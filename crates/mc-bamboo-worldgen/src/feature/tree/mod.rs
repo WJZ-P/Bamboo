@@ -1,64 +1,99 @@
-//! `TreeFeature`：26.3 的橡树放置骨架，逐行照 `TreeFeature.doPlace` / `place` 翻译。
+//! `TreeFeature`：照官方 26.3 的 `TreeFeature.place` / `doPlace` 逐行翻译。
 //!
-//! 本轮只走橡树需要的分支：无 root placer、无 decorator、straight trunk + blob foliage。
-//! 命中未移植的 placer / decorator 时在 [`TreeConfig::parse`] 返回 `None`，由分发把
-//! 整个 placed feature 标成 unsupported。
+//! 一次放置的流程：取树高、树叶高度和半径 → 检查高度范围和可用空间 → 放树根 →
+//! 放树干（得到若干树叶挂点）→ 每个挂点放树叶 → 装饰器 → `updateLeaves` 把树叶的
+//! `distance` 写好。树根、树干、树叶、装饰的位置各记在一个和 Java `HashSet` 迭代顺序
+//! 一致的集合里，见 [`java_set`]。
 //!
-//! `TreeFeature`: the oak placement skeleton, translated line by line from official
-//! `TreeFeature.doPlace` / `place`. Only oak's branches are ported (no root placer,
-//! no decorator, straight trunk + blob foliage). Unported placers / decorators make
-//! [`TreeConfig::parse`] return `None` so the placed feature is marked unsupported.
+//! 还没移植的部分（树根放置器、装饰器、`poplar_foliage_placer`）在
+//! [`config::TreeConfig::parse`] 返回 `None`，由分发把整个 placed feature 标成
+//! unsupported。
+//!
+//! `TreeFeature`, translated line by line from official 26.3 `TreeFeature.place` /
+//! `doPlace`.
+//!
+//! One placement: pick the tree height, foliage height and radius → check the height
+//! range and free space → place roots → place the trunk (yielding foliage attachments)
+//! → place foliage at each attachment → decorators → `updateLeaves` writes the leaves'
+//! `distance`. Root, trunk, foliage and decoration positions are each recorded in a set
+//! that iterates like Java's `HashSet`, see [`java_set`].
+//!
+//! Unported parts (root placers, decorators, `poplar_foliage_placer`) make
+//! [`config::TreeConfig::parse`] return `None`, so the placed feature stays unsupported.
 
 pub mod config;
 pub mod foliage;
+pub mod java_set;
 pub mod leaves;
 pub mod trunk;
+
+use std::sync::OnceLock;
 
 use serde_json::Value;
 
 use mc_bamboo_data::{
-    block_by_name, block_id_of_state, block_of_state, block_tag, facts, registries, state_facts,
-    state_fluid,
+    block_by_name, block_id_of_state, block_of_state, block_tag, facts, state_facts,
 };
 
 use crate::random::WorldgenRandom;
 
-use crate::feature::{state::with_property, world::FeatureWorld};
+use crate::feature::world::FeatureWorld;
 
 use config::TreeConfig;
+use java_set::JavaHashSet;
 
 pub(crate) type Pos = (i32, i32, i32);
 
-/// `FoliagePlacer.FoliageAttachment` 的五个字段（26.3）。
+/// `FoliagePlacer.FoliageAttachment`（26.3 的五个字段）。
 ///
-/// The five fields of official `FoliagePlacer.FoliageAttachment` (26.3).
+/// Official `FoliagePlacer.FoliageAttachment` (five fields in 26.3).
+#[derive(Clone, Copy)]
 pub(crate) struct FoliageAttachment {
     pub pos: Pos,
     pub radius_offset_xz: i32,
     pub foliage_height_offset: i32,
-    pub double_trunk: bool,
+    pub size_x: i32,
+    pub size_z: i32,
 }
 
-/// 一棵已解析的橡树。
+impl FoliageAttachment {
+    /// `new FoliageAttachment(pos, radiusOffsetXZ, doubleTrunk)`。
+    pub fn new(pos: Pos, radius_offset_xz: i32, double_trunk: bool) -> Self {
+        let size = if double_trunk { 2 } else { 1 };
+        Self {
+            pos,
+            radius_offset_xz,
+            foliage_height_offset: 0,
+            size_x: size,
+            size_z: size,
+        }
+    }
+
+    pub fn double_trunk(&self) -> bool {
+        self.size_x == 2 && self.size_z == 2
+    }
+}
+
+/// 一棵已解析的树。
 ///
-/// A parsed oak tree.
+/// A parsed tree.
 pub struct TreeFeature {
     config: TreeConfig,
 }
 
 impl TreeFeature {
-    /// 解析配置；只接受橡树这一组已移植的分支，其余返回 `None`。
+    /// 解析配置；含未移植的部分时返回 `None`。
     ///
-    /// Parse the config; `None` for anything outside the ported oak branches.
+    /// Parse the config; `None` when it uses an unported part.
     pub fn parse(config: &Value) -> Option<Self> {
         Some(Self {
             config: TreeConfig::parse(config)?,
         })
     }
 
-    /// `TreeFeature.place` 的一个候选位置，返回是否放了方块。
+    /// 官方 `TreeFeature.place`，返回是否放了方块。
     ///
-    /// One candidate of official `TreeFeature.place`; returns whether anything was placed.
+    /// Official `TreeFeature.place`; returns whether anything was placed.
     pub fn place(&self, world: &mut FeatureWorld<'_>, random: &WorldgenRandom, pos: Pos) -> bool {
         let mut place = TreePlace::new(world);
         if !self.do_place(&mut place, random, pos) {
@@ -67,72 +102,73 @@ impl TreeFeature {
         if place.trunks.is_empty() && place.foliage.is_empty() {
             return false;
         }
-        // decorators 为空，官方这里直接跑 updateLeaves。
-        // decorators are empty, so official code goes straight to updateLeaves.
+        // 装饰器还没移植：`parse` 只放行 decorators 为空的配置。
+        // Decorators are unported: `parse` only accepts configs without any.
         leaves::update_leaves(&mut place);
         true
     }
 
-    /// 官方 `TreeFeature.doPlace`（89–125 行）。
+    /// 官方 `TreeFeature.doPlace`。
     ///
-    /// Official `TreeFeature.doPlace` (lines 89–125).
+    /// Official `TreeFeature.doPlace`.
     fn do_place(
         &self,
         place: &mut TreePlace<'_, '_>,
         random: &WorldgenRandom,
         origin: Pos,
     ) -> bool {
-        let tree_height = self.config.trunk.tree_height(random);
-        let foliage_height = self.config.foliage.foliage_height();
-        let leaf_radius = self.config.foliage.foliage_radius(random);
-        // 无 root placer：trunkOrigin == origin。
+        let config = &self.config;
+        let tree_height = config.trunk.tree_height(random);
+        let foliage_height = config.foliage.foliage_height(random, tree_height);
+        let trunk_height = tree_height - foliage_height;
+        let leaf_radius = config.foliage.foliage_radius(random, trunk_height);
+        // 没有 root placer：trunkOrigin == origin。
         // No root placer: trunkOrigin == origin.
-        let min_y = origin.1;
-        let max_y = origin.1 + tree_height + 1;
-        let world_max = place.world.min_y + place.world.height;
-        if min_y > place.world.min_y && max_y <= world_max {
-            let clipped = self.get_max_free_tree_height(place, tree_height, origin);
-            let tall_enough = clipped >= tree_height
-                || self
-                    .config
-                    .min_clipped_height
-                    .is_some_and(|min| clipped >= min);
-            if tall_enough {
-                let attachments =
-                    self.config
-                        .trunk
-                        .place_trunk(place, &self.config, random, clipped, origin);
-                for attachment in &attachments {
-                    self.config.foliage.create_foliage(
-                        place,
-                        &self.config,
-                        random,
-                        attachment,
-                        foliage_height,
-                        leaf_radius,
-                    );
-                }
-                return true;
-            }
+        let trunk_origin = origin;
+        let min_y = origin.1.min(trunk_origin.1);
+        let max_y = origin.1.max(trunk_origin.1) + tree_height + 1;
+        // `level.getMaxY() + 1` 就是 `minY + height`。
+        // `level.getMaxY() + 1` equals `minY + height`.
+        let world_top = place.world.min_y + place.world.height;
+        if min_y < place.world.min_y + 1 || max_y > world_top {
+            return false;
         }
-        false
+        let clipped = self.max_free_tree_height(place, tree_height, trunk_origin);
+        let tall_enough = clipped >= tree_height
+            || config
+                .size
+                .min_clipped_height
+                .is_some_and(|min| clipped >= min);
+        if !tall_enough {
+            return false;
+        }
+        let attachments = config
+            .trunk
+            .place_trunk(place, config, random, clipped, trunk_origin);
+        for attachment in &attachments {
+            config.foliage.create_foliage(
+                place,
+                config,
+                random,
+                clipped,
+                attachment,
+                foliage_height,
+                leaf_radius,
+            );
+        }
+        true
     }
 
-    /// 官方 `TreeFeature.getMaxFreeTreeHeight`（127–144 行）。
+    /// 官方 `TreeFeature.getMaxFreeTreeHeight`。
     ///
-    /// Official `TreeFeature.getMaxFreeTreeHeight` (lines 127–144).
-    fn get_max_free_tree_height(
-        &self,
-        place: &TreePlace<'_, '_>,
-        max_height: i32,
-        pos: Pos,
-    ) -> i32 {
-        for y in 0..max_height + 2 {
-            let r = self.config.size_at_height(max_height, y);
+    /// Official `TreeFeature.getMaxFreeTreeHeight`.
+    fn max_free_tree_height(&self, place: &TreePlace<'_, '_>, max_height: i32, pos: Pos) -> i32 {
+        for y in 0..=max_height + 1 {
+            let r = self.config.size.size_at_height(max_height, y);
             for x in -r..=r {
                 for z in -r..=r {
                     let at = (pos.0 + x, pos.1 + y, pos.2 + z);
-                    let blocked = !is_free(place.world, at)
+                    let blocked = !self.config.trunk.is_free(place.world, at)
                         || (!self.config.ignore_vines && is_vine(place.world, at));
                     if blocked {
                         return y - 2;
@@ -144,21 +180,25 @@ impl TreeFeature {
     }
 }
 
-/// 一次放置收集到的方块：树干（`trunks`）和树叶（`foliage`），供 `updateLeaves` 用。
+/// 一次放置里官方那四个 `HashSet<BlockPos>` 和世界。
 ///
-/// Blocks collected during one placement: `trunks` and `foliage`, for `updateLeaves`.
+/// The world plus the four `HashSet<BlockPos>` of one official placement.
 pub(crate) struct TreePlace<'a, 'w> {
     pub world: &'w mut FeatureWorld<'a>,
-    pub trunks: Vec<Pos>,
-    pub foliage: Vec<Pos>,
+    pub roots: JavaHashSet,
+    pub trunks: JavaHashSet,
+    pub foliage: JavaHashSet,
+    pub decorations: JavaHashSet,
 }
 
 impl<'a, 'w> TreePlace<'a, 'w> {
     fn new(world: &'w mut FeatureWorld<'a>) -> Self {
         Self {
             world,
-            trunks: Vec::new(),
-            foliage: Vec::new(),
+            roots: JavaHashSet::new(),
+            trunks: JavaHashSet::new(),
+            foliage: JavaHashSet::new(),
+            decorations: JavaHashSet::new(),
         }
     }
 
@@ -166,81 +206,91 @@ impl<'a, 'w> TreePlace<'a, 'w> {
         self.world.get_block(pos.0, pos.1, pos.2)
     }
 
+    /// 官方 `trunkSetter`：记下位置，再 `level.setBlock(pos, state, 19)`。
+    ///
+    /// Official `trunkSetter`: record the position, then `level.setBlock(pos, state, 19)`.
     pub fn set_trunk(&mut self, pos: Pos, state: u32) {
+        self.trunks.insert(pos);
         self.world
             .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
-        self.trunks.push(pos);
     }
 
+    /// 官方 `FoliageSetter.set`。
+    ///
+    /// Official `FoliageSetter.set`.
     pub fn set_foliage(&mut self, pos: Pos, state: u32) {
+        self.foliage.insert(pos);
         self.world
             .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
-        self.foliage.push(pos);
     }
+}
+
+/// 树要查的几个方块标签，各只查一次。
+///
+/// The few block tags trees test, each looked up once.
+fn cached_tag(cell: &'static OnceLock<&'static [i32]>, name: &str) -> &'static [i32] {
+    cell.get_or_init(|| block_tag(name).unwrap_or(&[]))
+}
+
+fn state_in(ids: &[i32], state: u32) -> bool {
+    block_id_of_state(state).is_some_and(|id| ids.contains(&(id as i32)))
+}
+
+pub(crate) fn is_air(state: u32) -> bool {
+    state_facts(state) & facts::AIR != 0
+}
+
+pub(crate) fn is_log(state: u32) -> bool {
+    static TAG: OnceLock<&'static [i32]> = OnceLock::new();
+    state_in(cached_tag(&TAG, "minecraft:logs"), state)
+}
+
+pub(crate) fn is_leaves(state: u32) -> bool {
+    static TAG: OnceLock<&'static [i32]> = OnceLock::new();
+    state_in(cached_tag(&TAG, "minecraft:leaves"), state)
 }
 
 /// `TreeFeature.validTreePos`：空气或 `replaceable_by_trees`。
 ///
 /// Official `TreeFeature.validTreePos`: air or `replaceable_by_trees`.
 pub(crate) fn valid_tree_pos(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    static TAG: OnceLock<&'static [i32]> = OnceLock::new();
     let state = world.get_block(pos.0, pos.1, pos.2);
-    state_facts(state) & facts::AIR != 0 || in_tag("minecraft:replaceable_by_trees", state)
+    is_air(state) || state_in(cached_tag(&TAG, "minecraft:replaceable_by_trees"), state)
 }
 
-/// `TrunkPlacer.isFree`：validTreePos 或 `LOGS`。
-///
-/// Official `TrunkPlacer.isFree`: validTreePos or `LOGS`.
-fn is_free(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+/// `TreeFeature.isAirOrLeaves`。
+pub(crate) fn is_air_or_leaves(world: &FeatureWorld<'_>, pos: Pos) -> bool {
     let state = world.get_block(pos.0, pos.1, pos.2);
-    valid_tree_pos(world, pos) || in_tag("minecraft:logs", state)
+    is_air(state) || is_leaves(state)
 }
 
 /// `TreeFeature.isVine`：`minecraft:vine`。
 ///
 /// Official `TreeFeature.isVine`: `minecraft:vine`.
 fn is_vine(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    static VINE: OnceLock<Option<usize>> = OnceLock::new();
+    let vine = *VINE.get_or_init(|| {
+        block_by_name("minecraft:vine").and_then(|block| block_id_of_state(block.default_state))
+    });
     let state = world.get_block(pos.0, pos.1, pos.2);
-    let Some(vine) = block_by_name("minecraft:vine") else {
-        return false;
-    };
-    block_id_of_state(state)
-        .is_some_and(|id| id == block_id_of_state(vine.default_state).unwrap_or(usize::MAX))
+    vine.is_some() && block_id_of_state(state) == vine
 }
 
-/// `TrunkPlacer.placeLog` 的 setter（simple provider 不取随机数）。
+/// `soil_beneath_tree` 规则里的 `cannot_replace_below_tree_trunk` 标签。
 ///
-/// The setter of official `TrunkPlacer.placeLog` (simple provider takes no random).
-pub(crate) fn place_log(place: &mut TreePlace<'_, '_>, state: u32, pos: Pos) {
-    place.set_trunk(pos, state);
+/// The `cannot_replace_below_tree_trunk` tag of the `soil_beneath_tree` rule.
+pub(crate) fn cannot_replace_below_trunk(state: u32) -> bool {
+    static TAG: OnceLock<&'static [i32]> = OnceLock::new();
+    state_in(
+        cached_tag(&TAG, "minecraft:cannot_replace_below_tree_trunk"),
+        state,
+    )
 }
 
-/// `FoliagePlacer.tryPlaceLeaf`（169–186 行）。
+/// `BlockState.getValue` 的属性读取；方块没有这个属性时返回 `None`。
 ///
-/// Official `FoliagePlacer.tryPlaceLeaf` (lines 169–186).
-pub(crate) fn try_place_leaf(
-    place: &mut TreePlace<'_, '_>,
-    config: &TreeConfig,
-    _random: &WorldgenRandom,
-    pos: Pos,
-) {
-    let current = place.get_block(pos);
-    let persistent = property_value(current, "persistent") == Some("true");
-    if persistent || !valid_tree_pos(place.world, pos) {
-        return;
-    }
-    let mut state = config.foliage_state;
-    if has_property(state, "waterlogged") {
-        let fluid = state_fluid(place.get_block(pos)).fluid;
-        let water = fluid == registries::fluid::by_name("minecraft:water").unwrap_or(-1);
-        state = with_property(state, "waterlogged", if water { "true" } else { "false" })
-            .unwrap_or(state);
-    }
-    place.set_foliage(pos, state);
-}
-
-/// `BlockState.hasProperty` / `getValueOrElse` 的属性读取。
-///
-/// Reading a property for `BlockState.hasProperty` / `getValueOrElse`.
+/// Read a property like `BlockState.getValue`; `None` when the block lacks it.
 pub(crate) fn property_value(state: u32, name: &str) -> Option<&'static str> {
     let block = block_of_state(state)?;
     let mut stride = 1_u32;
@@ -259,14 +309,47 @@ pub(crate) fn has_property(state: u32, name: &str) -> bool {
     block_of_state(state).is_some_and(|b| b.properties.iter().any(|p| p.name == name))
 }
 
-fn in_tag(name: &str, state: u32) -> bool {
-    block_id_of_state(state)
-        .is_some_and(|id| block_tag(name).is_some_and(|ids| ids.contains(&(id as i32))))
+/// `Mth.floor(float)`。
+pub(crate) fn floor_f32(value: f32) -> i32 {
+    let truncated = value as i32;
+    if value < truncated as f32 {
+        truncated - 1
+    } else {
+        truncated
+    }
 }
 
-/// `soil_beneath_tree` 规则的 `cannot_replace_below_tree_trunk` 判定。
+/// `Mth.floor(double)`。
+pub(crate) fn floor_f64(value: f64) -> i32 {
+    let truncated = value as i32;
+    if value < f64::from(truncated) {
+        truncated - 1
+    } else {
+        truncated
+    }
+}
+
+/// `Direction.Plane.HORIZONTAL` 的顺序：NORTH、EAST、SOUTH、WEST，值是 `(stepX, stepZ)`。
 ///
-/// The `cannot_replace_below_tree_trunk` test of the `soil_beneath_tree` rule.
-pub(crate) fn in_cannot_replace_tag(state: u32) -> bool {
-    in_tag("minecraft:cannot_replace_below_tree_trunk", state)
+/// The order of `Direction.Plane.HORIZONTAL`: NORTH, EAST, SOUTH, WEST as `(stepX, stepZ)`.
+pub(crate) const HORIZONTAL: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+
+/// `Direction.Plane.HORIZONTAL.getRandomDirection`：`faces[random.nextInt(4)]`，
+/// 返回它在 [`HORIZONTAL`] 里的下标。
+///
+/// `Direction.Plane.HORIZONTAL.getRandomDirection`: `faces[random.nextInt(4)]`,
+/// returned as an index into [`HORIZONTAL`].
+pub(crate) fn random_horizontal(random: &WorldgenRandom) -> usize {
+    random.next_int(4) as usize
+}
+
+/// 水平方向所在的轴名（`Direction.getAxis`）。
+///
+/// The axis name of a horizontal direction (`Direction.getAxis`).
+pub(crate) fn axis_of(direction: usize) -> &'static str {
+    if HORIZONTAL[direction].0 != 0 {
+        "x"
+    } else {
+        "z"
+    }
 }

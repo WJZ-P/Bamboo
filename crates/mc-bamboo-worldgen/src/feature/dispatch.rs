@@ -22,7 +22,7 @@ type Pos = (i32, i32, i32);
 pub enum Leaf {
     Ore(OreFeature),
     SimpleBlock(SimpleBlockFeature),
-    Tree(TreeFeature),
+    Tree(Box<TreeFeature>),
 }
 
 /// 按 `Feature` 类型 ID 解析配置；未移植或解析不了的类型返回 `None`。
@@ -32,7 +32,7 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
     match kind {
         "minecraft:ore" => Some(Leaf::Ore(OreFeature::parse(config).ok()?)),
         "minecraft:simple_block" => Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?)),
-        "minecraft:tree" => TreeFeature::parse(config).map(Leaf::Tree),
+        "minecraft:tree" => TreeFeature::parse(config).map(|tree| Leaf::Tree(Box::new(tree))),
         _ => None,
     }
 }
