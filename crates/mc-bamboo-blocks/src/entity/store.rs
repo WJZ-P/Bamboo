@@ -717,11 +717,26 @@ impl EntityStore {
         self.ticking = true;
     }
 
-    /// tick 结束时把这次生成的实体并进来，它们下一 tick 才 tick。
+    /// tick 结束时把这次生成的实体并进来，它们下一 tick 才 tick；同时回收这一拍
+    /// 被 `discard` 的实体留下的借用槽位。精确模式 `World::tick_entities` 把实体
+    /// `take` 出去，tick 中被丢弃的实体既不 `put` 回来也不会再 `remove`
+    /// （`take` 已经把它从 `index` 摘掉），于是 `taken` 里会永久留着一行、
+    /// `slots[row]` 也一直是空的，让 `ready_to_move_chunks` 永远为假、区块收回
+    /// 全卡在 "not ready"。这里统一把这些行从 `taken` 摘掉并放回 `free`。
+    ///
+    /// Merge the entities spawned this tick (they tick next tick) and release the
+    /// borrowed slots of entities discarded this tick. The precise driver takes an
+    /// entity out; a discarded one is never put back or removed (take already
+    /// dropped it from `index`), so its `taken` entry and empty slot would leak
+    /// forever, leaving `ready_to_move_chunks` permanently false and stalling every
+    /// chunk reclaim. Return those rows to `free` so they can be reused.
     pub fn end_tick(&mut self) {
         self.ticking = false;
         // 这一拍被 `discard` 的实体不会 `put` 回来，旧位置快照在这里统一丢掉。
         self.taken_snapshots.clear();
+        for (_, row) in std::mem::take(&mut self.taken) {
+            self.free.push(row);
+        }
         let pending = std::mem::take(&mut self.pending);
         for row in pending {
             self.insert_row(row);
@@ -935,6 +950,44 @@ mod tests {
         assert!(store.public_at(uid).is_none());
         store.put(entity);
         assert_eq!(store.public_at(uid).map(|public| public.uid), Some(uid));
+    }
+
+    /// 精确模式里被 `discard` 的实体 `take` 出去后不再 `put` 回来；`end_tick`
+    /// 必须把这些借用行回收，否则 `taken` 永远非空、`ready_to_move_chunks`
+    /// 永远为假，所有区块收回都会卡在 "not ready"。
+    ///
+    /// In the precise driver a discarded entity is taken out and never put back;
+    /// `end_tick` must release those borrowed rows or `ready_to_move_chunks`
+    /// stays false forever and every chunk reclaim stalls.
+    #[test]
+    fn discarded_entities_do_not_leave_borrowed_rows_at_tick_end() {
+        let mut store = EntityStore::new();
+        let kept = store.spawn(Entity::ground_item(
+            Vec3::new(0.5, 64.0, 0.5),
+            ItemStack::new(1, 1),
+        ));
+        let discarded = store.spawn(Entity::ground_item(
+            Vec3::new(40.5, 64.0, 40.5),
+            ItemStack::new(2, 1),
+        ));
+        assert!(store.ready_to_move_chunks());
+
+        store.begin_tick();
+        let alive = store.take(kept).unwrap();
+        let gone = store.take(discarded).unwrap();
+        assert!(!store.ready_to_move_chunks(), "借出去的实体还没放回");
+        store.put(alive);
+        // 这一拍被 discard：既不 put 也不 remove，和 World::tick_entities 一致。
+        // Discarded this tick: neither put back nor removed, like World::tick_entities.
+        drop(gone);
+        store.end_tick();
+
+        assert!(
+            store.ready_to_move_chunks(),
+            "被丢弃的实体不能让 ready_to_move_chunks 永远为假"
+        );
+        assert!(store.public_at(discarded).is_none(), "丢弃的实体不在表里");
+        assert_eq!(store.public_at(kept).map(|public| public.uid), Some(kept));
     }
 
     #[test]
