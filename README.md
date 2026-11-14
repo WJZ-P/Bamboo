@@ -524,21 +524,27 @@ WebView2 的渲染进程不算在内。
   0 不一致的有 step 6 的矿石，以及 step 9 的植被子集（详见
   `docs/worldgen-features-plan.md` 5.1）；其余类型仍明确标 `unsupported`，对拍时整块跳过，
   不假装支持。本轮已移植：`simple_block` 的内联 bare-state 与 `weighted` /
-  `randomized_int` typed provider、一批继承 `VegetationBlock` 的存活判定（含
-  `LeafLitterBlock` 的 `isFaceSturdy(UP)`）、双高植物 `DoublePlantBlock.placeAt`、
+  `randomized_int` / `noise` / `dual_noise` / `noise_threshold` / `rule_based` typed
+  provider（`BLOCK_STATE_PROVIDER` 注册表已由生成器导出，`to_place` 的 holder 字符串
+  在解析时展开）、一批继承 `VegetationBlock` 的存活判定（含
+  `LeafLitterBlock` 的 `isFaceSturdy(UP)`、`SeagrassBlock` / `TallSeagrassBlock`、
+  睡莲、海泡菜、孢子花）、双高植物 `DoublePlantBlock.placeAt`（按祖先表判定，
+  含 `TallSeagrassBlock` 子类）、
   `would_survive` / `has_sturdy_face` / `matching_fluids` 谓词、组合类
   （`random_selector` / `weighted_random_selector` / `simple_random_selector` /
-  `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）与 `clamped` IntProvider。
-  诚实的已知差异与未做：`to_place` 的 holder 字符串引用（`BLOCK_STATE_PROVIDER` 注册表未
-  导出）、蘑菇（要 `getRawBrightness`）、睡莲、孢子花、苔藓地毯、海泡菜等特殊
+  `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）与
+  `clamped` / `clamped_normal` / `weighted_list` IntProvider。
+  诚实的已知差异与未做：`rotated` state provider、蘑菇（要 `getRawBrightness`）、
+  苔藓地毯（`MossyCarpetBlock.placeAt` 用 `level.getRandom()`）等特殊
   `canSurvive`；`schedule_tick` 忽略；`noise_threshold_count` / `noise_based_count` /
   `environment_scan` / `surface_water_depth_filter` / `surface_relative_threshold_filter`
-  修饰器、`clamped_normal` / `weighted_list` IntProvider；方块实体数据（蜂巢、可疑沙等）。
+  修饰器（由其它分支补）；方块实体数据（蜂巢、可疑沙等）。
   树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）和水下/其余植被按分工移交给
   `cb-wg-trees` / `cb-wg-aquatic`；`projected_random_patchy_square` 在 26.3 导出数据里没有
-  条目。组合类里只有 `simple_random_selector`（forest_flowers / flower_forest_flowers）
-  拿到 0 不一致对拍，其余组合类子项多为树/水生（已移交），place 逻辑按官方源码移植但
-  本轮未逐方块验证。此前 terrain 含水层在个别邻居区块（seed -1、chunk (52,-26)、
+  条目。组合类里 `simple_random_selector`（forest_flowers / flower_forest_flowers）、
+  `weighted_random_selector`（8 个 seagrass 父链）和 `random_selector` 的花园 holder
+  分支拿到 0 不一致对拍；`random_boolean_selector` / `sequence` 的子项仍多为未移植类型，
+  place 逻辑按官方源码移植但尚未逐方块验证。此前 terrain 含水层在个别邻居区块（seed -1、chunk (52,-26)、
   y=-54）与官方 3 格不一致，现已修复：补上官方 `Aquifer.NoiseBasedAquifer.computeSubstance`
   在「最近格子给的是水、正下方全局流体是岩浆」时跳过压力计算直接返回水的短路，并
   对齐 `shouldScheduleFluidUpdate` 的 similarity 门槛。该短路只影响岩浆层上边界 y=-54，

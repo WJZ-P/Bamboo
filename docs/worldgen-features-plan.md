@@ -748,6 +748,18 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `sequence`；子项为注册表引用或内联配置，子项用 `placeWithBiomeCheck=false`
   （topFeature 为空）。`place_candidates` 改为递归回调并汇总 `supported` / `placed`。
 * `clamped` IntProvider（递归 source + `clamp`）。
+* `noise_state.rs`（接手会话 `416468e`）：`NoiseProvider` / `DualNoiseProvider` /
+  `NoiseThresholdProvider`，`normalize` / `amplitude_modifiers` 交给现有的 `NormalNoise`；
+  `BLOCK_STATE_PROVIDER` 注册表由生成器导出到 `worldgen.json` 的 `block_state_provider`
+  键，`to_place` 的 holder 字符串在解析时展开。三个花园 provider
+  （flower_plain / flower_meadow / flower_flower_forest）0 不一致。
+* `RuleBasedStateProvider`（`73d9be5`）：`if_true` 用 `block_predicate` 求值，规则按顺序试，
+  `getOptionalState` 全不中且没有 fallback 时返回 null（`SimpleBlockFeature` 放弃），
+  `getState` 那一层才退化成当前位置方块。`is_supported` 要求每条规则的谓词和 provider
+  都已移植。`rotated` 仍 `unsupported`（step 9 里没有用到）。
+* `survival.rs` 补齐海草 / 高海草 / 睡莲 / 海泡菜 / 孢子花（`73d9be5`、`f2198fd`），
+  `is_double_plant` 改查祖先表（`TallSeagrassBlock` 是 `DoublePlantBlock` 子类，
+  之前漏判导致高海草只放了半格）。
 
 #### 本分支对拍结果（`--through features --steps 9`）
 
@@ -763,6 +775,10 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | 故意把 weighted provider 固定选第 0 条（同参数） | 120 处不一致（确认非假绿） |
 | `--steps 6 --ore-only`、`--through carvers`（`--seeds 2 --chunks 4/6 --salt 1`）、`worldgen java` | 各 0 不一致（旧阶段回归） |
 | `cargo test -p mc-bamboo-worldgen` | 115 个测试全过 |
+| 3 个花园 holder provider（flower_plain / flower_meadow / flower_flower_forest / flower_plains / flower_forest_flowers / forest_flowers），`--seeds 2 --chunks 20 --salt 3` | 0 不一致（40 中心 / 35389440 方块，0 skipped） |
+| 海草 5 个（cold / normal / river / swamp / warm，`weighted_random_selector` 子项），`--seeds 2 --chunks 16 --salt 11` | 0 不一致（32 中心 / 28311552 方块，0 skipped） |
+| 睡莲 + 海泡菜 + 孢子花，`--seeds 2 --chunks 16 --salt 11` | 0 不一致（32 中心 / 28311552 方块，0 skipped） |
+| 故意把 `sea_pickle_placeable` 改成恒 true，`--seeds 3 --chunks 30 --salt 21` | 130 处不一致（确认非假绿） |
 
 **terrain 含水层既有差异**：`--salt 7` 下 seed -1、中心 chunk (52,-27) 的 +z 邻居
 (52,-26)、y=-54、x=14、z=1..3 三格，官方是水、Bamboo 是深板岩；`--steps 0`
@@ -781,9 +797,9 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `random_boolean_selector` / `sequence` 的 place 逻辑按官方源码逐行移植，但子项多为
   树 / 水生（已移交），本轮未逐方块验证，待对方分支 merge 本分支后再放开对拍。
   `projected_random_patchy_square` 在 26.3 导出数据里没有条目。
-* `to_place` 的 holder 字符串引用（flower_plain / flower_meadow / flower_flower_forest）：
-  `BLOCK_STATE_PROVIDER` 注册表未导出，需生成器补数据；特殊 `canSurvive`
-  （蘑菇、睡莲、孢子花、苔藓地毯、海泡菜）同上。
+* `to_place` 的 holder 字符串引用已支持（`block_state_provider` 键）；`rotated` provider
+  仍 `unsupported`，step 9 里没有用到。特殊 `canSurvive` 里只剩蘑菇（`getRawBrightness`
+  需要生成期光照）和苔藓地毯（`MossyCarpetBlock.placeAt` 用 `level.getRandom()`）未移植。
 * `noise_threshold_count` / `noise_based_count` / `environment_scan` /
   `surface_water_depth_filter` / `surface_relative_threshold_filter` 修饰器、
   `clamped_normal` / `weighted_list` IntProvider、方块实体数据（蜂巢、可疑沙等）。
