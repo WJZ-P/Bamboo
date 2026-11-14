@@ -735,6 +735,23 @@ impl NormalNoise {
         self.range
     }
 
+    /// `NormalNoise.createParity(firstOctave, amplitudes)`：晶洞用固定参数的奇偶噪声。
+    ///
+    /// `NormalNoise.createParity(firstOctave, amplitudes)`: the fixed-parameter parity
+    /// noise used by the geode feature.
+    pub fn create_parity(first_octave: i32, amplitudes: &[f64]) -> Self {
+        let mut parameters = NormalNoiseParameters {
+            base_amplitude: 1.0,
+            base_octave: first_octave,
+            octave_count: amplitudes.len() as i32,
+            normalize: Normalization::Enabled,
+            amplitude_modifiers: amplitudes.to_vec(),
+        };
+        parameters.base_amplitude =
+            compute_parity_base_amplitude(parameters.base_octave, amplitudes);
+        Self::new(parameters)
+    }
+
     pub fn parameters(&self) -> &NormalNoiseParameters {
         &self.parameters
     }
@@ -857,6 +874,21 @@ fn compute_parity_normalization_factor(
 /// `NormalNoise.parityExpectedDeviation`。
 fn parity_expected_deviation(octave_span: i32) -> f64 {
     0.1 * (1.0 + 1.0 / f64::from(octave_span.wrapping_add(1)))
+}
+
+/// `NormalNoise.computeParityBaseAmplitude(baseOctave, amplitudes)`。
+///
+/// `NormalNoise.computeParityBaseAmplitude(baseOctave, amplitudes)`.
+fn compute_parity_base_amplitude(base_octave: i32, amplitudes: &[f64]) -> f64 {
+    let octaves = build_octaves(base_octave, 1.0, amplitudes.len() as i32, true, amplitudes);
+    let target_amplitude: f64 = octaves.iter().map(|octave| octave.abs_amplitude()).sum();
+    let new_normalization_factor = compute_normalization_factor(target_amplitude, &octaves);
+    if new_normalization_factor == 0.0 {
+        return 1.0;
+    }
+    let old_normalization_factor =
+        compute_parity_normalization_factor(1.0, amplitudes.len() as i32, amplitudes);
+    old_normalization_factor / new_normalization_factor
 }
 
 /// `LegacyFbmInitializer.createForLegacyNetherBiome`。

@@ -83,6 +83,17 @@ struct IcebergGen<'w, 'a> {
     a: i32,
 }
 
+/// `signedDistanceEllipse` 的椭圆参数。
+///
+/// The ellipse parameters of `signedDistanceEllipse`.
+struct EllipseAxes {
+    origin_x: i32,
+    origin_z: i32,
+    a: i32,
+    c: i32,
+    angle: f64,
+}
+
 impl IcebergGen<'_, '_> {
     /// `IcebergFeature.place`。返回恒为 true。
     ///
@@ -107,8 +118,7 @@ impl IcebergGen<'_, '_> {
         if !self.is_ellipse && self.random.next_double() > 0.9 {
             self.over_water_height += self.random.next_int(19) + 7;
         }
-        self.under_water_height =
-            (self.over_water_height + self.random.next_int(11)).min(18);
+        self.under_water_height = (self.over_water_height + self.random.next_int(11)).min(18);
         self.width =
             (self.over_water_height + self.random.next_int(7) - self.random.next_int(5)).min(11);
         self.a = if self.is_ellipse {
@@ -161,7 +171,8 @@ impl IcebergGen<'_, '_> {
                     } else {
                         a
                     };
-                    let radius = self.height_dependent_radius_steep(-y_off, self.under_water_height);
+                    let radius =
+                        self.height_dependent_radius_steep(-y_off, self.under_water_height);
                     if xo < radius {
                         self.generate_iceberg_block(
                             origin,
@@ -248,20 +259,11 @@ impl IcebergGen<'_, '_> {
     /// `signedDistanceEllipse`（origin 为 BlockPos 传入，分母为 int → double）。
     ///
     /// `signedDistanceEllipse` (origin is a BlockPos; int denominators widen to double).
-    fn signed_distance_ellipse(
-        &self,
-        xo: i32,
-        zo: i32,
-        origin_x: i32,
-        origin_z: i32,
-        a: i32,
-        c: i32,
-        angle: f64,
-    ) -> f64 {
-        let dx = (xo - origin_x) as f64;
-        let dz = (zo - origin_z) as f64;
-        let t1 = (dx * angle.cos() - dz * angle.sin()) / a as f64;
-        let t2 = (dx * angle.sin() + dz * angle.cos()) / c as f64;
+    fn signed_distance_ellipse(&self, xo: i32, zo: i32, ellipse: EllipseAxes) -> f64 {
+        let dx = (xo - ellipse.origin_x) as f64;
+        let dz = (zo - ellipse.origin_z) as f64;
+        let t1 = (dx * ellipse.angle.cos() - dz * ellipse.angle.sin()) / ellipse.a as f64;
+        let t2 = (dx * ellipse.angle.sin() + dz * ellipse.angle.cos()) / ellipse.c as f64;
         pow2(t1) + pow2(t2) - 1.0
     }
 
@@ -290,7 +292,17 @@ impl IcebergGen<'_, '_> {
     ) {
         let signed_dist = if self.is_ellipse {
             let c = self.get_ellipse_c(y_off, height);
-            self.signed_distance_ellipse(xo, zo, 0, 0, a, c, self.shape_angle)
+            self.signed_distance_ellipse(
+                xo,
+                zo,
+                EllipseAxes {
+                    origin_x: 0,
+                    origin_z: 0,
+                    a,
+                    c,
+                    angle: self.shape_angle,
+                },
+            )
         } else {
             self.signed_distance_circle(xo, zo, radius)
         };
@@ -335,11 +347,7 @@ impl IcebergGen<'_, '_> {
                     <= self.random.next_int((height / divisor).max(1)) as f64
                         + height as f64 * 0.6)
                 && randomness;
-            let placed = if snow {
-                blocks::SNOW_BLOCK
-            } else {
-                self.state
-            };
+            let placed = if snow { blocks::SNOW_BLOCK } else { self.state };
             self.world.set_block_with_heightmaps(x, y, z, placed);
         }
     }
@@ -361,7 +369,8 @@ impl IcebergGen<'_, '_> {
                     if Self::is_iceberg_state(state) || is(state, "minecraft:snow") {
                         let below = self.world.get_block(px, py - 1, pz);
                         if is_air_state(below) {
-                            self.world.set_block_with_heightmaps(px, py, pz, blocks::AIR);
+                            self.world
+                                .set_block_with_heightmaps(px, py, pz, blocks::AIR);
                             self.world
                                 .set_block_with_heightmaps(px, py + 1, pz, blocks::AIR);
                         } else if Self::is_iceberg_state(state) {
@@ -376,7 +385,8 @@ impl IcebergGen<'_, '_> {
                                 .filter(|&&side| !Self::is_iceberg_state(side))
                                 .count();
                             if counter >= 3 {
-                                self.world.set_block_with_heightmaps(px, py, pz, blocks::AIR);
+                                self.world
+                                    .set_block_with_heightmaps(px, py, pz, blocks::AIR);
                             }
                         }
                     }
@@ -448,11 +458,13 @@ impl IcebergGen<'_, '_> {
                 let signed_dist = self.signed_distance_ellipse(
                     xo,
                     zo,
-                    local_origin.0,
-                    local_origin.1,
-                    a,
-                    c,
-                    angle,
+                    EllipseAxes {
+                        origin_x: local_origin.0,
+                        origin_z: local_origin.1,
+                        a,
+                        c,
+                        angle,
+                    },
                 );
                 if signed_dist < 0.0 {
                     let (px, py, pz) = (
@@ -463,9 +475,11 @@ impl IcebergGen<'_, '_> {
                     let state = self.world.get_block(px, py, pz);
                     if Self::is_iceberg_state(state) || is(state, "minecraft:snow_block") {
                         if under_water {
-                            self.world.set_block_with_heightmaps(px, py, pz, blocks::WATER);
+                            self.world
+                                .set_block_with_heightmaps(px, py, pz, blocks::WATER);
                         } else {
-                            self.world.set_block_with_heightmaps(px, py, pz, blocks::AIR);
+                            self.world
+                                .set_block_with_heightmaps(px, py, pz, blocks::AIR);
                             // removeFloatingSnowLayer：上方雪层换成空气。
                             // removeFloatingSnowLayer: replace the snow layer above with air.
                             let above = self.world.get_block(px, py + 1, pz);
@@ -513,9 +527,15 @@ mod tests {
 
     #[test]
     fn parses_both_iceberg_states() {
-        let packed = IcebergFeature::parse(&serde_json::from_str(r#"{"state":"minecraft:packed_ice"}"#).unwrap()).unwrap();
+        let packed = IcebergFeature::parse(
+            &serde_json::from_str(r#"{"state":"minecraft:packed_ice"}"#).unwrap(),
+        )
+        .unwrap();
         assert_eq!(packed.state, mc_bamboo_data::blocks::PACKED_ICE);
-        let blue = IcebergFeature::parse(&serde_json::from_str(r#"{"state":"minecraft:blue_ice"}"#).unwrap()).unwrap();
+        let blue = IcebergFeature::parse(
+            &serde_json::from_str(r#"{"state":"minecraft:blue_ice"}"#).unwrap(),
+        )
+        .unwrap();
         assert_eq!(blue.state, mc_bamboo_data::blocks::BLUE_ICE);
     }
 

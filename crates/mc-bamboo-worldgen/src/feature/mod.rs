@@ -12,6 +12,7 @@ pub mod block_predicate;
 pub mod composition;
 pub mod disk;
 pub mod dispatch;
+pub mod geode;
 pub mod heightmap;
 pub mod iceberg;
 pub mod ores;

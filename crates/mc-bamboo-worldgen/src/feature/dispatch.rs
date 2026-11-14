@@ -14,6 +14,7 @@ use crate::random::WorldgenRandom;
 use super::{
     block_blob::{self, BlockBlobFeature},
     disk::{self, DiskFeature},
+    geode::{self, GeodeFeature},
     iceberg::{self, IcebergFeature},
     ores,
     placement::OreFeature,
@@ -32,6 +33,7 @@ type Pos = (i32, i32, i32);
 pub enum Leaf {
     BlockBlob(BlockBlobFeature),
     Disk(DiskFeature),
+    Geode(Box<GeodeFeature>),
     Iceberg(IcebergFeature),
     Ore(OreFeature),
     SimpleBlock(SimpleBlockFeature),
@@ -46,6 +48,7 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
     let leaf = match kind {
         "minecraft:block_blob" => Leaf::BlockBlob(BlockBlobFeature::parse(config).ok()?),
         "minecraft:disk" => Leaf::Disk(DiskFeature::parse(config).ok()?),
+        "minecraft:geode" => Leaf::Geode(Box::new(GeodeFeature::parse(config).ok()?)),
         "minecraft:iceberg" => Leaf::Iceberg(IcebergFeature::parse(config).ok()?),
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?),
@@ -71,6 +74,7 @@ fn is_supported(leaf: &Leaf) -> bool {
     match leaf {
         Leaf::BlockBlob(blob) => blob.supported(),
         Leaf::Disk(disk) => disk.supported(),
+        Leaf::Geode(geode) => geode.supported(),
         _ => true,
     }
 }
@@ -87,6 +91,7 @@ pub fn place_leaf(
     match leaf {
         Leaf::BlockBlob(blob) => block_blob::place(blob, world, random, pos),
         Leaf::Disk(disk) => disk::place(disk, world, random, pos),
+        Leaf::Geode(geode) => geode::place(geode, world, random, pos),
         Leaf::Iceberg(iceberg) => iceberg::place(iceberg, world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),

@@ -17,6 +17,10 @@ pub struct FeatureWorld<'a> {
     ///
     /// `WorldGenRegion.getSeaLevel()`, from `NoiseGeneratorSettings.seaLevel()`.
     pub sea_level: i32,
+    /// `level.getSeed()`：世界种子，晶洞这类固定参数噪声要用。
+    ///
+    /// `level.getSeed()`: the world seed, needed by fixed-parameter noises such as the geode.
+    pub seed: i64,
     /// 9 个区块的可变方块；中心在 [`CENTER`]。
     pub blocks: [ChunkBlocks; 9],
     /// 只读的 quart 群系格。
@@ -32,7 +36,7 @@ pub struct FeatureWorld<'a> {
 }
 
 impl<'a> FeatureWorld<'a> {
-    pub fn new(input: &'a FeatureChunks, sea_level: i32) -> Result<Self, String> {
+    pub fn new(input: &'a FeatureChunks, sea_level: i32, seed: i64) -> Result<Self, String> {
         if input.blocks.len() != 9 || input.biomes.len() != 9 || input.heights.len() != 9 {
             return Err("FeatureChunks must contain 9 chunks".to_owned());
         }
@@ -43,6 +47,7 @@ impl<'a> FeatureWorld<'a> {
             min_y: input.min_y,
             height: input.height,
             sea_level,
+            seed,
             blocks: input.blocks.clone(),
             biomes: &input.biomes,
             heights: input.heights,

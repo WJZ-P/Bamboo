@@ -96,23 +96,21 @@ impl Modifier {
                     Self::Unsupported(kind.to_owned())
                 }
             }
-            "minecraft:surface_relative_threshold_filter" => {
-                Self::SurfaceRelativeThresholdFilter {
-                    heightmap: HeightmapKind::parse(
-                        field("heightmap")?
-                            .as_str()
-                            .ok_or("surface_relative_threshold_filter heightmap is not a string")?,
-                    )?,
-                    min_inclusive: object
-                        .get("min_inclusive")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(i32::MIN as i64),
-                    max_inclusive: object
-                        .get("max_inclusive")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(i32::MAX as i64),
-                }
-            }
+            "minecraft:surface_relative_threshold_filter" => Self::SurfaceRelativeThresholdFilter {
+                heightmap: HeightmapKind::parse(
+                    field("heightmap")?
+                        .as_str()
+                        .ok_or("surface_relative_threshold_filter heightmap is not a string")?,
+                )?,
+                min_inclusive: object
+                    .get("min_inclusive")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i32::MIN as i64),
+                max_inclusive: object
+                    .get("max_inclusive")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i32::MAX as i64),
+            },
             _ => Self::Unsupported(kind.to_owned()),
         })
     }

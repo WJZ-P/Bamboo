@@ -84,10 +84,10 @@ impl StateProvider {
                         let weight = entry
                             .get("weight")
                             .and_then(Value::as_i64)
-                            .ok_or("weighted entry has no weight")? as i32;
-                        let state = parse_state(
-                            entry.get("data").ok_or("weighted entry has no data")?,
-                        )?;
+                            .ok_or("weighted entry has no weight")?
+                            as i32;
+                        let state =
+                            parse_state(entry.get("data").ok_or("weighted entry has no data")?)?;
                         Ok((weight, state))
                     })
                     .collect::<Result<Vec<_>, String>>()?;
@@ -145,9 +145,9 @@ impl StateProvider {
             Self::RandomizedInt { source, .. } => source.supported(),
             Self::RuleBased { fallback, rules } => {
                 fallback.as_deref().is_none_or(StateProvider::supported)
-                    && rules
-                        .iter()
-                        .all(|(predicate, provider)| predicate.is_supported() && provider.supported())
+                    && rules.iter().all(|(predicate, provider)| {
+                        predicate.is_supported() && provider.supported()
+                    })
             }
             Self::Unsupported(_) => false,
         }

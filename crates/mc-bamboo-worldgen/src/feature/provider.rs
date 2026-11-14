@@ -196,6 +196,21 @@ impl IntProvider {
             Self::Clamped { source, min, max } => source.sample(random).clamp(*min, *max),
         }
     }
+
+    /// `IntProvider.maxInclusive()`：只有常量与几种非递归形态有确定上界。
+    ///
+    /// `IntProvider.maxInclusive()`: only constant and the non-recursive shapes have a
+    /// definite upper bound.
+    pub fn max_value(&self) -> i32 {
+        match self {
+            Self::Constant(value) => *value,
+            Self::Uniform { max, .. }
+            | Self::Trapezoid { max, .. }
+            | Self::BiasedToBottom { max, .. }
+            | Self::VeryBiasedToBottom { max, .. }
+            | Self::Clamped { max, .. } => *max,
+        }
+    }
 }
 
 /// `HeightProvider.sample(random, WorldGenerationContext)`。
