@@ -105,6 +105,16 @@ pub enum IntProvider {
         min: i32,
         max: i32,
     },
+    /// `WeightedListInt`：`distribution.getRandomOrThrow(random).sample(random)`。
+    /// 每个 `data` 是递归的 `IntProvider`（导出里是裸数字，即 `ConstantInt`）。
+    ///
+    /// `WeightedListInt`: `distribution.getRandomOrThrow(random).sample(random)`.
+    /// Each `data` is a recursive `IntProvider` (bare numbers in the export are
+    /// `ConstantInt`).
+    WeightedList {
+        entries: Vec<(i32, Box<IntProvider>)>,
+        total: i32,
+    },
 }
 
 impl IntProvider {
@@ -158,6 +168,28 @@ impl IntProvider {
                 min: integer("min_inclusive")?,
                 max: integer("max_inclusive")?,
             },
+            // `WeightedListInt`：distribution 是 WeightedList<IntProvider>。
+            // `WeightedListInt`: distribution is a WeightedList<IntProvider>.
+            "minecraft:weighted_list" => {
+                let entries = object
+                    .get("distribution")
+                    .ok_or("weighted list has no distribution")?
+                    .as_array()
+                    .ok_or("weighted list distribution is not an array")?
+                    .iter()
+                    .map(|entry| {
+                        let weight = entry
+                            .get("weight")
+                            .and_then(Value::as_i64)
+                            .ok_or("weighted list entry has no weight")?
+                            as i32;
+                        let data = entry.get("data").ok_or("weighted list entry has no data")?;
+                        Ok((weight, Box::new(IntProvider::parse(data)?)))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let total = entries.iter().map(|(weight, _)| *weight).sum();
+                Self::WeightedList { entries, total }
+            }
             _ => return Err(format!("unsupported int provider {kind}")),
         })
     }
@@ -194,6 +226,23 @@ impl IntProvider {
             // ClampedInt.sample：先 sample source（消费随机数），再 clamp。
             // ClampedInt.sample: sample the source (consuming random), then clamp.
             Self::Clamped { source, min, max } => source.sample(random).clamp(*min, *max),
+            // WeightedList.getRandomOrThrow：nextInt(totalWeight) + 累计权重轮盘，
+            // 选中的 IntProvider 再 sample（ConstantInt 不额外取数）。
+            // WeightedList.getRandomOrThrow: nextInt(totalWeight) + cumulative wheel,
+            // then sample the chosen IntProvider (ConstantInt takes no extra random).
+            Self::WeightedList { entries, total } => {
+                if *total == 0 {
+                    return 0;
+                }
+                let mut selection = random.next_int(*total);
+                for (weight, provider) in entries {
+                    selection -= *weight;
+                    if selection < 0 {
+                        return provider.sample(random);
+                    }
+                }
+                0
+            }
         }
     }
 }

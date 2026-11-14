@@ -114,6 +114,13 @@ fn generated_cells(threads: usize, positions: &[ChunkPos]) -> BTreeMap<ChunkPos,
         ..WorldConfig::default()
     };
     let mut world = World::new(config, receiver);
+    // 这里比的是生成结果。区块交付后世界还在 tick，随机刻会让草蔓延到树下的泥土上、
+    // 让够不到原木的树叶腐烂，而两次运行经过的 tick 数不同。关掉随机刻再比。
+    // This compares generation output. The world keeps ticking after delivery, and
+    // random ticks spread grass onto the dirt under trees and decay leaves out of
+    // reach of a log, while the two runs see different numbers of ticks. Turn random
+    // ticks off for the comparison.
+    world.region.block_rules.random_tick_speed = 0;
     for &pos in positions {
         world.apply_ticket(TicketOp::Forced { pos, forced: true });
     }
