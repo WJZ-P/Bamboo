@@ -211,9 +211,11 @@ impl Options {
                 "--chunk" => {
                     let x = args.next().ok_or(USAGE)?;
                     let z = args.next().ok_or(USAGE)?;
-                    options
-                        .forwarded
-                        .extend(["--chunk".to_owned(), (*x).to_owned(), (*z).to_owned()]);
+                    options.forwarded.extend([
+                        "--chunk".to_owned(),
+                        (*x).to_owned(),
+                        (*z).to_owned(),
+                    ]);
                 }
                 "--scan" => {
                     let value = args.next().ok_or(USAGE)?;
