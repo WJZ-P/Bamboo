@@ -35,6 +35,7 @@ pub mod aquifer;
 pub mod beardifier;
 pub mod biome;
 pub mod biome_manager;
+pub mod biome_region;
 pub mod biome_temperature;
 pub mod carver;
 pub mod chunk;
