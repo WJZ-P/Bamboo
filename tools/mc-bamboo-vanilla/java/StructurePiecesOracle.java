@@ -16,8 +16,14 @@ import net.minecraft.nbt.IntArrayTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.server.packs.PackType;
+import net.minecraft.server.packs.repository.PackRepository;
+import net.minecraft.server.packs.repository.ServerPacksSource;
+import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.util.Mth;
+import net.minecraft.util.datafix.DataFixers;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
 import net.minecraft.world.level.levelgen.WorldgenRandom;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
@@ -28,6 +34,9 @@ import net.minecraft.world.level.levelgen.structure.structures.MineshaftPieces;
 import net.minecraft.world.level.levelgen.structure.structures.MineshaftStructure;
 import net.minecraft.world.level.levelgen.structure.structures.OceanMonumentPieces;
 import net.minecraft.world.level.levelgen.structure.structures.StrongholdPieces;
+import net.minecraft.world.level.levelgen.structure.structures.WoodlandMansionPieces;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
+import net.minecraft.world.level.storage.LevelStorageSource;
 
 /**
  * 用官方 26.3 的结构件类直接对拍多件式结构的「结构件列表」布局
@@ -69,6 +78,34 @@ public final class StructurePiecesOracle {
     private static final StructurePieceSerializationContext CTX =
             new StructurePieceSerializationContext(null, null, null);
 
+    // 林地府邸的 WoodlandMansionPiece 需要一个 StructureTemplateManager 来算包围盒。
+    // 官方服务端就是从 vanilla pack 的 data/minecraft/structure/**.nbt 加载模板，这里用
+    // 同一套 ServerPacksSource + MultiPackResourceManager 构造，模板尺寸与导出 blob 一致。
+    // WoodlandMansionPiece needs a StructureTemplateManager for its bounding box. Vanilla
+    // loads templates from the vanilla pack's data/minecraft/structure/**.nbt; we build the
+    // same manager so template sizes match the exported blob.
+    private static StructureTemplateManager templateManager;
+
+    private static StructureTemplateManager templateManager() {
+        if (templateManager == null) {
+            try {
+                PackRepository repository = ServerPacksSource.createVanillaTrustedRepository();
+                repository.reload();
+                repository.setSelected(List.of("vanilla"));
+                MultiPackResourceManager resources =
+                        new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected());
+                Path temp = Files.createTempDirectory("bamboo-mansion");
+                LevelStorageSource.LevelStorageAccess storage =
+                        LevelStorageSource.createDefault(temp).createAccess("mansion");
+                templateManager = new StructureTemplateManager(
+                        resources, storage, DataFixers.getDataFixer(), BuiltInRegistries.BLOCK);
+            } catch (Exception e) {
+                throw new IllegalStateException("cannot build StructureTemplateManager", e);
+            }
+        }
+        return templateManager;
+    }
+
     public static void main(String[] args) throws Exception {
         if (args.length != 1) {
             throw new IllegalArgumentException("usage: StructurePiecesOracle <queries.txt>");
@@ -92,6 +129,7 @@ public final class StructurePiecesOracle {
                 case "mineshaft_mesa" -> mineshaft(seed, cx, cz, true, arg);
                 case "stronghold" -> stronghold(seed, cx, cz);
                 case "ocean_monument" -> oceanMonument(seed, cx, cz);
+                case "woodland_mansion" -> woodlandMansion(seed, cx, cz, arg);
                 default -> throw new IllegalArgumentException("unknown kind " + kind);
             };
             out.append("Q ").append(kind).append(' ').append(seed).append(' ').append(cx)
@@ -186,6 +224,20 @@ public final class StructurePiecesOracle {
             throw new IllegalStateException("cannot read MonumentBuilding.childPieces", e);
         }
         return out;
+    }
+
+    /** WoodlandMansionStructure.findGenerationPoint + generatePieces 的编排。
+     * rotation 由 Rotation.getRandom(context.random()) 取数；startPos 的 X/Z 取自
+     * chunkPos.getBlockX/Z(7)，Y 由外部喂入（terrain 的 getLowestYIn5by5Box）。 */
+    private static List<String> woodlandMansion(long seed, int cx, int cz, int startY) {
+        WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+        random.setLargeFeatureSeed(seed, cx, cz);
+        Rotation rotation = Rotation.getRandom(random);
+        ChunkPos chunkPos = new ChunkPos(cx, cz);
+        BlockPos startPos = new BlockPos(chunkPos.getBlockX(7), startY, chunkPos.getBlockZ(7));
+        List<WoodlandMansionPieces.WoodlandMansionPiece> pieces = new ArrayList<>();
+        WoodlandMansionPieces.generateMansion(templateManager(), startPos, rotation, pieces, random);
+        return pieces.stream().map(StructurePiecesOracle::dump).collect(Collectors.toList());
     }
 
     /** 把一个结构件按统一格式 dump 成一行。 */
