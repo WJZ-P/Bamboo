@@ -31,6 +31,8 @@
 //!     用官方 getRingPositionsFor / findBiomeHorizontal 对拍要塞环位置与群系吸附
 //! mc-bamboo-vanilla structure-validity <java 路径>
 //!     用官方 Structure.GenerationContext 对拍 findValidGenerationPoint 的群系与高度判定
+//! mc-bamboo-vanilla structure-pieces <java 路径>
+//!     用官方结构件类对拍四个多件式结构的结构件布局（类型、包围盒、朝向、参数）
 //!
 //!     Compare findValidGenerationPoint's biome and height gates against vanilla
 //!     Structure.GenerationContext
@@ -104,6 +106,8 @@ mod seed_world;
 #[cfg(feature = "oracle")]
 mod storage_oracle;
 #[cfg(feature = "oracle")]
+mod structure_pieces;
+#[cfg(feature = "oracle")]
 mod structure_rings;
 #[cfg(feature = "oracle")]
 mod structure_validity;
@@ -154,6 +158,8 @@ const STRUCTURE_RINGS_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureRing
 #[cfg(feature = "oracle")]
 const STRUCTURE_VALIDITY_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureValidityOracle.java";
 #[cfg(feature = "oracle")]
+const STRUCTURE_PIECES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePiecesOracle.java";
+#[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 #[cfg(feature = "oracle")]
 const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
@@ -182,6 +188,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structures <java 路径>
       mc-bamboo-vanilla structure-rings <java 路径>
       mc-bamboo-vanilla structure-validity <java 路径>
+      mc-bamboo-vanilla structure-pieces <java 路径>
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -233,6 +240,7 @@ fn run() -> Result<(), String> {
         ["structures", java, ref options @ ..] => structures_cli(java, options),
         ["structure-rings", java, ref options @ ..] => structure_rings_cli(java, options),
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
+        ["structure-pieces", java, ref options @ ..] => structure_pieces_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
@@ -467,6 +475,17 @@ fn structure_validity_cli(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn structure_pieces_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let queries_path = root.join(WORK_DIR).join("structure_pieces_queries.txt");
+    structure_pieces::run(
+        official_program(java, STRUCTURE_PIECES_SOURCE)?,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
 fn loot_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     loot_oracle::run(official_program(java, LOOT_ORACLE_SOURCE)?, options)
 }
@@ -676,6 +695,11 @@ fn structure_rings_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn structure_validity_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_pieces_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
