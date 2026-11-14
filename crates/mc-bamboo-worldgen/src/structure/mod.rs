@@ -18,6 +18,7 @@
 //! biome validity checks, `features`-stage `placeInChunk`, the terrain `Beardifier` and the
 //! save `structures` tag are later milestones; see `docs/worldgen-structures-plan.md`.
 
+pub mod jigsaw;
 pub mod pieces;
 pub mod placement;
 pub mod registry;

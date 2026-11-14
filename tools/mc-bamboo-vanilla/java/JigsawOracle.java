@@ -1,9 +1,14 @@
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Predicate;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
@@ -22,9 +27,33 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.util.datafix.DataFixers;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.LevelHeightAccessor;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.BiomeSource;
+import net.minecraft.world.level.biome.Climate;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
 import net.minecraft.world.level.block.Rotation;
+import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
+import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.world.level.levelgen.RandomState;
+import net.minecraft.world.level.levelgen.densityfunction.SamplerContext;
+import net.minecraft.world.level.levelgen.structure.BoundingBox;
+import net.minecraft.world.level.levelgen.structure.PoolElementStructurePiece;
+import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraft.world.level.levelgen.structure.StructurePiece;
+import net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder;
+import net.minecraft.world.level.levelgen.structure.pools.EmptyPoolElement;
+import net.minecraft.world.level.levelgen.structure.pools.FeaturePoolElement;
+import net.minecraft.world.level.levelgen.structure.pools.LegacySinglePoolElement;
+import net.minecraft.world.level.levelgen.structure.pools.ListPoolElement;
+import net.minecraft.world.level.levelgen.structure.pools.SinglePoolElement;
+import net.minecraft.world.level.levelgen.structure.pools.StructurePoolElement;
+import net.minecraft.world.level.levelgen.structure.structures.JigsawStructure;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
+import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.storage.LevelStorageSource;
 
@@ -34,20 +63,26 @@ import net.minecraft.world.level.storage.LevelStorageSource;
  * structureTemplateManager 从 null 换成它。
  *
  * <p>templates 模式：逐个 get(id) 加载模板，输出 size / save() 的 blocks 数 /
- * getJigsaws(ZERO, NONE) 的拼图方块数，用来验证模板确实被加载。
+ * getJigsaws(ZERO, NONE) 的拼图方块数，验证模板确实被加载。
  *
- * <p>Compare jigsaw against vanilla with a real StructureTemplateManager loaded
- * from the vanilla data pack. No server, no save, no EULA.
+ * <p>pieces 模式：queries 每行 {@code id|seed|cx|cz}。造官方
+ * NoiseBasedChunkGenerator / RandomState / GenerationContext，调
+ * JigsawStructure.findGenerationPoint，输出 stub 位置和每结构件的类型、模板名、
+ * 位置、旋转、包围盒、groundLevelDelta、junction 数。
  *
- * <p>Usage: JigsawOracle templates &lt;queries.txt&gt;
+ * <p>Compare jigsaw against vanilla with a real StructureTemplateManager. No
+ * server, no save, no EULA.
+ *
+ * <p>Usage: JigsawOracle templates|pieces &lt;queries.txt&gt;
  */
 public final class JigsawOracle {
     private JigsawOracle() {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 2 || !args[0].equals("templates")) {
-            throw new IllegalArgumentException("usage: JigsawOracle templates <queries.txt>");
+        if (args.length != 2) {
+            throw new IllegalArgumentException(
+                    "usage: JigsawOracle templates|pieces <queries.txt>");
         }
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
@@ -64,15 +99,18 @@ public final class JigsawOracle {
                 StructureTemplateManager manager = new StructureTemplateManager(
                         resources, storage, DataFixers.getDataFixer(),
                         registries.lookupOrThrow(Registries.BLOCK));
-                runTemplates(manager, Path.of(args[1]));
+                switch (args[0]) {
+                    case "templates" -> runTemplates(manager, Path.of(args[1]));
+                    case "pieces" -> runPieces(manager, registries, Path.of(args[1]));
+                    default -> throw new IllegalArgumentException("unknown mode " + args[0]);
+                }
             }
         }
     }
 
     private static void runTemplates(StructureTemplateManager manager, Path queries) throws Exception {
-        List<String> lines = Files.readAllLines(queries, StandardCharsets.UTF_8);
         StringBuilder out = new StringBuilder();
-        for (String line : lines) {
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
             if (line.isBlank()) {
                 continue;
             }
@@ -88,6 +126,106 @@ public final class JigsawOracle {
                     .append(blocks).append('|').append(jigsaws).append('\n');
         }
         System.out.print(out);
+    }
+
+    private static void runPieces(
+            StructureTemplateManager manager, RegistryAccess registries, Path queries)
+            throws Exception {
+        HolderLookup.RegistryLookup<NormalNoise> noiseLookup =
+                registries.lookupOrThrow(Registries.NOISE);
+        Registry<NoiseGeneratorSettings> settingsReg =
+                registries.lookupOrThrow(Registries.NOISE_SETTINGS);
+        NoiseGeneratorSettings settings =
+                settingsReg.getValue(Identifier.withDefaultNamespace("overworld"));
+        NoiseBasedChunkGenerator generator = new NoiseBasedChunkGenerator(
+                MultiNoiseBiomeSource.createFromPreset(
+                        registries.lookupOrThrow(
+                                        Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST)
+                                .getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD)),
+                settingsReg.wrapAsHolder(settings));
+        BiomeSource biomeSource = generator.getBiomeSource();
+        LevelHeightAccessor heightAccessor = LevelHeightAccessor.create(
+                settings.noiseSettings().minY(), settings.noiseSettings().height());
+        Registry<Structure> structureReg = registries.lookupOrThrow(Registries.STRUCTURE);
+
+        Map<Long, RandomState> states = new HashMap<>();
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|");
+            String id = p[0];
+            long seed = Long.parseLong(p[1]);
+            int cx = Integer.parseInt(p[2]);
+            int cz = Integer.parseInt(p[3]);
+            RandomState state = states.computeIfAbsent(
+                    seed, s -> RandomState.create(noiseLookup, s, settings));
+            Climate.Sampler sampler = state.createClimateSampler(
+                    SamplerContext.builder().enableCaches().build());
+            Structure structure = structureReg.getValue(Identifier.parse(id));
+            if (!(structure instanceof JigsawStructure jigsaw)) {
+                throw new IllegalStateException(id + " is not a jigsaw structure");
+            }
+            Predicate<Holder<Biome>> validBiome = structure.biomes()::contains;
+            Structure.GenerationContext context = new Structure.GenerationContext(
+                    registries, generator, biomeSource, sampler, state, manager, seed,
+                    new ChunkPos(cx, cz), heightAccessor, validBiome);
+            String key = id + "|" + seed + "|" + cx + "|" + cz;
+            Optional<Structure.GenerationStub> stub = jigsaw.findGenerationPoint(context);
+            if (stub.isEmpty()) {
+                out.append("Q|").append(key).append("|0|0|0|0|0\n");
+                continue;
+            }
+            StructurePiecesBuilder builder = stub.get().getPiecesBuilder();
+            List<StructurePiece> pieces = builder.build().pieces();
+            BlockPos position = stub.get().position();
+            out.append("Q|").append(key).append("|1|").append(position.getX()).append('|')
+                    .append(position.getY()).append('|').append(position.getZ()).append('|')
+                    .append(pieces.size()).append('\n');
+            for (int i = 0; i < pieces.size(); i++) {
+                StructurePiece piece = pieces.get(i);
+                String description = piece instanceof PoolElementStructurePiece pool
+                        ? describe(pool) : "other|-|0|0|0|0|0|0|0|0|0|0|0|0";
+                out.append("P|").append(key).append('|').append(i).append('|')
+                        .append(description).append('\n');
+            }
+        }
+        System.out.print(out);
+    }
+
+    /** 类型|模板名|pos|rotation|boundingBox(6)|groundLevelDelta|junctions。 */
+    private static String describe(PoolElementStructurePiece piece) {
+        StructurePoolElement element = piece.getElement();
+        String type;
+        String location;
+        if (element == EmptyPoolElement.INSTANCE) {
+            type = "empty";
+            location = "-";
+        } else if (element instanceof LegacySinglePoolElement) {
+            type = "legacy";
+            location = ((SinglePoolElement) element).getTemplateLocation().toString();
+        } else if (element instanceof SinglePoolElement single) {
+            type = "single";
+            location = single.getTemplateLocation().toString();
+        } else if (element instanceof ListPoolElement) {
+            type = "list";
+            location = "-";
+        } else if (element instanceof FeaturePoolElement) {
+            type = "feature";
+            location = "-";
+        } else {
+            type = "other";
+            location = "-";
+        }
+        BlockPos pos = piece.getPosition();
+        BoundingBox box = piece.getBoundingBox();
+        return type + "|" + location + "|"
+                + pos.getX() + "|" + pos.getY() + "|" + pos.getZ() + "|"
+                + piece.getRotation().ordinal() + "|"
+                + box.minX() + "|" + box.minY() + "|" + box.minZ() + "|"
+                + box.maxX() + "|" + box.maxY() + "|" + box.maxZ() + "|"
+                + piece.getGroundLevelDelta() + "|" + piece.getJunctions().size();
     }
 
     private static LayeredRegistryAccess<RegistryLayer> loadRegistries(
