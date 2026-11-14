@@ -39,6 +39,7 @@ pub mod carver;
 pub mod chunk;
 pub mod climate;
 pub mod density;
+pub mod feature;
 pub mod interval;
 pub mod material;
 pub mod math;
@@ -106,13 +107,33 @@ impl Worldgen {
         }
 
         // 地表规则、条件和雕刻器是新加的字段；缺了明确报错，别静默生成错的世界。
+        // 地物那四个键同理，feature / placed_feature / biome_features 是对象，
+        // features_per_step 是数组，形状由 object_field / array_field 一并核对。
         for name in [
             "material_rule",
             "material_condition",
             "carver",
             "biome_carvers",
+            "feature",
+            "placed_feature",
+            "biome_features",
         ] {
             object_field(root, name)?;
+        }
+        let steps = root
+            .get("features_per_step")
+            .and_then(Value::as_array)
+            .ok_or("missing features_per_step")?;
+        if steps.len() != crate::feature::DECORATION_STEPS {
+            return Err(format!(
+                "features_per_step has {} steps, expected {}",
+                steps.len(),
+                crate::feature::DECORATION_STEPS
+            ));
+        }
+        for (index, step) in steps.iter().enumerate() {
+            step.as_array()
+                .ok_or_else(|| format!("features_per_step[{index}] is not an array"))?;
         }
 
         let end = object_field(root, "end_biomes")?;

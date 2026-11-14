@@ -77,6 +77,8 @@ pub struct Generator<'a> {
     default_block: u32,
     default_fluid: u32,
     empty: u32,
+    /// 地物注册表，按 `Worldgen` 建一次。
+    features: crate::feature::registry::Registry,
 }
 
 /// 含水层用的六条密度函数，编译顺序和 `NoiseBasedAquifer` 的构造器一样。
@@ -149,6 +151,8 @@ impl<'a> Generator<'a> {
         .map_err(|error| format!("material rules: {error}"))?;
         let carvers =
             Carvers::compile(worldgen.raw()).map_err(|error| format!("carvers: {error}"))?;
+        let features = crate::feature::registry::Registry::parse(worldgen.raw())
+            .map_err(|error| format!("features: {error}"))?;
         let cache_count = compiler.cache_count();
         let positional = compiler.positional_factory();
         let mut material = material;
@@ -170,6 +174,7 @@ impl<'a> Generator<'a> {
             default_block,
             default_fluid,
             empty: blocks::AIR,
+            features,
         })
     }
 
@@ -328,6 +333,35 @@ impl<'a> Generator<'a> {
             )?;
         }
         Ok(layers)
+    }
+
+    /// `ChunkStatus.FEATURES`：`ChunkGenerator.applyBiomeDecoration`。
+    ///
+    /// 输入是中心加 8 个邻居到 CARVERS 阶段的结果；输出 9 个区块改成 FEATURES
+    /// 阶段之后的样子，以及给 8 个邻居的写增量。见
+    /// [`crate::feature::run::FeatureContext`] 的两个过渡开关。
+    pub fn features(
+        &self,
+        input: &crate::feature::FeatureChunks,
+        steps_mask: i32,
+        allowed_kinds: Option<&'static [&'static str]>,
+    ) -> Result<crate::feature::FeatureResult, String> {
+        let biomes = BiomeManager::new(self.biomes, self.seed);
+        let context = crate::feature::run::FeatureContext {
+            registry: &self.features,
+            samplers: &self.router,
+            biomes: &biomes,
+            settings: self.settings,
+            seed: self.seed,
+            steps_mask,
+            allowed_kinds,
+        };
+        crate::feature::run::features(input, &context)
+    }
+
+    /// 地物注册表，对拍报告统计用。
+    pub fn feature_registry(&self) -> &crate::feature::registry::Registry {
+        &self.features
     }
 
     fn worldgen_noises(&self) -> &'a NoiseRegistry {

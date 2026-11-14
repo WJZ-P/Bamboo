@@ -439,6 +439,51 @@ impl WorldgenRandom {
         (upper << 32).wrapping_add(lower)
     }
 
+    /// `nextInt()`：`BitRandomSource.nextInt()` = `next(32)`。
+    pub fn next_int_unbounded(&self) -> i32 {
+        self.next(32)
+    }
+
+    /// `nextInt(bound)`：`BitRandomSource` 的默认实现。
+    ///
+    /// `WorldgenRandom` 继承 `LegacyRandomSource`，不管内层包的是 Legacy 还是 Xoroshiro，
+    /// 这里都走 `next(bits)` 的默认 31 位无偏取模，不是内层源自己的 Lemire 实现。
+    pub fn next_int(&self, bound: i32) -> i32 {
+        assert!(bound > 0, "Bound must be positive");
+        if bound & (bound - 1) == 0 {
+            return ((i64::from(bound) * i64::from(self.next(31))) >> 31) as i32;
+        }
+        loop {
+            let sample = self.next(31);
+            let modulo = sample % bound;
+            if sample.wrapping_sub(modulo).wrapping_add(bound - 1) >= 0 {
+                return modulo;
+            }
+        }
+    }
+
+    /// `Mth.randomBetweenInclusive(random, min, max)`。
+    pub fn next_int_between_inclusive(&self, min: i32, max: i32) -> i32 {
+        self.next_int(max - min + 1) + min
+    }
+
+    /// `nextFloat()`：`BitRandomSource` 的默认实现，`next(24) * 2^-24`。
+    pub fn next_float(&self) -> f32 {
+        self.next(24) as f32 * 5.960_464_5e-8_f32
+    }
+
+    /// `nextDouble()`：`BitRandomSource` 的默认实现，两次 `next` 拼 53 位。
+    pub fn next_double(&self) -> f64 {
+        let upper = i64::from(self.next(26));
+        let lower = i64::from(self.next(27));
+        ((upper << 27) + lower) as f64 * 1.110_223_024_625_156_5e-16_f64
+    }
+
+    /// `nextBoolean()`：`next(1)`。
+    pub fn next_boolean(&self) -> bool {
+        self.next(1) != 0
+    }
+
     /// `setDecorationSeed(seed, chunkX, chunkZ)`，返回官方那个 population seed。
     pub fn set_decoration_seed(&self, seed: i64, chunk_x: i32, chunk_z: i32) -> i64 {
         self.set_seed(seed);
@@ -643,5 +688,66 @@ mod tests {
         let wrapper = WorldgenRandom::new(Random::Xoroshiro(XoroshiroRandom::new(7)));
         assert_eq!(wrapper.next_long(), expected);
         assert_eq!(wrapper.count(), 2);
+    }
+}
+
+/// `WorldgenRandom` 的 `BitRandomSource` 默认方法与官方逐位一致。
+///
+/// 期望值来自 `RandProbe.java`（`setDecorationSeed(0,0,0)` 再
+/// `setFeatureSeed(deco,0,6)` 后的 12 个 `nextDouble`）和
+/// `RandProbe2.java` / `OreProbe2.java`（`setFeatureSeed(1234,3,2)` 后的
+/// `nextFloat`、`nextInt(16)`、`nextInt(321)` 序列）。
+#[cfg(test)]
+mod bit_source_tests {
+    use super::*;
+
+    #[test]
+    fn next_double_and_float_match_official_bits() {
+        let doubles: [u64; 12] = [
+            0x3fe5176a7c84f4e0,
+            0x3fd3ae22ec25f982,
+            0x3fe21317d64bb543,
+            0x3f9eecb1b3865040,
+            0x3fed928a2f45aae2,
+            0x3fe2d596e048cffe,
+            0x3fe88d1290842d31,
+            0x3fe31bd6f7bfcb1b,
+            0x3fc7d41e9728d59c,
+            0x3fe22d31f3aa9fa3,
+            0x3fea431af13bd658,
+            0x3fd69e680b06f434,
+        ];
+        let floats: [u32; 8] = [
+            0x3e354818, 0x3eabcbde, 0x3ed271ae, 0x3f29410d, 0x3f5b6976, 0x3f155757, 0x3ee4b004,
+            0x3e2925d8,
+        ];
+        let r = WorldgenRandom::new(Algorithm::Xoroshiro.new_instance(0));
+        let deco = r.set_decoration_seed(0, 0, 0);
+        r.set_feature_seed(deco, 0, 6);
+        for (i, want) in doubles.iter().enumerate() {
+            assert_eq!(r.next_double().to_bits(), *want, "nextDouble {i}");
+        }
+        let r2 = WorldgenRandom::new(Algorithm::Xoroshiro.new_instance(0));
+        r2.set_feature_seed(1234, 3, 2);
+        for (i, want) in floats.iter().enumerate() {
+            assert_eq!(r2.next_float().to_bits(), *want, "nextFloat {i}");
+        }
+        assert_eq!(r2.count(), 8);
+
+        let r3 = WorldgenRandom::new(Algorithm::Xoroshiro.new_instance(0));
+        r3.set_feature_seed(1234, 3, 2);
+        let ni16: [i32; 20] = [
+            2, 5, 6, 10, 13, 9, 7, 2, 1, 5, 9, 5, 11, 9, 11, 9, 4, 3, 14, 14,
+        ];
+        let ni321: [i32; 20] = [
+            120, 74, 0, 130, 167, 278, 166, 163, 160, 213, 284, 47, 93, 52, 266, 213, 1, 94, 74,
+            163,
+        ];
+        for (i, want) in ni16.iter().enumerate() {
+            assert_eq!(r3.next_int(16), *want, "nextInt(16) {i}");
+        }
+        for (i, want) in ni321.iter().enumerate() {
+            assert_eq!(r3.next_int(321), *want, "nextInt(321) {i}");
+        }
     }
 }
