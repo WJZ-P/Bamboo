@@ -745,6 +745,8 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | `--steps 2 --feature-types minecraft:geode --chunk X Z`（晶洞，6 个已知生成点） | 每个 **0 不一致**（每区块 884736 方块、886272 次比较） |
 | `--steps 1 --feature-types minecraft:lake` | `--seeds 2 --chunks 4` / `--seeds 3 --chunks 8 --salt 7`（24 中心 / 21233664 方块）均 **0 不一致** |
 | `--steps 2 --feature-types minecraft:large_dripstone --chunk 2 36 --scan 25`（25 个滴水石洞穴区块） | **0 不一致**（22118400 方块）；这批位置官方与 Bamboo 都没长柱，见下面「疑点」 |
+| `--steps 4 --feature-types minecraft:blue_ice --chunk X Z`，5 个真实生成点 `(255,-109) (260,-106) (242,-104) (243,-103) (241,-102)` | 每个 **0 不一致**（884736 方块 / 886272 次比较）；故意把 `yOff < 2` 改成 `yOff < 3` 后报 **5 处不一致** |
+| `--steps 4`（step 4 全量） | `--seeds 2 --chunks 4` **0 不一致** |
 | `--steps 2`（step 2 全量：`lake` / `geode` / `iceberg` / `large_dripstone` / `block_blob`） | `--seeds 2 --chunks 4` **0 不一致** |
 
 **本轮的接手工作**（2026-11-14 接续）：
@@ -767,6 +769,9 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `provider.rs` 补 `IntProvider::max_value` 与浮点 `FloatProvider`（只 `uniform`）。
 * 新增 `large_dripstone.rs`（大型滴水石柱）：`Column.scan` 空腔扫描、钟乳石/石笋的
   「往回挪到根嵌进石头」、`SpeleothemUtils` 的高度曲线与风偏移，都按 26.3 移植。
+* 新增 `blue_ice.rs`（冻洋蓝冰）：200 次尝试里的 `nextInt(5)` / `nextInt(6)` /
+  两个 `nextInt(xzDiff)` 顺序，以及 `yOff / 2` 的**截断除法**（Java 负数向零取整，
+  不能用 `div_euclid`）都照官方。
 * 新增 `monster_room.rs`（地牢）：代码按官方逐行写完，但逐方块对拍仍有 2 格差异
   （箱子落点不同），**没有**接进 `dispatch.rs`，对拍时仍标 `unsupported`。
 * 两个选点探针（`#[ignore]` 测试，手动跑）：
@@ -795,9 +800,12 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 **还没做**（按 5.2 的分类，仍标 `unsupported` / `skipped`）：
 
 * step 1/2/3/4/7/10 的其余非植被类型：`monster_room`（代码已写、未接入）、`fossil`、
-  `spike`（ice_spike）、`overlay`（desert_well）、`blue_ice`、`speleothem_cluster`、
+  `spike`（ice_spike）、`overlay`（desert_well）、`speleothem_cluster`、
   `freeze_top_layer`。已完成的是 `disk`、`underwater_magma`、`spring_feature`、`iceberg`、
-  `block_blob`、`geode`、`lake`、`large_dripstone`。
+  `block_blob`、`geode`、`lake`、`large_dripstone`、`blue_ice`。
+  `overlay`（沙漠井）依赖 `minecraft:template` 地物（要落结构模板），归模板/结构那条线；
+  `speleothem_cluster` 需要 `clamped_normal` 浮点提供者与 `nextGaussian` 缓存语义，
+  本轮没做。
 * 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`monster_room` 要刷怪笼 /
   战利品表 / 方块实体；`large_dripstone` 是较大的独立 feature；`freeze_top_layer` 走
   `SnowLayerBlock.canSurvive` 的形状判定和 `getBrightness`，Java 对拍代理

@@ -574,13 +574,14 @@ WebView2 的渲染进程不算在内。
   的模板环境）。本轮全是纯函数 + 对拍，还没接进 Director 的 `structure_starts` 阶段。
 - 地物（非植被，分支 `cb-wg-feat-a`）：`block_blob`（森林岩石）、`disk`、
   `spring_feature`、`underwater_magma`、`iceberg`（含 `blue_ice` 变体）、`geode`
-  （紫水晶晶洞）、`lake`（岩浆湖）、`large_dripstone`（大型滴水石柱）已按官方 26.3
-  移植；`chunkgen` 的 `--ore-only` 已泛化成 `--feature-types ID,ID` 诊断白名单（条目可以是
-  Feature 类型 ID 或 placed feature 注册名），过滤不动 `features_per_step` 的全局 index。
-  其余非植被类型（怪物房、化石、冰刺、冰补丁、沙漠井、滴水石簇、`freeze_top_layer`）
-  在完整 11 步对拍里仍标 `unsupported` / `skipped`，按「不发明行为」先留白。
-  `geode` 的 `rarity_filter` 是 1/24、`large_dripstone` 只在稀疏的 `dripstone_caves`
-  群系里出现，两者都要先扫出真实生成点再逐个 `--chunk X Z` 复核（仓库里有两个
+  （紫水晶晶洞）、`lake`（岩浆湖）、`large_dripstone`（大型滴水石柱）、`blue_ice`
+  （冻洋蓝冰）已按官方 26.3 移植；`chunkgen` 的 `--ore-only` 已泛化成
+  `--feature-types ID,ID` 诊断白名单（条目可以是 Feature 类型 ID 或 placed feature
+  注册名），过滤不动 `features_per_step` 的全局 index。其余非植被类型（怪物房、化石、
+  冰刺、冰补丁、沙漠井、滴水石簇、`freeze_top_layer`）在完整 11 步对拍里仍标
+  `unsupported` / `skipped`，按「不发明行为」先留白。`geode` 的 `rarity_filter` 是
+  1/24、`large_dripstone` 只在稀疏的 `dripstone_caves` 群系里出现、`blue_ice` 只在
+  冻洋且要求相邻浮冰，三者都要先扫出真实生成点再逐个 `--chunk X Z` 复核（仓库里有三个
   `#[ignore]` 探针）；`lake` 的主世界两个变体都是岩浆湖，官方「水做的湖表面结冰」
   分支（`Biome.shouldFreeze`）因此不会进入，Rust 侧对非水流体同样跳过。
   `monster_room`（地牢）代码已按官方逐行写完，但箱子落点仍差 2 格，未接进 dispatch。
