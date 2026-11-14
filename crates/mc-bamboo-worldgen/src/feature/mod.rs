@@ -9,6 +9,7 @@
 
 pub mod block_blob;
 pub mod block_predicate;
+pub mod blue_ice;
 pub mod composition;
 pub mod disk;
 pub mod dispatch;

@@ -165,3 +165,106 @@ fn find_dripstone_caves_chunks() {
     }
     println!("DRIPBIOME seed {seed}: {found} chunk(s) in radius {radius}");
 }
+
+/// 找冻洋区块：`blue_ice` 只在这些群系出现，先定位再对拍。
+///
+/// Locate frozen-ocean chunks: `blue_ice` only appears there, so find them first.
+#[test]
+#[ignore]
+fn find_frozen_ocean_chunks() {
+    let seed: i64 = std::env::var("ICE_SEED")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0);
+    let radius: i32 = std::env::var("ICE_RADIUS")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(64);
+    let worldgen = Worldgen::load().expect("worldgen");
+    let generator = Generator::new(&worldgen, seed).expect("generator");
+    let registry = generator.feature_registry();
+    let ice_biomes: Vec<u32> = (0..128u32)
+        .filter(|&id| {
+            registry
+                .biome_features(id, 4)
+                .iter()
+                .any(|name| name == "minecraft:blue_ice")
+        })
+        .collect();
+    println!("ICE biome ids with blue_ice: {ice_biomes:?}");
+    let mut found = 0;
+    for cz in -radius..=radius {
+        for cx in -radius..=radius {
+            let Ok(sections) = generator.biomes(cx, cz) else {
+                continue;
+            };
+            if sections
+                .iter()
+                .flatten()
+                .any(|cell| ice_biomes.contains(cell))
+            {
+                println!("ICECHUNK seed {seed} chunk ({cx},{cz})");
+                found += 1;
+                if found >= 20 {
+                    println!("ICECHUNK seed {seed}: stopping after 20");
+                    return;
+                }
+            }
+        }
+    }
+    println!("ICECHUNK seed {seed}: {found} chunk(s) in radius {radius}");
+}
+
+/// 找真正长出蓝冰的冻洋区块：蓝冰要求水面 + 相邻浮冰，条件很苛刻。
+///
+/// Find frozen-ocean chunks that really grow blue ice: it needs water plus an adjacent
+/// packed-ice face, which is a strict condition.
+#[test]
+#[ignore]
+fn list_blue_ice_chunks() {
+    let seed: i64 = std::env::var("ICE_SEED")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0);
+    let radius: i32 = std::env::var("ICE_RADIUS")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(8);
+    let center_x: i32 = std::env::var("ICE_X")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0);
+    let center_z: i32 = std::env::var("ICE_Z")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0);
+    let worldgen = Worldgen::load().expect("worldgen");
+    let generator = Generator::new(&worldgen, seed).expect("generator");
+    let allowed = vec!["minecraft:blue_ice".to_owned()];
+    let blue_ice = mc_bamboo_data::block_by_name("minecraft:blue_ice")
+        .and_then(|block| mc_bamboo_data::block_id_of_state(block.first_state));
+    let mut found = 0;
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            let cx = center_x + dx;
+            let cz = center_z + dz;
+            let Some(input) = nine_chunk_input(&generator, cx, cz) else {
+                continue;
+            };
+            let Ok(result) = generator.features(&input, 1 << 4, Some(&allowed)) else {
+                continue;
+            };
+            if result.unsupported {
+                continue;
+            }
+            let hit = result.blocks[4].iter().flatten().any(|&state| {
+                blue_ice.is_some_and(|id| mc_bamboo_data::block_id_of_state(state) == Some(id))
+            });
+            if hit {
+                println!("BLUEICE seed {seed} chunk ({cx},{cz})");
+                found += 1;
+            }
+        }
+    }
+    println!("BLUEICE seed {seed} around ({center_x},{center_z}) radius {radius}: {found}");
+}
