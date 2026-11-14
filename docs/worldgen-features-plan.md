@@ -744,6 +744,8 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | `--through carvers`（旧阶段回归） | `--seeds 2 --chunks 6 --salt 1` **0 不一致** |
 | `--steps 2 --feature-types minecraft:geode --chunk X Z`（晶洞，6 个已知生成点） | 每个 **0 不一致**（每区块 884736 方块、886272 次比较） |
 | `--steps 1 --feature-types minecraft:lake` | `--seeds 2 --chunks 4` / `--seeds 3 --chunks 8 --salt 7`（24 中心 / 21233664 方块）均 **0 不一致** |
+| `--steps 2 --feature-types minecraft:large_dripstone --chunk 2 36 --scan 25`（25 个滴水石洞穴区块） | **0 不一致**（22118400 方块）；这批位置官方与 Bamboo 都没长柱，见下面「疑点」 |
+| `--steps 2`（step 2 全量：`lake` / `geode` / `iceberg` / `large_dripstone` / `block_blob`） | `--seeds 2 --chunks 4` **0 不一致** |
 
 **本轮的接手工作**（2026-11-14 接续）：
 
@@ -760,14 +762,26 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `is_outside_build_height`；`block_predicate.rs` 补 `inside_world_bounds`；
   `placement.rs` 补 `environment_scan`。
 * `ChunkgenOracle.java` 的 `WorldGenLevel` 代理补 `isInsideBuildHeight`
-  （此前 `environment_scan` 会抛 `UnsupportedOperationException`）。
+  （此前 `environment_scan` 会抛 `UnsupportedOperationException`）；`block_predicate.rs`
+  补 `inside_world_bounds`；`placement.rs` 补 `environment_scan` 修饰器；
+  `provider.rs` 补 `IntProvider::max_value` 与浮点 `FloatProvider`（只 `uniform`）。
+* 新增 `large_dripstone.rs`（大型滴水石柱）：`Column.scan` 空腔扫描、钟乳石/石笋的
+  「往回挪到根嵌进石头」、`SpeleothemUtils` 的高度曲线与风偏移，都按 26.3 移植。
+* 新增 `monster_room.rs`（地牢）：代码按官方逐行写完，但逐方块对拍仍有 2 格差异
+  （箱子落点不同），**没有**接进 `dispatch.rs`，对拍时仍标 `unsupported`。
+* 两个选点探针（`#[ignore]` 测试，手动跑）：
+  `cargo test --release -p mc-bamboo-worldgen --lib list_geode_chunks -- --ignored`
+  （环境变量 `GEODE_SEED` / `GEODE_RADIUS`）和
+  `... find_dripstone_caves_chunks -- --ignored`（`DRIP_SEED` / `DRIP_RADIUS`，
+  只采群系，比跑地形快一个数量级）。晶洞和滴水石柱都太稀疏，随机区块撞不上，
+  必须先扫出真实生成点再 `--chunk X Z` 逐个复核。
 
-晶洞的对拍要点：它的 `rarity_filter` 是 1/24，稀疏随机区块几乎撞不上，所以先用一个
-`#[ignore]` 的 Rust 探针（`cargo test --release -p mc-bamboo-worldgen --lib
-list_geode_chunks -- --ignored`，环境变量 `GEODE_SEED` / `GEODE_RADIUS`）扫出真实
-生成点（seed 0、半径 8 里有 6 个），再逐个用 `--chunk X Z` 对拍。两个新类型都先故意
-改坏一处确认对拍会失败（晶洞改 `filling` 层半径报 130 处；湖把椭球个数从
-`nextInt(4)+4` 改成 `+3` 报 40 处），还原后回 0。
+晶洞：`rarity_filter` 是 1/24，seed 0、半径 8 里只有 6 个区块生成，逐个对拍全 0 不一致。
+滴水石柱：`dripstone_caves` 群系本身很稀疏（seed 0 的 ±64 区块里只有 9 个），
+在这 9 个位置及其 5×5 邻域里，官方和 Bamboo 都**没有**长出柱子——所以「实际生成柱」这条
+路径本轮没有被逐方块覆盖，只覆盖了「该位置不长柱」的路径。两个新类型都先故意改坏一处
+确认对拍会失败（晶洞改 `filling` 层半径报 130 处；湖把椭球个数从 `nextInt(4)+4` 改成
+`+3` 报 40 处），还原后回 0。
 
 ### 还没做
 
@@ -780,10 +794,10 @@ list_geode_chunks -- --ignored`，环境变量 `GEODE_SEED` / `GEODE_RADIUS`）�
 
 **还没做**（按 5.2 的分类，仍标 `unsupported` / `skipped`）：
 
-* step 1/2/3/4/7/10 的其余非植被类型：`large_dripstone`、`monster_room`、`fossil`、
-  `spike`（ice_spike）、`disk`（ice_patch）、`overlay`（desert_well）、`blue_ice`、
-  `speleothem_cluster`、`freeze_top_layer`。已完成的是 `disk`、`underwater_magma`、
-  `spring_feature`、`iceberg`、`block_blob`、`geode`、`lake`。
+* step 1/2/3/4/7/10 的其余非植被类型：`monster_room`（代码已写、未接入）、`fossil`、
+  `spike`（ice_spike）、`overlay`（desert_well）、`blue_ice`、`speleothem_cluster`、
+  `freeze_top_layer`。已完成的是 `disk`、`underwater_magma`、`spring_feature`、`iceberg`、
+  `block_blob`、`geode`、`lake`、`large_dripstone`。
 * 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`monster_room` 要刷怪笼 /
   战利品表 / 方块实体；`large_dripstone` 是较大的独立 feature；`freeze_top_layer` 走
   `SnowLayerBlock.canSurvive` 的形状判定和 `getBrightness`，Java 对拍代理
