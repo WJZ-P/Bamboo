@@ -17,6 +17,7 @@ use std::{collections::HashMap, sync::Arc};
 use mc_bamboo_blocks::LegacyRandom;
 
 use crate::{
+    beardifier::Beardifier,
     density::{
         self, Axis, BinaryOp, DistanceMetric, Kind, Ref, RoundOp, TilingMode, UnaryOp, leaky_relu,
         squeeze,
@@ -78,6 +79,12 @@ pub struct Context {
     cells: Vec<CacheCell>,
     /// 用完的临时缓冲，下次接着用，省掉反复分配。
     pool: Vec<Vec<f32>>,
+    /// 官方 `SamplerContext` 的 user field（Beardifier.CONTEXT_KEY）。`None` 等价于
+    /// `Beardifier.EMPTY`：没有结构影响密度，恒 0。
+    ///
+    /// The official `SamplerContext` user field (`Beardifier.CONTEXT_KEY`); `None` equals
+    /// `Beardifier.EMPTY`: no structure affects density, always 0.
+    beardifier: Option<Arc<Beardifier>>,
 }
 
 impl Context {
@@ -87,12 +94,42 @@ impl Context {
             caching: true,
             cells: vec![CacheCell::empty(); cache_count],
             pool: Vec::new(),
+            beardifier: None,
         }
     }
 
     /// 不记忆的上下文，官方的 `SamplerContext.EMPTY_UNCACHED`。
     pub fn uncached() -> Self {
         Self::default()
+    }
+
+    /// 注入本区块的 `Beardifier`，对应 `NoiseChunk` 把 `Beardifier.CONTEXT_KEY` 放进
+    /// `SamplerContext` 的 user fields。terrain 的 `doFill` 用它，其它步骤不注入（恒 EMPTY）。
+    ///
+    /// Inject the chunk's `Beardifier`, like `NoiseChunk` putting `Beardifier.CONTEXT_KEY` into
+    /// the `SamplerContext` user fields. `doFill` sets it; other steps stay EMPTY.
+    pub fn set_beardifier(&mut self, beardifier: Arc<Beardifier>) {
+        self.beardifier = Some(beardifier);
+    }
+
+    /// `ContextBoundSampler.sampleValue`：有 Beardifier 就委托它，否则后备常量 0。
+    ///
+    /// `ContextBoundSampler.sampleValue`: delegate to the Beardifier, else the 0 fallback.
+    fn beardifier_value(&self, x: i32, y: i32, z: i32) -> f32 {
+        match &self.beardifier {
+            Some(b) => b.sample_value(x, y, z),
+            None => 0.0_f32,
+        }
+    }
+
+    /// `ContextBoundSampler.sampleVolume`：有 Beardifier 就委托它，否则整块填 0。
+    ///
+    /// `ContextBoundSampler.sampleVolume`: delegate to the Beardifier, else fill 0.
+    fn beardifier_fill(&self, out: &mut [f32], volume: &Volume) {
+        match &self.beardifier {
+            Some(b) => b.sample_volume(out, volume),
+            None => out.fill(0.0_f32),
+        }
     }
 
     /// `SamplerContext.getCacheCell`：格子不够就长出来，没开缓存时没有格子。
@@ -141,9 +178,14 @@ pub fn block_pos_as_long(x: i32, y: i32, z: i32) -> i64 {
 /// 官方的 `DensitySampler`，一个变体对应官方一个采样器类。
 #[derive(Debug, Clone)]
 pub enum Sampler {
-    /// `ConstantFunction.Sampler`，也包括 `blend_alpha`、`blend_offset` 和 `beardifier`
-    /// 在没有上下文字段时的那个后备值。
+    /// `ConstantFunction.Sampler`，也包括 `blend_alpha`、`blend_offset` 的后备值。
     Constant(f32),
+    /// `SimpleDensityFunction.BEARDIFIER` 编译成的 `ContextBoundSampler`：求值时从
+    /// `Context` 里取 Beardifier（没注入就是 `Beardifier.EMPTY`，恒 0）。
+    ///
+    /// The `ContextBoundSampler` compiled from `SimpleDensityFunction.BEARDIFIER`: reads the
+    /// Beardifier from `Context` at sample time (EMPTY / always 0 when not injected).
+    Beardifier,
     /// `NoiseFunction.Sampler`。
     Noise {
         noise: Arc<Noise>,
@@ -410,6 +452,7 @@ impl Sampler {
     pub fn sample_value(&self, context: &mut Context, x: i32, y: i32, z: i32) -> f32 {
         match self {
             Self::Constant(value) => *value,
+            Self::Beardifier => context.beardifier_value(x, y, z),
             Self::Noise {
                 noise,
                 xz_scale,
@@ -774,6 +817,7 @@ impl Sampler {
     pub fn sample_volume(&self, context: &mut Context, out: &mut [f32], volume: &Volume) {
         match self {
             Self::Constant(value) => out.fill(*value),
+            Self::Beardifier => context.beardifier_fill(out, volume),
             Self::Noise {
                 noise,
                 xz_scale,
@@ -1800,9 +1844,11 @@ impl Compiler {
     fn compile_node(&mut self, function: &Ref) -> Sampler {
         match &function.kind {
             Kind::Constant(value) => Sampler::Constant(*value),
-            // 上下文里没有 Blender 和 Beardifier，取官方的后备常量。
+            // Blender 为空：官方 `ContextBoundSampler` 的后备常量。
+            // Beardifier 也是 `ContextBoundSampler`，但求值时从 `Context` 的 user field 取真值。
             Kind::BlendAlpha => Sampler::Constant(1.0),
-            Kind::BlendOffset | Kind::Beardifier => Sampler::Constant(0.0),
+            Kind::BlendOffset => Sampler::Constant(0.0),
+            Kind::Beardifier => Sampler::Beardifier,
             Kind::Noise {
                 noise,
                 xz_scale,
