@@ -196,17 +196,46 @@ fn modify(
 /// `PlacementModifier.modify` 和 `Feature.place`，而 `Feature.place` 会消费
 /// 随机数；后续候选位置的 `in_square` / `height_range` 求值会读到被它推进过的
 /// 随机源。先收集会得到一个完全不同的随机序列。
+/// 一次 `Feature.place` 的结果：`supported` 表示涉及的分支是否都已移植，`placed`
+/// 是官方 `FeaturePlacer.place` 的 `placedAny`（Sequence 的短路要用）。
+///
+/// Outcome of one `Feature.place`: `supported` says whether every branch is ported;
+/// `placed` is the official `FeaturePlacer.place` `placedAny` flag.
+#[derive(Debug, Clone, Copy)]
+pub struct PlaceOutcome {
+    pub supported: bool,
+    pub placed: bool,
+}
+
+impl PlaceOutcome {
+    pub fn unsupported() -> Self {
+        Self {
+            supported: false,
+            placed: false,
+        }
+    }
+
+    fn combine(&mut self, other: Self) {
+        self.supported &= other.supported;
+        self.placed |= other.placed;
+    }
+}
+
 pub fn place_candidates(
     modifiers: &[Modifier],
     world: &mut FeatureWorld<'_>,
     env: &mut PlacementEnv<'_>,
     random: &WorldgenRandom,
     origin: Pos,
-    place: &mut dyn FnMut(&mut FeatureWorld<'_>, Pos),
-) {
+    place: &mut dyn FnMut(&mut FeatureWorld<'_>, &mut PlacementEnv<'_>, Pos) -> PlaceOutcome,
+) -> PlaceOutcome {
+    let mut total = PlaceOutcome {
+        supported: true,
+        placed: false,
+    };
     if modifiers.is_empty() {
-        place(world, origin);
-        return;
+        total.combine(place(world, env, origin));
+        return total;
     }
     let mut positions = vec![origin];
     let mut indices = vec![0usize];
@@ -215,6 +244,7 @@ pub fn place_candidates(
         modified.clear();
         {
             // `modify` 只读世界，借用在这一个作用域里结束，放置回调才能可变借用。
+            // `modify` only reads the world; ending this scope lets the place callback borrow it.
             let frozen: &FeatureWorld<'_> = world;
             let mut ctx = PlacementContext {
                 world: frozen,
@@ -234,10 +264,11 @@ pub fn place_candidates(
         } else {
             // 字节码 300-378：最后一个 modifier，正序放置。
             for &candidate in &modified {
-                place(world, candidate);
+                total.combine(place(world, env, candidate));
             }
         }
     }
+    total
 }
 
 /// `OreFeature` 的配置：`targets[].target` 是 `RuleTest`，`targets[].state` 是方块状态。

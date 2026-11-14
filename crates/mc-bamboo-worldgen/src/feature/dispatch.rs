@@ -32,12 +32,17 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
     }
 }
 
-/// `Feature.place` 的一个候选位置。
-pub fn place_leaf(leaf: &Leaf, world: &mut FeatureWorld<'_>, random: &WorldgenRandom, pos: Pos) {
+/// `Feature.place` 的一个候选位置，返回是否放了方块（官方 `placedAny`）。
+///
+/// One candidate of `Feature.place`; returns whether a block was placed (`placedAny`).
+pub fn place_leaf(
+    leaf: &Leaf,
+    world: &mut FeatureWorld<'_>,
+    random: &WorldgenRandom,
+    pos: Pos,
+) -> bool {
     match leaf {
-        Leaf::Ore(ore) => {
-            ores::place(ore, world, random, pos);
-        }
+        Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
     }
 }

@@ -50,19 +50,20 @@ impl SimpleBlockFeature {
         Some(Self { state })
     }
 
-    /// 官方 `SimpleBlockFeature.place` 的单个候选位置。SimpleStateProvider.getState
-    /// 不消费随机数，所以这里只读 `random` 是为了和递归/组合类共用签名。
+    /// 官方 `SimpleBlockFeature.place` 的单个候选位置，返回是否走过 `setBlock`。
+    /// SimpleStateProvider.getState 不消费随机数，`random` 只为和组合类共用签名。
     ///
-    /// One candidate of official `SimpleBlockFeature.place`. `SimpleStateProvider.getState`
-    /// consumes no random; `random` is kept for a uniform signature with composition features.
-    pub fn place(&self, world: &mut FeatureWorld<'_>, _random: &WorldgenRandom, pos: Pos) {
+    /// One candidate of official `SimpleBlockFeature.place`; returns whether `setBlock`
+    /// ran. `SimpleStateProvider.getState` consumes no random; `random` keeps the signature.
+    pub fn place(&self, world: &mut FeatureWorld<'_>, _random: &WorldgenRandom, pos: Pos) -> bool {
         if !survival::can_survive(self.state, world, pos) {
-            return;
+            return false;
         }
         if survival::is_double_plant(self.state) {
-            self.place_at(world, pos);
+            self.place_at(world, pos)
         } else {
             world.set_block_with_heightmaps(pos.0, pos.1, pos.2, self.state);
+            true
         }
     }
 
@@ -74,7 +75,7 @@ impl SimpleBlockFeature {
     /// `DoublePlantBlock.placeAt`: check the block above, then place `half=lower` / `half=upper`.
     /// The three exported double plants have only a `half` property (no `waterlogged`), so
     /// `copyWaterloggedFrom` is a no-op here.
-    fn place_at(&self, world: &mut FeatureWorld<'_>, pos: Pos) {
+    fn place_at(&self, world: &mut FeatureWorld<'_>, pos: Pos) -> bool {
         let (x, y, z) = pos;
         let above = world.get_block(x, y + 1, z);
         let above_air = state_facts(above) & facts::AIR != 0;
@@ -84,13 +85,14 @@ impl SimpleBlockFeature {
             let fluid_same = state_fluid(self.state).fluid == state_fluid(above).fluid;
             let replaceable = state_facts(above) & facts::REPLACEABLE != 0;
             if !fluid_same || !replaceable {
-                return;
+                return false;
             }
         }
         let lower = with_property(self.state, "half", "lower").unwrap_or(self.state);
         let upper = with_property(self.state, "half", "upper").unwrap_or(self.state);
         world.set_block_with_heightmaps(x, y, z, lower);
         world.set_block_with_heightmaps(x, y + 1, z, upper);
+        true
     }
 }
 

@@ -77,13 +77,34 @@ impl VerticalAnchor {
 /// `IntProvider.sample(random)`: step 9 uses constant, uniform, trapezoid, and the
 /// two biased variants for `count` / `offset`. Recursive clamped / weighted_list /
 /// clamped_normal stay unsupported for now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntProvider {
     Constant(i32),
-    Uniform { min: i32, max: i32 },
-    Trapezoid { min: i32, max: i32, plateau: i32 },
-    BiasedToBottom { min: i32, max: i32 },
-    VeryBiasedToBottom { min: i32, max: i32 },
+    Uniform {
+        min: i32,
+        max: i32,
+    },
+    Trapezoid {
+        min: i32,
+        max: i32,
+        plateau: i32,
+    },
+    BiasedToBottom {
+        min: i32,
+        max: i32,
+    },
+    VeryBiasedToBottom {
+        min: i32,
+        max: i32,
+    },
+    /// `ClampedInt`：`clamp(source.sample(random), min, max)`，source 递归。
+    ///
+    /// `ClampedInt`: `clamp(source.sample(random), min, max)` with a recursive source.
+    Clamped {
+        source: Box<IntProvider>,
+        min: i32,
+        max: i32,
+    },
 }
 
 impl IntProvider {
@@ -126,39 +147,53 @@ impl IntProvider {
                 min: integer("min_inclusive")?,
                 max: integer("max_inclusive")?,
             },
+            // `ClampedInt`：先 sample source（消费随机数），再 clamp。
+            // `ClampedInt`: sample the source (consuming random), then clamp.
+            "minecraft:clamped" => Self::Clamped {
+                source: Box::new(IntProvider::parse(
+                    object
+                        .get("source")
+                        .ok_or("clamped int provider has no source")?,
+                )?),
+                min: integer("min_inclusive")?,
+                max: integer("max_inclusive")?,
+            },
             _ => return Err(format!("unsupported int provider {kind}")),
         })
     }
 
-    pub fn sample(self, random: &WorldgenRandom) -> i32 {
+    pub fn sample(&self, random: &WorldgenRandom) -> i32 {
         match self {
-            Self::Constant(value) => value,
-            Self::Uniform { min, max } => random.next_int_between_inclusive(min, max),
+            Self::Constant(value) => *value,
+            Self::Uniform { min, max } => random.next_int_between_inclusive(*min, *max),
             // TrapezoidInt.sample：对称且 plateau==0 时走官方的快路径，两次 nextInt。
             // TrapezoidInt.sample: official symmetric fast path, two nextInt calls.
             Self::Trapezoid { min, max, plateau } => {
-                if plateau == 0 && max == -min {
-                    return random.next_int(max + 1) - random.next_int(max + 1);
+                if *plateau == 0 && *max == -*min {
+                    return random.next_int(*max + 1) - random.next_int(*max + 1);
                 }
-                let range = max - min;
-                if plateau == range {
-                    return random.next_int_between_inclusive(min, max);
+                let range = *max - *min;
+                if *plateau == range {
+                    return random.next_int_between_inclusive(*min, *max);
                 }
-                let plateau_start = (range - plateau) / 2;
+                let plateau_start = (range - *plateau) / 2;
                 let plateau_end = range - plateau_start;
-                min + random.next_int_between_inclusive(0, plateau_end)
+                *min + random.next_int_between_inclusive(0, plateau_end)
                     + random.next_int_between_inclusive(0, plateau_start)
             }
             // BiasedToBottomInt：min + nextInt(nextInt(max-min+1)+1)。
             // BiasedToBottomInt: min + nextInt(nextInt(max-min+1)+1).
             Self::BiasedToBottom { min, max } => {
-                min + random.next_int(random.next_int(max - min + 1) + 1)
+                *min + random.next_int(random.next_int(*max - *min + 1) + 1)
             }
             // VeryBiasedToBottomInt：再套一层 nextInt。
             // VeryBiasedToBottomInt: one more nested nextInt.
             Self::VeryBiasedToBottom { min, max } => {
-                min + random.next_int(random.next_int(random.next_int(max - min + 1) + 1) + 1)
+                *min + random.next_int(random.next_int(random.next_int(*max - *min + 1) + 1) + 1)
             }
+            // ClampedInt.sample：先 sample source（消费随机数），再 clamp。
+            // ClampedInt.sample: sample the source (consuming random), then clamp.
+            Self::Clamped { source, min, max } => source.sample(random).clamp(*min, *max),
         }
     }
 }
@@ -375,6 +410,31 @@ mod tests {
                 very.sample(&c),
                 5 + d.next_int(d.next_int(d.next_int(span) + 1) + 1)
             );
+        }
+    }
+
+    #[test]
+    fn clamped_provider_matches_official() {
+        // `forest_flowers` 的 count：clamp(uniform(-3,1), 0, 1)。
+        // `forest_flowers` count: clamp(uniform(-3,1), 0, 1).
+        let value: Value = serde_json::from_str(
+            r#"{"min_inclusive":0,"max_inclusive":1,"source":{"min_inclusive":-3,"max_inclusive":1,"type":"minecraft:uniform"},"type":"minecraft:clamped"}"#,
+        )
+        .unwrap();
+        let provider = IntProvider::parse(&value).unwrap();
+        assert_eq!(
+            provider,
+            IntProvider::Clamped {
+                source: Box::new(IntProvider::Uniform { min: -3, max: 1 }),
+                min: 0,
+                max: 1,
+            }
+        );
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let expected = b.next_int_between_inclusive(-3, 1).clamp(0, 1);
+            assert_eq!(provider.sample(&a), expected);
         }
     }
 }
