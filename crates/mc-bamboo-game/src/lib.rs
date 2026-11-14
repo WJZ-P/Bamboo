@@ -142,3 +142,19 @@ pub fn saved_data_samples() -> (mc_bamboo_nbt::Tag, mc_bamboo_nbt::Tag) {
 pub fn world_gen_settings_sample(config: &WorldGenConfig) -> mc_bamboo_nbt::Tag {
     world_gen_settings::encode(config)
 }
+
+/// 供 `mc-bamboo-vanilla spawn` 对拍：返回游戏里 `setInitialSpawn` 那份代码算出的
+/// 出生区块 `(cx, cz)` 和最终出生点 `(x, y, z)`。只在 `oracle-samples` feature 下编进库里。
+///
+/// Sample the in-game `setInitialSpawn` code for the `mc-bamboo-vanilla spawn`
+/// oracle: the spawn chunk `(cx, cz)` and the final spawn `(x, y, z)`. Gated
+/// behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn fresh_spawn_sample(config: &WorldGenConfig) -> Option<((i32, i32), (i32, i32, i32))> {
+    worldgen_spawn::select_spawn(config).map(|selection| {
+        (
+            selection.origin,
+            (selection.pos.x, selection.pos.y, selection.pos.z),
+        )
+    })
+}
