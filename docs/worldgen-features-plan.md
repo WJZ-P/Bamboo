@@ -742,6 +742,32 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | `--types minecraft:disk` / `minecraft:spring_feature` / `minecraft:underwater_magma`（分别跑） | 多种子 / 区块 **0 不一致**（magma 跑到 72 中心 / 63700992 方块） |
 | `--steps 6 --ore-only`（回归） | `--seeds 2 --chunks 4 --salt 1` **0 不一致** |
 | `--through carvers`（旧阶段回归） | `--seeds 2 --chunks 6 --salt 1` **0 不一致** |
+| `--steps 2 --feature-types minecraft:geode --chunk X Z`（晶洞，6 个已知生成点） | 每个 **0 不一致**（每区块 884736 方块、886272 次比较） |
+| `--steps 1 --feature-types minecraft:lake` | `--seeds 2 --chunks 4` / `--seeds 3 --chunks 8 --salt 7`（24 中心 / 21233664 方块）均 **0 不一致** |
+
+**本轮的接手工作**（2026-11-14 接续）：
+
+* 先把前任留下的、损坏的 `git merge cb-wg-aquifer` 中止，改为直接合并 `main`
+  （含水层修复已在 main 上）。前任的工作区冲突解决把 main 侧的组合类地物、
+  `simple_block`、`block_predicate`、`composition`、`heightmap`、`survival` 全丢了；
+  这次以 main 为骨架重新合并，把我方类型挂上去，同时删掉了并行的重复实现
+  （`predicates.rs` 并入 `block_predicate.rs`，`state_provider.rs` 合并两边形态）。
+* `--types` 诊断白名单被 main 的 `--feature-types` 取代（超集：支持按 placed feature
+  名字或 Feature 类型 ID 匹配），保留 main 的实现。
+* 新增 `geode.rs`、`lake.rs`；`noise.rs` 补 `NormalNoise.createParity` 与
+  `computeParityBaseAmplitude`；`provider.rs` 补 `IntProvider::max_value`；
+  `FeatureWorld` 补 `seed` / `sea_level` / `is_inside_build_height` /
+  `is_outside_build_height`；`block_predicate.rs` 补 `inside_world_bounds`；
+  `placement.rs` 补 `environment_scan`。
+* `ChunkgenOracle.java` 的 `WorldGenLevel` 代理补 `isInsideBuildHeight`
+  （此前 `environment_scan` 会抛 `UnsupportedOperationException`）。
+
+晶洞的对拍要点：它的 `rarity_filter` 是 1/24，稀疏随机区块几乎撞不上，所以先用一个
+`#[ignore]` 的 Rust 探针（`cargo test --release -p mc-bamboo-worldgen --lib
+list_geode_chunks -- --ignored`，环境变量 `GEODE_SEED` / `GEODE_RADIUS`）扫出真实
+生成点（seed 0、半径 8 里有 6 个），再逐个用 `--chunk X Z` 对拍。两个新类型都先故意
+改坏一处确认对拍会失败（晶洞改 `filling` 层半径报 130 处；湖把椭球个数从
+`nextInt(4)+4` 改成 `+3` 报 40 处），还原后回 0。
 
 ### 还没做
 
@@ -754,18 +780,16 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 
 **还没做**（按 5.2 的分类，仍标 `unsupported` / `skipped`）：
 
-* step 1/2/3/4/7/10 的其余非植被类型：`lake`、`geode`、`iceberg`、`large_dripstone`、
-  `block_blob`（forest_rock）、`monster_room`、`fossil`、`spike`（ice_spike）、
-  `disk`（ice_patch）、`overlay`（desert_well）、`blue_ice`、`speleothem_cluster`、
-  `freeze_top_layer`。
+* step 1/2/3/4/7/10 的其余非植被类型：`large_dripstone`、`monster_room`、`fossil`、
+  `spike`（ice_spike）、`disk`（ice_patch）、`overlay`（desert_well）、`blue_ice`、
+  `speleothem_cluster`、`freeze_top_layer`。已完成的是 `disk`、`underwater_magma`、
+  `spring_feature`、`iceberg`、`block_blob`、`geode`、`lake`。
 * 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`monster_room` 要刷怪笼 /
-  战利品表 / 方块实体；`geode` / `lake` / `iceberg` / `large_dripstone` / `block_blob`
-  是较大的独立 feature；`freeze_top_layer` 的 `Biome.shouldFreeze` / `shouldSnow` 走
-  `SnowLayerBlock.canSurvive` 的形状判定和 `getBrightness`，且和植被修饰器共用
-  `isInsideBuildHeight`——Java 对拍代理（`ChunkgenOracle.java`）目前没实现
-  `isInsideBuildHeight` / `getBrightness`，完整 11 步会抛 `UnsupportedOperationException`，
-  这些路径无法逐位比对。按项目「不发明行为」的原则，宁可保留 `skipped` 也不塞未经验证的
-  实现；完整 11 步代理补齐后可用 `--types` 逐个放开再对拍。
+  战利品表 / 方块实体；`large_dripstone` 是较大的独立 feature；`freeze_top_layer` 走
+  `SnowLayerBlock.canSurvive` 的形状判定和 `getBrightness`，Java 对拍代理
+  （`ChunkgenOracle.java`）还没实现 `getBrightness`（`isInsideBuildHeight` 已补），
+  完整 11 步会抛 `UnsupportedOperationException`，这些路径无法逐位比对。按项目
+  「不发明行为」的原则，宁可保留 `skipped` 也不塞未经验证的实现。
 * 植被类型（树、花、草、patch、selector / sequence 容器，见 5.2）由 `cb-wg-feat-b`
   负责，本轮不做。
 * `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按「已移植集合」
