@@ -336,9 +336,14 @@ fn attempt_spread_vein(
     match behaviour {
         Behaviour::Sculk | Behaviour::Vein => spread_all(world, pos, state) > 0,
         Behaviour::Default => match facings {
-            // `facings == null`：`getSameSpaceSpreader().spreadAll(level.getBlockState(pos), ...) > 0`。
-            // `facings == null`: `getSameSpaceSpreader().spreadAll(...) > 0`.
-            None => spread_all_with(world, pos, state, &[SpreadKind::SamePosition]) > 0,
+            // `facings == null`：官方这里传的是 `level.getBlockState(pos)` 的**实时值**，
+            // 不是外面读进来的快照 `state`。两者在 spread 过程中会不同。
+            // `facings == null`: vanilla passes a fresh `level.getBlockState(pos)` here,
+            // not the snapshot taken by the caller; they diverge during spreading.
+            None => {
+                let live = world.get_block(pos.0, pos.1, pos.2);
+                spread_all_with(world, pos, live, &[SpreadKind::SamePosition]) > 0
+            }
             // `!facings.isEmpty()`：`!isAir && !fluid.is(WATER)` 才拒绝，否则 `regrow`。
             // `!facings.isEmpty()`: reject only when `!isAir && !fluid.is(WATER)`, else
             // `regrow`.
