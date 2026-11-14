@@ -14,7 +14,8 @@ use crate::{
 };
 
 use super::{
-    Pos, TreePlace, cannot_replace_below_trunk, foliage::FoliagePlacer, trunk::TrunkPlacer,
+    Pos, TreePlace, cannot_replace_below_trunk, decorator::Decorator, foliage::FoliagePlacer,
+    trunk::TrunkPlacer,
 };
 
 /// 一棵树的全部已解析配置。
@@ -27,6 +28,7 @@ pub struct TreeConfig {
     pub foliage_provider: StateProvider,
     pub below_trunk: BelowTrunk,
     pub size: FeatureSize,
+    pub decorators: Vec<Decorator>,
     pub ignore_vines: bool,
 }
 
@@ -36,14 +38,17 @@ impl TreeConfig {
         if object.get("type").and_then(Value::as_str) != Some("minecraft:tree") {
             return None;
         }
-        // root placer 和 decorators 还没移植。
-        // Root placers and decorators are unported.
+        // root placer 还没移植。
+        // Root placers are unported.
         if object.contains_key("root_placer") {
             return None;
         }
-        if !object.get("decorators")?.as_array()?.is_empty() {
-            return None;
-        }
+        let decorators = object
+            .get("decorators")?
+            .as_array()?
+            .iter()
+            .map(Decorator::parse)
+            .collect::<Option<Vec<_>>>()?;
         Some(Self {
             trunk: TrunkPlacer::parse(object.get("trunk_placer")?)?,
             foliage: FoliagePlacer::parse(object.get("foliage_placer")?)?,
@@ -51,6 +56,7 @@ impl TreeConfig {
             foliage_provider: StateProvider::parse(object.get("foliage_provider")?)?,
             below_trunk: BelowTrunk::parse(object.get("below_trunk_provider")?)?,
             size: FeatureSize::parse(object.get("minimum_size")?)?,
+            decorators,
             ignore_vines: object
                 .get("ignore_vines")
                 .and_then(Value::as_bool)
@@ -171,14 +177,15 @@ mod tests {
     fn parses_plain_trees_and_gates_unported_ones() {
         let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
         let features = root["feature"].as_object().unwrap();
-        // 没有装饰器和树根的树都能解析。
-        // Trees without decorators or roots parse.
+        // 没有树根的树都能解析。
+        // Trees without roots parse.
         for name in ["minecraft:oak", "minecraft:fancy_oak", "minecraft:acacia"] {
             assert!(TreeConfig::parse(&features[name]).is_some(), "{name}");
         }
-        // swamp_oak 带 leave_vine 装饰器。
-        // swamp_oak has a leave_vine decorator.
-        assert!(TreeConfig::parse(&features["minecraft:swamp_oak"]).is_none());
+        // 带装饰器的也能解析；红树有 root placer，还不行。
+        // Decorated trees parse too; mangrove has a root placer and does not yet.
+        assert!(TreeConfig::parse(&features["minecraft:swamp_oak"]).is_some());
+        assert!(TreeConfig::parse(&features["minecraft:mangrove"]).is_none());
     }
 
     #[test]

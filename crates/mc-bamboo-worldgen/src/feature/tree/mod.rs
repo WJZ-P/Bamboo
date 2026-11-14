@@ -5,7 +5,7 @@
 //! `distance` 写好。树根、树干、树叶、装饰的位置各记在一个和 Java `HashSet` 迭代顺序
 //! 一致的集合里，见 [`java_set`]。
 //!
-//! 还没移植的部分（树根放置器、装饰器、`poplar_foliage_placer`）在
+//! 还没移植的部分（树根放置器、`pale_moss` 装饰器、`poplar_foliage_placer`）在
 //! [`config::TreeConfig::parse`] 返回 `None`，由分发把整个 placed feature 标成
 //! unsupported。
 //!
@@ -18,10 +18,11 @@
 //! `distance`. Root, trunk, foliage and decoration positions are each recorded in a set
 //! that iterates like Java's `HashSet`, see [`java_set`].
 //!
-//! Unported parts (root placers, decorators, `poplar_foliage_placer`) make
+//! Unported parts (root placers, the `pale_moss` decorator, `poplar_foliage_placer`) make
 //! [`config::TreeConfig::parse`] return `None`, so the placed feature stays unsupported.
 
 pub mod config;
+pub mod decorator;
 pub mod foliage;
 pub mod java_set;
 pub mod leaves;
@@ -102,8 +103,9 @@ impl TreeFeature {
         if place.trunks.is_empty() && place.foliage.is_empty() {
             return false;
         }
-        // 装饰器还没移植：`parse` 只放行 decorators 为空的配置。
-        // Decorators are unported: `parse` only accepts configs without any.
+        for decorator in &self.config.decorators {
+            decorator.place(&mut place, random);
+        }
         leaves::update_leaves(&mut place);
         true
     }
