@@ -417,11 +417,16 @@ WebView2 的渲染进程不算在内。
   这次 `features` 里用纯函数（带缓存）重算 8 个邻居中心写进来的增量，保证集合从中心自己的
   features 结果就齐；增量按 `TaskId` 顺序追加、完工按 `(x,y,z,state)` 规范序落盘，同格重复写
   由规范序里最后一条生效，而非官方的生成顺序。邻居快照是干净的 CARVERS 地形（与对拍一致），
-  官方 `WorldGenRegion` 读的可能是邻居更靠后阶段的内容。`possibleBiomes` 仍用对拍的「全部群系 /
-  uncached resolver」简化路径，没换成官方周围 3×3 区块调色板并集（`BiomeCondition.compile`
-  的静态优化、雕刻器的 `carverBiome` 分支都还没按真实服务端的样子重新对拍）。
-  高度图只由 `Chunk::from_sections` 从方块重算 4 张，后期处理位置表、`ProtoChunk` 其余字段、
-  非 `full` 区块从盘上读回后按状态继续生成，都还没逐项对拍。`ChunkColumn::from_parts`
+  官方 `WorldGenRegion` 读的可能是邻居更靠后阶段的内容。
+  `possibleBiomes`、雕刻器的 `carverBiome` 分支和 `WorldGenRegion` 的 `uncachedBiomeResolver`
+  已按真实服务端路径重新对拍：`gen-world` 的 Java 端用 `collectPossibleBiomes(region, 1)` 的
+  3×3 调色板并集、非空 `carverBiomeRegion` 和 `region.getBiomeManager()` 出题，与游戏侧同一份
+  `generate_chunk` 逐方块、逐 quart 格 0 不一致（多种子、多区块）；两条路径何时会不同、哪些是
+  疑点，见 `docs/worldgen.md`。六张高度图（`WORLD_SURFACE_WG` / `OCEAN_FLOOR_WG` 两张 WG 和
+  四张 `FINAL_HEIGHTMAPS`）已从最终 CARVERS 方块按官方谓词算出、逐列对拍 0 不一致，存档写出
+  的四张 FINAL 打包位流也和官方 `SerializableChunkData` 逐字对拍 0 不一致。
+  后期处理位置表、`ProtoChunk` 其余字段、非 `full` 区块从盘上读回后按状态继续生成，
+  都还没逐项对拍。`ChunkColumn::from_parts`
   产出的盒子 `untouched=false`，生成的区块一律算「改过」而写盘，官方可以丢弃原样生成区块。
   出生点是 `MinecraftServer.setInitialSpawn` 的**简化版**：从原点区块起按官方 11×11 螺旋、
   用 quart 群系粗略排除海洋后找一块不淹水的地表，没有 `NoiseSpawnFinder` 的气候螺旋定位、
