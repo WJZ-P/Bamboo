@@ -96,13 +96,17 @@ impl MultifaceGrowthFeature {
         }
         for search in &search_directions {
             let placement_directions = shuffle(&self.directions_except(opposite(search)), random);
-            let mut pos = origin;
             for _ in 0..self.search_range {
-                pos = offset(pos, search);
+                // 官方循环里每次都是 `pos.setWithOffset(origin, searchDirection)`，会重置到
+                // `origin + searchDirection`（不是累加）。这是官方的实际行为，照抄。
+                // The official loop calls `pos.setWithOffset(origin, searchDirection)` every
+                // iteration, which resets to `origin + searchDirection` instead of advancing.
+                // That is the official behaviour; copy it.
+                let pos = offset(origin, search);
                 let state = world.get_block(pos.0, pos.1, pos.2);
                 // `!isAirOrWater(state) && !state.is(placeBlock)` 时停止这一方向。
                 // Stop this direction when the block is neither air/water nor the growth.
-                if !self.is_air_or_water(state) && state != self.block {
+                if !self.is_air_or_water(state) && !is_same_block(state, self.block) {
                     break;
                 }
                 if self.place_growth_if_possible(world, pos, state, random, &placement_directions) {
@@ -139,7 +143,7 @@ impl MultifaceGrowthFeature {
             };
             world.set_block_with_heightmaps(pos.0, pos.1, pos.2, new_state);
             if random.next_float() < self.chance_of_spreading {
-                self.spread(world, pos, new_state, direction, random);
+                self.spread(world, pos, new_state, random);
             }
             return true;
         }
@@ -210,28 +214,28 @@ impl MultifaceGrowthFeature {
                 .is_some()
     }
 
-    /// `MultifaceSpreader.spreadFromFaceTowardRandomDirection`：把六个方向洗牌，逐个试
-    /// `spread_from_face_toward_direction`，第一个成功就返回。
+    /// `MultifaceSpreader.spreadFromFaceTowardRandomDirection`：先把六个方向洗牌当作**起始面**
+    /// 候选（只保留已在状态上出现的面），对每个候选再洗一次牌当作**扩散方向**候选。
+    /// 官方的 `.map(...).filter(Optional::isPresent).findFirst()` 是惰性短路：一旦某个起始面
+    /// 成功就不再洗后面的牌。
     ///
-    /// `MultifaceSpreader.spreadFromFaceTowardRandomDirection`: shuffle the six directions
-    /// and take the first successful spread.
-    fn spread(
-        &self,
-        world: &mut FeatureWorld<'_>,
-        pos: Pos,
-        state: u32,
-        starting_face: &'static str,
-        random: &WorldgenRandom,
-    ) {
-        for spread_direction in shuffle(&DIRECTIONS, random) {
-            if self.spread_from_face_toward_direction(
-                world,
-                pos,
-                state,
-                starting_face,
-                spread_direction,
-            ) {
-                return;
+    /// `MultifaceSpreader.spreadFromFaceTowardRandomDirection`: shuffle all six directions as
+    /// **starting face** candidates (keeping only faces present on the state), then shuffle
+    /// again per candidate for the **spread direction**. The official
+    /// `.map(...).filter(Optional::isPresent).findFirst()` short-circuits lazily, so no
+    /// further shuffles happen once one face succeeds.
+    fn spread(&self, world: &mut FeatureWorld<'_>, pos: Pos, state: u32, random: &WorldgenRandom) {
+        for face in shuffle(&DIRECTIONS, random) {
+            // `config.canSpreadFrom(state, faceDirection)` = `hasFace(state, faceDirection)`。
+            // `config.canSpreadFrom(state, faceDirection)` = `hasFace(state, faceDirection)`.
+            if with_property(state, face, "true") != Some(state) {
+                continue;
+            }
+            for spread_direction in shuffle(&DIRECTIONS, random) {
+                if self.spread_from_face_toward_direction(world, pos, state, face, spread_direction)
+                {
+                    return;
+                }
             }
         }
     }
