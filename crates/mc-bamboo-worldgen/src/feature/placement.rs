@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
+    predicates::Predicate,
     provider::{IntProvider, WorldGenerationContext},
     registry::Registry,
     state::parse_state,
@@ -30,8 +31,16 @@ pub enum Modifier {
         y: IntProvider,
         z: IntProvider,
     },
-    /// 已解析但本轮不生效的修饰器（例如 `surface_relative_threshold_filter`）。
-    /// 命中时置 `unsupported`，让对拍跳过这个区块。
+    /// `block_predicate_filter`：`BlockPredicateFilter.shouldPlace`。
+    BlockPredicateFilter(Predicate),
+    /// `surface_relative_threshold_filter`：按高度图差值过滤候选 y。
+    SurfaceRelativeThresholdFilter {
+        heightmap: HeightmapKind,
+        min_inclusive: i64,
+        max_inclusive: i64,
+    },
+    /// 已解析但本轮不生效的修饰器。命中时置 `unsupported`，让对拍跳过这个区块。
+    /// A parsed-but-unported modifier; sets `unsupported` so the chunk is skipped.
     Unsupported(String),
 }
 
@@ -71,12 +80,34 @@ impl Modifier {
                 y: IntProvider::parse(field("y")?)?,
                 z: IntProvider::parse(field("z")?)?,
             },
+            "minecraft:block_predicate_filter" => {
+                Self::BlockPredicateFilter(Predicate::parse(field("predicate")?)?)
+            }
+            "minecraft:surface_relative_threshold_filter" => Self::SurfaceRelativeThresholdFilter {
+                heightmap: HeightmapKind::parse(
+                    field("heightmap")?
+                        .as_str()
+                        .ok_or("surface_relative_threshold_filter heightmap is not a string")?,
+                )?,
+                min_inclusive: object
+                    .get("min_inclusive")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i32::MIN as i64),
+                max_inclusive: object
+                    .get("max_inclusive")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i32::MAX as i64),
+            },
             _ => Self::Unsupported(kind.to_owned()),
         })
     }
 
     pub fn is_supported(&self) -> bool {
-        !matches!(self, Self::Unsupported(_))
+        match self {
+            Self::Unsupported(_) => false,
+            Self::BlockPredicateFilter(predicate) => predicate.supported(),
+            _ => true,
+        }
     }
 }
 
@@ -154,6 +185,27 @@ fn modify(
             };
             let biome = (ctx.biome_at)(x, y, z);
             if ctx.registry.biome_has_feature(biome, placed) {
+                out.push(pos);
+            }
+        }
+        Modifier::BlockPredicateFilter(predicate) => {
+            // PlacementFilter.shouldPlace 为真才放行原 pos。
+            // A PlacementFilter emits the original pos only when shouldPlace is true.
+            if predicate.test(ctx.world, pos) {
+                out.push(pos);
+            }
+        }
+        Modifier::SurfaceRelativeThresholdFilter {
+            heightmap,
+            min_inclusive,
+            max_inclusive,
+        } => {
+            // surfaceY = context.getHeight(heightmap, x, z)，官方用 long 算差值。
+            // surfaceY = context.getHeight(heightmap, x, z); official uses long arithmetic.
+            let surface_y = ctx.world.get_height(*heightmap, x, z) as i64;
+            let min_y = surface_y + *min_inclusive;
+            let max_y = surface_y + *max_inclusive;
+            if min_y <= y as i64 && y as i64 <= max_y {
                 out.push(pos);
             }
         }

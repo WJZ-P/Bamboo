@@ -126,6 +126,11 @@ pub enum HeightProvider {
         max: VerticalAnchor,
         plateau: i32,
     },
+    VeryBiasedToBottom {
+        min: VerticalAnchor,
+        max: VerticalAnchor,
+        inner: i32,
+    },
 }
 
 impl HeightProvider {
@@ -172,6 +177,18 @@ impl HeightProvider {
                     max: value,
                 })
             }
+            "minecraft:very_biased_to_bottom" => {
+                let inner = object
+                    .get("inner")
+                    .and_then(Value::as_i64)
+                    .map(|n| n as i32)
+                    .unwrap_or(1);
+                Ok(Self::VeryBiasedToBottom {
+                    min: anchor("min_inclusive")?,
+                    max: anchor("max_inclusive")?,
+                    inner,
+                })
+            }
             _ => Err(format!("unsupported height provider {kind}")),
         }
     }
@@ -202,7 +219,30 @@ impl HeightProvider {
                 low + random.next_int_between_inclusive(0, range - slope)
                     + random.next_int_between_inclusive(0, slope)
             }
+            Self::VeryBiasedToBottom { min, max, inner } => {
+                let low = min.resolve(context);
+                let high = max.resolve(context);
+                // 官方 `Mth.nextInt(random, a, b)`：a >= b 时直接返回 a，不取随机数。
+                // Official `Mth.nextInt(random, a, b)`: returns a without drawing when a >= b.
+                if high - low - inner < 0 {
+                    return low;
+                }
+                let upper = mth_next_int(random, low + inner, high);
+                let biased = mth_next_int(random, low, upper - 1);
+                mth_next_int(random, low, biased - 1 + inner)
+            }
         }
+    }
+}
+
+/// `Mth.nextInt(random, min, max)`：含端点，`min >= max` 时不消费随机数直接返回 min。
+///
+/// `Mth.nextInt(random, min, max)`: inclusive; returns min without drawing if min >= max.
+fn mth_next_int(random: &WorldgenRandom, min: i32, max: i32) -> i32 {
+    if min >= max {
+        min
+    } else {
+        random.next_int_between_inclusive(min, max)
     }
 }
 

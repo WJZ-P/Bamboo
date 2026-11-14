@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     DECORATION_STEPS, FeatureChunks, FeatureResult,
-    placement::{Modifier, OreFeature, PlacementEnv, place_candidates},
+    placement::{Modifier, PlacementEnv, place_candidates},
     provider::WorldGenerationContext,
     registry::Registry,
     world::FeatureWorld,
@@ -31,7 +31,8 @@ pub struct FeatureContext<'a> {
     /// 只跑这些 step；`(1<<11)-1` 表示全部。过渡期诊断用。
     pub steps_mask: i32,
     /// 只跑这些配置类型；`None` 表示全部。过渡期诊断用。
-    pub allowed_kinds: Option<&'static [&'static str]>,
+    /// Transitional diagnostic filter: only run placed features of these config types.
+    pub allowed_kinds: Option<&'a [String]>,
 }
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数。
@@ -97,7 +98,7 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                     let Some((kind, _)) = resolve_feature(ctx.registry, &placed.feature) else {
                         continue;
                     };
-                    if !kinds.contains(&kind.as_str()) {
+                    if !kinds.iter().any(|allowed| allowed == &kind) {
                         continue;
                     }
                 }
@@ -120,21 +121,26 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
             };
 
             // 解析 feature 配置；未移植的类型标 unsupported 并跳过（不消费随机数）。
+            // Parse the feature config; unported types mark unsupported and skip
+            // without consuming randomness.
             let Some((kind, config)) = resolve_feature(ctx.registry, &placed.feature) else {
                 unsupported = true;
                 continue;
             };
             if ctx
                 .allowed_kinds
-                .is_some_and(|kinds| !kinds.contains(&kind.as_str()))
+                .is_some_and(|kinds| !kinds.iter().any(|allowed| allowed == &kind))
             {
                 continue;
             }
-            if kind != "minecraft:ore" {
+            let Some(feature) = super::dispatch::Feature::parse(&kind, config)? else {
+                unsupported = true;
+                continue;
+            };
+            if !feature.is_supported() {
                 unsupported = true;
                 continue;
             }
-            let ore = OreFeature::parse(config)?;
             let modifiers: Vec<Modifier> = placed
                 .placement
                 .iter()
@@ -160,7 +166,7 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
             // 官方在栈 DFS 过程中交错执行 modifier 和 Feature.place；不能先收集
             // 全部候选位置，否则 Feature.place 消费的随机数会打乱后续 modifier。
             let mut place_one = |world: &mut FeatureWorld<'_>, pos: (i32, i32, i32)| {
-                super::ores::place(&ore, world, &random, pos);
+                feature.place(world, &random, pos);
             };
             place_candidates(
                 &modifiers,

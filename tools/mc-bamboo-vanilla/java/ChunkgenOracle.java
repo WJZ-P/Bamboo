@@ -493,6 +493,7 @@ public final class ChunkgenOracle {
                         }
                     }
                     case "--ore-only" -> featureAllowList = "minecraft:ore";
+                    case "--types" -> featureAllowList = args[++i];
                     case "--biomes-only" -> through = 0;
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
@@ -797,6 +798,12 @@ public final class ChunkgenOracle {
             if (allowed == null) {
                 return;
             }
+            // 逗号分隔的配置类型 ID；`--ore-only` 是单元素的情况。
+            // Comma-separated feature type IDs; `--ore-only` is the single-element case.
+            Set<String> allowedTypes = new HashSet<>();
+            for (String type : allowed.split(",")) {
+                allowedTypes.add(type.trim());
+            }
             Registry<net.minecraft.world.level.levelgen.placement.PlacedFeature> placed =
                     this.registries.lookupOrThrow(Registries.PLACED_FEATURE);
             Set<String> keep = new HashSet<>();
@@ -806,7 +813,7 @@ public final class ChunkgenOracle {
                     : placed.entrySet()) {
                 net.minecraft.world.level.levelgen.placement.PlacedFeature value = entry.getValue();
                 // 用 codec 的类型 ID 比，不用注册名前缀猜。
-                if (allowed.equals(featureTypeId(value.feature().value()))) {
+                if (allowedTypes.contains(featureTypeId(value.feature().value()))) {
                     keep.add(entry.getKey().identifier().toString());
                 }
             }

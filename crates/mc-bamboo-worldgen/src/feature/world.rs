@@ -3,7 +3,7 @@
 //! 读写范围照 `WorldGenRegion`（`writeRadius = 1`）：3×3 之外的写直接丢弃，
 //! 读超出会抛错（对拍时那意味着地物访问了我们没准备的区块）。
 
-use mc_bamboo_data::{facts, state_facts};
+use mc_bamboo_data::{facts, registries, state_facts, state_fluid};
 
 use super::{CENTER, ChunkBlocks, FeatureChunks, FeatureResult, Heightmaps};
 
@@ -17,8 +17,9 @@ pub struct FeatureWorld<'a> {
     pub blocks: [ChunkBlocks; 9],
     /// 只读的 quart 群系格。
     pub biomes: &'a [Vec<Vec<u32>>; 9],
-    /// 只读的 primed 高度图（terrain 阶段算好的）。
-    pub heights: &'a [Heightmaps; 9],
+    /// primed 高度图；`set_block_state` 按 `Heightmap.update` 增量更新。
+    /// Primed heightmaps; `set_block_state` updates them via `Heightmap.update`.
+    pub heights: [Heightmaps; 9],
     /// 8 个邻居的写增量，中心不记（中心直接交回 `blocks[4]`）。
     pub deltas: [Vec<(i32, i32, i32, u32)>; 9],
 }
@@ -36,7 +37,7 @@ impl<'a> FeatureWorld<'a> {
             height: input.height,
             blocks: input.blocks.clone(),
             biomes: &input.biomes,
-            heights: &input.heights,
+            heights: input.heights,
             deltas: empty(),
         })
     }
@@ -88,6 +89,8 @@ impl<'a> FeatureWorld<'a> {
     ///
     /// `OreFeature` 走 `BulkSectionAccess` 直接写 `LevelChunkSection`，
     /// 不触发 `ChunkAccess` 的高度图更新，所以这里也不更新 `heights`。
+    /// OreFeature writes through BulkSectionAccess (bypassing setBlockState), so no
+    /// heightmap update here.
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
         let Some((chunk, index)) = self.block_index(x, y, z) else {
             return false;
@@ -95,6 +98,38 @@ impl<'a> FeatureWorld<'a> {
         self.blocks[chunk][index / 256][index % 256] = state;
         if chunk != CENTER {
             self.deltas[chunk].push((x, y, z, state));
+        }
+        true
+    }
+
+    /// `level.setBlock(...)` 走 `ChunkAccess.setBlockState`：写方块并按
+    /// `Heightmap.update` 增量更新 `FINAL_HEIGHTMAPS` 四种高度图。
+    ///
+    /// `level.setBlock(...)` goes through `ChunkAccess.setBlockState`: writes the
+    /// block and incrementally updates the four `FINAL_HEIGHTMAPS` via `Heightmap.update`.
+    pub fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+        let Some((chunk, index)) = self.block_index(x, y, z) else {
+            return false;
+        };
+        self.blocks[chunk][index / 256][index % 256] = state;
+        if chunk != CENTER {
+            self.deltas[chunk].push((x, y, z, state));
+        }
+        let column = (x & 15) as usize * 16 + (z & 15) as usize;
+        // 先只读算好四个新值，再写回，避开 &mut 与 &self 的借用冲突。
+        // Compute the four new values read-only first, then write back.
+        let mut updates = [(HeightmapKind::WorldSurface, 0_i32); 4];
+        for (slot, kind) in FINAL_HEIGHTMAPS.iter().enumerate() {
+            let current = heightmap_column(&self.heights[chunk], *kind)[column];
+            updates[slot] = (
+                *kind,
+                heightmap_update(state, *kind, y, self.min_y, current, |probe_y| {
+                    self.get_block(x, probe_y, z)
+                }),
+            );
+        }
+        for (kind, value) in updates {
+            heightmap_column_mut(&mut self.heights[chunk], kind)[column] = value;
         }
         true
     }
@@ -151,6 +186,18 @@ pub enum HeightmapKind {
     MotionBlockingNoLeaves,
 }
 
+/// `ChunkStatus.FINAL_HEIGHTMAPS`：`setBlockState` 只更新这四种。
+/// `heightmapsAfter` 由 `ProtoChunk.getPersistedStatus()` 给出，features 阶段是
+/// `ChunkStatus.TERRAIN`，对应 `FINAL_HEIGHTMAPS`。
+///
+/// `ChunkStatus.FINAL_HEIGHTMAPS`: only these four are updated by `setBlockState`.
+const FINAL_HEIGHTMAPS: [HeightmapKind; 4] = [
+    HeightmapKind::WorldSurface,
+    HeightmapKind::OceanFloor,
+    HeightmapKind::MotionBlocking,
+    HeightmapKind::MotionBlockingNoLeaves,
+];
+
 impl HeightmapKind {
     pub fn parse(name: &str) -> Result<Self, String> {
         Ok(match name {
@@ -165,52 +212,118 @@ impl HeightmapKind {
     }
 }
 
-/// 从 terrain 阶段的方块自顶向下扫描出 primed 高度图。
-pub fn prime_heightmaps(blocks: &ChunkBlocks, min_y: i32, height: i32) -> Heightmaps {
-    let _ = height;
-    let mut result = Heightmaps::new(min_y);
-    for column in 0..256 {
-        let mut world_surface = min_y - 1;
-        let mut ocean_floor = min_y - 1;
-        let mut motion = min_y - 1;
-        let mut motion_no_leaves = min_y - 1;
-        for y in (min_y..min_y + blocks.len() as i32).rev() {
-            let state = blocks[(y - min_y) as usize][column];
-            let bits = state_facts(state);
-            if bits & facts::AIR == 0 {
-                world_surface = world_surface.max(y);
-            }
-            if bits & facts::MOTION_BLOCKING != 0 {
-                ocean_floor = ocean_floor.max(y);
-                motion = motion.max(y);
-            } else if bits & facts::CAN_OCCLUDE != 0 {
-                motion = motion.max(y);
-            }
-            if bits & facts::MOTION_BLOCKING_NO_LEAVES != 0 {
-                motion_no_leaves = motion_no_leaves.max(y);
-            }
-        }
-        result.world_surface_wg[column] = world_surface;
-        result.world_surface[column] = world_surface;
-        result.ocean_floor_wg[column] = ocean_floor;
-        result.ocean_floor[column] = ocean_floor;
-        result.motion_blocking[column] = motion;
-        result.motion_blocking_no_leaves[column] = motion_no_leaves;
-    }
-    result
-}
-
-/// `Heightmap.primeHeightmaps` 的 `WORLD_SURFACE_WG` 判定：非空气。
+/// `Heightmap.Types` 的 `isOpaque` 谓词（26.3 字节码）。
+///
+/// - `NOT_AIR` = `!isAir()`（WORLD_SURFACE*）
+/// - `MATERIAL_MOTION_BLOCKING` = `state.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP)`
+///   （OCEAN_FLOOR*）
+/// - `MOTION_BLOCKING` = `state.is(BLOCKS_MOTION_IN_HEIGHTMAP) || !getFluidState().isEmpty()`
+/// - `MOTION_BLOCKING_NO_LEAVES` = `state.is(BLOCKS_MOTION_IN_HEIGHTMAP_NO_LEAVES)
+///   || !getFluidState().isEmpty()`
+///
+/// 导出的 `facts` 位分别对应这些判定；`state_fluid` 的 `fluid` 是流体注册表 ID，
+/// `EMPTY`（0）表示没有流体。
+///
+/// `Heightmap.Types.isOpaque` predicates; the exported `facts` bits and
+/// `state_fluid().fluid` (fluid registry ID, 0 = EMPTY) cover these tests.
 pub fn is_heightmap_opaque(state: u32, kind: HeightmapKind) -> bool {
     let bits = state_facts(state);
+    let has_fluid = state_fluid(state).fluid != registries::fluid::EMPTY;
     match kind {
         HeightmapKind::WorldSurfaceWg | HeightmapKind::WorldSurface => bits & facts::AIR == 0,
         HeightmapKind::OceanFloorWg | HeightmapKind::OceanFloor => {
             bits & facts::MOTION_BLOCKING != 0
         }
-        HeightmapKind::MotionBlocking => {
-            bits & facts::MOTION_BLOCKING != 0 || bits & facts::CAN_OCCLUDE != 0
+        HeightmapKind::MotionBlocking => bits & facts::MOTION_BLOCKING != 0 || has_fluid,
+        HeightmapKind::MotionBlockingNoLeaves => {
+            bits & facts::MOTION_BLOCKING_NO_LEAVES != 0 || has_fluid
         }
-        HeightmapKind::MotionBlockingNoLeaves => bits & facts::MOTION_BLOCKING_NO_LEAVES != 0,
     }
+}
+
+/// 取某个高度图的一列（只读）。
+/// Get one heightmap column (read-only).
+fn heightmap_column(heights: &Heightmaps, kind: HeightmapKind) -> &[i32; 256] {
+    match kind {
+        HeightmapKind::WorldSurfaceWg => &heights.world_surface_wg,
+        HeightmapKind::WorldSurface => &heights.world_surface,
+        HeightmapKind::OceanFloorWg => &heights.ocean_floor_wg,
+        HeightmapKind::OceanFloor => &heights.ocean_floor,
+        HeightmapKind::MotionBlocking => &heights.motion_blocking,
+        HeightmapKind::MotionBlockingNoLeaves => &heights.motion_blocking_no_leaves,
+    }
+}
+
+/// 取某个高度图的一列（可变）。
+/// Get one heightmap column (mutable).
+fn heightmap_column_mut(heights: &mut Heightmaps, kind: HeightmapKind) -> &mut [i32; 256] {
+    match kind {
+        HeightmapKind::WorldSurfaceWg => &mut heights.world_surface_wg,
+        HeightmapKind::WorldSurface => &mut heights.world_surface,
+        HeightmapKind::OceanFloorWg => &mut heights.ocean_floor_wg,
+        HeightmapKind::OceanFloor => &mut heights.ocean_floor,
+        HeightmapKind::MotionBlocking => &mut heights.motion_blocking,
+        HeightmapKind::MotionBlockingNoLeaves => &mut heights.motion_blocking_no_leaves,
+    }
+}
+
+/// `Heightmap.update(localX, localY, localZ, state)`：返回该列新的 `getHeight` 值。
+///
+/// `getFirstAvailable = stored + 1`，`setHeight(h)` 把 data 设为 `h - minY`。
+/// 26.3 字节码：先判 `localY <= firstAvailable - 2` 直接返回；新状态不透明且
+/// `localY >= firstAvailable` 时抬到 `localY`；新状态透明且刚好削掉顶格时向下扫。
+///
+/// `Heightmap.update(...)`: returns the column's new `getHeight` value following
+/// the 26.3 bytecode (raise above current first available, or scan down on removal).
+fn heightmap_update(
+    state: u32,
+    kind: HeightmapKind,
+    local_y: i32,
+    min_y: i32,
+    stored: i32,
+    get_block: impl Fn(i32) -> u32,
+) -> i32 {
+    let first_available = stored + 1;
+    if local_y <= first_available - 2 {
+        return stored;
+    }
+    if is_heightmap_opaque(state, kind) {
+        if local_y >= first_available {
+            return local_y;
+        }
+    } else if first_available - 1 == local_y {
+        for probe in (min_y..local_y).rev() {
+            if is_heightmap_opaque(get_block(probe), kind) {
+                return probe;
+            }
+        }
+        return min_y - 1;
+    }
+    stored
+}
+
+/// 从 terrain 阶段的方块自顶向下扫描出 primed 高度图，逐类型用 `is_heightmap_opaque`。
+/// Scan terrain blocks top-down to prime each heightmap with `is_heightmap_opaque`.
+pub fn prime_heightmaps(blocks: &ChunkBlocks, min_y: i32, height: i32) -> Heightmaps {
+    let _ = height;
+    let mut result = Heightmaps::new(min_y);
+    for column in 0..256 {
+        for kind in [
+            HeightmapKind::WorldSurfaceWg,
+            HeightmapKind::WorldSurface,
+            HeightmapKind::OceanFloorWg,
+            HeightmapKind::OceanFloor,
+            HeightmapKind::MotionBlocking,
+            HeightmapKind::MotionBlockingNoLeaves,
+        ] {
+            for y in (min_y..min_y + blocks.len() as i32).rev() {
+                let state = blocks[(y - min_y) as usize][column];
+                if is_heightmap_opaque(state, kind) {
+                    heightmap_column_mut(&mut result, kind)[column] = y;
+                    break;
+                }
+            }
+        }
+    }
+    result
 }

@@ -344,7 +344,7 @@ impl<'a> Generator<'a> {
         &self,
         input: &crate::feature::FeatureChunks,
         steps_mask: i32,
-        allowed_kinds: Option<&'static [&'static str]>,
+        allowed_kinds: Option<&[String]>,
     ) -> Result<crate::feature::FeatureResult, String> {
         let biomes = BiomeManager::new(self.biomes, self.seed);
         let context = crate::feature::run::FeatureContext {
