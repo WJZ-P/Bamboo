@@ -483,7 +483,8 @@ fn compare(worldgen: &Worldgen, parsed: &Parsed, break_self_test: bool) -> Resul
                 generators.insert(case.seed, Generator::new(worldgen, case.seed)?);
             }
             let generator = &generators[&case.seed];
-            let layers = generator.terrain_with_beardifier(case.x, case.z, stage, Some(&beardifier))?;
+            let layers =
+                generator.terrain_with_beardifier(case.x, case.z, stage, Some(&beardifier))?;
             let flat: Vec<u32> = layers.iter().flatten().copied().collect();
             if flat.len() != snapshot.blocks.len() {
                 push(
@@ -503,7 +504,9 @@ fn compare(worldgen: &Worldgen, parsed: &Parsed, break_self_test: bool) -> Resul
                 let Some(&official) = states.get(official_index as usize) else {
                     push(
                         &mut mismatches,
-                        format!("case {id} {stage_name}[{index}]: palette index {official_index} out of range"),
+                        format!(
+                            "case {id} {stage_name}[{index}]: palette index {official_index} out of range"
+                        ),
                     );
                     continue;
                 };

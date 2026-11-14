@@ -300,8 +300,8 @@ fn get_beard_contribution(dx: i32, dy: i32, dz: i32, y_to_ground: i32) -> f32 {
         let dxf = dx as f32;
         let dzf = dz as f32;
         let distance_sqr = dxf * dxf + dy_with_offset * dy_with_offset + dzf * dzf;
-        let value = -dy_with_offset * (fast_inv_sqrt(f64::from(distance_sqr / 2.0_f32)) as f32)
-            / 2.0_f32;
+        let value =
+            -dy_with_offset * (fast_inv_sqrt(f64::from(distance_sqr / 2.0_f32)) as f32) / 2.0_f32;
         value * beard_kernel()[(zi * 24 * 24 + xi * 24 + yi) as usize]
     } else {
         0.0_f32
@@ -394,7 +394,11 @@ impl Beardifier {
     /// structure starts intersecting the chunk with `terrainAdaptation() != NONE`; it applies
     /// `isCloseToChunk(12)`, RIGID projection, the `chunk±12` junction filter, unions the boxes
     /// and `inflatedBy(24)`, all in the official order.
-    pub fn for_structures_in_chunk(chunk_x: i32, chunk_z: i32, starts: &[StructureStartInput]) -> Self {
+    pub fn for_structures_in_chunk(
+        chunk_x: i32,
+        chunk_z: i32,
+        starts: &[StructureStartInput],
+    ) -> Self {
         let min_x = chunk_x * 16;
         let min_z = chunk_z * 16;
         let mut rigids: Vec<Rigid> = Vec::new();
@@ -463,9 +467,18 @@ impl Beardifier {
         if !affected.intersects_volume(volume) {
             return;
         }
-        let min_x = java_floor_div((affected.min_x.wrapping_sub(volume.min_x)).max(0), volume.step_x);
-        let min_y = java_floor_div((affected.min_y.wrapping_sub(volume.min_y)).max(0), volume.step_y);
-        let min_z = java_floor_div((affected.min_z.wrapping_sub(volume.min_z)).max(0), volume.step_z);
+        let min_x = java_floor_div(
+            (affected.min_x.wrapping_sub(volume.min_x)).max(0),
+            volume.step_x,
+        );
+        let min_y = java_floor_div(
+            (affected.min_y.wrapping_sub(volume.min_y)).max(0),
+            volume.step_y,
+        );
+        let min_z = java_floor_div(
+            (affected.min_z.wrapping_sub(volume.min_z)).max(0),
+            volume.step_z,
+        );
         let max_x = (volume.size_x - 1).min(java_floor_div(
             affected.max_x.wrapping_sub(volume.min_x),
             volume.step_x,
@@ -514,11 +527,9 @@ impl Beardifier {
             };
             noise += match rigid.terrain_adjustment {
                 TerrainAdjustment::None => 0.0_f32,
-                TerrainAdjustment::Bury => get_bury_contribution(
-                    dx as f32,
-                    dy as f32 / 2.0_f32,
-                    dz as f32,
-                ),
+                TerrainAdjustment::Bury => {
+                    get_bury_contribution(dx as f32, dy as f32 / 2.0_f32, dz as f32)
+                }
                 TerrainAdjustment::BeardThin | TerrainAdjustment::BeardBox => {
                     get_beard_contribution(dx, dy, dz, dy_to_ground) * 0.8_f32
                 }
@@ -574,17 +585,16 @@ mod tests {
             0,
             &[start(
                 TerrainAdjustment::BeardThin,
-                vec![piece(
-                    [2, 60, 2, 13, 70, 13],
-                    7,
-                    PieceKind::Plain,
-                )],
+                vec![piece([2, 60, 2, 13, 70, 13], 7, PieceKind::Plain)],
             )],
         );
         assert_eq!(beard.rigids().len(), 1);
         // `forStructuresInChunk` 对非 pool 结构件固定用 groundLevelDelta = 0。
         assert_eq!(beard.rigids()[0].ground_level_delta, 0);
-        assert_eq!(beard.rigids()[0].terrain_adjustment, TerrainAdjustment::BeardThin);
+        assert_eq!(
+            beard.rigids()[0].terrain_adjustment,
+            TerrainAdjustment::BeardThin
+        );
         assert_eq!(beard.junctions().len(), 0);
         assert_eq!(
             beard.affected_box(),
@@ -603,11 +613,8 @@ mod tests {
     fn a_piece_more_than_twelve_blocks_away_is_excluded() {
         // `isCloseToChunk(12)` 只比 XZ：`maxX < minBlockX - 12` 时不交。
         let far = piece([40, 60, 0, 50, 70, 10], 0, PieceKind::Plain);
-        let beard = Beardifier::for_structures_in_chunk(
-            0,
-            0,
-            &[start(TerrainAdjustment::Bury, vec![far])],
-        );
+        let beard =
+            Beardifier::for_structures_in_chunk(0, 0, &[start(TerrainAdjustment::Bury, vec![far])]);
         assert_eq!(beard.affected_box(), None);
         assert_eq!(beard.rigids().len(), 0);
     }
