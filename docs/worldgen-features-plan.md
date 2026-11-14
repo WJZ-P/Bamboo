@@ -615,8 +615,9 @@ Java 侧按白名单判定：中心 3×3 涉及的**所有** step 的 placed fea
 * Java 对拍：`--through features` 用 `WorldGenLevel` 动态代理 + 9 个跑到 CARVERS 的
   `ProtoChunk`，输出 9 宫格。`--steps 6` 和 `--ore-only` 是过渡期诊断开关：
   前者把没选中的 step 在每群系的 `BiomeGenerationSettings.features()` 里换成空
-  `HolderSet`，后者按 `Feature.DIRECT_CODEC` 的类型 ID 只保留 `minecraft:ore`；
-  两者都不动 `featuresPerStep`，所以全局 index 和 `setFeatureSeed` 参数与官方一致。
+  `HolderSet`，后者（`--ore-only`，现已泛化成 `--types ID,ID`）按 `Feature.DIRECT_CODEC`
+  的类型 ID 只保留白名单里的类型；两者都不动 `featuresPerStep`，所以全局 index 和
+  `setFeatureSeed` 参数与官方一致。
 * Rust：`feature/` 模块（注册表、provider、state、rule_test、world、placement、
   ores、run），`Generator::features()` 入口，`chunkgen.rs` 逐方块比 9 宫格。
   `WorldgenRandom` 补齐了 `BitRandomSource` 默认实现的 `nextInt` / `nextFloat` /
@@ -716,18 +717,64 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 `Context::uncached()` 组合从未单独对拍过**。优先核对这两条 climate sampler
 构造路径是否逐位一致，以及 `interpolated` 在 uncached 单点路径下的行为
 （`docs/worldgen.md` 提到它在 1×1×1 上不是纯函数）。
+### 本轮（cb-wg-feat-a）追加
+
+`--ore-only` 泛化成 `--types ID,ID`（Java 侧 `ChunkgenOracle.java` 和 Rust 侧
+`chunkgen.rs` 两边对齐，`features_per_step` 的全局 index、`setFeatureSeed` 参数不变）；
+`Generator::features` / `FeatureContext` 的过滤参数从 `&'static [&'static str]` 改成
+`Option<&[String]>`。新增 `feature/dispatch.rs` 做类型分派，`run.rs` 把写死的
+`minecraft:ore` 改成按类型调用已移植模块。新增 `predicates.rs`（`BlockPredicate`）、
+`state_provider.rs`（`BlockStateProvider`）、`disk.rs`、`underwater_magma.rs`、
+`spring.rs`；`placement.rs` 加 `block_predicate_filter` /
+`surface_relative_threshold_filter`，`provider.rs` 加 `very_biased_to_bottom`，
+`world.rs` 的 `set_block_state` 照 `Heightmap.update` 增量更新四种 `FINAL_HEIGHTMAPS`。
+5.2 的分类表已单独提交（`70b5db1`）。
+
+每个新加的 `--types` 比较都先故意写错方块、确认报出 `mismatches` 再改回：disk 写
+`STONE` 报 160 处；spring 写 `STONE` 报 1 处；underwater_magma 写 `STONE` 在 24 / 72
+中心下分别报 11 / 36 / 51 处；改回后全部 0 不一致。
+
+| 命令 | 结果 |
+|---|---|
+| `chunkgen java --through features --steps 6`（step 6 全 34 个 placed feature） | `--seeds 1 --chunks 1` / `2×4 --salt 1` / `3×8 --salt 7` / `6×12 --salt 1` 均 **0 不一致** |
+| `--types minecraft:disk,minecraft:underwater_magma,minecraft:spring_feature`（跨全部 11 步） | `--seeds 2 --chunks 4` / `3×8 --salt 7` / `6×12 --salt 1`（72 中心 / 63700992 方块）均 **0 不一致** |
+| `--types minecraft:disk` / `minecraft:spring_feature` / `minecraft:underwater_magma`（分别跑） | 多种子 / 区块 **0 不一致**（magma 跑到 72 中心 / 63700992 方块） |
+| `--steps 6 --ore-only`（回归） | `--seeds 2 --chunks 4 --salt 1` **0 不一致** |
+| `--through carvers`（旧阶段回归） | `--seeds 2 --chunks 6 --salt 1` **0 不一致** |
+
 ### 还没做
 
-* `DiskFeature` / `UnderwaterMagmaFeature` / `surface_relative_threshold_filter` /
-  `block_predicate_filter`：step 6 里非 ore 的 5 个 placed feature 目前标
-  `unsupported`，完整 11 步对拍会跳过这些区块。
-* 其它 10 个 step（湖、晶洞、怪物房、花草、积雪等）全部标 `unsupported`。
-* `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按
-  「已移植集合」输出 `skipped`，`--ore-only` 是手工过滤。
+**已完成**（见上「本轮追加」）：step 6 里非 ore 的 5 个 placed feature
+（`disk` 4 + `underwater_magma` 1）和 step 8 的 3 个 `spring_feature` 已按官方 26.3
+移植；`block_predicate_filter` / `surface_relative_threshold_filter` 两个修饰器、
+`BlockPredicate` / `BlockStateProvider`（simple / rule_based）、`very_biased_to_bottom`
+高度提供者、`Heightmap.update` 增量更新均已补齐。这些类型在 `--steps 6` 全量、
+以及跨全部 11 步的 `--types` 白名单下都逐方块 0 不一致。
+
+**还没做**（按 5.2 的分类，仍标 `unsupported` / `skipped`）：
+
+* step 1/2/3/4/7/10 的其余非植被类型：`lake`、`geode`、`iceberg`、`large_dripstone`、
+  `block_blob`（forest_rock）、`monster_room`、`fossil`、`spike`（ice_spike）、
+  `disk`（ice_patch）、`overlay`（desert_well）、`blue_ice`、`speleothem_cluster`、
+  `freeze_top_layer`。
+* 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`monster_room` 要刷怪笼 /
+  战利品表 / 方块实体；`geode` / `lake` / `iceberg` / `large_dripstone` / `block_blob`
+  是较大的独立 feature；`freeze_top_layer` 的 `Biome.shouldFreeze` / `shouldSnow` 走
+  `SnowLayerBlock.canSurvive` 的形状判定和 `getBrightness`，且和植被修饰器共用
+  `isInsideBuildHeight`——Java 对拍代理（`ChunkgenOracle.java`）目前没实现
+  `isInsideBuildHeight` / `getBrightness`，完整 11 步会抛 `UnsupportedOperationException`，
+  这些路径无法逐位比对。按项目「不发明行为」的原则，宁可保留 `skipped` 也不塞未经验证的
+  实现；完整 11 步代理补齐后可用 `--types` 逐个放开再对拍。
+* 植被类型（树、花、草、patch、selector / sequence 容器，见 5.2）由 `cb-wg-feat-b`
+  负责，本轮不做。
+* `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按「已移植集合」
+  直接输出 `skipped`，`--types` 是手工白名单。
 * 接进 Director（5.3.1 的邻居快照 + 增量合并）还没做。
-* 高度图的增量更新：矿石走 `BulkSectionAccess` 直接写 `LevelChunkSection`，
-  **绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是 primed 后固定的；
-  以后接树/湖时要照 `Heightmap.update` 补上。
+* 方块实体 / POI / 后期处理位置表：Java 侧 `ProtoChunk` 会记，但 `FeatureResult` 只带
+  方块；本轮已移植的 disk / magma / spring 都不产生方块实体，对拍不需要，接树 /
+  怪物房 / 湖时再补输出和比较。
+* 高度图增量更新已按 `Heightmap.update` 在 `set_block_state` 里补齐；矿石走
+  `BulkSectionAccess` 绕过 `setBlockState`，仍用 primed 后固定的高度图（照官方）。
 
 ## 5.2 `features_per_step` 全部 placed feature 的分类（非植被 / 植被）
 
