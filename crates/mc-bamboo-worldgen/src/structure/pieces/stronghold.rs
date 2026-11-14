@@ -182,19 +182,20 @@ impl SP {
     }
 }
 
-/// `BoundingBox.orientBox` 的水平四方向版。
+/// `BoundingBox.orientBox` 的水平四方向版。三个坐标组各用一个元组，
+/// 避免函数参数过多（clippy too_many_arguments）。
+///
+/// Horizontal `BoundingBox.orientBox`. Coordinate triples are grouped into tuples
+/// to stay under clippy's argument-count limit.
 fn orient_box(
-    foot_x: i32,
-    foot_y: i32,
-    foot_z: i32,
-    off_x: i32,
-    off_y: i32,
-    off_z: i32,
-    width: i32,
-    height: i32,
-    depth: i32,
+    foot: (i32, i32, i32),
+    off: (i32, i32, i32),
+    dims: (i32, i32, i32),
     dir: HDir,
 ) -> Box {
+    let (foot_x, foot_y, foot_z) = foot;
+    let (off_x, off_y, off_z) = off;
+    let (width, height, depth) = dims;
     match dir {
         HDir::South => new_box(
             foot_x + off_x,
@@ -262,30 +263,26 @@ fn create_piece(
     kind: Kind,
     boxes: &[Box],
     random: &WorldgenRandom,
-    foot_x: i32,
-    foot_y: i32,
-    foot_z: i32,
+    foot: (i32, i32, i32),
     dir: HDir,
     gd: i32,
 ) -> Option<SP> {
     let collides = |b: &Box| boxes.iter().any(|e| intersects(e, b));
     let mut sp = SP::new(kind, [0; 6], gd, dir);
     let bb = match kind {
-        Kind::Straight => orient_box(foot_x, foot_y, foot_z, -1, -1, 0, 5, 5, 7, dir),
-        Kind::PrisonHall => orient_box(foot_x, foot_y, foot_z, -1, -1, 0, 9, 5, 11, dir),
-        Kind::LeftTurn | Kind::RightTurn => {
-            orient_box(foot_x, foot_y, foot_z, -1, -1, 0, 5, 5, 5, dir)
-        }
-        Kind::RoomCrossing => orient_box(foot_x, foot_y, foot_z, -4, -1, 0, 11, 7, 11, dir),
-        Kind::StraightStairsDown => orient_box(foot_x, foot_y, foot_z, -1, -7, 0, 5, 11, 8, dir),
-        Kind::StairsDown => orient_box(foot_x, foot_y, foot_z, -1, -7, 0, 5, 11, 5, dir),
-        Kind::FiveCrossing => orient_box(foot_x, foot_y, foot_z, -4, -3, 0, 10, 9, 11, dir),
-        Kind::ChestCorridor => orient_box(foot_x, foot_y, foot_z, -1, -1, 0, 5, 5, 7, dir),
-        Kind::PortalRoom => orient_box(foot_x, foot_y, foot_z, -4, -1, 0, 11, 8, 16, dir),
+        Kind::Straight => orient_box(foot, (-1, -1, 0), (5, 5, 7), dir),
+        Kind::PrisonHall => orient_box(foot, (-1, -1, 0), (9, 5, 11), dir),
+        Kind::LeftTurn | Kind::RightTurn => orient_box(foot, (-1, -1, 0), (5, 5, 5), dir),
+        Kind::RoomCrossing => orient_box(foot, (-4, -1, 0), (11, 7, 11), dir),
+        Kind::StraightStairsDown => orient_box(foot, (-1, -7, 0), (5, 11, 8), dir),
+        Kind::StairsDown => orient_box(foot, (-1, -7, 0), (5, 11, 5), dir),
+        Kind::FiveCrossing => orient_box(foot, (-4, -3, 0), (10, 9, 11), dir),
+        Kind::ChestCorridor => orient_box(foot, (-1, -1, 0), (5, 5, 7), dir),
+        Kind::PortalRoom => orient_box(foot, (-4, -1, 0), (11, 8, 16), dir),
         Kind::Library => {
-            let tall = orient_box(foot_x, foot_y, foot_z, -4, -1, 0, 14, 11, 15, dir);
+            let tall = orient_box(foot, (-4, -1, 0), (14, 11, 15), dir);
             if !is_ok_box(&tall) || collides(&tall) {
-                let short = orient_box(foot_x, foot_y, foot_z, -4, -1, 0, 14, 6, 15, dir);
+                let short = orient_box(foot, (-4, -1, 0), (14, 6, 15), dir);
                 if !is_ok_box(&short) || collides(&short) {
                     return None;
                 }
@@ -401,25 +398,14 @@ impl Layout {
 }
 
 /// `FillerCorridor.findPieceBox`：找出能塞下的填充走廊盒；`random` 参数官方未用。
-fn find_filler_box(boxes: &[Box], foot_x: i32, foot_y: i32, foot_z: i32, dir: HDir) -> Option<Box> {
-    let first = orient_box(foot_x, foot_y, foot_z, -1, -1, 0, 5, 5, 4, dir);
+fn find_filler_box(boxes: &[Box], foot: (i32, i32, i32), dir: HDir) -> Option<Box> {
+    let first = orient_box(foot, (-1, -1, 0), (5, 5, 4), dir);
     let collision = boxes.iter().find(|b| intersects(b, &first)).copied()?;
     if collision[1] == first[1] {
         for depth in (1..=2).rev() {
-            let b = orient_box(foot_x, foot_y, foot_z, -1, -1, 0, 5, 5, depth, dir);
+            let b = orient_box(foot, (-1, -1, 0), (5, 5, depth), dir);
             if !intersects(&collision, &b) {
-                return Some(orient_box(
-                    foot_x,
-                    foot_y,
-                    foot_z,
-                    -1,
-                    -1,
-                    0,
-                    5,
-                    5,
-                    depth + 1,
-                    dir,
-                ));
+                return Some(orient_box(foot, (-1, -1, 0), (5, 5, depth + 1), dir));
             }
         }
     }
@@ -440,13 +426,15 @@ fn generate_piece_from_small_door(
         return None;
     }
     let boxes: Vec<Box> = layout.builder.pieces.iter().map(|p| p.bb).collect();
+    let foot = (foot_x, foot_y, foot_z);
 
     // imposedPiece 优先尝试，且无论成功与否都清空。
-    if let Some(imposed) = layout.imposed.take() {
-        if let Some(sp) = create_piece(imposed, &boxes, random, foot_x, foot_y, foot_z, dir, depth)
-        {
-            return Some(sp);
-        }
+    if let Some(sp) = layout
+        .imposed
+        .take()
+        .and_then(|imposed| create_piece(imposed, &boxes, random, foot, dir, depth))
+    {
+        return Some(sp);
     }
 
     for _ in 0..5 {
@@ -460,16 +448,7 @@ fn generate_piece_from_small_door(
                 {
                     break;
                 }
-                let sp = create_piece(
-                    layout.current[i].kind,
-                    &boxes,
-                    random,
-                    foot_x,
-                    foot_y,
-                    foot_z,
-                    dir,
-                    depth,
-                );
+                let sp = create_piece(layout.current[i].kind, &boxes, random, foot, dir, depth);
                 if let Some(sp) = sp {
                     layout.current[i].place_count += 1;
                     layout.previous = Some(layout.current[i].id);
@@ -484,7 +463,7 @@ fn generate_piece_from_small_door(
     }
 
     // 5 次失败后的 FillerCorridor 兜底。
-    let bb = find_filler_box(&boxes, foot_x, foot_y, foot_z, dir)?;
+    let bb = find_filler_box(&boxes, foot, dir)?;
     if bb[1] <= 1 {
         return None;
     }

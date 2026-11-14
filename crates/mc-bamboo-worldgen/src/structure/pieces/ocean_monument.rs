@@ -307,8 +307,7 @@ fn generate_room_graph(rooms: &mut [RoomDef], random: &WorldgenRandom) -> (Vec<i
                 if !rooms[pos as usize].present {
                     continue;
                 }
-                for d3 in 0..6 {
-                    let (sx, sy, sz) = STEPS[d3];
+                for (d3, &(sx, sy, sz)) in STEPS.iter().enumerate() {
                     let (nx, ny, nz) = (x + sx, y + sy, z + sz);
                     if (0..5).contains(&nx) && (0..5).contains(&nz) && (0..3).contains(&ny) {
                         let np = room_index(nx, ny, nz);
