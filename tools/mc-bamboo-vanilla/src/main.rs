@@ -106,9 +106,9 @@ mod storage_oracle;
 #[cfg(feature = "oracle")]
 mod structure_rings;
 #[cfg(feature = "oracle")]
-mod structures;
-#[cfg(feature = "oracle")]
 mod structure_validity;
+#[cfg(feature = "oracle")]
+mod structures;
 #[cfg(feature = "oracle")]
 mod ticket_oracle;
 #[cfg(feature = "oracle")]
@@ -152,8 +152,7 @@ const STRUCTURES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePlacement
 #[cfg(feature = "oracle")]
 const STRUCTURE_RINGS_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureRingsOracle.java";
 #[cfg(feature = "oracle")]
-const STRUCTURE_VALIDITY_SOURCE: &str =
-    "tools/mc-bamboo-vanilla/java/StructureValidityOracle.java";
+const STRUCTURE_VALIDITY_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureValidityOracle.java";
 #[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 #[cfg(feature = "oracle")]

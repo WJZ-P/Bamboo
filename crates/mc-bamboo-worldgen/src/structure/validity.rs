@@ -86,7 +86,8 @@ pub fn column_has_valid_biome(
     let (center_x, center_z) = chunk_center(chunk_x, chunk_z);
     let min_quart_y = quart(min_y - 1);
     let max_quart_y = quart(min_y + height - 1);
-    let names = generator.column_biome_names(quart(center_x), quart(center_z), min_quart_y, max_quart_y)?;
+    let names =
+        generator.column_biome_names(quart(center_x), quart(center_z), min_quart_y, max_quart_y)?;
     Ok(names.iter().any(|name| allowed.contains(name)))
 }
 
@@ -181,8 +182,7 @@ pub fn find_valid_generation_point(
     let (center_x, center_z) = chunk_center(chunk.0, chunk.1);
     let column = column_has_valid_biome(generator, chunk, allowed, dims)?;
     let stub_y = generator.first_occupied_height(center_x, center_z)?;
-    let start_biome_valid =
-        is_valid_biome_at(resolver, center_x, stub_y, center_z, allowed);
+    let start_biome_valid = is_valid_biome_at(resolver, center_x, stub_y, center_z, allowed);
     Ok(GenerationPoint {
         stub: (center_x, stub_y, center_z),
         column_has_valid_biome: column,

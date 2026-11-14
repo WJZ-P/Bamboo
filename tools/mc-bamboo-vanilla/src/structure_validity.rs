@@ -158,9 +158,7 @@ fn parse_output(stdout: &str) -> Result<OracleOutput, String> {
                 biomes.insert(id, names);
             }
             "H" | "Q" | "S" | "D" => {
-                let seed: i64 = fields[1]
-                    .parse()
-                    .map_err(|_| format!("bad seed: {line}"))?;
+                let seed: i64 = fields[1].parse().map_err(|_| format!("bad seed: {line}"))?;
                 let cx = parse_i32(&fields, 2, line)?;
                 let cz = parse_i32(&fields, 3, line)?;
                 let key = (seed, cx, cz);
@@ -215,11 +213,7 @@ fn parse_output(stdout: &str) -> Result<OracleOutput, String> {
     })
 }
 
-fn compare(
-    sets: &StructureSets,
-    structures: &Structures,
-    stdout: &str,
-) -> Result<(), String> {
+fn compare(sets: &StructureSets, structures: &Structures, stdout: &str) -> Result<(), String> {
     let output = parse_output(stdout)?;
     let mut mismatches: Vec<String> = Vec::new();
     let mut total = 0usize;
@@ -244,7 +238,10 @@ fn compare(
         biome_cmp += 1;
         total += 1;
         if ours != *names {
-            push(&mut mismatches, format!("BIOME {id}: ours {ours:?} vs {names:?}"));
+            push(
+                &mut mismatches,
+                format!("BIOME {id}: ours {ours:?} vs {names:?}"),
+            );
         }
     }
 
@@ -284,17 +281,15 @@ fn compare(
                 generator.first_occupied_height(min_x + 16, min_z)?,
                 generator.first_occupied_height(min_x + 16, min_z + 16)?,
             ];
-            for i in 0..5 {
+            for (i, &ours) in ours_heights.iter().enumerate() {
                 height_cmp += 1;
                 total += 1;
-                heights_seen.insert(data.heights[i]);
-                if ours_heights[i] != data.heights[i] {
+                let expected = data.heights[i];
+                heights_seen.insert(expected);
+                if ours != expected {
                     push(
                         &mut mismatches,
-                        format!(
-                            "H ({seed},{cx},{cz})[{i}]: ours {} vs {}",
-                            ours_heights[i], data.heights[i]
-                        ),
+                        format!("H ({seed},{cx},{cz})[{i}]: ours {ours} vs {expected}"),
                     );
                 }
             }
@@ -307,8 +302,7 @@ fn compare(
                     .get(id)
                     .ok_or_else(|| format!("Rust is missing structure {id}"))?;
                 let allowed: HashSet<String> = allowed_biome_names(def)?;
-                let col =
-                    column_has_valid_biome(&generator, (cx, cz), &allowed, (min_y, height))?;
+                let col = column_has_valid_biome(&generator, (cx, cz), &allowed, (min_y, height))?;
                 let pv = is_valid_biome_at(&mut resolver, center_x, stub_y, center_z, &allowed);
                 let (jcol, jpv) = *data
                     .gates
@@ -373,7 +367,7 @@ fn compare(
             // D: composed "selected structure + valid + start".
             let selected = select_start(
                 &plans,
-                &structures,
+                structures,
                 &generator,
                 &mut resolver,
                 (cx, cz),
