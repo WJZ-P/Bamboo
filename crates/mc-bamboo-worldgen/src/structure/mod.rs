@@ -28,6 +28,7 @@ pub mod single;
 pub mod start;
 pub mod start_point;
 pub mod template;
+pub mod templated;
 pub mod validity;
 
 use std::collections::{HashMap, HashSet};
