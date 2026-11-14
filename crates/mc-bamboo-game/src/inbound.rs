@@ -84,6 +84,11 @@ pub enum Inbound {
     },
     /// `/whitelist reload` 从连接层读回来的白名单。
     WhitelistReload(crate::admin::WhitelistReload),
+    /// 控制台输入线程从 stdin 读到的一行命令，世界线程按服务器控制台来源执行。
+    ///
+    /// A console line read from stdin by the input thread, executed by the world thread
+    /// with the server-console source.
+    ConsoleCommand(String),
     /// 踢出所有玩家并结束世界线程。
     Shutdown,
 }

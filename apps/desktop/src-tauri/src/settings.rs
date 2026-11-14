@@ -244,6 +244,11 @@ impl ServerSettings {
                 reclaims: self.reclaims_per_tick as usize,
             },
             world_gen: self.world_gen.clone(),
+            // 桌面端有 GUI 控制台，不读进程 stdin；广播默认按官方 true。
+            // The desktop has a GUI console, so it does not read process stdin;
+            // the broadcast flag keeps the official default (true).
+            broadcast_console_to_ops: true,
+            console_enabled: false,
         }
     }
 

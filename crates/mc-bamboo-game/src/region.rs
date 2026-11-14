@@ -238,6 +238,13 @@ pub(crate) struct Region {
     pub(crate) send_command_feedback: bool,
     /// `GameRules.LOG_ADMIN_COMMANDS`。
     pub(crate) log_admin_commands: bool,
+    /// 官方 `server.properties` 的 `broadcast-console-to-ops`：控制台命令反馈要不要
+    /// 广播给在线 OP。`WorldConfig` 启动时带进来，和游戏规则分开、运行中不变。
+    ///
+    /// Official `server.properties` `broadcast-console-to-ops`: whether console command
+    /// feedback is broadcast to online ops. Set from `WorldConfig` at startup; separate
+    /// from game rules and fixed for the run.
+    pub(crate) broadcast_console_to_ops: bool,
     /// `GameRules.COMMAND_BLOCKS_WORK`。
     pub(crate) command_blocks_work: bool,
     /// 命令方块里保存的命令。不执行，也不存档。
@@ -379,6 +386,7 @@ impl Region {
             world_border: WorldBorder::default(),
             send_command_feedback: rules.bool(mc_bamboo_data::gamerules::SEND_COMMAND_FEEDBACK),
             log_admin_commands: rules.bool(mc_bamboo_data::gamerules::LOG_ADMIN_COMMANDS),
+            broadcast_console_to_ops: true,
             command_blocks_work: rules.bool(mc_bamboo_data::gamerules::COMMAND_BLOCKS_WORK),
             command_blocks: BTreeMap::new(),
             admin_changes: crate::admin::AdminChanges::default(),
