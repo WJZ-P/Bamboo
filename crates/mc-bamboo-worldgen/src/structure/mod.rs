@@ -22,6 +22,7 @@
 pub mod pieces;
 pub mod place;
 pub mod placement;
+pub mod post_process;
 pub mod registry;
 pub mod rings;
 pub mod save;
