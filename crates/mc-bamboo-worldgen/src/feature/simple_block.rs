@@ -51,7 +51,7 @@ impl SimpleBlockFeature {
     /// One candidate of official `SimpleBlockFeature.place`: `getOptionalState` (typed
     /// providers consume random), then `canSurvive`, then dispatch by block class.
     pub fn place(&self, world: &mut FeatureWorld<'_>, random: &WorldgenRandom, pos: Pos) -> bool {
-        let Some(state) = self.provider.get_state(random) else {
+        let Some(state) = self.provider.get_state(random, pos) else {
             return false;
         };
         if !survival::can_survive(state, world, pos) {
@@ -111,11 +111,16 @@ mod tests {
             "type": "minecraft:simple_block",
         });
         assert!(SimpleBlockFeature::parse(&weighted).is_some());
-        // holder 字符串引用未导出的注册表，也不支持。
-        // A holder string references an unexported registry; unsupported.
+        // flower holder 引用（noise_threshold provider）现在支持。
+        // The flower holder reference (noise_threshold provider) is now supported.
         let holder: Value =
             json!({"to_place": "minecraft:flower_plain", "type": "minecraft:simple_block"});
-        assert!(SimpleBlockFeature::parse(&holder).is_none());
+        assert!(SimpleBlockFeature::parse(&holder).is_some());
+        // rule_based provider 仍未移植，仍标 unsupported。
+        // The rule_based provider stays unported / unsupported.
+        let unported: Value =
+            json!({"to_place": "minecraft:soil_beneath_tree", "type": "minecraft:simple_block"});
+        assert!(SimpleBlockFeature::parse(&unported).is_none());
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod block_predicate;
 pub mod composition;
 pub mod dispatch;
 pub mod heightmap;
+pub mod noise_state;
 pub mod ores;
 pub mod placement;
 pub mod provider;

@@ -1415,6 +1415,8 @@ public final class Extractor {
         worldgen.add("feature", encodeRegistry(registries, ops, Registries.FEATURE, Feature.DIRECT_CODEC));
         worldgen.add("placed_feature",
                 encodeRegistry(registries, ops, Registries.PLACED_FEATURE, PlacedFeature.DIRECT_CODEC));
+        worldgen.add("block_state_provider",
+                encodeRegistry(registries, ops, Registries.BLOCK_STATE_PROVIDER, BlockStateProvider.DIRECT_CODEC));
         worldgen.add("biome_features", biomeFeatures(registries));
         worldgen.add("features_per_step", featuresPerStep(registries));
         worldgen.add("multi_noise_presets", multiNoisePresets(registries));

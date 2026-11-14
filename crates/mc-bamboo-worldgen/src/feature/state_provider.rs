@@ -1,22 +1,22 @@
-//! `BlockStateProvider`：`SimpleBlockFeature.to_place` 的三种已移植形态。
+//! `BlockStateProvider`：`SimpleBlockFeature.to_place` 的已移植形态。
 //!
-//! 26.3 的 `to_place` 是 `Holder<BlockStateProvider>`。内联 bare state 等价于
-//! `SimpleStateProvider`（`getState` 不消费随机数）；typed provider 里 `weighted` 用
-//! `WeightedList.getRandomOrThrow`，`randomized_int` 先采样 source 再用 `IntProvider.sample`
-//! 改一个整数属性。holder 字符串引用的是未导出的 `BLOCK_STATE_PROVIDER` 注册表，暂不支持。
-//! 其余 typed provider（noise / dual_noise / noise_threshold / rotated）也暂不支持。
+//! 内联 bare state 等价于 `SimpleStateProvider`（不消费随机数）；typed provider 里
+//! `weighted` 用 `WeightedList.getRandomOrThrow`、`randomized_int` 用 `IntProvider.sample`
+//! 改整数属性、`noise` / `dual_noise` / `noise_threshold` 用 `NormalNoise` 按坐标选。
+//! 字符串是 `BLOCK_STATE_PROVIDER` 注册表引用（生成器已导出），解析时展开成对应配置。
+//! `rotated` / `rule_based` 暂不支持。
 //!
-//! `BlockStateProvider` shapes ported for `SimpleBlockFeature.to_place`. An inline bare state
-//! is `SimpleStateProvider` (no random consumed); `weighted` uses
-//! `WeightedList.getRandomOrThrow`, `randomized_int` samples its source then overwrites an
-//! integer property with `IntProvider.sample`. Holder references and other typed providers
-//! (noise / dual_noise / noise_threshold / rotated) stay unsupported.
+//! Ported `BlockStateProvider` shapes for `SimpleBlockFeature.to_place`: inline bare state,
+//! weighted / randomized_int / noise / dual_noise / noise_threshold typed providers, and
+//! holder references into the exported `BLOCK_STATE_PROVIDER` registry. `rotated` and
+//! `rule_based` stay unsupported.
 
 use serde_json::Value;
 
 use crate::random::WorldgenRandom;
 
 use super::{
+    noise_state::{NoiseStateProvider, Pos, holder_registry},
     provider::IntProvider,
     state::{parse_state, with_property},
 };
@@ -36,6 +36,8 @@ pub enum StateProvider {
         property: String,
         values: IntProvider,
     },
+    /// `NoiseProvider` / `DualNoiseProvider` / `NoiseThresholdProvider`（按坐标用噪声）。
+    Noise(NoiseStateProvider),
 }
 
 impl StateProvider {
@@ -44,9 +46,9 @@ impl StateProvider {
     /// Parse `to_place`; return `None` for unported shapes.
     pub fn parse(value: &Value) -> Option<Self> {
         match value {
-            // 字符串是 `Holder<BlockStateProvider>` 注册表引用（未导出），不支持。
-            // A string is a holder reference to the unexported registry: unsupported.
-            Value::String(_) => None,
+            // 字符串展开成 `BLOCK_STATE_PROVIDER` 注册表里对应的配置。
+            // A string expands to its `BLOCK_STATE_PROVIDER` registry entry.
+            Value::String(name) => Self::parse(holder_registry().get(name.as_str())?),
             Value::Object(object) => {
                 let Some(kind) = object.get("type").and_then(Value::as_str) else {
                     return Some(Self::Simple(parse_state(value).ok()?));
@@ -70,6 +72,9 @@ impl StateProvider {
                         property: object.get("property")?.as_str()?.to_owned(),
                         values: IntProvider::parse(object.get("values")?).ok()?,
                     }),
+                    "minecraft:noise" | "minecraft:dual_noise" | "minecraft:noise_threshold" => {
+                        Some(Self::Noise(NoiseStateProvider::parse(value)?))
+                    }
                     _ => None,
                 }
             }
@@ -86,13 +91,14 @@ impl StateProvider {
             Self::Simple(state) => vec![*state],
             Self::Weighted { entries, .. } => entries.iter().map(|(_, state)| *state).collect(),
             Self::RandomizedInt { source, .. } => source.possible_states(),
+            Self::Noise(provider) => provider.possible_states(),
         }
     }
 
     /// 官方 `BlockStateProvider.getState(level, random, pos)`，返回状态 ID。
     ///
     /// Official `BlockStateProvider.getState(level, random, pos)`; returns a state ID.
-    pub fn get_state(&self, random: &WorldgenRandom) -> Option<u32> {
+    pub fn get_state(&self, random: &WorldgenRandom, pos: Pos) -> Option<u32> {
         match self {
             Self::Simple(state) => Some(*state),
             // `WeightedList.getRandomOrThrow`：nextInt(totalWeight) + 累计权重轮盘。
@@ -117,10 +123,11 @@ impl StateProvider {
                 property,
                 values,
             } => {
-                let base = source.get_state(random)?;
+                let base = source.get_state(random, pos)?;
                 let value = values.sample(random);
                 with_property(base, property, &value.to_string())
             }
+            Self::Noise(provider) => provider.get_state(random, pos),
         }
     }
 }
@@ -137,8 +144,17 @@ mod tests {
             StateProvider::parse(&bare),
             Some(StateProvider::Simple(_))
         ));
+        // flower holder 展开成 noise_threshold provider，现在支持。
+        // The flower holder expands to a noise_threshold provider; now supported.
         let holder: Value = json!("minecraft:flower_plain");
-        assert!(StateProvider::parse(&holder).is_none());
+        assert!(matches!(
+            StateProvider::parse(&holder),
+            Some(StateProvider::Noise(_))
+        ));
+        // rule_based / 缺字段的 noise provider 仍不支持。
+        // rule_based and an incomplete noise provider stay unsupported.
+        let unported: Value = json!("minecraft:soil_beneath_tree");
+        assert!(StateProvider::parse(&unported).is_none());
         let noise: Value = json!({"type": "minecraft:noise", "seed": 1});
         assert!(StateProvider::parse(&noise).is_none());
     }
