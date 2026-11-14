@@ -121,11 +121,11 @@ mod storage_oracle;
 mod structure_pieces;
 #[cfg(feature = "oracle")]
 mod structure_rings;
+#[cfg(feature = "oracle")]
+mod structure_single;
 mod structure_templates;
 #[cfg(feature = "oracle")]
 mod structure_templates_oracle;
-#[cfg(feature = "oracle")]
-mod structure_single;
 #[cfg(feature = "oracle")]
 mod structure_validity;
 #[cfg(feature = "oracle")]
