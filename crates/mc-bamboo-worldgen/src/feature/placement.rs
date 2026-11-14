@@ -7,6 +7,8 @@
 
 use serde_json::Value;
 
+use mc_bamboo_data::{block_id_of_state, blocks, facts, state_facts};
+
 use crate::random::WorldgenRandom;
 
 use super::{
@@ -47,7 +49,24 @@ pub enum Modifier {
         noise_factor: f64,
         noise_offset: f64,
     },
-    /// 已解析但本轮不生效的修饰器（例如 `surface_relative_threshold_filter`）。
+    /// `SurfaceRelativeThresholdFilter`：按高度图差值过滤候选 y（复用 `cb-wg-feat-a`）。
+    SurfaceRelativeThresholdFilter {
+        heightmap: HeightmapKind,
+        min_inclusive: i64,
+        max_inclusive: i64,
+    },
+    /// `SurfaceWaterDepthFilter`：WORLD_SURFACE - OCEAN_FLOOR <= max_water_depth。
+    SurfaceWaterDepthFilter(i32),
+    /// `EnvironmentScanPlacement`：沿竖直方向扫描满足 target 的位置。
+    EnvironmentScan {
+        step: i32,
+        target: BlockPredicate,
+        allowed: BlockPredicate,
+        max_steps: i32,
+    },
+    /// `CountOnEveryLayerPlacement`：每层地面各放 count 个候选。
+    CountOnEveryLayer(IntProvider),
+    /// 已解析但本轮不生效的修饰器（例如含未移植谓词的 `environment_scan`）。
     /// 命中时置 `unsupported`，让对拍跳过这个区块。
     Unsupported(String),
 }
@@ -118,6 +137,52 @@ impl Modifier {
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0),
             },
+            // `SurfaceRelativeThresholdFilter` 与 `cb-wg-feat-a` 的实现一致。
+            "minecraft:surface_relative_threshold_filter" => Self::SurfaceRelativeThresholdFilter {
+                heightmap: HeightmapKind::parse(
+                    field("heightmap")?
+                        .as_str()
+                        .ok_or("surface_relative_threshold_filter heightmap is not a string")?,
+                )?,
+                min_inclusive: object
+                    .get("min_inclusive")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i64::from(i32::MIN)),
+                max_inclusive: object
+                    .get("max_inclusive")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i64::from(i32::MAX)),
+            },
+            "minecraft:surface_water_depth_filter" => Self::SurfaceWaterDepthFilter(
+                field("max_water_depth")?
+                    .as_i64()
+                    .ok_or("bad max_water_depth")? as i32,
+            ),
+            "minecraft:environment_scan" => {
+                let step = match field("direction_of_search")?.as_str() {
+                    Some("up") => 1,
+                    Some("down") => -1,
+                    _ => return Err("environment_scan direction is not up/down".to_owned()),
+                };
+                let target = BlockPredicate::parse(field("target_condition")?);
+                let allowed = object
+                    .get("allowed_search_condition")
+                    .map(BlockPredicate::parse)
+                    .unwrap_or(BlockPredicate::True);
+                let max_steps = field("max_steps")?.as_i64().ok_or("bad max_steps")? as i32;
+                if !target.is_supported() || !allowed.is_supported() {
+                    return Ok(Self::Unsupported(kind.to_owned()));
+                }
+                Self::EnvironmentScan {
+                    step,
+                    target,
+                    allowed,
+                    max_steps,
+                }
+            }
+            "minecraft:count_on_every_layer" => {
+                Self::CountOnEveryLayer(IntProvider::parse(field("count")?)?)
+            }
             _ => Self::Unsupported(kind.to_owned()),
         })
     }
@@ -249,8 +314,125 @@ fn modify(
                 out.push(pos);
             }
         }
+        Modifier::SurfaceRelativeThresholdFilter {
+            heightmap,
+            min_inclusive,
+            max_inclusive,
+        } => {
+            let surface_y = i64::from(ctx.world.get_height(*heightmap, x, z));
+            let min_y = surface_y + *min_inclusive;
+            let max_y = surface_y + *max_inclusive;
+            if min_y <= i64::from(y) && i64::from(y) <= max_y {
+                out.push(pos);
+            }
+        }
+        Modifier::SurfaceWaterDepthFilter(max_depth) => {
+            let ocean = ctx.world.get_height(HeightmapKind::OceanFloor, x, z);
+            let surface = ctx.world.get_height(HeightmapKind::WorldSurface, x, z);
+            if surface - ocean <= *max_depth {
+                out.push(pos);
+            }
+        }
+        Modifier::EnvironmentScan {
+            step,
+            target,
+            allowed,
+            max_steps,
+        } => {
+            let mut scan_y = y;
+            if allowed.test(ctx.world, pos) {
+                for _ in 0..*max_steps {
+                    if target.test(ctx.world, (x, scan_y, z)) {
+                        out.push((x, scan_y, z));
+                        return;
+                    }
+                    scan_y += *step;
+                    let max_y = ctx.world.min_y + ctx.world.height - 1;
+                    if scan_y < ctx.world.min_y || scan_y > max_y {
+                        return;
+                    }
+                    if !allowed.test(ctx.world, (x, scan_y, z)) {
+                        break;
+                    }
+                }
+                if target.test(ctx.world, (x, scan_y, z)) {
+                    out.push((x, scan_y, z));
+                }
+            }
+        }
+        Modifier::CountOnEveryLayer(provider) => {
+            let mut layer = 0_i32;
+            loop {
+                let mut found = false;
+                let mut i = 0_i32;
+                loop {
+                    // 官方 for 循环的条件每次都调 `count.sample(random)`。
+                    // The official for-condition calls `count.sample(random)` every iteration.
+                    if i >= provider.sample(random) {
+                        break;
+                    }
+                    let cx = x + random.next_int(16);
+                    let cz = z + random.next_int(16);
+                    let start_y = ctx.world.get_height(HeightmapKind::MotionBlocking, cx, cz);
+                    if let Some(found_y) = find_on_ground_y(ctx.world, cx, start_y, cz, layer) {
+                        out.push((cx, found_y, cz));
+                        found = true;
+                    }
+                    i += 1;
+                }
+                layer += 1;
+                if !found {
+                    break;
+                }
+            }
+        }
         Modifier::Unsupported(_) => {}
     }
+}
+
+/// `CountOnEveryLayerPlacement.findOnGroundYPosition`：向下找第 `layer` 层
+/// 「下面非空、当前空、下面不是基岩」的位置，返回可放置的 y。
+///
+/// `CountOnEveryLayerPlacement.findOnGroundYPosition`: scan down for the `layer`-th
+/// ground surface (below non-empty, current empty, below not bedrock).
+fn find_on_ground_y(
+    world: &FeatureWorld<'_>,
+    x: i32,
+    start_y: i32,
+    z: i32,
+    layer: i32,
+) -> Option<i32> {
+    let mut current = world.get_block(x, start_y, z);
+    let mut current_layer = 0_i32;
+    for y in (world.min_y + 1..=start_y).rev() {
+        let below = world.get_block(x, y - 1, z);
+        if !count_layer_is_empty(below)
+            && count_layer_is_empty(current)
+            && !count_layer_is_bedrock(below)
+        {
+            if current_layer == layer {
+                return Some(y);
+            }
+            current_layer += 1;
+        }
+        current = below;
+    }
+    None
+}
+
+/// `CountOnEveryLayerPlacement.isEmpty` = isAir || water || lava。
+fn count_layer_is_empty(state: u32) -> bool {
+    if state_facts(state) & facts::AIR != 0 {
+        return true;
+    }
+    block_id_of_state(state).is_some_and(|id| {
+        id == block_id_of_state(blocks::WATER).unwrap_or(usize::MAX)
+            || id == block_id_of_state(blocks::LAVA).unwrap_or(usize::MAX)
+    })
+}
+
+fn count_layer_is_bedrock(state: u32) -> bool {
+    block_id_of_state(state) == block_id_of_state(blocks::BEDROCK)
 }
 
 /// `FeaturePlacer` 的栈 DFS；每遇到最后一个 modifier 产生的候选位置就立刻调
@@ -414,8 +596,22 @@ mod tests {
             assert!(Modifier::parse(&value).unwrap().is_supported(), "{label}");
         }
         let unknown: Value =
-            serde_json::from_str(r#"{"type":"minecraft:surface_water_depth_filter"}"#).unwrap();
+            serde_json::from_str(r#"{"type":"minecraft:not_a_real_modifier"}"#).unwrap();
         assert!(!Modifier::parse(&unknown).unwrap().is_supported());
+    }
+
+    #[test]
+    fn parses_surface_scan_and_layer_modifiers() {
+        let cases = [
+            r#"{"type":"minecraft:surface_relative_threshold_filter","heightmap":"OCEAN_FLOOR_WG","max_inclusive":-13}"#,
+            r#"{"type":"minecraft:surface_water_depth_filter","max_water_depth":0}"#,
+            r#"{"type":"minecraft:environment_scan","direction_of_search":"down","target_condition":{"type":"minecraft:solid"},"allowed_search_condition":{"type":"minecraft:matching_block_tag","tag":"minecraft:air"},"max_steps":12}"#,
+            r#"{"type":"minecraft:count_on_every_layer","count":6}"#,
+        ];
+        for text in cases {
+            let value: Value = serde_json::from_str(text).unwrap();
+            assert!(Modifier::parse(&value).unwrap().is_supported(), "{text}");
+        }
     }
 
     #[test]
@@ -482,5 +678,92 @@ mod tests {
         let b = crate::biome_temperature::biome_info_noise(12.5, -34.25);
         assert_eq!(a, b);
         assert_ne!(a, crate::biome_temperature::biome_info_noise(13.5, -34.25));
+    }
+
+    /// 造一个 y=2 为石头地面、其余空气的 3×3 世界，高度图固定为 2。
+    fn scan_test_world() -> (crate::feature::FeatureChunks, Registry) {
+        use crate::feature::{ChunkBlocks, FeatureChunks, Heightmaps};
+        let min_y = 0;
+        let height = 8;
+        let mut blocks: [ChunkBlocks; 9] =
+            std::array::from_fn(|_| vec![vec![blocks::AIR; 256]; height as usize]);
+        for chunk in &mut blocks {
+            chunk[2] = vec![blocks::STONE; 256];
+        }
+        let mut heights: [Heightmaps; 9] = std::array::from_fn(|_| Heightmaps::new(min_y));
+        for h in &mut heights {
+            h.world_surface = [2; 256];
+            h.ocean_floor = [2; 256];
+            h.motion_blocking = [2; 256];
+            h.world_surface_wg = [2; 256];
+            h.ocean_floor_wg = [2; 256];
+            h.motion_blocking_no_leaves = [2; 256];
+        }
+        let chunks = FeatureChunks {
+            center_x: 0,
+            center_z: 0,
+            min_y,
+            height,
+            blocks,
+            biomes: std::array::from_fn(|_| Vec::new()),
+            heights,
+        };
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        let registry = Registry::parse(root.as_object().unwrap()).unwrap();
+        (chunks, registry)
+    }
+
+    #[test]
+    fn surface_scan_and_layer_modifiers_produce_official_candidates() {
+        use crate::random::Algorithm;
+        let (chunks, registry) = scan_test_world();
+        let world = FeatureWorld::new(&chunks).unwrap();
+        let generation = WorldGenerationContext {
+            min_y: 0,
+            height: 8,
+            sea_level: 63,
+        };
+        let random = WorldgenRandom::new(Algorithm::Xoroshiro.new_instance(1));
+        let mut biome_at = |_x: i32, _y: i32, _z: i32| 0u32;
+        let mut run = |modifier: &Modifier, pos: Pos| {
+            let mut ctx = PlacementContext {
+                world: &world,
+                generation,
+                biome_at: &mut biome_at,
+                registry: &registry,
+                top_feature: None,
+            };
+            let mut out = Vec::new();
+            modify(modifier, &mut ctx, &random, pos, &mut out);
+            out
+        };
+
+        // WORLD_SURFACE - OCEAN_FLOOR = 0：max=0 放行，max=-1 过滤掉。
+        let water = Modifier::SurfaceWaterDepthFilter(0);
+        assert_eq!(run(&water, (0, 4, 0)), vec![(0, 4, 0)]);
+        let water_neg = Modifier::SurfaceWaterDepthFilter(-1);
+        assert!(run(&water_neg, (0, 4, 0)).is_empty());
+
+        // surfaceY = 3，max_inclusive=0：y=3 放行，y=4 过滤掉。
+        let relative = Modifier::SurfaceRelativeThresholdFilter {
+            heightmap: HeightmapKind::WorldSurface,
+            min_inclusive: i64::from(i32::MIN),
+            max_inclusive: 0,
+        };
+        assert_eq!(run(&relative, (0, 3, 0)), vec![(0, 3, 0)]);
+        assert!(run(&relative, (0, 4, 0)).is_empty());
+
+        // 从 y=6 向下扫到石头地面 y=2（solid）才命中。
+        let scan = Modifier::EnvironmentScan {
+            step: -1,
+            target: BlockPredicate::Solid { offset: [0, 0, 0] },
+            allowed: BlockPredicate::True,
+            max_steps: 5,
+        };
+        assert_eq!(run(&scan, (0, 6, 0)), vec![(0, 2, 0)]);
+
+        // 逐层扫描应至少在地面层放一个候选。
+        let layers = Modifier::CountOnEveryLayer(IntProvider::Constant(1));
+        assert!(!run(&layers, (0, 0, 0)).is_empty());
     }
 }
