@@ -325,6 +325,18 @@ fn is_door(name: &str) -> bool {
     name.ends_with("_door") && name != "minecraft:iron_trapdoor"
 }
 
+/// `with_property` 的多属性版：按给定顺序逐个设置，任一失败就保留原状态。
+///
+/// Multi-property `with_property`: apply each pair in order, keeping the state as-is if
+/// any one fails.
+pub fn with_props(state: u32, pairs: &[(&str, &str)]) -> u32 {
+    let mut current = state;
+    for (key, value) in pairs {
+        current = with_property(current, key, value).unwrap_or(current);
+    }
+    current
+}
+
 /// `BlockState.cycle(HINGE)`：上下半扇互换。
 ///
 /// `BlockState.cycle(HINGE)`: swap the two halves of the hinge.

@@ -17,6 +17,7 @@ pub mod mineshaft;
 pub mod mineshaft_place;
 pub mod ocean_monument;
 pub mod stronghold;
+pub mod stronghold_place;
 pub mod woodland_mansion;
 
 use std::collections::BTreeMap;
