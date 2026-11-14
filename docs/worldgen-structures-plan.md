@@ -246,6 +246,59 @@
    `lowest_ground_height` 读到错误的列。要么造 3×3 假地形，要么按地形公式直接算越界列。
    改这两处后沙漠神殿的不一致从 52427 降到 23004（剩下的差异还没查完）。
 
+**第十轮（2026-11-14，`cb-wg-structures` 续：按第九轮三条根因重做对拍，仍无代码提交）**：
+
+本轮把第九轮定位的三条根因全部实现并实测，**结论是三条都必要但不充分**，剩下的差异出在
+`fillColumnDown` 的边界上。所有代码改动在收尾时都回退了（工作树干净），只留这份记录。
+
+实现过的三件事（都可复用）：
+
+1. `region_random(seed, use_legacy_random, cx, cz) =
+   Algorithm::new_instance(seed).fork_positional()
+     .from_hash_of("minecraft:worldgen_region_random").fork_positional().at(cx, 0, cz)`，
+   `use_legacy_random` 传主世界 `noise_settings.legacy_random_source`（false）。
+2. `PieceContext` 加 `writes: Option<Vec<(i32, i32, i32, u32)>>`，`place_block` /
+   `fill_column_down` / `create_chest` 都往里记；Java 侧 `PieceLevelHandler.written`
+   （`TreeMap<BlockPos, BlockState>`，后写覆盖先写）是同一语义。**两边都比写入日志**，
+   而不是「写前写后状态差异」。
+3. 假世界改成 3×3 合成地形（9 个区块都按同一公式填），区块外的高度按公式算而不是
+   `& 15` 折回。
+
+实测结果（`structure-place` 48 查询：埋藏的宝藏 / 沙漠神殿 / 女巫小屋各 16）：
+
+| 阶段 | 不一致数 |
+|---|---|
+| 起点（只改对 `region_random`） | 52427 |
+| + 写入日志 | 46980 |
+| + 3×3 地形 | 7945 |
+| 只剩沙漠神殿，埋藏的宝藏与女巫小屋已对上（只剩 18 处女巫小屋） | 18 |
+
+**剩下的 18 处全部是女巫小屋的 `fillColumnDown` 差一格**：Java 把橡木原木填到 `y = 62`，
+Rust 填到 `63`；`(1, 63, 2)` 反过来（Rust 写了、Java 没写）。也就是说
+`fillColumnDown` 的起点或终止条件有一处 `±1`。官方：
+
+```
+BlockPos.MutableBlockPos pos = this.getWorldPos(x, startY, z);
+if (chunkBB.isInside(pos)) {
+   while (this.isReplaceableByStructures(level.getBlockState(pos)) && pos.getY() > level.getMinY() + 1) {
+      level.setBlock(pos, blockState, 2);
+      pos.move(Direction.DOWN);
+   }
+}
+```
+
+注意 `pos` 在**循环体内**被 `move(DOWN)` 推进、而 `isReplaceableByStructures` 读的是
+**推进后**的位置——写的是「当前 `pos`」，判的是「当前 `pos`」，然后在末尾下移一格。
+Rust 的 `place.rs::fill_column_down` 先读 `get_block(pos)`、再 `set_block(pos)`、再 `y -= 1`，
+顺序一致；差异最可能在**起点**：官方 `getWorldPos(x, startY, z)` 的 Y 是
+`startY + boundingBox.minY`，而结构件在 `postProcess` 里已经被 `updateAverageGroundHeight`
+平移过，`boundingBox.minY` 是平移后的值。Rust 传进 `PieceContext.piece_bb` 的也是平移后的
+`new_bb`，但 `fill_column_down` 用的是 `self.world_pos(x, start_y, z)`，其中 `world_y` 读
+`piece_bb[1]`——这条链是对的。
+
+**下一轮应该直接盯着这 18 处对齐**：用一个只含女巫小屋的查询集，把 Java 侧
+`fillColumnDown` 每次 `setBlock` 的坐标打出来，和 Rust 的 `writes` 逐条比，一处一处对。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」
 是 `onTopOfChunkCenter` 基线路径的通用判定，**不等于** `Structure.generate` 的最终有效：
