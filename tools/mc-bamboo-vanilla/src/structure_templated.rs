@@ -13,27 +13,11 @@
 use std::{fs, path::Path, process::Command};
 
 use mc_bamboo_worldgen::structure::{
+    Structures,
     pieces::Piece,
-    templated::{
-        self,
-        ocean_ruin::{BiomeTemp, Config},
-    },
+    templated::{self, ocean_ruin::Config},
 };
-
-/// 两种海底遗迹的配置，和 `worldgen.json` 的 `ocean_ruin_warm` / `ocean_ruin_cold` 一致。
-///
-/// The two ocean-ruin configs, matching `ocean_ruin_warm` / `ocean_ruin_cold` in
-/// `worldgen.json`.
-const WARM_RUIN: Config = Config {
-    biome_temp: BiomeTemp::Warm,
-    large_probability: 0.3,
-    cluster_probability: 0.9,
-};
-const COLD_RUIN: Config = Config {
-    biome_temp: BiomeTemp::Cold,
-    large_probability: 0.3,
-    cluster_probability: 0.9,
-};
+use serde_json::Value;
 
 /// 覆盖原点、负坐标、远处坐标的种子。
 const SEEDS: [i64; 8] = [
@@ -78,7 +62,29 @@ struct Query {
     arg: i32,
 }
 
-pub fn run(mut command: Command, queries_path: &Path, _options: &[&str]) -> Result<(), String> {
+pub fn run(
+    mut command: Command,
+    worldgen_path: &Path,
+    queries_path: &Path,
+    _options: &[&str],
+) -> Result<(), String> {
+    let text = fs::read_to_string(worldgen_path)
+        .map_err(|error| format!("cannot read worldgen.json: {error}"))?;
+    let value: Value =
+        serde_json::from_str(&text).map_err(|error| format!("bad worldgen.json: {error}"))?;
+    let raw = value.as_object().ok_or("worldgen.json must be an object")?;
+    let structures = Structures::parse(raw.get("structure").ok_or("missing structure")?)?;
+    // 海底遗迹的两个概率从 `worldgen.json` 读，不再手写常量。
+    // The two ocean-ruin probabilities come from `worldgen.json` instead of hand-written
+    // constants.
+    let mut configs = std::collections::HashMap::new();
+    for id in ["minecraft:ocean_ruin_warm", "minecraft:ocean_ruin_cold"] {
+        let def = structures
+            .get(id)
+            .ok_or_else(|| format!("missing structure {id}"))?;
+        configs.insert(id, Config::parse(&def.raw)?);
+    }
+
     let queries = build_queries();
     write_queries(queries_path, &queries)?;
 
@@ -97,7 +103,7 @@ pub fn run(mut command: Command, queries_path: &Path, _options: &[&str]) -> Resu
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    compare(&queries, &String::from_utf8_lossy(&output.stdout))
+    compare(&configs, &queries, &String::from_utf8_lossy(&output.stdout))
 }
 
 fn build_queries() -> Vec<Query> {
@@ -180,11 +186,30 @@ fn query_key(q: &Query) -> String {
 }
 
 /// 按 kind 调生产代码，产出规范化的 `P` 行。
-fn rust_lines(q: &Query) -> Result<Vec<String>, String> {
+fn rust_lines(
+    configs: &std::collections::HashMap<&str, Config>,
+    q: &Query,
+) -> Result<Vec<String>, String> {
+    let ocean = |id: &str| -> Result<Config, String> {
+        configs
+            .get(id)
+            .copied()
+            .ok_or_else(|| format!("missing ocean ruin config {id}"))
+    };
     let pieces: Vec<Piece> = match q.kind {
         "igloo" => templated::igloo::generate(q.seed, q.cx, q.cz)?,
-        "ocean_ruin_warm" => templated::ocean_ruin::generate(q.seed, q.cx, q.cz, WARM_RUIN)?,
-        "ocean_ruin_cold" => templated::ocean_ruin::generate(q.seed, q.cx, q.cz, COLD_RUIN)?,
+        "ocean_ruin_warm" => templated::ocean_ruin::generate(
+            q.seed,
+            q.cx,
+            q.cz,
+            ocean("minecraft:ocean_ruin_warm")?,
+        )?,
+        "ocean_ruin_cold" => templated::ocean_ruin::generate(
+            q.seed,
+            q.cx,
+            q.cz,
+            ocean("minecraft:ocean_ruin_cold")?,
+        )?,
         "shipwreck_ocean" => templated::shipwreck::generate(q.seed, q.cx, q.cz, false)?,
         "shipwreck_beached" => templated::shipwreck::generate(q.seed, q.cx, q.cz, true)?,
         other => return Err(format!("no Rust layout for kind {other}")),
@@ -192,7 +217,11 @@ fn rust_lines(q: &Query) -> Result<Vec<String>, String> {
     Ok(pieces.iter().map(Piece::canonical_line).collect())
 }
 
-fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
+fn compare(
+    configs: &std::collections::HashMap<&str, Config>,
+    queries: &[Query],
+    stdout: &str,
+) -> Result<(), String> {
     let sections = parse_output(stdout)?;
     if sections.len() != queries.len() {
         return Err(format!(
@@ -224,7 +253,7 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
             ));
         }
         *kind_counts.entry(q.kind).or_default() += 1;
-        let ours = rust_lines(q)?;
+        let ours = rust_lines(configs, q)?;
         let n = java_lines.len().max(ours.len());
         pieces_total += java_lines.len();
         depth_counts.insert(java_lines.len());

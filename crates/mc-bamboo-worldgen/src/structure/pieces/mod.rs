@@ -233,12 +233,18 @@ impl Piece {
         self.extras.insert(key.to_owned(), value.to_string());
     }
 
-    /// 浮点 extras：用最短往返十进制写出（`Float.toString` 的语义），对拍两侧一致。
+    /// 浮点 extras：按 Java `Float.toString` 的写法（整数也带 `.0`），对拍两侧一致。
     ///
-    /// Float extras written as the shortest round-trip decimal (`Float.toString`
-    /// semantics), so both oracle sides agree.
+    /// Float extras written the way Java's `Float.toString` does (integral values keep a
+    /// `.0`), so both oracle sides agree.
     pub fn put_float(&mut self, key: &str, value: f32) {
-        self.extras.insert(key.to_owned(), format!("{value}"));
+        let text = format!("{value}");
+        let text = if text.contains('.') || text.contains('e') || text.contains("inf") {
+            text
+        } else {
+            format!("{text}.0")
+        };
+        self.extras.insert(key.to_owned(), text);
     }
 
     pub fn put_bool(&mut self, key: &str, value: bool) {

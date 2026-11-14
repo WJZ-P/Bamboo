@@ -59,6 +59,12 @@
 //!
 //!     Compare the piece layout of template-based single-piece structures against the
 //!     official template piece classes; the igloo is ported
+//! mc-bamboo-vanilla structure-ruined-portal <java 路径>
+//!     用官方 RuinedPortalStructure.findValidGenerationPoint 对拍废弃传送门的结构件布局
+//!     （含 findSuitableY 的整列搜索与 Mirror.FRONT_BACK）
+//!
+//!     Compare the ruined portal piece layout against vanilla, covering findSuitableY's
+//!     full-column scan and Mirror.FRONT_BACK
 //! mc-bamboo-vanilla structure-save <java 路径>
 //!     用官方 CompoundTag / PieceContainer 对拍区块 NBT 的 structures 键（starts / References）
 //!
@@ -161,6 +167,8 @@ mod structure_pieces;
 #[cfg(feature = "oracle")]
 mod structure_rings;
 #[cfg(feature = "oracle")]
+mod structure_ruined_portal;
+#[cfg(feature = "oracle")]
 mod structure_save;
 #[cfg(feature = "oracle")]
 mod structure_single;
@@ -235,6 +243,9 @@ const STRUCTURE_SINGLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSin
 const STRUCTURE_TEMPLATED_SOURCE: &str =
     "tools/mc-bamboo-vanilla/java/StructureTemplatedOracle.java";
 #[cfg(feature = "oracle")]
+const STRUCTURE_RUINED_PORTAL_SOURCE: &str =
+    "tools/mc-bamboo-vanilla/java/StructureRuinedPortalOracle.java";
+#[cfg(feature = "oracle")]
 const STRUCTURE_SAVE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSaveOracle.java";
 #[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
@@ -279,6 +290,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-generation <java 路径>
       mc-bamboo-vanilla structure-single <java 路径>
       mc-bamboo-vanilla structure-templated <java 路径>
+      mc-bamboo-vanilla structure-ruined-portal <java 路径>
       mc-bamboo-vanilla structure-save <java 路径>
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
@@ -341,6 +353,9 @@ fn run() -> Result<(), String> {
         ["structure-generation", java, ref options @ ..] => structure_generation_cli(java, options),
         ["structure-single", java, ref options @ ..] => structure_single_cli(java, options),
         ["structure-templated", java, ref options @ ..] => structure_templated_cli(java, options),
+        ["structure-ruined-portal", java, ref options @ ..] => {
+            structure_ruined_portal_cli(java, options)
+        }
         ["structure-save", java, ref options @ ..] => structure_save_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
@@ -620,9 +635,26 @@ fn structure_single_cli(java: &str, options: &[&str]) -> Result<(), String> {
 #[cfg(feature = "oracle")]
 fn structure_templated_cli(java: &str, options: &[&str]) -> Result<(), String> {
     let root = workspace_root();
+    let worldgen_path = root.join("crates/mc-bamboo-data/src/generated/worldgen.json");
     let queries_path = root.join(WORK_DIR).join("structure_templated_queries.txt");
     structure_templated::run(
         official_program(java, STRUCTURE_TEMPLATED_SOURCE)?,
+        &worldgen_path,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_ruined_portal_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let worldgen_path = root.join("crates/mc-bamboo-data/src/generated/worldgen.json");
+    let queries_path = root
+        .join(WORK_DIR)
+        .join("structure_ruined_portal_queries.txt");
+    structure_ruined_portal::run(
+        official_program(java, STRUCTURE_RUINED_PORTAL_SOURCE)?,
+        &worldgen_path,
         &queries_path,
         options,
     )
@@ -921,6 +953,11 @@ fn beard_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn structure_templated_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_ruined_portal_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

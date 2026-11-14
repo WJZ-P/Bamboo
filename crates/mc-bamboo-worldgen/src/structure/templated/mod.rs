@@ -17,6 +17,7 @@
 
 pub mod igloo;
 pub mod ocean_ruin;
+pub mod ruined_portal;
 pub mod shipwreck;
 
 use crate::structure::pieces::{Box, new_box};

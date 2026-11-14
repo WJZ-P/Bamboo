@@ -58,6 +58,34 @@ pub struct Config {
     pub cluster_probability: f32,
 }
 
+impl Config {
+    /// 从 `structure` 条目的原始 JSON 解析 `biome_temp` / `large_probability` /
+    /// `cluster_probability`，和 `OceanRuinStructure.CODEC` 的字段名一致。
+    ///
+    /// Parse `biome_temp` / `large_probability` / `cluster_probability` from a `structure`
+    /// entry's raw JSON, matching the `OceanRuinStructure.CODEC` field names.
+    pub fn parse(raw: &serde_json::Value) -> Result<Self, String> {
+        let object = raw.as_object().ok_or("ocean ruin must be an object")?;
+        let biome_temp = match object.get("biome_temp").and_then(serde_json::Value::as_str) {
+            Some("warm") => BiomeTemp::Warm,
+            Some("cold") => BiomeTemp::Cold,
+            _ => return Err("ocean ruin has no valid biome_temp".to_owned()),
+        };
+        let float = |key: &str| -> Result<f32, String> {
+            object
+                .get(key)
+                .and_then(serde_json::Value::as_f64)
+                .map(|value| value as f32)
+                .ok_or_else(|| format!("ocean ruin has no {key}"))
+        };
+        Ok(Self {
+            biome_temp,
+            large_probability: float("large_probability")?,
+            cluster_probability: float("cluster_probability")?,
+        })
+    }
+}
+
 /// `OceanRuinPieces.WARM_RUINS`。
 ///
 /// `OceanRuinPieces.WARM_RUINS`.
