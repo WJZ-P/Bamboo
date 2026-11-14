@@ -18,6 +18,7 @@ use crate::{
     structure::place::PieceContext,
 };
 
+pub mod pyramid;
 pub mod swamp_hut;
 
 /// 官方 `BuriedTreasurePiece.postProcess` 里判「液体」用的两个方块。

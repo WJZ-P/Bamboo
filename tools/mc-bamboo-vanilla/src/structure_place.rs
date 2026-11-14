@@ -36,7 +36,11 @@ const CHUNKS: [(i32, i32); 4] = [(0, 0), (1, -1), (-3, 2), (100, -100)];
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
 const KINDS: [&str; 3] = ["buried_treasure", "desert_pyramid", "swamp_hut"];
-
+/// 已写但还没对上官方坐标的结构：先不进对拍查询集，等修好再放开。
+///
+/// Structures that are ported but whose coordinates still differ from vanilla: kept out of the
+/// oracle query set until fixed.
+const SKIPPED: [&str; 1] = ["desert_pyramid"];
 /// 一条查询。
 struct Query {
     kind: &'static str,
@@ -182,6 +186,27 @@ fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
             // The witch and cat are entities; the Java side aborts there after writing blocks.
             true
         }
+        "desert_pyramid" => {
+            let pieces =
+                mc_bamboo_worldgen::structure::single::generate(q.kind, q.seed, q.cx, q.cz)?;
+            let piece = pieces.first().ok_or("no piece")?;
+            let random = mc_bamboo_worldgen::structure::pieces::make_random(q.seed, q.cx, q.cz);
+            let _ = post_process::pyramid::desert_pyramid(
+                &mut world,
+                &piece.bb,
+                &chunk_bb,
+                Some(mc_bamboo_worldgen::structure::pieces::HDir::from_2d(
+                    piece.o,
+                )),
+                piece.rot,
+                piece.mirror,
+                q.seed,
+                q.cx,
+                q.cz,
+                &random,
+            );
+            false
+        }
         other => return Err(format!("no postProcess for {other}")),
     };
     let after = snapshot(&world, q.cx, q.cz);
@@ -195,7 +220,7 @@ pub fn run(mut command: Command, queries_path: &Path, _options: &[&str]) -> Resu
             CHUNKS.iter().flat_map(move |&(cx, cz)| {
                 KINDS
                     .iter()
-                    .filter(|&&kind| kind != "desert_pyramid")
+                    .filter(|&&kind| !SKIPPED.contains(&kind))
                     .map(move |&kind| Query { kind, seed, cx, cz })
             })
         })
@@ -274,10 +299,11 @@ fn parse_output(stdout: &str) -> Result<Vec<(String, usize, bool, Diff)>, String
                 blocks.insert((x, y, z), state);
                 let _ = count;
             }
-            // `T` 行是 Java 侧 postProcess 抛异常的类型（实体路径），不参与比较。
+            // `T` 行是 Java 侧 postProcess 抛异常的类型（实体路径），`D` 行是诊断用的包围盒，
+            // 都不参与比较。
             // `T` lines name the exception type from the Java postProcess (entity path) and
-            // take no part in the comparison.
-            "T" => {}
+            // `D` lines are diagnostic boxes; neither takes part in the comparison.
+            "T" | "D" => {}
             other => return Err(format!("unknown oracle line kind {other}: {line}")),
         }
     }

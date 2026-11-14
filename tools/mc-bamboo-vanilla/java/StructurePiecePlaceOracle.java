@@ -134,7 +134,7 @@ public final class StructurePiecePlaceOracle {
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
                     StructurePiecePlaceOracle.class.getClassLoader(),
                     new Class<?>[] {WorldGenLevel.class},
-                    new PieceLevelHandler(chunk, heightAccessor));
+                    new PieceLevelHandler(chunk, heightAccessor, seed));
             StructureManager structures =
                     new StructureManager(level, new WorldOptions(seed, false, false), null);
 
@@ -153,6 +153,16 @@ public final class StructurePiecePlaceOracle {
                 // with a prefix the Rust side skips.
                 System.out.println("T " + kind + " " + seed + " " + cx + " " + cz + " "
                         + t.getClass().getName());
+            }
+            // 诊断行：结构件包围盒平移后的范围，用来判断 `lowest_ground_height` 是否把结构
+            // 推出了区块。只在 `PIECE_PLACE_DEBUG` 打开时输出。
+            // Diagnostic: the piece box after the height shift, to see whether
+            // `lowest_ground_height` pushed it out of the chunk. Only with `PIECE_PLACE_DEBUG`.
+            if (System.getenv("PIECE_PLACE_DEBUG") != null) {
+                var box = piece.getBoundingBox();
+                System.out.println("D " + kind + " " + seed + " " + cx + " " + cz + " "
+                        + box.minX() + " " + box.minY() + " " + box.minZ() + " "
+                        + box.maxX() + " " + box.maxY() + " " + box.maxZ());
             }
             TreeMap<BlockPos, BlockState> after = snapshot(chunk);
 
@@ -234,9 +244,27 @@ public final class StructurePiecePlaceOracle {
         };
     }
 
+    /**
+     * `WorldGenRegion.getRandom()`：`randomState.getOrCreateRandomFactory("worldgen_region_random")`
+     * 在区块中心 `getWorldPosition()` 上的随机源。
+     *
+     * <p>和 Rust 侧 `region_random` 走同一条 Legacy 位置派生：先用
+     * `WorldgenRandom(LegacyRandomSource(worldSeed))` 取一次 `nextLong()` 当工厂种子，再
+     * `LegacyPositionalRandomFactory.at(x, 0, z)`。
+     *
+     * <p>The `WorldGenRegion` random source: `randomState.getOrCreateRandomFactory(
+     * "worldgen_region_random")` at the chunk centre. Uses the same Legacy positional
+     * derivation as the Rust `region_random`.
+     */
+    private static net.minecraft.util.RandomSource regionRandom(long worldSeed, ChunkPos center) {
+        WorldgenRandom source = new WorldgenRandom(new LegacyRandomSource(worldSeed));
+        long factorySeed = source.nextLong();
+        return new LegacyRandomSource.LegacyPositionalRandomFactory(factorySeed)
+                .at(center.getWorldPosition());
+    }
+
     /** 逐格快照：只收非空气方块，省内存。 */
-    private static TreeMap<BlockPos, BlockState> snapshot(ProtoChunk chunk) {
-        TreeMap<BlockPos, BlockState> blocks = new TreeMap<>();
+    private static TreeMap<BlockPos, BlockState> snapshot(ProtoChunk chunk) {        TreeMap<BlockPos, BlockState> blocks = new TreeMap<>();
         ChunkPos pos = chunk.getPos();
         for (int y = MIN_Y; y < MIN_Y + HEIGHT; y++) {
             for (int x = 0; x < 16; x++) {
@@ -256,10 +284,14 @@ public final class StructurePiecePlaceOracle {
     static final class PieceLevelHandler implements InvocationHandler {
         private final ProtoChunk chunk;
         private final LevelHeightAccessor heightAccessor;
+        private final long seed;
+        private final ChunkPos center;
 
-        PieceLevelHandler(ProtoChunk chunk, LevelHeightAccessor heightAccessor) {
+        PieceLevelHandler(ProtoChunk chunk, LevelHeightAccessor heightAccessor, long seed) {
             this.chunk = chunk;
             this.heightAccessor = heightAccessor;
+            this.seed = seed;
+            this.center = chunk.getPos();
         }
 
         @Override
@@ -297,7 +329,9 @@ public final class StructurePiecePlaceOracle {
                 case "getHeightmapPos": {
                     Heightmap.Types type = (Heightmap.Types) args[0];
                     BlockPos pos = (BlockPos) args[1];
-                    return new BlockPos(pos.getX(),
+                    // LevelReader.getHeightmapPos 调 this.getHeight，即 WorldGenRegion.getHeight 的 +1 版本。
+                            // LevelReader.getHeightmapPos calls this.getHeight, i.e. WorldGenRegion.getHeight with +1.
+                            return new BlockPos(pos.getX(),
                             this.chunk.getHeight(type, pos.getX() & 15, pos.getZ() & 15) + 1, pos.getZ());
                 }
                 case "getMinY":
@@ -321,9 +355,15 @@ public final class StructurePiecePlaceOracle {
                 case "isClientSide":
                     return false;
                 case "getRandom":
-                    return net.minecraft.util.RandomSource.create(0L);
+                    // `WorldGenRegion.getRandom()`：
+                    // `randomState.getOrCreateRandomFactory("worldgen_region_random").at(center)`。
+                    // 这里照同一条 Legacy 位置派生复算。
+                    // `WorldGenRegion.getRandom()`:
+                    // `randomState.getOrCreateRandomFactory("worldgen_region_random").at(center)`,
+                    // recomputed with the same Legacy positional derivation.
+                    return regionRandom(this.seed, this.center);
                 case "getSeed":
-                    return 0L;
+                    return this.seed;
                 case "getCenter":
                     return this.chunk.getPos();
                 case "getBiomeManager":
