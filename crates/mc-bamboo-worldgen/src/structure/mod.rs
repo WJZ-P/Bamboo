@@ -22,6 +22,7 @@ pub mod placement;
 pub mod registry;
 pub mod rings;
 pub mod start;
+pub mod validity;
 
 use std::collections::{HashMap, HashSet};
 
@@ -36,6 +37,11 @@ pub use registry::{
 pub use start::{
     BoundingBox, References, StartPlan, StructurePiece, StructureStart, StructureStarts,
     chunk_pos_pack, selection_sequence, structure_references,
+};
+pub use validity::{
+    GenerationPoint, SelectedStart, allowed_biome_names, column_has_valid_biome, corner_heights,
+    find_valid_generation_point, is_valid_biome_at, lowest_y, mean_first_occupied_height,
+    select_start,
 };
 
 /// `hasStructureChunkInRange` 递归查别的集合时允许的最大深度。
