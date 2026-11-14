@@ -404,6 +404,13 @@ impl PositionalFactory {
 pub struct WorldgenRandom {
     source: Random,
     count: Cell<u32>,
+    /// `LegacyRandomSource` 的 `MarsagliaPolarGaussian` 缓存：一次算两个数，第二个留到
+    /// 下一次；官方这个缓存在 `LegacyRandomSource` 实例上，`setSeed` **不清**它。
+    ///
+    /// The `LegacyRandomSource` `MarsagliaPolarGaussian` cache: two values per computation,
+    /// the second kept for the next call. The official cache lives on the
+    /// `LegacyRandomSource` instance and `setSeed` does **not** clear it.
+    next_gaussian: Cell<Option<f64>>,
 }
 
 impl WorldgenRandom {
@@ -411,6 +418,7 @@ impl WorldgenRandom {
         Self {
             source,
             count: Cell::new(0),
+            next_gaussian: Cell::new(None),
         }
     }
 
@@ -482,6 +490,26 @@ impl WorldgenRandom {
     /// `nextBoolean()`：`next(1)`。
     pub fn next_boolean(&self) -> bool {
         self.next(1) != 0
+    }
+
+    /// `nextGaussian()`：`MarsagliaPolarGaussian`，缓存在本实例上、`setSeed` 不清。
+    ///
+    /// `nextGaussian()`: `MarsagliaPolarGaussian`; the cache lives on this instance and
+    /// `setSeed` does not clear it.
+    pub fn next_gaussian(&self) -> f64 {
+        if let Some(value) = self.next_gaussian.take() {
+            return value;
+        }
+        loop {
+            let x = 2.0 * self.next_double() - 1.0;
+            let y = 2.0 * self.next_double() - 1.0;
+            let radius_squared = x * x + y * y;
+            if radius_squared < 1.0 && radius_squared != 0.0 {
+                let multiplier = (-2.0 * radius_squared.ln() / radius_squared).sqrt();
+                self.next_gaussian.set(Some(y * multiplier));
+                return x * multiplier;
+            }
+        }
     }
 
     /// `setDecorationSeed(seed, chunkX, chunkZ)`，返回官方那个 population seed。

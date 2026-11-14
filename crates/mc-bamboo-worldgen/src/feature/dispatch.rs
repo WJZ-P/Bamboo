@@ -23,6 +23,7 @@ use super::{
     ores,
     placement::OreFeature,
     simple_block::SimpleBlockFeature,
+    speleothem_cluster::SpeleothemClusterFeature,
     spring::{self, SpringFeature},
     underwater_magma::{self, UnderwaterMagmaFeature},
     world::FeatureWorld,
@@ -45,6 +46,7 @@ pub enum Leaf {
     MonsterRoom(MonsterRoomFeature),
     Ore(OreFeature),
     SimpleBlock(SimpleBlockFeature),
+    SpeleothemCluster(Box<SpeleothemClusterFeature>),
     Spring(SpringFeature),
     UnderwaterMagma(UnderwaterMagmaFeature),
 }
@@ -65,6 +67,9 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         }
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?),
+        "minecraft:speleothem_cluster" => {
+            Leaf::SpeleothemCluster(Box::new(SpeleothemClusterFeature::parse(config).ok()?))
+        }
         "minecraft:spring_feature" => Leaf::Spring(SpringFeature::parse(config).ok()?),
         "minecraft:underwater_magma" => {
             Leaf::UnderwaterMagma(UnderwaterMagmaFeature::parse(config).ok()?)
@@ -114,6 +119,7 @@ pub fn place_leaf(
         Leaf::LargeDripstone(feature) => large_dripstone::place(feature, world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
+        Leaf::SpeleothemCluster(feature) => feature.place(world, random, pos),
         Leaf::Spring(spring) => spring::place(spring, world, pos),
         Leaf::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),
     }

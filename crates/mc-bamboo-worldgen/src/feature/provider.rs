@@ -213,30 +213,47 @@ impl IntProvider {
     }
 }
 
-/// `FloatProvider`：本轮只用到 `uniform`（大型滴水石）。
+/// `FloatProvider`：`uniform` 与 `clamped_normal`（大型滴水石 / 滴水石簇用）。
 ///
-/// `FloatProvider`: only `uniform` is needed this round (the large dripstone feature).
+/// `FloatProvider`: `uniform` and `clamped_normal` (used by the large dripstone and the
+/// speleothem cluster features).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FloatProvider {
-    pub min: f32,
-    pub max: f32,
+pub enum FloatProvider {
+    /// `UniformFloat`：`nextFloat() * (max - min) + min`。
+    ///
+    /// `UniformFloat`: `nextFloat() * (max - min) + min`.
+    Uniform { min: f32, max: f32 },
+    /// `ClampedNormalFloat`：`clamp(normal(mean, deviation), min, max)`。
+    ///
+    /// `ClampedNormalFloat`: `clamp(normal(mean, deviation), min, max)`.
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
+        min: f32,
+        max: f32,
+    },
 }
 
 impl FloatProvider {
-    /// `UniformFloat.MAP_CODEC`：`min_inclusive` / `max_exclusive`。
+    /// `UniformFloat.MAP_CODEC` / `ClampedNormalFloat.MAP_CODEC`。
     ///
-    /// `UniformFloat.MAP_CODEC`: `min_inclusive` / `max_exclusive`.
+    /// `UniformFloat.MAP_CODEC` / `ClampedNormalFloat.MAP_CODEC`.
     pub fn parse(value: &Value) -> Result<Self, String> {
+        // `FloatProviders.codec` 允许一个裸浮点数当常量 provider。
+        // `FloatProviders.codec` accepts a bare float as a constant provider.
+        if let Some(number) = value.as_f64() {
+            return Ok(Self::Uniform {
+                min: number as f32,
+                max: number as f32,
+            });
+        }
         let object = value
             .as_object()
-            .ok_or("float provider must be an object")?;
+            .ok_or("float provider must be an object or a number")?;
         let kind = object
             .get("type")
             .and_then(Value::as_str)
             .ok_or("float provider has no type")?;
-        if kind != "minecraft:uniform" {
-            return Err(format!("unsupported float provider {kind}"));
-        }
         let number = |name: &str| -> Result<f32, String> {
             object
                 .get(name)
@@ -244,19 +261,52 @@ impl FloatProvider {
                 .map(|value| value as f32)
                 .ok_or_else(|| format!("float provider has no {name}"))
         };
-        let min = number("min_inclusive")?;
-        let max = number("max_exclusive")?;
-        if max <= min {
-            return Err("uniform float provider needs max > min".to_owned());
+        match kind {
+            "minecraft:uniform" => {
+                let min = number("min_inclusive")?;
+                let max = number("max_exclusive")?;
+                if max < min {
+                    return Err("uniform float provider needs max >= min".to_owned());
+                }
+                Ok(Self::Uniform { min, max })
+            }
+            "minecraft:clamped_normal" => {
+                let min = number("min")?;
+                let max = number("max")?;
+                if max < min {
+                    return Err("clamped normal float provider needs max >= min".to_owned());
+                }
+                Ok(Self::ClampedNormal {
+                    mean: number("mean")?,
+                    deviation: number("deviation")?,
+                    min,
+                    max,
+                })
+            }
+            other => Err(format!("unsupported float provider {other}")),
         }
-        Ok(Self { min, max })
     }
 
-    /// `Mth.randomBetween(random, min, maxExclusive)`：`nextFloat() * (max - min) + min`。
+    /// `FloatProvider.sample(random)`。
     ///
-    /// `Mth.randomBetween(random, min, maxExclusive)`: `nextFloat() * (max - min) + min`.
+    /// `FloatProvider.sample(random)`.
     pub fn sample(&self, random: &WorldgenRandom) -> f32 {
-        random.next_float() * (self.max - self.min) + self.min
+        match self {
+            // `Mth.randomBetween(random, min, maxExclusive)`。
+            // `Mth.randomBetween(random, min, maxExclusive)`.
+            Self::Uniform { min, max } => random.next_float() * (max - min) + min,
+            // `Mth.clamp(Mth.normal(random, mean, deviation), min, max)`。
+            // `Mth.clamp(Mth.normal(random, mean, deviation), min, max)`.
+            Self::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => {
+                let value = *mean + random.next_gaussian() as f32 * *deviation;
+                value.clamp(*min, *max)
+            }
+        }
     }
 }
 
