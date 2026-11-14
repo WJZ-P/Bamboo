@@ -27,8 +27,8 @@ use crate::{
 ///
 /// The `level` and `chunkBB` parameters of vanilla `StructurePiece.postProcess`, plus the
 /// piece's own orientation, rotation and mirror.
-pub struct PieceContext<'a> {
-    pub world: &'a mut FeatureWorld<'a>,
+pub struct PieceContext<'a, 'b> {
+    pub world: &'a mut FeatureWorld<'b>,
     /// `chunkBB`：只在这个盒子里写字，出了盒子 `placeBlock` 直接丢弃。
     ///
     /// `chunkBB`: writes are dropped outside this box.
@@ -49,7 +49,7 @@ pub struct PieceContext<'a> {
     pub mirror: i32,
 }
 
-impl PieceContext<'_> {
+impl PieceContext<'_, '_> {
     /// `getWorldX(x, z)`。
     ///
     /// `getWorldX(x, z)`.

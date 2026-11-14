@@ -26,6 +26,7 @@ pub mod post_process;
 pub mod registry;
 pub mod rings;
 pub mod save;
+pub mod scattered;
 pub mod single;
 pub mod start;
 pub mod start_point;
