@@ -368,6 +368,21 @@ WebView2 的渲染进程不算在内。
   `terrain` 里地表/雕刻器本就 uncached 重算群系），默认起一个小计算池把生成移出世界线程；
   `world_gen_settings.dat` 按官方 `WorldGenSettings.CODEC` 持久化种子与维度生成器，读档时以它为准。
   `gen-world <java>` 用官方出题、调**游戏里同一份** `generate_chunk` 逐格对拍，多种子 0 不一致。
+  `gen-world --level-type large_biomes|amplified` 还把这两种世界换上对应的官方
+  `NoiseGeneratorSettings` 逐方块对拍 0 不一致（三种共用 `minecraft:overworld` 群系预设）。
+- **出生点**照官方 `MinecraftServer.setInitialSpawn` 整条链移植：`NoiseBasedChunkGenerator.getOrigin`
+  → `NoiseSpawnFinder` 的气候螺旋 + `SpawnTargetPoint.sampleFitness`（`mc-bamboo-worldgen::spawn`），
+  暂定点 `(spawnChunk*16+8, 64, +8)`，`PlayerSpawnFinder` 的 11×11 区块螺旋 + 三种高度图 +
+  流体/碰撞判定和 `fixupSpawnHeight` 兜底；奖励箱按专用服务端默认关闭。`spawn <java>`
+  对拍在 `normal` / `large_biomes` / `amplified` 上多个种子把出生区块和最终出生点与官方
+  逐个比，0 不一致。`saved-data` 让官方 `WorldGenSettings.CODEC` 复核了噪声生成器的形状
+  （三种 settings id 都过）。
+- **flat `generator-settings`** 照 `FlatLevelGeneratorSettings.CODEC` 解析全部五个字段
+  （`layers` / `biome` / `features` / `lakes` / `structure_overrides`）并写进
+  `world_gen_settings.dat`；`flat-world <java>` 让官方 `FlatLevelSource.buildTerrain` 与
+  `generate_chunk` 逐方块对拍，5 组配置 / 491520 个方块 0 不一致。
+- release 实测 `generate_chunk` 各阶段耗时、在 `normal` 世界上跑了 6 个飞行假玩家的压测
+  （生成不占世界线程、默认 4 线程会积压区块），数字和计算池默认线程数建议见 `docs/worldgen.md`。
 
 已知限制：
 
@@ -404,13 +419,24 @@ WebView2 的渲染进程不算在内。
   高度图只由 `Chunk::from_sections` 从方块重算 4 张，后期处理位置表、`ProtoChunk` 其余字段、
   非 `full` 区块从盘上读回后按状态继续生成，都还没逐项对拍。`ChunkColumn::from_parts`
   产出的盒子 `untouched=false`，生成的区块一律算「改过」而写盘，官方可以丢弃原样生成区块。
-  出生点是 `MinecraftServer.setInitialSpawn` 的**简化版**：从原点区块起按官方 11×11 螺旋、
-  用 quart 群系粗略排除海洋后找一块不淹水的地表，没有 `NoiseSpawnFinder` 的气候螺旋定位、
-  没有 `PlayerSpawnFinder` 的碰撞盒 / 高度图三重判定、没有奖励箱；flat 世界仍是旧的超平坦出生点。
+  出生点的 `setInitialSpawn` 链已按官方逐段移植并对拍（`getOrigin` 气候螺旋、
+  `PlayerSpawnFinder` 的 11×11 螺旋 + 高度图/流体/碰撞、`fixupSpawnHeight` 兜底），
+  但**只比较到 CARVERS 地形**：地物/结构/光照还没接进游戏，官方真实世界里树、雪层、
+  结构会改变 `MOTION_BLOCKING` 高度图和落点，Bamboo 目前算的是没有这些内容的地表，
+  因此个别种子的实际出生点仍可能和满配官方世界不同；等 `full` 阶段补齐后要重跑
+  `spawn` 对拍。`getCollisionShape` 在 Java 对拍里用 `EmptyBlockGetter`、在 Rust 里用
+  `COLLISION_FULL_BLOCK` 事实近似，对 CARVERS 的完整方块/流体/空气等价。`setInitialSpawn`
+  本身不调 `fixupSpawnHeight`（那是 `PlayerSpawnFinder.findSpawn` 进服兜底），Bamboo 只在
+  11×11 整片找不到落点这一罕见情形用它，且在实测种子上是恒等变换。flat 世界仍保留旧的
+  超平坦出生点（`(8, 0, 8)`），`initial_spawn` 只对三种噪声世界生效；flat 的
+  `features` / `lakes` / `structure_overrides` 已解析并写入存档，但超平坦地形只填地层和群系，
+  不生成地物/湖/结构（对应阶段没接）。奖励箱按官方专用服务端默认关闭。
   随机种子（`level-seed` 为空）用 `nanoTime ^ uniquifier` 近似官方 `RandomSupport`，进程内固定，
-  只和官方「空种子 = 随机」的语义一致、不逐位比较。`fly-20` 飞行压测没实跑，计算池默认
-  取核数一半夹在 1..=4，换上真实地物/结构后要重量。下界和末地、非空
-  `BlendingData` / `Beardifier` 也没做。按区块分格插值（官方 `interpolated` 的成批求值）
+  只和官方「空种子 = 随机」的语义一致、不逐位比较。`normal` 世界的飞行压测已实跑：生成
+  不占世界线程（`tick_total` p50 0.12–1.18 ms），但默认 4 线程在 6 个飞行玩家下会积压
+  区块（backlog 峰值 436、区块延迟数秒）；计算池默认仍取核数一半夹在 1..=4（不盲目调高，
+  内存吃紧），部署可显式加大，换上真实地物/结构后要重量，见 `docs/worldgen.md`。
+  下界和末地、非空 `BlendingData` / `Beardifier` 也没做。按区块分格插值（官方 `interpolated` 的成批求值）
   在区块网格上已由 `chunkgen` 覆盖，单点 `worldgen` 对拍里跳过这批函数。
 
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
@@ -859,7 +885,19 @@ cargo run --release -p mc-bamboo-vanilla -- chunkgen <java 路径> \
 
 ```bash
 cargo run --release -p mc-bamboo-vanilla -- gen-world <java 路径> \
-    [--seeds N] [--chunks N] [--salt S] [--show N]
+    [--seeds N] [--chunks N] [--salt S] [--level-type normal|large_biomes|amplified] [--show N]
+```
+
+`spawn` 让官方 `MinecraftServer.setInitialSpawn` 出题（出生区块 + 最终出生点），Bamboo 侧
+调游戏里那份 `initial_spawn`，三种噪声世界、多个种子逐个比；`flat-world` 让官方
+`FlatLevelGeneratorSettings.CODEC` + `FlatLevelSource.buildTerrain` 出题，Bamboo 侧调
+`FlatSettings::parse` + `generate_chunk`，逐字段、逐方块比较。两者都支持
+`--break-self-test`：
+
+```bash
+cargo run --release -p mc-bamboo-vanilla -- spawn <java 路径> \
+    [--seeds N] [--salt S] [--level-type normal|large_biomes|amplified] [--show N]
+cargo run --release -p mc-bamboo-vanilla -- flat-world <java 路径> [--show N]
 ```
 
 存档的编解码层也一样：官方 `SerializableChunkData.parse` 读 Bamboo 写出的区块 NBT 再
