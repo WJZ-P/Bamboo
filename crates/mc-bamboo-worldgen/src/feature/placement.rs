@@ -35,6 +35,18 @@ pub enum Modifier {
     ///
     /// `BlockPredicateFilter`: passes a candidate through unchanged, no random.
     BlockPredicateFilter(BlockPredicate),
+    /// `NoiseThresholdCountPlacement`：BIOME_INFO_NOISE 阈值决定重复次数。
+    NoiseThresholdCount {
+        noise_level: f64,
+        below_noise: i32,
+        above_noise: i32,
+    },
+    /// `NoiseBasedCountPlacement`：噪声线性映射后 ceil 决定重复次数。
+    NoiseBasedCount {
+        noise_to_count_ratio: i32,
+        noise_factor: f64,
+        noise_offset: f64,
+    },
     /// 已解析但本轮不生效的修饰器（例如 `surface_relative_threshold_filter`）。
     /// 命中时置 `unsupported`，让对拍跳过这个区块。
     Unsupported(String),
@@ -88,6 +100,24 @@ impl Modifier {
                     Self::Unsupported(kind.to_owned())
                 }
             }
+            // 两个 `RepeatingPlacement.count`：噪声是静态的，不消费随机数。
+            // Two `RepeatingPlacement.count` variants: the noise is static, no random consumed.
+            "minecraft:noise_threshold_count" => Self::NoiseThresholdCount {
+                noise_level: field("noise_level")?.as_f64().ok_or("bad noise_level")?,
+                below_noise: field("below_noise")?.as_i64().ok_or("bad below_noise")? as i32,
+                above_noise: field("above_noise")?.as_i64().ok_or("bad above_noise")? as i32,
+            },
+            "minecraft:noise_based_count" => Self::NoiseBasedCount {
+                noise_to_count_ratio: field("noise_to_count_ratio")?
+                    .as_i64()
+                    .ok_or("bad noise_to_count_ratio")?
+                    as i32,
+                noise_factor: field("noise_factor")?.as_f64().ok_or("bad noise_factor")?,
+                noise_offset: object
+                    .get("noise_offset")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+            },
             _ => Self::Unsupported(kind.to_owned()),
         })
     }
@@ -182,6 +212,40 @@ fn modify(
         // `PlacementFilter.modify`: forward origin only when shouldPlace is true.
         Modifier::BlockPredicateFilter(predicate) => {
             if predicate.test(ctx.world, pos) {
+                out.push(pos);
+            }
+        }
+        // `Biome.BIOME_INFO_NOISE.get(x/200, z/200)` 与阈值比较，重复 below/above 次。
+        Modifier::NoiseThresholdCount {
+            noise_level,
+            below_noise,
+            above_noise,
+        } => {
+            let noise = f64::from(crate::biome_temperature::biome_info_noise(
+                f64::from(x) / 200.0,
+                f64::from(z) / 200.0,
+            ));
+            let count = if noise < *noise_level {
+                *below_noise
+            } else {
+                *above_noise
+            };
+            for _ in 0..count.max(0) {
+                out.push(pos);
+            }
+        }
+        // `ceil((noise + offset) * ratio)` 次，噪声按 `x/noiseFactor, z/noiseFactor` 取样。
+        Modifier::NoiseBasedCount {
+            noise_to_count_ratio,
+            noise_factor,
+            noise_offset,
+        } => {
+            let noise = f64::from(crate::biome_temperature::biome_info_noise(
+                f64::from(x) / *noise_factor,
+                f64::from(z) / *noise_factor,
+            ));
+            let count = ((noise + *noise_offset) * f64::from(*noise_to_count_ratio)).ceil() as i32;
+            for _ in 0..count.max(0) {
                 out.push(pos);
             }
         }
@@ -375,5 +439,48 @@ mod tests {
         )
         .unwrap();
         assert!(!Modifier::parse(&cane).unwrap().is_supported());
+    }
+
+    #[test]
+    fn parses_noise_count_modifiers() {
+        let threshold: Value = serde_json::from_str(
+            r#"{"type":"minecraft:noise_threshold_count","noise_level":-0.8,"below_noise":4,"above_noise":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            Modifier::parse(&threshold).unwrap(),
+            Modifier::NoiseThresholdCount {
+                below_noise: 4,
+                above_noise: 1,
+                ..
+            }
+        ));
+        assert!(Modifier::parse(&threshold).unwrap().is_supported());
+        let based: Value = serde_json::from_str(
+            r#"{"type":"minecraft:noise_based_count","noise_to_count_ratio":10,"noise_factor":200.0,"noise_offset":0.3}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            Modifier::parse(&based).unwrap(),
+            Modifier::NoiseBasedCount {
+                noise_to_count_ratio: 10,
+                ..
+            }
+        ));
+        assert!(Modifier::parse(&based).unwrap().is_supported());
+        // `noise_offset` 缺省为 0.0。
+        let no_offset: Value = serde_json::from_str(
+            r#"{"type":"minecraft:noise_based_count","noise_to_count_ratio":5,"noise_factor":100.0}"#,
+        )
+        .unwrap();
+        assert!(Modifier::parse(&no_offset).unwrap().is_supported());
+    }
+
+    #[test]
+    fn biome_info_noise_is_static_and_deterministic() {
+        let a = crate::biome_temperature::biome_info_noise(12.5, -34.25);
+        let b = crate::biome_temperature::biome_info_noise(12.5, -34.25);
+        assert_eq!(a, b);
+        assert_ne!(a, crate::biome_temperature::biome_info_noise(13.5, -34.25));
     }
 }

@@ -138,6 +138,15 @@ fn static_noises() -> &'static StaticNoises {
     })
 }
 
+/// `Biome.BIOME_INFO_NOISE.get(x, z)`：静态 SimplexNoise，与世界种子无关，
+/// `NoiseThresholdCountPlacement` / `NoiseBasedCountPlacement` 用它决定重复次数。
+///
+/// `Biome.BIOME_INFO_NOISE.get(x, z)`: the static SimplexNoise (independent of the world
+/// seed) used by the two noise-based count placements.
+pub fn biome_info_noise(x: f64, z: f64) -> f32 {
+    static_noises().biome_info.get2(x, z)
+}
+
 /// `TemperatureModifier.FROZEN.modifyTemperature`：两处噪声都偏小时温度变成 0.2。
 fn frozen_modifier(noises: &StaticNoises, x: i32, z: i32, base: f32) -> f32 {
     let xf = f64::from(x);
