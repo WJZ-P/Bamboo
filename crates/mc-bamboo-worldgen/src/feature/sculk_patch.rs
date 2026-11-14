@@ -264,6 +264,10 @@ fn update_one(
     }
     let mut state = world.get_block(cursor.pos.0, cursor.pos.1, cursor.pos.2);
     let mut behaviour = Behaviour::of(state);
+    // 官方是 `if (spreadVeins && attemptSpreadVein(...)) { if (canChangeBlockStateOnSpread()) {...} }`。
+    // 两层的短路语义保持原样，合并成一个条件不影响求值顺序。
+    // Vanilla nests `if (canChangeBlockStateOnSpread())` inside the spread attempt; the
+    // short-circuit order is unchanged by folding the outer pair.
     if spread_veins
         && attempt_spread_vein(
             behaviour,
@@ -272,11 +276,10 @@ fn update_one(
             state,
             cursor.facings.as_deref(),
         )
+        && behaviour.can_change_block_state_on_spread()
     {
-        if behaviour.can_change_block_state_on_spread() {
-            state = world.get_block(cursor.pos.0, cursor.pos.1, cursor.pos.2);
-            behaviour = Behaviour::of(state);
-        }
+        state = world.get_block(cursor.pos.0, cursor.pos.1, cursor.pos.2);
+        behaviour = Behaviour::of(state);
     }
 
     cursor.charge = attempt_use_charge(behaviour, cursor, world, origin, random, spread_veins);
@@ -591,10 +594,10 @@ fn discharged_vein(world: &mut FeatureWorld<'_>, state: u32, pos: Pos) {
         }
         let (dx, dy, dz) = offset(direction);
         let neighbour = world.get_block(pos.0 + dx, pos.1 + dy, pos.2 + dz);
-        if block_id_of_state(neighbour) == block_id_of_state(blocks::SCULK) {
-            if let Some(cleared) = with_property(new_state, face_property(direction), "false") {
-                new_state = cleared;
-            }
+        if block_id_of_state(neighbour) == block_id_of_state(blocks::SCULK)
+            && let Some(cleared) = with_property(new_state, face_property(direction), "false")
+        {
+            new_state = cleared;
         }
     }
     if !Direction::ALL.iter().any(|&face| has_face(new_state, face)) {
@@ -970,11 +973,11 @@ fn regrow(
     for &face in faces {
         let (dx, dy, dz) = offset(face);
         let neighbour = world.get_block(pos.0 + dx, pos.1 + dy, pos.2 + dz);
-        if can_attach_to(neighbour, face) {
-            if let Some(state) = with_property(new_state, face_property(face), "true") {
-                new_state = state;
-                any = true;
-            }
+        if can_attach_to(neighbour, face)
+            && let Some(state) = with_property(new_state, face_property(face), "true")
+        {
+            new_state = state;
+            any = true;
         }
     }
     if !any {
