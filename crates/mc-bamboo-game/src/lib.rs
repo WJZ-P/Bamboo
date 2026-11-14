@@ -130,3 +130,15 @@ pub fn saved_data_samples() -> (mc_bamboo_nbt::Tag, mc_bamboo_nbt::Tag) {
         save_data::world_border_tag(&border),
     )
 }
+
+/// 供 `mc-bamboo-vanilla saved-data` 对拍：返回 Bamboo 编码器给这份配置写出的
+/// `world_gen_settings.dat` 的 `data` 复合标签，让官方 `WorldGenSettings.CODEC` 复核
+/// 噪声生成器的形状。只在 `oracle-samples` feature 下编进库里。
+///
+/// Sample Bamboo's `world_gen_settings.dat` `data` compound for the official
+/// `WorldGenSettings.CODEC` to validate the noise generator shape. Gated behind
+/// the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn world_gen_settings_sample(config: &WorldGenConfig) -> mc_bamboo_nbt::Tag {
+    world_gen_settings::encode(config)
+}
