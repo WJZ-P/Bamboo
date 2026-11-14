@@ -111,6 +111,19 @@ pub struct ServerConfig {
     /// Embedded use defaults to superflat / seed 0; a world created from
     /// `server.properties` is switched to the official default `normal`.
     pub world_gen: WorldGenConfig,
+    /// 官方 `server.properties` 的 `broadcast-console-to-ops`：控制台命令反馈要不要
+    /// 广播给在线 OP。默认 true。
+    ///
+    /// Official `server.properties` `broadcast-console-to-ops`: whether console command
+    /// feedback is broadcast to online ops. Defaults to true.
+    pub broadcast_console_to_ops: bool,
+    /// 要不要起读 stdin 的控制台输入线程。命令行版（从 `server.properties` 建的配置）
+    /// 打开；嵌入式用法（测试、oracle、压测、桌面端 GUI）关掉，不去读进程 stdin。
+    ///
+    /// Whether to start the stdin-reading console thread. Enabled for the CLI (config
+    /// built from `server.properties`); disabled for embedded use (tests, oracle, load
+    /// tests, the desktop GUI) so they do not read the process stdin.
+    pub console_enabled: bool,
 }
 
 impl Default for ServerConfig {
@@ -138,6 +151,8 @@ impl Default for ServerConfig {
             chunk_worker_threads: 0,
             mail_budget: MailBudget::default(),
             world_gen: WorldGenConfig::default(),
+            broadcast_console_to_ops: true,
+            console_enabled: false,
         }
     }
 }
