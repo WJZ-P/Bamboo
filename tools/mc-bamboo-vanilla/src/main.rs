@@ -151,6 +151,8 @@ mod storage_oracle;
 #[cfg(feature = "oracle")]
 mod structure_generation;
 #[cfg(feature = "oracle")]
+mod structure_load;
+#[cfg(feature = "oracle")]
 mod structure_pieces;
 #[cfg(feature = "oracle")]
 mod structure_rings;
@@ -226,6 +228,8 @@ const STRUCTURE_SINGLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSin
 #[cfg(feature = "oracle")]
 const STRUCTURE_SAVE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSaveOracle.java";
 #[cfg(feature = "oracle")]
+const STRUCTURE_LOAD_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureLoadOracle.java";
+#[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 #[cfg(feature = "oracle")]
 const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
@@ -268,6 +272,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-generation <java 路径>
       mc-bamboo-vanilla structure-single <java 路径>
       mc-bamboo-vanilla structure-save <java 路径>
+      mc-bamboo-vanilla structure-load <java 路径>
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -329,6 +334,7 @@ fn run() -> Result<(), String> {
         ["structure-generation", java, ref options @ ..] => structure_generation_cli(java, options),
         ["structure-single", java, ref options @ ..] => structure_single_cli(java, options),
         ["structure-save", java, ref options @ ..] => structure_save_cli(java, options),
+        ["structure-load", java, ref options @ ..] => structure_load_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
@@ -609,6 +615,17 @@ fn structure_save_cli(java: &str, options: &[&str]) -> Result<(), String> {
     structure_save::run(
         official_program(java, STRUCTURE_SAVE_SOURCE)?,
         java,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_load_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let queries_path = root.join(WORK_DIR).join("structure_load_queries.txt");
+    structure_load::run(
+        official_program(java, STRUCTURE_LOAD_SOURCE)?,
+        &queries_path,
         options,
     )
 }
@@ -897,6 +914,11 @@ fn beard_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn structure_save_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_load_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

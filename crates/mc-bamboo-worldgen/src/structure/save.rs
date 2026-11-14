@@ -453,10 +453,10 @@ pub fn regenerate_monument(chunk_x: i32, chunk_z: i32, seed: i64, saved: &[Piece
     // Vanilla draws getRandomDirection even when the saved orientation wins, so the
     // random source is aligned with the original MonumentBuilding construction.
     let default_dir = HDir::random(&random);
-    let dir = if (0..4).contains(&old.o) {
-        HDir::from_2d(old.o)
-    } else {
+    let dir = if old.o < 0 {
         default_dir
+    } else {
+        HDir::from_2d(old.o)
     };
     ocean_monument::monument_building(&random, west, north, dir)
 }
@@ -741,5 +741,62 @@ mod tests {
         assert_eq!((start.chunk_x, start.chunk_z, start.references), (3, -9, 1));
         assert_eq!(start.pieces.len(), 1);
         assert_eq!(start.pieces[0].id, "minecraft:shpr");
+    }
+
+    #[test]
+    fn regenerate_monument_matches_generation_from_save_fields() {
+        use crate::structure::pieces::ocean_monument;
+
+        for seed in [0_i64, 42, -7, 12_345_678_901] {
+            for (cx, cz) in [(0, 0), (1, -1), (34, 50)] {
+                let generated = ocean_monument::generate(seed, cx, cz);
+                // 存档只保留第 0 项（MonumentBuilding）。
+                // Saving keeps only index 0 (the MonumentBuilding).
+                let saved: Vec<Piece> = vec![generated[0].clone()];
+                let rebuilt = regenerate_monument(cx, cz, seed, &saved);
+                assert_eq!(
+                    rebuilt, generated,
+                    "seed {seed} chunk {cx},{cz}: rebuilt room graph differs"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn regenerate_monument_uses_the_saved_orientation() {
+        use crate::structure::pieces::{HDir, ocean_monument};
+
+        let generated = ocean_monument::generate(7, 3, -5);
+        let mut saved = vec![generated[0].clone()];
+        // 存档朝向换成相反方向：官方用存档朝向建 MonumentBuilding，但取数位置不变。
+        // Swap the saved orientation: vanilla builds with it while the draw position
+        // stays aligned.
+        saved[0].o = HDir::from_2d(saved[0].o).opposite().to_2d();
+        let rebuilt = regenerate_monument(3, -5, 7, &saved);
+        assert_eq!(rebuilt[0].o, saved[0].o);
+        assert_ne!(rebuilt[0].o, generated[0].o);
+        // 房间图仍按同一随机序列重建，件数不变，但包围盒跟着朝向变。
+        // The room graph is still rebuilt from the same draws: same piece count, boxes follow.
+        assert_eq!(rebuilt.len(), generated.len());
+        assert_ne!(rebuilt[1].bb, generated[1].bb);
+    }
+
+    #[test]
+    fn regenerate_monument_falls_back_when_the_saved_orientation_is_missing() {
+        use crate::structure::pieces::ocean_monument;
+
+        let generated = ocean_monument::generate(11, 2, 4);
+        let mut saved = vec![generated[0].clone()];
+        saved[0].o = -1;
+        let rebuilt = regenerate_monument(2, 4, 11, &saved);
+        // `O = -1` 时官方 `getOrientation()` 为 null，退回本次取到的方向。
+        // With `O = -1` vanilla's `getOrientation()` is null, so the drawn direction wins.
+        assert!((0..4).contains(&rebuilt[0].o));
+        assert_eq!(rebuilt.len(), generated.len());
+    }
+
+    #[test]
+    fn regenerate_monument_of_nothing_stays_empty() {
+        assert!(regenerate_monument(0, 0, 0, &[]).is_empty());
     }
 }
