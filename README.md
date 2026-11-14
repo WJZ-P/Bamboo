@@ -10,7 +10,7 @@ A Minecraft server written from scratch in Rust
 
 </div>
 
-> 项目处于早期阶段。多名玩家已经能用 Minecraft 26.3 进入同一个超平坦世界，走动、互相看见、放置和破坏方块、在生存模式里按方块硬度和工具挖方块、在告示牌上写字、用书与笔写字并署名、阅读成书、把书放到讲台上翻页、让活塞推方块、打开箱子、聊天。放置方块仍然不扣物品（往讲台上放书是例外：生存模式扣一本，创造模式不扣）。生存和冒险模式挖掉方块会按战利品表掉在地上，地上的物品能捡起来，按 Q 能丢出来。有 Anvil 存档：关服再开，改过的区块、方块实体、计划刻、三种实体、玩家位置和物品栏都还在，官方服务端能接着读这个世界目录（见「存档」一节和下面的已知限制）。服务器目录里的 `server.properties` / `bamboo.toml` 可以调视距、线程数、红石缓存和区块计算池；世界目录按 `level-name` 放在服务器目录下。
+> 项目处于早期阶段。多名玩家已经能用 Minecraft 26.3 进入同一个世界，走动、互相看见、放置和破坏方块、在生存模式里按方块硬度和工具挖方块、在告示牌上写字、用书与笔写字并署名、阅读成书、把书放到讲台上翻页、让活塞推方块、打开箱子、聊天。新世界默认 `normal`（和官方一样的噪声地形：群系、地表、洞穴峡谷），`level-type=flat` 可切回超平坦；terrain 阶段的纯函数已接进 Director 流水线并逐方块对拍 0 不一致，但**还没有地物、结构和生物**（见下面世界生成的已知限制）。放置方块仍然不扣物品（往讲台上放书是例外：生存模式扣一本，创造模式不扣）。生存和冒险模式挖掉方块会按战利品表掉在地上，地上的物品能捡起来，按 Q 能丢出来。有 Anvil 存档：关服再开，改过的区块、方块实体、计划刻、三种实体、玩家位置和物品栏都还在，官方服务端能接着读这个世界目录（见「存档」一节和下面的已知限制）。服务器目录里的 `server.properties` / `bamboo.toml` 可以调视距、线程数、红石缓存、区块计算池，以及 `level-seed` / `level-type` / `generator-settings` / `generate-structures` 四个世界生成键；世界目录按 `level-name` 放在服务器目录下。
 
 ## 运行
 
@@ -97,9 +97,13 @@ WebView2 的渲染进程不算在内。
   最近还没匀速轮到的脏改动和没落完的快照；`/save-off` 期间不写盘也不卸载。
   方块实体里不存档的运行态（容器开合人数、告示牌编辑中的玩家）改了不标脏；
   以后接结构、生物群系存档时要补上对应的标脏入口。
-- 只持久化改动过的（脏）区块。没改过的按超平坦模板重建；`data/minecraft/world_gen_settings.dat`
-  用官方 `WorldGenSettings.CODEC` 编出 `minecraft:flat` 生成器，层和 Bamboo 的超平坦
-  模板一致，官方服务端打开这个世界后新生成的区块和 Bamboo 相同（Q9）。
+- 只持久化改动过的（脏）区块。flat 世界没改过的按超平坦模板重建；噪声世界生成的区块
+  一律算「改过」而写盘（官方可以丢弃原样生成区块，见世界生成已知限制）。
+  `data/minecraft/world_gen_settings.dat` 用官方 `WorldGenSettings.CODEC` 写出这一局的
+  种子和维度生成器：flat 写 `minecraft:flat` + 地层（层和超平坦模板一致），噪声世界写
+  `minecraft:noise` + `biome_source` / `settings` 注册名；读档时以它为准，空 `level-seed`
+  的随机种子重启后固定。`saved-data` 子命令对拍的是导出的**超平坦默认值常量**；运行时
+  编码的噪声世界形状只验证了 Bamboo 自己读写一致，没单独用官方 codec 复核。
 - 玩家数据只恢复已建模字段：位置取整到方块（小数部分丢掉、不补发位置包）、朝向、
   游戏模式、物品栏、末影箱、选中槽。血量、经验、能力、饥饿、食物等运行时没建模，
   保存用官方默认值。
@@ -109,7 +113,8 @@ WebView2 的渲染进程不算在内。
   世界边界用 `WorldBorder::export_settings` / `restore`（`restore` 传存档里的游戏时间）
   写到官方按维度存放的 `dimensions/minecraft/overworld/data/minecraft/world_border.dat`，
   启动时读回。`data/minecraft/world_gen_settings.dat` 写官方 `WorldGenSettings.CODEC`
-  编出的超平坦默认值（层与模板一致）。这些文件都用官方 codec 对拍（`saved-data` 子命令）。
+  形状的种子与维度生成器（见上一条），读档时再读回。游戏规则 / 世界边界 / 导出的超平坦
+  默认值常量用官方 codec 对拍（`saved-data` 子命令）。
   天气、世界时钟、计划事件、流浪商人、自定义 Boss 栏、末影龙战斗这些没建模的
   saved data 不写文件（官方 `computeIfAbsent` 会自己造默认值）；`/weather` 不写存档。
   `chunk_tickets.dat` 写空 `tickets` 列表（无 `/forceload`）。
@@ -133,7 +138,8 @@ WebView2 的渲染进程不算在内。
 
 ## 现在能玩什么
 
-- 多名玩家进入同一个超平坦世界；登录模式由服务器目录里的 `online-mode` 决定（官方默认正版验证）。
+- 多名玩家进入同一个世界；新世界默认 `normal`（噪声地形，见上面世界生成一节），
+  `level-type=flat` 用超平坦；登录模式由服务器目录里的 `online-mode` 决定（官方默认正版验证）。
 - 默认按官方 `server.properties` 的 `online-mode=true` 走正版验证；官方未实现的键原样保留、
   写回并在启动日志里列出「现在不起作用」。要离线直连就要在 `server.properties` 里写
   `online-mode=false`（`probe` / 单元测试 / 压测工具的内置 `serve` 用 `ServerConfig::default()`，本来就是离线）。
@@ -337,9 +343,8 @@ WebView2 的渲染进程不算在内。
   每刻推进半格，到一格时把方块放回去并更新邻居，动画期间被破坏也有官方的处理。官方客户端会收到方块事件，
   播放伸出和收回的动画。`PushReaction` 和推不动的方块来自官方导出的数据。
 
-世界生成的数学已经移植好了；**区块级的主世界 `BIOMES` 和噪声填充（`doFill`）也已有纯函数
-和官方逐方块 / 逐群系对拍**，但整套生成还没接进游戏，游戏里用的仍然只有群系温度（天气），
-世界还是超平坦：
+世界生成的数学已经移植好了；**主世界 `terrain`（`doFill` + 地表规则 + 雕刻器）的纯函数
+已接进 Director 的多阶段生成流水线**，新世界默认 `normal`（噪声世界），不再是超平坦：
 
 - `mc-bamboo-worldgen` 是「种子 + 坐标 → 数值」的纯函数：官方的随机源（`XoroshiroRandomSource`、
   `RandomSupport` 的种子混合、两种 `PositionalRandomFactory`、`WorldgenRandom` 的种子设置）、
@@ -352,10 +357,16 @@ WebView2 的渲染进程不算在内。
 - 用官方代码出题比对：几十万个点上每条噪声的两条路径、每条注册表密度函数和七套维度设置的
   噪声路由的两条路径、三个维度的群系，以及 67 个群系在几处坐标上的 `Biome.getTemperature`
   （含固定种子的三份噪声和 `frozen` 修饰），浮点按 `Float.floatToRawIntBits` 逐位相同。
-- 区块级的 `chunkgen` 对拍另有一道：官方在 JVM 里用 `ChunkGenerator` / `RandomState` /
-  `ProtoChunk` 生成同一个主世界区块到 `BIOMES` 和噪声填充，逐格比较群系注册表和方块，
-  0 不一致（命令和耗时见 `docs/worldgen.md`）。含水层、成批密度求值和官方 sampler 缓存
-  也已移植；这是纯函数加 oracle，**没有接进 Director 的生成流水线**。
+- 区块级的 `chunkgen` 对拍：官方在 JVM 里用 `ChunkGenerator` / `RandomState` / `ProtoChunk`
+  生成同一个主世界区块到 `BIOMES` / `NOISE` / `SURFACE` / `CARVERS`，逐格比较群系和方块，
+  0 不一致（命令和耗时见 `docs/worldgen.md`）。含水层、成批密度求值和官方 sampler 缓存也已移植。
+- **接进游戏**（`docs/worldgen.md`「接进游戏」）：`server.properties` 的 `level-seed` /
+  `level-type` / `generator-settings` / `generate-structures` 生效，认 `normal` / `flat` /
+  `large_biomes` / `amplified`；`World::build` 对非 flat 世界用 `PipelineKind::Staged` 按
+  `ChunkPyramid` 派十个 `ChunkStatus` 阶段，`biomes` 写 quart 群系、`terrain` 写跑完
+  CARVERS 的方块并重算高度图，默认起一个小计算池把生成移出世界线程；
+  `world_gen_settings.dat` 按官方 `WorldGenSettings.CODEC` 持久化种子与维度生成器，读档时以它为准。
+  `gen-world <java>` 用官方出题、调**游戏里同一份** `generate_chunk` 逐格对拍，多种子 0 不一致。
 
 已知限制：
 
@@ -377,12 +388,29 @@ WebView2 的渲染进程不算在内。
   边界状态写进官方按维度存放的 `dimensions/minecraft/overworld/data/minecraft/world_border.dat`
   （`export_settings` / `restore`，`restore` 传存档里的游戏时间），启动时读回，编码和官方
   `WorldBorder.Settings.CODEC` 对拍。边界伤害的警告遮罩、`BorderStatus.getColor` 由客户端自己算。
-- 世界生成接进游戏的部分仍然只有群系温度：区块生成的流程、线程和区块状态都没动，世界仍然是超平坦。
-  已有的纯函数覆盖了主世界的 `BIOMES` 和噪声填充（`doFill`，含官方含水层与成批密度路径），
-  但没接进 Director；地表规则、雕刻器、地物、结构、光照、高度图和出生点查找都没做，
-  接进游戏时 `possibleBiomes` 还要从对拍用的「全部群系」改成官方的周围 3×3 区块群系调色板并集并重新对拍。
-  按区块分格插值（官方 `interpolated` 的成批求值）现在在区块网格上已由 `chunkgen` 覆盖，
-  单点 `worldgen` 对拍里跳过这批函数。下界和末地、非空 `BlendingData` / `Beardifier` 也没做。
+- **世界生成（本轮接入）的已知限制**：`biomes` / `terrain` 阶段接了真生成并逐方块对拍 0 不一致，
+  但 `structure_starts` / `structure_references` 是空实现、`features` / `initialize_light` /
+  `light` / `spawn` / `full` 阶段原样透传。也就是说游戏里**没有地物、没有结构、不刷怪**：
+  第 6 步矿石的纯函数只在对拍里跑、没接进游戏（地物 A/B 在做），结构接口留给结构队员。
+  生成时的光照不写在流水线里：生成的 `RegionColumn` 带 `isLightOn=false`、空光照层，
+  交付后由**运行时**光照引擎补算（设计稿 5.6），和官方在流水线里算完 `light` 的时机不同，
+  边界上可能短暂偏暗；方块光（岩浆等）没有被生成阶段专门初始化。
+  设计稿 5.3.1 的多阶段**邻居只读快照 `Arc<ProtoChunk>` 和 `FeatureResult.deltas` 按
+  `TaskId` 合并还没做**：`Task::Generate.neighbors` 恒为空，features / 生成时 light 拿不到
+  半径 1 的邻居视图，这才是它们先透传的原因。`possibleBiomes` 仍用对拍的「全部群系 /
+  uncached resolver」简化路径，没换成官方周围 3×3 区块调色板并集（`BiomeCondition.compile`
+  的静态优化、雕刻器的 `carverBiome` 分支都还没按真实服务端的样子重新对拍）。
+  高度图只由 `Chunk::from_sections` 从方块重算 4 张，后期处理位置表、`ProtoChunk` 其余字段、
+  非 `full` 区块从盘上读回后按状态继续生成，都还没逐项对拍。`ChunkColumn::from_parts`
+  产出的盒子 `untouched=false`，生成的区块一律算「改过」而写盘，官方可以丢弃原样生成区块。
+  出生点是 `MinecraftServer.setInitialSpawn` 的**简化版**：从原点区块起按官方 11×11 螺旋、
+  用 quart 群系粗略排除海洋后找一块不淹水的地表，没有 `NoiseSpawnFinder` 的气候螺旋定位、
+  没有 `PlayerSpawnFinder` 的碰撞盒 / 高度图三重判定、没有奖励箱；flat 世界仍是旧的超平坦出生点。
+  随机种子（`level-seed` 为空）用 `nanoTime ^ uniquifier` 近似官方 `RandomSupport`，进程内固定，
+  只和官方「空种子 = 随机」的语义一致、不逐位比较。`fly-20` 飞行压测没实跑，计算池默认
+  取核数一半夹在 1..=4，换上真实地物/结构后要重量。下界和末地、非空
+  `BlendingData` / `Beardifier` 也没做。按区块分格插值（官方 `interpolated` 的成批求值）
+  在区块网格上已由 `chunkgen` 覆盖，单点 `worldgen` 对拍里跳过这批函数。
 
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
   README「区块级对拍」；合并提交 `ae76868`、`9a96b5e`、`9d6e94c`）
@@ -656,7 +684,7 @@ WebView2 的渲染进程不算在内。
 | `crates/mc-bamboo-game` | 世界线程：tick、玩家、区块跟踪、实体同步、方块交互、方块实体的物品数据、聊天，不依赖 tokio |
 | `crates/mc-bamboo-protocol` | 网络协议：VarInt、帧、数据包、物品数据组件，只处理字节 |
 | `crates/mc-bamboo-world` | 游戏世界：区块、调色板、光照、超平坦，不知道网络 |
-| `crates/mc-bamboo-worldgen` | 世界生成的数学和区块级生成：随机源、噪声、密度函数、气候、群系源、官方群系温度、含水层、主世界 `BIOMES` 和 `doFill`，纯函数；游戏里只用到群系温度，生成流水线还没接 |
+| `crates/mc-bamboo-worldgen` | 世界生成的数学和区块级生成：随机源、噪声、密度函数、气候、群系源、官方群系温度、含水层、主世界 `BIOMES` / `terrain`（`doFill`+地表+雕刻器）和 features 第 6 步矿石的纯函数；`terrain` 已接进游戏流水线（在 `mc-bamboo-game::worldgen` 里组装成 `RegionColumn`），地物/结构/光照还没接 |
 | `crates/mc-bamboo-blocks` | 方块行为：放置、形状更新、破坏、右键（含工具对方块的右键）、计划刻、方块事件、会 tick 的方块实体（按事件休眠）和触发级红石缓存，纯逻辑，不知道网络和存储 |
 | `crates/mc-bamboo-command` | 命令分发和参数解析：Brigadier 风格的树、坐标、方块状态、选择器，纯逻辑，不知道网络 |
 | `crates/mc-bamboo-recipes` | 配方查找和匹配：有序、无序、烧炼、切石机、锻造、酿造和特殊配方，纯逻辑，不知道网络和世界线程 |
@@ -685,10 +713,11 @@ protocol blocks world
 `command` 依赖 `core`、`data`、`blocks` 和 `uuid`；只有 `game` 依赖它。它不认识网络，也不认识世界线程。
 `recipes` 依赖 `data` 和 `protocol`：组装产物要写组件。它不认识数据包的帧，也不认识世界线程。
 `auth` 只有 `server` 依赖它，它自己只依赖 `core`：它不认识数据包，也不认识世界线程。
-`worldgen` 的区块生成（`BIOMES` / `doFill`）还是纯函数、没接进游戏；`game` 只用它算
-`Biome.getTemperature`（天气的结冰、积雪和降水类型），工具里的 `chunkgen` / `worldgen` oracle
-用其余的数学。它依赖 `data`（官方导出的世界生成数据和群系气候表）和
-`blocks`（里面有官方的 `LegacyRandomSource`）。
+`worldgen` 是纯函数；`game` 现在既用它算 `Biome.getTemperature`（天气的结冰、积雪和降水
+类型），也在 `game::worldgen` 里调它的 `BIOMES` / `terrain` 生成区块接进 Director 流水线
+（`worldgen` 本身不认识世界线程，`RegionColumn` 的组装在 `game`）。工具里的
+`chunkgen` / `worldgen` / `gen-world` oracle 用其余的数学并逐格对拍。它依赖 `data`
+（官方导出的世界生成数据和群系气候表）和 `blocks`（里面有官方的 `LegacyRandomSource`）。
 `loot` 算方块掉落、实体死亡和箱子填充，由 `game` 在挖掘、爆炸、`destroyBlock`、`/loot` 和容器第一次读写时调用；
 它依赖 `data`（嵌入的战利品表 JSON）和 `blocks`（随机源、方块状态）。
 
@@ -714,6 +743,10 @@ cargo run -p mc-bamboo-vanilla -- generate <server.jar>
 
 然后启动 Bamboo，用官方网络代码让三个客户端走一遍进服、移动、建造、聊天和开关箱子，检查收到的每个包。
 区块包里的方块和流体计数、高度图都由官方代码从解出来的方块重算，再和收到的值逐段比较：
+
+**探针是按超平坦校准的**：新世界默认已经是 `normal`，所以运行探针的服务器目录里的
+`server.properties` 必须设 `level-type=minecraft:flat`（建议同时设 `level-seed=0` 固定种子），
+否则客户端收到的是噪声地形、探针里按超平坦写死的方块断言会失败。这个文件不进仓库。
 
 ```bash
 cargo run -p mc-bamboo-vanilla -- probe 127.0.0.1 25565
@@ -802,12 +835,22 @@ cargo run --release -p mc-bamboo-vanilla -- worldgen <java 路径> \
 ```
 
 区块级对拍另有一道：官方在 JVM 里用 `ChunkGenerator`、`RandomState` 和 `ProtoChunk` 生成同一个
-主世界区块到 `biomes` 和噪声填充（26.3 的 `terrain` 步只跑 `doFill`），逐方块、逐群系比较；
+主世界区块到 `biomes`、`doFill`、地表规则和雕刻器（`--through carvers`），逐方块、逐群系比较；
 不启动服务端、不接受 EULA。细节和耗时见 `docs/worldgen.md`：
 
 ```bash
 cargo run --release -p mc-bamboo-vanilla -- chunkgen <java 路径> \
-    [--seeds N] [--chunks N] [--salt S] [--biomes-only] [--show N]
+    [--seeds N] [--chunks N] [--salt S] [--through carvers] [--show N]
+```
+
+`gen-world` 是接进游戏后的对拍：同一套官方出题，Bamboo 侧调的是**游戏里用的那份**
+`game::worldgen::generate_chunk`（`OverworldGenerator` 走 `Staged` 流水线时的纯函数）
+而不是直接调 `mc-bamboo-worldgen`，逐 quart 格、逐方块比较 CARVERS 快照；两边都不跑
+地物/结构/光照。`--break-self-test` 故意改坏一个方块，确认对拍会报不一致：
+
+```bash
+cargo run --release -p mc-bamboo-vanilla -- gen-world <java 路径> \
+    [--seeds N] [--chunks N] [--salt S] [--show N]
 ```
 
 存档的编解码层也一样：官方 `SerializableChunkData.parse` 读 Bamboo 写出的区块 NBT 再
