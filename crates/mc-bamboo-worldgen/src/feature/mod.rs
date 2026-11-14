@@ -23,6 +23,7 @@ pub mod simple_block;
 pub mod state;
 pub mod state_provider;
 pub mod survival;
+pub mod vines;
 pub mod world;
 
 /// `GenerationStep.Decoration` 的枚举项个数（26.3 是 11 个）。

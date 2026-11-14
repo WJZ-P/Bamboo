@@ -13,7 +13,7 @@ use crate::random::WorldgenRandom;
 
 use super::{
     bamboo::BambooFeature, ores, placement::OreFeature, simple_block::SimpleBlockFeature,
-    world::FeatureWorld,
+    vines::VinesFeature, world::FeatureWorld,
 };
 
 type Pos = (i32, i32, i32);
@@ -23,6 +23,7 @@ pub enum Leaf {
     Bamboo(Box<BambooFeature>),
     Ore(Box<OreFeature>),
     SimpleBlock(Box<SimpleBlockFeature>),
+    Vines(Box<VinesFeature>),
 }
 
 /// 按 `Feature` 类型 ID 解析配置；未移植或解析不了的类型返回 `None`。
@@ -54,5 +55,6 @@ pub fn place_leaf(
         Leaf::Bamboo(bamboo) => bamboo.place(world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
+        Leaf::Vines(vines) => vines.place(world, random, pos),
     }
 }
