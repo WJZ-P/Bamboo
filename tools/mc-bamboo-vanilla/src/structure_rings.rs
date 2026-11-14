@@ -13,15 +13,18 @@
 //! emits 128 ring positions plus several search results per seed; Rust recomputes with
 //! the production functions and compares every item.
 
-use std::process::Command;
+use std::{collections::HashMap, process::Command};
 
 use mc_bamboo_blocks::LegacyRandom;
 use mc_bamboo_worldgen::{
     Worldgen,
     settings::SeededRouter,
-    structure::rings::{
-        BiomeResolver, FindBiomeParams, find_biome_horizontal, resolve_allowed_biomes,
-        ring_positions,
+    structure::{
+        StructureSets, StructureState,
+        rings::{
+            BiomeResolver, FindBiomeParams, find_biome_horizontal, resolve_allowed_biomes,
+            ring_positions,
+        },
     },
 };
 
@@ -47,12 +50,20 @@ pub fn run(mut command: Command, _options: &[&str]) -> Result<(), String> {
         .preset("minecraft:overworld")
         .ok_or("missing minecraft:overworld preset")?;
     let allowed = resolve_allowed_biomes(PREFERRED_BIOMES)?;
+    let sets = StructureSets::parse(
+        worldgen
+            .raw()
+            .get("structure_set")
+            .ok_or("worldgen.json missing structure_set")?,
+    )?;
 
     let mut router: Option<(i64, SeededRouter)> = None;
+    let mut rings_by_seed: HashMap<i64, Vec<(i32, i32)>> = HashMap::new();
     let mut mismatches = Vec::new();
     let mut total_mismatches = 0usize;
     let mut ring_checks = 0usize;
     let mut biome_checks = 0usize;
+    let mut isc_checks = 0usize;
     let mut ring_seeds = 0usize;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -106,6 +117,35 @@ pub fn run(mut command: Command, _options: &[&str]) -> Result<(), String> {
                 }
             }
             router = Some((seed, fresh));
+            rings_by_seed.insert(seed, ours);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("ISC ") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            let seed: i64 = parts[0].parse().map_err(|_| format!("bad ISC: {line}"))?;
+            let count: usize = parts[1]
+                .parse()
+                .map_err(|_| format!("bad ISC count: {line}"))?;
+            let positions = rings_by_seed
+                .get(&seed)
+                .ok_or_else(|| format!("ISC before RINGS for seed {seed}"))?;
+            let mut state = StructureState::new(sets.clone());
+            state.set_ring_positions("minecraft:strongholds", positions.iter().copied());
+            for _ in 0..count {
+                let check = lines.next().ok_or("missing ISC entry")?;
+                let fields: Vec<&str> = check.split_whitespace().collect();
+                let x: i32 = fields[0].parse().map_err(|_| format!("bad x: {check}"))?;
+                let z: i32 = fields[1].parse().map_err(|_| format!("bad z: {check}"))?;
+                let want = fields[2] == "1";
+                let got = state.is_structure_chunk("minecraft:strongholds", seed, x, z);
+                isc_checks += 1;
+                if got != want {
+                    total_mismatches += 1;
+                    if mismatches.len() < 24 {
+                        mismatches.push(format!("ISC seed={seed} ({x},{z}): ours {got} vs {want}"));
+                    }
+                }
+            }
             continue;
         }
         if let Some(rest) = line.strip_prefix("B ") {
@@ -165,7 +205,7 @@ pub fn run(mut command: Command, _options: &[&str]) -> Result<(), String> {
     }
 
     println!(
-        "structure-rings: {ring_seeds} seeds, {ring_checks} ring positions, {biome_checks} findBiomeHorizontal checks"
+        "structure-rings: {ring_seeds} seeds, {ring_checks} ring positions, {biome_checks} findBiomeHorizontal checks, {isc_checks} isStructureChunk checks"
     );
     if total_mismatches == 0 {
         println!("STRUCTURE-RINGS RESULT: 0 mismatches");

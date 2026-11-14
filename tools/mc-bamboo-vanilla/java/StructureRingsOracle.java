@@ -45,6 +45,13 @@ public final class StructureRingsOracle {
         {4096, 0}, {0, 4096}, {-4096, 0}, {0, -4096}, {500, -300},
         {-500, 300}, {12345, -6789}, {-12345, 6789}, {100, 100}, {-100, -100}, {255, 127},
     };
+    // 一定不落在环位置上的区块，用来覆盖 isStructureChunk 的 false 分支。
+    // Chunks guaranteed not to be ring positions, to cover the false branch.
+    private static final int[][] NON_RING_CHUNKS = {
+        {0, 0}, {9000, 9000}, {-9000, -9000}, {12345, -5432}, {-12345, 5432},
+        {1, 1}, {-1, -1}, {50000, 50000}, {-50000, 100}, {100, -50000},
+        {7, 13}, {-7, -13}, {31337, 7}, {7, 31337}, {-31337, -7}, {-7, -31337},
+    };
 
     public static void main(String[] args) throws Exception {
         SharedConstants.tryDetectVersion();
@@ -108,6 +115,21 @@ public final class StructureRingsOracle {
             out.append("RINGS ").append(seed).append(' ').append(positions.size()).append('\n');
             for (ChunkPos pos : positions) {
                 out.append(pos.x()).append(' ').append(pos.z()).append('\n');
+            }
+
+            // 官方 ConcentricRingsStructurePlacement.isStructureChunk：环位置命中 + 若干远点。
+            // Official isStructureChunk: ring positions plus some far misses.
+            out.append("ISC ").append(seed).append(' ')
+                    .append(positions.size() + NON_RING_CHUNKS.length).append('\n');
+            for (ChunkPos pos : positions) {
+                boolean hit = placement.isStructureChunk(state, pos.x(), pos.z());
+                out.append(pos.x()).append(' ').append(pos.z()).append(' ')
+                        .append(hit ? 1 : 0).append('\n');
+            }
+            for (int[] chunk : NON_RING_CHUNKS) {
+                boolean hit = placement.isStructureChunk(state, chunk[0], chunk[1]);
+                out.append(chunk[0]).append(' ').append(chunk[1]).append(' ')
+                        .append(hit ? 1 : 0).append('\n');
             }
 
             for (int[] origin : ORIGINS) {

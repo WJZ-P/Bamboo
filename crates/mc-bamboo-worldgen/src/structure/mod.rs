@@ -23,6 +23,8 @@ pub mod registry;
 pub mod rings;
 pub mod start;
 
+use std::collections::{HashMap, HashSet};
+
 pub use placement::{
     Common, ConcentricRings, ExclusionZone, FrequencyReductionMethod, Placement, RandomSpread,
     SpreadType,
@@ -72,11 +74,32 @@ pub struct StartCandidate {
 #[derive(Debug, Clone)]
 pub struct StructureState {
     sets: StructureSets,
+    /// `concentric_rings` 结构集算好的环位置（`ChunkGeneratorStructureState.ringPositions`）。
+    /// `ConcentricRingsStructurePlacement.isPlacementChunk` 用它做 `contains`。
+    ///
+    /// Precomputed ring positions for `concentric_rings` sets
+    /// (`ChunkGeneratorStructureState.ringPositions`), used by `isPlacementChunk`.
+    rings: HashMap<String, HashSet<(i32, i32)>>,
 }
 
 impl StructureState {
     pub fn new(sets: StructureSets) -> Self {
-        Self { sets }
+        Self {
+            sets,
+            rings: HashMap::new(),
+        }
+    }
+
+    /// 把 `rings::ring_positions` 的结果注入某个 `concentric_rings` 结构集。
+    ///
+    /// Feed `rings::ring_positions` output into a `concentric_rings` set.
+    pub fn set_ring_positions(
+        &mut self,
+        set_name: &str,
+        positions: impl IntoIterator<Item = (i32, i32)>,
+    ) {
+        self.rings
+            .insert(set_name.to_owned(), positions.into_iter().collect());
     }
 
     pub fn sets(&self) -> &StructureSets {
@@ -103,9 +126,20 @@ impl StructureState {
         let Some(set) = self.sets.get(set_name) else {
             return false;
         };
+        // `concentric_rings` 的 isPlacementChunk 是 `ringPositions.contains(chunkPos)`；
+        // 没注入环位置时和之前一样返回 false（还不支持）。
+        // `concentric_rings` isPlacementChunk is `ringPositions.contains(chunkPos)`;
+        // without injected positions it stays false (unsupported), as before.
+        let placement_hit = match &set.placement {
+            Placement::RandomSpread(p) => p.is_placement_chunk(seed, x, z),
+            Placement::ConcentricRings(_) => self
+                .rings
+                .get(set_name)
+                .is_some_and(|positions| positions.contains(&(x, z))),
+        };
         // 三项都是与运算，顺序照搬官方（虽然都是纯函数，但决定了语义）。
         // All three terms are ANDed in vanilla order (pure, but the order defines semantics).
-        let base = set.placement.is_placement_chunk(seed, x, z)
+        let base = placement_hit
             && set
                 .placement
                 .apply_additional_chunk_restrictions(seed, x, z);
