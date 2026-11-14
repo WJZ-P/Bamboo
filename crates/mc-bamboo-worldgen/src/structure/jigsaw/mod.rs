@@ -15,6 +15,7 @@ pub mod config;
 pub mod element;
 pub mod pool;
 pub mod rotation;
+pub mod shapes;
 
 pub use config::{HeightProvider, JigsawConfig, JigsawStructures, WorldGenerationContext};
 pub use element::{JigsawBlock, PoolElement, Projection};

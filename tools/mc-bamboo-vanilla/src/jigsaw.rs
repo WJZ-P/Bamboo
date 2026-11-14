@@ -52,6 +52,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
     match options.first().copied().unwrap_or("templates") {
         "templates" => run_templates(command, work_dir),
         "pieces" => run_pieces(command, work_dir, options.get(1), options.get(2)),
+        "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
 }

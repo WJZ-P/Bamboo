@@ -41,6 +41,10 @@ import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.densityfunction.SamplerContext;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.levelgen.structure.PoolElementStructurePiece;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.shapes.BooleanOp;
+import net.minecraft.world.phys.shapes.Shapes;
+import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructurePiece;
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder;
@@ -102,6 +106,7 @@ public final class JigsawOracle {
                 switch (args[0]) {
                     case "templates" -> runTemplates(manager, Path.of(args[1]));
                     case "pieces" -> runPieces(manager, registries, Path.of(args[1]));
+                    case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
                 }
             }
@@ -226,6 +231,72 @@ public final class JigsawOracle {
                 + box.minX() + "|" + box.minY() + "|" + box.minZ() + "|"
                 + box.maxX() + "|" + box.maxY() + "|" + box.maxZ() + "|"
                 + piece.getGroundLevelDelta() + "|" + piece.getJunctions().size();
+    }
+
+    /** 独立小场景：模拟 addPieces 里 free 的 join / joinIsNotEmpty / joinUnoptimized 序列。 */
+    private static void runShapes(Path queries) throws Exception {
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] f = line.trim().split("\\|");
+            String scene = f[0];
+            String kind = f[1];
+            double[] big = new double[6];
+            int[] initial = new int[6];
+            for (int i = 0; i < 6; i++) {
+                big[i] = Integer.parseInt(f[2 + i]);
+                initial[i] = Integer.parseInt(f[8 + i]);
+            }
+            int count = Integer.parseInt(f[14]);
+            AABB bigAabb = new AABB(big[0], big[1], big[2], big[3], big[4], big[5]);
+            BoundingBox initialBox = new BoundingBox(
+                    initial[0], initial[1], initial[2],
+                    initial[3], initial[4], initial[5]);
+            VoxelShape free;
+            if (kind.equals("context")) {
+                free = Shapes.join(Shapes.create(bigAabb),
+                        Shapes.create(AABB.of(initialBox)), BooleanOp.ONLY_FIRST);
+            } else {
+                free = Shapes.create(AABB.of(initialBox));
+            }
+            StringBuilder results = new StringBuilder();
+            int pos = 15;
+            for (int k = 0; k < count; k++) {
+                int[] t = new int[6];
+                for (int i = 0; i < 6; i++) {
+                    t[i] = Integer.parseInt(f[pos + i]);
+                }
+                pos += 6;
+                BoundingBox target = new BoundingBox(t[0], t[1], t[2], t[3], t[4], t[5]);
+                AABB deflated = AABB.of(target).deflate(0.25);
+                boolean blocked = Shapes.joinIsNotEmpty(
+                        free, Shapes.create(deflated), BooleanOp.ONLY_SECOND);
+                results.append(blocked ? '1' : '0');
+                if (!blocked) {
+                    free = Shapes.joinUnoptimized(
+                            free, Shapes.create(AABB.of(target)), BooleanOp.ONLY_FIRST);
+                }
+            }
+            out.append(scene).append('|').append(results).append('\n');
+        }
+        // D 行：直接输出 AABB.of(bb).deflate(0.25) 的乘 4 边界，验证 deflate 数值。
+        int[][] deflateCases = {
+            {0, 0, 0, 0, 0, 0}, {5, 5, 5, 9, 9, 9},
+            {-3, -2, -1, 4, 6, 8}, {10, 0, 0, 10, 0, 0},
+        };
+        for (int[] b : deflateCases) {
+            AABB d = AABB.of(new BoundingBox(
+                    b[0], b[1], b[2], b[3], b[4], b[5])).deflate(0.25);
+            out.append("D|").append((long) (d.minX * 4)).append('|')
+                    .append((long) (d.minY * 4)).append('|')
+                    .append((long) (d.minZ * 4)).append('|')
+                    .append((long) (d.maxX * 4)).append('|')
+                    .append((long) (d.maxY * 4)).append('|')
+                    .append((long) (d.maxZ * 4)).append('\n');
+        }
+        System.out.print(out);
     }
 
     private static LayeredRegistryAccess<RegistryLayer> loadRegistries(

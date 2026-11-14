@@ -93,6 +93,8 @@ mod generate;
 #[cfg(feature = "oracle")]
 mod jigsaw;
 #[cfg(feature = "oracle")]
+mod jigsaw_shapes;
+#[cfg(feature = "oracle")]
 mod light;
 #[cfg(feature = "oracle")]
 mod loot_oracle;
