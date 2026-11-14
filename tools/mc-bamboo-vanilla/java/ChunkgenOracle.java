@@ -639,7 +639,7 @@ public final class ChunkgenOracle {
                         continue;
                     }
                     if (this.options.through() >= 4) {
-                        writeFeatures(seed, pos, generator, generatorSettings, state, biomeManager);
+                        writeFeatures(seed, pos, generator, generatorSettings, state, biomeManager, resolver);
                         continue;
                     }
 
@@ -681,13 +681,13 @@ public final class ChunkgenOracle {
          */
         private void writeFeatures(long seed, ChunkPos pos, NoiseBasedChunkGenerator generator,
                 NoiseGeneratorSettings generatorSettings, RandomState randomState,
-                BiomeManager biomeManager) throws Exception {
+                BiomeManager biomeManager, BiomeResolver resolver) throws Exception {
             TerrainChunk[] chunks = new TerrainChunk[9];
             for (int dz = -1; dz <= 1; dz++) {
                 for (int dx = -1; dx <= 1; dx++) {
                     chunks[(dz + 1) * 3 + dx + 1] = generateTerrain(
                             seed, new ChunkPos(pos.x() + dx, pos.z() + dz), generator,
-                            generatorSettings, randomState, biomeManager);
+                            generatorSettings, randomState, resolver);
                 }
             }
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
@@ -740,24 +740,13 @@ public final class ChunkgenOracle {
         /** 现有单区块生成流程抽出来，features 阶段要用九次。 */
         private TerrainChunk generateTerrain(long seed, ChunkPos pos, NoiseBasedChunkGenerator generator,
                 NoiseGeneratorSettings generatorSettings, RandomState state,
-                BiomeManager biomeManager) throws Exception {
+                BiomeResolver resolver) throws Exception {
+            // 和游戏一样走真实服务端路径（3×3 possibleBiomes、region 的 biomeManager）。
+            // Same real-server path as the game (3x3 possibleBiomes, region's biomeManager).
             ProtoChunk proto = newChunk(pos, generatorSettings);
             generator.createBiomes(state, Blender.empty(), null, proto).join();
             proto.setPersistedStatus(ChunkStatus.BIOMES);
-            DensityVolume volume = new DensityVolume(
-                    16, generatorSettings.noiseSettings().height(), 16,
-                    pos.getMinBlockX(), generatorSettings.noiseSettings().minY(), pos.getMinBlockZ());
-            java.util.function.Supplier<Aquifer.FluidPicker> picker = instancePicker(generator);
-            try (NoiseChunk noiseChunk = new NoiseChunk(
-                    state, Beardifier.EMPTY, generatorSettings, picker.get(), Blender.empty(), volume)) {
-                this.doFill.invoke(generator, noiseChunk, proto);
-                this.buildSurface.invoke(generator, proto, noiseChunk, state, biomeManager,
-                        this.possibleBiomes, generatorSettings.materialRule().value());
-                this.generateCarvers.invoke(generator, proto, Blender.empty(), noiseChunk, state,
-                        biomeManager, null, generatorSettings.materialRule().value());
-            }
-            proto.setPersistedStatus(ChunkStatus.TERRAIN);
-            Heightmap.primeHeightmaps(proto, ChunkStatus.FINAL_HEIGHTMAPS);
+            buildRealTerrain(seed, pos, proto, generator, generatorSettings, state, resolver);
             return new TerrainChunk(proto);
         }
 
@@ -933,6 +922,26 @@ public final class ChunkgenOracle {
         private void writeRealPath(long seed, ChunkPos pos, ProtoChunk center,
                 NoiseBasedChunkGenerator generator, NoiseGeneratorSettings gs,
                 RandomState state, BiomeResolver resolver) throws Exception {
+            buildRealTerrain(seed, pos, center, generator, gs, state, resolver);
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "carvers");
+            line.addProperty("seed", seed);
+            line.addProperty("x", pos.x());
+            line.addProperty("z", pos.z());
+            addBlocks(line, center);
+            addHeightmaps(line, center);
+            write(line);
+        }
+
+        /**
+         * 真实服务端路径把 center 跑到 TERRAIN 并 prime FINAL_HEIGHTMAPS；center 须已有群系。
+         *
+         * Real-server path: run center (biomes already filled) to TERRAIN and prime
+         * FINAL_HEIGHTMAPS.
+         */
+        private void buildRealTerrain(long seed, ChunkPos pos, ProtoChunk center,
+                NoiseBasedChunkGenerator generator, NoiseGeneratorSettings gs,
+                RandomState state, BiomeResolver resolver) throws Exception {
             ProtoChunk[][] neighbors = new ProtoChunk[17][17];
             for (int dx = -8; dx <= 8; dx++) {
                 for (int dz = -8; dz <= 8; dz++) {
@@ -972,14 +981,6 @@ public final class ChunkgenOracle {
             // buildTerrain's thenApply: raise to TERRAIN, then prime FINAL_HEIGHTMAPS.
             center.setPersistedStatus(ChunkStatus.TERRAIN);
             Heightmap.primeHeightmaps(center, ChunkStatus.FINAL_HEIGHTMAPS);
-            JsonObject line = new JsonObject();
-            line.addProperty("type", "carvers");
-            line.addProperty("seed", seed);
-            line.addProperty("x", pos.x());
-            line.addProperty("z", pos.z());
-            addBlocks(line, center);
-            addHeightmaps(line, center);
-            write(line);
         }
 
         /**

@@ -186,6 +186,25 @@ pub fn loading_step(stage: ChunkStatus) -> Step {
     LOADING[stage_index(stage)]
 }
 
+/// 这一步要不要带邻居的只读快照，以及邻居至少到了哪个阶段。
+///
+/// `features` 读写中心加半径 1 的 3×3，邻居要跑到 `terrain`；`light` 要半径 1
+/// 的 `initialize_light`。其余阶段只写中心，不需要邻居视图。半径是切比雪夫
+/// 距离，和 [`Step::requires`] 一致，但这里只取真正要读数据的那一圈（不取
+/// `structure_starts` 的半径 8，那只是调度依赖、不是邻居视图）。
+///
+/// Whether a step needs read-only neighbor snapshots and the minimum stage
+/// those neighbors must have reached. `features` reads a radius-1 3×3 at
+/// `terrain`; `light` needs radius-1 `initialize_light`. Other stages write
+/// only the center. This is the data-reading ring, not the scheduling ring.
+pub fn neighbor_view(stage: ChunkStatus) -> Option<(i32, ChunkStatus)> {
+    match stage {
+        ChunkStatus::Features => Some((1, ChunkStatus::Terrain)),
+        ChunkStatus::Light => Some((1, ChunkStatus::InitializeLight)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

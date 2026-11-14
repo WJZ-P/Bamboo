@@ -417,29 +417,26 @@ WebView2 的渲染进程不算在内。
   边界状态写进官方按维度存放的 `dimensions/minecraft/overworld/data/minecraft/world_border.dat`
   （`export_settings` / `restore`，`restore` 传存档里的游戏时间），启动时读回，编码和官方
   `WorldBorder.Settings.CODEC` 对拍。边界伤害的警告遮罩、`BorderStatus.getColor` 由客户端自己算。
-- **世界生成（本轮接入）的已知限制**：`biomes` / `terrain` 阶段接了真生成并逐方块对拍 0 不一致，
-  但 `structure_starts` / `structure_references` 是空实现、`features` / `initialize_light` /
-  `light` / `spawn` / `full` 阶段原样透传。也就是说游戏里**没有地物、没有结构、不刷怪**：
-  第 6 步矿石的纯函数只在对拍里跑、没接进游戏（地物 A/B 在做），结构接口留给结构队员。
-  生成时的光照不写在流水线里：生成的 `RegionColumn` 带 `isLightOn=false`、空光照层，
-  交付后由**运行时**光照引擎补算（设计稿 5.6），和官方在流水线里算完 `light` 的时机不同，
-  边界上可能短暂偏暗；方块光（岩浆等）没有被生成阶段专门初始化。
-  设计稿 5.3.1 的多阶段**邻居只读快照 `Arc<ProtoChunk>` 和 `FeatureResult.deltas` 按
-  `TaskId` 合并还没做**：`Task::Generate.neighbors` 恒为空，features / 生成时 light 拿不到
-  半径 1 的邻居视图，这才是它们先透传的原因。`possibleBiomes`、雕刻器的 `carverBiome`
-  分支和 `WorldGenRegion` 的 `uncachedBiomeResolver` 已按真实服务端路径重新对拍：
-  `gen-world` 的 Java 端用 `collectPossibleBiomes(region, 1)` 的 3×3 调色板并集、非空
-  `carverBiomeRegion` 和 `region.getBiomeManager()` 出题，与游戏侧同一份 `generate_chunk`
-  逐方块、逐 quart 格 0 不一致（多种子、多区块）；两条路径何时会不同、哪些是疑点，
-  见 `docs/worldgen.md`。六张高度图（`WORLD_SURFACE_WG` / `OCEAN_FLOOR_WG` 两张 WG 和
-  四张 `FINAL_HEIGHTMAPS`）已从最终 CARVERS 方块按官方谓词算出、逐列对拍 0 不一致，
-  存档写出的四张 FINAL 打包位流也和官方 `SerializableChunkData` 逐字对拍 0 不一致。
-  后期处理位置表、`ProtoChunk` 其余字段、非 `full` 区块从盘上读回后按状态继续生成，
-  都还没逐项对拍。`ChunkColumn::from_parts`
+- **世界生成（本轮接入）的已知限制**：`biomes` / `terrain` 阶段接了真生成，`possibleBiomes`、雕刻器的
+  `carverBiome` 分支和 `WorldGenRegion` 的 `uncachedBiomeResolver` 已按真实服务端路径逐方块对拍 0 不一致，
+  六张高度图逐列、存档里四张 FINAL 高度图位流逐字对拍 0 不一致（见 `docs/worldgen.md`）。
+  `features` 阶段已接进游戏：`Task::Generate` 按 `ChunkStep` 依赖半径带邻居引用，世界线程把每个区块的
+  CARVERS 半成品存成不可变 `Arc` 快照，计算池上跑 `Generator::features()`，写邻居的增量按 `TaskId` 顺序合并、
+  完工时排规范序落到交付盒子；1 线程与 4 线程计算池生成同一片区块逐字节相同。已合进 main 的地物类型都会在
+  游戏里放置，`gen-world --through features` 目前逐方块对拍的是矿石（8 个中心 / 7077888 方块 0 不一致），
+  其余已移植类型由 `chunkgen` 单独对拍；还没移植的类型照对拍的做法标 `unsupported` 跳过。
+  `initialize_light` / `light` 两个阶段在流水线里用邻居快照算出生成期光照，交付的区块带 `isLightOn=true`，
+  不再等运行时补算（`gen-light` 对拍）。`structure_starts` / `structure_references` 仍是空实现、`spawn` 不刷怪，
+  所以游戏里**还没有结构和生物**。
+  `features` 与官方的**语义差异**：官方邻居溢出的写来自各邻居区块跑到 `FEATURES` 时的 `WorldGenRegion`，
+  结果取决于实际的生成先后；Bamboo 在中心这次 `features` 里用纯函数重算 8 个邻居中心写进来的增量，按
+  `(x,y,z,state)` 规范序落盘，同格重复写由规范序里最后一条生效，邻居快照是干净的 CARVERS 地形。结果与线程
+  调度无关、可重现，但边界上重叠的写入可能和某一次官方生成不同；地物越来越多后要重新核对。
+  后期处理位置表、`ProtoChunk` 其余字段、非 `full` 区块从盘上读回后按状态继续生成，都还没逐项对拍。`ChunkColumn::from_parts`
   产出的盒子 `untouched=false`，生成的区块一律算「改过」而写盘，官方可以丢弃原样生成区块。
   出生点的 `setInitialSpawn` 链已按官方逐段移植并对拍（`getOrigin` 气候螺旋、
   `PlayerSpawnFinder` 的 11×11 螺旋 + 高度图/流体/碰撞、`fixupSpawnHeight` 兜底），
-  但**只比较到 CARVERS 地形**：地物/结构/光照还没接进游戏，官方真实世界里树、雪层、
+  但**只比较到 CARVERS 地形**：出生点仍在 CARVERS 快照上算，官方真实世界里树、雪层、
   结构会改变 `MOTION_BLOCKING` 高度图和落点，Bamboo 目前算的是没有这些内容的地表，
   因此个别种子的实际出生点仍可能和满配官方世界不同；等 `full` 阶段补齐后要重跑
   `spawn` 对拍。`getCollisionShape` 在 Java 对拍里用 `EmptyBlockGetter`、在 Rust 里用
@@ -458,8 +455,9 @@ WebView2 的渲染进程不算在内。
   在区块网格上已由 `chunkgen` 覆盖，单点 `worldgen` 对拍里跳过这批函数。
 
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
-  README「区块级对拍」；合并提交 `ae76868`、`9a96b5e`、`9d6e94c`）
-- 结构生成（`docs/worldgen-structures-plan.md`）目前是纯函数 + 官方对拍，没有接进游戏：
+  README「区块级对拍」；合并提交 `ae76868`、`9a96b5e`、`9d6e94c`。第二轮 features 接入见
+  `docs/worldgen.md`、`docs/worldgen-features-plan.md`、`docs/world-model-design.md` 5.3.1 / 第 16 节）
+- 结构生成（`docs/worldgen-structures-plan.md`）本轮只做到「放置判定」这一步的纯函数和对拍：
   `worldgen.json` 从官方导出了 `structure_set` / `structure` / `template_pool` / `processor_list`
   四个注册表。`mc-bamboo-worldgen::structure` 移植并逐格对拍了 `random_spread` 的潜在起点、
   四种频率削减（9280 个比较 0 不一致）、`createStructures` 的加权选择 / `existingStart` 短路

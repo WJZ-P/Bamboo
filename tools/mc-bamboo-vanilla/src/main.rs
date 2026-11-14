@@ -101,6 +101,8 @@ mod extract;
 #[cfg(feature = "oracle")]
 mod flat_world;
 #[cfg(feature = "oracle")]
+mod gen_light;
+#[cfg(feature = "oracle")]
 mod gen_world;
 mod generate;
 #[cfg(feature = "oracle")]
@@ -183,6 +185,8 @@ const CHUNKGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkgenOracle.java"
 #[cfg(feature = "oracle")]
 const BEARD_SOURCE: &str = "tools/mc-bamboo-vanilla/java/BeardifierOracle.java";
 #[cfg(feature = "oracle")]
+const GEN_LIGHT_SOURCE: &str = "tools/mc-bamboo-vanilla/java/GenLightOracle.java";
+#[cfg(feature = "oracle")]
 const STRUCTURES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePlacementOracle.java";
 #[cfg(feature = "oracle")]
 const STRUCTURE_RINGS_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureRingsOracle.java";
@@ -232,6 +236,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla spawn <java 路径> [--seeds N] [--salt S] [--show N] [--level-type normal|large_biomes|amplified] [--break-self-test]
       mc-bamboo-vanilla flat-world <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla beard <java 路径> [--through noise|surface|carvers] [--break-self-test]
+      mc-bamboo-vanilla gen-light <java 路径> [--scenes N] [--seed S] [--show N] [--break-self-test]
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -289,6 +294,7 @@ fn run() -> Result<(), String> {
         ["spawn", java, ref options @ ..] => spawn_cli(java, options),
         ["flat-world", java, ref options @ ..] => flat_world_cli(java, options),
         ["beard", java, ref options @ ..] => beard_cli(java, options),
+        ["gen-light", java, ref options @ ..] => gen_light_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
@@ -565,6 +571,11 @@ fn beard_cli(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn gen_light_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    gen_light::run(official_program(java, GEN_LIGHT_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
 fn loot_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     loot_oracle::run(official_program(java, LOOT_ORACLE_SOURCE)?, options)
 }
@@ -804,6 +815,11 @@ fn flat_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn beard_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn gen_light_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
