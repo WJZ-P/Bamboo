@@ -44,6 +44,7 @@ fn is_liquid(state: u32) -> bool {
 pub fn buried_treasure(
     world: &mut FeatureWorld,
     bb: &[i32; 6],
+    mut writes: Option<&mut Vec<crate::structure::place::Write>>,
 ) -> Option<((i32, i32, i32), [i32; 6])> {
     let (x, z) = (bb[0], bb[2]);
     // `level.getHeight(OCEAN_FLOOR_WG, x, z)` 已经是「最高方块 y + 1」。
@@ -87,6 +88,9 @@ pub fn buried_treasure(
                         soft
                     };
                     world.set_block_with_heightmaps(relative.0, relative.1, relative.2, place);
+                    if let Some(log) = writes.as_deref_mut() {
+                        log.push((relative.0, relative.1, relative.2, place));
+                    }
                 }
             }
             return Some(((x, y, z), [x, y, z, x, y, z]));
@@ -110,14 +114,14 @@ pub fn create_chest(
     chunk_bb: &[i32; 6],
     pos: (i32, i32, i32),
     block_state: Option<u32>,
-) -> bool {
+) -> Option<u32> {
     if !PieceContext::inside(chunk_bb, pos) || world.get_block(pos.0, pos.1, pos.2) == blocks::CHEST
     {
-        return false;
+        return None;
     }
     let state = block_state.unwrap_or_else(|| reorient(world, pos, blocks::CHEST));
     world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
-    true
+    Some(state)
 }
 
 /// `StructurePiece.reorient(level, pos, chestState)`：按周围实心方块决定箱子朝向。

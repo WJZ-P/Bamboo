@@ -49,48 +49,43 @@ struct Query {
     cz: i32,
 }
 
-/// 一份「9 宫格里只有中心有地形」的输入。
+/// 一份合成地形：9 个区块都按同一条公式填，`postProcess` 写半径内的读写都能拿到正确的
+/// 地形（官方 `WorldGenRegion` 的写半径就是 1，同样能读到邻居）。
 ///
-/// A "only the centre chunk has terrain" input.
+/// Synthetic terrain: all nine chunks follow the same formula so `postProcess` reads and
+/// writes the correct terrain within its write radius (vanilla's `WorldGenRegion` write
+/// radius is 1 and can read the neighbours too).
 fn synthetic_chunks(cx: i32, cz: i32) -> mc_bamboo_worldgen::feature::FeatureChunks {
-    use mc_bamboo_worldgen::feature::{CENTER, ChunkBlocks, FeatureChunks, Heightmaps};
-    let empty: ChunkBlocks = vec![vec![mc_bamboo_data::blocks::AIR; 256]; HEIGHT as usize];
-    let mut center: ChunkBlocks = empty.clone();
-    for x in 0..16 {
-        for z in 0..16 {
-            let world_x = cx * 16 + x;
-            let world_z = cz * 16 + z;
-            let surface = surface_y(world_x, world_z);
-            let column = x as usize * 16 + z as usize;
-            for y in MIN_Y..surface - 1 {
-                center[(y - MIN_Y) as usize][column] = mc_bamboo_data::blocks::STONE;
+    use mc_bamboo_worldgen::feature::{ChunkBlocks, FeatureChunks, Heightmaps};
+    let blocks: [ChunkBlocks; 9] = std::array::from_fn(|index| {
+        let dx = index as i32 % 3 - 1;
+        let dz = index as i32 / 3 - 1;
+        let base_x = (cx + dx) * 16;
+        let base_z = (cz + dz) * 16;
+        let mut chunk: ChunkBlocks = vec![vec![mc_bamboo_data::blocks::AIR; 256]; HEIGHT as usize];
+        for x in 0..16 {
+            for z in 0..16 {
+                let surface = surface_y(base_x + x, base_z + z);
+                let column = x as usize * 16 + z as usize;
+                for y in MIN_Y..surface - 1 {
+                    chunk[(y - MIN_Y) as usize][column] = mc_bamboo_data::blocks::STONE;
+                }
+                chunk[(surface - 1 - MIN_Y) as usize][column] = mc_bamboo_data::blocks::SANDSTONE;
+                chunk[(surface - MIN_Y) as usize][column] = mc_bamboo_data::blocks::SAND;
             }
-            center[(surface - 1 - MIN_Y) as usize][column] = mc_bamboo_data::blocks::SANDSTONE;
-            center[(surface - MIN_Y) as usize][column] = mc_bamboo_data::blocks::SAND;
         }
-    }
-    let heights = prime(&center);
+        chunk
+    });
+    let heights: [Heightmaps; 9] = std::array::from_fn(|index| prime(&blocks[index]));
     let biomes = std::array::from_fn(|_| vec![vec![0u32; 64]; 4]);
     FeatureChunks {
         center_x: cx,
         center_z: cz,
         min_y: MIN_Y,
         height: HEIGHT,
-        blocks: std::array::from_fn(|index| {
-            if index == CENTER {
-                center.clone()
-            } else {
-                empty.clone()
-            }
-        }),
+        blocks,
         biomes,
-        heights: std::array::from_fn(|index| {
-            if index == CENTER {
-                heights
-            } else {
-                Heightmaps::new(MIN_Y)
-            }
-        }),
+        heights,
     }
 }
 
@@ -108,43 +103,19 @@ fn prime(
 /// One query's diff: `(x, y, z) -> state id`.
 type Diff = BTreeMap<(i32, i32, i32), u32>;
 
-fn snapshot(world: &FeatureWorld, cx: i32, cz: i32) -> Diff {
-    let mut map = Diff::new();
-    for y in MIN_Y..MIN_Y + HEIGHT {
-        for x in cx * 16..cx * 16 + 16 {
-            for z in cz * 16..cz * 16 + 16 {
-                let state = world.get_block(x, y, z);
-                if state != mc_bamboo_data::blocks::AIR {
-                    map.insert((x, y, z), state);
-                }
-            }
-        }
-    }
-    map
-}
-
-fn diff(before: &Diff, after: &Diff) -> Diff {
-    let mut changed = Diff::new();
-    for (pos, state) in after {
-        if before.get(pos) != Some(state) {
-            changed.insert(*pos, *state);
-        }
-    }
-    for pos in before.keys() {
-        if !after.contains_key(pos) {
-            changed.insert(*pos, mc_bamboo_data::blocks::AIR);
-        }
-    }
-    changed
-}
-
-/// 跑一个查询的 Rust 侧。
+/// 跑一个查询的 Rust 侧，返回结构写下的方块。
 ///
-/// Run the Rust side of one query.
+/// 比的是「写入日志」而不是写前写后的状态差异：结构写在地形上的方块（沙漠神殿的塔身几乎
+/// 全落在沙 / 砂岩上）不是状态变化，但官方确实写了。Java 侧的 `PieceLevelHandler.written`
+/// 是同一套语义（后写覆盖先写）。
+///
+/// Run the Rust side of one query, returning the blocks the structure wrote. Compares write
+/// logs rather than before/after state diffs: a block landing on existing terrain (most of the
+/// desert pyramid) is not a state change yet vanilla wrote it. The Java
+/// `PieceLevelHandler.written` has the same semantics (later writes win).
 fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
     let chunks = synthetic_chunks(q.cx, q.cz);
     let mut world = FeatureWorld::new(&chunks)?;
-    let before = snapshot(&world, q.cx, q.cz);
     let chunk_bb = [
         q.cx * 16,
         MIN_Y + 1,
@@ -153,14 +124,16 @@ fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
         MIN_Y + HEIGHT - 1,
         q.cz * 16 + 15,
     ];
+    let mut writes: Vec<(i32, i32, i32, u32)> = Vec::new();
     let entity_abort = match q.kind {
         "buried_treasure" => {
             let x = q.cx * 16 + 9;
             let z = q.cz * 16 + 9;
             if let Some((chest, _)) =
-                post_process::buried_treasure(&mut world, &[x, 90, z, x, 90, z])
+                post_process::buried_treasure(&mut world, &[x, 90, z, x, 90, z], Some(&mut writes))
+                && let Some(state) = post_process::create_chest(&mut world, &chunk_bb, chest, None)
             {
-                post_process::create_chest(&mut world, &chunk_bb, chest, None);
+                writes.push((chest.0, chest.1, chest.2, state));
             }
             // 埋藏的宝藏不生成实体，不会 abort。
             // The buried treasure spawns no entity, so it never aborts.
@@ -172,7 +145,7 @@ fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
             let pieces =
                 mc_bamboo_worldgen::structure::single::generate(q.kind, q.seed, q.cx, q.cz)?;
             let piece = pieces.first().ok_or("no piece")?;
-            let _ = post_process::swamp_hut::swamp_hut(
+            let (_, log) = post_process::swamp_hut::swamp_hut(
                 &mut world,
                 &piece.bb,
                 &chunk_bb,
@@ -181,7 +154,9 @@ fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
                 )),
                 piece.rot,
                 piece.mirror,
+                Some(Vec::new()),
             )?;
+            writes.extend(log.unwrap_or_default());
             // 女巫和猫是实体，Java 侧在这一步 abort；方块部分两边都写完了。
             // The witch and cat are entities; the Java side aborts there after writing blocks.
             true
@@ -191,7 +166,7 @@ fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
                 mc_bamboo_worldgen::structure::single::generate(q.kind, q.seed, q.cx, q.cz)?;
             let piece = pieces.first().ok_or("no piece")?;
             let random = mc_bamboo_worldgen::structure::pieces::make_random(q.seed, q.cx, q.cz);
-            let _ = post_process::pyramid::desert_pyramid(
+            let (_, log) = post_process::pyramid::desert_pyramid(
                 &mut world,
                 &piece.bb,
                 &chunk_bb,
@@ -201,16 +176,24 @@ fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
                 piece.rot,
                 piece.mirror,
                 q.seed,
+                false,
                 q.cx,
                 q.cz,
                 &random,
+                Some(Vec::new()),
             );
+            writes.extend(log.unwrap_or_default());
             false
         }
         other => return Err(format!("no postProcess for {other}")),
     };
-    let after = snapshot(&world, q.cx, q.cz);
-    Ok((diff(&before, &after), entity_abort))
+    // 后写的覆盖先写的，和 Java 的 `TreeMap` 一致。
+    // Later writes win, matching the Java `TreeMap`.
+    let mut out = Diff::new();
+    for (x, y, z, state) in writes {
+        out.insert((x, y, z), state);
+    }
+    Ok((out, entity_abort))
 }
 
 pub fn run(mut command: Command, queries_path: &Path, _options: &[&str]) -> Result<(), String> {

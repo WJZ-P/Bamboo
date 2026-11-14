@@ -22,7 +22,7 @@ use mc_bamboo_blocks::BlockState;
 
 use crate::{
     feature::world::FeatureWorld,
-    random::{PositionalFactory, Random},
+    random::Random,
     structure::{place::PieceContext, post_process::create_chest, scattered::lowest_ground_height},
 };
 
@@ -49,6 +49,10 @@ enum Op {
     ///
     /// `placeBlock(state, x, y, z)`.
     One { state: u32, at: (i32, i32, i32) },
+    /// `fillColumnDown(state, x, startY, z)`。
+    ///
+    /// `fillColumnDown(state, x, startY, z)`.
+    ColumnDown { state: u32, at: (i32, i32, i32) },
 }
 
 /// `generateBox(..., edge, fill, skipAir)`，追加到指令表。
@@ -89,24 +93,40 @@ impl Op {
                 skip_air,
             } => ctx.generate_box(from, to, edge, fill, skip_air),
             Self::One { state, at } => ctx.place_block(state, at.0, at.1, at.2),
+            Self::ColumnDown { state, at } => ctx.fill_column_down(state, at.0, at.1, at.2),
         }
     }
 }
 
-/// `level.getRandom()`：`WorldGenRegion` 的随机源。
+/// `WorldGenRegion` 的 `getRandom()`：`randomState.getOrCreateRandomFactory(
+/// "minecraft:worldgen_region_random")` 在区块中心 `getWorldPosition()` 上的随机源。
 ///
-/// 官方 `WorldGenRegion` 构造时用
-/// `randomState.getOrCreateRandomFactory("worldgen_region_random").at(center.getWorldPosition())`；
-/// `RandomState` 的工厂种子是 `WorldgenRandom(worldSeed)` 的一次 `nextLong()`。
+/// 官方链路：`RandomState.random = Algorithm.newInstance(seed).forkPositional()`；
+/// `getOrCreateRandomFactory(name) = random.fromHashOf(name).forkPositional()`；
+/// `WorldGenRegion` 再 `.at(center.getWorldPosition())`。`use_legacy_random` 与 `RandomState`
+/// 一致（主世界 `legacy_random_source` 为 false，即 `Xoroshiro`）。
 ///
-/// `level.getRandom()`: the `WorldGenRegion` random source. Vanilla derives it in the
-/// `WorldGenRegion` constructor via
-/// `randomState.getOrCreateRandomFactory("worldgen_region_random").at(center.getWorldPosition())`;
-/// the `RandomState` factory seed is one `nextLong()` from `WorldgenRandom(worldSeed)`.
-pub fn region_random(world_seed: i64, center_x: i32, center_z: i32) -> Random {
-    let source = Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(world_seed));
-    let factory_seed = source.next_long();
-    PositionalFactory::Legacy { seed: factory_seed }.at(center_x, 0, center_z)
+/// Vanilla chain: `RandomState.random = Algorithm.newInstance(seed).forkPositional()`;
+/// `getOrCreateRandomFactory(name) = random.fromHashOf(name).forkPositional()`; the
+/// `WorldGenRegion` then calls `.at(center.getWorldPosition())`. `use_legacy_random` matches
+/// `RandomState` (the overworld's `legacy_random_source` is false, i.e. `Xoroshiro`).
+pub fn region_random(
+    world_seed: i64,
+    use_legacy_random: bool,
+    center_x: i32,
+    center_z: i32,
+) -> Random {
+    let algorithm = if use_legacy_random {
+        crate::random::Algorithm::Legacy
+    } else {
+        crate::random::Algorithm::Xoroshiro
+    };
+    algorithm
+        .new_instance(world_seed)
+        .fork_positional()
+        .from_hash_of("minecraft:worldgen_region_random")
+        .fork_positional()
+        .at(center_x, 0, center_z)
 }
 
 /// 按属性名和文本设置方块状态；属性不存在时 panic（数据版本变更会让它立刻暴露）。
@@ -165,6 +185,18 @@ fn ops() -> Vec<Op> {
             air,
             false,
         );
+    }
+
+    // `fillColumnDown` 的 21×21 列：官方在这段（塔身之后、正面入口之前）对每列调一次。
+    // The 21x21 `fillColumnDown` columns: vanilla runs this between the pyramid body and the
+    // front entrance, once per column.
+    for x in 0..SIDE {
+        for z in 0..SIDE {
+            ops.push(Op::ColumnDown {
+                state: sandstone,
+                at: (x, -5, z),
+            });
+        }
     }
 
     // 正面入口。
@@ -484,10 +516,12 @@ pub fn desert_pyramid(
     rotation: i32,
     mirror: i32,
     seed: i64,
+    use_legacy_random: bool,
     cx: i32,
     cz: i32,
     random: &crate::random::WorldgenRandom,
-) -> Option<(i32, [i32; 6])> {
+    writes: crate::structure::place::WriteLog,
+) -> crate::structure::place::Placed {
     // `updateHeightPositionToLowestGroundHeight(level, -random.nextInt(3))`。
     let offset = -random.next_int(3);
     let (height_position, new_bb) = lowest_ground_height(world, piece_bb, offset);
@@ -499,27 +533,28 @@ pub fn desert_pyramid(
         orientation,
         rotation,
         mirror,
+        writes,
     };
 
     for op in ops() {
         op.run(&mut ctx);
-    }
-    for x in 0..SIDE {
-        for z in 0..SIDE {
-            ctx.fill_column_down(mc_bamboo_data::blocks::SANDSTONE, x, -5, z);
-        }
     }
 
     // 四个箱子：`Direction.Plane.HORIZONTAL` 顺序（NORTH、EAST、SOUTH、WEST）。
     // Four chests in `Direction.Plane.HORIZONTAL` order (NORTH, EAST, SOUTH, WEST).
     for (dx, dz) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
         let at = ctx.world_pos(10 + dx * 2, -11, 10 + dz * 2);
-        create_chest(ctx.world, &chunk, at, None);
+        if let Some(state) = create_chest(ctx.world, &chunk, at, None)
+            && let Some(writes) = ctx.writes.as_mut()
+        {
+            writes.push((at.0, at.1, at.2, state));
+        }
     }
 
-    let mut region = region_random(seed, cx * 16 + 8, cz * 16 + 8);
+    let mut region = region_random(seed, use_legacy_random, cx * 16 + 8, cz * 16 + 8);
     add_cellar(&mut ctx, &mut region);
-    Some((height_position, new_bb))
+    let writes = ctx.writes.take();
+    (Some((height_position, new_bb)), writes)
 }
 
 /// `DesertPyramidPiece.addCellar`：楼梯 + 墓室，`roomCenter = (16, -4, 13)`。
@@ -600,18 +635,21 @@ fn add_cellar_room(ctx: &mut PieceContext<'_, '_>, region: &mut Random) {
         (-2, 0),
         (0, 2),
         (0, -2),
-        (3, 0),
     ] {
         ctx.place_block(orange, x + dx, y, z + dz);
     }
-    // 东西两个出口：`placeSand` 不写方块，只写外层的切制 / 雕纹砂岩。
-    // The two side exits: `placeSand` writes nothing, so only the outer cut / chiseled
-    // sandstone is placed.
-    for dx in [-3, 3] {
-        let outside = if dx < 0 { x - 4 } else { x + 4 };
-        ctx.place_block(cut, outside, y + 1, z);
-        ctx.place_block(chiseled, outside, y + 2, z);
-    }
+    // 东侧出口：`placeSand` 不写方块，只写外层的切制 / 雕纹砂岩。
+    // East exit: `placeSand` writes nothing, only the outer cut / chiseled sandstone is placed.
+    ctx.place_block(orange, x + 3, y, z);
+    ctx.place_block(cut, x + 4, y + 1, z);
+    ctx.place_block(chiseled, x + 4, y + 2, z);
+    // 西侧出口。
+    // West exit.
+    ctx.place_block(orange, x - 3, y, z);
+    ctx.place_block(cut, x - 4, y + 1, z);
+    ctx.place_block(chiseled, x - 4, y + 2, z);
+    // 南北两侧：只有橙陶瓦，`placeSand` 不写方块。
+    // North and south: only the orange terracotta; `placeSand` writes nothing.
     ctx.place_block(orange, x, y, z + 3);
     ctx.place_block(orange, x, y, z - 3);
     ctx.place_block(cut, x, y + 1, z - 4);

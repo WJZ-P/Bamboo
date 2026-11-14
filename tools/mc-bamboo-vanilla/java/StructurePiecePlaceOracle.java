@@ -131,10 +131,11 @@ public final class StructurePiecePlaceOracle {
                     Heightmap.Types.WORLD_SURFACE_WG,
                     Heightmap.Types.OCEAN_FLOOR_WG));
 
+            PieceLevelHandler handler = new PieceLevelHandler(chunk, heightAccessor, seed);
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
                     StructurePiecePlaceOracle.class.getClassLoader(),
                     new Class<?>[] {WorldGenLevel.class},
-                    new PieceLevelHandler(chunk, heightAccessor, seed));
+                    handler);
             StructureManager structures =
                     new StructureManager(level, new WorldOptions(seed, false, false), null);
 
@@ -164,20 +165,12 @@ public final class StructurePiecePlaceOracle {
                         + box.minX() + " " + box.minY() + " " + box.minZ() + " "
                         + box.maxX() + " " + box.maxY() + " " + box.maxZ());
             }
-            TreeMap<BlockPos, BlockState> after = snapshot(chunk);
-
-            TreeMap<BlockPos, BlockState> changed = new TreeMap<>();
-            for (var entry : after.entrySet()) {
-                BlockState old = before.get(entry.getKey());
-                if (old == null || !old.equals(entry.getValue())) {
-                    changed.put(entry.getKey(), entry.getValue());
-                }
-            }
-            for (var key : before.keySet()) {
-                if (!after.containsKey(key)) {
-                    changed.put(key, Blocks.AIR.defaultBlockState());
-                }
-            }
+            // 用「官方真正写下的方块」当结果，不用写前写后状态差异：结构写在地形上的方块
+            // （沙漠神殿的塔身几乎全落在沙 / 砂岩上）不是状态变化，但确实写了。
+            // Use the blocks vanilla actually wrote rather than a before/after state diff: a
+            // block landing on existing terrain (most of the desert pyramid) is not a state
+            // change yet was written.
+            TreeMap<BlockPos, BlockState> changed = handler.written;
             out.append("Q ").append(kind).append(' ').append(seed).append(' ').append(cx)
                     .append(' ').append(cz).append(' ').append(changed.size()).append(' ')
                     .append(entityAbort ? 1 : 0).append('\n');
@@ -257,9 +250,21 @@ public final class StructurePiecePlaceOracle {
      * derivation as the Rust `region_random`.
      */
     private static net.minecraft.util.RandomSource regionRandom(long worldSeed, ChunkPos center) {
-        WorldgenRandom source = new WorldgenRandom(new LegacyRandomSource(worldSeed));
-        long factorySeed = source.nextLong();
-        return new LegacyRandomSource.LegacyPositionalRandomFactory(factorySeed)
+        // `RandomState.random = Algorithm.newInstance(seed).forkPositional()`，
+        // 再 `getOrCreateRandomFactory(name) = random.fromHashOf(name).forkPositional()`，
+        // 再 `.at(center.getWorldPosition())`。主世界 `legacy_random_source` 为 false，用
+        // `XoroshiroRandomSource`。
+        // `RandomState.random = Algorithm.newInstance(seed).forkPositional()`, then
+        // `getOrCreateRandomFactory(name) = random.fromHashOf(name).forkPositional()`, then
+        // `.at(center.getWorldPosition())`. The overworld's `legacy_random_source` is false, so
+        // the source is `XoroshiroRandomSource`.
+        net.minecraft.world.level.levelgen.WorldgenRandom.Algorithm algorithm =
+                net.minecraft.world.level.levelgen.WorldgenRandom.Algorithm.XOROSHIRO;
+        return algorithm.newInstance(worldSeed)
+                .forkPositional()
+                .fromHashOf(net.minecraft.resources.Identifier.withDefaultNamespace(
+                        "worldgen_region_random"))
+                .forkPositional()
                 .at(center.getWorldPosition());
     }
 
@@ -286,12 +291,43 @@ public final class StructurePiecePlaceOracle {
         private final LevelHeightAccessor heightAccessor;
         private final long seed;
         private final ChunkPos center;
+        /**
+         * 每次 `setBlock` / `setBlockAndUpdate` 真正写下的方块，后写覆盖先写。
+         *
+         * <p>比「写前写后状态差异」可靠：结构写在地形上的方块（沙漠神殿的塔身几乎全落在
+         * 沙 / 砂岩上）不是状态变化，但官方确实写了。
+         *
+         * <p>Every block actually written by `setBlock` / `setBlockAndUpdate`; later writes
+         * win. More faithful than a before/after state diff: a structure block landing on
+         * existing terrain (most of the desert pyramid's body) is not a state change yet
+         * vanilla wrote it.
+         */
+        final TreeMap<BlockPos, BlockState> written = new TreeMap<>();
 
         PieceLevelHandler(ProtoChunk chunk, LevelHeightAccessor heightAccessor, long seed) {
             this.chunk = chunk;
             this.heightAccessor = heightAccessor;
             this.seed = seed;
             this.center = chunk.getPos();
+        }
+
+        /**
+         * `WorldGenRegion.getHeight(type, x, z)`：区块内读本区块的高度图，区块外按地形公式
+         * 现算（官方在那个位置能读到邻居区块，`WorldGenRegion` 的写半径是 1）。
+         *
+         * <p>不能把区块外坐标 `& 15` 折回本区块——那会让 `lowest_ground_height` 读到错误的列。
+         *
+         * <p>`WorldGenRegion.getHeight(type, x, z)`: inside the chunk read this chunk's
+         * heightmap, outside compute from the terrain formula (vanilla can read the neighbour;
+         * the write radius is 1). Never fold out-of-chunk coordinates back with `& 15`, which
+         * would make `lowest_ground_height` sample the wrong column.
+         */
+        private int heightAt(Heightmap.Types type, int x, int z) {
+            if (Math.abs(x - this.center.getMinBlockX()) < 16
+                    && Math.abs(z - this.center.getMinBlockZ()) < 16) {
+                return this.chunk.getHeight(type, x & 15, z & 15);
+            }
+            return 64 + Math.floorMod(x * 31 + z * 17, 5) - 2;
         }
 
         @Override
@@ -306,11 +342,16 @@ public final class StructurePiecePlaceOracle {
                     BlockPos pos = (BlockPos) args[0];
                     BlockState state = (BlockState) args[1];
                     this.chunk.setBlockState(pos, state, 2);
+                    this.written.put(pos, state);
                     return true;
                 }
-                case "setBlockAndUpdate":
-                    this.chunk.setBlockState((BlockPos) args[0], (BlockState) args[1], 2);
+                case "setBlockAndUpdate": {
+                    BlockPos pos = (BlockPos) args[0];
+                    BlockState state = (BlockState) args[1];
+                    this.chunk.setBlockState(pos, state, 2);
+                    this.written.put(pos, state);
                     return true;
+                }
                 case "getHeight": {
                     int arity = args == null ? 0 : args.length;
                     if (arity == 0) {
@@ -320,19 +361,19 @@ public final class StructurePiecePlaceOracle {
                         Heightmap.Types type = (Heightmap.Types) args[0];
                         int x = (Integer) args[1];
                         int z = (Integer) args[2];
-                        return this.chunk.getHeight(type, x & 15, z & 15) + 1;
+                        return heightAt(type, x, z) + 1;
                     }
                     Heightmap.Types type = (Heightmap.Types) args[0];
                     BlockPos pos = (BlockPos) args[1];
-                    return this.chunk.getHeight(type, pos.getX() & 15, pos.getZ() & 15) + 1;
+                    return heightAt(type, pos.getX(), pos.getZ()) + 1;
                 }
                 case "getHeightmapPos": {
                     Heightmap.Types type = (Heightmap.Types) args[0];
                     BlockPos pos = (BlockPos) args[1];
                     // LevelReader.getHeightmapPos 调 this.getHeight，即 WorldGenRegion.getHeight 的 +1 版本。
-                            // LevelReader.getHeightmapPos calls this.getHeight, i.e. WorldGenRegion.getHeight with +1.
-                            return new BlockPos(pos.getX(),
-                            this.chunk.getHeight(type, pos.getX() & 15, pos.getZ() & 15) + 1, pos.getZ());
+                    // LevelReader.getHeightmapPos calls this.getHeight, i.e. WorldGenRegion.getHeight with +1.
+                    return new BlockPos(pos.getX(), heightAt(type, pos.getX(), pos.getZ()) + 1,
+                            pos.getZ());
                 }
                 case "getMinY":
                     return MIN_Y;

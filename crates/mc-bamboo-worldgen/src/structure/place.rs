@@ -27,6 +27,21 @@ use crate::{
 ///
 /// The `level` and `chunkBB` parameters of vanilla `StructurePiece.postProcess`, plus the
 /// piece's own orientation, rotation and mirror.
+/// 一次写入：`(x, y, z, state)`。
+///
+/// One write: `(x, y, z, state)`.
+pub type Write = (i32, i32, i32, u32);
+
+/// 写入日志（可选），给对拍用；`None` 时零开销。
+///
+/// Optional write log for the oracle; `None` costs nothing.
+pub type WriteLog = Option<Vec<Write>>;
+
+/// 一个  的产物：高度校正结果和写入日志。
+///
+/// A  result: the height adjustment and the write log.
+pub type Placed = (Option<(i32, [i32; 6])>, WriteLog);
+
 pub struct PieceContext<'a, 'b> {
     pub world: &'a mut FeatureWorld<'b>,
     /// `chunkBB`：只在这个盒子里写字，出了盒子 `placeBlock` 直接丢弃。
@@ -47,6 +62,11 @@ pub struct PieceContext<'a, 'b> {
     /// `getRotation().ordinal()` and `getMirror().ordinal()`, `-1` for null.
     pub rotation: i32,
     pub mirror: i32,
+    /// 每次写入的 `(x, y, z, state)`，给对拍用。`None` 时不记录（生产路径零开销）。
+    ///
+    /// Every write as `(x, y, z, state)` for the oracle. `None` disables recording (zero cost
+    /// on the production path).
+    pub writes: WriteLog,
 }
 
 impl PieceContext<'_, '_> {
@@ -114,6 +134,9 @@ impl PieceContext<'_, '_> {
             return;
         }
         let state = self.transform(state);
+        if let Some(writes) = self.writes.as_mut() {
+            writes.push((pos.0, pos.1, pos.2, state));
+        }
         self.world.set_block(pos.0, pos.1, pos.2, state);
     }
 
@@ -208,6 +231,9 @@ impl PieceContext<'_, '_> {
             let current = self.world.get_block(pos.0, y, pos.2);
             if !replaceable_by_structures(current) {
                 break;
+            }
+            if let Some(writes) = self.writes.as_mut() {
+                writes.push((pos.0, y, pos.2, state));
             }
             self.world.set_block(pos.0, y, pos.2, state);
             y -= 1;

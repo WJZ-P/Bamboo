@@ -51,10 +51,11 @@ pub fn swamp_hut(
     orientation: Option<crate::structure::pieces::HDir>,
     rotation: i32,
     mirror: i32,
-) -> Result<Option<(i32, [i32; 6])>, String> {
+    writes: crate::structure::place::WriteLog,
+) -> Result<crate::structure::place::Placed, String> {
     let Some((height_position, new_bb)) = average_ground_height(world, piece_bb, chunk_bb, 0)
     else {
-        return Ok(None);
+        return Ok((None, writes));
     };
     let mut ctx = PieceContext {
         world,
@@ -63,6 +64,7 @@ pub fn swamp_hut(
         orientation,
         rotation,
         mirror,
+        writes,
     };
 
     let planks = mc_bamboo_data::blocks::SPRUCE_PLANKS;
@@ -139,5 +141,6 @@ pub fn swamp_hut(
             ctx.fill_column_down(logs, x, -1, z);
         }
     }
-    Ok(Some((height_position, new_bb)))
+    let writes = ctx.writes.take();
+    Ok((Some((height_position, new_bb)), writes))
 }
