@@ -263,10 +263,11 @@ impl World {
         // 读档时用存档里的出生点（已由 `apply_level_data` 套回）。超平坦保持不变。
         // A fresh world (no level.dat) picks a spawn like `setInitialSpawn`;
         // a loaded world keeps the saved spawn (already applied). Flat is unchanged.
-        if fresh_world && staged {
-            if let Some(spawn) = crate::worldgen_spawn::initial_spawn(&world_gen) {
-                global.state_mut().spawn = spawn;
-            }
+        if fresh_world
+            && staged
+            && let Some(spawn) = crate::worldgen_spawn::initial_spawn(&world_gen)
+        {
+            global.state_mut().spawn = spawn;
         }
         let director_config = DirectorConfig {
             pipeline: if staged {

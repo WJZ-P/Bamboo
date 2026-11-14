@@ -83,7 +83,7 @@ fn with_generator<T>(
     let key = (config.seed, settings_id);
     GENERATORS.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if !cache.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
             // 解析官方数据一次就泄漏成 'static：进程里只有一份，之后一直复用。
             // Parse the official data once and leak it to 'static; reused thereafter.
             let worldgen: &'static Worldgen =
@@ -94,7 +94,7 @@ fn with_generator<T>(
                 "minecraft:overworld",
                 config.seed,
             )?;
-            cache.insert(key, generator);
+            entry.insert(generator);
         }
         let generator = cache.get(&key).expect("generator was just inserted");
         f(generator)
