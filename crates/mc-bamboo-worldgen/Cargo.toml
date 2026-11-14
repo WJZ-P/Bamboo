@@ -11,6 +11,7 @@ categories = ["games"]
 
 [dependencies]
 mc-bamboo-blocks.workspace = true
+mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
 md-5.workspace = true
 sha2.workspace = true

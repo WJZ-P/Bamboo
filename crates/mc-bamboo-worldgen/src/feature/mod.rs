@@ -7,6 +7,7 @@
 //! 数据来自 `mc-bamboo-data::worldgen::WORLDGEN` 里的 `feature`、`placed_feature`、
 //! `biome_features` 和 `features_per_step` 四个键，见 `docs/worldgen-features-plan.md`。
 
+pub mod bamboo;
 pub mod block_predicate;
 pub mod dispatch;
 pub mod heightmap;
@@ -18,6 +19,7 @@ pub mod rule_test;
 pub mod run;
 pub mod simple_block;
 pub mod state;
+pub mod vines;
 pub mod world;
 
 /// `GenerationStep.Decoration` 的枚举项个数（26.3 是 11 个）。
