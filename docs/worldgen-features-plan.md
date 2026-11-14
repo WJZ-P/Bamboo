@@ -814,6 +814,10 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
 | 全 7 个类型一起放开 | `--seeds 6 --chunks 8 --salt 13` / `--salt 99`（各 48 中心）、`--seeds 9 --chunks 10 --salt 3`（90 中心 / 79626240 方块）均 **0 不一致 / 0 skipped** |
 | 故意改坏 | `speleothem` 每次先写一格 `STONE`：`--seeds 6 --chunks 8 --salt 13` 报 **9 mismatches**；`freeze_top_layer` 把雪换成 `STONE`：`--seeds 3 --chunks 6 --salt 1` 报 **160 mismatches**；改回后都是 0 |
 
+`SnowLayerBlock.canSurvive` 的「下方是 8 层满雪」这一条最初写成「下方有 `layers` 属性」，
+自查时改成真的比较当前层数（`layers_of`），并加了单元测试
+`layers_of_reads_the_current_layer_count` 覆盖 1..8 层。
+
 **注意**：`--seeds 3 --chunks 3 --salt 13` 这类小配置里 `pointed_dripstone`/
 `sulfur_spike` 一格都没放（那两个群系不在窗口内），即使把 `place` 整个改成
 `return false` 也报 0 —— 这是空跑，不能算验证。上面的 0 不一致都选了能真正放方块的
