@@ -128,7 +128,7 @@ fn offset(direction: &str) -> (i32, i32, i32) {
 /// `getFaceShape` slices the shape at the extremum along the axis and then checks whether
 /// the slice is cube-like. For a union of axis-aligned boxes that means one box touches the
 /// boundary on that face and spans the full 1x1 on the other two axes.
-fn face_is_full(shape: &[Aabb], direction: &str) -> bool {
+pub(crate) fn face_is_full(shape: &[Aabb], direction: &str) -> bool {
     const EPSILON: f64 = 1.0e-7;
     let spans = |lower: f64, upper: f64| lower <= EPSILON && upper >= 1.0 - EPSILON;
     shape.iter().any(|box_| {

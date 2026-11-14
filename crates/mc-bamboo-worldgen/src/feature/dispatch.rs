@@ -12,8 +12,8 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
-    bamboo::BambooFeature, ores, placement::OreFeature, simple_block::SimpleBlockFeature,
-    vines::VinesFeature, world::FeatureWorld,
+    bamboo::BambooFeature, multiface::MultifaceGrowthFeature, ores, placement::OreFeature,
+    simple_block::SimpleBlockFeature, vines::VinesFeature, world::FeatureWorld,
 };
 
 type Pos = (i32, i32, i32);
@@ -24,6 +24,7 @@ pub enum Leaf {
     Ore(Box<OreFeature>),
     SimpleBlock(Box<SimpleBlockFeature>),
     Vines(Box<VinesFeature>),
+    MultifaceGrowth(Box<MultifaceGrowthFeature>),
 }
 
 /// 按 `Feature` 类型 ID 解析配置；未移植或解析不了的类型返回 `None`。
@@ -34,6 +35,9 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         // 按 Feature 类型 ID 的字母序插入。
         // Inserted in Feature type ID order.
         "minecraft:bamboo" => Some(Leaf::Bamboo(Box::new(BambooFeature::parse(config)?))),
+        "minecraft:multiface_growth" => Some(Leaf::MultifaceGrowth(Box::new(
+            MultifaceGrowthFeature::parse(config)?,
+        ))),
         "minecraft:ore" => Some(Leaf::Ore(Box::new(OreFeature::parse(config).ok()?))),
         "minecraft:simple_block" => Some(Leaf::SimpleBlock(Box::new(SimpleBlockFeature::parse(
             config,
@@ -56,5 +60,6 @@ pub fn place_leaf(
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
         Leaf::Vines(vines) => vines.place(world, random, pos),
+        Leaf::MultifaceGrowth(growth) => growth.place(world, random, pos),
     }
 }
