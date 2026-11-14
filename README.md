@@ -77,7 +77,8 @@ WebView2 的渲染进程不算在内。
 次数做有上限的退避后由正常保存重试，绝不永久暂停；盒子留到写成功才释放，关服时
 把还没写成功的停放盒子全部重新编码提交；到关服磁盘还在失败就 `error!` 列出没存下的
 区块，照常退出。每次写盘或刷盘失败都在世界线程 `error!` 记日志（带路径和原因）并计数，
-`flush` 失败作为错误报出，不当成功。IO 线程 panic 或通道断开按设计稿 §14 / R12 当成
+`flush` 失败作为错误报出，不当成功。关服的 `flush` 和计算池排空都有墙钟上限，
+超时记错误并继续退出，绝不无限等。IO 线程 panic 或通道断开按设计稿 §14 / R12 当成
 致命错误：记日志、走关服流程把还能同步写的 `level.dat` / `data/` 存下来，不挂死。
 
 探针和每个测试都从空世界开始：单元测试 / oracle 用 `world_dir = None` 或临时目录，
@@ -88,6 +89,15 @@ WebView2 的渲染进程不算在内。
 （2026-11-14 按实现更新：`docs/m3-storage.md` 第 14 节、`docs/world-model-design.md` 5.3.1、
 `docs/profiling.md` 第 11 节、`crates/mc-bamboo-game/src/chunk_jobs.rs`、`tools/probe.sh`；
 合并提交 `05d8fa1`、`082a7c9`、`54f5fd2`）
+
+（2026-11-14 修 main 上两个回归：① 实体 tick 中被丢弃的实体曾在
+`EntityStore::taken` 里永久留一行，让 `ready_to_move_chunks()` 永远为假，玩家全离开后
+区块收回卡在 "not ready"、关服（等存完盘）因此挂死；现在 `end_tick` 回收这些借用槽位，
+`drain_compute` 和 `ChunkIo::flush` 的关服等待都有墙钟上限，绝不无限等。② `05d8fa1`
+（经 `1a0dee9` 合并）让所有区块走异步读流水线后，全新世界进服第一刻 `submit_reads`
+取 `region.players` 得到空表，读请求按坐标排序、远处区块抢先到达；现在改从 Director
+票表取玩家中心，全新世界和带存档世界第一批都按距离交付。详见 `docs/m3-storage.md`
+第 14 节「2026-11-14 修 main 上两个回归」。）
 
 ### 存档已知限制
 
@@ -398,11 +408,16 @@ WebView2 的渲染进程不算在内。
   边界上可能短暂偏暗；方块光（岩浆等）没有被生成阶段专门初始化。
   设计稿 5.3.1 的多阶段**邻居只读快照 `Arc<ProtoChunk>` 和 `FeatureResult.deltas` 按
   `TaskId` 合并还没做**：`Task::Generate.neighbors` 恒为空，features / 生成时 light 拿不到
-  半径 1 的邻居视图，这才是它们先透传的原因。`possibleBiomes` 仍用对拍的「全部群系 /
-  uncached resolver」简化路径，没换成官方周围 3×3 区块调色板并集（`BiomeCondition.compile`
-  的静态优化、雕刻器的 `carverBiome` 分支都还没按真实服务端的样子重新对拍）。
-  高度图只由 `Chunk::from_sections` 从方块重算 4 张，后期处理位置表、`ProtoChunk` 其余字段、
-  非 `full` 区块从盘上读回后按状态继续生成，都还没逐项对拍。`ChunkColumn::from_parts`
+  半径 1 的邻居视图，这才是它们先透传的原因。`possibleBiomes`、雕刻器的 `carverBiome`
+  分支和 `WorldGenRegion` 的 `uncachedBiomeResolver` 已按真实服务端路径重新对拍：
+  `gen-world` 的 Java 端用 `collectPossibleBiomes(region, 1)` 的 3×3 调色板并集、非空
+  `carverBiomeRegion` 和 `region.getBiomeManager()` 出题，与游戏侧同一份 `generate_chunk`
+  逐方块、逐 quart 格 0 不一致（多种子、多区块）；两条路径何时会不同、哪些是疑点，
+  见 `docs/worldgen.md`。六张高度图（`WORLD_SURFACE_WG` / `OCEAN_FLOOR_WG` 两张 WG 和
+  四张 `FINAL_HEIGHTMAPS`）已从最终 CARVERS 方块按官方谓词算出、逐列对拍 0 不一致，
+  存档写出的四张 FINAL 打包位流也和官方 `SerializableChunkData` 逐字对拍 0 不一致。
+  后期处理位置表、`ProtoChunk` 其余字段、非 `full` 区块从盘上读回后按状态继续生成，
+  都还没逐项对拍。`ChunkColumn::from_parts`
   产出的盒子 `untouched=false`，生成的区块一律算「改过」而写盘，官方可以丢弃原样生成区块。
   出生点是 `MinecraftServer.setInitialSpawn` 的**简化版**：从原点区块起按官方 11×11 螺旋、
   用 quart 群系粗略排除海洋后找一块不淹水的地表，没有 `NoiseSpawnFinder` 的气候螺旋定位、
