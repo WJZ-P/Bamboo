@@ -122,12 +122,35 @@
   0 不一致，官方 `PiecesContainer.load` / `save` 往返能读 `Children`，`world-dir` 的
   `SerializableChunkData.parse` 能读带该键的 4 个区块；反转 `BB` 的 int 顺序、把
   `References` 键改小写两处故意改坏各报 8 处不一致，还原回 0。
-* **仍没做**：需要模板的单件结构（雪屋 / 沉船 / 海底遗迹 / 废弃传送门）、`features`
-  阶段的 `placeInChunk` / `postProcess` / processors / 方块实体 / 拼图替换、把结构起点
+* **当时没做（本轮已补上前三种）**：需要模板的单件结构（雪屋 / 沉船 / 海底遗迹 / 废弃传送门）、
+  `features` 阶段的 `placeInChunk` / `postProcess` / processors / 方块实体 / 拼图替换、把结构起点
   真正接进 Director。模板结构件的 Java 对拍要构造带 `StructureTemplateManager` 的
   `GenerationContext`，且沉船 / 废弃传送门的包围盒依赖 `getLowestY` /
   `getMeanFirstOccupiedHeight`（terrain 高度），`features` 放置要逐方块比 `postProcess`，
-  两者都是独立的大块工作，本轮未达到 0 不一致，见第 10 节。
+  两者都是独立的大块工作。雪屋 / 沉船 / 海底遗迹已在下一段补上；废弃传送门仍没做。
+
+**第五轮（2026-11-14，`cb-wg-structures` 续：需要模板的单件结构布局）**：
+
+* 合并 `main` 时本分支已与 `main` 同步（`main` 的 `4405fc3` 含本分支全部提交），
+  工作区里那份没完成的 `git merge main` 冲突已按 main 内容解决（两边子命令都保留）。
+* 新增 `mc-bamboo-worldgen::structure::templated`：需要 `.nbt` 模板的单件结构的结构件布局。
+  公共部分是 `TemplateStructurePiece` 的包围盒算法（`StructureTemplate.transform` 的整数版 +
+  `getBoundingBox(BlockPos, Rotation, pivot, Mirror, Vec3i)`），每个结构一个子模块：
+  * 雪屋（`templated/igloo.rs`，`IglooPieces.addPieces`）：`igloo/top` 恒放，`nextDouble() < 0.5`
+    时先放 `igloo/bottom`（`depth = nextInt(8) + 4`，深度 `depth * 3`）和 `depth - 1` 段
+    `igloo/middle`；三个模板的 rotation pivot `(3,5)` / `(1,1)` / `(3,7)` 与偏移照官方常量表。
+  * 沉船（`templated/shipwreck.rs`，`ShipwreckPieces.addRandomPiece`）：一张模板，
+    pivot `(4,15)`，`is_beached` 决定从 11 项沙滩表还是 20 项海洋表里抽。
+  * 海底遗迹（`templated/ocean_ruin.rs`，`OceanRuinPieces.addPieces`）：`nextFloat() <= large_probability`
+    选大小，冷水遗迹一次 `nextInt` 同号取 brick / cracked / mossy（完好度 0.7 / 0.5），
+    大遗迹再 `nextFloat() <= cluster_probability` 时 `allPositions` 八个候选 + `nextInt(4..8)` 圈。
+* 新对拍 `cargo run -p mc-bamboo-vanilla -- structure-templated <java>` +
+  `java/StructureTemplatedOracle.java`（构造真实 `StructureTemplateManager`，不启服务端 / 读存档 /
+  接受 EULA）：8 种子 × 12 区块 × 5 类 = 480 查询、1685 结构件、1685 行逐项比 0 不一致。
+  故意改坏四处确认会失败：雪屋梯子 pivot 262 处、沉船 pivot 142 处、海底遗迹 cluster
+  候选下界 68 处、冷水 cracked 完好度 263 处，都还原回 0。
+* **仍没做**：废弃传送门（`RuinedPortalPiece` 的 `VerticalPlacement` / `findSuitableY` 要
+  `getBaseColumn` 的整列方块，属放置里程碑）、jigsaw 结构件、`features` 阶段的放置。
 
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、
 结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
@@ -683,7 +706,7 @@ structures (Compound)
 | 1 | 本方案文档 | — | **做完** |
 | 2 | 数据导出：`worldgen.json` 加四键，Rust 解析骨架 | `extract` 重跑无 diff（除四键）、旧 `chunkgen --through carvers` 仍 0 | **做完**：重跑无 diff、`--through carvers` 小样本 0 不一致 |
 | 3 | 放置：`random_spread`（含频率削减、exclusion zone、spread type）、`concentric_rings` 几何 | 大范围区块「哪个区块有哪个结构起点」0 不一致；新对拍先故意改坏一处确认会失败 | **做完**：20 集 × 464 查询 = 9280 放置比较 + 9744 加权选择比较 0 不一致；`concentric_rings` 6 种子 768 环位置 + 864 `isStructureChunk` 0 不一致 |
-| 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **部分做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿（`cb-wg-multipiece` 240 查询 25660 结构件 0 不一致）已做；需要模板的单件结构（雪屋 / 沉船 / 海底遗迹 / 废弃传送门）、林地府邸、jigsaw 结构件没做 |
+| 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **部分做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿 / 林地府邸（`structure-pieces` 336 查询 77960 结构件 0 不一致）、需要模板的雪屋 / 沉船 / 海底遗迹（`structure-templated` 480 查询 1685 结构件 0 不一致）已做；废弃传送门、jigsaw 结构件没做 |
 | 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | 没做 |
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | **做完（纯函数 + 对拍，`cb-wg-beard`）**：`beard` 12 用例 5,912,076 比较 0 不一致（kernel / sampleValue / sampleVolume / affectedBox / 三阶段方块），`--break-self-test` 会失败；`chunkgen --through carvers` EMPTY 回归仍 0。**没接进 Director**：游戏里仍走 `EMPTY` |
 | 7 | 存档：`structures` 键写/读；海底神殿「只存一个 `MonumentBuilding`、读回重建房间图」的口径见 4.1 | 读回一致，`world-dir` 确认官方能读 | **通用编码做完**：`structure-save` 8 case 规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、`world-dir` 的 `SerializableChunkData.parse` 都能读；各结构件 `addAdditionalSaveData` 字段与读档路径由 `cb-wg-multipiece` 在其上补齐 |
@@ -853,11 +876,18 @@ structures (Compound)
   各结构的 `findGenerationPoint`（结构件生成、模板、jigsaw）没做，`StructureStart`
   仍是数据类型，`start_plans` 只给加权尝试序列。组合对拍只覆盖 6 个 `random_spread`
   结构集、不含 `isStructureChunk` 命中过滤。
-* 第五轮已落地并对拍：`structure::single` 的四个代码生成单件结构布局（第 4 步一部分）、
+* 第五轮已落地并对拍：`structure::single` 的四个代码生成单件结构布局、
+  `structure::templated` 的雪屋 / 沉船 / 海底遗迹布局（第 4 步一部分）、
   `mc-bamboo-worldgen::beardifier`（第 6 步，`cb-wg-beard`，见第 5 节）、`structure::save` 的 `structures` 键（第 7 步）。
-  仍没做：需要模板的单件结构与 jigsaw 结构件生成（第 4 步其余）、`features` 阶段结构件
+  仍没做：废弃传送门的布局、jigsaw 结构件生成（第 4 步其余）、`features` 阶段结构件
   放置（第 5 步，`placeInChunk` / `postProcess` / processors / 方块实体 / 拼图替换），
   以及把全部结构起点接进 Director。这些仍是纯函数/类型，没有接进游戏。
+* 雪屋 / 沉船 / 海底遗迹的布局只做「结构件列表」：雪屋和沉船的 `postProcess` 会用
+  `getHeight` 把结构件 Y 校正到地表 / 海床，沉船还在模板超过 32 格时于 `generatePieces`
+  里按 `getLowestY` / `getMeanFirstOccupiedHeight` 调 Y；海底遗迹的 `postProcess` 同样按
+  `OCEAN_FLOOR_WG` 重设 Y。这些都依赖 terrain 高度，留给放置里程碑；现有 31 个沉船模板
+  都不超过 9×21×28，`isTooBigToFitInWorldGenRegion()` 恒 false，所以 `generatePieces`
+  里的高度调整在官方也从不触发（Rust 侧对该分支直接报错而不是猜）。
 * `structure-validity` 的整列判定与起点单点判定在这批数据上从未不一致（第 9 节疑点
   10）；两条路径各自用故意改坏单独验过。
 * `structure_references` 的纯函数 `structure_references` 已就位（含 `ChunkPos.pack`
