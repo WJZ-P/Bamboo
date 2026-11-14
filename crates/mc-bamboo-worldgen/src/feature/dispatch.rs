@@ -17,6 +17,7 @@ use super::{
     geode::{self, GeodeFeature},
     iceberg::{self, IcebergFeature},
     lake::{self, LakeFeature},
+    large_dripstone::{self, LargeDripstoneFeature},
     monster_room::{self, MonsterRoomFeature},
     ores,
     placement::OreFeature,
@@ -38,6 +39,7 @@ pub enum Leaf {
     Geode(Box<GeodeFeature>),
     Iceberg(IcebergFeature),
     Lake(Box<LakeFeature>),
+    LargeDripstone(Box<LargeDripstoneFeature>),
     MonsterRoom(MonsterRoomFeature),
     Ore(OreFeature),
     SimpleBlock(SimpleBlockFeature),
@@ -55,6 +57,9 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         "minecraft:geode" => Leaf::Geode(Box::new(GeodeFeature::parse(config).ok()?)),
         "minecraft:iceberg" => Leaf::Iceberg(IcebergFeature::parse(config).ok()?),
         "minecraft:lake" => Leaf::Lake(Box::new(LakeFeature::parse(config).ok()?)),
+        "minecraft:large_dripstone" => {
+            Leaf::LargeDripstone(Box::new(LargeDripstoneFeature::parse(config).ok()?))
+        }
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?),
         "minecraft:spring_feature" => Leaf::Spring(SpringFeature::parse(config).ok()?),
@@ -81,6 +86,7 @@ fn is_supported(leaf: &Leaf) -> bool {
         Leaf::Disk(disk) => disk.supported(),
         Leaf::Geode(geode) => geode.supported(),
         Leaf::Lake(lake) => lake.supported(),
+        Leaf::LargeDripstone(feature) => feature.supported(),
         _ => true,
     }
 }
@@ -101,6 +107,7 @@ pub fn place_leaf(
         Leaf::Iceberg(iceberg) => iceberg::place(iceberg, world, random, pos),
         Leaf::MonsterRoom(room) => monster_room::place(room, world, random, pos),
         Leaf::Lake(lake) => lake::place(lake, world, random, pos),
+        Leaf::LargeDripstone(feature) => large_dripstone::place(feature, world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
         Leaf::Spring(spring) => spring::place(spring, world, pos),

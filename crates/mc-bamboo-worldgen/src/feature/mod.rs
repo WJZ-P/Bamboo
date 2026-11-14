@@ -12,10 +12,13 @@ pub mod block_predicate;
 pub mod composition;
 pub mod disk;
 pub mod dispatch;
+#[cfg(test)]
+pub mod dripstone_probe;
 pub mod geode;
 pub mod heightmap;
 pub mod iceberg;
 pub mod lake;
+pub mod large_dripstone;
 pub mod monster_room;
 pub mod ores;
 pub mod placement;

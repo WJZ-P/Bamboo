@@ -213,6 +213,53 @@ impl IntProvider {
     }
 }
 
+/// `FloatProvider`：本轮只用到 `uniform`（大型滴水石）。
+///
+/// `FloatProvider`: only `uniform` is needed this round (the large dripstone feature).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FloatProvider {
+    pub min: f32,
+    pub max: f32,
+}
+
+impl FloatProvider {
+    /// `UniformFloat.MAP_CODEC`：`min_inclusive` / `max_exclusive`。
+    ///
+    /// `UniformFloat.MAP_CODEC`: `min_inclusive` / `max_exclusive`.
+    pub fn parse(value: &Value) -> Result<Self, String> {
+        let object = value
+            .as_object()
+            .ok_or("float provider must be an object")?;
+        let kind = object
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or("float provider has no type")?;
+        if kind != "minecraft:uniform" {
+            return Err(format!("unsupported float provider {kind}"));
+        }
+        let number = |name: &str| -> Result<f32, String> {
+            object
+                .get(name)
+                .and_then(Value::as_f64)
+                .map(|value| value as f32)
+                .ok_or_else(|| format!("float provider has no {name}"))
+        };
+        let min = number("min_inclusive")?;
+        let max = number("max_exclusive")?;
+        if max <= min {
+            return Err("uniform float provider needs max > min".to_owned());
+        }
+        Ok(Self { min, max })
+    }
+
+    /// `Mth.randomBetween(random, min, maxExclusive)`：`nextFloat() * (max - min) + min`。
+    ///
+    /// `Mth.randomBetween(random, min, maxExclusive)`: `nextFloat() * (max - min) + min`.
+    pub fn sample(&self, random: &WorldgenRandom) -> f32 {
+        random.next_float() * (self.max - self.min) + self.min
+    }
+}
+
 /// `HeightProvider.sample(random, WorldGenerationContext)`。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HeightProvider {
