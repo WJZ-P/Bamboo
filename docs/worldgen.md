@@ -371,7 +371,7 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   折进 terrain 是为了避免两次组装 `RegionColumn`（纯 all-air 的 biomes 盒子在
   `from_sections` 里也要重算 4 张高度图，很慢且马上被 terrain 覆盖）；官方 `terrain`
   里地表/雕刻器本就是 `BiomeManager` uncached 重算群系，这里连 quart 格也一起算。
-  `features` / `initialize_light` / `light` / `spawn` / `full` 本轮原样透传。
+  `initialize_light` / `light` / `spawn` / `full` 本轮仍原样透传；`features` 见下。
 * 数据交接：`Worldgen` 解析一次后按线程 `Box::leak`，`chunk::Generator` 每条计算线程
   各缓存一份（它的 `ParameterList` 用 `Cell` 记 R 树 `lastResult`，官方是
   `ThreadLocal`，不能跨线程共享）。生成的方块/群系按官方 `PalettedContainer` 下标写进
@@ -383,6 +383,39 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   出题，Bamboo 侧调**游戏里用的同一份** `generate_chunk` 逐 quart 格、逐方块比较。
   `--break-self-test` 故意改坏一个方块确认对拍会失败。`--through carvers` 两边都停在
   CARVERS，地物/结构/光照按 `--steps` 的思路一起排除。release 实跑见「耗时」。
+
+### 第二轮：`features` 接进游戏（设计稿 5.3.1 / features-plan 3.2）
+
+`features` 阶段不再透传。`mc-bamboo-game/src/worldgen_features.rs` 是游戏侧的接线：
+
+* **邻居只读快照**：`pyramid::neighbor_view` 给 `features`（和 `light`）声明半径 1 的
+  邻居和所需阶段，`advance_stage` 把 `(位置, 阶段)` 列进 `Task::Generate.neighbors`。
+  世界线程（`director_host.rs` 的 `partials`）把每个区块的 CARVERS 半成品存成不可变
+  `Arc<GeneratedChunk>`，发任务时按位置挂到 `ChunkWork::Generate` 上——全是 `Arc` 克隆，
+  不复制方块、不改快照。空缺的邻居由计算线程用 `cached_generate_chunk` 纯函数现算。
+  发出后世界线程不再改这份 `Arc`（只在 `Forgot` / 完工时移除）。
+* **`features` 纯函数**：`resolve_view` 拼 3×3，`run_features` 调
+  `chunk::Generator::features()`（`applyBiomeDecoration`）。已移植的 `minecraft:ore`
+  照常放，其余类型标 `unsupported` 跳过（`feature/run.rs`，地物 A/B 合入后自动生效）。
+* **写邻居的增量**：中心自己的地物、溢出到 8 个邻居的写、以及 8 个邻居中心溢进来的写
+  都表示成世界坐标增量。世界线程按 `TaskId` 顺序（`collect_compute` 已排好序）追加到
+  目标区块的增量表，`Task::Assemble` 时 `assemble_feature_column` 排 `(x,y,z,state)`
+  规范序再落到交付盒子——与线程调度、回执到达顺序无关。
+* **确定性重算**：Bamboo 的调度不保证 8 个邻居的 `features` 都在中心组装前落地，所以中心
+  这次 `features` 用 `cached_feature_run`（线程本地缓存）纯函数重算 8 个邻居中心写进来的
+  增量，保证本区块需要的集合从自己的 features 结果就齐。`features` 是纯函数、随机数只从
+  种子和坐标派生，命中缓存不改结果。
+* **验收**：`gen-world <java> --through features`（内部给 Java 加 `--ore-only`，Bamboo 调
+  **游戏里这份** `game_features`）逐方块比 3×3 九宫格，`--break-self-test` 自检会失败；
+  `--seeds 2 --chunks 4 --through features --salt 1` 实跑 8 个中心 / 7077888 方块 0 不一致，
+  carvers 路径回归 0 不一致。`world::staged_tests::one_and_four_threads_generate_identical_feature_blocks`
+  用 1 线程和 4 线程计算池生成同一片 3×3 normal 区块，逐格方块相同。
+
+和官方的**语义差异**（写进本轮汇报的疑点清单）：官方邻居溢出的写来自各邻居区块跑到
+`FEATURES` 时的 `WorldGenRegion`，Bamboo 改为中心纯函数重算；增量按规范序而非官方生成顺序
+生效；同格重复写由规范序里最后一条生效；邻居快照是干净 CARVERS 地形，`WorldGenRegion`
+读的可能是邻居更靠后阶段的内容。这些都不改变「已移植矿石」的逐格结果（对拍 0 不一致），
+但在换上更多地物、结构、生成期光照后要重新核对。
 
 ### 各阶段耗时与生成能否跟上飞行
 
@@ -403,12 +436,12 @@ CARVERS 约 37 ms（release，不含建 `Generator`、不含 `ChunkColumn` 组�
 
 ## 还没做
 
-* 地物（`features` 阶段透传，不放置任何地物；第 6 步矿石的纯函数已有、没接进游戏）、
-  结构（两个阶段是空实现）、生成时的 `initialize_light` / `light`（透传，光照由
-  **运行时**光照引擎在交付后补算）、`spawn` 阶段刷怪（空实现）。
-* 邻居只读快照 `Arc<ProtoChunk>` 与 `FeatureResult.deltas` 按 `TaskId` 顺序合并
-  （设计稿 5.3.1 的 M4 剩余部分）：`Task::Generate.neighbors` 目前恒为空，features /
-  light 拿不到半径 1 的邻居视图，所以这两块先透传。
+* 地物**类型**：`features` 阶段已接进游戏（见上），但只移植了 `minecraft:ore`；其余
+  feature / modifier / predicate 类型照对拍标 `unsupported` 跳过（地物 A/B 在做）。
+  结构（两个阶段是空实现）、生成时的 `initialize_light` / `light`（`light` 已带半径 1
+  邻居引用，但真实光照计算没移植，光照由**运行时**引擎在交付后补算）、`spawn` 刷怪仍是空实现。
+* 生成期光照 `initialize_light` / `light` 的真实计算（`isLightOn=true`、天空光 / 方块光
+  逐格对拍）：邻居视图的接口已经就位，计算本身是下一轮。
 * 下界和末地（无 `aquifers` 的路径、五群系末地源、下界老 fbm）。
 * `BlendingData` / `Blender` 的非空路径（老存档升级、旧区块混合）。
 * `Beardifier` 的非空路径（结构影响密度）。

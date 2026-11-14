@@ -856,6 +856,38 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   玩家离开、`/save-all`（force）和关服不受影响。第二次 Ctrl+C / 桌面端第二次停止
   明确记录「未保存的改动会丢」并立刻结束进程。F6 背压只暂缓收回，交付照常。
 
+### 2026-11-14 修 main 上两个回归
+
+- **区块收回卡死 / 关服挂住**：精确模式（默认 `entity_threads = 0`）的
+  `World::tick_entities` 把实体 `take` 出去，tick 里被 `discard` 的实体既不 `put`
+  回来也不再 `remove`（`take` 已把它从 `index` 摘掉），`EntityStore::taken` 里会
+  永久留一行、`slots[row]` 一直空着。于是 `ready_to_move_chunks()` 永远为假，
+  所有区块收回都卡在 "not ready"、每 50ms 打一条 warn，玩家全离开后关服（会等
+  世界存完盘）因此挂死。修法是 `EntityStore::end_tick` 在 tick 边界把这些残留的
+  `taken` 行摘掉、槽位放回 `free`，和并行驱动 `remove_entity` 的清理一致。
+  另外把关服路径上的等待都加上界：`DirectorHost::drain_compute` 有墙钟上限
+  （`SHUTDOWN_DRAIN_TIMEOUT`），`ChunkIo::flush` 用 `recv_timeout`
+  （`FLUSH_TIMEOUT`），IO 线程卡住时也会记错误并退出，绝不无限等。
+  回归测试 `entity::store::tests::discarded_entities_do_not_leave_borrowed_rows_at_tick_end`
+  和 `world::tests::review_probe::all_chunks_reclaim_and_shutdown_completes_after_every_player_leaves`。
+- **全新世界进服区块顺序**：`05d8fa1`（经合并 `1a0dee9` 进 main）让所有区块都走
+  异步读流水线后，`submit_reads` 用 `region.players` 取玩家中心按距离排序读请求。
+  但进服那一刻 `Event::Tickets`（`PlayerMoved`）先派读任务、之后才
+  `region.add_player`，第一刻的票泵里 `region.players` 是空的，读请求退化成按
+  坐标 `(x, z)` 排序，远处区块抢先回执，`nearest chunk comes first` 和
+  `first batch is the three by three around the spawn` 两项 probe 检查失败。
+  修法是改从 Director 票表取玩家中心（`TicketTable::player_centers`），票表在
+  `handle_effects` 里同步 `set_player`，派读时一定有正确的中心；带盘上区块的
+  世界和全新世界都按距离交付第一批。回归测试
+  `director_host::tests::read_submission_uses_ticket_table_centers_not_region_players`，
+  全新世界探针 `tools/probe.sh` 与 `--loaded` 两种模式都跑 718/718。
+
+  验证说明：Windows 下 `tokio::signal::ctrl_c()` 需要控制台；无人值守的 `-p`
+  环境里 `tools/probe.sh` 后台启动的 `bamboo` 没有控制台，`kill -INT` 送不到
+  `ctrl_c()`，探针脚本的优雅关服一步会等满 30 秒后 `kill -9`。关服不再挂住、
+  存盘完整这一点由上面的进程内回归测试（直接发 `Inbound::Shutdown` 走完
+  `shut_down()`）验证；有控制台的环境下 `tools/probe.sh` 能正常关服。
+
 ### `level.dat` 每个字段的来源
 
 逐字段核对 26.3 `PrimaryLevelData.setTagData`（`createTag` 的私有实现）的字节码

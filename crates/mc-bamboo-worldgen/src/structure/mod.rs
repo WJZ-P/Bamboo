@@ -22,7 +22,9 @@ pub mod pieces;
 pub mod placement;
 pub mod registry;
 pub mod rings;
+pub mod single;
 pub mod start;
+pub mod template;
 pub mod validity;
 
 use std::collections::{HashMap, HashSet};

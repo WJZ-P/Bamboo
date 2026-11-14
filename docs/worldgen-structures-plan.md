@@ -92,6 +92,19 @@
 * 每一步单独提交；整列判定与起点单点判定在这批数据上从未不一致（主世界群系沿 Y 基本
   恒定），两条路径各自用故意改坏单独验过。
 
+**第四轮（2026-11-14，`cb-wg-jigsaw` 分支：结构模板导出）**：
+
+* 从官方 jar 原样导出 1511 个 `.nbt`（`structures.bin` + 索引，见 2.2），重跑无 diff；
+  `mc-bamboo-data::structures` 暴露字节，`mc-bamboo-worldgen::structure::template`
+  用 `mc-bamboo-nbt` 解析方块 / 方块实体 / 拼图方块（单元测试解析全部 1511 个模板）。
+* 新对拍 `structure-templates`：官方 `NbtIo` 逐节点比整棵 NBT 树、校验导出字节等于 jar
+  原文、比字段计数，1511 个模板 0 不一致；故意改坏一处 1511 个全失败，还原回 0。
+* **jigsaw 结构件生成（`JigsawPlacement.addPieces`、五种 pool element、村庄 5 种 /
+  掠夺者前哨站 / 古城 / 试炼密室 / 古迹废墟的结构件列表对拍）没做**：官方对拍需要构造
+  带 `StructureTemplateManager` 的 `Structure.GenerationContext`（前面队员的 oracle 该参数
+  传 `null`），Rust 侧要精确复刻 `Shapes` 的 AABB 布尔运算、`getShuffledJigsawBlocks` 的
+  洗牌顺序与 `SequencedPriorityIterator`，本次会话未能达到逐项 0 不一致，见第 10 节。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、
 每个结构真正的 `findGenerationPoint`（结构件生成）、结构件放置、`Beardifier`、存档
 `structures` 键都还没做；这一切都还是纯函数加 oracle，没有接进 Director，游戏里世界仍是
@@ -211,12 +224,20 @@ worldgen.add("processor_list", encodeRegistry(registries, ops, Registries.PROCES
 
 `data/minecraft/structure/**.nbt` 共 1511 个、约 4.04 MiB，是 `StructureTemplate` 的
 NBT（`size` / `palette` / `blocks` / `entities`），被 `single_pool_element` 的 `location`
-按注册名引用。这些是二进制文件，不能手写。**本轮（第 1–3 步）用不到**：只有第 4 步
-（结构件生成）和第 5 步（`postProcess` 放模板）才需要真正读模板内容。方案是到那一步
-再由生成器从 jar 原样导出到一个独立目录（例如 `crates/mc-bamboo-data/src/generated/structures/`，
-按 `worldgen/structure` 的相对路径存 `.nbt`），用 `include_bytes!` 或构建期读取；
-导出方式、路径、编解码属于第 4 步的范围，届时补进 `generate.rs` 并进
-「重跑无 diff」的同一套流程。**当前不导出，作为已知限制写明**（见第 10 节）。
+按注册名引用。这些是二进制文件，不能手写。
+
+**已落地（`cb-wg-jigsaw` 分支，2026-11-14）**：生成器新步骤
+（`tools/mc-bamboo-vanilla/src/structure_templates.rs`）从 jar 的 zip 条目解掉外层
+deflate，把每个 gzip 字节按注册名排序拼成 `structures.bin`，另写 `structures.rs` 索引
+（`BLOB` / `ENTRIES` / `get(name)`），由 `mc-bamboo-data` 用 `include_bytes!` 暴露。
+1511 个模板、4236847 字节，重跑 `extract` 逐字节无 diff（`.gitattributes` 给二进制加
+了例外）。Rust 侧 `mc-bamboo-worldgen::structure::template` 用
+`mc-bamboo-nbt::read_compressed` 解析出 `size` / `palette`（26.3 的 `id` /
+`properties`）/ `blocks`（含方块实体 `nbt`）/ `entities` / 拼图方块（`orientation` 的
+front / top、`name` / `target` / `pool` / 优先级 / `joint`），单元测试解析全部 1511 个
+模板。`structure-templates` 对拍用官方 `NbtIo` 逐节点规范化整棵 NBT 树并校验导出字节
+等于 jar 原文，1511 个模板 0 不一致，故意改坏 Rust 的 int 标记会让 1511 个全部失败。
+多 palette 模板有 20 个，`getRandomPalette` 的按位置随机选择留到结构件生成那一步处理。
 
 ### 2.3 为什么用 codec 重编码而不是直接拷 jar 里的 JSON
 
@@ -615,9 +636,18 @@ structures (Compound)
 * 主世界以外的维度（下界、末地）不做。Bamboo 目前没有下界/末地维度。
 * **全是纯函数 + 对拍，没接进游戏**：`structure_starts` / `structure_references` 两个阶段
   仍是空实现，本模块的结果没有进 Director 的流水线，游戏里世界仍是超平坦。
-* `.nbt` 结构模板仍**未导出**（第 2.2 节，jar 里 1511 个、约 4 MiB）：按队长约定，在
-  第一个真正用到模板的结构那一步再导出，本轮没做到那一步，只导出了引用它们的四个
-  注册表 JSON。
+* `.nbt` 结构模板**已导出**（第 2.2 节）：`cb-wg-jigsaw` 分支从 jar 原样导出 1511 个、
+  4236847 字节，重跑无 diff，Rust 侧可解析并经官方 `NbtIo` 逐节点对拍 0 不一致。
+  20 个多 palette 模板的 `StructurePlaceSettings.getRandomPalette`（按位置
+  `RandomSource.create(Mth.getSeed(pos))` 选 palette）尚未移植，结构件生成要用时补。
+* **jigsaw 结构件生成（`JigsawPlacement.addPieces` 及 5 类 jigsaw 结构）没做**：`addPieces`
+  依赖 `StructureTemplateManager` 加载模板、`Shapes` 的 VoxelShape 布尔空间检查（`ONLY_FIRST`
+  / `ONLY_SECOND` / `deflate(0.25)` / `MutableObject` 共享 / `sourceFree` 与 `contextFree`）、
+  `Rotation.getShuffled` / `getShuffledTemplates` / `getRandomTemplate` 的随机取数顺序、
+  `SequencedPriorityIterator` 的 placementPriority 队列，以及各结构 `findGenerationPoint`
+  的 `HeightProvider` / `PoolAliasLookup` / `DimensionPadding` / `LiquidSettings`。官方对拍
+  还要把 `Structure.GenerationContext` 的 `structureTemplateManager` 从 `null` 换成真实实例
+  （构造器需要 `LevelStorageAccess` 与 `DataFixer`）。这些都没移植，不假装支持。
 * `concentric_rings`（要塞）的环几何 + `findBiomeHorizontal` 吸附已移植并对拍
   0 不一致；但要塞的 `isStructureChunk` 必须先由调用方 `set_ring_positions` 注入
   `ring_positions` 的结果，没注入时仍返回 false。`Placement::is_placement_chunk` 单独

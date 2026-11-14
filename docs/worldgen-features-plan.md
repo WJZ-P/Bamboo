@@ -726,10 +726,14 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   「已移植集合」输出 `skipped`，`--ore-only` 是手工过滤。
 * 接进 Director 的**多阶段流水线形状**已经就位（流水线分支：`PipelineKind::Staged`
   按 `ChunkPyramid` 派 `structure_starts … full` 十个阶段、terrain 已接真生成）。
-  但 **5.3.1 的邻居只读快照 `Arc<ProtoChunk>` + `FeatureResult.deltas` 按 `TaskId`
-  合并还没做**：`Task::Generate.neighbors` 仍恒为空，所以游戏里的 `features` 阶段目前
-  是透传、不放置任何地物（第 6 步矿石的纯函数只在对拍里跑）。`initialize_light` /
-  `light` / `spawn` 同样透传。把 features 真正接进游戏要等这块邻居快照落地。
+  **第二轮（本轮）已把 features 接进游戏**：`Task::Generate.neighbors` 按 `ChunkStep`
+  半径带邻居引用，世界线程存不可变 `Arc` CARVERS 快照（`director_host.rs::partials`），
+  计算池跑 `Generator::features()`，写邻居增量按 `TaskId` 追加、完工
+  `assemble_feature_column` 排规范序落盘；中心还会纯函数重算 8 个邻居中心溢进来的写，
+  保证集合与邻居任务落地时刻无关。见 `docs/worldgen.md`「第二轮」、`mc-bamboo-game/src/worldgen_features.rs`。
+  `gen-world --through features`（Java `--ore-only`）0 不一致、1/4 线程逐字节相同。
+  **还没做**：其余地物类型（A/B 在做）、`initialize_light` / `light` 的真实计算
+  （`light` 已带邻居引用）、`spawn` 刷怪。
 * 高度图的增量更新：矿石走 `BulkSectionAccess` 直接写 `LevelChunkSection`，
   **绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是 primed 后固定的；
   以后接树/湖时要照 `Heightmap.update` 补上。
