@@ -609,6 +609,33 @@ mod tests {
         );
     }
 
+    /// `jigsaw jigsaws` 对拍用的四个位置要让**每个**多 palette 模板至少命中一次非 0
+    /// palette，否则「按位置选 palette」那条在官方对拍里只是间接推断。
+    ///
+    /// The four positions used by the `jigsaw jigsaws` oracle must hit a non-zero palette
+    /// for **every** multi-palette template; otherwise the position-based palette choice
+    /// is only indirectly covered by the vanilla comparison.
+    #[test]
+    fn oracle_positions_exercise_every_multi_palette_template() {
+        const POSITIONS: [(i32, i32, i32); 4] =
+            [(0, 0, 0), (1, 2, 3), (-7, 64, 11), (100, -20, -33)];
+        let mut multi = 0usize;
+        for &(name, _, _) in blob::ENTRIES {
+            let template = StructureTemplate::load(name).unwrap();
+            if template.palettes.len() <= 1 {
+                continue;
+            }
+            multi += 1;
+            assert!(
+                POSITIONS
+                    .iter()
+                    .any(|&pos| template.palette_index(pos).is_some_and(|index| index != 0)),
+                "{name}: none of the oracle positions selects a non-zero palette"
+            );
+        }
+        assert!(multi > 0, "no multi-palette template found");
+    }
+
     /// `empty.nbt` 是最小的模板，能读出来且尺寸非负。
     ///
     /// `empty.nbt` is the smallest template; it loads with a non-negative size.
