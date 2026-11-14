@@ -13,6 +13,7 @@ pub mod composition;
 pub mod disk;
 pub mod dispatch;
 pub mod dripstone_utils;
+pub mod freeze_top_layer;
 pub mod heightmap;
 pub mod large_dripstone;
 pub mod ores;

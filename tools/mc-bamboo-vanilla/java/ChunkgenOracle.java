@@ -209,6 +209,10 @@ final class FeatureLevelHandler implements InvocationHandler {
                 int y = args[0] instanceof BlockPos pos ? pos.getY() : (Integer) args[0];
                 return y < this.minY || y > this.minY + this.height - 1;
             }
+            case "isInsideBuildHeight": {
+                int y = args[0] instanceof BlockPos pos ? pos.getY() : (Integer) args[0];
+                return y >= this.minY && y <= this.minY + this.height - 1;
+            }
             case "getSeaLevel":
                 return this.seaLevel;
             case "scheduleTick": {
@@ -290,6 +294,19 @@ final class FeatureLevelHandler implements InvocationHandler {
             }
             case "isEmptyBlock":
                 return getBlockState((BlockPos) args[0]).isAir();
+            case "getBrightness", "getRawBrightness":
+                // 假世界没有光照引擎，地物阶段官方世界里方块光也只有 0，天空光是 15
+                // （还没跑 light 阶段，整片区域都当露天）。
+                // The fake world has no light engine: block light is 0 during the feature
+                // stage and sky light is 15 (light has not run, everything is open sky).
+                if (args[0] instanceof net.minecraft.world.level.LightLayer layer) {
+                    return layer == net.minecraft.world.level.LightLayer.SKY ? 15 : 0;
+                }
+                return 15;
+            case "canSeeSky":
+                return true;
+            case "getLightEngine":
+                throw new UnsupportedOperationException("getLightEngine is not available here");
             case "isWaterAt": {
                 // LevelReader.isWaterAt 的默认实现，SpeleothemUtils.growSpeleothem 会调。
                 // LevelReader.isWaterAt default, used by SpeleothemUtils.growSpeleothem.
