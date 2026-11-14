@@ -11,16 +11,19 @@ pub mod block_predicate;
 pub mod composition;
 pub mod dispatch;
 pub mod heightmap;
+pub mod huge_mushroom;
 pub mod ores;
 pub mod placement;
 pub mod provider;
 pub mod registry;
 pub mod rule_test;
 pub mod run;
+pub mod shape_update;
 pub mod simple_block;
 pub mod state;
 pub mod state_provider;
 pub mod survival;
+pub mod tree;
 pub mod world;
 
 /// `GenerationStep.Decoration` 的枚举项个数（26.3 是 11 个）。
