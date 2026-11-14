@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     Pos, TreePlace, cannot_replace_below_trunk, decorator::Decorator, foliage::FoliagePlacer,
-    trunk::TrunkPlacer,
+    root::RootPlacer, trunk::TrunkPlacer,
 };
 
 /// 一棵树的全部已解析配置。
@@ -24,6 +24,7 @@ use super::{
 pub struct TreeConfig {
     pub trunk: TrunkPlacer,
     pub foliage: FoliagePlacer,
+    pub root: Option<RootPlacer>,
     pub trunk_provider: StateProvider,
     pub foliage_provider: StateProvider,
     pub below_trunk: BelowTrunk,
@@ -38,11 +39,10 @@ impl TreeConfig {
         if object.get("type").and_then(Value::as_str) != Some("minecraft:tree") {
             return None;
         }
-        // root placer 还没移植。
-        // Root placers are unported.
-        if object.contains_key("root_placer") {
-            return None;
-        }
+        let root = match object.get("root_placer") {
+            Some(root) => Some(RootPlacer::parse(root)?),
+            None => None,
+        };
         let decorators = object
             .get("decorators")?
             .as_array()?
@@ -52,6 +52,7 @@ impl TreeConfig {
         Some(Self {
             trunk: TrunkPlacer::parse(object.get("trunk_placer")?)?,
             foliage: FoliagePlacer::parse(object.get("foliage_placer")?)?,
+            root,
             trunk_provider: StateProvider::parse(object.get("trunk_provider")?)?,
             foliage_provider: StateProvider::parse(object.get("foliage_provider")?)?,
             below_trunk: BelowTrunk::parse(object.get("below_trunk_provider")?)?,
@@ -182,10 +183,13 @@ mod tests {
         for name in ["minecraft:oak", "minecraft:fancy_oak", "minecraft:acacia"] {
             assert!(TreeConfig::parse(&features[name]).is_some(), "{name}");
         }
-        // 带装饰器的也能解析；红树有 root placer，还不行。
-        // Decorated trees parse too; mangrove has a root placer and does not yet.
+        // 带装饰器、带树根的也能解析。
+        // Decorated and rooted trees parse too.
         assert!(TreeConfig::parse(&features["minecraft:swamp_oak"]).is_some());
-        assert!(TreeConfig::parse(&features["minecraft:mangrove"]).is_none());
+        assert!(TreeConfig::parse(&features["minecraft:mangrove"]).is_some());
+        // pale_oak 带 pale_moss 装饰器，还不行。
+        // pale_oak has the pale_moss decorator and does not parse yet.
+        assert!(TreeConfig::parse(&features["minecraft:pale_oak"]).is_none());
     }
 
     #[test]

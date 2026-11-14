@@ -55,6 +55,10 @@ enum Kind {
         foliage_height: IntProvider,
         leaf_placement_attempts: i32,
     },
+    Poplar {
+        height: IntProvider,
+        side_hole_chance: f32,
+    },
     Cherry {
         height: IntProvider,
         wide_bottom_layer_hole_chance: f32,
@@ -98,6 +102,10 @@ impl FoliagePlacer {
                 foliage_height: provider("foliage_height")?,
                 leaf_placement_attempts: int("leaf_placement_attempts")?,
             },
+            "minecraft:poplar_foliage_placer" => Kind::Poplar {
+                height: provider("height")?,
+                side_hole_chance: float("side_hole_chance")?,
+            },
             "minecraft:cherry_foliage_placer" => Kind::Cherry {
                 height: provider("height")?,
                 wide_bottom_layer_hole_chance: float("wide_bottom_layer_hole_chance")?,
@@ -124,7 +132,9 @@ impl FoliagePlacer {
             | Kind::Bush { height }
             | Kind::MegaJungle { height } => *height,
             Kind::Acacia => 0,
-            Kind::Pine { height } | Kind::Cherry { height, .. } => height.sample(random),
+            Kind::Pine { height } | Kind::Cherry { height, .. } | Kind::Poplar { height, .. } => {
+                height.sample(random)
+            }
             Kind::Spruce { trunk_height } => 4.max(tree_height - trunk_height.sample(random)),
             Kind::MegaPine { crown_height } => crown_height.sample(random),
             Kind::DarkOak => 4,
@@ -277,6 +287,28 @@ impl FoliagePlacer {
                     run.try_place_leaf((a.pos.0 + dx, a.pos.1 + dy, a.pos.2 + dz));
                 }
             }
+            Kind::Poplar {
+                side_hole_chance, ..
+            } => {
+                let pos = (a.pos.0, a.pos.1 + offset, a.pos.2);
+                let radius = leaf_radius + a.radius_offset_xz - 1;
+                let flip = random.next_boolean();
+                let poplar = Poplar {
+                    side_hole_chance: *side_hole_chance,
+                    foliage_height: height_with_offset,
+                    flip,
+                    double_trunk,
+                };
+                run.poplar_row(&poplar, pos, radius - 2, height_with_offset - 1);
+                run.poplar_row(&poplar, pos, radius - 1, height_with_offset - 2);
+                run.poplar_row(&poplar, pos, radius - 1, height_with_offset - 3);
+                for y in (1..=height_with_offset - 4).rev() {
+                    run.poplar_row(&poplar, pos, radius, y);
+                }
+                run.poplar_logs(&poplar, pos, radius, height_with_offset - 4);
+                run.poplar_row(&poplar, pos, radius - 1, 0);
+                run.poplar_row(&poplar, pos, (radius - 2).clamp(1, 2), -1);
+            }
             Kind::Cherry {
                 hanging_leaves_chance,
                 hanging_leaves_extension_chance,
@@ -337,7 +369,9 @@ impl FoliagePlacer {
                     false
                 }
             }
-            Kind::RandomSpread { .. } => false,
+            // 白杨有自己的 `shouldSkipLocation`，官方这个重载直接抛异常。
+            // Poplar has its own `shouldSkipLocation`; the official overload throws.
+            Kind::RandomSpread { .. } | Kind::Poplar { .. } => false,
             Kind::Cherry {
                 wide_bottom_layer_hole_chance,
                 corner_hole_chance,
@@ -418,6 +452,55 @@ impl Run<'_, '_, '_> {
                 );
                 if !skip {
                     self.try_place_leaf((origin.0 + dx, origin.1 + y, origin.2 + dz));
+                }
+            }
+        }
+    }
+
+    /// 官方 `PoplarFoliagePlacer.placeLeavesRow`。
+    ///
+    /// Official `PoplarFoliagePlacer.placeLeavesRow`.
+    fn poplar_row(&mut self, poplar: &Poplar, origin: Pos, radius: i32, y: i32) {
+        let offset = i32::from(poplar.double_trunk);
+        for dx in -radius..=radius + offset {
+            for dz in -radius..=radius + offset {
+                if !poplar.should_skip_location(self.random, dx, y, dz, radius) {
+                    self.try_place_leaf((origin.0 + dx, origin.1 + y, origin.2 + dz));
+                }
+            }
+        }
+    }
+
+    /// 官方 `PoplarFoliagePlacer.replaceLeavesWithLog`：把伸得够远的那几片树叶换成
+    /// 横放的原木。换上去的原木走的是 `foliageSetter`，所以记在树叶集合里。
+    ///
+    /// Official `PoplarFoliagePlacer.replaceLeavesWithLog`: swaps the leaves that reach
+    /// far enough for sideways logs. The logs go through `foliageSetter`, so they are
+    /// recorded in the foliage set.
+    fn poplar_logs(&mut self, poplar: &Poplar, origin: Pos, radius: i32, y: i32) {
+        let offset = i32::from(poplar.double_trunk);
+        for dx in -radius..=radius + offset {
+            for dz in -radius..=radius + offset {
+                let (abs_dx, abs_dz) = (dx.abs(), dz.abs());
+                let partial = poplar.partial_row(y);
+                let corner = poplar.corner_blocks_to_cut(dx, dz, radius, partial);
+                let far =
+                    abs_dz == 0 && radius - abs_dx >= 4 || abs_dx == 0 && radius - abs_dz >= 4;
+                if !(within_rhombus(radius, abs_dx, abs_dz, corner, 2) && far) {
+                    continue;
+                }
+                let pos = (origin.0 + dx, origin.1 + y, origin.2 + dz);
+                // `tryPlaceLog`：这一格正好是 foliage provider 给出的状态才换。
+                // `tryPlaceLog`: only when the block equals the state the foliage
+                // provider gives.
+                let foliage = self.config.foliage_provider.get_state(self.random);
+                if foliage != Some(self.place.get_block(pos)) {
+                    continue;
+                }
+                if let Some(log) = self.config.trunk_provider.get_state(self.random) {
+                    let axis = if abs_dz == 0 { "x" } else { "z" };
+                    let log = with_property(log, "axis", axis).unwrap_or(log);
+                    self.place.set_foliage(pos, log);
                 }
             }
         }
@@ -504,4 +587,63 @@ impl Run<'_, '_, '_> {
 fn is_water_source(state: u32) -> bool {
     let fluid = state_fluid(state);
     fluid.source && fluid.fluid == registries::fluid::by_name("minecraft:water").unwrap_or(-1)
+}
+
+/// 白杨一次 `createFoliage` 里不变的参数。
+///
+/// The parameters that stay fixed during one poplar `createFoliage`.
+struct Poplar {
+    side_hole_chance: f32,
+    foliage_height: i32,
+    flip: bool,
+    double_trunk: bool,
+}
+
+impl Poplar {
+    /// `shouldRowBePartialRhombusShape`。
+    fn partial_row(&self, y: i32) -> bool {
+        self.foliage_height - 1 == y || self.foliage_height - 2 == y
+    }
+
+    /// `getCornerBlocksToCutForRhombusShape`。
+    fn corner_blocks_to_cut(&self, dx: i32, dz: i32, radius: i32, partial: bool) -> i32 {
+        let small_corner = if self.flip {
+            dx > 0 && dz > 0 || dz < 0 && dx < 0
+        } else {
+            dx > 0 && dz < 0 || dz > 0 && dx < 0
+        };
+        if small_corner {
+            radius - 1
+        } else if partial {
+            radius + 1
+        } else {
+            radius
+        }
+    }
+
+    /// 官方 `PoplarFoliagePlacer.shouldSkipLocation`（带上下文的那个重载）。
+    ///
+    /// Official `PoplarFoliagePlacer.shouldSkipLocation` (the overload with context).
+    fn should_skip_location(
+        &self,
+        random: &WorldgenRandom,
+        dx: i32,
+        y: i32,
+        dz: i32,
+        radius: i32,
+    ) -> bool {
+        let partial = self.partial_row(y);
+        let corner = self.corner_blocks_to_cut(dx, dz, radius, partial);
+        let (abs_dx, abs_dz) = (dx.abs(), dz.abs());
+        if partial && (abs_dx == radius || abs_dz == radius) {
+            return true;
+        }
+        let side_removal = i32::from(random.next_float() <= self.side_hole_chance);
+        !within_rhombus(radius, abs_dx, abs_dz, corner, side_removal)
+    }
+}
+
+/// `PoplarFoliagePlacer.isWithinRhombusShape`。
+fn within_rhombus(radius: i32, abs_dx: i32, abs_dz: i32, corner: i32, side_removal: i32) -> bool {
+    abs_dx + abs_dz <= radius * 2 - (corner + side_removal)
 }

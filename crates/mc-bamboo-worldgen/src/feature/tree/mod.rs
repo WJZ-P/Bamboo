@@ -5,7 +5,7 @@
 //! `distance` 写好。树根、树干、树叶、装饰的位置各记在一个和 Java `HashSet` 迭代顺序
 //! 一致的集合里，见 [`java_set`]。
 //!
-//! 还没移植的部分（树根放置器、`pale_moss` 装饰器、`poplar_foliage_placer`）在
+//! 还没移植的部分（`pale_moss` 装饰器）在
 //! [`config::TreeConfig::parse`] 返回 `None`，由分发把整个 placed feature 标成
 //! unsupported。
 //!
@@ -18,7 +18,7 @@
 //! `distance`. Root, trunk, foliage and decoration positions are each recorded in a set
 //! that iterates like Java's `HashSet`, see [`java_set`].
 //!
-//! Unported parts (root placers, the `pale_moss` decorator, `poplar_foliage_placer`) make
+//! The one unported part (the `pale_moss` decorator) makes
 //! [`config::TreeConfig::parse`] return `None`, so the placed feature stays unsupported.
 
 pub mod config;
@@ -26,6 +26,7 @@ pub mod decorator;
 pub mod foliage;
 pub mod java_set;
 pub mod leaves;
+pub mod root;
 pub mod trunk;
 
 use std::sync::OnceLock;
@@ -130,9 +131,10 @@ impl TreeFeature {
         let foliage_height = config.foliage.foliage_height(random, tree_height);
         let trunk_height = tree_height - foliage_height;
         let leaf_radius = config.foliage.foliage_radius(random, trunk_height);
-        // 没有 root placer：trunkOrigin == origin。
-        // No root placer: trunkOrigin == origin.
-        let trunk_origin = origin;
+        let trunk_origin = match &config.root {
+            Some(root) => root.trunk_origin(origin, random),
+            None => origin,
+        };
         let min_y = origin.1.min(trunk_origin.1);
         let max_y = origin.1.max(trunk_origin.1) + tree_height + 1;
         // `level.getMaxY() + 1` 就是 `minY + height`。
@@ -148,6 +150,11 @@ impl TreeFeature {
                 .min_clipped_height
                 .is_some_and(|min| clipped >= min);
         if !tall_enough {
+            return false;
+        }
+        if let Some(root) = &config.root
+            && !root.place_roots(place, random, origin, trunk_origin)
+        {
             return false;
         }
         let attachments = config
@@ -219,6 +226,15 @@ impl<'a, 'w> TreePlace<'a, 'w> {
     /// Official `trunkSetter`: record the position, then `level.setBlock(pos, state, 19)`.
     pub fn set_trunk(&mut self, pos: Pos, state: u32) {
         self.trunks.insert(pos);
+        self.world
+            .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+    }
+
+    /// 官方 `rootSetter`。
+    ///
+    /// Official `rootSetter`.
+    pub fn set_root(&mut self, pos: Pos, state: u32) {
+        self.roots.insert(pos);
         self.world
             .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
     }

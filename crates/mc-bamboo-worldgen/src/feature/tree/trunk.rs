@@ -255,7 +255,7 @@ impl TrunkPlacer {
 /// `HolderSet<Block>`：`#标签`、单个方块 ID，或方块 ID 列表。
 ///
 /// `HolderSet<Block>`: a `#tag`, one block ID, or a list of block IDs.
-fn holder_set(value: &Value) -> Option<Vec<i32>> {
+pub(crate) fn holder_set(value: &Value) -> Option<Vec<i32>> {
     let block = |name: &str| {
         let block = block_by_name(name)?;
         block_id_of_state(block.default_state).map(|id| id as i32)
