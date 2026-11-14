@@ -41,6 +41,10 @@
 //!     用官方 NbtIo 逐节点对拍导出的结构模板 NBT
 //!
 //!     Compare exported structure template NBT node by node with vanilla NbtIo
+//! mc-bamboo-vanilla jigsaw <java 路径>
+//!     用官方 StructureTemplateManager / JigsawPlacement 对拍 jigsaw 结构件
+//!
+//!     Compare jigsaw pieces with vanilla StructureTemplateManager / JigsawPlacement
 //! mc-bamboo-vanilla machine <java 路径>
 //!     让官方熔炉和酿造台在假世界里逐刻跑，比较进度、物品、方块状态和世界随机源
 //! mc-bamboo-vanilla entity-oracle <java 路径>
@@ -86,6 +90,8 @@ mod extract;
 #[cfg(feature = "oracle")]
 mod gen_world;
 mod generate;
+#[cfg(feature = "oracle")]
+mod jigsaw;
 #[cfg(feature = "oracle")]
 mod light;
 #[cfg(feature = "oracle")]
@@ -173,6 +179,8 @@ const STRUCTURE_TEMPLATES_SOURCE: &str =
 #[cfg(feature = "oracle")]
 const STRUCTURE_PIECES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePiecesOracle.java";
 #[cfg(feature = "oracle")]
+const JIGSAW_SOURCE: &str = "tools/mc-bamboo-vanilla/java/JigsawOracle.java";
+#[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 #[cfg(feature = "oracle")]
 const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
@@ -204,6 +212,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-validity <java 路径>
       mc-bamboo-vanilla structure-templates <java 路径>
       mc-bamboo-vanilla structure-pieces <java 路径>
+      mc-bamboo-vanilla jigsaw <java 路径>
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -258,6 +267,7 @@ fn run() -> Result<(), String> {
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
         ["structure-templates", java, ref options @ ..] => structure_templates_cli(java, options),
         ["structure-pieces", java, ref options @ ..] => structure_pieces_cli(java, options),
+        ["jigsaw", java, ref options @ ..] => jigsaw_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
@@ -519,6 +529,15 @@ fn structure_pieces_cli(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn jigsaw_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    jigsaw::run(
+        official_program(java, JIGSAW_SOURCE)?,
+        &workspace_root().join(WORK_DIR),
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
 fn loot_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     loot_oracle::run(official_program(java, LOOT_ORACLE_SOURCE)?, options)
 }
@@ -743,6 +762,11 @@ fn structure_templates_cli(_java: &str, _options: &[&str]) -> Result<(), String>
 
 #[cfg(not(feature = "oracle"))]
 fn structure_pieces_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn jigsaw_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
