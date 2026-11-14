@@ -28,24 +28,13 @@ const HEADER: &str = "// 这个文件由 mc-bamboo-vanilla 生成，不要手动
 /// Locate the vanilla jar holding structure templates under `target/vanilla/versions`
 /// and write the blob and index into the generated data directory.
 pub fn export(work_dir: &Path, output_dir: &Path) -> Result<(), String> {
-    let mut jars = Vec::new();
-    collect_jars(&work_dir.join("versions"), &mut jars)?;
-    // 路径排序让多个候选 jar 时结果确定；重跑无 diff 依赖这一步。
-    // Sorting paths keeps the pick deterministic when several jars are present.
-    jars.sort();
-
-    let mut templates: Option<Vec<(String, Vec<u8>)>> = None;
-    for path in &jars {
-        let bytes =
-            fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        if let Ok(found) = read_templates(&bytes)
-            && !found.is_empty()
-        {
-            templates = Some(found);
-            break;
-        }
+    let jar = vanilla_jar(work_dir)?;
+    let bytes =
+        fs::read(&jar).map_err(|error| format!("cannot read {}: {error}", jar.display()))?;
+    let templates = read_templates(&bytes)?;
+    if templates.is_empty() {
+        return Err("vanilla jar contains no structure templates".to_owned());
     }
-    let templates = templates.ok_or("no vanilla jar contains structure templates")?;
 
     let mut blob = Vec::new();
     let mut rows: Vec<(String, u32, u32)> = Vec::with_capacity(templates.len());
@@ -67,6 +56,27 @@ pub fn export(work_dir: &Path, output_dir: &Path) -> Result<(), String> {
         blob.len()
     );
     Ok(())
+}
+
+/// 找到 `target/vanilla/versions` 下含结构模板的官方 jar。
+///
+/// Locate the vanilla jar under `target/vanilla/versions` that holds structure templates.
+pub fn vanilla_jar(work_dir: &Path) -> Result<PathBuf, String> {
+    let mut jars = Vec::new();
+    collect_jars(&work_dir.join("versions"), &mut jars)?;
+    // 路径排序让多个候选 jar 时结果确定；重跑无 diff 依赖这一步。
+    // Sorting paths keeps the pick deterministic when several jars are present.
+    jars.sort();
+    for path in &jars {
+        let bytes =
+            fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        if let Ok(found) = read_templates(&bytes)
+            && !found.is_empty()
+        {
+            return Ok(path.clone());
+        }
+    }
+    Err("no vanilla jar contains structure templates".to_owned())
 }
 
 /// 递归收一个目录下的所有 `.jar`，顺序由调用方排序决定。
