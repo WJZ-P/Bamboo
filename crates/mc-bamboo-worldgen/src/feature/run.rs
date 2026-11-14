@@ -30,9 +30,13 @@ pub struct FeatureContext<'a> {
     pub seed: i64,
     /// 只跑这些 step；`(1<<11)-1` 表示全部。过渡期诊断用。
     pub steps_mask: i32,
-    /// 只跑这些配置类型；`None` 表示全部。过渡期诊断用（`--feature-types`）。
+    /// 只跑这些条目；`None` 表示全部。每个条目是 Feature 类型 ID 或 placed feature
+    /// 注册名，和 Java 侧 `--feature-types` 的白名单判定一致（精确匹配其一）。
+    /// 过渡期诊断用。
     ///
-    /// Only run these config types; `None` means all. Diagnostic `--feature-types`.
+    /// Only run these entries; `None` means all. Each entry is a Feature type ID or
+    /// a placed-feature registry name, matched the same way as Java's
+    /// `--feature-types` allow list (exact match on either). Diagnostic only.
     pub allowed_kinds: Option<&'a [String]>,
 }
 
@@ -89,18 +93,26 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 let Some(id) = ctx.registry.placed_id(name) else {
                     continue;
                 };
-                // 过渡期 `--ore-only`：Java 侧把非 ore 的 HolderSet 换空了，
-                // 这里要在收集 indices 时用同一套白名单过滤，否则两边跑的
-                // (index, step) 集合不同。
-                if let Some(kinds) = ctx.allowed_kinds {
-                    let Some(placed) = ctx.registry.placed(id) else {
-                        continue;
-                    };
-                    let Some((kind, _)) = resolve_feature(ctx.registry, &placed.feature) else {
-                        continue;
-                    };
-                    if !kinds.iter().any(|k| k == &kind) {
-                        continue;
+                // 过渡期 `--feature-types` / `--ore-only`：Java 侧把不在白名单里的
+                // HolderSet 换空了，这里要用同一套判定收集 indices，否则两边跑的
+                // (index, step) 集合不同。白名单条目既可以是 placed feature 注册名，
+                // 也可以是 Feature 类型 ID；两处都精确匹配其一，和 Java 对称。
+                // Java empties the non-whitelisted HolderSets; collect indices with
+                // the same rule so both sides run the same (index, step) set. A
+                // selector is a placed-feature name OR a Feature type ID, matched
+                // exactly, symmetric with Java's allow list.
+                if let Some(selectors) = ctx.allowed_kinds {
+                    let by_name = selectors.iter().any(|s| s == name);
+                    if !by_name {
+                        let Some(placed) = ctx.registry.placed(id) else {
+                            continue;
+                        };
+                        let Some((kind, _)) = resolve_feature(ctx.registry, &placed.feature) else {
+                            continue;
+                        };
+                        if !selectors.iter().any(|s| s == &kind) {
+                            continue;
+                        }
                     }
                 }
                 // featuresPerStep[step] 是按全局 index 排好的列表，下标即 index。
@@ -122,16 +134,12 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
             };
 
             // 解析 feature 配置；未移植的类型标 unsupported 并跳过（不消费随机数）。
+            // 白名单过滤已在上面收集 indices 时完成，这里不再按类型二次过滤，
+            // 否则按 placed feature 名保留下来的条目会被误丢。
             let Some((kind, config)) = resolve_feature(ctx.registry, &placed.feature) else {
                 unsupported = true;
                 continue;
             };
-            if ctx
-                .allowed_kinds
-                .is_some_and(|kinds| !kinds.iter().any(|k| k == &kind))
-            {
-                continue;
-            }
             if kind != "minecraft:ore" {
                 unsupported = true;
                 continue;

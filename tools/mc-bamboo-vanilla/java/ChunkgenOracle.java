@@ -802,15 +802,18 @@ public final class ChunkgenOracle {
             if (allowed == null) {
                 return;
             }
-            // 白名单是逗号分隔的一组 Feature 类型 ID；逐个精确匹配 codec 的类型 ID，
-            // 不用注册名前缀猜。--ore-only 传单个 "minecraft:ore"，走同一条路径。
-            // The allow list is a comma-separated set of Feature type IDs, matched
-            // exactly against the codec type ID. --ore-only passes a single entry.
-            Set<String> types = new HashSet<>();
+            // 白名单是逗号分隔的一组条目：每个可以是 Feature 类型 ID（精确匹配 codec
+            // 的类型 ID），也可以是 placed feature 的注册名（精确匹配）。这样既能按类型
+            // 放开一整类，也能只隔离出单个 placed feature 做逐方块对拍。
+            // `--ore-only` 传单个 "minecraft:ore"，走同一条路径。
+            // Comma-separated allow list: each entry is either a Feature type ID
+            // (matched against the codec type ID) or a placed-feature registry name
+            // (matched exactly), so a whole type or a single placed feature can be run.
+            Set<String> selectors = new HashSet<>();
             for (String part : allowed.split(",")) {
                 String trimmed = part.trim();
                 if (!trimmed.isEmpty()) {
-                    types.add(trimmed);
+                    selectors.add(trimmed);
                 }
             }
             Registry<net.minecraft.world.level.levelgen.placement.PlacedFeature> placed =
@@ -821,8 +824,9 @@ public final class ChunkgenOracle {
                     net.minecraft.world.level.levelgen.placement.PlacedFeature> entry
                     : placed.entrySet()) {
                 net.minecraft.world.level.levelgen.placement.PlacedFeature value = entry.getValue();
-                if (types.contains(featureTypeId(value.feature().value()))) {
-                    keep.add(entry.getKey().identifier().toString());
+                String name = entry.getKey().identifier().toString();
+                if (selectors.contains(featureTypeId(value.feature().value())) || selectors.contains(name)) {
+                    keep.add(name);
                 }
             }
             if (keep.isEmpty()) {

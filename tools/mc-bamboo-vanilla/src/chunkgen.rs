@@ -111,11 +111,13 @@ struct Options {
     features: bool,
     /// 转发给 Java 侧的 `--steps` 掩码。
     steps: i32,
-    /// `--feature-types` / `--ore-only`：Java 侧只留这些类型的 placed feature，
-    /// Rust 侧用同一组类型过滤 indices。`None` 表示不过滤（跑全部）。
+    /// `--feature-types` / `--ore-only`：条目是 Feature 类型 ID 或 placed feature
+    /// 注册名；Java 侧只留这些 placed feature，Rust 侧用同一组条目过滤 indices。
+    /// `None` 表示不过滤（跑全部）。
     ///
-    /// `--feature-types` / `--ore-only`: Java keeps only these placed-feature types,
-    /// Rust filters indices by the same set. `None` means no filtering.
+    /// `--feature-types` / `--ore-only`: each entry is a Feature type ID or a
+    /// placed-feature registry name; Java keeps only those placed features and Rust
+    /// filters indices by the same set. `None` means no filtering.
     feature_types: Option<Vec<String>>,
 }
 

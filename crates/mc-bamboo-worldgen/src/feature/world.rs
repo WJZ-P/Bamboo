@@ -5,9 +5,7 @@
 
 use mc_bamboo_data::{facts, state_facts};
 
-use super::{
-    CENTER, ChunkBlocks, FeatureChunks, FeatureResult, Heightmaps, heightmap::is_opaque,
-};
+use super::{CENTER, ChunkBlocks, FeatureChunks, FeatureResult, Heightmaps, heightmap::is_opaque};
 
 /// 3×3 世界生成空间的读写接口。
 pub struct FeatureWorld<'a> {
