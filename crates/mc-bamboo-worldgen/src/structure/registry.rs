@@ -99,6 +99,10 @@ impl StructureSets {
         self.sets.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.sets.is_empty()
+    }
+
     /// 所有 `random_spread` 结构集的名字，按字母序。对拍用它核对两边集合一致。
     ///
     /// Sorted names of all `random_spread` structure sets. The oracle uses it to check the
@@ -178,6 +182,10 @@ impl Structures {
 
     pub fn len(&self) -> usize {
         self.defs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.defs.is_empty()
     }
 }
 

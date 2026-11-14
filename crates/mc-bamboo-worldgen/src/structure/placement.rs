@@ -161,42 +161,49 @@ impl Common {
     /// the matching reducer runs. Every reducer uses `new WorldgenRandom(new
     /// LegacyRandomSource(0L))`.
     pub fn apply_additional_chunk_restrictions(&self, seed: i64, x: i32, z: i32) -> bool {
-        if !(self.frequency < 1.0) {
-            return true;
-        }
-        let random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
-        match self.method {
-            FrequencyReductionMethod::Default => {
-                // `probabilityReducer` 把 salt 当 x、sourceX 当 z、sourceZ 当 blend，
-                // 与另外三个方法的参数直觉不同，照抄 26.3 源码。
-                // `probabilityReducer` passes salt as x, sourceX as z, sourceZ as blend,
-                // unlike the other three; copied verbatim from the 26.3 sources.
-                random.set_large_feature_with_salt(seed, self.salt, x, z);
-                random.next_float() < self.frequency
+        // 官方是 `!(frequency < 1.0F) || shouldGenerate(...)`：frequency==1 不取随机数。
+        // 把条件写成 `if frequency < 1.0 { reducer } else { true }`，和原式逐位等价
+        // （含 NaN 时走 else），也避开对 PartialOrd 用取反比较。
+        // Vanilla is `!(frequency < 1.0F) || shouldGenerate(...)`: frequency==1 draws
+        // nothing. `if frequency < 1.0 { reducer } else { true }` is bit-equivalent
+        // (NaN also falls into else) and avoids a negated comparison on PartialOrd.
+        if self.frequency < 1.0 {
+            let random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
+            match self.method {
+                FrequencyReductionMethod::Default => {
+                    // `probabilityReducer` 把 salt 当 x、sourceX 当 z、sourceZ 当 blend，
+                    // 与另外三个方法的参数直觉不同，照抄 26.3 源码。
+                    // `probabilityReducer` passes salt as x, sourceX as z, sourceZ as blend,
+                    // unlike the other three; copied verbatim from the 26.3 sources.
+                    random.set_large_feature_with_salt(seed, self.salt, x, z);
+                    random.next_float() < self.frequency
+                }
+                FrequencyReductionMethod::LegacyType1 => {
+                    // `legacyPillagerOutpostReducer`：`cx ^ cz<<4 ^ seed` 里 cx/cz 是 int。
+                    // `legacyPillagerOutpostReducer`: cx/cz in `cx ^ cz<<4 ^ seed` are ints.
+                    let cx = x >> 4;
+                    let cz = z >> 4;
+                    let mixed = i64::from(cx ^ (cz << 4));
+                    random.set_seed(mixed ^ seed);
+                    random.next_int_unbounded();
+                    let bound = (1.0_f32 / self.frequency) as i32;
+                    random.next_int(bound) == 0
+                }
+                FrequencyReductionMethod::LegacyType2 => {
+                    // `legacyArbitrarySaltProbabilityReducer`：忽略配置的 salt，用硬编码常量。
+                    // `legacyArbitrarySaltProbabilityReducer`: ignores the configured salt.
+                    random.set_large_feature_with_salt(seed, x, z, 10_387_320);
+                    random.next_float() < self.frequency
+                }
+                FrequencyReductionMethod::LegacyType3 => {
+                    random.set_large_feature_seed(seed, x, z);
+                    // 官方把 float 概率提升成 double 再比：nextDouble() < probability。
+                    // Vanilla promotes the float probability to double: nextDouble() < probability.
+                    random.next_double() < f64::from(self.frequency)
+                }
             }
-            FrequencyReductionMethod::LegacyType1 => {
-                // `legacyPillagerOutpostReducer`：`cx ^ cz<<4 ^ seed` 里 cx/cz 是 int。
-                // `legacyPillagerOutpostReducer`: cx/cz in `cx ^ cz<<4 ^ seed` are ints.
-                let cx = x >> 4;
-                let cz = z >> 4;
-                let mixed = i64::from(cx ^ (cz << 4));
-                random.set_seed(mixed ^ seed);
-                random.next_int_unbounded();
-                let bound = (1.0_f32 / self.frequency) as i32;
-                random.next_int(bound) == 0
-            }
-            FrequencyReductionMethod::LegacyType2 => {
-                // `legacyArbitrarySaltProbabilityReducer`：忽略配置的 salt，用硬编码常量。
-                // `legacyArbitrarySaltProbabilityReducer`: ignores the configured salt.
-                random.set_large_feature_with_salt(seed, x, z, 10_387_320);
-                random.next_float() < self.frequency
-            }
-            FrequencyReductionMethod::LegacyType3 => {
-                random.set_large_feature_seed(seed, x, z);
-                // 官方把 float 概率提升成 double 再比：nextDouble() < probability。
-                // Vanilla promotes the float probability to double: nextDouble() < probability.
-                random.next_double() < f64::from(self.frequency)
-            }
+        } else {
+            true
         }
     }
 }
