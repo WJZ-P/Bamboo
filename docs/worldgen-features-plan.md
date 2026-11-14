@@ -768,7 +768,9 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 (52,-26)、y=-54、x=14、z=1..3 三格，官方是水、Bamboo 是深板岩；`--steps 0`
 （不跑任何 feature）同样复现，确认与地物改动无关，是邻居区块 terrain 的既有差异
 （旧阶段 carvers 回归只比中心单区块，故未暴露）。上面的 0 不一致结果都用 `--salt 3`
-等避开该区块的参数取得。
+等避开该区块的参数取得。**该差异已在 `cb-wg-aquifer` 分支修复**：补齐官方
+`Aquifer.NoiseBasedAquifer.computeSubstance` 的「水 + 下方岩浆」短路后，(52,-26) 以
+`chunkgen --chunk 52 -26` 精确复现为 0 不一致，详见 `docs/worldgen.md`「岩浆层上边界的短路」。
 
 #### 本分支明确还没做（诚实标 `unsupported`）
 

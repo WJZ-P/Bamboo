@@ -132,7 +132,19 @@ y 方向是起点加逐格累加的 `delta`（`fadd` 顺序），和单点 `lerp
 * `FluidStatus.at(y)` 在 `y >= level` 时给空气，`FluidStatus.equals` 比较液面和流体类型。
 
 `shouldScheduleFluidUpdate` 只影响官方的后期处理位置表，对拍不比它，但计算照搬，以后接游戏时
-要用。
+要用。`mayFlow23` 用的是 `similarity(d2, d3)`、`mayFlow13` 用的是 `similarity(d1, d3)`，两个
+门槛不要对调。
+
+**岩浆层上边界的短路（已修）**。官方 `computeSubstance` 在 `similarity12 > 0` 分支里还有一段
+早期返回：当最近格子在 `blockY` 给的是水、且 `globalFluidPicker.computeFluid(x, blockY-1, z)`
+在 `blockY-1` 给的是岩浆时，直接返回水、跳过后面三条压力判据，并把
+`shouldScheduleFluidUpdate` 设为 true。因为 `blockY <= -55` 会被前面的「全局流体是岩浆」判据
+提前返回岩浆、`blockY >= -53` 时下方不再是岩浆，这段短路实际上**只在 y = -54 这一层**生效，
+而且要 `density <= 0`（洞穴/空腔）、最近含水层格子给的是水、`similarity12 > 0`、压力判据本会
+返回 `None` 同时成立才看得出差别，所以非常稀有。之前漏掉这段，seed -1、chunk (52,-26)、
+y=-54、x=14、z=1..3 三格官方是水、Bamboo 是深板岩；地物对拍在 features 的 9 宫格里才撞见。
+补齐后，以该区块为中心的连续网格、多 salt 的随机扫描、以及标准 `chunkgen` 对拍都是 0 不一致。
+`chunk.rs` 里有一条单区块回归测试盯着这三格。
 
 ## 数据的导出与重跑
 
@@ -222,8 +234,16 @@ cargo run --release -p mc-bamboo-vanilla -- chunkgen java --seeds 6 --chunks 36 
 ```bash
 cargo run --release -p mc-bamboo-vanilla -- chunkgen java \
     [--seeds N] [--chunks N] [--salt S] [--through biomes|noise|surface|carvers] \
-    [--biomes-only] [--show N]
+    [--biomes-only] [--show N] [--chunk X Z] [--scan N] [--break-self-test]
 ```
+
+地形阶段的扩大搜索额外有三个开关，都只改 Java 侧出题的坐标来源：
+
+* `--chunk X Z`：只出题这一个区块，用来精确复现某个坐标（例如 `--chunk 52 -26`）；
+* `--scan N`：每个种子出 N 个覆盖近处/中距/远距/负坐标的随机区块，用来批量扫地形阶段；
+* `--chunk X Z` 与 `--scan N` 合用：出以 (X,Z) 为中心的 `(2r+1)²` 个**相邻区块**网格。
+  含水层岩浆层边界这类稀有分支只在连续洞穴区域里出现，稀疏的随机区块扫不到，必须用相邻
+  网格；`--break-self-test` 故意改坏一个方块，确认逐方块比较器会报不一致。
 
 `ChunkgenOracle.java` 按官方 `WorldLoader` 的前半段读数据包注册表，对每个（种子，区块）造一个
 `ProtoChunk`（`LevelHeightAccessor.create(minY, height)`、`PalettedContainerFactory.create(...)`、
@@ -250,6 +270,9 @@ cargo run --release -p mc-bamboo-vanilla -- worldgen java
 | `chunkgen --through surface` | 同上规模，只比到 SURFACE | 0 |
 | `chunkgen --through noise` | 同上规模，只比到 NOISE | 0 |
 | `chunkgen --biomes-only` | 8 种子 × 36 区块 = 442368 个 quart 格 | 0 |
+| `chunkgen --scan 300 --through noise` | 6 种子 × 300 区块 × 6 个 salt = 10800 区块，每轮 176,947,200 个 NOISE 方块 | 0 |
+| `chunkgen --chunk X Z --scan 169 --through noise` | 9 个锚点（原点、负坐标、远坐标、报告区块多 salt）× 6 种子 × 169 相邻区块 = 9126 区块 | 0 |
+| `chunkgen --chunk 52 -26 --scan 81 --through carvers` | 3 种子 × 81 相邻区块，三阶段各 23,887,872 个方块 | 0 |
 | `worldgen` | 3 种子、21 个维度状态、4608 个噪声值、5364 个密度函数值、288 个群系、536 个温度 | 0 |
 
 含 `interpolated` 的函数在 `worldgen` 的单点成批比较里跳过 612 项（成批路径在 1×1×1 上不是纯
