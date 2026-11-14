@@ -113,6 +113,8 @@
 各结构的 `findGenerationPoint`、包围盒、`.nbt` 模板、jigsaw 仍属第 4 步。组合对拍只覆盖
 6 个 `random_spread` 结构集、不含 `isStructureChunk` 命中过滤（那是已对拍的 `start_plans`
 的职责）。`.nbt` 结构模板按约定留到第一个真正用到它的结构那一步再导出。
+（本节是第四轮结束时的快照；第五轮已把四个代码生成多件式结构的结构件布局、
+`findGenerationPoint` 前置判定作为纯函数做完，模板也已在 2.2 导出，见下方第五轮。）
 
 **多件式结构的结构件布局（2026-11-14，分支 `cb-wg-multipiece`，基于 4074b37）**：
 
@@ -136,20 +138,59 @@
   25660 个结构件、25660 个比较 0 不一致。每个结构先故意改坏一处（矿井丢弃首个
   `nextDouble`、要塞丢弃 `randomSmallDoor` 的 `nextInt(5)`、海底神殿扫描循环 5 改 4）
   确认对拍失败再还原。
-* **没做（已知限制 / 交接）**：林地府邸 `WoodlandMansionPieces.MansionGrid` /
-  `MansionPiecePlacer.createMansion` 的结构件布局。理由：`createMansion` 约 360 行带
-  `rotation.rotate(Direction)` 和网格位标志（`0x800000`）的位置运算、`MansionGrid` 约
-  300 行、三个 `FloorRoomCollection` 的房间名随机；且 Java 侧要构造
-  `StructureTemplateManager`（`TemplateStructurePiece` 构造器会 `getOrCreate().getBoundingBox`）
-  才能产出 `WoodlandMansionPiece`。按约定「模板只用名字和位置，不需要读模板内容」，
-  对拍应只比 `Template` / `TPX,TPY,TPZ` / `Rot` / `Mi`（排除模板算出的 `BB`），
-  `startPos`（`getLowestYIn5by5Box`）作为 terrain 外部输入喂入，`rotation` 由
-  `Rotation.getRandom(context.random())` 复现。下一步：先搭好能产出 MP 行
-  （模板名 + 位置 + rotation + mirror）的 Java oracle，再逐步移植 `MansionGrid` 与
-  `createMansion`，照本分支三个结构的办法先故意改坏一处确认对拍会失败。
+* 林地府邸的结构件布局**已在第五轮（见下）做完**，本条是 4074b37 当时的交接记录：
+  当时 `createMansion` 约 360 行带 `rotation.rotate(Direction)` 和网格位标志
+  （`0x800000`）的位置运算、`MansionGrid` 约 300 行、三个 `FloorRoomCollection` 的
+  房间名随机，Java 侧要构造 `StructureTemplateManager`
+  （`TemplateStructurePiece` 构造器会 `getOrCreate().getBoundingBox`）才能产出
+  `WoodlandMansionPiece`，所以当时按「模板只用名字和位置，不需要读模板内容」把
+  `BB` 排除在对拍外、`startPos` 作为 terrain 外部输入喂入。第五轮导出了全部模板、
+  构造了真实 `StructureTemplateManager`，现在连模板算出的 `BB` 一起比。
 * 以上全是纯函数 + oracle，没接进 Director 的 `structure_starts` / `structure_references`
   阶段；游戏里世界仍是超平坦。结构件放置（第 5 步）、Beardifier（第 6 步）、存档
   `structures` 键（第 7 步）仍归结构队员 / 后续里程碑。
+
+**第五轮（2026-11-14，`cb-wg-multipiece` 续：林地府邸布局 / 四个结构的 `findGenerationPoint` 前置判定 / 存档口径）**：
+
+* 合入 `main` 与 `cb-wg-structures`（拿到 `cb-wg-jigsaw` 导出的 1511 个 `.nbt`、
+  `mc-bamboo-data::structures`、`structure::template` 解析器、`.gitattributes`、
+  `cb-fix-main` 的探针修复），再用 `StructureTemplate::load(name).size` 算每个
+  `WoodlandMansionPiece` 的 `BB`。新增 `structure/pieces/woodland_mansion/{mod,grid,placer}.rs`
+  照官方移植 `MansionGrid`（`recursiveCorridor` / `cleanEdges` / `identifyRooms` /
+  `setupThirdFloor` / `SimpleGrid`）与 `MansionPiecePlacer.createMansion`（入口、外墙、
+  屋顶、三层地毯 / 墙 / 房间、`FloorRoomCollection` 房间名随机、`addRoom1x1/1x2/2x2`、
+  密室）。`StructurePiecesOracle.java` 构造真实 `StructureTemplateManager`（vanilla pack
+  + `ServerPacksSource` + `DataFixers`），对拍模板名 / 位置 / rotation / mirror / `BB`。
+  `structure-pieces` 扩到 336 个查询、77960 个结构件、0 不一致；两处故意改坏
+  （用错的 `1x1` 房间名 278 处、多取一次 `nextInt` 48592 处）确认失败再还原。
+* 新增 `structure/start_point.rs`（`Site` / `SiteGates` / `PointKind` / `site_gates` /
+  `start_point`），逐行翻译四个结构各自的 `findGenerationPoint` 前置判定并用
+  `findValidGenerationPoint`（`findGenerationPoint(context).filter(context::isValidBiome)`）
+  判「这个起点是否真的生成」：矿井 / 恶地矿井恒有 stub（Y = 50+yOffset，恶地按结构件
+  包围盒中心取 `getBaseHeight(WORLD_SURFACE_WG)` 作 surfaceHeight）、要塞
+  `chunkPos.getWorldPosition()` = (minX,0,minZ)、海底神殿 `getBiomesWithin` 周边海洋 +
+  `couldValidBiomeExistOnTopOfChunkCenter` + `OCEAN_FLOOR_WG` 高度、林地府邸
+  `couldValidBiomeExistInTerrainColumn(blockX7,blockZ7)` + 四角最低高度 +
+  `startPos.getY() < 60`。`chunk.rs` 加 `first_occupied_height_ocean_floor`
+  （`OCEAN_FLOOR_WG` 用 `BLOCKS_MOTION_IN_HEIGHTMAP` 标签），与已有的
+  `first_occupied_height` / `column_biome_names` / `validity.rs` 原语组合。
+  新对拍 `structure-generation`（`StructureGenerationOracle.java` 造官方
+  `Structure.GenerationContext` 直接调 `Structure.findValidGenerationPoint`，
+  `structureTemplateManager` 传 null——所有结构件生成 consumer 在
+  `findValidGenerationPoint` 里都不会被触发）：96 个查询、480 行 R、5286 个字段
+  逐项比（valid / stub / col / col7 / sur / oceanFloor / base / 五个高度 / lowest /
+  below60 / pv + BIOME / KINDS），0 不一致；故意把 `isValidBiome` 过滤丢掉
+  （`stub_biome_valid = true`）立刻 192 处不一致，还原回 0。查询集含深海
+  （sur=1 32 个区 / 海底神殿 valid=1 16 个）、恶地（恶地矿井 valid=1 6 个）、
+  黑森林（林地府邸 valid=1 3 个）、低地（below60=1 2 个），真 / 假分支都被比到。
+* `docs/worldgen-structures-plan.md` 4.1 写清海底神殿存档口径：存档时 `Children`
+  只有一个 `MonumentBuilding`（`OMB`，基类四键，`OceanMonumentPiece.addAdditionalSaveData`
+  为空，房间图是私有 `childPieces`），读回时 `StructureStart.loadStaticStart` 对
+  `OceanMonumentStructure` 调 `regeneratePiecesAfterLoad`，用世界种子 + 区块坐标 +
+  存档 `BB` 角 + 存档朝向确定性重建整个 `childPieces`。留给结构队员第 7 步。
+* 每一步单独提交，每个新对拍都先故意改坏一处确认会失败再还原。以上仍是纯函数 +
+  oracle，没接进游戏；四个 `findGenerationPoint` 的「是否生成」是纯判定，
+  不写方块，`StructureStart` 仍只是数据类型，第 4–7 步的主体依旧归结构队员。
 
 ## 1. 官方 26.3 的结构生成全景
 
