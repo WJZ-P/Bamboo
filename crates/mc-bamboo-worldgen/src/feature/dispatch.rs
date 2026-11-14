@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
+    block_blob::{self, BlockBlobFeature},
     disk::{self, DiskFeature},
     placement::OreFeature,
     spring::{self, SpringFeature},
@@ -25,6 +26,7 @@ use super::{
 /// Ported feature types, in alphabetical order of type ID.
 #[derive(Debug, Clone)]
 pub enum Feature {
+    BlockBlob(BlockBlobFeature),
     Disk(DiskFeature),
     Ore(OreFeature),
     Spring(SpringFeature),
@@ -38,6 +40,7 @@ impl Feature {
     /// consuming no randomness).
     pub fn parse(kind: &str, config: &Value) -> Result<Option<Self>, String> {
         Ok(Some(match kind {
+            "minecraft:block_blob" => Self::BlockBlob(BlockBlobFeature::parse(config)?),
             "minecraft:disk" => Self::Disk(DiskFeature::parse(config)?),
             "minecraft:ore" => Self::Ore(OreFeature::parse(config)?),
             "minecraft:spring_feature" => Self::Spring(SpringFeature::parse(config)?),
@@ -53,6 +56,7 @@ impl Feature {
     /// Whether every nested predicate / state provider in the config is ported.
     pub fn is_supported(&self) -> bool {
         match self {
+            Self::BlockBlob(blob) => blob.supported(),
             Self::Disk(disk) => disk.supported(),
             _ => true,
         }
@@ -69,6 +73,7 @@ impl Feature {
         pos: (i32, i32, i32),
     ) -> bool {
         match self {
+            Self::BlockBlob(blob) => block_blob::place(blob, world, random, pos),
             Self::Disk(disk) => disk::place(disk, world, random, pos),
             Self::Ore(ore) => super::ores::place(ore, world, random, pos),
             Self::Spring(spring) => spring::place(spring, world, pos),
