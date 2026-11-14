@@ -832,6 +832,28 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
 `--types minecraft:blue_ice,minecraft:iceberg,...` 重新逐方块对拍。实现本身按
 `BlueIceFeature.java` 逐句移植（海平面、水、packed_ice 邻格、200 次偏移扩散）。
 
+### 本轮（cb-wg-caves 收尾）追加
+
+合并 `main` 与 `cb-wg-aquatic` 之后，本分支新增/保留的内容：
+
+| 内容 | 状态 |
+|---|---|
+| `feature/speleothem.rs`（`pointed_dripstone` / `sulfur_spike` 的叶子） | **已对拍 0 不一致** |
+| `feature/freeze_top_layer.rs`（含 `SnowLayerBlock.canSurvive` 与 `snowy` 属性） | **已对拍 0 不一致** |
+| `modifier::EnvironmentScan` / `int_provider::ClampedNormal` | 由上面两项使用，随它们验证 |
+| `modifier::RandomChance` | `sculk_patch_deep_dark` 的 `sequence` 用；已随 `--steps 7` 验证 |
+| 代理补 `isInsideBuildHeight` / `getBrightness` / `canSeeSky` / `playSound` / `levelEvent` / `findBlocksIn` | 支撑上面两项与 sculk 家族 |
+| `survival::classify` 补 `SculkCatalystBlock` / `SculkSensorBlock` / `SculkShriekerBlock` / `CalibratedSculkSensorBlock` → `Kind::Default` | 官方四类都没覆写 `canSurvive`；只影响 `sculk_patch` 的 `sequence` |
+| `feature/sculk_patch.rs`（`SculkPatchFeature` + `SculkSpreader`） | **已写未验证，不接入 dispatch** |
+
+对拍配置（全部在 `--through features` 下）：
+
+| 命令 | 结果 |
+|---|---|
+| `--types minecraft:blue_ice,minecraft:disk,minecraft:large_dripstone,minecraft:speleothem,minecraft:speleothem_cluster,minecraft:spike,minecraft:freeze_top_layer --seeds 4 --chunks 6 --salt 13` | 24 中心 / 21233664 方块，**0 不一致 / 0 skipped** |
+| `--steps 7 --types minecraft:sculk_vein --chunk -42 111 --scan 4 --seeds 1 --salt 13` | 9 中心 / 7962624 方块，**0 不一致**；故意改坏 `is_own_block` 报 20 处 |
+| `--steps 7 --types minecraft:sculk_patch_deep_dark --chunk -42 111 --scan 1` | **8 mismatches**（未通过，已断开接入） |
+
 ### 还没做
 
 **已完成**（见上两轮「本轮追加」）：step 6 里非 ore 的 5 个 placed feature
@@ -849,12 +871,18 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
   `sulfur_spike`）、`spike`、`blue_ice`、`disk(ice_patch)`、`freeze_top_layer`
   已由 `cb-wg-caves` 移植并对拍 0 不一致（见上）。
 * step 7（`UNDERGROUND_DECORATION`）的非植被部分：`sulfur_spike_cluster` /
-  `dripstone_cluster`（`speleothem_cluster`）已移植；**`sculk_vein`（`multiface_growth`）
-  和 `sculk_patch_deep_dark`（`sequence` 包着 `sculk_patch`）还没做**。前者要
-  `MultifaceSpreadeableBlock.getStateForPlacement` 的面位运算和 `getSpreader().spreadFromFaceTowardRandomDirection`
-  的扩散；后者要 `SculkPatchFeature` 的 `charge_count`/`amount_per_charge`/`spread_attempts`
-  循环加 `sculk_spreadable` 标签判定。两者都还没有 Rust 侧的 `multiface` 方块属性支持，
-  按「不发明行为」先留白。
+  `dripstone_cluster`（`speleothem_cluster`）已移植并对拍 0 不一致。
+  `sculk_vein` 的 `multiface_growth` 由 `cb-wg-aquatic` 移植（`feature/multiface.rs`），
+  本分支合入后在 `deep_dark` 定点对拍 0 不一致（9 中心 / 7962624 方块）；
+  **默认坐标下它一次都不放方块，必须 `--chunk -42 111 --scan N` 才比得到**。
+  `sculk_patch_deep_dark`（`sequence` 包着 `sculk_patch`）的移植已写在
+  `feature/sculk_patch.rs`（`SculkPatchFeature` + `SculkSpreader` + `SculkBlock` /
+  `SculkVeinBlock` 两个 `SculkBehaviour` + `SculkVeinSpreaderConfig`），
+  但**没对拍到 0 不一致，所以不接入 dispatch**（`parse_leaf` 返回 `None`，
+  主循环把整个 placed feature 标 `unsupported`）。
+  现状：`deep_dark` 单区块 8 mismatches、`--scan 3` 160 处，`--steps 0` 基线为 0；
+  两边的写入序列前 21 行一致、第 22 行分叉，怀疑同一格 `sculk_vein` 的面集合在
+  两个时间点不同。细节与已排除项见 `reports/cb-wg-caves.md` 的疑点清单。
 * 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`monster_room` 要刷怪笼 /
   战利品表 / 方块实体；`geode` / `lake` / `iceberg` / `block_blob` 是较大的独立 feature。
 * 植被类型（树、花、草、patch、selector / sequence 容器，见 5.2）由 `cb-wg-feat-b` 负责，本轮不做。

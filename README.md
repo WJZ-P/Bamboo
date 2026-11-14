@@ -480,15 +480,20 @@ WebView2 的渲染进程不算在内。
   （原版来自 `iceberg`，属 `cb-wg-feat-a` 的冰山、尚未合入），`--types` 白名单里没有
   `iceberg` 就不会有 `packed_ice`，所以现有的逐方块对拍里 `blue_ice` 从不放方块、
   0 不一致是「空跑」的；等 `iceberg` 合入后要用
-  `--types minecraft:blue_ice,minecraft:iceberg,...` 补对拍。其余非植被类型
-  （`lake`、`geode`、`iceberg`、`block_blob`、`monster_room`、`fossil`、`overlay`）
-  和 step 7 地下装饰里的 `sculk_vein`（`multiface_growth`）与
-  `sculk_patch_deep_dark`（`sequence` + `sculk_patch`）、以及全部植被类型，
-  在完整 11 步对拍里仍标 `unsupported` / `skipped`：`fossil` 要生成器导出结构模板、
-  `monster_room` 要刷怪笼 / 战利品表 / 方块实体，`sculk_vein` 要
-  `MultifaceSpreadeableBlock` 的面位运算和扩散、`sculk_patch` 要
-  `sculk_spreadable` 标签与 `charge_count` 循环，Rust 侧都没有对应支撑，无法逐位比对，
-  按「不发明行为」先留白；植被由 `cb-wg-feat-b` 负责。
+  `--types minecraft:blue_ice,minecraft:iceberg,...` 补对拍。
+  step 7 地下装饰里的 `sculk_vein` 由 `multiface_growth` 覆盖（代码来自 `cb-wg-aquatic`），
+  在 `deep_dark` 定点对拍 0 不一致；**注意默认坐标（`FIXED_CHUNKS` + 随机）下它一次都不放方块，
+  必须用 `--chunk -42 111 --scan N`（种子 0 的 `deep_dark`）才比得到**。
+  `sculk_patch`（`SculkPatchFeature` + `SculkSpreader`）的移植已写在
+  `feature/sculk_patch.rs`，但**还没对拍到 0 不一致，所以不接入 dispatch**：
+  `parse_leaf` 对它返回 `None`，主循环把 `sculk_patch_deep_dark` 整块标 `unsupported`。
+  现状是 `deep_dark` 那个区块比官方少 8 格方块（单区块 8 mismatches、`--scan 3` 160 处），
+  `--steps 0` 基线为 0 可确认差异来自这一步。两边的写入序列前 21 行一致、第 22 行分叉，
+  怀疑是同一格 `sculk_vein` 的面集合在两个时间点不同，细节见汇报。
+  其余非植被类型（`lake`、`geode`、`iceberg`、`block_blob`、`monster_room`、`fossil`、
+  `overlay`）以及全部植被类型，在完整 11 步对拍里仍标 `unsupported` / `skipped`：
+  `fossil` 要生成器导出结构模板、`monster_room` 要刷怪笼 / 战利品表 / 方块实体；
+  植被由 `cb-wg-feat-b` 负责。
   `freeze_top_layer` 已移植并逐方块 0 不一致：它复用 `biome_temperature` 里的
   `getHeightAdjustedTemperature`，逐点群系由主循环的 `BiomeManager` 未缓存解算器给出，
   没有改 `Feature::place` 签名（在 `composition.rs` 的 `place_feature` 里单开一个分支）。
