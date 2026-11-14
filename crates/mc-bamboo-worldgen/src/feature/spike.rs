@@ -85,7 +85,6 @@ pub fn place(
     if width > 1 && random.next_int(60) == 0 {
         origin.1 += 10 + random.next_int(30);
     }
-
     for y_off in 0..height {
         let scale = (1.0_f32 - y_off as f32 / height as f32) * width as f32;
         let new_width = ceil_f32(scale);
@@ -93,13 +92,19 @@ pub fn place(
             let dx = abs_i32(xo) as f32 - 0.25_f32;
             for zo in -new_width..=new_width {
                 let dz = abs_i32(zo) as f32 - 0.25_f32;
-                let inside_circle = xo == 0 && zo == 0 || !(dx * dx + dz * dz > scale * scale);
-                // 官方 `&&` 左侧为假时右侧不取随机数（边界格判定）。
-                // The official `&&` short-circuits the right side (edge-cell test).
+                let inside_circle = xo == 0 && zo == 0 || dx * dx + dz * dz <= scale * scale;
+                // 官方是 `(insideCircle) && (keep)`：`insideCircle` 为假时 `&&` 短路，
+                // **不取** `keep` 里的随机数，所以这里必须先判圆内再求 `keep`。
+                // The official code is `(insideCircle) && (keep)`: a short-circuited
+                // `insideCircle` skips the random draw inside `keep`, so the circle test
+                // must come first.
+                if !inside_circle {
+                    continue;
+                }
                 let keep =
                     xo != -new_width && xo != new_width && zo != -new_width && zo != new_width
-                        || !(random.next_float() > 0.75_f32);
-                if !(inside_circle && keep) {
+                        || random.next_float() <= 0.75_f32;
+                if !keep {
                     continue;
                 }
                 let positive = (origin.0 + xo, origin.1 + y_off, origin.2 + zo);
@@ -128,12 +133,7 @@ pub fn place(
         }
     }
 
-    let mut pillar_width = width - 1;
-    if pillar_width < 0 {
-        pillar_width = 0;
-    } else if pillar_width > 1 {
-        pillar_width = 1;
-    }
+    let pillar_width = (width - 1).clamp(0, 1);
 
     for xo in -pillar_width..=pillar_width {
         for zo in -pillar_width..=pillar_width {

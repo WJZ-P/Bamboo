@@ -262,6 +262,15 @@ fn create_pointed_block(pointed: u32, direction: &str, thickness: &str) -> Optio
     apply_property(state, THICKNESS, thickness)
 }
 
+/// 一株滴水石要写什么、往哪写。
+///
+/// One speleothem: which way it points, how long it is, and whether the tip is merged.
+struct SpeleothemShape {
+    downward: bool,
+    total_length: i32,
+    merged_tip: bool,
+}
+
 /// `SpeleothemUtils.buildBaseToTipColumn` + `growSpeleothem`：从 `start` 沿 `direction`
 /// 依次写 base / middle / frustum / tip。
 ///
@@ -270,13 +279,14 @@ fn create_pointed_block(pointed: u32, direction: &str, thickness: &str) -> Optio
 fn grow_speleothem(
     world: &mut FeatureWorld<'_>,
     start: (i32, i32, i32),
-    downward: bool,
-    total_length: i32,
-    merged_tip: bool,
+    shape: SpeleothemShape,
     base: u32,
     pointed: u32,
     replaceable: &[i32],
 ) {
+    let downward = shape.downward;
+    let total_length = shape.total_length;
+    let merged_tip = shape.merged_tip;
     let opposite = if downward { 1 } else { -1 };
     let above = (start.0, start.1 + opposite, start.2);
     let base_state = world.get_block(above.0, above.1, above.2);
@@ -331,8 +341,7 @@ impl SpeleothemClusterFeature {
     ) -> bool {
         if !is_empty_or_water(world.get_block(origin.0, origin.1, origin.2)) {
             return false;
-        }
-        // 取样顺序照官方：height、wetness、density、radius ×2。
+        } // 取样顺序照官方：height、wetness、density、radius ×2。
         // Draw order per the official code: height, wetness, density, then radius twice.
         let height = self.height.sample(random);
         let wetness = self.wetness.sample(random);
@@ -384,12 +393,15 @@ impl SpeleothemClusterFeature {
         ) else {
             return;
         };
-        let ceiling = Some(base_column.ceiling);
-        let base_floor = Some(base_column.floor);
-        let want_pool = random.next_float() < chance_of_water;
+        // `column_scan` 只在上下都有边缘时返回 `Range`，所以这里两端都一定存在；
+        // 官方的 `OptionalInt` 在这条路径上也一定非空。
+        // `column_scan` only returns a `Range` when both edges exist, so both ends are
+        // always present here; the official `OptionalInt`s are non-empty on this path too.
+        let ceiling = base_column.ceiling;
         let mut column = base_column;
-        if want_pool && self.can_place_pool(world, (pos.0, base_floor.unwrap(), pos.2)) {
-            let base_floor_y = base_floor.unwrap();
+        let want_pool = random.next_float() < chance_of_water;
+        if want_pool && self.can_place_pool(world, (pos.0, base_column.floor, pos.2)) {
+            let base_floor_y = base_column.floor;
             column.floor = base_floor_y - 1;
             world.set_block_with_heightmaps(
                 pos.0,
@@ -398,66 +410,40 @@ impl SpeleothemClusterFeature {
                 mc_bamboo_data::blocks::WATER,
             );
         }
-        let floor = Some(column.floor);
+        let floor = column.floor;
         let want_stalactite = random.next_double() < chance_of_speleothem;
-        let stalactite_height = if ceiling.is_some()
-            && want_stalactite
-            && !self.is_lava(world, (pos.0, ceiling.unwrap(), pos.2))
+        let stalactite_height = if want_stalactite && !self.is_lava(world, (pos.0, ceiling, pos.2))
         {
             let thickness = self.speleothem_block_layer_thickness.sample(random);
-            self.replace_blocks_with_base_blocks(
-                world,
-                (pos.0, ceiling.unwrap(), pos.2),
-                thickness,
-                1,
-            );
-            let max_height = if floor.is_some() {
-                cluster_height.min(ceiling.unwrap() - floor.unwrap())
-            } else {
-                cluster_height
-            };
+            self.replace_blocks_with_base_blocks(world, (pos.0, ceiling, pos.2), thickness, 1);
+            let max_height = cluster_height.min(ceiling - floor);
             self.get_speleothem_height(random, dx, dz, density, max_height)
         } else {
             0
         };
 
         let want_stalagmite = random.next_double() < chance_of_speleothem;
-        let stalagmite_height = if floor.is_some()
-            && want_stalagmite
-            && !self.is_lava(world, (pos.0, floor.unwrap(), pos.2))
-        {
+        let stalagmite_height = if want_stalagmite && !self.is_lava(world, (pos.0, floor, pos.2)) {
             let thickness = self.speleothem_block_layer_thickness.sample(random);
-            self.replace_blocks_with_base_blocks(
-                world,
-                (pos.0, floor.unwrap(), pos.2),
-                thickness,
-                -1,
-            );
-            if ceiling.is_some() {
-                (stalactite_height
-                    + random.next_int_between_inclusive(
-                        -self.max_stalagmite_stalactite_height_diff,
-                        self.max_stalagmite_stalactite_height_diff,
-                    ))
-                .max(0)
-            } else {
-                self.get_speleothem_height(random, dx, dz, density, cluster_height)
-            }
+            self.replace_blocks_with_base_blocks(world, (pos.0, floor, pos.2), thickness, -1);
+            (stalactite_height
+                + random.next_int_between_inclusive(
+                    -self.max_stalagmite_stalactite_height_diff,
+                    self.max_stalagmite_stalactite_height_diff,
+                ))
+            .max(0)
         } else {
             0
         };
 
-        let (actual_stalactite_height, actual_stalagmite_height) = if ceiling.is_some()
-            && floor.is_some()
-            && ceiling.unwrap() - stalactite_height <= floor.unwrap() + stalagmite_height
+        let (actual_stalactite_height, actual_stalagmite_height) = if ceiling - stalactite_height
+            <= floor + stalagmite_height
         {
-            let floor_y = floor.unwrap();
-            let ceiling_y = ceiling.unwrap();
-            let lowest_bottom = (ceiling_y - stalactite_height).max(floor_y + 1);
-            let highest_top = (floor_y + stalagmite_height).min(ceiling_y - 1);
+            let lowest_bottom = (ceiling - stalactite_height).max(floor + 1);
+            let highest_top = (floor + stalagmite_height).min(ceiling - 1);
             let actual_bottom = random.next_int_between_inclusive(lowest_bottom, highest_top + 1);
             let actual_top = actual_bottom - 1;
-            (ceiling_y - actual_bottom, actual_top - floor_y)
+            (ceiling - actual_bottom, actual_top - floor)
         } else {
             (stalactite_height, stalagmite_height)
         };
@@ -466,25 +452,29 @@ impl SpeleothemClusterFeature {
             && actual_stalactite_height > 0
             && actual_stalagmite_height > 0
             && actual_stalactite_height + actual_stalagmite_height == column.height();
-        if let Some(ceiling_y) = ceiling {
+        {
             grow_speleothem(
                 world,
-                (pos.0, ceiling_y - 1, pos.2),
-                true,
-                actual_stalactite_height,
-                merge_tips,
+                (pos.0, ceiling - 1, pos.2),
+                SpeleothemShape {
+                    downward: true,
+                    total_length: actual_stalactite_height,
+                    merged_tip: merge_tips,
+                },
                 self.base_block,
                 self.pointed_block,
                 &self.replaceable_blocks,
             );
         }
-        if let Some(floor_y) = floor {
+        {
             grow_speleothem(
                 world,
-                (pos.0, floor_y + 1, pos.2),
-                false,
-                actual_stalagmite_height,
-                merge_tips,
+                (pos.0, floor + 1, pos.2),
+                SpeleothemShape {
+                    downward: false,
+                    total_length: actual_stalagmite_height,
+                    merged_tip: merge_tips,
+                },
                 self.base_block,
                 self.pointed_block,
                 &self.replaceable_blocks,
