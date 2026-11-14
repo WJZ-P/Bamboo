@@ -20,6 +20,7 @@
 //! `docs/worldgen-structures-plan.md`.
 
 pub mod pieces;
+pub mod place;
 pub mod placement;
 pub mod registry;
 pub mod rings;

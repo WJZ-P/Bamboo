@@ -502,6 +502,14 @@ pub struct StateTables {
     /// 每个形状的盒子，一个盒子是 `min_x, min_y, min_z, max_x, max_y, max_z`。
     pub shapes: Vec<Vec<[f64; 6]>>,
     pub shape_faces: Vec<u16>,
+    /// 每个状态的四个 `rotate` 结果（`Rotation.ordinal()` 顺序），长度 = 状态数 × 4。
+    ///
+    /// Four `rotate` results per state, in `Rotation.ordinal()` order; length is states × 4.
+    pub rotation: Vec<u32>,
+    /// 每个状态的三个 `mirror` 结果（`Mirror.ordinal()` 顺序），长度 = 状态数 × 3。
+    ///
+    /// Three `mirror` results per state, in `Mirror.ordinal()` order; length is states × 3.
+    pub mirror: Vec<u32>,
 }
 
 #[derive(Debug, Deserialize)]
