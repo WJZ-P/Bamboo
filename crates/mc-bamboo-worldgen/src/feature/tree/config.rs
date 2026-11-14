@@ -118,3 +118,21 @@ fn simple_state(value: &Value) -> Option<u32> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_oak_and_gates_unported_trees() {
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        let features = root["feature"].as_object().unwrap();
+        // 纯橡树：straight trunk + blob foliage + 空 decorators。
+        // Plain oak: straight trunk + blob foliage + empty decorators.
+        assert!(TreeConfig::parse(&features["minecraft:oak"]).is_some());
+        // swamp_oak 带 leave_vine decorator；fancy_oak 用别的 trunk placer。
+        // swamp_oak has a leave_vine decorator; fancy_oak uses another trunk placer.
+        assert!(TreeConfig::parse(&features["minecraft:swamp_oak"]).is_none());
+        assert!(TreeConfig::parse(&features["minecraft:fancy_oak"]).is_none());
+    }
+}

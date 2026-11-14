@@ -53,17 +53,19 @@ pub(crate) fn update_leaves(place: &mut TreePlace<'_, '_>) {
                 break;
             };
             to_check[smallest_distance].remove(&pos);
+            if !shape.insert(pos) {
+                continue;
+            }
             if bounds.is_inside(pos) {
                 if smallest_distance != 0 {
                     let state = place.get_block(pos);
-                    let distance = smallest_distance.to_string();
+                    let distance = (smallest_distance + 1).to_string();
                     if let Some(updated) = with_property(state, "distance", &distance) {
                         place
                             .world
                             .set_block_with_heightmaps(pos.0, pos.1, pos.2, updated);
                     }
                 }
-                shape.insert(pos);
                 for dir in DIRECTIONS {
                     let neighbor = (pos.0 + dir.0, pos.1 + dir.1, pos.2 + dir.2);
                     if bounds.is_inside(neighbor) && !shape.contains(&neighbor) {
