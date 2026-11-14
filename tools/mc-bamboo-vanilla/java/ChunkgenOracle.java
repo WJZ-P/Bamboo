@@ -456,7 +456,8 @@ public final class ChunkgenOracle {
      * 所以跳过别的 step 不影响留下的 step。最终验收仍要跑完整 11 步。
      */
     private record Options(int seeds, int chunks, long salt, int through, int stepsMask,
-            String featureAllowList, boolean realPath, String settings) {
+            String featureAllowList, boolean realPath, String settings,
+            Integer forcedX, Integer forcedZ, int scan) {
         static final int ALL_STEPS = (1 << 11) - 1;
 
         static Options parse(String[] args) {
@@ -474,6 +475,15 @@ public final class ChunkgenOracle {
             // Real-server path: 3x3 possibleBiomes, the carverBiome branch, region.getBiomeManager().
             boolean realPath = false;
             String settings = "overworld";
+            // `--chunk X Z` 只出题这一个区块（精确复现）；`--scan N` 每个种子出 N 个
+            // 覆盖近处/远处/负坐标的随机区块；两者合用则出以 (X,Z) 为中心的连续网格。
+            // 都只改坐标来源。
+            // `--chunk X Z` emits only this one chunk (exact reproduction); `--scan N` emits
+            // N random chunks per seed spanning near/far/negative coordinates; combined they
+            // emit a contiguous grid centered on (X,Z). All only change the coordinate source.
+            Integer forcedX = null;
+            Integer forcedZ = null;
+            int scan = 0;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seeds" -> seeds = Integer.parseInt(args[++i]);
@@ -505,10 +515,16 @@ public final class ChunkgenOracle {
                     case "--feature-types" -> featureAllowList = args[++i];
                     case "--biomes-only" -> through = 0;
                     case "--real-path" -> realPath = true;
+                    case "--chunk" -> {
+                        forcedX = Integer.parseInt(args[++i]);
+                        forcedZ = Integer.parseInt(args[++i]);
+                    }
+                    case "--scan" -> scan = Integer.parseInt(args[++i]);
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
-            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath, settings);
+            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath, settings,
+                    forcedX, forcedZ, scan);
         }
     }
 
@@ -1170,16 +1186,53 @@ public final class ChunkgenOracle {
         }
 
         private int[][] chunks(long seed) {
-            int count = this.options.chunks();
+            // `--chunk X Z --scan N`：以 (X,Z) 为中心的一连续网格，密集覆盖含水层
+            // 格子边界。稀有分支（如岩浆层上边界 y=-54）只在连续洞穴区域里出现，
+            // 稀疏的随机区块扫不到，所以扫描要用相邻区块而不是完全随机的坐标。
+            // `--chunk X Z --scan N`: a contiguous grid centered on (X,Z) that densely
+            // covers aquifer cell boundaries. Rare branches (e.g. the lava-layer top at
+            // y=-54) only occur inside connected cave regions, which sparse random chunks
+            // miss; scanning therefore needs adjacent chunks rather than purely random ones.
+            if (this.options.forcedX() != null && this.options.scan() > 0) {
+                int side = 1;
+                while (side * side < this.options.scan()) {
+                    side += 2;
+                }
+                int r = side / 2;
+                int[][] grid = new int[side * side][2];
+                int k = 0;
+                for (int dz = -r; dz <= r; dz++) {
+                    for (int dx = -r; dx <= r; dx++) {
+                        grid[k][0] = this.options.forcedX() + dx;
+                        grid[k][1] = this.options.forcedZ() + dz;
+                        k++;
+                    }
+                }
+                return grid;
+            }
+            // `--chunk` 覆盖成单个区块，用 FIXED_SEEDS 里的种子逐个复现。
+            // `--chunk` overrides to a single chunk, reproduced under each FIXED_SEEDS entry.
+            if (this.options.forcedX() != null) {
+                return new int[][] {{this.options.forcedX(), this.options.forcedZ()}};
+            }
+            boolean scan = this.options.scan() > 0;
+            int count = scan ? this.options.scan() : this.options.chunks();
             int[][] result = new int[count][2];
-            Random random = new Random(seed ^ 0x51A7_5EEDL ^ this.options.salt());
+            // 扫描用独立的播种，覆盖近处网格（容易撞上含水层格子边界）、
+            // 中距离、远距离和负坐标；和默认坐标生成互不干扰。
+            // Scanning uses its own seed and spans a near grid (likely to hit aquifer cell
+            // boundaries), mid range, far range and negative coordinates, independent of
+            // the default coordinate generator.
+            long randomSeed = seed ^ 0x51A7_5EEDL ^ this.options.salt();
+            Random random = new Random(scan ? randomSeed ^ 0x5CA4_5EEDL : randomSeed);
             for (int i = 0; i < count; i++) {
-                if (i < FIXED_CHUNKS.length) {
+                if (!scan && i < FIXED_CHUNKS.length) {
                     result[i] = FIXED_CHUNKS[i].clone();
                 } else {
-                    int bound = switch (i % 3) {
-                        case 0 -> 64;
-                        case 1 -> 4096;
+                    int bound = switch (i % 4) {
+                        case 0 -> 48;
+                        case 1 -> 512;
+                        case 2 -> 16384;
                         default -> 1_000_000;
                     };
                     result[i][0] = random.nextInt(-bound, bound);

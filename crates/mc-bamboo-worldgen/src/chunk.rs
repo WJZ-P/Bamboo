@@ -564,4 +564,31 @@ mod tests {
             assert!(section.iter().all(|id| (*id as usize) < 67));
         }
     }
+
+    /// 回归：种子 -1、区块 (52,-26) 在岩浆层上边界（y=-54）应给出水，而不是深板岩。
+    /// 官方 `Aquifer.NoiseBasedAquifer.computeSubstance` 在最近格子给的是水、且正下方
+    /// 全局流体是岩浆时，跳过压力计算直接返回水；缺失这段会误判成实心方块。
+    /// Regression: seed -1, chunk (52,-26) at the lava-layer top (y=-54) must be water,
+    /// not deepslate. Vanilla `computeSubstance` short-circuits to water when the nearest
+    /// cell is water and the global fluid one block below is lava; without it a pressure
+    /// check wrongly returns a solid block.
+    #[test]
+    fn aquifer_water_over_lava_boundary() {
+        let worldgen = Worldgen::load().expect("能读数据");
+        let generator = Generator::new(&worldgen, -1).expect("能建生成器");
+        let layers = generator
+            .terrain(52, -26, Stage::Noise)
+            .expect("能生成地形");
+        let water = block_by_name("minecraft:water")
+            .expect("有水方块")
+            .default_state;
+        let min_y = worldgen
+            .settings("minecraft:overworld")
+            .expect("有主世界设置")
+            .min_y;
+        let local_y = (-54 - min_y) as usize;
+        for z in 1..=3 {
+            assert_eq!(layers[local_y][14 * 16 + z], water, "y=-54 x=14 z={z}");
+        }
+    }
 }
