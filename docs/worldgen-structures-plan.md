@@ -53,12 +53,15 @@
 官方 jar 的 `data/minecraft/worldgen/` 下有（`target/vanilla/versions/26.3/server-26.3.jar`
 里的计数）：
 
-| 目录 | 条目数 | 注册表键 | DIRECT_CODEC |
+| 目录 | `.json` 条目数 | 注册表键 | DIRECT_CODEC |
 |---|---:|---|---|
-| `worldgen/structure_set/` | 22 | `Registries.STRUCTURE_SET` | `StructureSet.DIRECT_CODEC` |
-| `worldgen/structure/` | 87 | `Registries.STRUCTURE` | `Structure.DIRECT_CODEC` |
-| `worldgen/template_pool/` | 306 | `Registries.TEMPLATE_POOL` | `StructureTemplatePool.DIRECT_CODEC` |
-| `worldgen/processor_list/` | 41 | `Registries.PROCESSOR_LIST` | `StructureProcessorType.DIRECT_CODEC` |
+| `worldgen/structure_set/` | 21 | `Registries.STRUCTURE_SET` | `StructureSet.DIRECT_CODEC` |
+| `worldgen/structure/` | 52 | `Registries.STRUCTURE` | `Structure.DIRECT_CODEC` |
+| `worldgen/template_pool/` | 245 | `Registries.TEMPLATE_POOL` | `StructureTemplatePool.DIRECT_CODEC` |
+| `worldgen/processor_list/` | 40 | `Registries.PROCESSOR_LIST` | `StructureProcessorType.DIRECT_CODEC` |
+
+（条目数是 jar 里 `*.json` 的文件数，和 `encodeRegistry` 导出的键数一致；不要把
+`unzip -l` 里的目录项算进去。）
 
 `Structure.DIRECT_CODEC` 是 `BuiltInRegistries.STRUCTURE_TYPE.byNameCodec().dispatch(...)`，
 `StructureTemplatePool.DIRECT_CODEC` 引 `StructurePoolElement.CODEC`（按 `element_type` 分发），
