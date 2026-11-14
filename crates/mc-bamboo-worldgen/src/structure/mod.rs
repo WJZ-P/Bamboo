@@ -20,6 +20,7 @@
 
 pub mod placement;
 pub mod registry;
+pub mod start;
 
 pub use placement::{
     Common, ConcentricRings, ExclusionZone, FrequencyReductionMethod, Placement, RandomSpread,
@@ -28,6 +29,10 @@ pub use placement::{
 pub use registry::{
     SelectionEntry, StructureDef, StructureSetEntry, StructureSets, Structures,
     possible_structure_sets, resolve_biome_holders,
+};
+pub use start::{
+    BoundingBox, References, StartPlan, StructurePiece, StructureStart, StructureStarts,
+    chunk_pos_pack, selection_sequence, structure_references,
 };
 
 /// `hasStructureChunkInRange` 递归查别的集合时允许的最大深度。
@@ -158,6 +163,36 @@ impl StructureState {
             .map(|set| StartCandidate {
                 set: set.name.clone(),
                 structures: set.structures.clone(),
+            })
+            .collect()
+    }
+
+    /// `createStructures` 的放置门 + `existingStart` 短路 + 加权选择序列。
+    ///
+    /// 官方对每个结构集先检查 `getStartForStructure(...)` 有没有已经有效的起点，
+    /// 有就跳过整个结构集；否则 `isStructureChunk` 通过才做加权选择。这里产出
+    /// 每个命中结构集的 `StartPlan`（尝试序列），不含 `Structure.generate` 的有效性
+    /// 判定，所以没有「最终选中哪个结构」。
+    ///
+    /// The `createStructures` gate + `existingStart` short-circuit + weighted selection.
+    /// Vanilla first checks `getStartForStructure(...)` for an already-valid start and
+    /// skips the whole set; otherwise it only selects when `isStructureChunk` passes.
+    /// This yields a `StartPlan` (attempt sequence) per hit; without `Structure.generate`
+    /// validity there is no "finally selected structure".
+    pub fn start_plans(
+        &self,
+        seed: i64,
+        x: i32,
+        z: i32,
+        existing: &StructureStarts,
+    ) -> Vec<StartPlan> {
+        self.sets
+            .iter()
+            .filter(|set| !existing.has_valid_for_set(&set.structures))
+            .filter(|set| self.is_structure_chunk(&set.name, seed, x, z))
+            .map(|set| StartPlan {
+                set: set.name.clone(),
+                attempts: start::selection_sequence(&set.structures, seed, x, z),
             })
             .collect()
     }

@@ -17,7 +17,7 @@
 
 use std::{fs, path::Path, process::Command};
 
-use mc_bamboo_worldgen::structure::StructureSets;
+use mc_bamboo_worldgen::structure::{StructureSets, selection_sequence};
 use serde_json::Value;
 
 /// 覆盖原点、固定点和很大正负数的种子，含 0、±1、大数和 int 边界。
@@ -123,6 +123,13 @@ fn write_queries(path: &Path, queries: &[(i64, i32, i32)]) -> Result<(), String>
     fs::write(path, text).map_err(|error| format!("cannot write queries file: {error}"))
 }
 
+/// 失败信息里的序列最多留 120 个字符。
+///
+/// Keep at most 120 characters of a sequence in a failure line.
+fn truncate(text: &str) -> &str {
+    text.get(..text.len().min(120)).unwrap_or(text)
+}
+
 fn compare(sets: &StructureSets, stdout: &str, query_count: usize) -> Result<(), String> {
     let mut lines = stdout.lines();
 
@@ -154,28 +161,70 @@ fn compare(sets: &StructureSets, stdout: &str, query_count: usize) -> Result<(),
     // 记一下频率判定为 false 的条数，确认频率削减的分支真的被比到，不是恒 true。
     // Count false frequency restrictions to confirm the reducers are actually exercised.
     let mut false_restrictions = 0usize;
+    let mut selection_comparisons = 0usize;
+    let mut in_selection = false;
     for line in lines {
         if line.is_empty() {
             continue;
         }
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() != 8 || fields[0] != "R" {
-            return Err(format!("bad oracle line: {line}"));
+        // R 段之后是 "SELECT n"，再往后是加权威选序列。
+        // After the R section comes "SELECT n", then the weighted-selection lines.
+        if let Some(select_count) = line.strip_prefix("SELECT ") {
+            let select_count: usize = select_count
+                .parse()
+                .map_err(|_| format!("bad SELECT count: {line}"))?;
+            if select_count != sets.len() {
+                return Err(format!(
+                    "SELECT set count {select_count} != Rust {} ",
+                    sets.len()
+                ));
+            }
+            in_selection = true;
+            continue;
         }
-        let name = fields[1];
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let name = *fields
+            .get(1)
+            .ok_or_else(|| format!("bad oracle line: {line}"))?;
         let seed: i64 = fields[2].parse().map_err(|_| format!("bad seed: {line}"))?;
         let x: i32 = fields[3].parse().map_err(|_| format!("bad x: {line}"))?;
         let z: i32 = fields[4].parse().map_err(|_| format!("bad z: {line}"))?;
+        let set = sets
+            .get(name)
+            .ok_or_else(|| format!("unknown set in oracle output: {name}"))?;
+
+        if in_selection {
+            // `S name seed x z a,b,c`：官方 createStructures 的加权尝试序列。
+            // `S name seed x z a,b,c`: official createStructures attempt sequence.
+            if fields.len() != 6 || fields[0] != "S" {
+                return Err(format!("bad selection line: {line}"));
+            }
+            let ours = selection_sequence(&set.structures, seed, x, z).join(",");
+            selection_comparisons += 1;
+            if ours != fields[5] {
+                total_mismatches += 1;
+                if mismatches.len() < 24 {
+                    // 多结构集的序列很长，失败信息截断，避免刷屏。
+                    // Multi-structure sequences are long; truncate failure lines.
+                    mismatches.push(format!(
+                        "selection {name} seed={seed} ({x},{z}): ours [{}] vs [{}]",
+                        truncate(&ours),
+                        truncate(fields[5])
+                    ));
+                }
+            }
+            continue;
+        }
+
+        if fields.len() != 8 || fields[0] != "R" {
+            return Err(format!("bad oracle line: {line}"));
+        }
         let px: i32 = fields[5].parse().map_err(|_| format!("bad px: {line}"))?;
         let pz: i32 = fields[6].parse().map_err(|_| format!("bad pz: {line}"))?;
         let restrict = fields[7] == "1";
         if !restrict {
             false_restrictions += 1;
         }
-
-        let set = sets
-            .get(name)
-            .ok_or_else(|| format!("unknown set in oracle output: {name}"))?;
         let spread = set
             .placement
             .as_random_spread()
@@ -197,8 +246,8 @@ fn compare(sets: &StructureSets, stdout: &str, query_count: usize) -> Result<(),
     }
 
     println!(
-        "structures: {} sets, {} queries, {} comparisons ({} false frequency restrictions)",
-        count, query_count, comparisons, false_restrictions
+        "structures: {} sets, {} queries, {} placement comparisons ({} false frequency restrictions), {} selection comparisons",
+        count, query_count, comparisons, false_restrictions, selection_comparisons
     );
     if total_mismatches == 0 {
         println!("STRUCTURES RESULT: 0 mismatches");

@@ -1,3 +1,4 @@
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -14,6 +15,8 @@ import net.minecraft.SharedConstants;
 import net.minecraft.core.Vec3i;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.levelgen.LegacyRandomSource;
+import net.minecraft.world.level.levelgen.WorldgenRandom;
 import net.minecraft.world.level.levelgen.structure.placement.AbstractSpreadingStructurePlacement;
 import net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement;
 import net.minecraft.world.level.levelgen.structure.placement.RandomSpreadType;
@@ -26,8 +29,9 @@ import net.minecraft.world.level.levelgen.structure.placement.RandomSpreadType;
  * 和 applyAdditionalChunkRestrictions。输出纯文本，Rust 侧逐行比。
  *
  * <p>Usage: StructurePlacementOracle &lt;worldgen.json&gt; &lt;queries.txt&gt;
- * queries.txt 每行是 "seed x z"。输出第一行是 SETS 数量，接着是这些名字（按字典序），
- * 再往后每行是 "R name seed x z px pz restrict"。
+ * queries.txt 每行是 "seed x z"。输出先是 SETS 数量 + 这些名字，接着每行的
+ * "R name seed x z px pz restrict"（放置）；然后一行 "SELECT n"，再每行
+ * "S name seed x z a,b,c"（createStructures 加权选择的官方尝试序列）。
  */
 public final class StructurePlacementOracle {
     public static void main(String[] args) throws Exception {
@@ -80,6 +84,52 @@ public final class StructurePlacementOracle {
                 out.append("R ").append(name).append(' ').append(seed).append(' ').append(x).append(' ')
                         .append(z).append(' ').append(pos.x()).append(' ').append(pos.z()).append(' ')
                         .append(restrict ? 1 : 0).append('\n');
+            }
+        }
+
+        // createStructures 的加权选择：对全部结构集（含 concentric_rings）输出官方
+        // setLargeFeatureSeed + nextInt(total) 的尝试序列。选择序列本身不依赖
+        // isStructureChunk，所有查询点都算，覆盖更广。
+        // Weighted selection of createStructures: emit the official
+        // setLargeFeatureSeed + nextInt(total) attempt order for every structure set.
+        // The sequence does not depend on isStructureChunk, so all queries are used.
+        out.append("SELECT ").append(sets.size()).append('\n');
+        for (Map.Entry<String, JsonElement> entry : sets.entrySet()) {
+            JsonArray structures = entry.getValue().getAsJsonObject().getAsJsonArray("structures");
+            for (String query : queries) {
+                if (query.isBlank()) {
+                    continue;
+                }
+                String[] parts = query.trim().split("\\s+");
+                long seed = Long.parseLong(parts[0]);
+                int x = Integer.parseInt(parts[1]);
+                int z = Integer.parseInt(parts[2]);
+                WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+                random.setLargeFeatureSeed(seed, x, z);
+                List<JsonElement> options = new ArrayList<>();
+                structures.forEach(options::add);
+                int total = 0;
+                for (JsonElement option : options) {
+                    total += option.getAsJsonObject().get("weight").getAsInt();
+                }
+                List<String> sequence = new ArrayList<>();
+                while (!options.isEmpty()) {
+                    int choice = random.nextInt(total);
+                    int index = 0;
+                    for (int k = 0; k < options.size(); k++) {
+                        choice -= options.get(k).getAsJsonObject().get("weight").getAsInt();
+                        if (choice < 0) {
+                            break;
+                        }
+                        index++;
+                    }
+                    JsonObject selected = options.get(index).getAsJsonObject();
+                    sequence.add(selected.get("structure").getAsString());
+                    total -= selected.get("weight").getAsInt();
+                    options.remove(index);
+                }
+                out.append("S ").append(entry.getKey()).append(' ').append(seed).append(' ').append(x)
+                        .append(' ').append(z).append(' ').append(String.join(",", sequence)).append('\n');
             }
         }
         System.out.print(out);
