@@ -37,6 +37,9 @@
 //! mc-bamboo-vanilla beard <java 路径> [--through noise|surface|carvers] [--break-self-test]
 //!     用官方 Beardifier 对拍结构对地形密度的影响（kernel / sampleValue / sampleVolume / 方块）
 //!
+//!     Cross-check structure influence on terrain density against vanilla Beardifier
+//!     (kernel / sampleValue / sampleVolume / blocks)
+//!
 //!     Compare findValidGenerationPoint's biome and height gates against vanilla
 //!     Structure.GenerationContext
 //! mc-bamboo-vanilla machine <java 路径>

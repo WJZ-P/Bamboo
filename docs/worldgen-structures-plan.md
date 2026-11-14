@@ -138,6 +138,17 @@
   阶段；游戏里世界仍是超平坦。结构件放置（第 5 步）、Beardifier（第 6 步）、存档
   `structures` 键（第 7 步）仍归结构队员 / 后续里程碑。
 
+**Beardifier（2026-11-14，分支 `cb-wg-beard`，基于 main 4fd5d68）**：第 6 步
+（结构对 terrain 密度的影响）单独落地，见第 5 节。`mc-bamboo-worldgen::beardifier`
+逐行移植官方 `Beardifier` 的全部计算与 `forStructuresInChunk` 收集，`finalDensity` 的
+`beardifier` 标记节点按官方 `ContextBoundSampler` 在求值时从 `SamplerContext` 取本区块
+Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_height` 等基线固定
+`EMPTY`。新子命令 `beard` 用官方 Beardifier 连进 `NoiseChunk` 出题，12 用例
+5,912,076 个比较逐位 0 不一致（含 NOISE / SURFACE / CARVERS 方块），`--break-self-test`
+故意改坏一处会失败。**仍是纯函数 + 对拍，没接进游戏**：结构件生成（jigsaw / 结构 /
+多件式结构里程碑）没做完，Java 侧用的是覆盖全部 `TerrainAdjustment` 的代表性输入盒而非
+`Structure.generate` 的真实产物，`forStructuresInChunk` 的收集分支只有单元测试覆盖。
+
 ## 1. 官方 26.3 的结构生成全景
 
 `ChunkStatus` 顺序（`docs/worldgen.md`）：`empty` → `structure_starts` →
@@ -450,6 +461,42 @@ structures (Compound)
 对拍：terrain 阶段在没有结构的区块必须仍是 0 不一致（EMPTY 路径回归），在有结构地基的
 区块逐方块比 `finalDensity` / `doFill` 结果。
 
+**第 6 步已落地（2026-11-14，分支 `cb-wg-beard`，基于 main 4fd5d68）**：
+
+* 逐行移植到 `mc-bamboo-worldgen::beardifier`（新模块）：五种 `TerrainAdjustment`、
+  `BEARD_KERNEL`（24³ 个 `e^(-dist²/16)`，构造期算好，逐位核对官方原始位模式）、
+  `getBuryContribution` / `getBeardContribution`（含 `Mth.fastInvSqrt` 的 Quake 魔数反平方根）、
+  `sampleValueUnchecked`（官方 `compute`）和 `sampleVolume`（`fillArray` 的 z→x→y 成批、
+  `affectedBox` 相交裁剪），以及 `forStructuresInChunk` 的收集（`isCloseToChunk(12)`、
+  RIGID projection、junction 的 `chunk±12` 严格 XZ 过滤、并集 `inflatedBy(24)`）。
+* 接入按官方 `ContextBoundSampler` 的语义：`finalDensity` 里的 `beardifier` 标记节点编译成
+  `Sampler::Beardifier`，在 `sampleValue` / `sampleVolume` 时从 `sampler::Context` 的
+  user field 取本区块 Beardifier，没注入就是 `Beardifier.EMPTY`（恒 0）。**编译仍是一份**，
+  不按区块重编译，所以噪声实例、`cache` 编号和取数顺序都不变；`Generator::terrain_with_beardifier`
+  把 Beardifier 注进 `Context`，`terrain` / `noise` / `first_occupied_height` 等基线路径永远
+  不注入（固定 `EMPTY`，满足疑点 2）。结构为空时 `finalDensity` 逐位不变。
+* 输入类型 `StructureStartInput` / `PieceInput` / `Rigid` / `Junction` 设计成能直接接收
+  `structure_starts` 产出的结构件；`Beardifier::from_parts(rigids, junctions)` 是对拍和合并
+  共用的入口，`for_structures_in_chunk(chunk_x, chunk_z, starts)` 是留给流水线接上的接口。
+* 对拍 `cargo run -p mc-bamboo-vanilla -- beard <java>`（新子命令 + `java/BeardifierOracle.java`）：
+  Java 侧用官方 `Beardifier` 的 `@VisibleForTesting` 构造器，从导出的 Rigid（盒 + 调整类型 +
+  `groundLevelDelta`）和 junction 造真实 Beardifier，连进 `NoiseChunk` 跑
+  `doFill` / `buildSurface` / `generateCarvers`；Rust 侧从同一份输入重建 Beardifier，逐位比较
+  `BEARD_KERNEL` 原始位模式、整块 16×height×16 的 `sampleValue` / `sampleVolume`、
+  `affectedBox`，以及 NOISE / SURFACE / CARVERS 三个阶段的方块。12 个用例（空、五种
+  `TerrainAdjustment`、junction、跨区块 / 贴顶贴底边界）共 5,912,076 个比较 0 不一致。
+  `--break-self-test` 故意把一个 `groundLevelDelta` 加 1，报 32 处不一致并失败，还原后回 0；
+  旧 `chunkgen --through carvers` 仍 0 不一致（EMPTY 回归）。
+* **没做 / 已知限制**：Java 侧的盒是按真实结构尺度构造的代表性输入，覆盖全部
+  `TerrainAdjustment`，但**不是** `Structure.generate` 跑出的真实结构起点——jigsaw 模板
+  导出与结构件生成归 jigsaw / 结构 / 多件式结构里程碑。Beardifier 的输入本就只是包围盒 +
+  调整类型 + 连接点，所以对密度计算是完整逐位对拍；等结构件接上后把
+  `for_structures_in_chunk` 的产物填进同一套输入即可。`forStructuresInChunk` 的收集分支
+  （`isCloseToChunk`、RIGID projection、junction 过滤）只有 Rust 单元测试覆盖，没有和官方
+  `StructureManager` 端到端对拍（那需要能产出真实 `PoolElementStructurePiece` 的模板环境）。
+  本轮全是纯函数 + 对拍，**没接进 Director**：`structure_starts` / `structure_references`
+  仍是空实现，游戏里 `terrain` 仍走 `EMPTY`，世界仍是超平坦。
+
 ## 6. `features` 阶段里结构件的放置
 
 `ChunkGenerator.applyBiomeDecoration`（351 行起，逐段）：
@@ -482,7 +529,7 @@ structures (Compound)
 | 3 | 放置：`random_spread`（含频率削减、exclusion zone、spread type）、`concentric_rings` 几何 | 大范围区块「哪个区块有哪个结构起点」0 不一致；新对拍先故意改坏一处确认会失败 | **做完**：20 集 × 464 查询 = 9280 放置比较 + 9744 加权选择比较 0 不一致；`concentric_rings` 6 种子 768 环位置 + 864 `isStructureChunk` 0 不一致 |
 | 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | 没做 |
 | 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | 没做 |
-| 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | 没做（仍用 `Beardifier.EMPTY`） |
+| 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | **做完（纯函数 + 对拍，`cb-wg-beard`）**：`beard` 12 用例 5,912,076 比较 0 不一致（kernel / sampleValue / sampleVolume / affectedBox / 三阶段方块），`--break-self-test` 会失败；`chunkgen --through carvers` EMPTY 回归仍 0。**没接进 Director**：游戏里仍走 `EMPTY` |
 | 7 | 存档：`structures` 键写/读 | 读回一致，`world-dir` 确认官方能读 | 没做 |
 
 第三轮还落地了步 1 与步 4 之间的一层通用原语：`Structure.generate` 的
@@ -572,9 +619,15 @@ structures (Compound)
    `villages`、`ruined_portals`、`abandoned_camp` 等是多结构集，9744 个序列比较 0 不一致。
    但官方在第一个「生成成功」的结构就提前返回，Bamboo 目前只能给完整尝试序列；
    最终选中的结构仍要等 `Structure.generate` 有效性判定（未做）。
-5. **`Beardifier` 并入 `finalDensity` 的方式**：`SamplerContext` 里的
-   `Beardifier.CONTEXT_KEY` 与 `mc-bamboo-worldgen::sampler` 的编译/取数要逐位核对，
-   别改变噪声实例的 cache 编号和取数序列。
+5. **`Beardifier` 并入 `finalDensity` 的方式（已对拍解决）**：照官方
+   `ContextBoundSampler`，`finalDensity` 的 `beardifier` 标记编译成一份固定的
+   `Sampler::Beardifier`，求值时从 `Context` 的 user field 取本区块 Beardifier，**不按
+   区块重编译**，所以噪声实例、`cache` 编号和取数序列都没变；EMPTY 注入 `None` 时返回
+   0.0，和原来 `Sampler::Constant(0.0)` 逐位相同（`chunkgen --through carvers` 仍 0
+   不一致）。`beard` 对拍里单点和成批两条路径都逐位比过。**仍存疑**：`first_occupied_height`
+   / `iterateNoiseColumn` 固定走 `EMPTY` 是照结构队员疑点 2 的要求，但那批基线路径没有在
+   「有结构」的区块上单独和官方对拍过（官方 `findValidGenerationPoint` 用的也是
+   `Beardifier.EMPTY`）。
 6. **局部 index vs 全局 index**：`features` 阶段结构件用 per-step 局部 `index`，
    地物用 `FeatureSorter` 全局 index，两者 `setFeatureSeed` 的第二参数含义不同。
 7. **排除区组合路径未对拍**：`pillager_outposts` 的 `exclusion_zone` 在
@@ -635,12 +688,24 @@ structures (Compound)
   仍是数据类型，`start_plans` 只给加权尝试序列。组合对拍只覆盖 6 个 `random_spread`
   结构集、不含 `isStructureChunk` 命中过滤。
 * 结构件生成（第 4 步，所有旧式 / jigsaw 结构）、`features` 阶段结构件放置（第 5 步，
-  `placeInChunk` / `postProcess` / processors / 方块实体 / 拼图替换）、`Beardifier`
-  （第 6 步，terrain 仍用 `EMPTY`）、存档 `structures` 键（第 7 步）全都没做。
+  `placeInChunk` / `postProcess` / processors / 方块实体 / 拼图替换）、存档 `structures` 键
+  （第 7 步）全都没做。`Beardifier`（第 6 步）的**纯函数 / 密度计算 / 对拍已做完**
+  （`cb-wg-beard`，见第 5 节），但**没接进 Director**：`structure_starts` /
+  `structure_references` 仍是空实现，游戏里 `terrain` 仍走 `EMPTY`；把真实结构件喂进
+  `terrain_with_beardifier` 是合并时的事。
 * `structure-validity` 的整列判定与起点单点判定在这批数据上从未不一致（第 9 节疑点
   10）；两条路径各自用故意改坏单独验过。
 * `structure_references` 的纯函数 `structure_references` 已就位（含 `ChunkPos.pack`
   与包围盒 XZ 相交），但没接进流水线，也没和官方 `createReferences` 对拍。
 * `Structure.DIRECT_CODEC` 整表 `encodeStart` 已在本 jar 上实测通过（四键导出成功、
   重跑无 diff），但换官方 jar 版本后仍要重跑 `extract` 看 diff。
+* **Beardifier 对拍的输入不是真实结构起点**：`beard` 的 Java 侧用官方 `Beardifier` 的
+  `@VisibleForTesting` 构造器，从一组覆盖五种 `TerrainAdjustment` 的代表性盒 + junction
+  造真实 Beardifier，**不是** `Structure.generate` 跑出来的真实结构件——jigsaw 模板导出
+  与结构件生成归 jigsaw / 结构 / 多件式结构里程碑。Beardifier 的输入本就只是包围盒 +
+  调整类型 + 连接点，所以对密度计算仍是完整逐位对拍；但
+  `forStructuresInChunk` 的收集分支（`isCloseToChunk`、RIGID projection、junction XZ
+  过滤）只有 Rust 单元测试覆盖，没有和官方 `StructureManager` 端到端对拍。等结构件
+  接上后，把 `for_structures_in_chunk` 的产物填进同一套输入即可，并可把 `beard` 的
+  输入换成真实生成的结构件再对拍一次。
 * 未完成的结构/阶段不假装支持：地物分支用 `unsupported` 标记，结构里程碑沿用同一做法。

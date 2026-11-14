@@ -68,6 +68,12 @@ let carvers = generator.terrain(chunk_x, chunk_z, Stage::Carvers)?;
 * `sample_volume`：真正的一块 `Volume`（`densityfunction/DensityVolume` 的移植），按官方的
   `z → x → y` 顺序填缓冲。
 
+`finalDensity` 里 `beardifier` 标记节点（`SimpleDensityFunction.BEARDIFIER`）现在也编译成
+`Sampler::Beardifier`，像官方 `ContextBoundSampler` 一样在两条路径里从 `Context` 取本区块
+Beardifier；`beard` 子命令对拍它的单点和成批两条路径（见 `docs/worldgen-structures-plan.md`
+第 5 节）。编译仍是一份、不按区块重编译，噪声实例和取数顺序不变，`EMPTY` 时逐位等于
+原来的常量 0。
+
 **`BIOMES`**：`doCreateBiomes` 用开了缓存的 `SamplerContext` 建 `Climate.Sampler`；
 `MultiNoiseBiomeSource.createResolverForChunk` 对六个气候函数在 quart 体积
 `(4, height/4, 4)`、步长 `(4,4,4)` 上各做一次 `sampleVolume`，再 `Climate.target` 量化成定点数查
@@ -411,7 +417,10 @@ CARVERS 约 37 ms（release，不含建 `Generator`、不含 `ChunkColumn` 组�
   light 拿不到半径 1 的邻居视图，所以这两块先透传。
 * 下界和末地（无 `aquifers` 的路径、五群系末地源、下界老 fbm）。
 * `BlendingData` / `Blender` 的非空路径（老存档升级、旧区块混合）。
-* `Beardifier` 的非空路径（结构影响密度）。
+* `Beardifier` 的非空密度路径**已移植并对拍**（见 `docs/worldgen-structures-plan.md` 第 5 节
+  和 `cargo run -p mc-bamboo-vanilla -- beard <java>`）：纯函数、密度计算和整条
+  `finalDensity` 接入都逐位一致，但**没接进游戏**——`structure_starts` 阶段还是空实现，
+  游戏里 `terrain` 仍走 `EMPTY` 那支；把真实结构件喂进 `terrain_with_beardifier` 是合并时的事。
 * 正式流程里的 `possibleBiomes`（周围 3×3 区块调色板的并集）；对拍和游戏都走
   「全部群系 / uncached resolver」这条简化路径，见「接进游戏时要重新对拍的两处」。
 * 高度图、后期处理位置表和 `ProtoChunk` 的其余字段：游戏目前只写方块 + quart 群系，
