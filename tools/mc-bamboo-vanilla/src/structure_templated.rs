@@ -12,7 +12,28 @@
 
 use std::{fs, path::Path, process::Command};
 
-use mc_bamboo_worldgen::structure::{pieces::Piece, templated};
+use mc_bamboo_worldgen::structure::{
+    pieces::Piece,
+    templated::{
+        self,
+        ocean_ruin::{BiomeTemp, Config},
+    },
+};
+
+/// 两种海底遗迹的配置，和 `worldgen.json` 的 `ocean_ruin_warm` / `ocean_ruin_cold` 一致。
+///
+/// The two ocean-ruin configs, matching `ocean_ruin_warm` / `ocean_ruin_cold` in
+/// `worldgen.json`.
+const WARM_RUIN: Config = Config {
+    biome_temp: BiomeTemp::Warm,
+    large_probability: 0.3,
+    cluster_probability: 0.9,
+};
+const COLD_RUIN: Config = Config {
+    biome_temp: BiomeTemp::Cold,
+    large_probability: 0.3,
+    cluster_probability: 0.9,
+};
 
 /// 覆盖原点、负坐标、远处坐标的种子。
 const SEEDS: [i64; 8] = [
@@ -40,7 +61,13 @@ const CHUNKS: [(i32, i32); 12] = [
     (-500, 300),
     (7, -13),
 ];
-const KINDS: [&str; 3] = ["igloo", "shipwreck_beached", "shipwreck_ocean"];
+const KINDS: [&str; 5] = [
+    "igloo",
+    "ocean_ruin_cold",
+    "ocean_ruin_warm",
+    "shipwreck_beached",
+    "shipwreck_ocean",
+];
 
 /// 一条查询。
 struct Query {
@@ -156,6 +183,8 @@ fn query_key(q: &Query) -> String {
 fn rust_lines(q: &Query) -> Result<Vec<String>, String> {
     let pieces: Vec<Piece> = match q.kind {
         "igloo" => templated::igloo::generate(q.seed, q.cx, q.cz)?,
+        "ocean_ruin_warm" => templated::ocean_ruin::generate(q.seed, q.cx, q.cz, WARM_RUIN)?,
+        "ocean_ruin_cold" => templated::ocean_ruin::generate(q.seed, q.cx, q.cz, COLD_RUIN)?,
         "shipwreck_ocean" => templated::shipwreck::generate(q.seed, q.cx, q.cz, false)?,
         "shipwreck_beached" => templated::shipwreck::generate(q.seed, q.cx, q.cz, true)?,
         other => return Err(format!("no Rust layout for kind {other}")),

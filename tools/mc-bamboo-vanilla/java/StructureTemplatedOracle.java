@@ -3,14 +3,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.HolderSet;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.DoubleTag;
+import net.minecraft.nbt.FloatTag;
 import net.minecraft.nbt.IntArrayTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
@@ -22,13 +26,18 @@ import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.util.datafix.DataFixers;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Rotation;
+import net.minecraft.world.level.levelgen.GenerationStep;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
 import net.minecraft.world.level.levelgen.WorldgenRandom;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
+import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructurePiece;
+import net.minecraft.world.level.levelgen.structure.TerrainAdjustment;
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSerializationContext;
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder;
 import net.minecraft.world.level.levelgen.structure.structures.IglooPieces;
+import net.minecraft.world.level.levelgen.structure.structures.OceanRuinPieces;
+import net.minecraft.world.level.levelgen.structure.structures.OceanRuinStructure;
 import net.minecraft.world.level.levelgen.structure.structures.ShipwreckPieces;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
 import net.minecraft.world.level.storage.LevelStorageSource;
@@ -108,6 +117,8 @@ public final class StructureTemplatedOracle {
                 case "igloo" -> igloo(seed, cx, cz);
                 case "shipwreck_ocean" -> shipwreck(seed, cx, cz, false);
                 case "shipwreck_beached" -> shipwreck(seed, cx, cz, true);
+                case "ocean_ruin_warm" -> oceanRuin(seed, cx, cz, OceanRuinStructure.Type.WARM, 0.3F, 0.9F);
+                case "ocean_ruin_cold" -> oceanRuin(seed, cx, cz, OceanRuinStructure.Type.COLD, 0.3F, 0.9F);
                 default -> throw new IllegalArgumentException("unknown kind " + kind);
             };
             out.append("Q ").append(kind).append(' ').append(seed).append(' ').append(cx)
@@ -163,6 +174,38 @@ public final class StructureTemplatedOracle {
                 .collect(Collectors.toCollection(ArrayList::new));
     }
 
+    /**
+     * {@code OceanRuinStructure.generatePieces} 的编排。
+     *
+     * <p>官方没有把 piece 列表暴露给外部，所以这里照 {@code generatePieces} 的步骤用公开
+     * 成员复刻：抽是否大遗迹、抽模板、大遗迹再抽 cluster。{@code addPieces} 本身是
+     * {@code public static}，直接调它即可。
+     *
+     * <p>The orchestration of {@code OceanRuinStructure.generatePieces}. The piece list is
+     * not exposed, so mirror the public steps: draw whether it is large, draw templates,
+     * and let a large ruin draw the cluster. {@code addPieces} itself is
+     * {@code public static}, so it is called directly.
+     */
+    private static List<String> oceanRuin(
+            long seed, int cx, int cz, OceanRuinStructure.Type biomeTemp,
+            float largeProbability, float clusterProbability) {
+        WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+        random.setLargeFeatureSeed(seed, cx, cz);
+        ChunkPos chunkPos = new ChunkPos(cx, cz);
+        BlockPos offset = new BlockPos(chunkPos.getMinBlockX(), GENERATION_HEIGHT, chunkPos.getMinBlockZ());
+        Rotation rotation = Rotation.getRandom(random);
+        StructurePiecesBuilder builder = new StructurePiecesBuilder();
+        OceanRuinStructure structure = new OceanRuinStructure(
+                new Structure.StructureSettings(
+                        HolderSet.empty(), Map.of(), GenerationStep.Decoration.SURFACE_STRUCTURES,
+                        TerrainAdjustment.NONE),
+                biomeTemp, largeProbability, clusterProbability);
+        OceanRuinPieces.addPieces(templateManager(), offset, rotation, builder, random, structure);
+        return builder.build().pieces().stream()
+                .map(StructureTemplatedOracle::dump)
+                .collect(Collectors.toCollection(ArrayList::new));
+    }
+
     /** 把一个结构件按统一格式 dump 成一行。 */
     private static String dump(StructurePiece piece) {
         String id = BuiltInRegistries.STRUCTURE_PIECE.getKey(piece.getType()).toString();
@@ -205,6 +248,16 @@ public final class StructureTemplatedOracle {
                 sb.append(value(element));
             }
             return sb.toString();
+        }
+        // 浮点按 `Float.toString` / `Double.toString` 写，和 Rust 的 `{}` 一致；
+        // 整数仍走 `longValue()`。
+        // Floats use `Float.toString` / `Double.toString` to match Rust's `{}`; integers
+        // still go through `longValue()`.
+        if (tag instanceof FloatTag floatTag) {
+            return Float.toString(floatTag.floatValue());
+        }
+        if (tag instanceof DoubleTag doubleTag) {
+            return Double.toString(doubleTag.doubleValue());
         }
         Optional<Number> number = tag.asNumber();
         if (number.isPresent()) {

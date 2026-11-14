@@ -233,6 +233,14 @@ impl Piece {
         self.extras.insert(key.to_owned(), value.to_string());
     }
 
+    /// 浮点 extras：用最短往返十进制写出（`Float.toString` 的语义），对拍两侧一致。
+    ///
+    /// Float extras written as the shortest round-trip decimal (`Float.toString`
+    /// semantics), so both oracle sides agree.
+    pub fn put_float(&mut self, key: &str, value: f32) {
+        self.extras.insert(key.to_owned(), format!("{value}"));
+    }
+
     pub fn put_bool(&mut self, key: &str, value: bool) {
         self.extras
             .insert(key.to_owned(), i32::from(value).to_string());
