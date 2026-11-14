@@ -164,38 +164,7 @@ impl<'a> BiomeManager<'a> {
 
     /// `BiomeManager.getBiome` 的八角插值：按 `biomeZoomSeed` 选出最近的 quart 角。
     fn fiddled_corner(&self, x: i32, y: i32, z: i32) -> (i32, i32, i32) {
-        let quart_x = java_floor_div(x.wrapping_sub(2), 4);
-        let quart_y = java_floor_div(y.wrapping_sub(2), 4);
-        let quart_z = java_floor_div(z.wrapping_sub(2), 4);
-        let fraction_x = ((x.wrapping_sub(2)) & 3) as f64 / 4.0;
-        let fraction_y = ((y.wrapping_sub(2)) & 3) as f64 / 4.0;
-        let fraction_z = ((z.wrapping_sub(2)) & 3) as f64 / 4.0;
-
-        let mut best = 0_u32;
-        let mut best_distance = f64::INFINITY;
-        for corner in 0..8 {
-            let low_x = corner & 4 == 0;
-            let low_y = corner & 2 == 0;
-            let low_z = corner & 1 == 0;
-            let cx = if low_x { quart_x } else { quart_x + 1 };
-            let cy = if low_y { quart_y } else { quart_y + 1 };
-            let cz = if low_z { quart_z } else { quart_z + 1 };
-            let fx = if low_x { fraction_x } else { fraction_x - 1.0 };
-            let fy = if low_y { fraction_y } else { fraction_y - 1.0 };
-            let fz = if low_z { fraction_z } else { fraction_z - 1.0 };
-            let distance = fiddled_distance(self.seed, cx, cy, cz, fx, fy, fz);
-            // 官方是「严格小于」才换：等距时保留第一个角。
-            if distance < best_distance {
-                best = corner;
-                best_distance = distance;
-            }
-        }
-
-        (
-            if best & 4 == 0 { quart_x } else { quart_x + 1 },
-            if best & 2 == 0 { quart_y } else { quart_y + 1 },
-            if best & 1 == 0 { quart_z } else { quart_z + 1 },
-        )
+        fiddled_corner(self.seed, x, y, z)
     }
 
     /// `getNoiseBiome(quartX, quartY, quartZ)`：雕刻器选邻域群系用。
@@ -210,6 +179,48 @@ impl<'a> BiomeManager<'a> {
         let target = climate_at(samplers, context, quart_x, quart_y, quart_z);
         biome_id(self.source.biome(target))
     }
+}
+
+/// `BiomeManager.getBiome` 里那段八角插值：返回被选中的 quart 角。
+///
+/// 单独拿出来是因为 `WorldGenRegion` 那条路径要先用它定位 quart 角，再去区块里读格子。
+///
+/// The octant interpolation inside `BiomeManager.getBiome`: returns the chosen quart
+/// corner. Split out because the `WorldGenRegion` path locates the quart corner first
+/// and then reads that cell out of the chunk.
+pub fn fiddled_corner(zoom_seed: i64, x: i32, y: i32, z: i32) -> (i32, i32, i32) {
+    let quart_x = java_floor_div(x.wrapping_sub(2), 4);
+    let quart_y = java_floor_div(y.wrapping_sub(2), 4);
+    let quart_z = java_floor_div(z.wrapping_sub(2), 4);
+    let fraction_x = ((x.wrapping_sub(2)) & 3) as f64 / 4.0;
+    let fraction_y = ((y.wrapping_sub(2)) & 3) as f64 / 4.0;
+    let fraction_z = ((z.wrapping_sub(2)) & 3) as f64 / 4.0;
+
+    let mut best = 0_u32;
+    let mut best_distance = f64::INFINITY;
+    for corner in 0..8 {
+        let low_x = corner & 4 == 0;
+        let low_y = corner & 2 == 0;
+        let low_z = corner & 1 == 0;
+        let cx = if low_x { quart_x } else { quart_x + 1 };
+        let cy = if low_y { quart_y } else { quart_y + 1 };
+        let cz = if low_z { quart_z } else { quart_z + 1 };
+        let fx = if low_x { fraction_x } else { fraction_x - 1.0 };
+        let fy = if low_y { fraction_y } else { fraction_y - 1.0 };
+        let fz = if low_z { fraction_z } else { fraction_z - 1.0 };
+        let distance = fiddled_distance(zoom_seed, cx, cy, cz, fx, fy, fz);
+        // 官方是「严格小于」才换：等距时保留第一个角。
+        if distance < best_distance {
+            best = corner;
+            best_distance = distance;
+        }
+    }
+
+    (
+        if best & 4 == 0 { quart_x } else { quart_x + 1 },
+        if best & 2 == 0 { quart_y } else { quart_y + 1 },
+        if best & 1 == 0 { quart_z } else { quart_z + 1 },
+    )
 }
 
 fn climate_at(
