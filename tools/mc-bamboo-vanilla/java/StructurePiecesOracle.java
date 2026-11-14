@@ -30,7 +30,8 @@ import net.minecraft.world.level.levelgen.structure.structures.OceanMonumentPiec
 import net.minecraft.world.level.levelgen.structure.structures.StrongholdPieces;
 
 /**
- * 用官方 26.3 的结构件类直接对拍四个多件式结构的「结构件列表」布局。
+ * 用官方 26.3 的结构件类直接对拍多件式结构的「结构件列表」布局
+ * （当前覆盖废弃矿井、要塞、海底神殿三种）。
  *
  * <p>不启动服务端、不读存档、不接受 EULA、不加载 worldgen 注册表：只需要
  * {@code Bootstrap.bootStrap()} 让 {@code BuiltInRegistries.STRUCTURE_PIECE} 就绪。
@@ -43,8 +44,9 @@ import net.minecraft.world.level.levelgen.structure.structures.StrongholdPieces;
  * 外部输入（恶地的 surfaceHeight；其余为 0）。输出每个查询一段：{@code Q} 头带
  * 结构件数，随后若干 {@code P} 行。
  *
- * <p>Compare the piece-list layout of the four code-built multi-piece structures
- * against vanilla 26.3, calling the official piece classes directly. No server,
+ * <p>Compare the piece-list layout of code-built multi-piece structures (currently
+ * mineshaft, stronghold, ocean monument) against vanilla 26.3, calling the official
+ * piece classes directly. No server,
  * save, EULA or worldgen registry load; only {@code Bootstrap.bootStrap()}. Each
  * query seeds its own WorldgenRandom via {@code setLargeFeatureSeed} and mirrors
  * the {@code findGenerationPoint} / {@code generatePieces} orchestration. Pieces

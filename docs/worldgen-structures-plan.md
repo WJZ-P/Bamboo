@@ -101,6 +101,43 @@
 6 个 `random_spread` 结构集、不含 `isStructureChunk` 命中过滤（那是已对拍的 `start_plans`
 的职责）。`.nbt` 结构模板按约定留到第一个真正用到它的结构那一步再导出。
 
+**多件式结构的结构件布局（2026-11-14，分支 `cb-wg-multipiece`，基于 4074b37）**：
+
+* 新增 `mc-bamboo-worldgen::structure::pieces`，把四个「用代码生成结构件列表」的多件式
+  结构中的**三个**布局移植成纯函数（结构件的类型、包围盒、朝向、genDepth、各子类参数，
+  以及世界随机源取数次数和顺序逐步照官方翻译，不含 `postProcess`）：
+  * 废弃矿井（`MineshaftStructure` / `MineshaftPieces`，普通 + 恶地两种）：起始房间、
+    递归 `addChildren`、`moveBelowSeaLevel` / 恶地 `getBaseHeight` 竖直平移。恶地的
+    `surfaceHeight` 由外部喂入（官方取自 terrain 的 `getBaseHeight`）。
+  * 要塞（`StrongholdStructure` / `StrongholdPieces`）：重试循环、加权表、
+    `generatePieceFromSmallDoor`、`pendingChildren` 随机出队、各子类 `createPiece` /
+    `addChildren`、`moveBelowSeaLevel`。
+  * 海底神殿（`OceanMonumentStructure` / `OceanMonumentPieces`）：`createTopPiece`、
+    `MonumentBuilding.generateRoomGraph`（房间网格 / 连接 / 开口 / 寻源 / `Util.shuffle` /
+    扫描循环）、七个 fitter、`getWorldPos` 平移、两翼与阁楼。Java 侧用反射列出
+    `childPieces`，连同 `MonumentBuilding` 一起逐项比。
+* 新子命令 `cargo run -p mc-bamboo-vanilla -- structure-pieces <java>` +
+  `java/StructurePiecesOracle.java`：只 `Bootstrap.bootStrap()`，不启服务端 / 读存档 /
+  接受 EULA / 加载 worldgen 注册表；每条查询自己 `setLargeFeatureSeed(seed,cx,cz)`，
+  调官方结构件类后用 `createTag` 按统一格式 dump。6 种子 × 8 区块，240 个查询、
+  25660 个结构件、25660 个比较 0 不一致。每个结构先故意改坏一处（矿井丢弃首个
+  `nextDouble`、要塞丢弃 `randomSmallDoor` 的 `nextInt(5)`、海底神殿扫描循环 5 改 4）
+  确认对拍失败再还原。
+* **没做（已知限制 / 交接）**：林地府邸 `WoodlandMansionPieces.MansionGrid` /
+  `MansionPiecePlacer.createMansion` 的结构件布局。理由：`createMansion` 约 360 行带
+  `rotation.rotate(Direction)` 和网格位标志（`0x800000`）的位置运算、`MansionGrid` 约
+  300 行、三个 `FloorRoomCollection` 的房间名随机；且 Java 侧要构造
+  `StructureTemplateManager`（`TemplateStructurePiece` 构造器会 `getOrCreate().getBoundingBox`）
+  才能产出 `WoodlandMansionPiece`。按约定「模板只用名字和位置，不需要读模板内容」，
+  对拍应只比 `Template` / `TPX,TPY,TPZ` / `Rot` / `Mi`（排除模板算出的 `BB`），
+  `startPos`（`getLowestYIn5by5Box`）作为 terrain 外部输入喂入，`rotation` 由
+  `Rotation.getRandom(context.random())` 复现。下一步：先搭好能产出 MP 行
+  （模板名 + 位置 + rotation + mirror）的 Java oracle，再逐步移植 `MansionGrid` 与
+  `createMansion`，照本分支三个结构的办法先故意改坏一处确认对拍会失败。
+* 以上全是纯函数 + oracle，没接进 Director 的 `structure_starts` / `structure_references`
+  阶段；游戏里世界仍是超平坦。结构件放置（第 5 步）、Beardifier（第 6 步）、存档
+  `structures` 键（第 7 步）仍归结构队员 / 后续里程碑。
+
 ## 1. 官方 26.3 的结构生成全景
 
 `ChunkStatus` 顺序（`docs/worldgen.md`）：`empty` → `structure_starts` →

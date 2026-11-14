@@ -32,7 +32,8 @@
 //! mc-bamboo-vanilla structure-validity <java 路径>
 //!     用官方 Structure.GenerationContext 对拍 findValidGenerationPoint 的群系与高度判定
 //! mc-bamboo-vanilla structure-pieces <java 路径>
-//!     用官方结构件类对拍四个多件式结构的结构件布局（类型、包围盒、朝向、参数）
+//!     用官方结构件类对拍多件式结构的结构件布局（类型、包围盒、朝向、参数）；
+//!     已移植废弃矿井 / 要塞 / 海底神殿三种
 //!
 //!     Compare findValidGenerationPoint's biome and height gates against vanilla
 //!     Structure.GenerationContext
