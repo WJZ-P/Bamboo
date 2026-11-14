@@ -77,7 +77,7 @@ impl VerticalAnchor {
 /// `IntProvider.sample(random)`: step 9 uses constant, uniform, trapezoid, and the
 /// two biased variants for `count` / `offset`. Recursive clamped / weighted_list /
 /// clamped_normal stay unsupported for now.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IntProvider {
     Constant(i32),
     Uniform {
@@ -105,6 +105,18 @@ pub enum IntProvider {
         min: i32,
         max: i32,
     },
+    /// `ClampedNormalInt`：`clamp(mean + (float)nextGaussian()*deviation, min, max)` 后截断。
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
+        min: i32,
+        max: i32,
+    },
+    /// `WeightedListInt`：`nextInt(total)` 选一个嵌套 provider 再 `sample`。
+    WeightedList {
+        distribution: Vec<(i32, IntProvider)>,
+        total: i32,
+    },
 }
 
 impl IntProvider {
@@ -124,6 +136,13 @@ impl IntProvider {
                 .get(name)
                 .and_then(Value::as_i64)
                 .map(|n| n as i32)
+                .ok_or_else(|| format!("int provider {kind} has no {name}"))
+        };
+        let float = |name: &str| -> Result<f32, String> {
+            object
+                .get(name)
+                .and_then(Value::as_f64)
+                .map(|n| n as f32)
                 .ok_or_else(|| format!("int provider {kind} has no {name}"))
         };
         Ok(match kind {
@@ -158,6 +177,41 @@ impl IntProvider {
                 min: integer("min_inclusive")?,
                 max: integer("max_inclusive")?,
             },
+            // `ClampedNormalInt`：mean / deviation 是 f32（官方 Codec.FLOAT）。
+            "minecraft:clamped_normal" => Self::ClampedNormal {
+                mean: float("mean")?,
+                deviation: float("deviation")?,
+                min: integer("min_inclusive")?,
+                max: integer("max_inclusive")?,
+            },
+            // `WeightedListInt`：distribution 的 data 是嵌套 IntProvider。
+            "minecraft:weighted_list" => {
+                let distribution = object
+                    .get("distribution")
+                    .and_then(Value::as_array)
+                    .ok_or("weighted_list has no distribution")?
+                    .iter()
+                    .map(|entry| -> Result<(i32, IntProvider), String> {
+                        let weight = entry
+                            .get("weight")
+                            .and_then(Value::as_i64)
+                            .ok_or("weighted_list entry has no weight")?
+                            as i32;
+                        let data = IntProvider::parse(
+                            entry.get("data").ok_or("weighted_list entry has no data")?,
+                        )?;
+                        Ok((weight, data))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let total: i32 = distribution.iter().map(|(weight, _)| *weight).sum();
+                if total == 0 {
+                    return Err("weighted_list has zero total weight".to_owned());
+                }
+                Self::WeightedList {
+                    distribution,
+                    total,
+                }
+            }
             _ => return Err(format!("unsupported int provider {kind}")),
         })
     }
@@ -194,6 +248,35 @@ impl IntProvider {
             // ClampedInt.sample：先 sample source（消费随机数），再 clamp。
             // ClampedInt.sample: sample the source (consuming random), then clamp.
             Self::Clamped { source, min, max } => source.sample(random).clamp(*min, *max),
+            // ClampedNormalInt.sample = (int)clamp(Mth.normal(random, mean, deviation), min, max)。
+            // Mth.normal = mean + (float)nextGaussian() * deviation（均为 f32 运算）。
+            Self::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => {
+                let normal = *mean + (random.next_gaussian() as f32) * *deviation;
+                normal.clamp(*min as f32, *max as f32) as i32
+            }
+            // WeightedListInt.sample = getRandomOrThrow(random).sample(random)：
+            // 先 nextInt(total) 选一个嵌套 provider，再采样它。
+            Self::WeightedList {
+                distribution,
+                total,
+            } => {
+                let mut selection = random.next_int(*total);
+                for (weight, provider) in distribution {
+                    selection -= *weight;
+                    if selection < 0 {
+                        return provider.sample(random);
+                    }
+                }
+                distribution
+                    .last()
+                    .map(|(_, provider)| provider.sample(random))
+                    .unwrap_or(0)
+            }
         }
     }
 }
@@ -434,6 +517,49 @@ mod tests {
         let b = random();
         for _ in 0..1000 {
             let expected = b.next_int_between_inclusive(-3, 1).clamp(0, 1);
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
+
+    #[test]
+    fn clamped_normal_matches_official_mth_normal() {
+        // 官方 `ClampedNormalInt.sample` = (int)clamp(Mth.normal(random, mean, dev), min, max)。
+        // `Mth.normal` = mean + (float)nextGaussian() * deviation。
+        let provider = IntProvider::ClampedNormal {
+            mean: 5.0,
+            deviation: 2.0,
+            min: 0,
+            max: 10,
+        };
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let expected = {
+                let normal = 5.0_f32 + (b.next_gaussian() as f32) * 2.0_f32;
+                normal.clamp(0.0, 10.0) as i32
+            };
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
+
+    #[test]
+    fn weighted_list_matches_official_get_random_or_throw() {
+        // `trees_plains` 的 count：weighted_list[{data:0,w:19},{data:1,w:1}]。
+        // 官方：nextInt(totalWeight) 选条目，再 sample 选中的 IntProvider。
+        let value: Value = serde_json::from_str(
+            r#"{"distribution":[{"data":0,"weight":19},{"data":{"type":"minecraft:uniform","min_inclusive":1,"max_inclusive":3},"weight":1}],"type":"minecraft:weighted_list"}"#,
+        )
+        .unwrap();
+        let provider = IntProvider::parse(&value).unwrap();
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let selection = b.next_int(20);
+            let expected = if selection < 19 {
+                0
+            } else {
+                b.next_int_between_inclusive(1, 3)
+            };
             assert_eq!(provider.sample(&a), expected);
         }
     }

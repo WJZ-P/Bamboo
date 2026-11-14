@@ -404,6 +404,14 @@ impl PositionalFactory {
 pub struct WorldgenRandom {
     source: Random,
     count: Cell<u32>,
+    /// `MarsagliaPolarGaussian` 一次算两个数，第二个留到下一次。
+    /// 官方 `LegacyRandomSource.nextGaussian()` 用 `nextDouble()` 的默认路径
+    /// （`next(26)+next(27)`），不是内层 Xoroshiro 的 53 位路径。
+    ///
+    /// `MarsagliaPolarGaussian` computes two values at once; the second is cached.
+    /// Official `LegacyRandomSource.nextGaussian()` uses the default `nextDouble()`
+    /// path, not the inner Xoroshiro 53-bit path.
+    gaussian: Cell<Option<f64>>,
 }
 
 impl WorldgenRandom {
@@ -411,6 +419,7 @@ impl WorldgenRandom {
         Self {
             source,
             count: Cell::new(0),
+            gaussian: Cell::new(None),
         }
     }
 
@@ -425,6 +434,7 @@ impl WorldgenRandom {
 
     pub fn set_seed(&self, seed: i64) {
         self.source.set_seed(seed);
+        self.gaussian.set(None);
     }
 
     fn next(&self, bits: u32) -> i32 {
@@ -477,6 +487,27 @@ impl WorldgenRandom {
         let upper = i64::from(self.next(26));
         let lower = i64::from(self.next(27));
         ((upper << 27) + lower) as f64 * 1.110_223_024_625_156_5e-16_f64
+    }
+
+    /// `RandomSource.nextGaussian()`：`MarsagliaPolarGaussian`，用本类的
+    /// `next_double()`（默认路径），一次算两个、第二个留到下次。
+    ///
+    /// `RandomSource.nextGaussian()`: `MarsagliaPolarGaussian` using this class's
+    /// `next_double()` (default path); two values per call, second cached.
+    pub fn next_gaussian(&self) -> f64 {
+        if let Some(value) = self.gaussian.take() {
+            return value;
+        }
+        loop {
+            let x = 2.0 * self.next_double() - 1.0;
+            let y = 2.0 * self.next_double() - 1.0;
+            let radius_squared = x * x + y * y;
+            if radius_squared < 1.0 && radius_squared != 0.0 {
+                let multiplier = (-2.0 * radius_squared.ln() / radius_squared).sqrt();
+                self.gaussian.set(Some(y * multiplier));
+                return x * multiplier;
+            }
+        }
     }
 
     /// `nextBoolean()`：`next(1)`。
