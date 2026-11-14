@@ -6,7 +6,9 @@ type Sources = Vec<(ChunkPos, i32)>;
 
 use mc_bamboo_core::ChunkPos;
 
-use super::spread::{PEAK_MARGIN, PEAK_WINDOW, SCRATCH_POOL_CAP, SCRATCH_POOL_MIN};
+use super::spread::{
+    PEAK_MARGIN, PEAK_WINDOW, SCRATCH_POOL_CAP, SCRATCH_POOL_MIN, dense_enabled, dense_hits,
+};
 use super::{
     ChunkStatus, FULL_CHUNK_LEVEL, LevelChange, MAX_LEVEL, MIN_VIEW_DISTANCE, SIMULATION_MAX_LEVEL,
     SavedTicket, TicketTable, TicketType, UNLOADED_LEVEL, full_status, generation_status,
@@ -561,18 +563,151 @@ fn incremental_propagation_matches_brute_force() {
     check_against_brute_force(0x0123_4567_89ab_cdef, 60, true);
 }
 
+/// 窗口边界、负坐标、跨 64 块、多源重叠和撤源：强制走快路径逐步对暴力不动点。
+#[test]
+fn dense_window_handles_boundaries_and_source_removal() {
+    let _guard = TicketTable::force_dense(true);
+    let mut table = TicketTable::new();
+    let mut state: u64 = 0x1234_5678_9abc_def0;
+    let mut rand = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for step in 0..120 {
+        // 坐标特意跨 64 的块边界和正负号，等级覆盖 0、31、44、45 几个临界值。
+        let x = match step % 4 {
+            0 => (rand() % 9) as i32 - 68,
+            1 => (rand() % 9) as i32 + 60,
+            2 => (rand() % 141) as i32 - 70,
+            _ => -((rand() % 141) as i32),
+        };
+        let z = (rand() % 141) as i32 - 70;
+        let level = [0, 1, 30, 31, 32, 33, 34, 44, 45][(rand() % 9) as usize];
+        let ty = TicketType::ALL[(rand() % 9) as usize];
+        if rand() % 2 == 0 {
+            table.add(ty, p(x, z), level);
+        } else {
+            table.remove(ty, p(x, z), level);
+        }
+        if step % 11 == 0 {
+            table.set_player(7, Some(p((rand() % 9) as i32 - 68, 63)));
+        }
+        if step % 13 == 0 {
+            table.set_view_distance((rand() % 12) as i32 - 1);
+        }
+        let changes = table.run_updates().to_vec();
+        assert!(changes.windows(2).all(|w| w[0].pos < w[1].pos));
+        let (loading_sources, simulation_sources) = table_sources(&table);
+        for bx in -80..=80 {
+            for bz in -80..=80 {
+                let pos = p(bx, bz);
+                assert_eq!(
+                    table.loading_level(pos),
+                    min_distance_level(&loading_sources, pos, UNLOADED_LEVEL),
+                    "第 {step} 步 {pos:?} 加载等级"
+                );
+                assert_eq!(
+                    table.simulation_level(pos),
+                    min_distance_level(&simulation_sources, pos, SIMULATION_MAX_LEVEL),
+                    "第 {step} 步 {pos:?} 模拟等级"
+                );
+            }
+        }
+    }
+}
+
+/// 同一轮里两个相距很远的源必须回退，回退路径仍然算出同一个不动点。
+#[test]
+fn sparse_updates_fall_back_to_two_phase() {
+    let mut table = TicketTable::new();
+    // 两个变化落在同一个 run_updates 里，包围盒宽高都远超单窗口的格数硬上限。
+    let before = dense_hits();
+    table.add(TicketType::Forced, p(-300_000, -300_000), 0);
+    table.add(TicketType::Forced, p(300_000, 300_000), 0);
+    let changes = table.run_updates().to_vec();
+    assert_eq!(dense_hits(), before, "超出窗口硬上限时不该走稠密窗口");
+    assert!(changes.windows(2).all(|w| w[0].pos < w[1].pos));
+    let (loading_sources, simulation_sources) = table_sources(&table);
+    for &(x, z) in &[
+        (-300_000, -300_000),
+        (300_000, 300_000),
+        (0, 0),
+        (-300_001, -299_999),
+        (300_044, 300_044),
+    ] {
+        let pos = p(x, z);
+        assert_eq!(
+            table.loading_level(pos),
+            min_distance_level(&loading_sources, pos, UNLOADED_LEVEL)
+        );
+        assert_eq!(
+            table.simulation_level(pos),
+            min_distance_level(&simulation_sources, pos, SIMULATION_MAX_LEVEL)
+        );
+    }
+}
+
+/// 单个玩家跨一格时窗口很小，正常判据下也必须命中快路径（不是悄悄回退）。
+#[test]
+fn small_move_takes_the_dense_window_path() {
+    if !dense_enabled() {
+        // 环境变量把快路径整条关掉时，这一测的是回退路径；其余测试仍照常覆盖。
+        return;
+    }
+    let mut table = TicketTable::new();
+    table.set_player(1, Some(p(0, 0)));
+    table.run_updates();
+    let before = dense_hits();
+    for x in 1..=8 {
+        table.set_player(1, Some(p(x, 0)));
+        table.run_updates();
+    }
+    let hits = dense_hits() - before;
+    assert!(hits >= 8, "两次平面各命中一次，8 步至少 16 次，实际 {hits}");
+}
+
+/// 稠密窗口快路径和回退路径必须算出同一个不动点：强制走快路径再跑一遍随机序列。
+#[test]
+fn dense_window_matches_brute_force_when_forced() {
+    let _guard = TicketTable::force_dense(true);
+    check_against_brute_force(0x5eed_1234_5678_9abc, 90, false);
+    check_against_brute_force(0xdead_beef_cafe_0001, 60, true);
+    check_against_brute_force(0x0123_4567_89ab_cdef, 60, true);
+}
+
 /// 更长的随机序列：每步把两张平面的全部等级和 `run_updates` 的输出一起对一遍。
 ///
 /// 传播改法只要让某一步的某个区块差一级、或者变化列表多/少一项，这里就会停在那一步。
 /// 视距和模拟距离也随机变，覆盖方环、`replaceTicketLevelOfType` 和多玩家引用计数。
+/// 长随机参照测试用的种子；强制走快路径的一版用同一组种子，方便逐位对照。
+const LONG_RANDOM_SEEDS: &[u64] = &[
+    0x5150_0a5a_1234_5678,
+    0xfeed_face_dead_beef,
+    0x9e37_79b9_7f4a_7c15,
+    0x0bad_c0de_0000_0026u64,
+    0xaaaa_bbbb_cccc_dddd,
+    0x1111_2222_3333_4444,
+    0xdead_0000_beef_ffff,
+    0x0000_0000_0000_0001,
+];
+
 #[test]
 fn long_random_sequence_matches_full_fixed_point() {
-    for seed in [
-        0x5150_0a5a_1234_5678,
-        0xfeed_face_dead_beef,
-        0x9e37_79b9_7f4a_7c15,
-        0x0bad_c0de_0000_0026u64,
-    ] {
+    long_random_sequence_with_seeds(LONG_RANDOM_SEEDS);
+}
+
+/// 强制稠密窗口快路径下的长随机序列：每步把全部等级和变化列表对一遍暴力不动点。
+#[test]
+fn dense_window_long_random_matches_full_fixed_point() {
+    let _guard = TicketTable::force_dense(true);
+    // 视距和模拟距离随机变化会撑出大窗口，这里覆盖到窗口边界、负坐标和多源重叠。
+    long_random_sequence_with_seeds(LONG_RANDOM_SEEDS);
+}
+
+fn long_random_sequence_with_seeds(seeds: &[u64]) {
+    for &seed in seeds {
         let mut state: u64 = seed;
         let mut rand = move || {
             state ^= state << 13;
@@ -754,6 +889,44 @@ fn scratch_blocks_stay_bounded_while_moving_away() {
         "辅助块数没有上界：起始 {first}，稳态 {steady}，峰值 {peak}，上界 {bound}"
     );
     assert_eq!(table.scratch_blocks(), steady, "稳态之后块数应该不再变化");
+}
+
+/// 快路径的稠密缓冲也按近期峰值回收：走过一大片之后峰值滑出窗口，缓冲缩回。
+#[test]
+fn dense_buffer_recycles_after_a_large_window() {
+    if !dense_enabled() {
+        return;
+    }
+    let mut table = TicketTable::new();
+    // 一个玩家的小窗口稳态。
+    table.set_player(1, Some(p(0, 0)));
+    for x in 1..=PEAK_WINDOW as i32 {
+        table.set_player(1, Some(p(x, 0)));
+        table.run_updates();
+    }
+    let steady = table.scratch_blocks();
+    assert!(steady > 0);
+    // 一批玩家分散在一段仍有界、但比单个视野大得多的区域里，撑大窗口。
+    for id in 0..40u64 {
+        table.set_player(id, Some(p(id as i32 * 23, (id as i32 % 7) * 9)));
+    }
+    table.run_updates();
+    let peak = table.scratch_blocks();
+    assert!(peak > steady, "大窗口应该撑大辅助结构：{steady} → {peak}");
+    assert!(dense_hits() > 0, "这个场景应该走快路径");
+    // 全部离开，跑够一个完整的峰值窗口。
+    for id in 0..40u64 {
+        table.set_player(id, None);
+    }
+    for _ in 0..=PEAK_WINDOW * 2 {
+        table.run_updates();
+    }
+    assert!(
+        table.scratch_blocks() <= steady + 2 * (PEAK_MARGIN + SCRATCH_POOL_MIN),
+        "峰值过去后辅助结构要缩回稳态附近：{} → {}",
+        peak,
+        table.scratch_blocks()
+    );
 }
 
 #[test]
