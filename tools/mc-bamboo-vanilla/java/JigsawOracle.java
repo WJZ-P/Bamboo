@@ -8,6 +8,8 @@ import java.util.Optional;
 import java.util.function.Predicate;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.block.JigsawBlock;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
@@ -105,6 +107,7 @@ public final class JigsawOracle {
                         registries.lookupOrThrow(Registries.BLOCK));
                 switch (args[0]) {
                     case "templates" -> runTemplates(manager, Path.of(args[1]));
+                    case "jigsaws" -> runJigsaws(manager, Path.of(args[1]));
                     case "pieces" -> runPieces(manager, registries, Path.of(args[1]));
                     case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
@@ -210,9 +213,53 @@ public final class JigsawOracle {
         }
     }
 
+    /**
+     * jigsaws 模式：queries 每行 {@code id|rotation|x|y|z}。对每个旋转和位置调
+     * {@code StructureTemplate.getJigsaws(position, rotation)}，输出每个拼图方块的
+     * 世界位置、front、top、name、target、pool、joint、placement/selection 优先级。
+     * 这样 getRandomPalette 的按位置选择、旋转后的 front/top 都被直接对拍。
+     *
+     * <p>Jigsaw-block mode: one {@code id|rotation|x|y|z} per line. Prints every jigsaw
+     * block's world position, front, top, name, target, pool, joint and priorities after
+     * {@code StructureTemplate.getJigsaws(position, rotation)}, which covers both the
+     * position-based palette choice and the rotated front/top.
+     */
+    private static void runJigsaws(StructureTemplateManager manager, Path queries) throws Exception {
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|");
+            Identifier id = Identifier.parse(p[0]);
+            Rotation rotation = Rotation.BY_ID.apply(Integer.parseInt(p[1]));
+            BlockPos pos = new BlockPos(
+                    Integer.parseInt(p[2]), Integer.parseInt(p[3]), Integer.parseInt(p[4]));
+            StructureTemplate template = manager.get(id).orElseThrow();
+            List<StructureTemplate.JigsawBlockInfo> jigsaws = template.getJigsaws(pos, rotation);
+            out.append("J|").append(line.trim()).append('|').append(jigsaws.size()).append('\n');
+            for (StructureTemplate.JigsawBlockInfo jigsaw : jigsaws) {
+                BlockState state = jigsaw.state();
+                out.append("K|").append(line.trim()).append('|')
+                        .append(jigsaw.pos().getX()).append('|')
+                        .append(jigsaw.pos().getY()).append('|')
+                        .append(jigsaw.pos().getZ()).append('|')
+                        .append(JigsawBlock.getFrontFacing(state).getSerializedName()).append('|')
+                        .append(JigsawBlock.getTopFacing(state).getSerializedName()).append('|')
+                        .append(jigsaw.name() == null ? "-" : jigsaw.name().toString()).append('|')
+                        .append(jigsaw.target()).append('|')
+                        .append(jigsaw.pool().identifier()).append('|')
+                        .append(jigsaw.jointType().getSerializedName()).append('|')
+                        .append(jigsaw.placementPriority()).append('|')
+                        .append(jigsaw.selectionPriority()).append('\n');
+            }
+            System.out.print(out);
+            out.setLength(0);
+        }
+    }
+
     /** 类型|模板名|pos|rotation|boundingBox(6)|groundLevelDelta|junctions。 */
-    private static String describe(PoolElementStructurePiece piece) {
-        StructurePoolElement element = piece.getElement();
+    private static String describe(PoolElementStructurePiece piece) {        StructurePoolElement element = piece.getElement();
         String type;
         String location;
         if (element == EmptyPoolElement.INSTANCE) {

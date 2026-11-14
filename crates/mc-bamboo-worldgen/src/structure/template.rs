@@ -17,6 +17,7 @@
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
+use mc_bamboo_blocks::LegacyRandom;
 use mc_bamboo_data::structures as blob;
 use mc_bamboo_nbt::{Accounter, Compression, Tag, read_compressed};
 
@@ -207,6 +208,16 @@ impl JigsawEntry {
             .nth(1)
             .and_then(Direction::from_name)
     }
+
+    /// `JointType.getSerializedName()`。
+    ///
+    /// `JointType.getSerializedName()`.
+    pub const fn joint_name(&self) -> &'static str {
+        match self.joint {
+            JointType::Rollable => "rollable",
+            JointType::Aligned => "aligned",
+        }
+    }
 }
 
 /// 一块结构模板。
@@ -218,7 +229,12 @@ pub struct StructureTemplate {
     pub palettes: Vec<Vec<PaletteEntry>>,
     pub blocks: Vec<BlockEntry>,
     pub entities: Vec<EntityEntry>,
-    pub jigsaws: Vec<JigsawEntry>,
+    /// 每个 palette 各自的拼图方块，顺序照 `Palette.jigsaws()`：`blockEntities` 组按
+    /// `(y, x, z)` 稳定排序。
+    ///
+    /// The jigsaw blocks of each palette, in `Palette.jigsaws()` order: the
+    /// `blockEntities` group stably sorted by `(y, x, z)`.
+    pub palette_jigsaws: Vec<Vec<JigsawEntry>>,
 }
 
 impl StructureTemplate {
@@ -261,7 +277,35 @@ impl StructureTemplate {
             palettes: Vec::new(),
             blocks: Vec::new(),
             entities: Vec::new(),
-            jigsaws: Vec::new(),
+            palette_jigsaws: Vec::new(),
+        }
+    }
+
+    /// `StructurePlaceSettings.getRandomPalette(palettes, pos)` 选中的 palette 序号。
+    ///
+    /// 官方 `getRandom(pos)` 是 `RandomSource.create(Mth.getSeed(pos))`，只由位置决定，
+    /// **不消耗**世界生成随机源。
+    ///
+    /// Index of the palette `StructurePlaceSettings.getRandomPalette(palettes, pos)`
+    /// picks. Vanilla `getRandom(pos)` is `RandomSource.create(Mth.getSeed(pos))`: the
+    /// choice depends only on the position and draws nothing from the worldgen random.
+    pub fn palette_index(&self, position: (i32, i32, i32)) -> Option<usize> {
+        if self.palettes.is_empty() {
+            return None;
+        }
+        let seed = crate::random::positional_seed(position.0, position.1, position.2);
+        let random = crate::random::Random::Legacy(LegacyRandom::new(seed));
+        Some(random.next_int(self.palettes.len() as i32) as usize)
+    }
+
+    /// `getJigsaws(position, rotation)` 取到的那个 palette 的拼图方块（未旋转）。
+    ///
+    /// The jigsaw blocks of the palette `getJigsaws(position, rotation)` would pick,
+    /// before rotation.
+    pub fn jigsaws_at(&self, position: (i32, i32, i32)) -> &[JigsawEntry] {
+        match self.palette_index(position) {
+            Some(index) => self.palette_jigsaws.get(index).map_or(&[], Vec::as_slice),
+            None => &[],
         }
     }
 
@@ -276,13 +320,13 @@ impl StructureTemplate {
         let palettes = parse_palettes(root)?;
         let blocks = parse_blocks(root)?;
         let entities = parse_entities(root)?;
-        let jigsaws = parse_jigsaws(&palettes, &blocks)?;
+        let palette_jigsaws = parse_jigsaws(&palettes, &blocks)?;
         Ok(Self {
             size,
             palettes,
             blocks,
             entities,
-            jigsaws,
+            palette_jigsaws,
         })
     }
 }
@@ -375,46 +419,52 @@ fn parse_entities(root: &Compound) -> Result<Vec<EntityEntry>, String> {
 fn parse_jigsaws(
     palettes: &[Vec<PaletteEntry>],
     blocks: &[BlockEntry],
-) -> Result<Vec<JigsawEntry>, String> {
-    let palette = palettes
-        .first()
-        .ok_or("structure template has no palette")?;
-    let mut out = Vec::new();
-    for block in blocks {
-        let state = palette
-            .get(block.state)
-            .ok_or("block state index out of palette")?;
-        if state.name != "minecraft:jigsaw" {
-            continue;
+) -> Result<Vec<Vec<JigsawEntry>>, String> {
+    let mut out = Vec::with_capacity(palettes.len());
+    for palette in palettes {
+        let mut jigsaws = Vec::new();
+        for block in blocks {
+            let state = palette
+                .get(block.state)
+                .ok_or("block state index out of palette")?;
+            if state.name != "minecraft:jigsaw" {
+                continue;
+            }
+            // `JigsawBlockInfo.parse` 对拼图方块强制要求 nbt。
+            // `JigsawBlockInfo.parse` requires the jigsaw block to have nbt.
+            let nbt = block
+                .nbt
+                .as_ref()
+                .and_then(as_compound)
+                .ok_or("jigsaw block has no nbt")?;
+            let orientation = state.property("orientation").unwrap_or("north_up");
+            let front = orientation.split('_').next().and_then(Direction::from_name);
+            let joint = match field(nbt, "joint").and_then(as_string) {
+                Some("aligned") => JointType::Aligned,
+                Some("rollable") => JointType::Rollable,
+                // `getDefaultJointType`：front 水平是 ALIGNED，否则 ROLLABLE。
+                // `getDefaultJointType`: horizontal front is ALIGNED, otherwise ROLLABLE.
+                _ if front.is_some_and(Direction::axis_is_horizontal) => JointType::Aligned,
+                _ => JointType::Rollable,
+            };
+            jigsaws.push(JigsawEntry {
+                pos: block.pos,
+                orientation: orientation.to_owned(),
+                name: string_or(nbt, "name", "minecraft:empty"),
+                target: string_or(nbt, "target", "minecraft:empty"),
+                pool: string_or(nbt, "pool", "minecraft:empty"),
+                final_state: string_or(nbt, "final_state", "minecraft:air"),
+                joint,
+                placement_priority: int_or(nbt, "placement_priority", 0),
+                selection_priority: int_or(nbt, "selection_priority", 0),
+            });
         }
-        // `JigsawBlockInfo.parse` 对拼图方块强制要求 nbt。
-        // `JigsawBlockInfo.parse` requires the jigsaw block to have nbt.
-        let nbt = block
-            .nbt
-            .as_ref()
-            .and_then(as_compound)
-            .ok_or("jigsaw block has no nbt")?;
-        let orientation = state.property("orientation").unwrap_or("north_up");
-        let front = orientation.split('_').next().and_then(Direction::from_name);
-        let joint = match field(nbt, "joint").and_then(as_string) {
-            Some("aligned") => JointType::Aligned,
-            Some("rollable") => JointType::Rollable,
-            // `getDefaultJointType`：front 水平是 ALIGNED，否则 ROLLABLE。
-            // `getDefaultJointType`: horizontal front is ALIGNED, otherwise ROLLABLE.
-            _ if front.is_some_and(Direction::axis_is_horizontal) => JointType::Aligned,
-            _ => JointType::Rollable,
-        };
-        out.push(JigsawEntry {
-            pos: block.pos,
-            orientation: orientation.to_owned(),
-            name: string_or(nbt, "name", "minecraft:empty"),
-            target: string_or(nbt, "target", "minecraft:empty"),
-            pool: string_or(nbt, "pool", "minecraft:empty"),
-            final_state: string_or(nbt, "final_state", "minecraft:air"),
-            joint,
-            placement_priority: int_or(nbt, "placement_priority", 0),
-            selection_priority: int_or(nbt, "selection_priority", 0),
-        });
+        // `buildInfoList` 把带 nbt 的方块（拼图方块都在其中）按 (y, x, z) 稳定排序后
+        // 放在最后，`Palette.jigsaws()` 直接取这个顺序。
+        // `buildInfoList` stably sorts the nbt-carrying blocks (all jigsaws) by (y, x, z)
+        // and appends them last; `Palette.jigsaws()` keeps that order.
+        jigsaws.sort_by_key(|jigsaw| (jigsaw.pos.1, jigsaw.pos.0, jigsaw.pos.2));
+        out.push(jigsaws);
     }
     Ok(out)
 }
@@ -525,7 +575,7 @@ mod tests {
             if template.palettes.len() > 1 {
                 multi_palette += 1;
             }
-            jigsaw_blocks += template.jigsaws.len();
+            jigsaw_blocks += template.palette_jigsaws.iter().map(Vec::len).sum::<usize>();
             for block in &template.blocks {
                 assert!(
                     block.state < template.palettes[0].len(),
@@ -533,11 +583,11 @@ mod tests {
                     block.state
                 );
             }
-            for jigsaw in &template.jigsaws {
+            for jigsaw in template.palette_jigsaws.iter().flatten() {
                 assert!(jigsaw.front().is_some(), "{name}: bad jigsaw front");
                 assert!(jigsaw.top().is_some(), "{name}: bad jigsaw top");
             }
-            if !template.jigsaws.is_empty() {
+            if template.palette_jigsaws.iter().any(|list| !list.is_empty()) {
                 with_jigsaws += 1;
             }
             if template.blocks.iter().any(|block| block.nbt.is_some()) {

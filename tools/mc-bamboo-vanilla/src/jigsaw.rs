@@ -28,7 +28,7 @@ use mc_bamboo_worldgen::{
     chunk::Generator,
     structure::{
         Structures, allowed_biome_names,
-        jigsaw::{JigsawStructures, StructurePieces, TemplatePools, add_pieces},
+        jigsaw::{JigsawStructures, Rotation, StructurePieces, TemplatePools, add_pieces},
         template::StructureTemplate,
     },
 };
@@ -52,19 +52,17 @@ const CHUNKS: [(i32, i32); 6] = [(0, 0), (1, 1), (-5, 7), (34, -34), (12, -3), (
 pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), String> {
     match options.first().copied().unwrap_or("templates") {
         "templates" => run_templates(command, work_dir),
+        "jigsaws" => run_jigsaws(command, work_dir),
         "pieces" => run_pieces(command, work_dir, options.get(1), options.get(2)),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
 }
 
-/// 全部单 palette 模板 id（blob 索引已按名字排序）。
+/// 全部模板 id（多 palette 的也要，才能验证 `getRandomPalette`）。
 fn template_queries() -> Vec<String> {
     blob::ENTRIES
         .iter()
-        .filter(|(name, _, _)| {
-            StructureTemplate::load(name).is_ok_and(|template| template.palettes.len() == 1)
-        })
         .map(|(name, _, _)| (*name).to_owned())
         .collect()
 }
@@ -106,7 +104,7 @@ fn compare_templates(stdout: &str, expected_count: usize) -> Result<(), String> 
             template.size.1,
             template.size.2,
             template.blocks.len(),
-            template.jigsaws.len()
+            template.palette_jigsaws.first().map_or(0, Vec::len)
         );
         checked += 1;
         if line != want {
@@ -131,13 +129,160 @@ fn compare_templates(stdout: &str, expected_count: usize) -> Result<(), String> 
     Ok(())
 }
 
+/// 每个模板 × 四种旋转 × 几个位置，验证 `getJigsaws` 的 palette 选择与旋转。
+///
+/// 位置既包含 `(0,0,0)`（`getRandom` 的种子是 0）也包含非零坐标，覆盖多 palette 的
+/// 全部选择分支。
+///
+/// Every template times four rotations times a few positions, verifying the palette
+/// choice and rotation of `getJigsaws`. Positions include `(0,0,0)` (seed 0) and
+/// non-zero ones so that every multi-palette branch is exercised.
+const JIGSAW_POSITIONS: [(i32, i32, i32); 4] =
+    [(0, 0, 0), (1, 2, 3), (-7, 64, 11), (100, -20, -33)];
+
+fn run_jigsaws(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    let queries_path = work_dir.join("jigsaw_jigsaw_queries.txt");
+    let mut queries = Vec::new();
+    for &(name, _, _) in blob::ENTRIES {
+        for rotation in 0..4 {
+            for (x, y, z) in JIGSAW_POSITIONS {
+                queries.push(format!("{name}|{rotation}|{x}|{y}|{z}"));
+            }
+        }
+    }
+    fs::write(&queries_path, queries.join("\n"))
+        .map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("jigsaws")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_jigsaws(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
+/// Java 的 `J|key|n` 行给数量，`K|key|...` 行给每个拼图方块；逐条用 Rust 重算比较。
+///
+/// Java emits `J|key|n` for the count and `K|key|...` for each jigsaw block; every
+/// line is recomputed on the Rust side and compared.
+fn compare_jigsaws(stdout: &str, queries: &[String]) -> Result<(), String> {
+    // `J|id|rot|x|y|z|n` 的 key 是前 5 段；`K|id|rot|x|y|z|...` 同样。
+    // The key of both `J|id|rot|x|y|z|n` and `K|id|rot|x|y|z|...` is its first five fields.
+    fn split_key<'a>(fields: &[&'a str]) -> Option<(String, Vec<&'a str>)> {
+        if fields.len() < 6 {
+            return None;
+        }
+        Some((fields[1..6].join("|"), fields[6..].to_vec()))
+    }
+    let mut counts: HashMap<String, String> = HashMap::new();
+    let mut blocks: HashMap<String, Vec<String>> = HashMap::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        match fields.first().copied() {
+            Some("J") => {
+                if let Some((key, rest)) = split_key(&fields) {
+                    counts.insert(key, rest.first().copied().unwrap_or("").to_owned());
+                }
+            }
+            Some("K") => {
+                if let Some((key, rest)) = split_key(&fields) {
+                    blocks.entry(key).or_default().push(rest.join("|"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut checked = 0usize;
+    let mut jigsaws_checked = 0usize;
+    for query in queries {
+        let (id, rest) = query.split_once('|').ok_or("bad jigsaw query")?;
+        let parts: Vec<i32> = rest
+            .split('|')
+            .map(|value| value.parse::<i32>())
+            .collect::<Result<_, _>>()
+            .map_err(|error| format!("bad jigsaw query {query}: {error}"))?;
+        let [rotation, x, y, z] = parts[..] else {
+            return Err(format!("bad jigsaw query {query}"));
+        };
+        let template =
+            StructureTemplate::load(id).map_err(|error| format!("cannot load {id}: {error}"))?;
+        let rotation = Rotation::from_index(rotation);
+        let want = template.jigsaws_at((x, y, z));
+        let got_count = counts
+            .get(query.as_str())
+            .map(String::as_str)
+            .unwrap_or("-");
+        if got_count != want.len().to_string() {
+            return Err(format!(
+                "{query}: jigsaw count rust {} java {got_count}",
+                want.len()
+            ));
+        }
+        let empty: Vec<String> = Vec::new();
+        let got_lines = blocks.get(query.as_str()).unwrap_or(&empty);
+        if got_lines.len() != want.len() {
+            return Err(format!(
+                "{query}: jigsaw lines rust {} java {}",
+                want.len(),
+                got_lines.len()
+            ));
+        }
+        for (jigsaw, line) in want.iter().zip(got_lines) {
+            let local = rotation.transform(jigsaw.pos);
+            let want_fields = [
+                (local.0 + x).to_string(),
+                (local.1 + y).to_string(),
+                (local.2 + z).to_string(),
+                rotation
+                    .rotate_direction(jigsaw.front().ok_or("bad orientation")?)
+                    .name()
+                    .to_owned(),
+                rotation
+                    .rotate_direction(jigsaw.top().ok_or("bad orientation")?)
+                    .name()
+                    .to_owned(),
+                jigsaw.name.clone(),
+                jigsaw.target.clone(),
+                jigsaw.pool.clone(),
+                jigsaw.joint_name().to_owned(),
+                jigsaw.placement_priority.to_string(),
+                jigsaw.selection_priority.to_string(),
+            ];
+            // `line` 此时不含 key 前缀，逐字段比。
+            // `line` has no key prefix here, so compare field by field.
+            let got_fields: Vec<&str> = line.split('|').collect();
+            for (index, want) in want_fields.iter().enumerate() {
+                if got_fields.get(index).is_none_or(|got| *got != want) {
+                    return Err(format!(
+                        "{query}: jigsaw field {index} rust {want} java {:?}",
+                        got_fields.get(index)
+                    ));
+                }
+            }
+            jigsaws_checked += 1;
+        }
+        checked += 1;
+    }
+    println!(
+        "jigsaw blocks: {checked} template/rotation/position queries, \
+         {jigsaws_checked} jigsaw blocks, all fields identical"
+    );
+    Ok(())
+}
+
 struct Query {
     id: String,
     seed: i64,
     cx: i32,
     cz: i32,
 }
-
 impl Query {
     fn key(&self) -> String {
         format!("{}|{}|{}|{}", self.id, self.seed, self.cx, self.cz)

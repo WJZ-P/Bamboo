@@ -272,11 +272,13 @@ impl PoolElement {
             }]),
             Self::Single { location, .. } => {
                 let template = StructureTemplate::load_cached(location)?;
-                // `buildInfoList` 里拼图方块都在 blockEntities 组，按 (y, x, z) 排序。
-                // In `buildInfoList` jigsaws are in the block-entity group sorted by (y,x,z).
-                let mut jigsaws: Vec<_> = template.jigsaws.iter().collect();
-                jigsaws.sort_by_key(|jigsaw| (jigsaw.pos.1, jigsaw.pos.0, jigsaw.pos.2));
-                let mut blocks: Vec<JigsawBlock> = jigsaws
+                // `getJigsaws(position, rotation)`：`getRandomPalette` 按**世界位置**选
+                // palette，然后 `Palette.jigsaws()` 已是 `(y, x, z)` 顺序。
+                // `getJigsaws(position, rotation)`: `getRandomPalette` picks the palette
+                // from the **world position**; `Palette.jigsaws()` is already in
+                // `(y, x, z)` order.
+                let mut blocks: Vec<JigsawBlock> = template
+                    .jigsaws_at(position)
                     .iter()
                     .map(|jigsaw| {
                         let (front0, top0) = parse_orientation(&jigsaw.orientation)?;
