@@ -13,11 +13,13 @@
 //! (mushrooms need brightness, lily pads need a fluid, spore blossoms need `canSupportCenter`)
 //! stay unported and make the whole placed feature unsupported.
 
+use mc_bamboo_core::Direction;
 use mc_bamboo_data::{
-    BlockClass, block_id_of_state, block_of_state, block_tag, facts, state_facts, state_fluid, tags,
+    BlockClass, block_id_of_state, block_of_state, block_tag, collision_shape, facts, registries,
+    state_facts, state_fluid, tags,
 };
 
-use super::world::FeatureWorld;
+use super::{state::with_property, world::FeatureWorld};
 
 type Pos = (i32, i32, i32);
 
@@ -38,6 +40,17 @@ enum Kind {
     Cactus,
     /// `SugarCaneBlock.canSurvive`：下面和相邻流体判定。
     SugarCane,
+    /// `SeagrassBlock.mayPlaceOn`：下面 `isFaceSturdy(UP)` 且不在
+    /// `cannot_support_seagrass` 标签里。
+    Seagrass,
+    /// `TallSeagrassBlock.canSurvive`：上半格看下半格，下半格多看一次流体。
+    TallSeagrass,
+    /// `SeaPickleBlock.mayPlaceOn`：下面那格碰撞形状朝上的面非空，或 `isFaceSturdy(UP)`。
+    SeaPickle,
+    /// `LilyPadBlock.mayPlaceOn`：下面那格是（或含有）`supports_lily_pad`，且上面没有流体。
+    LilyPad,
+    /// `SporeBlossomBlock.canSurvive`：上面那格 `canSupportCenter(DOWN)` 且本格不是水。
+    SporeBlossom,
 }
 
 /// 这个状态的存活判定是否已移植。未移植时调用方要把整个 placed feature 标 unsupported，
@@ -66,6 +79,11 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         Some(Kind::SturdyFaceUp) => state_facts(below) & (1u64 << (facts::STURDY_FULL + 1)) != 0,
         Some(Kind::Cactus) => cactus_can_survive(world, pos),
         Some(Kind::SugarCane) => sugar_cane_can_survive(world, pos),
+        Some(Kind::Seagrass) => seagrass_can_survive(world, pos),
+        Some(Kind::TallSeagrass) => tall_seagrass_can_survive(state, world, pos),
+        Some(Kind::SeaPickle) => sea_pickle_can_survive(world, pos),
+        Some(Kind::LilyPad) => lily_pad_can_survive(world, pos),
+        Some(Kind::SporeBlossom) => spore_blossom_can_survive(world, pos),
         None => false,
     }
 }
@@ -146,13 +164,90 @@ fn sugar_cane_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
     false
 }
 
+/// `SeagrassBlock.mayPlaceOn`：下面 `isFaceSturdy(UP)`，且不在
+/// `cannot_support_seagrass` 里。
+///
+/// `SeagrassBlock.mayPlaceOn`: the block below is `isFaceSturdy(UP)` and not in
+/// `cannot_support_seagrass`.
+fn seagrass_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    let sturdy = state_facts(below) & (1u64 << (facts::STURDY_FULL + 1)) != 0;
+    sturdy && !in_block_tag(below, "minecraft:cannot_support_seagrass")
+}
+
+/// `TallSeagrassBlock.canSurvive`：上半格只认「下面是同类的下半格」；下半格走
+/// `DoublePlantBlock`（`supports_vegetation`）、`SeagrassBlock` 的标签判定，
+/// 再加上本格的流体是满水。
+///
+/// `TallSeagrassBlock.canSurvive`: the upper half only accepts the matching lower half;
+/// the lower half uses `DoublePlantBlock` (`supports_vegetation`) plus the
+/// `cannot_support_seagrass` tag and requires a full water fluid here.
+fn tall_seagrass_can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    if with_property(state, "half", "upper").is_some_and(|upper| upper == state) {
+        let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+        return is_block(below, "minecraft:tall_seagrass")
+            && with_property(below, "half", "lower").is_some_and(|lower| lower == below);
+    }
+    if !seagrass_can_survive(world, pos) {
+        return false;
+    }
+    let fluid = state_fluid(world.get_block(pos.0, pos.1, pos.2));
+    in_fluid_tag(world.get_block(pos.0, pos.1, pos.2), "minecraft:water") && fluid.amount == 8
+}
+
+/// `SeaPickleBlock.mayPlaceOn`：下面那格碰撞形状朝上的面非空，或 `isFaceSturdy(UP)`。
+/// 注意官方用的是「面形状非空」而不是「满面」，海泡菜自己那圈碰撞形状也满足。
+///
+/// `SeaPickleBlock.mayPlaceOn`: the block below has a non-empty collision face toward
+/// UP, or is `isFaceSturdy(UP)`. The official check is "face shape not empty", not
+/// "face full", which a sea pickle's own collision shape also satisfies.
+fn sea_pickle_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    !mc_bamboo_blocks::shape::face_shape(collision_shape(below), Direction::Up).is_empty()
+        || state_facts(below) & (1u64 << (facts::STURDY_FULL + 1)) != 0
+}
+
+/// `LilyPadBlock.mayPlaceOn`：这一格的流体在 `supports_lily_pad` 里，或下面那格在
+/// 同名方块标签里；且上面一格没有流体。
+///
+/// `LilyPadBlock.mayPlaceOn`: this position's fluid is in `supports_lily_pad` or the
+/// block below is in the block tag of the same name, and no fluid sits above.
+fn lily_pad_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    let supported = in_fluid_tag(below, "minecraft:supports_lily_pad")
+        || in_block_tag(below, "minecraft:supports_lily_pad");
+    let above = world.get_block(pos.0, pos.1 + 1, pos.2);
+    supported && state_fluid(above).fluid == registries::fluid::EMPTY
+}
+
+/// `SporeBlossomBlock.canSurvive`：上面那格 `Block.canSupportCenter(DOWN)`，
+/// 且本格不是水。
+///
+/// `SporeBlossomBlock.canSurvive`: the block above supports the center face toward DOWN
+/// and this position holds no water.
+fn spore_blossom_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    let above = world.get_block(pos.0, pos.1 + 1, pos.2);
+    let supports = if in_block_tag(above, "minecraft:unstable_bottom_center") {
+        false
+    } else {
+        // `SupportType.CENTER` 的位从 `facts::STURDY_CENTER` 起，朝向是 DOWN（ordinal 0）。
+        // CENTER support bits start at `facts::STURDY_CENTER`; DOWN has ordinal 0.
+        state_facts(above) & (1u64 << facts::STURDY_CENTER) != 0
+    };
+    supports && !in_fluid_tag(world.get_block(pos.0, pos.1, pos.2), "minecraft:water")
+}
+
 /// 是否走 `DoublePlantBlock.placeAt`（放上下两格）而不是单格 `setBlock`。
+/// `TallSeagrassBlock` 也继承 `DoublePlantBlock`，官方用的是 `instanceof`。
 ///
 /// Whether to use `DoublePlantBlock.placeAt` (two blocks) instead of a single `setBlock`.
+/// `TallSeagrassBlock` extends `DoublePlantBlock` too, and the official check is `instanceof`.
 pub fn is_double_plant(state: u32) -> bool {
     matches!(
         block_of_state(state).map(|block| block.class),
-        Some(BlockClass::DoublePlantBlock) | Some(BlockClass::TallFlowerBlock)
+        Some(BlockClass::DoublePlantBlock)
+            | Some(BlockClass::TallFlowerBlock)
+            | Some(BlockClass::TallSeagrassBlock)
     )
 }
 
@@ -189,10 +284,15 @@ fn classify(state: u32) -> Option<Kind> {
         }
         BlockClass::CactusBlock => Kind::Cactus,
         BlockClass::SugarCaneBlock => Kind::SugarCane,
-        // 蘑菇（亮度）、睡莲（流体）、孢子花（canSupportCenter）、
-        // 苔藓地毯等仍覆写了 canSurvive/mayPlaceOn，本轮明确不支持。
-        // Mushroom (brightness), lily pad (fluid), spore blossom (canSupportCenter),
-        // mossy carpet still override canSurvive/mayPlaceOn: unported.
+        // 海草和甘蔗一样：都是 VegetationBlock 的泛化判定加自己的标签。
+        // Seagrass and sugar cane both add their own tags to the generic check.
+        BlockClass::SeagrassBlock => Kind::Seagrass,
+        BlockClass::TallSeagrassBlock => Kind::TallSeagrass,
+        BlockClass::SeaPickleBlock => Kind::SeaPickle,
+        BlockClass::LilyPadBlock => Kind::LilyPad,
+        BlockClass::SporeBlossomBlock => Kind::SporeBlossom,
+        // 蘑菇（亮度）、苔藓地毯等仍覆写了 canSurvive/mayPlaceOn，本轮明确不支持。
+        // Mushroom (brightness), mossy carpet still override canSurvive/mayPlaceOn: unported.
         _ => return None,
     })
 }
@@ -228,6 +328,11 @@ mod tests {
             "minecraft:leaf_litter",
             "minecraft:sugar_cane",
             "minecraft:cactus",
+            "minecraft:seagrass",
+            "minecraft:tall_seagrass",
+            "minecraft:sea_pickle",
+            "minecraft:lily_pad",
+            "minecraft:spore_blossom",
         ] {
             assert!(supports(state(name)), "{name}");
         }
@@ -235,12 +340,10 @@ mod tests {
 
     #[test]
     fn classes_with_special_survival_stay_unported() {
-        for name in [
-            "minecraft:brown_mushroom",
-            "minecraft:red_mushroom",
-            "minecraft:lily_pad",
-            "minecraft:spore_blossom",
-        ] {
+        // 蘑菇还要 `level.getRawBrightness(pos, 0) < 13`，光照没接进地物视图。
+        // Mushrooms still need `level.getRawBrightness(pos, 0) < 13`, and the feature
+        // world has no light data.
+        for name in ["minecraft:brown_mushroom", "minecraft:red_mushroom"] {
             assert!(!supports(state(name)), "{name}");
         }
     }
