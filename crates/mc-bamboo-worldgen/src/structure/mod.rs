@@ -20,6 +20,11 @@
 
 pub mod placement;
 pub mod registry;
+pub mod rings;
+pub mod start;
+pub mod validity;
+
+use std::collections::{HashMap, HashSet};
 
 pub use placement::{
     Common, ConcentricRings, ExclusionZone, FrequencyReductionMethod, Placement, RandomSpread,
@@ -28,6 +33,15 @@ pub use placement::{
 pub use registry::{
     SelectionEntry, StructureDef, StructureSetEntry, StructureSets, Structures,
     possible_structure_sets, resolve_biome_holders,
+};
+pub use start::{
+    BoundingBox, References, StartPlan, StructurePiece, StructureStart, StructureStarts,
+    chunk_pos_pack, selection_sequence, structure_references,
+};
+pub use validity::{
+    GenerationPoint, SelectedStart, allowed_biome_names, column_has_valid_biome, corner_heights,
+    find_valid_generation_point, is_valid_biome_at, lowest_y, mean_first_occupied_height,
+    select_start,
 };
 
 /// `hasStructureChunkInRange` 递归查别的集合时允许的最大深度。
@@ -66,11 +80,32 @@ pub struct StartCandidate {
 #[derive(Debug, Clone)]
 pub struct StructureState {
     sets: StructureSets,
+    /// `concentric_rings` 结构集算好的环位置（`ChunkGeneratorStructureState.ringPositions`）。
+    /// `ConcentricRingsStructurePlacement.isPlacementChunk` 用它做 `contains`。
+    ///
+    /// Precomputed ring positions for `concentric_rings` sets
+    /// (`ChunkGeneratorStructureState.ringPositions`), used by `isPlacementChunk`.
+    rings: HashMap<String, HashSet<(i32, i32)>>,
 }
 
 impl StructureState {
     pub fn new(sets: StructureSets) -> Self {
-        Self { sets }
+        Self {
+            sets,
+            rings: HashMap::new(),
+        }
+    }
+
+    /// 把 `rings::ring_positions` 的结果注入某个 `concentric_rings` 结构集。
+    ///
+    /// Feed `rings::ring_positions` output into a `concentric_rings` set.
+    pub fn set_ring_positions(
+        &mut self,
+        set_name: &str,
+        positions: impl IntoIterator<Item = (i32, i32)>,
+    ) {
+        self.rings
+            .insert(set_name.to_owned(), positions.into_iter().collect());
     }
 
     pub fn sets(&self) -> &StructureSets {
@@ -97,9 +132,20 @@ impl StructureState {
         let Some(set) = self.sets.get(set_name) else {
             return false;
         };
+        // `concentric_rings` 的 isPlacementChunk 是 `ringPositions.contains(chunkPos)`；
+        // 没注入环位置时和之前一样返回 false（还不支持）。
+        // `concentric_rings` isPlacementChunk is `ringPositions.contains(chunkPos)`;
+        // without injected positions it stays false (unsupported), as before.
+        let placement_hit = match &set.placement {
+            Placement::RandomSpread(p) => p.is_placement_chunk(seed, x, z),
+            Placement::ConcentricRings(_) => self
+                .rings
+                .get(set_name)
+                .is_some_and(|positions| positions.contains(&(x, z))),
+        };
         // 三项都是与运算，顺序照搬官方（虽然都是纯函数，但决定了语义）。
         // All three terms are ANDed in vanilla order (pure, but the order defines semantics).
-        let base = set.placement.is_placement_chunk(seed, x, z)
+        let base = placement_hit
             && set
                 .placement
                 .apply_additional_chunk_restrictions(seed, x, z);
@@ -158,6 +204,36 @@ impl StructureState {
             .map(|set| StartCandidate {
                 set: set.name.clone(),
                 structures: set.structures.clone(),
+            })
+            .collect()
+    }
+
+    /// `createStructures` 的放置门 + `existingStart` 短路 + 加权选择序列。
+    ///
+    /// 官方对每个结构集先检查 `getStartForStructure(...)` 有没有已经有效的起点，
+    /// 有就跳过整个结构集；否则 `isStructureChunk` 通过才做加权选择。这里产出
+    /// 每个命中结构集的 `StartPlan`（尝试序列），不含 `Structure.generate` 的有效性
+    /// 判定，所以没有「最终选中哪个结构」。
+    ///
+    /// The `createStructures` gate + `existingStart` short-circuit + weighted selection.
+    /// Vanilla first checks `getStartForStructure(...)` for an already-valid start and
+    /// skips the whole set; otherwise it only selects when `isStructureChunk` passes.
+    /// This yields a `StartPlan` (attempt sequence) per hit; without `Structure.generate`
+    /// validity there is no "finally selected structure".
+    pub fn start_plans(
+        &self,
+        seed: i64,
+        x: i32,
+        z: i32,
+        existing: &StructureStarts,
+    ) -> Vec<StartPlan> {
+        self.sets
+            .iter()
+            .filter(|set| !existing.has_valid_for_set(&set.structures))
+            .filter(|set| self.is_structure_chunk(&set.name, seed, x, z))
+            .map(|set| StartPlan {
+                set: set.name.clone(),
+                attempts: start::selection_sequence(&set.structures, seed, x, z),
             })
             .collect()
     }

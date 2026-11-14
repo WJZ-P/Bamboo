@@ -335,6 +335,111 @@ impl<'a> Generator<'a> {
         Ok(layers)
     }
 
+    /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight(x, z, WORLD_SURFACE_WG, ...)`。
+    ///
+    /// 照 `iterateNoiseColumn` 用一块 1×height×1、步长 1 的体积和全新的含水层，自顶向下
+    /// 找第一个非空气方块。`getBaseHeight` 返回 blockY+1，`getFirstOccupiedHeight` 再减 1，
+    /// 所以这里直接返回该 blockY；整列都是空气时返回 minY-1。
+    ///
+    /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight(x, z, WORLD_SURFACE_WG, ...)`.
+    /// Mirrors `iterateNoiseColumn`: a fresh 1xheightx1 step-1 volume and a fresh aquifer,
+    /// scanning top-down for the first non-air block. `getBaseHeight` returns blockY+1 and
+    /// `getFirstOccupiedHeight` subtracts 1, so we return that blockY directly; an all-air
+    /// column yields minY-1.
+    pub fn first_occupied_height(&self, block_x: i32, block_z: i32) -> Result<i32, String> {
+        let min_y = self.settings.min_y;
+        let height = self.settings.height;
+        let volume = Volume::blocks((1, height, 1), (block_x, min_y, block_z));
+        let mut context = Context::new(self.cache_count);
+        let mut density = context.acquire(volume.len());
+        let aquifer_functions = self.aquifer.as_ref().ok_or("dimension has no aquifers")?;
+        let mut aquifer = Aquifer::new(
+            aquifer_functions,
+            &mut context,
+            self.aquifer_random,
+            &volume,
+            self.settings.sea_level,
+            self.default_fluid,
+            lava_state()?,
+            self.empty,
+        );
+        self.router
+            .final_density
+            .sample_volume(&mut context, &mut density, &volume);
+        for local_y in (0..height).rev() {
+            let block_y = min_y + local_y;
+            let value = f64::from(density[volume.index(0, local_y, 0)]);
+            let state = aquifer
+                .compute_substance(&mut context, block_x, block_y, block_z, value)
+                .unwrap_or(self.default_block);
+            if state != self.empty {
+                context.release(density);
+                return Ok(block_y);
+            }
+        }
+        context.release(density);
+        Ok(min_y - 1)
+    }
+
+    /// `MultiNoiseBiomeSource.createResolverForChunk` 的成批气候采样，返回一列 quart Y 的群系名。
+    ///
+    /// `couldStructureExistInColumn` 用 1×N×1、步长 4 的体积，对六个气候函数各跑一次
+    /// `sampleVolume`，再对每格查群系参数表。和 `biomes()` 同一条成批路径。
+    ///
+    /// Batch climate sampling of `MultiNoiseBiomeSource.createResolverForChunk`: returns the
+    /// biome name for each quart Y of one column. `couldStructureExistInColumn` uses a
+    /// 1xNx1 step-4 volume, runs `sampleVolume` for each of the six climate functions, then
+    /// looks up the parameter list per cell. Same batch path as `biomes()`.
+    pub fn column_biome_names(
+        &self,
+        quart_x: i32,
+        quart_z: i32,
+        min_quart_y: i32,
+        max_quart_y: i32,
+    ) -> Result<Vec<String>, String> {
+        let count = max_quart_y - min_quart_y + 1;
+        let volume = Volume::new(
+            (1, count, 1),
+            (
+                quart_to_block(quart_x),
+                quart_to_block(min_quart_y),
+                quart_to_block(quart_z),
+            ),
+            (4, 4, 4),
+        );
+        let mut context = Context::new(self.cache_count);
+        let mut columns: Vec<Vec<f32>> = Vec::with_capacity(6);
+        for sampler in [
+            &self.router.temperature,
+            &self.router.vegetation,
+            &self.router.continents,
+            &self.router.erosion,
+            &self.router.depth,
+            &self.router.ridges,
+        ] {
+            let mut buffer = context.acquire(volume.len());
+            sampler.sample_volume(&mut context, &mut buffer, &volume);
+            columns.push(buffer);
+        }
+        let mut names = Vec::with_capacity(count as usize);
+        for quart_y in min_quart_y..=max_quart_y {
+            let index = volume.index(0, quart_y - min_quart_y, 0);
+            let target = TargetPoint::of([
+                columns[0][index],
+                columns[1][index],
+                columns[2][index],
+                columns[3][index],
+                columns[4][index],
+                columns[5][index],
+            ]);
+            names.push(self.biomes.biome(target).to_owned());
+        }
+        for column in columns {
+            context.release(column);
+        }
+        Ok(names)
+    }
+
     /// `ChunkStatus.FEATURES`：`ChunkGenerator.applyBiomeDecoration`。
     ///
     /// 输入是中心加 8 个邻居到 CARVERS 阶段的结果；输出 9 个区块改成 FEATURES
