@@ -16,6 +16,7 @@ use super::{
     blue_ice::{self, BlueIceFeature},
     disk::{self, DiskFeature},
     geode::{self, GeodeFeature},
+    huge_mushroom::HugeMushroomFeature,
     iceberg::{self, IcebergFeature},
     lake::{self, LakeFeature},
     large_dripstone::{self, LargeDripstoneFeature},
@@ -26,6 +27,7 @@ use super::{
     speleothem_cluster::SpeleothemClusterFeature,
     spike::{self, SpikeFeatureFeature},
     spring::{self, SpringFeature},
+    tree::{TreeFeature, fallen::FallenTreeFeature},
     underwater_magma::{self, UnderwaterMagmaFeature},
     world::FeatureWorld,
 };
@@ -50,6 +52,9 @@ pub enum Leaf {
     SpeleothemCluster(Box<SpeleothemClusterFeature>),
     Spike(SpikeFeatureFeature),
     Spring(SpringFeature),
+    Tree(Box<TreeFeature>),
+    FallenTree(Box<FallenTreeFeature>),
+    HugeMushroom(Box<HugeMushroomFeature>),
     UnderwaterMagma(UnderwaterMagmaFeature),
 }
 
@@ -71,8 +76,13 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?),
         "minecraft:spike" => Leaf::Spike(SpikeFeatureFeature::parse(config).ok()?),
         "minecraft:spring_feature" => Leaf::Spring(SpringFeature::parse(config).ok()?),
+        "minecraft:tree" => Leaf::Tree(Box::new(TreeFeature::parse(config)?)),
+        "minecraft:fallen_tree" => Leaf::FallenTree(Box::new(FallenTreeFeature::parse(config)?)),
         "minecraft:underwater_magma" => {
             Leaf::UnderwaterMagma(UnderwaterMagmaFeature::parse(config).ok()?)
+        }
+        "minecraft:huge_brown_mushroom" | "minecraft:huge_red_mushroom" => {
+            Leaf::HugeMushroom(Box::new(HugeMushroomFeature::parse(kind, config)?))
         }
         _ => return None,
     };
@@ -123,6 +133,9 @@ pub fn place_leaf(
         Leaf::SpeleothemCluster(feature) => feature.place(world, random, pos),
         Leaf::Spike(spike) => spike::place(spike, world, random, pos),
         Leaf::Spring(spring) => spring::place(spring, world, pos),
+        Leaf::Tree(tree) => tree.place(world, random, pos),
+        Leaf::FallenTree(tree) => tree.place(world, random, pos),
+        Leaf::HugeMushroom(mushroom) => mushroom.place(world, random, pos),
         Leaf::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),
     }
 }

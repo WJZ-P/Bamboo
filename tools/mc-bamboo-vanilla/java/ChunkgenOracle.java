@@ -296,8 +296,30 @@ final class FeatureLevelHandler implements InvocationHandler {
             }
             case "isEmptyBlock":
                 return getBlockState((BlockPos) args[0]).isAir();
-            case "getBlockEntity":
-                return chunkAt((BlockPos) args[0]).chunk().getBlockEntity((BlockPos) args[0]);
+            case "getBlockEntity": {
+                // WorldGenRegion.getBlockEntity：区块里还没有方块实体、但 setBlock 留了
+                // DUMMY NBT 时，现造一个放回区块。蜂巢装饰器靠它决定取不取随机数。
+                // WorldGenRegion.getBlockEntity: with no block entity yet but a DUMMY NBT
+                // left by setBlock, create one and store it. The beehive decorator's
+                // random draws depend on it.
+                BlockPos pos = (BlockPos) args[0];
+                ChunkAccess chunk = chunkAt(pos).chunk();
+                net.minecraft.world.level.block.entity.BlockEntity found = chunk.getBlockEntity(pos);
+                if (found != null) {
+                    return found;
+                }
+                CompoundTag tag = chunk.getBlockEntityNbt(pos);
+                BlockState state = chunk.getBlockState(pos);
+                if (tag != null && "DUMMY".equals(tag.getStringOr("id", "")) && state.hasBlockEntity()) {
+                    found = ((net.minecraft.world.level.block.EntityBlock) state.getBlock())
+                            .newBlockEntity(pos, state);
+                    if (found != null) {
+                        chunk.setBlockEntity(found);
+                    }
+                    return found;
+                }
+                return null;
+            }
             case "markPosForPostProcessing":
                 chunkAt((BlockPos) args[0]).chunk().markPosForPostProcessing((BlockPos) args[0]);
                 return null;

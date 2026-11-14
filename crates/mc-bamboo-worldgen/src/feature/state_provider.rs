@@ -243,6 +243,54 @@ impl StateProvider {
     ) -> Option<u32> {
         self.get_optional_state(world, random, pos)
     }
+
+    /// 这个 provider 的取状态是否与位置无关：`rule_based` 要读世界，其余不要。
+    ///
+    /// Whether sampling this provider is position-independent: only `rule_based` reads the
+    /// world.
+    pub fn is_position_free(&self) -> bool {
+        match self {
+            Self::Simple(_) | Self::Weighted { .. } => true,
+            Self::RandomizedInt { source, .. } => source.is_position_free(),
+            Self::RuleBased { .. } | Self::Unsupported(_) => false,
+        }
+    }
+
+    /// 与位置无关的 `getState`：树、巨型蘑菇这类没有逐格上下文的地方用。
+    ///
+    /// 调用前必须确认 [`Self::is_position_free`]，否则返回 `None`（不假装支持）。
+    ///
+    /// The position-independent `getState`, for callers like trees and huge mushrooms that
+    /// have no per-cell context. Callers must check [`Self::is_position_free`] first;
+    /// otherwise this returns `None` rather than pretending to support it.
+    pub fn get_state_without_position(&self, random: &WorldgenRandom) -> Option<u32> {
+        match self {
+            Self::Simple(state) => Some(*state),
+            Self::Weighted { entries, total } => {
+                if *total == 0 {
+                    return None;
+                }
+                let mut selection = random.next_int(*total);
+                for (weight, state) in entries {
+                    selection -= *weight;
+                    if selection < 0 {
+                        return Some(*state);
+                    }
+                }
+                None
+            }
+            Self::RandomizedInt {
+                source,
+                property,
+                values,
+            } => {
+                let base = source.get_state_without_position(random)?;
+                let value = values.sample(random);
+                with_property(base, property, &value.to_string())
+            }
+            Self::RuleBased { .. } | Self::Unsupported(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]

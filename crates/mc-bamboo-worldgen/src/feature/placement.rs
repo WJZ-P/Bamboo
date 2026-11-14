@@ -43,6 +43,10 @@ pub enum Modifier {
         min_inclusive: i64,
         max_inclusive: i64,
     },
+    /// `SurfaceWaterDepthFilter`：`WORLD_SURFACE - OCEAN_FLOOR <= maxWaterDepth`。
+    ///
+    /// Official `SurfaceWaterDepthFilter`: `WORLD_SURFACE - OCEAN_FLOOR <= maxWaterDepth`.
+    SurfaceWaterDepthFilter(i32),
     /// `EnvironmentScanPlacement`：沿一个方向最多走 `max_steps` 步找 `target_condition`。
     ///
     /// `EnvironmentScanPlacement`: walk up to `max_steps` in one direction looking for
@@ -92,6 +96,12 @@ impl Modifier {
                     .ok_or("heightmap is not a string")?,
             )?),
             "minecraft:biome" => Self::Biome,
+            "minecraft:surface_water_depth_filter" => Self::SurfaceWaterDepthFilter(
+                field("max_water_depth")?
+                    .as_i64()
+                    .ok_or_else(|| "surface_water_depth_filter has no max_water_depth".to_owned())?
+                    as i32,
+            ),
             "minecraft:offset" => Self::Offset {
                 x: IntProvider::parse(field("x")?)?,
                 y: IntProvider::parse(field("y")?)?,
@@ -245,6 +255,16 @@ fn modify(
         // `PlacementFilter.modify`: forward origin only when shouldPlace is true.
         Modifier::BlockPredicateFilter(predicate) => {
             if predicate.test(ctx.world, pos) {
+                out.push(pos);
+            }
+        }
+        // `SurfaceWaterDepthFilter.shouldPlace`：两张高度图之差不超过上限才放行。
+        // `SurfaceWaterDepthFilter.shouldPlace`: forward only when the two heightmaps
+        // differ by at most the configured depth.
+        Modifier::SurfaceWaterDepthFilter(max) => {
+            let y_ocean = ctx.world.get_height(HeightmapKind::OceanFloor, x, z);
+            let y_surface = ctx.world.get_height(HeightmapKind::WorldSurface, x, z);
+            if y_surface - y_ocean <= *max {
                 out.push(pos);
             }
         }
@@ -459,7 +479,7 @@ mod tests {
             assert!(Modifier::parse(&value).unwrap().is_supported(), "{label}");
         }
         let unknown: Value =
-            serde_json::from_str(r#"{"type":"minecraft:surface_water_depth_filter"}"#).unwrap();
+            serde_json::from_str(r#"{"type":"minecraft:fixed_placement"}"#).unwrap();
         assert!(!Modifier::parse(&unknown).unwrap().is_supported());
     }
 

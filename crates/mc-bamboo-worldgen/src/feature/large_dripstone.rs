@@ -479,18 +479,11 @@ pub fn place(
     true
 }
 
-/// `IntProvider.minInclusive()`；`clamped` 外层用自带的 min。
+/// `IntProvider.minInclusive()`。
 ///
-/// `IntProvider.minInclusive()`; the `clamped` wrapper uses its own min.
+/// `IntProvider.minInclusive()`.
 fn min_inclusive(provider: &IntProvider) -> i32 {
-    match provider {
-        IntProvider::Constant(value) => *value,
-        IntProvider::Uniform { min, .. }
-        | IntProvider::Trapezoid { min, .. }
-        | IntProvider::BiasedToBottom { min, .. }
-        | IntProvider::VeryBiasedToBottom { min, .. }
-        | IntProvider::Clamped { min, .. } => *min,
-    }
+    provider.min_value()
 }
 
 /// `IntProvider.maxInclusive()`。

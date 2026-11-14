@@ -55,10 +55,21 @@ impl<'a> FeatureWorld<'a> {
         })
     }
 
+    /// 交出结果。写增量里每一格只留最后一次写：一次地物运行可能把同一格写好几次
+    /// （树叶先放成 `distance=7`，`updateLeaves` 再改成真实距离；藤蔓放下后又被
+    /// `updateShapeAtEdge` 移除），邻居区块要的是最终状态。调用方之后把多个中心的增量
+    /// 合到一起、按规范序落盘，那一步分不出先后，所以必须在这里先收敛。
+    ///
+    /// Hand back the result. Each cell keeps only its last write: one feature run can
+    /// write a cell several times (a leaf is placed with `distance=7` and `updateLeaves`
+    /// then rewrites the real distance; a vine is placed and `updateShapeAtEdge` removes
+    /// it), and the neighbour chunk needs the final state. The caller later merges
+    /// several centres' deltas and applies them in canonical order, which cannot tell
+    /// earlier from later, so the collapse has to happen here.
     pub fn finish(self, unsupported: bool) -> FeatureResult {
         FeatureResult {
             blocks: self.blocks,
-            deltas: self.deltas,
+            deltas: self.deltas.map(last_writes),
             unsupported,
         }
     }
@@ -261,4 +272,31 @@ pub fn prime_heightmaps(blocks: &ChunkBlocks, min_y: i32, height: i32) -> Height
 /// `Heightmap.Types.isOpaque()`，转发到 [`super::heightmap::is_opaque`]。
 pub fn is_heightmap_opaque(state: u32, kind: HeightmapKind) -> bool {
     is_opaque(state, kind)
+}
+
+/// 每一格只留最后一次写，保持这些「最后一次写」原来的先后顺序。
+///
+/// Keep only the last write of each cell, in the original order of those last writes.
+fn last_writes(deltas: Vec<(i32, i32, i32, u32)>) -> Vec<(i32, i32, i32, u32)> {
+    let mut seen = std::collections::HashSet::with_capacity(deltas.len());
+    let mut out: Vec<_> = deltas
+        .into_iter()
+        .rev()
+        .filter(|&(x, y, z, _)| seen.insert((x, y, z)))
+        .collect();
+    out.reverse();
+    out
+}
+
+#[cfg(test)]
+mod last_write_tests {
+    use super::last_writes;
+
+    #[test]
+    fn a_cell_written_twice_keeps_the_later_state() {
+        // 第一格先写 294 再写 270：留下 270，哪怕 294 的编号更大。
+        // The first cell is written 294 then 270: 270 stays although 294 is larger.
+        let deltas = vec![(1, 70, 1, 294), (2, 70, 1, 139), (1, 70, 1, 270)];
+        assert_eq!(last_writes(deltas), vec![(2, 70, 1, 139), (1, 70, 1, 270)]);
+    }
 }
