@@ -1483,6 +1483,9 @@ mod loaded_tests;
 #[path = "world/tests/review_probe.rs"]
 mod review_probe;
 #[cfg(test)]
+#[path = "world/staged_tests.rs"]
+mod staged_tests;
+#[cfg(test)]
 mod storage_diff_tests;
 #[cfg(test)]
 pub(crate) mod tests;

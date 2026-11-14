@@ -365,9 +365,12 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   （`chunk_worker_threads` 未配时取核数一半、夹在 1..=4），让几十毫秒的地形生成
   不占住 20 TPS 的世界线程。flat 配置仍走原来的超平坦模板 + 一步流水线，行为不变。
 * 十个 `ChunkStatus` 阶段是纯函数 `(阶段, 位置, 配置) → RegionColumn`：
-  `structure_starts` / `structure_references` 空实现（结构队员填）；
-  `biomes` 写 quart 群系；`terrain` 一步跑 `doFill → buildSurface → generateCarvers`
-  写方块、`Chunk::from_sections` 从方块重算 4 张高度图（等价 `primeHeightmaps`）；
+  `structure_starts` / `structure_references` 空实现（结构队员填）；`biomes` 透传；
+  `terrain` 一步同时算 quart 群系和 `doFill → buildSurface → generateCarvers` 的方块、
+  `Chunk::from_sections` 从方块重算 4 张高度图（等价 `primeHeightmaps`）。把 BIOMES
+  折进 terrain 是为了避免两次组装 `RegionColumn`（纯 all-air 的 biomes 盒子在
+  `from_sections` 里也要重算 4 张高度图，很慢且马上被 terrain 覆盖）；官方 `terrain`
+  里地表/雕刻器本就是 `BiomeManager` uncached 重算群系，这里连 quart 格也一起算。
   `features` / `initialize_light` / `light` / `spawn` / `full` 本轮原样透传。
 * 数据交接：`Worldgen` 解析一次后按线程 `Box::leak`，`chunk::Generator` 每条计算线程
   各缓存一份（它的 `ParameterList` 用 `Cell` 记 R 树 `lastResult`，官方是

@@ -23,7 +23,7 @@ use tracing::error;
 use crate::{
     region::RegionColumn,
     world_options::WorldGenConfig,
-    worldgen::{build_region_column, generate_biomes, generate_chunk},
+    worldgen::{build_region_column, generate_chunk},
 };
 
 /// 邻居只读视图：`(位置, 它已经到的阶段, 盒子)`。
@@ -90,18 +90,20 @@ impl ChunkGenerator for FlatGenerator {
 
 /// 主世界多阶段生成器：把 `worldgen` 的纯函数接进 Director 的 `Staged` 流水线。
 ///
-/// `structure_starts` / `structure_references` 先接成空实现（结构队员填）；
-/// `biomes` 写 quart 群系；`terrain` 写跑到 CARVERS 的方块并重算高度图；
-/// `features` / `initialize_light` / `light` / `spawn` / `full` 本轮先原样透传
+/// `structure_starts` / `structure_references` / `biomes` 先接成透传：`terrain` 一步
+/// 同时算出 quart 群系和跑到 CARVERS 的方块（官方 `terrain` 状态里地表/雕刻器本就是
+/// uncached 重算群系，这里把 BIOMES 阶段的 quart 格也一起算，避免两次组装 column）；
+/// `features` / `initialize_light` / `light` / `spawn` / `full` 本轮也原样透传
 /// （邻居只读快照、增量合并、生成时光照还没接，见 README 已知限制）。
 /// 每一步都是 `(阶段, 位置, 配置) → 盒子` 的纯函数，与线程、调度无关。
 ///
 /// Overworld staged generator: wires `worldgen`'s pure functions into the
-/// Director's `Staged` pipeline. `structure_starts` / `structure_references` are
-/// empty stubs (for the structures teammate); `biomes` writes quart biomes;
-/// `terrain` writes blocks through CARVERS and recomputes heightmaps;
-/// `features` / `initialize_light` / `light` / `spawn` / `full` pass through for
-/// now (neighbor snapshots, delta merge and in-pipeline light are not wired;
+/// Director's `Staged` pipeline. `structure_starts` / `structure_references` /
+/// `biomes` pass through: `terrain` computes both quart biomes and CARVERS blocks
+/// in one step (vanilla's `terrain` re-resolves biomes uncached for surface /
+/// carvers anyway; folding BIOMES in avoids assembling the column twice).
+/// `features` / `initialize_light` / `light` / `spawn` / `full` also pass through
+/// for now (neighbor snapshots, delta merge and in-pipeline light not wired;
 /// see README known limitations). Each step is a pure
 /// `(stage, pos, config) → box` function, independent of thread/timing.
 #[derive(Debug, Clone)]
@@ -130,12 +132,11 @@ impl ChunkGenerator for OverworldGenerator {
         _neighbors: NeighborView<'_>,
     ) -> Box<RegionColumn> {
         let result = match stage {
-            // `ChunkStatus.BIOMES`：只写 quart 群系，方块仍是空气。
-            // `ChunkStatus.BIOMES`: write quart biomes only, blocks remain air.
-            ChunkStatus::Biomes => generate_biomes(&self.config, pos.x, pos.z)
-                .and_then(|chunk| build_region_column(&chunk)),
-            // `ChunkStatus.TERRAIN`：一步跑 doFill → buildSurface → generateCarvers。
-            // `ChunkStatus.TERRAIN`: run doFill → buildSurface → generateCarvers.
+            // `ChunkStatus.TERRAIN`：一步算 quart 群系 + doFill → buildSurface →
+            // generateCarvers 的方块，组装成最终 column。其它阶段透传。
+            // `ChunkStatus.TERRAIN`: compute quart biomes + blocks through
+            // doFill → buildSurface → generateCarvers, assemble the final column.
+            // Other stages pass through.
             ChunkStatus::Terrain => generate_chunk(&self.config, pos.x, pos.z)
                 .and_then(|chunk| build_region_column(&chunk)),
             _ => return empty_center(center),

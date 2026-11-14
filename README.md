@@ -363,8 +363,9 @@ WebView2 的渲染进程不算在内。
 - **接进游戏**（`docs/worldgen.md`「接进游戏」）：`server.properties` 的 `level-seed` /
   `level-type` / `generator-settings` / `generate-structures` 生效，认 `normal` / `flat` /
   `large_biomes` / `amplified`；`World::build` 对非 flat 世界用 `PipelineKind::Staged` 按
-  `ChunkPyramid` 派十个 `ChunkStatus` 阶段，`biomes` 写 quart 群系、`terrain` 写跑完
-  CARVERS 的方块并重算高度图，默认起一个小计算池把生成移出世界线程；
+  `ChunkPyramid` 派十个 `ChunkStatus` 阶段，`terrain` 一步算出 quart 群系和跑完
+  CARVERS 的方块并重算高度图（`biomes` 阶段透传，避免两次组装 column；官方
+  `terrain` 里地表/雕刻器本就 uncached 重算群系），默认起一个小计算池把生成移出世界线程；
   `world_gen_settings.dat` 按官方 `WorldGenSettings.CODEC` 持久化种子与维度生成器，读档时以它为准。
   `gen-world <java>` 用官方出题、调**游戏里同一份** `generate_chunk` 逐格对拍，多种子 0 不一致。
 
