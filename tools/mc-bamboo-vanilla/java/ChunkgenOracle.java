@@ -456,7 +456,8 @@ public final class ChunkgenOracle {
      * 所以跳过别的 step 不影响留下的 step。最终验收仍要跑完整 11 步。
      */
     private record Options(int seeds, int chunks, long salt, int through, int stepsMask,
-            String featureAllowList, boolean realPath) {
+            String featureAllowList, boolean realPath, String settings,
+            Integer forcedX, Integer forcedZ, int scan) {
         static final int ALL_STEPS = (1 << 11) - 1;
 
         static Options parse(String[] args) {
@@ -473,11 +474,22 @@ public final class ChunkgenOracle {
             // 真实服务端路径：3×3 possibleBiomes、carverBiome 分支、region.getBiomeManager()。
             // Real-server path: 3x3 possibleBiomes, the carverBiome branch, region.getBiomeManager().
             boolean realPath = false;
+            String settings = "overworld";
+            // `--chunk X Z` 只出题这一个区块（精确复现）；`--scan N` 每个种子出 N 个
+            // 覆盖近处/远处/负坐标的随机区块；两者合用则出以 (X,Z) 为中心的连续网格。
+            // 都只改坐标来源。
+            // `--chunk X Z` emits only this one chunk (exact reproduction); `--scan N` emits
+            // N random chunks per seed spanning near/far/negative coordinates; combined they
+            // emit a contiguous grid centered on (X,Z). All only change the coordinate source.
+            Integer forcedX = null;
+            Integer forcedZ = null;
+            int scan = 0;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seeds" -> seeds = Integer.parseInt(args[++i]);
                     case "--chunks" -> chunks = Integer.parseInt(args[++i]);
                     case "--salt" -> salt = Long.parseLong(args[++i]);
+                    case "--settings" -> settings = args[++i];
                     case "--through" -> {
                         String value = args[++i];
                         through = switch (value) {
@@ -503,10 +515,16 @@ public final class ChunkgenOracle {
                     case "--feature-types" -> featureAllowList = args[++i];
                     case "--biomes-only" -> through = 0;
                     case "--real-path" -> realPath = true;
+                    case "--chunk" -> {
+                        forcedX = Integer.parseInt(args[++i]);
+                        forcedZ = Integer.parseInt(args[++i]);
+                    }
+                    case "--scan" -> scan = Integer.parseInt(args[++i]);
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
-            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath);
+            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath, settings,
+                    forcedX, forcedZ, scan);
         }
     }
 
@@ -554,23 +572,29 @@ public final class ChunkgenOracle {
         }
 
         void run() throws Exception {
+            // --settings 在 normal / large_biomes / amplified 之间切 NoiseGeneratorSettings，
+            // 三种世界共用 minecraft:overworld 群系预设（WorldPresets.bootstrap）。
+            // --settings switches NoiseGeneratorSettings between normal / large_biomes /
+            // amplified; all three share the minecraft:overworld biome preset (WorldPresets.bootstrap).
+            String settingsId = "minecraft:" + this.options.settings();
+            NoiseGeneratorSettings generatorSettings =
+                    this.settings.getValue(Identifier.withDefaultNamespace(this.options.settings()));
+            if (generatorSettings == null) {
+                throw new IllegalStateException("missing " + settingsId + " noise settings");
+            }
             JsonObject header = new JsonObject();
             header.addProperty("type", "header");
             header.addProperty("version", SharedConstants.getCurrentVersion().id());
             header.addProperty("protocol", SharedConstants.getCurrentVersion().protocolVersion());
-            header.addProperty("settings", "minecraft:overworld");
+            header.addProperty("settings", settingsId);
             header.addProperty("preset", "minecraft:overworld");
-            header.addProperty("minY", -64);
-            header.addProperty("height", 384);
-            header.addProperty("seaLevel", 63);
+            header.addProperty("minY", generatorSettings.noiseSettings().minY());
+            header.addProperty("height", generatorSettings.noiseSettings().height());
+            header.addProperty("seaLevel", generatorSettings.seaLevel());
             header.addProperty("through", this.options.through());
             header.addProperty("steps", this.options.stepsMask());
             write(header);
 
-            NoiseGeneratorSettings generatorSettings = this.settings.getValue(Identifier.withDefaultNamespace("overworld"));
-            if (generatorSettings == null) {
-                throw new IllegalStateException("missing minecraft:overworld noise settings");
-            }
             NoiseBasedChunkGenerator generator =
                     new NoiseBasedChunkGenerator(
                             MultiNoiseBiomeSource.createFromPreset(
@@ -615,7 +639,7 @@ public final class ChunkgenOracle {
                         continue;
                     }
                     if (this.options.through() >= 4) {
-                        writeFeatures(seed, pos, generator, generatorSettings, state, biomeManager);
+                        writeFeatures(seed, pos, generator, generatorSettings, state, biomeManager, resolver);
                         continue;
                     }
 
@@ -657,13 +681,13 @@ public final class ChunkgenOracle {
          */
         private void writeFeatures(long seed, ChunkPos pos, NoiseBasedChunkGenerator generator,
                 NoiseGeneratorSettings generatorSettings, RandomState randomState,
-                BiomeManager biomeManager) throws Exception {
+                BiomeManager biomeManager, BiomeResolver resolver) throws Exception {
             TerrainChunk[] chunks = new TerrainChunk[9];
             for (int dz = -1; dz <= 1; dz++) {
                 for (int dx = -1; dx <= 1; dx++) {
                     chunks[(dz + 1) * 3 + dx + 1] = generateTerrain(
                             seed, new ChunkPos(pos.x() + dx, pos.z() + dz), generator,
-                            generatorSettings, randomState, biomeManager);
+                            generatorSettings, randomState, resolver);
                 }
             }
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
@@ -716,24 +740,13 @@ public final class ChunkgenOracle {
         /** 现有单区块生成流程抽出来，features 阶段要用九次。 */
         private TerrainChunk generateTerrain(long seed, ChunkPos pos, NoiseBasedChunkGenerator generator,
                 NoiseGeneratorSettings generatorSettings, RandomState state,
-                BiomeManager biomeManager) throws Exception {
+                BiomeResolver resolver) throws Exception {
+            // 和游戏一样走真实服务端路径（3×3 possibleBiomes、region 的 biomeManager）。
+            // Same real-server path as the game (3x3 possibleBiomes, region's biomeManager).
             ProtoChunk proto = newChunk(pos, generatorSettings);
             generator.createBiomes(state, Blender.empty(), null, proto).join();
             proto.setPersistedStatus(ChunkStatus.BIOMES);
-            DensityVolume volume = new DensityVolume(
-                    16, generatorSettings.noiseSettings().height(), 16,
-                    pos.getMinBlockX(), generatorSettings.noiseSettings().minY(), pos.getMinBlockZ());
-            java.util.function.Supplier<Aquifer.FluidPicker> picker = instancePicker(generator);
-            try (NoiseChunk noiseChunk = new NoiseChunk(
-                    state, Beardifier.EMPTY, generatorSettings, picker.get(), Blender.empty(), volume)) {
-                this.doFill.invoke(generator, noiseChunk, proto);
-                this.buildSurface.invoke(generator, proto, noiseChunk, state, biomeManager,
-                        this.possibleBiomes, generatorSettings.materialRule().value());
-                this.generateCarvers.invoke(generator, proto, Blender.empty(), noiseChunk, state,
-                        biomeManager, null, generatorSettings.materialRule().value());
-            }
-            proto.setPersistedStatus(ChunkStatus.TERRAIN);
-            Heightmap.primeHeightmaps(proto, ChunkStatus.FINAL_HEIGHTMAPS);
+            buildRealTerrain(seed, pos, proto, generator, generatorSettings, state, resolver);
             return new TerrainChunk(proto);
         }
 
@@ -909,6 +922,26 @@ public final class ChunkgenOracle {
         private void writeRealPath(long seed, ChunkPos pos, ProtoChunk center,
                 NoiseBasedChunkGenerator generator, NoiseGeneratorSettings gs,
                 RandomState state, BiomeResolver resolver) throws Exception {
+            buildRealTerrain(seed, pos, center, generator, gs, state, resolver);
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "carvers");
+            line.addProperty("seed", seed);
+            line.addProperty("x", pos.x());
+            line.addProperty("z", pos.z());
+            addBlocks(line, center);
+            addHeightmaps(line, center);
+            write(line);
+        }
+
+        /**
+         * 真实服务端路径把 center 跑到 TERRAIN 并 prime FINAL_HEIGHTMAPS；center 须已有群系。
+         *
+         * Real-server path: run center (biomes already filled) to TERRAIN and prime
+         * FINAL_HEIGHTMAPS.
+         */
+        private void buildRealTerrain(long seed, ChunkPos pos, ProtoChunk center,
+                NoiseBasedChunkGenerator generator, NoiseGeneratorSettings gs,
+                RandomState state, BiomeResolver resolver) throws Exception {
             ProtoChunk[][] neighbors = new ProtoChunk[17][17];
             for (int dx = -8; dx <= 8; dx++) {
                 for (int dz = -8; dz <= 8; dz++) {
@@ -948,14 +981,6 @@ public final class ChunkgenOracle {
             // buildTerrain's thenApply: raise to TERRAIN, then prime FINAL_HEIGHTMAPS.
             center.setPersistedStatus(ChunkStatus.TERRAIN);
             Heightmap.primeHeightmaps(center, ChunkStatus.FINAL_HEIGHTMAPS);
-            JsonObject line = new JsonObject();
-            line.addProperty("type", "carvers");
-            line.addProperty("seed", seed);
-            line.addProperty("x", pos.x());
-            line.addProperty("z", pos.z());
-            addBlocks(line, center);
-            addHeightmaps(line, center);
-            write(line);
         }
 
         /**
@@ -1162,16 +1187,53 @@ public final class ChunkgenOracle {
         }
 
         private int[][] chunks(long seed) {
-            int count = this.options.chunks();
+            // `--chunk X Z --scan N`：以 (X,Z) 为中心的一连续网格，密集覆盖含水层
+            // 格子边界。稀有分支（如岩浆层上边界 y=-54）只在连续洞穴区域里出现，
+            // 稀疏的随机区块扫不到，所以扫描要用相邻区块而不是完全随机的坐标。
+            // `--chunk X Z --scan N`: a contiguous grid centered on (X,Z) that densely
+            // covers aquifer cell boundaries. Rare branches (e.g. the lava-layer top at
+            // y=-54) only occur inside connected cave regions, which sparse random chunks
+            // miss; scanning therefore needs adjacent chunks rather than purely random ones.
+            if (this.options.forcedX() != null && this.options.scan() > 0) {
+                int side = 1;
+                while (side * side < this.options.scan()) {
+                    side += 2;
+                }
+                int r = side / 2;
+                int[][] grid = new int[side * side][2];
+                int k = 0;
+                for (int dz = -r; dz <= r; dz++) {
+                    for (int dx = -r; dx <= r; dx++) {
+                        grid[k][0] = this.options.forcedX() + dx;
+                        grid[k][1] = this.options.forcedZ() + dz;
+                        k++;
+                    }
+                }
+                return grid;
+            }
+            // `--chunk` 覆盖成单个区块，用 FIXED_SEEDS 里的种子逐个复现。
+            // `--chunk` overrides to a single chunk, reproduced under each FIXED_SEEDS entry.
+            if (this.options.forcedX() != null) {
+                return new int[][] {{this.options.forcedX(), this.options.forcedZ()}};
+            }
+            boolean scan = this.options.scan() > 0;
+            int count = scan ? this.options.scan() : this.options.chunks();
             int[][] result = new int[count][2];
-            Random random = new Random(seed ^ 0x51A7_5EEDL ^ this.options.salt());
+            // 扫描用独立的播种，覆盖近处网格（容易撞上含水层格子边界）、
+            // 中距离、远距离和负坐标；和默认坐标生成互不干扰。
+            // Scanning uses its own seed and spans a near grid (likely to hit aquifer cell
+            // boundaries), mid range, far range and negative coordinates, independent of
+            // the default coordinate generator.
+            long randomSeed = seed ^ 0x51A7_5EEDL ^ this.options.salt();
+            Random random = new Random(scan ? randomSeed ^ 0x5CA4_5EEDL : randomSeed);
             for (int i = 0; i < count; i++) {
-                if (i < FIXED_CHUNKS.length) {
+                if (!scan && i < FIXED_CHUNKS.length) {
                     result[i] = FIXED_CHUNKS[i].clone();
                 } else {
-                    int bound = switch (i % 3) {
-                        case 0 -> 64;
-                        case 1 -> 4096;
+                    int bound = switch (i % 4) {
+                        case 0 -> 48;
+                        case 1 -> 512;
+                        case 2 -> 16384;
                         default -> 1_000_000;
                     };
                     result[i][0] = random.nextInt(-bound, bound);

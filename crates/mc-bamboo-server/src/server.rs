@@ -337,6 +337,14 @@ impl Server {
         let config = world_config(&self.shared.config);
         let keys = Arc::clone(&self.shared.profile_keys);
         let admin = self.admin.split();
+        // 命令行版（从 server.properties 建的配置）才起读 stdin 的控制台线程；
+        // 嵌入式用法不读进程 stdin。连接线程读到的命令经 Inbound 交给世界线程。
+        // Only the CLI (config built from server.properties) starts the stdin console
+        // thread; embedded use does not read process stdin. Its lines reach the world
+        // thread as Inbound messages.
+        if self.shared.config.console_enabled {
+            crate::console::spawn(self.inbox_sender.clone());
+        }
         self.run_with_world(
             move |inbox| World::with_admin(config, inbox, keys, admin).run(),
             shutdown,
@@ -568,6 +576,7 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
         mail_budget: config.mail_budget,
         world_dir: config.world_dir.clone(),
         world_gen: config.world_gen.clone(),
+        broadcast_console_to_ops: config.broadcast_console_to_ops,
     }
 }
 

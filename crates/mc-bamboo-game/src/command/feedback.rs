@@ -4,10 +4,11 @@
 //! colour and recipients follow the official rules.
 
 use mc_bamboo_command::{ErrorArg, ParseError};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::text::{Color, Component, TranslateArg};
 use tracing::info;
 
-use crate::{inbound::PlayerId, region::Region};
+use crate::{command::console, inbound::PlayerId, region::Region};
 
 /// 执行期的失败。解析错误另带游标，用来画第二行 `command.context.here`。
 ///
@@ -97,13 +98,50 @@ fn context_line(input: &str, cursor: usize) -> Component {
     )
 }
 
+/// 组件的纯文本。官方 `MinecraftServer.sendSystemMessage` 打日志用
+/// `message.getString()`；Bamboo 没有语言文件，翻译键按原文留下，再把 `with` 参数和
+/// `extra` 子组件依次拼上（相当于 `Component.getString()` 不查语言表的版本）。
+///
+/// Plain text of a component. Official `MinecraftServer.sendSystemMessage` logs
+/// `message.getString()`; Bamboo has no language file, so translation keys stay as-is
+/// and `with` args / `extra` children are appended in order.
+fn plain_text(content: &Component) -> String {
+    fn walk(tag: &Tag, out: &mut String) {
+        match tag {
+            Tag::String(text) => out.push_str(text),
+            Tag::Compound(entries) => {
+                for (key, value) in entries {
+                    if matches!(key.as_str(), "text" | "translate" | "extra" | "with") {
+                        walk(value, out);
+                    }
+                }
+            }
+            Tag::List(items) => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = String::new();
+    walk(content.tag(), &mut out);
+    out
+}
+
 pub(crate) fn send_system(region: &mut Region, id: PlayerId, content: &Component) {
-    // 官方 `CommandSourceStack.sendSuccess` / `sendFailure` 最后都走
-    // `ServerPlayer.sendSystemMessage`，隐藏聊天时不发非 overlay 系统消息。
-    //
-    // Official `CommandSourceStack.sendSuccess` / `sendFailure` both end at
-    // `ServerPlayer.sendSystemMessage`, which suppresses non-overlay messages for hidden chat.
-    crate::chat::send_system_message(region, id, content, false);
+    if console::is_console(id) {
+        // 官方控制台来源的 `MinecraftServer.sendSystemMessage`：把反馈打进日志。
+        // Official console source `MinecraftServer.sendSystemMessage`: log the feedback.
+        info!("{}", plain_text(content));
+    } else {
+        // 官方 `CommandSourceStack.sendSuccess` / `sendFailure` 最后都走
+        // `ServerPlayer.sendSystemMessage`，隐藏聊天时不发非 overlay 系统消息。
+        //
+        // Official `CommandSourceStack.sendSuccess` / `sendFailure` both end at
+        // `ServerPlayer.sendSystemMessage`, which suppresses non-overlay messages for hidden chat.
+        crate::chat::send_system_message(region, id, content, false);
+    }
 }
 
 /// 官方 `sendSuccess`。`broadcast` 为真时，其他 OP 收到灰色斜体的 `chat.type.admin`。
@@ -111,32 +149,53 @@ pub(crate) fn send_system(region: &mut Region, id: PlayerId, content: &Component
 /// Official `sendSuccess`. When `broadcast` is set, other ops receive a grey italic
 /// `chat.type.admin` line.
 pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component, broadcast: bool) {
-    // `CommandSourceStack.sendSuccess`：自己的系统消息受 `send_command_feedback` 限制。
+    let console = console::is_console(source);
+    // 官方 `CommandSourceStack.sendSuccess` 的两道门：
+    //   shouldSendSystemMessage = source.acceptsSuccess() && !silent
+    //   shouldBroadcast = broadcast && source.shouldInformAdmins() && !silent
+    // 官方 `ServerPlayer.acceptsSuccess()` 是 `send_command_feedback` 规则、控制台来源恒 true；
+    // 官方 `DedicatedServer.shouldInformAdmins()` 是 `broadcast-console-to-ops`、玩家来源恒 true。
+    // `send_command_feedback` 另外管 `broadcastToAdmins` 里发给 OP 的那一份。
     //
-    // `CommandSourceStack.sendSuccess`: the caller's system message is gated by
-    // `send_command_feedback`.
-    if region.send_command_feedback {
+    // Official `CommandSourceStack.sendSuccess` gates its own message with
+    // `source.acceptsSuccess()` (the `send_command_feedback` rule for players, always true
+    // for the console) and the op broadcast with `broadcast && source.shouldInformAdmins()`
+    // (`broadcast-console-to-ops` for the console, always true for players).
+    let send_own = if console {
+        true
+    } else {
+        region.send_command_feedback
+    };
+    if send_own {
         send_system(region, source, &message);
     }
-    if !broadcast {
+    let should_broadcast = broadcast
+        && if console {
+            region.broadcast_console_to_ops
+        } else {
+            true
+        };
+    if !should_broadcast {
         return;
     }
-    let Some(name) = region
-        .players
-        .get(&source)
-        .map(|player| player.name.clone())
-    else {
-        return;
+    let name = if console {
+        console::NAME.to_owned()
+    } else {
+        match region.players.get(&source) {
+            Some(player) => player.name.clone(),
+            None => return,
+        }
     };
-    // `broadcastToAdmins`：其他 OP 的 `chat.type.admin` 也看 `send_command_feedback`。
-    // 日志看 `log_admin_commands`，而且来源不是服务器本身。玩家执行的命令会记。
+    // 官方 `broadcastToAdmins`：来源不是服务器本身时，`log_admin_commands` 再追加一条日志。
+    // 控制台来源的 source == server，不记这一条。
     //
-    // `broadcastToAdmins`: other ops' `chat.type.admin` also checks `send_command_feedback`.
-    // The log checks `log_admin_commands`, and the source is not the server. A player's
-    // command is logged.
-    if region.log_admin_commands {
+    // Official `broadcastToAdmins`: the extra `log_admin_commands` line is skipped when
+    // the source is the server itself (the console case); a player's command is logged.
+    if !console && region.log_admin_commands {
         info!(player = %name, "broadcasting command feedback");
     }
+    // `broadcastToAdmins`：其他 OP 的 `chat.type.admin` 也看 `send_command_feedback`。
+    // `broadcastToAdmins`: other ops' `chat.type.admin` also checks `send_command_feedback`.
     if !region.send_command_feedback {
         return;
     }

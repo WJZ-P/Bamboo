@@ -68,6 +68,12 @@ let carvers = generator.terrain(chunk_x, chunk_z, Stage::Carvers)?;
 * `sample_volume`：真正的一块 `Volume`（`densityfunction/DensityVolume` 的移植），按官方的
   `z → x → y` 顺序填缓冲。
 
+`finalDensity` 里 `beardifier` 标记节点（`SimpleDensityFunction.BEARDIFIER`）现在也编译成
+`Sampler::Beardifier`，像官方 `ContextBoundSampler` 一样在两条路径里从 `Context` 取本区块
+Beardifier；`beard` 子命令对拍它的单点和成批两条路径（见 `docs/worldgen-structures-plan.md`
+第 5 节）。编译仍是一份、不按区块重编译，噪声实例和取数顺序不变，`EMPTY` 时逐位等于
+原来的常量 0。
+
 **`BIOMES`**：`doCreateBiomes` 用开了缓存的 `SamplerContext` 建 `Climate.Sampler`；
 `MultiNoiseBiomeSource.createResolverForChunk` 对六个气候函数在 quart 体积
 `(4, height/4, 4)`、步长 `(4,4,4)` 上各做一次 `sampleVolume`，再 `Climate.target` 量化成定点数查
@@ -132,7 +138,19 @@ y 方向是起点加逐格累加的 `delta`（`fadd` 顺序），和单点 `lerp
 * `FluidStatus.at(y)` 在 `y >= level` 时给空气，`FluidStatus.equals` 比较液面和流体类型。
 
 `shouldScheduleFluidUpdate` 只影响官方的后期处理位置表，对拍不比它，但计算照搬，以后接游戏时
-要用。
+要用。`mayFlow23` 用的是 `similarity(d2, d3)`、`mayFlow13` 用的是 `similarity(d1, d3)`，两个
+门槛不要对调。
+
+**岩浆层上边界的短路（已修）**。官方 `computeSubstance` 在 `similarity12 > 0` 分支里还有一段
+早期返回：当最近格子在 `blockY` 给的是水、且 `globalFluidPicker.computeFluid(x, blockY-1, z)`
+在 `blockY-1` 给的是岩浆时，直接返回水、跳过后面三条压力判据，并把
+`shouldScheduleFluidUpdate` 设为 true。因为 `blockY <= -55` 会被前面的「全局流体是岩浆」判据
+提前返回岩浆、`blockY >= -53` 时下方不再是岩浆，这段短路实际上**只在 y = -54 这一层**生效，
+而且要 `density <= 0`（洞穴/空腔）、最近含水层格子给的是水、`similarity12 > 0`、压力判据本会
+返回 `None` 同时成立才看得出差别，所以非常稀有。之前漏掉这段，seed -1、chunk (52,-26)、
+y=-54、x=14、z=1..3 三格官方是水、Bamboo 是深板岩；地物对拍在 features 的 9 宫格里才撞见。
+补齐后，以该区块为中心的连续网格、多 salt 的随机扫描、以及标准 `chunkgen` 对拍都是 0 不一致。
+`chunk.rs` 里有一条单区块回归测试盯着这三格。
 
 ## 数据的导出与重跑
 
@@ -222,8 +240,16 @@ cargo run --release -p mc-bamboo-vanilla -- chunkgen java --seeds 6 --chunks 36 
 ```bash
 cargo run --release -p mc-bamboo-vanilla -- chunkgen java \
     [--seeds N] [--chunks N] [--salt S] [--through biomes|noise|surface|carvers] \
-    [--biomes-only] [--show N]
+    [--biomes-only] [--show N] [--chunk X Z] [--scan N] [--break-self-test]
 ```
+
+地形阶段的扩大搜索额外有三个开关，都只改 Java 侧出题的坐标来源：
+
+* `--chunk X Z`：只出题这一个区块，用来精确复现某个坐标（例如 `--chunk 52 -26`）；
+* `--scan N`：每个种子出 N 个覆盖近处/中距/远距/负坐标的随机区块，用来批量扫地形阶段；
+* `--chunk X Z` 与 `--scan N` 合用：出以 (X,Z) 为中心的 `(2r+1)²` 个**相邻区块**网格。
+  含水层岩浆层边界这类稀有分支只在连续洞穴区域里出现，稀疏的随机区块扫不到，必须用相邻
+  网格；`--break-self-test` 故意改坏一个方块，确认逐方块比较器会报不一致。
 
 `ChunkgenOracle.java` 按官方 `WorldLoader` 的前半段读数据包注册表，对每个（种子，区块）造一个
 `ProtoChunk`（`LevelHeightAccessor.create(minY, height)`、`PalettedContainerFactory.create(...)`、
@@ -250,6 +276,9 @@ cargo run --release -p mc-bamboo-vanilla -- worldgen java
 | `chunkgen --through surface` | 同上规模，只比到 SURFACE | 0 |
 | `chunkgen --through noise` | 同上规模，只比到 NOISE | 0 |
 | `chunkgen --biomes-only` | 8 种子 × 36 区块 = 442368 个 quart 格 | 0 |
+| `chunkgen --scan 300 --through noise` | 6 种子 × 300 区块 × 6 个 salt = 10800 区块，每轮 176,947,200 个 NOISE 方块 | 0 |
+| `chunkgen --chunk X Z --scan 169 --through noise` | 9 个锚点（原点、负坐标、远坐标、报告区块多 salt）× 6 种子 × 169 相邻区块 = 9126 区块 | 0 |
+| `chunkgen --chunk 52 -26 --scan 81 --through carvers` | 3 种子 × 81 相邻区块，三阶段各 23,887,872 个方块 | 0 |
 | `worldgen` | 3 种子、21 个维度状态、4608 个噪声值、5364 个密度函数值、288 个群系、536 个温度 | 0 |
 
 含 `interpolated` 的函数在 `worldgen` 的单点成批比较里跳过 612 项（成批路径在 1×1×1 上不是纯
@@ -279,6 +308,37 @@ CARVERS 只比 SURFACE 多约 1.5 ms：17×17 邻域的大部分 carver 在 `isS
 过滤掉了。三项优化里的两项有可测收益，逐项前后都量过 `chunk_timing` 并跑
 `chunkgen --through carvers` 多种子对拍；没有收益的一项（条件结果的惰性缓存，见下）撤掉了。
 详见 `performance-optimizations.md` 第 10 节。
+
+### 本机复测（Windows 16 核，2026-11-14，release）
+
+上面 M4 Pro 那组是另一台机器；这组是**接进游戏这一轮**在同一台 16 核 Windows 上现跑的，
+机器当时内存已用到 97%、还有别的队员在并行构建，所以绝对值明显偏大、长尾明显，
+只用来量本机相对开销，不和 M4 Pro 那组直接比。`chunk_timing`（35 区块 × 5 种子，
+累计到各阶段）中位数：
+
+```
+Noise:   median   7.09 ms, min  6.44 ms, max  28.57 ms
+Surface: median  38.82 ms, min 25.05 ms, max 494.05 ms
+Carvers: median  40.57 ms, min 26.90 ms, max 972.95 ms
+```
+
+`cargo run --release -p mc-bamboo-game --example generate_chunk_timing` 量的是**游戏里
+那份** `worldgen::generate_chunk`（同样 35 区块 × 5 种子，每种子先预热一次），
+分解为 BIOMES、到 CARVERS 的整段、以及 `build_region_column` 组装：
+
+```
+ biomes-only: 35 chunks median  0.40 ms, min 0.20 ms, max  1.09 ms
+  to-carvers: 35 chunks median 30.82 ms, min 22.47 ms, max 48.71 ms
+    assembly: 35 chunks median  2.86 ms, min 1.75 ms, max  3.36 ms
+to-carvers + assembly: 33.68 ms/chunk (medians added)
+```
+
+`to-carvers` 内含 quart 群系（~0.4 ms，和 `biomes-only` 一致）和
+`doFill → buildSurface → generateCarvers`；`assembly` 是 `PalettedContainer` 重打包
+加 `Chunk::from_sections` 重算 4 张高度图。两次 `chunk_timing` / `generate_chunk_timing`
+在不同时刻跑、受并发负载影响不同，所以 `to-carvers`（30.82 ms）比同次 `Carvers`
+累计（40.57 ms）小，不能相减；以 `generate_chunk_timing` 的 ~34 ms/区块作为本机
+「游戏里生成一个可交付区块」的量级。
 
 ### 拆分表：慢在哪
 
@@ -442,7 +502,7 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   折进 terrain 是为了避免两次组装 `RegionColumn`（纯 all-air 的 biomes 盒子在
   `from_sections` 里也要重算 4 张高度图，很慢且马上被 terrain 覆盖）；官方 `terrain`
   里地表/雕刻器本就是 `BiomeManager` uncached 重算群系，这里连 quart 格也一起算。
-  `features` / `initialize_light` / `light` / `spawn` / `full` 本轮原样透传。
+  `initialize_light` / `light` / `spawn` / `full` 本轮仍原样透传；`features` 见下。
 * 数据交接：`Worldgen` 解析一次后按线程 `Box::leak`，`chunk::Generator` 每条计算线程
   各缓存一份（它的 `ParameterList` 用 `Cell` 记 R 树 `lastResult`，官方是
   `ThreadLocal`，不能跨线程共享）。生成的方块/群系按官方 `PalettedContainer` 下标写进
@@ -458,6 +518,39 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   排除。`gen-world --seeds 3 --chunks 12`（两个 salt 各 36 区块）每轮比 55296 个 quart
   格、3538944 个方块、55296 个高度图列、5328 个高度图 long，全部 `0 mismatches`。
 
+### 第二轮：`features` 接进游戏（设计稿 5.3.1 / features-plan 3.2）
+
+`features` 阶段不再透传。`mc-bamboo-game/src/worldgen_features.rs` 是游戏侧的接线：
+
+* **邻居只读快照**：`pyramid::neighbor_view` 给 `features`（和 `light`）声明半径 1 的
+  邻居和所需阶段，`advance_stage` 把 `(位置, 阶段)` 列进 `Task::Generate.neighbors`。
+  世界线程（`director_host.rs` 的 `partials`）把每个区块的 CARVERS 半成品存成不可变
+  `Arc<GeneratedChunk>`，发任务时按位置挂到 `ChunkWork::Generate` 上——全是 `Arc` 克隆，
+  不复制方块、不改快照。空缺的邻居由计算线程用 `cached_generate_chunk` 纯函数现算。
+  发出后世界线程不再改这份 `Arc`（只在 `Forgot` / 完工时移除）。
+* **`features` 纯函数**：`resolve_view` 拼 3×3，`run_features` 调
+  `chunk::Generator::features()`（`applyBiomeDecoration`）。已移植的 `minecraft:ore`
+  照常放，其余类型标 `unsupported` 跳过（`feature/run.rs`，地物 A/B 合入后自动生效）。
+* **写邻居的增量**：中心自己的地物、溢出到 8 个邻居的写、以及 8 个邻居中心溢进来的写
+  都表示成世界坐标增量。世界线程按 `TaskId` 顺序（`collect_compute` 已排好序）追加到
+  目标区块的增量表，`Task::Assemble` 时 `assemble_feature_column` 排 `(x,y,z,state)`
+  规范序再落到交付盒子——与线程调度、回执到达顺序无关。
+* **确定性重算**：Bamboo 的调度不保证 8 个邻居的 `features` 都在中心组装前落地，所以中心
+  这次 `features` 用 `cached_feature_run`（线程本地缓存）纯函数重算 8 个邻居中心写进来的
+  增量，保证本区块需要的集合从自己的 features 结果就齐。`features` 是纯函数、随机数只从
+  种子和坐标派生，命中缓存不改结果。
+* **验收**：`gen-world <java> --through features`（内部给 Java 加 `--ore-only`，Bamboo 调
+  **游戏里这份** `game_features`）逐方块比 3×3 九宫格，`--break-self-test` 自检会失败；
+  `--seeds 2 --chunks 4 --through features --salt 1` 实跑 8 个中心 / 7077888 方块 0 不一致，
+  carvers 路径回归 0 不一致。`world::staged_tests::one_and_four_threads_generate_identical_feature_blocks`
+  用 1 线程和 4 线程计算池生成同一片 3×3 normal 区块，逐格方块相同。
+
+和官方的**语义差异**（写进本轮汇报的疑点清单）：官方邻居溢出的写来自各邻居区块跑到
+`FEATURES` 时的 `WorldGenRegion`，Bamboo 改为中心纯函数重算；增量按规范序而非官方生成顺序
+生效；同格重复写由规范序里最后一条生效；邻居快照是干净 CARVERS 地形，`WorldGenRegion`
+读的可能是邻居更靠后阶段的内容。这些都不改变「已移植矿石」的逐格结果（对拍 0 不一致），
+但在换上更多地物、结构、生成期光照后要重新核对。
+
 ### 各阶段耗时与生成能否跟上飞行
 
 `cargo run --release -p mc-bamboo-worldgen --example chunk_timing` 量的是纯函数
@@ -466,26 +559,57 @@ CARVERS 约 37 ms（release，不含建 `Generator`、不含 `ChunkColumn` 组�
 `gen-world` 的 release 实跑：每区块额外要做 `PalettedContainer` 重打包和
 `Chunk::from_sections` 重算 4 张高度图，量到约 40 ms/区块量级。
 
-飞行的压测场景（`fly-20` 之类）本轮**没有实跑**：`PipelineKind::Staged` 的完整依赖图
-里 `structure_references` / `biomes` / `terrain` / `features` 要半径 8 的
-`structure_starts`，`features` 要半径 1 的 `terrain`，`light` 要半径 1 的
-`initialize_light`；一个可见区块会牵出一大圈依赖区块。结构/地物/光照阶段目前是透传
-空实现，这些依赖都是廉价的空盒子，但真实地形仍要按 `ChunkStep` 的半径铺开。
-计算池默认 4 线程、每线程一个 `Generator`，生成不占世界线程；世界线程只收
-`TaskId` 排好序的回执。**结论待量**：换上真实地物/结构后要重跑 `fly-20`，量
-玩家飞行时每刻新生成区块数、在途生成数、信箱积压和 tick 起点抖动，再决定线程数。
+飞行的压测本轮**实跑了一次**：release 构建 `bamboo` + `bamboo-loadtest`，临时目录里
+`server.properties` 写 `level-type=minecraft:normal`、`level-seed=0`、视距 8、离线，
+`BAMBOO_PROFILE=10`，6 个假玩家 `--pattern fly --layout spread --duration 30 --ramp 5`。
+16 核机器上 `default_staged_worker_threads() = min(4, 核数/2) = 4`，每线程一个
+`Generator`；客户端 6/6 连上、0 登录失败、0 掉线，平均收到 ~64 区块/秒。剖析器三份
+10 秒报告（各 201 tick）的关键数字：
+
+| 指标 | 第 1 份 | 第 2 份（稳态飞行） | 第 3 份 |
+|---|---|---|---|
+| `tick_total` p50 / p95 / max (ms) | 0.123 / 1.311 / 2.183 | 1.180 / 1.704 / 2.204 | 0.983 / 2.097 / 8.350 |
+| `tick_start_lateness` p95 (ms) | 134.218 | 0.492 | 8.389 |
+| `compute_in_flight` 平均 / max | 7.7 / 16 | 16 / 16 | 1.4 / 16 |
+| `compute_backlog` 平均 / max | 190 / 436 | 155 / 328 | 1.7 / 29 |
+| `chunks_delivered` 平均/刻 | 0.54 | 1.51 | 0.46 |
+| `chunk_latency_us` p50 | 0.85 s | 5.77 s | 12.6 s |
+| `skipped_catch_ups` | 0 | 0 | 0 |
+
+**结论：生成没有把世界线程的 tick 拖慢。** `tick_total` 全程 p50 0.12–1.18 ms、
+p95 1.3–2.1 ms、最坏一份 max 8.35 ms，远低于 20 TPS 的 50 ms 预算；生成在计算池里，
+世界线程只收 `TaskId` 排好序的回执，和 `docs/design.md`「世界线程从不等待 IO」一致。
+第 1 份 `tick_start_lateness` p95 134 ms 是整机高负载下的调度抖动，不是世界线程自己的
+耗时（同期 `tick_total` 只有 0.12 ms）。
+
+**但吞吐跟不上**：`compute_in_flight` 在稳态钉在 16（= 4 线程 × 每线程队列 4，
+见 `docs/profiling.md` 第 2 节），`compute_backlog` 峰值 436、稳态 144–328，
+`chunk_latency` p50 从 0.85 s 涨到 5.8 s 再到 12.6 s。也就是说 6 个飞行玩家 + 视距 8
+下，4 线程来不及交付区块，玩家会明显感到区块迟到；瓶颈是计算池吞吐，不是世界线程。
+
+**计算池默认线程数建议**：保留 `min(4, 核数/2) = 4` 作为默认。实测它把世界线程
+稳稳压在 ~1 ms/tick，已经达成「不拖慢 tick」这个首要目标；本机 ~34 ms/区块、4 线程
+理论约 120 区块/秒，但已被 6 名飞行玩家打满，再加线程会线性增加常驻内存
+（每线程一份 `Worldgen` + `Generator`），而这台 31 GB 机器当时已用到 97%。期望更多
+玩家同时在噪声世界飞行、且内存宽裕的部署，再显式把 `chunk_worker_threads` 提到 8，
+以 `compute_backlog` 不再持续增长、`chunk_latency` 回落到亚秒为准；**不要**因为这次
+测到 backlog 就调高默认值。等地物/结构/光照接进来（每区块更贵）后必须重跑本压测
+再评估线程数。
 
 ## 还没做
 
-* 地物（`features` 阶段透传，不放置任何地物；第 6 步矿石的纯函数已有、没接进游戏）、
-  结构（两个阶段是空实现）、生成时的 `initialize_light` / `light`（透传，光照由
-  **运行时**光照引擎在交付后补算）、`spawn` 阶段刷怪（空实现）。
-* 邻居只读快照 `Arc<ProtoChunk>` 与 `FeatureResult.deltas` 按 `TaskId` 顺序合并
-  （设计稿 5.3.1 的 M4 剩余部分）：`Task::Generate.neighbors` 目前恒为空，features /
-  light 拿不到半径 1 的邻居视图，所以这两块先透传。
+* 地物**类型**：`features` 阶段已接进游戏（见上），但只移植了 `minecraft:ore`；其余
+  feature / modifier / predicate 类型照对拍标 `unsupported` 跳过（地物 A/B 在做）。
+  结构（两个阶段是空实现）、生成时的 `initialize_light` / `light`（`light` 已带半径 1
+  邻居引用，但真实光照计算没移植，光照由**运行时**引擎在交付后补算）、`spawn` 刷怪仍是空实现。
+* 生成期光照 `initialize_light` / `light` 的真实计算（`isLightOn=true`、天空光 / 方块光
+  逐格对拍）：邻居视图的接口已经就位，计算本身是下一轮。
 * 下界和末地（无 `aquifers` 的路径、五群系末地源、下界老 fbm）。
 * `BlendingData` / `Blender` 的非空路径（老存档升级、旧区块混合）。
-* `Beardifier` 的非空路径（结构影响密度）。
+* `Beardifier` 的非空密度路径**已移植并对拍**（见 `docs/worldgen-structures-plan.md` 第 5 节
+  和 `cargo run -p mc-bamboo-vanilla -- beard <java>`）：纯函数、密度计算和整条
+  `finalDensity` 接入都逐位一致，但**没接进游戏**——`structure_starts` 阶段还是空实现，
+  游戏里 `terrain` 仍走 `EMPTY` 那支；把真实结构件喂进 `terrain_with_beardifier` 是合并时的事。
 * `possibleBiomes` / `carverBiome` / `region.getBiomeManager()` 已在 `gen-world` 按真实
   服务端路径重新对拍（见「真实服务端路径与简化路径」），但 Rust 侧 `generate_chunk`
   仍走等价的简化路径：没有把 3×3 调色板并集的 `BiomeCondition.compile` 折叠、读

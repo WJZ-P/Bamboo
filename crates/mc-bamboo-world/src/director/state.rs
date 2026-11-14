@@ -12,7 +12,7 @@ use crate::ticket::{
     is_entity_ticking,
 };
 
-use super::pyramid::PipelineKind;
+use super::pyramid::{PipelineKind, neighbor_view};
 
 /// 一个完工的区块束。Director 不打开它，只整包搬运。
 ///
@@ -235,12 +235,19 @@ pub enum Task<C> {
         bytes: Vec<u8>,
     },
     /// `column` 是中心的半成品，`None` 表示执行器按模板造一个。
-    /// `neighbors` 是只读视图的 owned 快照。
+    /// `neighbors` 是这一步需要的邻居只读视图：`(位置, 邻居至少到了的阶段)`，
+    /// 半径和阶段由 `pyramid::neighbor_view` 给出。宿主按位置把不可变快照
+    /// （`Arc`）挂到计算任务上，Director 本身不碰盒子数据。
+    ///
+    /// `column` is the center's half-built box (`None` means build from a
+    /// template). `neighbors` lists the read-only neighbor view as
+    /// `(pos, minimum stage)`, from `pyramid::neighbor_view`; the host attaches
+    /// the immutable `Arc` snapshots to the compute job.
     Generate {
         pos: ChunkPos,
         stage: ChunkStatus,
         column: Option<C>,
-        neighbors: Vec<(ChunkPos, ChunkStatus, C)>,
+        neighbors: Vec<(ChunkPos, ChunkStatus)>,
         write_radius: i32,
     },
     Assemble {
@@ -1067,6 +1074,26 @@ impl<C: ChunkBundle> Director<C> {
         for &(needed, radius) in step.requires {
             self.ensure_dependencies(pos, radius, needed);
         }
+        // 邻居只读视图：按 `neighbor_view` 的半径把 3×3（去掉中心）列进任务，
+        // 宿主再用不可变快照填进来。和 `ensure_dependencies` 一样用饱和加减，
+        // 坐标到 i32 边界也不会溢出。
+        // Read-only neighbor view: list the radius-1 3x3 (minus the center) per
+        // `neighbor_view`; the host fills in immutable snapshots. Saturating
+        // offsets like `ensure_dependencies`.
+        let mut neighbors = Vec::new();
+        if let Some((radius, needed)) = neighbor_view(stage) {
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    if dx == 0 && dz == 0 {
+                        continue;
+                    }
+                    neighbors.push((
+                        ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz)),
+                        needed,
+                    ));
+                }
+            }
+        }
         self.enqueue(
             out,
             pos,
@@ -1076,7 +1103,7 @@ impl<C: ChunkBundle> Director<C> {
                 pos,
                 stage,
                 column,
-                neighbors: Vec::new(),
+                neighbors,
                 write_radius: step.write_radius,
             },
         );

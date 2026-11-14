@@ -30,6 +30,8 @@ const CHUNKS: [(i32, i32); 8] = [
 ];
 /// 恶地类型喂入的 surfaceHeight：40（<= seaLevel，无随机）、100（有随机）。
 const MESA_SURFACE_HEIGHTS: [i32; 2] = [40, 100];
+/// 林地府邸喂入的 startY（terrain 的 getLowestYIn5by5Box 结果）：都 >= 60。
+const MANSION_START_Y: [i32; 2] = [60, 90];
 
 /// 一条查询。
 struct Query {
@@ -96,6 +98,15 @@ fn build_queries() -> Vec<Query> {
                 cz,
                 arg: 0,
             });
+            for &start_y in &MANSION_START_Y {
+                queries.push(Query {
+                    kind: "woodland_mansion",
+                    seed,
+                    cx,
+                    cz,
+                    arg: start_y,
+                });
+            }
         }
     }
     queries
@@ -169,6 +180,7 @@ fn rust_lines(q: &Query) -> Result<Vec<String>, String> {
         "mineshaft_mesa" => pieces::mineshaft::generate(q.seed, q.cx, q.cz, true, q.arg),
         "stronghold" => pieces::stronghold::generate(q.seed, q.cx, q.cz),
         "ocean_monument" => pieces::ocean_monument::generate(q.seed, q.cx, q.cz),
+        "woodland_mansion" => pieces::woodland_mansion::generate(q.seed, q.cx, q.cz, q.arg)?,
         other => return Err(format!("no Rust layout for kind {other}")),
     };
     Ok(pieces.iter().map(Piece::canonical_line).collect())
