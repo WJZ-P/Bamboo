@@ -465,6 +465,10 @@ public final class ChunkgenOracle {
             long salt = 1;
             int through = 3;
             int stepsMask = ALL_STEPS;
+            // 逗号分隔的 Feature 类型 ID 白名单；null 表示不过滤。`--ore-only` 等价于
+            // `--feature-types minecraft:ore`，保留它是为了兼容旧的对拍脚本。
+            // Comma-separated Feature type-ID allow list; null means no filter.
+            // `--ore-only` is kept as an alias for `--feature-types minecraft:ore`.
             String featureAllowList = null;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
@@ -493,6 +497,7 @@ public final class ChunkgenOracle {
                         }
                     }
                     case "--ore-only" -> featureAllowList = "minecraft:ore";
+                    case "--feature-types" -> featureAllowList = args[++i];
                     case "--biomes-only" -> through = 0;
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
@@ -797,6 +802,17 @@ public final class ChunkgenOracle {
             if (allowed == null) {
                 return;
             }
+            // 白名单是逗号分隔的一组 Feature 类型 ID；逐个精确匹配 codec 的类型 ID，
+            // 不用注册名前缀猜。--ore-only 传单个 "minecraft:ore"，走同一条路径。
+            // The allow list is a comma-separated set of Feature type IDs, matched
+            // exactly against the codec type ID. --ore-only passes a single entry.
+            Set<String> types = new HashSet<>();
+            for (String part : allowed.split(",")) {
+                String trimmed = part.trim();
+                if (!trimmed.isEmpty()) {
+                    types.add(trimmed);
+                }
+            }
             Registry<net.minecraft.world.level.levelgen.placement.PlacedFeature> placed =
                     this.registries.lookupOrThrow(Registries.PLACED_FEATURE);
             Set<String> keep = new HashSet<>();
@@ -805,8 +821,7 @@ public final class ChunkgenOracle {
                     net.minecraft.world.level.levelgen.placement.PlacedFeature> entry
                     : placed.entrySet()) {
                 net.minecraft.world.level.levelgen.placement.PlacedFeature value = entry.getValue();
-                // 用 codec 的类型 ID 比，不用注册名前缀猜。
-                if (allowed.equals(featureTypeId(value.feature().value()))) {
+                if (types.contains(featureTypeId(value.feature().value()))) {
                     keep.add(entry.getKey().identifier().toString());
                 }
             }

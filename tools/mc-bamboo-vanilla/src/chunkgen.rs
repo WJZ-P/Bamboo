@@ -27,7 +27,7 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: chunkgen <java> [--seeds N] [--chunks N] [--salt S] \
-     [--through STAGE] [--steps 6] [--show N]";
+     [--through STAGE] [--steps 6] [--feature-types IDS] [--ore-only] [--show N]";
 /// 完整的 11 个地物步骤；`--steps` 只是过渡期的诊断开关。
 const ALL_STEPS: i32 = (1 << 11) - 1;
 const DEFAULT_SHOW: usize = 8;
@@ -111,8 +111,12 @@ struct Options {
     features: bool,
     /// 转发给 Java 侧的 `--steps` 掩码。
     steps: i32,
-    /// `--ore-only`：Java 侧只留 `minecraft:ore`，Rust 侧同样过滤。
-    ore_only: bool,
+    /// `--feature-types` / `--ore-only`：Java 侧只留这些类型的 placed feature，
+    /// Rust 侧用同一组类型过滤 indices。`None` 表示不过滤（跑全部）。
+    ///
+    /// `--feature-types` / `--ore-only`: Java keeps only these placed-feature types,
+    /// Rust filters indices by the same set. `None` means no filtering.
+    feature_types: Option<Vec<String>>,
 }
 
 impl Options {
@@ -125,12 +129,12 @@ impl Options {
             through: Stage::Noise,
             features: false,
             steps: ALL_STEPS,
-            ore_only: false,
+            feature_types: None,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
-                "--seeds" | "--chunks" | "--salt" | "--steps" => {
+                "--seeds" | "--chunks" | "--salt" | "--steps" | "--feature-types" => {
                     let value = args.next().ok_or(USAGE)?;
                     if arg == "--steps" {
                         let mut mask = 0_i32;
@@ -143,12 +147,20 @@ impl Options {
                         }
                         options.steps = mask;
                     }
+                    if arg == "--feature-types" {
+                        let types: Vec<String> = value
+                            .split(',')
+                            .map(|s| s.trim().to_owned())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        options.feature_types = Some(types);
+                    }
                     options
                         .forwarded
                         .extend([arg.to_owned(), (*value).to_owned()]);
                 }
                 "--ore-only" => {
-                    options.ore_only = true;
+                    options.feature_types = Some(vec!["minecraft:ore".to_owned()]);
                     options.forwarded.push("--ore-only".to_owned());
                 }
                 "--biomes-only" => {
@@ -206,7 +218,7 @@ struct Report<'a> {
     biomes_only: bool,
     features: bool,
     steps: i32,
-    ore_only: bool,
+    feature_types: Option<Vec<String>>,
     mismatches: Vec<String>,
     show: usize,
     ended: bool,
@@ -240,7 +252,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         biomes_only: options.biomes_only,
         features: options.features,
         steps: options.steps,
-        ore_only: options.ore_only,
+        feature_types: options.feature_types,
         mismatches: Vec::new(),
         show: options.show.unwrap_or(DEFAULT_SHOW),
         ended: false,
@@ -567,7 +579,9 @@ impl Report<'_> {
         }
 
         // 造 9 个区块的 CARVERS 结果 + BIOMES 群系格 + primed 高度图。
-        let ore_only = self.ore_only;
+        // 先把过滤清单拷出来，避免和 `self.generator` 的可变借用冲突。
+        // Copy the filter out first to avoid clashing with the `self.generator` borrow.
+        let allowed = self.feature_types.clone();
         let generator = match self.generator(seed) {
             Ok(generator) => generator,
             Err(error) => {
@@ -613,12 +627,7 @@ impl Report<'_> {
             biomes: biomes.try_into().expect("9 chunks"),
             heights: heights.try_into().expect("9 chunks"),
         };
-        let allowed = if ore_only {
-            Some(&["minecraft:ore"][..])
-        } else {
-            None
-        };
-        let result = match generator.features(&input, steps, allowed) {
+        let result = match generator.features(&input, steps, allowed.as_deref()) {
             Ok(result) => result,
             Err(error) => {
                 self.mismatch(format!(

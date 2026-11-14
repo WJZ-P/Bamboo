@@ -30,8 +30,10 @@ pub struct FeatureContext<'a> {
     pub seed: i64,
     /// 只跑这些 step；`(1<<11)-1` 表示全部。过渡期诊断用。
     pub steps_mask: i32,
-    /// 只跑这些配置类型；`None` 表示全部。过渡期诊断用。
-    pub allowed_kinds: Option<&'static [&'static str]>,
+    /// 只跑这些配置类型；`None` 表示全部。过渡期诊断用（`--feature-types`）。
+    ///
+    /// Only run these config types; `None` means all. Diagnostic `--feature-types`.
+    pub allowed_kinds: Option<&'a [String]>,
 }
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数。
@@ -97,7 +99,7 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                     let Some((kind, _)) = resolve_feature(ctx.registry, &placed.feature) else {
                         continue;
                     };
-                    if !kinds.contains(&kind.as_str()) {
+                    if !kinds.iter().any(|k| k == &kind) {
                         continue;
                     }
                 }
@@ -126,7 +128,7 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
             };
             if ctx
                 .allowed_kinds
-                .is_some_and(|kinds| !kinds.contains(&kind.as_str()))
+                .is_some_and(|kinds| !kinds.iter().any(|k| k == &kind))
             {
                 continue;
             }
