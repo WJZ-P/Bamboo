@@ -105,6 +105,13 @@ pub enum IntProvider {
         min: i32,
         max: i32,
     },
+    /// `WeightedListInt`：`WeightedList.getRandomOrThrow` 选一项，再 sample 那一项。
+    ///
+    /// `WeightedListInt`: pick an entry via `WeightedList.getRandomOrThrow`, then sample it.
+    WeightedList {
+        entries: Vec<(i32, IntProvider)>,
+        total: i32,
+    },
 }
 
 impl IntProvider {
@@ -158,6 +165,31 @@ impl IntProvider {
                 min: integer("min_inclusive")?,
                 max: integer("max_inclusive")?,
             },
+            // `WeightedListInt`：`distribution` 是 `{data: IntProvider, weight}` 数组，
+            // `data` 可以是裸整数（Constant）或嵌套的 IntProvider。
+            // `WeightedListInt`: `distribution` is a list of `{data, weight}`;
+            // `data` may be a bare int (Constant) or a nested IntProvider.
+            "minecraft:weighted_list" => {
+                let distribution = object
+                    .get("distribution")
+                    .and_then(Value::as_array)
+                    .ok_or("weighted_list has no distribution")?;
+                let mut entries = Vec::with_capacity(distribution.len());
+                let mut total: i32 = 0;
+                for item in distribution {
+                    let weight = item
+                        .get("weight")
+                        .and_then(Value::as_i64)
+                        .ok_or("weighted_list entry has no weight")?
+                        as i32;
+                    let provider = IntProvider::parse(
+                        item.get("data").ok_or("weighted_list entry has no data")?,
+                    )?;
+                    total += weight;
+                    entries.push((weight, provider));
+                }
+                Self::WeightedList { entries, total }
+            }
             _ => return Err(format!("unsupported int provider {kind}")),
         })
     }
@@ -194,6 +226,25 @@ impl IntProvider {
             // ClampedInt.sample：先 sample source（消费随机数），再 clamp。
             // ClampedInt.sample: sample the source (consuming random), then clamp.
             Self::Clamped { source, min, max } => source.sample(random).clamp(*min, *max),
+            // `WeightedList.getRandomOrThrow`：nextInt(totalWeight) 先消费一次，
+            // 再按累计权重选中的那一项 sample（可能再消费随机数）。Flat / Compact
+            // 两种 selector 的累计权重结果一致，用循环复现即可。
+            // `WeightedList.getRandomOrThrow`: consume nextInt(totalWeight) first,
+            // then sample the selected entry (which may consume more). Flat and
+            // Compact selectors agree on the cumulative-weight mapping.
+            Self::WeightedList { entries, total } => {
+                if *total == 0 {
+                    return 0;
+                }
+                let mut selection = random.next_int(*total);
+                for (weight, provider) in entries {
+                    selection -= *weight;
+                    if selection < 0 {
+                        return provider.sample(random);
+                    }
+                }
+                0
+            }
         }
     }
 }
@@ -434,6 +485,46 @@ mod tests {
         let b = random();
         for _ in 0..1000 {
             let expected = b.next_int_between_inclusive(-3, 1).clamp(0, 1);
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
+
+    #[test]
+    fn weighted_list_selects_then_samples_like_official() {
+        // `cactus` 第二层花：distribution [{data:0,w:3},{data:1,w:1}]，total=4。
+        // getRandomOrThrow 先 nextInt(4)，选中项再 sample（这里都是 Constant，不取数）。
+        // `cactus` flower layer: distribution [{data:0,w:3},{data:1,w:1}], total=4.
+        // getRandomOrThrow consumes nextInt(4), then samples the selected Constant.
+        let value: Value = serde_json::from_str(
+            r#"{"distribution":[{"data":0,"weight":3},{"data":1,"weight":1}],"type":"minecraft:weighted_list"}"#,
+        )
+        .unwrap();
+        let provider = IntProvider::parse(&value).unwrap();
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let selection = b.next_int(4);
+            let expected = if selection < 3 { 0 } else { 1 };
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
+
+    #[test]
+    fn weighted_list_with_nested_provider_consumes_both_draws() {
+        // `cave_vine` 高度：distribution 里是 uniform(0,2)，weight 单项为 1。
+        // nextInt(1) 仍消费一次，再 sample uniform。两个同种子源应完全一致。
+        // `cave_vine` height: distribution holds uniform(0,2), single weight 1.
+        // nextInt(1) still consumes one draw, then the uniform samples.
+        let value: Value = serde_json::from_str(
+            r#"{"distribution":[{"data":{"min_inclusive":0,"max_inclusive":2,"type":"minecraft:uniform"},"weight":1}],"type":"minecraft:weighted_list"}"#,
+        )
+        .unwrap();
+        let provider = IntProvider::parse(&value).unwrap();
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let _ = b.next_int(1);
+            let expected = b.next_int_between_inclusive(0, 2);
             assert_eq!(provider.sample(&a), expected);
         }
     }

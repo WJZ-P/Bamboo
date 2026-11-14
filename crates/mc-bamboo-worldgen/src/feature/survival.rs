@@ -14,7 +14,7 @@
 //! stay unported and make the whole placed feature unsupported.
 
 use mc_bamboo_data::{
-    BlockClass, block_id_of_state, block_of_state, block_tag, facts, state_facts,
+    BlockClass, block_id_of_state, block_of_state, block_tag, facts, state_facts, state_fluid, tags,
 };
 
 use super::world::FeatureWorld;
@@ -34,6 +34,10 @@ enum Kind {
     DoublePlant(&'static str),
     /// `LeafLitterBlock.canSurvive`：下面那格 `isFaceSturdy(FULL, UP)`。
     SturdyFaceUp,
+    /// `CactusBlock.canSurvive`：四周、下面、上面三处判定。
+    Cactus,
+    /// `SugarCaneBlock.canSurvive`：下面和相邻流体判定。
+    SugarCane,
 }
 
 /// 这个状态的存活判定是否已移植。未移植时调用方要把整个 placed feature 标 unsupported，
@@ -60,8 +64,86 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         // 即 `isFaceSturdy(FULL)`；Direction.UP 的 ordinal 是 1。
         // `LeafLitterBlock.canSurvive`: `isFaceSturdy(FULL, UP)`; UP's ordinal is 1.
         Some(Kind::SturdyFaceUp) => state_facts(below) & (1u64 << (facts::STURDY_FULL + 1)) != 0,
+        Some(Kind::Cactus) => cactus_can_survive(world, pos),
+        Some(Kind::SugarCane) => sugar_cane_can_survive(world, pos),
         None => false,
     }
+}
+
+/// `Direction.Plane.HORIZONTAL` 的四个水平偏移；这些判定只读方块，顺序不影响结果。
+///
+/// The four `Direction.Plane.HORIZONTAL` offsets; these checks only read blocks,
+/// so order does not change the result.
+const HORIZONTAL: [(i32, i32, i32); 4] = [(0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0)];
+
+fn block_id(state: u32) -> i32 {
+    block_id_of_state(state).map_or(-1, |id| id as i32)
+}
+
+fn is_block(state: u32, name: &str) -> bool {
+    block_of_state(state).is_some_and(|block| block.name == name)
+}
+
+fn in_block_tag(state: u32, tag: &str) -> bool {
+    block_tag(tag).is_some_and(|ids| ids.contains(&block_id(state)))
+}
+
+/// `FluidState.is(tag)`：状态里的流体 ID 是否在该流体标签里。
+///
+/// `FluidState.is(tag)`: whether the state's fluid ID belongs to the fluid tag.
+fn in_fluid_tag(state: u32, tag: &str) -> bool {
+    let fluid = state_fluid(state).fluid;
+    let group = &tags::TAG_GROUPS[tags::fluid_tags::GROUP];
+    group
+        .tags
+        .iter()
+        .find(|entry| entry.name == tag)
+        .is_some_and(|entry| entry.ids.contains(&fluid))
+}
+
+/// `CactusBlock.canSurvive`：水平相邻不能有实心方块或岩浆；下面得是仙人掌本身或
+/// `supports_cactus` 标签；上面那一格不能是 `liquid()`。
+///
+/// `CactusBlock.canSurvive`: no solid/lava horizontal neighbour; below must be a
+/// cactus or the `supports_cactus` tag; the block above must not be `liquid()`.
+fn cactus_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    for (dx, _, dz) in HORIZONTAL {
+        let neighbor = world.get_block(pos.0 + dx, pos.1, pos.2 + dz);
+        if state_facts(neighbor) & facts::SOLID != 0 || in_fluid_tag(neighbor, "minecraft:lava") {
+            return false;
+        }
+    }
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    let supported =
+        is_block(below, "minecraft:cactus") || in_block_tag(below, "minecraft:supports_cactus");
+    let above = world.get_block(pos.0, pos.1 + 1, pos.2);
+    supported && state_facts(above) & facts::LIQUID == 0
+}
+
+/// `SugarCaneBlock.canSurvive`：下面是甘蔗则恒 true；否则下面得在
+/// `supports_sugar_cane` 标签里，且水平相邻的某格流体或方块在
+/// `supports_sugar_cane_adjacently` 标签里。
+///
+/// `SugarCaneBlock.canSurvive`: sugar cane below is always true; otherwise the
+/// block below must be in `supports_sugar_cane` and a horizontal neighbour must
+/// be in `supports_sugar_cane_adjacently` (fluid or block tag).
+fn sugar_cane_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    if is_block(below, "minecraft:sugar_cane") {
+        return true;
+    }
+    if !in_block_tag(below, "minecraft:supports_sugar_cane") {
+        return false;
+    }
+    for (dx, _, dz) in HORIZONTAL {
+        let side = world.get_block(pos.0 + dx, pos.1 - 1, pos.2 + dz);
+        if in_fluid_tag(side, "minecraft:supports_sugar_cane_adjacently")
+            || in_block_tag(side, "minecraft:supports_sugar_cane_adjacently")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// 是否走 `DoublePlantBlock.placeAt`（放上下两格）而不是单格 `setBlock`。
@@ -105,10 +187,12 @@ fn classify(state: u32) -> Option<Kind> {
         BlockClass::DoublePlantBlock | BlockClass::TallFlowerBlock => {
             Kind::DoublePlant("minecraft:supports_vegetation")
         }
-        // 蘑菇（亮度）、睡莲（流体）、孢子花（canSupportCenter）、甘蔗、仙人掌、
-        // 苔藓地毯等都覆写了 canSurvive/mayPlaceOn，本轮明确不支持。
+        BlockClass::CactusBlock => Kind::Cactus,
+        BlockClass::SugarCaneBlock => Kind::SugarCane,
+        // 蘑菇（亮度）、睡莲（流体）、孢子花（canSupportCenter）、
+        // 苔藓地毯等仍覆写了 canSurvive/mayPlaceOn，本轮明确不支持。
         // Mushroom (brightness), lily pad (fluid), spore blossom (canSupportCenter),
-        // sugar cane, cactus, mossy carpet override canSurvive/mayPlaceOn: unported.
+        // mossy carpet still override canSurvive/mayPlaceOn: unported.
         _ => return None,
     })
 }
@@ -142,6 +226,8 @@ mod tests {
             "minecraft:short_dry_grass",
             "minecraft:tall_dry_grass",
             "minecraft:leaf_litter",
+            "minecraft:sugar_cane",
+            "minecraft:cactus",
         ] {
             assert!(supports(state(name)), "{name}");
         }
@@ -154,8 +240,6 @@ mod tests {
             "minecraft:red_mushroom",
             "minecraft:lily_pad",
             "minecraft:spore_blossom",
-            "minecraft:sugar_cane",
-            "minecraft:cactus",
         ] {
             assert!(!supports(state(name)), "{name}");
         }

@@ -8,6 +8,7 @@
 //! `biome_features` 和 `features_per_step` 四个键，见 `docs/worldgen-features-plan.md`。
 
 pub mod bamboo;
+pub mod block_column;
 pub mod block_predicate;
 pub mod composition;
 pub mod dispatch;

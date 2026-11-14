@@ -35,6 +35,14 @@ pub enum Modifier {
     ///
     /// `BlockPredicateFilter`: passes a candidate through unchanged, no random.
     BlockPredicateFilter(BlockPredicate),
+    /// `NoiseBasedCountPlacement`：用静态 `SimplexNoise` 算重复次数，不消费随机数。
+    ///
+    /// `NoiseBasedCountPlacement`: repeats via a static `SimplexNoise`, no random consumed.
+    NoiseBasedCount {
+        noise_to_count_ratio: i32,
+        noise_factor: f64,
+        noise_offset: f64,
+    },
     /// 已解析但本轮不生效的修饰器（例如 `surface_relative_threshold_filter`）。
     /// 命中时置 `unsupported`，让对拍跳过这个区块。
     Unsupported(String),
@@ -88,6 +96,21 @@ impl Modifier {
                     Self::Unsupported(kind.to_owned())
                 }
             }
+            // `NoiseBasedCountPlacement`：配置里三个数，缺省 noise_offset=0。
+            // `NoiseBasedCountPlacement`: three config numbers, noise_offset defaults to 0.
+            "minecraft:noise_based_count" => Self::NoiseBasedCount {
+                noise_to_count_ratio: field("noise_to_count_ratio")?
+                    .as_i64()
+                    .ok_or("noise_based_count has no ratio")?
+                    as i32,
+                noise_factor: field("noise_factor")?
+                    .as_f64()
+                    .ok_or("noise_based_count has no factor")?,
+                noise_offset: object
+                    .get("noise_offset")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+            },
             _ => Self::Unsupported(kind.to_owned()),
         })
     }
@@ -182,6 +205,25 @@ fn modify(
         // `PlacementFilter.modify`: forward origin only when shouldPlace is true.
         Modifier::BlockPredicateFilter(predicate) => {
             if predicate.test(ctx.world, pos) {
+                out.push(pos);
+            }
+        }
+        // `NoiseBasedCountPlacement.count`：`ceil((BIOME_INFO_NOISE.get(x/f, z/f) + offset) * ratio)`，
+        // 然后把 origin 复制 count 次；不消费随机数。
+        // `NoiseBasedCountPlacement.count`: ceil of the scaled static noise, then
+        // duplicate the origin that many times; no random consumed.
+        Modifier::NoiseBasedCount {
+            noise_to_count_ratio,
+            noise_factor,
+            noise_offset,
+        } => {
+            let noise = crate::biome_temperature::biome_info_noise(
+                f64::from(x) / *noise_factor,
+                f64::from(z) / *noise_factor,
+            );
+            let count = (f64::from(noise) + *noise_offset) * f64::from(*noise_to_count_ratio);
+            let count = count.ceil() as i32;
+            for _ in 0..count.max(0) {
                 out.push(pos);
             }
         }
@@ -355,6 +397,23 @@ mod tests {
     }
 
     #[test]
+    fn noise_based_count_parses_and_static_noise_is_stable() {
+        let value: Value = serde_json::from_str(
+            r#"{"noise_factor":80,"noise_to_count_ratio":120,"type":"minecraft:noise_based_count"}"#,
+        )
+        .unwrap();
+        let modifier = Modifier::parse(&value).unwrap();
+        assert!(modifier.is_supported());
+        assert!(matches!(modifier, Modifier::NoiseBasedCount { .. }));
+        // 静态噪声和世界种子无关，同一坐标两次求值必须完全一致且有限。
+        // The static noise is seed-independent: identical and finite for one input.
+        let first = crate::biome_temperature::biome_info_noise(12.5, -7.25);
+        let second = crate::biome_temperature::biome_info_noise(12.5, -7.25);
+        assert_eq!(first, second);
+        assert!(first.is_finite());
+    }
+
+    #[test]
     fn parses_block_predicate_filter_and_flags_unported_predicates() {
         let air: Value = serde_json::from_str(
             r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:matching_block_tag","tag":"minecraft:air"}}"#,
@@ -370,10 +429,19 @@ mod tests {
         assert!(Modifier::parse(&sapling).unwrap().is_supported());
         // 存活判定未移植的 state 仍让整条修饰器 unsupported。
         // A state with an unported survival check still makes the modifier unsupported.
-        let cane: Value = serde_json::from_str(
-            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:sugar_cane"}}"#,
+        let mushroom: Value = serde_json::from_str(
+            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:red_mushroom"}}"#,
         )
         .unwrap();
-        assert!(!Modifier::parse(&cane).unwrap().is_supported());
+        assert!(!Modifier::parse(&mushroom).unwrap().is_supported());
+        // 甘蔗 / 仙人掌的存活判定已移植，整条修饰器现在支持。
+        // Sugar cane / cactus survival is ported, so the modifier is now supported.
+        for name in ["minecraft:sugar_cane", "minecraft:cactus"] {
+            let text = format!(
+                r#"{{"type":"minecraft:block_predicate_filter","predicate":{{"type":"minecraft:would_survive","state":"{name}"}}}}"#
+            );
+            let value: Value = serde_json::from_str(&text).unwrap();
+            assert!(Modifier::parse(&value).unwrap().is_supported(), "{name}");
+        }
     }
 }

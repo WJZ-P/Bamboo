@@ -316,11 +316,11 @@ mod tests {
 
     #[test]
     fn unported_kind_marks_the_predicate_unsupported() {
-        // would_survive 的 state 若存活判定未移植（甘蔗需要邻水），仍标 unsupported。
-        // A would_survive with an unported survival check (sugar cane needs adjacent water)
+        // would_survive 的 state 若存活判定未移植（蘑菇要亮度），仍标 unsupported。
+        // A would_survive with an unported survival check (mushroom needs brightness)
         // stays unsupported.
         let would: Value =
-            json!({"type": "minecraft:would_survive", "state": "minecraft:sugar_cane"});
+            json!({"type": "minecraft:would_survive", "state": "minecraft:red_mushroom"});
         assert!(!BlockPredicate::parse(&would).is_supported());
         // all_of 里夹一个未移植的，整体也要 unsupported。
         // An unported child makes the whole all_of unsupported.
@@ -328,10 +328,18 @@ mod tests {
             "type": "minecraft:all_of",
             "predicates": [
                 {"type": "minecraft:matching_block_tag", "tag": "minecraft:air"},
-                {"type": "minecraft:would_survive", "state": "minecraft:sugar_cane"},
+                {"type": "minecraft:would_survive", "state": "minecraft:red_mushroom"},
             ],
         });
         assert!(!BlockPredicate::parse(&all).is_supported());
+    }
+
+    #[test]
+    fn cactus_and_sugar_cane_would_survive_are_supported() {
+        for name in ["minecraft:cactus", "minecraft:sugar_cane"] {
+            let would: Value = json!({"type": "minecraft:would_survive", "state": name});
+            assert!(BlockPredicate::parse(&would).is_supported(), "{name}");
+        }
     }
 
     #[test]
