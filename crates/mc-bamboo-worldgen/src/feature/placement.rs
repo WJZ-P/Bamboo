@@ -370,7 +370,7 @@ mod tests {
             assert!(Modifier::parse(&value).unwrap().is_supported(), "{label}");
         }
         let unknown: Value =
-            serde_json::from_str(r#"{"type":"minecraft:surface_water_depth_filter"}"#).unwrap();
+            serde_json::from_str(r#"{"type":"minecraft:fixed_placement"}"#).unwrap();
         assert!(!Modifier::parse(&unknown).unwrap().is_supported());
     }
 
