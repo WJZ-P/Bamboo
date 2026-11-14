@@ -42,6 +42,10 @@
 //!
 //!     Compare the piece layout of the four code-built single-piece structures against
 //!     the official piece classes
+//! mc-bamboo-vanilla structure-save <java 路径>
+//!     用官方 CompoundTag / PieceContainer 对拍区块 NBT 的 structures 键（starts / References）
+//!
+//!     Compare the chunk NBT structures key (starts / References) against vanilla codecs
 //! mc-bamboo-vanilla structure-templates <java 路径>
 //!     用官方 NbtIo 逐节点对拍导出的结构模板 NBT
 //!
@@ -128,6 +132,8 @@ mod structure_pieces;
 #[cfg(feature = "oracle")]
 mod structure_rings;
 #[cfg(feature = "oracle")]
+mod structure_save;
+#[cfg(feature = "oracle")]
 mod structure_single;
 mod structure_templates;
 #[cfg(feature = "oracle")]
@@ -185,6 +191,8 @@ const STRUCTURE_PIECES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePie
 #[cfg(feature = "oracle")]
 const STRUCTURE_SINGLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSingleOracle.java";
 #[cfg(feature = "oracle")]
+const STRUCTURE_SAVE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSaveOracle.java";
+#[cfg(feature = "oracle")]
 const STRUCTURE_TEMPLATES_SOURCE: &str =
     "tools/mc-bamboo-vanilla/java/StructureTemplateOracle.java";
 #[cfg(feature = "oracle")]
@@ -221,6 +229,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-validity <java 路径>
       mc-bamboo-vanilla structure-pieces <java 路径>
       mc-bamboo-vanilla structure-single <java 路径>
+      mc-bamboo-vanilla structure-save <java 路径>
       mc-bamboo-vanilla structure-templates <java 路径>
       mc-bamboo-vanilla beardifier <java 路径>
       mc-bamboo-vanilla machine <java 路径>
@@ -277,6 +286,7 @@ fn run() -> Result<(), String> {
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
         ["structure-pieces", java, ref options @ ..] => structure_pieces_cli(java, options),
         ["structure-single", java, ref options @ ..] => structure_single_cli(java, options),
+        ["structure-save", java, ref options @ ..] => structure_save_cli(java, options),
         ["structure-templates", java, ref options @ ..] => structure_templates_cli(java, options),
         ["beardifier", java, ref options @ ..] => beardifier_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
@@ -542,6 +552,15 @@ fn structure_single_cli(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn structure_save_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    structure_save::run(
+        official_program(java, STRUCTURE_SAVE_SOURCE)?,
+        java,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
 fn structure_templates_cli(java: &str, options: &[&str]) -> Result<(), String> {
     structure_templates_oracle::run(
         official_program(java, STRUCTURE_TEMPLATES_SOURCE)?,
@@ -786,6 +805,11 @@ fn structure_pieces_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn structure_single_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_save_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

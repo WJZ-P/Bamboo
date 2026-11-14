@@ -121,10 +121,7 @@ impl SaveStart {
     /// start writes only `id = "INVALID"` (`StructureStart.INVALID_START`).
     pub fn to_tag(&self) -> Tag {
         if self.children.is_empty() {
-            return Tag::Compound(vec![(
-                "id".to_owned(),
-                Tag::String("INVALID".to_owned()),
-            )]);
+            return Tag::Compound(vec![("id".to_owned(), Tag::String("INVALID".to_owned()))]);
         }
         let children = Tag::List(self.children.iter().map(SavePiece::to_tag).collect());
         Tag::Compound(vec![
@@ -230,10 +227,7 @@ mod tests {
         };
         assert_eq!(
             start.to_tag(),
-            Tag::Compound(vec![(
-                "id".to_owned(),
-                Tag::String("INVALID".to_owned())
-            )])
+            Tag::Compound(vec![("id".to_owned(), Tag::String("INVALID".to_owned()))])
         );
     }
 
@@ -300,14 +294,8 @@ mod tests {
                     (
                         "Children".to_owned(),
                         Tag::List(vec![Tag::Compound(vec![
-                            (
-                                "id".to_owned(),
-                                Tag::String("minecraft:tedp".to_owned())
-                            ),
-                            (
-                                "BB".to_owned(),
-                                Tag::IntArray(vec![1, 64, 2, 21, 78, 22])
-                            ),
+                            ("id".to_owned(), Tag::String("minecraft:tedp".to_owned())),
+                            ("BB".to_owned(), Tag::IntArray(vec![1, 64, 2, 21, 78, 22])),
                             ("O".to_owned(), Tag::Int(2)),
                             ("GD".to_owned(), Tag::Int(0)),
                         ])])
