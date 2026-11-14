@@ -465,6 +465,10 @@ public final class ChunkgenOracle {
             long salt = 1;
             int through = 3;
             int stepsMask = ALL_STEPS;
+            // 逗号分隔的 Feature 类型 ID 白名单；null 表示不过滤。`--ore-only` 等价于
+            // `--feature-types minecraft:ore`，保留它是为了兼容旧的对拍脚本。
+            // Comma-separated Feature type-ID allow list; null means no filter.
+            // `--ore-only` is kept as an alias for `--feature-types minecraft:ore`.
             String featureAllowList = null;
             // 真实服务端路径：3×3 possibleBiomes、carverBiome 分支、region.getBiomeManager()。
             // Real-server path: 3x3 possibleBiomes, the carverBiome branch, region.getBiomeManager().
@@ -496,6 +500,7 @@ public final class ChunkgenOracle {
                         }
                     }
                     case "--ore-only" -> featureAllowList = "minecraft:ore";
+                    case "--feature-types" -> featureAllowList = args[++i];
                     case "--biomes-only" -> through = 0;
                     case "--real-path" -> realPath = true;
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
@@ -809,6 +814,20 @@ public final class ChunkgenOracle {
             if (allowed == null) {
                 return;
             }
+            // 白名单是逗号分隔的一组条目：每个可以是 Feature 类型 ID（精确匹配 codec
+            // 的类型 ID），也可以是 placed feature 的注册名（精确匹配）。这样既能按类型
+            // 放开一整类，也能只隔离出单个 placed feature 做逐方块对拍。
+            // `--ore-only` 传单个 "minecraft:ore"，走同一条路径。
+            // Comma-separated allow list: each entry is either a Feature type ID
+            // (matched against the codec type ID) or a placed-feature registry name
+            // (matched exactly), so a whole type or a single placed feature can be run.
+            Set<String> selectors = new HashSet<>();
+            for (String part : allowed.split(",")) {
+                String trimmed = part.trim();
+                if (!trimmed.isEmpty()) {
+                    selectors.add(trimmed);
+                }
+            }
             Registry<net.minecraft.world.level.levelgen.placement.PlacedFeature> placed =
                     this.registries.lookupOrThrow(Registries.PLACED_FEATURE);
             Set<String> keep = new HashSet<>();
@@ -817,9 +836,9 @@ public final class ChunkgenOracle {
                     net.minecraft.world.level.levelgen.placement.PlacedFeature> entry
                     : placed.entrySet()) {
                 net.minecraft.world.level.levelgen.placement.PlacedFeature value = entry.getValue();
-                // 用 codec 的类型 ID 比，不用注册名前缀猜。
-                if (allowed.equals(featureTypeId(value.feature().value()))) {
-                    keep.add(entry.getKey().identifier().toString());
+                String name = entry.getKey().identifier().toString();
+                if (selectors.contains(featureTypeId(value.feature().value())) || selectors.contains(name)) {
+                    keep.add(name);
                 }
             }
             if (keep.isEmpty()) {
