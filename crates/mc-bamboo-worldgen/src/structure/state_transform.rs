@@ -117,13 +117,25 @@ pub fn apply_mirror(state: u32, mirror: Mirror) -> u32 {
     };
     match block.name {
         // `WallTorchBlock.mirror`：`state.rotate(mirror.getRotation(FACING))`。
-        // `WallTorchBlock.mirror`: `state.rotate(mirror.getRotation(FACING))`.
-        "minecraft:wall_torch" => {
+        // `ButtonBlock` 继承 `HorizontalDirectionalBlock`，实现相同。
+        // `WallTorchBlock.mirror`, and `ButtonBlock` via `HorizontalDirectionalBlock`.
+        n if is_horizontal_facing(n) => {
             let Some(facing) = property_of(state, "facing") else {
                 return state;
             };
             let implied = mirror.get_rotation(facing);
             with_property(state, "facing", implied.rotate_facing(facing)).unwrap_or(state)
+        }
+        // `DoorBlock.mirror`：先按 `mirror.getRotation(FACING)` 旋转，再 `cycle(HINGE)`。
+        // `DoorBlock.mirror`: rotate by `mirror.getRotation(FACING)` then `cycle(HINGE)`.
+        n if is_door(n) => {
+            let Some(facing) = property_of(state, "facing") else {
+                return state;
+            };
+            let implied = mirror.get_rotation(facing);
+            let rotated =
+                with_property(state, "facing", implied.rotate_facing(facing)).unwrap_or(state);
+            cycle_hinge(rotated)
         }
         // `CrossCollisionBlock.mirror`：LEFT_RIGHT 交换 north/south，FRONT_BACK 交换 east/west。
         // `CrossCollisionBlock.mirror`: LEFT_RIGHT swaps north/south, FRONT_BACK east/west.
@@ -151,8 +163,17 @@ pub fn apply_rotation(state: u32, rotation: Rotation) -> u32 {
     };
     match block.name {
         // `WallTorchBlock.rotate`：`state.setValue(FACING, rotation.rotate(FACING))`。
-        // `WallTorchBlock.rotate`: `state.setValue(FACING, rotation.rotate(FACING))`.
-        "minecraft:wall_torch" => {
+        // `ButtonBlock` 继承 `HorizontalDirectionalBlock`，实现相同。
+        // `WallTorchBlock.rotate`, and `ButtonBlock` via `HorizontalDirectionalBlock`.
+        n if is_horizontal_facing(n) => {
+            let Some(facing) = property_of(state, "facing") else {
+                return state;
+            };
+            with_property(state, "facing", rotation.rotate_facing(facing)).unwrap_or(state)
+        }
+        // `DoorBlock.rotate`：只旋转 `facing`，不动 `hinge`。
+        // `DoorBlock.rotate`: only `facing` turns; `hinge` stays.
+        n if is_door(n) => {
             let Some(facing) = property_of(state, "facing") else {
                 return state;
             };
@@ -268,6 +289,51 @@ fn is_cross_collision(name: &str) -> bool {
         || name.ends_with("_wall")
         || name.ends_with("_pane")
         || name == "minecraft:iron_bars"
+}
+
+/// 是不是 `HorizontalDirectionalBlock` 的子类、且只有 `facing` 一个朝向属性
+/// （墙上火把、按钮、箱子、熔炉……）。要塞用到的是墙上火把和石按钮。
+///
+/// Whether the block is a `HorizontalDirectionalBlock` subclass whose only direction
+/// property is `facing` (wall torches, buttons, chests, furnaces, ...). The stronghold
+/// uses wall torches and stone buttons.
+fn is_horizontal_facing(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:wall_torch"
+            | "minecraft:stone_button"
+            | "minecraft:oak_button"
+            | "minecraft:spruce_button"
+            | "minecraft:birch_button"
+            | "minecraft:jungle_button"
+            | "minecraft:acacia_button"
+            | "minecraft:dark_oak_button"
+            | "minecraft:cherry_button"
+            | "minecraft:pale_oak_button"
+            | "minecraft:mangrove_button"
+            | "minecraft:bamboo_button"
+            | "minecraft:crimson_button"
+            | "minecraft:warped_button"
+            | "minecraft:polished_blackstone_button"
+    )
+}
+
+/// 是不是 `DoorBlock`（需要额外的 `cycle(HINGE)`）。
+///
+/// Whether the block is a `DoorBlock` (needs the extra `cycle(HINGE)`).
+fn is_door(name: &str) -> bool {
+    name.ends_with("_door") && name != "minecraft:iron_trapdoor"
+}
+
+/// `BlockState.cycle(HINGE)`：上下半扇互换。
+///
+/// `BlockState.cycle(HINGE)`: swap the two halves of the hinge.
+fn cycle_hinge(state: u32) -> u32 {
+    let Some(hinge) = property_of(state, "hinge") else {
+        return state;
+    };
+    let flipped = if hinge == "left" { "right" } else { "left" };
+    with_property(state, "hinge", flipped).unwrap_or(state)
 }
 
 /// 是不是 `BaseRailBlock` 的子类。
