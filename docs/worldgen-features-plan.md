@@ -848,21 +848,92 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 同一命令 0 不一致。如果以后复现「某个 placed feature 单独跑就错位、整批跑反而对」，
 先确认 `target/debug/mc-bamboo-vanilla.exe` 和 `mc-bamboo-worldgen` 是同一份构建。
 
+### 第二轮：`vegetation_patch`、`random_block` 与蘑菇（分支 `cb-wg-aquatic`）
+
+提交：`ec80aeb`（`JavaPosSet`）、`3b8d9d6`（`vegetation_patch` + `random_block` +
+蘑菇/地毯存活判定）、`3479dd3`（修 `HashMap` 的 resize 顺序 + 记录树化限制）。
+开工前合入 main 的 `753d877`（地形真实路径修复）。
+
+本轮落地：
+
+* `feature/java_set.rs`：复刻 `java.util.HashSet<BlockPos>` 的迭代顺序。
+  `VegetationPatchFeature` 把地表收进 `HashSet` 后按迭代顺序每点消费一次 `nextFloat`，
+  顺序错就整块随机流错位。实现按 OpenJDK 的 `HashMap`：容量 16 起、装载因子 0.75、
+  `h = (y + z*31)*31 + x` 再 `h ^ (h >>> 16)`、桶内尾插、`putVal` 先 `treeifyBin`
+  （桶内第 8 个且容量 < 64 就翻倍）再判 `++size > threshold`、翻倍按 `hash & oldCap`
+  做 lo/hi 拆分并保持相对顺序。单测用官方 JVM 实际打印的顺序（197 点圆盘、64 点椭圆、
+  20 点翻倍）逐一比对。
+* `feature/vegetation_patch.rs`：`VegetationPatchFeature` 全体 —— `xz_radius` 采样两次
+  各 +1、`placeGroundPatch` 的角列/边列短路（边列要 `extra_edge_column_chance != 0`
+  且 `nextFloat() <= chance`）、竖直两段扫描、`belowState.isFaceSturdy(opposite)`、
+  `depth.sample` + `extra_bottom_block_chance`、`placeGround`（同方块不移动位置）、
+  `distributeVegetation` 按集合迭代序、`WaterloggedVegetationPatchFeature` 的
+  `isExposed` + 换水 + `waterlogged=true` 覆写。
+* `state_provider.rs` 的 `random_block`（`HolderSet<Block>.getRandomElement`，等概率
+  `nextInt(size)`，用默认状态）；`StateProvider::parse_with` 支持 `Holder` 字符串查
+  `block_state_provider` 注册表。
+* `Extractor.java` 新增 `block_state_provider` 键（`worldgen.json` +174 行），解锁
+  `cave_vines_body` / `cave_vines_head`，`minecraft:cave_vines` 从 skipped 变成真跑通。
+* `survival.rs`：`CarpetBlock.canSurvive`（下面非空气）、`MushroomBlock.canSurvive`。
+
+对拍（`--through features`，逐方块）：
+
+| 集合 | 参数 | 结果 |
+|---|---|---|
+| `lush_caves_vegetation`（floor `moss_patch`） | `--steps 9 --seeds 3 --chunks 20 --salt 5` | 10 处，`--steps 0` 复现同一批（terrain 既有差异） |
+| `pale_moss_patch`（floor，含 `MossyCarpetBlock` 存活判定） | 同上 | 10 处，同 terrain |
+| `minecraft:cave_vines`（`block_column` + holder provider） | `--steps 9 --seeds 3 --chunks 8 --salt 3` | **0 不一致，0 skipped**（之前是 skipped） |
+| `lush_caves_vegetation,pale_moss_patch,sea_pickle,kelp_cold,glow_lichen,cave_vines` | `--steps 9 --seeds 3 --chunks 12 --salt 7` | **0 不一致，0 skipped**（36 中心 / 31850496 方块） |
+| `lush_caves_ceiling_vegetation`（ceiling `moss_patch_ceiling`） | `--steps 9 --seeds 3 --chunks 20 --salt 5` | **20 处未解决**：10 处 terrain + 10 处 `cave_vines` 位置错位，见疑点 |
+| 故意跳过 `place_ground_patch` | `--seeds 2 --chunks 4 --salt 3` | 0 处差异（该批次无繁茂洞穴，不能作为非假绿证据） |
+
+#### 已知限制：`HashMap` 桶内 8+ 元素时的树化
+
+官方 `HashMap` 在容量 ≥ 64 且某个桶到第 8 个节点时把桶转成红黑树，`treeify` 之后
+`moveRootToFront` 把树根挪到桶首，迭代顺序因此和纯链表不同。本实现只复刻链表
+（`ec80aeb` + `3479dd3`），**没有实现 `TreeNode` 树化**。`java_set.rs` 里
+`heavy_collisions_expose_the_untreeified_limit` 锁住了这个差异（官方从 192 开始、
+本实现从 0 开始）。
+
+这很可能是 `lush_caves_ceiling_vegetation` 那 10 处差异的根因：ceiling 的
+`vegetation_chance` 只有 0.08，surface 集合里只有约 5 个点被选中，顺序一错就选中
+完全不同的列；floor 的 `vegetation_chance` 是 0.8，几乎所有列都长植被，顺序错也看不
+出来。
+
+#### 蘑菇的亮度判据（已查清并落地）
+
+`WorldGenRegion` **没有覆写** `getRawBrightness`，它转发到 `level.getLightEngine()`
+（`BlockAndLightGetter` 的默认实现）。`LevelLightEngine.getRawBrightness` 取
+`max(blockLight, skyLight - skyDampen)`。`ChunkStatus.FEATURES` 在 `INITIALIZE_LIGHT`
+**之前**，区块还没有任何光照 DataLayer：
+
+* `SkyLightSectionStorage.getLightValue`：`topSections` 的默认值是
+  `currentLowestY`（构造时 `Integer.MAX_VALUE`，只有 `onNodeAdded` 才下调），
+  该列没有数据时走 `topSection == currentLowestY` 分支返回 **15**。
+* `BlockLightSectionStorage.getLightValue`：没有 DataLayer 时返回 **0**。
+
+所以 FEATURES 阶段 `getRawBrightness(pos, 0)` **恒为 15**，`< 13` 永不成立。蘑菇的
+`canSurvive` 因此只剩「下面在 `overrides_mushroom_light_requirement` 里」（
+`cherry_leaves` / `coarse_dirt` / `note_block`）。这一条已按此实现并写进
+`survival.rs` 的注释。
+
+**未验证的部分**：`mushroom_island_vegetation`（蘑菇岛群系，`huge_red/brown_mushroom`
+巨型蘑菇）和 `brown_mushroom_normal` 等 placed feature 没有拿到 0 不一致对拍 ——
+前者依赖 `huge_*_mushroom`（属 `cb-wg-trees`），后者需要专门的群系覆盖。所以「亮度
+恒为 15」这个结论**目前只有源码推导，没有逐方块对拍证据**。
+
 #### 本分支还没做（诚实标 `unsupported`）
 
-* 珊瑚族（`simple_random_selector` / `overlay` / `random_block` 状态提供者）：
-  类型本身属 `cb-wg-feat-b` / `cb-wg-feat-a` 的组合类与非植被类，本分支没有实现；
-  `warm_ocean_vegetation` 因此在 step 9 仍标 skipped。
-* `vegetation_patch` / `waterlogged_vegetation_patch`、`root_system`：
-  `vegetation_patch` 需要 `Holder<PlacedFeature>` 子地物（多为树 / 苔藓）与
-  `CaveSurface`，本轮未做；`root_system` 需要 `TreeFeature`，属 `cb-wg-trees`。
+* 珊瑚族：`random_block` 状态提供者已在本轮（`3b8d9d6`）移植并通过单测，
+  但 `warm_ocean_vegetation` 仍依赖 `overlay`（地物 A 的类型）和嵌套
+  `simple_random_selector`，所以 step 9 仍标 skipped。
+* `root_system`（`rooted_azalea_tree`、`rooted_sulfur_spring`）：需要 `TreeFeature`，
+  属 `cb-wg-trees`。
 * `block_pile`、`huge_fungus`、`chorus_plant`：只被组合类内联或只在下界/末地。
 * `noise_threshold_count` / `count_on_every_layer` / `surface_water_depth_filter`
   修饰器：本分支只补了 `environment_scan` 与 `surface_relative_threshold_filter`。
 * `seagrass` / `sea_pickle` / `lily_pad` / `spore_blossom` / `mushroom` 的
-  `canSurvive`：前四个已在 `6a3e4aa` 移植（`SeagrassBlock`（`isFaceSturdy(UP)` +
-  `cannot_support_seagrass`）、`TallSeagrassBlock`（上半格看下半格 + 满水）、
-  `SeaPickleBlock`（下面碰撞面形状非空或 `isFaceSturdy(UP)`）、`LilyPadBlock`
+  `canSurvive`：全部已移植。`mushroom` 的亮度判据见上文「蘑菇的亮度判据」。
   （`supports_lily_pad` 流体/方块标签 + 上方空流体）、`SporeBlossomBlock`
   （上方 `canSupportCenter(DOWN)` 且本格非水））；只有蘑菇仍不支持，因为它要
   `level.getRawBrightness(pos, 0) < 13`，而 `FeatureWorld` 没有光照数据。
@@ -870,8 +941,8 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `TallSeagrassBlock`（官方是 `instanceof DoublePlantBlock`），否则上下两格只会放
   下半格、上半格留成水。
 * holder 字符串引用的 `to_place`（`cave_vines_body` / `cave_vines_head` 等）：
-  `BLOCK_STATE_PROVIDER` 注册表未导出，`cave_vine` 的 `block_column` 因此仍
-  `unsupported`（本分支 `cave_vines` 对拍实际是 skipped 后 0 不一致，不是真跑）。
+  `block_state_provider` 注册表已在第二轮（`3b8d9d6`）导出，`cave_vines` 现在真跑通
+  （0 不一致、0 skipped）。
 
 ### 还没做
 
