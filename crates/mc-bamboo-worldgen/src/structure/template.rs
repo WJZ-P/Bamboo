@@ -15,8 +15,20 @@
 //! and the rest live in `nbt`. Bytes come from `mc-bamboo-data::structures` and are
 //! parsed, never rewritten.
 
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
 use mc_bamboo_data::structures as blob;
 use mc_bamboo_nbt::{Accounter, Compression, Tag, read_compressed};
+
+thread_local! {
+    /// 已解析模板的缓存，对应官方 `StructureTemplateManager.getOrCreate` 的
+    /// `structureRepository`。模板不可变，同一个 id 只解析一次。
+    ///
+    /// Cache of parsed templates, the counterpart of vanilla
+    /// `StructureTemplateManager.getOrCreate`'s `structureRepository`. Templates are
+    /// immutable, so each id is parsed once.
+    static CACHE: RefCell<HashMap<String, Rc<StructureTemplate>>> = RefCell::new(HashMap::new());
+}
 
 type Compound = [(String, Tag)];
 
@@ -218,10 +230,26 @@ impl StructureTemplate {
     /// Load a template by its id (`minecraft:...`). Vanilla `getOrCreate(id)`
     /// returns an empty `StructureTemplate` for a missing id instead of an error.
     pub fn load(name: &str) -> Result<Self, String> {
-        let Some(bytes) = blob::get(name) else {
-            return Ok(Self::empty());
+        Self::load_cached(name).map(|template| (*template).clone())
+    }
+
+    /// 同上，但返回共享句柄；内部热路径（`getBoundingBox` / `getJigsaws`）用它，
+    /// 避免每个结构件都重新解析一次 NBT。
+    ///
+    /// Same lookup but returning a shared handle; the hot paths
+    /// (`getBoundingBox` / `getJigsaws`) use it to avoid re-parsing NBT per piece.
+    pub fn load_cached(name: &str) -> Result<Rc<Self>, String> {
+        if let Some(template) = CACHE.with(|cache| cache.borrow().get(name).cloned()) {
+            return Ok(template);
+        }
+        let template = match blob::get(name) {
+            Some(bytes) => Rc::new(Self::parse(bytes)?),
+            // 官方 `getOrCreate` 对缺失的模板返回空模板，不是错误。
+            // Vanilla `getOrCreate` returns an empty template for a missing id.
+            None => Rc::new(Self::empty()),
         };
-        Self::parse(bytes)
+        CACHE.with(|cache| cache.borrow_mut().insert(name.to_owned(), template.clone()));
+        Ok(template)
     }
 
     /// `new StructureTemplate()`：size 0、无 palette、无方块、无实体、无拼图方块。

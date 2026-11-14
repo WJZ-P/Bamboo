@@ -196,7 +196,7 @@ impl PoolElement {
         match self {
             Self::Empty | Self::Feature { .. } => Ok((0, 0, 0)),
             Self::Single { location, .. } => {
-                let template = StructureTemplate::load(location)?;
+                let template = StructureTemplate::load_cached(location)?;
                 Ok(rotation.size(template.size))
             }
             Self::List { elements, .. } => {
@@ -219,7 +219,7 @@ impl PoolElement {
         match self {
             Self::Empty => Err("EmptyPoolElement has no bounding box".to_owned()),
             Self::Single { location, .. } => {
-                let template = StructureTemplate::load(location)?;
+                let template = StructureTemplate::load_cached(location)?;
                 Ok(rotation.bounding_box(position, template.size))
             }
             Self::List { elements, .. } => {
@@ -271,7 +271,7 @@ impl PoolElement {
                 joint: JointType::Rollable,
             }]),
             Self::Single { location, .. } => {
-                let template = StructureTemplate::load(location)?;
+                let template = StructureTemplate::load_cached(location)?;
                 // `buildInfoList` 里拼图方块都在 blockEntities 组，按 (y, x, z) 排序。
                 // In `buildInfoList` jigsaws are in the block-entity group sorted by (y,x,z).
                 let mut jigsaws: Vec<_> = template.jigsaws.iter().collect();
