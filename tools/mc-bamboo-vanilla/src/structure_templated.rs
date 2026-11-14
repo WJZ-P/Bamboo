@@ -40,7 +40,7 @@ const CHUNKS: [(i32, i32); 12] = [
     (-500, 300),
     (7, -13),
 ];
-const KINDS: [&str; 1] = ["igloo"];
+const KINDS: [&str; 3] = ["igloo", "shipwreck_beached", "shipwreck_ocean"];
 
 /// 一条查询。
 struct Query {
@@ -156,6 +156,8 @@ fn query_key(q: &Query) -> String {
 fn rust_lines(q: &Query) -> Result<Vec<String>, String> {
     let pieces: Vec<Piece> = match q.kind {
         "igloo" => templated::igloo::generate(q.seed, q.cx, q.cz)?,
+        "shipwreck_ocean" => templated::shipwreck::generate(q.seed, q.cx, q.cz, false)?,
+        "shipwreck_beached" => templated::shipwreck::generate(q.seed, q.cx, q.cz, true)?,
         other => return Err(format!("no Rust layout for kind {other}")),
     };
     Ok(pieces.iter().map(Piece::canonical_line).collect())

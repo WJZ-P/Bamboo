@@ -16,6 +16,7 @@
 //! milestone. Each structure is one submodule exposing a pure `generate(seed, cx, cz, ..)`.
 
 pub mod igloo;
+pub mod shipwreck;
 
 use crate::structure::pieces::{Box, new_box};
 

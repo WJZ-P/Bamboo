@@ -29,6 +29,7 @@ import net.minecraft.world.level.levelgen.structure.StructurePiece;
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSerializationContext;
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder;
 import net.minecraft.world.level.levelgen.structure.structures.IglooPieces;
+import net.minecraft.world.level.levelgen.structure.structures.ShipwreckPieces;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
 import net.minecraft.world.level.storage.LevelStorageSource;
 
@@ -105,6 +106,8 @@ public final class StructureTemplatedOracle {
             int arg = Integer.parseInt(p[4]);
             List<String> pieces = switch (kind) {
                 case "igloo" -> igloo(seed, cx, cz);
+                case "shipwreck_ocean" -> shipwreck(seed, cx, cz, false);
+                case "shipwreck_beached" -> shipwreck(seed, cx, cz, true);
                 default -> throw new IllegalArgumentException("unknown kind " + kind);
             };
             out.append("Q ").append(kind).append(' ').append(seed).append(' ').append(cx)
@@ -126,6 +129,35 @@ public final class StructureTemplatedOracle {
         BlockPos startPos = new BlockPos(chunkPos.getMinBlockX(), GENERATION_HEIGHT, chunkPos.getMinBlockZ());
         StructurePiecesBuilder builder = new StructurePiecesBuilder();
         IglooPieces.addPieces(templateManager(), startPos, rotation, builder, random);
+        return builder.build().pieces().stream()
+                .map(StructureTemplatedOracle::dump)
+                .collect(Collectors.toCollection(ArrayList::new));
+    }
+
+    /**
+     * {@code ShipwreckStructure.generatePieces} 的编排。
+     *
+     * <p>官方在 {@code generatePieces} 里只在模板超过 32（{@code isTooBigToFitInWorldGenRegion}）
+     * 时按高度图调整 Y；现有 31 个模板都放得下，所以这里与生产代码一致，Y 恒 90。
+     *
+     * <p>The orchestration of {@code ShipwreckStructure.generatePieces}. Vanilla only
+     * height-adjusts inside {@code generatePieces} when the template exceeds 32 blocks
+     * ({@code isTooBigToFitInWorldGenRegion}); every shipped template fits, so this keeps
+     * Y at 90 like the Rust side.
+     */
+    private static List<String> shipwreck(long seed, int cx, int cz, boolean isBeached) {
+        WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+        random.setLargeFeatureSeed(seed, cx, cz);
+        Rotation rotation = Rotation.getRandom(random);
+        ChunkPos chunkPos = new ChunkPos(cx, cz);
+        BlockPos offset = new BlockPos(chunkPos.getMinBlockX(), GENERATION_HEIGHT, chunkPos.getMinBlockZ());
+        StructurePiecesBuilder builder = new StructurePiecesBuilder();
+        ShipwreckPieces.ShipwreckPiece piece = ShipwreckPieces.addRandomPiece(
+                templateManager(), offset, rotation, builder, random, isBeached);
+        if (piece.isTooBigToFitInWorldGenRegion()) {
+            throw new IllegalStateException("shipwreck template too big for the oracle: "
+                    + piece.template().toString());
+        }
         return builder.build().pieces().stream()
                 .map(StructureTemplatedOracle::dump)
                 .collect(Collectors.toCollection(ArrayList::new));
