@@ -491,3 +491,60 @@ pub fn replace_blocks_with_base_blocks(
         pos.1 += dy;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feature::state::{official_name, state_from_official_name};
+    use mc_bamboo_data::blocks;
+
+    #[test]
+    fn float_provider_parses_the_exported_shapes() {
+        let constant: Value = serde_json::from_str("0").unwrap();
+        assert!(
+            matches!(FloatProvider::parse(&constant).unwrap(), FloatProvider::Constant(v) if v == 0.0)
+        );
+        let uniform: Value = serde_json::from_str(
+            r#"{"type":"minecraft:uniform","min_inclusive":0.3,"max_exclusive":0.7}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            FloatProvider::parse(&uniform).unwrap(),
+            FloatProvider::Uniform { .. }
+        ));
+        let normal: Value = serde_json::from_str(
+            r#"{"type":"minecraft:clamped_normal","mean":0.1,"deviation":0.3,"min":0.1,"max":0.9}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            FloatProvider::parse(&normal).unwrap(),
+            FloatProvider::ClampedNormal { .. }
+        ));
+    }
+
+    #[test]
+    fn pointed_block_states_round_trip_by_property() {
+        // `createPointedBlock` 用的三个属性都要能精确还原成状态 ID。
+        // All three properties used by `createPointedBlock` must round-trip to a state ID.
+        for direction in ["up", "down"] {
+            for thickness in ["tip_merge", "tip", "frustum", "middle", "base"] {
+                for waterlogged in ["true", "false"] {
+                    let mut state =
+                        create_pointed_block(blocks::POINTED_DRIPSTONE, direction, thickness);
+                    state = apply_property(state, "waterlogged", waterlogged).unwrap();
+                    let name = official_name(state);
+                    assert!(
+                        name.contains(&format!("vertical_direction={direction}")),
+                        "{name}"
+                    );
+                    assert!(name.contains(&format!("thickness={thickness}")), "{name}");
+                    assert!(
+                        name.contains(&format!("waterlogged={waterlogged}")),
+                        "{name}"
+                    );
+                    assert_eq!(state_from_official_name(&name).unwrap(), state, "{name}");
+                }
+            }
+        }
+    }
+}
