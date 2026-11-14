@@ -21,6 +21,7 @@ use mc_bamboo_world::{
         Desired, Director, DirectorConfig, Effect, Event, RegionMessage, SaveSeq, Task, TaskId,
         TaskResult, TicketOp,
     },
+    light::generate::GeneratedLight,
     store::ChunkRevision,
 };
 
@@ -186,6 +187,10 @@ pub(crate) struct DirectorHost {
     /// receives results (ascending `TaskId`); sorted canonically at assembly so
     /// the final blocks do not depend on append order.
     feature_deltas: BTreeMap<ChunkPos, Vec<BlockDelta>>,
+    /// `light` 阶段算出的生成期光照，按区块存；完工组装时装进交付盒子并清掉。
+    /// Generation-time light from the `light` stage, per chunk; installed into
+    /// the delivered column at final assembly and cleared.
+    generated_light: BTreeMap<ChunkPos, GeneratedLight>,
     /// 计算池。`None` 是内联执行器：解析、生成、序列化当场做完（精确模式、测试）。
     pool: Option<ComputePool<ChunkJob>>,
     /// 还没交给池子的计算任务（待办）。池子里最多放 `threads × POOL_JOBS_PER_THREAD`
@@ -306,6 +311,7 @@ impl DirectorHost {
             generator: Arc::new(FlatGenerator::from_env()),
             partials: BTreeMap::new(),
             feature_deltas: BTreeMap::new(),
+            generated_light: BTreeMap::new(),
             pool: None,
             compute_backlog: HashMap::new(),
             backlog_order: BinaryHeap::new(),
@@ -1248,13 +1254,20 @@ impl DirectorHost {
                 // At completion, assemble from the immutable CARVERS snapshot +
                 // accumulated feature deltas (canonical order, merge-order
                 // independent); flat / disk paths keep the original box.
-                let column = match self.partials.get(&pos) {
+                let mut column = match self.partials.get(&pos) {
                     Some(snapshot) => {
                         let mut deltas = self.feature_deltas.remove(&pos).unwrap_or_default();
                         assemble_feature_column(snapshot.as_ref(), &mut deltas).unwrap_or(column)
                     }
                     None => column,
                 };
+                // `light` 阶段算好的天空光 + 方块光装进交付盒子并标记
+                // `isLightOn=true`；flat / 读盘路径没有这份光照，盒子照旧。
+                // Install the `light` stage's sky + block light into the
+                // delivered column with `isLightOn=true`; flat/disk keep theirs.
+                if let Some(light) = self.generated_light.remove(&pos) {
+                    column.set_generated_light(light);
+                }
                 self.partials.remove(&pos);
                 self.feature_deltas.remove(&pos);
                 TaskResult::Assembled { column }
@@ -1438,6 +1451,9 @@ impl DirectorHost {
                 .entry(*target)
                 .or_default()
                 .extend_from_slice(deltas);
+        }
+        if let Some(light) = &output.light {
+            self.generated_light.insert(pos, light.clone());
         }
     }
 
@@ -1720,10 +1736,11 @@ impl DirectorHost {
                     self.save_cooldown.remove(&pos);
                     self.saved_revisions.remove(&pos);
                     self.loaded_save_tick.remove(&pos);
-                    // 生成期的半成品快照和累计增量也在这里清掉。
-                    // Clear the generation-time ProtoChunk snapshot and deltas.
+                    // 生成期的半成品快照、累计增量和光照也在这里清掉。
+                    // Clear the generation-time snapshot, deltas and light.
                     self.partials.remove(&pos);
                     self.feature_deltas.remove(&pos);
+                    self.generated_light.remove(&pos);
                 }
             }
         }

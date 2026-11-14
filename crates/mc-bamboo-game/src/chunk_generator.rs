@@ -31,6 +31,7 @@ use crate::{
         GenerateOutput, SnapshotView, generate_features_stage, generate_terrain_stage,
         passthrough_stage,
     },
+    worldgen_light::generate_light_stage,
 };
 
 /// 邻居只读视图：`(位置, 不可变的 CARVERS 快照)`。`None` 表示计算线程现算。
@@ -105,13 +106,15 @@ impl ChunkGenerator for FlatGenerator {
 /// `structure_starts` / `structure_references` / `biomes` 先接成透传：`terrain`
 /// 一步同时算出 quart 群系和跑到 CARVERS 的方块；`features` 读半径 1 的邻居
 /// 快照、跑 `Generator::features()`，中心内容和写邻居的增量交回世界线程；
-/// `initialize_light` / `light` / `spawn` / `full` 本轮也原样透传。
-/// 每一步都是 `(阶段, 位置, 配置, 输入) → 盒子 + 增量` 的纯函数。
+/// `light` 读同一份 3×3 邻居视图、算中心柱的生成期光照（天空光 + 方块光）交回；
+/// `initialize_light` / `spawn` / `full` 原样透传。每一步都是
+/// `(阶段, 位置, 配置, 输入) → 盒子 + 增量 + 光照` 的纯函数。
 ///
 /// Overworld staged generator. `terrain` computes quart biomes + CARVERS blocks;
 /// `features` reads radius-1 neighbor snapshots, runs `Generator::features()`,
-/// and returns the center content plus neighbor deltas; light/spawn/full pass
-/// through. Each step is pure in stage, position, config and inputs.
+/// and returns the center content plus neighbor deltas; `light` reads the same
+/// 3×3 view and computes the center column's generation-time sky + block light;
+/// initialize_light/spawn/full pass through. Each step is pure.
 #[derive(Debug, Clone)]
 pub(crate) struct OverworldGenerator {
     config: WorldGenConfig,
@@ -132,6 +135,25 @@ impl ChunkGenerator for OverworldGenerator {
         center_snapshot: CenterSnapshot,
         neighbors: NeighborView<'_>,
     ) -> GenerateOutput {
+        // `ChunkStatus.LIGHT`：把官方 `initializeLight` + `light` 合成一步纯函数，
+        // 读 3×3 邻居视图算出中心柱的天空光 + 方块光，装进 `GenerateOutput.light`
+        // 交回世界线程（完工组装时落进交付盒子）。中心盒子仍是透传，组装时重建。
+        // `ChunkStatus.LIGHT`: fold vanilla `initializeLight` + `light` into one
+        // pure step; compute the center's sky + block light from the 3×3 view and
+        // put it in `GenerateOutput.light`. The center box is still a pass-through,
+        // rebuilt at final assembly.
+        if stage == ChunkStatus::Light {
+            let light =
+                generate_light_stage(&self.config, pos.x, pos.z, center_snapshot, neighbors);
+            let mut output = passthrough_stage(center);
+            match light {
+                Ok(light) => output.light = Some(light),
+                Err(error) => {
+                    error!(%error, x = pos.x, z = pos.z, ?stage, "generation light failed; keeping column without baked light");
+                }
+            }
+            return output;
+        }
         let result = match stage {
             // `ChunkStatus.TERRAIN`：算 quart 群系 + doFill → buildSurface →
             // generateCarvers 的方块，并把 CARVERS 纯数据作为邻居快照交回。

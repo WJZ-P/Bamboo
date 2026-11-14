@@ -20,7 +20,7 @@
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use mc_bamboo_core::ChunkPos;
-use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
+use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT, light::generate::GeneratedLight};
 use mc_bamboo_worldgen::feature::{
     CENTER, DECORATION_STEPS, FeatureChunks, FeatureResult, Heightmaps, world::prime_heightmaps,
 };
@@ -49,16 +49,23 @@ pub(crate) struct GenerateOutput {
     /// 给邻居（和中心自身）的写增量，按目标区块坐标分组。
     /// Feature writes grouped by target chunk position.
     pub(crate) deltas: Vec<(ChunkPos, Vec<BlockDelta>)>,
+    /// `light` 阶段算出的生成期光照（中心柱的天空光 + 方块光）。`None` 表示
+    /// 这一阶段不算光；世界线程在完工组装时装进交付盒子。
+    /// Generation-time light for the center column from the `light` stage (sky +
+    /// block layers). `None` means this stage computes no light; the world
+    /// thread installs it into the delivered column at final assembly.
+    pub(crate) light: Option<GeneratedLight>,
 }
 
 impl GenerateOutput {
-    /// 没有增量、没有快照的阶段（透传）。
-    /// A pass-through stage: no snapshot, no deltas.
+    /// 没有增量、没有快照、没有光照的阶段（透传）。
+    /// A pass-through stage: no snapshot, no deltas, no light.
     fn passthrough(column: Box<RegionColumn>) -> Self {
         Self {
             column,
             terrain: None,
             deltas: Vec::new(),
+            light: None,
         }
     }
 }
@@ -75,7 +82,7 @@ pub(crate) type SnapshotView<'a> = &'a [(ChunkPos, Option<Arc<GeneratedChunk>>)]
 ///
 /// Build the 9-chunk view in `(dz, dx)` order, center at `CENTER`, indexing by
 /// chunk position so the list order does not matter.
-fn resolve_view(
+pub(crate) fn resolve_view(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
@@ -351,6 +358,7 @@ pub(crate) fn generate_features_stage(
         column,
         terrain: None,
         deltas,
+        light: None,
     })
 }
 
@@ -369,6 +377,7 @@ pub(crate) fn generate_terrain_stage(
         column,
         terrain: Some(chunk),
         deltas: Vec::new(),
+        light: None,
     })
 }
 

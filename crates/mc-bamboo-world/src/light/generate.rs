@@ -27,7 +27,7 @@ use mc_bamboo_core::{ChunkPos, LightLayer};
 
 use crate::{chunk::Chunk, store::ChunkMap};
 
-use super::{DataLayer, Chunks, Engines, LightColumn, LightStorage};
+use super::{Chunks, DataLayer, Engines, LightColumn, LightStorage};
 
 /// 生成期算出的一柱光照：天空光、方块光各 [`super::LIGHT_SECTION_COUNT`] 段，
 /// `None` 表示官方不存这一段（`DataLayer::Filled(0)` 和它是两回事）。
@@ -51,10 +51,7 @@ pub struct GeneratedLight {
 /// the center and its neighbors. `chunks` needs at least the 3×3 around
 /// `center`; every [`Chunk`] must have its sky-light sources computed
 /// (`ChunkColumn::from_parts` does this). Pure: no world state, deterministic.
-pub fn generate_light(
-    center: ChunkPos,
-    chunks: &BTreeMap<ChunkPos, Chunk>,
-) -> GeneratedLight {
+pub fn generate_light(center: ChunkPos, chunks: &BTreeMap<ChunkPos, Chunk>) -> GeneratedLight {
     // 视图之外读成全空气：`Chunk::empty` 的天空光源表默认就是「整列都通到天」。
     // Positions outside the view read as all-air; `Chunk::empty` already has a
     // default sky-source table meaning "open sky for the whole column".
@@ -94,7 +91,7 @@ mod tests {
     use mc_bamboo_core::BlockPos;
 
     use super::*;
-    use crate::{flat, store::ChunkStore, MIN_Y};
+    use crate::{MIN_Y, flat, store::ChunkStore};
 
     /// 把生成期光照装进一个真正的 `ChunkColumn`，读 `light_value` 时会走官方
     /// 「`None` 段向上找」的天空光回退，和游戏交付的盒子完全一致。
@@ -102,7 +99,9 @@ mod tests {
     /// the same `None`-section sky fallback as the delivered box.
     fn column_of_light(generated: &GeneratedLight) -> crate::column::ChunkColumn {
         let mut store = ChunkStore::flat();
-        let base = store.take_column(ChunkPos::new(0, 0)).expect("flat light settled");
+        let base = store
+            .take_column(ChunkPos::new(0, 0))
+            .expect("flat light settled");
         let mut parts = crate::column::ChunkColumnParts::read_from(&base);
         parts.light = [generated.sky.clone(), generated.block.clone()];
         parts.light_on = true;
