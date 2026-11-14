@@ -109,20 +109,35 @@ fn two_writes_in_one_batch_only_the_newest_is_acked() {
     dir.create_layout().unwrap();
     let mut io = ChunkIo::open(&dir).unwrap();
     let fresh = ChunkPos::new(100, 100);
+    // 等 worker 确认暂停后再排两条写：暂停期间它不会再从通道取请求，放行后
+    // 两条必然被同一次 `try_iter` 收进同一批，不依赖调度时序、不用 sleep。
+    let (ready, release) = io.pause_for_test();
+    ready.recv().expect("worker 到达暂停点");
     io.submit_write(fresh, 10, Some(b"new-a".to_vec()), None);
     io.submit_write(fresh, 11, Some(b"new-b".to_vec()), None);
+    release.send(()).expect("放行 worker");
     let r = drain(&io);
     println!("同一批两条同位置写的回执：{r:?}");
-    assert!(
-        r.iter()
-            .any(|x| matches!(x, Reply::Written { seq: 11, .. }))
-    );
-    assert!(
-        !r.iter()
-            .any(|x| matches!(x, Reply::Written { seq: 10, .. }))
+    assert_eq!(
+        r,
+        vec![Reply::Written {
+            pos: fresh,
+            seq: 11,
+            present: true,
+        }],
+        "同批旧写既不能回成功也不能回失败，磁盘只留最新快照"
     );
     assert!(io.set_known(fresh, true, 11));
     assert!(io.has_chunk(fresh));
+    // 旧写确实被跳过，而不是只少了回执：落盘内容必须是新写。
+    io.submit_read(fresh, 1, 0);
+    let reads = drain(&io);
+    assert!(
+        reads
+            .iter()
+            .any(|x| matches!(x, Reply::Read { chunk: Some(bytes), .. } if bytes == b"new-b")),
+        "同批去重必须留下最新的内容：{reads:?}"
+    );
     io.close();
 }
 
