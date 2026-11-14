@@ -78,9 +78,17 @@ impl JavaPosSet {
         self.buckets[index].push(pos);
         self.len += 1;
         // `putVal` 先挂到桶尾，再判 `++size > threshold`；桶内到 8 个且容量还小也翻倍。
-        // `putVal` appends first, then checks `++size > threshold`; a bin reaching 8
-        // nodes while the table is still small also doubles.
-        if self.len > self.threshold() || (self.buckets[index].len() >= 8 && self.capacity() < 64) {
+        // `putVal` 的顺序：先挂在桶尾，插到第 8 个节点时 `binCount >= 7` 调
+        // `treeifyBin`（容量 < 64 就翻倍），**然后**才 `++size > threshold` 再翻一次。
+        // 反过来会让容量序列不同，桶索引和迭代顺序都会错。
+        // `putVal` order: append to the bin, call `treeifyBin` when the bin holds its 8th
+        // node (`binCount >= 7`, doubling while the table is under 64), and **then**
+        // check `++size > threshold`. Swapping them changes the capacity sequence, so
+        // both the bucket indices and the iteration order drift.
+        if self.buckets[index].len() >= 8 && self.capacity() < 64 {
+            self.resize(self.capacity() * 2);
+        }
+        if self.len > self.threshold() {
             self.resize(self.capacity() * 2);
         }
     }
@@ -164,6 +172,40 @@ mod tests {
         }
         let expected: Vec<Pos> = (6..20).chain(0..6).map(|x| (x, 70, 0)).collect();
         assert_eq!(set.to_vec(), expected);
+    }
+
+    #[test]
+    fn heavy_collisions_expose_the_untreeified_limit() {
+        // 40 个 (i*16, 62, 0) 挤进少数几个桶。官方 `HashMap` 在容量 ≥ 64 且桶内到 8 个
+        // 节点时把桶转成红黑树，`treeify` 之后 `moveRootToFront` 把树根挪到桶首，迭代
+        // 顺序因此和纯链表不同（官方第 0 个是 192，纯链表是 0）。
+        //
+        // **这是已知限制**：本实现只复刻链表，不实现 `HashMap.TreeNode` 的树化与
+        // `moveRootToFront`，所以桶内 ≥ 8 个元素时迭代顺序会和官方不同。植被 patch 的
+        // 地表集合通常只有几十个点（容量 64/128），触发树化需要同一桶挤进 8 个点，
+        // 实测只在极端形状下出现。
+        //
+        // Forty (i*16, 62, 0) positions pile into a few bins. The official `HashMap`
+        // treeifies a bin holding 8 nodes once the table is at least 64 wide, and
+        // `moveRootToFront` then moves the tree root to the bin head, so the order differs
+        // from a plain list (official starts at 192, a plain list at 0).
+        //
+        // **Known limit**: only the linked-list shape is replicated here; `HashMap.TreeNode`
+        // treeification and `moveRootToFront` are not. Bins of 8+ entries therefore iterate
+        // differently from the official implementation. Vegetation-patch surface sets are
+        // usually a few dozen positions (capacity 64/128), and reaching a treeified bin
+        // needs eight points in one bin, which only extreme shapes produce.
+        let mut set = JavaPosSet::new();
+        for i in 0..40 {
+            set.insert((i * 16, 62, 0));
+        }
+        let order = set.to_vec();
+        // 锁住当前（链表）行为，避免以后无意改动；和官方不同是已知的。
+        // Pin the current (linked-list) behaviour so it cannot drift silently; the
+        // difference from the official order is documented above.
+        assert_eq!(order[0], (0, 62, 0));
+        assert_eq!(order[1], (64, 62, 0));
+        assert_eq!(order.len(), 40);
     }
 
     #[test]
