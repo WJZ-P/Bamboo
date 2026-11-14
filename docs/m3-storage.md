@@ -856,6 +856,45 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   玩家离开、`/save-all`（force）和关服不受影响。第二次 Ctrl+C / 桌面端第二次停止
   明确记录「未保存的改动会丢」并立刻结束进程。F6 背压只暂缓收回，交付照常。
 
+### 2026-11-14 修 main 上两个回归
+
+- **区块收回卡死 / 关服挂住**：精确模式（默认 `entity_threads = 0`）的
+  `World::tick_entities` 把实体 `take` 出去，tick 里被 `discard` 的实体既不 `put`
+  回来也不再 `remove`（`take` 已把它从 `index` 摘掉），`EntityStore::taken` 里会
+  永久留一行、`slots[row]` 一直空着。于是 `ready_to_move_chunks()` 永远为假，
+  所有区块收回都卡在 "not ready"、每 50ms 打一条 warn，玩家全离开后关服（会等
+  世界存完盘）因此挂死。修法是 `EntityStore::end_tick` 在 tick 边界把这些残留的
+  `taken` 行摘掉、槽位放回 `free`，和并行驱动 `remove_entity` 的清理一致。
+  另外把关服路径上的等待都加上界：`DirectorHost::drain_compute` 有墙钟上限
+  （`SHUTDOWN_DRAIN_TIMEOUT`），`ChunkIo::flush` 用 `recv_timeout`
+  （`FLUSH_TIMEOUT`），IO 线程卡住时也会记错误并退出，绝不无限等。
+  回归测试 `entity::store::tests::discarded_entities_do_not_leave_borrowed_rows_at_tick_end`
+  和 `world::tests::review_probe::all_chunks_reclaim_and_shutdown_completes_after_every_player_leaves`。
+- **全新世界进服区块顺序**：`05d8fa1`（经合并 `1a0dee9` 进 main）让所有区块都走
+  异步读流水线后，`submit_reads` 用 `region.players` 取玩家中心按距离排序读请求。
+  但进服那一刻 `Event::Tickets`（`PlayerMoved`）先派读任务、之后才
+  `region.add_player`，第一刻的票泵里 `region.players` 是空的，读请求退化成按
+  坐标 `(x, z)` 排序，远处区块抢先回执，`nearest chunk comes first` 和
+  `first batch is the three by three around the spawn` 两项 probe 检查失败。
+  修法是改从 Director 票表取玩家中心（`TicketTable::player_centers`），票表在
+  `handle_effects` 里同步 `set_player`，派读时一定有正确的中心；带盘上区块的
+  世界和全新世界都按距离交付第一批。回归测试
+  `director_host::tests::read_submission_uses_ticket_table_centers_not_region_players`，
+  全新世界探针 `tools/probe.sh` 与 `--loaded` 两种模式都跑 719/719（探针收尾多了
+  一项 `/stop` 回执检查，见下）。
+
+  验证说明（2026-11-14 按实现更新）：无人值守 `-p` 环境里后台启动的 `bamboo`
+  没有控制台，`kill -INT` 送不到 `tokio::signal::ctrl_c()`，所以脚本不再用信号
+  关服。现在 `Probe.java` 收尾让管理员 Kitten 执行 `/stop`（`BAMBOO_PROBE_STOP=1`），
+  服务端走 `stopServer` 流程自己退出并存盘；`tools/probe.sh` 等进程自己退出
+  （最多 60 秒），把「正常退出」当一项检查，退出后检查 `level.dat` / 玩家数据 /
+  区域文件都在，并用 `mc-bamboo-vanilla world-dir` 让官方 codec 读一遍世界目录。
+  只有没自己退出才 `kill -9` 并把探针判为失败。`--loaded` 两遍都照此处理。
+  官方客户端的 `/stop` 和控制台 `stop` 走同一条关服流程；控制台线程从 stdin
+  读命令（见 README「控制台命令」），但这台 Windows 上后台原生进程的 stdin
+  不可用，脚本因此选客户端 `/stop`。两遍都实测 `PROBE RESULT 719/719`、
+  `Bamboo stopped`、世界文件齐全、`WORLD-DIR RESULT` 通过。
+
 ### `level.dat` 每个字段的来源
 
 逐字段核对 26.3 `PrimaryLevelData.setTagData`（`createTag` 的私有实现）的字节码
@@ -947,7 +986,10 @@ Bamboo 真的有对应状态；其余按官方专用服务端的默认写，不�
   熔炉存盘重启、装盒后睡着的熔炉在另一个线程编码字节一致、1000 刻自动保存差分
   测试、复查探针的回归测试、带存档世界「最近的区块先到」的回归测试。
 - `tools/probe.sh <目录> <端口>` 跑全新世界；`<目录> <端口> --loaded` 用同一个
-  临时目录先建档、重启再跑一遍，两遍都报 `PROBE RESULT`。
+  临时目录先建档、重启再跑一遍，两遍都报 `PROBE RESULT 719/719`。两遍收尾都由
+  `Probe.java` 的 `/stop` 正常关服，脚本等进程自己退出（最多 60 秒），再检查
+  `level.dat` / 玩家数据 / 区域文件都在，并跑一次官方 `world-dir`；没自己退出
+  才 `kill -9` 并判失败。
 - `mc-bamboo-vanilla world-dir <目录> <java>`、`saved-data <java>`、
   `world-block <目录> <x> <y> <z> <方块名> <java>` 用官方 codec 检查真实目录。
 - `tools/crash-test.sh`：起服务端 → 官方探针 721/721 → 放一个具体标记方块 →

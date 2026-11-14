@@ -15,7 +15,10 @@ use std::{
     time::Duration,
 };
 
-use mc_bamboo_game::{MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, MailBudget};
+use mc_bamboo_game::{
+    MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, MailBudget,
+    world_options::WorldGenConfig,
+};
 use toml::{Table, Value};
 use tracing::{info, warn};
 
@@ -113,6 +116,11 @@ const IMPLEMENTED: &[&str] = &[
     "max-players",
     "network-compression-threshold",
     "enforce-secure-profile",
+    "broadcast-console-to-ops",
+    "level-seed",
+    "level-type",
+    "generator-settings",
+    "generate-structures",
 ];
 
 /// `bamboo.toml` 里的全部键。
@@ -388,12 +396,22 @@ pub struct OfficialConfig {
     pub enforce_secure_profile: bool,
     /// 登录之后启用压缩的阈值，小于 0 表示关闭。
     pub compression_threshold: i32,
+    /// 控制台命令反馈要不要广播给在线 OP（`broadcast-console-to-ops`）。
+    pub broadcast_console_to_ops: bool,
     /// 监听地址，空字符串表示监听所有网卡。
     pub server_ip: String,
     /// 监听端口。
     pub server_port: u16,
     /// 世界名字。服务器目录 + 这个名字就是世界目录。
     pub level_name: String,
+    /// `level-seed` 原文。空串表示随机种子；数字或字符串按官方 `WorldOptions.parseSeed` 解析。
+    pub level_seed: String,
+    /// `level-type` 原文，例如 `minecraft:normal`。
+    pub level_type: String,
+    /// `generator-settings` 原文（flat 预设的 JSON）。
+    pub generator_settings: String,
+    /// `generate-structures`：先读进来存好，结构接上后生效。
+    pub generate_structures: bool,
     /// 未实现或未知的键，按读入顺序保存原文，写回时原样输出。
     passthrough: Vec<(String, String)>,
 }
@@ -418,9 +436,14 @@ impl Default for OfficialConfig {
             prevent_proxy_connections: parse_bool(get("prevent-proxy-connections")),
             enforce_secure_profile: parse_bool(get("enforce-secure-profile")),
             compression_threshold: get("network-compression-threshold").parse().unwrap_or(256),
+            broadcast_console_to_ops: parse_bool(get("broadcast-console-to-ops")),
             server_ip: String::new(),
             server_port: get("server-port").parse().unwrap_or(25565),
             level_name: get("level-name").to_owned(),
+            level_seed: get("level-seed").to_owned(),
+            level_type: get("level-type").to_owned(),
+            generator_settings: get("generator-settings").to_owned(),
+            generate_structures: parse_bool(get("generate-structures")),
             passthrough,
         }
     }
@@ -450,9 +473,14 @@ impl OfficialConfig {
                 "prevent-proxy-connections" => self.prevent_proxy_connections.to_string(),
                 "enforce-secure-profile" => self.enforce_secure_profile.to_string(),
                 "network-compression-threshold" => self.compression_threshold.to_string(),
+                "broadcast-console-to-ops" => self.broadcast_console_to_ops.to_string(),
                 "server-ip" => self.server_ip.clone(),
                 "server-port" => self.server_port.to_string(),
                 "level-name" => self.level_name.clone(),
+                "level-seed" => self.level_seed.clone(),
+                "level-type" => self.level_type.clone(),
+                "generator-settings" => self.generator_settings.clone(),
+                "generate-structures" => self.generate_structures.to_string(),
                 _ => continue,
             };
             out.push(((*key).to_owned(), value));
@@ -497,9 +525,14 @@ impl OfficialConfig {
                     config.compression_threshold =
                         parse_i32(&value, "network-compression-threshold", file, 256);
                 }
+                "broadcast-console-to-ops" => config.broadcast_console_to_ops = parse_bool(&value),
                 "server-ip" => config.server_ip = value,
                 "server-port" => config.server_port = parse_u16(&value, "server-port", file, 25565),
                 "level-name" => config.level_name = value,
+                "level-seed" => config.level_seed = value,
+                "level-type" => config.level_type = value,
+                "generator-settings" => config.generator_settings = value,
+                "generate-structures" => config.generate_structures = parse_bool(&value),
                 _ => unreachable!("IMPLEMENTED 和 match 必须同步"),
             }
         }
@@ -634,6 +667,17 @@ impl ConfigFiles {
     /// 变成运行时用的 [`ServerConfig`]。四份管理名单固定放在服务器目录里。
     pub fn to_server_config(&self, directory: &Path) -> ServerConfig {
         let defaults = ServerConfig::default();
+        // 按官方 `DedicatedServerProperties` 解析四个世界生成键；坏值回退并记日志。
+        // Resolve the four world-gen keys like `DedicatedServerProperties`; bad values fall back and log.
+        let (world_gen, warnings) = WorldGenConfig::from_properties(
+            &self.official.level_seed,
+            &self.official.level_type,
+            &self.official.generator_settings,
+            self.official.generate_structures,
+        );
+        for message in warnings {
+            warn!(%message, "falling back to default world generation setting");
+        }
         ServerConfig {
             motd: self.official.motd.clone(),
             max_players: self.official.max_players,
@@ -659,6 +703,11 @@ impl ConfigFiles {
                 deliveries: self.bamboo.deliveries_per_tick,
                 reclaims: self.bamboo.reclaims_per_tick,
             },
+            world_gen,
+            broadcast_console_to_ops: self.official.broadcast_console_to_ops,
+            // 从真实 server.properties 建起来的命令行版才读进程 stdin；嵌入用法不读。
+            // Only the CLI, built from a real server.properties, reads process stdin.
+            console_enabled: true,
         }
     }
 
@@ -672,6 +721,7 @@ impl ConfigFiles {
         official.prevent_proxy_connections = config.prevent_proxy_connections;
         official.enforce_secure_profile = config.enforce_secure_profile;
         official.compression_threshold = config.compression_threshold;
+        official.broadcast_console_to_ops = config.broadcast_console_to_ops;
         let mut bamboo = existing.bamboo.clone();
         bamboo.pre_play_timeout = config.pre_play_timeout;
         bamboo.max_pre_play_connections = config.max_pre_play_connections;
@@ -729,6 +779,11 @@ impl ConfigFiles {
                 defaults.official.compression_threshold.to_string(),
             ),
             (
+                "broadcast-console-to-ops",
+                self.official.broadcast_console_to_ops.to_string(),
+                defaults.official.broadcast_console_to_ops.to_string(),
+            ),
+            (
                 "server-ip",
                 self.official.server_ip.clone(),
                 defaults.official.server_ip.clone(),
@@ -742,6 +797,26 @@ impl ConfigFiles {
                 "level-name",
                 self.official.level_name.clone(),
                 defaults.official.level_name.clone(),
+            ),
+            (
+                "level-seed",
+                self.official.level_seed.clone(),
+                defaults.official.level_seed.clone(),
+            ),
+            (
+                "level-type",
+                self.official.level_type.clone(),
+                defaults.official.level_type.clone(),
+            ),
+            (
+                "generator-settings",
+                self.official.generator_settings.clone(),
+                defaults.official.generator_settings.clone(),
+            ),
+            (
+                "generate-structures",
+                self.official.generate_structures.to_string(),
+                defaults.official.generate_structures.to_string(),
             ),
         ];
         for (key, value, default) in official {
@@ -993,7 +1068,14 @@ mod tests {
         assert!(defaults.official.enforce_secure_profile);
         assert_eq!(defaults.official.compression_threshold, 256);
         assert_eq!(defaults.official.level_name, "world");
-        assert_eq!(defaults.official.passthrough.len(), 59);
+        assert_eq!(defaults.official.level_seed, "");
+        assert_eq!(defaults.official.level_type, "minecraft:normal");
+        assert_eq!(defaults.official.generator_settings, "{}");
+        assert!(defaults.official.generate_structures);
+        // 四个世界生成键和 broadcast-console-to-ops 现在是实现项，passthrough 从 59 减到 54。
+        // The four world-gen keys and broadcast-console-to-ops are now implemented:
+        // passthrough drops 59 -> 54.
+        assert_eq!(defaults.official.passthrough.len(), 54);
         assert_eq!(defaults.bamboo.entity_threads, 0);
         assert_eq!(defaults.bamboo.deliveries_per_tick, 64);
         assert_eq!(defaults.bamboo.reclaims_per_tick, 64);
@@ -1055,7 +1137,7 @@ mod tests {
             fs::read_to_string(dir.path().join(BAMBOO_FILE)).unwrap(),
             bamboo
         );
-        assert_eq!(loaded.unsupported_keys().len(), 59);
+        assert_eq!(loaded.unsupported_keys().len(), 54);
         assert_eq!(loaded.unknown_keys(), ["my-custom-key"]);
         assert_eq!(world_dir(dir.path(), &loaded), dir.path().join("survival"));
     }
@@ -1110,6 +1192,27 @@ mod tests {
     }
 
     #[test]
+    fn world_gen_keys_round_trip_and_reach_server_config() {
+        use mc_bamboo_game::world_options::LevelType;
+        let dir = Temp::new();
+        let mut files = ConfigFiles::default();
+        files.official.level_seed = "123456789".to_owned();
+        files.official.level_type = "minecraft:amplified".to_owned();
+        files.official.generator_settings =
+            r#"{"layers":[{"block":"minecraft:stone","height":2}],"biome":"minecraft:desert"}"#
+                .to_owned();
+        files.official.generate_structures = false;
+        write(dir.path(), &files).unwrap();
+        let loaded = read(dir.path()).unwrap();
+        assert_eq!(loaded.official, files.official);
+        let config = loaded.to_server_config(dir.path());
+        assert_eq!(config.world_gen.seed, 123456789);
+        assert_eq!(config.world_gen.level_type, LevelType::Amplified);
+        assert!(!config.world_gen.generate_structures);
+        assert_eq!(config.world_gen.flat.layers.len(), 1);
+    }
+
+    #[test]
     fn server_config_carries_every_value_and_the_list_directory() {
         let dir = Temp::new();
         let mut files = ConfigFiles::default();
@@ -1128,6 +1231,27 @@ mod tests {
         );
         let rebuilt = ConfigFiles::from_server_config(&config, &files);
         assert_eq!(rebuilt, files);
+    }
+
+    #[test]
+    fn console_config_reaches_the_server_and_round_trips() {
+        let dir = Temp::new();
+        let mut files = ConfigFiles::default();
+        // 官方默认 true；改成 false 后要能从文件读回来、带进 ServerConfig。
+        // Official default is true; a false value must survive the file and reach ServerConfig.
+        assert!(files.official.broadcast_console_to_ops);
+        files.official.broadcast_console_to_ops = false;
+        write(dir.path(), &files).unwrap();
+        let loaded = read(dir.path()).unwrap();
+        assert!(!loaded.official.broadcast_console_to_ops);
+        let config = loaded.to_server_config(dir.path());
+        assert!(!config.broadcast_console_to_ops);
+        assert!(config.console_enabled);
+        let rebuilt = ConfigFiles::from_server_config(&config, &loaded);
+        assert!(!rebuilt.official.broadcast_console_to_ops);
+        // 写入的文件里有这一项，值是 false。
+        let text = fs::read_to_string(dir.path().join(PROPERTIES_FILE)).unwrap();
+        assert!(text.contains("broadcast-console-to-ops=false\n"));
     }
 
     #[test]

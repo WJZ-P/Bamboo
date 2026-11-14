@@ -470,3 +470,87 @@ fn a_saved_world_delivers_the_nearest_chunk_first() {
         "读结果已经全部收回"
     );
 }
+
+/// 多名玩家在不同位置进服、走动、全部离开后，区块全部收回，关服在合理时间内
+/// 完成且存盘完整。回归：实体 tick 中被 `discard` 的行曾永久留在
+/// `EntityStore::taken`，让 `ready_to_move_chunks` 永远为假，于是所有区块收回
+/// 卡在 "not ready"、关服（会等存盘）因此挂死。
+///
+/// Multiple players join at different positions, move, and all leave; every chunk
+/// is reclaimed and shutdown finishes in bounded time with an intact save.
+/// Regression: entities discarded during a tick used to leave permanent rows in
+/// `EntityStore::taken`, making `ready_to_move_chunks` permanently false so all
+/// reclaims stalled at "not ready" and shutdown (which waits for the save) hung.
+#[test]
+fn all_chunks_reclaim_and_shutdown_completes_after_every_player_leaves() {
+    use std::time::{Duration, Instant};
+
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::item::ItemStack;
+    use mc_bamboo_storage::world_dir::{LevelSource, load_level_data};
+
+    let temp = TempWorld::new("reclaim-shutdown");
+    let dir = WorldDir::new(&temp.0);
+    dir.create_layout().unwrap();
+    let mut server = Harness::new_loaded_with_save(2, &temp.0);
+
+    // 三名玩家在不同位置进服、走动。
+    // Three players join at different positions and move around.
+    let alice = server.join_and_settle("Alice");
+    let bob = server.join_and_settle("Bob");
+    let cara = server.join_and_settle("Cara");
+    server.move_to(&bob, 100.0, 100.0);
+    server.move_to(&cara, -100.0, 100.0);
+    for _ in 0..16 {
+        server.tick();
+    }
+    assert!(
+        server.region().chunks.loaded_count().unwrap_or(0) > 0,
+        "进服后应有一批已加载区块"
+    );
+
+    // 一个空物品会在这一拍实体 tick 里被 discard。修复前它被 take 出去后既不
+    // put 也不 remove，taken 里永久留一行，让 ready_to_move_chunks 永远为假。
+    // An empty-stack item is discarded this entity tick. Before the fix it was
+    // taken out and never returned, leaving a permanent taken row.
+    let uid = server.spawn_entity(Entity::ground_item(
+        Vec3::new(0.5, 64.0, 0.5),
+        ItemStack::empty(),
+    ));
+    crate::interaction::run_entity_ticks(0, server.region());
+    assert!(
+        server.region().entities.public_at(uid).is_none(),
+        "空物品这一拍应被丢弃"
+    );
+    assert!(
+        server.region().entities.ready_to_move_chunks(),
+        "被丢弃的实体不能让 ready_to_move_chunks 永远为假"
+    );
+
+    // 全部离开：票撤销，延迟到期后区块全部收回。
+    // All players leave: tickets are dropped and every chunk is reclaimed.
+    server.leave(&alice);
+    server.leave(&bob);
+    server.leave(&cara);
+    let mut reclaimed = false;
+    for _ in 0..3000 {
+        if server.region().chunks.loaded_count().unwrap_or(0) == 0 {
+            reclaimed = true;
+            break;
+        }
+        server.tick();
+    }
+    assert!(reclaimed, "所有区块都要收回");
+
+    // 关服在合理时间内完成，且 level.dat 可读（存盘完整）。
+    // Shutdown finishes in bounded time and level.dat is readable (save intact).
+    let started = Instant::now();
+    server.shut_down();
+    assert!(started.elapsed() < Duration::from_secs(30), "关服不能挂死");
+    assert_eq!(
+        load_level_data(&dir).source,
+        LevelSource::Primary,
+        "关服必须写出可读的 level.dat"
+    );
+}

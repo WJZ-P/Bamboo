@@ -109,18 +109,24 @@ step 9（`vegetal_decoration`）占 109 个。
 ## 进度表
 
 以 `--feature-types` 按 placed feature 名隔离对拍，逐块 0 不一致才算做完一项。
+范围调整（2026-11-14）：树 / `fallen_tree` / 巨型蘑菇移交 `cb-wg-trees`，水下植被与
+其余植被移交 `cb-wg-aquatic`；本分支只做组合类、`simple_block` 剩余种类、谓词。
 
 | 类型 / 支撑件 | 状态 | 对拍 |
 |---|---|---|
-| `minecraft:simple_block`（内联 bare-state provider） | 已做，按方块类白名单判 `canSurvive` | step 9 的 11 个 placed feature 多种子 / 多区块 0 不一致 |
-| `IntProvider` trapezoid / biased / very_biased | 已做 | 单测覆盖对称快路径与官方嵌套取数 |
+| `minecraft:simple_block`（内联 bare-state provider） | 已做，按方块类白名单判 `canSurvive` | 前 11 个 placed feature 多种子 0 不一致 |
+| 内联新类（SweetBerryBush / Eyeblossom / FireflyBush / Sapling / FlowerBed / Short·TallDryGrass / LeafLitter / melon / DoublePlant） | 已做 | 12 个 placed feature 90 中心 0 不一致，改坏报 160 处 |
+| `DoublePlantBlock.placeAt`（上下两格 + `half`） | 已做 | 随 DoublePlant 花 / 草对拍 |
+| `IntProvider` trapezoid / biased / very_biased / clamped | 已做 | 单测 + `forest_flowers` 的 count 对拍 |
 | `BlockPredicate`：tag / blocks / all_of / any_of / not / replaceable / solid / true | 已做 | 单测 + `block_predicate_filter` 对拍 |
-| `block_predicate_filter` 修饰器 | 已做 | 见 `patch_pumpkin` 等 |
-| `Heightmap.update`（`setBlockState` 路径） | 已做 | 3 个单测 |
-| `--feature-types`（类型 ID / placed feature 名） | 已做 | 故意改坏确认非假绿 |
-| 组合类（selector / sequence / random_patch）、树及全部变体、`fallen_tree` | 未做 | 标 `unsupported` |
-| `noise_threshold_count` / `noise_based_count` / `environment_scan` 等修饰器 | 未做 | 标 `unsupported` |
-| `would_survive` / `has_sturdy_face` / `matching_fluids` 谓词 | 未做 | 标 `unsupported` |
-| 水下植被 / 藤蔓 / 苔藓 / 垂滴叶 / 孢子花 / multiface / 竹子 / 甘蔗 / 仙人掌 / 巨型蘑菇 | 未做 | 标 `unsupported` |
-| holder 引用的 `to_place`（`BLOCK_STATE_PROVIDER` 注册表）、weighted / randomized_int provider | 未做 | 注册表未导出 / 标 `unsupported` |
+| `would_survive` / `has_sturdy_face` / `matching_fluids` 谓词 | 已做 | firefly_bush / melon 等对拍；has_sturdy_face 仅单测（kelp 已移交） |
+| `block_predicate_filter` / `Heightmap.update` / `--feature-types` | 已做 | 见上，故意改坏确认非假绿 |
+| `BlockStateProvider` weighted / randomized_int / 内联 bare-state | 已做 | 9 个 weighted 90 中心 0 不一致，改坏报 120 处 |
+| 组合类：random_selector / weighted_random_selector / simple_random_selector / random_boolean_selector / sequence | 已做（框架 + 递归 `PlacedFeature.place`） | simple_random_selector（forest_flowers / flower_forest_flowers）90 中心 0 不一致，改坏报 52 处；其余子项多为树 / 水生（已移交），未逐块验证 |
+| 树 / `fallen_tree` / 巨型蘑菇 | 移交 `cb-wg-trees` | — |
+| 水下植被 / 其余植被（block_column / bamboo / vines / multiface / root_system 等） | 移交 `cb-wg-aquatic` | — |
+| `noise_threshold_count` / `noise_based_count` / `environment_scan` / `surface_water_depth_filter` / `surface_relative_threshold_filter` 修饰器 | 未做 | 标 `unsupported` |
+| 蘑菇（亮度）/ 睡莲 / 孢子花 / 苔藓地毯 / 海泡菜等特殊 `canSurvive` | 未做 | 标 `unsupported` |
+| holder 引用的 `to_place`（`BLOCK_STATE_PROVIDER` 注册表） | 未做 | 注册表未导出 |
+| `clamped_normal` / `weighted_list` IntProvider、`projected_random_patchy_square`（26.3 导出数据无条目） | 未做 | 标 `unsupported` / 无条目 |
 | 方块实体数据（蜂巢 / 可疑沙等） | 未做 | 无对拍 |

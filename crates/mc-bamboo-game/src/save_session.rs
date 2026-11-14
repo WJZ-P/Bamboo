@@ -67,6 +67,14 @@ pub struct SaveSession {
     /// Whether `level.dat` was actually read from disk (a fresh world has none,
     /// so the runtime defaults are authoritative).
     loaded_level: bool,
+    /// 启动时从 `world_gen_settings.dat` 读到的种子 / 世界类型（旧世界可能没有）。
+    /// Seed / level type read from `world_gen_settings.dat` at startup (older
+    /// worlds may not have the file).
+    stored_world_gen: Option<crate::world_options::WorldGenConfig>,
+    /// 这一局实际用的世界生成参数，写 `world_gen_settings.dat` 时用。
+    /// The world-gen config actually used this session, written to
+    /// `world_gen_settings.dat` on save.
+    world_gen: crate::world_options::WorldGenConfig,
 }
 
 impl SaveSession {
@@ -103,6 +111,13 @@ impl SaveSession {
             world_border: read_saved_data_at(&dir.world_border_dat()),
         };
         let loaded_level = matches!(loaded.source, LevelSource::Primary | LevelSource::Fallback);
+        // 世界生成设置（种子 + 维度生成器）存在 `data/` 里；有存档就以存档为准，
+        // 这样空 `level-seed` 的随机种子在重启后仍指向同一个世界（官方行为）。
+        // World-gen settings (seed + dimension generator) live in `data/`; a
+        // saved world wins over config, so an empty `level-seed`'s random value
+        // still addresses the same world after a restart (vanilla behaviour).
+        let stored_world_gen = read_saved_data(&dir, "minecraft:world_gen_settings")
+            .and_then(|data| crate::world_gen_settings::decode(&data));
         Ok((
             Self {
                 dir,
@@ -111,9 +126,23 @@ impl SaveSession {
                 auto_save: true,
                 startup,
                 loaded_level,
+                stored_world_gen,
+                world_gen: crate::world_options::WorldGenConfig::default(),
             },
             loaded.source,
         ))
+    }
+
+    /// 启动时从存档读到的世界生成参数；没有就是 `None`，调用方用配置。
+    /// World-gen config read from the save at startup; `None` means use config.
+    pub(crate) fn loaded_world_gen(&self) -> Option<&crate::world_options::WorldGenConfig> {
+        self.stored_world_gen.as_ref()
+    }
+
+    /// 记下这一局实际用的参数，供 `encode_saves` 写回 `world_gen_settings.dat`。
+    /// Record the config used this session for `encode_saves` to persist.
+    pub(crate) fn set_world_gen(&mut self, world_gen: crate::world_options::WorldGenConfig) {
+        self.world_gen = world_gen;
     }
 
     pub fn dir(&self) -> &WorldDir {
@@ -186,17 +215,17 @@ impl SaveSession {
                 &global.world_border().export_settings(),
             ))?,
         });
-        // 官方服务端打开这个世界时按 `minecraft:flat` 继续生成，层与 Bamboo
-        // 的超平坦模板一致（数据由生成流程从官方 `WorldGenSettings.CODEC` 导出）。
+        // 按官方 `WorldGenSettings.CODEC` 写出这一局的种子和维度生成器：
+        // flat 写 `minecraft:flat` + 地层，噪声世界写 `minecraft:noise` + settings 注册名。
+        // 官方服务端再打开这个世界时按同样的生成器继续，种子也固定下来。
+        // Write this session's seed and dimension generator per vanilla's
+        // `WorldGenSettings.CODEC`: flat writes `minecraft:flat` + layers, noise
+        // worlds write `minecraft:noise` + a settings id. An official server
+        // reopening the world uses the same generator and the fixed seed.
         files.push(EncodedFile {
             path: self.dir.saved_data("minecraft:world_gen_settings"),
             backup: None,
-            bytes: encode_saved_data(
-                &mc_bamboo_nbt::parse_snbt(mc_bamboo_data::saved_world::WORLD_GEN_SETTINGS)
-                    .map_err(|error| {
-                        io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-                    })?,
-            )?,
+            bytes: encode_saved_data(&crate::world_gen_settings::encode(&self.world_gen))?,
         });
         files.push(EncodedFile {
             path: self.dir.chunk_tickets(),

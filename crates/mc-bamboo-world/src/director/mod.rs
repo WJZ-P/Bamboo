@@ -19,7 +19,9 @@ mod bench_tests;
 #[cfg(test)]
 mod tests;
 
-pub use pyramid::{GENERATION, LOADING, PipelineKind, Step, loading_step, stage_index};
+pub use pyramid::{
+    GENERATION, LOADING, PipelineKind, Step, loading_step, neighbor_view, stage_index,
+};
 pub use state::{
     ChunkBundle, DebugRecord, DebugState, Desired, Director, DirectorConfig, Effect, Event,
     LevelClassification, Owner, RegionId, RegionMessage, SaveSeq, Task, TaskId, TaskResult,

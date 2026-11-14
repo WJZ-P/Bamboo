@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use mc_bamboo_auth::{CONNECT_TIMEOUT, READ_TIMEOUT, SESSION_SERVER_URL};
-use mc_bamboo_game::MailBudget;
+use mc_bamboo_game::{MailBudget, WorldGenConfig};
 use tracing::warn;
 
 /// 视距的下限，再小客户端就没有可渲染的区块了。
@@ -103,6 +103,27 @@ pub struct ServerConfig {
     pub chunk_worker_threads: usize,
     /// Director 信箱每刻交付/收回区块的个数上限，0 表示不限。
     pub mail_budget: MailBudget,
+    /// 世界生成参数（种子、世界类型、flat 预设、是否生成结构）。
+    /// 嵌入用法（测试、oracle、压测）默认超平坦、种子 0；由 `server.properties`
+    /// 新建的世界在 `ConfigFiles::to_server_config` 里改成官方默认 `normal`。
+    ///
+    /// World generation parameters (seed, level type, flat preset, structures).
+    /// Embedded use defaults to superflat / seed 0; a world created from
+    /// `server.properties` is switched to the official default `normal`.
+    pub world_gen: WorldGenConfig,
+    /// 官方 `server.properties` 的 `broadcast-console-to-ops`：控制台命令反馈要不要
+    /// 广播给在线 OP。默认 true。
+    ///
+    /// Official `server.properties` `broadcast-console-to-ops`: whether console command
+    /// feedback is broadcast to online ops. Defaults to true.
+    pub broadcast_console_to_ops: bool,
+    /// 要不要起读 stdin 的控制台输入线程。命令行版（从 `server.properties` 建的配置）
+    /// 打开；嵌入式用法（测试、oracle、压测、桌面端 GUI）关掉，不去读进程 stdin。
+    ///
+    /// Whether to start the stdin-reading console thread. Enabled for the CLI (config
+    /// built from `server.properties`); disabled for embedded use (tests, oracle, load
+    /// tests, the desktop GUI) so they do not read the process stdin.
+    pub console_enabled: bool,
 }
 
 impl Default for ServerConfig {
@@ -129,6 +150,9 @@ impl Default for ServerConfig {
             redstone_cache: false,
             chunk_worker_threads: 0,
             mail_budget: MailBudget::default(),
+            world_gen: WorldGenConfig::default(),
+            broadcast_console_to_ops: true,
+            console_enabled: false,
         }
     }
 }
