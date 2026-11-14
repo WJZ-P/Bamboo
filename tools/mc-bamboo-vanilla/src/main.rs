@@ -34,6 +34,12 @@
 //!
 //!     Compare findValidGenerationPoint's biome and height gates against vanilla
 //!     Structure.GenerationContext
+//! mc-bamboo-vanilla structure-generation <java 路径>
+//!     用官方 Structure.findValidGenerationPoint 对拍四个代码生成结构的
+//!     findGenerationPoint 前置判定与「这个起点是否真的生成」
+//!
+//!     Compare the four code-built structures' findGenerationPoint gates and
+//!     "whether this start really generates" against vanilla
 //! mc-bamboo-vanilla structure-pieces <java 路径>
 //!     用官方结构件类对拍多件式结构的结构件布局（类型、包围盒、朝向、参数）；
 //!     已移植废弃矿井 / 要塞 / 海底神殿三种
@@ -118,6 +124,8 @@ mod seed_world;
 #[cfg(feature = "oracle")]
 mod storage_oracle;
 #[cfg(feature = "oracle")]
+mod structure_generation;
+#[cfg(feature = "oracle")]
 mod structure_pieces;
 #[cfg(feature = "oracle")]
 mod structure_rings;
@@ -177,6 +185,9 @@ const STRUCTURE_VALIDITY_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureV
 #[cfg(feature = "oracle")]
 const STRUCTURE_PIECES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePiecesOracle.java";
 #[cfg(feature = "oracle")]
+const STRUCTURE_GENERATION_SOURCE: &str =
+    "tools/mc-bamboo-vanilla/java/StructureGenerationOracle.java";
+#[cfg(feature = "oracle")]
 const STRUCTURE_SINGLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSingleOracle.java";
 #[cfg(feature = "oracle")]
 const STRUCTURE_TEMPLATES_SOURCE: &str =
@@ -211,6 +222,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla gen-world <java 路径> [--seeds N] [--chunks N] [--salt S] [--show N] [--break-self-test]
       mc-bamboo-vanilla structure-rings <java 路径>
       mc-bamboo-vanilla structure-validity <java 路径>
+      mc-bamboo-vanilla structure-generation <java 路径>
       mc-bamboo-vanilla structure-pieces <java 路径>
       mc-bamboo-vanilla structure-single <java 路径>
       mc-bamboo-vanilla structure-templates <java 路径>
@@ -266,6 +278,7 @@ fn run() -> Result<(), String> {
         ["gen-world", java, ref options @ ..] => gen_world_cli(java, options),
         ["structure-rings", java, ref options @ ..] => structure_rings_cli(java, options),
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
+        ["structure-generation", java, ref options @ ..] => structure_generation_cli(java, options),
         ["structure-pieces", java, ref options @ ..] => structure_pieces_cli(java, options),
         ["structure-single", java, ref options @ ..] => structure_single_cli(java, options),
         ["structure-templates", java, ref options @ ..] => structure_templates_cli(java, options),
@@ -503,6 +516,19 @@ fn structure_validity_cli(java: &str, options: &[&str]) -> Result<(), String> {
     let queries_path = root.join(WORK_DIR).join("structure_validity_queries.txt");
     structure_validity::run(
         official_program(java, STRUCTURE_VALIDITY_SOURCE)?,
+        &worldgen_path,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_generation_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let worldgen_path = root.join("crates/mc-bamboo-data/src/generated/worldgen.json");
+    let queries_path = root.join(WORK_DIR).join("structure_generation_queries.txt");
+    structure_generation::run(
+        official_program(java, STRUCTURE_GENERATION_SOURCE)?,
         &worldgen_path,
         &queries_path,
         options,
@@ -755,6 +781,11 @@ fn structure_rings_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn structure_validity_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_generation_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

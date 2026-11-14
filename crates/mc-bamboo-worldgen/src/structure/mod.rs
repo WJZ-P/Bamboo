@@ -24,6 +24,7 @@ pub mod registry;
 pub mod rings;
 pub mod single;
 pub mod start;
+pub mod start_point;
 pub mod template;
 pub mod validity;
 
