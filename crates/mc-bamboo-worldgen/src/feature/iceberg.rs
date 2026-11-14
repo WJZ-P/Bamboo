@@ -340,7 +340,7 @@ impl IcebergGen<'_, '_> {
             } else {
                 self.state
             };
-            self.world.set_block_state(x, y, z, placed);
+            self.world.set_block_with_heightmaps(x, y, z, placed);
         }
     }
 
@@ -361,9 +361,9 @@ impl IcebergGen<'_, '_> {
                     if Self::is_iceberg_state(state) || is(state, "minecraft:snow") {
                         let below = self.world.get_block(px, py - 1, pz);
                         if is_air_state(below) {
-                            self.world.set_block_state(px, py, pz, blocks::AIR);
+                            self.world.set_block_with_heightmaps(px, py, pz, blocks::AIR);
                             self.world
-                                .set_block_state(px, py + 1, pz, blocks::AIR);
+                                .set_block_with_heightmaps(px, py + 1, pz, blocks::AIR);
                         } else if Self::is_iceberg_state(state) {
                             let neighbours = [
                                 self.world.get_block(px - 1, py, pz),
@@ -376,7 +376,7 @@ impl IcebergGen<'_, '_> {
                                 .filter(|&&side| !Self::is_iceberg_state(side))
                                 .count();
                             if counter >= 3 {
-                                self.world.set_block_state(px, py, pz, blocks::AIR);
+                                self.world.set_block_with_heightmaps(px, py, pz, blocks::AIR);
                             }
                         }
                     }
@@ -463,15 +463,15 @@ impl IcebergGen<'_, '_> {
                     let state = self.world.get_block(px, py, pz);
                     if Self::is_iceberg_state(state) || is(state, "minecraft:snow_block") {
                         if under_water {
-                            self.world.set_block_state(px, py, pz, blocks::WATER);
+                            self.world.set_block_with_heightmaps(px, py, pz, blocks::WATER);
                         } else {
-                            self.world.set_block_state(px, py, pz, blocks::AIR);
+                            self.world.set_block_with_heightmaps(px, py, pz, blocks::AIR);
                             // removeFloatingSnowLayer：上方雪层换成空气。
                             // removeFloatingSnowLayer: replace the snow layer above with air.
                             let above = self.world.get_block(px, py + 1, pz);
                             if is(above, "minecraft:snow") {
                                 self.world
-                                    .set_block_state(px, py + 1, pz, blocks::AIR);
+                                    .set_block_with_heightmaps(px, py + 1, pz, blocks::AIR);
                             }
                         }
                     }

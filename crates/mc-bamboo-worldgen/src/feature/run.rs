@@ -14,11 +14,8 @@ use crate::{
 };
 
 use super::{
-    DECORATION_STEPS, FeatureChunks, FeatureResult,
-    placement::{Modifier, PlacementEnv, place_candidates},
-    provider::WorldGenerationContext,
-    registry::Registry,
-    world::FeatureWorld,
+    DECORATION_STEPS, FeatureChunks, FeatureResult, composition, placement::PlacementEnv,
+    provider::WorldGenerationContext, registry::Registry, world::FeatureWorld,
 };
 
 /// 一次 `features` 调用需要的、按种子建一次的东西。
@@ -30,8 +27,13 @@ pub struct FeatureContext<'a> {
     pub seed: i64,
     /// 只跑这些 step；`(1<<11)-1` 表示全部。过渡期诊断用。
     pub steps_mask: i32,
-    /// 只跑这些配置类型；`None` 表示全部。过渡期诊断用。
-    /// Transitional diagnostic filter: only run placed features of these config types.
+    /// 只跑这些条目；`None` 表示全部。每个条目是 Feature 类型 ID 或 placed feature
+    /// 注册名，和 Java 侧 `--feature-types` 的白名单判定一致（精确匹配其一）。
+    /// 过渡期诊断用。
+    ///
+    /// Only run these entries; `None` means all. Each entry is a Feature type ID or
+    /// a placed-feature registry name, matched the same way as Java's
+    /// `--feature-types` allow list (exact match on either). Diagnostic only.
     pub allowed_kinds: Option<&'a [String]>,
 }
 
@@ -88,18 +90,26 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 let Some(id) = ctx.registry.placed_id(name) else {
                     continue;
                 };
-                // 过渡期 `--ore-only`：Java 侧把非 ore 的 HolderSet 换空了，
-                // 这里要在收集 indices 时用同一套白名单过滤，否则两边跑的
-                // (index, step) 集合不同。
-                if let Some(kinds) = ctx.allowed_kinds {
-                    let Some(placed) = ctx.registry.placed(id) else {
-                        continue;
-                    };
-                    let Some((kind, _)) = resolve_feature(ctx.registry, &placed.feature) else {
-                        continue;
-                    };
-                    if !kinds.iter().any(|allowed| allowed == &kind) {
-                        continue;
+                // 过渡期 `--feature-types` / `--ore-only`：Java 侧把不在白名单里的
+                // HolderSet 换空了，这里要用同一套判定收集 indices，否则两边跑的
+                // (index, step) 集合不同。白名单条目既可以是 placed feature 注册名，
+                // 也可以是 Feature 类型 ID；两处都精确匹配其一，和 Java 对称。
+                // Java empties the non-whitelisted HolderSets; collect indices with
+                // the same rule so both sides run the same (index, step) set. A
+                // selector is a placed-feature name OR a Feature type ID, matched
+                // exactly, symmetric with Java's allow list.
+                if let Some(selectors) = ctx.allowed_kinds {
+                    let by_name = selectors.iter().any(|s| s == name);
+                    if !by_name {
+                        let Some(placed) = ctx.registry.placed(id) else {
+                            continue;
+                        };
+                        let Some((kind, _)) = resolve_feature(ctx.registry, &placed.feature) else {
+                            continue;
+                        };
+                        if !selectors.iter().any(|s| s == &kind) {
+                            continue;
+                        }
                     }
                 }
                 // featuresPerStep[step] 是按全局 index 排好的列表，下标即 index。
@@ -120,37 +130,6 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 continue;
             };
 
-            // 解析 feature 配置；未移植的类型标 unsupported 并跳过（不消费随机数）。
-            // Parse the feature config; unported types mark unsupported and skip
-            // without consuming randomness.
-            let Some((kind, config)) = resolve_feature(ctx.registry, &placed.feature) else {
-                unsupported = true;
-                continue;
-            };
-            if ctx
-                .allowed_kinds
-                .is_some_and(|kinds| !kinds.iter().any(|allowed| allowed == &kind))
-            {
-                continue;
-            }
-            let Some(feature) = super::dispatch::Feature::parse(&kind, config)? else {
-                unsupported = true;
-                continue;
-            };
-            if !feature.is_supported() {
-                unsupported = true;
-                continue;
-            }
-            let modifiers: Vec<Modifier> = placed
-                .placement
-                .iter()
-                .map(Modifier::parse)
-                .collect::<Result<Vec<_>, _>>()?;
-            if modifiers.iter().any(|m| !m.is_supported()) {
-                unsupported = true;
-                continue;
-            }
-
             // BiomeFilter 需要 level.getBiome(pos)，即 BiomeManager.getBiome 的
             // 八角 fiddled distance；这里用一个闭包把采样器和上下文带进去。
             let mut biome_at = |x: i32, y: i32, z: i32| -> u32 {
@@ -163,19 +142,22 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 registry: ctx.registry,
                 top_feature: Some(placed_id),
             };
-            // 官方在栈 DFS 过程中交错执行 modifier 和 Feature.place；不能先收集
-            // 全部候选位置，否则 Feature.place 消费的随机数会打乱后续 modifier。
-            let mut place_one = |world: &mut FeatureWorld<'_>, pos: (i32, i32, i32)| {
-                feature.place(world, &random, pos);
-            };
-            place_candidates(
-                &modifiers,
+            // 组合类会在 Feature.place 里递归再走一轮修饰器链；整棵树是否都移植
+            // 由 place_placed 汇总，任一未移植分支都让本区块标 unsupported。
+            // Composition features recurse into more placement chains inside Feature.place;
+            // place_placed reports whether the whole tree is ported.
+            let outcome = composition::place_placed(
+                ctx.registry,
+                &placed.feature,
+                &placed.placement,
                 &mut world,
                 &mut env,
                 &random,
                 origin,
-                &mut place_one,
             );
+            if !outcome.supported {
+                unsupported = true;
+            }
         }
     }
 

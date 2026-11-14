@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
-    predicates::Predicate, provider::IntProvider, state_provider::StateProvider,
+    block_predicate::BlockPredicate, provider::IntProvider, state_provider::StateProvider,
     world::FeatureWorld,
 };
 
@@ -25,7 +25,7 @@ use super::{
 pub struct DiskFeature {
     pub radius: IntProvider,
     pub half_height: i32,
-    pub target: Predicate,
+    pub target: BlockPredicate,
     pub state_provider: StateProvider,
 }
 
@@ -38,7 +38,7 @@ impl DiskFeature {
                 .get("half_height")
                 .and_then(Value::as_i64)
                 .ok_or("disk has no half_height")? as i32,
-            target: Predicate::parse(object.get("target").ok_or("disk has no target")?)?,
+            target: BlockPredicate::parse(object.get("target").ok_or("disk has no target")?),
             state_provider: StateProvider::parse(
                 object
                     .get("state_provider")
@@ -51,7 +51,7 @@ impl DiskFeature {
     ///
     /// Whether every predicate and state provider in the config is ported.
     pub fn supported(&self) -> bool {
-        self.target.supported() && self.state_provider.supported()
+        self.target.is_supported() && self.state_provider.supported()
     }
 }
 
@@ -91,7 +91,7 @@ pub fn place(
                     // setBlock(pos, state, 2)：走 ChunkAccess.setBlockState，要更新高度图。
                     // setBlock(pos, state, 2): goes through ChunkAccess.setBlockState,
                     // so the heightmaps must be updated.
-                    world.set_block_state(x, y, z, state);
+                    world.set_block_with_heightmaps(x, y, z, state);
                     placed_any = true;
                 }
                 y -= 1;

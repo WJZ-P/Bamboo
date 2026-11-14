@@ -8,19 +8,23 @@
 //! `biome_features` 和 `features_per_step` 四个键，见 `docs/worldgen-features-plan.md`。
 
 pub mod block_blob;
+pub mod block_predicate;
+pub mod composition;
 pub mod disk;
 pub mod dispatch;
+pub mod heightmap;
 pub mod iceberg;
 pub mod ores;
 pub mod placement;
-pub mod predicates;
 pub mod provider;
 pub mod registry;
 pub mod rule_test;
 pub mod run;
+pub mod simple_block;
 pub mod spring;
 pub mod state;
 pub mod state_provider;
+pub mod survival;
 pub mod underwater_magma;
 pub mod world;
 

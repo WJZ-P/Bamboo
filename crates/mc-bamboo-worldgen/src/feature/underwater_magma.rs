@@ -165,7 +165,7 @@ pub fn place(
                 if random.next_float() < feature.placement_probability_per_valid_position
                     && is_valid_placement(world, x, y, z)
                 {
-                    world.set_block_state(x, y, z, magma);
+                    world.set_block_with_heightmaps(x, y, z, magma);
                     placed = true;
                 }
             }

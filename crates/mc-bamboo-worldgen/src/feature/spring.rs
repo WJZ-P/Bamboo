@@ -181,6 +181,6 @@ pub fn place(
     if rock != spring.rock_count || hole != spring.hole_count {
         return false;
     }
-    world.set_block_state(x, y, z, spring.state);
+    world.set_block_with_heightmaps(x, y, z, spring.state);
     true
 }

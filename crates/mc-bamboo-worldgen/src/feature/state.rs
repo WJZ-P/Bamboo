@@ -35,6 +35,13 @@ pub fn parse_state(value: &Value) -> Result<u32, String> {
     Ok(state)
 }
 
+/// 返回一个把某个属性改成给定值的状态 ID，属性名或值不存在时返回 `None`。
+///
+/// Return a state with one property set to the given value, or `None` if absent.
+pub fn with_property(state: u32, name: &str, value: &str) -> Option<u32> {
+    apply_property(state, name, value)
+}
+
 /// 按官方 `StateDefinition` 的属性顺序改一个属性的值。
 ///
 /// 状态 ID 是属性值笛卡尔积，最后一个属性变化最快（`blocks.rs` 的生成注释）。

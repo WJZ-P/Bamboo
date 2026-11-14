@@ -1,8 +1,10 @@
-// 用官方 codec 读 Bamboo 写出的两份 saved data，报告解码结果；读不动就非 0 退出。
-// 只加载官方类、不启动服务端、不接受 EULA。
+// 用官方 codec 读 Bamboo 写出的 saved data（游戏规则、世界边界、超平坦和若干噪声
+// world_gen_settings.dat），报告解码结果；读不动就非 0 退出。只加载官方类、不启动
+// 服务端、不接受 EULA。
 //
-// Decode Bamboo's two saved-data files with the official codecs and report the
-// result; exit non-zero when a file cannot be decoded. No server, no EULA.
+// Decode Bamboo's saved-data files (game rules, world border, a flat and several
+// noise world_gen_settings.dat) with the official codecs and report the result;
+// exit non-zero when a file cannot be decoded. No server, no EULA.
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -39,9 +41,12 @@ import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
 import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.gamerules.GameRule;
 import net.minecraft.world.level.gamerules.GameRuleMap;
+import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.WorldGenSettings;
 import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
 import net.minecraft.world.level.levelgen.FlatLevelSource;
@@ -91,8 +96,8 @@ public final class SavedDataOracle {
                 new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected())) {
         RegistryAccess.Frozen registries = loadRegistries(resources);
         RegistryOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, registries);
-        if (args.length != 3) {
-            throw new IllegalArgumentException("usage: SavedDataOracle <game_rules.dat> <world_border.dat> <world_gen_settings.dat>");
+        if (args.length < 3) {
+            throw new IllegalArgumentException("usage: SavedDataOracle <game_rules.dat> <world_border.dat> <flat_world_gen_settings.dat> [noise_world_gen_settings.dat ...]");
         }
 
         CompoundTag genRoot = NbtIo.readCompressed(Path.of(args[2]), NbtAccounter.unlimitedHeap());
@@ -119,6 +124,36 @@ public final class SavedDataOracle {
         gen.addProperty("biome", registries.lookupOrThrow(Registries.BIOME)
                 .getKey(flat.settings().getBiome().value()).toString());
         result0 = gen;
+
+        // 额外传入的每份 world_gen_settings.dat 都必须是官方 WorldGenSettings.CODEC
+        // 能解析的 minecraft:noise 生成器；把解析出的形状报告给 Rust 侧逐项核对。
+        // Every extra world_gen_settings.dat must be a minecraft:noise generator that
+        // the official WorldGenSettings.CODEC accepts; report its decoded shape.
+        JsonArray noiseGens = new JsonArray();
+        for (int i = 3; i < args.length; i++) {
+            CompoundTag noiseRoot = NbtIo.readCompressed(Path.of(args[i]), NbtAccounter.unlimitedHeap());
+            Tag noiseData = noiseRoot.get("data");
+            if (noiseData == null) {
+                throw new IllegalStateException("noise world_gen_settings.dat has no data tag");
+            }
+            WorldGenSettings parsed = WorldGenSettings.CODEC.parse(ops, noiseData).getOrThrow();
+            var noiseStem = parsed.dimensions().get(net.minecraft.world.level.dimension.LevelStem.OVERWORLD);
+            if (noiseStem.isEmpty() || !(noiseStem.get().generator() instanceof NoiseBasedChunkGenerator noise)) {
+                throw new IllegalStateException("noise world_gen_settings.dat overworld is not minecraft:noise");
+            }
+            boolean overworldPreset = noise.getBiomeSource() instanceof MultiNoiseBiomeSource mn
+                    && mn.stable(MultiNoiseBiomeSourceParameterLists.OVERWORLD);
+            JsonObject ng = new JsonObject();
+            ng.addProperty("generator", "minecraft:noise");
+            ng.addProperty("settings", noise.generatorSettings().unwrapKey()
+                    .map(k -> k.identifier().toString()).orElse(""));
+            ng.addProperty("biome_source", overworldPreset ? "minecraft:multi_noise" : "other");
+            ng.addProperty("preset", overworldPreset ? "minecraft:overworld" : "other");
+            ng.addProperty("seed", parsed.options().seed());
+            ng.addProperty("generate_structures", parsed.options().generateStructures());
+            ng.addProperty("bonus_chest", parsed.options().generateBonusChest());
+            noiseGens.add(ng);
+        }
 
         CompoundTag gameRulesRoot = NbtIo.readCompressed(Path.of(args[0]), NbtAccounter.unlimitedHeap());
         Tag gameRulesData = gameRulesRoot.get("data");
@@ -166,6 +201,7 @@ public final class SavedDataOracle {
         b.addProperty("lerp_target", border.lerpTarget());
         result.add("world_border", b);
         result.add("world_gen_settings", result0);
+        result.add("noise_generators", noiseGens);
 
         try (Writer out = new OutputStreamWriter(stdout, StandardCharsets.UTF_8)) {
             out.write(result.toString());

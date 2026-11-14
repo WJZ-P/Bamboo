@@ -165,6 +165,10 @@ import net.minecraft.world.level.levelgen.densityfunction.DensityFunction;
 import net.minecraft.world.level.levelgen.material.condition.MaterialCondition;
 import net.minecraft.world.level.levelgen.material.rule.MaterialRule;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
+import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraft.world.level.levelgen.structure.StructureSet;
+import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType;
 import net.minecraft.world.level.levelgen.blockpredicates.AllOfPredicate;
 import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate;
@@ -1415,6 +1419,14 @@ public final class Extractor {
         worldgen.add("features_per_step", featuresPerStep(registries));
         worldgen.add("multi_noise_presets", multiNoisePresets(registries));
         worldgen.add("end_biomes", endBiomes());
+        worldgen.add("structure_set",
+                encodeRegistry(registries, ops, Registries.STRUCTURE_SET, StructureSet.DIRECT_CODEC));
+        worldgen.add("structure",
+                encodeRegistry(registries, ops, Registries.STRUCTURE, Structure.DIRECT_CODEC));
+        worldgen.add("template_pool",
+                encodeRegistry(registries, ops, Registries.TEMPLATE_POOL, StructureTemplatePool.DIRECT_CODEC));
+        worldgen.add("processor_list",
+                encodeRegistry(registries, ops, Registries.PROCESSOR_LIST, StructureProcessorType.DIRECT_CODEC));
         return worldgen;
     }
 

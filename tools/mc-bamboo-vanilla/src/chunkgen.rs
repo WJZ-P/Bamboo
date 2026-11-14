@@ -27,7 +27,9 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: chunkgen <java> [--seeds N] [--chunks N] [--salt S] \
-     [--through STAGE] [--steps 6] [--types ID,ID] [--ore-only] [--show N]";
+     [--through STAGE] [--steps 6] [--feature-types IDS] [--ore-only] [--show N] \
+     [--chunk X Z] [--scan N] [--break-self-test] \
+     (--chunk X Z + --scan N = contiguous grid centered on X,Z)";
 /// 完整的 11 个地物步骤；`--steps` 只是过渡期的诊断开关。
 const ALL_STEPS: i32 = (1 << 11) - 1;
 const DEFAULT_SHOW: usize = 8;
@@ -111,10 +113,17 @@ struct Options {
     features: bool,
     /// 转发给 Java 侧的 `--steps` 掩码。
     steps: i32,
-    /// `--types` 的配置类型 ID 白名单；`None` 表示全部。
-    /// 过渡期诊断开关，让对拍只跑这些类型的 placed feature。
-    /// Transitional diagnostic filter: only run placed features of these config types.
-    types: Option<Vec<String>>,
+    /// `--feature-types` / `--ore-only`：条目是 Feature 类型 ID 或 placed feature
+    /// 注册名；Java 侧只留这些 placed feature，Rust 侧用同一组条目过滤 indices。
+    /// `None` 表示不过滤（跑全部）。
+    ///
+    /// `--feature-types` / `--ore-only`: each entry is a Feature type ID or a
+    /// placed-feature registry name; Java keeps only those placed features and Rust
+    /// filters indices by the same set. `None` means no filtering.
+    feature_types: Option<Vec<String>>,
+    /// 自检：故意改坏一个方块，确认比较器会报不一致。
+    /// Self-test: deliberately break one block so the comparator must report a mismatch.
+    break_self_test: bool,
 }
 
 impl Options {
@@ -127,12 +136,13 @@ impl Options {
             through: Stage::Noise,
             features: false,
             steps: ALL_STEPS,
-            types: None,
+            feature_types: None,
+            break_self_test: false,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
-                "--seeds" | "--chunks" | "--salt" | "--steps" | "--types" => {
+                "--seeds" | "--chunks" | "--salt" | "--steps" | "--feature-types" => {
                     let value = args.next().ok_or(USAGE)?;
                     if arg == "--steps" {
                         let mut mask = 0_i32;
@@ -144,21 +154,21 @@ impl Options {
                             mask |= 1 << step;
                         }
                         options.steps = mask;
-                    } else if arg == "--types" {
-                        options.types = Some(
-                            value
-                                .split(',')
-                                .map(|part| part.trim().to_owned())
-                                .filter(|part| !part.is_empty())
-                                .collect(),
-                        );
+                    }
+                    if arg == "--feature-types" {
+                        let types: Vec<String> = value
+                            .split(',')
+                            .map(|s| s.trim().to_owned())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        options.feature_types = Some(types);
                     }
                     options
                         .forwarded
                         .extend([arg.to_owned(), (*value).to_owned()]);
                 }
                 "--ore-only" => {
-                    options.types = Some(vec!["minecraft:ore".to_owned()]);
+                    options.feature_types = Some(vec!["minecraft:ore".to_owned()]);
                     options.forwarded.push("--ore-only".to_owned());
                 }
                 "--biomes-only" => {
@@ -193,6 +203,27 @@ impl Options {
                     let value = args.next().ok_or(USAGE)?;
                     options.show = Some(value.parse().map_err(|_| USAGE)?);
                 }
+                // 精确复现单个区块 / 大范围地形扫描 / 以该区块为中心的连续网格，
+                // 都只转发给 Java 侧来出坐标，组合语义也在 Java 侧解释。
+                // Exact single-chunk reproduction / wide terrain scan / contiguous grid
+                // centered on that chunk: all are forwarded to the Java side, which produces
+                // the coordinates and interprets the combined form.
+                "--chunk" => {
+                    let x = args.next().ok_or(USAGE)?;
+                    let z = args.next().ok_or(USAGE)?;
+                    options.forwarded.extend([
+                        "--chunk".to_owned(),
+                        (*x).to_owned(),
+                        (*z).to_owned(),
+                    ]);
+                }
+                "--scan" => {
+                    let value = args.next().ok_or(USAGE)?;
+                    options
+                        .forwarded
+                        .extend(["--scan".to_owned(), (*value).to_owned()]);
+                }
+                "--break-self-test" => options.break_self_test = true,
                 _ => return Err(USAGE.to_owned()),
             }
         }
@@ -216,10 +247,11 @@ struct Report<'a> {
     biomes_only: bool,
     features: bool,
     steps: i32,
-    types: Option<Vec<String>>,
+    feature_types: Option<Vec<String>>,
     mismatches: Vec<String>,
     show: usize,
     ended: bool,
+    break_self_test: bool,
 }
 
 /// 启动官方进程，一边读一边比较。`command` 已经是能运行 `ChunkgenOracle.java` 的命令。
@@ -250,10 +282,11 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         biomes_only: options.biomes_only,
         features: options.features,
         steps: options.steps,
-        types: options.types,
+        feature_types: options.feature_types,
         mismatches: Vec::new(),
         show: options.show.unwrap_or(DEFAULT_SHOW),
         ended: false,
+        break_self_test: options.break_self_test,
     };
     let read = report.read_lines(BufReader::new(stdout));
     if read.is_err() {
@@ -459,7 +492,7 @@ impl Report<'_> {
                 }
             }
         }
-        let ours = match self
+        let mut ours = match self
             .generator(seed)
             .and_then(|generator| generator.terrain(x, z, stage))
         {
@@ -469,6 +502,12 @@ impl Report<'_> {
                 return;
             }
         };
+        // 自检：在第一个 NOISE 区块改坏一格，确认逐方块比较器确实会报不一致。
+        // Self-test: break one block in the first NOISE chunk so the block-by-block
+        // comparator must report a mismatch.
+        if self.break_self_test && stage == Stage::Noise && self.chunks == 1 {
+            ours[0][0] = u32::MAX;
+        }
         let height = ours.len();
         if expected.len() != height * 256 {
             self.mismatch(format!(
@@ -577,7 +616,9 @@ impl Report<'_> {
         }
 
         // 造 9 个区块的 CARVERS 结果 + BIOMES 群系格 + primed 高度图。
-        let allowed: Option<Vec<String>> = self.types.clone();
+        // 先把过滤清单拷出来，避免和 `self.generator` 的可变借用冲突。
+        // Copy the filter out first to avoid clashing with the `self.generator` borrow.
+        let allowed = self.feature_types.clone();
         let generator = match self.generator(seed) {
             Ok(generator) => generator,
             Err(error) => {
@@ -685,6 +726,19 @@ impl Report<'_> {
             return Err("ChunkgenOracle.java stopped before its end line".to_owned());
         }
         println!("oracle reported {} checks", self.checks);
+        if self.break_self_test {
+            if self.mismatches.is_empty() {
+                return Err(
+                    "chunkgen self-test broke a block but reported 0 mismatches; the detector is broken"
+                        .to_owned(),
+                );
+            }
+            println!(
+                "chunkgen self-test: detector works ({} mismatches from the deliberate break)",
+                self.mismatches.len()
+            );
+            return Ok(());
+        }
         if !self.mismatches.is_empty() {
             for text in &self.mismatches[..self.mismatches.len().min(self.show)] {
                 println!("  {text}");

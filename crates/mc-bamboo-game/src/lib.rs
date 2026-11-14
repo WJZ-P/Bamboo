@@ -78,7 +78,13 @@ mod sign;
 mod tick_levels;
 mod weather;
 mod world;
+mod world_gen_settings;
+pub mod world_options;
 mod world_state;
+pub mod worldgen;
+pub mod worldgen_features;
+mod worldgen_light;
+mod worldgen_spawn;
 
 pub use command::test_commands;
 pub use director_host::MailBudget;
@@ -93,6 +99,7 @@ pub use secure_chat::ServiceProfileKeys;
 pub use world::{
     MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, World, WorldConfig,
 };
+pub use world_options::WorldGenConfig;
 
 /// 供 `mc-bamboo-vanilla saved-data` 和官方 codec 对拍：返回 Bamboo 编码器写出的
 /// 两份示例 `data` 复合标签（游戏规则、世界边界）。只暴露公开的 [`Tag`]，
@@ -124,4 +131,37 @@ pub fn saved_data_samples() -> (mc_bamboo_nbt::Tag, mc_bamboo_nbt::Tag) {
         save_data::game_rules_tag(&rules),
         save_data::world_border_tag(&border),
     )
+}
+
+/// 供 `mc-bamboo-vanilla saved-data` 对拍：返回 Bamboo 编码器给这份配置写出的
+/// `world_gen_settings.dat` 的 `data` 复合标签，让官方 `WorldGenSettings.CODEC` 复核
+/// 噪声生成器的形状。只在 `oracle-samples` feature 下编进库里。
+///
+/// Sample Bamboo's `world_gen_settings.dat` `data` compound for the official
+/// `WorldGenSettings.CODEC` to validate the noise generator shape. Gated behind
+/// the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn world_gen_settings_sample(config: &WorldGenConfig) -> mc_bamboo_nbt::Tag {
+    world_gen_settings::encode(config)
+}
+
+/// `fresh_spawn_sample` 的返回类型：`(出生区块, 出生点)`。
+/// Return type of `fresh_spawn_sample`: `(spawn chunk, spawn position)`.
+#[cfg(feature = "oracle-samples")]
+pub type SpawnSample = ((i32, i32), (i32, i32, i32));
+
+/// 供 `mc-bamboo-vanilla spawn` 对拍：返回游戏里 `setInitialSpawn` 那份代码算出的
+/// 出生区块 `(cx, cz)` 和最终出生点 `(x, y, z)`。只在 `oracle-samples` feature 下编进库里。
+///
+/// Sample the in-game `setInitialSpawn` code for the `mc-bamboo-vanilla spawn`
+/// oracle: the spawn chunk `(cx, cz)` and the final spawn `(x, y, z)`. Gated
+/// behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn fresh_spawn_sample(config: &WorldGenConfig) -> Option<SpawnSample> {
+    worldgen_spawn::select_spawn(config).map(|selection| {
+        (
+            selection.origin,
+            (selection.pos.x, selection.pos.y, selection.pos.z),
+        )
+    })
 }

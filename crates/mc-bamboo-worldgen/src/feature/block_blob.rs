@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::random::WorldgenRandom;
 
-use super::{predicates::Predicate, state::parse_state, world::FeatureWorld};
+use super::{block_predicate::BlockPredicate, state::parse_state, world::FeatureWorld};
 
 /// `BlockBlobFeature` 的配置。
 ///
@@ -20,7 +20,7 @@ use super::{predicates::Predicate, state::parse_state, world::FeatureWorld};
 #[derive(Debug, Clone)]
 pub struct BlockBlobFeature {
     pub state: u32,
-    pub can_place_on: Predicate,
+    pub can_place_on: BlockPredicate,
 }
 
 impl BlockBlobFeature {
@@ -30,11 +30,11 @@ impl BlockBlobFeature {
             .ok_or("block_blob feature must be an object")?;
         Ok(Self {
             state: parse_state(object.get("state").ok_or("block_blob has no state")?)?,
-            can_place_on: Predicate::parse(
+            can_place_on: BlockPredicate::parse(
                 object
                     .get("can_place_on")
                     .ok_or("block_blob has no can_place_on")?,
-            )?,
+            ),
         })
     }
 
@@ -42,7 +42,7 @@ impl BlockBlobFeature {
     ///
     /// Whether every nested predicate is ported.
     pub fn supported(&self) -> bool {
-        self.can_place_on.supported()
+        self.can_place_on.is_supported()
     }
 }
 
@@ -81,7 +81,7 @@ pub fn place(
                     if d2 <= tr_sq {
                         // setBlockAndUpdate → ChunkAccess.setBlockState，要更新高度图。
                         // setBlockAndUpdate → ChunkAccess.setBlockState, so update heightmaps.
-                        world.set_block_state(ox + dx, oy + dy, oz + dz, blob.state);
+                        world.set_block_with_heightmaps(ox + dx, oy + dy, oz + dz, blob.state);
                     }
                 }
             }
