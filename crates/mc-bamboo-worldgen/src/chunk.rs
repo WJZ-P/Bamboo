@@ -23,6 +23,7 @@ use serde_json::Value;
 use crate::{
     Worldgen,
     aquifer::Aquifer,
+    beardifier::Beardifier,
     biome::MultiNoiseBiomeSource,
     biome_manager::BiomeManager,
     carver::Carvers,
@@ -261,10 +262,31 @@ impl<'a> Generator<'a> {
         chunk_z: i32,
         stage: Stage,
     ) -> Result<Vec<Vec<u32>>, String> {
+        self.terrain_with_beardifier(chunk_x, chunk_z, stage, None)
+    }
+
+    /// `terrain` 加上一个本区块的 `Beardifier`。`structure_starts` / `structure_references`
+    /// 接进游戏后由调用方把真实结构喂进来；`None` 等价于官方 `Beardifier.EMPTY`，和
+    /// [`Generator::terrain`] 逐位相同。`first_occupied_height` 等基线路径永远走 `None`。
+    ///
+    /// `terrain` with a per-chunk `Beardifier`. Once the structure stages are wired into the
+    /// game the caller feeds real structures here; `None` equals vanilla `Beardifier.EMPTY` and
+    /// is bit-identical to [`Generator::terrain`]. Baseline paths such as
+    /// `first_occupied_height` always stay on `None`.
+    pub fn terrain_with_beardifier(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        stage: Stage,
+        beardifier: Option<&Beardifier>,
+    ) -> Result<Vec<Vec<u32>>, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
         let mut context = Context::new(self.cache_count);
+        if let Some(beardifier) = beardifier {
+            context.set_beardifier(std::sync::Arc::new(beardifier.clone()));
+        }
         let mut density = context.acquire(volume.len());
         // 官方先建 NoiseChunk（含水层的构造器也在这里求值），再算 finalDensity。
         // Rust 借检查不让两件事同时抱着 context，所以先建含水层，再算密度。
