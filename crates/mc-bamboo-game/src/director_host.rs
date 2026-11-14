@@ -76,6 +76,14 @@ pub(crate) const MAX_IO_MAILBOX: usize = 16384;
 /// Guard against a truly non-convergent `pump`. A large world must never panic
 /// here: on exceeding the cap, log and stop the pump instead of asserting.
 pub(crate) const PUMP_ROUND_LIMIT: usize = 20_000_000;
+/// 关服排空计算池的墙钟上限。正常关服远小于这个值；它只防止任务被无限重派
+/// 时世界线程卡死，超时后明确记下没存下来的区块、继续关服，绝不无限等。
+///
+/// Wall-clock bound for draining the compute pool at shutdown. Normal shutdown
+/// is far shorter; it only stops the world thread from hanging if tasks keep
+/// being resubmitted forever. On timeout, log the unsaved chunks and continue
+/// shutting down instead of waiting forever.
+pub(crate) const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
 /// 计算池里每条线程最多同时放几个任务，其余留在宿主的待办里。
 /// 留在宿主手里的任务还能按玩家的新位置重排、撤票时直接丢掉，
 /// 不会在池子里排一长串过期的远处任务。
@@ -1090,7 +1098,7 @@ impl DirectorHost {
             // 没有新消息就收敛了。
             self.flush_region_mail_into(region, &mut events);
             if events.is_empty() {
-                self.submit_reads(region);
+                self.submit_reads();
                 self.submit_compute(region);
                 self.pump_events = events;
                 return;
@@ -1103,7 +1111,17 @@ impl DirectorHost {
     /// 区块因此就是最近的那一圈（官方 `PlayerChunkSender` 的语义）。
     /// Submit the reads collected this round in distance order. The IO worker is
     /// FIFO, so near chunks reply first and join the same ordered delivery batch.
-    fn submit_reads(&mut self, region: &Region) {
+    ///
+    /// 玩家中心取自 Director 票表而不是 `region.players`：进服那一刻
+    /// `Event::Tickets`（`PlayerMoved`）先派读任务、随后才 `region.add_player`，
+    /// 用 `region.players` 会取到空表，读任务退化成按坐标排序，远处区块抢先回执。
+    /// 票表在 `handle_effects` 里同步 `set_player`，派读时一定有正确的中心。
+    /// Player centers come from the Director ticket table, not `region.players`:
+    /// on join, `Event::Tickets` (`PlayerMoved`) queues reads before
+    /// `region.add_player`, so `region.players` is empty and reads would fall back
+    /// to raw coordinate order, letting far chunks reply first. The ticket table
+    /// is updated synchronously in `handle_effects`, so centers are always valid.
+    fn submit_reads(&mut self) {
         if self.read_queue.is_empty() {
             return;
         }
@@ -1111,7 +1129,7 @@ impl DirectorHost {
             self.read_queue.clear();
             return;
         };
-        let centers = Self::guaranteed_centers(region);
+        let centers = self.director.tickets().player_centers();
         let mut queued = std::mem::take(&mut self.read_queue);
         // 稳定排序：同等距离保持 Director 派任务的顺序（TaskId 升序），结果确定。
         queued.sort_by_key(|&(pos, _, _)| Self::distance_to_players(pos, &centers));
@@ -1390,10 +1408,23 @@ impl DirectorHost {
     }
 
     /// 关服用：阻塞等计算池把在途任务全部做完，结果照常喂给 Director。
-    /// 池子线程意外全退时不会无限等：超时一轮没有任何进展就记错误退出。
+    /// 池子线程意外全退、或任务被无限重派时都不会无限等：没有进展或超过
+    /// 墙钟上限就记错误退出，把还没存下来的区块列出来。
+    ///
+    /// Drain the compute pool at shutdown, feeding results to the Director. A
+    /// dead pool or endlessly resubmitted tasks must never hang the world thread:
+    /// no progress or a wall-clock timeout logs the unsaved chunks and returns.
     fn drain_compute(&mut self, region: &mut Region) {
+        let started = Instant::now();
         let mut idle_rounds = 0;
         while self.compute_in_flight() > 0 {
+            if started.elapsed() >= SHUTDOWN_DRAIN_TIMEOUT {
+                tracing::error!(
+                    left = self.compute_in_flight(),
+                    "chunk compute pool did not drain before the shutdown deadline; some chunks are not saved"
+                );
+                return;
+            }
             self.submit_compute(region);
             let events = self.collect_compute(Some(Duration::from_millis(100)));
             if events.is_empty() {
@@ -2507,5 +2538,71 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 0, "poll_io already consumed all read replies");
+    }
+
+    /// 进服那刻的票 pump 在 `region.add_player` 之前派读任务，`region.players`
+    /// 还是空的；`submit_reads` 必须用 Director 票表里的玩家中心按距离排序，
+    /// 否则读任务退化成按坐标排序，远处区块抢先回执、第一批不是脚下 3×3。
+    ///
+    /// On join, the ticket pump queues reads before `region.add_player`, so
+    /// `region.players` is empty. `submit_reads` must order by the player centers
+    /// from the Director ticket table; otherwise reads fall back to raw coordinate
+    /// order, far chunks reply first, and the first batch is not the 3x3.
+    #[test]
+    fn read_submission_uses_ticket_table_centers_not_region_players() {
+        use mc_bamboo_storage::{chunk_io::ChunkIo, world_dir::WorldDir};
+
+        struct Temp(std::path::PathBuf);
+        impl Temp {
+            fn new() -> Self {
+                let path = std::env::temp_dir().join(format!(
+                    "bamboo-submit-order-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let _ = std::fs::remove_dir_all(&path);
+                Self(path)
+            }
+        }
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let temp = Temp::new();
+        let dir = WorldDir::new(&temp.0);
+        dir.create_layout().unwrap();
+        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        host.set_io(ChunkIo::open(&dir).unwrap());
+        // 玩家只在票表里（模拟进服派读时尚未 region.add_player），region 里没有玩家。
+        // The player is only in the ticket table (reads queued before add_player).
+        host.director
+            .tickets_mut()
+            .set_player(1, Some(ChunkPos::new(0, 0)));
+
+        // 故意远处在前、出生点在后：修复前会按坐标排，(-10,-10) 抢在最前。
+        // Far chunks first on purpose: before the fix they sorted by coordinate.
+        host.read_queue = vec![
+            (ChunkPos::new(10, 10), 1, 0),
+            (ORIGIN, 2, 0),
+            (ChunkPos::new(3, 0), 3, 0),
+            (ChunkPos::new(-10, -10), 4, 0),
+        ];
+        host.submit_reads();
+        host.flush_io();
+
+        let mut seen = Vec::new();
+        while let Some(reply) = host.io().unwrap().try_recv() {
+            if let Reply::Read { pos, .. } = reply {
+                seen.push(pos);
+            }
+        }
+        assert_eq!(seen.len(), 4, "四个读都提交了");
+        assert_eq!(seen[0], ORIGIN, "最近的出生点区块必须先提交给 IO 线程");
+        assert_eq!(seen[1], ChunkPos::new(3, 0), "其次按距离");
     }
 }

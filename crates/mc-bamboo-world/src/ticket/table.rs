@@ -196,6 +196,16 @@ impl TicketTable {
         out
     }
 
+    /// 每名玩家所在的区块，按玩家 id 升序。玩家票驱动区块加载，读盘请求的
+    /// 先后按这些中心排距离，进服第一批才会是脚下最近的 3×3。
+    ///
+    /// The chunk each player stands in, ordered by player id. Player tickets drive
+    /// chunk loading; ordering read requests by distance to these centers keeps
+    /// the first join batch the nearest 3x3 around the player.
+    pub fn player_centers(&self) -> Vec<ChunkPos> {
+        self.players.values().copied().collect()
+    }
+
     /// 某个位置的全部票，按 (类型, 等级) 排序。
     pub fn tickets_at(&self, pos: ChunkPos) -> Vec<Ticket> {
         let Some(list) = self.tickets.get(&pos) else {

@@ -77,7 +77,8 @@ WebView2 的渲染进程不算在内。
 次数做有上限的退避后由正常保存重试，绝不永久暂停；盒子留到写成功才释放，关服时
 把还没写成功的停放盒子全部重新编码提交；到关服磁盘还在失败就 `error!` 列出没存下的
 区块，照常退出。每次写盘或刷盘失败都在世界线程 `error!` 记日志（带路径和原因）并计数，
-`flush` 失败作为错误报出，不当成功。IO 线程 panic 或通道断开按设计稿 §14 / R12 当成
+`flush` 失败作为错误报出，不当成功。关服的 `flush` 和计算池排空都有墙钟上限，
+超时记错误并继续退出，绝不无限等。IO 线程 panic 或通道断开按设计稿 §14 / R12 当成
 致命错误：记日志、走关服流程把还能同步写的 `level.dat` / `data/` 存下来，不挂死。
 
 探针和每个测试都从空世界开始：单元测试 / oracle 用 `world_dir = None` 或临时目录，
@@ -88,6 +89,15 @@ WebView2 的渲染进程不算在内。
 （2026-11-14 按实现更新：`docs/m3-storage.md` 第 14 节、`docs/world-model-design.md` 5.3.1、
 `docs/profiling.md` 第 11 节、`crates/mc-bamboo-game/src/chunk_jobs.rs`、`tools/probe.sh`；
 合并提交 `05d8fa1`、`082a7c9`、`54f5fd2`）
+
+（2026-11-14 修 main 上两个回归：① 实体 tick 中被丢弃的实体曾在
+`EntityStore::taken` 里永久留一行，让 `ready_to_move_chunks()` 永远为假，玩家全离开后
+区块收回卡在 "not ready"、关服（等存完盘）因此挂死；现在 `end_tick` 回收这些借用槽位，
+`drain_compute` 和 `ChunkIo::flush` 的关服等待都有墙钟上限，绝不无限等。② `05d8fa1`
+（经 `1a0dee9` 合并）让所有区块走异步读流水线后，全新世界进服第一刻 `submit_reads`
+取 `region.players` 得到空表，读请求按坐标排序、远处区块抢先到达；现在改从 Director
+票表取玩家中心，全新世界和带存档世界第一批都按距离交付。详见 `docs/m3-storage.md`
+第 14 节「2026-11-14 修 main 上两个回归」。）
 
 ### 存档已知限制
 
