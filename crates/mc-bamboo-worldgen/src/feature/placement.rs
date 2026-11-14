@@ -327,7 +327,8 @@ fn modify(
         } => {
             let surface = i64::from(ctx.world.get_height(*heightmap, x, z));
             let y = i64::from(y);
-            if surface + i64::from(*min_inclusive) <= y && y <= surface + i64::from(*max_inclusive) {
+            if surface + i64::from(*min_inclusive) <= y && y <= surface + i64::from(*max_inclusive)
+            {
                 out.push(pos);
             }
         }

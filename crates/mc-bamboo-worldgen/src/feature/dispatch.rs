@@ -12,8 +12,9 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
-    bamboo::BambooFeature, block_column::BlockColumnFeature, ores, placement::OreFeature,
-    simple_block::SimpleBlockFeature, vines::VinesFeature, world::FeatureWorld,
+    bamboo::BambooFeature, block_column::BlockColumnFeature, multiface::MultifaceGrowthFeature,
+    ores, placement::OreFeature, simple_block::SimpleBlockFeature, vines::VinesFeature,
+    world::FeatureWorld,
 };
 
 type Pos = (i32, i32, i32);
@@ -24,6 +25,7 @@ pub enum Leaf {
     SimpleBlock(SimpleBlockFeature),
     Bamboo(BambooFeature),
     BlockColumn(BlockColumnFeature),
+    Multiface(MultifaceGrowthFeature),
     Vines(VinesFeature),
 }
 
@@ -34,6 +36,9 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
     match kind {
         "minecraft:bamboo" => Some(Leaf::Bamboo(BambooFeature::parse(config)?)),
         "minecraft:block_column" => Some(Leaf::BlockColumn(BlockColumnFeature::parse(config)?)),
+        "minecraft:multiface_growth" => {
+            Some(Leaf::Multiface(MultifaceGrowthFeature::parse(config)?))
+        }
         "minecraft:ore" => Some(Leaf::Ore(OreFeature::parse(config).ok()?)),
         "minecraft:simple_block" => Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?)),
         "minecraft:vines" => Some(Leaf::Vines(VinesFeature::parse(config)?)),
@@ -55,6 +60,7 @@ pub fn place_leaf(
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
         Leaf::Bamboo(feature) => feature.place(world, random, pos),
         Leaf::BlockColumn(feature) => feature.place(world, random, pos),
+        Leaf::Multiface(feature) => feature.place(world, random, pos),
         Leaf::Vines(feature) => feature.place(world, random, pos),
     }
 }
