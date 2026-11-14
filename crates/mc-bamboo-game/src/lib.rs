@@ -80,6 +80,7 @@ mod weather;
 mod world;
 pub mod world_options;
 mod world_state;
+pub mod worldgen;
 
 pub use command::test_commands;
 pub use director_host::MailBudget;

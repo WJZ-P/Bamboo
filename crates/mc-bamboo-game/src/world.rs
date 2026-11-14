@@ -21,13 +21,14 @@ use mc_bamboo_storage::{
     player_data::PlayerData,
     world_dir::{encode_player_data, player_uuid_string},
 };
-use mc_bamboo_world::director::TicketOp;
+use mc_bamboo_world::director::{DirectorConfig, PipelineKind, TicketOp};
 
 use crate::director_host::{DirectorHost, MailBudget};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     book, chat, chunk_broadcast,
+    chunk_generator::OverworldGenerator,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
     command, container, entity_sync, entity_tracking,
     global::{Global, RosterEntry},
@@ -55,6 +56,20 @@ pub const MAX_ENTITY_THREADS: usize = 256;
 pub const MAX_CHUNK_WORKER_THREADS: usize = 64;
 
 const SERVER_SHUTDOWN: &str = "multiplayer.disconnect.server_shutdown";
+
+/// 多阶段生成、又没显式配 `chunk_worker_threads` 时的默认线程数：取 CPU 核数的一半，
+/// 夹在 1..=4。真生成每区块几十毫秒，留几条线程就不至于把 20 TPS 的世界线程拖住；
+/// 上限 4 是照 31 GB 内存、同时还有别的队员在跑的机器留的余量。
+///
+/// Default worker threads for staged generation when `chunk_worker_threads` is
+/// unset: half the CPUs, clamped to 1..=4. Real generation costs tens of ms per
+/// chunk, so a few threads keep it off the 20 TPS world thread; the cap of 4
+/// leaves room on a machine shared with other workers.
+fn default_staged_worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).clamp(1, 4))
+        .unwrap_or(2)
+}
 
 /// 世界的启动参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +191,12 @@ impl World {
         let view_distance = config
             .view_distance
             .clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE);
+        // 只有「从 server.properties 来的非 flat 世界」走多阶段生成；无限超平坦
+        // 测试路径和 flat 配置保持原样（超平坦模板 + 一步流水线）。
+        // Only a non-flat world from server.properties uses staged generation;
+        // the infinite-flat test path and flat configs keep the old superflat template.
+        let world_gen = config.world_gen.clone();
+        let staged = !infinite_flat && !world_gen.level_type.is_flat();
         // 启动阶段同步打开存档：建目录、拿锁、读 level.dat。失败就拒绝启动，
         // 不让世界线程带着一个没锁住的世界目录继续跑。
         // Open the save synchronously at startup: create the layout, take the lock,
@@ -218,6 +239,20 @@ impl World {
             save.startup()
                 .apply(&mut global, &mut region, save.level().time);
         }
+        // 种子进 `WorldState`（`hashed_seed` 进 login 包、天气、随机序列）。
+        // `level.dat` 里没有建模的 seed 字段，`apply_level_data` 不动它。
+        // Put the seed into `WorldState` (hashed_seed for the login packet,
+        // weather, random sequences). `level.dat` has no modelled seed field,
+        // so `apply_level_data` leaves it alone.
+        global.state_mut().seed = world_gen.seed;
+        let director_config = DirectorConfig {
+            pipeline: if staged {
+                PipelineKind::Staged
+            } else {
+                PipelineKind::Flat
+            },
+            ..DirectorConfig::default()
+        };
         let mut world = Self {
             authoritative_admin,
             entity_threads: config.entity_threads.min(MAX_ENTITY_THREADS),
@@ -229,7 +264,7 @@ impl World {
                 DirectorHost::new_infinite_flat(Default::default())
             } else {
                 DirectorHost::new(
-                    Default::default(),
+                    director_config,
                     MailBudget {
                         deliveries: config.mail_budget.deliveries.min(MAX_MAIL_BUDGET),
                         reclaims: config.mail_budget.reclaims.min(MAX_MAIL_BUDGET),
@@ -262,9 +297,24 @@ impl World {
                     ..Default::default()
                 });
         }
+        if staged {
+            // 真生成比超平坦模板慢得多，默认就用计算池把它挪出世界线程；配置文件
+            // 显式给了 `chunk_worker_threads` 就照给的值（0 = 仍然内联）。
+            // Real generation is far slower than the superflat template, so by
+            // default push it off the world thread with the compute pool; an
+            // explicit `chunk_worker_threads` value is honoured (0 = still inline).
+            world
+                .host
+                .set_generator(Arc::new(OverworldGenerator::new(world_gen.clone())));
+        }
+        let compute_threads = if staged && config.chunk_worker_threads == 0 {
+            default_staged_worker_threads()
+        } else {
+            config.chunk_worker_threads
+        };
         world
             .host
-            .set_compute_threads(config.chunk_worker_threads.min(MAX_CHUNK_WORKER_THREADS));
+            .set_compute_threads(compute_threads.min(MAX_CHUNK_WORKER_THREADS));
         // 启用存档时起一条 IO 线程并接进 Director 宿主；起不来也拒绝启动。
         // With saving enabled, start one IO thread and attach it to the host.
         if let Some(save) = &world.save {

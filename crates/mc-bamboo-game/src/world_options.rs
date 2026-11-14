@@ -131,8 +131,8 @@ impl FlatSettings {
     /// rest like vanilla.
     pub fn parse(json: &str) -> Result<Self, String> {
         let text = if json.trim().is_empty() { "{}" } else { json };
-        let root: Value =
-            serde_json::from_str(text).map_err(|error| format!("bad generator-settings: {error}"))?;
+        let root: Value = serde_json::from_str(text)
+            .map_err(|error| format!("bad generator-settings: {error}"))?;
         if !root.is_object() {
             return Err("generator-settings must be a JSON object".to_owned());
         }
@@ -166,7 +166,8 @@ impl FlatSettings {
             settings.biome = registries::biome::NAMES
                 .iter()
                 .position(|&name| name == biome)
-                .ok_or_else(|| format!("unknown flat biome {biome}"))? as u32;
+                .ok_or_else(|| format!("unknown flat biome {biome}"))?
+                as u32;
         }
         Ok(settings)
     }
@@ -314,7 +315,10 @@ mod tests {
         assert_eq!(parse_seed(""), None);
         assert_eq!(parse_seed("   "), None);
         // 超范围的字符串走 hashCode。/ Out-of-range numeric string falls back to hashCode.
-        assert_eq!(parse_seed("9223372036854775808"), Some(java_string_hash_code("9223372036854775808")));
+        assert_eq!(
+            parse_seed("9223372036854775808"),
+            Some(java_string_hash_code("9223372036854775808"))
+        );
     }
 
     #[test]
@@ -324,21 +328,42 @@ mod tests {
         assert_eq!(java_string_hash_code("hello"), 99_162_322);
         // 经典样例：hashCode 恰好是 Integer.MIN_VALUE，符号扩展成负 long。
         // Classic sample: hashCode is exactly Integer.MIN_VALUE, sign-extended.
-        assert_eq!(java_string_hash_code("polygenelubricants"), -2_147_483_648i64);
+        assert_eq!(
+            java_string_hash_code("polygenelubricants"),
+            -2_147_483_648i64
+        );
     }
 
     #[test]
     fn level_type_names_and_settings() {
-        assert_eq!(LevelType::from_level_id("minecraft:normal"), Some(LevelType::Normal));
+        assert_eq!(
+            LevelType::from_level_id("minecraft:normal"),
+            Some(LevelType::Normal)
+        );
         assert_eq!(LevelType::from_level_id("NORMAL"), Some(LevelType::Normal));
         assert_eq!(LevelType::from_level_id("default"), Some(LevelType::Normal));
-        assert_eq!(LevelType::from_level_id("minecraft:flat"), Some(LevelType::Flat));
-        assert_eq!(LevelType::from_level_id("largebiomes"), Some(LevelType::LargeBiomes));
-        assert_eq!(LevelType::from_level_id("minecraft:amplified"), Some(LevelType::Amplified));
+        assert_eq!(
+            LevelType::from_level_id("minecraft:flat"),
+            Some(LevelType::Flat)
+        );
+        assert_eq!(
+            LevelType::from_level_id("largebiomes"),
+            Some(LevelType::LargeBiomes)
+        );
+        assert_eq!(
+            LevelType::from_level_id("minecraft:amplified"),
+            Some(LevelType::Amplified)
+        );
         assert_eq!(LevelType::from_level_id("nonsense"), None);
         assert_eq!(LevelType::Normal.settings_id(), Some("minecraft:overworld"));
-        assert_eq!(LevelType::LargeBiomes.settings_id(), Some("minecraft:large_biomes"));
-        assert_eq!(LevelType::Amplified.settings_id(), Some("minecraft:amplified"));
+        assert_eq!(
+            LevelType::LargeBiomes.settings_id(),
+            Some("minecraft:large_biomes")
+        );
+        assert_eq!(
+            LevelType::Amplified.settings_id(),
+            Some("minecraft:amplified")
+        );
         assert_eq!(LevelType::Flat.settings_id(), None);
     }
 
@@ -356,7 +381,8 @@ mod tests {
     fn flat_parse_empty_and_custom() {
         assert_eq!(FlatSettings::parse("{}").unwrap(), FlatSettings::default());
         assert_eq!(FlatSettings::parse("").unwrap(), FlatSettings::default());
-        let custom = r#"{"layers":[{"block":"minecraft:stone","height":3}],"biome":"minecraft:desert"}"#;
+        let custom =
+            r#"{"layers":[{"block":"minecraft:stone","height":3}],"biome":"minecraft:desert"}"#;
         let parsed = FlatSettings::parse(custom).unwrap();
         assert_eq!(parsed.layers, vec![(blocks::STONE, 3)]);
         assert_eq!(parsed.biome, registries::biome::DESERT as u32);
@@ -366,7 +392,8 @@ mod tests {
 
     #[test]
     fn from_properties_normal_by_default_and_random_seed() {
-        let (config, warnings) = WorldGenConfig::from_properties("", "minecraft:normal", "{}", true);
+        let (config, warnings) =
+            WorldGenConfig::from_properties("", "minecraft:normal", "{}", true);
         assert_eq!(config.level_type, LevelType::Normal);
         assert!(config.generate_structures);
         assert!(warnings.is_empty());

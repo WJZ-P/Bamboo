@@ -334,8 +334,11 @@ impl DirectorHost {
         }
     }
 
-    /// 换生成器。测试和压测用。
-    #[cfg(test)]
+    /// 换生成器。`World::build` 按世界类型装 `FlatGenerator` 或 `OverworldGenerator`，
+    /// 测试和压测也能换。
+    ///
+    /// Swap the generator. `World::build` installs `FlatGenerator` or
+    /// `OverworldGenerator` by level type; tests and load tests can also swap it.
     pub(crate) fn set_generator(&mut self, generator: Arc<dyn ChunkGenerator>) {
         self.generator = generator;
     }
