@@ -192,12 +192,53 @@ pub struct Piece {
     pub rot: i32,
     /// `getMirror().ordinal()`，null 为 -1。
     pub mirror: i32,
-    /// `addAdditionalSaveData` 里除 `id/BB/O/GD` 外的键，按 key 排序；值已格式化成
-    /// 和 Java oracle 一致的标准串。
-    pub extras: BTreeMap<String, String>,
+    /// `addAdditionalSaveData` 里除 `id/BB/O/GD` 外的键，按 key 排序；值保留 NBT 类型，
+    /// 存档时逐键写出官方类型（布尔是 Byte、`Num` 是 Int、`D` 是 Byte、模板名是 String）。
+    pub extras: BTreeMap<String, Extra>,
     /// `MineShaftRoom` 的 `Entrances`：一组包围盒，随 `move` 一起平移。
     /// 其它结构件为空。为空时不写 `Entrances` 键。
     pub entrances: Vec<Box>,
+}
+
+/// 一条结构件子类存档字段的值，对应官方 `addAdditionalSaveData` 写的 NBT 类型。
+/// 只覆盖这四个多件式结构用到的类型：`putBoolean` → Byte，`putInt` → Int，
+/// `store(String 枚举 codec)` → String，`store(BYTE codec)`（`Direction` 的 `D`）→ Byte。
+///
+/// One subclass save value, matching the NBT type written by vanilla
+/// `addAdditionalSaveData`: `putBoolean` → Byte, `putInt` → Int, `store(String enum
+/// codec)` → String, and `store(BYTE codec)` (the mineshaft `D`) → Byte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Extra {
+    Byte(i8),
+    Int(i32),
+    Str(String),
+}
+
+impl Extra {
+    /// 转成存档用的 `Tag`，类型和官方逐键一致。
+    ///
+    /// Convert to a save `Tag` with the exact vanilla type.
+    pub fn to_tag(&self) -> mc_bamboo_nbt::Tag {
+        match self {
+            Self::Byte(v) => mc_bamboo_nbt::Tag::Byte(*v),
+            Self::Int(v) => mc_bamboo_nbt::Tag::Int(*v),
+            Self::Str(v) => mc_bamboo_nbt::Tag::String(v.clone()),
+        }
+    }
+
+    /// 对拍用的标准串：数值带 NBT 类型前缀（`B:` / `I:` …），和 oracle 的 `tagTypeName`
+    /// 一致；字符串原样。压平数值会让 Byte/Int 写错也发现不了。
+    ///
+    /// Oracle token: numbers carry an NBT type prefix (`B:` / `I:` ...) matching the
+    /// oracle's `tagTypeName`; strings are verbatim. Flattening numbers would hide
+    /// Byte-vs-Int mistakes.
+    pub fn token(&self) -> String {
+        match self {
+            Self::Byte(v) => format!("B:{v}"),
+            Self::Int(v) => format!("I:{v}"),
+            Self::Str(v) => v.clone(),
+        }
+    }
 }
 
 impl Piece {
@@ -230,16 +271,24 @@ impl Piece {
     }
 
     pub fn put_int(&mut self, key: &str, value: i32) {
-        self.extras.insert(key.to_owned(), value.to_string());
+        self.extras.insert(key.to_owned(), Extra::Int(value));
     }
 
     pub fn put_bool(&mut self, key: &str, value: bool) {
         self.extras
-            .insert(key.to_owned(), i32::from(value).to_string());
+            .insert(key.to_owned(), Extra::Byte(i8::from(value)));
+    }
+
+    /// `tag.store(key, Direction.LEGACY_ID_CODEC_2D, dir)`：`Codec.BYTE`，不是 Int。
+    ///
+    /// `tag.store(key, Direction.LEGACY_ID_CODEC_2D, dir)`: a `Codec.BYTE`, not an Int.
+    pub fn put_byte(&mut self, key: &str, value: i32) {
+        self.extras.insert(key.to_owned(), Extra::Byte(value as i8));
     }
 
     pub fn put_str(&mut self, key: &str, value: &str) {
-        self.extras.insert(key.to_owned(), value.to_owned());
+        self.extras
+            .insert(key.to_owned(), Extra::Str(value.to_owned()));
     }
 
     /// 对拍用的标准行：`P id bb6 O GD rot mirror extras`。
@@ -250,7 +299,11 @@ impl Piece {
     /// `k=v` pairs joined by commas, `-` when empty. `Entrances` is formatted here
     /// from the current (already-translated) boxes.
     pub fn canonical_line(&self) -> String {
-        let mut extras = self.extras.clone();
+        let mut extras: BTreeMap<String, String> = self
+            .extras
+            .iter()
+            .map(|(k, v)| (k.clone(), v.token()))
+            .collect();
         if !self.entrances.is_empty() {
             let mut parts = Vec::with_capacity(self.entrances.len());
             for b in &self.entrances {
