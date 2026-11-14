@@ -197,9 +197,23 @@ fn place_feature<'a>(
         };
     }
     // `vegetation_patch` 需要注册表和 `PlacementEnv` 才能递归放子地物，不能当叶子。
+    //
+    // **只接 `vegetation_patch`**：`moss_patch`（floor）、`moss_patch_ceiling`
+    // （ceiling，还有 10 处未解决的 `cave_vines` 错位）、`pale_moss_patch` 都跑过逐方块
+    // 对拍；ceiling 的差异根因是 `JavaPosSet` 没实现 `HashMap` 树化，属已知限制。
+    // `waterlogged_vegetation_patch`（`clay_pool_with_dripleaves`）**没有任何对拍**，
+    // 所以不接，标 unsupported。
+    //
     // `vegetation_patch` needs the registry and `PlacementEnv` to recurse into its child
     // feature, so it cannot be a leaf.
-    if kind == "minecraft:vegetation_patch" || kind == "minecraft:waterlogged_vegetation_patch" {
+    //
+    // **Only `vegetation_patch` is wired**: `moss_patch` (floor), `moss_patch_ceiling`
+    // (ceiling, still 10 unresolved `cave_vines` offsets) and `pale_moss_patch` all went
+    // through per-block comparison; the ceiling difference traces back to `JavaPosSet` not
+    // implementing `HashMap` treeification, a documented limit.
+    // `waterlogged_vegetation_patch` (`clay_pool_with_dripleaves`) has **no comparison at
+    // all**, so it stays unsupported.
+    if kind == "minecraft:vegetation_patch" {
         let Some(patch) = super::vegetation_patch::VegetationPatch::parse(kind, config) else {
             return PlaceOutcome::unsupported();
         };

@@ -12,10 +12,16 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
-    bamboo::BambooFeature, block_column::BlockColumnFeature, huge_mushroom::HugeMushroomFeature,
-    multiface::MultifaceGrowthFeature, ores, placement::OreFeature,
-    simple_block::SimpleBlockFeature, tree::{TreeFeature, fallen::FallenTreeFeature},
-    vines::VinesFeature, world::FeatureWorld,
+    bamboo::BambooFeature,
+    block_column::BlockColumnFeature,
+    huge_mushroom::HugeMushroomFeature,
+    multiface::MultifaceGrowthFeature,
+    ores,
+    placement::OreFeature,
+    simple_block::SimpleBlockFeature,
+    tree::{TreeFeature, fallen::FallenTreeFeature},
+    vines::VinesFeature,
+    world::FeatureWorld,
 };
 
 type Pos = (i32, i32, i32);
@@ -45,16 +51,16 @@ pub fn parse_leaf<'a>(
 ) -> Option<Leaf> {
     match kind {
         "minecraft:bamboo" => Some(Leaf::Bamboo(BambooFeature::parse(config)?)),
-        "minecraft:block_column" => {
-            Some(Leaf::BlockColumn(BlockColumnFeature::parse(config, lookup)?))
-        }
+        "minecraft:block_column" => Some(Leaf::BlockColumn(BlockColumnFeature::parse(
+            config, lookup,
+        )?)),
         "minecraft:multiface_growth" => {
             Some(Leaf::Multiface(MultifaceGrowthFeature::parse(config)?))
         }
         "minecraft:ore" => Some(Leaf::Ore(OreFeature::parse(config).ok()?)),
-        "minecraft:simple_block" => {
-            Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(config, lookup)?))
-        }
+        "minecraft:simple_block" => Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(
+            config, lookup,
+        )?)),
         "minecraft:tree" => TreeFeature::parse(config).map(|tree| Leaf::Tree(Box::new(tree))),
         "minecraft:fallen_tree" => {
             FallenTreeFeature::parse(config).map(|tree| Leaf::FallenTree(Box::new(tree)))
