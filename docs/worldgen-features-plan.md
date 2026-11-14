@@ -639,7 +639,7 @@ Java 侧按白名单判定：中心 3×3 涉及的**所有** step 的 placed fea
 | `chunkgen java --seeds 6 --chunks 36 --through features --steps 6 --ore-only --salt 1/7` | **0 不一致**（216 中心 / 各 191102976 方块） |
 | `chunkgen java --seeds 2 --chunks 6 --through carvers --salt 1` | 0 不一致（旧阶段回归） |
 | `worldgen java` | 0 不一致 |
-| `cargo test -p mc-bamboo-worldgen` | 95 个测试全过 |
+| `cargo test -p mc-bamboo-worldgen` | 108 个测试全过（含植被地物的新单测） |
 | `cargo clippy -p mc-bamboo-worldgen -p mc-bamboo-vanilla --all-targets -- -D warnings` | 干净 |
 
 **曾有的差异（已解决，见下）**：`--ore-only --steps 6` 在第三个种子的
@@ -716,18 +716,78 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 `Context::uncached()` 组合从未单独对拍过**。优先核对这两条 climate sampler
 构造路径是否逐位一致，以及 `interpolated` 在 uncached 单点路径下的行为
 （`docs/worldgen.md` 提到它在 1×1×1 上不是纯函数）。
+### 植被地物进度（分支 `cb-wg-feat-b`，本轮新增）
+
+按 `features_per_step` 分类见 `docs/worldgen-vegetal-features.md`：step 9 共 109 项，
+植被类归本分支。逐项提交、逐项对拍，已落地：
+
+* `--ore-only` 泛化成 `--feature-types`：条目可以是 Feature 类型 ID 或 placed feature
+  注册名；Java / Rust 用同一套判定过滤（否则按名字隔离单个 placed feature 会假绿）。
+  `--ore-only` 保留为别名。
+* `Heightmap.update` 增量更新（`heightmap.rs`）：走 `setBlockState` 的地物用
+  `set_block_with_heightmaps` 更新四种 FINAL 高度图；矿石走 `BulkSectionAccess`，
+  仍用 `set_block` 不动高度图。带 3 个单测。
+* 支撑件：`IntProvider` 补 trapezoid（含 `plateau==0 && max==-min` 对称快路径）、
+  biased_to_bottom、very_biased_to_bottom；`BlockPredicate`（`block_predicate.rs`）
+  补 matching_block_tag / matching_blocks / all_of / any_of / not / replaceable /
+  solid / true；`PlacementModifier` 补 `block_predicate_filter`；`dispatch.rs` 做叶子
+  分派，`run.rs` 通过 `Leaf` 转发，修饰器解析失败只标 `unsupported` 不再整块报错。
+* `SimpleBlockFeature`（`simple_block.rs`）：照官方
+  `getOptionalState → canSurvive → setBlock(pos, state, 2)`；只实现内联 bare-state
+  provider（等价于 `SimpleStateProvider`），按**已核对的方块类白名单**判 `canSurvive`：
+  Pumpkin / Block 默认 true，Bush / Flower / TallGrass 查 `supports_vegetation`，
+  DryVegetation 查 `supports_dry_vegetation`（26.3 这几类都直接继承
+  `VegetationBlock`，没有额外的亮度检查）。蘑菇（亮度）、DoublePlant / MossyCarpet
+  （placeAt 上下两格）、Fire / LilyPad / SporeBlossom / Nether 植物、`to_place` 为
+  注册名字符串或 weighted / randomized_int typed provider 的，全部明确标 `unsupported`。
+
+#### 本分支对拍结果（`--through features --steps 9`）
+
+| 命令（省略 `--through features`；`FEATS` 为 11 个已放开的 simple_block 名字） | 结果 |
+|---|---|
+| `--steps 9 --feature-types minecraft:patch_dead_bush --seeds 3 --chunks 4 --salt 1` | 0 不一致（12 中心 / 10616832 方块，0 skipped） |
+| `--steps 9 --feature-types minecraft:patch_bush --seeds 2 --chunks 4 --salt 7` | 0 不一致（8 中心 / 7077888 方块，0 skipped） |
+| `--steps 9 --feature-types "$FEATS" --seeds 2 --chunks 4 --salt 1/7/42` | 各 0 不一致（8 中心 / 7077888 方块，0 skipped） |
+| `--steps 9 --feature-types "$FEATS" --seeds 4 --chunks 3 --salt 3` | 0 不一致（12 中心 / 10616832 方块，0 skipped） |
+| `--steps 6 --ore-only --seeds 2 --chunks 4`（旧阶段回归） | 0 不一致（8 中心 / 7077888 方块） |
+| 故意把 `SimpleBlockFeature` 放的状态换成石头 | 同一命令报 4 处不一致，坐标与官方放草处一致（确认非假绿） |
+| `cargo test -p mc-bamboo-worldgen` | 108 个测试全过 |
+
+11 个已验证的 placed feature：`patch_red_shrub`、`patch_grass_savanna`、
+`flower_swamp`、`patch_bush`、`patch_grass_forest`、`patch_grass_normal`、
+`patch_dead_bush`、`patch_grass_badlands`、`patch_dead_bush_2`、
+`patch_dead_bush_badlands`、`patch_pumpkin`。
+
+#### 本分支明确还没做（诚实标 `unsupported`）
+
+* 树及全部变体（trunk/foliage/root placer、decorator、蜂巢方块实体与蜜蜂数据、
+  cherry / mangrove / pale oak / fallen_tree）、组合类（random_selector、
+  weighted_random_selector、simple_random_selector、sequence、random_patch）、
+  `noise_threshold_count` / `noise_based_count`（要 `Biome.BIOME_INFO_NOISE`）、
+  `count_on_every_layer` / `environment_scan` / `surface_water_depth_filter` 等修饰器。
+* `would_survive` / `has_sturdy_face` / `matching_fluids` 谓词（树、水下植被用）。
+* 水下植被、藤蔓 / 发光地衣 / 苔藓 / 垂滴叶 / 孢子花 / multiface growth、竹子 /
+  甘蔗 / 仙人掌 / 南瓜西瓜之外的、甜浆果、巨型蘑菇、`block_column` / `block_pile` /
+  `vegetation_patch` 等其它植被类型。
+* `to_place` 为 `BLOCK_STATE_PROVIDER` 注册表引用的 3 个 flower 配置
+  （`flower_plain` / `flower_meadow` / `flower_flower_forest`）：该注册表未导出，
+  需生成器补数据。
+* 方块实体数据对拍、接进 Director 的多阶段生成与邻居增量合并（流水线分支负责）。
+
 ### 还没做
 
-* `DiskFeature` / `UnderwaterMagmaFeature` / `surface_relative_threshold_filter` /
-  `block_predicate_filter`：step 6 里非 ore 的 5 个 placed feature 目前标
-  `unsupported`，完整 11 步对拍会跳过这些区块。
-* 其它 10 个 step（湖、晶洞、怪物房、花草、积雪等）全部标 `unsupported`。
+* `DiskFeature` / `UnderwaterMagmaFeature` / `surface_relative_threshold_filter`：
+  step 6 里非 ore 的几类 placed feature 目前标 `unsupported`，完整 11 步对拍会跳过
+  这些区块。（`block_predicate_filter` 修饰器本身已由 `cb-wg-feat-b` 移植。）
+* 其它 10 个 step（湖、晶洞、怪物房、积雪等）里仍未移植的类型全部标 `unsupported`；
+  植被类的 step 9 进度见上。
 * `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按
-  「已移植集合」输出 `skipped`，`--ore-only` 是手工过滤。
+  「已移植集合」输出 `skipped`，`--feature-types` 是手工过滤。
 * 接进 Director（5.3.1 的邻居快照 + 增量合并）还没做。
 * 高度图的增量更新：矿石走 `BulkSectionAccess` 直接写 `LevelChunkSection`，
-  **绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是 primed 后固定的；
-  以后接树/湖时要照 `Heightmap.update` 补上。
+  **绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是 primed 后固定的。
+  `cb-wg-feat-b` 已为走 `setBlockState` 的 `simple_block` 补上 `Heightmap.update`；
+  接树 / 湖时复用同一个 `set_block_with_heightmaps` 即可。
 
 ## 6. 工作量估计
 

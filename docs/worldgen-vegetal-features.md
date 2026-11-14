@@ -82,7 +82,7 @@ step 9（`vegetal_decoration`）占 109 个。
 
 ## 本轮落地
 
-见 `docs/worldgen-features-plan.md` 5.1 与本文件末尾的进度表。所有未移植类型照现有做法在
+见 `docs/worldgen-features-plan.md` 5.1 与下面的进度表。所有未移植类型照现有做法在
 `run.rs` 标 `unsupported`，对拍时整块跳过，不假装支持。
 
 ## 依赖（`BlockStateProvider` / `BlockPredicate` / 值提供者 / 修饰器）
@@ -105,3 +105,22 @@ step 9（`vegetal_decoration`）占 109 个。
 `noise_threshold_count` / `noise_based_count` 用的是 `Biome.BIOME_INFO_NOISE`
 （`SimplexNoise(WorldgenRandom(LegacyRandomSource(2345L)))`，与世界种子无关），
 `mc-bamboo-worldgen::biome_temperature` 已构造同一份，见那里的 `static_noises`。
+
+## 进度表
+
+以 `--feature-types` 按 placed feature 名隔离对拍，逐块 0 不一致才算做完一项。
+
+| 类型 / 支撑件 | 状态 | 对拍 |
+|---|---|---|
+| `minecraft:simple_block`（内联 bare-state provider） | 已做，按方块类白名单判 `canSurvive` | step 9 的 11 个 placed feature 多种子 / 多区块 0 不一致 |
+| `IntProvider` trapezoid / biased / very_biased | 已做 | 单测覆盖对称快路径与官方嵌套取数 |
+| `BlockPredicate`：tag / blocks / all_of / any_of / not / replaceable / solid / true | 已做 | 单测 + `block_predicate_filter` 对拍 |
+| `block_predicate_filter` 修饰器 | 已做 | 见 `patch_pumpkin` 等 |
+| `Heightmap.update`（`setBlockState` 路径） | 已做 | 3 个单测 |
+| `--feature-types`（类型 ID / placed feature 名） | 已做 | 故意改坏确认非假绿 |
+| 组合类（selector / sequence / random_patch）、树及全部变体、`fallen_tree` | 未做 | 标 `unsupported` |
+| `noise_threshold_count` / `noise_based_count` / `environment_scan` 等修饰器 | 未做 | 标 `unsupported` |
+| `would_survive` / `has_sturdy_face` / `matching_fluids` 谓词 | 未做 | 标 `unsupported` |
+| 水下植被 / 藤蔓 / 苔藓 / 垂滴叶 / 孢子花 / multiface / 竹子 / 甘蔗 / 仙人掌 / 巨型蘑菇 | 未做 | 标 `unsupported` |
+| holder 引用的 `to_place`（`BLOCK_STATE_PROVIDER` 注册表）、weighted / randomized_int provider | 未做 | 注册表未导出 / 标 `unsupported` |
+| 方块实体数据（蜂巢 / 可疑沙等） | 未做 | 无对拍 |
