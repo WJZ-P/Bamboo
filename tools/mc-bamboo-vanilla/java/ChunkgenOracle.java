@@ -456,7 +456,7 @@ public final class ChunkgenOracle {
      * 所以跳过别的 step 不影响留下的 step。最终验收仍要跑完整 11 步。
      */
     private record Options(int seeds, int chunks, long salt, int through, int stepsMask,
-            String featureAllowList, boolean realPath) {
+            String featureAllowList, boolean realPath, String settings) {
         static final int ALL_STEPS = (1 << 11) - 1;
 
         static Options parse(String[] args) {
@@ -473,11 +473,13 @@ public final class ChunkgenOracle {
             // 真实服务端路径：3×3 possibleBiomes、carverBiome 分支、region.getBiomeManager()。
             // Real-server path: 3x3 possibleBiomes, the carverBiome branch, region.getBiomeManager().
             boolean realPath = false;
+            String settings = "overworld";
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seeds" -> seeds = Integer.parseInt(args[++i]);
                     case "--chunks" -> chunks = Integer.parseInt(args[++i]);
                     case "--salt" -> salt = Long.parseLong(args[++i]);
+                    case "--settings" -> settings = args[++i];
                     case "--through" -> {
                         String value = args[++i];
                         through = switch (value) {
@@ -506,7 +508,7 @@ public final class ChunkgenOracle {
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
-            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath);
+            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath, settings);
         }
     }
 
@@ -554,23 +556,29 @@ public final class ChunkgenOracle {
         }
 
         void run() throws Exception {
+            // --settings 在 normal / large_biomes / amplified 之间切 NoiseGeneratorSettings，
+            // 三种世界共用 minecraft:overworld 群系预设（WorldPresets.bootstrap）。
+            // --settings switches NoiseGeneratorSettings between normal / large_biomes /
+            // amplified; all three share the minecraft:overworld biome preset (WorldPresets.bootstrap).
+            String settingsId = "minecraft:" + this.options.settings();
+            NoiseGeneratorSettings generatorSettings =
+                    this.settings.getValue(Identifier.withDefaultNamespace(this.options.settings()));
+            if (generatorSettings == null) {
+                throw new IllegalStateException("missing " + settingsId + " noise settings");
+            }
             JsonObject header = new JsonObject();
             header.addProperty("type", "header");
             header.addProperty("version", SharedConstants.getCurrentVersion().id());
             header.addProperty("protocol", SharedConstants.getCurrentVersion().protocolVersion());
-            header.addProperty("settings", "minecraft:overworld");
+            header.addProperty("settings", settingsId);
             header.addProperty("preset", "minecraft:overworld");
-            header.addProperty("minY", -64);
-            header.addProperty("height", 384);
-            header.addProperty("seaLevel", 63);
+            header.addProperty("minY", generatorSettings.noiseSettings().minY());
+            header.addProperty("height", generatorSettings.noiseSettings().height());
+            header.addProperty("seaLevel", generatorSettings.seaLevel());
             header.addProperty("through", this.options.through());
             header.addProperty("steps", this.options.stepsMask());
             write(header);
 
-            NoiseGeneratorSettings generatorSettings = this.settings.getValue(Identifier.withDefaultNamespace("overworld"));
-            if (generatorSettings == null) {
-                throw new IllegalStateException("missing minecraft:overworld noise settings");
-            }
             NoiseBasedChunkGenerator generator =
                     new NoiseBasedChunkGenerator(
                             MultiNoiseBiomeSource.createFromPreset(

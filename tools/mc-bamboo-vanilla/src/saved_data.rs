@@ -1,13 +1,20 @@
 //! `mc-bamboo-vanilla saved-data <java 路径>`：把 Bamboo 编码器写出的
-//! `game_rules.dat` / `world_border.dat` 交给官方 `GameRuleMap.CODEC` /
-//! `WorldBorder.Settings.CODEC` 解码，逐项核对；再故意写坏一个键，确认它会报错。
+//! `game_rules.dat` / `world_border.dat` / `world_gen_settings.dat` 交给官方
+//! `GameRuleMap.CODEC` / `WorldBorder.Settings.CODEC` / `WorldGenSettings.CODEC`
+//! 解码，逐项核对；超平坦和三种噪声世界的 `world_gen_settings.dat` 都复核，再故意
+//! 写坏一个键、一个噪声生成器类型，确认官方 codec 会报错。
 //!
-//! Compare Bamboo's `game_rules.dat` / `world_border.dat` against the official
-//! codecs: decode them with the official classes and check the values, then
-//! deliberately break one key and confirm the oracle rejects it.
+//! Compare Bamboo's `game_rules.dat` / `world_border.dat` / `world_gen_settings.dat`
+//! against the official codecs: decode them and check the values. Both the flat and
+//! the three noise `world_gen_settings.dat` shapes are validated; then deliberately
+//! break one key and one noise generator type to confirm the oracle rejects them.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
+use mc_bamboo_game::world_options::{LevelType, WorldGenConfig};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_storage::world_dir::{WorldDir, write_saved_data_at};
 use serde::Deserialize;
@@ -20,12 +27,26 @@ struct Report {
     game_rules: Vec<RuleEntry>,
     world_border: BorderReport,
     world_gen_settings: GenReport,
+    noise_generators: Vec<NoiseGenReport>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GenReport {
     layers: Vec<GenLayer>,
     biome: String,
+}
+
+/// 官方 `WorldGenSettings.CODEC` 解出的 `minecraft:noise` 生成器形状。
+/// Shape of a `minecraft:noise` generator decoded by the official codec.
+#[derive(Debug, Deserialize)]
+struct NoiseGenReport {
+    generator: String,
+    settings: String,
+    biome_source: String,
+    preset: String,
+    seed: i64,
+    generate_structures: bool,
+    bonus_chest: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,11 +81,17 @@ fn decode(
     game_rules: &Path,
     world_border: &Path,
     world_gen_settings: &Path,
+    noise_files: &[&Path],
 ) -> Result<Report, String> {
-    let output = crate::official_program(java, SOURCE)?
+    let mut command = crate::official_program(java, SOURCE)?;
+    command
         .arg(game_rules)
         .arg(world_border)
-        .arg(world_gen_settings)
+        .arg(world_gen_settings);
+    for path in noise_files {
+        command.arg(path);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("cannot run java: {error}"))?;
     if !output.status.success() {
@@ -114,9 +141,56 @@ pub fn run(java: &str) -> Result<(), String> {
     write_saved_data_at(&world_gen_path, &world_gen_tag)
         .map_err(|error| format!("cannot write world_gen_settings.dat: {error}"))?;
 
+    // 三种噪声世界各写一份 world_gen_settings.dat，交给官方 WorldGenSettings.CODEC 复核形状。
+    // Write one world_gen_settings.dat per noise world for the official codec to validate.
+    let noise_cases: Vec<(WorldGenConfig, &str)> = vec![
+        (
+            WorldGenConfig {
+                seed: 12345,
+                level_type: LevelType::Normal,
+                generate_structures: true,
+                ..WorldGenConfig::default()
+            },
+            "minecraft:overworld",
+        ),
+        (
+            WorldGenConfig {
+                seed: -7,
+                level_type: LevelType::LargeBiomes,
+                generate_structures: true,
+                ..WorldGenConfig::default()
+            },
+            "minecraft:large_biomes",
+        ),
+        (
+            WorldGenConfig {
+                seed: 99,
+                level_type: LevelType::Amplified,
+                generate_structures: false,
+                ..WorldGenConfig::default()
+            },
+            "minecraft:amplified",
+        ),
+    ];
+    let mut noise_paths: Vec<PathBuf> = Vec::with_capacity(noise_cases.len());
+    for (index, (config, _)) in noise_cases.iter().enumerate() {
+        let path = dir.join(format!("noise_world_gen_settings_{index}.dat"));
+        let tag = mc_bamboo_game::world_gen_settings_sample(config);
+        write_saved_data_at(&path, &tag)
+            .map_err(|error| format!("cannot write noise world_gen_settings.dat: {error}"))?;
+        noise_paths.push(path);
+    }
+    let noise_refs: Vec<&Path> = noise_paths.iter().map(PathBuf::as_path).collect();
+
     // 1. 官方 codec 能解码 Bamboo 写出的文件，且值一致。
     // The official codecs decode Bamboo's files and the values match.
-    let report = decode(java, &game_rules_path, &world_border_path, &world_gen_path)?;
+    let report = decode(
+        java,
+        &game_rules_path,
+        &world_border_path,
+        &world_gen_path,
+        &noise_refs,
+    )?;
     check_rule(&report, "minecraft:random_tick_speed", "int", &json!(7))?;
     check_rule(&report, "minecraft:fire_damage", "bool", &json!(false))?;
     let b = &report.world_border;
@@ -161,8 +235,57 @@ pub fn run(java: &str) -> Result<(), String> {
             b.warning_blocks, b.warning_time, b.lerp_time
         ));
     }
+    // 官方 codec 解出的三种噪声生成器形状要和 Bamboo 的编码逐项一致。
+    // The decoded noise generator shapes must match Bamboo's encoding field by field.
+    if report.noise_generators.len() != noise_cases.len() {
+        return Err(format!(
+            "expected {} noise generators, got {}",
+            noise_cases.len(),
+            report.noise_generators.len()
+        ));
+    }
+    for ((config, settings), got) in noise_cases.iter().zip(&report.noise_generators) {
+        if got.generator != "minecraft:noise"
+            || got.settings != *settings
+            || got.biome_source != "minecraft:multi_noise"
+            || got.preset != "minecraft:overworld"
+        {
+            return Err(format!("noise generator shape differs: {got:?}"));
+        }
+        if got.seed != config.seed
+            || got.generate_structures != config.generate_structures
+            || got.bonus_chest
+        {
+            return Err(format!(
+                "noise world options differ for {settings}: {got:?}"
+            ));
+        }
+    }
 
-    // 2. 故意写坏一个键名，官方 codec 必须报错（非 0 退出）。
+    // 2. 故意把一份噪声 world_gen_settings.dat 的 generator type 改坏，官方 codec 必须报错。
+    // Deliberately corrupt a noise generator type; the official codec must reject it.
+    let broken_noise_path = dir.join("noise_world_gen_settings_broken.dat");
+    let broken = corrupt_generator_type(&mc_bamboo_game::world_gen_settings_sample(
+        &noise_cases[0].0,
+    ));
+    write_saved_data_at(&broken_noise_path, &broken)
+        .map_err(|error| format!("cannot write broken noise world_gen_settings.dat: {error}"))?;
+    if decode(
+        java,
+        &game_rules_path,
+        &world_border_path,
+        &world_gen_path,
+        &[broken_noise_path.as_path()],
+    )
+    .is_ok()
+    {
+        return Err(
+            "official codec accepted a noise world_gen_settings.dat with a broken generator type"
+                .to_owned(),
+        );
+    }
+
+    // 3. 故意写坏一个键名，官方 codec 必须报错（非 0 退出）。
     // Deliberately break a key; the official codec must reject it.
     let Tag::Compound(entries) = &world_border_tag else {
         return Err("world_border sample is not a compound".to_owned());
@@ -180,13 +303,47 @@ pub fn run(java: &str) -> Result<(), String> {
         .collect();
     write_saved_data_at(&world_border_path, &Tag::Compound(renamed))
         .map_err(|error| format!("cannot write broken world_border.dat: {error}"))?;
-    if decode(java, &game_rules_path, &world_border_path, &world_gen_path).is_ok() {
+    if decode(
+        java,
+        &game_rules_path,
+        &world_border_path,
+        &world_gen_path,
+        &[],
+    )
+    .is_ok()
+    {
         return Err("official codec accepted a world_border.dat with a broken key".to_owned());
     }
 
     let _ = fs::remove_dir_all(&dir);
     println!(
-        "SAVED-DATA RESULT: game_rules.dat, world_border.dat and the flat world_gen_settings.dat match the official codecs; broken key rejected"
+        "SAVED-DATA RESULT: game_rules.dat, world_border.dat, the flat and three noise world_gen_settings.dat match the official codecs; broken key and broken noise generator rejected"
     );
     Ok(())
+}
+
+/// 把 `data` 复合标签里 `minecraft:noise` 的 generator `type` 换成一个不存在的注册名，
+/// 用来做官方 codec 的自检。
+/// Replace the `minecraft:noise` generator `type` in a `data` compound with a
+/// nonexistent id for the official-codec self-test.
+fn corrupt_generator_type(tag: &Tag) -> Tag {
+    match tag {
+        Tag::Compound(entries) => Tag::Compound(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    let value = if key == "type"
+                        && matches!(value, Tag::String(s) if s == "minecraft:noise")
+                    {
+                        Tag::String("minecraft:bogus_generator".to_owned())
+                    } else {
+                        corrupt_generator_type(value)
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        Tag::List(items) => Tag::List(items.iter().map(corrupt_generator_type).collect()),
+        other => other.clone(),
+    }
 }

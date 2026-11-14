@@ -105,8 +105,14 @@ fn noise_generator(settings_id: &str) -> Tag {
     ])
 }
 
-/// `FlatLevelSource.CODEC` 的 `settings`：默认关掉 features/lakes，只写地层和群系。
-/// `settings` for `FlatLevelSource.CODEC`: features/lakes off, only layers and biome.
+/// `FlatLevelSource.CODEC` 的 `settings`：照 `FlatLevelGeneratorSettings.CODEC`
+/// 写出 `layers` / `biome` / `features` / `lakes` / `structure_overrides` 全部字段。
+/// Bamboo 的超平坦地形只填地层和群系，但存档里保留用户配置，官方打开时字段不丢。
+///
+/// `settings` for `FlatLevelSource.CODEC`: write all five
+/// `FlatLevelGeneratorSettings.CODEC` fields (`layers` / `biome` / `features` /
+/// `lakes` / `structure_overrides`). Bamboo's flat terrain only fills layers and
+/// biome, but the save keeps the user's config so vanilla does not lose it.
 fn flat_generator(flat: &FlatSettings) -> Tag {
     let layers = flat
         .layers
@@ -125,18 +131,34 @@ fn flat_generator(flat: &FlatSettings) -> Tag {
         .get(flat.biome as usize)
         .copied()
         .unwrap_or("minecraft:plains");
+    let mut settings = vec![
+        ("features".to_owned(), Tag::Byte(i8::from(flat.features))),
+        ("lakes".to_owned(), Tag::Byte(i8::from(flat.lakes))),
+        ("biome".to_owned(), string_tag(biome)),
+        ("layers".to_owned(), Tag::List(layers)),
+    ];
+    if let Some(overrides) = structure_overrides_tag(&flat.structure_overrides) {
+        settings.push(("structure_overrides".to_owned(), overrides));
+    }
     Tag::Compound(vec![
         ("type".to_owned(), string_tag("minecraft:flat")),
-        (
-            "settings".to_owned(),
-            Tag::Compound(vec![
-                ("features".to_owned(), Tag::Byte(0)),
-                ("lakes".to_owned(), Tag::Byte(0)),
-                ("biome".to_owned(), string_tag(biome)),
-                ("layers".to_owned(), Tag::List(layers)),
-            ]),
-        ),
+        ("settings".to_owned(), Tag::Compound(settings)),
     ])
+}
+
+/// 单个 `#tag` 写成字符串标签，其余写成字符串列表（官方 `HolderSet` 的 NBT 形状）。
+/// A single `#tag` becomes a string tag; anything else becomes a string list
+/// (the official `HolderSet` NBT shape).
+fn structure_overrides_tag(overrides: &[String]) -> Option<Tag> {
+    if overrides.is_empty() {
+        return None;
+    }
+    if overrides.len() == 1 && overrides[0].starts_with('#') {
+        return Some(string_tag(&overrides[0]));
+    }
+    Some(Tag::List(
+        overrides.iter().map(|name| string_tag(name)).collect(),
+    ))
 }
 
 /// 从存档里的 `data` 复合标签恢复世界生成参数。文件缺失或坏字段时返回 `None`，
@@ -172,8 +194,9 @@ pub fn decode(data: &Tag) -> Option<WorldGenConfig> {
     })
 }
 
-/// 解析 flat 的 `settings.layers` / `settings.biome`；缺字段或坏方块名回退默认预设。
-/// Parse flat `settings.layers` / `settings.biome`; fall back to the default preset.
+/// 解析 flat 的 `settings` 全部字段；缺字段或坏方块名回退默认预设。
+/// Parse all flat `settings` fields; fall back to the default preset on a bad
+/// block name.
 fn decode_flat(generator: &Tag) -> FlatSettings {
     let Some(settings) = field(generator, "settings") else {
         return FlatSettings::default();
@@ -186,13 +209,28 @@ fn decode_flat(generator: &Tag) -> FlatSettings {
     {
         flat.biome = id as u32;
     }
+    flat.features = boolean(settings, "features", false);
+    flat.lakes = boolean(settings, "lakes", false);
+    flat.structure_overrides = match field(settings, "structure_overrides") {
+        Some(Tag::String(tag)) => vec![tag.clone()],
+        Some(Tag::List(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                Tag::String(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     if let Some(Tag::List(entries)) = field(settings, "layers") {
         let mut layers = Vec::with_capacity(entries.len());
         for entry in entries {
             let (Some(name), Some(height)) = (
                 string(entry, "block"),
                 match field(entry, "height") {
-                    Some(Tag::Int(value)) if *value > 0 => Some(*value),
+                    // `FlatLayerInfo.CODEC` 是 `intRange(0, Y_SIZE)`，0 层合法。
+                    // `FlatLayerInfo.CODEC` is `intRange(0, Y_SIZE)`; 0 is legal.
+                    Some(Tag::Int(value)) if *value >= 0 => Some(*value),
                     _ => None,
                 },
             ) else {
@@ -243,6 +281,7 @@ mod tests {
             flat: FlatSettings {
                 layers: vec![(mc_bamboo_data::blocks::STONE, 3)],
                 biome: registries::biome::DESERT as u32,
+                ..FlatSettings::default()
             },
         };
         let decoded = decode(&encode(&config)).expect("decodes");
@@ -253,6 +292,42 @@ mod tests {
             vec![(mc_bamboo_data::blocks::STONE, 3)]
         );
         assert_eq!(decoded.flat.biome, registries::biome::DESERT as u32);
+    }
+
+    #[test]
+    fn flat_round_trips_all_five_settings_fields() {
+        // features / lakes / structure_overrides 也要写进存档再读回。
+        // features / lakes / structure_overrides must survive the save round-trip.
+        let config = WorldGenConfig {
+            seed: 7,
+            level_type: LevelType::Flat,
+            flat: FlatSettings {
+                layers: vec![(mc_bamboo_data::blocks::STONE, 2)],
+                biome: registries::biome::DESERT as u32,
+                features: true,
+                lakes: true,
+                structure_overrides: vec!["#minecraft:villages".to_owned()],
+            },
+            ..WorldGenConfig::default()
+        };
+        let decoded = decode(&encode(&config)).expect("decodes");
+        assert_eq!(decoded.flat, config.flat);
+
+        // 直接列表形态。/ Direct list form.
+        let list_config = WorldGenConfig {
+            flat: FlatSettings {
+                structure_overrides: vec![
+                    "minecraft:villages".to_owned(),
+                    "minecraft:desert_pyramids".to_owned(),
+                ],
+                ..config.flat.clone()
+            },
+            ..config.clone()
+        };
+        assert_eq!(
+            decode(&encode(&list_config)).unwrap().flat,
+            list_config.flat
+        );
     }
 
     #[test]

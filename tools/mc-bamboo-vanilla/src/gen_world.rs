@@ -9,6 +9,7 @@
 //! 地物、结构、光照还没移植：Java 侧 `--through carvers` 本来就不跑它们，游戏侧
 //! 的 `features` / `initialize_light` / `light` / `spawn` 阶段本轮也是透传，两边
 //! 用同样的边界（CARVERS 快照）比较，符合 `--through` / `--steps` 的做法。
+//! `--level-type` 把 `normal` / `large_biomes` / `amplified` 三种噪声世界逐个对拍。
 //!
 //! `gen-world`: compare vanilla generation against the SAME code the game runs.
 //! `ChunkgenOracle.java --through carvers` emits quart biomes and blocks for a set
@@ -18,6 +19,7 @@
 //! Features / structures / light are not ported: the Java side stops at CARVERS
 //! and the game's `features` / light / spawn stages are pass-throughs, so both
 //! compare the same CARVERS snapshot (the `--through` convention).
+//! `--level-type` compares each of `normal` / `large_biomes` / `amplified`.
 
 use std::{
     collections::HashMap,
@@ -35,13 +37,17 @@ use serde_json::Value;
 use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S] [--show N] \
-     [--break-self-test]";
+     [--level-type normal|large_biomes|amplified] [--break-self-test]";
 const DEFAULT_SHOW: usize = 8;
 
 #[derive(Debug)]
 struct Options {
     forwarded: Vec<String>,
     show: usize,
+    /// 对拍哪种噪声世界；三种共用 overworld 群系预设，只换 NoiseGeneratorSettings。
+    /// Which noise world to compare; all three share the overworld biome preset and
+    /// differ only in NoiseGeneratorSettings.
+    level_type: LevelType,
     /// 故意把 Bamboo 的第一个方块改坏，确认对拍会报不一致（自检）。
     /// Deliberately corrupt the first Bamboo block to verify the oracle fails (self-test).
     break_self_test: bool,
@@ -60,6 +66,7 @@ impl Options {
                 "--real-path".to_owned(),
             ],
             show: DEFAULT_SHOW,
+            level_type: LevelType::Normal,
             break_self_test: false,
         };
         let mut args = args.iter();
@@ -73,6 +80,20 @@ impl Options {
                 }
                 "--show" => {
                     options.show = args.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
+                }
+                "--level-type" => {
+                    let value = args.next().ok_or(USAGE)?;
+                    let level = LevelType::from_level_id(value)
+                        .filter(|l| !l.is_flat())
+                        .ok_or(USAGE)?;
+                    let settings = level
+                        .settings_id()
+                        .and_then(|id| id.strip_prefix("minecraft:"))
+                        .ok_or(USAGE)?;
+                    options.level_type = level;
+                    options
+                        .forwarded
+                        .extend(["--settings".to_owned(), settings.to_owned()]);
                 }
                 "--break-self-test" => options.break_self_test = true,
                 _ => return Err(USAGE.to_owned()),
@@ -112,6 +133,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         pending_biomes: HashMap::new(),
         stats: Stats::default(),
         show: options.show,
+        level_type: options.level_type,
         break_self_test: options.break_self_test,
         header_ok: false,
         official_checks: 0,
@@ -137,6 +159,7 @@ struct Report {
     pending_biomes: HashMap<(i64, i32, i32), Vec<Vec<String>>>,
     stats: Stats,
     show: usize,
+    level_type: LevelType,
     break_self_test: bool,
     header_ok: bool,
     official_checks: u64,
@@ -199,22 +222,26 @@ impl Report {
                 version::PROTOCOL_VERSION
             ));
         }
-        // `ChunkgenOracle.java` 固定用 minecraft:overworld 设置和群系预设；gen-world
-        // 只验证 normal 世界类型，其余类型要等 Java 侧支持别的 settings 再放开。
-        // `ChunkgenOracle.java` fixes minecraft:overworld settings/preset; gen-world
-        // only verifies the normal level type until other settings are supported.
-        if get_str("settings")? != "minecraft:overworld"
-            || get_str("preset")? != "minecraft:overworld"
-        {
-            return Err("gen-world expects the overworld settings/preset".to_owned());
+        // 三种噪声世界共用 minecraft:overworld 群系预设，只换 NoiseGeneratorSettings；
+        // header 里的 settings 必须等于这次对拍选的世界类型。
+        // All three noise worlds share the minecraft:overworld biome preset and differ
+        // only in NoiseGeneratorSettings; the header settings must match the level type.
+        let settings_id = self
+            .level_type
+            .settings_id()
+            .ok_or("flat has no noise settings")?;
+        if get_str("settings")? != settings_id || get_str("preset")? != "minecraft:overworld" {
+            return Err(format!(
+                "gen-world expects {settings_id} / minecraft:overworld"
+            ));
         }
         let min_y = get_i64("minY")?;
         let height = get_i64("height")?;
         let sea_level = get_i64("seaLevel")?;
         let settings = mc_bamboo_worldgen::Worldgen::load()?
-            .settings("minecraft:overworld")
+            .settings(settings_id)
             .map(|s| (s.min_y, s.height, s.sea_level))
-            .ok_or("missing overworld settings")?;
+            .ok_or("missing noise settings")?;
         if (min_y, height, sea_level)
             != (
                 i64::from(settings.0),
@@ -279,7 +306,7 @@ impl Report {
 
         let config = WorldGenConfig {
             seed,
-            level_type: LevelType::Normal,
+            level_type: self.level_type,
             ..WorldGenConfig::default()
         };
         let mut generated =
@@ -686,5 +713,27 @@ mod tests {
         assert!(options.forwarded.contains(&"--real-path".to_owned()));
         assert!(options.forwarded.contains(&"2".to_owned()));
         assert!(Options::parse(&["--bogus"]).is_err());
+    }
+
+    #[test]
+    fn level_type_forwards_the_settings_id() {
+        let normal = Options::parse(&[]).unwrap();
+        assert_eq!(normal.level_type, LevelType::Normal);
+        assert!(!normal.forwarded.contains(&"--settings".to_owned()));
+        let large = Options::parse(&["--level-type", "large_biomes"]).unwrap();
+        assert_eq!(large.level_type, LevelType::LargeBiomes);
+        let forwarded = large
+            .forwarded
+            .windows(2)
+            .map(|w| (w[0].as_str(), w[1].as_str()));
+        assert!(
+            forwarded
+                .into_iter()
+                .any(|(k, v)| k == "--settings" && v == "large_biomes")
+        );
+        let amplified = Options::parse(&["--level-type", "minecraft:amplified"]).unwrap();
+        assert_eq!(amplified.level_type, LevelType::Amplified);
+        // flat 不是噪声世界，不接受。/ flat is not a noise world, so it is rejected.
+        assert!(Options::parse(&["--level-type", "flat"]).is_err());
     }
 }

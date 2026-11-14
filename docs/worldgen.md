@@ -280,6 +280,37 @@ CARVERS 只比 SURFACE 多约 1.5 ms：17×17 邻域的大部分 carver 在 `isS
 `chunkgen --through carvers` 多种子对拍；没有收益的一项（条件结果的惰性缓存，见下）撤掉了。
 详见 `performance-optimizations.md` 第 10 节。
 
+### 本机复测（Windows 16 核，2026-11-14，release）
+
+上面 M4 Pro 那组是另一台机器；这组是**接进游戏这一轮**在同一台 16 核 Windows 上现跑的，
+机器当时内存已用到 97%、还有别的队员在并行构建，所以绝对值明显偏大、长尾明显，
+只用来量本机相对开销，不和 M4 Pro 那组直接比。`chunk_timing`（35 区块 × 5 种子，
+累计到各阶段）中位数：
+
+```
+Noise:   median   7.09 ms, min  6.44 ms, max  28.57 ms
+Surface: median  38.82 ms, min 25.05 ms, max 494.05 ms
+Carvers: median  40.57 ms, min 26.90 ms, max 972.95 ms
+```
+
+`cargo run --release -p mc-bamboo-game --example generate_chunk_timing` 量的是**游戏里
+那份** `worldgen::generate_chunk`（同样 35 区块 × 5 种子，每种子先预热一次），
+分解为 BIOMES、到 CARVERS 的整段、以及 `build_region_column` 组装：
+
+```
+ biomes-only: 35 chunks median  0.40 ms, min 0.20 ms, max  1.09 ms
+  to-carvers: 35 chunks median 30.82 ms, min 22.47 ms, max 48.71 ms
+    assembly: 35 chunks median  2.86 ms, min 1.75 ms, max  3.36 ms
+to-carvers + assembly: 33.68 ms/chunk (medians added)
+```
+
+`to-carvers` 内含 quart 群系（~0.4 ms，和 `biomes-only` 一致）和
+`doFill → buildSurface → generateCarvers`；`assembly` 是 `PalettedContainer` 重打包
+加 `Chunk::from_sections` 重算 4 张高度图。两次 `chunk_timing` / `generate_chunk_timing`
+在不同时刻跑、受并发负载影响不同，所以 `to-carvers`（30.82 ms）比同次 `Carvers`
+累计（40.57 ms）小，不能相减；以 `generate_chunk_timing` 的 ~34 ms/区块作为本机
+「游戏里生成一个可交付区块」的量级。
+
 ### 拆分表：慢在哪
 
 基准是临时插桩（嵌在 `Generator::terrain` 和地表/雕刻器里，量完已还原，没进仓库）：
@@ -466,14 +497,42 @@ CARVERS 约 37 ms（release，不含建 `Generator`、不含 `ChunkColumn` 组�
 `gen-world` 的 release 实跑：每区块额外要做 `PalettedContainer` 重打包和
 `Chunk::from_sections` 重算 4 张高度图，量到约 40 ms/区块量级。
 
-飞行的压测场景（`fly-20` 之类）本轮**没有实跑**：`PipelineKind::Staged` 的完整依赖图
-里 `structure_references` / `biomes` / `terrain` / `features` 要半径 8 的
-`structure_starts`，`features` 要半径 1 的 `terrain`，`light` 要半径 1 的
-`initialize_light`；一个可见区块会牵出一大圈依赖区块。结构/地物/光照阶段目前是透传
-空实现，这些依赖都是廉价的空盒子，但真实地形仍要按 `ChunkStep` 的半径铺开。
-计算池默认 4 线程、每线程一个 `Generator`，生成不占世界线程；世界线程只收
-`TaskId` 排好序的回执。**结论待量**：换上真实地物/结构后要重跑 `fly-20`，量
-玩家飞行时每刻新生成区块数、在途生成数、信箱积压和 tick 起点抖动，再决定线程数。
+飞行的压测本轮**实跑了一次**：release 构建 `bamboo` + `bamboo-loadtest`，临时目录里
+`server.properties` 写 `level-type=minecraft:normal`、`level-seed=0`、视距 8、离线，
+`BAMBOO_PROFILE=10`，6 个假玩家 `--pattern fly --layout spread --duration 30 --ramp 5`。
+16 核机器上 `default_staged_worker_threads() = min(4, 核数/2) = 4`，每线程一个
+`Generator`；客户端 6/6 连上、0 登录失败、0 掉线，平均收到 ~64 区块/秒。剖析器三份
+10 秒报告（各 201 tick）的关键数字：
+
+| 指标 | 第 1 份 | 第 2 份（稳态飞行） | 第 3 份 |
+|---|---|---|---|
+| `tick_total` p50 / p95 / max (ms) | 0.123 / 1.311 / 2.183 | 1.180 / 1.704 / 2.204 | 0.983 / 2.097 / 8.350 |
+| `tick_start_lateness` p95 (ms) | 134.218 | 0.492 | 8.389 |
+| `compute_in_flight` 平均 / max | 7.7 / 16 | 16 / 16 | 1.4 / 16 |
+| `compute_backlog` 平均 / max | 190 / 436 | 155 / 328 | 1.7 / 29 |
+| `chunks_delivered` 平均/刻 | 0.54 | 1.51 | 0.46 |
+| `chunk_latency_us` p50 | 0.85 s | 5.77 s | 12.6 s |
+| `skipped_catch_ups` | 0 | 0 | 0 |
+
+**结论：生成没有把世界线程的 tick 拖慢。** `tick_total` 全程 p50 0.12–1.18 ms、
+p95 1.3–2.1 ms、最坏一份 max 8.35 ms，远低于 20 TPS 的 50 ms 预算；生成在计算池里，
+世界线程只收 `TaskId` 排好序的回执，和 `docs/design.md`「世界线程从不等待 IO」一致。
+第 1 份 `tick_start_lateness` p95 134 ms 是整机高负载下的调度抖动，不是世界线程自己的
+耗时（同期 `tick_total` 只有 0.12 ms）。
+
+**但吞吐跟不上**：`compute_in_flight` 在稳态钉在 16（= 4 线程 × 每线程队列 4，
+见 `docs/profiling.md` 第 2 节），`compute_backlog` 峰值 436、稳态 144–328，
+`chunk_latency` p50 从 0.85 s 涨到 5.8 s 再到 12.6 s。也就是说 6 个飞行玩家 + 视距 8
+下，4 线程来不及交付区块，玩家会明显感到区块迟到；瓶颈是计算池吞吐，不是世界线程。
+
+**计算池默认线程数建议**：保留 `min(4, 核数/2) = 4` 作为默认。实测它把世界线程
+稳稳压在 ~1 ms/tick，已经达成「不拖慢 tick」这个首要目标；本机 ~34 ms/区块、4 线程
+理论约 120 区块/秒，但已被 6 名飞行玩家打满，再加线程会线性增加常驻内存
+（每线程一份 `Worldgen` + `Generator`），而这台 31 GB 机器当时已用到 97%。期望更多
+玩家同时在噪声世界飞行、且内存宽裕的部署，再显式把 `chunk_worker_threads` 提到 8，
+以 `compute_backlog` 不再持续增长、`chunk_latency` 回落到亚秒为准；**不要**因为这次
+测到 backlog 就调高默认值。等地物/结构/光照接进来（每区块更贵）后必须重跑本压测
+再评估线程数。
 
 ## 还没做
 
