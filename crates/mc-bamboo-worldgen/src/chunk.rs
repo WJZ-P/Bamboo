@@ -184,6 +184,25 @@ impl<'a> Generator<'a> {
         self.settings
     }
 
+    /// 供诊断和对拍用的群系来源：等价于 `BiomeManager::new(preset, seed)`。
+    ///
+    /// A biome source for diagnostics and oracles; equals `BiomeManager::new(preset, seed)`.
+    pub fn biome_source(&self) -> &MultiNoiseBiomeSource {
+        self.biomes
+    }
+
+    /// 路由采样器（六条气候函数在这里）。
+    /// The router samplers (the six climate functions live here).
+    pub fn samplers(&self) -> &crate::settings::Samplers {
+        &self.router
+    }
+
+    /// 世界种子。
+    /// The world seed.
+    pub fn seed(&self) -> i64 {
+        self.seed
+    }
+
     /// 建一个区块的 quart 群系格（`ChunkStatus.BIOMES` 的产物），用来拼 3×3 region。
     ///
     /// Build one chunk's quart biome cells (the `ChunkStatus.BIOMES` output), for
