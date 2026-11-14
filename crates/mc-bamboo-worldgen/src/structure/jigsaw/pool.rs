@@ -25,6 +25,11 @@ pub struct TemplatePool {
     /// `templates`：按 weight 重复的 `elements` 下标。
     expanded: Vec<usize>,
     fallback: String,
+    /// `maxSize`：官方缓存在字段里（`Integer.MIN_VALUE` 表示未算），首次调用才算。
+    ///
+    /// `maxSize`: vanilla caches it in a field (`Integer.MIN_VALUE` means unset) and
+    /// computes it on first use.
+    max_size: std::cell::Cell<i32>,
 }
 
 impl TemplatePool {
@@ -59,6 +64,7 @@ impl TemplatePool {
             elements,
             expanded,
             fallback,
+            max_size: std::cell::Cell::new(i32::MIN),
         })
     }
 
@@ -98,6 +104,9 @@ impl TemplatePool {
     /// `getMaxSize(manager)`: the max `getYSpan()` of every (non-empty) expanded
     /// element's bounding box at `Rotation.NONE` / `BlockPos.ZERO`.
     pub fn max_size(&self) -> Result<i32, String> {
+        if self.max_size.get() != i32::MIN {
+            return Ok(self.max_size.get());
+        }
         let mut max = 0;
         for &index in &self.expanded {
             let element = &self.elements[index];
@@ -107,6 +116,7 @@ impl TemplatePool {
             let box_ = element.bounding_box((0, 0, 0), Rotation::None)?;
             max = max.max(box_.max_y - box_.min_y + 1);
         }
+        self.max_size.set(max);
         Ok(max)
     }
 }
