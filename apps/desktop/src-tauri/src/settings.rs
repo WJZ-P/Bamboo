@@ -154,6 +154,13 @@ pub struct ServerSettings {
     pub deliveries_per_tick: u32,
     /// Director 信箱每刻最多收回多少个区块，0 表示不限。
     pub reclaims_per_tick: u32,
+    /// 世界生成参数，从 `server.properties` 的四个键解析而来，不进界面 JSON。
+    /// 界面目前不编辑这四项，`as_files` 会原样保留已有值。
+    ///
+    /// World generation parameters parsed from the four `server.properties` keys.
+    /// Not part of the UI JSON; the UI does not edit them and `as_files` keeps them.
+    #[serde(skip)]
+    pub world_gen: mc_bamboo_game::WorldGenConfig,
 }
 
 impl Default for ServerSettings {
@@ -195,6 +202,13 @@ impl ServerSettings {
             chunk_worker_threads: u32::try_from(bamboo.chunk_worker_threads).unwrap_or(u32::MAX),
             deliveries_per_tick: u32::try_from(bamboo.deliveries_per_tick).unwrap_or(u32::MAX),
             reclaims_per_tick: u32::try_from(bamboo.reclaims_per_tick).unwrap_or(u32::MAX),
+            world_gen: mc_bamboo_game::world_options::WorldGenConfig::from_properties(
+                &official.level_seed,
+                &official.level_type,
+                &official.generator_settings,
+                official.generate_structures,
+            )
+            .0,
         }
     }
 
@@ -229,6 +243,7 @@ impl ServerSettings {
                 deliveries: self.deliveries_per_tick as usize,
                 reclaims: self.reclaims_per_tick as usize,
             },
+            world_gen: self.world_gen.clone(),
         }
     }
 
@@ -483,6 +498,7 @@ mod tests {
             chunk_worker_threads: 3,
             deliveries_per_tick: 16,
             reclaims_per_tick: 8,
+            world_gen: Default::default(),
         };
         let config = settings.to_server_config();
         assert_eq!(config.motd, "hello");

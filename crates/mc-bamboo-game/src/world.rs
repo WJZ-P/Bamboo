@@ -85,6 +85,12 @@ pub struct WorldConfig {
     ///
     /// The world directory. `None` disables saving (tests, oracle, load tests).
     pub world_dir: Option<PathBuf>,
+    /// 世界生成参数（种子、世界类型、flat 预设、是否生成结构）。
+    /// 默认超平坦、种子 0，保持嵌入式测试的现有行为。
+    ///
+    /// World generation parameters (seed, level type, flat preset, structures).
+    /// Defaults to superflat / seed 0 to keep embedded-test behaviour.
+    pub world_gen: crate::world_options::WorldGenConfig,
 }
 
 impl Default for WorldConfig {
@@ -100,6 +106,7 @@ impl Default for WorldConfig {
             chunk_worker_threads: 0,
             mail_budget: MailBudget::default(),
             world_dir: None,
+            world_gen: crate::world_options::WorldGenConfig::default(),
         }
     }
 }
