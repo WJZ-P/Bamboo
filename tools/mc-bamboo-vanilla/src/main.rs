@@ -37,6 +37,10 @@
 //!
 //!     Compare findValidGenerationPoint's biome and height gates against vanilla
 //!     Structure.GenerationContext
+//! mc-bamboo-vanilla structure-templates <java 路径>
+//!     用官方 NbtIo 逐节点对拍导出的结构模板 NBT
+//!
+//!     Compare exported structure template NBT node by node with vanilla NbtIo
 //! mc-bamboo-vanilla machine <java 路径>
 //!     让官方熔炉和酿造台在假世界里逐刻跑，比较进度、物品、方块状态和世界随机源
 //! mc-bamboo-vanilla entity-oracle <java 路径>
@@ -112,6 +116,9 @@ mod storage_oracle;
 mod structure_pieces;
 #[cfg(feature = "oracle")]
 mod structure_rings;
+mod structure_templates;
+#[cfg(feature = "oracle")]
+mod structure_templates_oracle;
 #[cfg(feature = "oracle")]
 mod structure_validity;
 #[cfg(feature = "oracle")]
@@ -161,6 +168,9 @@ const STRUCTURE_RINGS_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureRing
 #[cfg(feature = "oracle")]
 const STRUCTURE_VALIDITY_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureValidityOracle.java";
 #[cfg(feature = "oracle")]
+const STRUCTURE_TEMPLATES_SOURCE: &str =
+    "tools/mc-bamboo-vanilla/java/StructureTemplateOracle.java";
+#[cfg(feature = "oracle")]
 const STRUCTURE_PIECES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePiecesOracle.java";
 #[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
@@ -192,6 +202,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla gen-world <java 路径> [--seeds N] [--chunks N] [--salt S] [--show N] [--break-self-test]
       mc-bamboo-vanilla structure-rings <java 路径>
       mc-bamboo-vanilla structure-validity <java 路径>
+      mc-bamboo-vanilla structure-templates <java 路径>
       mc-bamboo-vanilla structure-pieces <java 路径>
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
@@ -245,6 +256,7 @@ fn run() -> Result<(), String> {
         ["gen-world", java, ref options @ ..] => gen_world_cli(java, options),
         ["structure-rings", java, ref options @ ..] => structure_rings_cli(java, options),
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
+        ["structure-templates", java, ref options @ ..] => structure_templates_cli(java, options),
         ["structure-pieces", java, ref options @ ..] => structure_pieces_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
@@ -308,6 +320,7 @@ fn generate(server_jar: &str, java: &str) -> Result<(), String> {
     let output_dir = root.join(OUTPUT_DIR);
     fs::create_dir_all(&output_dir).map_err(|error| format!("无法创建输出目录：{error}"))?;
     generate::write_all(&data, &output_dir)?;
+    structure_templates::export(&work_dir, &output_dir)?;
 
     println!(
         "已生成 Minecraft {} 的数据（协议 {}）",
@@ -325,6 +338,7 @@ fn extract(java: &str) -> Result<(), String> {
     let output_dir = root.join(OUTPUT_DIR);
     fs::create_dir_all(&output_dir).map_err(|error| format!("无法创建输出目录：{error}"))?;
     generate::write_all(&data, &output_dir)?;
+    structure_templates::export(&work_dir, &output_dir)?;
 
     println!(
         "已用现有的报告重新生成 Minecraft {} 的数据（协议 {}）",
@@ -480,6 +494,15 @@ fn structure_validity_cli(java: &str, options: &[&str]) -> Result<(), String> {
         official_program(java, STRUCTURE_VALIDITY_SOURCE)?,
         &worldgen_path,
         &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_templates_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    structure_templates_oracle::run(
+        official_program(java, STRUCTURE_TEMPLATES_SOURCE)?,
+        &workspace_root().join(WORK_DIR),
         options,
     )
 }
@@ -710,6 +733,11 @@ fn structure_rings_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn structure_validity_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_templates_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
