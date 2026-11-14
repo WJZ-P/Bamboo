@@ -99,6 +99,13 @@ enum Request {
         task_id: u64,
         generation: u64,
     },
+    /// 测试接缝：worker 收到本批时先通知调用方「已停在这里」，等放行后继续处理。
+    /// Test seam: the worker announces that its batch is paused and waits for a
+    /// release before continuing, so a test can queue the next batch first.
+    PauseForTest {
+        ready: Sender<()>,
+        release: Receiver<()>,
+    },
     Shutdown,
 }
 
@@ -444,6 +451,22 @@ impl ChunkIo {
         });
     }
 
+    /// 暂停 worker 处理请求直到放行；`ready` 确认已进入暂停点，`release` 放行。
+    /// 暂停期间排入通道的请求会在放行后由同一批 `try_iter` 收齐。测试专用。
+    /// Pause request processing until released: `ready` confirms the worker is
+    /// paused and `release` resumes it. Requests queued while paused are then
+    /// collected together by one `try_iter`. Test-only.
+    #[doc(hidden)]
+    pub fn pause_for_test(&self) -> (Receiver<()>, Sender<()>) {
+        let (ready_tx, ready) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        self.send_request(Request::PauseForTest {
+            ready: ready_tx,
+            release: release_rx,
+        });
+        (ready, release)
+    }
+
     /// 排一道不阻塞的栅栏并返回它的序号。IO 线程按 FIFO 处理到它时，此前提交的所有
     /// 写都已落盘且区域文件已 `sync_all`，随后往 `results` 信箱回一条 `Flushed { seq }`。
     /// 世界线程不等待，在 tick 开头收信箱时据此发 `save-all flush` 的成功消息。
@@ -681,6 +704,24 @@ fn worker_loop(
         // 再逐个处理，这样同一批里同区块的旧快照会被跳过。
         let mut batch = vec![first];
         batch.extend(rx.try_iter());
+        // 测试接缝收到本批时先通知调用方、再阻塞在这里等放行；放行前提交的请求
+        // 留在通道里，下一次 `try_iter` 会把它们收成确定的一批。
+        // The test seam notifies its caller when its batch is reached, then
+        // blocks here until released. Requests queued before the release stay
+        // in the channel and are collected by the next `try_iter` as one batch.
+        let pauses: Vec<_> = batch
+            .iter()
+            .filter_map(|request| match request {
+                Request::PauseForTest { ready, release } => Some((ready.clone(), release)),
+                _ => None,
+            })
+            .collect();
+        for (ready, _) in &pauses {
+            let _ = ready.send(());
+        }
+        for (_, release) in &pauses {
+            let _ = release.recv();
+        }
         for request in &batch {
             match request {
                 Request::Write { pos, seq, .. } | Request::DropSnapshot { pos, seq } => {
@@ -714,6 +755,7 @@ fn worker_loop(
             // Catch a single task panic: the IO thread lives on and still replies,
             // so no read waits forever (like official IOWorker.submitThrowingTask).
             let outcome = catch_unwind(AssertUnwindSafe(|| match request {
+                Request::PauseForTest { .. } => {}
                 Request::Read {
                     pos,
                     task_id,
@@ -1160,6 +1202,36 @@ mod tests {
         io.close();
     }
 
+    /// 暂停接缝本身要真的挡住 worker：放行前写请求不能落盘。
+    /// The pause seam really holds the worker: no write lands before release.
+    #[test]
+    fn a_paused_worker_does_not_process_queued_requests() {
+        let tmp = TempDir::new("pause");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        let mut io = ChunkIo::open(&dir).unwrap();
+        let (ready, release) = io.pause_for_test();
+        ready.recv().expect("worker 到达暂停点");
+        let pos = ChunkPos::new(7, 8);
+        io.submit_write(pos, 1, Some(b"later".to_vec()), None);
+        let region = dir.region_dir().join(RegionPos::of(pos).file_name());
+        assert!(!region.exists(), "暂停期间 worker 不该碰磁盘");
+        assert_eq!(io.in_flight_requests(), 2, "暂停的请求和写都还在计数里");
+        release.send(()).expect("放行 worker");
+        io.flush().unwrap();
+        assert_eq!(io.in_flight_requests(), 0);
+        assert_eq!(
+            collect(&io),
+            vec![Reply::Written {
+                pos,
+                seq: 1,
+                present: true,
+            }]
+        );
+        assert!(region.exists(), "放行后写真的落盘");
+        io.close();
+    }
+
     #[test]
     fn a_newer_snapshot_drops_the_older_write() {
         let tmp = TempDir::new("drop");
@@ -1167,9 +1239,12 @@ mod tests {
         dir.create_layout().unwrap();
         let mut io = ChunkIo::open(&dir).unwrap();
         let pos = ChunkPos::new(0, 0);
-        // 同一批里两个写：只有最新的 seq 该落盘并回执。
+        // 暂停 worker 后一次排两个写，保证它们真的落在同一批里。
+        let (ready, release) = io.pause_for_test();
+        ready.recv().expect("worker 到达暂停点");
         io.submit_write(pos, 5, Some(b"old".to_vec()), None);
         io.submit_write(pos, 6, Some(b"new".to_vec()), None);
+        release.send(()).expect("放行 worker");
         io.flush().unwrap();
         let written: Vec<u64> = collect(&io)
             .into_iter()
