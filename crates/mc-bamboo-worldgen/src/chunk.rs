@@ -250,7 +250,7 @@ impl<'a> Generator<'a> {
         self.terrain(chunk_x, chunk_z, Stage::Noise)
     }
 
-    /// 生成到 `terrain` 状态里的某一个阶段。
+    /// 生成到 `terrain` 状态里的某一个阶段（EMPTY beardifier，即官方新区块无结构的基线）。
     ///
     /// 返回 `height` 个方块层，每层的 256 个默认状态 ID，下标 `x*16 + z`。
     /// 三个步骤共用一个 [`Context`] 和一个 [`Aquifer`]，和官方一个 `NoiseChunk`
@@ -260,6 +260,32 @@ impl<'a> Generator<'a> {
         chunk_x: i32,
         chunk_z: i32,
         stage: Stage,
+    ) -> Result<Vec<Vec<u32>>, String> {
+        self.terrain_with_beardifier(
+            chunk_x,
+            chunk_z,
+            stage,
+            &crate::structure::beardifier::Beardifier::EMPTY,
+        )
+    }
+
+    /// 生成到 `terrain` 状态里的某一个阶段，并把 `beardifier` 的结构件密度贡献并进
+    /// `final_density`。`final_density` 顶层是 `add(base, beardifier)`；编译后的 beardifier
+    /// 标记是常量 0（EMPTY 基线），所以 `base + 0.0 + beard` 与官方 `add(base, beard)`
+    /// 逐位相同（`base + 0.0` 精确无舍入），且不改噪声取数次数与顺序。EMPTY 时此调用
+    /// 与 `terrain` 完全一致（terrain 对拍 0 不一致的 EMPTY 回归）。
+    ///
+    /// Generate to a `terrain` stage, folding the `beardifier`'s structure-piece density
+    /// contribution into `final_density`. `final_density` tops out at `add(base, beardifier)`;
+    /// the compiled marker is constant 0 (the EMPTY baseline), so `base + 0.0 + beard` is
+    /// bit-identical to vanilla `add(base, beard)` and changes no noise draw order. With EMPTY
+    /// this is exactly `terrain` (the 0-mismatch EMPTY regression).
+    pub fn terrain_with_beardifier(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        stage: Stage,
+        beardifier: &crate::structure::beardifier::Beardifier,
     ) -> Result<Vec<Vec<u32>>, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
@@ -282,6 +308,10 @@ impl<'a> Generator<'a> {
         self.router
             .final_density
             .sample_volume(&mut context, &mut density, &volume);
+        // 结构件密度贡献：标记在 final_density 顶层、无取数，逐格加上与官方 add 等价。
+        // Structure-piece contribution: the marker sits at the top of final_density and draws
+        // no randomness, so adding cell by cell is equivalent to vanilla's add.
+        beardifier.add_to_volume(&mut density, &volume);
 
         let mut layers = vec![vec![self.empty; 256]; height as usize];
         for z in 0..16 {
@@ -346,6 +376,15 @@ impl<'a> Generator<'a> {
     /// scanning top-down for the first non-air block. `getBaseHeight` returns blockY+1 and
     /// `getFirstOccupiedHeight` subtracts 1, so we return that blockY directly; an all-air
     /// column yields minY-1.
+    ///
+    /// 官方 `iterateNoiseColumn` 用 `Beardifier = null`（EMPTY）：`getBaseHeight` 永远不受
+    /// 结构地基影响，所以这里固定走 EMPTY 分支，绝不调用 `terrain_with_beardifier`。接入真实
+    /// Beardifier 时这一支必须保持 EMPTY，否则结构生成期的高度判定会算进结构地基，和原版不一致。
+    ///
+    /// Vanilla `iterateNoiseColumn` passes a `null` (EMPTY) beardifier: `getBaseHeight` never
+    /// accounts for structure terrain, so this stays on the EMPTY branch and must never call
+    /// `terrain_with_beardifier`. Keep it EMPTY when a real Beardifier is wired in, or structure
+    /// height checks would wrongly include structure terrain and diverge from vanilla.
     pub fn first_occupied_height(&self, block_x: i32, block_z: i32) -> Result<i32, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
