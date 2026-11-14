@@ -26,7 +26,9 @@
 //!                            [--biome-points N] [--show N]
 //!     让官方代码算世界生成的噪声、密度函数和群系，用 mc-bamboo-worldgen 重算，浮点逐位比较
 //! mc-bamboo-vanilla structures <java 路径>
-//!     用官方 RandomSpreadStructurePlacement 对拍结构放置，大范围区块逐格比潜在起点和频率判定
+//!     用官方 RandomSpreadStructurePlacement 对拍结构放置、加权选择和频率判定
+//! mc-bamboo-vanilla structure-rings <java 路径>
+//!     用官方 getRingPositionsFor / findBiomeHorizontal 对拍要塞环位置与群系吸附
 //! mc-bamboo-vanilla machine <java 路径>
 //!     让官方熔炉和酿造台在假世界里逐刻跑，比较进度、物品、方块状态和世界随机源
 //! mc-bamboo-vanilla entity-oracle <java 路径>
@@ -97,6 +99,8 @@ mod seed_world;
 #[cfg(feature = "oracle")]
 mod storage_oracle;
 #[cfg(feature = "oracle")]
+mod structure_rings;
+#[cfg(feature = "oracle")]
 mod structures;
 #[cfg(feature = "oracle")]
 mod ticket_oracle;
@@ -139,6 +143,8 @@ const CHUNKGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkgenOracle.java"
 #[cfg(feature = "oracle")]
 const STRUCTURES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePlacementOracle.java";
 #[cfg(feature = "oracle")]
+const STRUCTURE_RINGS_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureRingsOracle.java";
+#[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 #[cfg(feature = "oracle")]
 const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
@@ -165,6 +171,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
       mc-bamboo-vanilla chunkgen <java 路径> [--seeds N] [--chunks N] [--salt S] [--biomes-only] [--show N]
       mc-bamboo-vanilla structures <java 路径>
+      mc-bamboo-vanilla structure-rings <java 路径>
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -214,6 +221,7 @@ fn run() -> Result<(), String> {
         ["worldgen", java, ref options @ ..] => worldgen(java, options),
         ["chunkgen", java, ref options @ ..] => chunkgen_cli(java, options),
         ["structures", java, ref options @ ..] => structures_cli(java, options),
+        ["structure-rings", java, ref options @ ..] => structure_rings_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
@@ -430,6 +438,11 @@ fn structures_cli(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn structure_rings_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    structure_rings::run(official_program(java, STRUCTURE_RINGS_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
 fn loot_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     loot_oracle::run(official_program(java, LOOT_ORACLE_SOURCE)?, options)
 }
@@ -629,6 +642,11 @@ fn chunkgen_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn structures_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_rings_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
