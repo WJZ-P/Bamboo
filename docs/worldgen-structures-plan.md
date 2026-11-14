@@ -47,11 +47,32 @@
   逐格比潜在起点和频率判定，9280 个比较 0 不一致（其中 1296 条频率判定为 false，确认
   频率削减分支真的被比到）。故意把 `floorDiv` 换成截断除法，对拍立刻报 312 处不一致并
   失败，还原后恢复 0；旧 `chunkgen --through carvers` 仍是 0 不一致。
-  `concentric_rings`（要塞）因 `findBiomeHorizontal` 未移植，不在该对拍里。
+
+**第二轮（2026-11-13，队长分派的步 1–2）**：
+
+* 结构选择与起点生成（步 1，`structure/start.rs`）：`StructureStart` / `StructurePiece` /
+  `BoundingBox` / `StructureStarts` / `References` / `StartPlan` 数据类型；
+  `createStructures` 的加权选择（`setLargeFeatureSeed` + `nextInt(total)` + 移除重试）、
+  `existingStart` 短路、`createReferences` 的 17×17 邻域 + 包围盒 XZ 相交 +
+  `ChunkPos.pack`。`StructureState::start_plans` 产出每个命中结构集的尝试序列。
+  `structures` 对拍扩出一节官方 `WorldgenRandom` 加权选择序列：21 个结构集 × 464 查询 =
+  9744 个比较，和放置合计 0 不一致（故意把 `setLargeFeatureSeed` 的 x/z 对调，报 1987
+  处不一致并失败）。**`Structure.generate` 的 `findValidGenerationPoint`（群系 + 高度检查）
+  没做**，所以没有「起点是否有效 / 最终选中哪个结构」，只有尝试序列。
+* 要塞 `concentric_rings`（步 2，`structure/rings.rs`）：`BiomeSource.findBiomeHorizontal`
+  的单点气候群系解析器、蓄水池抽样、精确搜索顺序，和 `generateRingPositions` 的主
+  `LegacyRandomSource`、`fork()` 消费 `nextLong()`、`Math.round`、角度/距离/spread 更新。
+  新子命令 `cargo run -p mc-bamboo-vanilla -- structure-rings <java>` 用官方
+  `getRingPositionsFor` / `findBiomeHorizontal` / `isStructureChunk` 对拍：6 个种子、768 个
+  环位置、96 个 `findBiomeHorizontal`、864 个 `isStructureChunk` 检查全 0 不一致。
+  故意丢掉 `fork()` 的 `nextLong()`，环位置立刻大面积不一致。`StructureState` 现在可以
+  注入环位置，要塞的 `isStructureChunk` 不再是恒 false 的占位实现。
+* 每一步都单独提交，每个新对拍都先故意改坏一处确认会失败再还原。
 
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、
-结构件生成与放置、`Beardifier`、存档 `structures` 键都还没做；这一切都还是纯函数加
-oracle，没有接进 Director，游戏里世界仍是超平坦。
+`Structure.generate` 的有效性判定、结构件生成与放置、`Beardifier`、存档 `structures` 键
+都还没做；这一切都还是纯函数加 oracle，没有接进 Director，游戏里世界仍是超平坦。
+`.nbt` 结构模板按约定留到第一个真正用到它的结构那一步再导出。
 
 ## 1. 官方 26.3 的结构生成全景
 
@@ -270,31 +291,53 @@ impl Placement {
 pub struct StructureState { /* ... */ }
 impl StructureState {
     pub fn new(sets: StructureSets) -> Self;
+    /// 注入 rings::ring_positions 的结果；concentric_rings 的 isPlacementChunk 用它。
+    pub fn set_ring_positions(&mut self, set_name: &str, positions: impl IntoIterator<Item = (i32, i32)>);
     /// 官方 StructurePlacement.isStructureChunk(state, x, z)：
     /// isPlacementChunk && applyAdditionalChunkRestrictions && applyInteractionsWithOtherStructures。
     pub fn is_structure_chunk(&self, set_name: &str, seed: i64, x: i32, z: i32) -> bool;
     /// createStructures 的放置门：返回命中结构集（按名字排序），只到「结构集」这一层。
     pub fn start_candidates(&self, seed: i64, x: i32, z: i32) -> Vec<StartCandidate>;
+    /// 放置门 + existingStart 短路 + 加权选择序列（structure/start.rs）。
+    pub fn start_plans(&self, seed: i64, x: i32, z: i32, existing: &StructureStarts) -> Vec<StartPlan>;
 }
 pub struct StartCandidate { pub set: String, pub structures: Vec<SelectionEntry> }
+pub struct StartPlan { pub set: String, pub attempts: Vec<String> }
+// 数据与辅助函数（structure/start.rs）
+pub struct StructureStart { /* structure, chunk_x/z, references, pieces, terrain_adaptation */ }
+pub struct StructurePiece { /* piece_type, bounding_box, orientation, ground_level_delta */ }
+pub struct BoundingBox { /* min/max x,y,z */ }
+pub struct StructureStarts { pub by_structure: BTreeMap<String, StructureStart> }
+pub type References = BTreeMap<String, Vec<i64>>;
+pub fn selection_sequence(entries: &[SelectionEntry], seed: i64, x: i32, z: i32) -> Vec<String>;
+pub fn chunk_pos_pack(x: i32, z: i32) -> i64;
+pub fn structure_references(center_x: i32, center_z: i32,
+    neighbors: &[(i32, i32, &StructureStarts)]) -> References;
+// 要塞环位置（structure/rings.rs）
+pub fn ring_positions(seed: i64, resolver: &mut BiomeResolver, allowed: &HashSet<String>,
+    distance: i32, spread: i32, count: i32) -> Vec<(i32, i32)>;
+pub fn find_biome_horizontal(/* ... */) -> Option<(i32, i32, String)>;
 ```
 
-注意与官方两处差别，合并时别当成已完成：
+注意与官方的差别，合并时别当成已完成：
 
-* `StructureState::start_candidates` 只给「哪个结构集把 (x,z) 判为起点」，
-  **不含** `createStructures` 里的加权选具体结构（`setLargeFeatureSeed` + `nextInt(total)`）
-  和 `Structure.generate`（群系有效性检查 + 结构件生成）——那两步在第 4 步，需要结构件。
-* `concentric_rings`（要塞）的 `is_placement_chunk` 本轮返回 false（群系吸附未移植），
-  所以 `is_structure_chunk` 对要塞恒 false，不能当成官方结果。
+* `start_candidates` / `start_plans` 只给「哪个结构集把 (x,z) 判为起点」和
+  「按什么顺序尝试结构」，**不含** `Structure.generate`（`findValidGenerationPoint`
+  的群系 + 高度检查 + 结构件生成）。所以没有「起点是否有效 / 最终选中哪个结构」，
+  `StructureStarts` 目前只是数据类型，没有生产它的实现。
+* `concentric_rings` 的 `is_structure_chunk` 必须先调 `set_ring_positions` 注入
+  `ring_positions` 的结果；没注入时仍返回 false（占位）。`Placement::is_placement_chunk`
+  对 `ConcentricRings` 单独调用时恒 false，只有 `StructureState` 这条路径是准的。
 
 后续阶段的接口（本轮**未实现**，供队长接上）：
 
 * `structure_starts` 阶段：`Generator::structure_starts(seed, chunk_x, chunk_z) ->
-  StructureStarts`。在 `start_candidates` 之上补加权选择 + `Structure.generate`，
-  产出 `StructureStart`（含 `StructurePiece` 及包围盒）。
+  StructureStarts`。在 `start_plans` 之上补 `Structure.generate`，产出 `StructureStart`
+  （含 `StructurePiece` 及包围盒）。
 * `structure_references` 阶段：`Generator::structure_references(center, neighbor_starts) ->
   References`，照 `createReferences` 的 17×17 邻域、包围盒相交、`ChunkPos.pack`
   （`pack(x,z) = (x as u32 as i64) | ((z as u32 as i64) << 32)`）写引用。
+  纯函数 `structure_references` 已就位，但没接进流水线。
 * 两个函数都只依赖 `&self` 和入参，不碰世界状态、不取系统随机数，可进计算池
   （`docs/world-model-design.md` 5.3.1）。流水线队员先接空实现，队长合并时按此签名接上。
 
@@ -372,7 +415,7 @@ structures (Compound)
 |---|---|---|---|
 | 1 | 本方案文档 | — | **做完** |
 | 2 | 数据导出：`worldgen.json` 加四键，Rust 解析骨架 | `extract` 重跑无 diff（除四键）、旧 `chunkgen --through carvers` 仍 0 | **做完**：重跑无 diff、`--through carvers` 小样本 0 不一致 |
-| 3 | 放置：`random_spread`（含频率削减、exclusion zone、spread type）、`concentric_rings` 几何 | 大范围区块「哪个区块有哪个结构起点」0 不一致；新对拍先故意改坏一处确认会失败 | **random_spread 做完**：20 集 × 464 查询 = 9280 比较 0 不一致；`concentric_rings` 只做了几何（吸附待办），未纳入对拍 |
+| 3 | 放置：`random_spread`（含频率削减、exclusion zone、spread type）、`concentric_rings` 几何 | 大范围区块「哪个区块有哪个结构起点」0 不一致；新对拍先故意改坏一处确认会失败 | **做完**：20 集 × 464 查询 = 9280 放置比较 + 9744 加权选择比较 0 不一致；`concentric_rings` 6 种子 768 环位置 + 864 `isStructureChunk` 0 不一致 |
 | 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | 没做 |
 | 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | 没做 |
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | 没做（仍用 `Beardifier.EMPTY`） |
@@ -391,10 +434,21 @@ structures (Compound)
   （1296 条频率判定为 false，确认四种 reducer 的 false 分支真的被比到）。
   故意把 `floorDiv` 换成截断除法，对拍立刻报 312 处不一致并失败，还原后恢复 0。
   `exclusion zone`（`pillager_outposts`）和 `concentric_rings` 不在此对拍内，见第 9 节疑点。
+* **第二轮的步 1（加权选择，已落地）**：`structures` 子命令加了一节 `SELECT`，Java 用官方
+  `WorldgenRandom.setLargeFeatureSeed` + `nextInt(total)` 对 21 个结构集输出尝试序列，
+  Rust 用生产代码 `selection_sequence` 复算，9744 个比较 0 不一致。故意把
+  `setLargeFeatureSeed` 的 x/z 对调会报 1987 处不一致。
+* **第二轮的步 2（要塞环位置，已落地）**：`cargo run -p mc-bamboo-vanilla --
+  structure-rings <java>`，`java/StructureRingsOracle.java` 按 `WorldLoader` 前半段读官方
+  注册表、造 `NoiseBasedChunkGenerator` / `RandomState` / `ChunkGeneratorStructureState`，
+  调官方 `getRingPositionsFor`、`findBiomeHorizontal`、`isStructureChunk` 输出；Rust 用
+  `rings::ring_positions` / `find_biome_horizontal` / `StructureState::is_structure_chunk`
+  复算。6 个种子、768 个环位置、96 个 `findBiomeHorizontal`、864 个 `isStructureChunk`
+  检查全 0 不一致。故意丢掉 `fork()` 的 `nextLong()` 会让环位置大面积不一致。
 * 第 4 步及以后用 `chunkgen` 的 `--through features` 九宫格假世界
   （`docs/worldgen-features-plan.md` 4.1）逐方块比，和 `world-dir` 比存档。
-* `concentric_rings` 的 `findBiomeHorizontal` 群系吸附、`.nbt` 模板导出、第 4–7 步的
-  主体都超出一轮，做不完按 WIP 规则提交并在汇报里交接。
+* `.nbt` 模板导出、`Structure.generate` 有效性判定、第 4–7 步的主体都超出本轮，
+  做不完按 WIP 规则提交并在汇报里交接。
 
 ### 7.2 Rust 侧解析的注意点
 
@@ -428,15 +482,21 @@ structures (Compound)
    `feature_pool_element` 引 `PlacedFeature`，都靠 `RegistryOps`。**本 jar 上已实测通过**
    （四键导出成功、重跑无 diff）；换官方 jar 版本后仍要重跑 `extract` 看 diff，
    失败则退回「从 jar 原始 JSON 导出」并记差异。
-2. **`concentric_rings` 的 `findBiomeHorizontal`**：依赖 uncached 气候采样器和
-   `BiomeResolver` 的取数顺序，是 `docs/worldgen-features-plan.md` 7.3 同源的疑点；
-   吸附完成前要塞起点不能算 0 不一致。
+2. **`concentric_rings` 的气候采样器上下文**：官方 `findBiomeHorizontal` 走
+   `createCachingResolver(randomState)`（`SamplerContext.enableCaches()`），Bamboo 的
+   `SeededRouter::climate` 用 `Context::uncached()`。该搜索的 3249 个 quart 坐标互不相同、
+   没有 `sampleVolume` 成批调用，所以缓存不会命中、单点值应相同；6 种子 0 不一致
+   佐证了这点，但换成别的搜索半径/分辨率时仍要重验。R 树 `lastResult` 官方是
+   `ThreadLocal`（ForkJoinPool 多线程）、Bamboo 是 `Cell`，环位置对拍 0 不一致说明
+   这批数据没有因平局选不同群系；自定义预设里平局变多时可能露出来。
 3. **`probabilityReducer` 的参数方向**：26.3 把 `salt` 当 `x`、`sourceX` 当 `z`、
    `sourceZ` 当 `blend`，和另三个方法不同；当前数据没有用 `default` + frequency<1 的
    结构集，但对拍要覆盖到这条路径（可用合成参数单独验）。
-4. **加权选择**：`createStructures` 在 `structures.size() > 1` 时用
+4. **加权选择（已对拍 0 不一致）**：`createStructures` 在 `structures.size() > 1` 时用
    `setLargeFeatureSeed(seed, x, z)` 后 `nextInt(total)` 逐个试；`mineshafts`、
-   `villages`、`ruined_portals` 等是多结构集，顺序和 `HolderSet` 迭代序要照官方。
+   `villages`、`ruined_portals`、`abandoned_camp` 等是多结构集，9744 个序列比较 0 不一致。
+   但官方在第一个「生成成功」的结构就提前返回，Bamboo 目前只能给完整尝试序列；
+   最终选中的结构仍要等 `Structure.generate` 有效性判定（未做）。
 5. **`Beardifier` 并入 `finalDensity` 的方式**：`SamplerContext` 里的
    `Beardifier.CONTEXT_KEY` 与 `mc-bamboo-worldgen::sampler` 的编译/取数要逐位核对，
    别改变噪声实例的 cache 编号和取数序列。
@@ -449,28 +509,45 @@ structures (Compound)
    `applyAdditionalChunkRestrictions`，没把这套交互与官方逐格对拍（官方要
    `ChunkGeneratorStructureState` 实例才能调 `applyInteractionsWithOtherStructures`）。
    底层原语单独验过，但组合语义置信度低一档。
-8. **`concentric_rings` 环几何未对拍**：`ring_positions_geometry` 照字节码复刻了
+8. **环几何与吸附已对拍 0 不一致**：`structure/rings.rs` 照字节码复刻了
    `RandomSource.create()`（LegacyRandomSource）、`setSeed(concentricRingsSeed)`、
-   `random.nextDouble()` 的角度/距离推进、`fork()` 消费 `nextLong()` 和 `Math.round`，
-   但没接 `findBiomeHorizontal`、也没和官方环位置对拍，只能当几何草稿，不能当结果用。
+   `nextDouble()` 的角度/距离推进、`fork()` 消费 `nextLong()`、`Math.round`、
+   `findBiomeHorizontal` 的搜索顺序与蓄水池抽样；6 种子 768 个环位置与官方
+   `getRingPositionsFor` 全一致。故意丢掉 `fork()` 的 `nextLong()` 会立刻全错。
+   旧的 `placement.rs::ring_positions_geometry`（未吸附的几何草稿）保留但不再用于
+   `isStructureChunk`，实际判定走 `rings::ring_positions` 注入的结果。
+9. **`findValidGenerationPoint` 没做**：`Structure.generate` 的
+   `couldValidBiomeExistOnTopOfChunkCenter`（整列 quart 群系扫描，走
+   `createResolverForChunk` 的成批 `sampleVolume`）、`getLowestY`（4 角
+   `getFirstOccupiedHeight` → `getBaseHeight` → `iterateNoiseColumn` 的 terrain 密度）
+   和 `isValidBiome`（起点 quart 群系）都还没移植。因此没有「起点是否有效」，
+   `StructureStart` 只是数据类型，没有生产它的入口。
 
-## 10. 已知限制（本轮结束时，2026-11-13）
+## 10. 已知限制（第二轮结束时，2026-11-13）
 
 * 主世界以外的维度（下界、末地）不做。Bamboo 目前没有下界/末地维度。
 * **全是纯函数 + 对拍，没接进游戏**：`structure_starts` / `structure_references` 两个阶段
   仍是空实现，本模块的结果没有进 Director 的流水线，游戏里世界仍是超平坦。
-* `.nbt` 结构模板本轮未导出（第 2.2 节，jar 里 1511 个、约 4 MiB），第 4 步结构件生成
-  前补齐；本轮只导出了引用它们的四个注册表 JSON。
-* `concentric_rings`（要塞）只移植了环位置的确定性几何，`findBiomeHorizontal` 的群系吸附
-  未移植，`is_placement_chunk` 对要塞恒 false，**要塞起点不保证与官方一致**，也没进对拍。
+* `.nbt` 结构模板仍**未导出**（第 2.2 节，jar 里 1511 个、约 4 MiB）：按队长约定，在
+  第一个真正用到模板的结构那一步再导出，本轮没做到那一步，只导出了引用它们的四个
+  注册表 JSON。
+* `concentric_rings`（要塞）的环几何 + `findBiomeHorizontal` 吸附已移植并对拍
+  0 不一致；但要塞的 `isStructureChunk` 必须先由调用方 `set_ring_positions` 注入
+  `ring_positions` 的结果，没注入时仍返回 false。`Placement::is_placement_chunk` 单独
+  调用 `ConcentricRings` 时恒 false，只有 `StructureState` 这条路径是准的。
 * `pillager_outposts` 的 `exclusion_zone` 在 `StructureState::is_structure_chunk` 里实现并
   有单元测试（村庄/前哨不同点），但 `structures` 对拍调的是官方无状态的
   `getPotentialStructureChunk` + `applyAdditionalChunkRestrictions`，**没有把排除区交互
   （`hasStructureChunkInRange`）拿来和官方逐格对拍**；它依赖的 `getPotentialStructureChunk`
   已单独验过，但组合路径置信度低一档，见第 9 节疑点。
-* `Structure.generate` 的加权选具体结构（多结构集）、群系有效性检查、结构件生成（第 4 步）、
-  `features` 阶段结构件放置（第 5 步）、`Beardifier`（第 6 步，terrain 仍用 `EMPTY`）、
-  存档 `structures` 键（第 7 步）都没做。`start_candidates` 只到「结构集」这一层。
+* **`Structure.generate` 没做**：`findValidGenerationPoint` 的整列群系扫描、四角
+  `getFirstOccupiedHeight` 高度检查、起点群系检查都没移植，所以没有「起点是否有效 /
+  最终选中哪个结构」，`StructureStart` 只是数据类型。`start_plans` 只给加权尝试序列。
+* 结构件生成（第 4 步，所有旧式 / jigsaw 结构）、`features` 阶段结构件放置（第 5 步，
+  `placeInChunk` / `postProcess` / processors / 方块实体 / 拼图替换）、`Beardifier`
+  （第 6 步，terrain 仍用 `EMPTY`）、存档 `structures` 键（第 7 步）全都没做。
+* `structure_references` 的纯函数 `structure_references` 已就位（含 `ChunkPos.pack`
+  与包围盒 XZ 相交），但没接进流水线，也没和官方 `createReferences` 对拍。
 * `Structure.DIRECT_CODEC` 整表 `encodeStart` 已在本 jar 上实测通过（四键导出成功、
   重跑无 diff），但换官方 jar 版本后仍要重跑 `extract` 看 diff。
 * 未完成的结构/阶段不假装支持：地物分支用 `unsupported` 标记，结构里程碑沿用同一做法。
