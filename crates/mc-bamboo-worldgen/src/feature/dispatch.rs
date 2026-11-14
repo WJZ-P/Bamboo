@@ -11,7 +11,10 @@ use serde_json::Value;
 
 use crate::random::WorldgenRandom;
 
-use super::{ores, placement::OreFeature, simple_block::SimpleBlockFeature, world::FeatureWorld};
+use super::{
+    ores, placement::OreFeature, simple_block::SimpleBlockFeature, tree::TreeFeature,
+    world::FeatureWorld,
+};
 
 type Pos = (i32, i32, i32);
 
@@ -19,6 +22,7 @@ type Pos = (i32, i32, i32);
 pub enum Leaf {
     Ore(OreFeature),
     SimpleBlock(SimpleBlockFeature),
+    Tree(TreeFeature),
 }
 
 /// 按 `Feature` 类型 ID 解析配置；未移植或解析不了的类型返回 `None`。
@@ -28,6 +32,7 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
     match kind {
         "minecraft:ore" => Some(Leaf::Ore(OreFeature::parse(config).ok()?)),
         "minecraft:simple_block" => Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?)),
+        "minecraft:tree" => TreeFeature::parse(config).map(Leaf::Tree),
         _ => None,
     }
 }
@@ -44,5 +49,6 @@ pub fn place_leaf(
     match leaf {
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
+        Leaf::Tree(tree) => tree.place(world, random, pos),
     }
 }
