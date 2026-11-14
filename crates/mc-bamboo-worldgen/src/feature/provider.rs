@@ -72,12 +72,12 @@ impl VerticalAnchor {
 
 /// `IntProvider.sample(random)`。26.3 step 9 的 `count` / `offset` 用到 constant、
 /// uniform、trapezoid、biased_to_bottom、very_biased_to_bottom；递归的 clamped /
-/// weighted_list / clamped_normal 暂不支持，解析时报错让该 placed feature 标 unsupported。
+/// clamped_normal 也已支持，weighted_list 暂不支持。
 ///
 /// `IntProvider.sample(random)`: step 9 uses constant, uniform, trapezoid, and the
-/// two biased variants for `count` / `offset`. Recursive clamped / weighted_list /
-/// clamped_normal stay unsupported for now.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// two biased variants for `count` / `offset`. Recursive clamped / clamped_normal
+/// are supported; weighted_list is not.
+#[derive(Debug, Clone, PartialEq)]
 pub enum IntProvider {
     Constant(i32),
     Uniform {
@@ -105,6 +105,15 @@ pub enum IntProvider {
         min: i32,
         max: i32,
     },
+    /// `ClampedNormalInt`：`(int)Mth.clamp(Mth.normal(random, mean, deviation), min, max)`。
+    ///
+    /// `ClampedNormalInt`: `(int)Mth.clamp(Mth.normal(random, mean, deviation), min, max)`.
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
+        min: i32,
+        max: i32,
+    },
 }
 
 impl IntProvider {
@@ -124,6 +133,12 @@ impl IntProvider {
                 .get(name)
                 .and_then(Value::as_i64)
                 .map(|n| n as i32)
+                .ok_or_else(|| format!("int provider {kind} has no {name}"))
+        };
+        let number = |name: &str| -> Result<f64, String> {
+            object
+                .get(name)
+                .and_then(Value::as_f64)
                 .ok_or_else(|| format!("int provider {kind} has no {name}"))
         };
         Ok(match kind {
@@ -155,6 +170,14 @@ impl IntProvider {
                         .get("source")
                         .ok_or("clamped int provider has no source")?,
                 )?),
+                min: integer("min_inclusive")?,
+                max: integer("max_inclusive")?,
+            },
+            // `ClampedNormalInt`：mean / deviation 是 float，min / max 是 int。
+            // `ClampedNormalInt`: float mean/deviation, int min/max.
+            "minecraft:clamped_normal" => Self::ClampedNormal {
+                mean: number("mean")? as f32,
+                deviation: number("deviation")? as f32,
                 min: integer("min_inclusive")?,
                 max: integer("max_inclusive")?,
             },
@@ -194,6 +217,17 @@ impl IntProvider {
             // ClampedInt.sample：先 sample source（消费随机数），再 clamp。
             // ClampedInt.sample: sample the source (consuming random), then clamp.
             Self::Clamped { source, min, max } => source.sample(random).clamp(*min, *max),
+            // `ClampedNormalInt.sample`：先 `Mth.normal`，再 `Mth.clamp`，最后截断成 int。
+            // `ClampedNormalInt.sample`: `Mth.normal`, then `Mth.clamp`, then a cast to int.
+            Self::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => {
+                let normal = *mean + (random.next_gaussian() as f32) * *deviation;
+                crate::math::clamp(normal, *min as f32, *max as f32) as i32
+            }
         }
     }
 }

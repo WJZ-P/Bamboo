@@ -43,6 +43,11 @@ pub enum Modifier {
         min_inclusive: i64,
         max_inclusive: i64,
     },
+    /// `EnvironmentScanPlacement`：沿竖直方向扫描，找第一个满足 `target_condition` 的格子。
+    ///
+    /// `EnvironmentScanPlacement`: scan vertically for the first cell matching
+    /// `target_condition`.
+    EnvironmentScan(EnvironmentScan),
     /// 已解析但本轮不生效的修饰器。命中时置 `unsupported`，让对拍跳过这个区块。
     /// A parsed-but-unported modifier; sets `unsupported` so the chunk is skipped.
     Unsupported(String),
@@ -111,6 +116,31 @@ impl Modifier {
                     .and_then(Value::as_i64)
                     .unwrap_or(i32::MAX as i64),
             },
+            // `EnvironmentScanPlacement`：`allowed_search_condition` 缺省是 alwaysTrue。
+            // `EnvironmentScanPlacement`: `allowed_search_condition` defaults to alwaysTrue.
+            "minecraft:environment_scan" => {
+                let direction = field("direction_of_search")?
+                    .as_str()
+                    .and_then(parse_direction)
+                    .ok_or("environment_scan direction is not a vertical direction")?;
+                let target = BlockPredicate::parse(field("target_condition")?);
+                let allowed = match object.get("allowed_search_condition") {
+                    Some(value) => BlockPredicate::parse(value),
+                    None => BlockPredicate::True,
+                };
+                if !target.is_supported() || !allowed.is_supported() {
+                    return Ok(Self::Unsupported(kind.to_owned()));
+                }
+                Self::EnvironmentScan(EnvironmentScan {
+                    direction,
+                    target,
+                    allowed,
+                    max_steps: field("max_steps")?
+                        .as_i64()
+                        .ok_or("environment_scan max_steps is not an int")?
+                        as i32,
+                })
+            }
             _ => Self::Unsupported(kind.to_owned()),
         })
     }
@@ -119,6 +149,9 @@ impl Modifier {
         match self {
             Self::Unsupported(_) | Self::BlockPredicateFilter(BlockPredicate::Unsupported) => false,
             Self::BlockPredicateFilter(predicate) => predicate.is_supported(),
+            Self::EnvironmentScan(scan) => {
+                scan.target.is_supported() && scan.allowed.is_supported()
+            }
             _ => true,
         }
     }
@@ -222,8 +255,80 @@ fn modify(
                 out.push(pos);
             }
         }
+        Modifier::EnvironmentScan(scan) => {
+            scan.modify(ctx.world, pos, out);
+        }
         Modifier::Unsupported(_) => {}
     }
+}
+
+/// `EnvironmentScanPlacement` 的四个解析后字段。
+///
+/// The four parsed fields of `EnvironmentScanPlacement`.
+#[derive(Debug, Clone)]
+pub struct EnvironmentScan {
+    pub direction: u32,
+    pub target: BlockPredicate,
+    pub allowed: BlockPredicate,
+    pub max_steps: i32,
+}
+
+impl EnvironmentScan {
+    /// `EnvironmentScanPlacement.modify`：从 origin 起沿竖直方向最多走 `max_steps` 格，
+    /// 途中一旦 target 命中就立刻放行（中途 return，不再做末尾那次判定）；走到
+    /// build height 外立刻返回；allowed 不成立就 break，再对当前位置补一次 target 判定。
+    ///
+    /// `EnvironmentScanPlacement.modify`: walk up to `max_steps` vertically from origin,
+    /// emitting the first cell matching `target` and returning; return early outside the
+    /// build height; `break` when `allowed` fails and test `target` once more there.
+    pub fn modify(&self, world: &FeatureWorld<'_>, origin: Pos, out: &mut Vec<Pos>) {
+        let [dx, dy, dz] = direction_offset(self.direction);
+        let mut pos = origin;
+        if !self.allowed.test(world, pos) {
+            return;
+        }
+        for _ in 0..self.max_steps {
+            if self.target.test(world, pos) {
+                out.push(pos);
+                return;
+            }
+            pos = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+            if pos.1 < world.min_y || pos.1 >= world.min_y + world.height {
+                return;
+            }
+            if !self.allowed.test(world, pos) {
+                break;
+            }
+        }
+        if self.target.test(world, pos) {
+            out.push(pos);
+        }
+    }
+}
+
+/// `Direction` 的单位步长（ordinal 顺序：DOWN, UP, NORTH, SOUTH, WEST, EAST）。
+///
+/// The unit step of a `Direction` (ordinal order: DOWN, UP, NORTH, SOUTH, WEST, EAST).
+fn direction_offset(direction: u32) -> [i32; 3] {
+    match direction {
+        0 => [0, -1, 0],
+        1 => [0, 1, 0],
+        2 => [0, 0, -1],
+        3 => [0, 0, 1],
+        4 => [-1, 0, 0],
+        _ => [1, 0, 0],
+    }
+}
+
+/// `Direction.VERTICAL_CODEC` 的小写名。
+///
+/// Lower-case names accepted by `Direction.VERTICAL_CODEC`.
+fn parse_direction(name: &str) -> Option<u32> {
+    Some(match name {
+        "down" => 0,
+        "up" => 1,
+        _ => return None,
+    })
 }
 
 /// `FeaturePlacer` 的栈 DFS；每遇到最后一个 modifier 产生的候选位置就立刻调

@@ -18,6 +18,7 @@ use super::{
     ores,
     placement::OreFeature,
     simple_block::SimpleBlockFeature,
+    speleothem::{self, SpeleothemFeature},
     speleothem_cluster::{self, SpeleothemClusterFeature},
     spike::{self, SpikeFeature},
     spring::{self, SpringFeature},
@@ -37,6 +38,7 @@ pub enum Leaf {
     LargeDripstone(LargeDripstoneFeature),
     Ore(OreFeature),
     SimpleBlock(SimpleBlockFeature),
+    Speleothem(SpeleothemFeature),
     SpeleothemCluster(SpeleothemClusterFeature),
     Spike(SpikeFeature),
     Spring(SpringFeature),
@@ -69,6 +71,7 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         }
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?),
+        "minecraft:speleothem" => Leaf::Speleothem(SpeleothemFeature::parse(config).ok()?),
         "minecraft:speleothem_cluster" => {
             Leaf::SpeleothemCluster(SpeleothemClusterFeature::parse(config).ok()?)
         }
@@ -97,6 +100,7 @@ pub fn place_leaf(
         Leaf::LargeDripstone(feature) => large_dripstone::place(feature, world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
+        Leaf::Speleothem(feature) => speleothem::place(feature, world, random, pos),
         Leaf::SpeleothemCluster(feature) => speleothem_cluster::place(feature, world, random, pos),
         Leaf::Spike(spike) => spike::place(spike, world, random, pos),
         Leaf::Spring(spring) => spring::place(spring, world, pos),
