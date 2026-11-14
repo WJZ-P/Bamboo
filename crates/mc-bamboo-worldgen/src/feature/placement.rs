@@ -330,10 +330,19 @@ mod tests {
         )
         .unwrap();
         assert!(Modifier::parse(&air).unwrap().is_supported());
-        let would: Value = serde_json::from_str(
+        // would_survive 的 sapling 存活判定已移植，整条修饰器现在支持。
+        // A would_survive with a sapling has a ported survival check, so it is supported.
+        let sapling: Value = serde_json::from_str(
             r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:oak_sapling"}}"#,
         )
         .unwrap();
-        assert!(!Modifier::parse(&would).unwrap().is_supported());
+        assert!(Modifier::parse(&sapling).unwrap().is_supported());
+        // 存活判定未移植的 state 仍让整条修饰器 unsupported。
+        // A state with an unported survival check still makes the modifier unsupported.
+        let cane: Value = serde_json::from_str(
+            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:sugar_cane"}}"#,
+        )
+        .unwrap();
+        assert!(!Modifier::parse(&cane).unwrap().is_supported());
     }
 }
