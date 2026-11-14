@@ -363,6 +363,100 @@ Rust 的 `FeatureWorld::get_height` 返回 `stored + 1`，而 `stored` 是「最
 3. 再决定 Rust 侧是加两层 `get_height`（`+1` / `+2` 各一个，名字区分语义），
    还是统一改正 `prime_heightmaps` 的存储约定。
 
+**第十三轮（2026-11-14，`cb-wg-structures`：`Heightmap` 存储语义已确认，`get_height` 差两层的账）**：
+
+上一轮说「两处官方都走 `WorldGenRegion.getHeight`，不该有差别」，本轮把
+`Heightmap` 的内部约定读清楚了，结论是**差在 Rust 侧的两层 `+1` 记重了**：
+
+官方 `Heightmap`（`net/minecraft/world/level/levelgen/Heightmap.java`）：
+
+```
+private int getFirstAvailable(int index) { return this.data.get(index) + this.chunk.getMinY(); }
+private void setHeight(int x, int z, int height) { this.data.set(getIndex(x, z), height - chunk.getMinY()); }
+public int getHighestTaken(int x, int z) { return this.getFirstAvailable(getIndex(x, z)) - 1; }
+```
+
+`setHeight` 存的是 `height`，而调用它的是 `Heightmap.update` 里的
+`this.setHeight(localX, localZ, localY + 1)` 和 `primeHeightmaps` 里的
+`heightmap.setHeight(x, z, y + 1)`——**`data` 存的是「最高方块 y + 1」**，
+`getFirstAvailable` 返回同一个值，`getHighestTaken` 才是最高方块 y。
+
+`ChunkAccess.getHeight(type, x, z)` 直接返回 `heightmap.getFirstAvailable(...)`
+（`ChunkAccess.java:180`），也就是**最高方块 y + 1**；
+`WorldGenRegion.getHeight` 覆写版再 `+ 1`（`WorldGenRegion.java:462`），
+所以 `WorldGenRegion.getHeight` = **最高方块 y + 2**。
+
+Rust 侧：`feature/heightmap.rs` 的 `Heightmaps` 存的是**最高方块 y**（`update` 里
+`*slot = y`，`prime_heightmaps` 里 `max(y)`），比官方 `data` 少 1；
+`FeatureWorld::get_height` 返回 `stored + 1` = **最高方块 y + 1**，
+即 `ChunkAccess.getHeight`，比 `WorldGenRegion.getHeight` 少 1。
+
+上一轮把 `get_height` 改成 `+2` 后对拍从 18 涨到 2786，是因为**埋藏的宝藏那条路径本来就错**：
+`BuriedTreasurePiece.postProcess` 用 `level.getHeight(OCEAN_FLOOR_WG, x, z)`（`WorldGenRegion`
+覆写版，= 最高 y + 2），而 Rust 用它算出的 `+1` 值恰好和 Java oracle 里**同样少一层的
+代理实现**相互抵消，所以显示 0 不一致。**也就是说 `buried_treasure` 的 0 不一致也是假的**，
+两边的 bug 抵消了。
+
+**正确做法（下一轮执行）**：
+
+1. 把 `feature/heightmap.rs` 的存储约定改成和官方一致（`data` = 最高方块 y + 1），
+   或者把 `FeatureWorld::get_height` 改成 `stored + 2` 并**同时**修正
+   `buried_treasure` 的调用；
+2. Java oracle 的 `PieceLevelHandler.heightAt` 目前返回 `chunk.getHeight(...)`
+   （= 最高 y + 1），`getHeight` / `getHeightmapPos` 各自 `+1`，两边都少一层；
+   应改成 `heightAt` 返回 `chunk.getHeight(...) + 1`（= 最高 y + 2）并去掉外面的 `+1`；
+3. 改完必须重跑 `buried_treasure` 与 `swamp_hut` 两项，确认**同时**归零。
+
+**本轮没有提交代码**（只把这条结论写进文档）：时间用在了读官方 `Heightmap` 与核对
+`ChunkAccess` / `WorldGenRegion` 的两处 `+1`，把「两边 bug 抵消」这一层查清楚了，
+但没有足够的实测时间去同时改 Rust 存储约定 + Java 代理 + 两个结构并验证。
+
+**第十四轮（2026-11-14，`cb-wg-structures` 续：女巫小屋差一格的实测推翻前两轮推断）**：
+
+本轮**用追踪确认了 Java 侧的真实写入**，前面三轮的推断都不对。代码全部回退
+（工作树干净，仍是 `c99e823` 的 18 处基线）。
+
+在 Java oracle 的 `PieceLevelHandler.setBlock` 里加了一条追踪，只打印
+`x = 1, z ∈ {2, 7}, y ∈ 61..64` 的写入，实测（`swamp_hut 0 0 0`）：
+
+```
+Y 1 64 2 140
+Y 1 64 7 140
+Y 1 63 2 140
+Y 1 63 7 140
+```
+
+即 **Java 的 `fillColumnDown` 写的是 64 和 63，不是 62**。Rust 写 63（本轮诊断
+`hpos = 64`、`new_bb[1] = 64`、`world_y(-1) = 63`）。
+
+所以 18 处差异的 `java: 140 (oak_log) @ (1,62,2)` **不是** `fillColumnDown` 写的，
+而是别的地方。已知：
+
+* `fillColumnDown` 只写 63（62 是沙子，`isReplaceableByStructures` 为假，循环停下）；
+* 四根柱子 `generateBox(1,0,2, 1,3,2, logs…)` 写局部 y `0..3` = 世界 `64..67`；
+* 女巫小屋没有任何指令写世界 y < 63。
+
+**矛盾的焦点**：Java 在 `(1, 62, 2)` 写下了橡木原木，但从源码看这条路径走不到那里。
+可能性（下一轮按顺序排除）：
+
+1. **`getWorldY` 的基准在 `fillColumnDown` 调用时不是 64**。`updateAverageGroundHeight`
+   在 `postProcess` 开头把盒子平移到 `minY = heightPosition`（本轮诊断 `hpos = 64`），
+   但官方 `placeCollapsedRoof` / `addCellar` 之类不会改回来。如果 `heightPosition` 实际是
+   63（诊断读到 64 是因为我打印的是平移后的盒子再算一次平均），那么 `world_y(-1) = 62`
+   就解释了 62 这一格。
+2. **`Heightmap.primeHeightmaps` 与 Rust `prime_heightmaps` 对 `MOTION_BLOCKING_NO_LEAVES`
+   的判定不同**（本轮仍未对拍这两份实现）。
+3. `chunkBB.isInside((x, 64, z))` 的边界差一列，导致 `count` 与 `total` 不同。
+
+**下一轮的第一步**：在 Java 的 `updateAverageGroundHeight` 之后**立刻**打印
+`boundingBox.minY`（而不是在 `postProcess` 之后重算），这是唯一还没测过的数。
+
+**本轮同时确认的一条（可复用）**：`Heightmap` 内部 `data` 存的是「最高方块 y + 1」，
+`ChunkAccess.getHeight` = 该值，`WorldGenRegion.getHeight` 覆写版再 +1；
+Rust `Heightmaps` 存「最高方块 y」、`get_height` 返回 `+1`，正好等于
+`ChunkAccess.getHeight`，比 `WorldGenRegion.getHeight` 少 1。把 `get_height` 改成 `+2`
+会让女巫小屋整栋上移一格（2786 处不一致），所以**现有 `+1` 是对的**，不要再改。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」
 是 `onTopOfChunkCenter` 基线路径的通用判定，**不等于** `Structure.generate` 的最终有效：
