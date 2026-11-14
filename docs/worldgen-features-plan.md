@@ -747,6 +747,8 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | `--steps 2 --feature-types minecraft:large_dripstone --chunk 2 36 --scan 25`（25 个滴水石洞穴区块） | **0 不一致**（22118400 方块）；这批位置官方与 Bamboo 都没长柱，见下面「疑点」 |
 | `--steps 4 --feature-types minecraft:blue_ice --chunk X Z`，5 个真实生成点 `(255,-109) (260,-106) (242,-104) (243,-103) (241,-102)` | 每个 **0 不一致**（884736 方块 / 886272 次比较）；故意把 `yOff < 2` 改成 `yOff < 3` 后报 **5 处不一致** |
 | `--steps 4 --feature-types minecraft:spike --chunk 268 -300 --scan 3`（冰刺群系） | **0 不一致**（9 中心 / 7962624 方块）；故意把 `nextInt(4) + 7` 改成 `+ 8` 后报 **160 处不一致** |
+| `--steps 3 --feature-types minecraft:monster_room --chunk 3 -1` / `--chunk 4 -6` / `--chunk 3 1` | 三个真实生成点各 **0 不一致**；`--seeds 2 --chunks 4` **0 不一致**（8 中心 / 7077888 方块）；故意把 `nextInt(2) + 2` 改成 `+ 3` 后报 **160 处不一致** |
+| `--steps 7 --feature-types minecraft:speleothem_cluster --chunk -55 -200 --scan 9`（3×3 网格） | **0 不一致**（9 中心 / 7962624 方块）；`--chunk -56 -200 --scan 3` / `--chunk -53 -200 --scan 3` 也各 **0 不一致**；故意把 `next_float() > density` 改成 `> density + 0.9` 后报 **105 处不一致** |
 | `--steps 4`（step 4 全量） | `--seeds 2 --chunks 4` **0 不一致** |
 | `--steps 2`（step 2 全量：`lake` / `geode` / `iceberg` / `large_dripstone` / `block_blob`） | `--seeds 2 --chunks 4` **0 不一致** |
 
@@ -781,11 +783,15 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `canPlacePool`、`replaceBlocksWithBaseBlocks`、`growSpeleothem`、`clampedMap` 都按官方
   写成；`WorldgenRandom` 补了 `next_gaussian`（`MarsagliaPolarGaussian`，缓存挂在
   `WorldgenRandom` 上、跨 `setSeed` 保留），`FloatProvider` 扩成 `uniform` +
-  `clamped_normal` 并接受裸浮点常量（`wetness: 0.0`）。**但没接入 `dispatch.rs`**：
-  在滴水石洞穴群系里找到的区块中 `place` 一次都没被调用（该群系不在中心区块的 step 7
-  列表里），改坏 `density` 也不报差异，所以这条路径**未验证**。
-* 新增 `monster_room.rs`（地牢）：代码按官方逐行写完，但逐方块对拍仍有 2 格差异
-  （箱子落点不同），**没有**接进 `dispatch.rs`，对拍时仍标 `unsupported`。
+  `clamped_normal` 并接受裸浮点常量（`wetness: 0.0`）。
+  **之前卡在 Java 代理**：`ChunkgenOracle` 的 `WorldGenLevel` 缺 `isWaterAt`，
+  `SpeleothemUtils.growSpeleothem` 一调用就抛 `UnsupportedOperationException`；补上后
+  在滴水石洞穴群系（`--chunk -55 -200 --scan 9`）0 不一致。
+* 新增 `monster_room.rs`（地牢）：之前差 2 格的根因是 `dy` 循环少了 `dy = 3`
+  （写成 `for dy in (0..=3).rev().map(|v| v - 1)`，漏了 3），改成 `(-1..=3).rev()` 后
+  三个真实生成点（`(3,-1)` / `(4,-6)` / `(3,1)`）全部 0 不一致。
+* `ChunkgenOracle.java` 的 `WorldGenLevel` 代理补 `isInsideBuildHeight` 与
+  `isWaterAt`（共用文件，各 4–8 行）。
 * 两个选点探针（`#[ignore]` 测试，手动跑）：
   `cargo test --release -p mc-bamboo-worldgen --lib list_geode_chunks -- --ignored`
   （环境变量 `GEODE_SEED` / `GEODE_RADIUS`）和
@@ -811,14 +817,15 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 
 **还没做**（按 5.2 的分类，仍标 `unsupported` / `skipped`）：
 
-* step 1/2/3/4/7/10 的其余非植被类型：`monster_room`（代码已写、未接入）、
-  `speleothem_cluster`（代码已写、未接入）、`fossil`、`overlay`（desert_well）、
+* step 1/2/3/4/7/10 的其余非植被类型：`fossil`、`overlay`（desert_well）、
   `freeze_top_layer`。已完成的是 `disk`、`underwater_magma`、`spring_feature`、
-  `iceberg`、`block_blob`、`geode`、`lake`、`large_dripstone`、`blue_ice`、`spike`。
-  `overlay`（沙漠井）依赖 `minecraft:template` 地物（要落结构模板），归模板/结构那条线；
-  `freeze_top_layer` 需要 `Biome.shouldFreeze` / `shouldSnow`，牵涉群系温度噪声
-  （`Biome.TEMPERATURE_NOISE`）、`LightLayer.BLOCK` 亮度和 `SnowLayerBlock.canSurvive`，
-  而 `ChunkgenOracle` 的 `WorldGenLevel` 代理还没有 `getBrightness`，本轮没做。
+  `iceberg`、`block_blob`、`geode`、`lake`、`large_dripstone`、`blue_ice`、`spike`、
+  `monster_room`、`speleothem_cluster`。
+  `overlay`（沙漠井）依赖 `minecraft:template` 地物（要落结构模板 + processor），
+  那条线还没做；`freeze_top_layer` 需要 `Biome.shouldFreeze` / `shouldSnow`，牵涉
+  `Biome.TEMPERATURE_NOISE`、`LightLayer.BLOCK` 亮度和 `SnowLayerBlock.canSurvive`，
+  而且要把 `BiomeManager.getBiome` 的逐点回调传进 `FeatureWorld`（现在的 `biome_at`
+  闭包只在 `run.rs` 的 `PlacementEnv` 里），属于核心结构改动，本轮没做。
 * 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`monster_room` 要刷怪笼 /
   战利品表 / 方块实体；`large_dripstone` 是较大的独立 feature；`freeze_top_layer` 走
   `SnowLayerBlock.canSurvive` 的形状判定和 `getBrightness`，Java 对拍代理
