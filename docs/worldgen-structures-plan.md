@@ -226,6 +226,37 @@ Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_heigh
   oracle，没接进游戏；四个 `findGenerationPoint` 的「是否生成」是纯判定，
   不写方块，`StructureStart` 仍只是数据类型，第 4–7 步的主体依旧归结构队员。
 
+**第六轮（2026-11-14，`cb-wg-multipiece` 续：结构件存档类型与读回路径）**：
+
+* `structure::pieces::Piece` 的子类存档值从「已格式化的字符串」改成带 NBT 类型的
+  `Extra::Byte / Int / Str`，新增 `SavePiece::from_layout` 把它们逐键写成官方类型。
+  `structure-pieces` 的 Java 侧同步在 token 上加类型前缀（`B:` / `I:`）。这次改动立刻
+  抓到一个真 bug：`MineShaftCrossing` 的 `D` 官方走 `tag.store("D",
+  Direction.LEGACY_ID_CODEC_2D, ...)`，那是 `Codec.BYTE`，原来写成 Int 也测不出来；
+  按 Byte 写之前对拍报 3312 处不一致，改正后 0。
+* `Entrances` 按 `MineShaftRoom.addAdditionalSaveData` 的
+  `tag.store("Entrances", BoundingBox.CODEC.listOf(), childEntranceBoxes)` 写成
+  IntArray 列表（不是字符串）。
+* 读回侧新增（`structure::save`）：`load_piece`（`StructurePiece(type, tag)` 的
+  `GD` 缺省 0 / `BB` 必需 / `O` 缺省 0，`Identifier.parse` 补 `minecraft:` 命名空间，
+  `PiecesContainer.load` 的 `RENAMES` 把 `nvi` / `pcp` / `bastionremnant` / `runtime`
+  归一到 `minecraft:jigsaw`）、`load_pieces`（未知 id 与坏标签跳过，照官方的
+  log-and-skip）、`load_start`（`loadStaticStart` 的字段集，`id = "INVALID"` 返回空）
+  与 `regenerate_monument`（`OceanMonumentStructure.regeneratePiecesAfterLoad`：
+  即便用存档朝向也先取一次 `getRandomDirection` 保持取数位置，再用存档 `BB` 的
+  `minX/minZ` 与朝向重建）。海底神殿的构造抽成 `ocean_monument::monument_building`，
+  生成与读回共用同一处，取数序列不可能分叉。
+* 新对拍 `cargo run -p mc-bamboo-vanilla -- structure-load <java>` +
+  `java/StructureLoadOracle.java`：官方构造器造件 → `createTag` → `PiecesContainer.load`
+  → 海底神殿再跑 `regeneratePiecesAfterLoad`（房间图用反射列 `childPieces`）；Rust 走
+  「布局 → `SavePiece::from_layout` → `to_tag` → `load_pieces`」同一条路。5 种子 × 4 区块
+  × 4 kind = 80 查询、8218 个读回结构件、656 行重建、8874 个比较 0 不一致；把
+  `regenerate_monument` 的方向取数换成常量立刻 610 处不一致，还原回 0。
+  单元测试另外钉住「同种子同区块重建 == 直接生成」「存档朝向覆盖取到的朝向」
+  「`O = -1` 退回取到的朝向」三条。
+* 仍是纯函数 + oracle：`chunk_nbt` 把 `structures` 当不透明标签原样保留，读回路径没有接进
+  世界状态，游戏里仍不会出现结构。
+
 ## 1. 官方 26.3 的结构生成全景
 
 `ChunkStatus` 顺序（`docs/worldgen.md`）：`empty` → `structure_starts` →
@@ -686,7 +717,7 @@ structures (Compound)
 | 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **部分做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿（`cb-wg-multipiece` 240 查询 25660 结构件 0 不一致）已做；需要模板的单件结构（雪屋 / 沉船 / 海底遗迹 / 废弃传送门）、林地府邸、jigsaw 结构件没做 |
 | 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | 没做 |
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | **做完（纯函数 + 对拍，`cb-wg-beard`）**：`beard` 12 用例 5,912,076 比较 0 不一致（kernel / sampleValue / sampleVolume / affectedBox / 三阶段方块），`--break-self-test` 会失败；`chunkgen --through carvers` EMPTY 回归仍 0。**没接进 Director**：游戏里仍走 `EMPTY` |
-| 7 | 存档：`structures` 键写/读；海底神殿「只存一个 `MonumentBuilding`、读回重建房间图」的口径见 4.1 | 读回一致，`world-dir` 确认官方能读 | **通用编码做完**：`structure-save` 8 case 规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、`world-dir` 的 `SerializableChunkData.parse` 都能读；各结构件 `addAdditionalSaveData` 字段与读档路径由 `cb-wg-multipiece` 在其上补齐 |
+| 7 | 存档：`structures` 键写/读；海底神殿「只存一个 `MonumentBuilding`、读回重建房间图」的口径见 4.1 | 读回一致，`world-dir` 确认官方能读 | **通用编码做完**：`structure-save` 8 case 规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、`world-dir` 的 `SerializableChunkData.parse` 都能读。**多件式结构的读回做完**（`cb-wg-multipiece`）：子类字段带 NBT 类型，`PiecesContainer.load` / `loadStaticStart` / `regeneratePiecesAfterLoad` 移植并对拍（`structure-load` 80 查询、8218 读回件、656 重建行 0 不一致），见第 0 节「多件式结构存档」 |
 
 第三轮还落地了步 1 与步 4 之间的一层通用原语：`Structure.generate` 的
 `findValidGenerationPoint` 群系 / 高度判定（整列群系、四角高度、起点单点群系），

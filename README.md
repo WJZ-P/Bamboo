@@ -512,13 +512,29 @@ WebView2 的渲染进程不算在内。
   `Structure.findValidGenerationPoint` 造 96 个查询、480 行、5286 个字段逐项比，
   0 不一致；故意丢掉 `isValidBiome` 过滤立刻 192 处不一致，还原回 0。
   海底神殿「只存一个 `MonumentBuilding`、读回 `regeneratePiecesAfterLoad` 重建房间图」的
-  存档口径写在 `docs/worldgen-structures-plan.md` 4.1，留给结构队员的第 7 步。
+  存档口径写在 `docs/worldgen-structures-plan.md` 4.1。
+  存档这一块（第 7 步里属于这四个结构的部分）也已落地：`structure::pieces::Piece` 的
+  子类字段带 NBT 类型（`Extra::Byte/Int/Str`），`structure::save::SavePiece::from_layout`
+  逐键写出官方类型（布尔 Byte、`Num`/`Type`/`Steps` Int、矿井 `D` 走
+  `Direction.LEGACY_ID_CODEC_2D` 的 Byte、模板名 String，`Entrances` 是
+  `BoundingBox.CODEC.listOf()` 的 IntArray 列表）；读回侧移植了
+  `PiecesContainer.load`（jigsaw 的 `RENAMES`、未知 id 与坏标签跳过）、
+  `StructureStart.loadStaticStart` 的字段集（`id = "INVALID"` 返回空）以及
+  `OceanMonumentStructure.regeneratePiecesAfterLoad`（先取一次 `getRandomDirection` 对齐
+  取数位置，再用存档 `BB` 的 `minX/minZ` 与存档朝向重建 `MonumentBuilding`，与生成共用
+  同一个 `monument_building` 构造器）。新对拍
+  `cargo run -p mc-bamboo-vanilla -- structure-load <java>`：80 个查询、8218 个读回结构件、
+  656 行海底神殿重建逐项比 0 不一致；把重建里的方向取数换成常量会报 610 处不一致。
+  **改坏验证发现的真 bug**：`structure-pieces` 原来把子类存档值压平成十进制，字节与整型
+  写错也发现不了；现在类型进 token（`B:` / `I:`），矿井 `D` 按官方写成 Byte 之前会报
+  3312 处不一致。
   已知限制：以上全是纯函数 + oracle，没接进 Director 的 `structure_starts` /
   `structure_references` 阶段，游戏里还没有结构；布局函数里恶地的 `surfaceHeight` /
   府邸的 `startY` 在对拍中仍作为外部输入喂入（前置判定模块已用 `Generator` 的高度原语
   算出并喂给布局）；结构件放置（第 5 步）、jigsaw 与其余旧式结构的结构件布局仍没做，
-  不假装支持。存档 `structures` 键的通用编码（第 7 步）见上一条，各结构件的
-  `addAdditionalSaveData` 字段与读档路径还没补齐；Beardifier 见下面单独一条。
+  不假装支持。读回路径已能解析这四个结构的结构件标签，但**没有**接进区块 NBT 解码后的
+  世界状态（`chunk_nbt` 仍把 `structures` 当不透明标签原样保留），所以存档读回后游戏里
+  也还不会出现结构。Beardifier 见下面单独一条。
 - 地物（features）阶段的纯函数正按官方 `ChunkGenerator.applyBiomeDecoration` 逐类移植，
   游戏里的接入由流水线分支（邻居快照 + `features` 阶段）负责。已逐方块对拍
   0 不一致的有 step 6 的矿石，以及 step 9 的植被子集（详见
