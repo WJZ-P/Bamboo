@@ -26,6 +26,7 @@ use crate::{
     beardifier::Beardifier,
     biome::MultiNoiseBiomeSource,
     biome_manager::BiomeManager,
+    biome_region::{BiomeGetter, ChunkBiomes, RegionBiomes},
     carver::Carvers,
     climate::TargetPoint,
     density::{self, FunctionRegistry, NoiseRegistry, Ref},
@@ -183,6 +184,49 @@ impl<'a> Generator<'a> {
         self.settings
     }
 
+    /// 建一个区块的 quart 群系格（`ChunkStatus.BIOMES` 的产物），用来拼 3×3 region。
+    ///
+    /// Build one chunk's quart biome cells (the `ChunkStatus.BIOMES` output), for
+    /// assembling the 3×3 region.
+    pub fn chunk_biomes(&self, chunk_x: i32, chunk_z: i32) -> Result<ChunkBiomes, String> {
+        let sections = self.biomes(chunk_x, chunk_z)?;
+        Ok(ChunkBiomes::new(
+            chunk_x,
+            chunk_z,
+            self.settings.min_y,
+            sections,
+        ))
+    }
+
+    /// 造中心加 8 个邻居的 3×3 群系视图，和官方 `buildTerrain` 的 `WorldGenRegion` 一样。
+    ///
+    /// 邻居的 `biomes()` 一定先于中心算：官方 `buildTerrain` 的 `collectPossibleBiomes`
+    /// 和 `region.getBiomeManager()` 都要读它们的 quart 格。查询顺序只影响 R 树的
+    /// `lastResult`，而这里每个区块的气候值都是成批 `sampleVolume` 出来的，和官方一致。
+    ///
+    /// Build the centre plus eight neighbours' 3×3 biome view, like vanilla
+    /// `buildTerrain`'s `WorldGenRegion`. Neighbours are filled first because
+    /// `collectPossibleBiomes` and `region.getBiomeManager()` read their quart cells.
+    /// Query order only affects the R-tree `lastResult`, and every chunk here samples
+    /// the climate in one batch, matching vanilla.
+    pub fn biome_region(&self, chunk_x: i32, chunk_z: i32) -> Result<RegionBiomes, String> {
+        let center = self.chunk_biomes(chunk_x, chunk_z)?;
+        let mut neighbors = Vec::with_capacity(8);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                neighbors.push(self.chunk_biomes(chunk_x + dx, chunk_z + dz)?);
+            }
+        }
+        Ok(RegionBiomes::new(
+            crate::biome_manager::obfuscate_seed(self.seed),
+            center,
+            neighbors,
+        ))
+    }
+
     /// `ChunkStatus.BIOMES`：`ChunkGenerator.doCreateBiomes` 加 `fillBiomesFromNoise`。
     ///
     /// 返回每个 section 的 64 个 quart 格（下标 `y*16 + z*4 + x`）的群系注册表 ID。
@@ -280,6 +324,43 @@ impl<'a> Generator<'a> {
         stage: Stage,
         beardifier: Option<&Beardifier>,
     ) -> Result<Vec<Vec<u32>>, String> {
+        self.terrain_inner(chunk_x, chunk_z, stage, beardifier, None)
+    }
+
+    /// `terrain` 再带上周围 3×3 区块已填好的 quart 群系格。
+    ///
+    /// 官方 `buildTerrain` 的地表阶段用 `region.getBiomeManager()`，它的 `BiomeResolver`
+    /// 就是 `WorldGenRegion`：先读 `ChunkStatus.BIOMES` 成批填好的格子，读不到才回退
+    /// 单点重算。成批 `sampleVolume` 和单点 `sampleValue` 的浮点顺序不同，气候参数落在
+    /// R 树最近邻的临界点上时会选到不同群系，所以地表材质必须照真实路径读格子。
+    ///
+    /// `terrain` plus the quart biome cells already stored in the surrounding 3×3 chunks.
+    /// Vanilla's terrain surface pass uses `region.getBiomeManager()`, whose
+    /// `BiomeResolver` is the `WorldGenRegion` itself: it reads the cells the
+    /// `ChunkStatus.BIOMES` batch fill wrote and only falls back to single-point
+    /// sampling when none are there. Batch `sampleVolume` and single-point
+    /// `sampleValue` differ in floating-point order, so climate values on an R-tree
+    /// nearest-neighbour tie pick different biomes; surface material must therefore
+    /// read the cells like the real path.
+    pub fn terrain_with_region(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        stage: Stage,
+        beardifier: Option<&Beardifier>,
+        region: &RegionBiomes,
+    ) -> Result<Vec<Vec<u32>>, String> {
+        self.terrain_inner(chunk_x, chunk_z, stage, beardifier, Some(region))
+    }
+
+    fn terrain_inner(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        stage: Stage,
+        beardifier: Option<&Beardifier>,
+        region: Option<&RegionBiomes>,
+    ) -> Result<Vec<Vec<u32>>, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
@@ -323,8 +404,16 @@ impl<'a> Generator<'a> {
             }
         }
         context.release(density);
+        let biome_manager = BiomeManager::new(self.biomes, self.seed);
+        let biome_getter = match region {
+            Some(region) => BiomeGetter::Region {
+                manager: &biome_manager,
+                region,
+            },
+            None => BiomeGetter::Uncached(&biome_manager),
+        };
+        let possible_biomes = region.map(RegionBiomes::possible_biomes);
         if stage >= Stage::Surface {
-            let biomes = BiomeManager::new(self.biomes, self.seed);
             self.material.build_surface(
                 &mut layers,
                 chunk_x,
@@ -332,13 +421,13 @@ impl<'a> Generator<'a> {
                 self.settings,
                 &mut context,
                 &self.router,
-                &biomes,
+                &biome_getter,
+                possible_biomes.as_deref(),
                 self.worldgen_noises(),
                 self.positional,
             )?;
         }
         if stage >= Stage::Carvers {
-            let biomes = BiomeManager::new(self.biomes, self.seed);
             self.carvers.generate(
                 &mut layers,
                 chunk_x,
@@ -346,7 +435,7 @@ impl<'a> Generator<'a> {
                 self.settings,
                 &mut context,
                 &self.router,
-                &biomes,
+                &biome_manager,
                 &mut aquifer,
                 &self.material,
                 self.worldgen.noises(),

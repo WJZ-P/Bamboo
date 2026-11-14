@@ -266,8 +266,9 @@ pub fn generate_chunk(config: &WorldGenConfig, x: i32, z: i32) -> Result<Generat
         return Ok(flat_chunk(config));
     }
     with_generator(config, |generator| {
-        let biomes = generator.biomes(x, z)?;
-        let blocks = generator.terrain(x, z, chunk::Stage::Carvers)?;
+        let region = generator.biome_region(x, z)?;
+        let blocks = generator.terrain_with_region(x, z, chunk::Stage::Carvers, None, &region)?;
+        let biomes = region.center().sections().to_vec();
         let heightmaps = compute_heightmaps(&blocks);
         Ok(GeneratedChunk {
             blocks,
