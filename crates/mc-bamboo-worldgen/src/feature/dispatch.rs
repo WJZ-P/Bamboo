@@ -12,9 +12,12 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
+    bamboo::BambooFeature,
+    block_column::BlockColumnFeature,
     blue_ice::{self, BlueIceFeature},
     disk::{self, DiskFeature},
     large_dripstone::{self, LargeDripstoneFeature},
+    multiface::MultifaceGrowthFeature,
     ores,
     placement::OreFeature,
     simple_block::SimpleBlockFeature,
@@ -23,6 +26,7 @@ use super::{
     spike::{self, SpikeFeature},
     spring::{self, SpringFeature},
     underwater_magma::{self, UnderwaterMagmaFeature},
+    vines::VinesFeature,
     world::FeatureWorld,
 };
 
@@ -33,9 +37,12 @@ type Pos = (i32, i32, i32);
 /// A ported leaf feature that needs no more registry parsing, in alphabetical
 /// order of type ID.
 pub enum Leaf {
+    Bamboo(BambooFeature),
     BlueIce(BlueIceFeature),
+    BlockColumn(BlockColumnFeature),
     Disk(DiskFeature),
     LargeDripstone(LargeDripstoneFeature),
+    Multiface(MultifaceGrowthFeature),
     Ore(OreFeature),
     SimpleBlock(SimpleBlockFeature),
     Speleothem(SpeleothemFeature),
@@ -43,6 +50,7 @@ pub enum Leaf {
     Spike(SpikeFeature),
     Spring(SpringFeature),
     UnderwaterMagma(UnderwaterMagmaFeature),
+    Vines(VinesFeature),
 }
 
 impl Leaf {
@@ -64,11 +72,14 @@ impl Leaf {
 /// or when a nested predicate is not ported.
 pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
     let leaf = match kind {
+        "minecraft:bamboo" => Leaf::Bamboo(BambooFeature::parse(config)?),
         "minecraft:blue_ice" => Leaf::BlueIce(BlueIceFeature::parse(config).ok()?),
+        "minecraft:block_column" => Leaf::BlockColumn(BlockColumnFeature::parse(config)?),
         "minecraft:disk" => Leaf::Disk(DiskFeature::parse(config).ok()?),
         "minecraft:large_dripstone" => {
             Leaf::LargeDripstone(LargeDripstoneFeature::parse(config).ok()?)
         }
+        "minecraft:multiface_growth" => Leaf::Multiface(MultifaceGrowthFeature::parse(config)?),
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?),
         "minecraft:speleothem" => Leaf::Speleothem(SpeleothemFeature::parse(config).ok()?),
@@ -80,6 +91,7 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         "minecraft:underwater_magma" => {
             Leaf::UnderwaterMagma(UnderwaterMagmaFeature::parse(config).ok()?)
         }
+        "minecraft:vines" => Leaf::Vines(VinesFeature::parse(config)?),
         _ => return None,
     };
     leaf.is_supported().then_some(leaf)
@@ -95,9 +107,12 @@ pub fn place_leaf(
     pos: Pos,
 ) -> bool {
     match leaf {
+        Leaf::Bamboo(feature) => feature.place(world, random, pos),
         Leaf::BlueIce(feature) => blue_ice::place(feature, world, random, pos),
+        Leaf::BlockColumn(feature) => feature.place(world, random, pos),
         Leaf::Disk(disk) => disk::place(disk, world, random, pos),
         Leaf::LargeDripstone(feature) => large_dripstone::place(feature, world, random, pos),
+        Leaf::Multiface(feature) => feature.place(world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
         Leaf::Speleothem(feature) => speleothem::place(feature, world, random, pos),
@@ -105,5 +120,6 @@ pub fn place_leaf(
         Leaf::Spike(spike) => spike::place(spike, world, random, pos),
         Leaf::Spring(spring) => spring::place(spring, world, pos),
         Leaf::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),
+        Leaf::Vines(feature) => feature.place(world, random, pos),
     }
 }

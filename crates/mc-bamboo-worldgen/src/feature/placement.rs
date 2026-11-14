@@ -35,21 +35,36 @@ pub enum Modifier {
     ///
     /// `BlockPredicateFilter`: passes a candidate through unchanged, no random.
     BlockPredicateFilter(BlockPredicate),
-    /// `surface_relative_threshold_filter`：按高度图差值过滤候选 y。
+    /// `NoiseBasedCountPlacement`：用静态 `SimplexNoise` 算重复次数，不消费随机数。
     ///
-    /// `surface_relative_threshold_filter`: filters candidate y by a heightmap delta.
-    SurfaceRelativeThresholdFilter {
-        heightmap: HeightmapKind,
-        min_inclusive: i64,
-        max_inclusive: i64,
+    /// `NoiseBasedCountPlacement`: repeats via a static `SimplexNoise`, no random consumed.
+    NoiseBasedCount {
+        noise_to_count_ratio: i32,
+        noise_factor: f64,
+        noise_offset: f64,
     },
-    /// `EnvironmentScanPlacement`：沿竖直方向扫描，找第一个满足 `target_condition` 的格子。
+    /// `EnvironmentScanPlacement`：沿竖直方向逐格扫描，找到 `target_condition` 就放行。
     ///
-    /// `EnvironmentScanPlacement`: scan vertically for the first cell matching
-    /// `target_condition`.
-    EnvironmentScan(EnvironmentScan),
-    /// 已解析但本轮不生效的修饰器。命中时置 `unsupported`，让对拍跳过这个区块。
-    /// A parsed-but-unported modifier; sets `unsupported` so the chunk is skipped.
+    /// `EnvironmentScanPlacement`: step along one vertical direction until the
+    /// `target_condition` holds, stopping when the search condition fails.
+    EnvironmentScan {
+        /// `Direction.VERTICAL_CODEC`：只有 up / down 两种。
+        direction: i32,
+        target: BlockPredicate,
+        allowed_search: BlockPredicate,
+        max_steps: i32,
+    },
+    /// `SurfaceRelativeThresholdFilter`：候选位置的 y 落在（地表面高度 + 上下限）之间。
+    ///
+    /// `SurfaceRelativeThresholdFilter`: keep the candidate only when its y lies within
+    /// the surface height plus the configured bounds.
+    SurfaceRelativeThreshold {
+        heightmap: HeightmapKind,
+        min_inclusive: i32,
+        max_inclusive: i32,
+    },
+    /// 已解析但本轮不生效的修饰器（例如 `surface_water_depth_filter`）。
+    /// 命中时置 `unsupported`，让对拍跳过这个区块。
     Unsupported(String),
 }
 
@@ -101,46 +116,66 @@ impl Modifier {
                     Self::Unsupported(kind.to_owned())
                 }
             }
-            "minecraft:surface_relative_threshold_filter" => Self::SurfaceRelativeThresholdFilter {
+            // `NoiseBasedCountPlacement`：配置里三个数，缺省 noise_offset=0。
+            // `NoiseBasedCountPlacement`: three config numbers, noise_offset defaults to 0.
+            "minecraft:noise_based_count" => Self::NoiseBasedCount {
+                noise_to_count_ratio: field("noise_to_count_ratio")?
+                    .as_i64()
+                    .ok_or("noise_based_count has no ratio")?
+                    as i32,
+                noise_factor: field("noise_factor")?
+                    .as_f64()
+                    .ok_or("noise_based_count has no factor")?,
+                noise_offset: object
+                    .get("noise_offset")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+            },
+            // `EnvironmentScanPlacement`：`direction_of_search` 只允许 up / down；
+            // `allowed_search_condition` 缺省是 `BlockPredicate.alwaysTrue()`。
+            // `EnvironmentScanPlacement`: the search direction is up or down only;
+            // `allowed_search_condition` defaults to `BlockPredicate.alwaysTrue()`.
+            "minecraft:environment_scan" => {
+                let direction = field("direction_of_search")?
+                    .as_str()
+                    .and_then(vertical_direction)
+                    .ok_or("environment_scan has no vertical direction")?;
+                let target = BlockPredicate::parse(field("target_condition")?);
+                let allowed_search = object
+                    .get("allowed_search_condition")
+                    .map(BlockPredicate::parse)
+                    .unwrap_or(BlockPredicate::True);
+                if !target.is_supported() || !allowed_search.is_supported() {
+                    Self::Unsupported(kind.to_owned())
+                } else {
+                    Self::EnvironmentScan {
+                        direction,
+                        target,
+                        allowed_search,
+                        max_steps: field("max_steps")?
+                            .as_i64()
+                            .ok_or("environment_scan has no max_steps")?
+                            as i32,
+                    }
+                }
+            }
+            // `SurfaceRelativeThresholdFilter`：两个边界缺省是 i32 的 MIN/MAX。
+            // `SurfaceRelativeThresholdFilter`: both bounds default to i32 MIN/MAX.
+            "minecraft:surface_relative_threshold_filter" => Self::SurfaceRelativeThreshold {
                 heightmap: HeightmapKind::parse(
                     field("heightmap")?
                         .as_str()
-                        .ok_or("surface_relative_threshold_filter heightmap is not a string")?,
+                        .ok_or("surface_relative_threshold_filter has no heightmap")?,
                 )?,
                 min_inclusive: object
                     .get("min_inclusive")
                     .and_then(Value::as_i64)
-                    .unwrap_or(i32::MIN as i64),
+                    .unwrap_or(i64::from(i32::MIN)) as i32,
                 max_inclusive: object
                     .get("max_inclusive")
                     .and_then(Value::as_i64)
-                    .unwrap_or(i32::MAX as i64),
+                    .unwrap_or(i64::from(i32::MAX)) as i32,
             },
-            // `EnvironmentScanPlacement`：`allowed_search_condition` 缺省是 alwaysTrue。
-            // `EnvironmentScanPlacement`: `allowed_search_condition` defaults to alwaysTrue.
-            "minecraft:environment_scan" => {
-                let direction = field("direction_of_search")?
-                    .as_str()
-                    .and_then(parse_direction)
-                    .ok_or("environment_scan direction is not a vertical direction")?;
-                let target = BlockPredicate::parse(field("target_condition")?);
-                let allowed = match object.get("allowed_search_condition") {
-                    Some(value) => BlockPredicate::parse(value),
-                    None => BlockPredicate::True,
-                };
-                if !target.is_supported() || !allowed.is_supported() {
-                    return Ok(Self::Unsupported(kind.to_owned()));
-                }
-                Self::EnvironmentScan(EnvironmentScan {
-                    direction,
-                    target,
-                    allowed,
-                    max_steps: field("max_steps")?
-                        .as_i64()
-                        .ok_or("environment_scan max_steps is not an int")?
-                        as i32,
-                })
-            }
             _ => Self::Unsupported(kind.to_owned()),
         })
     }
@@ -149,9 +184,13 @@ impl Modifier {
         match self {
             Self::Unsupported(_) | Self::BlockPredicateFilter(BlockPredicate::Unsupported) => false,
             Self::BlockPredicateFilter(predicate) => predicate.is_supported(),
-            Self::EnvironmentScan(scan) => {
-                scan.target.is_supported() && scan.allowed.is_supported()
-            }
+            // 扫描的三个字段里两个是谓词，任一未移植就整条修饰器不支持。
+            // Two of the scan's fields are predicates; an unported one disables the modifier.
+            Self::EnvironmentScan {
+                target,
+                allowed_search,
+                ..
+            } => target.is_supported() && allowed_search.is_supported(),
             _ => true,
         }
     }
@@ -241,94 +280,113 @@ fn modify(
                 out.push(pos);
             }
         }
-        Modifier::SurfaceRelativeThresholdFilter {
+        // `NoiseBasedCountPlacement.count`：`ceil((BIOME_INFO_NOISE.get(x/f, z/f) + offset) * ratio)`，
+        // 然后把 origin 复制 count 次；不消费随机数。
+        // `NoiseBasedCountPlacement.count`: ceil of the scaled static noise, then
+        // duplicate the origin that many times; no random consumed.
+        Modifier::NoiseBasedCount {
+            noise_to_count_ratio,
+            noise_factor,
+            noise_offset,
+        } => {
+            let noise = crate::biome_temperature::biome_info_noise(
+                f64::from(x) / *noise_factor,
+                f64::from(z) / *noise_factor,
+            );
+            let count = (f64::from(noise) + *noise_offset) * f64::from(*noise_to_count_ratio);
+            let count = count.ceil() as i32;
+            for _ in 0..count.max(0) {
+                out.push(pos);
+            }
+        }
+        Modifier::Unsupported(_) => {}
+        // `EnvironmentScanPlacement`：不消费随机数，只按谓词逐格扫描。
+        // `EnvironmentScanPlacement`: no random, purely a predicate walk.
+        Modifier::EnvironmentScan {
+            direction,
+            target,
+            allowed_search,
+            max_steps,
+        } => environment_scan(
+            ctx.world,
+            *direction,
+            target,
+            allowed_search,
+            *max_steps,
+            pos,
+            out,
+        ),
+        // `SurfaceRelativeThresholdFilter.shouldPlace`：`surfaceY + min <= y <= surfaceY + max`，
+        // 官方用 long 算，避免溢出。
+        // `SurfaceRelativeThresholdFilter.shouldPlace`: `surfaceY + min <= y <= surfaceY + max`,
+        // computed in long to avoid overflow.
+        Modifier::SurfaceRelativeThreshold {
             heightmap,
             min_inclusive,
             max_inclusive,
         } => {
-            // surfaceY = context.getHeight(heightmap, x, z)，官方用 long 算差值。
-            // surfaceY = context.getHeight(heightmap, x, z); official uses long arithmetic.
-            let surface_y = ctx.world.get_height(*heightmap, x, z) as i64;
-            let min_y = surface_y + *min_inclusive;
-            let max_y = surface_y + *max_inclusive;
-            if min_y <= y as i64 && y as i64 <= max_y {
+            let surface = i64::from(ctx.world.get_height(*heightmap, x, z));
+            let y = i64::from(y);
+            if surface + i64::from(*min_inclusive) <= y && y <= surface + i64::from(*max_inclusive)
+            {
                 out.push(pos);
             }
         }
-        Modifier::EnvironmentScan(scan) => {
-            scan.modify(ctx.world, pos, out);
-        }
-        Modifier::Unsupported(_) => {}
     }
 }
 
-/// `EnvironmentScanPlacement` 的四个解析后字段。
+/// `EnvironmentScanPlacement.modify`：从 `origin` 开始逐格沿竖直方向走，最多
+/// `max_steps` 步。先查 `allowed_search_condition`，再查 `target_condition`，
+/// 命中就放行；走出去（`isOutsideBuildHeight`）直接返回，搜索条件不成立则提前停止，
+/// 停止后再试一次 `target_condition`。
 ///
-/// The four parsed fields of `EnvironmentScanPlacement`.
-#[derive(Debug, Clone)]
-pub struct EnvironmentScan {
-    pub direction: u32,
-    pub target: BlockPredicate,
-    pub allowed: BlockPredicate,
-    pub max_steps: i32,
-}
-
-impl EnvironmentScan {
-    /// `EnvironmentScanPlacement.modify`：从 origin 起沿竖直方向最多走 `max_steps` 格，
-    /// 途中一旦 target 命中就立刻放行（中途 return，不再做末尾那次判定）；走到
-    /// build height 外立刻返回；allowed 不成立就 break，再对当前位置补一次 target 判定。
-    ///
-    /// `EnvironmentScanPlacement.modify`: walk up to `max_steps` vertically from origin,
-    /// emitting the first cell matching `target` and returning; return early outside the
-    /// build height; `break` when `allowed` fails and test `target` once more there.
-    pub fn modify(&self, world: &FeatureWorld<'_>, origin: Pos, out: &mut Vec<Pos>) {
-        let [dx, dy, dz] = direction_offset(self.direction);
-        let mut pos = origin;
-        if !self.allowed.test(world, pos) {
+/// `EnvironmentScanPlacement.modify`: walk from `origin` along the vertical direction for
+/// at most `max_steps` blocks. Test `allowed_search_condition` then `target_condition`;
+/// emit the position on a target hit. Leaving the build height returns immediately, a
+/// failed search condition stops the loop, and the target is tested once more afterwards.
+fn environment_scan(
+    world: &FeatureWorld<'_>,
+    direction: i32,
+    target: &BlockPredicate,
+    allowed_search: &BlockPredicate,
+    max_steps: i32,
+    pos: Pos,
+    out: &mut Vec<Pos>,
+) {
+    let (x, _, z) = pos;
+    let mut y = pos.1;
+    if !allowed_search.test(world, (x, y, z)) {
+        return;
+    }
+    for _ in 0..max_steps {
+        if target.test(world, (x, y, z)) {
+            out.push((x, y, z));
             return;
         }
-        for _ in 0..self.max_steps {
-            if self.target.test(world, pos) {
-                out.push(pos);
-                return;
-            }
-            pos = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
-            if pos.1 < world.min_y || pos.1 >= world.min_y + world.height {
-                return;
-            }
-            if !self.allowed.test(world, pos) {
-                break;
-            }
+        y += direction;
+        // `level.isOutsideBuildHeight(pos.getY())` ⇒ `y < minY || y >= minY + height`。
+        // `level.isOutsideBuildHeight(pos.getY())` is `y < minY || y >= minY + height`.
+        if y < world.min_y || y >= world.min_y + world.height {
+            return;
         }
-        if self.target.test(world, pos) {
-            out.push(pos);
+        if !allowed_search.test(world, (x, y, z)) {
+            break;
         }
+    }
+    if target.test(world, (x, y, z)) {
+        out.push((x, y, z));
     }
 }
 
-/// `Direction` 的单位步长（ordinal 顺序：DOWN, UP, NORTH, SOUTH, WEST, EAST）。
+/// `Direction.VERTICAL_CODEC` 的名字到竖直方向：up 是 `+1`，down 是 `-1`。
 ///
-/// The unit step of a `Direction` (ordinal order: DOWN, UP, NORTH, SOUTH, WEST, EAST).
-fn direction_offset(direction: u32) -> [i32; 3] {
-    match direction {
-        0 => [0, -1, 0],
-        1 => [0, 1, 0],
-        2 => [0, 0, -1],
-        3 => [0, 0, 1],
-        4 => [-1, 0, 0],
-        _ => [1, 0, 0],
+/// `Direction.VERTICAL_CODEC` name to the vertical step: +1 for up, -1 for down.
+fn vertical_direction(name: &str) -> Option<i32> {
+    match name {
+        "up" => Some(1),
+        "down" => Some(-1),
+        _ => None,
     }
-}
-
-/// `Direction.VERTICAL_CODEC` 的小写名。
-///
-/// Lower-case names accepted by `Direction.VERTICAL_CODEC`.
-fn parse_direction(name: &str) -> Option<u32> {
-    Some(match name {
-        "down" => 0,
-        "up" => 1,
-        _ => return None,
-    })
 }
 
 /// `FeaturePlacer` 的栈 DFS；每遇到最后一个 modifier 产生的候选位置就立刻调
@@ -497,6 +555,23 @@ mod tests {
     }
 
     #[test]
+    fn noise_based_count_parses_and_static_noise_is_stable() {
+        let value: Value = serde_json::from_str(
+            r#"{"noise_factor":80,"noise_to_count_ratio":120,"type":"minecraft:noise_based_count"}"#,
+        )
+        .unwrap();
+        let modifier = Modifier::parse(&value).unwrap();
+        assert!(modifier.is_supported());
+        assert!(matches!(modifier, Modifier::NoiseBasedCount { .. }));
+        // 静态噪声和世界种子无关，同一坐标两次求值必须完全一致且有限。
+        // The static noise is seed-independent: identical and finite for one input.
+        let first = crate::biome_temperature::biome_info_noise(12.5, -7.25);
+        let second = crate::biome_temperature::biome_info_noise(12.5, -7.25);
+        assert_eq!(first, second);
+        assert!(first.is_finite());
+    }
+
+    #[test]
     fn parses_block_predicate_filter_and_flags_unported_predicates() {
         let air: Value = serde_json::from_str(
             r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:matching_block_tag","tag":"minecraft:air"}}"#,
@@ -512,10 +587,19 @@ mod tests {
         assert!(Modifier::parse(&sapling).unwrap().is_supported());
         // 存活判定未移植的 state 仍让整条修饰器 unsupported。
         // A state with an unported survival check still makes the modifier unsupported.
-        let cane: Value = serde_json::from_str(
-            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:sugar_cane"}}"#,
+        let mushroom: Value = serde_json::from_str(
+            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:red_mushroom"}}"#,
         )
         .unwrap();
-        assert!(!Modifier::parse(&cane).unwrap().is_supported());
+        assert!(!Modifier::parse(&mushroom).unwrap().is_supported());
+        // 甘蔗 / 仙人掌的存活判定已移植，整条修饰器现在支持。
+        // Sugar cane / cactus survival is ported, so the modifier is now supported.
+        for name in ["minecraft:sugar_cane", "minecraft:cactus"] {
+            let text = format!(
+                r#"{{"type":"minecraft:block_predicate_filter","predicate":{{"type":"minecraft:would_survive","state":"{name}"}}}}"#
+            );
+            let value: Value = serde_json::from_str(&text).unwrap();
+            assert!(Modifier::parse(&value).unwrap().is_supported(), "{name}");
+        }
     }
 }
