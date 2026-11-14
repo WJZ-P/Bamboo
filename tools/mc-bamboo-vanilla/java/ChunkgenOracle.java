@@ -286,6 +286,18 @@ final class FeatureLevelHandler implements InvocationHandler {
                 return getFluidState((BlockPos) args[0])
                         .is(net.minecraft.tags.FluidTags.WATER);
             }
+            case "getRawBrightness": {
+                // 假世界没有光照引擎（ProtoChunk 要到 LIGHT 阶段才有），这里按
+                // BlockOracle 的既有约定恒给 15。后果是亮度相关的存活判定（蘑菇要
+                // `getRawBrightness < 13`）一律为假，官方侧不会放蘑菇；Rust 侧把蘑菇
+                // 标成 unsupported 让整个区块跳过，两边不会拿亮度做假的比较。
+                // The fake level has no light engine (a ProtoChunk only gets one at the
+                // LIGHT stage), so follow BlockOracle's existing convention of 15. Any
+                // brightness-gated survival check (mushrooms need `getRawBrightness <
+                // 13`) is therefore false; Rust marks mushrooms unsupported and skips the
+                // chunk, so neither side fakes a brightness comparison.
+                return 15;
+            }
             case "getHeightmapPos": {
                 // LevelReader.getHeightmapPos：x/z 不变，y 换成 getHeight(type,x,z)。
                 Heightmap.Types type = (Heightmap.Types) args[0];
