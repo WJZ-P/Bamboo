@@ -857,3 +857,34 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
    这一条自动成立；Rust 侧要照 `Heightmap.update` 的字节码补一份。
 6. **`--steps 6` 对拍专用开关**：这不是官方行为，只是过渡期的诊断手段；
    要在文档和测试里写清楚它不能当最终结果，最终必须跑完整 11 个 step。
+
+## 树（2026-11-14，分支 `cb-wg-trees`）
+
+`feature/tree/` 照官方 `TreeFeature.place` 的流程移植：取树高、树叶高度和半径，检查高度
+范围和可用空间，放树根，放树干得到树叶挂点，每个挂点放树叶，跑装饰器，`updateLeaves`
+写树叶的 `distance`，最后 `updateShapeAtEdge`。
+
+| 文件 | 内容 |
+|---|---|
+| `mod.rs` | `TreeFeature.place` / `doPlace` / `getMaxFreeTreeHeight`，四个位置集合 |
+| `java_set.rs` | 复现 Java `HashSet<BlockPos>` 的迭代顺序 |
+| `config.rs` | 配置解析、`FeatureSize`、`below_trunk_provider` |
+| `trunk.rs` | 十种 `TrunkPlacer` |
+| `foliage.rs` | 十二种 `FoliagePlacer` |
+| `root.rs` | `MangroveRootPlacer` |
+| `decorator.rs` | 十种 `TreeDecorator`（没有 `pale_moss`） |
+| `leaves.rs` | `updateLeaves` |
+| `fallen.rs` | `FallenTreeFeature` |
+| `../huge_mushroom.rs` | 两种巨型蘑菇 |
+| `../shape_update.rs` | `Level` 适配层和 `StructureTemplate.updateShapeAtEdge` |
+
+两处容易漏的官方行为：
+
+* `updateLeaves` 里同一片树叶可能同时待在两个距离桶里，从更远的桶再被取出时 `distance`
+  会被改写成更大的值。结果取决于 `HashSet` 的迭代顺序，这里照原样重放，不做修正。
+* `trunkSetter` 把树干正下方那块泥土也记进了原木集合，装饰器的 `logs.getFirst()` 取到
+  的是它。
+
+对拍数字和已知限制见 README 的"树"一条。验证时随机抽样碰不到的群系要定点比：用
+`W:\data\bamboo-agents\tools\tmp_find.rs` 这类临时测试按群系找区块，再用
+`chunkgen --chunk X Z --scan 3`。
