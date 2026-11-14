@@ -74,6 +74,7 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         }
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?),
+        "minecraft:monster_room" => Leaf::MonsterRoom(MonsterRoomFeature::parse(config).ok()?),
         "minecraft:speleothem_cluster" => {
             Leaf::SpeleothemCluster(Box::new(SpeleothemClusterFeature::parse(config).ok()?))
         }
