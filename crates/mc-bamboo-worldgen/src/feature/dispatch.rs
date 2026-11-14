@@ -12,7 +12,11 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
-    ores, placement::OreFeature, simple_block::SimpleBlockFeature, tree::TreeFeature,
+    huge_mushroom::HugeMushroomFeature,
+    ores,
+    placement::OreFeature,
+    simple_block::SimpleBlockFeature,
+    tree::{TreeFeature, fallen::FallenTreeFeature},
     world::FeatureWorld,
 };
 
@@ -23,6 +27,8 @@ pub enum Leaf {
     Ore(OreFeature),
     SimpleBlock(SimpleBlockFeature),
     Tree(Box<TreeFeature>),
+    FallenTree(Box<FallenTreeFeature>),
+    HugeMushroom(Box<HugeMushroomFeature>),
 }
 
 /// 按 `Feature` 类型 ID 解析配置；未移植或解析不了的类型返回 `None`。
@@ -33,6 +39,13 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         "minecraft:ore" => Some(Leaf::Ore(OreFeature::parse(config).ok()?)),
         "minecraft:simple_block" => Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?)),
         "minecraft:tree" => TreeFeature::parse(config).map(|tree| Leaf::Tree(Box::new(tree))),
+        "minecraft:fallen_tree" => {
+            FallenTreeFeature::parse(config).map(|tree| Leaf::FallenTree(Box::new(tree)))
+        }
+        "minecraft:huge_brown_mushroom" | "minecraft:huge_red_mushroom" => {
+            HugeMushroomFeature::parse(kind, config)
+                .map(|mushroom| Leaf::HugeMushroom(Box::new(mushroom)))
+        }
         _ => None,
     }
 }
@@ -50,5 +63,7 @@ pub fn place_leaf(
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
         Leaf::Tree(tree) => tree.place(world, random, pos),
+        Leaf::FallenTree(tree) => tree.place(world, random, pos),
+        Leaf::HugeMushroom(mushroom) => mushroom.place(world, random, pos),
     }
 }

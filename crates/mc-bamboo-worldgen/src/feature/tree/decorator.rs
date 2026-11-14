@@ -5,8 +5,7 @@
 //! 迭代顺序，见 [`super::java_set`]。注意 `trunkSetter` 也记下了树干正下方那块泥土，
 //! 它在原木列表里排第一个，官方的 `logs.getFirst()` 取到的就是它。
 //!
-//! 还没移植：`pale_moss`（要放 `pale_moss_patch` 这个 configured feature）和
-//! `attached_to_logs`（26.3 的数据里没有用到）。
+//! 还没移植：`pale_moss`（要放 `pale_moss_patch` 这个 configured feature）。
 //!
 //! The `TreeDecorator` subclasses, each translated line by line from official 26.3
 //! `place`.
@@ -17,8 +16,7 @@
 //! Note that `trunkSetter` also records the dirt block below the trunk; it comes first
 //! in the log list and is what official `logs.getFirst()` returns.
 //!
-//! Not ported: `pale_moss` (it places the `pale_moss_patch` configured feature) and
-//! `attached_to_logs` (unused in 26.3 data).
+//! Not ported: `pale_moss` (it places the `pale_moss_patch` configured feature).
 
 use std::{collections::HashSet, sync::OnceLock};
 
@@ -86,6 +84,11 @@ pub enum Decorator {
         exclusion_radius_y: i32,
         provider: StateProvider,
         required_empty_blocks: i32,
+        directions: Vec<Pos>,
+    },
+    AttachedToLogs {
+        probability: f32,
+        provider: StateProvider,
         directions: Vec<Pos>,
     },
     PlaceOnGround {
@@ -164,6 +167,16 @@ impl Decorator {
                     .map(|name| direction_step(name.as_str()?))
                     .collect::<Option<Vec<_>>>()?,
             },
+            "minecraft:attached_to_logs" => Self::AttachedToLogs {
+                probability: float("probability")?,
+                provider: block_provider(object.get("block_provider")?)?,
+                directions: object
+                    .get("directions")?
+                    .as_array()?
+                    .iter()
+                    .map(|name| direction_step(name.as_str()?))
+                    .collect::<Option<Vec<_>>>()?,
+            },
             "minecraft:place_on_ground" => Self::PlaceOnGround {
                 tries: int("tries", 128),
                 radius: int("radius", 2),
@@ -215,6 +228,11 @@ impl Decorator {
                 *required_empty_blocks,
                 directions,
             ),
+            Self::AttachedToLogs {
+                probability,
+                provider,
+                directions,
+            } => context.attached_to_logs(*probability, provider, directions),
             Self::PlaceOnGround {
                 tries,
                 radius,
@@ -583,6 +601,22 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
                 }
             }
             if let Some(state) = provider.get_state(self.random) {
+                self.set(placement, state);
+            }
+        }
+    }
+
+    /// `AttachedToLogsDecorator.place`。
+    fn attached_to_logs(&mut self, probability: f32, provider: &StateProvider, directions: &[Pos]) {
+        let mut logs = self.logs.clone();
+        shuffle(&mut logs, self.random);
+        for log in logs {
+            let direction = directions[self.random.next_int(directions.len() as i32) as usize];
+            let placement = offset(log, direction);
+            if self.random.next_float() <= probability
+                && self.is_air(placement)
+                && let Some(state) = provider.get_state(self.random)
+            {
                 self.set(placement, state);
             }
         }
