@@ -15,6 +15,7 @@ pub mod dispatch;
 pub mod geode;
 pub mod heightmap;
 pub mod iceberg;
+pub mod lake;
 pub mod ores;
 pub mod placement;
 pub mod provider;

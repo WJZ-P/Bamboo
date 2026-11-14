@@ -43,6 +43,19 @@ pub enum Modifier {
         min_inclusive: i64,
         max_inclusive: i64,
     },
+    /// `EnvironmentScanPlacement`：沿一个方向最多走 `max_steps` 步找 `target_condition`。
+    ///
+    /// `EnvironmentScanPlacement`: walk up to `max_steps` in one direction looking for
+    /// `target_condition`.
+    EnvironmentScan {
+        /// `Direction.VERTICAL_CODEC`：只有 `up` / `down`。
+        ///
+        /// `Direction.VERTICAL_CODEC`: only `up` / `down`.
+        downward: bool,
+        target_condition: BlockPredicate,
+        allowed_search_condition: BlockPredicate,
+        max_steps: i32,
+    },
     /// 已解析但本轮不生效的修饰器。
     /// 命中时置 `unsupported`，让对拍跳过这个区块。
     Unsupported(String),
@@ -111,6 +124,28 @@ impl Modifier {
                     .and_then(Value::as_i64)
                     .unwrap_or(i32::MAX as i64),
             },
+            "minecraft:environment_scan" => {
+                let direction = field("direction_of_search")?
+                    .as_str()
+                    .ok_or("environment_scan direction is not a string")?;
+                let downward = match direction {
+                    "down" => true,
+                    "up" => false,
+                    other => return Err(format!("unknown environment_scan direction {other}")),
+                };
+                Self::EnvironmentScan {
+                    downward,
+                    target_condition: BlockPredicate::parse(field("target_condition")?),
+                    allowed_search_condition: object
+                        .get("allowed_search_condition")
+                        .map(BlockPredicate::parse)
+                        .unwrap_or(BlockPredicate::True),
+                    max_steps: field("max_steps")?
+                        .as_i64()
+                        .ok_or("environment_scan max_steps is not an int")?
+                        as i32,
+                }
+            }
             _ => Self::Unsupported(kind.to_owned()),
         })
     }
@@ -119,6 +154,11 @@ impl Modifier {
         match self {
             Self::Unsupported(_) | Self::BlockPredicateFilter(BlockPredicate::Unsupported) => false,
             Self::BlockPredicateFilter(predicate) => predicate.is_supported(),
+            Self::EnvironmentScan {
+                target_condition,
+                allowed_search_condition,
+                ..
+            } => target_condition.is_supported() && allowed_search_condition.is_supported(),
             _ => true,
         }
     }
@@ -220,6 +260,38 @@ fn modify(
             let max_y = surface_y + *max_inclusive;
             if min_y <= y as i64 && y as i64 <= max_y {
                 out.push(pos);
+            }
+        }
+        Modifier::EnvironmentScan {
+            downward,
+            target_condition,
+            allowed_search_condition,
+            max_steps,
+        } => {
+            // `EnvironmentScanPlacement.modify`：先过 allowed_search，再逐步前进；
+            // 每步先看 target，再移动，出界即返回，allowed 不过就跳出外层；
+            // 跳出后 target 命中才放行。
+            // `EnvironmentScanPlacement.modify`: gate on allowed_search, then step; test the
+            // target before each move, stop at the build-height edge, break when allowed_search
+            // fails, and finally accept the position when the target matches.
+            let mut cursor = pos;
+            if allowed_search_condition.test(ctx.world, cursor) {
+                for _ in 0..*max_steps {
+                    if target_condition.test(ctx.world, cursor) {
+                        out.push(cursor);
+                        return;
+                    }
+                    cursor.1 += if *downward { -1 } else { 1 };
+                    if ctx.world.is_outside_build_height(cursor.1) {
+                        return;
+                    }
+                    if !allowed_search_condition.test(ctx.world, cursor) {
+                        break;
+                    }
+                }
+                if target_condition.test(ctx.world, cursor) {
+                    out.push(cursor);
+                }
             }
         }
         Modifier::Unsupported(_) => {}

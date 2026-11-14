@@ -176,6 +176,20 @@ impl<'a> FeatureWorld<'a> {
     pub fn is_air(&self, x: i32, y: i32, z: i32) -> bool {
         state_facts(self.get_block(x, y, z)) & facts::AIR != 0
     }
+
+    /// `LevelHeightAccessor.isInsideBuildHeight(y)`。
+    ///
+    /// `LevelHeightAccessor.isInsideBuildHeight(y)`.
+    pub fn is_inside_build_height(&self, y: i32) -> bool {
+        y >= self.min_y && y < self.min_y + self.height
+    }
+
+    /// `LevelHeightAccessor.isOutsideBuildHeight(y)`。
+    ///
+    /// `LevelHeightAccessor.isOutsideBuildHeight(y)`.
+    pub fn is_outside_build_height(&self, y: i32) -> bool {
+        !self.is_inside_build_height(y)
+    }
 }
 
 /// `Heightmap.Types` 的六种，顺序和 `heightmaps::TYPES` 一致。
