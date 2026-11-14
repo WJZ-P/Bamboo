@@ -444,6 +444,24 @@ WebView2 的渲染进程不算在内。
   古城 / 试炼密室 / 古迹废墟的结构件列表与官方对拍）仍没做；`pillager_outposts` 的排除区只有
   单元测试、未进官方逐格对拍。整列判定与起点单点判定在这批数据上从未不一致（主世界群系沿 Y
   基本恒定），两条路径各自用故意改坏单独验过。
+- 多件式结构的结构件布局（分支 `cb-wg-multipiece`）：`mc-bamboo-worldgen::structure::pieces`
+  把废弃矿井（普通 / 恶地）、要塞、海底神殿三个「用代码生成结构件列表」的布局移植成纯函数：
+  结构件的类型、包围盒、朝向、genDepth、各子类参数，以及世界随机源的取数次数和顺序逐步照
+  官方 26.3 翻译；不含把方块写进世界的 `postProcess`（属放置那一步）。新增
+  `cargo run -p mc-bamboo-vanilla -- structure-pieces <java>`：`StructurePiecesOracle.java`
+  直接调官方结构件类（不启服务端 / 读存档 / 接受 EULA，海底神殿的 `childPieces` 走反射列出），
+  按统一格式 dump，Rust 侧用生产代码复算逐项比。6 种子 × 8 区块覆盖普通矿井、恶地矿井
+  （两种 `surfaceHeight`）、要塞、海底神殿共 240 个查询、25660 个结构件、25660 个比较
+  0 不一致；三个结构各自先故意改坏一处（矿井丢弃首个 `nextDouble`、要塞丢弃
+  `randomSmallDoor` 的 `nextInt(5)`、海底神殿把扫描循环尝试数 5 改 4）确认对拍会失败再还原。
+  恶地矿井的 `surfaceHeight`（官方取自 `getBaseHeight`）作为外部输入喂入，布局函数只在给定
+  高度值下复现；这些仍是纯函数，没接进 `structure_starts` 阶段。
+  已知限制：**林地府邸（`WoodlandMansionPieces.MansionGrid` / `MansionPiecePlacer.createMansion`）
+  的结构件布局没做**——`createMansion` 约 360 行带 `rotation.rotate(Direction)` 与网格位标志的
+  位置运算、外加约 300 行 `MansionGrid`，且 Java 侧需要一个 `StructureTemplateManager` 才能构造
+  `WoodlandMansionPiece`；本轮没有移植，也没有假装支持，交接见 `docs/worldgen-structures-plan.md`
+  第 0 节。其余没做的结构（沉船、神殿、jigsaw 等）、结构件放置、Beardifier、存档
+  `structures` 键仍同上一条。
 - 红石的已知差异：发射器会发射不生成实体的弹射物，默认抛出和余料都生成真的物品实体。箭、雪球、蛋（含蓝蛋、棕蛋）、喷溅药水、滞留药水、经验瓶、烟花、火焰弹和风弹走默认抛出，官方那些是弹射物，出现事件 1002、1004、1018 或 1051 的整题不比较。船和矿车放得下时只扣物品、不生成实体，放不下时再套一层默认抛出。盔甲架和带 `entity_data` 的刷怪蛋留在槽里，当作生成失败，数量变少的整题不比较。TNT 物品在 `tnt_explodes` 为真时生成点燃的 TNT 并播放 `entity.tnt.primed`，数量减一；规则为假时物品留着、发 1001，不取朝向。打火石点着 TNT 方块时走 `TntBlock.prime` 再 `removeBlock` 再扣耐久。这些题比较方块、声音、容器和 `level.random`。点燃的 TNT 实体本身不进比较，方块 oracle 也不 tick 它。同一题里如果还有弹射物事件、盔甲架或刷怪蛋离开发射器，仍按那些原因整题排除。鱼桶只倒水，不生成鱼，环境音不比较。倒成功后仍取官方 `EntityType.create` 的一次 `nextFloat`，以及 `Mob.finalizeSpawn` 的 `triangle` 和一次 `nextFloat`。美西螈在 `BUCKET` 原因下 `finalizeSpawn` 直接返回，只取朝向那一次。热带鱼再按 `nextFloat() < 0.9` 取常见变种或随机花纹。硫磺立方桶不放方块，生成用的随机数同样照取。剪刀收满蜜的蜂巢按 `minecraft:harvest/beehive` 掉 3 个蜜脾，战利品表走自己的 `random_sequence`，不碰 `level.random`；`Block.popResource` 为这一组取 3 次位置偏移，生成物品实体。桶倒进可替换方块时，官方 `destroyBlock` 会先在方块还在时按 `getDrops` 一组一组 `popResource`，再换成流体方块；方块 oracle 把那些表换成空表，两边都不取数，也不生成物品。骨粉催树苗、杜鹃、蘑菇、菌、草方块、菌丝和要地物的方块时整题不比较。默认抛出和塞不回发射器的余料都生成物品实体。速度按官方 `spawnItem`：先取一个 `nextDouble` 算 `pow`，X、Z 的均值是朝向步长乘 `pow`，Y 是 0.2，再取三个 `triangle` 的六个 double；这套随机数只取一次。打火石和剪刀的耐久走通用 `hurtAndBreak`，耐久附魔用 `level.random`。玩家没有身体和鞍这两格。骷髅头、僵尸头、苦力怕头、龙首和猪灵头不放方块，只试着穿到前方的人身上。合成器按官方逻辑合成并吐出产物，朝空气吐出的东西按 `DefaultDispenseItemBehavior.spawnItem` 生成真的物品实体（精度 6），成就和地图的后处理也没做。方块 oracle 给合成器加了固定场景的题，合成成功的题逐项比较方块状态、容器内容、等级事件和世界随机源最后的种子；合成器到期时如果官方没有合成成功，只发失败事件 1050，这一声照常比较。漏斗把同一件物品搬进搬出不算合成。投掷器朝空气抛出的物品生成物品实体；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，地上的物品还没有接上这些触发，世界里没有生物和弹射物，下落方块和点燃的 TNT 也不会踩这些；阳光探测器不随时间变化，只在右键时按当前天空光算，世界时钟停在正午。唱片机放进唱片后立刻算在放（`ownSignal` 为 15），但不跑官方的歌曲计时：假世界也不登记唱片机的 ticker，所以不抽每 20 刻的 `nextInt(4)`，歌也不会放到结束。宝库只在官方结果里出现宝库方块实体的声音或状态事件 3015–3017 时整题不比较，没触发的宝库照常比较。
 - 活塞不推实体，也不推动玩家。下落方块和点燃的 TNT 已经在世界里，但官方 `PistonMovingBlockEntity` 的
   `moveCollidedEntities`、`moveStuckEntities`、`fixEntityWithinPistonBase` 三段没实现：掉落物、下落方块
