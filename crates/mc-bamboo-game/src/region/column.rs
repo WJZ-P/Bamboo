@@ -334,7 +334,7 @@ impl RegionColumn {
         parts.light = [light.sky, light.block];
         parts.light_on = true;
         if let Ok(column) = ChunkColumn::from_parts(parts) {
-            self.column = Box::new(column);
+            *self.column = column;
         }
     }
 
