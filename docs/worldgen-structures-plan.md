@@ -447,6 +447,77 @@ structures (Compound)
 （`SerializableChunkData.java` 549 行）。`world-dir` 对拍工具
 （`tools/mc-bamboo-vanilla/src/world_dir.rs`）用来确认官方能读回。
 
+### 4.1 海底神殿的存档口径（留给第 7 步存档）
+
+海底神殿的「结构件列表」和其它结构不一样：**存档时只存一个结构件，读回时把房间图整体
+重建**。第 7 步写 / 读 `structures` 键必须照下面的口径做，不能把房间图当成普通结构件列表
+存进去、也不能只读回 `Children` 就直接 `placeInChunk`。
+
+**生成 / 存档时存什么**：
+
+* `OceanMonumentStructure.generatePieces(builder, context)` 只
+  `builder.addPiece(createTopPiece(...))`：`PiecesContainer` 里**只有一个**
+  `OceanMonumentPieces.MonumentBuilding`（注册名 `OMB`）。整个房间图——
+  `MonumentBuilding.generateRoomGraph(random)` 造的 `RoomDefinition` 网格、入口 / 核心房间、
+  七个 `MonumentRoomFitter` 造的房间、两翼 `OceanMonumentWingRoom`、阁楼
+  `OceanMonumentPenthouse`——是 `MonumentBuilding` 的**私有字段 `childPieces`**，不是
+  `PiecesContainer` 里的独立结构件；`MonumentBuilding.postProcess`
+  （`OceanMonumentPieces.java` 394 行）才遍历 `childPieces` 逐间 `postProcess`。
+* `StructureStart.createTag(context, chunkPos)`（`StructureStart.java` 103 行）写
+  `Children = pieceContainer.save(context)`，因此海底神殿的 `Children` 是长度 1 的
+  `ListTag`，只有那个 `MonumentBuilding`。
+* `StructurePiece.createTag`（84 行）只写基类四个键 `id` / `BB` / `O` / `GD`；
+  `OceanMonumentPiece.addAdditionalSaveData`（`OceanMonumentPieces.java` 1501 行）是
+  **空实现**，所以 `MonumentBuilding` 不存任何房间图 / `childPieces` / 随机源状态，
+  只有这四项。`BB` 来自 `makeBoundingBox(west, 39, north, direction, 58, 23, 58)`
+  （固定 58×23×58、Y 从 39 起，`minX = west`、`minZ = north`），`O` 是朝向
+  （`setOrientation(direction)`），`GD = 0`。
+
+**读回时怎么重建**：
+
+* `SerializableChunkData.read`（292 行）把 `level.getSeed()` 传给
+  `StructureStart.loadStaticStart(context, tag, seed)`；它先
+  `PiecesContainer.load(children, context)` 用 `MonumentBuilding(CompoundTag)`
+  构造器（`OceanMonumentPieces.java` 223 行）造出那个结构件——这个构造器**只调
+  `super(..., tag)`，`childPieces` 是空的**。若就此拿去 `placeInChunk`，`postProcess`
+  遍历空列表，神殿一个房间都放不出来。
+* 因此 `loadStaticStart` 在 `structure instanceof OceanMonumentStructure` 时
+  （`StructureStart.java` 58–60 行）额外调
+  `OceanMonumentStructure.regeneratePiecesAfterLoad(chunkPos, seed, pieces)`
+  （`OceanMonumentStructure.java` 54 行）重建房间图。这是**只对海底神殿**的特例。
+* `regeneratePiecesAfterLoad` 的过程：
+
+  ```
+  random = new WorldgenRandom(new LegacyRandomSource(RandomSupport.generateUniqueSeed()))
+  random.setLargeFeatureSeed(seed, chunkPos.x, chunkPos.z)   // 唯一随机源；初始 seed 被覆盖
+  old = savedPieces.pieces().get(0)                          // 那个 MonumentBuilding
+  west = old.getBoundingBox().minX(); north = old.getBoundingBox().minZ()
+  defaultOrientation = Direction.Plane.HORIZONTAL.getRandomDirection(random)  // 消费一次 nextInt(4)
+  orientation = old.getOrientation() != null ? old.getOrientation() : defaultOrientation
+  topPiece = new MonumentBuilding(random, west, north, orientation)           // 重跑 generateRoomGraph
+  return 只含 topPiece 的 PiecesContainer
+  ```
+
+  * `generateUniqueSeed()` 只是初始值，`setLargeFeatureSeed(seed, x, z)` 立刻把它重置成
+    「世界种子 + 区块坐标」的确定性值，所以读回是**确定性重建**而非重新随机：
+    `generateRoomGraph` 里 `Util.shuffle`、`nextInt()` 等取数序列与当初生成逐次一致。
+  * `defaultOrientation` 这次 `nextInt(4)` **即便 `orientation` 用存档里的朝向也必须取**，
+    目的是让 `random` 的取数位置和「当初 `createTopPiece` 先 `getRandomDirection`、
+    再 `new MonumentBuilding(random, ...)`」对齐，重建出的房间图才和原版逐块一致。
+  * 返回的 `PiecesContainer` 仍只有一个 `MonumentBuilding`，但它的 `childPieces` 已被
+    `generateRoomGraph` 完整重建，`postProcess` 能照常放全部房间。读回后的 `BB` / 朝向
+    来自存档的 `MonumentBuilding`，`west/north` 就是存档 `BB.minX()/minZ()`。
+* 其它结构（矿井 / 要塞 / 林地府邸 / jigsaw）没有这一步：每个结构件各自用
+  `(CompoundTag)` 构造器 + `addAdditionalSaveData` 的字段恢复状态，`Children` 存的就是
+  完整结构件列表，读回直接用，不需要重建。
+
+**给第 7 步的验收口径**：写 `structures.starts.<structure>.Children` 时海底神殿只写
+一个 `OMB` 结构件（基类四键）；读回必须先 `PiecesContainer.load`、再对
+`OceanMonumentStructure` 跑 `regeneratePiecesAfterLoad`，然后才进 `placeInChunk`。
+`world-dir` 对拍应验证：存档前后 `Children` 长度恒为 1、重建后的 `BB` / 朝向 /
+`postProcess` 覆盖的房间集合与直接生成一致。结构队员的存档实现以本节为准，不要凭
+「每个结构件一个 tag」的通用直觉把房间图拆开存。
+
 ## 5. `Beardifier`
 
 `Beardifier.forStructuresInChunk(structureManager, chunkPos)`（`levelgen/Beardifier.java`）：
@@ -504,7 +575,7 @@ structures (Compound)
 | 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | 没做 |
 | 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | 没做 |
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | 没做（仍用 `Beardifier.EMPTY`） |
-| 7 | 存档：`structures` 键写/读 | 读回一致，`world-dir` 确认官方能读 | 没做 |
+| 7 | 存档：`structures` 键写/读；海底神殿「只存一个 `MonumentBuilding`、读回重建房间图」的口径见 4.1 | 读回一致，`world-dir` 确认官方能读 | 没做 |
 
 第三轮还落地了步 1 与步 4 之间的一层通用原语：`Structure.generate` 的
 `findValidGenerationPoint` 群系 / 高度判定（整列群系、四角高度、起点单点群系），
