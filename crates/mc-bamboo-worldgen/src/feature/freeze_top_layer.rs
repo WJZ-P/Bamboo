@@ -132,8 +132,26 @@ fn snow_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
     }
     // `belowState.is(this) && belowState.getValue(LAYERS) == 8`。
     // `belowState.is(this) && belowState.getValue(LAYERS) == 8`.
-    block_id_of_state(below) == block_id_of_state(blocks::SNOW)
-        && apply_property(below, "layers", "8").is_some()
+    block_id_of_state(below) == block_id_of_state(blocks::SNOW) && layers_of(below) == Some(8)
+}
+
+/// `SnowLayerBlock.LAYERS` 的当前值。按 `StateDefinition` 的属性顺序和 stride 反查，
+/// 和 `feature::state::official_name` 用的是同一套算法。
+///
+/// The current `SnowLayerBlock.LAYERS` value, decoded from the `StateDefinition` property
+/// order and strides exactly like `feature::state::official_name`.
+fn layers_of(state: u32) -> Option<i32> {
+    let block = mc_bamboo_data::block_of_state(state)?;
+    let mut stride = 1_u32;
+    for property in block.properties.iter().rev() {
+        let count = property.values.len() as u32;
+        if property.name == "layers" {
+            let index = (state - block.first_state) / stride % count;
+            return property.values[index as usize].parse().ok();
+        }
+        stride *= count;
+    }
+    None
 }
 
 /// `LevelReader.isInsideBuildHeight(y)`。
@@ -190,5 +208,24 @@ mod tests {
             blocks::ICE,
             "minecraft:cannot_support_snow_layer"
         ));
+    }
+
+    #[test]
+    fn layers_of_reads_the_current_layer_count() {
+        // `layers` 1..8 必须各自解出正确的数字，不能只看「属性存在」。
+        // `layers` 1..8 must decode to their own number, not just "property exists".
+        for layers in 1..=8 {
+            let state = apply_property(blocks::SNOW, "layers", &layers.to_string()).unwrap();
+            assert_eq!(layers_of(state), Some(layers), "layers {layers}");
+        }
+        // 只有 8 层雪能托住新雪层。
+        // Only a full 8-layer snow block can hold a new layer.
+        let seven = apply_property(blocks::SNOW, "layers", "7").unwrap();
+        let eight = apply_property(blocks::SNOW, "layers", "8").unwrap();
+        assert_ne!(layers_of(seven), Some(8));
+        assert_eq!(layers_of(eight), Some(8));
+        // 没有 `layers` 属性的方块返回 `None`。
+        // A block without a `layers` property returns `None`.
+        assert_eq!(layers_of(blocks::STONE), None);
     }
 }
