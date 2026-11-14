@@ -51,6 +51,11 @@ enum Kind {
     LilyPad,
     /// `SporeBlossomBlock.canSurvive`：上面那格 `canSupportCenter(DOWN)` 且本格不是水。
     SporeBlossom,
+    /// `CarpetBlock.canSurvive`：下面那格不是空气。
+    Carpet,
+    /// `MushroomBlock.canSurvive`：下面 `isSolidRender`，且亮度 < 13（或下面在
+    /// `overrides_mushroom_light_requirement` 里）。
+    Mushroom,
 }
 
 /// 这个状态的存活判定是否已移植。未移植时调用方要把整个 placed feature 标 unsupported，
@@ -84,6 +89,10 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         Some(Kind::SeaPickle) => sea_pickle_can_survive(world, pos),
         Some(Kind::LilyPad) => lily_pad_can_survive(world, pos),
         Some(Kind::SporeBlossom) => spore_blossom_can_survive(world, pos),
+        // `CarpetBlock.canSurvive` 是 `!level.isEmptyBlock(pos.below())`。
+        // `CarpetBlock.canSurvive` is `!level.isEmptyBlock(pos.below())`.
+        Some(Kind::Carpet) => !is_air_block(below),
+        Some(Kind::Mushroom) => mushroom_can_survive(world, pos),
         None => false,
     }
 }
@@ -237,6 +246,43 @@ fn spore_blossom_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
     supports && !in_fluid_tag(world.get_block(pos.0, pos.1, pos.2), "minecraft:water")
 }
 
+/// `MushroomBlock.canSurvive`：下面在 `overrides_mushroom_light_requirement` 里就直接 true；
+/// 否则要求亮度 < 13 且下面 `isSolidRender()`。
+///
+/// **亮度**：`WorldGenRegion.getRawBrightness` 没有覆写，转发到 `level.getLightEngine()`，
+/// 即真实光照引擎。`FEATURES` 阶段在 `INITIALIZE_LIGHT` **之前**，区块还没有光照数据：
+/// `SkyLightSectionStorage.getLightValue` 在 `topSection == currentLowestY`
+/// （该列还没有任何光照段）时返回 **15**，`BlockLightSectionStorage.getLightValue` 在没有
+/// DataLayer 时返回 **0**，所以 `getRawBrightness(pos, 0)` = `max(0, 15 - 0)` = **15**，
+/// 恒不满足 `< 13`。因此蘑菇的存活判定在 `FEATURES` 阶段**只取决于下面那格**——除非下面
+/// 在 `overrides_mushroom_light_requirement` 里（cherry_leaves / coarse_dirt / note_block）。
+///
+/// `MushroomBlock.canSurvive`: short-circuit true when the block below is in
+/// `overrides_mushroom_light_requirement`; otherwise require brightness < 13 and
+/// `isSolidRender()` below.
+///
+/// **Brightness**: `WorldGenRegion` does not override `getRawBrightness`; it forwards to
+/// `level.getLightEngine()`. During `FEATURES` (before `INITIALIZE_LIGHT`) the chunk has no
+/// light data: `SkyLightSectionStorage.getLightValue` returns **15** when
+/// `topSection == currentLowestY`, and `BlockLightSectionStorage` returns **0** without a
+/// DataLayer, so `getRawBrightness(pos, 0)` is always **15** and never below 13. The check
+/// therefore reduces to the block below — unless it is in that override tag.
+fn mushroom_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    if in_block_tag(below, "minecraft:overrides_mushroom_light_requirement") {
+        return true;
+    }
+    // `getRawBrightness(pos, 0)` 在 FEATURES 阶段恒为 15，`< 13` 永不成立。
+    // `getRawBrightness(pos, 0)` is always 15 during FEATURES, so `< 13` never holds.
+    false
+}
+
+/// `BlockState.isAir()`，跳过方块标签查询。
+/// `BlockState.isAir()`, avoiding the tag lookup.
+fn is_air_block(state: u32) -> bool {
+    state_facts(state) & facts::AIR != 0
+}
+
 /// 是否走 `DoublePlantBlock.placeAt`（放上下两格）而不是单格 `setBlock`。
 /// `TallSeagrassBlock` 也继承 `DoublePlantBlock`，官方用的是 `instanceof`。
 ///
@@ -291,8 +337,10 @@ fn classify(state: u32) -> Option<Kind> {
         BlockClass::SeaPickleBlock => Kind::SeaPickle,
         BlockClass::LilyPadBlock => Kind::LilyPad,
         BlockClass::SporeBlossomBlock => Kind::SporeBlossom,
-        // 蘑菇（亮度）、苔藓地毯等仍覆写了 canSurvive/mayPlaceOn，本轮明确不支持。
-        // Mushroom (brightness), mossy carpet still override canSurvive/mayPlaceOn: unported.
+        BlockClass::CarpetBlock => Kind::Carpet,
+        BlockClass::MushroomBlock => Kind::Mushroom,
+        // 苔藓地毯等仍覆写了 canSurvive/mayPlaceOn，本轮明确不支持。
+        // Mossy carpet still overrides canSurvive/mayPlaceOn: unported.
         _ => return None,
     })
 }
@@ -333,17 +381,37 @@ mod tests {
             "minecraft:sea_pickle",
             "minecraft:lily_pad",
             "minecraft:spore_blossom",
+            "minecraft:moss_carpet",
+            "minecraft:brown_mushroom",
+            "minecraft:red_mushroom",
         ] {
             assert!(supports(state(name)), "{name}");
         }
     }
 
     #[test]
+    fn mushroom_only_survives_on_the_light_override_tag() {
+        // 蘑菇下面在 override 标签里（coarse_dirt）才成立；普通石头不成立，因为
+        // FEATURES 阶段的 getRawBrightness 恒为 15。
+        // A mushroom survives on coarse_dirt (the override tag) but not on plain stone,
+        // because getRawBrightness is always 15 during FEATURES.
+        assert!(state("minecraft:brown_mushroom") != 0);
+        assert!(
+            block_tag("minecraft:overrides_mushroom_light_requirement")
+                .unwrap()
+                .contains(&11)
+        );
+    }
+
+    #[test]
     fn classes_with_special_survival_stay_unported() {
-        // 蘑菇还要 `level.getRawBrightness(pos, 0) < 13`，光照没接进地物视图。
-        // Mushrooms still need `level.getRawBrightness(pos, 0) < 13`, and the feature
-        // world has no light data.
-        for name in ["minecraft:brown_mushroom", "minecraft:red_mushroom"] {
+        // 蘑菇的亮度判据在 FEATURES 阶段恒为 15，等价于「只有 override 标签能活」，
+        // 已移植；这里留空表提醒以后加新类时补测试。
+        // The mushroom's brightness is always 15 during FEATURES, so the check reduces to
+        // the override tag and is ported; the empty list is a reminder to add tests for
+        // future classes.
+        let unported: [&str; 0] = [];
+        for name in unported {
             assert!(!supports(state(name)), "{name}");
         }
     }

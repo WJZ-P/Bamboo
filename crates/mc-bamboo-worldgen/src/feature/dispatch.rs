@@ -30,17 +30,27 @@ pub enum Leaf {
 }
 
 /// 按 `Feature` 类型 ID 解析配置；未移植或解析不了的类型返回 `None`。
+/// `lookup` 用来解析 `Holder<BlockStateProvider>` 的字符串引用。
 ///
 /// Parse a config by `Feature` type ID; return `None` for unported / unparsable types.
-pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
+/// `lookup` resolves `Holder<BlockStateProvider>` string references.
+pub fn parse_leaf<'a>(
+    kind: &str,
+    config: &'a Value,
+    lookup: &dyn Fn(&str) -> Option<&'a Value>,
+) -> Option<Leaf> {
     match kind {
         "minecraft:bamboo" => Some(Leaf::Bamboo(BambooFeature::parse(config)?)),
-        "minecraft:block_column" => Some(Leaf::BlockColumn(BlockColumnFeature::parse(config)?)),
+        "minecraft:block_column" => Some(Leaf::BlockColumn(BlockColumnFeature::parse(
+            config, lookup,
+        )?)),
         "minecraft:multiface_growth" => {
             Some(Leaf::Multiface(MultifaceGrowthFeature::parse(config)?))
         }
         "minecraft:ore" => Some(Leaf::Ore(OreFeature::parse(config).ok()?)),
-        "minecraft:simple_block" => Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?)),
+        "minecraft:simple_block" => Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(
+            config, lookup,
+        )?)),
         "minecraft:vines" => Some(Leaf::Vines(VinesFeature::parse(config)?)),
         _ => None,
     }

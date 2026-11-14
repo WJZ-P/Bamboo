@@ -30,7 +30,7 @@ type Pos = (i32, i32, i32);
 /// `Holder<PlacedFeature>`：注册表引用名，或内联的 `{"feature":..,"placement":[..]}`。
 ///
 /// `Holder<PlacedFeature>`: a registry name or an inline placed-feature object.
-enum Child<'a> {
+pub(crate) enum Child<'a> {
     Registry(&'a str),
     Inline {
         feature: &'a Value,
@@ -39,7 +39,7 @@ enum Child<'a> {
 }
 
 impl<'a> Child<'a> {
-    fn parse(value: &'a Value) -> Option<Self> {
+    pub(crate) fn parse(value: &'a Value) -> Option<Self> {
         match value {
             Value::String(name) => Some(Self::Registry(name.as_str())),
             Value::Object(object) => Some(Self::Inline {
@@ -189,12 +189,21 @@ fn place_feature<'a>(
     random: &WorldgenRandom,
     pos: Pos,
 ) -> PlaceOutcome {
-    if let Some(leaf) = parse_leaf(kind, config) {
+    if let Some(leaf) = parse_leaf(kind, config, &|name| registry.state_provider(name)) {
         let placed = place_leaf(&leaf, world, random, pos);
         return PlaceOutcome {
             supported: true,
             placed,
         };
+    }
+    // `vegetation_patch` 需要注册表和 `PlacementEnv` 才能递归放子地物，不能当叶子。
+    // `vegetation_patch` needs the registry and `PlacementEnv` to recurse into its child
+    // feature, so it cannot be a leaf.
+    if kind == "minecraft:vegetation_patch" || kind == "minecraft:waterlogged_vegetation_patch" {
+        let Some(patch) = super::vegetation_patch::VegetationPatch::parse(kind, config) else {
+            return PlaceOutcome::unsupported();
+        };
+        return patch.place(registry, world, env, random, pos);
     }
     let Some(comp) = Composition::parse(kind, config) else {
         return PlaceOutcome::unsupported();
@@ -284,7 +293,7 @@ fn place_composition<'a>(
     }
 }
 
-fn place_child<'a>(
+pub(crate) fn place_child<'a>(
     child: &Child<'a>,
     registry: &'a Registry,
     world: &mut FeatureWorld<'_>,

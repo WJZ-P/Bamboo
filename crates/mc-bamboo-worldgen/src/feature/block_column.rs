@@ -41,12 +41,15 @@ pub struct BlockColumnFeature {
 }
 
 impl BlockColumnFeature {
-    /// 按官方 codec 解析；任一 provider 是注册表引用、或 `allowed_placement`
-    /// 含未移植谓词时返回 `None`，让 placed feature 标 unsupported。
+    /// 按官方 codec 解析；`allowed_placement` 含未移植谓词时返回 `None`，让 placed
+    /// feature 标 unsupported。`provider` 的字符串形式按 `lookup` 查注册表。
     ///
-    /// Parse by the official codec; return `None` when a provider is a registry
-    /// reference or `allowed_placement` contains an unported predicate.
-    pub fn parse(config: &Value) -> Option<Self> {
+    /// Parse by the official codec; return `None` when `allowed_placement` contains an
+    /// unported predicate. String providers resolve through `lookup`.
+    pub fn parse<'a>(
+        config: &'a Value,
+        lookup: &dyn Fn(&str) -> Option<&'a Value>,
+    ) -> Option<Self> {
         let object = config.as_object()?;
         let layers = object
             .get("layers")?
@@ -55,7 +58,7 @@ impl BlockColumnFeature {
             .map(|entry| {
                 Some(Layer {
                     height: IntProvider::parse(entry.get("height")?).ok()?,
-                    provider: StateProvider::parse(entry.get("provider")?)?,
+                    provider: StateProvider::parse_with(entry.get("provider")?, lookup)?,
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -184,7 +187,7 @@ mod tests {
             "prioritize_tip": false,
             "type": "minecraft:block_column",
         });
-        let feature = BlockColumnFeature::parse(&config).unwrap();
+        let feature = BlockColumnFeature::parse(&config, &|_| None).unwrap();
         assert_eq!(feature.layers.len(), 2);
         assert_eq!(feature.direction, [0, 1, 0]);
         assert!(!feature.prioritize_tip);
@@ -199,7 +202,7 @@ mod tests {
             "prioritize_tip": true,
             "type": "minecraft:block_column",
         });
-        assert!(BlockColumnFeature::parse(&config).is_none());
+        assert!(BlockColumnFeature::parse(&config, &|_| None).is_none());
     }
 
     #[test]

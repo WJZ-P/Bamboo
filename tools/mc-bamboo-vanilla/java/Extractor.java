@@ -1415,6 +1415,14 @@ public final class Extractor {
         worldgen.add("feature", encodeRegistry(registries, ops, Registries.FEATURE, Feature.DIRECT_CODEC));
         worldgen.add("placed_feature",
                 encodeRegistry(registries, ops, Registries.PLACED_FEATURE, PlacedFeature.DIRECT_CODEC));
+        // `Holder<BlockStateProvider>` 字符串引用的注册表（`cave_vines_body` 等 8 条）。
+        // 地物配置里以字符串出现，Rust 侧解析时查这张表。
+        // The registry behind `Holder<BlockStateProvider>` string references (8 entries such
+        // as `cave_vines_body`); feature configs name them as strings, and Rust resolves
+        // them against this table.
+        worldgen.add("block_state_provider",
+                encodeRegistry(registries, ops, Registries.BLOCK_STATE_PROVIDER,
+                        BlockStateProvider.DIRECT_CODEC));
         worldgen.add("biome_features", biomeFeatures(registries));
         worldgen.add("features_per_step", featuresPerStep(registries));
         worldgen.add("multi_noise_presets", multiNoisePresets(registries));

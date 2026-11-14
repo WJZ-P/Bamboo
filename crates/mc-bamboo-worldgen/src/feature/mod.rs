@@ -25,6 +25,7 @@ pub mod simple_block;
 pub mod state;
 pub mod state_provider;
 pub mod survival;
+pub mod vegetation_patch;
 pub mod vines;
 pub mod world;
 

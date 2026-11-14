@@ -588,7 +588,7 @@ mod tests {
         // 存活判定未移植的 state 仍让整条修饰器 unsupported。
         // A state with an unported survival check still makes the modifier unsupported.
         let mushroom: Value = serde_json::from_str(
-            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:red_mushroom"}}"#,
+            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:pale_moss_carpet"}}"#,
         )
         .unwrap();
         assert!(!Modifier::parse(&mushroom).unwrap().is_supported());

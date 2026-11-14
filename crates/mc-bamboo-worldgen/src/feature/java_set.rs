@@ -80,8 +80,7 @@ impl JavaPosSet {
         // `putVal` 先挂到桶尾，再判 `++size > threshold`；桶内到 8 个且容量还小也翻倍。
         // `putVal` appends first, then checks `++size > threshold`; a bin reaching 8
         // nodes while the table is still small also doubles.
-        if self.len > self.threshold() || (self.buckets[index].len() >= 8 && self.capacity() < 64)
-        {
+        if self.len > self.threshold() || (self.buckets[index].len() >= 8 && self.capacity() < 64) {
             self.resize(self.capacity() * 2);
         }
     }
@@ -93,12 +92,12 @@ impl JavaPosSet {
     /// the rest move to `j + oldCapacity`, both keeping their relative order.
     fn resize(&mut self, new_capacity: usize) {
         let old_capacity = self.buckets.len();
-        let mut old = std::mem::replace(
+        let old = std::mem::replace(
             &mut self.buckets,
             (0..new_capacity).map(|_| Vec::new()).collect(),
         );
-        for j in 0..old_capacity {
-            for pos in std::mem::take(&mut old[j]) {
+        for (j, bin) in old.into_iter().enumerate() {
+            for pos in bin {
                 let high = spread(vec3i_hash(pos)) as usize & old_capacity != 0;
                 let index = if high { j + old_capacity } else { j };
                 self.buckets[index].push(pos);
