@@ -314,6 +314,7 @@ impl RegionColumn {
         }
     }
 
+
     /// 这个区块里的方块和光照，给测试和以后组装区块包用。
     #[cfg(test)]
     pub(crate) fn column(&self) -> &ChunkColumn {

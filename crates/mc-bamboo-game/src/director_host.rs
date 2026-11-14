@@ -32,6 +32,8 @@ use crate::{
     inbound::PlayerId,
     profiler::{Metric, SubPhase},
     region::{Region, RegionColumn, parking::Parking},
+    worldgen::GeneratedChunk,
+    worldgen_features::{BlockDelta, GenerateOutput, assemble_feature_column},
 };
 
 /// 编解码累计耗时（纳秒）。解析/序列化内联在世界线程上做，这里量出总耗时，
@@ -167,6 +169,23 @@ pub(crate) struct DirectorHost {
     io: Option<ChunkIo>,
     /// 生成阶段函数。内联执行器和计算池共用这一个。
     generator: Arc<dyn ChunkGenerator>,
+    /// 生成期每个区块的半成品 ProtoChunk（CARVERS 地形 + 已按 `TaskId` 顺序合并的
+    /// 地物写增量），存成不可变 `Arc`：任务发出后世界线程不再改这份快照，要改就
+    /// `Arc::make_mut` 写时复制出新的 `Arc`（设计稿 5.3.1）。只在世界线程读写，
+    /// 计算池拿到的都是 `Arc` 克隆、只读。区块交付/收回时清掉。
+    ///
+    /// Half-built ProtoChunk per chunk during generation (CARVERS terrain +
+    /// feature deltas merged in `TaskId` order), as an immutable `Arc`: once a
+    /// task is dispatched the world thread never mutates that snapshot, it
+    /// copy-on-writes a new `Arc` via `Arc::make_mut` (design 5.3.1). Only the
+    /// world thread mutates; the compute pool gets read-only `Arc` clones.
+    partials: BTreeMap<ChunkPos, Arc<GeneratedChunk>>,
+    /// 每个区块累计的地物写增量，按世界线程收到结果的顺序（`TaskId` 升序）
+    /// 追加；完工组装时排成规范序再落盘，结果与追加顺序无关。
+    /// Per-chunk feature write deltas, appended in the order the world thread
+    /// receives results (ascending `TaskId`); sorted canonically at assembly so
+    /// the final blocks do not depend on append order.
+    feature_deltas: BTreeMap<ChunkPos, Vec<BlockDelta>>,
     /// 计算池。`None` 是内联执行器：解析、生成、序列化当场做完（精确模式、测试）。
     pool: Option<ComputePool<ChunkJob>>,
     /// 还没交给池子的计算任务（待办）。池子里最多放 `threads × POOL_JOBS_PER_THREAD`
@@ -285,6 +304,8 @@ impl DirectorHost {
             parked: 0,
             io: None,
             generator: Arc::new(FlatGenerator::from_env()),
+            partials: BTreeMap::new(),
+            feature_deltas: BTreeMap::new(),
             pool: None,
             compute_backlog: HashMap::new(),
             backlog_order: BinaryHeap::new(),
@@ -1175,7 +1196,24 @@ impl DirectorHost {
                     }
                 }
             }
-            Task::Generate { stage, column, .. } => {
+            Task::Generate {
+                stage,
+                column,
+                neighbors,
+                ..
+            } => {
+                // 只读快照：中心取自己的半成品，邻居按 Director 列的位置从缓存取；
+                // 没有快照的位置留 `None`，计算线程用纯函数现算。全是 `Arc` 克隆，
+                // 不复制方块数据，也不改缓存。
+                // Read-only snapshots: the center's half-built column plus each
+                // listed neighbor's `Arc`; a missing neighbor is `None` and the
+                // compute thread regenerates it purely. All `Arc` clones: no
+                // block copy, no cache mutation.
+                let center_snapshot = self.partials.get(&pos).cloned();
+                let snapshots: Vec<(ChunkPos, Option<Arc<GeneratedChunk>>)> = neighbors
+                    .iter()
+                    .map(|(npos, _)| (*npos, self.partials.get(npos).cloned()))
+                    .collect();
                 if self.pool.is_some() {
                     let generator = Arc::clone(&self.generator);
                     self.queue_compute(
@@ -1185,18 +1223,46 @@ impl DirectorHost {
                         ChunkWork::Generate {
                             stage,
                             center: column,
+                            center_snapshot,
+                            neighbors: snapshots,
                             generator,
                         },
                     );
                     return None;
                 }
-                // 邻居视图现在总是空的（超平坦不需要），见 `chunk_generator`。
+                // 内联执行器：当场跑，增量由 `merge_generated` 合并（同一世界线程）。
+                // Inline: run now; `merge_generated` merges deltas on this thread.
+                let output = self.generator.generate(
+                    stage,
+                    pos,
+                    column,
+                    center_snapshot,
+                    &snapshots,
+                );
+                self.merge_generated(pos, &output);
                 TaskResult::Generated {
                     stage,
-                    column: self.generator.generate(stage, pos, column, &[]),
+                    column: output.column,
                 }
             }
-            Task::Assemble { column, .. } => TaskResult::Assembled { column },
+            Task::Assemble { column, .. } => {
+                // 生成到完工后用不可变的 CARVERS 快照 + 累计的地物增量组装交付
+                // 盒子（增量排规范序，和合并顺序无关）；flat / 读盘路径没有这份
+                // 快照，原盒子照旧。组装和生成用的是同一个 `build_region_column`。
+                // At completion, assemble from the immutable CARVERS snapshot +
+                // accumulated feature deltas (canonical order, merge-order
+                // independent); flat / disk paths keep the original box.
+                let column = match self.partials.get(&pos) {
+                    Some(snapshot) => {
+                        let mut deltas = self.feature_deltas.remove(&pos).unwrap_or_default();
+                        assemble_feature_column(snapshot.as_ref(), &mut deltas).unwrap_or(column)
+                    }
+                    None => column,
+                };
+                self.partials.remove(&pos);
+                self.feature_deltas.remove(&pos);
+                TaskResult::Assembled { column }
+            }
             Task::Save { seq, column, .. } => {
                 if self.io.is_some() {
                     if self.pool.is_some() {
@@ -1357,6 +1423,28 @@ impl DirectorHost {
             .collect()
     }
 
+    /// 合并一次生成结果：`terrain` 的 CARVERS 快照进缓存（不可变 `Arc`，不改
+    /// 已有的那份）；地物写增量按 `TaskId` 顺序追加到目标区块的增量表。
+    /// `compute_event` 已按 `TaskId` 升序、内联路径也在同一世界线程调用，所以
+    /// 追加顺序确定；完工时 `assemble_feature_column` 再排规范序，结果与顺序无关。
+    ///
+    /// Merge one generation result: cache the `terrain` CARVERS snapshot as an
+    /// immutable `Arc` (never mutate an existing snapshot) and append feature
+    /// deltas to each target chunk's delta list in `TaskId` order. `compute_event`
+    /// calls this in ascending `TaskId` order; `assemble_feature_column` sorts
+    /// canonically at completion, so the result is order-independent.
+    fn merge_generated(&mut self, pos: ChunkPos, output: &GenerateOutput) {
+        if let Some(terrain) = &output.terrain {
+            self.partials.insert(pos, Arc::new(terrain.clone()));
+        }
+        for (target, deltas) in &output.deltas {
+            self.feature_deltas
+                .entry(*target)
+                .or_default()
+                .extend_from_slice(deltas);
+        }
+    }
+
     /// 一条池子回执变成 Director 的 `TaskDone`。
     fn compute_event(&mut self, id: TaskId, reply: ChunkReply) -> Event<Box<RegionColumn>> {
         let ChunkReply {
@@ -1370,7 +1458,13 @@ impl DirectorHost {
             ChunkOutcome::Decoded(_) if cancelled => TaskResult::Cancelled,
             ChunkOutcome::Decoded(Ok(column)) => TaskResult::Decoded { column },
             ChunkOutcome::Decoded(Err(error)) => TaskResult::BadChunk { error },
-            ChunkOutcome::Generated { stage, column } => TaskResult::Generated { stage, column },
+            ChunkOutcome::Generated { stage, output } => {
+                self.merge_generated(pos, &output);
+                TaskResult::Generated {
+                    stage,
+                    column: output.column,
+                }
+            }
             ChunkOutcome::GenerateFailed { error } => TaskResult::BadChunk { error },
             ChunkOutcome::Saved {
                 seq,

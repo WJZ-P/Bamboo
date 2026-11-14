@@ -82,6 +82,7 @@ mod world_gen_settings;
 pub mod world_options;
 mod world_state;
 pub mod worldgen;
+mod worldgen_features;
 mod worldgen_spawn;
 
 pub use command::test_commands;

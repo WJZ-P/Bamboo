@@ -261,10 +261,12 @@ impl crate::chunk_generator::ChunkGenerator for CountingGenerator {
         stage: mc_bamboo_world::ticket::ChunkStatus,
         pos: ChunkPos,
         center: Option<Box<crate::region::RegionColumn>>,
+        center_snapshot: crate::chunk_generator::CenterSnapshot,
         neighbors: crate::chunk_generator::NeighborView<'_>,
-    ) -> Box<crate::region::RegionColumn> {
+    ) -> crate::worldgen_features::GenerateOutput {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.generate(stage, pos, center, neighbors)
+        self.inner
+            .generate(stage, pos, center, center_snapshot, neighbors)
     }
 }
 
