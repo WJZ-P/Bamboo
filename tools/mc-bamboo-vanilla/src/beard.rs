@@ -378,6 +378,7 @@ fn compare(worldgen: &Worldgen, parsed: &Parsed, break_self_test: bool) -> Resul
         let beardifier = Beardifier::from_parts(rigids, junctions);
 
         // affectedBox：并集 + inflatedBy(24) 的结果，逐字段核对。
+        // affectedBox: the union + inflatedBy(24) result, checked field by field.
         affected_cmp += 1;
         match (beardifier.affected_box(), case.affected) {
             (None, None) => {}
@@ -416,6 +417,7 @@ fn compare(worldgen: &Worldgen, parsed: &Parsed, break_self_test: bool) -> Resul
         }
 
         // sampleValue 逐点，原始位模式。
+        // sampleValue point by point, raw bit patterns.
         let mut index = 0_usize;
         for z in 0..16 {
             for x in 0..16 {
@@ -440,6 +442,7 @@ fn compare(worldgen: &Worldgen, parsed: &Parsed, break_self_test: bool) -> Resul
         }
 
         // sampleVolume 成批，原始位模式。
+        // sampleVolume in bulk, raw bit patterns.
         let mut out = vec![0.0_f32; expected_len];
         beardifier.sample_volume(&mut out, &volume);
         for (index, &ours) in out.iter().enumerate() {
@@ -457,6 +460,7 @@ fn compare(worldgen: &Worldgen, parsed: &Parsed, break_self_test: bool) -> Resul
         }
 
         // 三个阶段的方块。
+        // Blocks of the three stages.
         for (stage_name, snapshot) in &case.blocks {
             let Some(stage) = stage_of(stage_name) else {
                 push(

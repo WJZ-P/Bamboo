@@ -590,6 +590,7 @@ mod tests {
         );
         assert_eq!(beard.rigids().len(), 1);
         // `forStructuresInChunk` 对非 pool 结构件固定用 groundLevelDelta = 0。
+        // `forStructuresInChunk` always uses groundLevelDelta = 0 for non-pool pieces.
         assert_eq!(beard.rigids()[0].ground_level_delta, 0);
         assert_eq!(
             beard.rigids()[0].terrain_adjustment,
@@ -612,6 +613,7 @@ mod tests {
     #[test]
     fn a_piece_more_than_twelve_blocks_away_is_excluded() {
         // `isCloseToChunk(12)` 只比 XZ：`maxX < minBlockX - 12` 时不交。
+        // `isCloseToChunk(12)` compares XZ only: no overlap when `maxX < minBlockX - 12`.
         let far = piece([40, 60, 0, 50, 70, 10], 0, PieceKind::Plain);
         let beard =
             Beardifier::for_structures_in_chunk(0, 0, &[start(TerrainAdjustment::Bury, vec![far])]);
@@ -656,9 +658,11 @@ mod tests {
             )],
         );
         // 只有 Rigid projection 收成 Rigid，且沿用配置里那个 groundLevelDelta。
+        // Only the Rigid projection becomes a Rigid, keeping its configured groundLevelDelta.
         assert_eq!(beard.rigids().len(), 1);
         assert_eq!(beard.rigids()[0].ground_level_delta, 3);
         // 两个 pool 结构件的 junction 都被收，哪怕 projection 不是 Rigid。
+        // Junctions from both pool pieces are collected, even for a non-Rigid projection.
         assert_eq!(beard.junctions().len(), 2);
     }
 
@@ -680,6 +684,7 @@ mod tests {
                     PieceKind::Pool {
                         projection: PoolProjection::Rigid,
                         // -12 和 27 是开界，26 / -11 在内。
+                        // -12 and 27 are open bounds; 26 / -11 are inside.
                         junctions: vec![
                             make(-12, 5),
                             make(-11, 5),
@@ -706,10 +711,12 @@ mod tests {
     fn kernel_center_and_an_offset_match_the_official_formula() {
         let kernel = kernel_values();
         // BEARD_KERNEL[(dz+12)*576 + (dx+12)*24 + (dy+12)] = e^(-(dx²+(dy+0.5)²+dz²)/16)。
+        // BEARD_KERNEL[(dz+12)*576 + (dx+12)*24 + (dy+12)] = e^(-(dx²+(dy+0.5)²+dz²)/16).
         let center = kernel[(12 * 576 + 12 * 24 + 12) as usize];
         let expected_center = (-0.25_f64 / 16.0_f64).exp() as f32;
         assert_eq!(center.to_bits(), expected_center.to_bits());
         // dx=1,dy=0,dz=0：xi=13, yi=12, zi=12。
+        // dx=1, dy=0, dz=0: xi=13, yi=12, zi=12.
         let offset = kernel[(12 * 576 + 13 * 24 + 12) as usize];
         let expected_offset = (-1.25_f64 / 16.0_f64).exp() as f32;
         assert_eq!(offset.to_bits(), expected_offset.to_bits());

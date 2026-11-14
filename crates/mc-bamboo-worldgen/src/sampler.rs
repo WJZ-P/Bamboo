@@ -1844,8 +1844,11 @@ impl Compiler {
     fn compile_node(&mut self, function: &Ref) -> Sampler {
         match &function.kind {
             Kind::Constant(value) => Sampler::Constant(*value),
-            // Blender 为空：官方 `ContextBoundSampler` 的后备常量。
-            // Beardifier 也是 `ContextBoundSampler`，但求值时从 `Context` 的 user field 取真值。
+            // Blender 为空取官方 `ContextBoundSampler` 的后备常量；Beardifier 也是
+            // `ContextBoundSampler`，但求值时从 `Context` 的 user field 取真值。
+            // Blender is empty, so use the official `ContextBoundSampler` fallback; the
+            // Beardifier is also a `ContextBoundSampler` but reads its real value from the
+            // `Context` user field at sample time.
             Kind::BlendAlpha => Sampler::Constant(1.0),
             Kind::BlendOffset => Sampler::Constant(0.0),
             Kind::Beardifier => Sampler::Beardifier,

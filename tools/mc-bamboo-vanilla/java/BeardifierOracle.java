@@ -125,7 +125,11 @@ public class BeardifierOracle {
         }
     }
 
-    /** 和 ChunkgenOracle 一样：按官方 WorldLoader 的前半段读数据包注册表。 */
+    /**
+     * 和 ChunkgenOracle 一样：按官方 WorldLoader 的前半段读数据包注册表。
+     *
+     * <p>Same as ChunkgenOracle: load datapack registries via the first half of vanilla WorldLoader.
+     */
     private static LayeredRegistryAccess<RegistryLayer> loadRegistries(
             CloseableResourceManager resources) {
         var initial = RegistryLayer.createRegistryAccess();
@@ -140,7 +144,11 @@ public class BeardifierOracle {
         return initial.replaceFrom(RegistryLayer.WORLD, world);
     }
 
-    /** 一个对拍用例：真实 Beardifier 的输入就是这些 Rigid + Junction。 */
+    /**
+     * 一个对拍用例：真实 Beardifier 的输入就是这些 Rigid + Junction。
+     *
+     * <p>One oracle case: the Rigid + Junction list is exactly the input of a real Beardifier.
+     */
     private static final class Case {
         final long seed;
         final int cx;
@@ -172,7 +180,11 @@ public class BeardifierOracle {
         }
     }
 
-    /** 一组覆盖五个 TerrainAdjustment、juncton、空、边界外扩的用例。 */
+    /**
+     * 一组覆盖五个 TerrainAdjustment、junction、空、边界外扩的用例。
+     *
+     * <p>Cases covering all five TerrainAdjustment kinds, junctions, empty and boundary boxes.
+     */
     private static List<Case> cases() {
         long[] seeds = {0L, 1L, -1L, 42L, 1234567890123456789L, -8765432109876543210L};
         int[][] chunks = {
@@ -181,55 +193,83 @@ public class BeardifierOracle {
         };
         List<Case> list = new ArrayList<>();
         Case c = new Case(seeds[0], chunks[0][0], chunks[0][1]);
-        list.add(c); // case 0: EMPTY / 没有结构影响密度。
+        // case 0：EMPTY，没有结构影响密度。
+        // case 0: EMPTY, no structure affects density.
+        list.add(c);
         c = new Case(seeds[1], chunks[1][0], chunks[1][1]);
         c.rigid(2, 64, 2, 13, 72, 13, TerrainAdjustment.BEARD_THIN, 0);
-        list.add(c); // case 1: village-like beard_thin。
+        // case 1：一块村庄式的 beard_thin。
+        // case 1: one village-like beard_thin piece.
+        list.add(c);
         c = new Case(seeds[2], chunks[2][0], chunks[2][1]);
         c.rigid(0, -52, 0, 24, -40, 24, TerrainAdjustment.BURY, -1);
-        list.add(c); // case 2: ancient-city-like bury (deep)。
+        // case 2：深埋古城式的 bury。
+        // case 2: a deep ancient-city-like bury piece.
+        list.add(c);
         c = new Case(seeds[3], chunks[3][0], chunks[3][1]);
         c.rigid(-8, 60, -8, 20, 78, 20, TerrainAdjustment.BEARD_BOX, 2);
-        list.add(c); // case 3: beard_box 跨出区块 XZ。
+        // case 3：beard_box 跨出区块 XZ。
+        // case 3: beard_box extending beyond the chunk XZ bounds.
+        list.add(c);
         c = new Case(seeds[4], chunks[4][0], chunks[4][1]);
         c.rigid(4, -40, 4, 19, -20, 19, TerrainAdjustment.ENCAPSULATE, 0);
-        list.add(c); // case 4: trial-chambers-like encapsulate。
+        // case 4：试炼密室式的 encapsulate。
+        // case 4: a trial-chambers-like encapsulate piece.
+        list.add(c);
         c = new Case(seeds[5], chunks[5][0], chunks[5][1]);
         c.rigid(1, 60, 1, 8, 68, 8, TerrainAdjustment.NONE, 0);
         c.rigid(8, 62, 8, 15, 70, 15, TerrainAdjustment.BEARD_THIN, 0);
-        list.add(c); // case 5: 一块 NONE(贡献 0) + 一块 beard_thin。
+        // case 5：一块 NONE(贡献 0) 加一块 beard_thin。
+        // case 5: a NONE piece (zero contribution) plus a beard_thin piece.
+        list.add(c);
         c = new Case(seeds[0], chunks[6][0], chunks[6][1]);
         c.rigid(0, 62, 0, 10, 70, 10, TerrainAdjustment.BEARD_THIN, 1);
         c.rigid(6, -50, 6, 15, -42, 15, TerrainAdjustment.BURY, -2);
         c.rigid(2, 66, 2, 14, 80, 14, TerrainAdjustment.BEARD_BOX, 3);
         c.rigid(4, 300, 4, 12, 318, 12, TerrainAdjustment.ENCAPSULATE, 0);
         c.junction(8, 70, 8).junction(3, 64, 12).junction(12, 66, 3);
-        list.add(c); // case 6: 四个 adjustment + 三个 junction 同时。
+        // case 6：四个 adjustment 加三个 junction 同时。
+        // case 6: four adjustments plus three junctions at once.
+        list.add(c);
         c = new Case(seeds[1], chunks[7][0], chunks[7][1]);
         c.junction(2, 64, 2).junction(13, 66, 5).junction(7, 68, 12).junction(0, 70, 0);
-        list.add(c); // case 7: 只有 junction。
+        // case 7：只有 junction。
+        // case 7: junctions only.
+        list.add(c);
         c = new Case(seeds[2], chunks[8][0], chunks[8][1]);
         c.rigid(3, 60, 3, 14, 74, 14, TerrainAdjustment.BEARD_THIN, -3);
         c.junction(8, 62, 8).junction(11, 64, 11);
-        list.add(c); // case 8: 负 groundLevelDelta + junction。
+        // case 8：负 groundLevelDelta 加 junction。
+        // case 8: a negative groundLevelDelta plus junctions.
+        list.add(c);
         c = new Case(seeds[3], chunks[9][0], chunks[9][1]);
         c.rigid(0, -60, 0, 15, -48, 15, TerrainAdjustment.BEARD_BOX, 0);
         c.rigid(5, 66, 5, 18, 76, 18, TerrainAdjustment.ENCAPSULATE, 1);
         c.junction(9, 70, 9);
-        list.add(c); // case 9: 贴底 + 贴顶 + junction。
+        // case 9：贴底加贴顶加 junction。
+        // case 9: bottom-hugging plus top-hugging boxes plus a junction.
+        list.add(c);
         c = new Case(seeds[4], chunks[0][0], chunks[0][1]);
         c.rigid(-10, 64, 2, 6, 70, 14, TerrainAdjustment.BEARD_THIN, 0);
         c.rigid(9, 64, -6, 26, 70, 8, TerrainAdjustment.BEARD_THIN, 0);
-        list.add(c); // case 10: 两块相邻 village beard_thin，XZ 都外扩。
+        // case 10：两块相邻 village beard_thin，XZ 都外扩。
+        // case 10: two adjacent village beard_thin pieces, both extending past XZ.
+        list.add(c);
         c = new Case(seeds[5], chunks[1][0], chunks[1][1]);
         c.rigid(2, -58, 2, 13, -44, 13, TerrainAdjustment.BURY, 0);
         c.rigid(4, 62, 4, 12, 70, 12, TerrainAdjustment.BEARD_THIN, 2);
         c.junction(8, 64, 8).junction(8, -50, 8);
-        list.add(c); // case 11: 深 bury + 地表 beard_thin + 两个 junction。
+        // case 11：深 bury 加地表 beard_thin 加两个 junction。
+        // case 11: a deep bury plus a surface beard_thin plus two junctions.
+        list.add(c);
         return list;
     }
 
-    /** 照 forStructuresInChunk 的尾部：所有 piece / junction 包围盒并集再 inflatedBy(24)。 */
+    /**
+     * 照 forStructuresInChunk 的尾部：所有 piece / junction 包围盒并集再 inflatedBy(24)。
+     *
+     * <p>Like the tail of forStructuresInChunk: union of all piece/junction boxes, inflatedBy(24).
+     */
     private static BoundingBox affectedBoxOf(Case c) {
         BoundingBox any = null;
         for (Beardifier.Rigid r : c.rigids) {
@@ -316,6 +356,7 @@ public class BeardifierOracle {
             write(header);
 
             // BEARD_KERNEL 的原始位模式，Rust 侧逐位核对它的构造。
+            // Raw BEARD_KERNEL bits, for Rust to verify its construction bit-for-bit.
             Field kernelField = Beardifier.class.getDeclaredField("BEARD_KERNEL");
             kernelField.setAccessible(true);
             float[] kernel = (float[]) kernelField.get(null);
@@ -419,6 +460,7 @@ public class BeardifierOracle {
                 line.add("affected", a);
             }
             // sampleValue 逐点（体积顺序 z,x,y），原始位模式。
+            // sampleValue point by point (volume order z,x,y), raw bit patterns.
             JsonArray density = new JsonArray();
             int bx0 = c.bx();
             int bz0 = c.bz();
@@ -434,6 +476,7 @@ public class BeardifierOracle {
             }
             line.add("density", density);
             // sampleVolume 成批，原始位模式。
+            // sampleVolume in bulk, raw bit patterns.
             DensityBuffer buffer = DensityBuffer.createUnpooled(volume.size());
             beardifier.sampleVolume(SamplerContext.EMPTY_UNCACHED, buffer, volume);
             JsonArray vol = new JsonArray();
