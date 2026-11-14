@@ -21,6 +21,7 @@ use super::{
     multiface::MultifaceGrowthFeature,
     ores,
     placement::OreFeature,
+    sculk_patch::{self, SculkPatchFeature},
     simple_block::SimpleBlockFeature,
     speleothem::{self, SpeleothemFeature},
     speleothem_cluster::{self, SpeleothemClusterFeature},
@@ -48,6 +49,7 @@ pub enum Leaf {
     LargeDripstone(LargeDripstoneFeature),
     Multiface(MultifaceGrowthFeature),
     Ore(OreFeature),
+    SculkPatch(SculkPatchFeature),
     SimpleBlock(SimpleBlockFeature),
     Speleothem(SpeleothemFeature),
     SpeleothemCluster(SpeleothemClusterFeature),
@@ -90,6 +92,7 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         }
         "minecraft:multiface_growth" => Leaf::Multiface(MultifaceGrowthFeature::parse(config)?),
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
+        "minecraft:sculk_patch" => Leaf::SculkPatch(SculkPatchFeature::parse(config)?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?),
         "minecraft:speleothem" => Leaf::Speleothem(SpeleothemFeature::parse(config).ok()?),
         "minecraft:speleothem_cluster" => {
@@ -126,6 +129,7 @@ pub fn place_leaf(
         Leaf::LargeDripstone(feature) => large_dripstone::place(feature, world, random, pos),
         Leaf::Multiface(feature) => feature.place(world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
+        Leaf::SculkPatch(feature) => sculk_patch::place(feature, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
         Leaf::Speleothem(feature) => speleothem::place(feature, world, random, pos),
         Leaf::SpeleothemCluster(feature) => speleothem_cluster::place(feature, world, random, pos),

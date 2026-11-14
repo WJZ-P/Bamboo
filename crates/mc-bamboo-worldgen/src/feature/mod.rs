@@ -26,6 +26,7 @@ pub mod provider;
 pub mod registry;
 pub mod rule_test;
 pub mod run;
+pub mod sculk_patch;
 pub mod shape_update;
 pub mod simple_block;
 pub mod speleothem;
