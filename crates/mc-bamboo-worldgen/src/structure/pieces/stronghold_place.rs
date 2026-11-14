@@ -370,16 +370,37 @@ pub fn prison_hall_post_process(
     piece.box_selected(0, 0, 0, 8, 4, 10, true, random);
     generate_small_door(piece, entry_door, 1, 1, 0);
     piece.box_at(1, 1, 10, 3, 3, 10, cave_air(), cave_air(), false);
-    let bricks = Bricks::bricks();
-    piece.box_at(4, 1, 1, 4, 3, 9, bricks, bricks, false);
-    piece.box_at(5, 1, 1, 7, 3, 9, cave_air(), cave_air(), false);
-    piece.box_at(8, 1, 1, 8, 3, 9, bricks, bricks, false);
-    // 上层栏杆。
-    let bars = block("minecraft:iron_bars");
-    for z in [1, 3, 5, 7, 9] {
-        piece.place(bars, 4, 4, z);
-        piece.place(bars, 8, 4, z);
+    // 四道竖直的选择器盒，把牢房隔开。
+    // Four vertical selector boxes separating the cells.
+    for z in [1, 3, 7, 9] {
+        piece.box_selected(4, 1, z, 4, 3, z, false, random);
     }
+    let bars = block("minecraft:iron_bars");
+    let ns = with_props(bars, &[("north", "true"), ("south", "true")]);
+    let ns_east = with_props(
+        bars,
+        &[("north", "true"), ("south", "true"), ("east", "true")],
+    );
+    let we = with_props(bars, &[("west", "true"), ("east", "true")]);
+    for y in 1..=3 {
+        piece.place(ns, 4, y, 4);
+        piece.place(ns_east, 4, y, 5);
+        piece.place(ns, 4, y, 6);
+        piece.place(we, 5, y, 5);
+        piece.place(we, 6, y, 5);
+        piece.place(we, 7, y, 5);
+    }
+    piece.place(ns, 4, 3, 2);
+    piece.place(ns, 4, 3, 8);
+    // 两扇朝西的铁门（各两格高）。
+    // Two west-facing iron doors, two blocks tall each.
+    let door = block("minecraft:iron_door");
+    let bottom = with_props(door, &[("facing", "west"), ("half", "lower")]);
+    let top = with_props(door, &[("facing", "west"), ("half", "upper")]);
+    piece.place(bottom, 4, 1, 2);
+    piece.place(top, 4, 2, 2);
+    piece.place(bottom, 4, 1, 8);
+    piece.place(top, 4, 2, 8);
 }
 
 /// `RightTurn.postProcess`。
@@ -403,55 +424,122 @@ pub fn right_turn_post_process(
     }
 }
 
-/// `RoomCrossing.postProcess`。
+/// `RoomCrossing.postProcess`，三种 `type` 各一份完整布局。
 ///
-/// `RoomCrossing.postProcess`.
+/// `RoomCrossing.postProcess` with all three `type` layouts.
 pub fn room_crossing_post_process(
     piece: &mut StrongholdPiece<'_>,
     random: &WorldgenRandom,
     entry_door: SmallDoorType,
     extra_type: i32,
 ) {
-    piece.box_selected(0, 0, 0, 6, 6, 6, true, random);
-    generate_small_door(piece, entry_door, 1, 1, 0);
-    generate_small_door(piece, SmallDoorType::Opening, 1, 1, 6);
-    piece.box_at(0, 1, 1, 0, 5, 5, cave_air(), cave_air(), false);
-    piece.box_at(6, 1, 1, 6, 5, 5, cave_air(), cave_air(), false);
-    piece.box_at(1, 1, 0, 5, 5, 0, cave_air(), cave_air(), false);
+    piece.box_selected(0, 0, 0, 10, 6, 10, true, random);
+    generate_small_door(piece, entry_door, 4, 1, 0);
+    piece.box_at(4, 1, 10, 6, 3, 10, cave_air(), cave_air(), false);
+    piece.box_at(0, 1, 4, 0, 3, 6, cave_air(), cave_air(), false);
+    piece.box_at(10, 1, 4, 10, 3, 6, cave_air(), cave_air(), false);
     let bricks = Bricks::bricks();
-    for y in 1..=5 {
-        piece.place(bricks, 1, y, 5);
-        piece.place(bricks, 5, y, 5);
-        piece.place(bricks, 1, y, 1);
-        piece.place(bricks, 5, y, 1);
-    }
+    let slab = block("minecraft:smooth_stone_slab");
     match extra_type {
         0 => {
-            piece.place(bricks, 2, 1, 2);
-            piece.place(bricks, 3, 1, 2);
-            piece.place(bricks, 2, 1, 3);
-            piece.place(bricks, 3, 1, 3);
-            // 中间一根柱子。
-            for y in 2..=5 {
-                piece.place(bricks, 2, y, 3);
-                piece.place(bricks, 3, y, 3);
-                piece.place(bricks, 2, y, 2);
-                piece.place(bricks, 3, y, 2);
+            for y in 1..=3 {
+                piece.place(bricks, 5, y, 5);
+            }
+            let west_torch = with_property(block("minecraft:wall_torch"), "facing", "west")
+                .unwrap_or_else(|| block("minecraft:wall_torch"));
+            let east_torch = with_property(block("minecraft:wall_torch"), "facing", "east")
+                .unwrap_or_else(|| block("minecraft:wall_torch"));
+            let south_torch = with_property(block("minecraft:wall_torch"), "facing", "south")
+                .unwrap_or_else(|| block("minecraft:wall_torch"));
+            let north_torch = with_property(block("minecraft:wall_torch"), "facing", "north")
+                .unwrap_or_else(|| block("minecraft:wall_torch"));
+            piece.place(west_torch, 4, 3, 5);
+            piece.place(east_torch, 6, 3, 5);
+            piece.place(south_torch, 5, 3, 4);
+            piece.place(north_torch, 5, 3, 6);
+            for (x, z) in [
+                (4, 4),
+                (4, 5),
+                (4, 6),
+                (6, 4),
+                (6, 5),
+                (6, 6),
+                (5, 4),
+                (5, 6),
+            ] {
+                piece.place(slab, x, 1, z);
             }
         }
         1 => {
-            for y in 1..=3 {
-                piece.place(bricks, 2, y, 2);
-                piece.place(bricks, 3, y, 3);
+            for i in 0..5 {
+                piece.place(bricks, 3, 1, 3 + i);
+                piece.place(bricks, 7, 1, 3 + i);
+                piece.place(bricks, 3 + i, 1, 3);
+                piece.place(bricks, 3 + i, 1, 7);
             }
+            for y in 1..=3 {
+                piece.place(bricks, 5, y, 5);
+            }
+            piece.place(block("minecraft:water"), 5, 4, 5);
+        }
+        2 => {
+            let cobble = block("minecraft:cobblestone");
+            for z in 1..=9 {
+                piece.place(cobble, 1, 3, z);
+                piece.place(cobble, 9, 3, z);
+            }
+            for x in 1..=9 {
+                piece.place(cobble, x, 3, 1);
+                piece.place(cobble, x, 3, 9);
+            }
+            for (x, y, z) in [
+                (5, 1, 4),
+                (5, 1, 6),
+                (5, 3, 4),
+                (5, 3, 6),
+                (4, 1, 5),
+                (6, 1, 5),
+                (4, 3, 5),
+                (6, 3, 5),
+            ] {
+                piece.place(cobble, x, y, z);
+            }
+            for y in 1..=3 {
+                piece.place(cobble, 4, y, 4);
+                piece.place(cobble, 6, y, 4);
+                piece.place(cobble, 4, y, 6);
+                piece.place(cobble, 6, y, 6);
+            }
+            piece.place(block("minecraft:wall_torch"), 5, 3, 5);
+            let planks = block("minecraft:oak_planks");
+            for z in 2..=8 {
+                piece.place(planks, 2, 3, z);
+                piece.place(planks, 3, 3, z);
+                if z <= 3 || z >= 7 {
+                    piece.place(planks, 4, 3, z);
+                    piece.place(planks, 5, 3, z);
+                    piece.place(planks, 6, 3, z);
+                }
+                piece.place(planks, 7, 3, z);
+                piece.place(planks, 8, 3, z);
+            }
+            let ladder = with_property(block("minecraft:ladder"), "facing", "west")
+                .unwrap_or_else(|| block("minecraft:ladder"));
+            for y in 1..=3 {
+                piece.place(ladder, 9, y, 3);
+            }
+            create_chest(piece, random, 3, 4, 8);
         }
         _ => {}
     }
 }
 
-/// `StairsDown.postProcess`（不含 `StartPiece`，那只是 `isSource` 不同）。
+/// `StairsDown.postProcess`（`StartPiece` 只是 `isSource` 不同，方块完全相同）。
 ///
-/// `StairsDown.postProcess` (`StartPiece` only differs by `isSource`).
+/// 螺旋下降的阶梯：石砖 / 台阶交替，不是六层楼梯。
+///
+/// `StairsDown.postProcess` (`StartPiece` differs only by `isSource`; the blocks are
+/// identical). A spiralling stone-brick and slab staircase, not six stacked stairs.
 pub fn stairs_down_post_process(
     piece: &mut StrongholdPiece<'_>,
     random: &WorldgenRandom,
@@ -461,17 +549,27 @@ pub fn stairs_down_post_process(
     generate_small_door(piece, entry_door, 1, 7, 0);
     generate_small_door(piece, SmallDoorType::Opening, 1, 1, 4);
     let bricks = Bricks::bricks();
-    let stairs = with_property(block("minecraft:stone_brick_stairs"), "facing", "south")
-        .unwrap_or_else(|| block("minecraft:stone_brick_stairs"));
-    for i in 0..6 {
-        piece.place(stairs, 1, 6 - i, 1 + i);
-        piece.place(stairs, 2, 6 - i, 1 + i);
-        piece.place(stairs, 3, 6 - i, 1 + i);
-        if i < 5 {
-            piece.place(bricks, 1, 5 - i, 1 + i);
-            piece.place(bricks, 2, 5 - i, 1 + i);
-            piece.place(bricks, 3, 5 - i, 1 + i);
-        }
+    let slab = block("minecraft:smooth_stone_slab");
+    for (state, x, y, z) in [
+        (bricks, 2, 6, 1),
+        (bricks, 1, 5, 1),
+        (slab, 1, 6, 1),
+        (bricks, 1, 5, 2),
+        (bricks, 1, 4, 3),
+        (slab, 1, 5, 3),
+        (bricks, 2, 4, 3),
+        (bricks, 3, 3, 3),
+        (slab, 3, 4, 3),
+        (bricks, 3, 3, 2),
+        (bricks, 3, 2, 1),
+        (slab, 3, 3, 1),
+        (bricks, 2, 2, 1),
+        (bricks, 1, 1, 1),
+        (slab, 1, 2, 1),
+        (bricks, 1, 1, 2),
+        (slab, 1, 1, 3),
+    ] {
+        piece.place(state, x, y, z);
     }
 }
 
