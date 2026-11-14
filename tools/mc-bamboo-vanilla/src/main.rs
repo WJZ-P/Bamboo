@@ -34,6 +34,8 @@
 //! mc-bamboo-vanilla structure-pieces <java 路径>
 //!     用官方结构件类对拍多件式结构的结构件布局（类型、包围盒、朝向、参数）；
 //!     已移植废弃矿井 / 要塞 / 海底神殿三种
+//! mc-bamboo-vanilla beard <java 路径> [--through noise|surface|carvers] [--break-self-test]
+//!     用官方 Beardifier 对拍结构对地形密度的影响（kernel / sampleValue / sampleVolume / 方块）
 //!
 //!     Compare findValidGenerationPoint's biome and height gates against vanilla
 //!     Structure.GenerationContext
@@ -70,6 +72,8 @@
 //! `oracle` 和 `probe-online` 依赖生成的数据。生成文件坏了、这个工具编译不过时，
 //! 用 `--no-default-features` 编译，`generate` 不需要它们。
 
+#[cfg(feature = "oracle")]
+mod beard;
 #[cfg(feature = "oracle")]
 mod chunk_content_oracle;
 #[cfg(feature = "oracle")]
@@ -155,6 +159,8 @@ const WORLDGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/WorldgenOracle.java"
 #[cfg(feature = "oracle")]
 const CHUNKGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkgenOracle.java";
 #[cfg(feature = "oracle")]
+const BEARD_SOURCE: &str = "tools/mc-bamboo-vanilla/java/BeardifierOracle.java";
+#[cfg(feature = "oracle")]
 const STRUCTURES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePlacementOracle.java";
 #[cfg(feature = "oracle")]
 const STRUCTURE_RINGS_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureRingsOracle.java";
@@ -193,6 +199,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-rings <java 路径>
       mc-bamboo-vanilla structure-validity <java 路径>
       mc-bamboo-vanilla structure-pieces <java 路径>
+      mc-bamboo-vanilla beard <java 路径> [--through noise|surface|carvers] [--break-self-test]
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -246,6 +253,7 @@ fn run() -> Result<(), String> {
         ["structure-rings", java, ref options @ ..] => structure_rings_cli(java, options),
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
         ["structure-pieces", java, ref options @ ..] => structure_pieces_cli(java, options),
+        ["beard", java, ref options @ ..] => beard_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
@@ -496,6 +504,11 @@ fn structure_pieces_cli(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn beard_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    beard::run(official_program(java, BEARD_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
 fn loot_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     loot_oracle::run(official_program(java, LOOT_ORACLE_SOURCE)?, options)
 }
@@ -715,6 +728,11 @@ fn structure_validity_cli(_java: &str, _options: &[&str]) -> Result<(), String> 
 
 #[cfg(not(feature = "oracle"))]
 fn structure_pieces_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn beard_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

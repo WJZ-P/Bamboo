@@ -239,6 +239,14 @@ fn beard_kernel() -> &'static [f32; KERNEL_SIZE] {
     })
 }
 
+/// 导出 24³ 个核值，供对拍工具和官方 `BEARD_KERNEL` 的原始位模式逐位核对。
+///
+/// Expose the 24³ kernel values so the oracle can compare them bit-for-bit with vanilla's
+/// `BEARD_KERNEL`.
+pub fn kernel_values() -> &'static [f32] {
+    beard_kernel().as_slice()
+}
+
 /// `computeBeardContribution(int dx, int dy, int dz)` → `computeBeardContribution(dx, dy+0.5, dz)`。
 ///
 /// `computeBeardContribution(int dx, int dy, int dz)` → `computeBeardContribution(dx, dy+0.5, dz)`.
@@ -327,6 +335,27 @@ impl Beardifier {
             junctions: Vec::new(),
             affected_box: None,
         }
+    }
+
+    /// `affectedBox`，供对拍核对并集 + `inflatedBy(24)` 的结果。
+    ///
+    /// The `affectedBox`, for the oracle to check the union + `inflatedBy(24)` result.
+    pub fn affected_box(&self) -> Option<Box3> {
+        self.affected_box
+    }
+
+    /// 收好的 `Rigid` 列表（合并时排查结构件收集用）。
+    ///
+    /// The collected `Rigid` list (for debugging piece collection at merge time).
+    pub fn rigids(&self) -> &[Rigid] {
+        &self.pieces
+    }
+
+    /// 收好的 jigsaw 连接点列表。
+    ///
+    /// The collected jigsaw junction list.
+    pub fn junctions(&self) -> &[Junction] {
+        &self.junctions
     }
 
     /// 用已经收好的 `Rigid` 和 junction 构造；照 `forStructuresInChunk` 的尾部算 `affectedBox`。
@@ -509,5 +538,173 @@ impl Beardifier {
             noise += get_beard_contribution(dx, dy, dz, dy) * 0.4_f32;
         }
         noise
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn piece(b: [i32; 6], gld: i32, kind: PieceKind) -> PieceInput {
+        PieceInput {
+            bounding_box: Box3 {
+                min_x: b[0],
+                min_y: b[1],
+                min_z: b[2],
+                max_x: b[3],
+                max_y: b[4],
+                max_z: b[5],
+            },
+            ground_level_delta: gld,
+            kind,
+        }
+    }
+
+    fn start(adj: TerrainAdjustment, pieces: Vec<PieceInput>) -> StructureStartInput {
+        StructureStartInput {
+            terrain_adjustment: adj,
+            pieces,
+        }
+    }
+
+    #[test]
+    fn plain_piece_becomes_a_zero_delta_rigid_and_inflates_the_box() {
+        let beard = Beardifier::for_structures_in_chunk(
+            0,
+            0,
+            &[start(
+                TerrainAdjustment::BeardThin,
+                vec![piece(
+                    [2, 60, 2, 13, 70, 13],
+                    7,
+                    PieceKind::Plain,
+                )],
+            )],
+        );
+        assert_eq!(beard.rigids().len(), 1);
+        // `forStructuresInChunk` 对非 pool 结构件固定用 groundLevelDelta = 0。
+        assert_eq!(beard.rigids()[0].ground_level_delta, 0);
+        assert_eq!(beard.rigids()[0].terrain_adjustment, TerrainAdjustment::BeardThin);
+        assert_eq!(beard.junctions().len(), 0);
+        assert_eq!(
+            beard.affected_box(),
+            Some(Box3 {
+                min_x: -22,
+                min_y: 36,
+                min_z: -22,
+                max_x: 37,
+                max_y: 94,
+                max_z: 37,
+            })
+        );
+    }
+
+    #[test]
+    fn a_piece_more_than_twelve_blocks_away_is_excluded() {
+        // `isCloseToChunk(12)` 只比 XZ：`maxX < minBlockX - 12` 时不交。
+        let far = piece([40, 60, 0, 50, 70, 10], 0, PieceKind::Plain);
+        let beard = Beardifier::for_structures_in_chunk(
+            0,
+            0,
+            &[start(TerrainAdjustment::Bury, vec![far])],
+        );
+        assert_eq!(beard.affected_box(), None);
+        assert_eq!(beard.rigids().len(), 0);
+    }
+
+    #[test]
+    fn only_rigid_pool_pieces_become_rigids_but_all_pool_junctions_are_checked() {
+        let b = [0, 60, 0, 10, 70, 10];
+        let beard = Beardifier::for_structures_in_chunk(
+            0,
+            0,
+            &[start(
+                TerrainAdjustment::BeardBox,
+                vec![
+                    piece(
+                        b,
+                        3,
+                        PieceKind::Pool {
+                            projection: PoolProjection::Rigid,
+                            junctions: vec![Junction {
+                                source_x: 5,
+                                source_ground_y: 64,
+                                source_z: 5,
+                            }],
+                        },
+                    ),
+                    piece(
+                        b,
+                        9,
+                        PieceKind::Pool {
+                            projection: PoolProjection::TerrainMatching,
+                            junctions: vec![Junction {
+                                source_x: 6,
+                                source_ground_y: 65,
+                                source_z: 6,
+                            }],
+                        },
+                    ),
+                ],
+            )],
+        );
+        // 只有 Rigid projection 收成 Rigid，且沿用配置里那个 groundLevelDelta。
+        assert_eq!(beard.rigids().len(), 1);
+        assert_eq!(beard.rigids()[0].ground_level_delta, 3);
+        // 两个 pool 结构件的 junction 都被收，哪怕 projection 不是 Rigid。
+        assert_eq!(beard.junctions().len(), 2);
+    }
+
+    #[test]
+    fn junction_xz_filter_uses_strict_chunk_bounds() {
+        let make = |x: i32, z: i32| Junction {
+            source_x: x,
+            source_ground_y: 64,
+            source_z: z,
+        };
+        let beard = Beardifier::for_structures_in_chunk(
+            0,
+            0,
+            &[start(
+                TerrainAdjustment::BeardThin,
+                vec![piece(
+                    [0, 60, 0, 10, 70, 10],
+                    0,
+                    PieceKind::Pool {
+                        projection: PoolProjection::Rigid,
+                        // -12 和 27 是开界，26 / -11 在内。
+                        junctions: vec![
+                            make(-12, 5),
+                            make(-11, 5),
+                            make(26, 5),
+                            make(27, 5),
+                            make(5, -12),
+                            make(5, 26),
+                        ],
+                    },
+                )],
+            )],
+        );
+        assert_eq!(beard.junctions().len(), 3);
+    }
+
+    #[test]
+    fn empty_starts_produce_empty_beardifier() {
+        let beard = Beardifier::for_structures_in_chunk(3, -7, &[]);
+        assert_eq!(beard.affected_box(), None);
+        assert_eq!(beard.sample_value(48, 64, -112), 0.0_f32);
+    }
+
+    #[test]
+    fn kernel_center_and_an_offset_match_the_official_formula() {
+        let kernel = kernel_values();
+        // BEARD_KERNEL[(dz+12)*576 + (dx+12)*24 + (dy+12)] = e^(-(dx²+(dy+0.5)²+dz²)/16)。
+        let center = kernel[(12 * 576 + 12 * 24 + 12) as usize];
+        let expected_center = (-0.25_f64 / 16.0_f64).exp() as f32;
+        assert_eq!(center.to_bits(), expected_center.to_bits());
+        // dx=1,dy=0,dz=0：xi=13, yi=12, zi=12。
+        let offset = kernel[(12 * 576 + 13 * 24 + 12) as usize];
+        let expected_offset = (-1.25_f64 / 16.0_f64).exp() as f32;
+        assert_eq!(offset.to_bits(), expected_offset.to_bits());
     }
 }
