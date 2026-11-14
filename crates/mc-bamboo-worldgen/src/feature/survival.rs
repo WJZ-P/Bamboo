@@ -120,14 +120,17 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
                 .is_some_and(|ids| ids.contains(&block_id_of(below)));
             state_facts(below) & (1u64 << (facts::STURDY_FULL + 1)) != 0 && !cannot_support
         }
-        // `TallSeagrassBlock.canSurvive`（half=lower）：`VegetationBlock.canSurvive` 加上
-        // 本格流体是 `FluidTags.WATER` 且 `isFull()`（amount == 8）。
-        // `TallSeagrassBlock.canSurvive` (half=lower): the VegetationBlock check plus a full
-        // `FluidTags.WATER` fluid at this position (amount == 8).
+        // `TallSeagrassBlock.canSurvive`（half=lower）：`DoublePlantBlock.canSurvive` →
+        // `VegetationBlock.canSurvive` → 覆写后的 `mayPlaceOn`（`isFaceSturdy(UP)` 且不在
+        // `cannot_support_seagrass` 里），再加上本格流体是满水的 `FluidTags.WATER`。
+        // `TallSeagrassBlock.canSurvive` (half=lower): the VegetationBlock check via the
+        // overridden `mayPlaceOn` (`isFaceSturdy(UP)`, not in `cannot_support_seagrass`) plus
+        // a full `FluidTags.WATER` fluid at this position.
         Some(Kind::TallSeagrass) => {
-            let id = block_id_of(below);
+            let cannot_support = block_tag("minecraft:cannot_support_seagrass")
+                .is_some_and(|ids| ids.contains(&block_id_of(below)));
             let supported =
-                block_tag("minecraft:supports_vegetation").is_some_and(|ids| ids.contains(&id));
+                state_facts(below) & (1u64 << (facts::STURDY_FULL + 1)) != 0 && !cannot_support;
             let fluid = state_fluid(state);
             supported
                 && fluid_tag("minecraft:water").is_some_and(|ids| ids.contains(&fluid.fluid))
@@ -137,14 +140,20 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
     }
 }
 
-/// 是否走 `DoublePlantBlock.placeAt`（放上下两格）而不是单格 `setBlock`。
+/// 是否走 `DoublePlantBlock.placeAt`（放上下两格）而不是单格 `setBlock`。官方判定是
+/// `stateToPlace.getBlock() instanceof DoublePlantBlock`，所以按祖先表查，
+/// `TallSeagrassBlock` 这种子类也算。
 ///
 /// Whether to use `DoublePlantBlock.placeAt` (two blocks) instead of a single `setBlock`.
+/// The official test is `instanceof DoublePlantBlock`, so check the ancestor table; subclasses
+/// such as `TallSeagrassBlock` count too.
 pub fn is_double_plant(state: u32) -> bool {
-    matches!(
-        block_of_state(state).map(|block| block.class),
-        Some(BlockClass::DoublePlantBlock) | Some(BlockClass::TallFlowerBlock)
-    )
+    block_of_state(state).is_some_and(|block| {
+        block
+            .class
+            .ancestors()
+            .contains(&mc_bamboo_data::BlockAncestor::DoublePlantBlock)
+    })
 }
 
 /// 按官方类名分派；返回 `None` 表示存活判定未移植。
