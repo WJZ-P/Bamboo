@@ -52,6 +52,7 @@ import net.minecraft.world.level.levelgen.structure.StructurePiece;
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder;
 import net.minecraft.world.level.levelgen.structure.pools.EmptyPoolElement;
 import net.minecraft.world.level.levelgen.structure.pools.FeaturePoolElement;
+import net.minecraft.world.level.levelgen.structure.pools.JigsawJunction;
 import net.minecraft.world.level.levelgen.structure.pools.LegacySinglePoolElement;
 import net.minecraft.world.level.levelgen.structure.pools.ListPoolElement;
 import net.minecraft.world.level.levelgen.structure.pools.SinglePoolElement;
@@ -258,8 +259,9 @@ public final class JigsawOracle {
         }
     }
 
-    /** 类型|模板名|pos|rotation|boundingBox(6)|groundLevelDelta|junctions。 */
-    private static String describe(PoolElementStructurePiece piece) {        StructurePoolElement element = piece.getElement();
+    /** 类型|模板名|pos|rotation|boundingBox(6)|groundLevelDelta|junctions|junction 详情。 */
+    private static String describe(PoolElementStructurePiece piece) {
+        StructurePoolElement element = piece.getElement();
         String type;
         String location;
         if (element == EmptyPoolElement.INSTANCE) {
@@ -283,12 +285,28 @@ public final class JigsawOracle {
         }
         BlockPos pos = piece.getPosition();
         BoundingBox box = piece.getBoundingBox();
-        return type + "|" + location + "|"
-                + pos.getX() + "|" + pos.getY() + "|" + pos.getZ() + "|"
-                + piece.getRotation().ordinal() + "|"
-                + box.minX() + "|" + box.minY() + "|" + box.minZ() + "|"
-                + box.maxX() + "|" + box.maxY() + "|" + box.maxZ() + "|"
-                + piece.getGroundLevelDelta() + "|" + piece.getJunctions().size();
+        StringBuilder line = new StringBuilder();
+        line.append(type).append('|').append(location).append('|')
+                .append(pos.getX()).append('|').append(pos.getY()).append('|')
+                .append(pos.getZ()).append('|')
+                .append(piece.getRotation().ordinal()).append('|')
+                .append(box.minX()).append('|').append(box.minY()).append('|')
+                .append(box.minZ()).append('|')
+                .append(box.maxX()).append('|').append(box.maxY()).append('|')
+                .append(box.maxZ()).append('|')
+                .append(piece.getGroundLevelDelta()).append('|')
+                .append(piece.getJunctions().size());
+        // junction 详情：sourceX|sourceGroundY|sourceZ|deltaY|destProjection。
+        // Junction detail: sourceX|sourceGroundY|sourceZ|deltaY|destProjection.
+        for (JigsawJunction junction : piece.getJunctions()) {
+            line.append('|')
+                    .append(junction.getSourceX()).append('|')
+                    .append(junction.getSourceGroundY()).append('|')
+                    .append(junction.getSourceZ()).append('|')
+                    .append(junction.getDeltaY()).append('|')
+                    .append(junction.getDestProjection().getName());
+        }
+        return line.toString();
     }
 
     /** 独立小场景：模拟 addPieces 里 free 的 join / joinIsNotEmpty / joinUnoptimized 序列。 */

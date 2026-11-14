@@ -524,7 +524,7 @@ fn check_query(
         let line = lines
             .get(&index)
             .ok_or_else(|| format!("Java missing P[{index}]"))?;
-        let want = vec![
+        let mut want = vec![
             piece.element.type_name().to_owned(),
             piece.element.location().unwrap_or("-").to_owned(),
             piece.position.0.to_string(),
@@ -540,6 +540,17 @@ fn check_query(
             piece.ground_level_delta.to_string(),
             piece.junctions.len().to_string(),
         ];
+        // junction 详情（`sourceX|sourceGroundY|sourceZ|deltaY|destProjection` × N）。
+        // Junction details (`sourceX|sourceGroundY|sourceZ|deltaY|destProjection` × N).
+        for junction in &piece.junctions {
+            want.extend([
+                junction.source_x.to_string(),
+                junction.source_ground_y.to_string(),
+                junction.source_z.to_string(),
+                junction.delta_y.to_string(),
+                junction.dest_projection.name().to_owned(),
+            ]);
+        }
         for (field, want) in want.iter().enumerate() {
             if line.get(field).is_none_or(|got| got != want) {
                 return Ok(Some(format!(
@@ -547,6 +558,13 @@ fn check_query(
                     line.get(field)
                 )));
             }
+        }
+        if line.len() != want.len() {
+            return Ok(Some(format!(
+                "P[{index}]: rust {} fields java {}",
+                want.len(),
+                line.len()
+            )));
         }
     }
     Ok(None)
