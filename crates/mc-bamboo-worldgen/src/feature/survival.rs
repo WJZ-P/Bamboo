@@ -56,6 +56,11 @@ enum Kind {
     /// `MushroomBlock.canSurvive`：下面 `isSolidRender`，且亮度 < 13（或下面在
     /// `overrides_mushroom_light_requirement` 里）。
     Mushroom,
+    /// 悬挂的红树胎生苗：上面那格在 `supports_hanging_mangrove_propagule` 标签里。
+    ///
+    /// A hanging mangrove propagule: the block above is in the
+    /// `supports_hanging_mangrove_propagule` tag.
+    HangingPropagule,
 }
 
 /// 这个状态的存活判定是否已移植。未移植时调用方要把整个 placed feature 标 unsupported，
@@ -93,6 +98,12 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         // `CarpetBlock.canSurvive` is `!level.isEmptyBlock(pos.below())`.
         Some(Kind::Carpet) => !is_air_block(below),
         Some(Kind::Mushroom) => mushroom_can_survive(world, pos),
+        Some(Kind::HangingPropagule) => {
+            let above = world.get_block(pos.0, pos.1 + 1, pos.2);
+            let id = block_id_of_state(above).map_or(-1, |id| id as i32);
+            block_tag("minecraft:supports_hanging_mangrove_propagule")
+                .is_some_and(|ids| ids.contains(&id))
+        }
         None => false,
     }
 }
@@ -322,6 +333,18 @@ fn classify(state: u32) -> Option<Kind> {
         // LeafLitterBlock 覆写 canSurvive 为 isFaceSturdy(UP)。
         // LeafLitterBlock overrides canSurvive with isFaceSturdy(UP).
         BlockClass::LeafLitterBlock => Kind::SturdyFaceUp,
+        // `MangrovePropaguleBlock.canSurvive`：悬挂时看上面那格；否则走 VegetationBlock，
+        // 而它的 `mayPlaceOn` 换成了 `supports_mangrove_propagule` 标签。
+        // `MangrovePropaguleBlock.canSurvive`: a hanging one checks the block above;
+        // otherwise VegetationBlock applies, with `mayPlaceOn` overridden to the
+        // `supports_mangrove_propagule` tag.
+        BlockClass::MangrovePropaguleBlock => {
+            if super::tree::property_value(state, "hanging") == Some("true") {
+                Kind::HangingPropagule
+            } else {
+                Kind::Vegetation("minecraft:supports_mangrove_propagule")
+            }
+        }
         // 配置里的 to_place 都是默认状态（half=lower），canSurvive 走 VegetationBlock。
         // Exported to_place states are all the default (half=lower), so canSurvive uses
         // the VegetationBlock tag check; placement still goes through placeAt.

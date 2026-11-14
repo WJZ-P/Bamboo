@@ -12,9 +12,10 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
-    bamboo::BambooFeature, block_column::BlockColumnFeature, multiface::MultifaceGrowthFeature,
-    ores, placement::OreFeature, simple_block::SimpleBlockFeature, vines::VinesFeature,
-    world::FeatureWorld,
+    bamboo::BambooFeature, block_column::BlockColumnFeature, huge_mushroom::HugeMushroomFeature,
+    multiface::MultifaceGrowthFeature, ores, placement::OreFeature,
+    simple_block::SimpleBlockFeature, tree::{TreeFeature, fallen::FallenTreeFeature},
+    vines::VinesFeature, world::FeatureWorld,
 };
 
 type Pos = (i32, i32, i32);
@@ -27,6 +28,9 @@ pub enum Leaf {
     BlockColumn(BlockColumnFeature),
     Multiface(MultifaceGrowthFeature),
     Vines(VinesFeature),
+    Tree(Box<TreeFeature>),
+    FallenTree(Box<FallenTreeFeature>),
+    HugeMushroom(Box<HugeMushroomFeature>),
 }
 
 /// 按 `Feature` 类型 ID 解析配置；未移植或解析不了的类型返回 `None`。
@@ -41,16 +45,24 @@ pub fn parse_leaf<'a>(
 ) -> Option<Leaf> {
     match kind {
         "minecraft:bamboo" => Some(Leaf::Bamboo(BambooFeature::parse(config)?)),
-        "minecraft:block_column" => Some(Leaf::BlockColumn(BlockColumnFeature::parse(
-            config, lookup,
-        )?)),
+        "minecraft:block_column" => {
+            Some(Leaf::BlockColumn(BlockColumnFeature::parse(config, lookup)?))
+        }
         "minecraft:multiface_growth" => {
             Some(Leaf::Multiface(MultifaceGrowthFeature::parse(config)?))
         }
         "minecraft:ore" => Some(Leaf::Ore(OreFeature::parse(config).ok()?)),
-        "minecraft:simple_block" => Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(
-            config, lookup,
-        )?)),
+        "minecraft:simple_block" => {
+            Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(config, lookup)?))
+        }
+        "minecraft:tree" => TreeFeature::parse(config).map(|tree| Leaf::Tree(Box::new(tree))),
+        "minecraft:fallen_tree" => {
+            FallenTreeFeature::parse(config).map(|tree| Leaf::FallenTree(Box::new(tree)))
+        }
+        "minecraft:huge_brown_mushroom" | "minecraft:huge_red_mushroom" => {
+            HugeMushroomFeature::parse(kind, config)
+                .map(|mushroom| Leaf::HugeMushroom(Box::new(mushroom)))
+        }
         "minecraft:vines" => Some(Leaf::Vines(VinesFeature::parse(config)?)),
         _ => None,
     }
@@ -72,5 +84,8 @@ pub fn place_leaf(
         Leaf::BlockColumn(feature) => feature.place(world, random, pos),
         Leaf::Multiface(feature) => feature.place(world, random, pos),
         Leaf::Vines(feature) => feature.place(world, random, pos),
+        Leaf::Tree(tree) => tree.place(world, random, pos),
+        Leaf::FallenTree(tree) => tree.place(world, random, pos),
+        Leaf::HugeMushroom(mushroom) => mushroom.place(world, random, pos),
     }
 }
