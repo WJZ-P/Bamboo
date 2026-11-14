@@ -78,7 +78,9 @@ impl Options {
                 "--through" => {
                     let value = args.next().ok_or(USAGE)?;
                     if *value != "features" {
-                        return Err(format!("gen-world only supports --through features: {USAGE}"));
+                        return Err(format!(
+                            "gen-world only supports --through features: {USAGE}"
+                        ));
                     }
                     // 游戏侧只移植了矿石，Java 侧也只留矿石地物；其余类型两边都
                     // 不放，9 宫格逐方块仍可比（见 docs/worldgen-features-plan.md）。

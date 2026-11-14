@@ -104,10 +104,7 @@ fn generated_blocks(threads: usize, positions: &[ChunkPos]) -> BTreeMap<ChunkPos
     };
     let mut world = World::new(config, receiver);
     for &pos in positions {
-        world.apply_ticket(TicketOp::Forced {
-            pos,
-            forced: true,
-        });
+        world.apply_ticket(TicketOp::Forced { pos, forced: true });
     }
 
     let deadline = Instant::now() + Duration::from_secs(180);
@@ -170,7 +167,10 @@ fn one_and_four_threads_generate_identical_feature_blocks() {
     let one = generated_blocks(1, &positions);
     let four = generated_blocks(4, &positions);
     assert_eq!(one.len(), 9);
-    assert_eq!(one.keys().collect::<Vec<_>>(), four.keys().collect::<Vec<_>>());
+    assert_eq!(
+        one.keys().collect::<Vec<_>>(),
+        four.keys().collect::<Vec<_>>()
+    );
     for (pos, blocks_one) in &one {
         let blocks_four = four.get(pos).expect("both runs delivered the same chunks");
         assert_eq!(

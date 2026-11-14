@@ -140,13 +140,9 @@ impl ChunkGenerator for OverworldGenerator {
             ChunkStatus::Terrain => generate_terrain_stage(&self.config, pos.x, pos.z),
             // `ChunkStatus.FEATURES`：3×3 视图 + `Generator::features()`。
             // `ChunkStatus.FEATURES`: 3×3 view + `Generator::features()`.
-            ChunkStatus::Features => generate_features_stage(
-                &self.config,
-                pos.x,
-                pos.z,
-                center_snapshot,
-                neighbors,
-            ),
+            ChunkStatus::Features => {
+                generate_features_stage(&self.config, pos.x, pos.z, center_snapshot, neighbors)
+            }
             _ => return passthrough_stage(center),
         };
         match result {

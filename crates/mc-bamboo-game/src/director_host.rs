@@ -1232,13 +1232,9 @@ impl DirectorHost {
                 }
                 // 内联执行器：当场跑，增量由 `merge_generated` 合并（同一世界线程）。
                 // Inline: run now; `merge_generated` merges deltas on this thread.
-                let output = self.generator.generate(
-                    stage,
-                    pos,
-                    column,
-                    center_snapshot,
-                    &snapshots,
-                );
+                let output =
+                    self.generator
+                        .generate(stage, pos, column, center_snapshot, &snapshots);
                 self.merge_generated(pos, &output);
                 TaskResult::Generated {
                     stage,

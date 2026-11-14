@@ -136,8 +136,9 @@ pub(crate) fn run_features(
     }
     let blocks: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.blocks.clone());
     let biomes: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.biomes.clone());
-    let heights: [Heightmaps; 9] =
-        blocks.each_ref().map(|chunk| prime_heightmaps(chunk, MIN_Y, WORLD_HEIGHT));
+    let heights: [Heightmaps; 9] = blocks
+        .each_ref()
+        .map(|chunk| prime_heightmaps(chunk, MIN_Y, WORLD_HEIGHT));
     let input = FeatureChunks {
         center_x: cx,
         center_z: cz,
@@ -158,11 +159,7 @@ pub(crate) fn run_features(
 /// `gen-world --through features` oracle entry: from config + position alone,
 /// build the 3×3 CARVERS view and call the game's own [`run_features`], returning
 /// the 9-chunk result for block-by-block comparison.
-pub fn game_features(
-    config: &WorldGenConfig,
-    cx: i32,
-    cz: i32,
-) -> Result<FeatureResult, String> {
+pub fn game_features(config: &WorldGenConfig, cx: i32, cz: i32) -> Result<FeatureResult, String> {
     let view = build_view(config, cx, cz)?;
     run_features(config, cx, cz, view)
 }
@@ -176,6 +173,7 @@ struct FeatureRun {
     deltas: [Vec<BlockDelta>; 9],
 }
 
+type FeatureCache = HashMap<(i64, Option<&'static str>, i32, i32), Arc<FeatureRun>>;
 thread_local! {
     // 每条计算线程各缓存一份「以某区块为中心」的地物结果。中心区块在生成
     // 自己的 `features` 时，要重算 8 个邻居中心的地物、取它们写进本区块的
@@ -185,8 +183,7 @@ thread_local! {
     // center needs the 8 neighbor centers' results to collect the writes they
     // spill into it; caching makes each center run once. Pure, so hits never
     // change the result. Bounded: clear the whole table past the cap.
-    static FEATURE_CACHE: RefCell<HashMap<(i64, Option<&'static str>, i32, i32), Arc<FeatureRun>>> =
-        RefCell::new(HashMap::new());
+    static FEATURE_CACHE: RefCell<FeatureCache> = RefCell::new(HashMap::new());
 }
 const FEATURE_CACHE_CAP: usize = 256;
 
@@ -378,12 +375,8 @@ pub(crate) fn generate_terrain_stage(
 /// 透传阶段（结构、群系、光照、刷怪、完工）：盒子原样交回。
 ///
 /// Pass-through stages: return the box unchanged.
-pub(crate) fn passthrough_stage(
-    center: Option<Box<RegionColumn>>,
-) -> GenerateOutput {
-    GenerateOutput::passthrough(
-        center.unwrap_or_else(|| Box::new(RegionColumn::from_template())),
-    )
+pub(crate) fn passthrough_stage(center: Option<Box<RegionColumn>>) -> GenerateOutput {
+    GenerateOutput::passthrough(center.unwrap_or_else(|| Box::new(RegionColumn::from_template())))
 }
 
 /// 把一组世界坐标的写增量落进 `GeneratedChunk` 的方块数组。
@@ -391,7 +384,7 @@ pub(crate) fn passthrough_stage(
 /// Apply world-coordinate deltas into a `GeneratedChunk`'s block arrays.
 pub(crate) fn apply_deltas(chunk: &mut GeneratedChunk, deltas: &[BlockDelta]) {
     for &(x, y, z, state) in deltas {
-        if y < MIN_Y || y >= MIN_Y + WORLD_HEIGHT {
+        if !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
             continue;
         }
         let column = (x & 15) as usize * 16 + (z & 15) as usize;

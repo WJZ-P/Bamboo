@@ -128,9 +128,9 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
 // Each compute thread caches CARVERS terrain so the `features` 3×3 view does not
 // recompute it. The key includes seed and world type; terrain is pure, so a hit
 // never changes the result. Bounded: clear the whole table past the cap.
+type TerrainCache = HashMap<(i64, Option<&'static str>, i32, i32), GeneratedChunk>;
 thread_local! {
-    static TERRAIN_CACHE: RefCell<HashMap<(i64, Option<&'static str>, i32, i32), GeneratedChunk>> =
-        RefCell::new(HashMap::new());
+    static TERRAIN_CACHE: RefCell<TerrainCache> = RefCell::new(HashMap::new());
 }
 const TERRAIN_CACHE_CAP: usize = 1024;
 
