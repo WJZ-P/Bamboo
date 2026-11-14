@@ -49,6 +49,10 @@
 //!     多种子下把新世界的出生区块和出生点与官方逐个对拍；--break-self-test 故意改坏一处
 //!     Compare fresh-world spawn chunks and positions against vanilla across seeds;
 //!     --break-self-test deliberately corrupts one spawn.
+//! mc-bamboo-vanilla flat-world <java 路径> [--show N] [--break-self-test]
+//!     把 generator-settings 的五个字段和超平坦地形逐方块对拍官方 FlatLevelSource
+//!     Compare the five generator-settings fields and flat terrain block-by-block
+//!     with vanilla FlatLevelSource; --break-self-test corrupts one block.
 //! ```
 //!
 //! 升级游戏版本时，换一个 `server.jar` 运行 `generate`，看生成文件的差异，
@@ -73,6 +77,8 @@ mod components;
 #[cfg(feature = "oracle")]
 mod entity_oracle;
 mod extract;
+#[cfg(feature = "oracle")]
+mod flat_world;
 #[cfg(feature = "oracle")]
 mod gen_world;
 mod generate;
@@ -164,6 +170,8 @@ const PLAYER_DATA_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/PlayerData
 const WORLD_BORDER_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/WorldBorderOracle.java";
 #[cfg(feature = "oracle")]
 const SPAWN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/SpawnOracle.java";
+#[cfg(feature = "oracle")]
+const FLAT_WORLD_SOURCE: &str = "tools/mc-bamboo-vanilla/java/FlatWorldOracle.java";
 const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla extract [java 路径]\n      mc-bamboo-vanilla gamerules <java 路径>\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
       mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked] [--rule 名字=值] [--weather clear|rain|thunder]
       mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
@@ -177,6 +185,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structures <java 路径>
       mc-bamboo-vanilla gen-world <java 路径> [--seeds N] [--chunks N] [--salt S] [--show N] [--break-self-test]
       mc-bamboo-vanilla spawn <java 路径> [--seeds N] [--salt S] [--show N] [--level-type normal|large_biomes|amplified] [--break-self-test]
+      mc-bamboo-vanilla flat-world <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -228,6 +237,7 @@ fn run() -> Result<(), String> {
         ["structures", java, ref options @ ..] => structures_cli(java, options),
         ["gen-world", java, ref options @ ..] => gen_world_cli(java, options),
         ["spawn", java, ref options @ ..] => spawn_cli(java, options),
+        ["flat-world", java, ref options @ ..] => flat_world_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
@@ -454,6 +464,11 @@ fn spawn_cli(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn flat_world_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    flat_world::run(official_program(java, FLAT_WORLD_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
 fn loot_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     loot_oracle::run(official_program(java, LOOT_ORACLE_SOURCE)?, options)
 }
@@ -663,6 +678,11 @@ fn gen_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn spawn_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn flat_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
