@@ -32,7 +32,7 @@ use crate::{
     chunk::Generator,
     math::java_floor_div,
     structure::{
-        StructureStarts, StructureState,
+        StartPlan,
         registry::{StructureDef, Structures},
         rings::BiomeResolver,
     },
@@ -77,12 +77,12 @@ fn chunk_center(chunk_x: i32, chunk_z: i32) -> (i32, i32) {
 /// coords it goes through the batched `createResolverForChunk` path.
 pub fn column_has_valid_biome(
     generator: &Generator,
-    chunk_x: i32,
-    chunk_z: i32,
+    chunk: (i32, i32),
     allowed: &HashSet<String>,
-    min_y: i32,
-    height: i32,
+    dims: (i32, i32),
 ) -> Result<bool, String> {
+    let (chunk_x, chunk_z) = chunk;
+    let (min_y, height) = dims;
     let (center_x, center_z) = chunk_center(chunk_x, chunk_z);
     let min_quart_y = quart(min_y - 1);
     let max_quart_y = quart(min_y + height - 1);
@@ -174,14 +174,12 @@ pub struct GenerationPoint {
 pub fn find_valid_generation_point(
     generator: &Generator,
     resolver: &mut BiomeResolver,
-    chunk_x: i32,
-    chunk_z: i32,
+    chunk: (i32, i32),
     allowed: &HashSet<String>,
-    min_y: i32,
-    height: i32,
+    dims: (i32, i32),
 ) -> Result<GenerationPoint, String> {
-    let (center_x, center_z) = chunk_center(chunk_x, chunk_z);
-    let column = column_has_valid_biome(generator, chunk_x, chunk_z, allowed, min_y, height)?;
+    let (center_x, center_z) = chunk_center(chunk.0, chunk.1);
+    let column = column_has_valid_biome(generator, chunk, allowed, dims)?;
     let stub_y = generator.first_occupied_height(center_x, center_z)?;
     let start_biome_valid =
         is_valid_biome_at(resolver, center_x, stub_y, center_z, allowed);
@@ -205,38 +203,37 @@ pub struct SelectedStart {
     pub stub: (i32, i32, i32),
 }
 
-/// 用 `start_plans`（放置门 + existingStart 短路 + 加权尝试序列）加上基线判定，
-/// 复刻 `createStructures` 的「按结构集顺序、每个结构按加权顺序试，第一个有效就返回」。
+/// 用 `StartPlan`（放置门 + 加权尝试序列）加上基线判定，复刻 `createStructures` 的
+/// 「按结构集顺序、每个结构按加权顺序试，第一个有效就返回」。
+///
+/// `plans` 由调用方从 `StructureState::start_plans` 得到（含 existingStart 短路和
+/// isStructureChunk 命中过滤）；这里只做纯组合，不碰世界状态。
 ///
 /// 这里只有基线的 `findValidGenerationPoint`，真正的 `findGenerationPoint`（结构件生成）
 /// 属于下一步，所以「有效」是通用判定，不是 `Structure.generate` 的最终有效。
 ///
-/// Combines `start_plans` (placement gate + existingStart short-circuit + weighted attempt
-/// sequence) with the baseline gate to reproduce `createStructures`: iterate sets in order,
-/// try each structure in weighted order, return the first valid one. Only the baseline
-/// `findValidGenerationPoint` is used here; real piece generation is a later milestone, so
-/// "valid" is the generic gate, not `Structure.generate`'s final validity.
+/// Combines `StartPlan` (placement gate + weighted attempt sequence) with the baseline gate
+/// to reproduce `createStructures`: iterate sets in order, try each structure in weighted
+/// order, return the first valid one. The caller supplies plans from
+/// `StructureState::start_plans` (with existingStart short-circuit and hit filtering); this is
+/// pure composition over already-decided data. Only the baseline `findValidGenerationPoint`
+/// is used here; real piece generation is a later milestone, so "valid" is the generic gate,
+/// not `Structure.generate`'s final validity.
 pub fn select_start(
-    state: &StructureState,
+    plans: &[StartPlan],
     structures: &Structures,
     generator: &Generator,
     resolver: &mut BiomeResolver,
-    seed: i64,
-    chunk_x: i32,
-    chunk_z: i32,
-    min_y: i32,
-    height: i32,
+    chunk: (i32, i32),
+    dims: (i32, i32),
 ) -> Result<Option<SelectedStart>, String> {
-    let plans = state.start_plans(seed, chunk_x, chunk_z, &StructureStarts::default());
-    for plan in &plans {
+    for plan in plans {
         for structure_id in &plan.attempts {
             let Some(def) = structures.get(structure_id) else {
                 continue;
             };
             let allowed = allowed_biome_names(def)?;
-            let point = find_valid_generation_point(
-                generator, resolver, chunk_x, chunk_z, &allowed, min_y, height,
-            )?;
+            let point = find_valid_generation_point(generator, resolver, chunk, &allowed, dims)?;
             if point.valid {
                 return Ok(Some(SelectedStart {
                     set: plan.set.clone(),
