@@ -175,7 +175,7 @@ fn parse_case(value: &Value) -> Result<Case, String> {
         .and_then(Value::as_array)
         .ok_or("missing junctions")?
         .iter()
-        .map(|j| int_array::<3>(j))
+        .map(int_array::<3>)
         .collect::<Result<Vec<_>, String>>()?;
     let affected = match value.get("affected") {
         None | Some(Value::Null) => None,
@@ -359,13 +359,12 @@ fn compare(worldgen: &Worldgen, parsed: &Parsed, break_self_test: bool) -> Resul
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        if break_self_test {
-            if let Some(rigid) = rigids
+        if break_self_test
+            && let Some(rigid) = rigids
                 .iter_mut()
                 .find(|r| r.terrain_adjustment != TerrainAdjustment::None)
-            {
-                rigid.ground_level_delta += 1;
-            }
+        {
+            rigid.ground_level_delta += 1;
         }
         let junctions: Vec<Junction> = case
             .junctions
@@ -479,8 +478,8 @@ fn compare(worldgen: &Worldgen, parsed: &Parsed, break_self_test: bool) -> Resul
                     }
                 }
             }
-            if !generators.contains_key(&case.seed) {
-                generators.insert(case.seed, Generator::new(worldgen, case.seed)?);
+            if let std::collections::hash_map::Entry::Vacant(entry) = generators.entry(case.seed) {
+                entry.insert(Generator::new(worldgen, case.seed)?);
             }
             let generator = &generators[&case.seed];
             let layers =
