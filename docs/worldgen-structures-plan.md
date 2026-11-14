@@ -69,10 +69,37 @@
   注入环位置，要塞的 `isStructureChunk` 不再是恒 false 的占位实现。
 * 每一步都单独提交，每个新对拍都先故意改坏一处确认会失败再还原。
 
+**第三轮（2026-11-13，接手后步 1：`findValidGenerationPoint` 通用判定）**：
+
+* `Structure.generate` → `findValidGenerationPoint` 里与结构件无关的三件判定移植到新文件
+  `structure/validity.rs`；`chunk.rs::Generator` 上只加两个原语：
+  `first_occupied_height`（照 `iterateNoiseColumn` 用 1×height×1、步长 1 的体积和全新
+  含水层，自顶向下找首个非空气方块）和 `column_biome_names`（照
+  `MultiNoiseBiomeSource.createResolverForChunk` 用 1×N×1、步长 4 的体积，成批采六条
+  气候函数再查群系参数表）。`validity.rs` 组合出
+  `couldValidBiomeExistOnTopOfChunkCenter`（整列 quart 群系）、`corner_heights` /
+  `lowest_y` / `mean_first_occupied_height`（四角高度）、`isValidBiome`（起点单点群系），
+  以及 `find_valid_generation_point`（`onTopOfChunkCenter` 基线路径的起点 + 有效性）和
+  `select_start`（`StartPlan` + 基线判定的纯组合）。
+* 新子命令 `cargo run -p mc-bamboo-vanilla -- structure-validity <java>`：Java 侧
+  `StructureValidityOracle.java` 造官方 `Structure.GenerationContext` 直接调
+  `couldValidBiomeExistOnTopOfChunkCenter()`、`getFirstOccupiedHeight(...)`、
+  `isValidBiome(stub)`，并按 `createStructures` 的加权序列组合出「起点 + 选中的结构 +
+  是否有效」；Rust 侧用生产代码复算。6 种子 × 12 区块，52 个结构合法群系名 + 360 个
+  高度字段（38 个不同值）+ 1584 个整列 / 起点判定字段 + 432 个加权序列 + 288 个组合字段
+  = 2716 个比较 0 不一致。两处故意改坏（反转整列判定、反转起点群系判定）各失败，
+  还原后回 0；旧 `structures` / `structure-rings` 对拍仍 0 不一致。
+* 每一步单独提交；整列判定与起点单点判定在这批数据上从未不一致（主世界群系沿 Y 基本
+  恒定），两条路径各自用故意改坏单独验过。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、
-`Structure.generate` 的有效性判定、结构件生成与放置、`Beardifier`、存档 `structures` 键
-都还没做；这一切都还是纯函数加 oracle，没有接进 Director，游戏里世界仍是超平坦。
-`.nbt` 结构模板按约定留到第一个真正用到它的结构那一步再导出。
+每个结构真正的 `findGenerationPoint`（结构件生成）、结构件放置、`Beardifier`、存档
+`structures` 键都还没做；这一切都还是纯函数加 oracle，没有接进 Director，游戏里世界仍是
+超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」
+是 `onTopOfChunkCenter` 基线路径的通用判定，**不等于** `Structure.generate` 的最终有效：
+各结构的 `findGenerationPoint`、包围盒、`.nbt` 模板、jigsaw 仍属第 4 步。组合对拍只覆盖
+6 个 `random_spread` 结构集、不含 `isStructureChunk` 命中过滤（那是已对拍的 `start_plans`
+的职责）。`.nbt` 结构模板按约定留到第一个真正用到它的结构那一步再导出。
 
 ## 1. 官方 26.3 的结构生成全景
 
@@ -421,6 +448,11 @@ structures (Compound)
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | 没做（仍用 `Beardifier.EMPTY`） |
 | 7 | 存档：`structures` 键写/读 | 读回一致，`world-dir` 确认官方能读 | 没做 |
 
+第三轮还落地了步 1 与步 4 之间的一层通用原语：`Structure.generate` 的
+`findValidGenerationPoint` 群系 / 高度判定（整列群系、四角高度、起点单点群系），
+见第 0 节与 7.1。它不改上表 1–7 的编号与状态；每个结构真正的 `findGenerationPoint`
+（结构件生成）仍归步 4，状态仍是「没做」。
+
 ### 7.1 对拍方法
 
 * **第 3 步（本轮重点，已落地）**：新增 `cargo run -p mc-bamboo-vanilla -- structures <java>`
@@ -445,10 +477,16 @@ structures (Compound)
   `rings::ring_positions` / `find_biome_horizontal` / `StructureState::is_structure_chunk`
   复算。6 个种子、768 个环位置、96 个 `findBiomeHorizontal`、864 个 `isStructureChunk`
   检查全 0 不一致。故意丢掉 `fork()` 的 `nextLong()` 会让环位置大面积不一致。
+* **第三轮的步 1（`findValidGenerationPoint` 通用判定，已落地）**：
+  `cargo run -p mc-bamboo-vanilla -- structure-validity <java>`，
+  `java/StructureValidityOracle.java` 造官方 `Structure.GenerationContext` 直接调三个
+  通用判定方法，Rust 用 `structure::validity` 复算。6 种子 × 12 区块、2716 个比较
+  0 不一致；反转整列判定、反转起点群系判定两处故意改坏各失败。注意「是否有效」是
+  `onTopOfChunkCenter` 基线的通用判定，不是 `Structure.generate` 的最终有效。
 * 第 4 步及以后用 `chunkgen` 的 `--through features` 九宫格假世界
   （`docs/worldgen-features-plan.md` 4.1）逐方块比，和 `world-dir` 比存档。
-* `.nbt` 模板导出、`Structure.generate` 有效性判定、第 4–7 步的主体都超出本轮，
-  做不完按 WIP 规则提交并在汇报里交接。
+* `.nbt` 模板导出、各结构的 `findGenerationPoint`（结构件生成）、第 4–7 步的主体
+  都超出本轮，做不完按 WIP 规则提交并在汇报里交接。
 
 ### 7.2 Rust 侧解析的注意点
 
@@ -516,14 +554,26 @@ structures (Compound)
    `getRingPositionsFor` 全一致。故意丢掉 `fork()` 的 `nextLong()` 会立刻全错。
    旧的 `placement.rs::ring_positions_geometry`（未吸附的几何草稿）保留但不再用于
    `isStructureChunk`，实际判定走 `rings::ring_positions` 注入的结果。
-9. **`findValidGenerationPoint` 没做**：`Structure.generate` 的
+9. **`findValidGenerationPoint` 通用判定已做，各结构 `findGenerationPoint` 没做**：
    `couldValidBiomeExistOnTopOfChunkCenter`（整列 quart 群系扫描，走
-   `createResolverForChunk` 的成批 `sampleVolume`）、`getLowestY`（4 角
-   `getFirstOccupiedHeight` → `getBaseHeight` → `iterateNoiseColumn` 的 terrain 密度）
-   和 `isValidBiome`（起点 quart 群系）都还没移植。因此没有「起点是否有效」，
-   `StructureStart` 只是数据类型，没有生产它的入口。
+   `createResolverForChunk` 的成批 `sampleVolume`）、`getLowestY` /
+   `getMeanFirstOccupiedHeight`（4 角 `getFirstOccupiedHeight` → `getBaseHeight` →
+   `iterateNoiseColumn` 的 terrain 密度）和 `isValidBiome`（起点 quart 群系）已在
+   `structure/validity.rs` 移植并对拍 0 不一致。但每个结构真正的 `findGenerationPoint`
+   （结构件生成、模板、jigsaw）还没移植，所以「是否有效」只是 `onTopOfChunkCenter`
+   基线路径的通用判定，`StructureStart` 仍只是数据类型，没有生产它的入口。
+10. **整列判定与起点单点判定在这批数据上从未不一致**：`structure-validity` 的
+    1584 个判定字段里 `col != pv` 为 0（主世界群系沿 Y 基本恒定，整列有一个合法群系
+    ⇔ 起点那格群系合法）。两条路径是独立移植的（成批 `sampleVolume` vs 单点
+    `Path::Point`），各自的故意改坏都能被对拍抓到，但一个同时影响两条路径且方向一致的
+    错误不会被这组数据发现。换自定义群系预设（Y 方向有分层）时应重验。
+11. **组合 `D` 不是完整 `createStructures`**：Java / Rust 的「起点 + 选中的结构 +
+    是否有效」组合只按 6 个 `random_spread` 结构集名字顺序 + 加权序列走，没做
+    `isStructureChunk` 命中过滤，也不含 `concentric_rings`（要塞）。命中过滤是
+    `StructureState::start_plans` 的职责，已在 `structures` 对拍里逐格验过（9280 个
+    比较），但这里的组合与它没有拼在一起逐格对拍。
 
-## 10. 已知限制（第二轮结束时，2026-11-13）
+## 10. 已知限制（第三轮结束时，2026-11-13）
 
 * 主世界以外的维度（下界、末地）不做。Bamboo 目前没有下界/末地维度。
 * **全是纯函数 + 对拍，没接进游戏**：`structure_starts` / `structure_references` 两个阶段
@@ -540,12 +590,18 @@ structures (Compound)
   `getPotentialStructureChunk` + `applyAdditionalChunkRestrictions`，**没有把排除区交互
   （`hasStructureChunkInRange`）拿来和官方逐格对拍**；它依赖的 `getPotentialStructureChunk`
   已单独验过，但组合路径置信度低一档，见第 9 节疑点。
-* **`Structure.generate` 没做**：`findValidGenerationPoint` 的整列群系扫描、四角
-  `getFirstOccupiedHeight` 高度检查、起点群系检查都没移植，所以没有「起点是否有效 /
-  最终选中哪个结构」，`StructureStart` 只是数据类型。`start_plans` 只给加权尝试序列。
+* **`Structure.generate` 只做了通用判定**：`findValidGenerationPoint` 的整列群系扫描、
+  四角 `getFirstOccupiedHeight` 高度检查、起点群系检查已移植并对拍 0 不一致
+  （`structure/validity.rs`、`chunk.rs` 的两个 `Generator` 原语），但「是否有效」是
+  `onTopOfChunkCenter` 基线路径的通用判定，不是 `Structure.generate` 的最终有效：
+  各结构的 `findGenerationPoint`（结构件生成、模板、jigsaw）没做，`StructureStart`
+  仍是数据类型，`start_plans` 只给加权尝试序列。组合对拍只覆盖 6 个 `random_spread`
+  结构集、不含 `isStructureChunk` 命中过滤。
 * 结构件生成（第 4 步，所有旧式 / jigsaw 结构）、`features` 阶段结构件放置（第 5 步，
   `placeInChunk` / `postProcess` / processors / 方块实体 / 拼图替换）、`Beardifier`
   （第 6 步，terrain 仍用 `EMPTY`）、存档 `structures` 键（第 7 步）全都没做。
+* `structure-validity` 的整列判定与起点单点判定在这批数据上从未不一致（第 9 节疑点
+  10）；两条路径各自用故意改坏单独验过。
 * `structure_references` 的纯函数 `structure_references` 已就位（含 `ChunkPos.pack`
   与包围盒 XZ 相交），但没接进流水线，也没和官方 `createReferences` 对拍。
 * `Structure.DIRECT_CODEC` 整表 `encodeStart` 已在本 jar 上实测通过（四键导出成功、
