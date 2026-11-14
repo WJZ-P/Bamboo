@@ -9,6 +9,7 @@
 
 pub mod bamboo;
 pub mod block_predicate;
+pub mod composition;
 pub mod dispatch;
 pub mod heightmap;
 pub mod ores;
@@ -19,6 +20,8 @@ pub mod rule_test;
 pub mod run;
 pub mod simple_block;
 pub mod state;
+pub mod state_provider;
+pub mod survival;
 pub mod vines;
 pub mod world;
 

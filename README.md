@@ -387,15 +387,26 @@ WebView2 的渲染进程不算在内。
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
   README「区块级对拍」；合并提交 `ae76868`、`9a96b5e`、`9d6e94c`）
 - 地物（features）阶段的纯函数正按官方 `ChunkGenerator.applyBiomeDecoration` 逐类移植，
-  但**全部还没接进 Director / 游戏**：游戏里仍然只有超平坦加群系温度。当前已逐方块对拍
-  0 不一致的只有 step 6 的矿石和 step 9 里 11 个 `simple_block` 植被 placed feature
-  （草、花、枯灌木、灌木、南瓜等，见 `docs/worldgen-features-plan.md` 5.1）；其余地物类型仍
-  明确标 `unsupported`，对拍时整块跳过，不假装支持。诚实的已知差异：`SimpleBlockFeature`
-  只实现内联 bare-state provider；`to_place` 引用未导出的 `BLOCK_STATE_PROVIDER` 注册表、
-  weighted / randomized_int provider、蘑菇（要亮度）、双高植物 / 苔藓地毯（placeAt 上下
-  两格）、`would_survive` / `matching_fluids` 谓词、组合类地物、树和水下植被都还没做；
-  `schedule_tick` 目前忽略（不影响生成快照里的方块）。蜂巢方块实体、蜜蜂数据、可疑沙
-  战利品表等方块实体数据还没对拍；递归组合类地物尚未接进分派器。
+  但**全部还没接进 Director / 游戏**：游戏里仍然只有超平坦加群系温度。已逐方块对拍
+  0 不一致的有 step 6 的矿石，以及 step 9 的植被子集（详见
+  `docs/worldgen-features-plan.md` 5.1）；其余类型仍明确标 `unsupported`，对拍时整块跳过，
+  不假装支持。本轮已移植：`simple_block` 的内联 bare-state 与 `weighted` /
+  `randomized_int` typed provider、一批继承 `VegetationBlock` 的存活判定（含
+  `LeafLitterBlock` 的 `isFaceSturdy(UP)`）、双高植物 `DoublePlantBlock.placeAt`、
+  `would_survive` / `has_sturdy_face` / `matching_fluids` 谓词、组合类
+  （`random_selector` / `weighted_random_selector` / `simple_random_selector` /
+  `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）与 `clamped` IntProvider。
+  诚实的已知差异与未做：`to_place` 的 holder 字符串引用（`BLOCK_STATE_PROVIDER` 注册表未
+  导出）、蘑菇（要 `getRawBrightness`）、睡莲、孢子花、苔藓地毯、海泡菜等特殊
+  `canSurvive`；`schedule_tick` 忽略；`noise_threshold_count` / `noise_based_count` /
+  `environment_scan` / `surface_water_depth_filter` / `surface_relative_threshold_filter`
+  修饰器、`clamped_normal` / `weighted_list` IntProvider；方块实体数据（蜂巢、可疑沙等）。
+  树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）和水下/其余植被按分工移交给
+  `cb-wg-trees` / `cb-wg-aquatic`；`projected_random_patchy_square` 在 26.3 导出数据里没有
+  条目。组合类里只有 `simple_random_selector`（forest_flowers / flower_forest_flowers）
+  拿到 0 不一致对拍，其余组合类子项多为树/水生（已移交），place 逻辑按官方源码移植但
+  本轮未逐方块验证。世界里 terrain 含水层在个别邻居区块（seed -1、chunk (52,-26)、
+  y=-54）与官方 3 格不一致，是既有 terrain 差异，features 对拍选用避开该区块的参数。
 - 红石的已知差异：发射器会发射不生成实体的弹射物，默认抛出和余料都生成真的物品实体。箭、雪球、蛋（含蓝蛋、棕蛋）、喷溅药水、滞留药水、经验瓶、烟花、火焰弹和风弹走默认抛出，官方那些是弹射物，出现事件 1002、1004、1018 或 1051 的整题不比较。船和矿车放得下时只扣物品、不生成实体，放不下时再套一层默认抛出。盔甲架和带 `entity_data` 的刷怪蛋留在槽里，当作生成失败，数量变少的整题不比较。TNT 物品在 `tnt_explodes` 为真时生成点燃的 TNT 并播放 `entity.tnt.primed`，数量减一；规则为假时物品留着、发 1001，不取朝向。打火石点着 TNT 方块时走 `TntBlock.prime` 再 `removeBlock` 再扣耐久。这些题比较方块、声音、容器和 `level.random`。点燃的 TNT 实体本身不进比较，方块 oracle 也不 tick 它。同一题里如果还有弹射物事件、盔甲架或刷怪蛋离开发射器，仍按那些原因整题排除。鱼桶只倒水，不生成鱼，环境音不比较。倒成功后仍取官方 `EntityType.create` 的一次 `nextFloat`，以及 `Mob.finalizeSpawn` 的 `triangle` 和一次 `nextFloat`。美西螈在 `BUCKET` 原因下 `finalizeSpawn` 直接返回，只取朝向那一次。热带鱼再按 `nextFloat() < 0.9` 取常见变种或随机花纹。硫磺立方桶不放方块，生成用的随机数同样照取。剪刀收满蜜的蜂巢按 `minecraft:harvest/beehive` 掉 3 个蜜脾，战利品表走自己的 `random_sequence`，不碰 `level.random`；`Block.popResource` 为这一组取 3 次位置偏移，生成物品实体。桶倒进可替换方块时，官方 `destroyBlock` 会先在方块还在时按 `getDrops` 一组一组 `popResource`，再换成流体方块；方块 oracle 把那些表换成空表，两边都不取数，也不生成物品。骨粉催树苗、杜鹃、蘑菇、菌、草方块、菌丝和要地物的方块时整题不比较。默认抛出和塞不回发射器的余料都生成物品实体。速度按官方 `spawnItem`：先取一个 `nextDouble` 算 `pow`，X、Z 的均值是朝向步长乘 `pow`，Y 是 0.2，再取三个 `triangle` 的六个 double；这套随机数只取一次。打火石和剪刀的耐久走通用 `hurtAndBreak`，耐久附魔用 `level.random`。玩家没有身体和鞍这两格。骷髅头、僵尸头、苦力怕头、龙首和猪灵头不放方块，只试着穿到前方的人身上。合成器按官方逻辑合成并吐出产物，朝空气吐出的东西按 `DefaultDispenseItemBehavior.spawnItem` 生成真的物品实体（精度 6），成就和地图的后处理也没做。方块 oracle 给合成器加了固定场景的题，合成成功的题逐项比较方块状态、容器内容、等级事件和世界随机源最后的种子；合成器到期时如果官方没有合成成功，只发失败事件 1050，这一声照常比较。漏斗把同一件物品搬进搬出不算合成。投掷器朝空气抛出的物品生成物品实体；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，地上的物品还没有接上这些触发，世界里没有生物和弹射物，下落方块和点燃的 TNT 也不会踩这些；阳光探测器不随时间变化，只在右键时按当前天空光算，世界时钟停在正午。唱片机放进唱片后立刻算在放（`ownSignal` 为 15），但不跑官方的歌曲计时：假世界也不登记唱片机的 ticker，所以不抽每 20 刻的 `nextInt(4)`，歌也不会放到结束。宝库只在官方结果里出现宝库方块实体的声音或状态事件 3015–3017 时整题不比较，没触发的宝库照常比较。
 - 活塞不推实体，也不推动玩家。下落方块和点燃的 TNT 已经在世界里，但官方 `PistonMovingBlockEntity` 的
   `moveCollidedEntities`、`moveStuckEntities`、`fixEntityWithinPistonBase` 三段没实现：掉落物、下落方块

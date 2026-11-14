@@ -10,9 +10,11 @@
 
 use serde_json::Value;
 
-use mc_bamboo_data::{block_by_name, block_id_of_state, block_tag, facts, state_facts};
+use mc_bamboo_data::{
+    block_by_name, block_id_of_state, block_tag, facts, registries, state_facts, state_fluid, tags,
+};
 
-use super::world::FeatureWorld;
+use super::{state::parse_state, survival, world::FeatureWorld};
 
 type Pos = (i32, i32, i32);
 
@@ -37,9 +39,24 @@ pub enum BlockPredicate {
         offset: [i32; 3],
     },
     True,
-    /// 未移植的谓词类型（would_survive / has_sturdy_face / matching_fluids 等）。
+    /// `WouldSurvivePredicate`：`state.canSurvive(level, origin+offset)`。
+    WouldSurvive {
+        offset: [i32; 3],
+        state: u32,
+    },
+    /// `HasSturdyFacePredicate`：那一格在指定方向的 `isFaceSturdy(FULL)`。
+    HasSturdyFace {
+        offset: [i32; 3],
+        direction: u32,
+    },
+    /// `MatchingFluidsPredicate`：那一格的流体在给定 holderset 里。
+    MatchingFluids {
+        offset: [i32; 3],
+        fluids: Vec<i32>,
+    },
+    /// 未移植的谓词类型（含存活判定未移植的 would_survive）。
     ///
-    /// Unported predicate kind (would_survive / has_sturdy_face / matching_fluids ...).
+    /// Unported predicate kind (including would_survive with an unported state).
     Unsupported,
 }
 
@@ -79,6 +96,33 @@ impl BlockPredicate {
             "minecraft:replaceable" => Self::Replaceable { offset },
             "minecraft:solid" => Self::Solid { offset },
             "minecraft:true" => Self::True,
+            // `state.canSurvive`；存活判定未移植的方块仍标 unsupported。
+            // `state.canSurvive`; a state whose survival check is unported stays unsupported.
+            "minecraft:would_survive" => {
+                let state = object.get("state").and_then(|v| parse_state(v).ok());
+                match state {
+                    Some(state) if survival::supports(state) => {
+                        Self::WouldSurvive { offset, state }
+                    }
+                    _ => Self::Unsupported,
+                }
+            }
+            "minecraft:has_sturdy_face" => {
+                let Some(direction) = object
+                    .get("direction")
+                    .and_then(Value::as_str)
+                    .and_then(parse_direction)
+                else {
+                    return Self::Unsupported;
+                };
+                Self::HasSturdyFace { offset, direction }
+            }
+            "minecraft:matching_fluids" => {
+                let Some(fluids) = parse_fluids(object.get("fluids")) else {
+                    return Self::Unsupported;
+                };
+                Self::MatchingFluids { offset, fluids }
+            }
             _ => Self::Unsupported,
         }
     }
@@ -91,6 +135,7 @@ impl BlockPredicate {
             Self::Unsupported => false,
             Self::AllOf(list) | Self::AnyOf(list) => list.iter().all(Self::is_supported),
             Self::Not(inner) => inner.is_supported(),
+            Self::WouldSurvive { state, .. } => survival::supports(*state),
             _ => true,
         }
     }
@@ -116,6 +161,24 @@ impl BlockPredicate {
             }
             Self::Solid { offset } => state_facts(state_at(world, pos, offset)) & facts::SOLID != 0,
             Self::True => true,
+            // `state.canSurvive(level, origin+offset)`。
+            Self::WouldSurvive { offset, state } => survival::can_survive(
+                *state,
+                world,
+                (pos.0 + offset[0], pos.1 + offset[1], pos.2 + offset[2]),
+            ),
+            // `isFaceSturdy(FULL)`：facts 里按 Direction ordinal 预存了这一位。
+            // `isFaceSturdy(FULL)`: facts pre-stores this bit per Direction ordinal.
+            Self::HasSturdyFace { offset, direction } => {
+                let bits = state_facts(state_at(world, pos, offset));
+                bits & (1u64 << (*direction + facts::STURDY_FULL)) != 0
+            }
+            // `state.getFluidState().is(fluids)`：比流体注册表 ID。
+            // `state.getFluidState().is(fluids)`: compare the fluid registry ID.
+            Self::MatchingFluids { offset, fluids } => {
+                let fluid = state_fluid(state_at(world, pos, offset)).fluid;
+                fluids.contains(&fluid)
+            }
             // `is_supported` 保证这个分支不会被求值。
             // `is_supported` guarantees this branch is never evaluated.
             Self::Unsupported => false,
@@ -177,6 +240,47 @@ fn push_block(name: &str, out: &mut Vec<i32>) -> Option<()> {
     Some(())
 }
 
+/// `Direction` 的 ordinal（DOWN, UP, NORTH, SOUTH, WEST, EAST）。
+fn parse_direction(name: &str) -> Option<u32> {
+    Some(match name {
+        "down" => 0,
+        "up" => 1,
+        "north" => 2,
+        "south" => 3,
+        "west" => 4,
+        "east" => 5,
+        _ => return None,
+    })
+}
+
+/// `HolderSet<Fluid>`：单个流体名、`#tag`，或它们的数组，解析成流体注册表 ID。
+///
+/// `HolderSet<Fluid>`: a fluid name, `#tag`, or an array of them, resolved to IDs.
+fn parse_fluids(value: Option<&Value>) -> Option<Vec<i32>> {
+    let mut out = Vec::new();
+    match value? {
+        Value::String(name) => push_fluid(name, &mut out)?,
+        Value::Array(items) => {
+            for item in items {
+                push_fluid(item.as_str()?, &mut out)?;
+            }
+        }
+        _ => return None,
+    }
+    Some(out)
+}
+
+fn push_fluid(name: &str, out: &mut Vec<i32>) -> Option<()> {
+    if let Some(tag_name) = name.strip_prefix('#') {
+        let group = tags::TAG_GROUPS.get(tags::fluid_tags::GROUP)?;
+        let tag = group.tags.iter().find(|t| t.name == tag_name)?;
+        out.extend_from_slice(tag.ids);
+    } else {
+        out.push(registries::fluid::by_name(name)?);
+    }
+    Some(())
+}
+
 fn parse_list(value: Option<&Value>) -> Vec<BlockPredicate> {
     value
         .and_then(Value::as_array)
@@ -212,8 +316,11 @@ mod tests {
 
     #[test]
     fn unported_kind_marks_the_predicate_unsupported() {
+        // would_survive 的 state 若存活判定未移植（甘蔗需要邻水），仍标 unsupported。
+        // A would_survive with an unported survival check (sugar cane needs adjacent water)
+        // stays unsupported.
         let would: Value =
-            json!({"type": "minecraft:would_survive", "state": "minecraft:oak_sapling"});
+            json!({"type": "minecraft:would_survive", "state": "minecraft:sugar_cane"});
         assert!(!BlockPredicate::parse(&would).is_supported());
         // all_of 里夹一个未移植的，整体也要 unsupported。
         // An unported child makes the whole all_of unsupported.
@@ -221,10 +328,44 @@ mod tests {
             "type": "minecraft:all_of",
             "predicates": [
                 {"type": "minecraft:matching_block_tag", "tag": "minecraft:air"},
-                {"type": "minecraft:would_survive", "state": "minecraft:oak_sapling"},
+                {"type": "minecraft:would_survive", "state": "minecraft:sugar_cane"},
             ],
         });
         assert!(!BlockPredicate::parse(&all).is_supported());
+    }
+
+    #[test]
+    fn ports_would_survive_sturdy_face_and_matching_fluids() {
+        let would: Value =
+            json!({"type": "minecraft:would_survive", "state": "minecraft:oak_sapling"});
+        assert!(matches!(
+            BlockPredicate::parse(&would),
+            BlockPredicate::WouldSurvive { .. }
+        ));
+        assert!(BlockPredicate::parse(&would).is_supported());
+        let sturdy: Value = json!({
+            "type": "minecraft:has_sturdy_face",
+            "direction": "up",
+            "offset": [0, -1, 0],
+        });
+        assert!(matches!(
+            BlockPredicate::parse(&sturdy),
+            BlockPredicate::HasSturdyFace { direction: 1, .. }
+        ));
+        assert!(BlockPredicate::parse(&sturdy).is_supported());
+        let fluids: Value = json!({
+            "type": "minecraft:matching_fluids",
+            "fluids": ["minecraft:water", "minecraft:flowing_water"],
+            "offset": [1, -1, 0],
+        });
+        assert!(matches!(
+            BlockPredicate::parse(&fluids),
+            BlockPredicate::MatchingFluids { .. }
+        ));
+        assert!(BlockPredicate::parse(&fluids).is_supported());
+        let empty: Value =
+            json!({"type": "minecraft:matching_fluids", "fluids": "minecraft:empty"});
+        assert!(BlockPredicate::parse(&empty).is_supported());
     }
 
     #[test]

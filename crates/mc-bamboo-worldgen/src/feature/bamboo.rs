@@ -87,19 +87,24 @@ impl BambooFeature {
         })
     }
 
-    /// 一个候选位置，照官方 `place` 的取数顺序。
-    /// One candidate, following the official `place` draw order.
-    pub fn place(&self, world: &mut FeatureWorld<'_>, random: &WorldgenRandom, pos: Pos) {
-        // 官方把 `placed++` 放在 `isEmptyBlock` 分支里、但 `canSurvive` 分支外；返回
-        // 值 `placed>0` 对 FeaturePlacer 无影响，这里不建模。
-        // Official increments `placed` inside the `isEmptyBlock` branch but outside
-        // `canSurvive`; the return `placed>0` is ignored by FeaturePlacer.
-        if !world.is_air(pos.0, pos.1, pos.2) || !can_survive(world, pos, &self.supports_bamboo) {
-            return;
+    /// 一个候选位置。返回官方 `placed>0`（`isEmptyBlock(origin)` 即 true，与
+    /// `canSurvive` 无关）；真正的取数与放置只在 `canSurvive` 成立时发生。
+    /// One candidate. Returns official `placed>0` (true when `isEmptyBlock(origin)`,
+    /// independent of `canSurvive`); the RNG draws and placement happen only when
+    /// `canSurvive` holds.
+    pub fn place(&self, world: &mut FeatureWorld<'_>, random: &WorldgenRandom, pos: Pos) -> bool {
+        if !world.is_air(pos.0, pos.1, pos.2) {
+            return false;
         }
+        if can_survive(world, pos, &self.supports_bamboo) {
+            self.grow(world, random, pos);
+        }
+        true
+    }
 
-        // 只有两个前置判定都成立，才消耗这两个随机数。
-        // Both RNG draws are consumed only after the two guards pass.
+    /// `canSurvive` 成立后的取数与放置，照官方 `place` 顺序。
+    /// RNG draws and placement after `canSurvive`, following the official `place` order.
+    fn grow(&self, world: &mut FeatureWorld<'_>, random: &WorldgenRandom, pos: Pos) {
         let height = random.next_int(12) + 5;
         if random.next_float() < self.probability {
             let radius = random.next_int(4) + 1;

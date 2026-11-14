@@ -14,12 +14,8 @@ use crate::{
 };
 
 use super::{
-    DECORATION_STEPS, FeatureChunks, FeatureResult,
-    dispatch::{parse_leaf, place_leaf},
-    placement::{Modifier, PlacementEnv, place_candidates},
-    provider::WorldGenerationContext,
-    registry::Registry,
-    world::FeatureWorld,
+    DECORATION_STEPS, FeatureChunks, FeatureResult, composition, placement::PlacementEnv,
+    provider::WorldGenerationContext, registry::Registry, world::FeatureWorld,
 };
 
 /// 一次 `features` 调用需要的、按种子建一次的东西。
@@ -134,37 +130,6 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 continue;
             };
 
-            // 解析 feature 配置；未移植的类型标 unsupported 并跳过（不消费随机数）。
-            // 白名单过滤已在上面收集 indices 时完成，这里不再按类型二次过滤，
-            // 否则按 placed feature 名保留下来的条目会被误丢。
-            let Some((kind, config)) = resolve_feature(ctx.registry, &placed.feature) else {
-                unsupported = true;
-                continue;
-            };
-            let Some(leaf) = parse_leaf(&kind, config) else {
-                unsupported = true;
-                continue;
-            };
-            // 修饰器解析失败（例如递归 IntProvider）也只标 unsupported，不让整个区块
-            // 对拍直接报错；已支持的类型里这种情况不会出现。
-            // A modifier parse failure only marks unsupported; it never fails the run.
-            let modifiers: Vec<Modifier> = match placed
-                .placement
-                .iter()
-                .map(Modifier::parse)
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(modifiers) => modifiers,
-                Err(_) => {
-                    unsupported = true;
-                    continue;
-                }
-            };
-            if modifiers.iter().any(|m| !m.is_supported()) {
-                unsupported = true;
-                continue;
-            }
-
             // BiomeFilter 需要 level.getBiome(pos)，即 BiomeManager.getBiome 的
             // 八角 fiddled distance；这里用一个闭包把采样器和上下文带进去。
             let mut biome_at = |x: i32, y: i32, z: i32| -> u32 {
@@ -177,19 +142,22 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 registry: ctx.registry,
                 top_feature: Some(placed_id),
             };
-            // 官方在栈 DFS 过程中交错执行 modifier 和 Feature.place；不能先收集
-            // 全部候选位置，否则 Feature.place 消费的随机数会打乱后续 modifier。
-            let mut place_one = |world: &mut FeatureWorld<'_>, pos: (i32, i32, i32)| {
-                place_leaf(&leaf, world, &random, pos);
-            };
-            place_candidates(
-                &modifiers,
+            // 组合类会在 Feature.place 里递归再走一轮修饰器链；整棵树是否都移植
+            // 由 place_placed 汇总，任一未移植分支都让本区块标 unsupported。
+            // Composition features recurse into more placement chains inside Feature.place;
+            // place_placed reports whether the whole tree is ported.
+            let outcome = composition::place_placed(
+                ctx.registry,
+                &placed.feature,
+                &placed.placement,
                 &mut world,
                 &mut env,
                 &random,
                 origin,
-                &mut place_one,
             );
+            if !outcome.supported {
+                unsupported = true;
+            }
         }
     }
 

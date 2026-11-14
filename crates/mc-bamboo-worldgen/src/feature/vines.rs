@@ -89,11 +89,13 @@ impl VinesFeature {
         Some(Self { states })
     }
 
-    /// 一个候选位置。`place` 不消费随机数，`random` 只为统一签名保留。
-    /// One candidate. `place` consumes no random; `random` keeps the shared signature.
-    pub fn place(&self, world: &mut FeatureWorld<'_>, _random: &WorldgenRandom, pos: Pos) {
+    /// 一个候选位置。返回是否放了藤蔓（官方 `placedAny`）；`place` 不消费随机数，
+    /// `random` 只为统一签名保留。
+    /// One candidate. Returns whether a vine was placed (`placedAny`); `place` consumes
+    /// no random, `random` keeps the shared signature.
+    pub fn place(&self, world: &mut FeatureWorld<'_>, _random: &WorldgenRandom, pos: Pos) -> bool {
         if !world.is_air(pos.0, pos.1, pos.2) {
-            return;
+            return false;
         }
         for &direction in &DIRECTIONS {
             let (dx, dy, dz) = offset(direction);
@@ -106,9 +108,10 @@ impl VinesFeature {
                     pos.2,
                     self.states[direction.id() as usize],
                 );
-                return;
+                return true;
             }
         }
+        false
     }
 }
 

@@ -639,7 +639,7 @@ Java 侧按白名单判定：中心 3×3 涉及的**所有** step 的 placed fea
 | `chunkgen java --seeds 6 --chunks 36 --through features --steps 6 --ore-only --salt 1/7` | **0 不一致**（216 中心 / 各 191102976 方块） |
 | `chunkgen java --seeds 2 --chunks 6 --through carvers --salt 1` | 0 不一致（旧阶段回归） |
 | `worldgen java` | 0 不一致 |
-| `cargo test -p mc-bamboo-worldgen` | 108 个测试全过（含植被地物的新单测） |
+| `cargo test -p mc-bamboo-worldgen` | 115 个测试全过（含组合类 / typed provider 新单测） |
 | `cargo clippy -p mc-bamboo-worldgen -p mc-bamboo-vanilla --all-targets -- -D warnings` | 干净 |
 
 **曾有的差异（已解决，见下）**：`--ore-only --steps 6` 在第三个种子的
@@ -716,63 +716,76 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 `Context::uncached()` 组合从未单独对拍过**。优先核对这两条 climate sampler
 构造路径是否逐位一致，以及 `interpolated` 在 uncached 单点路径下的行为
 （`docs/worldgen.md` 提到它在 1×1×1 上不是纯函数）。
-### 植被地物进度（分支 `cb-wg-feat-b`，本轮新增）
+### 植被地物进度（分支 `cb-wg-feat-b`）
 
-按 `features_per_step` 分类见 `docs/worldgen-vegetal-features.md`：step 9 共 109 项，
-植被类归本分支。逐项提交、逐项对拍，已落地：
+按 `features_per_step` 分类见 `docs/worldgen-vegetal-features.md`：step 9 共 109 项。
+**范围调整（2026-11-14）**：树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）移交
+`cb-wg-trees`，水下植被与其余植被移交 `cb-wg-aquatic`；本分支只做组合类、
+`simple_block` 剩余种类和谓词。逐项提交：
 
-* `--ore-only` 泛化成 `--feature-types`：条目可以是 Feature 类型 ID 或 placed feature
-  注册名；Java / Rust 用同一套判定过滤（否则按名字隔离单个 placed feature 会假绿）。
-  `--ore-only` 保留为别名。
-* `Heightmap.update` 增量更新（`heightmap.rs`）：走 `setBlockState` 的地物用
-  `set_block_with_heightmaps` 更新四种 FINAL 高度图；矿石走 `BulkSectionAccess`，
-  仍用 `set_block` 不动高度图。带 3 个单测。
-* 支撑件：`IntProvider` 补 trapezoid（含 `plateau==0 && max==-min` 对称快路径）、
-  biased_to_bottom、very_biased_to_bottom；`BlockPredicate`（`block_predicate.rs`）
-  补 matching_block_tag / matching_blocks / all_of / any_of / not / replaceable /
-  solid / true；`PlacementModifier` 补 `block_predicate_filter`；`dispatch.rs` 做叶子
-  分派，`run.rs` 通过 `Leaf` 转发，修饰器解析失败只标 `unsupported` 不再整块报错。
-* `SimpleBlockFeature`（`simple_block.rs`）：照官方
-  `getOptionalState → canSurvive → setBlock(pos, state, 2)`；只实现内联 bare-state
-  provider（等价于 `SimpleStateProvider`），按**已核对的方块类白名单**判 `canSurvive`：
-  Pumpkin / Block 默认 true，Bush / Flower / TallGrass 查 `supports_vegetation`，
-  DryVegetation 查 `supports_dry_vegetation`（26.3 这几类都直接继承
-  `VegetationBlock`，没有额外的亮度检查）。蘑菇（亮度）、DoublePlant / MossyCarpet
-  （placeAt 上下两格）、Fire / LilyPad / SporeBlossom / Nether 植物、`to_place` 为
-  注册名字符串或 weighted / randomized_int typed provider 的，全部明确标 `unsupported`。
+前任已落地（`804f1f3` .. `606ae1b`）：`--feature-types` 过滤、`Heightmap.update`
+增量更新、`IntProvider` / `BlockPredicate` / `block_predicate_filter` 支撑件、
+`SimpleBlockFeature` 内联 bare-state + 方块类白名单，以及 11 个内联 simple_block
+植被 placed feature 的 0 不一致对拍。
+
+本轮新增（`95629d7`、`54af08b`、`ad01c41`）：
+
+* `survival.rs`：共享 `canSurvive` 分派，白名单扩到 SweetBerryBush / Eyeblossom /
+  FireflyBush / Sapling / FlowerBed（`supports_vegetation`）、Short/TallDryGrass
+  （`supports_dry_vegetation`）、LeafLitter（`isFaceSturdy(FULL, UP)`）、
+  DoublePlant / TallFlower（标签判定 + `placeAt`）。蘑菇（`getRawBrightness`）、
+  睡莲、孢子花、苔藓地毯、海泡菜（碰撞形状面）等特殊 `canSurvive` 仍 `unsupported`。
+* `SimpleBlockFeature`：`DoublePlantBlock.placeAt`（上下两格 + `half` 属性）、
+  上方格的 `!isAir → fluidEquals && canBeReplaced` 检查；`schedule_tick` 忽略。
+* 三个谓词：`would_survive`（复用 `survival::can_survive`）、`has_sturdy_face`
+  （`facts::STURDY_FULL` 位）、`matching_fluids`（流体 HolderSet）。
+* `state_provider.rs`：typed `BlockStateProvider` —— `weighted`
+  （`WeightedList.nextInt(totalWeight)` 累计权重轮盘）、`randomized_int`
+  （source + `IntProvider.sample` 改整数属性）、内联 bare-state。holder 字符串引用
+  （`BLOCK_STATE_PROVIDER` 注册表未导出）仍 `unsupported`。
+* `composition.rs`：组合类框架 + 递归 `PlacedFeature.place` —— `random_selector` /
+  `weighted_random_selector` / `simple_random_selector` / `random_boolean_selector` /
+  `sequence`；子项为注册表引用或内联配置，子项用 `placeWithBiomeCheck=false`
+  （topFeature 为空）。`place_candidates` 改为递归回调并汇总 `supported` / `placed`。
+* `clamped` IntProvider（递归 source + `clamp`）。
 
 #### 本分支对拍结果（`--through features --steps 9`）
 
-| 命令（省略 `--through features`；`FEATS` 为 11 个已放开的 simple_block 名字） | 结果 |
+| 命令（省略 `--through features`） | 结果 |
 |---|---|
-| `--steps 9 --feature-types minecraft:patch_dead_bush --seeds 3 --chunks 4 --salt 1` | 0 不一致（12 中心 / 10616832 方块，0 skipped） |
-| `--steps 9 --feature-types minecraft:patch_bush --seeds 2 --chunks 4 --salt 7` | 0 不一致（8 中心 / 7077888 方块，0 skipped） |
-| `--steps 9 --feature-types "$FEATS" --seeds 2 --chunks 4 --salt 1/7/42` | 各 0 不一致（8 中心 / 7077888 方块，0 skipped） |
-| `--steps 9 --feature-types "$FEATS" --seeds 4 --chunks 3 --salt 3` | 0 不一致（12 中心 / 10616832 方块，0 skipped） |
-| `--steps 6 --ore-only --seeds 2 --chunks 4`（旧阶段回归） | 0 不一致（8 中心 / 7077888 方块） |
-| 故意把 `SimpleBlockFeature` 放的状态换成石头 | 同一命令报 4 处不一致，坐标与官方放草处一致（确认非假绿） |
-| `cargo test -p mc-bamboo-worldgen` | 108 个测试全过 |
+| `--steps 9 --feature-types "$FEATS_OLD" --seeds 2 --chunks 4 --salt 1`（11 个前任名字回归） | 0 不一致（8 中心 / 7077888 方块，0 skipped） |
+| `--steps 9 --feature-types "$FEATS_INLINE" --seeds 3 --chunks 30 --salt 3`（12 个新内联 simple_block） | 0 不一致（90 中心 / 79626240 方块，0 skipped） |
+| `--steps 9 --feature-types "$FEATS_INLINE" --seeds 2 --chunks 40 --salt 7` | 3 格差异，全是 terrain 含水层既有差异（见下），features 阶段无新增 |
+| 故意把 simple_block 放的状态换成石头（`FEATS_INLINE`，salt 7） | 160 处不一致（确认非假绿） |
+| `--steps 9 --feature-types "forest_flowers,flower_forest_flowers" --seeds 3 --chunks 30 --salt 3` | 0 不一致（90 中心 / 79626240 方块，0 skipped） |
+| 故意把 `simple_random_selector` 固定选第 0 个子项（同参数） | 52 处不一致（确认非假绿） |
+| `--steps 9 --feature-types "$FEATS_WEIGHTED" --seeds 3 --chunks 30 --salt 3`（9 个 weighted provider） | 0 不一致（90 中心 / 79626240 方块，0 skipped） |
+| 故意把 weighted provider 固定选第 0 条（同参数） | 120 处不一致（确认非假绿） |
+| `--steps 6 --ore-only`、`--through carvers`（`--seeds 2 --chunks 4/6 --salt 1`）、`worldgen java` | 各 0 不一致（旧阶段回归） |
+| `cargo test -p mc-bamboo-worldgen` | 115 个测试全过 |
 
-11 个已验证的 placed feature：`patch_red_shrub`、`patch_grass_savanna`、
-`flower_swamp`、`patch_bush`、`patch_grass_forest`、`patch_grass_normal`、
-`patch_dead_bush`、`patch_grass_badlands`、`patch_dead_bush_2`、
-`patch_dead_bush_badlands`、`patch_pumpkin`。
+**terrain 含水层既有差异**：`--salt 7` 下 seed -1、中心 chunk (52,-27) 的 +z 邻居
+(52,-26)、y=-54、x=14、z=1..3 三格，官方是水、Bamboo 是深板岩；`--steps 0`
+（不跑任何 feature）同样复现，确认与地物改动无关，是邻居区块 terrain 的既有差异
+（旧阶段 carvers 回归只比中心单区块，故未暴露）。上面的 0 不一致结果都用 `--salt 3`
+等避开该区块的参数取得。
 
 #### 本分支明确还没做（诚实标 `unsupported`）
 
-* 树及全部变体（trunk/foliage/root placer、decorator、蜂巢方块实体与蜜蜂数据、
-  cherry / mangrove / pale oak / fallen_tree）、组合类（random_selector、
-  weighted_random_selector、simple_random_selector、sequence、random_patch）、
-  `noise_threshold_count` / `noise_based_count`（要 `Biome.BIOME_INFO_NOISE`）、
-  `count_on_every_layer` / `environment_scan` / `surface_water_depth_filter` 等修饰器。
-* `would_survive` / `has_sturdy_face` / `matching_fluids` 谓词（树、水下植被用）。
-* 水下植被、藤蔓 / 发光地衣 / 苔藓 / 垂滴叶 / 孢子花 / multiface growth、竹子 /
-  甘蔗 / 仙人掌 / 南瓜西瓜之外的、甜浆果、巨型蘑菇、`block_column` / `block_pile` /
-  `vegetation_patch` 等其它植被类型。
-* `to_place` 为 `BLOCK_STATE_PROVIDER` 注册表引用的 3 个 flower 配置
-  （`flower_plain` / `flower_meadow` / `flower_flower_forest`）：该注册表未导出，
-  需生成器补数据。
-* 方块实体数据对拍、接进 Director 的多阶段生成与邻居增量合并（流水线分支负责）。
+* 树（全部变种、`fallen_tree`、巨型蘑菇）和水下/其余植被已按分工移交
+  `cb-wg-trees` / `cb-wg-aquatic`，不在本分支范围。
+* 组合类里只有 `simple_random_selector`（forest_flowers / flower_forest_flowers）
+  拿到 0 不一致对拍；`random_selector` / `weighted_random_selector` /
+  `random_boolean_selector` / `sequence` 的 place 逻辑按官方源码逐行移植，但子项多为
+  树 / 水生（已移交），本轮未逐方块验证，待对方分支 merge 本分支后再放开对拍。
+  `projected_random_patchy_square` 在 26.3 导出数据里没有条目。
+* `to_place` 的 holder 字符串引用（flower_plain / flower_meadow / flower_flower_forest）：
+  `BLOCK_STATE_PROVIDER` 注册表未导出，需生成器补数据；特殊 `canSurvive`
+  （蘑菇、睡莲、孢子花、苔藓地毯、海泡菜）同上。
+* `noise_threshold_count` / `noise_based_count` / `environment_scan` /
+  `surface_water_depth_filter` / `surface_relative_threshold_filter` 修饰器、
+  `clamped_normal` / `weighted_list` IntProvider、方块实体数据（蜂巢、可疑沙等）。
+* 接进 Director 的多阶段生成与邻居增量合并（流水线分支负责）。
 
 ### 还没做
 
