@@ -1724,6 +1724,10 @@ impl DirectorHost {
                     self.save_cooldown.remove(&pos);
                     self.saved_revisions.remove(&pos);
                     self.loaded_save_tick.remove(&pos);
+                    // 生成期的半成品快照和累计增量也在这里清掉。
+                    // Clear the generation-time ProtoChunk snapshot and deltas.
+                    self.partials.remove(&pos);
+                    self.feature_deltas.remove(&pos);
                 }
             }
         }

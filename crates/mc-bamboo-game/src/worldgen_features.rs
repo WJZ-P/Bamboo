@@ -152,6 +152,21 @@ pub(crate) fn run_features(
     })
 }
 
+/// `gen-world --through features` 对拍入口：只用配置和坐标，把 3×3 CARVERS
+/// 视图拼好、调游戏里同一份 [`run_features`]，返回 9 宫格结果给工具逐方块比较。
+///
+/// `gen-world --through features` oracle entry: from config + position alone,
+/// build the 3×3 CARVERS view and call the game's own [`run_features`], returning
+/// the 9-chunk result for block-by-block comparison.
+pub fn game_features(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+) -> Result<FeatureResult, String> {
+    let view = build_view(config, cx, cz)?;
+    run_features(config, cx, cz, view)
+}
+
 /// 一次 `applyBiomeDecoration` 里需要复用的紧凑结果：给 3×3 九宫格各格的
 /// 写增量（中心那格恒为空）。
 ///
@@ -442,5 +457,45 @@ mod tests {
         apply_deltas(&mut chunk, &[(3, 40, 5, 12345), (0, MIN_Y, 0, 999)]);
         assert_eq!(chunk.blocks[(40 - MIN_Y) as usize][3 * 16 + 5], 12345);
         assert_eq!(chunk.blocks[0][0], 999);
+    }
+
+    /// `features` 阶段真的会放地物：中心自己的方块相对 CARVERS 地形有变化，
+    /// 写增量非空（否则整条 features 接入就是空转）。
+    /// The `features` stage really places features: the center's blocks differ
+    /// from CARVERS terrain and the writes are non-empty (guard against a no-op).
+    #[test]
+    fn features_stage_places_blocks() {
+        let config = normal(2026);
+        let view = build_view(&config, 0, 0).unwrap();
+        let terrain = view[CENTER].clone();
+        let result = run_features(&config, 0, 0, view).unwrap();
+        let writes = center_writes(0, 0, &terrain, &result);
+        assert!(
+            !writes.is_empty(),
+            "ores should change some center blocks (unsupported={})",
+            result.unsupported
+        );
+    }
+
+    /// 增量合并按 `(x,y,z,state)` 规范序：追加顺序不同，最终方块也相同。
+    /// Canonical `(x,y,z,state)` sort: different append orders give equal blocks.
+    #[test]
+    fn assemble_is_independent_of_delta_order() {
+        let config = normal(7);
+        let terrain = cached_generate_chunk(&config, 0, 0).unwrap();
+        let mut a = vec![(3, 0, 5, 111), (4, 1, 6, 222), (3, 0, 5, 111)];
+        let mut b = vec![(4, 1, 6, 222), (3, 0, 5, 111), (3, 0, 5, 111)];
+        let ca = assemble_feature_column(&terrain, &mut a).unwrap();
+        let cb = assemble_feature_column(&terrain, &mut b).unwrap();
+        assert_eq!(ca.parts().column.untouched(), cb.parts().column.untouched());
+        let wa = ca.parts().column.chunk();
+        let wb = cb.parts().column.chunk();
+        for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
+            for x in 0..16 {
+                for z in 0..16 {
+                    assert_eq!(wa.block(x, y, z), wb.block(x, y, z), "at ({x},{y},{z})");
+                }
+            }
+        }
     }
 }

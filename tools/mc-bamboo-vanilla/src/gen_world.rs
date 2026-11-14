@@ -35,7 +35,7 @@ use serde_json::Value;
 use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S] [--show N] \
-     [--break-self-test]";
+     [--break-self-test] [--through features]";
 const DEFAULT_SHOW: usize = 8;
 
 #[derive(Debug)]
@@ -45,16 +45,22 @@ struct Options {
     /// 故意把 Bamboo 的第一个方块改坏，确认对拍会报不一致（自检）。
     /// Deliberately corrupt the first Bamboo block to verify the oracle fails (self-test).
     break_self_test: bool,
+    /// 跑到 `features`（只放开已移植的矿石）：Java 侧 `--ore-only`，游戏侧调
+    /// `game_features`，逐方块比 9 宫格。
+    /// Run through `features` (ported ores only): Java `--ore-only`, game calls
+    /// `game_features`, comparing the 9-chunk window block by block.
+    features: bool,
 }
 
 impl Options {
     fn parse(args: &[&str]) -> Result<Self, String> {
         let mut options = Self {
-            // 固定跑到 carvers：游戏侧同一阶段也只有 CARVERS 快照。
-            // Always go through carvers: the game side only has that snapshot too.
+            // 默认固定跑到 carvers：游戏侧同一阶段也只有 CARVERS 快照。
+            // Default: through carvers, the game's only pre-features snapshot.
             forwarded: vec!["--through".to_owned(), "carvers".to_owned()],
             show: DEFAULT_SHOW,
             break_self_test: false,
+            features: false,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -69,6 +75,23 @@ impl Options {
                     options.show = args.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
                 }
                 "--break-self-test" => options.break_self_test = true,
+                "--through" => {
+                    let value = args.next().ok_or(USAGE)?;
+                    if *value != "features" {
+                        return Err(format!("gen-world only supports --through features: {USAGE}"));
+                    }
+                    // 游戏侧只移植了矿石，Java 侧也只留矿石地物；其余类型两边都
+                    // 不放，9 宫格逐方块仍可比（见 docs/worldgen-features-plan.md）。
+                    // Only ores are ported in-game; filter Java to ores too, so the
+                    // 9-chunk windows stay comparable block by block.
+                    options.features = true;
+                    // 原地替换头两个 `--through carvers`，不动可能已经追加的
+                    // `--seeds/--chunks/--salt`。
+                    // Replace the leading `--through carvers` in place, keeping
+                    // any size args already appended.
+                    options.forwarded[1] = "features".to_owned();
+                    options.forwarded.push("--ore-only".to_owned());
+                }
                 _ => return Err(USAGE.to_owned()),
             }
         }
@@ -105,6 +128,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         stats: Stats::default(),
         show: options.show,
         break_self_test: options.break_self_test,
+        features: options.features,
         header_ok: false,
         official_checks: 0,
     };
@@ -130,6 +154,9 @@ struct Report {
     stats: Stats,
     show: usize,
     break_self_test: bool,
+    /// 跑到 features：读 `features` 线、调 `game_features` 比 9 宫格。
+    /// Features mode: read `features` lines, compare the 9-chunk window via `game_features`.
+    features: bool,
     header_ok: bool,
     official_checks: u64,
 }
@@ -146,11 +173,18 @@ impl Report {
                 .ok_or("oracle line has no type")?;
             match kind {
                 "header" => self.check_header(&value)?,
+                // features 模式下 biomes 线没有对应的 carvers 线，忽略。
+                // In features mode the biomes line has no matching carvers line.
+                "biomes" if self.features => {}
                 "biomes" => self.on_biomes(&value)?,
                 // noise / surface 是 CARVERS 之前的中间快照，游戏侧没有，跳过。
                 // noise / surface are pre-CARVERS snapshots the game side lacks; skip.
                 "noise" | "surface" => {}
+                "carvers" if self.features => {
+                    return Err("features-mode oracle emitted a carvers line".to_owned());
+                }
                 "carvers" => self.on_carvers(&value)?,
+                "features" if self.features => self.on_features(&value)?,
                 "end" => {
                     self.official_checks = value.get("checks").and_then(Value::as_u64).unwrap_or(0);
                 }
@@ -160,7 +194,7 @@ impl Report {
         if !self.header_ok {
             return Err("oracle did not emit a header".to_owned());
         }
-        if !self.pending_biomes.is_empty() {
+        if !self.features && !self.pending_biomes.is_empty() {
             return Err(format!(
                 "{} biomes lines had no matching carvers line",
                 self.pending_biomes.len()
@@ -220,9 +254,12 @@ impl Report {
             ));
         }
         let through = get_i64("through")?;
-        if through != 3 {
+        // carvers=3, features=4（和 chunkgen.rs 的 header 约定一致）。
+        // carvers=3, features=4 (same header convention as chunkgen.rs).
+        let expected = if self.features { 4 } else { 3 };
+        if through != expected {
             return Err(format!(
-                "oracle ran through {through}, gen-world needs carvers (3)"
+                "oracle ran through {through}, gen-world needs {expected}"
             ));
         }
         self.header_ok = true;
@@ -294,6 +331,86 @@ impl Report {
             block_indices,
             &generated,
         )?;
+        Ok(())
+    }
+
+    /// `--through features`：官方一行是中心 `(x,z)` 加 3×3 九宫格，每格带自己的
+    /// 调色板和方块数组。游戏侧调 `game_features`（同一份 `run_features`），把
+    /// 9 宫格逐方块比过去；`--break-self-test` 改坏第一格确认比较器会响。
+    ///
+    /// `--through features`: one line is the center `(x,z)` plus a 3×3 window,
+    /// each cell with its own palette and block array. Call `game_features`
+    /// (the same `run_features`) and compare all 9 cells block by block;
+    /// `--break-self-test` corrupts one cell to prove the detector works.
+    fn on_features(&mut self, value: &Value) -> Result<(), String> {
+        let (seed, x, z) = line_key(value)?;
+        let steps = value.get("steps").and_then(Value::as_i64).unwrap_or(0);
+        // 全部 11 步：`(1<<11)-1`。Java `--ore-only` 不改 steps，游戏侧也跑全部步。
+        // All 11 steps: `(1<<11)-1`. Java `--ore-only` keeps all steps; so does the game.
+        if steps != 2047 {
+            return Err(format!(
+                "features seed {seed} ({x},{z}): oracle ran steps mask {steps}, expected 2047"
+            ));
+        }
+        let chunks = value
+            .get("chunks")
+            .and_then(Value::as_array)
+            .ok_or("features line missing chunks")?;
+        if chunks.len() != 9 {
+            return Err(format!(
+                "features seed {seed} ({x},{z}): {} chunks vs 9",
+                chunks.len()
+            ));
+        }
+
+        let config = WorldGenConfig {
+            seed,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        let mut result = mc_bamboo_game::worldgen_features::game_features(&config, x, z)
+            .map_err(|error| format!("game features failed for seed {seed} ({x},{z}): {error}"))?;
+        if self.break_self_test {
+            // 自检：把九宫格第一格的第一个方块改成岩浆，确认下面会报不一致。
+            // Self-test: corrupt one block so the comparison must report a mismatch.
+            result.blocks[0][0][0] = mc_bamboo_data::blocks::LAVA;
+        }
+        self.stats.chunks += 1;
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            let dz = index as i32 / 3 - 1;
+            let dx = index as i32 % 3 - 1;
+            let reported_dx = chunk.get("dx").and_then(Value::as_i64).unwrap_or(99);
+            let reported_dz = chunk.get("dz").and_then(Value::as_i64).unwrap_or(99);
+            if reported_dx != i64::from(dx) || reported_dz != i64::from(dz) {
+                return Err(format!(
+                    "features seed {seed} ({x},{z}) index {index}: ({reported_dx},{reported_dz}) vs ({dx},{dz})"
+                ));
+            }
+            let palette = chunk
+                .get("palette")
+                .and_then(Value::as_array)
+                .ok_or("features chunk missing palette")?;
+            let indices = chunk
+                .get("blocks")
+                .and_then(Value::as_array)
+                .ok_or("features chunk missing blocks")?;
+            // 复用 CARVERS 的逐方块比较器（同一套调色板 / 下标语义）。
+            // Reuse the CARVERS block comparator (same palette / index layout).
+            let generated = GeneratedChunk {
+                blocks: result.blocks[index].clone(),
+                biomes: Vec::new(),
+            };
+            compare_blocks(
+                &mut self.stats,
+                seed,
+                x + dx,
+                z + dz,
+                palette,
+                indices,
+                &generated,
+            )?;
+        }
         Ok(())
     }
 
