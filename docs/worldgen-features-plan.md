@@ -760,6 +760,22 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 * `survival.rs` 补齐海草 / 高海草 / 睡莲 / 海泡菜 / 孢子花（`73d9be5`、`f2198fd`），
   `is_double_plant` 改查祖先表（`TallSeagrassBlock` 是 `DoublePlantBlock` 子类，
   之前漏判导致高海草只放了半格）。
+* `bamboo.rs`（`b4671bb`）：`BambooFeature` —— 高度 `nextInt(12)+5`、podzol 圆盘
+  （`nextInt(4)+1` 半径、`WORLD_SURFACE - 1`、`#minecraft:beneath_bamboo_podzol_replaceable`）、
+  竹竿三格顶。**对拍 0 不一致**（`--seeds 2 --chunks 14 --salt 5`，28 中心）。
+* `vines.rs`（`44e9782`，**已写未验证**）：`VinesFeature` —— 原点空气、
+  `Direction.values()` 找第一个非 DOWN 且 `MultifaceBlock.canAttachTo` 成立的方向。
+  `face_is_full` 按官方 `getFaceShape` + `isShapeFullBlock` 的等价条件实现
+  （某个盒子贴住该方向的边界且在另两轴上铺满 1×1）。**没能找到真正触发它的区块**：
+  `minecraft:vines` 只在 jungle / bamboo_jungle / sparse_jungle，`count=127`，
+  但丛林区块里 `BiomeManager.getBiome` 的三维平滑把候选点判成海洋，`biome` modifier
+  全部过滤掉。需要别的队员用游戏内实际丛林地表再验。
+* `multiface.rs`（`237c78a`、`d21458c`，**已写未验证**）：`MultifaceGrowthFeature`
+  （`minecraft:glow_lichen`）。含 `MultifaceSpreader` 的 `SAME_POSITION` /
+  `SAME_PLANE` / `WRAP_AROUND` 三种扩散、`getStateForPlacement` 的 waterlogged 处理。
+  **对拍仍有 126 处不一致**（`--seeds 2 --chunks 20 --salt 11 --steps 9`），
+  表现是 `glow_lichen -> water` / `air -> glow_lichen`，位置差一格左右，
+  疑点在汇报里。
 
 #### 本分支对拍结果（`--through features --steps 9`）
 
@@ -779,6 +795,10 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | 海草 5 个（cold / normal / river / swamp / warm，`weighted_random_selector` 子项），`--seeds 2 --chunks 16 --salt 11` | 0 不一致（32 中心 / 28311552 方块，0 skipped） |
 | 睡莲 + 海泡菜 + 孢子花，`--seeds 2 --chunks 16 --salt 11` | 0 不一致（32 中心 / 28311552 方块，0 skipped） |
 | 故意把 `sea_pickle_placeable` 改成恒 true，`--seeds 3 --chunks 30 --salt 21` | 130 处不一致（确认非假绿） |
+| `minecraft:bamboo`（`--seeds 2 --chunks 14 --salt 5 --steps 9`） | **0 不一致**（28 中心 / 24772608 方块，0 skipped） |
+| 故意把竹竿状态换成空气（`--seeds 2 --chunks 24 --salt 33`） | 160 处不一致（确认非假绿；同时暴露 27 处 terrain 既有差异） |
+| `minecraft:vines`（`--seeds 1 --chunk -784 -132 --scan 3 --steps 9`） | 8 处差异，全部是 terrain 既有差异（`--steps 0` 同样复现），但**藤蔓未被调用**（候选 0 次），不算验证 |
+| `minecraft:glow_lichen`（`--seeds 2 --chunks 20 --salt 11 --steps 9`） | **126 处不一致**（已写未验证，见疑点） |
 
 **terrain 含水层既有差异**：`--salt 7` 下 seed -1、中心 chunk (52,-27) 的 +z 邻居
 (52,-26)、y=-54、x=14、z=1..3 三格，官方是水、Bamboo 是深板岩；`--steps 0`
