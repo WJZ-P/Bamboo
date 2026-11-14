@@ -69,6 +69,8 @@ mod components;
 #[cfg(feature = "oracle")]
 mod entity_oracle;
 mod extract;
+#[cfg(feature = "oracle")]
+mod gen_world;
 mod generate;
 #[cfg(feature = "oracle")]
 mod light;
@@ -165,6 +167,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
       mc-bamboo-vanilla chunkgen <java 路径> [--seeds N] [--chunks N] [--salt S] [--biomes-only] [--show N]
       mc-bamboo-vanilla structures <java 路径>
+      mc-bamboo-vanilla gen-world <java 路径> [--seeds N] [--chunks N] [--salt S] [--show N] [--break-self-test]
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -214,6 +217,7 @@ fn run() -> Result<(), String> {
         ["worldgen", java, ref options @ ..] => worldgen(java, options),
         ["chunkgen", java, ref options @ ..] => chunkgen_cli(java, options),
         ["structures", java, ref options @ ..] => structures_cli(java, options),
+        ["gen-world", java, ref options @ ..] => gen_world_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
@@ -430,6 +434,11 @@ fn structures_cli(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn gen_world_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    gen_world::run(official_program(java, CHUNKGEN_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
 fn loot_oracle(java: &str, options: &[&str]) -> Result<(), String> {
     loot_oracle::run(official_program(java, LOOT_ORACLE_SOURCE)?, options)
 }
@@ -629,6 +638,11 @@ fn chunkgen_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn structures_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn gen_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

@@ -15,7 +15,10 @@ use std::{
     time::Duration,
 };
 
-use mc_bamboo_game::{MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, MailBudget};
+use mc_bamboo_game::{
+    MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, MailBudget,
+    world_options::WorldGenConfig,
+};
 use toml::{Table, Value};
 use tracing::{info, warn};
 
@@ -113,6 +116,10 @@ const IMPLEMENTED: &[&str] = &[
     "max-players",
     "network-compression-threshold",
     "enforce-secure-profile",
+    "level-seed",
+    "level-type",
+    "generator-settings",
+    "generate-structures",
 ];
 
 /// `bamboo.toml` 里的全部键。
@@ -394,6 +401,14 @@ pub struct OfficialConfig {
     pub server_port: u16,
     /// 世界名字。服务器目录 + 这个名字就是世界目录。
     pub level_name: String,
+    /// `level-seed` 原文。空串表示随机种子；数字或字符串按官方 `WorldOptions.parseSeed` 解析。
+    pub level_seed: String,
+    /// `level-type` 原文，例如 `minecraft:normal`。
+    pub level_type: String,
+    /// `generator-settings` 原文（flat 预设的 JSON）。
+    pub generator_settings: String,
+    /// `generate-structures`：先读进来存好，结构接上后生效。
+    pub generate_structures: bool,
     /// 未实现或未知的键，按读入顺序保存原文，写回时原样输出。
     passthrough: Vec<(String, String)>,
 }
@@ -421,6 +436,10 @@ impl Default for OfficialConfig {
             server_ip: String::new(),
             server_port: get("server-port").parse().unwrap_or(25565),
             level_name: get("level-name").to_owned(),
+            level_seed: get("level-seed").to_owned(),
+            level_type: get("level-type").to_owned(),
+            generator_settings: get("generator-settings").to_owned(),
+            generate_structures: parse_bool(get("generate-structures")),
             passthrough,
         }
     }
@@ -453,6 +472,10 @@ impl OfficialConfig {
                 "server-ip" => self.server_ip.clone(),
                 "server-port" => self.server_port.to_string(),
                 "level-name" => self.level_name.clone(),
+                "level-seed" => self.level_seed.clone(),
+                "level-type" => self.level_type.clone(),
+                "generator-settings" => self.generator_settings.clone(),
+                "generate-structures" => self.generate_structures.to_string(),
                 _ => continue,
             };
             out.push(((*key).to_owned(), value));
@@ -500,6 +523,10 @@ impl OfficialConfig {
                 "server-ip" => config.server_ip = value,
                 "server-port" => config.server_port = parse_u16(&value, "server-port", file, 25565),
                 "level-name" => config.level_name = value,
+                "level-seed" => config.level_seed = value,
+                "level-type" => config.level_type = value,
+                "generator-settings" => config.generator_settings = value,
+                "generate-structures" => config.generate_structures = parse_bool(&value),
                 _ => unreachable!("IMPLEMENTED 和 match 必须同步"),
             }
         }
@@ -634,6 +661,17 @@ impl ConfigFiles {
     /// 变成运行时用的 [`ServerConfig`]。四份管理名单固定放在服务器目录里。
     pub fn to_server_config(&self, directory: &Path) -> ServerConfig {
         let defaults = ServerConfig::default();
+        // 按官方 `DedicatedServerProperties` 解析四个世界生成键；坏值回退并记日志。
+        // Resolve the four world-gen keys like `DedicatedServerProperties`; bad values fall back and log.
+        let (world_gen, warnings) = WorldGenConfig::from_properties(
+            &self.official.level_seed,
+            &self.official.level_type,
+            &self.official.generator_settings,
+            self.official.generate_structures,
+        );
+        for message in warnings {
+            warn!(%message, "falling back to default world generation setting");
+        }
         ServerConfig {
             motd: self.official.motd.clone(),
             max_players: self.official.max_players,
@@ -659,6 +697,7 @@ impl ConfigFiles {
                 deliveries: self.bamboo.deliveries_per_tick,
                 reclaims: self.bamboo.reclaims_per_tick,
             },
+            world_gen,
         }
     }
 
@@ -742,6 +781,26 @@ impl ConfigFiles {
                 "level-name",
                 self.official.level_name.clone(),
                 defaults.official.level_name.clone(),
+            ),
+            (
+                "level-seed",
+                self.official.level_seed.clone(),
+                defaults.official.level_seed.clone(),
+            ),
+            (
+                "level-type",
+                self.official.level_type.clone(),
+                defaults.official.level_type.clone(),
+            ),
+            (
+                "generator-settings",
+                self.official.generator_settings.clone(),
+                defaults.official.generator_settings.clone(),
+            ),
+            (
+                "generate-structures",
+                self.official.generate_structures.to_string(),
+                defaults.official.generate_structures.to_string(),
             ),
         ];
         for (key, value, default) in official {
@@ -993,7 +1052,13 @@ mod tests {
         assert!(defaults.official.enforce_secure_profile);
         assert_eq!(defaults.official.compression_threshold, 256);
         assert_eq!(defaults.official.level_name, "world");
-        assert_eq!(defaults.official.passthrough.len(), 59);
+        assert_eq!(defaults.official.level_seed, "");
+        assert_eq!(defaults.official.level_type, "minecraft:normal");
+        assert_eq!(defaults.official.generator_settings, "{}");
+        assert!(defaults.official.generate_structures);
+        // 四个世界生成键现在是实现项，passthrough 从 59 减到 55。
+        // The four world-gen keys are now implemented: passthrough drops 59 -> 55.
+        assert_eq!(defaults.official.passthrough.len(), 55);
         assert_eq!(defaults.bamboo.entity_threads, 0);
         assert_eq!(defaults.bamboo.deliveries_per_tick, 64);
         assert_eq!(defaults.bamboo.reclaims_per_tick, 64);
@@ -1055,7 +1120,7 @@ mod tests {
             fs::read_to_string(dir.path().join(BAMBOO_FILE)).unwrap(),
             bamboo
         );
-        assert_eq!(loaded.unsupported_keys().len(), 59);
+        assert_eq!(loaded.unsupported_keys().len(), 55);
         assert_eq!(loaded.unknown_keys(), ["my-custom-key"]);
         assert_eq!(world_dir(dir.path(), &loaded), dir.path().join("survival"));
     }
@@ -1107,6 +1172,27 @@ mod tests {
         fs::write(dir.path().join(BAMBOO_FILE), "entity_threads = [1,\n").unwrap();
         let loaded = read(dir.path()).unwrap();
         assert_eq!(loaded.bamboo, BambooConfig::default());
+    }
+
+    #[test]
+    fn world_gen_keys_round_trip_and_reach_server_config() {
+        use mc_bamboo_game::world_options::LevelType;
+        let dir = Temp::new();
+        let mut files = ConfigFiles::default();
+        files.official.level_seed = "123456789".to_owned();
+        files.official.level_type = "minecraft:amplified".to_owned();
+        files.official.generator_settings =
+            r#"{"layers":[{"block":"minecraft:stone","height":2}],"biome":"minecraft:desert"}"#
+                .to_owned();
+        files.official.generate_structures = false;
+        write(dir.path(), &files).unwrap();
+        let loaded = read(dir.path()).unwrap();
+        assert_eq!(loaded.official, files.official);
+        let config = loaded.to_server_config(dir.path());
+        assert_eq!(config.world_gen.seed, 123456789);
+        assert_eq!(config.world_gen.level_type, LevelType::Amplified);
+        assert!(!config.world_gen.generate_structures);
+        assert_eq!(config.world_gen.flat.layers.len(), 1);
     }
 
     #[test]

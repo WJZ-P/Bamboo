@@ -1,22 +1,30 @@
 //! 生成阶段函数的接口：`(阶段, 位置, 中心半成品, 邻居只读视图) → 中心的新内容`
 //! （设计稿 5.3）。
 //!
-//! 现在只有超平坦一个实现，十个阶段合成一步，产物是与坐标无关的模板。
+//! 两个实现：[`FlatGenerator`] 把超平坦的十个阶段合成一步、产物是模板；
+//! [`OverworldGenerator`] 把 `worldgen` 的纯函数接进 `Staged` 多阶段流水线。
 //! 接口按多阶段写好：Director 每个阶段派一个 `Task::Generate`，宿主把它交给
 //! 内联执行器或计算池，计算池的线程上调用这里的 [`ChunkGenerator::generate`]。
 //! 实现必须是纯函数：结果只由阶段、位置、种子和输入的区块决定，与哪条线程算、
 //! 什么时候算无关。
 //!
-//! Generation stage functions (design 5.3). Only the superflat generator exists;
-//! it folds all stages into one. Implementations must be pure: the result depends
-//! only on the stage, position, seed and inputs, never on the thread or timing.
+//! Generation stage functions (design 5.3). Two implementations: [`FlatGenerator`]
+//! folds superflat's ten stages into one template-producing step;
+//! [`OverworldGenerator`] wires `worldgen`'s pure functions into the `Staged`
+//! pipeline. Implementations must be pure: the result depends only on the stage,
+//! position, seed and inputs, never on the thread or timing.
 
 use std::time::Duration;
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_world::ticket::ChunkStatus;
+use tracing::error;
 
-use crate::region::RegionColumn;
+use crate::{
+    region::RegionColumn,
+    world_options::WorldGenConfig,
+    worldgen::{build_region_column, generate_chunk},
+};
 
 /// 邻居只读视图：`(位置, 它已经到的阶段, 盒子)`。
 ///
@@ -77,5 +85,119 @@ impl ChunkGenerator for FlatGenerator {
             std::thread::sleep(self.delay);
         }
         center.unwrap_or_else(|| Box::new(RegionColumn::from_template()))
+    }
+}
+
+/// 主世界多阶段生成器：把 `worldgen` 的纯函数接进 Director 的 `Staged` 流水线。
+///
+/// `structure_starts` / `structure_references` / `biomes` 先接成透传：`terrain` 一步
+/// 同时算出 quart 群系和跑到 CARVERS 的方块（官方 `terrain` 状态里地表/雕刻器本就是
+/// uncached 重算群系，这里把 BIOMES 阶段的 quart 格也一起算，避免两次组装 column）；
+/// `features` / `initialize_light` / `light` / `spawn` / `full` 本轮也原样透传
+/// （邻居只读快照、增量合并、生成时光照还没接，见 README 已知限制）。
+/// 每一步都是 `(阶段, 位置, 配置) → 盒子` 的纯函数，与线程、调度无关。
+///
+/// Overworld staged generator: wires `worldgen`'s pure functions into the
+/// Director's `Staged` pipeline. `structure_starts` / `structure_references` /
+/// `biomes` pass through: `terrain` computes both quart biomes and CARVERS blocks
+/// in one step (vanilla's `terrain` re-resolves biomes uncached for surface /
+/// carvers anyway; folding BIOMES in avoids assembling the column twice).
+/// `features` / `initialize_light` / `light` / `spawn` / `full` also pass through
+/// for now (neighbor snapshots, delta merge and in-pipeline light not wired;
+/// see README known limitations). Each step is a pure
+/// `(stage, pos, config) → box` function, independent of thread/timing.
+#[derive(Debug, Clone)]
+pub(crate) struct OverworldGenerator {
+    config: WorldGenConfig,
+}
+
+impl OverworldGenerator {
+    pub(crate) fn new(config: WorldGenConfig) -> Self {
+        Self { config }
+    }
+}
+
+/// 没有半成品时先造一个空模板盒子，后面的阶段再替换内容。
+/// Make an empty template box when there is no half-built column yet.
+fn empty_center(center: Option<Box<RegionColumn>>) -> Box<RegionColumn> {
+    center.unwrap_or_else(|| Box::new(RegionColumn::from_template()))
+}
+
+impl ChunkGenerator for OverworldGenerator {
+    fn generate(
+        &self,
+        stage: ChunkStatus,
+        pos: ChunkPos,
+        center: Option<Box<RegionColumn>>,
+        _neighbors: NeighborView<'_>,
+    ) -> Box<RegionColumn> {
+        let result = match stage {
+            // `ChunkStatus.TERRAIN`：一步算 quart 群系 + doFill → buildSurface →
+            // generateCarvers 的方块，组装成最终 column。其它阶段透传。
+            // `ChunkStatus.TERRAIN`: compute quart biomes + blocks through
+            // doFill → buildSurface → generateCarvers, assemble the final column.
+            // Other stages pass through.
+            ChunkStatus::Terrain => generate_chunk(&self.config, pos.x, pos.z)
+                .and_then(|chunk| build_region_column(&chunk)),
+            _ => return empty_center(center),
+        };
+        match result {
+            Ok(column) => column,
+            Err(error) => {
+                error!(%error, x = pos.x, z = pos.z, ?stage, "world generation failed; keeping previous column");
+                empty_center(center)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_data::registries;
+    use mc_bamboo_world::{MIN_Y, ticket::ChunkStatus};
+
+    use super::*;
+    use crate::world_options::LevelType;
+
+    /// 按 `Staged` 流水线的十个阶段跑一遍 `OverworldGenerator`，确认最后交回的盒子
+    /// 是真正的噪声地形（有非空气方块、有群系），而不是超平坦模板。
+    ///
+    /// Run `OverworldGenerator` through all ten `Staged` stages and check the
+    /// final box is real noise terrain (non-air blocks, real biomes), not the
+    /// superflat template.
+    #[test]
+    fn staged_pipeline_produces_terrain_instead_of_the_flat_template() {
+        let config = WorldGenConfig {
+            seed: 1234,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        let generator = OverworldGenerator::new(config);
+        let pos = ChunkPos::new(2, -3);
+        let mut column: Option<Box<RegionColumn>> = None;
+        for stage in ChunkStatus::ALL {
+            column = Some(generator.generate(stage, pos, column, &[]));
+        }
+        let column = column.expect("pipeline produced a final column");
+        let world = column.parts().column.chunk();
+        // 噪声地形从世界底部一路填到地表，跨好几个段；超平坦模板只有最底一个段
+        // 有四层方块。多于一个非空段就说明是真正的地形而不是模板。
+        // Noise terrain fills from the world bottom up through several sections;
+        // the flat template has four layers in only the bottom section. More than
+        // one non-empty section means real terrain, not the template.
+        let non_empty = world
+            .sections()
+            .iter()
+            .filter(|section| !section.is_empty())
+            .count();
+        assert!(
+            non_empty > 1,
+            "expected many filled sections, got {non_empty}"
+        );
+        let biome = world.biome_at(0, MIN_Y, 0);
+        assert!(biome < registries::biome::TOTAL);
+        // 生成的区块不是「原样」（会存档），模板才是原样。
+        // Generated columns are not pristine (they get saved); templates are.
+        assert!(!column.parts().column.untouched());
     }
 }

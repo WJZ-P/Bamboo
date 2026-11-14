@@ -567,6 +567,7 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
         chunk_worker_threads: config.chunk_worker_threads,
         mail_budget: config.mail_budget,
         world_dir: config.world_dir.clone(),
+        world_gen: config.world_gen.clone(),
     }
 }
 

@@ -78,7 +78,11 @@ mod sign;
 mod tick_levels;
 mod weather;
 mod world;
+mod world_gen_settings;
+pub mod world_options;
 mod world_state;
+pub mod worldgen;
+mod worldgen_spawn;
 
 pub use command::test_commands;
 pub use director_host::MailBudget;
@@ -93,6 +97,7 @@ pub use secure_chat::ServiceProfileKeys;
 pub use world::{
     MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, World, WorldConfig,
 };
+pub use world_options::WorldGenConfig;
 
 /// 供 `mc-bamboo-vanilla saved-data` 和官方 codec 对拍：返回 Bamboo 编码器写出的
 /// 两份示例 `data` 复合标签（游戏规则、世界边界）。只暴露公开的 [`Tag`]，

@@ -21,13 +21,14 @@ use mc_bamboo_storage::{
     player_data::PlayerData,
     world_dir::{encode_player_data, player_uuid_string},
 };
-use mc_bamboo_world::director::TicketOp;
+use mc_bamboo_world::director::{DirectorConfig, PipelineKind, TicketOp};
 
 use crate::director_host::{DirectorHost, MailBudget};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     book, chat, chunk_broadcast,
+    chunk_generator::OverworldGenerator,
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
     command, container, entity_sync, entity_tracking,
     global::{Global, RosterEntry},
@@ -55,6 +56,20 @@ pub const MAX_ENTITY_THREADS: usize = 256;
 pub const MAX_CHUNK_WORKER_THREADS: usize = 64;
 
 const SERVER_SHUTDOWN: &str = "multiplayer.disconnect.server_shutdown";
+
+/// 多阶段生成、又没显式配 `chunk_worker_threads` 时的默认线程数：取 CPU 核数的一半，
+/// 夹在 1..=4。真生成每区块几十毫秒，留几条线程就不至于把 20 TPS 的世界线程拖住；
+/// 上限 4 是照 31 GB 内存、同时还有别的队员在跑的机器留的余量。
+///
+/// Default worker threads for staged generation when `chunk_worker_threads` is
+/// unset: half the CPUs, clamped to 1..=4. Real generation costs tens of ms per
+/// chunk, so a few threads keep it off the 20 TPS world thread; the cap of 4
+/// leaves room on a machine shared with other workers.
+fn default_staged_worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).clamp(1, 4))
+        .unwrap_or(2)
+}
 
 /// 世界的启动参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +100,12 @@ pub struct WorldConfig {
     ///
     /// The world directory. `None` disables saving (tests, oracle, load tests).
     pub world_dir: Option<PathBuf>,
+    /// 世界生成参数（种子、世界类型、flat 预设、是否生成结构）。
+    /// 默认超平坦、种子 0，保持嵌入式测试的现有行为。
+    ///
+    /// World generation parameters (seed, level type, flat preset, structures).
+    /// Defaults to superflat / seed 0 to keep embedded-test behaviour.
+    pub world_gen: crate::world_options::WorldGenConfig,
 }
 
 impl Default for WorldConfig {
@@ -100,6 +121,7 @@ impl Default for WorldConfig {
             chunk_worker_threads: 0,
             mail_budget: MailBudget::default(),
             world_dir: None,
+            world_gen: crate::world_options::WorldGenConfig::default(),
         }
     }
 }
@@ -173,7 +195,7 @@ impl World {
         // 不让世界线程带着一个没锁住的世界目录继续跑。
         // Open the save synchronously at startup: create the layout, take the lock,
         // read level.dat. On failure, refuse to start instead of running unlocked.
-        let (save, startup_error) = match (&config.world_dir, infinite_flat) {
+        let (mut save, startup_error) = match (&config.world_dir, infinite_flat) {
             (Some(root), false) => match SaveSession::open(root) {
                 Ok((session, _source)) => (Some(session), None),
                 Err(error) => {
@@ -204,6 +226,9 @@ impl World {
         // back onto runtime; `restore` uses the saved game time. A fresh world has
         // no `level.dat`, so runtime defaults are authoritative (do not overwrite
         // them with `LevelData::default()`'s spawn).
+        let fresh_world = save
+            .as_ref()
+            .is_none_or(|session| !session.has_loaded_level());
         if let Some(save) = &save {
             if save.has_loaded_level() {
                 crate::save_data::apply_level_data(global.state_mut(), save.level());
@@ -211,6 +236,47 @@ impl World {
             save.startup()
                 .apply(&mut global, &mut region, save.level().time);
         }
+        // 有 `world_gen_settings.dat` 就以存档为准：空 `level-seed` 的随机种子在
+        // 首次保存时写进存档，重启后必须用同一个（官方行为），不能重新摇一次。
+        // `server.properties` 的世界类型只对新世界生效，改它对老存档无效。
+        // A saved `world_gen_settings.dat` wins: the random seed for an empty
+        // `level-seed` is written on first save, and a restart must reuse it
+        // (vanilla behaviour) instead of rolling a new one. `level-type` from
+        // `server.properties` only applies to a fresh world.
+        let world_gen = save
+            .as_ref()
+            .and_then(|session| session.loaded_world_gen())
+            .cloned()
+            .unwrap_or_else(|| config.world_gen.clone());
+        let staged = !infinite_flat && !world_gen.level_type.is_flat();
+        if let Some(save) = save.as_mut() {
+            save.set_world_gen(world_gen.clone());
+        }
+        // 种子进 `WorldState`（`hashed_seed` 进 login 包、天气、随机序列）。
+        // `level.dat` 里没有建模的 seed 字段，`apply_level_data` 不动它。
+        // Put the seed into `WorldState` (hashed_seed for the login packet,
+        // weather, random sequences). `level.dat` has no modelled seed field,
+        // so `apply_level_data` leaves it alone.
+        global.state_mut().seed = world_gen.seed;
+        global.state_mut().sequences = mc_bamboo_loot::RandomSequences::new(world_gen.seed);
+        // 全新世界（没有 level.dat）按官方 `MinecraftServer.setInitialSpawn` 选出生点；
+        // 读档时用存档里的出生点（已由 `apply_level_data` 套回）。超平坦保持不变。
+        // A fresh world (no level.dat) picks a spawn like `setInitialSpawn`;
+        // a loaded world keeps the saved spawn (already applied). Flat is unchanged.
+        if fresh_world
+            && staged
+            && let Some(spawn) = crate::worldgen_spawn::initial_spawn(&world_gen)
+        {
+            global.state_mut().spawn = spawn;
+        }
+        let director_config = DirectorConfig {
+            pipeline: if staged {
+                PipelineKind::Staged
+            } else {
+                PipelineKind::Flat
+            },
+            ..DirectorConfig::default()
+        };
         let mut world = Self {
             authoritative_admin,
             entity_threads: config.entity_threads.min(MAX_ENTITY_THREADS),
@@ -222,7 +288,7 @@ impl World {
                 DirectorHost::new_infinite_flat(Default::default())
             } else {
                 DirectorHost::new(
-                    Default::default(),
+                    director_config,
                     MailBudget {
                         deliveries: config.mail_budget.deliveries.min(MAX_MAIL_BUDGET),
                         reclaims: config.mail_budget.reclaims.min(MAX_MAIL_BUDGET),
@@ -255,9 +321,24 @@ impl World {
                     ..Default::default()
                 });
         }
+        if staged {
+            // 真生成比超平坦模板慢得多，默认就用计算池把它挪出世界线程；配置文件
+            // 显式给了 `chunk_worker_threads` 就照给的值（0 = 仍然内联）。
+            // Real generation is far slower than the superflat template, so by
+            // default push it off the world thread with the compute pool; an
+            // explicit `chunk_worker_threads` value is honoured (0 = still inline).
+            world
+                .host
+                .set_generator(Arc::new(OverworldGenerator::new(world_gen.clone())));
+        }
+        let compute_threads = if staged && config.chunk_worker_threads == 0 {
+            default_staged_worker_threads()
+        } else {
+            config.chunk_worker_threads
+        };
         world
             .host
-            .set_compute_threads(config.chunk_worker_threads.min(MAX_CHUNK_WORKER_THREADS));
+            .set_compute_threads(compute_threads.min(MAX_CHUNK_WORKER_THREADS));
         // 启用存档时起一条 IO 线程并接进 Director 宿主；起不来也拒绝启动。
         // With saving enabled, start one IO thread and attach it to the host.
         if let Some(save) = &world.save {
@@ -1402,6 +1483,9 @@ mod loaded_tests;
 #[cfg(test)]
 #[path = "world/tests/review_probe.rs"]
 mod review_probe;
+#[cfg(test)]
+#[path = "world/staged_tests.rs"]
+mod staged_tests;
 #[cfg(test)]
 mod storage_diff_tests;
 #[cfg(test)]

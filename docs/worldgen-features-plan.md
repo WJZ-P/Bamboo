@@ -724,7 +724,12 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 * 其它 10 个 step（湖、晶洞、怪物房、花草、积雪等）全部标 `unsupported`。
 * `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按
   「已移植集合」输出 `skipped`，`--ore-only` 是手工过滤。
-* 接进 Director（5.3.1 的邻居快照 + 增量合并）还没做。
+* 接进 Director 的**多阶段流水线形状**已经就位（流水线分支：`PipelineKind::Staged`
+  按 `ChunkPyramid` 派 `structure_starts … full` 十个阶段、terrain 已接真生成）。
+  但 **5.3.1 的邻居只读快照 `Arc<ProtoChunk>` + `FeatureResult.deltas` 按 `TaskId`
+  合并还没做**：`Task::Generate.neighbors` 仍恒为空，所以游戏里的 `features` 阶段目前
+  是透传、不放置任何地物（第 6 步矿石的纯函数只在对拍里跑）。`initialize_light` /
+  `light` / `spawn` 同样透传。把 features 真正接进游戏要等这块邻居快照落地。
 * 高度图的增量更新：矿石走 `BulkSectionAccess` 直接写 `LevelChunkSection`，
   **绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是 primed 后固定的；
   以后接树/湖时要照 `Heightmap.update` 补上。
