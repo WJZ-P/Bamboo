@@ -6,15 +6,18 @@
 //! 接口按多阶段写好：Director 每个阶段派一个 `Task::Generate`，宿主把它交给
 //! 内联执行器或计算池，计算池的线程上调用这里的 [`ChunkGenerator::generate`]。
 //! 实现必须是纯函数：结果只由阶段、位置、种子和输入的区块决定，与哪条线程算、
-//! 什么时候算无关。
+//! 什么时候算无关。`features` 阶段读半径 1 的邻居只读快照、产出写邻居的增量，
+//! 由世界线程按 `TaskId` 顺序合进各自的 `Arc` 快照（设计稿 5.3.1）。
 //!
 //! Generation stage functions (design 5.3). Two implementations: [`FlatGenerator`]
 //! folds superflat's ten stages into one template-producing step;
 //! [`OverworldGenerator`] wires `worldgen`'s pure functions into the `Staged`
 //! pipeline. Implementations must be pure: the result depends only on the stage,
-//! position, seed and inputs, never on the thread or timing.
+//! position, seed and inputs, never on the thread or timing. The `features`
+//! stage reads radius-1 neighbor snapshots and emits neighbor deltas that the
+//! world thread merges into `Arc` snapshots in `TaskId` order (design 5.3.1).
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_world::ticket::ChunkStatus;
@@ -23,15 +26,22 @@ use tracing::error;
 use crate::{
     region::RegionColumn,
     world_options::WorldGenConfig,
-    worldgen::{build_region_column, generate_chunk},
+    worldgen::GeneratedChunk,
+    worldgen_features::{
+        GenerateOutput, SnapshotView, generate_features_stage, generate_terrain_stage,
+        passthrough_stage,
+    },
 };
 
-/// 邻居只读视图：`(位置, 它已经到的阶段, 盒子)`。
+/// 邻居只读视图：`(位置, 不可变的 CARVERS 快照)`。`None` 表示计算线程现算。
 ///
-/// 现在 Director 派的 `Task::Generate` 不带邻居（超平坦不需要），这里总是空的。
-/// M4 接真生成时，Director 里的半成品改存成不可变快照（`Arc`），视图只加引用计数、
-/// 不复制；中心推进时写时复制。见 `docs/world-model-design.md` 5.3。
-pub(crate) type NeighborView<'a> = &'a [(ChunkPos, ChunkStatus, Box<RegionColumn>)];
+/// Read-only neighbor view: `(pos, immutable CARVERS snapshot)`. `None` means
+/// the compute thread regenerates it purely.
+pub(crate) type NeighborView<'a> = SnapshotView<'a>;
+
+/// 中心半成品的纯数据快照（CARVERS 地形），供 `features` 阶段拼 3×3 视图。
+/// Clean CARVERS snapshot of the center, for the `features` 3×3 view.
+pub(crate) type CenterSnapshot = Option<Arc<GeneratedChunk>>;
 
 /// 一个生成器。实现要能在多条线程上同时调用。
 pub(crate) trait ChunkGenerator: Send + Sync {
@@ -41,8 +51,9 @@ pub(crate) trait ChunkGenerator: Send + Sync {
         stage: ChunkStatus,
         pos: ChunkPos,
         center: Option<Box<RegionColumn>>,
+        center_snapshot: CenterSnapshot,
         neighbors: NeighborView<'_>,
-    ) -> Box<RegionColumn>;
+    ) -> GenerateOutput;
 }
 
 /// 超平坦：任何位置都是同一份模板，光照已经算好。
@@ -79,33 +90,28 @@ impl ChunkGenerator for FlatGenerator {
         _stage: ChunkStatus,
         _pos: ChunkPos,
         center: Option<Box<RegionColumn>>,
+        _center_snapshot: CenterSnapshot,
         _neighbors: NeighborView<'_>,
-    ) -> Box<RegionColumn> {
+    ) -> GenerateOutput {
         if !self.delay.is_zero() {
             std::thread::sleep(self.delay);
         }
-        center.unwrap_or_else(|| Box::new(RegionColumn::from_template()))
+        passthrough_stage(center)
     }
 }
 
 /// 主世界多阶段生成器：把 `worldgen` 的纯函数接进 Director 的 `Staged` 流水线。
 ///
-/// `structure_starts` / `structure_references` / `biomes` 先接成透传：`terrain` 一步
-/// 同时算出 quart 群系和跑到 CARVERS 的方块（官方 `terrain` 状态里地表/雕刻器本就是
-/// uncached 重算群系，这里把 BIOMES 阶段的 quart 格也一起算，避免两次组装 column）；
-/// `features` / `initialize_light` / `light` / `spawn` / `full` 本轮也原样透传
-/// （邻居只读快照、增量合并、生成时光照还没接，见 README 已知限制）。
-/// 每一步都是 `(阶段, 位置, 配置) → 盒子` 的纯函数，与线程、调度无关。
+/// `structure_starts` / `structure_references` / `biomes` 先接成透传：`terrain`
+/// 一步同时算出 quart 群系和跑到 CARVERS 的方块；`features` 读半径 1 的邻居
+/// 快照、跑 `Generator::features()`，中心内容和写邻居的增量交回世界线程；
+/// `initialize_light` / `light` / `spawn` / `full` 本轮也原样透传。
+/// 每一步都是 `(阶段, 位置, 配置, 输入) → 盒子 + 增量` 的纯函数。
 ///
-/// Overworld staged generator: wires `worldgen`'s pure functions into the
-/// Director's `Staged` pipeline. `structure_starts` / `structure_references` /
-/// `biomes` pass through: `terrain` computes both quart biomes and CARVERS blocks
-/// in one step (vanilla's `terrain` re-resolves biomes uncached for surface /
-/// carvers anyway; folding BIOMES in avoids assembling the column twice).
-/// `features` / `initialize_light` / `light` / `spawn` / `full` also pass through
-/// for now (neighbor snapshots, delta merge and in-pipeline light not wired;
-/// see README known limitations). Each step is a pure
-/// `(stage, pos, config) → box` function, independent of thread/timing.
+/// Overworld staged generator. `terrain` computes quart biomes + CARVERS blocks;
+/// `features` reads radius-1 neighbor snapshots, runs `Generator::features()`,
+/// and returns the center content plus neighbor deltas; light/spawn/full pass
+/// through. Each step is pure in stage, position, config and inputs.
 #[derive(Debug, Clone)]
 pub(crate) struct OverworldGenerator {
     config: WorldGenConfig,
@@ -117,35 +123,33 @@ impl OverworldGenerator {
     }
 }
 
-/// 没有半成品时先造一个空模板盒子，后面的阶段再替换内容。
-/// Make an empty template box when there is no half-built column yet.
-fn empty_center(center: Option<Box<RegionColumn>>) -> Box<RegionColumn> {
-    center.unwrap_or_else(|| Box::new(RegionColumn::from_template()))
-}
-
 impl ChunkGenerator for OverworldGenerator {
     fn generate(
         &self,
         stage: ChunkStatus,
         pos: ChunkPos,
         center: Option<Box<RegionColumn>>,
-        _neighbors: NeighborView<'_>,
-    ) -> Box<RegionColumn> {
+        center_snapshot: CenterSnapshot,
+        neighbors: NeighborView<'_>,
+    ) -> GenerateOutput {
         let result = match stage {
-            // `ChunkStatus.TERRAIN`：一步算 quart 群系 + doFill → buildSurface →
-            // generateCarvers 的方块，组装成最终 column。其它阶段透传。
-            // `ChunkStatus.TERRAIN`: compute quart biomes + blocks through
-            // doFill → buildSurface → generateCarvers, assemble the final column.
-            // Other stages pass through.
-            ChunkStatus::Terrain => generate_chunk(&self.config, pos.x, pos.z)
-                .and_then(|chunk| build_region_column(&chunk)),
-            _ => return empty_center(center),
+            // `ChunkStatus.TERRAIN`：算 quart 群系 + doFill → buildSurface →
+            // generateCarvers 的方块，并把 CARVERS 纯数据作为邻居快照交回。
+            // `ChunkStatus.TERRAIN`: quart biomes + blocks through doFill →
+            // buildSurface → generateCarvers, plus the clean CARVERS data.
+            ChunkStatus::Terrain => generate_terrain_stage(&self.config, pos.x, pos.z),
+            // `ChunkStatus.FEATURES`：3×3 视图 + `Generator::features()`。
+            // `ChunkStatus.FEATURES`: 3×3 view + `Generator::features()`.
+            ChunkStatus::Features => {
+                generate_features_stage(&self.config, pos.x, pos.z, center_snapshot, neighbors)
+            }
+            _ => return passthrough_stage(center),
         };
         match result {
-            Ok(column) => column,
+            Ok(output) => output,
             Err(error) => {
                 error!(%error, x = pos.x, z = pos.z, ?stage, "world generation failed; keeping previous column");
-                empty_center(center)
+                passthrough_stage(center)
             }
         }
     }
@@ -159,12 +163,12 @@ mod tests {
     use super::*;
     use crate::world_options::LevelType;
 
-    /// 按 `Staged` 流水线的十个阶段跑一遍 `OverworldGenerator`，确认最后交回的盒子
-    /// 是真正的噪声地形（有非空气方块、有群系），而不是超平坦模板。
+    /// 按 `Staged` 流水线的十个阶段跑一遍 `OverworldGenerator`（透传阶段带空
+    /// 邻居视图），确认最后交回的盒子是真正的噪声地形而不是超平坦模板。
     ///
-    /// Run `OverworldGenerator` through all ten `Staged` stages and check the
-    /// final box is real noise terrain (non-air blocks, real biomes), not the
-    /// superflat template.
+    /// Run `OverworldGenerator` through all ten `Staged` stages (pass-through
+    /// stages get an empty neighbor view) and check the final box is real noise
+    /// terrain, not the superflat template.
     #[test]
     fn staged_pipeline_produces_terrain_instead_of_the_flat_template() {
         let config = WorldGenConfig {
@@ -176,15 +180,11 @@ mod tests {
         let pos = ChunkPos::new(2, -3);
         let mut column: Option<Box<RegionColumn>> = None;
         for stage in ChunkStatus::ALL {
-            column = Some(generator.generate(stage, pos, column, &[]));
+            let output = generator.generate(stage, pos, column, None, &[]);
+            column = Some(output.column);
         }
         let column = column.expect("pipeline produced a final column");
         let world = column.parts().column.chunk();
-        // 噪声地形从世界底部一路填到地表，跨好几个段；超平坦模板只有最底一个段
-        // 有四层方块。多于一个非空段就说明是真正的地形而不是模板。
-        // Noise terrain fills from the world bottom up through several sections;
-        // the flat template has four layers in only the bottom section. More than
-        // one non-empty section means real terrain, not the template.
         let non_empty = world
             .sections()
             .iter()
@@ -196,8 +196,6 @@ mod tests {
         );
         let biome = world.biome_at(0, MIN_Y, 0);
         assert!(biome < registries::biome::TOTAL);
-        // 生成的区块不是「原样」（会存档），模板才是原样。
-        // Generated columns are not pristine (they get saved); templates are.
         assert!(!column.parts().column.untouched());
     }
 }

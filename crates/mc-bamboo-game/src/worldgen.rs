@@ -72,7 +72,7 @@ thread_local! {
 /// from the level type; all three noise worlds share the `minecraft:overworld`
 /// biome preset (`WorldPresets.bootstrap`) and differ only in
 /// `NoiseGeneratorSettings`.
-fn with_generator<T>(
+pub(crate) fn with_generator<T>(
     config: &WorldGenConfig,
     f: impl FnOnce(&chunk::Generator<'static>) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -120,6 +120,41 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
         blocks,
         biomes: vec![cells; SECTION_COUNT],
     }
+}
+
+// 每条计算线程各缓存一份到 CARVERS 的地形，供 `features` 阶段拼 3×3 视图时免于
+// 反复重算。键含种子和世界类型；地形是纯函数，命中与否不改变结果，只省时间。
+// 只在 `features` 阶段用，条目数封顶，超过就整表清掉（不逐条淘汰、不依赖顺序）。
+// Each compute thread caches CARVERS terrain so the `features` 3×3 view does not
+// recompute it. The key includes seed and world type; terrain is pure, so a hit
+// never changes the result. Bounded: clear the whole table past the cap.
+type TerrainCache = HashMap<(i64, Option<&'static str>, i32, i32), GeneratedChunk>;
+thread_local! {
+    static TERRAIN_CACHE: RefCell<TerrainCache> = RefCell::new(HashMap::new());
+}
+const TERRAIN_CACHE_CAP: usize = 1024;
+
+/// 带线程本地缓存的 `generate_chunk`，`features` 阶段拼 3×3 视图用。
+///
+/// Cached `generate_chunk` for building the `features` 3×3 view.
+pub(crate) fn cached_generate_chunk(
+    config: &WorldGenConfig,
+    x: i32,
+    z: i32,
+) -> Result<GeneratedChunk, String> {
+    let key = (config.seed, config.level_type.settings_id(), x, z);
+    TERRAIN_CACHE.with(|cache| {
+        if let Some(chunk) = cache.borrow().get(&key) {
+            return Ok(chunk.clone());
+        }
+        let chunk = generate_chunk(config, x, z)?;
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= TERRAIN_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(key, chunk.clone());
+        Ok(chunk)
+    })
 }
 
 /// 生成中心区块到 `terrain` 阶段。
