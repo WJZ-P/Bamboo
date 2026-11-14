@@ -35,6 +35,9 @@ impl SimpleBlockFeature {
     pub fn parse(config: &Value) -> Option<Self> {
         let to_place = config.as_object()?.get("to_place")?;
         let provider = StateProvider::parse(to_place).ok()?;
+        if !provider.supported() {
+            return None;
+        }
         if !provider
             .possible_states()
             .iter()
