@@ -12,7 +12,8 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
-    dripstone_utils::is_air, predicates::Predicate, state::parse_state, world::FeatureWorld,
+    block_predicate::BlockPredicate, dripstone_utils::is_air, state::parse_state,
+    world::FeatureWorld,
 };
 
 /// `SpikeFeature` 的配置。
@@ -20,8 +21,8 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct SpikeFeature {
     pub state: u32,
-    pub can_place_on: Predicate,
-    pub can_replace: Predicate,
+    pub can_place_on: BlockPredicate,
+    pub can_replace: BlockPredicate,
 }
 
 impl SpikeFeature {
@@ -31,21 +32,21 @@ impl SpikeFeature {
             .ok_or("spike feature must be an object")?;
         Ok(Self {
             state: parse_state(object.get("state").ok_or("spike has no state")?)?,
-            can_place_on: Predicate::parse(
+            can_place_on: BlockPredicate::parse(
                 object
                     .get("can_place_on")
                     .ok_or("spike has no can_place_on")?,
-            )?,
-            can_replace: Predicate::parse(
+            ),
+            can_replace: BlockPredicate::parse(
                 object
                     .get("can_replace")
                     .ok_or("spike has no can_replace")?,
-            )?,
+            ),
         })
     }
 
     pub fn supported(&self) -> bool {
-        self.can_place_on.supported() && self.can_replace.supported()
+        self.can_place_on.is_supported() && self.can_replace.is_supported()
     }
 }
 
@@ -95,13 +96,18 @@ pub fn place(
                         let positive = (origin.0 + xo, origin.1 + y_off, origin.2 + zo);
                         let state = world.get_block(positive.0, positive.1, positive.2);
                         if is_air(state) || spike.can_replace.test(world, positive) {
-                            world.set_block_state(positive.0, positive.1, positive.2, spike.state);
+                            world.set_block_with_heightmaps(
+                                positive.0,
+                                positive.1,
+                                positive.2,
+                                spike.state,
+                            );
                         }
                         if y_off != 0 && new_width > 1 {
                             let negative = (origin.0 + xo, origin.1 - y_off, origin.2 + zo);
                             let state = world.get_block(negative.0, negative.1, negative.2);
                             if is_air(state) || spike.can_replace.test(world, negative) {
-                                world.set_block_state(
+                                world.set_block_with_heightmaps(
                                     negative.0,
                                     negative.1,
                                     negative.2,
@@ -133,7 +139,7 @@ pub fn place(
                 {
                     break;
                 }
-                world.set_block_state(cursor.0, cursor.1, cursor.2, spike.state);
+                world.set_block_with_heightmaps(cursor.0, cursor.1, cursor.2, spike.state);
                 cursor.1 -= 1;
                 run_length -= 1;
                 if run_length <= 0 {

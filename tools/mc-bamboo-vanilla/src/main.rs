@@ -25,6 +25,22 @@
 //! mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N]
 //!                            [--biome-points N] [--show N]
 //!     让官方代码算世界生成的噪声、密度函数和群系，用 mc-bamboo-worldgen 重算，浮点逐位比较
+//! mc-bamboo-vanilla structures <java 路径>
+//!     用官方 RandomSpreadStructurePlacement 对拍结构放置、加权选择和频率判定
+//! mc-bamboo-vanilla structure-rings <java 路径>
+//!     用官方 getRingPositionsFor / findBiomeHorizontal 对拍要塞环位置与群系吸附
+//! mc-bamboo-vanilla structure-validity <java 路径>
+//!     用官方 Structure.GenerationContext 对拍 findValidGenerationPoint 的群系与高度判定
+//! mc-bamboo-vanilla structure-pieces <java 路径>
+//!     用官方结构件类对拍多件式结构的结构件布局（类型、包围盒、朝向、参数）；
+//!     已移植废弃矿井 / 要塞 / 海底神殿三种
+//!
+//!     Compare findValidGenerationPoint's biome and height gates against vanilla
+//!     Structure.GenerationContext
+//! mc-bamboo-vanilla structure-templates <java 路径>
+//!     用官方 NbtIo 逐节点对拍导出的结构模板 NBT
+//!
+//!     Compare exported structure template NBT node by node with vanilla NbtIo
 //! mc-bamboo-vanilla machine <java 路径>
 //!     让官方熔炉和酿造台在假世界里逐刻跑，比较进度、物品、方块状态和世界随机源
 //! mc-bamboo-vanilla entity-oracle <java 路径>
@@ -43,6 +59,14 @@
 //!     让官方 `DistanceManager` 在随机票操作里算区块等级，用 `TicketTable` 重放，逐步比较两套等级
 //! mc-bamboo-vanilla border-oracle <java 路径> [--cases N] [--seed S] [--show N]
 //!     让官方 `WorldBorder` 对随机的中心、大小和渐变出题，比对数学、逐刻推进和六个包的编码
+//! mc-bamboo-vanilla spawn <java 路径> [--seeds N] [--salt S] [--show N] [--level-type normal|large_biomes|amplified] [--break-self-test]
+//!     多种子下把新世界的出生区块和出生点与官方逐个对拍；--break-self-test 故意改坏一处
+//!     Compare fresh-world spawn chunks and positions against vanilla across seeds;
+//!     --break-self-test deliberately corrupts one spawn.
+//! mc-bamboo-vanilla flat-world <java 路径> [--show N] [--break-self-test]
+//!     把 generator-settings 的五个字段和超平坦地形逐方块对拍官方 FlatLevelSource
+//!     Compare the five generator-settings fields and flat terrain block-by-block
+//!     with vanilla FlatLevelSource; --break-self-test corrupts one block.
 //! ```
 //!
 //! 升级游戏版本时，换一个 `server.jar` 运行 `generate`，看生成文件的差异，
@@ -67,6 +91,10 @@ mod components;
 #[cfg(feature = "oracle")]
 mod entity_oracle;
 mod extract;
+#[cfg(feature = "oracle")]
+mod flat_world;
+#[cfg(feature = "oracle")]
+mod gen_world;
 mod generate;
 #[cfg(feature = "oracle")]
 mod light;
@@ -93,7 +121,20 @@ mod saved_data;
 #[cfg(feature = "oracle")]
 mod seed_world;
 #[cfg(feature = "oracle")]
+mod spawn;
+#[cfg(feature = "oracle")]
 mod storage_oracle;
+#[cfg(feature = "oracle")]
+mod structure_pieces;
+#[cfg(feature = "oracle")]
+mod structure_rings;
+mod structure_templates;
+#[cfg(feature = "oracle")]
+mod structure_templates_oracle;
+#[cfg(feature = "oracle")]
+mod structure_validity;
+#[cfg(feature = "oracle")]
+mod structures;
 #[cfg(feature = "oracle")]
 mod ticket_oracle;
 #[cfg(feature = "oracle")]
@@ -133,6 +174,17 @@ const WORLDGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/WorldgenOracle.java"
 #[cfg(feature = "oracle")]
 const CHUNKGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkgenOracle.java";
 #[cfg(feature = "oracle")]
+const STRUCTURES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePlacementOracle.java";
+#[cfg(feature = "oracle")]
+const STRUCTURE_RINGS_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureRingsOracle.java";
+#[cfg(feature = "oracle")]
+const STRUCTURE_VALIDITY_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureValidityOracle.java";
+#[cfg(feature = "oracle")]
+const STRUCTURE_TEMPLATES_SOURCE: &str =
+    "tools/mc-bamboo-vanilla/java/StructureTemplateOracle.java";
+#[cfg(feature = "oracle")]
+const STRUCTURE_PIECES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePiecesOracle.java";
+#[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 #[cfg(feature = "oracle")]
 const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
@@ -148,6 +200,10 @@ const TICKET_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/TicketOracle.ja
 const PLAYER_DATA_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/PlayerDataOracle.java";
 #[cfg(feature = "oracle")]
 const WORLD_BORDER_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/WorldBorderOracle.java";
+#[cfg(feature = "oracle")]
+const SPAWN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/SpawnOracle.java";
+#[cfg(feature = "oracle")]
+const FLAT_WORLD_SOURCE: &str = "tools/mc-bamboo-vanilla/java/FlatWorldOracle.java";
 const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla extract [java 路径]\n      mc-bamboo-vanilla gamerules <java 路径>\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
       mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked] [--rule 名字=值] [--weather clear|rain|thunder]
       mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
@@ -158,6 +214,14 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla loot-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
       mc-bamboo-vanilla chunkgen <java 路径> [--seeds N] [--chunks N] [--salt S] [--biomes-only] [--show N]
+      mc-bamboo-vanilla structures <java 路径>
+      mc-bamboo-vanilla gen-world <java 路径> [--seeds N] [--chunks N] [--salt S] [--show N] [--break-self-test]
+      mc-bamboo-vanilla structure-rings <java 路径>
+      mc-bamboo-vanilla structure-validity <java 路径>
+      mc-bamboo-vanilla structure-templates <java 路径>
+      mc-bamboo-vanilla structure-pieces <java 路径>
+      mc-bamboo-vanilla spawn <java 路径> [--seeds N] [--salt S] [--show N] [--level-type normal|large_biomes|amplified] [--break-self-test]
+      mc-bamboo-vanilla flat-world <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -206,6 +270,14 @@ fn run() -> Result<(), String> {
         ["loot-oracle", java, ref options @ ..] => loot_oracle(java, options),
         ["worldgen", java, ref options @ ..] => worldgen(java, options),
         ["chunkgen", java, ref options @ ..] => chunkgen_cli(java, options),
+        ["structures", java, ref options @ ..] => structures_cli(java, options),
+        ["gen-world", java, ref options @ ..] => gen_world_cli(java, options),
+        ["structure-rings", java, ref options @ ..] => structure_rings_cli(java, options),
+        ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
+        ["structure-templates", java, ref options @ ..] => structure_templates_cli(java, options),
+        ["structure-pieces", java, ref options @ ..] => structure_pieces_cli(java, options),
+        ["spawn", java, ref options @ ..] => spawn_cli(java, options),
+        ["flat-world", java, ref options @ ..] => flat_world_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
@@ -268,6 +340,7 @@ fn generate(server_jar: &str, java: &str) -> Result<(), String> {
     let output_dir = root.join(OUTPUT_DIR);
     fs::create_dir_all(&output_dir).map_err(|error| format!("无法创建输出目录：{error}"))?;
     generate::write_all(&data, &output_dir)?;
+    structure_templates::export(&work_dir, &output_dir)?;
 
     println!(
         "已生成 Minecraft {} 的数据（协议 {}）",
@@ -285,6 +358,7 @@ fn extract(java: &str) -> Result<(), String> {
     let output_dir = root.join(OUTPUT_DIR);
     fs::create_dir_all(&output_dir).map_err(|error| format!("无法创建输出目录：{error}"))?;
     generate::write_all(&data, &output_dir)?;
+    structure_templates::export(&work_dir, &output_dir)?;
 
     println!(
         "已用现有的报告重新生成 Minecraft {} 的数据（协议 {}）",
@@ -406,6 +480,72 @@ fn worldgen(java: &str, options: &[&str]) -> Result<(), String> {
 #[cfg(feature = "oracle")]
 fn chunkgen_cli(java: &str, options: &[&str]) -> Result<(), String> {
     chunkgen::run(official_program(java, CHUNKGEN_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn structures_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let worldgen_path = root.join("crates/mc-bamboo-data/src/generated/worldgen.json");
+    let queries_path = root.join(WORK_DIR).join("structures_queries.txt");
+    structures::run(
+        official_program(java, STRUCTURES_SOURCE)?,
+        &worldgen_path,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn gen_world_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    gen_world::run(official_program(java, CHUNKGEN_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn structure_rings_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    structure_rings::run(official_program(java, STRUCTURE_RINGS_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn structure_validity_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let worldgen_path = root.join("crates/mc-bamboo-data/src/generated/worldgen.json");
+    let queries_path = root.join(WORK_DIR).join("structure_validity_queries.txt");
+    structure_validity::run(
+        official_program(java, STRUCTURE_VALIDITY_SOURCE)?,
+        &worldgen_path,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_templates_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    structure_templates_oracle::run(
+        official_program(java, STRUCTURE_TEMPLATES_SOURCE)?,
+        &workspace_root().join(WORK_DIR),
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_pieces_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let queries_path = root.join(WORK_DIR).join("structure_pieces_queries.txt");
+    structure_pieces::run(
+        official_program(java, STRUCTURE_PIECES_SOURCE)?,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn spawn_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    spawn::run(official_program(java, SPAWN_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn flat_world_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    flat_world::run(official_program(java, FLAT_WORLD_SOURCE)?, options)
 }
 
 #[cfg(feature = "oracle")]
@@ -603,6 +743,46 @@ fn worldgen(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn chunkgen_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structures_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn gen_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_rings_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn spawn_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_validity_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_templates_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_pieces_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn flat_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

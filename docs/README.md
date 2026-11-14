@@ -30,6 +30,7 @@
 | `world-model-design.md` | **已确认，实施中**：世界模型的整套架构。三个平面加主控、区块束、区块加载流水线、region 的形成和调度、实体和生物 AI 的并行、红石热点优化、过载降级、实施顺序 |
 | `worldgen.md` | 世界生成的噪声阶段：26.3 的阶段划分、两条求值路径、含水层、区块级对拍、单区块耗时、还没做的 |
 | `chunk-tickets.md` | 区块平面的第一块：原版 26.3 ticket 机制的事实、`TicketTable` 的接口和不变量、与官方的差异、oracle 的用法和结果、玩家移动基准 |
+| `worldgen-structures-plan.md` | 世界生成的结构部分实施方案：数据导出、`StructurePlacement`、`structure_starts` / `structure_references`、结构件存档、Beardifier、features 阶段结构件放置、移植顺序与对拍方法 |
 
 ## 测量
 

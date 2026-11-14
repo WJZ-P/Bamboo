@@ -228,7 +228,7 @@ fn place_column(
         && can_place_pool(world, feature, (x, floor_y, z))
     {
         column = column.with_floor(floor_y - 1);
-        world.set_block_state(x, floor_y, z, blocks::WATER);
+        world.set_block_with_heightmaps(x, floor_y, z, blocks::WATER);
     }
     let floor = column.floor;
 

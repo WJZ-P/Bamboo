@@ -28,6 +28,7 @@ oracle = [
 probe-online = ["dep:mc-bamboo-server", "dep:rand_core", "dep:rsa", "dep:tokio"]
 
 [dependencies]
+flate2.workspace = true
 mc-bamboo-blocks = { workspace = true, optional = true }
 mc-bamboo-core = { workspace = true, optional = true }
 mc-bamboo-data = { workspace = true, optional = true }

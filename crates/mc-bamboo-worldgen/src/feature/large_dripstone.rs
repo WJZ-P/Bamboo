@@ -259,7 +259,12 @@ impl Dripstone {
                         let state = world.get_block(wa.0, wa.1, wa.2);
                         if is_empty_or_water_or_lava(state) {
                             has_been_out_of_stone = true;
-                            world.set_block_state(wa.0, wa.1, wa.2, blocks::DRIPSTONE_BLOCK);
+                            world.set_block_with_heightmaps(
+                                wa.0,
+                                wa.1,
+                                wa.2,
+                                blocks::DRIPSTONE_BLOCK,
+                            );
                         } else if has_been_out_of_stone
                             && in_block_tag(state, "minecraft:base_stone_overworld")
                         {

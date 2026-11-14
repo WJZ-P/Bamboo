@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
-    predicates::Predicate,
+    block_predicate::BlockPredicate,
     provider::{IntProvider, WorldGenerationContext},
     registry::Registry,
     state::parse_state,
@@ -31,9 +31,13 @@ pub enum Modifier {
         y: IntProvider,
         z: IntProvider,
     },
-    /// `block_predicate_filter`：`BlockPredicateFilter.shouldPlace`。
-    BlockPredicateFilter(Predicate),
+    /// `BlockPredicateFilter`：不过滤时把候选位置原样放行，不消费随机数。
+    ///
+    /// `BlockPredicateFilter`: passes a candidate through unchanged, no random.
+    BlockPredicateFilter(BlockPredicate),
     /// `surface_relative_threshold_filter`：按高度图差值过滤候选 y。
+    ///
+    /// `surface_relative_threshold_filter`: filters candidate y by a heightmap delta.
     SurfaceRelativeThresholdFilter {
         heightmap: HeightmapKind,
         min_inclusive: i64,
@@ -80,8 +84,17 @@ impl Modifier {
                 y: IntProvider::parse(field("y")?)?,
                 z: IntProvider::parse(field("z")?)?,
             },
+            // 未移植的谓词解析成 `BlockPredicate::Unsupported`，整条修饰器置
+            // unsupported；不把它当解析错误，避免让整个区块对拍直接报错。
+            // An unported predicate becomes `BlockPredicate::Unsupported` and marks
+            // the modifier unsupported, instead of failing the whole comparison.
             "minecraft:block_predicate_filter" => {
-                Self::BlockPredicateFilter(Predicate::parse(field("predicate")?)?)
+                let predicate = BlockPredicate::parse(field("predicate")?);
+                if predicate.is_supported() {
+                    Self::BlockPredicateFilter(predicate)
+                } else {
+                    Self::Unsupported(kind.to_owned())
+                }
             }
             "minecraft:surface_relative_threshold_filter" => Self::SurfaceRelativeThresholdFilter {
                 heightmap: HeightmapKind::parse(
@@ -104,8 +117,8 @@ impl Modifier {
 
     pub fn is_supported(&self) -> bool {
         match self {
-            Self::Unsupported(_) => false,
-            Self::BlockPredicateFilter(predicate) => predicate.supported(),
+            Self::Unsupported(_) | Self::BlockPredicateFilter(BlockPredicate::Unsupported) => false,
+            Self::BlockPredicateFilter(predicate) => predicate.is_supported(),
             _ => true,
         }
     }
@@ -188,9 +201,9 @@ fn modify(
                 out.push(pos);
             }
         }
+        // `PlacementFilter.modify`：shouldPlace 为真才把 origin 原样放行。
+        // `PlacementFilter.modify`: forward origin only when shouldPlace is true.
         Modifier::BlockPredicateFilter(predicate) => {
-            // PlacementFilter.shouldPlace 为真才放行原 pos。
-            // A PlacementFilter emits the original pos only when shouldPlace is true.
             if predicate.test(ctx.world, pos) {
                 out.push(pos);
             }
@@ -220,17 +233,46 @@ fn modify(
 /// `PlacementModifier.modify` 和 `Feature.place`，而 `Feature.place` 会消费
 /// 随机数；后续候选位置的 `in_square` / `height_range` 求值会读到被它推进过的
 /// 随机源。先收集会得到一个完全不同的随机序列。
+/// 一次 `Feature.place` 的结果：`supported` 表示涉及的分支是否都已移植，`placed`
+/// 是官方 `FeaturePlacer.place` 的 `placedAny`（Sequence 的短路要用）。
+///
+/// Outcome of one `Feature.place`: `supported` says whether every branch is ported;
+/// `placed` is the official `FeaturePlacer.place` `placedAny` flag.
+#[derive(Debug, Clone, Copy)]
+pub struct PlaceOutcome {
+    pub supported: bool,
+    pub placed: bool,
+}
+
+impl PlaceOutcome {
+    pub fn unsupported() -> Self {
+        Self {
+            supported: false,
+            placed: false,
+        }
+    }
+
+    fn combine(&mut self, other: Self) {
+        self.supported &= other.supported;
+        self.placed |= other.placed;
+    }
+}
+
 pub fn place_candidates(
     modifiers: &[Modifier],
     world: &mut FeatureWorld<'_>,
     env: &mut PlacementEnv<'_>,
     random: &WorldgenRandom,
     origin: Pos,
-    place: &mut dyn FnMut(&mut FeatureWorld<'_>, Pos),
-) {
+    place: &mut dyn FnMut(&mut FeatureWorld<'_>, &mut PlacementEnv<'_>, Pos) -> PlaceOutcome,
+) -> PlaceOutcome {
+    let mut total = PlaceOutcome {
+        supported: true,
+        placed: false,
+    };
     if modifiers.is_empty() {
-        place(world, origin);
-        return;
+        total.combine(place(world, env, origin));
+        return total;
     }
     let mut positions = vec![origin];
     let mut indices = vec![0usize];
@@ -239,6 +281,7 @@ pub fn place_candidates(
         modified.clear();
         {
             // `modify` 只读世界，借用在这一个作用域里结束，放置回调才能可变借用。
+            // `modify` only reads the world; ending this scope lets the place callback borrow it.
             let frozen: &FeatureWorld<'_> = world;
             let mut ctx = PlacementContext {
                 world: frozen,
@@ -258,10 +301,11 @@ pub fn place_candidates(
         } else {
             // 字节码 300-378：最后一个 modifier，正序放置。
             for &candidate in &modified {
-                place(world, candidate);
+                total.combine(place(world, env, candidate));
             }
         }
     }
+    total
 }
 
 /// `OreFeature` 的配置：`targets[].target` 是 `RuleTest`，`targets[].state` 是方块状态。
@@ -345,5 +389,28 @@ mod tests {
         let unknown: Value =
             serde_json::from_str(r#"{"type":"minecraft:surface_water_depth_filter"}"#).unwrap();
         assert!(!Modifier::parse(&unknown).unwrap().is_supported());
+    }
+
+    #[test]
+    fn parses_block_predicate_filter_and_flags_unported_predicates() {
+        let air: Value = serde_json::from_str(
+            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:matching_block_tag","tag":"minecraft:air"}}"#,
+        )
+        .unwrap();
+        assert!(Modifier::parse(&air).unwrap().is_supported());
+        // would_survive 的 sapling 存活判定已移植，整条修饰器现在支持。
+        // A would_survive with a sapling has a ported survival check, so it is supported.
+        let sapling: Value = serde_json::from_str(
+            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:oak_sapling"}}"#,
+        )
+        .unwrap();
+        assert!(Modifier::parse(&sapling).unwrap().is_supported());
+        // 存活判定未移植的 state 仍让整条修饰器 unsupported。
+        // A state with an unported survival check still makes the modifier unsupported.
+        let cane: Value = serde_json::from_str(
+            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:sugar_cane"}}"#,
+        )
+        .unwrap();
+        assert!(!Modifier::parse(&cane).unwrap().is_supported());
     }
 }

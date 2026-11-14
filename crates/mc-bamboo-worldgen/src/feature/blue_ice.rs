@@ -63,7 +63,7 @@ pub fn place(
         return false;
     }
 
-    world.set_block_state(ox, oy, oz, blocks::BLUE_ICE);
+    world.set_block_with_heightmaps(ox, oy, oz, blocks::BLUE_ICE);
 
     for _ in 0..200 {
         let y_off = random.next_int(5) - random.next_int(6);
@@ -92,7 +92,7 @@ pub fn place(
                         world.get_block(px + ddx, py + ddy, pz + ddz),
                         blocks::BLUE_ICE,
                     ) {
-                        world.set_block_state(px, py, pz, blocks::BLUE_ICE);
+                        world.set_block_with_heightmaps(px, py, pz, blocks::BLUE_ICE);
                         break;
                     }
                 }

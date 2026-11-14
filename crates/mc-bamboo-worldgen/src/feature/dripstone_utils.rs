@@ -379,7 +379,7 @@ fn place_pointed(
     let wet = is_water_at(world, pos.0, pos.1, pos.2);
     state =
         apply_property(state, "waterlogged", if wet { "true" } else { "false" }).unwrap_or(state);
-    world.set_block_state(pos.0, pos.1, pos.2, state);
+    world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
     pos.1 += if tip_up { 1 } else { -1 };
 }
 
@@ -466,7 +466,7 @@ pub fn place_base_block_if_possible(
     replaceable: &str,
 ) -> bool {
     if in_block_tag(world.get_block(pos.0, pos.1, pos.2), replaceable) {
-        world.set_block_state(pos.0, pos.1, pos.2, base_block_state);
+        world.set_block_with_heightmaps(pos.0, pos.1, pos.2, base_block_state);
         true
     } else {
         false

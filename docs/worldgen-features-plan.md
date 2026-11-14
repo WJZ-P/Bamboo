@@ -640,7 +640,7 @@ Java 侧按白名单判定：中心 3×3 涉及的**所有** step 的 placed fea
 | `chunkgen java --seeds 6 --chunks 36 --through features --steps 6 --ore-only --salt 1/7` | **0 不一致**（216 中心 / 各 191102976 方块） |
 | `chunkgen java --seeds 2 --chunks 6 --through carvers --salt 1` | 0 不一致（旧阶段回归） |
 | `worldgen java` | 0 不一致 |
-| `cargo test -p mc-bamboo-worldgen` | 95 个测试全过 |
+| `cargo test -p mc-bamboo-worldgen` | 115 个测试全过（含组合类 / typed provider 新单测） |
 | `cargo clippy -p mc-bamboo-worldgen -p mc-bamboo-vanilla --all-targets -- -D warnings` | 干净 |
 
 **曾有的差异（已解决，见下）**：`--ore-only --steps 6` 在第三个种子的
@@ -823,16 +823,113 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
   本轮不重复实现、也不假装支持。滴水石 leaf 要用的 `SpeleothemUtils.growSpeleothem`、
   `buildBaseToTipColumn`、`pointed_dripstone` 状态已在 `dripstone_utils.rs` 里备好
   （`speleothem_cluster` 正在用），等容器合入即可接。
-* 植被类型（树、花、草、patch、selector / sequence 容器，见 5.2）由 `cb-wg-feat-b`
-  负责，本轮不做。
+* 植被类型（树、花、草、patch、selector / sequence 容器，见 5.2）由 `cb-wg-feat-b` 负责，本轮不做。
 * `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按「已移植集合」
   直接输出 `skipped`，`--types` 是手工白名单。
-* 接进 Director（5.3.1 的邻居快照 + 增量合并）还没做。
+* 接进 Director 的**多阶段流水线形状**已经就位（流水线分支：`PipelineKind::Staged`
+  按 `ChunkPyramid` 派 `structure_starts … full` 十个阶段、terrain 已接真生成）。
+  但 **5.3.1 的邻居只读快照 `Arc<ProtoChunk>` + `FeatureResult.deltas` 按 `TaskId`
+  合并还没做**：`Task::Generate.neighbors` 仍恒为空，所以游戏里的 `features` 阶段目前
+  是透传、不放置任何地物（纯函数只在对拍里跑）。`initialize_light` / `light` / `spawn`
+  同样透传。把 features 真正接进游戏要等这块邻居快照落地。
 * 方块实体 / POI / 后期处理位置表：Java 侧 `ProtoChunk` 会记，但 `FeatureResult` 只带
-  方块；本轮已移植的 disk / magma / spring 都不产生方块实体，对拍不需要，接树 /
-  怪物房 / 湖时再补输出和比较。
-* 高度图增量更新已按 `Heightmap.update` 在 `set_block_state` 里补齐；矿石走
-  `BulkSectionAccess` 绕过 `setBlockState`，仍用 primed 后固定的高度图（照官方）。
+  方块；本轮已移植的 disk / magma / spring / 洞穴与冰雪类都不产生方块实体，对拍不需要，
+  接树 / 怪物房 / 湖时再补输出和比较。
+* 高度图的增量更新：走 `setBlockState` 的路径（`simple_block`、disk、滴水石等）已按
+  `Heightmap.update` 在 `set_block_state` 里补齐；矿石走 `BulkSectionAccess` 直接写
+  `LevelChunkSection`，**绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是
+  primed 后固定的（照官方）。接树 / 湖时复用同一个 `set_block_with_heightmaps` 即可。
+
+### 植被地物进度（分支 `cb-wg-feat-b`）
+
+按 `features_per_step` 分类见 `docs/worldgen-vegetal-features.md`：step 9 共 109 项。
+**范围调整（2026-11-14）**：树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）移交
+`cb-wg-trees`，水下植被与其余植被移交 `cb-wg-aquatic`；本分支只做组合类、
+`simple_block` 剩余种类和谓词。逐项提交：
+
+前任已落地（`804f1f3` .. `606ae1b`）：`--feature-types` 过滤、`Heightmap.update`
+增量更新、`IntProvider` / `BlockPredicate` / `block_predicate_filter` 支撑件、
+`SimpleBlockFeature` 内联 bare-state + 方块类白名单，以及 11 个内联 simple_block
+植被 placed feature 的 0 不一致对拍。
+
+本轮新增（`95629d7`、`54af08b`、`ad01c41`）：
+
+* `survival.rs`：共享 `canSurvive` 分派，白名单扩到 SweetBerryBush / Eyeblossom /
+  FireflyBush / Sapling / FlowerBed（`supports_vegetation`）、Short/TallDryGrass
+  （`supports_dry_vegetation`）、LeafLitter（`isFaceSturdy(FULL, UP)`）、
+  DoublePlant / TallFlower（标签判定 + `placeAt`）。蘑菇（`getRawBrightness`）、
+  睡莲、孢子花、苔藓地毯、海泡菜（碰撞形状面）等特殊 `canSurvive` 仍 `unsupported`。
+* `SimpleBlockFeature`：`DoublePlantBlock.placeAt`（上下两格 + `half` 属性）、
+  上方格的 `!isAir → fluidEquals && canBeReplaced` 检查；`schedule_tick` 忽略。
+* 三个谓词：`would_survive`（复用 `survival::can_survive`）、`has_sturdy_face`
+  （`facts::STURDY_FULL` 位）、`matching_fluids`（流体 HolderSet）。
+* `state_provider.rs`：typed `BlockStateProvider` —— `weighted`
+  （`WeightedList.nextInt(totalWeight)` 累计权重轮盘）、`randomized_int`
+  （source + `IntProvider.sample` 改整数属性）、内联 bare-state。holder 字符串引用
+  （`BLOCK_STATE_PROVIDER` 注册表未导出）仍 `unsupported`。
+* `composition.rs`：组合类框架 + 递归 `PlacedFeature.place` —— `random_selector` /
+  `weighted_random_selector` / `simple_random_selector` / `random_boolean_selector` /
+  `sequence`；子项为注册表引用或内联配置，子项用 `placeWithBiomeCheck=false`
+  （topFeature 为空）。`place_candidates` 改为递归回调并汇总 `supported` / `placed`。
+* `clamped` IntProvider（递归 source + `clamp`）。
+
+#### 本分支对拍结果（`--through features --steps 9`）
+
+| 命令（省略 `--through features`） | 结果 |
+|---|---|
+| `--steps 9 --feature-types "$FEATS_OLD" --seeds 2 --chunks 4 --salt 1`（11 个前任名字回归） | 0 不一致（8 中心 / 7077888 方块，0 skipped） |
+| `--steps 9 --feature-types "$FEATS_INLINE" --seeds 3 --chunks 30 --salt 3`（12 个新内联 simple_block） | 0 不一致（90 中心 / 79626240 方块，0 skipped） |
+| `--steps 9 --feature-types "$FEATS_INLINE" --seeds 2 --chunks 40 --salt 7` | 3 格差异，全是 terrain 含水层既有差异（见下），features 阶段无新增 |
+| 故意把 simple_block 放的状态换成石头（`FEATS_INLINE`，salt 7） | 160 处不一致（确认非假绿） |
+| `--steps 9 --feature-types "forest_flowers,flower_forest_flowers" --seeds 3 --chunks 30 --salt 3` | 0 不一致（90 中心 / 79626240 方块，0 skipped） |
+| 故意把 `simple_random_selector` 固定选第 0 个子项（同参数） | 52 处不一致（确认非假绿） |
+| `--steps 9 --feature-types "$FEATS_WEIGHTED" --seeds 3 --chunks 30 --salt 3`（9 个 weighted provider） | 0 不一致（90 中心 / 79626240 方块，0 skipped） |
+| 故意把 weighted provider 固定选第 0 条（同参数） | 120 处不一致（确认非假绿） |
+| `--steps 6 --ore-only`、`--through carvers`（`--seeds 2 --chunks 4/6 --salt 1`）、`worldgen java` | 各 0 不一致（旧阶段回归） |
+| `cargo test -p mc-bamboo-worldgen` | 115 个测试全过 |
+
+**terrain 含水层既有差异**：`--salt 7` 下 seed -1、中心 chunk (52,-27) 的 +z 邻居
+(52,-26)、y=-54、x=14、z=1..3 三格，官方是水、Bamboo 是深板岩；`--steps 0`
+（不跑任何 feature）同样复现，确认与地物改动无关，是邻居区块 terrain 的既有差异
+（旧阶段 carvers 回归只比中心单区块，故未暴露）。上面的 0 不一致结果都用 `--salt 3`
+等避开该区块的参数取得。
+
+#### 本分支明确还没做（诚实标 `unsupported`）
+
+* 树（全部变种、`fallen_tree`、巨型蘑菇）和水下/其余植被已按分工移交
+  `cb-wg-trees` / `cb-wg-aquatic`，不在本分支范围。
+* 组合类里只有 `simple_random_selector`（forest_flowers / flower_forest_flowers）
+  拿到 0 不一致对拍；`random_selector` / `weighted_random_selector` /
+  `random_boolean_selector` / `sequence` 的 place 逻辑按官方源码逐行移植，但子项多为
+  树 / 水生（已移交），本轮未逐方块验证，待对方分支 merge 本分支后再放开对拍。
+  `projected_random_patchy_square` 在 26.3 导出数据里没有条目。
+* `to_place` 的 holder 字符串引用（flower_plain / flower_meadow / flower_flower_forest）：
+  `BLOCK_STATE_PROVIDER` 注册表未导出，需生成器补数据；特殊 `canSurvive`
+  （蘑菇、睡莲、孢子花、苔藓地毯、海泡菜）同上。
+* `noise_threshold_count` / `noise_based_count` / `environment_scan` /
+  `surface_water_depth_filter` / `surface_relative_threshold_filter` 修饰器、
+  `clamped_normal` / `weighted_list` IntProvider、方块实体数据（蜂巢、可疑沙等）。
+* 接进 Director 的多阶段生成与邻居增量合并（流水线分支负责）。
+
+### 还没做
+
+* `DiskFeature` / `UnderwaterMagmaFeature` / `surface_relative_threshold_filter`：
+  step 6 里非 ore 的几类 placed feature 目前标 `unsupported`，完整 11 步对拍会跳过
+  这些区块。（`block_predicate_filter` 修饰器本身已由 `cb-wg-feat-b` 移植。）
+* 其它 10 个 step（湖、晶洞、怪物房、积雪等）里仍未移植的类型全部标 `unsupported`；
+  植被类的 step 9 进度见上。
+* `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按
+  「已移植集合」输出 `skipped`，`--feature-types` 是手工过滤。
+* 接进 Director 的**多阶段流水线形状**已经就位（流水线分支：`PipelineKind::Staged`
+  按 `ChunkPyramid` 派 `structure_starts … full` 十个阶段、terrain 已接真生成）。
+  但 **5.3.1 的邻居只读快照 `Arc<ProtoChunk>` + `FeatureResult.deltas` 按 `TaskId`
+  合并还没做**：`Task::Generate.neighbors` 仍恒为空，所以游戏里的 `features` 阶段目前
+  是透传、不放置任何地物（第 6 步矿石的纯函数只在对拍里跑）。`initialize_light` /
+  `light` / `spawn` 同样透传。把 features 真正接进游戏要等这块邻居快照落地。
+* 高度图的增量更新：矿石走 `BulkSectionAccess` 直接写 `LevelChunkSection`，
+  **绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是 primed 后固定的。
+  `cb-wg-feat-b` 已为走 `setBlockState` 的 `simple_block` 补上 `Heightmap.update`；
+  接树 / 湖时复用同一个 `set_block_with_heightmaps` 即可。
 
 ## 5.2 `features_per_step` 全部 placed feature 的分类（非植被 / 植被）
 

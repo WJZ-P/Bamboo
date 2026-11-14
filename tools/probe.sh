@@ -74,6 +74,10 @@ cat > "$TMP/ops.json" <<'JSON'
 JSON
 # 读配置文件的 bamboo 会读这个目录里的 server.properties。这里写的值和
 # ServerConfig::default() 一致（离线、视距 8、Bamboo 的 motd）；probe 的检查按这些值写。
+# 探针是按超平坦校准的，而新世界默认已经是 normal，所以必须显式切回 flat 并固定种子：
+# level-type=minecraft:flat、level-seed=0，否则客户端收到的是噪声地形、断言会失败。
+# The probe is calibrated for superflat while a new world now defaults to
+# normal, so pin flat + a fixed seed here or the client gets noise terrain.
 cat > "$TMP/server.properties" <<'PROPS'
 online-mode=false
 motd=A Bamboo Server
@@ -82,6 +86,8 @@ max-players=20
 network-compression-threshold=256
 enforce-secure-profile=true
 prevent-proxy-connections=false
+level-type=minecraft:flat
+level-seed=0
 PROPS
 
 (cd "$TREE" && cargo build -q --bin bamboo) || exit 1

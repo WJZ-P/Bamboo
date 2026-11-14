@@ -70,11 +70,41 @@ impl VerticalAnchor {
     }
 }
 
-/// `IntProvider.sample(random)`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `IntProvider.sample(random)`。26.3 step 9 的 `count` / `offset` 用到 constant、
+/// uniform、trapezoid、biased_to_bottom、very_biased_to_bottom；递归的 clamped /
+/// weighted_list / clamped_normal 暂不支持，解析时报错让该 placed feature 标 unsupported。
+///
+/// `IntProvider.sample(random)`: step 9 uses constant, uniform, trapezoid, and the
+/// two biased variants for `count` / `offset`. Recursive clamped / weighted_list /
+/// clamped_normal stay unsupported for now.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntProvider {
     Constant(i32),
-    Uniform { min: i32, max: i32 },
+    Uniform {
+        min: i32,
+        max: i32,
+    },
+    Trapezoid {
+        min: i32,
+        max: i32,
+        plateau: i32,
+    },
+    BiasedToBottom {
+        min: i32,
+        max: i32,
+    },
+    VeryBiasedToBottom {
+        min: i32,
+        max: i32,
+    },
+    /// `ClampedInt`：`clamp(source.sample(random), min, max)`，source 递归。
+    ///
+    /// `ClampedInt`: `clamp(source.sample(random), min, max)` with a recursive source.
+    Clamped {
+        source: Box<IntProvider>,
+        min: i32,
+        max: i32,
+    },
 }
 
 impl IntProvider {
@@ -96,20 +126,74 @@ impl IntProvider {
                 .map(|n| n as i32)
                 .ok_or_else(|| format!("int provider {kind} has no {name}"))
         };
-        match kind {
-            "minecraft:constant" => Ok(Self::Constant(integer("value")?)),
-            "minecraft:uniform" => Ok(Self::Uniform {
+        Ok(match kind {
+            "minecraft:constant" => Self::Constant(integer("value")?),
+            "minecraft:uniform" => Self::Uniform {
                 min: integer("min_inclusive")?,
                 max: integer("max_inclusive")?,
-            }),
-            _ => Err(format!("unsupported int provider {kind}")),
-        }
+            },
+            // TrapezoidInt 的字段名是 min / max / plateau（不是 min_inclusive）。
+            // TrapezoidInt uses min / max / plateau (not min_inclusive).
+            "minecraft:trapezoid" => Self::Trapezoid {
+                min: integer("min")?,
+                max: integer("max")?,
+                plateau: integer("plateau")?,
+            },
+            "minecraft:biased_to_bottom" => Self::BiasedToBottom {
+                min: integer("min_inclusive")?,
+                max: integer("max_inclusive")?,
+            },
+            "minecraft:very_biased_to_bottom" => Self::VeryBiasedToBottom {
+                min: integer("min_inclusive")?,
+                max: integer("max_inclusive")?,
+            },
+            // `ClampedInt`：先 sample source（消费随机数），再 clamp。
+            // `ClampedInt`: sample the source (consuming random), then clamp.
+            "minecraft:clamped" => Self::Clamped {
+                source: Box::new(IntProvider::parse(
+                    object
+                        .get("source")
+                        .ok_or("clamped int provider has no source")?,
+                )?),
+                min: integer("min_inclusive")?,
+                max: integer("max_inclusive")?,
+            },
+            _ => return Err(format!("unsupported int provider {kind}")),
+        })
     }
 
-    pub fn sample(self, random: &WorldgenRandom) -> i32 {
+    pub fn sample(&self, random: &WorldgenRandom) -> i32 {
         match self {
-            Self::Constant(value) => value,
-            Self::Uniform { min, max } => random.next_int_between_inclusive(min, max),
+            Self::Constant(value) => *value,
+            Self::Uniform { min, max } => random.next_int_between_inclusive(*min, *max),
+            // TrapezoidInt.sample：对称且 plateau==0 时走官方的快路径，两次 nextInt。
+            // TrapezoidInt.sample: official symmetric fast path, two nextInt calls.
+            Self::Trapezoid { min, max, plateau } => {
+                if *plateau == 0 && *max == -*min {
+                    return random.next_int(*max + 1) - random.next_int(*max + 1);
+                }
+                let range = *max - *min;
+                if *plateau == range {
+                    return random.next_int_between_inclusive(*min, *max);
+                }
+                let plateau_start = (range - *plateau) / 2;
+                let plateau_end = range - plateau_start;
+                *min + random.next_int_between_inclusive(0, plateau_end)
+                    + random.next_int_between_inclusive(0, plateau_start)
+            }
+            // BiasedToBottomInt：min + nextInt(nextInt(max-min+1)+1)。
+            // BiasedToBottomInt: min + nextInt(nextInt(max-min+1)+1).
+            Self::BiasedToBottom { min, max } => {
+                *min + random.next_int(random.next_int(*max - *min + 1) + 1)
+            }
+            // VeryBiasedToBottomInt：再套一层 nextInt。
+            // VeryBiasedToBottomInt: one more nested nextInt.
+            Self::VeryBiasedToBottom { min, max } => {
+                *min + random.next_int(random.next_int(random.next_int(*max - *min + 1) + 1) + 1)
+            }
+            // ClampedInt.sample：先 sample source（消费随机数），再 clamp。
+            // ClampedInt.sample: sample the source (consuming random), then clamp.
+            Self::Clamped { source, min, max } => source.sample(random).clamp(*min, *max),
         }
     }
 }
@@ -310,6 +394,87 @@ mod tests {
         for _ in 0..1000 {
             let y = provider.sample(&random, context);
             assert!((-64..=319).contains(&y), "y={y}");
+        }
+    }
+
+    #[test]
+    fn trapezoid_symmetric_fast_path_matches_two_next_int() {
+        // `offset` 的 x/z 是 trapezoid(-7..7, plateau=0)，官方走对称快路径：
+        // nextInt(8) - nextInt(8)。用两个同种子随机源验证取数序列完全一致。
+        // The symmetric fast path must consume and produce exactly
+        // nextInt(8) - nextInt(8) against a fresh random source.
+        let provider = IntProvider::Trapezoid {
+            min: -7,
+            max: 7,
+            plateau: 0,
+        };
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let expected = b.next_int(8) - b.next_int(8);
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
+
+    #[test]
+    fn trapezoid_general_formula_matches_official() {
+        // 非对称：min=2, max=11, plateau=2 → range=9, start=3, end=6。
+        // min + nextIntBetweenInclusive(0,6) + nextIntBetweenInclusive(0,3)。
+        // Non-symmetric path: min + nextIntBetweenInclusive(0,6) + (0,3).
+        let provider = IntProvider::Trapezoid {
+            min: 2,
+            max: 11,
+            plateau: 2,
+        };
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let expected =
+                2 + b.next_int_between_inclusive(0, 6) + b.next_int_between_inclusive(0, 3);
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
+
+    #[test]
+    fn biased_variants_match_official_nesting() {
+        let biased = IntProvider::BiasedToBottom { min: 5, max: 9 };
+        let very = IntProvider::VeryBiasedToBottom { min: 5, max: 9 };
+        let a = random();
+        let b = random();
+        let c = random();
+        let d = random();
+        for _ in 0..1000 {
+            let span = 9 - 5 + 1;
+            assert_eq!(biased.sample(&a), 5 + b.next_int(b.next_int(span) + 1));
+            assert_eq!(
+                very.sample(&c),
+                5 + d.next_int(d.next_int(d.next_int(span) + 1) + 1)
+            );
+        }
+    }
+
+    #[test]
+    fn clamped_provider_matches_official() {
+        // `forest_flowers` 的 count：clamp(uniform(-3,1), 0, 1)。
+        // `forest_flowers` count: clamp(uniform(-3,1), 0, 1).
+        let value: Value = serde_json::from_str(
+            r#"{"min_inclusive":0,"max_inclusive":1,"source":{"min_inclusive":-3,"max_inclusive":1,"type":"minecraft:uniform"},"type":"minecraft:clamped"}"#,
+        )
+        .unwrap();
+        let provider = IntProvider::parse(&value).unwrap();
+        assert_eq!(
+            provider,
+            IntProvider::Clamped {
+                source: Box::new(IntProvider::Uniform { min: -3, max: 1 }),
+                min: 0,
+                max: 1,
+            }
+        );
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let expected = b.next_int_between_inclusive(-3, 1).clamp(0, 1);
+            assert_eq!(provider.sample(&a), expected);
         }
     }
 }
