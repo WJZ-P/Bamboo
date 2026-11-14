@@ -40,7 +40,7 @@ impl<'a> FeatureWorld<'a> {
             height: input.height,
             blocks: input.blocks.clone(),
             biomes: &input.biomes,
-            heights: input.heights.clone(),
+            heights: input.heights,
             deltas: empty(),
         })
     }

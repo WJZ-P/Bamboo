@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
+    block_predicate::BlockPredicate,
     provider::{IntProvider, WorldGenerationContext},
     registry::Registry,
     state::parse_state,
@@ -30,6 +31,10 @@ pub enum Modifier {
         y: IntProvider,
         z: IntProvider,
     },
+    /// `BlockPredicateFilter`：不过滤时把候选位置原样放行，不消费随机数。
+    ///
+    /// `BlockPredicateFilter`: passes a candidate through unchanged, no random.
+    BlockPredicateFilter(BlockPredicate),
     /// 已解析但本轮不生效的修饰器（例如 `surface_relative_threshold_filter`）。
     /// 命中时置 `unsupported`，让对拍跳过这个区块。
     Unsupported(String),
@@ -71,12 +76,28 @@ impl Modifier {
                 y: IntProvider::parse(field("y")?)?,
                 z: IntProvider::parse(field("z")?)?,
             },
+            // 未移植的谓词解析成 `BlockPredicate::Unsupported`，整条修饰器置
+            // unsupported；不把它当解析错误，避免让整个区块对拍直接报错。
+            // An unported predicate becomes `BlockPredicate::Unsupported` and marks
+            // the modifier unsupported, instead of failing the whole comparison.
+            "minecraft:block_predicate_filter" => {
+                let predicate = BlockPredicate::parse(field("predicate")?);
+                if predicate.is_supported() {
+                    Self::BlockPredicateFilter(predicate)
+                } else {
+                    Self::Unsupported(kind.to_owned())
+                }
+            }
             _ => Self::Unsupported(kind.to_owned()),
         })
     }
 
     pub fn is_supported(&self) -> bool {
-        !matches!(self, Self::Unsupported(_))
+        match self {
+            Self::Unsupported(_) | Self::BlockPredicateFilter(BlockPredicate::Unsupported) => false,
+            Self::BlockPredicateFilter(predicate) => predicate.is_supported(),
+            _ => true,
+        }
     }
 }
 
@@ -154,6 +175,13 @@ fn modify(
             };
             let biome = (ctx.biome_at)(x, y, z);
             if ctx.registry.biome_has_feature(biome, placed) {
+                out.push(pos);
+            }
+        }
+        // `PlacementFilter.modify`：shouldPlace 为真才把 origin 原样放行。
+        // `PlacementFilter.modify`: forward origin only when shouldPlace is true.
+        Modifier::BlockPredicateFilter(predicate) => {
+            if predicate.test(ctx.world, pos) {
                 out.push(pos);
             }
         }
@@ -293,5 +321,19 @@ mod tests {
         let unknown: Value =
             serde_json::from_str(r#"{"type":"minecraft:surface_water_depth_filter"}"#).unwrap();
         assert!(!Modifier::parse(&unknown).unwrap().is_supported());
+    }
+
+    #[test]
+    fn parses_block_predicate_filter_and_flags_unported_predicates() {
+        let air: Value = serde_json::from_str(
+            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:matching_block_tag","tag":"minecraft:air"}}"#,
+        )
+        .unwrap();
+        assert!(Modifier::parse(&air).unwrap().is_supported());
+        let would: Value = serde_json::from_str(
+            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:oak_sapling"}}"#,
+        )
+        .unwrap();
+        assert!(!Modifier::parse(&would).unwrap().is_supported());
     }
 }

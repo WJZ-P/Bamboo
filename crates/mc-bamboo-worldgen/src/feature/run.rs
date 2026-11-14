@@ -15,7 +15,8 @@ use crate::{
 
 use super::{
     DECORATION_STEPS, FeatureChunks, FeatureResult,
-    placement::{Modifier, OreFeature, PlacementEnv, place_candidates},
+    dispatch::{parse_leaf, place_leaf},
+    placement::{Modifier, PlacementEnv, place_candidates},
     provider::WorldGenerationContext,
     registry::Registry,
     world::FeatureWorld,
@@ -140,16 +141,25 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 unsupported = true;
                 continue;
             };
-            if kind != "minecraft:ore" {
+            let Some(leaf) = parse_leaf(&kind, config) else {
                 unsupported = true;
                 continue;
-            }
-            let ore = OreFeature::parse(config)?;
-            let modifiers: Vec<Modifier> = placed
+            };
+            // 修饰器解析失败（例如递归 IntProvider）也只标 unsupported，不让整个区块
+            // 对拍直接报错；已支持的类型里这种情况不会出现。
+            // A modifier parse failure only marks unsupported; it never fails the run.
+            let modifiers: Vec<Modifier> = match placed
                 .placement
                 .iter()
                 .map(Modifier::parse)
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(modifiers) => modifiers,
+                Err(_) => {
+                    unsupported = true;
+                    continue;
+                }
+            };
             if modifiers.iter().any(|m| !m.is_supported()) {
                 unsupported = true;
                 continue;
@@ -170,7 +180,7 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
             // 官方在栈 DFS 过程中交错执行 modifier 和 Feature.place；不能先收集
             // 全部候选位置，否则 Feature.place 消费的随机数会打乱后续 modifier。
             let mut place_one = |world: &mut FeatureWorld<'_>, pos: (i32, i32, i32)| {
-                super::ores::place(&ore, world, &random, pos);
+                place_leaf(&leaf, world, &random, pos);
             };
             place_candidates(
                 &modifiers,

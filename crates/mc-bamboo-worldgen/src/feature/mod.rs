@@ -7,6 +7,8 @@
 //! 数据来自 `mc-bamboo-data::worldgen::WORLDGEN` 里的 `feature`、`placed_feature`、
 //! `biome_features` 和 `features_per_step` 四个键，见 `docs/worldgen-features-plan.md`。
 
+pub mod block_predicate;
+pub mod dispatch;
 pub mod heightmap;
 pub mod ores;
 pub mod placement;
@@ -14,6 +16,7 @@ pub mod provider;
 pub mod registry;
 pub mod rule_test;
 pub mod run;
+pub mod simple_block;
 pub mod state;
 pub mod world;
 

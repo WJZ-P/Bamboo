@@ -51,7 +51,7 @@ pub fn is_opaque(state: u32, kind: HeightmapKind) -> bool {
 /// 把 `(kind, column)` 映射到 `Heightmaps` 里对应的可变槽位。
 ///
 /// Map `(kind, column)` to the matching mutable slot in `Heightmaps`.
-fn slot<'a>(heights: &'a mut Heightmaps, kind: HeightmapKind, column: usize) -> &'a mut i32 {
+fn slot(heights: &mut Heightmaps, kind: HeightmapKind, column: usize) -> &mut i32 {
     match kind {
         HeightmapKind::WorldSurfaceWg => &mut heights.world_surface_wg[column],
         HeightmapKind::WorldSurface => &mut heights.world_surface[column],
