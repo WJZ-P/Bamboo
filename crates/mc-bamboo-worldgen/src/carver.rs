@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::{
     aquifer::Aquifer,
     biome_manager::{BiomeManager, ClimateCache},
+    biome_region::BiomeGetter,
     density::NoiseRegistry,
     material::MaterialRules,
     math::{floor, java_floor_div},
@@ -43,12 +44,12 @@ fn sin_table() -> &'static [f32] {
 }
 
 /// 官方 `Mth.sin(double)` 和 `cos(double)`：65536 项的查找表。
-fn mth_sin(value: f64) -> f32 {
+pub(crate) fn mth_sin(value: f64) -> f32 {
     let index = ((value * SIN_SCALE) as i64) & SIN_MASK;
     sin_table()[index as usize]
 }
 
-fn mth_cos(value: f64) -> f32 {
+pub(crate) fn mth_cos(value: f64) -> f32 {
     // 官方先加 16384.0（double）再 d2i，负数时和「先截断再加」差一位。
     let index = ((value * SIN_SCALE + 16_384.0) as i64) & SIN_MASK;
     sin_table()[index as usize]
@@ -706,6 +707,11 @@ impl Carvers {
         let mycelium = block_state("minecraft:mycelium")?;
         let dirt = block_state("minecraft:dirt")?;
         let uncarvable = block_tag("minecraft:uncarvable").unwrap_or(&[]);
+        // 雕刻器两条路径的 `topMaterial` 都用 `withDifferentSource(createUncachedResolver)`，
+        // 所以这里固定走单点、不折叠的简化来源。
+        // Both paths' `topMaterial` uses `withDifferentSource(createUncachedResolver)`, so
+        // this stays on the single-point, non-folding source.
+        let biome_getter = BiomeGetter::Uncached(biome_manager);
         let mut error = None;
         mask.visit(&mut |x, z, from, to| {
             if error.is_some() {
@@ -755,7 +761,7 @@ impl Carvers {
                             settings,
                             context,
                             router,
-                            biome_manager,
+                            &biome_getter,
                             noises,
                             positional,
                         );

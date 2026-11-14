@@ -102,6 +102,12 @@ impl Modifier {
                     .ok_or("heightmap is not a string")?,
             )?),
             "minecraft:biome" => Self::Biome,
+            "minecraft:surface_water_depth_filter" => Self::SurfaceWaterDepthFilter(
+                field("max_water_depth")?
+                    .as_i64()
+                    .ok_or_else(|| "surface_water_depth_filter has no max_water_depth".to_owned())?
+                    as i32,
+            ),
             "minecraft:offset" => Self::Offset {
                 x: IntProvider::parse(field("x")?)?,
                 y: IntProvider::parse(field("y")?)?,
@@ -153,11 +159,6 @@ impl Modifier {
                     .and_then(Value::as_i64)
                     .unwrap_or(i64::from(i32::MAX)),
             },
-            "minecraft:surface_water_depth_filter" => Self::SurfaceWaterDepthFilter(
-                field("max_water_depth")?
-                    .as_i64()
-                    .ok_or("bad max_water_depth")? as i32,
-            ),
             "minecraft:environment_scan" => {
                 let step = match field("direction_of_search")?.as_str() {
                     Some("up") => 1,
@@ -386,6 +387,7 @@ fn modify(
                 }
             }
         }
+
         Modifier::Unsupported(_) => {}
     }
 }

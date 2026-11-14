@@ -112,9 +112,14 @@ pub enum IntProvider {
         min: i32,
         max: i32,
     },
-    /// `WeightedListInt`：`nextInt(total)` 选一个嵌套 provider 再 `sample`。
+    /// `WeightedListInt`：`distribution.getRandomOrThrow(random).sample(random)`。
+    /// 每个 `data` 是递归的 `IntProvider`（导出里是裸数字，即 `ConstantInt`）。
+    ///
+    /// `WeightedListInt`: `distribution.getRandomOrThrow(random).sample(random)`.
+    /// Each `data` is a recursive `IntProvider` (bare numbers in the export are
+    /// `ConstantInt`).
     WeightedList {
-        distribution: Vec<(i32, IntProvider)>,
+        entries: Vec<(i32, Box<IntProvider>)>,
         total: i32,
     },
 }
@@ -184,33 +189,27 @@ impl IntProvider {
                 min: integer("min_inclusive")?,
                 max: integer("max_inclusive")?,
             },
-            // `WeightedListInt`：distribution 的 data 是嵌套 IntProvider。
+            // `WeightedListInt`：distribution 是 WeightedList<IntProvider>。
+            // `WeightedListInt`: distribution is a WeightedList<IntProvider>.
             "minecraft:weighted_list" => {
-                let distribution = object
+                let entries = object
                     .get("distribution")
-                    .and_then(Value::as_array)
-                    .ok_or("weighted_list has no distribution")?
+                    .ok_or("weighted list has no distribution")?
+                    .as_array()
+                    .ok_or("weighted list distribution is not an array")?
                     .iter()
-                    .map(|entry| -> Result<(i32, IntProvider), String> {
+                    .map(|entry| {
                         let weight = entry
                             .get("weight")
                             .and_then(Value::as_i64)
-                            .ok_or("weighted_list entry has no weight")?
+                            .ok_or("weighted list entry has no weight")?
                             as i32;
-                        let data = IntProvider::parse(
-                            entry.get("data").ok_or("weighted_list entry has no data")?,
-                        )?;
-                        Ok((weight, data))
+                        let data = entry.get("data").ok_or("weighted list entry has no data")?;
+                        Ok((weight, Box::new(IntProvider::parse(data)?)))
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let total: i32 = distribution.iter().map(|(weight, _)| *weight).sum();
-                if total == 0 {
-                    return Err("weighted_list has zero total weight".to_owned());
-                }
-                Self::WeightedList {
-                    distribution,
-                    total,
-                }
+                    .collect::<Result<Vec<_>, String>>()?;
+                let total = entries.iter().map(|(weight, _)| *weight).sum();
+                Self::WeightedList { entries, total }
             }
             _ => return Err(format!("unsupported int provider {kind}")),
         })
@@ -259,23 +258,22 @@ impl IntProvider {
                 let normal = *mean + (random.next_gaussian() as f32) * *deviation;
                 normal.clamp(*min as f32, *max as f32) as i32
             }
-            // WeightedListInt.sample = getRandomOrThrow(random).sample(random)：
-            // 先 nextInt(total) 选一个嵌套 provider，再采样它。
-            Self::WeightedList {
-                distribution,
-                total,
-            } => {
+            // WeightedList.getRandomOrThrow：nextInt(totalWeight) + 累计权重轮盘，
+            // 选中的 IntProvider 再 sample（ConstantInt 不额外取数）。
+            // WeightedList.getRandomOrThrow: nextInt(totalWeight) + cumulative wheel,
+            // then sample the chosen IntProvider (ConstantInt takes no extra random).
+            Self::WeightedList { entries, total } => {
+                if *total == 0 {
+                    return 0;
+                }
                 let mut selection = random.next_int(*total);
-                for (weight, provider) in distribution {
+                for (weight, provider) in entries {
                     selection -= *weight;
                     if selection < 0 {
                         return provider.sample(random);
                     }
                 }
-                distribution
-                    .last()
-                    .map(|(_, provider)| provider.sample(random))
-                    .unwrap_or(0)
+                0
             }
         }
     }

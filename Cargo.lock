@@ -2117,6 +2117,7 @@ name = "mc-bamboo-worldgen"
 version = "0.0.0"
 dependencies = [
  "mc-bamboo-blocks",
+ "mc-bamboo-core",
  "mc-bamboo-data",
  "mc-bamboo-nbt",
  "md-5",
