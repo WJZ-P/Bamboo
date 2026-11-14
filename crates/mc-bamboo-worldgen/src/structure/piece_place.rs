@@ -101,6 +101,11 @@ pub struct PieceCtx {
     pub bb: Box,
     /// `StructurePiece.getOrientation()`；`None` 对应官方 null（NBT `O = -1`）。
     pub orientation: Option<HDir>,
+    /// `StructurePiece.mirror` / `rotation`，由 `setOrientation` 推出。
+    ///
+    /// `StructurePiece.mirror` / `rotation`, derived by `setOrientation`.
+    pub mirror: crate::structure::state_transform::Mirror,
+    pub rotation: crate::structure::state_transform::Rotation,
     /// `StructurePiece.canBeReplaced(...)` 子类覆写；`None` 用基类默认（恒 true）。
     ///
     /// The subclass `canBeReplaced` override; `None` is the base default (always true).
@@ -109,9 +114,12 @@ pub struct PieceCtx {
 
 impl PieceCtx {
     pub fn new(bb: Box, orientation: Option<HDir>) -> Self {
+        let (mirror, rotation) = crate::structure::state_transform::from_orientation(orientation);
         Self {
             bb,
             orientation,
+            mirror,
+            rotation,
             can_replace: None,
         }
     }
@@ -178,7 +186,10 @@ impl PieceCtx {
 
     /// `StructurePiece.placeBlock(level, state, x, y, z, chunkBB)`。
     ///
-    /// `StructurePiece.placeBlock(level, state, x, y, z, chunkBB)`.
+    /// 顺序照官方：`isInside` → `canBeReplaced` → `mirror` → `rotate` → `setBlock`。
+    ///
+    /// `StructurePiece.placeBlock(level, state, x, y, z, chunkBB)`. Order follows
+    /// vanilla: `isInside` → `canBeReplaced` → `mirror` → `rotate` → `setBlock`.
     pub fn place_block(
         &self,
         level: &mut dyn PieceLevel,
@@ -197,6 +208,7 @@ impl PieceCtx {
         {
             return;
         }
+        let state = crate::structure::state_transform::transform(state, self.mirror, self.rotation);
         level.set_block(wx, wy, wz, state);
     }
 }

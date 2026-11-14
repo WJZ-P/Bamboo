@@ -391,6 +391,12 @@ struct FlatLevel {
     written: Vec<(i32, i32, i32)>,
     fill: &'static str,
     center: (i32, i32),
+    /// 每个 16³ 段里非空气方块的个数（`LevelChunkSection.hasOnlyAir` 的等价物）。
+    /// 初始填充先算入，之后每次写入即时维护。
+    ///
+    /// Non-air block count per 16³ section (the `LevelChunkSection.hasOnlyAir`
+    /// equivalent). The initial fill seeds it; each write updates it.
+    section_non_air: BTreeMap<(i32, i32, i32), usize>,
 }
 
 impl FlatLevel {
@@ -400,7 +406,34 @@ impl FlatLevel {
             written: Vec::new(),
             fill,
             center,
+            section_non_air: BTreeMap::new(),
         }
+    }
+
+    /// 段坐标：`(chunk_x, section_y, chunk_z)`。
+    ///
+    /// Section key: `(chunk_x, section_y, chunk_z)`.
+    fn section_key(x: i32, y: i32, z: i32) -> (i32, i32, i32) {
+        (x >> 4, y >> 4, z >> 4)
+    }
+
+    /// `LevelChunkSection.hasOnlyAir()`。
+    ///
+    /// `LevelChunkSection.hasOnlyAir()`.
+    fn section_is_empty(&self, x: i32, y: i32, z: i32) -> bool {
+        self.section_non_air
+            .get(&Self::section_key(x, y, z))
+            .map_or_else(
+                // 没有计数记录时按初始填充推：这一段的 16 层里只要有一层在填充范围
+                // 内、且填充不是空气，就算非空。
+                // Without a counter entry, derive from the initial fill: any of the 16
+                // layers inside the fill range (and the fill is not air) makes it non-empty.
+                || {
+                    let base_y = (y >> 4) << 4;
+                    (0..16).any(|dy| !is_air_block(self.initial_block(base_y + dy)))
+                },
+                |&count| count == 0,
+            )
     }
 
     /// `WorldGenRegion.isWithinWriteZone`：写半径 1。
@@ -410,33 +443,6 @@ impl FlatLevel {
         let dx = (x >> 4) - self.center.0;
         let dz = (z >> 4) - self.center.1;
         (-1..=1).contains(&dx) && (-1..=1).contains(&dz)
-    }
-
-    /// 这一格所在的 16³ 段是不是全空（`LevelChunkSection.hasOnlyAir`）。按「写入序列
-    /// 到此为止」的状态求值：假世界的初始填充先算入，之后每次写入即时反映。
-    ///
-    /// Whether this position's 16³ section is all air (`LevelChunkSection.hasOnlyAir`),
-    /// evaluated with every write so far applied: the initial fill counts first, then each
-    /// write is reflected immediately.
-    fn section_is_empty(&self, x: i32, y: i32, z: i32) -> bool {
-        let base_y = (y >> 4) << 4;
-        let base_x = (x >> 4) << 4;
-        let base_z = (z >> 4) << 4;
-        for by in 0..16 {
-            for bx in 0..16 {
-                for bz in 0..16 {
-                    let state = self
-                        .blocks
-                        .get(&(base_x + bx, base_y + by, base_z + bz))
-                        .copied()
-                        .unwrap_or_else(|| self.initial_block(base_y + by));
-                    if !is_air_block(state) {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
     }
 
     /// 初始状态下这一格的方块（`stone` 与 `stone_with_ceiling` 在 y 56..=62 / 63）。
@@ -492,12 +498,21 @@ impl PieceLevel for FlatLevel {
         }
         // `ProtoChunk.setBlockState`：section 原本全空、写入的又恰好是 `Blocks.AIR`
         // （普通空气，**不含** cave_air / void_air）时直接返回，方块不落盘：
-        // `if (wasEmpty && state.is(Blocks.AIR)) return state;`。`is` 比的是方块对象。
+        // `if (wasEmpty && state.is(Blocks.AIR)) return state;`。
         // `ProtoChunk.setBlockState` returns early for plain `Blocks.AIR` (not cave_air or
-        // void_air) written into an otherwise empty section: `if (wasEmpty &&
-        // state.is(Blocks.AIR)) return state;`. `is` compares block identity.
+        // void_air) written into an otherwise empty section.
         if is_plain_air(state) && self.section_is_empty(x, y, z) {
             return true;
+        }
+        let key = Self::section_key(x, y, z);
+        let previous = self.get_block(x, y, z);
+        let was_air = is_air_block(previous);
+        let is_air = is_air_block(state);
+        if was_air && !is_air {
+            *self.section_non_air.entry(key).or_insert(0) += 1;
+        } else if !was_air && is_air {
+            let count = self.section_non_air.entry(key).or_insert(0);
+            *count = count.saturating_sub(1);
         }
         self.written.push((x, y, z));
         self.blocks.insert((x, y, z), state);
