@@ -17,8 +17,8 @@ type Pos = (i32, i32, i32);
 
 /// 一个已移植、`place` 不再需要注册表解析的叶子地物。
 pub enum Leaf {
-    Ore(OreFeature),
-    SimpleBlock(SimpleBlockFeature),
+    Ore(Box<OreFeature>),
+    SimpleBlock(Box<SimpleBlockFeature>),
 }
 
 /// 按 `Feature` 类型 ID 解析配置；未移植或解析不了的类型返回 `None`。
@@ -26,8 +26,10 @@ pub enum Leaf {
 /// Parse a config by `Feature` type ID; return `None` for unported / unparsable types.
 pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
     match kind {
-        "minecraft:ore" => Some(Leaf::Ore(OreFeature::parse(config).ok()?)),
-        "minecraft:simple_block" => Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?)),
+        "minecraft:ore" => Some(Leaf::Ore(Box::new(OreFeature::parse(config).ok()?))),
+        "minecraft:simple_block" => Some(Leaf::SimpleBlock(Box::new(SimpleBlockFeature::parse(
+            config,
+        )?))),
         _ => None,
     }
 }

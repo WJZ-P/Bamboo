@@ -88,23 +88,23 @@ fn i64_field(object: &serde_json::Map<String, Value>, name: &str) -> Option<i64>
 pub enum NoiseStateProvider {
     /// `NoiseProvider`：按主噪声值从 states 选一个。
     Noise {
-        noise: Noise,
+        noise: Box<Noise>,
         scale: f64,
         states: Vec<u32>,
     },
     /// `DualNoiseProvider`：先用 slow noise 定 variety，再从子列表按主噪声选。
     DualNoise {
-        noise: Noise,
+        noise: Box<Noise>,
         scale: f64,
         states: Vec<u32>,
-        slow_noise: Noise,
+        slow_noise: Box<Noise>,
         slow_scale: f64,
         variety_min: f64,
         variety_max: f64,
     },
     /// `NoiseThresholdProvider`：阈值分 low/high，high 还要过 high_chance。
     NoiseThreshold {
-        noise: Noise,
+        noise: Box<Noise>,
         scale: f64,
         threshold: f32,
         high_chance: f32,
@@ -123,7 +123,7 @@ impl NoiseStateProvider {
         let noise = build_noise(seed, object.get("noise")?)?;
         match kind {
             "minecraft:noise" => Some(Self::Noise {
-                noise,
+                noise: Box::new(noise),
                 scale,
                 states: parse_states(object.get("states"))?,
             }),
@@ -132,17 +132,17 @@ impl NoiseStateProvider {
                 let variety_min = variety.first()?.as_i64()? as f64;
                 let variety_max = variety.get(1)?.as_i64()? as f64;
                 Some(Self::DualNoise {
-                    noise,
+                    noise: Box::new(noise),
                     scale,
                     states: parse_states(object.get("states"))?,
-                    slow_noise: build_noise(seed, object.get("slow_noise")?)?,
+                    slow_noise: Box::new(build_noise(seed, object.get("slow_noise")?)?),
                     slow_scale: f64::from(f32_field(object, "slow_scale")?),
                     variety_min,
                     variety_max,
                 })
             }
             "minecraft:noise_threshold" => Some(Self::NoiseThreshold {
-                noise,
+                noise: Box::new(noise),
                 scale,
                 threshold: f32_field(object, "threshold")?,
                 high_chance: f32_field(object, "high_chance")?,
