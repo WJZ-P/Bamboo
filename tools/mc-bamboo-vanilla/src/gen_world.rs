@@ -55,9 +55,15 @@ struct Options {
 impl Options {
     fn parse(args: &[&str]) -> Result<Self, String> {
         let mut options = Self {
-            // 默认固定跑到 carvers：游戏侧同一阶段也只有 CARVERS 快照。
-            // Default: through carvers, the game's only pre-features snapshot.
-            forwarded: vec!["--through".to_owned(), "carvers".to_owned()],
+            // 固定跑到 carvers，并走真实服务端路径（3×3 possibleBiomes、carverBiome、
+            // region.getBiomeManager()），Java 侧会额外输出各张高度图。
+            // Always go through carvers on the real-server path (3x3 possibleBiomes,
+            // carverBiome, region.getBiomeManager()); Java also emits all heightmaps.
+            forwarded: vec![
+                "--through".to_owned(),
+                "carvers".to_owned(),
+                "--real-path".to_owned(),
+            ],
             show: DEFAULT_SHOW,
             break_self_test: false,
             features: false,
@@ -106,6 +112,8 @@ struct Stats {
     chunks: u64,
     biome_cells: u64,
     blocks: u64,
+    heightmap_columns: u64,
+    heightmap_words: u64,
     mismatches: Vec<String>,
 }
 
@@ -318,9 +326,16 @@ impl Report {
                 format!("game generation failed for seed {seed} ({x},{z}): {error}")
             })?;
         if self.break_self_test {
-            // 自检：把第一层第一个方块改成岩浆，确认下面会报不一致。
-            // Self-test: corrupt one block so the comparison must report a mismatch.
+            // 自检：改坏一个方块、一张高度图的一列，以及一个高层方块（让从 blocks
+            // 重算的 FINAL words 也变化），确认三个比较器都会报不一致。
+            // Self-test: corrupt one block, one heightmap column, and one high block
+            // (so the FINAL words recomputed from blocks change too); all three
+            // comparators must then report mismatches.
             generated.blocks[0][0] = mc_bamboo_data::blocks::LAVA;
+            generated.blocks[200][0] = mc_bamboo_data::blocks::STONE;
+            if let Some(first) = generated.heightmaps.values_mut().next() {
+                first[0] = first[0].wrapping_add(1);
+            }
         }
         self.stats.chunks += 1;
         compare_biomes(&mut self.stats, seed, x, z, &biomes, &generated);
@@ -333,6 +348,20 @@ impl Report {
             block_indices,
             &generated,
         )?;
+        // 真实路径一定带高度图；缺了就当对拍配置错误，不静默跳过。
+        // The real-server path always emits heightmaps; a missing field is an error.
+        let columns = value
+            .get("heightmaps")
+            .and_then(Value::as_object)
+            .ok_or("carvers line missing heightmaps")?;
+        compare_heightmaps(&mut self.stats, seed, x, z, columns, &generated);
+        let words = value
+            .get("heightmap_words")
+            .and_then(Value::as_object)
+            .ok_or("carvers line missing heightmap_words")?;
+        let ours = mc_bamboo_game::worldgen::final_heightmap_words(&generated)
+            .map_err(|error| format!("cannot assemble column seed {seed} ({x},{z}): {error}"))?;
+        compare_heightmap_words(&mut self.stats, seed, x, z, words, &ours);
         Ok(())
     }
 
@@ -402,6 +431,7 @@ impl Report {
             let generated = GeneratedChunk {
                 blocks: result.blocks[index].clone(),
                 biomes: Vec::new(),
+                heightmaps: Default::default(),
             };
             compare_blocks(
                 &mut self.stats,
@@ -421,10 +451,13 @@ impl Report {
             chunks,
             biome_cells,
             blocks,
+            heightmap_columns,
+            heightmap_words,
             mismatches,
         } = self.stats;
         println!(
             "gen-world: {chunks} chunks, {biome_cells} quart cells, {blocks} blocks, \
+             {heightmap_columns} heightmap columns, {heightmap_words} heightmap words, \
              {} mismatches, {} official checks",
             mismatches.len(),
             self.official_checks
@@ -569,6 +602,101 @@ fn compare_blocks(
     Ok(())
 }
 
+/// 逐列比较六张高度图（世界高度 `getFirstAvailable`）。
+/// Compare the six heightmaps column by column (world height `getFirstAvailable`).
+fn compare_heightmaps(
+    stats: &mut Stats,
+    seed: i64,
+    x: i32,
+    z: i32,
+    columns: &serde_json::Map<String, Value>,
+    generated: &GeneratedChunk,
+) {
+    for key in mc_bamboo_game::worldgen::HEIGHTMAP_KEYS {
+        let expected = match columns.get(key).and_then(Value::as_array) {
+            Some(array) => array,
+            None => {
+                stats.mismatches.push(format!(
+                    "heightmaps seed {seed} ({x},{z}): official has no {key}"
+                ));
+                continue;
+            }
+        };
+        let ours = match generated.heightmaps.get(key) {
+            Some(map) => map,
+            None => {
+                stats.mismatches.push(format!(
+                    "heightmaps seed {seed} ({x},{z}): game has no {key}"
+                ));
+                continue;
+            }
+        };
+        if expected.len() != 256 || ours.len() != 256 {
+            stats.mismatches.push(format!(
+                "heightmaps seed {seed} ({x},{z}) {key}: {} columns vs official {}",
+                ours.len(),
+                expected.len()
+            ));
+            continue;
+        }
+        for (column, (&ours_value, official)) in ours.iter().zip(expected).enumerate() {
+            stats.heightmap_columns += 1;
+            let official = official.as_i64().unwrap_or(i64::MIN) as i32;
+            if ours_value != official {
+                stats.mismatches.push(format!(
+                    "heightmaps seed {seed} ({x},{z}) {key} column {column}: \
+                     official {official}, game {ours_value}"
+                ));
+            }
+        }
+    }
+}
+
+/// 比较四张 FINAL 高度图的打包位流（存档写出的 `LongArrayTag` 内容）。
+/// Compare the packed words of the four FINAL heightmaps (the saved `LongArrayTag`).
+fn compare_heightmap_words(
+    stats: &mut Stats,
+    seed: i64,
+    x: i32,
+    z: i32,
+    words: &serde_json::Map<String, Value>,
+    ours: &std::collections::BTreeMap<&'static str, Vec<u64>>,
+) {
+    for (key, values) in ours {
+        let expected = match words.get(*key).and_then(Value::as_array) {
+            Some(array) => array,
+            None => {
+                stats.mismatches.push(format!(
+                    "heightmap_words seed {seed} ({x},{z}): official has no {key}"
+                ));
+                continue;
+            }
+        };
+        if expected.len() != values.len() {
+            stats.mismatches.push(format!(
+                "heightmap_words seed {seed} ({x},{z}) {key}: {} words vs official {}",
+                values.len(),
+                expected.len()
+            ));
+            continue;
+        }
+        for (index, (&ours_word, official)) in values.iter().zip(expected).enumerate() {
+            stats.heightmap_words += 1;
+            let official = official
+                .as_i64()
+                .map(|value| value as u64)
+                .or_else(|| official.as_u64())
+                .unwrap_or(0);
+            if ours_word != official {
+                stats.mismatches.push(format!(
+                    "heightmap_words seed {seed} ({x},{z}) {key} word {index}: \
+                     official {official}, game {ours_word}"
+                ));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,6 +708,7 @@ mod tests {
         let generated = GeneratedChunk {
             blocks: vec![vec![mc_bamboo_data::blocks::STONE; 256]; 1],
             biomes: vec![],
+            heightmaps: Default::default(),
         };
         let palette = vec![Value::String("Block{minecraft:stone}".to_owned())];
         let indices: Vec<Value> = (0..256).map(|_| Value::from(0u64)).collect();
@@ -601,6 +730,7 @@ mod tests {
         let generated = GeneratedChunk {
             blocks: vec![],
             biomes: vec![vec![registries::biome::PLAINS as u32; 64]],
+            heightmaps: Default::default(),
         };
         let sections = vec![vec!["minecraft:desert".to_owned(); 64]];
         let mut stats = Stats::default();
@@ -608,11 +738,72 @@ mod tests {
         assert_eq!(stats.mismatches.len(), 64);
     }
 
+    /// 故意改坏一列：确认六张高度图的逐列比较会报不一致。
+    /// Deliberately break one column: the six-heightmap comparison must fail.
+    #[test]
+    fn heightmap_comparator_detects_a_wrong_column() {
+        let mut heightmaps = std::collections::BTreeMap::new();
+        for key in mc_bamboo_game::worldgen::HEIGHTMAP_KEYS {
+            heightmaps.insert(key, vec![100_i32; 256]);
+        }
+        let generated = GeneratedChunk {
+            blocks: vec![],
+            biomes: vec![],
+            heightmaps,
+        };
+        let mut columns = serde_json::Map::new();
+        for key in mc_bamboo_game::worldgen::HEIGHTMAP_KEYS {
+            columns.insert(
+                key.to_owned(),
+                Value::Array((0..256).map(|_| Value::from(100_i64)).collect()),
+            );
+        }
+        let mut clean = Stats::default();
+        compare_heightmaps(&mut clean, 1, 0, 0, &columns, &generated);
+        assert!(clean.mismatches.is_empty());
+        assert_eq!(clean.heightmap_columns, 6 * 256);
+
+        columns.insert(
+            "WORLD_SURFACE_WG".to_owned(),
+            Value::Array((0..256).map(|_| Value::from(101_i64)).collect()),
+        );
+        let mut broken = Stats::default();
+        compare_heightmaps(&mut broken, 1, 0, 0, &columns, &generated);
+        assert_eq!(broken.mismatches.len(), 256);
+    }
+
+    /// 故意改坏一个 long：确认 FINAL 高度图位流比较会报不一致。
+    /// Deliberately break one long: the FINAL heightmap-word comparison must fail.
+    #[test]
+    fn heightmap_words_comparator_detects_a_wrong_word() {
+        let mut ours: std::collections::BTreeMap<&'static str, Vec<u64>> =
+            std::collections::BTreeMap::new();
+        ours.insert("WORLD_SURFACE", vec![7_u64; 37]);
+        let mut words = serde_json::Map::new();
+        words.insert(
+            "WORLD_SURFACE".to_owned(),
+            Value::Array((0..37).map(|_| Value::from(7_i64)).collect()),
+        );
+        let mut clean = Stats::default();
+        compare_heightmap_words(&mut clean, 1, 0, 0, &words, &ours);
+        assert!(clean.mismatches.is_empty());
+        assert_eq!(clean.heightmap_words, 37);
+
+        words.insert(
+            "WORLD_SURFACE".to_owned(),
+            Value::Array((0..37).map(|_| Value::from(8_i64)).collect()),
+        );
+        let mut broken = Stats::default();
+        compare_heightmap_words(&mut broken, 1, 0, 0, &words, &ours);
+        assert_eq!(broken.mismatches.len(), 37);
+    }
+
     #[test]
     fn options_force_carvers_and_forward_seed_args() {
         let options = Options::parse(&["--seeds", "2", "--chunks", "4", "--salt", "9"]).unwrap();
         assert!(options.forwarded.contains(&"--through".to_owned()));
         assert!(options.forwarded.contains(&"carvers".to_owned()));
+        assert!(options.forwarded.contains(&"--real-path".to_owned()));
         assert!(options.forwarded.contains(&"2".to_owned()));
         assert!(Options::parse(&["--bogus"]).is_err());
     }

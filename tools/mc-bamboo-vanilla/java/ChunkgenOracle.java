@@ -456,7 +456,7 @@ public final class ChunkgenOracle {
      * 所以跳过别的 step 不影响留下的 step。最终验收仍要跑完整 11 步。
      */
     private record Options(int seeds, int chunks, long salt, int through, int stepsMask,
-            String featureAllowList) {
+            String featureAllowList, boolean realPath) {
         static final int ALL_STEPS = (1 << 11) - 1;
 
         static Options parse(String[] args) {
@@ -466,6 +466,9 @@ public final class ChunkgenOracle {
             int through = 3;
             int stepsMask = ALL_STEPS;
             String featureAllowList = null;
+            // 真实服务端路径：3×3 possibleBiomes、carverBiome 分支、region.getBiomeManager()。
+            // Real-server path: 3x3 possibleBiomes, the carverBiome branch, region.getBiomeManager().
+            boolean realPath = false;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seeds" -> seeds = Integer.parseInt(args[++i]);
@@ -494,10 +497,11 @@ public final class ChunkgenOracle {
                     }
                     case "--ore-only" -> featureAllowList = "minecraft:ore";
                     case "--biomes-only" -> through = 0;
+                    case "--real-path" -> realPath = true;
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
-            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList);
+            return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath);
         }
     }
 
@@ -595,6 +599,14 @@ public final class ChunkgenOracle {
                     proto.setPersistedStatus(ChunkStatus.BIOMES);
                     writeBiomes(seed, pos, proto);
                     if (this.options.through() < 1) {
+                        continue;
+                    }
+                    if (this.options.realPath()) {
+                        // 真实服务端路径：3×3 possibleBiomes、carverBiome、region 的 biomeManager，
+                        // 并输出各阶段 prime/更新后的高度图。
+                        // Real-server path: 3x3 possibleBiomes, carverBiome, region's biomeManager,
+                        // plus every heightmap after the stage's prime/update.
+                        writeRealPath(seed, pos, proto, generator, generatorSettings, state, resolver);
                         continue;
                     }
                     if (this.options.through() >= 4) {
@@ -865,6 +877,156 @@ public final class ChunkgenOracle {
             return picker;
         }
 
+        /**
+         * 真实服务端路径：照 {@code ChunkStatusTasks.buildTerrain}，用周围 3×3 群系调色板
+         * 并集、{@code carverBiome} 分支和 {@code region.getBiomeManager()}。造 17×17 个
+         * ProtoChunk（3×3 跑 {@code createBiomes}），不启动服务端、不接受 EULA。
+         *
+         * Real-server path: mirrors {@code ChunkStatusTasks.buildTerrain} with the
+         * 3x3 biome-palette union, the {@code carverBiome} branch and
+         * {@code region.getBiomeManager()}. Builds 17x17 ProtoChunks (3x3 run
+         * {@code createBiomes}); no server, no EULA.
+         */
+        private void writeRealPath(long seed, ChunkPos pos, ProtoChunk center,
+                NoiseBasedChunkGenerator generator, NoiseGeneratorSettings gs,
+                RandomState state, BiomeResolver resolver) throws Exception {
+            ProtoChunk[][] neighbors = new ProtoChunk[17][17];
+            for (int dx = -8; dx <= 8; dx++) {
+                for (int dz = -8; dz <= 8; dz++) {
+                    ProtoChunk p;
+                    if (dx == 0 && dz == 0) {
+                        p = center;
+                    } else {
+                        p = newChunk(new ChunkPos(pos.x() + dx, pos.z() + dz), gs);
+                        // 3×3 的 quart 群系格必须填好：collectPossibleBiomes 和
+                        // region.getBiomeManager().getBiome 都会读它们。
+                        // The 3x3 quart cells must be filled: collectPossibleBiomes and
+                        // region.getBiomeManager().getBiome both read them.
+                        if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) {
+                            generator.createBiomes(state, Blender.empty(), null, p).join();
+                        }
+                        p.setPersistedStatus(ChunkStatus.BIOMES);
+                    }
+                    neighbors[dx + 8][dz + 8] = p;
+                }
+            }
+            net.minecraft.server.level.WorldGenRegion region =
+                    makeRegion(center, neighbors, pos, seed, resolver);
+            Set<Holder<Biome>> possibleBiomes = collectPossibleBiomes(region, pos);
+            DensityVolume volume = new DensityVolume(
+                    16, gs.noiseSettings().height(), 16,
+                    pos.getMinBlockX(), gs.noiseSettings().minY(), pos.getMinBlockZ());
+            try (NoiseChunk noiseChunk = new NoiseChunk(
+                    state, Beardifier.EMPTY, gs, instancePicker(generator).get(),
+                    Blender.empty(), volume)) {
+                this.doFill.invoke(generator, noiseChunk, center);
+                this.buildSurface.invoke(generator, center, noiseChunk, state,
+                        region.getBiomeManager(), possibleBiomes, gs.materialRule().value());
+                this.generateCarvers.invoke(generator, center, Blender.empty(), noiseChunk,
+                        state, region.getBiomeManager(), region, gs.materialRule().value());
+            }
+            // ChunkStatusTasks.buildTerrain 的 thenApply：升到 TERRAIN 后 prime FINAL_HEIGHTMAPS。
+            // buildTerrain's thenApply: raise to TERRAIN, then prime FINAL_HEIGHTMAPS.
+            center.setPersistedStatus(ChunkStatus.TERRAIN);
+            Heightmap.primeHeightmaps(center, ChunkStatus.FINAL_HEIGHTMAPS);
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "carvers");
+            line.addProperty("seed", seed);
+            line.addProperty("x", pos.x());
+            line.addProperty("z", pos.z());
+            addBlocks(line, center);
+            addHeightmaps(line, center);
+            write(line);
+        }
+
+        /**
+         * 用 Unsafe 造一个不跑构造器的 WorldGenRegion，只填 getChunk/getBiomeManager 需要的字段。
+         *
+         * Build a constructor-less WorldGenRegion via Unsafe, filling only the fields
+         * getChunk/getBiomeManager need.
+         */
+        private net.minecraft.server.level.WorldGenRegion makeRegion(
+                ProtoChunk center, ProtoChunk[][] neighbors, ChunkPos pos, long seed,
+                BiomeResolver resolver) throws Exception {
+            net.minecraft.server.level.WorldGenRegion region =
+                    (net.minecraft.server.level.WorldGenRegion) allocate(
+                            net.minecraft.server.level.WorldGenRegion.class);
+            net.minecraft.util.StaticCache2D<ChunkAccess> cache =
+                    net.minecraft.util.StaticCache2D.create(pos.x(), pos.z(), 8,
+                            (x, z) -> neighbors[x - pos.x() + 8][z - pos.z() + 8]);
+            // terrain 步的 directDependencies：[BIOMES, BIOMES, STRUCTURE_STARTS×7]
+            // （ChunkPyramid: addRequirement(STRUCTURE_STARTS,8) + addRequirement(BIOMES,1)）。
+            // terrain step's directDependencies, from ChunkPyramid.
+            List<ChunkStatus> deps = new ArrayList<>();
+            deps.add(ChunkStatus.BIOMES);
+            deps.add(ChunkStatus.BIOMES);
+            for (int i = 2; i < 9; i++) {
+                deps.add(ChunkStatus.STRUCTURE_STARTS);
+            }
+            net.minecraft.world.level.chunk.status.ChunkDependencies direct =
+                    new net.minecraft.world.level.chunk.status.ChunkDependencies(
+                            com.google.common.collect.ImmutableList.copyOf(deps));
+            net.minecraft.world.level.chunk.status.ChunkStep step =
+                    new net.minecraft.world.level.chunk.status.ChunkStep(
+                            ChunkStatus.TERRAIN, direct, direct, 1, null);
+            setField(net.minecraft.server.level.WorldGenRegion.class, region, "cache", cache);
+            setField(net.minecraft.server.level.WorldGenRegion.class, region, "center", center);
+            setField(net.minecraft.server.level.WorldGenRegion.class, region, "generatingStep", step);
+            setField(net.minecraft.server.level.WorldGenRegion.class, region,
+                    "uncachedBiomeResolver", resolver);
+            setField(net.minecraft.server.level.WorldGenRegion.class, region, "biomeManager",
+                    new BiomeManager(region, BiomeManager.obfuscateSeed(seed)));
+            return region;
+        }
+
+        /**
+         * 照 ChunkStatusTasks.collectPossibleBiomes(region, 1)：周围 3×3 调色板并集。
+         *
+         * Mirrors ChunkStatusTasks.collectPossibleBiomes(region, 1): the 3x3 palette union.
+         */
+        private Set<Holder<Biome>> collectPossibleBiomes(
+                net.minecraft.server.level.WorldGenRegion region, ChunkPos pos) {
+            Set<Holder<Biome>> out = new HashSet<>();
+            for (int z = pos.z() - 1; z <= pos.z() + 1; z++) {
+                for (int x = pos.x() - 1; x <= pos.x() + 1; x++) {
+                    region.getChunk(x, z).collectBiomesInPalette(out);
+                }
+            }
+            return out;
+        }
+
+        private static final sun.misc.Unsafe UNSAFE = loadUnsafe();
+
+        private static sun.misc.Unsafe loadUnsafe() {
+            try {
+                Field field = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+                field.setAccessible(true);
+                return (sun.misc.Unsafe) field.get(null);
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        /** 跳过构造器分配实例，和 BlockOracle 一样。 Skip the constructor, as BlockOracle does. */
+        @SuppressWarnings("unchecked")
+        private static <T> T allocate(Class<T> type) {
+            try {
+                return (T) UNSAFE.allocateInstance(type);
+            } catch (InstantiationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
+        private static void setField(Class<?> owner, Object target, String name, Object value) {
+            try {
+                Field field = owner.getDeclaredField(name);
+                field.setAccessible(true);
+                field.set(target, value);
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
         private ProtoChunk newChunk(ChunkPos pos, NoiseGeneratorSettings generatorSettings) {
             LevelHeightAccessor height = LevelHeightAccessor.create(
                     generatorSettings.noiseSettings().minY(), generatorSettings.noiseSettings().height());
@@ -937,6 +1099,38 @@ public final class ChunkgenOracle {
             }
             line.add("palette", names);
             line.add("blocks", blocks);
+        }
+
+        /**
+         * 输出 ProtoChunk 里现有的每一张高度图：逐列的 getFirstAvailable（世界高度）
+         * 和打包的 raw long[]（存档/发包用的位流）。
+         *
+         * Emit every heightmap present on the ProtoChunk: per-column getFirstAvailable
+         * (world height) and the packed raw long[] (the on-disk/wire bitstream).
+         */
+        private void addHeightmaps(JsonObject line, ChunkAccess chunk) {
+            JsonObject columns = new JsonObject();
+            JsonObject words = new JsonObject();
+            for (java.util.Map.Entry<Heightmap.Types, Heightmap> entry : chunk.getHeightmaps()) {
+                Heightmap.Types type = entry.getKey();
+                Heightmap map = entry.getValue();
+                JsonArray perColumn = new JsonArray();
+                for (int z = 0; z < 16; z++) {
+                    for (int x = 0; x < 16; x++) {
+                        perColumn.add(map.getFirstAvailable(x, z));
+                        this.checks++;
+                    }
+                }
+                columns.add(type.getSerializationKey(), perColumn);
+                JsonArray raw = new JsonArray();
+                for (long word : map.getRawData()) {
+                    raw.add(word);
+                    this.checks++;
+                }
+                words.add(type.getSerializationKey(), raw);
+            }
+            line.add("heightmaps", columns);
+            line.add("heightmap_words", words);
         }
 
         private long[] seeds() {

@@ -417,11 +417,16 @@ WebView2 的渲染进程不算在内。
   这次 `features` 里用纯函数（带缓存）重算 8 个邻居中心写进来的增量，保证集合从中心自己的
   features 结果就齐；增量按 `TaskId` 顺序追加、完工按 `(x,y,z,state)` 规范序落盘，同格重复写
   由规范序里最后一条生效，而非官方的生成顺序。邻居快照是干净的 CARVERS 地形（与对拍一致），
-  官方 `WorldGenRegion` 读的可能是邻居更靠后阶段的内容。`possibleBiomes` 仍用对拍的「全部群系 /
-  uncached resolver」简化路径，没换成官方周围 3×3 区块调色板并集（`BiomeCondition.compile`
-  的静态优化、雕刻器的 `carverBiome` 分支都还没按真实服务端的样子重新对拍）。
-  高度图只由 `Chunk::from_sections` 从方块重算 4 张，后期处理位置表、`ProtoChunk` 其余字段、
-  非 `full` 区块从盘上读回后按状态继续生成，都还没逐项对拍。`ChunkColumn::from_parts`
+  官方 `WorldGenRegion` 读的可能是邻居更靠后阶段的内容。
+  `possibleBiomes`、雕刻器的 `carverBiome` 分支和 `WorldGenRegion` 的 `uncachedBiomeResolver`
+  已按真实服务端路径重新对拍：`gen-world` 的 Java 端用 `collectPossibleBiomes(region, 1)` 的
+  3×3 调色板并集、非空 `carverBiomeRegion` 和 `region.getBiomeManager()` 出题，与游戏侧同一份
+  `generate_chunk` 逐方块、逐 quart 格 0 不一致（多种子、多区块）；两条路径何时会不同、哪些是
+  疑点，见 `docs/worldgen.md`。六张高度图（`WORLD_SURFACE_WG` / `OCEAN_FLOOR_WG` 两张 WG 和
+  四张 `FINAL_HEIGHTMAPS`）已从最终 CARVERS 方块按官方谓词算出、逐列对拍 0 不一致，存档写出
+  的四张 FINAL 打包位流也和官方 `SerializableChunkData` 逐字对拍 0 不一致。
+  后期处理位置表、`ProtoChunk` 其余字段、非 `full` 区块从盘上读回后按状态继续生成，
+  都还没逐项对拍。`ChunkColumn::from_parts`
   产出的盒子 `untouched=false`，生成的区块一律算「改过」而写盘，官方可以丢弃原样生成区块。
   出生点是 `MinecraftServer.setInitialSpawn` 的**简化版**：从原点区块起按官方 11×11 螺旋、
   用 quart 群系粗略排除海洋后找一块不淹水的地表，没有 `NoiseSpawnFinder` 的气候螺旋定位、
@@ -429,7 +434,8 @@ WebView2 的渲染进程不算在内。
   随机种子（`level-seed` 为空）用 `nanoTime ^ uniquifier` 近似官方 `RandomSupport`，进程内固定，
   只和官方「空种子 = 随机」的语义一致、不逐位比较。`fly-20` 飞行压测没实跑，计算池默认
   取核数一半夹在 1..=4，换上真实地物/结构后要重量。下界和末地、非空
-  `BlendingData` / `Beardifier` 也没做。按区块分格插值（官方 `interpolated` 的成批求值）
+  `BlendingData` 也没做；`structure::beardifier` 纯函数已落地并对拍，但游戏里喂给 terrain
+  的仍恒为 `Beardifier::EMPTY`（结构没接进流水线）。按区块分格插值（官方 `interpolated` 的成批求值）
   在区块网格上已由 `chunkgen` 覆盖，单点 `worldgen` 对拍里跳过这批函数。
 
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
@@ -452,11 +458,17 @@ WebView2 的渲染进程不算在内。
   反转起点群系判定两处故意改坏各被抓到并失败，还原后回 0。
   已知限制：全是纯函数，没接进 Director 的 `structure_starts` / `structure_references` 阶段；
   这里的「是否有效」是 `onTopOfChunkCenter` 基线路径的通用群系 / 高度判定，不是
-  `Structure.generate` 的最终有效——每个结构真正的 `findGenerationPoint`（结构件生成、模板、
-  jigsaw）还没做，组合对拍只覆盖 6 个 `random_spread` 结构集、不含 `isStructureChunk` 命中过滤
-  （那是已对拍的 `start_plans` 的职责），`StructureStart` 仍只是数据类型。结构件生成
-  （所有旧式 / jigsaw 结构）、`features` 阶段的 `placeInChunk` / `postProcess` / processors /
-  方块实体 / 拼图替换、terrain 里的 `Beardifier`（仍用 `EMPTY`）、存档 `structures` 键全都没做；
+  `Structure.generate` 的最终有效，组合对拍只覆盖 6 个 `random_spread` 结构集、不含
+  `isStructureChunk` 命中过滤（那是已对拍的 `start_plans` 的职责），`StructureStart` 仍只是数据类型。
+  本轮新增并完成对拍的里程碑：四个代码生成单件结构（沙漠神殿、丛林神殿、女巫小屋、
+  埋藏的宝藏）的结构件布局（`structure-single`，8 种子 × 12 区块 × 4 类 = 384 查询、
+  384 结构件、384 行比较 0 不一致）；`Beardifier` 纯函数（`beardifier`，23 case、
+  11861 个 `sampleValue` 点 + 1648 个体元 = 13509 位比较 0 不一致，已接进
+  `terrain_with_beardifier`，`first_occupied_height` 固定走 EMPTY）；存档 `structures` 键
+  （`structure-save`，8 case 的规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、
+  `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。仍没做：需要模板的单件结构
+  （雪屋、沉船、海底遗迹、废弃传送门）、jigsaw 结构件生成、`features` 阶段的 `placeInChunk` /
+  `postProcess` / processors / 方块实体 / 拼图替换，以及把结构起点真正接进 Director；
   `.nbt` 结构模板已由 `cb-wg-jigsaw` 分支从官方 jar 原样导出成
   `mc-bamboo-data::structures`（1511 个、4236847 gzip 字节，重跑无 diff），并用官方
   `NbtIo` 逐节点对拍 0 不一致；Rust 侧 `structure::template` 能读出方块、方块实体和拼图方块。
@@ -490,8 +502,10 @@ WebView2 的渲染进程不算在内。
   已知限制：以上全是纯函数 + oracle，没接进 Director 的 `structure_starts` /
   `structure_references` 阶段，游戏里世界仍是超平坦；布局函数里恶地的 `surfaceHeight` /
   府邸的 `startY` 在对拍中仍作为外部输入喂入（前置判定模块已用 `Generator` 的高度原语
-  算出并喂给布局）；结构件放置（第 5 步）、`Beardifier`（第 6 步）、存档 `structures` 键
-  （第 7 步）、jigsaw 与其余旧式结构的结构件布局仍没做，不假装支持。
+  算出并喂给布局）；结构件放置（第 5 步）、jigsaw 与其余旧式结构的结构件布局仍没做，
+  不假装支持。`Beardifier` 纯函数（第 6 步）、存档 `structures` 键的通用编码（第 7 步）
+  由 `cb-wg-structures` 队友完成（见上一条）；本分支正在其上补齐各结构件的
+  `addAdditionalSaveData` 字段与读档路径，仍没接进 Director。
 - 红石的已知差异：发射器会发射不生成实体的弹射物，默认抛出和余料都生成真的物品实体。箭、雪球、蛋（含蓝蛋、棕蛋）、喷溅药水、滞留药水、经验瓶、烟花、火焰弹和风弹走默认抛出，官方那些是弹射物，出现事件 1002、1004、1018 或 1051 的整题不比较。船和矿车放得下时只扣物品、不生成实体，放不下时再套一层默认抛出。盔甲架和带 `entity_data` 的刷怪蛋留在槽里，当作生成失败，数量变少的整题不比较。TNT 物品在 `tnt_explodes` 为真时生成点燃的 TNT 并播放 `entity.tnt.primed`，数量减一；规则为假时物品留着、发 1001，不取朝向。打火石点着 TNT 方块时走 `TntBlock.prime` 再 `removeBlock` 再扣耐久。这些题比较方块、声音、容器和 `level.random`。点燃的 TNT 实体本身不进比较，方块 oracle 也不 tick 它。同一题里如果还有弹射物事件、盔甲架或刷怪蛋离开发射器，仍按那些原因整题排除。鱼桶只倒水，不生成鱼，环境音不比较。倒成功后仍取官方 `EntityType.create` 的一次 `nextFloat`，以及 `Mob.finalizeSpawn` 的 `triangle` 和一次 `nextFloat`。美西螈在 `BUCKET` 原因下 `finalizeSpawn` 直接返回，只取朝向那一次。热带鱼再按 `nextFloat() < 0.9` 取常见变种或随机花纹。硫磺立方桶不放方块，生成用的随机数同样照取。剪刀收满蜜的蜂巢按 `minecraft:harvest/beehive` 掉 3 个蜜脾，战利品表走自己的 `random_sequence`，不碰 `level.random`；`Block.popResource` 为这一组取 3 次位置偏移，生成物品实体。桶倒进可替换方块时，官方 `destroyBlock` 会先在方块还在时按 `getDrops` 一组一组 `popResource`，再换成流体方块；方块 oracle 把那些表换成空表，两边都不取数，也不生成物品。骨粉催树苗、杜鹃、蘑菇、菌、草方块、菌丝和要地物的方块时整题不比较。默认抛出和塞不回发射器的余料都生成物品实体。速度按官方 `spawnItem`：先取一个 `nextDouble` 算 `pow`，X、Z 的均值是朝向步长乘 `pow`，Y 是 0.2，再取三个 `triangle` 的六个 double；这套随机数只取一次。打火石和剪刀的耐久走通用 `hurtAndBreak`，耐久附魔用 `level.random`。玩家没有身体和鞍这两格。骷髅头、僵尸头、苦力怕头、龙首和猪灵头不放方块，只试着穿到前方的人身上。合成器按官方逻辑合成并吐出产物，朝空气吐出的东西按 `DefaultDispenseItemBehavior.spawnItem` 生成真的物品实体（精度 6），成就和地图的后处理也没做。方块 oracle 给合成器加了固定场景的题，合成成功的题逐项比较方块状态、容器内容、等级事件和世界随机源最后的种子；合成器到期时如果官方没有合成成功，只发失败事件 1050，这一声照常比较。漏斗把同一件物品搬进搬出不算合成。投掷器朝空气抛出的物品生成物品实体；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，地上的物品还没有接上这些触发，世界里没有生物和弹射物，下落方块和点燃的 TNT 也不会踩这些；阳光探测器不随时间变化，只在右键时按当前天空光算，世界时钟停在正午。唱片机放进唱片后立刻算在放（`ownSignal` 为 15），但不跑官方的歌曲计时：假世界也不登记唱片机的 ticker，所以不抽每 20 刻的 `nextInt(4)`，歌也不会放到结束。宝库只在官方结果里出现宝库方块实体的声音或状态事件 3015–3017 时整题不比较，没触发的宝库照常比较。
 - 活塞不推实体，也不推动玩家。下落方块和点燃的 TNT 已经在世界里，但官方 `PistonMovingBlockEntity` 的
   `moveCollidedEntities`、`moveStuckEntities`、`fixEntityWithinPistonBase` 三段没实现：掉落物、下落方块
