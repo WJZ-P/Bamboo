@@ -34,8 +34,13 @@ use mc_bamboo_worldgen::{
 };
 use serde_json::Value;
 
-/// 本轮 `pieces` 对拍的结构（村庄五种 + 前哨站 + 古城 + 试炼密室 + 古迹废墟）。
-const STRUCTURES: [&str; 9] = [
+/// 本轮 `pieces` 对拍的结构：村庄五种 + 前哨站 + 古城 + 试炼密室 + 古迹废墟 +
+/// 26.3 新增的全部 18 种 `abandoned_camp`。`bastion_remnant` 是下界结构，本轮不做。
+///
+/// Structures in the `pieces` oracle: five villages, pillager outpost, ancient city,
+/// trial chambers, trail ruins and all 18 `abandoned_camp` structures added in 26.3.
+/// `bastion_remnant` is a nether structure and out of scope.
+const STRUCTURES: [&str; 27] = [
     "minecraft:village_plains",
     "minecraft:village_desert",
     "minecraft:village_savanna",
@@ -45,6 +50,24 @@ const STRUCTURES: [&str; 9] = [
     "minecraft:ancient_city",
     "minecraft:trial_chambers",
     "minecraft:trail_ruins",
+    "minecraft:abandoned_camp_bamboo_jungle",
+    "minecraft:abandoned_camp_birch_forest",
+    "minecraft:abandoned_camp_cherry_grove",
+    "minecraft:abandoned_camp_dappled_forest",
+    "minecraft:abandoned_camp_flower_forest",
+    "minecraft:abandoned_camp_forest",
+    "minecraft:abandoned_camp_meadow",
+    "minecraft:abandoned_camp_old_growth_birch_forest",
+    "minecraft:abandoned_camp_old_growth_pine_taiga",
+    "minecraft:abandoned_camp_old_growth_spruce_taiga",
+    "minecraft:abandoned_camp_pale_garden",
+    "minecraft:abandoned_camp_savanna",
+    "minecraft:abandoned_camp_snowy_taiga",
+    "minecraft:abandoned_camp_sparse_jungle",
+    "minecraft:abandoned_camp_swamp",
+    "minecraft:abandoned_camp_taiga",
+    "minecraft:abandoned_camp_windswept_forest",
+    "minecraft:abandoned_camp_wooded_badlands",
 ];
 const SEEDS: [i64; 6] = [0, 1, -1, 42, 12_345_678_901, -98_765_432_123];
 const CHUNKS: [(i32, i32); 6] = [(0, 0), (1, 1), (-5, 7), (34, -34), (12, -3), (-40, 40)];
