@@ -131,46 +131,6 @@ impl<T> PriorityQueue<T> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::PriorityQueue;
-
-    /// `SequencedPriorityIterator`：高优先级先出、同优先级 FIFO、优先级可以交替入队。
-    ///
-    /// `SequencedPriorityIterator`: highest priority first, FIFO within a priority, and
-    /// priorities may be interleaved on insert.
-    #[test]
-    fn priority_queue_matches_sequenced_priority_iterator() {
-        let mut queue = PriorityQueue::default();
-        queue.add("a0", 0);
-        queue.add("b5", 5);
-        queue.add("a1", 0);
-        queue.add("c2", 2);
-        queue.add("b6", 5);
-        // 负优先级也要能排到最后。
-        // Negative priorities sort last too.
-        queue.add("d-3", -3);
-
-        let mut order = Vec::new();
-        while let Some(value) = queue.next() {
-            order.push(value);
-        }
-        assert_eq!(order, vec!["b5", "b6", "c2", "a0", "a1", "d-3"]);
-    }
-
-    /// 空队列返回 `None`；取完后也返回 `None`。
-    ///
-    /// An empty queue yields `None`, and so does an exhausted one.
-    #[test]
-    fn priority_queue_empties() {
-        let mut queue = PriorityQueue::default();
-        assert!(queue.next().is_none());
-        queue.add(1, 0);
-        assert_eq!(queue.next(), Some(1));
-        assert!(queue.next().is_none());
-    }
-}
-
 struct PieceState {
     piece_index: usize,
     free: Rc<RefCell<FreeSpace>>,
@@ -502,5 +462,45 @@ impl<'a> Placer<'a> {
             max = max.max(size);
         }
         Ok(max)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PriorityQueue;
+
+    /// `SequencedPriorityIterator`：高优先级先出、同优先级 FIFO、优先级可以交替入队。
+    ///
+    /// `SequencedPriorityIterator`: highest priority first, FIFO within a priority, and
+    /// priorities may be interleaved on insert.
+    #[test]
+    fn priority_queue_matches_sequenced_priority_iterator() {
+        let mut queue = PriorityQueue::default();
+        queue.add("a0", 0);
+        queue.add("b5", 5);
+        queue.add("a1", 0);
+        queue.add("c2", 2);
+        queue.add("b6", 5);
+        // 负优先级也要能排到最后。
+        // Negative priorities sort last too.
+        queue.add("d-3", -3);
+
+        let mut order = Vec::new();
+        while let Some(value) = queue.next() {
+            order.push(value);
+        }
+        assert_eq!(order, vec!["b5", "b6", "c2", "a0", "a1", "d-3"]);
+    }
+
+    /// 空队列返回 `None`；取完后也返回 `None`。
+    ///
+    /// An empty queue yields `None`, and so does an exhausted one.
+    #[test]
+    fn priority_queue_empties() {
+        let mut queue = PriorityQueue::default();
+        assert!(queue.next().is_none());
+        queue.add(1, 0);
+        assert_eq!(queue.next(), Some(1));
+        assert!(queue.next().is_none());
     }
 }
