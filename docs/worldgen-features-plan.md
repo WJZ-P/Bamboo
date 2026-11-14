@@ -832,6 +832,9 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | `minecraft:block_column`（9 个 placed feature） | `--steps 9 --seeds 3 --chunks 8 --salt 3` | 0 不一致（23 中心 / 20348928 方块 / 1 skipped） |
 | 同上，故意把柱状方块换成石头 | 同上 | 160 处不一致（确认非假绿） |
 | `seagrass_normal,warm,deep` + `sea_pickle` | `--steps 9 --seeds 3 --chunks 12 --salt 5` | 0 不一致（20 中心 / 17694720 方块 / 16 skipped） |
+| 9 个 seagrass + `sea_pickle` + `patch_waterlily` + `spore_blossom`（`6a3e4aa`） | `--steps 9 --seeds 3 --chunks 8 --salt 3` | 0 不一致（24 中心 / 21233664 方块，0 skipped） |
+| 同上，故意把 15 个 placed feature 一起放开 | `--steps 9 --seeds 4 --chunks 20 --salt 11` | 15 处不一致，全部是 terrain 既有差异（见下） |
+| 同上 | `--steps 9 --seeds 4 --chunks 20 --salt 3` | 36 处不一致，`--steps 0` 复现同一批，属 terrain |
 | `minecraft:cave_vines` | `--steps 9 --seeds 3 --chunks 8 --salt 3` | 0 不一致（23 中心 / 20348928 方块 / 1 skipped） |
 | `minecraft:kelp_cold` | `--steps 9 --seeds 3 --chunks 12 --salt 5` | 0 不一致（36 中心 / 31850496 方块） |
 | `minecraft:glow_lichen` | `--steps 9 --seeds 3 --chunks 12 --salt 7` | 0 不一致（36 中心 / 31850496 方块） |
@@ -857,9 +860,15 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 * `noise_threshold_count` / `count_on_every_layer` / `surface_water_depth_filter`
   修饰器：本分支只补了 `environment_scan` 与 `surface_relative_threshold_filter`。
 * `seagrass` / `sea_pickle` / `lily_pad` / `spore_blossom` / `mushroom` 的
-  `canSurvive`：前者走 `VegetationBlock` 的泛化标签判定，后四个各自的特殊判定
-  （流体、`canSupportCenter`、亮度）仍未移植，`simple_block` 对它们仍返回
-  `unsupported`。
+  `canSurvive`：前四个已在 `6a3e4aa` 移植（`SeagrassBlock`（`isFaceSturdy(UP)` +
+  `cannot_support_seagrass`）、`TallSeagrassBlock`（上半格看下半格 + 满水）、
+  `SeaPickleBlock`（下面碰撞面形状非空或 `isFaceSturdy(UP)`）、`LilyPadBlock`
+  （`supports_lily_pad` 流体/方块标签 + 上方空流体）、`SporeBlossomBlock`
+  （上方 `canSupportCenter(DOWN)` 且本格非水））；只有蘑菇仍不支持，因为它要
+  `level.getRawBrightness(pos, 0) < 13`，而 `FeatureWorld` 没有光照数据。
+* `TallSeagrassBlock` 的 `DoublePlantBlock.placeAt`：`is_double_plant` 现在也认
+  `TallSeagrassBlock`（官方是 `instanceof DoublePlantBlock`），否则上下两格只会放
+  下半格、上半格留成水。
 * holder 字符串引用的 `to_place`（`cave_vines_body` / `cave_vines_head` 等）：
   `BLOCK_STATE_PROVIDER` 注册表未导出，`cave_vine` 的 `block_column` 因此仍
   `unsupported`（本分支 `cave_vines` 对拍实际是 skipped 后 0 不一致，不是真跑）。
