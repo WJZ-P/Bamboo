@@ -290,6 +290,11 @@ final class FeatureLevelHandler implements InvocationHandler {
             }
             case "isEmptyBlock":
                 return getBlockState((BlockPos) args[0]).isAir();
+            case "isWaterAt": {
+                // LevelReader.isWaterAt 的默认实现，SpeleothemUtils.growSpeleothem 会调。
+                // LevelReader.isWaterAt default, used by SpeleothemUtils.growSpeleothem.
+                return getFluidState((BlockPos) args[0]).is(net.minecraft.tags.FluidTags.WATER);
+            }
             case "getBlockEntity":
                 return chunkAt((BlockPos) args[0]).chunk().getBlockEntity((BlockPos) args[0]);
             case "markPosForPostProcessing":

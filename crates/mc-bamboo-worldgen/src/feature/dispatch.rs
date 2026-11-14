@@ -13,8 +13,12 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
+    blue_ice::{self, BlueIceFeature},
     disk::{self, DiskFeature},
+    large_dripstone::{self, LargeDripstoneFeature},
     placement::OreFeature,
+    speleothem_cluster::{self, SpeleothemClusterFeature},
+    spike::{self, SpikeFeature},
     spring::{self, SpringFeature},
     underwater_magma::{self, UnderwaterMagmaFeature},
     world::FeatureWorld,
@@ -25,8 +29,12 @@ use super::{
 /// Ported feature types, in alphabetical order of type ID.
 #[derive(Debug, Clone)]
 pub enum Feature {
+    BlueIce(BlueIceFeature),
     Disk(DiskFeature),
+    LargeDripstone(LargeDripstoneFeature),
     Ore(OreFeature),
+    SpeleothemCluster(SpeleothemClusterFeature),
+    Spike(SpikeFeature),
     Spring(SpringFeature),
     UnderwaterMagma(UnderwaterMagmaFeature),
 }
@@ -38,8 +46,16 @@ impl Feature {
     /// consuming no randomness).
     pub fn parse(kind: &str, config: &Value) -> Result<Option<Self>, String> {
         Ok(Some(match kind {
+            "minecraft:blue_ice" => Self::BlueIce(BlueIceFeature::parse(config)?),
             "minecraft:disk" => Self::Disk(DiskFeature::parse(config)?),
+            "minecraft:large_dripstone" => {
+                Self::LargeDripstone(LargeDripstoneFeature::parse(config)?)
+            }
             "minecraft:ore" => Self::Ore(OreFeature::parse(config)?),
+            "minecraft:speleothem_cluster" => {
+                Self::SpeleothemCluster(SpeleothemClusterFeature::parse(config)?)
+            }
+            "minecraft:spike" => Self::Spike(SpikeFeature::parse(config)?),
             "minecraft:spring_feature" => Self::Spring(SpringFeature::parse(config)?),
             "minecraft:underwater_magma" => {
                 Self::UnderwaterMagma(UnderwaterMagmaFeature::parse(config)?)
@@ -54,6 +70,7 @@ impl Feature {
     pub fn is_supported(&self) -> bool {
         match self {
             Self::Disk(disk) => disk.supported(),
+            Self::Spike(spike) => spike.supported(),
             _ => true,
         }
     }
@@ -69,8 +86,14 @@ impl Feature {
         pos: (i32, i32, i32),
     ) -> bool {
         match self {
+            Self::BlueIce(feature) => blue_ice::place(feature, world, random, pos),
             Self::Disk(disk) => disk::place(disk, world, random, pos),
+            Self::LargeDripstone(feature) => large_dripstone::place(feature, world, random, pos),
             Self::Ore(ore) => super::ores::place(ore, world, random, pos),
+            Self::SpeleothemCluster(feature) => {
+                speleothem_cluster::place(feature, world, random, pos)
+            }
+            Self::Spike(spike) => spike::place(spike, world, random, pos),
             Self::Spring(spring) => spring::place(spring, world, pos),
             Self::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),
         }
