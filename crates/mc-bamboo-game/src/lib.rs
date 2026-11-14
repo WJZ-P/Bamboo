@@ -78,9 +78,11 @@ mod sign;
 mod tick_levels;
 mod weather;
 mod world;
+mod world_gen_settings;
 pub mod world_options;
 mod world_state;
 pub mod worldgen;
+mod worldgen_spawn;
 
 pub use command::test_commands;
 pub use director_host::MailBudget;

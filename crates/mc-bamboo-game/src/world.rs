@@ -191,17 +191,11 @@ impl World {
         let view_distance = config
             .view_distance
             .clamp(MIN_VIEW_DISTANCE, MAX_VIEW_DISTANCE);
-        // 只有「从 server.properties 来的非 flat 世界」走多阶段生成；无限超平坦
-        // 测试路径和 flat 配置保持原样（超平坦模板 + 一步流水线）。
-        // Only a non-flat world from server.properties uses staged generation;
-        // the infinite-flat test path and flat configs keep the old superflat template.
-        let world_gen = config.world_gen.clone();
-        let staged = !infinite_flat && !world_gen.level_type.is_flat();
         // 启动阶段同步打开存档：建目录、拿锁、读 level.dat。失败就拒绝启动，
         // 不让世界线程带着一个没锁住的世界目录继续跑。
         // Open the save synchronously at startup: create the layout, take the lock,
         // read level.dat. On failure, refuse to start instead of running unlocked.
-        let (save, startup_error) = match (&config.world_dir, infinite_flat) {
+        let (mut save, startup_error) = match (&config.world_dir, infinite_flat) {
             (Some(root), false) => match SaveSession::open(root) {
                 Ok((session, _source)) => (Some(session), None),
                 Err(error) => {
@@ -232,6 +226,9 @@ impl World {
         // back onto runtime; `restore` uses the saved game time. A fresh world has
         // no `level.dat`, so runtime defaults are authoritative (do not overwrite
         // them with `LevelData::default()`'s spawn).
+        let fresh_world = save
+            .as_ref()
+            .is_none_or(|session| !session.has_loaded_level());
         if let Some(save) = &save {
             if save.has_loaded_level() {
                 crate::save_data::apply_level_data(global.state_mut(), save.level());
@@ -239,12 +236,38 @@ impl World {
             save.startup()
                 .apply(&mut global, &mut region, save.level().time);
         }
+        // 有 `world_gen_settings.dat` 就以存档为准：空 `level-seed` 的随机种子在
+        // 首次保存时写进存档，重启后必须用同一个（官方行为），不能重新摇一次。
+        // `server.properties` 的世界类型只对新世界生效，改它对老存档无效。
+        // A saved `world_gen_settings.dat` wins: the random seed for an empty
+        // `level-seed` is written on first save, and a restart must reuse it
+        // (vanilla behaviour) instead of rolling a new one. `level-type` from
+        // `server.properties` only applies to a fresh world.
+        let world_gen = save
+            .as_ref()
+            .and_then(|session| session.loaded_world_gen())
+            .cloned()
+            .unwrap_or_else(|| config.world_gen.clone());
+        let staged = !infinite_flat && !world_gen.level_type.is_flat();
+        if let Some(save) = save.as_mut() {
+            save.set_world_gen(world_gen.clone());
+        }
         // 种子进 `WorldState`（`hashed_seed` 进 login 包、天气、随机序列）。
         // `level.dat` 里没有建模的 seed 字段，`apply_level_data` 不动它。
         // Put the seed into `WorldState` (hashed_seed for the login packet,
         // weather, random sequences). `level.dat` has no modelled seed field,
         // so `apply_level_data` leaves it alone.
         global.state_mut().seed = world_gen.seed;
+        global.state_mut().sequences = mc_bamboo_loot::RandomSequences::new(world_gen.seed);
+        // 全新世界（没有 level.dat）按官方 `MinecraftServer.setInitialSpawn` 选出生点；
+        // 读档时用存档里的出生点（已由 `apply_level_data` 套回）。超平坦保持不变。
+        // A fresh world (no level.dat) picks a spawn like `setInitialSpawn`;
+        // a loaded world keeps the saved spawn (already applied). Flat is unchanged.
+        if fresh_world && staged {
+            if let Some(spawn) = crate::worldgen_spawn::initial_spawn(&world_gen) {
+                global.state_mut().spawn = spawn;
+            }
+        }
         let director_config = DirectorConfig {
             pipeline: if staged {
                 PipelineKind::Staged
