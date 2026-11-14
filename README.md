@@ -460,27 +460,32 @@ WebView2 的渲染进程不算在内。
   世界还是超平坦。按 `docs/worldgen-features-plan.md` 5.2 的分类，非植被里已按官方 26.3
   移植并对拍 0 不一致的有 `ore`（流水线里程碑）、`disk`、`underwater_magma`、
   `spring_feature`，以及洞穴和冰雪类的 `large_dripstone`、`speleothem_cluster`
-  （`dripstone_cluster` / `sulfur_spike_cluster`）、`spike`（`ice_spike`）、
-  `blue_ice` 和 `disk` 的 `ice_patch`；它们共用 `dripstone_utils`（`SpeleothemUtils`、
-  `Column.scan`、`FloatProvider`、`Mth` 助手、带属性的 `pointed_dripstone` 状态），
-  `WorldgenRandom` 补了 `nextGaussian`，`FeatureWorld` 带 `seaLevel`，Java 对拍代理补了
-  `isWaterAt`。`chunkgen` 的 `--ore-only` 已泛化成 `--types ID,ID` 诊断白名单，
-  过滤不动 `features_per_step` 的全局 index。
+  （`dripstone_cluster` / `sulfur_spike_cluster`）、`speleothem`
+  （`pointed_dripstone` / `sulfur_spike`）、`spike`（`ice_spike`）、
+  `blue_ice`、`disk` 的 `ice_patch` 和 `freeze_top_layer`；它们共用 `dripstone_utils`
+  （`SpeleothemUtils`、`Column.scan`、`FloatProvider`、`Mth` 助手、带属性的
+  `pointed_dripstone` 状态），`WorldgenRandom` 补了 `nextGaussian`，`FeatureWorld` 带
+  `seaLevel`，`placement.rs` 补了 `environment_scan`，`provider.rs` 补了
+  `clamped_normal`，Java 对拍代理补了 `isWaterAt` / `isInsideBuildHeight` /
+  `getBrightness`。`chunkgen` 的 `--ore-only` 已泛化成 `--types ID,ID`（也认
+  `--feature-types`）诊断白名单，过滤不动 `features_per_step` 的全局 index。
   已知限制：`blue_ice` 按 `BlueIceFeature.java` 移植，但它要先有相邻的 `packed_ice`
   （原版来自 `iceberg`，属 `cb-wg-feat-a` 的冰山、尚未合入），`--types` 白名单里没有
   `iceberg` 就不会有 `packed_ice`，所以现有的逐方块对拍里 `blue_ice` 从不放方块、
   0 不一致是「空跑」的；等 `iceberg` 合入后要用
   `--types minecraft:blue_ice,minecraft:iceberg,...` 补对拍。其余非植被类型
-  （`lake`、`geode`、`iceberg`、`block_blob`、`monster_room`、`fossil`、`overlay`、
-  `freeze_top_layer`）和 `pointed_dripstone` / `sulfur_spike` 这两个
-  `simple_random_selector` 容器（属 `cb-wg-feat-b` 的组合类）、以及全部植被类型，
+  （`lake`、`geode`、`iceberg`、`block_blob`、`monster_room`、`fossil`、`overlay`）
+  和 step 7 地下装饰里的 `sculk_vein`（`multiface_growth`）与
+  `sculk_patch_deep_dark`（`sequence` + `sculk_patch`）、以及全部植被类型，
   在完整 11 步对拍里仍标 `unsupported` / `skipped`：`fossil` 要生成器导出结构模板、
-  `monster_room` 要刷怪笼 / 战利品表 / 方块实体，`freeze_top_layer` 走
-  `Biome.shouldFreeze` / `shouldSnow`（`SnowLayerBlock.canSurvive` 形状判定、
-  `getBrightness` 方块亮度）且要把逐点群系解析暴露给 `Feature::place`，而 Java 对拍代理
-  还没实现 `isInsideBuildHeight` / `getBrightness`（完整 11 步跑植被修饰器会抛异常），
-  这些路径无法逐位比对，按「不发明行为」先留白；植被由 `cb-wg-feat-b` 负责。
-  已移植的三种都不产生方块实体，所以 `FeatureResult` 的方块实体 / POI / 后期处理位置表输出
+  `monster_room` 要刷怪笼 / 战利品表 / 方块实体，`sculk_vein` 要
+  `MultifaceSpreadeableBlock` 的面位运算和扩散、`sculk_patch` 要
+  `sculk_spreadable` 标签与 `charge_count` 循环，Rust 侧都没有对应支撑，无法逐位比对，
+  按「不发明行为」先留白；植被由 `cb-wg-feat-b` 负责。
+  `freeze_top_layer` 已移植并逐方块 0 不一致：它复用 `biome_temperature` 里的
+  `getHeightAdjustedTemperature`，逐点群系由主循环的 `BiomeManager` 未缓存解算器给出，
+  没有改 `Feature::place` 签名（在 `composition.rs` 的 `place_feature` 里单开一个分支）。
+  已移植的类型都不产生方块实体，所以 `FeatureResult` 的方块实体 / POI / 后期处理位置表输出
   也还没补；接进游戏时按 `docs/world-model-design.md` 5.3.1 合 9 宫格快照和写增量。
 - 结构生成（`docs/worldgen-structures-plan.md`）目前是纯函数 + 官方对拍，没有接进游戏：
   `worldgen.json` 从官方导出了 `structure_set` / `structure` / `template_pool` / `processor_list`
