@@ -322,6 +322,47 @@ Rust 的 `place.rs::fill_column_down` 先读 `get_block(pos)`、再 `set_block(p
 改用写入日志后，这套更严格的语义把此前被「状态差异」掩盖的差异暴露出来了。
 沙漠神殿仍在 `SKIPPED`，本轮把它从 7936 压到 6953 后仍未归零。
 
+**第十二轮（2026-11-14，`cb-wg-structures` 续：女巫小屋差一格的定位，无代码提交）**：
+
+本轮只做了一件事：查第十一轮留下的 18 处 `fillColumnDown` 差一格。**没修好，代码全部回退**
+（工作树干净，仍是 `7172a2e` 的状态）。
+
+已经排除的：
+
+* **不是 `average_ground_height` 的公式问题**。我给 Java oracle 加了一条诊断，在
+  `postProcess` 之后按 `MOTION_BLOCKING_NO_LEAVES` 重算盒子平均值：`chunk 0 0 0` 的
+  `box = (0,64,0)..(6,70,8)`、`avg = 64`、`n = 63`，和 Rust 的 `piece_bb` / 公式完全一致。
+* **不是 `region_random`**。女巫小屋 `postProcess` 不取随机数（`entityAbort` 发生在女巫 / 猫
+  那一步，方块已写完）。
+* **不是 `piece_bb` 没传平移后的盒子**。`swamp_hut` 里 `piece_bb: new_bb` 确认无误。
+
+**未解的矛盾（下一轮从这里开始）**：
+
+用 `Heightmap.Types.MOTION_BLOCKING_NO_LEAVES` 在 `surface = 62` 的列上：
+`ChunkAccess.getHeight` = `Heightmap.getFirstAvailable` = 高度图里存的值 = **最高方块 y + 1** = 63；
+`WorldGenRegion.getHeight` 覆写版再加 1 = **64**；`LevelReader.getHeightmapPos` 调的是
+`this.getHeight`（即覆写版）= **64**。
+Rust 的 `FeatureWorld::get_height` 返回 `stored + 1`，而 `stored` 是「最高方块 y」（`prime_heightmaps`
+的约定）→ **63**。
+
+把 Rust 改成 `+2` 后，`structure-place` 从 18 处**涨到 2786 处**，说明埋藏的宝藏用的
+`get_height(OceanFloorWg)` 在 `+1` 下是对的。也就是说：
+
+* `BuriedTreasurePiece.postProcess` 的 `level.getHeight(OCEAN_FLOOR_WG, x, z)` 与 Rust `+1` 对齐；
+* `ScatteredFeaturePiece.updateAverageGroundHeight` 的 `level.getHeightmapPos(...).getY()`
+  需要 Rust `+2`。
+
+**这两处官方都走 `WorldGenRegion.getHeight`，不该有差别。** 所以要么我对
+`Heightmap.getFirstAvailable` 返回值的理解错一层，要么 `getHeightmapPos` 在
+`WorldGenRegion` 上还有别的覆写。下一轮应该：
+
+1. 直接读 `Heightmap.getFirstAvailable` / `setHeight` / `getHeight` 三个方法确认存的到底是
+   「方块 y」还是「方块 y + 1」；
+2. 在 Java oracle 里对同一个坐标同时打印 `level.getHeight(t, x, z)` 和
+   `level.getHeightmapPos(t, pos).getY()`，看这两个数差几；
+3. 再决定 Rust 侧是加两层 `get_height`（`+1` / `+2` 各一个，名字区分语义），
+   还是统一改正 `prime_heightmaps` 的存储约定。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」
 是 `onTopOfChunkCenter` 基线路径的通用判定，**不等于** `Structure.generate` 的最终有效：
