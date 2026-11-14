@@ -368,7 +368,38 @@ impl<'a> Generator<'a> {
     /// scanning top-down for the first non-air block. `getBaseHeight` returns blockY+1 and
     /// `getFirstOccupiedHeight` subtracts 1, so we return that blockY directly; an all-air
     /// column yields minY-1.
+    ///
+    /// 官方 `iterateNoiseColumn` 用 `Beardifier = null`（EMPTY）：`getBaseHeight` 永远不受
+    /// 结构地基影响，所以这里固定走 EMPTY 分支，绝不调用 `terrain_with_beardifier`。接入真实
+    /// Beardifier 时这一支必须保持 EMPTY，否则结构生成期的高度判定会算进结构地基，和原版不一致。
+    ///
+    /// Vanilla `iterateNoiseColumn` passes a `null` (EMPTY) beardifier: `getBaseHeight` never
+    /// accounts for structure terrain, so this stays on the EMPTY branch and must never call
+    /// `terrain_with_beardifier`. Keep it EMPTY when a real Beardifier is wired in, or structure
+    /// height checks would wrongly include structure terrain and diverge from vanilla.
     pub fn first_occupied_height(&self, block_x: i32, block_z: i32) -> Result<i32, String> {
+        self.first_occupied_height_impl(block_x, block_z, false)
+    }
+
+    /// `getFirstOccupiedHeight(x, z, OCEAN_FLOOR_WG, ...)`：自顶向下找第一个 `BLOCKS_MOTION_IN_HEIGHTMAP`
+    /// 方块（WORLD_SURFACE_WG 用 `NOT_AIR`；OCEAN_FLOOR_WG 用 `MATERIAL_MOTION_BLOCKING`）。
+    ///
+    /// `getFirstOccupiedHeight(x, z, OCEAN_FLOOR_WG, ...)`: top-down first motion-blocking block
+    /// (WORLD_SURFACE_WG uses `NOT_AIR`; OCEAN_FLOOR_WG uses `MATERIAL_MOTION_BLOCKING`).
+    pub fn first_occupied_height_ocean_floor(
+        &self,
+        block_x: i32,
+        block_z: i32,
+    ) -> Result<i32, String> {
+        self.first_occupied_height_impl(block_x, block_z, true)
+    }
+
+    fn first_occupied_height_impl(
+        &self,
+        block_x: i32,
+        block_z: i32,
+        motion_blocking: bool,
+    ) -> Result<i32, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         let volume = Volume::blocks((1, height, 1), (block_x, min_y, block_z));
@@ -394,7 +425,13 @@ impl<'a> Generator<'a> {
             let state = aquifer
                 .compute_substance(&mut context, block_x, block_y, block_z, value)
                 .unwrap_or(self.default_block);
-            if state != self.empty {
+            let opaque = if motion_blocking {
+                mc_bamboo_blocks::BlockState(state)
+                    .is_tagged(mc_bamboo_data::tags::block_tags::BLOCKS_MOTION_IN_HEIGHTMAP)
+            } else {
+                state != self.empty
+            };
+            if opaque {
                 context.release(density);
                 return Ok(block_y);
             }

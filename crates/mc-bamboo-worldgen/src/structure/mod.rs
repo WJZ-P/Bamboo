@@ -3,8 +3,8 @@
 //! 对照官方 `ChunkStatus` 的 `structure_starts` / `structure_references` 两个阶段，本模块
 //! 提供纯函数 `StructureState`：给定种子和区块坐标，算出「哪些结构集把这里当起点」。
 //! 结构件的生成（`Structure.generate`）、加权选具体结构、群系有效性检查、
-//! `features` 阶段的 `placeInChunk`、terrain 里的 `Beardifier` 和存档 `structures` 键
-//! 是后续里程碑，见 `docs/worldgen-structures-plan.md`。
+//! terrain 里的 `Beardifier` 和存档 `structures` 键已有对应模块；`features` 阶段的
+//! `placeInChunk` 仍是后续里程碑，见 `docs/worldgen-structures-plan.md`。
 //!
 //! 对接流水线的接口按该文档第 8 节：`structure_starts` 阶段拿本模块的
 //! `start_candidates`，再对命中结构跑 `Structure.generate` 得到 `StructureStart`；
@@ -15,14 +15,18 @@
 //! Mirroring the `structure_starts` / `structure_references` stages, this module provides
 //! the pure `StructureState`: given a seed and chunk coordinates, which structure sets
 //! treat the chunk as a start. Structure-piece generation, weighted structure selection,
-//! biome validity checks, `features`-stage `placeInChunk`, the terrain `Beardifier` and the
-//! save `structures` tag are later milestones; see `docs/worldgen-structures-plan.md`.
+//! biome validity checks, the terrain `Beardifier` and the save `structures` tag have their
+//! modules; `features`-stage `placeInChunk` is still a later milestone, see
+//! `docs/worldgen-structures-plan.md`.
 
 pub mod pieces;
 pub mod placement;
 pub mod registry;
 pub mod rings;
+pub mod save;
+pub mod single;
 pub mod start;
+pub mod start_point;
 pub mod template;
 pub mod validity;
 
@@ -36,6 +40,7 @@ pub use registry::{
     SelectionEntry, StructureDef, StructureSetEntry, StructureSets, Structures,
     possible_structure_sets, resolve_biome_holders,
 };
+pub use save::{SavePiece, SaveStart, encode_structures, structures_tag};
 pub use start::{
     BoundingBox, References, StartPlan, StructurePiece, StructureStart, StructureStarts,
     chunk_pos_pack, selection_sequence, structure_references,

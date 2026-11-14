@@ -31,9 +31,6 @@
 //!     用官方 getRingPositionsFor / findBiomeHorizontal 对拍要塞环位置与群系吸附
 //! mc-bamboo-vanilla structure-validity <java 路径>
 //!     用官方 Structure.GenerationContext 对拍 findValidGenerationPoint 的群系与高度判定
-//! mc-bamboo-vanilla structure-pieces <java 路径>
-//!     用官方结构件类对拍多件式结构的结构件布局（类型、包围盒、朝向、参数）；
-//!     已移植废弃矿井 / 要塞 / 海底神殿三种
 //! mc-bamboo-vanilla beard <java 路径> [--through noise|surface|carvers] [--break-self-test]
 //!     用官方 Beardifier 对拍结构对地形密度的影响（kernel / sampleValue / sampleVolume / 方块）
 //!
@@ -42,6 +39,24 @@
 //!
 //!     Compare findValidGenerationPoint's biome and height gates against vanilla
 //!     Structure.GenerationContext
+//! mc-bamboo-vanilla structure-generation <java 路径>
+//!     用官方 Structure.findValidGenerationPoint 对拍四个代码生成结构的
+//!     findGenerationPoint 前置判定与「这个起点是否真的生成」
+//!
+//!     Compare the four code-built structures' findGenerationPoint gates and
+//!     "whether this start really generates" against vanilla
+//! mc-bamboo-vanilla structure-pieces <java 路径>
+//!     用官方结构件类对拍多件式结构的结构件布局（类型、包围盒、朝向、参数）；
+//!     已移植废弃矿井 / 要塞 / 海底神殿三种
+//! mc-bamboo-vanilla structure-single <java 路径>
+//!     用官方结构件类对拍四个代码生成单件结构的结构件布局（类型、包围盒、朝向、参数）
+//!
+//!     Compare the piece layout of the four code-built single-piece structures against
+//!     the official piece classes
+//! mc-bamboo-vanilla structure-save <java 路径>
+//!     用官方 CompoundTag / PieceContainer 对拍区块 NBT 的 structures 键（starts / References）
+//!
+//!     Compare the chunk NBT structures key (starts / References) against vanilla codecs
 //! mc-bamboo-vanilla structure-templates <java 路径>
 //!     用官方 NbtIo 逐节点对拍导出的结构模板 NBT
 //!
@@ -134,9 +149,15 @@ mod spawn;
 #[cfg(feature = "oracle")]
 mod storage_oracle;
 #[cfg(feature = "oracle")]
+mod structure_generation;
+#[cfg(feature = "oracle")]
 mod structure_pieces;
 #[cfg(feature = "oracle")]
 mod structure_rings;
+#[cfg(feature = "oracle")]
+mod structure_save;
+#[cfg(feature = "oracle")]
+mod structure_single;
 mod structure_templates;
 #[cfg(feature = "oracle")]
 mod structure_templates_oracle;
@@ -198,6 +219,13 @@ const STRUCTURE_TEMPLATES_SOURCE: &str =
 #[cfg(feature = "oracle")]
 const STRUCTURE_PIECES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePiecesOracle.java";
 #[cfg(feature = "oracle")]
+const STRUCTURE_GENERATION_SOURCE: &str =
+    "tools/mc-bamboo-vanilla/java/StructureGenerationOracle.java";
+#[cfg(feature = "oracle")]
+const STRUCTURE_SINGLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSingleOracle.java";
+#[cfg(feature = "oracle")]
+const STRUCTURE_SAVE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSaveOracle.java";
+#[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 #[cfg(feature = "oracle")]
 const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
@@ -237,6 +265,9 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla flat-world <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla beard <java 路径> [--through noise|surface|carvers] [--break-self-test]
       mc-bamboo-vanilla gen-light <java 路径> [--scenes N] [--seed S] [--show N] [--break-self-test]
+      mc-bamboo-vanilla structure-generation <java 路径>
+      mc-bamboo-vanilla structure-single <java 路径>
+      mc-bamboo-vanilla structure-save <java 路径>
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -295,6 +326,9 @@ fn run() -> Result<(), String> {
         ["flat-world", java, ref options @ ..] => flat_world_cli(java, options),
         ["beard", java, ref options @ ..] => beard_cli(java, options),
         ["gen-light", java, ref options @ ..] => gen_light_cli(java, options),
+        ["structure-generation", java, ref options @ ..] => structure_generation_cli(java, options),
+        ["structure-single", java, ref options @ ..] => structure_single_cli(java, options),
+        ["structure-save", java, ref options @ ..] => structure_save_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
@@ -536,10 +570,14 @@ fn structure_validity_cli(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
-fn structure_templates_cli(java: &str, options: &[&str]) -> Result<(), String> {
-    structure_templates_oracle::run(
-        official_program(java, STRUCTURE_TEMPLATES_SOURCE)?,
-        &workspace_root().join(WORK_DIR),
+fn structure_generation_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let worldgen_path = root.join("crates/mc-bamboo-data/src/generated/worldgen.json");
+    let queries_path = root.join(WORK_DIR).join("structure_generation_queries.txt");
+    structure_generation::run(
+        official_program(java, STRUCTURE_GENERATION_SOURCE)?,
+        &worldgen_path,
+        &queries_path,
         options,
     )
 }
@@ -551,6 +589,35 @@ fn structure_pieces_cli(java: &str, options: &[&str]) -> Result<(), String> {
     structure_pieces::run(
         official_program(java, STRUCTURE_PIECES_SOURCE)?,
         &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_single_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let queries_path = root.join(WORK_DIR).join("structure_single_queries.txt");
+    structure_single::run(
+        official_program(java, STRUCTURE_SINGLE_SOURCE)?,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_save_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    structure_save::run(
+        official_program(java, STRUCTURE_SAVE_SOURCE)?,
+        java,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_templates_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    structure_templates_oracle::run(
+        official_program(java, STRUCTURE_TEMPLATES_SOURCE)?,
+        &workspace_root().join(WORK_DIR),
         options,
     )
 }
@@ -804,6 +871,11 @@ fn structure_templates_cli(_java: &str, _options: &[&str]) -> Result<(), String>
 }
 
 #[cfg(not(feature = "oracle"))]
+fn structure_generation_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
 fn structure_pieces_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
@@ -814,7 +886,17 @@ fn flat_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "oracle"))]
+fn structure_single_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
 fn beard_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_save_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
