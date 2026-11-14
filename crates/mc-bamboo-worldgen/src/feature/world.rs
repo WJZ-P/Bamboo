@@ -13,6 +13,9 @@ pub struct FeatureWorld<'a> {
     pub center_z: i32,
     pub min_y: i32,
     pub height: i32,
+    /// `WorldGenRegion.getSeaLevel()`，来自 `NoiseGeneratorSettings.seaLevel()`。
+    /// `WorldGenRegion.getSeaLevel()`, from `NoiseGeneratorSettings.seaLevel()`.
+    pub sea_level: i32,
     /// 9 个区块的可变方块；中心在 [`CENTER`]。
     pub blocks: [ChunkBlocks; 9],
     /// 只读的 quart 群系格。
@@ -25,7 +28,7 @@ pub struct FeatureWorld<'a> {
 }
 
 impl<'a> FeatureWorld<'a> {
-    pub fn new(input: &'a FeatureChunks) -> Result<Self, String> {
+    pub fn new(input: &'a FeatureChunks, sea_level: i32) -> Result<Self, String> {
         if input.blocks.len() != 9 || input.biomes.len() != 9 || input.heights.len() != 9 {
             return Err("FeatureChunks must contain 9 chunks".to_owned());
         }
@@ -35,6 +38,7 @@ impl<'a> FeatureWorld<'a> {
             center_z: input.center_z,
             min_y: input.min_y,
             height: input.height,
+            sea_level,
             blocks: input.blocks.clone(),
             biomes: &input.biomes,
             heights: input.heights,

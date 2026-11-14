@@ -37,7 +37,7 @@ pub struct FeatureContext<'a> {
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数。
 pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<FeatureResult, String> {
-    let mut world = FeatureWorld::new(input)?;
+    let mut world = FeatureWorld::new(input, ctx.settings.sea_level)?;
     let mut unsupported = false;
 
     // 字节码 132-177：ChunkPos.rangeClosed(center,1) 九个区块，把每个 section 的

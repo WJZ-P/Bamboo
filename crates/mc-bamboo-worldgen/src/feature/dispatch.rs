@@ -15,6 +15,7 @@ use crate::random::WorldgenRandom;
 use super::{
     block_blob::{self, BlockBlobFeature},
     disk::{self, DiskFeature},
+    iceberg::{self, IcebergFeature},
     placement::OreFeature,
     spring::{self, SpringFeature},
     underwater_magma::{self, UnderwaterMagmaFeature},
@@ -28,6 +29,7 @@ use super::{
 pub enum Feature {
     BlockBlob(BlockBlobFeature),
     Disk(DiskFeature),
+    Iceberg(IcebergFeature),
     Ore(OreFeature),
     Spring(SpringFeature),
     UnderwaterMagma(UnderwaterMagmaFeature),
@@ -42,6 +44,7 @@ impl Feature {
         Ok(Some(match kind {
             "minecraft:block_blob" => Self::BlockBlob(BlockBlobFeature::parse(config)?),
             "minecraft:disk" => Self::Disk(DiskFeature::parse(config)?),
+            "minecraft:iceberg" => Self::Iceberg(IcebergFeature::parse(config)?),
             "minecraft:ore" => Self::Ore(OreFeature::parse(config)?),
             "minecraft:spring_feature" => Self::Spring(SpringFeature::parse(config)?),
             "minecraft:underwater_magma" => {
@@ -75,6 +78,7 @@ impl Feature {
         match self {
             Self::BlockBlob(blob) => block_blob::place(blob, world, random, pos),
             Self::Disk(disk) => disk::place(disk, world, random, pos),
+            Self::Iceberg(iceberg) => iceberg::place(iceberg, world, random, pos),
             Self::Ore(ore) => super::ores::place(ore, world, random, pos),
             Self::Spring(spring) => spring::place(spring, world, pos),
             Self::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),

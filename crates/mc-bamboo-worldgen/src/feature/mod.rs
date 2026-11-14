@@ -10,6 +10,7 @@
 pub mod block_blob;
 pub mod disk;
 pub mod dispatch;
+pub mod iceberg;
 pub mod ores;
 pub mod placement;
 pub mod predicates;
