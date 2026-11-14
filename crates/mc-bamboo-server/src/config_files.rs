@@ -116,6 +116,7 @@ const IMPLEMENTED: &[&str] = &[
     "max-players",
     "network-compression-threshold",
     "enforce-secure-profile",
+    "broadcast-console-to-ops",
     "level-seed",
     "level-type",
     "generator-settings",
@@ -395,6 +396,8 @@ pub struct OfficialConfig {
     pub enforce_secure_profile: bool,
     /// 登录之后启用压缩的阈值，小于 0 表示关闭。
     pub compression_threshold: i32,
+    /// 控制台命令反馈要不要广播给在线 OP（`broadcast-console-to-ops`）。
+    pub broadcast_console_to_ops: bool,
     /// 监听地址，空字符串表示监听所有网卡。
     pub server_ip: String,
     /// 监听端口。
@@ -433,6 +436,7 @@ impl Default for OfficialConfig {
             prevent_proxy_connections: parse_bool(get("prevent-proxy-connections")),
             enforce_secure_profile: parse_bool(get("enforce-secure-profile")),
             compression_threshold: get("network-compression-threshold").parse().unwrap_or(256),
+            broadcast_console_to_ops: parse_bool(get("broadcast-console-to-ops")),
             server_ip: String::new(),
             server_port: get("server-port").parse().unwrap_or(25565),
             level_name: get("level-name").to_owned(),
@@ -469,6 +473,7 @@ impl OfficialConfig {
                 "prevent-proxy-connections" => self.prevent_proxy_connections.to_string(),
                 "enforce-secure-profile" => self.enforce_secure_profile.to_string(),
                 "network-compression-threshold" => self.compression_threshold.to_string(),
+                "broadcast-console-to-ops" => self.broadcast_console_to_ops.to_string(),
                 "server-ip" => self.server_ip.clone(),
                 "server-port" => self.server_port.to_string(),
                 "level-name" => self.level_name.clone(),
@@ -520,6 +525,7 @@ impl OfficialConfig {
                     config.compression_threshold =
                         parse_i32(&value, "network-compression-threshold", file, 256);
                 }
+                "broadcast-console-to-ops" => config.broadcast_console_to_ops = parse_bool(&value),
                 "server-ip" => config.server_ip = value,
                 "server-port" => config.server_port = parse_u16(&value, "server-port", file, 25565),
                 "level-name" => config.level_name = value,
@@ -698,6 +704,10 @@ impl ConfigFiles {
                 reclaims: self.bamboo.reclaims_per_tick,
             },
             world_gen,
+            broadcast_console_to_ops: self.official.broadcast_console_to_ops,
+            // 从真实 server.properties 建起来的命令行版才读进程 stdin；嵌入用法不读。
+            // Only the CLI, built from a real server.properties, reads process stdin.
+            console_enabled: true,
         }
     }
 
@@ -711,6 +721,7 @@ impl ConfigFiles {
         official.prevent_proxy_connections = config.prevent_proxy_connections;
         official.enforce_secure_profile = config.enforce_secure_profile;
         official.compression_threshold = config.compression_threshold;
+        official.broadcast_console_to_ops = config.broadcast_console_to_ops;
         let mut bamboo = existing.bamboo.clone();
         bamboo.pre_play_timeout = config.pre_play_timeout;
         bamboo.max_pre_play_connections = config.max_pre_play_connections;
@@ -766,6 +777,11 @@ impl ConfigFiles {
                 "network-compression-threshold",
                 self.official.compression_threshold.to_string(),
                 defaults.official.compression_threshold.to_string(),
+            ),
+            (
+                "broadcast-console-to-ops",
+                self.official.broadcast_console_to_ops.to_string(),
+                defaults.official.broadcast_console_to_ops.to_string(),
             ),
             (
                 "server-ip",
@@ -1056,9 +1072,10 @@ mod tests {
         assert_eq!(defaults.official.level_type, "minecraft:normal");
         assert_eq!(defaults.official.generator_settings, "{}");
         assert!(defaults.official.generate_structures);
-        // 四个世界生成键现在是实现项，passthrough 从 59 减到 55。
-        // The four world-gen keys are now implemented: passthrough drops 59 -> 55.
-        assert_eq!(defaults.official.passthrough.len(), 55);
+        // 四个世界生成键和 broadcast-console-to-ops 现在是实现项，passthrough 从 59 减到 54。
+        // The four world-gen keys and broadcast-console-to-ops are now implemented:
+        // passthrough drops 59 -> 54.
+        assert_eq!(defaults.official.passthrough.len(), 54);
         assert_eq!(defaults.bamboo.entity_threads, 0);
         assert_eq!(defaults.bamboo.deliveries_per_tick, 64);
         assert_eq!(defaults.bamboo.reclaims_per_tick, 64);
@@ -1120,7 +1137,7 @@ mod tests {
             fs::read_to_string(dir.path().join(BAMBOO_FILE)).unwrap(),
             bamboo
         );
-        assert_eq!(loaded.unsupported_keys().len(), 55);
+        assert_eq!(loaded.unsupported_keys().len(), 54);
         assert_eq!(loaded.unknown_keys(), ["my-custom-key"]);
         assert_eq!(world_dir(dir.path(), &loaded), dir.path().join("survival"));
     }
@@ -1214,6 +1231,27 @@ mod tests {
         );
         let rebuilt = ConfigFiles::from_server_config(&config, &files);
         assert_eq!(rebuilt, files);
+    }
+
+    #[test]
+    fn console_config_reaches_the_server_and_round_trips() {
+        let dir = Temp::new();
+        let mut files = ConfigFiles::default();
+        // 官方默认 true；改成 false 后要能从文件读回来、带进 ServerConfig。
+        // Official default is true; a false value must survive the file and reach ServerConfig.
+        assert!(files.official.broadcast_console_to_ops);
+        files.official.broadcast_console_to_ops = false;
+        write(dir.path(), &files).unwrap();
+        let loaded = read(dir.path()).unwrap();
+        assert!(!loaded.official.broadcast_console_to_ops);
+        let config = loaded.to_server_config(dir.path());
+        assert!(!config.broadcast_console_to_ops);
+        assert!(config.console_enabled);
+        let rebuilt = ConfigFiles::from_server_config(&config, &loaded);
+        assert!(!rebuilt.official.broadcast_console_to_ops);
+        // 写入的文件里有这一项，值是 false。
+        let text = fs::read_to_string(dir.path().join(PROPERTIES_FILE)).unwrap();
+        assert!(text.contains("broadcast-console-to-ops=false\n"));
     }
 
     #[test]

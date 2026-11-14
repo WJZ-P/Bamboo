@@ -106,6 +106,11 @@ pub struct WorldConfig {
     /// World generation parameters (seed, level type, flat preset, structures).
     /// Defaults to superflat / seed 0 to keep embedded-test behaviour.
     pub world_gen: crate::world_options::WorldGenConfig,
+    /// 官方 `server.properties` 的 `broadcast-console-to-ops`，控制台命令反馈广播给 OP 用。
+    ///
+    /// Official `server.properties` `broadcast-console-to-ops`, for console-feedback
+    /// broadcasts to ops.
+    pub broadcast_console_to_ops: bool,
 }
 
 impl Default for WorldConfig {
@@ -122,6 +127,7 @@ impl Default for WorldConfig {
             mail_budget: MailBudget::default(),
             world_dir: None,
             world_gen: crate::world_options::WorldGenConfig::default(),
+            broadcast_console_to_ops: true,
         }
     }
 }
@@ -219,6 +225,9 @@ impl World {
             config.enforce_secure_profile,
             keys,
         );
+        // 控制台命令反馈的广播开关来自 `server.properties`，启动时带进世界线程。
+        // The console-feedback broadcast flag comes from `server.properties` at startup.
+        region.broadcast_console_to_ops = config.broadcast_console_to_ops;
         // 启动时把读到的 `level.dat` 世界设置和 `data/` 的游戏规则 / 世界边界
         // 套回运行时；边界的 `restore` 用存档里的游戏时间。全新世界没有 `level.dat`，
         // 运行时默认值才是权威（不能拿 `LevelData::default()` 的出生点覆盖它）。
@@ -716,6 +725,15 @@ impl World {
                 Inbound::WhitelistReload(reload) => {
                     self.global.admin.whitelist = reload.entries;
                     crate::command::admin::after_reload(&mut self.global, &mut self.region);
+                }
+                // 连接层的控制台线程读到的命令，在世界线程里用服务器控制台来源执行。
+                // A console line read by the connection layer runs here with the server-console source.
+                Inbound::ConsoleCommand(line) => {
+                    crate::command::console::on_console_command(
+                        &mut self.global,
+                        &mut self.region,
+                        &line,
+                    );
                 }
                 Inbound::Shutdown => return self.shut_down(),
             }
