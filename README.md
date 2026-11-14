@@ -420,6 +420,12 @@ WebView2 的渲染进程不算在内。
 - **世界生成（本轮接入）的已知限制**：`biomes` / `terrain` 阶段接了真生成，`possibleBiomes`、雕刻器的
   `carverBiome` 分支和 `WorldGenRegion` 的 `uncachedBiomeResolver` 已按真实服务端路径逐方块对拍 0 不一致，
   六张高度图逐列、存档里四张 FINAL 高度图位流逐字对拍 0 不一致（见 `docs/worldgen.md`）。
+  `terrain` 的地表阶段现在读**相邻区块里 `BIOMES` 阶段成批填好的 quart 群系格**，和官方
+  `WorldGenRegion.getBiomeManager()` 一样，而不是重算单点气候：成批 `sampleVolume` 和单点 `sampleValue`
+  的浮点顺序不同，气候值落在 `ParameterList` R 树最近邻的临界点上时会选到不同群系。**这条以前漏过**：
+  种子 0 的区块 (644792,109695)（恶地和沙漠交界）地表 33 格被放成各色陶瓦，官方是砂岩/沙子；修复后
+  该区块 0 不一致，并加了回归测试 `worldgen::tests::badlands_desert_boundary_uses_stored_quart_biomes`。
+  代价是每个区块的 `terrain` 多算 8 个邻居区块的群系（气候成批采样，本机约 +4 ms/区块）。
   `features` 阶段已接进游戏：`Task::Generate` 按 `ChunkStep` 依赖半径带邻居引用，世界线程把每个区块的
   CARVERS 半成品存成不可变 `Arc` 快照，计算池上跑 `Generator::features()`，写邻居的增量按 `TaskId` 顺序合并、
   完工时排规范序落到交付盒子；1 线程与 4 线程计算池生成同一片区块逐字节相同。已合进 main 的地物类型都会在

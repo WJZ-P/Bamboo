@@ -420,10 +420,46 @@ Java 端已改成真实服务端路径，用 `ChunkgenOracle.java --real-path`�
 * terrain 跑完后照 `buildTerrain` 的 `thenApply` 升到 `TERRAIN` 并
   `Heightmap.primeHeightmaps(proto, FINAL_HEIGHTMAPS)`。
 
-`gen-world` 用这份真实路径出题，Bamboo 侧仍调游戏里同一份 `generate_chunk`（简化路径）。
-多种子、多区块、多 salt 下逐方块、逐 quart 格 0 不一致——也就是这两条路径在当前数据上
-结果相同，所以 Rust 侧没有为它们改 `Generator::terrain`（改了反而会动到 `chunkgen`
-纯函数对拍的 `lastResult` 顺序）。
+`gen-world` 用这份真实路径出题，Bamboo 侧调游戏里同一份 `generate_chunk`，后者现在也走真实路径：
+
+* `Generator::biome_region(chunk_x, chunk_z)` 按 `ChunkgenOracle.buildRealTerrain` 的顺序
+  （中心先、邻居 `dx` 外层 `dz` 内层）造 3×3 个区块的 quart 群系格，得到
+  `biome_region::RegionBiomes`。每个区块的群系都用 `Generator::biomes` 的成批路径。
+* `Generator::terrain_with_region` 把这个视图交给 `build_surface`：群系来源变成
+  `BiomeGetter::Region`（`WorldGenRegion.getBiomeManager()`），先按八角插值定位 quart 角
+  再读格子，3×3 之外才回退单点重算；`possibleBiomes` 传 3×3 调色板并集，
+  `BiomeCondition` 因此按官方的静态折叠规则短路。
+* `generateCarvers` 的 carver 选择和 `applyCarvingMask` 的 `topMaterial` 两条路径都用
+  `withDifferentSource(createUncachedResolver)`，所以两者都保持 `BiomeGetter::Uncached`。
+* `Generator::terrain` / `terrain_with_beardifier`（简化路径）保持原样：`chunkgen`、`beard`
+  对拍和 `first_occupied_height` 等基线路径仍走单点气候采样。
+
+#### 曾经漏掉的不一致（已修）
+
+种子 0 的区块 (644792,109695) 是恶地和沙漠交界。修复前 `gen-world --seeds 1 --chunk 644792 109695`
+报 33 处不一致：官方 y 66–79、x 12–15、z 8–12 是 `minecraft:sandstone`(677) 或
+`minecraft:sand`(121)，游戏侧是各色陶瓦（13211/13212/13215/13219/13223/14759）。
+
+原因是地表阶段的群系来源不同：官方 `buildSurface` 用 `region.getBiomeManager()`，它读
+`ChunkStatus.BIOMES` 阶段成批 `sampleVolume` 填进 quart 格的群系；Rust 侧用单点
+`Climate.Sampler.sample`。成批和单点算的是同一个数学函数，但浮点运算顺序不同，气候值
+落在 `ParameterList` R 树最近邻的临界点上时会选到不同群系。这个区块的那一列正好落在
+恶地和沙漠的边界上，于是 `BiomeCondition(minecraft:eroded_badlands)` 两边结论不同，
+陶瓦条带和砂岩就换了位置。
+
+以前随机抽样的区块两条路径结果相同，所以没发现。修复后：
+
+* `gen-world --seeds 1 --chunk 644792 109695` 0 不一致；
+* `gen-world`（默认 3 seeds × 12 chunks）、`--level-type amplified`、`--through features`、
+  `chunkgen --through carvers --seeds 2 --chunks 8`、`spawn`、`beard` 仍全部 0 不一致；
+* 6 个不同 `--salt` 各 `--seeds 2 --chunks 12`（共 144 区块）、10 个恶地/沙漠/丛林/沼泽
+  交界区块逐个 `--chunk` 也都 0 不一致；
+* 回归测试 `mc_bamboo_game::worldgen::tests::badlands_desert_boundary_uses_stored_quart_biomes`
+  固定这个区块：故意改回单点路径后测试立刻报 `(12,66,12) ... got state 13212`。
+
+成本：每个区块的 `terrain` 多算 8 个邻居区块的群系。邻居只用成批气候采样
+（本机约 2–5 ms/区块），`real_path_timing` 实测 `terrain` 从约 11 ms/区块涨到约 16 ms/区块
+（release，含 `biome_region`）。
 
 #### 两条路径什么时候会不同
 
@@ -435,12 +471,13 @@ Java 端已改成真实服务端路径，用 `ChunkgenOracle.java --real-path`�
   没先生成、调色板不全，或人为缩小 `collectPossibleBiomes` 半径，使某个实际会出现的
   群系不在集合里**，真实路径会把本该逐点判定的条件错误短路，地表方块可能不同。
   `MaterialSystem.topMaterial` 传 `possibleBiomes=null`，永远不折叠。
-* **`getBiome` 的群系来源**：真实路径的 `region.getBiomeManager()` 优先读 `BIOMES` 阶段
-  成批 `sampleVolume` 填进 quart 格的群系，简化路径用 uncached `sampleValue` 单点重算。
-  两条浮点路径在气候参数落在 R 树最近邻/量化的临界点时可能选到不同群系；若那个群系
-  恰好决定地表材质或 `coldEnoughToSnow`，两种路径的地表方块可能不同。本轮对拍没有
-  命中这种临界点。`applyCarvingMask` 的 `topMaterial` 用
-  `withDifferentSource(createUncachedResolver)`，两条路径在这一步都回到单点 uncached。
+* **`getBiome` 的群系来源**（**这曾经是一个真实的 bug，已修**）：真实路径的
+  `region.getBiomeManager()` 优先读 `BIOMES` 阶段成批 `sampleVolume` 填进 quart 格的群系，
+  简化路径用 uncached `sampleValue` 单点重算。两条浮点路径在气候参数落在 R 树最近邻的
+  临界点时**会**选到不同群系，见上面「曾经漏掉的不一致」。现在游戏侧走真实路径，
+  简化路径只剩 `chunkgen` / `beard` 对拍和基线高度查询在用。`applyCarvingMask` 的
+  `topMaterial` 用 `withDifferentSource(createUncachedResolver)`，两条路径在这一步都
+  回到单点 uncached。
 * **雕刻器群系**：26.3 的 `carverBiome(supplier)` 的 supplier 仍是
   `getBiomeGenerationSettingsForCarver(createUncachedResolver, sourcePos)`（单点、
   `quartY=0`），只是把结果缓存在 `ChunkAccess.carverBiomeSettings` 上跨中心区块复用，
@@ -610,11 +647,12 @@ p95 1.3–2.1 ms、最坏一份 max 8.35 ms，远低于 20 TPS 的 50 ms 预算�
   和 `cargo run -p mc-bamboo-vanilla -- beard <java>`）：纯函数、密度计算和整条
   `finalDensity` 接入都逐位一致，但**没接进游戏**——`structure_starts` 阶段还是空实现，
   游戏里 `terrain` 仍走 `EMPTY` 那支；把真实结构件喂进 `terrain_with_beardifier` 是合并时的事。
-* `possibleBiomes` / `carverBiome` / `region.getBiomeManager()` 已在 `gen-world` 按真实
-  服务端路径重新对拍（见「真实服务端路径与简化路径」），但 Rust 侧 `generate_chunk`
-  仍走等价的简化路径：没有把 3×3 调色板并集的 `BiomeCondition.compile` 折叠、读
-  quart 格的 `BiomeManager` 真的搬进 `mc-bamboo-worldgen`。两条路径在本轮对拍里
-  0 不一致，理论差异见上一节。
+* `possibleBiomes` / `carverBiome` / `region.getBiomeManager()` 已**在游戏侧落地**（见
+  「真实服务端路径与简化路径」）：`generate_chunk` 调 `Generator::biome_region` 造 3×3
+  群系视图、`terrain_with_region` 读 quart 格并传 3×3 `possibleBiomes` 并集，
+  `BiomeCondition` 按官方规则静态折叠。`chunkgen` / `beard` 对拍仍是简化路径，
+  基线高度查询（`first_occupied_height`）也保持单点 uncached。剩下没做的只有上一条
+  提到的非空 `Blender` / `BlendingData` / `BelowZeroRetrogen` 分支。
 * 高度图：六张已从最终 CARVERS 方块按官方谓词算出并逐列对拍 0 不一致，存档写出的
   四张 FINAL 打包位流也和官方逐字对拍 0 不一致（见「高度图」）。但游戏侧
   `build_region_column` 仍让 `Chunk::from_sections` 从方块重算，没有把 doFill 阶段的
