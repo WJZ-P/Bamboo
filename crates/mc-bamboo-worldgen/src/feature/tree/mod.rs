@@ -38,7 +38,7 @@ use mc_bamboo_data::{
 
 use crate::random::WorldgenRandom;
 
-use crate::feature::world::FeatureWorld;
+use crate::feature::{shape_update::update_shape_at_edge, world::FeatureWorld};
 
 use config::TreeConfig;
 use java_set::JavaHashSet;
@@ -106,7 +106,13 @@ impl TreeFeature {
         for decorator in &self.config.decorators {
             decorator.place(&mut place, random);
         }
-        leaves::update_leaves(&mut place);
+        // `StructureTemplate.updateShapeAtEdge(level, 3, shape, ...)`：树的外表面两侧各做
+        // 一次 `updateShape`，比如失去支撑的藤蔓在这里被移除。
+        // `StructureTemplate.updateShapeAtEdge(level, 3, shape, ...)`: both sides of the
+        // tree's outer faces run `updateShape`; unsupported vines are removed here.
+        if let Some((shape, bounds)) = leaves::update_leaves(&mut place) {
+            update_shape_at_edge(place.world, &shape, bounds.min, bounds.max);
+        }
         true
     }
 

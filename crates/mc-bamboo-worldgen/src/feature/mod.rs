@@ -17,6 +17,7 @@ pub mod provider;
 pub mod registry;
 pub mod rule_test;
 pub mod run;
+pub mod shape_update;
 pub mod simple_block;
 pub mod state;
 pub mod state_provider;
