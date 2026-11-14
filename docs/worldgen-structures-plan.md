@@ -224,6 +224,28 @@
   `structure_place.rs` 的 `SKIPPED` 列表，不进查询集，所以 `structure-place` 仍是
   32 查询 / 2202 格 / 0 不一致。
 
+**第九轮（2026-11-14，`cb-wg-structures` 续：沙漠神殿偏差的排查结论，无新产出）**：
+
+本轮全部时间用在定位沙漠神殿 `postProcess` 的坐标偏差上，**没有代码提交**（排查中改的
+`region_random`、write-log 对比都回退了，工作树干净）。但拿到了三条确定的结论，下一轮直接照做：
+
+1. **`region_random` 之前写错了**。官方是
+   `RandomState.random = Algorithm.newInstance(seed).forkPositional()`，
+   `getOrCreateRandomFactory(name) = random.fromHashOf(name).forkPositional()`，
+   再 `.at(center.getWorldPosition())`——也就是
+   `Algorithm::new_instance(seed).fork_positional().from_hash_of("minecraft:worldgen_region_random").fork_positional().at(x, 0, z)`。
+   第八轮写的「`WorldgenRandom(worldSeed).nextLong()` 当工厂种子」是错的。
+   `mc-bamboo-worldgen::random` 已有 `fork_positional` / `from_hash_of` 两个原语，直接拼即可。
+2. **oracle 之前只比「状态变化」，漏掉了结构写在地形上的方块**。沙漠神殿的塔身几乎全落在
+   合成地形的沙 / 砂岩上，`before`/`after` 快照判不出变化，于是 Java 侧一直是「0 个变化方块」。
+   正确的做法是让 `WorldGenLevel` 代理记录**每一次 `setBlock`**（`TreeMap<BlockPos, BlockState>`
+   后写覆盖先写），Rust 侧同样在 `PieceContext` 里记 `(x, y, z, state)` 写入日志
+   （含 `fill_column_down`），两边比写入日志而不是比状态差异。
+3. **`getHeight` / `getHeightmapPos` 在区块外不能 `& 15` 折回**。官方 `WorldGenRegion` 的写半径
+   是 1，能读到邻居区块；假世界只有一个区块时把越界坐标折回本区块会让
+   `lowest_ground_height` 读到错误的列。要么造 3×3 假地形，要么按地形公式直接算越界列。
+   改这两处后沙漠神殿的不一致从 52427 降到 23004（剩下的差异还没查完）。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」
 是 `onTopOfChunkCenter` 基线路径的通用判定，**不等于** `Structure.generate` 的最终有效：
