@@ -32,6 +32,7 @@
 //! （定义域本身见 [`density::Function::axes`]）。
 
 pub mod aquifer;
+pub mod beardifier;
 pub mod biome;
 pub mod biome_manager;
 pub mod biome_temperature;
@@ -47,7 +48,9 @@ pub mod noise;
 pub mod random;
 pub mod sampler;
 pub mod settings;
+pub mod spawn;
 pub mod spline;
+pub mod structure;
 pub mod volume;
 
 use std::collections::HashMap;
@@ -109,6 +112,10 @@ impl Worldgen {
         // 地表规则、条件和雕刻器是新加的字段；缺了明确报错，别静默生成错的世界。
         // 地物那四个键同理，feature / placed_feature / biome_features 是对象，
         // features_per_step 是数组，形状由 object_field / array_field 一并核对。
+        // 结构的四个注册表同样按对象校验，解析在 structure 模块里做。
+        // Surface rules, conditions and carvers are added fields: fail loudly rather than
+        // silently generating a wrong world. The four feature keys and the four structure
+        // registries are objects too; shape is checked by object_field / array_field.
         for name in [
             "material_rule",
             "material_condition",
@@ -117,6 +124,10 @@ impl Worldgen {
             "feature",
             "placed_feature",
             "biome_features",
+            "structure_set",
+            "structure",
+            "template_pool",
+            "processor_list",
         ] {
             object_field(root, name)?;
         }

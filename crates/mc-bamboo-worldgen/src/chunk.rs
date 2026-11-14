@@ -23,6 +23,7 @@ use serde_json::Value;
 use crate::{
     Worldgen,
     aquifer::Aquifer,
+    beardifier::Beardifier,
     biome::MultiNoiseBiomeSource,
     biome_manager::BiomeManager,
     carver::Carvers,
@@ -261,10 +262,31 @@ impl<'a> Generator<'a> {
         chunk_z: i32,
         stage: Stage,
     ) -> Result<Vec<Vec<u32>>, String> {
+        self.terrain_with_beardifier(chunk_x, chunk_z, stage, None)
+    }
+
+    /// `terrain` 加上一个本区块的 `Beardifier`。`structure_starts` / `structure_references`
+    /// 接进游戏后由调用方把真实结构喂进来；`None` 等价于官方 `Beardifier.EMPTY`，和
+    /// [`Generator::terrain`] 逐位相同。`first_occupied_height` 等基线路径永远走 `None`。
+    ///
+    /// `terrain` with a per-chunk `Beardifier`. Once the structure stages are wired into the
+    /// game the caller feeds real structures here; `None` equals vanilla `Beardifier.EMPTY` and
+    /// is bit-identical to [`Generator::terrain`]. Baseline paths such as
+    /// `first_occupied_height` always stay on `None`.
+    pub fn terrain_with_beardifier(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        stage: Stage,
+        beardifier: Option<&Beardifier>,
+    ) -> Result<Vec<Vec<u32>>, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
         let mut context = Context::new(self.cache_count);
+        if let Some(beardifier) = beardifier {
+            context.set_beardifier(std::sync::Arc::new(beardifier.clone()));
+        }
         let mut density = context.acquire(volume.len());
         // 官方先建 NoiseChunk（含水层的构造器也在这里求值），再算 finalDensity。
         // Rust 借检查不让两件事同时抱着 context，所以先建含水层，再算密度。
@@ -333,6 +355,111 @@ impl<'a> Generator<'a> {
             )?;
         }
         Ok(layers)
+    }
+
+    /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight(x, z, WORLD_SURFACE_WG, ...)`。
+    ///
+    /// 照 `iterateNoiseColumn` 用一块 1×height×1、步长 1 的体积和全新的含水层，自顶向下
+    /// 找第一个非空气方块。`getBaseHeight` 返回 blockY+1，`getFirstOccupiedHeight` 再减 1，
+    /// 所以这里直接返回该 blockY；整列都是空气时返回 minY-1。
+    ///
+    /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight(x, z, WORLD_SURFACE_WG, ...)`.
+    /// Mirrors `iterateNoiseColumn`: a fresh 1xheightx1 step-1 volume and a fresh aquifer,
+    /// scanning top-down for the first non-air block. `getBaseHeight` returns blockY+1 and
+    /// `getFirstOccupiedHeight` subtracts 1, so we return that blockY directly; an all-air
+    /// column yields minY-1.
+    pub fn first_occupied_height(&self, block_x: i32, block_z: i32) -> Result<i32, String> {
+        let min_y = self.settings.min_y;
+        let height = self.settings.height;
+        let volume = Volume::blocks((1, height, 1), (block_x, min_y, block_z));
+        let mut context = Context::new(self.cache_count);
+        let mut density = context.acquire(volume.len());
+        let aquifer_functions = self.aquifer.as_ref().ok_or("dimension has no aquifers")?;
+        let mut aquifer = Aquifer::new(
+            aquifer_functions,
+            &mut context,
+            self.aquifer_random,
+            &volume,
+            self.settings.sea_level,
+            self.default_fluid,
+            lava_state()?,
+            self.empty,
+        );
+        self.router
+            .final_density
+            .sample_volume(&mut context, &mut density, &volume);
+        for local_y in (0..height).rev() {
+            let block_y = min_y + local_y;
+            let value = f64::from(density[volume.index(0, local_y, 0)]);
+            let state = aquifer
+                .compute_substance(&mut context, block_x, block_y, block_z, value)
+                .unwrap_or(self.default_block);
+            if state != self.empty {
+                context.release(density);
+                return Ok(block_y);
+            }
+        }
+        context.release(density);
+        Ok(min_y - 1)
+    }
+
+    /// `MultiNoiseBiomeSource.createResolverForChunk` 的成批气候采样，返回一列 quart Y 的群系名。
+    ///
+    /// `couldStructureExistInColumn` 用 1×N×1、步长 4 的体积，对六个气候函数各跑一次
+    /// `sampleVolume`，再对每格查群系参数表。和 `biomes()` 同一条成批路径。
+    ///
+    /// Batch climate sampling of `MultiNoiseBiomeSource.createResolverForChunk`: returns the
+    /// biome name for each quart Y of one column. `couldStructureExistInColumn` uses a
+    /// 1xNx1 step-4 volume, runs `sampleVolume` for each of the six climate functions, then
+    /// looks up the parameter list per cell. Same batch path as `biomes()`.
+    pub fn column_biome_names(
+        &self,
+        quart_x: i32,
+        quart_z: i32,
+        min_quart_y: i32,
+        max_quart_y: i32,
+    ) -> Result<Vec<String>, String> {
+        let count = max_quart_y - min_quart_y + 1;
+        let volume = Volume::new(
+            (1, count, 1),
+            (
+                quart_to_block(quart_x),
+                quart_to_block(min_quart_y),
+                quart_to_block(quart_z),
+            ),
+            (4, 4, 4),
+        );
+        let mut context = Context::new(self.cache_count);
+        let mut columns: Vec<Vec<f32>> = Vec::with_capacity(6);
+        for sampler in [
+            &self.router.temperature,
+            &self.router.vegetation,
+            &self.router.continents,
+            &self.router.erosion,
+            &self.router.depth,
+            &self.router.ridges,
+        ] {
+            let mut buffer = context.acquire(volume.len());
+            sampler.sample_volume(&mut context, &mut buffer, &volume);
+            columns.push(buffer);
+        }
+        let mut names = Vec::with_capacity(count as usize);
+        for quart_y in min_quart_y..=max_quart_y {
+            let index = volume.index(0, quart_y - min_quart_y, 0);
+            let target = TargetPoint::of([
+                columns[0][index],
+                columns[1][index],
+                columns[2][index],
+                columns[3][index],
+                columns[4][index],
+                columns[5][index],
+            ]);
+            names.push(self.biomes.biome(target).to_owned());
+        }
+        for column in columns {
+            context.release(column);
+        }
+        Ok(names)
     }
 
     /// `ChunkStatus.FEATURES`：`ChunkGenerator.applyBiomeDecoration`。
@@ -457,6 +584,33 @@ mod tests {
         for section in sections {
             assert_eq!(section.len(), 64);
             assert!(section.iter().all(|id| (*id as usize) < 67));
+        }
+    }
+
+    /// 回归：种子 -1、区块 (52,-26) 在岩浆层上边界（y=-54）应给出水，而不是深板岩。
+    /// 官方 `Aquifer.NoiseBasedAquifer.computeSubstance` 在最近格子给的是水、且正下方
+    /// 全局流体是岩浆时，跳过压力计算直接返回水；缺失这段会误判成实心方块。
+    /// Regression: seed -1, chunk (52,-26) at the lava-layer top (y=-54) must be water,
+    /// not deepslate. Vanilla `computeSubstance` short-circuits to water when the nearest
+    /// cell is water and the global fluid one block below is lava; without it a pressure
+    /// check wrongly returns a solid block.
+    #[test]
+    fn aquifer_water_over_lava_boundary() {
+        let worldgen = Worldgen::load().expect("能读数据");
+        let generator = Generator::new(&worldgen, -1).expect("能建生成器");
+        let layers = generator
+            .terrain(52, -26, Stage::Noise)
+            .expect("能生成地形");
+        let water = block_by_name("minecraft:water")
+            .expect("有水方块")
+            .default_state;
+        let min_y = worldgen
+            .settings("minecraft:overworld")
+            .expect("有主世界设置")
+            .min_y;
+        let local_y = (-54 - min_y) as usize;
+        for z in 1..=3 {
+            assert_eq!(layers[local_y][14 * 16 + z], water, "y=-54 x=14 z={z}");
         }
     }
 }

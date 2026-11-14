@@ -768,7 +768,9 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 (52,-26)、y=-54、x=14、z=1..3 三格，官方是水、Bamboo 是深板岩；`--steps 0`
 （不跑任何 feature）同样复现，确认与地物改动无关，是邻居区块 terrain 的既有差异
 （旧阶段 carvers 回归只比中心单区块，故未暴露）。上面的 0 不一致结果都用 `--salt 3`
-等避开该区块的参数取得。
+等避开该区块的参数取得。**该差异已在 `cb-wg-aquifer` 分支修复**：补齐官方
+`Aquifer.NoiseBasedAquifer.computeSubstance` 的「水 + 下方岩浆」短路后，(52,-26) 以
+`chunkgen --chunk 52 -26` 精确复现为 0 不一致，详见 `docs/worldgen.md`「岩浆层上边界的短路」。
 
 #### 本分支明确还没做（诚实标 `unsupported`）
 
@@ -796,7 +798,16 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   植被类的 step 9 进度见上。
 * `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按
   「已移植集合」输出 `skipped`，`--feature-types` 是手工过滤。
-* 接进 Director（5.3.1 的邻居快照 + 增量合并）还没做。
+* 接进 Director 的**多阶段流水线形状**已经就位（流水线分支：`PipelineKind::Staged`
+  按 `ChunkPyramid` 派 `structure_starts … full` 十个阶段、terrain 已接真生成）。
+  **第二轮（本轮）已把 features 接进游戏**：`Task::Generate.neighbors` 按 `ChunkStep`
+  半径带邻居引用，世界线程存不可变 `Arc` CARVERS 快照（`director_host.rs::partials`），
+  计算池跑 `Generator::features()`，写邻居增量按 `TaskId` 追加、完工
+  `assemble_feature_column` 排规范序落盘；中心还会纯函数重算 8 个邻居中心溢进来的写，
+  保证集合与邻居任务落地时刻无关。见 `docs/worldgen.md`「第二轮」、`mc-bamboo-game/src/worldgen_features.rs`。
+  `gen-world --through features`（Java `--ore-only`）0 不一致、1/4 线程逐字节相同。
+  **还没做**：其余地物类型（A/B 在做）、`initialize_light` / `light` 的真实计算
+  （`light` 已带邻居引用）、`spawn` 刷怪。
 * 高度图的增量更新：矿石走 `BulkSectionAccess` 直接写 `LevelChunkSection`，
   **绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是 primed 后固定的。
   `cb-wg-feat-b` 已为走 `setBlockState` 的 `simple_block` 补上 `Heightmap.update`；

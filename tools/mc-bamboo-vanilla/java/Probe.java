@@ -885,9 +885,48 @@ public final class Probe {
             for (Join client : clients) {
                 client.finishChecks();
             }
+            // 收尾：让管理员 Kitten 执行 /stop，照官方 StopCommand 发
+            // commands.stop.stopping，服务端走关服流程并存盘；tools/probe.sh 随后
+            // 等进程自己退出，再检查世界目录。只有 BAMBOO_PROBE_STOP=1 才做：
+            // 崩溃测试要 kill -9 一个还在跑的服务端，不能先正常关服。
+            // Wrap-up: the operator Kitten runs /stop (official StopCommand sends
+            // commands.stop.stopping) so the server shuts down and saves; tools/probe.sh
+            // then waits for the process to exit and verifies the world dir. Gated on
+            // BAMBOO_PROBE_STOP=1: the crash test needs kill -9 to hit a running server.
+            if ("1".equals(System.getenv("BAMBOO_PROBE_STOP"))) {
+                for (Join client : clients) {
+                    client.expectShutdown();
+                }
+                kitten.send(new ServerboundChatCommandPacket("stop"));
+                check("stop: the server acknowledges /stop with commands.stop.stopping",
+                        stopAcknowledged(kitten));
+            }
             for (Join client : clients) {
                 client.close();
             }
+        }
+
+        /**
+         * 只泵管理员，等 /stop 的 commands.stop.stopping 回执；其他客户端会被关服断开，
+         * 不泵它们，免得把「连接被断开」记成失败。
+         *
+         * <p>Pump only the operator for the commands.stop.stopping acknowledgement; the
+         * other clients are disconnected by the shutdown, so leave them unpumped.
+         */
+        private boolean stopAcknowledged(Join admin) {
+            long deadline = System.currentTimeMillis() + STEP_TIMEOUT_MILLIS;
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    admin.pump();
+                } catch (IOException closedByShutdown) {
+                    break;
+                }
+                if (admin.systemTexts().stream()
+                        .anyMatch(text -> text.contains("Stopping the server"))) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private Join connect(String name, HumanoidArm arm, boolean walks) throws IOException {
@@ -2986,6 +3025,9 @@ public final class Probe {
         private boolean ownDataChecked;
         private boolean inBundle;
         private boolean closed;
+        // 收尾的 /stop 会正常关服断开这条连接，别把「连接被断开」记成失败。
+        // The wrap-up /stop shuts the server down; a disconnect is expected, not a failure.
+        private boolean shutdownExpected;
         private String disconnectReason = "";
         private int sequence;
         /** 客户端自己算出来的 serverId 哈希，服务端问 session server 时要用同一个。 */
@@ -3136,6 +3178,13 @@ public final class Probe {
             return sessionUrl != null;
         }
 
+        // 标记这条连接会因为收尾的 /stop 被正常断开，pump 不再把断开记成失败。
+        // Mark this connection as expected to close from the wrap-up /stop so pump does not fail.
+        void expectShutdown() {
+            this.shutdownExpected = true;
+            bridge.shutdownExpected = true;
+        }
+
         /** 转发一轮字节。服务端主动断开或者官方解码器报错时，连接会在这里结束。 */
         void pump() throws IOException {
             if (closed) {
@@ -3144,10 +3193,12 @@ public final class Probe {
             bridge.pump();
             if (bridge.channelClosed()) {
                 closed = true;
-                DisconnectionDetails details = connection.getDisconnectionDetails();
-                String reason = details == null ? "none" : details.reason().getString();
-                System.out.println("PROBE connection of " + player + " closed: " + reason);
-                check("connection: " + player + " stayed connected (" + reason + ")", false);
+                if (!shutdownExpected) {
+                    DisconnectionDetails details = connection.getDisconnectionDetails();
+                    String reason = details == null ? "none" : details.reason().getString();
+                    System.out.println("PROBE connection of " + player + " closed: " + reason);
+                    check("connection: " + player + " stayed connected (" + reason + ")", false);
+                }
             }
         }
 
@@ -4590,6 +4641,9 @@ public final class Probe {
         int rawFrames;
         /** 长度前缀不为零但小于阈值的帧。官方不会这样发，客户端也会拒绝。 */
         int belowThresholdFrames;
+        // 收尾的 /stop 正常关服，socket 关闭不再记成失败。
+        // The wrap-up /stop shuts the server down; a closing socket is not a failure.
+        boolean shutdownExpected;
 
         Bridge(String host, int port) throws IOException {
             socket = new Socket(host, port);
@@ -4651,7 +4705,9 @@ public final class Probe {
             try {
                 int read = socket.getInputStream().read(chunk);
                 if (read < 0) {
-                    check("connection: server kept the socket open", false);
+                    if (!shutdownExpected) {
+                        check("connection: server kept the socket open", false);
+                    }
                     connection.disconnect(Component.literal("the server closed the socket"));
                     return;
                 }

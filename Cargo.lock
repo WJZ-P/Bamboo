@@ -2082,6 +2082,7 @@ dependencies = [
 name = "mc-bamboo-vanilla"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "mc-bamboo-blocks",
  "mc-bamboo-core",
  "mc-bamboo-data",
@@ -2118,6 +2119,7 @@ dependencies = [
  "mc-bamboo-blocks",
  "mc-bamboo-core",
  "mc-bamboo-data",
+ "mc-bamboo-nbt",
  "md-5",
  "serde_json",
  "sha2",

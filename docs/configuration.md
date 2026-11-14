@@ -48,6 +48,25 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 | `network-compression-threshold` | 整数 | `256` | 包负载超过这么多字节才压缩；负数关闭，0 压缩每个包 |
 | `enforce-secure-profile` | bool | `true` | 正版玩家的聊天必须带 Mojang 签过的公钥；没开正版验证或没取到公钥时不生效 |
 
+### 世界生成相关的键
+
+世界生成接进游戏后，这四个键生效（解析在 `mc-bamboo-game/src/world_options.rs`，
+接进流水线见 `docs/worldgen.md`）：
+
+| 键 | 类型 | 官方 26.3 默认值 | 作用 |
+|---|---|---|---|
+| `level-seed` | 字符串 | ``（空） | 空 = 随机种子（首次存档时写进 `world_gen_settings.dat` 后固定）；数字按 `Long.parseLong`；其它字符串按 `String.hashCode()` |
+| `level-type` | 字符串 | `minecraft:normal` | 世界预设。认 `normal` / `flat` / `large_biomes` / `amplified`（含旧名 `default` / `largebiomes`）；查不到回退 `normal` 并记日志；**新世界默认 normal，不再是超平坦** |
+| `generator-settings` | JSON | `{}` | 只在 `flat` 预设生效，`FlatLevelGeneratorSettings.CODEC` 的 `layers` / `biome`（`features` / `lakes` 等本轮不接）；坏 JSON 回退默认超平坦预设 |
+| `generate-structures` | bool | `true` | 先读进来存进 `world_gen_settings.dat`；结构阶段接上后生效，目前结构阶段是空实现 |
+
+**只对全新世界生效**：世界存在 `data/minecraft/world_gen_settings.dat` 时，种子、
+世界类型和 flat 预设一律以存档为准，`level-type` / `level-seed` 改了也不影响老存档
+（官方行为）。四种 `level-type` 的差别：三种噪声世界共用 `minecraft:overworld`
+群系预设，只是 `NoiseGeneratorSettings` 不同（`normal`=`overworld`、
+`large_biomes`=`large_biomes`、`amplified`=`amplified`）；`flat` 走 `FlatLevelSource`。
+`generate-structures` 目前只存储、不影响生成。
+
 **和 `ServerConfig::default()` 的关系**：写出来的文件和这份表格一律用官方默认值；
 `ServerConfig::default()` 是「不读配置文件」的嵌入用法（单元测试、oracle、probe、
 压测工具的内置 `serve`）的默认值，保持 Bamboo 原来的取值（`motd=A Bamboo Server`、
@@ -57,7 +76,11 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 ### 官方有、Bamboo 还没实现的键
 
 读进来原样保留、写回时原样写出去，不报错。启动时用一条日志列出这些键
-「现在不起作用」（个别逻辑按官方默认值硬编码，例如聊天刷屏阈值按 10 秒算）。共 59 个：
+「现在不起作用」（个别逻辑按官方默认值硬编码，例如聊天刷屏阈值按 10 秒算）。官方 26.3
+默认文件里有、Bamboo 还没实现的共 **55 个**（`IMPLEMENTED` 从 10 个增到 14 个：新增
+`level-seed` / `level-type` / `generator-settings` / `generate-structures`）。下面清单还多列了
+2 个旧版遗留键（`announce-player-achievements`、`resource-pack-hash`），官方 26.3 默认文件里
+已经没有、读到时按未知键原样保留，不算进这 55 个：
 
 `allow-flight`、`enable-code-of-conduct`、`bug-report-link`、`force-gamemode`、
 `enforce-whitelist`、`difficulty`、`gamemode`、`management-server-enabled`、
@@ -76,8 +99,7 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 `resource-pack-hash`、`require-resource-pack`、`resource-pack-prompt`、
 `initial-enabled-packs`、`initial-disabled-packs`、`player-idle-timeout`、
 `status-heartbeat-interval`、`white-list`、`log-ips`、`pause-when-empty-seconds`、
-`accepts-transfers`、`level-seed`、`generate-structures`、`generator-settings`、
-`level-type`。
+`accepts-transfers`。
 
 `management-server-secret` 官方是启动时随机生成的，Bamboo 不实现管理服务器，
 生成的文件里这一项是空的。键和值的转义照 Java `Properties.store`（`=`、`:`、

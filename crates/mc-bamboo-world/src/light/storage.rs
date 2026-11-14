@@ -178,6 +178,13 @@ impl LightColumn {
         self.layers[slot(section_y)?].as_ref()
     }
 
+    /// 取出 26 段的光照数据，给生成期光照组装区块柱用。
+    ///
+    /// Return the 26 light sections, for assembling a generated chunk column.
+    pub(crate) fn into_layers(self) -> Vec<Option<DataLayer>> {
+        self.layers.to_vec()
+    }
+
     /// `getTopSectionY`：这一列最高的存光照的段再往上一段。一段都没有时是 `lowest_section`。
     pub(crate) fn top_section_y(&self, lowest_section: i32) -> i32 {
         self.layers

@@ -15,9 +15,11 @@ use mc_bamboo_world::{director::SaveSeq, ticket::ChunkStatus};
 
 use crate::{
     chunk_codec::{ChunkCodec, InlineCodec, PackedChunk},
-    chunk_generator::ChunkGenerator,
+    chunk_generator::{CenterSnapshot, ChunkGenerator},
     compute_pool::PoolJob,
     region::RegionColumn,
+    worldgen::GeneratedChunk,
+    worldgen_features::GenerateOutput,
 };
 
 /// 一个区块任务。`generation` 原样带回，宿主拼 `TaskDone` 用。
@@ -31,10 +33,15 @@ pub(crate) struct ChunkJob {
 pub(crate) enum ChunkWork {
     /// 解开容器、解析两份 NBT。
     Decode { bytes: Vec<u8> },
-    /// 把中心推进到 `stage`。
+    /// 把中心推进到 `stage`。`center_snapshot` 和 `neighbors` 是只读的
+    /// `Arc<GeneratedChunk>` 快照（计算线程只读，不碰世界状态）。
+    /// Advance the center to `stage`; `center_snapshot` and `neighbors` are
+    /// read-only `Arc<GeneratedChunk>` snapshots the compute thread only reads.
     Generate {
         stage: ChunkStatus,
         center: Option<Box<RegionColumn>>,
+        center_snapshot: CenterSnapshot,
+        neighbors: Vec<(ChunkPos, Option<Arc<GeneratedChunk>>)>,
         generator: Arc<dyn ChunkGenerator>,
     },
     /// 把收回的盒子编成两份 NBT。盒子只借来读，回执里原样交还。
@@ -47,7 +54,7 @@ pub(crate) enum ChunkWork {
 /// 计算的产物，`ChunkJob::run` 的输出。
 pub(crate) enum ChunkOutput {
     Decoded(Result<Box<RegionColumn>, String>),
-    Generated(Box<RegionColumn>),
+    Generated(GenerateOutput),
     Encoded(Result<PackedChunk, String>),
 }
 
@@ -63,7 +70,7 @@ pub(crate) enum ChunkOutcome {
     Decoded(Result<Box<RegionColumn>, String>),
     Generated {
         stage: ChunkStatus,
-        column: Box<RegionColumn>,
+        output: GenerateOutput,
     },
     /// 生成失败（panic）：中心的半成品已经交给生成器，拿不回来了。
     GenerateFailed {
@@ -107,8 +114,22 @@ impl PoolJob for ChunkJob {
             ChunkWork::Generate {
                 stage,
                 center,
+                center_snapshot,
+                neighbors,
                 generator,
-            } => ChunkOutput::Generated(generator.generate(*stage, pos, center.take(), &[])),
+            } => {
+                let view: Vec<(ChunkPos, Option<Arc<GeneratedChunk>>)> = neighbors
+                    .iter()
+                    .map(|(pos, snapshot)| (*pos, snapshot.clone()))
+                    .collect();
+                ChunkOutput::Generated(generator.generate(
+                    *stage,
+                    pos,
+                    center.take(),
+                    center_snapshot.clone(),
+                    &view,
+                ))
+            }
             ChunkWork::Save { column, .. } => ChunkOutput::Encoded(encode_column(pos, column)),
         }
     }
@@ -119,8 +140,8 @@ impl PoolJob for ChunkJob {
                 ChunkOutcome::Decoded(result)
             }
             (ChunkWork::Decode { .. }, Err(error)) => ChunkOutcome::Decoded(Err(error)),
-            (ChunkWork::Generate { stage, .. }, Ok(ChunkOutput::Generated(column))) => {
-                ChunkOutcome::Generated { stage, column }
+            (ChunkWork::Generate { stage, .. }, Ok(ChunkOutput::Generated(output))) => {
+                ChunkOutcome::Generated { stage, output }
             }
             (ChunkWork::Generate { .. }, Err(error)) => ChunkOutcome::GenerateFailed { error },
             (ChunkWork::Save { seq, column }, Ok(ChunkOutput::Encoded(encoded))) => {
