@@ -299,6 +299,29 @@ Rust 的 `place.rs::fill_column_down` 先读 `get_block(pos)`、再 `set_block(p
 **下一轮应该直接盯着这 18 处对齐**：用一个只含女巫小屋的查询集，把 Java 侧
 `fillColumnDown` 每次 `setBlock` 的坐标打出来，和 Rust 的 `writes` 逐条比，一处一处对。
 
+**第十一轮（2026-11-14，`cb-wg-structures`：对拍改用写入日志，落地三条根因）**：
+
+第九、十轮定位的根因**已实现并提交**（`7175dd0`，WIP）：
+
+* `structure::place` 新增 `Write = (x, y, z, state)` / `WriteLog = Option<Vec<Write>>` /
+  `Placed = (Option<(i32, [i32; 6])>, WriteLog)` 三个别名；`PieceContext.writes` 在
+  `place_block` 与 `fill_column_down` 里记录每次写入（生产路径传 `None`，零开销）。
+* `region_random(seed, use_legacy_random, cx, cz)` 改成官方链路：
+  `Algorithm::new_instance(seed).fork_positional().from_hash_of(
+  "minecraft:worldgen_region_random").fork_positional().at(cx, 0, cz)`。
+* `structure-place` 的 Java oracle：`PieceLevelHandler.written`（`TreeMap<BlockPos, BlockState>`，
+  后写覆盖先写）当结果；`getHeight` / `getHeightmapPos` 在区块外按合成地形公式现算，
+  不再 `& 15` 折回；假世界 9 个区块都填地形。
+* 沙漠神殿的 `fillColumnDown` 21×21 循环改回指令表里官方的位置（塔身之后、正面入口之前），
+  此前误放在指令表末尾。
+* `add_cellar_room` 的四个出口按官方顺序重排（`x+3` → `cut(x+4)` → `chiseled(x+4)` →
+  `x-3` → `cut(x-4)` → `chiseled(x-4)` → 南北两个橙陶瓦）。
+
+**当前状态（不能算通过）**：`structure-place` 是 **18 处不一致**，全部是女巫小屋的
+`fillColumnDown` 差一格（Java 填到 `y = 62`，Rust 到 `63`；`(1, 63, 2)` 反过来）。
+改用写入日志后，这套更严格的语义把此前被「状态差异」掩盖的差异暴露出来了。
+沙漠神殿仍在 `SKIPPED`，本轮把它从 7936 压到 6953 后仍未归零。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」
 是 `onTopOfChunkCenter` 基线路径的通用判定，**不等于** `Structure.generate` 的最终有效：
