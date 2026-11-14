@@ -125,8 +125,13 @@ pub fn center_piece_with_random(
     let aliases = PoolAliasLookup::create(&config.pool_aliases, position, seed)?;
 
     let start_pool = aliases.lookup(&config.start_pool);
+    // 官方 `startPool.unwrapKey().flatMap(key -> pools.getOptional(lookup(key))).orElse(startPool.value())`：
+    // 别名指向的 pool 不在注册表时回退到原始 `start_pool`。
+    // Vanilla falls back to the original `startPool.value()` when the aliased pool is
+    // not in the registry.
     let center_pool = pools
         .get(start_pool)
+        .or_else(|| pools.get(&config.start_pool))
         .ok_or_else(|| format!("missing start pool {start_pool}"))?;
     let center_element = center_pool.get_random_template(random)?;
     if center_element == PoolElement::Empty {

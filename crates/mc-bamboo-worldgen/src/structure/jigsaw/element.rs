@@ -164,7 +164,9 @@ impl PoolElement {
 
     pub const fn projection(&self) -> Projection {
         match self {
-            Self::Empty => Projection::Rigid,
+            // `EmptyPoolElement` 的构造器传的是 `TERRAIN_MATCHING`。
+            // `EmptyPoolElement` passes `TERRAIN_MATCHING` to its constructor.
+            Self::Empty => Projection::TerrainMatching,
             Self::Single { projection, .. }
             | Self::List { projection, .. }
             | Self::Feature { projection, .. } => *projection,
