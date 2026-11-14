@@ -13,6 +13,7 @@
 //! names and positions only). Each structure exposes one pure function.
 
 pub mod mineshaft;
+pub mod stronghold;
 
 use std::collections::BTreeMap;
 
@@ -234,6 +235,10 @@ impl Piece {
             .insert(key.to_owned(), i32::from(value).to_string());
     }
 
+    pub fn put_str(&mut self, key: &str, value: &str) {
+        self.extras.insert(key.to_owned(), value.to_owned());
+    }
+
     /// 对拍用的标准行：`P id bb6 O GD rot mirror extras`。
     /// extras 是按 key 排序的 `k=v`，用逗号连接，空则为 `-`。
     /// `Entrances` 在这时按当前（已平移过的）盒子格式化。
@@ -303,6 +308,16 @@ impl Builder {
     /// `findCollisionPiece(box)`。
     pub fn collides(&self, box_: &Box) -> bool {
         self.pieces.iter().any(|p| intersects(&p.bb, box_))
+    }
+
+    /// `findCollisionPiece(box)` 返回第一个相交结构件的包围盒（FillerCorridor 用）。
+    ///
+    /// `findCollisionPiece(box)` returning the first intersecting piece's box.
+    pub fn find_collision(&self, box_: &Box) -> Option<Box> {
+        self.pieces
+            .iter()
+            .find(|p| intersects(&p.bb, box_))
+            .map(|p| p.bb)
     }
 
     /// `getBoundingBox()`：所有结构件包围盒的并集。

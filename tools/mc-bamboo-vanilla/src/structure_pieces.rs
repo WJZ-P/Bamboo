@@ -82,6 +82,13 @@ fn build_queries() -> Vec<Query> {
                     arg: surface,
                 });
             }
+            queries.push(Query {
+                kind: "stronghold",
+                seed,
+                cx,
+                cz,
+                arg: 0,
+            });
         }
     }
     queries
@@ -153,6 +160,7 @@ fn rust_lines(q: &Query) -> Result<Vec<String>, String> {
     let pieces: Vec<Piece> = match q.kind {
         "mineshaft_normal" => pieces::mineshaft::generate(q.seed, q.cx, q.cz, false, q.arg),
         "mineshaft_mesa" => pieces::mineshaft::generate(q.seed, q.cx, q.cz, true, q.arg),
+        "stronghold" => pieces::stronghold::generate(q.seed, q.cx, q.cz),
         other => return Err(format!("no Rust layout for kind {other}")),
     };
     Ok(pieces.iter().map(Piece::canonical_line).collect())

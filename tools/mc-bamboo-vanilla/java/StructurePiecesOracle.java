@@ -26,6 +26,7 @@ import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSeriali
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder;
 import net.minecraft.world.level.levelgen.structure.structures.MineshaftPieces;
 import net.minecraft.world.level.levelgen.structure.structures.MineshaftStructure;
+import net.minecraft.world.level.levelgen.structure.structures.StrongholdPieces;
 
 /**
  * 用官方 26.3 的结构件类直接对拍四个多件式结构的「结构件列表」布局。
@@ -53,6 +54,9 @@ import net.minecraft.world.level.levelgen.structure.structures.MineshaftStructur
 public final class StructurePiecesOracle {
     private static final int SEA_LEVEL = 63;
     private static final int MIN_Y = -64;
+    // 和 Rust 侧一致的重试安全上限；正常种子远在此之前命中传送门房间。
+    // Retry safety cap matching the Rust side; normal seeds hit the portal room well before it.
+    private static final int MAX_TRIES = 128;
 
     // createTag 里由基类写的四个键，不进 extras。
     // Four base keys written by StructurePiece.createTag; excluded from extras.
@@ -83,6 +87,7 @@ public final class StructurePiecesOracle {
             List<String> pieces = switch (kind) {
                 case "mineshaft_normal" -> mineshaft(seed, cx, cz, false, arg);
                 case "mineshaft_mesa" -> mineshaft(seed, cx, cz, true, arg);
+                case "stronghold" -> stronghold(seed, cx, cz);
                 default -> throw new IllegalArgumentException("unknown kind " + kind);
             };
             out.append("Q ").append(kind).append(' ').append(seed).append(' ').append(cx)
@@ -117,6 +122,38 @@ public final class StructurePiecesOracle {
             builder.moveBelowSeaLevel(SEA_LEVEL, MIN_Y, random, 10);
         }
 
+        return builder.build().pieces().stream().map(StructurePiecesOracle::dump).collect(Collectors.toList());
+    }
+
+    /** StrongholdStructure.generatePieces 的重试循环编排（全用公开成员复刻）。 */
+    private static List<String> stronghold(long seed, int cx, int cz) {
+        WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+        ChunkPos chunkPos = new ChunkPos(cx, cz);
+        StructurePiecesBuilder builder = new StructurePiecesBuilder();
+        int tries = 0;
+        StrongholdPieces.StartPiece startRoom;
+        while (true) {
+            builder.clear();
+            random.setLargeFeatureSeed(seed + tries++, cx, cz);
+            StrongholdPieces.resetPieces();
+            startRoom = new StrongholdPieces.StartPiece(
+                    random, chunkPos.getBlockX(2), chunkPos.getBlockZ(2));
+            builder.addPiece(startRoom);
+            startRoom.addChildren(startRoom, builder, random);
+            List<StructurePiece> pending = startRoom.pendingChildren;
+            while (!pending.isEmpty()) {
+                int pos = random.nextInt(pending.size());
+                StructurePiece piece = pending.remove(pos);
+                piece.addChildren(startRoom, builder, random);
+            }
+            builder.moveBelowSeaLevel(SEA_LEVEL, MIN_Y, random, 10);
+            if (!builder.isEmpty() && startRoom.portalRoomPiece != null) {
+                break;
+            }
+            if (tries >= MAX_TRIES) {
+                break;
+            }
+        }
         return builder.build().pieces().stream().map(StructurePiecesOracle::dump).collect(Collectors.toList());
     }
 
