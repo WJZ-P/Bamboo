@@ -1,9 +1,9 @@
 //! `spawn`：多种子下把新世界的出生区块和出生点与官方逐个对拍。
 //!
-//! `SpawnOracle.java` 在 JVM 里跑官方 `MinecraftServer.setInitialSpawn`（`getOrigin`
-//! + 11×11 区块螺旋 + `PlayerSpawnFinder.getSpawnPosInChunk`，地形到 CARVERS），
-//! 每个种子输出出生区块 `[cx, cz]` 和出生点 `[x, y, z]`。Bamboo 侧调
-//! `mc-bamboo-game::fresh_spawn_sample` —— 游戏里 `setInitialSpawn` 那份代码 ——
+//! `SpawnOracle.java` 在 JVM 里跑官方 `MinecraftServer.setInitialSpawn`：先用
+//! `getOrigin` 定出生区块，再走 11×11 区块螺旋和 `PlayerSpawnFinder.getSpawnPosInChunk`
+//! （地形到 CARVERS），每个种子输出出生区块 `[cx, cz]` 和出生点 `[x, y, z]`。
+//! Bamboo 侧调 `mc-bamboo-game::fresh_spawn_sample` —— 游戏里 `setInitialSpawn` 那份代码 ——
 //! 逐个比较，0 不一致才算过。`--break-self-test` 故意改坏一个出生点确认会失败。
 //!
 //! `spawn`: compare the fresh-world spawn chunk and spawn position against
