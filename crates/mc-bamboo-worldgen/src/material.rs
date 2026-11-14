@@ -17,7 +17,8 @@ use mc_bamboo_data::{block_by_name, blocks};
 use serde_json::Value;
 
 use crate::{
-    biome_manager::{self, BiomeManager, ClimateCache},
+    biome_manager::{self, ClimateCache},
+    biome_region::BiomeGetter,
     density::{self, FunctionRegistry, NoiseRegistry, Ref},
     math::{floor_f32, java_floor_div, java_round},
     noise::Noise as NoiseInstance,
@@ -173,7 +174,12 @@ struct Scan<'a> {
     preliminary_buffer: Vec<f32>,
     preliminary_ready: bool,
     router: &'a RouterSamplers,
-    biome_manager: &'a BiomeManager<'a>,
+    biome_manager: &'a BiomeGetter<'a>,
+    /// 官方 `MaterialRuleContext.possibleBiomes()`：`None` 时每个群系条件都逐格判定。
+    ///
+    /// Vanilla `MaterialRuleContext.possibleBiomes()`; `None` decides every biome
+    /// condition per cell.
+    possible: Option<&'a [u32]>,
     /// 一次扫描里反复问的气候参数；`topMaterial` 单独建一张 1×1×1 的。
     climate: &'a mut ClimateCache,
     block_x: i32,
@@ -280,6 +286,18 @@ impl MaterialRules {
     }
 
     /// `MaterialSystem.buildSurface`：把规则应用到 `layers` 上。
+    ///
+    /// `possible_biomes` 对应官方 `MaterialRuleContext.possibleBiomes()`：真实服务端路径
+    /// 传周围 3×3 区块调色板的并集，`BiomeCondition.compile` 据此把「集合里没有任何该
+    /// 群系」的条件折叠成常量 `false`、「集合里全是该群系」折叠成常量 `true`；传 `None`
+    /// 等价于简化路径和 `topMaterial` 的 `possibleBiomes = null`，每个条件都逐格判定。
+    ///
+    /// `MaterialSystem.buildSurface`: apply the rules to `layers`. `possible_biomes`
+    /// mirrors vanilla's `MaterialRuleContext.possibleBiomes()`: the real-server path
+    /// passes the 3×3 palette union, which lets `BiomeCondition.compile` fold "no such
+    /// biome can appear" to constant `false` and "every biome is one of these" to
+    /// constant `true`; `None` matches both the simplified path and `topMaterial`'s
+    /// `possibleBiomes = null`, where every condition is decided per cell.
     #[allow(clippy::too_many_arguments)]
     pub fn build_surface(
         &self,
@@ -289,7 +307,8 @@ impl MaterialRules {
         settings: &Settings,
         context: &mut Context,
         router: &RouterSamplers,
-        biome_manager: &BiomeManager<'_>,
+        biome_manager: &BiomeGetter<'_>,
+        possible_biomes: Option<&[u32]>,
         noises: &NoiseRegistry,
         positional: PositionalFactory,
     ) -> Result<(), String> {
@@ -321,6 +340,7 @@ impl MaterialRules {
             context,
             router,
             biome_manager,
+            possible_biomes,
             &mut climate,
             noises,
             positional,
@@ -440,7 +460,7 @@ impl MaterialRules {
         settings: &Settings,
         context: &mut Context,
         router: &RouterSamplers,
-        biome_manager: &BiomeManager<'_>,
+        biome_manager: &BiomeGetter<'_>,
         noises: &NoiseRegistry,
         positional: PositionalFactory,
     ) -> Result<Option<u32>, String> {
@@ -466,6 +486,9 @@ impl MaterialRules {
             context,
             router,
             biome_manager,
+            // 官方 `topMaterial` 传 `possibleBiomes = null`，永不折叠。
+            // Vanilla `topMaterial` passes `possibleBiomes = null`, so nothing folds.
+            None,
             &mut climate,
             noises,
             positional,
@@ -557,7 +580,27 @@ impl MaterialRules {
 
     fn test(&self, condition: &CondNode, scan: &mut Scan<'_>, context: &mut Context) -> bool {
         match condition {
-            CondNode::Biome(biomes) => biomes.contains(&scan.get_biome()),
+            // 官方 `BiomeCondition.compile`：`possibleBiomes != null` 时先把
+            // 「集合里没有任何该群系」折叠成常量 `false`、「集合里全是该群系」折叠成常量
+            // `true`，都不碰 `getBiome`。规则树编译一次就固定，所以这里每次重算折叠结论
+            // 和编译期折叠等价，关键是**不调用** `getBiome`（它会推进 R 树的 lastResult）。
+            //
+            // Vanilla `BiomeCondition.compile` folds to constant `false` when none of the
+            // condition's biomes is possible and to constant `true` when all possible
+            // biomes match, without touching `getBiome`. The tree is compiled once, so
+            // re-deciding the fold here is equivalent; what matters is *not* calling
+            // `getBiome`, which advances the R-tree `lastResult`.
+            CondNode::Biome(biomes) => {
+                if let Some(possible) = scan.possible {
+                    if !biomes.iter().any(|biome| possible.contains(biome)) {
+                        return false;
+                    }
+                    if possible.iter().all(|biome| biomes.contains(biome)) {
+                        return true;
+                    }
+                }
+                biomes.contains(&scan.get_biome())
+            }
             CondNode::Not(child) => !self.test(child, scan, context),
             CondNode::Hole => scan.surface_depth <= 0,
             CondNode::Steep => scan.surface_gradient_x <= -4 || scan.surface_gradient_z >= 4,
@@ -678,7 +721,8 @@ impl<'a> Scan<'a> {
         settings: &Settings,
         context: &mut Context,
         router: &'a RouterSamplers,
-        biome_manager: &'a BiomeManager<'a>,
+        biome_manager: &'a BiomeGetter<'a>,
+        possible: Option<&'a [u32]>,
         climate: &'a mut ClimateCache,
         _noises: &NoiseRegistry,
         positional: PositionalFactory,
@@ -720,6 +764,7 @@ impl<'a> Scan<'a> {
             preliminary_ready: false,
             router,
             biome_manager,
+            possible,
             climate,
             block_x: min_x,
             block_z: min_z,
