@@ -22,6 +22,7 @@ pub mod pieces;
 pub mod placement;
 pub mod registry;
 pub mod rings;
+pub mod single;
 pub mod start;
 pub mod validity;
 
