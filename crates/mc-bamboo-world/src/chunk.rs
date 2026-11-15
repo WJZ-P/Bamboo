@@ -526,6 +526,63 @@ impl Chunk {
         Ok(chunk)
     }
 
+    /// 只给生成期光照用的区块：从世界生成的逐层方块直接建段，只算光引擎要读的东西。
+    ///
+    /// `layers` 是自下而上 [`WORLD_HEIGHT`] 层，每层 256 格、下标 `x * 16 + z`。段的方块、
+    /// 计数、哈希和天空光源表都和 [`from_sections`](Self::from_sections) 读盘组装的一样；
+    /// 全是空气的段直接用空段。高度图、方块实体表和生物群系不填（光引擎不读），
+    /// 所以这个区块不能交给世界或写盘。
+    ///
+    /// A chunk for generation-time light only: build sections straight from the
+    /// worldgen block layers and compute only what the light engine reads.
+    /// `layers` holds [`WORLD_HEIGHT`] layers bottom-up, 256 cells each indexed
+    /// `x * 16 + z`. Section blocks, counts, hashes and sky-light sources equal
+    /// the disk assembly in [`from_sections`](Self::from_sections); all-air
+    /// sections use the empty section. Heightmaps, block entities and biomes are
+    /// left empty (the light engine does not read them), so this chunk must
+    /// never reach the world or disk.
+    pub(crate) fn for_light(layers: &[Vec<u32>]) -> Result<Self, String> {
+        if layers.len() != WORLD_HEIGHT as usize || layers.iter().any(|layer| layer.len() != 256) {
+            return Err("generated chunk has the wrong number of layers or cells".to_owned());
+        }
+        let mut sections = Vec::with_capacity(SECTION_COUNT);
+        let mut values = [blocks::AIR; 4096];
+        for section_layers in layers.as_chunks::<{ SECTION_SIZE as usize }>().0 {
+            if section_layers
+                .iter()
+                .all(|layer| layer.iter().all(|&state| state == blocks::AIR))
+            {
+                sections.push(Section::empty(0));
+                continue;
+            }
+            for (y, layer) in section_layers.iter().enumerate() {
+                for x in 0..16 {
+                    for z in 0..16 {
+                        values[Section::block_index(x, y, z)] = layer[x * 16 + z];
+                    }
+                }
+            }
+            sections.push(Section::from_disk(
+                PalettedContainer::blocks_from_values(&values),
+                PalettedContainer::biomes(0),
+            ));
+        }
+        let random_ticking_sections = random_ticking_mask(&sections);
+        let mut chunk = Self {
+            random_ticking_sections,
+            sections,
+            heightmaps: [Heightmap::EMPTY; HeightmapKind::ALL.len()],
+            block_entities: BTreeMap::new(),
+            signs: BTreeMap::new(),
+            update_tags: BTreeMap::new(),
+            preserved_block_entities: BTreeMap::new(),
+            archive: ChunkArchiveMeta::default(),
+            sky_light_sources: SkyLightSources::default(),
+        };
+        chunk.initialize_light_sources();
+        Ok(chunk)
+    }
+
     /// 写入一个告示牌，坐标由调用方校验过。
     pub(crate) fn put_sign(
         &mut self,

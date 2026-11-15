@@ -153,6 +153,7 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 registry: ctx.registry,
                 top_feature: Some(placed_id),
             };
+            crate::perf::feature_begin(step, placed_id);
             // 组合类会在 Feature.place 里递归再走一轮修饰器链；整棵树是否都移植
             // 由 place_placed 汇总，任一未移植分支都让本区块标 unsupported。
             // Composition features recurse into more placement chains inside Feature.place;
@@ -166,6 +167,7 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 &random,
                 origin,
             );
+            crate::perf::feature_end();
             if !outcome.supported {
                 unsupported = true;
             }
@@ -177,7 +179,10 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
 
 /// 解析 `PlacedFeature.feature`：注册表引用（字符串）或内联配置（对象）。
 /// 返回 `(类型 ID, 配置对象)`。
-pub(crate) fn resolve_feature<'a>(
+///
+/// Resolve `PlacedFeature.feature`: a registry reference (string) or an inline config
+/// (object). Returns `(type id, config object)`.
+pub fn resolve_feature<'a>(
     registry: &'a Registry,
     value: &'a serde_json::Value,
 ) -> Option<(String, &'a serde_json::Value)> {

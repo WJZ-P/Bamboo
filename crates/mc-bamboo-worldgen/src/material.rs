@@ -381,7 +381,14 @@ impl MaterialRules {
                 let mut stone_depth_above: i32 = 0;
                 let mut min_y_stone = I32_MAX;
                 let mut water_height = I32_MIN;
+                // 测量「只生成切割线以上」时，扫描到这一行就停（默认是 `min_y`）。
+                // When measuring "only above the cut line", stop the scan at this row
+                // (the default is `min_y`).
+                let scan_floor = crate::perf::floors().surface.unwrap_or(settings.min_y);
                 for y in (settings.min_y..=start).rev() {
+                    if y < scan_floor {
+                        break;
+                    }
                     let state = layer_get(layers, settings.min_y, x, y, z);
                     if biome_manager::is_air(state) {
                         stone_depth_above = 0;

@@ -52,13 +52,47 @@ pub struct GeneratedLight {
 /// `center`; every [`Chunk`] must have its sky-light sources computed
 /// (`ChunkColumn::from_parts` does this). Pure: no world state, deterministic.
 pub fn generate_light(center: ChunkPos, chunks: &BTreeMap<ChunkPos, Chunk>) -> GeneratedLight {
+    light_of(center, chunks.clone())
+}
+
+/// 和 [`generate_light`] 相同，但直接读世界生成的逐层方块，不先组装完整的 [`Chunk`]。
+///
+/// 每一项是一个区块的位置和它自下而上 [`crate::WORLD_HEIGHT`] 层方块（每层 256 格、
+/// 下标 `x * 16 + z`，即 `GeneratedChunk.blocks` 的布局）。光引擎只读段方块、段计数和
+/// 天空光源表，这里只建这些（[`Chunk::for_light`]），省掉调色板往返、四张高度图和
+/// 方块实体扫描；同一份方块的结果和 [`generate_light`] 逐位相同。
+///
+/// Same as [`generate_light`], but reads worldgen block layers directly instead
+/// of fully assembled [`Chunk`]s. Each entry is a chunk position and its
+/// [`crate::WORLD_HEIGHT`] layers bottom-up (256 cells each, indexed
+/// `x * 16 + z`, the `GeneratedChunk.blocks` layout). The light engine only
+/// reads section blocks, section counts and sky-light sources, so only those are
+/// built ([`Chunk::for_light`]), skipping the palette round trip, the four
+/// heightmaps and the block-entity scan; for the same blocks the result is
+/// bit-identical to [`generate_light`].
+pub fn generate_light_from_layers(
+    center: ChunkPos,
+    columns: &[(ChunkPos, &[Vec<u32>])],
+) -> Result<GeneratedLight, String> {
+    let mut chunks = BTreeMap::new();
+    for &(pos, layers) in columns {
+        chunks.insert(pos, Chunk::for_light(layers)?);
+    }
+    Ok(light_of(center, chunks))
+}
+
+/// 两个入口共用的计算；`chunks` 按位置顺序装进 `ChunkMap`，遍历顺序因此和入口无关。
+///
+/// Shared core of both entry points; `chunks` enters the `ChunkMap` in position
+/// order, so the iteration order does not depend on the entry point.
+fn light_of(center: ChunkPos, chunks: BTreeMap<ChunkPos, Chunk>) -> GeneratedLight {
     // 视图之外读成全空气：`Chunk::empty` 的天空光源表默认就是「整列都通到天」。
     // Positions outside the view read as all-air; `Chunk::empty` already has a
     // default sky-source table meaning "open sky for the whole column".
     let air = Chunk::empty(0);
     let mut edited: ChunkMap<Chunk> = ChunkMap::default();
     for (pos, chunk) in chunks {
-        edited.insert(*pos, chunk.clone());
+        edited.insert(pos, chunk);
     }
     let view = Chunks::new(&air, &edited);
 
