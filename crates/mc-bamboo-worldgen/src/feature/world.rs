@@ -473,4 +473,103 @@ mod block_writer_tests {
         let result = world.finish(false);
         assert_eq!(result.block_entities, vec![((1, 65, 1), nbt)]);
     }
+
+    /// 端到端：真实模板（村庄房屋带箱子）走 `place_piece` 写进 `FeatureWorld`，
+    /// 带 nbt 的位置要出现在 `block_entities` 里，并随 `finish` 交出去。
+    ///
+    /// End to end: a real template (a village house with chests) goes through
+    /// `place_piece` into a `FeatureWorld`; positions carrying nbt must show up in
+    /// `block_entities` and be handed out by `finish`.
+    #[test]
+    fn place_piece_fills_the_block_entity_table() {
+        use crate::structure::jigsaw::place::{place_piece, state_id_of};
+        use crate::structure::processor::BlockStateSpec;
+        use crate::structure::processor_apply::PlaceSettings;
+        use crate::structure::template::StructureTemplate;
+
+        // 挑一个带方块实体 nbt 的模板。
+        // Pick a template whose palette blocks carry block-entity nbt.
+        let mut chosen: Option<(String, StructureTemplate)> = None;
+        for &(name, _, _) in mc_bamboo_data::structures::ENTRIES {
+            let Ok(template) = StructureTemplate::load(name) else {
+                continue;
+            };
+            if template.palettes.len() != 1 || template.blocks.is_empty() {
+                continue;
+            }
+            if template.blocks.iter().any(|block| block.nbt.is_some()) {
+                chosen = Some((name.to_owned(), template));
+                break;
+            }
+        }
+        let Some((name, template)) = chosen else {
+            return; // 数据里没有带 nbt 的模板：跳过。
+        };
+
+        let chunks = water_chunks();
+        let mut world = FeatureWorld::new(&chunks, 63, 0).unwrap();
+        struct Level;
+        impl crate::structure::processor_apply::ProcessorLevel for Level {
+            fn block_state(&self, _pos: (i32, i32, i32)) -> BlockStateSpec {
+                BlockStateSpec::parse_str("minecraft:air").unwrap()
+            }
+            fn in_block_set(
+                &self,
+                _state: &BlockStateSpec,
+                _set: &crate::structure::processor::BlockSetRef,
+            ) -> bool {
+                false
+            }
+        }
+        let level = Level;
+        let bounds = crate::structure::BoundingBox {
+            min_x: -64,
+            min_y: -64,
+            min_z: -64,
+            max_x: 64,
+            max_y: 128,
+            max_z: 64,
+        };
+        let placed = place_piece(
+            &template,
+            (0, 64, 0),
+            &[],
+            &level,
+            PlaceSettings {
+                piece_position: (0, 64, 0),
+                reference_pos: (0, 64, 0),
+                chunk_bb: Some(bounds),
+                level_seed: 0,
+                explicit_random: None,
+            },
+            0,
+            0,
+            &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            &mut world,
+        )
+        .unwrap_or_else(|error| panic!("{name}: place_piece failed: {error}"));
+        assert!(
+            !placed.placed.is_empty(),
+            "{name}: expected some block writes"
+        );
+        // 所有落在 `chunk_bb` 内的带 nbt 方块都应该登记到方块实体表。
+        // Every nbt-carrying block inside `chunk_bb` must be registered.
+        let expected = placed
+            .placed
+            .iter()
+            .filter(|(_, nbt)| nbt.is_some())
+            .count();
+        assert!(
+            expected > 0,
+            "{name}: template has block-entity nbt but none got written"
+        );
+        assert_eq!(
+            world.block_entities.len(),
+            expected,
+            "{name}: every nbt write must land in the block-entity table"
+        );
+        let result = world.finish(false);
+        assert_eq!(result.block_entities.len(), expected);
+        let _ = state_id_of(&BlockStateSpec::parse_str("minecraft:air").unwrap());
+    }
 }
