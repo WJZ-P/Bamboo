@@ -1266,6 +1266,26 @@ level.getRandom(), 2)`（字节码 129 是 `WorldGenLevel.getRandom()`），而
 | `pale_moss_patch`（`MossyCarpetBlock.placeAt`） | `--seeds 6 --chunks 40 --salt 7` | **2 处未解决**（240 中心 / 212336640 方块 / 0 skipped）。改区域随机源前是 15 处 |
 | 14 个已验证 placed feature 一起放开（`block_column,vines,bamboo,multiface_growth,cave_vines,sea_pickle,seagrass_*×4,patch_waterlily,spore_blossom,kelp_cold,lush_caves_vegetation`） | `--seeds 4 --chunks 12 --salt 7` | **0 不一致**（48 中心 / 42467328 方块 / 0 skipped） |
 
+#### 第五轮：合并 main 后的收尾（分支 `cb-wg-aquatic`）
+
+main 已把本分支（`1c9853c6`）合进去了，所以再 `git merge main` 时两边是同一批改动的两个副本，
+产生了大量「同一项出现两次」的冲突（`Opaque` 式重复枚举项 / match 分支 / 解析分支）。
+
+处理原则：**同一功能两份一模一样时保留 main 那份**，删掉本分支的副本。
+
+* `provider.rs`：`IntProvider::ClampedNormal` 的枚举项、`parse` 分支、`sample` 分支
+  各去重一次（保留 main 的 `number()` 版本）。
+* `placement.rs`：`SurfaceWaterDepthFilter` / `Unsupported` 的 match 分支去重。
+* `dispatch.rs`：`Ore` / `SimpleBlock` 的 `place_leaf` 分支去重。
+* `mod.rs`：`lake` / `large_dripstone` / `monster_room`（main）与
+  `mossy_carpet`（本分支）都保留。
+* `root_system.rs`（别人在本分支上的提交）有一个 `clippy::identity_op`：
+  `1u64 << (facts::STURDY_FULL + 0)` 改成 `1u64 << facts::STURDY_FULL`。
+
+另外修正了 `WorldGenRegion.random` 的采样点：`ChunkPos.getWorldPosition()` 是
+`new BlockPos(minBlockX, **0**, minBlockZ)`，y 恒为 **0**，不是维度的 `minY`。
+之前用 `min_y`（-64）是错的。
+
 #### 第四轮：`HashMap` 桶树化（分支 `cb-wg-aquatic`）
 
 提交：`e27882c6`（`WIP:` 开头，按工作模式保留）。
