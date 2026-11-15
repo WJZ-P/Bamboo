@@ -1883,22 +1883,33 @@ fn compare_capped_full(
 /// `placepiece` mode: official `StructureTemplate.placeInWorld` against
 /// `mc_bamboo_worldgen::structure::jigsaw::place::place_piece`, compared write by write.
 fn run_place_piece(mut command: Command, work_dir: &Path) -> Result<(), String> {
-    // 只挑单 palette 的模板：`getRandomPalette` 在这轮不是重点（已由 `jigsaw jigsaws` 覆盖），
-    // 而多 palette 会让每个查询的期望值依赖位置随机。
-    // Only single-palette templates: `getRandomPalette` is covered by `jigsaw jigsaws`, and
-    // multi-palette templates would make each expectation depend on the position roll.
-    let mut names: Vec<String> = blob::ENTRIES
-        .iter()
-        .filter(|(name, _, _)| {
-            StructureTemplate::load(name)
-                .is_ok_and(|t| t.palettes.len() == 1 && !t.blocks.is_empty())
-        })
-        .map(|(name, _, _)| (*name).to_owned())
-        .collect();
-    names.sort();
-    // 每 20 个取一个，控制规模。
-    // Take every 20th to keep the run small.
-    let picked: Vec<String> = names.iter().step_by(20).cloned().collect();
+    // 单 palette 的模板每 20 个取一个控制规模；多 palette 的 20 个模板**全取**，
+    // 因为它们的 `getRandomPalette` 会按位置选不同的 palette，是 `jigsaw jigsaws`
+    // 只验索引、验不到方块写入的那一块。两边都用同一个 piece 位置，
+    // `getRandomPalette` 的结果因此可复现。
+    // Single-palette templates are sampled every 20th to keep the run small; all 20
+    // multi-palette templates are included, because `getRandomPalette` picks a palette by
+    // position and `jigsaw jigsaws` only verifies the index, not the block writes. Both
+    // sides use the same piece position, so the roll is reproducible.
+    let mut single: Vec<String> = Vec::new();
+    let mut multi: Vec<String> = Vec::new();
+    for &(name, _, _) in blob::ENTRIES {
+        let Ok(template) = StructureTemplate::load(name) else {
+            continue;
+        };
+        if template.blocks.is_empty() {
+            continue;
+        }
+        if template.palettes.len() == 1 {
+            single.push(name.to_owned());
+        } else {
+            multi.push(name.to_owned());
+        }
+    }
+    single.sort();
+    multi.sort();
+    let mut picked: Vec<String> = single.iter().step_by(20).cloned().collect();
+    picked.extend(multi);
 
     let mut queries = Vec::new();
     for name in &picked {
