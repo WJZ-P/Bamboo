@@ -1892,6 +1892,7 @@ fn run_place_piece(mut command: Command, work_dir: &Path) -> Result<(), String> 
 fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
     let mut java_q: HashMap<String, (bool, usize)> = HashMap::new();
     let mut java_w: HashMap<String, Vec<String>> = HashMap::new();
+    let mut java_seeds: HashMap<String, Vec<String>> = HashMap::new();
     for line in stdout.lines() {
         let fields: Vec<&str> = line.split('|').collect();
         if fields.len() < 14 {
@@ -1905,12 +1906,19 @@ fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
             "W" => {
                 java_w.entry(key).or_default().push(fields[13..].join("|"));
             }
+            "S" => {
+                java_seeds
+                    .entry(key)
+                    .or_default()
+                    .push(fields[13..].join("|"));
+            }
             _ => {}
         }
     }
 
     let mut checked = 0usize;
     let mut writes_checked = 0usize;
+    let mut seeds_checked = 0usize;
     let mut mismatches = 0usize;
     let mut first: Option<String> = None;
     for query in queries {
@@ -1945,6 +1953,7 @@ fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
         #[derive(Default)]
         struct Recorder {
             writes: Vec<(i32, i32, i32, String)>,
+            seeds: Vec<(i32, i32, i32, i64)>,
         }
         impl mc_bamboo_worldgen::structure::jigsaw::place::BlockWriter for Recorder {
             fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
@@ -1955,6 +1964,16 @@ fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
                     mc_bamboo_worldgen::structure::jigsaw::place::state_text(state),
                 ));
                 true
+            }
+            // 只记 `LootTableSeed`：Java 侧也只输出这个。
+            // Only the `LootTableSeed`; the Java side prints just that too.
+            fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {
+                if let mc_bamboo_nbt::Tag::Compound(entries) = nbt
+                    && let Some((_, mc_bamboo_nbt::Tag::Long(seed))) =
+                        entries.iter().find(|(key, _)| key == "LootTableSeed")
+                {
+                    self.seeds.push((x, y, z, *seed));
+                }
             }
         }
         let level = Level;
@@ -2008,6 +2027,37 @@ fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
                 }
             }
         }
+        // 随机容器的 `LootTableSeed`。官方只在「该位置带 nbt 且方块实体是
+        // `RandomizableContainer`」时覆盖，所以这一项同时验证判定与取数次数。
+        // The `LootTableSeed` of randomizable containers; vanilla only overwrites it when
+        // the position carries nbt and the block entity is a `RandomizableContainer`.
+        let mut my_seeds = recorder.seeds.clone();
+        my_seeds.sort_unstable();
+        let want_seeds = java_seeds.get(&key).cloned().unwrap_or_default();
+        if want_seeds.len() != my_seeds.len() {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{key}: container seeds rust {} java {}",
+                    my_seeds.len(),
+                    want_seeds.len()
+                ));
+            }
+        } else {
+            for (index, (x, y, z, seed)) in my_seeds.iter().enumerate() {
+                let got = format!("{x}|{y}|{z}|{seed}");
+                if want_seeds.get(index).is_none_or(|line| *line != got) {
+                    mismatches += 1;
+                    if first.is_none() {
+                        first = Some(format!(
+                            "{key} seed[{index}]: rust {got} java {:?}",
+                            want_seeds.get(index)
+                        ));
+                    }
+                }
+            }
+        }
+        seeds_checked += my_seeds.len();
     }
     if checked != queries.len() {
         return Err(format!(
@@ -2021,7 +2071,10 @@ fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
             first.unwrap_or_default()
         ));
     }
-    println!("jigsaw placepiece: {checked} queries, {writes_checked} writes, all identical");
+    println!(
+        "jigsaw placepiece: {checked} queries, {writes_checked} writes, {seeds_checked} seeds, \
+         all identical"
+    );
     Ok(())
 }
 

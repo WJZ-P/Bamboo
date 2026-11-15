@@ -1136,7 +1136,7 @@ public final class JigsawOracle {
             settings.setMirror(mirror);
             settings.setBoundingBox(bb);
             settings.setLiquidSettings(LiquidSettings.IGNORE_WATERLOGGING);
-            RecordingLevel level = new RecordingLevel();
+            RecordingLevel level = new RecordingLevel(registries);
             // `RandomSource.create(0)`：这一轮不比随机相关行为（没有 processor）。
             // `RandomSource.create(0)`: nothing random in this round (no processors).
             boolean placed = template.placeInWorld(
@@ -1155,6 +1155,23 @@ public final class JigsawOracle {
                         .append(w.pos().getY()).append('|')
                         .append(w.pos().getZ()).append('|')
                         .append(BuiltInRegistries.BLOCK.getKey(w.state().getBlock())).append('\n');
+            }
+            level.collectSeeds();
+            // `S|key|x|y|z|seed`：带 nbt 且方块实体是随机容器的位置。
+            // 按 `(x, y, z)` 排序（`TreeMap<BlockPos>` 用的是 `Vec3i.compareTo`，即 `y, z, x`，
+            // 与 Rust 侧不同，所以这里显式重排）。
+            // `S|key|x|y|z|seed`: positions with nbt whose block entity is a randomizable
+            // container, sorted by `(x, y, z)` to match the Rust side (`BlockPos.compareTo`
+            // orders by `y, z, x`).
+            java.util.List<BlockPos> seedOrder = new java.util.ArrayList<>(level.seeds.keySet());
+            seedOrder.sort(java.util.Comparator.<BlockPos>comparingInt(BlockPos::getX)
+                    .thenComparingInt(BlockPos::getY).thenComparingInt(BlockPos::getZ));
+            for (BlockPos pos : seedOrder) {
+                out.append("S|").append(key).append('|')
+                        .append(pos.getX()).append('|')
+                        .append(pos.getY()).append('|')
+                        .append(pos.getZ()).append('|')
+                        .append(level.seeds.get(pos)).append('\n');
             }
         }
         System.out.print(out);
@@ -1273,6 +1290,42 @@ public final class JigsawOracle {
      */
     private static final class RecordingLevel {
         private final List<Write> writes = new java.util.ArrayList<>();
+        /**
+         * 官方在 `blockInfo.nbt != null` 时先写一个 `BARRIER`——这是唯一能从
+         * `setBlock` 序列里看出「这个位置带 nbt」的信号。
+         *
+         * <p>Vanilla writes a `BARRIER` first when `blockInfo.nbt != null`; that is the only
+         * signal in the `setBlock` sequence telling us the position carries nbt.
+         */
+        private final java.util.Set<BlockPos> nbtPositions = new java.util.HashSet<>();
+        /** 带 nbt 且有方块实体的位置 → 方块实体（`getBlockEntity` 要返回它）。 */
+        private final java.util.Map<BlockPos, Object> entities = new java.util.HashMap<>();
+        /** 最终种子（`placeInWorld` 之后从方块实体读回）。 */
+        private final java.util.Map<BlockPos, Long> seeds = new java.util.TreeMap<>();
+        private final RegistryAccess registries;
+
+        RecordingLevel(RegistryAccess registries) {
+            this.registries = registries;
+        }
+
+        /**
+         * 收集种子的最终值。只收「带 nbt 且方块实体是随机容器」的位置——这与官方
+         * `if (blockInfo.nbt != null) { if (blockEntity instanceof RandomizableContainer) ... }`
+         * 完全对应。
+         *
+         * <p>Collect the final seed values. Only positions that carried nbt and whose block
+         * entity is a `RandomizableContainer`, exactly matching vanilla.
+         */
+        void collectSeeds() {
+            for (var entry : this.entities.entrySet()) {
+                if (!this.nbtPositions.contains(entry.getKey())) {
+                    continue;
+                }
+                if (entry.getValue() instanceof net.minecraft.world.RandomizableContainer c) {
+                    this.seeds.put(entry.getKey(), c.getLootTableSeed());
+                }
+            }
+        }
 
         net.minecraft.world.level.ServerLevelAccessor proxy() {
             return (net.minecraft.world.level.ServerLevelAccessor)
@@ -1284,6 +1337,22 @@ public final class JigsawOracle {
                                     BlockPos pos = (BlockPos) args[0];
                                     BlockState state = (BlockState) args[1];
                                     this.writes.add(new Write(pos.immutable(), state));
+                                    // 写 `BARRIER` 说明这个位置带 nbt；随后那次真方块写入时
+                                    // 建方块实体，好让官方的 `getBlockEntity` 返回非 null
+                                    // （否则 `LootTableSeed` 的覆盖根本不会执行）。
+                                    // Writing `BARRIER` means the position carries nbt; build
+                                    // the block entity on the real write so vanilla's
+                                    // `getBlockEntity` is non-null and the `LootTableSeed`
+                                    // overwrite actually runs.
+                                    if (state.is(Blocks.BARRIER)) {
+                                        this.nbtPositions.add(pos.immutable());
+                                    } else if (this.nbtPositions.contains(pos)
+                                            && state.getBlock() instanceof net.minecraft.world.level.block.EntityBlock eb) {
+                                        Object be = eb.newBlockEntity(pos.immutable(), state);
+                                        if (be != null) {
+                                            this.entities.put(pos.immutable(), be);
+                                        }
+                                    }
                                     yield true;
                                 }
                                 case "getBlockState" -> Blocks.AIR.defaultBlockState();
@@ -1293,7 +1362,8 @@ public final class JigsawOracle {
                                 case "getMinY" -> JigsawOracle.MIN_Y;
                                 case "getHeight" ->
                                         method.getParameterCount() == 0 ? 384 : JigsawOracle.MIN_Y + 1;
-                                case "getBlockEntity" -> null;
+                                case "getBlockEntity" -> this.entities.get((BlockPos) args[0]);
+                                case "registryAccess" -> this.registries;
                                 case "getRandom" -> RandomSource.create(0L);
                                 case "toString" -> "RecordingLevel";
                                 case "hashCode" -> System.identityHashCode(self);
