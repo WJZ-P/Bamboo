@@ -3252,10 +3252,13 @@ fn run_block_entity_modifier(mut command: Command, work_dir: &Path) -> Result<()
             // 同名嵌套键与只在 existing 里存在的键。
             // A nested key present in both, plus one only in `existing`.
             "{Nested:{A:9,B:9},Deep:{X:{Y:1}}}",
-            // 标量与嵌套混合（列表值本仓库的 SNBT 子集不支持，用嵌套代替）。
-            // Scalars mixed with nesting (the repo's SNBT subset has no list form, so
-            // nesting stands in for it).
+            // 标量与嵌套混合。
+            // Scalars mixed with nesting.
             "{Scalar:\"s\",Deeper:{X:{Y:{Z:1}}}}",
+            // 列表值：与数据里的列表同键冲突时，「整体替换」与「逐元素合并」结果不同。
+            // List values: when the key collides with a list in the data, replacing the
+            // whole list and merging element-wise differ.
+            "{List:[1,2,3],Other:{L:[4b,5b]}}",
         ] {
             for loot in [
                 "minecraft:archaeology/trail_ruins_common",
@@ -3430,49 +3433,243 @@ fn compare_block_entity_modifier(stdout: &str, queries: &[String]) -> Result<(),
 /// 对拍里只用固定几组手写输入，不需要完整解析器。
 ///
 /// Minimal SNBT for the fixed hand-written inputs: compounds, quoted strings and ints.
+/// 解析 SNBT 子集，返回 `Tag`。
+///
+/// 支持：复合 `{k:v,...}`、列表 `[v,...]`（元素必须同型）、带引号的字符串
+/// （含 \`\\"\` 与 \`\\\\\` 转义）、以及带类型后缀的数字
+/// `1b` / `2s` / `3` / `4L` / `5.0f` / `6.0d`。裸 `true`/`false` 按 Java 的
+/// SNBT 规范当作 byte。
+///
+/// 不支持数组（`[B;...]` / `[I;...]` / `[L;...]`）与下标语法；对拍用不到。
+///
+/// Parses an SNBT subset into a `Tag`: compounds, homogeneous lists, quoted strings with
+/// \`\\"\` / \`\\\\\` escapes, and numbers with the `b` / `s` / `L` / `f` / `d`
+/// suffixes. Bare `true`/`false` become bytes, as in Java's SNBT. Arrays and index syntax
+/// are unsupported; the oracle does not need them.
 fn parse_snbt(text: &str) -> Result<mc_bamboo_nbt::Tag, String> {
-    use mc_bamboo_nbt::Tag;
-    let trimmed = text.trim();
-    let Some(inner) = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
-        return Err(format!("bad snbt {text}"));
-    };
-    let mut entries = Vec::new();
-    if inner.trim().is_empty() {
-        return Ok(Tag::Compound(entries));
+    let chars: Vec<char> = text.chars().collect();
+    let mut at = 0usize;
+    let tag = parse_snbt_value(&chars, &mut at)?;
+    skip_snbt_ws(&chars, &mut at);
+    if at != chars.len() {
+        return Err(format!("trailing snbt input in {text}"));
     }
-    let mut depth = 0;
-    let mut start = 0;
-    let bytes: Vec<char> = inner.chars().collect();
-    let mut parts = Vec::new();
-    for (index, ch) in bytes.iter().enumerate() {
-        match ch {
-            '{' => depth += 1,
-            '}' => depth -= 1,
-            ',' if depth == 0 => {
-                parts.push(bytes[start..index].iter().collect::<String>());
-                start = index + 1;
+    Ok(tag)
+}
+
+fn skip_snbt_ws(chars: &[char], at: &mut usize) {
+    while *at < chars.len() && chars[*at].is_whitespace() {
+        *at += 1;
+    }
+}
+
+/// 解析一个值，推进 `at`。
+///
+/// Parse one value and advance `at`.
+fn parse_snbt_value(chars: &[char], at: &mut usize) -> Result<mc_bamboo_nbt::Tag, String> {
+    skip_snbt_ws(chars, at);
+    let Some(&first) = chars.get(*at) else {
+        return Err("unexpected end of snbt".to_owned());
+    };
+    match first {
+        '{' => parse_snbt_compound(chars, at),
+        '[' => parse_snbt_list(chars, at),
+        '"' => parse_snbt_string(chars, at),
+        _ => parse_snbt_scalar(chars, at),
+    }
+}
+
+fn parse_snbt_compound(chars: &[char], at: &mut usize) -> Result<mc_bamboo_nbt::Tag, String> {
+    use mc_bamboo_nbt::Tag;
+    *at += 1; // '{'
+    let mut entries = Vec::new();
+    loop {
+        skip_snbt_ws(chars, at);
+        match chars.get(*at) {
+            Some('}') => {
+                *at += 1;
+                break;
             }
+            Some(',') => {
+                *at += 1;
+                continue;
+            }
+            None => return Err("unterminated snbt compound".to_owned()),
             _ => {}
         }
-    }
-    parts.push(bytes[start..].iter().collect::<String>());
-    for part in parts {
-        let (key, value) = part.split_once(':').ok_or("bad snbt entry")?;
-        let value = value.trim();
-        let tag = if value.starts_with('{') {
-            parse_snbt(value)?
-        } else if let Some(text) = value.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-            Tag::String(text.to_owned())
+        // key：带引号或裸标识符。
+        // The key, quoted or bare.
+        let key = if chars.get(*at) == Some(&'"') {
+            match parse_snbt_string(chars, at)? {
+                Tag::String(text) => text,
+                _ => return Err("snbt key is not a string".to_owned()),
+            }
         } else {
-            Tag::Int(
-                value
-                    .parse::<i32>()
-                    .map_err(|error| format!("bad snbt number {value}: {error}"))?,
-            )
+            let start = *at;
+            while *at < chars.len() && !matches!(chars[*at], ':' | ',' | '}') {
+                *at += 1;
+            }
+            chars[start..*at]
+                .iter()
+                .collect::<String>()
+                .trim()
+                .to_owned()
         };
-        entries.push((key.trim().to_owned(), tag));
+        skip_snbt_ws(chars, at);
+        if chars.get(*at) != Some(&':') {
+            return Err("snbt entry has no colon".to_owned());
+        }
+        if key.is_empty() {
+            return Err("snbt entry has an empty key".to_owned());
+        }
+        *at += 1;
+        let value = parse_snbt_value(chars, at)?;
+        entries.push((key, value));
+        skip_snbt_ws(chars, at);
+        match chars.get(*at) {
+            Some(',') => *at += 1,
+            Some('}') => {
+                *at += 1;
+                break;
+            }
+            _ => return Err("snbt compound entry is not terminated".to_owned()),
+        }
     }
     Ok(Tag::Compound(entries))
+}
+
+fn parse_snbt_list(chars: &[char], at: &mut usize) -> Result<mc_bamboo_nbt::Tag, String> {
+    use mc_bamboo_nbt::Tag;
+    *at += 1; // '['
+    let mut values = Vec::new();
+    loop {
+        skip_snbt_ws(chars, at);
+        match chars.get(*at) {
+            Some(']') => {
+                *at += 1;
+                break;
+            }
+            Some(',') => {
+                *at += 1;
+                continue;
+            }
+            None => return Err("unterminated snbt list".to_owned()),
+            _ => {}
+        }
+        values.push(parse_snbt_value(chars, at)?);
+        skip_snbt_ws(chars, at);
+        match chars.get(*at) {
+            Some(',') => *at += 1,
+            Some(']') => {
+                *at += 1;
+                break;
+            }
+            _ => return Err("snbt list entry is not terminated".to_owned()),
+        }
+    }
+    // 官方 SNBT 要求列表元素同型；这里也校验，否则编码时会写出非法 NBT。
+    // Vanilla SNBT requires homogeneous lists; checking here keeps the encoder honest.
+    if let Some(first) = values.first() {
+        let kind = std::mem::discriminant(first);
+        if values
+            .iter()
+            .any(|value| std::mem::discriminant(value) != kind)
+        {
+            return Err("snbt list mixes element types".to_owned());
+        }
+    }
+    Ok(Tag::List(values))
+}
+
+fn parse_snbt_string(chars: &[char], at: &mut usize) -> Result<mc_bamboo_nbt::Tag, String> {
+    use mc_bamboo_nbt::Tag;
+    *at += 1; // '"'
+    let mut out = String::new();
+    loop {
+        let Some(&ch) = chars.get(*at) else {
+            return Err("unterminated snbt string".to_owned());
+        };
+        *at += 1;
+        match ch {
+            '"' => break,
+            '\\' => {
+                let Some(&escaped) = chars.get(*at) else {
+                    return Err("unterminated snbt escape".to_owned());
+                };
+                *at += 1;
+                out.push(match escaped {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    other => other,
+                });
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(Tag::String(out))
+}
+
+fn parse_snbt_scalar(chars: &[char], at: &mut usize) -> Result<mc_bamboo_nbt::Tag, String> {
+    use mc_bamboo_nbt::Tag;
+    let start = *at;
+    while *at < chars.len() && !matches!(chars[*at], ',' | ']' | '}' | ':') {
+        *at += 1;
+    }
+    let raw = chars[start..*at].iter().collect::<String>();
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err("empty snbt scalar".to_owned());
+    }
+    if text == "true" {
+        return Ok(Tag::Byte(1));
+    }
+    if text == "false" {
+        return Ok(Tag::Byte(0));
+    }
+    // 带后缀的数字：b / s / L / f / d。后缀区分大小写（Java 用 `L` 表示 long）。
+    // Numbers with a `b` / `s` / `L` / `f` / `d` suffix; the suffix is case sensitive
+    // (`L` means long in Java's SNBT).
+    let (body, kind) = match text.chars().last() {
+        Some(suffix @ ('b' | 's' | 'L' | 'f' | 'd')) => (&text[..text.len() - 1], Some(suffix)),
+        _ => (text, None),
+    };
+    match kind {
+        Some('b') => body
+            .parse::<i8>()
+            .map(Tag::Byte)
+            .map_err(|error| format!("bad snbt byte {text}: {error}")),
+        Some('s') => body
+            .parse::<i16>()
+            .map(Tag::Short)
+            .map_err(|error| format!("bad snbt short {text}: {error}")),
+        Some('L') => body
+            .parse::<i64>()
+            .map(Tag::Long)
+            .map_err(|error| format!("bad snbt long {text}: {error}")),
+        Some('f') => body
+            .parse::<f32>()
+            .map(Tag::Float)
+            .map_err(|error| format!("bad snbt float {text}: {error}")),
+        Some('d') => body
+            .parse::<f64>()
+            .map(Tag::Double)
+            .map_err(|error| format!("bad snbt double {text}: {error}")),
+        _ => {
+            // 无后缀：带小数点或指数按 double，否则按 int（Java SNBT 也是这个规则）。
+            // No suffix: a decimal point or exponent means double, otherwise int, matching
+            // Java's SNBT rules.
+            if body.contains('.') || body.contains('e') || body.contains('E') {
+                body.parse::<f64>()
+                    .map(Tag::Double)
+                    .map_err(|error| format!("bad snbt double {text}: {error}"))
+            } else {
+                body.parse::<i32>()
+                    .map(Tag::Int)
+                    .map_err(|error| format!("bad snbt int {text}: {error}"))
+            }
+        }
+    }
 }
 
 /// `rc` 模式：`is_randomizable_container` 对官方 `instanceof RandomizableContainer`，
@@ -4174,4 +4371,100 @@ fn check_query(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod snbt_tests {
+    use super::parse_snbt;
+    use mc_bamboo_nbt::Tag;
+
+    /// 标量与后缀：无后缀整数是 int，带点按 double，后缀区分类型。
+    ///
+    /// Scalars and suffixes: bare integers are ints, a decimal point means double, and
+    /// suffixes select the type.
+    #[test]
+    fn scalars_and_suffixes() {
+        let Tag::Compound(entries) =
+            parse_snbt("{A:1,B:2b,C:3s,D:4L,E:5.5f,F:6.5d,G:true,H:false,I:-7}").unwrap()
+        else {
+            panic!("expected a compound");
+        };
+        let get = |key: &str| {
+            entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, tag)| tag.clone())
+                .unwrap_or_else(|| panic!("missing {key}"))
+        };
+        assert_eq!(get("A"), Tag::Int(1));
+        assert_eq!(get("B"), Tag::Byte(2));
+        assert_eq!(get("C"), Tag::Short(3));
+        assert_eq!(get("D"), Tag::Long(4));
+        assert_eq!(get("E"), Tag::Float(5.5));
+        assert_eq!(get("F"), Tag::Double(6.5));
+        assert_eq!(get("G"), Tag::Byte(1));
+        assert_eq!(get("H"), Tag::Byte(0));
+        assert_eq!(get("I"), Tag::Int(-7));
+    }
+
+    /// 列表：同型可解析，混型必须报错（官方 SNBT 也不允许）。
+    ///
+    /// Lists: homogeneous ones parse, mixed ones must fail (vanilla SNBT rejects them too).
+    #[test]
+    fn lists_require_homogeneous_elements() {
+        let Tag::Compound(entries) = parse_snbt("{L:[1,2,3],Nested:{L:[4b,5b]}}").unwrap() else {
+            panic!("expected a compound");
+        };
+        let some = |key: &str| {
+            entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, tag)| tag.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            some("L"),
+            Tag::List(vec![Tag::Int(1), Tag::Int(2), Tag::Int(3)])
+        );
+        let Tag::Compound(nested) = some("Nested") else {
+            panic!("expected a nested compound");
+        };
+        assert_eq!(nested[0].1, Tag::List(vec![Tag::Byte(4), Tag::Byte(5)]));
+        assert!(
+            parse_snbt("{Bad:[1,2b]}").is_err(),
+            "a mixed list must be rejected"
+        );
+        assert!(parse_snbt("{Empty:[]}").is_ok(), "an empty list is fine");
+    }
+
+    /// 字符串转义与键的两种写法。
+    ///
+    /// String escapes and both key spellings.
+    #[test]
+    fn strings_and_quoted_keys() {
+        let Tag::Compound(entries) = parse_snbt(r#"{"Quoted Key":"a\"b\\c","Plain":1}"#).unwrap()
+        else {
+            panic!("expected a compound");
+        };
+        assert_eq!(entries[0].0, "Quoted Key");
+        assert_eq!(entries[0].1, Tag::String("a\"b\\c".to_owned()));
+        assert_eq!(entries[1].0, "Plain");
+    }
+
+    /// 结构错误必须报错，不能静默吞掉。
+    ///
+    /// Structural errors must be reported, never swallowed.
+    #[test]
+    fn malformed_input_is_rejected() {
+        for text in [
+            "{A:1",
+            "[1,2",
+            "{A}",
+            "{:1}",
+            "{A:1}}",
+            "{A:\"unterminated}",
+        ] {
+            assert!(parse_snbt(text).is_err(), "{text} should not parse");
+        }
+    }
 }
