@@ -291,6 +291,25 @@ Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_heigh
   柱子下方是熔岩、十二个末影之眼全中的传送门。
 * **没接进 Director**：这些代码只被 oracle 调用，游戏里仍然没有结构。
 
+**海底神殿与林地府邸放置（2026-11-15，分支 `cb-wg-monument`，都已对拍 0 不一致）**：
+
+* `structure::pieces::ocean_monument_place` 及 `monument_rooms` / `monument_double_rooms`：
+  `MonumentBuilding` 与全部房间的 `postProcess`。对拍世界加了 `ocean`（海床 + 水 + 部分冰面）。
+  官方神殿里 364 处 `generateBox` 的边缘块和填充块都相同，所以「边缘 ≠ 填充」这一支
+  仍然只有单元测试覆盖。
+* `structure::pieces::woodland_mansion::place_piece`（`TemplateStructurePiece.postProcess`）
+  与 `after_place`：模板放置走 `structure::template_place`，数据标记处理箱子和
+  `Mage` / `Warrior` / `Group of Allays`（每只生物把标记格写一次空气，悦灵数量取
+  `PieceLevel::level_random`）。
+* `state_transform` 改成按方块类和祖先类分派，覆盖官方所有重写 `rotate` / `mirror` 的方块
+  类；`up` / `down` 朝向在旋转时保持不变。
+* 模板放置照 `placeInWorld`：带 NBT 的方块先写 `BARRIER`；`RandomizableContainer` 取一次
+  `nextLong()`（`WorldGenRegion.getBlockEntity` 会把 `DUMMY` 换成真方块实体）；
+  `placeLiquid` 按 `WorldGenRegion` 语义（不做邻居形状更新），`toFill` 与回填循环不看
+  `placeLiquid` 的返回值。生成期天空光读 15（区块还没点光）。
+* **当前状态**：神殿 32 查询 298 万个位置、府邸 32 查询 380 万个位置，0 不一致，每次调用的
+  写入次数也全部相同；抽样开 `STRUCTURE_PLACE_TRACE=1` 也是 0。
+
 ## 1. 官方 26.3 的结构生成全景
 
 `ChunkStatus` 顺序（`docs/worldgen.md`）：`empty` → `structure_starts` →
@@ -749,7 +768,7 @@ structures (Compound)
 | 2 | 数据导出：`worldgen.json` 加四键，Rust 解析骨架 | `extract` 重跑无 diff（除四键）、旧 `chunkgen --through carvers` 仍 0 | **做完**：重跑无 diff、`--through carvers` 小样本 0 不一致 |
 | 3 | 放置：`random_spread`（含频率削减、exclusion zone、spread type）、`concentric_rings` 几何 | 大范围区块「哪个区块有哪个结构起点」0 不一致；新对拍先故意改坏一处确认会失败 | **做完**：20 集 × 464 查询 = 9280 放置比较 + 9744 加权选择比较 0 不一致；`concentric_rings` 6 种子 768 环位置 + 864 `isStructureChunk` 0 不一致 |
 | 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **部分做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿（`cb-wg-multipiece` 240 查询 25660 结构件 0 不一致）已做；需要模板的单件结构（雪屋 / 沉船 / 海底遗迹 / 废弃传送门）、林地府邸、jigsaw 结构件没做 |
-| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分完成**：`structure::piece_place`（放置辅助）、`structure::state_transform`（mirror/rotate）、`structure::pieces::mineshaft_place`（矿井四种）与 `stronghold_place`（要塞十二种）已移植，`structure-place` 对拍对矿井和要塞都是 0 不一致（2026-11-15）。**没有接进 Director**，见第 0 节「多件式结构放置」 |
+| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分完成**：`structure::piece_place`（放置辅助）、`structure::state_transform`（mirror/rotate）、`structure::pieces::mineshaft_place`（矿井四种）与 `stronghold_place`（要塞十二种）已移植，`structure-place` 对拍对矿井和要塞都是 0 不一致（2026-11-15）；海底神殿与林地府邸（含模板放置与 `afterPlace`）也是 0 不一致（`cb-wg-monument`）。**没有接进 Director**，见第 0 节「多件式结构放置」 |
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | **做完（纯函数 + 对拍，`cb-wg-beard`）**：`beard` 12 用例 5,912,076 比较 0 不一致（kernel / sampleValue / sampleVolume / affectedBox / 三阶段方块），`--break-self-test` 会失败；`chunkgen --through carvers` EMPTY 回归仍 0。**没接进 Director**：游戏里仍走 `EMPTY` |
 | 7 | 存档：`structures` 键写/读；海底神殿「只存一个 `MonumentBuilding`、读回重建房间图」的口径见 4.1 | 读回一致，`world-dir` 确认官方能读 | **通用编码做完**：`structure-save` 8 case 规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、`world-dir` 的 `SerializableChunkData.parse` 都能读。**多件式结构的读回做完**（`cb-wg-multipiece`）：子类字段带 NBT 类型，`PiecesContainer.load` / `loadStaticStart` / `regeneratePiecesAfterLoad` 移植并对拍（`structure-load` 80 查询、8218 读回件、656 重建行 0 不一致），见第 0 节「多件式结构存档」 |
 
