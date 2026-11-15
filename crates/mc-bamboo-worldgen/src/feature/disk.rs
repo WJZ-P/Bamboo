@@ -43,7 +43,8 @@ impl DiskFeature {
                 object
                     .get("state_provider")
                     .ok_or("disk has no state_provider")?,
-            )?,
+            )
+            .ok_or("disk has an unported state_provider")?,
         })
     }
 

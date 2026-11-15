@@ -463,6 +463,42 @@ WebView2 的渲染进程不算在内。
   （2026-11-14 按实现更新：`docs/worldgen.md`「还没做」、`docs/performance-optimizations.md` 第 9 节、
   README「区块级对拍」；合并提交 `ae76868`、`9a96b5e`、`9d6e94c`。第二轮 features 接入见
   `docs/worldgen.md`、`docs/worldgen-features-plan.md`、`docs/world-model-design.md` 5.3.1 / 第 16 节）
+- 地物（`ChunkStatus.FEATURES`）阶段：纯函数已按 `docs/worldgen-features-plan.md` 的分类
+  逐类移植，接入游戏流水线由流水线分支负责。按 5.2 的分类，非植被里已按官方 26.3
+  移植并对拍 0 不一致的有 `ore`（流水线里程碑）、`disk`、`underwater_magma`、
+  `spring_feature`，以及洞穴和冰雪类的 `large_dripstone`、`speleothem_cluster`
+  （`dripstone_cluster` / `sulfur_spike_cluster`）、`speleothem`
+  （`pointed_dripstone` / `sulfur_spike`）、`spike`（`ice_spike`）、
+  `blue_ice`、`disk` 的 `ice_patch` 和 `freeze_top_layer`；它们共用 `dripstone_utils`
+  （`SpeleothemUtils`、`Column.scan`、`FloatProvider`、`Mth` 助手、带属性的
+  `pointed_dripstone` 状态），`WorldgenRandom` 补了 `nextGaussian`，`FeatureWorld` 带
+  `seaLevel`，`placement.rs` 补了 `environment_scan`，`provider.rs` 补了
+  `clamped_normal`，Java 对拍代理补了 `isWaterAt` / `isInsideBuildHeight` /
+  `getBrightness`。`chunkgen` 的 `--ore-only` 已泛化成 `--types ID,ID`（也认
+  `--feature-types`）诊断白名单，过滤不动 `features_per_step` 的全局 index。
+  已知限制：`blue_ice` 按 `BlueIceFeature.java` 移植，但它要先有相邻的 `packed_ice`
+  （原版来自 `iceberg`，属 `cb-wg-feat-a` 的冰山、尚未合入），`--types` 白名单里没有
+  `iceberg` 就不会有 `packed_ice`，所以现有的逐方块对拍里 `blue_ice` 从不放方块、
+  0 不一致是「空跑」的；等 `iceberg` 合入后要用
+  `--types minecraft:blue_ice,minecraft:iceberg,...` 补对拍。
+  step 7 地下装饰里的 `sculk_vein` 由 `multiface_growth` 覆盖（代码来自 `cb-wg-aquatic`），
+  在 `deep_dark` 定点对拍 0 不一致；**注意默认坐标（`FIXED_CHUNKS` + 随机）下它一次都不放方块，
+  必须用 `--chunk -42 111 --scan N`（种子 0 的 `deep_dark`）才比得到**。
+  `sculk_patch`（`SculkPatchFeature` + `SculkSpreader`）的移植已写在
+  `feature/sculk_patch.rs`，但**还没对拍到 0 不一致，所以不接入 dispatch**：
+  `parse_leaf` 对它返回 `None`，主循环把 `sculk_patch_deep_dark` 整块标 `unsupported`。
+  现状是 `deep_dark` 那个区块比官方少 8 格方块（单区块 8 mismatches、`--scan 3` 160 处），
+  `--steps 0` 基线为 0 可确认差异来自这一步。两边的写入序列前 21 行一致、第 22 行分叉，
+  怀疑是同一格 `sculk_vein` 的面集合在两个时间点不同，细节见汇报。
+  其余非植被类型（`lake`、`geode`、`iceberg`、`block_blob`、`monster_room`、`fossil`、
+  `overlay`）以及全部植被类型，在完整 11 步对拍里仍标 `unsupported` / `skipped`：
+  `fossil` 要生成器导出结构模板、`monster_room` 要刷怪笼 / 战利品表 / 方块实体；
+  植被由 `cb-wg-feat-b` 负责。
+  `freeze_top_layer` 已移植并逐方块 0 不一致：它复用 `biome_temperature` 里的
+  `getHeightAdjustedTemperature`，逐点群系由主循环的 `BiomeManager` 未缓存解算器给出，
+  没有改 `Feature::place` 签名（在 `composition.rs` 的 `place_feature` 里单开一个分支）。
+  已移植的类型都不产生方块实体，所以 `FeatureResult` 的方块实体 / POI / 后期处理位置表输出
+  也还没补；接进游戏时按 `docs/world-model-design.md` 5.3.1 合 9 宫格快照和写增量。
 - 结构生成（`docs/worldgen-structures-plan.md`）目前是纯函数 + 官方对拍，没有接进游戏：
   `worldgen.json` 从官方导出了 `structure_set` / `structure` / `template_pool` / `processor_list`
   四个注册表。`mc-bamboo-worldgen::structure` 移植并逐格对拍了 `random_spread` 的潜在起点、
@@ -484,11 +520,28 @@ WebView2 的渲染进程不算在内。
   `isStructureChunk` 命中过滤（那是已对拍的 `start_plans` 的职责），`StructureStart` 仍只是数据类型。
   本轮新增并完成对拍的里程碑：四个代码生成单件结构（沙漠神殿、丛林神殿、女巫小屋、
   埋藏的宝藏）的结构件布局（`structure-single`，8 种子 × 12 区块 × 4 类 = 384 查询、
-  384 结构件、384 行比较 0 不一致）；存档 `structures` 键
+  384 结构件、384 行比较 0 不一致）；雪屋 / 沉船 / 海底遗迹三种需要 `.nbt` 模板的单件结构
+  布局（`structure-templated`，8 种子 × 12 区块 × 5 类 = 480 查询、1685 结构件、1685 行
+  比较 0 不一致——雪屋覆盖 3 个模板 / 4 种 rotation / 1–12 件的深度分支，沉船覆盖 23 个
+  模板（沙滩表 11 + 海洋表 20，两表重叠 8 个）、海底遗迹覆盖暖 / 冷两种群系、48 个模板、
+  大遗迹 cluster 分支 3–27 件；三处故意改坏——雪屋梯子 pivot 262 处、沉船 pivot 142 处、
+  海底遗迹 cluster 位置下界 68 处与冷水完好度 263 处——确认失败后还原回 0）；废弃传送门的
+  结构件布局（`structure-ruined-portal`，6 个结构变体 × 6 种子 × 18 区块 = 648 查询、
+  110 个结构件、110 行比较 0 不一致——覆盖五种 `VerticalPlacement`（`in_nether` 不做）、
+  `Mirror.FRONT_BACK` 与 `NONE`、`can_be_cold` 真假，`findSuitableY` 走新增的
+  `Generator::base_column` 整列原语；两处故意改坏——`findSuitableY` 的三格门槛改两格 23 处、
+  `MIRROR_FRONT_BACK` 常量 2 改 1 68 处——确认失败后还原回 0）；存档
+  `structures` 键
   （`structure-save`，8 case 的规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、
-  `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。仍没做：需要模板的单件结构
-  （雪屋、沉船、海底遗迹、废弃传送门）、jigsaw 结构件生成、`features` 阶段的 `placeInChunk` /
-  `postProcess` / processors / 方块实体 / 拼图替换，以及把结构起点真正接进 Director（`Beardifier` 见下面单独一条）；
+  `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。仍没做：
+  jigsaw 结构件生成、`features` 阶段的 `placeInChunk` /
+  `postProcess` / processors / 方块实体 / 拼图替换。`structure::post_process` 里有埋藏的宝藏
+  与女巫小屋、沙漠神殿三份 `postProcess` 的方块部分，新对拍 `structure-post-process` 按
+  **写入日志**（比「写前写后的状态差异」严格：结构写在地形上的方块不算状态变化，但官方确实写了）：
+  32 查询里**埋藏的宝藏 16 查询 0 不一致**，**女巫小屋 18 处不一致（未通过）**——Java 的地下
+  柱子比 Rust 低一格，根因还没定位；沙漠神殿没进查询集（`SKIPPED`），最后一次实测 6953 处
+  不一致。三份 `postProcess` **都没有接进 `feature/run.rs`**，游戏里结构件仍然一个方块都不放。
+  另有把结构起点真正接进 Director（`Beardifier` 见下面单独一条）；
   `.nbt` 结构模板已由 `cb-wg-jigsaw` 分支从官方 jar 原样导出成
   `mc-bamboo-data::structures`（1511 个、4236847 gzip 字节，重跑无 diff），并用官方
   `NbtIo` 逐节点对拍 0 不一致；Rust 侧 `structure::template` 能读出方块、方块实体和拼图方块。
@@ -520,7 +573,7 @@ WebView2 的渲染进程不算在内。
   海底神殿「只存一个 `MonumentBuilding`、读回 `regeneratePiecesAfterLoad` 重建房间图」的
   存档口径写在 `docs/worldgen-structures-plan.md` 4.1。
   存档这一块（第 7 步里属于这四个结构的部分）也已落地：`structure::pieces::Piece` 的
-  子类字段带 NBT 类型（`Extra::Byte/Int/Str`），`structure::save::SavePiece::from_layout`
+  子类字段带 NBT 类型（`Extra::Byte/Int/Float/Str`），`structure::save::SavePiece::from_layout`
   逐键写出官方类型（布尔 Byte、`Num`/`Type`/`Steps` Int、矿井 `D` 走
   `Direction.LEGACY_ID_CODEC_2D` 的 Byte、模板名 String，`Entrances` 是
   `BoundingBox.CODEC.listOf()` 的 IntArray 列表）；读回侧移植了
@@ -543,7 +596,7 @@ WebView2 的渲染进程不算在内。
     覆盖栅栏（`CrossCollisionBlock` 四面）、墙上火把与按钮（`HorizontalDirectionalBlock` 的
     `facing`）、门（`DoorBlock`，镜像时还要 `cycle(HINGE)`）、铁轨（十种 `RailShape`）。
   * `structure::pieces::mineshaft_place`：矿井四种结构件（走廊 / 交叉口 / 楼梯 / 房间）的
-    `postProcess`。`structure-place` 对拍（`StructurePlaceOracle.java` 在假
+    `postProcess`。`structure-place` 对拍（`StructurePiecePlaceOracle.java` 在假
     `WorldGenLevel` 上跑官方 `postProcess`）目前 **354 处不一致**，集中在栅栏朝向、
     铁轨走向和少量缺位方块。
   * `structure::pieces::stronghold_place`：要塞十二种结构件（`ChestCorridor` /
@@ -552,7 +605,11 @@ WebView2 的渲染进程不算在内。
     `Library` / `PortalRoom`）的 `postProcess`，含 `SmoothStoneSelector` 与四种
     `SmallDoorType`。**已接入 `structure-place` 但全量对拍还跑不通**（Java 侧某个
     seed/chunk 组合抛异常，单条 case 正常），未验证。
-  * 对拍口径说明：`structure-place` 只比**非空气**方块。`ProtoChunk` 的
+  * 单件结构的 `postProcess`（埋藏的宝藏 / 女巫小屋 / 沙漠神殿）走另一个对拍子命令
+    `structure-post-process`（`StructurePlaceOracle.java`，按写入日志逐格比）：埋藏的宝藏
+    16 查询 0 不一致；女巫小屋 18 处不一致（没过）；沙漠神殿没进查询集（`SKIPPED`）。
+  * 对拍口径说明：`structure-place` / `structure-post-process` 都只比**非空气**方块。
+    `ProtoChunk` 的
     `PalettedContainer` 按 `state.isAir()` 判定，`cave_air` / `void_air` 在空 section 里
     不会真的落盘，读回来就是 `air`；结构件写空气只为挖空，变体没有意义。
   已知限制：以上全是纯函数 + oracle，**放置一律没接进 Director**，游戏里还没有结构；
@@ -563,24 +620,37 @@ WebView2 的渲染进程不算在内。
   所以存档读回后游戏里也还不会出现结构。Beardifier 见下面单独一条。
 - 地物（features）阶段的纯函数正按官方 `ChunkGenerator.applyBiomeDecoration` 逐类移植，
   游戏里的接入由流水线分支（邻居快照 + `features` 阶段）负责。已逐方块对拍
-  0 不一致的有 step 6 的矿石，以及 step 9 的植被子集（详见
-  `docs/worldgen-features-plan.md` 5.1）；其余类型仍明确标 `unsupported`，对拍时整块跳过，
-  不假装支持。本轮已移植：`simple_block` 的内联 bare-state 与 `weighted` /
-  `randomized_int` typed provider、一批继承 `VegetationBlock` 的存活判定（含
+  0 不一致的有 step 6 的矿石、step 9 的植被子集，以及水下植被与 `vegetation_patch`
+  （详见 `docs/worldgen-features-plan.md` 5.1）；其余类型仍明确标 `unsupported`，对拍时
+  整块跳过，不假装支持。已移植并接入：`simple_block` 的内联 bare-state 与 `weighted` /
+  `randomized_int` / `random_block` typed provider、holder 字符串引用（本轮补导出
+  `block_state_provider` 注册表）、一批继承 `VegetationBlock` 的存活判定（含
   `LeafLitterBlock` 的 `isFaceSturdy(UP)`）、双高植物 `DoublePlantBlock.placeAt`、
   `would_survive` / `has_sturdy_face` / `matching_fluids` 谓词、组合类
   （`random_selector` / `weighted_random_selector` / `simple_random_selector` /
-  `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）与 `clamped` IntProvider。
-  诚实的已知差异与未做：`to_place` 的 holder 字符串引用（`BLOCK_STATE_PROVIDER` 注册表未
-  导出）、蘑菇（要 `getRawBrightness`）、睡莲、孢子花、苔藓地毯、海泡菜等特殊
-  `canSurvive`；`schedule_tick` 忽略；`noise_threshold_count` / `noise_based_count` /
-  `environment_scan` / `surface_water_depth_filter` / `surface_relative_threshold_filter`
-  修饰器、`clamped_normal` / `weighted_list` IntProvider；方块实体数据（蜂巢、可疑沙等）。
-  树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）和水下/其余植被按分工移交给
-  `cb-wg-trees` / `cb-wg-aquatic`；`projected_random_patchy_square` 在 26.3 导出数据里没有
-  条目。组合类里只有 `simple_random_selector`（forest_flowers / flower_forest_flowers）
-  拿到 0 不一致对拍，其余组合类子项多为树/水生（已移交），place 逻辑按官方源码移植但
-  本轮未逐方块验证。此前 terrain 含水层在个别邻居区块（seed -1、chunk (52,-26)、
+  `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）、`block_column`
+  （仙人掌 / 甘蔗 / 海带 / 洞穴藤蔓）、
+  `vines`、`bamboo`、`multiface_growth`（发光地衣 / 幽匿脉络）、`vegetation_patch`
+  （苔藓 / 苍白苔藓），以及 `environment_scan` / `surface_relative_threshold_filter` /
+  `noise_based_count` / `random_chance` 修饰器和 `clamped` / `clamped_normal` /
+  `weighted_list` IntProvider。蘑菇的亮度判据（`FEATURES` 阶段 `getRawBrightness` 恒为 15，
+  只剩 `overrides_mushroom_light_requirement` 标签生效）、睡莲、孢子花、海泡菜、海草、
+  地毯的 `canSurvive` 也都已移植。
+  非植被那一批（`block_blob` / `geode` / `iceberg` / `lake` / `monster_room` /
+  `spring_feature` / `disk` / `underwater_magma` / `large_dripstone` / `speleothem` /
+  `speleothem_cluster` / `spike` / `blue_ice` / `freeze_top_layer`）由
+  `cb-wg-feat-a` 与 `cb-wg-caves` 移植，逐方块对拍 0 不一致。
+  诚实的已知差异与未做：苔藓地毯
+  （`MossyCarpetBlock` 的 `placeAt`，含侧面 `nextBoolean`）仍未支持；藓类 patch 的
+  地表集合用 Java `HashSet` 的迭代顺序决定植被随机数分配，本实现只复刻到链表，
+  **桶内 8 个以上元素时官方会转红黑树、顺序不同**（`moss_patch_ceiling` 因此有 10 处
+  未解决的 `cave_vines` 错位）；`waterlogged_vegetation_patch`
+  （`clay_pool_with_dripleaves`）代码已写但没有任何对拍，**故意不接入**；
+  `noise_threshold_count` / `count_on_every_layer` 修饰器；方块实体数据（蜂巢、可疑沙等）。
+  树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）已由 `cb-wg-trees` 合入 main；
+  `projected_random_patchy_square` 在 26.3 导出数据里没有条目。
+  组合类里只有 `simple_random_selector`（forest_flowers / flower_forest_flowers）
+  拿到 0 不一致对拍，其余组合类的 place 逻辑按官方源码移植但未逐方块验证。此前 terrain 含水层在个别邻居区块（seed -1、chunk (52,-26)、
   y=-54）与官方 3 格不一致，现已修复：补上官方 `Aquifer.NoiseBasedAquifer.computeSubstance`
   在「最近格子给的是水、正下方全局流体是岩浆」时跳过压力计算直接返回水的短路，并
   对齐 `shouldScheduleFluidUpdate` 的 similarity 门槛。该短路只影响岩浆层上边界 y=-54，

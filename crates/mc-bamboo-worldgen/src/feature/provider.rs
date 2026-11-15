@@ -72,12 +72,12 @@ impl VerticalAnchor {
 
 /// `IntProvider.sample(random)`。26.3 step 9 的 `count` / `offset` 用到 constant、
 /// uniform、trapezoid、biased_to_bottom、very_biased_to_bottom；递归的 clamped /
-/// weighted_list / clamped_normal 暂不支持，解析时报错让该 placed feature 标 unsupported。
+/// clamped_normal 也已支持，weighted_list 暂不支持。
 ///
 /// `IntProvider.sample(random)`: step 9 uses constant, uniform, trapezoid, and the
-/// two biased variants for `count` / `offset`. Recursive clamped / weighted_list /
-/// clamped_normal stay unsupported for now.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// two biased variants for `count` / `offset`. Recursive clamped / clamped_normal
+/// are supported; weighted_list is not.
+#[derive(Debug, Clone, PartialEq)]
 pub enum IntProvider {
     Constant(i32),
     Uniform {
@@ -102,6 +102,15 @@ pub enum IntProvider {
     /// `ClampedInt`: `clamp(source.sample(random), min, max)` with a recursive source.
     Clamped {
         source: Box<IntProvider>,
+        min: i32,
+        max: i32,
+    },
+    /// `ClampedNormalInt`：`(int)Mth.clamp(Mth.normal(random, mean, deviation), min, max)`。
+    ///
+    /// `ClampedNormalInt`: `(int)Mth.clamp(Mth.normal(random, mean, deviation), min, max)`.
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
         min: i32,
         max: i32,
     },
@@ -136,6 +145,12 @@ impl IntProvider {
                 .map(|n| n as i32)
                 .ok_or_else(|| format!("int provider {kind} has no {name}"))
         };
+        let number = |name: &str| -> Result<f64, String> {
+            object
+                .get(name)
+                .and_then(Value::as_f64)
+                .ok_or_else(|| format!("int provider {kind} has no {name}"))
+        };
         Ok(match kind {
             "minecraft:constant" => Self::Constant(integer("value")?),
             "minecraft:uniform" => Self::Uniform {
@@ -165,6 +180,14 @@ impl IntProvider {
                         .get("source")
                         .ok_or("clamped int provider has no source")?,
                 )?),
+                min: integer("min_inclusive")?,
+                max: integer("max_inclusive")?,
+            },
+            // `ClampedNormalInt`：mean / deviation 是 float，min / max 是 int。
+            // `ClampedNormalInt`: float mean/deviation, int min/max.
+            "minecraft:clamped_normal" => Self::ClampedNormal {
+                mean: number("mean")? as f32,
+                deviation: number("deviation")? as f32,
                 min: integer("min_inclusive")?,
                 max: integer("max_inclusive")?,
             },
@@ -226,6 +249,17 @@ impl IntProvider {
             // ClampedInt.sample：先 sample source（消费随机数），再 clamp。
             // ClampedInt.sample: sample the source (consuming random), then clamp.
             Self::Clamped { source, min, max } => source.sample(random).clamp(*min, *max),
+            // `ClampedNormalInt.sample`：先 `Mth.normal`，再 `Mth.clamp`，最后截断成 int。
+            // `ClampedNormalInt.sample`: `Mth.normal`, then `Mth.clamp`, then a cast to int.
+            Self::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => {
+                let normal = *mean + (random.next_gaussian() as f32) * *deviation;
+                crate::math::clamp(normal, *min as f32, *max as f32) as i32
+            }
             // WeightedList.getRandomOrThrow：nextInt(totalWeight) + 累计权重轮盘，
             // 选中的 IntProvider 再 sample（ConstantInt 不额外取数）。
             // WeightedList.getRandomOrThrow: nextInt(totalWeight) + cumulative wheel,
@@ -257,7 +291,8 @@ impl IntProvider {
             | Self::Trapezoid { max, .. }
             | Self::BiasedToBottom { max, .. }
             | Self::VeryBiasedToBottom { max, .. }
-            | Self::Clamped { max, .. } => *max,
+            | Self::Clamped { max, .. }
+            | Self::ClampedNormal { max, .. } => *max,
             // `WeightedListInt.maxInclusive()`：各个分支上界的最大值。
             // `WeightedListInt.maxInclusive()`: the largest upper bound among the branches.
             Self::WeightedList { entries, .. } => entries
@@ -278,7 +313,8 @@ impl IntProvider {
             | Self::Trapezoid { min, .. }
             | Self::BiasedToBottom { min, .. }
             | Self::VeryBiasedToBottom { min, .. }
-            | Self::Clamped { min, .. } => *min,
+            | Self::Clamped { min, .. }
+            | Self::ClampedNormal { min, .. } => *min,
             // `WeightedListInt.minInclusive()`：各个分支下界的最小值。
             // `WeightedListInt.minInclusive()`: the smallest lower bound among the branches.
             Self::WeightedList { entries, .. } => entries
@@ -286,103 +322,6 @@ impl IntProvider {
                 .map(|(_, provider)| provider.min_value())
                 .min()
                 .unwrap_or(0),
-        }
-    }
-}
-
-/// `FloatProvider`：`uniform` 与 `clamped_normal`（大型滴水石 / 滴水石簇用）。
-///
-/// `FloatProvider`: `uniform` and `clamped_normal` (used by the large dripstone and the
-/// speleothem cluster features).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum FloatProvider {
-    /// `UniformFloat`：`nextFloat() * (max - min) + min`。
-    ///
-    /// `UniformFloat`: `nextFloat() * (max - min) + min`.
-    Uniform { min: f32, max: f32 },
-    /// `ClampedNormalFloat`：`clamp(normal(mean, deviation), min, max)`。
-    ///
-    /// `ClampedNormalFloat`: `clamp(normal(mean, deviation), min, max)`.
-    ClampedNormal {
-        mean: f32,
-        deviation: f32,
-        min: f32,
-        max: f32,
-    },
-}
-
-impl FloatProvider {
-    /// `UniformFloat.MAP_CODEC` / `ClampedNormalFloat.MAP_CODEC`。
-    ///
-    /// `UniformFloat.MAP_CODEC` / `ClampedNormalFloat.MAP_CODEC`.
-    pub fn parse(value: &Value) -> Result<Self, String> {
-        // `FloatProviders.codec` 允许一个裸浮点数当常量 provider。
-        // `FloatProviders.codec` accepts a bare float as a constant provider.
-        if let Some(number) = value.as_f64() {
-            return Ok(Self::Uniform {
-                min: number as f32,
-                max: number as f32,
-            });
-        }
-        let object = value
-            .as_object()
-            .ok_or("float provider must be an object or a number")?;
-        let kind = object
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or("float provider has no type")?;
-        let number = |name: &str| -> Result<f32, String> {
-            object
-                .get(name)
-                .and_then(Value::as_f64)
-                .map(|value| value as f32)
-                .ok_or_else(|| format!("float provider has no {name}"))
-        };
-        match kind {
-            "minecraft:uniform" => {
-                let min = number("min_inclusive")?;
-                let max = number("max_exclusive")?;
-                if max < min {
-                    return Err("uniform float provider needs max >= min".to_owned());
-                }
-                Ok(Self::Uniform { min, max })
-            }
-            "minecraft:clamped_normal" => {
-                let min = number("min")?;
-                let max = number("max")?;
-                if max < min {
-                    return Err("clamped normal float provider needs max >= min".to_owned());
-                }
-                Ok(Self::ClampedNormal {
-                    mean: number("mean")?,
-                    deviation: number("deviation")?,
-                    min,
-                    max,
-                })
-            }
-            other => Err(format!("unsupported float provider {other}")),
-        }
-    }
-
-    /// `FloatProvider.sample(random)`。
-    ///
-    /// `FloatProvider.sample(random)`.
-    pub fn sample(&self, random: &WorldgenRandom) -> f32 {
-        match self {
-            // `Mth.randomBetween(random, min, maxExclusive)`。
-            // `Mth.randomBetween(random, min, maxExclusive)`.
-            Self::Uniform { min, max } => random.next_float() * (max - min) + min,
-            // `Mth.clamp(Mth.normal(random, mean, deviation), min, max)`。
-            // `Mth.clamp(Mth.normal(random, mean, deviation), min, max)`.
-            Self::ClampedNormal {
-                mean,
-                deviation,
-                min,
-                max,
-            } => {
-                let value = *mean + random.next_gaussian() as f32 * *deviation;
-                value.clamp(*min, *max)
-            }
         }
     }
 }
@@ -663,6 +602,46 @@ mod tests {
         let b = random();
         for _ in 0..1000 {
             let expected = b.next_int_between_inclusive(-3, 1).clamp(0, 1);
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
+
+    #[test]
+    fn weighted_list_selects_then_samples_like_official() {
+        // `cactus` 第二层花：distribution [{data:0,w:3},{data:1,w:1}]，total=4。
+        // getRandomOrThrow 先 nextInt(4)，选中项再 sample（这里都是 Constant，不取数）。
+        // `cactus` flower layer: distribution [{data:0,w:3},{data:1,w:1}], total=4.
+        // getRandomOrThrow consumes nextInt(4), then samples the selected Constant.
+        let value: Value = serde_json::from_str(
+            r#"{"distribution":[{"data":0,"weight":3},{"data":1,"weight":1}],"type":"minecraft:weighted_list"}"#,
+        )
+        .unwrap();
+        let provider = IntProvider::parse(&value).unwrap();
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let selection = b.next_int(4);
+            let expected = if selection < 3 { 0 } else { 1 };
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
+
+    #[test]
+    fn weighted_list_with_nested_provider_consumes_both_draws() {
+        // `cave_vine` 高度：distribution 里是 uniform(0,2)，weight 单项为 1。
+        // nextInt(1) 仍消费一次，再 sample uniform。两个同种子源应完全一致。
+        // `cave_vine` height: distribution holds uniform(0,2), single weight 1.
+        // nextInt(1) still consumes one draw, then the uniform samples.
+        let value: Value = serde_json::from_str(
+            r#"{"distribution":[{"data":{"min_inclusive":0,"max_inclusive":2,"type":"minecraft:uniform"},"weight":1}],"type":"minecraft:weighted_list"}"#,
+        )
+        .unwrap();
+        let provider = IntProvider::parse(&value).unwrap();
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let _ = b.next_int(1);
+            let expected = b.next_int_between_inclusive(0, 2);
             assert_eq!(provider.sample(&a), expected);
         }
     }

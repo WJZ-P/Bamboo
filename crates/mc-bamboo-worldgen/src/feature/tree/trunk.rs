@@ -170,7 +170,7 @@ impl TrunkPlacer {
         if !self.valid_tree_pos(place.world, pos) {
             return false;
         }
-        let Some(mut state) = config.trunk_provider.get_state_without_position(random) else {
+        let Some(mut state) = config.trunk_provider.get_state(random) else {
             return false;
         };
         if let LogAxis::Set(axis) = axis {

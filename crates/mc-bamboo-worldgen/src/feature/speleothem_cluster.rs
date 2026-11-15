@@ -1,637 +1,367 @@
-//! `SpeleothemClusterFeature`（滴水石簇 / 硫磺尖簇）。
+//! `SpeleothemClusterFeature`（`minecraft:speleothem_cluster`）：`dripstone_cluster` 和
+//! `sulfur_spike_cluster` 的洞穴簇。
 //!
-//! 照 `SpeleothemClusterFeature.place` 与 `placeColumn`：
-//! 先在原点用 `Column.scan` 上下找空腔边缘；对半径范围内的每一列，按「离边缘的距离」
-//! 算一个长柱概率，再按 `wetness` 决定是否在底部挖一格水面，按 `density` 和高度偏置
-//! 决定钟乳石 / 石笋的高度，最后把柱底换成 `base_block` 并铺 `pointed_block`。
-//! `Column.withFloor` 会把地板抬高 / 压低一格，`mergeTips` 决定尖端是否是 `tip_merge`。
+//! `place` 先取 height/wetness/density/xRadius/zRadius，再逐列 `placeColumn`：
+//! Column.scan、可选水池、钟乳/石笋高度（clamped_normal）、合并判定、growSpeleothem。
+//! 随机消费顺序（含所有短路分支）必须逐位照官方。
 //!
-//! `SpeleothemClusterFeature.place` and `placeColumn`: scan the cavity edges at the origin
-//! with `Column.scan`, then for every column in the radius compute a speleothem chance from
-//! its distance to the cluster edge, optionally carve a one-block pool from `wetness`, pick
-//! stalactite/stalagmite heights from `density` and the height bias, and finally replace the
-//! column base with `base_block` and lay `pointed_block`. `Column.withFloor` shifts the
-//! floor by one and `mergeTips` selects the `tip_merge` tip.
+//! `SpeleothemClusterFeature` (`minecraft:speleothem_cluster`): the `dripstone_cluster`
+//! and `sulfur_spike_cluster` cave clusters. `place` draws height/wetness/density/xRadius/
+//! zRadius, then runs `placeColumn` per column: Column.scan, optional pool, stalactite /
+//! stalagmite heights (clamped_normal), merge decision, growSpeleothem. The random draw
+//! order, including every short-circuit branch, must match the official bit for bit.
 
-use mc_bamboo_data::{facts, state_facts, state_fluid, tags};
+use mc_bamboo_data::blocks;
 use serde_json::Value;
 
-use crate::random::WorldgenRandom;
+use crate::{math, random::WorldgenRandom};
 
 use super::{
-    provider::{FloatProvider, IntProvider},
-    state::{apply_property, parse_state},
+    dripstone_utils::{
+        DIRECTION_OFFSETS, FloatProvider, HORIZONTAL, Materials, clamped_map_f32, clamped_map_f64,
+        fluid_is_water, grow_speleothem, in_block_tag, is_empty_or_water,
+        is_neither_empty_nor_water, replace_blocks_with_base_blocks, same_block, scan_column,
+    },
+    provider::IntProvider,
+    state::parse_state,
     world::FeatureWorld,
 };
 
-/// `SpeleothemUtils.createPointedBlock` 的两个属性名。
-///
-/// The two property names of `SpeleothemUtils.createPointedBlock`.
-const TIP_DIRECTION: &str = "vertical_direction";
-const THICKNESS: &str = "thickness";
-
-/// `SpeleothemClusterFeature` 的配置。
 #[derive(Debug, Clone)]
 pub struct SpeleothemClusterFeature {
-    pub base_block: u32,
-    pub pointed_block: u32,
-    pub replaceable_blocks: Vec<i32>,
-    pub floor_to_ceiling_search_range: i32,
-    pub height: IntProvider,
-    pub radius: IntProvider,
-    pub max_stalagmite_stalactite_height_diff: i32,
-    pub height_deviation: i32,
-    pub speleothem_block_layer_thickness: IntProvider,
-    pub density: FloatProvider,
-    pub wetness: FloatProvider,
-    pub chance_of_speleothem_at_max_distance_from_center: f32,
-    pub max_distance_from_edge_affecting_chance_of_speleothem: i32,
-    pub max_distance_from_center_affecting_height_bias: i32,
+    base_block: u32,
+    pointed_default: u32,
+    replaceable: String,
+    search_range: i32,
+    height: IntProvider,
+    radius: IntProvider,
+    max_height_diff: i32,
+    height_deviation: i32,
+    layer_thickness: IntProvider,
+    density: FloatProvider,
+    wetness: FloatProvider,
+    chance_at_max_distance: f32,
+    max_distance_edge: i32,
+    max_distance_center: i32,
 }
 
 impl SpeleothemClusterFeature {
     pub fn parse(config: &Value) -> Result<Self, String> {
         let object = config
             .as_object()
-            .ok_or("speleothem_cluster feature must be an object")?;
-        let field = |name: &str| -> Result<&Value, String> {
+            .ok_or("speleothem_cluster must be an object")?;
+        let int = |name: &str| -> Result<i32, String> {
             object
                 .get(name)
+                .and_then(Value::as_i64)
+                .map(|v| v as i32)
+                .ok_or_else(|| format!("speleothem_cluster has no {name}"))
+        };
+        let float = |name: &str| -> Result<f32, String> {
+            object
+                .get(name)
+                .and_then(Value::as_f64)
+                .map(|v| v as f32)
                 .ok_or_else(|| format!("speleothem_cluster has no {name}"))
         };
         Ok(Self {
-            base_block: parse_state(field("base_block")?)?,
-            pointed_block: parse_state(field("pointed_block")?)?,
-            replaceable_blocks: holder_set(field("replaceable_blocks")?)?,
-            floor_to_ceiling_search_range: int(field("floor_to_ceiling_search_range")?)?,
-            height: IntProvider::parse(field("height")?)?,
-            radius: IntProvider::parse(field("radius")?)?,
-            max_stalagmite_stalactite_height_diff: int(field(
-                "max_stalagmite_stalactite_height_diff",
-            )?)?,
-            height_deviation: int(field("height_deviation")?)?,
-            speleothem_block_layer_thickness: IntProvider::parse(field(
-                "speleothem_block_layer_thickness",
-            )?)?,
-            density: FloatProvider::parse(field("density")?)?,
-            wetness: FloatProvider::parse(field("wetness")?)?,
-            chance_of_speleothem_at_max_distance_from_center: number(field(
-                "chance_of_speleothem_at_max_distance_from_center",
-            )?)?,
-            max_distance_from_edge_affecting_chance_of_speleothem: int(field(
-                "max_distance_from_edge_affecting_chance_of_speleothem",
-            )?)?,
-            max_distance_from_center_affecting_height_bias: int(field(
-                "max_distance_from_center_affecting_height_bias",
-            )?)?,
+            base_block: parse_state(object.get("base_block").ok_or("no base_block")?)?,
+            pointed_default: parse_state(object.get("pointed_block").ok_or("no pointed_block")?)?,
+            replaceable: object
+                .get("replaceable_blocks")
+                .and_then(Value::as_str)
+                .ok_or("no replaceable_blocks")?
+                .trim_start_matches('#')
+                .to_owned(),
+            search_range: int("floor_to_ceiling_search_range")?,
+            height: IntProvider::parse(object.get("height").ok_or("no height")?)?,
+            radius: IntProvider::parse(object.get("radius").ok_or("no radius")?)?,
+            max_height_diff: int("max_stalagmite_stalactite_height_diff")?,
+            height_deviation: int("height_deviation")?,
+            layer_thickness: IntProvider::parse(
+                object
+                    .get("speleothem_block_layer_thickness")
+                    .ok_or("no layer_thickness")?,
+            )?,
+            density: FloatProvider::parse(object.get("density").ok_or("no density")?)?,
+            wetness: FloatProvider::parse(object.get("wetness").ok_or("no wetness")?)?,
+            chance_at_max_distance: float("chance_of_speleothem_at_max_distance_from_center")?,
+            max_distance_edge: int("max_distance_from_edge_affecting_chance_of_speleothem")?,
+            max_distance_center: int("max_distance_from_center_affecting_height_bias")?,
         })
     }
+}
 
-    /// 没有嵌套的未移植配置。
-    ///
-    /// No unported nested config.
-    pub fn supported(&self) -> bool {
-        true
+/// `getChanceOfStalagmiteOrStalactite`：float 版 `clampedMap`，结果拓宽成 double。
+/// `getChanceOfStalagmiteOrStalactite`: float `clampedMap`, widened to double.
+fn chance_of_speleothem(
+    feature: &SpeleothemClusterFeature,
+    x_radius: i32,
+    z_radius: i32,
+    dx: i32,
+    dz: i32,
+) -> f64 {
+    let x_distance = x_radius - dx.abs();
+    let z_distance = z_radius - dz.abs();
+    let distance = x_distance.min(z_distance);
+    f64::from(clamped_map_f32(
+        distance as f32,
+        0.0,
+        feature.max_distance_edge as f32,
+        feature.chance_at_max_distance,
+        1.0,
+    ))
+}
+
+fn can_be_adjacent_to_water(world: &FeatureWorld<'_>, pos: (i32, i32, i32)) -> bool {
+    let state = world.get_block(pos.0, pos.1, pos.2);
+    in_block_tag(state, "minecraft:base_stone_overworld") || fluid_is_water(state)
+}
+
+/// `canPlacePool`。
+/// `canPlacePool`.
+fn can_place_pool(
+    world: &FeatureWorld<'_>,
+    feature: &SpeleothemClusterFeature,
+    pos: (i32, i32, i32),
+) -> bool {
+    let (x, y, z) = pos;
+    let state = world.get_block(x, y, z);
+    if same_block(state, blocks::WATER)
+        || same_block(state, feature.base_block)
+        || same_block(state, feature.pointed_default)
+    {
+        return false;
     }
-}
-
-fn int(value: &Value) -> Result<i32, String> {
-    value
-        .as_i64()
-        .map(|value| value as i32)
-        .ok_or_else(|| "expected an int".to_owned())
-}
-
-fn number(value: &Value) -> Result<f32, String> {
-    value
-        .as_f64()
-        .map(|value| value as f32)
-        .ok_or_else(|| "expected a number".to_owned())
-}
-
-/// `HolderSet<Block>`：`#tag`、方块名或数组，解析成方块注册表 ID。
-///
-/// `HolderSet<Block>`: a `#tag`, a block name, or an array, as block registry IDs.
-fn holder_set(value: &Value) -> Result<Vec<i32>, String> {
-    let entries: Vec<String> = match value {
-        Value::String(name) => vec![name.clone()],
-        Value::Array(items) => items
-            .iter()
-            .map(|item| {
-                item.as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| "block holder entry is not a string".to_owned())
-            })
-            .collect::<Result<Vec<_>, String>>()?,
-        _ => return Err("block holder set is neither a string nor an array".to_owned()),
-    };
-    let mut ids = Vec::new();
-    for entry in entries {
-        match entry.strip_prefix('#') {
-            Some(tag) => {
-                let ids_in_tag =
-                    mc_bamboo_data::block_tag(tag).ok_or_else(|| format!("unknown tag {tag}"))?;
-                ids.extend_from_slice(ids_in_tag);
-            }
-            None => {
-                let block = mc_bamboo_data::block_by_name(&entry)
-                    .ok_or_else(|| format!("unknown block {entry}"))?;
-                let id = mc_bamboo_data::block_id_of_state(block.first_state)
-                    .ok_or_else(|| format!("unknown block {entry}"))?;
-                ids.push(id as i32);
-            }
+    if fluid_is_water(world.get_block(x, y + 1, z)) {
+        return false;
+    }
+    for direction in HORIZONTAL {
+        let (dx, dy, dz) = DIRECTION_OFFSETS[direction];
+        if !can_be_adjacent_to_water(world, (x + dx, y + dy, z + dz)) {
+            return false;
         }
     }
-    Ok(ids)
+    can_be_adjacent_to_water(world, (x, y - 1, z))
 }
 
-fn in_set(state: u32, ids: &[i32]) -> bool {
-    mc_bamboo_data::block_id_of_state(state).is_some_and(|id| ids.contains(&(id as i32)))
+fn is_lava(world: &FeatureWorld<'_>, pos: (i32, i32, i32)) -> bool {
+    same_block(world.get_block(pos.0, pos.1, pos.2), blocks::LAVA)
 }
 
-fn is_block(state: u32, name: &str) -> bool {
-    mc_bamboo_data::block_of_state(state).is_some_and(|block| block.name == name)
-}
-
-/// 两个状态是否属于同一个方块（官方 `state.is(block)` 的语义）。
-///
-/// Whether two states belong to the same block (the official `state.is(block)` semantics).
-fn same_block(state: u32, other: u32) -> bool {
-    match (
-        mc_bamboo_data::block_id_of_state(state),
-        mc_bamboo_data::block_id_of_state(other),
-    ) {
-        (Some(a), Some(b)) => a == b,
-        _ => false,
+/// `getSpeleothemHeight`：先 `nextFloat() > density` 短路，再 clampedMap(double)，
+/// 最后 clamped_normal 取整。
+/// `getSpeleothemHeight`: short-circuit on `nextFloat() > density`, then double
+/// `clampedMap`, then a clamped-normal sample cast to int.
+fn speleothem_height(
+    feature: &SpeleothemClusterFeature,
+    random: &WorldgenRandom,
+    dx: i32,
+    dz: i32,
+    density: f32,
+    max_height: i32,
+) -> i32 {
+    if random.next_float() > density {
+        return 0;
     }
+    let distance = dx.abs() + dz.abs();
+    let height_mean = clamped_map_f64(
+        distance as f64,
+        0.0,
+        feature.max_distance_center as f64,
+        max_height as f64 / 2.0,
+        0.0,
+    ) as f32;
+    let normal = height_mean + (random.next_gaussian() as f32) * (feature.height_deviation as f32);
+    math::clamp(normal, 0.0_f32, max_height as f32) as i32
 }
 
-/// `SpeleothemUtils.isEmptyOrWater`。
-fn is_empty_or_water(state: u32) -> bool {
-    state_facts(state) & facts::AIR != 0 || is_block(state, "minecraft:water")
-}
-
-/// `SpeleothemUtils.isNeitherEmptyNorWater`。
-fn is_neither_empty_nor_water(state: u32) -> bool {
-    !is_empty_or_water(state)
-}
-
-/// `Mth.clampedMap(value, min, max, outMin, outMax)`（float 版）。
-///
-/// `Mth.clampedMap(value, min, max, outMin, outMax)` (the float overload).
-fn clamped_map(value: f32, min: f32, max: f32, out_min: f32, out_max: f32) -> f32 {
-    let t = ((value - min) / (max - min)).clamp(0.0, 1.0);
-    out_min + t * (out_max - out_min)
-}
-
-/// 双端都有的 `Column.Range`（本轮只用这一种）。
-///
-/// The `Column.Range` shape with both ends present (the only shape used this round).
+/// `placeColumn` 的每列参数，单独打包避免一次传太多参数。
+/// Per-column parameters for `placeColumn`, bundled to keep the argument list short.
 #[derive(Debug, Clone, Copy)]
-struct Range {
-    floor: i32,
-    ceiling: i32,
+struct ColumnParams {
+    dx: i32,
+    dz: i32,
+    wetness: f32,
+    chance: f64,
+    cluster_height: i32,
+    density: f32,
 }
 
-impl Range {
-    fn height(self) -> i32 {
-        self.ceiling - self.floor - 1
-    }
-}
-
-/// `Column.scan` 的结果；本轮只关心「上下都有边缘」的 `Range`。
-///
-/// The result of `Column.scan`; this round only needs the `Range` with both edges.
-fn column_scan(
-    world: &FeatureWorld<'_>,
-    pos: (i32, i32, i32),
-    search_range: i32,
-    inside: impl Fn(u32) -> bool,
-    valid_edge: impl Fn(u32) -> bool,
-) -> Option<Range> {
-    if !inside(world.get_block(pos.0, pos.1, pos.2)) {
-        return None;
-    }
-    let ceiling = scan_direction(world, pos, search_range, &inside, &valid_edge, 1)?;
-    let floor = scan_direction(world, pos, search_range, &inside, &valid_edge, -1)?;
-    Some(Range { floor, ceiling })
-}
-
-fn scan_direction(
-    world: &FeatureWorld<'_>,
-    pos: (i32, i32, i32),
-    search_range: i32,
-    inside: &impl Fn(u32) -> bool,
-    valid_edge: &impl Fn(u32) -> bool,
-    step: i32,
-) -> Option<i32> {
-    let mut y = pos.1;
-    let mut index = 1;
-    while index < search_range && inside(world.get_block(pos.0, y, pos.2)) {
-        y += step;
-        index += 1;
-    }
-    if valid_edge(world.get_block(pos.0, y, pos.2)) {
-        Some(y)
-    } else {
-        None
-    }
-}
-
-/// `SpeleothemUtils.placeBaseBlockIfPossible`。
-fn place_base_block_if_possible(
+/// `SpeleothemClusterFeature.placeColumn`。
+/// `SpeleothemClusterFeature.placeColumn`.
+fn place_column(
+    feature: &SpeleothemClusterFeature,
     world: &mut FeatureWorld<'_>,
+    random: &WorldgenRandom,
     pos: (i32, i32, i32),
-    base: u32,
-    replaceable: &[i32],
-) -> bool {
-    let state = world.get_block(pos.0, pos.1, pos.2);
-    if in_set(state, replaceable) {
-        world.set_block_with_heightmaps(pos.0, pos.1, pos.2, base);
-        true
-    } else {
-        false
-    }
-}
-
-/// `SpeleothemUtils.createPointedBlock`。
-///
-/// `SpeleothemUtils.createPointedBlock`.
-fn create_pointed_block(pointed: u32, direction: &str, thickness: &str) -> Option<u32> {
-    let state = apply_property(pointed, TIP_DIRECTION, direction)?;
-    apply_property(state, THICKNESS, thickness)
-}
-
-/// 一株滴水石要写什么、往哪写。
-///
-/// One speleothem: which way it points, how long it is, and whether the tip is merged.
-struct SpeleothemShape {
-    downward: bool,
-    total_length: i32,
-    merged_tip: bool,
-}
-
-/// `SpeleothemUtils.buildBaseToTipColumn` + `growSpeleothem`：从 `start` 沿 `direction`
-/// 依次写 base / middle / frustum / tip。
-///
-/// `SpeleothemUtils.buildBaseToTipColumn` + `growSpeleothem`: write base / middle / frustum /
-/// tip from `start` along `direction`.
-fn grow_speleothem(
-    world: &mut FeatureWorld<'_>,
-    start: (i32, i32, i32),
-    shape: SpeleothemShape,
-    base: u32,
-    pointed: u32,
-    replaceable: &[i32],
+    params: ColumnParams,
 ) {
-    let downward = shape.downward;
-    let total_length = shape.total_length;
-    let merged_tip = shape.merged_tip;
-    let opposite = if downward { 1 } else { -1 };
-    let above = (start.0, start.1 + opposite, start.2);
-    let base_state = world.get_block(above.0, above.1, above.2);
-    // `SpeleothemUtils.isBase(state, baseBlock, replaceableBlocks)`。
-    // `SpeleothemUtils.isBase(state, baseBlock, replaceableBlocks)`.
-    if !(same_block(base_state, base) || in_set(base_state, replaceable)) {
+    let (x, _y, z) = pos;
+    let ColumnParams {
+        dx,
+        dz,
+        wetness,
+        chance,
+        cluster_height,
+        density,
+    } = params;
+    let Some(base_column) = scan_column(
+        world,
+        pos,
+        feature.search_range,
+        is_empty_or_water,
+        is_neither_empty_nor_water,
+    ) else {
+        return;
+    };
+    let ceiling = base_column.ceiling;
+    let base_floor = base_column.floor;
+    if ceiling.is_none() && base_floor.is_none() {
         return;
     }
-    let direction = if downward { "down" } else { "up" };
-    let mut pos = start;
-    let step = if downward { -1 } else { 1 };
-    let mut emit = |thickness: &str, world: &mut FeatureWorld<'_>| {
-        if let Some(mut state) = create_pointed_block(pointed, direction, thickness) {
-            // `PointedDripstoneBlock.WATERLOGGED` 按该格的 `isWaterAt` 设置。
-            // `PointedDripstoneBlock.WATERLOGGED` follows the cell's `isWaterAt`.
-            let waterlogged = state_fluid(world.get_block(pos.0, pos.1, pos.2)).fluid
-                != mc_bamboo_data::registries::fluid::EMPTY;
-            state = apply_property(
-                state,
-                "waterlogged",
-                if waterlogged { "true" } else { "false" },
-            )
-            .unwrap_or(state);
-            world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
-        }
-        pos.1 += step;
-    };
-    if total_length >= 3 {
-        emit("base", world);
-        for _ in 0..total_length - 3 {
-            emit("middle", world);
-        }
-    }
-    if total_length >= 2 {
-        emit("frustum", world);
-    }
-    if total_length >= 1 {
-        emit(if merged_tip { "tip_merge" } else { "tip" }, world);
-    }
-    let _ = base;
-}
 
-impl SpeleothemClusterFeature {
-    /// `SpeleothemClusterFeature.place`。
-    ///
-    /// `SpeleothemClusterFeature.place`.
-    pub fn place(
-        &self,
-        world: &mut FeatureWorld<'_>,
-        random: &WorldgenRandom,
-        origin: (i32, i32, i32),
-    ) -> bool {
-        if !is_empty_or_water(world.get_block(origin.0, origin.1, origin.2)) {
-            return false;
-        } // 取样顺序照官方：height、wetness、density、radius ×2。
-        // Draw order per the official code: height, wetness, density, then radius twice.
-        let height = self.height.sample(random);
-        let wetness = self.wetness.sample(random);
-        let density = self.density.sample(random);
-        let x_radius = self.radius.sample(random);
-        let z_radius = self.radius.sample(random);
-
-        for dx in -x_radius..=x_radius {
-            for dz in -z_radius..=z_radius {
-                let chance = self.chance_of_stalagmite_or_stalactite(x_radius, z_radius, dx, dz);
-                self.place_column(
-                    world,
-                    random,
-                    (origin.0 + dx, origin.1, origin.2 + dz),
-                    dx,
-                    dz,
-                    wetness,
-                    chance,
-                    height,
-                    density,
-                );
-            }
-        }
-        true
+    let want_pool = random.next_float() < wetness;
+    let mut column = base_column;
+    if want_pool
+        && let Some(floor_y) = base_floor
+        && can_place_pool(world, feature, (x, floor_y, z))
+    {
+        column = column.with_floor(floor_y - 1);
+        world.set_block_with_heightmaps(x, floor_y, z, blocks::WATER);
     }
+    let floor = column.floor;
 
-    /// `placeColumn`。
-    ///
-    /// `placeColumn`.
-    #[allow(clippy::too_many_arguments)]
-    fn place_column(
-        &self,
-        world: &mut FeatureWorld<'_>,
-        random: &WorldgenRandom,
-        pos: (i32, i32, i32),
-        dx: i32,
-        dz: i32,
-        chance_of_water: f32,
-        chance_of_speleothem: f64,
-        cluster_height: i32,
-        density: f32,
-    ) {
-        let Some(base_column) = column_scan(
-            world,
-            pos,
-            self.floor_to_ceiling_search_range,
-            is_empty_or_water,
-            is_neither_empty_nor_water,
-        ) else {
-            return;
-        };
-        // `column_scan` 只在上下都有边缘时返回 `Range`，所以这里两端都一定存在；
-        // 官方的 `OptionalInt` 在这条路径上也一定非空。
-        // `column_scan` only returns a `Range` when both edges exist, so both ends are
-        // always present here; the official `OptionalInt`s are non-empty on this path too.
-        let ceiling = base_column.ceiling;
-        let mut column = base_column;
-        let want_pool = random.next_float() < chance_of_water;
-        if want_pool && self.can_place_pool(world, (pos.0, base_column.floor, pos.2)) {
-            let base_floor_y = base_column.floor;
-            column.floor = base_floor_y - 1;
-            world.set_block_with_heightmaps(
-                pos.0,
-                base_floor_y,
-                pos.2,
-                mc_bamboo_data::blocks::WATER,
+    let want_stalactite = random.next_double() < chance;
+    let stalactite_height = if let Some(ceiling_y) = ceiling {
+        if want_stalactite && !is_lava(world, (x, ceiling_y, z)) {
+            let thickness = feature.layer_thickness.sample(random);
+            replace_blocks_with_base_blocks(
+                world,
+                (x, ceiling_y, z),
+                thickness,
+                1,
+                feature.base_block,
+                &feature.replaceable,
             );
+            let max_height = match floor {
+                Some(floor_y) => cluster_height.min(ceiling_y - floor_y),
+                None => cluster_height,
+            };
+            speleothem_height(feature, random, dx, dz, density, max_height)
+        } else {
+            0
         }
-        let floor = column.floor;
-        let want_stalactite = random.next_double() < chance_of_speleothem;
-        let stalactite_height = if want_stalactite && !self.is_lava(world, (pos.0, ceiling, pos.2))
-        {
-            let thickness = self.speleothem_block_layer_thickness.sample(random);
-            self.replace_blocks_with_base_blocks(world, (pos.0, ceiling, pos.2), thickness, 1);
-            let max_height = cluster_height.min(ceiling - floor);
-            self.get_speleothem_height(random, dx, dz, density, max_height)
+    } else {
+        0
+    };
+
+    let want_stalagmite = random.next_double() < chance;
+    let stalagmite_height = if let Some(floor_y) = floor {
+        if want_stalagmite && !is_lava(world, (x, floor_y, z)) {
+            let thickness = feature.layer_thickness.sample(random);
+            replace_blocks_with_base_blocks(
+                world,
+                (x, floor_y, z),
+                thickness,
+                -1,
+                feature.base_block,
+                &feature.replaceable,
+            );
+            if ceiling.is_some() {
+                let diff = random
+                    .next_int_between_inclusive(-feature.max_height_diff, feature.max_height_diff);
+                (stalactite_height + diff).max(0)
+            } else {
+                speleothem_height(feature, random, dx, dz, density, cluster_height)
+            }
         } else {
             0
-        };
+        }
+    } else {
+        0
+    };
 
-        let want_stalagmite = random.next_double() < chance_of_speleothem;
-        let stalagmite_height = if want_stalagmite && !self.is_lava(world, (pos.0, floor, pos.2)) {
-            let thickness = self.speleothem_block_layer_thickness.sample(random);
-            self.replace_blocks_with_base_blocks(world, (pos.0, floor, pos.2), thickness, -1);
-            (stalactite_height
-                + random.next_int_between_inclusive(
-                    -self.max_stalagmite_stalactite_height_diff,
-                    self.max_stalagmite_stalactite_height_diff,
-                ))
-            .max(0)
-        } else {
-            0
-        };
-
-        let (actual_stalactite_height, actual_stalagmite_height) = if ceiling - stalactite_height
-            <= floor + stalagmite_height
-        {
-            let lowest_bottom = (ceiling - stalactite_height).max(floor + 1);
-            let highest_top = (floor + stalagmite_height).min(ceiling - 1);
-            let actual_bottom = random.next_int_between_inclusive(lowest_bottom, highest_top + 1);
-            let actual_top = actual_bottom - 1;
-            (ceiling - actual_bottom, actual_top - floor)
+    let (actual_stalactite, actual_stalagmite) =
+        if let (Some(ceiling_y), Some(floor_y)) = (ceiling, floor) {
+            if ceiling_y - stalactite_height <= floor_y + stalagmite_height {
+                let lowest = (ceiling_y - stalactite_height).max(floor_y + 1);
+                let highest = (floor_y + stalagmite_height).min(ceiling_y - 1);
+                let bottom = random.next_int_between_inclusive(lowest, highest + 1);
+                (ceiling_y - bottom, bottom - 1 - floor_y)
+            } else {
+                (stalactite_height, stalagmite_height)
+            }
         } else {
             (stalactite_height, stalagmite_height)
         };
 
-        let merge_tips = random.next_boolean()
-            && actual_stalactite_height > 0
-            && actual_stalagmite_height > 0
-            && actual_stalactite_height + actual_stalagmite_height == column.height();
-        {
-            grow_speleothem(
-                world,
-                (pos.0, ceiling - 1, pos.2),
-                SpeleothemShape {
-                    downward: true,
-                    total_length: actual_stalactite_height,
-                    merged_tip: merge_tips,
-                },
-                self.base_block,
-                self.pointed_block,
-                &self.replaceable_blocks,
-            );
-        }
-        {
-            grow_speleothem(
-                world,
-                (pos.0, floor + 1, pos.2),
-                SpeleothemShape {
-                    downward: false,
-                    total_length: actual_stalagmite_height,
-                    merged_tip: merge_tips,
-                },
-                self.base_block,
-                self.pointed_block,
-                &self.replaceable_blocks,
-            );
-        }
-    }
+    // `nextBoolean()` 总会被消费，后面几项只是纯比较。
+    // `nextBoolean()` is always drawn; the rest are pure comparisons.
+    let merge_tips = random.next_boolean()
+        && actual_stalactite > 0
+        && actual_stalagmite > 0
+        && column
+            .height()
+            .is_some_and(|h| actual_stalactite + actual_stalagmite == h);
 
-    fn is_lava(&self, world: &FeatureWorld<'_>, pos: (i32, i32, i32)) -> bool {
-        is_block(world.get_block(pos.0, pos.1, pos.2), "minecraft:lava")
-    }
-
-    /// `getSpeleothemHeight`。
-    ///
-    /// `getSpeleothemHeight`.
-    fn get_speleothem_height(
-        &self,
-        random: &WorldgenRandom,
-        dx: i32,
-        dz: i32,
-        density: f32,
-        max_height: i32,
-    ) -> i32 {
-        if random.next_float() > density {
-            return 0;
-        }
-        let distance_from_center = dx.abs() + dz.abs();
-        let height_mean = clamped_map(
-            distance_from_center as f32,
-            0.0,
-            self.max_distance_from_center_affecting_height_bias as f32,
-            max_height as f32 / 2.0,
-            0.0,
+    let mats = Materials {
+        base_block: feature.base_block,
+        pointed_default: feature.pointed_default,
+        replaceable: &feature.replaceable,
+    };
+    if let Some(ceiling_y) = ceiling {
+        grow_speleothem(
+            world,
+            (x, ceiling_y - 1, z),
+            false,
+            actual_stalactite,
+            merge_tips,
+            mats,
         );
-        // `randomBetweenBiased` = `ClampedNormalFloat.sample(random, mean, deviation, min, max)`。
-        // `randomBetweenBiased` = `ClampedNormalFloat.sample(random, mean, deviation, min, max)`.
-        let value = height_mean + random.next_gaussian() as f32 * self.height_deviation as f32;
-        value.clamp(0.0, max_height as f32) as i32
     }
-
-    /// `canPlacePool`。
-    ///
-    /// `canPlacePool`.
-    fn can_place_pool(&self, world: &FeatureWorld<'_>, pos: (i32, i32, i32)) -> bool {
-        let state = world.get_block(pos.0, pos.1, pos.2);
-        // `state.is(Blocks.WATER) || state.is(baseBlock.getBlock()) || state.is(pointedBlock.getBlock())`
-        // —— 官方按**方块**比，不是按状态比。
-        // The official checks compare blocks, not states.
-        if is_block(state, "minecraft:water")
-            || same_block(state, self.base_block)
-            || same_block(state, self.pointed_block)
-        {
-            return false;
-        }
-        if state_fluid(world.get_block(pos.0, pos.1 + 1, pos.2)).fluid
-            == mc_bamboo_data::registries::fluid::WATER
-        {
-            return false;
-        }
-        for direction in [(0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0)] {
-            let neighbor = (pos.0 + direction.0, pos.1, pos.2 + direction.2);
-            if !self.can_be_adjacent_to_water(world, neighbor) {
-                return false;
-            }
-        }
-        self.can_be_adjacent_to_water(world, (pos.0, pos.1 - 1, pos.2))
-    }
-
-    /// `canBeAdjacentToWater`。
-    ///
-    /// `canBeAdjacentToWater`.
-    fn can_be_adjacent_to_water(&self, world: &FeatureWorld<'_>, pos: (i32, i32, i32)) -> bool {
-        let state = world.get_block(pos.0, pos.1, pos.2);
-        in_set(
-            state,
-            mc_bamboo_data::block_tag(tags::block_tags::BASE_STONE_OVERWORLD.name).unwrap_or(&[]),
-        ) || state_fluid(state).fluid == mc_bamboo_data::registries::fluid::WATER
-    }
-
-    /// `replaceBlocksWithBaseBlocks`。
-    ///
-    /// `replaceBlocksWithBaseBlocks`.
-    fn replace_blocks_with_base_blocks(
-        &self,
-        world: &mut FeatureWorld<'_>,
-        first: (i32, i32, i32),
-        max_count: i32,
-        step: i32,
-    ) {
-        let mut pos = first;
-        for _ in 0..max_count {
-            if !place_base_block_if_possible(world, pos, self.base_block, &self.replaceable_blocks)
-            {
-                return;
-            }
-            pos.1 += step;
-        }
-    }
-
-    /// `getChanceOfStalagmiteOrStalactite`。
-    ///
-    /// `getChanceOfStalagmiteOrStalactite`.
-    fn chance_of_stalagmite_or_stalactite(
-        &self,
-        x_radius: i32,
-        z_radius: i32,
-        dx: i32,
-        dz: i32,
-    ) -> f64 {
-        let x_distance_from_edge = x_radius - dx.abs();
-        let z_distance_from_edge = z_radius - dz.abs();
-        let distance_from_edge = x_distance_from_edge.min(z_distance_from_edge);
-        f64::from(clamped_map(
-            distance_from_edge as f32,
-            0.0,
-            self.max_distance_from_edge_affecting_chance_of_speleothem as f32,
-            self.chance_of_speleothem_at_max_distance_from_center,
-            1.0,
-        ))
+    if let Some(floor_y) = floor {
+        grow_speleothem(
+            world,
+            (x, floor_y + 1, z),
+            true,
+            actual_stalagmite,
+            merge_tips,
+            mats,
+        );
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// `SpeleothemClusterFeature.place`。
+/// `SpeleothemClusterFeature.place`.
+pub fn place(
+    feature: &SpeleothemClusterFeature,
+    world: &mut FeatureWorld<'_>,
+    random: &WorldgenRandom,
+    origin: (i32, i32, i32),
+) -> bool {
+    if !is_empty_or_water(world.get_block(origin.0, origin.1, origin.2)) {
+        return false;
+    }
+    let height = feature.height.sample(random);
+    let wetness = feature.wetness.sample(random);
+    let density = feature.density.sample(random);
+    let x_radius = feature.radius.sample(random);
+    let z_radius = feature.radius.sample(random);
 
-    #[test]
-    fn parses_both_overworld_clusters() {
-        let root: Value =
-            serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).expect("worldgen json");
-        let features = root
-            .get("feature")
-            .and_then(Value::as_object)
-            .expect("feature registry");
-        let mut parsed = 0;
-        for name in [
-            "minecraft:dripstone_cluster",
-            "minecraft:sulfur_spike_cluster",
-        ] {
-            let Some(config) = features.get(name) else {
-                continue;
+    for dx in -x_radius..=x_radius {
+        for dz in -z_radius..=z_radius {
+            let params = ColumnParams {
+                dx,
+                dz,
+                wetness,
+                chance: chance_of_speleothem(feature, x_radius, z_radius, dx, dz),
+                cluster_height: height,
+                density,
             };
-            let feature = SpeleothemClusterFeature::parse(config)
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
-            assert!(feature.supported(), "{name}");
-            parsed += 1;
+            let pos = (origin.0 + dx, origin.1, origin.2 + dz);
+            place_column(feature, world, random, pos, params);
         }
-        assert!(parsed > 0, "no cluster config found");
     }
-
-    #[test]
-    fn clamped_map_matches_the_linear_interpolation() {
-        assert_eq!(clamped_map(0.0, 0.0, 8.0, 4.0, 0.0), 4.0);
-        assert_eq!(clamped_map(8.0, 0.0, 8.0, 4.0, 0.0), 0.0);
-        assert_eq!(clamped_map(4.0, 0.0, 8.0, 4.0, 0.0), 2.0);
-        // 超出范围时夹在端点。
-        // Out of range clamps to the endpoints.
-        assert_eq!(clamped_map(-1.0, 0.0, 8.0, 4.0, 0.0), 4.0);
-        assert_eq!(clamped_map(99.0, 0.0, 8.0, 4.0, 0.0), 0.0);
-    }
+    true
 }

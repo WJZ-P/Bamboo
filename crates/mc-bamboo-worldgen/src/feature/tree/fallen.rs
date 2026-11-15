@@ -48,7 +48,7 @@ impl FallenTreeFeature {
                 .collect::<Option<Vec<_>>>()
         };
         Some(Self {
-            trunk_provider: StateProvider::parse(object.get("trunk_provider")?).ok()?,
+            trunk_provider: StateProvider::parse(object.get("trunk_provider")?)?,
             log_length: IntProvider::parse(object.get("log_length")?).ok()?,
             stump_decorators: decorators("stump_decorators")?,
             log_decorators: decorators("log_decorators")?,
@@ -117,7 +117,7 @@ impl FallenTreeFeature {
         pos: Pos,
         axis: Option<&str>,
     ) {
-        let Some(mut state) = self.trunk_provider.get_state_without_position(random) else {
+        let Some(mut state) = self.trunk_provider.get_state(random) else {
             return;
         };
         if let Some(axis) = axis {

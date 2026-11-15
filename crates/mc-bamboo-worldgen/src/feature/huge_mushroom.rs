@@ -46,8 +46,8 @@ impl HugeMushroomFeature {
         }
         Some(Self {
             red,
-            cap_provider: StateProvider::parse(object.get("cap_provider")?).ok()?,
-            stem_provider: StateProvider::parse(object.get("stem_provider")?).ok()?,
+            cap_provider: StateProvider::parse(object.get("cap_provider")?)?,
+            stem_provider: StateProvider::parse(object.get("stem_provider")?)?,
             foliage_radius: object
                 .get("foliage_radius")
                 .and_then(Value::as_i64)
@@ -80,7 +80,7 @@ impl HugeMushroomFeature {
         }
         // `placeTrunk`。
         for dy in 0..tree_height {
-            if let Some(stem) = self.stem_provider.get_state_without_position(random) {
+            if let Some(stem) = self.stem_provider.get_state(random) {
                 place_mushroom_block(world, (origin.0, origin.1 + dy, origin.2), stem);
             }
         }
@@ -160,7 +160,7 @@ impl HugeMushroomFeature {
                 let east = max_x || z_edge && dx == r - 1;
                 let north = min_z || x_edge && dz == 1 - r;
                 let south = max_z || x_edge && dz == r - 1;
-                let Some(state) = self.cap_provider.get_state_without_position(random) else {
+                let Some(state) = self.cap_provider.get_state(random) else {
                     continue;
                 };
                 let state = with_sides(
@@ -205,7 +205,7 @@ impl HugeMushroomFeature {
                     if dy < tree_height && x_edge == z_edge {
                         continue;
                     }
-                    let Some(state) = self.cap_provider.get_state_without_position(random) else {
+                    let Some(state) = self.cap_provider.get_state(random) else {
                         continue;
                     };
                     let state = with_sides(

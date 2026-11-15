@@ -118,13 +118,18 @@ impl GeodeFeature {
         };
         Ok(Self {
             blocks: GeodeBlockSettings {
-                filling_provider: StateProvider::parse(block_field("filling_provider")?)?,
-                inner_layer_provider: StateProvider::parse(block_field("inner_layer_provider")?)?,
+                filling_provider: StateProvider::parse(block_field("filling_provider")?)
+                    .ok_or("geode filling_provider is unported")?,
+                inner_layer_provider: StateProvider::parse(block_field("inner_layer_provider")?)
+                    .ok_or("geode inner_layer_provider is unported")?,
                 alternate_inner_layer_provider: StateProvider::parse(block_field(
                     "alternate_inner_layer_provider",
-                )?)?,
-                middle_layer_provider: StateProvider::parse(block_field("middle_layer_provider")?)?,
-                outer_layer_provider: StateProvider::parse(block_field("outer_layer_provider")?)?,
+                )?)
+                .ok_or("geode alternate_inner_layer_provider is unported")?,
+                middle_layer_provider: StateProvider::parse(block_field("middle_layer_provider")?)
+                    .ok_or("geode middle_layer_provider is unported")?,
+                outer_layer_provider: StateProvider::parse(block_field("outer_layer_provider")?)
+                    .ok_or("geode outer_layer_provider is unported")?,
                 inner_placements: block_field("inner_placements")?
                     .as_array()
                     .ok_or("geode inner_placements is not an array")?

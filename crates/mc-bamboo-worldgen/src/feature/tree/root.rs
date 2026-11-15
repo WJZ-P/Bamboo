@@ -49,7 +49,7 @@ impl RootPlacer {
         }
         let above_root = match object.get("above_root_placement") {
             Some(above) => Some((
-                StateProvider::parse(above.get("above_root_provider")?).ok()?,
+                StateProvider::parse(above.get("above_root_provider")?)?,
                 above.get("above_root_placement_chance")?.as_f64()? as f32,
             )),
             None => None,
@@ -58,12 +58,11 @@ impl RootPlacer {
         let int = |name: &str| mangrove.get(name).and_then(Value::as_i64).map(|n| n as i32);
         Some(Self {
             trunk_offset_y: IntProvider::parse(object.get("trunk_offset_y")?).ok()?,
-            root_provider: StateProvider::parse(object.get("root_provider")?).ok()?,
+            root_provider: StateProvider::parse(object.get("root_provider")?)?,
             above_root,
             can_grow_through: holder_set(mangrove.get("can_grow_through")?)?,
             muddy_roots_in: holder_set(mangrove.get("muddy_roots_in")?)?,
-            muddy_roots_provider: StateProvider::parse(mangrove.get("muddy_roots_provider")?)
-                .ok()?,
+            muddy_roots_provider: StateProvider::parse(mangrove.get("muddy_roots_provider")?)?,
             max_root_width: int("max_root_width")?,
             max_root_length: int("max_root_length")?,
             random_skew_chance: mangrove.get("random_skew_chance")?.as_f64()? as f32,
@@ -207,7 +206,7 @@ impl RootPlacer {
     /// Official `MangroveRootPlacer.placeRoot`: roots inside mud become muddy roots.
     fn place_root(&self, place: &mut TreePlace<'_, '_>, random: &WorldgenRandom, pos: Pos) {
         if in_set(&self.muddy_roots_in, place.get_block(pos)) {
-            if let Some(muddy) = self.muddy_roots_provider.get_state_without_position(random) {
+            if let Some(muddy) = self.muddy_roots_provider.get_state(random) {
                 let state = potentially_waterlogged(place, pos, muddy);
                 place.set_root(pos, state);
             }
@@ -217,7 +216,7 @@ impl RootPlacer {
         if !self.can_place_root(place.world, pos) {
             return;
         }
-        if let Some(root) = self.root_provider.get_state_without_position(random) {
+        if let Some(root) = self.root_provider.get_state(random) {
             let state = potentially_waterlogged(place, pos, root);
             place.set_root(pos, state);
         }
@@ -225,7 +224,7 @@ impl RootPlacer {
             let above = (pos.0, pos.1 + 1, pos.2);
             if random.next_float() < *chance
                 && is_air(place.get_block(above))
-                && let Some(state) = provider.get_state_without_position(random)
+                && let Some(state) = provider.get_state(random)
             {
                 let state = potentially_waterlogged(place, above, state);
                 place.set_root(above, state);

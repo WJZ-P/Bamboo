@@ -106,6 +106,15 @@ struct StaticNoises {
     biome_info: SimplexNoise,
 }
 
+/// `Biome.BIOME_INFO_NOISE.get(x, z)`：和世界种子无关的静态 `SimplexNoise`。
+/// `noise_based_count` / `noise_threshold_count` 用它算每个区块的尝试次数。
+///
+/// `Biome.BIOME_INFO_NOISE.get(x, z)`: the seed-independent static `SimplexNoise`
+/// used by `noise_based_count` / `noise_threshold_count` to derive per-chunk counts.
+pub fn biome_info_noise(x: f64, z: f64) -> f32 {
+    static_noises().biome_info.get2(x, z)
+}
+
 fn static_noises() -> &'static StaticNoises {
     static NOISES: OnceLock<StaticNoises> = OnceLock::new();
     NOISES.get_or_init(|| {

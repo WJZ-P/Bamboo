@@ -46,8 +46,10 @@ impl LakeFeature {
                 .ok_or_else(|| format!("lake has no {name}"))
         };
         Ok(Self {
-            fluid: StateProvider::parse(field("fluid")?)?,
-            barrier: StateProvider::parse(field("barrier")?)?,
+            fluid: StateProvider::parse(field("fluid")?)
+                .ok_or("lake fluid state provider is unported")?,
+            barrier: StateProvider::parse(field("barrier")?)
+                .ok_or("lake barrier state provider is unported")?,
             can_place_feature: BlockPredicate::parse(field("can_place_feature")?),
             can_replace_with_air_or_fluid: BlockPredicate::parse(field(
                 "can_replace_with_air_or_fluid",

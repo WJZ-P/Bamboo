@@ -53,8 +53,8 @@ impl TreeConfig {
             trunk: TrunkPlacer::parse(object.get("trunk_placer")?)?,
             foliage: FoliagePlacer::parse(object.get("foliage_placer")?)?,
             root,
-            trunk_provider: StateProvider::parse(object.get("trunk_provider")?).ok()?,
-            foliage_provider: StateProvider::parse(object.get("foliage_provider")?).ok()?,
+            trunk_provider: StateProvider::parse(object.get("trunk_provider")?)?,
+            foliage_provider: StateProvider::parse(object.get("foliage_provider")?)?,
             below_trunk: BelowTrunk::parse(object.get("below_trunk_provider")?)?,
             size: FeatureSize::parse(object.get("minimum_size")?)?,
             decorators,
@@ -91,7 +91,7 @@ impl BelowTrunk {
                 Some(Self::SoilBeneathTree { dirt })
             }
             Value::String(_) => None,
-            _ => Some(Self::Provider(StateProvider::parse(value).ok()?)),
+            _ => Some(Self::Provider(StateProvider::parse(value)?)),
         }
     }
 
@@ -106,7 +106,7 @@ impl BelowTrunk {
                 }
                 *dirt
             }
-            Self::Provider(provider) => match provider.get_state_without_position(random) {
+            Self::Provider(provider) => match provider.get_state(random) {
                 Some(state) => state,
                 None => return,
             },

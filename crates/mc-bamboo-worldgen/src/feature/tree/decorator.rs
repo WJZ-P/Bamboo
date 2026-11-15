@@ -181,7 +181,7 @@ impl Decorator {
                 tries: int("tries", 128),
                 radius: int("radius", 2),
                 height: int("height", 1),
-                provider: StateProvider::parse(object.get("block_state_provider")?).ok()?,
+                provider: StateProvider::parse(object.get("block_state_provider")?)?,
             },
             "minecraft:shelf_mushroom" => Self::ShelfMushroom {
                 probability: float("probability")?,
@@ -302,7 +302,7 @@ fn block_provider(value: &Value) -> Option<StateProvider> {
             })
         }
         Value::String(_) => None,
-        _ => StateProvider::parse(value).ok(),
+        _ => StateProvider::parse(value),
     }
 }
 
@@ -600,7 +600,7 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
                     }
                 }
             }
-            if let Some(state) = provider.get_state_without_position(self.random) {
+            if let Some(state) = provider.get_state(self.random) {
                 self.set(placement, state);
             }
         }
@@ -615,7 +615,7 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
             let placement = offset(log, direction);
             if self.random.next_float() <= probability
                 && self.is_air(placement)
-                && let Some(state) = provider.get_state_without_position(self.random)
+                && let Some(state) = provider.get_state(self.random)
             {
                 self.set(placement, state);
             }
@@ -670,7 +670,7 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
         if surface > above.1 {
             return;
         }
-        if let Some(state) = provider.get_state_without_position(self.random) {
+        if let Some(state) = provider.get_state(self.random) {
             self.set(above, state);
         }
     }
