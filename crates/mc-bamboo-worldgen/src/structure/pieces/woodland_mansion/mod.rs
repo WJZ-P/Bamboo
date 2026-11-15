@@ -202,6 +202,31 @@ impl Mir {
 /// `BlockPos` 的三元组 `(x, y, z)`。
 pub type Pos = (i32, i32, i32);
 
+/// `Rot` → `state_transform::Rotation`。
+///
+/// `Rot` → `state_transform::Rotation`.
+pub fn rotation_of(rot: Rot) -> crate::structure::state_transform::Rotation {
+    use crate::structure::state_transform::Rotation;
+    match rot {
+        Rot::None => Rotation::None,
+        Rot::Cw90 => Rotation::Clockwise90,
+        Rot::Cw180 => Rotation::Clockwise180,
+        Rot::Ccw90 => Rotation::CounterClockwise90,
+    }
+}
+
+/// `Mir` → `state_transform::Mirror`。
+///
+/// `Mir` → `state_transform::Mirror`.
+pub fn mirror_of(mir: Mir) -> crate::structure::state_transform::Mirror {
+    use crate::structure::state_transform::Mirror;
+    match mir {
+        Mir::None => Mirror::None,
+        Mir::LeftRight => Mirror::LeftRight,
+        Mir::FrontBack => Mirror::FrontBack,
+    }
+}
+
 /// `BlockPos.relative(direction, n)`。
 pub fn relative(p: Pos, dir: Dir, n: i32) -> Pos {
     let (sx, sy, sz) = dir.step();
@@ -404,4 +429,246 @@ pub fn generate(seed: i64, chunk_x: i32, chunk_z: i32, start_y: i32) -> Result<V
         pieces.push(piece);
     }
     Ok(pieces)
+}
+
+/// 一条 `WoodlandMansionPiece` 的模板放置。
+///
+/// 官方 `TemplateStructurePiece.postProcess`（`TemplateStructurePiece.java`）：
+/// `placeSettings.setBoundingBox(chunkBB)` → `template.getBoundingBox(placeSettings,
+/// templatePosition)` 重算自己的 `BB` → `template.placeInWorld(level, position,
+/// referencePos, settings, random, 2)`，成功后再对 `filterBlocks(..., STRUCTURE_BLOCK)`
+/// 里 `mode == DATA` 的数据标记调 `handleDataMarker`。
+///
+/// 本轮只比方块：数据标记（箱子朝向 + 战利品表种子）与拼图方块替换里，箱子朝向会写进
+/// 方块状态，所以这里只做 `handleDataMarker` 的方块部分——`createChest` 写 `CHEST` 并取一次
+/// `nextLong()`。实体（唤魔者 / 卫道士 / 悦灵）不建，也不取数（它们的随机取数在
+/// `level.getRandom()` 上，不消耗 `postProcess` 的 `random`）。
+///
+/// Template placement of one `WoodlandMansionPiece`. Vanilla's
+/// `TemplateStructurePiece.postProcess` sets the bounding box to `chunkBB`, recomputes its
+/// own `BB` from the template, then calls `template.placeInWorld(..., 2)`; afterwards it
+/// runs `handleDataMarker` for every `mode == DATA` structure block. Only blocks are
+/// compared here, so only the block part of `handleDataMarker` is kept (`createChest`
+/// writes a `CHEST` and draws one `nextLong()`); entities are not created and draw
+/// nothing from the `postProcess` `random`.
+pub fn place_piece(
+    piece: &Piece,
+    level: &mut dyn crate::structure::piece_place::PieceLevel,
+    chunk_bb: &[i32; 6],
+    random: &WorldgenRandom,
+) -> Result<(), String> {
+    let template_name = piece
+        .extras
+        .get("Template")
+        .map(|value| value.token())
+        .ok_or("mansion piece has no Template")?;
+    let template =
+        StructureTemplate::load_cached(&format!("minecraft:woodland_mansion/{template_name}"))?;
+    let position = (
+        int_extra(piece, "TPX"),
+        int_extra(piece, "TPY"),
+        int_extra(piece, "TPZ"),
+    );
+    let rotation = rotation_of(rot_of(piece));
+    let mirror = mirror_of(mir_of(piece));
+    let settings = crate::structure::template_place::PlaceSettings::mansion(rotation, mirror);
+
+    let blocks =
+        crate::structure::template_place::blocks_in_chunk(&template, position, settings, chunk_bb)?;
+    let placed = crate::structure::template_place::place_blocks(level, chunk_bb, &blocks, settings);
+    // `placeInWorld` 末尾的两步形状更新（`getKnownShape()` 为 false）。
+    // The two shape-update steps at the end of `placeInWorld` (`getKnownShape()` false).
+    crate::structure::template_shape_update::update_shapes(level, &placed);
+
+    // `handleDataMarker`：只做箱子那一段。
+    // `handleDataMarker`: the chest part only.
+    for (local, entry) in template.blocks.iter().zip(0..) {
+        let _ = entry;
+        let Some(nbt) = &local.nbt else {
+            continue;
+        };
+        let Some(mode) = nbt_string(nbt, "mode") else {
+            continue;
+        };
+        // 存档里的值来自 `StructureMode.LEGACY_CODEC` 的 `valueOf`，是大写的 `DATA`。
+        // The saved value comes from `StructureMode.LEGACY_CODEC`"'s `valueOf`, so it is `DATA`.
+        if mode != "DATA" {
+            continue;
+        }
+        let metadata = nbt_string(nbt, "metadata").unwrap_or_default();
+        if !metadata.starts_with("Chest") {
+            continue;
+        }
+        let local_pos =
+            crate::structure::template_place::transform_pos(local.pos, mirror, rotation);
+        let world = (
+            local_pos.0 + position.0,
+            local_pos.1 + position.1,
+            local_pos.2 + position.2,
+        );
+        if !crate::structure::piece_place::box_is_inside(chunk_bb, world.0, world.1, world.2) {
+            continue;
+        }
+        write_marker_chest(level, world, &metadata, rotation, random);
+    }
+    Ok(())
+}
+
+/// 读存档里的 Int 型子类字段。
+///
+/// Read an Int subclass field from the save extras.
+fn int_extra(piece: &Piece, key: &str) -> i32 {
+    piece
+        .extras
+        .get(key)
+        .map(|value| value.token())
+        .and_then(|token| token.strip_prefix("I:").and_then(|v| v.parse().ok()))
+        .unwrap_or(0)
+}
+
+/// 读存档里的字符串型子类字段。
+///
+/// Read a String subclass field from the save extras.
+fn str_extra(piece: &Piece, key: &str) -> Option<String> {
+    piece.extras.get(key).map(|value| value.token())
+}
+
+/// `piece.extras["Rot"]` → `Rot`。
+///
+/// `piece.extras["Rot"]` → `Rot`.
+fn rot_of(piece: &Piece) -> Rot {
+    match str_extra(piece, "Rot").as_deref() {
+        Some("CLOCKWISE_90") => Rot::Cw90,
+        Some("CLOCKWISE_180") => Rot::Cw180,
+        Some("COUNTERCLOCKWISE_90") => Rot::Ccw90,
+        _ => Rot::None,
+    }
+}
+
+/// `piece.extras["Mi"]` → `Mir`。
+///
+/// `WoodlandMansionPiece` 把 mirror 存在 `placeSettings` 里，`StructurePiece.getMirror()`
+/// 仍返回 `setOrientation(NORTH)` 得到的 `NONE`，所以不能从 `piece.mirror` 读。
+///
+/// `piece.extras["Mi"]` → `Mir`. `WoodlandMansionPiece` keeps the mirror in its
+/// `placeSettings`, so `StructurePiece.getMirror()` still reports the `NONE` from
+/// `setOrientation(NORTH)`; it cannot be read from `piece.mirror`.
+fn mir_of(piece: &Piece) -> Mir {
+    match str_extra(piece, "Mi").as_deref() {
+        Some("LEFT_RIGHT") => Mir::LeftRight,
+        Some("FRONT_BACK") => Mir::FrontBack,
+        _ => Mir::None,
+    }
+}
+
+/// `CompoundTag.getStringOr(key, default)`。
+///
+/// `CompoundTag.getStringOr(key, default)`.
+fn nbt_string(tag: &mc_bamboo_nbt::Tag, key: &str) -> Option<String> {
+    let mc_bamboo_nbt::Tag::Compound(entries) = tag else {
+        return None;
+    };
+    entries.iter().find_map(|(name, value)| {
+        (name == key).then(|| match value {
+            mc_bamboo_nbt::Tag::String(text) => Some(text.clone()),
+            _ => None,
+        })?
+    })
+}
+
+/// `handleDataMarker` 的箱子分支：`createChest(level, chunkBB, random, pos,
+/// WOODLAND_MANSION, chestState)`。
+///
+/// `createChest` 先看这一格是不是已经是 `CHEST`，不是就 `setBlock` 并取一次 `nextLong()`。
+/// 箱子的 `facing` 由 `"ChestWest"` 之类按 `placeSettings.getRotation()` 旋转得到。
+///
+/// The chest branch of `handleDataMarker`: `createChest(level, chunkBB, random, pos,
+/// WOODLAND_MANSION, chestState)` writes a `CHEST` unless one is already there and draws
+/// one `nextLong()`. `facing` comes from names like `"ChestWest"` rotated by
+/// `placeSettings.getRotation()`.
+fn write_marker_chest(
+    level: &mut dyn crate::structure::piece_place::PieceLevel,
+    world: (i32, i32, i32),
+    metadata: &str,
+    rotation: crate::structure::state_transform::Rotation,
+    random: &WorldgenRandom,
+) {
+    // `ChestBlock.FACING` = `rotation.rotate(Direction.X)`：只看 rotation，不看 mirror。
+    // `ChestBlock.FACING` = `rotation.rotate(Direction.X)`, using the rotation only.
+    let facing = match metadata {
+        "ChestWest" => rotation.rotate_facing("west"),
+        "ChestEast" => rotation.rotate_facing("east"),
+        "ChestSouth" => rotation.rotate_facing("south"),
+        "ChestNorth" => rotation.rotate_facing("north"),
+        _ => "north",
+    };
+    // `createChest` 先看这一格是不是已经是 `CHEST`；是就整段跳过（连 `nextLong()` 也不取）。
+    // `createChest` first checks whether the position already holds a `CHEST`; if so the
+    // whole call is skipped, including the `nextLong()`.
+    if crate::structure::piece_place::is_block(
+        level.get_block(world.0, world.1, world.2),
+        "minecraft:chest",
+    ) {
+        return;
+    }
+    let chest = crate::structure::piece_place::block("minecraft:chest");
+    let chest =
+        crate::structure::piece_place::with_property(chest, "facing", facing).unwrap_or(chest);
+    level.set_block(world.0, world.1, world.2, chest);
+    // `chestBlockEntity.setLootTable(lootTable, random.nextLong())`。
+    // `chestBlockEntity.setLootTable(lootTable, random.nextLong())`.
+    random.next_long();
+}
+
+/// `WoodlandMansionStructure.afterPlace`：对区块里每个 `boundingBox.isInside` 且
+/// `isInsidePiece` 的非空格子，往下填圆石直到碰到非空气、非液体或世界底部。
+///
+/// `isInsidePiece` 是 `PiecesContainer` 的方法：这一格必须落在某个结构件的包围盒里。
+/// `boundingBox` 是全部结构件的并集。
+///
+/// `WoodlandMansionStructure.afterPlace`: for every non-empty position inside the
+/// structure's bounding box that `isInsidePiece` accepts, fill cobblestone downwards
+/// until a non-air, non-liquid block or the world floor stops it. `isInsidePiece` is
+/// `PiecesContainer`'s test that the position lies in some piece's box; the bounding box
+/// is the union of all pieces.
+pub fn after_place(
+    pieces: &[Piece],
+    level: &mut dyn crate::structure::piece_place::PieceLevel,
+    chunk_bb: &[i32; 6],
+) {
+    if pieces.is_empty() {
+        return;
+    }
+    let boxes: Vec<[i32; 6]> = pieces.iter().map(|piece| piece.bb).collect();
+    let union = crate::structure::pieces::union(&boxes);
+    let min_y = level.min_y();
+    let y_start = union[1];
+    let cobblestone = crate::structure::piece_place::block("minecraft:cobblestone");
+    let is_empty =
+        |level: &dyn crate::structure::piece_place::PieceLevel, x: i32, y: i32, z: i32| {
+            crate::structure::piece_place::is_air(level.get_block(x, y, z))
+        };
+
+    for x in chunk_bb[0]..=chunk_bb[3] {
+        for z in chunk_bb[2]..=chunk_bb[5] {
+            if is_empty(level, x, y_start, z)
+                || !crate::structure::piece_place::box_is_inside(&union, x, y_start, z)
+                || !boxes.iter().any(|piece_bb| {
+                    crate::structure::piece_place::box_is_inside(piece_bb, x, y_start, z)
+                })
+            {
+                continue;
+            }
+            let mut y = y_start - 1;
+            while y > min_y {
+                if !is_empty(level, x, y, z)
+                    && !crate::structure::piece_place::is_liquid(level.get_block(x, y, z))
+                {
+                    break;
+                }
+                level.set_block(x, y, z, cobblestone);
+                y -= 1;
+            }
+        }
+    }
 }

@@ -28,8 +28,8 @@ const CHUNKS: [(i32, i32); 3] = [(0, 0), (1, -1), (34, 50)];
 const FILLS: [&str; 3] = ["stone", "air", "stone_with_ceiling"];
 /// 写半径：`WorldGenRegion` 用 1；海底神殿横跨 4×4 区块，边缘区块的写入要 2 才覆盖。
 ///
-/// Write radius: `WorldGenRegion` uses 1; the ocean monument spans 4×4 chunks, so 2 is
-/// needed to reach the writes of its edge chunks.
+/// Write radius: `WorldGenRegion` uses 1; the ocean monument spans 4×4 chunks, so 2
+/// is needed to reach the writes of its edge chunks.
 const SIDE: i32 = 2;
 
 /// 假世界的 Y 范围，和 Java 侧一致。
@@ -114,11 +114,7 @@ fn build_queries(filter: Option<&str>, chunk_filter: Option<(i32, i32)>) -> Vec<
                     });
                 }
             }
-            // 林地府邸的模板放置还没移植，先在查询集里关掉。
-            // The woodland mansion's template placement is not ported yet, so it is left
-            // out of the query set for now.
-            let _ = KIND_WOODLAND_MANSION;
-            for kind in [KIND_OCEAN_MONUMENT] {
+            for kind in [KIND_OCEAN_MONUMENT, KIND_WOODLAND_MANSION] {
                 if !wants(kind) {
                     continue;
                 }
@@ -314,6 +310,15 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
                     break;
                 }
             }
+            // `StructureStart.placeInChunk` 在所有结构件之后调 `structure.afterPlace`；
+            // 林地府邸的那一份往下填圆石。
+            // `StructureStart.placeInChunk` runs `structure.afterPlace` after all pieces;
+            // the mansion's fills cobblestone downwards.
+            if q.kind == KIND_WOODLAND_MANSION {
+                mc_bamboo_worldgen::structure::pieces::woodland_mansion::after_place(
+                    &layout, &mut level, &chunk_bb,
+                );
+            }
         }
     }
 
@@ -365,7 +370,10 @@ fn place_piece(
         return place_stronghold_piece(piece, index, level, chunk_bb, random);
     }
     if kind == KIND_WOODLAND_MANSION {
-        return Err("woodland mansion template placement is not ported yet".to_owned());
+        mc_bamboo_worldgen::structure::pieces::woodland_mansion::place_piece(
+            piece, level, &chunk_bb, random,
+        )?;
+        return Ok(None);
     }
 
     let shaft = if kind == KIND_MINESHAFT_MESA {
@@ -643,11 +651,12 @@ impl FlatLevel {
 
     /// `WorldGenRegion.isWithinWriteZone`：写半径。这里取 `SIDE`（比官方的 1 宽），
     /// 因为对拍刻意把 5×5 区块全部当中心跑一遍，好让横跨 4×4 区块的海底神殿的每个
-    /// 边缘区块都被走到。两侧用同一个值，语义一致。
+    /// 边缘区块都被走到。Java 侧同样用 `SIDE`，语义一致。
     ///
-    /// `WorldGenRegion.isWithinWriteZone`: the write radius. `SIDE` (wider than vanilla's
-    /// 1) because the oracle deliberately runs all 5×5 chunks as the centre so every edge
-    /// chunk of the 4×4-chunk ocean monument is exercised. Both sides use the same value.
+    /// `WorldGenRegion.isWithinWriteZone`: the write radius. `SIDE` is wider than
+    /// vanilla's radius because the oracle deliberately runs all 5×5 chunks as the
+    /// centre, so every edge chunk of the 4×4-chunk ocean monument is exercised. The Java
+    /// side uses the same `SIDE`.
     fn in_write_zone(&self, x: i32, z: i32) -> bool {
         let dx = (x >> 4) - self.center.0;
         let dz = (z >> 4) - self.center.1;
@@ -806,6 +815,29 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
             sections.len(),
             queries.len()
         ));
+    }
+    // 调试用：把 Rust 的方块快照写到文件，方便和 Java 的输出直接 diff。
+    // Debug aid: dump the Rust block snapshots so they can be diffed against Java's.
+    if std::env::var_os("BAMBOO_STRUCTURE_PLACE_DUMP_RUST").is_some() {
+        let mut dump = String::new();
+        for q in queries {
+            let ours = rust_result(q)?;
+            dump.push_str(&format!(
+                "Q {} {} {} {} {}\n",
+                q.kind, q.seed, q.cx, q.cz, q.fill
+            ));
+            for line in &ours.pieces {
+                dump.push_str(line);
+                dump.push('\n');
+            }
+            dump.push_str(&format!("B {}\n", ours.blocks.len()));
+            for line in &ours.blocks {
+                dump.push_str(line);
+                dump.push('\n');
+            }
+        }
+        std::fs::write("structure_place_rust.txt", dump)
+            .map_err(|error| format!("cannot write the rust dump: {error}"))?;
     }
 
     let mut failures: Vec<String> = Vec::new();

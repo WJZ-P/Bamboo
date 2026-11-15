@@ -410,6 +410,9 @@ public final class StructurePlaceOracle {
         private final Holder<Biome> levelBiome;
         private final RegistryAccess.Frozen registries;
         private final String fill;
+        /** `WorldGenRegion.getRandom()` 的等价物：位置随机源，固定种子。 */
+        private final net.minecraft.util.RandomSource levelRandom =
+                net.minecraft.util.RandomSource.create(0L);
         /** 所有写过的位置，按首次写入顺序。 */
         private final List<BlockPos> written = new ArrayList<>();
         private final PalettedContainerFactory factory;
@@ -661,6 +664,40 @@ public final class StructurePlaceOracle {
                         return MIN_Y;
                     case "getMaxBuildHeight":
                         return MIN_Y + 384;
+                    case "getRandom":
+                        // `updateShapeAtEdge` 调 `level.getRandom()`；`WorldGenRegion` 返回
+                        // 该区块的位置随机源。用固定种子的一支，两侧都不从它取数
+                        // （结构件里没有 `updateShape` 会取随机的方块）。
+                        // `updateShapeAtEdge` calls `level.getRandom()`; a `WorldGenRegion`
+                        // returns the chunk's positional source. A fixed-seed source is
+                        // used here; neither side draws from it (no block the pieces place
+                        // draws a random in `updateShape`).
+                        return Level.this.levelRandom;
+                    case "updateNeighborsAt":
+                    case "blockUpdated":
+                        return null;
+                    case "isEmptyBlock": {
+                        BlockPos pos = (BlockPos) args[0];
+                        if (!withinWriteZone(pos)) {
+                            return true;
+                        }
+                        return at(pos).getBlockState(pos).isAir();
+                    }
+                    case "getRawBrightness":
+                        // 生成期区块还没算光照（`ChunkStatus.TERRAIN` 早于
+                        // `INITIALIZE_LIGHT`），`getRawBrightness` 读到的都是 0。
+                        // A generating chunk has no light yet (`ChunkStatus.TERRAIN` comes
+                        // before `INITIALIZE_LIGHT`), so `getRawBrightness` reads 0.
+                        return 0;
+                    case "getSkyDarken":
+                        return 0;
+                    case "environmentAttributes":
+                        // `LavaFluid.isFastLava` 读 `FAST_LAVA`；生成期没有真实环境属性系统，
+                        // `EnvironmentAttributeReader.EMPTY` 返回属性默认值。
+                        // `LavaFluid.isFastLava` reads `FAST_LAVA`; a generating level has no
+                        // real attribute system, and `EnvironmentAttributeReader.EMPTY`
+                        // returns each attribute's default.
+                        return net.minecraft.world.attribute.EnvironmentAttributeReader.EMPTY;
                     case "toString":
                         return "StructurePlaceLevel";
                     case "hashCode":
