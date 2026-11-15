@@ -1,8 +1,8 @@
 //! 结构件 `postProcess` 的逐方块对拍：官方 `StructurePlaceOracle` 对
 //! `mc-bamboo-worldgen::structure::pieces::*_place`。
 //!
-//! Rust 写 queries.txt（`kind seed cx cz fill`），Java 在 3×3 假 `ProtoChunk` 世界里按
-//! `StructureStart.placeInChunk` 的编排逐区块调官方 `postProcess`，输出结构件清单（`L` 行）、
+//! Rust 写 queries.txt（`kind seed cx cz fill`），Java 在假 `ProtoChunk` 世界里按
+//! `StructureStart.placeInChunk` 的编排，对整个结构碰到的每个区块调官方 `postProcess`，输出结构件清单（`L` 行）、
 //! 每次调用的写入次数（`P` 行）与每个写过的位置的最终状态（`B` 之后的行）；Rust 侧用生产
 //! 代码走「布局 → `postProcess`」，逐项比较。
 //!
@@ -15,8 +15,8 @@
 //!
 //! Per-block oracle for piece `postProcess`: vanilla `StructurePlaceOracle` against the
 //! Rust `*_place` modules. Rust writes queries.txt; Java builds pieces with the official
-//! orchestration, runs `postProcess` over a fake 3×3 `ProtoChunk` world the way
-//! `StructureStart.placeInChunk` does, and dumps the piece list (`L`), the write count of
+//! orchestration, runs `postProcess` over a fake `ProtoChunk` world for every chunk the
+//! whole structure touches, the way `StructureStart.placeInChunk` does, and dumps the piece list (`L`), the write count of
 //! every invocation (`P`) and the final state of every written position. Rust runs the
 //! production layout plus placement and compares all of it.
 //!
@@ -40,10 +40,16 @@ use mc_bamboo_worldgen::structure::{
     pieces::{self, HDir, Piece},
 };
 
-/// 覆盖原点、负坐标、远处坐标的种子。
+/// 世界种子。
+///
+/// World seeds.
 const SEEDS: [i64; 4] = [0, 42, -7, 12_345_678_901];
-/// 覆盖不同群系带的区块坐标。
-const CHUNKS: [(i32, i32); 3] = [(0, 0), (1, -1), (34, 50)];
+/// 结构起点所在的区块：原点附近和远处、正负坐标都有。整个结构碰到的区块都会放置，
+/// 所以起点不用多。
+///
+/// Start chunks: near the origin and far away, positive and negative. Every chunk the
+/// whole structure touches is placed, so a few starts are enough.
+const CHUNKS: [(i32, i32); 2] = [(0, 0), (34, -50)];
 /// 四种初始世界（定义见 [`FlatLevel::initial_block`]）：全空、地表一层石头、实心石头、
 /// 带空气洞和水洞的石头。覆盖「内部 / 外部」、支撑、柱子 / 铁链、`isInInvalidLocation`。
 ///
@@ -266,12 +272,21 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
     // `hasPlacedChest`, `hasPlacedSpawner`), kept by layout index.
     let mut piece_flags: Vec<bool> = vec![false; layout.len()];
 
-    // 和 Java 侧一样逐区块调：`chunkBB` 是该区块整列盒，`random` 每区块重播。
-    // Once per chunk like Java: the chunk's full column box, random reseeded per chunk.
+    // 和 Java 侧一样：对结构包围盒碰到的每个区块各调一次（先 z 后 x），`chunkBB` 是该
+    // 区块整列盒，`random` 每区块重播，写区是这个区块的 ±1。
+    // Like Java: once per chunk the structure's bounding box touches (z outer, x inner),
+    // with the chunk's full column box, the random reseeded per chunk and the write zone
+    // being that chunk plus or minus one.
     let mut invocations: Vec<Invocation> = Vec::new();
-    for dz in -1..=1 {
-        for dx in -1..=1 {
-            let at = (q.cx + dx, q.cz + dz);
+    let chunks = |low: usize, high: usize| {
+        let min = layout.iter().map(|piece| piece.bb[low]).min().unwrap_or(0);
+        let max = layout.iter().map(|piece| piece.bb[high]).max().unwrap_or(0);
+        (min >> 4)..=(max >> 4)
+    };
+    for chunk_z in chunks(2, 5) {
+        for chunk_x in chunks(0, 3) {
+            let at = (chunk_x, chunk_z);
+            level.center = at;
             let chunk_bb = chunk_box(at);
             let random = pieces::make_random(q.seed ^ 0x5DEECE66D, at.0, at.1);
             for (i, piece) in layout.iter().enumerate() {
@@ -539,13 +554,13 @@ fn piece_line(piece: &Piece) -> String {
 
 /// 假世界：初始方块由 [`FlatLevel::initial_block`] 算出，写入记在稀疏表里。
 ///
-/// 语义照 Java 侧的假 `WorldGenRegion`：写只落在中心区块 ±1 内，读不受限制；
+/// 语义照 Java 侧的假 `WorldGenRegion`：写只落在正在生成的区块 ±1 内，读不受限制；
 /// 构建高度之外读到空气、写了不生效。
 ///
 /// Fake world: initial blocks come from [`FlatLevel::initial_block`], writes go into a
 /// sparse map. Semantics follow the Java side's fake `WorldGenRegion`: writes land only
-/// within one chunk of the centre, reads are unrestricted, and outside the build height
-/// reads yield air and writes have no effect.
+/// within one chunk of the chunk being generated, reads are unrestricted, and outside the
+/// build height reads yield air and writes have no effect.
 struct FlatLevel {
     blocks: HashMap<(i32, i32, i32), u32>,
     /// 所有写过的位置。
@@ -553,6 +568,10 @@ struct FlatLevel {
     /// Every written position.
     written: BTreeSet<(i32, i32, i32)>,
     fill: &'static str,
+    /// 正在生成的区块：`WorldGenRegion` 的中心，写区是它的 ±1。
+    ///
+    /// The chunk being generated: the `WorldGenRegion` centre, whose write zone is that
+    /// chunk plus or minus one.
     center: (i32, i32),
     /// 当前这次调用的写入，按顺序：`x y z state`。
     ///
@@ -647,8 +666,10 @@ impl PieceLevel for FlatLevel {
             return false;
         }
         self.written.insert((x, y, z));
+        // 逐次写入记原状态，cave_air 和 air 不合并。
+        // The ordered trace keeps the exact state; cave_air and air stay distinct here.
         self.piece_writes
-            .push(format!("{x} {y} {z} {}", state_name(state)));
+            .push(format!("{x} {y} {z} {}", exact_state_name(state)));
         if (MIN_Y..MIN_Y + HEIGHT).contains(&y) {
             self.blocks.insert((x, y, z), state);
         }
@@ -699,6 +720,14 @@ fn state_name(state: u32) -> String {
     if is_air_block(state) {
         return "AIR".to_owned();
     }
+    exact_state_name(state)
+}
+
+/// 状态的 `Block{name}[props]` 名字，和 Java `BlockState.toString()` 一致，空气家族不合并。
+///
+/// The `Block{name}[props]` name, matching Java's `BlockState.toString()`, with the air
+/// family kept distinct.
+fn exact_state_name(state: u32) -> String {
     let Some(id) = block_id_of_state(state) else {
         return format!("<state {state}>");
     };
@@ -736,6 +765,10 @@ struct KindTotals {
     list_mismatches: usize,
     block_mismatches: usize,
     write_mismatches: usize,
+    /// 每种结构件有多少次调用真的写了方块（按 `id` 与朝向 `O`）。
+    ///
+    /// Invocations that actually wrote blocks, per piece `id` and orientation `O`.
+    placed: BTreeMap<String, usize>,
     /// 官方那一侧最终方块按方块名的计数：看覆盖到了哪些分支。
     ///
     /// Vanilla's final blocks counted by block name, to show which branches were covered.
@@ -775,6 +808,16 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
         total.blocks += section.blocks.len();
         for line in &section.blocks {
             *total.coverage.entry(block_name(line)).or_insert(0) += 1;
+        }
+        for invocation in &section.invocations {
+            if invocation.count == 0 {
+                continue;
+            }
+            // `L` 行：`id minX minY minZ maxX maxY maxZ O GD extras`。
+            // `L` line: `id minX minY minZ maxX maxY maxZ O GD extras`.
+            let fields: Vec<&str> = section.pieces[invocation.piece].split(' ').collect();
+            let label = format!("{}/O{}", fields[0], fields[7]);
+            *total.placed.entry(label).or_insert(0) += 1;
         }
 
         let mut list_mismatches = 0usize;
@@ -944,6 +987,12 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
             .map(|(name, count)| format!("{name}={count}"))
             .collect();
         println!("  vanilla blocks: {}", coverage.join(" "));
+        let placed: Vec<String> = total
+            .placed
+            .iter()
+            .map(|(name, count)| format!("{name}={count}"))
+            .collect();
+        println!("  invocations that wrote blocks: {}", placed.join(" "));
     }
     if mismatch_count == 0 && write_mismatch_count == 0 {
         println!("STRUCTURE-PLACE RESULT: 0 mismatches");

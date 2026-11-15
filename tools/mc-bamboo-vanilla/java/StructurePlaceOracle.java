@@ -59,19 +59,22 @@ import net.minecraft.world.level.material.FluidState;
  * 对拍结构件的 {@code postProcess}：在 JVM 里造一个不启动服务端的假 {@code WorldGenLevel}，
  * 用官方 {@code StructurePiece.postProcess} 写方块，再逐方块输出。
  *
- * <p>假世界是一个 3×3 的 {@code ProtoChunk}，初始方块由 {@code fill} 参数决定
- * （`stone` / `air` / `stone_with_ceiling`），用来覆盖「内部 / 外部」、「顶上有没有东西」
- * 这些分支。{@code WorldGenLevel} 用 {@code Proxy} 实现，语义照 {@code WorldGenRegion}；
+ * <p>假世界是一张按需创建的 {@code ProtoChunk} 表，初始方块由 {@code fill} 参数决定
+ * （`air` / `band` / `stone` / `caves`），用来覆盖「内部 / 外部」、支撑、柱子 / 铁链、
+ * 液体这些分支。{@code WorldGenLevel} 用 {@code Proxy} 实现，语义照 {@code WorldGenRegion}；
  * 没实现的方法抛异常，让没覆盖到的路径立刻暴露。
  *
  * <p>Rust 写 queries.txt，每条一行
  * {@code <kind> <seed> <cx> <cz> <fill>}；本类按官方编排生成结构件，然后对每个结构件
- * 调 {@code postProcess}（`chunkBB` 取结构件包围盒所在的整个区块），输出
- * {@code Q} 头、{@code L} 行的结构件清单和 {@code B} 行的方块快照。
+ * 在它碰到的每个区块里调一次 {@code postProcess}，输出 {@code Q} 头、{@code L} 行的
+ * 结构件清单、{@code P} 行的逐次调用写入次数（设了 `STRUCTURE_PLACE_TRACE` 时还有
+ * {@code D} 行的逐次写入）和 {@code B} 之后每个写过的位置的最终状态。
  *
- * <p>Oracle for {@code postProcess}: builds a fake serviceless {@code WorldGenLevel} over a
- * 3×3 {@code ProtoChunk} grid, runs the official {@code StructurePiece.postProcess}, and
- * dumps every block. Unimplemented level methods throw so uncovered paths surface.
+ * <p>Oracle for {@code postProcess}: builds a fake serviceless {@code WorldGenLevel} over
+ * lazily created {@code ProtoChunk}s, runs the official {@code StructurePiece.postProcess}
+ * once per chunk each piece touches, and dumps the piece list, every invocation's write
+ * count (plus its ordered writes under `STRUCTURE_PLACE_TRACE`) and the final state of
+ * every written position. Unimplemented level methods throw so uncovered paths surface.
  *
  * <p>Usage: StructurePlaceOracle &lt;queries.txt&gt;
  */
@@ -229,15 +232,22 @@ public final class StructurePlaceOracle {
             }
 
             Level level = new Level(pos, fill, registries);
-            // 和 `StructureStart.placeInChunk` 一样：对 3×3 每个区块各调一次，
-            // `chunkBB` 是该区块的整列盒，`random` 每个区块重新播种。
-            // Same as `StructureStart.placeInChunk`: once per chunk with that chunk's
-            // full column box, reseeding the random per chunk.
+            // 和 `StructureStart.placeInChunk` 一样：对结构包围盒碰到的每个区块各调一次
+            // （先 z 后 x），`chunkBB` 是该区块的整列盒，`random` 每个区块重新播种，
+            // 写区是这个区块的 ±1。
+            // Same as `StructureStart.placeInChunk`: once per chunk the structure's bounding
+            // box touches (z outer, x inner) with that chunk's full column box, reseeding the
+            // random per chunk; the write zone is that chunk plus or minus one.
             boolean trace = System.getenv("STRUCTURE_PLACE_TRACE") != null;
             int invocation = 0;
-            for (int dz = -1; dz <= 1; dz++) {
-                for (int dx = -1; dx <= 1; dx++) {
-                    ChunkPos at = new ChunkPos(cx + dx, cz + dz);
+            BoundingBox all = BoundingBox.encapsulatingBoxes(
+                    pieces.stream().map(StructurePiece::getBoundingBox)::iterator).orElseThrow();
+            for (int chunkZ = SectionPos.blockToSectionCoord(all.minZ());
+                    chunkZ <= SectionPos.blockToSectionCoord(all.maxZ()); chunkZ++) {
+                for (int chunkX = SectionPos.blockToSectionCoord(all.minX());
+                        chunkX <= SectionPos.blockToSectionCoord(all.maxX()); chunkX++) {
+                    ChunkPos at = new ChunkPos(chunkX, chunkZ);
+                    level.center = at;
                     BoundingBox chunkBB = chunkBox(at);
                     WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
                     random.setLargeFeatureSeed(seed ^ 0x5DEECE66DL, at.x(), at.z());
@@ -394,7 +404,8 @@ public final class StructurePlaceOracle {
 
     /** 一个假世界：无界的 ProtoChunk 映射 + `WorldGenLevel` 代理。 */
     private static final class Level {
-        private final ChunkPos center;
+        /** 正在生成的区块：`WorldGenRegion` 的中心，写区是它的 ±1。 */
+        private ChunkPos center;
         private final java.util.Map<Long, ProtoChunk> chunks = new java.util.HashMap<>();
         private final WorldGenLevel proxy;
         private final Holder<Biome> levelBiome;
@@ -608,8 +619,11 @@ public final class StructurePlaceOracle {
                         }
                         ProtoChunk chunk = at(pos);
                         written.add(pos.immutable());
+                        // 逐次写入记传给 `setBlock` 的原状态，cave_air 和 air 不合并。
+                        // The ordered trace keeps the exact state handed to `setBlock`;
+                        // cave_air and air stay distinct here.
                         pieceWrites.add(pos.getX() + " " + pos.getY() + " " + pos.getZ() + " "
-                                + name(state));
+                                + state);
                         BlockState old = chunk.setBlockState(pos, state, flags);
                         if (state.hasBlockEntity()) {
                             CompoundTag tag = new CompoundTag();
