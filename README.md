@@ -595,7 +595,11 @@ WebView2 的渲染进程不算在内。
   `rule` / `protected_blocks` / `capped`）、五种 `RuleTest`、`axis_aligned_linear_pos` 和
   `append_loot`；
   `apply` 在假世界上用官方 `StructureTemplate.processBlockInfos` 跑 40 个列表
-  （120 查询 / 893 个存活方块）与 `structure::processor_apply` 逐块 0 不一致；
+  （200 查询 / 941 个存活方块，其中 80 条带 `chunkBB`）与 `structure::processor_apply`
+  逐块 0 不一致，覆盖了 `processOnlyInCurrentChunk` 的两支；
+  `capped` 复刻 `CappedProcessor.finalizeProcessing` 的随机源派生
+  （`createThreadLocalInstance(seed).forkPositional().at(piece)`）、`Util.toShuffledList`
+  的洗牌序列与 `limit.sample`，75 查询 0 不一致；
   `jigsaws` 对 1511 个模板 × 4 种旋转 × 4 个位置 = 24176 个查询、
   68352 个拼图方块的位置 / front / top / name / target / pool / joint / 两个优先级逐项
   0 不一致；`templates` 1511 个模板的尺寸 / 方块数 / 拼图方块数 0 不一致；`shapes`
@@ -613,9 +617,9 @@ WebView2 的渲染进程不算在内。
   按官方 codec 解析成类型化的 `structure::processor::Processor` 并逐键对拍过编码，
   **但 processor 的执行（`processBlock` / `finalizeProcessing`）已在
   `structure::processor_apply` 里移植并对拍**：`block_rot` / `rule` / `protected_blocks`
-  逐方块 0 不一致（120 查询 / 893 存活方块）；`capped` 的 `finalizeProcessing` 因为假世界
-  给不出真实 `ServerLevel` 种子，只对了 delegate 的逐块效果与限额，**上限选取的随机序列
-  没有直接对拍**。
+  逐方块 0 不一致（200 查询 / 941 存活方块），`processOnlyInCurrentChunk` 的两支（有
+  `chunkBB` 时过滤、链里有 `capped` 时不过滤）都覆盖到；`capped` 的随机源派生、洗牌序列
+  与 `limit.sample` 也单独对拍过（75 查询 0 不一致，见 `jigsaw capped`）。
   `start_height` 只支持 `constant`（absolute）与 `uniform`——26.3 主世界全部 28 个 jigsaw
   结构只用这两种，其余 provider 标 unsupported；`bastion_remnant` 是下界结构，按分工不做。
   `liquid_settings` 已随 `Piece` 带到放置阶段（`SinglePoolElement` 用

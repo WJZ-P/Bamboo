@@ -223,6 +223,28 @@
   （7 vs 8 个存活方块）；(b) `BlockState` 在 NBT 里是 `{id, properties}`，上一轮已经修过，
   这轮复核确认。
 
+**第八轮（2026-11-14，`cb-wg-jigsaw` 分支：整件分支覆盖 + capped 随机序列 + 空列表校验）**：
+
+* `structure::processor_apply::process_blocks` 补上官方的 `processOnlyInCurrentChunk`：
+  链里没有任何 `evaluates_entire_piece_state()` 为真（26.3 只有 `capped`）且
+  `settings.getBoundingBox()` 存在时，只处理落在盒内的方块。这直接决定
+  `processedBlockInfoList` 的长度，进而决定 `capped` 洗牌的下标范围，所以必须照做。
+  `Processor::evaluates_entire_piece_state()` 照官方实现（只有 `Capped` 返回 true）。
+* 新对拍模式 `jigsaw capped`：复刻 `CappedProcessor.finalizeProcessing` 的随机源派生
+  （`RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece)`）、
+  `Util.toShuffledList` 的洗牌序列、`limit.sample` 的取值，以及原始 `nextInt(1000)`
+  序列。5 种子 × 3 结构件位置 × 5 种 size = 75 查询 0 不一致。**这条补上了上一轮报告里
+  最大的疑点**：不需要伪造 `ServerLevel` 也能验证随机源与洗牌。
+* `jigsaw apply` 的查询格式加了可选的 `chunkBB` 段（`none` 或 6 个整数），80 条带盒的
+  查询覆盖 `processOnlyInCurrentChunk` 的两支。主链里的 `capped` 被换成 `limit = 0`
+  的等价实例（`processBlock` 本来就是空实现，`finalizeProcessing` 在 `limit == 0` 时
+  提前返回，于是不需要真实 `ServerLevel` 种子，但 `evaluates_entire_piece_state` 仍为
+  true）。200 查询 / 941 存活方块 0 不一致。
+* `ListPoolElement` 的空 `elements` 列表改成解码错误（官方构造器
+  `if (elements.isEmpty()) throw new IllegalArgumentException`）。
+* 故意改坏：`processOnlyInCurrentChunk` 取反 → 80 处不一致；`evaluates_entire_piece_state`
+  改成 `false` → 6 处不一致；`capped` 的洗牌改成固定 `nextInt(size)` → 45 处不一致。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、
 结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」
