@@ -293,6 +293,20 @@ impl Processor {
                 "processor_type".to_owned(),
                 Tag::String("minecraft:jigsaw_replacement".to_owned()),
             )),
+            Self::Gravity { heightmap, offset } => {
+                fields.push((
+                    "processor_type".to_owned(),
+                    Tag::String("minecraft:gravity".to_owned()),
+                ));
+                // 两个字段都是 `optionalFieldOf`：等于默认值就不写。
+                // Both fields are `optionalFieldOf`; defaults are omitted.
+                if heightmap != "WORLD_SURFACE_WG" {
+                    fields.push(("heightmap".to_owned(), Tag::String(heightmap.clone())));
+                }
+                if *offset != 0 {
+                    fields.push(("offset".to_owned(), Tag::Int(*offset)));
+                }
+            }
         }
         Ok(Tag::Compound(fields))
     }

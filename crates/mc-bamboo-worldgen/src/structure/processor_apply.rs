@@ -44,6 +44,15 @@ pub trait ProcessorLevel {
     ///
     /// `state.is(HolderSet<Block>)`: whether the state belongs to a tag or explicit set.
     fn in_block_set(&self, state: &BlockStateSpec, set: &BlockSetRef) -> bool;
+
+    /// `level.getHeight(heightmap, x, z)`：`GravityProcessor` 用它算方块的落点。
+    /// 默认实现返回 `MIN_Y`，表示「不支持高度图」——只有需要它的 processor 会调用。
+    ///
+    /// `level.getHeight(heightmap, x, z)`, used by `GravityProcessor`. The default returns
+    /// `MIN_Y` to mean "heightmap unavailable"; only processors that need it call this.
+    fn height(&self, _heightmap: &str, _x: i32, _z: i32) -> i32 {
+        i32::MIN
+    }
 }
 
 /// 一个待处理的方块，对应官方 `StructureTemplate.StructureBlockInfo`。
@@ -274,6 +283,20 @@ pub fn process_block(
             } else {
                 Some(block.clone())
             }
+        }
+        // `GravityProcessor.processBlock`：把 Y 抬到 `height + offset + templateY`。
+        // `GravityProcessor.processBlock`: lifts Y to `height + offset + templateY`.
+        Processor::Gravity { heightmap, offset } => {
+            let pos = block.world_pos;
+            let height = level.height(heightmap, pos.0, pos.2);
+            let delta = block.pos.1;
+            let mut out = block.clone();
+            out.world_pos = (
+                pos.0,
+                height.wrapping_add(*offset).wrapping_add(delta),
+                pos.2,
+            );
+            Some(out)
         }
         // `JigsawReplacementProcessor.processBlock`：把拼图方块换成 nbt 里的 `final_state`。
         // `JigsawReplacementProcessor.processBlock`: replaces the jigsaw with `final_state`.
@@ -1051,6 +1074,46 @@ mod tests {
         let other = block((0, 64, 0), "minecraft:stone");
         let out = process_block(&processor, &other, (0, 64, 0), &level, None).unwrap();
         assert_eq!(out.state.name, "minecraft:stone");
+    }
+
+    /// `gravity` 把 Y 抬到 `height + offset + templateRelativePos.y`。
+    ///
+    /// `gravity` lifts Y to `height + offset + templateRelativePos.y`.
+    #[test]
+    fn gravity_lifts_y_to_the_heightmap() {
+        /// 高度图恒为 70 的假世界。
+        ///
+        /// A fake level whose heightmap is always 70.
+        struct Height70;
+        impl ProcessorLevel for Height70 {
+            fn block_state(&self, _pos: (i32, i32, i32)) -> BlockStateSpec {
+                state("minecraft:air")
+            }
+            fn in_block_set(&self, _state: &BlockStateSpec, _set: &BlockSetRef) -> bool {
+                false
+            }
+            fn height(&self, _heightmap: &str, _x: i32, _z: i32) -> i32 {
+                70
+            }
+        }
+        let level = Height70;
+        let processor = Processor::Gravity {
+            heightmap: "WORLD_SURFACE_WG".to_owned(),
+            offset: -1,
+        };
+        // `templateRelativePos.y` 是 3，高度 70，offset -1 -> 72。
+        // `templateRelativePos.y` is 3, height 70, offset -1 -> 72.
+        let b = ProcessBlock {
+            pos: (5, 3, 7),
+            world_pos: (5, 40, 7),
+            state: state("minecraft:grass_block"),
+            nbt: None,
+        };
+        let out = process_block(&processor, &b, (0, 0, 0), &level, None).unwrap();
+        assert_eq!(out.world_pos, (5, 72, 7));
+        // X/Z 不变，状态不变。
+        // X/Z and the state are unchanged.
+        assert_eq!(out.state.name, "minecraft:grass_block");
     }
 
     /// `capped` 最多改 `limit` 个方块，且逐块用 delegate 的效果。

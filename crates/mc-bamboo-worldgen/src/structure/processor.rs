@@ -96,6 +96,13 @@ pub enum Processor {
     /// `JigsawReplacementProcessor`: replaces a jigsaw block with the `final_state` from
     /// its nbt (default `minecraft:air`); a `structure_void` result drops the block.
     JigsawReplacement,
+    /// `GravityProcessor`：把方块的 Y 抬到 `level.getHeight(heightmap, x, z) + offset +
+    /// templateRelativePos.y`。`TERRAIN_MATCHING` 投影用它把结构贴到地表。
+    ///
+    /// `GravityProcessor`: lifts a block to
+    /// `level.getHeight(heightmap, x, z) + offset + templateRelativePos.y`. The
+    /// `TERRAIN_MATCHING` projection uses it to hug the terrain.
+    Gravity { heightmap: String, offset: i32 },
 }
 
 impl Processor {
@@ -177,6 +184,16 @@ impl Processor {
                 Ok(Self::BlockIgnore { to_ignore: blocks })
             }
             "minecraft:jigsaw_replacement" => Ok(Self::JigsawReplacement),
+            "minecraft:gravity" => Ok(Self::Gravity {
+                // `Heightmap.Types.CODEC` 的名字；缺省 `WORLD_SURFACE_WG`。
+                // The `Heightmap.Types.CODEC` name; defaults to `WORLD_SURFACE_WG`.
+                heightmap: raw
+                    .get("heightmap")
+                    .and_then(Value::as_str)
+                    .unwrap_or("WORLD_SURFACE_WG")
+                    .to_owned(),
+                offset: raw.get("offset").and_then(Value::as_i64).unwrap_or(0) as i32,
+            }),
             other => Err(format!("unsupported processor {other}")),
         }
     }
@@ -651,6 +668,7 @@ mod tests {
                     Processor::Capped { .. } => "capped",
                     Processor::BlockIgnore { .. } => "block_ignore",
                     Processor::JigsawReplacement => "jigsaw_replacement",
+                    Processor::Gravity { .. } => "gravity",
                 };
                 *counts.entry(key).or_insert(0) += 1;
             }

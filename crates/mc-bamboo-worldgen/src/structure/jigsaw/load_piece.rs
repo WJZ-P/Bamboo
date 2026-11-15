@@ -264,6 +264,12 @@ pub fn processor_from_tag(tag: &Tag) -> Result<Processor, String> {
             Ok(Processor::BlockIgnore { to_ignore })
         }
         "minecraft:jigsaw_replacement" => Ok(Processor::JigsawReplacement),
+        "minecraft:gravity" => Ok(Processor::Gravity {
+            heightmap: string_field(tag, "heightmap")
+                .unwrap_or("WORLD_SURFACE_WG")
+                .to_owned(),
+            offset: int_field(tag, "offset").unwrap_or(0),
+        }),
         other => Err(format!("unsupported processor {other}")),
     }
 }
