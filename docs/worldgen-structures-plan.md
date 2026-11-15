@@ -293,6 +293,27 @@
   方块实体 nbt 的恢复（`blockEntity.loadWithComponents` + `LootTableSeed`）、
   `placeEntities`（结构里的实体）、从 `pool_element` 取 `processors` 并接进 `place_piece`。
 
+**第十三轮（2026-11-15，`cb-wg-jigsaw` 分支：三类硬编码 processor + 全组合覆盖）**：
+
+* 补上另外三类 processor（`processor_list` 里没有、由 `SinglePoolElement.getSettings` 与
+  `Projection` 硬编码加进放置设置的）：
+  * `BlockIgnoreProcessor`（`block_ignore`）：`to_ignore` 里的方块直接丢弃。官方三个常量
+    实例 `STRUCTURE_BLOCK` / `AIR` / `STRUCTURE_AND_AIR` 都能构造。
+  * `JigsawReplacementProcessor`（`jigsaw_replacement`）：把拼图方块换成它 nbt 里的
+    `final_state`（缺省 `minecraft:air`）；换成 `structure_void` 时丢弃；没有 nbt 时保留原
+    方块（官方只打警告）；解析失败时丢弃。
+  * `GravityProcessor`（`gravity`）：把方块的 Y 抬到
+    `level.getHeight(heightmap, x, z) + offset + templateRelativePos.y`。
+    `ProcessorLevel` 因此多了一个 `height()`（默认返回 `MIN_Y` 表示不支持）。
+* `ProcessBlock` 增加 `nbt: Option<Tag>`（`JigsawReplacementProcessor` 要读 `final_state`，
+  带 nbt 的方块还要先写 `BARRIER`）。
+* `place_processed` 现在尊重 `set_block` 的返回值：只有真正改了状态才计入返回值，与官方
+  `if (level.setBlock(...)) { ... placed.add(...) }` 一致。
+* `jigsaw placepiece` 的覆盖从 3 组 mirror/rotation 扩到**全部 12 组**
+  （3 个 mirror × 4 个 rotation）：900 查询、610992 次写入 0 不一致。
+* 故意改坏：`block_ignore` 恒不忽略（单元测试失败）、`gravity` 丢掉
+  `templateRelativePos.y`（单元测试失败）、`place_processed` 不检查返回值（单元测试失败）。
+
 **第五轮（2026-11-14，`cb-wg-structures` 续：需要模板的单件结构布局）**：
 
 * 合并 `main` 时本分支已与 `main` 同步（`main` 的 `4405fc3` 含本分支全部提交），

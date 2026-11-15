@@ -662,8 +662,8 @@ WebView2 的渲染进程不算在内。
   （砾石被 `capped` 规则换成可疑的沙砾，实际替换 72 次，说明限额真的生效）；
   `placepiece` 把**整条模板放置链路**（按世界位置选 palette → 位置变换含 mirror 与
   rotation → processor 链 → 带 nbt 的方块先写 `BARRIER` → `chunkBB` 过滤 → 状态
-  mirror/rotate）与官方 `StructureTemplate.placeInWorld` 逐写入比：225 查询（每个模板
-  三种 mirror/rotation 组合）、152748 次写入 0 不一致；
+  mirror/rotate）与官方 `StructureTemplate.placeInWorld` 逐写入比：900 查询
+  （8 个单 palette 模板 × 全部 12 种 mirror/rotation 组合）、610992 次写入 0 不一致；
   `jigsaws` 对 1511 个模板 × 4 种旋转 × 4 个位置 = 24176 个查询、
   68352 个拼图方块的位置 / front / top / name / target / pool / joint / 两个优先级逐项
   0 不一致；`templates` 1511 个模板的尺寸 / 方块数 / 拼图方块数 0 不一致；`shapes`
@@ -679,7 +679,8 @@ WebView2 的渲染进程不算在内。
   方块实体）属放置那一步，`Piece::to_full_save_piece` 给出 `pool_element` / `rotation` /
   `junctions` / `liquid_settings` 全部子类字段的存档标签，`processor_list` 的 40 个条目也已
   按官方 codec 解析成类型化的 `structure::processor::Processor` 并逐键对拍过编码；
-  `processors` 的内联非空对象与 `processor_list` 的逐 processor 执行见上一条。
+  除了 `processor_list` 里的四种（`block_rot` / `rule` / `protected_blocks` / `capped`），
+  放置阶段硬编码的三种（`block_ignore` / `jigsaw_replacement` / `gravity`）也已移植。
   `TemplatePools` 在解析时就把每个 pool 的 `maxSize` 一次算好（官方懒算，结果相同），
   因此它是 `Sync + Send`，可以放进 `Arc` 供多线程区块生成共享。
   `start_height` 只支持 `constant`（absolute）与 `uniform`——26.3 主世界全部 28 个 jigsaw
