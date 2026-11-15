@@ -659,12 +659,18 @@ public final class ChunkgenOracle {
             if (generatorSettings == null) {
                 throw new IllegalStateException("missing " + settingsId + " noise settings");
             }
+            // `nether` 换群系预设；其余（overworld 的 normal / large_biomes / amplified）
+            // 共用 minecraft:overworld 预设（WorldPresets.bootstrap）。
+            // `nether` switches the biome preset; the overworld variants all share
+            // minecraft:overworld.
+            boolean nether = "minecraft:nether".equals(settingsId);
+            String preset = nether ? "minecraft:nether" : "minecraft:overworld";
             JsonObject header = new JsonObject();
             header.addProperty("type", "header");
             header.addProperty("version", SharedConstants.getCurrentVersion().id());
             header.addProperty("protocol", SharedConstants.getCurrentVersion().protocolVersion());
             header.addProperty("settings", settingsId);
-            header.addProperty("preset", "minecraft:overworld");
+            header.addProperty("preset", preset);
             header.addProperty("minY", generatorSettings.noiseSettings().minY());
             header.addProperty("height", generatorSettings.noiseSettings().height());
             header.addProperty("seaLevel", generatorSettings.seaLevel());
@@ -676,7 +682,9 @@ public final class ChunkgenOracle {
                     new NoiseBasedChunkGenerator(
                             MultiNoiseBiomeSource.createFromPreset(
                                     registries.lookupOrThrow(Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST)
-                                            .getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD)),
+                                            .getOrThrow(nether
+                                                    ? MultiNoiseBiomeSourceParameterLists.NETHER
+                                                    : MultiNoiseBiomeSourceParameterLists.OVERWORLD)),
                             this.settings.wrapAsHolder(generatorSettings));
             // featuresPerStep 是 memoized supplier，第一次 get() 会按注册表此刻的
             // BiomeGenerationSettings.features() 排全局顺序。必须在两个诊断过滤之前
@@ -841,6 +849,13 @@ public final class ChunkgenOracle {
          * 换了 jar 版本或 validate() 的行为变了，这里会立刻报错而不是静默算错。
          */
         private void checkFeaturesPerStep(NoiseBasedChunkGenerator generator) throws Exception {
+            // 这组数字是主世界群系集合的指纹；下界的 step 6 只有远古残骸那几个，
+            // 尺寸和下标都不适用。
+            // These numbers fingerprint the overworld biome set; the nether step 6 holds
+            // only the ancient debris features, so neither size nor index applies.
+            if (!"minecraft:overworld".equalsIgnoreCase(this.options.settings())) {
+                return;
+            }
             Field field = net.minecraft.world.level.chunk.ChunkGenerator.class
                     .getDeclaredField("featuresPerStep");
             field.setAccessible(true);

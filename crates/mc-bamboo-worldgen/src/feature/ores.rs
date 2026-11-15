@@ -217,6 +217,54 @@ fn lerp(alpha: f64, p0: f64, p1: f64) -> f64 {
     p0 + alpha * (p1 - p0)
 }
 
+/// `ScatteredOreFeature.place`：在 `origin` 周围最多 7 格内做 `nextInt(size + 1)` 次
+/// 单点尝试，每次用 `round((nextFloat() - nextFloat()) * maxDist)` 偏移三个轴。
+///
+/// 偏移上限逐次取 `min(i, 7)`，所以前 7 次尝试的半径逐渐变大、之后固定为 7。
+/// 每次尝试都走父类的 `canPlaceOre`，命中第一个 `RuleTest` 就写方块并跳出内层循环。
+///
+/// `ScatteredOreFeature.place`: up to `nextInt(size + 1)` single-block tries around the
+/// origin, each offset by `round((nextFloat() - nextFloat()) * maxDist)` per axis. The
+/// per-try radius is `min(i, 7)`, so it grows for the first seven tries and then stays
+/// at 7. Each try runs the parent `canPlaceOre` and writes the first matching target.
+pub fn place_scattered(
+    ore: &OreFeature,
+    world: &mut FeatureWorld<'_>,
+    random: &WorldgenRandom,
+    origin: (i32, i32, i32),
+) -> bool {
+    const MAX_DIST_FROM_ORIGIN: i32 = 7;
+    let number_of_tries = random.next_int(ore.size + 1);
+    for i in 0..number_of_tries {
+        let max_distance = i.min(MAX_DIST_FROM_ORIGIN);
+        let dx = scattered_offset(random, max_distance);
+        let dy = scattered_offset(random, max_distance);
+        let dz = scattered_offset(random, max_distance);
+        let (x, y, z) = (origin.0 + dx, origin.1 + dy, origin.2 + dz);
+        let state = world.get_block(x, y, z);
+        for (rule, target_state) in &ore.targets {
+            if can_place_ore(ore, rule, world, random, state, x, y, z) {
+                world.set_block_with_heightmaps(x, y, z, *target_state);
+                break;
+            }
+        }
+    }
+    // 官方恒返回 true（哪怕一次都没放成）。
+    // The official code always returns true, even when nothing was placed.
+    true
+}
+
+/// `ScatteredOreFeature.getRandomPlacementInOneAxisRelativeToOrigin`。
+///
+/// `ScatteredOreFeature.getRandomPlacementInOneAxisRelativeToOrigin`.
+fn scattered_offset(random: &WorldgenRandom, max_distance: i32) -> i32 {
+    let value = (random.next_float() - random.next_float()) * max_distance as f32;
+    // `Math.round(float)` 是 `floor(x + 0.5)`，不是 Rust 的 `round`（后者远离零）。
+    // `Math.round(float)` is `floor(x + 0.5)`, not Rust's `round` (which rounds away
+    // from zero).
+    (value + 0.5).floor() as i32
+}
+
 /// `AbstractOreFeature.canPlaceOre`。
 #[allow(clippy::too_many_arguments)]
 fn can_place_ore(
@@ -264,4 +312,47 @@ fn is_adjacent_to_air(world: &FeatureWorld<'_>, x: i32, y: i32, z: i32) -> bool 
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn scattered_offset_matches_java_round() {
+        // `Math.round` 是 `floor(x + 0.5)`：`-0.5` 取 `0`、`-0.51` 取 `-1`。
+        // Rust 的 `round` 会给 `-1` / `-1`，两者不同，所以必须显式 floor。
+        // `Math.round` is `floor(x + 0.5)`: `-0.5` gives 0 and `-0.51` gives -1.
+        // Rust's `round` would give -1 for both, so the floor is explicit.
+        assert_eq!((0.0f32 + 0.5).floor() as i32, 0);
+        assert_eq!((-0.5f32 + 0.5).floor() as i32, 0);
+        assert_eq!((-0.51f32 + 0.5).floor() as i32, -1);
+        assert_eq!((-0.5f32).round() as i32, -1);
+    }
+
+    #[test]
+    fn parses_both_scattered_ore_configs() {
+        // `scattered_ore` 和 `ore` 共用 `AbstractOreFeature` 的 codec，两个导出配置
+        // 都应该按 `OreFeature` 解析出来。
+        // `scattered_ore` shares the `AbstractOreFeature` codec with `ore`, so both
+        // exported configs parse through `OreFeature`.
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        for name in [
+            "minecraft:ore_ancient_debris_large",
+            "minecraft:ore_ancient_debris_small",
+        ] {
+            let config = &root["feature"][name];
+            assert_eq!(
+                config["type"].as_str(),
+                Some("minecraft:scattered_ore"),
+                "{name}"
+            );
+            let parsed = OreFeature::parse(config).expect(name);
+            assert!(!parsed.targets.is_empty(), "{name}");
+            // 两个配置都是 `discard_chance_on_air_exposure = 1`：碰到空气就放弃。
+            // Both configs set `discard_chance_on_air_exposure = 1`: give up on air.
+            assert_eq!(parsed.discard_chance_on_air_exposure, 1.0, "{name}");
+        }
+    }
 }

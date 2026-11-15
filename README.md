@@ -713,6 +713,44 @@ WebView2 的渲染进程不算在内。
   的倍数用整数精确复刻，若将来有非 0.25 倍的 AABB 进来（目前没有）会失去精度。
 - 地物（features）阶段的纯函数正按官方 `ChunkGenerator.applyBiomeDecoration` 逐类移植，
   游戏里的接入由流水线分支（邻居快照 + `features` 阶段）负责。已逐方块对拍
+  0 不一致的有 step 6 的矿石，以及 step 9 的植被子集（详见
+  `docs/worldgen-features-plan.md` 5.1）；其余类型仍明确标 `unsupported`，对拍时整块跳过，
+  不假装支持。本轮已移植：`simple_block` 的内联 bare-state 与 `weighted` /
+  `randomized_int` / `noise` / `dual_noise` / `noise_threshold` / `rule_based` typed
+  provider（`BLOCK_STATE_PROVIDER` 注册表已由生成器导出，`to_place` 的 holder 字符串
+  在解析时展开）、一批继承 `VegetationBlock` 的存活判定（含
+  `LeafLitterBlock` 的 `isFaceSturdy(UP)`、`SeagrassBlock` / `TallSeagrassBlock`、
+  睡莲、海泡菜、孢子花）、双高植物 `DoublePlantBlock.placeAt`（按祖先表判定，
+  含 `TallSeagrassBlock` 子类）、
+  `would_survive` / `has_sturdy_face` / `matching_fluids` 谓词、组合类
+  （`random_selector` / `weighted_random_selector` / `simple_random_selector` /
+  `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）与
+  `clamped` / `clamped_normal` / `weighted_list` IntProvider、`BambooFeature`
+  （竹子）、`MultifaceGrowthFeature`（发光地衣）、`VinesFeature`（藤蔓），三者都是
+  **逐方块 0 不一致**。
+  `minecraft:glow_lichen` 现在是**逐方块 0 不一致**（`--seeds 2 --chunks 20 --salt 11
+  --steps 9 --feature-types minecraft:glow_lichen`：40 中心 / 35389440 方块 / 0 skipped；
+  故意关掉扩散后报 70 处不一致，确认不是空跑）。修的过程中发现并修掉两个真 bug：
+  `validDirections` 里 `Direction.Plane.HORIZONTAL` 的枚举顺序写错，
+  以及把地物放置用的扩散入口和骨粉用的那个搞混了。细节见
+  `docs/worldgen-features-plan.md` 5.1。
+  另有六个类型**已按官方源码写完但还没验证**（第 13–16 轮）：
+  `minecraft:overlay` / `minecraft:no_op` / `minecraft:single_block_pillar` /
+  `minecraft:coral_tree` / `minecraft:coral_claw` / `minecraft:random_block`
+  （state provider）。它们只能通过 `minecraft:warm_ocean_vegetation` 到达，而那条链
+  始终 `0 centers / 9 skipped`——珊瑚的存活判定（`CoralBlock` / `CoralPlantBlock` /
+  `CoralFanBlock`）和 `#minecraft:corals` 标签展开都已确认正确（有单测），根因还没找到。
+  诚实的已知差异与未做：蘑菇（要 `getRawBrightness`）、
+  苔藓地毯（`MossyCarpetBlock.placeAt` 用 `level.getRandom()`）等特殊
+  `canSurvive`；`schedule_tick` 忽略；`noise_threshold_count` / `noise_based_count` /
+  `environment_scan` / `surface_water_depth_filter` / `surface_relative_threshold_filter`
+  修饰器（由其它分支补）；方块实体数据（蜂巢、可疑沙等）。
+  树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）和水下/其余植被按分工移交给
+  `cb-wg-trees` / `cb-wg-aquatic`；`projected_random_patchy_square` 在 26.3 导出数据里没有
+  条目。组合类里 `simple_random_selector`（forest_flowers / flower_forest_flowers）、
+  `weighted_random_selector`（8 个 seagrass 父链）和 `random_selector` 的花园 holder
+  分支拿到 0 不一致对拍；`random_boolean_selector` / `sequence` 的子项仍多为未移植类型，
+  place 逻辑按官方源码移植但尚未逐方块验证。此前 terrain 含水层在个别邻居区块（seed -1、chunk (52,-26)、
   0 不一致的有 step 6 的矿石、step 9 的植被子集，以及水下植被与 `vegetation_patch`
   （详见 `docs/worldgen-features-plan.md` 5.1）；其余类型仍明确标 `unsupported`，对拍时
   整块跳过，不假装支持。已移植并接入：`simple_block` 的内联 bare-state 与 `weighted` /

@@ -143,12 +143,18 @@ impl<'a> Generator<'a> {
             .get("density_function")
             .and_then(Value::as_object)
             .ok_or("missing density_function")?;
+        let material_rule = raw
+            .get("material_rule")
+            .and_then(Value::as_str)
+            .ok_or("noise settings has no material_rule")?
+            .to_owned();
         let material = MaterialRules::compile(
             worldgen.raw(),
             raw_functions,
             worldgen.noises(),
             worldgen.functions(),
             &mut compiler,
+            &material_rule,
         )
         .map_err(|error| format!("material rules: {error}"))?;
         let carvers =
@@ -354,6 +360,41 @@ impl<'a> Generator<'a> {
         self.terrain_inner(chunk_x, chunk_z, stage, beardifier, None)
     }
 
+    /// 建一个区块用的含水层。有 `aquifers` 配置时是噪声版，没有时（下界）是
+    /// `Aquifer.createDisabled` 的简化版。
+    ///
+    /// Build the aquifer for one volume: the noise-based one when `aquifers` is
+    /// configured, and the `Aquifer.createDisabled` simplification otherwise (the
+    /// nether).
+    fn make_aquifer(
+        &self,
+        context: &mut Context,
+        volume: &Volume,
+        lava: u32,
+    ) -> Result<Aquifer<'_>, String> {
+        Ok(match self.aquifer.as_ref() {
+            Some(functions) => Aquifer::new(
+                functions,
+                context,
+                self.aquifer_random,
+                volume,
+                self.settings.sea_level,
+                self.default_fluid,
+                lava,
+                self.empty,
+            ),
+            // 没有 `aquifers` 的维度（下界）走 `Aquifer.createDisabled`。
+            // A dimension without `aquifers` (the nether) takes `Aquifer.createDisabled`.
+            None => Aquifer::new_disabled(
+                self.aquifer_random,
+                self.settings.sea_level,
+                self.default_fluid,
+                lava,
+                self.empty,
+            ),
+        })
+    }
+
     /// `terrain` 再带上周围 3×3 区块已填好的 quart 群系格。
     ///
     /// 官方 `buildTerrain` 的地表阶段用 `region.getBiomeManager()`，它的 `BiomeResolver`
@@ -414,17 +455,9 @@ impl<'a> Generator<'a> {
         crate::perf::mark(crate::perf::Phase::AquiferInit);
         // 官方先建 NoiseChunk（含水层的构造器也在这里求值），再算 finalDensity。
         // Rust 借检查不让两件事同时抱着 context，所以先建含水层，再算密度。
-        let aquifer = self.aquifer.as_ref().ok_or("dimension has no aquifers")?;
-        let mut aquifer = Aquifer::new(
-            aquifer,
-            &mut context,
-            self.aquifer_random,
-            &volume,
-            self.settings.sea_level,
-            self.default_fluid,
-            lava,
-            self.empty,
-        );
+        // Build the aquifer before the density, because Rust's borrow checker will not
+        // let both hold the context at once.
+        let mut aquifer = self.make_aquifer(&mut context, &volume, lava)?;
         crate::perf::note_skip_above(aquifer.skip_sampling_above_y());
         crate::perf::mark(crate::perf::Phase::NoiseDensity);
         self.router
@@ -661,17 +694,7 @@ impl<'a> Generator<'a> {
         let volume = Volume::blocks((1, height, 1), (block_x, min_y, block_z));
         let mut context = Context::new(self.cache_count);
         let mut density = context.acquire(volume.len());
-        let aquifer_functions = self.aquifer.as_ref().ok_or("dimension has no aquifers")?;
-        let mut aquifer = Aquifer::new(
-            aquifer_functions,
-            &mut context,
-            self.aquifer_random,
-            &volume,
-            self.settings.sea_level,
-            self.default_fluid,
-            lava_state()?,
-            self.empty,
-        );
+        let mut aquifer = self.make_aquifer(&mut context, &volume, lava_state()?)?;
         self.router
             .final_density
             .sample_volume(&mut context, &mut density, &volume);
@@ -714,17 +737,7 @@ impl<'a> Generator<'a> {
         let volume = Volume::blocks((1, height, 1), (block_x, min_y, block_z));
         let mut context = Context::new(self.cache_count);
         let mut density = context.acquire(volume.len());
-        let aquifer_functions = self.aquifer.as_ref().ok_or("dimension has no aquifers")?;
-        let mut aquifer = Aquifer::new(
-            aquifer_functions,
-            &mut context,
-            self.aquifer_random,
-            &volume,
-            self.settings.sea_level,
-            self.default_fluid,
-            lava_state()?,
-            self.empty,
-        );
+        let mut aquifer = self.make_aquifer(&mut context, &volume, lava_state()?)?;
         self.router
             .final_density
             .sample_volume(&mut context, &mut density, &volume);
