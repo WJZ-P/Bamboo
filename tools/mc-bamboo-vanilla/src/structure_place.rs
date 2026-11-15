@@ -112,7 +112,7 @@ struct Section {
     /// 每次调用的写入位置（只在设置了 `STRUCTURE_PLACE_TRACE` 时非空）。
     ///
     /// Write positions per invocation (only when `STRUCTURE_PLACE_TRACE` is set).
-    piece_positions: Vec<(usize, i32, i32, i32)>,
+    piece_positions: Vec<(usize, i32, i32, i32, i32, i32)>,
     blocks: Vec<String>,
 }
 
@@ -174,13 +174,23 @@ fn parse_output(stdout: &str) -> Result<Vec<Section>, String> {
             }
             "D" => match &mut current {
                 Some(section) => {
+                    // `D <invocation> <chunk_x> <chunk_z> <x> <y> <z>`。
+                    // `D <invocation> <chunk_x> <chunk_z> <x> <y> <z>`.
                     let invocation: usize = fields[1]
                         .parse()
                         .map_err(|_| format!("bad invocation: {line}"))?;
-                    let x: i32 = fields[2].parse().map_err(|_| format!("bad x: {line}"))?;
-                    let y: i32 = fields[3].parse().map_err(|_| format!("bad y: {line}"))?;
-                    let z: i32 = fields[4].parse().map_err(|_| format!("bad z: {line}"))?;
-                    section.piece_positions.push((invocation, x, y, z));
+                    let chunk_x: i32 = fields[2]
+                        .parse()
+                        .map_err(|_| format!("bad chunk x: {line}"))?;
+                    let chunk_z: i32 = fields[3]
+                        .parse()
+                        .map_err(|_| format!("bad chunk z: {line}"))?;
+                    let x: i32 = fields[4].parse().map_err(|_| format!("bad x: {line}"))?;
+                    let y: i32 = fields[5].parse().map_err(|_| format!("bad y: {line}"))?;
+                    let z: i32 = fields[6].parse().map_err(|_| format!("bad z: {line}"))?;
+                    section
+                        .piece_positions
+                        .push((invocation, chunk_x, chunk_z, x, y, z));
                 }
                 None => return Err(format!("D line before any Q: {line}")),
             },
@@ -818,9 +828,17 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
                     let theirs: std::collections::BTreeSet<(i32, i32, i32)> = section
                         .piece_positions
                         .iter()
-                        .filter(|(inv, _, _, _)| *inv == i)
-                        .map(|(_, x, y, z)| (*x, *y, *z))
+                        .filter(|(inv, _, _, _, _, _)| *inv == i)
+                        .map(|(_, _, _, x, y, z)| (*x, *y, *z))
                         .collect();
+                    // 这条调用属于哪个 chunk，用来判断 `chunkBB` 的作用域。
+                    // Which chunk this invocation belongs to, to check `chunkBB`'s scope.
+                    let chunk = section
+                        .piece_positions
+                        .iter()
+                        .find(|(inv, _, _, _, _, _)| *inv == i)
+                        .map(|(_, cx, cz, _, _, _)| format!("chunk {cx} {cz}"))
+                        .unwrap_or_else(|| "<none>".to_owned());
                     let mine: std::collections::BTreeSet<(i32, i32, i32)> = ours
                         .piece_writes
                         .get(i)
@@ -829,7 +847,9 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
                     for pos in theirs.difference(&mine).take(6) {
                         push(
                             &mut failures,
-                            format!("[{key}]   piece #{i} java wrote {pos:?}, rust did not"),
+                            format!(
+                                "[{key}]   piece #{i} ({chunk}) java wrote {pos:?}, rust did not"
+                            ),
                         );
                     }
                     for pos in mine.difference(&theirs).take(6) {

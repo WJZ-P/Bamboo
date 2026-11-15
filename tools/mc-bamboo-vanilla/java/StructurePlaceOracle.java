@@ -192,7 +192,7 @@ public final class StructurePlaceOracle {
                         BlockPos referencePos = new BlockPos(at.getMiddleBlockX(),
                                 piece.getBoundingBox().minY(), at.getMiddleBlockZ());
                         int beforeWrites = level.writtenSize();
-                        level.beginPiece(invocation);
+                        level.beginPiece(invocation, at.x(), at.z());
                         invocation++;
                         try {
                             piece.postProcess(level.proxy(), null, null, random, chunkBB, at,
@@ -369,22 +369,35 @@ public final class StructurePlaceOracle {
         private final List<BlockPos> written = new ArrayList<>();
         /** 当前正在跑的结构件调用编号（两侧一致的全局序号）。 */
         private int currentInvocation;
+        private int currentChunkX;
+        private int currentChunkZ;
         /** 每次结构件调用写了哪些位置，用于逐件定位差异。 */
         private final java.util.List<java.util.List<BlockPos>> pieceWrites = new ArrayList<>();
+        /** 每次调用所属的 chunk，`D` 行带上它来确认 `chunkBB` 的作用域。 */
+        private final java.util.List<int[]> pieceChunk = new ArrayList<>();
 
-        void beginPiece(int invocation) {
+        void beginPiece(int invocation, int chunkX, int chunkZ) {
             this.currentInvocation = invocation;
+            this.currentChunkX = chunkX;
+            this.currentChunkZ = chunkZ;
             while (pieceWrites.size() <= invocation) {
                 pieceWrites.add(new ArrayList<>());
             }
+            while (pieceChunk.size() <= invocation) {
+                pieceChunk.add(null);
+            }
+            pieceChunk.set(invocation, new int[] {chunkX, chunkZ});
         }
 
         /** 输出每次调用写过的位置：`D <invocation> <x> <y> <z>`。 */
         java.util.List<String> pieceWriteLines() {
             java.util.List<String> out = new ArrayList<>();
             for (int i = 0; i < pieceWrites.size(); i++) {
+                int[] chunk = pieceChunk.get(i);
                 for (BlockPos pos : pieceWrites.get(i)) {
-                    out.add("D " + i + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ());
+                    out.add("D " + i + " " + (chunk == null ? "?" : chunk[0]) + " "
+                            + (chunk == null ? "?" : chunk[1]) + " "
+                            + pos.getX() + " " + pos.getY() + " " + pos.getZ());
                 }
             }
             return out;
