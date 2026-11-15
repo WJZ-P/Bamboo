@@ -416,11 +416,6 @@ fn classify(state: u32) -> Option<Kind> {
         | BlockClass::SculkSensorBlock
         | BlockClass::SculkShriekerBlock
         | BlockClass::CalibratedSculkSensorBlock => Kind::Default,
-        // `RotatedPillarBlock` / `SnowyBlock` 也继承 `Block`，`canSurvive` 恒 true
-        // （`rotated` / `rule_based` 状态提供者会产出它们）。
-        // `RotatedPillarBlock` / `SnowyBlock` extend `Block` too, so `canSurvive` is
-        // always true; the `rotated` / `rule_based` providers produce them.
-        BlockClass::RotatedPillarBlock | BlockClass::SnowyBlock => Kind::Default,
         // 直接继承 VegetationBlock、不覆写 canSurvive 的类，标签判定。
         // Classes extending VegetationBlock without overriding canSurvive: a tag check.
         BlockClass::BushBlock

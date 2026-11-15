@@ -7,7 +7,7 @@
 #[rustfmt::skip]
 mod generated;
 
-pub use mc_bamboo_core::Aabb;
+use mc_bamboo_core::Aabb;
 
 /// 配方表的数据结构和官方数据包导出的全部配方。
 pub mod recipe;
