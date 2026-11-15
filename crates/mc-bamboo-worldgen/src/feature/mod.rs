@@ -23,6 +23,7 @@ pub mod rule_test;
 pub mod run;
 pub mod shape_update;
 pub mod simple_block;
+pub mod single_block_pillar;
 pub mod state;
 pub mod state_provider;
 pub mod survival;

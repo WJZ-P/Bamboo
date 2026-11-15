@@ -93,6 +93,12 @@ enum Composition<'a> {
     Sequence {
         features: Vec<Child<'a>>,
     },
+    /// `OverlayFeature`：把所有子项都放一遍，任一成功就算成功（**不短路**）。
+    ///
+    /// `OverlayFeature`: place every child, succeed if any did (no short-circuit).
+    Overlay {
+        features: Vec<Child<'a>>,
+    },
 }
 
 impl<'a> Composition<'a> {
@@ -130,6 +136,9 @@ impl<'a> Composition<'a> {
                 features: parse_holder_set(object.get("features")?)?,
             }),
             "minecraft:sequence" => Some(Self::Sequence {
+                features: parse_holder_set(object.get("features")?)?,
+            }),
+            "minecraft:overlay" => Some(Self::Overlay {
                 features: parse_holder_set(object.get("features")?)?,
             }),
             "minecraft:random_boolean_selector" => Some(Self::RandomBooleanSelector {
@@ -281,6 +290,22 @@ fn place_composition<'a>(
             }
             total
         }
+        // 官方 `OverlayFeature.place`：`placedAny |= placer.place(...)`，**循环到底**，
+        // 不因为某个子项失败就停。
+        // Official `OverlayFeature.place`: `placedAny |= placer.place(...)` over every
+        // child; it never stops early.
+        Composition::Overlay { features } => {
+            let mut total = PlaceOutcome {
+                supported: true,
+                placed: false,
+            };
+            for child in features {
+                let outcome = place_child(child, registry, world, env, random, pos);
+                total.supported &= outcome.supported;
+                total.placed |= outcome.placed;
+            }
+            total
+        }
     }
 }
 
@@ -335,6 +360,7 @@ mod tests {
                     | "minecraft:simple_random_selector"
                     | "minecraft:random_boolean_selector"
                     | "minecraft:sequence"
+                    | "minecraft:overlay"
             );
             if is_composition {
                 assert!(
