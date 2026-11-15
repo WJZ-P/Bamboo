@@ -31,7 +31,17 @@ const FILLS: [&str; 3] = ["stone", "air", "stone_with_ceiling"];
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
 
+/// 查询类型名字（同时是 `--feature-types` 的取值）。
+///
+/// Query kind names, also the values accepted by `--feature-types`.
+const KIND_MINESHAFT: &str = "mineshaft_normal";
+const KIND_MINESHAFT_MESA: &str = "mineshaft_mesa";
+const KIND_STRONGHOLD: &str = "stronghold";
+const KIND_OCEAN_MONUMENT: &str = "ocean_monument";
+const KIND_WOODLAND_MANSION: &str = "woodland_mansion";
+
 /// 一条查询。
+#[derive(Debug, Clone)]
 struct Query {
     kind: &'static str,
     seed: i64,
@@ -40,8 +50,18 @@ struct Query {
     fill: &'static str,
 }
 
-pub fn run(mut command: Command, queries_path: &Path, _options: &[&str]) -> Result<(), String> {
-    let queries = build_queries();
+pub fn run(mut command: Command, queries_path: &Path, options: &[&str]) -> Result<(), String> {
+    let filter = option_value(options, "--feature-types");
+    let chunk_filter = option_value(options, "--chunk").map(|raw| {
+        let mut parts = raw.split_whitespace();
+        let x: i32 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let z: i32 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        (x, z)
+    });
+    let queries = build_queries(filter.as_deref(), chunk_filter);
+    if queries.is_empty() {
+        return Err("no queries selected".to_owned());
+    }
     write_queries(queries_path, &queries)?;
 
     // 内存紧，给这个 java 对拍进程设上限（JVM 选项经 JAVA_TOOL_OPTIONS 生效）。
@@ -62,11 +82,45 @@ pub fn run(mut command: Command, queries_path: &Path, _options: &[&str]) -> Resu
     compare(&queries, &String::from_utf8_lossy(&output.stdout))
 }
 
-fn build_queries() -> Vec<Query> {
+fn build_queries(filter: Option<&str>, chunk_filter: Option<(i32, i32)>) -> Vec<Query> {
     let mut queries = Vec::new();
+
+    // `--feature-types <name>` 只保留那一个类型；没给就用全部。
+    // `--feature-types <name>` keeps only that type; all of them otherwise.
+    let wants = |kind: &str| filter.is_none_or(|name| name == kind);
+    let chunks: Vec<(i32, i32)> = match chunk_filter {
+        Some(one) => vec![one],
+        None => CHUNKS.to_vec(),
+    };
+
     for &seed in &SEEDS {
-        for &(cx, cz) in &CHUNKS {
-            for kind in ["mineshaft_normal", "mineshaft_mesa", "stronghold"] {
+        for &(cx, cz) in &chunks {
+            for kind in [KIND_MINESHAFT, KIND_MINESHAFT_MESA, KIND_STRONGHOLD] {
+                if !wants(kind) {
+                    continue;
+                }
+                for &fill in &FILLS {
+                    queries.push(Query {
+                        kind,
+                        seed,
+                        cx,
+                        cz,
+                        fill,
+                    });
+                }
+            }
+            // 林地府邸的模板放置还没移植，先在查询集里关掉。
+            // The woodland mansion's template placement is not ported yet, so it is left
+            // out of the query set for now.
+            let _ = KIND_WOODLAND_MANSION;
+            for kind in [KIND_OCEAN_MONUMENT] {
+                if !wants(kind) {
+                    continue;
+                }
+                // 海底神殿 / 林地府邸只在有水的 / 有地面的填充下有意义：
+                // `air` 全空世界里所有写入都落在「原本空气」上，仍然照放。
+                // The monument and the mansion are still placed in the all-air fill; the
+                // writes just land on existing air.
                 for &fill in &FILLS {
                     queries.push(Query {
                         kind,
@@ -80,6 +134,14 @@ fn build_queries() -> Vec<Query> {
         }
     }
     queries
+}
+
+/// `--opt value` 的取值。
+///
+/// Value of `--opt value`.
+fn option_value(options: &[&str], name: &str) -> Option<String> {
+    let index = options.iter().position(|option| *option == name)?;
+    options.get(index + 1).map(|value| (*value).to_owned())
 }
 
 fn write_queries(path: &Path, queries: &[Query]) -> Result<(), String> {
@@ -178,9 +240,42 @@ struct RustResult {
 }
 
 fn rust_result(q: &Query) -> Result<RustResult, String> {
-    let layout = layout(q)?;
     let center = (q.cx, q.cz);
     let mut level = FlatLevel::new(q.fill, center);
+    let mut minecraft_random = 0;
+
+    // 海底神殿的 `Children` 只有一个 `MonumentBuilding`，房间图是它的私有字段：
+    // `L` 行只比那一个结构件，方块靠 `MonumentBuilding.postProcess` 自己放下整个房间图。
+    // The ocean monument's `Children` holds a single `MonumentBuilding` whose room graph
+    // is a private field: the `L` lines only cover that piece, and blocks come from
+    // `MonumentBuilding.postProcess` placing the entire room graph itself.
+    if q.kind == KIND_OCEAN_MONUMENT {
+        let random = pieces::make_random(q.seed, q.cx, q.cz);
+        let dir = HDir::random(&random);
+        let west = q.cx * 16 - 29;
+        let north = q.cz * 16 - 29;
+        let monument = pieces::ocean_monument::monument_layout(&random, west, north, dir);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let at = (q.cx + dx, q.cz + dz);
+                let chunk_bb = chunk_box(at);
+                let chunk_random = pieces::make_random(q.seed ^ 0x5DEECE66D, at.0, at.1);
+                pieces::ocean_monument_place::place_in_chunk(
+                    &monument,
+                    &mut level,
+                    chunk_bb,
+                    63,
+                    &chunk_random,
+                );
+            }
+        }
+        return Ok(RustResult {
+            pieces: monument.pieces().iter().take(1).map(piece_line).collect(),
+            blocks: level.snapshot(),
+        });
+    }
+
+    let layout = layout(q)?;
 
     // 和 Java 侧一样逐区块调：`chunkBB` 是该区块整列盒，`random` 每区块重播。
     // Once per chunk like Java: the chunk's full column box, random reseeded per chunk.
@@ -196,7 +291,15 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
                     continue;
                 }
                 if place_piece(
-                    q.kind, piece, i, &layout, &mut level, chunk_bb, center, &random,
+                    q.kind,
+                    piece,
+                    i,
+                    &layout,
+                    &mut level,
+                    chunk_bb,
+                    center,
+                    &random,
+                    &mut minecraft_random,
                 )?
                 .is_some()
                 {
@@ -217,12 +320,25 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
 
 fn layout(q: &Query) -> Result<Vec<Piece>, String> {
     match q.kind {
-        "mineshaft_normal" => Ok(pieces::mineshaft::generate(q.seed, q.cx, q.cz, false, 0)),
-        "mineshaft_mesa" => Ok(pieces::mineshaft::generate(q.seed, q.cx, q.cz, true, 0)),
-        "stronghold" => Ok(pieces::stronghold::generate(q.seed, q.cx, q.cz)),
+        KIND_MINESHAFT => Ok(pieces::mineshaft::generate(q.seed, q.cx, q.cz, false, 0)),
+        KIND_MINESHAFT_MESA => Ok(pieces::mineshaft::generate(q.seed, q.cx, q.cz, true, 0)),
+        KIND_STRONGHOLD => Ok(pieces::stronghold::generate(q.seed, q.cx, q.cz)),
+        KIND_OCEAN_MONUMENT => Ok(pieces::ocean_monument::generate(q.seed, q.cx, q.cz)),
+        KIND_WOODLAND_MANSION => Ok(pieces::woodland_mansion::generate(
+            q.seed,
+            q.cx,
+            q.cz,
+            MANSION_START_Y,
+        )?),
         other => Err(format!("no Rust layout for kind {other}")),
     }
 }
+
+/// 林地府邸的喂入 `startY`（官方 `getLowestYIn5by5Box` 的结果，必须 >= 60）。
+///
+/// The `startY` fed to the woodland mansion layout (vanilla
+/// `getLowestYIn5by5Box`, always >= 60).
+const MANSION_START_Y: i32 = 63;
 
 /// 按结构件类型调对应的 `postProcess`。
 #[allow(clippy::too_many_arguments)]
@@ -235,15 +351,19 @@ fn place_piece(
     chunk_bb: [i32; 6],
     _center: (i32, i32),
     random: &mc_bamboo_worldgen::random::WorldgenRandom,
+    _minecraft_random: &mut i64,
 ) -> Result<Option<()>, String> {
     use mc_bamboo_worldgen::structure::pieces::mineshaft_place as place;
 
     let _ = layout;
-    if kind == "stronghold" {
+    if kind == KIND_STRONGHOLD {
         return place_stronghold_piece(piece, index, level, chunk_bb, random);
     }
+    if kind == KIND_WOODLAND_MANSION {
+        return Err("woodland mansion template placement is not ported yet".to_owned());
+    }
 
-    let shaft = if kind == "mineshaft_mesa" {
+    let shaft = if kind == KIND_MINESHAFT_MESA {
         place::ShaftType::Mesa
     } else {
         place::ShaftType::Normal

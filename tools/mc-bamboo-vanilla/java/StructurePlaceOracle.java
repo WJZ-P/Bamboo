@@ -17,6 +17,7 @@ import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.SectionPos;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.RegistryDataLoader;
@@ -28,12 +29,14 @@ import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
+import net.minecraft.util.datafix.DataFixers;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
@@ -52,8 +55,12 @@ import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSeriali
 import net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder;
 import net.minecraft.world.level.levelgen.structure.structures.MineshaftPieces;
 import net.minecraft.world.level.levelgen.structure.structures.MineshaftStructure;
+import net.minecraft.world.level.levelgen.structure.structures.OceanMonumentPieces;
 import net.minecraft.world.level.levelgen.structure.structures.StrongholdPieces;
+import net.minecraft.world.level.levelgen.structure.structures.WoodlandMansionPieces;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
 import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.storage.LevelStorageSource;
 
 /**
  * 对拍结构件的 {@code postProcess}：在 JVM 里造一个不启动服务端的假 {@code WorldGenLevel}，
@@ -78,10 +85,35 @@ import net.minecraft.world.level.material.FluidState;
 public final class StructurePlaceOracle {
     private static final int SEA_LEVEL = 63;
     private static final int MIN_Y = -64;
+    /** 林地府邸喂入的 `startY`，必须和 Rust 侧 `MANSION_START_Y` 一致。 */
+    private static final int MANSION_START_Y = 63;
     private static final StructurePieceSerializationContext CTX =
             new StructurePieceSerializationContext(null, null, null);
     private static final java.util.Set<String> BASE_KEYS =
             java.util.Set.of("id", "BB", "O", "GD");
+
+    /** 林地府邸要 `StructureTemplateManager` 算包围盒；只建一次。 */
+    private static StructureTemplateManager templateManager;
+
+    private static StructureTemplateManager templateManager() {
+        if (templateManager == null) {
+            try {
+                PackRepository repository = ServerPacksSource.createVanillaTrustedRepository();
+                repository.reload();
+                repository.setSelected(List.of("vanilla"));
+                MultiPackResourceManager resources =
+                        new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected());
+                Path temp = Files.createTempDirectory("bamboo-mansion");
+                LevelStorageSource.LevelStorageAccess storage =
+                        LevelStorageSource.createDefault(temp).createAccess("mansion");
+                templateManager = new StructureTemplateManager(
+                        resources, storage, DataFixers.getDataFixer(), BuiltInRegistries.BLOCK);
+            } catch (Exception e) {
+                throw new IllegalStateException("cannot build StructureTemplateManager", e);
+            }
+        }
+        return templateManager;
+    }
 
     public static void main(String[] args) throws Exception {
         if (args.length != 1) {
@@ -98,7 +130,6 @@ public final class StructurePlaceOracle {
     private static void run(String queriesFile) throws Exception {
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
-
         // 矿井 `createChest` 会创建矿车实体；本轮不比实体，但它的随机取数必须照取。
         // 把 `EntityTypes.CHEST_MINECART` 的 `factory` 换成返回 null，让 `create` 走
         // 「创建失败」分支（和 `create` 返回 null 的语义一致），方块不受影响。
@@ -235,6 +266,31 @@ public final class StructurePlaceOracle {
         ChunkPos chunkPos = new ChunkPos(cx, cz);
         StructurePiecesBuilder builder = new StructurePiecesBuilder();
         switch (kind) {
+            case "ocean_monument" -> {
+                // OceanMonumentStructure.createTopPiece：只加一个 MonumentBuilding，
+                // 房间图是它的私有字段，postProcess 自己遍历 childPieces。
+                // OceanMonumentStructure.createTopPiece: only a MonumentBuilding is added;
+                // the room graph is a private field its postProcess walks itself.
+                random.setLargeFeatureSeed(seed, cx, cz);
+                Direction orientation = Direction.Plane.HORIZONTAL.getRandomDirection(random);
+                int west = chunkPos.getMinBlockX() - 29;
+                int north = chunkPos.getMinBlockZ() - 29;
+                builder.addPiece(new OceanMonumentPieces.MonumentBuilding(
+                        random, west, north, orientation));
+            }
+            case "woodland_mansion" -> {
+                // WoodlandMansionStructure.generatePieces：rotation 先取，再 generateMansion。
+                // WoodlandMansionStructure.generatePieces: rotation first, then the mansion.
+                random.setLargeFeatureSeed(seed, cx, cz);
+                Rotation rotation = Rotation.getRandom(random);
+                BlockPos startPos = new BlockPos(chunkPos.getBlockX(7), MANSION_START_Y,
+                        chunkPos.getBlockZ(7));
+                List<WoodlandMansionPieces.WoodlandMansionPiece> mansion =
+                        new java.util.ArrayList<>();
+                WoodlandMansionPieces.generateMansion(templateManager(), startPos, rotation,
+                        mansion, random);
+                mansion.forEach(builder::addPiece);
+            }
             case "mineshaft_normal", "mineshaft_mesa" -> {
                 random.setLargeFeatureSeed(seed, cx, cz);
                 random.nextDouble();
@@ -556,7 +612,14 @@ public final class StructurePlaceOracle {
                     }
                     case "setBlockAndUpdate":
                         return invoke(self, method, new Object[] {args[0], args[1], 3});
-                    case "removeBlock":
+                    case "scheduleTick": {
+                        // `placeBlock` 在写入后对该格的流体调一次 `scheduleTick(pos, fluid, 0)`。
+                        // 只比方块，计划刻不落盘；这里吞掉，不抛异常。
+                        // `placeBlock` schedules a tick for the fluid it just wrote. Only
+                        // blocks are compared and ticks are not persisted, so this is a
+                        // no-op here.
+                        return null;
+                    }                    case "removeBlock":
                         return invoke(self, method,
                                 new Object[] {args[0], Blocks.AIR.defaultBlockState(), 3});
                     case "ensureCanWrite":

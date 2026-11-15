@@ -15,7 +15,10 @@
 
 pub mod mineshaft;
 pub mod mineshaft_place;
+pub mod monument_double_rooms;
+pub mod monument_rooms;
 pub mod ocean_monument;
+pub mod ocean_monument_place;
 pub mod stronghold;
 pub mod stronghold_place;
 pub mod woodland_mansion;

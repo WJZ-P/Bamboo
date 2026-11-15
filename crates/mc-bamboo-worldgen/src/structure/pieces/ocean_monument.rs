@@ -36,15 +36,19 @@ fn room_index(x: i32, y: i32, z: i32) -> i32 {
     y * 25 + z * 5 + x
 }
 
-/// 房间节点；`connections` 存房间 index（-1 为 null）。
-#[derive(Clone)]
-struct RoomDef {
-    present: bool,
-    connections: [i32; 6],
-    has_opening: [bool; 6],
-    claimed: bool,
-    is_source: bool,
-    scan_index: i32,
+/// 房间节点；`connections` 存房间 index（-1 为 null）。放置阶段还要读
+/// `connections` / `has_opening`（房间的墙面、地板和开口），所以对外公开。
+///
+/// A room node; `connections` holds room indices (-1 for null). The placement stage
+/// also reads `connections` / `has_opening` (walls, floors and openings), so it is public.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomDef {
+    pub present: bool,
+    pub connections: [i32; 6],
+    pub has_opening: [bool; 6],
+    pub claimed: bool,
+    pub is_source: bool,
+    pub scan_index: i32,
 }
 
 impl RoomDef {
@@ -97,7 +101,7 @@ fn find_source(rooms: &mut [RoomDef], idx: i32, scan: i32) -> bool {
 
 /// 子件类型（含固定包围盒尺寸，`rw/rh/rd` 为网格单位）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RoomKind {
+pub enum RoomKind {
     Building,
     Entry,
     Core,
@@ -113,7 +117,10 @@ enum RoomKind {
 }
 
 impl RoomKind {
-    fn id(self) -> &'static str {
+    /// `StructurePieceType` 的注册名。
+    ///
+    /// The `StructurePieceType` registry name.
+    pub fn id(self) -> &'static str {
         match self {
             Self::Building => "minecraft:omb",
             Self::Entry => "minecraft:omentry",
@@ -131,7 +138,9 @@ impl RoomKind {
     }
 
     /// 由 RoomDefinition 造盒时的 (rw, rh, rd)。
-    fn dims(self) -> (i32, i32, i32) {
+    ///
+    /// The (rw, rh, rd) used when making the box from a room definition.
+    pub fn dims(self) -> (i32, i32, i32) {
         match self {
             Self::Entry | Self::Simple | Self::SimpleTop => (1, 1, 1),
             Self::Core => (2, 2, 2),
@@ -214,14 +223,20 @@ fn fitter_fits(fitter: Fitter, rooms: &[RoomDef], idx: i32) -> bool {
     }
 }
 
-/// 执行 fitter 的 `create`：改 claimed、返回 (类型, 用于造盒的房间 index)。
-/// `FitSimpleRoom` 消耗一次 `nextInt(3)`。
+/// 执行 fitter 的 `create`：改 claimed、返回 (类型, 用于造盒的房间 index, 构造期取数)。
+/// 第三个值只对 `FitSimpleRoom` 有意义：`OceanMonumentSimpleRoom` 构造器的
+/// `nextInt(3)` 就是 `mainDesign`；其它 fitter 返回 0。
+///
+/// Run a fitter's `create`: mark claimed and return (kind, room index used for the box,
+/// constructor draw). The third value only matters for `FitSimpleRoom`:
+/// `OceanMonumentSimpleRoom`'s constructor `nextInt(3)` is `mainDesign`; other fitters
+/// return 0.
 fn fitter_create(
     fitter: Fitter,
     rooms: &mut [RoomDef],
     idx: i32,
     random: &WorldgenRandom,
-) -> (RoomKind, i32) {
+) -> (RoomKind, i32, i32) {
     match fitter {
         Fitter::DoubleXY => {
             rooms[idx as usize].claimed = true;
@@ -231,7 +246,7 @@ fn fitter_create(
             rooms[up as usize].claimed = true;
             let east_up = rooms[east as usize].connections[D_UP];
             rooms[east_up as usize].claimed = true;
-            (RoomKind::DoubleXY, idx)
+            (RoomKind::DoubleXY, idx, 0)
         }
         Fitter::DoubleYZ => {
             rooms[idx as usize].claimed = true;
@@ -241,7 +256,7 @@ fn fitter_create(
             rooms[up as usize].claimed = true;
             let north_up = rooms[north as usize].connections[D_UP];
             rooms[north_up as usize].claimed = true;
-            (RoomKind::DoubleYZ, idx)
+            (RoomKind::DoubleYZ, idx, 0)
         }
         Fitter::DoubleZ => {
             let d = &rooms[idx as usize];
@@ -253,28 +268,29 @@ fn fitter_create(
             rooms[source as usize].claimed = true;
             let north = rooms[source as usize].connections[D_NORTH];
             rooms[north as usize].claimed = true;
-            (RoomKind::DoubleZ, source)
+            (RoomKind::DoubleZ, source, 0)
         }
         Fitter::DoubleX => {
             rooms[idx as usize].claimed = true;
             let east = rooms[idx as usize].connections[D_EAST];
             rooms[east as usize].claimed = true;
-            (RoomKind::DoubleX, idx)
+            (RoomKind::DoubleX, idx, 0)
         }
         Fitter::DoubleY => {
             rooms[idx as usize].claimed = true;
             let up = rooms[idx as usize].connections[D_UP];
             rooms[up as usize].claimed = true;
-            (RoomKind::DoubleY, idx)
+            (RoomKind::DoubleY, idx, 0)
         }
         Fitter::SimpleTop => {
             rooms[idx as usize].claimed = true;
-            (RoomKind::SimpleTop, idx)
+            (RoomKind::SimpleTop, idx, 0)
         }
         Fitter::Simple => {
             rooms[idx as usize].claimed = true;
-            random.next_int(3); // OceanMonumentSimpleRoom 构造器
-            (RoomKind::Simple, idx)
+            // `OceanMonumentSimpleRoom` 构造器。
+            // `OceanMonumentSimpleRoom`'s constructor.
+            (RoomKind::Simple, idx, random.next_int(3))
         }
     }
 }
@@ -459,6 +475,67 @@ fn child_piece(kind: RoomKind, bb: Box, dir: HDir) -> Piece {
     Piece::oriented(kind.id(), bb, 1, dir)
 }
 
+/// 一个子结构件的放置数据：类型、包围盒、绑定的房间节点（两翼和阁楼没有），以及
+/// 构造期抽的两个 `mainDesign`。
+///
+/// Placement data of one child piece: type, box, the bound room node (wings and the
+/// penthouse have none), and the two `mainDesign` values drawn in the constructors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonumentChild {
+    pub kind: RoomKind,
+    pub bb: Box,
+    /// `OceanMonumentPiece.roomDefinition` 的房间 index；两翼 / 阁楼为 `None`。
+    ///
+    /// Room index of `OceanMonumentPiece.roomDefinition`; `None` for wings/penthouse.
+    pub room: Option<i32>,
+    /// `OceanMonumentSimpleRoom.mainDesign`（构造器里 `random.nextInt(3)`），其它为 0。
+    pub main_design: i32,
+    /// `OceanMonumentWingRoom.mainDesign`（构造器里 `random.nextInt() & 1`），其它为 0。
+    pub wing_design: i32,
+}
+
+/// 海底神殿的完整布局：`MonumentBuilding` 的盒子、房间图、子结构件列表。
+///
+/// 布局对拍只需要 [`MonumentLayout::pieces`]；放置阶段还要房间图（子件按
+/// `roomDefinition.connections` / `hasOpening` 决定墙、地板和开口）和两个 `mainDesign`。
+///
+/// The full ocean monument layout: the `MonumentBuilding` box, the room graph and the
+/// child pieces. The layout oracle only needs [`MonumentLayout::pieces`]; placement
+/// also needs the room graph (children read `roomDefinition.connections` /
+/// `hasOpening` for walls, floors and openings) and the two `mainDesign` values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonumentLayout {
+    pub dir: HDir,
+    /// `MonumentBuilding` 的包围盒。
+    pub bb: Box,
+    /// 房间网格，index 就是 `RoomDefinition.index`（75 个网格位 + 1001/1002/1003）。
+    pub rooms: Vec<RoomDef>,
+    /// 子结构件，顺序就是 `childPieces` 的顺序（先入口与核心，再房间，最后两翼与阁楼）。
+    pub children: Vec<MonumentChild>,
+}
+
+impl MonumentLayout {
+    /// 布局 + 第 0 项 `MonumentBuilding` 合成结构件列表（和存档 / 对拍同一形状）。
+    ///
+    /// The layout plus the leading `MonumentBuilding`, in the piece-list shape used by
+    /// the save path and the oracle.
+    pub fn pieces(&self) -> Vec<Piece> {
+        let mut result = Vec::with_capacity(self.children.len() + 1);
+        result.push(Piece::oriented(
+            RoomKind::Building.id(),
+            self.bb,
+            0,
+            self.dir,
+        ));
+        result.extend(
+            self.children
+                .iter()
+                .map(|child| child_piece(child.kind, child.bb, self.dir)),
+        );
+        result
+    }
+}
+
 /// 生成海底神殿的结构件列表：第 0 项是 MonumentBuilding，其余是 childPieces
 /// （入口、核心、各房间、两翼、阁楼），包围盒已含 `getWorldPos` 平移。
 ///
@@ -471,7 +548,7 @@ pub fn generate(seed: i64, chunk_x: i32, chunk_z: i32) -> Vec<Piece> {
     let dir = HDir::random(&random);
     let west = chunk_x * 16 - 29;
     let north = chunk_z * 16 - 29;
-    monument_building(&random, west, north, dir)
+    monument_layout(&random, west, north, dir).pieces()
 }
 
 /// `new OceanMonumentPieces.MonumentBuilding(random, west, north, direction)`：
@@ -482,7 +559,12 @@ pub fn generate(seed: i64, chunk_x: i32, chunk_z: i32) -> Vec<Piece> {
 /// is the MonumentBuilding itself, the rest are `childPieces` (entry, core, fitted
 /// rooms, wings, penthouse). Both generation and read-back
 /// (`regeneratePiecesAfterLoad`) go through here with the identical draw order.
-pub fn monument_building(random: &WorldgenRandom, west: i32, north: i32, dir: HDir) -> Vec<Piece> {
+pub fn monument_layout(
+    random: &WorldgenRandom,
+    west: i32,
+    north: i32,
+    dir: HDir,
+) -> MonumentLayout {
     // MonumentBuilding 包围盒：width==depth==58，两轴结果相同。
     let bb = new_box(west, 39, north, west + 57, 39 + 22, north + 57);
 
@@ -493,19 +575,23 @@ pub fn monument_building(random: &WorldgenRandom, west: i32, north: i32, dir: HD
     let source = room_index(2, 0, 0);
     rooms[source as usize].claimed = true;
 
-    let mut children: Vec<Piece> = Vec::new();
+    let mut children: Vec<MonumentChild> = Vec::new();
     // 入口与核心（genDepth 1）。
-    children.push(child_piece(
-        RoomKind::Entry,
-        room_box(dir, source, 1, 1, 1),
-        dir,
-    ));
+    children.push(MonumentChild {
+        kind: RoomKind::Entry,
+        bb: room_box(dir, source, 1, 1, 1),
+        room: Some(source),
+        main_design: 0,
+        wing_design: 0,
+    });
     let (cw, ch, cd) = RoomKind::Core.dims();
-    children.push(child_piece(
-        RoomKind::Core,
-        room_box(dir, core, cw, ch, cd),
-        dir,
-    ));
+    children.push(MonumentChild {
+        kind: RoomKind::Core,
+        bb: room_box(dir, core, cw, ch, cd),
+        room: Some(core),
+        main_design: 0,
+        wing_design: 0,
+    });
 
     // 七个 fitter 逐个尝试。
     for &def in &room_defs {
@@ -514,9 +600,15 @@ pub fn monument_building(random: &WorldgenRandom, west: i32, north: i32, dir: HD
         }
         for &fitter in &FITTERS {
             if fitter_fits(fitter, &rooms, def) {
-                let (kind, box_idx) = fitter_create(fitter, &mut rooms, def, random);
+                let (kind, box_idx, main_design) = fitter_create(fitter, &mut rooms, def, random);
                 let (rw, rh, rd) = kind.dims();
-                children.push(child_piece(kind, room_box(dir, box_idx, rw, rh, rd), dir));
+                children.push(MonumentChild {
+                    kind,
+                    bb: room_box(dir, box_idx, rw, rh, rd),
+                    room: Some(box_idx),
+                    main_design,
+                    wing_design: 0,
+                });
                 break;
             }
         }
@@ -524,8 +616,8 @@ pub fn monument_building(random: &WorldgenRandom, west: i32, north: i32, dir: HD
 
     // offset = getWorldPos(9, 0, 22)；平移已有子件。
     let off = world_pos(&bb, dir, 9, 0, 22);
-    for p in children.iter_mut() {
-        translate(&mut p.bb, off.0, off.1, off.2);
+    for child in children.iter_mut() {
+        translate(&mut child.bb, off.0, off.1, off.2);
     }
 
     // 两翼与阁楼：包围盒已是世界坐标，不再平移。
@@ -538,14 +630,35 @@ pub fn monument_building(random: &WorldgenRandom, west: i32, north: i32, dir: HD
         world_pos(&bb, dir, 22, 13, 22),
         world_pos(&bb, dir, 35, 17, 35),
     );
-    // wingRandom = random.nextInt()（无界 nextInt = next(32)），仅影响未存档的 mainDesign。
-    random.next_int_unbounded();
-    children.push(child_piece(RoomKind::Wing, left, dir));
-    children.push(child_piece(RoomKind::Wing, right, dir));
-    children.push(child_piece(RoomKind::Penthouse, penthouse, dir));
+    // wingRandom = random.nextInt()（无界 nextInt = next(32)）：左翼 `& 1`，右翼 `(v+1) & 1`。
+    // wingRandom = random.nextInt() (unbounded = next(32)): left wing `& 1`, right `(v+1) & 1`.
+    let wing_random = random.next_int_unbounded();
+    children.push(MonumentChild {
+        kind: RoomKind::Wing,
+        bb: left,
+        room: None,
+        main_design: 0,
+        wing_design: wing_random & 1,
+    });
+    children.push(MonumentChild {
+        kind: RoomKind::Wing,
+        bb: right,
+        room: None,
+        main_design: 0,
+        wing_design: (wing_random.wrapping_add(1)) & 1,
+    });
+    children.push(MonumentChild {
+        kind: RoomKind::Penthouse,
+        bb: penthouse,
+        room: None,
+        main_design: 0,
+        wing_design: 0,
+    });
 
-    let mut result = Vec::with_capacity(children.len() + 1);
-    result.push(Piece::oriented(RoomKind::Building.id(), bb, 0, dir));
-    result.extend(children);
-    result
+    MonumentLayout {
+        dir,
+        bb,
+        rooms,
+        children,
+    }
 }
