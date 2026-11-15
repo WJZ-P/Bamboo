@@ -633,5 +633,13 @@ mod tests {
         assert!(is_double_plant(state("minecraft:tall_grass")));
         assert!(is_double_plant(state("minecraft:sunflower")));
         assert!(!is_double_plant(state("minecraft:short_grass")));
+        // `SmallDripleafBlock extends DoublePlantBlock`，官方 `SimpleBlockFeature` 用
+        // `instanceof DoublePlantBlock` 判，所以小垂滴叶也要走 `placeAt`。
+        // `SmallDripleafBlock` extends `DoublePlantBlock` and the official
+        // `SimpleBlockFeature` tests `instanceof DoublePlantBlock`, so it uses `placeAt`.
+        assert!(is_double_plant(state("minecraft:small_dripleaf")));
+        // `tall_seagrass` 同样继承 `DoublePlantBlock`。
+        // `tall_seagrass` extends `DoublePlantBlock` as well.
+        assert!(is_double_plant(state("minecraft:tall_seagrass")));
     }
 }
