@@ -230,11 +230,8 @@ fn extra_int(piece: &Piece, key: &str) -> Option<i32> {
 }
 
 fn extra_float(piece: &Piece, key: &str) -> Option<f32> {
-    piece
-        .extras
-        .get(key)
-        .and_then(|value| match value {
-            crate::structure::pieces::Extra::Float(value) => Some(*value),
-            _ => None,
-        })
+    piece.extras.get(key).and_then(|value| match value {
+        crate::structure::pieces::Extra::Float(value) => Some(*value),
+        _ => None,
+    })
 }
