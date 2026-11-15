@@ -1163,3 +1163,34 @@ mod tests {
         assert!((1..=50).contains(&penalty), "{penalty}");
     }
 }
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn vein_default_state_has_no_faces() {
+        // `Blocks.SCULK_VEIN` 的默认状态：6 个面都是 false、waterlogged=false。
+        // The `Blocks.SCULK_VEIN` default state: all six faces false, waterlogged false.
+        let state = blocks::SCULK_VEIN;
+        for face in Direction::ALL {
+            assert!(!has_face(state, face), "{face:?} should start closed");
+        }
+    }
+
+    #[test]
+    fn has_face_reads_each_property_independently() {
+        // 逐面设置后 `has_face` 只对设过的那一面为真。
+        // After setting one face, `has_face` is true for that one only.
+        for face in Direction::ALL {
+            let state = with_property(blocks::SCULK_VEIN, face_property(face), "true").unwrap();
+            for other in Direction::ALL {
+                assert_eq!(
+                    has_face(state, other),
+                    other == face,
+                    "{face:?} set, checking {other:?}"
+                );
+            }
+        }
+    }
+}
