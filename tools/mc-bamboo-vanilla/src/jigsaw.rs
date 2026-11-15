@@ -97,6 +97,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "cappedfull" => run_capped_full(command, work_dir),
         "placepiece" => run_place_piece(command, work_dir),
         "entities" => run_entities(command, work_dir),
+        "waterpiece" => run_water_piece(command, work_dir),
         "bemod" => run_block_entity_modifier(command, work_dir),
         "rc" => run_randomizable_container(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
@@ -1888,6 +1889,324 @@ fn run_place_piece(mut command: Command, work_dir: &Path) -> Result<(), String> 
         ));
     }
     compare_place_piece(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
+/// `waterpiece` 模式：带 `APPLY_WATERLOGGING` 与流体模型的 `placeInWorld` 对
+/// `jigsaw::place::place_piece`，逐写入比**完整状态**（含属性）。
+///
+/// `waterpiece` mode: `placeInWorld` with `APPLY_WATERLOGGING` and a fluid model against
+/// `jigsaw::place::place_piece`, comparing every write's full state (properties included).
+fn run_water_piece(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    let names = water_piece_templates();
+    let mut queries = Vec::new();
+    for (name, template) in &names {
+        let (sx, sy, sz) = template.size;
+        let span = sx.max(sz) + 2;
+        // 只跑 NONE 镜像 + NONE 旋转，外加 FRONT_BACK 镜像 + CLOCKWISE_90 旋转：
+        // 前者覆盖最直接的路径，后者覆盖镜像与旋转叠加。
+        // Only NONE/NONE plus FRONT_BACK/CLOCKWISE_90: the plain path and the one where a
+        // mirror and a rotation stack.
+        for (mirror, rotation) in [(0_u32, 0_u32), (2, 1)] {
+            for variant in 0_u32..3 {
+                let bb = (-span, -2, -span, span, sy + 3, span);
+                // 三种水位：源水、流动水、岩浆。水位只铺模板脚下一层（y = -1），
+                // 足够让每个落在该层的可含水方块都触发 `placeLiquid`。
+                // Three fluid variants: source water, flowing water, lava. The fluid is
+                // only the layer just under the template (y = -1), enough to trigger
+                // `placeLiquid` for every waterloggable block landing on it.
+                let fluid = match variant {
+                    0 => "water",
+                    1 => "flowing_water",
+                    _ => "lava",
+                };
+                let mut entries = Vec::new();
+                for x in -span..=span {
+                    for z in -span..=span {
+                        entries.push(format!("{fluid}:{x},-1,{z}"));
+                    }
+                }
+                queries.push(format!(
+                    "{name}|0|-1|0|{mirror}|{rotation}|{}|{}|{}|{}|{}|{}|{}",
+                    bb.0,
+                    bb.1,
+                    bb.2,
+                    bb.3,
+                    bb.4,
+                    bb.5,
+                    entries.join(";")
+                ));
+            }
+        }
+    }
+    let queries_path = work_dir.join("jigsaw_water_piece_queries.txt");
+    fs::write(&queries_path, queries.join("\n"))
+        .map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("waterpiece")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_water_piece(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
+/// `waterpiece` 用的模板：单 palette、含至少一个可含水方块的，取前 8 个。
+///
+/// Templates for `waterpiece`: single palette with at least one waterloggable block, first
+/// eight only.
+fn water_piece_templates() -> Vec<(String, StructureTemplate)> {
+    use mc_bamboo_worldgen::structure::jigsaw::place::is_waterloggable_state;
+    let mut names: Vec<String> = blob::ENTRIES
+        .iter()
+        .map(|(name, _, _)| (*name).to_owned())
+        .collect();
+    names.sort();
+    let mut out = Vec::new();
+    for name in names {
+        let Ok(template) = StructureTemplate::load(&name) else {
+            continue;
+        };
+        if template.palettes.len() != 1 || template.blocks.is_empty() {
+            continue;
+        }
+        let palette = &template.palettes[0];
+        // 调色板里只要有一个可含水状态就选这个模板。
+        // Pick the template when any palette entry is waterloggable.
+        let waterloggable = palette.iter().any(|entry| {
+            mc_bamboo_worldgen::structure::jigsaw::place::state_id_of(
+                &mc_bamboo_worldgen::structure::processor::BlockStateSpec {
+                    name: entry.name.clone(),
+                    properties: entry.properties.clone(),
+                },
+            )
+            .is_ok_and(is_waterloggable_state)
+        });
+        if waterloggable {
+            out.push((name, template));
+            if out.len() == 8 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 解析 Java 的 `waterpiece` 输出并与 Rust 侧逐写入比较。
+///
+/// Parse the Java `waterpiece` output and compare every write with the Rust side.
+fn compare_water_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
+    let mut java_q: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut java_w: HashMap<String, Vec<String>> = HashMap::new();
+    let mut java_keys: HashMap<String, String> = HashMap::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() < 15 {
+            continue;
+        }
+        // 查询本身是 13 段（0..=12），`Q` 行是 `Q|13 段 key|placed|writes|fluidQueries`。
+        // A query has 13 fields (0..=12); a `Q` line is
+        // `Q|the 13 key fields|placed|writes|fluidQueries`.
+        let key = fields[1..14].join("|");
+        match fields[0] {
+            "Q" => {
+                java_q.insert(
+                    key.clone(),
+                    (
+                        fields[15].parse().unwrap_or(0),
+                        fields[16].parse().unwrap_or(0),
+                    ),
+                );
+                java_keys.insert(key, fields[1..14].join("|"));
+            }
+            "W" => {
+                java_w.entry(key).or_default().push(fields[14..].join("|"));
+            }
+            _ => {}
+        }
+    }
+
+    let mut checked = 0usize;
+    let mut writes_checked = 0usize;
+    let mut fluid_queries = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for query in queries {
+        let fields: Vec<&str> = query.split('|').collect();
+        let name = fields[0];
+        let piece = (
+            parse_i32(fields[1])?,
+            parse_i32(fields[2])?,
+            parse_i32(fields[3])?,
+        );
+        let mirror = parse_i32(fields[4])? as u32;
+        let rotation = parse_i32(fields[5])? as u32;
+        let bb = BoundingBox {
+            min_x: parse_i32(fields[6])?,
+            min_y: parse_i32(fields[7])?,
+            min_z: parse_i32(fields[8])?,
+            max_x: parse_i32(fields[9])?,
+            max_y: parse_i32(fields[10])?,
+            max_z: parse_i32(fields[11])?,
+        };
+        // 水位表。
+        // The fluid table.
+        let mut fluids: HashMap<(i32, i32, i32), (bool, bool)> = HashMap::new();
+        for entry in fields[12].split(';') {
+            let Some((kind, coords)) = entry.split_once(':') else {
+                continue;
+            };
+            let xyz: Vec<i32> = coords
+                .split(',')
+                .map(|value| value.parse::<i32>().unwrap_or(0))
+                .collect();
+            let (is_water, source) = match kind {
+                "water" => (true, true),
+                "flowing_water" => (true, false),
+                "lava" => (false, true),
+                _ => continue,
+            };
+            fluids.insert((xyz[0], xyz[1], xyz[2]), (is_water, source));
+        }
+        let template = StructureTemplate::load(name)
+            .map_err(|error| format!("cannot load {name}: {error}"))?;
+        struct Level;
+        impl ProcessorLevel for Level {
+            fn block_state(&self, _pos: (i32, i32, i32)) -> BlockStateSpec {
+                BlockStateSpec::parse_str("minecraft:air").unwrap()
+            }
+            fn in_block_set(&self, _state: &BlockStateSpec, _set: &BlockSetRef) -> bool {
+                false
+            }
+        }
+        /// 记录写入，并按水位表回答 `fluid_at`；`block_state` 返回最后一次写的状态
+        /// （watering 第二段要读刚写的方块）。
+        ///
+        /// Records writes, answers `fluid_at` from the fluid table, and returns the last
+        /// written state from `block_state` (the second watering pass reads it).
+        #[derive(Default)]
+        struct Recorder {
+            writes: Vec<(i32, i32, i32, u32)>,
+            fluids: HashMap<(i32, i32, i32), (bool, bool)>,
+            last: HashMap<(i32, i32, i32), u32>,
+        }
+        impl mc_bamboo_worldgen::structure::jigsaw::place::BlockWriter for Recorder {
+            fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+                self.writes.push((x, y, z, state));
+                self.last.insert((x, y, z), state);
+                true
+            }
+            fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<(bool, bool)> {
+                Some(
+                    self.fluids
+                        .get(&(x, y, z))
+                        .copied()
+                        .unwrap_or((false, false)),
+                )
+            }
+            fn block_state(&self, x: i32, y: i32, z: i32) -> u32 {
+                self.last
+                    .get(&(x, y, z))
+                    .copied()
+                    .unwrap_or(mc_bamboo_data::blocks::AIR)
+            }
+        }
+        let level = Level;
+        let mut recorder = Recorder {
+            fluids,
+            ..Recorder::default()
+        };
+        mc_bamboo_worldgen::structure::jigsaw::place::place_piece(
+            &template,
+            piece,
+            &[],
+            &level,
+            processor_apply::PlaceSettings {
+                piece_position: piece,
+                reference_pos: piece,
+                chunk_bb: Some(bb),
+                level_seed: 0,
+                explicit_random: None,
+            },
+            mirror,
+            rotation,
+            &mc_bamboo_worldgen::random::Random::Legacy(LegacyRandom::new(0)),
+            &mut recorder,
+        )?;
+        checked += 1;
+        writes_checked += recorder.writes.len();
+        let key = fields[..13].join("|");
+        let Some((placed, count, fluid_queries_java)) = java_q
+            .get(&key)
+            .map(|(count, queries)| (true, *count, *queries))
+        else {
+            return Err(format!("Java missing Q for {key}"));
+        };
+        let _ = placed;
+        fluid_queries += fluid_queries_java;
+        let _ = java_keys.get(&key);
+        if count != recorder.writes.len() {
+            mismatches += 1;
+            if first.is_none() {
+                // 查询串（尤其水位表）很长，只报前 12 段。
+                // The query string (especially the fluid table) is long; report only the
+                // first twelve fields.
+                first = Some(format!(
+                    "{}: writes rust {} java {count}",
+                    fields[..12].join("|"),
+                    recorder.writes.len()
+                ));
+            }
+            continue;
+        }
+        let want = java_w.get(&key).cloned().unwrap_or_default();
+        for (index, (x, y, z, state)) in recorder.writes.iter().enumerate() {
+            let got = format!("{x}|{y}|{z}|{}", state_with_properties(*state));
+            if want.get(index).is_none_or(|line| *line != got) {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!(
+                        "{key}[{index}]: rust {got} java {:?}",
+                        want.get(index)
+                    ));
+                }
+            }
+        }
+    }
+    if checked != queries.len() {
+        return Err(format!(
+            "checked {checked} water queries, expected {}",
+            queries.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches} differences over {checked} queries; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!(
+        "jigsaw waterpiece: {checked} queries, {writes_checked} writes, \
+         {fluid_queries} fluid queries, all identical"
+    );
+    Ok(())
+}
+
+/// 状态的比较文本：`minecraft:oak_slab[type=bottom,waterlogged=false]`，属性按名字排序。
+///
+/// Comparable state text with every property, sorted by name.
+fn state_with_properties(state: u32) -> String {
+    let name = mc_bamboo_worldgen::structure::jigsaw::place::state_text(state);
+    let properties = mc_bamboo_worldgen::structure::jigsaw::place::state_properties(state);
+    if properties.is_empty() {
+        return name;
+    }
+    format!("{name}[{}]", properties.join(","))
 }
 
 /// `entities` 模式：官方 `StructureTemplate.placeEntities` 的几何与 nbt 改写对

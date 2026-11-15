@@ -175,6 +175,7 @@ public final class JigsawOracle {
                     case "capped" -> runCapped(Path.of(args[1]));
                     case "cappedfull" -> runCappedFull(registries, Path.of(args[1]));
                     case "placepiece" -> runPlacePiece(manager, registries, Path.of(args[1]));
+                    case "waterpiece" -> runWaterPiece(manager, registries, Path.of(args[1]));
                     case "entities" -> runEntities(manager, Path.of(args[1]));
                     case "bemod" -> runBlockEntityModifier(registries, Path.of(args[1]));
                     case "rc" -> runRandomizableContainer(registries, Path.of(args[1]));
@@ -1261,6 +1262,12 @@ public final class JigsawOracle {
             settings.setMirror(mirror);
             settings.setBoundingBox(bb);
             settings.setLiquidSettings(LiquidSettings.IGNORE_WATERLOGGING);
+            // `SinglePoolElement.getSettings` 也这么设：形状已知时官方跳过
+            // `updateShapeAtEdge` 与逐方块 `updateFromNeighbourShapes`，这两段不在本对拍范围内。
+            // Same as `SinglePoolElement.getSettings`: a known shape makes vanilla skip
+            // `updateShapeAtEdge` and the per-block `updateFromNeighbourShapes`, neither of
+            // which this oracle covers.
+            settings.setKnownShape(true);
             RecordingLevel level = new RecordingLevel(registries);
             // `RandomSource.create(0)`：这一轮不比随机相关行为（没有 processor）。
             // `RandomSource.create(0)`: nothing random in this round (no processors).
@@ -1301,6 +1308,115 @@ public final class JigsawOracle {
         }
         System.out.print(out);
         System.out.flush();
+    }
+
+    /**
+     * waterpiece 模式：查询每行
+     * {@code template|pieceX|pieceY|pieceZ|mirror|rotation|bb(6)|fluids}，
+     * `fluids` 是 `-` 或 `kind:x,y,z,kind:x,y,z,...` 形式的水位表（`kind` 为
+     * `water` / `flowing_water` / `lava`）。用 `APPLY_WATERLOGGING` 跑官方
+     * `StructureTemplate.placeInWorld`，输出每次 `setBlock` 的坐标与**完整状态**
+     * （含属性），Rust 侧的 `jigsaw::place::place_piece` 带流体模型复算。
+     *
+     * <p>Water-piece mode: like place-piece but with `APPLY_WATERLOGGING` and a fluid table,
+     * printing every write with its full state (properties included).
+     */
+    private static void runWaterPiece(
+            StructureTemplateManager manager, RegistryAccess registries, Path queries)
+            throws Exception {
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|", -1);
+            Identifier id = Identifier.parse(p[0]);
+            BlockPos piece = new BlockPos(
+                    Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3]));
+            Mirror mirror = Mirror.values()[Integer.parseInt(p[4])];
+            Rotation rotation = Rotation.values()[Integer.parseInt(p[5])];
+            BoundingBox bb = new BoundingBox(
+                    Integer.parseInt(p[6]), Integer.parseInt(p[7]), Integer.parseInt(p[8]),
+                    Integer.parseInt(p[9]), Integer.parseInt(p[10]), Integer.parseInt(p[11]));
+            String fluids = p[12];
+            StructureTemplate template = manager.get(id).orElseThrow(
+                    () -> new IllegalStateException("template not loaded: " + id));
+            StructurePlaceSettings settings = new StructurePlaceSettings();
+            settings.setRotation(rotation);
+            settings.setMirror(mirror);
+            settings.setBoundingBox(bb);
+            settings.setLiquidSettings(LiquidSettings.APPLY_WATERLOGGING);
+            // `SinglePoolElement.getSettings` 里就有 `setKnownShape(true)`：形状已知时官方
+            // 跳过 `updateShapeAtEdge` 与逐方块 `updateFromNeighbourShapes` 那两段。
+            // 这一段在 `placepiece` 里也没覆盖，跳过保持两边口径一致。
+            // `SinglePoolElement.getSettings` sets `setKnownShape(true)`, which makes vanilla
+            // skip `updateShapeAtEdge` and the per-block `updateFromNeighbourShapes`; the
+            // placepiece oracle skips them too, so this keeps both comparable.
+            settings.setKnownShape(true);
+            RecordingLevel level = new RecordingLevel(registries);
+            if (!fluids.equals("-")) {
+                for (String entry : fluids.split(";")) {
+                    String[] parts = entry.split(":");
+                    int kind = switch (parts[0]) {
+                        case "water" -> 1;
+                        case "flowing_water" -> 2;
+                        case "lava" -> 3;
+                        default -> throw new IllegalArgumentException("bad fluid " + parts[0]);
+                    };
+                    String[] xyz = parts[1].split(",");
+                    level.setFluid(new BlockPos(
+                            Integer.parseInt(xyz[0]),
+                            Integer.parseInt(xyz[1]),
+                            Integer.parseInt(xyz[2])), kind);
+                }
+            }
+            boolean placed = template.placeInWorld(
+                    level.proxy(),
+                    piece,
+                    piece,
+                    settings,
+                    RandomSource.create(0L),
+                    2);
+            String key = String.join("|", p);
+            out.append("Q|").append(key).append('|').append(placed ? 1 : 0).append('|')
+                    .append(level.writes.size()).append('|')
+                    .append(level.fluidQueries).append('|')
+                    .append(level.blockAndUpdateCalls).append('\n');
+            for (var w : level.writes) {
+                out.append("W|").append(key).append('|')
+                        .append(w.pos().getX()).append('|')
+                        .append(w.pos().getY()).append('|')
+                        .append(w.pos().getZ()).append('|')
+                        .append(stateText(w.state())).append('\n');
+            }
+        }
+        System.out.print(out);
+        System.out.flush();
+    }
+
+    /**
+     * 方块状态的比较文本：`minecraft:oak_slab[waterlogged=true,type=bottom]`，属性按名字
+     * 排序后输出，只保留 Rust 侧也能算的属性（全部属性）。
+     *
+     * <p>A comparable block-state text with every property, sorted by name.
+     */
+    private static String stateText(BlockState state) {
+        var properties = new java.util.TreeMap<String, String>();
+        for (var property : state.getProperties()) {
+            properties.put(property.getName(), propertyValue(state, property));
+        }
+        String suffix = properties.isEmpty()
+                ? ""
+                : properties.entrySet().stream()
+                        .map(entry -> entry.getKey() + "=" + entry.getValue())
+                        .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+        return BuiltInRegistries.BLOCK.getKey(state.getBlock()) + suffix;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends Comparable<T>> String propertyValue(
+            BlockState state, net.minecraft.world.level.block.state.properties.Property<T> property) {
+        return property.getName(state.getValue(property));
     }
 
     /**
@@ -1428,9 +1544,47 @@ public final class JigsawOracle {
         /** 最终种子（`placeInWorld` 之后从方块实体读回）。 */
         private final java.util.Map<BlockPos, Long> seeds = new java.util.TreeMap<>();
         private final RegistryAccess registries;
+        /**
+         * 每个位置原本的流体，`0` 表示没有（空气 / 非流体方块）。`1` 是水、`2` 是流动水、
+         * `3` 是岩浆。watering 读的是**写方块之前**的流体，所以这份表是模板外世界的
+         * 初始状态。
+         *
+         * <p>Each position's original fluid, `0` for none. `1` water, `2` flowing water,
+         * `3` lava. Watering reads the fluid **before** the block is written, so this table
+         * is the template's surroundings.
+         */
+        private final java.util.Map<BlockPos, Integer> fluids = new java.util.HashMap<>();
+        /** `getBlockState` 看到的最新状态：每次 `setBlock` 更新，watering 第二段要读它。 */
+        private final java.util.Map<BlockPos, BlockState> lastWritten = new java.util.HashMap<>();
+        /** `getFluidState` 被问到的次数，用来确认 watering 真的走了。 */
+        private int fluidQueries;
+        /** `scheduleTick` 被调用的次数。 */
+        private int scheduledTicks;
+        /** `setBlockAndUpdate` 被调用的次数（`SimpleWaterloggedBlock.placeLiquid` 的写法）。 */
+        private int blockAndUpdateCalls;
 
         RecordingLevel(RegistryAccess registries) {
             this.registries = registries;
+        }
+
+        void setFluid(BlockPos pos, int kind) {
+            this.fluids.put(pos.immutable(), kind);
+        }
+
+        /**
+         * `Level.getFluidState`：按表返回水位对应的流体状态。
+         *
+         * <p>`Level.getFluidState`: the fluid state for the position's table entry.
+         */
+        private net.minecraft.world.level.material.FluidState fluidAt(BlockPos pos) {
+            this.fluidQueries++;
+            return switch (this.fluids.getOrDefault(pos, 0)) {
+                case 1 -> net.minecraft.world.level.material.Fluids.WATER.getSource(false);
+                case 2 -> net.minecraft.world.level.material.Fluids.FLOWING_WATER
+                        .defaultFluidState();
+                case 3 -> net.minecraft.world.level.material.Fluids.LAVA.getSource(false);
+                default -> Blocks.AIR.defaultBlockState().getFluidState();
+            };
         }
 
         /**
@@ -1462,6 +1616,7 @@ public final class JigsawOracle {
                                     BlockPos pos = (BlockPos) args[0];
                                     BlockState state = (BlockState) args[1];
                                     this.writes.add(new Write(pos.immutable(), state));
+                                    this.lastWritten.put(pos.immutable(), state);
                                     // 写 `BARRIER` 说明这个位置带 nbt；随后那次真方块写入时
                                     // 建方块实体，好让官方的 `getBlockEntity` 返回非 null
                                     // （否则 `LootTableSeed` 的覆盖根本不会执行）。
@@ -1480,9 +1635,42 @@ public final class JigsawOracle {
                                     }
                                     yield true;
                                 }
-                                case "getBlockState" -> Blocks.AIR.defaultBlockState();
-                                case "getFluidState" ->
-                                        Blocks.AIR.defaultBlockState().getFluidState();
+                                case "getBlockState" -> {
+                                    // watering 的第二段会读**刚写进去**的方块（`getBlockState(pos)`
+                                    // 之后 `instanceof LiquidBlockContainer`），所以要先查写入表。
+                                    // The second watering pass reads the block just written, so
+                                    // consult the write table first.
+                                    BlockState written = this.lastWritten.get((BlockPos) args[0]);
+                                    yield written == null
+                                            ? Blocks.AIR.defaultBlockState()
+                                            : written;
+                                }
+                                case "getFluidState" -> this.fluidAt((BlockPos) args[0]);
+                                // `SimpleWaterloggedBlock.placeLiquid` 用 `isClientSide()` 决定
+                                // 要不要真的写方块；假世界是服务端，返回 false。
+                                // `placeLiquid` gates the write on `isClientSide()`; this fake
+                                // level is the server side, so false.
+                                case "isClientSide" -> false;
+                                // `SimpleWaterloggedBlock.placeLiquid` 走
+                                // `level.setBlockAndUpdate(pos, state)` = `setBlock(pos, state, 3)`。
+                                // `setBlockAndUpdate` 是 `LevelAccessor` 的默认方法，代理必须自己实现。
+                                // `placeLiquid` calls `level.setBlockAndUpdate(pos, state)`, which
+                                // is `setBlock(pos, state, 3)`; a proxy must implement the default
+                                // method itself.
+                                case "setBlockAndUpdate" -> {
+                                    this.blockAndUpdateCalls++;
+                                    BlockPos pos = (BlockPos) args[0];
+                                    BlockState state = (BlockState) args[1];
+                                    this.writes.add(new Write(pos.immutable(), state));
+                                    this.lastWritten.put(pos.immutable(), state);
+                                    yield true;
+                                }
+                                // `placeLiquid` 的 `scheduleTick` 不改方块，记下即可。
+                                // `placeLiquid` also schedules a tick; it changes no block.
+                                case "scheduleTick" -> {
+                                    this.scheduledTicks++;
+                                    yield null;
+                                }
                                 case "isEmptyBlock" -> true;
                                 case "getMinY" -> JigsawOracle.MIN_Y;
                                 case "getHeight" ->
