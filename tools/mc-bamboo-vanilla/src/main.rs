@@ -65,6 +65,11 @@
 //!
 //!     Compare the ruined portal piece layout against vanilla, covering findSuitableY's
 //!     full-column scan and Mirror.FRONT_BACK
+//! mc-bamboo-vanilla structure-templated-place <java 路径>
+//!     用官方 postProcess 逐方块对拍雪屋 / 沉船 / 海底遗迹的模板放置
+//!
+//!     Compare the igloo / shipwreck / ocean ruin template placement block by block
+//!     against the official postProcess
 //! mc-bamboo-vanilla structure-save <java 路径>
 //!     用官方 CompoundTag / PieceContainer 对拍区块 NBT 的 structures 键（starts / References）
 //!
@@ -190,6 +195,8 @@ mod structure_single;
 mod structure_single_place;
 #[cfg(feature = "oracle")]
 mod structure_templated;
+#[cfg(feature = "oracle")]
+mod structure_templated_place;
 mod structure_templates;
 #[cfg(feature = "oracle")]
 mod structure_templates_oracle;
@@ -272,6 +279,9 @@ const STRUCTURE_SAVE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSaveO
 #[cfg(feature = "oracle")]
 const STRUCTURE_LOAD_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureLoadOracle.java";
 #[cfg(feature = "oracle")]
+const STRUCTURE_TEMPLATED_PLACE_SOURCE: &str =
+    "tools/mc-bamboo-vanilla/java/StructureTemplatedPlaceOracle.java";
+#[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 #[cfg(feature = "oracle")]
 const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.java";
@@ -315,6 +325,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-generation <java 路径>
       mc-bamboo-vanilla structure-single <java 路径>
       mc-bamboo-vanilla structure-templated <java 路径>
+      mc-bamboo-vanilla structure-templated-place <java 路径>
       mc-bamboo-vanilla structure-ruined-portal <java 路径>
       mc-bamboo-vanilla structure-place <java 路径>
       mc-bamboo-vanilla structure-save <java 路径>
@@ -382,6 +393,9 @@ fn run() -> Result<(), String> {
         ["structure-generation", java, ref options @ ..] => structure_generation_cli(java, options),
         ["structure-single", java, ref options @ ..] => structure_single_cli(java, options),
         ["structure-templated", java, ref options @ ..] => structure_templated_cli(java, options),
+        ["structure-templated-place", java, ref options @ ..] => {
+            structure_templated_place_cli(java, options)
+        }
         ["structure-ruined-portal", java, ref options @ ..] => {
             structure_ruined_portal_cli(java, options)
         }
@@ -683,6 +697,19 @@ fn structure_templated_cli(java: &str, options: &[&str]) -> Result<(), String> {
     structure_templated::run(
         official_program(java, STRUCTURE_TEMPLATED_SOURCE)?,
         &worldgen_path,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_templated_place_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let queries_path = root
+        .join(WORK_DIR)
+        .join("structure_templated_place_queries.txt");
+    structure_templated_place::run(
+        official_program(java, STRUCTURE_TEMPLATED_PLACE_SOURCE)?,
         &queries_path,
         options,
     )
@@ -1036,6 +1063,11 @@ fn beard_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn structure_templated_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_templated_place_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
