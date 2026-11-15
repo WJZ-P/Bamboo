@@ -268,7 +268,7 @@ public final class StructurePiecesOracle {
                 + rot + " " + mirror + " " + extraToken;
     }
 
-    /** createTag 里 extras 的值统一成便于 Rust 复现的标准串。 */
+    /** createTag 里 extras 的值统一成便于 Rust 复现的标准串。类型前缀保证 Byte/Int 不被压平。 */
     private static String value(Tag tag) {
         if (tag instanceof IntArrayTag array) {
             return joinInts(array.getAsIntArray());
@@ -285,13 +285,29 @@ public final class StructurePiecesOracle {
         }
         Optional<Number> number = tag.asNumber();
         if (number.isPresent()) {
-            return Long.toString(number.get().longValue());
+            // NBT 数字类型必须显式带上：官方 putBoolean → Byte、putInt → Int、
+            // Direction.LEGACY_ID_CODEC_2D → Byte，压平成十进制会让类型写错也发现不了。
+            // Numbers carry their NBT type: putBoolean → Byte, putInt → Int,
+            // Direction.LEGACY_ID_CODEC_2D → Byte. Flattening to decimal hides type bugs.
+            return tagTypeName(tag) + ":" + number.get().longValue();
         }
         Optional<String> string = tag.asString();
         if (string.isPresent()) {
             return string.get();
         }
         return "?";
+    }
+
+    private static String tagTypeName(Tag tag) {
+        return switch (tag.getId()) {
+            case 1 -> "B";
+            case 2 -> "S";
+            case 3 -> "I";
+            case 4 -> "L";
+            case 5 -> "F";
+            case 6 -> "D";
+            default -> "?";
+        };
     }
 
     private static String joinInts(int[] ints) {
