@@ -65,6 +65,11 @@
 //!
 //!     Compare the ruined portal piece layout against vanilla, covering findSuitableY's
 //!     full-column scan and Mirror.FRONT_BACK
+//! mc-bamboo-vanilla structure-templated-place <java 路径>
+//!     用官方 postProcess 逐方块对拍雪屋 / 沉船 / 海底遗迹的模板放置
+//!
+//!     Compare the igloo / shipwreck / ocean ruin template placement block by block
+//!     against the official postProcess
 //! mc-bamboo-vanilla structure-save <java 路径>
 //!     用官方 CompoundTag / PieceContainer 对拍区块 NBT 的 structures 键（starts / References）
 //!
@@ -73,6 +78,12 @@
 //!     用官方 NbtIo 逐节点对拍导出的结构模板 NBT
 //!
 //!     Compare exported structure template NBT node by node with vanilla NbtIo
+//! mc-bamboo-vanilla jigsaw <java 路径> [templates|jigsaws|pieces|shapes]
+//!     用官方 StructureTemplateManager / JigsawPlacement 对拍 jigsaw 结构件
+//!
+//!     Compare jigsaw pieces with vanilla StructureTemplateManager / JigsawPlacement
+//!     (`templates` = template sizes and block counts, `jigsaws` = getJigsaws after the
+//!     position-based palette choice and rotation, `pieces` = the full addPieces output)
 //! mc-bamboo-vanilla machine <java 路径>
 //!     让官方熔炉和酿造台在假世界里逐刻跑，比较进度、物品、方块状态和世界随机源
 //! mc-bamboo-vanilla entity-oracle <java 路径>
@@ -133,6 +144,10 @@ mod gen_light;
 mod gen_world;
 mod generate;
 #[cfg(feature = "oracle")]
+mod jigsaw;
+#[cfg(feature = "oracle")]
+mod jigsaw_shapes;
+#[cfg(feature = "oracle")]
 mod light;
 #[cfg(feature = "oracle")]
 mod loot_oracle;
@@ -179,7 +194,11 @@ mod structure_save;
 #[cfg(feature = "oracle")]
 mod structure_single;
 #[cfg(feature = "oracle")]
+mod structure_single_place;
+#[cfg(feature = "oracle")]
 mod structure_templated;
+#[cfg(feature = "oracle")]
+mod structure_templated_place;
 mod structure_templates;
 #[cfg(feature = "oracle")]
 mod structure_templates_oracle;
@@ -189,6 +208,8 @@ mod structure_validity;
 mod structures;
 #[cfg(feature = "oracle")]
 mod ticket_oracle;
+#[cfg(feature = "oracle")]
+mod transform;
 #[cfg(feature = "oracle")]
 mod world_block;
 #[cfg(feature = "oracle")]
@@ -241,6 +262,7 @@ const STRUCTURE_TEMPLATES_SOURCE: &str =
 #[cfg(feature = "oracle")]
 const STRUCTURE_PIECES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePiecesOracle.java";
 #[cfg(feature = "oracle")]
+const JIGSAW_SOURCE: &str = "tools/mc-bamboo-vanilla/java/JigsawOracle.java";
 const STRUCTURE_GENERATION_SOURCE: &str =
     "tools/mc-bamboo-vanilla/java/StructureGenerationOracle.java";
 #[cfg(feature = "oracle")]
@@ -258,6 +280,9 @@ const STRUCTURE_RUINED_PORTAL_SOURCE: &str =
 // `postProcess`); `StructurePiecePlaceOracle.java` is the single-piece `postProcess` one.
 // The two branches named them the other way round, so the merge re-pairs them by content.
 #[cfg(feature = "oracle")]
+const STRUCTURE_SINGLE_PLACE_SOURCE: &str =
+    "tools/mc-bamboo-vanilla/java/StructurePiecePlaceOracle.java";
+#[cfg(feature = "oracle")]
 const STRUCTURE_PLACE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePlaceOracle.java";
 #[cfg(feature = "oracle")]
 const STRUCTURE_POST_PROCESS_SOURCE: &str =
@@ -266,6 +291,10 @@ const STRUCTURE_POST_PROCESS_SOURCE: &str =
 const STRUCTURE_SAVE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSaveOracle.java";
 #[cfg(feature = "oracle")]
 const STRUCTURE_LOAD_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureLoadOracle.java";
+#[cfg(feature = "oracle")]
+const TRANSFORM_SOURCE: &str = "tools/mc-bamboo-vanilla/java/TransformOracle.java";
+const STRUCTURE_TEMPLATED_PLACE_SOURCE: &str =
+    "tools/mc-bamboo-vanilla/java/StructureTemplatedPlaceOracle.java";
 #[cfg(feature = "oracle")]
 const LOOT_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LootOracle.java";
 #[cfg(feature = "oracle")]
@@ -302,6 +331,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-validity <java 路径>
       mc-bamboo-vanilla structure-templates <java 路径>
       mc-bamboo-vanilla structure-pieces <java 路径>
+      mc-bamboo-vanilla jigsaw <java 路径>
       mc-bamboo-vanilla spawn <java 路径> [--seeds N] [--salt S] [--show N] [--level-type normal|large_biomes|amplified] [--break-self-test]
       mc-bamboo-vanilla flat-world <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla beard <java 路径> [--through noise|surface|carvers] [--break-self-test]
@@ -309,11 +339,14 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-generation <java 路径>
       mc-bamboo-vanilla structure-single <java 路径>
       mc-bamboo-vanilla structure-templated <java 路径>
+      mc-bamboo-vanilla structure-templated-place <java 路径>
       mc-bamboo-vanilla structure-ruined-portal <java 路径>
       mc-bamboo-vanilla structure-place <java 路径>
       mc-bamboo-vanilla structure-save <java 路径>
       mc-bamboo-vanilla structure-load <java 路径>
+      mc-bamboo-vanilla structure-single-place <java 路径>
       mc-bamboo-vanilla structure-post-process <java 路径>
+      mc-bamboo-vanilla transform <java 路径>
       mc-bamboo-vanilla machine <java 路径>
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -368,6 +401,7 @@ fn run() -> Result<(), String> {
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
         ["structure-templates", java, ref options @ ..] => structure_templates_cli(java, options),
         ["structure-pieces", java, ref options @ ..] => structure_pieces_cli(java, options),
+        ["jigsaw", java, ref options @ ..] => jigsaw_cli(java, options),
         ["spawn", java, ref options @ ..] => spawn_cli(java, options),
         ["flat-world", java, ref options @ ..] => flat_world_cli(java, options),
         ["beard", java, ref options @ ..] => beard_cli(java, options),
@@ -375,15 +409,22 @@ fn run() -> Result<(), String> {
         ["structure-generation", java, ref options @ ..] => structure_generation_cli(java, options),
         ["structure-single", java, ref options @ ..] => structure_single_cli(java, options),
         ["structure-templated", java, ref options @ ..] => structure_templated_cli(java, options),
+        ["structure-templated-place", java, ref options @ ..] => {
+            structure_templated_place_cli(java, options)
+        }
         ["structure-ruined-portal", java, ref options @ ..] => {
             structure_ruined_portal_cli(java, options)
         }
         ["structure-place", java, ref options @ ..] => structure_place_cli(java, options),
+        ["structure-single-place", java, ref options @ ..] => {
+            structure_single_place_cli(java, options)
+        }
         ["structure-save", java, ref options @ ..] => structure_save_cli(java, options),
         ["structure-load", java, ref options @ ..] => structure_load_cli(java, options),
         ["structure-post-process", java, ref options @ ..] => {
             structure_post_process_cli(java, options)
         }
+        ["transform", java, ref options @ ..] => transform_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
@@ -649,6 +690,15 @@ fn structure_pieces_cli(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn jigsaw_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    jigsaw::run(
+        official_program(java, JIGSAW_SOURCE)?,
+        &workspace_root().join(WORK_DIR),
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
 fn structure_single_cli(java: &str, options: &[&str]) -> Result<(), String> {
     let root = workspace_root();
     let queries_path = root.join(WORK_DIR).join("structure_single_queries.txt");
@@ -667,6 +717,19 @@ fn structure_templated_cli(java: &str, options: &[&str]) -> Result<(), String> {
     structure_templated::run(
         official_program(java, STRUCTURE_TEMPLATED_SOURCE)?,
         &worldgen_path,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_templated_place_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let queries_path = root
+        .join(WORK_DIR)
+        .join("structure_templated_place_queries.txt");
+    structure_templated_place::run(
+        official_program(java, STRUCTURE_TEMPLATED_PLACE_SOURCE)?,
         &queries_path,
         options,
     )
@@ -693,6 +756,19 @@ fn structure_place_cli(java: &str, options: &[&str]) -> Result<(), String> {
     let queries_path = root.join(WORK_DIR).join("structure_place_queries.txt");
     structure_place::run(
         official_program(java, STRUCTURE_PLACE_SOURCE)?,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_single_place_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let queries_path = root
+        .join(WORK_DIR)
+        .join("structure_single_place_queries.txt");
+    structure_single_place::run(
+        official_program(java, STRUCTURE_SINGLE_PLACE_SOURCE)?,
         &queries_path,
         options,
     )
@@ -726,6 +802,17 @@ fn structure_post_process_cli(java: &str, options: &[&str]) -> Result<(), String
         .join("structure_post_process_queries.txt");
     structure_post_process::run(
         official_program(java, STRUCTURE_POST_PROCESS_SOURCE)?,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn transform_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let queries_path = root.join(WORK_DIR).join("transform_queries.txt");
+    transform::run(
+        official_program(java, TRANSFORM_SOURCE)?,
         &queries_path,
         options,
     )
@@ -999,6 +1086,11 @@ fn structure_pieces_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "oracle"))]
+fn jigsaw_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
 fn flat_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
@@ -1015,6 +1107,11 @@ fn beard_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn structure_templated_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_templated_place_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
@@ -1039,7 +1136,17 @@ fn structure_load_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "oracle"))]
+fn structure_single_place_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
 fn structure_post_process_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn transform_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

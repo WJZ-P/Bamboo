@@ -144,9 +144,42 @@ pub struct ShaftPiece<'a> {
     pub shaft: ShaftType,
     pub level: &'a mut dyn PieceLevel,
     pub chunk_bb: [i32; 6],
+    /// [`invalid_location_probe`] 那一格的群系是否带 `MINESHAFT_BLOCKING` 标签，
+    /// 由调用方查好传进来。
+    ///
+    /// Whether the biome at [`invalid_location_probe`] carries the `MINESHAFT_BLOCKING`
+    /// tag; looked up by the caller.
+    pub biome_blocking: bool,
+}
+
+/// `isInInvalidLocation` 查群系的那一格：结构件盒外扩一格、裁到 `chunkBB` 之后的中心
+/// （三轴都是 Java 的整数除法）。
+///
+/// The position `isInInvalidLocation` reads the biome at: the centre of the piece box
+/// grown by one and clipped to `chunkBB` (Java integer division on every axis).
+pub fn invalid_location_probe(piece_bb: &[i32; 6], chunk_bb: &[i32; 6]) -> (i32, i32, i32) {
+    let x0 = (piece_bb[0] - 1).max(chunk_bb[0]);
+    let y0 = (piece_bb[1] - 1).max(chunk_bb[1]);
+    let z0 = (piece_bb[2] - 1).max(chunk_bb[2]);
+    let x1 = (piece_bb[3] + 1).min(chunk_bb[3]);
+    let y1 = (piece_bb[4] + 1).min(chunk_bb[4]);
+    let z1 = (piece_bb[5] + 1).min(chunk_bb[5]);
+    ((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2)
 }
 
 impl ShaftPiece<'_> {
+    /// `MineShaftPiece.isInInvalidLocation(level, chunkBB)`。
+    ///
+    /// `MineShaftPiece.isInInvalidLocation(level, chunkBB)`.
+    fn is_in_invalid_location(&self) -> bool {
+        is_in_invalid_location(
+            &self.ctx.bb,
+            &self.chunk_bb,
+            &*self.level,
+            self.biome_blocking,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn box_at(
         &mut self,
@@ -189,7 +222,10 @@ pub fn corridor_post_process(
     piece: &mut ShaftPiece<'_>,
     random: &WorldgenRandom,
     state: &mut CorridorPlace,
-) -> bool {
+) {
+    if piece.is_in_invalid_location() {
+        return;
+    }
     let length = state.num_sections * 5 - 1;
     piece.box_at(0, 0, 0, 2, 1, length, cave_air(), cave_air(), false);
     crate::structure::piece_place::generate_maybe_box(
@@ -231,18 +267,11 @@ pub fn corridor_post_process(
         maybe_place_cobweb(piece, random, 0.05, 0, 2, z + 2);
         maybe_place_cobweb(piece, random, 0.05, 2, 2, z + 2);
 
-        // 两次 1% 的箱子机会：官方这里会创建矿车实体（`EntityTypes.CHEST_MINECART.create`
-        // 需要真实 `ServerLevel`），假世界做不到。命中时这条结构件在这一点截断，Rust 侧
-        // 在同一个位置也截断，两边逐方块仍可比较（截断点之前的方块）。
-        // Two 1% chest chances: vanilla spawns a minecart there
-        // (`EntityTypes.CHEST_MINECART.create` needs a real `ServerLevel`), which the fake
-        // world cannot. On a hit the piece is truncated at that point on both sides, so the
-        // blocks before it are still compared.
-        if random.next_int(100) == 0 && corridor_chest(piece, random, 2, 0, z - 1) {
-            return true;
+        if random.next_int(100) == 0 {
+            corridor_chest(piece, random, 2, 0, z - 1);
         }
-        if random.next_int(100) == 0 && corridor_chest(piece, random, 0, 0, z + 1) {
-            return true;
+        if random.next_int(100) == 0 {
+            corridor_chest(piece, random, 0, 0, z + 1);
         }
 
         if state.spider_corridor && !state.has_placed_spider {
@@ -295,15 +324,14 @@ pub fn corridor_post_process(
             }
         }
     }
-    false
 }
 
-/// `MineShaftCorridor.createChest`：空格且下方非空时放铁轨。
-/// 返回 true 表示这条路径需要矿车实体（假世界里做不到），调用方应截断。
+/// `MineShaftCorridor.createChest`：空格且下方非空时放一段铁轨和一辆运输矿车。
+/// 矿车实体这里不生成，但它的战利品种子 `random.nextLong()` 照取。返回值同官方。
 ///
-/// `MineShaftCorridor.createChest`: a rail on an empty block whose neighbour below is
-/// not empty. Returns true when the path needs a minecart entity (not possible in the
-/// fake world), so the caller truncates.
+/// `MineShaftCorridor.createChest`: a rail plus a chest minecart on an empty block whose
+/// neighbour below is not empty. The minecart entity is not spawned here, but its loot
+/// seed `random.nextLong()` is still drawn. Returns what vanilla returns.
 fn corridor_chest(
     piece: &mut ShaftPiece<'_>,
     random: &WorldgenRandom,
@@ -518,11 +546,16 @@ fn maybe_place_cobweb(
 }
 
 /// `hasSturdyNeighbours`：按 `Direction.values()` 顺序（DOWN/UP/NORTH/SOUTH/WEST/EAST）。
+/// 方向是**世界**方向：官方先 `getWorldPos` 再 `worldPos.move(direction)`，不经过结构件
+/// 朝向变换。
 ///
 /// `hasSturdyNeighbours` iterating `Direction.values()`
-/// (DOWN/UP/NORTH/SOUTH/WEST/EAST).
+/// (DOWN/UP/NORTH/SOUTH/WEST/EAST). The directions are **world** directions: vanilla
+/// calls `getWorldPos` first and then `worldPos.move(direction)`, bypassing the piece
+/// orientation.
 fn has_sturdy_neighbours(piece: &ShaftPiece<'_>, x: i32, y: i32, z: i32, count: i32) -> bool {
     let mut sturdy = 0;
+    let (px, py, pz) = piece.ctx.world_pos(x, y, z);
     for (dx, dy, dz, opposite) in [
         (0, -1, 0, Dir::Up),
         (0, 1, 0, Dir::Down),
@@ -531,7 +564,7 @@ fn has_sturdy_neighbours(piece: &ShaftPiece<'_>, x: i32, y: i32, z: i32, count: 
         (-1, 0, 0, Dir::East),
         (1, 0, 0, Dir::West),
     ] {
-        let (wx, wy, wz) = piece.ctx.world_pos(x + dx, y + dy, z + dz);
+        let (wx, wy, wz) = (px + dx, py + dy, pz + dz);
         if box_is_inside(&piece.chunk_bb, wx, wy, wz)
             && is_face_sturdy_full(piece.level.get_block(wx, wy, wz), opposite)
         {
@@ -566,6 +599,9 @@ fn set_planks_block(piece: &mut ShaftPiece<'_>, x: i32, y: i32, z: i32) {
 /// `MineShaftCrossing.postProcess`. Two-floored crossings excavate both floors,
 /// single ones a full-height space; then four corner pillars and the plank floor.
 pub fn crossing_post_process(piece: &mut ShaftPiece<'_>, two_floored: bool) {
+    if piece.is_in_invalid_location() {
+        return;
+    }
     let bb = piece.ctx.bb;
     if two_floored {
         piece.box_at(
@@ -679,6 +715,9 @@ fn place_support_pillar(piece: &mut ShaftPiece<'_>, x: i32, y0: i32, z: i32, y1:
 ///
 /// `MineShaftStairs.postProcess`.
 pub fn stairs_post_process(piece: &mut ShaftPiece<'_>) {
+    if piece.is_in_invalid_location() {
+        return;
+    }
     piece.box_at(0, 5, 0, 2, 7, 1, cave_air(), cave_air(), false);
     piece.box_at(0, 0, 7, 2, 2, 8, cave_air(), cave_air(), false);
     for i in 0..5 {
@@ -704,6 +743,9 @@ pub fn stairs_post_process(piece: &mut ShaftPiece<'_>) {
 /// `MineShaftRoom.postProcess`: ceiling air from `minY+1` to `min(minY+3, maxY)`, the
 /// last three layers of every entrance, then an upper half sphere.
 pub fn room_post_process(piece: &mut ShaftPiece<'_>, entrances: &[[i32; 6]]) {
+    if piece.is_in_invalid_location() {
+        return;
+    }
     let bb = piece.ctx.bb;
     piece.box_at(
         bb[0],
