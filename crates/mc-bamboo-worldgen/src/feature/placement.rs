@@ -329,17 +329,6 @@ fn modify(
                 out.push(pos);
             }
         }
-        // `SurfaceWaterDepthFilter.shouldPlace`：两张高度图之差不超过上限才放行。
-        // `SurfaceWaterDepthFilter.shouldPlace`: forward only when the two heightmaps
-        // differ by at most the configured depth.
-        Modifier::SurfaceWaterDepthFilter(max) => {
-            let y_ocean = ctx.world.get_height(HeightmapKind::OceanFloor, x, z);
-            let y_surface = ctx.world.get_height(HeightmapKind::WorldSurface, x, z);
-            if y_surface - y_ocean <= *max {
-                out.push(pos);
-            }
-        }
-        Modifier::Unsupported(_) => {}
         // `EnvironmentScanPlacement`：不消费随机数，只按谓词逐格扫描。
         // `EnvironmentScanPlacement`: no random, purely a predicate walk.
         Modifier::EnvironmentScan {
@@ -372,6 +361,17 @@ fn modify(
                 out.push(pos);
             }
         }
+        // `SurfaceWaterDepthFilter.shouldPlace`：两张高度图之差不超过上限才放行。
+        // `SurfaceWaterDepthFilter.shouldPlace`: forward only when the two heightmaps
+        // differ by at most the configured depth.
+        Modifier::SurfaceWaterDepthFilter(max) => {
+            let y_ocean = ctx.world.get_height(HeightmapKind::OceanFloor, x, z);
+            let y_surface = ctx.world.get_height(HeightmapKind::WorldSurface, x, z);
+            if y_surface - y_ocean <= *max {
+                out.push(pos);
+            }
+        }
+        Modifier::Unsupported(_) => {}
     }
 }
 
@@ -628,7 +628,7 @@ mod tests {
         // 存活判定未移植的 state 仍让整条修饰器 unsupported。
         // A state with an unported survival check still makes the modifier unsupported.
         let mushroom: Value = serde_json::from_str(
-            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:red_mushroom"}}"#,
+            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:pale_moss_carpet"}}"#,
         )
         .unwrap();
         assert!(!Modifier::parse(&mushroom).unwrap().is_supported());

@@ -39,6 +39,12 @@ pub enum BlockPredicate {
         offset: [i32; 3],
     },
     True,
+    /// `InsideWorldBoundsPredicate`：`origin + offset` 的 y 在建造高度内。
+    ///
+    /// `InsideWorldBoundsPredicate`: the y of `origin + offset` is inside the build height.
+    InsideWorldBounds {
+        offset: [i32; 3],
+    },
     /// `WouldSurvivePredicate`：`state.canSurvive(level, origin+offset)`。
     WouldSurvive {
         offset: [i32; 3],
@@ -96,6 +102,7 @@ impl BlockPredicate {
             "minecraft:replaceable" => Self::Replaceable { offset },
             "minecraft:solid" => Self::Solid { offset },
             "minecraft:true" => Self::True,
+            "minecraft:inside_world_bounds" => Self::InsideWorldBounds { offset },
             // `state.canSurvive`；存活判定未移植的方块仍标 unsupported。
             // `state.canSurvive`; a state whose survival check is unported stays unsupported.
             "minecraft:would_survive" => {
@@ -161,6 +168,9 @@ impl BlockPredicate {
             }
             Self::Solid { offset } => state_facts(state_at(world, pos, offset)) & facts::SOLID != 0,
             Self::True => true,
+            // `level.isInsideBuildHeight(origin.offset(offset))`。
+            // `level.isInsideBuildHeight(origin.offset(offset))`.
+            Self::InsideWorldBounds { offset } => world.is_inside_build_height(pos.1 + offset[1]),
             // `state.canSurvive(level, origin+offset)`。
             Self::WouldSurvive { offset, state } => survival::can_survive(
                 *state,
@@ -316,11 +326,11 @@ mod tests {
 
     #[test]
     fn unported_kind_marks_the_predicate_unsupported() {
-        // would_survive 的 state 若存活判定未移植（蘑菇要亮度），仍标 unsupported。
-        // A would_survive with an unported survival check (mushroom needs brightness)
+        // would_survive 的 state 若存活判定未移植（苍白苔藓地毯要邻接判定），仍标 unsupported。
+        // A would_survive with an unported survival check (pale moss carpet needs adjacency)
         // stays unsupported.
         let would: Value =
-            json!({"type": "minecraft:would_survive", "state": "minecraft:red_mushroom"});
+            json!({"type": "minecraft:would_survive", "state": "minecraft:pale_moss_carpet"});
         assert!(!BlockPredicate::parse(&would).is_supported());
         // all_of 里夹一个未移植的，整体也要 unsupported。
         // An unported child makes the whole all_of unsupported.
@@ -328,7 +338,7 @@ mod tests {
             "type": "minecraft:all_of",
             "predicates": [
                 {"type": "minecraft:matching_block_tag", "tag": "minecraft:air"},
-                {"type": "minecraft:would_survive", "state": "minecraft:red_mushroom"},
+                {"type": "minecraft:would_survive", "state": "minecraft:pale_moss_carpet"},
             ],
         });
         assert!(!BlockPredicate::parse(&all).is_supported());

@@ -19,6 +19,7 @@ use super::{
 };
 
 /// `BlueIceFeature` 是无配置的 `MapCodec.unit`。
+///
 /// `BlueIceFeature` is a configless `MapCodec.unit`.
 #[derive(Debug, Clone, Copy)]
 pub struct BlueIceFeature;
@@ -27,9 +28,17 @@ impl BlueIceFeature {
     pub fn parse(_config: &Value) -> Result<Self, String> {
         Ok(Self)
     }
+
+    /// 没有嵌套配置，恒可对拍。
+    ///
+    /// No nested config, always comparable.
+    pub fn supported(&self) -> bool {
+        true
+    }
 }
 
 /// `BlueIceFeature.place`。
+///
 /// `BlueIceFeature.place`.
 pub fn place(
     _feature: &BlueIceFeature,
@@ -100,4 +109,15 @@ pub fn place(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blue_ice_has_no_config_fields() {
+        let config: Value = serde_json::json!({"type": "minecraft:blue_ice"});
+        assert!(BlueIceFeature::parse(&config).is_ok());
+    }
 }

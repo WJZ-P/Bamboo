@@ -21,7 +21,6 @@ use super::{
     },
     world::{FeatureWorld, HeightmapKind},
 };
-
 /// `column_radius` 是 `clamped`，本轮只需要它的 min/max 边界（官方 place 里也只用这两个）。
 /// `column_radius` is `clamped`; the official `place` only uses its min/max bounds.
 #[derive(Debug, Clone, Copy)]
@@ -112,6 +111,13 @@ impl LargeDripstoneFeature {
                 .ok_or("large_dripstone has no min_radius_for_wind")?,
             min_bluntness_for_wind: float("min_bluntness_for_wind")?,
         })
+    }
+
+    /// 没有嵌套的未移植配置：`replaceable_blocks` 是标签，其余都是数值。
+    ///
+    /// No unported nested config: `replaceable_blocks` is a tag and the rest are numbers.
+    pub fn supported(&self) -> bool {
+        true
     }
 }
 

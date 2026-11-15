@@ -279,6 +279,51 @@ impl IntProvider {
             }
         }
     }
+
+    /// `IntProvider.maxInclusive()`：只有常量与几种非递归形态有确定上界。
+    ///
+    /// `IntProvider.maxInclusive()`: only constant and the non-recursive shapes have a
+    /// definite upper bound.
+    pub fn max_value(&self) -> i32 {
+        match self {
+            Self::Constant(value) => *value,
+            Self::Uniform { max, .. }
+            | Self::Trapezoid { max, .. }
+            | Self::BiasedToBottom { max, .. }
+            | Self::VeryBiasedToBottom { max, .. }
+            | Self::Clamped { max, .. }
+            | Self::ClampedNormal { max, .. } => *max,
+            // `WeightedListInt.maxInclusive()`：各个分支上界的最大值。
+            // `WeightedListInt.maxInclusive()`: the largest upper bound among the branches.
+            Self::WeightedList { entries, .. } => entries
+                .iter()
+                .map(|(_, provider)| provider.max_value())
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
+    /// `IntProvider.minInclusive()`。
+    ///
+    /// `IntProvider.minInclusive()`.
+    pub fn min_value(&self) -> i32 {
+        match self {
+            Self::Constant(value) => *value,
+            Self::Uniform { min, .. }
+            | Self::Trapezoid { min, .. }
+            | Self::BiasedToBottom { min, .. }
+            | Self::VeryBiasedToBottom { min, .. }
+            | Self::Clamped { min, .. }
+            | Self::ClampedNormal { min, .. } => *min,
+            // `WeightedListInt.minInclusive()`：各个分支下界的最小值。
+            // `WeightedListInt.minInclusive()`: the smallest lower bound among the branches.
+            Self::WeightedList { entries, .. } => entries
+                .iter()
+                .map(|(_, provider)| provider.min_value())
+                .min()
+                .unwrap_or(0),
+        }
+    }
 }
 
 /// `HeightProvider.sample(random, WorldGenerationContext)`。

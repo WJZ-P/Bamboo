@@ -14,8 +14,13 @@ pub struct FeatureWorld<'a> {
     pub min_y: i32,
     pub height: i32,
     /// `WorldGenRegion.getSeaLevel()`，来自 `NoiseGeneratorSettings.seaLevel()`。
+    ///
     /// `WorldGenRegion.getSeaLevel()`, from `NoiseGeneratorSettings.seaLevel()`.
     pub sea_level: i32,
+    /// `level.getSeed()`：世界种子，晶洞这类固定参数噪声要用。
+    ///
+    /// `level.getSeed()`: the world seed, needed by fixed-parameter noises such as the geode.
+    pub seed: i64,
     /// 9 个区块的可变方块；中心在 [`CENTER`]。
     pub blocks: [ChunkBlocks; 9],
     /// 只读的 quart 群系格。
@@ -33,7 +38,7 @@ pub struct FeatureWorld<'a> {
 }
 
 impl<'a> FeatureWorld<'a> {
-    pub fn new(input: &'a FeatureChunks, sea_level: i32) -> Result<Self, String> {
+    pub fn new(input: &'a FeatureChunks, sea_level: i32, seed: i64) -> Result<Self, String> {
         if input.blocks.len() != 9 || input.biomes.len() != 9 || input.heights.len() != 9 {
             return Err("FeatureChunks must contain 9 chunks".to_owned());
         }
@@ -44,6 +49,7 @@ impl<'a> FeatureWorld<'a> {
             min_y: input.min_y,
             height: input.height,
             sea_level,
+            seed,
             blocks: input.blocks.clone(),
             biomes: &input.biomes,
             heights: input.heights,
@@ -182,6 +188,20 @@ impl<'a> FeatureWorld<'a> {
     /// `BiomeFilter` 需要这个，见 `feature::run`。
     pub fn is_air(&self, x: i32, y: i32, z: i32) -> bool {
         state_facts(self.get_block(x, y, z)) & facts::AIR != 0
+    }
+
+    /// `LevelHeightAccessor.isInsideBuildHeight(y)`。
+    ///
+    /// `LevelHeightAccessor.isInsideBuildHeight(y)`.
+    pub fn is_inside_build_height(&self, y: i32) -> bool {
+        y >= self.min_y && y < self.min_y + self.height
+    }
+
+    /// `LevelHeightAccessor.isOutsideBuildHeight(y)`。
+    ///
+    /// `LevelHeightAccessor.isOutsideBuildHeight(y)`.
+    pub fn is_outside_build_height(&self, y: i32) -> bool {
+        !self.is_inside_build_height(y)
     }
 }
 
