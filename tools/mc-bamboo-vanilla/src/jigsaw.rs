@@ -504,7 +504,7 @@ fn compare_pools(stdout: &str, queries: &[String]) -> Result<(), String> {
 /// `save` mode queries match `pieces` (structure × seed × chunk) but compare the full
 /// Children tag produced by vanilla `createTag`.
 fn run_save(mut command: Command, work_dir: &Path) -> Result<(), String> {
-    let queries = build_queries(2, 2);
+    let queries = build_queries(3, 3);
     let queries_path = work_dir.join("jigsaw_save_queries.txt");
     let text = queries
         .iter()
@@ -790,7 +790,7 @@ fn compare_processors(stdout: &str) -> Result<(), String> {
 /// compare each field with vanilla's own write-then-read result (including the recomputed
 /// bounding box and the re-encoded element).
 fn run_load(mut command: Command, work_dir: &Path) -> Result<(), String> {
-    let queries = build_queries(2, 2);
+    let queries = build_queries(3, 3);
     let queries_path = work_dir.join("jigsaw_load_queries.txt");
     let text = queries
         .iter()
