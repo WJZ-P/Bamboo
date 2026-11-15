@@ -36,6 +36,7 @@ pub mod start;
 pub mod start_point;
 pub mod state_transform;
 pub mod template;
+pub mod template_place;
 pub mod templated;
 pub mod validity;
 

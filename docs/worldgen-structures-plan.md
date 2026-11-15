@@ -959,9 +959,7 @@ deflate，把每个 gzip 字节按注册名排序拼成 `structures.bin`，另�
 front / top、`name` / `target` / `pool` / 优先级 / `joint`），单元测试解析全部 1511 个
 模板。`structure-templates` 对拍用官方 `NbtIo` 逐节点规范化整棵 NBT 树并校验导出字节
 等于 jar 原文，1511 个模板 0 不一致，故意改坏 Rust 的 int 标记会让 1511 个全部失败。
-多 palette 模板有 20 个，`getRandomPalette` 的按位置随机选择已在结构件生成那一步移植
-（`StructureTemplate::palette_index`，按 `Mth.getSeed(position)` 建随机源，不消耗世界随机源），
-并由 `jigsaw jigsaws` 对拍直接覆盖。
+多 palette 模板有 20 个，`getRandomPalette` 的按位置随机选择留到结构件生成那一步处理。
 
 ### 2.3 为什么用 codec 重编码而不是直接拷 jar 里的 JSON
 
@@ -1477,29 +1475,15 @@ structures (Compound)
 * `.nbt` 结构模板**已导出**（第 2.2 节）：`cb-wg-jigsaw` 分支从 jar 原样导出 1511 个、
   4236847 字节，重跑无 diff，Rust 侧可解析并经官方 `NbtIo` 逐节点对拍 0 不一致。
   20 个多 palette 模板的 `StructurePlaceSettings.getRandomPalette`（按位置
-  `RandomSource.create(Mth.getSeed(pos))` 选 palette）已在 jigsaw 结构件生成里移植，
-  并由 `jigsaw jigsaws` 对拍覆盖（见下一条）。
-* **jigsaw 结构件生成已做完（纯函数 + 对拍，`cb-wg-jigsaw`）**：
-  `mc-bamboo-worldgen::structure::jigsaw` 移植了 `JigsawStructure.findGenerationPoint` 与
-  `JigsawPlacement.addPieces` 的完整递归——`HeightProvider.sample`、`Rotation.getRandom` /
-  `getShuffled`、模板按 id 缓存（对齐 `StructureTemplateManager.getOrCreate`）、
-  `getRandomPalette` 的按位置选择、`Palette.jigsaws()` 顺序 + `Util.shuffle` + 稳定按
-  `selectionPriority` 降序、`PoolAliasLookup`（`direct` / `random` / `random_group`）、
-  `getRandomTemplate` / `getShuffledTemplates` / `getMaxSize`、`canAttach`、
-  `Shapes` 的三种布尔运算（乘 4 整数精确复刻 `deflate(0.25)`）、
-  `SequencedPriorityIterator`、`project_start_to_heightmap` / `getFirstFreeHeight`、
-  `isStartTooCloseToWorldHeightLimits`、`doExpansionHack`；五种 pool element 全部支持。
-  对拍 `jigsaw pieces`：27 个结构（村庄 5 种、掠夺者前哨站、古城、试炼密室、古迹废墟、
-  26.3 新增的 18 种 `abandoned_camp`）× 6 种子 × 6 区块 = 972 个查询、12467 个结构件的
-  类型 / 模板名 / 位置 / 旋转 / 包围盒 / `groundLevelDelta` / 全部 junction 字段 0 不一致；
-  `jigsaw jigsaws` 对 1511 个模板 × 4 旋转 × 4 位置 = 24176 个查询、68352 个拼图方块的
-  位置 / front / top / name / target / pool / joint / 优先级 0 不一致；`jigsaw shapes` 120
-  场景 0 不一致。四处故意改坏各自被抓到并失败。
-  仍没做：`Piece` 只有结构件列表，方块写入（`placeInChunk` / `postProcess` / processors /
-  拼图替换 / 方块实体）属第 5 步；`Piece::to_save_piece` 只给 `id` / `BB` / `O=-1` / `GD=0`，
-  `addAdditionalSaveData` 的 `pool_element` / `rotation` / `junctions` 还没编码。
-  `start_height` 只支持 `constant` 与 `uniform`（26.3 主世界全部 28 个 jigsaw 结构只用这两种）；
-  `bastion_remnant` 是下界结构，不做。
+  `RandomSource.create(Mth.getSeed(pos))` 选 palette）尚未移植，结构件生成要用时补。
+* **jigsaw 结构件生成（`JigsawPlacement.addPieces` 及 5 类 jigsaw 结构）没做**：`addPieces`
+  依赖 `StructureTemplateManager` 加载模板、`Shapes` 的 VoxelShape 布尔空间检查（`ONLY_FIRST`
+  / `ONLY_SECOND` / `deflate(0.25)` / `MutableObject` 共享 / `sourceFree` 与 `contextFree`）、
+  `Rotation.getShuffled` / `getShuffledTemplates` / `getRandomTemplate` 的随机取数顺序、
+  `SequencedPriorityIterator` 的 placementPriority 队列，以及各结构 `findGenerationPoint`
+  的 `HeightProvider` / `PoolAliasLookup` / `DimensionPadding` / `LiquidSettings`。官方对拍
+  还要把 `Structure.GenerationContext` 的 `structureTemplateManager` 从 `null` 换成真实实例
+  （构造器需要 `LevelStorageAccess` 与 `DataFixer`）。这些都没移植，不假装支持。
 * `concentric_rings`（要塞）的环几何 + `findBiomeHorizontal` 吸附已移植并对拍
   0 不一致；但要塞的 `isStructureChunk` 必须先由调用方 `set_ring_positions` 注入
   `ring_positions` 的结果，没注入时仍返回 false。`Placement::is_placement_chunk` 单独
@@ -1517,11 +1501,13 @@ structures (Compound)
   仍是数据类型，`start_plans` 只给加权尝试序列。组合对拍只覆盖 6 个 `random_spread`
   结构集、不含 `isStructureChunk` 命中过滤。
 * 第五轮已落地并对拍：`structure::single` 的四个代码生成单件结构布局（第 4 步一部分）、
-  `mc-bamboo-worldgen::beardifier`（第 6 步，`cb-wg-beard`，见第 5 节）、`structure::save` 的 `structures` 键（第 7 步）、
-  以及 `structure::jigsaw` 的 jigsaw 结构件生成（第 4 步的 jigsaw 部分，`cb-wg-jigsaw`，
-  972 查询 / 12467 结构件 0 不一致）。仍没做：需要模板的单件结构（第 4 步其余）、
-  `features` 阶段结构件放置（第 5 步，`placeInChunk` / `postProcess` / processors /
-  方块实体 / 拼图替换），以及把全部结构起点接进 Director。这些仍是纯函数/类型，没有接进游戏。
+  `structure::templated` 的雪屋 / 沉船 / 海底遗迹布局、废弃传送门的布局（第 4 步其余）、
+  `mc-bamboo-worldgen::beardifier`（第 6 步，`cb-wg-beard`，见第 5 节）、`structure::save` 的
+  `structures` 键（第 7 步）、以及 `structure::jigsaw` 的 jigsaw 结构件生成与模板放置链路
+  （第 4 步的 jigsaw 部分，`cb-wg-jigsaw`，972 查询 / 12467 结构件 + 900 查询 / 610992 次写入
+  0 不一致）。仍没做：`features` 阶段结构件放置（第 5 步，`placeInChunk` / `postProcess` /
+  processors / 方块实体 / 拼图替换），以及把全部结构起点接进 Director。这些仍是纯函数/类型，
+  没有接进游戏。
 * 第五轮已落地并对拍：`structure::single` 的四个代码生成单件结构布局、
   `structure::templated` 的雪屋 / 沉船 / 海底遗迹布局（第 4 步一部分）、
   `mc-bamboo-worldgen::beardifier`（第 6 步，`cb-wg-beard`，见第 5 节）、`structure::save` 的 `structures` 键（第 7 步）。
