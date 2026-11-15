@@ -584,6 +584,12 @@ WebView2 的渲染进程不算在内。
   `validDirections` 里 `Direction.Plane.HORIZONTAL` 的枚举顺序写错，
   以及把地物放置用的扩散入口和骨粉用的那个搞混了。细节见
   `docs/worldgen-features-plan.md` 5.1。
+  另有六个类型**已按官方源码写完但还没验证**（第 13–16 轮）：
+  `minecraft:overlay` / `minecraft:no_op` / `minecraft:single_block_pillar` /
+  `minecraft:coral_tree` / `minecraft:coral_claw` / `minecraft:random_block`
+  （state provider）。它们只能通过 `minecraft:warm_ocean_vegetation` 到达，而那条链
+  始终 `0 centers / 9 skipped`——珊瑚的存活判定（`CoralBlock` / `CoralPlantBlock` /
+  `CoralFanBlock`）和 `#minecraft:corals` 标签展开都已确认正确（有单测），根因还没找到。
   诚实的已知差异与未做：`rotated` state provider、蘑菇（要 `getRawBrightness`）、
   苔藓地毯（`MossyCarpetBlock.placeAt` 用 `level.getRandom()`）等特殊
   `canSurvive`；`schedule_tick` 忽略；`noise_threshold_count` / `noise_based_count` /
