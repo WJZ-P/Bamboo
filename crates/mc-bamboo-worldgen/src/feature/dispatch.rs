@@ -60,6 +60,10 @@ pub enum Leaf {
     MonsterRoom(MonsterRoomFeature),
     Multiface(MultifaceGrowthFeature),
     Ore(OreFeature),
+    /// `ScatteredOreFeature`：`origin` 周围最多 7 格的零散单点尝试。
+    ///
+    /// `ScatteredOreFeature`: scattered single-block tries within seven blocks.
+    ScatteredOre(OreFeature),
     SculkPatch(SculkPatchFeature),
     SimpleBlock(SimpleBlockFeature),
     Speleothem(SpeleothemFeature),
@@ -129,6 +133,10 @@ pub fn parse_leaf<'a>(
         // `MapCodec.unit(NoOpFeature::new)`: no fields, `place` always returns true.
         "minecraft:no_op" => Leaf::NoOp,
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
+        // `ScatteredOreFeature` 复用 `AbstractOreFeature` 的 codec，配置结构相同。
+        // `ScatteredOreFeature` shares the `AbstractOreFeature` codec, so the config
+        // shape is identical.
+        "minecraft:scattered_ore" => Leaf::ScatteredOre(OreFeature::parse(config).ok()?),
         "minecraft:sculk_patch" => Leaf::SculkPatch(SculkPatchFeature::parse(config)?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config, lookup)?),
         "minecraft:single_block_pillar" => {
@@ -174,6 +182,7 @@ pub fn place_leaf(
         Leaf::MonsterRoom(room) => monster_room::place(room, world, random, pos),
         Leaf::Multiface(feature) => feature.place(world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
+        Leaf::ScatteredOre(ore) => ores::place_scattered(ore, world, random, pos),
         Leaf::SculkPatch(feature) => sculk_patch::place(feature, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
         Leaf::Speleothem(feature) => speleothem::place(feature, world, random, pos),
