@@ -475,7 +475,8 @@ pub fn place_piece(
 
     let blocks =
         crate::structure::template_place::blocks_in_chunk(&template, position, settings, chunk_bb)?;
-    let placed = crate::structure::template_place::place_blocks(level, chunk_bb, &blocks, settings);
+    let placed =
+        crate::structure::template_place::place_blocks(level, chunk_bb, &blocks, settings, random);
     // `placeInWorld` 末尾的两步形状更新（`getKnownShape()` 为 false）。
     // The two shape-update steps at the end of `placeInWorld` (`getKnownShape()` false).
     crate::structure::template_shape_update::update_shapes(level, &placed);
@@ -487,10 +488,12 @@ pub fn place_piece(
     // `filterBlocks(..., STRUCTURE_BLOCK)` loop calling `handleDataMarker`, then the
     // `filterBlocks(..., JIGSAW)` loop replacing jigsaw blocks. Kept in the same order.
 
-    // `handleDataMarker`：只做箱子那一段。
-    // `handleDataMarker`: the chest part only.
-    for (local, entry) in template.blocks.iter().zip(0..) {
-        let _ = entry;
+    // `handleDataMarker`：箱子标记和生物标记。实体不建，但生物标记那格的 `setBlock(AIR)`
+    // 每只生物写一次，悦灵数量取 `level.getRandom()`。
+    // `handleDataMarker`: chest markers and mob markers. No entity is built, but a mob
+    // marker's `setBlock(AIR)` happens once per mob, and the allay count draws from
+    // `level.getRandom()`.
+    for local in &template.blocks {
         let Some(nbt) = &local.nbt else {
             continue;
         };
@@ -503,9 +506,6 @@ pub fn place_piece(
             continue;
         }
         let metadata = nbt_string(nbt, "metadata").unwrap_or_default();
-        if !metadata.starts_with("Chest") {
-            continue;
-        }
         let local_pos =
             crate::structure::template_place::transform_pos(local.pos, mirror, rotation);
         let world = (
@@ -516,7 +516,18 @@ pub fn place_piece(
         if !crate::structure::piece_place::box_is_inside(chunk_bb, world.0, world.1, world.2) {
             continue;
         }
-        write_marker_chest(level, world, &metadata, rotation, random);
+        if metadata.starts_with("Chest") {
+            write_marker_chest(level, world, &metadata, rotation, random);
+            continue;
+        }
+        let mobs = match metadata.as_str() {
+            "Mage" | "Warrior" => 1,
+            "Group of Allays" => level.level_random().next_int(3) + 1,
+            _ => 0,
+        };
+        for _ in 0..mobs {
+            level.set_block(world.0, world.1, world.2, mc_bamboo_data::blocks::AIR);
+        }
     }
 
     // 拼图方块替换（官方的 `filterBlocks(..., JIGSAW)` 那一段）。府邸模板里没有拼图方块，

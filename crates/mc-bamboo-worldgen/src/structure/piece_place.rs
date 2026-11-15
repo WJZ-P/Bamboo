@@ -99,6 +99,12 @@ pub trait PieceLevel {
     /// `OCEAN_FLOOR_WG` is no longer updated when pieces and features write blocks.
     /// Implementations must not recompute it from the current blocks.
     fn ocean_floor_height(&self, x: i32, z: i32) -> i32;
+    /// `LevelAccessor.getRandom()`：`WorldGenRegion` 自己的位置随机源，和传给
+    /// `postProcess` 的 `random` 是两回事（林地府邸的悦灵数量从这里取）。
+    ///
+    /// `LevelAccessor.getRandom()`: the `WorldGenRegion`'s own positional source, separate
+    /// from the `random` passed to `postProcess` (the mansion's allay count draws from it).
+    fn level_random(&self) -> &crate::random::WorldgenRandom;
 }
 
 /// `BoundingBox.isInside(pos)`：三轴都含端点。
@@ -705,12 +711,14 @@ mod tests {
     /// A one-block test world.
     struct TestLevel {
         blocks: BTreeMap<(i32, i32, i32), u32>,
+        random: crate::random::WorldgenRandom,
     }
 
     impl TestLevel {
         fn new() -> Self {
             Self {
                 blocks: BTreeMap::new(),
+                random: crate::structure::pieces::make_random(0, 0, 0),
             }
         }
     }
@@ -738,6 +746,10 @@ mod tests {
 
         fn ocean_floor_height(&self, _x: i32, _z: i32) -> i32 {
             0
+        }
+
+        fn level_random(&self) -> &crate::random::WorldgenRandom {
+            &self.random
         }
     }
 

@@ -24,8 +24,8 @@
 use std::collections::HashSet;
 
 use mc_bamboo_blocks::{
-    Aabb, BlockEntities, BlockEvents, BlockState, BlockTicks, EntityStore, EntityTables,
-    FluidState, Level, LevelRandom, LevelTables, RedstoneMemory, World,
+    Aabb, BlockEntities, BlockEvents, BlockState, BlockTicks, EntityStore, EntityTables, Level,
+    LevelRandom, LevelTables, RedstoneMemory, World,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, sign::SignContent};
 
@@ -287,8 +287,17 @@ impl Level for ShapeLevel<'_> {
         false
     }
 
-    fn brightness(&self, _layer: LightLayer, _pos: BlockPos) -> i32 {
-        0
+    /// FEATURES 阶段的区块还没到 `INITIALIZE_LIGHT`，天空光存储里没有这一列，
+    /// `SkyLightSectionStorage.getLightValue` 返回 15；方块光没有数据，返回 0。
+    ///
+    /// A FEATURES-stage chunk has not reached `INITIALIZE_LIGHT`, so the sky light
+    /// storage has no entry for the column and `SkyLightSectionStorage.getLightValue`
+    /// returns 15; block light has no data and reads 0.
+    fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> i32 {
+        match layer {
+            LightLayer::Sky => 15,
+            LightLayer::Block => 0,
+        }
     }
 
     fn sign(&self, _pos: BlockPos) -> Option<SignContent> {
@@ -302,31 +311,4 @@ impl Level for ShapeLevel<'_> {
     fn note_block_sound(&self, _pos: BlockPos) -> Option<String> {
         None
     }
-}
-
-/// `LiquidBlockContainer.placeLiquid(level, pos, state, fluid)`：把流体灌进一个含水方块。
-///
-/// 方块自己的 `place_liquid` 在 `mc-bamboo-blocks` 里，它读写世界要一个
-/// [`Level`]；这里把 [`PieceLevel`] 包成 [`ShapeLevel`] 再转发。
-///
-/// `LiquidBlockContainer.placeLiquid(level, pos, state, fluid)`: pour a fluid into a
-/// waterloggable block. The block's own `place_liquid` lives in `mc-bamboo-blocks` and
-/// needs a [`Level`]; this wraps the [`PieceLevel`] in a [`ShapeLevel`] and forwards.
-pub fn place_liquid(
-    level: &mut dyn PieceLevel,
-    pos: (i32, i32, i32),
-    state: BlockState,
-    fluid: FluidState,
-) -> bool {
-    let mut wrapper = ShapeLevel {
-        level,
-        block_entities: BlockEntities::default(),
-        block_events: BlockEvents::default(),
-        redstone: RedstoneMemory::default(),
-        entities: EntityStore::default(),
-        random: LevelRandom::new(0),
-    };
-    let mut ticks = BlockTicks::default();
-    let mut world = World::new(&mut wrapper, &mut ticks);
-    state.place_liquid(&mut world, BlockPos::new(pos.0, pos.1, pos.2), fluid)
 }

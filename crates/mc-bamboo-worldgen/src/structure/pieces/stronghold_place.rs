@@ -1089,12 +1089,14 @@ mod tests {
     /// A sparse test world.
     struct TestLevel {
         blocks: BTreeMap<(i32, i32, i32), u32>,
+        random: crate::random::WorldgenRandom,
     }
 
     impl TestLevel {
         fn new() -> Self {
             Self {
                 blocks: BTreeMap::new(),
+                random: crate::structure::pieces::make_random(0, 0, 0),
             }
         }
     }
@@ -1122,6 +1124,10 @@ mod tests {
 
         fn ocean_floor_height(&self, _x: i32, _z: i32) -> i32 {
             0
+        }
+
+        fn level_random(&self) -> &crate::random::WorldgenRandom {
+            &self.random
         }
     }
 

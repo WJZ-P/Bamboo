@@ -11,8 +11,7 @@
 //!
 //! 已知限制：官方在 `placeInWorld` 之后还会跑 `updateShapeAtEdge` /
 //! `updateFromNeighbourShapes`（林地府邸没有 `setKnownShape`），这两步留给调用方
-//! （`feature::shape_update` 已有等价实现）。带 `nbt` 的方块官方先写 `BARRIER` 再写真实
-//! 状态，那一步只为移除旧方块实体，不影响最终方块，这里省掉。
+//! （`feature::shape_update` 已有等价实现）。
 //!
 //! Per-block structure template placement: a port of `StructureTemplate.placeInWorld` and
 //! `processBlockInfos`, covering the combination the woodland mansion uses (rotation /
@@ -28,9 +27,9 @@
 //!
 //! Known limits: vanilla also runs `updateShapeAtEdge` / `updateFromNeighbourShapes` after
 //! `placeInWorld` (the mansion never calls `setKnownShape`); those steps are left to the
-//! caller (`feature::shape_update` already has an equivalent). Blocks with `nbt` get a
-//! `BARRIER` written first in vanilla only to drop the old block entity, which does not
-//! affect the final block, so it is skipped here.
+//! caller (`feature::shape_update` already has an equivalent).
+
+use mc_bamboo_data::BlockAncestor;
 
 use crate::structure::piece_place::{PieceLevel, box_is_inside, is_block};
 use crate::structure::state_transform::{Mirror, Rotation, transform};
@@ -180,25 +179,26 @@ pub fn blocks_in_chunk(
 /// 官方按 palette 顺序逐块写；每块先过 `boundingBox.isInside`（就是调用方传的
 /// `chunkBB`），再做 `mirror` / `rotate`，然后 `setBlock`。
 ///
-/// 带 `nbt` 的方块官方会读 `level.getBlockEntity(pos)`，是 `RandomizableContainer` 时
-/// 才 `blockInfo.nbt.putLong("LootTableSeed", random.nextLong())`。世界生成期这里的
-/// 区块是 `ProtoChunk`，`setBlock` 只把方块实体 NBT 放进 `pendingBlockEntities`，
-/// `getBlockEntity` 读的是另一张表，返回 null，所以**一次 `nextLong()` 都不取**。
+/// 带 `nbt` 的方块官方先写一次 `BARRIER`，再写真实状态；之后读
+/// `level.getBlockEntity(pos)`，是 `RandomizableContainer` 时取
+/// `random.nextLong()` 作 `LootTableSeed`。`WorldGenRegion.getBlockEntity` 会把
+/// `setBlock` 留下的 `DUMMY` 占位换成真的方块实体，所以箱子、木桶这类**每个都取一次**。
 ///
 /// The write loop of `StructureTemplate.placeInWorld`. Vanilla writes block by block in
 /// palette order; each goes through `boundingBox.isInside` (the caller's `chunkBB`), then
 /// `mirror` / `rotate`, then `setBlock`.
 ///
-/// For blocks with `nbt` vanilla reads `level.getBlockEntity(pos)` and only draws
-/// `blockInfo.nbt.putLong("LootTableSeed", random.nextLong())` for a
-/// `RandomizableContainer`. During chunk generation the chunk is a `ProtoChunk`, whose
-/// `setBlock` only fills `pendingBlockEntities` while `getBlockEntity` reads another map
-/// and returns null, so no `nextLong()` is drawn here.
+/// Blocks with `nbt` get a `BARRIER` written first, then the real state; vanilla then
+/// reads `level.getBlockEntity(pos)` and draws `random.nextLong()` as the `LootTableSeed`
+/// of a `RandomizableContainer`. `WorldGenRegion.getBlockEntity` turns the `DUMMY`
+/// placeholder `setBlock` left into a real block entity, so every chest, barrel and the
+/// like draws once.
 pub fn place_blocks(
     level: &mut dyn PieceLevel,
     chunk_bb: &[i32; 6],
     blocks: &[PlacedBlock],
     settings: PlaceSettings,
+    random: &crate::random::WorldgenRandom,
 ) -> Vec<(i32, i32, i32)> {
     // `LiquidSettings` 的两段：写入前取该格的流体，写完把旧流体回填进含水方块。
     // The two `LiquidSettings` steps: read the cell's fluid before the write, then pour it
@@ -214,8 +214,19 @@ pub fn place_blocks(
             .apply_waterlogging
             .then(|| level.get_block(entry.pos.0, entry.pos.1, entry.pos.2));
         let state = transform(entry.state, settings.mirror, settings.rotation);
+        if entry.has_nbt {
+            level.set_block(
+                entry.pos.0,
+                entry.pos.1,
+                entry.pos.2,
+                crate::structure::piece_place::block("minecraft:barrier"),
+            );
+        }
         level.set_block(entry.pos.0, entry.pos.1, entry.pos.2, state);
         placed.push(entry.pos);
+        if entry.has_nbt && is_randomizable_container(state) {
+            random.next_long();
+        }
 
         let Some(previous) = previous else {
             continue;
@@ -226,12 +237,17 @@ pub fn place_blocks(
             locked.push(entry.pos);
             continue;
         }
-        // `state.getBlock() instanceof LiquidBlockContainer` → `placeLiquid(...)`。
-        // `state.getBlock() instanceof LiquidBlockContainer` → `placeLiquid(...)`.
-        if !is_liquid_container(state) || is_empty_fluid(previous) {
+        // `state.getBlock() instanceof LiquidBlockContainer` → `placeLiquid(...)`，不看它
+        // 成不成功；旧流体不是源（包括空流体）就进 `toFill`。
+        // `state.getBlock() instanceof LiquidBlockContainer` → `placeLiquid(...)` whatever
+        // it returns; a previous fluid that is not a source (empty included) joins `toFill`.
+        if !is_liquid_container(state) {
             continue;
         }
-        if place_liquid(level, entry.pos, state, previous) && !is_source(previous) {
+        if !is_empty_fluid(previous) {
+            place_liquid(level, entry.pos, state, previous);
+        }
+        if !is_source(previous) {
             to_fill.push(entry.pos);
         }
     }
@@ -266,7 +282,12 @@ pub fn place_blocks(
                 index += 1;
                 continue;
             };
-            if is_liquid_container(current) && place_liquid(level, pos, current, fluid) {
+            // 官方只要是 `LiquidBlockContainer` 就算填过、移出 `toFill`，不看 `placeLiquid`
+            // 的结果。
+            // Vanilla counts any `LiquidBlockContainer` as filled and drops it from
+            // `toFill`, whatever `placeLiquid` returns.
+            if is_liquid_container(current) {
+                place_liquid(level, pos, current, fluid);
                 filled = true;
                 to_fill.remove(index);
                 continue;
@@ -299,32 +320,69 @@ fn is_empty_fluid(state: u32) -> bool {
 ///
 /// Whether the block is a `LiquidBlockContainer`.
 fn is_liquid_container(state: u32) -> bool {
-    let Some(id) = mc_bamboo_data::block_id_of_state(state) else {
-        return false;
-    };
-    // 本版本实现 `LiquidBlockContainer` 的都是 `SimpleWaterloggedBlock`（台阶、楼梯、
-    // 栅栏、墙……），它们都有 `waterlogged` 属性；按属性判定与官方 `instanceof`
-    // 在这批方块上等价。
-    //
-    // Every `LiquidBlockContainer` in this version is a `SimpleWaterloggedBlock` (slabs,
-    // stairs, fences, walls, ...) and carries a `waterlogged` property, so testing the
-    // property matches vanilla's `instanceof` on this block set.
-    mc_bamboo_data::blocks::BLOCKS[id]
-        .properties
-        .iter()
-        .any(|property| property.name == "waterlogged")
+    has_ancestor(state, &[BlockAncestor::LiquidBlockContainer])
 }
 
-/// 调一次 `LiquidBlockContainer.placeLiquid`，返回它是否真的放进了流体。
+/// 方块实体是不是 `RandomizableContainer`（箱子一族、木桶、合成器、饰纹陶罐、发射器 /
+/// 投掷器、漏斗、潜影盒）。
 ///
-/// One `LiquidBlockContainer.placeLiquid`, returning whether the fluid landed.
-fn place_liquid(level: &mut dyn PieceLevel, pos: (i32, i32, i32), state: u32, fluid: u32) -> bool {
-    crate::structure::template_shape_update::place_liquid(
-        level,
-        pos,
-        mc_bamboo_blocks::BlockState(state),
-        mc_bamboo_blocks::BlockState(fluid).fluid(),
+/// Whether the block entity is a `RandomizableContainer` (the chest family, barrel,
+/// crafter, decorated pot, dispenser / dropper, hopper, shulker box).
+fn is_randomizable_container(state: u32) -> bool {
+    has_ancestor(
+        state,
+        &[
+            BlockAncestor::ChestBlock,
+            BlockAncestor::BarrelBlock,
+            BlockAncestor::CrafterBlock,
+            BlockAncestor::DecoratedPotBlock,
+            BlockAncestor::DispenserBlock,
+            BlockAncestor::HopperBlock,
+            BlockAncestor::ShulkerBoxBlock,
+        ],
     )
+}
+
+/// 方块类（含自身）是否继承或实现了其中之一。
+///
+/// Whether the block class (itself included) extends or implements any of these.
+fn has_ancestor(state: u32, wanted: &[BlockAncestor]) -> bool {
+    mc_bamboo_data::block_of_state(state)
+        .is_some_and(|block| block.class.ancestors().iter().any(|a| wanted.contains(a)))
+}
+
+/// 在 `WorldGenRegion` 上调一次 `LiquidBlockContainer.placeLiquid`，返回它是否放进了流体。
+///
+/// 所有会放的实现（`SimpleWaterloggedBlock`、台阶非双层、营火、蜡烛、干涸恶魂）都要求
+/// 方块还没含水、流体是水源（`is(Fluids.WATER)`，流动的水不算），然后
+/// `setBlockAndUpdate` 写一次含水状态；营火和点着的蜡烛顺带熄灭。`WorldGenRegion` 的
+/// `setBlock` 不做邻居形状更新，声音、粒子、计划刻都不改方块。海带、海草恒返回 false。
+///
+/// One `LiquidBlockContainer.placeLiquid` on a `WorldGenRegion`, returning whether the
+/// fluid went in. Every implementation that accepts (`SimpleWaterloggedBlock`, non-double
+/// slabs, campfire, candle, dried ghast) requires the block not to be waterlogged yet and
+/// the fluid to be a water source (`is(Fluids.WATER)`; flowing water does not count), then
+/// writes the waterlogged state once through `setBlockAndUpdate`; campfires and lit candles
+/// are put out as well. `WorldGenRegion.setBlock` runs no neighbour shape updates, and
+/// sounds, particles and scheduled ticks change no block. Kelp and seagrass always refuse.
+fn place_liquid(level: &mut dyn PieceLevel, pos: (i32, i32, i32), state: u32, fluid: u32) -> bool {
+    use crate::structure::state_transform::property_of;
+    if property_of(state, "waterlogged") != Some("false")
+        || property_of(state, "type") == Some("double")
+        || !mc_bamboo_blocks::BlockState(fluid)
+            .fluid()
+            .is(mc_bamboo_data::registries::fluid::WATER)
+    {
+        return false;
+    }
+    let mut new_state =
+        crate::structure::piece_place::with_property(state, "waterlogged", "true").unwrap_or(state);
+    if property_of(new_state, "lit").is_some() {
+        new_state = crate::structure::piece_place::with_property(new_state, "lit", "false")
+            .unwrap_or(new_state);
+    }
+    level.set_block(pos.0, pos.1, pos.2, new_state);
+    true
 }
 
 /// `BlockStateParser.parseForBlock(..., stateString, true)`：解析

@@ -829,7 +829,15 @@ public final class StructurePlaceOracle {
         private final class Handler implements InvocationHandler {
             @Override
             public Object invoke(Object self, Method method, Object[] args) throws Throwable {
-                String name = method.getName();
+                return call(method.getName(), self, method, args);
+            }
+
+            // `setBlockAndUpdate` / `removeBlock` 按名字转给 `setBlock`，不能再用同一个 `method`
+            // 递归（那样会无限转回自己）。
+            // `setBlockAndUpdate` / `removeBlock` forward to `setBlock` by name; recursing with
+            // the same `method` would loop back to themselves forever.
+            private Object call(String name, Object self, Method method, Object[] args)
+                    throws Throwable {
                 int arity = args == null ? 0 : args.length;
                 switch (name) {
                     case "getMinY":
@@ -918,9 +926,9 @@ public final class StructurePlaceOracle {
                         return true;
                     }
                     case "setBlockAndUpdate":
-                        return invoke(self, method, new Object[] {args[0], args[1], 3});
+                        return call("setBlock", self, method, new Object[] {args[0], args[1], 3});
                     case "removeBlock":
-                        return invoke(self, method,
+                        return call("setBlock", self, method,
                                 new Object[] {args[0], Blocks.AIR.defaultBlockState(), 3});
                     case "ensureCanWrite":
                     case "isWithinWriteZone":
@@ -989,6 +997,22 @@ public final class StructurePlaceOracle {
                     case "markPosForPostProcessing":
                         at((BlockPos) args[0]).markPosForPostProcessing((BlockPos) args[0]);
                         return null;
+                    case "updateNeighborsAt":
+                        // `WorldGenRegion` 不覆写，用的是 `LevelAccessor` 的空默认实现。
+                        // `WorldGenRegion` keeps `LevelAccessor`'s empty default.
+                        return null;
+                    case "environmentAttributes":
+                        // 放置路径上只有 `LavaFluid.isFastLava` 读它，只影响流体刻的延迟。
+                        // Only `LavaFluid.isFastLava` reads it during placement, and only
+                        // for the fluid tick delay.
+                        return net.minecraft.world.attribute.EnvironmentAttributeReader.EMPTY;
+                    case "getRawBrightness":
+                        // 生成期区块还没点光：天空光存储里没有这一列，读出 15；方块光是 0。
+                        // A generating chunk is not lit yet: the sky storage has no entry
+                        // for the column and reads 15; block light reads 0.
+                        return Math.max(0, 15 - (int) args[1]);
+                    case "getBrightness":
+                        return args[0] == net.minecraft.world.level.LightLayer.SKY ? 15 : 0;
                     case "getCenter":
                         return center;
                     case "getSeed":

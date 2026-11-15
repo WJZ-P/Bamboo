@@ -417,6 +417,15 @@ impl Builder {
     }
 }
 
+/// `RandomSource.create(seed)`：一个 `LegacyRandomSource(seed)`。
+///
+/// `RandomSource.create(seed)`: a `LegacyRandomSource(seed)`.
+pub fn legacy_random(seed: i64) -> WorldgenRandom {
+    use crate::random::Random;
+    use mc_bamboo_blocks::LegacyRandom;
+    WorldgenRandom::new(Random::Legacy(LegacyRandom::new(seed)))
+}
+
 /// 造一个 `makeRandom(seed, chunkPos)`：`WorldgenRandom(LegacyRandomSource(0))`
 /// 再 `setLargeFeatureSeed(seed, x, z)`。
 ///

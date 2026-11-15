@@ -223,8 +223,11 @@ fn parse_output(stdout: &str) -> Result<Vec<Section>, String> {
             expected_blocks = None;
             continue;
         }
+        // 第一个 `Q` 之前只会是官方日志（读府邸模板时箱子物品的反序列化警告），跳过。
+        // Anything before the first `Q` is vanilla logging (the item decoding warnings
+        // when the mansion templates load), skipped.
         let Some(section) = &mut current else {
-            return Err(format!("oracle line before any Q: {line}"));
+            continue;
         };
         let number = |index: usize| -> Result<i64, String> {
             fields
@@ -658,6 +661,11 @@ struct FlatLevel {
     /// Cached `OCEAN_FLOOR_WG` height per column (initial terrain only, see
     /// `ocean_floor_height`).
     heights: RefCell<HashMap<(i32, i32), i32>>,
+    /// `WorldGenRegion.getRandom()` 的替身：和 Java 侧一样，每条查询一个 `RandomSource.create(0)`。
+    ///
+    /// Stand-in for `WorldGenRegion.getRandom()`: like Java, one `RandomSource.create(0)`
+    /// per query.
+    level_random: mc_bamboo_worldgen::random::WorldgenRandom,
 }
 
 /// 初始填充的最高一层（`stone` / `caves`）。
@@ -674,6 +682,7 @@ impl FlatLevel {
             center,
             piece_writes: Vec::new(),
             heights: RefCell::new(HashMap::new()),
+            level_random: pieces::legacy_random(0),
         }
     }
 
@@ -806,6 +815,10 @@ impl PieceLevel for FlatLevel {
         self.heights.borrow_mut().insert((x, z), height);
         height
     }
+
+    fn level_random(&self) -> &mc_bamboo_worldgen::random::WorldgenRandom {
+        &self.level_random
+    }
 }
 
 /// 状态的 `Block{name[props]}` 名字，和 Java `BlockState.toString()` 一致；
@@ -912,8 +925,15 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
             }
             // `L` 行：`id minX minY minZ maxX maxY maxZ O GD extras`。
             // `L` line: `id minX minY minZ maxX maxY maxZ O GD extras`.
-            let fields: Vec<&str> = section.pieces[invocation.piece].split(' ').collect();
-            let label = format!("{}/O{}", fields[0], fields[7]);
+            // 下标等于结构件数的是林地府邸的 `afterPlace`。
+            // An index equal to the piece count is the woodland mansion's `afterPlace`.
+            let label = match section.pieces.get(invocation.piece) {
+                Some(line) => {
+                    let fields: Vec<&str> = line.split(' ').collect();
+                    format!("{}/O{}", fields[0], fields[7])
+                }
+                None => "afterPlace".to_owned(),
+            };
             *total.placed.entry(label).or_insert(0) += 1;
         }
 
