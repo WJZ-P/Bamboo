@@ -613,6 +613,90 @@ mod tests {
     }
 
     #[test]
+    fn the_exported_clay_pool_writes_its_ground() {
+        // 用导出数据里**真实的** `clay_pool_with_dripleaves` 配置跑一遍：
+        // 它的 `replaceable` 是 `#minecraft:lush_ground_replaceable`、`depth` 是 3、
+        // `extra_bottom_block_chance` 是 0.8、`vegetation_feature` 是
+        // `minecraft:dripleaf`（`simple_random_selector` 包着 `small_dripleaf` 和
+        // `big_dripleaf` 的 `block_column`）。
+        //
+        // 野外这个 placed feature 几乎不触发（`environment_scan` 的落点在地表附近，
+        // `BiomeFilter` 按 `BiomeManager` 的平滑群系判定为 `jungle` 而不是
+        // `lush_caves`），所以这里直接调 `place` 拿证据。
+        //
+        // Run the **exported** `clay_pool_with_dripleaves` config once. Its `replaceable`
+        // is `#minecraft:lush_ground_replaceable`, depth 3,
+        // `extra_bottom_block_chance` 0.8, and the vegetation is `minecraft:dripleaf`
+        // (a `simple_random_selector` over `small_dripleaf` and a `big_dripleaf`
+        // `block_column`). In the wild the feature almost never fires — the scan lands
+        // near the surface where `BiomeManager` resolves to `jungle` — so this calls
+        // `place` directly to get evidence.
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        let config = root["feature"]["minecraft:clay_pool_with_dripleaves"].clone();
+        let patch =
+            VegetationPatch::parse("minecraft:waterlogged_vegetation_patch", &config).unwrap();
+        assert!(patch.waterlogged);
+
+        let input = flat_world();
+        let mut world = FeatureWorld::new(&input, 63, 0).unwrap();
+        let registry = Registry::parse(root.as_object().unwrap()).unwrap();
+        let mut biome_at = |_: i32, _: i32, _: i32| 0_u32;
+        let mut env = PlacementEnv {
+            generation: crate::feature::provider::WorldGenerationContext {
+                min_y: -64,
+                height: 384,
+                sea_level: 63,
+            },
+            biome_at: &mut biome_at,
+            registry: &registry,
+            top_feature: None,
+            region_random: &WorldgenRandom::new(
+                crate::random::Algorithm::Xoroshiro.new_instance(1),
+            ),
+        };
+        let random = WorldgenRandom::new(crate::random::Algorithm::Xoroshiro.new_instance(7));
+
+        let outcome = patch.place(&registry, &mut world, &mut env, &random, (0, -63, 0));
+        assert!(
+            outcome.supported,
+            "every branch of the exported config is ported"
+        );
+
+        // `depth = 3` 会沿 UP 铺三层：y = -64、-63、-62。`lush_ground_replaceable`
+        // 含石头，所以这三层都可能被换成黏土。
+        // `depth = 3` lays three layers upward (y = -64, -63, -62); stone is in
+        // `lush_ground_replaceable`, so all three can become clay.
+        let clay = mc_bamboo_data::block_by_name("minecraft:clay")
+            .unwrap()
+            .default_state;
+        let mut clay_cells = 0;
+        let mut water_cells = 0;
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in -64..-61 {
+                    let state = world.get_block(x, y, z);
+                    if state == clay {
+                        clay_cells += 1;
+                    } else if state == mc_bamboo_data::blocks::WATER {
+                        water_cells += 1;
+                    }
+                }
+            }
+        }
+        assert!(clay_cells > 0, "the exported config must lay clay");
+        // **不断言一定有水**：这条测试用的平坦世界里，每一列的水平邻居都是空气，
+        // `isExposed` 会把所有地表都判成暴露，`fill_water` 自然不会换任何格子。
+        // 「不暴露的格子变成水」由 `waterlogged_patch_lays_ground_and_turns_deep_cells_into_water`
+        // 覆盖（那里的 patch 半径更大，有内部列）。
+        //
+        // **No water assertion**: in this flat world every column has air neighbours, so
+        // `isExposed` marks every surface cell as exposed and `fill_water` replaces
+        // nothing. The "unexposed cells become water" path is covered by
+        // `waterlogged_patch_lays_ground_and_turns_deep_cells_into_water`.
+        let _ = water_cells;
+    }
+
+    #[test]
     fn waterlogged_variant_is_flagged() {
         let config = serde_json::json!({
             "depth": 3,
