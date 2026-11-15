@@ -313,9 +313,9 @@ impl MultifaceGrowthFeature {
             directions.push("down");
         }
         if self.can_place_on_wall {
-            // `Direction.Plane.HORIZONTAL`：NORTH, SOUTH, WEST, EAST。
-            // `Direction.Plane.HORIZONTAL`: NORTH, SOUTH, WEST, EAST.
-            directions.extend(["north", "south", "west", "east"]);
+            // `Direction.Plane.HORIZONTAL` 的顺序是 NORTH, EAST, SOUTH, WEST。
+            // `Direction.Plane.HORIZONTAL` is ordered NORTH, EAST, SOUTH, WEST.
+            directions.extend(["north", "east", "south", "west"]);
         }
         directions
     }
