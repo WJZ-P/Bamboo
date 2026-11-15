@@ -1897,11 +1897,47 @@ fn run_place_piece(mut command: Command, work_dir: &Path) -> Result<(), String> 
 /// `waterpiece` mode: `placeInWorld` with `APPLY_WATERLOGGING` and a fluid model against
 /// `jigsaw::place::place_piece`, comparing every write's full state (properties included).
 fn run_water_piece(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    use mc_bamboo_worldgen::structure::jigsaw::place::state_id_of;
+    use mc_bamboo_worldgen::structure::processor::BlockStateSpec;
     let names = water_piece_templates();
     let mut queries = Vec::new();
     for (name, template) in &names {
         let (sx, sy, sz) = template.size;
         let span = sx.max(sz) + 2;
+        // 每层都铺水：模板里可含水的方块可能在任何高度（`ancient_city` 的蜡烛在 y=4~5），
+        // 只铺脚下一层够不到。层数受模板高度限制，体积 = (2span+1)^2 * (sy+1)，所以只对
+        // 小模板这么干，免得水位表大到把 Java 的 StringBuilder 撑爆。
+        // Fill every layer: waterloggable blocks can sit at any height (ancient city candles
+        // are at y=4..5), so a single layer under the template misses them. Volume is
+        // (2*span+1)^2 * (sy+1), so this only applies to small templates to keep the fluid
+        // table from blowing up the Java side.
+        // 精确铺水：只给「模板里含可含水方块的那个格子」及其下方一层放水。这样
+        // 无论模板多大，条目数都不超过方块数 × 2，且一定覆盖蜡烛/营火/台阶。
+        // Precise fill: drop water exactly where the template has a waterloggable block
+        // (and one block below). The entry count stays proportional to the block count no
+        // matter how big the template is, and always covers candles / campfires / slabs.
+        let mut targets: Vec<(i32, i32, i32)> = Vec::new();
+        for block in &template.blocks {
+            let entry = &template.palettes[0][block.state];
+            let Ok(state) = state_id_of(&BlockStateSpec {
+                name: entry.name.clone(),
+                properties: entry.properties.clone(),
+            }) else {
+                continue;
+            };
+            if mc_bamboo_worldgen::structure::state_transform::property_of(state, "waterlogged")
+                .is_none()
+            {
+                continue;
+            }
+            // 模板本地坐标；piece 在 (0,-1,0)，所以世界坐标 = 本地 + (0,-1,0)。
+            // Template-local coordinates; the piece sits at (0,-1,0), so world = local - 1
+            // in y.
+            targets.push(block.pos);
+        }
+        if targets.is_empty() {
+            continue;
+        }
         // 只跑 NONE 镜像 + NONE 旋转，外加 FRONT_BACK 镜像 + CLOCKWISE_90 旋转：
         // 前者覆盖最直接的路径，后者覆盖镜像与旋转叠加。
         // Only NONE/NONE plus FRONT_BACK/CLOCKWISE_90: the plain path and the one where a
@@ -1909,21 +1945,18 @@ fn run_water_piece(mut command: Command, work_dir: &Path) -> Result<(), String> 
         for (mirror, rotation) in [(0_u32, 0_u32), (2, 1)] {
             for variant in 0_u32..3 {
                 let bb = (-span, -2, -span, span, sy + 3, span);
-                // 三种水位：源水、流动水、岩浆。水位只铺模板脚下一层（y = -1），
-                // 足够让每个落在该层的可含水方块都触发 `placeLiquid`。
-                // Three fluid variants: source water, flowing water, lava. The fluid is
-                // only the layer just under the template (y = -1), enough to trigger
-                // `placeLiquid` for every waterloggable block landing on it.
+                // 三种水位：源水、流动水、岩浆。
+                // Three fluid variants: source water, flowing water, lava.
                 let fluid = match variant {
                     0 => "water",
                     1 => "flowing_water",
                     _ => "lava",
                 };
                 let mut entries = Vec::new();
-                for x in -span..=span {
-                    for z in -span..=span {
-                        entries.push(format!("{fluid}:{x},-1,{z}"));
-                    }
+                for &(x, y, z) in &targets {
+                    // `place_piece` 的 piece 位置是 (0,-1,0)，所以模板本地 y 落在世界 y-1。
+                    // The piece sits at (0,-1,0), so template-local y lands on world y-1.
+                    entries.push(format!("{fluid}:{x},{},{}", y - 1, z));
                 }
                 queries.push(format!(
                     "{name}|0|-1|0|{mirror}|{rotation}|{}|{}|{}|{}|{}|{}|{}",
@@ -1982,17 +2015,19 @@ fn water_piece_templates() -> Vec<(String, StructureTemplate)> {
         candidates.push((name, template));
     }
 
-    // 一个模板里的可含水方块属于哪几类。
-    // Which kinds of waterloggable block a template contains.
-    let kinds_of = |template: &StructureTemplate| -> (bool, bool, bool, bool) {
+    // 一个模板里的可含水方块属于哪几类：台阶 / 蜡烛 / 营火 / 其他 / **含 lit 的火方块**。
+    // Which kinds of waterloggable block a template contains: slab, candle, campfire,
+    // other, and **a fire block that is lit**.
+    let kinds_of = |template: &StructureTemplate| -> (bool, bool, bool, bool, bool) {
         if template.blocks.is_empty() {
-            return (false, false, false, false);
+            return (false, false, false, false, false);
         }
         let palette = &template.palettes[0];
         let mut slab = false;
         let mut candle = false;
         let mut campfire = false;
         let mut other = false;
+        let mut lit_fire = false;
         for entry in palette {
             let Ok(state) = state_id_of(&BlockStateSpec {
                 name: entry.name.clone(),
@@ -2004,6 +2039,15 @@ fn water_piece_templates() -> Vec<(String, StructureTemplate)> {
                 .is_none()
             {
                 continue;
+            }
+            let is_fire = entry.name.ends_with("_candle")
+                || entry.name == "minecraft:campfire"
+                || entry.name == "minecraft:soul_campfire";
+            if is_fire
+                && mc_bamboo_worldgen::structure::state_transform::property_of(state, "lit")
+                    == Some("true")
+            {
+                lit_fire = true;
             }
             match entry.name.as_str() {
                 // 台阶的判据就是 `type` 属性（26.3 里只有台阶用它）。
@@ -2018,12 +2062,15 @@ fn water_piece_templates() -> Vec<(String, StructureTemplate)> {
                 _ => other = true,
             }
         }
-        (slab, candle, campfire, other)
+        (slab, candle, campfire, other, lit_fire)
     };
 
-    // 每一类取前 6 个，避免只用一类模板。`other` 放最后，且不占前面三类的名额。
-    // Six per kind so no single kind dominates; `other` comes last and never blocks the
-    // first three.
+    // 第一类取台阶、第二类取营火、第三类取**含 lit=true 火方块**的（这是 `lit` 清位唯一
+    // 能被真实模板触发的地方：`ancient_city/barracks` 与 `trial_chambers/ominous_vault`
+    // 里的蜡烛就是 lit），第四类补其他可含水方块。
+    // Kinds: slabs, campfires, templates with a **lit** fire block (the only real templates
+    // where the `lit` clearing branch is reachable — the candles in `ancient_city/barracks`
+    // and `trial_chambers/ominous_vault` are lit), then other waterloggable blocks.
     let mut picked: Vec<(String, StructureTemplate)> = Vec::new();
     let mut picked_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for wanted in 0..4 {
@@ -2040,10 +2087,10 @@ fn water_piece_templates() -> Vec<(String, StructureTemplate)> {
             let hit = match wanted {
                 0 => kinds.0,
                 1 => kinds.1,
-                2 => kinds.2,
-                // `other` 只要「有可含水方块但不属于前三类」。
-                // `other`: waterloggable but not one of the first three kinds.
-                _ => kinds.3 && !kinds.0 && !kinds.1 && !kinds.2,
+                2 => kinds.4,
+                // 其他可含水方块，且不属于前三类。
+                // Waterloggable but none of the first three kinds.
+                _ => kinds.3 && !kinds.0 && !kinds.1 && !kinds.4,
             };
             if hit {
                 picked.push((name.clone(), template.clone()));
