@@ -554,6 +554,22 @@ WebView2 的渲染进程不算在内。
   * 对拍口径说明：`structure-place` 只比**非空气**方块。`ProtoChunk` 的
     `PalettedContainer` 按 `state.isAir()` 判定，`cave_air` / `void_air` 在空 section 里
     不会真的落盘，读回来就是 `air`；结构件写空气只为挖空，变体没有意义。
+  * **海底神殿已对拍到 0 不一致**（分支 `cb-wg-monument`）：`ocean_monument_place`
+    （`MonumentBuilding.postProcess` 的水体 / 两翼 / 门廊 / 三层外墙 / 屋顶 / 7×7 柱子）、
+    `monument_rooms` 与 `monument_double_rooms`（入口、核心、五种双房间、两种简单房间、
+    两翼、阁楼）。`MonumentLayout` 保留房间图，生成与读回共用同一个构造器。
+    `structure-place --feature-types ocean_monument` 3 种子 × 3 区块 × 3 填充 = 36 查询、
+    4,823,136 个方块 **0 不一致**；写半径放到 2 以覆盖神殿的 4×4 区块跨度。
+    远古守卫者不建实体（它的取数在 `level.getRandom()` 上，不消耗 `postProcess` 的
+    `random`），只保留位置判定。
+  * **林地府邸模板放置已移植，剩 1 处已知差异**：`structure::template_place` 是
+    `StructureTemplate.placeInWorld` + `processBlockInfos`，`template_shape_update` 是末尾的
+    `updateShapeAtEdge` + `updateFromNeighbourShapes`，`woodland_mansion::place_piece` 是
+    `TemplateStructurePiece.postProcess` + `handleDataMarker` 的箱子分支。
+    `structure-place --feature-types woodland_mansion` 36 查询、6318 结构件、
+    **3 处不一致**（种子 42 的 `1x2_a1` 一个 `ChestSouth` 数据标记）。
+    `after_place`（往下填圆石）已移植但没接进对拍。`state_transform` 顺手补齐了楼梯 /
+    柱状方块 / 墙 / 藤蔓 / 栅栏门 / 箱子等方块的 mirror / rotate。
   已知限制：以上全是纯函数 + oracle，**放置一律没接进 Director**，游戏里还没有结构；
   布局函数里恶地的 `surfaceHeight` / 府邸的 `startY` 在对拍中仍作为外部输入喂入
   （前置判定模块已用 `Generator` 的高度原语算出并喂给布局）；jigsaw 与其余旧式结构的

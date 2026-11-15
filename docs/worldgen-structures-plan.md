@@ -298,6 +298,74 @@ Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_heigh
   `state.isAir()` 判定，`cave_air` / `void_air` 写进空 section 不会真的落盘，读回来是
   `air`；结构件写空气只为挖空。**当前状态**：矿井 354 处不一致（栅栏朝向、铁轨走向、
   少量缺位），要塞全量跑不通（Java 侧某 seed/chunk 抛异常，单条正常）。
+
+**海底神殿放置（2026-11-14，分支 `cb-wg-monument`，已验证 0 不一致）**：
+
+* `structure::pieces::ocean_monument`：`MonumentLayout` 保留房间图（`rooms`）、
+  `MonumentBuilding` 盒子和 `childPieces`（每项带 `room` index、`mainDesign`、
+  `wingDesign`）；`monument_layout` 是生成与读回（`regeneratePiecesAfterLoad`）共用的
+  构造器，`pieces()` 交出存档 / 对拍用的结构件列表（第 0 项是 `OMB`）。
+  `RoomDef` / `RoomKind` / `MonumentChild` 对外公开，放置阶段要读 `connections` /
+  `hasOpening`。
+* `structure::pieces::ocean_monument_place`：`MonumentBuilding.postProcess`（水体、
+  两翼、门廊拱与墙、屋顶、下 / 中 / 上三层外墙、7×7 柱子与 `fillColumnDown`、四圈
+  `water_box`）以及 `place_in_chunk`（先放顶层，再按 `childPieces` 顺序放与 `chunkBB`
+  相交的子件）。
+* `structure::pieces::monument_rooms` / `monument_double_rooms`：入口、核心、五种双
+  房间、两种简单房间、两翼、阁楼的 `postProcess`。`generateWaterBox` 的
+  `FILL_KEEP`（冰 / 浮冰 / 蓝冰 / 水）与 `getWorldY(y) >= seaLevel && block != WATER`
+  分支照抄；`generateBoxOnFillOnly` 只在 `WATER` 上落块；海绵房间的
+  `nextInt(3)` / `nextInt(4)` 逐格照取；简单房间的 `centerPillar` 只在
+  `mainDesign != 0` 时取一次 `nextBoolean()`（短路与）。
+* 远古守卫者：`spawnElder` 只保留 `chunkBB.isInside(pos)` 的位置判定，实体不建。它的
+  随机取数全在 `level.getRandom()`（`WorldGenRegion` 的位置随机源）上，不消耗
+  `postProcess` 的 `random`，也不写方块。
+* 对拍：`structure-place --feature-types ocean_monument`，3 种子 × 3 区块 × 3 填充 =
+  36 个查询、36 个结构件、4,823,136 个方块，**0 不一致**。写半径与遍历半径都放到 2
+  （`SIDE`，Java / Rust 两侧同值），因为神殿横跨 4×4 区块；把 `generateWaterBox` 的
+  `block != WATER` 改成 `==` 会立刻报 96 处不一致，还原回 0。
+* **没做的**：实体（远古守卫者）本身不比；箱子 / 战利品表不涉及。
+
+**林地府邸模板放置（2026-11-14，分支 `cb-wg-monument`，已写，剩 1 处已知差异）**：
+
+* `structure::template_place`：`StructureTemplate.placeInWorld` +
+  `processBlockInfos` 的移植。`PlaceSettings` 只有本轮要用的 rotation / mirror /
+  `BlockIgnoreProcessor.STRUCTURE_BLOCK`；`transform_pos` 是官方的
+  `StructureTemplate.transform(pos, mirror, rotation, ZERO)`；`blocks_in_chunk` 先按
+  `getRandomPalette`（`Mth.getSeed(position)`，不消耗世界随机源）选 palette，再逐块
+  算世界坐标、过 `chunkBB.isInside`、丢 `structure_block`；`place_blocks` 逐块
+  `mirror` → `rotate` → `setBlock`。
+  **`getBlockEntity` 在 `ProtoChunk` 上返回 null**（方块实体 NBT 进
+  `pendingBlockEntities`，那张表是另一个），所以官方模板放置里
+  `LootTableSeed` 的 `nextLong()` **一次都不取**，这里也不取。
+* `structure::template_shape_update`：`placeInWorld` 末尾的两步形状更新
+  （`updateShapeAtEdge` + `Block.updateFromNeighbourShapes`）。`PieceLevel` 包成
+  `mc_bamboo_blocks::Level`，方块行为直接复用 `mc-bamboo-blocks` 的 `update_shape`。
+* `structure::pieces::woodland_mansion::place_piece`：`TemplateStructurePiece.postProcess`
+  的编排——`blocks_in_chunk` → `place_blocks` → `update_shapes` → 数据标记
+  （`handleDataMarker` 的箱子分支：`ChestWest/East/South/North` 按
+  `placeSettings.rotation` 旋转 `facing`，写 `CHEST` 并取一次 `nextLong()`；已经是
+  `CHEST` 的格子整段跳过）。**`Mi` / `Rot` 必须从存档 extras 读**，不能用
+  `Piece.mirror`：`WoodlandMansionPiece` 把 mirror 放在 `placeSettings` 里，
+  `getMirror()` 仍返回 `setOrientation(NORTH)` 的 `NONE`。
+  `after_place`（`WoodlandMansionStructure.afterPlace` 的往下填圆石）已移植，**没有**
+  接进对拍（Java 侧的假世界只跑 `StructurePiece.postProcess`，不调
+  `StructureStart.afterPlace`）。
+* `structure::state_transform` 扩充：楼梯（`StairBlock` 的 mirror 按 `facing` 落在
+  哪个轴分支 + `shape` 重写，rotate 只转 `facing`）、`RotatedPillarBlock`（90° 时
+  X/Z 轴互换）、`WallBlock` 与 `VineBlock` 的四面映射（和 `CrossCollisionBlock`
+  的 90° 方向相反）、`FenceGateBlock`（只转 `facing`，不是四面交换）、
+  箱子 / 熔炉 / 发射器 / 木桶 / 拉杆 / 梯子等只转 `facing` 的方块。
+* 对拍：`structure-place --feature-types woodland_mansion`，3 种子 × 3 区块 × 3 填充 =
+  36 个查询、6318 个结构件、**3 处不一致**（种子 42 的同一个 `chest`，见下）。
+* **已知差异（1 处）**：种子 42 的 `1x2_a1` 结构件（`Mi=LEFT_RIGHT`,
+  `Rot=COUNTERCLOCKWISE_90`）在 (35, 64, 12) 有一个 `ChestSouth` 数据标记。那个位置
+  本来放的是模板里的 `structure_block`（被 `BlockIgnoreProcessor.STRUCTURE_BLOCK`
+  丢弃），官方 `createChest` 于是写入 `CHEST`；Java 对拍里没有这个方块，Rust 写了。
+  两边结构件清单逐字节相同，`1x2_a1` 在 (35,64,12) 之前的方块也都一致；差异只在这一
+  格。尚未查清原因（可能是 Java 侧 `filterBlocks` 的 `boundingBox` 与 `chunkBB` 在
+  该模板上的交互），列入汇报疑点。
+
 * **没接进 Director**：这些代码只被 oracle 调用，游戏里仍然没有结构。
 
 ## 1. 官方 26.3 的结构生成全景
