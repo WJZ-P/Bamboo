@@ -246,7 +246,8 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
         for dx in -1..=1 {
             let at = (q.cx + dx, q.cz + dz);
             let chunk_bb = chunk_box(at);
-            let random = pieces::make_random(q.seed ^ 0x5DEECE66D, at.0, at.1);
+            let seed_for_chunk = q.seed ^ 0x5DEECE66D;
+            let mut random = pieces::make_random(seed_for_chunk, at.0, at.1);
             for (i, piece) in layout.iter().enumerate() {
                 // `StructureStart.placeInChunk` 只调与本区块盒相交的结构件。
                 // `StructureStart.placeInChunk` only runs pieces intersecting the chunk box.
@@ -260,11 +261,14 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
                 )?
                 .is_some()
                 {
-                    // 命中 1% 矿车箱子：Java 侧同一位置截断，这条结构件在这里结束。
-                    // Hit the 1% minecart chest: Java truncates at the same point, ending
-                    // this piece here.
+                    // 命中 1% 矿车箱子：Java 侧捕获 NPE、重播随机源、**继续下一条结构件**。
+                    // 这里必须同样继续，不能 `break`，否则整块后续结构件都不放了。
+                    // Hit the 1% minecart chest: Java catches the NPE, reseeds the random
+                    // and moves on to the next piece. Must continue here too; breaking
+                    // would drop every remaining piece of the chunk.
                     writes.push((at.0, at.1, level.written.len() - before));
-                    break;
+                    random = pieces::make_random(seed_for_chunk, at.0, at.1);
+                    continue;
                 }
                 writes.push((at.0, at.1, level.written.len() - before));
             }
