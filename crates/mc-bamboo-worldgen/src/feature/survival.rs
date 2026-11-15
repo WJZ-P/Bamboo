@@ -60,6 +60,14 @@ enum Kind {
     ///
     /// Pale moss carpet: the block below is not air (`BASE`), or the same block with `BASE`.
     MossyCarpet,
+    /// `SmallDripleafBlock.mayPlaceOn`：下面在 `supports_small_dripleaf` 里，或本格流体
+    /// 是水源且下面在 `supports_vegetation` 里（下半格）。上半格走 `DoublePlantBlock`。
+    SmallDripleaf,
+    /// `BigDripleafBlock.canSurvive`：下面同类、大垂滴叶茎，或 `supports_big_dripleaf`。
+    BigDripleaf,
+    /// `BigDripleafStemBlock.canSurvive`：下面同类或 `supports_big_dripleaf`，
+    /// **并且**上面同类或 `big_dripleaf`。
+    BigDripleafStem,
     /// 悬挂的红树胎生苗：上面那格在 `supports_hanging_mangrove_propagule` 标签里。
     ///
     /// A hanging mangrove propagule: the block above is in the
@@ -102,6 +110,9 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         // `CarpetBlock.canSurvive` is `!level.isEmptyBlock(pos.below())`.
         Some(Kind::Carpet) => !is_air_block(below),
         Some(Kind::Mushroom) => mushroom_can_survive(world, pos),
+        Some(Kind::SmallDripleaf) => small_dripleaf_can_survive(state, world, pos),
+        Some(Kind::BigDripleaf) => big_dripleaf_can_survive(world, pos),
+        Some(Kind::BigDripleafStem) => big_dripleaf_stem_can_survive(world, pos),
         // `MossyCarpetBlock.canSurvive`：`BASE` 时下面非空气；否则下面同类且 `BASE`。
         // `MossyCarpetBlock.canSurvive`: with `BASE` the block below is not air; otherwise
         // the block below is the same block carrying `BASE`.
@@ -323,6 +334,57 @@ fn is_base_mossy_carpet(state: u32) -> bool {
     with_property(state, "bottom", "true") == Some(state)
 }
 
+/// `SmallDripleafBlock.canSurvive`：上半格走 `DoublePlantBlock`（下面是同类下半格）；
+/// 下半格走 `mayPlaceOn` —— 下面在 `supports_small_dripleaf` 里，或者本格上方是水源
+/// 且下面在 `supports_vegetation` 里。
+///
+/// `SmallDripleafBlock.canSurvive`: the upper half uses `DoublePlantBlock` (the matching
+/// lower half below); the lower half uses `mayPlaceOn` — the block below is in
+/// `supports_small_dripleaf`, or the fluid above this cell is a water source and the block
+/// below is in `supports_vegetation`.
+fn small_dripleaf_can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    if with_property(state, "half", "upper").is_some_and(|upper| upper == state) {
+        let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+        return is_block(below, "minecraft:small_dripleaf")
+            && with_property(below, "half", "lower").is_some_and(|lower| lower == below);
+    }
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    if in_block_tag(below, "minecraft:supports_small_dripleaf") {
+        return true;
+    }
+    let above_fluid = state_fluid(world.get_block(pos.0, pos.1 + 1, pos.2));
+    above_fluid.source
+        && registries::fluid::WATER == above_fluid.fluid
+        && in_block_tag(below, "minecraft:supports_vegetation")
+}
+
+/// `BigDripleafBlock.canSurvive`：下面同类、`big_dripleaf_stem`，或
+/// `supports_big_dripleaf`。
+///
+/// `BigDripleafBlock.canSurvive`: the block below is the same block, a `big_dripleaf_stem`,
+/// or in `supports_big_dripleaf`.
+fn big_dripleaf_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    is_block(below, "minecraft:big_dripleaf")
+        || is_block(below, "minecraft:big_dripleaf_stem")
+        || in_block_tag(below, "minecraft:supports_big_dripleaf")
+}
+
+/// `BigDripleafStemBlock.canSurvive`：下面同类或 `supports_big_dripleaf`，
+/// **并且**上面同类或 `big_dripleaf`。
+///
+/// `BigDripleafStemBlock.canSurvive`: the block below is the same block or in
+/// `supports_big_dripleaf`, **and** the block above is the same block or `big_dripleaf`.
+fn big_dripleaf_stem_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    let above = world.get_block(pos.0, pos.1 + 1, pos.2);
+    let below_ok = is_block(below, "minecraft:big_dripleaf_stem")
+        || in_block_tag(below, "minecraft:supports_big_dripleaf");
+    let above_ok =
+        is_block(above, "minecraft:big_dripleaf_stem") || is_block(above, "minecraft:big_dripleaf");
+    below_ok && above_ok
+}
+
 /// 是否走 `DoublePlantBlock.placeAt`（放上下两格）而不是单格 `setBlock`。
 /// `TallSeagrassBlock` 也继承 `DoublePlantBlock`，官方用的是 `instanceof`。
 ///
@@ -400,6 +462,9 @@ fn classify(state: u32) -> Option<Kind> {
         BlockClass::CarpetBlock => Kind::Carpet,
         BlockClass::MushroomBlock => Kind::Mushroom,
         BlockClass::MossyCarpetBlock => Kind::MossyCarpet,
+        BlockClass::SmallDripleafBlock => Kind::SmallDripleaf,
+        BlockClass::BigDripleafBlock => Kind::BigDripleaf,
+        BlockClass::BigDripleafStemBlock => Kind::BigDripleafStem,
         // 苔藓地毯等仍覆写了 canSurvive/mayPlaceOn，本轮明确不支持。
         // Mossy carpet still overrides canSurvive/mayPlaceOn: unported.
         _ => return None,

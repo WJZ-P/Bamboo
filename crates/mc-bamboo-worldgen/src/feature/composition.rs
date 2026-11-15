@@ -225,7 +225,7 @@ fn place_feature<'a>(
     // implementing `HashMap` treeification, a documented limit.
     // `waterlogged_vegetation_patch` (`clay_pool_with_dripleaves`) has **no comparison at
     // all**, so it stays unsupported.
-    if kind == "minecraft:vegetation_patch" {
+    if kind == "minecraft:vegetation_patch" || kind == "minecraft:waterlogged_vegetation_patch" {
         let Some(patch) = super::vegetation_patch::VegetationPatch::parse(kind, config) else {
             return PlaceOutcome::unsupported();
         };

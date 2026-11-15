@@ -330,7 +330,7 @@ mod tests {
         // A would_survive with an unported survival check (big dripleaf needs a shape check)
         // stays unsupported.
         let would: Value =
-            json!({"type": "minecraft:would_survive", "state": "minecraft:big_dripleaf"});
+            json!({"type": "minecraft:would_survive", "state": "minecraft:chorus_flower"});
         assert!(!BlockPredicate::parse(&would).is_supported());
         // all_of 里夹一个未移植的，整体也要 unsupported。
         // An unported child makes the whole all_of unsupported.
@@ -338,7 +338,7 @@ mod tests {
             "type": "minecraft:all_of",
             "predicates": [
                 {"type": "minecraft:matching_block_tag", "tag": "minecraft:air"},
-                {"type": "minecraft:would_survive", "state": "minecraft:big_dripleaf"},
+                {"type": "minecraft:would_survive", "state": "minecraft:chorus_flower"},
             ],
         });
         assert!(!BlockPredicate::parse(&all).is_supported());
