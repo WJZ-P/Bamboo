@@ -734,10 +734,6 @@ fn compare_processors(stdout: &str) -> Result<(), String> {
         let list = lists
             .get(id)
             .ok_or_else(|| format!("Rust missing processor list {id}"))?;
-        // `DIRECT_CODEC` 是 `LIST_OBJECT_CODEC.fieldOf("processors")`，所以在 NBT 里是
-        // 一个 `{processors: [...]}` 复合。
-        // `DIRECT_CODEC` is `LIST_OBJECT_CODEC.fieldOf("processors")`, so the NBT value is
-        // a `{processors: [...]}` compound.
         let got = canonical_tag(&Tag::Compound(vec![(
             "processors".to_owned(),
             Tag::List(

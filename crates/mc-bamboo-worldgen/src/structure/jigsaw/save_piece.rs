@@ -203,18 +203,22 @@ fn junctions_tag(junctions: &[Junction]) -> Tag {
 }
 
 /// `StructureProcessorType.LIST_CODEC` 在 NBT 里的形状：注册名写字符串，内联列表写成
-/// processor 对象数组。
+/// `{processors: [...]}` 复合（`DIRECT_CODEC` 的 `fieldOf("processors")` 形式）。
 ///
 /// The NBT shape of `StructureProcessorType.LIST_CODEC`: a registry name as a string, an
-/// inline list as an array of processor objects.
+/// inline list as a `{processors: [...]}` compound (the `DIRECT_CODEC` form with
+/// `fieldOf("processors")`).
 fn processor_ref_tag(reference: &ProcessorListRef) -> Result<Tag, String> {
     match reference {
         ProcessorListRef::Named(name) => Ok(Tag::String(name.clone())),
-        ProcessorListRef::Inline(list) => Ok(Tag::List(
-            list.iter()
-                .map(|processor| processor.to_tag())
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
+        ProcessorListRef::Inline(list) => Ok(Tag::Compound(vec![(
+            "processors".to_owned(),
+            Tag::List(
+                list.iter()
+                    .map(|processor| processor.to_tag())
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        )])),
     }
 }
 
@@ -494,10 +498,12 @@ mod tests {
             fields[0].1,
             Tag::String("minecraft:single_pool_element".to_owned())
         );
-        // 内联 processor 列表直接写成列表（`LIST_OBJECT_CODEC` 的裸数组形式）。
-        // An inline processor list is written directly as a list (the bare-array form of
-        // `LIST_OBJECT_CODEC`).
-        assert_eq!(fields[3].1, Tag::List(Vec::new()));
+        // 内联 processor 列表是 `{processors: [...]}` 复合（`DIRECT_CODEC` 的形式）。
+        // An inline processor list is a `{processors: [...]}` compound (the `DIRECT_CODEC` form).
+        assert_eq!(
+            fields[3].1,
+            Tag::Compound(vec![("processors".to_owned(), Tag::List(Vec::new()))])
+        );
     }
 
     #[test]
