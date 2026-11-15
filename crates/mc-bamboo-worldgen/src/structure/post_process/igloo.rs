@@ -77,6 +77,10 @@ pub struct IglooOutcome {
     ///
     /// The trapdoor position capped with snow, if any.
     pub snow: Option<(i32, i32, i32)>,
+    /// `handleDataMarker` 写下的方块（`chest` 标记换成空气）。
+    ///
+    /// The blocks written by `handleDataMarker` (a `chest` marker becomes air).
+    pub marker_writes: Vec<(i32, i32, i32, u32)>,
 }
 
 /// `IglooPieces.IglooPiece.makeSettings(rotation, templateLocation)`。
@@ -145,6 +149,19 @@ pub fn igloo(
     let placement =
         template_piece_post_process(world, &template, corrected, &settings, chunk_bb, record);
 
+    let mut marker_writes = Vec::new();
+    for (metadata, pos) in &placement.markers {
+        // `IglooPiece.handleDataMarker`：`chest` 标记把标记格换成空气，战利品表写进
+        // 下面那格的箱子（`random.nextLong()` 只影响战利品，见 README 已知限制）。
+        // `IglooPiece.handleDataMarker`: a `chest` marker turns the marker cell into air and
+        // puts the loot table on the chest below (`random.nextLong()` only affects loot,
+        // see the README limitations).
+        if metadata == "chest" {
+            world.set_block_with_heightmaps(pos.0, pos.1, pos.2, mc_bamboo_data::blocks::AIR);
+            marker_writes.push((pos.0, pos.1, pos.2, mc_bamboo_data::blocks::AIR));
+        }
+    }
+
     let mut snow = None;
     if template_name == IGLOO.template {
         let offset = settings.relative((3, 0, 5));
@@ -170,7 +187,15 @@ pub fn igloo(
         placement,
         corrected_position: corrected,
         snow,
+        marker_writes,
     })
+}
+
+/// `IglooPiece.handleDataMarker` 写下的方块（`chest` 标记换成空气）。
+///
+/// The blocks `IglooPiece.handleDataMarker` writes (a `chest` marker becomes air).
+pub fn marker_blocks(outcome: &IglooOutcome) -> Vec<(i32, i32, i32, u32)> {
+    outcome.marker_writes.clone()
 }
 
 /// 读结构件 extras 里的整数字段。

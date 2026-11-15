@@ -473,20 +473,8 @@ pub fn template_piece_post_process(
     let mut markers = Vec::new();
     let mut jigsaw_writes = Vec::new();
     if placed.is_some() {
-        for (pos, entry) in filter_blocks(
-            template,
-            template_position,
-            &settings,
-            "minecraft:structure_block",
-        ) {
-            let Some(entry) = entry else { continue };
-            let Some(metadata) = string_field(entry, "metadata") else {
-                continue;
-            };
-            let mode = string_field(entry, "mode").unwrap_or_default();
-            if mode == "data" {
-                markers.push((metadata, pos));
-            }
+        for (metadata, pos) in data_markers(template, template_position, &settings) {
+            markers.push((metadata, pos));
         }
         for (pos, entry) in
             filter_blocks(template, template_position, &settings, "minecraft:jigsaw")
@@ -508,6 +496,33 @@ pub fn template_piece_post_process(
         bounding_box,
         template_position,
     }
+}
+
+/// `TemplateStructurePiece.postProcess` 里数据标记的方块效果。
+///
+/// 官方在 `placeInWorld` 成功之后遍历 `filterBlocks(STRUCTURE_BLOCK)`，对
+/// `mode == data` 的标记调 `handleDataMarker`。这里把标记位置和 metadata 交回调用方，
+/// 由各结构决定写什么方块。
+///
+/// The block effects of data markers inside `TemplateStructurePiece.postProcess`. After a
+/// successful `placeInWorld` vanilla walks `filterBlocks(STRUCTURE_BLOCK)` and, for
+/// markers with `mode == data`, calls `handleDataMarker`. The marker positions and
+/// metadata are handed back here so each structure decides what to write.
+pub fn data_markers(
+    template: &StructureTemplate,
+    position: (i32, i32, i32),
+    settings: &PlaceSettings,
+) -> Vec<(String, (i32, i32, i32))> {
+    let mut markers = Vec::new();
+    for (pos, entry) in filter_blocks(template, position, settings, "minecraft:structure_block") {
+        let Some(entry) = entry else { continue };
+        if string_field(entry, "mode").as_deref() != Some("data") {
+            continue;
+        }
+        let metadata = string_field(entry, "metadata").unwrap_or_default();
+        markers.push((metadata, pos));
+    }
+    markers
 }
 
 /// `StructureTemplate.getBoundingBox(settings, position)`：`(0,0,0)` 和 `size - 1` 两个角

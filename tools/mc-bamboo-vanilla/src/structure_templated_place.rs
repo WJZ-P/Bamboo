@@ -245,7 +245,7 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
             if java != rust {
                 mismatch_count += 1;
                 *bad_by_kind.entry(q.kind).or_default() += 1;
-                if failures.len() < 24 {
+                if failures.len() < 4000 {
                     failures.push(format!("[{key}] {pos:?}: java {java:?}, rust {rust:?}"));
                 }
             }
@@ -326,8 +326,10 @@ fn rust_writes(q: &Query) -> Result<BTreeMap<(i32, i32, i32), u32>, String> {
                 let mut writes = outcome
                     .placement
                     .placed
-                    .and_then(|p| p.writes)
+                    .as_ref()
+                    .and_then(|p| p.writes.clone())
                     .unwrap_or_default();
+                writes.extend(igloo::marker_blocks(&outcome));
                 if let Some(snow) = outcome.snow {
                     writes.push((snow.0, snow.1, snow.2, snow_state()));
                 }
