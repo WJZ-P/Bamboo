@@ -161,6 +161,13 @@ impl PoolElement {
                     .iter()
                     .map(Self::parse)
                     .collect::<Result<Vec<_>, _>>()?;
+                // `ListPoolElement` 构造器：`if (elements.isEmpty()) throw new
+                // IllegalArgumentException("Elements are empty")`，所以空列表是解码错误。
+                // `ListPoolElement`'s constructor throws for an empty list, so it is a
+                // decode error rather than an empty element.
+                if elements.is_empty() {
+                    return Err("list_pool_element has an empty elements list".to_owned());
+                }
                 Ok(Self::List {
                     elements,
                     projection: Projection::parse(raw.get("projection"))?,

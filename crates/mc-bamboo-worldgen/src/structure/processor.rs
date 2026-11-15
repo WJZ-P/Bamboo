@@ -86,6 +86,17 @@ pub enum Processor {
 }
 
 impl Processor {
+    /// `StructureProcessor.evaluatesEntirePieceState()`：26.3 只有 `CappedProcessor`
+    /// 返回 true，其余都是基类的 false。返回 true 时 `processBlockInfos` 会关掉
+    /// 「只处理当前区块」的优化。
+    ///
+    /// `StructureProcessor.evaluatesEntirePieceState()`: in 26.3 only `CappedProcessor`
+    /// returns true; the rest keep the default false. When true, `processBlockInfos`
+    /// disables the "current chunk only" optimisation.
+    pub const fn evaluates_entire_piece_state(&self) -> bool {
+        matches!(self, Self::Capped { .. })
+    }
+
     fn parse(raw: &Value) -> Result<Self, String> {
         let kind = raw
             .get("processor_type")

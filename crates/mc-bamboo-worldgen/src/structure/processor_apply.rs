@@ -25,8 +25,9 @@ use mc_bamboo_blocks::LegacyRandom;
 
 use crate::{
     random::{Random, positional_seed},
-    structure::processor::{
-        BlockSetRef, BlockStateSpec, PosRuleTest, Processor, ProcessorRule, RuleTest,
+    structure::{
+        processor::{BlockSetRef, BlockStateSpec, PosRuleTest, Processor, ProcessorRule, RuleTest},
+        start::BoundingBox,
     },
 };
 
@@ -254,8 +255,19 @@ pub fn process_block(
 /// `StructureTemplate.processBlockInfos` 的编排：逐方块跑 processor 链，再跑
 /// `finalizeProcessing`。
 ///
+/// `chunk_bb` 对应官方的 `settings.getBoundingBox()`：
+///
+/// * 只要 processor 链里没有任何一个 `evaluatesEntirePieceState()` 为真（26.3 只有
+///   `CappedProcessor` 会返回 true），且 `chunk_bb` 存在，就**只处理落在 `chunk_bb` 内的
+///   方块**（官方 `processOnlyInCurrentChunk`）。这决定 `processedBlockInfoList` 的长度，
+///   进而决定 `CappedProcessor` 洗牌时用的下标范围，所以必须照做。
+/// * `chunk_bb` 为 `None` 表示不过滤（官方 `settings.getBoundingBox() == null`）。
+///
 /// The `StructureTemplate.processBlockInfos` orchestration: run the processor chain per
-/// block, then `finalizeProcessing`.
+/// block, then `finalizeProcessing`. `chunk_bb` mirrors `settings.getBoundingBox()`: when
+/// no processor evaluates the whole piece state (in 26.3 only `CappedProcessor` does) and
+/// a bounding box is set, only blocks inside it are processed. That governs the length of
+/// `processedBlockInfoList`, hence the index range `CappedProcessor` shuffles over.
 pub fn process_blocks(
     processors: &[Processor],
     blocks: &[ProcessBlock],
@@ -263,10 +275,25 @@ pub fn process_blocks(
     reference_pos: (i32, i32, i32),
     level: &impl ProcessorLevel,
     level_seed: i64,
+    chunk_bb: Option<BoundingBox>,
 ) -> Vec<ProcessBlock> {
+    // 官方先扫一遍 processor 决定是否整件处理。
+    // Vanilla first scans the processors to decide whether to process the whole piece.
+    let process_only_in_current_chunk = processors
+        .iter()
+        .all(|processor| !processor.evaluates_entire_piece_state());
     let mut originals = Vec::new();
     let mut processed = Vec::new();
     for block in blocks {
+        let inside = match (process_only_in_current_chunk, chunk_bb) {
+            (true, Some(bb)) => {
+                bb.contains(block.world_pos.0, block.world_pos.1, block.world_pos.2)
+            }
+            _ => true,
+        };
+        if !inside {
+            continue;
+        }
         let mut current = Some(block.clone());
         for processor in processors {
             let Some(block_now) = current else {
@@ -621,7 +648,15 @@ mod tests {
             block((0, 0, 0), "minecraft:stone"),
             block((1, 0, 0), "minecraft:dirt"),
         ];
-        let out = process_blocks(&processors, &blocks, (0, 64, 0), (0, 64, 0), &level, 0);
+        let out = process_blocks(
+            &processors,
+            &blocks,
+            (0, 64, 0),
+            (0, 64, 0),
+            &level,
+            0,
+            None,
+        );
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].state.name, "minecraft:cobblestone");
         assert_eq!(out[1].state.name, "minecraft:dirt");
@@ -683,6 +718,60 @@ mod tests {
         assert_eq!(out.state.name, "minecraft:stone");
     }
 
+    /// `chunkBB` 只让盒内方块进入处理，除非链里有 `capped`
+    /// （`evaluatesEntirePieceState()` 为 true 会关掉过滤）。
+    ///
+    /// `chunkBB` lets only inside blocks through unless the chain has a `capped`
+    /// (whose `evaluatesEntirePieceState()` turns the filter off).
+    #[test]
+    fn chunk_bb_filters_unless_capped_is_present() {
+        let level = OneState {
+            state: state("minecraft:air"),
+            tag_blocks: Vec::new(),
+        };
+        let blocks = vec![
+            block((0, 0, 0), "minecraft:stone"),
+            block((5, 0, 0), "minecraft:stone"),
+        ];
+        let bb = BoundingBox {
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            max_x: 0,
+            max_y: 0,
+            max_z: 0,
+        };
+        let plain = vec![Processor::ProtectedBlocks {
+            value: BlockSetRef::Blocks(Vec::new()),
+        }];
+        // 没有 capped：只处理盒内那一个。
+        // No `capped`: only the inside block is processed.
+        let out = process_blocks(&plain, &blocks, (0, 0, 0), (0, 0, 0), &level, 0, Some(bb));
+        assert_eq!(out.len(), 1);
+        // `chunk_bb = None` 时不过滤。
+        // `chunk_bb = None` does not filter.
+        let out = process_blocks(&plain, &blocks, (0, 0, 0), (0, 0, 0), &level, 0, None);
+        assert_eq!(out.len(), 2);
+        // 有 capped（limit 0 也够，因为只看 `evaluatesEntirePieceState`）：不过滤。
+        // With a `capped` even at limit 0 (only `evaluatesEntirePieceState` matters): no filter.
+        let with_capped = vec![Processor::Capped {
+            delegate: Box::new(Processor::ProtectedBlocks {
+                value: BlockSetRef::Blocks(Vec::new()),
+            }),
+            limit: 0,
+        }];
+        let out = process_blocks(
+            &with_capped,
+            &blocks,
+            (0, 0, 0),
+            (0, 0, 0),
+            &level,
+            0,
+            Some(bb),
+        );
+        assert_eq!(out.len(), 2);
+    }
+
     /// `capped` 最多改 `limit` 个方块，且逐块用 delegate 的效果。
     ///
     /// `capped` alters at most `limit` blocks using the delegate's effect.
@@ -708,7 +797,15 @@ mod tests {
         let blocks: Vec<ProcessBlock> = (0..6)
             .map(|i| block((i, 0, 0), "minecraft:stone"))
             .collect();
-        let out = process_blocks(&processors, &blocks, (0, 64, 0), (0, 64, 0), &level, 0);
+        let out = process_blocks(
+            &processors,
+            &blocks,
+            (0, 64, 0),
+            (0, 64, 0),
+            &level,
+            0,
+            None,
+        );
         let changed = out
             .iter()
             .filter(|b| b.state.name == "minecraft:gold_block")

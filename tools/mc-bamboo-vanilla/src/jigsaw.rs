@@ -22,14 +22,16 @@ use std::{
     process::Command,
 };
 
+use mc_bamboo_blocks::LegacyRandom;
 use mc_bamboo_data::{structures as blob, worldgen::WORLDGEN};
 use mc_bamboo_nbt::Tag;
+use mc_bamboo_worldgen::random::Random;
 use mc_bamboo_worldgen::{
     Worldgen,
     chunk::Generator,
     settings::SeededRouter,
     structure::{
-        Structures, allowed_biome_names,
+        BoundingBox, Structures, allowed_biome_names,
         jigsaw::{
             JigsawConfig, JigsawStructures, Piece, Rotation, StructurePieces, TemplatePools,
             add_pieces,
@@ -91,6 +93,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "processors" => run_processors(command, work_dir),
         "load" => run_load(command, work_dir),
         "apply" => run_apply(command, work_dir),
+        "capped" => run_capped(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
@@ -1009,12 +1012,23 @@ struct ApplyQuery {
     reference: (i32, i32, i32),
     world_state: String,
     blocks: Vec<ApplyBlock>,
+    /// `settings.getBoundingBox()`：`Some` 时只有盒内的方块被处理（除非链里有
+    /// `capped`）。这是覆盖 `processOnlyInCurrentChunk` 的唯一途径。
+    ///
+    /// `settings.getBoundingBox()`: when set, only blocks inside it are processed (unless
+    /// the chain contains a `capped`). This is the only way to cover
+    /// `processOnlyInCurrentChunk`.
+    chunk_bb: Option<(i32, i32, i32, i32, i32, i32)>,
 }
 
 impl ApplyQuery {
     fn key(&self) -> String {
+        let bb = self
+            .chunk_bb
+            .map(|bb| format!("{}|{}|{}|{}|{}|{}", bb.0, bb.1, bb.2, bb.3, bb.4, bb.5))
+            .unwrap_or_else(|| "none".to_owned());
         format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{bb}",
             self.list,
             self.piece.0,
             self.piece.1,
@@ -1079,6 +1093,22 @@ fn build_apply_queries(lists: &ProcessorLists) -> Vec<String> {
                     reference: (0, 64, 0),
                     world_state: world_state.to_owned(),
                     blocks: blocks.clone(),
+                    chunk_bb: None,
+                }
+                .to_line(),
+            );
+            // 带 `chunkBB`：只覆盖前半批方块，用来比 `processOnlyInCurrentChunk`
+            // （链里没有 `capped` 时生效）。
+            // With a `chunkBB` covering only the first half, exercising
+            // `processOnlyInCurrentChunk` (effective when the chain has no `capped`).
+            queries.push(
+                ApplyQuery {
+                    list: name.clone(),
+                    piece: (0, 64, 0),
+                    reference: (0, 64, 0),
+                    world_state: world_state.to_owned(),
+                    blocks: blocks.clone(),
+                    chunk_bb: Some((0, 64, 0, 1, 65, 0)),
                 }
                 .to_line(),
             );
@@ -1092,6 +1122,7 @@ fn build_apply_queries(lists: &ProcessorLists) -> Vec<String> {
                 reference: (-13, 40, 27),
                 world_state: "minecraft:air".to_owned(),
                 blocks,
+                chunk_bb: None,
             }
             .to_line(),
         );
@@ -1103,30 +1134,38 @@ fn build_apply_queries(lists: &ProcessorLists) -> Vec<String> {
 ///
 /// Java emits `A|key|count` and `S|key|x|y|z|state` for the blocks that survive.
 fn compare_apply(stdout: &str, queries: &[String], lists: &ProcessorLists) -> Result<(), String> {
+    // Java 输出的 key 与查询行的前缀一一对应，所以先为每条查询算出它自己的 key，
+    // 再按 `java` 行去掉 key 之后的剩余字段归类。这样不用猜 key 的长度。
+    // Each query's key is a prefix of its own line, so compute the keys up front and key
+    // the Java rows by their remainder; no need to guess the key length.
+    let mut query_by_key: HashMap<String, &String> = HashMap::new();
+    for line in queries {
+        let fields: Vec<&str> = line.split('|').collect();
+        let key_len = if fields[9] == "none" { 10 } else { 15 };
+        query_by_key.insert(fields[..key_len].join("|"), line);
+    }
+
     let mut java_a: HashMap<String, usize> = HashMap::new();
     let mut java_s: HashMap<String, Vec<String>> = HashMap::new();
     let mut java_c: HashMap<String, usize> = HashMap::new();
     let mut java_d: HashMap<String, Vec<String>> = HashMap::new();
     for line in stdout.lines() {
-        let fields: Vec<&str> = line.split('|').collect();
-        if fields.len() < 11 {
+        let Some(row) = split_java_row(line, &query_by_key) else {
             continue;
-        }
-        // key 是前 9 段（list|piece(3)|ref(3)|worldState|count）。
-        // The key is the first nine fields.
-        let key = fields[1..10].join("|");
-        match fields[0] {
+        };
+        let (key, rest) = row;
+        match line.split('|').next().unwrap_or("") {
             "A" => {
-                java_a.insert(key, fields[10].parse().unwrap_or(0));
+                java_a.insert(key, rest.parse().unwrap_or(0));
             }
             "S" => {
-                java_s.entry(key).or_default().push(fields[10..].join("|"));
+                java_s.entry(key).or_default().push(rest);
             }
             "C" => {
-                java_c.insert(key, fields[10].parse().unwrap_or(0));
+                java_c.insert(key, rest.parse().unwrap_or(0));
             }
             "D" => {
-                java_d.entry(key).or_default().push(fields[10..].join("|"));
+                java_d.entry(key).or_default().push(rest);
             }
             _ => {}
         }
@@ -1151,8 +1190,27 @@ fn compare_apply(stdout: &str, queries: &[String], lists: &ProcessorLists) -> Re
         );
         let world_state = fields[7].to_owned();
         let count: usize = parse_i32(fields[8])? as usize;
+        // 第 10 段（下标 9）是 `chunkBB`：`none` 或 6 个整数。
+        // Field 10 (index 9) is the `chunkBB`: `none` or six ints.
+        let chunk_bb = if fields[9] == "none" {
+            None
+        } else {
+            let mut bb = [0_i32; 6];
+            for (index, slot) in bb.iter_mut().enumerate() {
+                *slot = parse_i32(fields[9 + index])?;
+            }
+            Some(BoundingBox {
+                min_x: bb[0],
+                min_y: bb[1],
+                min_z: bb[2],
+                max_x: bb[3],
+                max_y: bb[4],
+                max_z: bb[5],
+            })
+        };
+        let bb_fields = if chunk_bb.is_some() { 6 } else { 1 };
         let mut blocks = Vec::with_capacity(count);
-        let mut at = 9;
+        let mut at = 9 + bb_fields;
         for _ in 0..count {
             let pos = (
                 parse_i32(fields[at])?,
@@ -1178,20 +1236,42 @@ fn compare_apply(stdout: &str, queries: &[String], lists: &ProcessorLists) -> Re
         // key 直接取查询行的前 9 段，和 Java 侧 `copyOfRange(p, 0, 9)` 一致。
         // The key is the first nine fields of the query line, matching the Java side's
         // `copyOfRange(p, 0, 9)`.
-        let key = fields[..9].join("|");
+        let key = if chunk_bb.is_some() {
+            fields[..15].join("|")
+        } else {
+            fields[..10].join("|")
+        };
         let level = FakeLevel::new(&world_state);
-        // `CappedProcessor` 的 `finalizeProcessing` 要真实的 `ServerLevel` 种子，假世界给不出，
-        // 所以主链里跳过它（官方侧同样剥离），delegate 的效果单独比。
-        // `CappedProcessor.finalizeProcessing` needs a real `ServerLevel` seed, which the
-        // fake level cannot provide, so the main chain skips it (the oracle strips it too)
-        // and the delegate's effect is compared separately.
-        let flat: Vec<_> = processors
+        // `CappedProcessor` 的 `processBlock` 是空实现，所以把它留在链里不会改变方块；
+        // 但它的 `evaluatesEntirePieceState()` 为 true，会关掉 `processOnlyInCurrentChunk`，
+        // 这正是要覆盖的分支。
+        // `CappedProcessor.processBlock` is a no-op, so keeping it in the chain changes no
+        // block, but its `evaluatesEntirePieceState()` disables
+        // `processOnlyInCurrentChunk` — exactly the branch to cover.
+        // 官方那边主链里的 `capped` 被换成了 `limit = 0`（避免需要真实 `ServerLevel`），
+        // 所以 Rust 这边也要跳过 `finalize_capped`，只保留它的 `evaluates_entire_piece_state`
+        // 效果（关掉 `processOnlyInCurrentChunk`）。
+        // The oracle swaps the main-chain `capped` for `limit = 0`, so Rust must skip
+        // `finalize_capped` too and keep only its `evaluates_entire_piece_state` effect.
+        let zero_capped: Vec<Processor> = processors
             .iter()
-            .filter(|processor| !matches!(processor, Processor::Capped { .. }))
-            .cloned()
+            .map(|processor| match processor {
+                Processor::Capped { delegate, .. } => Processor::Capped {
+                    delegate: delegate.clone(),
+                    limit: 0,
+                },
+                other => other.clone(),
+            })
             .collect();
-        let processed =
-            processor_apply::process_blocks(&flat, &blocks, piece, reference, &level, 0);
+        let processed = processor_apply::process_blocks(
+            &zero_capped,
+            &blocks,
+            piece,
+            reference,
+            &level,
+            0,
+            chunk_bb,
+        );
 
         checked += 1;
         blocks_checked += processed.len();
@@ -1240,6 +1320,11 @@ fn compare_apply(stdout: &str, queries: &[String], lists: &ProcessorLists) -> Re
                 reference,
                 &level,
                 0,
+                // 官方那边 delegate 单独跑时用的是 `delegateSettings`，它**带了**同一个
+                // `chunkBB`（而且没有 capped，所以走 `processOnlyInCurrentChunk` 的过滤）。
+                // Vanilla runs the delegate with `delegateSettings`, which carries the same
+                // `chunkBB` and has no `capped`, so it does filter.
+                chunk_bb,
             );
             let Some(want_count) = java_c.get(&key) else {
                 continue;
@@ -1349,6 +1434,177 @@ impl ProcessorLevel for FakeLevel {
     fn in_block_set(&self, state: &BlockStateSpec, set: &BlockSetRef) -> bool {
         in_block_set(state, set)
     }
+}
+
+/// `capped` 模式：验证 `CappedProcessor.finalizeProcessing` 的随机源派生与洗牌顺序。
+///
+/// `capped` mode: verifies the random-source derivation and shuffle order of
+/// `CappedProcessor.finalizeProcessing`.
+fn run_capped(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    let mut queries = Vec::new();
+    for seed in [0_i64, 1, -1, 42, 12_345_678_901] {
+        for piece in [(0, 64, 0), (-13, 40, 27), (100, -50, -200)] {
+            for size in [1_usize, 2, 5, 8, 33] {
+                queries.push(format!("{seed}|{}|{}|{}|{size}", piece.0, piece.1, piece.2));
+            }
+        }
+    }
+    let queries_path = work_dir.join("jigsaw_capped_queries.txt");
+    fs::write(&queries_path, queries.join("\n"))
+        .map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("capped")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_capped(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
+/// Java 的 `C|key|sampled|indices` 与 `R|key|nextInt,nextInt,...`。
+///
+/// Java emits `C|key|sampled|indices` and `R|key|nextInt,...`.
+fn compare_capped(stdout: &str, queries: &[String]) -> Result<(), String> {
+    let mut java_c: HashMap<String, (i32, String)> = HashMap::new();
+    let mut java_r: HashMap<String, String> = HashMap::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() < 7 {
+            continue;
+        }
+        let key = fields[1..6].join("|");
+        match fields[0] {
+            "C" => {
+                java_c.insert(key, (fields[6].parse().unwrap_or(0), fields[7..].join("|")));
+            }
+            "R" => {
+                java_r.insert(key, fields[6..].join("|"));
+            }
+            _ => {}
+        }
+    }
+
+    let mut checked = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for query in queries {
+        let fields: Vec<&str> = query.split('|').collect();
+        let seed = fields[0]
+            .parse::<i64>()
+            .map_err(|error| format!("bad seed {}: {error}", fields[0]))?;
+        let piece = (
+            parse_i32(fields[1])?,
+            parse_i32(fields[2])?,
+            parse_i32(fields[3])?,
+        );
+        let size: usize = parse_i32(fields[4])? as usize;
+        checked += 1;
+
+        // `RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece)`。
+        // `RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece)`.
+        let random = Random::Legacy(LegacyRandom::new(seed))
+            .fork_positional()
+            .at(piece.0, piece.1, piece.2);
+        // `limit.sample(random)` 用一个常数 6 的 provider（与 Java 侧一致）。
+        // `limit.sample(random)` with a constant-6 provider, matching the Java side.
+        let sampled = constant_int_sample(&random, 6);
+        let mut indices: Vec<usize> = (0..size).collect();
+        shuffle_indices(&mut indices, &random);
+        let got = indices
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let Some((want_sampled, want_indices)) = java_c.get(query) else {
+            return Err(format!("Java missing C for {query}"));
+        };
+        if *want_sampled != sampled {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{query}: sampled rust {sampled} java {want_sampled}"
+                ));
+            }
+        }
+        if *want_indices != got {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!("{query}: indices rust {got} java {want_indices}"));
+            }
+        }
+
+        // 再比原始 `nextInt(1000)` 序列，单独验随机源。
+        // Then compare the raw `nextInt(1000)` sequence to check the source itself.
+        let src = Random::Legacy(LegacyRandom::new(seed))
+            .fork_positional()
+            .at(piece.0, piece.1, piece.2);
+        let raw = (0..8)
+            .map(|_| src.next_int(1000).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        if let Some(want_raw) = java_r.get(query)
+            && *want_raw != raw
+        {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!("{query}: raw rust {raw} java {want_raw}"));
+            }
+        }
+    }
+
+    if checked != queries.len() {
+        return Err(format!(
+            "checked {checked} capped queries, expected {}",
+            queries.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches} differences over {checked} queries; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!("jigsaw capped: {checked} queries, source + shuffle + sample all identical");
+    Ok(())
+}
+
+/// `ConstantInt.of(value).sample(random)`：不取随机数，直接返回常量。
+///
+/// `ConstantInt.of(value).sample(random)`: returns the constant without drawing.
+fn constant_int_sample(_random: &Random, value: i32) -> i32 {
+    value
+}
+
+/// `Util.toShuffledList(IntStream.range(0, size), random)` 的洗牌循环。
+///
+/// The shuffle loop of `Util.toShuffledList(IntStream.range(0, size), random)`.
+fn shuffle_indices(items: &mut [usize], random: &Random) {
+    for i in (2..=items.len()).rev() {
+        let swap_to = random.next_int(i as i32) as usize;
+        items.swap(i - 1, swap_to);
+    }
+}
+
+/// 把一行 Java 输出拆成 `(key, 剩余部分)`：key 是 `query_by_key` 里某个查询前缀。
+///
+/// Split one Java output line into `(key, rest)` where the key is the prefix of one of the
+/// queries.
+fn split_java_row(line: &str, query_by_key: &HashMap<String, &String>) -> Option<(String, String)> {
+    for key in query_by_key.keys() {
+        let prefix = format!("|{key}|");
+        if let Some(index) = line.find(&prefix) {
+            let rest = &line[index + prefix.len()..];
+            return Some((key.clone(), rest.to_owned()));
+        }
+    }
+    None
 }
 
 fn run_pieces(

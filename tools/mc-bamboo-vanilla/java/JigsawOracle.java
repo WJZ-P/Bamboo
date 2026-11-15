@@ -43,6 +43,9 @@ import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
+import net.minecraft.util.RandomSource;
+import net.minecraft.util.Util;
+import net.minecraft.util.valueproviders.ConstantInt;
 import net.minecraft.util.datafix.DataFixers;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LevelHeightAccessor;
@@ -154,6 +157,7 @@ public final class JigsawOracle {
                     case "processors" -> runProcessors(registries);
                     case "load" -> runLoad(manager, registries, Path.of(args[1]));
                     case "apply" -> runApply(registries, Path.of(args[1]));
+                    case "capped" -> runCapped(Path.of(args[1]));
                     case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
                 }
@@ -651,9 +655,22 @@ public final class JigsawOracle {
                     Integer.parseInt(p[4]), Integer.parseInt(p[5]), Integer.parseInt(p[6]));
             BlockState worldState = stateOf(p[7]);
             int count = Integer.parseInt(p[8]);
+            // 第 10 段（下标 9）是 `chunkBB`：`none` 或 6 个整数。
+            // Field 10 (index 9) is the `chunkBB`: `none` or six ints.
+            BoundingBox chunkBb = null;
+            int at = 9;
+            if (!p[at].equals("none")) {
+                chunkBb = new BoundingBox(
+                        Integer.parseInt(p[at]), Integer.parseInt(p[at + 1]),
+                        Integer.parseInt(p[at + 2]), Integer.parseInt(p[at + 3]),
+                        Integer.parseInt(p[at + 4]), Integer.parseInt(p[at + 5]));
+                at += 6;
+            } else {
+                at += 1;
+            }
             List<StructureTemplate.StructureBlockInfo> infos = new java.util.ArrayList<>();
             List<String> inputProps = new java.util.ArrayList<>();
-            int pos = 9;
+            int pos = at;
             for (int i = 0; i < count; i++) {
                 // 每块是 `x|y|z|state` 四段。
                 // Each block is four fields: `x|y|z|state`.
@@ -676,17 +693,22 @@ public final class JigsawOracle {
                 throw new IllegalStateException("no processor list " + listId);
             }
             StructurePlaceSettings settings = new StructurePlaceSettings();
-            List<StructureProcessor> flat = new java.util.ArrayList<>();
+            settings.setBoundingBox(chunkBb);
+            // 整条链都进 settings：`CappedProcessor.processBlock` 是空实现，但它的
+            // `evaluatesEntirePieceState()` 会关掉 `processOnlyInCurrentChunk`，这正是要覆盖的。
+            // The whole chain goes in: `CappedProcessor.processBlock` is a no-op, but its
+            // `evaluatesEntirePieceState()` disables `processOnlyInCurrentChunk`.
+            for (StructureProcessor processor : list.list()) {
+                settings.addProcessor(
+                        processor instanceof CappedProcessor
+                                ? cappedWithoutFinalizing(processor)
+                                : processor);
+            }
             List<StructureProcessor> capped = new java.util.ArrayList<>();
             for (StructureProcessor processor : list.list()) {
                 if (processor instanceof CappedProcessor) {
                     capped.add(processor);
-                } else {
-                    flat.add(processor);
                 }
-            }
-            for (StructureProcessor processor : flat) {
-                settings.addProcessor(processor);
             }
             FakeProcessorLevel level = new FakeProcessorLevel(worldState, 0L);
             List<StructureTemplate.StructureBlockInfo> processed =
@@ -694,7 +716,8 @@ public final class JigsawOracle {
                             level.proxy(), piecePos, refPos, settings, infos);
             // key 只是前 9 段（`list|piece(3)|ref(3)|worldState|count`），方块列表不进去。
             // The key is only the first nine fields; the block list stays out of it.
-            String key = String.join("|", java.util.Arrays.copyOfRange(p, 0, 9));
+            String key = String.join("|", java.util.Arrays.copyOfRange(
+                    p, 0, chunkBb == null ? 10 : 15));
             out.append("A|").append(key).append('|')
                     .append(processed.size()).append('\n');
             for (StructureTemplate.StructureBlockInfo info : processed) {
@@ -714,6 +737,7 @@ public final class JigsawOracle {
                 // `CappedProcessor.delegate` 是私有字段，反射读。
                 // `CappedProcessor.delegate` is private; read it reflectively.
                 StructurePlaceSettings delegateSettings = new StructurePlaceSettings();
+                delegateSettings.setBoundingBox(chunkBb);
                 delegateSettings.addProcessor(cappedDelegate(processor));
                 List<StructureTemplate.StructureBlockInfo> viaDelegate =
                         StructureTemplate.processBlockInfos(
@@ -731,6 +755,32 @@ public final class JigsawOracle {
         }
         System.out.print(out);
         System.out.flush();
+    }
+
+    /**
+     * 造一个 `limit` 为 0 的等价 `CappedProcessor`：`processBlock` 本来就是空实现，
+     * `finalizeProcessing` 在 `limit == 0` 时直接返回，于是不需要真实的
+     * `level.getLevel().getSeed()`；而 `evaluatesEntirePieceState()` 仍然是 true，
+     * `processOnlyInCurrentChunk` 照样被关掉。这是覆盖那条分支又不伪造 `ServerLevel` 的办法。
+     *
+     * <p>A `CappedProcessor` clone whose limit is 0: `processBlock` is a no-op and
+     * `finalizeProcessing` returns early, so no real `ServerLevel` seed is needed, while
+     * `evaluatesEntirePieceState()` stays true and `processOnlyInCurrentChunk` stays off.
+     */
+    private static StructureProcessor cappedWithoutFinalizing(StructureProcessor capped) {
+        try {
+            var field = CappedProcessor.class.getDeclaredField("limit");
+            field.setAccessible(true);
+            Object limit = field.get(capped);
+            if (limit instanceof ConstantInt) {
+                // 原本就是常数：造一个 0 的替换。
+                // Already a constant: replace it with zero.
+                return new CappedProcessor(cappedDelegate(capped), ConstantInt.of(0));
+            }
+            return capped;
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("cannot read CappedProcessor.limit", error);
+        }
     }
 
     /** 反射读 `CappedProcessor.delegate`（没有公开访问器）。 */
@@ -849,6 +899,60 @@ public final class JigsawOracle {
      * <p>Fake level: every position holds the same `worldState`; `getBlockState` and
      * `is(HolderSet)` are all a processor needs.
      */
+    /**
+     * capped 模式：queries 每行 {@code seed|pieceX|pieceY|pieceZ|size}。复刻
+     * `CappedProcessor.finalizeProcessing` 的随机源与洗牌：
+     * {@code RandomSource.createThreadLocalInstance(seed).forkPositional().at(pos)}，
+     * 再 {@code Util.toShuffledList(IntStream.range(0, size), random)}，输出洗牌后的下标序列
+     * 与随后 {@code limit.sample(random)} 的取值。这样「随机源派生 + 洗牌顺序 + 取样」
+     * 三段都能和 Rust 逐项比，不需要伪造真实 {@code ServerLevel}。
+     *
+     * <p>Capped mode: one {@code seed|pieceX|pieceY|pieceZ|size} per line, replaying the
+     * random source and shuffle of `CappedProcessor.finalizeProcessing` and printing the
+     * shuffled indices plus the sampled limit, so all three stages can be compared.
+     */
+    private static void runCapped(Path queries) throws Exception {
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|");
+            long seed = Long.parseLong(p[0]);
+            BlockPos piece = new BlockPos(
+                    Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3]));
+            int size = Integer.parseInt(p[4]);
+            var random = RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece);
+            // 官方顺序：先 `limit.sample(random)`，再 `toShuffledList`。
+            // Vanilla order: `limit.sample(random)` first, then `toShuffledList`.
+            int sampled = net.minecraft.util.valueproviders.ConstantInt.of(6).sample(random);
+            var indices = net.minecraft.util.Util.toShuffledList(
+                    java.util.stream.IntStream.range(0, size), random);
+            out.append("C|").append(String.join("|", p)).append('|')
+                    .append(sampled).append('|');
+            for (int i = 0; i < indices.size(); i++) {
+                if (i > 0) {
+                    out.append(',');
+                }
+                out.append(indices.getInt(i));
+            }
+            out.append('\n');
+            // 再补一条 `nextInt` 序列，单独验随机源本身（不经过洗牌）。
+            // Also emit a raw `nextInt` sequence to check the source itself.
+            var src = RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece);
+            out.append("R|").append(String.join("|", p)).append('|');
+            for (int i = 0; i < 8; i++) {
+                if (i > 0) {
+                    out.append(',');
+                }
+                out.append(src.nextInt(1000));
+            }
+            out.append('\n');
+        }
+        System.out.print(out);
+        System.out.flush();
+    }
+
     /**
      * 假世界：所有位置的方块都是同一个 `worldState`。processor 只用
      * `getBlockState` 与 `state.is(tag)`，所以用代理挡住其余方法。
