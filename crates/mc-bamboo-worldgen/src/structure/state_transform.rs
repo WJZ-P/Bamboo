@@ -1,22 +1,17 @@
-//! 结构件放置时的方块状态 `mirror` / `rotate` 变换（`StructurePiece.placeBlock` 的那一步）。
+//! 结构件放置时的方块状态 `mirror` / `rotate` 变换（`StructurePiece.placeBlock` 和
+//! `StructureTemplate.placeInWorld` 的那一步）。
 //!
-//! 官方 `StructurePiece.placeBlock` 在 `setBlock` 之前对状态依次做
-//! `blockState.mirror(this.mirror)` 和 `blockState.rotate(this.rotation)`，而
-//! `mirror` / `rotate` 的默认实现是恒等（`BlockBehaviour.java:251-257`），只有少数方块重写。
-//! 废弃矿井用到的三类会变：栅栏（`CrossCollisionBlock` 的四面）、墙上的火把（`facing`）、
-//! 铁轨（`shape`）。其它方块（原木、木板、蜘蛛网、刷怪笼、铁链）恒等。
+//! 官方先 `blockState.mirror(mirror)` 再 `blockState.rotate(rotation)`；默认实现是恒等
+//! （`BlockBehaviour.java:251-257`），重写了的方块类按做法分成 [`Rule`] 的几类，按方块类
+//! 和祖先类查出来。没重写的方块原样返回。
 //!
-//! 这里只实现这三类；遇到没重写的方块原样返回，和官方默认行为一致。
-//!
-//! The `mirror` / `rotate` state transforms of `StructurePiece.placeBlock`. Vanilla applies
-//! `blockState.mirror(this.mirror)` then `blockState.rotate(this.rotation)` before
-//! `setBlock`; the defaults are identity (`BlockBehaviour.java:251-257`) and only a few
-//! blocks override them. Three matter for the mineshaft: fences (`CrossCollisionBlock`'s
-//! four sides), wall torches (`facing`) and rails (`shape`). Everything else (logs,
-//! planks, cobweb, spawner, iron chain) is identity. Only those three are implemented;
-//! unhandled blocks pass through, matching the vanilla default.
+//! The `mirror` / `rotate` state transforms of `StructurePiece.placeBlock` and
+//! `StructureTemplate.placeInWorld`. Vanilla applies `blockState.mirror(mirror)` then
+//! `blockState.rotate(rotation)`; the defaults are identity (`BlockBehaviour.java:251-257`)
+//! and the overriding block classes are grouped by behaviour into [`Rule`], looked up from
+//! the block class and its ancestors. Blocks without an override pass through.
 
-use mc_bamboo_data::{BlockClass, block_id_of_state, block_of_state};
+use mc_bamboo_data::{block_id_of_state, block_of_state};
 
 use crate::structure::piece_place::with_property;
 
@@ -69,14 +64,29 @@ impl Mirror {
             _ => "east",
         }
     }
+
+    /// `Mirror.mirror(Direction)`：六方向，镜像轴上的方向取反，其余不变。
+    ///
+    /// `Mirror.mirror(Direction)` over all six directions: directions on the mirrored
+    /// axis flip, the rest stay.
+    pub fn mirror_direction(self, direction: &str) -> &'static str {
+        match direction {
+            "up" => "up",
+            "down" => "down",
+            other => self.mirror_facing(other),
+        }
+    }
 }
 
 impl Rotation {
-    /// `Rotation.rotate(Direction)`：水平四方向顺时针转。
+    /// `Rotation.rotate(Direction)`：水平四方向顺时针转，`up` / `down` 不变。
     ///
-    /// `Rotation.rotate(Direction)` for the four horizontal facings.
+    /// `Rotation.rotate(Direction)`: the four horizontal facings turn clockwise, `up` /
+    /// `down` stay.
     pub fn rotate_facing(self, facing: &str) -> &'static str {
         match (self, facing) {
+            (_, "up") => "up",
+            (_, "down") => "down",
             (Self::None, "north") => "north",
             (Self::None, "south") => "south",
             (Self::None, "west") => "west",
@@ -105,6 +115,164 @@ pub fn transform(state: u32, mirror: Mirror, rotation: Rotation) -> u32 {
     apply_rotation(mirrored, rotation)
 }
 
+/// 官方重写了 `rotate` / `mirror` 的方块按做法分成的几类。
+///
+/// The ways vanilla blocks override `rotate` / `mirror`, grouped by behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rule {
+    /// `FACING` 按 `rotation.rotate` 转；镜像是 `state.rotate(mirror.getRotation(FACING))`。
+    ///
+    /// `FACING` turns by `rotation.rotate`; mirroring is
+    /// `state.rotate(mirror.getRotation(FACING))`.
+    Facing,
+    /// `AnvilBlock`：只重写了 `rotate`，镜像恒等。
+    ///
+    /// `AnvilBlock`: only `rotate` is overridden, mirroring is identity.
+    FacingRotateOnly,
+    /// `RodBlock`：转 `FACING`，镜像是 `mirror.mirror(FACING)`。
+    ///
+    /// `RodBlock`: turns `FACING`, mirroring is `mirror.mirror(FACING)`.
+    Rod,
+    /// `DoorBlock`：同 [`Rule::Facing`]，镜像之后再 `cycle(HINGE)`。
+    ///
+    /// `DoorBlock`: like [`Rule::Facing`], then `cycle(HINGE)` after mirroring.
+    Door,
+    /// `StairBlock`。
+    ///
+    /// `StairBlock`.
+    Stair,
+    /// 三种铁轨的 `shape`。
+    ///
+    /// The `shape` of the three rails.
+    Rail,
+    /// 四面属性（`CrossCollisionBlock`、`WallBlock`、`VineBlock`、`TripWireBlock`、
+    /// `RedstoneWireBlock`、`MossyCarpetBlock`）。
+    ///
+    /// Four side properties (`CrossCollisionBlock`, `WallBlock`, `VineBlock`,
+    /// `TripWireBlock`, `RedstoneWireBlock`, `MossyCarpetBlock`).
+    Sides,
+    /// 六面布尔属性按方向映射（`HugeMushroomBlock`、`MultifaceBlock`）。
+    ///
+    /// Six face booleans remapped by direction (`HugeMushroomBlock`, `MultifaceBlock`).
+    Faces,
+    /// `RotatedPillarBlock.rotatePillar`（以及同样写法的下界传送门），镜像恒等。
+    ///
+    /// `RotatedPillarBlock.rotatePillar` (and the nether portal's equivalent), mirroring
+    /// is identity.
+    Pillar,
+    /// 16 档的 `ROTATION`（旗帜、立着的告示牌和悬挂告示牌、头颅）。
+    ///
+    /// The 16-step `ROTATION` (banners, standing and ceiling hanging signs, skulls).
+    Rotation16,
+    /// `ORIENTATION`（`FrontAndTop`：拼图方块、合成器）。
+    ///
+    /// `ORIENTATION` (`FrontAndTop`: jigsaw, crafter).
+    Orientation,
+    /// 默认实现：恒等。
+    ///
+    /// The default: identity.
+    Identity,
+}
+
+/// 按方块类和它的祖先类找出官方用的是哪一种重写。
+///
+/// 祖先表是无序的，所以先查会被子类再次重写的那些（门、楼梯、铁砧……），最后才查
+/// `HorizontalDirectionalBlock` 这类最宽的。
+///
+/// Find which vanilla override applies from the block class and its ancestors. The
+/// ancestor table is unordered, so the narrower overrides (door, stairs, anvil, ...) are
+/// checked before broad ones such as `HorizontalDirectionalBlock`.
+fn rule_of(state: u32) -> Rule {
+    let Some(block) = block_of_state(state) else {
+        return Rule::Identity;
+    };
+    let class = format!("{:?}", block.class);
+    let names: Vec<String> = std::iter::once(class)
+        .chain(block.class.ancestors().iter().map(|a| format!("{a:?}")))
+        .collect();
+    let has = |wanted: &[&str]| names.iter().any(|name| wanted.contains(&name.as_str()));
+    if has(&["DoorBlock"]) {
+        Rule::Door
+    } else if has(&["StairBlock"]) {
+        Rule::Stair
+    } else if has(&["RailBlock", "PoweredRailBlock", "DetectorRailBlock"]) {
+        Rule::Rail
+    } else if has(&[
+        "CrossCollisionBlock",
+        "WallBlock",
+        "VineBlock",
+        "TripWireBlock",
+        "RedstoneWireBlock",
+        "MossyCarpetBlock",
+    ]) {
+        Rule::Sides
+    } else if has(&["HugeMushroomBlock", "MultifaceBlock"]) {
+        Rule::Faces
+    } else if has(&[
+        "RotatedPillarBlock",
+        "InfestedRotatedPillarBlock",
+        "CreakingHeartBlock",
+        "NetherPortalBlock",
+    ]) {
+        Rule::Pillar
+    } else if has(&[
+        "BannerBlock",
+        "StandingSignBlock",
+        "CeilingHangingSignBlock",
+        "SkullBlock",
+    ]) {
+        Rule::Rotation16
+    } else if has(&["JigsawBlock", "CrafterBlock"]) {
+        Rule::Orientation
+    } else if has(&["RodBlock"]) {
+        Rule::Rod
+    } else if has(&["AnvilBlock"]) {
+        Rule::FacingRotateOnly
+    } else if has(&[
+        "HorizontalDirectionalBlock",
+        "AbstractFurnaceBlock",
+        "AmethystClusterBlock",
+        "AttachedStemBlock",
+        "BarrelBlock",
+        "BaseCoralWallFanBlock",
+        "BeehiveBlock",
+        "BellBlock",
+        "CalibratedSculkSensorBlock",
+        "CampfireBlock",
+        "ChestBlock",
+        "ChiseledBookShelfBlock",
+        "CommandBlock",
+        "CopperGolemStatueBlock",
+        "DecoratedPotBlock",
+        "DispenserBlock",
+        "EnderChestBlock",
+        "EndPortalFrameBlock",
+        "FlowerBedBlock",
+        "GrindstoneBlock",
+        "HopperBlock",
+        "LadderBlock",
+        "LeafLitterBlock",
+        "LecternBlock",
+        "ObserverBlock",
+        "RedstoneWallTorchBlock",
+        "ShelfBlock",
+        "ShulkerBoxBlock",
+        "SmallDripleafBlock",
+        "StonecutterBlock",
+        "TripWireHookBlock",
+        "VaultBlock",
+        "WallBannerBlock",
+        "WallHangingSignBlock",
+        "WallSignBlock",
+        "WallSkullBlock",
+        "WallTorchBlock",
+    ]) {
+        Rule::Facing
+    } else {
+        Rule::Identity
+    }
+}
+
 /// `BlockState.mirror(mirror)`。
 ///
 /// `BlockState.mirror(mirror)`.
@@ -112,41 +280,24 @@ pub fn apply_mirror(state: u32, mirror: Mirror) -> u32 {
     if mirror == Mirror::None {
         return state;
     }
-    let Some(block) = block_of_state(state) else {
-        return state;
-    };
-    match block.class {
-        // 这五类都继承 `HorizontalDirectionalBlock`（或行为相同）：只按
-        // `mirror.getRotation(FACING)` 旋转 `facing`。
-        // These all behave like `HorizontalDirectionalBlock`: rotate `facing` by
-        // `mirror.getRotation(FACING)`.
-        BlockClass::WallTorchBlock
-        | BlockClass::ButtonBlock
-        | BlockClass::LadderBlock
-        | BlockClass::ChestBlock
-        | BlockClass::TrappedChestBlock
-        | BlockClass::EnderChestBlock
-        | BlockClass::EndPortalFrameBlock
-        | BlockClass::RedstoneWallTorchBlock
-        | BlockClass::CopperChestBlock
-        | BlockClass::WeatheringCopperChestBlock
-        | BlockClass::FurnaceBlock
-        | BlockClass::HopperBlock
-        | BlockClass::TrapDoorBlock
-        | BlockClass::FenceGateBlock => mirror_facing(state, mirror),
+    match rule_of(state) {
+        Rule::Facing => mirror_facing(state, mirror),
         // `DoorBlock.mirror`：先按 `mirror.getRotation(FACING)` 旋转，再 `cycle(HINGE)`。
         // `DoorBlock.mirror`: rotate by `mirror.getRotation(FACING)` then `cycle(HINGE)`.
-        BlockClass::DoorBlock => cycle_hinge(mirror_facing(state, mirror)),
+        Rule::Door => cycle_hinge(mirror_facing(state, mirror)),
+        Rule::Rod => {
+            let Some(facing) = property_of(state, "facing") else {
+                return state;
+            };
+            with_property(state, "facing", mirror.mirror_direction(facing)).unwrap_or(state)
+        }
         // `StairBlock.mirror`：Z 轴方向（LEFT_RIGHT）或 X 轴方向（FRONT_BACK）时整体转 180°
         // 并按镜像翻转 `shape`。
         // `StairBlock.mirror`: turn 180° and flip `shape` when the axis matches.
-        BlockClass::StairBlock => mirror_stairs(state, mirror),
-        // `CrossCollisionBlock.mirror`：LEFT_RIGHT 交换 north/south，FRONT_BACK 交换 east/west。
-        // `CrossCollisionBlock.mirror`: LEFT_RIGHT swaps north/south, FRONT_BACK east/west.
-        BlockClass::FenceBlock
-        | BlockClass::WallBlock
-        | BlockClass::IronBarsBlock
-        | BlockClass::StainedGlassPaneBlock => {
+        Rule::Stair => mirror_stairs(state, mirror),
+        // LEFT_RIGHT 交换 north/south，FRONT_BACK 交换 east/west。
+        // LEFT_RIGHT swaps north/south, FRONT_BACK east/west.
+        Rule::Sides => {
             let pairs: &[(&str, &str)] = match mirror {
                 Mirror::LeftRight => &[("north", "south"), ("south", "north")],
                 Mirror::FrontBack => &[("east", "west"), ("west", "east")],
@@ -154,16 +305,101 @@ pub fn apply_mirror(state: u32, mirror: Mirror) -> u32 {
             };
             swap_properties(state, pairs)
         }
+        Rule::Faces => map_faces(state, |d| mirror.mirror_direction(d)),
         // `BaseRailBlock.mirror`：按 `LEFT_RIGHT` / `FRONT_BACK` 翻转 `shape`。
         // `BaseRailBlock.mirror`: flip `shape` for `LEFT_RIGHT` / `FRONT_BACK`.
-        BlockClass::RailBlock | BlockClass::PoweredRailBlock | BlockClass::DetectorRailBlock => {
+        Rule::Rail => {
             let Some(shape) = property_of(state, "shape") else {
                 return state;
             };
             let new_shape = mirror_rail(shape, mirror);
             with_property(state, "shape", new_shape).unwrap_or(state)
         }
-        _ => state,
+        // `Mirror.mirror(rotation, 16)`。
+        // `Mirror.mirror(rotation, 16)`.
+        Rule::Rotation16 => map_rotation16(state, |r| {
+            let corrected = if r > 8 { r - 16 } else { r };
+            match mirror {
+                Mirror::LeftRight => (8 - corrected + 16) % 16,
+                Mirror::FrontBack => (16 - corrected) % 16,
+                Mirror::None => r,
+            }
+        }),
+        // `mirror.rotation()` 是 `INVERT_Z` / `INVERT_X`，作用在方向上就是 `mirror.mirror`。
+        // `mirror.rotation()` is `INVERT_Z` / `INVERT_X`, which acts on a direction like
+        // `mirror.mirror`.
+        Rule::Orientation => map_orientation(state, |d| mirror.mirror_direction(d)),
+        Rule::FacingRotateOnly | Rule::Pillar | Rule::Identity => state,
+    }
+}
+
+/// `BlockState.rotate(rotation)`。
+///
+/// `BlockState.rotate(rotation)`.
+pub fn apply_rotation(state: u32, rotation: Rotation) -> u32 {
+    if rotation == Rotation::None {
+        return state;
+    }
+    match rule_of(state) {
+        // 这几类都只转 `facing`（`DoorBlock.rotate` 和 `StairBlock.rotate` 不动 `hinge` /
+        // `shape`）。
+        // These only turn `facing` (`DoorBlock.rotate` and `StairBlock.rotate` leave
+        // `hinge` / `shape` alone).
+        Rule::Facing | Rule::FacingRotateOnly | Rule::Rod | Rule::Door | Rule::Stair => {
+            rotate_facing_state(state, rotation)
+        }
+        // 四面属性的四个分支照抄。
+        // The four side-property branches, transcribed.
+        Rule::Sides => {
+            let pairs: &[(&str, &str)] = match rotation {
+                Rotation::Clockwise180 => &[
+                    ("north", "south"),
+                    ("east", "west"),
+                    ("south", "north"),
+                    ("west", "east"),
+                ],
+                Rotation::CounterClockwise90 => &[
+                    ("north", "east"),
+                    ("east", "south"),
+                    ("south", "west"),
+                    ("west", "north"),
+                ],
+                Rotation::Clockwise90 => &[
+                    ("north", "west"),
+                    ("east", "north"),
+                    ("south", "east"),
+                    ("west", "south"),
+                ],
+                Rotation::None => &[],
+            };
+            swap_properties(state, pairs)
+        }
+        Rule::Faces => map_faces(state, |d| rotation.rotate_facing(d)),
+        // `BaseRailBlock.rotate`：转 `shape`。
+        // `BaseRailBlock.rotate` turns `shape`.
+        Rule::Rail => {
+            let Some(shape) = property_of(state, "shape") else {
+                return state;
+            };
+            let new_shape = rotate_rail(shape, rotation);
+            with_property(state, "shape", new_shape).unwrap_or(state)
+        }
+        // 90 度时 `axis` 的 X↔Z 互换，180 度与不转时不变。
+        // 90 degrees swaps axis X and Z; 180 and none do not.
+        Rule::Pillar => rotate_pillar(state, rotation),
+        // `Rotation.rotate(rotation, 16)`。
+        // `Rotation.rotate(rotation, 16)`.
+        Rule::Rotation16 => map_rotation16(state, |r| {
+            let steps = match rotation {
+                Rotation::Clockwise90 => 4,
+                Rotation::Clockwise180 => 8,
+                Rotation::CounterClockwise90 => 12,
+                Rotation::None => 0,
+            };
+            (r + steps) % 16
+        }),
+        Rule::Orientation => map_orientation(state, |d| rotation.rotate_facing(d)),
+        Rule::Identity => state,
     }
 }
 
@@ -272,82 +508,42 @@ fn rotate_facing_state(state: u32, rotation: Rotation) -> u32 {
     with_property(state, "facing", rotation.rotate_facing(facing)).unwrap_or(state)
 }
 
-/// `BlockState.rotate(rotation)`。
+/// `MultifaceBlock.mapDirections` / `HugeMushroomBlock` 的六面映射：新的 `map(d)` 面取旧的
+/// `d` 面，所有面同时写。
 ///
-/// `BlockState.rotate(rotation)`.
-pub fn apply_rotation(state: u32, rotation: Rotation) -> u32 {
-    if rotation == Rotation::None {
-        return state;
+/// The six-face remap of `MultifaceBlock.mapDirections` / `HugeMushroomBlock`: the new
+/// `map(d)` face takes the old `d` face, all written at once.
+fn map_faces(state: u32, map: impl Fn(&str) -> &'static str) -> u32 {
+    let mut pairs: Vec<(&str, &str)> = Vec::with_capacity(6);
+    for direction in ["down", "up", "north", "south", "west", "east"] {
+        if property_of(state, direction).is_some() {
+            pairs.push((map(direction), direction));
+        }
     }
-    let Some(block) = block_of_state(state) else {
+    swap_properties(state, &pairs)
+}
+
+/// 改写 0..16 的 `rotation` 属性。
+///
+/// Rewrite the 0..16 `rotation` property.
+fn map_rotation16(state: u32, map: impl Fn(i32) -> i32) -> u32 {
+    let Some(value) = property_of(state, "rotation").and_then(|v| v.parse::<i32>().ok()) else {
         return state;
     };
-    match block.class {
-        // `HorizontalDirectionalBlock.rotate`：只转 `facing`。
-        // `HorizontalDirectionalBlock.rotate`: only `facing` turns.
-        BlockClass::WallTorchBlock
-        | BlockClass::ButtonBlock
-        | BlockClass::LadderBlock
-        | BlockClass::ChestBlock
-        | BlockClass::TrappedChestBlock
-        | BlockClass::EnderChestBlock
-        | BlockClass::EndPortalFrameBlock
-        | BlockClass::RedstoneWallTorchBlock
-        | BlockClass::CopperChestBlock
-        | BlockClass::WeatheringCopperChestBlock
-        | BlockClass::FurnaceBlock
-        | BlockClass::HopperBlock
-        | BlockClass::TrapDoorBlock
-        | BlockClass::FenceGateBlock
-        // `DoorBlock.rotate` 和 `StairBlock.rotate` 同样只转 `facing`（不动 `hinge` / `shape`）。
-        // `DoorBlock.rotate` and `StairBlock.rotate` also only turn `facing`.
-        | BlockClass::DoorBlock
-        | BlockClass::StairBlock => rotate_facing_state(state, rotation),
-        // `CrossCollisionBlock.rotate` 的四个分支照抄。
-        // The four `CrossCollisionBlock.rotate` branches, transcribed.
-        BlockClass::FenceBlock
-        | BlockClass::WallBlock
-        | BlockClass::IronBarsBlock
-        | BlockClass::StainedGlassPaneBlock => {
-            let pairs: &[(&str, &str)] = match rotation {
-                Rotation::Clockwise180 => &[
-                    ("north", "south"),
-                    ("east", "west"),
-                    ("south", "north"),
-                    ("west", "east"),
-                ],
-                Rotation::CounterClockwise90 => &[
-                    ("north", "east"),
-                    ("east", "south"),
-                    ("south", "west"),
-                    ("west", "north"),
-                ],
-                Rotation::Clockwise90 => &[
-                    ("north", "west"),
-                    ("east", "north"),
-                    ("south", "east"),
-                    ("west", "south"),
-                ],
-                Rotation::None => &[],
-            };
-            swap_properties(state, pairs)
-        }
-        // `BaseRailBlock.rotate`：转 `shape`。
-        // `BaseRailBlock.rotate` turns `shape`.
-        BlockClass::RailBlock
-        | BlockClass::PoweredRailBlock
-        | BlockClass::DetectorRailBlock => {
-            let Some(shape) = property_of(state, "shape") else {
-                return state;
-            };
-            let new_shape = rotate_rail(shape, rotation);
-            with_property(state, "shape", new_shape).unwrap_or(state)
-        }
-        // `RotatedPillarBlock.rotate`：90 度时 `axis` 的 X↔Z 互换，180 度与不转时不变。
-        // `RotatedPillarBlock.rotate`: 90 degrees swaps axis X and Z; 180 and none do not.
-        BlockClass::RotatedPillarBlock | BlockClass::ChainBlock => rotate_pillar(state, rotation),
-        _ => state,
-    }
+    with_property(state, "rotation", &map(value).to_string()).unwrap_or(state)
+}
+
+/// 改写 `FrontAndTop` 的 `orientation`（形如 `north_up`）：前、上两个方向各自映射。
+///
+/// Rewrite a `FrontAndTop` `orientation` (like `north_up`): map the front and the top
+/// direction each.
+fn map_orientation(state: u32, map: impl Fn(&str) -> &'static str) -> u32 {
+    let Some((front, top)) = property_of(state, "orientation").and_then(|v| v.split_once('_'))
+    else {
+        return state;
+    };
+    let value = format!("{}_{}", map(front), map(top));
+    with_property(state, "orientation", &value).unwrap_or(state)
 }
 
 /// `RotatedPillarBlock.rotatePillar`。
