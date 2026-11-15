@@ -170,11 +170,12 @@ impl StateProvider {
         }
     }
 
-    /// 官方 `BlockStateProvider.getState(level, random, pos)`；`rule_based` 需要世界和
-    /// 位置，这里返回 `None`（它由 DiskFeature 走 [`Self::get_optional_state`]）。
+    /// 官方 `BlockStateProvider.getState(level, random, pos)` 在「不需要世界」时的形态。
+    /// `rule_based` 要读世界和位置，这里返回 `None`（它走 [`Self::get_optional_state`]）。
     ///
-    /// Official `BlockStateProvider.getState(level, random, pos)`; `rule_based` needs the
-    /// world and pos, so it returns `None` here (DiskFeature uses `get_optional_state`).
+    /// The world-free form of `BlockStateProvider.getState(level, random, pos)`.
+    /// `rule_based` needs the world and position, so it returns `None` here and goes
+    /// through [`Self::get_optional_state`] instead.
     pub fn get_state(&self, random: &WorldgenRandom) -> Option<u32> {
         match self {
             Self::Simple(state) => Some(*state),
@@ -326,6 +327,19 @@ mod tests {
     }
 
     #[test]
+    fn holder_string_is_resolved_through_the_lookup() {
+        // 字符串 holder 在有注册表时解析成被引用的 provider。
+        // A string holder parses to the referenced provider when the lookup knows it.
+        let referenced: Value = json!({"id": "minecraft:poppy"});
+        let holder: Value = json!("minecraft:test_provider");
+        let provider = StateProvider::parse_with(&holder, &|name| {
+            (name == "minecraft:test_provider").then_some(&referenced)
+        })
+        .unwrap();
+        assert_eq!(provider.possible_states().len(), 1);
+    }
+
+    #[test]
     fn parses_random_block_from_a_tag() {
         // `coral/block_decoration` uses `{"blocks": "#minecraft:corals", "type":
         // "random_block"}`.
@@ -390,19 +404,8 @@ mod tests {
         let provider = StateProvider::parse(&sand).unwrap();
         assert!(provider.supported());
         assert_eq!(provider.possible_states().len(), 2);
-    }
-
-    #[test]
-    fn holder_string_is_resolved_through_the_lookup() {
-        // 字符串 holder 在有注册表时解析成被引用的 provider，没有时返回 `None`。
-        // A string holder parses to the referenced provider when the lookup knows it.
-        let referenced: Value =
-            json!({"type": "minecraft:simple", "state": {"id": "minecraft:poppy"}});
-        let holder: Value = json!("minecraft:test_provider");
-        let provider = StateProvider::parse_with(&holder, &|name| {
-            (name == "minecraft:test_provider").then_some(&referenced)
-        })
-        .unwrap();
-        assert_eq!(provider.possible_states().len(), 1);
+        // `rule_based` 需要世界和位置，无位置版本返回 `None`。
+        // `rule_based` needs the world and position, so the world-free form returns `None`.
+        assert!(provider.get_state(&random()).is_none());
     }
 }

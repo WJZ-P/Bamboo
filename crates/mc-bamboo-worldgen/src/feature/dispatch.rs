@@ -13,11 +13,16 @@ use crate::random::WorldgenRandom;
 
 use super::{
     bamboo::BambooFeature,
+    block_blob::{self, BlockBlobFeature},
     block_column::BlockColumnFeature,
     blue_ice::{self, BlueIceFeature},
     disk::{self, DiskFeature},
+    geode::{self, GeodeFeature},
     huge_mushroom::HugeMushroomFeature,
+    iceberg::{self, IcebergFeature},
+    lake::{self, LakeFeature},
     large_dripstone::{self, LargeDripstoneFeature},
+    monster_room::{self, MonsterRoomFeature},
     multiface::MultifaceGrowthFeature,
     ores,
     placement::OreFeature,
@@ -41,12 +46,17 @@ type Pos = (i32, i32, i32);
 /// order of type ID.
 pub enum Leaf {
     Bamboo(BambooFeature),
-    BlueIce(BlueIceFeature),
+    BlockBlob(BlockBlobFeature),
     BlockColumn(BlockColumnFeature),
+    BlueIce(BlueIceFeature),
     Disk(DiskFeature),
     FallenTree(Box<FallenTreeFeature>),
+    Geode(Box<GeodeFeature>),
     HugeMushroom(Box<HugeMushroomFeature>),
+    Iceberg(IcebergFeature),
+    Lake(Box<LakeFeature>),
     LargeDripstone(LargeDripstoneFeature),
+    MonsterRoom(MonsterRoomFeature),
     Multiface(MultifaceGrowthFeature),
     Ore(OreFeature),
     SculkPatch(SculkPatchFeature),
@@ -66,7 +76,11 @@ impl Leaf {
     /// Whether every nested predicate / state provider in the config is ported.
     fn is_supported(&self) -> bool {
         match self {
+            Self::BlockBlob(blob) => blob.supported(),
             Self::Disk(disk) => disk.supported(),
+            Self::Geode(geode) => geode.supported(),
+            Self::Lake(lake) => lake.supported(),
+            Self::LargeDripstone(feature) => feature.supported(),
             Self::Spike(spike) => spike.supported(),
             _ => true,
         }
@@ -86,16 +100,21 @@ pub fn parse_leaf<'a>(
 ) -> Option<Leaf> {
     let leaf = match kind {
         "minecraft:bamboo" => Leaf::Bamboo(BambooFeature::parse(config)?),
-        "minecraft:blue_ice" => Leaf::BlueIce(BlueIceFeature::parse(config).ok()?),
+        "minecraft:block_blob" => Leaf::BlockBlob(BlockBlobFeature::parse(config).ok()?),
         "minecraft:block_column" => Leaf::BlockColumn(BlockColumnFeature::parse(config, lookup)?),
+        "minecraft:blue_ice" => Leaf::BlueIce(BlueIceFeature::parse(config).ok()?),
         "minecraft:disk" => Leaf::Disk(DiskFeature::parse(config).ok()?),
         "minecraft:fallen_tree" => Leaf::FallenTree(Box::new(FallenTreeFeature::parse(config)?)),
+        "minecraft:geode" => Leaf::Geode(Box::new(GeodeFeature::parse(config).ok()?)),
         "minecraft:huge_brown_mushroom" | "minecraft:huge_red_mushroom" => {
             Leaf::HugeMushroom(Box::new(HugeMushroomFeature::parse(kind, config)?))
         }
+        "minecraft:iceberg" => Leaf::Iceberg(IcebergFeature::parse(config).ok()?),
+        "minecraft:lake" => Leaf::Lake(Box::new(LakeFeature::parse(config).ok()?)),
         "minecraft:large_dripstone" => {
             Leaf::LargeDripstone(LargeDripstoneFeature::parse(config).ok()?)
         }
+        "minecraft:monster_room" => Leaf::MonsterRoom(MonsterRoomFeature::parse(config).ok()?),
         "minecraft:multiface_growth" => Leaf::Multiface(MultifaceGrowthFeature::parse(config)?),
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
         // `minecraft:sculk_patch` 已写但**未对拍到 0 不一致**（见汇报），按规矩不接入：
@@ -131,12 +150,17 @@ pub fn place_leaf(
 ) -> bool {
     match leaf {
         Leaf::Bamboo(feature) => feature.place(world, random, pos),
-        Leaf::BlueIce(feature) => blue_ice::place(feature, world, random, pos),
+        Leaf::BlockBlob(blob) => block_blob::place(blob, world, random, pos),
         Leaf::BlockColumn(feature) => feature.place(world, random, pos),
+        Leaf::BlueIce(feature) => blue_ice::place(feature, world, random, pos),
         Leaf::Disk(disk) => disk::place(disk, world, random, pos),
         Leaf::FallenTree(tree) => tree.place(world, random, pos),
+        Leaf::Geode(geode) => geode::place(geode, world, random, pos),
         Leaf::HugeMushroom(mushroom) => mushroom.place(world, random, pos),
+        Leaf::Iceberg(iceberg) => iceberg::place(iceberg, world, random, pos),
+        Leaf::Lake(lake) => lake::place(lake, world, random, pos),
         Leaf::LargeDripstone(feature) => large_dripstone::place(feature, world, random, pos),
+        Leaf::MonsterRoom(room) => monster_room::place(room, world, random, pos),
         Leaf::Multiface(feature) => feature.place(world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SculkPatch(feature) => sculk_patch::place(feature, world, random, pos),

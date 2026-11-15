@@ -220,6 +220,8 @@ final class FeatureLevelHandler implements InvocationHandler {
                 return y < this.minY || y > this.minY + this.height - 1;
             }
             case "isInsideBuildHeight": {
+                // `LevelHeightAccessor.isInsideBuildHeight` 就是 `!isOutsideBuildHeight`。
+                // `LevelHeightAccessor.isInsideBuildHeight` is `!isOutsideBuildHeight`.
                 int y = args[0] instanceof BlockPos pos ? pos.getY() : (Integer) args[0];
                 return y >= this.minY && y <= this.minY + this.height - 1;
             }

@@ -17,6 +17,7 @@ use super::{
 };
 
 /// `SpikeFeature` 的配置。
+///
 /// `SpikeFeature` configuration.
 #[derive(Debug, Clone)]
 pub struct SpikeFeature {
@@ -45,12 +46,16 @@ impl SpikeFeature {
         })
     }
 
+    /// 嵌套谓词是否都已移植。
+    ///
+    /// Whether every nested predicate is ported.
     pub fn supported(&self) -> bool {
         self.can_place_on.is_supported() && self.can_replace.is_supported()
     }
 }
 
 /// `SpikeFeature.place`。
+///
 /// `SpikeFeature.place`.
 pub fn place(
     spike: &SpikeFeature,
@@ -150,4 +155,24 @@ pub fn place(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_ice_spike() {
+        let root: Value =
+            serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).expect("worldgen json");
+        let features = root
+            .get("feature")
+            .and_then(Value::as_object)
+            .expect("feature registry");
+        let config = features
+            .get("minecraft:ice_spike")
+            .expect("ice_spike config");
+        let spike = SpikeFeature::parse(config).expect("parses");
+        assert!(spike.supported());
+    }
 }

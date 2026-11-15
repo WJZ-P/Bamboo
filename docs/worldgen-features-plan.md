@@ -717,7 +717,7 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 `Context::uncached()` 组合从未单独对拍过**。优先核对这两条 climate sampler
 构造路径是否逐位一致，以及 `interpolated` 在 uncached 单点路径下的行为
 （`docs/worldgen.md` 提到它在 1×1×1 上不是纯函数）。
-### 本轮（cb-wg-feat-a）追加
+   720|### 本轮（cb-wg-feat-a）追加
 
 `--ore-only` 泛化成 `--types ID,ID`（Java 侧 `ChunkgenOracle.java` 和 Rust 侧
 `chunkgen.rs` 两边对齐，`features_per_step` 的全局 index、`setFeatureSeed` 参数不变）；
@@ -741,6 +741,70 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | `--types minecraft:disk` / `minecraft:spring_feature` / `minecraft:underwater_magma`（分别跑） | 多种子 / 区块 **0 不一致**（magma 跑到 72 中心 / 63700992 方块） |
 | `--steps 6 --ore-only`（回归） | `--seeds 2 --chunks 4 --salt 1` **0 不一致** |
 | `--through carvers`（旧阶段回归） | `--seeds 2 --chunks 6 --salt 1` **0 不一致** |
+| `--steps 2 --feature-types minecraft:geode --chunk X Z`（晶洞，6 个已知生成点） | 每个 **0 不一致**（每区块 884736 方块、886272 次比较） |
+| `--steps 1 --feature-types minecraft:lake` | `--seeds 2 --chunks 4` / `--seeds 3 --chunks 8 --salt 7`（24 中心 / 21233664 方块）均 **0 不一致** |
+| `--steps 2 --feature-types minecraft:large_dripstone --chunk 2 36 --scan 25`（25 个滴水石洞穴区块） | **0 不一致**（22118400 方块）；这批位置官方与 Bamboo 都没长柱 |
+| `--steps 2 --feature-types minecraft:large_dripstone --chunk -53 -206` / `-50 -200` / `-52 -204` / `-49 -199`（4 个真的长柱的区块） | 每个 **0 不一致**；故意把 `dripstone_block` 改成 `calcite` 后报 **13 / 33 处不一致**，主路径已逐方块覆盖 |
+| `--steps 4 --feature-types minecraft:blue_ice --chunk X Z`，5 个真实生成点 `(255,-109) (260,-106) (242,-104) (243,-103) (241,-102)` | 每个 **0 不一致**（884736 方块 / 886272 次比较）；故意把 `yOff < 2` 改成 `yOff < 3` 后报 **5 处不一致** |
+| `--steps 4 --feature-types minecraft:spike --chunk 268 -300 --scan 3`（冰刺群系） | **0 不一致**（9 中心 / 7962624 方块）；故意把 `nextInt(4) + 7` 改成 `+ 8` 后报 **160 处不一致** |
+| `--steps 3 --feature-types minecraft:monster_room --chunk 3 -1` / `--chunk 4 -6` / `--chunk 3 1` | 三个真实生成点各 **0 不一致**；`--seeds 2 --chunks 4` **0 不一致**（8 中心 / 7077888 方块）；故意把 `nextInt(2) + 2` 改成 `+ 3` 后报 **160 处不一致** |
+| `--steps 7 --feature-types minecraft:speleothem_cluster --chunk -55 -200 --scan 9`（3×3 网格） | **0 不一致**（9 中心 / 7962624 方块）；`--chunk -56 -200 --scan 3` / `--chunk -53 -200 --scan 3` 也各 **0 不一致**；故意把 `next_float() > density` 改成 `> density + 0.9` 后报 **105 处不一致** |
+| `--steps 4`（step 4 全量） | `--seeds 2 --chunks 4` **0 不一致** |
+| `--steps 2`（step 2 全量：`lake` / `geode` / `iceberg` / `large_dripstone` / `block_blob`） | `--seeds 2 --chunks 4` **0 不一致** |
+
+**本轮的接手工作**（2026-11-14 接续）：
+
+* 先把前任留下的、损坏的 `git merge cb-wg-aquifer` 中止，改为直接合并 `main`
+  （含水层修复已在 main 上）。前任的工作区冲突解决把 main 侧的组合类地物、
+  `simple_block`、`block_predicate`、`composition`、`heightmap`、`survival` 全丢了；
+  这次以 main 为骨架重新合并，把我方类型挂上去，同时删掉了并行的重复实现
+  （`predicates.rs` 并入 `block_predicate.rs`，`state_provider.rs` 合并两边形态）。
+* `--types` 诊断白名单被 main 的 `--feature-types` 取代（超集：支持按 placed feature
+  名字或 Feature 类型 ID 匹配），保留 main 的实现。
+* 新增 `geode.rs`、`lake.rs`；`noise.rs` 补 `NormalNoise.createParity` 与
+  `computeParityBaseAmplitude`；`provider.rs` 补 `IntProvider::max_value`；
+  `FeatureWorld` 补 `seed` / `sea_level` / `is_inside_build_height` /
+  `is_outside_build_height`；`block_predicate.rs` 补 `inside_world_bounds`；
+  `placement.rs` 补 `environment_scan`。
+* `ChunkgenOracle.java` 的 `WorldGenLevel` 代理补 `isInsideBuildHeight`
+  （此前 `environment_scan` 会抛 `UnsupportedOperationException`）；`block_predicate.rs`
+  补 `inside_world_bounds`；`placement.rs` 补 `environment_scan` 修饰器；
+  `provider.rs` 补 `IntProvider::max_value` 与浮点 `FloatProvider`（只 `uniform`）。
+* 新增 `large_dripstone.rs`（大型滴水石柱）：`Column.scan` 空腔扫描、钟乳石/石笋的
+  「往回挪到根嵌进石头」、`SpeleothemUtils` 的高度曲线与风偏移，都按 26.3 移植。
+* 新增 `blue_ice.rs`（冻洋蓝冰）：200 次尝试里的 `nextInt(5)` / `nextInt(6)` /
+  两个 `nextInt(xzDiff)` 顺序，以及 `yOff / 2` 的**截断除法**（Java 负数向零取整，
+  不能用 `div_euclid`）都照官方。
+* 新增 `spike.rs`（冰刺）：锥体上下对称、`runLength` 柱脚、`Mth.ceil(scale)` 照官方。
+  **关键坑**：官方的 `(insideCircle) && (keep)` 会在 `insideCircle` 为假时短路掉 `keep`
+  里的 `random.nextFloat()`；一开始把 `keep` 提前求值，导致每格多取一次随机数，对拍
+  报 6 处不一致，改正后 0 不一致。
+* 新增 `speleothem_cluster.rs`（滴水石簇 / 硫磺尖簇）：`Column.scan`、`withFloor`、
+  `canPlacePool`、`replaceBlocksWithBaseBlocks`、`growSpeleothem`、`clampedMap` 都按官方
+  写成；`WorldgenRandom` 补了 `next_gaussian`（`MarsagliaPolarGaussian`，缓存挂在
+  `WorldgenRandom` 上、跨 `setSeed` 保留），`FloatProvider` 扩成 `uniform` +
+  `clamped_normal` 并接受裸浮点常量（`wetness: 0.0`）。
+  **之前卡在 Java 代理**：`ChunkgenOracle` 的 `WorldGenLevel` 缺 `isWaterAt`，
+  `SpeleothemUtils.growSpeleothem` 一调用就抛 `UnsupportedOperationException`；补上后
+  在滴水石洞穴群系（`--chunk -55 -200 --scan 9`）0 不一致。
+* 新增 `monster_room.rs`（地牢）：之前差 2 格的根因是 `dy` 循环少了 `dy = 3`
+  （写成 `for dy in (0..=3).rev().map(|v| v - 1)`，漏了 3），改成 `(-1..=3).rev()` 后
+  三个真实生成点（`(3,-1)` / `(4,-6)` / `(3,1)`）全部 0 不一致。
+* `ChunkgenOracle.java` 的 `WorldGenLevel` 代理补 `isInsideBuildHeight` 与
+  `isWaterAt`（共用文件，各 4–8 行）。
+* 两个选点探针（`#[ignore]` 测试，手动跑）：
+  `cargo test --release -p mc-bamboo-worldgen --lib list_geode_chunks -- --ignored`
+  （环境变量 `GEODE_SEED` / `GEODE_RADIUS`）和
+  `... find_dripstone_caves_chunks -- --ignored`（`DRIP_SEED` / `DRIP_RADIUS`，
+  只采群系，比跑地形快一个数量级）。晶洞和滴水石柱都太稀疏，随机区块撞不上，
+  必须先扫出真实生成点再 `--chunk X Z` 逐个复核。
+
+晶洞：`rarity_filter` 是 1/24，seed 0、半径 8 里只有 6 个区块生成，逐个对拍全 0 不一致。
+滴水石柱：`dripstone_caves` 群系本身很稀疏（seed 0 的 ±64 区块里只有 9 个），
+在这 9 个位置及其 5×5 邻域里，官方和 Bamboo 都**没有**长出柱子——所以「实际生成柱」这条
+路径本轮没有被逐方块覆盖，只覆盖了「该位置不长柱」的路径。两个新类型都先故意改坏一处
+确认对拍会失败（晶洞改 `filling` 层半径报 130 处；湖把椭球个数从 `nextInt(4)+4` 改成
+`+3` 报 40 处），还原后回 0。
 
 ### 本轮（cb-wg-caves）追加
 
@@ -865,15 +929,15 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
 
 **还没做**（按 5.2 的分类，仍标 `unsupported` / `skipped`）：
 
-* step 1/2/3/4 的其余非植被类型：`lake`、`geode`、`iceberg`、
-  `block_blob`（forest_rock）、`monster_room`、`fossil`、`overlay`（desert_well）。
-  `large_dripstone`、`speleothem_cluster`、`speleothem`（`pointed_dripstone` /
-  `sulfur_spike`）、`spike`、`blue_ice`、`disk(ice_patch)`、`freeze_top_layer`
-  已由 `cb-wg-caves` 移植并对拍 0 不一致（见上）。
+* step 1/2/3/4/7/10 的其余非植被类型：`fossil`、`overlay`（desert_well）。
+  已完成的是 `disk`、`underwater_magma`、`spring_feature`、`iceberg`、`block_blob`、
+  `geode`、`lake`、`large_dripstone`、`blue_ice`、`spike`、`monster_room`、
+  `speleothem_cluster`（`cb-wg-feat-a`），以及 `speleothem`（`pointed_dripstone` /
+  `sulfur_spike`）、`freeze_top_layer`（`cb-wg-caves`）。
 * step 7（`UNDERGROUND_DECORATION`）的非植被部分：`sulfur_spike_cluster` /
   `dripstone_cluster`（`speleothem_cluster`）已移植并对拍 0 不一致。
   `sculk_vein` 的 `multiface_growth` 由 `cb-wg-aquatic` 移植（`feature/multiface.rs`），
-  本分支合入后在 `deep_dark` 定点对拍 0 不一致（9 中心 / 7962624 方块）；
+  在 `deep_dark` 定点对拍 0 不一致（9 中心 / 7962624 方块）；
   **默认坐标下它一次都不放方块，必须 `--chunk -42 111 --scan N` 才比得到**。
   `sculk_patch_deep_dark`（`sequence` 包着 `sculk_patch`）的移植已写在
   `feature/sculk_patch.rs`（`SculkPatchFeature` + `SculkSpreader` + `SculkBlock` /
@@ -883,9 +947,9 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
   现状：`deep_dark` 单区块 8 mismatches、`--scan 3` 160 处，`--steps 0` 基线为 0；
   两边的写入序列前 21 行一致、第 22 行分叉，怀疑同一格 `sculk_vein` 的面集合在
   两个时间点不同。细节与已排除项见 `reports/cb-wg-caves.md` 的疑点清单。
-* 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`monster_room` 要刷怪笼 /
-  战利品表 / 方块实体；`geode` / `lake` / `iceberg` / `block_blob` 是较大的独立 feature。
-* 植被类型（树、花、草、patch、selector / sequence 容器，见 5.2）由 `cb-wg-feat-b` 负责，本轮不做。
+* 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`overlay`（沙漠井）依赖
+  `minecraft:template` 地物（要落结构模板 + processor），那条线还没做。
+  植被类型（树、花、草、patch、selector / sequence 容器，见 5.2）由 `cb-wg-feat-b` 负责。
 * `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按「已移植集合」
   直接输出 `skipped`，`--types` 是手工白名单。
 * 接进 Director 的**多阶段流水线形状**已经就位（流水线分支：`PipelineKind::Staged`
@@ -902,6 +966,72 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
   `LevelChunkSection`，**绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是
   primed 后固定的（照官方）。接树 / 湖时复用同一个 `set_block_with_heightmaps` 即可。
 
+## 5.2 `features_per_step` 全部 placed feature 的分类（非植被 / 植被）
+
+分工按「placed feature 的配置类型」（`Feature.DIRECT_CODEC` 的类型 ID）划界：`cb-wg-feat-a`
+做非植被，`cb-wg-feat-b` 做植被。下表把导出的 `features_per_step`（11 步、共 167 个
+placed feature，主世界 67 个群系的全局有序并集）按类型逐类列出。`ore`（step 6 的 29 个 +
+step 7 的 1 个）是流水线里程碑已完成的，本轮不再改，列出来只是为了让表完整。
+
+判据：树、花草、蘑菇、patch、海草/海带/珊瑚、竹、甘蔗、仙人掌、藤蔓、地衣、发光
+地衣、孢子花等，以及只包着这些的 selector / sequence 容器归植被；湖、晶洞、冰山、森林
+岩石、滴水石、矿石、disk、地下水岩浆、怪物房、化石、泉水、积雪结冰、地下装饰里的
+sculk/硫磺/滴水石簇归非植被。**拿不准的容器类型（`sequence`、`simple_random_selector`、
+`multiface_growth`、`root_system`、`random_boolean_selector`）一律归植被**，在汇报里列出。
+
+### 非植被（`cb-wg-feat-a`）
+
+| step | 类型 ID | placed feature |
+|---:|---|---|
+| 1 | `minecraft:lake` | `lake_lava_underground`, `lake_lava_surface` |
+| 2 | `minecraft:geode` | `amethyst_geode` |
+| 2 | `minecraft:iceberg` | `iceberg_packed`, `iceberg_blue` |
+| 2 | `minecraft:large_dripstone` | `large_dripstone` |
+| 2 | `minecraft:block_blob` | `forest_rock` |
+| 3 | `minecraft:monster_room` | `monster_room`, `monster_room_deep` |
+| 3 | `minecraft:fossil` | `fossil_upper`, `fossil_lower` |
+| 4 | `minecraft:spike` | `ice_spike` |
+| 4 | `minecraft:disk` | `ice_patch` |
+| 4 | `minecraft:overlay` | `desert_well` |
+| 4 | `minecraft:blue_ice` | `blue_ice` |
+| 6 | `minecraft:ore` | 29 个 `ore_*`（已完成） |
+| 6 | `minecraft:disk` | `disk_grass`, `disk_sand`, `disk_clay`, `disk_gravel` |
+| 6 | `minecraft:underwater_magma` | `underwater_magma` |
+| 7 | `minecraft:ore` | `ore_infested`（已完成） |
+| 7 | `minecraft:speleothem_cluster` | `sulfur_spike_cluster`, `dripstone_cluster` |
+| 8 | `minecraft:spring_feature` | `spring_water`, `spring_lava`, `spring_lava_frozen` |
+| 10 | `minecraft:freeze_top_layer` | `freeze_top_layer` |
+
+step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_predicate_filter`（155 处
+中的 disk 几处）、以及 disk 用到的 `rule_based` / `simple` 状态提供者、`matching_blocks` /
+`matching_fluids` / `solid` / `any_of` / `not` 谓词也归 `cb-wg-feat-a`（它们是放置/配置的
+公共构件，不是某一类地物）。
+
+### 植被（`cb-wg-feat-b`）
+
+| step | 类型 ID | 个数 | 代表 placed feature |
+|---:|---|---:|---|
+| 1 | `minecraft:root_system` | 1 | `rooted_sulfur_spring`（拿不准，归植被） |
+| 1 | `minecraft:sequence` | 1 | `sulfur_pool`（拿不准，归植被） |
+| 7 | `minecraft:multiface_growth` | 1 | `sculk_vein`（拿不准，归植被） |
+| 7 | `minecraft:sequence` | 1 | `sculk_patch_deep_dark`（拿不准，归植被） |
+| 7 | `minecraft:simple_random_selector` | 2 | `sulfur_spike`, `pointed_dripstone`（拿不准，归植被） |
+| 9 | `minecraft:tree` | 2 | `trees_swamp`, `trees_cherry` |
+| 9 | `minecraft:random_selector` | 23 | `trees_plains`, `trees_savanna`, … |
+| 9 | `minecraft:weighted_random_selector` | 9 | `seagrass_river`, `trees_dappled_forest`, … |
+| 9 | `minecraft:simple_random_selector` | 3 | `flower_forest_flowers`, `warm_ocean_vegetation`, … |
+| 9 | `minecraft:random_boolean_selector` | 2 | `lush_caves_clay`, `mushroom_island_vegetation` |
+| 9 | `minecraft:simple_block` | 52 | `flower_plains`, `patch_grass_normal`, 蘑菇、孢子和花等 |
+| 9 | `minecraft:bamboo` | 2 | `bamboo`, `bamboo_light` |
+| 9 | `minecraft:block_column` | 9 | `cave_vines`, `patch_sugar_cane`, `patch_cactus`, `kelp_*` |
+| 9 | `minecraft:vegetation_patch` | 3 | `pale_moss_patch`, `lush_caves_vegetation`, … |
+| 9 | `minecraft:vines` | 2 | `classic_vines_cave_feature`, `vines` |
+| 9 | `minecraft:multiface_growth` | 1 | `glow_lichen` |
+| 9 | `minecraft:root_system` | 1 | `rooted_azalea_tree` |
+
+`placed_feature` 注册表里还有一批只在下界/末地群系出现的类型（`end_island`、`end_spike`、
+`chorus_plant`、`huge_fungus`、`delta_feature`、`netherrack_replace_blobs`、`void_start_platform`
+等），它们**不在**主世界 `features_per_step` 里，本轮不做。
 ### 植被地物进度（分支 `cb-wg-feat-b`）
 按 `features_per_step` 分类见 `docs/worldgen-vegetal-features.md`：step 9 共 109 项。
 **范围调整（2026-11-14）**：树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）移交

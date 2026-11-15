@@ -8,18 +8,25 @@
 //! `biome_features` 和 `features_per_step` 四个键，见 `docs/worldgen-features-plan.md`。
 
 pub mod bamboo;
+pub mod block_blob;
 pub mod block_column;
 pub mod block_predicate;
 pub mod blue_ice;
 pub mod composition;
 pub mod disk;
 pub mod dispatch;
+#[cfg(test)]
+pub mod dripstone_probe;
 pub mod dripstone_utils;
 pub mod freeze_top_layer;
+pub mod geode;
 pub mod heightmap;
 pub mod huge_mushroom;
+pub mod iceberg;
 pub mod java_set;
+pub mod lake;
 pub mod large_dripstone;
+pub mod monster_room;
 pub mod multiface;
 pub mod ores;
 pub mod placement;
