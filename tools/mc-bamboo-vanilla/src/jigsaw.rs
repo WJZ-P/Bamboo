@@ -94,6 +94,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "load" => run_load(command, work_dir),
         "apply" => run_apply(command, work_dir),
         "capped" => run_capped(command, work_dir),
+        "cappedfull" => run_capped_full(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
@@ -1607,6 +1608,218 @@ fn split_java_row(line: &str, query_by_key: &HashMap<String, &String>) -> Option
         }
     }
     None
+}
+
+/// `cappedfull` 模式：带真实种子跑完整 `process_blocks`（含 `finalize_capped`），
+/// 与官方 `processBlockInfos` 逐方块比。这是 `capped` 三段式验证之外的端到端检查。
+///
+/// `cappedfull` mode: runs the whole `process_blocks` with a real seed (so
+/// `finalize_capped` really executes) and compares block by block with vanilla
+/// `processBlockInfos`.
+fn run_capped_full(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    let raw: Value =
+        serde_json::from_str(WORLDGEN).map_err(|error| format!("bad worldgen.json: {error}"))?;
+    let lists = ProcessorLists::parse(raw.get("processor_list").ok_or("missing processor_list")?)?;
+
+    // 只有含 `capped` 的列表才有意义（其余走 `apply` 已覆盖）。
+    let mut queries = Vec::new();
+    for name in lists.names().cloned().collect::<Vec<_>>() {
+        let processors = lists.get(&name).ok_or("missing list")?;
+        if !processors
+            .iter()
+            .any(|processor| matches!(processor, Processor::Capped { .. }))
+        {
+            continue;
+        }
+        for seed in [0_i64, 1, 42, -7] {
+            for piece in [(0, 64, 0), (-13, 40, 27)] {
+                queries.push(build_capped_full_query(&name, seed, piece));
+            }
+        }
+    }
+    let queries_path = work_dir.join("jigsaw_capped_full_queries.txt");
+    fs::write(&queries_path, queries.join("\n"))
+        .map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("cappedfull")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_capped_full(&String::from_utf8_lossy(&output.stdout), &queries, &lists)
+}
+
+/// 一条 `cappedfull` 查询：`list|seed|piece(3)|worldState|count|blocks`。
+///
+/// One `cappedfull` query line.
+fn build_capped_full_query(name: &str, seed: i64, piece: (i32, i32, i32)) -> String {
+    // `minecraft:trail_ruins_replaceable` 只含 `minecraft:gravel`，所以至少要放几个砾石，
+    // `capped` 才会真的替换；其余方块作为不命中的对照。
+    // `minecraft:trail_ruins_replaceable` only contains `minecraft:gravel`, so the batch
+    // needs several gravel blocks for `capped` to do anything; the rest are controls.
+    let states = [
+        "minecraft:gravel",
+        "minecraft:gravel",
+        "minecraft:gravel",
+        "minecraft:gravel",
+        "minecraft:gravel",
+        "minecraft:gravel",
+        "minecraft:stone",
+        "minecraft:deepslate_bricks",
+    ];
+    let mut line = format!(
+        "{name}|{seed}|{}|{}|{}|minecraft:air|{}",
+        piece.0,
+        piece.1,
+        piece.2,
+        states.len()
+    );
+    for (index, state) in states.iter().enumerate() {
+        // 查询里放**模板相对坐标**：官方 `processBlockInfos` 自己会
+        // `calculateRelativePosition(...).offset(position)`，所以这里不能预先加 `piece`。
+        // The query holds template-relative positions: vanilla `processBlockInfos` adds
+        // `position` itself, so `piece` must not be pre-added.
+        let pos = ((index as i32) % 4, index as i32 / 4, 0);
+        line.push_str(&format!("|{}|{}|{}|{state}", pos.0, pos.1, pos.2));
+    }
+    line
+}
+
+fn compare_capped_full(
+    stdout: &str,
+    queries: &[String],
+    lists: &ProcessorLists,
+) -> Result<(), String> {
+    let mut java_a: HashMap<String, usize> = HashMap::new();
+    let mut java_s: HashMap<String, Vec<String>> = HashMap::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() < 9 {
+            continue;
+        }
+        // key 是前 7 段（list|seed|piece(3)|worldState|count）。
+        // The key is the first seven fields.
+        let key = fields[1..8].join("|");
+        match fields[0] {
+            "A" => {
+                java_a.insert(key, fields[8].parse().unwrap_or(0));
+            }
+            "S" => {
+                java_s.entry(key).or_default().push(fields[8..].join("|"));
+            }
+            _ => {}
+        }
+    }
+
+    let mut checked = 0usize;
+    let mut blocks_checked = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for query in queries {
+        let fields: Vec<&str> = query.split('|').collect();
+        let list_id = fields[0];
+        let seed = fields[1]
+            .parse::<i64>()
+            .map_err(|error| format!("bad seed: {error}"))?;
+        let piece = (
+            parse_i32(fields[2])?,
+            parse_i32(fields[3])?,
+            parse_i32(fields[4])?,
+        );
+        let world_state = fields[5].to_owned();
+        let count: usize = parse_i32(fields[6])? as usize;
+        let mut blocks = Vec::with_capacity(count);
+        let mut at = 7;
+        for _ in 0..count {
+            let pos = (
+                parse_i32(fields[at])?,
+                parse_i32(fields[at + 1])?,
+                parse_i32(fields[at + 2])?,
+            );
+            let state = fields[at + 3].to_owned();
+            at += 4;
+            blocks.push(ProcessBlock {
+                // 查询里是模板相对坐标，世界坐标由 `piece + pos` 得到（与官方一致的默认
+                // settings 语义）。
+                // The query holds template-relative positions; the world position is
+                // `piece + pos`, matching vanilla with default settings.
+                pos,
+                world_pos: (pos.0 + piece.0, pos.1 + piece.1, pos.2 + piece.2),
+                state: BlockStateSpec::parse_str(&state)?,
+            });
+        }
+        let processors = lists
+            .get(list_id)
+            .ok_or_else(|| format!("Rust missing processor list {list_id}"))?;
+        let key = fields[..7].join("|");
+        let level = FakeLevel::new(&world_state);
+        let processed = processor_apply::process_blocks(
+            processors,
+            &blocks,
+            &level,
+            processor_apply::PlaceSettings {
+                piece_position: piece,
+                reference_pos: piece,
+                chunk_bb: None,
+                level_seed: seed,
+                explicit_random: None,
+            },
+        );
+        checked += 1;
+        blocks_checked += processed.len();
+        let Some(want_count) = java_a.get(&key) else {
+            return Err(format!("Java missing A for {key}"));
+        };
+        if *want_count != processed.len() {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{key}: kept rust {} java {want_count}",
+                    processed.len()
+                ));
+            }
+            continue;
+        }
+        let want_states = java_s.get(&key).cloned().unwrap_or_default();
+        for (index, block) in processed.iter().enumerate() {
+            let want = format!(
+                "{}|{}|{}|{}",
+                block.world_pos.0,
+                block.world_pos.1,
+                block.world_pos.2,
+                block.state.text()
+            );
+            if want_states.get(index).is_none_or(|got| *got != want) {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!(
+                        "{key}[{index}]: rust {want} java {:?}",
+                        want_states.get(index)
+                    ));
+                }
+            }
+        }
+    }
+    if checked != queries.len() {
+        return Err(format!(
+            "checked {checked} capped-full queries, expected {}",
+            queries.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches} differences over {checked} queries; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!("jigsaw cappedfull: {checked} queries, {blocks_checked} blocks, all identical");
+    Ok(())
 }
 
 fn run_pieces(

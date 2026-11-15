@@ -158,6 +158,7 @@ public final class JigsawOracle {
                     case "load" -> runLoad(manager, registries, Path.of(args[1]));
                     case "apply" -> runApply(registries, Path.of(args[1]));
                     case "capped" -> runCapped(Path.of(args[1]));
+                    case "cappedfull" -> runCappedFull(registries, Path.of(args[1]));
                     case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
                 }
@@ -954,6 +955,135 @@ public final class JigsawOracle {
     }
 
     /**
+     * 造一个 `getSeed()` 返回 `seed` 的假 `ServerLevel`。`getSeed()` 的链路是
+     * `server.worldGenSettings.options.seed`，三层都是 final 字段，所以用
+     * `Unsafe.allocateInstance` 分配、再用反射写入。这样 `CappedProcessor.finalizeProcessing`
+     * 里的 `level.getLevel().getSeed()` 就能拿到真实数值，从而能端到端对拍整个函数。
+     *
+     * <p>A fake `ServerLevel` whose `getSeed()` returns `seed`. The chain is
+     * `server.worldGenSettings.options.seed`; all three are final, so allocate them with
+     * `Unsafe.allocateInstance` and set the fields reflectively. That makes
+     * `CappedProcessor.finalizeProcessing`'s `level.getLevel().getSeed()` return a real
+     * value, so the whole method can be compared end to end.
+     */
+    private static net.minecraft.server.level.ServerLevel fakeServerLevelWithSeed(long seed) {
+        try {
+            Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+            var theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
+            theUnsafe.setAccessible(true);
+            Object unsafe = theUnsafe.get(null);
+            var allocate = unsafeClass.getMethod("allocateInstance", Class.class);
+
+            Object worldOptions = allocate.invoke(
+                    unsafe, net.minecraft.world.level.levelgen.WorldOptions.class);
+            setFinalField(worldOptions, "seed", seed);
+
+            Object genSettings = allocate.invoke(
+                    unsafe, net.minecraft.world.level.levelgen.WorldGenSettings.class);
+            setFinalField(genSettings, "options", worldOptions);
+
+            Object server = allocate.invoke(
+                    unsafe, net.minecraft.server.dedicated.DedicatedServer.class);
+            setFinalField(server, "worldGenSettings", genSettings);
+
+            Object level = allocate.invoke(
+                    unsafe, net.minecraft.server.level.ServerLevel.class);
+            setFinalField(level, "server", server);
+            return (net.minecraft.server.level.ServerLevel) level;
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("cannot build a seeded fake ServerLevel", error);
+        }
+    }
+
+    /** 写一个可能声明在父类上的字段。 */
+    private static void setFinalField(Object target, String name, Object value) throws
+            ReflectiveOperationException {
+        for (Class<?> c = target.getClass(); c != null; c = c.getSuperclass()) {
+            try {
+                var field = c.getDeclaredField(name);
+                field.setAccessible(true);
+                field.set(target, value);
+                return;
+            } catch (NoSuchFieldException ignored) {
+                // 继续往父类找。
+                // Keep walking up the hierarchy.
+            }
+        }
+        throw new NoSuchFieldException(name);
+    }
+
+    /**
+     * cappedfull 模式：queries 每行
+     * {@code list|seed|pieceX|pieceY|pieceZ|worldState|n|x,y,z,state...}。
+     * 用真实种子跑**完整**的 `StructureTemplate.processBlockInfos`（链里保留真实的
+     * `CappedProcessor`，于是 `finalizeProcessing` 会真的执行限额替换），输出最终存活
+     * 的方块。这样 `capped` 的「随机源 + 洗牌 + 取样」与 delegate 效果被端到端串起来验证。
+     *
+     * <p>Capped-full mode: runs the complete `processBlockInfos` with a real seed so
+     * `finalizeProcessing` really performs the capped replacement, and prints the final
+     * surviving blocks — the end-to-end check the piecewise `capped` mode cannot give.
+     */
+    private static void runCappedFull(RegistryAccess registries, Path queries) throws Exception {
+        Registry<StructureProcessorList> reg = registries.lookupOrThrow(Registries.PROCESSOR_LIST);
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|");
+            String listId = p[0];
+            long seed = Long.parseLong(p[1]);
+            BlockPos piece = new BlockPos(
+                    Integer.parseInt(p[2]), Integer.parseInt(p[3]), Integer.parseInt(p[4]));
+            BlockState worldState = stateOf(p[5]);
+            int count = Integer.parseInt(p[6]);
+            List<String> inputProps = new java.util.ArrayList<>();
+            List<StructureTemplate.StructureBlockInfo> infos = new java.util.ArrayList<>();
+            int pos = 7;
+            for (int i = 0; i < count; i++) {
+                int x = Integer.parseInt(p[pos]);
+                int y = Integer.parseInt(p[pos + 1]);
+                int z = Integer.parseInt(p[pos + 2]);
+                String stateText = p[pos + 3];
+                for (String property : propertyNames(stateText)) {
+                    if (!inputProps.contains(property)) {
+                        inputProps.add(property);
+                    }
+                }
+                pos += 4;
+                infos.add(new StructureTemplate.StructureBlockInfo(
+                        new BlockPos(x, y, z), stateOf(stateText), null));
+            }
+            StructureProcessorList list = reg.getValue(Identifier.parse(listId));
+            if (list == null) {
+                throw new IllegalStateException("no processor list " + listId);
+            }
+            StructurePlaceSettings settings = new StructurePlaceSettings();
+            for (StructureProcessor processor : list.list()) {
+                settings.addProcessor(processor);
+            }
+            // 这里 `levelSeed` 是真的：`fakeServerLevelWithSeed` 让
+            // `getLevel().getSeed()` 返回 `seed`。
+            // The level seed is real here: `getLevel().getSeed()` returns `seed`.
+            FakeProcessorLevel level = new FakeProcessorLevel(worldState, seed);
+            List<StructureTemplate.StructureBlockInfo> processed =
+                    StructureTemplate.processBlockInfos(
+                            level.proxy(), piece, piece, settings, infos);
+            String key = String.join("|", java.util.Arrays.copyOfRange(p, 0, 7));
+            out.append("A|").append(key).append('|').append(processed.size()).append('\n');
+            for (StructureTemplate.StructureBlockInfo info : processed) {
+                BlockPos bp = info.pos();
+                out.append("S|").append(key).append('|')
+                        .append(bp.getX()).append('|').append(bp.getY()).append('|')
+                        .append(bp.getZ()).append('|')
+                        .append(stateName(info.state(), inputProps)).append('\n');
+            }
+        }
+        System.out.print(out);
+        System.out.flush();
+    }
+
+    /**
      * 假世界：所有位置的方块都是同一个 `worldState`。processor 只用
      * `getBlockState` 与 `state.is(tag)`，所以用代理挡住其余方法。
      *
@@ -993,47 +1123,9 @@ public final class JigsawOracle {
                             });
         }
 
-        /**
-         * 假 `ServerLevel`：`CappedProcessor.finalizeProcessing` 只调用 `getSeed()`。
-         * `ServerLevel` 是类不是接口，代理造不出来，所以用 `Unsafe.allocateInstance`
-         * 分配一个不跑构造器的实例，再用反射把 `Level` 里的种子字段设成 `levelSeed`。
-         *
-         * <p>Fake `ServerLevel`: `finalizeProcessing` only calls `getSeed()`. `ServerLevel`
-         * is a class, so a proxy cannot stand in; allocate it without running the
-         * constructor and set the level seed field reflectively.
-         */
+        /** 假 `ServerLevel`：把种子接到 `fakeServerLevelWithSeed`。 */
         private net.minecraft.server.level.ServerLevel fakeServerLevel() {
-            try {
-                var unsafeField = Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe");
-                unsafeField.setAccessible(true);
-                Object unsafe = unsafeField.get(null);
-                var allocate = Class.forName("sun.misc.Unsafe")
-                        .getMethod("allocateInstance", Class.class);
-                net.minecraft.server.level.ServerLevel level =
-                        (net.minecraft.server.level.ServerLevel) allocate.invoke(
-                                unsafe, net.minecraft.server.level.ServerLevel.class);
-                // `Level` 里保存种子的字段在 26.3 叫 `seed`（`ServerLevelData` 之后会覆盖它，
-                // 但 `getSeed()` 直接读这个字段）。
-                // The field holding the seed is `seed` in 26.3; `getSeed()` reads it directly.
-                java.lang.reflect.Field seedField = null;
-                for (Class<?> c = level.getClass(); c != null; c = c.getSuperclass()) {
-                    try {
-                        seedField = c.getDeclaredField("seed");
-                        break;
-                    } catch (NoSuchFieldException ignored) {
-                        // 继续往父类找。
-                        // Keep walking up the hierarchy.
-                    }
-                }
-                if (seedField == null) {
-                    throw new IllegalStateException("no seed field on ServerLevel");
-                }
-                seedField.setAccessible(true);
-                seedField.setLong(level, this.levelSeed);
-                return level;
-            } catch (ReflectiveOperationException error) {
-                throw new IllegalStateException("cannot build a fake ServerLevel", error);
-            }
+            return fakeServerLevelWithSeed(this.levelSeed);
         }
     }
 
