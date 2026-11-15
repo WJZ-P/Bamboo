@@ -245,6 +245,10 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
             if java != rust {
                 mismatch_count += 1;
                 *bad_by_kind.entry(q.kind).or_default() += 1;
+                // 上限给到 4000 是为了能用 `statename.js` 归类全量不一致；24 条只能看到
+                // 前几个区块，上一轮就因此误判过「0 不一致」。
+                // The 4000 cap exists so `statename.js` can classify every mismatch; 24
+                // only showed the first chunks and caused a wrong "0 mismatches" claim.
                 if failures.len() < 4000 {
                     failures.push(format!("[{key}] {pos:?}: java {java:?}, rust {rust:?}"));
                 }
