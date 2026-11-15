@@ -1403,4 +1403,78 @@ mod tests {
             .count();
         assert_eq!(changed, 2);
     }
+
+    /// `capped` 的配额只由**真正改动**的方块消耗：洗牌后若排在前面的方块被 delegate
+    /// 判为「无需改动」，官方不会把它算进 `replaced`，仍会继续试后面的下标。
+    /// 这条测试钉住「必须用完整洗牌序列、不能提前截断」——提前截成 `maxToReplace` 个
+    /// 会在前几个不命中时少改方块。
+    ///
+    /// The capped quota is consumed only by blocks that really change: when a delegate
+    /// leaves an early shuffled index untouched, vanilla does not count it and keeps
+    /// trying later indices. This test pins "use the whole shuffled list, do not truncate
+    /// up front" — truncating to `maxToReplace` would change too few blocks when the first
+    /// few indices do not match.
+    #[test]
+    fn capped_quota_only_counts_real_changes() {
+        let level = OneState {
+            state: state("minecraft:air"),
+            tag_blocks: Vec::new(),
+        };
+        // 只有 `minecraft:dirt` 会被改成金块；其余方块 delegate 返回原样。
+        // Only `minecraft:dirt` becomes gold; the delegate leaves everything else as is.
+        let delegate = Processor::Rule {
+            rules: vec![ProcessorRule {
+                input_predicate: RuleTest::BlockMatch {
+                    block: "minecraft:dirt".to_owned(),
+                },
+                location_predicate: RuleTest::AlwaysTrue,
+                position_predicate: PosRuleTest::AlwaysTrue,
+                output_state: state("minecraft:gold_block"),
+                block_entity_modifier: RuleBlockEntityModifier::Passthrough,
+            }],
+        };
+        let processors = vec![Processor::Capped {
+            delegate: Box::new(delegate),
+            limit: 2,
+        }];
+        // 33 个方块里只有最后两个是泥土，前面全是石头。
+        // Of 33 blocks only the last two are dirt; the rest are stone. A truncated
+        // shuffle prefix would almost never contain both.
+        let mut blocks: Vec<ProcessBlock> = (0..31)
+            .map(|i| block((i, 0, 0), "minecraft:stone"))
+            .collect();
+        blocks.push(block((31, 0, 0), "minecraft:dirt"));
+        blocks.push(block((32, 0, 0), "minecraft:dirt"));
+
+        // 多个种子都要恰好改 2 个：只要有一个种子下只改了 1 个，就说明截断了。
+        // Every seed must change exactly 2: a seed that changes only 1 proves truncation.
+        let mut min_changed = usize::MAX;
+        for seed in [0_i64, 1, 42, -7, 12_345_678_901, -98_765_432_123, 7, 99] {
+            let out = process_blocks(
+                &processors,
+                &blocks,
+                &level,
+                PlaceSettings {
+                    piece_position: (0, 64, 0),
+                    reference_pos: (0, 64, 0),
+                    chunk_bb: None,
+                    level_seed: seed,
+                    explicit_random: None,
+                },
+            );
+            let changed = out
+                .iter()
+                .filter(|b| b.state.name == "minecraft:gold_block")
+                .count();
+            assert!(
+                changed <= 2,
+                "seed {seed}: changed {changed} blocks, limit is 2"
+            );
+            min_changed = min_changed.min(changed);
+        }
+        assert_eq!(
+            min_changed, 2,
+            "some seed changed fewer than 2 blocks: the shuffled list was truncated"
+        );
+    }
 }
