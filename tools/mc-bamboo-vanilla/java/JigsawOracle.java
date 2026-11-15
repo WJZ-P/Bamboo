@@ -30,6 +30,8 @@ import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.Vec3i;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceType;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
@@ -103,6 +105,13 @@ import net.minecraft.world.level.storage.LevelStorageSource;
  */
 public final class JigsawOracle {
     private static final Gson GSON = new Gson();
+    /** `PiecesContainer.RENAMES`：老的 jigsaw 结构件 id 统一成 `minecraft:jigsaw`。 */
+    private static final Map<Identifier, Identifier> LOAD_RENAMES = Map.of(
+            Identifier.withDefaultNamespace("nvi"), Identifier.withDefaultNamespace("jigsaw"),
+            Identifier.withDefaultNamespace("pcp"), Identifier.withDefaultNamespace("jigsaw"),
+            Identifier.withDefaultNamespace("bastionremnant"),
+            Identifier.withDefaultNamespace("jigsaw"),
+            Identifier.withDefaultNamespace("runtime"), Identifier.withDefaultNamespace("jigsaw"));
 
     private JigsawOracle() {
     }
@@ -137,6 +146,7 @@ public final class JigsawOracle {
                     case "pools" -> runPools(manager, registries, Path.of(args[1]));
                     case "save" -> runSave(manager, registries, Path.of(args[1]));
                     case "processors" -> runProcessors(registries);
+                    case "load" -> runLoad(manager, registries, Path.of(args[1]));
                     case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
                 }
@@ -464,6 +474,147 @@ public final class JigsawOracle {
         }
         System.out.print(out);
         System.out.flush();
+    }
+
+    /**
+     * load 模式：queries 每行 {@code id|seed|cx|cz}。先用官方生成结构件，再对每个结构件
+     * {@code createTag} → 用官方 {@code StructurePieceType.load} 读回，输出读回后的全部
+     * 字段（位置、旋转、包围盒、groundLevelDelta、junction 数、液体设置、元素指纹）。
+     * 这样「存档写 → 官方读」这条链路和 Rust 的 `Piece::from_save_tag` 逐项比到，
+     * 包围盒重算也在里面。
+     *
+     * <p>Load mode: one {@code id|seed|cx|cz} per line. Generates the pieces, runs
+     * {@code createTag} and then vanilla {@code StructurePieceType.load} to read each one
+     * back, printing the fields that survived. This compares the whole write-then-read
+     * chain (including the recomputed bounding box) against `Piece::from_save_tag`.
+     */
+    private static void runLoad(
+            StructureTemplateManager manager, RegistryAccess registries, Path queries)
+            throws Exception {
+        HolderLookup.RegistryLookup<NormalNoise> noiseLookup =
+                registries.lookupOrThrow(Registries.NOISE);
+        Registry<NoiseGeneratorSettings> settingsReg =
+                registries.lookupOrThrow(Registries.NOISE_SETTINGS);
+        NoiseGeneratorSettings settings =
+                settingsReg.getValue(Identifier.withDefaultNamespace("overworld"));
+        NoiseBasedChunkGenerator generator = new NoiseBasedChunkGenerator(
+                MultiNoiseBiomeSource.createFromPreset(
+                        registries.lookupOrThrow(
+                                        Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST)
+                                .getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD)),
+                settingsReg.wrapAsHolder(settings));
+        BiomeSource biomeSource = generator.getBiomeSource();
+        LevelHeightAccessor heightAccessor = LevelHeightAccessor.create(
+                settings.noiseSettings().minY(), settings.noiseSettings().height());
+        Registry<Structure> structureReg = registries.lookupOrThrow(Registries.STRUCTURE);
+        StructurePieceSerializationContext ctx =
+                new StructurePieceSerializationContext(null, registries, manager);
+
+        Map<Long, RandomState> states = new HashMap<>();
+        Map<Long, Climate.Sampler> samplers = new HashMap<>();
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|");
+            String id = p[0];
+            long seed = Long.parseLong(p[1]);
+            int cx = Integer.parseInt(p[2]);
+            int cz = Integer.parseInt(p[3]);
+            RandomState state = states.get(seed);
+            Climate.Sampler sampler = samplers.get(seed);
+            if (state == null || sampler == null) {
+                state = RandomState.create(noiseLookup, seed, settings);
+                sampler = state.createClimateSampler(
+                        SamplerContext.builder().enableCaches().build());
+                states.put(seed, state);
+                samplers.put(seed, sampler);
+            }
+            Structure structure = structureReg.getValue(Identifier.parse(id));
+            if (!(structure instanceof JigsawStructure jigsaw)) {
+                throw new IllegalStateException(id + " is not a jigsaw structure");
+            }
+            Predicate<Holder<Biome>> validBiome = structure.biomes()::contains;
+            Structure.GenerationContext context = new Structure.GenerationContext(
+                    registries, generator, biomeSource, sampler, state, manager, seed,
+                    new ChunkPos(cx, cz), heightAccessor, validBiome);
+            String key = id + "|" + seed + "|" + cx + "|" + cz;
+            Optional<Structure.GenerationStub> stub = jigsaw.findGenerationPoint(context);
+            if (stub.isEmpty()) {
+                out.append("Q|").append(key).append("|0|0\n");
+                System.out.print(out);
+                System.out.flush();
+                out.setLength(0);
+                continue;
+            }
+            List<StructurePiece> pieces = stub.get().getPiecesBuilder().build().pieces();
+            out.append("Q|").append(key).append("|1|").append(pieces.size()).append('\n');
+            int reloaded = 0;
+            for (int i = 0; i < pieces.size(); i++) {
+                CompoundTag tag = pieces.get(i).createTag(ctx);
+                StructurePiece loaded;
+                try {
+                    // 照 `PiecesContainer.load` 的三步：`RENAMES` → 注册表查类型 → `load`。
+                    // Mirror `PiecesContainer.load`: `RENAMES`, registry lookup, `load`.
+                    Identifier oldKey = Identifier.parse(
+                            tag.getStringOr("id", "").toLowerCase(java.util.Locale.ROOT));
+                    Identifier pieceId = LOAD_RENAMES.getOrDefault(oldKey, oldKey);
+                    StructurePieceType pieceType =
+                            BuiltInRegistries.STRUCTURE_PIECE.getValue(pieceId);
+                    if (pieceType == null) {
+                        out.append("R|").append(key).append('|').append(i)
+                                .append("|unknown\n");
+                        continue;
+                    }
+                    loaded = pieceType.load(ctx, tag);
+                } catch (RuntimeException error) {
+                    // 官方 `PiecesContainer.load` 对坏标签是 catch 后跳过。
+                    // Vanilla `PiecesContainer.load` catches bad tags and skips the piece.
+                    out.append("R|").append(key).append('|').append(i).append("|skip\n");
+                    continue;
+                }
+                if (!(loaded instanceof PoolElementStructurePiece pool)) {
+                    out.append("R|").append(key).append('|').append(i).append("|other\n");
+                    continue;
+                }
+                reloaded++;
+                BlockPos pos = pool.getPosition();
+                BoundingBox box = pool.getBoundingBox();
+                out.append("R|").append(key).append('|').append(i).append('|')
+                        .append(pos.getX()).append('|').append(pos.getY()).append('|')
+                        .append(pos.getZ()).append('|')
+                        .append(pool.getRotation().ordinal()).append('|')
+                        .append(box.minX()).append('|').append(box.minY()).append('|')
+                        .append(box.minZ()).append('|')
+                        .append(box.maxX()).append('|').append(box.maxY()).append('|')
+                        .append(box.maxZ()).append('|')
+                        .append(pool.getGroundLevelDelta()).append('|')
+                        .append(pool.getJunctions().size()).append('|')
+                        .append(liquidName(pool)).append('\n');
+            }
+            out.append("A|").append(key).append('|').append(reloaded).append('\n');
+            System.out.print(out);
+            System.out.flush();
+            out.setLength(0);
+        }
+    }
+
+    /**
+     * 元素的可比指纹：官方 `StructurePoolElement.CODEC` 编出的规范 NBT。元素里带
+     * `Holder`（`feature` / `processors`），必须用带注册表的序列化上下文。
+     *
+     * <p>Element digest: canonical NBT from the official `StructurePoolElement.CODEC`. The
+     * element holds `Holder`s (`feature` / `processors`), so it needs a registry-aware
+     * serialization context.
+     */
+    private static String elementDigest(
+            RegistryAccess registries, StructurePoolElement element) {
+        var ops = registries.createSerializationContext(NbtOps.INSTANCE);
+        return canonical(StructurePoolElement.CODEC
+                        .encodeStart(ops, element)
+                        .getOrThrow(error -> new IllegalStateException("encode: " + error)))
+                .toString();
     }
 
     /**

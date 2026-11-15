@@ -31,7 +31,8 @@ use mc_bamboo_worldgen::{
     structure::{
         Structures, allowed_biome_names,
         jigsaw::{
-            JigsawConfig, JigsawStructures, Rotation, StructurePieces, TemplatePools, add_pieces,
+            JigsawConfig, JigsawStructures, Piece, Rotation, StructurePieces, TemplatePools,
+            add_pieces,
         },
         processor::ProcessorLists,
         rings::BiomeResolver,
@@ -87,6 +88,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "pools" => run_pools(command, work_dir),
         "save" => run_save(command, work_dir),
         "processors" => run_processors(command, work_dir),
+        "load" => run_load(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
@@ -766,6 +768,198 @@ fn compare_processors(stdout: &str) -> Result<(), String> {
     println!(
         "jigsaw processors: {checked} processor lists, {processors_checked} processors, \
          all fields identical"
+    );
+    Ok(())
+}
+
+/// `load` 模式：生成结构件 → `to_full_save_piece` → `Piece::from_save_tag` 读回，
+/// 逐项比官方同一套「写→读」的结果（含重算的包围盒与元素编码）。
+///
+/// `load` mode: generate pieces, `to_full_save_piece`, then `Piece::from_save_tag`, and
+/// compare each field with vanilla's own write-then-read result (including the recomputed
+/// bounding box and the re-encoded element).
+fn run_load(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    let queries = build_queries(2, 2);
+    let queries_path = work_dir.join("jigsaw_load_queries.txt");
+    let text = queries
+        .iter()
+        .map(|query| format!("{}|{}|{}|{}", query.id, query.seed, query.cx, query.cz))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&queries_path, text).map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("load")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_load(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
+/// Java 的 `Q|key|status|n`、`R|key|idx|...`、`A|key|reloaded`。
+/// `R` 行是官方读回的字段：`pos(3)|rot|bb(6)|gld|njunc|liquid|element`。
+///
+/// Java emits `Q|key|status|n`, `R|key|idx|...` and `A|key|reloaded`. The `R` line holds
+/// what vanilla read back: `pos(3)|rot|bb(6)|gld|njunc|liquid|element`.
+fn compare_load(stdout: &str, queries: &[Query]) -> Result<(), String> {
+    let mut java_q: HashMap<String, Vec<String>> = HashMap::new();
+    let mut java_r: HashMap<String, BTreeMap<usize, Vec<String>>> = HashMap::new();
+    for line in stdout.lines() {
+        // `Q|key(4)|status|n` 与 `R|key(4)|idx|field...`：key 固定 4 段，之后才是
+        // 状态或下标。
+        // `Q|key(4)|status|n` and `R|key(4)|idx|field...`: the key is always four fields,
+        // followed by the status or the index.
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() < 6 {
+            continue;
+        }
+        let key = format!("{}|{}|{}|{}", fields[1], fields[2], fields[3], fields[4]);
+        match fields[0] {
+            "Q" => {
+                java_q.insert(key, fields[5..].iter().map(|s| (*s).to_owned()).collect());
+            }
+            "R" => {
+                let index = fields[5]
+                    .parse::<usize>()
+                    .map_err(|error| format!("bad R index: {error}"))?;
+                java_r
+                    .entry(key)
+                    .or_default()
+                    .insert(index, fields[6..].iter().map(|s| (*s).to_owned()).collect());
+            }
+            _ => {}
+        }
+    }
+
+    let worldgen = Worldgen::load()?;
+    let settings = worldgen
+        .settings("minecraft:overworld")
+        .ok_or("missing overworld settings")?;
+    let dims = (settings.min_y, settings.height, settings.sea_level);
+    let raw: Value =
+        serde_json::from_str(WORLDGEN).map_err(|error| format!("bad worldgen.json: {error}"))?;
+    let structures = Structures::parse(raw.get("structure").ok_or("missing structure")?)?;
+    let configs = JigsawStructures::parse(raw.get("structure").ok_or("missing structure")?)?;
+    let pools = TemplatePools::parse(raw.get("template_pool").ok_or("missing template_pool")?)?;
+
+    let mut allowed_cache: HashMap<String, HashSet<String>> = HashMap::new();
+    for id in &STRUCTURES {
+        let def = structures
+            .get(id)
+            .ok_or_else(|| format!("missing structure def {id}"))?;
+        allowed_cache.insert((*id).to_owned(), allowed_biome_names(def)?);
+    }
+
+    let mut by_seed: BTreeMap<i64, Vec<&Query>> = BTreeMap::new();
+    for query in queries {
+        by_seed.entry(query.seed).or_default().push(query);
+    }
+
+    let mut checked = 0usize;
+    let mut reloaded = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for (seed, group) in &by_seed {
+        let generator = Generator::new(&worldgen, *seed)?;
+        for query in group {
+            let key = query.key();
+            let config = configs
+                .get(&query.id)
+                .ok_or_else(|| format!("missing jigsaw config {}", query.id))?;
+            let allowed = &allowed_cache[&query.id];
+            let result = add_pieces(
+                config,
+                &pools,
+                &generator,
+                allowed,
+                dims,
+                query.seed,
+                (query.cx, query.cz),
+            )?;
+            checked += 1;
+            let q = java_q
+                .get(&key)
+                .ok_or_else(|| format!("Java missing Q for {key}"))?;
+            let status = if result.is_some() { "1" } else { "0" };
+            if q.first().map(String::as_str) != Some(status) {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!("{key}: stub status rust {status} java {q:?}"));
+                }
+                continue;
+            }
+            let Some(structure) = &result else {
+                continue;
+            };
+            let lines = java_r.get(&key);
+            for (index, piece) in structure.pieces.iter().enumerate() {
+                let save = piece.to_full_save_piece()?;
+                let tag = save.to_tag();
+                let Some(loaded) = Piece::from_save_tag(&tag)? else {
+                    mismatches += 1;
+                    if first.is_none() {
+                        first = Some(format!("{key}: Rust cannot read piece {index}"));
+                    }
+                    continue;
+                };
+                let Some(line) = lines.and_then(|lines| lines.get(&index)) else {
+                    mismatches += 1;
+                    if first.is_none() {
+                        first = Some(format!("{key}: Java missing R[{index}]"));
+                    }
+                    continue;
+                };
+                reloaded += 1;
+                let want = [
+                    loaded.position.0.to_string(),
+                    loaded.position.1.to_string(),
+                    loaded.position.2.to_string(),
+                    loaded.rotation.index().to_string(),
+                    loaded.bounding_box.min_x.to_string(),
+                    loaded.bounding_box.min_y.to_string(),
+                    loaded.bounding_box.min_z.to_string(),
+                    loaded.bounding_box.max_x.to_string(),
+                    loaded.bounding_box.max_y.to_string(),
+                    loaded.bounding_box.max_z.to_string(),
+                    loaded.ground_level_delta.to_string(),
+                    loaded.junctions.len().to_string(),
+                    loaded.liquid_settings.name().to_owned(),
+                ];
+                for (field, want) in want.iter().enumerate() {
+                    if line.get(field).is_none_or(|got| got != want) {
+                        mismatches += 1;
+                        if first.is_none() {
+                            first = Some(format!(
+                                "{key}: R[{index}][{field}] rust {want} java {:?}",
+                                line.get(field)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if checked != queries.len() {
+        return Err(format!(
+            "checked {checked} queries, expected {}",
+            queries.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches} differences over {checked} queries; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!(
+        "jigsaw load: {checked} queries, {reloaded} pieces round-tripped, all fields identical"
     );
     Ok(())
 }
