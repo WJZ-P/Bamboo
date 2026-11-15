@@ -476,20 +476,24 @@ WebView2 的渲染进程不算在内。
   `clamped_normal`，Java 对拍代理补了 `isWaterAt` / `isInsideBuildHeight` /
   `getBrightness`。`chunkgen` 的 `--ore-only` 已泛化成 `--types ID,ID`（也认
   `--feature-types`）诊断白名单，过滤不动 `features_per_step` 的全局 index。
-  已知限制：`blue_ice` 按 `BlueIceFeature.java` 移植，但它要先有相邻的 `packed_ice`
-  （原版来自 `iceberg`，属 `cb-wg-feat-a` 的冰山、尚未合入），`--types` 白名单里没有
-  `iceberg` 就不会有 `packed_ice`，所以现有的逐方块对拍里 `blue_ice` 从不放方块、
-  0 不一致是「空跑」的；等 `iceberg` 合入后要用
-  `--types minecraft:blue_ice,minecraft:iceberg,...` 补对拍。
+  已知限制：`blue_ice` 按 `BlueIceFeature.java` 移植。它要先有相邻的 `packed_ice`
+  （原版来自 `iceberg`，现在已随 main 合入），所以要把它和 `iceberg` 一起放开才比得到：
+  `--types minecraft:blue_ice,minecraft:iceberg --chunk -200 117 --scan 3 --seeds 1 --salt 13`
+  （种子 0 的 `frozen_ocean`）是 **0 不一致 / 0 skipped**，把 `place` 开头改成写一格 `STONE`
+  会报 **54 处**，确认不是空跑。种子 -1 的 `(53,78)` 附近也是 0 不一致。
+  注意默认坐标（`FIXED_CHUNKS` + 随机）里没有冻洋，单跑 `blue_ice` 会空跑。
   step 7 地下装饰里的 `sculk_vein` 由 `multiface_growth` 覆盖（代码来自 `cb-wg-aquatic`），
   在 `deep_dark` 定点对拍 0 不一致；**注意默认坐标（`FIXED_CHUNKS` + 随机）下它一次都不放方块，
   必须用 `--chunk -42 111 --scan N`（种子 0 的 `deep_dark`）才比得到**。
-  `sculk_patch`（`SculkPatchFeature` + `SculkSpreader`）的移植已写在
-  `feature/sculk_patch.rs`，但**还没对拍到 0 不一致，所以不接入 dispatch**：
-  `parse_leaf` 对它返回 `None`，主循环把 `sculk_patch_deep_dark` 整块标 `unsupported`。
-  现状是 `deep_dark` 那个区块比官方少 8 格方块（单区块 8 mismatches、`--scan 3` 160 处），
-  `--steps 0` 基线为 0 可确认差异来自这一步。两边的写入序列前 21 行一致、第 22 行分叉，
-  怀疑是同一格 `sculk_vein` 的面集合在两个时间点不同，细节见汇报。
+  `sculk_patch`（`SculkPatchFeature` + `SculkSpreader`）也已移植到
+  `feature/sculk_patch.rs` 并**对拍 0 不一致**：`--steps 7 --types
+  minecraft:sculk_patch_deep_dark --chunk -42 111 --scan 3` 在三种子 / 三种扫描尺寸下
+  均 0 不一致 / 0 skipped（最多 27 中心 / 23887872 方块），把 `attemptPlaceSculk`
+  写死的方块换成石头会报 160 处，确认不是空跑。step 7 全 7 个 placed feature
+  一起放开也是 0 不一致。踩过的坑：`BlockPos.betweenClosed` 的遍历顺序是
+  **x 内层、y 中层、z 外层**，按 x 外层写会让 `ChargeCursor` 的邻格洗牌从不同的
+  格子起步，导致所有游标走错路径（写入总量反而更多，但位置全偏）。
+  `sculk_patch_ancient_city`（古城结构专用，`placement` 为空）没做。
   其余非植被类型（`lake`、`geode`、`iceberg`、`block_blob`、`monster_room`、`fossil`、
   `overlay`）以及全部植被类型，在完整 11 步对拍里仍标 `unsupported` / `skipped`：
   `fossil` 要生成器导出结构模板、`monster_room` 要刷怪笼 / 战利品表 / 方块实体；
@@ -734,22 +738,34 @@ WebView2 的渲染进程不算在内。
   `spring_feature`、`underwater_magma`、`iceberg`（含 `blue_ice` 变体）、`geode`
   （紫水晶晶洞）、`lake`（岩浆湖）、`large_dripstone`（大型滴水石柱）、`blue_ice`
   （冻洋蓝冰）、`spike`（冰刺）、`monster_room`（地牢）、`speleothem_cluster`
-  （滴水石簇 / 硫磺尖簇）已按官方 26.3 移植并逐方块对拍 0 不一致；`chunkgen` 的
-  `--ore-only` 已泛化成 `--feature-types ID,ID` 诊断白名单（条目可以是 Feature 类型 ID
-  或 placed feature 注册名），过滤不动 `features_per_step` 的全局 index。其余非植被
-  类型（化石、沙漠井、`freeze_top_layer`）在完整 11 步对拍里仍标 `unsupported` /
-  `skipped`，按「不发明行为」先留白。`geode` 的 `rarity_filter` 是 1/24、
-  `large_dripstone` 只在稀疏的 `dripstone_caves` 群系里出现、`blue_ice` 只在冻洋且要求
-  相邻浮冰、`spike` 只在 `ice_spikes` 类群系、`speleothem_cluster` 只在滴水石洞穴里且
-  要原点位于空腔，这些都要先扫出真实生成点再 `--chunk X Z --scan N` 复核（仓库里有
-  三个 `#[ignore]` 探针）；`lake` 的主世界两个变体都是岩浆湖，官方「水做的湖表面结冰」
-  分支（`Biome.shouldFreeze`）因此不会进入，Rust 侧对非水流体同样跳过。
-  这些类型的实际生成路径都已逐方块对拍到（`large_dripstone` 本轮在滴水石洞穴里找到
-  4 个真的长柱的区块，`--chunk -53 -206` / `-50 -200` / `-52 -204` / `-49 -199`，
-  故意改坏 `dripstone_block` → `calcite` 报 13 / 33 处不一致）。
-  还没验证过、因此**没有**接进 dispatch 的：`freeze_top_layer`（要把群系回调传进
-  `FeatureWorld`，属核心结构改动）、`overlay`（沙漠井，依赖未实现的
-  `minecraft:template` 地物）、`fossil`（要模板接线）。
+  （滴水石簇 / 硫磺尖簇）、`freeze_top_layer`（顶层结冰与积雪）已按官方 26.3 移植并
+  逐方块对拍 0 不一致；`chunkgen` 的 `--ore-only` 已泛化成 `--feature-types ID,ID`
+  诊断白名单（条目可以是 Feature 类型 ID 或 placed feature 注册名），过滤不动
+  `features_per_step` 的全局 index。其余非植被类型（化石、沙漠井）在完整 11 步对拍里
+  仍标 `unsupported` / `skipped`，按「不发明行为」先留白。`geode` 的
+  `rarity_filter` 是 1/24、`large_dripstone` 只在稀疏的 `dripstone_caves` 群系里出现、
+  `blue_ice` 只在冻洋且要求相邻浮冰、`spike` 只在 `ice_spikes` 类群系、
+  `speleothem_cluster` 只在滴水石洞穴里且要原点位于空腔、`freeze_top_layer` 只在
+  冷群系（温度 < 0.15）真的结冰下雪，这些都要先扫出真实生成点再 `--chunk X Z --scan N`
+  复核（仓库里有三个 `#[ignore]` 探针）；`lake` 的主世界两个变体都是岩浆湖，官方
+  「水做的湖表面结冰」分支（`Biome.shouldFreeze`）因此不会进入，Rust 侧对非水流体
+  同样跳过。
+  这些类型的实际生成路径都已逐方块对拍到（`large_dripstone` 在滴水石洞穴里找到
+  4 个真的长柱的区块，`--chunk -53 -206` / `-50 -200` / `-52 -204` / `-49 -199`；
+  `freeze_top_layer` 在 `--chunk 255 -109` / `260 -106` / `268 -300` / `242 -104`
+  四个冷群系区块上各 0 不一致）。
+  还没验证过、因此**没有**接进 dispatch 的：`overlay`（沙漠井）与 `fossil`
+  —— 两者都依赖 `minecraft:template` 地物，而这个 Feature **无法用当前的 chunkgen
+  oracle 对拍**：`TemplateFeature.place` 要
+  `level.getLevel().getServer().getStructureTemplateManager()`，oracle 的
+  `WorldGenLevel` 是动态代理，cast 到 `ServerLevel` 会抛 `ClassCastException`。
+  `template_feature.rs`（加权选模板、`Util.getRandom(rotations)`、`getRotatedOffset`
+  居中、`state_transform` 的镜像/旋转、`rule` processor 的 `block_match` /
+  `always_true` / `append_loot`）、`overlay` 组合类、`volume_match` 谓词、
+  `randomly_selected` 修饰器都已按官方写好，但**没有一次真正的逐方块比较**。
+  **`freeze_top_layer` 的已知前提**：features 阶段没有生成期光照，官方
+  `Biome.shouldFreeze` / `shouldSnow` 里的 `getBrightness(BLOCK) < 10` 恒成立；
+  Rust 侧不查亮度，`ChunkgenOracle` 的代理把方块光返回 0、天空光返回 15。
 - 红石的已知差异：发射器会发射不生成实体的弹射物，默认抛出和余料都生成真的物品实体。箭、雪球、蛋（含蓝蛋、棕蛋）、喷溅药水、滞留药水、经验瓶、烟花、火焰弹和风弹走默认抛出，官方那些是弹射物，出现事件 1002、1004、1018 或 1051 的整题不比较。船和矿车放得下时只扣物品、不生成实体，放不下时再套一层默认抛出。盔甲架和带 `entity_data` 的刷怪蛋留在槽里，当作生成失败，数量变少的整题不比较。TNT 物品在 `tnt_explodes` 为真时生成点燃的 TNT 并播放 `entity.tnt.primed`，数量减一；规则为假时物品留着、发 1001，不取朝向。打火石点着 TNT 方块时走 `TntBlock.prime` 再 `removeBlock` 再扣耐久。这些题比较方块、声音、容器和 `level.random`。点燃的 TNT 实体本身不进比较，方块 oracle 也不 tick 它。同一题里如果还有弹射物事件、盔甲架或刷怪蛋离开发射器，仍按那些原因整题排除。鱼桶只倒水，不生成鱼，环境音不比较。倒成功后仍取官方 `EntityType.create` 的一次 `nextFloat`，以及 `Mob.finalizeSpawn` 的 `triangle` 和一次 `nextFloat`。美西螈在 `BUCKET` 原因下 `finalizeSpawn` 直接返回，只取朝向那一次。热带鱼再按 `nextFloat() < 0.9` 取常见变种或随机花纹。硫磺立方桶不放方块，生成用的随机数同样照取。剪刀收满蜜的蜂巢按 `minecraft:harvest/beehive` 掉 3 个蜜脾，战利品表走自己的 `random_sequence`，不碰 `level.random`；`Block.popResource` 为这一组取 3 次位置偏移，生成物品实体。桶倒进可替换方块时，官方 `destroyBlock` 会先在方块还在时按 `getDrops` 一组一组 `popResource`，再换成流体方块；方块 oracle 把那些表换成空表，两边都不取数，也不生成物品。骨粉催树苗、杜鹃、蘑菇、菌、草方块、菌丝和要地物的方块时整题不比较。默认抛出和塞不回发射器的余料都生成物品实体。速度按官方 `spawnItem`：先取一个 `nextDouble` 算 `pow`，X、Z 的均值是朝向步长乘 `pow`，Y 是 0.2，再取三个 `triangle` 的六个 double；这套随机数只取一次。打火石和剪刀的耐久走通用 `hurtAndBreak`，耐久附魔用 `level.random`。玩家没有身体和鞍这两格。骷髅头、僵尸头、苦力怕头、龙首和猪灵头不放方块，只试着穿到前方的人身上。合成器按官方逻辑合成并吐出产物，朝空气吐出的东西按 `DefaultDispenseItemBehavior.spawnItem` 生成真的物品实体（精度 6），成就和地图的后处理也没做。方块 oracle 给合成器加了固定场景的题，合成成功的题逐项比较方块状态、容器内容、等级事件和世界随机源最后的种子；合成器到期时如果官方没有合成成功，只发失败事件 1050，这一声照常比较。漏斗把同一件物品搬进搬出不算合成。投掷器朝空气抛出的物品生成物品实体；压力板、探测铁轨、绊线和绊线钩、标靶、幽匿感测体、避雷针要实体、弹射物、振动或雷击才触发，地上的物品还没有接上这些触发，世界里没有生物和弹射物，下落方块和点燃的 TNT 也不会踩这些；阳光探测器不随时间变化，只在右键时按当前天空光算，世界时钟停在正午。唱片机放进唱片后立刻算在放（`ownSignal` 为 15），但不跑官方的歌曲计时：假世界也不登记唱片机的 ticker，所以不抽每 20 刻的 `nextInt(4)`，歌也不会放到结束。宝库只在官方结果里出现宝库方块实体的声音或状态事件 3015–3017 时整题不比较，没触发的宝库照常比较。
 - 活塞不推实体，也不推动玩家。下落方块和点燃的 TNT 已经在世界里，但官方 `PistonMovingBlockEntity` 的
   `moveCollidedEntities`、`moveStuckEntities`、`fixEntityWithinPistonBase` 三段没实现：掉落物、下落方块

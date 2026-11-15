@@ -94,6 +94,12 @@ pub enum Modifier {
         include_edges: bool,
         include_interior: bool,
     },
+    /// `RandomlySelectedPlacement`：`Util.getRandom(placements, random)` 选一个再递归
+    /// `modify`（会消费一次 `nextInt(len)`）。
+    ///
+    /// `RandomlySelectedPlacement`: pick one with `Util.getRandom(placements, random)` and
+    /// recurse into its `modify` (consumes one `nextInt(len)`).
+    RandomlySelected(Vec<Modifier>),
     /// 已解析但本轮不生效的修饰器（例如 `noise_threshold_count`）。
     /// 命中时置 `unsupported`，让对拍跳过这个区块。
     Unsupported(String),
@@ -258,6 +264,18 @@ impl Modifier {
                     .and_then(Value::as_bool)
                     .unwrap_or(true),
             },
+            "minecraft:randomly_selected" => {
+                let placements = field("placements")?
+                    .as_array()
+                    .ok_or("randomly_selected has no placements array")?
+                    .iter()
+                    .map(Modifier::parse)
+                    .collect::<Result<Vec<_>, _>>()?;
+                if placements.is_empty() {
+                    return Err("randomly_selected needs at least one placement".to_owned());
+                }
+                Self::RandomlySelected(placements)
+            }
             _ => Self::Unsupported(kind.to_owned()),
         })
     }
@@ -273,6 +291,7 @@ impl Modifier {
                 allowed_search,
                 ..
             } => target.is_supported() && allowed_search.is_supported(),
+            Self::RandomlySelected(placements) => placements.iter().all(Modifier::is_supported),
             _ => true,
         }
     }
@@ -493,6 +512,13 @@ fn modify(
             if y_surface - y_ocean <= *max {
                 out.push(pos);
             }
+        }
+        // `Util.getRandom(placements, random).modify(...)`：先取一次 `nextInt(len)`，
+        // 再把选中的那条修饰器原样跑一遍。
+        // `Util.getRandom(placements, random).modify(...)`.
+        Modifier::RandomlySelected(placements) => {
+            let index = random.next_int(placements.len() as i32) as usize;
+            modify(&placements[index], ctx, random, pos, out);
         }
         Modifier::Unsupported(_) => {}
     }
