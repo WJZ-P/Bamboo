@@ -1338,9 +1338,40 @@ main 已把本分支（`1c9853c6`）合进去了，所以再 `git merge main` �
 | `lush_caves_ceiling_vegetation` | `--chunk 0 52 --scan 25 --seeds 1` | 0 不一致（25 中心 / 22118400 方块） |
 | 三者一起 | `--chunk 0 52 --scan 25 --seeds 1` | 0 不一致，**2 skipped**（`treeified` 标记生效） |
 
-**注意**：`lush_caves_clay` 的 `setBlock` 改坏后仍 0 不一致，说明这组参数下
-`clay_pool_with_dripleaves` 的 `placeGround` 没真正写入（`replaceable` 或
-`below_sturdy` 没匹配上）。**所以 `waterlogged_vegetation_patch` 仍是「已写未验证」。**
+#### `lush_caves_clay` 为什么在野外几乎不触发（第十三/十四轮诊断）
+
+`lush_caves_clay` 是 `waterlogged_vegetation_patch`（`clay_pool_with_dripleaves`）唯一的入口，
+只属于 `minecraft:lush_caves` 群系（`features_per_step[9]` 的全局 index 32）。它长期对拍
+0 不一致但改坏也不报，第十三轮加了逐修饰器的计数诊断，结论如下：
+
+```
+modifier Count(Constant(62))     -> 62 out
+modifier InSquare                ->  1 out   (×62，每次 in_square 只产 1 个)
+modifier HeightRange(uniform)    ->  1 out   (×62)
+modifier EnvironmentScan{down}   ->  0 out   (×60) / 1 out (×2)
+modifier Offset{y:+1}            ->  1 out   (×2)
+modifier Biome                   ->  0 out   (×2)   ← 全部被 BiomeFilter 杀掉
+```
+
+再给 `Biome` 加诊断，两个候选的拒绝原因都是：
+
+```
+biome filter rejected at (3, 80, 844): biome=29 placed=87
+biome filter rejected at (4, 88, 842): biome=29 placed=87
+```
+
+`biome=29` 是 **`minecraft:jungle`**，而 `lush_caves` 的注册表 ID 是 **31**。
+
+原因是 `BiomeManager.getBiome`（官方 `BiomeFilter` 走的就是它）会按八角距离做平滑，
+而这两个候选的 y 是 **80 / 88** —— `environment_scan` 从 `height_range` 的随机 y 向下
+找到的第一块 solid 在地表附近，那里的平滑群系是 `jungle` 而不是地下的 `lush_caves`。
+**所以 BiomeFilter 杀掉它们是正确的官方行为**，`lush_caves_clay` 只在「扫描落点恰好
+在 `lush_caves` 主导的深度」时才真正跑，野外极少。
+
+结论：`waterlogged_vegetation_patch` / `SmallDripleafBlock` 的 `placeAt` 路径**不是实现有问题**，
+而是这个 placed feature 本身在地表附近几乎不触发。要拿到逐方块对拍证据，需要专门找
+「`environment_scan` 停在深处」的区块，或在集成测试里直接构造（`waterlogged_patch_lays_ground_and_turns_deep_cells_into_water`
+已经这么做了）。
 
 #### 第五轮：`root_system`（分支 `cb-wg-aquatic`）
 
