@@ -141,6 +141,7 @@ impl MultifaceGrowthFeature {
             let Some(new_state) = self.state_for_placement(old_state, world, pos, direction) else {
                 return false;
             };
+            trace_write(pos, new_state);
             world.set_block_with_heightmaps(pos.0, pos.1, pos.2, new_state);
             if random.next_float() < self.chance_of_spreading {
                 self.spread(world, pos, new_state, direction, random);
@@ -299,6 +300,7 @@ impl MultifaceGrowthFeature {
             else {
                 return false;
             };
+            trace_write(spread.pos, new_state);
             world.set_block_with_heightmaps(spread.pos.0, spread.pos.1, spread.pos.2, new_state);
             return true;
         }
@@ -474,6 +476,31 @@ fn push_block(name: &str, out: &mut Vec<i32>) -> Option<()> {
         out.push(block_id_of_state(block.default_state)? as i32);
     }
     Some(())
+}
+
+/// 调试：把一次写方块追加到 trace 文件（和 `ChunkgenOracle.traceWrite` 同格式）。
+///
+/// Debug: append one block write in the same format as `ChunkgenOracle.traceWrite`.
+fn trace_write(pos: Pos, state: u32) {
+    let Ok(target) = std::env::var("BAMBOO_TRACE_BLOCK") else {
+        return;
+    };
+    let Some(block) = mc_bamboo_data::block_of_state(state) else {
+        return;
+    };
+    if block.name != target {
+        return;
+    }
+    let path = std::env::var("BAMBOO_TRACE_FILE_RUST")
+        .unwrap_or_else(|_| "target/trace-rust.txt".to_owned());
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{} {} {} state={state}", pos.0, pos.1, pos.2);
+    }
 }
 
 #[cfg(test)]

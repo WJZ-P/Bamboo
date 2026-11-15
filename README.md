@@ -576,11 +576,14 @@ WebView2 的渲染进程不算在内。
   （`random_selector` / `weighted_random_selector` / `simple_random_selector` /
   `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）与
   `clamped` / `clamped_normal` / `weighted_list` IntProvider、`BambooFeature`
-  （竹子，逐方块 0 不一致）。另有 `VinesFeature`（藤蔓）和 `MultifaceGrowthFeature`
-  （发光地衣）已按官方源码写完但**还没验证**：藤蔓在丛林区块找不到能通过 `biome`
-  修饰器的候选点，发光地衣仍有约 70 处不一致（126 → 102 → 70，修掉了
-  `Direction.Plane.HORIZONTAL` 顺序和扩散入口用错这两个真 bug），细节见
-  `docs/worldgen-features-plan.md` 5.1 的疑点。
+  （竹子）、`MultifaceGrowthFeature`（发光地衣，见下）。另有 `VinesFeature`（藤蔓）
+  已按官方源码写完但**还没验证**：丛林区块里查不到能通过 `biome` 修饰器的候选点。
+  `minecraft:glow_lichen` 现在是**逐方块 0 不一致**（`--seeds 2 --chunks 20 --salt 11
+  --steps 9 --feature-types minecraft:glow_lichen`：40 中心 / 35389440 方块 / 0 skipped；
+  故意关掉扩散后报 70 处不一致，确认不是空跑）。修的过程中发现并修掉两个真 bug：
+  `validDirections` 里 `Direction.Plane.HORIZONTAL` 的枚举顺序写错，
+  以及把地物放置用的扩散入口和骨粉用的那个搞混了。细节见
+  `docs/worldgen-features-plan.md` 5.1。
   诚实的已知差异与未做：`rotated` state provider、蘑菇（要 `getRawBrightness`）、
   苔藓地毯（`MossyCarpetBlock.placeAt` 用 `level.getRandom()`）等特殊
   `canSurvive`；`schedule_tick` 忽略；`noise_threshold_count` / `noise_based_count` /

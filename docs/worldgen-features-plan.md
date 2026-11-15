@@ -794,8 +794,17 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   方向当起始面候选、每个再洗一次当扩散方向」，那对应的是**另一个入口**
   `spreadFromRandomFaceTowardRandomDirection`（只有骨粉路径 `performBonemeal` 用）。
   修完多点对拍 102 → **70**。
+  **第 8 轮的结论（已解决）**：第 7 轮的修复其实已经让发光地衣**完全对齐**，之前的
+  「70 处」是修复过程中的中间数据。第 8 轮复测同一命令
+  （`--seeds 2 --chunks 20 --salt 11 --steps 9 --feature-types minecraft:glow_lichen`）
+  得到 **0 不一致**（40 中心 / 35389440 方块 / 0 skipped）；把
+  `chance_of_spreading` 强制成 0（关掉扩散）后同命令报 **70 处**，确认这个 0
+  不是空跑——扩散这一半差异正是第 7 轮修掉的那个入口搞混的 bug。
   **第 6 轮已排除的假设**：(a) `can_be_placed_on` 的方块 ID 映射（逐个核对 10 个名字
   → 注册表索引，全对）；(b) `can_attach_to` 判据（改成恒 true + 关闭扩散，差异不变）。
+  **第 8 轮排除的假设**：(c) `SpreadType.getSpreadPos` 三个分支（逐行对照
+  `SAME_POSITION` / `SAME_PLANE` / `WRAP_AROUND`，与我的 `offset` 嵌套等价）；
+  (d) `Direction.Axis` 的 ordinal 映射（`X=0, Y=1, Z=2`）。
 * 组合类回归（`6723362` 合并 main 后，`871f2b4`）：树在本分支已经可用，于是把
   `random_selector` 和 `weighted_random_selector` 放开逐方块对拍。
   * 6 个 `random_selector` 树（trees_plains / trees_savanna / trees_taiga /
@@ -845,7 +854,7 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | `minecraft:bamboo`（`--seeds 2 --chunks 14 --salt 5 --steps 9`） | **0 不一致**（28 中心 / 24772608 方块，0 skipped） |
 | 故意把竹竿状态换成空气（`--seeds 2 --chunks 24 --salt 33`） | 160 处不一致（确认非假绿；同时暴露 27 处 terrain 既有差异） |
 | `minecraft:vines`（`--seeds 1 --chunk -784 -132 --scan 3 --steps 9`） | 8 处差异，全部是 terrain 既有差异（`--steps 0` 同样复现），但**藤蔓未被调用**（候选 0 次），不算验证 |
-| `minecraft:glow_lichen`（`--seeds 2 --chunks 20 --salt 11 --steps 9`） | **70 处不一致**（已写未验证，见疑点；126 → 102 → 70） |
+| `minecraft:glow_lichen`（`--seeds 2 --chunks 20 --salt 11 --steps 9`） | **0 不一致**（40 中心 / 35389440 方块 / 0 skipped）；关掉扩散后同命令报 70 处（确认非空跑）。轨迹 126 → 102 → 70 → 0 |
 | `minecraft:spore_blossom`（lush_caves，`--seeds 1 --chunk -600 -598 --scan 3 --steps 9`） | 0 不一致但 **simple_block 叶子被调用 0 次**，`environment_scan` 把候选全滤掉，不算验证 |
 | 6 个 `random_selector` 树（`--seeds 2 --chunks 24 --salt 13 --steps 9`） | **0 不一致**（48 中心 / 42467328 方块，0 skipped） |
 | 故意把 `random_selector` 的 chance 改成恒真 | 160 处不一致（确认非假绿） |
