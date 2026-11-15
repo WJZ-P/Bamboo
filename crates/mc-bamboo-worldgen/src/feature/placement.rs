@@ -24,6 +24,10 @@ use super::{
 pub enum Modifier {
     Count(IntProvider),
     RarityFilter(i32),
+    /// `RandomChancePlacement`：`nextFloat() < chance`，不满足就丢掉候选。
+    ///
+    /// `RandomChancePlacement`: keep the candidate when `nextFloat() < chance`.
+    RandomChance(f32),
     InSquare,
     HeightRange(super::provider::HeightProvider),
     Heightmap(HeightmapKind),
@@ -87,6 +91,11 @@ impl Modifier {
         };
         Ok(match kind {
             "minecraft:count" => Self::Count(IntProvider::parse(field("count")?)?),
+            "minecraft:random_chance" => Self::RandomChance(
+                field("chance")?
+                    .as_f64()
+                    .ok_or("random_chance chance is not a number")? as f32,
+            ),
             "minecraft:rarity_filter" => Self::RarityFilter(
                 field("chance")?
                     .as_i64()
@@ -234,6 +243,11 @@ fn modify(
         Modifier::Count(provider) => {
             let count = provider.sample(random);
             for _ in 0..count.max(0) {
+                out.push(pos);
+            }
+        }
+        Modifier::RandomChance(chance) => {
+            if random.next_float() < *chance {
                 out.push(pos);
             }
         }
