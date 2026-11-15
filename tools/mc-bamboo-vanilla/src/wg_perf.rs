@@ -39,12 +39,24 @@ use mc_bamboo_worldgen::{
 };
 
 const USAGE: &str = "usage: wg-perf [--seeds N] [--chunks N] [--biomes a,b,c] [--repeat N] \
-                     [--threads N] [--aux N] [--json] [--skip-cut] [--skip-sky] [--skip-threads]";
+                     [--threads N] [--aux N] [--plan-scan N] [--json] [--skip-cut] [--skip-plans] \
+                     [--skip-sky] [--skip-threads]";
+
+/// 辅助测量的默认抽样上限（高度分布、切割线对照、多线程）。`--aux N` 可以改。
+/// Default cap on the auxiliary measurements (height profile, cut-line comparison,
+/// threads); `--aux N` overrides it.const AUX_LIMIT: usize = 20;
 
 /// 辅助测量的默认抽样上限（高度分布、切割线对照、多线程）。`--aux N` 可以改。
 /// Default cap on the auxiliary measurements (height profile, cut-line comparison,
 /// threads); `--aux N` overrides it.
 const AUX_LIMIT: usize = 20;
+
+/// 洞穴群系和废弃矿井统计的默认扫描量（每个种子）。矿井 `frequency` 0.004，要 250 个区块
+/// 才期望碰到一个，所以默认扫 2500 个。
+///
+/// Default scan size per seed for the cave-biome and mineshaft counts. Mineshaft `frequency`
+/// is 0.004, so 250 chunks are needed to expect one; the default scans 2500.
+const PLAN_SCAN: usize = 2500;
 
 /// 默认采样的群系：任务书要求的五类（平原、森林、山地、海洋、丛林），再加上五种常见的
 /// 其它类型，让每个种子能凑够 200 个以上区块（窄带群系单种找不到那么多）。
@@ -103,6 +115,12 @@ struct Options {
     skip_cut: bool,
     skip_sky: bool,
     skip_threads: bool,
+    /// 跳过「水平切线方案 × 玩家情形」两节。
+    /// Skip the cut-plan-by-player-situation sections.
+    skip_plans: bool,
+    /// 洞穴群系和废弃矿井统计每个种子扫多少个区块。
+    /// How many chunks per seed the cave-biome and mineshaft scan covers.
+    plan_scan: usize,
     /// 辅助测量的抽样上限。 Cap on the auxiliary measurements.
     aux: usize,
 }
@@ -122,6 +140,8 @@ impl Options {
             skip_cut: false,
             skip_sky: false,
             skip_threads: false,
+            skip_plans: false,
+            plan_scan: PLAN_SCAN,
             aux: AUX_LIMIT,
         };
         let mut args = args.iter();
@@ -142,10 +162,14 @@ impl Options {
                 "--repeat" => options.repeat = value()?.parse().map_err(|_| USAGE.to_owned())?,
                 "--threads" => options.threads = value()?.parse().map_err(|_| USAGE.to_owned())?,
                 "--aux" => options.aux = value()?.parse().map_err(|_| USAGE.to_owned())?,
+                "--plan-scan" => {
+                    options.plan_scan = value()?.parse().map_err(|_| USAGE.to_owned())?
+                }
                 "--json" => options.json = true,
                 "--skip-cut" => options.skip_cut = true,
                 "--skip-sky" => options.skip_sky = true,
                 "--skip-threads" => options.skip_threads = true,
+                "--skip-plans" => options.skip_plans = true,
                 _ => return Err(USAGE.to_owned()),
             }
         }
@@ -214,6 +238,10 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     print_features(&worldgen, &aux_targets, options.repeat, &aux_measured)?;
     if !options.skip_cut {
         measure_cut_lines(&worldgen, &aux_targets, &aux_measured, options.repeat)?;
+    }
+    if !options.skip_plans {
+        measure_cut_plans(&worldgen, &aux_targets, &aux_measured, options.repeat)?;
+        measure_special_chunks(&worldgen, &seeds, &aux_measured, options.plan_scan)?;
     }
     if !options.skip_sky {
         measure_sky(&worldgen, &aux_targets, &aux_measured, &bands)?;
@@ -284,6 +312,564 @@ fn measure_once(
 fn cut_line(ocean_floor_min: i32) -> i32 {
     (ocean_floor_min - 24).div_euclid(16) * 16
 }
+
+/// 「水平切线方案 × 玩家情形」一节：量出「必须生成的部分」占完整生成时间的比例。
+///
+/// **做法：按阶段合成，不靠整链计时相除。** 整链计时有个致命问题：`light_view`（3×3 重打包，
+/// 约 27 ms）和 `features`（约 14 ms）几乎不随切割线变化，而真正能省的 `noise_density` +
+/// `surface` + `substance` 加起来只有约 10 ms；两者相比，切割线带来的差异被稀释到 15% 以内，
+/// 再被这台机器 ±10% 的计时噪声淹没（实测出现过 104% 这种不可能的数字）。
+///
+/// 所以这里对每个抽样区块量两样东西：
+///
+/// 1. **各阶段耗时**（`Record::phases_ms`），在完全不裁的情况下量一遍；
+/// 2. **几个代表 floor 上的地形耗时**（`doFill` + 地表 + 雕刻器），用来拟合
+///    「地形耗时随 floor 变化」的比例。
+///
+/// 然后按「每个 floor 覆盖多少列」加权，合成出每种情形的总耗时。
+///
+/// **This section synthesises per-phase costs instead of dividing whole-chain timings.**
+/// `light_view` (~27 ms) and `features` (~14 ms) barely move with the cut line, while the
+/// parts that do move (`noise_density` + `surface` + `substance`) total about 10 ms; the
+/// difference is diluted below fifteen percent and then drowned by this machine's ten-percent
+/// timing noise (the first attempt produced impossible 104% figures). So each sampled chunk
+/// measures its per-phase costs once, plus the terrain cost at a few representative floors to
+/// fit how terrain time scales with the floor, and the situations are combined from those.
+fn measure_cut_plans(
+    worldgen: &Worldgen,
+    targets: &[Target],
+    measured: &[Measured],
+    repeat: usize,
+) -> Result<(), String> {
+    println!("\n## 水平切线方案 × 玩家情形\n");
+    println!(
+        "视距 {VIEW_CHUNKS} 区块（{}×{} 列），3D 距离 ≤ {REQUIRED_RADIUS:.0} 格必须生成，\
+         地表带总是生成。每行是「必须生成 / 完整生成」。\n",
+        VIEW_CHUNKS * 2 + 1,
+        VIEW_CHUNKS * 2 + 1
+    );
+
+    print!("| 切法 |");
+    for situation in PlayerSituation::ALL {
+        print!(" {} |", situation.name());
+    }
+    println!(" 仅切法（无玩家） |");
+    print!("|---|");
+    for _ in PlayerSituation::ALL {
+        print!("---|");
+    }
+    println!("---|");
+
+    for plan in CutPlan::ALL {
+        let mut required = [0.0f64; 3];
+        let mut base_required = 0.0f64;
+        let mut full_total = 0.0f64;
+
+        for (target, item) in targets.iter().zip(measured) {
+            let generator = Generator::new(worldgen, target.seed)?;
+            let full = item.record.total();
+            full_total += full;
+
+            // 地形耗时随 floor 的曲线：在几个代表高度上各量一遍。
+            // 直接调 `terrain_with_region`，不走整条链——这里只要地形。
+            // The terrain cost against the floor, measured at a few representative heights. It
+            // calls `terrain_with_region` directly, because only the terrain is wanted here.
+            let region = generator.biome_region(target.x, target.z)?;
+            let mut terrain_curve: Vec<(i32, f64)> = Vec::new();
+            for floor in [MIN_Y, -32, 0, 32, 64, 96] {
+                for _ in 0..repeat {
+                    perf::set_floors(Floors {
+                        noise: Some(floor),
+                        surface: Some(floor),
+                        carver: Some(floor),
+                        feature: Some(floor),
+                    });
+                    let start = Instant::now();
+                    let blocks = generator.terrain_with_region(
+                        target.x,
+                        target.z,
+                        Stage::Carvers,
+                        None,
+                        &region,
+                    )?;
+                    terrain_curve.push((floor, start.elapsed().as_secs_f64() * 1000.0));
+                    black_box(&blocks);
+                }
+            }
+            perf::set_floors(Floors::default());
+
+            // 按 floor 取中位数，保证单调（floor 越高越快）。
+            // Take the median per floor and force monotonicity (higher floor is faster).
+            let mut by_floor: BTreeMap<i32, Vec<f64>> = BTreeMap::new();
+            for (floor, ms) in terrain_curve {
+                by_floor.entry(floor).or_default().push(ms);
+            }
+            let mut curve: Vec<(i32, f64)> = by_floor
+                .into_iter()
+                .map(|(floor, mut values)| {
+                    values.sort_by(f64::total_cmp);
+                    (floor, values[values.len() / 2])
+                })
+                .collect();
+            curve.sort_by_key(|(floor, _)| *floor);
+            for index in 1..curve.len() {
+                if curve[index].1 > curve[index - 1].1 {
+                    curve[index].1 = curve[index - 1].1;
+                }
+            }
+
+            let terrain_at = |floor: i32| -> f64 {
+                // 分段线性插值，floor 超出两端就取端点。
+                // Piecewise-linear interpolation; outside the ends, clamp.
+                let first = curve[0];
+                if floor <= first.0 {
+                    return first.1;
+                }
+                let last = curve[curve.len() - 1];
+                if floor >= last.0 {
+                    return last.1;
+                }
+                for pair in curve.windows(2) {
+                    let (low, low_ms) = pair[0];
+                    let (high, high_ms) = pair[1];
+                    if floor >= low && floor <= high {
+                        let t = (floor - low) as f64 / (high - low) as f64;
+                        return low_ms + (high_ms - low_ms) * t;
+                    }
+                }
+                last.1
+            };
+
+            // 整链里除地形以外的部分（群系、地物、光照、组装）不随 floor 变化。
+            // Everything but the terrain (biomes, features, light, assembly) does not move
+            // with the floor. It is derived from the recorded full time minus the recorded
+            // terrain time, so the identity floor reproduces the full time exactly.
+            let terrain_full = item.record.terrain();
+            let rest = (full - terrain_full).max(0.0);
+            // 让 `terrain_at(MIN_Y)` 严格等于 `terrain_full`：曲线是按区块实测的，可能差一点点。
+            // Make `terrain_at(MIN_Y)` equal `terrain_full` exactly: the curve is measured per
+            // chunk and can drift slightly.
+            let curve_min = terrain_at(MIN_Y);
+            let scale = if curve_min > 0.0 {
+                terrain_full / curve_min
+            } else {
+                1.0
+            };
+            let synthesize = |floor: i32| -> f64 { rest + terrain_at(floor) * scale };
+
+            let base_floor = plan.base_floor(item.ocean_floor_min, MIN_Y);
+            base_required += synthesize(base_floor);
+
+            for (index, situation) in PlayerSituation::ALL.iter().enumerate() {
+                let player_y = situation.player_y(item.ocean_floor_min);
+                let mut total_ms = 0.0;
+                let mut columns = 0usize;
+                for dz in -VIEW_CHUNKS..=VIEW_CHUNKS {
+                    for dx in -VIEW_CHUNKS..=VIEW_CHUNKS {
+                        let distance = horizontal_distance(dx, dz);
+                        let floor = plan.required_floor(
+                            item.ocean_floor_min,
+                            MIN_Y,
+                            Some((distance, player_y)),
+                        );
+                        total_ms += synthesize(floor);
+                        columns += 1;
+                    }
+                }
+                required[index] += total_ms / columns as f64;
+            }
+        }
+
+        print!("| {} |", plan.name());
+        for value in required {
+            print!(" {:.1}% |", value / full_total.max(0.001) * 100.0);
+        }
+        println!(" {:.1}% |", base_required / full_total.max(0.001) * 100.0);
+
+        // 自检：「每段一条」是不裁的恒等切法，四处都该正好 100%。
+        // Self-check: "one line per segment" cuts nothing, so all four cells must be 100%.
+        if plan == CutPlan::EverySegment {
+            let mut worst = (base_required / full_total.max(0.001) * 100.0 - 100.0).abs();
+            for value in required {
+                worst = worst.max((value / full_total.max(0.001) * 100.0 - 100.0).abs());
+            }
+            if worst > 2.0 {
+                println!(
+                    "\n> **自检警告**：恒等切法「每段一条」应正好 100%，实测偏离 {worst:.1} \
+                     个百分点。这组数字不可信。\n"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 含有洞穴群系的区块比例，以及废弃矿井结构件跨过地表带下边界的区块比例。
+///
+/// 队长要求：这两类区块按「深层不延迟」计入。
+///
+/// 洞穴群系四种：繁茂洞穴、滴水石洞穴、硫磺洞穴、深暗之域。
+/// 判定方法：`Generator::biomes` 的段调色板里出现其一，就算这一列含有洞穴群系。
+///
+/// 废弃矿井：用 `pieces::mineshaft::generate` 重建这个区块的矿井结构件，看有没有结构件
+/// 的 y 范围跨过地表带下边界（`cut`）。恶地类型（`mineshaft_mesa`）要用真实的
+/// `surface_height`，这里用 `first_occupied_height + 1`（官方 `getBaseHeight`）。
+///
+/// 矿井的 `frequency` 只有 0.004，抽样几十个区块基本碰不到，所以这一节单独扫一**大片**
+/// 区块（`scan` 个，按方环从原点铺开），只用轻量的群系查询和矿井布局，不跑地形生成。
+///
+/// The share of chunks with a cave biome and the share whose abandoned-mineshaft pieces
+/// straddle the surface band's lower edge. Mineshaft `frequency` is 0.004, so a few dozen
+/// samples almost never contain one; this section therefore scans a larger patch with only
+/// the cheap biome query and the piece layout, no terrain generation.
+fn measure_special_chunks(
+    worldgen: &Worldgen,
+    seeds: &[i64],
+    measured: &[Measured],
+    scan: usize,
+) -> Result<(), String> {
+    println!("\n## 需要「深层不延迟」的区块\n");
+
+    let cave_biomes = [
+        "minecraft:lush_caves",
+        "minecraft:dripstone_caves",
+        "minecraft:sulfur_caves",
+        "minecraft:deep_dark",
+    ];
+    let cave_ids: Vec<u32> = cave_biomes
+        .iter()
+        .map(|name| {
+            registries::biome::NAMES
+                .iter()
+                .position(|known| known == name)
+                .map(|id| id as u32)
+                .ok_or_else(|| format!("unknown biome {name}"))
+        })
+        .collect::<Result<_, _>>()?;
+
+    // 用抽样区块的切割线中位数做基准，矿井跨线按每个区块自己的切割线算。
+    // Use each chunk's own cut line for the mineshaft test.
+    let mut cave_chunks = 0usize;
+    let mut mine_placement_chunks = 0usize;
+    let mut mine_chunks = 0usize;
+    let mut mine_24 = 0usize;
+    let mut mine_48 = 0usize;
+    let mut counted = 0usize;
+
+    // 抽样区块（有完整记录，带切割线）。
+    let mut cut_by_seed: BTreeMap<i64, i32> = BTreeMap::new();
+    for item in measured {
+        cut_by_seed.insert(item.target.seed, item.ocean_floor_min);
+    }
+
+    for target in scan_targets(&seeds, scan) {
+        let Some(&ocean_floor_min) = cut_by_seed.get(&target.seed) else {
+            continue;
+        };
+        counted += 1;
+        let generator = Generator::new(worldgen, target.seed)?;
+        let sections = generator.biomes(target.x, target.z)?;
+        if sections.iter().flatten().any(|id| cave_ids.contains(id)) {
+            cave_chunks += 1;
+        }
+        match mineshaft_pieces(worldgen, &generator, target)? {
+            MineShaft::NotPlacement => {}
+            MineShaft::NoStart => mine_placement_chunks += 1,
+            MineShaft::Pieces(lo, hi) => {
+                mine_placement_chunks += 1;
+                mine_chunks += 1;
+                for (margin, counter) in [(24, &mut mine_24), (48, &mut mine_48)] {
+                    let cut = (ocean_floor_min - margin).div_euclid(16) * 16;
+                    if lo < cut && hi >= cut {
+                        *counter += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let percent = |count: usize| count as f64 / counted.max(1) as f64 * 100.0;
+    println!(
+        "扫描 {counted} 个区块（每个种子从原点按方环铺开；`minecraft:mineshafts` 的 \
+         `frequency` 只有 0.004）：\n\
+         - 含洞穴群系（繁茂/滴水石/硫磺/深暗）：**{cave_chunks} 个（{:.1}%）**\n\
+         - 有矿井起点的区块：{mine_chunks} 个，其中放置区块 {mine_placement_chunks} 个\n\
+         - 矿井结构件跨过地表带下边界（余量 24）：**{mine_24} 个（{:.2}%）**\n\
+         - 矿井结构件跨过地表带下边界（余量 48）：**{mine_48} 个（{:.2}%）**\n\
+         \n> 比例都在**全部扫描区块**上算（不是只在有矿井的区块上），因为「这个区块要不要\
+         额外生成深层」是在全部区块上摊的。",
+        percent(cave_chunks),
+        percent(mine_24),
+        percent(mine_48)
+    );
+    Ok(())
+}
+
+/// 扫描用的区块列表：每个种子从原点按方环铺开，共 `count` 个。
+/// The chunks to scan: `count` positions per seed, walked as square rings from the origin.
+fn scan_targets(seeds: &[i64], count: usize) -> Vec<Target> {
+    let mut out = Vec::with_capacity(count * seeds.len());
+    for &seed in seeds {
+        let mut ring = 0i32;
+        let mut found = 0usize;
+        while found < count {
+            for (x, z) in ring_positions(ring) {
+                if found == count {
+                    break;
+                }
+                out.push(Target {
+                    seed,
+                    x,
+                    z,
+                    biome: "scan",
+                });
+                found += 1;
+            }
+            ring += 1;
+        }
+    }
+    out
+}
+
+/// 一个区块的废弃矿井情况。
+///
+/// The abandoned-mineshaft status of one chunk.
+enum MineShaft {
+    /// 不是矿井的放置区块。 Not a placement chunk for mineshafts.
+    NotPlacement,
+    /// 是放置区块，但这次采样没有生成起点（群系或高度不满足）。
+    /// A placement chunk whose start did not generate (biome or height gate).
+    NoStart,
+    /// 有起点，带着结构件的 y 范围。 A start exists, with its pieces' y span.
+    Pieces(i32, i32),
+}
+
+/// 一个区块里废弃矿井结构件的 y 范围（`None` 表示这个区块没有矿井）。
+///
+/// 官方由 `structure_starts` 阶段决定哪个区块有矿井起点，这里用同一个布局函数重建：
+/// 先按区块的群系决定普通还是恶地类型，再调 `pieces::mineshaft::generate`。
+///
+/// The y span of a chunk's abandoned-mineshaft pieces (`None` when there is none). Vanilla
+/// decides which chunk holds the start during `structure_starts`; this rebuilds it with the
+/// same layout function, picking the normal or mesa variant from the chunk's biome.
+fn mineshaft_pieces(
+    worldgen: &Worldgen,
+    generator: &Generator<'_>,
+    target: Target,
+) -> Result<MineShaft, String> {
+    let _ = worldgen;
+    // 只有矿井的放置区块才可能有起点；用结构放置判定，和游戏一致。
+    // Only a placement chunk can hold a start; use the same placement test as the game.
+    let state = mineshaft_state()?;
+    if !state.is_structure_chunk("minecraft:mineshafts", target.seed, target.x, target.z) {
+        return Ok(MineShaft::NotPlacement);
+    }
+    // 恶地群系用 `mineshaft_mesa`，否则用 `mineshaft`。
+    // Badlands gets `mineshaft_mesa`, everything else `mineshaft`.
+    let sections = generator.biomes(target.x, target.z)?;
+    let mesa_id = registries::biome::NAMES
+        .iter()
+        .position(|name| name.contains("badlands"))
+        .map(|id| id as u32);
+    let mesa = mesa_id.is_some_and(|id| sections.iter().flatten().any(|&cell| cell == id));
+    let surface_height = if mesa {
+        let cx = target.x * 16 + 8;
+        let cz = target.z * 16 + 8;
+        generator.first_occupied_height(cx, cz)? + 1
+    } else {
+        0
+    };
+    let pieces = mc_bamboo_worldgen::structure::pieces::mineshaft::generate(
+        target.seed,
+        target.x,
+        target.z,
+        mesa,
+        surface_height,
+    );
+    if pieces.is_empty() {
+        return Ok(MineShaft::NoStart);
+    }
+    let mut lo = i32::MAX;
+    let mut hi = i32::MIN;
+    for piece in &pieces {
+        lo = lo.min(piece.bb[1]);
+        hi = hi.max(piece.bb[4]);
+    }
+    Ok(MineShaft::Pieces(lo, hi))
+}
+
+/// 矿井的结构放置表（只解析一次）。
+/// The mineshaft structure-placement table, parsed once.
+fn mineshaft_state() -> Result<mc_bamboo_worldgen::structure::StructureState, String> {
+    static STATE: std::sync::OnceLock<
+        Result<mc_bamboo_worldgen::structure::StructureState, String>,
+    > = std::sync::OnceLock::new();
+    STATE
+        .get_or_init(|| {
+            let root: serde_json::Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN)
+                .map_err(|error| format!("worldgen json: {error}"))?;
+            // `StructureSets::parse` 要的是 `structure_set` 那个对象，不是整个 root。
+            // `StructureSets::parse` wants the `structure_set` object, not the whole root.
+            let sets_value = root
+                .get("structure_set")
+                .ok_or_else(|| "worldgen has no structure_set".to_owned())?;
+            let sets = mc_bamboo_worldgen::structure::StructureSets::parse(sets_value)
+                .map_err(|error| format!("structure sets: {error}"))?;
+            Ok(mc_bamboo_worldgen::structure::StructureState::new(sets))
+        })
+        .clone()
+}
+
+/// 一条水平切线方案：用几条 y 线把一列切开。
+/// 队长要比较的四种切法。每种都归纳成**一个必须生成的下界**——理由见
+/// [`CutPlan::required_floor`]。
+///
+/// One horizontal cut plan: how many y lines split a column. Each plan reduces to a single
+/// required lower bound; see [`CutPlan::required_floor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CutPlan {
+    /// 一条线：地表带下边界。 One line: the surface band's lower edge.
+    SurfaceBand,
+    /// 两条线：再加 y=0。 Two lines: plus y=0.
+    PlusZero,
+    /// 三条线：再加 y=-32。 Three lines: plus y=-32.
+    PlusMinus32,
+    /// 每 16 格一段各一条线（共 23 条），等于不裁。
+    /// One line per 16-block segment (23 of them), i.e. no cutting.
+    EverySegment,
+}
+
+impl CutPlan {
+    const ALL: [Self; 4] = [
+        Self::SurfaceBand,
+        Self::PlusZero,
+        Self::PlusMinus32,
+        Self::EverySegment,
+    ];
+
+    /// 报告里的名字。 The name used in reports.
+    fn name(self) -> &'static str {
+        match self {
+            Self::SurfaceBand => "1 条线（地表带）",
+            Self::PlusZero => "2 条线（+y=0）",
+            Self::PlusMinus32 => "3 条线（+y=-32）",
+            Self::EverySegment => "每段一条（23 条）",
+        }
+    }
+
+    /// 这个方案在某一列上必须生成的最低 y。
+    ///
+    /// `cut` 是地表带的下边界（已对齐 16），`min_y` 是世界下界。
+    ///
+    /// **为什么只需要一个下界**：切割线以下的段只有在玩家靠近时才生成，而「玩家 128 格
+    /// 以内」对一条竖直线来说是一段**连续**区间；地表带又总是生成。两者取并，仍然是从某个
+    /// y 到世界顶部的一段连续区间。所以「必须生成」永远是 `[floor, 世界顶部]`。
+    ///
+    /// `player` 给出玩家相对这一列的水平距离和玩家 y；`None` 表示没有玩家靠近（站着不动
+    /// 且这一列在视距外，或纯粹问「完全不靠近时要生成多少」）。
+    ///
+    /// The lowest y this plan must generate for one column. `cut` is the surface band's lower
+    /// edge and `min_y` the world floor. A single bound suffices because the deferred
+    /// segments are only generated when a player is close, and "within 128 blocks" meets a
+    /// vertical line in one contiguous span; the surface band is always generated, so the
+    /// union is still one contiguous run from `floor` to the top. `player` is the horizontal
+    /// distance from the player and the player's y; `None` means no player nearby.
+    fn required_floor(self, cut: i32, min_y: i32, player: Option<(f64, i32)>) -> i32 {
+        let base = self.base_floor(cut, min_y);
+        let Some((distance, player_y)) = player else {
+            return base;
+        };
+        // 球体裁剪：水平距离 `distance` 时，垂直方向最多还能覆盖这么远。
+        // Sphere clipping: at this horizontal distance the vertical reach is at most this.
+        let reach_sq =
+            crate::wg_perf::REQUIRED_RADIUS * crate::wg_perf::REQUIRED_RADIUS - distance * distance;
+        if reach_sq <= 0.0 {
+            return base;
+        }
+        let reach = reach_sq.sqrt();
+        // 这一段段往下看：段 `[lo, lo+16)` 的任意一点离玩家的垂直距离不超过 reach 就必须生成。
+        // 用段的上边界判，保守（宁可多生成，不少生成）。
+        // Walk the segments downwards; a segment whose top is within `reach` of the player's
+        // y must be generated. Using the top edge is conservative.
+        let mut floor = base;
+        while floor > min_y {
+            let next = floor - 16;
+            if (floor as f64 - player_y as f64).abs() > reach {
+                break;
+            }
+            floor = next;
+        }
+        floor
+    }
+
+    /// 只看切法本身（玩家不靠近）时必须生成的最低 y。
+    ///
+    /// The lowest y this plan generates when no player is nearby.
+    fn base_floor(self, cut: i32, min_y: i32) -> i32 {
+        match self {
+            Self::SurfaceBand => cut,
+            Self::PlusZero => cut.min(0),
+            Self::PlusMinus32 => cut.min(0).min(-32),
+            Self::EverySegment => min_y,
+        }
+    }
+}
+
+/// 三种玩家情形。
+/// The three player situations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayerSituation {
+    /// 高空直线飞行，y=200。 Straight flight at y=200.
+    Flying,
+    /// 地面直线行走（y 取该列的地表高度）。
+    /// Walking on the ground (y is the column's surface height).
+    Walking,
+    /// 站着不动。 Standing still.
+    Standing,
+}
+
+impl PlayerSituation {
+    const ALL: [Self; 3] = [Self::Flying, Self::Walking, Self::Standing];
+
+    /// 报告里的名字。 The name used in reports.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Flying => "高空直线飞行 (y=200)",
+            Self::Walking => "地面直线行走",
+            Self::Standing => "站着不动",
+        }
+    }
+
+    /// 玩家 y。行走和站立都用该列的地表高度，由调用方给。
+    /// The player's y; walking and standing both use the column's surface height.
+    fn player_y(self, surface_y: i32) -> i32 {
+        match self {
+            Self::Flying => 200,
+            Self::Walking | Self::Standing => surface_y,
+        }
+    }
+}
+
+/// 列中心到玩家的水平距离（方块）。
+///
+/// 列偏移 `dx` 表示它的中心在 `dx * 16 + 8` 处（相对玩家所在列的中心）。
+///
+/// The horizontal distance from a column's centre to the player. A column at offset `dx`
+/// has its centre at `dx * 16 + 8` relative to the player's column centre.
+fn horizontal_distance(chunk_dx: i32, chunk_dz: i32) -> f64 {
+    let dx = f64::from(chunk_dx * CHUNK_WIDTH + CHUNK_WIDTH / 2);
+    let dz = f64::from(chunk_dz * CHUNK_WIDTH + CHUNK_WIDTH / 2);
+    (dx * dx + dz * dz).sqrt()
+}
+
+/// 一列的水平宽度（方块）。 A column's horizontal width in blocks.
+const CHUNK_WIDTH: i32 = 16;
+
+/// 视距（区块）。队长指定的 12。 The view distance in chunks, 12 as the lead specified.
+const VIEW_CHUNKS: i32 = 12;
+
+/// 必须生成的最大 3D 距离（方块）。 The largest 3D distance that still forces generation.
+const REQUIRED_RADIUS: f64 = 128.0;
 
 /// 一次带记录的生成：中心区块自己走完整条链，3×3 视图由调用方给（游戏里来自快照缓存）。
 ///
@@ -1335,4 +1921,119 @@ fn stats(values: &[f64]) -> (f64, f64, f64) {
     let median = sorted[sorted.len() / 2];
     let p95 = sorted[((sorted.len() as f64 * 0.95) as usize).min(sorted.len() - 1)];
     (mean, median, p95)
+}
+
+#[cfg(test)]
+mod cut_plan_tests {
+    use super::*;
+
+    const MIN_Y: i32 = -64;
+
+    /// 没有玩家靠近时，各切法给出的下界就是它自己那条线。
+    /// With no player nearby each plan's floor is its own lowest line.
+    #[test]
+    fn base_floors_follow_the_plan() {
+        let cut = 32;
+        assert_eq!(CutPlan::SurfaceBand.base_floor(cut, MIN_Y), 32);
+        assert_eq!(CutPlan::PlusZero.base_floor(cut, MIN_Y), 0);
+        assert_eq!(CutPlan::PlusMinus32.base_floor(cut, MIN_Y), -32);
+        assert_eq!(CutPlan::EverySegment.base_floor(cut, MIN_Y), MIN_Y);
+        // 地表带下边界在地面以下时，`min` 要取到它。
+        // When the surface band's edge is below y=0 the min has to reach it.
+        assert_eq!(CutPlan::PlusZero.base_floor(-16, MIN_Y), -16);
+    }
+
+    /// 不裁的切法任何时候都返回世界下界。
+    /// The uncut plan always returns the world floor.
+    #[test]
+    fn every_segment_never_cuts() {
+        for distance in [0.0, 64.0, 128.0, 400.0] {
+            for y in [-60, 0, 100, 200] {
+                assert_eq!(
+                    CutPlan::EverySegment.required_floor(32, MIN_Y, Some((distance, y))),
+                    MIN_Y
+                );
+            }
+        }
+    }
+
+    /// 玩家就在脚下（水平距离 0）时，垂直方向能覆盖整个 128 格，所以深层段都会被拉进来。
+    /// A player directly below reaches the full 128 blocks vertically, pulling the deep
+    /// segments in.
+    #[test]
+    fn a_player_directly_below_reaches_the_deep_segments() {
+        // 地表带下边界 32，玩家在 y=0：128 格垂直覆盖足够拉到 -64。
+        // Surface edge 32 with the player at y=0: 128 blocks of vertical reach reaches -64.
+        let floor = CutPlan::SurfaceBand.required_floor(32, MIN_Y, Some((0.0, 0)));
+        assert_eq!(floor, MIN_Y);
+    }
+
+    /// 玩家很远（超过 128 格）时不影响结果。
+    /// A player beyond 128 blocks changes nothing.
+    #[test]
+    fn a_distant_player_changes_nothing() {
+        for distance in [129.0, 200.0, 1000.0] {
+            assert_eq!(
+                CutPlan::SurfaceBand.required_floor(32, MIN_Y, Some((distance, 0))),
+                32
+            );
+        }
+    }
+
+    /// 水平距离越大，能下探的垂直距离越小。
+    /// The farther away horizontally, the less vertical reach is left.
+    #[test]
+    fn vertical_reach_shrinks_with_horizontal_distance() {
+        let near = CutPlan::SurfaceBand.required_floor(32, MIN_Y, Some((0.0, 0)));
+        let mid = CutPlan::SurfaceBand.required_floor(32, MIN_Y, Some((64.0, 0)));
+        let far = CutPlan::SurfaceBand.required_floor(32, MIN_Y, Some((120.0, 0)));
+        assert!(
+            near <= mid,
+            "near {near} should reach at least as deep as mid {mid}"
+        );
+        assert!(
+            mid <= far,
+            "mid {mid} should reach at least as deep as far {far}"
+        );
+        // 距离 120 时垂直只够 sqrt(128²-120²) ≈ 44 格，从 32 往下只能到 -16 以下一点。
+        // At distance 120 the vertical reach is only sqrt(128^2-120^2) = 44, so from 32 the
+        // floor cannot go far below -16.
+        assert!(far > MIN_Y);
+    }
+
+    /// 玩家的 y 越高，能下探到深层的机会越小（因为垂直差距变大）。
+    /// The higher the player, the harder it is to reach the deep segments.
+    #[test]
+    fn a_higher_player_reaches_less() {
+        let low = CutPlan::SurfaceBand.required_floor(32, MIN_Y, Some((0.0, 0)));
+        let high = CutPlan::SurfaceBand.required_floor(32, MIN_Y, Some((0.0, 200)));
+        assert!(
+            high >= low,
+            "high {high} should reach no deeper than low {low}"
+        );
+        // 玩家在 y=200，地表带下边界 32，垂直差 168 > 128，够不到。
+        // A player at y=200 with the surface edge at 32 is 168 blocks up: out of reach.
+        assert_eq!(high, 32);
+    }
+
+    /// 列中心按 +8 偏移算水平距离。
+    /// Column centres are offset by 8 for the horizontal distance.
+    #[test]
+    fn horizontal_distance_uses_column_centres() {
+        // 玩家所在列（dx=dz=0）的中心相距 (8, 8)，即 8√2。
+        // The player's own column (dx=dz=0) has its centre at (8, 8), i.e. 8*sqrt(2).
+        assert!((horizontal_distance(0, 0) - (128.0_f64).sqrt()).abs() < 1e-9);
+        // 东边一个区块：中心在 (24, 8)。
+        // One chunk east: the centre is at (24, 8).
+        assert!((horizontal_distance(1, 0) - (24.0_f64 * 24.0 + 64.0).sqrt()).abs() < 1e-9);
+    }
+
+    /// 三种玩家情形的 y 取值。
+    /// The player y of each situation.
+    #[test]
+    fn situations_pick_the_expected_player_y() {
+        assert_eq!(PlayerSituation::Flying.player_y(70), 200);
+        assert_eq!(PlayerSituation::Walking.player_y(70), 70);
+        assert_eq!(PlayerSituation::Standing.player_y(70), 70);
+    }
 }
