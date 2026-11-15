@@ -39,20 +39,30 @@ use mc_bamboo_worldgen::{
 };
 
 const USAGE: &str = "usage: wg-perf [--seeds N] [--chunks N] [--biomes a,b,c] [--repeat N] \
-                     [--threads N] [--json] [--skip-cut] [--skip-sky] [--skip-threads]";
+                     [--threads N] [--aux N] [--json] [--skip-cut] [--skip-sky] [--skip-threads]";
 
-/// 辅助测量每轮最多测多少个区块（高度分布、切割线对照、多线程）。
-/// How many chunks the auxiliary measurements cover per round.
+/// 辅助测量的默认抽样上限（高度分布、切割线对照、多线程）。`--aux N` 可以改。
+/// Default cap on the auxiliary measurements (height profile, cut-line comparison,
+/// threads); `--aux N` overrides it.
 const AUX_LIMIT: usize = 20;
 
-/// 默认按群系采样：平原、森林、山地、海洋、丛林。
-/// The default biome sample: plains, forest, hills, ocean, jungle.
-const DEFAULT_BIOMES: [&str; 5] = [
+/// 默认采样的群系：任务书要求的五类（平原、森林、山地、海洋、丛林），再加上五种常见的
+/// 其它类型，让每个种子能凑够 200 个以上区块（窄带群系单种找不到那么多）。
+///
+/// The default biome sample: the five the brief asks for (plains, forest, hills, ocean,
+/// jungle) plus five other common types, so each seed reaches more than two hundred
+/// chunks (a single narrow biome cannot supply that many).
+const DEFAULT_BIOMES: [&str; 10] = [
     "minecraft:plains",
     "minecraft:forest",
     "minecraft:windswept_hills",
     "minecraft:ocean",
     "minecraft:jungle",
+    "minecraft:desert",
+    "minecraft:taiga",
+    "minecraft:swamp",
+    "minecraft:badlands",
+    "minecraft:savanna",
 ];
 
 /// 一个种子下要测的区块。
@@ -93,6 +103,8 @@ struct Options {
     skip_cut: bool,
     skip_sky: bool,
     skip_threads: bool,
+    /// 辅助测量的抽样上限。 Cap on the auxiliary measurements.
+    aux: usize,
 }
 
 impl Options {
@@ -110,6 +122,7 @@ impl Options {
             skip_cut: false,
             skip_sky: false,
             skip_threads: false,
+            aux: AUX_LIMIT,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -128,6 +141,7 @@ impl Options {
                 }
                 "--repeat" => options.repeat = value()?.parse().map_err(|_| USAGE.to_owned())?,
                 "--threads" => options.threads = value()?.parse().map_err(|_| USAGE.to_owned())?,
+                "--aux" => options.aux = value()?.parse().map_err(|_| USAGE.to_owned())?,
                 "--json" => options.json = true,
                 "--skip-cut" => options.skip_cut = true,
                 "--skip-sky" => options.skip_sky = true,
@@ -194,7 +208,7 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     print_biomes(&measured);
     // 辅助测量取一部分区块，免得整轮跑太久。
     // The auxiliary measurements use a subsample so a round stays affordable.
-    let (aux_targets, aux_measured) = subsample(&targets, &measured, AUX_LIMIT);
+    let (aux_targets, aux_measured) = subsample(&targets, &measured, options.aux);
     let bands = measure_bands(&worldgen, &aux_targets, options.repeat)?;
     print_bands(&bands, &aux_measured);
     print_features(&worldgen, &aux_targets, options.repeat, &aux_measured)?;
@@ -494,8 +508,14 @@ fn subsample(
 
 /// 按群系找区块：`Generator::biomes` 的段调色板里目标群系过半就算。
 ///
+/// 扫描用螺旋方环（半径逐圈加 1 个区块），一圈里按 `(x, z)` 走完再进下一圈，这样同一圈
+/// 能给出足够多的候选；`radius * 6` 的稀疏八方向在群系窄带（山地、丛林）上找不到那么多。
+///
 /// Find chunks by biome: keep a chunk when the target biome is a majority of its quart
-/// cells in the section palettes from `Generator::biomes`.
+/// cells in the section palettes from `Generator::biomes`. The scan walks square rings
+/// one chunk at a time and covers every position of a ring, because the old sparse
+/// eight-direction step over `radius * 6` could not find enough chunks of a narrow biome
+/// band such as hills or jungle.
 fn pick_targets(
     worldgen: &Worldgen,
     seeds: &[i64],
@@ -512,18 +532,8 @@ fn pick_targets(
                 .ok_or_else(|| format!("unknown biome {name}"))? as u32;
             let static_name = registries::biome::NAMES[wanted as usize];
             let mut found = 0;
-            'scan: for radius in 0..800 {
-                let d = radius * 6;
-                for (x, z) in [
-                    (d, d),
-                    (-d, d),
-                    (d, -d),
-                    (-d, -d),
-                    (d, 0),
-                    (0, d),
-                    (-d, 0),
-                    (0, -d),
-                ] {
+            'rings: for ring in 0..600 {
+                for (x, z) in ring_positions(ring) {
                     let sections = generator.biomes(x, z)?;
                     let hits = sections
                         .iter()
@@ -540,7 +550,7 @@ fn pick_targets(
                         });
                         found += 1;
                         if found == per_biome {
-                            break 'scan;
+                            break 'rings;
                         }
                     }
                 }
@@ -553,6 +563,25 @@ fn pick_targets(
         }
     }
     Ok(targets)
+}
+
+/// 第 `ring` 圈方环上的全部区块坐标；`ring == 0` 只有原点。
+///
+/// Every chunk position on square ring `ring`; `ring == 0` is the origin alone.
+fn ring_positions(ring: i32) -> Vec<(i32, i32)> {
+    if ring == 0 {
+        return vec![(0, 0)];
+    }
+    let mut out = Vec::with_capacity((ring as usize + 1) * 8);
+    for x in -ring..=ring {
+        out.push((x, -ring));
+        out.push((x, ring));
+    }
+    for z in -ring + 1..ring {
+        out.push((-ring, z));
+        out.push((ring, z));
+    }
+    out
 }
 
 fn print_phases(measured: &[Measured]) {
@@ -927,11 +956,25 @@ fn measure_feature_runs(
 }
 
 /// 按高度分布给地物分类。
-/// Classify a feature by its height distribution.
+///
+/// 有一类地物的「候选位置」不是它真正改写的方块位置：`freeze_top_layer` 的候选 y 恒为
+/// `minY`，它自己在 `place` 里逐列读 `MOTION_BLOCKING` 再改地表；`monster_room` 的候选是
+/// 房间原点，房间本身跨好几层。按候选高度分类对它们是误导，单独标成「扫描型」。
+///
+/// Classify a feature by its height distribution. Some features' candidates are not the
+/// blocks they actually rewrite: `freeze_top_layer`'s candidate y is always `minY` while
+/// it walks each column's `MOTION_BLOCKING` height, and `monster_room`'s candidate is the
+/// room origin with the room spanning several layers. Classifying those by candidate
+/// height would mislead, so they are marked as scan-type instead.
 fn classify_feature(row: &FeatureRow) -> &'static str {
     if row.candidates == 0 {
-        "无候选"
-    } else if row.above_share > 0.95 {
+        return "无候选";
+    }
+    match row.kind.as_str() {
+        "minecraft:freeze_top_layer" | "minecraft:monster_room" => return "扫描型",
+        _ => {}
+    }
+    if row.above_share > 0.95 {
         "地表"
     } else if row.above_share < 0.05 {
         "地下"
