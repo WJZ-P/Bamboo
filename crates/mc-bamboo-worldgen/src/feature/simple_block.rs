@@ -3,13 +3,14 @@
 //! 官方 `SimpleBlockFeature.place`：`to_place.getOptionalState` → `canSurvive` →
 //! 按方块类型分派（DoublePlantBlock / MossyCarpetBlock 走 placeAt，其余 `setBlock(pos, state, 2)`）。
 //! 26.3 的 `to_place` 是 `Holder<BlockStateProvider>`：内联 bare state（`{"id":...}`）等价于
-//! `SimpleStateProvider`，注册名字符串引用的是 `BLOCK_STATE_PROVIDER` 注册表（本轮未导出），
-//! `weighted` / `randomized_int` 是 typed provider。这里只实现内联 bare state，其余标 unsupported。
+//! `SimpleStateProvider`，注册名字符串按 `block_state_provider` 注册表解析，
+//! `weighted` / `randomized_int` / `random_block` 是 typed provider。
 //!
 //! Official `SimpleBlockFeature.place`: `getOptionalState` -> `canSurvive` -> dispatch by block
 //! class (DoublePlantBlock / MossyCarpetBlock use placeAt, else `setBlock(pos, state, 2)`).
-//! Only inline bare-state `to_place` (SimpleStateProvider) is ported; holder references and
-//! typed providers stay unsupported.
+//! `to_place` is a `Holder<BlockStateProvider>`: an inline bare state is a
+//! `SimpleStateProvider`, a registry name resolves through `block_state_provider`, and
+//! `weighted` / `randomized_int` / `random_block` are typed providers.
 
 use serde_json::Value;
 
@@ -28,13 +29,21 @@ pub struct SimpleBlockFeature {
 
 impl SimpleBlockFeature {
     /// 解析 `to_place` 为已移植的 provider，且所有可能状态的存活判定都已移植；
-    /// holder 引用和未移植的 typed provider 返回 `None`（标 unsupported）。
+    /// 未移植的 typed provider 返回 `None`（标 unsupported）。字符串 holder 引用按
+    /// `lookup` 查 `block_state_provider` 注册表。
     ///
     /// Parse `to_place` into a ported provider whose every possible state has a ported
-    /// survival check; holder references and unported typed providers return `None`.
-    pub fn parse(config: &Value) -> Option<Self> {
+    /// survival check; unported typed providers return `None`. String holder references
+    /// resolve through `lookup` against the `block_state_provider` registry.
+    pub fn parse<'a>(
+        config: &'a Value,
+        lookup: &dyn Fn(&str) -> Option<&'a Value>,
+    ) -> Option<Self> {
         let to_place = config.as_object()?.get("to_place")?;
-        let provider = StateProvider::parse(to_place)?;
+        let provider = StateProvider::parse_with(to_place, lookup)?;
+        if !provider.supported() {
+            return None;
+        }
         if !provider
             .possible_states()
             .iter()
@@ -51,7 +60,7 @@ impl SimpleBlockFeature {
     /// One candidate of official `SimpleBlockFeature.place`: `getOptionalState` (typed
     /// providers consume random), then `canSurvive`, then dispatch by block class.
     pub fn place(&self, world: &mut FeatureWorld<'_>, random: &WorldgenRandom, pos: Pos) -> bool {
-        let Some(state) = self.provider.get_state(random) else {
+        let Some(state) = self.provider.get_optional_state(world, random, pos) else {
             return false;
         };
         if !survival::can_survive(state, world, pos) {
@@ -103,19 +112,19 @@ mod tests {
     fn parses_inline_bare_state_and_gates_unported_forms() {
         let pumpkin: Value =
             json!({"to_place": {"id": "minecraft:pumpkin"}, "type": "minecraft:simple_block"});
-        assert!(SimpleBlockFeature::parse(&pumpkin).is_some());
+        assert!(SimpleBlockFeature::parse(&pumpkin, &|_| None).is_some());
         // weighted typed provider 现在支持。
         // The weighted typed provider is now supported.
         let weighted: Value = json!({
             "to_place": {"type": "minecraft:weighted", "entries": [{"data": "minecraft:poppy", "weight": 1}]},
             "type": "minecraft:simple_block",
         });
-        assert!(SimpleBlockFeature::parse(&weighted).is_some());
+        assert!(SimpleBlockFeature::parse(&weighted, &|_| None).is_some());
         // holder 字符串引用未导出的注册表，也不支持。
         // A holder string references an unexported registry; unsupported.
         let holder: Value =
             json!({"to_place": "minecraft:flower_plain", "type": "minecraft:simple_block"});
-        assert!(SimpleBlockFeature::parse(&holder).is_none());
+        assert!(SimpleBlockFeature::parse(&holder, &|_| None).is_none());
     }
 
     #[test]
@@ -123,10 +132,12 @@ mod tests {
         // 双格植物现在走 placeAt，已支持。
         // Double plants now go through placeAt and are supported.
         let tall: Value = json!({"to_place": {"id": "minecraft:tall_grass"}});
-        assert!(SimpleBlockFeature::parse(&tall).is_some());
-        // 蘑菇要亮度检查，仍未移植。
-        // Mushrooms need a brightness check; still unported.
+        assert!(SimpleBlockFeature::parse(&tall, &|_| None).is_some());
+        // 蘑菇的亮度判据在 FEATURES 阶段恒为 15，等价于只看下面那格的 override 标签，
+        // 所以现在也支持。
+        // The mushroom's brightness is always 15 during FEATURES, which reduces the check
+        // to the override tag below, so it is supported now.
         let mushroom: Value = json!({"to_place": {"id": "minecraft:brown_mushroom"}});
-        assert!(SimpleBlockFeature::parse(&mushroom).is_none());
+        assert!(SimpleBlockFeature::parse(&mushroom, &|_| None).is_some());
     }
 }

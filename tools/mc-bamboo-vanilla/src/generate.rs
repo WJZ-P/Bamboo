@@ -1959,6 +1959,8 @@ fn states_file(data: &VersionData) -> Result<String, String> {
     check_table_length("STATE_FACTS", &tables.facts, total)?;
     check_table_length("STATE_FLUID", &tables.fluid, total)?;
     check_table_length("LIGHT_DAMPENING", &tables.light_dampening, total)?;
+    check_table_length("STATE_ROTATION", &tables.rotation, total * 4)?;
+    check_table_length("STATE_MIRROR", &tables.mirror, total * 3)?;
 
     let mut out = String::new();
     let _ = writeln!(out, "use crate::FluidFacts;\n");
@@ -1982,6 +1984,20 @@ fn states_file(data: &VersionData) -> Result<String, String> {
         "LIGHT_DAMPENING",
         "u8",
         &tables.light_dampening,
+    );
+    write_state_table(
+        &mut out,
+        "每个状态的四个 `rotate` 结果，下标 = 状态 * 4 + `Rotation.ordinal()`。",
+        "STATE_ROTATION",
+        "u32",
+        &tables.rotation,
+    );
+    write_state_table(
+        &mut out,
+        "每个状态的三个 `mirror` 结果，下标 = 状态 * 3 + `Mirror.ordinal()`。",
+        "STATE_MIRROR",
+        "u32",
+        &tables.mirror,
     );
 
     let _ = writeln!(out, "/// 去重后的流体状态，第一项是空流体。");
