@@ -10,7 +10,10 @@
 //!   的索引选择。
 //! - `pieces`：验证 `findGenerationPoint` + `addPieces` 的**全部结构件**
 //!   （RandomTemplate / Rotation / 包围盒 / project_start_to_heightmap /
-//!   VoxelShape 空间检查 / junction 数）。规模是 27 结构 × 6 种子 × 6 区块。
+//!   VoxelShape 空间检查 / junction 数）。默认跑满 6 种子 × 12 区块 × 27 结构。
+//! - `piecesbiome`：同 `pieces`，但**先按群系挑起点**（`column_has_valid_biome`
+//!   扫半径 64 的区块方阵）。`pieces` 的固定区块只有 5.8% 能通过 `isValidBiome`，
+//!   这个模式能到 55%，真正跑完 `addPieces` 的查询多一个数量级。
 //! - `pools`：每个 template pool 的结构件生成。
 //! - `save` / `load`：结构件 NBT 的编码与读回（含 `regeneratePiecesAfterLoad`）。
 //! - `processors` / `apply`：`processor_list` 的解析与 `processBlock` 执行。
