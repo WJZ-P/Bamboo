@@ -1451,10 +1451,24 @@ impl ProcessorLevel for FakeLevel {
 /// `CappedProcessor.finalizeProcessing`.
 fn run_capped(mut command: Command, work_dir: &Path) -> Result<(), String> {
     let mut queries = Vec::new();
-    for seed in [0_i64, 1, -1, 42, 12_345_678_901] {
-        for piece in [(0, 64, 0), (-13, 40, 27), (100, -50, -200)] {
-            for size in [1_usize, 2, 5, 8, 33] {
-                queries.push(format!("{seed}|{}|{}|{}|{size}", piece.0, piece.1, piece.2));
+    for seed in [0_i64, 1, -1, 42, 12_345_678_901, -98_765_432_123] {
+        for piece in [
+            (0, 64, 0),
+            (-13, 40, 27),
+            (100, -50, -200),
+            (-1000, 200, 1000),
+        ] {
+            // `maxToReplace = min(limit.sample(random), listSize)`。
+            // `limit` 取 0（不替换）、小于列表长度、恰好等于、大于；列表长度也取三种。
+            // `limit` covers 0 (no replacement), below the list size, exactly it and above
+            // it; the list size varies too.
+            for list_size in [1_usize, 7, 33] {
+                for limit in [0_i32, 1, 5, 33, 1000] {
+                    queries.push(format!(
+                        "{seed}|{}|{}|{}|{list_size}|{limit}",
+                        piece.0, piece.1, piece.2
+                    ));
+                }
             }
         }
     }
@@ -1480,20 +1494,31 @@ fn run_capped(mut command: Command, work_dir: &Path) -> Result<(), String> {
 ///
 /// Java emits `C|key|sampled|indices` and `R|key|nextInt,...`.
 fn compare_capped(stdout: &str, queries: &[String]) -> Result<(), String> {
-    let mut java_c: HashMap<String, (i32, String)> = HashMap::new();
+    let mut java_c: HashMap<String, (i32, i32, String)> = HashMap::new();
     let mut java_r: HashMap<String, String> = HashMap::new();
     for line in stdout.lines() {
         let fields: Vec<&str> = line.split('|').collect();
         if fields.len() < 7 {
             continue;
         }
-        let key = fields[1..6].join("|");
+        // `C|` / `R|` 之后是查询的 6 段，所以 key 是 `fields[1..7]`。
+        // The six query fields follow `C|` / `R|`, so the key is `fields[1..7]`.
+        let key = fields[1..7].join("|");
         match fields[0] {
             "C" => {
-                java_c.insert(key, (fields[6].parse().unwrap_or(0), fields[7..].join("|")));
+                java_c.insert(
+                    key,
+                    (
+                        fields[7].parse().unwrap_or(0),
+                        fields[8].parse().unwrap_or(0),
+                        fields[9..].join("|"),
+                    ),
+                );
             }
             "R" => {
-                java_r.insert(key, fields[6..].join("|"));
+                // `R|key(6 段)|nextInt,...`，key 之后才是序列。
+                // `R|the six key fields|nextInt,...`; the sequence follows the key.
+                java_r.insert(key, fields[7..].join("|"));
             }
             _ => {}
         }
@@ -1512,7 +1537,8 @@ fn compare_capped(stdout: &str, queries: &[String]) -> Result<(), String> {
             parse_i32(fields[2])?,
             parse_i32(fields[3])?,
         );
-        let size: usize = parse_i32(fields[4])? as usize;
+        let list_size: usize = parse_i32(fields[4])? as usize;
+        let limit: i32 = parse_i32(fields[5])?;
         checked += 1;
 
         // `RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece)`。
@@ -1520,18 +1546,24 @@ fn compare_capped(stdout: &str, queries: &[String]) -> Result<(), String> {
         let random = Random::Legacy(LegacyRandom::new(seed))
             .fork_positional()
             .at(piece.0, piece.1, piece.2);
-        // `limit.sample(random)` 用一个常数 6 的 provider（与 Java 侧一致）。
-        // `limit.sample(random)` with a constant-6 provider, matching the Java side.
-        let sampled = constant_int_sample(&random, 6);
-        let mut indices: Vec<usize> = (0..size).collect();
+        // `limit.sample(random)`。
+        // `limit.sample(random)`.
+        let sampled = constant_int_sample(&random, limit);
+        // `int maxToReplace = Math.min(this.limit.sample(random), processedBlockInfoList.size());`
+        let max_to_replace = sampled.min(list_size as i32).max(0) as usize;
+        let mut indices: Vec<usize> = (0..list_size).collect();
         shuffle_indices(&mut indices, &random);
+        // 只取前 `maxToReplace` 个：官方 `while (it.hasNext() && replaced < maxToReplace)`。
+        // Only the first `maxToReplace`: vanilla's
+        // `while (it.hasNext() && replaced < maxToReplace)`.
+        indices.truncate(max_to_replace);
         let got = indices
             .iter()
             .map(usize::to_string)
             .collect::<Vec<_>>()
             .join(",");
 
-        let Some((want_sampled, want_indices)) = java_c.get(query) else {
+        let Some((want_sampled, want_max, want_indices)) = java_c.get(query) else {
             return Err(format!("Java missing C for {query}"));
         };
         if *want_sampled != sampled {
@@ -1539,6 +1571,14 @@ fn compare_capped(stdout: &str, queries: &[String]) -> Result<(), String> {
             if first.is_none() {
                 first = Some(format!(
                     "{query}: sampled rust {sampled} java {want_sampled}"
+                ));
+            }
+        }
+        if *want_max != max_to_replace as i32 {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{query}: maxToReplace rust {max_to_replace} java {want_max}"
                 ));
             }
         }
@@ -1645,7 +1685,13 @@ fn run_capped_full(mut command: Command, work_dir: &Path) -> Result<(), String> 
                 (-1000, 200, 1000),
                 (37, 7, -53),
             ] {
-                queries.push(build_capped_full_query(&name, seed, piece));
+                // `gravel` 取 1（少于所有 limit）、3（等于最小的 limit）、8（多于最大 limit），
+                // 这样 `min(limit.sample(), listSize)` 两侧都走到。
+                // `gravel` is 1 (below every limit), 3 (equal to the smallest) and 8 (above
+                // the largest), so both sides of `min(limit.sample(), listSize)` are hit.
+                for gravel in [1_usize, 3, 8] {
+                    queries.push(build_capped_full_query(&name, seed, piece, gravel));
+                }
             }
         }
     }
@@ -1670,21 +1716,17 @@ fn run_capped_full(mut command: Command, work_dir: &Path) -> Result<(), String> 
 /// 一条 `cappedfull` 查询：`list|seed|piece(3)|worldState|count|blocks`。
 ///
 /// One `cappedfull` query line.
-fn build_capped_full_query(name: &str, seed: i64, piece: (i32, i32, i32)) -> String {
+fn build_capped_full_query(name: &str, seed: i64, piece: (i32, i32, i32), gravel: usize) -> String {
     // `minecraft:trail_ruins_replaceable` 只含 `minecraft:gravel`，所以至少要放几个砾石，
-    // `capped` 才会真的替换；其余方块作为不命中的对照。
+    // `capped` 才会真的替换；其余方块作为不命中的对照。`gravel` 个数可变，用来覆盖
+    // `min(limit.sample(), listSize)` 的两种取值：砾石多时取 `limit`，砾石少时取列表长度。
     // `minecraft:trail_ruins_replaceable` only contains `minecraft:gravel`, so the batch
     // needs several gravel blocks for `capped` to do anything; the rest are controls.
-    let states = [
-        "minecraft:gravel",
-        "minecraft:gravel",
-        "minecraft:gravel",
-        "minecraft:gravel",
-        "minecraft:gravel",
-        "minecraft:gravel",
-        "minecraft:stone",
-        "minecraft:deepslate_bricks",
-    ];
+    // `gravel` varies so both sides of `min(limit.sample(), listSize)` are covered: many
+    // gravel hits the limit, few gravel hits the list size.
+    let mut states: Vec<&str> = vec!["minecraft:gravel"; gravel];
+    states.push("minecraft:stone");
+    states.push("minecraft:deepslate_bricks");
     let mut line = format!(
         "{name}|{seed}|{}|{}|{}|minecraft:air|{}",
         piece.0,

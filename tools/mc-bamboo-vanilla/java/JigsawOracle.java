@@ -921,16 +921,18 @@ public final class JigsawOracle {
      * `is(HolderSet)` are all a processor needs.
      */
     /**
-     * capped 模式：queries 每行 {@code seed|pieceX|pieceY|pieceZ|size}。复刻
-     * `CappedProcessor.finalizeProcessing` 的随机源与洗牌：
+     * capped 模式：queries 每行 {@code seed|pieceX|pieceY|pieceZ|listSize|limit}。复刻
+     * `CappedProcessor.finalizeProcessing` 的完整取数顺序：
      * {@code RandomSource.createThreadLocalInstance(seed).forkPositional().at(pos)}，
-     * 再 {@code Util.toShuffledList(IntStream.range(0, size), random)}，输出洗牌后的下标序列
-     * 与随后 {@code limit.sample(random)} 的取值。这样「随机源派生 + 洗牌顺序 + 取样」
-     * 三段都能和 Rust 逐项比，不需要伪造真实 {@code ServerLevel}。
+     * {@code maxToReplace = min(limit.sample(random), listSize)}，
+     * {@code Util.toShuffledList(IntStream.range(0, listSize), random)}，然后取前
+     * {@code maxToReplace} 个下标。输出 {@code maxToReplace} 与**截断后的下标序列**，这样
+     * 「随机源派生 + 取样 + 洗牌 + 截断」四段都能逐项比。
      *
-     * <p>Capped mode: one {@code seed|pieceX|pieceY|pieceZ|size} per line, replaying the
-     * random source and shuffle of `CappedProcessor.finalizeProcessing` and printing the
-     * shuffled indices plus the sampled limit, so all three stages can be compared.
+     * <p>Capped mode: one {@code seed|pieceX|pieceY|pieceZ|listSize|limit} per line,
+     * replaying the whole draw order of `CappedProcessor.finalizeProcessing` and printing
+     * the clamped `maxToReplace` plus the truncated index list, so all four stages can be
+     * compared.
      */
     private static void runCapped(Path queries) throws Exception {
         StringBuilder out = new StringBuilder();
@@ -942,16 +944,22 @@ public final class JigsawOracle {
             long seed = Long.parseLong(p[0]);
             BlockPos piece = new BlockPos(
                     Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3]));
-            int size = Integer.parseInt(p[4]);
+            int listSize = Integer.parseInt(p[4]);
+            int limit = Integer.parseInt(p[5]);
             var random = RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece);
-            // 官方顺序：先 `limit.sample(random)`，再 `toShuffledList`。
-            // Vanilla order: `limit.sample(random)` first, then `toShuffledList`.
-            int sampled = net.minecraft.util.valueproviders.ConstantInt.of(6).sample(random);
+            // 官方顺序：先 `limit.sample(random)`，再 `min(size)`，然后 `toShuffledList`。
+            // Vanilla order: `limit.sample(random)`, then `min(size)`, then `toShuffledList`.
+            int sampled = net.minecraft.util.valueproviders.ConstantInt.of(limit).sample(random);
+            int maxToReplace = Math.min(sampled, listSize);
             var indices = net.minecraft.util.Util.toShuffledList(
-                    java.util.stream.IntStream.range(0, size), random);
+                    java.util.stream.IntStream.range(0, listSize), random);
             out.append("C|").append(String.join("|", p)).append('|')
-                    .append(sampled).append('|');
-            for (int i = 0; i < indices.size(); i++) {
+                    .append(sampled).append('|').append(Math.max(maxToReplace, 0)).append('|');
+            // 只输出前 `maxToReplace` 个：官方 `while (it.hasNext() && replaced < maxToReplace)`。
+            // Only the first `maxToReplace` entries: vanilla's
+            // `while (it.hasNext() && replaced < maxToReplace)`.
+            int shown = Math.max(Math.min(maxToReplace, indices.size()), 0);
+            for (int i = 0; i < shown; i++) {
                 if (i > 0) {
                     out.append(',');
                 }
