@@ -15,7 +15,10 @@
 
 pub mod mineshaft;
 pub mod mineshaft_place;
+pub mod monument_double_rooms;
+pub mod monument_rooms;
 pub mod ocean_monument;
+pub mod ocean_monument_place;
 pub mod stronghold;
 pub mod stronghold_place;
 pub mod woodland_mansion;
@@ -478,6 +481,15 @@ impl Builder {
         let dy = y1_pos - bb[4];
         self.offset_vertically(dy);
     }
+}
+
+/// `RandomSource.create(seed)`：一个 `LegacyRandomSource(seed)`。
+///
+/// `RandomSource.create(seed)`: a `LegacyRandomSource(seed)`.
+pub fn legacy_random(seed: i64) -> WorldgenRandom {
+    use crate::random::Random;
+    use mc_bamboo_blocks::LegacyRandom;
+    WorldgenRandom::new(Random::Legacy(LegacyRandom::new(seed)))
 }
 
 /// `Float.toString(float)` 的文本形式：最短十进制表示，整数补 `.0`。

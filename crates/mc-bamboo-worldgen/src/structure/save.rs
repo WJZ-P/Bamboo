@@ -466,7 +466,7 @@ pub fn regenerate_monument(chunk_x: i32, chunk_z: i32, seed: i64, saved: &[Piece
     } else {
         HDir::from_2d(old.o)
     };
-    ocean_monument::monument_building(&random, west, north, dir)
+    ocean_monument::monument_layout(&random, west, north, dir).pieces()
 }
 
 /// 把 `LoadedPiece` 映射成布局 `Piece`，供 `regenerate_monument` 用（只需要 `bb` / `o`）。
