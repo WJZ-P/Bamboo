@@ -600,6 +600,10 @@ WebView2 的渲染进程不算在内。
   `capped` 复刻 `CappedProcessor.finalizeProcessing` 的随机源派生
   （`createThreadLocalInstance(seed).forkPositional().at(piece)`）、`Util.toShuffledList`
   的洗牌序列与 `limit.sample`，75 查询 0 不一致；
+  `cappedfull` 用 `Unsafe.allocateInstance` 造出 `getSeed()` 返回真实种子的
+  `ServerLevel`（链路 `server.worldGenSettings.options.seed`，三层 final 字段反射写入），
+  于是**完整的 `finalizeProcessing`** 会真的执行限额替换：24 查询 / 192 方块 0 不一致
+  （砾石被 `capped` 规则换成可疑的沙砾，实际替换 72 次，说明限额真的生效）；
   `jigsaws` 对 1511 个模板 × 4 种旋转 × 4 个位置 = 24176 个查询、
   68352 个拼图方块的位置 / front / top / name / target / pool / joint / 两个优先级逐项
   0 不一致；`templates` 1511 个模板的尺寸 / 方块数 / 拼图方块数 0 不一致；`shapes`
@@ -614,12 +618,10 @@ WebView2 的渲染进程不算在内。
   `liquid_settings`），方块写入（`placeInChunk` / `postProcess` / processors / 拼图替换 /
   方块实体）属放置那一步，`Piece::to_full_save_piece` 给出 `pool_element` / `rotation` /
   `junctions` / `liquid_settings` 全部子类字段的存档标签，`processor_list` 的 40 个条目也已
-  按官方 codec 解析成类型化的 `structure::processor::Processor` 并逐键对拍过编码，
-  **但 processor 的执行（`processBlock` / `finalizeProcessing`）已在
-  `structure::processor_apply` 里移植并对拍**：`block_rot` / `rule` / `protected_blocks`
-  逐方块 0 不一致（200 查询 / 941 存活方块），`processOnlyInCurrentChunk` 的两支（有
-  `chunkBB` 时过滤、链里有 `capped` 时不过滤）都覆盖到；`capped` 的随机源派生、洗牌序列
-  与 `limit.sample` 也单独对拍过（75 查询 0 不一致，见 `jigsaw capped`）。
+  按官方 codec 解析成类型化的 `structure::processor::Processor` 并逐键对拍过编码；
+  `processors` 的内联非空对象与 `processor_list` 的逐 processor 执行见上一条。
+  `TemplatePools` 在解析时就把每个 pool 的 `maxSize` 一次算好（官方懒算，结果相同），
+  因此它是 `Sync + Send`，可以放进 `Arc` 供多线程区块生成共享。
   `start_height` 只支持 `constant`（absolute）与 `uniform`——26.3 主世界全部 28 个 jigsaw
   结构只用这两种，其余 provider 标 unsupported；`bastion_remnant` 是下界结构，按分工不做。
   `liquid_settings` 已随 `Piece` 带到放置阶段（`SinglePoolElement` 用

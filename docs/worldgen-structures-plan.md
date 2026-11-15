@@ -245,6 +245,28 @@
 * 故意改坏：`processOnlyInCurrentChunk` 取反 → 80 处不一致；`evaluates_entire_piece_state`
   改成 `false` → 6 处不一致；`capped` 的洗牌改成固定 `nextInt(size)` → 45 处不一致。
 
+**第九轮（2026-11-14，`cb-wg-jigsaw` 分支：显式随机源 / 端到端 capped / Sync）**：
+
+* `structure::processor_apply` 支持 `StructurePlaceSettings.setRandom(...)` 显式设置的
+  随机源：新增 `PlaceSettings` 结构体（`piece_position` / `reference_pos` / `chunk_bb` /
+  `level_seed` / `explicit_random`），`settings_random` 照官方
+  `if (this.random != null) return this.random;` 优先用显式的、否则按方块位置派生。
+  `process_blocks` 的参数从 8 个收敛成 `(processors, blocks, level, settings)`。
+* 新对拍模式 `jigsaw cappedfull`：用 `Unsafe.allocateInstance` + 反射写入
+  `server.worldGenSettings.options.seed` 三层 final 字段，造出 `getSeed()` 返回真实种子的
+  `ServerLevel`，于是官方 `CappedProcessor.finalizeProcessing` 会真的执行限额替换。
+  8 个含 `capped` 的列表 × 4 种子 × 2 位置 = 24 查询、192 方块 0 不一致。
+  **确认真的比到了**：`trail_ruins_houses_archaeology` 的规则把砾石换成可疑的沙砾，
+  24 个查询里共替换 72 次（`limit` 6/3/2/2 生效）；把洗牌改成不倒序后报 40 处不一致。
+* `PoolElement::from_tag`（读回路径）对空 `list_pool_element` 同样报错，与官方构造器
+  的 `IllegalArgumentException` 对齐。
+* `TemplatePool.max_size` 从 `Cell<i32>` 懒算改成解析时一次算好：官方懒算只为省一次遍历、
+  输入全是只读数据，结果相同；而 `Cell` 让 `TemplatePool` / `TemplatePools` 变成 `!Sync`，
+  没法放进 `Arc` 供多线程生成共享。新增两个单元测试钉住：`TemplatePools` 是 `Sync + Send`、
+  245 个 pool 的提前算结果与现算一致。`jigsaw pools` 980 查询 / 8976 件仍 0 不一致。
+* 故意改坏：忽略显式随机源（单元测试失败）、去掉空列表校验（单元测试失败）、
+  `capped` 洗牌改成不倒序（`cappedfull` 报 40 处）。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、
 结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」
