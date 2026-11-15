@@ -396,16 +396,20 @@ mod tests {
         assert_eq!(sulfur.allowed_vertical_water_for_tree, 1);
     }
 
-    /// 造一个 9 区块的最小世界：第 0 层（y = -64）全石头，其余空气。
+    /// 造一个 9 区块的最小世界：`y <= ground_top` 全石头，其余空气。
     ///
-    /// A minimal nine-chunk world: solid stone at layer 0 (y = -64), air above.
-    fn flat_world() -> crate::feature::FeatureChunks {
+    /// A minimal nine-chunk world: stone up to `ground_top`, air above.
+    fn flat_world_with_ground(ground_top: i32) -> crate::feature::FeatureChunks {
         let min_y = -64;
         let height = 384;
         let mut blocks = Vec::with_capacity(height);
-        blocks.push(vec![mc_bamboo_data::blocks::STONE; 256]);
-        for _ in 1..height {
-            blocks.push(vec![mc_bamboo_data::blocks::AIR; 256]);
+        for y in min_y..min_y + height as i32 {
+            let fill = if y <= ground_top {
+                mc_bamboo_data::blocks::STONE
+            } else {
+                mc_bamboo_data::blocks::AIR
+            };
+            blocks.push(vec![fill; 256]);
         }
         let chunk_blocks = || blocks.clone();
         let sections = || {
@@ -461,7 +465,7 @@ mod tests {
         });
         let feature = RootSystemFeature::parse(&config, &|_| None).unwrap();
 
-        let input = flat_world();
+        let input = flat_world_with_ground(1);
         let mut world = FeatureWorld::new(&input, 63, 0).unwrap();
         let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
         let registry = Registry::parse(root.as_object().unwrap()).unwrap();
@@ -483,25 +487,29 @@ mod tests {
 
         // `placeDirtAndTree` 第一次就 `move(UP)`，所以 origin 放在石头层上方的空气格。
         // `placeDirtAndTree` moves UP first, so the origin sits just above the stone.
-        let outcome = feature.place(&registry, &mut world, &mut env, &random, (0, -63, 0));
+        let outcome = feature.place(&registry, &mut world, &mut env, &random, (0, 2, 0));
         assert!(outcome.supported, "the root system must be fully supported");
         assert!(
             outcome.placed,
             "the official place() returns true for an air origin"
         );
 
-        // **这个测试只覆盖「解析 + 顶层 `place` 的返回值语义」**：在石头层上方的空气格
-        // 调用 `place`，确认它返回 `supported && placed`（官方对空气 origin 恒返回 true）。
+        // **这个测试覆盖「解析 + 顶层 `place` 的返回值语义」**：地表石头到 y = 1，
+        // origin 在 y = 2（空气）。`placeDirtAndTree` 第一轮 `pos.1 = 3`，它下面的
+        // `origin.y = 2` 是空气 → `isSolid` 不成立 → 返回 `None`，此时官方
+        // `RootSystemFeature.place` 仍返回 **true**（它只在 origin 不是空气时返回 false）。
         //
-        // 子 feature 与 `placeDirt` 的具体写入路径在这里**没有被触发**（诊断显示叶子没放
-        // 到 y = -62），原因未定位 —— 野外也一直没找到能放成树的坐标。所以 `root_system`
-        // 整体仍算「已写未验证」，这个测试不改变那个结论。
+        // **没有覆盖**：`placeDirt` / `placeRoots` 的写入路径（需要真正放成一棵树，
+        // 野外和合成世界里都还没构造出来），所以 `root_system` 仍算「已写未验证」。
         //
-        // This test only covers parsing and the top-level `place` return contract: calling
-        // `place` on an air cell above the stone layer must yield `supported && placed`
-        // (the official code returns true for any air origin). The child feature and the
-        // `placeDirt` write path are **not** exercised here (diagnostics showed the leaves
-        // never landed at y = -62), and no wild chunk has been found that grows a tree, so
+        // This test covers parsing and the top-level `place` return contract: stone up to
+        // y = 1 and the origin at y = 2 (air). On the first iteration `pos.1 = 3` and the
+        // block below (`origin.y = 2`) is air, so `isSolid` fails and `placeDirtAndTree`
+        // returns `None`; the official `RootSystemFeature.place` still returns **true**
+        // (it only returns false when the origin is not air).
+        //
+        // **Not covered**: the `placeDirt` / `placeRoots` write paths, which need a tree to
+        // actually place — not yet constructed in the wild or synthetically, so
         // `root_system` stays **written but unverified**.
         assert!(outcome.supported, "the root system must be fully supported");
         assert!(
