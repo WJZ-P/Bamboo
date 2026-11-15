@@ -531,6 +531,9 @@ fn classify(state: u32) -> Option<Kind> {
         BlockClass::SporeBlossomBlock => Kind::SporeBlossom,
         BlockClass::CarpetBlock => Kind::Carpet,
         BlockClass::MushroomBlock => Kind::Mushroom,
+        // `AzaleaBlock` 继承 `VegetationBlock` 但把 `mayPlaceOn` 换成 `supports_azalea`。
+        // `AzaleaBlock` extends `VegetationBlock` but swaps `mayPlaceOn` for `supports_azalea`.
+        BlockClass::AzaleaBlock => Kind::Vegetation("minecraft:supports_azalea"),
         BlockClass::MossyCarpetBlock => Kind::MossyCarpet,
         BlockClass::SmallDripleafBlock => Kind::SmallDripleaf,
         BlockClass::BigDripleafBlock => Kind::BigDripleaf,
@@ -580,9 +583,31 @@ mod tests {
             "minecraft:moss_carpet",
             "minecraft:brown_mushroom",
             "minecraft:red_mushroom",
+            "minecraft:azalea",
+            "minecraft:flowering_azalea",
         ] {
             assert!(supports(state(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn azalea_uses_the_azalea_tag_not_the_generic_one() {
+        // `AzaleaBlock` 覆写 `mayPlaceOn` 为 `supports_azalea`，不是 `supports_vegetation`。
+        // 两者的差别只有 `minecraft:clay`（方块 id 330）—— 它在 `supports_azalea` 里，
+        // 不在 `supports_vegetation` 里，正好用来区分两条分支。
+        // `AzaleaBlock` overrides `mayPlaceOn` with `supports_azalea`, not the generic
+        // tag. The two differ only by `minecraft:clay` (block id 330), which sits in
+        // `supports_azalea` only, so it distinguishes the two branches.
+        let clay = mc_bamboo_data::block_id_of_state(
+            block_by_name("minecraft:clay").unwrap().default_state,
+        )
+        .unwrap() as i32;
+        let azalea_tag = block_tag("minecraft:supports_azalea").unwrap();
+        let vegetation_tag = block_tag("minecraft:supports_vegetation").unwrap();
+        assert!(azalea_tag.contains(&clay));
+        assert!(!vegetation_tag.contains(&clay));
+        assert!(supports(state("minecraft:azalea")));
+        assert!(supports(state("minecraft:flowering_azalea")));
     }
 
     #[test]
