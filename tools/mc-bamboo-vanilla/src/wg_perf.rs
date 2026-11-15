@@ -30,7 +30,9 @@ use std::{
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_data::{registries, state_facts};
-use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT, chunk::Chunk};
+use mc_bamboo_world::{
+    MIN_Y, WORLD_HEIGHT, chunk::Chunk, light::generate::generate_light_from_layers,
+};
 use mc_bamboo_worldgen::{
     Worldgen,
     chunk::{Generator, Stage},
@@ -40,11 +42,7 @@ use mc_bamboo_worldgen::{
 
 const USAGE: &str = "usage: wg-perf [--seeds N] [--chunks N] [--biomes a,b,c] [--repeat N] \
                      [--threads N] [--aux N] [--plan-scan N] [--json] [--skip-cut] [--skip-plans] \
-                     [--skip-sky] [--skip-threads]";
-
-/// 辅助测量的默认抽样上限（高度分布、切割线对照、多线程）。`--aux N` 可以改。
-/// Default cap on the auxiliary measurements (height profile, cut-line comparison,
-/// threads); `--aux N` overrides it.const AUX_LIMIT: usize = 20;
+                     [--skip-sky] [--skip-threads] [--light-compare]";
 
 /// 辅助测量的默认抽样上限（高度分布、切割线对照、多线程）。`--aux N` 可以改。
 /// Default cap on the auxiliary measurements (height profile, cut-line comparison,
@@ -123,6 +121,8 @@ struct Options {
     plan_scan: usize,
     /// 辅助测量的抽样上限。 Cap on the auxiliary measurements.
     aux: usize,
+    /// 只跑新旧光照路径的交替对照。 Run only the old/new light path comparison.
+    light_compare: bool,
 }
 
 impl Options {
@@ -143,6 +143,7 @@ impl Options {
             skip_plans: false,
             plan_scan: PLAN_SCAN,
             aux: AUX_LIMIT,
+            light_compare: false,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -170,6 +171,7 @@ impl Options {
                 "--skip-sky" => options.skip_sky = true,
                 "--skip-threads" => options.skip_threads = true,
                 "--skip-plans" => options.skip_plans = true,
+                "--light-compare" => options.light_compare = true,
                 _ => return Err(USAGE.to_owned()),
             }
         }
@@ -190,6 +192,9 @@ pub fn run(args: &[&str]) -> Result<(), String> {
         options.chunks_per_biome,
         options.repeat
     );
+    if options.light_compare {
+        return measure_light_compare(&worldgen, &targets, options.repeat);
+    }
 
     // 首次调用的初始化开销单独报：建 `Generator`（编译采样器）+ 第一次生成。
     let init_start = Instant::now();
@@ -562,7 +567,7 @@ fn measure_special_chunks(
         cut_by_seed.insert(item.target.seed, item.ocean_floor_min);
     }
 
-    for target in scan_targets(&seeds, scan) {
+    for target in scan_targets(seeds, scan) {
         let Some(&ocean_floor_min) = cut_by_seed.get(&target.seed) else {
             continue;
         };
@@ -892,9 +897,9 @@ fn generate_recorded(
     perf::mark(Phase::Features);
     let result = run_features(generator, cx, cz, view)?;
     perf::mark(Phase::LightView);
-    let chunks = light_view(cx, cz, view)?;
+    let columns = light_columns(cx, cz, view);
     perf::mark(Phase::Light);
-    let light = mc_bamboo_world::light::generate::generate_light(ChunkPos::new(cx, cz), &chunks);
+    let light = generate_light_from_layers(ChunkPos::new(cx, cz), &columns)?;
     perf::mark(Phase::Assembly);
     let chunk = mc_bamboo_game::worldgen::GeneratedChunk {
         blocks,
@@ -955,7 +960,27 @@ fn measure_features(
     Ok((record.steps_ms.iter().sum(), record))
 }
 
-fn light_view(
+/// 游戏 `light` 阶段现在的输入：3×3 每个区块的位置和逐层方块，只借用不复制。
+///
+/// The game's `light` stage input now: each 3x3 chunk's position and block
+/// layers, borrowed rather than copied.
+fn light_columns(cx: i32, cz: i32, view: &[TerrainView; 9]) -> Vec<(ChunkPos, &[Vec<u32>])> {
+    view.iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let dx = index as i32 % 3 - 1;
+            let dz = index as i32 / 3 - 1;
+            (ChunkPos::new(cx + dx, cz + dz), chunk.blocks.as_slice())
+        })
+        .collect()
+}
+
+/// 旧的 `light` 阶段输入：复制快照，再逐个走 `build_region_column` 组装完整 `Chunk`。
+/// 只给 `--light-compare` 对照用。
+///
+/// The former `light` stage input: copy each snapshot and assemble a full
+/// `Chunk` through `build_region_column`. Only `--light-compare` uses it.
+fn assembled_light_view(
     cx: i32,
     cz: i32,
     view: &[TerrainView; 9],
@@ -972,6 +997,85 @@ fn light_view(
         );
     }
     Ok(chunks)
+}
+
+/// `--light-compare`：同一批区块上交替跑旧、新两条光照路径，各取 `repeat` 遍的最小值，
+/// 并逐段确认两边的光照完全相同。
+///
+/// 旧路径 = 复制快照 + `build_region_column` 组装 9 个 `Chunk`（`light_view`）+
+/// `generate_light`（`light`）；新路径 = `generate_light_from_layers` 一步（转换和传播都在里面）。
+///
+/// `--light-compare`: alternate the old and new light paths on the same chunks,
+/// keep the minimum of `repeat` runs each, and check that both give identical
+/// light. Old = copy snapshots + assemble 9 `Chunk`s via `build_region_column`
+/// (`light_view`) + `generate_light` (`light`); new = one
+/// `generate_light_from_layers` call (conversion and propagation together).
+fn measure_light_compare(
+    worldgen: &Worldgen,
+    targets: &[Target],
+    repeat: usize,
+) -> Result<(), String> {
+    let mut generators: HashMap<i64, Generator<'_>> = HashMap::new();
+    let (mut old_view, mut old_light, mut old_total, mut new_total) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for &target in targets {
+        let generator = match generators.entry(target.seed) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Generator::new(worldgen, target.seed)?)
+            }
+        };
+        let view = view_of(generator, target.x, target.z)?;
+        let center = ChunkPos::new(target.x, target.z);
+        let (mut best_view, mut best_light, mut best_old, mut best_new) =
+            (f64::MAX, f64::MAX, f64::MAX, f64::MAX);
+        for _ in 0..repeat.max(1) {
+            let start = Instant::now();
+            let chunks = assembled_light_view(target.x, target.z, &view)?;
+            let middle = Instant::now();
+            let old = mc_bamboo_world::light::generate::generate_light(center, &chunks);
+            let end = Instant::now();
+            best_view = best_view.min((middle - start).as_secs_f64() * 1000.0);
+            best_light = best_light.min((end - middle).as_secs_f64() * 1000.0);
+            best_old = best_old.min((end - start).as_secs_f64() * 1000.0);
+
+            let start = Instant::now();
+            let columns = light_columns(target.x, target.z, &view);
+            let new = generate_light_from_layers(center, &columns)?;
+            best_new = best_new.min(start.elapsed().as_secs_f64() * 1000.0);
+            if old.sky != new.sky || old.block != new.block {
+                return Err(format!(
+                    "light-compare: old and new light differ at seed {} chunk ({}, {})",
+                    target.seed, target.x, target.z
+                ));
+            }
+            black_box((&chunks, &old, &new));
+        }
+        old_view.push(best_view);
+        old_light.push(best_light);
+        old_total.push(best_old);
+        new_total.push(best_new);
+    }
+    let stats = |values: &mut Vec<f64>| {
+        values.sort_by(f64::total_cmp);
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        (mean, values[values.len() / 2])
+    };
+    println!(
+        "light-compare: {} chunks, min of {} runs each, old and new light identical",
+        targets.len(),
+        repeat.max(1)
+    );
+    for (name, values) in [
+        ("old light_view", &mut old_view),
+        ("old light", &mut old_light),
+        ("old light_view + light", &mut old_total),
+        ("new light (from layers)", &mut new_total),
+    ] {
+        let (mean, median) = stats(values);
+        println!("  {name:<26} mean {mean:>8.3} ms  median {median:>8.3} ms");
+    }
+    Ok(())
 }
 
 /// 一个区块到 CARVERS 的方块和群系；`features` 和 `light` 都要一份 3×3。
