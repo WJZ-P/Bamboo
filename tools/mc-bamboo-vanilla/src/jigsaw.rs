@@ -14,6 +14,9 @@
 //! - `piecesbiome`：同 `pieces`，但**先按群系挑起点**（`column_has_valid_biome`
 //!   扫半径 64 的区块方阵）。`pieces` 的固定区块只有 5.8% 能通过 `isValidBiome`，
 //!   这个模式能到 55%，真正跑完 `addPieces` 的查询多一个数量级。
+//! - `piecesexact`：在 `piecesbiome` 之上再加 `random_spread` 的**放置门**
+//!   （`StructureState::is_structure_chunk`）。命中率到 83%（69/83），
+//!   `no_stub` 只剩 5 个。
 //! - `pools`：每个 template pool 的结构件生成。
 //! - `save` / `load`：结构件 NBT 的编码与读回（含 `regeneratePiecesAfterLoad`）。
 //! - `processors` / `apply`：`processor_list` 的解析与 `processBlock` 执行。
@@ -47,7 +50,8 @@ use mc_bamboo_worldgen::{
     chunk::Generator,
     settings::SeededRouter,
     structure::{
-        BoundingBox, Structures, allowed_biome_names, column_has_valid_biome,
+        BoundingBox, StructureSets, StructureState, Structures, allowed_biome_names,
+        column_has_valid_biome,
         jigsaw::{
             JigsawConfig, JigsawStructures, Piece, Rotation, StructurePieces, TemplatePools,
             add_pieces,
@@ -124,6 +128,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "jigsaws" => run_jigsaws(command, work_dir),
         "pieces" => run_pieces(command, work_dir, options.get(1), options.get(2)),
         "piecesbiome" => run_pieces_biome(command, work_dir),
+        "piecesexact" => run_pieces_exact(command, work_dir),
         "pools" => run_pools(command, work_dir),
         "save" => run_save(command, work_dir),
         "processors" => run_processors(command, work_dir),
@@ -3550,6 +3555,126 @@ fn run_pieces(
 
 /// Java 的 Q 行 `Q|key|status|sx|sy|sz|n`，P 行 `P|key|idx|type|loc|pos(3)|rot|bb(6)|gld|njunc`。
 /// 全部结构件逐项比（含 npieces、njunc）；junction 详情由后续里程碑补 J 行。
+/// `piecesexact` 模式：在 `piecesbiome` 的群系过滤之上再加一道**放置门**。
+///
+/// `piecesbiome` 只保证「这块的列群系属于该结构」，但 `random_spread` 的频率判定
+///（`isStructureChunk`）仍然会否掉大部分区块，所以它的 `no_stub` 还有 53/131。
+/// 这里先算「包含该结构的每个 `structure_set`」，再要求至少一个 set
+/// `is_structure_chunk` 命中，最后才用群系过滤。三者同时成立时
+/// `findGenerationPoint` 几乎必然给出起点。
+///
+/// `piecesexact` mode: adds the **placement gate** on top of `piecesbiome`'s biome
+/// filter. `piecesbiome` only guarantees the column biome matches, but `random_spread`'s
+/// frequency test (`isStructureChunk`) still rejects most chunks, which is why it keeps
+/// 53/131 `no_stub` results. Here every `structure_set` containing the structure is
+/// collected first, at least one set must pass `is_structure_chunk`, and only then does
+/// the biome filter run. With all three true `findGenerationPoint` almost always yields
+/// a stub.
+fn run_pieces_exact(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    /// 每个方向扫多少个区块（`2*RADIUS+1` 见方）。
+    /// How many chunks to scan per axis (`2*RADIUS+1` square).
+    const RADIUS: i32 = 96;
+    /// 每个 (结构, 种子) 最多保留几个命中区块。
+    /// At most this many matching chunks per (structure, seed).
+    const PER_STRUCTURE: usize = 4;
+
+    let worldgen = Worldgen::load()?;
+    let settings = worldgen
+        .settings("minecraft:overworld")
+        .ok_or("missing overworld settings")?;
+    let dims = (settings.min_y, settings.height);
+    let raw: Value =
+        serde_json::from_str(WORLDGEN).map_err(|error| format!("bad worldgen.json: {error}"))?;
+    let structures = Structures::parse(raw.get("structure").ok_or("missing structure")?)?;
+    let sets = StructureSets::parse(raw.get("structure_set").ok_or("missing structure_set")?)?;
+    let state = StructureState::new(sets);
+    let mut allowed_cache: HashMap<String, HashSet<String>> = HashMap::new();
+    for id in &STRUCTURES {
+        let def = structures
+            .get(id)
+            .ok_or_else(|| format!("missing structure def {id}"))?;
+        allowed_cache.insert((*id).to_owned(), allowed_biome_names(def)?);
+    }
+    // 结构 → 包含它的所有 set 名。
+    // Structure -> every set containing it.
+    let mut sets_by_structure: HashMap<String, Vec<String>> = HashMap::new();
+    for entry in state.sets().iter() {
+        for selection in &entry.structures {
+            sets_by_structure
+                .entry(selection.structure.clone())
+                .or_default()
+                .push(entry.name.clone());
+        }
+    }
+
+    let mut queries = Vec::new();
+    let mut scanned = 0usize;
+    let mut placement_hits = 0usize;
+    for &seed in SEEDS.iter().take(4) {
+        let generator = Generator::new(&worldgen, seed)?;
+        for id in &STRUCTURES {
+            let allowed = &allowed_cache[*id];
+            let names = sets_by_structure.get(*id).cloned().unwrap_or_default();
+            let mut found = 0usize;
+            'scan: for dz in -RADIUS..=RADIUS {
+                for dx in -RADIUS..=RADIUS {
+                    let chunk = (dx, dz);
+                    scanned += 1;
+                    let placed = names
+                        .iter()
+                        .any(|set| state.is_structure_chunk(set, seed, chunk.0, chunk.1));
+                    if !placed {
+                        continue;
+                    }
+                    placement_hits += 1;
+                    if !column_has_valid_biome(&generator, chunk, allowed, dims)? {
+                        continue;
+                    }
+                    queries.push(Query {
+                        id: (*id).to_owned(),
+                        seed,
+                        cx: chunk.0,
+                        cz: chunk.1,
+                    });
+                    found += 1;
+                    if found == PER_STRUCTURE {
+                        break 'scan;
+                    }
+                }
+            }
+            if found == 0 {
+                println!("note: {id} seed {seed} has no placed+biome chunk within radius {RADIUS}");
+            }
+        }
+    }
+    println!(
+        "scanned {scanned} (structure, chunk) cells, {placement_hits} passed the placement gate, \
+         kept {} queries",
+        queries.len()
+    );
+
+    let queries_path = work_dir.join("jigsaw_piece_exact_queries.txt");
+    let text = queries
+        .iter()
+        .map(|query| format!("{}|{}|{}|{}", query.id, query.seed, query.cx, query.cz))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&queries_path, text).map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("pieces")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_pieces(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
 fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
     let mut java_q: HashMap<String, Vec<String>> = HashMap::new();
     let mut java_p: HashMap<String, BTreeMap<usize, Vec<String>>> = HashMap::new();
