@@ -775,7 +775,10 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `SAME_PLANE` / `WRAP_AROUND` 三种扩散、`getStateForPlacement` 的 waterlogged 处理。
   **对拍仍有 126 处不一致**（`--seeds 2 --chunks 20 --salt 11 --steps 9`），
   表现是 `glow_lichen -> water` / `air -> glow_lichen`，位置差一格左右，
-  疑点在汇报里。
+  疑点在汇报里。本轮修掉一个真 bug（`8f63533`）：`validDirections` 里
+  `Direction.Plane.HORIZONTAL` 的顺序是 **NORTH, EAST, SOUTH, WEST**，
+  之前写成 NORTH, SOUTH, WEST, EAST，导致洗牌结果整体错位。修完单区块
+  （`--chunk 1 0 --scan 1`）仍是 4 处，说明还有别的问题。
 * 组合类回归（`6723362` 合并 main 后，`871f2b4`）：树在本分支已经可用，于是把
   `random_selector` 和 `weighted_random_selector` 放开逐方块对拍。
   * 6 个 `random_selector` 树（trees_plains / trees_savanna / trees_taiga /
