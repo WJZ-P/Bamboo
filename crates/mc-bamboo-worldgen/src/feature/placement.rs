@@ -545,6 +545,9 @@ fn environment_scan(
     let (x, _, z) = pos;
     let mut y = pos.1;
     if !allowed_search.test(world, (x, y, z)) {
+        if std::env::var_os("BAMBOO_FEATURE_DEBUG").is_some() {
+            eprintln!("scan start rejected at ({x},{y},{z})");
+        }
         return;
     }
     for _ in 0..max_steps {
@@ -718,6 +721,14 @@ pub fn place_candidates(
                 top_feature: env.top_feature,
             };
             modify(&modifiers[index], &mut ctx, random, pos, &mut modified);
+            if std::env::var_os("BAMBOO_FEATURE_DEBUG").is_some() {
+                eprintln!(
+                    "modifier[{}] {:?} at {pos:?} -> {} candidates",
+                    index,
+                    std::mem::discriminant(&modifiers[index]),
+                    modified.len()
+                );
+            }
         }
         if index + 1 < modifiers.len() {
             // 字节码 237-294：倒序压栈。
