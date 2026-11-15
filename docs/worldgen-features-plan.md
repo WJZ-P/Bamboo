@@ -1437,7 +1437,10 @@ biome filter rejected at (4, 88, 842): biome=29 placed=87
   `simple_random_selector`，所以 step 9 仍标 skipped。
 * `root_system`（`rooted_azalea_tree`、`rooted_sulfur_spring`）：需要 `TreeFeature`，
   属 `cb-wg-trees`。
-* `block_pile`、`huge_fungus`、`chorus_plant`：只被组合类内联或只在下界/末地。
+* `block_pile`、`huge_fungus`、`chorus_plant`：**不在主世界的 `features_per_step` 里**
+  （三者的 placed feature 都是 `steps=[]`，且没有任何主世界条目按类型引用它们），
+  下界和末地维度还没做，所以**不需要实现**。第十五轮核对过 `features_per_step` 的全部
+  类型集合里没有这三个。
 * `noise_threshold_count` / `count_on_every_layer` / `surface_water_depth_filter`
   修饰器：第三轮（`8d12409d`）已全部移植。
   `noise_threshold_count` 用在 step 9 的 6 个植被 placed feature 上并对拍 0 不一致；
