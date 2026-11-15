@@ -289,7 +289,7 @@ impl VegetationPatch {
                 }
                 // `level.setBlock(belowPos, stateToPlace, 2)`。
                 // `level.setBlock(belowPos, stateToPlace, 2)`.
-                world.set_block_with_heightmaps(pos.0, pos.1, pos.2, mc_bamboo_data::blocks::STONE); // DELIBERATE BREAK
+                world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
                 pos = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
             }
         }
