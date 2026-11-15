@@ -358,6 +358,14 @@ fn classify(state: u32) -> Option<Kind> {
         BlockClass::DryVegetationBlock
         | BlockClass::ShortDryGrassBlock
         | BlockClass::TallDryGrassBlock => Kind::Vegetation("minecraft:supports_dry_vegetation"),
+        // `AzaleaBlock` 覆写 `mayPlaceOn` 为 `supports_azalea` 标签，形状同 VegetationBlock。
+        // `moss_vegetation` 的 weighted provider 里有 `azalea` / `flowering_azalea`，
+        // `lush_caves_vegetation` 整条链要靠它才能接入对拍。
+        //
+        // `AzaleaBlock` overrides `mayPlaceOn` with the `supports_azalea` tag, the same
+        // shape as VegetationBlock. The `moss_vegetation` weighted provider contains
+        // `azalea` / `flowering_azalea`, so `lush_caves_vegetation` needs it to run at all.
+        BlockClass::AzaleaBlock => Kind::Vegetation("minecraft:supports_azalea"),
         // LeafLitterBlock 覆写 canSurvive 为 isFaceSturdy(UP)。
         // LeafLitterBlock overrides canSurvive with isFaceSturdy(UP).
         BlockClass::LeafLitterBlock => Kind::SturdyFaceUp,
