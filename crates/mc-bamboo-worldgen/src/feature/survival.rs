@@ -36,6 +36,11 @@ enum Kind {
     DoublePlant(&'static str),
     /// `LeafLitterBlock.canSurvive`：下面那格 `isFaceSturdy(FULL, UP)`。
     SturdyFaceUp,
+    /// `BaseCoralWallFanBlock.canSurvive`：看 `facing` 反方向的邻居在 `facing` 面是否结实。
+    ///
+    /// `BaseCoralWallFanBlock.canSurvive`: the neighbour opposite `facing` must be sturdy
+    /// toward `facing`.
+    CoralWallFan,
     /// `HangingRootsBlock.canSurvive`：上面那格 `isFaceSturdy(FULL, DOWN)`。
     ///
     /// `HangingRootsBlock.canSurvive`: the block above is `isFaceSturdy(FULL, DOWN)`.
@@ -103,6 +108,7 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         // 即 `isFaceSturdy(FULL)`；Direction.UP 的 ordinal 是 1。
         // `LeafLitterBlock.canSurvive`: `isFaceSturdy(FULL, UP)`; UP's ordinal is 1.
         Some(Kind::SturdyFaceUp) => state_facts(below) & (1u64 << (facts::STURDY_FULL + 1)) != 0,
+        Some(Kind::CoralWallFan) => coral_wall_fan_can_survive(state, world, pos),
         // `HangingRootsBlock.canSurvive`：`above.isFaceSturdy(level, above, Direction.DOWN)`，
         // DIRECTION.DOWN 的 ordinal 是 0。
         // `HangingRootsBlock.canSurvive`: `isFaceSturdy(FULL, DOWN)`, DOWN's ordinal is 0.
@@ -146,6 +152,31 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         None => false,
     }
 }
+
+/// `BaseCoralWallFanBlock.canSurvive`：`facing` 反方向的邻居在 `facing` 面结实。
+///
+/// `BaseCoralWallFanBlock.canSurvive`: the neighbour opposite `facing` is sturdy toward
+/// `facing`.
+fn coral_wall_fan_can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    // `FACING` 的 ordinal 和 `Direction` 一致（north=2 / south=3 / west=4 / east=5）。
+    // `FACING`'s ordinal matches `Direction` (north=2 / south=3 / west=4 / east=5).
+    let Some(ordinal) =
+        (2..=5).find(|&o| with_property(state, "facing", FACE_NAMES[o - 2]) == Some(state))
+    else {
+        return false;
+    };
+    let opposite = HORIZONTAL_OFFSETS[ordinal - 2];
+    let neighbour = world.get_block(pos.0 - opposite.0, pos.1, pos.2 - opposite.2);
+    state_facts(neighbour) & (1u64 << (facts::STURDY_FULL + ordinal as u32)) != 0
+}
+
+/// `Direction` 的四个水平名字，`facing` 属性用的就是它们。
+/// The four horizontal `Direction` names used by the `facing` property.
+const FACE_NAMES: [&str; 4] = ["north", "south", "west", "east"];
+
+/// 四个水平方向的位移，下标和 `FACE_NAMES` 对应。
+/// Offsets of the four horizontal directions, indexed like `FACE_NAMES`.
+const HORIZONTAL_OFFSETS: [(i32, i32, i32); 4] = [(0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0)];
 
 /// `Direction.Plane.HORIZONTAL` 的四个水平偏移；这些判定只读方块，顺序不影响结果。
 ///
@@ -433,14 +464,17 @@ fn classify(state: u32) -> Option<Kind> {
         // 珊瑚块继承 `Block`，`canSurvive` 恒 true。
         // Coral blocks extend `Block`, so `canSurvive` is always true.
         BlockClass::CoralBlock => Kind::Default,
-        // 珊瑚植物（`BaseCoralPlantTypeBlock`）的 `canSurvive` 是「下面 `isFaceSturdy(UP)`」。
-        // Coral plants (`BaseCoralPlantTypeBlock`) require `isFaceSturdy(UP)` below.
+        // 珊瑚壁扇（`BaseCoralWallFanBlock`）贴墙：看 `facing` 反方向的邻居在 `facing` 面
+        // 是否结实。
+        // Coral wall fans attach to a wall: check the neighbour opposite `facing` for a
+        // sturdy face toward `facing`.
+        BlockClass::BaseCoralWallFanBlock | BlockClass::CoralWallFanBlock => Kind::CoralWallFan,
+        // 珊瑚植物 / 珊瑚扇（地面）：下面 `isFaceSturdy(UP)`。
+        // Coral plants and floor fans: `isFaceSturdy(UP)` below.
         BlockClass::BaseCoralPlantBlock
         | BlockClass::BaseCoralFanBlock
-        | BlockClass::BaseCoralWallFanBlock
         | BlockClass::CoralPlantBlock
-        | BlockClass::CoralFanBlock
-        | BlockClass::CoralWallFanBlock => Kind::SturdyFaceUp,
+        | BlockClass::CoralFanBlock => Kind::SturdyFaceUp,
         // 直接继承 VegetationBlock、不覆写 canSurvive 的类，标签判定。
         // Classes extending VegetationBlock without overriding canSurvive: a tag check.
         BlockClass::BushBlock
