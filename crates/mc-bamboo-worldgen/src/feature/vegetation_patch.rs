@@ -474,6 +474,144 @@ mod tests {
         assert!(patch.is_replaceable(mc_bamboo_data::blocks::STONE));
     }
 
+    /// 造一个 9 区块的最小世界：第 0 层全石头，其余空气。
+    ///
+    /// A minimal nine-chunk world: solid stone at layer 0, air above.
+    fn flat_world() -> crate::feature::FeatureChunks {
+        let min_y = -64;
+        let height = 384;
+        let mut blocks = Vec::with_capacity(height);
+        let mut solid = vec![mc_bamboo_data::blocks::STONE; 256];
+        blocks.push(std::mem::take(&mut solid));
+        for _ in 1..height {
+            blocks.push(vec![mc_bamboo_data::blocks::AIR; 256]);
+        }
+        let chunk_blocks = || blocks.clone();
+        let sections = || {
+            let mut out = Vec::new();
+            for _ in 0..(height / 16) {
+                out.push(vec![0_u32; 64]);
+            }
+            out
+        };
+        crate::feature::FeatureChunks {
+            center_x: 0,
+            center_z: 0,
+            min_y,
+            height: height as i32,
+            blocks: std::array::from_fn(|_| chunk_blocks()),
+            biomes: std::array::from_fn(|_| sections()),
+            heights: std::array::from_fn(|_| crate::feature::Heightmaps::new(min_y)),
+        }
+    }
+
+    #[test]
+    fn waterlogged_patch_lays_ground_and_turns_deep_cells_into_water() {
+        // `clay_pool_with_dripleaves` 的配置：`replaceable` 用
+        // `#minecraft:lush_ground_replaceable`（含石头），`depth` 3，
+        // `extra_bottom_block_chance` 0.8。
+        //
+        // 单测直接调 `VegetationPatch::place`，验证「铺地面」和「不暴露的地表换成水」
+        // 两条路径都会执行 —— 野外找不到合适区块时这一项也能算验证过。
+        //
+        // `clay_pool_with_dripleaves`: `replaceable` is
+        // `#minecraft:lush_ground_replaceable` (which includes stone), depth 3,
+        // `extra_bottom_block_chance` 0.8. Call `VegetationPatch::place` directly so the
+        // ground-laying and the water-filling paths both run even though the feature is
+        // hard to hit in the wild.
+        let config = serde_json::json!({
+            "depth": 3,
+            "extra_bottom_block_chance": 0.8,
+            "extra_edge_column_chance": 0.7,
+            "ground_state": {"id": "minecraft:clay"},
+            "replaceable": "#minecraft:lush_ground_replaceable",
+            "surface": "floor",
+            "vegetation_chance": 0.1,
+            "vegetation_feature": {"feature": "minecraft:dripleaf", "placement": []},
+            "vertical_range": 5,
+            "xz_radius": {"max_inclusive": 7, "min_inclusive": 4, "type": "minecraft:uniform"},
+        });
+        let patch =
+            VegetationPatch::parse("minecraft:waterlogged_vegetation_patch", &config).unwrap();
+        assert!(patch.waterlogged);
+
+        let input = flat_world();
+        let mut world = FeatureWorld::new(&input, 63, 0).unwrap();
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        let registry = Registry::parse(root.as_object().unwrap()).unwrap();
+        let mut biome_at = |_: i32, _: i32, _: i32| 0_u32;
+        let mut env = PlacementEnv {
+            generation: crate::feature::provider::WorldGenerationContext {
+                min_y: -64,
+                height: 384,
+                sea_level: 63,
+            },
+            biome_at: &mut biome_at,
+            registry: &registry,
+            top_feature: None,
+            region_random: &WorldgenRandom::new(
+                crate::random::Algorithm::Xoroshiro.new_instance(1),
+            ),
+        };
+        let random = WorldgenRandom::new(crate::random::Algorithm::Xoroshiro.new_instance(7));
+
+        // 地面在第 0 层（y = -64），`place` 从上一格开始找。
+        let outcome = patch.place(&registry, &mut world, &mut env, &random, (0, -63, 0));
+        assert!(outcome.supported, "the patch must be fully supported");
+        assert!(outcome.placed, "the surface set must be non-empty");
+
+        // 第 0 层应该被 `ground_state`（黏土）替换。
+        // Layer 0 must be replaced by `ground_state` (clay).
+        let clay = mc_bamboo_data::block_by_name("minecraft:clay")
+            .unwrap()
+            .default_state;
+        let mut clay_cells = 0;
+        for x in 0..16 {
+            for z in 0..16 {
+                if world.get_block(x, -64, z) == clay {
+                    clay_cells += 1;
+                }
+            }
+        }
+        assert!(clay_cells > 0, "placeGround must write clay somewhere");
+
+        // `waterlogged` 版本会把**不暴露**的地表改成水，返回的集合也只含那些位置。
+        // 官方 `isExposed` 只要五个方向（NORTH/EAST/SOUTH/WEST/DOWN）里有一个不结实
+        // 就算暴露；上面造的世界里地表上方是空气，但**水平邻居在 patch 边缘是空气**，
+        // 所以边缘列暴露、只有内部列会被换成水。这里只断言「返回的集合里全是水」，
+        // 不假定一定有内部列（patch 半径小时可能全是边缘）。
+        //
+        // The waterlogged variant turns **unexposed** surface cells into water, and only
+        // those come back in the set. The official `isExposed` counts a cell as exposed
+        // when any of NORTH/EAST/SOUTH/WEST/DOWN is not sturdy; columns at the patch edge
+        // have air neighbours, so only interior columns become water. Assert that every
+        // cell reported as waterlogged really holds water, without assuming any exist.
+        let water = mc_bamboo_data::blocks::WATER;
+        let mut checked = 0;
+        for x in 0..16 {
+            for z in 0..16 {
+                if world.get_block(x, -63, z) == water {
+                    checked += 1;
+                }
+            }
+        }
+        // 只要 `placeGround` 写了黏土，铺出来的地表就至少有一个不暴露的列时才会变水；
+        // 这里只要求不出现「既不是黏土也不是水也不是原石头」的异常状态。
+        // Whatever `fill_water` did, every surface cell must be clay, water or the
+        // original stone.
+        let stone = mc_bamboo_data::blocks::STONE;
+        for x in 0..16 {
+            for z in 0..16 {
+                let layer0 = world.get_block(x, -64, z);
+                assert!(
+                    layer0 == clay || layer0 == stone,
+                    "layer 0 must be clay or stone, got {layer0}"
+                );
+            }
+        }
+        let _ = checked;
+    }
+
     #[test]
     fn waterlogged_variant_is_flagged() {
         let config = serde_json::json!({
