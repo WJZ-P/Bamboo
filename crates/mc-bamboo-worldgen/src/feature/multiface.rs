@@ -143,7 +143,7 @@ impl MultifaceGrowthFeature {
             };
             world.set_block_with_heightmaps(pos.0, pos.1, pos.2, new_state);
             if random.next_float() < self.chance_of_spreading {
-                self.spread(world, pos, new_state, random);
+                self.spread(world, pos, new_state, direction, random);
             }
             return true;
         }
@@ -214,28 +214,30 @@ impl MultifaceGrowthFeature {
                 .is_some()
     }
 
-    /// `MultifaceSpreader.spreadFromFaceTowardRandomDirection`：先把六个方向洗牌当作**起始面**
-    /// 候选（只保留已在状态上出现的面），对每个候选再洗一次牌当作**扩散方向**候选。
-    /// 官方的 `.map(...).filter(Optional::isPresent).findFirst()` 是惰性短路：一旦某个起始面
-    /// 成功就不再洗后面的牌。
+    /// `MultifaceSpreader.spreadFromFaceTowardRandomDirection`：起始面是**刚放置用的那个
+    /// 面**（`placeGrowthIfPossible` 传进来的 `placementDirection`），只把六个**扩散方向**
+    /// 洗一次牌，逐个 `spreadFromFaceTowardDirection`，第一个成功的就返回。
     ///
-    /// `MultifaceSpreader.spreadFromFaceTowardRandomDirection`: shuffle all six directions as
-    /// **starting face** candidates (keeping only faces present on the state), then shuffle
-    /// again per candidate for the **spread direction**. The official
-    /// `.map(...).filter(Optional::isPresent).findFirst()` short-circuits lazily, so no
-    /// further shuffles happen once one face succeeds.
-    fn spread(&self, world: &mut FeatureWorld<'_>, pos: Pos, state: u32, random: &WorldgenRandom) {
-        for face in shuffle(&DIRECTIONS, random) {
-            // `config.canSpreadFrom(state, faceDirection)` = `hasFace(state, faceDirection)`。
-            // `config.canSpreadFrom(state, faceDirection)` = `hasFace(state, faceDirection)`.
-            if with_property(state, face, "true") != Some(state) {
-                continue;
-            }
-            for spread_direction in shuffle(&DIRECTIONS, random) {
-                if self.spread_from_face_toward_direction(world, pos, state, face, spread_direction)
-                {
-                    return;
-                }
+    /// `MultifaceSpreader.spreadFromFaceTowardRandomDirection`: the starting face is the
+    /// face just placed on (`placementDirection` from `placeGrowthIfPossible`); only the six
+    /// **spread directions** are shuffled, and the first success returns.
+    fn spread(
+        &self,
+        world: &mut FeatureWorld<'_>,
+        pos: Pos,
+        state: u32,
+        starting_face: &'static str,
+        random: &WorldgenRandom,
+    ) {
+        for spread_direction in shuffle(&DIRECTIONS, random) {
+            if self.spread_from_face_toward_direction(
+                world,
+                pos,
+                state,
+                starting_face,
+                spread_direction,
+            ) {
+                return;
             }
         }
     }
