@@ -595,6 +595,19 @@ fn is_liquid_container(state: u32) -> bool {
 /// * `CandleBlock` / `CampfireBlock`：灌水同时把 `lit` 置 false（`extinguish` / `douse`）；
 /// * `DriedGhastBlock`：与默认实现相同。
 ///
+/// **对拍覆盖边界**（`jigsaw waterpiece`，168 查询 / 64764 写入）：
+///
+/// * 台阶的双台阶拒绝与「已 waterlogged 不重复灌」由真实模板覆盖；
+/// * 营火在模板里**恒为 `lit=false`**（导出前已熄灭），所以 `lit` 清位那条分支
+///   对拍**抓不到**，只有单元测试覆盖；
+/// * 蜡烛只出现在多 palette 模板里，本对拍只跑单 palette，所以也没覆盖。
+///
+/// **Oracle coverage limits** (`jigsaw waterpiece`, 168 queries / 64764 writes):
+/// the double-slab refusal and the "already waterlogged" case are covered by real
+/// templates; campfires are always `lit=false` in the exported templates, so the `lit`
+/// clearing branch is **not** reachable there and only the unit test covers it; candles
+/// only appear in multi-palette templates, which this oracle skips.
+///
 /// `LiquidBlockContainer.placeLiquid(level, pos, state, fluidState)`: the state after the
 /// water goes in, or `None` when vanilla would return `false`. The default
 /// `SimpleWaterloggedBlock` implementation sets `waterlogged` when it is false and the

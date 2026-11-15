@@ -80,6 +80,7 @@ impl<'a> FeatureWorld<'a> {
         FeatureResult {
             blocks: self.blocks,
             deltas: self.deltas.map(last_writes),
+            block_entities: self.block_entities,
             unsupported,
         }
     }
@@ -456,5 +457,20 @@ mod block_writer_tests {
             2,
             "another position is separate"
         );
+    }
+
+    /// `finish` 把方块实体表带进 `FeatureResult`，上层才拿得到。
+    ///
+    /// `finish` carries the block-entity table into `FeatureResult` so callers see it.
+    #[test]
+    fn finish_carries_the_block_entities() {
+        use mc_bamboo_nbt::Tag;
+
+        let chunks = water_chunks();
+        let mut world = FeatureWorld::new(&chunks, 63, 0).unwrap();
+        let nbt = Tag::Compound(vec![("LootTable".to_owned(), Tag::String("x".to_owned()))]);
+        world.set_block_entity(1, 65, 1, &nbt);
+        let result = world.finish(false);
+        assert_eq!(result.block_entities, vec![((1, 65, 1), nbt)]);
     }
 }

@@ -1956,18 +1956,22 @@ fn run_water_piece(mut command: Command, work_dir: &Path) -> Result<(), String> 
     compare_water_piece(&String::from_utf8_lossy(&output.stdout), &queries)
 }
 
-/// `waterpiece` 用的模板：单 palette、含至少一个可含水方块的，取前 8 个。
+/// `waterpiece` 用的模板：按「可含水方块种类」定向挑，确保 `SlabBlock` /
+/// `CandleBlock` / `CampfireBlock` 三类覆写都被真实模板覆盖到。
 ///
-/// Templates for `waterpiece`: single palette with at least one waterloggable block, first
-/// eight only.
+/// Templates for `waterpiece`, picked by waterloggable block kind so that the
+/// `SlabBlock` / `CandleBlock` / `CampfireBlock` overrides are all exercised by real
+/// templates.
 fn water_piece_templates() -> Vec<(String, StructureTemplate)> {
-    use mc_bamboo_worldgen::structure::jigsaw::place::is_waterloggable_state;
+    use mc_bamboo_worldgen::structure::jigsaw::place::state_id_of;
+    use mc_bamboo_worldgen::structure::processor::BlockStateSpec;
+
+    let mut candidates: Vec<(String, StructureTemplate)> = Vec::new();
     let mut names: Vec<String> = blob::ENTRIES
         .iter()
         .map(|(name, _, _)| (*name).to_owned())
         .collect();
     names.sort();
-    let mut out = Vec::new();
     for name in names {
         let Ok(template) = StructureTemplate::load(&name) else {
             continue;
@@ -1975,26 +1979,87 @@ fn water_piece_templates() -> Vec<(String, StructureTemplate)> {
         if template.palettes.len() != 1 || template.blocks.is_empty() {
             continue;
         }
+        candidates.push((name, template));
+    }
+
+    // 一个模板里的可含水方块属于哪几类。
+    // Which kinds of waterloggable block a template contains.
+    let kinds_of = |template: &StructureTemplate| -> (bool, bool, bool, bool) {
+        if template.blocks.is_empty() {
+            return (false, false, false, false);
+        }
         let palette = &template.palettes[0];
-        // 调色板里只要有一个可含水状态就选这个模板。
-        // Pick the template when any palette entry is waterloggable.
-        let waterloggable = palette.iter().any(|entry| {
-            mc_bamboo_worldgen::structure::jigsaw::place::state_id_of(
-                &mc_bamboo_worldgen::structure::processor::BlockStateSpec {
-                    name: entry.name.clone(),
-                    properties: entry.properties.clone(),
-                },
-            )
-            .is_ok_and(is_waterloggable_state)
-        });
-        if waterloggable {
-            out.push((name, template));
-            if out.len() == 8 {
+        let mut slab = false;
+        let mut candle = false;
+        let mut campfire = false;
+        let mut other = false;
+        for entry in palette {
+            let Ok(state) = state_id_of(&BlockStateSpec {
+                name: entry.name.clone(),
+                properties: entry.properties.clone(),
+            }) else {
+                continue;
+            };
+            if mc_bamboo_worldgen::structure::state_transform::property_of(state, "waterlogged")
+                .is_none()
+            {
+                continue;
+            }
+            match entry.name.as_str() {
+                // 台阶的判据就是 `type` 属性（26.3 里只有台阶用它）。
+                // A slab is anything with the `type` property (only slabs use it in 26.3).
+                _ if mc_bamboo_worldgen::structure::state_transform::property_of(state, "type")
+                    .is_some() =>
+                {
+                    slab = true
+                }
+                name if name.ends_with("_candle") => candle = true,
+                "minecraft:campfire" | "minecraft:soul_campfire" => campfire = true,
+                _ => other = true,
+            }
+        }
+        (slab, candle, campfire, other)
+    };
+
+    // 每一类取前 6 个，避免只用一类模板。`other` 放最后，且不占前面三类的名额。
+    // Six per kind so no single kind dominates; `other` comes last and never blocks the
+    // first three.
+    let mut picked: Vec<(String, StructureTemplate)> = Vec::new();
+    let mut picked_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for wanted in 0..4 {
+        let limit = if wanted == 3 { 12 } else { 6 };
+        let mut taken = 0;
+        for (name, template) in &candidates {
+            if taken == limit {
                 break;
+            }
+            if picked_names.contains(name) {
+                continue;
+            }
+            let kinds = kinds_of(template);
+            let hit = match wanted {
+                0 => kinds.0,
+                1 => kinds.1,
+                2 => kinds.2,
+                // `other` 只要「有可含水方块但不属于前三类」。
+                // `other`: waterloggable but not one of the first three kinds.
+                _ => kinds.3 && !kinds.0 && !kinds.1 && !kinds.2,
+            };
+            if hit {
+                picked.push((name.clone(), template.clone()));
+                picked_names.insert(name.clone());
+                taken += 1;
             }
         }
     }
-    out
+    // 打印选中的模板，报告里要能看出覆盖了哪几类。
+    // Print the picked templates so the report can show which kinds are covered.
+    if std::env::var_os("JIGSAW_DUMP").is_some() {
+        for (name, _) in &picked {
+            eprintln!("waterpiece template {name}");
+        }
+    }
+    picked
 }
 
 /// 解析 Java 的 `waterpiece` 输出并与 Rust 侧逐写入比较。

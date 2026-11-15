@@ -152,6 +152,7 @@ fn run_features_filtered(
                 vec![vec![mc_bamboo_data::blocks::AIR; 256]; WORLD_HEIGHT as usize]
             }),
             deltas: std::array::from_fn(|_| Vec::new()),
+            block_entities: Vec::new(),
             unsupported: false,
         });
     }
