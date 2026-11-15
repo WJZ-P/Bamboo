@@ -279,6 +279,58 @@ impl PalettedContainer {
         Self::from_disk(&BIOME_RULES, palette, data)
     }
 
+    /// 从按容器下标（y、z、x）排好的 4096 个方块状态直接建容器。
+    ///
+    /// 调色板按第一次出现的顺序排，和 [`packed_for_disk`](Self::packed_for_disk) 后再
+    /// [`from_blocks_disk`](Self::from_blocks_disk) 读回来的容器读出的值、调色板内容完全相同，
+    /// 但省掉逐格 `set` 的扩容重打包和磁盘形式的往返。
+    ///
+    /// Build a block container straight from 4096 states in container index
+    /// order (y, z, x). The palette is in first-appearance order, so reads and
+    /// palette contents equal a `packed_for_disk` + `from_blocks_disk` round
+    /// trip, without per-cell `set` repacking or the disk round trip.
+    pub(crate) fn blocks_from_values(values: &[u32; BLOCKS_PER_SECTION]) -> Self {
+        let rules = &BLOCK_RULES;
+        let mut palette: Vec<u32> = Vec::new();
+        let mut stored = [0u32; BLOCKS_PER_SECTION];
+        let mut last = None;
+        for (slot, &value) in stored.iter_mut().zip(values) {
+            let position = match last {
+                Some((state, position)) if state == value => position,
+                _ => {
+                    let position = palette
+                        .iter()
+                        .position(|&entry| entry == value)
+                        .unwrap_or_else(|| {
+                            palette.push(value);
+                            palette.len() - 1
+                        }) as u32;
+                    last = Some((value, position));
+                    position
+                }
+            };
+            *slot = position;
+        }
+        let bits = rules.bits_for_palette(palette.len());
+        if bits == 0 {
+            return Self::filled(rules, palette[0]);
+        }
+        if rules.is_global(bits) {
+            return Self {
+                rules,
+                bits,
+                palette: Vec::new(),
+                data: pack_values(values.iter().copied(), bits),
+            };
+        }
+        Self {
+            rules,
+            bits,
+            palette,
+            data: pack_values(stored.into_iter(), bits),
+        }
+    }
+
     /// 磁盘形式的调色板：丢掉没用到的项，按第一次出现的顺序重排，并给出重新打包的 long 数组。
     /// 对应官方 `PalettedContainer.pack`。
     pub fn packed_for_disk(&self) -> (Vec<u32>, Vec<u64>) {

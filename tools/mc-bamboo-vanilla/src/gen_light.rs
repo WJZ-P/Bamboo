@@ -2,8 +2,8 @@
 //!
 //! `GenLightOracle.java` 在 JVM 里给一片 3×3 的确定性合成方块场景跑官方的
 //! `initializeLight` + `light`（生成期那两步），输出中心柱逐格的天空光、方块光，
-//! 外加这片 3×3 各方格的官方方块状态 ID。这里用**同一份**方块状态 ID 拼成
-//! [`Chunk`]，调 `mc_bamboo_world::light::generate::generate_light`（也就是游戏里
+//! 外加这片 3×3 各方格的官方方块状态 ID。这里用**同一份**方块状态 ID 拼成逐层方块，
+//! 调 `mc_bamboo_world::light::generate::generate_light_from_layers`（也就是游戏里
 //! `light` 阶段用的那份纯函数），把结果装进真正的 `ChunkColumn` 走官方的
 //! `None` 段天空光回退后逐格比较。两边用同一份方块，不依赖地形对拍。
 //!
@@ -13,15 +13,14 @@
 //! `LevelLightEngine` cell by cell. `GenLightOracle.java` drives the official
 //! `initializeLight` + `light` steps over a deterministic 3×3 synthetic scene and
 //! emits the center column's per-cell sky/block light plus the 3×3 block state
-//! ids. This side builds [`Chunk`]s from those exact ids, calls
-//! `generate_light` (the pure function the `light` stage uses), installs the
+//! ids. This side builds block layers from those exact ids, calls
+//! `generate_light_from_layers` (the pure function the `light` stage uses), installs the
 //! result into a real `ChunkColumn` (to apply vanilla's `None`-section sky
 //! fallback), and compares. Both use the same blocks, so no terrain oracle is
 //! involved. `--break-self-test` corrupts one Bamboo cell to prove the detector
 //! fires.
 
 use std::{
-    collections::BTreeMap,
     io::{BufRead, BufReader, Read},
     process::{Command, Stdio},
 };
@@ -34,9 +33,8 @@ use mc_bamboo_game::{
 };
 use mc_bamboo_world::{
     MIN_Y, SECTION_COUNT, WORLD_HEIGHT,
-    chunk::Chunk,
     column::{ChunkColumn, ChunkColumnParts},
-    light::generate::{GeneratedLight, generate_light},
+    light::generate::{GeneratedLight, generate_light_from_layers},
 };
 use serde_json::Value;
 
@@ -220,9 +218,9 @@ impl Report {
             ));
         }
 
-        // 拼 3×3 的 `Chunk`，同时留下中心柱的盒子供后面组装 `column_of_light`。
-        // Build the 3×3 `Chunk`s and keep the center box for `column_of_light`.
-        let mut built: BTreeMap<ChunkPos, Chunk> = BTreeMap::new();
+        // 拼 3×3 的逐层方块，同时组装中心柱的盒子供后面 `light_cells` 用。
+        // Build the 3×3 block layers and assemble the center box for `light_cells`.
+        let mut built: Vec<(ChunkPos, GeneratedChunk)> = Vec::with_capacity(9);
         let mut center_region: Option<Box<RegionColumn>> = None;
         for (grid, chunk) in chunks.iter().enumerate() {
             let dz = grid as i32 / 3 - 1;
@@ -242,19 +240,24 @@ impl Report {
                 ));
             }
             let generated = generated_chunk(&palette, &indices)?;
-            let region = build_region_column(&generated).map_err(|error| {
-                format!("genlight {index} grid {grid}: cannot assemble column: {error}")
-            })?;
-            built.insert(ChunkPos::new(dx, dz), region.parts().column.chunk().clone());
             if dx == 0 && dz == 0 {
-                center_region = Some(region);
+                center_region = Some(build_region_column(&generated).map_err(|error| {
+                    format!("genlight {index} grid {grid}: cannot assemble column: {error}")
+                })?);
             }
+            built.push((ChunkPos::new(dx, dz), generated));
         }
         let center_region =
             center_region.ok_or_else(|| format!("genlight {index}: no center chunk"))?;
 
-        // 游戏 `light` 阶段用的那份纯函数。 The pure function the `light` stage uses.
-        let light = generate_light(ChunkPos::new(0, 0), &built);
+        // 游戏 `light` 阶段用的那份纯函数：直接读逐层方块。
+        // The pure function the `light` stage uses, reading block layers directly.
+        let columns: Vec<(ChunkPos, &[Vec<u32>])> = built
+            .iter()
+            .map(|(pos, generated)| (*pos, generated.blocks.as_slice()))
+            .collect();
+        let light = generate_light_from_layers(ChunkPos::new(0, 0), &columns)
+            .map_err(|error| format!("genlight {index}: {error}"))?;
         let (mut sky, block) = light_cells(&center_region, &light)?;
         if self.break_self_test {
             // 自检：改坏第一格光，确认下面会报不一致。

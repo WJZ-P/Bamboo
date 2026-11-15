@@ -256,6 +256,7 @@ impl<'a> Generator<'a> {
     ///
     /// 返回每个 section 的 64 个 quart 格（下标 `y*16 + z*4 + x`）的群系注册表 ID。
     pub fn biomes(&self, chunk_x: i32, chunk_z: i32) -> Result<Vec<Vec<u32>>, String> {
+        crate::perf::mark(crate::perf::Phase::Biomes);
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         let sections = (height / 16) as usize;
@@ -312,6 +313,7 @@ impl<'a> Generator<'a> {
         for column in columns {
             context.release(column);
         }
+        crate::perf::pause();
         Ok(result)
     }
 
@@ -388,12 +390,28 @@ impl<'a> Generator<'a> {
     ) -> Result<Vec<Vec<u32>>, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
-        let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
+        crate::perf::mark(crate::perf::Phase::TerrainSetup);
+        // 测量时可能只算切割线以上的密度（见 `perf::Floors`），默认就是整个高度。
+        // Measurement may only fill the density above a cut line (see `perf::Floors`);
+        // by default the whole column is generated.
+        let floor = crate::perf::floors()
+            .noise
+            .unwrap_or(min_y)
+            .clamp(min_y, min_y + height - 1);
+        let density_min_y = if floor > min_y { floor } else { min_y };
+        let density_height = min_y + height - density_min_y;
+        let volume = Volume::blocks(
+            (16, density_height, 16),
+            (chunk_x * 16, density_min_y, chunk_z * 16),
+        );
         let mut context = Context::new(self.cache_count);
         if let Some(beardifier) = beardifier {
             context.set_beardifier(std::sync::Arc::new(beardifier.clone()));
         }
         let mut density = context.acquire(volume.len());
+        let lava = lava_state()?;
+        crate::perf::note_density_floor(density_min_y);
+        crate::perf::mark(crate::perf::Phase::AquiferInit);
         // 官方先建 NoiseChunk（含水层的构造器也在这里求值），再算 finalDensity。
         // Rust 借检查不让两件事同时抱着 context，所以先建含水层，再算密度。
         let aquifer = self.aquifer.as_ref().ok_or("dimension has no aquifers")?;
@@ -404,26 +422,35 @@ impl<'a> Generator<'a> {
             &volume,
             self.settings.sea_level,
             self.default_fluid,
-            lava_state()?,
+            lava,
             self.empty,
         );
+        crate::perf::note_skip_above(aquifer.skip_sampling_above_y());
+        crate::perf::mark(crate::perf::Phase::NoiseDensity);
         self.router
             .final_density
             .sample_volume(&mut context, &mut density, &volume);
 
+        crate::perf::mark(crate::perf::Phase::Substance);
         let mut layers = vec![vec![self.empty; 256]; height as usize];
+        // 切割线以下不生成：留成空气。下游阶段（地表规则、雕刻器、地物、光照）都按"这里
+        // 什么都没有"处理，和"深层还没生成"的语义一致；这也是测量对照实验想要的成本。
+        // Below the cut line nothing is generated: the layers stay air, so later stages
+        // (surface rules, carvers, features, light) treat that volume as empty, matching
+        // "the deep part has not been generated yet". That is the cost the measurement
+        // experiment is after.
         for z in 0..16 {
             let block_z = chunk_z * 16 + z;
             for x in 0..16 {
                 let block_x = chunk_x * 16 + x;
-                for local_y in (0..height).rev() {
-                    let block_y = min_y + local_y;
+                for local_y in (0..density_height).rev() {
+                    let block_y = density_min_y + local_y;
                     let value = f64::from(density[volume.index(x, local_y, z)]);
                     let state = aquifer
                         .compute_substance(&mut context, block_x, block_y, block_z, value)
                         .unwrap_or(self.default_block);
                     if state != self.empty {
-                        layers[local_y as usize][x as usize * 16 + z as usize] = state;
+                        layers[(block_y - min_y) as usize][x as usize * 16 + z as usize] = state;
                     }
                 }
             }
@@ -439,6 +466,7 @@ impl<'a> Generator<'a> {
         };
         let possible_biomes = region.map(RegionBiomes::possible_biomes);
         if stage >= Stage::Surface {
+            crate::perf::mark(crate::perf::Phase::Surface);
             self.material.build_surface(
                 &mut layers,
                 chunk_x,
@@ -453,6 +481,7 @@ impl<'a> Generator<'a> {
             )?;
         }
         if stage >= Stage::Carvers {
+            crate::perf::mark(crate::perf::Phase::CarverMask);
             self.carvers.generate(
                 &mut layers,
                 chunk_x,
@@ -468,7 +497,120 @@ impl<'a> Generator<'a> {
                 self.seed,
             )?;
         }
+        crate::perf::pause();
         Ok(layers)
+    }
+
+    /// 从某个 y 到世界顶部成批求值 `finalDensity`，返回耗时（毫秒）。
+    ///
+    /// 测量用：把 y 逐个高度带边界抬高，相邻两次整列求值的差就是这一带的边际耗时，
+    /// 和整块一次求值的口径一致（每一带单采样会重复算插值角点，不能用）。
+    ///
+    /// Sample `finalDensity` from `from_y` to the top of the world and return the elapsed
+    /// milliseconds. Measurement only: raising `from_y` band by band and taking the
+    /// difference of consecutive whole-column passes gives a per-band cost on the same
+    /// footing as one whole-volume pass (sampling each band alone would recompute the
+    /// interpolation corners). The aquifer is not involved.
+    #[cfg(feature = "perf")]
+    pub fn sample_density_from(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        from_y: i32,
+    ) -> Result<f64, String> {
+        let min_y = self.settings.min_y;
+        let height = self.settings.height;
+        let from_y = from_y.clamp(min_y, min_y + height - 1);
+        let volume = Volume::blocks(
+            (16, min_y + height - from_y, 16),
+            (chunk_x * 16, from_y, chunk_z * 16),
+        );
+        let mut context = Context::new(self.cache_count);
+        let mut density = context.acquire(volume.len());
+        let start = std::time::Instant::now();
+        self.router
+            .final_density
+            .sample_volume(&mut context, &mut density, &volume);
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        context.release(density);
+        Ok(elapsed)
+    }
+
+    /// 每个 8 格高度带是不是「整格空气」：一次整列求值，逐带看有没有 `density > 0`。
+    ///
+    /// 含水层在 `skipSamplingAboveY` 之上直接返回全局流体（海平面以上是空气），所以那里
+    /// `density <= 0` 就等于空气；更低的地方这个判定也会把含水的空腔算成「非空气」，
+    /// 用它的地方要注意。
+    ///
+    /// Whether each 8-block band is entirely air: one whole-column pass, then check each
+    /// band for any point with `density > 0`. Above the aquifer's `skipSamplingAboveY`
+    /// `density <= 0` is exactly air (the aquifer returns the global fluid, air above sea
+    /// level); lower down this also counts fluid-filled pockets as non-air.
+    #[cfg(feature = "perf")]
+    pub fn density_air_bands(&self, chunk_x: i32, chunk_z: i32) -> Result<Vec<bool>, String> {
+        let min_y = self.settings.min_y;
+        let height = self.settings.height;
+        let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
+        let mut context = Context::new(self.cache_count);
+        let mut density = context.acquire(volume.len());
+        self.router
+            .final_density
+            .sample_volume(&mut context, &mut density, &volume);
+        let mut bands = vec![true; (height / 8) as usize];
+        for local_y in 0..height {
+            let band = (local_y / 8) as usize;
+            if !bands[band] {
+                continue;
+            }
+            for z in 0..16 {
+                for x in 0..16 {
+                    if density[volume.index(x, local_y, z)] > 0.0 {
+                        bands[band] = false;
+                        break;
+                    }
+                }
+                if !bands[band] {
+                    break;
+                }
+            }
+        }
+        context.release(density);
+        Ok(bands)
+    }
+
+    /// 按 8 格高度带给出「这一格整格是实心」的掩码，供测量「跳过整格空气」的对照。
+    ///
+    /// 返回 `(bands, solid)`：`bands` 是每个高度带里 256 列的 `density > 0` 掩码。
+    ///
+    /// Per-band solid mask at 8-block granularity, for the "skip all-air cells"
+    /// experiment. Returns each band's 256-column `density > 0` mask.
+    #[cfg(feature = "perf")]
+    pub fn density_solid_mask(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Result<Vec<[bool; 256]>, String> {
+        let min_y = self.settings.min_y;
+        let height = self.settings.height;
+        let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
+        let mut context = Context::new(self.cache_count);
+        let mut density = context.acquire(volume.len());
+        self.router
+            .final_density
+            .sample_volume(&mut context, &mut density, &volume);
+        let mut bands = vec![[false; 256]; (height / 8) as usize];
+        for local_y in 0..height {
+            let band = &mut bands[(local_y / 8) as usize];
+            for z in 0..16 {
+                for x in 0..16 {
+                    if density[volume.index(x, local_y, z)] > 0.0 {
+                        band[x as usize * 16 + z as usize] = true;
+                    }
+                }
+            }
+        }
+        context.release(density);
+        Ok(bands)
     }
 
     /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight(x, z, WORLD_SURFACE_WG, ...)`。

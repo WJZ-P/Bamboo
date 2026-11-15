@@ -4,7 +4,11 @@
 //! `FEATURES`）给光引擎登记非空段、点亮光源、跑到底，中心区块柱里就带着天空光和
 //! 方块光，`isLightOn=true`。`mc_bamboo_world::light::generate::generate_light`
 //! 是这段的纯函数（复用运行时那套已和官方逐格对拍过的光引擎），这里负责把流水线
-//! 的邻居只读快照拼成 3×3 的 [`Chunk`] 视图喂给它，把结果交回世界线程。
+//! 的邻居只读快照拼成 3×3 视图，经 `generate_light_from_layers` 直接读快照里的
+//! 逐层方块（不先组装完整区块），把结果交回世界线程。
+//!
+//! The stage passes the snapshots' block layers straight to
+//! `generate_light_from_layers` without assembling full chunks first.
 //!
 //! 邻居视图里的快照是 CARVERS 地形。当前已移植的地物只有矿石（不透明、不发光，
 //! 替换的是同样不透明的石头），不改光源和遮挡，所以在 `LIGHT` 阶段用地形方块算光
@@ -17,7 +21,7 @@
 //! queue; the center column then carries sky + block light and `isLightOn=true`.
 //! `mc_bamboo_world::light::generate::generate_light` is the pure function
 //! (reusing the runtime engine, already validated cell-by-cell against vanilla);
-//! this module assembles the 3×3 [`Chunk`] view from the pipeline's immutable
+//! this module assembles the 3×3 view from the pipeline's immutable
 //! neighbor snapshots and returns the light for the world thread.
 //!
 //! The neighbor snapshots are CARVERS terrain. The only ported features are ores
@@ -26,28 +30,57 @@
 //! light cell-by-cell. When light-affecting features merge, their writes must be
 //! folded into the light input here (see README known limitations, report doubts).
 
-use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use mc_bamboo_core::ChunkPos;
-use mc_bamboo_world::{chunk::Chunk, light::generate::GeneratedLight};
+use mc_bamboo_world::light::generate::{GeneratedLight, generate_light_from_layers};
 
 use crate::{
     world_options::WorldGenConfig,
-    worldgen::{GeneratedChunk, build_region_column},
-    worldgen_features::{SnapshotView, resolve_view},
+    worldgen::{GeneratedChunk, cached_generate_chunk},
+    worldgen_features::SnapshotView,
 };
 
-/// 把一份 CARVERS [`GeneratedChunk`] 转成光引擎能读的 [`Chunk`]。
+/// 和 `resolve_view` 一样拼 3×3，但快照只共享 `Arc`、不复制方块；缺快照时现算。
 ///
-/// `build_region_column` 走官方 `PalettedContainer` 下标组装段，里面
-/// `Chunk::from_sections` 会算好天空光源表。纯函数，只依赖传入的方块。
+/// 下标 `(dz + 1) * 3 + (dx + 1)`，中心在 4。快照是不可变的，计算线程只读它们。
 ///
-/// Convert a CARVERS [`GeneratedChunk`] into a [`Chunk`] the light engine can
-/// read. `build_region_column` assembles sections in vanilla `PalettedContainer`
-/// order; its `Chunk::from_sections` computes the sky-light source table. Pure.
-fn to_chunk(chunk: &GeneratedChunk) -> Result<Chunk, String> {
-    let region = build_region_column(chunk)?;
-    Ok(region.parts().column.chunk().clone())
+/// Assemble the 3×3 like `resolve_view`, but share snapshot `Arc`s instead of
+/// copying their blocks; missing snapshots are generated. Index
+/// `(dz + 1) * 3 + (dx + 1)`, center at 4. Snapshots are immutable and only read.
+fn resolve_shared_view(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+    center: Option<Arc<GeneratedChunk>>,
+    neighbors: SnapshotView<'_>,
+) -> Result<[Arc<GeneratedChunk>; 9], String> {
+    let mut slots: [Option<Arc<GeneratedChunk>>; 9] = std::array::from_fn(|_| None);
+    slots[4] = Some(match center {
+        Some(arc) => arc,
+        None => Arc::new(cached_generate_chunk(config, cx, cz)?),
+    });
+    for (pos, snapshot) in neighbors {
+        let dx = pos.x - cx;
+        let dz = pos.z - cz;
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dz) {
+            continue;
+        }
+        let index = ((dz + 1) * 3 + (dx + 1)) as usize;
+        slots[index] = Some(match snapshot {
+            Some(arc) => Arc::clone(arc),
+            None => Arc::new(cached_generate_chunk(config, pos.x, pos.z)?),
+        });
+    }
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let index = ((dz + 1) * 3 + (dx + 1)) as usize;
+            if slots[index].is_none() {
+                slots[index] = Some(Arc::new(cached_generate_chunk(config, cx + dx, cz + dz)?));
+            }
+        }
+    }
+    Ok(slots.map(Option::unwrap))
 }
 
 /// `ChunkStatus.LIGHT`：从中心 + 8 个邻居的 CARVERS 视图算中心柱的生成期光照。
@@ -63,20 +96,20 @@ pub(crate) fn generate_light_stage(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
-    center: Option<std::sync::Arc<GeneratedChunk>>,
+    center: Option<Arc<GeneratedChunk>>,
     neighbors: SnapshotView<'_>,
 ) -> Result<GeneratedLight, String> {
-    let view = resolve_view(config, cx, cz, center, neighbors)?;
-    let mut chunks: BTreeMap<ChunkPos, Chunk> = BTreeMap::new();
-    for (index, generated) in view.iter().enumerate() {
-        let dx = index as i32 % 3 - 1;
-        let dz = index as i32 / 3 - 1;
-        chunks.insert(ChunkPos::new(cx + dx, cz + dz), to_chunk(generated)?);
-    }
-    Ok(mc_bamboo_world::light::generate::generate_light(
-        ChunkPos::new(cx, cz),
-        &chunks,
-    ))
+    let view = resolve_shared_view(config, cx, cz, center, neighbors)?;
+    let columns: Vec<(ChunkPos, &[Vec<u32>])> = view
+        .iter()
+        .enumerate()
+        .map(|(index, generated)| {
+            let dx = index as i32 % 3 - 1;
+            let dz = index as i32 / 3 - 1;
+            (ChunkPos::new(cx + dx, cz + dz), generated.blocks.as_slice())
+        })
+        .collect();
+    generate_light_from_layers(ChunkPos::new(cx, cz), &columns)
 }
 
 #[cfg(test)]
