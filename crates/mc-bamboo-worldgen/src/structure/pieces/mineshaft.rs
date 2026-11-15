@@ -94,7 +94,9 @@ impl Shaft {
             } => {
                 let mut p = Piece::plain(ID_CROSSING, bb, gd);
                 p.put_bool("tf", two_floored);
-                p.put_int("D", dir.to_2d());
+                // 官方 `tag.store("D", Direction.LEGACY_ID_CODEC_2D, dir)` 写的是 Byte。
+                // Vanilla writes `D` through `Direction.LEGACY_ID_CODEC_2D`, which is a Byte.
+                p.put_byte("D", dir.to_2d());
                 p
             }
             Self::Stairs { bb, gd, dir } => Piece::oriented(ID_STAIRS, bb, gd, dir),

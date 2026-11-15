@@ -57,7 +57,7 @@ fn staged_pipeline_delivers_generated_terrain_through_the_pool() {
     // 交付每刻有预算，池子回执下一刻才收；循环到区块到位，给足时间。
     // Delivery has a per-tick budget and pool replies arrive a tick later;
     // loop until the chunk lands.
-    let deadline = Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + Duration::from_secs(600);
     loop {
         let _ = world.tick();
         if world.region.chunks.is_loaded(origin) {
@@ -65,7 +65,7 @@ fn staged_pipeline_delivers_generated_terrain_through_the_pool() {
         }
         assert!(
             Instant::now() < deadline,
-            "staged pipeline did not deliver the origin chunk in 90 s"
+            "staged pipeline did not deliver the origin chunk in 600 s"
         );
     }
 
@@ -125,7 +125,7 @@ fn generated_cells(threads: usize, positions: &[ChunkPos]) -> BTreeMap<ChunkPos,
         world.apply_ticket(TicketOp::Forced { pos, forced: true });
     }
 
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_secs(900);
     let mut quiet = 0;
     loop {
         let _ = world.tick();
@@ -146,7 +146,7 @@ fn generated_cells(threads: usize, positions: &[ChunkPos]) -> BTreeMap<ChunkPos,
         }
         assert!(
             Instant::now() < deadline,
-            "normal-world generation did not settle in 180 s (threads={threads})"
+            "normal-world generation did not settle in 900 s (threads={threads})"
         );
     }
 

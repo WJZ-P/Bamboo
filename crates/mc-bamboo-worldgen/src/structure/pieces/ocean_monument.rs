@@ -471,11 +471,23 @@ pub fn generate(seed: i64, chunk_x: i32, chunk_z: i32) -> Vec<Piece> {
     let dir = HDir::random(&random);
     let west = chunk_x * 16 - 29;
     let north = chunk_z * 16 - 29;
+    monument_building(&random, west, north, dir)
+}
+
+/// `new OceanMonumentPieces.MonumentBuilding(random, west, north, direction)`：
+/// 第 0 项是 MonumentBuilding 本身，其余是 `childPieces`（入口、核心、各房间、两翼、
+/// 阁楼）。生成和读回（`regeneratePiecesAfterLoad`）都走这一处，随机取数顺序完全相同。
+///
+/// `new OceanMonumentPieces.MonumentBuilding(random, west, north, direction)`: index 0
+/// is the MonumentBuilding itself, the rest are `childPieces` (entry, core, fitted
+/// rooms, wings, penthouse). Both generation and read-back
+/// (`regeneratePiecesAfterLoad`) go through here with the identical draw order.
+pub fn monument_building(random: &WorldgenRandom, west: i32, north: i32, dir: HDir) -> Vec<Piece> {
     // MonumentBuilding 包围盒：width==depth==58，两轴结果相同。
     let bb = new_box(west, 39, north, west + 57, 39 + 22, north + 57);
 
     let mut rooms: Vec<RoomDef> = (0..1004).map(|_| RoomDef::empty()).collect();
-    let (room_defs, core) = generate_room_graph(&mut rooms, &random);
+    let (room_defs, core) = generate_room_graph(&mut rooms, random);
 
     // 构造器：sourceRoom.claimed = true（generateRoomGraph 之后）。
     let source = room_index(2, 0, 0);
@@ -502,7 +514,7 @@ pub fn generate(seed: i64, chunk_x: i32, chunk_z: i32) -> Vec<Piece> {
         }
         for &fitter in &FITTERS {
             if fitter_fits(fitter, &rooms, def) {
-                let (kind, box_idx) = fitter_create(fitter, &mut rooms, def, &random);
+                let (kind, box_idx) = fitter_create(fitter, &mut rooms, def, random);
                 let (rw, rh, rd) = kind.dims();
                 children.push(child_piece(kind, room_box(dir, box_idx, rw, rh, rd), dir));
                 break;
