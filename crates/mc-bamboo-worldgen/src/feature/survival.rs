@@ -338,7 +338,13 @@ fn classify(state: u32) -> Option<Kind> {
         | BlockClass::CalibratedSculkSensorBlock
         // `RootedDirtBlock` 只实现 `BonemealableBlock`，不覆写 `canSurvive`。
         // `RootedDirtBlock` only implements `BonemealableBlock` and keeps the default.
-        | BlockClass::RootedDirtBlock => Kind::Default,
+        | BlockClass::RootedDirtBlock
+        // `SnowyBlock` / `RotatedPillarBlock` 也直接继承 Block，`canSurvive` 是默认 true。
+        // `podzol` 走 rule_based provider、珊瑚链的 `basalt` 走 rotated provider，两处都靠它。
+        // `SnowyBlock` and `RotatedPillarBlock` extend Block directly and keep the default;
+        // the rule_based podzol provider and the rotated basalt provider both rely on it.
+        | BlockClass::SnowyBlock
+        | BlockClass::RotatedPillarBlock => Kind::Default,
         // 直接继承 VegetationBlock、不覆写 canSurvive 的类，标签判定。
         // Classes extending VegetationBlock without overriding canSurvive: a tag check.
         BlockClass::BushBlock

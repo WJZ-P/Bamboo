@@ -108,6 +108,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// 从导出的 `worldgen.json` 取 `block_state_provider` 注册表，供 holder 字符串解析。
+    ///
+    /// The `block_state_provider` registry from the exported `worldgen.json`, so holder
+    /// strings resolve the same way the real dispatch does.
+    fn parse_with_registry(config: &Value) -> Option<SimpleBlockFeature> {
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        let providers = &root["block_state_provider"];
+        SimpleBlockFeature::parse(config, &|name| providers.get(name))
+    }
+
     #[test]
     fn parses_inline_bare_state_and_gates_unported_forms() {
         let pumpkin: Value =
@@ -124,12 +134,12 @@ mod tests {
         // Holder strings resolve through `lookup` against the registry; supported now.
         let holder: Value =
             json!({"to_place": "minecraft:flower_plain", "type": "minecraft:simple_block"});
-        assert!(SimpleBlockFeature::parse(&holder, &|_| None).is_some());
+        assert!(parse_with_registry(&holder).is_some());
         // rule_based provider 的 soil_beneath_tree 现在支持。
         // The rule_based soil_beneath_tree provider is supported.
         let supported: Value =
             json!({"to_place": "minecraft:soil_beneath_tree", "type": "minecraft:simple_block"});
-        assert!(SimpleBlockFeature::parse(&supported, &|_| None).is_some());
+        assert!(parse_with_registry(&supported).is_some());
         // rotated provider 现在也移植了（珊瑚链依赖它）。
         // The rotated provider is ported now (the coral chain needs it).
         let rotated: Value = json!({
@@ -162,12 +172,12 @@ mod tests {
         // soil_beneath_tree is a rule_based provider whose predicate is ported.
         let soil: Value =
             json!({"to_place": "minecraft:soil_beneath_tree", "type": "minecraft:simple_block"});
-        assert!(SimpleBlockFeature::parse(&soil, &|_| None).is_some());
+        assert!(parse_with_registry(&soil).is_some());
         // rule_based provider 里的 podzol 现在也能解析（它的方块类是 SnowyBlock，默认存活）。
         // The rule_based podzol provider now parses too (SnowyBlock, default survival).
         let podzol: Value =
             json!({"to_place": "minecraft:podzol_beneath_tree", "type": "minecraft:simple_block"});
-        assert!(SimpleBlockFeature::parse(&podzol, &|_| None).is_some());
+        assert!(parse_with_registry(&podzol).is_some());
     }
 
     #[test]
