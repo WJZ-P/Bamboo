@@ -520,11 +520,28 @@ WebView2 的渲染进程不算在内。
   `isStructureChunk` 命中过滤（那是已对拍的 `start_plans` 的职责），`StructureStart` 仍只是数据类型。
   本轮新增并完成对拍的里程碑：四个代码生成单件结构（沙漠神殿、丛林神殿、女巫小屋、
   埋藏的宝藏）的结构件布局（`structure-single`，8 种子 × 12 区块 × 4 类 = 384 查询、
-  384 结构件、384 行比较 0 不一致）；存档 `structures` 键
+  384 结构件、384 行比较 0 不一致）；雪屋 / 沉船 / 海底遗迹三种需要 `.nbt` 模板的单件结构
+  布局（`structure-templated`，8 种子 × 12 区块 × 5 类 = 480 查询、1685 结构件、1685 行
+  比较 0 不一致——雪屋覆盖 3 个模板 / 4 种 rotation / 1–12 件的深度分支，沉船覆盖 23 个
+  模板（沙滩表 11 + 海洋表 20，两表重叠 8 个）、海底遗迹覆盖暖 / 冷两种群系、48 个模板、
+  大遗迹 cluster 分支 3–27 件；三处故意改坏——雪屋梯子 pivot 262 处、沉船 pivot 142 处、
+  海底遗迹 cluster 位置下界 68 处与冷水完好度 263 处——确认失败后还原回 0）；废弃传送门的
+  结构件布局（`structure-ruined-portal`，6 个结构变体 × 6 种子 × 18 区块 = 648 查询、
+  110 个结构件、110 行比较 0 不一致——覆盖五种 `VerticalPlacement`（`in_nether` 不做）、
+  `Mirror.FRONT_BACK` 与 `NONE`、`can_be_cold` 真假，`findSuitableY` 走新增的
+  `Generator::base_column` 整列原语；两处故意改坏——`findSuitableY` 的三格门槛改两格 23 处、
+  `MIRROR_FRONT_BACK` 常量 2 改 1 68 处——确认失败后还原回 0）；存档
+  `structures` 键
   （`structure-save`，8 case 的规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、
-  `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。仍没做：需要模板的单件结构
-  （雪屋、沉船、海底遗迹、废弃传送门）、jigsaw 结构件生成、`features` 阶段的 `placeInChunk` /
-  `postProcess` / processors / 方块实体 / 拼图替换，以及把结构起点真正接进 Director（`Beardifier` 见下面单独一条）；
+  `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。仍没做：
+  jigsaw 结构件生成、`features` 阶段的 `placeInChunk` /
+  `postProcess` / processors / 方块实体 / 拼图替换。`structure::post_process` 里有埋藏的宝藏
+  与女巫小屋、沙漠神殿三份 `postProcess` 的方块部分，新对拍 `structure-post-process` 按
+  **写入日志**（比「写前写后的状态差异」严格：结构写在地形上的方块不算状态变化，但官方确实写了）：
+  32 查询里**埋藏的宝藏 16 查询 0 不一致**，**女巫小屋 18 处不一致（未通过）**——Java 的地下
+  柱子比 Rust 低一格，根因还没定位；沙漠神殿没进查询集（`SKIPPED`），最后一次实测 6953 处
+  不一致。三份 `postProcess` **都没有接进 `feature/run.rs`**，游戏里结构件仍然一个方块都不放。
+  另有把结构起点真正接进 Director（`Beardifier` 见下面单独一条）；
   `.nbt` 结构模板已由 `cb-wg-jigsaw` 分支从官方 jar 原样导出成
   `mc-bamboo-data::structures`（1511 个、4236847 gzip 字节，重跑无 diff），并用官方
   `NbtIo` 逐节点对拍 0 不一致；Rust 侧 `structure::template` 能读出方块、方块实体和拼图方块。
@@ -579,7 +596,7 @@ WebView2 的渲染进程不算在内。
     覆盖栅栏（`CrossCollisionBlock` 四面）、墙上火把与按钮（`HorizontalDirectionalBlock` 的
     `facing`）、门（`DoorBlock`，镜像时还要 `cycle(HINGE)`）、铁轨（十种 `RailShape`）。
   * `structure::pieces::mineshaft_place`：矿井四种结构件（走廊 / 交叉口 / 楼梯 / 房间）的
-    `postProcess`。`structure-place` 对拍（`StructurePlaceOracle.java` 在假
+    `postProcess`。`structure-place` 对拍（`StructurePiecePlaceOracle.java` 在假
     `WorldGenLevel` 上跑官方 `postProcess`）目前 **354 处不一致**，集中在栅栏朝向、
     铁轨走向和少量缺位方块。
   * `structure::pieces::stronghold_place`：要塞十二种结构件（`ChestCorridor` /
@@ -588,7 +605,11 @@ WebView2 的渲染进程不算在内。
     `Library` / `PortalRoom`）的 `postProcess`，含 `SmoothStoneSelector` 与四种
     `SmallDoorType`。**已接入 `structure-place` 但全量对拍还跑不通**（Java 侧某个
     seed/chunk 组合抛异常，单条 case 正常），未验证。
-  * 对拍口径说明：`structure-place` 只比**非空气**方块。`ProtoChunk` 的
+  * 单件结构的 `postProcess`（埋藏的宝藏 / 女巫小屋 / 沙漠神殿）走另一个对拍子命令
+    `structure-post-process`（`StructurePlaceOracle.java`，按写入日志逐格比）：埋藏的宝藏
+    16 查询 0 不一致；女巫小屋 18 处不一致（没过）；沙漠神殿没进查询集（`SKIPPED`）。
+  * 对拍口径说明：`structure-place` / `structure-post-process` 都只比**非空气**方块。
+    `ProtoChunk` 的
     `PalettedContainer` 按 `state.isAir()` 判定，`cave_air` / `void_air` 在空 section 里
     不会真的落盘，读回来就是 `air`；结构件写空气只为挖空，变体没有意义。
   已知限制：以上全是纯函数 + oracle，**放置一律没接进 Director**，游戏里还没有结构；
