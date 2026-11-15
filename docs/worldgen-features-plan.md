@@ -744,7 +744,8 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | `--through carvers`（旧阶段回归） | `--seeds 2 --chunks 6 --salt 1` **0 不一致** |
 | `--steps 2 --feature-types minecraft:geode --chunk X Z`（晶洞，6 个已知生成点） | 每个 **0 不一致**（每区块 884736 方块、886272 次比较） |
 | `--steps 1 --feature-types minecraft:lake` | `--seeds 2 --chunks 4` / `--seeds 3 --chunks 8 --salt 7`（24 中心 / 21233664 方块）均 **0 不一致** |
-| `--steps 2 --feature-types minecraft:large_dripstone --chunk 2 36 --scan 25`（25 个滴水石洞穴区块） | **0 不一致**（22118400 方块）；这批位置官方与 Bamboo 都没长柱，见下面「疑点」 |
+| `--steps 2 --feature-types minecraft:large_dripstone --chunk 2 36 --scan 25`（25 个滴水石洞穴区块） | **0 不一致**（22118400 方块）；这批位置官方与 Bamboo 都没长柱 |
+| `--steps 2 --feature-types minecraft:large_dripstone --chunk -53 -206` / `-50 -200` / `-52 -204` / `-49 -199`（4 个真的长柱的区块） | 每个 **0 不一致**；故意把 `dripstone_block` 改成 `calcite` 后报 **13 / 33 处不一致**，主路径已逐方块覆盖 |
 | `--steps 4 --feature-types minecraft:blue_ice --chunk X Z`，5 个真实生成点 `(255,-109) (260,-106) (242,-104) (243,-103) (241,-102)` | 每个 **0 不一致**（884736 方块 / 886272 次比较）；故意把 `yOff < 2` 改成 `yOff < 3` 后报 **5 处不一致** |
 | `--steps 4 --feature-types minecraft:spike --chunk 268 -300 --scan 3`（冰刺群系） | **0 不一致**（9 中心 / 7962624 方块）；故意把 `nextInt(4) + 7` 改成 `+ 8` 后报 **160 处不一致** |
 | `--steps 3 --feature-types minecraft:monster_room --chunk 3 -1` / `--chunk 4 -6` / `--chunk 3 1` | 三个真实生成点各 **0 不一致**；`--seeds 2 --chunks 4` **0 不一致**（8 中心 / 7077888 方块）；故意把 `nextInt(2) + 2` 改成 `+ 3` 后报 **160 处不一致** |
@@ -826,12 +827,14 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `Biome.TEMPERATURE_NOISE`、`LightLayer.BLOCK` 亮度和 `SnowLayerBlock.canSurvive`，
   而且要把 `BiomeManager.getBiome` 的逐点回调传进 `FeatureWorld`（现在的 `biome_at`
   闭包只在 `run.rs` 的 `PlacementEnv` 里），属于核心结构改动，本轮没做。
-* 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`monster_room` 要刷怪笼 /
-  战利品表 / 方块实体；`large_dripstone` 是较大的独立 feature；`freeze_top_layer` 走
+* 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`freeze_top_layer` 走
   `SnowLayerBlock.canSurvive` 的形状判定和 `getBrightness`，Java 对拍代理
-  （`ChunkgenOracle.java`）还没实现 `getBrightness`（`isInsideBuildHeight` 已补），
-  完整 11 步会抛 `UnsupportedOperationException`，这些路径无法逐位比对。按项目
+  （`ChunkgenOracle.java`）还没实现 `getBrightness`（`isInsideBuildHeight` 与
+  `isWaterAt` 已补），完整 11 步会抛 `UnsupportedOperationException`。按项目
   「不发明行为」的原则，宁可保留 `skipped` 也不塞未经验证的实现。
+  `monster_room`（刷怪笼 / 战利品表 / 方块实体）与 `large_dripstone` 已完成：
+  前者的方块实体数据不进对拍（只比方块，但 `nextLong` / `nextInt(4)` 照取），
+  后者已在 4 个真的长柱的区块上逐方块覆盖。
 * 植被类型（树、花、草、patch、selector / sequence 容器，见 5.2）由 `cb-wg-feat-b`
   负责，本轮不做。
 * `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按「已移植集合」
