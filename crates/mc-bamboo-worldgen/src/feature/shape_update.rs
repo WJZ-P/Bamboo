@@ -171,13 +171,58 @@ impl AxisCycle {
     }
 }
 
+/// `Block.updateFromNeighbourShapes(state, level, pos)`：按 `UPDATE_SHAPE_ORDER`
+/// （WEST、EAST、NORTH、SOUTH、DOWN、UP）依次 `updateShape`，返回最终状态。
+///
+/// 结构模板放置写完所有方块后对每个写入位置调一次；结果与官方相同，因为每一步都只读
+/// 前一状态和当前世界。
+///
+/// `Block.updateFromNeighbourShapes(state, level, pos)`: `updateShape` in
+/// `UPDATE_SHAPE_ORDER` (WEST, EAST, NORTH, SOUTH, DOWN, UP), returning the final state.
+/// Template placement runs it once per written position after all writes; the result
+/// matches vanilla because every step reads only the previous state and the world.
+pub fn update_from_neighbour_shapes(world: &mut FeatureWorld<'_>, pos: Pos) -> u32 {
+    const ORDER: [Direction; 6] = [
+        Direction::West,
+        Direction::East,
+        Direction::North,
+        Direction::South,
+        Direction::Down,
+        Direction::Up,
+    ];
+    let mut level = ShapeLevel {
+        world,
+        block_entities: BlockEntities::default(),
+        block_events: BlockEvents::default(),
+        redstone: RedstoneMemory::default(),
+        entities: EntityStore::default(),
+        random: LevelRandom::new(0),
+    };
+    let block_pos = BlockPos::new(pos.0, pos.1, pos.2);
+    let mut state = level.block_state(block_pos);
+    let mut ticks = BlockTicks::default();
+    for direction in ORDER {
+        let neighbour_pos = block_pos.relative(direction);
+        let neighbour = level.block_state(neighbour_pos);
+        let mut block_world = World::new(&mut level, &mut ticks);
+        state = state.update_shape(
+            &mut block_world,
+            block_pos,
+            direction,
+            neighbour_pos,
+            neighbour,
+        );
+    }
+    state.0
+}
+
 /// 官方 `StructureTemplate.updateShapeAtEdge(level, 3, shape, minX, minY, minZ)`。
 /// `shape` 里是已填充格子的世界坐标，`min` / `max` 是形状的闭区间包围盒。
 ///
 /// Official `StructureTemplate.updateShapeAtEdge(level, 3, shape, minX, minY, minZ)`.
 /// `shape` holds the world positions of filled cells; `min` / `max` are the shape's
 /// inclusive bounds.
-pub(crate) fn update_shape_at_edge(
+pub fn update_shape_at_edge(
     world: &mut FeatureWorld<'_>,
     shape: &HashSet<Pos>,
     min: Pos,

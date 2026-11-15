@@ -289,6 +289,7 @@ pub fn place_in_world(
 
     let mut locked_fluids: Vec<(i32, i32, i32)> = Vec::new();
     let mut to_fill: Vec<(i32, i32, i32)> = Vec::new();
+    let mut placed_positions: Vec<(i32, i32, i32)> = Vec::new();
     for (pos, state, has_nbt) in processed {
         let previous_fluid = (settings.liquid == LiquidSettings::ApplyWaterlogging)
             .then(|| *mc_bamboo_data::state_fluid(world.get_block(pos.0, pos.1, pos.2)));
@@ -302,6 +303,7 @@ pub fn place_in_world(
         if !write(world, pos, state, &mut writes, record) {
             continue;
         }
+        placed_positions.push(pos);
         if has_nbt {
             block_entities.push(pos);
         }
@@ -322,6 +324,33 @@ pub fn place_in_world(
     }
 
     fill_fluids(world, &mut to_fill, &locked_fluids, &mut writes, record);
+    // `updateShapeAtEdge`：对写入形状的每个外表面，让两侧方块各做一次 `updateShape`。
+    // `updateShapeAtEdge`: run `updateShape` on both sides of every outer face of the
+    // written shape.
+    if !placed_positions.is_empty() {
+        let shape: std::collections::HashSet<(i32, i32, i32)> =
+            placed_positions.iter().copied().collect();
+        let min = (
+            placed_positions.iter().map(|pos| pos.0).min().unwrap_or(0),
+            placed_positions.iter().map(|pos| pos.1).min().unwrap_or(0),
+            placed_positions.iter().map(|pos| pos.2).min().unwrap_or(0),
+        );
+        let max = (
+            placed_positions.iter().map(|pos| pos.0).max().unwrap_or(0),
+            placed_positions.iter().map(|pos| pos.1).max().unwrap_or(0),
+            placed_positions.iter().map(|pos| pos.2).max().unwrap_or(0),
+        );
+        crate::feature::shape_update::update_shape_at_edge(world, &shape, min, max);
+        // 再对每个写入位置跑一次 `Block.updateFromNeighbourShapes`。
+        // Then run `Block.updateFromNeighbourShapes` on every written position.
+        for pos in &placed_positions {
+            let state = world.get_block(pos.0, pos.1, pos.2);
+            let new_state = crate::feature::shape_update::update_from_neighbour_shapes(world, *pos);
+            if new_state != state {
+                write(world, *pos, new_state, &mut writes, record);
+            }
+        }
+    }
     let _ = random;
     Some(Placed {
         writes: record.then_some(writes),
