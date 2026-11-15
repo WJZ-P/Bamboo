@@ -1670,14 +1670,32 @@ step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_pred
   `large_dripstone`、`monster_room`、`multiface_growth`、`ore`、`simple_block`、
   `speleothem`、`speleothem_cluster`、`spike`、`spring_feature`、`tree`、
   `underwater_magma`、`vegetation_patch`（floor / ceiling）、`vines`。
-* 已写但**不接入**（`parse_leaf` 返回 `None`，整块标 `unsupported`）：`sculk_patch`
-  （`deep_dark` 单区块 8 处不一致，未收敛）、`waterlogged_vegetation_patch`
-  （`clay_pool_with_dripleaves` 完全没对拍）。
-* 已知未解决的差异：`moss_patch_ceiling` 的 10 处 `cave_vines` 错位（根因是
-  `JavaPosSet` 没实现 `java.util.HashMap` 的红黑树化）。
-* 没做：`fossil`、`overlay`（沙漠井，要 `template` 地物）、`root_system`、
-  `huge_fungus`、`chorus_plant`、`block_pile`、`noise_threshold_count` /
-  `count_on_every_layer` 修饰器。
+* 已写并接入：`sculk_patch`（`deep_dark` 的 step 7，见下）、
+  `waterlogged_vegetation_patch`（`lush_caves_clay`，见下）。
+* 已知未解决的差异：无。`moss_patch_ceiling` 的 `cave_vines` 错位已随
+  `region_random` 改成裸 `RandomSource` 一起消失（见 `reports/cb-wg-aquatic.md`）。
+* 没做：`fossil`、`overlay`（沙漠井，要 `template` 地物）、`root_system`（官方成功路径
+  不可达）、`huge_fungus`、`chorus_plant`、`block_pile`。
+
+#### `sculk_patch`（第二十二轮验证）
+
+`sculk_patch_deep_dark` 挂在 `minecraft:deep_dark` 的 **step 7**（`count 256`、
+`in_square`、`height_range`、`biome`，没有 `environment_scan`），所以整片深暗之域都会触发。
+定点比对（三个 `deep_dark` 主导区块各 9 中心）：
+
+```
+--through features --steps 7 \
+  --feature-types minecraft:sculk_patch_deep_dark,minecraft:sculk_vein \
+  --chunk 177 -177 --scan 3 --seeds 1     # 0 不一致 / 0 skipped
+  --chunk  78   78 --scan 3 --seeds 1     # 0 不一致 / 0 skipped
+  --chunk 174 -174 --scan 3 --seeds 1     # 0 不一致 / 0 skipped
+```
+
+完整 11 步（不带 `--steps`）下同样 **0 不一致 / 0 skipped**。改坏验证：
+`charge_count` 循环多跑 4 轮 → **160 处**。
+
+此前文档里"`deep_dark` 单区块 8 处不一致"的记录已过时——那是 `region_random`
+静态类型修正之前的状态。
 
 ## 6. 工作量估计
 
