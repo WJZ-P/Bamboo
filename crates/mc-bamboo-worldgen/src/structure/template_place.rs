@@ -418,7 +418,17 @@ pub fn place_in_world(
         // fence `shape` mismatch count from 29 to 1706, so `feature/shape_update.rs`
         // (written for trees) is not equivalent to vanilla under the template-placement
         // `updateMode = 2`. See the report's open questions.
-        let _ = (&shape, min, max);
+        // `updateShapeAtEdge` 的「形状内侧」那一步，官方会做，但 `feature/shape_update.rs`
+        // 那份实现跑出来会把 `shape=straight` 的楼梯改成 `outer_right`（打开后沉船
+        // 29 → 1706 处，差异对全是 `straight -> outer_right`），所以只跑「形状外侧邻居」
+        // 那一半（跨区块边界的栅栏连接位靠它）。内侧格子由下面的
+        // `updateFromNeighbourShapes` 按 `UPDATE_SHAPE_ORDER` 重算。
+        // Vanilla also updates the in-shape cells inside `updateShapeAtEdge`, but
+        // `feature/shape_update.rs` turns `shape=straight` stairs into `outer_right`
+        // (enabling it takes the shipwreck from 29 to 1706), so only the **outside**
+        // neighbours run here — they are the chunk-border fence connections. The inside
+        // cells are recomputed by `updateFromNeighbourShapes` below.
+        crate::feature::shape_update::update_shape_at_edge_outside_only(world, &shape, min, max);
         // 再对每个写入位置跑一次 `Block.updateFromNeighbourShapes`。
         // Then run `Block.updateFromNeighbourShapes` on every written position.
         for pos in &placed_positions {

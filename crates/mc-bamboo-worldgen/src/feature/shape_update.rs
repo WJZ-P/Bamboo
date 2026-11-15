@@ -228,6 +228,36 @@ pub fn update_shape_at_edge(
     min: Pos,
     max: Pos,
 ) {
+    update_shape_at_edge_impl(world, shape, min, max, false);
+}
+
+/// 只更新形状**外侧**邻居那一半（跳过形状内格子的 `updateShape`）。
+///
+/// 模板放置用这个：内侧格子随后由 `Block.updateFromNeighbourShapes` 按
+/// `UPDATE_SHAPE_ORDER` 统一重算（官方 `placeInWorld` 也是先 `updateShapeAtEdge`
+/// 再逐方块 `updateFromNeighbourShapes`，内侧的第一次结果会被覆盖），而外侧邻居只有
+/// `updateShapeAtEdge` 会碰——它负责跨区块边界那一侧的栅栏 / 楼梯连接位。
+///
+/// Only the outside-neighbour half (skips `updateShape` on the in-shape cells). Template
+/// placement uses this: the inside cells are recomputed immediately afterwards by
+/// `Block.updateFromNeighbourShapes`, while the outside neighbours are touched **only** by
+/// `updateShapeAtEdge` — they are the ones on the far side of a chunk border.
+pub fn update_shape_at_edge_outside_only(
+    world: &mut FeatureWorld<'_>,
+    shape: &HashSet<Pos>,
+    min: Pos,
+    max: Pos,
+) {
+    update_shape_at_edge_impl(world, shape, min, max, true);
+}
+
+fn update_shape_at_edge_impl(
+    world: &mut FeatureWorld<'_>,
+    shape: &HashSet<Pos>,
+    min: Pos,
+    max: Pos,
+    outside_only: bool,
+) {
     let size = [max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1];
     let mut level = ShapeLevel {
         world,
@@ -258,10 +288,10 @@ pub fn update_shape_at_edge(
                     };
                     let full = c != c_size && shape.contains(&cell(c));
                     if !last_full && full {
-                        update_face(&mut level, cell(c), negative);
+                        update_face(&mut level, cell(c), negative, outside_only);
                     }
                     if last_full && !full {
-                        update_face(&mut level, cell(c - 1), positive);
+                        update_face(&mut level, cell(c - 1), positive, outside_only);
                     }
                     last_full = full;
                 }
@@ -274,19 +304,30 @@ pub fn update_shape_at_edge(
 ///
 /// One face of `updateShapeAtEdge`: update the cell inside the shape, then the
 /// neighbour across the face.
-fn update_face(level: &mut ShapeLevel<'_, '_>, cell: Pos, direction: Direction) {
+fn update_face(
+    level: &mut ShapeLevel<'_, '_>,
+    cell: Pos,
+    direction: Direction,
+    outside_only: bool,
+) {
     let pos = BlockPos::new(cell.0, cell.1, cell.2);
     let neighbor_pos = pos.relative(direction);
     let state = level.block_state(pos);
     let neighbor = level.block_state(neighbor_pos);
     let mut ticks = BlockTicks::default();
-    let new_state = {
+    let new_state = if outside_only {
+        // 内侧格子交给 `updateFromNeighbourShapes`，这里只把它当作邻居的「新状态」用。
+        // The inside cell is handled by `updateFromNeighbourShapes`; here it only serves as
+        // the neighbour's "new state" argument.
+        state
+    } else {
         let mut world = World::new(level, &mut ticks);
-        state.update_shape(&mut world, pos, direction, neighbor_pos, neighbor)
+        let updated = state.update_shape(&mut world, pos, direction, neighbor_pos, neighbor);
+        if updated != state {
+            level.write_block(pos, updated, 2);
+        }
+        updated
     };
-    if new_state != state {
-        level.write_block(pos, new_state, 2);
-    }
     let new_neighbor = {
         let mut world = World::new(level, &mut ticks);
         neighbor.update_shape(
