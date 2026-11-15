@@ -80,6 +80,18 @@ impl BoundingBox {
         self.max_x >= min_x && self.min_x <= max_x && self.max_z >= min_z && self.min_z <= max_z
     }
 
+    /// `BoundingBox.isInside(Vec3i)`：六轴都含端点。
+    ///
+    /// `BoundingBox.isInside(Vec3i)`: inclusive on all six axes.
+    pub const fn contains(&self, x: i32, y: i32, z: i32) -> bool {
+        self.min_x <= x
+            && x <= self.max_x
+            && self.min_y <= y
+            && y <= self.max_y
+            && self.min_z <= z
+            && z <= self.max_z
+    }
+
     /// 把一批结构件的包围盒并起来（对应 `PiecesContainer.calculateBoundingBox()`）。
     ///
     /// Union of a set of piece boxes (`PiecesContainer.calculateBoundingBox()`).
