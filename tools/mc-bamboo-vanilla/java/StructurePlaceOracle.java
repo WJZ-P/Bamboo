@@ -87,6 +87,8 @@ public final class StructurePlaceOracle {
     private static final int MIN_Y = -64;
     /** 林地府邸喂入的 `startY`，必须和 Rust 侧 `MANSION_START_Y` 一致。 */
     private static final int MANSION_START_Y = 63;
+    /** 装饰与写半径：海底神殿横跨 4×4 区块，取 2 才能覆盖边缘区块的写入。 */
+    private static final int SIDE = 2;
     private static final StructurePieceSerializationContext CTX =
             new StructurePieceSerializationContext(null, null, null);
     private static final java.util.Set<String> BASE_KEYS =
@@ -209,8 +211,8 @@ public final class StructurePlaceOracle {
             // Same as `StructureStart.placeInChunk`: once per chunk with that chunk's
             // full column box, reseeding the random per chunk.
             int aborted = 0;
-            for (int dz = -1; dz <= 1; dz++) {
-                for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -SIDE; dz <= SIDE; dz++) {
+                for (int dx = -SIDE; dx <= SIDE; dx++) {
                     ChunkPos at = new ChunkPos(cx + dx, cz + dz);
                     BoundingBox chunkBB = chunkBox(at);
                     WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
@@ -502,7 +504,7 @@ public final class StructurePlaceOracle {
         private boolean withinWriteZone(BlockPos pos) {
             int dx = SectionPos.blockToSectionCoord(pos.getX()) - center.x();
             int dz = SectionPos.blockToSectionCoord(pos.getZ()) - center.z();
-            return Math.abs(dx) <= 1 && Math.abs(dz) <= 1;
+            return Math.abs(dx) <= SIDE && Math.abs(dz) <= SIDE;
         }
 
         private void fillChunk(ProtoChunk chunk) {

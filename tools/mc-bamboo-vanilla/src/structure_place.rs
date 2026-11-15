@@ -26,6 +26,11 @@ const SEEDS: [i64; 4] = [0, 42, -7, 12_345_678_901];
 const CHUNKS: [(i32, i32); 3] = [(0, 0), (1, -1), (34, 50)];
 /// 三种初始世界，覆盖「内部 / 外部」与「顶上有无方块」的分支。
 const FILLS: [&str; 3] = ["stone", "air", "stone_with_ceiling"];
+/// 写半径：`WorldGenRegion` 用 1；海底神殿横跨 4×4 区块，边缘区块的写入要 2 才覆盖。
+///
+/// Write radius: `WorldGenRegion` uses 1; the ocean monument spans 4×4 chunks, so 2 is
+/// needed to reach the writes of its edge chunks.
+const SIDE: i32 = 2;
 
 /// 假世界的 Y 范围，和 Java 侧一致。
 const MIN_Y: i32 = -64;
@@ -255,8 +260,8 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
         let west = q.cx * 16 - 29;
         let north = q.cz * 16 - 29;
         let monument = pieces::ocean_monument::monument_layout(&random, west, north, dir);
-        for dz in -1..=1 {
-            for dx in -1..=1 {
+        for dz in -SIDE..=SIDE {
+            for dx in -SIDE..=SIDE {
                 let at = (q.cx + dx, q.cz + dz);
                 let chunk_bb = chunk_box(at);
                 let chunk_random = pieces::make_random(q.seed ^ 0x5DEECE66D, at.0, at.1);
@@ -279,8 +284,8 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
 
     // 和 Java 侧一样逐区块调：`chunkBB` 是该区块整列盒，`random` 每区块重播。
     // Once per chunk like Java: the chunk's full column box, random reseeded per chunk.
-    for dz in -1..=1 {
-        for dx in -1..=1 {
+    for dz in -SIDE..=SIDE {
+        for dx in -SIDE..=SIDE {
             let at = (q.cx + dx, q.cz + dz);
             let chunk_bb = chunk_box(at);
             let random = pieces::make_random(q.seed ^ 0x5DEECE66D, at.0, at.1);
@@ -636,13 +641,17 @@ impl FlatLevel {
             )
     }
 
-    /// `WorldGenRegion.isWithinWriteZone`：写半径 1。
+    /// `WorldGenRegion.isWithinWriteZone`：写半径。这里取 `SIDE`（比官方的 1 宽），
+    /// 因为对拍刻意把 5×5 区块全部当中心跑一遍，好让横跨 4×4 区块的海底神殿的每个
+    /// 边缘区块都被走到。两侧用同一个值，语义一致。
     ///
-    /// `WorldGenRegion.isWithinWriteZone`: write radius 1.
+    /// `WorldGenRegion.isWithinWriteZone`: the write radius. `SIDE` (wider than vanilla's
+    /// 1) because the oracle deliberately runs all 5×5 chunks as the centre so every edge
+    /// chunk of the 4×4-chunk ocean monument is exercised. Both sides use the same value.
     fn in_write_zone(&self, x: i32, z: i32) -> bool {
         let dx = (x >> 4) - self.center.0;
         let dz = (z >> 4) - self.center.1;
-        (-1..=1).contains(&dx) && (-1..=1).contains(&dz)
+        (-SIDE..=SIDE).contains(&dx) && (-SIDE..=SIDE).contains(&dz)
     }
 
     /// 初始状态下这一格的方块（`stone` 与 `stone_with_ceiling` 在 y 56..=62 / 63）。
