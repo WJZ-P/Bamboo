@@ -351,6 +351,53 @@ pub struct BlockStateSpec {
 }
 
 impl BlockStateSpec {
+    /// 从 `minecraft:oak_stairs[facing=north,half=bottom]` 这样的文本解析。
+    /// 用于对拍与测试构造（JSON 走 `parse`）。
+    ///
+    /// Parse from text such as `minecraft:oak_stairs[facing=north,half=bottom]`, used by
+    /// the oracle and tests (JSON goes through `parse`).
+    pub fn parse_str(text: &str) -> Result<Self, String> {
+        let (name, rest) = match text.find('[') {
+            None => (text, ""),
+            Some(index) => (
+                &text[..index],
+                text.get(index + 1..text.len().saturating_sub(1))
+                    .ok_or("unterminated block state")?,
+            ),
+        };
+        let mut properties = Vec::new();
+        if !rest.is_empty() {
+            for pair in rest.split(',') {
+                let (key, value) = pair.split_once('=').ok_or("bad property pair")?;
+                properties.push((key.to_owned(), value.to_owned()));
+            }
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            properties,
+        })
+    }
+
+    /// 写回 `minecraft:oak_stairs[facing=north,half=bottom]` 形式的文本，属性顺序按
+    /// 当前列表。官方 `BlockState.toString` 的属性顺序是属性定义顺序，对拍里两边都用
+    /// 各自的状态表，所以这里只要求**双方一致**的规范化：按键名排序。
+    ///
+    /// The text form `minecraft:oak_stairs[facing=...]`, with properties sorted by name so
+    /// both sides normalise identically.
+    pub fn text(&self) -> String {
+        if self.properties.is_empty() {
+            return self.name.clone();
+        }
+        let mut sorted = self.properties.clone();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let body = sorted
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{}[{body}]", self.name)
+    }
+
     fn parse(raw: &Value) -> Result<Self, String> {
         match raw {
             Value::String(name) => Ok(Self {

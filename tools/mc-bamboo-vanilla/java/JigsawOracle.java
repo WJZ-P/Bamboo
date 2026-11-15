@@ -79,7 +79,11 @@ import net.minecraft.world.level.levelgen.structure.structures.JigsawStructure;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorList;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructurePlaceSettings;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessor;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
+import net.minecraft.world.level.levelgen.structure.templatesystem.CappedProcessor;
 import net.minecraft.world.level.levelgen.structure.templatesystem.LiquidSettings;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import net.minecraft.world.level.storage.LevelResource;
@@ -105,6 +109,8 @@ import net.minecraft.world.level.storage.LevelStorageSource;
  */
 public final class JigsawOracle {
     private static final Gson GSON = new Gson();
+    /** 主世界最小 Y（`noise_settings.minecraft:overworld` 的 `min_y`）。 */
+    private static final int MIN_Y = -64;
     /** `PiecesContainer.RENAMES`：老的 jigsaw 结构件 id 统一成 `minecraft:jigsaw`。 */
     private static final Map<Identifier, Identifier> LOAD_RENAMES = Map.of(
             Identifier.withDefaultNamespace("nvi"), Identifier.withDefaultNamespace("jigsaw"),
@@ -147,6 +153,7 @@ public final class JigsawOracle {
                     case "save" -> runSave(manager, registries, Path.of(args[1]));
                     case "processors" -> runProcessors(registries);
                     case "load" -> runLoad(manager, registries, Path.of(args[1]));
+                    case "apply" -> runApply(registries, Path.of(args[1]));
                     case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
                 }
@@ -615,6 +622,315 @@ public final class JigsawOracle {
                         .encodeStart(ops, element)
                         .getOrThrow(error -> new IllegalStateException("encode: " + error)))
                 .toString();
+    }
+
+    /**
+     * apply 模式：queries 每行
+     * {@code list|pieceX|pieceY|pieceZ|refX|refY|refZ|worldState|n|x,y,z,state;...}。
+     * 用官方 {@code StructureTemplate.processBlockInfos} 在假世界上跑一遍给定的
+     * processor 列表，输出保留下来的方块（位置 + 状态）与丢弃数。假世界只有两种状态：
+     * {@code worldState}（所有位置都是它）与空；这足以覆盖 `location_predicate` /
+     * `ProtectedBlockProcessor` 的两支。
+     *
+     * <p>Apply mode: one line per query, running the official
+     * {@code StructureTemplate.processBlockInfos} over a fake level that returns
+     * `worldState` everywhere, and printing the surviving blocks plus the drop count.
+     */
+    private static void runApply(RegistryAccess registries, Path queries) throws Exception {
+        Registry<StructureProcessorList> reg = registries.lookupOrThrow(Registries.PROCESSOR_LIST);
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|");
+            String listId = p[0];
+            BlockPos piecePos = new BlockPos(
+                    Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3]));
+            BlockPos refPos = new BlockPos(
+                    Integer.parseInt(p[4]), Integer.parseInt(p[5]), Integer.parseInt(p[6]));
+            BlockState worldState = stateOf(p[7]);
+            int count = Integer.parseInt(p[8]);
+            List<StructureTemplate.StructureBlockInfo> infos = new java.util.ArrayList<>();
+            List<String> inputProps = new java.util.ArrayList<>();
+            int pos = 9;
+            for (int i = 0; i < count; i++) {
+                // 每块是 `x|y|z|state` 四段。
+                // Each block is four fields: `x|y|z|state`.
+                int x = Integer.parseInt(p[pos]);
+                int y = Integer.parseInt(p[pos + 1]);
+                int z = Integer.parseInt(p[pos + 2]);
+                String stateText = p[pos + 3];
+                for (String property : propertyNames(stateText)) {
+                    if (!inputProps.contains(property)) {
+                        inputProps.add(property);
+                    }
+                }
+                BlockState state = stateOf(stateText);
+                pos += 4;
+                infos.add(new StructureTemplate.StructureBlockInfo(
+                        new BlockPos(x, y, z), state, null));
+            }
+            StructureProcessorList list = reg.getValue(Identifier.parse(listId));
+            if (list == null) {
+                throw new IllegalStateException("no processor list " + listId);
+            }
+            StructurePlaceSettings settings = new StructurePlaceSettings();
+            List<StructureProcessor> flat = new java.util.ArrayList<>();
+            List<StructureProcessor> capped = new java.util.ArrayList<>();
+            for (StructureProcessor processor : list.list()) {
+                if (processor instanceof CappedProcessor) {
+                    capped.add(processor);
+                } else {
+                    flat.add(processor);
+                }
+            }
+            for (StructureProcessor processor : flat) {
+                settings.addProcessor(processor);
+            }
+            FakeProcessorLevel level = new FakeProcessorLevel(worldState, 0L);
+            List<StructureTemplate.StructureBlockInfo> processed =
+                    StructureTemplate.processBlockInfos(
+                            level.proxy(), piecePos, refPos, settings, infos);
+            // key 只是前 9 段（`list|piece(3)|ref(3)|worldState|count`），方块列表不进去。
+            // The key is only the first nine fields; the block list stays out of it.
+            String key = String.join("|", java.util.Arrays.copyOfRange(p, 0, 9));
+            out.append("A|").append(key).append('|')
+                    .append(processed.size()).append('\n');
+            for (StructureTemplate.StructureBlockInfo info : processed) {
+                BlockPos bp = info.pos();
+                out.append("S|").append(key).append('|')
+                        .append(bp.getX()).append('|').append(bp.getY()).append('|')
+                        .append(bp.getZ()).append('|')
+                        .append(stateName(info.state(), inputProps)).append('\n');
+            }
+            // `CappedProcessor` 的 `finalizeProcessing` 要 `level.getLevel().getSeed()`，
+            // 假世界给不出真实 `ServerLevel`，所以单独输出「它的 delegate 作用在同样的
+            // 方块上」的结果：Rust 侧只需比较 delegate 的逐块效果与 capped 的选取下标数。
+            // `CappedProcessor.finalizeProcessing` needs `level.getLevel().getSeed()`,
+            // which a fake level cannot provide, so emit the delegate's effect on the same
+            // blocks instead: Rust only needs that plus the capped selection count.
+            for (StructureProcessor processor : capped) {
+                // `CappedProcessor.delegate` 是私有字段，反射读。
+                // `CappedProcessor.delegate` is private; read it reflectively.
+                StructurePlaceSettings delegateSettings = new StructurePlaceSettings();
+                delegateSettings.addProcessor(cappedDelegate(processor));
+                List<StructureTemplate.StructureBlockInfo> viaDelegate =
+                        StructureTemplate.processBlockInfos(
+                                level.proxy(), piecePos, refPos, delegateSettings, infos);
+                out.append("C|").append(key).append('|')
+                        .append(viaDelegate.size()).append('\n');
+                for (StructureTemplate.StructureBlockInfo info : viaDelegate) {
+                    BlockPos bp = info.pos();
+                    out.append("D|").append(key).append('|')
+                            .append(bp.getX()).append('|').append(bp.getY()).append('|')
+                            .append(bp.getZ()).append('|')
+                            .append(stateName(info.state(), inputProps)).append('\n');
+                }
+            }
+        }
+        System.out.print(out);
+        System.out.flush();
+    }
+
+    /** 反射读 `CappedProcessor.delegate`（没有公开访问器）。 */
+    private static StructureProcessor cappedDelegate(StructureProcessor capped) {
+        try {
+            java.lang.reflect.Field field =
+                    net.minecraft.world.level.levelgen.structure.templatesystem.CappedProcessor.class
+                            .getDeclaredField("delegate");
+            field.setAccessible(true);
+            return (StructureProcessor) field.get(capped);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("cannot read CappedProcessor.delegate", error);
+        }
+    }
+
+    /**
+     * 输出方块状态，但**只保留**输入的 `output_state` 里写出来的属性；如果输出状态与
+     * 某个输入状态同名，就沿用那个输入的属性集合。这样 Rust 侧不必带全套默认属性。
+     *
+     * <p>Emit a block state keeping only the properties the input wrote; when the output
+     * state shares a name with an input state, that input's property set is reused, so the
+     * Rust side need not carry every default property.
+     */
+    private static String stateName(BlockState state, List<String> propertyNames) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(BuiltInRegistries.BLOCK.getKey(state.getBlock()));
+        List<String> shown = new java.util.ArrayList<>();
+        for (var property : state.getProperties()) {
+            if (propertyNames.contains(property.getName())) {
+                shown.add(property.getName() + "=" + nameOf(state, property));
+            }
+        }
+        if (!shown.isEmpty()) {
+            shown.sort(String::compareTo);
+            sb.append('[').append(String.join(",", shown)).append(']');
+        }
+        return sb.toString();
+    }
+
+    /** 从 `minecraft:oak_stairs[facing=north]` 取出属性名集合。 */
+    private static List<String> propertyNames(String text) {
+        List<String> names = new java.util.ArrayList<>();
+        int bracket = text.indexOf('[');
+        if (bracket < 0) {
+            return names;
+        }
+        for (String pair : text.substring(bracket + 1, text.length() - 1).split(",")) {
+            names.add(pair.split("=", 2)[0]);
+        }
+        return names;
+    }
+
+    /** `Block{minecraft:stone}` 或 `Block{minecraft:oak_stairs}[facing=north,...]`。 */
+    private static String stateName(BlockState state) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(BuiltInRegistries.BLOCK.getKey(state.getBlock()));
+        if (!state.getProperties().isEmpty()) {
+            sb.append('[');
+            boolean first = true;
+            for (var property : state.getProperties()) {
+                if (!first) {
+                    sb.append(',');
+                }
+                first = false;
+                sb.append(property.getName()).append('=').append(nameOf(state, property));
+            }
+            sb.append(']');
+        }
+        return sb.toString();
+    }
+
+    private static <T extends Comparable<T>> String nameOf(
+            BlockState state, net.minecraft.world.level.block.state.properties.Property<T> p) {
+        return p.getName(state.getValue(p));
+    }
+
+    /** 从 `minecraft:stone` / `minecraft:oak_stairs[facing=north]` 造方块状态。 */
+    private static BlockState stateOf(String text) {
+        int bracket = text.indexOf('[');
+        String name = bracket < 0 ? text : text.substring(0, bracket);
+        Block block = BuiltInRegistries.BLOCK.getValue(Identifier.parse(name));
+        if (block == null) {
+            throw new IllegalStateException("no block " + name);
+        }
+        BlockState state = block.defaultBlockState();
+        if (bracket >= 0) {
+            String body = text.substring(bracket + 1, text.length() - 1);
+            for (String pair : body.split(",")) {
+                String[] kv = pair.split("=", 2);
+                state = withProperty(state, kv[0], kv[1]);
+            }
+        }
+        return state;
+    }
+
+    private static <T extends Comparable<T>> BlockState withProperty(
+            BlockState state, String name, String value) {
+        var property = state.getBlock().getStateDefinition().getProperty(name);
+        if (property == null) {
+            throw new IllegalStateException("no property " + name);
+        }
+        return setProperty(state, property, value);
+    }
+
+    private static <T extends Comparable<T>> BlockState setProperty(
+            BlockState state,
+            net.minecraft.world.level.block.state.properties.Property<T> property,
+            String value) {
+        return state.setValue(property, property.getValue(value).orElseThrow());
+    }
+
+    /**
+     * 假世界：所有位置的方块都是同一个 `worldState`。`getBlockState` 与 `is(HolderSet)`
+     * 是 processor 唯一会用到的东西。
+     *
+     * <p>Fake level: every position holds the same `worldState`; `getBlockState` and
+     * `is(HolderSet)` are all a processor needs.
+     */
+    /**
+     * 假世界：所有位置的方块都是同一个 `worldState`。processor 只用
+     * `getBlockState` 与 `state.is(tag)`，所以用代理挡住其余方法。
+     *
+     * <p>Fake level: every position holds the same `worldState`. Processors only touch
+     * `getBlockState` and `state.is(tag)`, so a proxy covers the rest.
+     */
+    private static final class FakeProcessorLevel {
+        private final BlockState worldState;
+        /** `CappedProcessor.finalizeProcessing` 只用 `level.getLevel().getSeed()`。 */
+        private final long levelSeed;
+
+        FakeProcessorLevel(BlockState worldState, long levelSeed) {
+            this.worldState = worldState;
+            this.levelSeed = levelSeed;
+        }
+
+        net.minecraft.world.level.ServerLevelAccessor proxy() {
+            return (net.minecraft.world.level.ServerLevelAccessor)
+                    java.lang.reflect.Proxy.newProxyInstance(
+                            JigsawOracle.class.getClassLoader(),
+                            new Class<?>[] {net.minecraft.world.level.ServerLevelAccessor.class},
+                            (self, method, args) -> switch (method.getName()) {
+                                case "getBlockState" -> this.worldState;
+                                case "getFluidState" -> this.worldState.getFluidState();
+                                case "isEmptyBlock" -> this.worldState.isAir();
+                                case "getLevel" -> this.fakeServerLevel();
+                                case "getMinY" -> JigsawOracle.MIN_Y;
+                                case "getHeight" ->
+                                        method.getParameterCount() == 0 ? 384 : JigsawOracle.MIN_Y + 1;
+                                case "getBlockEntity" -> null;
+                                case "toString" -> "FakeProcessorLevel";
+                                case "hashCode" -> System.identityHashCode(self);
+                                case "equals" -> self == args[0];
+                                default -> throw new UnsupportedOperationException(
+                                        "ServerLevelAccessor." + method.getName() + "/"
+                                                + method.getParameterCount());
+                            });
+        }
+
+        /**
+         * 假 `ServerLevel`：`CappedProcessor.finalizeProcessing` 只调用 `getSeed()`。
+         * `ServerLevel` 是类不是接口，代理造不出来，所以用 `Unsafe.allocateInstance`
+         * 分配一个不跑构造器的实例，再用反射把 `Level` 里的种子字段设成 `levelSeed`。
+         *
+         * <p>Fake `ServerLevel`: `finalizeProcessing` only calls `getSeed()`. `ServerLevel`
+         * is a class, so a proxy cannot stand in; allocate it without running the
+         * constructor and set the level seed field reflectively.
+         */
+        private net.minecraft.server.level.ServerLevel fakeServerLevel() {
+            try {
+                var unsafeField = Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe");
+                unsafeField.setAccessible(true);
+                Object unsafe = unsafeField.get(null);
+                var allocate = Class.forName("sun.misc.Unsafe")
+                        .getMethod("allocateInstance", Class.class);
+                net.minecraft.server.level.ServerLevel level =
+                        (net.minecraft.server.level.ServerLevel) allocate.invoke(
+                                unsafe, net.minecraft.server.level.ServerLevel.class);
+                // `Level` 里保存种子的字段在 26.3 叫 `seed`（`ServerLevelData` 之后会覆盖它，
+                // 但 `getSeed()` 直接读这个字段）。
+                // The field holding the seed is `seed` in 26.3; `getSeed()` reads it directly.
+                java.lang.reflect.Field seedField = null;
+                for (Class<?> c = level.getClass(); c != null; c = c.getSuperclass()) {
+                    try {
+                        seedField = c.getDeclaredField("seed");
+                        break;
+                    } catch (NoSuchFieldException ignored) {
+                        // 继续往父类找。
+                        // Keep walking up the hierarchy.
+                    }
+                }
+                if (seedField == null) {
+                    throw new IllegalStateException("no seed field on ServerLevel");
+                }
+                seedField.setAccessible(true);
+                seedField.setLong(level, this.levelSeed);
+                return level;
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException("cannot build a fake ServerLevel", error);
+            }
+        }
     }
 
     /**

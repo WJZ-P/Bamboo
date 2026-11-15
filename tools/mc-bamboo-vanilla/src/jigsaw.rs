@@ -34,7 +34,8 @@ use mc_bamboo_worldgen::{
             JigsawConfig, JigsawStructures, Piece, Rotation, StructurePieces, TemplatePools,
             add_pieces,
         },
-        processor::ProcessorLists,
+        processor::{BlockSetRef, BlockStateSpec, Processor, ProcessorLists},
+        processor_apply::{self, ProcessBlock, ProcessorLevel},
         rings::BiomeResolver,
         template::StructureTemplate,
         validity,
@@ -89,6 +90,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "save" => run_save(command, work_dir),
         "processors" => run_processors(command, work_dir),
         "load" => run_load(command, work_dir),
+        "apply" => run_apply(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
@@ -962,6 +964,391 @@ fn compare_load(stdout: &str, queries: &[Query]) -> Result<(), String> {
         "jigsaw load: {checked} queries, {reloaded} pieces round-tripped, all fields identical"
     );
     Ok(())
+}
+
+/// `apply` 模式：对每个 `processor_list`（以及几条合成的组合）在假世界上跑
+/// `process_blocks`，与官方 `StructureTemplate.processBlockInfos` 逐方块比。
+///
+/// `apply` mode: runs `process_blocks` over every `processor_list` (plus a few synthetic
+/// combinations) on a fake level and compares it with vanilla
+/// `StructureTemplate.processBlockInfos` block by block.
+fn run_apply(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    let raw: Value =
+        serde_json::from_str(WORLDGEN).map_err(|error| format!("bad worldgen.json: {error}"))?;
+    let lists = ProcessorLists::parse(raw.get("processor_list").ok_or("missing processor_list")?)?;
+    let queries = build_apply_queries(&lists);
+    let queries_path = work_dir.join("jigsaw_apply_queries.txt");
+    fs::write(&queries_path, queries.join("\n"))
+        .map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("apply")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_apply(&String::from_utf8_lossy(&output.stdout), &queries, &lists)
+}
+
+/// 一条 apply 查询里要处理的方块：`(pos, state)`。
+///
+/// The blocks of one apply query: `(pos, state)`.
+type ApplyBlock = ((i32, i32, i32), String);
+
+/// 一条 apply 查询。
+///
+/// One apply query.
+struct ApplyQuery {
+    list: String,
+    piece: (i32, i32, i32),
+    reference: (i32, i32, i32),
+    world_state: String,
+    blocks: Vec<ApplyBlock>,
+}
+
+impl ApplyQuery {
+    fn key(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            self.list,
+            self.piece.0,
+            self.piece.1,
+            self.piece.2,
+            self.reference.0,
+            self.reference.1,
+            self.reference.2,
+            self.world_state,
+            self.blocks.len()
+        )
+    }
+
+    fn to_line(&self) -> String {
+        let mut line = self.key();
+        for (pos, state) in &self.blocks {
+            line.push_str(&format!("|{}|{}|{}|{state}", pos.0, pos.1, pos.2));
+        }
+        line
+    }
+}
+
+/// 每个 `processor_list` 配一组覆盖各分支的方块与两种假世界状态。
+///
+/// Every `processor_list` gets one block set covering each branch, with two fake world
+/// states.
+fn build_apply_queries(lists: &ProcessorLists) -> Vec<String> {
+    // 覆盖 `rule` / `block_rot` / `protected_blocks` / `capped` 会用到的方块：
+    // 深板岩砖（ancient city 规则）、可疑的沙砾（trail ruins）、黑石（bastion）、
+    // 草方块与空气（对照）。
+    // Blocks covering the rules of `rule` / `block_rot` / `protected_blocks` / `capped`:
+    // deepslate bricks, suspicious gravel, blackstone, plus grass and air as controls.
+    let states = [
+        "minecraft:deepslate_bricks",
+        "minecraft:cracked_deepslate_bricks",
+        "minecraft:suspicious_gravel",
+        "minecraft:blackstone",
+        "minecraft:gilded_blackstone",
+        "minecraft:polished_blackstone_bricks",
+        "minecraft:grass_block[snowy=false]",
+        "minecraft:air",
+    ];
+    let mut queries = Vec::new();
+    for name in lists.names().cloned().collect::<Vec<_>>() {
+        // 每组方块放在相邻位置，覆盖 `axis_aligned_linear_pos` 的距离分支。
+        // Blocks sit at consecutive positions so the distance branches of
+        // `axis_aligned_linear_pos` are covered.
+        let blocks: Vec<ApplyBlock> = states
+            .iter()
+            .enumerate()
+            .map(|(index, state)| {
+                (
+                    ((index as i32) % 4, 64 + index as i32 / 4, 0),
+                    (*state).to_owned(),
+                )
+            })
+            .collect();
+        for world_state in ["minecraft:air", "minecraft:deepslate_bricks"] {
+            queries.push(
+                ApplyQuery {
+                    list: name.clone(),
+                    piece: (0, 64, 0),
+                    reference: (0, 64, 0),
+                    world_state: world_state.to_owned(),
+                    blocks: blocks.clone(),
+                }
+                .to_line(),
+            );
+        }
+        // 再换一个结构件位置，覆盖 `CappedProcessor` 按位置派生的随机源。
+        // Another piece position to cover the `CappedProcessor` position-derived source.
+        queries.push(
+            ApplyQuery {
+                list: name,
+                piece: (-13, 40, 27),
+                reference: (-13, 40, 27),
+                world_state: "minecraft:air".to_owned(),
+                blocks,
+            }
+            .to_line(),
+        );
+    }
+    queries
+}
+
+/// Java 的 `A|key|count` 与 `S|key|x|y|z|state`（只列保留下来的方块）。
+///
+/// Java emits `A|key|count` and `S|key|x|y|z|state` for the blocks that survive.
+fn compare_apply(stdout: &str, queries: &[String], lists: &ProcessorLists) -> Result<(), String> {
+    let mut java_a: HashMap<String, usize> = HashMap::new();
+    let mut java_s: HashMap<String, Vec<String>> = HashMap::new();
+    let mut java_c: HashMap<String, usize> = HashMap::new();
+    let mut java_d: HashMap<String, Vec<String>> = HashMap::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() < 11 {
+            continue;
+        }
+        // key 是前 9 段（list|piece(3)|ref(3)|worldState|count）。
+        // The key is the first nine fields.
+        let key = fields[1..10].join("|");
+        match fields[0] {
+            "A" => {
+                java_a.insert(key, fields[10].parse().unwrap_or(0));
+            }
+            "S" => {
+                java_s.entry(key).or_default().push(fields[10..].join("|"));
+            }
+            "C" => {
+                java_c.insert(key, fields[10].parse().unwrap_or(0));
+            }
+            "D" => {
+                java_d.entry(key).or_default().push(fields[10..].join("|"));
+            }
+            _ => {}
+        }
+    }
+
+    let mut checked = 0usize;
+    let mut blocks_checked = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for line in queries {
+        let fields: Vec<&str> = line.split('|').collect();
+        let list_id = fields[0];
+        let piece = (
+            parse_i32(fields[1])?,
+            parse_i32(fields[2])?,
+            parse_i32(fields[3])?,
+        );
+        let reference = (
+            parse_i32(fields[4])?,
+            parse_i32(fields[5])?,
+            parse_i32(fields[6])?,
+        );
+        let world_state = fields[7].to_owned();
+        let count: usize = parse_i32(fields[8])? as usize;
+        let mut blocks = Vec::with_capacity(count);
+        let mut at = 9;
+        for _ in 0..count {
+            let pos = (
+                parse_i32(fields[at])?,
+                parse_i32(fields[at + 1])?,
+                parse_i32(fields[at + 2])?,
+            );
+            let state = fields[at + 3].to_owned();
+            at += 4;
+            blocks.push(ProcessBlock {
+                pos,
+                // `calculateRelativePosition(settings, pos).offset(position)`：默认
+                // settings（mirror / rotation 都是 NONE、pivot 是 ZERO）下就是
+                // `pos + position`。
+                // With default settings (NONE mirror/rotation, ZERO pivot) this is
+                // `pos + position`.
+                world_pos: (pos.0 + piece.0, pos.1 + piece.1, pos.2 + piece.2),
+                state: BlockStateSpec::parse_str(&state)?,
+            });
+        }
+        let processors = lists
+            .get(list_id)
+            .ok_or_else(|| format!("Rust missing processor list {list_id}"))?;
+        // key 直接取查询行的前 9 段，和 Java 侧 `copyOfRange(p, 0, 9)` 一致。
+        // The key is the first nine fields of the query line, matching the Java side's
+        // `copyOfRange(p, 0, 9)`.
+        let key = fields[..9].join("|");
+        let level = FakeLevel::new(&world_state);
+        // `CappedProcessor` 的 `finalizeProcessing` 要真实的 `ServerLevel` 种子，假世界给不出，
+        // 所以主链里跳过它（官方侧同样剥离），delegate 的效果单独比。
+        // `CappedProcessor.finalizeProcessing` needs a real `ServerLevel` seed, which the
+        // fake level cannot provide, so the main chain skips it (the oracle strips it too)
+        // and the delegate's effect is compared separately.
+        let flat: Vec<_> = processors
+            .iter()
+            .filter(|processor| !matches!(processor, Processor::Capped { .. }))
+            .cloned()
+            .collect();
+        let processed =
+            processor_apply::process_blocks(&flat, &blocks, piece, reference, &level, 0);
+
+        checked += 1;
+        blocks_checked += processed.len();
+        let want_count = java_a
+            .get(&key)
+            .ok_or_else(|| format!("Java missing A for {key}"))?;
+        if *want_count != processed.len() {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{key}: kept rust {} java {want_count}",
+                    processed.len()
+                ));
+            }
+            continue;
+        }
+        let want_states = java_s.get(&key).cloned().unwrap_or_default();
+        for (index, block) in processed.iter().enumerate() {
+            let want = format!(
+                "{}|{}|{}|{}",
+                block.world_pos.0,
+                block.world_pos.1,
+                block.world_pos.2,
+                block.state.text()
+            );
+            if want_states.get(index).is_none_or(|got| *got != want) {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!(
+                        "{key}[{index}]: rust {want} java {:?}",
+                        want_states.get(index)
+                    ));
+                }
+            }
+        }
+        // `CappedProcessor` 的 delegate 单独跑一遍，与官方 `C`/`D` 行比。
+        // Run the `CappedProcessor` delegate separately and compare with the `C`/`D` lines.
+        for processor in processors {
+            let Processor::Capped { delegate, .. } = processor else {
+                continue;
+            };
+            let via_delegate = processor_apply::process_blocks(
+                std::slice::from_ref(delegate.as_ref()),
+                &blocks,
+                piece,
+                reference,
+                &level,
+                0,
+            );
+            let Some(want_count) = java_c.get(&key) else {
+                continue;
+            };
+            if *want_count != via_delegate.len() {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!(
+                        "{key}: capped delegate kept rust {} java {want_count}",
+                        via_delegate.len()
+                    ));
+                }
+                continue;
+            }
+            let want_states = java_d.get(&key).cloned().unwrap_or_default();
+            for (index, block) in via_delegate.iter().enumerate() {
+                let want = format!(
+                    "{}|{}|{}|{}",
+                    block.world_pos.0,
+                    block.world_pos.1,
+                    block.world_pos.2,
+                    block.state.text()
+                );
+                if want_states.get(index).is_none_or(|got| *got != want) {
+                    mismatches += 1;
+                    if first.is_none() {
+                        first = Some(format!(
+                            "{key} capped[{index}]: rust {want} java {:?}",
+                            want_states.get(index)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if checked != queries.len() {
+        return Err(format!(
+            "checked {checked} apply queries, expected {}",
+            queries.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches} differences over {checked} queries; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!("jigsaw apply: {checked} queries, {blocks_checked} surviving blocks, all identical");
+    Ok(())
+}
+
+fn parse_i32(text: &str) -> Result<i32, String> {
+    text.parse::<i32>()
+        .map_err(|error| format!("bad number {text}: {error}"))
+}
+
+/// 假世界：所有位置的方块都是同一个状态；标签按 `mc-bamboo-data` 的方块表判定。
+///
+/// Fake level: every position holds the same state; tags are resolved through the
+/// `mc-bamboo-data` block tables.
+struct FakeLevel {
+    state: BlockStateSpec,
+}
+
+impl FakeLevel {
+    fn new(text: &str) -> Self {
+        Self {
+            state: BlockStateSpec::parse_str(text).unwrap_or(BlockStateSpec {
+                name: "minecraft:air".to_owned(),
+                properties: Vec::new(),
+            }),
+        }
+    }
+}
+
+/// `state.is(HolderSet<Block>)`：标签走 `mc-bamboo-data` 的方块标签表，显式列表比对名字。
+///
+/// `state.is(HolderSet<Block>)`: tags go through the `mc-bamboo-data` block tag table,
+/// explicit lists compare names.
+fn in_block_set(state: &BlockStateSpec, set: &BlockSetRef) -> bool {
+    match set {
+        BlockSetRef::Tag(text) => {
+            let name = text.strip_prefix('#').unwrap_or(text);
+            let Some(ids) = mc_bamboo_data::block_tag(name) else {
+                return false;
+            };
+            let Some(block) = mc_bamboo_data::block_by_name(&state.name) else {
+                return false;
+            };
+            // `Block` 没有自己的 id 字段，用它的默认状态反查方块注册表 id。
+            // `Block` has no id field, so derive it from the default state.
+            let Some(id) = mc_bamboo_data::block_id_of_state(block.default_state) else {
+                return false;
+            };
+            ids.contains(&(id as i32))
+        }
+        BlockSetRef::Blocks(names) => names.contains(&state.name),
+    }
+}
+
+impl ProcessorLevel for FakeLevel {
+    fn block_state(&self, _pos: (i32, i32, i32)) -> BlockStateSpec {
+        self.state.clone()
+    }
+
+    fn in_block_set(&self, state: &BlockStateSpec, set: &BlockSetRef) -> bool {
+        in_block_set(state, set)
+    }
 }
 
 fn run_pieces(

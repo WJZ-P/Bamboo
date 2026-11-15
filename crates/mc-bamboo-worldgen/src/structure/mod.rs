@@ -24,6 +24,7 @@ pub mod piece_place;
 pub mod pieces;
 pub mod placement;
 pub mod processor;
+pub mod processor_apply;
 pub mod registry;
 pub mod rings;
 pub mod save;

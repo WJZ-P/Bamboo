@@ -1,0 +1,718 @@
+//! `StructureProcessor` 的执行：`processBlock` / `finalizeProcessing` 的纯函数版。
+//!
+//! 官方 `StructureTemplate.processBlockInfos` 对模板里每个方块依次跑
+//! `settings.getProcessors()` 里的 processor（任一返回 null 就丢弃该方块），最后再对整份
+//! 列表跑一遍 `finalizeProcessing`。这里照同一条链路翻译，把「世界」抽象成
+//! `ProcessorLevel`（读某个位置的方块状态 + 标签判定）。
+//!
+//! 随机源的关键细节（最容易写错的地方）：
+//!
+//! * `BlockRotProcessor.processBlock` 与 `RuleProcessor.processBlock` 都用
+//!   `settings.getRandom(processedBlockInfo.pos())`；没有显式随机源时是
+//!   `RandomSource.create(Mth.getSeed(pos))`——**每个方块一个独立随机源**，不消耗世界随机源。
+//! * `CappedProcessor.finalizeProcessing` 用
+//!   `RandomSource.createThreadLocalInstance(level.getLevel().getSeed()).forkPositional().at(position)`，
+//!   即 `Mth.getSeed(piecePosition)` 派生的随机源（`position` 是结构件位置）。
+//!
+//! Execution of `StructureProcessor`: the pure-function form of `processBlock` /
+//! `finalizeProcessing`. Vanilla `StructureTemplate.processBlockInfos` runs the settings'
+//! processors over every template block (any returning null drops the block) and then runs
+//! `finalizeProcessing` over the whole list. Per-block processors derive their random
+//! source from the block position (`RandomSource.create(Mth.getSeed(pos))`, no world
+//! randomness); `CappedProcessor` derives its source from the piece position.
+
+use mc_bamboo_blocks::LegacyRandom;
+
+use crate::{
+    random::{Random, positional_seed},
+    structure::processor::{
+        BlockSetRef, BlockStateSpec, PosRuleTest, Processor, ProcessorRule, RuleTest,
+    },
+};
+
+/// processor 需要读世界的地方：`level.getBlockState(pos)` 与标签判定。
+///
+/// What a processor needs from the world: `level.getBlockState(pos)` plus tag lookups.
+pub trait ProcessorLevel {
+    /// `level.getBlockState(pos)`。
+    ///
+    /// `level.getBlockState(pos)`.
+    fn block_state(&self, pos: (i32, i32, i32)) -> BlockStateSpec;
+
+    /// `state.is(HolderSet<Block>)`：方块是否属于某个标签或显式集合。
+    ///
+    /// `state.is(HolderSet<Block>)`: whether the state belongs to a tag or explicit set.
+    fn in_block_set(&self, state: &BlockStateSpec, set: &BlockSetRef) -> bool;
+}
+
+/// 一个待处理的方块，对应官方 `StructureTemplate.StructureBlockInfo`。
+///
+/// One block to process, mirroring vanilla `StructureTemplate.StructureBlockInfo`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessBlock {
+    /// `blockInfo.pos`：模板内的相对坐标（未变换），用作 `templateRelativePos`。
+    ///
+    /// `blockInfo.pos`: the template-relative position (untransformed), used as
+    /// `templateRelativePos`.
+    pub pos: (i32, i32, i32),
+    /// 世界坐标（`calculateRelativePosition(settings, pos).offset(position)`）。
+    ///
+    /// The world position (`calculateRelativePosition(settings, pos).offset(position)`).
+    pub world_pos: (i32, i32, i32),
+    pub state: BlockStateSpec,
+}
+
+/// `StructurePlaceSettings.getRandom(pos)`：没有显式随机源时按位置派生。
+///
+/// `StructurePlaceSettings.getRandom(pos)`: derived from the position when no explicit
+/// source is set.
+fn position_random(pos: (i32, i32, i32)) -> Random {
+    Random::Legacy(LegacyRandom::new(positional_seed(pos.0, pos.1, pos.2)))
+}
+
+/// `RuleTest.test(state, pos, random)`。
+///
+/// `RuleTest.test(state, pos, random)`.
+fn rule_test_matches(
+    test: &RuleTest,
+    state: &BlockStateSpec,
+    level: &impl ProcessorLevel,
+    random: &Random,
+) -> bool {
+    match test {
+        RuleTest::AlwaysTrue => true,
+        RuleTest::BlockMatch { block } => state.name == *block,
+        RuleTest::BlockStateMatch { block_state } => state == block_state,
+        RuleTest::TagMatch { tag } => {
+            level.in_block_set(state, &BlockSetRef::Tag(format!("#{tag}")))
+        }
+        // `random.nextFloat() < probability`：方块不匹配时**不取随机数**（短路）。
+        // `random.nextFloat() < probability`: no draw when the block does not match.
+        RuleTest::RandomBlockMatch { block, probability } => {
+            state.name == *block && random.next_float() < *probability
+        }
+        RuleTest::RandomBlockStateMatch {
+            block_state,
+            probability,
+        } => state == block_state && random.next_float() < *probability,
+    }
+}
+
+/// `ProcessorRule.test(level, inputState, inTemplatePos, worldPos, reference, random)`。
+///
+/// `ProcessorRule.test(level, inputState, inTemplatePos, worldPos, reference, random)`.
+fn rule_matches(
+    rule: &ProcessorRule,
+    block: &ProcessBlock,
+    reference_pos: (i32, i32, i32),
+    level: &impl ProcessorLevel,
+    random: &Random,
+) -> bool {
+    // `inputPredicate.test(inputState, worldPos, random)`：用模板里的方块。
+    // `inputPredicate.test(inputState, worldPos, random)`: uses the template block.
+    if !rule_test_matches(&rule.input_predicate, &block.state, level, random) {
+        return false;
+    }
+    // `locPredicate.testAgainstWorldState(level, worldPos, random)`：读**世界**的方块。
+    // `locPredicate.testAgainstWorldState(level, worldPos, random)`: reads the world state.
+    let world_state = level.block_state(block.world_pos);
+    if !rule_test_matches(&rule.location_predicate, &world_state, level, random) {
+        return false;
+    }
+    pos_rule_test_matches(
+        &rule.position_predicate,
+        block.pos,
+        block.world_pos,
+        reference_pos,
+        random,
+    )
+}
+
+/// `PosRuleTest.test`。`AxisAlignedLinearPosTest` 的公式照官方。
+///
+/// `PosRuleTest.test`. `AxisAlignedLinearPosTest` uses the vanilla formula verbatim.
+fn pos_rule_test_matches(
+    test: &PosRuleTest,
+    _template_pos: (i32, i32, i32),
+    world_pos: (i32, i32, i32),
+    reference: (i32, i32, i32),
+    random: &Random,
+) -> bool {
+    match test {
+        PosRuleTest::AlwaysTrue => true,
+        PosRuleTest::AxisAlignedLinear {
+            min_chance,
+            max_chance,
+            min_dist,
+            max_dist,
+            axis,
+        } => {
+            // `Direction.get(POSITIVE, axis).getStep*()`：沿轴分量取 1，其余 0。
+            // `Direction.get(POSITIVE, axis)`: 1 along the axis, 0 elsewhere.
+            let step = match axis.as_str() {
+                "x" => (1.0_f32, 0.0, 0.0),
+                "z" => (0.0, 0.0, 1.0),
+                _ => (0.0, 1.0, 0.0),
+            };
+            let dx = (world_pos.0 - reference.0) as f32 * step.0;
+            let dy = (world_pos.1 - reference.1) as f32 * step.1;
+            let dz = (world_pos.2 - reference.2) as f32 * step.2;
+            let dist = (dx.abs() + dy.abs() + dz.abs()) as i32;
+            let rnd = random.next_float();
+            rnd <= clamped_lerp(
+                inverse_lerp(dist as f32, *min_dist as f32, *max_dist as f32),
+                *min_chance,
+                *max_chance,
+            )
+        }
+    }
+}
+
+/// `Mth.inverseLerp(value, min, max)`。
+///
+/// `Mth.inverseLerp(value, min, max)`.
+fn inverse_lerp(value: f32, min: f32, max: f32) -> f32 {
+    if min == max {
+        0.0
+    } else {
+        ((value - min) / (max - min)).clamp(0.0, 1.0)
+    }
+}
+
+/// `Mth.clampedLerp(delta, start, end)`。
+///
+/// `Mth.clampedLerp(delta, start, end)`.
+fn clamped_lerp(delta: f32, start: f32, end: f32) -> f32 {
+    if delta < 0.0 {
+        start
+    } else if delta > 1.0 {
+        end
+    } else {
+        start + delta * (end - start)
+    }
+}
+
+/// 一个 processor 的 `processBlock`：`Some` 表示保留（可能改过），`None` 表示丢弃。
+///
+/// One processor's `processBlock`: `Some` keeps the block (possibly altered), `None` drops it.
+pub fn process_block(
+    processor: &Processor,
+    block: &ProcessBlock,
+    reference_pos: (i32, i32, i32),
+    level: &impl ProcessorLevel,
+) -> Option<ProcessBlock> {
+    match processor {
+        Processor::BlockRot {
+            integrity,
+            rottable_blocks,
+        } => {
+            // 官方 `(!rottable.isPresent() || state.is(rottable)) && !(nextFloat() <= integrity)`
+            // 才返回 null；不在集合里时**不取随机数**。
+            // Vanilla returns null only on that branch, and the roll is drawn only then.
+            let in_set = match rottable_blocks {
+                None => true,
+                Some(set) => level.in_block_set(&block.state, set),
+            };
+            if !in_set {
+                return Some(block.clone());
+            }
+            let random = position_random(block.world_pos);
+            if random.next_float() <= *integrity {
+                Some(block.clone())
+            } else {
+                None
+            }
+        }
+        Processor::Rule { rules } => {
+            // 每个方块一个随机源，整条规则链共用（官方在同一函数里只建一次）。
+            // One source per block, shared by the whole rule chain (vanilla builds it once).
+            let random = position_random(block.world_pos);
+            for rule in rules {
+                if rule_matches(rule, block, reference_pos, level, &random) {
+                    let mut out = block.clone();
+                    out.state = rule.output_state.clone();
+                    return Some(out);
+                }
+            }
+            Some(block.clone())
+        }
+        Processor::ProtectedBlocks { value } => {
+            // 官方读的是**世界**该位置的方块，不是模板里的方块。
+            // Vanilla reads the world state at that position, not the template block.
+            if level.in_block_set(&level.block_state(block.world_pos), value) {
+                None
+            } else {
+                Some(block.clone())
+            }
+        }
+        // `CappedProcessor.processBlock` 是空实现，它只在 `finalizeProcessing` 里干活。
+        // `CappedProcessor.processBlock` is a no-op; it only works in `finalizeProcessing`.
+        Processor::Capped { .. } => Some(block.clone()),
+    }
+}
+
+/// `StructureTemplate.processBlockInfos` 的编排：逐方块跑 processor 链，再跑
+/// `finalizeProcessing`。
+///
+/// The `StructureTemplate.processBlockInfos` orchestration: run the processor chain per
+/// block, then `finalizeProcessing`.
+pub fn process_blocks(
+    processors: &[Processor],
+    blocks: &[ProcessBlock],
+    piece_position: (i32, i32, i32),
+    reference_pos: (i32, i32, i32),
+    level: &impl ProcessorLevel,
+    level_seed: i64,
+) -> Vec<ProcessBlock> {
+    let mut originals = Vec::new();
+    let mut processed = Vec::new();
+    for block in blocks {
+        let mut current = Some(block.clone());
+        for processor in processors {
+            let Some(block_now) = current else {
+                break;
+            };
+            current = process_block(processor, &block_now, reference_pos, level);
+        }
+        if let Some(block_now) = current {
+            originals.push(block.clone());
+            processed.push(block_now);
+        }
+    }
+    for processor in processors {
+        if let Processor::Capped { delegate, limit } = processor {
+            processed = finalize_capped(CappedInput {
+                delegate,
+                limit: *limit,
+                originals: &originals,
+                processed,
+                piece_position,
+                reference_pos,
+                level,
+                level_seed,
+            });
+        }
+    }
+    processed
+}
+
+/// `finalize_capped` 的输入，避免参数过多。
+///
+/// Inputs of `finalize_capped`, kept in one place to avoid a long argument list.
+struct CappedInput<'a, L> {
+    delegate: &'a Processor,
+    limit: i32,
+    originals: &'a [ProcessBlock],
+    processed: Vec<ProcessBlock>,
+    piece_position: (i32, i32, i32),
+    reference_pos: (i32, i32, i32),
+    level: &'a L,
+    level_seed: i64,
+}
+
+/// `CappedProcessor.finalizeProcessing`：用位置派生的随机源挑下标，最多改 `limit` 个。
+///
+/// `CappedProcessor.finalizeProcessing`: picks indices with the position-derived source and
+/// alters at most `limit` blocks.
+fn finalize_capped<L: ProcessorLevel>(input: CappedInput<'_, L>) -> Vec<ProcessBlock> {
+    let CappedInput {
+        delegate,
+        limit,
+        originals,
+        mut processed,
+        piece_position,
+        reference_pos,
+        level,
+        level_seed,
+    } = input;
+    // `if (limit.maxInclusive() != 0 && !list.isEmpty())`，且两份列表长度必须相同。
+    // Vanilla also requires both lists to have the same length.
+    if limit == 0 || processed.is_empty() || originals.len() != processed.len() {
+        return processed;
+    }
+    // `RandomSource.createThreadLocalInstance(levelSeed).forkPositional().at(position)`：
+    // 先 fork 位置工厂再按结构件位置取随机源。
+    // `RandomSource.createThreadLocalInstance(levelSeed).forkPositional().at(position)`:
+    // fork the positional factory from the level seed, then position it at the piece.
+    let random = Random::Legacy(LegacyRandom::new(level_seed))
+        .fork_positional()
+        .at(piece_position.0, piece_position.1, piece_position.2);
+    let max_to_replace = limit.min(processed.len() as i32);
+    if max_to_replace < 1 {
+        return processed;
+    }
+    // `Util.toShuffledList(IntStream.range(0, size), random)`。
+    // `Util.toShuffledList(IntStream.range(0, size), random)`.
+    let mut indices: Vec<usize> = (0..processed.len()).collect();
+    shuffle(&mut indices, &random);
+    let mut replaced = 0;
+    for index in indices {
+        if replaced >= max_to_replace {
+            break;
+        }
+        // 官方传 `originalBlockInfo.pos()` 作为 `templateRelativePos`，处理的是
+        // `processedBlockInfoList.get(index)`。
+        // Vanilla passes `originalBlockInfo.pos()` as `templateRelativePos` while processing
+        // `processedBlockInfoList.get(index)`.
+        if let Some(altered) = process_block(delegate, &processed[index], reference_pos, level)
+            && altered != processed[index]
+        {
+            replaced += 1;
+            processed[index] = altered;
+        }
+    }
+    processed
+}
+
+/// `Util.shuffle(list, random)`：从尾部往前的 Fisher-Yates（与
+/// `rotation::shuffle` 同一条，但作用于 `Random` 而不是 `WorldgenRandom`）。
+///
+/// `Util.shuffle(list, random)`: back-to-front Fisher-Yates, the same algorithm as
+/// `rotation::shuffle` but over a plain `Random`.
+fn shuffle<T>(items: &mut [T], random: &Random) {
+    for i in (2..=items.len()).rev() {
+        let swap_to = random.next_int(i as i32) as usize;
+        items.swap(i - 1, swap_to);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::structure::processor::{
+        BlockStateSpec, PosRuleTest, ProcessorRule, RuleBlockEntityModifier,
+    };
+
+    /// 所有位置都返回同一个状态的假世界，标签走显式名字列表。
+    ///
+    /// A fake level returning one state everywhere; tags go through an explicit name list.
+    struct OneState {
+        state: BlockStateSpec,
+        tag_blocks: Vec<&'static str>,
+    }
+
+    impl ProcessorLevel for OneState {
+        fn block_state(&self, _pos: (i32, i32, i32)) -> BlockStateSpec {
+            self.state.clone()
+        }
+
+        fn in_block_set(&self, state: &BlockStateSpec, set: &BlockSetRef) -> bool {
+            match set {
+                BlockSetRef::Blocks(names) => names.contains(&state.name),
+                BlockSetRef::Tag(_) => self.tag_blocks.contains(&state.name.as_str()),
+            }
+        }
+    }
+
+    fn state(name: &str) -> BlockStateSpec {
+        BlockStateSpec::parse_str(name).unwrap()
+    }
+
+    fn block(pos: (i32, i32, i32), name: &str) -> ProcessBlock {
+        ProcessBlock {
+            pos,
+            world_pos: pos,
+            state: state(name),
+        }
+    }
+
+    /// `block_rot` 在 `nextFloat() <= integrity` 时保留，否则丢弃；不在 `rottable_blocks`
+    /// 里的方块直接保留且**不取**随机数。
+    ///
+    /// `block_rot` keeps a block when `nextFloat() <= integrity`; a block outside
+    /// `rottable_blocks` is kept without drawing at all.
+    #[test]
+    fn block_rot_keeps_high_integrity_and_skips_untracked_blocks() {
+        let level = OneState {
+            state: state("minecraft:air"),
+            tag_blocks: Vec::new(),
+        };
+        // `(0,64,0)` 的 `Mth.getSeed` 派生随机源首个 `nextFloat` 是 0.9703。
+        // The first `nextFloat` of the `(0,64,0)` position source is 0.9703.
+        let processor = Processor::BlockRot {
+            integrity: 0.99,
+            rottable_blocks: None,
+        };
+        assert!(
+            process_block(
+                &processor,
+                &block((0, 64, 0), "minecraft:stone"),
+                (0, 64, 0),
+                &level
+            )
+            .is_some()
+        );
+        let processor = Processor::BlockRot {
+            integrity: 0.95,
+            rottable_blocks: None,
+        };
+        assert!(
+            process_block(
+                &processor,
+                &block((0, 64, 0), "minecraft:stone"),
+                (0, 64, 0),
+                &level
+            )
+            .is_none()
+        );
+
+        // 不在 `rottable_blocks` 里：无论 integrity 多低都保留（且不取随机数）。
+        // Outside `rottable_blocks`: kept whatever the integrity, and nothing is drawn.
+        let processor = Processor::BlockRot {
+            integrity: 0.0,
+            rottable_blocks: Some(BlockSetRef::Blocks(vec![
+                "minecraft:deepslate_bricks".to_owned(),
+            ])),
+        };
+        assert!(
+            process_block(
+                &processor,
+                &block((0, 64, 0), "minecraft:stone"),
+                (0, 64, 0),
+                &level
+            )
+            .is_some()
+        );
+        assert!(
+            process_block(
+                &processor,
+                &block((0, 64, 0), "minecraft:deepslate_bricks"),
+                (0, 64, 0),
+                &level
+            )
+            .is_none()
+        );
+    }
+
+    /// `rule` 只应用第一条命中的规则，并把状态换成 `output_state`。
+    ///
+    /// `rule` applies only the first matching rule and replaces the state with
+    /// `output_state`.
+    #[test]
+    fn rule_applies_only_the_first_match() {
+        let level = OneState {
+            state: state("minecraft:air"),
+            tag_blocks: Vec::new(),
+        };
+        let rules = vec![
+            ProcessorRule {
+                input_predicate: RuleTest::BlockMatch {
+                    block: "minecraft:stone".to_owned(),
+                },
+                location_predicate: RuleTest::AlwaysTrue,
+                position_predicate: PosRuleTest::AlwaysTrue,
+                output_state: state("minecraft:cobblestone"),
+                block_entity_modifier: RuleBlockEntityModifier::Passthrough,
+            },
+            ProcessorRule {
+                input_predicate: RuleTest::AlwaysTrue,
+                location_predicate: RuleTest::AlwaysTrue,
+                position_predicate: PosRuleTest::AlwaysTrue,
+                output_state: state("minecraft:dirt"),
+                block_entity_modifier: RuleBlockEntityModifier::Passthrough,
+            },
+        ];
+        let processor = Processor::Rule { rules };
+        let out = process_block(
+            &processor,
+            &block((0, 64, 0), "minecraft:stone"),
+            (0, 64, 0),
+            &level,
+        )
+        .unwrap();
+        assert_eq!(out.state.name, "minecraft:cobblestone");
+    }
+
+    /// `location_predicate` 读**世界**方块，不读模板方块。
+    ///
+    /// `location_predicate` reads the world state, not the template block.
+    #[test]
+    fn location_predicate_reads_the_world() {
+        let level = OneState {
+            state: state("minecraft:stone"),
+            tag_blocks: Vec::new(),
+        };
+        let processor = Processor::Rule {
+            rules: vec![ProcessorRule {
+                input_predicate: RuleTest::AlwaysTrue,
+                // 世界是石头 -> 命中；模板是泥土也无所谓。
+                // The world is stone, so this matches even though the template is dirt.
+                location_predicate: RuleTest::BlockMatch {
+                    block: "minecraft:stone".to_owned(),
+                },
+                position_predicate: PosRuleTest::AlwaysTrue,
+                output_state: state("minecraft:gravel"),
+                block_entity_modifier: RuleBlockEntityModifier::Passthrough,
+            }],
+        };
+        let out = process_block(
+            &processor,
+            &block((0, 64, 0), "minecraft:dirt"),
+            (0, 64, 0),
+            &level,
+        )
+        .unwrap();
+        assert_eq!(out.state.name, "minecraft:gravel");
+    }
+
+    /// `protected_blocks` 只丢弃**世界**方块属于该集合的位置。
+    ///
+    /// `protected_blocks` drops only the positions whose **world** block is in the set.
+    #[test]
+    fn protected_blocks_reads_the_world() {
+        let level = OneState {
+            state: state("minecraft:bedrock"),
+            tag_blocks: Vec::new(),
+        };
+        let processor = Processor::ProtectedBlocks {
+            value: BlockSetRef::Blocks(vec!["minecraft:bedrock".to_owned()]),
+        };
+        assert!(
+            process_block(
+                &processor,
+                &block((0, 64, 0), "minecraft:stone"),
+                (0, 64, 0),
+                &level
+            )
+            .is_none()
+        );
+
+        let level = OneState {
+            state: state("minecraft:air"),
+            tag_blocks: Vec::new(),
+        };
+        assert!(
+            process_block(
+                &processor,
+                &block((0, 64, 0), "minecraft:stone"),
+                (0, 64, 0),
+                &level
+            )
+            .is_some()
+        );
+    }
+
+    /// `process_blocks` 里任一 processor 返回 `None` 就丢弃该方块，其余继续。
+    ///
+    /// In `process_blocks` any processor returning `None` drops the block; the rest run on.
+    #[test]
+    fn chain_drops_on_first_none() {
+        let level = OneState {
+            state: state("minecraft:air"),
+            tag_blocks: Vec::new(),
+        };
+        let processors = vec![
+            Processor::ProtectedBlocks {
+                value: BlockSetRef::Blocks(Vec::new()),
+            },
+            Processor::Rule {
+                rules: vec![ProcessorRule {
+                    input_predicate: RuleTest::BlockMatch {
+                        block: "minecraft:stone".to_owned(),
+                    },
+                    location_predicate: RuleTest::AlwaysTrue,
+                    position_predicate: PosRuleTest::AlwaysTrue,
+                    output_state: state("minecraft:cobblestone"),
+                    block_entity_modifier: RuleBlockEntityModifier::Passthrough,
+                }],
+            },
+        ];
+        let blocks = vec![
+            block((0, 0, 0), "minecraft:stone"),
+            block((1, 0, 0), "minecraft:dirt"),
+        ];
+        let out = process_blocks(&processors, &blocks, (0, 64, 0), (0, 64, 0), &level, 0);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].state.name, "minecraft:cobblestone");
+        assert_eq!(out[1].state.name, "minecraft:dirt");
+    }
+
+    /// `axis_aligned_linear_pos` 的距离按轴分量算：`min_dist` 以内用 `min_chance`。
+    ///
+    /// `axis_aligned_linear_pos` measures distance along the axis; inside `min_dist` the
+    /// chance is `min_chance`.
+    #[test]
+    fn axis_aligned_linear_pos_uses_the_axis_distance() {
+        let level = OneState {
+            state: state("minecraft:air"),
+            tag_blocks: Vec::new(),
+        };
+        let processor = Processor::Rule {
+            rules: vec![ProcessorRule {
+                input_predicate: RuleTest::AlwaysTrue,
+                location_predicate: RuleTest::AlwaysTrue,
+                position_predicate: PosRuleTest::AxisAlignedLinear {
+                    min_chance: 1.0,
+                    max_chance: 1.0,
+                    min_dist: 0,
+                    max_dist: 100,
+                    axis: "y".to_owned(),
+                },
+                output_state: state("minecraft:gold_block"),
+                block_entity_modifier: RuleBlockEntityModifier::Passthrough,
+            }],
+        };
+        // chance 恒 1.0，`nextFloat() <= 1.0` 总是成立，所以无论多远都命中。
+        // The chance is always 1.0, so `nextFloat() <= 1.0` always holds.
+        let far = ProcessBlock {
+            pos: (0, 0, 0),
+            world_pos: (0, 200, 0),
+            state: state("minecraft:stone"),
+        };
+        let out = process_block(&processor, &far, (0, 0, 0), &level).unwrap();
+        assert_eq!(out.state.name, "minecraft:gold_block");
+
+        // chance 恒 0.0 -> `nextFloat()` 几乎不会等于 0，所以不命中。
+        // The chance is 0.0, so `nextFloat()` almost never equals 0 and nothing matches.
+        let processor = Processor::Rule {
+            rules: vec![ProcessorRule {
+                input_predicate: RuleTest::AlwaysTrue,
+                location_predicate: RuleTest::AlwaysTrue,
+                position_predicate: PosRuleTest::AxisAlignedLinear {
+                    min_chance: 0.0,
+                    max_chance: 0.0,
+                    min_dist: 0,
+                    max_dist: 100,
+                    axis: "y".to_owned(),
+                },
+                output_state: state("minecraft:gold_block"),
+                block_entity_modifier: RuleBlockEntityModifier::Passthrough,
+            }],
+        };
+        let out = process_block(&processor, &far, (0, 0, 0), &level).unwrap();
+        assert_eq!(out.state.name, "minecraft:stone");
+    }
+
+    /// `capped` 最多改 `limit` 个方块，且逐块用 delegate 的效果。
+    ///
+    /// `capped` alters at most `limit` blocks using the delegate's effect.
+    #[test]
+    fn capped_respects_the_limit() {
+        let level = OneState {
+            state: state("minecraft:air"),
+            tag_blocks: Vec::new(),
+        };
+        let delegate = Processor::Rule {
+            rules: vec![ProcessorRule {
+                input_predicate: RuleTest::AlwaysTrue,
+                location_predicate: RuleTest::AlwaysTrue,
+                position_predicate: PosRuleTest::AlwaysTrue,
+                output_state: state("minecraft:gold_block"),
+                block_entity_modifier: RuleBlockEntityModifier::Passthrough,
+            }],
+        };
+        let processors = vec![Processor::Capped {
+            delegate: Box::new(delegate),
+            limit: 2,
+        }];
+        let blocks: Vec<ProcessBlock> = (0..6)
+            .map(|i| block((i, 0, 0), "minecraft:stone"))
+            .collect();
+        let out = process_blocks(&processors, &blocks, (0, 64, 0), (0, 64, 0), &level, 0);
+        let changed = out
+            .iter()
+            .filter(|b| b.state.name == "minecraft:gold_block")
+            .count();
+        assert_eq!(changed, 2);
+    }
+}
