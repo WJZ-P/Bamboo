@@ -39,6 +39,11 @@ pub enum StateProvider {
         property: String,
         values: IntProvider,
     },
+    /// `RandomBlockProvider`：从一组方块里 `nextInt(size)` 取一个，用它默认状态。
+    ///
+    /// `RandomBlockProvider`: pick one block from a set with `nextInt(size)` and use
+    /// that block's default state.
+    RandomBlock(Vec<u32>),
     /// `NoiseProvider` / `DualNoiseProvider` / `NoiseThresholdProvider`（按坐标用噪声）。
     Noise(Box<NoiseStateProvider>),
     /// `RuleBasedStateProvider`：按 `BlockPredicate` 顺序试，第一个命中且给出状态的就用它。
@@ -80,6 +85,9 @@ impl StateProvider {
                         property: object.get("property")?.as_str()?.to_owned(),
                         values: IntProvider::parse(object.get("values")?).ok()?,
                     }),
+                    "minecraft:random_block" => Some(Self::RandomBlock(parse_block_states(
+                        object.get("blocks")?,
+                    )?)),
                     "minecraft:noise" | "minecraft:dual_noise" | "minecraft:noise_threshold" => {
                         Some(Self::Noise(Box::new(NoiseStateProvider::parse(value)?)))
                     }
@@ -117,6 +125,7 @@ impl StateProvider {
             Self::Weighted { entries, .. } => entries.iter().map(|(_, state)| *state).collect(),
             Self::RandomizedInt { source, .. } => source.possible_states(),
             Self::Noise(provider) => provider.possible_states(),
+            Self::RandomBlock(states) => states.clone(),
             // fallback 缺失时官方可能返回 null，`SimpleBlockFeature.place` 直接放弃，
             // 所以只有 fallback 存在时它才是可能状态。
             // A missing fallback makes the official provider return null (the feature gives
@@ -163,6 +172,16 @@ impl StateProvider {
     ) -> Option<u32> {
         match self {
             Self::Simple(state) => Some(*state),
+            // `HolderSet.getRandomElement`：`nextInt(size)` 取一个，再用默认状态。
+            // `HolderSet.getRandomElement`: `nextInt(size)`, then the default state.
+            Self::RandomBlock(states) => {
+                if states.is_empty() {
+                    return None;
+                }
+                states
+                    .get(random.next_int(states.len() as i32) as usize)
+                    .copied()
+            }
             // `WeightedList.getRandomOrThrow`：nextInt(totalWeight) + 累计权重轮盘。
             // `WeightedList.getRandomOrThrow`: nextInt(totalWeight) + cumulative weights.
             Self::Weighted { entries, total } => {
@@ -229,6 +248,36 @@ impl StateProvider {
             },
         }
     }
+}
+
+/// `HolderSet<Block>` 展开成每个方块的默认状态 ID：方块名、`#tag`，或它们的数组。
+///
+/// Expand a `HolderSet<Block>` into the default state IDs: a block name, a `#tag`, or
+/// an array of them.
+fn parse_block_states(value: &Value) -> Option<Vec<u32>> {
+    let mut out = Vec::new();
+    match value {
+        Value::String(name) => push_block_state(name, &mut out)?,
+        Value::Array(items) => {
+            for item in items {
+                push_block_state(item.as_str()?, &mut out)?;
+            }
+        }
+        _ => return None,
+    }
+    Some(out)
+}
+
+fn push_block_state(name: &str, out: &mut Vec<u32>) -> Option<()> {
+    if let Some(tag) = name.strip_prefix('#') {
+        for id in mc_bamboo_data::block_tag(tag)? {
+            let index = usize::try_from(*id).ok()?;
+            out.push(mc_bamboo_data::blocks::BLOCKS.get(index)?.default_state);
+        }
+    } else {
+        out.push(mc_bamboo_data::block_by_name(name)?.default_state);
+    }
+    Some(())
 }
 
 #[cfg(test)]
