@@ -238,6 +238,7 @@ fn measure_once(
     let ocean_floor_min = ocean_floor_min(generator, target)?;
     let cut = cut_line(ocean_floor_min);
     let view = view_of(generator, target.x, target.z)?;
+    perf::set_floors(Floors::default());
     let mut records = Vec::with_capacity(repeat);
     let mut times = Vec::with_capacity(repeat);
     for _ in 0..repeat {
@@ -282,7 +283,8 @@ fn generate_recorded(
 ) -> Result<Record, String> {
     let (cx, cz) = (target.x, target.z);
     let min_y = generator.settings().min_y;
-    perf::set_floors(Floors::default());
+    // 不改调用方设好的实验下界：切割线对照实验靠它切掉深层。
+    // Keep the caller's experimental floors: the cut-line comparison relies on them.
     perf::begin(min_y, cut, Phase::Biomes);
     let region = generator.biome_region(cx, cz)?;
     perf::mark(Phase::TerrainSetup);
@@ -949,13 +951,15 @@ fn step_name(step: usize) -> &'static str {
 ///
 /// 完整生成和半成品交替跑（同一次循环里各跑一遍），两边都取**最小值**：机器上有别的
 /// 负载，抖动只会把时间推高，交替跑还能让两边看到相近的负载。每个区块各算自己的比例，
-/// 再按群系取中位数。同时打印两边的绝对耗时。
+/// 再按群系取中位数。除了整块比例，还给出**逐阶段的绝对耗时**，因为光照和组装里有一部分
+/// 工作（装 3×3 视图、重打包调色板）不受切割线影响，只看整块比例会把这个掩盖掉。
 ///
 /// The "only above the cut line" comparison at margins 16 / 24 / 32 / 48. The full and
 /// the partial generation alternate inside the loop and both use the **minimum**: other
 /// load only pushes timings up, and alternating makes both see similar load. Each chunk
-/// contributes its own ratio, then the per-biome median is taken. Both absolute times are
-/// printed too.
+/// contributes its own ratio, then the per-biome median is taken. Per-phase absolute
+/// times are printed too: part of the light and assembly work (converting the 3x3 view,
+/// repacking palettes) is independent of the cut line, and a whole-chunk ratio hides it.
 fn measure_cut_lines(
     worldgen: &Worldgen,
     targets: &[Target],
@@ -969,13 +973,14 @@ fn measure_cut_lines(
             biomes.push(target.biome);
         }
     }
-    let mut absolute: BTreeMap<i32, Vec<(f64, f64)>> = BTreeMap::new();
-    let mut table: BTreeMap<i32, Vec<(&'static str, f64)>> = BTreeMap::new();
+    let mut ratios: BTreeMap<i32, Vec<(&'static str, f64)>> = BTreeMap::new();
+    let mut per_phase: BTreeMap<i32, BTreeMap<usize, (Vec<f64>, Vec<f64>)>> = BTreeMap::new();
+    let mut totals: BTreeMap<i32, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
     for margin in [16, 24, 32, 48] {
         for (target, item) in targets.iter().zip(measured) {
             let generator = Generator::new(worldgen, target.seed)?;
-            let cut = (item.ocean_floor_min - margin).div_euclid(16) * 16;
             let view = view_of(&generator, target.x, target.z)?;
+            let cut = (item.ocean_floor_min - margin).div_euclid(16) * 16;
             let floors = Floors {
                 noise: Some(cut),
                 surface: Some(cut),
@@ -984,25 +989,49 @@ fn measure_cut_lines(
             };
             let mut full = f64::MAX;
             let mut partial = f64::MAX;
+            let mut full_record: Option<Record> = None;
+            let mut partial_record: Option<Record> = None;
             for _ in 0..repeat {
                 perf::set_floors(Floors::default());
                 let start = Instant::now();
                 let record = generate_recorded(&generator, *target, item.cut, &view)?;
-                full = full.min(start.elapsed().as_secs_f64() * 1000.0);
-                black_box(&record);
+                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                if elapsed < full {
+                    full = elapsed;
+                    full_record = Some(record);
+                }
 
                 perf::set_floors(floors);
                 let start = Instant::now();
                 let record = generate_recorded(&generator, *target, cut, &view)?;
-                partial = partial.min(start.elapsed().as_secs_f64() * 1000.0);
-                black_box(&record);
+                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                if elapsed < partial {
+                    partial = elapsed;
+                    partial_record = Some(record);
+                }
             }
             perf::set_floors(Floors::default());
-            table
+            ratios
                 .entry(margin)
                 .or_default()
                 .push((target.biome, partial / full.max(0.001) * 100.0));
-            absolute.entry(margin).or_default().push((full, partial));
+            let (full_record, partial_record) = match (full_record, partial_record) {
+                (Some(full), Some(partial)) => (full, partial),
+                _ => continue,
+            };
+            let phases = per_phase.entry(margin).or_default();
+            for phase in Phase::ALL {
+                let entry = phases
+                    .entry(phase.index())
+                    .or_insert_with(|| (Vec::new(), Vec::new()));
+                entry.0.push(full_record.phases_ms[phase.index()]);
+                entry.1.push(partial_record.phases_ms[phase.index()]);
+            }
+            let entry = totals
+                .entry(margin)
+                .or_insert_with(|| (Vec::new(), Vec::new()));
+            entry.0.push(full);
+            entry.1.push(partial);
         }
     }
 
@@ -1010,14 +1039,14 @@ fn measure_cut_lines(
     for biome in &biomes {
         print!(" {} |", biome.replace("minecraft:", ""));
     }
-    println!(" 总体 | 完整 ms | 半成品 ms |");
+    println!(" 总体 |");
     print!("|---|");
     for _ in 0..biomes.len() {
         print!("---|");
     }
-    println!("---|---|---|");
+    println!("---|");
     for margin in [16, 24, 32, 48] {
-        let rows = table.get(&margin).cloned().unwrap_or_default();
+        let rows = ratios.get(&margin).cloned().unwrap_or_default();
         print!("| {margin} |");
         for biome in &biomes {
             let values: Vec<f64> = rows
@@ -1028,15 +1057,29 @@ fn measure_cut_lines(
             print!(" {:.1}% |", stats(&values).1);
         }
         let all: Vec<f64> = rows.iter().map(|(_, ratio)| *ratio).collect();
-        let pairs = absolute.get(&margin).cloned().unwrap_or_default();
-        let fulls: Vec<f64> = pairs.iter().map(|(full, _)| *full).collect();
-        let partials: Vec<f64> = pairs.iter().map(|(_, partial)| *partial).collect();
-        println!(
-            " {:.1}% | {:.1} | {:.1} |",
-            stats(&all).1,
-            stats(&fulls).1,
-            stats(&partials).1
-        );
+        println!(" {:.1}% |", stats(&all).1);
+    }
+
+    println!("\n### 逐阶段的绝对耗时（中位数 ms/区块，完整 → 半成品）\n");
+    print!("| 余量 |");
+    for phase in Phase::ALL {
+        print!(" {} |", phase.name());
+    }
+    println!(" 整块 |");
+    print!("|---|");
+    for _ in Phase::ALL {
+        print!("---|");
+    }
+    println!("---|");
+    for margin in [16, 24, 32, 48] {
+        let phases = per_phase.get(&margin).cloned().unwrap_or_default();
+        print!("| {margin} |");
+        for phase in Phase::ALL {
+            let entry = phases.get(&phase.index()).cloned().unwrap_or_default();
+            print!(" {:.2}→{:.2} |", stats(&entry.0).1, stats(&entry.1).1);
+        }
+        let entry = totals.get(&margin).cloned().unwrap_or_default();
+        println!(" {:.1}→{:.1} |", stats(&entry.0).1, stats(&entry.1).1);
     }
     Ok(())
 }
@@ -1138,6 +1181,7 @@ fn measure_threads(
         views.push(view_of(&generator, target.x, target.z)?);
     }
     let mut single = Vec::new();
+    perf::set_floors(Floors::default());
     for _ in 0..repeat {
         let start = Instant::now();
         for (target, view) in targets.iter().zip(&views) {
@@ -1163,6 +1207,9 @@ fn measure_threads(
                 scope.spawn(move || {
                     let worldgen = Worldgen::load().expect("worldgen data");
                     let generator = Generator::new(&worldgen, batch[0].seed).expect("generator");
+                    // 下界是按线程存的，每个工作线程自己设一遍。
+                    // The floors are thread-local, so every worker sets its own.
+                    perf::set_floors(Floors::default());
                     loop {
                         let index = next.fetch_add(1, Ordering::Relaxed);
                         let Some(target) = batch.get(index).copied() else {

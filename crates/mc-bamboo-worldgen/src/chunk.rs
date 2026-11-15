@@ -433,12 +433,12 @@ impl<'a> Generator<'a> {
 
         crate::perf::mark(crate::perf::Phase::Substance);
         let mut layers = vec![vec![self.empty; 256]; height as usize];
-        // 切割线以下不生成：按默认方块填满（只为让下游阶段有东西可读，不代表官方结果）。
-        // Below the cut line nothing is generated: fill with the default block so later
-        // stages have something to read (this is not the vanilla result).
-        for layer in layers.iter_mut().take((density_min_y - min_y) as usize) {
-            layer.fill(self.default_block);
-        }
+        // 切割线以下不生成：留成空气。下游阶段（地表规则、雕刻器、地物、光照）都按"这里
+        // 什么都没有"处理，和"深层还没生成"的语义一致；这也是测量对照实验想要的成本。
+        // Below the cut line nothing is generated: the layers stay air, so later stages
+        // (surface rules, carvers, features, light) treat that volume as empty, matching
+        // "the deep part has not been generated yet". That is the cost the measurement
+        // experiment is after.
         for z in 0..16 {
             let block_z = chunk_z * 16 + z;
             for x in 0..16 {
