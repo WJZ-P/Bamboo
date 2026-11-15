@@ -143,12 +143,18 @@ impl<'a> Generator<'a> {
             .get("density_function")
             .and_then(Value::as_object)
             .ok_or("missing density_function")?;
+        let material_rule = raw
+            .get("material_rule")
+            .and_then(Value::as_str)
+            .ok_or("noise settings has no material_rule")?
+            .to_owned();
         let material = MaterialRules::compile(
             worldgen.raw(),
             raw_functions,
             worldgen.noises(),
             worldgen.functions(),
             &mut compiler,
+            &material_rule,
         )
         .map_err(|error| format!("material rules: {error}"))?;
         let carvers =

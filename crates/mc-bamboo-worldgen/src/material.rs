@@ -215,6 +215,7 @@ impl MaterialRules {
         noises: &NoiseRegistry,
         functions: &FunctionRegistry,
         compiler: &mut Compiler,
+        material_rule: &str,
     ) -> Result<Self, String> {
         let rules = object(root, "material_rule")?;
         let conditions = object(root, "material_condition")?;
@@ -233,7 +234,7 @@ impl MaterialRules {
         let mut noise_map = HashMap::new();
         let mut visited = HashSet::new();
         let tree = parse_rule(
-            &Value::String("minecraft:overworld".to_owned()),
+            &Value::String(material_rule.to_owned()),
             rules,
             conditions,
             raw_functions,

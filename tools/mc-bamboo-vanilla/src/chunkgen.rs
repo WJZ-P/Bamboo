@@ -746,7 +746,7 @@ impl Report<'_> {
                 if want != have {
                     self.mismatch(format!(
                         "features seed {seed} chunk ({x},{z}) ({dx},{dz}) y {} x {} z {}: official {want}, bamboo {have}",
-                        position as i32 / 256 - 64,
+                        position as i32 / 256 + self.min_y,
                         (position % 256) / 16,
                         position % 16
                     ));
