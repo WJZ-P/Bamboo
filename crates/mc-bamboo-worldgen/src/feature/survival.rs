@@ -430,6 +430,17 @@ fn classify(state: u32) -> Option<Kind> {
         // `RootedDirtBlock` 只实现 `BonemealableBlock`，不覆写 `canSurvive`。
         // `RootedDirtBlock` only implements `BonemealableBlock` and keeps the default.
         | BlockClass::RootedDirtBlock => Kind::Default,
+        // 珊瑚块继承 `Block`，`canSurvive` 恒 true。
+        // Coral blocks extend `Block`, so `canSurvive` is always true.
+        BlockClass::CoralBlock => Kind::Default,
+        // 珊瑚植物（`BaseCoralPlantTypeBlock`）的 `canSurvive` 是「下面 `isFaceSturdy(UP)`」。
+        // Coral plants (`BaseCoralPlantTypeBlock`) require `isFaceSturdy(UP)` below.
+        BlockClass::BaseCoralPlantBlock
+        | BlockClass::BaseCoralFanBlock
+        | BlockClass::BaseCoralWallFanBlock
+        | BlockClass::CoralPlantBlock
+        | BlockClass::CoralFanBlock
+        | BlockClass::CoralWallFanBlock => Kind::SturdyFaceUp,
         // 直接继承 VegetationBlock、不覆写 canSurvive 的类，标签判定。
         // Classes extending VegetationBlock without overriding canSurvive: a tag check.
         BlockClass::BushBlock

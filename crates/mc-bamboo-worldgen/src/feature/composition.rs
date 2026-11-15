@@ -260,6 +260,16 @@ fn place_feature<'a>(
         };
         return claw.place(registry, world, env, random, pos);
     }
+    // `NoOpFeature`：`MapCodec.unit`，`place` 恒返回 true、不取随机数、不写方块。
+    //
+    // `NoOpFeature`: a unit codec whose `place` returns true without drawing random or
+    // writing blocks.
+    if kind == "minecraft:no_op" {
+        return PlaceOutcome {
+            supported: true,
+            placed: true,
+        };
+    }
     let Some(comp) = Composition::parse(kind, config) else {
         return PlaceOutcome::unsupported();
     };
