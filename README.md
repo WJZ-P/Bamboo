@@ -570,6 +570,9 @@ WebView2 的渲染进程不算在内。
     **3 处不一致**（种子 42 的 `1x2_a1` 一个 `ChestSouth` 数据标记）。
     `after_place`（往下填圆石）已移植但没接进对拍。`state_transform` 顺手补齐了楼梯 /
     柱状方块 / 墙 / 藤蔓 / 栅栏门 / 箱子等方块的 mirror / rotate。
+    `LiquidSettings` 的流体回填（写入前取流体 → `placeLiquid` 进含水方块 → 相邻源回填
+    循环）和拼图方块替换（`filterBlocks(..., JIGSAW)` → `final_state`）也已补上；
+    府邸模板里没有触发条件，所以这两项**未与官方对拍**。
   已知限制：以上全是纯函数 + oracle，**放置一律没接进 Director**，游戏里还没有结构；
   布局函数里恶地的 `surfaceHeight` / 府邸的 `startY` 在对拍中仍作为外部输入喂入
   （前置判定模块已用 `Generator` 的高度原语算出并喂给布局）；jigsaw 与其余旧式结构的

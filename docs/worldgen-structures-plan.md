@@ -362,10 +362,21 @@ Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_heigh
   `Rot=COUNTERCLOCKWISE_90`）在 (35, 64, 12) 有一个 `ChestSouth` 数据标记，模板里那一格
   是 `structure_block`（被 `BlockIgnoreProcessor.STRUCTURE_BLOCK` 丢弃）。Rust 于是按
   `createChest` 写入 `CHEST` + 一次 `nextLong()`，Java 对拍里没有这个方块。
-  已确认：两边结构件清单逐字节相同；Java 侧该结构件在区块 (2,0) 确实跑了
-  `postProcess`、`chunkBB.isInside(35,64,12)` 为 true、该格只有一个模板方块
-  （`structure_block`）；所以官方 `createChest` 的 `!getBlockState(pos).is(CHEST)`
-  在这里应当成立并写入，但 Java 输出里没有。原因未查清，列入汇报疑点。
+  已确认（第二轮复查）：两边结构件清单逐字节相同；Java 侧该结构件在区块 (2,0) 确实跑了
+  `postProcess`；`chunkBB` 是 `[32,-64,0]..[47,319,15]`，`isInside(35,64,12)` 为 true；
+  `filterBlocks(..., STRUCTURE_BLOCK)` 返回该标记，NBT 是
+  `mode:"DATA", metadata:"ChestSouth"`；该格 `getBlockState` 是 air；
+  `TemplateStructurePiece.postProcess` 正常返回（无异常、`A` 计数不变）。
+  但 Java 侧 31 次 `Blocks.CHEST` 的 `setBlock` 里没有 (35,64,12)，所以
+  `StructurePiece.createChest` 一定在某处提前返回了，而三处条件我都验证成立。
+  **原因仍未查清**，列入汇报疑点 1。
+* **`LiquidSettings` 的流体回填已补**（第二轮）：`template_place::place_blocks` 在写入前
+  取该格流体，写完按官方逻辑把旧流体 `placeLiquid` 进含水方块、非源流体进 `toFill`，
+  再跑 `[UP, NORTH, EAST, SOUTH, WEST]` 的相邻源回填循环（`lockedFluids` 跳过）。
+  府邸模板没有位于流体中的含水方块，所以这 36 个查询里没有触发，**未与官方对拍**。
+* **拼图方块替换已补**（第二轮）：`template_place::replace_jigsaws` 按
+  `filterBlocks(..., JIGSAW)` 取 `final_state`、用 `parse_block_state` 解析后写回，
+  接在 `place_piece` 的数据标记循环之后。府邸模板没有拼图方块，所以**未触发**。
 
 * **没接进 Director**：这些代码只被 oracle 调用，游戏里仍然没有结构。
 
