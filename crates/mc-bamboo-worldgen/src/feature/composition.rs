@@ -93,6 +93,14 @@ enum Composition<'a> {
     Sequence {
         features: Vec<Child<'a>>,
     },
+    /// `OverlayFeature`：对每个子 `PlacedFeature` 依次 `place`，
+    /// `placedAny |= placer.place(...)`（不短路，全部都要跑）。
+    ///
+    /// `OverlayFeature`: place every child `PlacedFeature` in turn,
+    /// `placedAny |= placer.place(...)` (no short-circuit; all of them run).
+    Overlay {
+        features: Vec<Child<'a>>,
+    },
 }
 
 impl<'a> Composition<'a> {
@@ -130,6 +138,9 @@ impl<'a> Composition<'a> {
                 features: parse_holder_set(object.get("features")?)?,
             }),
             "minecraft:sequence" => Some(Self::Sequence {
+                features: parse_holder_set(object.get("features")?)?,
+            }),
+            "minecraft:overlay" => Some(Self::Overlay {
                 features: parse_holder_set(object.get("features")?)?,
             }),
             "minecraft:random_boolean_selector" => Some(Self::RandomBooleanSelector {
@@ -278,6 +289,20 @@ fn place_composition<'a>(
                     total.placed = false;
                     break;
                 }
+            }
+            total
+        }
+        // `OverlayFeature.place`：`placedAny |= placer.place(...)`，不短路。
+        // `OverlayFeature.place`: `placedAny |= placer.place(...)`, no short-circuit.
+        Composition::Overlay { features } => {
+            let mut total = PlaceOutcome {
+                supported: true,
+                placed: false,
+            };
+            for child in features {
+                let outcome = place_child(child, registry, world, env, random, pos);
+                total.supported &= outcome.supported;
+                total.placed |= outcome.placed;
             }
             total
         }

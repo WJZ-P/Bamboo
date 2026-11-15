@@ -45,6 +45,16 @@ pub enum BlockPredicate {
     InsideWorldBounds {
         offset: [i32; 3],
     },
+    /// `VolumeMatchPredicate`：`min..=max` 这个长方体里的每一格都要过 `match`
+    /// （遍历顺序 x → z → y，和官方一致）。
+    ///
+    /// `VolumeMatchPredicate`: every cell of the `min..=max` box must satisfy `match`
+    /// (iteration order x → z → y, matching the official loop nesting).
+    VolumeMatch {
+        min: [i32; 3],
+        max: [i32; 3],
+        inner: Box<BlockPredicate>,
+    },
     /// `WouldSurvivePredicate`：`state.canSurvive(level, origin+offset)`。
     WouldSurvive {
         offset: [i32; 3],
@@ -103,6 +113,20 @@ impl BlockPredicate {
             "minecraft:solid" => Self::Solid { offset },
             "minecraft:true" => Self::True,
             "minecraft:inside_world_bounds" => Self::InsideWorldBounds { offset },
+            "minecraft:volume_match" => {
+                let (Some(min), Some(max), Some(inner)) = (
+                    object.get("min").and_then(parse_offset_value),
+                    object.get("max").and_then(parse_offset_value),
+                    object.get("match").map(Self::parse),
+                ) else {
+                    return Self::Unsupported;
+                };
+                Self::VolumeMatch {
+                    min,
+                    max,
+                    inner: Box::new(inner),
+                }
+            }
             // `state.canSurvive`；存活判定未移植的方块仍标 unsupported。
             // `state.canSurvive`; a state whose survival check is unported stays unsupported.
             "minecraft:would_survive" => {
@@ -142,6 +166,7 @@ impl BlockPredicate {
             Self::Unsupported => false,
             Self::AllOf(list) | Self::AnyOf(list) => list.iter().all(Self::is_supported),
             Self::Not(inner) => inner.is_supported(),
+            Self::VolumeMatch { inner, .. } => inner.is_supported(),
             Self::WouldSurvive { state, .. } => survival::supports(*state),
             _ => true,
         }
@@ -171,6 +196,23 @@ impl BlockPredicate {
             // `level.isInsideBuildHeight(origin.offset(offset))`。
             // `level.isInsideBuildHeight(origin.offset(offset))`.
             Self::InsideWorldBounds { offset } => world.is_inside_build_height(pos.1 + offset[1]),
+            // `VolumeMatchPredicate.test`：x → z → y 三层循环，任一格不中即假。
+            // `VolumeMatchPredicate.test`: nested x → z → y loops; one miss fails.
+            Self::VolumeMatch { min, max, inner } => {
+                let mut ok = true;
+                'outer: for dx in min[0]..=max[0] {
+                    for dz in min[2]..=max[2] {
+                        for dy in min[1]..=max[1] {
+                            let probe = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+                            if !inner.test(world, probe) {
+                                ok = false;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+                ok
+            }
             // `state.canSurvive(level, origin+offset)`。
             Self::WouldSurvive { offset, state } => survival::can_survive(
                 *state,
@@ -220,6 +262,21 @@ fn parse_offset(value: Option<&Value>) -> [i32; 3] {
         result[index] = item.as_i64().unwrap_or(0) as i32;
     }
     result
+}
+
+/// `Vec3i.offsetCodec(16)`：必须有恰好三项的整数数组。
+///
+/// `Vec3i.offsetCodec(16)`: requires an exactly-three-element integer array.
+fn parse_offset_value(value: &Value) -> Option<[i32; 3]> {
+    let array = value.as_array()?;
+    if array.len() != 3 {
+        return None;
+    }
+    let mut result = [0; 3];
+    for (index, item) in array.iter().enumerate() {
+        result[index] = item.as_i64()? as i32;
+    }
+    Some(result)
 }
 
 /// `HolderSet<Block>`：单个方块名、`#tag`，或它们的数组。名字解析成方块注册表 ID。

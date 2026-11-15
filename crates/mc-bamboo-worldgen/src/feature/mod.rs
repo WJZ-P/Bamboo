@@ -37,6 +37,7 @@ pub mod spring;
 pub mod state;
 pub mod state_provider;
 pub mod survival;
+pub mod template_feature;
 pub mod tree;
 pub mod underwater_magma;
 pub mod world;
