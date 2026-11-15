@@ -192,6 +192,7 @@ pub fn place_processed(
     chunk_bb: crate::structure::BoundingBox,
     mirror: u32,
     rotation: u32,
+    random: &crate::random::Random,
     world: &mut impl BlockWriter,
 ) -> Result<PlacedBlocks, String> {
     let mut placed = PlacedBlocks::default();
@@ -236,10 +237,69 @@ pub fn place_processed(
                     max_z: bounds.max_z.max(pos.2),
                 },
             });
-            placed.placed.push((pos, block.nbt.clone()));
+            // 官方的方块实体恢复：带 nbt 时，如果这个方块实体是
+            // `RandomizableContainer`，就用 `random.nextLong()` **再取一次**覆盖
+            // `LootTableSeed`，然后才 `loadWithComponents`。这一次取数必须发生，
+            // 否则世界随机源序列与官方错开。
+            //
+            // The block-entity restore: with nbt set, a `RandomizableContainer` gets
+            // `random.nextLong()` **drawn again** to overwrite `LootTableSeed` before
+            // `loadWithComponents`. That draw must happen or the world random sequence
+            // diverges from vanilla.
+            let nbt = match &block.nbt {
+                None => None,
+                Some(tag) if is_randomizable_container(&block.state.name) => {
+                    Some(overwrite_loot_table_seed(tag, random.next_long()))
+                }
+                Some(tag) => Some(tag.clone()),
+            };
+            placed.placed.push((pos, nbt));
         }
     }
     Ok(placed)
+}
+
+/// 这个方块是不是 `RandomizableContainer`（官方实现该接口的 8 个方块实体类）。
+///
+/// Whether this block's block entity implements `RandomizableContainer` (the eight vanilla
+/// block-entity classes that do).
+pub fn is_randomizable_container(block_name: &str) -> bool {
+    use mc_bamboo_data::registries::block_entity_type as be;
+    let Some(block) = mc_bamboo_data::block_by_name(block_name) else {
+        return false;
+    };
+    let Some(kind) = block.block_entity_type else {
+        return false;
+    };
+    matches!(
+        kind,
+        be::CHEST
+            | be::TRAPPED_CHEST
+            | be::DISPENSER
+            | be::DROPPER
+            | be::HOPPER
+            | be::SHULKER_BOX
+            | be::BARREL
+            | be::DECORATED_POT
+            | be::CRAFTER
+            | be::BRUSHABLE_BLOCK
+    )
+}
+
+/// 用 `seed` 覆盖（或插入）nbt 里的 `LootTableSeed`。
+///
+/// Overwrite (or insert) `LootTableSeed` in the nbt.
+fn overwrite_loot_table_seed(tag: &mc_bamboo_nbt::Tag, seed: i64) -> mc_bamboo_nbt::Tag {
+    use mc_bamboo_nbt::Tag;
+    let mut out = tag.clone();
+    if let Tag::Compound(entries) = &mut out {
+        if let Some((_, value)) = entries.iter_mut().find(|(key, _)| key == "LootTableSeed") {
+            *value = Tag::Long(seed);
+        } else {
+            entries.push(("LootTableSeed".to_owned(), Tag::Long(seed)));
+        }
+    }
+    out
 }
 
 /// `Blocks.BARRIER.defaultBlockState()` 的状态 id。
@@ -277,6 +337,7 @@ pub fn place_piece<L: ProcessorLevel>(
     mirror: u32,
     rotation: u32,
     chunk_bb: crate::structure::BoundingBox,
+    random: &crate::random::Random,
     world: &mut impl BlockWriter,
 ) -> Result<PlacedBlocks, String> {
     // `settings.getRandomPalette(palettes, position)`：按世界位置选调色板。
@@ -304,7 +365,7 @@ pub fn place_piece<L: ProcessorLevel>(
             state: block.state,
         })
         .collect();
-    place_processed(&place, chunk_bb, mirror, rotation, world)
+    place_processed(&place, chunk_bb, mirror, rotation, random, world)
 }
 
 /// 供调试与日志用：`minecraft:x` 形式的方块名（不含属性）。
@@ -601,7 +662,15 @@ mod tests {
             accept: 3,
             calls: 0,
         };
-        let changed = place_processed(&blocks, bb, 0, 0, &mut world).unwrap();
+        let changed = place_processed(
+            &blocks,
+            bb,
+            0,
+            0,
+            &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            &mut world,
+        )
+        .unwrap();
         assert_eq!(world.calls, 5, "every block is still attempted");
         assert_eq!(changed.placed.len(), 3, "only accepted writes count");
         // 包围盒只覆盖被接受的前三个（x = 0,1,2）。
@@ -655,7 +724,15 @@ mod tests {
             })
             .collect();
         let mut world = World::default();
-        let placed = place_processed(&blocks, bb, 0, 0, &mut world).unwrap();
+        let placed = place_processed(
+            &blocks,
+            bb,
+            0,
+            0,
+            &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            &mut world,
+        )
+        .unwrap();
         assert_eq!(world.calls, 2, "the block at (5,5,5) is outside the box");
         assert_eq!(placed.placed.len(), 2);
         assert_eq!(
@@ -673,9 +750,148 @@ mod tests {
         // 空输入：不写、`bounds` 为 `None`。
         // Empty input: nothing written, `bounds` is `None`.
         let mut world = World::default();
-        let placed = place_processed(&[], bb, 0, 0, &mut world).unwrap();
+        let placed = place_processed(
+            &[],
+            bb,
+            0,
+            0,
+            &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            &mut world,
+        )
+        .unwrap();
         assert_eq!(world.calls, 0);
         assert_eq!(placed.bounds, None);
+    }
+
+    /// `is_randomizable_container` 认哪些方块：官方只有
+    /// `RandomizableContainerBlockEntity` 的子类（箱子 / 陷阱箱 / 发射器 / 投掷器 /
+    /// 漏斗 / 潜影盒 / 木桶 / 饰纹陶罐 / 合成器以及可疑的沙砾与沙子用的
+    /// `BrushableBlockEntity`）实现 `RandomizableContainer`。熔炉 / 酿造台 / 烟熏炉 /
+    /// 高炉**不是**（它们是 `AbstractFurnaceBlockEntity` / `BaseContainerBlockEntity`，
+    /// 没有实现该接口）。
+    ///
+    /// Blocks that count: only the `RandomizableContainerBlockEntity` subclasses (chest,
+    /// trapped chest, dispenser, dropper, hopper, shulker box, barrel, decorated pot,
+    /// crafter) plus `BrushableBlockEntity`. Furnaces and brewing stands are not.
+    #[test]
+    fn randomizable_containers_match_the_vanilla_set() {
+        use super::is_randomizable_container;
+        // 是随机容器的。
+        // Randomizable containers.
+        for name in [
+            "minecraft:chest",
+            "minecraft:trapped_chest",
+            "minecraft:dispenser",
+            "minecraft:dropper",
+            "minecraft:hopper",
+            "minecraft:shulker_box",
+            "minecraft:barrel",
+            "minecraft:decorated_pot",
+            "minecraft:crafter",
+            "minecraft:suspicious_sand",
+            "minecraft:suspicious_gravel",
+        ] {
+            assert!(
+                is_randomizable_container(name),
+                "{name} must be randomizable"
+            );
+        }
+        // 不是随机容器的：同一批「看着像容器」的方块，以及普通方块。
+        // Not randomizable: containers that do not implement the interface, plus plain blocks.
+        for name in [
+            "minecraft:furnace",
+            "minecraft:blast_furnace",
+            "minecraft:smoker",
+            "minecraft:brewing_stand",
+            "minecraft:ender_chest",
+            "minecraft:stone",
+            "minecraft:jigsaw",
+            "minecraft:not_a_block",
+        ] {
+            assert!(
+                !is_randomizable_container(name),
+                "{name} must not be randomizable"
+            );
+        }
+    }
+
+    /// 随机容器在放置时多取一次 `nextLong` 覆盖 `LootTableSeed`；非随机容器不取数。
+    ///
+    /// A randomizable container draws one extra `nextLong` to overwrite `LootTableSeed`;
+    /// other blocks draw nothing.
+    #[test]
+    fn placing_a_randomizable_container_draws_the_loot_seed() {
+        use super::{BlockWriter, PlaceBlock, place_processed};
+        use crate::structure::processor::BlockStateSpec;
+        use mc_bamboo_nbt::Tag;
+
+        #[derive(Default)]
+        struct World {
+            calls: usize,
+        }
+        impl BlockWriter for World {
+            fn set_block(&mut self, _x: i32, _y: i32, _z: i32, _state: u32) -> bool {
+                self.calls += 1;
+                true
+            }
+        }
+        let bb = crate::structure::BoundingBox {
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            max_x: 10,
+            max_y: 10,
+            max_z: 10,
+        };
+        let nbt = || {
+            Some(Tag::Compound(vec![(
+                "LootTable".to_owned(),
+                Tag::String("minecraft:chests/simple_dungeon".to_owned()),
+            )]))
+        };
+
+        // 箱子：`LootTableSeed` 被写入，且取了一次数。
+        // A chest: `LootTableSeed` is written and one draw happened.
+        let blocks = vec![PlaceBlock {
+            pos: (0, 0, 0),
+            state: BlockStateSpec::parse_str("minecraft:chest").unwrap(),
+            nbt: nbt(),
+        }];
+        let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(3));
+        let mut world = World::default();
+        let placed = place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        let (_, saved) = &placed.placed[0];
+        let saved = saved.as_ref().unwrap();
+        let Tag::Compound(entries) = saved else {
+            panic!("saved nbt must be a compound");
+        };
+        assert!(
+            entries
+                .iter()
+                .any(|(key, value)| key == "LootTableSeed" && matches!(value, Tag::Long(_))),
+            "a chest must get LootTableSeed"
+        );
+
+        // 石头 + nbt：不是随机容器，不写 `LootTableSeed`、不取数。
+        // Stone with nbt: not a container, so no `LootTableSeed` and no draw.
+        let blocks = vec![PlaceBlock {
+            pos: (0, 0, 0),
+            state: BlockStateSpec::parse_str("minecraft:stone").unwrap(),
+            nbt: nbt(),
+        }];
+        let mut world = World::default();
+        let placed = place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        let (_, saved) = &placed.placed[0];
+        let Tag::Compound(entries) = saved.as_ref().unwrap() else {
+            panic!("saved nbt must be a compound");
+        };
+        assert!(
+            !entries.iter().any(|(key, _)| key == "LootTableSeed"),
+            "stone must not get LootTableSeed"
+        );
+        // 两次调用的取数次数不同：第一次多取了 1 次，所以同一个 `random` 的后续值不同。
+        // The draw counts differ, so the same `random` yields a different next value.
+        let _ = random.next_long();
     }
 
     /// 完整链路：模板 → processor 链 → 写入，只写 `chunk_bb` 内的位置，且写出的状态
@@ -750,6 +966,7 @@ mod tests {
             0,
             0,
             chunk_bb,
+            &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
             &mut world,
         )
         .unwrap();

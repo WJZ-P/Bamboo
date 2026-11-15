@@ -1973,6 +1973,7 @@ fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
             mirror,
             rotation,
             bb,
+            &mc_bamboo_worldgen::random::Random::Legacy(LegacyRandom::new(0)),
             &mut recorder,
         )?;
         checked += 1;
