@@ -247,7 +247,7 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
     // 结构件上会跨 3×3 调用保留的可变状态（`hasPlacedSpider`），按 layout 下标复用。
     // Mutable per-piece state that survives the 3x3 invocations (`hasPlacedSpider`),
     // reused across chunks by layout index.
-    let mut spider_state: Vec<bool> = vec![false; layout.len()];
+    let mut piece_flags: Vec<bool> = vec![false; layout.len()];
 
     // 和 Java 侧一样逐区块调：`chunkBB` 是该区块整列盒，`random` 每区块重播。
     // Once per chunk like Java: the chunk's full column box, random reseeded per chunk.
@@ -275,7 +275,7 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
                     chunk_bb,
                     center,
                     &random,
-                    &mut spider_state,
+                    &mut piece_flags,
                 )?
                 .is_some()
                 {
@@ -321,13 +321,13 @@ fn place_piece(
     chunk_bb: [i32; 6],
     _center: (i32, i32),
     random: &mc_bamboo_worldgen::random::WorldgenRandom,
-    spider_state: &mut [bool],
+    piece_flags: &mut [bool],
 ) -> Result<Option<()>, String> {
     use mc_bamboo_worldgen::structure::pieces::mineshaft_place as place;
 
     let _ = layout;
     if kind == "stronghold" {
-        return place_stronghold_piece(piece, index, level, chunk_bb, random);
+        return place_stronghold_piece(piece, index, level, chunk_bb, random, piece_flags);
     }
 
     let shaft = if kind == "mineshaft_mesa" {
@@ -370,10 +370,10 @@ fn place_piece(
                 // 用调用方传入的表按 layout 下标复用。
                 // `hasPlacedSpider` lives on the piece and persists across the 3x3
                 // invocations; reuse the caller's table keyed by layout index.
-                has_placed_spider: spider_state[index],
+                has_placed_spider: piece_flags[index],
             };
             let truncated = place::corridor_post_process(&mut sp, random, &mut state);
-            spider_state[index] = state.has_placed_spider;
+            piece_flags[index] = state.has_placed_spider;
             // 返回 true 表示命中 1% 矿车箱子，Java 侧也在同一步截断。
             // Returning true means the 1% minecart chest hit; Java truncates at the same
             // point.
@@ -403,6 +403,7 @@ fn place_stronghold_piece(
     level: &mut FlatLevel,
     chunk_bb: [i32; 6],
     random: &mc_bamboo_worldgen::random::WorldgenRandom,
+    piece_flags: &mut [bool],
 ) -> Result<Option<()>, String> {
     use mc_bamboo_worldgen::structure::pieces::stronghold_place as sp;
 
@@ -432,8 +433,11 @@ fn place_stronghold_piece(
 
     match piece.id.as_str() {
         "minecraft:shcc" => {
-            let mut chest = false;
+            // `hasPlacedChest` 同样是结构件字段，跨 3×3 调用保留。
+            // `hasPlacedChest` is also a piece field that survives the 3x3 invocations.
+            let mut chest = piece_flags[index];
             sp::chest_corridor_post_process(&mut stronghold, random, door, &mut chest);
+            piece_flags[index] = chest;
         }
         "minecraft:shfc" => sp::filler_corridor_post_process(&mut stronghold, integer("Steps")),
         "minecraft:shs" => {
@@ -461,8 +465,11 @@ fn place_stronghold_piece(
         ),
         "minecraft:shli" => sp::library_post_process(&mut stronghold, random, door, flag("Tall")),
         "minecraft:shpr" => {
-            let mut spawner = false;
+            // `hasPlacedSpawner` 同上。
+            // `hasPlacedSpawner` likewise.
+            let mut spawner = piece_flags[index];
             sp::portal_room_post_process(&mut stronghold, random, &mut spawner);
+            piece_flags[index] = spawner;
         }
         other => return Err(format!("no stronghold postProcess for {other} ({index})")),
     }
