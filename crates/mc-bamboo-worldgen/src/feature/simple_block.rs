@@ -75,13 +75,15 @@ impl SimpleBlockFeature {
     }
 
     /// `DoublePlantBlock.placeAt(level, state, lowerPos, 2)`：先照官方检查上一格能否
-    /// 容纳上半部分，再放下 `half=lower` / `half=upper` 两格。26.3 导出的三种双格植物
-    /// （tall_grass / sunflower / large_fern）只有 `half` 属性，没有 `waterlogged`，
-    /// 所以 `copyWaterloggedFrom` 在这里是 no-op。
+    /// 容纳上半部分，再放下 `half=lower` / `half=upper` 两格。两格各自
+    /// `copyWaterloggedFrom`：状态有 `waterlogged` 属性时按该格是否有水设置，
+    /// `small_dripleaf` 就是这种情况；`tall_grass` / `sunflower` / `large_fern` 没有
+    /// 这个属性，那一步是 no-op。
     ///
-    /// `DoublePlantBlock.placeAt`: check the block above, then place `half=lower` / `half=upper`.
-    /// The three exported double plants have only a `half` property (no `waterlogged`), so
-    /// `copyWaterloggedFrom` is a no-op here.
+    /// `DoublePlantBlock.placeAt`: check the block above, then place `half=lower` /
+    /// `half=upper`. Each half runs `copyWaterloggedFrom`: a state carrying
+    /// `waterlogged` is set from whether that cell holds water (`small_dripleaf` does),
+    /// while `tall_grass` / `sunflower` / `large_fern` have no such property and skip it.
     fn place_at(&self, world: &mut FeatureWorld<'_>, pos: Pos, state: u32) -> bool {
         let (x, y, z) = pos;
         let above = world.get_block(x, y + 1, z);
@@ -97,10 +99,38 @@ impl SimpleBlockFeature {
         }
         let lower = with_property(state, "half", "lower").unwrap_or(state);
         let upper = with_property(state, "half", "upper").unwrap_or(state);
+        let lower = copy_waterlogged_from(world, (x, y, z), lower);
+        let upper = copy_waterlogged_from(world, (x, y + 1, z), upper);
         world.set_block_with_heightmaps(x, y, z, lower);
         world.set_block_with_heightmaps(x, y + 1, z, upper);
         true
     }
+}
+
+/// `DoublePlantBlock.copyWaterloggedFrom(level, pos, state)`：状态有 `waterlogged`
+/// 属性时，按该格 `getFluidState(pos).is(FluidTags.WATER)` 设置它。
+///
+/// `DoublePlantBlock.copyWaterloggedFrom(level, pos, state)`: when the state carries a
+/// `waterlogged` property, set it from `getFluidState(pos).is(FluidTags.WATER)`.
+fn copy_waterlogged_from(world: &FeatureWorld<'_>, pos: Pos, state: u32) -> u32 {
+    let water = in_water_tag(world.get_block(pos.0, pos.1, pos.2));
+    if water {
+        with_property(state, "waterlogged", "true").unwrap_or(state)
+    } else {
+        with_property(state, "waterlogged", "false").unwrap_or(state)
+    }
+}
+
+/// `FluidState.is(FluidTags.WATER)`。
+///
+/// `FluidState.is(FluidTags.WATER)`.
+fn in_water_tag(state: u32) -> bool {
+    let fluid = state_fluid(state).fluid;
+    mc_bamboo_data::tags::TAG_GROUPS[mc_bamboo_data::tags::fluid_tags::GROUP]
+        .tags
+        .iter()
+        .find(|entry| entry.name == "minecraft:water")
+        .is_some_and(|entry| entry.ids.contains(&fluid))
 }
 
 #[cfg(test)]

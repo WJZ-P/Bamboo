@@ -392,6 +392,11 @@ pub fn is_double_plant(state: u32) -> bool {
         Some(BlockClass::DoublePlantBlock)
             | Some(BlockClass::TallFlowerBlock)
             | Some(BlockClass::TallSeagrassBlock)
+            // `SmallDripleafBlock extends DoublePlantBlock`，官方
+            // `SimpleBlockFeature` 的 `instanceof` 覆盖它。
+            // `SmallDripleafBlock extends DoublePlantBlock`, so the official
+            // `SimpleBlockFeature` `instanceof` covers it.
+            | Some(BlockClass::SmallDripleafBlock)
     )
 }
 
