@@ -15,6 +15,7 @@ pub mod dispatch;
 pub mod heightmap;
 pub mod huge_mushroom;
 pub mod java_set;
+pub mod mossy_carpet;
 pub mod multiface;
 pub mod ores;
 pub mod placement;

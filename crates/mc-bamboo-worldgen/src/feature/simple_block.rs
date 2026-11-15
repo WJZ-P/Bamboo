@@ -64,6 +64,11 @@ impl SimpleBlockFeature {
         }
         if survival::is_double_plant(state) {
             self.place_at(world, pos, state)
+        } else if let Some(carpet) = super::mossy_carpet::MossyCarpet::parse(state) {
+            // `stateToPlace.getBlock() instanceof MossyCarpetBlock` →
+            // `MossyCarpetBlock.placeAt(level, origin, level.getRandom(), 2)`。
+            // `MossyCarpetBlock` goes through `placeAt` with `level.getRandom()`.
+            carpet.place_at(world, random, pos)
         } else {
             world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
             true

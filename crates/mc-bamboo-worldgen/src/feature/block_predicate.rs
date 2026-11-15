@@ -316,11 +316,11 @@ mod tests {
 
     #[test]
     fn unported_kind_marks_the_predicate_unsupported() {
-        // would_survive 的 state 若存活判定未移植（苍白苔藓地毯要邻接判定），仍标 unsupported。
-        // A would_survive with an unported survival check (pale moss carpet needs adjacency)
+        // would_survive 的 state 若存活判定未移植（大垂滴叶要形状判定），仍标 unsupported。
+        // A would_survive with an unported survival check (big dripleaf needs a shape check)
         // stays unsupported.
         let would: Value =
-            json!({"type": "minecraft:would_survive", "state": "minecraft:pale_moss_carpet"});
+            json!({"type": "minecraft:would_survive", "state": "minecraft:big_dripleaf"});
         assert!(!BlockPredicate::parse(&would).is_supported());
         // all_of 里夹一个未移植的，整体也要 unsupported。
         // An unported child makes the whole all_of unsupported.
@@ -328,7 +328,7 @@ mod tests {
             "type": "minecraft:all_of",
             "predicates": [
                 {"type": "minecraft:matching_block_tag", "tag": "minecraft:air"},
-                {"type": "minecraft:would_survive", "state": "minecraft:pale_moss_carpet"},
+                {"type": "minecraft:would_survive", "state": "minecraft:big_dripleaf"},
             ],
         });
         assert!(!BlockPredicate::parse(&all).is_supported());

@@ -77,7 +77,7 @@ impl VerticalAnchor {
 /// `IntProvider.sample(random)`: step 9 uses constant, uniform, trapezoid, and the
 /// two biased variants for `count` / `offset`. Recursive clamped / weighted_list /
 /// clamped_normal stay unsupported for now.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IntProvider {
     Constant(i32),
     Uniform {
@@ -114,6 +114,15 @@ pub enum IntProvider {
     WeightedList {
         entries: Vec<(i32, Box<IntProvider>)>,
         total: i32,
+    },
+    /// `ClampedNormalInt`：`clamp(mean + nextGaussian * deviation, min, max)`。
+    ///
+    /// `ClampedNormalInt`: `clamp(mean + nextGaussian * deviation, min, max)`.
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
+        min: i32,
+        max: i32,
     },
 }
 
@@ -190,6 +199,26 @@ impl IntProvider {
                 let total = entries.iter().map(|(weight, _)| *weight).sum();
                 Self::WeightedList { entries, total }
             }
+            // `ClampedNormalInt`：`(int) Mth.clamp(Mth.normal(random, mean, deviation),
+            // minInclusive, maxInclusive)`，`Mth.normal` 是
+            // `mean + (float) nextGaussian() * deviation`。
+            // `ClampedNormalInt`: `(int) Mth.clamp(Mth.normal(random, mean, deviation),
+            // min, max)`; `Mth.normal` is `mean + (float) nextGaussian() * deviation`.
+            "minecraft:clamped_normal" => {
+                let float = |name: &str| -> Result<f32, String> {
+                    object
+                        .get(name)
+                        .and_then(Value::as_f64)
+                        .map(|n| n as f32)
+                        .ok_or_else(|| format!("clamped_normal has no {name}"))
+                };
+                Self::ClampedNormal {
+                    mean: float("mean")?,
+                    deviation: float("deviation")?,
+                    min: integer("min_inclusive")?,
+                    max: integer("max_inclusive")?,
+                }
+            }
             _ => return Err(format!("unsupported int provider {kind}")),
         })
     }
@@ -242,6 +271,19 @@ impl IntProvider {
                     }
                 }
                 0
+            }
+            // `Mth.normal` 先取一次 `nextGaussian`（可能是缓存的那一半），再乘偏差加到均值上，
+            // 最后 `Mth.clamp` 到整数区间并截断成 int。
+            // `Mth.normal` draws one `nextGaussian` (possibly the cached half), scales by
+            // the deviation, adds the mean, then `Mth.clamp` and truncate to int.
+            Self::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => {
+                let value = *mean + random.next_gaussian() as f32 * *deviation;
+                (value.clamp(*min as f32, *max as f32)) as i32
             }
         }
     }
@@ -508,22 +550,38 @@ mod tests {
     }
 
     #[test]
-    fn weighted_list_with_nested_provider_consumes_both_draws() {
-        // `cave_vine` 高度：distribution 里是 uniform(0,2)，weight 单项为 1。
-        // nextInt(1) 仍消费一次，再 sample uniform。两个同种子源应完全一致。
-        // `cave_vine` height: distribution holds uniform(0,2), single weight 1.
-        // nextInt(1) still consumes one draw, then the uniform samples.
+    fn clamped_normal_samples_the_gaussian_and_clamps() {
+        // `ClampedNormalInt.sample` = `(int) clamp(mean + (float) nextGaussian * deviation,
+        // min, max)`。用同种子的另一个源手算一遍比对。
+        // `ClampedNormalInt.sample` = `(int) clamp(mean + (float) nextGaussian * deviation,
+        // min, max)`; replicate with a second same-seed source.
         let value: Value = serde_json::from_str(
-            r#"{"distribution":[{"data":{"min_inclusive":0,"max_inclusive":2,"type":"minecraft:uniform"},"weight":1}],"type":"minecraft:weighted_list"}"#,
+            r#"{"mean":32.5,"deviation":9.0,"min_inclusive":1,"max_inclusive":64,"type":"minecraft:clamped_normal"}"#,
         )
         .unwrap();
         let provider = IntProvider::parse(&value).unwrap();
         let a = random();
         let b = random();
         for _ in 0..1000 {
-            let _ = b.next_int(1);
-            let expected = b.next_int_between_inclusive(0, 2);
+            let expected = (32.5_f32 + b.next_gaussian() as f32 * 9.0).clamp(1.0, 64.0) as i32;
             assert_eq!(provider.sample(&a), expected);
         }
+    }
+
+    #[test]
+    fn clamped_normal_parses_the_exported_fields() {
+        let value: Value = serde_json::from_str(
+            r#"{"deviation":0.5,"max_inclusive":3,"mean":2,"min_inclusive":0,"type":"minecraft:clamped_normal"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            IntProvider::parse(&value).unwrap(),
+            IntProvider::ClampedNormal {
+                mean: 2.0,
+                deviation: 0.5,
+                min: 0,
+                max: 3
+            }
+        ));
     }
 }

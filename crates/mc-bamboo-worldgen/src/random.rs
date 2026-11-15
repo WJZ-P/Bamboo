@@ -404,6 +404,10 @@ impl PositionalFactory {
 pub struct WorldgenRandom {
     source: Random,
     count: Cell<u32>,
+    /// `MarsagliaPolarGaussian.nextNextGaussian`。
+    ///
+    /// `MarsagliaPolarGaussian.nextNextGaussian`.
+    next_gaussian: Cell<Option<f64>>,
 }
 
 impl WorldgenRandom {
@@ -411,6 +415,7 @@ impl WorldgenRandom {
         Self {
             source,
             count: Cell::new(0),
+            next_gaussian: Cell::new(None),
         }
     }
 
@@ -425,6 +430,9 @@ impl WorldgenRandom {
 
     pub fn set_seed(&self, seed: i64) {
         self.source.set_seed(seed);
+        // `MarsagliaPolarGaussian.reset()` 清掉缓存的那一半。
+        // `MarsagliaPolarGaussian.reset()` drops the cached half.
+        self.next_gaussian.set(None);
     }
 
     fn next(&self, bits: u32) -> i32 {
@@ -482,6 +490,28 @@ impl WorldgenRandom {
     /// `nextBoolean()`：`next(1)`。
     pub fn next_boolean(&self) -> bool {
         self.next(1) != 0
+    }
+
+    /// `RandomSource.nextGaussian()`：和 `LegacyRandomSource` 的默认实现一致 ——
+    /// Marsaglia 极坐标法，缓存另一半（`nextGaussian` 字段）。
+    ///
+    /// `RandomSource.nextGaussian()`: the `LegacyRandomSource` default — the Marsaglia
+    /// polar method caching the second value.
+    pub fn next_gaussian(&self) -> f64 {
+        if let Some(value) = self.next_gaussian.get() {
+            self.next_gaussian.set(None);
+            return value;
+        }
+        loop {
+            let x = 2.0 * self.next_double() - 1.0;
+            let y = 2.0 * self.next_double() - 1.0;
+            let radius_squared = x * x + y * y;
+            if radius_squared < 1.0 && radius_squared != 0.0 {
+                let multiplier = (-2.0 * radius_squared.ln() / radius_squared).sqrt();
+                self.next_gaussian.set(Some(y * multiplier));
+                return x * multiplier;
+            }
+        }
     }
 
     /// `setDecorationSeed(seed, chunkX, chunkZ)`，返回官方那个 population seed。

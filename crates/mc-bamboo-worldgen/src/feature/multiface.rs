@@ -72,9 +72,11 @@ fn has_face(state: u32, face: Direction) -> bool {
 }
 
 /// `MultifaceBlock.canAttachTo`：邻居朝回来那一面的支撑形状或碰撞形状是满的。
+/// `MossyCarpetBlock.canSupportAtFace` 也复用它。
+///
 /// `MultifaceBlock.canAttachTo`: the neighbour's support or collision shape is full
-/// toward the opposite face.
-fn can_attach_to(state: u32, face: Direction) -> bool {
+/// toward the opposite face. `MossyCarpetBlock.canSupportAtFace` reuses it.
+pub(crate) fn can_attach_to(state: u32, face: Direction) -> bool {
     let toward = face.opposite();
     mc_bamboo_blocks::shape::is_face_full(support_shape(state), toward)
         || mc_bamboo_blocks::shape::is_face_full(collision_shape(state), toward)

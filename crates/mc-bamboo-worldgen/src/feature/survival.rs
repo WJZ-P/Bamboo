@@ -56,6 +56,10 @@ enum Kind {
     /// `MushroomBlock.canSurvive`：下面 `isSolidRender`，且亮度 < 13（或下面在
     /// `overrides_mushroom_light_requirement` 里）。
     Mushroom,
+    /// 苍白苔藓地毯：下面非空气（`BASE`）或下面同类且 `BASE`。
+    ///
+    /// Pale moss carpet: the block below is not air (`BASE`), or the same block with `BASE`.
+    MossyCarpet,
     /// 悬挂的红树胎生苗：上面那格在 `supports_hanging_mangrove_propagule` 标签里。
     ///
     /// A hanging mangrove propagule: the block above is in the
@@ -98,6 +102,19 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         // `CarpetBlock.canSurvive` is `!level.isEmptyBlock(pos.below())`.
         Some(Kind::Carpet) => !is_air_block(below),
         Some(Kind::Mushroom) => mushroom_can_survive(world, pos),
+        // `MossyCarpetBlock.canSurvive`：`BASE` 时下面非空气；否则下面同类且 `BASE`。
+        // `MossyCarpetBlock.canSurvive`: with `BASE` the block below is not air; otherwise
+        // the block below is the same block carrying `BASE`.
+        Some(Kind::MossyCarpet) => {
+            if is_air_block(below) {
+                return false;
+            }
+            if is_base_mossy_carpet(state) {
+                true
+            } else {
+                is_base_mossy_carpet(below) && is_mossy_carpet(below)
+            }
+        }
         Some(Kind::HangingPropagule) => {
             let above = world.get_block(pos.0, pos.1 + 1, pos.2);
             let id = block_id_of_state(above).map_or(-1, |id| id as i32);
@@ -294,6 +311,18 @@ fn is_air_block(state: u32) -> bool {
     state_facts(state) & facts::AIR != 0
 }
 
+/// `state.is(Blocks.PALE_MOSS_CARPET)`。
+/// `state.is(Blocks.PALE_MOSS_CARPET)`.
+fn is_mossy_carpet(state: u32) -> bool {
+    block_of_state(state).is_some_and(|block| block.name == "minecraft:pale_moss_carpet")
+}
+
+/// `state.getValue(MossyCarpetBlock.BASE)`。
+/// `state.getValue(MossyCarpetBlock.BASE)`.
+fn is_base_mossy_carpet(state: u32) -> bool {
+    with_property(state, "bottom", "true") == Some(state)
+}
+
 /// 是否走 `DoublePlantBlock.placeAt`（放上下两格）而不是单格 `setBlock`。
 /// `TallSeagrassBlock` 也继承 `DoublePlantBlock`，官方用的是 `instanceof`。
 ///
@@ -362,6 +391,7 @@ fn classify(state: u32) -> Option<Kind> {
         BlockClass::SporeBlossomBlock => Kind::SporeBlossom,
         BlockClass::CarpetBlock => Kind::Carpet,
         BlockClass::MushroomBlock => Kind::Mushroom,
+        BlockClass::MossyCarpetBlock => Kind::MossyCarpet,
         // 苔藓地毯等仍覆写了 canSurvive/mayPlaceOn，本轮明确不支持。
         // Mossy carpet still overrides canSurvive/mayPlaceOn: unported.
         _ => return None,
@@ -447,11 +477,11 @@ mod tests {
     /// `SimpleBlockFeature` routes it through `MossyCarpetBlock.placeAt` (with side
     /// `nextBoolean`), so pale moss carpet must stay unported.
     #[test]
-    fn pale_moss_carpet_stays_unported() {
+    fn pale_moss_carpet_is_supported_and_needs_support_below() {
         let pale = state("minecraft:pale_moss_carpet");
-        assert!(!supports(pale), "pale_moss_carpet must be unsupported");
-        // 同类的普通地毯（`CarpetBlock`）已移植，两者不能混。
-        // The plain `CarpetBlock` is ported; the two must not be confused.
+        assert!(supports(pale));
+        // 同类的普通地毯（`CarpetBlock`）走另一条分支。
+        // The plain `CarpetBlock` takes a different branch.
         assert!(supports(state("minecraft:moss_carpet")));
     }
 
