@@ -503,8 +503,24 @@ pub fn place_candidates(
             }
         } else {
             // 字节码 300-378：最后一个 modifier，正序放置。
+            // 候选位置先记进测量（高度分布要完整），再按「切割线以下不放地物」的
+            // 实验下界决定跳不跳；默认 `None`，全都放。
+            // Candidates are recorded before the experimental floor decides whether to
+            // skip them, so the height distribution stays complete; `None` (default)
+            // runs every candidate.
+            let floor = crate::perf::floors().feature;
+            let top_level = env.top_feature.is_some();
             for &candidate in &modified {
-                total.combine(place(world, env, candidate));
+                if top_level {
+                    crate::perf::candidate(candidate.1);
+                }
+                if floor.is_some_and(|floor| candidate.1 < floor) {
+                    continue;
+                }
+                let started = crate::perf::place_begin();
+                let outcome = place(world, env, candidate);
+                crate::perf::place_end(started);
+                total.combine(outcome);
             }
         }
     }

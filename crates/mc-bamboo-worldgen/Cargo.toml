@@ -9,6 +9,14 @@ description = "World generation math of the Bamboo Minecraft server: random sour
 keywords = ["minecraft"]
 categories = ["games"]
 
+[features]
+default = []
+# 只给 `mc-bamboo-vanilla wg-perf` 用的计时和高度分布钩子。默认构建里全是空操作，
+# 行为和生成结果都不变（见 `src/perf.rs`）。
+# Timing and height-bucket hooks only for `mc-bamboo-vanilla wg-perf`. Every hook is a
+# no-op in default builds, so behaviour and generated blocks are unchanged.
+perf = []
+
 [dependencies]
 mc-bamboo-blocks.workspace = true
 mc-bamboo-core.workspace = true

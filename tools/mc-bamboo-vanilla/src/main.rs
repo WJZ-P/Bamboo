@@ -219,6 +219,9 @@ mod world_dir;
 #[cfg(feature = "oracle")]
 mod worldgen;
 
+#[cfg(feature = "oracle")]
+mod wg_perf;
+
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -336,6 +339,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla flat-world <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla beard <java 路径> [--through noise|surface|carvers] [--break-self-test]
       mc-bamboo-vanilla gen-light <java 路径> [--scenes N] [--seed S] [--show N] [--break-self-test]
+      mc-bamboo-vanilla wg-perf [--seeds N] [--chunks N] [--biomes a,b,c] [--repeat N] [--threads N] [--json] [--skip-cut] [--skip-sky] [--skip-threads]
       mc-bamboo-vanilla structure-generation <java 路径>
       mc-bamboo-vanilla structure-single <java 路径>
       mc-bamboo-vanilla structure-templated <java 路径>
@@ -406,6 +410,7 @@ fn run() -> Result<(), String> {
         ["flat-world", java, ref options @ ..] => flat_world_cli(java, options),
         ["beard", java, ref options @ ..] => beard_cli(java, options),
         ["gen-light", java, ref options @ ..] => gen_light_cli(java, options),
+        ["wg-perf", ref options @ ..] => wg_perf::run(options),
         ["structure-generation", java, ref options @ ..] => structure_generation_cli(java, options),
         ["structure-single", java, ref options @ ..] => structure_single_cli(java, options),
         ["structure-templated", java, ref options @ ..] => structure_templated_cli(java, options),
