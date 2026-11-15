@@ -836,7 +836,7 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | `minecraft:bamboo`（`--seeds 2 --chunks 14 --salt 5 --steps 9`） | **0 不一致**（28 中心 / 24772608 方块，0 skipped） |
 | 故意把竹竿状态换成空气（`--seeds 2 --chunks 24 --salt 33`） | 160 处不一致（确认非假绿；同时暴露 27 处 terrain 既有差异） |
 | `minecraft:vines`（`--seeds 1 --chunk -784 -132 --scan 3 --steps 9`） | 8 处差异，全部是 terrain 既有差异（`--steps 0` 同样复现），但**藤蔓未被调用**（候选 0 次），不算验证 |
-| `minecraft:glow_lichen`（`--seeds 2 --chunks 20 --salt 11 --steps 9`） | **102 处不一致**（已写未验证，见疑点；从 126 降下来） |
+| `minecraft:glow_lichen`（`--seeds 2 --chunks 20 --salt 11 --steps 9`） | **70 处不一致**（已写未验证，见疑点；126 → 102 → 70） |
 | `minecraft:spore_blossom`（lush_caves，`--seeds 1 --chunk -600 -598 --scan 3 --steps 9`） | 0 不一致但 **simple_block 叶子被调用 0 次**，`environment_scan` 把候选全滤掉，不算验证 |
 | 6 个 `random_selector` 树（`--seeds 2 --chunks 24 --salt 13 --steps 9`） | **0 不一致**（48 中心 / 42467328 方块，0 skipped） |
 | 故意把 `random_selector` 的 chance 改成恒真 | 160 处不一致（确认非假绿） |
