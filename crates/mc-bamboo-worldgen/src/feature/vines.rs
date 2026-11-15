@@ -1,139 +1,178 @@
-//! `VinesFeature`：藤蔓地物的 `place`。
+//! `VinesFeature`：藤蔓（`minecraft:vines`）。
 //!
-//! 官方 `VinesFeature.place`：先判 `isEmptyBlock(origin)`，再按 `Direction.values()`
-//! 顺序（跳过 DOWN）找第一个 `VineBlock.isAcceptableNeighbour` 成立的相邻格，
-//! 把默认藤蔓状态的对应面属性置 true 后 `setBlock(origin, state, 2)`。
-//! `isAcceptableNeighbour` 转发到 `MultifaceBlock.canAttachTo`：相邻方块朝回来的那一面
-//! （`direction.getOpposite()`）在支撑形状或碰撞形状上是满的就能贴。
+//! 官方 `VinesFeature.place` 只有两步：原点必须是空气；按 `Direction.values()`
+//! （DOWN, UP, NORTH, SOUTH, WEST, EAST）的顺序找第一个「不是 DOWN 且
+//! `VineBlock.isAcceptableNeighbour(level, origin.relative(d), d)` 为真」的方向，
+//! 放一格把该方向属性设为 true 的藤蔓。`isAcceptableNeighbour` 就是
+//! `MultifaceBlock.canAttachTo`：邻居的支撑形状或碰撞形状在反方向那一面是满的。
 //!
-//! `VinesFeature.place` for vines: bail unless `isEmptyBlock(origin)`, then walk
-//! `Direction.values()` (skipping DOWN) for the first `VineBlock.isAcceptableNeighbour`;
-//! set the matching face property on the default vine state and `setBlock(..., 2)`.
-//! `isAcceptableNeighbour` forwards to `MultifaceBlock.canAttachTo`: the neighbour's face
-//! toward the origin (`direction.getOpposite()`) must be full in the support or collision shape.
+//! Official `VinesFeature.place`: the origin must be air, then walk
+//! `Direction.values()` (DOWN, UP, NORTH, SOUTH, WEST, EAST) and take the first
+//! non-DOWN direction whose neighbour accepts the vine; place one vine with that face
+//! property set. `isAcceptableNeighbour` is `MultifaceBlock.canAttachTo`, i.e. the
+//! neighbour's support or collision shape is full on the opposite face.
 
-use mc_bamboo_core::Direction;
-use mc_bamboo_data::{collision_shape, support_shape};
-use serde_json::{Value, json};
+use mc_bamboo_data::{Aabb, block_by_name, collision_shape, support_shape};
 
 use crate::random::WorldgenRandom;
 
-use super::{state::parse_state, world::FeatureWorld};
+use super::{state::with_property, world::FeatureWorld};
 
 type Pos = (i32, i32, i32);
 
-/// `Direction.values()` 里除 DOWN 外的五个方向，顺序照官方枚举。
-/// The five directions of `Direction.values()` except DOWN, in enum order.
-const DIRECTIONS: [Direction; 5] = [
-    Direction::Up,
-    Direction::North,
-    Direction::South,
-    Direction::West,
-    Direction::East,
-];
+/// `Direction` 的六个值，顺序即 `Direction.values()`（ordinal 顺序）。
+///
+/// The six `Direction` values in `Direction.values()` (ordinal) order.
+const DIRECTIONS: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
 
-/// `BlockPos.relative(direction)` 的位移。
-/// The block offset of `BlockPos.relative(direction)`.
-fn offset(direction: Direction) -> (i32, i32, i32) {
-    match direction {
-        Direction::Down => (0, -1, 0),
-        Direction::Up => (0, 1, 0),
-        Direction::North => (0, 0, -1),
-        Direction::South => (0, 0, 1),
-        Direction::West => (-1, 0, 0),
-        Direction::East => (1, 0, 0),
-    }
-}
-
-/// `VineBlock.getPropertyForFace(direction)` 的属性名（DOWN 不会走到）。
-/// Property name of `VineBlock.getPropertyForFace(direction)` (DOWN is never used).
-fn face_property(direction: Direction) -> &'static str {
-    match direction {
-        Direction::Up => "up",
-        Direction::North => "north",
-        Direction::South => "south",
-        Direction::West => "west",
-        Direction::East => "east",
-        Direction::Down => "down",
-    }
-}
-
-/// `MultifaceBlock.canAttachTo(level, direction, neighbourPos, neighbourState)`：
-/// 朝 `face` 的支撑形状或碰撞形状是满面。
-/// `MultifaceBlock.canAttachTo`: the support or collision shape is full on `face`.
-fn can_attach_to(state: u32, face: Direction) -> bool {
-    let support = support_shape(state);
-    let collision = collision_shape(state);
-    mc_bamboo_blocks::shape::is_face_full(support, face)
-        || mc_bamboo_blocks::shape::is_face_full(collision, face)
-}
-
-/// 已解析的藤蔓地物；`states[d.id()]` 是该面为 true 的状态。
-/// Parsed vines feature; `states[d.id()]` is the state with that face set.
+/// 已解析的 `minecraft:vines` 配置（没有字段）。
+///
+/// The parsed `minecraft:vines` config (no fields).
 pub struct VinesFeature {
-    states: [u32; 6],
+    vine: u32,
 }
 
 impl VinesFeature {
-    /// 配置是 unit codec（`MapCodec.unit`），没有字段；只需预算五个面状态。
-    /// The config is a unit codec with no fields; only precompute the five face states.
-    pub fn parse(_config: &Value) -> Option<Self> {
-        let mut states = [0_u32; 6];
-        for &direction in &DIRECTIONS {
-            let value = json!({
-                "id": "minecraft:vine",
-                "properties": { face_property(direction): "true" },
-            });
-            states[direction.id() as usize] = parse_state(&value).ok()?;
-        }
-        Some(Self { states })
+    /// `MapCodec.unit(VinesFeature::new)`：配置里没有字段。
+    ///
+    /// `MapCodec.unit(VinesFeature::new)`: the config has no fields.
+    pub fn parse(_config: &serde_json::Value) -> Option<Self> {
+        Some(Self {
+            vine: block_by_name("minecraft:vine")?.default_state,
+        })
     }
 
-    /// 一个候选位置。返回是否放了藤蔓（官方 `placedAny`）；`place` 不消费随机数，
-    /// `random` 只为统一签名保留。
-    /// One candidate. Returns whether a vine was placed (`placedAny`); `place` consumes
-    /// no random, `random` keeps the shared signature.
-    pub fn place(&self, world: &mut FeatureWorld<'_>, _random: &WorldgenRandom, pos: Pos) -> bool {
-        if !world.is_air(pos.0, pos.1, pos.2) {
+    /// 官方 `VinesFeature.place`：一个候选位置。
+    ///
+    /// Official `VinesFeature.place` at one candidate.
+    pub fn place(
+        &self,
+        world: &mut FeatureWorld<'_>,
+        _random: &WorldgenRandom,
+        origin: Pos,
+    ) -> bool {
+        if !world.is_air(origin.0, origin.1, origin.2) {
             return false;
         }
-        for &direction in &DIRECTIONS {
+        for direction in DIRECTIONS {
+            // 官方跳过 DOWN，`UP` 也走 `canAttachTo`（不额外要求上面是藤蔓）。
+            // The official loop skips DOWN; UP still goes through `canAttachTo`.
+            if direction == "down" {
+                continue;
+            }
             let (dx, dy, dz) = offset(direction);
-            let neighbour = world.get_block(pos.0 + dx, pos.1 + dy, pos.2 + dz);
-            let face = direction.opposite();
-            if can_attach_to(neighbour, face) {
-                world.set_block_with_heightmaps(
-                    pos.0,
-                    pos.1,
-                    pos.2,
-                    self.states[direction.id() as usize],
-                );
+            if !self.accepts(
+                world,
+                (origin.0 + dx, origin.1 + dy, origin.2 + dz),
+                direction,
+            ) {
+                continue;
+            }
+            if let Some(state) = with_property(self.vine, direction, "true") {
+                world.set_block_with_heightmaps(origin.0, origin.1, origin.2, state);
                 return true;
             }
         }
         false
     }
+
+    /// `MultifaceBlock.canAttachTo(level, direction, neighbourPos, state)`：
+    /// `Block.isFaceFull(getBlockSupportShape, opposite) ||
+    ///  Block.isFaceFull(getCollisionShape, opposite)`。
+    ///
+    /// `MultifaceBlock.canAttachTo`: the support or collision shape is full on the
+    /// opposite face.
+    fn accepts(&self, world: &FeatureWorld<'_>, neighbour: Pos, direction: &str) -> bool {
+        let state = world.get_block(neighbour.0, neighbour.1, neighbour.2);
+        let opposite = opposite_face(direction);
+        face_is_full(support_shape(state), opposite)
+            || face_is_full(collision_shape(state), opposite)
+    }
+}
+
+/// `Direction.getOpposite()` 对应的面名。
+///
+/// The face name of `Direction.getOpposite()`.
+fn opposite_face(direction: &str) -> &'static str {
+    match direction {
+        "up" => "down",
+        "down" => "up",
+        "north" => "south",
+        "south" => "north",
+        "west" => "east",
+        _ => "west",
+    }
+}
+
+/// `Direction` 的方块坐标偏移。
+///
+/// The block-coordinate offset of a `Direction`.
+fn offset(direction: &str) -> (i32, i32, i32) {
+    match direction {
+        "down" => (0, -1, 0),
+        "up" => (0, 1, 0),
+        "north" => (0, 0, -1),
+        "south" => (0, 0, 1),
+        "west" => (-1, 0, 0),
+        _ => (1, 0, 0),
+    }
+}
+
+/// `Block.isFaceFull(shape, direction)`：`getFaceShape(direction)` 是完整方块。
+///
+/// 官方 `getFaceShape` 先在轴向上的极值处切一片，再判断那片是不是完整方块
+/// （`SliceShape.isCubeLike`）。对轴对齐盒子的并集，这等价于：某个盒子在该方向上
+/// 贴到边界（`min_y <= 0` 之类），并且它在另两个轴上铺满 1×1。这里按这个等价条件实现。
+///
+/// `Block.isFaceFull(shape, direction)`: the face shape is a full block. The official
+/// `getFaceShape` slices the shape at the extremum along the axis and then checks whether
+/// the slice is cube-like. For a union of axis-aligned boxes that means one box touches the
+/// boundary on that face and spans the full 1x1 on the other two axes.
+pub(crate) fn face_is_full(shape: &[Aabb], direction: &str) -> bool {
+    const EPSILON: f64 = 1.0e-7;
+    let spans = |lower: f64, upper: f64| lower <= EPSILON && upper >= 1.0 - EPSILON;
+    shape.iter().any(|box_| {
+        let touches_face = match direction {
+            "down" => box_.min_y <= EPSILON,
+            "up" => box_.max_y >= 1.0 - EPSILON,
+            "north" => box_.min_z <= EPSILON,
+            "south" => box_.max_z >= 1.0 - EPSILON,
+            "west" => box_.min_x <= EPSILON,
+            _ => box_.max_x >= 1.0 - EPSILON,
+        };
+        let spans_tangents = match direction {
+            "down" | "up" => spans(box_.min_x, box_.max_x) && spans(box_.min_z, box_.max_z),
+            "north" | "south" => spans(box_.min_x, box_.max_x) && spans(box_.min_y, box_.max_y),
+            _ => spans(box_.min_y, box_.max_y) && spans(box_.min_z, box_.max_z),
+        };
+        touches_face && spans_tangents
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn parses_all_five_face_states() {
-        let feature = VinesFeature::parse(&json!({"type": "minecraft:vines"})).unwrap();
-        for &direction in &DIRECTIONS {
-            assert_ne!(feature.states[direction.id() as usize], 0);
+    fn parses_and_builds_each_face() {
+        let feature = VinesFeature::parse(&serde_json::json!({"type": "minecraft:vines"})).unwrap();
+        for direction in ["up", "north", "south", "west", "east"] {
+            let state = with_property(feature.vine, direction, "true").unwrap();
+            assert_ne!(state, feature.vine);
         }
+        // 默认状态所有面都是 false。
+        // The default state has every face property false.
+        assert!(with_property(feature.vine, "north", "false").is_some());
     }
 
     #[test]
-    fn face_properties_are_distinct() {
-        let feature = VinesFeature::parse(&json!({})).unwrap();
-        let mut seen = std::collections::HashSet::new();
-        for &direction in &DIRECTIONS {
-            assert!(seen.insert(feature.states[direction.id() as usize]));
+    fn full_face_detection_matches_whole_blocks() {
+        let block = [Aabb::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)];
+        for direction in ["down", "up", "north", "south", "west", "east"] {
+            assert!(face_is_full(&block, direction), "{direction}");
         }
+        // 空形状任何面都不满。
+        // An empty shape is full on no face.
+        assert!(!face_is_full(&[], "up"));
     }
 }

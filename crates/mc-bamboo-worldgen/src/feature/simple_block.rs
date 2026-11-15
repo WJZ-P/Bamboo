@@ -119,8 +119,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// 用导出的 `worldgen.json` 建一份注册表，给 holder 字符串查表用。
+    /// A registry built from the exported `worldgen.json`, used to resolve holder strings.
+    fn registry() -> crate::feature::registry::Registry {
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        crate::feature::registry::Registry::parse(root.as_object().unwrap()).unwrap()
+    }
+
     #[test]
     fn parses_inline_bare_state_and_gates_unported_forms() {
+        let registry = registry();
+        let lookup = |name: &str| registry.state_provider(name);
         let pumpkin: Value =
             json!({"to_place": {"id": "minecraft:pumpkin"}, "type": "minecraft:simple_block"});
         assert!(SimpleBlockFeature::parse(&pumpkin, &|_| None).is_some());
@@ -131,11 +140,26 @@ mod tests {
             "type": "minecraft:simple_block",
         });
         assert!(SimpleBlockFeature::parse(&weighted, &|_| None).is_some());
-        // holder 字符串引用未导出的注册表，也不支持。
-        // A holder string references an unexported registry; unsupported.
+        // holder 字符串通过 `lookup` 查 `block_state_provider` 注册表，现在支持。
+        // Holder strings resolve through `lookup` against the registry; supported now.
         let holder: Value =
             json!({"to_place": "minecraft:flower_plain", "type": "minecraft:simple_block"});
-        assert!(SimpleBlockFeature::parse(&holder, &|_| None).is_none());
+        assert!(SimpleBlockFeature::parse(&holder, &lookup).is_some());
+        // rule_based provider 的 soil_beneath_tree 现在支持。
+        // The rule_based soil_beneath_tree provider is supported.
+        let supported: Value =
+            json!({"to_place": "minecraft:soil_beneath_tree", "type": "minecraft:simple_block"});
+        assert!(SimpleBlockFeature::parse(&supported, &lookup).is_some());
+        // rotated provider 现在也移植了（珊瑚链依赖它）。
+        // The rotated provider is ported now (the coral chain needs it).
+        let rotated: Value = json!({
+            "to_place": {
+                "type": "minecraft:rotated",
+                "state": {"id": "minecraft:basalt", "properties": {"axis": "y"}},
+            },
+            "type": "minecraft:simple_block",
+        });
+        assert!(SimpleBlockFeature::parse(&rotated, &|_| None).is_some());
     }
 
     #[test]
@@ -150,5 +174,49 @@ mod tests {
         // to the override tag below, so it is supported now.
         let mushroom: Value = json!({"to_place": {"id": "minecraft:brown_mushroom"}});
         assert!(SimpleBlockFeature::parse(&mushroom, &|_| None).is_some());
+    }
+
+    #[test]
+    fn parses_rule_based_holder_and_rejects_unported_predicates() {
+        let registry = registry();
+        let lookup = |name: &str| registry.state_provider(name);
+        // soil_beneath_tree 是 rule_based provider，谓词全部已移植。
+        // soil_beneath_tree is a rule_based provider whose predicate is ported.
+        let soil: Value =
+            json!({"to_place": "minecraft:soil_beneath_tree", "type": "minecraft:simple_block"});
+        assert!(SimpleBlockFeature::parse(&soil, &lookup).is_some());
+        // rule_based provider 里的 podzol 现在也能解析（它的方块类是 SnowyBlock，默认存活）。
+        // The rule_based podzol provider now parses too (SnowyBlock, default survival).
+        let podzol: Value =
+            json!({"to_place": "minecraft:podzol_beneath_tree", "type": "minecraft:simple_block"});
+        assert!(SimpleBlockFeature::parse(&podzol, &lookup).is_some());
+    }
+
+    #[test]
+    fn parses_water_plant_holders() {
+        // 睡莲、海泡菜、孢子花、海草的存活判定已移植，这些配置现在能解析。
+        // Lily pad, sea pickle, spore blossom and seagrass survival checks are ported, so
+        // these configs parse.
+        let lily: Value = json!({"to_place": {"id": "minecraft:lily_pad"}});
+        assert!(SimpleBlockFeature::parse(&lily, &|_| None).is_some());
+        // 海泡菜用内联 randomized_int provider（pickles 1..4）。
+        // Sea pickles use an inline randomized_int provider (pickles 1..4).
+        let pickle: Value = json!({
+            "to_place": {
+                "property": "pickles",
+                "source": {"id": "minecraft:sea_pickle", "properties": {"pickles": "1", "waterlogged": "true"}},
+                "type": "minecraft:randomized_int",
+                "values": {"min_inclusive": 1, "max_inclusive": 4, "type": "minecraft:uniform"},
+            },
+        });
+        assert!(SimpleBlockFeature::parse(&pickle, &|_| None).is_some());
+        let blossom: Value = json!({"to_place": {"id": "minecraft:spore_blossom"}});
+        assert!(SimpleBlockFeature::parse(&blossom, &|_| None).is_some());
+        let seagrass: Value = json!({"to_place": {"id": "minecraft:seagrass"}});
+        assert!(SimpleBlockFeature::parse(&seagrass, &|_| None).is_some());
+        let tall: Value = json!({
+            "to_place": {"id": "minecraft:tall_seagrass", "properties": {"half": "lower"}},
+        });
+        assert!(SimpleBlockFeature::parse(&tall, &|_| None).is_some());
     }
 }

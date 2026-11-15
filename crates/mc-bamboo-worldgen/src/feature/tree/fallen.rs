@@ -117,7 +117,10 @@ impl FallenTreeFeature {
         pos: Pos,
         axis: Option<&str>,
     ) {
-        let Some(mut state) = self.trunk_provider.get_state(random) else {
+        let Some(mut state) = self
+            .trunk_provider
+            .get_optional_state(place.world, random, pos)
+        else {
             return;
         };
         if let Some(axis) = axis {

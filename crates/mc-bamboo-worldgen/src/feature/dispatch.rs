@@ -28,6 +28,7 @@ use super::{
     placement::OreFeature,
     sculk_patch::{self, SculkPatchFeature},
     simple_block::SimpleBlockFeature,
+    single_block_pillar::SingleBlockPillarFeature,
     speleothem::{self, SpeleothemFeature},
     speleothem_cluster::{self, SpeleothemClusterFeature},
     spike::{self, SpikeFeature},
@@ -68,6 +69,14 @@ pub enum Leaf {
     Tree(Box<TreeFeature>),
     UnderwaterMagma(UnderwaterMagmaFeature),
     Vines(VinesFeature),
+    /// `NoOpFeature`：什么都不做，但 `place` 返回 true。
+    ///
+    /// `NoOpFeature`: does nothing but returns true from `place`.
+    NoOp,
+    /// `SingleBlockPillarFeature`：沿竖直方向连续放方块。
+    ///
+    /// `SingleBlockPillarFeature`: stack one block along a vertical axis.
+    SingleBlockPillar(Box<SingleBlockPillarFeature>),
 }
 
 impl Leaf {
@@ -116,6 +125,9 @@ pub fn parse_leaf<'a>(
         }
         "minecraft:monster_room" => Leaf::MonsterRoom(MonsterRoomFeature::parse(config).ok()?),
         "minecraft:multiface_growth" => Leaf::Multiface(MultifaceGrowthFeature::parse(config)?),
+        // `MapCodec.unit(NoOpFeature::new)`：配置里没有字段，`place` 恒返回 true。
+        // `MapCodec.unit(NoOpFeature::new)`: no fields, `place` always returns true.
+        "minecraft:no_op" => Leaf::NoOp,
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
         // `minecraft:sculk_patch` 已写但**未对拍到 0 不一致**（见汇报），按规矩不接入：
         // 解析返回 `None`，主循环把整个 placed feature 标 `unsupported`。
@@ -123,6 +135,9 @@ pub fn parse_leaf<'a>(
         // (see the report), so it stays out of dispatch: parsing returns `None` and the
         // main loop marks the placed feature unsupported.
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config, lookup)?),
+        "minecraft:single_block_pillar" => {
+            Leaf::SingleBlockPillar(Box::new(SingleBlockPillarFeature::parse(config)?))
+        }
         "minecraft:speleothem" => Leaf::Speleothem(SpeleothemFeature::parse(config).ok()?),
         "minecraft:speleothem_cluster" => {
             Leaf::SpeleothemCluster(SpeleothemClusterFeature::parse(config).ok()?)
@@ -175,5 +190,7 @@ pub fn place_leaf(
         Leaf::Tree(tree) => tree.place(world, random, pos),
         Leaf::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),
         Leaf::Vines(feature) => feature.place(world, random, pos),
+        Leaf::NoOp => true,
+        Leaf::SingleBlockPillar(pillar) => pillar.place(world, random, pos),
     }
 }
