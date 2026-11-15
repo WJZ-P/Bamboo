@@ -145,6 +145,12 @@ impl<'a> Aquifer<'a> {
         aquifer
     }
 
+    /// `skipSamplingAboveY`：高于这个 y 的 `computeSubstance` 直接返回全局流体。
+    /// `skipSamplingAboveY`: above this y, `computeSubstance` returns the global fluid.
+    pub fn skip_sampling_above_y(&self) -> i32 {
+        self.skip_sampling_above_y
+    }
+
     /// `computeSubstance(x, y, z, density)`：`null` 表示用维度的默认方块（石头）。
     pub fn compute_substance(
         &mut self,
