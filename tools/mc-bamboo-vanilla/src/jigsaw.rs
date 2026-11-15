@@ -25,7 +25,6 @@ use std::{
 use mc_bamboo_blocks::LegacyRandom;
 use mc_bamboo_data::{structures as blob, worldgen::WORLDGEN};
 use mc_bamboo_nbt::Tag;
-use mc_bamboo_worldgen::random::Random;
 use mc_bamboo_worldgen::{
     Worldgen,
     chunk::Generator,
@@ -36,7 +35,10 @@ use mc_bamboo_worldgen::{
             JigsawConfig, JigsawStructures, Piece, Rotation, StructurePieces, TemplatePools,
             add_pieces,
         },
-        processor::{BlockSetRef, BlockStateSpec, Processor, ProcessorLists},
+        processor::{
+            BlockSetRef, BlockStateSpec, PosRuleTest, Processor, ProcessorLists, ProcessorRule,
+            RuleBlockEntityModifier, RuleTest,
+        },
         processor_apply::{self, ProcessBlock, ProcessorLevel},
         rings::BiomeResolver,
         template::StructureTemplate,
@@ -1458,16 +1460,20 @@ fn run_capped(mut command: Command, work_dir: &Path) -> Result<(), String> {
             (100, -50, -200),
             (-1000, 200, 1000),
         ] {
-            // `maxToReplace = min(limit.sample(random), listSize)`。
-            // `limit` 取 0（不替换）、小于列表长度、恰好等于、大于；列表长度也取三种。
-            // `limit` covers 0 (no replacement), below the list size, exactly it and above
-            // it; the list size varies too.
+            // `limit` 覆盖 0（不替换）、小于列表长度、恰好等于、大于；列表长度取三种；
+            // `integrity` 取 0（全保留）、0.5、1（全替换成空气），
+            // 这样 delegate 是否真的生效也能看出来。
+            // `limit` covers 0, below the list size, exactly it and above; three list
+            // sizes; `integrity` covers 0 (nothing rots), 0.5 and 1 (everything does),
+            // so the delegate's effect is visible too.
             for list_size in [1_usize, 7, 33] {
                 for limit in [0_i32, 1, 5, 33, 1000] {
-                    queries.push(format!(
-                        "{seed}|{}|{}|{}|{list_size}|{limit}",
-                        piece.0, piece.1, piece.2
-                    ));
+                    for integrity in ["0", "0.5", "1"] {
+                        queries.push(format!(
+                            "{seed}|{}|{}|{}|{list_size}|{limit}|{integrity}",
+                            piece.0, piece.1, piece.2
+                        ));
+                    }
                 }
             }
         }
@@ -1490,41 +1496,58 @@ fn run_capped(mut command: Command, work_dir: &Path) -> Result<(), String> {
     compare_capped(&String::from_utf8_lossy(&output.stdout), &queries)
 }
 
-/// Java 的 `C|key|sampled|indices` 与 `R|key|nextInt,nextInt,...`。
+/// `capped` 对拍里第 `index` 个输入方块用的羊毛颜色。
 ///
-/// Java emits `C|key|sampled|indices` and `R|key|nextInt,...`.
+/// The wool colour used for the `index`th input block in the `capped` oracle.
+fn wool_colour(index: usize) -> &'static str {
+    const COLOURS: [&str; 16] = [
+        "minecraft:white_wool",
+        "minecraft:orange_wool",
+        "minecraft:magenta_wool",
+        "minecraft:light_blue_wool",
+        "minecraft:yellow_wool",
+        "minecraft:lime_wool",
+        "minecraft:pink_wool",
+        "minecraft:gray_wool",
+        "minecraft:light_gray_wool",
+        "minecraft:cyan_wool",
+        "minecraft:purple_wool",
+        "minecraft:blue_wool",
+        "minecraft:brown_wool",
+        "minecraft:green_wool",
+        "minecraft:red_wool",
+        "minecraft:black_wool",
+    ];
+    COLOURS[index % COLOURS.len()]
+}
+
+/// `capped` 的 Java 输出是 `C|key|count` 加一串 `S|key|x|y|z|block`。
+///
+/// The `capped` Java output is `C|key|count` followed by `S|key|x|y|z|block` lines.
 fn compare_capped(stdout: &str, queries: &[String]) -> Result<(), String> {
-    let mut java_c: HashMap<String, (i32, i32, String)> = HashMap::new();
-    let mut java_r: HashMap<String, String> = HashMap::new();
+    let mut java_c: HashMap<String, usize> = HashMap::new();
+    let mut java_s: HashMap<String, Vec<String>> = HashMap::new();
     for line in stdout.lines() {
         let fields: Vec<&str> = line.split('|').collect();
-        if fields.len() < 7 {
+        if fields.len() < 9 {
             continue;
         }
-        // `C|` / `R|` 之后是查询的 6 段，所以 key 是 `fields[1..7]`。
-        // The six query fields follow `C|` / `R|`, so the key is `fields[1..7]`.
-        let key = fields[1..7].join("|");
+        // 查询是 7 段，所以 key 是 `fields[1..8]`。
+        // A query has seven fields, so the key is `fields[1..8]`.
+        let key = fields[1..8].join("|");
         match fields[0] {
             "C" => {
-                java_c.insert(
-                    key,
-                    (
-                        fields[7].parse().unwrap_or(0),
-                        fields[8].parse().unwrap_or(0),
-                        fields[9..].join("|"),
-                    ),
-                );
+                java_c.insert(key, fields[8].parse().unwrap_or(0));
             }
-            "R" => {
-                // `R|key(6 段)|nextInt,...`，key 之后才是序列。
-                // `R|the six key fields|nextInt,...`; the sequence follows the key.
-                java_r.insert(key, fields[7..].join("|"));
+            "S" => {
+                java_s.entry(key).or_default().push(fields[8..].join("|"));
             }
             _ => {}
         }
     }
 
     let mut checked = 0usize;
+    let mut blocks_checked = 0usize;
     let mut mismatches = 0usize;
     let mut first: Option<String> = None;
     for query in queries {
@@ -1539,71 +1562,128 @@ fn compare_capped(stdout: &str, queries: &[String]) -> Result<(), String> {
         );
         let list_size: usize = parse_i32(fields[4])? as usize;
         let limit: i32 = parse_i32(fields[5])?;
+        let integrity: f32 = fields[6]
+            .parse()
+            .map_err(|error| format!("bad integrity {}: {error}", fields[6]))?;
         checked += 1;
 
-        // `RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece)`。
-        // `RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece)`.
-        let random = Random::Legacy(LegacyRandom::new(seed))
-            .fork_positional()
-            .at(piece.0, piece.1, piece.2);
-        // `limit.sample(random)`。
-        // `limit.sample(random)`.
-        let sampled = constant_int_sample(&random, limit);
-        // `int maxToReplace = Math.min(this.limit.sample(random), processedBlockInfoList.size());`
-        let max_to_replace = sampled.min(list_size as i32).max(0) as usize;
-        let mut indices: Vec<usize> = (0..list_size).collect();
-        shuffle_indices(&mut indices, &random);
-        // 只取前 `maxToReplace` 个：官方 `while (it.hasNext() && replaced < maxToReplace)`。
-        // Only the first `maxToReplace`: vanilla's
-        // `while (it.hasNext() && replaced < maxToReplace)`.
-        indices.truncate(max_to_replace);
-        let got = indices
-            .iter()
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
+        // 输入方块与 Java 侧一致：每个位置一块**不同**的羊毛。
+        // 必须各不相同，否则 `BlockRotProcessor` 把方块换成空气后，
+        // 「换掉了哪一个」在输出里看不出来，洗牌顺序就无法被验证。
+        // Inputs match the Java side: a **distinct** wool colour per position. They must
+        // differ, otherwise `BlockRotProcessor` turning a block into air makes "which one
+        // was replaced" invisible and the shuffle order becomes unverifiable.
+        let mut blocks = Vec::with_capacity(list_size);
+        for index in 0..list_size {
+            let pos = ((index % 4) as i32, (index / 4) as i32, 0);
+            blocks.push(processor_apply::ProcessBlock {
+                pos,
+                world_pos: (pos.0 + piece.0, pos.1 + piece.1, pos.2 + piece.2),
+                state: BlockStateSpec::parse_str(wool_colour(index))?,
+                nbt: None,
+            });
+        }
+        // `new CappedProcessor(<delegate>, ConstantInt.of(limit))`。
+        // delegate 必须是 `RuleProcessor`（把方块换成别的方块），不能用
+        // `BlockRotProcessor`：后者返回 `null`，而官方 `finalizeProcessing` 只在
+        // `maybeAltered != null && !processedBlockInfo.equals(maybeAltered)` 时
+        // 才 `replaced++`，`null` 被跳过——那样 delegate 的效果完全不可观测，
+        // 洗牌顺序也就无法被验证。
+        //
+        // `integrity` 在这里表示「启用前 N 条规则的比例」：`0` 时规则表为空（delegate
+        // 永不改动任何方块），`0.5` 时只启用一半，`1` 时全部启用。三种情况分别覆盖
+        // 「一个都改不了」（`replaced` 永远 0）、「有些能改」、「全都能改」。
+        //
+        // `new CappedProcessor(<delegate>, ConstantInt.of(limit))`. The delegate must be a
+        // `RuleProcessor` that turns a block into a different block, not a
+        // `BlockRotProcessor`: the latter returns `null`, and vanilla's
+        // `finalizeProcessing` only counts `replaced` when
+        // `maybeAltered != null && !processedBlockInfo.equals(maybeAltered)`. A `null`
+        // result is skipped, making the delegate's effect invisible and the shuffle order
+        // unverifiable.
+        //
+        // `integrity` here is the fraction of rules enabled: `0` means an empty rule list
+        // (the delegate never changes anything), `0.5` enables half, `1` enables all three,
+        // covering "nothing replaceable", "some replaceable" and "all replaceable".
+        let all_rules: [(&str, &str); 16] = [
+            ("minecraft:white_wool", "minecraft:blue_wool"),
+            ("minecraft:orange_wool", "minecraft:light_blue_wool"),
+            ("minecraft:magenta_wool", "minecraft:lime_wool"),
+            ("minecraft:light_blue_wool", "minecraft:yellow_wool"),
+            ("minecraft:yellow_wool", "minecraft:purple_wool"),
+            ("minecraft:lime_wool", "minecraft:pink_wool"),
+            ("minecraft:pink_wool", "minecraft:gray_wool"),
+            ("minecraft:gray_wool", "minecraft:light_gray_wool"),
+            ("minecraft:light_gray_wool", "minecraft:cyan_wool"),
+            ("minecraft:cyan_wool", "minecraft:orange_wool"),
+            ("minecraft:purple_wool", "minecraft:magenta_wool"),
+            ("minecraft:blue_wool", "minecraft:white_wool"),
+            ("minecraft:brown_wool", "minecraft:red_wool"),
+            ("minecraft:green_wool", "minecraft:brown_wool"),
+            ("minecraft:red_wool", "minecraft:green_wool"),
+            ("minecraft:black_wool", "minecraft:cyan_wool"),
+        ];
+        let enabled = (all_rules.len() as f32 * integrity).round() as usize;
+        let mut rules = Vec::new();
+        for (source, output) in all_rules.iter().take(enabled.min(all_rules.len())) {
+            rules.push(ProcessorRule {
+                input_predicate: RuleTest::BlockMatch {
+                    block: (*source).to_owned(),
+                },
+                location_predicate: RuleTest::AlwaysTrue,
+                position_predicate: PosRuleTest::AlwaysTrue,
+                output_state: BlockStateSpec::parse_str(output)?,
+                block_entity_modifier: RuleBlockEntityModifier::Passthrough,
+            });
+        }
+        let processors = vec![Processor::Capped {
+            delegate: Box::new(Processor::Rule { rules }),
+            limit,
+        }];
+        let level = FakeLevel::new("minecraft:air");
+        let processed = processor_apply::process_blocks(
+            &processors,
+            &blocks,
+            &level,
+            processor_apply::PlaceSettings {
+                piece_position: piece,
+                reference_pos: piece,
+                chunk_bb: None,
+                level_seed: seed,
+                explicit_random: None,
+            },
+        );
+        blocks_checked += processed.len();
 
-        let Some((want_sampled, want_max, want_indices)) = java_c.get(query) else {
+        let Some(want_count) = java_c.get(query) else {
             return Err(format!("Java missing C for {query}"));
         };
-        if *want_sampled != sampled {
+        if *want_count != processed.len() {
             mismatches += 1;
             if first.is_none() {
                 first = Some(format!(
-                    "{query}: sampled rust {sampled} java {want_sampled}"
+                    "{query}: count rust {} java {want_count}",
+                    processed.len()
                 ));
             }
+            continue;
         }
-        if *want_max != max_to_replace as i32 {
-            mismatches += 1;
-            if first.is_none() {
-                first = Some(format!(
-                    "{query}: maxToReplace rust {max_to_replace} java {want_max}"
-                ));
-            }
-        }
-        if *want_indices != got {
-            mismatches += 1;
-            if first.is_none() {
-                first = Some(format!("{query}: indices rust {got} java {want_indices}"));
-            }
-        }
-
-        // 再比原始 `nextInt(1000)` 序列，单独验随机源。
-        // Then compare the raw `nextInt(1000)` sequence to check the source itself.
-        let src = Random::Legacy(LegacyRandom::new(seed))
-            .fork_positional()
-            .at(piece.0, piece.1, piece.2);
-        let raw = (0..8)
-            .map(|_| src.next_int(1000).to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        if let Some(want_raw) = java_r.get(query)
-            && *want_raw != raw
-        {
-            mismatches += 1;
-            if first.is_none() {
-                first = Some(format!("{query}: raw rust {raw} java {want_raw}"));
+        let want = java_s.get(query).cloned().unwrap_or_default();
+        for (index, block) in processed.iter().enumerate() {
+            // 只比方块名（状态里的属性 Java 侧也没输出）。
+            // Compare only the block name; the Java side prints just the name too.
+            let got = format!(
+                "{0}|{1}|{2}|{3}",
+                block.world_pos.0, block.world_pos.1, block.world_pos.2, block.state.name
+            );
+            if want.get(index).is_none_or(|line| *line != got) {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!(
+                        "{query}[{index}]: rust {got} java {:?}",
+                        want.get(index)
+                    ));
+                }
             }
         }
     }
@@ -1620,25 +1700,8 @@ fn compare_capped(stdout: &str, queries: &[String]) -> Result<(), String> {
             first.unwrap_or_default()
         ));
     }
-    println!("jigsaw capped: {checked} queries, source + shuffle + sample all identical");
+    println!("jigsaw capped: {checked} queries, {blocks_checked} survivors, all identical");
     Ok(())
-}
-
-/// `ConstantInt.of(value).sample(random)`：不取随机数，直接返回常量。
-///
-/// `ConstantInt.of(value).sample(random)`: returns the constant without drawing.
-fn constant_int_sample(_random: &Random, value: i32) -> i32 {
-    value
-}
-
-/// `Util.toShuffledList(IntStream.range(0, size), random)` 的洗牌循环。
-///
-/// The shuffle loop of `Util.toShuffledList(IntStream.range(0, size), random)`.
-fn shuffle_indices(items: &mut [usize], random: &Random) {
-    for i in (2..=items.len()).rev() {
-        let swap_to = random.next_int(i as i32) as usize;
-        items.swap(i - 1, swap_to);
-    }
 }
 
 /// 把一行 Java 输出拆成 `(key, 剩余部分)`：key 是 `query_by_key` 里某个查询前缀。

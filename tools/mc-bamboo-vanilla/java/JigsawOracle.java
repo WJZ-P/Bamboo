@@ -172,7 +172,7 @@ public final class JigsawOracle {
                     case "processors" -> runProcessors(registries);
                     case "load" -> runLoad(manager, registries, Path.of(args[1]));
                     case "apply" -> runApply(registries, Path.of(args[1]));
-                    case "capped" -> runCapped(Path.of(args[1]));
+                    case "capped" -> runCapped(registries, Path.of(args[1]));
                     case "cappedfull" -> runCappedFull(registries, Path.of(args[1]));
                     case "placepiece" -> runPlacePiece(manager, registries, Path.of(args[1]));
                     case "waterpiece" -> runWaterPiece(manager, registries, Path.of(args[1]));
@@ -934,7 +934,40 @@ public final class JigsawOracle {
      * the clamped `maxToReplace` plus the truncated index list, so all four stages can be
      * compared.
      */
-    private static void runCapped(Path queries) throws Exception {
+    /**
+     * capped 模式：queries 每行
+     * {@code seed|pieceX|pieceY|pieceZ|listSize|limit|integrity}。构造真实的
+     * `new CappedProcessor(new BlockRotProcessor(integrity), ConstantInt.of(limit))`，
+     * 放进 `StructurePlaceSettings` 后调官方 `StructureTemplate.processBlockInfos`，
+     * 输出**真正存活下来的方块**（位置 + 状态）。Rust 侧走
+     * `structure::processor_apply::process_blocks`，两边都是产品代码。
+     *
+     * <p>Capped mode: builds a real
+     * `CappedProcessor(BlockRotProcessor(integrity), ConstantInt.of(limit))`, runs vanilla
+     * `processBlockInfos` and prints the surviving blocks. The Rust side runs
+     * `process_blocks`, so both sides exercise product code.
+     */
+    /** `capped` 对拍用的 16 种羊毛注册名，两边按同一顺序取。 */
+    private static final String[] WOOL_NAMES = {
+        "minecraft:white_wool",
+        "minecraft:orange_wool",
+        "minecraft:magenta_wool",
+        "minecraft:light_blue_wool",
+        "minecraft:yellow_wool",
+        "minecraft:lime_wool",
+        "minecraft:pink_wool",
+        "minecraft:gray_wool",
+        "minecraft:light_gray_wool",
+        "minecraft:cyan_wool",
+        "minecraft:purple_wool",
+        "minecraft:blue_wool",
+        "minecraft:brown_wool",
+        "minecraft:green_wool",
+        "minecraft:red_wool",
+        "minecraft:black_wool",
+    };
+
+    private static void runCapped(RegistryAccess registries, Path queries) throws Exception {
         StringBuilder out = new StringBuilder();
         for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
             if (line.isBlank()) {
@@ -946,37 +979,89 @@ public final class JigsawOracle {
                     Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3]));
             int listSize = Integer.parseInt(p[4]);
             int limit = Integer.parseInt(p[5]);
-            var random = RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece);
-            // 官方顺序：先 `limit.sample(random)`，再 `min(size)`，然后 `toShuffledList`。
-            // Vanilla order: `limit.sample(random)`, then `min(size)`, then `toShuffledList`.
-            int sampled = net.minecraft.util.valueproviders.ConstantInt.of(limit).sample(random);
-            int maxToReplace = Math.min(sampled, listSize);
-            var indices = net.minecraft.util.Util.toShuffledList(
-                    java.util.stream.IntStream.range(0, listSize), random);
-            out.append("C|").append(String.join("|", p)).append('|')
-                    .append(sampled).append('|').append(Math.max(maxToReplace, 0)).append('|');
-            // 只输出前 `maxToReplace` 个：官方 `while (it.hasNext() && replaced < maxToReplace)`。
-            // Only the first `maxToReplace` entries: vanilla's
-            // `while (it.hasNext() && replaced < maxToReplace)`.
-            int shown = Math.max(Math.min(maxToReplace, indices.size()), 0);
-            for (int i = 0; i < shown; i++) {
-                if (i > 0) {
-                    out.append(',');
-                }
-                out.append(indices.getInt(i));
+            float integrity = Float.parseFloat(p[6]);
+            // 输入方块：每个位置一块**不同**颜色的羊毛。必须各不相同，否则
+            // `BlockRotProcessor` 把方块换成空气后，「换掉了哪一个」在输出里看不出来，
+            // 洗牌顺序就无法被验证。
+            // Inputs: a **distinct** wool colour per position. They must differ, otherwise
+            // `BlockRotProcessor` turning a block into air makes "which one was replaced"
+            // invisible and the shuffle order becomes unverifiable.
+            List<StructureTemplate.StructureBlockInfo> infos = new java.util.ArrayList<>();
+            for (int i = 0; i < listSize; i++) {
+                var wool = BuiltInRegistries.BLOCK.getValue(
+                        Identifier.parse(WOOL_NAMES[i % WOOL_NAMES.length]));
+                infos.add(new StructureTemplate.StructureBlockInfo(
+                        new BlockPos(i % 4, i / 4, 0),
+                        wool.defaultBlockState(),
+                        null));
             }
-            out.append('\n');
-            // 再补一条 `nextInt` 序列，单独验随机源本身（不经过洗牌）。
-            // Also emit a raw `nextInt` sequence to check the source itself.
-            var src = RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece);
-            out.append("R|").append(String.join("|", p)).append('|');
-            for (int i = 0; i < 8; i++) {
-                if (i > 0) {
-                    out.append(',');
-                }
-                out.append(src.nextInt(1000));
+            StructurePlaceSettings settings = new StructurePlaceSettings();
+            // delegate 必须是 `RuleProcessor`：`BlockRotProcessor` 返回 `null`，而
+            // `finalizeProcessing` 只在 `maybeAltered != null && !equals` 时计数，
+            // `null` 会被跳过，delegate 效果不可观测。
+            // The delegate must be a `RuleProcessor`: `BlockRotProcessor` returns `null`
+            // and `finalizeProcessing` only counts `maybeAltered != null && !equals`, so a
+            // `null` result is skipped and the delegate's effect becomes invisible.
+            List<String> allRules = java.util.List.of(
+                    "minecraft:white_wool", "minecraft:orange_wool",
+                    "minecraft:magenta_wool", "minecraft:light_blue_wool",
+                    "minecraft:yellow_wool", "minecraft:lime_wool",
+                    "minecraft:pink_wool", "minecraft:gray_wool",
+                    "minecraft:light_gray_wool", "minecraft:cyan_wool",
+                    "minecraft:purple_wool", "minecraft:blue_wool",
+                    "minecraft:brown_wool", "minecraft:green_wool",
+                    "minecraft:red_wool", "minecraft:black_wool");
+            // 输出列与 Rust 侧 `all_rules` 的第二列一一对应。
+            // The output column matches the second column of the Rust `all_rules` table.
+            List<String> allOutputs = java.util.List.of(
+                    "minecraft:blue_wool", "minecraft:light_blue_wool",
+                    "minecraft:lime_wool", "minecraft:yellow_wool",
+                    "minecraft:purple_wool", "minecraft:pink_wool",
+                    "minecraft:gray_wool", "minecraft:light_gray_wool",
+                    "minecraft:cyan_wool", "minecraft:orange_wool",
+                    "minecraft:magenta_wool", "minecraft:white_wool",
+                    "minecraft:red_wool", "minecraft:brown_wool",
+                    "minecraft:green_wool", "minecraft:cyan_wool");
+            int enabled = Math.min(
+                    Math.round(allRules.size() * integrity), allRules.size());
+            java.util.List<net.minecraft.world.level.levelgen.structure.templatesystem
+                    .ProcessorRule> rules = new java.util.ArrayList<>();
+            for (int i = 0; i < enabled; i++) {
+                String source = allRules.get(i);
+                String output = allOutputs.get(i);
+                rules.add(new net.minecraft.world.level.levelgen.structure.templatesystem
+                        .ProcessorRule(
+                                new net.minecraft.world.level.levelgen.structure.templatesystem
+                                        .BlockMatchTest(
+                                                BuiltInRegistries.BLOCK.getValue(
+                                                        Identifier.parse(source))),
+                                net.minecraft.world.level.levelgen.structure.templatesystem
+                                        .AlwaysTrueTest.INSTANCE,
+                                BuiltInRegistries.BLOCK.getValue(
+                                        Identifier.parse(output)).defaultBlockState()));
             }
-            out.append('\n');
+            settings.addProcessor(new net.minecraft.world.level.levelgen.structure.templatesystem
+                    .CappedProcessor(
+                            new net.minecraft.world.level.levelgen.structure.templatesystem
+                                    .RuleProcessor(rules),
+                            net.minecraft.util.valueproviders.ConstantInt.of(limit)));
+            // `getLevel().getSeed()` 必须是真种子：`finalizeProcessing` 用它派生随机源。
+            // `getLevel().getSeed()` must be the real seed; `finalizeProcessing` derives its
+            // random source from it.
+            FakeProcessorLevel level = new FakeProcessorLevel(Blocks.AIR.defaultBlockState(), seed);
+            List<StructureTemplate.StructureBlockInfo> processed =
+                    StructureTemplate.processBlockInfos(
+                            level.proxy(), piece, piece, settings, infos);
+            String key = String.join("|", p);
+            out.append("C|").append(key).append('|').append(processed.size()).append('\n');
+            for (StructureTemplate.StructureBlockInfo info : processed) {
+                BlockPos bp = info.pos();
+                out.append("S|").append(key).append('|')
+                        .append(bp.getX()).append('|').append(bp.getY()).append('|')
+                        .append(bp.getZ()).append('|')
+                        .append(BuiltInRegistries.BLOCK.getKey(info.state().getBlock()))
+                        .append('\n');
+            }
         }
         System.out.print(out);
         System.out.flush();
