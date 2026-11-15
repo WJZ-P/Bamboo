@@ -132,7 +132,7 @@ mod tests {
             let pieces = generate(seed, 3, -5).unwrap();
             let last = pieces.last().unwrap();
             assert_eq!(
-                last.extras.get("Template").map(String::as_str),
+                last.get_str("Template"),
                 Some("minecraft:igloo/top")
             );
             assert_eq!(pieces, generate(seed, 3, -5).unwrap());
@@ -154,7 +154,7 @@ mod tests {
                 saw_basement = true;
                 let lab = &pieces[0];
                 assert_eq!(
-                    lab.extras.get("Template").map(String::as_str),
+                    lab.get_str("Template"),
                     Some("minecraft:igloo/bottom")
                 );
                 assert_eq!(pieces.len(), (pieces.len() - 2) + 2);

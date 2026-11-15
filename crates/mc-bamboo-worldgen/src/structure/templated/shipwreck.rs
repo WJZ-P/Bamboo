@@ -139,10 +139,10 @@ mod tests {
             let ocean = generate(seed, 5, -3, false).unwrap();
             let beached = generate(seed, 5, -3, true).unwrap();
             assert_eq!(ocean, generate(seed, 5, -3, false).unwrap());
-            let ocean_name = ocean[0].extras.get("Template").unwrap();
-            let beached_name = beached[0].extras.get("Template").unwrap();
-            assert!(OCEAN.contains(&ocean_name.as_str()), "{ocean_name}");
-            assert!(BEACHED.contains(&beached_name.as_str()), "{beached_name}");
+            let ocean_name = ocean[0].get_str("Template").unwrap();
+            let beached_name = beached[0].get_str("Template").unwrap();
+            assert!(OCEAN.contains(&ocean_name), "{ocean_name}");
+            assert!(BEACHED.contains(&beached_name), "{beached_name}");
         }
     }
 }

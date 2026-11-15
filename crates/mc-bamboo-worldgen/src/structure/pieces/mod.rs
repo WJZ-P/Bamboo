@@ -287,7 +287,7 @@ impl Piece {
         } else {
             format!("{text}.0")
         };
-        self.extras.insert(key.to_owned(), text);
+        self.extras.insert(key.to_owned(), Extra::Str(text));
     }
 
     pub fn put_bool(&mut self, key: &str, value: bool) {
@@ -305,6 +305,17 @@ impl Piece {
     pub fn put_str(&mut self, key: &str, value: &str) {
         self.extras
             .insert(key.to_owned(), Extra::Str(value.to_owned()));
+    }
+
+    /// 取字符串字段（`Extras` 里非字符串返回 `None`）。测试和放置里程碑读模板名用。
+    ///
+    /// Read a string field (`None` for non-string extras). Used by tests and the
+    /// placement milestone to read the template name.
+    pub fn get_str(&self, key: &str) -> Option<&str> {
+        match self.extras.get(key) {
+            Some(Extra::Str(value)) => Some(value.as_str()),
+            _ => None,
+        }
     }
 
     /// 对拍用的标准行：`P id bb6 O GD rot mirror extras`。
