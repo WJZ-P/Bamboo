@@ -3553,9 +3553,17 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join(" ");
     println!("piece element types: {summary}");
-    let missing: Vec<&str> = ["empty", "single", "legacy", "list", "feature"]
+    // `empty_pool_element` 的 `getPieces` 恒返回空列表，**永远不会产出结构件**，
+    // 所以它不该进「必须有件」的检查。数据里它出现在 31 个 pool 里（例如
+    // `village/plains/houses` 的 weight=10），但它对结构件列表的贡献本来就是零。
+    // `empty_pool_element.getPieces` always returns an empty list, so it never yields a
+    // piece and must not be required here. The data does contain it in 31 pools (for
+    // example `village/plains/houses` at weight 10), but its contribution to the piece
+    // list is zero by definition.
+    let available = crate::jigsaw::pool_element_kinds_in_data()?;
+    let missing: Vec<&str> = ["single", "legacy", "list", "feature"]
         .into_iter()
-        .filter(|name| !type_counts.contains_key(*name))
+        .filter(|name| available.contains(*name) && !type_counts.contains_key(*name))
         .collect();
     if !missing.is_empty() {
         println!(
@@ -3563,7 +3571,69 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
             missing.join(", ")
         );
     }
+    let absent: Vec<&str> = ["single", "legacy", "list", "feature"]
+        .into_iter()
+        .filter(|name| !available.contains(*name))
+        .collect();
+    if !absent.is_empty() {
+        println!(
+            "note: pool element types absent from the data: {}",
+            absent.join(", ")
+        );
+    }
+    if available.contains("empty") {
+        println!(
+            "note: `empty` elements are present in the data but yield no pieces by \
+             definition, so they never appear above"
+        );
+    }
     Ok(())
+}
+
+/// 26.3 数据里实际出现过的 pool element 类型（`empty` / `single` / `legacy` /
+/// `list` / `feature` 五种的子集）。
+///
+/// The pool element kinds that actually occur in the 26.3 data (a subset of `empty` /
+/// `single` / `legacy` / `list` / `feature`).
+pub fn pool_element_kinds_in_data() -> Result<std::collections::BTreeSet<&'static str>, String> {
+    let raw: Value =
+        serde_json::from_str(WORLDGEN).map_err(|error| format!("bad worldgen.json: {error}"))?;
+    let pools = raw
+        .get("template_pool")
+        .and_then(Value::as_object)
+        .ok_or("missing template_pool")?;
+    let mut kinds = std::collections::BTreeSet::new();
+    for pool in pools.values() {
+        let Some(elements) = pool.get("elements").and_then(Value::as_array) else {
+            continue;
+        };
+        for element in elements {
+            // `element_type` 嵌在 `element` 对象里：`{element: {element_type, ...}, weight}`。
+            // `element_type` sits inside `element`: `{element: {element_type, ...}, weight}`.
+            let Some(kind) = element
+                .get("element")
+                .and_then(|inner| inner.get("element_type"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let mapped = if kind.ends_with("empty_pool_element") {
+                "empty"
+            } else if kind.ends_with("legacy_single_pool_element") {
+                "legacy"
+            } else if kind.ends_with("single_pool_element") {
+                "single"
+            } else if kind.ends_with("list_pool_element") {
+                "list"
+            } else if kind.ends_with("feature_pool_element") {
+                "feature"
+            } else {
+                continue;
+            };
+            kinds.insert(mapped);
+        }
+    }
+    Ok(kinds)
 }
 
 /// 用生产 `add_pieces` 的结果比 Q 行与全部 P 行；返回第一个差异描述。
