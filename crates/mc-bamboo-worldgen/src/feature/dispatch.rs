@@ -15,6 +15,7 @@ use super::{
     block_blob::{self, BlockBlobFeature},
     blue_ice::{self, BlueIceFeature},
     disk::{self, DiskFeature},
+    freeze_top_layer::{self, FreezeTopLayerFeature},
     geode::{self, GeodeFeature},
     huge_mushroom::HugeMushroomFeature,
     iceberg::{self, IcebergFeature},
@@ -41,6 +42,7 @@ type Pos = (i32, i32, i32);
 pub enum Leaf {
     BlockBlob(BlockBlobFeature),
     BlueIce(BlueIceFeature),
+    FreezeTopLayer(FreezeTopLayerFeature),
     Disk(DiskFeature),
     Geode(Box<GeodeFeature>),
     Iceberg(IcebergFeature),
@@ -66,6 +68,9 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         "minecraft:block_blob" => Leaf::BlockBlob(BlockBlobFeature::parse(config).ok()?),
         "minecraft:blue_ice" => Leaf::BlueIce(BlueIceFeature::parse(config).ok()?),
         "minecraft:disk" => Leaf::Disk(DiskFeature::parse(config).ok()?),
+        "minecraft:freeze_top_layer" => {
+            Leaf::FreezeTopLayer(FreezeTopLayerFeature::parse(config).ok()?)
+        }
         "minecraft:geode" => Leaf::Geode(Box::new(GeodeFeature::parse(config).ok()?)),
         "minecraft:iceberg" => Leaf::Iceberg(IcebergFeature::parse(config).ok()?),
         "minecraft:lake" => Leaf::Lake(Box::new(LakeFeature::parse(config).ok()?)),
@@ -127,6 +132,7 @@ pub fn place_leaf(
         Leaf::BlockBlob(blob) => block_blob::place(blob, world, random, pos),
         Leaf::BlueIce(feature) => blue_ice::place(feature, world, random, pos),
         Leaf::Disk(disk) => disk::place(disk, world, random, pos),
+        Leaf::FreezeTopLayer(feature) => freeze_top_layer::place(feature, world, random, pos),
         Leaf::Geode(geode) => geode::place(geode, world, random, pos),
         Leaf::Iceberg(iceberg) => iceberg::place(iceberg, world, random, pos),
         Leaf::MonsterRoom(room) => monster_room::place(room, world, random, pos),

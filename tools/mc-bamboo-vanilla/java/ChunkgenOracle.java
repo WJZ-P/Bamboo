@@ -291,6 +291,21 @@ final class FeatureLevelHandler implements InvocationHandler {
                 // `LevelReader.isWaterAt(pos)`: the cell's fluid is in `FluidTags.WATER`.
                 return getFluidState((BlockPos) args[0])
                         .is(net.minecraft.tags.FluidTags.WATER);
+            case "getBrightness":
+            case "getRawBrightness": {
+                // features 阶段还没有生成期光照（官方在 FEATURES 之后才 `initializeLight`），
+                // 方块光恒为 0、天空光按 15 计；`Biome.shouldFreeze` / `shouldSnow` 只要
+                // 「方块光 < 10」，这条恒成立。
+                // Generation-time light does not exist during the features stage (the
+                // official pipeline only runs `initializeLight` after FEATURES), so block
+                // light is 0 and skylight is 15. `Biome.shouldFreeze` / `shouldSnow` only
+                // need "block light < 10", which always holds.
+                Object layerOrPos = args[0];
+                if (layerOrPos instanceof net.minecraft.world.level.LightLayer layer) {
+                    return layer == net.minecraft.world.level.LightLayer.SKY ? 15 : 0;
+                }
+                return 15;
+            }
             case "getHeightmapPos": {
                 // LevelReader.getHeightmapPos：x/z 不变，y 换成 getHeight(type,x,z)。
                 Heightmap.Types type = (Heightmap.Types) args[0];

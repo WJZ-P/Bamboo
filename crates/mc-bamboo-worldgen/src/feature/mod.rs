@@ -15,6 +15,7 @@ pub mod disk;
 pub mod dispatch;
 #[cfg(test)]
 pub mod dripstone_probe;
+pub mod freeze_top_layer;
 pub mod geode;
 pub mod heightmap;
 pub mod huge_mushroom;

@@ -3,7 +3,11 @@
 //! 读写范围照 `WorldGenRegion`（`writeRadius = 1`）：3×3 之外的写直接丢弃，
 //! 读超出会抛错（对拍时那意味着地物访问了我们没准备的区块）。
 
+use std::cell::RefCell;
+
 use mc_bamboo_data::{facts, state_facts};
+
+use crate::{biome_manager::BiomeManager, sampler::Context, settings::Samplers};
 
 use super::{CENTER, ChunkBlocks, FeatureChunks, FeatureResult, Heightmaps, heightmap::is_opaque};
 
@@ -33,10 +37,27 @@ pub struct FeatureWorld<'a> {
     pub heights: [Heightmaps; 9],
     /// 8 个邻居的写增量，中心不记（中心直接交回 `blocks[4]`）。
     pub deltas: [Vec<(i32, i32, i32, u32)>; 9],
+    /// `level.getBiome(pos)` 的逐点求解：官方走 `BiomeManager.getBiome` 的八角平滑，
+    /// 不是直接读 quart 群系格。`freeze_top_layer` 这类要问群系温度的地物用它。
+    ///
+    /// Per-point `level.getBiome(pos)`: the official path is `BiomeManager.getBiome`'s
+    /// eight-corner smoothing, not a direct quart-cell read.
+    pub biome_manager: &'a BiomeManager<'a>,
+    pub samplers: &'a Samplers,
+    /// `SamplerContext.EMPTY_UNCACHED`：单点求值不记忆缓存。
+    ///
+    /// `SamplerContext.EMPTY_UNCACHED`: single-point evaluation keeps no cache.
+    biome_context: RefCell<Context>,
 }
 
 impl<'a> FeatureWorld<'a> {
-    pub fn new(input: &'a FeatureChunks, sea_level: i32, seed: i64) -> Result<Self, String> {
+    pub fn new(
+        input: &'a FeatureChunks,
+        sea_level: i32,
+        seed: i64,
+        biome_manager: &'a BiomeManager<'a>,
+        samplers: &'a Samplers,
+    ) -> Result<Self, String> {
         if input.blocks.len() != 9 || input.biomes.len() != 9 || input.heights.len() != 9 {
             return Err("FeatureChunks must contain 9 chunks".to_owned());
         }
@@ -52,6 +73,9 @@ impl<'a> FeatureWorld<'a> {
             biomes: &input.biomes,
             heights: input.heights,
             deltas: empty(),
+            biome_manager,
+            samplers,
+            biome_context: RefCell::new(Context::uncached()),
         })
     }
 
@@ -186,6 +210,16 @@ impl<'a> FeatureWorld<'a> {
     /// `BiomeFilter` 需要这个，见 `feature::run`。
     pub fn is_air(&self, x: i32, y: i32, z: i32) -> bool {
         state_facts(self.get_block(x, y, z)) & facts::AIR != 0
+    }
+
+    /// `LevelReader.getBiome(pos)`：`BiomeManager.getBiome` 的八角平滑，逐点求值。
+    ///
+    /// `LevelReader.getBiome(pos)`: `BiomeManager.getBiome`'s eight-corner smoothing,
+    /// evaluated per point.
+    pub fn get_biome(&self, x: i32, y: i32, z: i32) -> u32 {
+        let mut context = self.biome_context.borrow_mut();
+        self.biome_manager
+            .biome(self.samplers, &mut context, x, y, z)
     }
 
     /// `LevelHeightAccessor.isInsideBuildHeight(y)`。
