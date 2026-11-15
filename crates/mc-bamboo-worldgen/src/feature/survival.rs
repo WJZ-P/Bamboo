@@ -345,7 +345,15 @@ fn classify(state: u32) -> Option<Kind> {
     Some(match class {
         // `BlockBehaviour.canSurvive` 默认 true；PumpkinBlock 直接继承 Block。
         // `BlockBehaviour.canSurvive` defaults to true; PumpkinBlock extends Block.
-        BlockClass::Block | BlockClass::PumpkinBlock => Kind::Default,
+        // 幽匿催化剂 / 传感器 / 尖啸体都不覆写 `canSurvive`，同样走默认 true。
+        // The sculk catalyst / sensor / shrieker do not override `canSurvive`, so they
+        // take the default of true as well.
+        BlockClass::Block
+        | BlockClass::PumpkinBlock
+        | BlockClass::SculkCatalystBlock
+        | BlockClass::SculkSensorBlock
+        | BlockClass::SculkShriekerBlock
+        | BlockClass::CalibratedSculkSensorBlock => Kind::Default,
         // 直接继承 VegetationBlock、不覆写 canSurvive 的类，标签判定。
         // Classes extending VegetationBlock without overriding canSurvive: a tag check.
         BlockClass::BushBlock

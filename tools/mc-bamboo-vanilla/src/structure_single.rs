@@ -144,7 +144,7 @@ fn query_key(q: &Query) -> String {
 
 fn rust_lines(q: &Query) -> Result<Vec<String>, String> {
     let pieces: Vec<Piece> = single::generate(q.kind, q.seed, q.cx, q.cz)?;
-    Ok(pieces.iter().map(Piece::canonical_line).collect())
+    Ok(pieces.iter().map(Piece::plain_line).collect())
 }
 
 fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {

@@ -28,12 +28,12 @@ pub struct FeatureContext<'a> {
     /// 只跑这些 step；`(1<<11)-1` 表示全部。过渡期诊断用。
     pub steps_mask: i32,
     /// 只跑这些条目；`None` 表示全部。每个条目是 Feature 类型 ID 或 placed feature
-    /// 注册名，和 Java 侧 `--feature-types` 的白名单判定一致（精确匹配其一）。
+    /// 注册名，和 Java 侧 `--feature-types` / `--types` 的白名单判定一致（精确匹配其一）。
     /// 过渡期诊断用。
     ///
     /// Only run these entries; `None` means all. Each entry is a Feature type ID or
     /// a placed-feature registry name, matched the same way as Java's
-    /// `--feature-types` allow list (exact match on either). Diagnostic only.
+    /// `--feature-types` / `--types` allow list (exact match on either). Diagnostic only.
     pub allowed_kinds: Option<&'a [String]>,
     /// `WorldGenRegion.getRandom()`：`MossyCarpetBlock.placeAt` 一类调用读的是它，
     /// 不是 `(index, step)` 播种的地物 `random`。整个 `features` 调用共用一份。
@@ -45,7 +45,7 @@ pub struct FeatureContext<'a> {
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数。
 pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<FeatureResult, String> {
-    let mut world = FeatureWorld::new(input)?;
+    let mut world = FeatureWorld::new(input, ctx.settings.sea_level, ctx.seed)?;
     let mut unsupported = false;
 
     // 字节码 132-177：ChunkPos.rangeClosed(center,1) 九个区块，把每个 section 的
@@ -96,10 +96,10 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 let Some(id) = ctx.registry.placed_id(name) else {
                     continue;
                 };
-                // 过渡期 `--feature-types` / `--ore-only`：Java 侧把不在白名单里的
-                // HolderSet 换空了，这里要用同一套判定收集 indices，否则两边跑的
-                // (index, step) 集合不同。白名单条目既可以是 placed feature 注册名，
-                // 也可以是 Feature 类型 ID；两处都精确匹配其一，和 Java 对称。
+                // 过渡期 `--feature-types` / `--types` / `--ore-only`：Java 侧把不在
+                // 白名单里的 HolderSet 换空了，这里要用同一套判定收集 indices，否则
+                // 两边跑的 (index, step) 集合不同。白名单条目既可以是 placed feature
+                // 注册名，也可以是 Feature 类型 ID；两处都精确匹配其一，和 Java 对称。
                 // Java empties the non-whitelisted HolderSets; collect indices with
                 // the same rule so both sides run the same (index, step) set. A
                 // selector is a placed-feature name OR a Feature type ID, matched

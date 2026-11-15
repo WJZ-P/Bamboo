@@ -404,10 +404,18 @@ impl PositionalFactory {
 pub struct WorldgenRandom {
     source: Random,
     count: Cell<u32>,
-    /// `MarsagliaPolarGaussian.nextNextGaussian`。
+    /// `MarsagliaPolarGaussian` 一次算两个值，第二个留到下一次 `nextGaussian()`。
+    /// 挂在 `WorldgenRandom` 上（不是内层源）：`nextGaussian()` 走的是本类型的
+    /// `nextDouble()`（`BitRandomSource` 的 26+27 位路径）。
+    /// `MarsagliaPolarGaussian` computes two values per round and caches the second.
+    /// It lives on `WorldgenRandom` (not the inner source): `nextGaussian()` uses this
+    /// type's `nextDouble()` (the `BitRandomSource` 26+27 bit path).
     ///
-    /// `MarsagliaPolarGaussian.nextNextGaussian`.
-    next_gaussian: Cell<Option<f64>>,
+    /// `setSeed` 会清掉它 —— 官方的 `WorldgenRandom` 继承 `LegacyRandomSource`，
+    /// 而 `LegacyRandomSource.setSeed` 调 `gaussianSource.reset()`。
+    /// `setSeed` clears it: the official `WorldgenRandom` extends `LegacyRandomSource`,
+    /// whose `setSeed` calls `gaussianSource.reset()`.
+    gaussian: Cell<Option<f64>>,
 }
 
 impl WorldgenRandom {
@@ -415,7 +423,7 @@ impl WorldgenRandom {
         Self {
             source,
             count: Cell::new(0),
-            next_gaussian: Cell::new(None),
+            gaussian: Cell::new(None),
         }
     }
 
@@ -430,9 +438,9 @@ impl WorldgenRandom {
 
     pub fn set_seed(&self, seed: i64) {
         self.source.set_seed(seed);
-        // `MarsagliaPolarGaussian.reset()` 清掉缓存的那一半。
-        // `MarsagliaPolarGaussian.reset()` drops the cached half.
-        self.next_gaussian.set(None);
+        // 官方 `WorldgenRandom.setSeed` 只转发给内层源，不清 gaussian 缓存。
+        // The official `WorldgenRandom.setSeed` only forwards to the inner source and
+        // leaves the gaussian cache alone.
     }
 
     fn next(&self, bits: u32) -> i32 {
@@ -492,14 +500,22 @@ impl WorldgenRandom {
         self.next(1) != 0
     }
 
-    /// `RandomSource.nextGaussian()`：和 `LegacyRandomSource` 的默认实现一致 ——
-    /// Marsaglia 极坐标法，缓存另一半（`nextGaussian` 字段）。
+    /// `RandomSource.nextGaussian()`：`LegacyRandomSource` 把这个委托给
+    /// `MarsagliaPolarGaussian`，后者用 `this.nextDouble()`（`BitRandomSource` 默认实现，
+    /// 两次 `next`）取两个 (-1,1) 的样本，极坐标变换后缓存第二个。
     ///
-    /// `RandomSource.nextGaussian()`: the `LegacyRandomSource` default — the Marsaglia
-    /// polar method caching the second value.
+    /// 注意：官方 `WorldgenRandom.setSeed` 只转发到内层 `RandomSource.setSeed`
+    /// （`javap` 第 77 行），**不**调自己的 `gaussianSource.reset()`，所以缓存的那一半
+    /// 会跨 `setFeatureSeed` 保留；这里也刻意不在 `set_seed` 里清 `gaussian`。
+    ///
+    /// `RandomSource.nextGaussian()`: `LegacyRandomSource` delegates to
+    /// `MarsagliaPolarGaussian`, which draws two (-1,1) samples via `this.nextDouble()`
+    /// (the `BitRandomSource` default, two `next` calls), transforms them, and caches
+    /// the second. `WorldgenRandom.setSeed` only forwards to the inner
+    /// `RandomSource.setSeed` and does **not** call `gaussianSource.reset()`, so the
+    /// cached value survives `setFeatureSeed`; we likewise do not clear it.
     pub fn next_gaussian(&self) -> f64 {
-        if let Some(value) = self.next_gaussian.get() {
-            self.next_gaussian.set(None);
+        if let Some(value) = self.gaussian.take() {
             return value;
         }
         loop {
@@ -508,7 +524,7 @@ impl WorldgenRandom {
             let radius_squared = x * x + y * y;
             if radius_squared < 1.0 && radius_squared != 0.0 {
                 let multiplier = (-2.0 * radius_squared.ln() / radius_squared).sqrt();
-                self.next_gaussian.set(Some(y * multiplier));
+                self.gaussian.set(Some(y * multiplier));
                 return x * multiplier;
             }
         }

@@ -615,6 +615,24 @@ pub fn light_dampening(state: u32) -> u8 {
     states::LIGHT_DAMPENING[state as usize]
 }
 
+/// `BlockState.rotate(rotation)`：按 `Rotation.ordinal()`（0=NONE、1=CLOCKWISE_90、
+/// 2=CLOCKWISE_180、3=COUNTERCLOCKWISE_90）查表。状态 ID 不存在时 panic。
+///
+/// `BlockState.rotate(rotation)` looked up by `Rotation.ordinal()` (0=NONE,
+/// 1=CLOCKWISE_90, 2=CLOCKWISE_180, 3=COUNTERCLOCKWISE_90). Panics on an unknown state.
+pub fn state_rotation(state: u32, rotation: u32) -> u32 {
+    states::STATE_ROTATION[state as usize * 4 + rotation as usize]
+}
+
+/// `BlockState.mirror(mirror)`：按 `Mirror.ordinal()`（0=NONE、1=LEFT_RIGHT、
+/// 2=FRONT_BACK）查表。状态 ID 不存在时 panic。
+///
+/// `BlockState.mirror(mirror)` looked up by `Mirror.ordinal()` (0=NONE, 1=LEFT_RIGHT,
+/// 2=FRONT_BACK). Panics on an unknown state.
+pub fn state_mirror(state: u32, mirror: u32) -> u32 {
+    states::STATE_MIRROR[state as usize * 3 + mirror as usize]
+}
+
 /// 状态的 `getLightEmission`。状态 ID 不存在时 panic。
 pub fn light_emission(state: u32) -> u8 {
     light::LIGHT_EMISSION[state as usize]

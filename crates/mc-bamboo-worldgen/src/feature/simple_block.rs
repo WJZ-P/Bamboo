@@ -3,13 +3,14 @@
 //! 官方 `SimpleBlockFeature.place`：`to_place.getOptionalState` → `canSurvive` →
 //! 按方块类型分派（DoublePlantBlock / MossyCarpetBlock 走 placeAt，其余 `setBlock(pos, state, 2)`）。
 //! 26.3 的 `to_place` 是 `Holder<BlockStateProvider>`：内联 bare state（`{"id":...}`）等价于
-//! `SimpleStateProvider`，注册名字符串引用的是 `BLOCK_STATE_PROVIDER` 注册表（本轮未导出），
-//! `weighted` / `randomized_int` 是 typed provider。这里只实现内联 bare state，其余标 unsupported。
+//! `SimpleStateProvider`，注册名字符串按 `block_state_provider` 注册表解析，
+//! `weighted` / `randomized_int` / `random_block` 是 typed provider。
 //!
 //! Official `SimpleBlockFeature.place`: `getOptionalState` -> `canSurvive` -> dispatch by block
 //! class (DoublePlantBlock / MossyCarpetBlock use placeAt, else `setBlock(pos, state, 2)`).
-//! Only inline bare-state `to_place` (SimpleStateProvider) is ported; holder references and
-//! typed providers stay unsupported.
+//! `to_place` is a `Holder<BlockStateProvider>`: an inline bare state is a
+//! `SimpleStateProvider`, a registry name resolves through `block_state_provider`, and
+//! `weighted` / `randomized_int` / `random_block` are typed providers.
 
 use serde_json::Value;
 
@@ -40,6 +41,9 @@ impl SimpleBlockFeature {
     ) -> Option<Self> {
         let to_place = config.as_object()?.get("to_place")?;
         let provider = StateProvider::parse_with(to_place, lookup)?;
+        if !provider.supported() {
+            return None;
+        }
         if !provider
             .possible_states()
             .iter()
@@ -62,7 +66,7 @@ impl SimpleBlockFeature {
         region_random: &WorldgenRandom,
         pos: Pos,
     ) -> bool {
-        let Some(state) = self.provider.get_state(random) else {
+        let Some(state) = self.provider.get_optional_state(world, random, pos) else {
             return false;
         };
         if !survival::can_survive(state, world, pos) {

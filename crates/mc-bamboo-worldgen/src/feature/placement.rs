@@ -36,6 +36,10 @@ pub enum Modifier {
     ///
     /// `BlockPredicateFilter`: passes a candidate through unchanged, no random.
     BlockPredicateFilter(BlockPredicate),
+    /// `RandomChancePlacement`：`nextFloat() < chance` 才放行。
+    ///
+    /// `RandomChancePlacement`: forward only when `nextFloat() < chance`.
+    RandomChance(f32),
     /// `NoiseBasedCountPlacement`：用静态 `SimplexNoise` 算重复次数，不消费随机数。
     ///
     /// `NoiseBasedCountPlacement`: repeats via a static `SimplexNoise`, no random consumed.
@@ -81,7 +85,7 @@ pub enum Modifier {
     /// `CountOnEveryLayerPlacement`: place once per underground layer, walking the
     /// air-to-solid boundaries bottom-up.
     CountOnEveryLayer(IntProvider),
-    /// 已解析但本轮不生效的修饰器（例如 `surface_relative_threshold_filter`）。
+    /// 已解析但本轮不生效的修饰器（例如 `noise_threshold_count`）。
     /// 命中时置 `unsupported`，让对拍跳过这个区块。
     Unsupported(String),
 }
@@ -117,6 +121,15 @@ impl Modifier {
                     .ok_or("heightmap is not a string")?,
             )?),
             "minecraft:biome" => Self::Biome,
+            // `RandomChancePlacement`：`chance` 是 float，范围 0..1。
+            // `RandomChancePlacement`: `chance` is a float in 0..1.
+            "minecraft:random_chance" => Self::RandomChance(
+                field("chance")?
+                    .as_f64()
+                    .ok_or("random_chance chance is not a number")? as f32,
+            ),
+            // `SurfaceWaterDepthFilter`：`max_water_depth` 是 int。
+            // `SurfaceWaterDepthFilter`: `max_water_depth` is an int.
             "minecraft:surface_water_depth_filter" => Self::SurfaceWaterDepthFilter(
                 field("max_water_depth")?
                     .as_i64()
@@ -328,6 +341,13 @@ fn modify(
                 out.push(pos);
             }
         }
+        // `RandomChancePlacement.shouldPlace`：先取一次 nextFloat 再比。
+        // `RandomChancePlacement.shouldPlace`: one nextFloat draw, then compare.
+        Modifier::RandomChance(chance) => {
+            if random.next_float() < *chance {
+                out.push(pos);
+            }
+        }
         // `NoiseBasedCountPlacement.count`：`ceil((BIOME_INFO_NOISE.get(x/f, z/f) + offset) * ratio)`，
         // 然后把 origin 复制 count 次；不消费随机数。
         // `NoiseBasedCountPlacement.count`: ceil of the scaled static noise, then
@@ -367,7 +387,8 @@ fn modify(
                 out.push(pos);
             }
         }
-        // `SurfaceWaterDepthFilter.shouldPlace`：两张高度图之差不超过上限才放行。        // `SurfaceWaterDepthFilter.shouldPlace`: forward only when the two heightmaps
+        // `SurfaceWaterDepthFilter.shouldPlace`：两张高度图之差不超过上限才放行。
+        // `SurfaceWaterDepthFilter.shouldPlace`: forward only when the two heightmaps
         // differ by at most the configured depth.
         Modifier::SurfaceWaterDepthFilter(max) => {
             let y_ocean = ctx.world.get_height(HeightmapKind::OceanFloor, x, z);
@@ -414,6 +435,17 @@ fn modify(
                 out.push(pos);
             }
         }
+        // `SurfaceWaterDepthFilter.shouldPlace`：两张高度图之差不超过上限才放行。
+        // `SurfaceWaterDepthFilter.shouldPlace`: forward only when the two heightmaps
+        // differ by at most the configured depth.
+        Modifier::SurfaceWaterDepthFilter(max) => {
+            let y_ocean = ctx.world.get_height(HeightmapKind::OceanFloor, x, z);
+            let y_surface = ctx.world.get_height(HeightmapKind::WorldSurface, x, z);
+            if y_surface - y_ocean <= *max {
+                out.push(pos);
+            }
+        }
+        Modifier::Unsupported(_) => {}
     }
 }
 
