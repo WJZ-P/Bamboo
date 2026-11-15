@@ -326,3 +326,141 @@ fn place_liquid(level: &mut dyn PieceLevel, pos: (i32, i32, i32), state: u32, fl
         mc_bamboo_blocks::BlockState(fluid).fluid(),
     )
 }
+
+/// `BlockStateParser.parseForBlock(..., stateString, true)`：解析
+/// `minecraft:oak_planks[axis=y]` 这种拼图方块的 `final_state`。
+///
+/// 官方在 `BlockStateParser` 里把 `name[props]` 拆开、按 `StateDefinition` 逐属性校验；
+/// 这里复用 `mc-bamboo-data` 的方块表与 `feature::state::with_property`，行为相同。
+///
+/// `BlockStateParser.parseForBlock(..., stateString, true)`: parse a jigsaw block's
+/// `final_state` such as `minecraft:oak_planks[axis=y]`. Vanilla splits `name[props]` and
+/// validates each property against the `StateDefinition`; this reuses `mc-bamboo-data`'s
+/// block table and `feature::state::with_property`, which behaves the same.
+pub fn parse_block_state(text: &str) -> Result<u32, String> {
+    let (name, rest) = match text.split_once('[') {
+        Some((name, rest)) => (name, Some(rest.strip_suffix(']').unwrap_or(rest))),
+        None => (text, None),
+    };
+    let mut state = mc_bamboo_data::block_by_name(name)
+        .ok_or_else(|| format!("unknown block {name}"))?
+        .default_state;
+    let Some(props) = rest else {
+        return Ok(state);
+    };
+    for pair in props.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| format!("bad block state property {pair}"))?;
+        state = crate::feature::state::with_property(state, key.trim(), value.trim())
+            .ok_or_else(|| format!("{name} has no property {key}={value}"))?;
+    }
+    Ok(state)
+}
+
+/// `TemplateStructurePiece.postProcess` 里那段拼图方块替换。
+///
+/// 官方对 `filterBlocks(..., JIGSAW)` 的每个拼图方块读 `final_state`（缺省
+/// `minecraft:air`）、`BlockStateParser.parseForBlock` 解析，然后
+/// `level.setBlockAndUpdate(pos, targetState)`。解析失败只记日志。
+///
+/// The jigsaw-block replacement inside `TemplateStructurePiece.postProcess`. For every
+/// jigsaw block from `filterBlocks(..., JIGSAW)`, vanilla reads `final_state` (default
+/// `minecraft:air`), parses it with `BlockStateParser.parseForBlock` and calls
+/// `level.setBlockAndUpdate(pos, targetState)`. A parse failure is only logged.
+pub fn replace_jigsaws(
+    template: &StructureTemplate,
+    position: (i32, i32, i32),
+    settings: PlaceSettings,
+    chunk_bb: &[i32; 6],
+    level: &mut dyn PieceLevel,
+) {
+    let Some(palette_index) = template.palette_index(position) else {
+        return;
+    };
+    let Some(jigsaws) = template.palette_jigsaws.get(palette_index) else {
+        return;
+    };
+    for jigsaw in jigsaws {
+        let local = transform_pos(jigsaw.pos, settings.mirror, settings.rotation);
+        let world = (
+            local.0 + position.0,
+            local.1 + position.1,
+            local.2 + position.2,
+        );
+        if !box_is_inside(chunk_bb, world.0, world.1, world.2) {
+            continue;
+        }
+        // 解析失败只记日志，不中断（官方 `catch (CommandSyntaxException)` 后保留默认 air）。
+        // A parse failure is only logged; vanilla keeps the default air and continues.
+        let Ok(state) = parse_block_state(&jigsaw.final_state) else {
+            continue;
+        };
+        level.set_block(world.0, world.1, world.2, state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_block_state_reads_a_name_and_its_properties() {
+        let plain = parse_block_state("minecraft:stone").unwrap();
+        assert_eq!(
+            mc_bamboo_data::blocks::BLOCKS[mc_bamboo_data::block_id_of_state(plain).unwrap()].name,
+            "minecraft:stone"
+        );
+        let with_props = parse_block_state("minecraft:oak_log[axis=x]").unwrap();
+        let id = mc_bamboo_data::block_id_of_state(with_props).unwrap();
+        assert_eq!(mc_bamboo_data::blocks::BLOCKS[id].name, "minecraft:oak_log");
+        assert_ne!(
+            with_props,
+            parse_block_state("minecraft:oak_log[axis=y]").unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_block_state_rejects_unknown_blocks_and_properties() {
+        assert!(parse_block_state("minecraft:not_a_block").is_err());
+        assert!(parse_block_state("minecraft:stone[nope=1]").is_err());
+    }
+
+    #[test]
+    fn transform_pos_matches_the_vanilla_corner_cases() {
+        // `StructureTemplate.transform` 的四条分支各取一个点（pivot 为 ZERO）：
+        // CCW90 → `(-z, y, -x)`，CW90 → `(-z, y, x)`，CW180 → `(-x, y, -z)`。
+        // One point per `StructureTemplate.transform` branch with a zero pivot:
+        // CCW90 is `(-z, y, -x)`, CW90 `(-z, y, x)`, CW180 `(-x, y, -z)`.
+        assert_eq!(
+            transform_pos((3, 1, 5), Mirror::None, Rotation::None),
+            (3, 1, 5)
+        );
+        assert_eq!(
+            transform_pos((3, 1, 5), Mirror::None, Rotation::Clockwise180),
+            (-3, 1, -5)
+        );
+        assert_eq!(
+            transform_pos((3, 1, 5), Mirror::None, Rotation::Clockwise90),
+            (-5, 1, 3)
+        );
+        assert_eq!(
+            transform_pos((3, 1, 5), Mirror::None, Rotation::CounterClockwise90),
+            (5, 1, -3)
+        );
+        // 镜像先作用，再旋转。
+        // The mirror runs first, then the rotation.
+        assert_eq!(
+            transform_pos((3, 1, 5), Mirror::LeftRight, Rotation::None),
+            (3, 1, -5)
+        );
+        assert_eq!(
+            transform_pos((3, 1, 5), Mirror::FrontBack, Rotation::None),
+            (-3, 1, 5)
+        );
+    }
+}

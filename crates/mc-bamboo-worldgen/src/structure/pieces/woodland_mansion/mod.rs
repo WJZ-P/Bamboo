@@ -480,6 +480,13 @@ pub fn place_piece(
     // The two shape-update steps at the end of `placeInWorld` (`getKnownShape()` false).
     crate::structure::template_shape_update::update_shapes(level, &placed);
 
+    // `TemplateStructurePiece.postProcess` 里数据标记与拼图替换的顺序：官方先遍历
+    // `filterBlocks(..., STRUCTURE_BLOCK)` 调 `handleDataMarker`，再遍历
+    // `filterBlocks(..., JIGSAW)` 替换拼图方块。这里保留同样的先后。
+    // Vanilla's order in `TemplateStructurePiece.postProcess`: first the
+    // `filterBlocks(..., STRUCTURE_BLOCK)` loop calling `handleDataMarker`, then the
+    // `filterBlocks(..., JIGSAW)` loop replacing jigsaw blocks. Kept in the same order.
+
     // `handleDataMarker`：只做箱子那一段。
     // `handleDataMarker`: the chest part only.
     for (local, entry) in template.blocks.iter().zip(0..) {
@@ -511,6 +518,15 @@ pub fn place_piece(
         }
         write_marker_chest(level, world, &metadata, rotation, random);
     }
+
+    // 拼图方块替换（官方的 `filterBlocks(..., JIGSAW)` 那一段）。府邸模板里没有拼图方块，
+    // 所以这一段在府邸上不产生任何写入；接上它是为了让这条路径对其它模板结构件可用。
+    // Jigsaw-block replacement (vanilla's `filterBlocks(..., JIGSAW)` loop). The mansion's
+    // templates carry no jigsaw blocks, so this writes nothing for the mansion; it is wired
+    // in so the path is ready for other template pieces.
+    crate::structure::template_place::replace_jigsaws(
+        &template, position, settings, chunk_bb, level,
+    );
     Ok(())
 }
 
