@@ -1506,10 +1506,23 @@ for (int y = 0; y < rootColumnMaxHeight; y++) {
 `cherry_leaves` / `coarse_dirt` / `note_block`）。这一条已按此实现并写进
 `survival.rs` 的注释。
 
-**未验证的部分**：`mushroom_island_vegetation`（蘑菇岛群系，`huge_red/brown_mushroom`
-巨型蘑菇）和 `brown_mushroom_normal` 等 placed feature 没有拿到 0 不一致对拍 ——
-前者依赖 `huge_*_mushroom`（属 `cb-wg-trees`），后者需要专门的群系覆盖。所以「亮度
-恒为 15」这个结论**目前只有源码推导，没有逐方块对拍证据**。
+**已验证（第二十一轮）**：用临时集成测试扫出 seed 0 下全 24 段都是 `mushroom_fields`
+的区块 `(-8628,0)`（1536/1536 个 quart 格），对拍：
+
+```
+--through features --steps 9 \
+  --feature-types minecraft:mushroom_island_vegetation,minecraft:brown_mushroom_taiga,\
+minecraft:red_mushroom_taiga,minecraft:brown_mushroom_normal,minecraft:red_mushroom_normal \
+  --chunk -8628 0 --scan 9 --seeds 1
+```
+
+结果 **0 不一致 / 0 skipped**（9 中心 / 7962624 方块）。改坏验证：把
+`mushroom_can_survive` 改成恒 `true`（无视亮度标签）后报 **160 处**
+（`bamboo 3828` = `brown_mushroom`，`official 0`），证明蘑菇确实被真实放置，
+「亮度恒为 15」这条判据也在起作用。
+
+注意 `mushroom_island_vegetation` 里的 `huge_red/brown_mushroom` 属 `cb-wg-trees`，
+本轮放开的 5 个 placed feature 都能跑到；巨型蘑菇本身仍归树队员。
 
 #### 本分支还没做（诚实标 `unsupported`）
 
