@@ -512,6 +512,30 @@ fn compare_pools(stdout: &str, queries: &[String]) -> Result<(), String> {
         .join(" ");
     println!("jigsaw pools: {checked} pools, {pieces_checked} pieces, all Q/P fields identical");
     println!("pool element types: {summary}");
+    // 与 `pieces` 一致：只要求「数据里真的有」且「会产件」的类型被比到。
+    // `empty_pool_element` 的 `getPieces` 恒返回空列表，数据里虽有 31 处，但不可能
+    // 出现在上面这份统计里。
+    // Same rule as `pieces`: only kinds that exist in the data and yield pieces are
+    // required. `empty_pool_element.getPieces` always returns an empty list, so although
+    // the data has 31 of them they can never appear in the summary above.
+    let available = pool_element_kinds_in_data()?;
+    let missing: Vec<&str> = ["single", "legacy", "list", "feature"]
+        .into_iter()
+        .filter(|name| available.contains(*name) && !type_counts.contains_key(*name))
+        .collect();
+    if !missing.is_empty() {
+        println!(
+            "note: pool element types never compared: {}",
+            missing.join(", ")
+        );
+    }
+    if available.contains("empty") {
+        println!(
+            "note: `empty` elements never appear above because they yield no pieces, but \
+             their `break` in the target loop is covered by the Q/P comparison (turning it \
+             into `continue` reports 109/980 pools differing)"
+        );
+    }
     Ok(())
 }
 
@@ -3583,8 +3607,9 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
     }
     if available.contains("empty") {
         println!(
-            "note: `empty` elements are present in the data but yield no pieces by \
-             definition, so they never appear above"
+            "note: `empty` elements never appear above because they yield no pieces, but \
+             their `break` in the target loop is covered by the Q/P comparison (turning it \
+             into `continue` reports 109/980 pools differing)"
         );
     }
     Ok(())
