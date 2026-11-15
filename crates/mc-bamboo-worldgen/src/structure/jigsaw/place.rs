@@ -279,54 +279,58 @@ pub fn place_processed(
                     // `state.getFluidState().isSource()`：新方块本身是流体源，锁定该位置。
                     // The new block is itself a fluid source: lock the position.
                     locked_fluids.insert(pos);
-                } else if is_waterloggable(state_out) && is_water {
-                    // `SimpleWaterloggedBlock.placeLiquid`：`!waterlogged && fluidState.is(WATER)`。
-                    // `is(WATER)` 比较的是**流体类型**，流动水也满足；所以只要该位置原本
-                    // 有流体（源或流动）就会灌。灌完若原流体不是源，加入 `toFill` 等待
-                    // 相邻源扩散。
-                    // `is(WATER)` compares the fluid *type*, so flowing water counts too:
-                    // any fluid at the position triggers it. A non-source fluid joins
-                    // `toFill` so a neighbouring source can spread in.
-                    if let Some(waterlogged) = with_waterlogged(state_out, true) {
-                        world.set_block(pos.0, pos.1, pos.2, waterlogged);
-                        if !source {
-                            to_fill.push(pos);
-                        }
+                } else if is_liquid_container(state_out) {
+                    // `state.getBlock() instanceof LiquidBlockContainer` →
+                    // `placeLiquid(...)`；**返回 false 也照样**把位置加入 `toFill`。
+                    // The `placeLiquid` call; the position joins `toFill` even when it
+                    // returns false.
+                    if let Some(filled_state) = place_liquid(state_out, is_water) {
+                        world.set_block(pos.0, pos.1, pos.2, filled_state);
+                    }
+                    if !source {
+                        to_fill.push(pos);
                     }
                 }
             }
         }
     }
     // `while (filled && !toFill.isEmpty())`：反复把「相邻有源流体」的待填充位置灌满。
-    // Repeat until no more positions can be filled from a neighbouring source.
+    // 官方在这里用 `FluidState toPlace = level.getFluidState(pos)` 起手（任何流体，不止水），
+    // 再按 UP/NORTH/EAST/SOUTH/WEST 找第一个**未被锁定**的源；找到源就调 `placeLiquid`
+    //（不管返回什么）并把位置出列。
+    // Repeat until no more positions can be filled from a neighbouring source. Vanilla
+    // starts from the position's own fluid state (any fluid, not just water) and scans
+    // UP/NORTH/EAST/SOUTH/WEST for the first unlocked source; a found source means
+    // `placeLiquid` runs and the position leaves the list regardless of its result.
     let directions = [(0, 1, 0), (0, 0, -1), (1, 0, 0), (0, 0, 1), (-1, 0, 0)];
     let mut filled = true;
     while filled && !to_fill.is_empty() {
         filled = false;
         let mut remaining = Vec::with_capacity(to_fill.len());
         for pos in std::mem::take(&mut to_fill) {
-            let mut source = world
-                .fluid_at(pos.0, pos.1, pos.2)
-                .is_some_and(|(is_water, is_source)| is_water && is_source);
-            if !source {
+            let mut to_place = world.fluid_at(pos.0, pos.1, pos.2);
+            if !to_place.is_some_and(|(_, is_source)| is_source) {
                 for (dx, dy, dz) in directions {
                     let neighbor = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
                     if locked_fluids.contains(&neighbor) {
                         continue;
                     }
-                    if world
-                        .fluid_at(neighbor.0, neighbor.1, neighbor.2)
-                        .is_some_and(|(is_water, is_source)| is_water && is_source)
-                    {
-                        source = true;
+                    let Some(fluid) = world.fluid_at(neighbor.0, neighbor.1, neighbor.2) else {
+                        continue;
+                    };
+                    if fluid.1 {
+                        to_place = Some(fluid);
                         break;
                     }
                 }
             }
-            if source {
+            if to_place.is_some_and(|(_, is_source)| is_source) {
                 let state = world.block_state(pos.0, pos.1, pos.2);
-                if let Some(waterlogged) = with_waterlogged(state, true) {
-                    world.set_block(pos.0, pos.1, pos.2, waterlogged);
+                if is_liquid_container(state) {
+                    let is_water = to_place.is_some_and(|(is_water, _)| is_water);
+                    if let Some(filled_state) = place_liquid(state, is_water) {
+                        world.set_block(pos.0, pos.1, pos.2, filled_state);
+                    }
                     filled = true;
                     continue;
                 }
@@ -338,11 +342,67 @@ pub fn place_processed(
     Ok(placed)
 }
 
-/// `SimpleWaterloggedBlock`：方块状态里有 `waterlogged` 属性。
+/// `state.getBlock() instanceof LiquidBlockContainer`。
 ///
-/// `SimpleWaterloggedBlock`: the state has a `waterlogged` property.
-fn is_waterloggable(state: u32) -> bool {
-    crate::structure::state_transform::property_of(state, "waterlogged").is_some()
+/// 26.3 里有 `waterlogged` 属性的 505 个方块**全部**实现该接口且用默认
+/// `SimpleWaterloggedBlock.placeLiquid`（少数覆写见 [`place_liquid`]）；反过来只有四个
+/// 方块实现接口却没有该属性（`kelp` / `kelp_plant` / `seagrass` / `tall_seagrass`），
+/// 它们的 `placeLiquid` 恒返回 `false`。两类都由本函数如实分类。
+///
+/// Every one of the 505 blocks with a `waterlogged` property in 26.3 implements
+/// `LiquidBlockContainer` through the default `SimpleWaterloggedBlock.placeLiquid` (the few
+/// overrides are in [`place_liquid`]); conversely only four blocks implement the interface
+/// without the property (`kelp` / `kelp_plant` / `seagrass` / `tall_seagrass`) and their
+/// `placeLiquid` always returns `false`. This classifies both sets faithfully.
+fn is_liquid_container(state: u32) -> bool {
+    if crate::structure::state_transform::property_of(state, "waterlogged").is_some() {
+        return true;
+    }
+    matches!(
+        state_text(state).as_str(),
+        "minecraft:kelp" | "minecraft:kelp_plant" | "minecraft:seagrass" | "minecraft:tall_seagrass"
+    )
+}
+
+/// `LiquidBlockContainer.placeLiquid(level, pos, state, fluidState)`：返回灌完之后的新状态，
+/// 没灌上（官方返回 `false`）时返回 `None`。
+///
+/// 默认实现是 `SimpleWaterloggedBlock`：`!waterlogged && fluidState.is(WATER)` 时把
+/// `waterlogged` 置 true。26.3 有四处覆写，行为都归结为同一件事：
+///
+/// * `SlabBlock`：`type == double` 时直接返回 `false`；
+/// * `CandleBlock` / `CampfireBlock`：灌水同时把 `lit` 置 false（`extinguish` / `douse`）；
+/// * `DriedGhastBlock`：与默认实现相同。
+///
+/// `LiquidBlockContainer.placeLiquid(level, pos, state, fluidState)`: the state after the
+/// water goes in, or `None` when vanilla would return `false`. The default
+/// `SimpleWaterloggedBlock` implementation sets `waterlogged` when it is false and the
+/// fluid is water. The four overrides in 26.3 all reduce to the same result: `SlabBlock`
+/// refuses `type == double`, `CandleBlock` / `CampfireBlock` also clear `lit`, and
+/// `DriedGhastBlock` matches the default.
+fn place_liquid(state: u32, is_water: bool) -> Option<u32> {
+    use crate::structure::state_transform::property_of;
+    // `fluidState.is(Fluids.WATER)`：比较流体**类型**，流动水也满足。
+    // `is(WATER)` compares the fluid *type*, so flowing water qualifies too.
+    if !is_water {
+        return None;
+    }
+    if property_of(state, "waterlogged") != Some("false") {
+        return None;
+    }
+    // `SlabBlock.placeLiquid`：双台阶不灌。
+    // `SlabBlock.placeLiquid`: a double slab takes no water.
+    if property_of(state, "type") == Some("double") {
+        return None;
+    }
+    let next = with_waterlogged(state, true)?;
+    // `CandleBlock` 走 `extinguish` → `setLit(false)`；`CampfireBlock` 直接
+    // `setValue(LIT, false)`。两者都保留刚设上的 `waterlogged = true`。
+    // `CandleBlock` goes through `extinguish` → `setLit(false)`; `CampfireBlock` sets
+    // `LIT = false` directly. Both keep the `waterlogged = true` just set.
+    Some(
+        crate::structure::piece_place::with_property(next, "lit", "false").unwrap_or(next),
+    )
 }
 
 /// 把 `waterlogged` 设成 `value`；没有该属性时返回 `None`。
@@ -1102,6 +1162,68 @@ mod tests {
             crate::structure::state_transform::property_of(world.writes[0].1, "waterlogged"),
             Some("false")
         );
+    }
+
+    /// `LiquidBlockContainer.placeLiquid` 的四类覆写，逐个照官方行为：
+    ///
+    /// * 台阶：`type=double` 时 `SlabBlock.placeLiquid` 返回 false，不灌；
+    /// * 蜡烛 / 营火：灌水同时把 `lit` 清成 false；
+    /// * `dried_ghast` 与默认实现相同；
+    /// * 海带 / 海草：实现接口但恒返回 false，不灌。
+    ///
+    /// The four `placeLiquid` overrides, each matching vanilla: a double slab refuses
+    /// water, candles and campfires also clear `lit`, `dried_ghast` behaves like the
+    /// default, and kelp / seagrass implement the interface but always refuse.
+    #[test]
+    fn place_liquid_matches_the_four_vanilla_overrides() {
+        use super::place_liquid;
+        use crate::structure::processor::BlockStateSpec;
+        use crate::structure::state_transform::property_of;
+
+        // `state_id_of` 已经处理「名字 + 属性 → 状态 ID」。
+        // `state_id_of` already turns a name plus properties into a state id.
+        let state = |text: &str| super::state_id_of(&BlockStateSpec::parse_str(text).unwrap());
+        let state = |text: &str| state(text).expect("known state");
+
+        // 单台阶：灌水成功。
+        // A bottom slab takes the water.
+        let bottom = state("minecraft:oak_slab[waterlogged=false,type=bottom]");
+        let filled = place_liquid(bottom, true).expect("a bottom slab accepts water");
+        assert_eq!(property_of(filled, "waterlogged"), Some("true"));
+
+        // 双台阶：`SlabBlock.placeLiquid` 返回 false。
+        // A double slab refuses.
+        let double = state("minecraft:oak_slab[waterlogged=false,type=double]");
+        assert_eq!(place_liquid(double, true), None, "a double slab refuses water");
+
+        // 蜡烛：灌水并清 `lit`。
+        // A candle is waterlogged and goes out.
+        let candle = state("minecraft:candle[lit=true,waterlogged=false]");
+        let filled = place_liquid(candle, true).expect("a lit candle is waterlogged");
+        assert_eq!(property_of(filled, "waterlogged"), Some("true"));
+        assert_eq!(property_of(filled, "lit"), Some("false"), "lit is cleared");
+
+        // 营火：同上。
+        // Same for a campfire.
+        let campfire = state("minecraft:campfire[lit=true,waterlogged=false]");
+        let filled = place_liquid(campfire, true).expect("a lit campfire is waterlogged");
+        assert_eq!(property_of(filled, "waterlogged"), Some("true"));
+        assert_eq!(property_of(filled, "lit"), Some("false"));
+
+        // 岩浆不算水。
+        // Lava is not water.
+        assert_eq!(place_liquid(bottom, false), None, "lava does not waterlog");
+
+        // 已经 waterlogged 的方块不再灌（默认实现要求 `!waterlogged`）。
+        // An already waterlogged block is left alone.
+        let already = state("minecraft:oak_slab[waterlogged=true,type=bottom]");
+        assert_eq!(place_liquid(already, true), None);
+
+        // 海带：实现接口但恒返回 false。
+        // Kelp implements the interface but always refuses.
+        let kelp = state("minecraft:kelp");
+        assert!(super::is_liquid_container(kelp), "kelp is a LiquidBlockContainer");
+        assert_eq!(place_liquid(kelp, true), None, "kelp refuses water");
     }
 
     /// 调用方不提供流体模型（`fluid_is_source` 返回 `None`）时，watering 整段跳过。
