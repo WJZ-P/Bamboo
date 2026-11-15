@@ -260,6 +260,12 @@ struct Report<'a> {
     ///
     /// The `preset` from the header: `minecraft:overworld` or `minecraft:nether`.
     preset: String,
+    /// header 里的 `minY` / `height`：features 的 9 宫格和高度图要按维度取。
+    ///
+    /// `minY` / `height` from the header; the feature 3x3 grid and heightmaps follow the
+    /// dimension.
+    min_y: i32,
+    height: i32,
     biomes: u64,
     blocks: Vec<u64>,
     features_blocks: u64,
@@ -297,6 +303,8 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         generators: HashMap::new(),
         settings: "minecraft:overworld".to_owned(),
         preset: "minecraft:overworld".to_owned(),
+        min_y: -64,
+        height: 384,
         biomes: 0,
         blocks: vec![0; Stage::Carvers as usize + 1],
         features_blocks: 0,
@@ -397,6 +405,8 @@ impl Report<'_> {
                     // hardcoded overworld.
                     self.settings = settings.clone();
                     self.preset = preset.clone();
+                    self.min_y = min_y;
+                    self.height = height;
                 }
                 Line::Biomes {
                     seed,
@@ -569,9 +579,12 @@ impl Report<'_> {
             let bamboo = *layer;
             self.blocks[stage as usize] += 1;
             if official != bamboo {
+                // y 只是报错文案用的，必须跟着维度的 min_y 走，不能写死主世界的 -64。
+                // The y is only for the message and must follow the dimension's min_y
+                // instead of the hardcoded overworld -64.
                 self.mismatch(format!(
                     "{label} seed {seed} chunk ({x},{z}) y {} x {} z {}: official {} ({}), bamboo {}",
-                    index as i32 / 256 - 64,
+                    index as i32 / 256 + self.min_y,
                     (index % 256) / 16,
                     index % 16,
                     palette[id],
@@ -620,7 +633,7 @@ impl Report<'_> {
                 ));
                 return;
             }
-            if chunk.blocks.len() != 384 * 256 {
+            if chunk.blocks.len() != self.height as usize * 256 {
                 self.mismatch(format!(
                     "features seed {seed} chunk ({x},{z}) ({dx},{dz}): {} blocks vs {}",
                     chunk.blocks.len(),
@@ -657,6 +670,8 @@ impl Report<'_> {
         // 先把过滤清单拷出来，避免和 `self.generator` 的可变借用冲突。
         // Copy the filter out first to avoid clashing with the `self.generator` borrow.
         let allowed = self.feature_types.clone();
+        let min_y = self.min_y;
+        let height = self.height;
         let generator = match self.generator(seed) {
             Ok(generator) => generator,
             Err(error) => {
@@ -693,7 +708,7 @@ impl Report<'_> {
                             return;
                         }
                     };
-                heights.push(prime_heightmaps(&layers, -64, 384));
+                heights.push(prime_heightmaps(&layers, min_y, height));
                 blocks.push(layers);
                 biomes.push(region.center().sections().to_vec());
             }
@@ -701,8 +716,8 @@ impl Report<'_> {
         let input = FeatureChunks {
             center_x: x,
             center_z: z,
-            min_y: -64,
-            height: 384,
+            min_y,
+            height,
             blocks: blocks.try_into().expect("9 chunks"),
             biomes: biomes.try_into().expect("9 chunks"),
             heights: heights.try_into().expect("9 chunks"),
