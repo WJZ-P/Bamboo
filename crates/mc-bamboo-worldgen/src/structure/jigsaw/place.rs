@@ -158,8 +158,7 @@ pub fn relative_position(pos: (i32, i32, i32), mirror: u32, rotation: u32) -> (i
     }
 }
 
-/// 一次放置的产物：真正写进去的方块，以及它们的包围盒。
-///
+/// 一次放置的产物：真正写进去的方块，以及它们的包围盒。///
 /// 官方 `StructureTemplate.placeInWorld` 内部维护 `minX..maxZ` 与 `placed`（位置 + nbt），
 /// 用于 `updateShapeAtEdge`、方块实体 `setChanged` 与 `placeEntities`。这里把同样的两块
 /// 数据交出去，使用方（放置里程碑）自己决定怎么用。
@@ -335,10 +334,21 @@ pub fn place_piece<L: ProcessorLevel>(
     settings: PlaceSettings<'_>,
     mirror: u32,
     rotation: u32,
-    chunk_bb: crate::structure::BoundingBox,
     random: &crate::random::Random,
     world: &mut impl BlockWriter,
 ) -> Result<PlacedBlocks, String> {
+    // `settings.getBoundingBox()`：`None` 时官方不过滤（`boundingBox == null`），
+    // 这里用一个「无限」盒表示同样的语义。
+    // `settings.getBoundingBox()`; `None` means no filtering in vanilla, represented here by
+    // an unbounded box.
+    let chunk_bb = settings.chunk_bb.unwrap_or(crate::structure::BoundingBox {
+        min_x: i32::MIN,
+        min_y: i32::MIN,
+        min_z: i32::MIN,
+        max_x: i32::MAX,
+        max_y: i32::MAX,
+        max_z: i32::MAX,
+    });
     // `settings.getRandomPalette(palettes, position)`：按世界位置选调色板。
     // `settings.getRandomPalette(palettes, position)`: palette picked by world position.
     let palette_index = template
@@ -965,7 +975,6 @@ mod tests {
             },
             0,
             0,
-            chunk_bb,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
             &mut world,
         )
