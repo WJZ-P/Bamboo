@@ -415,6 +415,21 @@
   验证了「哪些方块是随机容器」与「取数次数与顺序」。
 * 故意改坏：随机容器不覆盖 `LootTableSeed`（不发那次 `nextLong`）→ 264 处不一致。
 
+**第二十轮（2026-11-15，`cb-wg-jigsaw` 分支：watering）**：
+
+* `place_processed` 补上官方 `placeInWorld` 的 watering 段：写方块**之前**读该位置的流体状态
+  （`settings.shouldApplyWaterlogging() ? level.getFluidState(pos) : null`）；新方块本身是
+  流体源时把位置加进 `lockedFluids`；新方块可含水（状态里有 `waterlogged`）且该位置原本有
+  水时把 `waterlogged` 置 true，原本不是源的位置再加进 `toFill`；最后按官方顺序
+  （`UP, NORTH, EAST, SOUTH, WEST`）反复把「相邻有源流体」的位置灌满，`lockedFluids` 里的
+  位置不参与。
+* `BlockWriter` 新增 `fluid_at(x, y, z) -> Option<(is_water, is_source)>`（默认 `None` =
+  调用方没有流体模型，整段 watering 跳过）与 `block_state(x, y, z)`。
+* 两个单元测试：源流体位置的台阶得到 `waterlogged=true`、非源位置不写第二遍；
+  `fluid_at` 返回 `None` 时只写方块本身。改坏「不灌水」→ 测试失败。
+* `jigsaw placepiece` 900 查询 / 610992 写入 / 852 种子仍 0 不一致（这条对拍走
+  `fluid_at == None` 的路径，所以**watering 本身只有单元测试覆盖**）。
+
 **第五轮（2026-11-14，`cb-wg-structures` 续：需要模板的单件结构布局）**：
 
 * 合并 `main` 时本分支已与 `main` 同步（`main` 的 `4405fc3` 含本分支全部提交），
