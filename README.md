@@ -648,8 +648,15 @@ WebView2 的渲染进程不算在内。
   4 个真的长柱的区块，`--chunk -53 -206` / `-50 -200` / `-52 -204` / `-49 -199`；
   `freeze_top_layer` 在 `--chunk 255 -109` / `260 -106` / `268 -300` / `242 -104`
   四个冷群系区块上各 0 不一致）。
-  还没验证过、因此**没有**接进 dispatch 的：`overlay`（沙漠井，依赖未实现的
-  `minecraft:template` 地物）、`fossil`（要模板接线）。
+  还没验证过、因此**没有**接进 dispatch 的：`overlay`（沙漠井）与 `fossil`
+  —— 两者都依赖 `minecraft:template` 地物。`template` 已经按官方写了
+  （`template_feature.rs`：加权选模板、`Util.getRandom(rotations)`、`getRotatedOffset`
+  居中、`state_transform::transform` 的镜像/旋转、`rule` processor 的
+  `block_match` / `always_true` / `append_loot`），`overlay` 组合类与
+  `volume_match` 谓词、`randomly_selected` 修饰器也补齐了；但 `desert_well` 的
+  `rarity_filter` 是 1/1000，本轮没能扫出真实生成点做「改坏必失败」的确认，
+  所以**没有**把 `minecraft:template` 接进 `dispatch.rs`（连带 `overlay` 也跑不起来）。
+  下一轮只要找到一个真的生成了沙漠井的坐标就能放开。
   **`freeze_top_layer` 的已知前提**：features 阶段没有生成期光照，官方
   `Biome.shouldFreeze` / `shouldSnow` 里的 `getBrightness(BLOCK) < 10` 恒成立；
   Rust 侧不查亮度，`ChunkgenOracle` 的代理把方块光返回 0、天空光返回 15。

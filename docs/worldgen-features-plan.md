@@ -824,11 +824,11 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   已完成的是 `disk`、`underwater_magma`、`spring_feature`、`iceberg`、`block_blob`、
   `geode`、`lake`、`large_dripstone`、`blue_ice`、`spike`、`monster_room`、
   `speleothem_cluster`、`freeze_top_layer`。
-  `overlay`（沙漠井）依赖 `minecraft:template` 地物（要落结构模板 + processor），
-  那条线还没做。
-* 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`overlay` 要先实现
-  `minecraft:template`。按项目「不发明行为」的原则，宁可保留 `skipped` 也不塞未经验证
-  的实现。
+  `overlay` / `fossil` 都依赖 `minecraft:template` 地物。这个 Feature 类型已经写好了
+  （`feature/template_feature.rs`），`overlay` 组合类、`volume_match` 谓词、
+  `randomly_selected` 修饰器也一并补齐；**但没接进 `dispatch.rs`**：
+  `desert_well` 的 `rarity_filter` 是 1/1000，本轮扫的网格（9–25 区块）没撞上真实
+  生成点，改坏旋转也不报差异，属于「已写未验证」。
   `monster_room`（刷怪笼 / 战利品表 / 方块实体）与 `large_dripstone` 已完成：
   前者的方块实体数据不进对拍（只比方块，但 `nextLong` / `nextInt(4)` 照取），
   后者已在 4 个真的长柱的区块上逐方块覆盖。
