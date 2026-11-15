@@ -314,6 +314,30 @@
 * 故意改坏：`block_ignore` 恒不忽略（单元测试失败）、`gravity` 丢掉
   `templateRelativePos.y`（单元测试失败）、`place_processed` 不检查返回值（单元测试失败）。
 
+**第十四轮（2026-11-15，`cb-wg-jigsaw` 分支：processor 组装 / gravity 语义 / 放置产物）**：
+
+* 合并 `main`（`2ba852ee`，矿井与要塞的方块放置已对拍）。三处冲突：`state_transform` 的
+  `property_of` 取 main 的 `pub`（我要跨模块用）；`StructurePlaceOracle` 的假世界字段两边
+  保留（并删掉重复的 `case "scheduleTick"`，main 的版本不记录、我的记录，保留后者）；
+  里程碑表步 4 用本分支的完整版、步 5 合并两边进展（矿井/要塞现在都是 0 不一致）。
+  合并后 `jigsaw placepiece` 900 查询 0 不一致、`structure-place` 0 不一致。
+* `structure::jigsaw::place::assemble_processors`：照 `SinglePoolElement.getSettings` 组装
+  processor 链——`BlockIgnore(STRUCTURE_BLOCK)` → 可选 `JigsawReplacement`（`!keepJigsaws`）
+  → `pool_element` 配置的 → `Projection` 的（`TERRAIN_MATCHING` 是
+  `Gravity(WORLD_SURFACE_WG, -1)`）。**`LegacySinglePoolElement` 的额外一步**：先
+  `popProcessor(STRUCTURE_BLOCK)` 摘掉链首，再把 `STRUCTURE_AND_AIR` **追加到末尾**
+  （不是原地替换）。6 种组合各有单元测试。
+* `GravityProcessor` 的两处语义补齐：`WORLD_SURFACE_WG` → `WORLD_SURFACE`、
+  `OCEAN_FLOOR_WG` → `OCEAN_FLOOR` 的替换（官方在 `level instanceof ServerLevel` 时做）；
+  `ProcessorLevel::height` 从「返回哨兵整数」改成 `Option<i32>`，拿不到时**保留原位置**
+  而不是算出一个回绕的 Y。
+* `place_processed` / `place_piece` 的返回值从「改变计数」改成 `PlacedBlocks`
+  （`bounds` = 官方 `minX..maxZ`，`placed` = 位置 + nbt 列表）。官方用这两块做
+  `updateShapeAtEdge`、方块实体 `setChanged` 与 `placeEntities`，本分支只把数据交出去。
+  `PlaceBlock` 的 `has_nbt: bool` 相应换成 `nbt: Option<Tag>`。
+* 故意改坏：legacy 的 `STRUCTURE_AND_AIR` 改成原地替换（组装测试失败）、
+  gravity 不换 WG 名字（测试失败）、包围盒只记第一个（两个测试失败）。
+
 **第五轮（2026-11-14，`cb-wg-structures` 续：需要模板的单件结构布局）**：
 
 * 合并 `main` 时本分支已与 `main` 同步（`main` 的 `4405fc3` 含本分支全部提交），
@@ -1277,7 +1301,7 @@ structures (Compound)
 | 2 | 数据导出：`worldgen.json` 加四键，Rust 解析骨架 | `extract` 重跑无 diff（除四键）、旧 `chunkgen --through carvers` 仍 0 | **做完**：重跑无 diff、`--through carvers` 小样本 0 不一致 |
 | 3 | 放置：`random_spread`（含频率削减、exclusion zone、spread type）、`concentric_rings` 几何 | 大范围区块「哪个区块有哪个结构起点」0 不一致；新对拍先故意改坏一处确认会失败 | **做完**：20 集 × 464 查询 = 9280 放置比较 + 9744 加权选择比较 0 不一致；`concentric_rings` 6 种子 768 环位置 + 864 `isStructureChunk` 0 不一致 |
 | 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿 / 林地府邸（`structure-pieces` 336 查询 77960 结构件 0 不一致）、需要模板的雪屋 / 沉船 / 海底遗迹（`structure-templated` 480 查询 1685 结构件 0 不一致）、废弃传送门（`structure-ruined-portal` 648 查询 110 结构件 0 不一致，含 `findSuitableY` 整列搜索与 `Mirror.FRONT_BACK`）、**jigsaw 全部（`cb-wg-jigsaw`：`jigsaw pieces` 972 查询 12467 结构件 / `jigsaw pools` 980 查询 8976 结构件 0 不一致）** 已做 |
-| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分完成**：`structure::piece_place`（放置辅助）、`structure::state_transform`（mirror/rotate）、`structure::pieces::mineshaft_place`（矿井四种）与 `stronghold_place`（要塞十二种）已移植，`structure-place` 对拍对矿井和要塞都是 0 不一致（2026-11-15）。**没有接进 Director**，见第 0 节「多件式结构放置」。<br>**部分做完（方块部分）**：单件结构的 `postProcess` 走独立子命令 `structure-post-process`（`StructurePlaceOracle.java`），按写入日志逐格比：埋藏的宝藏 16 查询 0 不一致；**女巫小屋 18 处不一致（未通过）**，Java 的地下柱子比 Rust 低一格；沙漠神殿没进查询集（`SKIPPED`），最后实测 6953 处。丛林神殿、方块实体、战利品表没做，**三份 `postProcess` 都没接进 `feature/run.rs`**。<br>**jigsaw 侧（`cb-wg-jigsaw`）**：模板放置链路 `structure::jigsaw::place`（选 palette → 位置变换含 mirror/rotation → processor 链 → `BARRIER` → `chunkBB` 过滤 → 状态变换）对官方 `StructureTemplate.placeInWorld` 逐写入比，`jigsaw placepiece` 900 查询 / 610992 次写入 0 不一致；`processor_list` 的四种 processor 与放置阶段硬编码的三种（`block_ignore` / `jigsaw_replacement` / `gravity`）都已移植并各自对拍 |
+| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分完成**：`structure::piece_place`（放置辅助）、`structure::state_transform`（mirror/rotate）、`structure::pieces::mineshaft_place`（矿井四种）与 `stronghold_place`（要塞十二种）已移植，`structure-place` 对拍对矿井和要塞都是 0 不一致（2026-11-15）。**没有接进 Director**，见第 0 节「多件式结构放置」。<br>**部分做完（方块部分）**：单件结构的 `postProcess` 走独立子命令 `structure-post-process`（`StructurePlaceOracle.java`），按写入日志逐格比：埋藏的宝藏 16 查询 0 不一致；**女巫小屋 18 处不一致（未通过）**，Java 的地下柱子比 Rust 低一格；沙漠神殿没进查询集（`SKIPPED`），最后实测 6953 处。丛林神殿、方块实体、战利品表没做，**三份 `postProcess` 都没接进 `feature/run.rs`**。<br>**jigsaw 侧（`cb-wg-jigsaw`）**：模板放置链路 `structure::jigsaw::place`（选 palette → 位置变换含 mirror/rotation → processor 链 → `BARRIER` → `chunkBB` 过滤 → 状态变换）对官方 `StructureTemplate.placeInWorld` 逐写入比，`jigsaw placepiece` 900 查询 / 610992 次写入 0 不一致；`processor_list` 的四种 processor 与放置阶段硬编码的三种（`block_ignore` / `jigsaw_replacement` / `gravity`）都已移植并各自对拍，`assemble_processors` 照 `SinglePoolElement.getSettings` 的四段顺序组装（含 legacy 的 pop-then-append） |
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | **做完（纯函数 + 对拍，`cb-wg-beard`）**：`beard` 12 用例 5,912,076 比较 0 不一致（kernel / sampleValue / sampleVolume / affectedBox / 三阶段方块），`--break-self-test` 会失败；`chunkgen --through carvers` EMPTY 回归仍 0。**没接进 Director**：游戏里仍走 `EMPTY` |
 | 7 | 存档：`structures` 键写/读；海底神殿「只存一个 `MonumentBuilding`、读回重建房间图」的口径见 4.1 | 读回一致，`world-dir` 确认官方能读 | **通用编码做完**：`structure-save` 8 case 规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、`world-dir` 的 `SerializableChunkData.parse` 都能读。**多件式结构的读回做完**（`cb-wg-multipiece`）：子类字段带 NBT 类型，`PiecesContainer.load` / `loadStaticStart` / `regeneratePiecesAfterLoad` 移植并对拍（`structure-load` 80 查询、8218 读回件、656 重建行 0 不一致），见第 0 节「多件式结构存档」 |
 
