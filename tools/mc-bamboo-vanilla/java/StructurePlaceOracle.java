@@ -59,19 +59,22 @@ import net.minecraft.world.level.material.FluidState;
  * 对拍结构件的 {@code postProcess}：在 JVM 里造一个不启动服务端的假 {@code WorldGenLevel}，
  * 用官方 {@code StructurePiece.postProcess} 写方块，再逐方块输出。
  *
- * <p>假世界是一个 3×3 的 {@code ProtoChunk}，初始方块由 {@code fill} 参数决定
- * （`stone` / `air` / `stone_with_ceiling`），用来覆盖「内部 / 外部」、「顶上有没有东西」
- * 这些分支。{@code WorldGenLevel} 用 {@code Proxy} 实现，语义照 {@code WorldGenRegion}；
+ * <p>假世界是一张按需创建的 {@code ProtoChunk} 表，初始方块由 {@code fill} 参数决定
+ * （`air` / `band` / `stone` / `caves`），用来覆盖「内部 / 外部」、支撑、柱子 / 铁链、
+ * 液体这些分支。{@code WorldGenLevel} 用 {@code Proxy} 实现，语义照 {@code WorldGenRegion}；
  * 没实现的方法抛异常，让没覆盖到的路径立刻暴露。
  *
  * <p>Rust 写 queries.txt，每条一行
  * {@code <kind> <seed> <cx> <cz> <fill>}；本类按官方编排生成结构件，然后对每个结构件
- * 调 {@code postProcess}（`chunkBB` 取结构件包围盒所在的整个区块），输出
- * {@code Q} 头、{@code L} 行的结构件清单和 {@code B} 行的方块快照。
+ * 在它碰到的每个区块里调一次 {@code postProcess}，输出 {@code Q} 头、{@code L} 行的
+ * 结构件清单、{@code P} 行的逐次调用写入次数（设了 `STRUCTURE_PLACE_TRACE` 时还有
+ * {@code D} 行的逐次写入）和 {@code B} 之后每个写过的位置的最终状态。
  *
- * <p>Oracle for {@code postProcess}: builds a fake serviceless {@code WorldGenLevel} over a
- * 3×3 {@code ProtoChunk} grid, runs the official {@code StructurePiece.postProcess}, and
- * dumps every block. Unimplemented level methods throw so uncovered paths surface.
+ * <p>Oracle for {@code postProcess}: builds a fake serviceless {@code WorldGenLevel} over
+ * lazily created {@code ProtoChunk}s, runs the official {@code StructurePiece.postProcess}
+ * once per chunk each piece touches, and dumps the piece list, every invocation's write
+ * count (plus its ordered writes under `STRUCTURE_PLACE_TRACE`) and the final state of
+ * every written position. Unimplemented level methods throw so uncovered paths surface.
  *
  * <p>Usage: StructurePlaceOracle &lt;queries.txt&gt;
  */
@@ -80,6 +83,7 @@ public final class StructurePlaceOracle {
     private static final int MIN_Y = -64;
     private static final StructurePieceSerializationContext CTX =
             new StructurePieceSerializationContext(null, null, null);
+    private static net.minecraft.server.level.ServerLevel serverLevel;
     private static final java.util.Set<String> BASE_KEYS =
             java.util.Set.of("id", "BB", "O", "GD");
 
@@ -99,13 +103,7 @@ public final class StructurePlaceOracle {
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
 
-        // 矿井 `createChest` 会创建矿车实体；本轮不比实体，但它的随机取数必须照取。
-        // 把 `EntityTypes.CHEST_MINECART` 的 `factory` 换成返回 null，让 `create` 走
-        // 「创建失败」分支（和 `create` 返回 null 的语义一致），方块不受影响。
-        // The mineshaft `createChest` spawns a minecart; entities are out of scope but the
-        // draws must happen. Swap the `factory` to return null so `create` fails exactly
-        // like a failed entity creation, leaving blocks untouched.
-        disableMinecartCreation();
+        serverLevel = installMinecartStub();
 
         PackRepository repository = ServerPacksSource.createVanillaTrustedRepository();
         repository.reload();
@@ -124,17 +122,78 @@ public final class StructurePlaceOracle {
         System.out.print(out);
     }
 
+    /** 不走构造器的矿车：只承接 `setInitialPos` / `setLootTable`，不碰实体内部状态。 */
+    private static final class InertMinecartChest
+            extends net.minecraft.world.entity.vehicle.minecart.MinecartChest {
+        private InertMinecartChest() {
+            super(null, null);
+        }
+
+        @Override
+        public void setInitialPos(double x, double y, double z) {
+        }
+    }
+
+    private static sun.misc.Unsafe unsafe() throws ReflectiveOperationException {
+        java.lang.reflect.Field field = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+        field.setAccessible(true);
+        return (sun.misc.Unsafe) field.get(null);
+    }
+
+    private static void setField(Class<?> owner, String name, Object target, Object value)
+            throws ReflectiveOperationException {
+        java.lang.reflect.Field field = owner.getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
+    /**
+     * 让 `EntityTypes.CHEST_MINECART.create(level.getLevel(), ...)` 在没有服务端的情况下
+     * 走完：`getLevel()` 给一个不经构造器分配的 `ServerLevel`（只接上 `enabledFeatures()`
+     * 那条链），`factory` 换成返回一个不经构造器分配的矿车。这样官方的
+     * `chest != null` 分支照常执行，`random.nextLong()` 照常取，结构件不中断。
+     *
+     * <p>Lets `EntityTypes.CHEST_MINECART.create(level.getLevel(), ...)` complete without a
+     * server: `getLevel()` yields a constructor-less `ServerLevel` wired only for
+     * `enabledFeatures()`, and the `factory` yields a constructor-less minecart. Vanilla's
+     * `chest != null` branch then runs as usual, `random.nextLong()` is drawn and the piece
+     * is never aborted.
+     */
     @SuppressWarnings("unchecked")
-    private static void disableMinecartCreation() {
+    private static net.minecraft.server.level.ServerLevel installMinecartStub() {
         try {
+            sun.misc.Unsafe unsafe = unsafe();
             Object type = net.minecraft.world.entity.EntityTypes.CHEST_MINECART;
-            java.lang.reflect.Field factory =
-                    net.minecraft.world.entity.EntityType.class.getDeclaredField("factory");
-            factory.setAccessible(true);
-            factory.set(type, (net.minecraft.world.entity.EntityType.EntityFactory<net.minecraft.world.entity.Entity>)
-                    (t, level) -> null);
+            setField(net.minecraft.world.entity.EntityType.class, "factory", type,
+                    (net.minecraft.world.entity.EntityType.EntityFactory<net.minecraft.world.entity.Entity>)
+                            (t, level) -> {
+                                try {
+                                    return (net.minecraft.world.entity.Entity)
+                                            unsafe.allocateInstance(InertMinecartChest.class);
+                                } catch (InstantiationException error) {
+                                    throw new IllegalStateException(error);
+                                }
+                            });
+            net.minecraft.world.level.storage.WorldData data =
+                    (net.minecraft.world.level.storage.WorldData) Proxy.newProxyInstance(
+                            StructurePlaceOracle.class.getClassLoader(),
+                            new Class<?>[] {net.minecraft.world.level.storage.WorldData.class},
+                            (self, method, args) -> {
+                                if (method.getName().equals("enabledFeatures")) {
+                                    return net.minecraft.world.flag.FeatureFlags.DEFAULT_FLAGS;
+                                }
+                                throw new UnsupportedOperationException(
+                                        "WorldData." + method.getName());
+                            });
+            Object server = unsafe.allocateInstance(
+                    net.minecraft.server.dedicated.DedicatedServer.class);
+            setField(net.minecraft.server.MinecraftServer.class, "worldData", server, data);
+            Object fakeLevel = unsafe.allocateInstance(
+                    net.minecraft.server.level.ServerLevel.class);
+            setField(net.minecraft.server.level.ServerLevel.class, "server", fakeLevel, server);
+            return (net.minecraft.server.level.ServerLevel) fakeLevel;
         } catch (ReflectiveOperationException error) {
-            throw new IllegalStateException("cannot stub the minecart factory", error);
+            throw new IllegalStateException("cannot stub the minecart path", error);
         }
     }
 
@@ -173,52 +232,51 @@ public final class StructurePlaceOracle {
             }
 
             Level level = new Level(pos, fill, registries);
-            // 和 `StructureStart.placeInChunk` 一样：对 3×3 每个区块各调一次，
-            // `chunkBB` 是该区块的整列盒，`random` 每个区块重新播种。
-            // Same as `StructureStart.placeInChunk`: once per chunk with that chunk's
-            // full column box, reseeding the random per chunk.
-            int aborted = 0;
-            for (int dz = -1; dz <= 1; dz++) {
-                for (int dx = -1; dx <= 1; dx++) {
-                    ChunkPos at = new ChunkPos(cx + dx, cz + dz);
+            // 和 `StructureStart.placeInChunk` 一样：对结构包围盒碰到的每个区块各调一次
+            // （先 z 后 x），`chunkBB` 是该区块的整列盒，`random` 每个区块重新播种，
+            // 写区是这个区块的 ±1。
+            // Same as `StructureStart.placeInChunk`: once per chunk the structure's bounding
+            // box touches (z outer, x inner) with that chunk's full column box, reseeding the
+            // random per chunk; the write zone is that chunk plus or minus one.
+            boolean trace = System.getenv("STRUCTURE_PLACE_TRACE") != null;
+            int invocation = 0;
+            BoundingBox all = BoundingBox.encapsulatingBoxes(
+                    pieces.stream().map(StructurePiece::getBoundingBox)::iterator).orElseThrow();
+            for (int chunkZ = SectionPos.blockToSectionCoord(all.minZ());
+                    chunkZ <= SectionPos.blockToSectionCoord(all.maxZ()); chunkZ++) {
+                for (int chunkX = SectionPos.blockToSectionCoord(all.minX());
+                        chunkX <= SectionPos.blockToSectionCoord(all.maxX()); chunkX++) {
+                    ChunkPos at = new ChunkPos(chunkX, chunkZ);
+                    level.center = at;
                     BoundingBox chunkBB = chunkBox(at);
                     WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
                     random.setLargeFeatureSeed(seed ^ 0x5DEECE66DL, at.x(), at.z());
-                    for (StructurePiece piece : pieces) {
+                    for (int index = 0; index < pieces.size(); index++) {
+                        StructurePiece piece = pieces.get(index);
                         if (!piece.getBoundingBox().intersects(chunkBB)) {
                             continue;
                         }
                         BlockPos referencePos = new BlockPos(at.getMiddleBlockX(),
                                 piece.getBoundingBox().minY(), at.getMiddleBlockZ());
-                        try {
-                            piece.postProcess(level.proxy(), null, null, random, chunkBB, at,
-                                    referencePos);
-                        } catch (NullPointerException error) {
-                            // 只有矿井 `createChest` 的矿车会走到这里：假世界没有真实
-                            // `ServerLevel`。记一次中断，不假装这次覆盖了剩余方块。
-                            // Only the mineshaft `createChest` minecart reaches this: the fake
-                            // world has no real `ServerLevel`. Count it as an aborted piece
-                            // instead of pretending the rest of it was covered.
-                            if (error.getStackTrace().length == 0
-                                    || !error.getStackTrace()[0].toString()
-                                            .contains("EntityType")) {
-                                throw error;
-                            }
-                            aborted++;
-                            if (random != null) {
-                                // 中断后这条结构件的剩余取数不再发生，和官方不同；
-                                // 记录后跳过，不让它污染后续区块的随机序列。
-                                // After aborting, the rest of this piece's draws are skipped,
-                                // unlike vanilla; recorded and skipped so later chunks' random
-                                // sequences are not polluted.
-                                random.setLargeFeatureSeed(seed ^ 0x5DEECE66DL, at.x(), at.z());
+                        level.beginPiece();
+                        piece.postProcess(level.proxy(), null, null, random, chunkBB, at,
+                                referencePos);
+                        out.append("P ").append(invocation).append(' ').append(index).append(' ')
+                                .append(at.x()).append(' ').append(at.z()).append(' ')
+                                .append(level.pieceWrites.size()).append('\n');
+                        if (trace) {
+                            for (String write : level.pieceWrites) {
+                                out.append("D ").append(invocation).append(' ').append(write)
+                                        .append('\n');
                             }
                         }
+                        invocation++;
                     }
                 }
             }
-            out.append("A ").append(aborted).append('\n');
-            out.append("B ").append(level.snapshot().size()).append('\n');            for (String block : level.snapshot()) {
+            List<String> snapshot = level.snapshot();
+            out.append("B ").append(snapshot.size()).append('\n');
+            for (String block : snapshot) {
                 out.append(block).append('\n');
             }
         }
@@ -346,14 +404,22 @@ public final class StructurePlaceOracle {
 
     /** 一个假世界：无界的 ProtoChunk 映射 + `WorldGenLevel` 代理。 */
     private static final class Level {
-        private final ChunkPos center;
+        /** 正在生成的区块：`WorldGenRegion` 的中心，写区是它的 ±1。 */
+        private ChunkPos center;
         private final java.util.Map<Long, ProtoChunk> chunks = new java.util.HashMap<>();
         private final WorldGenLevel proxy;
         private final Holder<Biome> levelBiome;
         private final RegistryAccess.Frozen registries;
         private final String fill;
-        /** 所有写过的位置，按首次写入顺序。 */
-        private final List<BlockPos> written = new ArrayList<>();
+        /** 所有写过的位置。 */
+        private final java.util.Set<BlockPos> written = new java.util.HashSet<>();
+        /** 当前这次结构件调用的写入，按顺序：`x y z state`。 */
+        private final List<String> pieceWrites = new ArrayList<>();
+
+        void beginPiece() {
+            pieceWrites.clear();
+        }
+
         private final PalettedContainerFactory factory;
 
         Level(ChunkPos center, String fill, RegistryAccess.Frozen registries) {
@@ -377,63 +443,45 @@ public final class StructurePlaceOracle {
             return proxy;
         }
 
-        /** 只输出「和初始填充不同」的方块，按 x、y、z 排序；同一位置取最后一次写入。 */
+        /**
+         * 每个写过的位置的最终状态，按 x、y、z 排序。空气家族统一记成 `AIR`：
+         * `ProtoChunk.getBlockState` 对全空气的段直接返回 `Blocks.AIR`，读不出 cave_air。
+         *
+         * <p>Final state of every written position, sorted by x, y, z. The air family is
+         * normalised to `AIR`: `ProtoChunk.getBlockState` returns `Blocks.AIR` for an
+         * all-air section, so cave_air cannot be read back reliably.
+         */
         List<String> snapshot() {
-            // 同一位置可能被写多次：用位置做 key 保留最后一次，避免比较器把它当重复项。
-            // A position can be written more than once: key by position so the last write
-            // wins instead of being deduplicated away by the comparator.
-            java.util.TreeMap<String, String> out = new java.util.TreeMap<>((a, b) -> {
-                String[] pa = a.split(" ");
-                String[] pb = b.split(" ");
-                int c = Integer.compare(Integer.parseInt(pa[0]), Integer.parseInt(pb[0]));
-                if (c != 0) {
-                    return c;
-                }
-                c = Integer.compare(Integer.parseInt(pa[1]), Integer.parseInt(pb[1]));
-                if (c != 0) {
-                    return c;
-                }
-                return Integer.compare(Integer.parseInt(pa[2]), Integer.parseInt(pb[2]));
-            });
-            for (BlockPos pos : written) {
-                BlockState state = at(pos).getBlockState(pos);
-                String key = pos.getX() + " " + pos.getY() + " " + pos.getZ();
-                // air 家族之间的区分在 `ProtoChunk` 里不可靠：`PalettedContainer` 用
-                // `state.isAir()` 判定，cave_air / void_air 都算空气，单值调色板不会真的
-                // 落盘。结构件写空气只为挖空，挖空后是 air 还是 cave_air 对结果没有意义，
-                // 所以对拍只比非空气方块。
-                // `ProtoChunk` cannot reliably tell air family members apart:
-                // `PalettedContainer` tests `state.isAir()`, so cave_air and void_air count
-                // as air and a single-value palette never stores them. Pieces write air only
-                // to carve space, so the oracle compares non-air blocks only.
-                if (state.isAir()) {
-                    out.remove(key);
-                    continue;
-                }
-                if (!name(state).equals(initialName())) {
-                    out.put(key, key + " " + name(state));
-                } else {
-                    out.remove(key);
-                }
+            List<BlockPos> sorted = new ArrayList<>(written);
+            sorted.sort(java.util.Comparator.<BlockPos>comparingInt(BlockPos::getX)
+                    .thenComparingInt(BlockPos::getY).thenComparingInt(BlockPos::getZ));
+            List<String> out = new ArrayList<>(sorted.size());
+            for (BlockPos pos : sorted) {
+                out.add(pos.getX() + " " + pos.getY() + " " + pos.getZ() + " "
+                        + name(at(pos).getBlockState(pos)));
             }
-            return new ArrayList<>(out.values());
-        }
-
-        private String initialName() {
-            return fill.equals("air") ? "Block{minecraft:air}"
-                    : "Block{minecraft:stone}";
+            return out;
         }
 
         private static String name(BlockState state) {
-            return state.toString();
+            return state.isAir() ? "AIR" : state.toString();
         }
 
         private ProtoChunk chunk(int cx, int cz) {
             return chunks.computeIfAbsent((((long) cx) << 32) ^ (cz & 0xFFFF_FFFFL), key -> {
                 ProtoChunk chunk = new ProtoChunk(new ChunkPos(cx, cz), UpgradeData.EMPTY,
                         LevelHeightAccessor.create(MIN_Y, 384), factory, null);
-                chunk.setPersistedStatus(ChunkStatus.TERRAIN);
                 fillChunk(chunk);
+                // 官方在 FEATURES 阶段时区块的持久状态是 TERRAIN，它的 `heightmapsAfter` 是
+                // FINAL 那一组：`OCEAN_FLOOR_WG` 停在地形阶段结束时的值，结构件写方块不会再
+                // 更新它。这里在填完初始地形后把它算好，再切到 TERRAIN，得到同样的冻结高度图。
+                // During FEATURES the chunk's persisted status is TERRAIN, whose
+                // `heightmapsAfter` is the FINAL set: `OCEAN_FLOOR_WG` stays at its
+                // end-of-terrain value and piece writes never update it. Prime it after the
+                // initial fill, then switch to TERRAIN, to get the same frozen heightmap.
+                Heightmap.primeHeightmaps(chunk,
+                        java.util.EnumSet.of(Heightmap.Types.OCEAN_FLOOR_WG));
+                chunk.setPersistedStatus(ChunkStatus.TERRAIN);
                 return chunk;
             });
         }
@@ -449,17 +497,56 @@ public final class StructurePlaceOracle {
             return Math.abs(dx) <= 1 && Math.abs(dz) <= 1;
         }
 
+        /**
+         * 初始世界（Rust 侧 `FlatLevel::initial_block` 是同一个函数）：
+         * `air` 全空；`band` 只有 y 56..=63 一层石头；`stone` 是 y <= 100 的实心石头；
+         * `caves` 在实心石头里按 4×4×4 的格子挖空气洞和少量水洞。
+         *
+         * <p>The initial world (same function as Rust's `FlatLevel::initial_block`): `air` is
+         * empty; `band` is a stone slab at y 56..=63; `stone` is solid stone up to y 100;
+         * `caves` carves air pockets and a few water pockets out of that stone on a 4x4x4
+         * grid.
+         */
+        private BlockState initial(int x, int y, int z) {
+            switch (fill) {
+                case "air":
+                    return null;
+                case "band":
+                    return y >= 56 && y <= 63 ? Blocks.STONE.defaultBlockState() : null;
+                case "stone":
+                    return y <= 100 ? Blocks.STONE.defaultBlockState() : null;
+                case "caves": {
+                    if (y > 100) {
+                        return null;
+                    }
+                    int hash = Math.floorDiv(x, 4) * 73856093 ^ Math.floorDiv(y, 4) * 19349663
+                            ^ Math.floorDiv(z, 4) * 83492791;
+                    int bucket = Math.floorMod(hash, 61);
+                    if (bucket < 12) {
+                        return null;
+                    }
+                    return bucket == 12 ? Blocks.WATER.defaultBlockState()
+                            : Blocks.STONE.defaultBlockState();
+                }
+                default:
+                    throw new IllegalArgumentException("unknown fill " + fill);
+            }
+        }
+
         private void fillChunk(ProtoChunk chunk) {
             if (fill.equals("air")) {
                 return;
             }
-            int last = fill.equals("stone_with_ceiling") ? 63 : 62;
-            for (int y = 56; y <= last; y++) {
+            BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+            for (int y = MIN_Y; y <= 100; y++) {
                 for (int x = 0; x < 16; x++) {
                     for (int z = 0; z < 16; z++) {
-                        var pos = new BlockPos(chunk.getPos().getMinBlockX() + x, y,
+                        pos.set(chunk.getPos().getMinBlockX() + x, y,
                                 chunk.getPos().getMinBlockZ() + z);
-                        chunk.setBlockState(pos, Blocks.STONE.defaultBlockState(), 0);
+                        BlockState state = initial(pos.getX(), y, pos.getZ());
+                        if (state != null) {
+                            chunk.setBlockState(pos, state, 0);
+                        }
                     }
                 }
             }
@@ -513,17 +600,14 @@ public final class StructurePlaceOracle {
                         return at(new BlockPos(x, 0, z)).getHeight(type, x & 15, z & 15) + 1;
                     }
                     case "getBlockState": {
+                        // `WorldGenRegion.getBlockState` 读写区外的区块照样返回真实方块。
+                        // `WorldGenRegion.getBlockState` returns real blocks outside the
+                        // write zone too.
                         BlockPos pos = (BlockPos) args[0];
-                        if (!withinWriteZone(pos)) {
-                            return Blocks.AIR.defaultBlockState();
-                        }
                         return at(pos).getBlockState(pos);
                     }
                     case "getFluidState": {
                         BlockPos pos = (BlockPos) args[0];
-                        if (!withinWriteZone(pos)) {
-                            return Blocks.AIR.defaultBlockState().getFluidState();
-                        }
                         return at(pos).getFluidState(pos);
                     }
                     case "setBlock": {
@@ -535,6 +619,11 @@ public final class StructurePlaceOracle {
                         }
                         ProtoChunk chunk = at(pos);
                         written.add(pos.immutable());
+                        // 逐次写入记传给 `setBlock` 的原状态，cave_air 和 air 不合并。
+                        // The ordered trace keeps the exact state handed to `setBlock`;
+                        // cave_air and air stay distinct here.
+                        pieceWrites.add(pos.getX() + " " + pos.getY() + " " + pos.getZ() + " "
+                                + state);
                         BlockState old = chunk.setBlockState(pos, state, flags);
                         if (state.hasBlockEntity()) {
                             CompoundTag tag = new CompoundTag();
@@ -568,8 +657,39 @@ public final class StructurePlaceOracle {
                         }
                         return chunk((Integer) args[1], (Integer) args[2]);
                     }
-                    case "getBlockEntity":
-                        return at((BlockPos) args[0]).getBlockEntity((BlockPos) args[0]);
+                    case "getBlockEntity": {
+                        // 照 `WorldGenRegion.getBlockEntity`：`DUMMY` 占位在第一次读取时
+                        // 换成真的方块实体，这样 `createChest` 的 `random.nextLong()` 才会取。
+                        // As `WorldGenRegion.getBlockEntity`: the `DUMMY` placeholder becomes a
+                        // real block entity on first read, so `createChest` draws its
+                        // `random.nextLong()`.
+                        BlockPos pos = (BlockPos) args[0];
+                        ProtoChunk chunk = at(pos);
+                        BlockEntity existing = chunk.getBlockEntity(pos);
+                        if (existing != null) {
+                            return existing;
+                        }
+                        CompoundTag tag = chunk.getBlockEntityNbt(pos);
+                        BlockState state = chunk.getBlockState(pos);
+                        if (tag == null || !state.hasBlockEntity()) {
+                            return null;
+                        }
+                        BlockEntity created = ((net.minecraft.world.level.block.EntityBlock)
+                                state.getBlock()).newBlockEntity(pos, state);
+                        if (created != null) {
+                            chunk.setBlockEntity(created);
+                        }
+                        return created;
+                    }
+                    case "addFreshEntity":
+                        return true;
+                    case "scheduleTick":
+                        // `placeBlock` 写含流体的方块后会给它排一个 0 刻的 tick。假世界不做
+                        // 计划刻，方块本身已经写进去了，直接返回。
+                        // `placeBlock` schedules a zero-delay tick after writing a block that
+                        // holds fluid. The fake world runs no ticks; the block is already in,
+                        // so this is a no-op.
+                        return null;
                     case "markPosForPostProcessing":
                         at((BlockPos) args[0]).markPosForPostProcessing((BlockPos) args[0]);
                         return null;
@@ -580,13 +700,7 @@ public final class StructurePlaceOracle {
                     case "isClientSide":
                         return false;
                     case "getLevel":
-                        // `createChest` 会 `EntityTypes.CHEST_MINECART.create(level.getLevel(), ...)`，
-                        // 那需要真实 `ServerLevel`。假世界给 null 让它 NPE；oracle 捕获后
-                        // 把这条结构件标为「中断」，不假装覆盖了那一小段（见汇报）。
-                        // `createChest` spawns a minecart through `level.getLevel()`, which needs
-                        // a real `ServerLevel`. The fake world returns null so it NPEs; the
-                        // oracle catches that, marks the piece aborted and reports it.
-                        return null;
+                        return serverLevel;
                     case "getBiome":
                     case "getNoiseBiome":
                         return levelBiome;
