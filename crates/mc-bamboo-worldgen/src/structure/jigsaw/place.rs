@@ -721,6 +721,35 @@ impl BlockWriter for crate::feature::world::FeatureWorld<'_> {
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
         crate::feature::world::FeatureWorld::set_block(self, x, y, z, state)
     }
+
+    /// 官方 `blockEntity.loadWithComponents(...)`：nbt 交给假世界的方块实体表。
+    /// 走 `set_block_with_heightmaps` 那条官方路径（`LevelChunk.setBlockState` 也会更新
+    /// 高度图），与地物放置保持一致。
+    ///
+    /// Vanilla `blockEntity.loadWithComponents(...)`: hand the nbt to the fake world's block
+    /// entity store. Goes through `set_block_with_heightmaps` because vanilla's
+    /// `LevelChunk.setBlockState` updates the heightmaps too.
+    fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {
+        crate::feature::world::FeatureWorld::set_block_entity(self, x, y, z, nbt);
+    }
+
+    /// `level.getFluidState(pos)`，见 [`crate::feature::world::FeatureWorld::fluid_state`]。
+    ///
+    /// `level.getFluidState(pos)`; see `FeatureWorld::fluid_state`.
+    fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<(bool, bool)> {
+        Some(crate::feature::world::FeatureWorld::fluid_state(
+            self, x, y, z,
+        ))
+    }
+
+    /// `level.getBlockState(pos)`：范围内给真实状态，范围外给空气（与
+    /// `WorldGenRegion.getBlockState` 一致）。
+    ///
+    /// `level.getBlockState(pos)`: the real state inside the 3x3, air outside, matching
+    /// `WorldGenRegion.getBlockState`.
+    fn block_state(&self, x: i32, y: i32, z: i32) -> u32 {
+        crate::feature::world::FeatureWorld::get_block(self, x, y, z)
+    }
 }
 
 /// 完整的一次结构件放置：选调色板 → 跑 processor 链 → 写世界。

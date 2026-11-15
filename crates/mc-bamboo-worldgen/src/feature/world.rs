@@ -35,6 +35,13 @@ pub struct FeatureWorld<'a> {
     pub heights: [Heightmaps; 9],
     /// 8 个邻居的写增量，中心不记（中心直接交回 `blocks[4]`）。
     pub deltas: [Vec<(i32, i32, i32, u32)>; 9],
+    /// 写进去的方块实体 nbt，`(世界坐标, nbt)`，按写入顺序。`ChunkAccess` 在
+    /// `setBlockState` 里会把旧方块实体丢掉，所以这里也是「最后写入者胜」。
+    ///
+    /// Block-entity nbt written into the world, `(world position, nbt)` in write order.
+    /// `ChunkAccess.setBlockState` drops the old block entity, so the last writer wins
+    /// here too.
+    pub block_entities: Vec<((i32, i32, i32), mc_bamboo_nbt::Tag)>,
 }
 
 impl<'a> FeatureWorld<'a> {
@@ -54,6 +61,7 @@ impl<'a> FeatureWorld<'a> {
             biomes: &input.biomes,
             heights: input.heights,
             deltas: empty(),
+            block_entities: Vec::new(),
         })
     }
 
@@ -74,6 +82,30 @@ impl<'a> FeatureWorld<'a> {
             deltas: self.deltas.map(last_writes),
             unsupported,
         }
+    }
+
+    /// `LevelWriter.setBlockEntity` / `ChunkAccess.setBlockEntityNbt`：记下该位置的方块实体
+    /// nbt。同一位置再次写入会覆盖前一次（`setBlockState` 先丢旧方块实体）。
+    ///
+    /// `LevelWriter.setBlockEntity` / `ChunkAccess.setBlockEntityNbt`: record the block
+    /// entity nbt for that position. A later write to the same position replaces the
+    /// earlier one (`setBlockState` drops the old block entity first).
+    pub fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {
+        self.block_entities.retain(|(pos, _)| *pos != (x, y, z));
+        self.block_entities.push(((x, y, z), nbt.clone()));
+    }
+
+    /// `level.getFluidState(pos)`：流体类型与是否源，由状态表给出。
+    ///
+    /// `level.getFluidState(pos)`: the fluid type and whether it is a source, both from the
+    /// state table.
+    pub fn fluid_state(&self, x: i32, y: i32, z: i32) -> (bool, bool) {
+        let fluid = mc_bamboo_data::state_fluid(self.get_block(x, y, z));
+        // `FluidState.is(Fluids.WATER)`：`water` 与 `flowing_water` 都算。
+        // `is(WATER)` accepts both `water` and `flowing_water`.
+        let is_water = fluid.fluid == mc_bamboo_data::registries::fluid::WATER
+            || fluid.fluid == mc_bamboo_data::registries::fluid::FLOWING_WATER;
+        (is_water, fluid.source)
     }
 
     /// 区块坐标转 9 宫格下标；超出 3×3 返回 `None`。
@@ -300,5 +332,129 @@ mod last_write_tests {
         // The first cell is written 294 then 270: 270 stays although 294 is larger.
         let deltas = vec![(1, 70, 1, 294), (2, 70, 1, 139), (1, 70, 1, 270)];
         assert_eq!(last_writes(deltas), vec![(2, 70, 1, 139), (1, 70, 1, 270)]);
+    }
+}
+
+#[cfg(test)]
+mod block_writer_tests {
+    use crate::feature::world::FeatureWorld;
+    use crate::structure::jigsaw::place::BlockWriter;
+
+    /// 一个 y=64 是水的 3×3 输入。`FeatureWorld` 借用它，所以由调用方持有。
+    ///
+    /// A 3x3 input whose y=64 is water. `FeatureWorld` borrows it, so the caller owns it.
+    fn water_chunks() -> crate::feature::FeatureChunks {
+        use crate::feature::{CENTER, ChunkBlocks, FeatureChunks, Heightmaps};
+        let min_y = -64;
+        let height = 384;
+        let blocks: ChunkBlocks = vec![vec![mc_bamboo_data::blocks::AIR; 256]; height as usize];
+        let biomes = std::array::from_fn(|_| vec![vec![0u32; 64]; 4]);
+        let mut blocks_all: [ChunkBlocks; 9] = std::array::from_fn(|_| blocks.clone());
+        blocks_all[CENTER] = blocks;
+        // `minecraft:water[level=0]` 是水方块：流体是 `water`、`source = true`。
+        // `minecraft:water[level=0]` is a water block: fluid `water`, `source = true`.
+        let water = mc_bamboo_data::block_by_name("minecraft:water")
+            .expect("water block")
+            .default_state;
+        blocks_all[CENTER][(64 - min_y) as usize][0] = water;
+        FeatureChunks {
+            center_x: 0,
+            center_z: 0,
+            min_y,
+            height,
+            blocks: blocks_all,
+            biomes,
+            heights: [Heightmaps::new(min_y); 9],
+        }
+    }
+
+    /// `fluid_at` 从状态表读出「是水 / 是否源」，`block_state` 读真实状态。
+    ///
+    /// `fluid_at` reads the fluid kind and source flag from the state table; `block_state`
+    /// reads the real state.
+    #[test]
+    fn fluid_at_and_block_state_read_the_world() {
+        let chunks = water_chunks();
+        let world = FeatureWorld::new(&chunks, 63, 0).unwrap();
+        // y=64 有源水；y=65 是空气。
+        // y=64 holds source water; y=65 is air.
+        assert_eq!(world.fluid_state(0, 64, 0), (true, true));
+        assert_eq!(world.fluid_state(0, 65, 0), (false, false));
+        assert_eq!(
+            world.block_state(0, 64, 0),
+            mc_bamboo_data::block_by_name("minecraft:water")
+                .unwrap()
+                .default_state
+        );
+        // 3×3 之外读空气：与 `WorldGenRegion.getBlockState` 一致。
+        // Outside the 3x3 it reads air, matching `WorldGenRegion.getBlockState`.
+        assert_eq!(
+            world.block_state(1000, 64, 1000),
+            mc_bamboo_data::blocks::AIR
+        );
+    }
+
+    /// 写进流体源的水可含方块会被灌上 `waterlogged`，这只有在 `fluid_at` 真的返回流体
+    /// 模型时才发生——默认实现返回 `None` 时整段 watering 跳过。
+    ///
+    /// A waterloggable block written into a fluid source gets `waterlogged = true`, which
+    /// only happens when `fluid_at` actually returns a fluid model; the default `None`
+    /// skips the whole watering pass.
+    #[test]
+    fn watering_works_through_the_real_world() {
+        use crate::structure::jigsaw::place::{PlaceBlock, place_processed};
+        use crate::structure::processor::BlockStateSpec;
+
+        let chunks = water_chunks();
+        let mut world = FeatureWorld::new(&chunks, 63, 0).unwrap();
+        let bb = crate::structure::BoundingBox {
+            min_x: -16,
+            min_y: 0,
+            min_z: -16,
+            max_x: 16,
+            max_y: 128,
+            max_z: 16,
+        };
+        let blocks = vec![PlaceBlock {
+            pos: (0, 64, 0),
+            state: BlockStateSpec::parse_str("minecraft:oak_slab[type=bottom,waterlogged=false]")
+                .unwrap(),
+            nbt: None,
+        }];
+        let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0));
+        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        let state = world.get_block(0, 64, 0);
+        assert_eq!(
+            crate::structure::state_transform::property_of(state, "waterlogged"),
+            Some("true"),
+            "the slab in the water source is waterlogged"
+        );
+    }
+
+    /// `set_block_entity` 记下 nbt，后写覆盖前写。
+    ///
+    /// `set_block_entity` records the nbt; a later write replaces an earlier one.
+    #[test]
+    fn set_block_entity_keeps_the_last_write() {
+        use mc_bamboo_nbt::Tag;
+
+        let chunks = water_chunks();
+        let mut world = FeatureWorld::new(&chunks, 63, 0).unwrap();
+        let first = Tag::Compound(vec![("a".to_owned(), Tag::Int(1))]);
+        let second = Tag::Compound(vec![("a".to_owned(), Tag::Int(2))]);
+        world.set_block_entity(1, 65, 1, &first);
+        assert_eq!(world.block_entities, vec![((1, 65, 1), first.clone())]);
+        world.set_block_entity(1, 65, 1, &second);
+        assert_eq!(
+            world.block_entities,
+            vec![((1, 65, 1), second)],
+            "the later write wins"
+        );
+        world.set_block_entity(2, 65, 1, &first);
+        assert_eq!(
+            world.block_entities.len(),
+            2,
+            "another position is separate"
+        );
     }
 }
