@@ -3816,6 +3816,11 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
             match (&result, valid) {
                 (Some(_), true) => stub_and_valid += 1,
                 (Some(_), false) => stub_invalid_biome += 1,
+                // `None` 与 Java 的 `status=0` 已经逐查询比过，所以这里的计数只是
+                // 报告「有多少查询最终没有结构」，不代表覆盖缺口。
+                // The `None` result is already compared against Java's `status=0` per
+                // query, so this counter only reports how many queries end with no
+                // structure; it is not a coverage gap.
                 (None, _) => no_stub += 1,
             }
             let got_p = java_p.get(&key);
