@@ -908,6 +908,59 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 完全不同的列；floor 的 `vegetation_chance` 是 0.8，几乎所有列都长植被，顺序错也看不
 出来。
 
+#### 第三轮：`noise_threshold_count`、`clamped_normal`、`count_on_every_layer`、
+`MossyCarpetBlock.placeAt`（分支 `cb-wg-aquatic`）
+
+提交：`8d12409d`、`cad07370`（均为 `WIP:` 开头，按本轮工作模式保留）。
+
+本轮落地：
+
+* `IntProvider::ClampedNormal`：`clamp(mean + (float) nextGaussian * deviation, min, max)`。
+  为此给 `WorldgenRandom` 补了 `next_gaussian`（`MarsagliaPolarGaussian`，缓存另一半，
+  `set_seed` 时清缓存）。导出数据里只有 `pointed_dripstone` / `sulfur_spike` 用它，
+  **不属本分支范围，未对拍**。
+* `Modifier::NoiseThresholdCount`：`BIOME_INFO_NOISE.get(x/200, z/200)` 与
+  `noise_level` 比较，取 `below_noise` / `above_noise`。对拍见下表。
+* `Modifier::CountOnEveryLayer`：逐层找「空气在实心之上」的第 n 个交界，
+  床岩不算支撑。导出数据里只被下界类型用。
+* `feature/mossy_carpet.rs`：`MossyCarpetBlock.placeAt` —— `getUpdatedState`
+  （`BASE` / `LOW` / `TALL` 与上方同类地毯的联动）、`createTopperWithSideChance`
+  （每个非 `NONE` 侧面一次 `nextBoolean`）、放 topper 后再更新一次下层。
+* `survival.rs` 的 `MossyCarpet` 分支（`canSurvive`：`BASE` 时下面非空气，
+  否则下面同类且 `BASE`），`simple_block.rs` 分派到 `placeAt`。
+
+**关键发现：`level.getRandom()` 不是地物的 `random`。** `SimpleBlockFeature.place`
+对 `MossyCarpetBlock` 调的是 `MossyCarpetBlock.placeAt(level, origin,
+level.getRandom(), 2)`（字节码 129 是 `WorldGenLevel.getRandom()`），而
+`WorldGenRegion.random` 来自 `RandomState.getOrCreateRandomFactory("worldgen_region_random")`
+在中心区块**世界原点**上取的随机源，整个 `features` 调用共用一份，和按
+`(index, step)` 重新播种的地物 `random` 完全无关。
+
+为此在 `Generator` 里加了 `region_random: PositionalFactory`，
+`FeatureContext` / `PlacementEnv` 各加一个 `region_random` 字段，
+`place_leaf` / `SimpleBlockFeature::place` 把它传到 `MossyCarpet::place_at`。
+改之前 `pale_moss_patch` 对拍 15 处不一致，改之后降到 2 处。
+
+对拍（`--through features --steps 9`，逐方块）：
+
+| 集合 | 参数 | 结果 |
+|---|---|---|
+| `flower_cherry,flower_plains,patch_grass_meadow,patch_grass_plain,patch_tall_grass_2,wildflowers_meadow`（`noise_threshold_count` 的 6 个 placed feature） | `--seeds 4 --chunks 20 --salt 7` | **0 不一致**（79 中心 / 69894144 方块 / 1 skipped） |
+| 同上，故意把阈值偏 1.0 | `--seeds 2 --chunks 8 --salt 7` | 24 处不一致（确认比到了） |
+| `pale_moss_patch`（`MossyCarpetBlock.placeAt`） | `--seeds 6 --chunks 40 --salt 7` | **2 处未解决**（240 中心 / 212336640 方块 / 0 skipped）。改区域随机源前是 15 处 |
+| 14 个已验证 placed feature 一起放开（`block_column,vines,bamboo,multiface_growth,cave_vines,sea_pickle,seagrass_*×4,patch_waterlily,spore_blossom,kelp_cold,lush_caves_vegetation`） | `--seeds 4 --chunks 12 --salt 7` | **0 不一致**（48 中心 / 42467328 方块 / 0 skipped） |
+
+#### 已知限制（第三轮新增）
+
+* **`pale_moss_patch` 还剩 2 处**：`chunk (529509,523106)` 的
+  `(12,135,10)` 与 `(12,136,10)`。官方是 `{east:low, south:low, bottom:true}` +
+  空气，Bamboo 是 `{east:tall, south:low, bottom:true}` +
+  `{east:low, bottom:true}`（多放了一个下层，且 east 判成 `tall`）。
+  两个 patch 在这个位置重叠，Bamboo 多放的一格说明某个 `place_at` 的调用位置或
+  数量不同。**未定位。**
+* `clamped_normal` 只有单测，没对拍（用它的两个 placed feature 属洞穴/冰雪分支）。
+* `count_on_every_layer` 只有单测，没对拍（只被下界类型用，主世界不出现）。
+
 #### 蘑菇的亮度判据（已查清并落地）
 
 `WorldGenRegion` **没有覆写** `getRawBrightness`，它转发到 `level.getLightEngine()`
@@ -939,7 +992,10 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   属 `cb-wg-trees`。
 * `block_pile`、`huge_fungus`、`chorus_plant`：只被组合类内联或只在下界/末地。
 * `noise_threshold_count` / `count_on_every_layer` / `surface_water_depth_filter`
-  修饰器：本分支只补了 `environment_scan` 与 `surface_relative_threshold_filter`。
+  修饰器：第三轮（`8d12409d`）已全部移植。
+  `noise_threshold_count` 用在 step 9 的 6 个植被 placed feature 上并对拍 0 不一致；
+  `count_on_every_layer` 只被下界类型（`crimson_fungi` 等）用，主世界不出现；
+  `surface_water_depth_filter` 由 main 移植。
 * `seagrass` / `sea_pickle` / `lily_pad` / `spore_blossom` / `mushroom` 的
   `canSurvive`：全部已移植。`mushroom` 的亮度判据见上文「蘑菇的亮度判据」。
   （`supports_lily_pad` 流体/方块标签 + 上方空流体）、`SporeBlossomBlock`
