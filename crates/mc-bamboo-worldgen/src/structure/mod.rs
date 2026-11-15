@@ -23,6 +23,7 @@ pub mod jigsaw;
 pub mod piece_place;
 pub mod pieces;
 pub mod placement;
+pub mod processor;
 pub mod registry;
 pub mod rings;
 pub mod save;

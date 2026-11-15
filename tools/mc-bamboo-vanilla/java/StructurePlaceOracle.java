@@ -84,13 +84,16 @@ public final class StructurePlaceOracle {
             java.util.Set.of("id", "BB", "O", "GD");
 
     public static void main(String[] args) throws Exception {
+        System.err.println("PLACE oracle start");
         if (args.length != 1) {
             throw new IllegalArgumentException("usage: StructurePlaceOracle <queries.txt>");
         }
         try {
             run(args[0]);
         } catch (Throwable error) {
-            error.printStackTrace();
+            // stdout 已被重定向给结果，堆栈必须写到真正的 stderr，否则看不到。
+            // stdout is redirected to the results, so print the trace to the real stderr.
+            error.printStackTrace(System.err);
             throw error;
         }
     }
@@ -354,6 +357,8 @@ public final class StructurePlaceOracle {
         private final String fill;
         /** 所有写过的位置，按首次写入顺序。 */
         private final List<BlockPos> written = new ArrayList<>();
+        /** `placeBlock` 请求过的流体 tick 位置（本 oracle 不 tick，只确认不抛异常）。 */
+        private final List<BlockPos> scheduled = new ArrayList<>();
         private final PalettedContainerFactory factory;
 
         Level(ChunkPos center, String fill, RegistryAccess.Frozen registries) {
@@ -596,6 +601,15 @@ public final class StructurePlaceOracle {
                         return MIN_Y;
                     case "getMaxBuildHeight":
                         return MIN_Y + 384;
+                    case "scheduleTick": {
+                        // `placeBlock` 在 `setBlock` 后若该位置有流体会调它。本 oracle 不 tick，
+                        // 调度本身不改方块、不取世界随机数，所以只记录不抛异常。
+                        // `placeBlock` calls this when the written position holds a fluid.
+                        // This oracle never ticks; scheduling changes no block and draws no
+                        // world randomness, so record it instead of throwing.
+                        scheduled.add((BlockPos) args[0]);
+                        return null;
+                    }
                     case "toString":
                         return "StructurePlaceLevel";
                     case "hashCode":
