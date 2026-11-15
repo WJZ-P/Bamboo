@@ -44,7 +44,7 @@ use mc_bamboo_worldgen::{
     chunk::Generator,
     settings::SeededRouter,
     structure::{
-        BoundingBox, Structures, allowed_biome_names,
+        BoundingBox, Structures, allowed_biome_names, column_has_valid_biome,
         jigsaw::{
             JigsawConfig, JigsawStructures, Piece, Rotation, StructurePieces, TemplatePools,
             add_pieces,
@@ -120,6 +120,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "templates" => run_templates(command, work_dir),
         "jigsaws" => run_jigsaws(command, work_dir),
         "pieces" => run_pieces(command, work_dir, options.get(1), options.get(2)),
+        "piecesbiome" => run_pieces_biome(command, work_dir),
         "pools" => run_pools(command, work_dir),
         "save" => run_save(command, work_dir),
         "processors" => run_processors(command, work_dir),
@@ -561,7 +562,7 @@ fn compare_pools(stdout: &str, queries: &[String]) -> Result<(), String> {
 /// `save` mode queries match `pieces` (structure × seed × chunk) but compare the full
 /// Children tag produced by vanilla `createTag`.
 fn run_save(mut command: Command, work_dir: &Path) -> Result<(), String> {
-    let queries = build_queries(3, 3);
+    let queries = build_queries(SEEDS.len(), CHUNKS.len());
     let queries_path = work_dir.join("jigsaw_save_queries.txt");
     let text = queries
         .iter()
@@ -847,7 +848,7 @@ fn compare_processors(stdout: &str) -> Result<(), String> {
 /// compare each field with vanilla's own write-then-read result (including the recomputed
 /// bounding box and the re-encoded element).
 fn run_load(mut command: Command, work_dir: &Path) -> Result<(), String> {
-    let queries = build_queries(3, 3);
+    let queries = build_queries(SEEDS.len(), CHUNKS.len());
     let queries_path = work_dir.join("jigsaw_load_queries.txt");
     let text = queries
         .iter()
@@ -3409,6 +3410,103 @@ fn run_randomizable_container(mut command: Command, work_dir: &Path) -> Result<(
     Ok(())
 }
 
+/// `piecesbiome` 模式：像 `pieces` 一样比结构件，但**先按群系挑起点**。
+///
+/// `pieces` 用固定的 12 个区块，实测只有 5.8% 的查询能通过 `isValidBiome`，
+/// 其余 94% 只验证了「返回 `None`」。这里对每个 (结构, 种子) 在半径 `RADIUS` 的
+/// 区块范围内扫 `column_has_valid_biome`，挑出前 `PER_STRUCTURE` 个真正属于该结构
+/// 群系的区块，于是几乎每个查询都会跑完 `addPieces`。
+///
+/// `piecesbiome` mode: compares pieces like `pieces` but **picks start points by biome**
+/// first. `pieces` uses twelve fixed chunks and only 5.8% of its queries pass
+/// `isValidBiome`, so the rest only exercise the "returns None" path. Here each
+/// (structure, seed) scans `column_has_valid_biome` over a chunk square of radius
+/// `RADIUS` and keeps the first `PER_STRUCTURE` chunks whose column really holds the
+/// structure's biome, so nearly every query runs `add_pieces` to completion.
+fn run_pieces_biome(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    /// 每个方向扫多少个区块（`2*RADIUS+1` 见方）。
+    /// How many chunks to scan per axis (`2*RADIUS+1` square).
+    const RADIUS: i32 = 64;
+    /// 每个 (结构, 种子) 最多保留几个命中区块。
+    /// At most this many matching chunks per (structure, seed).
+    const PER_STRUCTURE: usize = 3;
+
+    let worldgen = Worldgen::load()?;
+    let settings = worldgen
+        .settings("minecraft:overworld")
+        .ok_or("missing overworld settings")?;
+    let dims = (settings.min_y, settings.height);
+    let raw: Value =
+        serde_json::from_str(WORLDGEN).map_err(|error| format!("bad worldgen.json: {error}"))?;
+    let structures = Structures::parse(raw.get("structure").ok_or("missing structure")?)?;
+    let mut allowed_cache: HashMap<String, HashSet<String>> = HashMap::new();
+    for id in &STRUCTURES {
+        let def = structures
+            .get(id)
+            .ok_or_else(|| format!("missing structure def {id}"))?;
+        allowed_cache.insert((*id).to_owned(), allowed_biome_names(def)?);
+    }
+
+    let mut queries = Vec::new();
+    let mut scanned = 0usize;
+    let mut per_structure: HashMap<String, usize> = HashMap::new();
+    for &seed in SEEDS.iter().take(3) {
+        let generator = Generator::new(&worldgen, seed)?;
+        for id in &STRUCTURES {
+            let allowed = &allowed_cache[*id];
+            let mut found = 0usize;
+            'scan: for dz in -RADIUS..=RADIUS {
+                for dx in -RADIUS..=RADIUS {
+                    let chunk = (dx, dz);
+                    scanned += 1;
+                    if !column_has_valid_biome(&generator, chunk, allowed, dims)? {
+                        continue;
+                    }
+                    queries.push(Query {
+                        id: (*id).to_owned(),
+                        seed,
+                        cx: chunk.0,
+                        cz: chunk.1,
+                    });
+                    found += 1;
+                    if found == PER_STRUCTURE {
+                        break 'scan;
+                    }
+                }
+            }
+            *per_structure.entry((*id).to_owned()).or_default() += found;
+            if found == 0 {
+                println!("note: {id} seed {seed} has no valid-biome chunk within radius {RADIUS}");
+            }
+        }
+    }
+    println!(
+        "scanned {scanned} (structure, chunk) columns by biome, kept {} queries",
+        queries.len()
+    );
+
+    let queries_path = work_dir.join("jigsaw_piece_biome_queries.txt");
+    let text = queries
+        .iter()
+        .map(|query| format!("{}|{}|{}|{}", query.id, query.seed, query.cx, query.cz))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&queries_path, text).map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("pieces")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_pieces(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
 fn run_pieces(
     mut command: Command,
     work_dir: &Path,
@@ -3417,11 +3515,11 @@ fn run_pieces(
 ) -> Result<(), String> {
     let seeds = seeds_arg
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(2)
+        .unwrap_or(SEEDS.len())
         .clamp(1, SEEDS.len());
     let chunks = chunks_arg
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(2)
+        .unwrap_or(CHUNKS.len())
         .clamp(1, CHUNKS.len());
     let queries = build_queries(seeds, chunks);
     let queries_path = work_dir.join("jigsaw_piece_queries.txt");
