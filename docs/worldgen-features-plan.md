@@ -1373,6 +1373,43 @@ biome filter rejected at (4, 88, 842): biome=29 placed=87
 「`environment_scan` 停在深处」的区块，或在集成测试里直接构造（`waterlogged_patch_lays_ground_and_turns_deep_cells_into_water`
 已经这么做了）。
 
+#### 第二十轮：用「低段 `lush_caves` 占多数」的区块跑通了 `waterlogged_vegetation_patch`
+
+上一段说需要「专门找 `environment_scan` 停在深处」的区块。第二十轮用
+`W:\data\bamboo-agents\tools\tmp_find.rs` 的做法（临时集成测试，用完删除）扫出
+seed 0 下**低 8 段（y = -64..63）`lush_caves` 占 75%+** 的区块：
+`(476,0)` 0.760、`(480,0)` 0.803、`(484,0)` 0.814、`(488,0)` 0.812、
+`(-528,528)` 0.781、`(-532,532)` 0.844。
+
+其中 `(480,0)` 一带真的跑到了 `waterlogged=true` 分支（加临时打印确认）：
+
+```
+DIAG vegetation_patch place waterlogged=false origin=(7674, -36, -16)
+DIAG placeGroundPatch waterlogged=false placed=true surface=52
+DIAG vegetation_patch place waterlogged=true  origin=(7675, -21, -5)
+DIAG placeGroundPatch waterlogged=true  placed=true surface=1
+DIAG vegetation_patch place waterlogged=true  origin=(7692, -12, 15)
+DIAG placeGroundPatch waterlogged=true  placed=true surface=29
+DIAG vegetation_patch place waterlogged=true  origin=(7692, -10, 9)
+DIAG placeGroundPatch waterlogged=true  placed=true surface=11
+DIAG vegetation_patch place waterlogged=true  origin=(7689, 44, 29)
+DIAG placeGroundPatch waterlogged=true  placed=true surface=40
+DIAG vegetation_patch place waterlogged=true  origin=(7703, 69, 17)
+DIAG placeGroundPatch waterlogged=true  placed=true surface=30
+```
+
+对拍命令与结果：
+
+| 命令 | 结果 | 改坏验证 |
+|---|---|---|
+| `--through features --steps 9 --feature-types minecraft:lush_caves_clay --chunk 480 0 --scan 9 --seeds 1` | **0 不一致 / 0 skipped**（9 中心 / 7962624 方块） | 把 `is_exposed` 改成恒 `true`（不换任何水）报 **160 处** |
+
+**注意**：`--feature-types` 要写 **placed feature 注册名** `minecraft:lush_caves_clay`，
+不能写类型 ID `minecraft:waterlogged_vegetation_patch` —— 后者会让 Java 侧
+`applyFeatureAllowList` 抛 `feature allow list kept nothing`，因为白名单是按
+**placed feature** 过滤的，而 `clay_pool_with_dripleaves` 没被任何 placed feature 直接引用
+（它只作为 `lush_caves_clay` 的 `random_boolean_selector` 子项出现）。
+
 #### `root_system` 的成功路径在官方 26.3 里几乎不可达（第十六轮核对）
 
 `rooted_azalea_tree` / `rooted_sulfur_spring` 长期「改坏也不报错」。逐字节核对官方
@@ -1434,17 +1471,19 @@ for (int y = 0; y < rootColumnMaxHeight; y++) {
 
 #### 已知限制（第四轮更新）
 
-* **`moss_patch_ceiling` 还剩 4 处 `cave_vines` 错位**：`chunkgen --through features
+* ~~**`moss_patch_ceiling` 还剩 4 处 `cave_vines` 错位**~~：`chunkgen --through features
   --steps 9 --feature-types minecraft:lush_caves_ceiling_vegetation --chunk -58 -217
   --seeds 2` 报 14 处 = 10 处 terrain + 4 处地物。官方在 `(13,-27..-24,6)` 竖着放 4 格
   `cave_vines`，Bamboo 放到邻块 `(1,0)` 的 `(0,-29..-26,1)`。surface 迭代序（`treeify`）
   已修正，但仍选到不同列，说明 **surface 集合内容不同或 `nextFloat` 次数不同**。未定位。
-* **`pale_moss_patch` 还剩 2 处**：`chunk (529509,523106)` 的 `(12,135,10)` /
-  `(12,136,10)`。诊断结果：Bamboo 的 `place_at` 放下了 base `35584`（与官方一致）和
-  topper `35662`（`{east:low,bottom:false}`），随后「再更新一次下层」把 base 的 east
-  从 `low` 升成 `tall`（因为看到上层同类地毯 east 非 none）。官方没放 topper，所以 base
-  保持 `low`。**根因在 `topper_with_side_chance` 的返回**，未定位。
-  已确认方向正确：把 `region_random` 换成地物 `random` 会退化成 15 处。
+* ~~**`pale_moss_patch` 还剩 2 处**~~ **已修复（第二十轮）**：`chunk (529509,523106)`
+  的 `(12,135,10)` / `(12,136,10)`。根因是 `region_random` 的**类型**：
+  官方 `WorldGenRegion.random` 是裸 `RandomSource`（`XoroshiroRandomSource`），
+  `nextBoolean()` 等于 `(nextLong() & 1) != 0`（long 的**低位**）；我包成了
+  `WorldgenRandom`，它的 `nextBoolean()` 走 `next(1)`（**高位**），两边序列完全不同。
+  JVM 实测同一位置：官方 `false`、Bamboo `true`。
+  改成裸 `Random` 后 `--chunk 529509 523106 --seeds 6` 从 2 处降到 **0 处**；
+  把取数改成 `!random.next_boolean()` 会报 **6 处**（改坏验证通过）。提交 `4941e404`。
 * `clamped_normal` 只有单测，没对拍（用它的两个 placed feature 属洞穴/冰雪分支）。
 * `count_on_every_layer` 只有单测，没对拍（只被下界类型用，主世界不出现）。
 
