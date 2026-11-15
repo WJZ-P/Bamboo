@@ -123,6 +123,12 @@ pub struct FeatureResult {
     /// 8 个邻居（不含中心）相对输入的写增量，只记真正被 `setBlock` 改过的格子。
     /// 下标和输入的 9 宫格一致，`[CENTER]` 恒为空。
     pub deltas: [Vec<(i32, i32, i32, u32)>; 9],
+    /// 写进去的方块实体 nbt，`(世界坐标, nbt)`，同一位置后写覆盖前写。
+    /// 现在只有结构件放置会填（`set_block_entity`）。
+    ///
+    /// Block-entity nbt written into the world as `(world position, nbt)`; a later write to
+    /// the same position replaces the earlier one. Only structure placement fills it today.
+    pub block_entities: Vec<((i32, i32, i32), mc_bamboo_nbt::Tag)>,
     /// 本区块涉及了未移植的地物 / 修饰器 / 谓词，对拍时不参与逐方块比较。
     pub unsupported: bool,
 }

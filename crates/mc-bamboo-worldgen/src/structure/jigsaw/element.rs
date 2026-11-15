@@ -16,6 +16,7 @@ use crate::{
     random::WorldgenRandom,
     structure::{
         BoundingBox,
+        processor::ProcessorListRef,
         template::{Direction, JointType, StructureTemplate},
     },
 };
@@ -47,9 +48,14 @@ impl Projection {
     }
 }
 
-/// 五种 pool element。processor 字段留到放置阶段，这里只解析结构件生成要用的。
+/// 五种 pool element。`processors` / `override_liquid_settings` 只留给放置阶段，
+/// 结构件生成不读；`processors` 已按 `StructureProcessorType.LIST_CODEC` 解析成
+/// 类型化的 `ProcessorListRef`（注册名或内联列表），放置那一步不用再解析 JSON。
 ///
-/// The five pool element types. Processors are left for the placement stage.
+/// The five pool element types. `processors` / `override_liquid_settings` are only for
+/// the placement stage; piece generation never reads them. `processors` is parsed into a
+/// typed `ProcessorListRef` (a registry name or an inline list) per
+/// `StructureProcessorType.LIST_CODEC`, so the placement stage does not re-parse JSON.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PoolElement {
     Empty,
@@ -57,6 +63,12 @@ pub enum PoolElement {
         location: String,
         projection: Projection,
         legacy: bool,
+        /// `processors`：注册名或内联列表。
+        ///
+        /// `processors`: a registry name or an inline list.
+        processors: ProcessorListRef,
+        /// `SinglePoolElement.overrideLiquidSettings`。
+        override_liquid_settings: Option<String>,
     },
     List {
         elements: Vec<PoolElement>,
@@ -131,6 +143,14 @@ impl PoolElement {
                     location: string_field(raw, "location")?,
                     projection: Projection::parse(raw.get("projection"))?,
                     legacy: element_type == "minecraft:legacy_single_pool_element",
+                    processors: ProcessorListRef::parse(
+                        raw.get("processors")
+                            .ok_or("single_pool_element has no processors")?,
+                    )?,
+                    override_liquid_settings: raw
+                        .get("override_liquid_settings")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                 })
             }
             "minecraft:list_pool_element" => {
@@ -141,6 +161,13 @@ impl PoolElement {
                     .iter()
                     .map(Self::parse)
                     .collect::<Result<Vec<_>, _>>()?;
+                // `ListPoolElement` 构造器：`if (elements.isEmpty()) throw new
+                // IllegalArgumentException("Elements are empty")`，所以空列表是解码错误。
+                // `ListPoolElement`'s constructor throws for an empty list, so it is a
+                // decode error rather than an empty element.
+                if elements.is_empty() {
+                    return Err("list_pool_element has an empty elements list".to_owned());
+                }
                 Ok(Self::List {
                     elements,
                     projection: Projection::parse(raw.get("projection"))?,

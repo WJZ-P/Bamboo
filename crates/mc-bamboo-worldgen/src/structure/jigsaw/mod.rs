@@ -14,15 +14,18 @@
 pub mod alias;
 pub mod config;
 pub mod element;
+pub mod load_piece;
+pub mod place;
 pub mod placer;
 pub mod pool;
 pub mod rotation;
+pub mod save_piece;
 pub mod shapes;
 
 pub use alias::PoolAliasLookup;
 pub use config::{HeightProvider, JigsawConfig, JigsawStructures, WorldGenerationContext};
 pub use element::{JigsawBlock, PoolElement, Projection, can_attach};
-pub use placer::{Junction, Piece, StructurePieces, add_pieces};
+pub use placer::{Junction, LiquidSettings, Piece, StructurePieces, add_pieces};
 pub use pool::{TemplatePool, TemplatePools};
 pub use rotation::{Rotation, shuffle, shuffled_copy};
 

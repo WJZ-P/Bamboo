@@ -98,6 +98,7 @@ public final class StructurePlaceOracle {
             java.util.Set.of("id", "BB", "O", "GD");
 
     public static void main(String[] args) throws Exception {
+        System.err.println("PLACE oracle start");
         if (args.length != 1) {
             throw new IllegalArgumentException("usage: StructurePlaceOracle <queries.txt>");
         }
@@ -662,12 +663,15 @@ public final class StructurePlaceOracle {
         private final Holder<Biome> levelBiome;
         private final RegistryAccess.Frozen registries;
         private final String fill;
+        /** 所有写过的位置。`Set` 去重，`snapshot()` 最后还会排序。 */
+        // Every written position. A `Set` avoids duplicates; `snapshot()` sorts anyway.
+        private final java.util.Set<BlockPos> written = new java.util.HashSet<>();
+        /** `placeBlock` 请求过的流体 tick 位置（本 oracle 不 tick，只确认不抛异常）。 */
+        private final List<BlockPos> scheduled = new ArrayList<>();
         /** `WorldGenRegion.getRandom()` 的替身，固定种子。 */
         // Stand-in for `WorldGenRegion.getRandom()`, fixed seed.
         private final net.minecraft.util.RandomSource levelRandom =
                 net.minecraft.util.RandomSource.create(0L);
-        /** 所有写过的位置。 */
-        private final java.util.Set<BlockPos> written = new java.util.HashSet<>();
         /** 当前这次结构件调用的写入，按顺序：`x y z state`。 */
         private final List<String> pieceWrites = new ArrayList<>();
 
@@ -987,13 +991,6 @@ public final class StructurePlaceOracle {
                     case "holderLookup":
                         return registries.lookupOrThrow(
                                 (net.minecraft.resources.ResourceKey) args[0]);
-                    case "scheduleTick":
-                        // `placeBlock` 写含流体的方块后会给它排一个 0 刻的 tick。假世界不做
-                        // 计划刻，方块本身已经写进去了，直接返回。
-                        // `placeBlock` schedules a zero-delay tick after writing a block that
-                        // holds fluid. The fake world runs no ticks; the block is already in,
-                        // so this is a no-op.
-                        return null;
                     case "markPosForPostProcessing":
                         at((BlockPos) args[0]).markPosForPostProcessing((BlockPos) args[0]);
                         return null;
@@ -1030,6 +1027,15 @@ public final class StructurePlaceOracle {
                         return MIN_Y;
                     case "getMaxBuildHeight":
                         return MIN_Y + 384;
+                    case "scheduleTick": {
+                        // `placeBlock` 在 `setBlock` 后若该位置有流体会调它。本 oracle 不 tick，
+                        // 调度本身不改方块、不取世界随机数，所以只记录不抛异常。
+                        // `placeBlock` calls this when the written position holds a fluid.
+                        // This oracle never ticks; scheduling changes no block and draws no
+                        // world randomness, so record it instead of throwing.
+                        scheduled.add((BlockPos) args[0]);
+                        return null;
+                    }
                     case "toString":
                         return "StructurePlaceLevel";
                     case "hashCode":

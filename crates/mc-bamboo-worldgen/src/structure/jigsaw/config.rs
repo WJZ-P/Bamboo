@@ -87,6 +87,30 @@ pub struct JigsawConfig {
 }
 
 impl JigsawConfig {
+    /// 把任意一个 pool 当起始 pool 的合成配置：`maxDepth` 4、`use_expansion_hack` 开、
+    /// 起点 Y 固定 64、不投影、`max_distance` 80、无别名、默认液体设置。`jigsaw pools`
+    /// 对拍用它逐 pool 走 `addPieces`，覆盖 feature / list / empty 元素和每条拼接路径。
+    ///
+    /// Synthetic config treating an arbitrary pool as the start pool: `maxDepth` 4,
+    /// `use_expansion_hack` on, fixed start Y 64, no projection, `max_distance` 80, no
+    /// aliases and the default liquid settings. The `jigsaw pools` oracle uses it to run
+    /// `addPieces` per pool, covering feature / list / empty elements and every
+    /// attachment path.
+    pub fn for_pool(pool: &str, start_y: i32) -> Self {
+        Self {
+            start_pool: pool.to_owned(),
+            start_jigsaw_name: None,
+            max_depth: 4,
+            start_height: HeightProvider::Constant(start_y),
+            use_expansion_hack: true,
+            project_start_to_heightmap: None,
+            max_distance: (80, 80),
+            dimension_padding: (0, 0),
+            liquid_settings: "apply_waterlogging".to_owned(),
+            pool_aliases: Vec::new(),
+        }
+    }
+
     pub fn parse(raw: &Value) -> Result<Self, String> {
         Ok(Self {
             start_pool: string_field(raw, "start_pool")?,

@@ -105,6 +105,47 @@
   传 `null`），Rust 侧要精确复刻 `Shapes` 的 AABB 布尔运算、`getShuffledJigsawBlocks` 的
   洗牌顺序与 `SequencedPriorityIterator`，本次会话未能达到逐项 0 不一致，见第 10 节。
 
+**第四轮续（2026-11-14，`cb-wg-jigsaw` 分支：jigsaw 结构件生成）**：
+
+* 补完第四轮没做的 `JigsawPlacement.addPieces` 全递归：`structure::jigsaw` 下的
+  `config`（`HeightProvider` / `MaxDistance` / `DimensionPadding`）、`rotation`
+  （`Rotation` / `Util.shuffle` / `shuffledCopy`）、`element`（五种 pool element 的
+  `getSize` / `getBoundingBox` / `getShuffledJigsawBlocks` / `canAttach`）、`pool`
+  （`StructureTemplatePool` 的展开、`getRandomTemplate`、`getShuffledTemplates`、
+  `getMaxSize` 缓存）、`shapes`（`Shapes.join` / `joinIsNotEmpty` / `joinUnoptimized`
+  的乘 4 整数精确复刻）、`alias`（`PoolAliasLookup`）、`placer`（`tryPlacingChildren`
+  递归 + `SequencedPriorityIterator`）。
+* `structure::template` 增加模板按 id 缓存（对齐 `StructureTemplateManager.getOrCreate`，
+  否则 972 个查询要重复解析 NBT 几百万次）与按位置的 `getRandomPalette`
+  （`palette_index` / `jigsaws_at`），多 palette 模板不再固定取第一个。
+* 对拍 `jigsaw` 子命令四个模式：`templates`（1511 个模板的尺寸 / 方块数 / 拼图方块数）、
+  `jigsaws`（24176 个模板 × 旋转 × 位置查询、68352 个拼图方块逐字段）、
+  `pieces`（27 个结构 × 6 种子 × 6 区块 = 972 查询、12467 结构件逐字段，含每个 junction）、
+  `shapes`（120 场景 + 4 个 deflate case）。全部 0 不一致；四处故意改坏各自被抓到并失败。
+* 覆盖了 26.3 新增的 18 个 `abandoned_camp_*` jigsaw 结构（也在本分支范围内）。
+
+**第四轮续二（2026-11-14，`cb-wg-jigsaw` 分支：连接规则与存档字段的覆盖面）**：
+
+* `pieces` 的 Q 行补上 `isValidBiome(stub)`（`findValidGenerationPoint` 的最后一道门），
+  逐查询比真假；3 种子 × 4 区块 × 27 结构 = 324 查询、4033 结构件 0 不一致，
+  其中 14/324 为 true（真假两支都比到）。故意反转 `isValidBiome` 报 26/324 不一致。
+  P 行同时补 `getGenDepth()`（恒 0）与 `PoolElementStructurePiece.liquidSettings`
+  （官方无访问器，Java 侧反射读）。
+* 新对拍模式 `jigsaw pools`：把 245 个 `template_pool` 每一个都当起始 pool 直接调官方
+  `JigsawPlacement.addPieces`（`maxDepth` 4、expansion hack 开、`MaxDistance(80)`、
+  `PoolAliasLookup.EMPTY`），2 种子 × 2 区块 × 245 pool = 980 查询、8976 结构件 0 不一致。
+  这一条把 `feature_pool_element`（639 件）与 `list_pool_element`（15 件）当父件的路径
+  真的比到了——按结构生成时它们只当叶子，进不了 `addPieces` 的递归。
+  故意把 expansion hack 的 `expandTo + 1` 改成 `+2`，报 82/980 不一致。
+* 新对拍模式 `jigsaw save`：用真实结构件跑官方 `PoolElementStructurePiece.createTag`，
+  逐 Children 条目比完整规范 NBT（`PosX`/`PosY`/`PosZ`、`ground_level_delta`、
+  `pool_element`、`rotation`（`LEGACY_CODEC` 的枚举常量名）、`junctions`、
+  `liquid_settings` 仅在非默认时写）。108 查询、1216 个件标签 0 不一致；
+  故意把 `rotation` 写成 `CODEC` 的 `none`，对拍立刻报差异。
+* `PoolElement` 补上放置阶段要用的 `processors`（注册名或内联对象）与
+  `override_liquid_settings`；`Piece` 补 `liquid_settings`，`Piece::to_full_save_piece`
+  给出带全部子类字段的存档结构件。
+
 **第五轮（2026-11-14，`cb-wg-structures` 分支：单件布局 / Beardifier / 存档）**：
 
 * 合并了 `main` 及队友分支 `cb-fix-main` / `cb-wg-jigsaw` / `cb-wg-multipiece` /
@@ -128,6 +169,266 @@
   `GenerationContext`，且沉船 / 废弃传送门的包围盒依赖 `getLowestY` /
   `getMeanFirstOccupiedHeight`（terrain 高度），`features` 放置要逐方块比 `postProcess`，
   两者都是独立的大块工作。雪屋 / 沉船 / 海底遗迹已在下一段补上；废弃传送门仍没做。
+
+**第六轮（2026-11-14，`cb-wg-jigsaw` 分支：`processor_list` 解析与编码）**：
+
+* 新模块 `structure::processor`：按官方 `StructureProcessorType.DIRECT_CODEC` /
+  `SINGLE_CODEC` / `RuleTest.CODEC` / `PosRuleTest.CODEC` /
+  `RuleBlockEntityModifier.CODEC` 把 26.3 的 40 个 `processor_list`（52 个 processor）
+  解析成类型化的 Rust 结构体。四种 processor：`block_rot`（含可选 `rottable_blocks`）、
+  `rule`（`ProcessorRule` 的五个字段，`position_predicate` / `block_entity_modifier` 有
+  默认值）、`protected_blocks`、`capped`（`delegate` + `limit`，`limit` 是
+  `IntProvider` 的 `constant` 形式）。五种 `RuleTest`（`always_true` / `block_match` /
+  `blockstate_match` / `tag_match` / `random_block_match` / `random_blockstate_match`）、
+  一种 `PosRuleTest`（`axis_aligned_linear_pos`，五个字段全是 `optionalFieldOf`）与
+  一种 modifier（`append_loot`）。
+* 新对拍模式 `jigsaw processors`：Java 侧用官方 `DIRECT_CODEC` 把全部 40 个列表编码成
+  NBT，Rust 侧用 `Processor::to_tag` 复算，逐键比。40 个列表 / 52 个 processor
+  0 不一致。**这条对拍抓出两处真实 bug**：(a) `BlockState` 在 26.3 的 NBT 里是
+  `{id, properties}`（不是 `{Name, Properties}`），10/40 列表受影响；(b) 官方与 Rust 的
+  float 默认格式化不同（`1.0E-4` vs `0.0001`），改为比位模式后消失。
+* `PoolElement::Single.processors` 从原始 `serde_json::Value` 改成类型化的
+  `ProcessorListRef`（注册名或内联列表）；`Piece` 的存档 `pool_element` 按官方 codec
+  写出（内联是 `{processors: [...]}` 复合）。
+* **回归抓出的第三处 bug**：把内联 `processors` 写成裸数组后，`jigsaw save` 立刻报
+  789/108 不一致（官方是 `{processors: {type:9, values:[]}}`），改回复合后回 0。
+* 故意改坏：把 `BlockState` 的 `id` 键改回 `Name`，`jigsaw processors` 报 5/40。
+* **仍没做**：processor 的**执行**（`BlockRotProcessor.processBlock` /
+  `RuleProcessor.processBlock` 的 `Mth.getSeed(pos)` 随机源、`CappedProcessor.finalizeProcessing`
+  的限额、`ProtectedBlockProcessor` 的跳过），属放置阶段。
+
+**第七轮（2026-11-14，`cb-wg-jigsaw` 分支：jigsaw 读回 + processor 执行）**：
+
+* `structure::jigsaw::load_piece`：`PoolElementStructurePiece(context, tag)` 的读回。照官方
+  顺序读 `PosX`/`PosY`/`PosZ`（缺省 0）、`ground_level_delta`（缺省 0）、`pool_element`
+  （`StructurePoolElement.CODEC`，读不出就整体失败）、`rotation`（`LEGACY_CODEC`）、
+  `junctions`（缺省空）、`liquid_settings`（缺省 `apply_waterlogging`），并**用元素重算
+  包围盒**（忽略存档 `BB`）。新对拍模式 `jigsaw load`：官方 `createTag` → 官方
+  `StructurePieceType.load`（含 `PiecesContainer.RENAMES`）读回，与 Rust 逐项比，
+  108 查询 / 1216 结构件 0 不一致。故意改坏 `ground_level_delta` 报 1216 处；另发现
+  「用存档 `BB` 代替重算」在这批数据上结果相同（存档 `BB` 本来就等于重算值），所以补了
+  单元测试 `saved_bounding_box_is_ignored_in_favour_of_the_element` 钉住语义。
+* `structure::processor_apply`：`StructureProcessor.processBlock` /
+  `finalizeProcessing` 的纯函数版，输入是 `ProcessorLevel`（读世界方块 + 标签判定）。
+  逐个照官方：`block_rot`（`nextFloat() <= integrity` 才保留；不在 `rottable_blocks` 里
+  时**不取随机数**）、`rule`（`inputPredicate` 用模板方块、`locationPredicate` 读**世界**
+  方块、`positionPredicate` 用模板相对坐标）、`protected_blocks`（读**世界**方块）、
+  `capped`（`processBlock` 空实现，只在 `finalizeProcessing` 里用
+  `levelSeed.forkPositional().at(piecePos)` 派生的随机源洗牌取前 `limit` 个）。
+* 新对拍模式 `jigsaw apply`：40 个 `processor_list` × 8 种方块 × 2 种假世界状态 × 1 个额外
+  结构件位置 = 120 查询，逐方块比官方 `StructureTemplate.processBlockInfos`，893 个存活
+  方块 0 不一致。故意改坏两处（`integrity` 判据、`tag_match` 取反）合报 198 处不一致。
+* **对拍抓出的两处真实 bug**：(a) 我把模板相对坐标直接当世界坐标，漏了
+  `calculateRelativePosition(...).offset(position)`，导致 `block_rot` 的位置随机源错位
+  （7 vs 8 个存活方块）；(b) `BlockState` 在 NBT 里是 `{id, properties}`，上一轮已经修过，
+  这轮复核确认。
+
+**第八轮（2026-11-14，`cb-wg-jigsaw` 分支：整件分支覆盖 + capped 随机序列 + 空列表校验）**：
+
+* `structure::processor_apply::process_blocks` 补上官方的 `processOnlyInCurrentChunk`：
+  链里没有任何 `evaluates_entire_piece_state()` 为真（26.3 只有 `capped`）且
+  `settings.getBoundingBox()` 存在时，只处理落在盒内的方块。这直接决定
+  `processedBlockInfoList` 的长度，进而决定 `capped` 洗牌的下标范围，所以必须照做。
+  `Processor::evaluates_entire_piece_state()` 照官方实现（只有 `Capped` 返回 true）。
+* 新对拍模式 `jigsaw capped`：复刻 `CappedProcessor.finalizeProcessing` 的随机源派生
+  （`RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece)`）、
+  `Util.toShuffledList` 的洗牌序列、`limit.sample` 的取值，以及原始 `nextInt(1000)`
+  序列。5 种子 × 3 结构件位置 × 5 种 size = 75 查询 0 不一致。**这条补上了上一轮报告里
+  最大的疑点**：不需要伪造 `ServerLevel` 也能验证随机源与洗牌。
+* `jigsaw apply` 的查询格式加了可选的 `chunkBB` 段（`none` 或 6 个整数），80 条带盒的
+  查询覆盖 `processOnlyInCurrentChunk` 的两支。主链里的 `capped` 被换成 `limit = 0`
+  的等价实例（`processBlock` 本来就是空实现，`finalizeProcessing` 在 `limit == 0` 时
+  提前返回，于是不需要真实 `ServerLevel` 种子，但 `evaluates_entire_piece_state` 仍为
+  true）。200 查询 / 941 存活方块 0 不一致。
+* `ListPoolElement` 的空 `elements` 列表改成解码错误（官方构造器
+  `if (elements.isEmpty()) throw new IllegalArgumentException`）。
+* 故意改坏：`processOnlyInCurrentChunk` 取反 → 80 处不一致；`evaluates_entire_piece_state`
+  改成 `false` → 6 处不一致；`capped` 的洗牌改成固定 `nextInt(size)` → 45 处不一致。
+
+**第九轮（2026-11-14，`cb-wg-jigsaw` 分支：显式随机源 / 端到端 capped / Sync）**：
+
+* `structure::processor_apply` 支持 `StructurePlaceSettings.setRandom(...)` 显式设置的
+  随机源：新增 `PlaceSettings` 结构体（`piece_position` / `reference_pos` / `chunk_bb` /
+  `level_seed` / `explicit_random`），`settings_random` 照官方
+  `if (this.random != null) return this.random;` 优先用显式的、否则按方块位置派生。
+  `process_blocks` 的参数从 8 个收敛成 `(processors, blocks, level, settings)`。
+* 新对拍模式 `jigsaw cappedfull`：用 `Unsafe.allocateInstance` + 反射写入
+  `server.worldGenSettings.options.seed` 三层 final 字段，造出 `getSeed()` 返回真实种子的
+  `ServerLevel`，于是官方 `CappedProcessor.finalizeProcessing` 会真的执行限额替换。
+  8 个含 `capped` 的列表 × 4 种子 × 2 位置 = 24 查询、192 方块 0 不一致。
+  **确认真的比到了**：`trail_ruins_houses_archaeology` 的规则把砾石换成可疑的沙砾，
+  24 个查询里共替换 72 次（`limit` 6/3/2/2 生效）；把洗牌改成不倒序后报 40 处不一致。
+* `PoolElement::from_tag`（读回路径）对空 `list_pool_element` 同样报错，与官方构造器
+  的 `IllegalArgumentException` 对齐。
+* `TemplatePool.max_size` 从 `Cell<i32>` 懒算改成解析时一次算好：官方懒算只为省一次遍历、
+  输入全是只读数据，结果相同；而 `Cell` 让 `TemplatePool` / `TemplatePools` 变成 `!Sync`，
+  没法放进 `Arc` 供多线程生成共享。新增两个单元测试钉住：`TemplatePools` 是 `Sync + Send`、
+  245 个 pool 的提前算结果与现算一致。`jigsaw pools` 980 查询 / 8976 件仍 0 不一致。
+* 故意改坏：忽略显式随机源（单元测试失败）、去掉空列表校验（单元测试失败）、
+  `capped` 洗牌改成不倒序（`cappedfull` 报 40 处）。
+
+**第十二轮（2026-11-15，`cb-wg-jigsaw` 分支：模板放置链路）**：
+
+* 合并 `main`（`1c9853c6`，含水生 / 洞穴 / 非植被地物与模板化结构布局）。三处冲突
+  （`structure/mod.rs` 的模块表、README、设计文档）全部两边保留；里程碑表步 4 从
+  「jigsaw 结构件没做」改成「做完」并补上本分支的两条对拍数字。
+* 新模块 `structure::jigsaw::place`：jigsaw 结构件的 `postProcess` 整条链路。
+  `relative_position(pos, mirror, rotation)` 照官方
+  `StructureTemplate.transform(pos, mirror, rotation, ZERO)`（mirror 先把 Z 或 X 取反，
+  再按 rotation 转）；`template_blocks` 按世界位置选 palette 并把模板方块转成 processor
+  链的输入（`has_nbt` 标记跟着走）；`place_piece` = 选 palette → `process_blocks` → 写入；
+  `place_processed` 做状态 `mirror`/`rotate`、`chunkBB` 过滤，以及官方的「带 nbt 的方块
+  先写一个 `BARRIER`」。
+* `state_id_of` 把方块状态名（含属性）解析成注册表状态 id，属性顺序无关；未知方块或非法
+  属性组合报错而不是静默写空气（有单元测试）。
+* 新对拍模式 `jigsaw placepiece`：官方 `StructureTemplate.placeInWorld`
+  （`IGNORE_WATERLOGGING`、无 processor、记录型假世界）对 `place_piece`，逐次 `setBlock`
+  比位置与方块名。8 个单 palette 模板 × 3 组 mirror/rotation
+  （`none/none`、`none/90`、`left_right/180`）= 225 查询、**152748 次写入 0 不一致**。
+  故意改坏两处（mirror 的 Z 取反改成 X、不写 `BARRIER`）合报 1284 处不一致。
+* 对拍过程中修掉两个自身 bug：(a) `relative_position` 最初漏了 mirror（只在方块状态上
+  应用了，位置变换同样需要）；(b) 对拍查询的 `chunkBB` 最初只覆盖 `0..span`，而旋转后的
+  坐标会落到负半轴，导致 Java 侧只写 10 个方块——改成跨正负两侧才比得对。
+* **没做**：`placeInWorld` 的 watering 逻辑（`toFill` / `lockedFluids` 的流体填充循环）、
+  方块实体 nbt 的恢复（`blockEntity.loadWithComponents` + `LootTableSeed`）、
+  `placeEntities`（结构里的实体）、从 `pool_element` 取 `processors` 并接进 `place_piece`。
+
+**第十三轮（2026-11-15，`cb-wg-jigsaw` 分支：三类硬编码 processor + 全组合覆盖）**：
+
+* 补上另外三类 processor（`processor_list` 里没有、由 `SinglePoolElement.getSettings` 与
+  `Projection` 硬编码加进放置设置的）：
+  * `BlockIgnoreProcessor`（`block_ignore`）：`to_ignore` 里的方块直接丢弃。官方三个常量
+    实例 `STRUCTURE_BLOCK` / `AIR` / `STRUCTURE_AND_AIR` 都能构造。
+  * `JigsawReplacementProcessor`（`jigsaw_replacement`）：把拼图方块换成它 nbt 里的
+    `final_state`（缺省 `minecraft:air`）；换成 `structure_void` 时丢弃；没有 nbt 时保留原
+    方块（官方只打警告）；解析失败时丢弃。
+  * `GravityProcessor`（`gravity`）：把方块的 Y 抬到
+    `level.getHeight(heightmap, x, z) + offset + templateRelativePos.y`。
+    `ProcessorLevel` 因此多了一个 `height()`（默认返回 `MIN_Y` 表示不支持）。
+* `ProcessBlock` 增加 `nbt: Option<Tag>`（`JigsawReplacementProcessor` 要读 `final_state`，
+  带 nbt 的方块还要先写 `BARRIER`）。
+* `place_processed` 现在尊重 `set_block` 的返回值：只有真正改了状态才计入返回值，与官方
+  `if (level.setBlock(...)) { ... placed.add(...) }` 一致。
+* `jigsaw placepiece` 的覆盖从 3 组 mirror/rotation 扩到**全部 12 组**
+  （3 个 mirror × 4 个 rotation）：900 查询、610992 次写入 0 不一致。
+* 故意改坏：`block_ignore` 恒不忽略（单元测试失败）、`gravity` 丢掉
+  `templateRelativePos.y`（单元测试失败）、`place_processed` 不检查返回值（单元测试失败）。
+
+**第十四轮（2026-11-15，`cb-wg-jigsaw` 分支：processor 组装 / gravity 语义 / 放置产物）**：
+
+* 合并 `main`（`2ba852ee`，矿井与要塞的方块放置已对拍）。三处冲突：`state_transform` 的
+  `property_of` 取 main 的 `pub`（我要跨模块用）；`StructurePlaceOracle` 的假世界字段两边
+  保留（并删掉重复的 `case "scheduleTick"`，main 的版本不记录、我的记录，保留后者）；
+  里程碑表步 4 用本分支的完整版、步 5 合并两边进展（矿井/要塞现在都是 0 不一致）。
+  合并后 `jigsaw placepiece` 900 查询 0 不一致、`structure-place` 0 不一致。
+* `structure::jigsaw::place::assemble_processors`：照 `SinglePoolElement.getSettings` 组装
+  processor 链——`BlockIgnore(STRUCTURE_BLOCK)` → 可选 `JigsawReplacement`（`!keepJigsaws`）
+  → `pool_element` 配置的 → `Projection` 的（`TERRAIN_MATCHING` 是
+  `Gravity(WORLD_SURFACE_WG, -1)`）。**`LegacySinglePoolElement` 的额外一步**：先
+  `popProcessor(STRUCTURE_BLOCK)` 摘掉链首，再把 `STRUCTURE_AND_AIR` **追加到末尾**
+  （不是原地替换）。6 种组合各有单元测试。
+* `GravityProcessor` 的两处语义补齐：`WORLD_SURFACE_WG` → `WORLD_SURFACE`、
+  `OCEAN_FLOOR_WG` → `OCEAN_FLOOR` 的替换（官方在 `level instanceof ServerLevel` 时做）；
+  `ProcessorLevel::height` 从「返回哨兵整数」改成 `Option<i32>`，拿不到时**保留原位置**
+  而不是算出一个回绕的 Y。
+* `place_processed` / `place_piece` 的返回值从「改变计数」改成 `PlacedBlocks`
+  （`bounds` = 官方 `minX..maxZ`，`placed` = 位置 + nbt 列表）。官方用这两块做
+  `updateShapeAtEdge`、方块实体 `setChanged` 与 `placeEntities`，本分支只把数据交出去。
+  `PlaceBlock` 的 `has_nbt: bool` 相应换成 `nbt: Option<Tag>`。
+* 故意改坏：legacy 的 `STRUCTURE_AND_AIR` 改成原地替换（组装测试失败）、
+  gravity 不换 WG 名字（测试失败）、包围盒只记第一个（两个测试失败）。
+
+**第十五轮（2026-11-15，`cb-wg-jigsaw` 分支：方块实体 modifier 的执行）**：
+
+* `RuleBlockEntityModifier::apply` 照官方三种实现：`passthrough`（原样返回）、
+  `append_loot`（拷贝后写 `LootTable` 并 `nextLong()` 生成 `LootTableSeed`）、
+  `clear`（空复合）、`append_static`（`existingTag.merge(tag)` 的**递归**合并）。
+  `Processor::Rule` 命中规则后现在也会改写 nbt（`rule.getOutputTag(random, nbt)`）。
+* `append_static` 的解析/编码补上（26.3 数据里没用到，但 codec 里有）。
+* 新对拍模式 `jigsaw bemod`：4 种 modifier × 4 个种子 × 3 种现有 nbt = 60 查询，
+  逐键比生成的 NBT，并用「随后再取一次 `nextLong`」验证取数次数一致：**60 查询 0 不一致**。
+* 故意改坏：`append_loot` 不取 `nextLong`（24 处不一致）、`append_static` 不递归合并
+  （4 处不一致）。
+* **对拍设计踩过一个坑**：最初 `append_static` 的 `data` 与 `existing` 用了同一段嵌套 nbt，
+  「递归合并」和「直接覆盖」结果相同，改坏发现不了。加了 `append_static_data` 查询
+  （data 用 `{Nested:{A:1}, Extra:7}`，existing 用 `{Nested:{B:2}, Only:3}`）才区分开。
+
+**第十六轮（2026-11-15，`cb-wg-jigsaw` 分支：随机容器的战利品种子）**：
+
+* `place_processed` / `place_piece` 新增 `random: &Random` 参数，照官方
+  `StructureTemplate.placeInWorld` 的方块实体恢复：带 nbt 的方块如果其方块实体是
+  `RandomizableContainer`，就用 `random.nextLong()` **再取一次**覆盖 `LootTableSeed`。
+  这一次取数必须发生，否则世界随机源序列与官方错开。
+* `is_randomizable_container` 按方块实体类型判定，集合是官方实现该接口的十类：
+  箱子 / 陷阱箱 / 发射器 / 投掷器 / 漏斗 / 潜影盒 / 木桶 / 饰纹陶罐 / 合成器 /
+  可疑的方块（`BrushableBlockEntity`）。熔炉、烟熏炉、高炉、酿造台**不是**。
+* 单元测试两个：`randomizable_containers_match_the_vanilla_set`（11 个正例 + 8 个反例）、
+  `placing_a_randomizable_container_draws_the_loot_seed`（箱子得到 `LootTableSeed`、石头
+  不会）。故意改坏：集合里漏掉 `hopper`、不覆盖种子，两处各被一个测试抓到。
+* **没做到的事**：本想用新对拍模式 `rc` 让官方 `instanceof RandomizableContainer` 逐个
+  判定所有 1286 个方块，但 `Block.newBlockEntity` 会触发 `Components not bound yet`
+  （oracle 没初始化组件注册表），Java 侧构造不出方块实体。改用「按方块实体类型判定 +
+  单元测试钉住集合」的替代方案，**所以这个集合没有对拍，只有单元测试**。
+
+**第十七轮（2026-11-15，`cb-wg-jigsaw` 分支：随机容器集合的官方对拍）**：
+
+* 解决了上一轮「`rc` 对拍跑不起来」的问题：`Block.newBlockEntity` 读组件默认值时抛
+  `Components not bound yet`，因为组件只在服务器资源重载
+  （`ReloadableServerResources`）时绑定。oracle 里手动跑一次
+  `BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(registries)` 并
+  `PendingComponents::apply()`，方块实体就能构造了。
+* 新对拍模式 `jigsaw rc`：官方对全部 **1286 个方块**逐个构造方块实体并
+  `instanceof RandomizableContainer`，与 `is_randomizable_container` 逐条比：
+  `1286 blocks, 33 randomizable, all identical`。
+* **对拍抓到一个真 bug**：我把 `brushable_block`（可疑的沙砾 / 沙子）算成了随机容器，
+  但官方 `BrushableBlockEntity extends BlockEntity`，**没有实现**
+  `RandomizableContainer`。对拍报 `2/1286 blocks differ`，修正后回 0。
+  这意味着上一轮的单元测试把错误的集合钉住了——**单元测试只能验证我想验证的东西，
+  对拍才能发现我想错的东西**。
+* `place_piece` 的参数从 10 个减到 9 个：`chunk_bb` 从 settings 里取（`None` 时用
+  无限盒表示官方的「不过滤」），去掉重复参数。`jigsaw placepiece` 900 查询仍 0 不一致。
+
+**第十八轮（2026-11-15，`cb-wg-jigsaw` 分支：方块实体写入钩子）**：
+
+* `BlockWriter` 新增 `set_block_entity(x, y, z, nbt)`（默认空实现）。`place_processed`
+  在写完方块后把最终 nbt 交给它，对应官方的
+  `blockEntity.loadWithComponents(TagValueInput.create(...))`。随机容器的 nbt 里带着
+  放置期生成的 `LootTableSeed`。两个单元测试钉住（随机容器带种子、普通方块只带自己的
+  nbt、没有 nbt 的方块不触发）。
+* 合并 `main`（`5c7e9995`，含 `template_feature.rs` 等），无冲突。
+* **没做成的一件事**：想给 `jigsaw placepiece` 加「随机容器 `LootTableSeed`」的端到端对拍，
+  需要假世界的 `getBlockEntity` 返回真实方块实体并记录 `loadWithComponents`。做到一半发现
+  两个问题：(a) `loadWithComponents` 需要真实的 `RegistryAccess`（`TagValueInput.create`），
+  补上后 (b) 官方只在 `blockInfo.nbt != null` 时才调它，而我的假世界在写 `barrier` 等位置
+  时也会登记方块实体，导致 Java 侧多出种子。这条对拍**未完成、未提交**，代码已回滚。
+  `place_processed` 的 nbt 传递目前**只有单元测试**。
+
+**第十九轮（2026-11-15，`cb-wg-jigsaw` 分支：随机容器种子的端到端对拍）**：
+
+* 补上第十八轮没做成的对拍。关键是找到可靠的判据：官方只在
+  `blockInfo.nbt != null` 时才走方块实体恢复，而**它在那之前会先写一个 `BARRIER`**
+  ——所以「写过 `barrier` 的位置」就是「带 nbt 的位置」。假世界据此为那些位置建方块实体，
+  `getBlockEntity` 返回它，`collectSeeds` 只收「带 nbt 且是随机容器」的位置，
+  与官方逻辑一一对应。
+* `jigsaw placepiece` 现在额外输出 `S|key|x|y|z|seed`：**900 查询、610992 次写入、
+  852 个随机容器种子，全部一致**。种子是放置期 `nextLong()` 的真实取值，所以这条同时
+  验证了「哪些方块是随机容器」与「取数次数与顺序」。
+* 故意改坏：随机容器不覆盖 `LootTableSeed`（不发那次 `nextLong`）→ 264 处不一致。
+
+**第二十轮（2026-11-15，`cb-wg-jigsaw` 分支：watering）**：
+
+* `place_processed` 补上官方 `placeInWorld` 的 watering 段：写方块**之前**读该位置的流体状态
+  （`settings.shouldApplyWaterlogging() ? level.getFluidState(pos) : null`）；新方块本身是
+  流体源时把位置加进 `lockedFluids`；新方块可含水（状态里有 `waterlogged`）且该位置原本有
+  水时把 `waterlogged` 置 true，原本不是源的位置再加进 `toFill`；最后按官方顺序
+  （`UP, NORTH, EAST, SOUTH, WEST`）反复把「相邻有源流体」的位置灌满，`lockedFluids` 里的
+  位置不参与。
+* `BlockWriter` 新增 `fluid_at(x, y, z) -> Option<(is_water, is_source)>`（默认 `None` =
+  调用方没有流体模型，整段 watering 跳过）与 `block_state(x, y, z)`。
+* 两个单元测试：源流体位置的台阶得到 `waterlogged=true`、非源位置不写第二遍；
+  `fluid_at` 返回 `None` 时只写方块本身。改坏「不灌水」→ 测试失败。
+* `jigsaw placepiece` 900 查询 / 610992 写入 / 852 种子仍 0 不一致（这条对拍走
+  `fluid_at == None` 的路径，所以**watering 本身只有单元测试覆盖**）。
 
 **第五轮（2026-11-14，`cb-wg-structures` 续：需要模板的单件结构布局）**：
 
@@ -472,7 +773,6 @@ Rust `Heightmaps` 存「最高方块 y」、`get_height` 返回 `+1`，正好等
   `--release` 5.75s 通过）、`gen-world`（0 不一致）、`gen-world --through features`
   （0 不一致）、九个结构对拍（全 0）、探针（719/719）。
 
-**仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」
 是 `onTopOfChunkCenter` 基线路径的通用判定，**不等于** `Structure.generate` 的最终有效：
 各结构的 `findGenerationPoint`、包围盒、`.nbt` 模板、jigsaw 仍属第 4 步。组合对拍只覆盖
@@ -1112,8 +1412,8 @@ structures (Compound)
 | 1 | 本方案文档 | — | **做完** |
 | 2 | 数据导出：`worldgen.json` 加四键，Rust 解析骨架 | `extract` 重跑无 diff（除四键）、旧 `chunkgen --through carvers` 仍 0 | **做完**：重跑无 diff、`--through carvers` 小样本 0 不一致 |
 | 3 | 放置：`random_spread`（含频率削减、exclusion zone、spread type）、`concentric_rings` 几何 | 大范围区块「哪个区块有哪个结构起点」0 不一致；新对拍先故意改坏一处确认会失败 | **做完**：20 集 × 464 查询 = 9280 放置比较 + 9744 加权选择比较 0 不一致；`concentric_rings` 6 种子 768 环位置 + 864 `isStructureChunk` 0 不一致 |
-| 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **部分做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿（`cb-wg-multipiece` 240 查询 25660 结构件 0 不一致）已做；需要模板的单件结构（雪屋 / 沉船 / 海底遗迹 / 废弃传送门）、林地府邸、jigsaw 结构件没做 |
-| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分完成**：`structure::piece_place`（放置辅助）、`structure::state_transform`（mirror/rotate）、`structure::pieces::mineshaft_place`（矿井四种）与 `stronghold_place`（要塞十二种）已移植，`structure-place` 对拍对矿井和要塞都是 0 不一致（2026-11-15）；海底神殿与林地府邸（含模板放置与 `afterPlace`）也是 0 不一致（`cb-wg-monument`）。**没有接进 Director**，见第 0 节「多件式结构放置」 |
+| 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿 / 林地府邸（`structure-pieces` 336 查询 77960 结构件 0 不一致）、需要模板的雪屋 / 沉船 / 海底遗迹（`structure-templated` 480 查询 1685 结构件 0 不一致）、废弃传送门（`structure-ruined-portal` 648 查询 110 结构件 0 不一致，含 `findSuitableY` 整列搜索与 `Mirror.FRONT_BACK`）、**jigsaw 全部（`cb-wg-jigsaw`：`jigsaw pieces` 972 查询 12467 结构件 / `jigsaw pools` 980 查询 8976 结构件 0 不一致）** 已做 |
+| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分完成**：`structure::piece_place`（放置辅助）、`structure::state_transform`（mirror/rotate）、`structure::pieces::mineshaft_place`（矿井四种）与 `stronghold_place`（要塞十二种）已移植，`structure-place` 对拍对矿井和要塞都是 0 不一致（2026-11-15）。**没有接进 Director**，见第 0 节「多件式结构放置」。<br>**部分做完（方块部分）**：单件结构的 `postProcess` 走独立子命令 `structure-post-process`（`StructurePlaceOracle.java`），按写入日志逐格比：埋藏的宝藏 16 查询 0 不一致；**女巫小屋 18 处不一致（未通过）**，Java 的地下柱子比 Rust 低一格；沙漠神殿没进查询集（`SKIPPED`），最后实测 6953 处。丛林神殿、方块实体、战利品表没做，**三份 `postProcess` 都没接进 `feature/run.rs`**。<br>**海底神殿与林地府邸的方块放置（含模板放置与 `afterPlace`）也是 0 不一致（`cb-wg-monument`）**，<br>**jigsaw 侧（`cb-wg-jigsaw`）**：模板放置链路 `structure::jigsaw::place`（选 palette → 位置变换含 mirror/rotation → processor 链 → `BARRIER` → `chunkBB` 过滤 → 状态变换）对官方 `StructureTemplate.placeInWorld` 逐写入比，`jigsaw placepiece` 900 查询 / 610992 次写入 0 不一致；`processor_list` 的四种 processor 与放置阶段硬编码的三种（`block_ignore` / `jigsaw_replacement` / `gravity`）都已移植并各自对拍，`assemble_processors` 照 `SinglePoolElement.getSettings` 的四段顺序组装（含 legacy 的 pop-then-append）；`RuleBlockEntityModifier` 的三种（`passthrough` / `append_loot` / `clear`）与 `append_static` 都已按官方 `apply` 实现并对拍（`jigsaw bemod` 60 查询 0 不一致）；`jigsaw rc` 1286 个方块的随机容器判定 0 不一致 |
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | **做完（纯函数 + 对拍，`cb-wg-beard`）**：`beard` 12 用例 5,912,076 比较 0 不一致（kernel / sampleValue / sampleVolume / affectedBox / 三阶段方块），`--break-self-test` 会失败；`chunkgen --through carvers` EMPTY 回归仍 0。**没接进 Director**：游戏里仍走 `EMPTY` |
 | 7 | 存档：`structures` 键写/读；海底神殿「只存一个 `MonumentBuilding`、读回重建房间图」的口径见 4.1 | 读回一致，`world-dir` 确认官方能读 | **通用编码做完**：`structure-save` 8 case 规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、`world-dir` 的 `SerializableChunkData.parse` 都能读。**多件式结构的读回做完**（`cb-wg-multipiece`）：子类字段带 NBT 类型，`PiecesContainer.load` / `loadStaticStart` / `regeneratePiecesAfterLoad` 移植并对拍（`structure-load` 80 查询、8218 读回件、656 重建行 0 不一致），见第 0 节「多件式结构存档」 |
 
@@ -1282,6 +1582,14 @@ structures (Compound)
   各结构的 `findGenerationPoint`（结构件生成、模板、jigsaw）没做，`StructureStart`
   仍是数据类型，`start_plans` 只给加权尝试序列。组合对拍只覆盖 6 个 `random_spread`
   结构集、不含 `isStructureChunk` 命中过滤。
+* 第五轮已落地并对拍：`structure::single` 的四个代码生成单件结构布局（第 4 步一部分）、
+  `structure::templated` 的雪屋 / 沉船 / 海底遗迹布局、废弃传送门的布局（第 4 步其余）、
+  `mc-bamboo-worldgen::beardifier`（第 6 步，`cb-wg-beard`，见第 5 节）、`structure::save` 的
+  `structures` 键（第 7 步）、以及 `structure::jigsaw` 的 jigsaw 结构件生成与模板放置链路
+  （第 4 步的 jigsaw 部分，`cb-wg-jigsaw`，972 查询 / 12467 结构件 + 900 查询 / 610992 次写入
+  0 不一致）。仍没做：`features` 阶段结构件放置（第 5 步，`placeInChunk` / `postProcess` /
+  processors / 方块实体 / 拼图替换），以及把全部结构起点接进 Director。这些仍是纯函数/类型，
+  没有接进游戏。
 * 第五轮已落地并对拍：`structure::single` 的四个代码生成单件结构布局、
   `structure::templated` 的雪屋 / 沉船 / 海底遗迹布局（第 4 步一部分）、
   `mc-bamboo-worldgen::beardifier`（第 6 步，`cb-wg-beard`，见第 5 节）、`structure::save` 的 `structures` 键（第 7 步）。
