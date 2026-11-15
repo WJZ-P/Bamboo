@@ -464,6 +464,10 @@ fn classify(state: u32) -> Option<Kind> {
         // 珊瑚块继承 `Block`，`canSurvive` 恒 true。
         // Coral blocks extend `Block`, so `canSurvive` is always true.
         BlockClass::CoralBlock => Kind::Default,
+        // `LeavesBlock` 也继承 `Block`，`canSurvive` 恒 true（树和 `root_system` 的子地物会放它）。
+        // `LeavesBlock` extends `Block` too, so `canSurvive` is always true (trees and
+        // `root_system` children place it).
+        BlockClass::LeavesBlock => Kind::Default,
         // 珊瑚壁扇（`BaseCoralWallFanBlock`）贴墙：看 `facing` 反方向的邻居在 `facing` 面
         // 是否结实。
         // Coral wall fans attach to a wall: check the neighbour opposite `facing` for a

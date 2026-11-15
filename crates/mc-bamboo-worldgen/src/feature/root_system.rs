@@ -396,6 +396,120 @@ mod tests {
         assert_eq!(sulfur.allowed_vertical_water_for_tree, 1);
     }
 
+    /// 造一个 9 区块的最小世界：第 0 层（y = -64）全石头，其余空气。
+    ///
+    /// A minimal nine-chunk world: solid stone at layer 0 (y = -64), air above.
+    fn flat_world() -> crate::feature::FeatureChunks {
+        let min_y = -64;
+        let height = 384;
+        let mut blocks = Vec::with_capacity(height);
+        blocks.push(vec![mc_bamboo_data::blocks::STONE; 256]);
+        for _ in 1..height {
+            blocks.push(vec![mc_bamboo_data::blocks::AIR; 256]);
+        }
+        let chunk_blocks = || blocks.clone();
+        let sections = || {
+            let mut out = Vec::new();
+            for _ in 0..(height / 16) {
+                out.push(vec![0_u32; 64]);
+            }
+            out
+        };
+        crate::feature::FeatureChunks {
+            center_x: 0,
+            center_z: 0,
+            min_y,
+            height: height as i32,
+            blocks: std::array::from_fn(|_| chunk_blocks()),
+            biomes: std::array::from_fn(|_| sections()),
+            heights: std::array::from_fn(|_| crate::feature::Heightmaps::new(min_y)),
+        }
+    }
+
+    /// 在假世界里调用 `RootSystemFeature::place`，确认它对空气 origin 返回
+    /// `supported && placed`。
+    ///
+    /// Call `RootSystemFeature::place` in a synthetic world and check that an air origin
+    /// yields `supported && placed`.
+    #[test]
+    fn root_system_place_returns_supported_for_an_air_origin() {
+        // 子 feature 用 `simple_block` 放一格 `oak_leaves`：只要能放成功，
+        // `placeDirtAndTree` 就会走 `placeDirt`。
+        //
+        // The child is a `simple_block` placing one `oak_leaves`; as soon as it succeeds
+        // `placeDirtAndTree` runs `placeDirt`.
+        let config = serde_json::json!({
+            "allowed_tree_position": {"tag": "minecraft:air", "type": "minecraft:matching_block_tag"},
+            "allowed_vertical_water_for_tree": 2,
+            "feature": {
+                "feature": {"to_place": {"id": "minecraft:oak_leaves"}, "type": "minecraft:simple_block"},
+                "placement": []
+            },
+            "hanging_root_placement_attempts": 40,
+            "hanging_root_radius": 3,
+            "hanging_root_state_provider": {"id": "minecraft:hanging_roots", "properties": {"waterlogged": "false"}},
+            "hanging_roots_vertical_span": 2,
+            "level_test_distance": 0,
+            "max_level_deviation": 0,
+            "required_vertical_space_for_tree": 3,
+            "root_column_max_height": 100,
+            "root_placement_attempts": 20,
+            "root_radius": 3,
+            "root_replaceable": "#minecraft:azalea_root_replaceable",
+            "root_state_provider": {"id": "minecraft:rooted_dirt"},
+            "type": "minecraft:root_system",
+        });
+        let feature = RootSystemFeature::parse(&config, &|_| None).unwrap();
+
+        let input = flat_world();
+        let mut world = FeatureWorld::new(&input, 63, 0).unwrap();
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        let registry = Registry::parse(root.as_object().unwrap()).unwrap();
+        let mut biome_at = |_: i32, _: i32, _: i32| 0_u32;
+        let mut env = PlacementEnv {
+            generation: crate::feature::provider::WorldGenerationContext {
+                min_y: -64,
+                height: 384,
+                sea_level: 63,
+            },
+            biome_at: &mut biome_at,
+            registry: &registry,
+            top_feature: None,
+            region_random: &WorldgenRandom::new(
+                crate::random::Algorithm::Xoroshiro.new_instance(1),
+            ),
+        };
+        let random = WorldgenRandom::new(crate::random::Algorithm::Xoroshiro.new_instance(7));
+
+        // `placeDirtAndTree` 第一次就 `move(UP)`，所以 origin 放在石头层上方的空气格。
+        // `placeDirtAndTree` moves UP first, so the origin sits just above the stone.
+        let outcome = feature.place(&registry, &mut world, &mut env, &random, (0, -63, 0));
+        assert!(outcome.supported, "the root system must be fully supported");
+        assert!(
+            outcome.placed,
+            "the official place() returns true for an air origin"
+        );
+
+        // **这个测试只覆盖「解析 + 顶层 `place` 的返回值语义」**：在石头层上方的空气格
+        // 调用 `place`，确认它返回 `supported && placed`（官方对空气 origin 恒返回 true）。
+        //
+        // 子 feature 与 `placeDirt` 的具体写入路径在这里**没有被触发**（诊断显示叶子没放
+        // 到 y = -62），原因未定位 —— 野外也一直没找到能放成树的坐标。所以 `root_system`
+        // 整体仍算「已写未验证」，这个测试不改变那个结论。
+        //
+        // This test only covers parsing and the top-level `place` return contract: calling
+        // `place` on an air cell above the stone layer must yield `supported && placed`
+        // (the official code returns true for any air origin). The child feature and the
+        // `placeDirt` write path are **not** exercised here (diagnostics showed the leaves
+        // never landed at y = -62), and no wild chunk has been found that grows a tree, so
+        // `root_system` stays **written but unverified**.
+        assert!(outcome.supported, "the root system must be fully supported");
+        assert!(
+            outcome.placed,
+            "the official place() returns true for an air origin"
+        );
+    }
+
     #[test]
     fn air_passes_tree_space_and_water_is_height_limited() {
         assert!(is_allowed_tree_space(mc_bamboo_data::blocks::AIR, 1, 2));
