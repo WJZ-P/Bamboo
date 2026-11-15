@@ -16,6 +16,7 @@ use crate::{
     random::WorldgenRandom,
     structure::{
         BoundingBox,
+        processor::ProcessorListRef,
         template::{Direction, JointType, StructureTemplate},
     },
 };
@@ -48,11 +49,13 @@ impl Projection {
 }
 
 /// 五种 pool element。`processors` / `override_liquid_settings` 只留给放置阶段，
-/// 结构件生成不读；解析成原始 JSON 是为了让放置那一步不用再回查注册表。
+/// 结构件生成不读；`processors` 已按 `StructureProcessorType.LIST_CODEC` 解析成
+/// 类型化的 `ProcessorListRef`（注册名或内联列表），放置那一步不用再解析 JSON。
 ///
 /// The five pool element types. `processors` / `override_liquid_settings` are only for
-/// the placement stage; piece generation never reads them. They are kept as raw JSON so
-/// the placement stage does not have to re-read the registry.
+/// the placement stage; piece generation never reads them. `processors` is parsed into a
+/// typed `ProcessorListRef` (a registry name or an inline list) per
+/// `StructureProcessorType.LIST_CODEC`, so the placement stage does not re-parse JSON.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PoolElement {
     Empty,
@@ -60,10 +63,10 @@ pub enum PoolElement {
         location: String,
         projection: Projection,
         legacy: bool,
-        /// `processors`：注册名（`minecraft:x`）或内联 `{processors: [...]}` 对象。
+        /// `processors`：注册名或内联列表。
         ///
-        /// `processors`: a registry name (`minecraft:x`) or inline `{processors: [...]}`.
-        processors: Value,
+        /// `processors`: a registry name or an inline list.
+        processors: ProcessorListRef,
         /// `SinglePoolElement.overrideLiquidSettings`。
         override_liquid_settings: Option<String>,
     },
@@ -140,10 +143,10 @@ impl PoolElement {
                     location: string_field(raw, "location")?,
                     projection: Projection::parse(raw.get("projection"))?,
                     legacy: element_type == "minecraft:legacy_single_pool_element",
-                    processors: raw
-                        .get("processors")
-                        .cloned()
-                        .ok_or("single_pool_element has no processors")?,
+                    processors: ProcessorListRef::parse(
+                        raw.get("processors")
+                            .ok_or("single_pool_element has no processors")?,
+                    )?,
                     override_liquid_settings: raw
                         .get("override_liquid_settings")
                         .and_then(Value::as_str)

@@ -25,7 +25,13 @@ use super::{
     placer::{Junction, LiquidSettings, Piece},
     rotation::Rotation,
 };
-use crate::structure::save::SavePiece;
+use crate::structure::{
+    processor::{
+        BlockSetRef, BlockStateSpec, PosRuleTest, Processor, ProcessorListRef, ProcessorRule,
+        RuleBlockEntityModifier, RuleTest,
+    },
+    save::SavePiece,
+};
 
 impl Piece {
     /// `PoolElementStructurePiece.addAdditionalSaveData` 的全部键。
@@ -110,7 +116,7 @@ impl PoolElement {
                     "projection".to_owned(),
                     Tag::String(projection.name().to_owned()),
                 ));
-                fields.push(("processors".to_owned(), json_to_tag(processors)?));
+                fields.push(("processors".to_owned(), processor_ref_tag(processors)?));
                 if let Some(name) = override_liquid_settings {
                     fields.push((
                         "override_liquid_settings".to_owned(),
@@ -196,40 +202,260 @@ fn junctions_tag(junctions: &[Junction]) -> Tag {
     Tag::List(junctions.iter().map(junction_tag).collect())
 }
 
-/// 把 `processors` 的原始 JSON 转成 NBT。`processors` 在 26.3 只有两种形状：
-/// 注册名（字符串）或内联 `{processors: [...]}` 对象；内联对象里的 processor 列表
-/// 目前只有空列表，非空对象留给放置里程碑补。
+/// `StructureProcessorType.LIST_CODEC` 在 NBT 里的形状：注册名写字符串，内联列表写成
+/// processor 对象数组。
 ///
-/// Convert the raw `processors` JSON to NBT. In 26.3 it only has two shapes: a registry
-/// name (string) or an inline `{processors: [...]}` object whose list is currently always
-/// empty; non-empty processor objects are left to the placement milestone.
-fn json_to_tag(value: &serde_json::Value) -> Result<Tag, String> {
-    match value {
-        serde_json::Value::String(text) => Ok(Tag::String(text.clone())),
-        serde_json::Value::Object(fields) => {
-            let mut out = Vec::new();
-            for (key, value) in fields {
-                out.push((key.clone(), json_to_tag(value)?));
-            }
-            Ok(Tag::Compound(out))
-        }
-        serde_json::Value::Array(values) => Ok(Tag::List(
-            values
-                .iter()
-                .map(json_to_tag)
+/// The NBT shape of `StructureProcessorType.LIST_CODEC`: a registry name as a string, an
+/// inline list as an array of processor objects.
+fn processor_ref_tag(reference: &ProcessorListRef) -> Result<Tag, String> {
+    match reference {
+        ProcessorListRef::Named(name) => Ok(Tag::String(name.clone())),
+        ProcessorListRef::Inline(list) => Ok(Tag::List(
+            list.iter()
+                .map(|processor| processor.to_tag())
                 .collect::<Result<Vec<_>, _>>()?,
         )),
-        serde_json::Value::Bool(flag) => Ok(Tag::Byte(i8::from(*flag))),
-        serde_json::Value::Number(number) => {
-            if let Some(value) = number.as_i64() {
-                Ok(Tag::Int(value as i32))
-            } else if let Some(value) = number.as_f64() {
-                Ok(Tag::Double(value))
-            } else {
-                Err(format!("unsupported processor number {number}"))
+    }
+}
+
+impl Processor {
+    /// `StructureProcessorType.SINGLE_CODEC` 在 NBT 里的对象形状。
+    ///
+    /// The object shape of `StructureProcessorType.SINGLE_CODEC` in NBT.
+    pub fn to_tag(&self) -> Result<Tag, String> {
+        let mut fields = Vec::new();
+        match self {
+            Self::BlockRot {
+                integrity,
+                rottable_blocks,
+            } => {
+                fields.push((
+                    "processor_type".to_owned(),
+                    Tag::String("minecraft:block_rot".to_owned()),
+                ));
+                // `RegistryCodecs.holderSet(Registries.BLOCK).optionalFieldOf(...)`：有值才写，
+                // 标签写成 `#minecraft:x`，方块列表写成 id 数组。
+                // Written only when present; a tag becomes `#minecraft:x`, a list becomes ids.
+                if let Some(set) = rottable_blocks {
+                    fields.push(("rottable_blocks".to_owned(), block_set_tag(set)));
+                }
+                fields.push(("integrity".to_owned(), Tag::Float(*integrity)));
+            }
+            Self::Rule { rules } => {
+                fields.push((
+                    "processor_type".to_owned(),
+                    Tag::String("minecraft:rule".to_owned()),
+                ));
+                fields.push((
+                    "rules".to_owned(),
+                    Tag::List(rules.iter().map(ProcessorRule::to_tag).collect()),
+                ));
+            }
+            Self::ProtectedBlocks { value } => {
+                fields.push((
+                    "processor_type".to_owned(),
+                    Tag::String("minecraft:protected_blocks".to_owned()),
+                ));
+                fields.push(("value".to_owned(), block_set_tag(value)));
+            }
+            Self::Capped { delegate, limit } => {
+                fields.push((
+                    "processor_type".to_owned(),
+                    Tag::String("minecraft:capped".to_owned()),
+                ));
+                fields.push(("delegate".to_owned(), delegate.to_tag()?));
+                // `IntProviders.POSITIVE_CODEC` 的 `constant` 形式是裸 int。
+                // The `constant` form of `IntProviders.POSITIVE_CODEC` is a bare int.
+                fields.push(("limit".to_owned(), Tag::Int(*limit)));
             }
         }
-        serde_json::Value::Null => Err("null is not representable in NBT".to_owned()),
+        Ok(Tag::Compound(fields))
+    }
+}
+
+impl ProcessorRule {
+    fn to_tag(&self) -> Tag {
+        let mut fields = vec![
+            ("input_predicate".to_owned(), self.input_predicate.to_tag()),
+            (
+                "location_predicate".to_owned(),
+                self.location_predicate.to_tag(),
+            ),
+            ("output_state".to_owned(), self.output_state.to_tag()),
+        ];
+        // `position_predicate` / `block_entity_modifier` 用 `lenientOptionalFieldOf`，
+        // 默认值（`always_true` / `passthrough`）不写。
+        // Both use `lenientOptionalFieldOf`; defaults (`always_true` / `passthrough`) are
+        // omitted.
+        if self.position_predicate != PosRuleTest::AlwaysTrue {
+            fields.push((
+                "position_predicate".to_owned(),
+                self.position_predicate.to_tag(),
+            ));
+        }
+        if self.block_entity_modifier != RuleBlockEntityModifier::Passthrough {
+            fields.push((
+                "block_entity_modifier".to_owned(),
+                self.block_entity_modifier.to_tag(),
+            ));
+        }
+        Tag::Compound(fields)
+    }
+}
+
+impl RuleTest {
+    /// `RuleTest.CODEC` 的对象形状。`always_true` 只有 `predicate_type`。
+    ///
+    /// The object shape of `RuleTest.CODEC`; `always_true` has only `predicate_type`.
+    pub fn to_tag(&self) -> Tag {
+        let mut fields = Vec::new();
+        match self {
+            Self::AlwaysTrue => fields.push((
+                "predicate_type".to_owned(),
+                Tag::String("minecraft:always_true".to_owned()),
+            )),
+            Self::BlockMatch { block } => {
+                fields.push((
+                    "predicate_type".to_owned(),
+                    Tag::String("minecraft:block_match".to_owned()),
+                ));
+                fields.push(("block".to_owned(), Tag::String(block.clone())));
+            }
+            Self::BlockStateMatch { block_state } => {
+                fields.push((
+                    "predicate_type".to_owned(),
+                    Tag::String("minecraft:blockstate_match".to_owned()),
+                ));
+                fields.push(("block_state".to_owned(), block_state.to_tag()));
+            }
+            Self::TagMatch { tag } => {
+                fields.push((
+                    "predicate_type".to_owned(),
+                    Tag::String("minecraft:tag_match".to_owned()),
+                ));
+                fields.push(("tag".to_owned(), Tag::String(tag.clone())));
+            }
+            Self::RandomBlockMatch { block, probability } => {
+                fields.push((
+                    "predicate_type".to_owned(),
+                    Tag::String("minecraft:random_block_match".to_owned()),
+                ));
+                fields.push(("block".to_owned(), Tag::String(block.clone())));
+                fields.push(("probability".to_owned(), Tag::Float(*probability)));
+            }
+            Self::RandomBlockStateMatch {
+                block_state,
+                probability,
+            } => {
+                fields.push((
+                    "predicate_type".to_owned(),
+                    Tag::String("minecraft:random_blockstate_match".to_owned()),
+                ));
+                fields.push(("block_state".to_owned(), block_state.to_tag()));
+                fields.push(("probability".to_owned(), Tag::Float(*probability)));
+            }
+        }
+        Tag::Compound(fields)
+    }
+}
+
+impl PosRuleTest {
+    fn to_tag(&self) -> Tag {
+        let mut fields = Vec::new();
+        match self {
+            Self::AlwaysTrue => fields.push((
+                "predicate_type".to_owned(),
+                Tag::String("minecraft:always_true".to_owned()),
+            )),
+            Self::AxisAlignedLinear {
+                min_chance,
+                max_chance,
+                min_dist,
+                max_dist,
+                axis,
+            } => {
+                fields.push((
+                    "predicate_type".to_owned(),
+                    Tag::String("minecraft:axis_aligned_linear_pos".to_owned()),
+                ));
+                // 全部字段都是 `optionalFieldOf`：等于默认值就不写。
+                // Every field is `optionalFieldOf`: values equal to the default are omitted.
+                if *min_chance != 0.0 {
+                    fields.push(("min_chance".to_owned(), Tag::Float(*min_chance)));
+                }
+                if *max_chance != 0.0 {
+                    fields.push(("max_chance".to_owned(), Tag::Float(*max_chance)));
+                }
+                if *min_dist != 0 {
+                    fields.push(("min_dist".to_owned(), Tag::Int(*min_dist)));
+                }
+                if *max_dist != 0 {
+                    fields.push(("max_dist".to_owned(), Tag::Int(*max_dist)));
+                }
+                if axis != "y" {
+                    fields.push(("axis".to_owned(), Tag::String(axis.clone())));
+                }
+            }
+        }
+        Tag::Compound(fields)
+    }
+}
+
+impl RuleBlockEntityModifier {
+    fn to_tag(&self) -> Tag {
+        let mut fields = Vec::new();
+        match self {
+            Self::Passthrough => fields.push((
+                "type".to_owned(),
+                Tag::String("minecraft:passthrough".to_owned()),
+            )),
+            Self::AppendLoot { loot_table } => {
+                fields.push((
+                    "type".to_owned(),
+                    Tag::String("minecraft:append_loot".to_owned()),
+                ));
+                fields.push(("loot_table".to_owned(), Tag::String(loot_table.clone())));
+            }
+            Self::Clear => {
+                fields.push(("type".to_owned(), Tag::String("minecraft:clear".to_owned())))
+            }
+        }
+        Tag::Compound(fields)
+    }
+}
+
+impl BlockStateSpec {
+    /// `BlockState.CODEC`。26.3 的 NBT 形状是 `{id, properties}`（和 `.nbt` 模板里的
+    /// palette 一致）；无属性时写裸 id 字符串。
+    ///
+    /// `BlockState.CODEC`. The 26.3 NBT shape is `{id, properties}` (the same as in a
+    /// `.nbt` template palette); a bare id string when there are no properties.
+    fn to_tag(&self) -> Tag {
+        if self.properties.is_empty() {
+            return Tag::String(self.name.clone());
+        }
+        let properties = Tag::Compound(
+            self.properties
+                .iter()
+                .map(|(key, value)| (key.clone(), Tag::String(value.clone())))
+                .collect(),
+        );
+        Tag::Compound(vec![
+            ("id".to_owned(), Tag::String(self.name.clone())),
+            ("properties".to_owned(), properties),
+        ])
+    }
+}
+
+/// `HolderSet<Block>`：标签写 `#minecraft:x`，显式列表写 id 数组。
+///
+/// `HolderSet<Block>`: a tag as `#minecraft:x`, an explicit list as an array of ids.
+fn block_set_tag(set: &BlockSetRef) -> Tag {
+    match set {
+        BlockSetRef::Tag(text) => Tag::String(text.clone()),
+        BlockSetRef::Blocks(ids) => {
+            Tag::List(ids.iter().map(|id| Tag::String(id.clone())).collect())
+        }
     }
 }
 
@@ -243,7 +469,7 @@ mod tests {
             location: "minecraft:village/plains/houses/plains_small_house_1".to_owned(),
             projection: Projection::Rigid,
             legacy: false,
-            processors: serde_json::json!({ "processors": [] }),
+            processors: ProcessorListRef::Inline(Vec::new()),
             override_liquid_settings: None,
         }
     }
@@ -268,12 +494,10 @@ mod tests {
             fields[0].1,
             Tag::String("minecraft:single_pool_element".to_owned())
         );
-        // 内联空 processor 列表是空列表，不是字符串。
-        // The inline empty processor list is an empty list, not a string.
-        assert_eq!(
-            fields[3].1,
-            Tag::Compound(vec![("processors".into(), Tag::List(Vec::new()))])
-        );
+        // 内联 processor 列表直接写成列表（`LIST_OBJECT_CODEC` 的裸数组形式）。
+        // An inline processor list is written directly as a list (the bare-array form of
+        // `LIST_OBJECT_CODEC`).
+        assert_eq!(fields[3].1, Tag::List(Vec::new()));
     }
 
     #[test]

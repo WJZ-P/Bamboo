@@ -23,6 +23,7 @@ use std::{
 };
 
 use mc_bamboo_data::{structures as blob, worldgen::WORLDGEN};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_worldgen::{
     Worldgen,
     chunk::Generator,
@@ -32,6 +33,7 @@ use mc_bamboo_worldgen::{
         jigsaw::{
             JigsawConfig, JigsawStructures, Rotation, StructurePieces, TemplatePools, add_pieces,
         },
+        processor::ProcessorLists,
         rings::BiomeResolver,
         template::StructureTemplate,
         validity,
@@ -84,6 +86,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "pieces" => run_pieces(command, work_dir, options.get(1), options.get(2)),
         "pools" => run_pools(command, work_dir),
         "save" => run_save(command, work_dir),
+        "processors" => run_processors(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
@@ -650,8 +653,12 @@ fn compare_save(stdout: &str, queries: &[Query]) -> Result<(), String> {
 }
 
 /// 和 `structure_save::canonical_tag` 同一套规范化（type + 按键排序的 values）。
+/// 浮点用位模式（`#xxxxxxxx`），不用文本：`0.0001` 与 `1.0E-4` 是同一个值但 Java 与
+/// Rust 的默认格式化不同，比文本会假失败。
 ///
-/// The same normalisation as `structure_save::canonical_tag` (type plus key-sorted values).
+/// Same normalisation as `structure_save::canonical_tag` (type plus key-sorted values).
+/// Floats use their bit pattern (`#xxxxxxxx`) rather than text: `0.0001` and `1.0E-4` are
+/// the same value but Java and Rust format them differently, so text would differ falsely.
 fn canonical_tag(tag: &mc_bamboo_nbt::Tag) -> Value {
     use mc_bamboo_nbt::Tag;
     match tag {
@@ -659,8 +666,10 @@ fn canonical_tag(tag: &mc_bamboo_nbt::Tag) -> Value {
         Tag::Short(v) => serde_json::json!({"type": 2, "value": v.to_string()}),
         Tag::Int(v) => serde_json::json!({"type": 3, "value": v.to_string()}),
         Tag::Long(v) => serde_json::json!({"type": 4, "value": v.to_string()}),
-        Tag::Float(v) => serde_json::json!({"type": 5, "value": v.to_string()}),
-        Tag::Double(v) => serde_json::json!({"type": 6, "value": v.to_string()}),
+        Tag::Float(v) => serde_json::json!({"type": 5, "value": format!("#{:08x}", v.to_bits())}),
+        Tag::Double(v) => {
+            serde_json::json!({"type": 6, "value": format!("#{:016x}", v.to_bits())})
+        }
         Tag::String(v) => serde_json::json!({"type": 8, "value": v}),
         Tag::ByteArray(v) => serde_json::json!({"type": 7, "values": v}),
         Tag::IntArray(v) => serde_json::json!({"type": 11, "values": v}),
@@ -679,6 +688,90 @@ fn canonical_tag(tag: &mc_bamboo_nbt::Tag) -> Value {
             serde_json::json!({"type": 10, "values": Value::Object(map)})
         }
     }
+}
+
+/// `processors` 模式：不带 queries，把 40 个 `processor_list` 用官方 `DIRECT_CODEC`
+/// 编码后逐键比 Rust 侧的 `Processor::to_tag`。
+///
+/// `processors` mode: no queries; compares the official `DIRECT_CODEC` encoding of all 40
+/// `processor_list` entries against the Rust `Processor::to_tag`, key by key.
+fn run_processors(mut command: Command, _work_dir: &Path) -> Result<(), String> {
+    let output = command
+        .arg("processors")
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_processors(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Java 的 `P|id|<reference>|<inline>`；只比 `inline`（引用就是注册名，无信息量）。
+///
+/// Java emits `P|id|<reference>|<inline>`; only `inline` is compared (the reference is
+/// just the registry name).
+fn compare_processors(stdout: &str) -> Result<(), String> {
+    let raw: Value =
+        serde_json::from_str(WORLDGEN).map_err(|error| format!("bad worldgen.json: {error}"))?;
+    let lists = ProcessorLists::parse(raw.get("processor_list").ok_or("missing processor_list")?)?;
+
+    let mut checked = 0usize;
+    let mut processors_checked = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.splitn(4, '|').collect();
+        if fields.len() != 4 || fields[0] != "P" {
+            continue;
+        }
+        let id = fields[1];
+        let want: Value = serde_json::from_str(fields[3])
+            .map_err(|error| format!("bad inline json for {id}: {error}"))?;
+        let list = lists
+            .get(id)
+            .ok_or_else(|| format!("Rust missing processor list {id}"))?;
+        // `DIRECT_CODEC` 是 `LIST_OBJECT_CODEC.fieldOf("processors")`，所以在 NBT 里是
+        // 一个 `{processors: [...]}` 复合。
+        // `DIRECT_CODEC` is `LIST_OBJECT_CODEC.fieldOf("processors")`, so the NBT value is
+        // a `{processors: [...]}` compound.
+        let got = canonical_tag(&Tag::Compound(vec![(
+            "processors".to_owned(),
+            Tag::List(
+                list.iter()
+                    .map(|processor| processor.to_tag())
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        )]));
+        checked += 1;
+        processors_checked += list.len();
+        if got != want {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!("{id}: rust {got} java {want}"));
+            }
+        }
+    }
+    if checked != lists.len() {
+        return Err(format!(
+            "checked {checked} processor lists, expected {}",
+            lists.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches}/{checked} processor lists differ; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!(
+        "jigsaw processors: {checked} processor lists, {processors_checked} processors, \
+         all fields identical"
+    );
+    Ok(())
 }
 
 fn run_pieces(

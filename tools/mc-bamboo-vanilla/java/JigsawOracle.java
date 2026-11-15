@@ -15,6 +15,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.IntArrayTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.LongArrayTag;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.NumericTag;
 import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
@@ -30,7 +31,6 @@ import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.Vec3i;
 import net.minecraft.core.registries.Registries;
-import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.server.Bootstrap;
@@ -75,6 +75,8 @@ import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
 import net.minecraft.world.level.levelgen.structure.pools.alias.PoolAliasLookup;
 import net.minecraft.world.level.levelgen.structure.structures.JigsawStructure;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorList;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
 import net.minecraft.world.level.levelgen.structure.templatesystem.LiquidSettings;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
@@ -106,9 +108,12 @@ public final class JigsawOracle {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 2) {
+        // `processors` 模式不需要 queries 文件。
+        // The `processors` mode needs no queries file.
+        boolean noQueries = args.length == 1 && args[0].equals("processors");
+        if (args.length != 2 && !noQueries) {
             throw new IllegalArgumentException(
-                    "usage: JigsawOracle templates|pieces <queries.txt>");
+                    "usage: JigsawOracle templates|pieces|pools|save|processors <queries.txt>");
         }
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
@@ -131,6 +136,7 @@ public final class JigsawOracle {
                     case "pieces" -> runPieces(manager, registries, Path.of(args[1]));
                     case "pools" -> runPools(manager, registries, Path.of(args[1]));
                     case "save" -> runSave(manager, registries, Path.of(args[1]));
+                    case "processors" -> runProcessors(registries);
                     case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
                 }
@@ -424,12 +430,59 @@ public final class JigsawOracle {
         }
     }
 
-    /** `CompoundTag` 的键序不确定：转成按键排序的规范 JSON（同 StructureSaveOracle）。 */
+    /**
+     * processors 模式：不带 queries 文件，把注册表里全部 `processor_list` 用官方
+     * `StructureProcessorType.LIST_CODEC` 编码成 NBT 输出。这样 40 个列表里的每一种
+     * processor（`block_rot` / `rule` / `protected_blocks` / `capped`）、五种 `RuleTest`、
+     * `axis_aligned_linear_pos` 和 `append_loot` 的编码都被逐键比到，不依赖某次生成是否
+     * 碰到它们。
+     *
+     * <p>Processor mode: no queries file. Encodes every registered `processor_list` with
+     * vanilla `StructureProcessorType.LIST_CODEC`, so every processor, `RuleTest`,
+     * `PosRuleTest` and block-entity modifier in the 40 lists is compared key by key.
+     */
+    private static void runProcessors(RegistryAccess registries) throws Exception {
+        Registry<StructureProcessorList> reg = registries.lookupOrThrow(Registries.PROCESSOR_LIST);
+        var ops = registries.createSerializationContext(NbtOps.INSTANCE);
+        StringBuilder out = new StringBuilder();
+        for (var entry : reg.entrySet()) {
+            Identifier id = entry.getKey().identifier();
+            StructureProcessorList list = entry.getValue();
+            // `LIST_CODEC` 编的是 `Holder`，走引用时只写注册名，所以另外用 `DIRECT_CODEC`
+            // 编内联内容：那个才真正展开每个 processor。
+            // `LIST_CODEC` encodes a `Holder` and yields only the registry name; also
+            // encode the inline contents with `DIRECT_CODEC`, which expands each processor.
+            Tag reference = StructureProcessorType.LIST_CODEC
+                    .encodeStart(ops, reg.wrapAsHolder(list))
+                    .getOrThrow(error -> new IllegalStateException(id + ": " + error));
+            Tag inline = StructureProcessorType.DIRECT_CODEC
+                    .encodeStart(ops, list)
+                    .getOrThrow(error -> new IllegalStateException(id + ": " + error));
+            out.append("P|").append(id).append('|')
+                    .append(GSON.toJson(canonical(reference))).append('|')
+                    .append(GSON.toJson(canonical(inline))).append('\n');
+        }
+        System.out.print(out);
+        System.out.flush();
+    }
+
+    /**
+     * `CompoundTag` 的键序不确定：转成按键排序的规范 JSON（同 StructureSaveOracle）。
+     * 浮点用位模式（`#xxxxxxxx`），避免 Java 与 Rust 的默认格式化差异（`1.0E-4` vs
+     * `0.0001`）造成假失败。
+     *
+     * <p>Key-sorted canonical JSON like StructureSaveOracle. Floats use their bit pattern
+     * so Java and Rust default formatting (`1.0E-4` vs `0.0001`) cannot cause false diffs.
+     */
     private static JsonObject canonical(Tag tag) {
         JsonObject out = new JsonObject();
         out.addProperty("type", tag.getId());
         switch (tag.getId()) {
-            case 1, 2, 3, 4, 5, 6 -> out.addProperty("value", String.valueOf(((NumericTag) tag).box()));
+            case 1, 2, 3, 4 -> out.addProperty("value", String.valueOf(((NumericTag) tag).box()));
+            case 5 -> out.addProperty("value", String.format(
+                    "#%08x", Float.floatToRawIntBits(((NumericTag) tag).floatValue())));
+            case 6 -> out.addProperty("value", String.format(
+                    "#%016x", Double.doubleToRawLongBits(((NumericTag) tag).doubleValue())));
             case 8 -> out.addProperty("value", ((StringTag) tag).value());
             case 7 -> {
                 JsonArray values = new JsonArray();
