@@ -29,8 +29,8 @@ struct Scene {
 pub fn run(mut command: Command, work_dir: &Path, count_arg: Option<&&str>) -> Result<(), String> {
     let count = count_arg
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(120)
-        .clamp(1, 400);
+        .unwrap_or(400)
+        .clamp(1, 1000);
     let scenes = build_scenes(count);
     let queries_path = work_dir.join("jigsaw_shapes_queries.txt");
     fs::write(&queries_path, serialize(&scenes))
