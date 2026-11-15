@@ -83,6 +83,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "jigsaws" => run_jigsaws(command, work_dir),
         "pieces" => run_pieces(command, work_dir, options.get(1), options.get(2)),
         "pools" => run_pools(command, work_dir),
+        "save" => run_save(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
@@ -479,6 +480,205 @@ fn compare_pools(stdout: &str, queries: &[String]) -> Result<(), String> {
     println!("jigsaw pools: {checked} pools, {pieces_checked} pieces, all Q/P fields identical");
     println!("pool element types: {summary}");
     Ok(())
+}
+
+/// `save` 模式的查询与 `pieces` 相同（结构 × 种子 × 区块），比的是官方 `createTag`
+/// 编出的完整 Children 标签。
+///
+/// `save` mode queries match `pieces` (structure × seed × chunk) but compare the full
+/// Children tag produced by vanilla `createTag`.
+fn run_save(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    let queries = build_queries(2, 2);
+    let queries_path = work_dir.join("jigsaw_save_queries.txt");
+    let text = queries
+        .iter()
+        .map(|query| format!("{}|{}|{}|{}", query.id, query.seed, query.cx, query.cz))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&queries_path, text).map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("save")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_save(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
+/// Java 的 `Q|key|status|n` 给状态和件数，`T|key|idx|<canonical JSON>` 给每个 Children 条目。
+///
+/// Java emits `Q|key|status|n` for status and count, `T|key|idx|<canonical JSON>` per
+/// Children entry.
+fn compare_save(stdout: &str, queries: &[Query]) -> Result<(), String> {
+    let mut java_q: HashMap<String, Vec<String>> = HashMap::new();
+    let mut java_t: HashMap<String, BTreeMap<usize, Value>> = HashMap::new();
+    for line in stdout.lines() {
+        // key 是 `id|seed|cx|cz` 四段，后面再跟 idx 和 JSON，所以最多切 7 段。
+        // The key is four fields (`id|seed|cx|cz`) followed by the index and the JSON,
+        // so split into at most seven parts.
+        let fields: Vec<&str> = line.splitn(7, '|').collect();
+        if fields.len() < 6 {
+            continue;
+        }
+        let key = format!("{}|{}|{}|{}", fields[1], fields[2], fields[3], fields[4]);
+        match fields[0] {
+            "Q" => {
+                java_q.insert(key, fields[5..].iter().map(|s| (*s).to_owned()).collect());
+            }
+            "T" => {
+                let index = fields[5]
+                    .parse::<usize>()
+                    .map_err(|error| format!("bad T index: {error}"))?;
+                let json: Value = serde_json::from_str(fields[6])
+                    .map_err(|error| format!("bad T json: {error}"))?;
+                java_t.entry(key).or_default().insert(index, json);
+            }
+            _ => {}
+        }
+    }
+
+    let worldgen = Worldgen::load()?;
+    let settings = worldgen
+        .settings("minecraft:overworld")
+        .ok_or("missing overworld settings")?;
+    let dims = (settings.min_y, settings.height, settings.sea_level);
+    let raw: Value =
+        serde_json::from_str(WORLDGEN).map_err(|error| format!("bad worldgen.json: {error}"))?;
+    let structures = Structures::parse(raw.get("structure").ok_or("missing structure")?)?;
+    let configs = JigsawStructures::parse(raw.get("structure").ok_or("missing structure")?)?;
+    let pools = TemplatePools::parse(raw.get("template_pool").ok_or("missing template_pool")?)?;
+
+    let mut allowed_cache: HashMap<String, HashSet<String>> = HashMap::new();
+    for id in &STRUCTURES {
+        let def = structures
+            .get(id)
+            .ok_or_else(|| format!("missing structure def {id}"))?;
+        allowed_cache.insert((*id).to_owned(), allowed_biome_names(def)?);
+    }
+
+    let mut by_seed: BTreeMap<i64, Vec<&Query>> = BTreeMap::new();
+    for query in queries {
+        by_seed.entry(query.seed).or_default().push(query);
+    }
+
+    let mut checked = 0usize;
+    let mut tags_checked = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for (seed, group) in &by_seed {
+        let generator = Generator::new(&worldgen, *seed)?;
+        for query in group {
+            let key = query.key();
+            let config = configs
+                .get(&query.id)
+                .ok_or_else(|| format!("missing jigsaw config {}", query.id))?;
+            let allowed = &allowed_cache[&query.id];
+            let result = add_pieces(
+                config,
+                &pools,
+                &generator,
+                allowed,
+                dims,
+                query.seed,
+                (query.cx, query.cz),
+            )?;
+            checked += 1;
+            let got = java_q
+                .get(&key)
+                .ok_or_else(|| format!("Java missing Q for {key}"))?;
+            let want_status = if result.is_some() { "1" } else { "0" };
+            if got.first().map(String::as_str) != Some(want_status) {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!(
+                        "{key}: stub status rust {want_status} java {got:?}"
+                    ));
+                }
+                continue;
+            }
+            let Some(structure) = &result else {
+                continue;
+            };
+            if got.get(1).map(String::as_str) != Some(&structure.pieces.len().to_string()) {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!(
+                        "{key}: piece count rust {} java {:?}",
+                        structure.pieces.len(),
+                        got.get(1)
+                    ));
+                }
+                continue;
+            }
+            let lines = java_t.get(&key);
+            for (index, piece) in structure.pieces.iter().enumerate() {
+                let want = canonical_tag(&piece.to_full_save_piece()?.to_tag());
+                let have = lines
+                    .and_then(|lines| lines.get(&index))
+                    .ok_or_else(|| format!("Java missing T[{index}] for {key}"))?;
+                tags_checked += 1;
+                if &want != have {
+                    mismatches += 1;
+                    if first.is_none() {
+                        first = Some(format!("{key}: T[{index}] rust {want} java {have}"));
+                    }
+                }
+            }
+        }
+    }
+
+    if checked != queries.len() {
+        return Err(format!(
+            "checked {checked} queries, expected {}",
+            queries.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches}/{checked} queries differ; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!("jigsaw save: {checked} queries, {tags_checked} piece tags, all fields identical");
+    Ok(())
+}
+
+/// 和 `structure_save::canonical_tag` 同一套规范化（type + 按键排序的 values）。
+///
+/// The same normalisation as `structure_save::canonical_tag` (type plus key-sorted values).
+fn canonical_tag(tag: &mc_bamboo_nbt::Tag) -> Value {
+    use mc_bamboo_nbt::Tag;
+    match tag {
+        Tag::Byte(v) => serde_json::json!({"type": 1, "value": v.to_string()}),
+        Tag::Short(v) => serde_json::json!({"type": 2, "value": v.to_string()}),
+        Tag::Int(v) => serde_json::json!({"type": 3, "value": v.to_string()}),
+        Tag::Long(v) => serde_json::json!({"type": 4, "value": v.to_string()}),
+        Tag::Float(v) => serde_json::json!({"type": 5, "value": v.to_string()}),
+        Tag::Double(v) => serde_json::json!({"type": 6, "value": v.to_string()}),
+        Tag::String(v) => serde_json::json!({"type": 8, "value": v}),
+        Tag::ByteArray(v) => serde_json::json!({"type": 7, "values": v}),
+        Tag::IntArray(v) => serde_json::json!({"type": 11, "values": v}),
+        Tag::LongArray(v) => serde_json::json!({"type": 12, "values": v}),
+        Tag::List(v) => serde_json::json!({
+            "type": 9,
+            "values": v.iter().map(canonical_tag).collect::<Vec<_>>()
+        }),
+        Tag::Compound(entries) => {
+            let mut sorted: Vec<_> = entries.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut map = serde_json::Map::new();
+            for (key, value) in sorted {
+                map.insert(key.clone(), canonical_tag(value));
+            }
+            serde_json::json!({"type": 10, "values": Value::Object(map)})
+        }
+    }
 }
 
 fn run_pieces(

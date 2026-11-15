@@ -1,11 +1,24 @@
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Predicate;
+import net.minecraft.nbt.ByteArrayTag;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.IntArrayTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.LongArrayTag;
+import net.minecraft.nbt.NumericTag;
+import net.minecraft.nbt.StringTag;
+import net.minecraft.nbt.Tag;
+import net.minecraft.world.level.levelgen.structure.pieces.StructurePieceSerializationContext;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.JigsawBlock;
@@ -87,6 +100,8 @@ import net.minecraft.world.level.storage.LevelStorageSource;
  * <p>Usage: JigsawOracle templates|pieces &lt;queries.txt&gt;
  */
 public final class JigsawOracle {
+    private static final Gson GSON = new Gson();
+
     private JigsawOracle() {
     }
 
@@ -115,6 +130,7 @@ public final class JigsawOracle {
                     case "jigsaws" -> runJigsaws(manager, Path.of(args[1]));
                     case "pieces" -> runPieces(manager, registries, Path.of(args[1]));
                     case "pools" -> runPools(manager, registries, Path.of(args[1]));
+                    case "save" -> runSave(manager, registries, Path.of(args[1]));
                     case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
                 }
@@ -322,6 +338,139 @@ public final class JigsawOracle {
             System.out.flush();
             out.setLength(0);
         }
+    }
+
+    /**
+     * save 模式：queries 每行 {@code id|seed|cx|cz}。用真实结构件跑官方
+     * {@code PoolElementStructurePiece.createTag}，输出每个 Children 条目的规范 NBT，
+     * 这样 pool_element / rotation / junctions / liquid_settings / PosX 等子类字段都被
+     * 逐键比到，不只是基类四字段。
+     *
+     * <p>Save mode: one {@code id|seed|cx|cz} per line. Runs vanilla
+     * {@code PoolElementStructurePiece.createTag} on real pieces and prints each Children
+     * entry as canonical NBT, comparing every subclass field (pool_element, rotation,
+     * junctions, liquid_settings, PosX, ...) instead of just the four base fields.
+     */
+    private static void runSave(
+            StructureTemplateManager manager, RegistryAccess registries, Path queries)
+            throws Exception {
+        HolderLookup.RegistryLookup<NormalNoise> noiseLookup =
+                registries.lookupOrThrow(Registries.NOISE);
+        Registry<NoiseGeneratorSettings> settingsReg =
+                registries.lookupOrThrow(Registries.NOISE_SETTINGS);
+        NoiseGeneratorSettings settings =
+                settingsReg.getValue(Identifier.withDefaultNamespace("overworld"));
+        NoiseBasedChunkGenerator generator = new NoiseBasedChunkGenerator(
+                MultiNoiseBiomeSource.createFromPreset(
+                        registries.lookupOrThrow(
+                                        Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST)
+                                .getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD)),
+                settingsReg.wrapAsHolder(settings));
+        BiomeSource biomeSource = generator.getBiomeSource();
+        LevelHeightAccessor heightAccessor = LevelHeightAccessor.create(
+                settings.noiseSettings().minY(), settings.noiseSettings().height());
+        Registry<Structure> structureReg = registries.lookupOrThrow(Registries.STRUCTURE);
+        StructurePieceSerializationContext ctx =
+                new StructurePieceSerializationContext(null, registries, manager);
+
+        Map<Long, RandomState> states = new HashMap<>();
+        Map<Long, Climate.Sampler> samplers = new HashMap<>();
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|");
+            String id = p[0];
+            long seed = Long.parseLong(p[1]);
+            int cx = Integer.parseInt(p[2]);
+            int cz = Integer.parseInt(p[3]);
+            RandomState state = states.get(seed);
+            Climate.Sampler sampler = samplers.get(seed);
+            if (state == null || sampler == null) {
+                state = RandomState.create(noiseLookup, seed, settings);
+                sampler = state.createClimateSampler(
+                        SamplerContext.builder().enableCaches().build());
+                states.put(seed, state);
+                samplers.put(seed, sampler);
+            }
+            Structure structure = structureReg.getValue(Identifier.parse(id));
+            if (!(structure instanceof JigsawStructure jigsaw)) {
+                throw new IllegalStateException(id + " is not a jigsaw structure");
+            }
+            Predicate<Holder<Biome>> validBiome = structure.biomes()::contains;
+            Structure.GenerationContext context = new Structure.GenerationContext(
+                    registries, generator, biomeSource, sampler, state, manager, seed,
+                    new ChunkPos(cx, cz), heightAccessor, validBiome);
+            String key = id + "|" + seed + "|" + cx + "|" + cz;
+            Optional<Structure.GenerationStub> stub = jigsaw.findGenerationPoint(context);
+            if (stub.isEmpty()) {
+                out.append("Q|").append(key).append("|0|0\n");
+                System.out.print(out);
+                System.out.flush();
+                out.setLength(0);
+                continue;
+            }
+            List<StructurePiece> pieces = stub.get().getPiecesBuilder().build().pieces();
+            out.append("Q|").append(key).append("|1|").append(pieces.size()).append('\n');
+            for (int i = 0; i < pieces.size(); i++) {
+                CompoundTag tag = pieces.get(i).createTag(ctx);
+                out.append("T|").append(key).append('|').append(i).append('|')
+                        .append(GSON.toJson(canonical(tag))).append('\n');
+            }
+            System.out.print(out);
+            System.out.flush();
+            out.setLength(0);
+        }
+    }
+
+    /** `CompoundTag` 的键序不确定：转成按键排序的规范 JSON（同 StructureSaveOracle）。 */
+    private static JsonObject canonical(Tag tag) {
+        JsonObject out = new JsonObject();
+        out.addProperty("type", tag.getId());
+        switch (tag.getId()) {
+            case 1, 2, 3, 4, 5, 6 -> out.addProperty("value", String.valueOf(((NumericTag) tag).box()));
+            case 8 -> out.addProperty("value", ((StringTag) tag).value());
+            case 7 -> {
+                JsonArray values = new JsonArray();
+                for (byte value : ((ByteArrayTag) tag).getAsByteArray()) {
+                    values.add((int) value);
+                }
+                out.add("values", values);
+            }
+            case 11 -> {
+                JsonArray values = new JsonArray();
+                for (int value : ((IntArrayTag) tag).getAsIntArray()) {
+                    values.add(value);
+                }
+                out.add("values", values);
+            }
+            case 12 -> {
+                JsonArray values = new JsonArray();
+                for (long value : ((LongArrayTag) tag).getAsLongArray()) {
+                    values.add(value);
+                }
+                out.add("values", values);
+            }
+            case 9 -> {
+                JsonArray values = new JsonArray();
+                for (Tag value : (ListTag) tag) {
+                    values.add(canonical(value));
+                }
+                out.add("values", values);
+            }
+            case 10 -> {
+                JsonObject values = new JsonObject();
+                List<String> keys = new ArrayList<>(((CompoundTag) tag).keySet());
+                keys.sort(String::compareTo);
+                for (String key : keys) {
+                    values.add(key, canonical(((CompoundTag) tag).get(key)));
+                }
+                out.add("values", values);
+            }
+            default -> throw new IllegalArgumentException("tag type " + tag.getId());
+        }
+        return out;
     }
 
     /**

@@ -17,6 +17,7 @@ pub mod element;
 pub mod placer;
 pub mod pool;
 pub mod rotation;
+pub mod save_piece;
 pub mod shapes;
 
 pub use alias::PoolAliasLookup;
