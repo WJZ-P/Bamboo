@@ -80,7 +80,10 @@ pub enum VerticalPlacement {
 }
 
 impl VerticalPlacement {
-    fn parse(name: &str) -> Option<Self> {
+    /// 从 NBT 的字符串读回 `VerticalPlacement`。
+    ///
+    /// Read `VerticalPlacement` back from its NBT string.
+    pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "on_land_surface" => Self::OnLandSurface,
             "partly_buried" => Self::PartlyBuried,
@@ -203,11 +206,54 @@ pub struct Properties {
 }
 
 impl Properties {
+    /// 解析 `canonical` 拼出来的字符串（对拍与读档共用同一种写法）。
+    ///
+    /// Parse the string `canonical` writes (shared by the oracle and save loading).
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let body = text
+            .trim()
+            .strip_prefix('{')
+            .and_then(|rest| rest.strip_suffix('}'))
+            .ok_or_else(|| format!("bad portal properties {text}"))?;
+        let mut cold = false;
+        let mut mossiness = 0.0;
+        let mut air_pocket = false;
+        let mut overgrown = false;
+        let mut vines = false;
+        let mut replace_with_blackstone = false;
+        for entry in body.split(';') {
+            let (key, value) = entry
+                .split_once('=')
+                .ok_or_else(|| format!("bad portal property {entry}"))?;
+            match key {
+                "cold" => cold = value == "1",
+                "mossiness" => {
+                    mossiness = value
+                        .parse()
+                        .map_err(|_| format!("bad mossiness {value}"))?
+                }
+                "air_pocket" => air_pocket = value == "1",
+                "overgrown" => overgrown = value == "1",
+                "vines" => vines = value == "1",
+                "replace_with_blackstone" => replace_with_blackstone = value == "1",
+                other => return Err(format!("unknown portal property {other}")),
+            }
+        }
+        Ok(Self {
+            cold,
+            mossiness,
+            air_pocket,
+            overgrown,
+            vines,
+            replace_with_blackstone,
+        })
+    }
+
     /// 按 `Properties.CODEC` 的字段名拼成和 Java oracle 一致的标准串（键按字母序）。
     ///
     /// Format into the canonical string the Java oracle produces for `Properties.CODEC`
     /// (keys sorted alphabetically).
-    fn canonical(self) -> String {
+    pub fn canonical(self) -> String {
         format!(
             "{{air_pocket={};cold={};mossiness={};overgrown={};replace_with_blackstone={};\
              vines={}}}",
@@ -253,21 +299,21 @@ fn mirror_name(mirror: i32) -> &'static str {
 /// `RuinedPortalPiece` 的构造参数，避免函数参数过多。
 ///
 /// Constructor parameters of one `RuinedPortalPiece`, to keep the arity small.
-struct PortalPieceSpec<'a> {
-    template_name: &'a str,
-    template_size: (i32, i32, i32),
-    position: (i32, i32, i32),
-    rotation: i32,
-    mirror: i32,
-    pivot: (i32, i32),
-    placement: VerticalPlacement,
-    properties: Properties,
+pub struct PortalPieceSpec<'a> {
+    pub template_name: &'a str,
+    pub template_size: (i32, i32, i32),
+    pub position: (i32, i32, i32),
+    pub rotation: i32,
+    pub mirror: i32,
+    pub pivot: (i32, i32),
+    pub placement: VerticalPlacement,
+    pub properties: Properties,
 }
 
 /// `RuinedPortalPiece` 的一个结构件。
 ///
 /// One `RuinedPortalPiece`.
-fn portal_piece(spec: PortalPieceSpec<'_>) -> Piece {
+pub fn portal_piece(spec: PortalPieceSpec<'_>) -> Piece {
     let PortalPieceSpec {
         template_name,
         template_size,

@@ -333,6 +333,17 @@ impl Piece {
             .insert(key.to_owned(), Extra::Str(value.to_owned()));
     }
 
+    /// 取字符串字段（`Extras` 里非字符串返回 `None`）。测试和放置里程碑读模板名用。
+    ///
+    /// Read a string field (`None` for non-string extras). Used by tests and the
+    /// placement milestone to read the template name.
+    pub fn get_str(&self, key: &str) -> Option<&str> {
+        match self.extras.get(key) {
+            Some(Extra::Str(value)) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
     /// 对拍用的标准行：`P id bb6 O GD rot mirror extras`。
     /// extras 是按 key 排序的 `k=v`，用逗号连接，空则为 `-`。
     /// `Entrances` 在这时按当前（已平移过的）盒子格式化。数值带 NBT 类型前缀，
