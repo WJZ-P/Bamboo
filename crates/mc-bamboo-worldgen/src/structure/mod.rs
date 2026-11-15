@@ -19,6 +19,7 @@
 //! modules; `features`-stage `placeInChunk` is still a later milestone, see
 //! `docs/worldgen-structures-plan.md`.
 
+pub mod jigsaw;
 pub mod piece_place;
 pub mod pieces;
 pub mod place;
@@ -33,6 +34,7 @@ pub mod start;
 pub mod start_point;
 pub mod state_transform;
 pub mod template;
+pub mod template_place;
 pub mod templated;
 pub mod validity;
 
