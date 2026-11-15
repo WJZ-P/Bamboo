@@ -33,6 +33,7 @@ pub mod ores;
 pub mod placement;
 pub mod provider;
 pub mod registry;
+pub mod root_system;
 pub mod rule_test;
 pub mod run;
 pub mod sculk_patch;

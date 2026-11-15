@@ -231,6 +231,18 @@ fn place_feature<'a>(
         };
         return patch.place(registry, world, env, random, pos);
     }
+    // `root_system` 同样要注册表和 `PlacementEnv`（它递归调 `treeFeature.place`）。
+    //
+    // `root_system` likewise needs the registry and `PlacementEnv` because it recurses
+    // into `treeFeature.place`.
+    if kind == "minecraft:root_system" {
+        let Some(system) =
+            super::root_system::RootSystem::parse(config, &|name| registry.state_provider(name))
+        else {
+            return PlaceOutcome::unsupported();
+        };
+        return system.place(registry, world, env, random, pos);
+    }
     let Some(comp) = Composition::parse(kind, config) else {
         return PlaceOutcome::unsupported();
     };

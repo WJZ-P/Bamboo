@@ -387,17 +387,6 @@ fn modify(
                 out.push(pos);
             }
         }
-        // `SurfaceWaterDepthFilter.shouldPlace`：两张高度图之差不超过上限才放行。
-        // `SurfaceWaterDepthFilter.shouldPlace`: forward only when the two heightmaps
-        // differ by at most the configured depth.
-        Modifier::SurfaceWaterDepthFilter(max) => {
-            let y_ocean = ctx.world.get_height(HeightmapKind::OceanFloor, x, z);
-            let y_surface = ctx.world.get_height(HeightmapKind::WorldSurface, x, z);
-            if y_surface - y_ocean <= *max {
-                out.push(pos);
-            }
-        }
-        Modifier::Unsupported(_) => {}
         // `CountOnEveryLayerPlacement`：逐层扫描，会消费随机数。
         // `CountOnEveryLayerPlacement`: walks layer by layer and consumes random.
         Modifier::CountOnEveryLayer(count) => {

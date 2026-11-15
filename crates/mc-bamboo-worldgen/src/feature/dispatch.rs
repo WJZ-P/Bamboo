@@ -152,8 +152,6 @@ pub fn place_leaf(
     pos: Pos,
 ) -> bool {
     match leaf {
-        Leaf::Ore(ore) => ores::place(ore, world, random, pos),
-        Leaf::SimpleBlock(feature) => feature.place(world, random, region_random, pos),
         Leaf::Bamboo(feature) => feature.place(world, random, pos),
         Leaf::BlockBlob(blob) => block_blob::place(blob, world, random, pos),
         Leaf::BlockColumn(feature) => feature.place(world, random, pos),

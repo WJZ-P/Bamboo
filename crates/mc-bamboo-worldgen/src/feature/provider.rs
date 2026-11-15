@@ -218,21 +218,6 @@ impl IntProvider {
             // `mean + (float) nextGaussian() * deviation`。
             // `ClampedNormalInt`: `(int) Mth.clamp(Mth.normal(random, mean, deviation),
             // min, max)`; `Mth.normal` is `mean + (float) nextGaussian() * deviation`.
-            "minecraft:clamped_normal" => {
-                let float = |name: &str| -> Result<f32, String> {
-                    object
-                        .get(name)
-                        .and_then(Value::as_f64)
-                        .map(|n| n as f32)
-                        .ok_or_else(|| format!("clamped_normal has no {name}"))
-                };
-                Self::ClampedNormal {
-                    mean: float("mean")?,
-                    deviation: float("deviation")?,
-                    min: integer("min_inclusive")?,
-                    max: integer("max_inclusive")?,
-                }
-            }
             _ => return Err(format!("unsupported int provider {kind}")),
         })
     }
@@ -296,19 +281,6 @@ impl IntProvider {
                     }
                 }
                 0
-            }
-            // `Mth.normal` 先取一次 `nextGaussian`（可能是缓存的那一半），再乘偏差加到均值上，
-            // 最后 `Mth.clamp` 到整数区间并截断成 int。
-            // `Mth.normal` draws one `nextGaussian` (possibly the cached half), scales by
-            // the deviation, adds the mean, then `Mth.clamp` and truncate to int.
-            Self::ClampedNormal {
-                mean,
-                deviation,
-                min,
-                max,
-            } => {
-                let value = *mean + random.next_gaussian() as f32 * *deviation;
-                (value.clamp(*min as f32, *max as f32)) as i32
             }
         }
     }
