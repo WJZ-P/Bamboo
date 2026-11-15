@@ -126,10 +126,12 @@ fn properties_text(properties: &[(String, String)]) -> String {
 pub struct PlaceBlock {
     pub pos: (i32, i32, i32),
     pub state: BlockStateSpec,
-    /// `blockInfo.nbt != null`：官方先写 `Blocks.BARRIER` 再写真正的方块。
+    /// `blockInfo.nbt`：非 `None` 时官方先写 `Blocks.BARRIER` 再写真正的方块，放置完成后
+    /// 还要用它恢复方块实体。
     ///
-    /// `blockInfo.nbt != null`: vanilla writes `Blocks.BARRIER` before the real block.
-    pub has_nbt: bool,
+    /// `blockInfo.nbt`: when set, vanilla writes `Blocks.BARRIER` first and restores the
+    /// block entity afterwards.
+    pub nbt: Option<mc_bamboo_nbt::Tag>,
 }
 
 /// `StructureTemplate.calculateRelativePosition(settings, pos)`：`transform(pos, mirror,
@@ -156,6 +158,28 @@ pub fn relative_position(pos: (i32, i32, i32), mirror: u32, rotation: u32) -> (i
     }
 }
 
+/// 一次放置的产物：真正写进去的方块，以及它们的包围盒。
+///
+/// 官方 `StructureTemplate.placeInWorld` 内部维护 `minX..maxZ` 与 `placed`（位置 + nbt），
+/// 用于 `updateShapeAtEdge`、方块实体 `setChanged` 与 `placeEntities`。这里把同样的两块
+/// 数据交出去，使用方（放置里程碑）自己决定怎么用。
+///
+/// What one placement produced: the blocks that were really written, plus their bounding
+/// box. Vanilla keeps `minX..maxZ` and `placed` (position + nbt) internally for
+/// `updateShapeAtEdge`, block-entity `setChanged` and `placeEntities`; this exposes the same
+/// two pieces so the placement milestone can use them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlacedBlocks {
+    /// `minX..maxZ`：只有真正改了的方块参与。一个都没写时是 `None`。
+    ///
+    /// `minX..maxZ`, built only from blocks that really changed; `None` when nothing did.
+    pub bounds: Option<crate::structure::BoundingBox>,
+    /// `placed`：`(世界坐标, 原方块的 nbt)`，按写入顺序。
+    ///
+    /// `placed`: `(world position, the block's original nbt)`, in write order.
+    pub placed: Vec<((i32, i32, i32), Option<mc_bamboo_nbt::Tag>)>,
+}
+
 /// 官方 `StructureTemplate.placeInWorld` 的方块写入循环（processor 已跑完的那部分）：
 /// 对每个处理后的方块做 `state.mirror(...).rotate(...)` 并写进世界，只写落在 `chunk_bb`
 /// 内的位置；带 nbt 的方块先写一个 `BARRIER`。
@@ -169,8 +193,8 @@ pub fn place_processed(
     mirror: u32,
     rotation: u32,
     world: &mut impl BlockWriter,
-) -> Result<usize, String> {
-    let mut changed = 0;
+) -> Result<PlacedBlocks, String> {
+    let mut placed = PlacedBlocks::default();
     for block in processed {
         let pos = block.pos;
         if !chunk_bb.contains(pos.0, pos.1, pos.2) {
@@ -187,18 +211,35 @@ pub fn place_processed(
             state_out = mc_bamboo_data::state_rotation(state_out, rotation);
         }
         // `if (blockInfo.nbt != null) level.setBlock(blockPos, Blocks.BARRIER..., 820);`
-        if block.has_nbt {
+        if block.nbt.is_some() {
             world.set_block(pos.0, pos.1, pos.2, barrier_state());
         }
         // 官方只在 `level.setBlock(...)` 返回 true 时才把位置计入 `minX..maxZ` 与
-        // `placed`（即 `placeInWorld` 的「实际改了几个方块」），返回值不参与其它判断。
-        // Vanilla counts a position only when `level.setBlock(...)` returns true; that
-        // count is what `placeInWorld` reports as "blocks actually changed".
+        // `placed`。
+        // Vanilla counts a position only when `level.setBlock(...)` returns true.
         if world.set_block(pos.0, pos.1, pos.2, state_out) {
-            changed += 1;
+            placed.bounds = Some(match placed.bounds {
+                None => crate::structure::BoundingBox {
+                    min_x: pos.0,
+                    min_y: pos.1,
+                    min_z: pos.2,
+                    max_x: pos.0,
+                    max_y: pos.1,
+                    max_z: pos.2,
+                },
+                Some(bounds) => crate::structure::BoundingBox {
+                    min_x: bounds.min_x.min(pos.0),
+                    min_y: bounds.min_y.min(pos.1),
+                    min_z: bounds.min_z.min(pos.2),
+                    max_x: bounds.max_x.max(pos.0),
+                    max_y: bounds.max_y.max(pos.1),
+                    max_z: bounds.max_z.max(pos.2),
+                },
+            });
+            placed.placed.push((pos, block.nbt.clone()));
         }
     }
-    Ok(changed)
+    Ok(placed)
 }
 
 /// `Blocks.BARRIER.defaultBlockState()` 的状态 id。
@@ -237,7 +278,7 @@ pub fn place_piece<L: ProcessorLevel>(
     rotation: u32,
     chunk_bb: crate::structure::BoundingBox,
     world: &mut impl BlockWriter,
-) -> Result<usize, String> {
+) -> Result<PlacedBlocks, String> {
     // `settings.getRandomPalette(palettes, position)`：按世界位置选调色板。
     // `settings.getRandomPalette(palettes, position)`: palette picked by world position.
     let palette_index = template
@@ -250,20 +291,15 @@ pub fn place_piece<L: ProcessorLevel>(
     let blocks = template_blocks(template, palette_index, palette, piece_position, |pos| {
         relative_position(pos, mirror, rotation)
     })?;
-    let nbt_positions: std::collections::HashSet<(i32, i32, i32)> = blocks
-        .iter()
-        .filter(|(_, has_nbt)| *has_nbt)
-        .map(|(block, _)| block.world_pos)
-        .collect();
     let plain: Vec<ProcessBlock> = blocks.into_iter().map(|(block, _)| block).collect();
     let processed = process_blocks(processors, &plain, level, settings);
     let place: Vec<PlaceBlock> = processed
         .into_iter()
         .map(|block| PlaceBlock {
-            // 官方用处理后的位置查 `blockInfo.nbt`：processor 会改写状态但保留 nbt。
-            // Vanilla looks the nbt up on the processed info: processors rewrite the state
-            // but keep the nbt.
-            has_nbt: nbt_positions.contains(&block.world_pos),
+            // processor 会改写状态但保留 nbt，所以直接用处理后的方块上的 nbt。
+            // Processors rewrite the state but keep the nbt, so take it from the processed
+            // block.
+            nbt: block.nbt.clone(),
             pos: block.world_pos,
             state: block.state,
         })
@@ -557,7 +593,7 @@ mod tests {
             .map(|i| PlaceBlock {
                 pos: (i, 0, 0),
                 state: BlockStateSpec::parse_str("minecraft:stone").unwrap(),
-                has_nbt: false,
+                nbt: None,
             })
             .collect();
 
@@ -567,7 +603,79 @@ mod tests {
         };
         let changed = place_processed(&blocks, bb, 0, 0, &mut world).unwrap();
         assert_eq!(world.calls, 5, "every block is still attempted");
-        assert_eq!(changed, 3, "only accepted writes count");
+        assert_eq!(changed.placed.len(), 3, "only accepted writes count");
+        // 包围盒只覆盖被接受的前三个（x = 0,1,2）。
+        // The bounds cover only the three accepted blocks (x = 0,1,2).
+        assert_eq!(
+            changed.bounds,
+            Some(crate::structure::BoundingBox {
+                min_x: 0,
+                min_y: 0,
+                min_z: 0,
+                max_x: 2,
+                max_y: 0,
+                max_z: 0,
+            })
+        );
+    }
+
+    /// `chunkBB` 外的方块既不写也不进 `placed`/`bounds`；一个都没写时 `bounds` 是 `None`。
+    ///
+    /// Blocks outside `chunkBB` are neither written nor recorded; an empty placement has
+    /// `bounds == None`.
+    #[test]
+    fn placed_bounds_skip_out_of_box_blocks() {
+        use super::{BlockWriter, PlaceBlock, place_processed};
+        use crate::structure::processor::BlockStateSpec;
+
+        #[derive(Default)]
+        struct World {
+            calls: usize,
+        }
+        impl BlockWriter for World {
+            fn set_block(&mut self, _x: i32, _y: i32, _z: i32, _state: u32) -> bool {
+                self.calls += 1;
+                true
+            }
+        }
+        let bb = crate::structure::BoundingBox {
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            max_x: 1,
+            max_y: 1,
+            max_z: 1,
+        };
+        let blocks: Vec<PlaceBlock> = [(0, 0, 0), (1, 1, 1), (5, 5, 5)]
+            .into_iter()
+            .map(|pos| PlaceBlock {
+                pos,
+                state: BlockStateSpec::parse_str("minecraft:stone").unwrap(),
+                nbt: None,
+            })
+            .collect();
+        let mut world = World::default();
+        let placed = place_processed(&blocks, bb, 0, 0, &mut world).unwrap();
+        assert_eq!(world.calls, 2, "the block at (5,5,5) is outside the box");
+        assert_eq!(placed.placed.len(), 2);
+        assert_eq!(
+            placed.bounds,
+            Some(crate::structure::BoundingBox {
+                min_x: 0,
+                min_y: 0,
+                min_z: 0,
+                max_x: 1,
+                max_y: 1,
+                max_z: 1,
+            })
+        );
+
+        // 空输入：不写、`bounds` 为 `None`。
+        // Empty input: nothing written, `bounds` is `None`.
+        let mut world = World::default();
+        let placed = place_processed(&[], bb, 0, 0, &mut world).unwrap();
+        assert_eq!(world.calls, 0);
+        assert_eq!(placed.bounds, None);
     }
 
     /// 完整链路：模板 → processor 链 → 写入，只写 `chunk_bb` 内的位置，且写出的状态
@@ -645,7 +753,7 @@ mod tests {
             &mut world,
         )
         .unwrap();
-        assert!(written > 0, "expected some writes");
+        assert!(!written.placed.is_empty(), "expected some writes");
         // 每个写出的位置都在盒内。
         // Every write must be inside the box.
         for (x, y, z, _) in &world.writes {
@@ -654,8 +762,9 @@ mod tests {
         // 盒外的方块确实被跳过了：总写入数少于模板方块数时成立，或全部在盒内。
         // The filter must have skipped something unless every block happens to be inside.
         assert!(
-            written <= template.blocks.len(),
-            "wrote {written} of {} blocks",
+            written.placed.len() <= template.blocks.len(),
+            "wrote {} of {} blocks",
+            written.placed.len(),
             template.blocks.len()
         );
         let _ = palette;
