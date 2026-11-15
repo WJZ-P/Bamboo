@@ -310,15 +310,13 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
                     break;
                 }
             }
-            // `StructureStart.placeInChunk` 在所有结构件之后调 `structure.afterPlace`；
-            // 林地府邸的那一份往下填圆石。
-            // `StructureStart.placeInChunk` runs `structure.afterPlace` after all pieces;
-            // the mansion's fills cobblestone downwards.
-            if q.kind == KIND_WOODLAND_MANSION {
-                mc_bamboo_worldgen::structure::pieces::woodland_mansion::after_place(
-                    &layout, &mut level, &chunk_bb,
-                );
-            }
+            // `afterPlace`（林地府邸往下填圆石）没有做对拍：Java 侧的对拍只跑
+            // `StructurePiece.postProcess`，不调 `StructureStart.afterPlace`。Rust 的
+            // `woodland_mansion::after_place` 已移植但没有接进来，见汇报的疑点清单。
+            // `afterPlace` (the mansion's cobblestone fill) is not compared: the Java
+            // oracle only runs `StructurePiece.postProcess`, never
+            // `StructureStart.afterPlace`. `woodland_mansion::after_place` is ported but
+            // not wired in here; see the report's open questions.
         }
     }
 
