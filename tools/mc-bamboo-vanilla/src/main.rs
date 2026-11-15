@@ -78,7 +78,7 @@
 //!     用官方 NbtIo 逐节点对拍导出的结构模板 NBT
 //!
 //!     Compare exported structure template NBT node by node with vanilla NbtIo
-//! mc-bamboo-vanilla jigsaw <java 路径> [templates|jigsaws|pieces|shapes]
+//! mc-bamboo-vanilla jigsaw <java 路径> [templates|jigsaws|pieces|shapes|entities]
 //!     用官方 StructureTemplateManager / JigsawPlacement 对拍 jigsaw 结构件
 //!
 //!     Compare jigsaw pieces with vanilla StructureTemplateManager / JigsawPlacement

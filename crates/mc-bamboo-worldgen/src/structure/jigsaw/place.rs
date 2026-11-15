@@ -24,6 +24,7 @@ use crate::structure::{
     processor_apply::{PlaceSettings, ProcessBlock, ProcessorLevel, process_blocks},
     template::{PaletteEntry, StructureTemplate},
 };
+use mc_bamboo_nbt::Tag;
 
 /// 一个模板里某个调色板的方块，转成 processor 链的输入。
 ///
@@ -177,6 +178,224 @@ pub struct PlacedBlocks {
     ///
     /// `placed`: `(world position, the block's original nbt)`, in write order.
     pub placed: Vec<((i32, i32, i32), Option<mc_bamboo_nbt::Tag>)>,
+    /// `placeEntities` 的产物：待创建的实体（只在 `place_piece` 里填）。
+    ///
+    /// What `placeEntities` produced: entities to create (filled in by `place_piece` only).
+    pub entities: Vec<PlacedEntity>,
+}
+
+/// 官方 `StructureTemplate.placeEntities`：把模板里的每个实体变换到世界坐标，改写它的
+/// `Pos` / `block_pos` / `UUID`，并算出 `yRot`。实体本身不在这里创建。
+///
+/// 逐行照官方：
+///
+/// * `blockPos = transform(entityInfo.blockPos, mirror, rotation, pivot).offset(position)`，
+///   只放落在 `boundingBox` 内的；
+/// * `tag = nbt.copy()`，`Pos` 换成变换后的 `Vec3`（**double** 列表），删 `UUID`；
+/// * `block_pos` 存在时按 `BlockPos.CODEC`（三个 int 的 `int[]`）改写；
+/// * `yRot = entity.rotate(rotation) + entity.mirror(mirror) - entity.getYRot()`，
+///   其中 `rotate` / `mirror` 都先 `Mth.wrapDegrees(entity.getYRot())`。
+///
+/// Vanilla `StructureTemplate.placeEntities`: transform each template entity into world
+/// space, rewrite its `Pos` / `block_pos` / `UUID` and work out `yRot`. The entity itself is
+/// not created here.
+pub fn place_entities(
+    template: &StructureTemplate,
+    piece_position: (i32, i32, i32),
+    mirror: u32,
+    rotation: u32,
+    chunk_bb: Option<crate::structure::BoundingBox>,
+) -> Vec<PlacedEntity> {
+    let mut out = Vec::new();
+    for entity in &template.entities {
+        let block_pos = relative_position(entity.block_pos, mirror, rotation);
+        let block_pos = (
+            block_pos.0 + piece_position.0,
+            block_pos.1 + piece_position.1,
+            block_pos.2 + piece_position.2,
+        );
+        if let Some(bb) = chunk_bb
+            && !bb.contains(block_pos.0, block_pos.1, block_pos.2)
+        {
+            continue;
+        }
+        let relative = transform_double(entity.pos, mirror, rotation);
+        let pos = (
+            relative.0 + f64::from(piece_position.0),
+            relative.1 + f64::from(piece_position.1),
+            relative.2 + f64::from(piece_position.2),
+        );
+        let Tag::Compound(mut entries) = entity.nbt.clone() else {
+            continue;
+        };
+        // `Rotation` 是 `[yRot, xRot]`，都在实体身上先读出来（官方是先 `EntityType.create`
+        // 再 `entity.getYRot()`，值就是 nbt 里那份）。
+        // `Rotation` is `[yRot, xRot]`; read it out first (vanilla reads it back from the
+        // created entity, which is the nbt value).
+        let (y_rot_nbt, x_rot) = rotation_of(&entries).unwrap_or((0.0, 0.0));
+        // `tag.put("Pos", posTag)`：覆盖成变换后的 double 列表。
+        // `tag.put("Pos", posTag)`: overwrite with the transformed double list.
+        entries.retain(|(key, _)| key != "Pos");
+        entries.push((
+            "Pos".to_owned(),
+            Tag::List(vec![
+                Tag::Double(pos.0),
+                Tag::Double(pos.1),
+                Tag::Double(pos.2),
+            ]),
+        ));
+        // `tag.remove("UUID")`。
+        entries.retain(|(key, _)| key != "UUID");
+        // `if (tag.contains("block_pos")) tag.store("block_pos", BlockPos.CODEC, blockPos)`。
+        // `BlockPos.CODEC` 是三个 int 的流（`int[]`）。
+        // `BlockPos.CODEC` is a three-int stream (`int[]`).
+        if entries.iter().any(|(key, _)| key == "block_pos") {
+            entries.retain(|(key, _)| key != "block_pos");
+            entries.push((
+                "block_pos".to_owned(),
+                Tag::IntArray(vec![block_pos.0, block_pos.1, block_pos.2]),
+            ));
+        }
+
+        // `float yRot = entity.rotate(rotation); yRot += entity.mirror(mirror)
+        //      - entity.getYRot();`
+        // 结合顺序必须照抄：**先**算 `mirror(base) - raw`，**再**与 `rotate` 相加，
+        // 否则 f32 舍入会差 1 个 ULP。
+        // The association order matters: compute `mirror(base) - raw` **first**, then add it
+        // to `rotate`, or f32 rounding differs by one ULP.
+        let base = wrap_degrees_f32(y_rot_nbt);
+        let rotated = base + rotation_angle_f32(rotation);
+        let delta = mirror_value_f32(mirror, base) - y_rot_nbt;
+        let y_rot = rotated + delta;
+        out.push(PlacedEntity {
+            block_pos,
+            x: pos.0,
+            y: pos.1,
+            z: pos.2,
+            y_rot,
+            x_rot,
+            raw_y_rot: y_rot_nbt,
+            tag: Tag::Compound(entries),
+        });
+    }
+    out
+}
+
+/// 实体 nbt 里的 `Rotation`：`[yRot, xRot]`，两个 float。
+///
+/// The entity's `Rotation` nbt: `[yRot, xRot]`, both floats.
+fn rotation_of(entries: &[(String, mc_bamboo_nbt::Tag)]) -> Option<(f32, f32)> {
+    let tag = entries.iter().find(|(key, _)| key == "Rotation")?;
+    let mc_bamboo_nbt::Tag::List(values) = &tag.1 else {
+        return None;
+    };
+    let number = |tag: &mc_bamboo_nbt::Tag| match tag {
+        mc_bamboo_nbt::Tag::Float(value) => Some(*value),
+        mc_bamboo_nbt::Tag::Double(value) => Some(*value as f32),
+        _ => None,
+    };
+    Some((number(values.first()?)?, number(values.get(1)?)?))
+}
+
+/// `Mth.wrapDegrees(float)`。
+///
+/// `Mth.wrapDegrees(float)`.
+fn wrap_degrees_f32(angle: f32) -> f32 {
+    let mut normalized = angle % 360.0;
+    if normalized >= 180.0 {
+        normalized -= 360.0;
+    }
+    if normalized < -180.0 {
+        normalized += 360.0;
+    }
+    normalized
+}
+
+/// `Entity.rotate(rotation)` 相对原 `yRot` 的增量。`Rotation` 序是
+/// 0=NONE、1=CLOCKWISE_90、2=CLOCKWISE_180、3=COUNTERCLOCKWISE_90。
+///
+/// The increment `Entity.rotate(rotation)` adds. `Rotation` order is 0=NONE, 1=CLOCKWISE_90,
+/// 2=CLOCKWISE_180, 3=COUNTERCLOCKWISE_90.
+fn rotation_angle_f32(rotation: u32) -> f32 {
+    match rotation {
+        1 => 90.0,
+        2 => 180.0,
+        3 => 270.0,
+        _ => 0.0,
+    }
+}
+
+/// `Entity.mirror(mirror)`：`LEFT_RIGHT` 取 `180 - angle`、`FRONT_BACK` 取反，其余原样。
+/// `Mirror` 序是 0=NONE、1=LEFT_RIGHT、2=FRONT_BACK。
+///
+/// `Entity.mirror(mirror)`: `180 - angle` for `LEFT_RIGHT`, negate for `FRONT_BACK`,
+/// otherwise the input. `Mirror` order is 0=NONE, 1=LEFT_RIGHT, 2=FRONT_BACK.
+fn mirror_value_f32(mirror: u32, angle: f32) -> f32 {
+    match mirror {
+        1 => 180.0 - angle,
+        2 => -angle,
+        _ => angle,
+    }
+}
+
+/// `StructureTemplate.transform(Vec3, mirror, rotation, pivot)`，pivot 为零；镜像用
+/// `1.0 - x` / `1.0 - z`，与整数版本取反再平移等价。
+///
+/// `StructureTemplate.transform(Vec3, mirror, rotation, pivot)` with a zero pivot. The
+/// mirror is `1.0 - x` / `1.0 - z`, which equals negate-then-shift.
+fn transform_double(pos: (f64, f64, f64), mirror: u32, rotation: u32) -> (f64, f64, f64) {
+    let (mut x, y, mut z) = pos;
+    // `Mirror` 序：0=NONE、1=LEFT_RIGHT（取反 z）、2=FRONT_BACK（取反 x）。
+    // `Mirror` order: 0=NONE, 1=LEFT_RIGHT (negate z), 2=FRONT_BACK (negate x).
+    match mirror {
+        1 => z = 1.0 - z,
+        2 => x = 1.0 - x,
+        _ => {}
+    }
+    // `Rotation` 序：0=NONE、1=CLOCKWISE_90、2=CLOCKWISE_180、3=COUNTERCLOCKWISE_90。
+    // `Rotation` order: 0=NONE, 1=CLOCKWISE_90, 2=CLOCKWISE_180, 3=COUNTERCLOCKWISE_90.
+    match rotation {
+        1 => (1.0 - z, y, x),
+        2 => (1.0 - x, y, 1.0 - z),
+        3 => (z, y, 1.0 - x),
+        _ => (x, y, z),
+    }
+}
+
+/// 一个待创建的实体，照 `StructureTemplate.placeEntities` 里 `createEntityIgnoreException`
+/// 之后、`addFreshEntityWithPassengers` 之前的那份 `tag`，外加算好的朝向。
+///
+/// 官方这一段只做几何与 nbt 改写（`Pos` 覆盖、删 `UUID`、改写 `block_pos`、算 `yRot`），
+/// 创建实体本身需要实体注册表与 `ServerLevel`，留给上层。`y_rot` 对应
+/// `entity.rotate(rotation) + entity.mirror(mirror) - entity.getYRot()`。
+///
+/// One entity to create: the `tag` as it stands between `createEntityIgnoreException` and
+/// `addFreshEntityWithPassengers`, plus the computed rotation. Vanilla's loop only does
+/// geometry and nbt rewriting here (overwrite `Pos`, drop `UUID`, rewrite `block_pos`, work
+/// out `yRot`); creating the entity needs the entity registry and a `ServerLevel`, so that
+/// stays with the caller. `y_rot` is
+/// `entity.rotate(rotation) + entity.mirror(mirror) - entity.getYRot()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedEntity {
+    /// `transform(entityInfo.blockPos, mirror, rotation, pivot).offset(position)`，整数。
+    /// 既用于包围盒判定，也是 `block_pos` 改写后的值。
+    ///
+    /// The transformed integer `blockPos`; used both for the box test and as the rewritten
+    /// `block_pos`.
+    pub block_pos: (i32, i32, i32),
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub y_rot: f32,
+    /// 实体原本的 `Rotation`（`[yRot, xRot]`），最终 `snapTo` 用的是它。
+    ///
+    /// The entity's original `Rotation` (`[yRot, xRot]`); `snapTo` ends up with it.
+    pub x_rot: f32,
+    /// nbt 里的原始 `yRot`（`Rotation[0]`）。
+    ///
+    /// The raw `yRot` from the nbt (`Rotation[0]`).
+    pub raw_y_rot: f32,
+    pub tag: mc_bamboo_nbt::Tag,
 }
 
 /// 官方 `StructureTemplate.placeInWorld` 的方块写入循环（processor 已跑完的那部分）：
@@ -360,7 +579,10 @@ fn is_liquid_container(state: u32) -> bool {
     }
     matches!(
         state_text(state).as_str(),
-        "minecraft:kelp" | "minecraft:kelp_plant" | "minecraft:seagrass" | "minecraft:tall_seagrass"
+        "minecraft:kelp"
+            | "minecraft:kelp_plant"
+            | "minecraft:seagrass"
+            | "minecraft:tall_seagrass"
     )
 }
 
@@ -400,9 +622,7 @@ fn place_liquid(state: u32, is_water: bool) -> Option<u32> {
     // `setValue(LIT, false)`。两者都保留刚设上的 `waterlogged = true`。
     // `CandleBlock` goes through `extinguish` → `setLit(false)`; `CampfireBlock` sets
     // `LIT = false` directly. Both keep the `waterlogged = true` just set.
-    Some(
-        crate::structure::piece_place::with_property(next, "lit", "false").unwrap_or(next),
-    )
+    Some(crate::structure::piece_place::with_property(next, "lit", "false").unwrap_or(next))
 }
 
 /// 把 `waterlogged` 设成 `value`；没有该属性时返回 `None`。
@@ -446,7 +666,6 @@ pub fn is_randomizable_container(block_name: &str) -> bool {
 ///
 /// Overwrite (or insert) `LootTableSeed` in the nbt.
 fn overwrite_loot_table_seed(tag: &mc_bamboo_nbt::Tag, seed: i64) -> mc_bamboo_nbt::Tag {
-    use mc_bamboo_nbt::Tag;
     let mut out = tag.clone();
     if let Tag::Compound(entries) = &mut out {
         if let Some((_, value)) = entries.iter_mut().find(|(key, _)| key == "LootTableSeed") {
@@ -556,7 +775,22 @@ pub fn place_piece<L: ProcessorLevel>(
             state: block.state,
         })
         .collect();
-    place_processed(&place, chunk_bb, mirror, rotation, random, world)
+    let mut placed = place_processed(&place, chunk_bb, mirror, rotation, random, world)?;
+    // `if (!settings.isIgnoreEntities()) placeEntities(...)`。`SinglePoolElement.getSettings`
+    // 里 `setIgnoreEntities(false)`，所以 jigsaw 结构件照官方都要放实体。`finalizeEntities`
+    // 只影响 `Mob.finalizeSpawn`，那属于实体系统，这里交给调用方。
+    // `placeEntities` runs unless entities are ignored; `SinglePoolElement.getSettings` sets
+    // `setIgnoreEntities(false)`, so jigsaw pieces always place them. `finalizeEntities` only
+    // gates `Mob.finalizeSpawn`, which belongs to the entity system and stays with the
+    // caller.
+    placed.entities = place_entities(
+        template,
+        piece_position,
+        mirror,
+        rotation,
+        settings.chunk_bb,
+    );
+    Ok(placed)
 }
 
 /// 供调试与日志用：`minecraft:x` 形式的方块名（不含属性）。
@@ -1194,7 +1428,11 @@ mod tests {
         // 双台阶：`SlabBlock.placeLiquid` 返回 false。
         // A double slab refuses.
         let double = state("minecraft:oak_slab[waterlogged=false,type=double]");
-        assert_eq!(place_liquid(double, true), None, "a double slab refuses water");
+        assert_eq!(
+            place_liquid(double, true),
+            None,
+            "a double slab refuses water"
+        );
 
         // 蜡烛：灌水并清 `lit`。
         // A candle is waterlogged and goes out.
@@ -1222,7 +1460,10 @@ mod tests {
         // 海带：实现接口但恒返回 false。
         // Kelp implements the interface but always refuses.
         let kelp = state("minecraft:kelp");
-        assert!(super::is_liquid_container(kelp), "kelp is a LiquidBlockContainer");
+        assert!(
+            super::is_liquid_container(kelp),
+            "kelp is a LiquidBlockContainer"
+        );
         assert_eq!(place_liquid(kelp, true), None, "kelp refuses water");
     }
 
@@ -1468,5 +1709,94 @@ mod tests {
             template.blocks.len()
         );
         let _ = palette;
+    }
+
+    /// `place_entities` 照官方 `StructureTemplate.placeEntities` 变换实体：
+    /// `Pos` 换成变换后的 double 列表、删 `UUID`、`block_pos` 改写成三个 int、`yRot`
+    /// 按 rotate/mirror 累加。用真实模板里带村民的那一份验证。
+    ///
+    /// `place_entities` transforms entities the way vanilla does: overwrite `Pos` with the
+    /// transformed doubles, drop `UUID`, rewrite `block_pos` as three ints, and accumulate
+    /// `yRot` through rotate/mirror. Verified on a real template that carries a villager.
+    #[test]
+    fn place_entities_matches_the_vanilla_transform() {
+        use super::{place_entities, wrap_degrees_f32};
+        use mc_bamboo_nbt::Tag;
+
+        let name = "minecraft:village/plains/villagers/unemployed";
+        let template = crate::structure::template::StructureTemplate::load(name).unwrap();
+        assert_eq!(template.entities.len(), 1, "{name} should carry one entity");
+
+        // 无镜像无旋转、原点：`Pos` 与 `block_pos` 只是平移到世界坐标。
+        // No mirror, no rotation, zero position: `Pos` and `block_pos` just translate.
+        let placed = place_entities(&template, (100, 70, -50), 0, 0, None);
+        assert_eq!(placed.len(), 1);
+        let entity = &placed[0];
+        let source = &template.entities[0];
+        assert!((entity.x - (source.pos.0 + 100.0)).abs() < 1e-9);
+        assert!((entity.y - (source.pos.1 + 70.0)).abs() < 1e-9);
+        assert!((entity.z - (source.pos.2 - 50.0)).abs() < 1e-9);
+        let Tag::Compound(entries) = &entity.tag else {
+            panic!("entity nbt must be a compound")
+        };
+        let Tag::List(pos) = &entries.iter().find(|(key, _)| key == "Pos").unwrap().1 else {
+            panic!("Pos must be a list")
+        };
+        assert_eq!(pos.len(), 3);
+        assert_eq!(pos[0], Tag::Double(entity.x));
+        assert_eq!(pos[1], Tag::Double(entity.y));
+        assert_eq!(pos[2], Tag::Double(entity.z));
+        assert!(
+            !entries.iter().any(|(key, _)| key == "UUID"),
+            "UUID is dropped"
+        );
+        let block_pos = entries
+            .iter()
+            .find(|(key, _)| key == "block_pos")
+            .map(|(_, value)| value.clone());
+        if let Some(Tag::IntArray(values)) = block_pos {
+            assert_eq!(values.len(), 3);
+        }
+
+        // 朝向：`rotate(CLOCKWISE_90)` 是 +90，`mirror(LEFT_RIGHT)` 是 `180 - yRot`，
+        // 末尾再减一次未包装的原值。
+        // Rotation: `rotate(CLOCKWISE_90)` adds 90, `mirror(LEFT_RIGHT)` is `180 - yRot`,
+        // and the raw original is subtracted once more.
+        let raw = entity.raw_y_rot;
+        let base = wrap_degrees_f32(raw);
+        let rotated = place_entities(&template, (0, 0, 0), 0, 1, None);
+        let expected = (base + 90.0) + (base - raw);
+        assert!(
+            (rotated[0].y_rot - expected).abs() < 1e-4,
+            "yRot {} != {expected}",
+            rotated[0].y_rot
+        );
+        let mirrored = place_entities(&template, (0, 0, 0), 1, 0, None);
+        let expected = base + ((180.0 - base) - raw);
+        assert!(
+            (mirrored[0].y_rot - expected).abs() < 1e-4,
+            "yRot {} != {expected}",
+            mirrored[0].y_rot
+        );
+
+        // 包围盒过滤：`block_pos` 落在盒外时整个实体跳过。
+        // Box filtering: an entity whose `block_pos` is outside is skipped entirely.
+        let world_block = (
+            source.block_pos.0 + 100,
+            source.block_pos.1 + 70,
+            source.block_pos.2 - 50,
+        );
+        let outside = crate::structure::BoundingBox {
+            min_x: world_block.0 + 1000,
+            min_y: world_block.1,
+            min_z: world_block.2,
+            max_x: world_block.0 + 1001,
+            max_y: world_block.1 + 1,
+            max_z: world_block.2 + 1,
+        };
+        assert!(
+            place_entities(&template, (100, 70, -50), 0, 0, Some(outside)).is_empty(),
+            "an entity outside the box is skipped"
+        );
     }
 }

@@ -175,6 +175,7 @@ public final class JigsawOracle {
                     case "capped" -> runCapped(Path.of(args[1]));
                     case "cappedfull" -> runCappedFull(registries, Path.of(args[1]));
                     case "placepiece" -> runPlacePiece(manager, registries, Path.of(args[1]));
+                    case "entities" -> runEntities(manager, Path.of(args[1]));
                     case "bemod" -> runBlockEntityModifier(registries, Path.of(args[1]));
                     case "rc" -> runRandomizableContainer(registries, Path.of(args[1]));
                     case "shapes" -> runShapes(Path.of(args[1]));
@@ -1099,6 +1100,130 @@ public final class JigsawOracle {
         }
         System.out.print(out);
         System.out.flush();
+    }
+
+    /**
+     * entities 模式：queries 每行
+     * {@code template|pieceX|pieceY|pieceZ|mirror|rotation|bb(6)}。
+     * 复算官方 {@code StructureTemplate.placeEntities} 里除「创建实体」以外的全部步骤：
+     * `transform` 后的 `blockPos` 与 `Vec3`、改写后的 `Pos`、删掉的 `UUID`、改写后的
+     * `block_pos`，以及 `entity.rotate(rotation) + entity.mirror(mirror) - entity.getYRot()`。
+     * Rust 侧的 `jigsaw::place::place_entities` 复算同样的东西，逐实体比较。
+     *
+     * <p>Entities mode: replays every step of `StructureTemplate.placeEntities` except
+     * creating the entity, and prints the transformed `blockPos` / `Vec3`, the rewritten
+     * `Pos`, the dropped `UUID`, the rewritten `block_pos` and the computed `yRot`.
+     */
+    private static void runEntities(
+            StructureTemplateManager manager, Path queries) throws Exception {
+        StringBuilder out = new StringBuilder();
+        // 一个不初始化字段的具体 `Entity`（`Marker` 是最简单的具体子类），只为调
+        // `rotate` / `mirror` 这两个官方方法：它们只读 `getYRot()`，`setYRot` 也只写那
+        // 一个字段，所以字段全零的实例足够。
+        // A concrete `Entity` with no initialisation (`Marker` is the simplest concrete
+        // subclass), used only for the official `rotate` / `mirror` methods: they read
+        // `getYRot()` and `setYRot` writes just that field, so an all-zero instance is fine.
+        net.minecraft.world.entity.Entity blankEntity =
+                (net.minecraft.world.entity.Entity) allocateBlank(
+                        net.minecraft.world.entity.Marker.class);
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|");
+            Identifier id = Identifier.parse(p[0]);
+            BlockPos piece = new BlockPos(
+                    Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3]));
+            Mirror mirror = Mirror.values()[Integer.parseInt(p[4])];
+            Rotation rotation = Rotation.values()[Integer.parseInt(p[5])];
+            BoundingBox bb = new BoundingBox(
+                    Integer.parseInt(p[6]), Integer.parseInt(p[7]), Integer.parseInt(p[8]),
+                    Integer.parseInt(p[9]), Integer.parseInt(p[10]), Integer.parseInt(p[11]));
+            StructureTemplate template = manager.get(id).orElseThrow(
+                    () -> new IllegalStateException("template not loaded: " + id));
+            // `entityInfoList` 是私有的；用 `save` 拿同一份数据（`entities` 列表）。
+            // `entityInfoList` is private; `save` exposes the same data.
+            CompoundTag saved = template.save(new CompoundTag());
+            String key = String.join("|", p);
+            var entities = saved.getListOrEmpty("entities");
+            out.append("Q|").append(key).append('|').append(entities.size()).append('\n');
+            for (int i = 0; i < entities.size(); i++) {
+                CompoundTag entry = entities.getCompoundOrEmpty(i);
+                CompoundTag nbt = entry.getCompoundOrEmpty("nbt");
+                BlockPos templateBlockPos = readBlockPos(entry.getListOrEmpty("blockPos"));
+                ListTag posList = entry.getListOrEmpty("pos");
+                net.minecraft.world.phys.Vec3 templatePos = new net.minecraft.world.phys.Vec3(
+                        posList.getDoubleOr(0, 0.0),
+                        posList.getDoubleOr(1, 0.0),
+                        posList.getDoubleOr(2, 0.0));
+                BlockPos blockPos = StructureTemplate
+                        .transform(templateBlockPos, mirror, rotation, BlockPos.ZERO)
+                        .offset(piece);
+                if (!bb.isInside(blockPos)) {
+                    continue;
+                }
+                net.minecraft.world.phys.Vec3 pos = StructureTemplate
+                        .transform(templatePos, mirror, rotation, BlockPos.ZERO)
+                        .add(piece.getX(), piece.getY(), piece.getZ());
+                float rawYRot = nbt.getListOrEmpty("Rotation").getFloatOr(0, 0.0F);
+                float xRot = nbt.getListOrEmpty("Rotation").getFloatOr(1, 0.0F);
+                blankEntity.setYRot(rawYRot);
+                float yRot = blankEntity.rotate(rotation);
+                yRot += blankEntity.mirror(mirror) - blankEntity.getYRot();
+                // 照官方顺序改写这一份副本：`Pos` 覆盖、删 `UUID`、`block_pos` 重存，
+                // 然后才读回来报告。
+                // Rewrite this copy in vanilla's order: overwrite `Pos`, drop `UUID`,
+                // re-store `block_pos`; only then read back what gets reported.
+                ListTag posTag = new ListTag();
+                posTag.add(net.minecraft.nbt.DoubleTag.valueOf(pos.x));
+                posTag.add(net.minecraft.nbt.DoubleTag.valueOf(pos.y));
+                posTag.add(net.minecraft.nbt.DoubleTag.valueOf(pos.z));
+                nbt.put("Pos", posTag);
+                // 删之前先记下来：删完再判永远是否。
+                // Record it before the removal; checking afterwards would always say no.
+                boolean hadUuid = nbt.contains("UUID");
+                nbt.remove("UUID");
+                if (nbt.contains("block_pos")) {
+                    nbt.store("block_pos", BlockPos.CODEC, blockPos);
+                }
+                BlockPos rewrittenBlockPos = nbt.contains("block_pos")
+                        ? nbt.read("block_pos", BlockPos.CODEC).orElse(blockPos)
+                        : null;
+                out.append("E|").append(key)
+                        .append('|').append(blockPos.getX())
+                        .append(',').append(blockPos.getY())
+                        .append(',').append(blockPos.getZ())
+                        .append('|').append(Double.doubleToRawLongBits(pos.x))
+                        .append('|').append(Double.doubleToRawLongBits(pos.y))
+                        .append('|').append(Double.doubleToRawLongBits(pos.z))
+                        .append('|').append(Float.floatToRawIntBits(yRot))
+                        .append('|').append(Float.floatToRawIntBits(xRot))
+                        .append('|').append(nbt.contains("UUID") ? 1 : 0)
+                        .append('|').append(rewrittenBlockPos == null ? "-" : rewrittenBlockPos.getX()
+                                + "," + rewrittenBlockPos.getY() + "," + rewrittenBlockPos.getZ())
+                        .append('|').append(nbt.getStringOr("id", ""))
+                        .append('\n');
+            }
+        }
+        System.out.print(out);
+        System.out.flush();
+    }
+
+    private static BlockPos readBlockPos(ListTag list) {
+        return new BlockPos(
+                list.getIntOr(0, 0), list.getIntOr(1, 0), list.getIntOr(2, 0));
+    }
+
+    /// `sun.misc.Unsafe.allocateInstance`：跳过构造器造一个字段全零的对象。
+    ///
+    /// `sun.misc.Unsafe.allocateInstance`: allocate an all-zero instance, skipping the
+    /// constructor.
+    private static Object allocateBlank(Class<?> type) throws ReflectiveOperationException {
+        Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+        var theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
+        theUnsafe.setAccessible(true);
+        Object unsafe = theUnsafe.get(null);
+        return unsafeClass.getMethod("allocateInstance", Class.class).invoke(unsafe, type);
     }
 
     /**

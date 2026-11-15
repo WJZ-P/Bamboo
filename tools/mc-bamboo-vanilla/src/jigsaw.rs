@@ -96,6 +96,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "capped" => run_capped(command, work_dir),
         "cappedfull" => run_capped_full(command, work_dir),
         "placepiece" => run_place_piece(command, work_dir),
+        "entities" => run_entities(command, work_dir),
         "bemod" => run_block_entity_modifier(command, work_dir),
         "rc" => run_randomizable_container(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
@@ -1889,6 +1890,224 @@ fn run_place_piece(mut command: Command, work_dir: &Path) -> Result<(), String> 
     compare_place_piece(&String::from_utf8_lossy(&output.stdout), &queries)
 }
 
+/// `entities` 模式：官方 `StructureTemplate.placeEntities` 的几何与 nbt 改写对
+/// `jigsaw::place::place_entities`，逐实体比。
+///
+/// `entities` mode: vanilla's `StructureTemplate.placeEntities` geometry and nbt rewriting
+/// against `jigsaw::place::place_entities`, compared entity by entity.
+fn run_entities(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    // 只挑带实体的模板。
+    // Only templates that carry entities.
+    let mut names: Vec<String> = blob::ENTRIES
+        .iter()
+        .filter(|(name, _, _)| {
+            StructureTemplate::load(name).is_ok_and(|template| !template.entities.is_empty())
+        })
+        .map(|(name, _, _)| (*name).to_owned())
+        .collect();
+    names.sort();
+
+    let mut queries = Vec::new();
+    for name in &names {
+        let (sx, sy, sz) = StructureTemplate::load(name)
+            .map_err(|error| format!("cannot load {name}: {error}"))?
+            .size;
+        let span = sx.max(sz) + 2;
+        for mirror in 0_u32..3 {
+            for rotation in 0_u32..4 {
+                // 一半查询用放得下的盒，一半用只覆盖一角的盒，两条分支都走。
+                // Half the queries use a box that fits, half one that clips a corner.
+                let bb = if (mirror + rotation) % 2 == 0 {
+                    (-span, 0, -span, span, sy + 2, span)
+                } else {
+                    (0, 0, 0, span / 2, sy / 2, span / 2)
+                };
+                queries.push(format!(
+                    "{name}|0|0|0|{mirror}|{rotation}|{}|{}|{}|{}|{}|{}",
+                    bb.0, bb.1, bb.2, bb.3, bb.4, bb.5
+                ));
+            }
+        }
+    }
+    let queries_path = work_dir.join("jigsaw_entities_queries.txt");
+    fs::write(&queries_path, queries.join("\n"))
+        .map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("entities")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_entities(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
+/// 解析 Java 的 `entities` 输出并与 Rust 侧逐实体比较。
+///
+/// Parse the Java `entities` output and compare it entity by entity with the Rust side.
+fn compare_entities(stdout: &str, queries: &[String]) -> Result<(), String> {
+    let mut java: HashMap<String, Vec<String>> = HashMap::new();
+    let mut java_counts: HashMap<String, usize> = HashMap::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() < 14 {
+            continue;
+        }
+        let key = fields[1..13].join("|");
+        match fields[0] {
+            "Q" => {
+                java_counts.insert(key, fields[13].parse().unwrap_or(0));
+            }
+            "E" => {
+                java.entry(key).or_default().push(fields[13..].join("|"));
+            }
+            _ => {}
+        }
+    }
+
+    let mut checked = 0usize;
+    let mut entities_checked = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for query in queries {
+        let fields: Vec<&str> = query.split('|').collect();
+        let name = fields[0];
+        let piece = (
+            parse_i32(fields[1])?,
+            parse_i32(fields[2])?,
+            parse_i32(fields[3])?,
+        );
+        let mirror = parse_i32(fields[4])? as u32;
+        let rotation = parse_i32(fields[5])? as u32;
+        let bb = BoundingBox {
+            min_x: parse_i32(fields[6])?,
+            min_y: parse_i32(fields[7])?,
+            min_z: parse_i32(fields[8])?,
+            max_x: parse_i32(fields[9])?,
+            max_y: parse_i32(fields[10])?,
+            max_z: parse_i32(fields[11])?,
+        };
+        let template = StructureTemplate::load(name)
+            .map_err(|error| format!("cannot load {name}: {error}"))?;
+        let placed = mc_bamboo_worldgen::structure::jigsaw::place::place_entities(
+            &template,
+            piece,
+            mirror,
+            rotation,
+            Some(bb),
+        );
+        checked += 1;
+        entities_checked += placed.len();
+        let key = fields.join("|");
+        let Some(total) = java_counts.get(&key) else {
+            return Err(format!("Java missing Q for {key}"));
+        };
+        if *total != template.entities.len() {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{key}: template entities rust {} java {total}",
+                    template.entities.len()
+                ));
+            }
+            continue;
+        }
+        let want = java.get(&key).cloned().unwrap_or_default();
+        if want.len() != placed.len() {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{key}: placed entities rust {} java {}",
+                    placed.len(),
+                    want.len()
+                ));
+            }
+            continue;
+        }
+        for (index, entity) in placed.iter().enumerate() {
+            let got = entity_line(entity);
+            if want[index] != got {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!("{key}[{index}]: rust {got} java {}", want[index]));
+                }
+            }
+        }
+    }
+    if checked != queries.len() {
+        return Err(format!(
+            "checked {checked} entity queries, expected {}",
+            queries.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches} differences over {checked} queries; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!("jigsaw entities: {checked} queries, {entities_checked} entities, all identical");
+    Ok(())
+}
+
+/// 一个实体的比较行，顺序与 Java 侧 `E|key|...` 之后那段一致：
+/// `blockPos(3) | pos 三个 raw double | yRot raw float | xRot raw float | UUID 是否存在 |
+/// 改写后的 block_pos | id`。
+///
+/// One entity's comparison line, in the same order as the Java `E|key|...` payload:
+/// `blockPos (three ints) | three raw doubles | raw yRot | raw xRot | UUID present? |
+/// rewritten block_pos | id`.
+fn entity_line(entity: &mc_bamboo_worldgen::structure::jigsaw::place::PlacedEntity) -> String {
+    let (block_pos, id) = match &entity.tag {
+        mc_bamboo_nbt::Tag::Compound(entries) => {
+            let block_pos = entries
+                .iter()
+                .find(|(key, _)| key == "block_pos")
+                .map(|(_, value)| match value {
+                    mc_bamboo_nbt::Tag::IntArray(values) if values.len() == 3 => {
+                        format!("{},{},{}", values[0], values[1], values[2])
+                    }
+                    _ => "-".to_owned(),
+                })
+                .unwrap_or_else(|| "-".to_owned());
+            let id = entries
+                .iter()
+                .find(|(key, _)| key == "id")
+                .map(|(_, value)| match value {
+                    mc_bamboo_nbt::Tag::String(text) => text.clone(),
+                    _ => String::new(),
+                })
+                .unwrap_or_default();
+            (block_pos, id)
+        }
+        _ => ("-".to_owned(), String::new()),
+    };
+    let has_uuid = match &entity.tag {
+        mc_bamboo_nbt::Tag::Compound(entries) => entries.iter().any(|(key, _)| key == "UUID"),
+        _ => false,
+    };
+    format!(
+        "{},{},{}|{}|{}|{}|{}|{}|{}|{block_pos}|{id}",
+        entity.block_pos.0,
+        entity.block_pos.1,
+        entity.block_pos.2,
+        // `to_bits()` 是 `u64`/`u32`，Java 的 `doubleToRawLongBits` /
+        // `floatToRawIntBits` 是带符号的，按位转过去才可比。
+        // `to_bits()` yields `u64`/`u32`; Java's `doubleToRawLongBits` /
+        // `floatToRawIntBits` are signed, so reinterpret the same bits as signed.
+        entity.x.to_bits() as i64,
+        entity.y.to_bits() as i64,
+        entity.z.to_bits() as i64,
+        entity.y_rot.to_bits() as i32,
+        entity.x_rot.to_bits() as i32,
+        i32::from(has_uuid),
+    )
+}
 fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
     let mut java_q: HashMap<String, (bool, usize)> = HashMap::new();
     let mut java_w: HashMap<String, Vec<String>> = HashMap::new();
