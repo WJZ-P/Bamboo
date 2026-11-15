@@ -787,6 +787,15 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   **第 4 轮的定位实验**：把 `chance_of_spreading` 强制成 0（不扩散）后，单区块的
   差异从 4 降到 2 —— 说明一半差异来自扩散，另一半来自主放置。剩的 2 处是官方在
   `(5,36,0)` 放了 `up`、`(15,42,13)` 放了 `north`，我方这两格没放。
+  **第 7 轮修的真 bug（`07a0942d`）**：`spread` 的起始面必须是**刚放置用的那个方向**
+  ——官方 `placeGrowthIfPossible` 把自己的 `placementDirection` 直接传给
+  `MultifaceSpreader.spreadFromFaceTowardRandomDirection(state, level, pos,
+  startingFace, random, true)`，只洗六个**扩散方向**。我之前错误地实现成了「先洗六个
+  方向当起始面候选、每个再洗一次当扩散方向」，那对应的是**另一个入口**
+  `spreadFromRandomFaceTowardRandomDirection`（只有骨粉路径 `performBonemeal` 用）。
+  修完多点对拍 102 → **70**。
+  **第 6 轮已排除的假设**：(a) `can_be_placed_on` 的方块 ID 映射（逐个核对 10 个名字
+  → 注册表索引，全对）；(b) `can_attach_to` 判据（改成恒 true + 关闭扩散，差异不变）。
 * 组合类回归（`6723362` 合并 main 后，`871f2b4`）：树在本分支已经可用，于是把
   `random_selector` 和 `weighted_random_selector` 放开逐方块对拍。
   * 6 个 `random_selector` 树（trees_plains / trees_savanna / trees_taiga /
