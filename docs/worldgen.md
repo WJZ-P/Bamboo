@@ -633,6 +633,51 @@ p95 1.3–2.1 ms、最坏一份 max 8.35 ms，远低于 20 TPS 的 50 ms 预算�
 测到 backlog 就调高默认值。等地物/结构/光照接进来（每区块更贵）后必须重跑本压测
 再评估线程数。
 
+### 分阶段、分高度带的耗时（`wg-perf`）
+
+上面两节量的是「到某个阶段为止」的累计和纯函数，`wg-perf` 量的是**一个区块从头到尾**的
+每一段，以及噪声填充按 8 格一层的分布和每个 placed feature 的候选高度。
+
+```bash
+# 完整一轮：3 种子 × 5 群系（平原/森林/山地/海洋/丛林）× 8 区块，每个 3 遍取中位数
+cargo build --release -p mc-bamboo-vanilla
+./target/release/mc-bamboo-vanilla.exe wg-perf --seeds 3 --chunks 8 --repeat 3
+
+# 只量主流程，辅助测量（高度分布、切割线对照、多线程）跳过
+./target/release/mc-bamboo-vanilla.exe wg-perf --seeds 1 --chunks 20 \
+    --skip-cut --skip-sky --skip-threads
+
+# 换群系、减重复次数
+./target/release/mc-bamboo-vanilla.exe wg-perf --biomes minecraft:desert,minecraft:taiga --repeat 2
+```
+
+`wg-perf` 不需要 Java，不读存档：它只调本 crate 的纯函数和 `mc-bamboo-game::worldgen` 的
+组装。计量钩子在 `mc-bamboo-worldgen` 的 `perf` 特性下（`src/perf.rs`），**默认构建里全是
+空操作**，生成结果和求值顺序都不变；`mc-bamboo-vanilla` 的 `oracle` 特性会打开它。
+`--repeat` 控制每组重复次数（中位数），辅助测量在区块列表里等间隔抽最多 20 个。
+
+它同时会用 `perf::Floors` 做两组**只用于计时**的对照实验，**这两组会改变生成结果**
+（线下留空气、跳过线下地物候选），所以只在 `perf` 特性下存在：
+
+- 噪声填充逐 8 格高度带的耗时（从每个带边界整列差分得到）；
+- 只生成切割线（`OCEAN_FLOOR_WG` 最小值减 24、对齐到 16）以上，相对完整生成的比例。
+
+一轮 600 区块（3 种子 × 10 群系 × 20）× 3 遍的实测量级（Windows 16 核、release、机器本身
+有别的负载）：`biomes` 5.9 ms、`doFill` 6.6 ms、`surface` 3.6 ms、`carvers` 2.2 ms、
+`features` 14.0 ms、`light`（含把 3×3 装成光引擎 `Chunk`）32.4 ms、`assembly` 2.9 ms，
+记录合计 70.5 ms/区块。其中 **27.2 ms 是「3×3 重打包」而不是光照算法本身**——这是当前
+流水线里最大的一块，值得单独优化。详见 `reports/cb-wg-perf.md`。
+
+这一块已经改掉：`light` 阶段改用 `generate_light_from_layers`，直接从快照的逐层方块建只给
+光引擎用的段（`Chunk::for_light`：一次扫描建调色板、全空气段直接用空段、不算高度图和方块实体、
+快照只共享 `Arc` 不复制），光照结果逐位不变。`wg-perf --light-compare` 在同一批区块上交替跑
+新旧两条路径并逐段比较：96 个区块里旧路径 `light_view` + `light` 中位数 35.1 ms，新路径
+11.3 ms；整块墙钟中位数约 40 ms/区块。详见 `reports/cb-wg-lightperf.md`。
+
+The 3×3 repack is gone: the `light` stage now calls `generate_light_from_layers`,
+which builds light-only sections straight from the snapshot layers. Light is
+bit-identical; `wg-perf --light-compare` measured 35.1 → 11.3 ms (median, 96 chunks).
+
 ## 还没做
 
 * 地物**类型**：`features` 阶段已接进游戏（见上），但只移植了 `minecraft:ore`；其余

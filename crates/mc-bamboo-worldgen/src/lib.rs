@@ -46,6 +46,7 @@ pub mod interval;
 pub mod material;
 pub mod math;
 pub mod noise;
+pub mod perf;
 pub mod random;
 pub mod sampler;
 pub mod settings;
