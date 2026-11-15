@@ -123,10 +123,13 @@ step 9（`vegetal_decoration`）占 109 个。
 | `block_predicate_filter` / `Heightmap.update` / `--feature-types` | 已做 | 见上，故意改坏确认非假绿 |
 | `BlockStateProvider` weighted / randomized_int / 内联 bare-state | 已做 | 9 个 weighted 90 中心 0 不一致，改坏报 120 处 |
 | 组合类：random_selector / weighted_random_selector / simple_random_selector / random_boolean_selector / sequence | 已做（框架 + 递归 `PlacedFeature.place`） | simple_random_selector（forest_flowers / flower_forest_flowers）90 中心 0 不一致，改坏报 52 处；其余子项多为树 / 水生（已移交），未逐块验证 |
-| 树 / `fallen_tree` / 巨型蘑菇 | 移交 `cb-wg-trees` | — |
-| 水下植被 / 其余植被（block_column / bamboo / vines / multiface / root_system 等） | 移交 `cb-wg-aquatic` | — |
-| `noise_threshold_count` / `noise_based_count` / `environment_scan` / `surface_water_depth_filter` / `surface_relative_threshold_filter` 修饰器 | 未做 | 标 `unsupported` |
-| 蘑菇（亮度）/ 睡莲 / 孢子花 / 苔藓地毯 / 海泡菜等特殊 `canSurvive` | 未做 | 标 `unsupported` |
-| holder 引用的 `to_place`（`BLOCK_STATE_PROVIDER` 注册表） | 未做 | 注册表未导出 |
-| `clamped_normal` / `weighted_list` IntProvider、`projected_random_patchy_square`（26.3 导出数据无条目） | 未做 | 标 `unsupported` / 无条目 |
+| 树 / `fallen_tree` / 巨型蘑菇 | 移交 `cb-wg-trees`（**已合入 main**） | — |
+| 水下植被 / 其余植被（见 `docs/worldgen-features-plan.md`「第二轮」） | 已由 `cb-wg-aquatic` 完成大部分 | 见该文档的对拍表 |
+| `noise_threshold_count` / `count_on_every_layer` / `surface_water_depth_filter` 修饰器 | 未做 | 标 `unsupported` |
+| `environment_scan` / `surface_relative_threshold_filter` / `noise_based_count` 修饰器 | 已由 `cb-wg-aquatic` 完成 | `block_column` / `glow_lichen` / `kelp_cold` 多种子 0 不一致 |
+| 蘑菇（亮度）/ 睡莲 / 孢子花 / 海泡菜 / 海草 / 地毯的 `canSurvive` | 已由 `cb-wg-aquatic` 完成 | 见 `docs/worldgen-features-plan.md`「第二轮」 |
+| 苔藓地毯（`MossyCarpetBlock.placeAt`，含侧面 `nextBoolean`） | 未做 | 标 `unsupported` |
+| holder 引用的 `to_place`（`BLOCK_STATE_PROVIDER` 注册表） | 已由 `cb-wg-aquatic` 完成（注册表已导出） | `cave_vines` 24 中心 0 不一致 |
+| `clamped_normal` IntProvider、`projected_random_patchy_square`（26.3 导出数据无条目） | 未做 | 标 `unsupported` / 无条目 |
+| `weighted_list` IntProvider | 已做 | 见 `docs/worldgen-features-plan.md`「第二轮」（合并 main 后取 main 的 `Box<IntProvider>` 版） |
 | 方块实体数据（蜂巢 / 可疑沙等） | 未做 | 无对拍 |

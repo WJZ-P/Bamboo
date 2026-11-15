@@ -45,7 +45,7 @@ pub fn with_property(state: u32, name: &str, value: &str) -> Option<u32> {
 /// 按官方 `StateDefinition` 的属性顺序改一个属性的值。
 ///
 /// 状态 ID 是属性值笛卡尔积，最后一个属性变化最快（`blocks.rs` 的生成注释）。
-fn apply_property(state: u32, name: &str, value: &str) -> Option<u32> {
+pub(crate) fn apply_property(state: u32, name: &str, value: &str) -> Option<u32> {
     let block = mc_bamboo_data::block_of_state(state)?;
     let mut stride = 1_u32;
     for property in block.properties.iter().rev() {

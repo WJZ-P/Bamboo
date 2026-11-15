@@ -126,6 +126,8 @@ import net.minecraft.world.level.ItemLike;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.Mirror;
+import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.block.BucketPickup;
 import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.CandleCakeBlock;
@@ -1415,6 +1417,14 @@ public final class Extractor {
         worldgen.add("feature", encodeRegistry(registries, ops, Registries.FEATURE, Feature.DIRECT_CODEC));
         worldgen.add("placed_feature",
                 encodeRegistry(registries, ops, Registries.PLACED_FEATURE, PlacedFeature.DIRECT_CODEC));
+        // `Holder<BlockStateProvider>` 字符串引用的注册表（`cave_vines_body` 等 8 条）。
+        // 地物配置里以字符串出现，Rust 侧解析时查这张表。
+        // The registry behind `Holder<BlockStateProvider>` string references (8 entries such
+        // as `cave_vines_body`); feature configs name them as strings, and Rust resolves
+        // them against this table.
+        worldgen.add("block_state_provider",
+                encodeRegistry(registries, ops, Registries.BLOCK_STATE_PROVIDER,
+                        BlockStateProvider.DIRECT_CODEC));
         worldgen.add("biome_features", biomeFeatures(registries));
         worldgen.add("features_per_step", featuresPerStep(registries));
         worldgen.add("multi_noise_presets", multiNoisePresets(registries));
@@ -1795,6 +1805,15 @@ public final class Extractor {
         private final JsonArray shapes = new JsonArray();
         private final JsonArray shapeFaces = new JsonArray();
         private final Map<String, Integer> shapeIndexes = new HashMap<>();
+        // 每个状态的四个 rotate 结果（NONE / CLOCKWISE_90 / CLOCKWISE_180 /
+        // COUNTERCLOCKWISE_90，即 Rotation.ordinal()）和三个 mirror 结果（NONE /
+        // LEFT_RIGHT / FRONT_BACK，即 Mirror.ordinal()）。结构件放置要按方向和 mirror 改
+        // 方块状态，这张表让 Rust 侧直接查表，不用重写每个方块的 rotate/mirror。
+        // Four rotate results per state (Rotation.ordinal()) and three mirror results
+        // (Mirror.ordinal()); structure-piece placement looks them up instead of
+        // reimplementing each block's rotate/mirror.
+        private final JsonArray rotation = new JsonArray();
+        private final JsonArray mirror = new JsonArray();
         private static final Map<Block, Boolean> MOVES_SHAPE = new HashMap<>();
 
         JsonObject build() {
@@ -1817,6 +1836,8 @@ public final class Extractor {
             tables.add("fluidStates", fluidStates);
             tables.add("shapes", shapes);
             tables.add("shapeFaces", shapeFaces);
+            tables.add("rotation", rotation);
+            tables.add("mirror", mirror);
             return tables;
         }
 
@@ -1826,6 +1847,12 @@ public final class Extractor {
 
             facts.add(stateFacts(state, BlockPos.ZERO));
             fluid.add(fluidIndex(state.getFluidState()));
+            for (Rotation value : Rotation.values()) {
+                rotation.add(Block.BLOCK_STATE_REGISTRY.getId(state.rotate(value)));
+            }
+            for (Mirror value : Mirror.values()) {
+                mirror.add(Block.BLOCK_STATE_REGISTRY.getId(state.mirror(value)));
+            }
             lightDampening.add(state.getLightDampening());
 
             VoxelShape collisionShape = state.getCollisionShape(EMPTY, BlockPos.ZERO, CollisionContext.empty());
