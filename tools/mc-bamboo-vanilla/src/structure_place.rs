@@ -834,6 +834,10 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
         std::collections::BTreeMap::new();
     let mut all_diffs: Vec<String> = Vec::new();
     let mut write_mismatches = 0usize;
+    /// 每条查询的 `(key, 差异数, 写入次数差异数)`，逐查询定位用。
+    ///
+    /// `(key, mismatch count, write-count diffs)` per query, for per-query locating.
+    let mut per_query: Vec<(String, usize, usize)> = Vec::new();
 
     for (q, section) in queries.iter().zip(sections.iter()) {
         let key = format!("{} {} {} {} {}", q.kind, q.seed, q.cx, q.cz, q.fill);
@@ -846,6 +850,11 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
         let ours = rust_result(q)?;
         pieces_total += section.pieces.len();
         block_total += section.blocks.len();
+        // 记录这一条查询自身的差异数，最后按查询逐行打印：定位时不用再推算序号。
+        // Track this query's own difference count and print one line per query at the end,
+        // so locating the first divergence no longer needs index arithmetic.
+        let mismatches_before_query = mismatch_count;
+        let write_diffs_before_query = write_mismatches;
         // 先比每个结构件的写入次数：第一次出现数量不同就说明取数或分支分叉，
         // 比按方块名猜要精确得多。
         // Compare per-piece write counts first: the first piece whose count differs marks
@@ -954,6 +963,20 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
         // Positions present on only one side are counted separately (not as per-block
         // mismatches); the shared part is still compared strictly.
         one_sided += java_only.len() + rust_only.len();
+        per_query.push((
+            key.clone(),
+            mismatch_count - mismatches_before_query,
+            write_diffs_before_query,
+        ));
+    }
+
+    if std::env::var("STRUCTURE_PLACE_PER_QUERY").is_ok() {
+        println!("-- differences per query (only non-zero) --");
+        for (key, diff, _) in &per_query {
+            if *diff != 0 {
+                println!("  {diff:5} {key}");
+            }
+        }
     }
 
     if !java_only_by_block.is_empty() || !rust_only_by_block.is_empty() {
