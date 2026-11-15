@@ -126,6 +126,21 @@ pub fn shipwreck(
     ))
 }
 
+/// `ShipwreckPiece.handleDataMarker` 写下的方块。
+///
+/// 三个标记（`map_chest` / `treasure_chest` / `supply_chest`）都调
+/// `RandomizableContainer.setBlockEntityLootTable(level, random, pos.below(), table)`，
+/// 它只改方块实体、**不写方块**（`level.getBlockEntity` 在假世界返回 null，两侧都不取
+/// `nextLong`）。所以这里恒为空。
+///
+/// The blocks `ShipwreckPiece.handleDataMarker` writes. All three markers call
+/// `RandomizableContainer.setBlockEntityLootTable` on the block **below**, which only
+/// touches the block entity and writes no block (the fake world's `getBlockEntity` returns
+/// null, so neither side draws `nextLong`). Always empty here.
+pub fn marker_blocks() -> Vec<(i32, i32, i32, u32)> {
+    Vec::new()
+}
+
 /// 战利品标记名，供 `handleDataMarker` 的调用方判分支。
 ///
 /// The loot marker names, for the `handleDataMarker` caller.

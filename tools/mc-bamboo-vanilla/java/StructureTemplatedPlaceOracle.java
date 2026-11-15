@@ -95,6 +95,11 @@ public final class StructureTemplatedPlaceOracle {
         }
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
+        // 溺尸和矿车一样是实体，假世界造不出来；把 factory 换成返回 null，让 `create` 走
+        // 「创建失败」分支（官方语义），方块部分不受影响。
+        // Drowned are entities the fake world cannot host; swap the factory to return null so
+        // `create` takes the vanilla "creation failed" branch, leaving blocks untouched.
+        disableEntityCreation();
         PackRepository repository = ServerPacksSource.createVanillaTrustedRepository();
         repository.reload();
         repository.setSelected(List.of("vanilla"));
@@ -169,6 +174,11 @@ public final class StructureTemplatedPlaceOracle {
                         aborted++;
                         System.out.println("T " + kind + " " + seed + " " + cx + " " + cz + " "
                                 + error.getClass().getName());
+                        java.io.StringWriter sw = new java.io.StringWriter();
+                        error.printStackTrace(new java.io.PrintWriter(sw));
+                        for (String frame : sw.toString().split("\\n")) {
+                            System.out.println("U " + frame.trim());
+                        }
                     }
                 }
             }
@@ -248,27 +258,152 @@ public final class StructureTemplatedPlaceOracle {
                 template, rotation, mirror, pivot);
     }
 
-    /**
-     * 一个只回答 `getSeed()` 的 `ServerLevel` 代理，给 `CappedProcessor` 用。
-     *
-     * <p>A `ServerLevel` proxy that only answers `getSeed()`, for `CappedProcessor`.
-     */
-    private static Object serverLevelProxy(long seed) {
-        return Proxy.newProxyInstance(StructureTemplatedPlaceOracle.class.getClassLoader(),
-                new Class<?>[] {net.minecraft.server.level.ServerLevel.class},
-                (self, method, args) -> switch (method.getName()) {
-                    case "getSeed" -> seed;
-                    case "getDifficulty" -> net.minecraft.world.Difficulty.NORMAL;
-                    case "toString" -> "TemplatedPlaceServerLevel";
-                    case "hashCode" -> System.identityHashCode(self);
-                    case "equals" -> self == args[0];
-                    default -> throw new UnsupportedOperationException(
-                            "ServerLevel." + method.getName() + " is not implemented");
-                });
+    /** 一个只回答生成期会读到的那几个问题的 `WorldData` 代理。 */
+    private static Object worldDataProxy() {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                StructureTemplatedPlaceOracle.class.getClassLoader(),
+                new Class<?>[] {net.minecraft.world.level.storage.WorldData.class},
+                (self, method, args) -> worldDataAnswer(self, method, args));
     }
 
-    private static BoundingBox chunkBox(ChunkPos pos) {        return new BoundingBox(pos.getMinBlockX(), MIN_Y + 1, pos.getMinBlockZ(),
+    /** 同上，`WritableLevelData`（`Level.levelData` 的静态类型）。 */
+    private static Object writableLevelDataProxy() {
+        return java.lang.reflect.Proxy.newProxyInstance(
+                StructureTemplatedPlaceOracle.class.getClassLoader(),
+                new Class<?>[] {net.minecraft.world.level.storage.WritableLevelData.class},
+                (self, method, args) -> worldDataAnswer(self, method, args));
+    }
+
+    private static Object worldDataAnswer(Object self, java.lang.reflect.Method method,
+            Object[] args) {
+        return switch (method.getName()) {
+            case "enabledFeatures" -> net.minecraft.world.flag.FeatureFlags.VANILLA_SET;
+            case "getDifficulty" -> net.minecraft.world.Difficulty.NORMAL;
+            case "isDifficultyLocked" -> false;
+            case "getGameTime" -> 0L;
+            case "getDayTime" -> 0L;
+            case "toString" -> "TemplatedPlaceWorldData";
+            case "hashCode" -> System.identityHashCode(self);
+            case "equals" -> self == args[0];
+            default -> throw new UnsupportedOperationException(
+                    "WorldData." + method.getName() + " is not implemented");
+        };
+    }
+
+    /** 在 `type` 及其父类里找叫 `name` 的字段。 */
+    private static java.lang.reflect.Field findField(Class<?> type, String name)
+            throws NoSuchFieldException {
+        for (Class<?> owner = type; owner != null; owner = owner.getSuperclass()) {
+            try {
+                return owner.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {
+                // 继续往父类找。
+                // Keep walking up the hierarchy.
+            }
+        }
+        throw new NoSuchFieldException(name);
+    }
+
+    /**
+     * 把 `DROWNED` 的 `factory` 换成返回 null：假世界没有真实 `ServerLevel`，实体创建会
+     * 在 `enabledFeatures()` 上 NPE。换成 null 后官方 `handleDataMarker` 走
+     * `if (drowned != null)` 的假分支——方块（空气 / 水）都不写，两侧一致。
+     *
+     * Replaces `DROWNED`'s factory with one returning null: the fake world has no real
+     * `ServerLevel`, so entity creation NPEs on `enabledFeatures()`. With null the vanilla
+     * `if (drowned != null)` branch is skipped, writing no block on either side.
+     */
+    @SuppressWarnings("unchecked")
+    private static void disableEntityCreation() {
+        try {
+            java.lang.reflect.Field factory =
+                    net.minecraft.world.entity.EntityType.class.getDeclaredField("factory");
+            factory.setAccessible(true);
+            factory.set(net.minecraft.world.entity.EntityTypes.DROWNED,
+                    (net.minecraft.world.entity.EntityType.EntityFactory<
+                                    net.minecraft.world.entity.Entity>)
+                            (type, level) -> null);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("cannot stub the drowned factory", error);
+        }
+    }
+
+    private static BoundingBox chunkBox(ChunkPos pos) {
+        return new BoundingBox(pos.getMinBlockX(), MIN_Y + 1, pos.getMinBlockZ(),
                 pos.getMaxBlockX(), MIN_Y + HEIGHT - 1, pos.getMaxBlockZ());
+    }
+
+    /**
+     * `CappedProcessor` 需要 `level.getLevel().getSeed()`：`ServerLevel.getSeed()` 是
+     * `this.server.getWorldGenSettings().options().seed()`。这里用
+     * `sun.misc.Unsafe.allocateInstance` 造三个**不跑构造器**的实例（`ServerLevel`、
+     * `DedicatedServer`——`MinecraftServer` 唯一的非抽象子类、`WorldGenSettings`），只填这条
+     * 链上的字段，其余字段保持默认。
+     *
+     * `CappedProcessor` needs `level.getLevel().getSeed()`, i.e.
+     * `server.worldGenSettings().options().seed()`. Three instances are allocated with
+     * `sun.misc.Unsafe.allocateInstance` (no constructors), and only the fields on that
+     * chain are filled.
+     */
+    private static Object serverLevelProxy(long seed) {
+        try {
+            Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+            java.lang.reflect.Field theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
+            theUnsafe.setAccessible(true);
+            Object unsafe = theUnsafe.get(null);
+            java.lang.reflect.Method allocate =
+                    unsafeClass.getMethod("allocateInstance", Class.class);
+            Class<?> optionsType = net.minecraft.world.level.levelgen.WorldOptions.class;
+            Object options = allocate.invoke(unsafe, optionsType);
+            writeField(options, optionsType, "seed", seed);
+            Class<?> settingsType = net.minecraft.world.level.levelgen.WorldGenSettings.class;
+            Object settings = allocate.invoke(unsafe, settingsType);
+            writeField(settings, settingsType, "options", options);
+            Class<?> serverType = net.minecraft.server.dedicated.DedicatedServer.class;
+            Object server = allocate.invoke(unsafe, serverType);
+            writeField(server, serverType, "worldGenSettings", settings);
+            // `EntityType.canSpawn` 还会读 `level.enabledFeatures()` →
+            // `server.getWorldData().enabledFeatures()`；`WorldData` 是接口，可以用代理。
+            // `EntityType.canSpawn` also reads `level.enabledFeatures()`, i.e.
+            // `server.getWorldData().enabledFeatures()`; `WorldData` is an interface, so a
+            // proxy works.
+            Object worldData = worldDataProxy();
+            writeField(server, serverType, "worldData", worldData);
+            Class<?> levelType = net.minecraft.server.level.ServerLevel.class;
+            Object level = allocate.invoke(unsafe, levelType);
+            writeField(level, levelType, "server", server);
+            // `levelData` 是 `final` 的 `WritableLevelData`，反射写不进，用
+            // `Unsafe.putObject` 绕过 final。
+            // `levelData` is a `final WritableLevelData`; reflection refuses, so
+            // `Unsafe.putObject` writes it.
+            Object levelData = writableLevelDataProxy();
+            long offset = ((Number) unsafeClass
+                    .getMethod("objectFieldOffset", java.lang.reflect.Field.class)
+                    .invoke(unsafe, findField(levelType, "levelData")))
+                    .longValue();
+            unsafeClass.getMethod("putObject", Object.class, long.class, Object.class)
+                    .invoke(unsafe, level, offset, levelData);
+            return level;
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("cannot allocate a ServerLevel stand-in", error);
+        }
+    }
+
+    /** 把 `type` 及其父类里叫 `name` 的字段写成 `value`。 */
+    private static void writeField(Object target, Class<?> type, String name, Object value)
+            throws ReflectiveOperationException {
+        for (Class<?> owner = type; owner != null; owner = owner.getSuperclass()) {
+            try {
+                java.lang.reflect.Field field = owner.getDeclaredField(name);
+                field.setAccessible(true);
+                field.set(target, value);
+                return;
+            } catch (NoSuchFieldException ignored) {
+                // 继续往父类找。
+                // Keep walking up the hierarchy.
+            }
+        }
+        throw new NoSuchFieldException(name);
     }
 
     /** 合成地形：西半陆地、东半海。和 Rust 的 {@code surface_y} / {@code ocean} 一致。 */
@@ -440,17 +575,18 @@ public final class StructureTemplatedPlaceOracle {
                         return center;
                     case "getSeed":
                         return seed;
+                    case "getLevelData":
+                        return worldDataProxy();
                     case "isClientSide":
                         return false;
                     case "getLevel":
                     case "getMinecraftWorld":
-                        // `CappedProcessor.finalizeProcessing` 会 `level.getLevel().getSeed()`。
-                        // 官方的 `WorldGenLevel.getLevel()` 是 `ServerLevel`，这里用一个只
-                        // 实现 `getSeed()` 的代理顶替，避免 NPE 打断整条 query。
-                        // `CappedProcessor.finalizeProcessing` calls
-                        // `level.getLevel().getSeed()`. Vanilla's `getLevel()` is a
-                        // `ServerLevel`; a proxy that only answers `getSeed()` stands in so
-                        // the whole query is not aborted by an NPE.
+                        // `CappedProcessor.finalizeProcessing` 需要
+                        // `level.getLevel().getSeed()`；用 `Unsafe` 分配一个 `DedicatedServer`
+                        // （具体的 `MinecraftServer` 子类）并只填 `worldGenSettings`。
+                        // `CappedProcessor.finalizeProcessing` needs
+                        // `level.getLevel().getSeed()`; an `Unsafe`-allocated `DedicatedServer`
+                        // (a concrete `MinecraftServer`) only needs `worldGenSettings` filled.
                         return serverLevelProxy(seed);
                     case "getBiome":
                     case "getNoiseBiome":
@@ -459,11 +595,48 @@ public final class StructureTemplatedPlaceOracle {
                         return registries;
                     case "markPosForPostProcessing":
                     case "scheduleTick":
+                    case "updateNeighborsAt":
+                    case "updateNeighbourForOutputSignal":
+                    case "neighborChanged":
+                    case "blockUpdated":
+                    case "updateNeighborsAtExceptFromFacing":
+                    case "sendBlockUpdated":
+                    case "levelEvent":
+                    case "playSound":
+                    case "addParticle":
+                    case "gameEvent":
+                    case "destroyBlock":
+                    case "removeBlockEntity":
+                        // `updateShapeAtEdge` 与 `updateShape` 会调用这些；世界生成阶段它们
+                        // 对最终方块没有影响（没有玩家、没有红石），直接吞掉。
+                        // `updateShapeAtEdge` and `updateShape` call these; during worldgen
+                        // they do not change the resulting blocks (no players, no redstone).
+                        return null;
                     case "removeBlock":
                     case "ensureCanWrite":
                     case "isWithinWriteZone":
-                        return name.equals("isWithinWriteZone") ? Boolean.TRUE
-                                : name.equals("removeBlock") ? Boolean.TRUE : null;
+                        return Boolean.TRUE;
+                    case "isEmptyBlock": {
+                        BlockPos pos = (BlockPos) args[0];
+                        return !withinWriteZone(pos) || at(pos).getBlockState(pos).isAir();
+                    }
+                    case "isStateAtPosition": {
+                        BlockPos pos = (BlockPos) args[0];
+                        @SuppressWarnings("unchecked")
+                        java.util.function.Predicate<BlockState> predicate =
+                                (java.util.function.Predicate<BlockState>) args[1];
+                        return predicate.test(at(pos).getBlockState(pos));
+                    }
+                    case "isFluidAtPosition": {
+                        BlockPos pos = (BlockPos) args[0];
+                        @SuppressWarnings("unchecked")
+                        java.util.function.Predicate<FluidState> predicate =
+                                (java.util.function.Predicate<FluidState>) args[1];
+                        return predicate.test(at(pos).getFluidState(pos));
+                    }
+                    case "getBlockIfLoaded":
+                    case "getBlockStateIfLoaded":
+                        return invoke(self, method, new Object[] {args[0]});
                     case "toString":
                         return "TemplatedPlaceLevel";
                     case "hashCode":

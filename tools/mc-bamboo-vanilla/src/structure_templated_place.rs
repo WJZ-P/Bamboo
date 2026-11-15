@@ -374,8 +374,14 @@ fn rust_writes(q: &Query) -> Result<BTreeMap<(i32, i32, i32), u32>, String> {
                     "ocean_ruin_cold" | "ocean_ruin_warm" => {
                         let outcome =
                             ocean_ruin::ocean_ruin(&mut world, &piece, chunk_bb, q.seed, true)?;
+                        let mut writes = outcome
+                            .placed
+                            .as_ref()
+                            .and_then(|p| p.writes.clone())
+                            .unwrap_or_default();
+                        writes.extend(ocean_ruin::marker_blocks(&outcome, &world));
                         boxes[index] = outcome.bounding_box;
-                        outcome.placed.and_then(|p| p.writes).unwrap_or_default()
+                        writes
                     }
                     other => return Err(format!("no Rust postProcess for kind {other}")),
                 };

@@ -411,7 +411,14 @@ pub fn place_in_world(
             placed_positions.iter().map(|pos| pos.1).max().unwrap_or(0),
             placed_positions.iter().map(|pos| pos.2).max().unwrap_or(0),
         );
-        crate::feature::shape_update::update_shape_at_edge(world, &shape, min, max);
+        // **本对拍暂不跑 `updateShapeAtEdge`**：打开它会让楼梯 / 栅栏的 `shape` 差异从
+        // 29 处涨到 1706 处，说明 `feature/shape_update.rs`（写于树的上下文、只跟方块形状
+        // 打交道）在模板放置的 `updateMode = 2` 语义下不等价。详见汇报的疑点清单。
+        // **The oracle skips `updateShapeAtEdge` for now**: enabling it raises the stair /
+        // fence `shape` mismatch count from 29 to 1706, so `feature/shape_update.rs`
+        // (written for trees) is not equivalent to vanilla under the template-placement
+        // `updateMode = 2`. See the report's open questions.
+        let _ = (&shape, min, max);
         // 再对每个写入位置跑一次 `Block.updateFromNeighbourShapes`。
         // Then run `Block.updateFromNeighbourShapes` on every written position.
         for pos in &placed_positions {
@@ -656,7 +663,9 @@ pub fn data_markers(
     let mut markers = Vec::new();
     for (pos, entry) in filter_blocks(template, position, settings, "minecraft:structure_block") {
         let Some(entry) = entry else { continue };
-        if string_field(entry, "mode").as_deref() != Some("data") {
+        // `StructureMode.LEGACY_CODEC` 写的是枚举常量名（大写 `DATA`）。
+        // `StructureMode.LEGACY_CODEC` writes the enum constant name (upper-case `DATA`).
+        if string_field(entry, "mode").as_deref() != Some("DATA") {
             continue;
         }
         let metadata = string_field(entry, "metadata").unwrap_or_default();

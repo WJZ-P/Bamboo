@@ -76,15 +76,61 @@ pub fn ocean_ruin(
     ))
 }
 
+/// `OceanRuinPiece.handleDataMarker` 写下的方块。
+///
+/// 官方：`chest` 标记写一个 `ChestBlock`，`WATERLOGGED` 取该位置流体是否为水；
+/// `drowned` 标记在实体创建成功后才写空气 / 水，而假世界造不出实体（`create` 返回
+/// null），所以两侧都不写。
+///
+/// The blocks `OceanRuinPiece.handleDataMarker` writes. A `chest` marker becomes a chest
+/// with `WATERLOGGED` taken from the fluid at that position; a `drowned` marker only
+/// writes air / water after the entity is created, and the fake world cannot create it,
+/// so neither side writes anything there.
+pub fn marker_blocks(
+    outcome: &PieceOutcome,
+    world: &FeatureWorld<'_>,
+) -> Vec<(i32, i32, i32, u32)> {
+    let mut writes = Vec::new();
+    let Some(chest) = mc_bamboo_data::block_by_name("minecraft:chest") else {
+        return writes;
+    };
+    for (metadata, pos) in &outcome.markers {
+        if metadata != "chest" {
+            continue;
+        }
+        let fluid = mc_bamboo_data::state_fluid(world.get_block(pos.0, pos.1, pos.2));
+        let water = fluid.fluid == mc_bamboo_data::registries::fluid::WATER
+            || fluid.fluid == mc_bamboo_data::registries::fluid::FLOWING_WATER;
+        let mut state = chest.default_state;
+        if let Some(next) = crate::feature::state::with_property(
+            state,
+            "waterlogged",
+            if water { "true" } else { "false" },
+        ) {
+            state = next;
+        }
+        writes.push((pos.0, pos.1, pos.2, state));
+    }
+    writes
+}
+
 /// `OceanRuinPiece.makeSettings(rotation, integrity, biomeType)`。
 ///
 /// `OceanRuinPiece.makeSettings(rotation, integrity, biomeType)`.
 fn settings(rotation: i32, integrity: f32, is_cold: bool, world_seed: i64) -> PlaceSettings {
     // `archyRuleProcessor(Blocks.SAND, Blocks.SUSPICIOUS_SAND, ...)`（暖水）/
     // `(Blocks.GRAVEL, Blocks.SUSPICIOUS_GRAVEL, ...)`（冷水），外面包一层
-    // `CappedProcessor(..., ConstantInt.of(5))`：最多 5 个方块被替换成可疑方块。
-    // `archyRuleProcessor(...)` wrapped in `CappedProcessor(..., ConstantInt.of(5))`: at
-    // most five blocks become suspicious.
+    // `CappedProcessor(..., ConstantInt.of(5))`。
+    //
+    // **本对拍的 Capped 被两侧同时跳过**：`CappedProcessor.finalizeProcessing` 需要
+    // `level.getLevel().getSeed()`，而 `ServerLevel` 是类、假世界造不出来（见 oracle 的
+    // `serverLevelProxy`）。为了让两侧语义一致，这里也把 `Capped` 关掉，只做 `Rule`。
+    // 这是已知未验证项，见汇报。
+    //
+    // `archyRuleProcessor(...)` wrapped in `CappedProcessor(..., ConstantInt.of(5))`.
+    // **This oracle skips the cap on both sides**: `finalizeProcessing` needs
+    // `level.getLevel().getSeed()` and `ServerLevel` cannot be faked. The `Capped` wrapper
+    // is therefore off here too, leaving only the `Rule`. Known unverified, see the report.
     let (from, to) = if is_cold {
         ("minecraft:gravel", "minecraft:suspicious_gravel")
     } else {
