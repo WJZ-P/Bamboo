@@ -69,7 +69,11 @@ const SURFACE_OFFSETS: [[i32; 2]; 13] = [
 
 /// `Aquifer.NoiseBasedAquifer` 的区块级状态。
 pub struct Aquifer<'a> {
-    functions: &'a super::chunk::AquiferFunctions,
+    /// `None` 对应 `Aquifer.createDisabled`：维度没有 `aquifers` 配置（下界）。
+    ///
+    /// `None` mirrors `Aquifer.createDisabled`: the dimension has no `aquifers` config
+    /// (the nether).
+    functions: Option<&'a super::chunk::AquiferFunctions>,
     /// `RandomState.getOrCreateRandomFactory("minecraft:aquifer")`。
     positional: crate::random::PositionalFactory,
     sea_level: i32,
@@ -90,6 +94,12 @@ pub struct Aquifer<'a> {
     /// 高于这个 y 就不采样含水层，直接用全局流体规则。
     skip_sampling_above_y: i32,
     should_schedule_fluid_update: bool,
+    /// `Aquifer.createDisabled`：维度没有 `aquifers` 配置（下界）时，只用全局流体规则。
+    /// 这时所有网格字段都不参与判定。
+    ///
+    /// `Aquifer.createDisabled`: the dimension has no `aquifers` config (the nether), so
+    /// only the global fluid rule applies and none of the grid fields are consulted.
+    disabled: bool,
 }
 
 /// `Aquifer.Config` 编译出来的六条函数。`chunk` 模块解析官方 JSON 后交给这里。
@@ -117,7 +127,7 @@ impl<'a> Aquifer<'a> {
         let grid_size_y = max_grid_y - min_grid_y + 1;
         let cells = (grid_size_x * grid_size_y * grid_size_z).max(0) as usize;
         let mut aquifer = Self {
-            functions,
+            functions: Some(functions),
             positional,
             sea_level,
             default_water,
@@ -133,6 +143,7 @@ impl<'a> Aquifer<'a> {
             surface_levels: HashMap::new(),
             skip_sampling_above_y: 0,
             should_schedule_fluid_update: false,
+            disabled: false,
         };
         // maxSurfaceLevel 覆盖从 minGridX 的第一个方块到 maxGridX 的第十个方块。
         let from_x = from_grid_x(min_grid_x, 0);
@@ -143,6 +154,41 @@ impl<'a> Aquifer<'a> {
         let skip_grid_y = grid_y(maximum + 8 + 12) + 1;
         aquifer.skip_sampling_above_y = from_grid_y(skip_grid_y, 11) - 1;
         aquifer
+    }
+
+    /// `Aquifer.createDisabled(globalFluidPicker)`：维度没有 `aquifers` 时只用全局流体
+    /// 规则。官方实现只有两句：`density > 0` 返回 `null`（石头），否则返回
+    /// `fluidRule.computeFluid(x, y, z).at(y)`。
+    ///
+    /// `Aquifer.createDisabled(globalFluidPicker)`: the dimension has no `aquifers`, so
+    /// only the global fluid rule applies. The official body is two lines: `null` (stone)
+    /// when `density > 0`, otherwise `fluidRule.computeFluid(x, y, z).at(y)`.
+    pub fn new_disabled(
+        positional: crate::random::PositionalFactory,
+        sea_level: i32,
+        default_water: u32,
+        default_lava: u32,
+        air: u32,
+    ) -> Self {
+        Self {
+            functions: None,
+            positional,
+            sea_level,
+            default_water,
+            default_lava,
+            air,
+            min_grid_x: 0,
+            min_grid_y: 0,
+            min_grid_z: 0,
+            grid_size_x: 0,
+            grid_size_z: 0,
+            status: Vec::new(),
+            locations: Vec::new(),
+            surface_levels: HashMap::new(),
+            skip_sampling_above_y: 0,
+            should_schedule_fluid_update: false,
+            disabled: true,
+        }
     }
 
     /// `skipSamplingAboveY`：高于这个 y 的 `computeSubstance` 直接返回全局流体。
@@ -165,6 +211,12 @@ impl<'a> Aquifer<'a> {
             return None;
         }
         let global = self.global_fluid(y);
+        // `Aquifer.createDisabled`：`fluidRule.computeFluid(x,y,z).at(y)`，不采样网格。
+        // `Aquifer.createDisabled`: `fluidRule.computeFluid(x,y,z).at(y)`, no grid sampling.
+        if self.disabled {
+            self.should_schedule_fluid_update = false;
+            return Some(global.at(y));
+        }
         if y > self.skip_sampling_above_y {
             self.should_schedule_fluid_update = false;
             return Some(global.at(y));
@@ -377,6 +429,7 @@ impl<'a> Aquifer<'a> {
         );
         let mut buffer = context.acquire(volume.len());
         self.functions
+            .expect("aquifers enabled")
             .surface_level
             .sample_volume(context, &mut buffer, &volume);
         let mut maximum = i32::MIN;
@@ -400,7 +453,7 @@ impl<'a> Aquifer<'a> {
         if let Some(level) = self.surface_levels.get(&key) {
             return *level;
         }
-        let sampler = &self.functions.surface_level;
+        let sampler = &self.functions.expect("aquifers enabled").surface_level;
         let level = floor_f32(sampler.sample_value(context, quart_x, 0, quart_z));
         self.surface_levels.insert(key, level);
         level
@@ -459,7 +512,7 @@ impl<'a> Aquifer<'a> {
         minimum: i32,
         flooded: bool,
     ) -> i32 {
-        let exclusion = &self.functions.exclusion;
+        let exclusion = &self.functions.expect("aquifers enabled").exclusion;
         let (random_level, global_level) =
             if f64::from(exclusion.sample_value(context, x, y, z)) > 0.0 {
                 (-1.0, -1.0)
@@ -473,6 +526,7 @@ impl<'a> Aquifer<'a> {
                 let floodedness = java_clamp(
                     f64::from(
                         self.functions
+                            .expect("aquifers enabled")
                             .fluid_level_floodedness
                             .sample_value(context, x, y, z),
                     ),
@@ -507,6 +561,7 @@ impl<'a> Aquifer<'a> {
         let base = grid_y * 40 + 20;
         let spread = f64::from(
             self.functions
+                .expect("aquifers enabled")
                 .fluid_level_spread
                 .sample_value(context, grid_x, grid_y, grid_z)
                 * 10.0,
@@ -531,6 +586,7 @@ impl<'a> Aquifer<'a> {
             let grid_z = java_floor_div(z, 64);
             let lava = f64::from(
                 self.functions
+                    .expect("aquifers enabled")
                     .lava
                     .sample_value(context, grid_x, grid_y, grid_z),
             );
@@ -587,7 +643,12 @@ impl<'a> Aquifer<'a> {
         let noise = if !(-2.0..=2.0).contains(&scaled) {
             0.0
         } else if barrier.is_nan() {
-            let value = f64::from(self.functions.barrier.sample_value(context, x, y, z));
+            let value = f64::from(
+                self.functions
+                    .expect("aquifers enabled")
+                    .barrier
+                    .sample_value(context, x, y, z),
+            );
             *barrier = value;
             value
         } else {

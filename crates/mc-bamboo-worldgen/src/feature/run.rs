@@ -119,8 +119,19 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                     }
                 }
                 // featuresPerStep[step] 是按全局 index 排好的列表，下标即 index。
+                // 找不到说明这个 placed feature 不在导出的全局顺序里 —— 目前
+                // `features_per_step` 只按主世界群系的并集排（见 `Extractor.featuresPerStep`），
+                // 所以下界 / 末地群系的 placed feature 都会落到这里。静默跳过会让
+                // 对拍报出「0 不一致」的假绿，必须标 unsupported。
+                //
+                // A missing index means the placed feature is not in the exported global
+                // order: `features_per_step` is sorted over the overworld biome set only
+                // (see `Extractor.featuresPerStep`), so nether and end entries land here.
+                // Skipping silently would report a false "0 mismatches".
                 if let Some(index) = globals.iter().position(|&g| g == id) {
                     indices.push(index as u32);
+                } else {
+                    unsupported = true;
                 }
             }
         }

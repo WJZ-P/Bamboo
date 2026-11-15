@@ -17,6 +17,7 @@ use crate::random::WorldgenRandom;
 
 use super::{
     block_predicate::BlockPredicate,
+    noise_state::NoiseStateProvider,
     provider::IntProvider,
     state::{parse_state, with_property},
     world::FeatureWorld,
@@ -51,6 +52,10 @@ pub enum StateProvider {
     ///
     /// `RandomBlockProvider`: pick one block uniformly and use its default state.
     RandomBlock(Vec<u32>),
+    /// `NoiseProvider` / `DualNoiseProvider` / `NoiseThresholdProvider`（按坐标用噪声）。
+    ///
+    /// The three noise-based providers, which pick a block from a noise sample at `pos`.
+    Noise(Box<NoiseStateProvider>),
     /// `RotatedBlockProvider`：先采样内层，再把方向相关属性改掉。
     ///
     /// `RotatedBlockProvider`: sample the inner provider, then overwrite the
@@ -133,6 +138,13 @@ impl StateProvider {
             "minecraft:random_block" => {
                 Self::RandomBlock(parse_block_states(object.get("blocks")?)?)
             }
+            // 三个 noise provider 的 `noise` / `slow_noise` 是内联参数（不是注册表引用），
+            // 所以直接按值解析，不需要 `lookup`。
+            // The three noise providers carry inline `NormalNoise` parameters, so they
+            // parse by value and need no `lookup`.
+            "minecraft:noise" | "minecraft:dual_noise" | "minecraft:noise_threshold" => {
+                Self::Noise(Box::new(NoiseStateProvider::parse(value)?))
+            }
             // `RotatedBlockProvider.CODEC`：`state` + 可选 `direction`。
             // `RotatedBlockProvider.CODEC`: `state` plus an optional `direction`.
             "minecraft:rotated" => Self::Rotated {
@@ -151,11 +163,9 @@ impl StateProvider {
     /// Whether every nested provider / predicate is ported.
     pub fn supported(&self) -> bool {
         match self {
-            Self::Simple(_)
-            | Self::Weighted { .. }
-            | Self::RandomizedInt { .. }
-            | Self::RandomBlock(_) => true,
+            Self::Simple(_) | Self::Weighted { .. } | Self::RandomBlock(_) | Self::Noise(_) => true,
             Self::Rotated { source, .. } => source.supported(),
+            Self::RandomizedInt { source, .. } => source.supported(),
             Self::RuleBased { fallback, rules } => {
                 fallback.as_deref().is_none_or(StateProvider::supported)
                     && rules.iter().all(|(predicate, provider)| {
@@ -175,6 +185,9 @@ impl StateProvider {
             Self::Weighted { entries, .. } => entries.iter().map(|(_, state)| *state).collect(),
             Self::RandomizedInt { source, .. } => source.possible_states(),
             Self::RandomBlock(states) => states.clone(),
+            Self::Noise(provider) => provider.possible_states(),
+            // 方向属性不改变方块类，内层 provider 的状态就够了。
+            // The direction properties do not change the block class.
             Self::Rotated { source, .. } => source.possible_states(),
             Self::RuleBased { fallback, rules } => {
                 let mut result = Vec::new();
@@ -233,11 +246,14 @@ impl StateProvider {
                 let index = random.next_int(states.len() as i32) as usize;
                 states.get(index).copied()
             }
-            Self::RuleBased { .. } => None,
             // `Rotated` 要先定 `direction`（可能消费随机数）再采样，走 `get_optional_state`。
-            // `Rotated` resolves `direction` first (possibly consuming random), so it goes
-            // through `get_optional_state`.
-            Self::Rotated { .. } => None,
+            // `Rotated` resolves `direction` first (possibly consuming random) and then
+            // samples, so it goes through `get_optional_state`.
+            // `Noise` 的 `getState` 不读世界，直接按坐标采样。
+            // `Noise.getState` needs no world; it samples at `pos` only through
+            // `get_optional_state`, so the world-free form returns `None`.
+            Self::Noise(_) => None,
+            Self::Rotated { .. } | Self::RuleBased { .. } => None,
         }
     }
 
@@ -257,18 +273,7 @@ impl StateProvider {
             Self::Weighted { .. } | Self::RandomizedInt { .. } | Self::RandomBlock(_) => {
                 self.get_state(random)
             }
-            Self::RuleBased { fallback, rules } => {
-                for (predicate, provider) in rules {
-                    if predicate.test(world, pos)
-                        && let Some(state) = provider.get_optional_state(world, random, pos)
-                    {
-                        return Some(state);
-                    }
-                }
-                fallback
-                    .as_deref()
-                    .and_then(|provider| provider.get_optional_state(world, random, pos))
-            }
+            Self::Noise(provider) => provider.get_state(random, pos),
             // 官方先把 `direction` 定下来（缺省时 `Direction.getRandom(random)` 消费一次
             // `nextInt(6)`），再采样内层 provider，最后依次尝试 `axis` / `facing` /
             // `horizontal_facing` 三个属性（有该属性才改）。
@@ -289,13 +294,25 @@ impl StateProvider {
                     state
                 })
             }
+            Self::RuleBased { fallback, rules } => {
+                for (predicate, provider) in rules {
+                    if predicate.test(world, pos)
+                        && let Some(state) = provider.get_optional_state(world, random, pos)
+                    {
+                        return Some(state);
+                    }
+                }
+                fallback
+                    .as_deref()
+                    .and_then(|provider| provider.get_optional_state(world, random, pos))
+            }
         }
     }
 }
 
-/// `Direction.values()` 的顺序，`Rotated` 的缺省方向从这里取。
+/// `Direction.values()` 的六个方向，顺序即 ordinal。
 ///
-/// `Direction.values()` order; `Rotated` picks its default direction from here.
+/// The six `Direction.values()` entries in ordinal order.
 const DIRECTIONS: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
 
 /// `Direction.CODEC` 的方向名。

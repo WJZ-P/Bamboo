@@ -86,13 +86,15 @@ impl SimpleBlockFeature {
     }
 
     /// `DoublePlantBlock.placeAt(level, state, lowerPos, 2)`：先照官方检查上一格能否
-    /// 容纳上半部分，再放下 `half=lower` / `half=upper` 两格。26.3 导出的三种双格植物
-    /// （tall_grass / sunflower / large_fern）只有 `half` 属性，没有 `waterlogged`，
-    /// 所以 `copyWaterloggedFrom` 在这里是 no-op。
+    /// 容纳上半部分，再放下 `half=lower` / `half=upper` 两格。两格各自
+    /// `copyWaterloggedFrom`：状态有 `waterlogged` 属性时按该格是否有水设置，
+    /// `small_dripleaf` 就是这种情况；`tall_grass` / `sunflower` / `large_fern` 没有
+    /// 这个属性，那一步是 no-op。
     ///
-    /// `DoublePlantBlock.placeAt`: check the block above, then place `half=lower` / `half=upper`.
-    /// The three exported double plants have only a `half` property (no `waterlogged`), so
-    /// `copyWaterloggedFrom` is a no-op here.
+    /// `DoublePlantBlock.placeAt`: check the block above, then place `half=lower` /
+    /// `half=upper`. Each half runs `copyWaterloggedFrom`: a state carrying
+    /// `waterlogged` is set from whether that cell holds water (`small_dripleaf` does),
+    /// while `tall_grass` / `sunflower` / `large_fern` have no such property and skip it.
     fn place_at(&self, world: &mut FeatureWorld<'_>, pos: Pos, state: u32) -> bool {
         let (x, y, z) = pos;
         let above = world.get_block(x, y + 1, z);
@@ -108,16 +110,54 @@ impl SimpleBlockFeature {
         }
         let lower = with_property(state, "half", "lower").unwrap_or(state);
         let upper = with_property(state, "half", "upper").unwrap_or(state);
+        let lower = copy_waterlogged_from(world, (x, y, z), lower);
+        let upper = copy_waterlogged_from(world, (x, y + 1, z), upper);
         world.set_block_with_heightmaps(x, y, z, lower);
         world.set_block_with_heightmaps(x, y + 1, z, upper);
         true
     }
 }
 
+/// `DoublePlantBlock.copyWaterloggedFrom(level, pos, state)`：状态有 `waterlogged`
+/// 属性时，按该格 `getFluidState(pos).is(FluidTags.WATER)` 设置它。
+///
+/// `DoublePlantBlock.copyWaterloggedFrom(level, pos, state)`: when the state carries a
+/// `waterlogged` property, set it from `getFluidState(pos).is(FluidTags.WATER)`.
+fn copy_waterlogged_from(world: &FeatureWorld<'_>, pos: Pos, state: u32) -> u32 {
+    let water = in_water_tag(world.get_block(pos.0, pos.1, pos.2));
+    if water {
+        with_property(state, "waterlogged", "true").unwrap_or(state)
+    } else {
+        with_property(state, "waterlogged", "false").unwrap_or(state)
+    }
+}
+
+/// `FluidState.is(FluidTags.WATER)`。
+///
+/// `FluidState.is(FluidTags.WATER)`.
+fn in_water_tag(state: u32) -> bool {
+    let fluid = state_fluid(state).fluid;
+    mc_bamboo_data::tags::TAG_GROUPS[mc_bamboo_data::tags::fluid_tags::GROUP]
+        .tags
+        .iter()
+        .find(|entry| entry.name == "minecraft:water")
+        .is_some_and(|entry| entry.ids.contains(&fluid))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 从导出的 `worldgen.json` 取 `block_state_provider` 注册表，供 holder 字符串解析。
+    ///
+    /// The `block_state_provider` registry from the exported `worldgen.json`, so holder
+    /// strings resolve the same way the real dispatch does.
+    fn parse_with_registry(config: &Value) -> Option<SimpleBlockFeature> {
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        let providers = &root["block_state_provider"];
+        SimpleBlockFeature::parse(config, &|name| providers.get(name))
+    }
 
     #[test]
     fn parses_inline_bare_state_and_gates_unported_forms() {
@@ -131,11 +171,26 @@ mod tests {
             "type": "minecraft:simple_block",
         });
         assert!(SimpleBlockFeature::parse(&weighted, &|_| None).is_some());
-        // holder 字符串引用未导出的注册表，也不支持。
-        // A holder string references an unexported registry; unsupported.
+        // holder 字符串通过 `lookup` 查 `block_state_provider` 注册表，现在支持。
+        // Holder strings resolve through `lookup` against the registry; supported now.
         let holder: Value =
             json!({"to_place": "minecraft:flower_plain", "type": "minecraft:simple_block"});
-        assert!(SimpleBlockFeature::parse(&holder, &|_| None).is_none());
+        assert!(parse_with_registry(&holder).is_some());
+        // rule_based provider 的 soil_beneath_tree 现在支持。
+        // The rule_based soil_beneath_tree provider is supported.
+        let supported: Value =
+            json!({"to_place": "minecraft:soil_beneath_tree", "type": "minecraft:simple_block"});
+        assert!(parse_with_registry(&supported).is_some());
+        // rotated provider 现在也移植了（珊瑚链依赖它）。
+        // The rotated provider is ported now (the coral chain needs it).
+        let rotated: Value = json!({
+            "to_place": {
+                "type": "minecraft:rotated",
+                "state": {"id": "minecraft:basalt", "properties": {"axis": "y"}},
+            },
+            "type": "minecraft:simple_block",
+        });
+        assert!(SimpleBlockFeature::parse(&rotated, &|_| None).is_some());
     }
 
     #[test]
@@ -150,5 +205,47 @@ mod tests {
         // to the override tag below, so it is supported now.
         let mushroom: Value = json!({"to_place": {"id": "minecraft:brown_mushroom"}});
         assert!(SimpleBlockFeature::parse(&mushroom, &|_| None).is_some());
+    }
+
+    #[test]
+    fn parses_rule_based_holder_and_rejects_unported_predicates() {
+        // soil_beneath_tree 是 rule_based provider，谓词全部已移植。
+        // soil_beneath_tree is a rule_based provider whose predicate is ported.
+        let soil: Value =
+            json!({"to_place": "minecraft:soil_beneath_tree", "type": "minecraft:simple_block"});
+        assert!(parse_with_registry(&soil).is_some());
+        // rule_based provider 里的 podzol 现在也能解析（它的方块类是 SnowyBlock，默认存活）。
+        // The rule_based podzol provider now parses too (SnowyBlock, default survival).
+        let podzol: Value =
+            json!({"to_place": "minecraft:podzol_beneath_tree", "type": "minecraft:simple_block"});
+        assert!(parse_with_registry(&podzol).is_some());
+    }
+
+    #[test]
+    fn parses_water_plant_holders() {
+        // 睡莲、海泡菜、孢子花、海草的存活判定已移植，这些配置现在能解析。
+        // Lily pad, sea pickle, spore blossom and seagrass survival checks are ported, so
+        // these configs parse.
+        let lily: Value = json!({"to_place": {"id": "minecraft:lily_pad"}});
+        assert!(SimpleBlockFeature::parse(&lily, &|_| None).is_some());
+        // 海泡菜用内联 randomized_int provider（pickles 1..4）。
+        // Sea pickles use an inline randomized_int provider (pickles 1..4).
+        let pickle: Value = json!({
+            "to_place": {
+                "property": "pickles",
+                "source": {"id": "minecraft:sea_pickle", "properties": {"pickles": "1", "waterlogged": "true"}},
+                "type": "minecraft:randomized_int",
+                "values": {"min_inclusive": 1, "max_inclusive": 4, "type": "minecraft:uniform"},
+            },
+        });
+        assert!(SimpleBlockFeature::parse(&pickle, &|_| None).is_some());
+        let blossom: Value = json!({"to_place": {"id": "minecraft:spore_blossom"}});
+        assert!(SimpleBlockFeature::parse(&blossom, &|_| None).is_some());
+        let seagrass: Value = json!({"to_place": {"id": "minecraft:seagrass"}});
+        assert!(SimpleBlockFeature::parse(&seagrass, &|_| None).is_some());
+        let tall: Value = json!({
+            "to_place": {"id": "minecraft:tall_seagrass", "properties": {"half": "lower"}},
+        });
+        assert!(SimpleBlockFeature::parse(&tall, &|_| None).is_some());
     }
 }

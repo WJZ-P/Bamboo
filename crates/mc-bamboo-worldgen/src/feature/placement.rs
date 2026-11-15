@@ -48,10 +48,10 @@ pub enum Modifier {
         noise_factor: f64,
         noise_offset: f64,
     },
-    /// `NoiseThresholdCountPlacement`：静态噪声低于阈值取 `below_noise`，否则 `above_noise`。
+    /// `NoiseThresholdCountPlacement`：噪声低于阈值取 `below_noise`，否则取 `above_noise`。
     ///
-    /// `NoiseThresholdCountPlacement`: pick `below_noise` or `above_noise` depending on
-    /// the static noise against a threshold.
+    /// `NoiseThresholdCountPlacement`: the static noise picks `below_noise` under the
+    /// threshold and `above_noise` otherwise.
     NoiseThresholdCount {
         noise_level: f64,
         below_noise: i32,
@@ -100,8 +100,9 @@ pub enum Modifier {
     /// `RandomlySelectedPlacement`: pick one with `Util.getRandom(placements, random)` and
     /// recurse into its `modify` (consumes one `nextInt(len)`).
     RandomlySelected(Vec<Modifier>),
-    /// 已解析但本轮不生效的修饰器（例如 `noise_threshold_count`）。
-    /// 命中时置 `unsupported`，让对拍跳过这个区块。
+    /// 已解析但尚未移植的修饰器；命中时置 `unsupported`，让对拍跳过这个区块。
+    ///
+    /// A parsed modifier that is still unported; hitting one marks the chunk unsupported.
     Unsupported(String),
 }
 
@@ -183,9 +184,12 @@ impl Modifier {
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0),
             },
-            // `NoiseThresholdCountPlacement`：三个字段都必填，和官方 `MapCodec` 一致。
-            // `NoiseThresholdCountPlacement`: all three fields are required, as in the
-            // official `MapCodec`.
+            // `NoiseThresholdCountPlacement`：三个字段都必填，和官方 `MapCodec` 一致；
+            // `BIOME_INFO_NOISE` 固定除以 200，和 `noise_based_count` 的 `noise_factor`
+            // 不是同一个来源。
+            // `NoiseThresholdCountPlacement`: all three fields are required as in the
+            // official `MapCodec`; the noise is always sampled at `x/200, z/200`, unrelated
+            // to `noise_based_count`'s `noise_factor`.
             "minecraft:noise_threshold_count" => Self::NoiseThresholdCount {
                 noise_level: field("noise_level")?
                     .as_f64()
@@ -199,7 +203,8 @@ impl Modifier {
                     .ok_or("noise_threshold_count has no above_noise")?
                     as i32,
             },
-            // `EnvironmentScanPlacement`：`direction_of_search` 只允许 up / down；            // `allowed_search_condition` 缺省是 `BlockPredicate.alwaysTrue()`。
+            // `EnvironmentScanPlacement`：`direction_of_search` 只允许 up / down；
+            // `allowed_search_condition` 缺省是 `BlockPredicate.alwaysTrue()`。
             // `EnvironmentScanPlacement`: the search direction is up or down only;
             // `allowed_search_condition` defaults to `BlockPredicate.alwaysTrue()`.
             "minecraft:environment_scan" => {
@@ -420,17 +425,23 @@ fn modify(
                 out.push(pos);
             }
         }
-        // `NoiseThresholdCountPlacement.count`：`BIOME_INFO_NOISE.get(x/200, z/200)` 低于
-        // `noise_level` 取 `below_noise`，否则 `above_noise`；不消费随机数。
-        // `NoiseThresholdCountPlacement.count`: compare the static noise at `x/200, z/200`
-        // against `noise_level` and pick `below_noise` / `above_noise`; no random consumed.
+        // `NoiseThresholdCountPlacement.count`：`BIOME_INFO_NOISE.get(x/200, z/200)`，
+        // 小于阈值取 `below_noise`，否则取 `above_noise`；不消费随机数。
+        // `NoiseThresholdCountPlacement.count`: the static noise at `(x/200, z/200)`
+        // selects `below_noise` or `above_noise`; no random consumed.
         Modifier::NoiseThresholdCount {
             noise_level,
             below_noise,
             above_noise,
         } => {
-            let noise =
-                crate::biome_temperature::biome_info_noise(x as f64 / 200.0, z as f64 / 200.0);
+            let noise = crate::biome_temperature::biome_info_noise(
+                f64::from(x) / 200.0,
+                f64::from(z) / 200.0,
+            );
+            // 官方的 `noiseLevel` 是 JSON 的 double，噪声本身是 float；比较时按 f64 提升，
+            // 和官方 `double < double` 的语义一致。
+            // The config `noise_level` is a JSON double while the noise is a float; the
+            // comparison widens to f64, matching the official `double < double`.
             let count = if f64::from(noise) < *noise_level {
                 *below_noise
             } else {
@@ -900,6 +911,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn noise_threshold_count_is_supported() {
+        let value: Value = serde_json::from_str(
+            r#"{"type":"minecraft:noise_threshold_count","noise_level":-0.8,"below_noise":0,"above_noise":7}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            Modifier::parse(&value).unwrap(),
+            Modifier::NoiseThresholdCount {
+                noise_level,
+                below_noise: 0,
+                above_noise: 7,
+            } if (noise_level + 0.8).abs() < 1e-9
+        ));
+        assert!(Modifier::parse(&value).unwrap().is_supported());
+        // 每个 step 9 里带它的 placed feature 都必须整条解析通过。
+        // Every step-9 placed feature carrying it must parse cleanly.
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        let mut seen = 0;
+        for placed in root["placed_feature"].as_object().unwrap().values() {
+            let Some(entries) = placed["placement"].as_array() else {
+                continue;
+            };
+            for entry in entries {
+                if entry["type"] == "minecraft:noise_threshold_count" {
+                    assert!(Modifier::parse(entry).unwrap().is_supported());
+                    seen += 1;
+                }
+            }
+        }
+        assert!(
+            seen > 0,
+            "no noise_threshold_count in the exported registry"
+        );
     }
 
     #[test]

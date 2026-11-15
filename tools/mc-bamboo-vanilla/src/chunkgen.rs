@@ -210,6 +210,16 @@ impl Options {
                     let value = args.next().ok_or(USAGE)?;
                     options.show = Some(value.parse().map_err(|_| USAGE)?);
                 }
+                // `--settings` 只转发给 Java 侧；Rust 侧靠 header 里的 settings / preset
+                // 反查自己的 `Settings`，不需要提前知道。
+                // `--settings` is forwarded only; Rust looks its own `Settings` up from the
+                // settings / preset fields in the header.
+                "--settings" => {
+                    let value = args.next().ok_or(USAGE)?;
+                    options
+                        .forwarded
+                        .extend(["--settings".to_owned(), (*value).to_owned()]);
+                }
                 // 精确复现单个区块 / 大范围地形扫描 / 以该区块为中心的连续网格，
                 // 都只转发给 Java 侧来出坐标，组合语义也在 Java 侧解释。
                 // Exact single-chunk reproduction / wide terrain scan / contiguous grid
@@ -242,6 +252,20 @@ impl Options {
 struct Report<'a> {
     worldgen: &'a Worldgen,
     generators: HashMap<i64, Generator<'a>>,
+    /// header 里的 `settings`：`Generator::with_settings` 用它选 `NoiseGeneratorSettings`。
+    ///
+    /// The `settings` from the header, used by `Generator::with_settings`.
+    settings: String,
+    /// header 里的 `preset`：`minecraft:overworld` 或 `minecraft:nether`。
+    ///
+    /// The `preset` from the header: `minecraft:overworld` or `minecraft:nether`.
+    preset: String,
+    /// header 里的 `minY` / `height`：features 的 9 宫格和高度图要按维度取。
+    ///
+    /// `minY` / `height` from the header; the feature 3x3 grid and heightmaps follow the
+    /// dimension.
+    min_y: i32,
+    height: i32,
     biomes: u64,
     blocks: Vec<u64>,
     features_blocks: u64,
@@ -277,6 +301,10 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
     let mut report = Report {
         worldgen: &worldgen,
         generators: HashMap::new(),
+        settings: "minecraft:overworld".to_owned(),
+        preset: "minecraft:overworld".to_owned(),
+        min_y: -64,
+        height: 384,
         biomes: 0,
         blocks: vec![0; Stage::Carvers as usize + 1],
         features_blocks: 0,
@@ -354,19 +382,31 @@ impl Report<'_> {
                             version::PROTOCOL_VERSION
                         ));
                     }
-                    if settings != "minecraft:overworld" || preset != "minecraft:overworld" {
-                        return Err(format!("unexpected settings {settings} / {preset}"));
+                    // 只接受导出的两个群系预设；`minecraft:nether` 用下界的
+                    // multi_noise 预设，其余主世界变体共用 overworld。
+                    // Only the two exported biome presets are accepted; `minecraft:nether`
+                    // uses the nether multi_noise preset, the overworld variants share
+                    // overworld.
+                    if preset != "minecraft:overworld" && preset != "minecraft:nether" {
+                        return Err(format!("unexpected preset {preset}"));
                     }
                     let ours = self
                         .worldgen
                         .settings(&settings)
-                        .ok_or("missing overworld settings")?;
+                        .ok_or_else(|| format!("missing settings {settings}"))?;
                     if ours.min_y != min_y || ours.height != height || ours.sea_level != sea_level {
                         return Err(format!(
                             "settings differ: official {min_y}/{height}/{sea_level}, bamboo {}/{}/{}",
                             ours.min_y, ours.height, ours.sea_level
                         ));
                     }
+                    // 后续区块的 `Generator` 要跟着 header 走，不能写死主世界。
+                    // Later chunks build their `Generator` from the header, not from a
+                    // hardcoded overworld.
+                    self.settings = settings.clone();
+                    self.preset = preset.clone();
+                    self.min_y = min_y;
+                    self.height = height;
                 }
                 Line::Biomes {
                     seed,
@@ -413,7 +453,8 @@ impl Report<'_> {
 
     fn generator(&mut self, seed: i64) -> Result<&Generator<'_>, String> {
         if !self.generators.contains_key(&seed) {
-            let generator = Generator::new(self.worldgen, seed)?;
+            let generator =
+                Generator::with_settings(self.worldgen, &self.settings, &self.preset, seed)?;
             self.generators.insert(seed, generator);
         }
         Ok(self.generators.get(&seed).expect("刚插进去"))
@@ -538,9 +579,12 @@ impl Report<'_> {
             let bamboo = *layer;
             self.blocks[stage as usize] += 1;
             if official != bamboo {
+                // y 只是报错文案用的，必须跟着维度的 min_y 走，不能写死主世界的 -64。
+                // The y is only for the message and must follow the dimension's min_y
+                // instead of the hardcoded overworld -64.
                 self.mismatch(format!(
                     "{label} seed {seed} chunk ({x},{z}) y {} x {} z {}: official {} ({}), bamboo {}",
-                    index as i32 / 256 - 64,
+                    index as i32 / 256 + self.min_y,
                     (index % 256) / 16,
                     index % 16,
                     palette[id],
@@ -589,7 +633,7 @@ impl Report<'_> {
                 ));
                 return;
             }
-            if chunk.blocks.len() != 384 * 256 {
+            if chunk.blocks.len() != self.height as usize * 256 {
                 self.mismatch(format!(
                     "features seed {seed} chunk ({x},{z}) ({dx},{dz}): {} blocks vs {}",
                     chunk.blocks.len(),
@@ -626,6 +670,8 @@ impl Report<'_> {
         // 先把过滤清单拷出来，避免和 `self.generator` 的可变借用冲突。
         // Copy the filter out first to avoid clashing with the `self.generator` borrow.
         let allowed = self.feature_types.clone();
+        let min_y = self.min_y;
+        let height = self.height;
         let generator = match self.generator(seed) {
             Ok(generator) => generator,
             Err(error) => {
@@ -662,7 +708,7 @@ impl Report<'_> {
                             return;
                         }
                     };
-                heights.push(prime_heightmaps(&layers, -64, 384));
+                heights.push(prime_heightmaps(&layers, min_y, height));
                 blocks.push(layers);
                 biomes.push(region.center().sections().to_vec());
             }
@@ -670,8 +716,8 @@ impl Report<'_> {
         let input = FeatureChunks {
             center_x: x,
             center_z: z,
-            min_y: -64,
-            height: 384,
+            min_y,
+            height,
             blocks: blocks.try_into().expect("9 chunks"),
             biomes: biomes.try_into().expect("9 chunks"),
             heights: heights.try_into().expect("9 chunks"),
@@ -700,7 +746,7 @@ impl Report<'_> {
                 if want != have {
                     self.mismatch(format!(
                         "features seed {seed} chunk ({x},{z}) ({dx},{dz}) y {} x {} z {}: official {want}, bamboo {have}",
-                        position as i32 / 256 - 64,
+                        position as i32 / 256 + self.min_y,
                         (position % 256) / 16,
                         position % 16
                     ));

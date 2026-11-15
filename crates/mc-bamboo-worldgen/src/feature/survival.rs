@@ -45,6 +45,25 @@ enum Kind {
     ///
     /// `HangingRootsBlock.canSurvive`: the block above is `isFaceSturdy(FULL, DOWN)`.
     SturdyFaceDown,
+    /// `SmallDripleafBlock.canSurvive`：上半格看下半格是不是自己；下半格看
+    /// `supports_small_dripleaf`，或「上面是水源且下面在 `supports_vegetation` 里」。
+    ///
+    /// `SmallDripleafBlock.canSurvive`: the upper half needs its own lower half below;
+    /// the lower half needs `supports_small_dripleaf`, or a water source above plus a
+    /// `supports_vegetation` block below.
+    SmallDripleaf,
+    /// `BigDripleafBlock.canSurvive`：下面是自己、`big_dripleaf_stem` 或
+    /// `supports_big_dripleaf`。
+    ///
+    /// `BigDripleafBlock.canSurvive`: below is itself, `big_dripleaf_stem`, or a
+    /// `supports_big_dripleaf` block.
+    BigDripleaf,
+    /// `BigDripleafStemBlock.canSurvive`：下面是自己或 `supports_big_dripleaf`，
+    /// 且上面是自己或 `big_dripleaf`。
+    ///
+    /// `BigDripleafStemBlock.canSurvive`: below is itself or `supports_big_dripleaf`,
+    /// and above is itself or `big_dripleaf`.
+    BigDripleafStem,
     /// `CactusBlock.canSurvive`：四周、下面、上面三处判定。
     Cactus,
     /// `SugarCaneBlock.canSurvive`：下面和相邻流体判定。
@@ -69,14 +88,6 @@ enum Kind {
     ///
     /// Pale moss carpet: the block below is not air (`BASE`), or the same block with `BASE`.
     MossyCarpet,
-    /// `SmallDripleafBlock.mayPlaceOn`：下面在 `supports_small_dripleaf` 里，或本格流体
-    /// 是水源且下面在 `supports_vegetation` 里（下半格）。上半格走 `DoublePlantBlock`。
-    SmallDripleaf,
-    /// `BigDripleafBlock.canSurvive`：下面同类、大垂滴叶茎，或 `supports_big_dripleaf`。
-    BigDripleaf,
-    /// `BigDripleafStemBlock.canSurvive`：下面同类或 `supports_big_dripleaf`，
-    /// **并且**上面同类或 `big_dripleaf`。
-    BigDripleafStem,
     /// 悬挂的红树胎生苗：上面那格在 `supports_hanging_mangrove_propagule` 标签里。
     ///
     /// A hanging mangrove propagule: the block above is in the
@@ -116,6 +127,9 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
             let above = world.get_block(pos.0, pos.1 + 1, pos.2);
             state_facts(above) & (1u64 << facts::STURDY_FULL) != 0
         }
+        Some(Kind::SmallDripleaf) => small_dripleaf_can_survive(state, world, pos),
+        Some(Kind::BigDripleaf) => big_dripleaf_can_survive(world, pos),
+        Some(Kind::BigDripleafStem) => big_dripleaf_stem_can_survive(world, pos),
         Some(Kind::Cactus) => cactus_can_survive(world, pos),
         Some(Kind::SugarCane) => sugar_cane_can_survive(world, pos),
         Some(Kind::Seagrass) => seagrass_can_survive(world, pos),
@@ -127,9 +141,6 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         // `CarpetBlock.canSurvive` is `!level.isEmptyBlock(pos.below())`.
         Some(Kind::Carpet) => !is_air_block(below),
         Some(Kind::Mushroom) => mushroom_can_survive(world, pos),
-        Some(Kind::SmallDripleaf) => small_dripleaf_can_survive(state, world, pos),
-        Some(Kind::BigDripleaf) => big_dripleaf_can_survive(world, pos),
-        Some(Kind::BigDripleafStem) => big_dripleaf_stem_can_survive(world, pos),
         // `MossyCarpetBlock.canSurvive`：`BASE` 时下面非空气；否则下面同类且 `BASE`。
         // `MossyCarpetBlock.canSurvive`: with `BASE` the block below is not air; otherwise
         // the block below is the same block carrying `BASE`.
@@ -207,6 +218,60 @@ fn in_fluid_tag(state: u32, tag: &str) -> bool {
         .iter()
         .find(|entry| entry.name == tag)
         .is_some_and(|entry| entry.ids.contains(&fluid))
+}
+
+/// `SmallDripleafBlock.canSurvive`。上半格走 `DoublePlantBlock`：下面必须是自己且
+/// `half=lower`；下半格走 `mayPlaceOn`：下面在 `supports_small_dripleaf` 里，或
+/// 「上面那格是水源且下面在 `supports_vegetation` 里」。
+///
+/// `SmallDripleafBlock.canSurvive`. The upper half follows `DoublePlantBlock` (its own
+/// lower half must be below); the lower half follows `mayPlaceOn`:
+/// `supports_small_dripleaf`, or a water source above plus a `supports_vegetation`
+/// block below.
+fn small_dripleaf_can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    if super::tree::property_value(state, "half") == Some("upper") {
+        let same_block = block_id_of_state(below) == block_id_of_state(state);
+        let lower = super::tree::property_value(below, "half") == Some("lower");
+        return same_block && lower;
+    }
+    if in_block_tag(below, "minecraft:supports_small_dripleaf") {
+        return true;
+    }
+    // `level.getFluidState(pos.above()).isSourceOfType(Fluids.WATER) && super.mayPlaceOn(...)`。
+    // `level.getFluidState(pos.above()).isSourceOfType(Fluids.WATER) && super.mayPlaceOn(...)`.
+    let above = world.get_block(pos.0, pos.1 + 1, pos.2);
+    let fluid = state_fluid(above);
+    fluid.fluid == registries::fluid::WATER
+        && fluid.source
+        && in_block_tag(below, "minecraft:supports_vegetation")
+}
+
+/// `BigDripleafBlock.canSurvive`：下面是自己、`big_dripleaf_stem`，或在
+/// `supports_big_dripleaf` 标签里。
+///
+/// `BigDripleafBlock.canSurvive`: below is itself, `big_dripleaf_stem`, or a block from
+/// the `supports_big_dripleaf` tag.
+fn big_dripleaf_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    is_block(below, "minecraft:big_dripleaf")
+        || is_block(below, "minecraft:big_dripleaf_stem")
+        || in_block_tag(below, "minecraft:supports_big_dripleaf")
+}
+
+/// `BigDripleafStemBlock.canSurvive`：下面是自己或 `supports_big_dripleaf`，
+/// 且上面是自己或 `big_dripleaf`。
+///
+/// `BigDripleafStemBlock.canSurvive`: below is itself or `supports_big_dripleaf`, and
+/// above is itself or `big_dripleaf`.
+fn big_dripleaf_stem_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+    let above = world.get_block(pos.0, pos.1 + 1, pos.2);
+    let below_ok = is_block(below, "minecraft:big_dripleaf_stem")
+        || in_block_tag(below, "minecraft:supports_big_dripleaf");
+    let above_ok =
+        is_block(above, "minecraft:big_dripleaf_stem") || is_block(above, "minecraft:big_dripleaf");
+    below_ok && above_ok
 }
 
 /// `CactusBlock.canSurvive`：水平相邻不能有实心方块或岩浆；下面得是仙人掌本身或
@@ -376,57 +441,6 @@ fn is_base_mossy_carpet(state: u32) -> bool {
     with_property(state, "bottom", "true") == Some(state)
 }
 
-/// `SmallDripleafBlock.canSurvive`：上半格走 `DoublePlantBlock`（下面是同类下半格）；
-/// 下半格走 `mayPlaceOn` —— 下面在 `supports_small_dripleaf` 里，或者本格上方是水源
-/// 且下面在 `supports_vegetation` 里。
-///
-/// `SmallDripleafBlock.canSurvive`: the upper half uses `DoublePlantBlock` (the matching
-/// lower half below); the lower half uses `mayPlaceOn` — the block below is in
-/// `supports_small_dripleaf`, or the fluid above this cell is a water source and the block
-/// below is in `supports_vegetation`.
-fn small_dripleaf_can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
-    if with_property(state, "half", "upper").is_some_and(|upper| upper == state) {
-        let below = world.get_block(pos.0, pos.1 - 1, pos.2);
-        return is_block(below, "minecraft:small_dripleaf")
-            && with_property(below, "half", "lower").is_some_and(|lower| lower == below);
-    }
-    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
-    if in_block_tag(below, "minecraft:supports_small_dripleaf") {
-        return true;
-    }
-    let above_fluid = state_fluid(world.get_block(pos.0, pos.1 + 1, pos.2));
-    above_fluid.source
-        && registries::fluid::WATER == above_fluid.fluid
-        && in_block_tag(below, "minecraft:supports_vegetation")
-}
-
-/// `BigDripleafBlock.canSurvive`：下面同类、`big_dripleaf_stem`，或
-/// `supports_big_dripleaf`。
-///
-/// `BigDripleafBlock.canSurvive`: the block below is the same block, a `big_dripleaf_stem`,
-/// or in `supports_big_dripleaf`.
-fn big_dripleaf_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
-    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
-    is_block(below, "minecraft:big_dripleaf")
-        || is_block(below, "minecraft:big_dripleaf_stem")
-        || in_block_tag(below, "minecraft:supports_big_dripleaf")
-}
-
-/// `BigDripleafStemBlock.canSurvive`：下面同类或 `supports_big_dripleaf`，
-/// **并且**上面同类或 `big_dripleaf`。
-///
-/// `BigDripleafStemBlock.canSurvive`: the block below is the same block or in
-/// `supports_big_dripleaf`, **and** the block above is the same block or `big_dripleaf`.
-fn big_dripleaf_stem_can_survive(world: &FeatureWorld<'_>, pos: Pos) -> bool {
-    let below = world.get_block(pos.0, pos.1 - 1, pos.2);
-    let above = world.get_block(pos.0, pos.1 + 1, pos.2);
-    let below_ok = is_block(below, "minecraft:big_dripleaf_stem")
-        || in_block_tag(below, "minecraft:supports_big_dripleaf");
-    let above_ok =
-        is_block(above, "minecraft:big_dripleaf_stem") || is_block(above, "minecraft:big_dripleaf");
-    below_ok && above_ok
-}
-
 /// 是否走 `DoublePlantBlock.placeAt`（放上下两格）而不是单格 `setBlock`。
 /// `TallSeagrassBlock` 也继承 `DoublePlantBlock`，官方用的是 `instanceof`。
 ///
@@ -464,7 +478,13 @@ fn classify(state: u32) -> Option<Kind> {
         | BlockClass::CalibratedSculkSensorBlock
         // `RootedDirtBlock` 只实现 `BonemealableBlock`，不覆写 `canSurvive`。
         // `RootedDirtBlock` only implements `BonemealableBlock` and keeps the default.
-        | BlockClass::RootedDirtBlock => Kind::Default,
+        | BlockClass::RootedDirtBlock
+        // `SnowyBlock` / `RotatedPillarBlock` 也直接继承 Block，`canSurvive` 是默认 true。
+        // `podzol` 走 rule_based provider、珊瑚链的 `basalt` 走 rotated provider，两处都靠它。
+        // `SnowyBlock` and `RotatedPillarBlock` extend Block directly and keep the default;
+        // the rule_based podzol provider and the rotated basalt provider both rely on it.
+        | BlockClass::SnowyBlock
+        | BlockClass::RotatedPillarBlock => Kind::Default,
         // 珊瑚块继承 `Block`，`canSurvive` 恒 true。
         // Coral blocks extend `Block`, so `canSurvive` is always true.
         BlockClass::CoralBlock => Kind::Default,
@@ -496,6 +516,19 @@ fn classify(state: u32) -> Option<Kind> {
         BlockClass::DryVegetationBlock
         | BlockClass::ShortDryGrassBlock
         | BlockClass::TallDryGrassBlock => Kind::Vegetation("minecraft:supports_dry_vegetation"),
+        // `AzaleaBlock` 覆写 `mayPlaceOn` 为 `supports_azalea` 标签，形状同 VegetationBlock。
+        // `moss_vegetation` 的 weighted provider 里有 `azalea` / `flowering_azalea`，
+        // `lush_caves_vegetation` 整条链要靠它才能接入对拍。
+        //
+        // `AzaleaBlock` overrides `mayPlaceOn` with the `supports_azalea` tag, the same
+        // shape as VegetationBlock. The `moss_vegetation` weighted provider contains
+        // `azalea` / `flowering_azalea`, so `lush_caves_vegetation` needs it to run at all.
+        BlockClass::AzaleaBlock => Kind::Vegetation("minecraft:supports_azalea"),
+        // 三种垂滴叶的 `canSurvive` 各自覆写，见对应函数。
+        // The three dripleaf classes override `canSurvive`; see the helpers below.
+        BlockClass::SmallDripleafBlock => Kind::SmallDripleaf,
+        BlockClass::BigDripleafBlock => Kind::BigDripleaf,
+        BlockClass::BigDripleafStemBlock => Kind::BigDripleafStem,
         // LeafLitterBlock 覆写 canSurvive 为 isFaceSturdy(UP)。
         // LeafLitterBlock overrides canSurvive with isFaceSturdy(UP).
         BlockClass::LeafLitterBlock => Kind::SturdyFaceUp,
@@ -531,13 +564,7 @@ fn classify(state: u32) -> Option<Kind> {
         BlockClass::SporeBlossomBlock => Kind::SporeBlossom,
         BlockClass::CarpetBlock => Kind::Carpet,
         BlockClass::MushroomBlock => Kind::Mushroom,
-        // `AzaleaBlock` 继承 `VegetationBlock` 但把 `mayPlaceOn` 换成 `supports_azalea`。
-        // `AzaleaBlock` extends `VegetationBlock` but swaps `mayPlaceOn` for `supports_azalea`.
-        BlockClass::AzaleaBlock => Kind::Vegetation("minecraft:supports_azalea"),
         BlockClass::MossyCarpetBlock => Kind::MossyCarpet,
-        BlockClass::SmallDripleafBlock => Kind::SmallDripleaf,
-        BlockClass::BigDripleafBlock => Kind::BigDripleaf,
-        BlockClass::BigDripleafStemBlock => Kind::BigDripleafStem,
         // 苔藓地毯等仍覆写了 canSurvive/mayPlaceOn，本轮明确不支持。
         // Mossy carpet still overrides canSurvive/mayPlaceOn: unported.
         _ => return None,
@@ -666,5 +693,23 @@ mod tests {
         // `tall_seagrass` 同样继承 `DoublePlantBlock`。
         // `tall_seagrass` extends `DoublePlantBlock` as well.
         assert!(is_double_plant(state("minecraft:tall_seagrass")));
+    }
+
+    #[test]
+    fn dripleaf_classes_have_survival_checks() {
+        // 三种垂滴叶以前都落在 `_ => None`，于是 `clay_pool_with_dripleaves` 的
+        // `vegetation_feature`（`dripleaf`）整条解析不出来，`lush_caves_clay` 被跳过。
+        //
+        // The three dripleaf classes used to fall into `_ => None`, which made the
+        // `dripleaf` vegetation feature of `clay_pool_with_dripleaves` unparsable and
+        // skipped `lush_caves_clay`.
+        for name in [
+            "minecraft:small_dripleaf",
+            "minecraft:big_dripleaf",
+            "minecraft:big_dripleaf_stem",
+        ] {
+            let state = state(name);
+            assert!(supports(state), "{name} must have a survival check");
+        }
     }
 }

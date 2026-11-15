@@ -10,6 +10,13 @@
 //! 顺序会变）。`BlockPos` 的哈希对一棵树里聚在一起的坐标几乎不冲突，真遇到时把
 //! [`JavaHashSet::treeified`] 置位，调用方据此把这次放置标成不支持。
 //!
+//! **实测**：完整 step 9（`--seeds 3 --chunks 20 --salt 3`，60 个中心 /
+//! 53084160 方块）里 `treeified` 一次都没被置位，所以当前不是假绿风险。
+//! 但 `treeified` 目前**没有消费者** —— 一旦真的触发，链表顺序会被静默使用。
+//! 要彻底消除这个隐患，可以照 `feature/java_set.rs` 的 `JavaPosSet` 补红黑树
+//! （含 `remove` 的 `deleteTreeNode`），或者把 `TreeFeature::place` 改成能上报
+//! `treeified` 的返回值。
+//!
 //! Reproduces the iteration order of Java's `HashSet<BlockPos>`.
 //!
 //! Official `TreeFeature.place` collects root, trunk, foliage and decoration positions
@@ -25,6 +32,13 @@
 //! `BlockPos` hashes of the clustered positions of one tree almost never collide; if
 //! it does happen [`JavaHashSet::treeified`] is set so the caller can mark the
 //! placement unsupported.
+//!
+//! **Measured**: `treeified` was never set across a full step-9 run (`--seeds 3
+//! --chunks 20 --salt 3`, 60 centres / 53084160 blocks), so there is no false-green
+//! risk today. But nothing reads `treeified` yet, so a real trigger would silently use
+//! the linked-list order. Closing that needs either a red-black tree like
+//! `JavaPosSet` (including `remove`'s `deleteTreeNode`) or a `TreeFeature::place` that
+//! can report it.
 
 use super::Pos;
 
