@@ -285,18 +285,20 @@ impl MultifaceGrowthFeature {
             if !self.can_spread_into(world, spread) {
                 continue;
             }
+            // 官方这里已经选定第一个通过 `canSpreadInto` 的位置，随后只尝试放一次；
+            // 放不下（`getStateForPlacement` 返回 null）就整条方向失败，不再试后面的
+            // `SpreadType`。
+            // The official code commits to the first position passing `canSpreadInto` and
+            // then places once; a null `getStateForPlacement` fails the whole direction
+            // instead of falling through to the next `SpreadType`.
             let existing = world.get_block(spread.pos.0, spread.pos.1, spread.pos.2);
-            if let Some(new_state) =
+            let Some(new_state) =
                 self.state_for_placement(existing, world, spread.pos, spread.face)
-            {
-                world.set_block_with_heightmaps(
-                    spread.pos.0,
-                    spread.pos.1,
-                    spread.pos.2,
-                    new_state,
-                );
-                return true;
-            }
+            else {
+                return false;
+            };
+            world.set_block_with_heightmaps(spread.pos.0, spread.pos.1, spread.pos.2, new_state);
+            return true;
         }
         false
     }
@@ -514,6 +516,33 @@ mod tests {
         assert_eq!(axis("up"), 1);
         assert_eq!(axis("north"), 2);
         assert_eq!(axis("east"), 0);
+    }
+
+    #[test]
+    fn face_presence_matches_the_property_value() {
+        // `hasFace(state, face)` 必须等价于「该面属性是 true」。
+        // `hasFace(state, face)` must equal "the face property is true".
+        use crate::feature::tree::property_value;
+        let block = mc_bamboo_data::block_by_name("minecraft:glow_lichen")
+            .unwrap()
+            .clone();
+        let faces = ["down", "east", "north", "south", "up", "west"];
+        for bits in 0u32..(1 << 6) {
+            let mut state = block.first_state;
+            for (index, face) in faces.iter().enumerate() {
+                let value = if bits & (1 << index) != 0 {
+                    "true"
+                } else {
+                    "false"
+                };
+                state = with_property(state, face, value).unwrap();
+            }
+            for face in faces {
+                let expected = property_value(state, face) == Some("true");
+                let got = with_property(state, face, "true") == Some(state);
+                assert_eq!(expected, got, "state {state} face {face}");
+            }
+        }
     }
 
     #[test]
