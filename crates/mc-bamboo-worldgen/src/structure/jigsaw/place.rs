@@ -195,11 +195,20 @@ pub fn place_processed(
     world: &mut impl BlockWriter,
 ) -> Result<PlacedBlocks, String> {
     let mut placed = PlacedBlocks::default();
+    // `List<BlockPos> toFill` / `lockedFluids`：watering 的两份列表。
+    // The two lists used by vanilla's watering pass.
+    let mut to_fill: Vec<(i32, i32, i32)> = Vec::new();
+    let mut locked_fluids: std::collections::HashSet<(i32, i32, i32)> =
+        std::collections::HashSet::new();
     for block in processed {
         let pos = block.pos;
         if !chunk_bb.contains(pos.0, pos.1, pos.2) {
             continue;
         }
+        // `settings.shouldApplyWaterlogging() ? level.getFluidState(blockPos) : null`。
+        // 必须在写方块之前读。
+        // Read before the block is written.
+        let previous_fluid = world.fluid_at(pos.0, pos.1, pos.2);
         let state = state_id_of(&block.state)?;
         // `BlockState.mirror(...).rotate(...)`，与 `StructureTemplate.placeInWorld` 同序。
         // `BlockState.mirror(...).rotate(...)`, same order as vanilla.
@@ -259,9 +268,92 @@ pub fn place_processed(
                 world.set_block_entity(pos.0, pos.1, pos.2, tag);
             }
             placed.placed.push((pos, nbt));
+
+            // `previousFluidState = settings.shouldApplyWaterlogging()
+            //      ? level.getFluidState(blockPos) : null`——在写方块**之前**取。
+            // 这一步必须在 `set_block` 之前读，否则读到的是新方块的状态。
+            // The previous fluid state is read **before** writing the block; after the write
+            // it would already be the new state.
+            if let Some((is_water, source)) = previous_fluid {
+                if mc_bamboo_data::state_fluid(state_out).source {
+                    // `state.getFluidState().isSource()`：新方块本身是流体源，锁定该位置。
+                    // The new block is itself a fluid source: lock the position.
+                    locked_fluids.insert(pos);
+                } else if is_waterloggable(state_out) && is_water {
+                    // `SimpleWaterloggedBlock.placeLiquid`：`!waterlogged && fluidState.is(WATER)`。
+                    // `is(WATER)` 比较的是**流体类型**，流动水也满足；所以只要该位置原本
+                    // 有流体（源或流动）就会灌。灌完若原流体不是源，加入 `toFill` 等待
+                    // 相邻源扩散。
+                    // `is(WATER)` compares the fluid *type*, so flowing water counts too:
+                    // any fluid at the position triggers it. A non-source fluid joins
+                    // `toFill` so a neighbouring source can spread in.
+                    if let Some(waterlogged) = with_waterlogged(state_out, true) {
+                        world.set_block(pos.0, pos.1, pos.2, waterlogged);
+                        if !source {
+                            to_fill.push(pos);
+                        }
+                    }
+                }
+            }
         }
     }
+    // `while (filled && !toFill.isEmpty())`：反复把「相邻有源流体」的待填充位置灌满。
+    // Repeat until no more positions can be filled from a neighbouring source.
+    let directions = [(0, 1, 0), (0, 0, -1), (1, 0, 0), (0, 0, 1), (-1, 0, 0)];
+    let mut filled = true;
+    while filled && !to_fill.is_empty() {
+        filled = false;
+        let mut remaining = Vec::with_capacity(to_fill.len());
+        for pos in std::mem::take(&mut to_fill) {
+            let mut source = world
+                .fluid_at(pos.0, pos.1, pos.2)
+                .is_some_and(|(is_water, is_source)| is_water && is_source);
+            if !source {
+                for (dx, dy, dz) in directions {
+                    let neighbor = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+                    if locked_fluids.contains(&neighbor) {
+                        continue;
+                    }
+                    if world
+                        .fluid_at(neighbor.0, neighbor.1, neighbor.2)
+                        .is_some_and(|(is_water, is_source)| is_water && is_source)
+                    {
+                        source = true;
+                        break;
+                    }
+                }
+            }
+            if source {
+                let state = world.block_state(pos.0, pos.1, pos.2);
+                if let Some(waterlogged) = with_waterlogged(state, true) {
+                    world.set_block(pos.0, pos.1, pos.2, waterlogged);
+                    filled = true;
+                    continue;
+                }
+            }
+            remaining.push(pos);
+        }
+        to_fill = remaining;
+    }
     Ok(placed)
+}
+
+/// `SimpleWaterloggedBlock`：方块状态里有 `waterlogged` 属性。
+///
+/// `SimpleWaterloggedBlock`: the state has a `waterlogged` property.
+fn is_waterloggable(state: u32) -> bool {
+    crate::structure::state_transform::property_of(state, "waterlogged").is_some()
+}
+
+/// 把 `waterlogged` 设成 `value`；没有该属性时返回 `None`。
+///
+/// Set `waterlogged` to `value`; `None` when the state has no such property.
+fn with_waterlogged(state: u32, value: bool) -> Option<u32> {
+    crate::structure::piece_place::with_property(
+        state,
+        "waterlogged",
+        if value { "true" } else { "false" },
+    )
 }
 
 /// 这个方块是不是 `RandomizableContainer`（官方实现该接口的 8 个方块实体类）。
@@ -328,6 +420,22 @@ pub trait BlockWriter {
     /// that position. The default is a no-op so callers without a block-entity store can
     /// handle the nbt themselves.
     fn set_block_entity(&mut self, _x: i32, _y: i32, _z: i32, _nbt: &mc_bamboo_nbt::Tag) {}
+
+    /// `level.getFluidState(pos)`：返回 `(是否有水, 是否源)`。
+    /// `None` 表示调用方不支持流体模型（整段 watering 跳过）。
+    ///
+    /// `level.getFluidState(pos)` as `(is_water, is_source)`; `None` means the caller has no
+    /// fluid model and the whole watering pass is skipped.
+    fn fluid_at(&self, _x: i32, _y: i32, _z: i32) -> Option<(bool, bool)> {
+        None
+    }
+
+    /// `level.getBlockState(pos)`。
+    ///
+    /// `level.getBlockState(pos)`.
+    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> u32 {
+        0
+    }
 }
 
 impl BlockWriter for crate::feature::world::FeatureWorld<'_> {
@@ -916,6 +1024,122 @@ mod tests {
         // 两次调用的取数次数不同：第一次多取了 1 次，所以同一个 `random` 的后续值不同。
         // The draw counts differ, so the same `random` yields a different next value.
         let _ = random.next_long();
+    }
+
+    /// watering：写方块时如果该位置原来是流体源、且新方块可含水，就把 `waterlogged`
+    /// 置 true；`lockedFluids` 里的位置不会被相邻流体灌。
+    ///
+    /// Watering: a waterloggable block written into a fluid source gets `waterlogged = true`;
+    /// positions in `lockedFluids` are not filled from neighbours.
+    #[test]
+    fn watering_sets_waterlogged_from_the_previous_fluid() {
+        use super::{BlockWriter, PlaceBlock, place_processed};
+        use crate::structure::processor::BlockStateSpec;
+
+        /// 记录写入，且把「某个位置是流体源」写死。
+        ///
+        /// Records writes and pins which positions are fluid sources.
+        #[derive(Default)]
+        struct World {
+            sources: std::collections::HashSet<(i32, i32, i32)>,
+            writes: Vec<((i32, i32, i32), u32)>,
+        }
+        impl BlockWriter for World {
+            fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+                self.writes.push(((x, y, z), state));
+                true
+            }
+            fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<(bool, bool)> {
+                let source = self.sources.contains(&(x, y, z));
+                // 测试里只有源流体，没有流动水。
+                // The test only has source fluid, no flowing water.
+                Some((source, source))
+            }
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> u32 {
+                // 上一次写入的状态（`place_processed` 里 watering 只读刚写的方块）。
+                // The last written state; watering only reads the block just written.
+                self.writes.last().map_or(0, |(_, state)| *state)
+            }
+        }
+
+        let bb = crate::structure::BoundingBox {
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            max_x: 10,
+            max_y: 10,
+            max_z: 10,
+        };
+        // 台阶：默认 `waterlogged=false`，可含水。
+        // A slab: `waterlogged=false` by default and waterloggable.
+        let blocks = vec![PlaceBlock {
+            pos: (2, 3, 4),
+            state: BlockStateSpec::parse_str("minecraft:oak_slab[type=bottom,waterlogged=false]")
+                .unwrap(),
+            nbt: None,
+        }];
+        let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0));
+
+        // 该位置原来是流体源 → 写完方块后 waterlogged 变 true。
+        // The position was a fluid source, so `waterlogged` becomes true.
+        let mut world = World::default();
+        world.sources.insert((2, 3, 4));
+        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        let last = world.writes.last().expect("at least one write");
+        assert_eq!(last.0, (2, 3, 4));
+        assert_eq!(
+            crate::structure::state_transform::property_of(last.1, "waterlogged"),
+            Some("true"),
+            "a waterloggable block in a fluid source is waterlogged"
+        );
+
+        // 不是流体源 → 保持 false，且只写一次。
+        // Not a fluid source: stays false and only one write happens.
+        let mut world = World::default();
+        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        assert_eq!(world.writes.len(), 1, "no extra watering write");
+        assert_eq!(
+            crate::structure::state_transform::property_of(world.writes[0].1, "waterlogged"),
+            Some("false")
+        );
+    }
+
+    /// 调用方不提供流体模型（`fluid_is_source` 返回 `None`）时，watering 整段跳过。
+    ///
+    /// When the caller has no fluid model, the whole watering pass is skipped.
+    #[test]
+    fn watering_is_skipped_without_a_fluid_model() {
+        use super::{BlockWriter, PlaceBlock, place_processed};
+        use crate::structure::processor::BlockStateSpec;
+
+        #[derive(Default)]
+        struct World {
+            writes: usize,
+        }
+        impl BlockWriter for World {
+            fn set_block(&mut self, _x: i32, _y: i32, _z: i32, _state: u32) -> bool {
+                self.writes += 1;
+                true
+            }
+        }
+        let bb = crate::structure::BoundingBox {
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            max_x: 10,
+            max_y: 10,
+            max_z: 10,
+        };
+        let blocks = vec![PlaceBlock {
+            pos: (0, 0, 0),
+            state: BlockStateSpec::parse_str("minecraft:oak_slab[type=bottom,waterlogged=false]")
+                .unwrap(),
+            nbt: None,
+        }];
+        let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0));
+        let mut world = World::default();
+        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        assert_eq!(world.writes, 1, "only the block itself is written");
     }
 
     /// `place_processed` 把 nbt 交给 `set_block_entity`（官方的
