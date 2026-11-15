@@ -806,6 +806,32 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `minecraft:vines` 只在 jungle / bamboo_jungle / sparse_jungle，`count=127`，
   但丛林区块里 `BiomeManager.getBiome` 的三维平滑把候选点判成海洋，`biome` modifier
   全部过滤掉。需要别的队员用游戏内实际丛林地表再验。
+* 珊瑚链路的三个真 bug（第 19–20 轮，`4650642e` + `c1f3d0be`）：
+  1. **`minecraft:rotated` state provider 从未实现** —— 这是 `RotatedBlockProvider`，
+     先把 `direction` 定下来（缺省时 `Direction.getRandom` 消费一次 `nextInt(6)`），
+     再采样内层 provider，最后依次尝试 `axis` / `facing` / `horizontal_facing`
+     （有该属性才改，水平方向才设 `horizontal_facing`）。它是
+     `#minecraft:wall_corals` 那条链唯一缺的 provider。
+  2. **`CoralWallFanBlock` 没有存活判定** —— `BaseCoralWallFanBlock.canSurvive`
+     要读状态的 `facing`，再看它反方向那格在 `facing` 那一面是不是满面；
+     与 `CoralPlantBlock` / `CoralFanBlock`（固定看 UP 面）不同。新增
+     `Kind::CoralWallFan`。
+  3. **`minecraft:random_chance` placement modifier 从未实现** ——
+     `RandomChancePlacement` = `nextFloat() < chance`。珊瑚的
+     `coral/block_decoration` 子项每条都带 `{"chance":0.2,"type":"minecraft:random_chance"}`，
+     缺它整条修饰器链被判 unsupported。
+
+  **效果**：`warm_ocean_vegetation` 从「`0 centers / 9 skipped`、0 比对」变成
+  「`1 centers / 8 skipped`、**50 处不一致**」——链路终于真正跑起来了，
+  但珊瑚方块还没放对（`official 18502/18600` vs `bamboo 89`（水））。
+
+  审计方法值得记下来：前几轮靠 `chunkgen` + 临时日志，每轮要重新编译、机器一忙就卡；
+  本轮改成在 `composition.rs` 里写单元测试 `audits_the_coral_subtree`，
+  直接遍历 `warm_ocean_vegetation` 的整棵子树逐层打印解析结果，**秒级出结果**。
+  注意**只查静态解析会漏掉 `Err` 分支**——`random_chance` 就是
+  `Modifier::parse` 直接返回 `Err`，静态审计里被 `Err` 分支吞掉了，
+  要靠运行时 `eprintln` 才发现。
+
 * `multiface.rs`（`237c78a`、`d21458c`，**已写未验证**）：`MultifaceGrowthFeature`
   （`minecraft:glow_lichen`）。含 `MultifaceSpreader` 的 `SAME_POSITION` /
   `SAME_PLANE` / `WRAP_AROUND` 三种扩散、`getStateForPlacement` 的 waterlogged 处理。
