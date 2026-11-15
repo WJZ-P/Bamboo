@@ -93,10 +93,14 @@ fn write_queries(path: &Path, queries: &[Query]) -> Result<(), String> {
     fs::write(path, text).map_err(|error| format!("cannot write queries file: {error}"))
 }
 
-/// 一个查询的输出：结构件清单（`L` 行）和方块快照（`B` 行）。
+/// 一个查询的输出：结构件清单（`L` 行）、每件写入次数（`P` 行）和方块快照（`B` 行）。
 struct Section {
     key: String,
     pieces: Vec<String>,
+    /// 每个结构件的写入次数，按 `(chunk_x, chunk_z, count)` 记录。
+    ///
+    /// Per-piece write counts, as `(chunk_x, chunk_z, count)`.
+    writes: Vec<(i32, i32, usize)>,
     blocks: Vec<String>,
 }
 
@@ -119,6 +123,7 @@ fn parse_output(stdout: &str) -> Result<Vec<Section>, String> {
                 current = Some(Section {
                     key: fields[1..6].join(" "),
                     pieces: Vec::new(),
+                    writes: Vec::new(),
                     blocks: Vec::new(),
                 });
                 expected_blocks = None;
@@ -126,6 +131,21 @@ fn parse_output(stdout: &str) -> Result<Vec<Section>, String> {
             "L" => match &mut current {
                 Some(section) => section.pieces.push(line[2..].to_owned()),
                 None => return Err(format!("L line before any Q: {line}")),
+            },
+            "P" => match &mut current {
+                Some(section) => {
+                    let x: i32 = fields[1]
+                        .parse()
+                        .map_err(|_| format!("bad chunk x: {line}"))?;
+                    let z: i32 = fields[2]
+                        .parse()
+                        .map_err(|_| format!("bad chunk z: {line}"))?;
+                    let count: usize = fields[3]
+                        .parse()
+                        .map_err(|_| format!("bad write count: {line}"))?;
+                    section.writes.push((x, z, count));
+                }
+                None => return Err(format!("P line before any Q: {line}")),
             },
             "A" => {
                 // 中断计数：命中 1% 矿车箱子、需要真实 ServerLevel 的结构件次数。
@@ -174,6 +194,7 @@ fn check_block_count(section: &Section, expected: Option<usize>) -> Result<(), S
 /// 一个查询对应的 Rust 结果。
 struct RustResult {
     pieces: Vec<String>,
+    writes: Vec<(i32, i32, usize)>,
     blocks: Vec<String>,
 }
 
@@ -184,6 +205,7 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
 
     // 和 Java 侧一样逐区块调：`chunkBB` 是该区块整列盒，`random` 每区块重播。
     // Once per chunk like Java: the chunk's full column box, random reseeded per chunk.
+    let mut writes: Vec<(i32, i32, usize)> = Vec::new();
     for dz in -1..=1 {
         for dx in -1..=1 {
             let at = (q.cx + dx, q.cz + dz);
@@ -195,6 +217,7 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
                 if !pieces::intersects(&piece.bb, &chunk_bb) {
                     continue;
                 }
+                let before = level.written.len();
                 if place_piece(
                     q.kind, piece, i, &layout, &mut level, chunk_bb, center, &random,
                 )?
@@ -203,14 +226,17 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
                     // 命中 1% 矿车箱子：Java 侧同一位置截断，这条结构件在这里结束。
                     // Hit the 1% minecart chest: Java truncates at the same point, ending
                     // this piece here.
+                    writes.push((at.0, at.1, level.written.len() - before));
                     break;
                 }
+                writes.push((at.0, at.1, level.written.len() - before));
             }
         }
     }
 
     Ok(RustResult {
         pieces: layout.iter().map(piece_line).collect(),
+        writes,
         blocks: level.snapshot(),
     })
 }
@@ -700,6 +726,7 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
     let mut rust_only_by_block: std::collections::BTreeMap<String, (usize, String)> =
         std::collections::BTreeMap::new();
     let mut all_diffs: Vec<String> = Vec::new();
+    let mut write_mismatches = 0usize;
 
     for (q, section) in queries.iter().zip(sections.iter()) {
         let key = format!("{} {} {} {} {}", q.kind, q.seed, q.cx, q.cz, q.fill);
@@ -712,6 +739,40 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
         let ours = rust_result(q)?;
         pieces_total += section.pieces.len();
         block_total += section.blocks.len();
+        // 先比每个结构件的写入次数：第一次出现数量不同就说明取数或分支分叉，
+        // 比按方块名猜要精确得多。
+        // Compare per-piece write counts first: the first piece whose count differs marks
+        // where the draws or a branch diverge, which is far more precise than guessing by
+        // block name.
+        let n = section.writes.len().min(ours.writes.len());
+        for i in 0..n {
+            let (jx, jz, jcount) = section.writes[i];
+            let (rx, rz, rcount) = ours.writes[i];
+            if jcount != rcount {
+                write_mismatches += 1;
+                let at = if (jx, jz) == (rx, rz) {
+                    format!("chunk {jx} {jz}")
+                } else {
+                    format!("java chunk {jx} {jz} vs rust chunk {rx} {rz}")
+                };
+                push(
+                    &mut failures,
+                    format!("[{key}] piece #{i} ({at}): java wrote {jcount}, rust wrote {rcount}"),
+                );
+            }
+        }
+        if section.writes.len() != ours.writes.len() {
+            write_mismatches += 1;
+            push(
+                &mut failures,
+                format!(
+                    "[{key}] placed {} pieces in java, {} in rust",
+                    section.writes.len(),
+                    ours.writes.len()
+                ),
+            );
+        }
+
         report_lines(
             &mut failures,
             &mut mismatch_count,
@@ -767,12 +828,13 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
     }
 
     println!(
-        "structure-place: {} queries, {} pieces, {} blocks compared, {} comparisons, {} one-sided positions",
+        "structure-place: {} queries, {} pieces, {} blocks compared, {} comparisons, {} one-sided positions, {} piece write-count differences",
         queries.len(),
         pieces_total,
         block_total,
         comparisons,
-        one_sided
+        one_sided,
+        write_mismatches
     );
     if failures.is_empty() {
         println!("STRUCTURE-PLACE RESULT: 0 mismatches");

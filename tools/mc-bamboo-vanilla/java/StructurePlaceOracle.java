@@ -190,6 +190,7 @@ public final class StructurePlaceOracle {
                         }
                         BlockPos referencePos = new BlockPos(at.getMiddleBlockX(),
                                 piece.getBoundingBox().minY(), at.getMiddleBlockZ());
+                        int beforeWrites = level.writtenSize();
                         try {
                             piece.postProcess(level.proxy(), null, null, random, chunkBB, at,
                                     referencePos);
@@ -214,6 +215,8 @@ public final class StructurePlaceOracle {
                                 random.setLargeFeatureSeed(seed ^ 0x5DEECE66DL, at.x(), at.z());
                             }
                         }
+                        out.append("P ").append(at.x()).append(' ').append(at.z()).append(' ')
+                                .append(level.writtenSize() - beforeWrites).append('\n');
                     }
                 }
             }
@@ -375,6 +378,13 @@ public final class StructurePlaceOracle {
 
         WorldGenLevel proxy() {
             return proxy;
+        }
+
+        /// 到目前为止的写入次数（`P` 行用来对比每个结构件写了多少方块）。
+        ///
+        /// Number of writes so far; the `P` lines compare per-piece write counts.
+        int writtenSize() {
+            return written.size();
         }
 
         /** 只输出「和初始填充不同」的方块，按 x、y、z 排序；同一位置取最后一次写入。 */
