@@ -197,6 +197,32 @@
   `RuleProcessor.processBlock` 的 `Mth.getSeed(pos)` 随机源、`CappedProcessor.finalizeProcessing`
   的限额、`ProtectedBlockProcessor` 的跳过），属放置阶段。
 
+**第七轮（2026-11-14，`cb-wg-jigsaw` 分支：jigsaw 读回 + processor 执行）**：
+
+* `structure::jigsaw::load_piece`：`PoolElementStructurePiece(context, tag)` 的读回。照官方
+  顺序读 `PosX`/`PosY`/`PosZ`（缺省 0）、`ground_level_delta`（缺省 0）、`pool_element`
+  （`StructurePoolElement.CODEC`，读不出就整体失败）、`rotation`（`LEGACY_CODEC`）、
+  `junctions`（缺省空）、`liquid_settings`（缺省 `apply_waterlogging`），并**用元素重算
+  包围盒**（忽略存档 `BB`）。新对拍模式 `jigsaw load`：官方 `createTag` → 官方
+  `StructurePieceType.load`（含 `PiecesContainer.RENAMES`）读回，与 Rust 逐项比，
+  108 查询 / 1216 结构件 0 不一致。故意改坏 `ground_level_delta` 报 1216 处；另发现
+  「用存档 `BB` 代替重算」在这批数据上结果相同（存档 `BB` 本来就等于重算值），所以补了
+  单元测试 `saved_bounding_box_is_ignored_in_favour_of_the_element` 钉住语义。
+* `structure::processor_apply`：`StructureProcessor.processBlock` /
+  `finalizeProcessing` 的纯函数版，输入是 `ProcessorLevel`（读世界方块 + 标签判定）。
+  逐个照官方：`block_rot`（`nextFloat() <= integrity` 才保留；不在 `rottable_blocks` 里
+  时**不取随机数**）、`rule`（`inputPredicate` 用模板方块、`locationPredicate` 读**世界**
+  方块、`positionPredicate` 用模板相对坐标）、`protected_blocks`（读**世界**方块）、
+  `capped`（`processBlock` 空实现，只在 `finalizeProcessing` 里用
+  `levelSeed.forkPositional().at(piecePos)` 派生的随机源洗牌取前 `limit` 个）。
+* 新对拍模式 `jigsaw apply`：40 个 `processor_list` × 8 种方块 × 2 种假世界状态 × 1 个额外
+  结构件位置 = 120 查询，逐方块比官方 `StructureTemplate.processBlockInfos`，893 个存活
+  方块 0 不一致。故意改坏两处（`integrity` 判据、`tag_match` 取反）合报 198 处不一致。
+* **对拍抓出的两处真实 bug**：(a) 我把模板相对坐标直接当世界坐标，漏了
+  `calculateRelativePosition(...).offset(position)`，导致 `block_rot` 的位置随机源错位
+  （7 vs 8 个存活方块）；(b) `BlockState` 在 NBT 里是 `{id, properties}`，上一轮已经修过，
+  这轮复核确认。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、
 结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」

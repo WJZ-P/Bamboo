@@ -587,10 +587,15 @@ WebView2 的渲染进程不算在内。
   `save` 用真实结构件跑官方 `PoolElementStructurePiece.createTag`，逐 Children 条目比完整
   规范 NBT（`PosX`/`PosY`/`PosZ`、`ground_level_delta`、`pool_element`、`rotation`、
   `junctions`、非默认才写的 `liquid_settings`），108 查询、1216 个件标签 0 不一致；
+  `load` 把每个结构件 `createTag` 后用官方 `StructurePieceType.load` 读回，与 Rust 的
+  `Piece::from_save_tag` 逐项比位置 / 旋转 / **重算的包围盒** / `groundLevelDelta` /
+  junction 数 / 液体设置，108 查询、1216 个结构件往返 0 不一致；
   `processors` 用官方 `StructureProcessorType.DIRECT_CODEC` 整表编码 40 个 `processor_list`
   （52 个 processor），逐键 0 不一致——这一条覆盖 26.3 的四种 processor（`block_rot` /
   `rule` / `protected_blocks` / `capped`）、五种 `RuleTest`、`axis_aligned_linear_pos` 和
   `append_loot`；
+  `apply` 在假世界上用官方 `StructureTemplate.processBlockInfos` 跑 40 个列表
+  （120 查询 / 893 个存活方块）与 `structure::processor_apply` 逐块 0 不一致；
   `jigsaws` 对 1511 个模板 × 4 种旋转 × 4 个位置 = 24176 个查询、
   68352 个拼图方块的位置 / front / top / name / target / pool / joint / 两个优先级逐项
   0 不一致；`templates` 1511 个模板的尺寸 / 方块数 / 拼图方块数 0 不一致；`shapes`
@@ -606,7 +611,11 @@ WebView2 的渲染进程不算在内。
   方块实体）属放置那一步，`Piece::to_full_save_piece` 给出 `pool_element` / `rotation` /
   `junctions` / `liquid_settings` 全部子类字段的存档标签，`processor_list` 的 40 个条目也已
   按官方 codec 解析成类型化的 `structure::processor::Processor` 并逐键对拍过编码，
-  **但 processor 的执行（`processBlock` / `finalizeProcessing`）还没移植**。
+  **但 processor 的执行（`processBlock` / `finalizeProcessing`）已在
+  `structure::processor_apply` 里移植并对拍**：`block_rot` / `rule` / `protected_blocks`
+  逐方块 0 不一致（120 查询 / 893 存活方块）；`capped` 的 `finalizeProcessing` 因为假世界
+  给不出真实 `ServerLevel` 种子，只对了 delegate 的逐块效果与限额，**上限选取的随机序列
+  没有直接对拍**。
   `start_height` 只支持 `constant`（absolute）与 `uniform`——26.3 主世界全部 28 个 jigsaw
   结构只用这两种，其余 provider 标 unsupported；`bastion_remnant` 是下界结构，按分工不做。
   `liquid_settings` 已随 `Piece` 带到放置阶段（`SinglePoolElement` 用
