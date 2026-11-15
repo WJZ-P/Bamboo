@@ -600,7 +600,9 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
                     }
                 }
             }
-            if let Some(state) = provider.get_state(self.place.world, self.random, placement) {
+            if let Some(state) =
+                provider.get_optional_state(self.place.world, self.random, placement)
+            {
                 self.set(placement, state);
             }
         }
@@ -615,7 +617,8 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
             let placement = offset(log, direction);
             if self.random.next_float() <= probability
                 && self.is_air(placement)
-                && let Some(state) = provider.get_state(self.place.world, self.random, placement)
+                && let Some(state) =
+                    provider.get_optional_state(self.place.world, self.random, placement)
             {
                 self.set(placement, state);
             }
@@ -670,7 +673,7 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
         if surface > above.1 {
             return;
         }
-        if let Some(state) = provider.get_state(self.place.world, self.random, above) {
+        if let Some(state) = provider.get_optional_state(self.place.world, self.random, above) {
             self.set(above, state);
         }
     }

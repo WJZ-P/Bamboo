@@ -50,7 +50,7 @@ impl SingleBlockPillarFeature {
             _ => return None,
         };
         let block = StateProvider::parse(object.get("block")?)?;
-        if !block.is_supported() {
+        if !block.supported() {
             return None;
         }
         let can_replace = match object.get("can_replace") {
@@ -90,7 +90,7 @@ impl SingleBlockPillarFeature {
             && random.next_float() < self.chance_to_continue
             && !is_outside_build_height(world, pos)
         {
-            let Some(state) = self.block.get_state(world, random, pos) else {
+            let Some(state) = self.block.get_optional_state(world, random, pos) else {
                 break;
             };
             world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);

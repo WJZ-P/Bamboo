@@ -554,6 +554,50 @@ impl<'a> Generator<'a> {
         Ok(min_y - 1)
     }
 
+    /// `NoiseBasedChunkGenerator.getBaseColumn(x, z, ...)`：一列的方块状态，下标
+    /// `blockY - minY`。
+    ///
+    /// 照 `iterateNoiseColumn` 的 `columnReference` 分支：同一个 1×height×1、步长 1 的体积、
+    /// 全新含水层、`Beardifier = null`，把每一层的 `computeSubstance` 结果按 Y 升序收全。
+    /// `NoiseColumn.getBlock(y)` 越界返回空气，所以调用方直接按 `y - minY` 取值即可。
+    ///
+    /// `NoiseBasedChunkGenerator.getBaseColumn(x, z, ...)`: one column of block states indexed
+    /// by `blockY - minY`. This is the `columnReference` branch of `iterateNoiseColumn`: the
+    /// same 1xheightx1 step-1 volume, a fresh aquifer and a null (EMPTY) beardifier, collecting
+    /// every `computeSubstance` result in ascending Y. `NoiseColumn.getBlock(y)` yields air out
+    /// of range, so callers index with `y - minY` directly.
+    pub fn base_column(&self, block_x: i32, block_z: i32) -> Result<Vec<u32>, String> {
+        let min_y = self.settings.min_y;
+        let height = self.settings.height;
+        let volume = Volume::blocks((1, height, 1), (block_x, min_y, block_z));
+        let mut context = Context::new(self.cache_count);
+        let mut density = context.acquire(volume.len());
+        let aquifer_functions = self.aquifer.as_ref().ok_or("dimension has no aquifers")?;
+        let mut aquifer = Aquifer::new(
+            aquifer_functions,
+            &mut context,
+            self.aquifer_random,
+            &volume,
+            self.settings.sea_level,
+            self.default_fluid,
+            lava_state()?,
+            self.empty,
+        );
+        self.router
+            .final_density
+            .sample_volume(&mut context, &mut density, &volume);
+        let mut column = vec![self.empty; height as usize];
+        for local_y in 0..height {
+            let block_y = min_y + local_y;
+            let value = f64::from(density[volume.index(0, local_y, 0)]);
+            column[local_y as usize] = aquifer
+                .compute_substance(&mut context, block_x, block_y, block_z, value)
+                .unwrap_or(self.default_block);
+        }
+        context.release(density);
+        Ok(column)
+    }
+
     /// `MultiNoiseBiomeSource.createResolverForChunk` 的成批气候采样，返回一列 quart Y 的群系名。
     ///
     /// `couldStructureExistInColumn` 用 1×N×1、步长 4 的体积，对六个气候函数各跑一次

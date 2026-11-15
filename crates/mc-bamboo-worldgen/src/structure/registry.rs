@@ -126,6 +126,13 @@ pub struct StructureDef {
     pub biomes: Vec<i32>,
     pub step: String,
     pub terrain_adaptation: String,
+    /// 该条目的原始 JSON，供具体结构读自己的配置字段（海底遗迹的概率、废弃传送门的
+    /// `setups` 等）。不在 `StructureDef` 里逐个解析，是为了让各结构的解析留在自己的模块。
+    ///
+    /// The raw JSON of this entry so a concrete structure can read its own config fields
+    /// (ocean-ruin probabilities, ruined-portal `setups`, ...). Fields are not parsed here so
+    /// that each structure keeps its parsing in its own module.
+    pub raw: Value,
 }
 
 /// `structure` 注册表（本轮只解析上面这几个字段）。
@@ -170,6 +177,7 @@ impl Structures {
                     biomes,
                     step,
                     terrain_adaptation,
+                    raw: value.clone(),
                 },
             );
         }

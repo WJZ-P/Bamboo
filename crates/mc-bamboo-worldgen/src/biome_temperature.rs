@@ -106,6 +106,15 @@ struct StaticNoises {
     biome_info: SimplexNoise,
 }
 
+/// `Biome.BIOME_INFO_NOISE.get(x, z)`：和世界种子无关的静态 `SimplexNoise`。
+/// `noise_based_count` / `noise_threshold_count` 用它算每个区块的尝试次数。
+///
+/// `Biome.BIOME_INFO_NOISE.get(x, z)`: the seed-independent static `SimplexNoise`
+/// used by `noise_based_count` / `noise_threshold_count` to derive per-chunk counts.
+pub fn biome_info_noise(x: f64, z: f64) -> f32 {
+    static_noises().biome_info.get2(x, z)
+}
+
 fn static_noises() -> &'static StaticNoises {
     static NOISES: OnceLock<StaticNoises> = OnceLock::new();
     NOISES.get_or_init(|| {
@@ -136,15 +145,6 @@ fn static_noises() -> &'static StaticNoises {
             biome_info,
         }
     })
-}
-
-/// `Biome.BIOME_INFO_NOISE.get(x, z)`：静态 SimplexNoise，与世界种子无关，
-/// `NoiseThresholdCountPlacement` / `NoiseBasedCountPlacement` 用它决定重复次数。
-///
-/// `Biome.BIOME_INFO_NOISE.get(x, z)`: the static SimplexNoise (independent of the world
-/// seed) used by the two noise-based count placements.
-pub fn biome_info_noise(x: f64, z: f64) -> f32 {
-    static_noises().biome_info.get2(x, z)
 }
 
 /// `TemperatureModifier.FROZEN.modifyTemperature`：两处噪声都偏小时温度变成 0.2。

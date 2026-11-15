@@ -85,6 +85,7 @@ fn i64_field(object: &serde_json::Map<String, Value>, name: &str) -> Option<i64>
 }
 
 /// 一个已解析的 noise-based `BlockStateProvider`。
+#[derive(Debug, Clone)]
 pub enum NoiseStateProvider {
     /// `NoiseProvider`：按主噪声值从 states 选一个。
     Noise {

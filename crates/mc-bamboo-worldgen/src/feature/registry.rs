@@ -53,6 +53,10 @@ pub struct Registry {
     /// `FeatureSorter` 排好的每步全局顺序；每个元素是 `placed` 的下标，
     /// 下标本身即 `setFeatureSeed(decorationSeed, index, step)` 用的 index。
     steps: Vec<Vec<u32>>,
+    /// `block_state_provider` 注册表（`Holder<BlockStateProvider>` 的字符串引用）。
+    ///
+    /// The `block_state_provider` registry behind `Holder<BlockStateProvider>` strings.
+    state_providers: HashMap<String, Value>,
 }
 
 /// `placed` 里的下标。
@@ -184,7 +188,28 @@ impl Registry {
             biome_features,
             biome_ids,
             steps,
+            // 缺这个键时保持空表：旧版 `worldgen.json` 仍能加载，字符串 provider 会被
+            // 当成不支持，行为和以前一致。
+            // Keep an empty table when the key is missing: an older `worldgen.json` still
+            // loads, and string providers simply stay unsupported as before.
+            state_providers: root
+                .get("block_state_provider")
+                .and_then(Value::as_object)
+                .map(|object| {
+                    object
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
+    }
+
+    /// `block_state_provider` 注册表里某个名字的配置。
+    ///
+    /// The config of one `block_state_provider` registry entry.
+    pub fn state_provider(&self, name: &str) -> Option<&Value> {
+        self.state_providers.get(name)
     }
 
     pub fn feature(&self, id: usize) -> Option<&FeatureDef> {

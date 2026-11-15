@@ -493,18 +493,19 @@ impl Run<'_, '_, '_> {
                 // `tryPlaceLog`：这一格正好是 foliage provider 给出的状态才换。
                 // `tryPlaceLog`: only when the block equals the state the foliage
                 // provider gives.
-                let foliage =
-                    self.config
-                        .foliage_provider
-                        .get_state(self.place.world, self.random, pos);
+                let foliage = self.config.foliage_provider.get_optional_state(
+                    self.place.world,
+                    self.random,
+                    pos,
+                );
                 if foliage != Some(self.place.get_block(pos)) {
                     continue;
                 }
-                if let Some(log) =
-                    self.config
-                        .trunk_provider
-                        .get_state(self.place.world, self.random, pos)
-                {
+                if let Some(log) = self.config.trunk_provider.get_optional_state(
+                    self.place.world,
+                    self.random,
+                    pos,
+                ) {
                     let axis = if abs_dz == 0 { "x" } else { "z" };
                     let log = with_property(log, "axis", axis).unwrap_or(log);
                     self.place.set_foliage(pos, log);
@@ -580,7 +581,7 @@ impl Run<'_, '_, '_> {
         let Some(mut state) =
             self.config
                 .foliage_provider
-                .get_state(self.place.world, self.random, pos)
+                .get_optional_state(self.place.world, self.random, pos)
         else {
             return false;
         };

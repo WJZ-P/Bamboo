@@ -124,6 +124,16 @@ final class FeatureLevelHandler implements InvocationHandler {
                 return chunkAt((BlockPos) args[0]).chunk().getBlockState((BlockPos) args[0]);
             case "getFluidState":
                 return chunkAt((BlockPos) args[0]).chunk().getFluidState((BlockPos) args[0]);
+            case "isWaterAt": {
+                // LevelReader.isWaterAt 的默认实现是 `getFluidState(pos).is(WATER)`；
+                // 代理必须显式转发，否则孢子花之类的 canSurvive 会直接抛异常。
+                // LevelReader.isWaterAt defaults to `getFluidState(pos).is(WATER)`;
+                // the proxy has to forward it or canSurvive checks such as the spore
+                // blossom's throw.
+                BlockPos pos = (BlockPos) args[0];
+                return chunkAt(pos).chunk().getFluidState(pos)
+                        .is(net.minecraft.tags.FluidTags.WATER);
+            }
             case "setBlock": {
                 // LevelWriter 的 default 重载会转调 4 参数的 setBlock(pos,state,flags,recursionLeft)。
                 BlockPos pos = (BlockPos) args[0];
@@ -208,6 +218,12 @@ final class FeatureLevelHandler implements InvocationHandler {
             case "isOutsideBuildHeight": {
                 int y = args[0] instanceof BlockPos pos ? pos.getY() : (Integer) args[0];
                 return y < this.minY || y > this.minY + this.height - 1;
+            }
+            case "isInsideBuildHeight": {
+                // `LevelHeightAccessor.isInsideBuildHeight` 就是 `!isOutsideBuildHeight`。
+                // `LevelHeightAccessor.isInsideBuildHeight` is `!isOutsideBuildHeight`.
+                int y = args[0] instanceof BlockPos pos ? pos.getY() : (Integer) args[0];
+                return y >= this.minY && y <= this.minY + this.height - 1;
             }
             case "getSeaLevel":
                 return this.seaLevel;
@@ -308,6 +324,19 @@ final class FeatureLevelHandler implements InvocationHandler {
             }
             case "isEmptyBlock":
                 return getBlockState((BlockPos) args[0]).isAir();
+            case "getBrightness", "getRawBrightness":
+                // 假世界没有光照引擎，地物阶段官方世界里方块光也只有 0，天空光是 15
+                // （还没跑 light 阶段，整片区域都当露天）。
+                // The fake world has no light engine: block light is 0 during the feature
+                // stage and sky light is 15 (light has not run, everything is open sky).
+                if (args[0] instanceof net.minecraft.world.level.LightLayer layer) {
+                    return layer == net.minecraft.world.level.LightLayer.SKY ? 15 : 0;
+                }
+                return 15;
+            case "canSeeSky":
+                return true;
+            case "getLightEngine":
+                throw new UnsupportedOperationException("getLightEngine is not available here");
             case "getBlockEntity": {
                 // WorldGenRegion.getBlockEntity：区块里还没有方块实体、但 setBlock 留了
                 // DUMMY NBT 时，现造一个放回区块。蜂巢装饰器靠它决定取不取随机数。
@@ -332,6 +361,25 @@ final class FeatureLevelHandler implements InvocationHandler {
                 }
                 return null;
             }
+            // 假世界没有客户端，声音和等级事件都只有表现作用，对拍只看方块；
+            // 但 `SculkSpreader` / `SculkBlock` 会无条件调它们，必须吞掉。
+            // The fake world has no client, so sounds and level events only matter for
+            // rendering; `SculkSpreader` / `SculkBlock` call them unconditionally.
+            case "playSound":
+                return null;
+            case "levelEvent":
+                return null;
+            case "gameEvent":
+                return null;
+            // `LevelReader.findBlocksIn`：`SculkBlock.canPlaceGrowth` 用它数
+            // `sculk_growth_inhibitors`。假世界是直接读 3×3 区块，用简单的扫描实现。
+            // `LevelReader.findBlocksIn`: `SculkBlock.canPlaceGrowth` counts
+            // `sculk_growth_inhibitors` with it; the fake world reads the 3x3 directly.
+            case "findBlocksIn": {
+                BlockPos from = (BlockPos) args[0];
+                BlockPos to = (BlockPos) args[1];
+                return ChunkgenBlockMatcher.of(this, from, to);
+            }
             case "markPosForPostProcessing":
                 chunkAt((BlockPos) args[0]).chunk().markPosForPostProcessing((BlockPos) args[0]);
                 return null;
@@ -351,6 +399,11 @@ final class FeatureLevelHandler implements InvocationHandler {
 
     private BlockState getBlockState(BlockPos pos) {
         return chunkAt(pos).chunk().getBlockState(pos);
+    }
+
+    /** `getBlockState` 给同包的 `ChunkgenBlockMatcher` 用。 */
+    BlockState getBlockStatePublic(BlockPos pos) {
+        return getBlockState(pos);
     }
 
     private net.minecraft.world.level.material.FluidState getFluidState(BlockPos pos) {
@@ -552,7 +605,9 @@ public final class ChunkgenOracle {
                         }
                     }
                     case "--ore-only" -> featureAllowList = "minecraft:ore";
-                    case "--feature-types" -> featureAllowList = args[++i];
+                    // `--types` 是早期诊断开关的名字，保留成别名。
+                    // `--types` is the older name for the same diagnostic switch; keep it as an alias.
+                    case "--types", "--feature-types" -> featureAllowList = args[++i];
                     case "--biomes-only" -> through = 0;
                     case "--real-path" -> realPath = true;
                     case "--chunk" -> {
@@ -889,6 +944,8 @@ public final class ChunkgenOracle {
                     net.minecraft.world.level.levelgen.placement.PlacedFeature> entry
                     : placed.entrySet()) {
                 net.minecraft.world.level.levelgen.placement.PlacedFeature value = entry.getValue();
+                // 先按 codec 的类型 ID 比，再按 placed feature 注册名比；不靠注册名前缀猜。
+                // Match the codec type ID first, then the placed-feature registry name.
                 String name = entry.getKey().identifier().toString();
                 if (selectors.contains(featureTypeId(value.feature().value())) || selectors.contains(name)) {
                     keep.add(name);
@@ -1287,5 +1344,81 @@ public final class ChunkgenOracle {
             this.out.write(line.toString());
             this.out.write('\n');
         }
+    }
+}
+
+/**
+ * `LevelReader.findBlocksIn` 在假世界里的实现：直接按区块扫描一个闭区间盒子。
+ *
+ * <p>官方 `BoxBlockMatcher` 走 `BlockScanUtils.findBlocks`，按 section 的 x、z、y 顺序
+ * 扫描，section 内是 y、z、x 顺序；这里保留同样的顺序，因为 `atMostMatched` 会在数到
+ * 第 n 个就停下，顺序影响命中判定。`SculkBlock.canPlaceGrowth` 只用 `atMostMatched(2)`
+ * 数 `sculk_growth_inhibitors`，三个以内的顺序无关；仍照官方顺序写，避免以后出错。
+ *
+ * The fake world's `LevelReader.findBlocksIn`: scan a closed box directly. The official
+ * `BoxBlockMatcher` goes through `BlockScanUtils.findBlocks`, which walks sections in
+ * x, z, y order and blocks inside a section in y, z, x order; the same order is kept
+ * because `atMostMatched` stops at the n-th hit. `SculkBlock.canPlaceGrowth` only counts
+ * `sculk_growth_inhibitors` up to two, so order does not change its answer, but keeping
+ * the official order avoids surprises later.
+ */
+final class ChunkgenBlockMatcher extends net.minecraft.world.level.blockscan.BlockMatcher {
+    private final FeatureLevelHandler handler;
+    private final BlockPos from;
+    private final BlockPos to;
+
+    private ChunkgenBlockMatcher(FeatureLevelHandler handler, BlockPos from, BlockPos to) {
+        super(null);
+        this.handler = handler;
+        this.from = from;
+        this.to = to;
+    }
+
+    static ChunkgenBlockMatcher of(FeatureLevelHandler handler, BlockPos from, BlockPos to) {
+        return new ChunkgenBlockMatcher(handler, from, to);
+    }
+
+    @Override
+    public boolean atLeastMatched(int n) {
+        return matchCount(n + 1) >= n;
+    }
+
+    private int matchCount(int limit) {
+        int count = 0;
+        int minX = Math.min(this.from.getX(), this.to.getX());
+        int minY = Math.min(this.from.getY(), this.to.getY());
+        int minZ = Math.min(this.from.getZ(), this.to.getZ());
+        int maxX = Math.max(this.from.getX(), this.to.getX());
+        int maxY = Math.max(this.from.getY(), this.to.getY());
+        int maxZ = Math.max(this.from.getZ(), this.to.getZ());
+        for (int x = minX; x <= maxX; x++) {
+            for (int z = minZ; z <= maxZ; z++) {
+                for (int y = minY; y <= maxY; y++) {
+                    BlockPos pos = new BlockPos(x, y, z);
+                    if (this.statePredicate.test(this.handler.getBlockStatePublic(pos))) {
+                        count++;
+                        if (count >= limit) {
+                            return count;
+                        }
+                    }
+                }
+            }
+        }
+        return count;
+    }
+
+    @Override
+    protected boolean anyMatched(java.util.function.Predicate<BlockState> predicate) {
+        return matchCount(1) >= 1;
+    }
+
+    @Override
+    public void forEach(java.util.function.BiConsumer<BlockPos, BlockState> consumer) {
+        throw new UnsupportedOperationException("forEach is not used by the chunkgen oracle");
+    }
+
+    @Override
+    public boolean forEachUntil(net.minecraft.world.level.blockscan.BlockStateConsumer consumer) {
+        throw new UnsupportedOperationException("forEachUntil is not used by the chunkgen oracle");
     }
 }
