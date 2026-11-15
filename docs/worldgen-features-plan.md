@@ -779,6 +779,14 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `Direction.Plane.HORIZONTAL` 的顺序是 **NORTH, EAST, SOUTH, WEST**，
   之前写成 NORTH, SOUTH, WEST, EAST，导致洗牌结果整体错位。修完单区块
   （`--chunk 1 0 --scan 1`）仍是 4 处，说明还有别的问题。
+  第 4 轮又修了两处（`fc5df1c`）：扩散时官方在第一个通过 `canSpreadInto` 的位置
+  就「一次定生死」（`getStateForPlacement` 返回 null 就让整条方向失败），
+  我之前会继续试后面的 `SpreadType`；另外加了一个单测穷举 `glow_lichen` 全部 64 种
+  面组合，确认 `with_property(state, face, "true") == Some(state)` 与
+  「该面属性是 true」等价。多点对拍仍是 102 处。
+  **第 4 轮的定位实验**：把 `chance_of_spreading` 强制成 0（不扩散）后，单区块的
+  差异从 4 降到 2 —— 说明一半差异来自扩散，另一半来自主放置。剩的 2 处是官方在
+  `(5,36,0)` 放了 `up`、`(15,42,13)` 放了 `north`，我方这两格没放。
 * 组合类回归（`6723362` 合并 main 后，`871f2b4`）：树在本分支已经可用，于是把
   `random_selector` 和 `weighted_random_selector` 放开逐方块对拍。
   * 6 个 `random_selector` 树（trees_plains / trees_savanna / trees_taiga /
@@ -828,7 +836,8 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | `minecraft:bamboo`（`--seeds 2 --chunks 14 --salt 5 --steps 9`） | **0 不一致**（28 中心 / 24772608 方块，0 skipped） |
 | 故意把竹竿状态换成空气（`--seeds 2 --chunks 24 --salt 33`） | 160 处不一致（确认非假绿；同时暴露 27 处 terrain 既有差异） |
 | `minecraft:vines`（`--seeds 1 --chunk -784 -132 --scan 3 --steps 9`） | 8 处差异，全部是 terrain 既有差异（`--steps 0` 同样复现），但**藤蔓未被调用**（候选 0 次），不算验证 |
-| `minecraft:glow_lichen`（`--seeds 2 --chunks 20 --salt 11 --steps 9`） | **126 处不一致**（已写未验证，见疑点） |
+| `minecraft:glow_lichen`（`--seeds 2 --chunks 20 --salt 11 --steps 9`） | **102 处不一致**（已写未验证，见疑点；从 126 降下来） |
+| `minecraft:spore_blossom`（lush_caves，`--seeds 1 --chunk -600 -598 --scan 3 --steps 9`） | 0 不一致但 **simple_block 叶子被调用 0 次**，`environment_scan` 把候选全滤掉，不算验证 |
 | 6 个 `random_selector` 树（`--seeds 2 --chunks 24 --salt 13 --steps 9`） | **0 不一致**（48 中心 / 42467328 方块，0 skipped） |
 | 故意把 `random_selector` 的 chance 改成恒真 | 160 处不一致（确认非假绿） |
 | `trees_dappled_forest`（`--seeds 1 --chunk -900 461 --scan 3 --steps 9`） | **0 不一致**（9 中心 / 7962624 方块，0 skipped；树叶子调用 18 次） |
