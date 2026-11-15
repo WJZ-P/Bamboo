@@ -2060,36 +2060,39 @@ fn run_water_piece(mut command: Command, work_dir: &Path) -> Result<(), String> 
         if targets.is_empty() {
             continue;
         }
-        // 只跑 NONE 镜像 + NONE 旋转，外加 FRONT_BACK 镜像 + CLOCKWISE_90 旋转：
-        // 前者覆盖最直接的路径，后者覆盖镜像与旋转叠加。
-        // Only NONE/NONE plus FRONT_BACK/CLOCKWISE_90: the plain path and the one where a
-        // mirror and a rotation stack.
-        for (mirror, rotation) in [(0_u32, 0_u32), (2, 1)] {
-            for variant in 0_u32..3 {
-                let bb = (-span, -2, -span, span, sy + 3, span);
-                // 三种水位：源水、流动水、岩浆。
-                // Three fluid variants: source water, flowing water, lava.
-                let fluid = match variant {
-                    0 => "water",
-                    1 => "flowing_water",
-                    _ => "lava",
-                };
-                let mut entries = Vec::new();
-                for &(x, y, z) in &targets {
-                    // `place_piece` 的 piece 位置是 (0,-1,0)，所以模板本地 y 落在世界 y-1。
-                    // The piece sits at (0,-1,0), so template-local y lands on world y-1.
-                    entries.push(format!("{fluid}:{x},{},{}", y - 1, z));
+        // 全部 12 种 mirror × rotation 组合。注水是按模板里可含水方块的**精确位置**
+        // 做的，条目数与模板体积无关，所以 12 组也不会把水位表撑大。
+        // All twelve mirror × rotation combinations. The fluid goes at each waterloggable
+        // block's **exact** template position, so the entry count is independent of the
+        // template's volume and twelve combinations stay cheap.
+        for mirror in 0_u32..3 {
+            for rotation in 0_u32..4 {
+                for variant in 0_u32..3 {
+                    let bb = (-span, -2, -span, span, sy + 3, span);
+                    // 三种水位：源水、流动水、岩浆。
+                    // Three fluid variants: source water, flowing water, lava.
+                    let fluid = match variant {
+                        0 => "water",
+                        1 => "flowing_water",
+                        _ => "lava",
+                    };
+                    let mut entries = Vec::new();
+                    for &(x, y, z) in &targets {
+                        // `place_piece` 的 piece 位置是 (0,-1,0)，所以模板本地 y 落在世界 y-1。
+                        // The piece sits at (0,-1,0), so template-local y lands on world y-1.
+                        entries.push(format!("{fluid}:{x},{},{}", y - 1, z));
+                    }
+                    queries.push(format!(
+                        "{name}|0|-1|0|{mirror}|{rotation}|{}|{}|{}|{}|{}|{}|{}",
+                        bb.0,
+                        bb.1,
+                        bb.2,
+                        bb.3,
+                        bb.4,
+                        bb.5,
+                        entries.join(";")
+                    ));
                 }
-                queries.push(format!(
-                    "{name}|0|-1|0|{mirror}|{rotation}|{}|{}|{}|{}|{}|{}|{}",
-                    bb.0,
-                    bb.1,
-                    bb.2,
-                    bb.3,
-                    bb.4,
-                    bb.5,
-                    entries.join(";")
-                ));
             }
         }
     }
