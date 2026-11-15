@@ -371,8 +371,7 @@ fn count_empty_corners(world: &FeatureWorld<'_>, corners: (Pos, Pos)) -> i32 {
 
 fn block_id_of_name(name: &str) -> Option<i32> {
     block_by_name(name)
-        .map(|block| mc_bamboo_data::block_id_of_state(block.default_state))
-        .flatten()
+        .and_then(|block| mc_bamboo_data::block_id_of_state(block.default_state))
         .map(|id| id as i32)
 }
 
@@ -431,7 +430,14 @@ fn place_in_world(
                         Some(blocks) => mc_bamboo_data::block_id_of_state(state)
                             .is_some_and(|id| blocks.contains(&(id as i32))),
                     };
-                    if rottable_hit && !(random.next_float() <= *integrity) {
+                    // 官方是 `!(random.nextFloat() <= integrity)` 时丢弃；`nextFloat()`
+                    // 落在 `[0, 1)`、`integrity` 是有限的 0..1，所以 `> integrity`
+                    // 与取反等价，且不必对浮点写取反比较。
+                    //
+                    // Vanilla drops the cell when `!(random.nextFloat() <= integrity)`.
+                    // `nextFloat()` is in `[0, 1)` and `integrity` is a finite 0..1, so
+                    // `> integrity` is equivalent without a negated float comparison.
+                    if rottable_hit && random.next_float() > *integrity {
                         keep = false;
                         break;
                     }
