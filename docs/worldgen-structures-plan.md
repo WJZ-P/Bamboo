@@ -618,9 +618,33 @@ Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_heigh
 * 仍是纯函数 + oracle：`chunk_nbt` 把 `structures` 当不透明标签原样保留，读回路径没有接进
   世界状态，游戏里仍不会出现结构。
 
-**多件式结构放置（2026-11-14，分支 `cb-wg-multipiece`，已写未验证）**：
+**模板结构放置（2026-11-14，分支 `cb-wg-templates`，部分已验证）**：
 
-* `structure::piece_place`：官方 `StructurePiece` 的放置辅助层（`getWorldPos` /
+* `structure::template_place`：`StructureTemplate.placeInWorld` 的等价实现加
+  `StructurePlaceSettings` 与 7 种 `StructureProcessor`（`BlockIgnoreProcessor` /
+  `BlockRotProcessor` / `RuleProcessor` / `BlockAgeProcessor` /
+  `BlackstoneReplaceProcessor` / `LavaSubmergedBlockProcessor` /
+  `ProtectedBlockProcessor`）。方块顺序照 `buildInfoList`（整方块、其它方块、带 nbt 的
+  方块，各自按 `(y, x, z)` 稳定排序），processor 随机源是
+  `RandomSource.create(Mth.getSeed(pos))`（`positional_seed`），palette 按模板位置选，
+  写完后跑 `updateShapeAtEdge` 与 `updateFromNeighbourShapes`。
+* `structure::post_process::igloo` / `shipwreck` / `ocean_ruin` / `ruined_portal`：四个结构
+  的 `postProcess` 方块部分（高度校正、processor 链、`spreadNetherrack` 等）。
+* 对拍 `cargo run -p mc-bamboo-vanilla -- structure-templated-place <java>` 与
+  `java/StructureTemplatedPlaceOracle.java`：合成地形（西半陆地、东半海）+ 官方
+  `postProcess` 写入日志逐格比。`--chunk` / `--feature-types` 未实现前，本轮覆盖面是
+  3 种子 × 4 区块 × 4 kind = 48 查询、6560 个格子比较。
+  **雪屋、海底遗迹（暖 / 冷）0 不一致**；沉船 1451 处不一致，集中在楼梯
+  `shape`（`straight` vs `outer_right`）与栅栏连接位——说明 `updateShape` 的
+  调用时机或读取顺序仍有偏差。
+* **废弃传送门的 `postProcess` 已写但没进对拍查询集**（`structure-templated-place` 只有
+  igloo / shipwreck / ocean_ruin 三类）：它的 Java 侧构造需要真实注册表，
+  本轮时间不够，未验证。
+* 箱子内容、实体、战利品表只比方块状态：随机数照取（沉船的 `nextInt(3)`、
+  `BlockRotProcessor` 的 `nextFloat`、`RuleProcessor` 的 `nextFloat`），箱子战利品表的
+  `nextLong` 未取（`getBlockEntity` 在 `ProtoChunk` 里返回 null，两侧一致）。
+
+**多件式结构放置（2026-11-14，分支 `cb-wg-multipiece`，已写未验证）**：* `structure::piece_place`：官方 `StructurePiece` 的放置辅助层（`getWorldPos` /
   `placeBlock` / `generateBox` 的两个重载 / `generateMaybeBox` / `maybeGenerateBlock` /
   `generateUpperHalfSphere` / `fillColumnDown` / `isInterior` /
   `isReplaceableByStructures`），世界读写由 `PieceLevel` trait 抽象。这是给结构队员
@@ -1102,7 +1126,7 @@ structures (Compound)
 | 2 | 数据导出：`worldgen.json` 加四键，Rust 解析骨架 | `extract` 重跑无 diff（除四键）、旧 `chunkgen --through carvers` 仍 0 | **做完**：重跑无 diff、`--through carvers` 小样本 0 不一致 |
 | 3 | 放置：`random_spread`（含频率削减、exclusion zone、spread type）、`concentric_rings` 几何 | 大范围区块「哪个区块有哪个结构起点」0 不一致；新对拍先故意改坏一处确认会失败 | **做完**：20 集 × 464 查询 = 9280 放置比较 + 9744 加权选择比较 0 不一致；`concentric_rings` 6 种子 768 环位置 + 864 `isStructureChunk` 0 不一致 |
 | 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **部分做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿 / 林地府邸（`structure-pieces` 336 查询 77960 结构件 0 不一致）、需要模板的雪屋 / 沉船 / 海底遗迹（`structure-templated` 480 查询 1685 结构件 0 不一致）、废弃传送门（`structure-ruined-portal` 648 查询 110 结构件 0 不一致，含 `findSuitableY` 整列搜索与 `Mirror.FRONT_BACK`）、jigsaw 全部（`cb-wg-jigsaw`，`jigsaw pieces` 972 查询 12467 结构件 0 不一致）已做 |
-| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分做完（方块部分）**：`structure-place` 按写入日志逐格比：埋藏的宝藏 16 查询 0 不一致；**女巫小屋 18 处不一致（未通过）**，Java 的地下柱子比 Rust 低一格；沙漠神殿没进查询集（`SKIPPED`），最后实测 6953 处。需要模板的四个结构（雪屋 / 沉船 / 海底遗迹 / 废弃传送门）的 `postProcess` 正按 `cb-wg-templates` 分支移植；processor、方块实体、战利品表、拼图替换没做，**现有的 `postProcess` 都没接进 `feature/run.rs`** |
+| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分做完（方块部分）**：`structure-place` 按写入日志逐格比：埋藏的宝藏 16 查询 0 不一致；**女巫小屋 18 处不一致（未通过）**，Java 的地下柱子比 Rust 低一格；沙漠神殿没进查询集（`SKIPPED`），最后实测 6953 处。`cb-wg-templates` 补上四个模板结构的 `postProcess` 与 `structure::template_place`（`placeInWorld` + 7 种 processor），新对拍 `structure-templated-place` 48 查询 6560 格：**雪屋与海底遗迹（暖 / 冷）0 不一致，沉船 1451 处不一致**（楼梯 `shape` 与栅栏连接位），**废弃传送门已写未验证**。方块实体、战利品表、拼图替换没做，**所有 `postProcess` 都没接进 `feature/run.rs`** |
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | **做完（纯函数 + 对拍，`cb-wg-beard`）**：`beard` 12 用例 5,912,076 比较 0 不一致（kernel / sampleValue / sampleVolume / affectedBox / 三阶段方块），`--break-self-test` 会失败；`chunkgen --through carvers` EMPTY 回归仍 0。**没接进 Director**：游戏里仍走 `EMPTY` |
 | 7 | 存档：`structures` 键写/读；海底神殿「只存一个 `MonumentBuilding`、读回重建房间图」的口径见 4.1 | 读回一致，`world-dir` 确认官方能读 | **通用编码做完**：`structure-save` 8 case 规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、`world-dir` 的 `SerializableChunkData.parse` 都能读。**多件式结构的读回做完**（`cb-wg-multipiece`）：子类字段带 NBT 类型，`PiecesContainer.load` / `loadStaticStart` / `regeneratePiecesAfterLoad` 移植并对拍（`structure-load` 80 查询、8218 读回件、656 重建行 0 不一致），见第 0 节「多件式结构存档」 |
 
@@ -1241,6 +1265,14 @@ structures (Compound)
 ## 10. 已知限制（第五轮结束时，2026-11-14）
 
 * 主世界以外的维度（下界、末地）不做。Bamboo 目前没有下界/末地维度。
+* **`cb-wg-templates` 分支（2026-11-14，部分已验证）**：四个模板结构的 `postProcess`
+  方块部分已写进 `structure::post_process::{igloo, shipwreck, ocean_ruin, ruined_portal}`，
+  底层是 `structure::template_place` 的 `placeInWorld` + 7 种 processor +
+  `updateShapeAtEdge` / `updateFromNeighbourShapes`。`structure-templated-place`
+  （48 查询、6560 格）上**雪屋与海底遗迹（暖 / 冷）0 不一致**，**沉船 1451 处不一致**
+  （楼梯 `shape` 与栅栏连接位，疑在 `updateShape` 的调用时机）、**废弃传送门未进查询集**。
+  箱子内容、实体、战利品表只比方块状态；`CappedProcessor`（海底遗迹可疑方块最多 5 个）
+  需要 `level.getSeed()`，未移植。
 * **全是纯函数 + 对拍，没接进游戏**：`structure_starts` / `structure_references` 两个阶段
   仍是空实现，本模块的结果没有进 Director 的流水线，游戏里世界仍是超平坦。
 * `.nbt` 结构模板**已导出**（第 2.2 节）：`cb-wg-jigsaw` 分支从 jar 原样导出 1511 个、
