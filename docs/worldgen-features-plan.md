@@ -869,6 +869,24 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `coral_tree` / `vegetation_patch` / `root_system` 还没移植），要等那些分支合进来
   才能不加 `--feature-types` 跑。
 
+* 第 12 轮新增三个「小类型」（`0459b9b6`）：
+  * `OverlayFeature`（`minecraft:overlay`）—— 和 `sequence` 几乎一样，但**不短路**：
+    `placedAny |= placer.place(...)` 走完所有子项。加在 `composition.rs` 的
+    `Composition::Overlay`。
+  * `NoOpFeature`（`minecraft:no_op`）—— 什么都不做，但 `place` 返回 **true**。
+  * `SingleBlockPillarFeature`（`minecraft:single_block_pillar`）—— 沿竖直方向逐格
+    放同一处方块，条件 `canReplace.test(...) && random.nextFloat() < chanceToContinue`
+    且没超出建造高度；**已知限制**：`cap_feature`（顶盖）要递归 `PlacedFeature.place`
+    并带 `PlacementEnv`，当前叶子接口不传，带 `cap_feature` 的配置解析时返回 `None`。
+
+  **三者都还没有可验证的路径**：`overlay` 只作为**内联子项**出现，没有独立的
+  placed feature；它的父级（`warm_ocean_vegetation` 经 `simple_random_selector` 到
+  `coral_tree` / `coral_claw`，`desert_well` 到 `template`，`basalt_pillar` 到
+  `single_block_pillar` 但带 `cap_feature`）都含还没移植的类型，所以整条会被标
+  unsupported。**回归确认**：已移植的类型（发光地衣 / 藤蔓 / 竹子）在
+  `--seeds 2 --chunks 16 --salt 11 --steps 9` 下仍 **0 不一致**（32 中心 /
+  28311552 方块 / 0 skipped），新代码没有引入回归。
+
 #### 本分支对拍结果（`--through features --steps 9`）
 
 | 命令（省略 `--through features`） | 结果 |
