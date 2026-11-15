@@ -79,9 +79,15 @@ fn build_queries() -> Vec<Query> {
             }
         }
     }
+    // `STRUCTURE_PLACE_KINDS=a,b` 只跑指定类型（验收时分开矿井和要塞）。
     // `STRUCTURE_PLACE_LIMIT=n` 只跑前 n 个查询，定位单个 case 时省时间。
-    // `STRUCTURE_PLACE_LIMIT=n` keeps only the first n queries to shorten a
-    // single-case investigation.
+    // `STRUCTURE_PLACE_KINDS=a,b` keeps only the named kinds, so the mineshaft and the
+    // stronghold can be accepted separately. `STRUCTURE_PLACE_LIMIT=n` keeps only the
+    // first n queries to shorten a single-case investigation.
+    if let Ok(kinds) = std::env::var("STRUCTURE_PLACE_KINDS") {
+        let wanted: Vec<&str> = kinds.split(',').map(str::trim).collect();
+        queries.retain(|q| wanted.contains(&q.kind));
+    }
     if let Ok(limit) = std::env::var("STRUCTURE_PLACE_LIMIT")
         && let Ok(limit) = limit.parse::<usize>()
     {
@@ -238,6 +244,10 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
     let layout = layout(q)?;
     let center = (q.cx, q.cz);
     let mut level = FlatLevel::new(q.fill, center);
+    // 结构件上会跨 3×3 调用保留的可变状态（`hasPlacedSpider`），按 layout 下标复用。
+    // Mutable per-piece state that survives the 3x3 invocations (`hasPlacedSpider`),
+    // reused across chunks by layout index.
+    let mut spider_state: Vec<bool> = vec![false; layout.len()];
 
     // 和 Java 侧一样逐区块调：`chunkBB` 是该区块整列盒，`random` 每区块重播。
     // Once per chunk like Java: the chunk's full column box, random reseeded per chunk.
@@ -257,7 +267,15 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
                 let before = level.written.len();
                 level.begin_piece();
                 if place_piece(
-                    q.kind, piece, i, &layout, &mut level, chunk_bb, center, &random,
+                    q.kind,
+                    piece,
+                    i,
+                    &layout,
+                    &mut level,
+                    chunk_bb,
+                    center,
+                    &random,
+                    &mut spider_state,
                 )?
                 .is_some()
                 {
@@ -303,6 +321,7 @@ fn place_piece(
     chunk_bb: [i32; 6],
     _center: (i32, i32),
     random: &mc_bamboo_worldgen::random::WorldgenRandom,
+    spider_state: &mut [bool],
 ) -> Result<Option<()>, String> {
     use mc_bamboo_worldgen::structure::pieces::mineshaft_place as place;
 
@@ -347,9 +366,14 @@ fn place_piece(
                 num_sections,
                 has_rails,
                 spider_corridor,
-                has_placed_spider: false,
+                // `hasPlacedSpider` 是结构件自身的字段，跨 3×3 的多次调用会保留；
+                // 用调用方传入的表按 layout 下标复用。
+                // `hasPlacedSpider` lives on the piece and persists across the 3x3
+                // invocations; reuse the caller's table keyed by layout index.
+                has_placed_spider: spider_state[index],
             };
             let truncated = place::corridor_post_process(&mut sp, random, &mut state);
+            spider_state[index] = state.has_placed_spider;
             // 返回 true 表示命中 1% 矿车箱子，Java 侧也在同一步截断。
             // Returning true means the 1% minecart chest hit; Java truncates at the same
             // point.
