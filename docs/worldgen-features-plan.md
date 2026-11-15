@@ -950,14 +950,42 @@ level.getRandom(), 2)`（字节码 129 是 `WorldGenLevel.getRandom()`），而
 | `pale_moss_patch`（`MossyCarpetBlock.placeAt`） | `--seeds 6 --chunks 40 --salt 7` | **2 处未解决**（240 中心 / 212336640 方块 / 0 skipped）。改区域随机源前是 15 处 |
 | 14 个已验证 placed feature 一起放开（`block_column,vines,bamboo,multiface_growth,cave_vines,sea_pickle,seagrass_*×4,patch_waterlily,spore_blossom,kelp_cold,lush_caves_vegetation`） | `--seeds 4 --chunks 12 --salt 7` | **0 不一致**（48 中心 / 42467328 方块 / 0 skipped） |
 
-#### 已知限制（第三轮新增）
+#### 第四轮：`HashMap` 桶树化（分支 `cb-wg-aquatic`）
 
-* **`pale_moss_patch` 还剩 2 处**：`chunk (529509,523106)` 的
-  `(12,135,10)` 与 `(12,136,10)`。官方是 `{east:low, south:low, bottom:true}` +
-  空气，Bamboo 是 `{east:tall, south:low, bottom:true}` +
-  `{east:low, bottom:true}`（多放了一个下层，且 east 判成 `tall`）。
-  两个 patch 在这个位置重叠，Bamboo 多放的一格说明某个 `place_at` 的调用位置或
-  数量不同。**未定位。**
+提交：`e27882c6`（`WIP:` 开头，按工作模式保留）。
+
+`VegetationPatchFeature` 把地表位置收进 `HashSet<BlockPos>` 后按迭代顺序分配植被随机数。
+上一轮只复刻了链表形状，桶内到 8 个元素时官方 `HashMap` 会转红黑树，`treeify` 之后
+`moveRootToFront` 把**树根**挪到桶首，迭代顺序因此不同。
+
+本轮实现：
+
+* `java_set.rs` 的 `Tree`：按桶内链表顺序逐个插入红黑树（`putTreeVal` + `balanceInsertion`
+  + `rotateLeft` / `rotateRight`），比较规则是 `HashMap.treeNode` —— hash 优先，再
+  `Vec3i.compareTo`（`y` → `z` → `x`）。`tieBreakOrder` 的 `identityHashCode` 分支用不到：
+  `compareTo` 全等的两个位置必然 `equals`，不可能同时存在于同一个 `HashSet`。
+* `JavaPosSet::insert` 的 `treeifyBin` 分支：容量 < 64 时翻倍，容量 ≥ 64 时调
+  `treeify`（把桶内链表重排成「根在最前、其余保持插入序」）。
+
+单测 `heavy_collisions_move_the_tree_root_to_the_bin_head` 用官方 JVM 实际打印的 40 个
+`(i*16, 62, 0)` 的顺序逐项比对，**40 个全部一致**。
+
+对拍：`moss_patch_ceiling` 从 **20 处降到 14 处**（其中 10 处是 terrain 既有差异，
+地物阶段剩 4 处）。剩下的 4 处见「疑点」。
+
+#### 已知限制（第四轮更新）
+
+* **`moss_patch_ceiling` 还剩 4 处 `cave_vines` 错位**：`chunkgen --through features
+  --steps 9 --feature-types minecraft:lush_caves_ceiling_vegetation --chunk -58 -217
+  --seeds 2` 报 14 处 = 10 处 terrain + 4 处地物。官方在 `(13,-27..-24,6)` 竖着放 4 格
+  `cave_vines`，Bamboo 放到邻块 `(1,0)` 的 `(0,-29..-26,1)`。surface 迭代序（`treeify`）
+  已修正，但仍选到不同列，说明 **surface 集合内容不同或 `nextFloat` 次数不同**。未定位。
+* **`pale_moss_patch` 还剩 2 处**：`chunk (529509,523106)` 的 `(12,135,10)` /
+  `(12,136,10)`。诊断结果：Bamboo 的 `place_at` 放下了 base `35584`（与官方一致）和
+  topper `35662`（`{east:low,bottom:false}`），随后「再更新一次下层」把 base 的 east
+  从 `low` 升成 `tall`（因为看到上层同类地毯 east 非 none）。官方没放 topper，所以 base
+  保持 `low`。**根因在 `topper_with_side_chance` 的返回**，未定位。
+  已确认方向正确：把 `region_random` 换成地物 `random` 会退化成 15 处。
 * `clamped_normal` 只有单测，没对拍（用它的两个 placed feature 属洞穴/冰雪分支）。
 * `count_on_every_layer` 只有单测，没对拍（只被下界类型用，主世界不出现）。
 
