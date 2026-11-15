@@ -1309,6 +1309,25 @@ main 已把本分支（`1c9853c6`）合进去了，所以再 `git merge main` �
 对拍：`moss_patch_ceiling` 从 **20 处降到 14 处**（其中 10 处是 terrain 既有差异，
 地物阶段剩 4 处）。剩下的 4 处见「疑点」。
 
+#### 第五轮：`root_system`（分支 `cb-wg-aquatic`）
+
+提交：`02887dfa`（`WIP:` 开头）。
+
+* `feature/root_system.rs`：`RootSystemFeature` 全体 —— `placeDirtAndTree`（向上逐格找能
+  放树的位置、`spaceForTree` 的竖直空间与四角检查、下面不能是岩浆且必须 `isSolid`）、
+  `placeDirt` + `placeRootedDirt`（每层 `root_placement_attempts` 次随机水平偏移，
+  只在 `root_replaceable` 里替换）、`placeRoots`（悬挂根，要求空气 + `canSurvive` +
+  上面 `isFaceSturdy(DOWN)`）。
+* 接进 `composition::place_feature`（需要注册表和 `PlacementEnv` 递归调 `treeFeature.place`）。
+* `hanging_root_state_provider` / `root_state_provider` 走 `StateProvider::parse_with`。
+
+对拍：`--steps 1,9 --feature-types minecraft:rooted_azalea_tree,minecraft:rooted_sulfur_spring
+--seeds 3 --chunks 20 --salt 7` → 60 中心 / 53084160 方块 / 0 skipped / 0 不一致；
+`--chunk -300 -275 --scan 5 --seeds 1`（繁茂洞穴）→ 9 中心 / 7962624 方块 / 0 不一致。
+**但两次「故意改坏」都仍是 0 不一致**，说明这两组参数下 `rooted_azalea_tree` 实际上
+一次都没放成（`allowed_tree_position` 或 `root_replaceable` 没匹配上），
+所以这一项应视为**已写未验证**，不是「已验证」。
+
 #### 已知限制（第四轮更新）
 
 * **`moss_patch_ceiling` 还剩 4 处 `cave_vines` 错位**：`chunkgen --through features
