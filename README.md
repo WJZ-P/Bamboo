@@ -576,8 +576,8 @@ WebView2 的渲染进程不算在内。
   （`random_selector` / `weighted_random_selector` / `simple_random_selector` /
   `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）与
   `clamped` / `clamped_normal` / `weighted_list` IntProvider、`BambooFeature`
-  （竹子）、`MultifaceGrowthFeature`（发光地衣，见下）。另有 `VinesFeature`（藤蔓）
-  已按官方源码写完但**还没验证**：丛林区块里查不到能通过 `biome` 修饰器的候选点。
+  （竹子）、`MultifaceGrowthFeature`（发光地衣）、`VinesFeature`（藤蔓），三者都是
+  **逐方块 0 不一致**。
   `minecraft:glow_lichen` 现在是**逐方块 0 不一致**（`--seeds 2 --chunks 20 --salt 11
   --steps 9 --feature-types minecraft:glow_lichen`：40 中心 / 35389440 方块 / 0 skipped；
   故意关掉扩散后报 70 处不一致，确认不是空跑）。修的过程中发现并修掉两个真 bug：

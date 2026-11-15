@@ -853,7 +853,7 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 | 故意把 `sea_pickle_placeable` 改成恒 true，`--seeds 3 --chunks 30 --salt 21` | 130 处不一致（确认非假绿） |
 | `minecraft:bamboo`（`--seeds 2 --chunks 14 --salt 5 --steps 9`） | **0 不一致**（28 中心 / 24772608 方块，0 skipped） |
 | 故意把竹竿状态换成空气（`--seeds 2 --chunks 24 --salt 33`） | 160 处不一致（确认非假绿；同时暴露 27 处 terrain 既有差异） |
-| `minecraft:vines`（`--seeds 1 --chunk -784 -132 --scan 3 --steps 9`） | 8 处差异，全部是 terrain 既有差异（`--steps 0` 同样复现），但**藤蔓未被调用**（候选 0 次），不算验证 |
+| `minecraft:vines`（`--seeds 1 --chunk -600 -438 --scan 3 --steps 9 --feature-types minecraft:vines`） | **0 不一致**（9 中心 / 7962624 方块 / 0 skipped）；临时日志确认藤蔓叶子被调用 **1312 次**；故意把面属性固定成 `north` 后同命令报 **17 处**（`vine -> vine`），确认非空跑 |
 | `minecraft:glow_lichen`（`--seeds 2 --chunks 20 --salt 11 --steps 9`） | **0 不一致**（40 中心 / 35389440 方块 / 0 skipped）；关掉扩散后同命令报 70 处（确认非空跑）。轨迹 126 → 102 → 70 → 0 |
 | `minecraft:spore_blossom`（lush_caves，`--seeds 1 --chunk -600 -598 --scan 3 --steps 9`） | 0 不一致但 **simple_block 叶子被调用 0 次**，`environment_scan` 把候选全滤掉，不算验证 |
 | 6 个 `random_selector` 树（`--seeds 2 --chunks 24 --salt 13 --steps 9`） | **0 不一致**（48 中心 / 42467328 方块，0 skipped） |
