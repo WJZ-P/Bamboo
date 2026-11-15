@@ -582,4 +582,110 @@ mod tests {
         assert_eq!(rotated_size(Rotation::None, (4, 5, 6)), (4, 5, 6));
         assert_eq!(rotated_size(Rotation::Clockwise180, (4, 5, 6)), (4, 5, 6));
     }
+
+    /// 造一个 9 区块的实心石头世界，把 y < 0 的部分留给化石。
+    ///
+    /// A nine-chunk solid-stone world; the sub-zero band is where the fossil lands.
+    fn solid_world() -> crate::feature::FeatureChunks {
+        let min_y = -64;
+        let height = 384;
+        let chunk_blocks = || {
+            let mut blocks = Vec::with_capacity(height);
+            for _ in 0..height {
+                blocks.push(vec![mc_bamboo_data::blocks::STONE; 256]);
+            }
+            blocks
+        };
+        let sections = || {
+            let mut out = Vec::new();
+            for _ in 0..(height / 16) {
+                out.push(vec![0_u32; 64]);
+            }
+            out
+        };
+        crate::feature::FeatureChunks {
+            center_x: 0,
+            center_z: 0,
+            min_y,
+            height: height as i32,
+            blocks: std::array::from_fn(|_| chunk_blocks()),
+            biomes: std::array::from_fn(|_| sections()),
+            heights: std::array::from_fn(|_| crate::feature::Heightmaps::new(min_y)),
+        }
+    }
+
+    #[test]
+    fn the_exported_fossil_writes_template_blocks() {
+        // 用导出数据里**真实的** `fossil_coal` 跑一遍 `place`：实心石头世界里
+        // `countEmptyCorners` 一个空角都看不到，`max_empty_corners_allowed = 4`
+        // 必然通过，所以放置路径一定会执行。
+        //
+        // Run the **exported** `fossil_coal` through `place`: in a solid-stone world
+        // `countEmptyCorners` sees no air at all, so the four-corner budget always
+        // passes and the placement path runs.
+        let feature = FossilFeature::parse(&fossil_config()).expect("fossil parses");
+        let input = solid_world();
+        let mut world = FeatureWorld::new(&input, 63, 0).unwrap();
+        let random =
+            crate::random::WorldgenRandom::new(crate::random::Algorithm::Xoroshiro.new_instance(3));
+        let placed = feature.place(&mut world, &random, (8, 0, 8));
+        assert!(placed, "the exported fossil must place in a solid world");
+
+        // 至少有一格不是石头：模板把石头换成了骨块 / 煤矿之类。
+        // At least one cell must differ from stone: the template swaps in bone blocks,
+        // coal ore and the like.
+        let mut changed = 0;
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in -64..-40 {
+                    if world.get_block(x, y, z) != mc_bamboo_data::blocks::STONE {
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        assert!(changed > 0, "the fossil template must write blocks");
+    }
+
+    #[test]
+    fn block_rot_drops_cells_below_the_integrity() {
+        // `block_rot` 每格取一次 `nextFloat`，`<= integrity` 才保留。integrity 0 时
+        // 没有任何格子能留下，所以模板一格都写不出来。
+        //
+        // `block_rot` draws one `nextFloat` per cell and keeps it when `<= integrity`.
+        // With integrity 0 nothing survives, so the template writes nothing.
+        let chain = Chain {
+            steps: vec![Step::BlockRot {
+                integrity: 0.0,
+                rottable: None,
+            }],
+        };
+        let template =
+            StructureTemplate::load_cached("minecraft:fossil/spine_1").expect("template loads");
+        let input = solid_world();
+        let mut world = FeatureWorld::new(&input, 63, 0).unwrap();
+        let random =
+            crate::random::WorldgenRandom::new(crate::random::Algorithm::Xoroshiro.new_instance(5));
+        place_in_world(
+            &template,
+            &mut world,
+            &random,
+            Rotation::None,
+            (8, 0, 8),
+            &chain,
+            (-16, -64, -16),
+            (48, 320, 48),
+        );
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in -64..-40 {
+                    assert_eq!(
+                        world.get_block(x, y, z),
+                        mc_bamboo_data::blocks::STONE,
+                        "integrity 0 must drop every cell"
+                    );
+                }
+            }
+        }
+    }
 }
