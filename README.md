@@ -484,11 +484,28 @@ WebView2 的渲染进程不算在内。
   `isStructureChunk` 命中过滤（那是已对拍的 `start_plans` 的职责），`StructureStart` 仍只是数据类型。
   本轮新增并完成对拍的里程碑：四个代码生成单件结构（沙漠神殿、丛林神殿、女巫小屋、
   埋藏的宝藏）的结构件布局（`structure-single`，8 种子 × 12 区块 × 4 类 = 384 查询、
-  384 结构件、384 行比较 0 不一致）；存档 `structures` 键
+  384 结构件、384 行比较 0 不一致）；雪屋 / 沉船 / 海底遗迹三种需要 `.nbt` 模板的单件结构
+  布局（`structure-templated`，8 种子 × 12 区块 × 5 类 = 480 查询、1685 结构件、1685 行
+  比较 0 不一致——雪屋覆盖 3 个模板 / 4 种 rotation / 1–12 件的深度分支，沉船覆盖 23 个
+  模板（沙滩表 11 + 海洋表 20，两表重叠 8 个）、海底遗迹覆盖暖 / 冷两种群系、48 个模板、
+  大遗迹 cluster 分支 3–27 件；三处故意改坏——雪屋梯子 pivot 262 处、沉船 pivot 142 处、
+  海底遗迹 cluster 位置下界 68 处与冷水完好度 263 处——确认失败后还原回 0）；废弃传送门的
+  结构件布局（`structure-ruined-portal`，6 个结构变体 × 6 种子 × 18 区块 = 648 查询、
+  110 个结构件、110 行比较 0 不一致——覆盖五种 `VerticalPlacement`（`in_nether` 不做）、
+  `Mirror.FRONT_BACK` 与 `NONE`、`can_be_cold` 真假，`findSuitableY` 走新增的
+  `Generator::base_column` 整列原语；两处故意改坏——`findSuitableY` 的三格门槛改两格 23 处、
+  `MIRROR_FRONT_BACK` 常量 2 改 1 68 处——确认失败后还原回 0）；存档
+  `structures` 键
   （`structure-save`，8 case 的规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、
-  `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。仍没做：需要模板的单件结构
-  （雪屋、沉船、海底遗迹、废弃传送门）、jigsaw 结构件生成、`features` 阶段的 `placeInChunk` /
-  `postProcess` / processors / 方块实体 / 拼图替换，以及把结构起点真正接进 Director（`Beardifier` 见下面单独一条）；
+  `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。仍没做：
+  jigsaw 结构件生成、`features` 阶段的 `placeInChunk` /
+  `postProcess` / processors / 方块实体 / 拼图替换。`structure::post_process` 里有埋藏的宝藏
+  与女巫小屋、沙漠神殿三份 `postProcess` 的方块部分，新对拍 `structure-place` 按**写入日志**
+  逐格比较（比「写前写后的状态差异」严格：结构写在地形上的方块不算状态变化，但官方确实写了）：
+  32 查询里**埋藏的宝藏 16 查询 0 不一致**，**女巫小屋 18 处不一致（未通过）**——Java 的地下
+  柱子比 Rust 低一格，根因还没定位；沙漠神殿没进查询集（`SKIPPED`），最后一次实测 6953 处
+  不一致。三份 `postProcess` **都没有接进 `feature/run.rs`**，游戏里结构件仍然一个方块都不放。
+  另有把结构起点真正接进 Director（`Beardifier` 见下面单独一条）；
   `.nbt` 结构模板已由 `cb-wg-jigsaw` 分支从官方 jar 原样导出成
   `mc-bamboo-data::structures`（1511 个、4236847 gzip 字节，重跑无 diff），并用官方
   `NbtIo` 逐节点对拍 0 不一致；Rust 侧 `structure::template` 能读出方块、方块实体和拼图方块。

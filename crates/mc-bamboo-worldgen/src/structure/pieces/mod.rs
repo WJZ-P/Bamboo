@@ -276,6 +276,20 @@ impl Piece {
         self.extras.insert(key.to_owned(), Extra::Int(value));
     }
 
+    /// 浮点 extras：按 Java `Float.toString` 的写法（整数也带 `.0`），对拍两侧一致。
+    ///
+    /// Float extras written the way Java's `Float.toString` does (integral values keep a
+    /// `.0`), so both oracle sides agree.
+    pub fn put_float(&mut self, key: &str, value: f32) {
+        let text = format!("{value}");
+        let text = if text.contains('.') || text.contains('e') || text.contains("inf") {
+            text
+        } else {
+            format!("{text}.0")
+        };
+        self.extras.insert(key.to_owned(), text);
+    }
+
     pub fn put_bool(&mut self, key: &str, value: bool) {
         self.extras
             .insert(key.to_owned(), Extra::Byte(i8::from(value)));
