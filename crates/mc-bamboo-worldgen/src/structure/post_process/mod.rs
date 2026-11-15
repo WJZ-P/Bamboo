@@ -18,6 +18,7 @@ use crate::{
     structure::place::PieceContext,
 };
 
+pub mod igloo;
 pub mod pyramid;
 pub mod swamp_hut;
 

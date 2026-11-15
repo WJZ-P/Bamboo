@@ -131,10 +131,7 @@ mod tests {
         for seed in [0, 42, -7] {
             let pieces = generate(seed, 3, -5).unwrap();
             let last = pieces.last().unwrap();
-            assert_eq!(
-                last.get_str("Template"),
-                Some("minecraft:igloo/top")
-            );
+            assert_eq!(last.get_str("Template"), Some("minecraft:igloo/top"));
             assert_eq!(pieces, generate(seed, 3, -5).unwrap());
         }
     }
@@ -153,10 +150,7 @@ mod tests {
             } else {
                 saw_basement = true;
                 let lab = &pieces[0];
-                assert_eq!(
-                    lab.get_str("Template"),
-                    Some("minecraft:igloo/bottom")
-                );
+                assert_eq!(lab.get_str("Template"), Some("minecraft:igloo/bottom"));
                 assert_eq!(pieces.len(), (pieces.len() - 2) + 2);
             }
         }

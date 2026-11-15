@@ -377,7 +377,10 @@ mod tests {
                 .unwrap()
                 .to_owned();
             for (i, kind) in ["brick", "cracked", "mossy"].iter().enumerate() {
-                assert_eq!(cold[i].get_str("Template"), Some(cold_template(kind, big, &suffix).as_str()));
+                assert_eq!(
+                    cold[i].get_str("Template"),
+                    Some(cold_template(kind, big, &suffix).as_str())
+                );
             }
             assert_eq!(
                 cold[0].get_str("Integrity"),
