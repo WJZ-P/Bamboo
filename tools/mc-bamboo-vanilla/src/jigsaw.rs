@@ -97,7 +97,23 @@ const STRUCTURES: [&str; 27] = [
     "minecraft:abandoned_camp_wooded_badlands",
 ];
 const SEEDS: [i64; 6] = [0, 1, -1, 42, 12_345_678_901, -98_765_432_123];
-const CHUNKS: [(i32, i32); 6] = [(0, 0), (1, 1), (-5, 7), (34, -34), (12, -3), (-40, 40)];
+const CHUNKS: [(i32, i32); 12] = [
+    (0, 0),
+    (1, 1),
+    (-5, 7),
+    (34, -34),
+    (12, -3),
+    (-40, 40),
+    // 补几个不同群系带：靠近热带、寒带与内陆，提高 `isValidBiome` 的通过率。
+    // Extra chunks from different biome bands (tropical, cold, inland) so more stubs pass
+    // `isValidBiome` and reach `addPieces`.
+    (-120, 260),
+    (300, 410),
+    (-780, -160),
+    (1024, -1024),
+    (37, 512),
+    (-600, 900),
+];
 
 pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), String> {
     match options.first().copied().unwrap_or("templates") {
@@ -3488,6 +3504,16 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
     let mut pieces_checked = 0usize;
     let mut mismatches = 0usize;
     let mut valid_count = 0usize;
+    // 四种结果分开计数，免得「大部分查询只是返回 None」被一个总数掩盖：
+    // `stub_and_valid` = 有起点且群系合法（真正跑完了 `addPieces`）；
+    // `stub_invalid_biome` = 有起点但群系不合法（只验证了 `isValidBiome`）；
+    // `no_stub` = `findGenerationPoint` 返回空（没走到 `addPieces`）。
+    // Four outcomes are counted separately so a bare total cannot hide "most queries just
+    // return None": `stub_and_valid` really ran `addPieces`; `stub_invalid_biome` only
+    // exercised `isValidBiome`; `no_stub` never reached `addPieces`.
+    let mut stub_and_valid = 0usize;
+    let mut stub_invalid_biome = 0usize;
+    let mut no_stub = 0usize;
     let mut first: Option<String> = None;
     // 每种 pool element 类型比到多少件，用来确认五种类型都真的被比过。
     // How many pieces of each pool element type were compared, proving all five ran.
@@ -3539,6 +3565,11 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
             if valid {
                 valid_count += 1;
             }
+            match (&result, valid) {
+                (Some(_), true) => stub_and_valid += 1,
+                (Some(_), false) => stub_invalid_biome += 1,
+                (None, _) => no_stub += 1,
+            }
             let got_p = java_p.get(&key);
             if let Some(diff) = check_query(&result, valid, q, got_p)? {
                 mismatches += 1;
@@ -3571,6 +3602,10 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
     }
     println!("jigsaw pieces: {checked} queries, {pieces_checked} pieces, all Q/P fields identical");
     println!("isValidBiome true for {valid_count}/{checked} queries");
+    println!(
+        "outcomes: stub_and_valid={stub_and_valid} stub_invalid_biome={stub_invalid_biome} \
+         no_stub={no_stub}"
+    );
     let summary = type_counts
         .iter()
         .map(|(name, count)| format!("{name}={count}"))
