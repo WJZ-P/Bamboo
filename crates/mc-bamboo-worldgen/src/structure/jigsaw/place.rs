@@ -252,6 +252,12 @@ pub fn place_processed(
                 }
                 Some(tag) => Some(tag.clone()),
             };
+            // 官方 `blockEntity.loadWithComponents(...)`：nbt 写进方块实体。
+            // Vanilla `blockEntity.loadWithComponents(...)`: the nbt goes into the block
+            // entity.
+            if let Some(tag) = &nbt {
+                world.set_block_entity(pos.0, pos.1, pos.2, tag);
+            }
             placed.placed.push((pos, nbt));
         }
     }
@@ -314,6 +320,14 @@ fn barrier_state() -> u32 {
 /// The minimal block-write interface (`FeatureWorld` and test doubles implement it).
 pub trait BlockWriter {
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool;
+
+    /// 官方 `blockEntity.loadWithComponents(...)`：把 nbt 装进该位置的方块实体。
+    /// 默认什么都不做（还没有方块实体容器的调用方可以先用这份 nbt 自己处理）。
+    ///
+    /// Vanilla `blockEntity.loadWithComponents(...)`: load the nbt into the block entity at
+    /// that position. The default is a no-op so callers without a block-entity store can
+    /// handle the nbt themselves.
+    fn set_block_entity(&mut self, _x: i32, _y: i32, _z: i32, _nbt: &mc_bamboo_nbt::Tag) {}
 }
 
 impl BlockWriter for crate::feature::world::FeatureWorld<'_> {
@@ -902,6 +916,120 @@ mod tests {
         // 两次调用的取数次数不同：第一次多取了 1 次，所以同一个 `random` 的后续值不同。
         // The draw counts differ, so the same `random` yields a different next value.
         let _ = random.next_long();
+    }
+
+    /// `place_processed` 把 nbt 交给 `set_block_entity`（官方的
+    /// `blockEntity.loadWithComponents`）；随机容器的 nbt 里带着放置期生成的
+    /// `LootTableSeed`。
+    ///
+    /// `place_processed` hands the nbt to `set_block_entity` (vanilla's
+    /// `blockEntity.loadWithComponents`); a randomizable container's nbt carries the
+    /// placement-time `LootTableSeed`.
+    #[test]
+    fn place_processed_hands_the_nbt_to_the_block_entity_hook() {
+        use super::{BlockWriter, PlaceBlock, place_processed};
+        use crate::structure::processor::BlockStateSpec;
+        use mc_bamboo_nbt::Tag;
+
+        /// 记录 `set_block_entity` 收到的 nbt。
+        ///
+        /// Records what `set_block_entity` receives.
+        #[derive(Default)]
+        struct World {
+            entities: Vec<((i32, i32, i32), Tag)>,
+        }
+        impl BlockWriter for World {
+            fn set_block(&mut self, _x: i32, _y: i32, _z: i32, _state: u32) -> bool {
+                true
+            }
+            fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &Tag) {
+                self.entities.push(((x, y, z), nbt.clone()));
+            }
+        }
+
+        let bb = crate::structure::BoundingBox {
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            max_x: 10,
+            max_y: 10,
+            max_z: 10,
+        };
+        let blocks = vec![PlaceBlock {
+            pos: (0, 5, 0),
+            state: BlockStateSpec::parse_str("minecraft:chest").unwrap(),
+            nbt: Some(Tag::Compound(vec![(
+                "LootTable".to_owned(),
+                Tag::String("minecraft:chests/simple_dungeon".to_owned()),
+            )])),
+        }];
+        let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(11));
+        let mut world = World::default();
+        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        assert_eq!(world.entities.len(), 1, "one block entity written");
+        let (pos, tag) = &world.entities[0];
+        assert_eq!(*pos, (0, 5, 0));
+        let Tag::Compound(entries) = tag else {
+            panic!("block entity nbt must be a compound");
+        };
+        assert!(entries.iter().any(|(key, _)| key == "LootTable"));
+        assert!(
+            entries.iter().any(|(key, _)| key == "LootTableSeed"),
+            "a chest gets the placement-time seed"
+        );
+    }
+
+    /// 不是随机容器的方块也会把 nbt 交给 `set_block_entity`，只是不带 `LootTableSeed`。
+    ///
+    /// A non-container block also hands its nbt to `set_block_entity`, just without
+    /// `LootTableSeed`.
+    #[test]
+    fn place_processed_hands_nbt_for_plain_blocks_too() {
+        use super::{BlockWriter, PlaceBlock, place_processed};
+        use crate::structure::processor::BlockStateSpec;
+        use mc_bamboo_nbt::Tag;
+
+        #[derive(Default)]
+        struct World {
+            entities: usize,
+        }
+        impl BlockWriter for World {
+            fn set_block(&mut self, _x: i32, _y: i32, _z: i32, _state: u32) -> bool {
+                true
+            }
+            fn set_block_entity(&mut self, _x: i32, _y: i32, _z: i32, _nbt: &Tag) {
+                self.entities += 1;
+            }
+        }
+        let bb = crate::structure::BoundingBox {
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            max_x: 10,
+            max_y: 10,
+            max_z: 10,
+        };
+        let blocks = vec![
+            PlaceBlock {
+                pos: (0, 0, 0),
+                state: BlockStateSpec::parse_str("minecraft:stone").unwrap(),
+                nbt: Some(Tag::Compound(vec![(
+                    "Marker".to_owned(),
+                    Tag::String("x".to_owned()),
+                )])),
+            },
+            // 没有 nbt 的方块不触发。
+            // A block without nbt does not trigger it.
+            PlaceBlock {
+                pos: (1, 0, 0),
+                state: BlockStateSpec::parse_str("minecraft:stone").unwrap(),
+                nbt: None,
+            },
+        ];
+        let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0));
+        let mut world = World::default();
+        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        assert_eq!(world.entities, 1, "only the block with nbt");
     }
 
     /// 完整链路：模板 → processor 链 → 写入，只写 `chunk_bb` 内的位置，且写出的状态
