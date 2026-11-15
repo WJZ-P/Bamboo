@@ -484,12 +484,15 @@ WebView2 的渲染进程不算在内。
   step 7 地下装饰里的 `sculk_vein` 由 `multiface_growth` 覆盖（代码来自 `cb-wg-aquatic`），
   在 `deep_dark` 定点对拍 0 不一致；**注意默认坐标（`FIXED_CHUNKS` + 随机）下它一次都不放方块，
   必须用 `--chunk -42 111 --scan N`（种子 0 的 `deep_dark`）才比得到**。
-  `sculk_patch`（`SculkPatchFeature` + `SculkSpreader`）的移植已写在
-  `feature/sculk_patch.rs`，但**还没对拍到 0 不一致，所以不接入 dispatch**：
-  `parse_leaf` 对它返回 `None`，主循环把 `sculk_patch_deep_dark` 整块标 `unsupported`。
-  现状是 `deep_dark` 那个区块比官方少 8 格方块（单区块 8 mismatches、`--scan 3` 160 处），
-  `--steps 0` 基线为 0 可确认差异来自这一步。两边的写入序列前 21 行一致、第 22 行分叉，
-  怀疑是同一格 `sculk_vein` 的面集合在两个时间点不同，细节见汇报。
+  `sculk_patch`（`SculkPatchFeature` + `SculkSpreader`）也已移植到
+  `feature/sculk_patch.rs` 并**对拍 0 不一致**：`--steps 7 --types
+  minecraft:sculk_patch_deep_dark --chunk -42 111 --scan 3` 在三种子 / 三种扫描尺寸下
+  均 0 不一致 / 0 skipped（最多 27 中心 / 23887872 方块），把 `attemptPlaceSculk`
+  写死的方块换成石头会报 160 处，确认不是空跑。step 7 全 7 个 placed feature
+  一起放开也是 0 不一致。踩过的坑：`BlockPos.betweenClosed` 的遍历顺序是
+  **x 内层、y 中层、z 外层**，按 x 外层写会让 `ChargeCursor` 的邻格洗牌从不同的
+  格子起步，导致所有游标走错路径（写入总量反而更多，但位置全偏）。
+  `sculk_patch_ancient_city`（古城结构专用，`placement` 为空）没做。
   其余非植被类型（`lake`、`geode`、`iceberg`、`block_blob`、`monster_room`、`fossil`、
   `overlay`）以及全部植被类型，在完整 11 步对拍里仍标 `unsupported` / `skipped`：
   `fossil` 要生成器导出结构模板、`monster_room` 要刷怪笼 / 战利品表 / 方块实体；
