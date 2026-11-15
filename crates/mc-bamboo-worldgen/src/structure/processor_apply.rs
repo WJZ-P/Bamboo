@@ -67,8 +67,18 @@ pub struct ProcessBlock {
 ///
 /// `StructurePlaceSettings.getRandom(pos)`: derived from the position when no explicit
 /// source is set.
-fn position_random(pos: (i32, i32, i32)) -> Random {
-    Random::Legacy(LegacyRandom::new(positional_seed(pos.0, pos.1, pos.2)))
+/// `StructurePlaceSettings.getRandom(pos)`。`explicit` 为 `Some` 时直接返回它
+/// （官方 `if (this.random != null) return this.random;`），否则按位置派生
+/// `RandomSource.create(Mth.getSeed(pos))`。
+///
+/// `StructurePlaceSettings.getRandom(pos)`: returns `explicit` when set (vanilla
+/// `if (this.random != null) return this.random;`), otherwise derives
+/// `RandomSource.create(Mth.getSeed(pos))`.
+fn settings_random(explicit: Option<&Random>, pos: (i32, i32, i32)) -> Random {
+    match explicit {
+        Some(random) => random.clone(),
+        None => Random::Legacy(LegacyRandom::new(positional_seed(pos.0, pos.1, pos.2))),
+    }
 }
 
 /// `RuleTest.test(state, pos, random)`。
@@ -201,6 +211,7 @@ pub fn process_block(
     block: &ProcessBlock,
     reference_pos: (i32, i32, i32),
     level: &impl ProcessorLevel,
+    explicit_random: Option<&Random>,
 ) -> Option<ProcessBlock> {
     match processor {
         Processor::BlockRot {
@@ -217,7 +228,7 @@ pub fn process_block(
             if !in_set {
                 return Some(block.clone());
             }
-            let random = position_random(block.world_pos);
+            let random = settings_random(explicit_random, block.world_pos);
             if random.next_float() <= *integrity {
                 Some(block.clone())
             } else {
@@ -227,7 +238,7 @@ pub fn process_block(
         Processor::Rule { rules } => {
             // 每个方块一个随机源，整条规则链共用（官方在同一函数里只建一次）。
             // One source per block, shared by the whole rule chain (vanilla builds it once).
-            let random = position_random(block.world_pos);
+            let random = settings_random(explicit_random, block.world_pos);
             for rule in rules {
                 if rule_matches(rule, block, reference_pos, level, &random) {
                     let mut out = block.clone();
@@ -252,10 +263,39 @@ pub fn process_block(
     }
 }
 
+/// `StructurePlaceSettings` 里与本模块相关的部分：位置、参考点、块过滤、随机源。
+///
+/// The parts of `StructurePlaceSettings` this module needs: position, reference point,
+/// bounding box and random source.
+#[derive(Clone, Copy)]
+pub struct PlaceSettings<'a> {
+    /// 结构件位置（`Piece::position`），`CappedProcessor` 用它派生随机源。
+    ///
+    /// The piece position, used by `CappedProcessor` to derive its random source.
+    pub piece_position: (i32, i32, i32),
+    /// `placeInChunk` 的参考点，供 `position_predicate` 用。
+    ///
+    /// The reference position passed to `placeInChunk`, used by `position_predicate`.
+    pub reference_pos: (i32, i32, i32),
+    /// `settings.getBoundingBox()`；`None` 表示不过滤。
+    ///
+    /// `settings.getBoundingBox()`; `None` means no filtering.
+    pub chunk_bb: Option<BoundingBox>,
+    /// 世界种子，`CappedProcessor.finalizeProcessing` 用它派生随机源。
+    ///
+    /// The level seed, used by `CappedProcessor.finalizeProcessing`.
+    pub level_seed: i64,
+    /// `settings.getRandom()` 显式设置的随机源；`None` 时按方块位置派生。
+    ///
+    /// An explicit `settings.getRandom()` source; `None` derives one from the block
+    /// position.
+    pub explicit_random: Option<&'a Random>,
+}
+
 /// `StructureTemplate.processBlockInfos` 的编排：逐方块跑 processor 链，再跑
 /// `finalizeProcessing`。
 ///
-/// `chunk_bb` 对应官方的 `settings.getBoundingBox()`：
+/// `settings.chunk_bb` 对应官方的 `settings.getBoundingBox()`：
 ///
 /// * 只要 processor 链里没有任何一个 `evaluatesEntirePieceState()` 为真（26.3 只有
 ///   `CappedProcessor` 会返回 true），且 `chunk_bb` 存在，就**只处理落在 `chunk_bb` 内的
@@ -264,19 +304,24 @@ pub fn process_block(
 /// * `chunk_bb` 为 `None` 表示不过滤（官方 `settings.getBoundingBox() == null`）。
 ///
 /// The `StructureTemplate.processBlockInfos` orchestration: run the processor chain per
-/// block, then `finalizeProcessing`. `chunk_bb` mirrors `settings.getBoundingBox()`: when
-/// no processor evaluates the whole piece state (in 26.3 only `CappedProcessor` does) and
-/// a bounding box is set, only blocks inside it are processed. That governs the length of
-/// `processedBlockInfoList`, hence the index range `CappedProcessor` shuffles over.
+/// block, then `finalizeProcessing`. `settings.chunk_bb` mirrors
+/// `settings.getBoundingBox()`: when no processor evaluates the whole piece state (in
+/// 26.3 only `CappedProcessor` does) and a bounding box is set, only blocks inside it are
+/// processed. That governs the length of `processedBlockInfoList`, hence the index range
+/// `CappedProcessor` shuffles over.
 pub fn process_blocks(
     processors: &[Processor],
     blocks: &[ProcessBlock],
-    piece_position: (i32, i32, i32),
-    reference_pos: (i32, i32, i32),
     level: &impl ProcessorLevel,
-    level_seed: i64,
-    chunk_bb: Option<BoundingBox>,
+    settings: PlaceSettings<'_>,
 ) -> Vec<ProcessBlock> {
+    let PlaceSettings {
+        piece_position,
+        reference_pos,
+        chunk_bb,
+        level_seed,
+        explicit_random,
+    } = settings;
     // 官方先扫一遍 processor 决定是否整件处理。
     // Vanilla first scans the processors to decide whether to process the whole piece.
     let process_only_in_current_chunk = processors
@@ -299,7 +344,7 @@ pub fn process_blocks(
             let Some(block_now) = current else {
                 break;
             };
-            current = process_block(processor, &block_now, reference_pos, level);
+            current = process_block(processor, &block_now, reference_pos, level, explicit_random);
         }
         if let Some(block_now) = current {
             originals.push(block.clone());
@@ -381,7 +426,8 @@ fn finalize_capped<L: ProcessorLevel>(input: CappedInput<'_, L>) -> Vec<ProcessB
         // `processedBlockInfoList.get(index)`。
         // Vanilla passes `originalBlockInfo.pos()` as `templateRelativePos` while processing
         // `processedBlockInfoList.get(index)`.
-        if let Some(altered) = process_block(delegate, &processed[index], reference_pos, level)
+        if let Some(altered) =
+            process_block(delegate, &processed[index], reference_pos, level, None)
             && altered != processed[index]
         {
             replaced += 1;
@@ -431,6 +477,23 @@ mod tests {
         }
     }
 
+    /// 构造一份默认 settings：位置 / 参考点 / 可选盒，世界种子 0、无显式随机源。
+    ///
+    /// Default settings: positions, optional box, level seed 0, no explicit source.
+    fn settings(
+        piece: (i32, i32, i32),
+        reference: (i32, i32, i32),
+        chunk_bb: Option<BoundingBox>,
+    ) -> PlaceSettings<'static> {
+        PlaceSettings {
+            piece_position: piece,
+            reference_pos: reference,
+            chunk_bb,
+            level_seed: 0,
+            explicit_random: None,
+        }
+    }
+
     fn state(name: &str) -> BlockStateSpec {
         BlockStateSpec::parse_str(name).unwrap()
     }
@@ -465,7 +528,8 @@ mod tests {
                 &processor,
                 &block((0, 64, 0), "minecraft:stone"),
                 (0, 64, 0),
-                &level
+                &level,
+                None
             )
             .is_some()
         );
@@ -478,7 +542,8 @@ mod tests {
                 &processor,
                 &block((0, 64, 0), "minecraft:stone"),
                 (0, 64, 0),
-                &level
+                &level,
+                None
             )
             .is_none()
         );
@@ -496,7 +561,8 @@ mod tests {
                 &processor,
                 &block((0, 64, 0), "minecraft:stone"),
                 (0, 64, 0),
-                &level
+                &level,
+                None
             )
             .is_some()
         );
@@ -505,7 +571,8 @@ mod tests {
                 &processor,
                 &block((0, 64, 0), "minecraft:deepslate_bricks"),
                 (0, 64, 0),
-                &level
+                &level,
+                None
             )
             .is_none()
         );
@@ -545,6 +612,7 @@ mod tests {
             &block((0, 64, 0), "minecraft:stone"),
             (0, 64, 0),
             &level,
+            None,
         )
         .unwrap();
         assert_eq!(out.state.name, "minecraft:cobblestone");
@@ -577,6 +645,7 @@ mod tests {
             &block((0, 64, 0), "minecraft:dirt"),
             (0, 64, 0),
             &level,
+            None,
         )
         .unwrap();
         assert_eq!(out.state.name, "minecraft:gravel");
@@ -599,7 +668,8 @@ mod tests {
                 &processor,
                 &block((0, 64, 0), "minecraft:stone"),
                 (0, 64, 0),
-                &level
+                &level,
+                None
             )
             .is_none()
         );
@@ -613,7 +683,8 @@ mod tests {
                 &processor,
                 &block((0, 64, 0), "minecraft:stone"),
                 (0, 64, 0),
-                &level
+                &level,
+                None
             )
             .is_some()
         );
@@ -651,11 +722,8 @@ mod tests {
         let out = process_blocks(
             &processors,
             &blocks,
-            (0, 64, 0),
-            (0, 64, 0),
             &level,
-            0,
-            None,
+            settings((0, 64, 0), (0, 64, 0), None),
         );
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].state.name, "minecraft:cobblestone");
@@ -694,7 +762,7 @@ mod tests {
             world_pos: (0, 200, 0),
             state: state("minecraft:stone"),
         };
-        let out = process_block(&processor, &far, (0, 0, 0), &level).unwrap();
+        let out = process_block(&processor, &far, (0, 0, 0), &level, None).unwrap();
         assert_eq!(out.state.name, "minecraft:gold_block");
 
         // chance 恒 0.0 -> `nextFloat()` 几乎不会等于 0，所以不命中。
@@ -714,7 +782,7 @@ mod tests {
                 block_entity_modifier: RuleBlockEntityModifier::Passthrough,
             }],
         };
-        let out = process_block(&processor, &far, (0, 0, 0), &level).unwrap();
+        let out = process_block(&processor, &far, (0, 0, 0), &level, None).unwrap();
         assert_eq!(out.state.name, "minecraft:stone");
     }
 
@@ -723,6 +791,39 @@ mod tests {
     ///
     /// `chunkBB` lets only inside blocks through unless the chain has a `capped`
     /// (whose `evaluatesEntirePieceState()` turns the filter off).
+    /// `settings.getRandom(pos)`：给了显式随机源就用它，否则按位置派生。
+    /// 用 `block_rot`（每方块只取一次 `nextFloat`）验证两条路径取到不同的值。
+    ///
+    /// `settings.getRandom(pos)`: the explicit source wins; otherwise it is derived from
+    /// the position. `block_rot` (one `nextFloat` per block) shows the two paths differ.
+    #[test]
+    fn explicit_random_overrides_the_positional_source() {
+        let level = OneState {
+            state: state("minecraft:air"),
+            tag_blocks: Vec::new(),
+        };
+        // `(0,64,0)` 的位置随机源首个 `nextFloat` 是 0.9703，所以 `integrity = 0.95` 会丢弃。
+        // The `(0,64,0)` source's first `nextFloat` is 0.9703, so `integrity = 0.95` drops.
+        let processor = Processor::BlockRot {
+            integrity: 0.95,
+            rottable_blocks: None,
+        };
+        let b = block((0, 64, 0), "minecraft:stone");
+        assert!(
+            process_block(&processor, &b, (0, 64, 0), &level, None).is_none(),
+            "no explicit source: the positional roll discards"
+        );
+
+        // 显式随机源的首个 `nextFloat` 取一个确定的小值：换成 seed 0 的 LegacyRandom，
+        // 它的首个 `nextFloat` 是 0.7309（< 0.95），所以保留。
+        // An explicit source whose first `nextFloat` is small keeps the block.
+        let explicit = Random::Legacy(LegacyRandom::new(0));
+        assert!(
+            process_block(&processor, &b, (0, 64, 0), &level, Some(&explicit)).is_some(),
+            "explicit source overrides the positional roll"
+        );
+    }
+
     #[test]
     fn chunk_bb_filters_unless_capped_is_present() {
         let level = OneState {
@@ -746,11 +847,21 @@ mod tests {
         }];
         // 没有 capped：只处理盒内那一个。
         // No `capped`: only the inside block is processed.
-        let out = process_blocks(&plain, &blocks, (0, 0, 0), (0, 0, 0), &level, 0, Some(bb));
+        let out = process_blocks(
+            &plain,
+            &blocks,
+            &level,
+            settings((0, 0, 0), (0, 0, 0), Some(bb)),
+        );
         assert_eq!(out.len(), 1);
         // `chunk_bb = None` 时不过滤。
         // `chunk_bb = None` does not filter.
-        let out = process_blocks(&plain, &blocks, (0, 0, 0), (0, 0, 0), &level, 0, None);
+        let out = process_blocks(
+            &plain,
+            &blocks,
+            &level,
+            settings((0, 0, 0), (0, 0, 0), None),
+        );
         assert_eq!(out.len(), 2);
         // 有 capped（limit 0 也够，因为只看 `evaluatesEntirePieceState`）：不过滤。
         // With a `capped` even at limit 0 (only `evaluatesEntirePieceState` matters): no filter.
@@ -763,11 +874,8 @@ mod tests {
         let out = process_blocks(
             &with_capped,
             &blocks,
-            (0, 0, 0),
-            (0, 0, 0),
             &level,
-            0,
-            Some(bb),
+            settings((0, 0, 0), (0, 0, 0), Some(bb)),
         );
         assert_eq!(out.len(), 2);
     }
@@ -800,11 +908,8 @@ mod tests {
         let out = process_blocks(
             &processors,
             &blocks,
-            (0, 64, 0),
-            (0, 64, 0),
             &level,
-            0,
-            None,
+            settings((0, 64, 0), (0, 64, 0), None),
         );
         let changed = out
             .iter()

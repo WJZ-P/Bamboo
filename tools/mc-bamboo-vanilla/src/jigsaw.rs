@@ -1266,11 +1266,14 @@ fn compare_apply(stdout: &str, queries: &[String], lists: &ProcessorLists) -> Re
         let processed = processor_apply::process_blocks(
             &zero_capped,
             &blocks,
-            piece,
-            reference,
             &level,
-            0,
-            chunk_bb,
+            processor_apply::PlaceSettings {
+                piece_position: piece,
+                reference_pos: reference,
+                chunk_bb,
+                level_seed: 0,
+                explicit_random: None,
+            },
         );
 
         checked += 1;
@@ -1316,15 +1319,14 @@ fn compare_apply(stdout: &str, queries: &[String], lists: &ProcessorLists) -> Re
             let via_delegate = processor_apply::process_blocks(
                 std::slice::from_ref(delegate.as_ref()),
                 &blocks,
-                piece,
-                reference,
                 &level,
-                0,
-                // 官方那边 delegate 单独跑时用的是 `delegateSettings`，它**带了**同一个
-                // `chunkBB`（而且没有 capped，所以走 `processOnlyInCurrentChunk` 的过滤）。
-                // Vanilla runs the delegate with `delegateSettings`, which carries the same
-                // `chunkBB` and has no `capped`, so it does filter.
-                chunk_bb,
+                processor_apply::PlaceSettings {
+                    piece_position: piece,
+                    reference_pos: reference,
+                    chunk_bb,
+                    level_seed: 0,
+                    explicit_random: None,
+                },
             );
             let Some(want_count) = java_c.get(&key) else {
                 continue;

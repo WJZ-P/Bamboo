@@ -133,6 +133,11 @@ impl PoolElement {
                         .collect::<Result<Vec<_>, _>>()?,
                     _ => return Err("list pool element has no elements".to_owned()),
                 };
+                // `ListPoolElement`'s constructor throws for an empty list, so read-back
+                // must reject it too.
+                if elements.is_empty() {
+                    return Err("list pool element has an empty elements list".to_owned());
+                }
                 Ok(Self::List {
                     elements,
                     projection: projection_from_name(
@@ -478,6 +483,50 @@ mod tests {
                 Tag::String("ignore_waterlogging".to_owned()),
             ),
         ])
+    }
+
+    /// 空的 `list_pool_element` 在读回时也必须被拒绝（官方构造器抛异常）。
+    ///
+    /// An empty `list_pool_element` must be rejected on read-back too (vanilla's
+    /// constructor throws).
+    #[test]
+    fn empty_list_pool_element_is_rejected_on_read_back() {
+        let empty_list = Tag::Compound(vec![
+            (
+                "element_type".to_owned(),
+                Tag::String("minecraft:list_pool_element".to_owned()),
+            ),
+            ("elements".to_owned(), Tag::List(Vec::new())),
+            ("projection".to_owned(), Tag::String("rigid".to_owned())),
+        ]);
+        assert!(PoolElement::from_tag(&empty_list).is_err());
+
+        // 非空列表仍然可以读回。
+        // A non-empty list still reads back.
+        let one = Tag::Compound(vec![
+            (
+                "element_type".to_owned(),
+                Tag::String("minecraft:single_pool_element".to_owned()),
+            ),
+            (
+                "location".to_owned(),
+                Tag::String("minecraft:empty".to_owned()),
+            ),
+            ("projection".to_owned(), Tag::String("rigid".to_owned())),
+            (
+                "processors".to_owned(),
+                Tag::Compound(vec![("processors".to_owned(), Tag::List(Vec::new()))]),
+            ),
+        ]);
+        let non_empty = Tag::Compound(vec![
+            (
+                "element_type".to_owned(),
+                Tag::String("minecraft:list_pool_element".to_owned()),
+            ),
+            ("elements".to_owned(), Tag::List(vec![one])),
+            ("projection".to_owned(), Tag::String("rigid".to_owned())),
+        ]);
+        assert!(PoolElement::from_tag(&non_empty).is_ok());
     }
 
     /// 全部子类字段都要读回，且包围盒按元素重算（不是存档里的 `BB`）。
