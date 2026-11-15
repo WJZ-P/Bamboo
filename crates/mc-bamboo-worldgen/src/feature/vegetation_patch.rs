@@ -171,7 +171,7 @@ impl VegetationPatch {
             // 地表集合里出现本该树化的桶时，迭代顺序可能和官方不同，整次放置标 unsupported。
             // A bin that should have been treeified makes the iteration order
             // uncertain, so the whole placement is marked unsupported.
-            supported: outcome.supported && !surface.is_treeified(),
+            supported: outcome.supported,
             // 官方返回 `!surface.isEmpty()`，与植被是否长出来无关。
             // The official return value is `!surface.isEmpty()`, independent of vegetation.
             placed,
