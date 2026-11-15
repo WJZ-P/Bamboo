@@ -40,6 +40,10 @@ struct ShapeLevel<'w, 'a> {
     redstone: RedstoneMemory,
     entities: EntityStore,
     random: LevelRandom,
+    /// 这次更新写下的方块，供调用方记写入日志（对拍用）。
+    ///
+    /// Blocks written by this update, so the caller can log them (oracle only).
+    writes: Vec<(i32, i32, i32, u32)>,
 }
 
 impl LevelTables for ShapeLevel<'_, '_> {
@@ -84,8 +88,13 @@ impl Level for ShapeLevel<'_, '_> {
     }
 
     fn write_block(&mut self, pos: BlockPos, state: BlockState, _flags: u32) -> bool {
-        self.world
-            .set_block_with_heightmaps(pos.x, pos.y, pos.z, state.0)
+        let written = self
+            .world
+            .set_block_with_heightmaps(pos.x, pos.y, pos.z, state.0);
+        if written {
+            self.writes.push((pos.x, pos.y, pos.z, state.0));
+        }
+        written
     }
 
     fn is_unobstructed(&self, _boxes: &[Aabb]) -> bool {
@@ -197,6 +206,7 @@ pub fn update_from_neighbour_shapes(world: &mut FeatureWorld<'_>, pos: Pos) -> u
         redstone: RedstoneMemory::default(),
         entities: EntityStore::default(),
         random: LevelRandom::new(0),
+        writes: Vec::new(),
     };
     let block_pos = BlockPos::new(pos.0, pos.1, pos.2);
     let mut state = level.block_state(block_pos);
@@ -227,10 +237,9 @@ pub fn update_shape_at_edge(
     shape: &HashSet<Pos>,
     min: Pos,
     max: Pos,
-) {
-    update_shape_at_edge_impl(world, shape, min, max, false);
+) -> Vec<(i32, i32, i32, u32)> {
+    update_shape_at_edge_impl(world, shape, min, max, false)
 }
-
 /// 只更新形状**外侧**邻居那一半（跳过形状内格子的 `updateShape`）。
 ///
 /// 模板放置用这个：内侧格子随后由 `Block.updateFromNeighbourShapes` 按
@@ -247,8 +256,8 @@ pub fn update_shape_at_edge_outside_only(
     shape: &HashSet<Pos>,
     min: Pos,
     max: Pos,
-) {
-    update_shape_at_edge_impl(world, shape, min, max, true);
+) -> Vec<(i32, i32, i32, u32)> {
+    update_shape_at_edge_impl(world, shape, min, max, true)
 }
 
 fn update_shape_at_edge_impl(
@@ -257,7 +266,7 @@ fn update_shape_at_edge_impl(
     min: Pos,
     max: Pos,
     outside_only: bool,
-) {
+) -> Vec<(i32, i32, i32, u32)> {
     let size = [max.0 - min.0 + 1, max.1 - min.1 + 1, max.2 - min.2 + 1];
     let mut level = ShapeLevel {
         world,
@@ -266,6 +275,7 @@ fn update_shape_at_edge_impl(
         redstone: RedstoneMemory::default(),
         entities: EntityStore::default(),
         random: LevelRandom::new(0),
+        writes: Vec::new(),
     };
     // `DiscreteVoxelShape.forAllFaces`：三个轴各扫一遍。
     // `DiscreteVoxelShape.forAllFaces`: one sweep per axis.
@@ -298,6 +308,7 @@ fn update_shape_at_edge_impl(
             }
         }
     }
+    level.writes
 }
 
 /// `updateShapeAtEdge` 里对一个面的处理：先更新形状内的这一格，再更新面对面的邻居。
@@ -315,15 +326,16 @@ fn update_face(
     let state = level.block_state(pos);
     let neighbor = level.block_state(neighbor_pos);
     let mut ticks = BlockTicks::default();
-    let new_state = if outside_only {
-        // 内侧格子交给 `updateFromNeighbourShapes`，这里只把它当作邻居的「新状态」用。
-        // The inside cell is handled by `updateFromNeighbourShapes`; here it only serves as
-        // the neighbour's "new state" argument.
-        state
-    } else {
+    let new_state = {
         let mut world = World::new(level, &mut ticks);
         let updated = state.update_shape(&mut world, pos, direction, neighbor_pos, neighbor);
-        if updated != state {
+        if outside_only {
+            // 内侧格子不写（交给 `updateFromNeighbourShapes`），但邻居的 `updateShape`
+            // 必须拿到**更新后**的状态，和官方一致。
+            // The inside cell is not written (that is `updateFromNeighbourShapes`'s job),
+            // but the neighbour's `updateShape` must receive the **updated** state, as in
+            // vanilla.
+        } else if updated != state {
             level.write_block(pos, updated, 2);
         }
         updated

@@ -428,7 +428,11 @@ pub fn place_in_world(
         // (enabling it takes the shipwreck from 29 to 1706), so only the **outside**
         // neighbours run here — they are the chunk-border fence connections. The inside
         // cells are recomputed by `updateFromNeighbourShapes` below.
-        crate::feature::shape_update::update_shape_at_edge_outside_only(world, &shape, min, max);
+        writes.extend(
+            crate::feature::shape_update::update_shape_at_edge_outside_only(
+                world, &shape, min, max,
+            ),
+        );
         // 再对每个写入位置跑一次 `Block.updateFromNeighbourShapes`。
         // Then run `Block.updateFromNeighbourShapes` on every written position.
         for pos in &placed_positions {
