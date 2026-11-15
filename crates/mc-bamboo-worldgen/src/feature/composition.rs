@@ -19,6 +19,7 @@ use crate::random::WorldgenRandom;
 
 use super::{
     dispatch::{parse_leaf, place_leaf},
+    freeze_top_layer,
     placement::{Modifier, PlaceOutcome, PlacementEnv, place_candidates},
     registry::Registry,
     run::resolve_feature,
@@ -189,6 +190,17 @@ fn place_feature<'a>(
     random: &WorldgenRandom,
     pos: Pos,
 ) -> PlaceOutcome {
+    // `freeze_top_layer` 要逐点群系解析，只有主循环能提供 `BiomeManager` 回调，
+    // 所以它不走 [`place_leaf`]，在这里直接接。
+    // `freeze_top_layer` needs per-point biome resolution, which only the main loop can
+    // supply via a `BiomeManager` callback, so it bypasses [`place_leaf`] here.
+    if kind == "minecraft:freeze_top_layer" {
+        let placed = freeze_top_layer::place(world, random, pos, &mut *env.biome_at);
+        return PlaceOutcome {
+            supported: true,
+            placed,
+        };
+    }
     if let Some(leaf) = parse_leaf(kind, config, &|name| registry.state_provider(name)) {
         let placed = place_leaf(&leaf, world, random, pos);
         return PlaceOutcome {

@@ -13,22 +13,27 @@ pub struct FeatureWorld<'a> {
     pub center_z: i32,
     pub min_y: i32,
     pub height: i32,
+    /// `WorldGenRegion.getSeaLevel()`，来自 `NoiseGeneratorSettings.seaLevel()`。
+    /// `WorldGenRegion.getSeaLevel()`, from `NoiseGeneratorSettings.seaLevel()`.
+    pub sea_level: i32,
     /// 9 个区块的可变方块；中心在 [`CENTER`]。
     pub blocks: [ChunkBlocks; 9],
     /// 只读的 quart 群系格。
     pub biomes: &'a [Vec<Vec<u32>>; 9],
-    /// primed 高度图（terrain 阶段算好的）；`set_block` 会按 `Heightmap.update` 增量更新
-    /// 四种 FINAL 类型。拥有一份可变拷贝，不借用输入，后续 feature 才能读到更新后的值。
+    /// primed 高度图（terrain 阶段算好的）；`set_block_with_heightmaps` 会按
+    /// `Heightmap.update` 增量更新四种 FINAL 类型。拥有一份可变拷贝，不借用输入，
+    /// 后续 feature 才能读到更新后的值。
     ///
-    /// Primed heightmaps, owned so `set_block` can update the four FINAL types
-    /// incrementally via `Heightmap.update`; later features read the updated values.
+    /// Primed heightmaps, owned so `set_block_with_heightmaps` can update the four
+    /// FINAL types incrementally via `Heightmap.update`; later features read the
+    /// updated values.
     pub heights: [Heightmaps; 9],
     /// 8 个邻居的写增量，中心不记（中心直接交回 `blocks[4]`）。
     pub deltas: [Vec<(i32, i32, i32, u32)>; 9],
 }
 
 impl<'a> FeatureWorld<'a> {
-    pub fn new(input: &'a FeatureChunks) -> Result<Self, String> {
+    pub fn new(input: &'a FeatureChunks, sea_level: i32) -> Result<Self, String> {
         if input.blocks.len() != 9 || input.biomes.len() != 9 || input.heights.len() != 9 {
             return Err("FeatureChunks must contain 9 chunks".to_owned());
         }
@@ -38,6 +43,7 @@ impl<'a> FeatureWorld<'a> {
             center_z: input.center_z,
             min_y: input.min_y,
             height: input.height,
+            sea_level,
             blocks: input.blocks.clone(),
             biomes: &input.biomes,
             heights: input.heights,

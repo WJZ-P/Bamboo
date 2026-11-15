@@ -1,30 +1,41 @@
-//! `BlockStateProvider`：`SimpleBlockFeature.to_place` 的三种已移植形态。
+//! `BlockStateProvider`：官方 `BlockStateProvider.DIRECT_CODEC` 是
+//! `Codec.xor(BlockState.FULL_CODEC, TYPED_CODEC)`。裸方块状态（`{"id":...}`）是
+//! `SimpleStateProvider`；带 `type` 的对象按类型分派：`simple`、`rule_based`（DiskFeature
+//! 用 `getOptionalState`，规则都不中时回退）、`weighted`、`randomized_int`、`random_block`。
+//! 字符串形式是 `Holder<BlockStateProvider>`，按名字查 `block_state_provider` 注册表。
 //!
-//! 26.3 的 `to_place` 是 `Holder<BlockStateProvider>`。内联 bare state 等价于
-//! `SimpleStateProvider`（`getState` 不消费随机数）；typed provider 里 `weighted` 用
-//! `WeightedList.getRandomOrThrow`，`randomized_int` 先采样 source 再用 `IntProvider.sample`
-//! 改一个整数属性。holder 字符串引用的是未导出的 `BLOCK_STATE_PROVIDER` 注册表，暂不支持。
-//! 其余 typed provider（noise / dual_noise / noise_threshold / rotated）也暂不支持。
-//!
-//! `BlockStateProvider` shapes ported for `SimpleBlockFeature.to_place`. An inline bare state
-//! is `SimpleStateProvider` (no random consumed); `weighted` uses
-//! `WeightedList.getRandomOrThrow`, `randomized_int` samples its source then overwrites an
-//! integer property with `IntProvider.sample`. Holder references and other typed providers
-//! (noise / dual_noise / noise_threshold / rotated) stay unsupported.
+//! `BlockStateProvider`: official `DIRECT_CODEC` is
+//! `xor(BlockState.FULL_CODEC, TYPED_CODEC)`. A bare block state is a `SimpleStateProvider`;
+//! typed objects dispatch to `simple`, `rule_based` (used by `DiskFeature.getOptionalState`),
+//! `weighted`, `randomized_int` and `random_block`. A string is a
+//! `Holder<BlockStateProvider>` resolved by name against the `block_state_provider` registry.
+//! Unported typed kinds return `None`.
 
 use serde_json::Value;
 
 use crate::random::WorldgenRandom;
 
 use super::{
+    block_predicate::BlockPredicate,
     provider::IntProvider,
     state::{parse_state, with_property},
+    world::FeatureWorld,
 };
 
+type Pos = (i32, i32, i32);
+
 /// 一个已解析的 `BlockStateProvider`。
+///
+/// A parsed `BlockStateProvider`.
+#[derive(Debug, Clone)]
 pub enum StateProvider {
     /// `SimpleStateProvider`：固定状态，不消费随机数。
     Simple(u32),
+    /// `RuleBasedStateProvider`：按顺序试规则，都不中再用 fallback。
+    RuleBased {
+        fallback: Option<Box<StateProvider>>,
+        rules: Vec<(BlockPredicate, StateProvider)>,
+    },
     /// `WeightedStateProvider`：`(weight, state)` 列表。
     Weighted {
         entries: Vec<(i32, u32)>,
@@ -61,44 +72,82 @@ impl StateProvider {
         value: &'a Value,
         lookup: &dyn Fn(&str) -> Option<&'a Value>,
     ) -> Option<Self> {
-        match value {
-            Value::String(name) => Self::parse_with(lookup(name)?, lookup),
-            Value::Object(object) => {
-                let Some(kind) = object.get("type").and_then(Value::as_str) else {
-                    return Some(Self::Simple(parse_state(value).ok()?));
+        let object = match value {
+            Value::String(name) => return Self::parse_with(lookup(name)?, lookup),
+            Value::Object(object) => object,
+            _ => return None,
+        };
+        let Some(kind) = object.get("type").and_then(Value::as_str) else {
+            // 裸方块状态没有 `type`，由 DIRECT_CODEC 的 xor 包成 SimpleStateProvider。
+            // A bare block state has no `type` and is wrapped into SimpleStateProvider.
+            return Some(Self::Simple(parse_state(value).ok()?));
+        };
+        Some(match kind {
+            "minecraft:simple" => Self::Simple(parse_state(object.get("state")?).ok()?),
+            "minecraft:rule_based" => {
+                let fallback = match object.get("fallback") {
+                    Some(value) => Some(Box::new(Self::parse_with(value, lookup)?)),
+                    None => None,
                 };
-                match kind {
-                    "minecraft:weighted" => {
-                        let entries = object
-                            .get("entries")?
-                            .as_array()?
-                            .iter()
-                            .map(|entry| {
-                                let weight = entry.get("weight")?.as_i64()? as i32;
-                                Some((weight, parse_state(entry.get("data")?).ok()?))
-                            })
-                            .collect::<Option<Vec<_>>>()?;
-                        let total: i32 = entries.iter().map(|(weight, _)| *weight).sum();
-                        Some(Self::Weighted { entries, total })
-                    }
-                    "minecraft:randomized_int" => Some(Self::RandomizedInt {
-                        source: Box::new(Self::parse_with(object.get("source")?, lookup)?),
-                        property: object.get("property")?.as_str()?.to_owned(),
-                        values: IntProvider::parse(object.get("values")?).ok()?,
-                    }),
-                    // `RandomBlockProvider`：`blocks` 是 `HolderSet<Block>`，按默认状态取。
-                    // `RandomBlockProvider`: `blocks` is a `HolderSet<Block>`; use defaults.
-                    "minecraft:random_block" => Some(Self::RandomBlock(parse_block_states(
-                        object.get("blocks")?,
-                    )?)),
-                    _ => None,
-                }
+                let rules = object
+                    .get("rules")?
+                    .as_array()?
+                    .iter()
+                    .map(|rule| {
+                        let rule = rule.as_object()?;
+                        let predicate = BlockPredicate::parse(rule.get("if_true")?);
+                        let then = Self::parse_with(rule.get("then")?, lookup)?;
+                        Some((predicate, then))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Self::RuleBased { fallback, rules }
             }
-            _ => None,
+            "minecraft:weighted" => {
+                let entries = object
+                    .get("entries")?
+                    .as_array()?
+                    .iter()
+                    .map(|entry| {
+                        let weight = entry.get("weight")?.as_i64()? as i32;
+                        Some((weight, parse_state(entry.get("data")?).ok()?))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let total: i32 = entries.iter().map(|(weight, _)| *weight).sum();
+                Self::Weighted { entries, total }
+            }
+            "minecraft:randomized_int" => Self::RandomizedInt {
+                source: Box::new(Self::parse_with(object.get("source")?, lookup)?),
+                property: object.get("property")?.as_str()?.to_owned(),
+                values: IntProvider::parse(object.get("values")?).ok()?,
+            },
+            // `RandomBlockProvider`：`blocks` 是 `HolderSet<Block>`，按默认状态取。
+            // `RandomBlockProvider`: `blocks` is a `HolderSet<Block>`; use defaults.
+            "minecraft:random_block" => {
+                Self::RandomBlock(parse_block_states(object.get("blocks")?)?)
+            }
+            _ => return None,
+        })
+    }
+
+    /// 是否全部子提供者 / 谓词都已移植。
+    ///
+    /// Whether every nested provider / predicate is ported.
+    pub fn supported(&self) -> bool {
+        match self {
+            Self::Simple(_)
+            | Self::Weighted { .. }
+            | Self::RandomizedInt { .. }
+            | Self::RandomBlock(_) => true,
+            Self::RuleBased { fallback, rules } => {
+                fallback.as_deref().is_none_or(StateProvider::supported)
+                    && rules.iter().all(|(predicate, provider)| {
+                        predicate.is_supported() && provider.supported()
+                    })
+            }
         }
     }
 
-    /// 所有可能放出的状态（用于检查存活判定是否都已移植）；属性值变化不改变方块类。
+    /// 所有可能放出的状态（用于检查存活判定是否都已移植）；整数属性值不改变方块类。
     ///
     /// Every state this provider may produce (for the survival-check gate); integer
     /// property values do not change the block class.
@@ -108,12 +157,24 @@ impl StateProvider {
             Self::Weighted { entries, .. } => entries.iter().map(|(_, state)| *state).collect(),
             Self::RandomizedInt { source, .. } => source.possible_states(),
             Self::RandomBlock(states) => states.clone(),
+            Self::RuleBased { fallback, rules } => {
+                let mut result = Vec::new();
+                for (_, provider) in rules {
+                    result.extend(provider.possible_states());
+                }
+                if let Some(fallback) = fallback {
+                    result.extend(fallback.possible_states());
+                }
+                result
+            }
         }
     }
 
-    /// 官方 `BlockStateProvider.getState(level, random, pos)`，返回状态 ID。
+    /// 官方 `BlockStateProvider.getState(level, random, pos)`；`rule_based` 需要世界和
+    /// 位置，这里返回 `None`（它由 DiskFeature 走 [`Self::get_optional_state`]）。
     ///
-    /// Official `BlockStateProvider.getState(level, random, pos)`; returns a state ID.
+    /// Official `BlockStateProvider.getState(level, random, pos)`; `rule_based` needs the
+    /// world and pos, so it returns `None` here (DiskFeature uses `get_optional_state`).
     pub fn get_state(&self, random: &WorldgenRandom) -> Option<u32> {
         match self {
             Self::Simple(state) => Some(*state),
@@ -151,6 +212,38 @@ impl StateProvider {
                 }
                 let index = random.next_int(states.len() as i32) as usize;
                 states.get(index).copied()
+            }
+            Self::RuleBased { .. } => None,
+        }
+    }
+
+    /// `BlockStateProvider.getOptionalState(level, random, pos)`；`None` 表示不放。
+    /// `rule_based` 按顺序试 `if_true`，命中则取对应 `then`，都不中再用 fallback。
+    ///
+    /// `getOptionalState(level, random, pos)`; `None` means place nothing. `rule_based`
+    /// tries each `if_true` in order, then falls back.
+    pub fn get_optional_state(
+        &self,
+        world: &FeatureWorld<'_>,
+        random: &WorldgenRandom,
+        pos: Pos,
+    ) -> Option<u32> {
+        match self {
+            Self::Simple(state) => Some(*state),
+            Self::Weighted { .. } | Self::RandomizedInt { .. } | Self::RandomBlock(_) => {
+                self.get_state(random)
+            }
+            Self::RuleBased { fallback, rules } => {
+                for (predicate, provider) in rules {
+                    if predicate.test(world, pos)
+                        && let Some(state) = provider.get_optional_state(world, random, pos)
+                    {
+                        return Some(state);
+                    }
+                }
+                fallback
+                    .as_deref()
+                    .and_then(|provider| provider.get_optional_state(world, random, pos))
             }
         }
     }
@@ -284,5 +377,32 @@ mod tests {
             StateProvider::parse(&randomized),
             Some(StateProvider::RandomizedInt { .. })
         ));
+    }
+
+    #[test]
+    fn parses_rule_based_disk_provider() {
+        let sand: Value = json!({
+            "fallback": {"id": "minecraft:sand"},
+            "rules": [{"if_true": {"blocks": "minecraft:air", "offset": [0,-1,0], "type": "minecraft:matching_blocks"},
+                       "then": {"id": "minecraft:sandstone"}}],
+            "type": "minecraft:rule_based",
+        });
+        let provider = StateProvider::parse(&sand).unwrap();
+        assert!(provider.supported());
+        assert_eq!(provider.possible_states().len(), 2);
+    }
+
+    #[test]
+    fn holder_string_is_resolved_through_the_lookup() {
+        // 字符串 holder 在有注册表时解析成被引用的 provider，没有时返回 `None`。
+        // A string holder parses to the referenced provider when the lookup knows it.
+        let referenced: Value =
+            json!({"type": "minecraft:simple", "state": {"id": "minecraft:poppy"}});
+        let holder: Value = json!("minecraft:test_provider");
+        let provider = StateProvider::parse_with(&holder, &|name| {
+            (name == "minecraft:test_provider").then_some(&referenced)
+        })
+        .unwrap();
+        assert_eq!(provider.possible_states().len(), 1);
     }
 }
