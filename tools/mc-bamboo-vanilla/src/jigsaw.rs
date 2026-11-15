@@ -26,12 +26,15 @@ use mc_bamboo_data::{structures as blob, worldgen::WORLDGEN};
 use mc_bamboo_worldgen::{
     Worldgen,
     chunk::Generator,
+    settings::SeededRouter,
     structure::{
         Structures, allowed_biome_names,
         jigsaw::{
             JigsawConfig, JigsawStructures, Rotation, StructurePieces, TemplatePools, add_pieces,
         },
+        rings::BiomeResolver,
         template::StructureTemplate,
+        validity,
     },
 };
 use serde_json::Value;
@@ -439,7 +442,7 @@ fn compare_pools(stdout: &str, queries: &[String]) -> Result<(), String> {
             let q = java_q
                 .get(*query)
                 .ok_or_else(|| format!("Java missing Q for {query}"))?;
-            if let Some(diff) = check_query(&result, q, java_p.get(*query))? {
+            if let Some(diff) = check_query(&result, true, q, java_p.get(*query))? {
                 mismatches += 1;
                 if first.is_none() {
                     first = Some(format!("{query}: {diff}"));
@@ -572,12 +575,24 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
     let mut checked = 0usize;
     let mut pieces_checked = 0usize;
     let mut mismatches = 0usize;
+    let mut valid_count = 0usize;
     let mut first: Option<String> = None;
     // 每种 pool element 类型比到多少件，用来确认五种类型都真的被比过。
     // How many pieces of each pool element type were compared, proving all five ran.
     let mut type_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let preset = worldgen
+        .preset("minecraft:overworld")
+        .ok_or("missing overworld preset")?;
     for (seed, group) in &by_seed {
         let generator = Generator::new(&worldgen, *seed)?;
+        // `findValidGenerationPoint` 最后一道门 `isValidBiome(stub)` 走单点群系解析。
+        // The final gate of `findValidGenerationPoint`, `isValidBiome(stub)`, uses the
+        // single-point biome resolver.
+        let mut router = SeededRouter::new(settings, *seed);
+        let mut resolver = BiomeResolver {
+            router: &mut router,
+            source: preset,
+        };
         for query in group {
             let key = query.key();
             let q = java_q
@@ -597,8 +612,23 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
                 (query.cx, query.cz),
             )?;
             checked += 1;
+            // `isValidBiome` 用 stub 位置的三点 quart 群系，与结构件列表无关。
+            // `isValidBiome` uses the stub's quart biome and is independent of the pieces.
+            let valid = match &result {
+                Some(structure) => validity::is_valid_biome_at(
+                    &mut resolver,
+                    structure.position.0,
+                    structure.position.1,
+                    structure.position.2,
+                    allowed,
+                ),
+                None => false,
+            };
+            if valid {
+                valid_count += 1;
+            }
             let got_p = java_p.get(&key);
-            if let Some(diff) = check_query(&result, q, got_p)? {
+            if let Some(diff) = check_query(&result, valid, q, got_p)? {
                 mismatches += 1;
                 if first.is_none() {
                     first = Some(format!("{key}: {diff}"));
@@ -628,6 +658,7 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
         ));
     }
     println!("jigsaw pieces: {checked} queries, {pieces_checked} pieces, all Q/P fields identical");
+    println!("isValidBiome true for {valid_count}/{checked} queries");
     let summary = type_counts
         .iter()
         .map(|(name, count)| format!("{name}={count}"))
@@ -650,6 +681,7 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
 /// 用生产 `add_pieces` 的结果比 Q 行与全部 P 行；返回第一个差异描述。
 fn check_query(
     result: &Option<StructurePieces>,
+    valid: bool,
     q: &[String],
     java_p: Option<&BTreeMap<usize, Vec<String>>>,
 ) -> Result<Option<String>, String> {
@@ -675,6 +707,7 @@ fn check_query(
         structure.position.1.to_string(),
         structure.position.2.to_string(),
         structure.pieces.len().to_string(),
+        if valid { "1" } else { "0" }.to_owned(),
     ];
     for (index, want) in q_want.iter().enumerate() {
         if q.get(index + 1).is_none_or(|got| got != want) {

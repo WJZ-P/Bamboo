@@ -193,6 +193,7 @@ public final class JigsawOracle {
                     new ChunkPos(cx, cz), heightAccessor, validBiome);
             String key = id + "|" + seed + "|" + cx + "|" + cz;
             Optional<Structure.GenerationStub> stub = jigsaw.findGenerationPoint(context);
+            boolean valid = stub.isPresent() && context.isValidBiome(stub.get());
             if (stub.isEmpty()) {
                 out.append("Q|").append(key).append("|0|0|0|0|0\n");
                 System.out.print(out);
@@ -203,9 +204,12 @@ public final class JigsawOracle {
             StructurePiecesBuilder builder = stub.get().getPiecesBuilder();
             List<StructurePiece> pieces = builder.build().pieces();
             BlockPos position = stub.get().position();
+            // Q 行末段是 `isValidBiome(stub)`，即 `findValidGenerationPoint` 的最后一道门。
+            // The Q line ends with `isValidBiome(stub)`, the last gate of
+            // `findValidGenerationPoint`.
             out.append("Q|").append(key).append("|1|").append(position.getX()).append('|')
                     .append(position.getY()).append('|').append(position.getZ()).append('|')
-                    .append(pieces.size()).append('\n');
+                    .append(pieces.size()).append('|').append(valid ? 1 : 0).append('\n');
             for (int i = 0; i < pieces.size(); i++) {
                 StructurePiece piece = pieces.get(i);
                 String description = piece instanceof PoolElementStructurePiece pool
@@ -302,9 +306,11 @@ public final class JigsawOracle {
             StructurePiecesBuilder builder = stub.get().getPiecesBuilder();
             List<StructurePiece> pieces = builder.build().pieces();
             BlockPos position = stub.get().position();
+            // 这里的 `validBiome` 恒真，所以 `isValidBiome` 也恒真，直接写 1。
+            // `validBiome` is always true here, so `isValidBiome` is too; write 1.
             out.append("Q|").append(key).append("|1|").append(position.getX()).append('|')
                     .append(position.getY()).append('|').append(position.getZ()).append('|')
-                    .append(pieces.size()).append('\n');
+                    .append(pieces.size()).append("|1\n");
             for (int i = 0; i < pieces.size(); i++) {
                 StructurePiece piece = pieces.get(i);
                 String description = piece instanceof PoolElementStructurePiece pool
