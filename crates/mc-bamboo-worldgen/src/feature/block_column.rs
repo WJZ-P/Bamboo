@@ -114,7 +114,12 @@ impl BlockColumnFeature {
                 continue;
             }
             for _ in 0..count {
-                let Some(state) = layer.provider.get_state(random) else {
+                // 官方 `layer.state().value().getState(level, random, placePos)`：带世界和
+                // 坐标，`rule_based` / `rotated` / `noise` 三种 provider 都要用它们。
+                // Official `getState(level, random, placePos)`; the `rule_based`,
+                // `rotated` and `noise` providers all need the world and the position.
+                let Some(state) = layer.provider.get_optional_state(world, random, place_pos)
+                else {
                     continue;
                 };
                 world.set_block_with_heightmaps(place_pos.0, place_pos.1, place_pos.2, state);

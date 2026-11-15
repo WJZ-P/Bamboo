@@ -28,10 +28,12 @@ use super::{
     placement::OreFeature,
     sculk_patch::{self, SculkPatchFeature},
     simple_block::SimpleBlockFeature,
+    single_block_pillar::SingleBlockPillarFeature,
     speleothem::{self, SpeleothemFeature},
     speleothem_cluster::{self, SpeleothemClusterFeature},
     spike::{self, SpikeFeature},
     spring::{self, SpringFeature},
+    template_feature::{self, TemplateFeature},
     tree::{TreeFeature, fallen::FallenTreeFeature},
     underwater_magma::{self, UnderwaterMagmaFeature},
     vines::VinesFeature,
@@ -59,15 +61,31 @@ pub enum Leaf {
     MonsterRoom(MonsterRoomFeature),
     Multiface(MultifaceGrowthFeature),
     Ore(OreFeature),
+    /// `ScatteredOreFeature`：`origin` 周围最多 7 格的零散单点尝试。
+    ///
+    /// `ScatteredOreFeature`: scattered single-block tries within seven blocks.
+    ScatteredOre(OreFeature),
     SculkPatch(SculkPatchFeature),
     SimpleBlock(SimpleBlockFeature),
     Speleothem(SpeleothemFeature),
     SpeleothemCluster(SpeleothemClusterFeature),
     Spike(SpikeFeature),
     Spring(SpringFeature),
+    /// `TemplateFeature`：把一份结构模板直接放进世界。
+    ///
+    /// `TemplateFeature`: drop one structure template straight into the world.
+    Template(Box<TemplateFeature>),
     Tree(Box<TreeFeature>),
     UnderwaterMagma(UnderwaterMagmaFeature),
     Vines(VinesFeature),
+    /// `NoOpFeature`：什么都不做，但 `place` 返回 true。
+    ///
+    /// `NoOpFeature`: does nothing but returns true from `place`.
+    NoOp,
+    /// `SingleBlockPillarFeature`：沿竖直方向连续放方块。
+    ///
+    /// `SingleBlockPillarFeature`: stack one block along a vertical axis.
+    SingleBlockPillar(Box<SingleBlockPillarFeature>),
 }
 
 impl Leaf {
@@ -82,6 +100,7 @@ impl Leaf {
             Self::Lake(lake) => lake.supported(),
             Self::LargeDripstone(feature) => feature.supported(),
             Self::Spike(spike) => spike.supported(),
+            Self::Template(feature) => feature.supported(),
             _ => true,
         }
     }
@@ -116,15 +135,30 @@ pub fn parse_leaf<'a>(
         }
         "minecraft:monster_room" => Leaf::MonsterRoom(MonsterRoomFeature::parse(config).ok()?),
         "minecraft:multiface_growth" => Leaf::Multiface(MultifaceGrowthFeature::parse(config)?),
+        // `MapCodec.unit(NoOpFeature::new)`：配置里没有字段，`place` 恒返回 true。
+        // `MapCodec.unit(NoOpFeature::new)`: no fields, `place` always returns true.
+        "minecraft:no_op" => Leaf::NoOp,
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
+        // `ScatteredOreFeature` 复用 `AbstractOreFeature` 的 codec，配置结构相同。
+        // `ScatteredOreFeature` shares the `AbstractOreFeature` codec, so the config
+        // shape is identical.
+        "minecraft:scattered_ore" => Leaf::ScatteredOre(OreFeature::parse(config).ok()?),
         "minecraft:sculk_patch" => Leaf::SculkPatch(SculkPatchFeature::parse(config)?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config, lookup)?),
+        "minecraft:single_block_pillar" => {
+            Leaf::SingleBlockPillar(Box::new(SingleBlockPillarFeature::parse(config)?))
+        }
         "minecraft:speleothem" => Leaf::Speleothem(SpeleothemFeature::parse(config).ok()?),
         "minecraft:speleothem_cluster" => {
             Leaf::SpeleothemCluster(SpeleothemClusterFeature::parse(config).ok()?)
         }
         "minecraft:spike" => Leaf::Spike(SpikeFeature::parse(config).ok()?),
         "minecraft:spring_feature" => Leaf::Spring(SpringFeature::parse(config).ok()?),
+        // `TemplateFeature` 的 processor 链只有 `desert_well` 用到的子集；别的
+        // processor 类型会让 `supported()` 返回 false，整个 placed feature 标 unsupported。
+        // `TemplateFeature` ports only the processor subset `desert_well` uses; any other
+        // processor kind makes `supported()` false so the placed feature stays unsupported.
+        "minecraft:template" => Leaf::Template(Box::new(TemplateFeature::parse(config).ok()?)),
         "minecraft:tree" => Leaf::Tree(Box::new(TreeFeature::parse(config)?)),
         "minecraft:underwater_magma" => {
             Leaf::UnderwaterMagma(UnderwaterMagmaFeature::parse(config).ok()?)
@@ -159,14 +193,18 @@ pub fn place_leaf(
         Leaf::MonsterRoom(room) => monster_room::place(room, world, random, pos),
         Leaf::Multiface(feature) => feature.place(world, random, pos),
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
+        Leaf::ScatteredOre(ore) => ores::place_scattered(ore, world, random, pos),
         Leaf::SculkPatch(feature) => sculk_patch::place(feature, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
         Leaf::Speleothem(feature) => speleothem::place(feature, world, random, pos),
         Leaf::SpeleothemCluster(feature) => speleothem_cluster::place(feature, world, random, pos),
         Leaf::Spike(spike) => spike::place(spike, world, random, pos),
         Leaf::Spring(spring) => spring::place(spring, world, pos),
+        Leaf::Template(feature) => template_feature::place(feature, world, random, pos),
         Leaf::Tree(tree) => tree.place(world, random, pos),
         Leaf::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),
         Leaf::Vines(feature) => feature.place(world, random, pos),
+        Leaf::NoOp => true,
+        Leaf::SingleBlockPillar(pillar) => pillar.place(world, random, pos),
     }
 }
