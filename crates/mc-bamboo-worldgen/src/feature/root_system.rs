@@ -1,38 +1,47 @@
-//! `RootSystemFeature`：`rooted_azalea_tree` / `rooted_sulfur_spring`。
+//! `RootSystemFeature`：杜鹃树根系 / 硫磺泉根系这类「先往上找位置长一株树，再从原点
+//! 往上铺一条根柱」的地物。
 //!
-//! 官方逻辑：先向上找一棵能放下的树（`placeDirtAndTree`），成功后沿 origin 到树根铺
-//! 一层 `root_state_provider`（`placeDirt`，每层 `root_placement_attempts` 次随机偏移），
-//! 最后在 origin 周围撒 `hanging_root_placement_attempts` 个悬挂根（`placeRoots`）。
+//! 官方 `place` 只在 `origin` 是空气时继续：`placeDirtAndTree` 沿竖直方向最多
+//! `root_column_max_height` 格逐格试，命中 `allowed_tree_position` 且竖直空间够时调
+//! 子 `PlacedFeature.place` 放树；树放成功了才 `placeDirt`（沿根柱逐格 `placeRootedDirt`）
+//! 并 `placeRoots`（悬挂根）。三个循环的随机数消耗顺序必须和官方一致：
+//! `placeRootedDirt` 每次尝试抽两次 `nextInt(rootRadius)` 定 x、两次定 z，
+//! `placeRoots` 每次尝试抽六次（x、y、z 各两次）。
 //!
-//! 随机数顺序必须照抄：`placeDirtAndTree` 每层的 `Heightmap` 查询不取数；
-//! `treeFeature.place` 取数；`placeDirt` 每层每尝试两次 `nextInt(rootRadius)`；
-//! `placeRoots` 每次尝试三次 `nextInt`（x / y / z 各两次相减）。
-//!
-//! `RootSystemFeature`. The official flow: walk up looking for a spot that fits a tree
-//! (`placeDirtAndTree`), then lay `root_state_provider` along the origin-to-trunk column
-//! (`placeDirt`, `root_placement_attempts` random offsets per layer), and finally scatter
-//! hanging roots around the origin (`placeRoots`). The draw order is part of the contract.
+//! `RootSystemFeature`: features that grow one tree above the origin and then lay a
+//! column of roots from the origin upward. Official `place` bails unless the origin is
+//! air; `placeDirtAndTree` walks up to `root_column_max_height` cells, and on the first
+//! cell that satisfies `allowed_tree_position` with enough vertical space it places the
+//! child `PlacedFeature`. Only when that tree was placed does it run `placeDirt` (walking
+//! the root column) and `placeRoots` (hanging roots). The random draw order must match
+//! the official code: `placeRootedDirt` draws two `nextInt(rootRadius)` for x and two for
+//! z per attempt, and `placeRoots` draws six (two per axis).
 
-use mc_bamboo_core::Direction;
-use mc_bamboo_data::{block_id_of_state, block_tag, facts, state_facts, state_fluid};
 use serde_json::Value;
+
+use mc_bamboo_data::{block_id_of_state, block_tag, facts, registries, state_facts, state_fluid};
 
 use crate::random::WorldgenRandom;
 
 use super::{
     block_predicate::BlockPredicate,
+    composition::{Child, place_child},
     placement::{PlaceOutcome, PlacementEnv},
-    provider::IntProvider,
     registry::Registry,
     state_provider::StateProvider,
+    survival,
     world::{FeatureWorld, HeightmapKind},
 };
 
 type Pos = (i32, i32, i32);
 
 /// 一个已解析的 `minecraft:root_system`。
+///
 /// A parsed `minecraft:root_system`.
-pub struct RootSystem {
+pub struct RootSystemFeature {
+    /// `Holder<PlacedFeature>`：注册表名或内联的 `{"feature":..,"placement":[..]}`。
+    ///
+    /// `Holder<PlacedFeature>`: a registry name or an inline placed-feature object.
     tree_feature: Value,
     required_vertical_space_for_tree: i32,
     level_test_distance: i32,
@@ -50,18 +59,39 @@ pub struct RootSystem {
     allowed_tree_position: BlockPredicate,
 }
 
-impl RootSystem {
-    /// 按官方 codec 解析；`root_state_provider` / `hanging_root_state_provider` 可以是
-    /// 内联 bare state，也可以是字符串 holder（用 `lookup` 查）。
+impl RootSystemFeature {
+    /// 按官方 codec 解析。`allowed_tree_position` 或两个状态提供者里有未移植分支时返回
+    /// `None`，让调用方把整个 placed feature 标 unsupported。
     ///
-    /// Parse by the official codec; the two state providers may be inline bare states or
-    /// string holders resolved through `lookup`.
+    /// Parse by the official codec. Return `None` when `allowed_tree_position` or either
+    /// state provider contains an unported branch, so the caller can mark the whole
+    /// placed feature unsupported.
     pub fn parse<'a>(
         config: &'a Value,
         lookup: &dyn Fn(&str) -> Option<&'a Value>,
     ) -> Option<Self> {
         let object = config.as_object()?;
         let integer = |name: &str| -> Option<i32> { Some(object.get(name)?.as_i64()? as i32) };
+        let root_state_provider =
+            StateProvider::parse_with(object.get("root_state_provider")?, lookup)?;
+        let hanging_root_state_provider =
+            StateProvider::parse_with(object.get("hanging_root_state_provider")?, lookup)?;
+        // 两个 provider 的状态都走 `setBlock`，悬挂根还要过 `canSurvive`；任一分支未移植
+        // 就不接入。
+        // Both providers feed `setBlock`, and the hanging one also goes through
+        // `canSurvive`, so an unported branch blocks the port.
+        for provider in [&root_state_provider, &hanging_root_state_provider] {
+            if !provider.supported() {
+                return None;
+            }
+            if !provider
+                .possible_states()
+                .iter()
+                .all(|&state| survival::supports(state))
+            {
+                return None;
+            }
+        }
         let allowed_tree_position = BlockPredicate::parse(object.get("allowed_tree_position")?);
         if !allowed_tree_position.is_supported() {
             return None;
@@ -73,26 +103,23 @@ impl RootSystem {
             max_level_deviation: integer("max_level_deviation")?,
             root_radius: integer("root_radius")?,
             root_replaceable: parse_block_set(object.get("root_replaceable")?)?,
-            root_state_provider: StateProvider::parse_with(
-                object.get("root_state_provider")?,
-                lookup,
-            )?,
+            root_state_provider,
             root_placement_attempts: integer("root_placement_attempts")?,
             root_column_max_height: integer("root_column_max_height")?,
             hanging_root_radius: integer("hanging_root_radius")?,
             hanging_roots_vertical_span: integer("hanging_roots_vertical_span")?,
-            hanging_root_state_provider: StateProvider::parse_with(
-                object.get("hanging_root_state_provider")?,
-                lookup,
-            )?,
+            hanging_root_state_provider,
             hanging_root_placement_attempts: integer("hanging_root_placement_attempts")?,
             allowed_vertical_water_for_tree: integer("allowed_vertical_water_for_tree")?,
             allowed_tree_position,
         })
     }
 
-    /// `RootSystemFeature.place`。
-    /// `RootSystemFeature.place`.
+    /// 官方 `RootSystemFeature.place`：`origin` 不是空气返回 false；之后无论有没有种成树
+    /// 都返回 true。
+    ///
+    /// Official `RootSystemFeature.place`: false only when the origin is not air;
+    /// afterwards it returns true whether or not a tree was placed.
     pub fn place(
         &self,
         registry: &Registry,
@@ -107,23 +134,34 @@ impl RootSystem {
                 placed: false,
             };
         }
-        let working = self.place_dirt_and_tree(registry, world, env, random, origin);
-        let mut supported = working.is_some();
-        if let Some(working) = working {
-            supported &= self.place_roots(world, random, origin, working);
+        let Some((outcome, hit_y)) = self.place_dirt_and_tree(registry, world, env, random, origin)
+        else {
+            return PlaceOutcome {
+                supported: true,
+                placed: true,
+            };
+        };
+        if !outcome.supported {
+            return outcome;
+        }
+        if outcome.placed {
+            // 官方 `placeDirt(pos, pos.getY() + y, ...)`，`y` 是命中的循环下标
+            // （`workingPos.y = origin.y + y + 1`）。
+            // The official call passes `origin.y + y` where `y` is the loop index.
+            self.place_dirt(world, random, origin, origin.1 + hit_y);
+            self.place_roots(world, random, origin);
         }
         PlaceOutcome {
-            supported,
-            // 官方这里恒返回 true（只要 origin 是空气）。
-            // The official code returns true whenever the origin is air.
+            supported: true,
             placed: true,
         }
     }
 
-    /// `placeDirtAndTree`：向上逐格找能放树的位置，返回成功时的树根位置（`workingPos`）。
+    /// `placeDirtAndTree`。种成树返回 `Some((子地物结果, 命中的循环下标 y))`，
+    /// 循环走完或撞到「下面是岩浆 / 不是实心方块」返回 `None`。
     ///
-    /// `placeDirtAndTree`: walk upward looking for a spot that fits a tree; returns the
-    /// trunk position on success.
+    /// `placeDirtAndTree`. `Some((child outcome, loop index y))` when a tree was placed;
+    /// `None` when the loop finishes or hits a lava / non-solid block below.
     fn place_dirt_and_tree(
         &self,
         registry: &Registry,
@@ -131,61 +169,39 @@ impl RootSystem {
         env: &mut PlacementEnv<'_>,
         random: &WorldgenRandom,
         origin: Pos,
-    ) -> Option<Pos> {
-        let mut working = origin;
+    ) -> Option<(PlaceOutcome, i32)> {
         for y in 0..self.root_column_max_height {
-            working = (working.0, working.1 + 1, working.2);
-            let surface = world.get_height(HeightmapKind::WorldSurface, working.0, working.2);
-            if surface < working.1 {
+            let pos = (origin.0, origin.1 + y + 1, origin.2);
+            // `level.getHeight(WORLD_SURFACE, workingPos) < workingPos.getY()`。
+            // `level.getHeight(WORLD_SURFACE, workingPos) < workingPos.getY()`.
+            if world.get_height(HeightmapKind::WorldSurface, pos.0, pos.2) < pos.1 {
                 return None;
             }
-            if !self.allowed_tree_position.test(world, working) {
+            if !self.allowed_tree_position.test(world, pos) || !self.space_for_tree(world, pos) {
                 continue;
             }
-            if !self.space_for_tree(world, working) {
-                continue;
-            }
-            let below = (working.0, working.1 - 1, working.2);
-            let below_state = world.get_block(below.0, below.1, below.2);
-            if in_fluid_tag(below_state, "minecraft:lava")
-                || state_facts(below_state) & facts::SOLID == 0
+            let below = world.get_block(pos.0, pos.1 - 1, pos.2);
+            if state_fluid(below).fluid == registries::fluid::LAVA
+                || state_facts(below) & facts::SOLID == 0
             {
                 return None;
             }
-            let outcome = self.place_tree(registry, world, env, random, working);
-            if !outcome.supported {
-                return None;
-            }
-            if outcome.placed {
-                let target = origin.1 + y;
-                self.place_dirt(world, random, origin, target);
-                return Some(working);
+            let Some(child) = Child::parse(&self.tree_feature) else {
+                return Some((PlaceOutcome::unsupported(), y));
+            };
+            let outcome = place_child(&child, registry, world, env, random, pos);
+            if !outcome.supported || outcome.placed {
+                return Some((outcome, y));
             }
         }
         None
     }
 
-    /// `this.treeFeature.value().place(level, generator, random, workingPos)`。
-    /// `this.treeFeature.value().place(level, generator, random, workingPos)`.
-    fn place_tree(
-        &self,
-        registry: &Registry,
-        world: &mut FeatureWorld<'_>,
-        env: &mut PlacementEnv<'_>,
-        random: &WorldgenRandom,
-        pos: Pos,
-    ) -> PlaceOutcome {
-        let Some(child) = super::composition::Child::parse(&self.tree_feature) else {
-            return PlaceOutcome::unsupported();
-        };
-        super::composition::place_child(&child, registry, world, env, random, pos)
-    }
-
-    /// `spaceForTree`：上方 `required_vertical_space_for_tree` 格都要能放树（空气，
-    /// 或允许高度内的水）；`level_test_distance > 0` 时还要检查四个角。
+    /// `spaceForTree`：上面 `required_vertical_space_for_tree` 格都得是空气或允许高度内的
+    /// 水，再按 `level_test_distance` 抽查四个水平方向的地面落差。
     ///
-    /// `spaceForTree`: every cell above must allow a tree (air, or water within the
-    /// allowed height); with `level_test_distance > 0` the four corners are checked too.
+    /// `spaceForTree`: the cells above must be air or allowed water, then the four
+    /// horizontal directions are checked for a level jump.
     fn space_for_tree(&self, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         for i in 1..=self.required_vertical_space_for_tree {
             let state = world.get_block(pos.0, pos.1 + i, pos.2);
@@ -194,20 +210,16 @@ impl RootSystem {
             }
         }
         if self.level_test_distance > 0 {
-            // `Direction.from2DDataValue(i)` 依次是 SOUTH、WEST、NORTH、EAST。
-            // `Direction.from2DDataValue(i)` yields SOUTH, WEST, NORTH, EAST.
-            for direction in [
-                Direction::South,
-                Direction::West,
-                Direction::North,
-                Direction::East,
-            ] {
-                let (dx, _, dz) = offset(direction);
-                let corner_x = pos.0 + dx * self.level_test_distance;
-                let corner_z = pos.2 + dz * self.level_test_distance;
-                let below = world.get_block(corner_x, pos.1 - self.max_level_deviation, corner_z);
-                let above = world.get_block(corner_x, pos.1 + self.max_level_deviation, corner_z);
-                if is_air(below) || !is_air(above) {
+            // `Direction.from2DDataValue(i)` 的 `BY_2D_DATA` 按 `data2d` 升序排，
+            // 顺序是 SOUTH、WEST、NORTH、EAST，不是枚举顺序。
+            // `BY_2D_DATA` is sorted by `data2d`: SOUTH, WEST, NORTH, EAST.
+            const HORIZONTAL_BY_2D: [(i32, i32); 4] = [(0, 1), (-1, 0), (0, -1), (1, 0)];
+            for (dx, dz) in HORIZONTAL_BY_2D {
+                let x = pos.0 + dx * self.level_test_distance;
+                let z = pos.2 + dz * self.level_test_distance;
+                let below = world.get_block(x, pos.1 - self.max_level_deviation, z);
+                let above = world.get_block(x, pos.1 + self.max_level_deviation, z);
+                if state_facts(below) & facts::AIR != 0 || state_facts(above) & facts::AIR == 0 {
                     return false;
                 }
             }
@@ -215,24 +227,27 @@ impl RootSystem {
         true
     }
 
-    /// `placeDirt`：从 `origin.y` 到 `target_height` 逐层铺根。
-    /// `placeDirt`: lay roots layer by layer from `origin.y` to `target_height`.
+    /// `placeDirt`：从 `origin.y` 到 `target_y`（不含）沿同一列逐格铺根。
+    ///
+    /// `placeDirt`: walk the column from `origin.y` to `target_y` exclusive.
     fn place_dirt(
         &self,
         world: &mut FeatureWorld<'_>,
         random: &WorldgenRandom,
         origin: Pos,
-        target_height: i32,
+        target_y: i32,
     ) {
-        let mut y = origin.1;
-        while y < target_height {
+        for y in origin.1..target_y {
             self.place_rooted_dirt(world, random, origin.0, origin.2, y);
-            y += 1;
         }
     }
 
-    /// `placeRootedDirt`：`root_placement_attempts` 次随机水平偏移。
-    /// `placeRootedDirt`: `root_placement_attempts` random horizontal offsets.
+    /// `placeRootedDirt`：每轮相对原点偏移 `nextInt(radius) - nextInt(radius)`（x、z 各一组），
+    /// 命中 `root_replaceable` 才写 provider 的状态。随机数每轮必抽满四次。
+    ///
+    /// `placeRootedDirt`: each attempt offsets from the origin by
+    /// `nextInt(radius) - nextInt(radius)` per axis, then writes the provider state when
+    /// the target is `root_replaceable`. Four draws happen every attempt.
     fn place_rooted_dirt(
         &self,
         world: &mut FeatureWorld<'_>,
@@ -242,121 +257,87 @@ impl RootSystem {
         y: i32,
     ) {
         for _ in 0..self.root_placement_attempts {
-            let dx = random.next_int(self.root_radius) - random.next_int(self.root_radius);
-            let dz = random.next_int(self.root_radius) - random.next_int(self.root_radius);
-            let x = origin_x + dx;
-            let z = origin_z + dz;
-            let existing = world.get_block(x, y, z);
-            if block_id_of_state(existing)
-                .is_some_and(|id| self.root_replaceable.contains(&(id as i32)))
+            let x =
+                origin_x + random.next_int(self.root_radius) - random.next_int(self.root_radius);
+            let z =
+                origin_z + random.next_int(self.root_radius) - random.next_int(self.root_radius);
+            let state = world.get_block(x, y, z);
+            let replaceable = block_id_of_state(state)
+                .is_some_and(|id| self.root_replaceable.contains(&(id as i32)));
+            if replaceable
+                && let Some(new_state) =
+                    self.root_state_provider
+                        .get_optional_state(world, random, (x, y, z))
             {
-                let Some(state) = self.root_state_provider.get_state(random) else {
-                    continue;
-                };
-                world.set_block_with_heightmaps(x, y, z, state);
+                world.set_block_with_heightmaps(x, y, z, new_state);
             }
         }
     }
 
-    /// `placeRoots`：在 origin 周围撒悬挂根，要求目标格是空气、状态能存活、
-    /// 且上面那格朝下的面结实。
+    /// `placeRoots`：围绕 `origin` 在悬挂根半径与竖直跨度内试放悬挂根，要求空位、
+    /// 能存活，且上面那格朝下结实。
     ///
-    /// `placeRoots`: scatter hanging roots around the origin; the target must be air, the
-    /// state must survive, and the block above must be sturdy toward DOWN.
-    fn place_roots(
-        &self,
-        world: &mut FeatureWorld<'_>,
-        random: &WorldgenRandom,
-        pos: Pos,
-        _working: Pos,
-    ) -> bool {
-        let mut supported = true;
+    /// `placeRoots`: try hanging roots around the origin, requiring an air cell that
+    /// survives and a sturdy block face above it.
+    fn place_roots(&self, world: &mut FeatureWorld<'_>, random: &WorldgenRandom, origin: Pos) {
         for _ in 0..self.hanging_root_placement_attempts {
-            let dx = random.next_int(self.hanging_root_radius)
+            // 官方六抽：x、y、z 各两次，顺序固定。
+            // Six draws in a fixed order: two each for x, y and z.
+            let x = origin.0 + random.next_int(self.hanging_root_radius)
                 - random.next_int(self.hanging_root_radius);
-            let dy = random.next_int(self.hanging_roots_vertical_span)
+            let y = origin.1 + random.next_int(self.hanging_roots_vertical_span)
                 - random.next_int(self.hanging_roots_vertical_span);
-            let dz = random.next_int(self.hanging_root_radius)
+            let z = origin.2 + random.next_int(self.hanging_root_radius)
                 - random.next_int(self.hanging_root_radius);
-            let target = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
-            if !world.is_air(target.0, target.1, target.2) {
+            if !world.is_air(x, y, z) {
                 continue;
             }
-            let Some(state) = self.hanging_root_state_provider.get_state(random) else {
-                supported = false;
+            let Some(state) =
+                self.hanging_root_state_provider
+                    .get_optional_state(world, random, (x, y, z))
+            else {
                 continue;
             };
-            if !super::survival::can_survive(state, world, target) {
+            if !survival::can_survive(state, world, (x, y, z)) {
                 continue;
             }
-            let above = world.get_block(target.0, target.1 + 1, target.2);
-            if !survival_sturdy_down(state, world, target, above) {
+            // `getBlockState(workingPos.above()).isFaceSturdy(level, workingPos, DOWN)`：
+            // 判定的是上面那格朝下的面，即 `STURDY_FULL + DOWN(0)`。
+            // The face of the cell above toward DOWN is tested: `STURDY_FULL + 0`.
+            let above = world.get_block(x, y + 1, z);
+            if state_facts(above) & (1u64 << facts::STURDY_FULL) == 0 {
                 continue;
             }
-            world.set_block_with_heightmaps(target.0, target.1, target.2, state);
+            world.set_block_with_heightmaps(x, y, z, state);
         }
-        supported
     }
 }
 
-/// `HangingRootsBlock.canSurvive`：上面那格 `isFaceSturdy(DOWN)`（FULL）。
-/// `HangingRootsBlock.canSurvive`: the block above is `isFaceSturdy(DOWN)` (FULL).
-fn survival_sturdy_down(_state: u32, _world: &FeatureWorld<'_>, _pos: Pos, above: u32) -> bool {
-    // `Direction.DOWN` 的 ordinal 是 0。
-    // `Direction.DOWN` has ordinal 0.
-    state_facts(above) & (1u64 << facts::STURDY_FULL) != 0
-}
-
-/// `isAllowedTreeSpace`：空气，或允许高度内的水。
-/// `isAllowedTreeSpace`: air, or water within the allowed height.
+/// `isAllowedTreeSpace`：空气恒允许；非空气只有当它在允许高度内的水里才行。
+///
+/// `isAllowedTreeSpace`: air always passes; otherwise only water within the allowed
+/// height passes.
 fn is_allowed_tree_space(
     state: u32,
     blocks_above_origin: i32,
     allowed_vertical_water: i32,
 ) -> bool {
-    if is_air(state) {
+    if state_facts(state) & facts::AIR != 0 {
         return true;
     }
     let blocks_above_ground = blocks_above_origin + 1;
-    blocks_above_ground <= allowed_vertical_water && in_fluid_tag(state, "minecraft:water")
+    blocks_above_ground <= allowed_vertical_water
+        && state_fluid(state).fluid == registries::fluid::WATER
 }
 
-fn is_air(state: u32) -> bool {
-    state_facts(state) & facts::AIR != 0
-}
-
-fn in_fluid_tag(state: u32, tag: &str) -> bool {
-    let fluid = state_fluid(state).fluid;
-    let group = &mc_bamboo_data::tags::TAG_GROUPS[mc_bamboo_data::tags::fluid_tags::GROUP];
-    group
-        .tags
-        .iter()
-        .find(|entry| entry.name == tag)
-        .is_some_and(|entry| entry.ids.contains(&fluid))
-}
-
-fn offset(direction: Direction) -> (i32, i32, i32) {
-    match direction {
-        Direction::Down => (0, -1, 0),
-        Direction::Up => (0, 1, 0),
-        Direction::North => (0, 0, -1),
-        Direction::South => (0, 0, 1),
-        Direction::West => (-1, 0, 0),
-        Direction::East => (1, 0, 0),
-    }
-}
-
-/// `HolderSet<Block>`：`#tag`、单个方块名，或方块名数组。
-/// `HolderSet<Block>`: a `#tag`, one block name, or an array of names.
+/// `HolderSet<Block>`：`#tag`、单个方块名，或方块名数组（`HolderSet.direct` 的形式）。
+///
+/// `HolderSet<Block>`: a `#tag`, a single block name, or an array of block names.
 fn parse_block_set(value: &Value) -> Option<Vec<i32>> {
+    let mut out = Vec::new();
     match value {
-        Value::String(name) => {
-            let mut out = Vec::new();
-            push_block_set(name, &mut out)?;
-            Some(out)
-        }
+        Value::String(name) => push_block_set(name, &mut out)?,
         Value::Array(items) => {
-            let mut out = Vec::new();
             for item in items {
                 let name = match item {
                     Value::String(name) => name.as_str(),
@@ -365,10 +346,10 @@ fn parse_block_set(value: &Value) -> Option<Vec<i32>> {
                 };
                 push_block_set(name, &mut out)?;
             }
-            Some(out)
         }
-        _ => None,
+        _ => return None,
     }
+    Some(out)
 }
 
 fn push_block_set(name: &str, out: &mut Vec<i32>) -> Option<()> {
@@ -381,75 +362,50 @@ fn push_block_set(name: &str, out: &mut Vec<i32>) -> Option<()> {
     Some(())
 }
 
-/// 让 `IntProvider` 的引用在这个模块里可见（`RootSystem` 的字段目前都用 `i32`，
-/// 这里只是避免 unused import 告警时误删）。
-/// Keeps the `IntProvider` import meaningful while every field is a plain `i32`.
-#[allow(dead_code)]
-type UnusedIntProvider = IntProvider;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn rooted_azalea_tree() -> Value {
-        serde_json::json!({
-            "allowed_tree_position": {
-                "predicates": [
-                    {"predicates": [
-                        {"tag": "minecraft:air", "type": "minecraft:matching_block_tag"},
-                        {"tag": "minecraft:replaceable_by_trees", "type": "minecraft:matching_block_tag"}
-                    ], "type": "minecraft:any_of"},
-                    {"offset": [0, -1, 0], "tag": "minecraft:azalea_grows_on", "type": "minecraft:matching_block_tag"}
-                ], "type": "minecraft:all_of"
-            },
-            "allowed_vertical_water_for_tree": 2,
-            "feature": {"feature": "minecraft:azalea_tree", "placement": []},
-            "hanging_root_placement_attempts": 20,
-            "hanging_root_radius": 3,
-            "hanging_root_state_provider": {"id": "minecraft:hanging_roots", "properties": {"waterlogged": "false"}},
-            "hanging_roots_vertical_span": 2,
-            "level_test_distance": 0,
-            "max_level_deviation": 0,
-            "required_vertical_space_for_tree": 3,
-            "root_column_max_height": 100,
-            "root_placement_attempts": 20,
-            "root_radius": 3,
-            "root_replaceable": "#minecraft:azalea_root_replaceable",
-            "root_state_provider": {"id": "minecraft:rooted_dirt"},
-            "type": "minecraft:root_system"
-        })
+    fn exported(name: &str) -> Value {
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        root["feature"][name].clone()
     }
 
     #[test]
-    fn parses_the_exported_rooted_azalea_tree() {
-        let system = RootSystem::parse(&rooted_azalea_tree(), &|_| None).unwrap();
-        assert_eq!(system.required_vertical_space_for_tree, 3);
-        assert_eq!(system.root_radius, 3);
-        assert_eq!(system.root_placement_attempts, 20);
-        assert_eq!(system.root_column_max_height, 100);
-        assert_eq!(system.hanging_root_radius, 3);
-        assert_eq!(system.hanging_roots_vertical_span, 2);
-        assert_eq!(system.allowed_vertical_water_for_tree, 2);
-        assert!(system.allowed_tree_position.is_supported());
-        assert!(!system.root_replaceable.is_empty());
-    }
-
-    #[test]
-    fn allowed_tree_space_accepts_air_and_shallow_water_only() {
-        let air = mc_bamboo_data::blocks::AIR;
-        assert!(is_allowed_tree_space(air, 1, 0));
-        let water = mc_bamboo_data::block_by_name("minecraft:water")
+    fn parses_the_exported_root_systems() {
+        let feature =
+            RootSystemFeature::parse(&exported("minecraft:rooted_azalea_tree"), &|_| None)
+                .expect("rooted_azalea_tree");
+        assert_eq!(feature.required_vertical_space_for_tree, 3);
+        assert_eq!(feature.root_column_max_height, 100);
+        assert_eq!(feature.root_radius, 3);
+        assert_eq!(feature.hanging_root_placement_attempts, 20);
+        let grass = mc_bamboo_data::block_by_name("minecraft:grass_block")
             .unwrap()
             .default_state;
-        // 允许高度 2：`blocksAboveGround = blocksAboveOrigin + 1`，所以第 1 格
-        // （`blocksAboveOrigin=1` → 2）可以，第 2 格（→ 3）不行。
-        // With allowed height 2, `blocksAboveGround = blocksAboveOrigin + 1`: cell 1
-        // (`blocksAboveOrigin=1` → 2) passes, cell 2 (→ 3) does not.
-        assert!(is_allowed_tree_space(water, 1, 2));
-        assert!(!is_allowed_tree_space(water, 2, 2));
-        assert!(!is_allowed_tree_space(water, 3, 2));
-        assert!(!is_allowed_tree_space(water, 1, 0));
-        let stone = mc_bamboo_data::blocks::STONE;
-        assert!(!is_allowed_tree_space(stone, 1, 64));
+        assert!(
+            feature
+                .root_replaceable
+                .contains(&(block_id_of_state(grass).unwrap() as i32))
+        );
+        let sulfur =
+            RootSystemFeature::parse(&exported("minecraft:rooted_sulfur_spring"), &|_| None)
+                .expect("rooted_sulfur_spring");
+        assert_eq!(sulfur.level_test_distance, 8);
+        assert_eq!(sulfur.max_level_deviation, 2);
+        assert_eq!(sulfur.allowed_vertical_water_for_tree, 1);
+    }
+
+    #[test]
+    fn air_passes_tree_space_and_water_is_height_limited() {
+        assert!(is_allowed_tree_space(mc_bamboo_data::blocks::AIR, 1, 2));
+        // `blocksAboveGround = blocksAboveOrigin + 1`：第 1 格在允许量 2 内，第 3 格不在。
+        // `blocksAboveGround` is `blocksAboveOrigin + 1`: cell 1 fits under 2, cell 3 does not.
+        assert!(is_allowed_tree_space(mc_bamboo_data::blocks::WATER, 1, 2));
+        assert!(!is_allowed_tree_space(mc_bamboo_data::blocks::WATER, 3, 2));
+        let stone = mc_bamboo_data::block_by_name("minecraft:stone")
+            .unwrap()
+            .default_state;
+        assert!(!is_allowed_tree_space(stone, 1, 2));
     }
 }
