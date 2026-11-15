@@ -476,11 +476,12 @@ WebView2 的渲染进程不算在内。
   `clamped_normal`，Java 对拍代理补了 `isWaterAt` / `isInsideBuildHeight` /
   `getBrightness`。`chunkgen` 的 `--ore-only` 已泛化成 `--types ID,ID`（也认
   `--feature-types`）诊断白名单，过滤不动 `features_per_step` 的全局 index。
-  已知限制：`blue_ice` 按 `BlueIceFeature.java` 移植，但它要先有相邻的 `packed_ice`
-  （原版来自 `iceberg`，属 `cb-wg-feat-a` 的冰山、尚未合入），`--types` 白名单里没有
-  `iceberg` 就不会有 `packed_ice`，所以现有的逐方块对拍里 `blue_ice` 从不放方块、
-  0 不一致是「空跑」的；等 `iceberg` 合入后要用
-  `--types minecraft:blue_ice,minecraft:iceberg,...` 补对拍。
+  已知限制：`blue_ice` 按 `BlueIceFeature.java` 移植。它要先有相邻的 `packed_ice`
+  （原版来自 `iceberg`，现在已随 main 合入），所以要把它和 `iceberg` 一起放开才比得到：
+  `--types minecraft:blue_ice,minecraft:iceberg --chunk -200 117 --scan 3 --seeds 1 --salt 13`
+  （种子 0 的 `frozen_ocean`）是 **0 不一致 / 0 skipped**，把 `place` 开头改成写一格 `STONE`
+  会报 **54 处**，确认不是空跑。种子 -1 的 `(53,78)` 附近也是 0 不一致。
+  注意默认坐标（`FIXED_CHUNKS` + 随机）里没有冻洋，单跑 `blue_ice` 会空跑。
   step 7 地下装饰里的 `sculk_vein` 由 `multiface_growth` 覆盖（代码来自 `cb-wg-aquatic`），
   在 `deep_dark` 定点对拍 0 不一致；**注意默认坐标（`FIXED_CHUNKS` + 随机）下它一次都不放方块，
   必须用 `--chunk -42 111 --scan N`（种子 0 的 `deep_dark`）才比得到**。

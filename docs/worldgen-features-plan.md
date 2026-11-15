@@ -888,13 +888,14 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
 配置，并用故意改坏确认过。
 
 
-**`blue_ice` 的空跑限制**：`BlueIceFeature.place` 要先在候选中找到相邻的
+**`blue_ice` 的对拍前提**：`BlueIceFeature.place` 要先在候选中找到相邻的
 `packed_ice`（原版由 `iceberg_packed` / `iceberg_blue` 这两个 `minecraft:iceberg`
-在冻洋水下生成，属 `cb-wg-feat-a` 的冰山、尚未合入）。`--types` 白名单里没有
-`iceberg` 时，冻洋里没有 `packed_ice`，`blue_ice` 每次都提前返回，上面的 0 不一致
-是「没放方块」的空跑。等 `iceberg` 合入后要用
-`--types minecraft:blue_ice,minecraft:iceberg,...` 重新逐方块对拍。实现本身按
-`BlueIceFeature.java` 逐句移植（海平面、水、packed_ice 邻格、200 次偏移扩散）。
+在冻洋水下生成）。`iceberg` 已随 main 合入，所以现在可以把它和 `blue_ice` 一起放开：
+`--types minecraft:blue_ice,minecraft:iceberg --chunk -200 117 --scan 3 --seeds 1 --salt 13`
+（种子 0 的 `frozen_ocean`）是 **0 不一致 / 0 skipped**；把 `place` 开头改成写一格
+`STONE` 会报 **54 处**，确认不是空跑。种子 -1 的 `(53,78)` 附近同样 0 不一致。
+默认坐标（`FIXED_CHUNKS` + 随机）里没有冻洋，单跑 `blue_ice` 仍会空跑。
+实现本身按 `BlueIceFeature.java` 逐句移植（海平面、水、packed_ice 邻格、200 次偏移扩散）。
 
 ### 本轮（cb-wg-caves 收尾）追加
 
