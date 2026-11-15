@@ -128,7 +128,7 @@ fn expected_line(id: &str) -> Result<String, String> {
         palette_entries,
         template.blocks.len(),
         template.entities.len(),
-        template.jigsaws.len()
+        template.palette_jigsaws.first().map_or(0, Vec::len)
     );
     Ok(format!("{id}\tX=1\t{hash:x}\t{counts}"))
 }

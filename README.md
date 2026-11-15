@@ -498,7 +498,7 @@ WebView2 的渲染进程不算在内。
   `structures` 键
   （`structure-save`，8 case 的规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、
   `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。仍没做：
-  jigsaw 结构件生成、`features` 阶段的 `placeInChunk` /
+  `features` 阶段的 `placeInChunk` /
   `postProcess` / processors / 方块实体 / 拼图替换。`structure::post_process` 里有埋藏的宝藏
   与女巫小屋、沙漠神殿三份 `postProcess` 的方块部分，新对拍 `structure-place` 按**写入日志**
   逐格比较（比「写前写后的状态差异」严格：结构写在地形上的方块不算状态变化，但官方确实写了）：
@@ -509,8 +509,7 @@ WebView2 的渲染进程不算在内。
   `.nbt` 结构模板已由 `cb-wg-jigsaw` 分支从官方 jar 原样导出成
   `mc-bamboo-data::structures`（1511 个、4236847 gzip 字节，重跑无 diff），并用官方
   `NbtIo` 逐节点对拍 0 不一致；Rust 侧 `structure::template` 能读出方块、方块实体和拼图方块。
-  jigsaw 结构件生成（`JigsawPlacement.addPieces`、五种 pool element、村庄 5 种 / 前哨站 /
-  古城 / 试炼密室 / 古迹废墟的结构件列表与官方对拍）仍没做；`pillager_outposts` 的排除区只有
+  jigsaw 结构件生成见下面单独的里程碑。`pillager_outposts` 的排除区只有
   单元测试、未进官方逐格对拍。整列判定与起点单点判定在这批数据上从未不一致（主世界群系沿 Y
   基本恒定），两条路径各自用故意改坏单独验过。
 - 多件式结构的结构件布局与前置判定（分支 `cb-wg-multipiece`）：
@@ -578,7 +577,41 @@ WebView2 的渲染进程不算在内。
   结构件布局仍没做，不假装支持。读回路径已能解析这四个结构的结构件标签，但**没有**接进
   区块 NBT 解码后的世界状态（`chunk_nbt` 仍把 `structures` 当不透明标签原样保留），
   所以存档读回后游戏里也还不会出现结构。Beardifier 见下面单独一条。
-- 地物（features）阶段的纯函数正按官方 `ChunkGenerator.applyBiomeDecoration` 逐类移植，
+- jigsaw 结构件生成（分支 `cb-wg-jigsaw`）：`mc-bamboo-worldgen::structure::jigsaw` 把
+  `JigsawStructure.findGenerationPoint` + `JigsawPlacement.addPieces` 整条递归移植成纯函数，
+  照官方 26.3 的取数顺序翻译：`HeightProvider.sample`（`constant` / `uniform`）、
+  `Rotation.getRandom` / `getShuffled`、`StructureTemplateManager.getOrCreate`（模板按 id
+  缓存）、`StructurePlaceSettings.getRandomPalette`（多 palette 模板按**世界位置**的
+  `Mth.getSeed` 选，不消耗世界随机源）、`Palette.jigsaws()` 的 `(y, x, z)` 顺序 +
+  `Util.shuffle` + 稳定按 `selectionPriority` 降序、`PoolAliasLookup.create`（`direct` /
+  `random` / `random_group` 共用一条 `RandomSource.create(seed).forkPositional().at(pos)`）、
+  `StructureTemplatePool.getRandomTemplate` / `getShuffledTemplates` / `getMaxSize`、
+  `Rotation.getShuffled`、`canAttach`、`Shapes` 的 `join` / `joinIsNotEmpty` /
+  `joinUnoptimized`（`AABB.deflate(0.25)`，用乘 4 整数精确表示）、
+  `SequencedPriorityIterator`、`project_start_to_heightmap` / `getFirstFreeHeight`、
+  `isStartTooCloseToWorldHeightLimits` 与 `doExpansionHack`。五种 pool element
+  （`single` / `legacy_single` / `list` / `feature` / `empty`）都支持。
+  对拍 `cargo run -p mc-bamboo-vanilla -- jigsaw <java> [templates|jigsaws|pieces|shapes]`
+  用官方 `StructureTemplateManager`（真实数据包）与 `Structure.GenerationContext`：
+  `pieces` 覆盖村庄 5 种、掠夺者前哨站、古城、试炼密室、古迹废墟和 26.3 新增的全部
+  18 种 `abandoned_camp`，6 种子 × 6 区块 × 27 结构 = 972 个查询、12467 个结构件的
+  类型 / 模板名 / 位置 / 旋转 / 包围盒 / `groundLevelDelta` / **每个 junction 的全部字段**
+  逐项 0 不一致；`jigsaws` 对 1511 个模板 × 4 种旋转 × 4 个位置 = 24176 个查询、
+  68352 个拼图方块的位置 / front / top / name / target / pool / joint / 两个优先级逐项
+  0 不一致；`templates` 1511 个模板的尺寸 / 方块数 / 拼图方块数 0 不一致；`shapes`
+  120 个场景 + 4 个 deflate case 0 不一致。四处故意改坏（别名随机源位置 +1、拼图方块
+  orientation 写死 `north_up`、junction 的 `sourceGroundY` +1、`pieces` 的 palette 选择）
+  各自被抓到并失败，还原回 0。
+  已知限制：仍是纯函数 + oracle，**没接进 Director 的 `structure_starts` 阶段**（那是流水线的
+  职责）；`Piece` 只带结构件列表（元素、位置、旋转、包围盒、`groundLevelDelta`、junctions），
+  方块写入（`placeInChunk` / `postProcess` / processors / 拼图替换 / 方块实体）属放置那一步，
+  `Piece::to_save_piece` 只给出 `id` / `BB` / `O=-1` / `GD=0` 四个基类字段，
+  `addAdditionalSaveData` 的 `pool_element` / `rotation` / `junctions` 等还没编码。
+  `start_height` 只支持 `constant`（absolute）与 `uniform`——26.3 主世界全部 28 个 jigsaw
+  结构只用这两种，其余 provider 标 unsupported；`bastion_remnant` 是下界结构，按分工不做。
+  `liquid_settings` 只解析不参与结构件生成（官方也要到放置阶段才用）。`Shapes` 按 0.25
+  的倍数用整数精确复刻，若将来有非 0.25 倍的 AABB 进来（目前没有）会失去精度。
+  地物（features）阶段的纯函数正按官方 `ChunkGenerator.applyBiomeDecoration` 逐类移植，
   游戏里的接入由流水线分支（邻居快照 + `features` 阶段）负责。已逐方块对拍
   0 不一致的有 step 6 的矿石，以及 step 9 的植被子集（详见
   `docs/worldgen-features-plan.md` 5.1）；其余类型仍明确标 `unsupported`，对拍时整块跳过，
