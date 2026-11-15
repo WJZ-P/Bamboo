@@ -13,6 +13,7 @@ pub mod block_column;
 pub mod block_predicate;
 pub mod blue_ice;
 pub mod composition;
+pub mod coral;
 pub mod disk;
 pub mod dispatch;
 #[cfg(test)]

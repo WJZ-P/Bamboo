@@ -238,6 +238,28 @@ fn place_feature<'a>(
         };
         return feature.place(registry, world, env, random, pos);
     }
+    // 珊瑚链：`overlay` / `coral_tree` / `coral_claw` 都要递归放子 `PlacedFeature`。
+    //
+    // The coral chain: `overlay` / `coral_tree` / `coral_claw` all recurse into child
+    // `PlacedFeature`s.
+    if kind == "minecraft:overlay" {
+        let Some(overlay) = super::coral::OverlayFeature::parse(config) else {
+            return PlaceOutcome::unsupported();
+        };
+        return overlay.place(registry, world, env, random, pos);
+    }
+    if kind == "minecraft:coral_tree" {
+        let Some(tree) = super::coral::CoralTree::parse(config) else {
+            return PlaceOutcome::unsupported();
+        };
+        return tree.place(registry, world, env, random, pos);
+    }
+    if kind == "minecraft:coral_claw" {
+        let Some(claw) = super::coral::CoralClaw::parse(config) else {
+            return PlaceOutcome::unsupported();
+        };
+        return claw.place(registry, world, env, random, pos);
+    }
     let Some(comp) = Composition::parse(kind, config) else {
         return PlaceOutcome::unsupported();
     };
