@@ -685,6 +685,11 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
     let mut pieces_total = 0usize;
     let mut block_total = 0usize;
     let mut comparisons = 0usize;
+    let mut java_only_by_block: std::collections::BTreeMap<String, (usize, String)> =
+        std::collections::BTreeMap::new();
+    let mut rust_only_by_block: std::collections::BTreeMap<String, (usize, String)> =
+        std::collections::BTreeMap::new();
+    let mut all_diffs: Vec<String> = Vec::new();
 
     for (q, section) in queries.iter().zip(sections.iter()) {
         let key = format!("{} {} {} {} {}", q.kind, q.seed, q.cx, q.cz, q.fill);
@@ -714,27 +719,41 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
         let mine: std::collections::BTreeSet<&str> =
             ours.blocks.iter().map(String::as_str).collect();
         comparisons += theirs.len().max(mine.len());
-        for line in theirs.difference(&mine).take(8) {
-            mismatch_count += 1;
-            push(&mut failures, format!("[{key}] B only in java: {line}"));
+        let java_only: Vec<&str> = theirs.difference(&mine).copied().collect();
+        let rust_only: Vec<&str> = mine.difference(&theirs).copied().collect();
+        mismatch_count += java_only.len() + rust_only.len();
+        // 按方块名聚合，样例只留前 3 条，明细全写进 `all_diffs`。
+        // Aggregate by block name with at most three samples each; the full list goes into
+        // `all_diffs` for the report file.
+        tally(&mut java_only_by_block, &java_only);
+        tally(&mut rust_only_by_block, &rust_only);
+        samples(&mut failures, &key, "java", &java_only);
+        samples(&mut failures, &key, "rust", &rust_only);
+        for line in &java_only {
+            all_diffs.push(format!("[{key}] only in java: {line}"));
         }
-        for line in mine.difference(&theirs).take(8) {
-            mismatch_count += 1;
-            push(&mut failures, format!("[{key}] B only in rust: {line}"));
+        for line in &rust_only {
+            all_diffs.push(format!("[{key}] only in rust: {line}"));
         }
         // 只在一侧出现的方块单独统计（不算逐块不一致），共有部分仍严格比较。
         // Positions present on only one side are counted separately (not as per-block
         // mismatches); the shared part is still compared strictly.
-        one_sided += theirs.symmetric_difference(&mine).count();
-        if !theirs.is_subset(&mine) || !mine.is_subset(&theirs) {
-            println!(
-                "  case {key}: java {} blocks, rust {} blocks, java-only {}, rust-only {}",
-                theirs.len(),
-                mine.len(),
-                theirs.difference(&mine).count(),
-                mine.difference(&theirs).count()
-            );
+        one_sided += java_only.len() + rust_only.len();
+    }
+
+    if !java_only_by_block.is_empty() || !rust_only_by_block.is_empty() {
+        println!("-- blocks only in java (by block) --");
+        for (block, (count, sample)) in &java_only_by_block {
+            println!("  {count:5} {block}   e.g. {sample}");
         }
+        println!("-- blocks only in rust (by block) --");
+        for (block, (count, sample)) in &rust_only_by_block {
+            println!("  {count:5} {block}   e.g. {sample}");
+        }
+    }
+    if let Ok(path) = std::env::var("STRUCTURE_PLACE_DIFFS") {
+        let _ = std::fs::write(&path, all_diffs.join("\n"));
+        println!("wrote {} diff lines to {path}", all_diffs.len());
     }
 
     println!(
@@ -785,5 +804,50 @@ fn report_lines(
 fn push(list: &mut Vec<String>, line: String) {
     if list.len() < 24 {
         list.push(line);
+    }
+}
+
+/// 按方块名（`Block{minecraft:x}[...]` 里的 `minecraft:x`）累加，并记一条样例位置。
+///
+/// Accumulate per block name (the `minecraft:x` inside `Block{minecraft:x}[...]`) with
+/// one sample position each.
+fn tally(into: &mut std::collections::BTreeMap<String, (usize, String)>, lines: &[&str]) {
+    for line in lines {
+        // 行格式：`x y z Block{...}`。
+        // Line format: `x y z Block{...}`.
+        let mut parts = line.splitn(4, ' ');
+        let _ = (parts.next(), parts.next(), parts.next());
+        let state = parts.next().unwrap_or("");
+        let name = state
+            .strip_prefix("Block{")
+            .and_then(|s| s.split(['}', '[']).next())
+            .unwrap_or(state)
+            .to_owned();
+        let entry = into.entry(name).or_insert_with(|| (0, (*line).to_owned()));
+        entry.0 += 1;
+    }
+}
+
+/// 往失败列表里加一条按方块名聚合的摘要，附最多三条样例。
+///
+/// Add one aggregate line per block name to the failure list with up to three samples.
+fn samples(failures: &mut Vec<String>, key: &str, side: &str, lines: &[&str]) {
+    let mut by_block: std::collections::BTreeMap<String, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for line in lines {
+        let mut parts = line.splitn(4, ' ');
+        let _ = (parts.next(), parts.next(), parts.next());
+        let state = parts.next().unwrap_or("");
+        let name = state
+            .strip_prefix("Block{")
+            .and_then(|s| s.split(['}', '[']).next())
+            .unwrap_or(state)
+            .to_owned();
+        by_block.entry(name).or_default().push(line);
+    }
+    for (block, list) in by_block {
+        for line in list.iter().take(3) {
+            push(failures, format!("[{key}] {side} only: {block} @ {line}"));
+        }
     }
 }

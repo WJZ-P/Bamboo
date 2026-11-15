@@ -570,6 +570,13 @@ public final class StructurePlaceOracle {
                     }
                     case "getBlockEntity":
                         return at((BlockPos) args[0]).getBlockEntity((BlockPos) args[0]);
+                    case "scheduleTick":
+                        // `placeBlock` 写含流体的方块后会给它排一个 0 刻的 tick。假世界不做
+                        // 计划刻，方块本身已经写进去了，直接返回。
+                        // `placeBlock` schedules a zero-delay tick after writing a block that
+                        // holds fluid. The fake world runs no ticks; the block is already in,
+                        // so this is a no-op.
+                        return null;
                     case "markPosForPostProcessing":
                         at((BlockPos) args[0]).markPosForPostProcessing((BlockPos) args[0]);
                         return null;
