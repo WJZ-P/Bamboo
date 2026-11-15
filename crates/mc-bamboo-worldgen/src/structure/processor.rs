@@ -386,9 +386,72 @@ pub enum RuleBlockEntityModifier {
     ///
     /// `Clear`: clears the block entity.
     Clear,
+    /// `AppendStatic`：把一段固定的 NBT 合并进方块实体（`existingTag.merge(tag)`）。
+    ///
+    /// `AppendStatic`: merges a fixed NBT into the block entity (`existingTag.merge(tag)`).
+    AppendStatic { data: mc_bamboo_nbt::Tag },
 }
 
 impl RuleBlockEntityModifier {
+    /// `RuleBlockEntityModifier.apply(random, existingTag)`：算出新的方块实体 NBT。
+    ///
+    /// `RuleBlockEntityModifier.apply(random, existingTag)`: the resulting block-entity NBT.
+    pub fn apply(
+        &self,
+        random: &crate::random::Random,
+        existing: Option<&mc_bamboo_nbt::Tag>,
+    ) -> Result<Option<mc_bamboo_nbt::Tag>, String> {
+        use mc_bamboo_nbt::Tag;
+        match self {
+            // `Passthrough.apply` 原样返回（可能是 null）。
+            // `Passthrough.apply` returns the input unchanged (possibly null).
+            Self::Passthrough => Ok(existing.cloned()),
+            // `AppendLoot.apply`：拷贝（或新建）后写 `LootTable` 与 `LootTableSeed`。
+            // `AppendLoot.apply`: copy (or create) then write `LootTable` and `LootTableSeed`.
+            Self::AppendLoot { loot_table } => {
+                let mut tag = match existing {
+                    Some(Tag::Compound(_)) => {
+                        existing.cloned().unwrap_or(Tag::Compound(Vec::new()))
+                    }
+                    // 现有标签不是复合（不可能，但官方也是 `existingTag.copy()` 后直接 store）。
+                    // A non-compound existing tag (impossible in practice): vanilla copies then
+                    // stores, which would throw; be explicit instead.
+                    Some(_) => return Err("block entity nbt is not a compound".to_owned()),
+                    None => Tag::Compound(Vec::new()),
+                };
+                if let Tag::Compound(entries) = &mut tag {
+                    entries.retain(|(key, _)| key != "LootTable" && key != "LootTableSeed");
+                    entries.push(("LootTable".to_owned(), Tag::String(loot_table.clone())));
+                    entries.push(("LootTableSeed".to_owned(), Tag::Long(random.next_long())));
+                }
+                Ok(Some(tag))
+            }
+            // `Clear.apply` 返回空复合。
+            // `Clear.apply` returns an empty compound.
+            Self::Clear => Ok(Some(Tag::Compound(Vec::new()))),
+            // `AppendStatic.apply`：`existingTag == null ? tag.copy() : existingTag.merge(tag)`。
+            // `AppendStatic.apply`: copy the tag when there is nothing, else merge into it.
+            Self::AppendStatic { data } => {
+                let Tag::Compound(new_entries) = data else {
+                    return Err("append_static data is not a compound".to_owned());
+                };
+                let mut merged = match existing {
+                    Some(Tag::Compound(_)) => {
+                        existing.cloned().unwrap_or(Tag::Compound(Vec::new()))
+                    }
+                    Some(_) => return Err("block entity nbt is not a compound".to_owned()),
+                    None => Tag::Compound(Vec::new()),
+                };
+                if let Tag::Compound(entries) = &mut merged {
+                    for (key, value) in new_entries {
+                        merge_tag(entries, key, value);
+                    }
+                }
+                Ok(Some(merged))
+            }
+        }
+    }
+
     fn parse(raw: &Value) -> Result<Self, String> {
         let kind = raw
             .get("type")
@@ -399,10 +462,70 @@ impl RuleBlockEntityModifier {
             "minecraft:append_loot" => Ok(Self::AppendLoot {
                 loot_table: string_field(raw, "loot_table")?,
             }),
+            "minecraft:append_static" => Ok(Self::AppendStatic {
+                data: json_value_to_tag(raw.get("data").ok_or("append_static has no data")?)?,
+            }),
             "minecraft:clear" => Ok(Self::Clear),
             other => Err(format!("unsupported block entity modifier {other}")),
         }
     }
+}
+
+/// `CompoundTag.merge(other)`：两边都是复合时递归合并，否则覆盖。
+///
+/// `CompoundTag.merge(other)`: recurse when both sides are compounds, otherwise overwrite.
+fn merge_tag(
+    entries: &mut Vec<(String, mc_bamboo_nbt::Tag)>,
+    key: &str,
+    value: &mc_bamboo_nbt::Tag,
+) {
+    use mc_bamboo_nbt::Tag;
+    if let Some(existing) = entries.iter_mut().find(|(name, _)| name == key) {
+        if let (Tag::Compound(self_entries), Tag::Compound(other_entries)) =
+            (&mut existing.1, value)
+        {
+            for (nested_key, nested_value) in other_entries {
+                merge_tag(self_entries, nested_key, nested_value);
+            }
+            return;
+        }
+        existing.1 = value.clone();
+        return;
+    }
+    entries.push((key.to_owned(), value.clone()));
+}
+
+/// 把一个 `serde_json::Value` 原样转成 NBT（`append_static` 的 `data` 字段）。
+///
+/// Convert a `serde_json::Value` to NBT verbatim (the `append_static` `data` field).
+fn json_value_to_tag(value: &Value) -> Result<mc_bamboo_nbt::Tag, String> {
+    use mc_bamboo_nbt::Tag;
+    Ok(match value {
+        Value::Object(fields) => Tag::Compound(
+            fields
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), json_value_to_tag(value)?)))
+                .collect::<Result<Vec<_>, String>>()?,
+        ),
+        Value::Array(values) => Tag::List(
+            values
+                .iter()
+                .map(json_value_to_tag)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Value::String(text) => Tag::String(text.clone()),
+        Value::Bool(flag) => Tag::Byte(i8::from(*flag)),
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                Tag::Int(int as i32)
+            } else if let Some(double) = number.as_f64() {
+                Tag::Double(double)
+            } else {
+                return Err(format!("unsupported append_static number {number}"));
+            }
+        }
+        Value::Null => return Err("append_static data has a null".to_owned()),
+    })
 }
 
 /// `BlockState.CODEC`：方块 id 加属性。

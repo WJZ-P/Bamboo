@@ -89,6 +89,12 @@ import net.minecraft.world.level.levelgen.structure.templatesystem.StructurePlac
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessor;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
 import net.minecraft.world.level.levelgen.structure.templatesystem.CappedProcessor;
+import net.minecraft.world.level.levelgen.structure.templatesystem.rule.blockentity.AppendLoot;
+import net.minecraft.world.level.levelgen.structure.templatesystem.rule.blockentity.AppendStatic;
+import net.minecraft.world.level.levelgen.structure.templatesystem.rule.blockentity.Clear;
+import net.minecraft.world.level.levelgen.structure.templatesystem.rule.blockentity.Passthrough;
+import net.minecraft.world.level.levelgen.structure.templatesystem.rule.blockentity.RuleBlockEntityModifier;
+import net.minecraft.nbt.TagParser;
 import net.minecraft.world.level.levelgen.structure.templatesystem.LiquidSettings;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import net.minecraft.world.level.storage.LevelResource;
@@ -162,6 +168,7 @@ public final class JigsawOracle {
                     case "capped" -> runCapped(Path.of(args[1]));
                     case "cappedfull" -> runCappedFull(registries, Path.of(args[1]));
                     case "placepiece" -> runPlacePiece(manager, registries, Path.of(args[1]));
+                    case "bemod" -> runBlockEntityModifier(registries, Path.of(args[1]));
                     case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
                 }
@@ -1144,6 +1151,73 @@ public final class JigsawOracle {
         }
         System.out.print(out);
         System.out.flush();
+    }
+
+    /**
+     * bemod 模式：把 26.3 数据里出现过的每一种 `block_entity_modifier`（`append_loot` /
+     * `clear` / `passthrough` / `append_static`）用官方 `apply(random, existing)` 跑一遍，
+     * 输出生成的 NBT。Rust 侧用 `RuleBlockEntityModifier::apply` 复算，逐键比。
+     * 这一条专门覆盖 `append_loot` 的 `LootTable` + `LootTableSeed`（含 `nextLong` 取数）。
+     *
+     * <p>Block-entity-modifier mode: runs every modifier kind through the official
+     * `apply(random, existing)` and prints the resulting NBT, covering `append_loot`'s
+     * `LootTable` + `LootTableSeed` (including the `nextLong` draw).
+     */
+    private static void runBlockEntityModifier(RegistryAccess registries, Path queries)
+            throws Exception {
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            // `kind|seed|lootTable|existingJson`，`existingJson` 为 `-` 表示没有 nbt。
+            // `kind|seed|lootTable|existingJson`; `-` means no existing nbt.
+            String[] p = line.trim().split("\\|", -1);
+            String kind = p[0];
+            long seed = Long.parseLong(p[1]);
+            String lootTable = p[2];
+            var ops = registries.createSerializationContext(NbtOps.INSTANCE);
+            CompoundTag existing = p[3].equals("-")
+                    ? null
+                    : TagParser.parseCompoundFully(p[3]);
+            RandomSource random = RandomSource.create(seed);
+            RuleBlockEntityModifier modifier = switch (kind) {
+                case "passthrough" -> Passthrough.INSTANCE;
+                case "clear" -> Clear.CODEC
+                        .codec()
+                        .parse(ops, ops.emptyMap())
+                        .getOrThrow(error -> new IllegalStateException("clear: " + error));
+                case "append_loot" -> new AppendLoot(
+                        net.minecraft.resources.ResourceKey.create(
+                                Registries.LOOT_TABLE, Identifier.parse(lootTable)));
+                case "append_static" -> new AppendStatic(
+                        existing == null ? new CompoundTag() : existing.copy());
+                // 与现有 nbt 的嵌套键不同，用来区分「递归合并」与「覆盖」。
+                // Nested keys differ from the existing tag so merge and overwrite diverge.
+                case "append_static_data" -> new AppendStatic(staticData());
+                default -> throw new IllegalStateException("unknown modifier " + kind);
+            };
+            CompoundTag applied = modifier.apply(random, existing);
+            out.append("M|").append(String.join("|", p)).append('|')
+                    .append(applied == null ? "-" : GSON.toJson(canonical(applied)))
+                    .append('\n');
+            // 再取一次随机数，证明 `apply` 消耗的取数次数与 Rust 一致。
+            // Draw once more, proving `apply` consumed the same number of draws as Rust.
+            out.append("N|").append(String.join("|", p)).append('|')
+                    .append(random.nextLong()).append('\n');
+        }
+        System.out.print(out);
+        System.out.flush();
+    }
+
+    /** `append_static_data` 用的固定 nbt：`{Nested:{A:1}, Extra:7}`。 */
+    private static CompoundTag staticData() {
+        CompoundTag nested = new CompoundTag();
+        nested.putInt("A", 1);
+        CompoundTag data = new CompoundTag();
+        data.put("Nested", nested);
+        data.putInt("Extra", 7);
+        return data;
     }
 
     /** 一次 `setBlock`：(位置, 状态)。 */

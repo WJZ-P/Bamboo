@@ -260,6 +260,15 @@ pub fn process_block(
                 if rule_matches(rule, block, reference_pos, level, &random) {
                     let mut out = block.clone();
                     out.state = rule.output_state.clone();
+                    // `rule.getOutputTag(random, processedBlockInfo.nbt())`。
+                    // 方块实体 nbt 只可能是复合或缺失；`apply` 的 `Err` 只在这种前提被破坏时
+                    // 出现，那时保留原 nbt（丢方块比丢 nbt 更糟）。
+                    // The block-entity nbt is either a compound or absent; `apply` only errors
+                    // when that premise breaks, in which case the original nbt is kept
+                    // (dropping the whole block would be worse).
+                    if let Ok(nbt) = rule.block_entity_modifier.apply(&random, out.nbt.as_ref()) {
+                        out.nbt = nbt;
+                    }
                     return Some(out);
                 }
             }
@@ -1191,6 +1200,145 @@ mod tests {
             out.world_pos,
             (0, 50, 0),
             "position kept when height is unknown"
+        );
+    }
+
+    /// `RuleBlockEntityModifier.apply`：`append_loot` 写 `LootTable` + 取一次 `nextLong`；
+    /// `clear` 清空；`passthrough` 原样返回；`append_static` 递归合并。
+    ///
+    /// `RuleBlockEntityModifier.apply`: `append_loot` writes `LootTable` plus one `nextLong`,
+    /// `clear` empties, `passthrough` returns the input and `append_static` merges recursively.
+    #[test]
+    fn block_entity_modifiers_produce_the_vanilla_tags() {
+        use crate::structure::processor::RuleBlockEntityModifier;
+        use mc_bamboo_blocks::LegacyRandom;
+        use mc_bamboo_nbt::Tag;
+
+        let random = Random::Legacy(LegacyRandom::new(7));
+        let existing = Tag::Compound(vec![
+            ("Keep".to_owned(), Tag::Int(5)),
+            (
+                "LootTable".to_owned(),
+                Tag::String("minecraft:old".to_owned()),
+            ),
+        ]);
+
+        // `passthrough` 不改。
+        // `passthrough` changes nothing.
+        assert_eq!(
+            RuleBlockEntityModifier::Passthrough
+                .apply(&random, Some(&existing))
+                .unwrap(),
+            Some(existing.clone())
+        );
+        // 现有的 nbt 是 `None` 时 `passthrough` 仍返回 `None`。
+        // With no existing nbt, `passthrough` still returns `None`.
+        assert_eq!(
+            RuleBlockEntityModifier::Passthrough
+                .apply(&random, None)
+                .unwrap(),
+            None
+        );
+
+        // `clear` 得到空复合。
+        // `clear` yields an empty compound.
+        assert_eq!(
+            RuleBlockEntityModifier::Clear
+                .apply(&random, Some(&existing))
+                .unwrap(),
+            Some(Tag::Compound(Vec::new()))
+        );
+
+        // `append_loot`：保留 `Keep`、覆盖 `LootTable`、加 `LootTableSeed`。
+        let appended = RuleBlockEntityModifier::AppendLoot {
+            loot_table: "minecraft:archaeology/trail_ruins_common".to_owned(),
+        }
+        .apply(&random, Some(&existing))
+        .unwrap()
+        .unwrap();
+        let Tag::Compound(entries) = &appended else {
+            panic!("append_loot must yield a compound");
+        };
+        let get = |key: &str| {
+            entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(get("Keep"), Some(Tag::Int(5)));
+        assert_eq!(
+            get("LootTable"),
+            Some(Tag::String(
+                "minecraft:archaeology/trail_ruins_common".to_owned()
+            ))
+        );
+        assert!(
+            matches!(get("LootTableSeed"), Some(Tag::Long(_))),
+            "append_loot must write a long seed"
+        );
+        // 同一个 `random` 连续取两次应得到不同的种子（证明它真的取数了）。
+        // Asking again must draw a different seed, proving it really draws.
+        let again = RuleBlockEntityModifier::AppendLoot {
+            loot_table: "minecraft:x".to_owned(),
+        }
+        .apply(&random, None)
+        .unwrap()
+        .unwrap();
+        assert!(
+            matches!(&again, Tag::Compound(_)),
+            "append_loot must yield a compound"
+        );
+        let seed = |tag: &Tag| match tag {
+            Tag::Compound(entries) => entries
+                .iter()
+                .find(|(name, _)| name == "LootTableSeed")
+                .map(|(_, value)| value.clone()),
+            _ => None,
+        };
+        assert_ne!(seed(&appended), seed(&again), "consecutive draws differ");
+
+        // `append_static` 递归合并：同名复合合并，标量覆盖。
+        // `append_static` merges recursively: same-name compounds merge, scalars overwrite.
+        let merged = RuleBlockEntityModifier::AppendStatic {
+            data: Tag::Compound(vec![
+                ("Keep".to_owned(), Tag::Int(9)),
+                (
+                    "Nested".to_owned(),
+                    Tag::Compound(vec![("A".to_owned(), Tag::Int(1))]),
+                ),
+            ]),
+        }
+        .apply(
+            &random,
+            Some(&Tag::Compound(vec![
+                (
+                    "Nested".to_owned(),
+                    Tag::Compound(vec![("B".to_owned(), Tag::Int(2))]),
+                ),
+                ("Only".to_owned(), Tag::Int(3)),
+            ])),
+        )
+        .unwrap()
+        .unwrap();
+        let Tag::Compound(entries) = &merged else {
+            panic!("append_static must yield a compound");
+        };
+        let nested = entries
+            .iter()
+            .find(|(name, _)| name == "Nested")
+            .map(|(_, value)| value.clone());
+        // 嵌套里同时有 A 和 B。
+        // The nested compound holds both A and B.
+        assert_eq!(
+            nested,
+            Some(Tag::Compound(vec![
+                ("B".to_owned(), Tag::Int(2)),
+                ("A".to_owned(), Tag::Int(1)),
+            ]))
+        );
+        assert!(
+            entries.iter().any(|(name, _)| name == "Only"),
+            "append_static must keep untouched keys"
         );
     }
 

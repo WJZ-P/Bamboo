@@ -458,6 +458,13 @@ impl RuleBlockEntityModifier {
             Self::Clear => {
                 fields.push(("type".to_owned(), Tag::String("minecraft:clear".to_owned())))
             }
+            Self::AppendStatic { data } => {
+                fields.push((
+                    "type".to_owned(),
+                    Tag::String("minecraft:append_static".to_owned()),
+                ));
+                fields.push(("data".to_owned(), data.clone()));
+            }
         }
         Tag::Compound(fields)
     }

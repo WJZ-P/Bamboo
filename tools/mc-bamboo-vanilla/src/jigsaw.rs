@@ -96,6 +96,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "capped" => run_capped(command, work_dir),
         "cappedfull" => run_capped_full(command, work_dir),
         "placepiece" => run_place_piece(command, work_dir),
+        "bemod" => run_block_entity_modifier(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
@@ -2021,6 +2022,238 @@ fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
     }
     println!("jigsaw placepiece: {checked} queries, {writes_checked} writes, all identical");
     Ok(())
+}
+
+/// `bemod` 模式：`RuleBlockEntityModifier.apply` 对官方同名方法，逐键比 NBT，
+/// 并用「随后再取一次 `nextLong`」验证取数次数一致。
+///
+/// `bemod` mode: `RuleBlockEntityModifier.apply` against vanilla's, comparing the NBT key by
+/// key plus one extra `nextLong` draw to prove the same number of draws.
+fn run_block_entity_modifier(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    // 26.3 的 `processor_list` 里 `append_loot` 有 4 处；另外三种也要覆盖（不是数据驱动，
+    // 因为 `clear` / `passthrough` / `append_static` 在数据里没出现）。
+    // The 26.3 `processor_list` has four `append_loot` entries; the other three are covered
+    // too even though the data never uses them.
+    let mut queries = Vec::new();
+    for seed in [0_i64, 1, 42, -7] {
+        for existing in [
+            "-",
+            "{Keep:5,LootTable:\"minecraft:old\"}",
+            "{Nested:{B:2},Only:3}",
+        ] {
+            queries.push(format!(
+                "append_loot|{seed}|minecraft:archaeology/trail_ruins_common|{existing}"
+            ));
+            queries.push(format!("clear|{seed}|minecraft:empty|{existing}"));
+            queries.push(format!("passthrough|{seed}|minecraft:empty|{existing}"));
+            //  的 data 与 existing 的嵌套键**不同**，否则「递归合并」与
+            // 「直接覆盖」结果相同，改坏也发现不了（本轮踩过）。
+            // The  data uses different nested keys from ; otherwise
+            // recursive merge and plain overwrite agree and a break goes unnoticed.
+            queries.push(format!("append_static|{seed}|minecraft:empty|{existing}"));
+            queries.push(format!(
+                "append_static_data|{seed}|minecraft:empty|{existing}"
+            ));
+        }
+    }
+    let queries_path = work_dir.join("jigsaw_bemod_queries.txt");
+    fs::write(&queries_path, queries.join("\n"))
+        .map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("bemod")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_block_entity_modifier(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
+fn compare_block_entity_modifier(stdout: &str, queries: &[String]) -> Result<(), String> {
+    let mut java_m: HashMap<String, Option<Value>> = HashMap::new();
+    let mut java_n: HashMap<String, i64> = HashMap::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() < 6 {
+            continue;
+        }
+        let key = fields[1..5].join("|");
+        match fields[0] {
+            "M" => {
+                let rest = fields[5..].join("|");
+                java_m.insert(
+                    key,
+                    if rest == "-" {
+                        None
+                    } else {
+                        Some(
+                            serde_json::from_str(&rest)
+                                .map_err(|error| format!("bad M json: {error}"))?,
+                        )
+                    },
+                );
+            }
+            "N" => {
+                java_n.insert(key, fields[5].parse().unwrap_or(0));
+            }
+            _ => {}
+        }
+    }
+
+    let mut checked = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for query in queries {
+        let fields: Vec<&str> = query.split('|').collect();
+        let kind = fields[0];
+        let seed = fields[1]
+            .parse::<i64>()
+            .map_err(|error| format!("bad seed: {error}"))?;
+        let loot_table = fields[2];
+        let existing_text = fields[3];
+        let existing = if existing_text == "-" {
+            None
+        } else {
+            Some(parse_snbt(existing_text)?)
+        };
+
+        let modifier = match kind {
+            "append_loot" => {
+                mc_bamboo_worldgen::structure::processor::RuleBlockEntityModifier::AppendLoot {
+                    loot_table: loot_table.to_owned(),
+                }
+            }
+            "clear" => mc_bamboo_worldgen::structure::processor::RuleBlockEntityModifier::Clear,
+            "passthrough" => {
+                mc_bamboo_worldgen::structure::processor::RuleBlockEntityModifier::Passthrough
+            }
+            "append_static" => {
+                mc_bamboo_worldgen::structure::processor::RuleBlockEntityModifier::AppendStatic {
+                    data: existing
+                        .clone()
+                        .unwrap_or(mc_bamboo_nbt::Tag::Compound(Vec::new())),
+                }
+            }
+            // 用一段与 existing 嵌套键**不同**的固定 data，才能区分「递归合并」与「覆盖」。
+            // A fixed data whose nested keys differ from `existing`, so recursive merge and
+            // plain overwrite give different results.
+            "append_static_data" => {
+                mc_bamboo_worldgen::structure::processor::RuleBlockEntityModifier::AppendStatic {
+                    data: mc_bamboo_nbt::Tag::Compound(vec![
+                        (
+                            "Nested".to_owned(),
+                            mc_bamboo_nbt::Tag::Compound(vec![(
+                                "A".to_owned(),
+                                mc_bamboo_nbt::Tag::Int(1),
+                            )]),
+                        ),
+                        ("Extra".to_owned(), mc_bamboo_nbt::Tag::Int(7)),
+                    ]),
+                }
+            }
+            other => return Err(format!("unknown modifier {other}")),
+        };
+        let random = mc_bamboo_worldgen::random::Random::Legacy(LegacyRandom::new(seed));
+        checked += 1;
+        let applied = modifier
+            .apply(&random, existing.as_ref())
+            .map_err(|error| format!("apply {kind}: {error}"))?;
+        let got = applied.as_ref().map(canonical_tag);
+        let key = fields[..4].join("|");
+        let Some(want) = java_m.get(&key) else {
+            return Err(format!("Java missing M for {key}"));
+        };
+        if &got != want {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{key}: rust {} java {}",
+                    got.map_or("-".to_owned(), |v| v.to_string()),
+                    want.as_ref().map_or("-".to_owned(), |v| v.to_string())
+                ));
+            }
+        }
+        // 随后再取一次 `nextLong`，验证取数次数一致。
+        // One more `nextLong` to prove the same number of draws.
+        let after = random.next_long();
+        if java_n.get(&key).is_some_and(|want| *want != after) {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{key}: draw-after rust {after} java {:?}",
+                    java_n.get(&key)
+                ));
+            }
+        }
+    }
+    if checked != queries.len() {
+        return Err(format!(
+            "checked {checked} modifier queries, expected {}",
+            queries.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches} differences over {checked} queries; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!("jigsaw bemod: {checked} queries, all identical");
+    Ok(())
+}
+
+/// 极简 SNBT：只支持 `{Key:value,...}`、字符串（双引号）、整数。
+/// 对拍里只用固定几组手写输入，不需要完整解析器。
+///
+/// Minimal SNBT for the fixed hand-written inputs: compounds, quoted strings and ints.
+fn parse_snbt(text: &str) -> Result<mc_bamboo_nbt::Tag, String> {
+    use mc_bamboo_nbt::Tag;
+    let trimmed = text.trim();
+    let Some(inner) = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
+        return Err(format!("bad snbt {text}"));
+    };
+    let mut entries = Vec::new();
+    if inner.trim().is_empty() {
+        return Ok(Tag::Compound(entries));
+    }
+    let mut depth = 0;
+    let mut start = 0;
+    let bytes: Vec<char> = inner.chars().collect();
+    let mut parts = Vec::new();
+    for (index, ch) in bytes.iter().enumerate() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(bytes[start..index].iter().collect::<String>());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(bytes[start..].iter().collect::<String>());
+    for part in parts {
+        let (key, value) = part.split_once(':').ok_or("bad snbt entry")?;
+        let value = value.trim();
+        let tag = if value.starts_with('{') {
+            parse_snbt(value)?
+        } else if let Some(text) = value.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+            Tag::String(text.to_owned())
+        } else {
+            Tag::Int(
+                value
+                    .parse::<i32>()
+                    .map_err(|error| format!("bad snbt number {value}: {error}"))?,
+            )
+        };
+        entries.push((key.trim().to_owned(), tag));
+    }
+    Ok(Tag::Compound(entries))
 }
 
 fn run_pieces(

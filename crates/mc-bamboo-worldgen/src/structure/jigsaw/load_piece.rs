@@ -363,6 +363,11 @@ fn block_entity_modifier_from_tag(
                 .to_owned(),
         }),
         "minecraft:clear" => Ok(RuleBlockEntityModifier::Clear),
+        "minecraft:append_static" => Ok(RuleBlockEntityModifier::AppendStatic {
+            data: field(tag, "data")
+                .ok_or("append_static has no data")?
+                .clone(),
+        }),
         other => Err(format!("unsupported block entity modifier {other}")),
     }
 }
