@@ -150,34 +150,14 @@ impl MonumentPiece<'_> {
     /// `generateBox(..., skipAir = false)`。
     ///
     /// `generateBox(..., skipAir = false)`.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn box_at(
-        &mut self,
-        x0: i32,
-        y0: i32,
-        z0: i32,
-        x1: i32,
-        y1: i32,
-        z1: i32,
-        edge: u32,
-        fill: u32,
-    ) {
+    pub(super) fn box_at(&mut self, range: [i32; 6], edge: u32, fill: u32) {
         let chunk_bb = self.chunk_bb;
-        generate_box(
-            &self.ctx,
-            self.level,
-            &chunk_bb,
-            [x0, y0, z0, x1, y1, z1],
-            edge,
-            fill,
-            false,
-        );
+        generate_box(&self.ctx, self.level, &chunk_bb, range, edge, fill, false);
     }
 
     /// `OceanMonumentPiece.generateWaterBox`。
     ///
     /// `OceanMonumentPiece.generateWaterBox`.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn water_box(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32) {
         let water = fill_block();
         let air = mc_bamboo_data::blocks::AIR;
@@ -200,17 +180,8 @@ impl MonumentPiece<'_> {
     /// `OceanMonumentPiece.generateBoxOnFillOnly`。
     ///
     /// `OceanMonumentPiece.generateBoxOnFillOnly`.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn box_on_fill_only(
-        &mut self,
-        x0: i32,
-        y0: i32,
-        z0: i32,
-        x1: i32,
-        y1: i32,
-        z1: i32,
-        target: u32,
-    ) {
+    pub(super) fn box_on_fill_only(&mut self, range: [i32; 6], target: u32) {
+        let [x0, y0, z0, x1, y1, z1] = range;
         let water = fill_block();
         for y in y0..=y1 {
             for x in x0..=x1 {
@@ -230,53 +201,37 @@ impl MonumentPiece<'_> {
         if down_opening {
             let gray = base_gray();
             let light = base_light();
-            self.box_at(x_off, 0, z_off, x_off + 2, 0, z_off + 7, gray, gray);
-            self.box_at(x_off + 5, 0, z_off, x_off + 7, 0, z_off + 7, gray, gray);
-            self.box_at(x_off + 3, 0, z_off, x_off + 4, 0, z_off + 2, gray, gray);
-            self.box_at(x_off + 3, 0, z_off + 5, x_off + 4, 0, z_off + 7, gray, gray);
+            self.box_at([x_off, 0, z_off, x_off + 2, 0, z_off + 7], gray, gray);
+            self.box_at([x_off + 5, 0, z_off, x_off + 7, 0, z_off + 7], gray, gray);
+            self.box_at([x_off + 3, 0, z_off, x_off + 4, 0, z_off + 2], gray, gray);
             self.box_at(
-                x_off + 3,
-                0,
-                z_off + 2,
-                x_off + 4,
-                0,
-                z_off + 2,
+                [x_off + 3, 0, z_off + 5, x_off + 4, 0, z_off + 7],
+                gray,
+                gray,
+            );
+            self.box_at(
+                [x_off + 3, 0, z_off + 2, x_off + 4, 0, z_off + 2],
                 light,
                 light,
             );
             self.box_at(
-                x_off + 3,
-                0,
-                z_off + 5,
-                x_off + 4,
-                0,
-                z_off + 5,
+                [x_off + 3, 0, z_off + 5, x_off + 4, 0, z_off + 5],
                 light,
                 light,
             );
             self.box_at(
-                x_off + 2,
-                0,
-                z_off + 3,
-                x_off + 2,
-                0,
-                z_off + 4,
+                [x_off + 2, 0, z_off + 3, x_off + 2, 0, z_off + 4],
                 light,
                 light,
             );
             self.box_at(
-                x_off + 5,
-                0,
-                z_off + 3,
-                x_off + 5,
-                0,
-                z_off + 4,
+                [x_off + 5, 0, z_off + 3, x_off + 5, 0, z_off + 4],
                 light,
                 light,
             );
         } else {
             let gray = base_gray();
-            self.box_at(x_off, 0, z_off, x_off + 7, 0, z_off + 7, gray, gray);
+            self.box_at([x_off, 0, z_off, x_off + 7, 0, z_off + 7], gray, gray);
         }
     }
 
@@ -377,67 +332,42 @@ fn generate_wing(piece: &mut MonumentPiece<'_>, flipped: bool, x_off: i32) {
     }
     let gray = base_gray();
     let light = base_light();
-    piece.box_at(x_off, 0, 0, x_off + 24, 0, 20, gray, gray);
+    piece.box_at([x_off, 0, 0, x_off + 24, 0, 20], gray, gray);
     piece.water_box(x_off, 1, 0, x_off + 24, 10, 20);
 
     for i in 0..4 {
-        piece.box_at(x_off + i, i + 1, i, x_off + i, i + 1, 20, light, light);
+        piece.box_at([x_off + i, i + 1, i, x_off + i, i + 1, 20], light, light);
         piece.box_at(
-            x_off + i + 7,
-            i + 5,
-            i + 7,
-            x_off + i + 7,
-            i + 5,
-            20,
+            [x_off + i + 7, i + 5, i + 7, x_off + i + 7, i + 5, 20],
             light,
             light,
         );
         piece.box_at(
-            x_off + 17 - i,
-            i + 5,
-            i + 7,
-            x_off + 17 - i,
-            i + 5,
-            20,
+            [x_off + 17 - i, i + 5, i + 7, x_off + 17 - i, i + 5, 20],
             light,
             light,
         );
         piece.box_at(
-            x_off + 24 - i,
-            i + 1,
-            i,
-            x_off + 24 - i,
-            i + 1,
-            20,
+            [x_off + 24 - i, i + 1, i, x_off + 24 - i, i + 1, 20],
             light,
             light,
         );
         piece.box_at(
-            x_off + i + 1,
-            i + 1,
-            i,
-            x_off + 23 - i,
-            i + 1,
-            i,
+            [x_off + i + 1, i + 1, i, x_off + 23 - i, i + 1, i],
             light,
             light,
         );
         piece.box_at(
-            x_off + i + 8,
-            i + 5,
-            i + 7,
-            x_off + 16 - i,
-            i + 5,
-            i + 7,
+            [x_off + i + 8, i + 5, i + 7, x_off + 16 - i, i + 5, i + 7],
             light,
             light,
         );
     }
 
-    piece.box_at(x_off + 4, 4, 4, x_off + 6, 4, 20, gray, gray);
-    piece.box_at(x_off + 7, 4, 4, x_off + 17, 4, 6, gray, gray);
-    piece.box_at(x_off + 18, 4, 4, x_off + 20, 4, 20, gray, gray);
-    piece.box_at(x_off + 11, 8, 11, x_off + 13, 8, 20, gray, gray);
+    piece.box_at([x_off + 4, 4, 4, x_off + 6, 4, 20], gray, gray);
+    piece.box_at([x_off + 7, 4, 4, x_off + 17, 4, 6], gray, gray);
+    piece.box_at([x_off + 18, 4, 4, x_off + 20, 4, 20], gray, gray);
+    piece.box_at([x_off + 11, 8, 11, x_off + 13, 8, 20], gray, gray);
     piece.place(light, x_off + 12, 9, 12);
     piece.place(light, x_off + 12, 9, 15);
     piece.place(light, x_off + 12, 9, 18);
@@ -464,8 +394,8 @@ fn generate_wing(piece: &mut MonumentPiece<'_>, flipped: bool, x_off: i32) {
         piece.place(light, pos, 5, 5);
     }
     piece.place(light, right_pos, 5, 5);
-    piece.box_at(x_off + 11, 1, 12, x_off + 13, 7, 12, gray, gray);
-    piece.box_at(x_off + 12, 1, 11, x_off + 12, 7, 13, gray, gray);
+    piece.box_at([x_off + 11, 1, 12, x_off + 13, 7, 12], gray, gray);
+    piece.box_at([x_off + 12, 1, 11, x_off + 12, 7, 13], gray, gray);
 }
 
 /// `MonumentBuilding.generateEntranceArchs`。
@@ -481,17 +411,17 @@ fn generate_entrance_archs(piece: &mut MonumentPiece<'_>) {
     piece.water_box(25, 0, 0, 32, 8, 20);
 
     for i in 0..4 {
-        piece.box_at(24, 2, 5 + i * 4, 24, 4, 5 + i * 4, light, light);
-        piece.box_at(22, 4, 5 + i * 4, 23, 4, 5 + i * 4, light, light);
+        piece.box_at([24, 2, 5 + i * 4, 24, 4, 5 + i * 4], light, light);
+        piece.box_at([22, 4, 5 + i * 4, 23, 4, 5 + i * 4], light, light);
         piece.place(light, 25, 5, 5 + i * 4);
         piece.place(light, 26, 6, 5 + i * 4);
         piece.place(lamp, 26, 5, 5 + i * 4);
-        piece.box_at(33, 2, 5 + i * 4, 33, 4, 5 + i * 4, light, light);
-        piece.box_at(34, 4, 5 + i * 4, 35, 4, 5 + i * 4, light, light);
+        piece.box_at([33, 2, 5 + i * 4, 33, 4, 5 + i * 4], light, light);
+        piece.box_at([34, 4, 5 + i * 4, 35, 4, 5 + i * 4], light, light);
         piece.place(light, 32, 5, 5 + i * 4);
         piece.place(light, 31, 6, 5 + i * 4);
         piece.place(lamp, 31, 5, 5 + i * 4);
-        piece.box_at(27, 6, 5 + i * 4, 30, 6, 5 + i * 4, gray, gray);
+        piece.box_at([27, 6, 5 + i * 4, 30, 6, 5 + i * 4], gray, gray);
     }
 }
 
@@ -505,20 +435,20 @@ fn generate_entrance_wall(piece: &mut MonumentPiece<'_>) {
     let gray = base_gray();
     let light = base_light();
     let black = base_black();
-    piece.box_at(15, 0, 21, 42, 0, 21, gray, gray);
+    piece.box_at([15, 0, 21, 42, 0, 21], gray, gray);
     piece.water_box(26, 1, 21, 31, 3, 21);
-    piece.box_at(21, 12, 21, 36, 12, 21, gray, gray);
-    piece.box_at(17, 11, 21, 40, 11, 21, gray, gray);
-    piece.box_at(16, 10, 21, 41, 10, 21, gray, gray);
-    piece.box_at(15, 7, 21, 42, 9, 21, gray, gray);
-    piece.box_at(16, 6, 21, 41, 6, 21, gray, gray);
-    piece.box_at(17, 5, 21, 40, 5, 21, gray, gray);
-    piece.box_at(21, 4, 21, 36, 4, 21, gray, gray);
-    piece.box_at(22, 3, 21, 26, 3, 21, gray, gray);
-    piece.box_at(31, 3, 21, 35, 3, 21, gray, gray);
-    piece.box_at(23, 2, 21, 25, 2, 21, gray, gray);
-    piece.box_at(32, 2, 21, 34, 2, 21, gray, gray);
-    piece.box_at(28, 4, 20, 29, 4, 21, light, light);
+    piece.box_at([21, 12, 21, 36, 12, 21], gray, gray);
+    piece.box_at([17, 11, 21, 40, 11, 21], gray, gray);
+    piece.box_at([16, 10, 21, 41, 10, 21], gray, gray);
+    piece.box_at([15, 7, 21, 42, 9, 21], gray, gray);
+    piece.box_at([16, 6, 21, 41, 6, 21], gray, gray);
+    piece.box_at([17, 5, 21, 40, 5, 21], gray, gray);
+    piece.box_at([21, 4, 21, 36, 4, 21], gray, gray);
+    piece.box_at([22, 3, 21, 26, 3, 21], gray, gray);
+    piece.box_at([31, 3, 21, 35, 3, 21], gray, gray);
+    piece.box_at([23, 2, 21, 25, 2, 21], gray, gray);
+    piece.box_at([32, 2, 21, 34, 2, 21], gray, gray);
+    piece.box_at([28, 4, 20, 29, 4, 21], light, light);
     piece.place(light, 27, 3, 21);
     piece.place(light, 30, 3, 21);
     piece.place(light, 26, 2, 21);
@@ -570,21 +500,37 @@ fn generate_roof_piece(piece: &mut MonumentPiece<'_>) {
     let gray = base_gray();
     let light = base_light();
     let lamp = lamp();
-    piece.box_at(21, 0, 22, 36, 0, 36, gray, gray);
+    piece.box_at([21, 0, 22, 36, 0, 36], gray, gray);
     piece.water_box(21, 1, 22, 36, 23, 36);
 
     for i in 0..4 {
-        piece.box_at(21 + i, 13 + i, 21 + i, 36 - i, 13 + i, 21 + i, light, light);
-        piece.box_at(21 + i, 13 + i, 36 - i, 36 - i, 13 + i, 36 - i, light, light);
-        piece.box_at(21 + i, 13 + i, 22 + i, 21 + i, 13 + i, 35 - i, light, light);
-        piece.box_at(36 - i, 13 + i, 22 + i, 36 - i, 13 + i, 35 - i, light, light);
+        piece.box_at(
+            [21 + i, 13 + i, 21 + i, 36 - i, 13 + i, 21 + i],
+            light,
+            light,
+        );
+        piece.box_at(
+            [21 + i, 13 + i, 36 - i, 36 - i, 13 + i, 36 - i],
+            light,
+            light,
+        );
+        piece.box_at(
+            [21 + i, 13 + i, 22 + i, 21 + i, 13 + i, 35 - i],
+            light,
+            light,
+        );
+        piece.box_at(
+            [36 - i, 13 + i, 22 + i, 36 - i, 13 + i, 35 - i],
+            light,
+            light,
+        );
     }
 
-    piece.box_at(25, 16, 25, 32, 16, 32, gray, gray);
-    piece.box_at(25, 17, 25, 25, 19, 25, light, light);
-    piece.box_at(32, 17, 25, 32, 19, 25, light, light);
-    piece.box_at(25, 17, 32, 25, 19, 32, light, light);
-    piece.box_at(32, 17, 32, 32, 19, 32, light, light);
+    piece.box_at([25, 16, 25, 32, 16, 32], gray, gray);
+    piece.box_at([25, 17, 25, 25, 19, 25], light, light);
+    piece.box_at([32, 17, 25, 32, 19, 25], light, light);
+    piece.box_at([25, 17, 32, 25, 19, 32], light, light);
+    piece.box_at([32, 17, 32, 32, 19, 32], light, light);
     piece.place(light, 26, 20, 26);
     piece.place(light, 27, 21, 27);
     piece.place(lamp, 27, 20, 27);
@@ -597,10 +543,10 @@ fn generate_roof_piece(piece: &mut MonumentPiece<'_>) {
     piece.place(light, 31, 20, 26);
     piece.place(light, 30, 21, 27);
     piece.place(lamp, 30, 20, 27);
-    piece.box_at(28, 21, 27, 29, 21, 27, gray, gray);
-    piece.box_at(27, 21, 28, 27, 21, 29, gray, gray);
-    piece.box_at(28, 21, 30, 29, 21, 30, gray, gray);
-    piece.box_at(30, 21, 28, 30, 21, 29, gray, gray);
+    piece.box_at([28, 21, 27, 29, 21, 27], gray, gray);
+    piece.box_at([27, 21, 28, 27, 21, 29], gray, gray);
+    piece.box_at([28, 21, 30, 29, 21, 30], gray, gray);
+    piece.box_at([30, 21, 28, 30, 21, 29], gray, gray);
 }
 
 /// `MonumentBuilding.generateLowerWall`。
@@ -610,12 +556,12 @@ fn generate_lower_wall(piece: &mut MonumentPiece<'_>) {
     let gray = base_gray();
     let light = base_light();
     if piece.chunk_intersects(0, 21, 6, 58) {
-        piece.box_at(0, 0, 21, 6, 0, 57, gray, gray);
+        piece.box_at([0, 0, 21, 6, 0, 57], gray, gray);
         piece.water_box(0, 1, 21, 6, 7, 57);
-        piece.box_at(4, 4, 21, 6, 4, 53, gray, gray);
+        piece.box_at([4, 4, 21, 6, 4, 53], gray, gray);
 
         for i in 0..4 {
-            piece.box_at(i, i + 1, 21, i, i + 1, 57 - i, light, light);
+            piece.box_at([i, i + 1, 21, i, i + 1, 57 - i], light, light);
         }
 
         let mut z = 23;
@@ -626,20 +572,20 @@ fn generate_lower_wall(piece: &mut MonumentPiece<'_>) {
         piece.place(light, 5, 5, 52);
 
         for i in 0..4 {
-            piece.box_at(i, i + 1, 21, i, i + 1, 57 - i, light, light);
+            piece.box_at([i, i + 1, 21, i, i + 1, 57 - i], light, light);
         }
 
-        piece.box_at(4, 1, 52, 6, 3, 52, gray, gray);
-        piece.box_at(5, 1, 51, 5, 3, 53, gray, gray);
+        piece.box_at([4, 1, 52, 6, 3, 52], gray, gray);
+        piece.box_at([5, 1, 51, 5, 3, 53], gray, gray);
     }
 
     if piece.chunk_intersects(51, 21, 58, 58) {
-        piece.box_at(51, 0, 21, 57, 0, 57, gray, gray);
+        piece.box_at([51, 0, 21, 57, 0, 57], gray, gray);
         piece.water_box(51, 1, 21, 57, 7, 57);
-        piece.box_at(51, 4, 21, 53, 4, 53, gray, gray);
+        piece.box_at([51, 4, 21, 53, 4, 53], gray, gray);
 
         for i in 0..4 {
-            piece.box_at(57 - i, i + 1, 21, 57 - i, i + 1, 57 - i, light, light);
+            piece.box_at([57 - i, i + 1, 21, 57 - i, i + 1, 57 - i], light, light);
         }
 
         let mut z = 23;
@@ -648,16 +594,16 @@ fn generate_lower_wall(piece: &mut MonumentPiece<'_>) {
             z += 3;
         }
         piece.place(light, 52, 5, 52);
-        piece.box_at(51, 1, 52, 53, 3, 52, gray, gray);
-        piece.box_at(52, 1, 51, 52, 3, 53, gray, gray);
+        piece.box_at([51, 1, 52, 53, 3, 52], gray, gray);
+        piece.box_at([52, 1, 51, 52, 3, 53], gray, gray);
     }
 
     if piece.chunk_intersects(0, 51, 57, 57) {
-        piece.box_at(7, 0, 51, 50, 0, 57, gray, gray);
+        piece.box_at([7, 0, 51, 50, 0, 57], gray, gray);
         piece.water_box(7, 1, 51, 50, 10, 57);
 
         for i in 0..4 {
-            piece.box_at(i + 1, i + 1, 57 - i, 56 - i, i + 1, 57 - i, light, light);
+            piece.box_at([i + 1, i + 1, 57 - i, 56 - i, i + 1, 57 - i], light, light);
         }
     }
 }
@@ -669,12 +615,12 @@ fn generate_middle_wall(piece: &mut MonumentPiece<'_>) {
     let gray = base_gray();
     let light = base_light();
     if piece.chunk_intersects(7, 21, 13, 50) {
-        piece.box_at(7, 0, 21, 13, 0, 50, gray, gray);
+        piece.box_at([7, 0, 21, 13, 0, 50], gray, gray);
         piece.water_box(7, 1, 21, 13, 10, 50);
-        piece.box_at(11, 8, 21, 13, 8, 53, gray, gray);
+        piece.box_at([11, 8, 21, 13, 8, 53], gray, gray);
 
         for i in 0..4 {
-            piece.box_at(i + 7, i + 5, 21, i + 7, i + 5, 54, light, light);
+            piece.box_at([i + 7, i + 5, 21, i + 7, i + 5, 54], light, light);
         }
 
         let mut z = 21;
@@ -685,12 +631,12 @@ fn generate_middle_wall(piece: &mut MonumentPiece<'_>) {
     }
 
     if piece.chunk_intersects(44, 21, 50, 54) {
-        piece.box_at(44, 0, 21, 50, 0, 50, gray, gray);
+        piece.box_at([44, 0, 21, 50, 0, 50], gray, gray);
         piece.water_box(44, 1, 21, 50, 10, 50);
-        piece.box_at(44, 8, 21, 46, 8, 53, gray, gray);
+        piece.box_at([44, 8, 21, 46, 8, 53], gray, gray);
 
         for i in 0..4 {
-            piece.box_at(50 - i, i + 5, 21, 50 - i, i + 5, 54, light, light);
+            piece.box_at([50 - i, i + 5, 21, 50 - i, i + 5, 54], light, light);
         }
 
         let mut z = 21;
@@ -701,7 +647,7 @@ fn generate_middle_wall(piece: &mut MonumentPiece<'_>) {
     }
 
     if piece.chunk_intersects(8, 44, 49, 54) {
-        piece.box_at(14, 0, 44, 43, 0, 50, gray, gray);
+        piece.box_at([14, 0, 44, 43, 0, 50], gray, gray);
         piece.water_box(14, 1, 44, 43, 10, 50);
 
         let mut x = 12;
@@ -724,11 +670,11 @@ fn generate_middle_wall(piece: &mut MonumentPiece<'_>) {
         }
 
         for i in 0..3 {
-            piece.box_at(8 + i, 5 + i, 54, 49 - i, 5 + i, 54, gray, gray);
+            piece.box_at([8 + i, 5 + i, 54, 49 - i, 5 + i, 54], gray, gray);
         }
 
-        piece.box_at(11, 8, 54, 46, 8, 54, light, light);
-        piece.box_at(14, 8, 44, 43, 8, 53, gray, gray);
+        piece.box_at([11, 8, 54, 46, 8, 54], light, light);
+        piece.box_at([14, 8, 44, 43, 8, 53], gray, gray);
     }
 }
 
@@ -739,13 +685,13 @@ fn generate_upper_wall(piece: &mut MonumentPiece<'_>) {
     let gray = base_gray();
     let light = base_light();
     if piece.chunk_intersects(14, 21, 20, 43) {
-        piece.box_at(14, 0, 21, 20, 0, 43, gray, gray);
+        piece.box_at([14, 0, 21, 20, 0, 43], gray, gray);
         piece.water_box(14, 1, 22, 20, 14, 43);
-        piece.box_at(18, 12, 22, 20, 12, 39, gray, gray);
-        piece.box_at(18, 12, 21, 20, 12, 21, light, light);
+        piece.box_at([18, 12, 22, 20, 12, 39], gray, gray);
+        piece.box_at([18, 12, 21, 20, 12, 21], light, light);
 
         for i in 0..4 {
-            piece.box_at(i + 14, i + 9, 21, i + 14, i + 9, 43 - i, light, light);
+            piece.box_at([i + 14, i + 9, 21, i + 14, i + 9, 43 - i], light, light);
         }
 
         let mut z = 23;
@@ -756,13 +702,13 @@ fn generate_upper_wall(piece: &mut MonumentPiece<'_>) {
     }
 
     if piece.chunk_intersects(37, 21, 43, 43) {
-        piece.box_at(37, 0, 21, 43, 0, 43, gray, gray);
+        piece.box_at([37, 0, 21, 43, 0, 43], gray, gray);
         piece.water_box(37, 1, 22, 43, 14, 43);
-        piece.box_at(37, 12, 22, 39, 12, 39, gray, gray);
-        piece.box_at(37, 12, 21, 39, 12, 21, light, light);
+        piece.box_at([37, 12, 22, 39, 12, 39], gray, gray);
+        piece.box_at([37, 12, 21, 39, 12, 21], light, light);
 
         for i in 0..4 {
-            piece.box_at(43 - i, i + 9, 21, 43 - i, i + 9, 43 - i, light, light);
+            piece.box_at([43 - i, i + 9, 21, 43 - i, i + 9, 43 - i], light, light);
         }
 
         let mut z = 23;
@@ -773,12 +719,12 @@ fn generate_upper_wall(piece: &mut MonumentPiece<'_>) {
     }
 
     if piece.chunk_intersects(15, 37, 42, 43) {
-        piece.box_at(21, 0, 37, 36, 0, 43, gray, gray);
+        piece.box_at([21, 0, 37, 36, 0, 43], gray, gray);
         piece.water_box(21, 1, 37, 36, 14, 43);
-        piece.box_at(21, 12, 37, 36, 12, 39, gray, gray);
+        piece.box_at([21, 12, 37, 36, 12, 39], gray, gray);
 
         for i in 0..4 {
-            piece.box_at(15 + i, i + 9, 43 - i, 42 - i, i + 9, 43 - i, light, light);
+            piece.box_at([15 + i, i + 9, 43 - i, 42 - i, i + 9, 43 - i], light, light);
         }
 
         let mut x = 21;
