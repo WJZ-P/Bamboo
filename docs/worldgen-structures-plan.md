@@ -170,6 +170,33 @@
   `getMeanFirstOccupiedHeight`（terrain 高度），`features` 放置要逐方块比 `postProcess`，
   两者都是独立的大块工作，本轮未达到 0 不一致，见第 10 节。
 
+**第六轮（2026-11-14，`cb-wg-jigsaw` 分支：`processor_list` 解析与编码）**：
+
+* 新模块 `structure::processor`：按官方 `StructureProcessorType.DIRECT_CODEC` /
+  `SINGLE_CODEC` / `RuleTest.CODEC` / `PosRuleTest.CODEC` /
+  `RuleBlockEntityModifier.CODEC` 把 26.3 的 40 个 `processor_list`（52 个 processor）
+  解析成类型化的 Rust 结构体。四种 processor：`block_rot`（含可选 `rottable_blocks`）、
+  `rule`（`ProcessorRule` 的五个字段，`position_predicate` / `block_entity_modifier` 有
+  默认值）、`protected_blocks`、`capped`（`delegate` + `limit`，`limit` 是
+  `IntProvider` 的 `constant` 形式）。五种 `RuleTest`（`always_true` / `block_match` /
+  `blockstate_match` / `tag_match` / `random_block_match` / `random_blockstate_match`）、
+  一种 `PosRuleTest`（`axis_aligned_linear_pos`，五个字段全是 `optionalFieldOf`）与
+  一种 modifier（`append_loot`）。
+* 新对拍模式 `jigsaw processors`：Java 侧用官方 `DIRECT_CODEC` 把全部 40 个列表编码成
+  NBT，Rust 侧用 `Processor::to_tag` 复算，逐键比。40 个列表 / 52 个 processor
+  0 不一致。**这条对拍抓出两处真实 bug**：(a) `BlockState` 在 26.3 的 NBT 里是
+  `{id, properties}`（不是 `{Name, Properties}`），10/40 列表受影响；(b) 官方与 Rust 的
+  float 默认格式化不同（`1.0E-4` vs `0.0001`），改为比位模式后消失。
+* `PoolElement::Single.processors` 从原始 `serde_json::Value` 改成类型化的
+  `ProcessorListRef`（注册名或内联列表）；`Piece` 的存档 `pool_element` 按官方 codec
+  写出（内联是 `{processors: [...]}` 复合）。
+* **回归抓出的第三处 bug**：把内联 `processors` 写成裸数组后，`jigsaw save` 立刻报
+  789/108 不一致（官方是 `{processors: {type:9, values:[]}}`），改回复合后回 0。
+* 故意改坏：把 `BlockState` 的 `id` 键改回 `Name`，`jigsaw processors` 报 5/40。
+* **仍没做**：processor 的**执行**（`BlockRotProcessor.processBlock` /
+  `RuleProcessor.processBlock` 的 `Mth.getSeed(pos)` 随机源、`CappedProcessor.finalizeProcessing`
+  的限额、`ProtectedBlockProcessor` 的跳过），属放置阶段。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、
 结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」

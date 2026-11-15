@@ -587,19 +587,26 @@ WebView2 的渲染进程不算在内。
   `save` 用真实结构件跑官方 `PoolElementStructurePiece.createTag`，逐 Children 条目比完整
   规范 NBT（`PosX`/`PosY`/`PosZ`、`ground_level_delta`、`pool_element`、`rotation`、
   `junctions`、非默认才写的 `liquid_settings`），108 查询、1216 个件标签 0 不一致；
+  `processors` 用官方 `StructureProcessorType.DIRECT_CODEC` 整表编码 40 个 `processor_list`
+  （52 个 processor），逐键 0 不一致——这一条覆盖 26.3 的四种 processor（`block_rot` /
+  `rule` / `protected_blocks` / `capped`）、五种 `RuleTest`、`axis_aligned_linear_pos` 和
+  `append_loot`；
   `jigsaws` 对 1511 个模板 × 4 种旋转 × 4 个位置 = 24176 个查询、
   68352 个拼图方块的位置 / front / top / name / target / pool / joint / 两个优先级逐项
   0 不一致；`templates` 1511 个模板的尺寸 / 方块数 / 拼图方块数 0 不一致；`shapes`
   120 个场景 + 4 个 deflate case 0 不一致。故意改坏各自被抓到并失败，还原回 0：
   别名随机源位置 +1、拼图方块 orientation 写死 `north_up`、junction 的 `sourceGroundY` +1、
   palette 选择、`isValidBiome` 取反（26/324）、expansion hack 的 `expandTo + 1` 改 `+2`
-  （82/980）、`rotation` 写成 `CODEC` 的 `none`（对拍立刻报差异）。
+  （82/980）、`rotation` 写成 `CODEC` 的 `none`（对拍立刻报差异）、`BlockState` 的
+  `id` 写成 `Name`（5/40）、把内联 `processors` 的 `{processors: [...]}` 外壳去掉
+  （`save` 模式报 789/108）。
   已知限制：仍是纯函数 + oracle，**没接进 Director 的 `structure_starts` 阶段**（那是流水线的
   职责）；`Piece` 带结构件列表（元素、位置、旋转、包围盒、`groundLevelDelta`、junctions、
   `liquid_settings`），方块写入（`placeInChunk` / `postProcess` / processors / 拼图替换 /
   方块实体）属放置那一步，`Piece::to_full_save_piece` 给出 `pool_element` / `rotation` /
-  `junctions` / `liquid_settings` 全部子类字段的存档标签，但 `processors` 的内联非空对象
-  与 `processor_list` 的逐 processor 编码还没做（26.3 数据里内联对象全是空列表）。
+  `junctions` / `liquid_settings` 全部子类字段的存档标签，`processor_list` 的 40 个条目也已
+  按官方 codec 解析成类型化的 `structure::processor::Processor` 并逐键对拍过编码，
+  **但 processor 的执行（`processBlock` / `finalizeProcessing`）还没移植**。
   `start_height` 只支持 `constant`（absolute）与 `uniform`——26.3 主世界全部 28 个 jigsaw
   结构只用这两种，其余 provider 标 unsupported；`bastion_remnant` 是下界结构，按分工不做。
   `liquid_settings` 已随 `Piece` 带到放置阶段（`SinglePoolElement` 用
