@@ -558,6 +558,107 @@ pub fn with_property(state: u32, name: &str, value: &str) -> Option<u32> {
     crate::feature::state::with_property(state, name, value)
 }
 
+/// 读一个方块状态上的属性值，找不到返回 `None`。
+///
+/// Read one property of a block state; `None` when it is absent.
+pub fn property_of_state(state: u32, key: &str) -> Option<&'static str> {
+    crate::structure::state_transform::property_of(state, key)
+}
+
+/// `StructurePiece.reorient(level, pos, chestDefault)`：按四周的实体方块决定箱子的朝向。
+///
+/// 逐条照官方（`StructurePiece.java` 401 行）：
+/// 1. 沿 `Direction.Plane.HORIZONTAL`（NORTH、EAST、SOUTH、WEST）数邻居；
+///    邻居已经是 `CHEST` 就原样返回；邻居 `isSolidRender` 时记成唯一实体邻居，
+///    出现第二个就作废；
+/// 2. 有唯一实体邻居时 `facing = 该邻居的反方向`；
+/// 3. 否则从当前 `facing` 出发，依次看正前方、反方向、顺时针、反方向，
+///    第一个 `isSolidRender` 的方向就是 `facing`。
+///
+/// `StructurePiece.reorient(level, pos, chestDefault)`: pick a chest's facing from the
+/// solid blocks around it. Translated from `StructurePiece.java:401`: walk
+/// `Direction.Plane.HORIZONTAL` (NORTH, EAST, SOUTH, WEST) and return the default state
+/// when a neighbour is already a `CHEST`; record a single solid neighbour and drop it when
+/// a second appears. With a unique solid neighbour, `facing` points away from it;
+/// otherwise the current `facing` is probed forward, backward, clockwise, backward and the
+/// first solid direction wins.
+pub fn reorient(level: &dyn PieceLevel, pos: (i32, i32, i32), chest_default: u32) -> u32 {
+    const HORIZONTAL: [&str; 4] = ["north", "east", "south", "west"];
+    let mut solid: Option<&'static str> = None;
+    for name in HORIZONTAL {
+        let neighbor = neighbor_towards(level, pos, name);
+        if is_block(neighbor, "minecraft:chest") {
+            return chest_default;
+        }
+        if is_solid_render(neighbor) {
+            if solid.is_some() {
+                solid = None;
+                break;
+            }
+            solid = Some(name);
+        }
+    }
+
+    if let Some(name) = solid {
+        return with_property(chest_default, "facing", opposite_facing(name))
+            .unwrap_or(chest_default);
+    }
+
+    // 从当前 `facing` 出发的四个探测：正前、反方向、顺时针、反方向。
+    // The four probes from the current `facing`: forward, back, clockwise, back.
+    let start =
+        crate::structure::state_transform::property_of(chest_default, "facing").unwrap_or("north");
+    let mut facing = start;
+    for probe in [
+        start,
+        opposite_facing(start),
+        clock_wise_facing(start),
+        opposite_facing(start),
+    ] {
+        if is_solid_render(neighbor_towards(level, pos, probe)) {
+            facing = probe;
+        }
+    }
+    with_property(chest_default, "facing", facing).unwrap_or(chest_default)
+}
+
+/// 水平四方向的反方向。
+///
+/// The opposite of a horizontal facing.
+fn opposite_facing(facing: &str) -> &'static str {
+    match facing {
+        "north" => "south",
+        "south" => "north",
+        "east" => "west",
+        _ => "east",
+    }
+}
+
+/// 水平四方向的顺时针下一个。
+///
+/// The clockwise neighbour of a horizontal facing.
+fn clock_wise_facing(facing: &str) -> &'static str {
+    match facing {
+        "north" => "east",
+        "east" => "south",
+        "south" => "west",
+        _ => "north",
+    }
+}
+
+/// 朝 `facing` 走一格后那格的方块。
+///
+/// The block one step along `facing`.
+fn neighbor_towards(level: &dyn PieceLevel, pos: (i32, i32, i32), facing: &str) -> u32 {
+    let (dx, dz) = match facing {
+        "north" => (0, -1),
+        "south" => (0, 1),
+        "east" => (1, 0),
+        _ => (-1, 0),
+    };
+    level.get_block(pos.0 + dx, pos.1, pos.2 + dz)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,5 +782,40 @@ mod tests {
         assert!(is_replaceable_by_structures(block("minecraft:seagrass")));
         assert!(!is_replaceable_by_structures(block("minecraft:stone")));
         assert!(!is_replaceable_by_structures(block("minecraft:oak_planks")));
+    }
+
+    #[test]
+    fn reorient_picks_the_facing_away_from_the_only_solid_neighbour() {
+        let mut level = TestLevel::new();
+        let stone = block("minecraft:stone");
+        let chest = block("minecraft:chest");
+        // 只有北边是实体方块 → 箱子朝南。
+        // Only the north side is solid, so the chest faces south.
+        level.blocks.insert((0, 0, -1), stone);
+        assert_eq!(
+            property_of_state(reorient(&level, (0, 0, 0), chest), "facing"),
+            Some("south")
+        );
+
+        // 四面都是实体方块 → 两个以上实体邻居，退回「从当前 facing 出发探测」，
+        // 而四面都实体时最后一个探测（反方向）胜出。
+        // Solid on all four sides: more than one solid neighbour, so the probe loop runs and
+        // the last probe (backwards) wins.
+        let mut all = TestLevel::new();
+        for (dx, dz) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+            all.blocks.insert((dx, 0, dz), stone);
+        }
+        assert_eq!(
+            property_of_state(reorient(&all, (0, 0, 0), chest), "facing"),
+            Some("south")
+        );
+    }
+
+    #[test]
+    fn reorient_keeps_the_default_when_a_neighbour_is_a_chest() {
+        let mut level = TestLevel::new();
+        let chest = block("minecraft:chest");
+        level.blocks.insert((0, 0, -1), chest);
+        assert_eq!(reorient(&level, (0, 0, 0), chest), chest);
     }
 }

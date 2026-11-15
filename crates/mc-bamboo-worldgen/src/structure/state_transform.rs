@@ -484,7 +484,7 @@ fn is_rail(name: &str) -> bool {
 /// 读一个属性值。
 ///
 /// Read one property value.
-fn property_of(state: u32, name: &str) -> Option<&'static str> {
+pub fn property_of(state: u32, name: &str) -> Option<&'static str> {
     let block = block_of_state(state)?;
     let mut stride = 1_u32;
     for property in block.properties.iter().rev() {

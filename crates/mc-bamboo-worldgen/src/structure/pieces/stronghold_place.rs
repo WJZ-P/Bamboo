@@ -299,21 +299,26 @@ pub fn chest_corridor_post_process(
 /// `createChest`：写 `CHEST` 方块并消耗一次 `nextLong()`（战利品表种子）。
 /// 方块实体本身不建。
 ///
-/// `createChest`: place a `CHEST` and consume one `nextLong()` for the loot table
-/// seed. The block entity itself is not created.
+/// 朝向由 `StructurePiece.reorient` 按四周实体方块决定（官方 `createChest` 的
+/// `blockState == null` 分支），结果直接用 `setBlock` 写入，**不**再经 `placeBlock` 的
+/// mirror / rotate——官方这里走的是 `level.setBlock(pos, blockState, 2)`。
+///
+/// `createChest`: place a `CHEST` and consume one `nextLong()` for the loot table seed.
+/// The block entity itself is not created. The facing comes from
+/// `StructurePiece.reorient` (vanilla's `blockState == null` branch) and is written with
+/// `setBlock` directly, **not** through `placeBlock`'s mirror / rotate, matching vanilla's
+/// `level.setBlock(pos, blockState, 2)`.
 fn create_chest(piece: &mut StrongholdPiece<'_>, random: &WorldgenRandom, x: i32, y: i32, z: i32) {
     let (wx, wy, wz) = piece.ctx.world_pos(x, y, z);
     if !box_is_inside(&piece.chunk_bb, wx, wy, wz) {
         return;
     }
-    piece.ctx.place_block(
+    let chest = crate::structure::piece_place::reorient(
         piece.level,
+        (wx, wy, wz),
         block("minecraft:chest"),
-        x,
-        y,
-        z,
-        &piece.chunk_bb,
     );
+    piece.level.set_block(wx, wy, wz, chest);
     random.next_long();
 }
 

@@ -244,6 +244,7 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
     let center = (q.cx, q.cz);
     let mut level = FlatLevel::new(q.fill, center);
     let mut minecraft_random = 0;
+    let mut stronghold_state = StrongholdState::default();
 
     // 海底神殿的 `Children` 只有一个 `MonumentBuilding`，房间图是它的私有字段：
     // `L` 行只比那一个结构件，方块靠 `MonumentBuilding.postProcess` 自己放下整个房间图。
@@ -301,6 +302,7 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
                     center,
                     &random,
                     &mut minecraft_random,
+                    &mut stronghold_state,
                 )?
                 .is_some()
                 {
@@ -360,12 +362,13 @@ fn place_piece(
     _center: (i32, i32),
     random: &mc_bamboo_worldgen::random::WorldgenRandom,
     _minecraft_random: &mut i64,
+    stronghold_state: &mut StrongholdState,
 ) -> Result<Option<()>, String> {
     use mc_bamboo_worldgen::structure::pieces::mineshaft_place as place;
 
     let _ = layout;
     if kind == KIND_STRONGHOLD {
-        return place_stronghold_piece(piece, index, level, chunk_bb, random);
+        return place_stronghold_piece(piece, index, level, chunk_bb, random, stronghold_state);
     }
     if kind == KIND_WOODLAND_MANSION {
         mc_bamboo_worldgen::structure::pieces::woodland_mansion::place_piece(
@@ -433,6 +436,31 @@ fn place_piece(
     Ok(None)
 }
 
+/// 要塞结构件的可变状态，按结构件 index 保存，**跨区块保留**。
+///
+/// 官方 `hasPlacedChest` / `hasPlacedSpawner` 是结构件自己的字段，`placeInChunk` 对一个
+/// 结构件的多次调用（每个相交区块一次）共用同一份。原来每次新建 `false`，于是同一个
+/// 结构件在第二个区块里会再放一次箱子 / 刷怪笼——这正是要塞对拍多出 `chest` 的原因。
+///
+/// Per-piece mutable state for the stronghold, keyed by piece index and kept **across
+/// chunks**. Vanilla's `hasPlacedChest` / `hasPlacedSpawner` are fields on the piece, so
+/// every `placeInChunk` call for that piece (once per intersecting chunk) shares them.
+/// Starting from `false` each time made a piece place a second chest / spawner in the
+/// next chunk, which is exactly why the stronghold oracle reported extra `chest` blocks.
+#[derive(Debug, Default)]
+struct StrongholdState {
+    placed: std::collections::BTreeMap<usize, (bool, bool)>,
+}
+
+impl StrongholdState {
+    /// 取一个结构件的 `(hasPlacedChest, hasPlacedSpawner)`。
+    ///
+    /// The `(hasPlacedChest, hasPlacedSpawner)` pair of one piece.
+    fn entry(&mut self, index: usize) -> &mut (bool, bool) {
+        self.placed.entry(index).or_insert((false, false))
+    }
+}
+
 /// 要塞结构件的 `postProcess` 分发：按注册名选十二个子类之一。
 ///
 /// Dispatch a stronghold piece to one of the twelve `postProcess` bodies.
@@ -442,6 +470,7 @@ fn place_stronghold_piece(
     level: &mut FlatLevel,
     chunk_bb: [i32; 6],
     random: &mc_bamboo_worldgen::random::WorldgenRandom,
+    state: &mut StrongholdState,
 ) -> Result<Option<()>, String> {
     use mc_bamboo_worldgen::structure::pieces::stronghold_place as sp;
 
@@ -469,10 +498,10 @@ fn place_stronghold_piece(
         .map(|v| sp::door_type_from_name(&v.token()))
         .unwrap_or(sp::SmallDoorType::Opening);
 
+    let (has_placed_chest, has_placed_spawner) = state.entry(index);
     match piece.id.as_str() {
         "minecraft:shcc" => {
-            let mut chest = false;
-            sp::chest_corridor_post_process(&mut stronghold, random, door, &mut chest);
+            sp::chest_corridor_post_process(&mut stronghold, random, door, has_placed_chest);
         }
         "minecraft:shfc" => sp::filler_corridor_post_process(&mut stronghold, integer("Steps")),
         "minecraft:shs" => {
@@ -500,8 +529,7 @@ fn place_stronghold_piece(
         ),
         "minecraft:shli" => sp::library_post_process(&mut stronghold, random, door, flag("Tall")),
         "minecraft:shpr" => {
-            let mut spawner = false;
-            sp::portal_room_post_process(&mut stronghold, random, &mut spawner);
+            sp::portal_room_post_process(&mut stronghold, random, has_placed_spawner);
         }
         other => return Err(format!("no stronghold postProcess for {other} ({index})")),
     }
