@@ -99,6 +99,18 @@ enum Composition<'a> {
     Overlay {
         features: Vec<Child<'a>>,
     },
+    /// `CoralTreeFeature`：竖直长主干，再从顶部水平分枝。
+    ///
+    /// `CoralTreeFeature`: a vertical trunk, then horizontal branches from the top.
+    CoralTree {
+        feature: Child<'a>,
+    },
+    /// `CoralClawFeature`：一个主爪方向加两段侧枝。
+    ///
+    /// `CoralClawFeature`: one claw direction plus two side branches.
+    CoralClaw {
+        feature: Child<'a>,
+    },
 }
 
 impl<'a> Composition<'a> {
@@ -140,6 +152,12 @@ impl<'a> Composition<'a> {
             }),
             "minecraft:overlay" => Some(Self::Overlay {
                 features: parse_holder_set(object.get("features")?)?,
+            }),
+            "minecraft:coral_tree" => Some(Self::CoralTree {
+                feature: Child::parse(object.get("feature")?)?,
+            }),
+            "minecraft:coral_claw" => Some(Self::CoralClaw {
+                feature: Child::parse(object.get("feature")?)?,
             }),
             "minecraft:random_boolean_selector" => Some(Self::RandomBooleanSelector {
                 feature_true: Child::parse(object.get("feature_true")?)?,
@@ -290,6 +308,111 @@ fn place_composition<'a>(
             }
             total
         }
+        // 官方 `CoralTreeFeature.place`：主干 `nextInt(3)+1` 高，每格放一次子项，放不下
+        // 就直接返回 true；然后从顶部朝 `nextInt(3)+2` 个水平方向分枝，每枝
+        // `nextInt(5)+2` 段，`j == 0 || (segmentLength >= 2 && nextFloat() < 0.25)` 时
+        // 再往外挪一格。
+        // Official `CoralTreeFeature.place`: a trunk of `nextInt(3)+1`, one child placement
+        // per block (returning true as soon as one fails), then `nextInt(3)+2` horizontal
+        // branches from the top, each up to `nextInt(5)+2` segments.
+        Composition::CoralTree { feature } => {
+            let mut pos = pos;
+            let trunk_height = random.next_int(3) + 1;
+            for _ in 0..trunk_height {
+                let outcome = place_child(feature, registry, world, env, random, pos);
+                if !outcome.supported {
+                    return outcome;
+                }
+                if !outcome.placed {
+                    return PlaceOutcome {
+                        supported: true,
+                        placed: true,
+                    };
+                }
+                pos = (pos.0, pos.1 + 1, pos.2);
+            }
+            let trunk_top = pos;
+            let branches = random.next_int(3) + 2;
+            let directions = shuffle_horizontal(random);
+            let mut total = PlaceOutcome {
+                supported: true,
+                placed: false,
+            };
+            for branch in directions.into_iter().take(branches as usize) {
+                let mut pos = step(trunk_top, branch);
+                let branch_height = random.next_int(5) + 2;
+                let mut segment_length = 0;
+                for j in 0..branch_height {
+                    let outcome = place_child(feature, registry, world, env, random, pos);
+                    total.supported &= outcome.supported;
+                    if !outcome.placed {
+                        break;
+                    }
+                    total.placed = true;
+                    segment_length += 1;
+                    pos = (pos.0, pos.1 + 1, pos.2);
+                    if j == 0 || (segment_length >= 2 && random.next_float() < 0.25) {
+                        pos = step(pos, branch);
+                        segment_length = 0;
+                    }
+                }
+            }
+            total
+        }
+        // 官方 `CoralClawFeature.place`：先随机一个爪方向，再在
+        // [爪方向, 顺时针, 逆时针] 里洗牌取 `nextInt(2)+2` 条枝。
+        // Official `CoralClawFeature.place`: pick a claw direction, shuffle
+        // [it, clockwise, counter-clockwise] and take `nextInt(2)+2` branches.
+        Composition::CoralClaw { feature } => {
+            let claw = horizontal_direction(random);
+            let branches = random.next_int(2) + 2;
+            let candidates = [claw, clockwise(claw), counter_clockwise(claw)];
+            let mut directions = candidates;
+            shuffle_slice(&mut directions, random);
+            let mut total = PlaceOutcome {
+                supported: true,
+                placed: false,
+            };
+            for branch in directions.into_iter().take(branches as usize) {
+                let mut pos = step(pos, branch);
+                let sideway_length = random.next_int(2) + 1;
+                let (segment_direction, inway_length) = if branch == claw {
+                    (claw, random.next_int(3) + 2)
+                } else {
+                    pos = (pos.0, pos.1 + 1, pos.2);
+                    let pick = if random.next_int(2) == 0 {
+                        branch
+                    } else {
+                        "up"
+                    };
+                    (pick, random.next_int(3) + 3)
+                };
+                for _ in 0..sideway_length {
+                    let outcome = place_child(feature, registry, world, env, random, pos);
+                    total.supported &= outcome.supported;
+                    if !outcome.placed {
+                        break;
+                    }
+                    total.placed = true;
+                    pos = step(pos, segment_direction);
+                }
+                pos = step(pos, opposite(segment_direction));
+                pos = (pos.0, pos.1 + 1, pos.2);
+                for _ in 0..inway_length {
+                    pos = step(pos, claw);
+                    let outcome = place_child(feature, registry, world, env, random, pos);
+                    total.supported &= outcome.supported;
+                    if !outcome.placed {
+                        break;
+                    }
+                    total.placed = true;
+                    if random.next_float() < 0.25 {
+                        pos = (pos.0, pos.1 + 1, pos.2);
+                    }
+                }
+            }
+            total
+        }
         // 官方 `OverlayFeature.place`：`placedAny |= placer.place(...)`，**循环到底**，
         // 不因为某个子项失败就停。
         // Official `OverlayFeature.place`: `placedAny |= placer.place(...)` over every
@@ -306,6 +429,73 @@ fn place_composition<'a>(
             }
             total
         }
+    }
+}
+
+/// `Direction.Plane.HORIZONTAL.shuffledCopy(random)` 的方向集（NORTH, EAST, SOUTH, WEST）。
+const HORIZONTAL: [&str; 4] = ["north", "east", "south", "west"];
+
+/// 洗牌后的水平方向。
+fn shuffle_horizontal(random: &WorldgenRandom) -> [&'static str; 4] {
+    let mut directions = HORIZONTAL;
+    shuffle_slice(&mut directions, random);
+    directions
+}
+
+/// `Direction.Plane.HORIZONTAL.getRandomDirection(random)`。
+fn horizontal_direction(random: &WorldgenRandom) -> &'static str {
+    HORIZONTAL[random.next_int(4) as usize]
+}
+
+/// `Util.shuffle`：从尾部往前，每步 `nextInt(i)`。
+fn shuffle_slice<T>(items: &mut [T], random: &WorldgenRandom) {
+    for i in (2..=items.len()).rev() {
+        let swap_to = random.next_int(i as i32) as usize;
+        items.swap(i - 1, swap_to);
+    }
+}
+
+/// `Direction.getClockWise()`（水平面上）。
+fn clockwise(direction: &'static str) -> &'static str {
+    match direction {
+        "north" => "east",
+        "east" => "south",
+        "south" => "west",
+        _ => "north",
+    }
+}
+
+/// `Direction.getCounterClockWise()`（水平面上）。
+fn counter_clockwise(direction: &'static str) -> &'static str {
+    match direction {
+        "north" => "west",
+        "west" => "south",
+        "south" => "east",
+        _ => "north",
+    }
+}
+
+/// `Direction.getOpposite()`。
+fn opposite(direction: &'static str) -> &'static str {
+    match direction {
+        "up" => "down",
+        "down" => "up",
+        "north" => "south",
+        "south" => "north",
+        "west" => "east",
+        _ => "west",
+    }
+}
+
+/// 沿方向走一格。
+fn step(pos: Pos, direction: &str) -> Pos {
+    match direction {
+        "up" => (pos.0, pos.1 + 1, pos.2),
+        "down" => (pos.0, pos.1 - 1, pos.2),
+        "north" => (pos.0, pos.1, pos.2 - 1),
+        "south" => (pos.0, pos.1, pos.2 + 1),
+        "west" => (pos.0 - 1, pos.1, pos.2),
+        _ => (pos.0 + 1, pos.1, pos.2),
     }
 }
 

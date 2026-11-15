@@ -177,7 +177,15 @@ fn classify(state: u32) -> Option<Kind> {
         // SnowyBlock（podzol）也不覆写。
         // `BlockBehaviour.canSurvive` defaults to true; PumpkinBlock extends Block and
         // SnowyBlock (podzol) does not override it either.
-        BlockClass::Block | BlockClass::PumpkinBlock | BlockClass::SnowyBlock => Kind::Default,
+        // `CoralBlock` 继承 `Block`、不覆写 `canSurvive`（只有 `updateShape` / `tick`
+        // 会做 `scanForWater` 换死珊瑚），所以存活判定是默认的 true。
+        // `CoralBlock` extends `Block` and does not override `canSurvive` (only
+        // `updateShape`/`tick` turn it into the dead block), so the check is the
+        // default true.
+        BlockClass::Block
+        | BlockClass::PumpkinBlock
+        | BlockClass::SnowyBlock
+        | BlockClass::CoralBlock => Kind::Default,
         // 直接继承 VegetationBlock、不覆写 canSurvive 的类，标签判定。
         // Classes extending VegetationBlock without overriding canSurvive: a tag check.
         BlockClass::BushBlock
