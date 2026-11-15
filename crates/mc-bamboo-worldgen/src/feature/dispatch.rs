@@ -17,6 +17,7 @@ use super::{
     block_column::BlockColumnFeature,
     blue_ice::{self, BlueIceFeature},
     disk::{self, DiskFeature},
+    fossil::FossilFeature,
     geode::{self, GeodeFeature},
     huge_mushroom::HugeMushroomFeature,
     iceberg::{self, IcebergFeature},
@@ -52,6 +53,10 @@ pub enum Leaf {
     BlueIce(BlueIceFeature),
     Disk(DiskFeature),
     FallenTree(Box<FallenTreeFeature>),
+    /// `FossilFeature`：沙漠 / 沼泽地下的化石，基座与矿脉各放一次。
+    ///
+    /// `FossilFeature`: an underground fossil, placed twice (base then ore overlay).
+    Fossil(Box<FossilFeature>),
     Geode(Box<GeodeFeature>),
     HugeMushroom(Box<HugeMushroomFeature>),
     Iceberg(IcebergFeature),
@@ -115,6 +120,7 @@ pub fn parse_leaf<'a>(
         "minecraft:blue_ice" => Leaf::BlueIce(BlueIceFeature::parse(config).ok()?),
         "minecraft:disk" => Leaf::Disk(DiskFeature::parse(config).ok()?),
         "minecraft:fallen_tree" => Leaf::FallenTree(Box::new(FallenTreeFeature::parse(config)?)),
+        "minecraft:fossil" => Leaf::Fossil(Box::new(FossilFeature::parse(config)?)),
         "minecraft:geode" => Leaf::Geode(Box::new(GeodeFeature::parse(config).ok()?)),
         "minecraft:huge_brown_mushroom" | "minecraft:huge_red_mushroom" => {
             Leaf::HugeMushroom(Box::new(HugeMushroomFeature::parse(kind, config)?))
@@ -173,6 +179,7 @@ pub fn place_leaf(
         Leaf::BlueIce(feature) => blue_ice::place(feature, world, random, pos),
         Leaf::Disk(disk) => disk::place(disk, world, random, pos),
         Leaf::FallenTree(tree) => tree.place(world, random, pos),
+        Leaf::Fossil(fossil) => fossil.place(world, random, pos),
         Leaf::Geode(geode) => geode::place(geode, world, random, pos),
         Leaf::HugeMushroom(mushroom) => mushroom.place(world, random, pos),
         Leaf::Iceberg(iceberg) => iceberg::place(iceberg, world, random, pos),
