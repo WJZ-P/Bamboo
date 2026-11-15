@@ -438,6 +438,10 @@ pub fn is_double_plant(state: u32) -> bool {
         Some(BlockClass::DoublePlantBlock)
             | Some(BlockClass::TallFlowerBlock)
             | Some(BlockClass::TallSeagrassBlock)
+            // `SmallDripleafBlock extends DoublePlantBlock`，官方用的是 `instanceof`。
+            // `SmallDripleafBlock extends DoublePlantBlock`; the official check is
+            // `instanceof`.
+            | Some(BlockClass::SmallDripleafBlock)
     )
 }
 
