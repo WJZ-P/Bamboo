@@ -647,7 +647,17 @@ Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_heigh
   `update_from_neighbour_shapes` 只覆盖了写入格自身。
 * **`updateShapeAtEdge` 在模板放置路径上暂时关闭**：打开它会让楼梯 / 栅栏的差异从 29 涨到
   1706，说明 `feature/shape_update.rs`（写于树的上文）在 `updateMode = 2` 语义下不等价。
-  详见下面的疑点清单。
+  第七轮做了三组对照实验（每次只动一个开关，`SKIP_EDGE` / `SKIP_NEIGHBOURS` 环境变量）：
+  * 两步都关（`SKIP_EDGE=1 SKIP_NEIGHBOURS=1`）：沉船 **1977** 处 —— 说明
+    `updateFromNeighbourShapes` 必须有。
+  * 只跑 `updateFromNeighbourShapes`（当前状态）：**29** 处。
+  * 两步都跑：**1706** 处 —— 说明 `updateShapeAtEdge` 那份实现会把本该是
+    `shape=straight` 的楼梯改成 `outer_right`（差异对全是
+    `jungle_stairs`/`dark_oak_stairs` 的 `straight -> outer_right`），方向是「多改了一步」。
+  29 处全部落在结构件跨区块边界（x/z 在 0、15、16 附近），且都是栅栏的连接位，
+  与「官方 `updateShapeAtEdge` 会更新形状**外**的邻居」这一点吻合：关掉它之后，
+  跨区块那一侧的栅栏连接位没人更新，于是留 29 处差异。**两个开关都不对**：
+  29 处是「少了形状外更新」，1706 处是「形状内更新做错了」。
 * 第七轮修掉的**oracle 伪影**（这些是假世界缺方法造成的，不是产品代码问题）：
   `isEmptyBlock` / `isStateAtPosition` / `isFluidAtPosition` / `updateNeighborsAt` /
   `neighborChanged` / `levelEvent` 等 `WorldGenLevel` 方法，之前调用会抛
