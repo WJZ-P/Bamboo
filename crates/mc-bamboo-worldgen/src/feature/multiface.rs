@@ -523,9 +523,7 @@ mod tests {
         // `hasFace(state, face)` 必须等价于「该面属性是 true」。
         // `hasFace(state, face)` must equal "the face property is true".
         use crate::feature::tree::property_value;
-        let block = mc_bamboo_data::block_by_name("minecraft:glow_lichen")
-            .unwrap()
-            .clone();
+        let block = *mc_bamboo_data::block_by_name("minecraft:glow_lichen").unwrap();
         let faces = ["down", "east", "north", "south", "up", "west"];
         for bits in 0u32..(1 << 6) {
             let mut state = block.first_state;
