@@ -36,6 +36,10 @@ enum Kind {
     DoublePlant(&'static str),
     /// `LeafLitterBlock.canSurvive`：下面那格 `isFaceSturdy(FULL, UP)`。
     SturdyFaceUp,
+    /// `HangingRootsBlock.canSurvive`：上面那格 `isFaceSturdy(FULL, DOWN)`。
+    ///
+    /// `HangingRootsBlock.canSurvive`: the block above is `isFaceSturdy(FULL, DOWN)`.
+    SturdyFaceDown,
     /// `CactusBlock.canSurvive`：四周、下面、上面三处判定。
     Cactus,
     /// `SugarCaneBlock.canSurvive`：下面和相邻流体判定。
@@ -87,6 +91,13 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         // 即 `isFaceSturdy(FULL)`；Direction.UP 的 ordinal 是 1。
         // `LeafLitterBlock.canSurvive`: `isFaceSturdy(FULL, UP)`; UP's ordinal is 1.
         Some(Kind::SturdyFaceUp) => state_facts(below) & (1u64 << (facts::STURDY_FULL + 1)) != 0,
+        // `HangingRootsBlock.canSurvive`：`above.isFaceSturdy(level, above, Direction.DOWN)`，
+        // DIRECTION.DOWN 的 ordinal 是 0。
+        // `HangingRootsBlock.canSurvive`: `isFaceSturdy(FULL, DOWN)`, DOWN's ordinal is 0.
+        Some(Kind::SturdyFaceDown) => {
+            let above = world.get_block(pos.0, pos.1 + 1, pos.2);
+            state_facts(above) & (1u64 << facts::STURDY_FULL) != 0
+        }
         Some(Kind::Cactus) => cactus_can_survive(world, pos),
         Some(Kind::SugarCane) => sugar_cane_can_survive(world, pos),
         Some(Kind::Seagrass) => seagrass_can_survive(world, pos),
@@ -324,7 +335,10 @@ fn classify(state: u32) -> Option<Kind> {
         | BlockClass::SculkCatalystBlock
         | BlockClass::SculkSensorBlock
         | BlockClass::SculkShriekerBlock
-        | BlockClass::CalibratedSculkSensorBlock => Kind::Default,
+        | BlockClass::CalibratedSculkSensorBlock
+        // `RootedDirtBlock` 只实现 `BonemealableBlock`，不覆写 `canSurvive`。
+        // `RootedDirtBlock` only implements `BonemealableBlock` and keeps the default.
+        | BlockClass::RootedDirtBlock => Kind::Default,
         // 直接继承 VegetationBlock、不覆写 canSurvive 的类，标签判定。
         // Classes extending VegetationBlock without overriding canSurvive: a tag check.
         BlockClass::BushBlock
@@ -341,6 +355,9 @@ fn classify(state: u32) -> Option<Kind> {
         // LeafLitterBlock 覆写 canSurvive 为 isFaceSturdy(UP)。
         // LeafLitterBlock overrides canSurvive with isFaceSturdy(UP).
         BlockClass::LeafLitterBlock => Kind::SturdyFaceUp,
+        // `HangingRootsBlock` 覆写 canSurvive 为「上面那格朝下结实」。
+        // `HangingRootsBlock` overrides canSurvive to require a sturdy DOWN face above.
+        BlockClass::HangingRootsBlock => Kind::SturdyFaceDown,
         // `MangrovePropaguleBlock.canSurvive`：悬挂时看上面那格；否则走 VegetationBlock，
         // 而它的 `mayPlaceOn` 换成了 `supports_mangrove_propagule` 标签。
         // `MangrovePropaguleBlock.canSurvive`: a hanging one checks the block above;
