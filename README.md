@@ -547,7 +547,8 @@ WebView2 的渲染进程不算在内。
   `.nbt` 结构模板已由 `cb-wg-jigsaw` 分支从官方 jar 原样导出成
   `mc-bamboo-data::structures`（1511 个、4236847 gzip 字节，重跑无 diff），并用官方
   `NbtIo` 逐节点对拍 0 不一致；Rust 侧 `structure::template` 能读出方块、方块实体和拼图方块。
-  jigsaw 结构件生成见下面单独的里程碑。`pillager_outposts` 的排除区只有
+  jigsaw 结构件生成（`JigsawPlacement.addPieces`、五种 pool element、村庄 5 种 / 前哨站 /
+  古城 / 试炼密室 / 古迹废墟的结构件列表与官方对拍）仍没做；`pillager_outposts` 的排除区只有
   单元测试、未进官方逐格对拍。整列判定与起点单点判定在这批数据上从未不一致（主世界群系沿 Y
   基本恒定），两条路径各自用故意改坏单独验过。
 - 多件式结构的结构件布局与前置判定（分支 `cb-wg-multipiece`）：
