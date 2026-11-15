@@ -40,7 +40,7 @@ pub struct FeatureContext<'a> {
     ///
     /// `WorldGenRegion.getRandom()`, read by calls such as `MossyCarpetBlock.placeAt`
     /// instead of the per-feature `random`. Shared by the whole `features` call.
-    pub region_random: &'a WorldgenRandom,
+    pub region_random: &'a crate::random::Random,
 }
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数。

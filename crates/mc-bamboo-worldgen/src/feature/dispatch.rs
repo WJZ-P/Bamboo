@@ -144,7 +144,7 @@ pub fn place_leaf(
     random: &WorldgenRandom,
     // `level.getRandom()`，只有 `MossyCarpetBlock.placeAt` 这类调用用它。
     // `level.getRandom()`, used only by calls such as `MossyCarpetBlock.placeAt`.
-    region_random: &WorldgenRandom,
+    region_random: &crate::random::Random,
     pos: Pos,
 ) -> bool {
     match leaf {

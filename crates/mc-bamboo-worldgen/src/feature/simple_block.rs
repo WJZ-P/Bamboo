@@ -63,7 +63,7 @@ impl SimpleBlockFeature {
         &self,
         world: &mut FeatureWorld<'_>,
         random: &WorldgenRandom,
-        region_random: &WorldgenRandom,
+        region_random: &crate::random::Random,
         pos: Pos,
     ) -> bool {
         let Some(state) = self.provider.get_optional_state(world, random, pos) else {

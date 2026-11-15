@@ -17,7 +17,7 @@ use mc_bamboo_core::Direction;
 use mc_bamboo_data::{block_of_state, facts, state_facts};
 use serde_json::Value;
 
-use crate::random::WorldgenRandom;
+use crate::random::Random;
 
 use super::{
     multiface::can_attach_to,
@@ -232,12 +232,7 @@ impl MossyCarpet {
     ///
     /// `MossyCarpetBlock.placeAt(level, pos, random, 2)`. Returns whether anything was
     /// placed (the base layer always is).
-    pub fn place_at(
-        &self,
-        world: &mut FeatureWorld<'_>,
-        random: &WorldgenRandom,
-        pos: Pos,
-    ) -> bool {
+    pub fn place_at(&self, world: &mut FeatureWorld<'_>, random: &Random, pos: Pos) -> bool {
         // 先把下层状态算出来并放下（`setBlock(pos, adjustedCarpetLayer, updateType)`）。
         // 用 world 的只读视图算，算完再写。
         // Compute the base layer, write it, then compute the topper.

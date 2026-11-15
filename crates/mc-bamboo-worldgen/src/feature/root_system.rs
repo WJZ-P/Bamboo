@@ -479,9 +479,7 @@ mod tests {
             biome_at: &mut biome_at,
             registry: &registry,
             top_feature: None,
-            region_random: &WorldgenRandom::new(
-                crate::random::Algorithm::Xoroshiro.new_instance(1),
-            ),
+            region_random: &crate::random::Algorithm::Xoroshiro.new_instance(1),
         };
         let random = WorldgenRandom::new(crate::random::Algorithm::Xoroshiro.new_instance(7));
 

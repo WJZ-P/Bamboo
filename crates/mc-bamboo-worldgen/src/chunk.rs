@@ -680,18 +680,25 @@ impl<'a> Generator<'a> {
     ) -> Result<crate::feature::FeatureResult, String> {
         let biomes = BiomeManager::new(self.biomes, self.seed);
         // `WorldGenRegion.random`：`getOrCreateRandomFactory("worldgen_region_random")`
-        // 在中心区块的**世界原点**（`center.getWorldPosition()`，即区块的 minY 那一格）
-        // 上取一个随机源。整个 `features` 调用共用这一个。
+        // 在中心区块的**世界原点**（`center.getWorldPosition()`）上取一个随机源。
+        // 整个 `features` 调用共用这一个。
+        //
+        // 注意它是**裸 `RandomSource`**，不是 `WorldgenRandom`：官方
+        // `WorldGenRegion.random` 的静态类型就是 `RandomSource`，
+        // `MossyCarpetBlock.placeAt` 调 `nextBoolean()` 走的是
+        // `XoroshiroRandomSource.nextBoolean() = (nextLong() & 1) != 0`（long 的低位）。
+        // 包成 `WorldgenRandom` 会走 `next(1)`（高位），序列完全不同。
         //
         // `WorldGenRegion.random`: the `worldgen_region_random` factory sampled at
         // `center.getPos().getWorldPosition()`, which is
         // `new BlockPos(minBlockX, 0, minBlockZ)` — **y is always 0**, not the dimension's
-        // minimum Y.
-        let region_random = crate::random::WorldgenRandom::new(self.region_random.at(
-            input.center_x * 16,
-            0,
-            input.center_z * 16,
-        ));
+        // minimum Y. It is a **bare `RandomSource`**, not a `WorldgenRandom`:
+        // `MossyCarpetBlock.placeAt`'s `nextBoolean()` is
+        // `XoroshiroRandomSource.nextBoolean() = (nextLong() & 1) != 0` (the low bit).
+        // Wrapping it in `WorldgenRandom` would use `next(1)` (the high bit).
+        let region_random = self
+            .region_random
+            .at(input.center_x * 16, 0, input.center_z * 16);
         let context = crate::feature::run::FeatureContext {
             registry: &self.features,
             samplers: &self.router,

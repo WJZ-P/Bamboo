@@ -318,8 +318,17 @@ pub struct PlacementEnv<'a> {
     pub top_feature: Option<u32>,
     /// `WorldGenRegion.getRandom()`，`level.getRandom()` 的等价物。
     ///
-    /// `WorldGenRegion.getRandom()`, the equivalent of `level.getRandom()`.
-    pub region_random: &'a WorldgenRandom,
+    /// 官方 `WorldGenRegion.random` 是**裸 `RandomSource`**（`XoroshiroRandomSource`），
+    /// 不是 `WorldgenRandom` 包装：`MossyCarpetBlock.placeAt` 拿到它调 `nextBoolean()`，
+    /// 走的是 `XoroshiroRandomSource.nextBoolean() = (nextLong() & 1) != 0`，即 **long 的低位**。
+    /// 用 `WorldgenRandom` 会走 `next(1)`（高位），序列完全不同。
+    ///
+    /// `WorldGenRegion.getRandom()`, the equivalent of `level.getRandom()`. Vanilla's
+    /// `WorldGenRegion.random` is a **bare `RandomSource`** (`XoroshiroRandomSource`), not a
+    /// `WorldgenRandom` wrapper: `MossyCarpetBlock.placeAt` calls `nextBoolean()` on it,
+    /// which is `(nextLong() & 1) != 0` — the **low** bit. Wrapping it in `WorldgenRandom`
+    /// would use `next(1)` (the high bit) and produce a different sequence.
+    pub region_random: &'a crate::random::Random,
 }
 
 /// 一个候选位置。
