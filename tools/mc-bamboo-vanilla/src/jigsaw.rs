@@ -2,13 +2,27 @@
 //!
 //! `jigsaw` 子命令跑 `JigsawOracle.java`：Java 端造真实的
 //! `StructureTemplateManager` 和 `Structure.GenerationContext`，这里用生产代码
-//! `mc-bamboo-worldgen::structure::jigsaw` 复算并逐字段比较。
+//! `mc-bamboo-worldgen::structure` 复算并逐字段比较。
 //!
 //! - `templates`：验证每个模板被 `StructureTemplateManager` 正确加载（size、
 //!   save() 的 blocks 数、getJigsaws 的拼图方块数）。
+//! - `jigsaws`：`getJigsaws(position, rotation)` 的拼图方块，含 `getRandomPalette`
+//!   的索引选择。
 //! - `pieces`：验证 `findGenerationPoint` + `addPieces` 的**全部结构件**
 //!   （RandomTemplate / Rotation / 包围盒 / project_start_to_heightmap /
-//!   VoxelShape 空间检查 / junction 数）。
+//!   VoxelShape 空间检查 / junction 数）。规模是 27 结构 × 6 种子 × 6 区块。
+//! - `pools`：每个 template pool 的结构件生成。
+//! - `save` / `load`：结构件 NBT 的编码与读回（含 `regeneratePiecesAfterLoad`）。
+//! - `processors` / `apply`：`processor_list` 的解析与 `processBlock` 执行。
+//! - `capped`：`CappedProcessor.finalizeProcessing` 的**端到端**比（真实
+//!   `CappedProcessor(RuleProcessor)`，比存活方块），`cappedraw` 是它的细粒度
+//!   诊断版（只比随机源 / 洗牌 / 取样三段）。
+//! - `cappedfull`：带真实种子跑完整 `process_blocks`，比最终方块的**状态**。
+//! - `placepiece`：`StructureTemplate.placeInWorld` 的方块写入（含多 palette 模板）。
+//! - `waterpiece`：同上但带 `APPLY_WATERLOGGING` 与流体模型，逐写入比完整状态。
+//! - `entities`：`StructureTemplate.placeEntities` 的几何与 nbt 改写。
+//! - `bemod`：`RuleBlockEntityModifier.apply` 的 NBT 生成。
+//! - `rc`：`RandomizableContainer` 的判定表（全部方块）。
 //! - `shapes`：独立的 `Shapes` AABB 布尔运算小场景（见 `jigsaw_shapes`）。
 //!
 //! Rust side of the vanilla jigsaw oracle. `JigsawOracle.java` builds a real
