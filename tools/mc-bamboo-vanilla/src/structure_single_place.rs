@@ -478,6 +478,10 @@ struct FlatLevel {
     /// Non-air block count per 16³ section (the `LevelChunkSection.hasOnlyAir`
     /// equivalent). The initial fill seeds it; each write updates it.
     section_non_air: BTreeMap<(i32, i32, i32), usize>,
+    /// `WorldGenRegion.getRandom()` 的替身；单结构件不从它取数。
+    ///
+    /// Stand-in for `WorldGenRegion.getRandom()`; single pieces draw nothing from it.
+    level_random: mc_bamboo_worldgen::random::WorldgenRandom,
 }
 
 impl FlatLevel {
@@ -488,6 +492,7 @@ impl FlatLevel {
             fill,
             center,
             section_non_air: BTreeMap::new(),
+            level_random: mc_bamboo_worldgen::structure::pieces::legacy_random(0),
         }
     }
 
@@ -637,6 +642,10 @@ impl PieceLevel for FlatLevel {
             y -= 1;
         }
         MIN_Y
+    }
+
+    fn level_random(&self) -> &mc_bamboo_worldgen::random::WorldgenRandom {
+        &self.level_random
     }
 }
 

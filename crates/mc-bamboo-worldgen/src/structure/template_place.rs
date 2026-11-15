@@ -22,9 +22,11 @@
 use mc_bamboo_data::{blocks, facts, state_facts};
 
 use crate::{
-    feature::world::{FeatureWorld, HeightmapKind},
+    feature::{shape_update::BlockAccess, world::HeightmapKind},
     random::WorldgenRandom,
-    structure::{pieces::Box, template::StructureTemplate, templated::transform},
+    structure::{
+        piece_place::PieceLevel, pieces::Box, template::StructureTemplate, templated::transform,
+    },
 };
 
 /// `Mirror` 的序号。
@@ -272,7 +274,7 @@ pub struct Placed {
 /// `StructureTemplate.placeInWorld(...)` with update mode 2. Returns false when the
 /// template has no palette (`palettes.isEmpty()`).
 pub fn place_in_world(
-    world: &mut FeatureWorld<'_>,
+    world: &mut dyn BlockAccess,
     template: &StructureTemplate,
     position: (i32, i32, i32),
     settings: &PlaceSettings,
@@ -464,7 +466,7 @@ pub fn place_in_world(
 /// Vanilla's fluid fill loop: repeatedly pour neighbouring source fluid into blocks that
 /// can hold liquid until a pass changes nothing.
 fn fill_fluids(
-    world: &mut FeatureWorld<'_>,
+    world: &mut dyn BlockAccess,
     to_fill: &mut Vec<(i32, i32, i32)>,
     locked: &[(i32, i32, i32)],
     writes: &mut Vec<BlockWrite>,
@@ -516,7 +518,7 @@ fn fill_fluids(
 /// world seed and derives a positional factory from it, so the legacy positional factory
 /// reproduces the same draws.
 fn apply_capped(
-    world: &FeatureWorld<'_>,
+    world: &dyn BlockAccess,
     settings: &PlaceSettings,
     limit: i32,
     delegate: &Processor,
@@ -621,7 +623,7 @@ pub struct PieceOutcome {
 /// What a `handleDataMarker` body may touch: the world, the `postProcess` random and the
 /// write log.
 pub struct MarkerContext<'w, 'a, 'r> {
-    pub world: &'w mut FeatureWorld<'a>,
+    pub world: &'w mut (dyn BlockAccess + 'a),
     pub random: &'r WorldgenRandom,
     pub writes: &'w mut Vec<BlockWrite>,
 }
@@ -675,7 +677,7 @@ pub type MarkerHandler<'h> = dyn FnMut(&mut MarkerContext<'_, '_, '_>, &str, (i3
 /// received: chest `LootTableSeed`s are drawn from it. `handle_marker` is the subclass's
 /// `handleDataMarker(metadata, pos, ...)`.
 pub fn template_piece_post_process(
-    world: &mut FeatureWorld<'_>,
+    world: &mut dyn BlockAccess,
     template: &StructureTemplate,
     template_position: (i32, i32, i32),
     settings: &PlaceSettings,
@@ -706,19 +708,62 @@ pub fn template_piece_post_process(
             };
             handle_marker(&mut context, &metadata, pos);
         }
-        for (pos, entry) in
-            filter_blocks(template, template_position, &settings, "minecraft:jigsaw")
-        {
-            let Some(entry) = entry else { continue };
-            let final_state =
-                string_field(entry, "final_state").unwrap_or_else(|| "minecraft:air".to_owned());
-            // 解析失败时官方只打日志，仍然写默认的空气。
-            // On a parse failure vanilla only logs and still writes the default air.
-            let state = state_from_text(&final_state).unwrap_or(blocks::AIR);
-            write(world, pos, state, &mut outcome.writes);
-        }
+        replace_jigsaws(
+            world,
+            template,
+            template_position,
+            &settings,
+            &mut outcome.writes,
+        );
     }
     outcome
+}
+
+/// `TemplateStructurePiece.postProcess` 里的拼图方块替换：`filterBlocks(..., JIGSAW)` 的
+/// 每一项读 `final_state`（缺省 `minecraft:air`）并写下。
+///
+/// The jigsaw replacement inside `TemplateStructurePiece.postProcess`: every
+/// `filterBlocks(..., JIGSAW)` entry reads `final_state` (default `minecraft:air`) and is
+/// written.
+pub fn replace_jigsaws(
+    world: &mut dyn BlockAccess,
+    template: &StructureTemplate,
+    position: (i32, i32, i32),
+    settings: &PlaceSettings,
+    writes: &mut Vec<BlockWrite>,
+) {
+    for (pos, entry) in filter_blocks(template, position, settings, "minecraft:jigsaw") {
+        let Some(entry) = entry else { continue };
+        let final_state =
+            string_field(entry, "final_state").unwrap_or_else(|| "minecraft:air".to_owned());
+        // 解析失败时官方只打日志，仍然写默认的空气。
+        // On a parse failure vanilla only logs and still writes the default air.
+        let state = state_from_text(&final_state).unwrap_or(blocks::AIR);
+        write(world, pos, state, writes);
+    }
+}
+
+/// 把结构件放置用的 [`PieceLevel`] 当作 [`BlockAccess`] 用（林地府邸走这条路）。
+///
+/// Use a piece-placement [`PieceLevel`] as a [`BlockAccess`] (the woodland mansion's path).
+pub struct PieceLevelAccess<'l>(pub &'l mut dyn PieceLevel);
+
+impl BlockAccess for PieceLevelAccess<'_> {
+    fn get_block(&self, x: i32, y: i32, z: i32) -> u32 {
+        self.0.get_block(x, y, z)
+    }
+
+    fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+        self.0.set_block(x, y, z, state)
+    }
+
+    fn min_y(&self) -> i32 {
+        self.0.min_y()
+    }
+
+    fn max_y(&self) -> i32 {
+        self.0.max_y()
+    }
 }
 
 /// `TemplateStructurePiece.postProcess` 里数据标记的方块效果。
@@ -859,7 +904,7 @@ fn state_from_text(text: &str) -> Option<u32> {
 }
 
 fn write(
-    world: &mut FeatureWorld<'_>,
+    world: &mut dyn BlockAccess,
     pos: (i32, i32, i32),
     state: u32,
     writes: &mut Vec<BlockWrite>,
@@ -872,7 +917,7 @@ fn write(
     // `getPersistedStatus().heightmapsAfter()` (the four FINAL maps at `FEATURES`).
     // `placeInChunk` calls `postProcess` once per chunk of the 3×3, and later chunks use
     // `getHeight` to adjust Y, so the heightmaps must be updated here.
-    let written = world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+    let written = world.set_block(pos.0, pos.1, pos.2, state);
     if written {
         writes.push((pos.0, pos.1, pos.2, state));
     }
@@ -1001,7 +1046,7 @@ impl Processor {
     /// `StructureProcessor.processBlock`: `None` drops the block.
     fn process(
         &self,
-        world: &FeatureWorld<'_>,
+        world: &dyn BlockAccess,
         pos: (i32, i32, i32),
         template_pos: (i32, i32, i32),
         state: u32,
