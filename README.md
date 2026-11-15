@@ -642,10 +642,11 @@ WebView2 的渲染进程不算在内。
   `cb-wg-feat-a` 与 `cb-wg-caves` 移植，逐方块对拍 0 不一致。
   诚实的已知差异与未做：苔藓地毯
   （`MossyCarpetBlock` 的 `placeAt`，含侧面 `nextBoolean`）仍未支持；藓类 patch 的
-  地表集合用 Java `HashSet` 的迭代顺序决定植被随机数分配，本实现只复刻到链表，
-  **桶内 8 个以上元素时官方会转红黑树、顺序不同**（`moss_patch_ceiling` 因此有 10 处
-  未解决的 `cave_vines` 错位）；`waterlogged_vegetation_patch`
-  （`clay_pool_with_dripleaves`）代码已写但没有任何对拍，**故意不接入**；
+  地表集合用 Java `HashSet` 的迭代顺序决定植被随机数分配；本实现只复刻链表与容量翻倍，
+  **桶内 8 个以上元素时官方会转红黑树、顺序不同** —— 这种情况直接置 `treeified` 标记，
+  把整次放置标 `unsupported`（对拍跳过该区块，`moss_patch_ceiling` 会因此有 skipped 区块）；
+  `waterlogged_vegetation_patch`（`clay_pool_with_dripleaves`）已接入并跑过对拍，
+  但改坏验证仍未触发写入，算「已写未验证」；
   `noise_threshold_count` / `count_on_every_layer` 修饰器；方块实体数据（蜂巢、可疑沙等）。
   树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）已由 `cb-wg-trees` 合入 main；
   `projected_random_patchy_square` 在 26.3 导出数据里没有条目。

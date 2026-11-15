@@ -1309,6 +1309,35 @@ main 已把本分支（`1c9853c6`）合进去了，所以再 `git merge main` �
 对拍：`moss_patch_ceiling` 从 **20 处降到 14 处**（其中 10 处是 terrain 既有差异，
 地物阶段剩 4 处）。剩下的 4 处见「疑点」。
 
+#### 第六轮：`vegetation_patch` 家族与垂滴叶（分支 `cb-wg-aquatic`）
+
+按队长指示，**停止「让 HashMap 桶树化后迭代顺序和 Java 一致」**（投入产出比低）。
+`java_set.rs` 改成：遇到本该树化的桶（容量 ≥ 64 且桶内 8 个）只置 `treeified` 标记，
+`VegetationPatch::place` 看到标记就把整次放置标 `unsupported`，对拍时跳过该区块。
+红黑树实现已删除。提交 `f749ee66`。
+
+* `survival.rs` 新增三个 `canSurvive`：
+  * `SmallDripleafBlock`：上半格看下半格；下半格看 `supports_small_dripleaf`，
+    或本格上方是水源且下面在 `supports_vegetation` 里。
+  * `BigDripleafBlock`：下面同类、`big_dripleaf_stem`，或 `supports_big_dripleaf`。
+  * `BigDripleafStemBlock`：下面同类或 `supports_big_dripleaf`，**并且**上面同类或
+    `big_dripleaf`。
+* `waterlogged_vegetation_patch`（`clay_pool_with_dripleaves`）重新接进
+  `composition::place_feature`。
+
+对拍（`--through features --steps 9`，繁茂洞穴 `--chunk 0 52`）：
+
+| 集合 | 参数 | 结果 |
+|---|---|---|
+| `lush_caves_clay`（`waterlogged_vegetation_patch` + `dripleaf`） | `--chunk 0 52 --scan 5 --seeds 1` | 0 不一致 / 0 skipped（9 中心 / 7962624 方块） |
+| `lush_caves_vegetation` | `--chunk -1 52 --seeds 1` | 0 不一致 |
+| `lush_caves_ceiling_vegetation` | `--chunk 0 52 --scan 25 --seeds 1` | 0 不一致（25 中心 / 22118400 方块） |
+| 三者一起 | `--chunk 0 52 --scan 25 --seeds 1` | 0 不一致，**2 skipped**（`treeified` 标记生效） |
+
+**注意**：`lush_caves_clay` 的 `setBlock` 改坏后仍 0 不一致，说明这组参数下
+`clay_pool_with_dripleaves` 的 `placeGround` 没真正写入（`replaceable` 或
+`below_sturdy` 没匹配上）。**所以 `waterlogged_vegetation_patch` 仍是「已写未验证」。**
+
 #### 第五轮：`root_system`（分支 `cb-wg-aquatic`）
 
 提交：`02887dfa`（`WIP:` 开头）。
