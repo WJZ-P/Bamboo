@@ -662,11 +662,11 @@ cargo build --release -p mc-bamboo-vanilla
 - 噪声填充逐 8 格高度带的耗时（从每个带边界整列差分得到）；
 - 只生成切割线（`OCEAN_FLOOR_WG` 最小值减 24、对齐到 16）以上，相对完整生成的比例。
 
-一轮 120 区块 × 3 遍的实测量级（Windows 16 核、release、机器本身 90% 以上占用）：
-`biomes` 5.3 ms、`doFill` 7.0 ms、`surface` 3.9 ms、`carvers` 2.3 ms、`features` 10.0 ms、
-`light`（含把 3×3 装成光引擎 `Chunk`）35.8 ms、`assembly` 3.2 ms，记录合计 71.6 ms/区块。
-其中 30.5 ms 是「3×3 重打包」而不是光照算法本身——这是当前流水线里最大的一块，值得单独
-优化。详见 `reports/cb-wg-perf.md`。
+一轮 600 区块（3 种子 × 10 群系 × 20）× 3 遍的实测量级（Windows 16 核、release、机器本身
+有别的负载）：`biomes` 5.9 ms、`doFill` 6.6 ms、`surface` 3.6 ms、`carvers` 2.2 ms、
+`features` 14.0 ms、`light`（含把 3×3 装成光引擎 `Chunk`）32.4 ms、`assembly` 2.9 ms，
+记录合计 70.5 ms/区块。其中 **27.2 ms 是「3×3 重打包」而不是光照算法本身**——这是当前
+流水线里最大的一块，值得单独优化。详见 `reports/cb-wg-perf.md`。
 
 ## 还没做
 
