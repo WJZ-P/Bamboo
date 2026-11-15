@@ -668,6 +668,16 @@ cargo build --release -p mc-bamboo-vanilla
 记录合计 70.5 ms/区块。其中 **27.2 ms 是「3×3 重打包」而不是光照算法本身**——这是当前
 流水线里最大的一块，值得单独优化。详见 `reports/cb-wg-perf.md`。
 
+这一块已经改掉：`light` 阶段改用 `generate_light_from_layers`，直接从快照的逐层方块建只给
+光引擎用的段（`Chunk::for_light`：一次扫描建调色板、全空气段直接用空段、不算高度图和方块实体、
+快照只共享 `Arc` 不复制），光照结果逐位不变。`wg-perf --light-compare` 在同一批区块上交替跑
+新旧两条路径并逐段比较：96 个区块里旧路径 `light_view` + `light` 中位数 35.1 ms，新路径
+11.3 ms；整块墙钟中位数约 40 ms/区块。详见 `reports/cb-wg-lightperf.md`。
+
+The 3×3 repack is gone: the `light` stage now calls `generate_light_from_layers`,
+which builds light-only sections straight from the snapshot layers. Light is
+bit-identical; `wg-perf --light-compare` measured 35.1 → 11.3 ms (median, 96 chunks).
+
 ## 还没做
 
 * 地物**类型**：`features` 阶段已接进游戏（见上），但只移植了 `minecraft:ore`；其余
