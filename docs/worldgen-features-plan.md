@@ -826,9 +826,19 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
   `speleothem_cluster`、`freeze_top_layer`。
   `overlay` / `fossil` 都依赖 `minecraft:template` 地物。这个 Feature 类型已经写好了
   （`feature/template_feature.rs`），`overlay` 组合类、`volume_match` 谓词、
-  `randomly_selected` 修饰器也一并补齐；**但没接进 `dispatch.rs`**：
-  `desert_well` 的 `rarity_filter` 是 1/1000，本轮扫的网格（9–25 区块）没撞上真实
-  生成点，改坏旋转也不报差异，属于「已写未验证」。
+  `randomly_selected` 修饰器也一并补齐；**但没接进 `dispatch.rs`**，原因是
+  **无法用当前的 chunkgen oracle 对拍**：
+  `TemplateFeature.place` 的第 59 行要
+  `level.getLevel().getServer().getStructureTemplateManager()`，而 oracle 的
+  `WorldGenLevel` 是 `java.lang.reflect.Proxy`，cast 到 `ServerLevel` 会抛
+  `ClassCastException: class jdk.proxy3.$Proxy19 cannot be cast to class
+  net.minecraft.server.level.ServerLevel`。没有真实服务端就没有
+  `StructureTemplateManager`，这条路径在 oracle 里跑不起来。
+  （用快速预筛探针确实找到了 10 个真实沙漠井，例如 seed 0 的 `(107,-238)`、
+  `(83,-203)`、`(21,-202)`；一到 Java 侧就抛上面那个异常。）
+  要验证它得另想办法：例如让 oracle 自己从 `target/vanilla` 里的 jar 构造一个
+  `StructureTemplateManager`（不启服务端），或者给 `WorldGenLevel` 代理再包一层能回答
+  `getLevel()` 的对象。这两条都超出本轮范围。
   `monster_room`（刷怪笼 / 战利品表 / 方块实体）与 `large_dripstone` 已完成：
   前者的方块实体数据不进对拍（只比方块，但 `nextLong` / `nextInt(4)` 照取），
   后者已在 4 个真的长柱的区块上逐方块覆盖。
