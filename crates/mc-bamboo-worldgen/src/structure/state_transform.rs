@@ -129,7 +129,11 @@ pub fn apply_mirror(state: u32, mirror: Mirror) -> u32 {
         | BlockClass::EndPortalFrameBlock
         | BlockClass::RedstoneWallTorchBlock
         | BlockClass::CopperChestBlock
-        | BlockClass::WeatheringCopperChestBlock => mirror_facing(state, mirror),
+        | BlockClass::WeatheringCopperChestBlock
+        | BlockClass::FurnaceBlock
+        | BlockClass::HopperBlock
+        | BlockClass::TrapDoorBlock
+        | BlockClass::FenceGateBlock => mirror_facing(state, mirror),
         // `DoorBlock.mirror`：先按 `mirror.getRotation(FACING)` 旋转，再 `cycle(HINGE)`。
         // `DoorBlock.mirror`: rotate by `mirror.getRotation(FACING)` then `cycle(HINGE)`.
         BlockClass::DoorBlock => cycle_hinge(mirror_facing(state, mirror)),
@@ -150,11 +154,67 @@ pub fn apply_mirror(state: u32, mirror: Mirror) -> u32 {
             };
             swap_properties(state, pairs)
         }
+        // `BaseRailBlock.mirror`：按 `LEFT_RIGHT` / `FRONT_BACK` 翻转 `shape`。
+        // `BaseRailBlock.mirror`: flip `shape` for `LEFT_RIGHT` / `FRONT_BACK`.
+        BlockClass::RailBlock | BlockClass::PoweredRailBlock | BlockClass::DetectorRailBlock => {
+            let Some(shape) = property_of(state, "shape") else {
+                return state;
+            };
+            let new_shape = mirror_rail(shape, mirror);
+            with_property(state, "shape", new_shape).unwrap_or(state)
+        }
         _ => state,
     }
 }
 
-/// `state.rotate(mirror.getRotation(FACING))`：mirror 对单一 `facing` 的那条路径。
+/// `BaseRailBlock.mirror(RailShape, Mirror)`。
+///
+/// `BaseRailBlock.mirror(RailShape, Mirror)`.
+fn mirror_rail(shape: &str, mirror: Mirror) -> &'static str {
+    match mirror {
+        Mirror::None => keep_shape(shape),
+        // `LEFT_RIGHT`：南北翻成相反，对角线的南北分量互换。
+        // `LEFT_RIGHT`: north/south flip, and the diagonal shapes swap their north/south.
+        Mirror::LeftRight => match shape {
+            "ascending_north" => "ascending_south",
+            "ascending_south" => "ascending_north",
+            "south_east" => "north_east",
+            "south_west" => "north_west",
+            "north_west" => "south_west",
+            "north_east" => "south_east",
+            other => keep_shape(other),
+        },
+        // `FRONT_BACK`：东西翻成相反，对角线的东西分量互换。
+        // `FRONT_BACK`: east/west flip, and the diagonal shapes swap their east/west.
+        Mirror::FrontBack => match shape {
+            "ascending_east" => "ascending_west",
+            "ascending_west" => "ascending_east",
+            "south_east" => "south_west",
+            "south_west" => "south_east",
+            "north_west" => "north_east",
+            "north_east" => "north_west",
+            other => keep_shape(other),
+        },
+    }
+}
+
+/// 形状名到同名静态串。
+///
+/// Map a shape name to the same static string.
+fn keep_shape(shape: &str) -> &'static str {
+    match shape {
+        "north_south" => "north_south",
+        "east_west" => "east_west",
+        "ascending_east" => "ascending_east",
+        "ascending_west" => "ascending_west",
+        "ascending_north" => "ascending_north",
+        "ascending_south" => "ascending_south",
+        "south_east" => "south_east",
+        "south_west" => "south_west",
+        "north_west" => "north_west",
+        _ => "north_east",
+    }
+}
 ///
 /// `state.rotate(mirror.getRotation(FACING))`: the single-`facing` mirror path.
 fn mirror_facing(state: u32, mirror: Mirror) -> u32 {
@@ -235,6 +295,10 @@ pub fn apply_rotation(state: u32, rotation: Rotation) -> u32 {
         | BlockClass::RedstoneWallTorchBlock
         | BlockClass::CopperChestBlock
         | BlockClass::WeatheringCopperChestBlock
+        | BlockClass::FurnaceBlock
+        | BlockClass::HopperBlock
+        | BlockClass::TrapDoorBlock
+        | BlockClass::FenceGateBlock
         // `DoorBlock.rotate` 和 `StairBlock.rotate` 同样只转 `facing`（不动 `hinge` / `shape`）。
         // `DoorBlock.rotate` and `StairBlock.rotate` also only turn `facing`.
         | BlockClass::DoorBlock
@@ -279,8 +343,32 @@ pub fn apply_rotation(state: u32, rotation: Rotation) -> u32 {
             let new_shape = rotate_rail(shape, rotation);
             with_property(state, "shape", new_shape).unwrap_or(state)
         }
+        // `RotatedPillarBlock.rotate`：90 度时 `axis` 的 X↔Z 互换，180 度与不转时不变。
+        // `RotatedPillarBlock.rotate`: 90 degrees swaps axis X and Z; 180 and none do not.
+        BlockClass::RotatedPillarBlock | BlockClass::ChainBlock => rotate_pillar(state, rotation),
         _ => state,
     }
+}
+
+/// `RotatedPillarBlock.rotatePillar`。
+///
+/// `RotatedPillarBlock.rotatePillar`.
+fn rotate_pillar(state: u32, rotation: Rotation) -> u32 {
+    if !matches!(
+        rotation,
+        Rotation::Clockwise90 | Rotation::CounterClockwise90
+    ) {
+        return state;
+    }
+    let Some(axis) = property_of(state, "axis") else {
+        return state;
+    };
+    let swapped = match axis {
+        "x" => "z",
+        "z" => "x",
+        _ => return state,
+    };
+    with_property(state, "axis", swapped).unwrap_or(state)
 }
 
 /// `BaseRailBlock.rotate(RailShape, Rotation)`。
