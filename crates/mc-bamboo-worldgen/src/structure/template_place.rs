@@ -47,6 +47,10 @@ pub struct PlaceSettings {
     ///
     /// `BlockIgnoreProcessor.STRUCTURE_BLOCK`: structure blocks are not written.
     pub ignore_structure_blocks: bool,
+    /// `LiquidSettings.APPLY_WATERLOGGING`（官方的默认值）。
+    ///
+    /// `LiquidSettings.APPLY_WATERLOGGING`, vanilla's default.
+    pub apply_waterlogging: bool,
 }
 
 impl PlaceSettings {
@@ -60,6 +64,7 @@ impl PlaceSettings {
             mirror,
             rotation,
             ignore_structure_blocks: true,
+            apply_waterlogging: true,
         }
     }
 }
@@ -195,14 +200,129 @@ pub fn place_blocks(
     blocks: &[PlacedBlock],
     settings: PlaceSettings,
 ) -> Vec<(i32, i32, i32)> {
+    // `LiquidSettings` 的两段：写入前取该格的流体，写完把旧流体回填进含水方块。
+    // The two `LiquidSettings` steps: read the cell's fluid before the write, then pour it
+    // back into waterloggable blocks afterwards.
+    let mut to_fill: Vec<(i32, i32, i32)> = Vec::new();
+    let mut locked: Vec<(i32, i32, i32)> = Vec::new();
     let mut placed = Vec::with_capacity(blocks.len());
     for entry in blocks {
         if !box_is_inside(chunk_bb, entry.pos.0, entry.pos.1, entry.pos.2) {
             continue;
         }
+        let previous = settings
+            .apply_waterlogging
+            .then(|| level.get_block(entry.pos.0, entry.pos.1, entry.pos.2));
         let state = transform(entry.state, settings.mirror, settings.rotation);
         level.set_block(entry.pos.0, entry.pos.1, entry.pos.2, state);
         placed.push(entry.pos);
+
+        let Some(previous) = previous else {
+            continue;
+        };
+        // `state.getFluidState().isSource()` → `lockedFluids.add(blockPos)`。
+        // `state.getFluidState().isSource()` → `lockedFluids.add(blockPos)`.
+        if is_source(state) {
+            locked.push(entry.pos);
+            continue;
+        }
+        // `state.getBlock() instanceof LiquidBlockContainer` → `placeLiquid(...)`。
+        // `state.getBlock() instanceof LiquidBlockContainer` → `placeLiquid(...)`.
+        if !is_liquid_container(state) || is_empty_fluid(previous) {
+            continue;
+        }
+        if place_liquid(level, entry.pos, state, previous) && !is_source(previous) {
+            to_fill.push(entry.pos);
+        }
+    }
+
+    // `while (filled && !toFill.isEmpty())`：按 `[UP, NORTH, EAST, SOUTH, WEST]` 找相邻
+    // 流体源再回填一次，`lockedFluids` 里的位置不参与。
+    // `while (filled && !toFill.isEmpty())`: look for a neighbouring source along
+    // `[UP, NORTH, EAST, SOUTH, WEST]` and pour again, skipping `lockedFluids`.
+    const DIRECTIONS: [(i32, i32, i32); 5] =
+        [(1, 0, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1), (-1, 0, 0)];
+    loop {
+        let mut filled = false;
+        let mut index = 0;
+        while index < to_fill.len() {
+            let pos = to_fill[index];
+            let current = level.get_block(pos.0, pos.1, pos.2);
+            let mut fluid = is_source(current).then_some(current);
+            if fluid.is_none() {
+                for (dx, dy, dz) in DIRECTIONS {
+                    let neighbor = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+                    if locked.contains(&neighbor) {
+                        continue;
+                    }
+                    let neighbor_state = level.get_block(neighbor.0, neighbor.1, neighbor.2);
+                    if is_source(neighbor_state) {
+                        fluid = Some(neighbor_state);
+                        break;
+                    }
+                }
+            }
+            let Some(fluid) = fluid else {
+                index += 1;
+                continue;
+            };
+            if is_liquid_container(current) && place_liquid(level, pos, current, fluid) {
+                filled = true;
+                to_fill.remove(index);
+                continue;
+            }
+            index += 1;
+        }
+        if !filled {
+            break;
+        }
     }
     placed
+}
+
+/// `state.getFluidState().isSource()`。
+///
+/// `state.getFluidState().isSource()`.
+fn is_source(state: u32) -> bool {
+    let fluid = mc_bamboo_blocks::BlockState(state).fluid();
+    !fluid.is_empty() && fluid.is_source()
+}
+
+/// `state.getFluidState().isEmpty()`。
+///
+/// `state.getFluidState().isEmpty()`.
+fn is_empty_fluid(state: u32) -> bool {
+    mc_bamboo_blocks::BlockState(state).fluid().is_empty()
+}
+
+/// 方块是不是 `LiquidBlockContainer`。
+///
+/// Whether the block is a `LiquidBlockContainer`.
+fn is_liquid_container(state: u32) -> bool {
+    let Some(id) = mc_bamboo_data::block_id_of_state(state) else {
+        return false;
+    };
+    // 本版本实现 `LiquidBlockContainer` 的都是 `SimpleWaterloggedBlock`（台阶、楼梯、
+    // 栅栏、墙……），它们都有 `waterlogged` 属性；按属性判定与官方 `instanceof`
+    // 在这批方块上等价。
+    //
+    // Every `LiquidBlockContainer` in this version is a `SimpleWaterloggedBlock` (slabs,
+    // stairs, fences, walls, ...) and carries a `waterlogged` property, so testing the
+    // property matches vanilla's `instanceof` on this block set.
+    mc_bamboo_data::blocks::BLOCKS[id]
+        .properties
+        .iter()
+        .any(|property| property.name == "waterlogged")
+}
+
+/// 调一次 `LiquidBlockContainer.placeLiquid`，返回它是否真的放进了流体。
+///
+/// One `LiquidBlockContainer.placeLiquid`, returning whether the fluid landed.
+fn place_liquid(level: &mut dyn PieceLevel, pos: (i32, i32, i32), state: u32, fluid: u32) -> bool {
+    crate::structure::template_shape_update::place_liquid(
+        level,
+        pos,
+        mc_bamboo_blocks::BlockState(state),
+        mc_bamboo_blocks::BlockState(fluid).fluid(),
+    )
 }
