@@ -291,7 +291,7 @@ pub fn place_in_world(
     let mut to_fill: Vec<(i32, i32, i32)> = Vec::new();
     for (pos, state, has_nbt) in processed {
         let previous_fluid = (settings.liquid == LiquidSettings::ApplyWaterlogging)
-            .then(|| mc_bamboo_data::state_fluid(world.get_block(pos.0, pos.1, pos.2)).clone());
+            .then(|| *mc_bamboo_data::state_fluid(world.get_block(pos.0, pos.1, pos.2)));
         let state = mirror_rotate(state, settings);
         if has_nbt {
             // `level.setBlock(blockPos, Blocks.BARRIER, 820)`：给方块实体占位。
@@ -507,6 +507,11 @@ pub fn template_box(
     ]
 }
 
+/// 一个被 `filterBlocks` 选中的方块：位置和它的 nbt。
+///
+/// One block picked by `filterBlocks`: its position and nbt.
+pub type FilteredBlock<'a> = ((i32, i32, i32), Option<&'a mc_bamboo_nbt::Tag>);
+
 /// `StructureTemplate.filterBlocks(position, settings, block)`：按 `buildInfoList` 的顺序
 /// 给出方块是 `block` 的项，位置变换后落在 `chunkBB` 内才算。
 ///
@@ -517,7 +522,7 @@ fn filter_blocks<'a>(
     position: (i32, i32, i32),
     settings: &PlaceSettings,
     block: &str,
-) -> Vec<((i32, i32, i32), Option<&'a mc_bamboo_nbt::Tag>)> {
+) -> Vec<FilteredBlock<'a>> {
     let Some(palette) = template.palette_index(position) else {
         return Vec::new();
     };
@@ -549,7 +554,7 @@ fn filter_blocks<'a>(
 /// 读 nbt 里的一个字符串字段（小写键名，和方块实体的 tag 一致）。
 ///
 /// Read one string field from an nbt tag (lower-case keys, as block entity tags use).
-pub fn string_field<'a>(tag: &'a mc_bamboo_nbt::Tag, key: &str) -> Option<String> {
+pub fn string_field(tag: &mc_bamboo_nbt::Tag, key: &str) -> Option<String> {
     let mc_bamboo_nbt::Tag::Compound(entries) = tag else {
         return None;
     };
@@ -733,9 +738,8 @@ impl Processor {
             }
             Processor::Blackstone => Some(blackstone(state)),
         }
-        .map(|state| {
+        .inspect(|_| {
             let _ = (template_pos, settings);
-            state
         })
     }
 }
