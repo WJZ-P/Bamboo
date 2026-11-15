@@ -660,6 +660,10 @@ WebView2 的渲染进程不算在内。
   `ServerLevel`（链路 `server.worldGenSettings.options.seed`，三层 final 字段反射写入），
   于是**完整的 `finalizeProcessing`** 会真的执行限额替换：24 查询 / 192 方块 0 不一致
   （砾石被 `capped` 规则换成可疑的沙砾，实际替换 72 次，说明限额真的生效）；
+  `placepiece` 把**整条模板放置链路**（按世界位置选 palette → 位置变换含 mirror 与
+  rotation → processor 链 → 带 nbt 的方块先写 `BARRIER` → `chunkBB` 过滤 → 状态
+  mirror/rotate）与官方 `StructureTemplate.placeInWorld` 逐写入比：225 查询（每个模板
+  三种 mirror/rotation 组合）、152748 次写入 0 不一致；
   `jigsaws` 对 1511 个模板 × 4 种旋转 × 4 个位置 = 24176 个查询、
   68352 个拼图方块的位置 / front / top / name / target / pool / joint / 两个优先级逐项
   0 不一致；`templates` 1511 个模板的尺寸 / 方块数 / 拼图方块数 0 不一致；`shapes`

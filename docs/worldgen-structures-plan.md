@@ -267,6 +267,32 @@
 * 故意改坏：忽略显式随机源（单元测试失败）、去掉空列表校验（单元测试失败）、
   `capped` 洗牌改成不倒序（`cappedfull` 报 40 处）。
 
+**第十二轮（2026-11-15，`cb-wg-jigsaw` 分支：模板放置链路）**：
+
+* 合并 `main`（`1c9853c6`，含水生 / 洞穴 / 非植被地物与模板化结构布局）。三处冲突
+  （`structure/mod.rs` 的模块表、README、设计文档）全部两边保留；里程碑表步 4 从
+  「jigsaw 结构件没做」改成「做完」并补上本分支的两条对拍数字。
+* 新模块 `structure::jigsaw::place`：jigsaw 结构件的 `postProcess` 整条链路。
+  `relative_position(pos, mirror, rotation)` 照官方
+  `StructureTemplate.transform(pos, mirror, rotation, ZERO)`（mirror 先把 Z 或 X 取反，
+  再按 rotation 转）；`template_blocks` 按世界位置选 palette 并把模板方块转成 processor
+  链的输入（`has_nbt` 标记跟着走）；`place_piece` = 选 palette → `process_blocks` → 写入；
+  `place_processed` 做状态 `mirror`/`rotate`、`chunkBB` 过滤，以及官方的「带 nbt 的方块
+  先写一个 `BARRIER`」。
+* `state_id_of` 把方块状态名（含属性）解析成注册表状态 id，属性顺序无关；未知方块或非法
+  属性组合报错而不是静默写空气（有单元测试）。
+* 新对拍模式 `jigsaw placepiece`：官方 `StructureTemplate.placeInWorld`
+  （`IGNORE_WATERLOGGING`、无 processor、记录型假世界）对 `place_piece`，逐次 `setBlock`
+  比位置与方块名。8 个单 palette 模板 × 3 组 mirror/rotation
+  （`none/none`、`none/90`、`left_right/180`）= 225 查询、**152748 次写入 0 不一致**。
+  故意改坏两处（mirror 的 Z 取反改成 X、不写 `BARRIER`）合报 1284 处不一致。
+* 对拍过程中修掉两个自身 bug：(a) `relative_position` 最初漏了 mirror（只在方块状态上
+  应用了，位置变换同样需要）；(b) 对拍查询的 `chunkBB` 最初只覆盖 `0..span`，而旋转后的
+  坐标会落到负半轴，导致 Java 侧只写 10 个方块——改成跨正负两侧才比得对。
+* **没做**：`placeInWorld` 的 watering 逻辑（`toFill` / `lockedFluids` 的流体填充循环）、
+  方块实体 nbt 的恢复（`blockEntity.loadWithComponents` + `LootTableSeed`）、
+  `placeEntities`（结构里的实体）、从 `pool_element` 取 `processors` 并接进 `place_piece`。
+
 **第五轮（2026-11-14，`cb-wg-structures` 续：需要模板的单件结构布局）**：
 
 * 合并 `main` 时本分支已与 `main` 同步（`main` 的 `4405fc3` 含本分支全部提交），
