@@ -3132,26 +3132,45 @@ fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
 /// `bemod` mode: `RuleBlockEntityModifier.apply` against vanilla's, comparing the NBT key by
 /// key plus one extra `nextLong` draw to prove the same number of draws.
 fn run_block_entity_modifier(mut command: Command, work_dir: &Path) -> Result<(), String> {
-    // 26.3 的 `processor_list` 里 `append_loot` 有 4 处；另外三种也要覆盖（不是数据驱动，
+    // 26.3 的 `processor_list` 里 `append_loot` 有两张表；另外三种也要覆盖（不是数据驱动，
     // 因为 `clear` / `passthrough` / `append_static` 在数据里没出现）。
-    // The 26.3 `processor_list` has four `append_loot` entries; the other three are covered
-    // too even though the data never uses them.
+    // The 26.3 `processor_list` uses two loot tables for `append_loot`; the other three
+    // kinds are covered too even though the data never uses them.
+    //
+    // `existing` 覆盖六种形态，重点在**递归合并**与**直接覆盖**会给出不同结果的那些：
+    // 同名顶层键、同名嵌套键、只在一侧存在的嵌套键、值为列表、值为纯量。
+    // 数据里的 `data` 与每种 `existing` 的组合只要有一处不同，改坏「递归合并」就能被发现。
+    // `existing` covers six shapes chosen so recursive merge and plain overwrite differ:
+    // same top-level key, same nested key, nested key on one side only, list value, scalar.
     let mut queries = Vec::new();
-    for seed in [0_i64, 1, 42, -7] {
+    for seed in [0_i64, 1, 42, -7, 12_345_678_901, -98_765_432_123] {
         for existing in [
             "-",
             "{Keep:5,LootTable:\"minecraft:old\"}",
             "{Nested:{B:2},Only:3}",
+            // 与数据里的 `LootTable` 同名：覆盖 vs 保留能区分。
+            // Same key as the data's `LootTable`: overwrite and keep differ.
+            "{LootTable:\"minecraft:keep_me\",Extra:1}",
+            // 同名嵌套键与只在 existing 里存在的键。
+            // A nested key present in both, plus one only in `existing`.
+            "{Nested:{A:9,B:9},Deep:{X:{Y:1}}}",
+            // 标量与嵌套混合（列表值本仓库的 SNBT 子集不支持，用嵌套代替）。
+            // Scalars mixed with nesting (the repo's SNBT subset has no list form, so
+            // nesting stands in for it).
+            "{Scalar:\"s\",Deeper:{X:{Y:{Z:1}}}}",
         ] {
-            queries.push(format!(
-                "append_loot|{seed}|minecraft:archaeology/trail_ruins_common|{existing}"
-            ));
+            for loot in [
+                "minecraft:archaeology/trail_ruins_common",
+                "minecraft:archaeology/trail_ruins_rare",
+            ] {
+                queries.push(format!("append_loot|{seed}|{loot}|{existing}"));
+            }
             queries.push(format!("clear|{seed}|minecraft:empty|{existing}"));
             queries.push(format!("passthrough|{seed}|minecraft:empty|{existing}"));
-            //  的 data 与 existing 的嵌套键**不同**，否则「递归合并」与
-            // 「直接覆盖」结果相同，改坏也发现不了（本轮踩过）。
-            // The  data uses different nested keys from ; otherwise
-            // recursive merge and plain overwrite agree and a break goes unnoticed.
+            // 数据的 data 与 existing 的嵌套键**不同**，否则「递归合并」与
+            // 「直接覆盖」结果相同，改坏也发现不了（早前踩过）。
+            // The data's keys differ from `existing`'s nested keys; otherwise recursive
+            // merge and plain overwrite agree and a break goes unnoticed.
             queries.push(format!("append_static|{seed}|minecraft:empty|{existing}"));
             queries.push(format!(
                 "append_static_data|{seed}|minecraft:empty|{existing}"
