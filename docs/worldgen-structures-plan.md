@@ -388,6 +388,21 @@
 * `place_piece` 的参数从 10 个减到 9 个：`chunk_bb` 从 settings 里取（`None` 时用
   无限盒表示官方的「不过滤」），去掉重复参数。`jigsaw placepiece` 900 查询仍 0 不一致。
 
+**第十八轮（2026-11-15，`cb-wg-jigsaw` 分支：方块实体写入钩子）**：
+
+* `BlockWriter` 新增 `set_block_entity(x, y, z, nbt)`（默认空实现）。`place_processed`
+  在写完方块后把最终 nbt 交给它，对应官方的
+  `blockEntity.loadWithComponents(TagValueInput.create(...))`。随机容器的 nbt 里带着
+  放置期生成的 `LootTableSeed`。两个单元测试钉住（随机容器带种子、普通方块只带自己的
+  nbt、没有 nbt 的方块不触发）。
+* 合并 `main`（`5c7e9995`，含 `template_feature.rs` 等），无冲突。
+* **没做成的一件事**：想给 `jigsaw placepiece` 加「随机容器 `LootTableSeed`」的端到端对拍，
+  需要假世界的 `getBlockEntity` 返回真实方块实体并记录 `loadWithComponents`。做到一半发现
+  两个问题：(a) `loadWithComponents` 需要真实的 `RegistryAccess`（`TagValueInput.create`），
+  补上后 (b) 官方只在 `blockInfo.nbt != null` 时才调它，而我的假世界在写 `barrier` 等位置
+  时也会登记方块实体，导致 Java 侧多出种子。这条对拍**未完成、未提交**，代码已回滚。
+  `place_processed` 的 nbt 传递目前**只有单元测试**。
+
 **第五轮（2026-11-14，`cb-wg-structures` 续：需要模板的单件结构布局）**：
 
 * 合并 `main` 时本分支已与 `main` 同步（`main` 的 `4405fc3` 含本分支全部提交），
