@@ -3613,7 +3613,7 @@ fn run_pieces_exact(mut command: Command, work_dir: &Path) -> Result<(), String>
     let preset = worldgen
         .preset("minecraft:overworld")
         .ok_or("missing overworld preset")?;
-    for &seed in SEEDS.iter().take(4) {
+    for &seed in SEEDS.iter() {
         let generator = Generator::new(&worldgen, seed)?;
         let mut router = SeededRouter::new(settings, seed);
         let mut resolver = BiomeResolver {
