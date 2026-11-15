@@ -8,12 +8,13 @@
 
 use crate::{
     feature::world::{FeatureWorld, HeightmapKind},
+    random::WorldgenRandom,
     structure::{
         pieces::{Box, Piece},
         template::StructureTemplate,
         template_place::{
-            IGNORE_STRUCTURE_BLOCK, LiquidSettings, PieceOutcome, PlaceSettings, Processor,
-            template_piece_post_process,
+            IGNORE_STRUCTURE_BLOCK, LiquidSettings, MarkerContext, PieceOutcome, PlaceSettings,
+            Processor, template_piece_post_process,
         },
         templated::{MIRROR_NONE, rotation_ordinal},
     },
@@ -61,28 +62,6 @@ fn part(template: &str) -> Option<&'static Part> {
         .find(|part| part.template == template)
 }
 
-/// 雪屋 `postProcess` 的产物。
-///
-/// The outcome of one igloo `postProcess`.
-pub struct IglooOutcome {
-    /// 模板放置的结果。
-    ///
-    /// The template placement outcome.
-    pub placement: PieceOutcome,
-    /// `postProcess` 之后的 `templatePosition`（官方最后会还原成旧值，这里给出校正后的）。
-    ///
-    /// The corrected `templatePosition` (vanilla restores the old value afterwards).
-    pub corrected_position: (i32, i32, i32),
-    /// 入口活板门补的雪块位置（没补就是 `None`）。
-    ///
-    /// The trapdoor position capped with snow, if any.
-    pub snow: Option<(i32, i32, i32)>,
-    /// `handleDataMarker` 写下的方块（`chest` 标记换成空气）。
-    ///
-    /// The blocks written by `handleDataMarker` (a `chest` marker becomes air).
-    pub marker_writes: Vec<(i32, i32, i32, u32)>,
-}
-
 /// `IglooPieces.IglooPiece.makeSettings(rotation, templateLocation)`。
 ///
 /// `IglooPieces.IglooPiece.makeSettings(rotation, templateLocation)`.
@@ -95,15 +74,19 @@ fn settings(rotation: i32, part: &Part) -> PlaceSettings {
 /// `IglooPieces.IglooPiece.postProcess` 的方块部分。
 ///
 /// 只处理与本区块盒相交的结构件；调用方按 `StructureStart.placeInChunk` 的编排决定调哪些。
+/// 官方在 `postProcess` 里把 `boundingBox` 改成校正后的盒子（`templatePosition` 最后还原），
+/// 所以这里也只改 `piece.bb`。
 ///
 /// The block part of `IglooPieces.IglooPiece.postProcess`. The caller decides which
-/// pieces to run, following `StructureStart.placeInChunk`.
+/// pieces to run, following `StructureStart.placeInChunk`. Vanilla leaves the corrected
+/// `boundingBox` on the piece (and restores `templatePosition`), so only `piece.bb` is
+/// updated here.
 pub fn igloo(
     world: &mut FeatureWorld<'_>,
-    piece: &Piece,
+    piece: &mut Piece,
     chunk_bb: Box,
-    record: bool,
-) -> Result<IglooOutcome, String> {
+    random: &WorldgenRandom,
+) -> Result<PieceOutcome, String> {
     let template_name = piece
         .get_str("Template")
         .ok_or("igloo piece has no Template")?
@@ -113,24 +96,10 @@ pub fn igloo(
         part(&template_name).ok_or_else(|| format!("unknown igloo template {template_name}"))?;
     let settings = settings(rotation, part);
     let template = StructureTemplate::load(&template_name)?;
-    let template_position = (piece.bb[0], piece.bb[1], piece.bb[2]);
-    // `TPX` / `TPY` / `TPZ` 才是模板位置，`BB` 是它算出来的盒子。
     let template_position = (
-        piece
-            .extras
-            .get("TPX")
-            .and_then(extra_int)
-            .unwrap_or(template_position.0),
-        piece
-            .extras
-            .get("TPY")
-            .and_then(extra_int)
-            .unwrap_or(template_position.1),
-        piece
-            .extras
-            .get("TPZ")
-            .and_then(extra_int)
-            .unwrap_or(template_position.2),
+        extra_int(piece, "TPX").ok_or("igloo piece has no TPX")?,
+        extra_int(piece, "TPY").ok_or("igloo piece has no TPY")?,
+        extra_int(piece, "TPZ").ok_or("igloo piece has no TPZ")?,
     );
 
     let relative = settings.relative((3 - part.offset.0, 0, -part.offset.2));
@@ -146,23 +115,17 @@ pub fn igloo(
         template_position.2,
     );
 
-    let placement =
-        template_piece_post_process(world, &template, corrected, &settings, chunk_bb, record);
+    let mut outcome = template_piece_post_process(
+        world,
+        &template,
+        corrected,
+        &settings,
+        chunk_bb,
+        random,
+        &mut handle_data_marker,
+    );
+    piece.bb = outcome.bounding_box;
 
-    let mut marker_writes = Vec::new();
-    for (metadata, pos) in &placement.markers {
-        // `IglooPiece.handleDataMarker`：`chest` 标记把标记格换成空气，战利品表写进
-        // 下面那格的箱子（`random.nextLong()` 只影响战利品，见 README 已知限制）。
-        // `IglooPiece.handleDataMarker`: a `chest` marker turns the marker cell into air and
-        // puts the loot table on the chest below (`random.nextLong()` only affects loot,
-        // see the README limitations).
-        if metadata == "chest" {
-            world.set_block_with_heightmaps(pos.0, pos.1, pos.2, mc_bamboo_data::blocks::AIR);
-            marker_writes.push((pos.0, pos.1, pos.2, mc_bamboo_data::blocks::AIR));
-        }
-    }
-
-    let mut snow = None;
     if template_name == IGLOO.template {
         let offset = settings.relative((3, 0, 5));
         let trapdoor = (
@@ -178,32 +141,36 @@ pub fn igloo(
             let snow_block = mc_bamboo_data::block_by_name("minecraft:snow_block")
                 .map(|block| block.default_state)
                 .ok_or("missing snow_block")?;
-            world.set_block_with_heightmaps(trapdoor.0, trapdoor.1, trapdoor.2, snow_block);
-            snow = Some(trapdoor);
+            if world.set_block_with_heightmaps(trapdoor.0, trapdoor.1, trapdoor.2, snow_block) {
+                outcome
+                    .writes
+                    .push((trapdoor.0, trapdoor.1, trapdoor.2, snow_block));
+            }
         }
     }
 
-    Ok(IglooOutcome {
-        placement,
-        corrected_position: corrected,
-        snow,
-        marker_writes,
-    })
+    Ok(outcome)
 }
 
-/// `IglooPiece.handleDataMarker` 写下的方块（`chest` 标记换成空气）。
+/// `IglooPiece.handleDataMarker`：`chest` 标记把标记格换成空气，再给下面那格的箱子设
+/// 战利品表（`random.nextLong()`）。
 ///
-/// The blocks `IglooPiece.handleDataMarker` writes (a `chest` marker becomes air).
-pub fn marker_blocks(outcome: &IglooOutcome) -> Vec<(i32, i32, i32, u32)> {
-    outcome.marker_writes.clone()
+/// `IglooPiece.handleDataMarker`: a `chest` marker turns the marker cell into air, then
+/// sets the loot table of the chest below (`random.nextLong()`).
+fn handle_data_marker(
+    context: &mut MarkerContext<'_, '_, '_>,
+    metadata: &str,
+    pos: (i32, i32, i32),
+) {
+    if metadata == "chest" {
+        context.set_block(pos, mc_bamboo_data::blocks::AIR);
+        context.seed_chest_loot_table((pos.0, pos.1 - 1, pos.2));
+    }
 }
 
-/// 读结构件 extras 里的整数字段。
-///
-/// Read an integer field from the piece extras.
-fn extra_int(value: &crate::structure::pieces::Extra) -> Option<i32> {
-    match value {
-        crate::structure::pieces::Extra::Int(value) => Some(*value),
+fn extra_int(piece: &Piece, key: &str) -> Option<i32> {
+    match piece.extras.get(key) {
+        Some(crate::structure::pieces::Extra::Int(value)) => Some(*value),
         _ => None,
     }
 }

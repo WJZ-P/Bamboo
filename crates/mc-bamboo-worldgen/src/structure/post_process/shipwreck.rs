@@ -12,8 +12,8 @@ use crate::{
         pieces::{Box, Piece},
         template::StructureTemplate,
         template_place::{
-            IGNORE_STRUCTURE_AND_AIR, LiquidSettings, PieceOutcome, PlaceSettings, Processor,
-            heightmap_type, template_piece_post_process,
+            IGNORE_STRUCTURE_AND_AIR, LiquidSettings, MarkerContext, PieceOutcome, PlaceSettings,
+            Processor, heightmap_type, template_piece_post_process,
         },
         templated::{MIRROR_NONE, rotation_ordinal},
     },
@@ -53,28 +53,29 @@ pub fn is_too_big(size: (i32, i32, i32)) -> bool {
 /// `ShipwreckPiece.postProcess` 的方块部分。
 ///
 /// `random` 是 `postProcess` 的世界随机源：沙滩沉船的 `calculateBeachedPosition` 会从它
-/// 取一次 `nextInt(3)`。调用方必须在与官方相同的位置调用本函数。
+/// 取一次 `nextInt(3)`，箱子的战利品种子也从它取。高度只校正一次：官方校正后把
+/// `heightAdjusted` 置 true 并改写 `templatePosition`，这里对应写回 `height_adjusted` 和
+/// `TPY`，后面的区块直接用校正后的位置。
 ///
 /// The block part of `ShipwreckPiece.postProcess`. `random` is the `postProcess` world
 /// random: a beached shipwreck draws `nextInt(3)` from it inside
-/// `calculateBeachedPosition`. The caller must invoke this at the same point vanilla does.
+/// `calculateBeachedPosition`, and chest loot seeds come from it too. The height is
+/// adjusted once: vanilla sets `heightAdjusted` and rewrites `templatePosition`, mirrored
+/// here by writing `height_adjusted` and `TPY` back so later chunks reuse the position.
 pub fn shipwreck(
     world: &mut FeatureWorld<'_>,
-    piece: &Piece,
+    piece: &mut Piece,
     chunk_bb: Box,
     random: &WorldgenRandom,
-    record: bool,
 ) -> Result<PieceOutcome, String> {
     let template_name = piece
         .get_str("Template")
         .ok_or("shipwreck piece has no Template")?
         .to_owned();
     let rotation = rotation_ordinal(piece.get_str("Rot").ok_or("shipwreck piece has no Rot")?)?;
-    let is_beached = piece
-        .extras
-        .get("isBeached")
-        .is_some_and(|value| value.token() == "B:1");
-    let template_position = (
+    let is_beached = extra_bool(piece, "isBeached");
+    let height_adjusted = extra_bool(piece, "height_adjusted");
+    let mut template_position = (
         extra_int(piece, "TPX").ok_or("shipwreck piece has no TPX")?,
         extra_int(piece, "TPY").ok_or("shipwreck piece has no TPY")?,
         extra_int(piece, "TPZ").ok_or("shipwreck piece has no TPZ")?,
@@ -82,11 +83,8 @@ pub fn shipwreck(
     let template = StructureTemplate::load(&template_name)?;
     let settings = settings(rotation);
 
-    let corrected = if is_too_big(template.size) {
-        template_position
-    } else {
-        let ocean_floor = !is_beached;
-        let kind = heightmap_type(ocean_floor);
+    if !height_adjusted && !is_too_big(template.size) {
+        let kind = heightmap_type(!is_beached);
         // `int minY = level.getMaxY() + 1`。
         // `int minY = level.getMaxY() + 1`.
         let mut lowest = world.min_y + world.height;
@@ -118,34 +116,41 @@ pub fn shipwreck(
         } else {
             mean
         };
-        (template_position.0, new_y, template_position.2)
-    };
+        // `adjustPositionHeight(newHeight)`。
+        // `adjustPositionHeight(newHeight)`.
+        template_position.1 = new_y;
+        piece.put_int("TPY", new_y);
+        piece.put_bool("height_adjusted", true);
+    }
 
-    Ok(template_piece_post_process(
-        world, &template, corrected, &settings, chunk_bb, record,
-    ))
+    let outcome = template_piece_post_process(
+        world,
+        &template,
+        template_position,
+        &settings,
+        chunk_bb,
+        random,
+        &mut handle_data_marker,
+    );
+    piece.bb = outcome.bounding_box;
+    Ok(outcome)
 }
 
-/// `ShipwreckPiece.handleDataMarker` 写下的方块。
+/// `ShipwreckPiece.handleDataMarker`：三个标记（`map_chest` / `treasure_chest` /
+/// `supply_chest`）都调 `RandomizableContainer.setBlockEntityLootTable(level, random,
+/// pos.below(), table)`，不写方块，只在下面那格是容器时取一次 `nextLong`。
 ///
-/// 三个标记（`map_chest` / `treasure_chest` / `supply_chest`）都调
-/// `RandomizableContainer.setBlockEntityLootTable(level, random, pos.below(), table)`，
-/// 它只改方块实体、**不写方块**（`level.getBlockEntity` 在假世界返回 null，两侧都不取
-/// `nextLong`）。所以这里恒为空。
-///
-/// The blocks `ShipwreckPiece.handleDataMarker` writes. All three markers call
-/// `RandomizableContainer.setBlockEntityLootTable` on the block **below**, which only
-/// touches the block entity and writes no block (the fake world's `getBlockEntity` returns
-/// null, so neither side draws `nextLong`). Always empty here.
-pub fn marker_blocks() -> Vec<(i32, i32, i32, u32)> {
-    Vec::new()
-}
-
-/// 战利品标记名，供 `handleDataMarker` 的调用方判分支。
-///
-/// The loot marker names, for the `handleDataMarker` caller.
-pub fn is_loot_marker(metadata: &str) -> bool {
-    MARKERS.contains(&metadata)
+/// `ShipwreckPiece.handleDataMarker`: the three markers call
+/// `RandomizableContainer.setBlockEntityLootTable(level, random, pos.below(), table)`,
+/// which writes no block and draws one `nextLong` when the block below is a container.
+fn handle_data_marker(
+    context: &mut MarkerContext<'_, '_, '_>,
+    metadata: &str,
+    pos: (i32, i32, i32),
+) {
+    if MARKERS.contains(&metadata) {
+        context.seed_loot_table((pos.0, pos.1 - 1, pos.2));
+    }
 }
 
 fn extra_int(piece: &Piece, key: &str) -> Option<i32> {
@@ -153,4 +158,11 @@ fn extra_int(piece: &Piece, key: &str) -> Option<i32> {
         Some(crate::structure::pieces::Extra::Int(value)) => Some(*value),
         _ => None,
     }
+}
+
+fn extra_bool(piece: &Piece, key: &str) -> bool {
+    matches!(
+        piece.extras.get(key),
+        Some(crate::structure::pieces::Extra::Byte(value)) if *value != 0
+    )
 }

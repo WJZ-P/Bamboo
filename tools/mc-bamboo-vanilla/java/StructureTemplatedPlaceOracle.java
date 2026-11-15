@@ -95,10 +95,9 @@ public final class StructureTemplatedPlaceOracle {
         }
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
-        // 溺尸和矿车一样是实体，假世界造不出来；把 factory 换成返回 null，让 `create` 走
-        // 「创建失败」分支（官方语义），方块部分不受影响。
-        // Drowned are entities the fake world cannot host; swap the factory to return null so
-        // `create` takes the vanilla "creation failed" branch, leaving blocks untouched.
+        // 溺尸是实体，假世界造不出真的；换成一个替身，见 `disableEntityCreation`。
+        // Drowned are entities the fake world cannot host; a stand-in is used instead, see
+        // `disableEntityCreation`.
         disableEntityCreation();
         PackRepository repository = ServerPacksSource.createVanillaTrustedRepository();
         repository.reload();
@@ -147,8 +146,9 @@ public final class StructureTemplatedPlaceOracle {
         int cz = Integer.parseInt(p[3]);
         ChunkPos pos = new ChunkPos(cx, cz);
 
-        List<StructurePiece> pieces = buildPieces(kind, seed, cx, cz, p);
-        Level level = new Level(pos, registries, seed);
+        List<StructurePiece> pieces = buildPieces(registries, kind, seed, cx, cz, p);
+        Level level = new Level(pos, registries, seed, kind.equals("ruined_portal"));
+        StringBuilder probes = new StringBuilder();
         int aborted = 0;
         // `StructureStart.placeInChunk` 的编排：3×3 每个区块各调一次，`chunkBB` 是该区块的
         // 整列盒，`random` 每区块重播，世界在调用之间保留。`CappedProcessor` 每个区块各挑
@@ -160,14 +160,18 @@ public final class StructureTemplatedPlaceOracle {
         for (int dz = -1; dz <= 1; dz++) {
             for (int dx = -1; dx <= 1; dx++) {
                 ChunkPos at = new ChunkPos(cx + dx, cz + dz);
+                // 和 `placeInChunk` 一样：一个区块里的所有结构件共用同一个随机源和同一个
+                // `chunkBB` 对象（废弃传送门会就地 `encapsulate` 它）。
+                // As in `placeInChunk`: every piece of one chunk shares one random and one
+                // `chunkBB` object (the ruined portal `encapsulate`s it in place).
+                WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(seed));
+                BoundingBox chunkBB = chunkBox(at);
                 for (StructurePiece piece : pieces) {
-                    if (!piece.getBoundingBox().intersects(chunkBox(at))) {
+                    if (!piece.getBoundingBox().intersects(chunkBB)) {
                         continue;
                     }
-                    WorldgenRandom random =
-                            new WorldgenRandom(new LegacyRandomSource(seed));
                     try {
-                        piece.postProcess(level.proxy(), null, null, random, chunkBox(at), at,
+                        piece.postProcess(level.proxy(), null, null, random, chunkBB, at,
                                 new BlockPos(at.getMiddleBlockX(),
                                         piece.getBoundingBox().minY(), at.getMiddleBlockZ()));
                     } catch (Throwable error) {
@@ -181,12 +185,19 @@ public final class StructureTemplatedPlaceOracle {
                         }
                     }
                 }
+                // 随机源探针：这个区块的所有结构件跑完后再取一个 `nextLong`。箱子战利品
+                // 种子之类不改方块的取数少一次、多一次，都会在这里露出来。
+                // Random probe: one more `nextLong` after all pieces of this chunk. A
+                // missing or extra draw that changes no block (chest loot seeds) shows here.
+                probes.append("R ").append(dx).append(' ').append(dz).append(' ')
+                        .append(random.nextLong()).append('\n');
             }
         }
         TreeMap<BlockPos, BlockState> written = level.written;
         out.append("Q ").append(kind).append(' ').append(seed).append(' ').append(cx)
                 .append(' ').append(cz).append(' ').append(written.size()).append(' ')
                 .append(aborted).append('\n');
+        out.append(probes);
         for (var entry : written.entrySet()) {
             BlockPos at = entry.getKey();
             out.append("B ").append(at.getX()).append(' ').append(at.getY()).append(' ')
@@ -196,8 +207,8 @@ public final class StructureTemplatedPlaceOracle {
     }
 
     /** 按官方编排造结构件。废弃传送门的参数由查询行给出（布局已单独对拍过）。 */
-    private static List<StructurePiece> buildPieces(String kind, long seed, int cx, int cz,
-            String[] p) throws Exception {
+    private static List<StructurePiece> buildPieces(RegistryAccess.Frozen registries,
+            String kind, long seed, int cx, int cz, String[] p) throws Exception {
         WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
         random.setLargeFeatureSeed(seed, cx, cz);
         ChunkPos chunkPos = new ChunkPos(cx, cz);
@@ -225,7 +236,7 @@ public final class StructureTemplatedPlaceOracle {
                 OceanRuinPieces.addPieces(templateManager, origin, rotation, builder, random,
                         structure);
             }
-            case "ruined_portal" -> builder.addPiece(portalPiece(p));
+            case "ruined_portal" -> builder.addPiece(portalPiece(registries, p));
             default -> throw new IllegalArgumentException("unknown kind " + kind);
         }
         return builder.build().pieces();
@@ -236,7 +247,7 @@ public final class StructureTemplatedPlaceOracle {
      *
      * <p>The {@code extra} format used for the ruined portal query.
      */
-    private static StructurePiece portalPiece(String[] p) {
+    private static StructurePiece portalPiece(RegistryAccess.Frozen registries, String[] p) {
         String[] fields = p[4].split("\\|");
         String templateName = fields[0];
         Rotation rotation = Rotation.values()[Integer.parseInt(fields[1])];
@@ -254,7 +265,7 @@ public final class StructureTemplatedPlaceOracle {
         StructureTemplate template = templateManager.getOrCreate(location);
         BlockPos pivot = new BlockPos(template.getSize().getX() / 2, 0,
                 template.getSize().getZ() / 2);
-        return new RuinedPortalPiece(null, templateManager, origin, placement, properties, location,
+        return new RuinedPortalPiece(registries, templateManager, origin, placement, properties, location,
                 template, rotation, mirror, pivot);
     }
 
@@ -305,29 +316,74 @@ public final class StructureTemplatedPlaceOracle {
     }
 
     /**
-     * 把 `DROWNED` 的 `factory` 换成返回 null：假世界没有真实 `ServerLevel`，实体创建会
-     * 在 `enabledFeatures()` 上 NPE。换成 null 后官方 `handleDataMarker` 走
-     * `if (drowned != null)` 的假分支——方块（空气 / 水）都不写，两侧一致。
+     * 假世界没有真实 `ServerLevel`，造不出真的溺尸。官方在真实服务端里
+     * `EntityTypes.DROWNED.create` 一定成功，随后才写空气 / 水；所以这里把 `factory` 换成
+     * 返回一个**不跑构造器**的 {@link StubDrowned}，让官方 `handleDataMarker` 走
+     * `drowned != null` 那条分支并写方块。实体本身不比较。
      *
-     * Replaces `DROWNED`'s factory with one returning null: the fake world has no real
-     * `ServerLevel`, so entity creation NPEs on `enabledFeatures()`. With null the vanilla
-     * `if (drowned != null)` branch is skipped, writing no block on either side.
+     * The fake world has no real `ServerLevel`, so a real drowned cannot be built. On a
+     * real server `EntityTypes.DROWNED.create` always succeeds and the air / water block is
+     * written afterwards; the factory therefore returns a constructor-less
+     * {@link StubDrowned} so the vanilla `handleDataMarker` takes the `drowned != null`
+     * branch and writes the block. The entity itself is not compared.
      */
     @SuppressWarnings("unchecked")
     private static void disableEntityCreation() {
         try {
+            Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+            java.lang.reflect.Field theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
+            theUnsafe.setAccessible(true);
+            Object unsafe = theUnsafe.get(null);
+            java.lang.reflect.Method allocate =
+                    unsafeClass.getMethod("allocateInstance", Class.class);
             java.lang.reflect.Field factory =
                     net.minecraft.world.entity.EntityType.class.getDeclaredField("factory");
             factory.setAccessible(true);
             factory.set(net.minecraft.world.entity.EntityTypes.DROWNED,
                     (net.minecraft.world.entity.EntityType.EntityFactory<
                                     net.minecraft.world.entity.Entity>)
-                            (type, level) -> null);
+                            (type, level) -> {
+                                try {
+                                    return (net.minecraft.world.entity.Entity)
+                                            allocate.invoke(unsafe, StubDrowned.class);
+                                } catch (ReflectiveOperationException error) {
+                                    throw new IllegalStateException(error);
+                                }
+                            });
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException("cannot stub the drowned factory", error);
         }
     }
 
+    /**
+     * 不跑构造器的溺尸替身：官方 `handleDataMarker` 对它调的三个方法都变成空操作。
+     *
+     * A constructor-less drowned stand-in: the three methods the vanilla
+     * `handleDataMarker` calls on it are no-ops.
+     */
+    private static final class StubDrowned
+            extends net.minecraft.world.entity.monster.zombie.Drowned {
+        private StubDrowned() {
+            super(null, null);
+        }
+
+        @Override
+        public void setPersistenceRequired() {
+        }
+
+        @Override
+        public void snapTo(BlockPos spawnPos, float yRot, float xRot) {
+        }
+
+        @Override
+        public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                net.minecraft.world.level.ServerLevelAccessor level,
+                net.minecraft.world.DifficultyInstance difficulty,
+                net.minecraft.world.entity.EntitySpawnReason spawnReason,
+                net.minecraft.world.entity.SpawnGroupData groupData) {
+            return groupData;
+        }
+    }
     private static BoundingBox chunkBox(ChunkPos pos) {
         return new BoundingBox(pos.getMinBlockX(), MIN_Y + 1, pos.getMinBlockZ(),
                 pos.getMaxBlockX(), MIN_Y + HEIGHT - 1, pos.getMaxBlockZ());
@@ -418,7 +474,12 @@ public final class StructureTemplatedPlaceOracle {
         return x >= 0;
     }
 
-    private static void fillTerrain(ProtoChunk chunk) {
+    /** 废弃传送门用的地形变体：陆地一侧每隔几列把地表那格换成熔岩。 */
+    static boolean isLavaColumn(int x, int z) {
+        return x < 0 && Math.floorMod(x * 13 + z * 5, 11) == 0;
+    }
+
+    private static void fillTerrain(ProtoChunk chunk, boolean lava) {
         ChunkPos pos = chunk.getPos();
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
@@ -432,7 +493,8 @@ public final class StructureTemplatedPlaceOracle {
                 chunk.setBlockState(new BlockPos(worldX, surface - 1, worldZ),
                         Blocks.SANDSTONE.defaultBlockState(), 0);
                 chunk.setBlockState(new BlockPos(worldX, surface, worldZ),
-                        Blocks.SAND.defaultBlockState(), 0);
+                        lava && isLavaColumn(worldX, worldZ) ? Blocks.LAVA.defaultBlockState()
+                                : Blocks.SAND.defaultBlockState(), 0);
                 if (isOcean(worldX)) {
                     for (int y = surface + 1; y <= SEA_LEVEL; y++) {
                         chunk.setBlockState(new BlockPos(worldX, y, worldZ),
@@ -453,9 +515,10 @@ public final class StructureTemplatedPlaceOracle {
         private final PalettedContainerFactory factory;
         final TreeMap<BlockPos, BlockState> written = new TreeMap<>();
         final long seed;
-        int aborted = 0;
+        final boolean lava;
 
-        Level(ChunkPos center, RegistryAccess.Frozen registries, long seed) {
+        Level(ChunkPos center, RegistryAccess.Frozen registries, long seed, boolean lava) {
+            this.lava = lava;
             this.center = center;
             this.registries = registries;
             this.seed = seed;
@@ -475,7 +538,7 @@ public final class StructureTemplatedPlaceOracle {
                 ProtoChunk chunk = new ProtoChunk(new ChunkPos(cx, cz), UpgradeData.EMPTY,
                         LevelHeightAccessor.create(MIN_Y, HEIGHT), factory, null);
                 chunk.setPersistedStatus(ChunkStatus.FEATURES);
-                fillTerrain(chunk);
+                fillTerrain(chunk, lava);
                 Heightmap.primeHeightmaps(chunk, Set.of(Heightmap.Types.WORLD_SURFACE_WG,
                         Heightmap.Types.OCEAN_FLOOR_WG, Heightmap.Types.MOTION_BLOCKING,
                         Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, Heightmap.Types.WORLD_SURFACE,
@@ -553,22 +616,76 @@ public final class StructureTemplatedPlaceOracle {
                         if (!withinWriteZone(pos)) {
                             return false;
                         }
-                        at(pos).setBlockState(pos, state, flags);
+                        ProtoChunk chunk = at(pos);
+                        BlockState old = chunk.setBlockState(pos, state, flags);
+                        // `WorldGenRegion.setBlock` 的 PROTOCHUNK 分支：带方块实体的状态留一份
+                        // DUMMY nbt，`getBlockEntity` 时再现造；旧状态带、新状态不带就删掉。
+                        // The PROTOCHUNK branch of `WorldGenRegion.setBlock`: a state with a
+                        // block entity leaves a DUMMY nbt that `getBlockEntity` turns into the
+                        // real one; an old block entity is removed when the new state has none.
+                        if (state.hasBlockEntity()) {
+                            net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
+                            tag.putInt("x", pos.getX());
+                            tag.putInt("y", pos.getY());
+                            tag.putInt("z", pos.getZ());
+                            tag.putString("id", "DUMMY");
+                            chunk.setBlockEntityNbt(tag);
+                        } else if (old != null && old.hasBlockEntity()) {
+                            chunk.removeBlockEntity(pos);
+                        }
                         written.put(pos.immutable(), state);
                         return true;
                     }
-                    case "getBlockEntity":
-                        // 世界生成阶段 ProtoChunk 只有 pending 的 DUMMY tag，读不到方块实体；
-                        // 战利品表那一步因此不会取随机数（两侧一致）。
-                        // During worldgen a ProtoChunk only has pending DUMMY tags, so the
-                        // loot-table step draws nothing (both sides agree).
+                    case "getBlockEntity": {
+                        // `WorldGenRegion.getBlockEntity`：区块里还没有方块实体、但 `setBlock`
+                        // 留了 DUMMY nbt 时现造一个放回区块。模板放置靠它决定取不取
+                        // `LootTableSeed` 的 `nextLong`。
+                        // `WorldGenRegion.getBlockEntity`: with no block entity yet but a DUMMY
+                        // nbt left by `setBlock`, create one and store it. Template placement
+                        // decides on the `LootTableSeed` `nextLong` from it.
+                        BlockPos pos = (BlockPos) args[0];
+                        if (!withinWriteZone(pos)) {
+                            return null;
+                        }
+                        ProtoChunk chunk = at(pos);
+                        net.minecraft.world.level.block.entity.BlockEntity found =
+                                chunk.getBlockEntity(pos);
+                        if (found != null) {
+                            return found;
+                        }
+                        net.minecraft.nbt.CompoundTag tag = chunk.getBlockEntityNbt(pos);
+                        BlockState state = chunk.getBlockState(pos);
+                        if (tag != null && "DUMMY".equals(tag.getStringOr("id", ""))
+                                && state.hasBlockEntity()) {
+                            found = ((net.minecraft.world.level.block.EntityBlock) state.getBlock())
+                                    .newBlockEntity(pos, state);
+                            if (found != null) {
+                                chunk.setBlockEntity(found);
+                            }
+                            return found;
+                        }
                         return null;
+                    }
+                    case "getCurrentDifficultyAt":
+                    case "addFreshEntityWithPassengers":
+                    case "addFreshEntity":
+                        // 只有溺尸替身会走到这里；实体不比较。
+                        // Only the drowned stand-in gets here; entities are not compared.
+                        return name.equals("addFreshEntity") ? Boolean.TRUE : null;
                     case "getChunk": {
                         if (arity == 1 && args[0] instanceof BlockPos pos) {
                             return at(pos);
                         }
                         return chunk((Integer) args[1], (Integer) args[2]);
                     }
+                    case "environmentAttributes":
+                        // 熔岩的 `updateShape` 排计划刻时问 `FAST_LAVA`；没有任何层的系统回答
+                        // 默认值（主世界就是默认值），计划刻本身被吞掉。
+                        // Lava's `updateShape` asks for `FAST_LAVA` when scheduling its tick; a
+                        // system without layers answers the default (the overworld value), and
+                        // the tick itself is swallowed.
+                        return net.minecraft.world.attribute.EnvironmentAttributeSystem.builder()
+                                .build();
                     case "getRandom":
                         return new LegacyRandomSource(0L);
                     case "getCenter":
@@ -593,6 +710,14 @@ public final class StructureTemplatedPlaceOracle {
                         return levelBiome;
                     case "registryAccess":
                         return registries;
+                    case "holderLookup": {
+                        // `LevelReader.holderLookup(key)` 的默认实现。
+                        // The default body of `LevelReader.holderLookup(key)`.
+                        @SuppressWarnings({"unchecked", "rawtypes"})
+                        Object lookup = registries.lookupOrThrow(
+                                (net.minecraft.resources.ResourceKey) args[0]);
+                        return lookup;
+                    }
                     case "markPosForPostProcessing":
                     case "scheduleTick":
                     case "updateNeighborsAt":

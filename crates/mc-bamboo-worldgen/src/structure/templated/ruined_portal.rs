@@ -299,21 +299,21 @@ fn mirror_name(mirror: i32) -> &'static str {
 /// `RuinedPortalPiece` 的构造参数，避免函数参数过多。
 ///
 /// Constructor parameters of one `RuinedPortalPiece`, to keep the arity small.
-struct PortalPieceSpec<'a> {
-    template_name: &'a str,
-    template_size: (i32, i32, i32),
-    position: (i32, i32, i32),
-    rotation: i32,
-    mirror: i32,
-    pivot: (i32, i32),
-    placement: VerticalPlacement,
-    properties: Properties,
+pub struct PortalPieceSpec<'a> {
+    pub template_name: &'a str,
+    pub template_size: (i32, i32, i32),
+    pub position: (i32, i32, i32),
+    pub rotation: i32,
+    pub mirror: i32,
+    pub pivot: (i32, i32),
+    pub placement: VerticalPlacement,
+    pub properties: Properties,
 }
 
 /// `RuinedPortalPiece` 的一个结构件。
 ///
 /// One `RuinedPortalPiece`.
-fn portal_piece(spec: PortalPieceSpec<'_>) -> Piece {
+pub fn portal_piece(spec: PortalPieceSpec<'_>) -> Piece {
     let PortalPieceSpec {
         template_name,
         template_size,

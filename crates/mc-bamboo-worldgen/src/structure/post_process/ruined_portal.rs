@@ -8,6 +8,7 @@
 //! and `RuleProcessor`), then `spreadNetherrack` and
 //! `addNetherrackDripColumnsBelowPortal`, and finally the optional vines and leaves.
 
+use mc_bamboo_core::Direction;
 use mc_bamboo_data::{blocks, facts, state_facts};
 
 use crate::{
@@ -17,9 +18,9 @@ use crate::{
         pieces::{Box, Piece},
         template::StructureTemplate,
         template_place::{
-            IGNORE_STRUCTURE_AND_AIR, IGNORE_STRUCTURE_BLOCK, InputTest, LiquidSettings,
-            PieceOutcome, PlaceSettings, Processor, Rule, heightmap_type,
-            template_piece_post_process,
+            BlockWrite, IGNORE_STRUCTURE_AND_AIR, IGNORE_STRUCTURE_BLOCK, InputTest,
+            LiquidSettings, PieceOutcome, PlaceSettings, Processor, Rule, heightmap_type, in_tag,
+            template_box, template_piece_post_process,
         },
         templated::ruined_portal::{Properties, VerticalPlacement},
     },
@@ -115,14 +116,20 @@ fn lava_rule(placement: VerticalPlacement, properties: Properties) -> Rule {
 
 /// `RuinedPortalPiece.postProcess` 的方块部分。
 ///
-/// The block part of `RuinedPortalPiece.postProcess`.
+/// `chunk_bb` 是 `placeInChunk` 传下来的那个盒子：官方在结构件中心落在盒内时
+/// **就地** `chunkBB.encapsulate(boundingBox)`，同一个区块里排在后面的结构件看到的是
+/// 扩大后的盒子，所以这里收可变引用。`random` 是 `postProcess` 的随机源。
+///
+/// The block part of `RuinedPortalPiece.postProcess`. `chunk_bb` is the box handed down
+/// by `placeInChunk`: when the piece centre is inside it vanilla calls
+/// `chunkBB.encapsulate(boundingBox)` **in place**, so later pieces of the same chunk see
+/// the grown box; hence the mutable reference. `random` is the `postProcess` random.
 pub fn ruined_portal(
     world: &mut FeatureWorld<'_>,
-    piece: &Piece,
-    chunk_bb: Box,
+    piece: &mut Piece,
+    chunk_bb: &mut Box,
     random: &WorldgenRandom,
-    record: bool,
-) -> Result<PortalsOutcome, String> {
+) -> Result<PieceOutcome, String> {
     let template_name = piece
         .get_str("Template")
         .ok_or("ruined portal piece has no Template")?
@@ -161,83 +168,268 @@ pub fn ruined_portal(
     // 并且把结构件的完整盒子并进 `chunkBB`（官方就地修改这个盒）。
     // `if (chunkBB.isInside(boundingBox.getCenter()))`: only place when the piece centre is
     // inside the chunk box, and merge the full piece box into `chunkBB` (vanilla mutates it).
-    let bounding_box =
-        crate::structure::template_place::template_box(&template, &settings, template_position);
-    let center = box_center(&bounding_box);
-    let mut writes = Vec::new();
-    if !inside(&chunk_bb, center) {
-        return Ok(PortalsOutcome {
-            placement: PieceOutcome {
-                placed: None,
-                markers: Vec::new(),
-                jigsaw_writes: Vec::new(),
-                bounding_box,
-                template_position,
-            },
-            writes,
+    let bounding_box = template_box(&template, &settings, template_position);
+    if !inside(chunk_bb, box_center(&bounding_box)) {
+        return Ok(PieceOutcome {
+            placed: false,
+            writes: Vec::new(),
+            block_entities: Vec::new(),
+            bounding_box: piece.bb,
+            template_position,
         });
     }
-    let mut chunk_bb = chunk_bb;
-    encapsulate(&mut chunk_bb, &bounding_box);
-    let placement_outcome = template_piece_post_process(
+    encapsulate(chunk_bb, &bounding_box);
+    // `handleDataMarker` 是空的。
+    // `handleDataMarker` is empty.
+    let mut outcome = template_piece_post_process(
         world,
         &template,
         template_position,
         &settings,
-        chunk_bb,
-        record,
+        *chunk_bb,
+        random,
+        &mut |_, _, _| {},
     );
-    // `this.getBoundingBox()` 在 `super.postProcess` 里被重算成模板盒。
-    // `this.getBoundingBox()` is recomputed as the template box inside `super.postProcess`.
-    let piece_box = placement_outcome.bounding_box;
+    // `this.boundingBox` 在 `super.postProcess` 里被重算成模板盒。
+    // `this.boundingBox` is recomputed as the template box inside `super.postProcess`.
+    piece.bb = outcome.bounding_box;
 
-    log_writes(&mut writes, world, record);
-    spread_netherrack(
+    let mut portal = Portal {
         world,
-        &piece_box,
+        random,
+        writes: std::mem::take(&mut outcome.writes),
+        bb: outcome.bounding_box,
         placement,
         properties,
-        random,
-        &mut writes,
-        record,
-    );
-    add_netherrack_drip_columns(world, &piece_box, properties, random, &mut writes, record);
+    };
+    portal.spread_netherrack();
+    portal.add_netherrack_drip_columns_below_portal();
     if properties.vines || properties.overgrown {
-        // `BlockPos.betweenClosedStream(this.getBoundingBox())` 的顺序：`index % width` 是
-        // x（变得最快），`(index / width) % height` 是 y，`index / width / height` 是 z。
-        // 所以 x 是最内层循环、y 中间、z 最外层。
-        // `BlockPos.betweenClosedStream(box)` order: `index % width` is x (fastest),
-        // `(index / width) % height` is y, `index / width / height` is z. So x is the
-        // innermost loop, y in the middle and z outermost.
-        for z in piece_box[2]..=piece_box[5] {
-            for y in piece_box[1]..=piece_box[4] {
-                for x in piece_box[0]..=piece_box[3] {
+        // `BlockPos.betweenClosedStream(this.getBoundingBox())` 的顺序：x 变得最快，
+        // 然后 y，z 最慢。
+        // `BlockPos.betweenClosedStream(box)` order: x fastest, then y, z slowest.
+        let bb = portal.bb;
+        for z in bb[2]..=bb[5] {
+            for y in bb[1]..=bb[4] {
+                for x in bb[0]..=bb[3] {
                     if properties.vines {
-                        maybe_add_vines(world, (x, y, z), random, &mut writes, record);
+                        portal.maybe_add_vines((x, y, z));
                     }
                     if properties.overgrown {
-                        maybe_add_leaves_above(world, (x, y, z), random, &mut writes, record);
+                        portal.maybe_add_leaves_above((x, y, z));
                     }
                 }
             }
         }
     }
-
-    Ok(PortalsOutcome {
-        placement: placement_outcome,
-        writes,
-    })
+    outcome.writes = portal.writes;
+    Ok(outcome)
 }
 
-/// 废弃传送门的产物：模板放置部分，加上 `postProcess` 之后追加的方块。
+/// `super.postProcess` 之后那几步共用的状态：世界、随机源、写入日志和结构件自己的字段。
 ///
-/// The ruined-portal outcome: the template placement plus the blocks appended after it.
-pub struct PortalsOutcome {
-    pub placement: PieceOutcome,
-    /// `spreadNetherrack` / 滴水柱 / 藤蔓 / 树叶写下的方块。
+/// The state shared by the steps after `super.postProcess`: the world, the random, the
+/// write log and the piece's own fields.
+struct Portal<'w, 'a, 'r> {
+    world: &'w mut FeatureWorld<'a>,
+    random: &'r WorldgenRandom,
+    writes: Vec<BlockWrite>,
+    /// `this.boundingBox`。
+    bb: Box,
+    placement: VerticalPlacement,
+    properties: Properties,
+}
+
+impl Portal<'_, '_, '_> {
+    fn get(&self, pos: (i32, i32, i32)) -> u32 {
+        self.world.get_block(pos.0, pos.1, pos.2)
+    }
+
+    /// `level.setBlockAndUpdate(pos, state)`。
     ///
-    /// The blocks written by `spreadNetherrack`, the drip columns, vines and leaves.
-    pub writes: Vec<(i32, i32, i32, u32)>,
+    /// `level.setBlockAndUpdate(pos, state)`.
+    fn set(&mut self, pos: (i32, i32, i32), state: u32) {
+        if self
+            .world
+            .set_block_with_heightmaps(pos.0, pos.1, pos.2, state)
+        {
+            self.writes.push((pos.0, pos.1, pos.2, state));
+        }
+    }
+
+    /// `spreadNetherrack(random, level)`。
+    ///
+    /// `spreadNetherrack(random, level)`.
+    fn spread_netherrack(&mut self) {
+        let follow_ground_surface = self.placement == VerticalPlacement::OnLandSurface
+            || self.placement == VerticalPlacement::OnOceanFloor;
+        let bb = self.bb;
+        let center = box_center(&bb);
+        let (center_x, center_z) = (center.0, center.2);
+        let max_distance = NETHERRACK_PROBABILITY_BY_DISTANCE.len() as i32;
+        let x_span = bb[3] - bb[0] + 1;
+        let z_span = bb[5] - bb[2] + 1;
+        let average_width = (x_span + z_span) / 2;
+        let distance_adjustment = self.random.next_int((8 - average_width / 2).max(1));
+
+        for x in center_x - max_distance..=center_x + max_distance {
+            for z in center_z - max_distance..=center_z + max_distance {
+                let distance = (x - center_x).abs() + (z - center_z).abs();
+                let adjusted = (distance + distance_adjustment).max(0);
+                if adjusted >= max_distance {
+                    continue;
+                }
+                let probability = NETHERRACK_PROBABILITY_BY_DISTANCE[adjusted as usize];
+                if self.random.next_double() >= f64::from(probability) {
+                    continue;
+                }
+                let surface_y = self.surface_y(x, z);
+                let y = if follow_ground_surface {
+                    surface_y
+                } else {
+                    bb[1].min(surface_y)
+                };
+                let pos = (x, y, z);
+                if (y - bb[1]).abs() > 3 || !self.can_be_replaced(self.get(pos)) {
+                    continue;
+                }
+                self.place_netherrack_or_magma(pos);
+                if self.properties.overgrown {
+                    self.maybe_add_leaves_above(pos);
+                }
+                self.add_netherrack_drip_column((pos.0, pos.1 - 1, pos.2));
+            }
+        }
+    }
+
+    /// `getSurfaceY(level, x, z, verticalPlacement)`。
+    ///
+    /// `getSurfaceY(level, x, z, verticalPlacement)`.
+    fn surface_y(&self, x: i32, z: i32) -> i32 {
+        let kind = heightmap_type(self.placement == VerticalPlacement::OnOceanFloor);
+        self.world.get_height(kind, x, z) - 1
+    }
+
+    /// `addNetherrackDripColumnsBelowPortal(random, level)`。
+    ///
+    /// `addNetherrackDripColumnsBelowPortal(random, level)`.
+    fn add_netherrack_drip_columns_below_portal(&mut self) {
+        let bb = self.bb;
+        // 注意边界：官方是 `x < maxX`、`z < maxZ`（两头都不含）。
+        // Note the bounds: vanilla loops `minX + 1 .. maxX` and `minZ + 1 .. maxZ`, both
+        // exclusive.
+        for x in bb[0] + 1..bb[3] {
+            for z in bb[2] + 1..bb[5] {
+                if is_block(self.get((x, bb[1], z)), "minecraft:netherrack") {
+                    self.add_netherrack_drip_column((x, bb[1] - 1, z));
+                }
+            }
+        }
+    }
+
+    /// `addNetherrackDripColumn(random, level, pos)`：先写一格，再按 50% 概率往下延伸，
+    /// 最多 8 格。
+    ///
+    /// `addNetherrackDripColumn(random, level, pos)`: write one block, then extend downward
+    /// with a 50% chance per step, at most eight steps.
+    fn add_netherrack_drip_column(&mut self, pos: (i32, i32, i32)) {
+        let mut current = pos;
+        self.place_netherrack_or_magma(current);
+        let mut remaining = 8;
+        while remaining > 0 && self.random.next_float() < 0.5 {
+            current = (current.0, current.1 - 1, current.2);
+            remaining -= 1;
+            self.place_netherrack_or_magma(current);
+        }
+    }
+
+    /// `placeNetherrackOrMagma(random, level, pos)`。
+    ///
+    /// `placeNetherrackOrMagma(random, level, pos)`.
+    fn place_netherrack_or_magma(&mut self, pos: (i32, i32, i32)) {
+        if !self.can_be_replaced(self.get(pos)) {
+            return;
+        }
+        let state =
+            if !self.properties.cold && self.random.next_float() < MAGMA_INSTEAD_OF_NETHERRACK {
+                block_state("minecraft:magma_block")
+            } else {
+                block_state("minecraft:netherrack")
+            };
+        self.set(pos, state);
+    }
+
+    /// `canBlockBeReplacedByNetherrackOrMagma(state)`。注意第一条是 `is(Blocks.AIR)`，
+    /// 不是 `isAir()`：洞穴空气可以被替换。
+    ///
+    /// `canBlockBeReplacedByNetherrackOrMagma(state)`. The first test is `is(Blocks.AIR)`,
+    /// not `isAir()`: cave air may be replaced.
+    fn can_be_replaced(&self, state: u32) -> bool {
+        state != blocks::AIR
+            && !is_block(state, "minecraft:obsidian")
+            && !in_tag(state, "minecraft:features_cannot_replace")
+            && (self.placement == VerticalPlacement::InNether || !is_block(state, "minecraft:lava"))
+    }
+
+    /// `maybeAddVines(random, level, pos)`。
+    ///
+    /// `maybeAddVines(random, level, pos)`.
+    fn maybe_add_vines(&mut self, pos: (i32, i32, i32)) {
+        let state = self.get(pos);
+        if state_facts(state) & facts::AIR != 0 || is_block(state, "minecraft:vine") {
+            return;
+        }
+        // `getRandomHorizontalDirection(random)`：`Plane.HORIZONTAL` 的 NORTH / EAST /
+        // SOUTH / WEST。
+        // `getRandomHorizontalDirection(random)`: NORTH / EAST / SOUTH / WEST of
+        // `Plane.HORIZONTAL`.
+        const HORIZONTAL: [(Direction, &str, (i32, i32)); 4] = [
+            (Direction::North, "south", (0, -1)),
+            (Direction::East, "west", (1, 0)),
+            (Direction::South, "north", (0, 1)),
+            (Direction::West, "east", (-1, 0)),
+        ];
+        let (direction, opposite, (dx, dz)) = HORIZONTAL[self.random.next_int(4) as usize];
+        let neighbour = (pos.0 + dx, pos.1, pos.2 + dz);
+        if state_facts(self.get(neighbour)) & facts::AIR == 0 {
+            return;
+        }
+        // `Block.isFaceFull(state.getCollisionShape(level, pos), direction)`。
+        // `Block.isFaceFull(state.getCollisionShape(level, pos), direction)`.
+        if !mc_bamboo_blocks::shape::is_face_full(mc_bamboo_data::collision_shape(state), direction)
+        {
+            return;
+        }
+        // `VineBlock.getPropertyForFace(direction.getOpposite())`。
+        // `VineBlock.getPropertyForFace(direction.getOpposite())`.
+        let mut vine = block_state("minecraft:vine");
+        if let Some(next) = crate::feature::state::with_property(vine, opposite, "true") {
+            vine = next;
+        }
+        self.set(neighbour, vine);
+    }
+
+    /// `maybeAddLeavesAbove(random, level, pos)`：先取 `nextFloat()`，再看方块。
+    ///
+    /// `maybeAddLeavesAbove(random, level, pos)`: the `nextFloat()` comes first, the block
+    /// checks after.
+    fn maybe_add_leaves_above(&mut self, pos: (i32, i32, i32)) {
+        if self.random.next_float() >= 0.5 {
+            return;
+        }
+        if !is_block(self.get(pos), "minecraft:netherrack") {
+            return;
+        }
+        let above = (pos.0, pos.1 + 1, pos.2);
+        if state_facts(self.get(above)) & facts::AIR == 0 {
+            return;
+        }
+        let mut leaves = block_state("minecraft:jungle_leaves");
+        if let Some(next) = crate::feature::state::with_property(leaves, "persistent", "true") {
+            leaves = next;
+        }
+        self.set(above, leaves);
+    }
 }
 
 /// `BoundingBox.getCenter()`。
@@ -270,325 +462,6 @@ fn encapsulate(bb: &mut Box, other: &Box) {
     bb[3] = bb[3].max(other[3]);
     bb[4] = bb[4].max(other[4]);
     bb[5] = bb[5].max(other[5]);
-}
-
-/// 把调用方传入的写入日志接上（对拍用）。
-///
-/// Append to the caller's write log (oracle only).
-fn log_writes(writes: &mut Vec<(i32, i32, i32, u32)>, _world: &FeatureWorld<'_>, _record: bool) {
-    let _ = writes;
-}
-
-/// `spreadNetherrack(random, level)`。
-///
-/// `spreadNetherrack(random, level)`.
-#[allow(clippy::too_many_arguments)]
-fn spread_netherrack(
-    world: &mut FeatureWorld<'_>,
-    bb: &Box,
-    placement: VerticalPlacement,
-    properties: Properties,
-    random: &WorldgenRandom,
-    writes: &mut Vec<(i32, i32, i32, u32)>,
-    record: bool,
-) {
-    let follow_ground_surface = placement == VerticalPlacement::OnLandSurface
-        || placement == VerticalPlacement::OnOceanFloor;
-    let center = box_center(bb);
-    let (center_x, center_z) = (center.0, center.2);
-    let max_distance = NETHERRACK_PROBABILITY_BY_DISTANCE.len() as i32;
-    let x_span = bb[3] - bb[0] + 1;
-    let z_span = bb[5] - bb[2] + 1;
-    let average_width = (x_span + z_span) / 2;
-    let distance_adjustment = random.next_int((8 - average_width / 2).max(1));
-
-    for x in center_x - max_distance..=center_x + max_distance {
-        for z in center_z - max_distance..=center_z + max_distance {
-            let distance = (x - center_x).abs() + (z - center_z).abs();
-            let adjusted = (distance + distance_adjustment).max(0);
-            if adjusted >= max_distance {
-                continue;
-            }
-            let probability = NETHERRACK_PROBABILITY_BY_DISTANCE[adjusted as usize];
-            if random.next_double() >= f64::from(probability) {
-                continue;
-            }
-            let surface_y = surface_y(world, x, z, placement);
-            let y = if follow_ground_surface {
-                surface_y
-            } else {
-                bb[1].min(surface_y)
-            };
-            let pos = (x, y, z);
-            if (y - bb[1]).abs() > 3 || !can_replace_by_netherrack(world, pos, placement) {
-                continue;
-            }
-            place_netherrack_or_magma(world, pos, properties, random, writes, record);
-            if properties.overgrown {
-                maybe_add_leaves_above(world, pos, random, writes, record);
-            }
-            add_netherrack_drip_column(
-                world,
-                (pos.0, pos.1 - 1, pos.2),
-                properties,
-                random,
-                writes,
-                record,
-            );
-        }
-    }
-}
-
-/// `getSurfaceY(level, x, z, verticalPlacement)`。
-///
-/// `getSurfaceY(level, x, z, verticalPlacement)`.
-fn surface_y(world: &FeatureWorld<'_>, x: i32, z: i32, placement: VerticalPlacement) -> i32 {
-    let kind = heightmap_type(placement == VerticalPlacement::OnOceanFloor);
-    world.get_height(kind, x, z) - 1
-}
-
-/// `addNetherrackDripColumnsBelowPortal(random, level)`。
-///
-/// `addNetherrackDripColumnsBelowPortal(random, level)`.
-fn add_netherrack_drip_columns(
-    world: &mut FeatureWorld<'_>,
-    bb: &Box,
-    properties: Properties,
-    random: &WorldgenRandom,
-    writes: &mut Vec<(i32, i32, i32, u32)>,
-    record: bool,
-) {
-    // 注意边界：官方是 `x < maxX`、`z < maxZ`（不含右边界）。
-    // Note the bounds: vanilla loops `x < maxX` and `z < maxZ` (exclusive).
-    for x in bb[0] + 1..bb[3] {
-        for z in bb[2] + 1..bb[5] {
-            let pos = (x, bb[1], z);
-            if is_block(world.get_block(pos.0, pos.1, pos.2), "minecraft:netherrack") {
-                add_netherrack_drip_column(
-                    world,
-                    (x, bb[1] - 1, z),
-                    properties,
-                    random,
-                    writes,
-                    record,
-                );
-            }
-        }
-    }
-}
-
-/// `addNetherrackDripColumn(random, level, pos)`：先写一格，再按 50% 概率往下延伸，最多 8 格。
-///
-/// `addNetherrackDripColumn(random, level, pos)`: write one block, then extend downward
-/// with a 50% chance per step, at most eight steps.
-fn add_netherrack_drip_column(
-    world: &mut FeatureWorld<'_>,
-    pos: (i32, i32, i32),
-    properties: Properties,
-    random: &WorldgenRandom,
-    writes: &mut Vec<(i32, i32, i32, u32)>,
-    record: bool,
-) {
-    // 官方在 `placeNetherrackOrMagma` 里用 `this.verticalPlacement` 判液体；
-    // 滴水柱没有那个上下文，用 `IN_NETHER` 之外的默认值（见汇报的疑点）。
-    // Vanilla checks `this.verticalPlacement` inside `placeNetherrackOrMagma`; the drip
-    // column has no such context here, so the default (not `IN_NETHER`) is used, see the
-    // report.
-    let mut current = pos;
-    place_netherrack_or_magma_drip(world, current, properties, None, random, writes, record);
-    let mut remaining = 8;
-    while remaining > 0 && random.next_float() < 0.5 {
-        current = (current.0, current.1 - 1, current.2);
-        remaining -= 1;
-        place_netherrack_or_magma_drip(world, current, properties, None, random, writes, record);
-    }
-}
-
-/// `placeNetherrackOrMagma(random, level, pos)`。
-///
-/// `placeNetherrackOrMagma(random, level, pos)`.
-fn place_netherrack_or_magma(
-    world: &mut FeatureWorld<'_>,
-    pos: (i32, i32, i32),
-    properties: Properties,
-    random: &WorldgenRandom,
-    writes: &mut Vec<(i32, i32, i32, u32)>,
-    record: bool,
-) {
-    place_netherrack_or_magma_drip(world, pos, properties, None, random, writes, record);
-}
-
-/// `placeNetherrackOrMagma` 的共用实现；`placement` 为 `None` 表示按「不是 IN_NETHER」处理。
-///
-/// The shared `placeNetherrackOrMagma` body; `placement = None` means "not IN_NETHER".
-fn place_netherrack_or_magma_drip(
-    world: &mut FeatureWorld<'_>,
-    pos: (i32, i32, i32),
-    properties: Properties,
-    _placement: Option<VerticalPlacement>,
-    random: &WorldgenRandom,
-    writes: &mut Vec<(i32, i32, i32, u32)>,
-    record: bool,
-) {
-    let current = world.get_block(pos.0, pos.1, pos.2);
-    if !can_replace_state(current) {
-        return;
-    }
-    let state = if !properties.cold && random.next_float() < MAGMA_INSTEAD_OF_NETHERRACK {
-        block_state("minecraft:magma_block")
-    } else {
-        block_state("minecraft:netherrack")
-    };
-    world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
-    if record {
-        writes.push((pos.0, pos.1, pos.2, state));
-    }
-}
-
-/// `canBlockBeReplacedByNetherrackOrMagma(level, pos)`。
-///
-/// `canBlockBeReplacedByNetherrackOrMagma(level, pos)`.
-fn can_replace_by_netherrack(
-    world: &FeatureWorld<'_>,
-    pos: (i32, i32, i32),
-    placement: VerticalPlacement,
-) -> bool {
-    let state = world.get_block(pos.0, pos.1, pos.2);
-    if is_block(state, "minecraft:lava") && placement != VerticalPlacement::InNether {
-        return false;
-    }
-    can_replace_state(state)
-}
-
-/// `canBlockBeReplacedByNetherrackOrMagma(BlockState)` 里与位置无关的部分。
-///
-/// The position-independent part of `canBlockBeReplacedByNetherrackOrMagma(BlockState)`.
-fn can_replace_state(state: u32) -> bool {
-    if state_facts(state) & facts::AIR != 0 {
-        return false;
-    }
-    if is_block(state, "minecraft:obsidian") {
-        return false;
-    }
-    if mc_bamboo_data::block_of_state(state).is_some_and(|block| {
-        mc_bamboo_data::block_tag("minecraft:features_cannot_replace")
-            .is_some_and(|ids| ids.contains(&(block.first_state as i32)))
-    }) {
-        return false;
-    }
-    true
-}
-
-/// `maybeAddVines(random, level, pos)`。
-///
-/// `maybeAddVines(random, level, pos)`.
-fn maybe_add_vines(
-    world: &mut FeatureWorld<'_>,
-    pos: (i32, i32, i32),
-    random: &WorldgenRandom,
-    writes: &mut Vec<(i32, i32, i32, u32)>,
-    record: bool,
-) {
-    let state = world.get_block(pos.0, pos.1, pos.2);
-    if state_facts(state) & facts::AIR != 0 || is_block(state, "minecraft:vine") {
-        return;
-    }
-    // `getRandomHorizontalDirection(random)`：`Plane.HORIZONTAL` 的 NORTH / EAST /
-    // SOUTH / WEST。
-    // `getRandomHorizontalDirection(random)`: NORTH / EAST / SOUTH / WEST of
-    // `Plane.HORIZONTAL`.
-    const HORIZONTAL: [(&str, (i32, i32)); 4] = [
-        ("north", (0, -1)),
-        ("east", (1, 0)),
-        ("south", (0, 1)),
-        ("west", (-1, 0)),
-    ];
-    let (name, (dx, dz)) = HORIZONTAL[random.next_int(4) as usize];
-    let neighbour = (pos.0 + dx, pos.1, pos.2 + dz);
-    let neighbour_state = world.get_block(neighbour.0, neighbour.1, neighbour.2);
-    if state_facts(neighbour_state) & facts::AIR == 0 {
-        return;
-    }
-    // `Block.isFaceFull(state.getCollisionShape(level, pos), direction)`。
-    // `Block.isFaceFull(state.getCollisionShape(level, pos), direction)`.
-    let opposite = match name {
-        "north" => "south",
-        "south" => "north",
-        "east" => "west",
-        _ => "east",
-    };
-    if !face_is_full(state, name) {
-        return;
-    }
-    let mut vine = block_state("minecraft:vine");
-    if let Some(next) = crate::feature::state::with_property(vine, opposite, "true") {
-        vine = next;
-    }
-    world.set_block_with_heightmaps(neighbour.0, neighbour.1, neighbour.2, vine);
-    if record {
-        writes.push((neighbour.0, neighbour.1, neighbour.2, vine));
-    }
-}
-
-/// `maybeAddLeavesAbove(random, level, pos)`。
-///
-/// `maybeAddLeavesAbove(random, level, pos)`.
-fn maybe_add_leaves_above(
-    world: &mut FeatureWorld<'_>,
-    pos: (i32, i32, i32),
-    random: &WorldgenRandom,
-    writes: &mut Vec<(i32, i32, i32, u32)>,
-    record: bool,
-) {
-    if random.next_float() >= 0.5 {
-        return;
-    }
-    if !is_block(world.get_block(pos.0, pos.1, pos.2), "minecraft:netherrack") {
-        return;
-    }
-    let above = (pos.0, pos.1 + 1, pos.2);
-    if state_facts(world.get_block(above.0, above.1, above.2)) & facts::AIR == 0 {
-        return;
-    }
-    let mut leaves = block_state("minecraft:jungle_leaves");
-    if let Some(next) = crate::feature::state::with_property(leaves, "persistent", "true") {
-        leaves = next;
-    }
-    world.set_block_with_heightmaps(above.0, above.1, above.2, leaves);
-    if record {
-        writes.push((above.0, above.1, above.2, leaves));
-    }
-}
-
-/// `Block.isFaceFull(collisionShape, direction)`：碰撞形状在这一面上的投影是否盖满整面。
-///
-/// `Block.isFaceFull(collisionShape, direction)`: whether the collision shape covers the
-/// whole face.
-fn face_is_full(state: u32, direction: &str) -> bool {
-    let boxes = mc_bamboo_data::collision_shape(state);
-    // 官方还要求形状在垂直于该面的两轴上覆盖 0..16、在方向上贴边。用轴对齐盒子近似：
-    // 只要有一个盒子的对应面是完整 16×16 就算满。
-    // Vanilla also requires the shape to span 0..16 on the two perpendicular axes and to
-    // touch the face; approximated with axis-aligned boxes: any box whose face is the full
-    // 16×16 counts.
-    boxes.iter().any(|b| match direction {
-        "north" => {
-            b.min_z <= 0.0 && b.min_x <= 0.0 && b.max_x >= 1.0 && b.min_y <= 0.0 && b.max_y >= 1.0
-        }
-        "south" => {
-            b.max_z >= 1.0 && b.min_x <= 0.0 && b.max_x >= 1.0 && b.min_y <= 0.0 && b.max_y >= 1.0
-        }
-        "east" => {
-            b.max_x >= 1.0 && b.min_z <= 0.0 && b.max_z >= 1.0 && b.min_y <= 0.0 && b.max_y >= 1.0
-        }
-        "west" => {
-            b.min_x <= 0.0 && b.min_z <= 0.0 && b.max_z >= 1.0 && b.min_y <= 0.0 && b.max_y >= 1.0
-        }
-        "up" => {
-            b.max_y >= 1.0 && b.min_x <= 0.0 && b.max_x >= 1.0 && b.min_z <= 0.0 && b.max_z >= 1.0
-        }
-        _ => b.min_y <= 0.0 && b.min_x <= 0.0 && b.max_x >= 1.0 && b.min_z <= 0.0 && b.max_z >= 1.0,
-    })
 }
 
 fn block_state(name: &str) -> u32 {

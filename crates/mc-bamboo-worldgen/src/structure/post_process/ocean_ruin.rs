@@ -11,12 +11,13 @@
 
 use crate::{
     feature::world::{FeatureWorld, HeightmapKind},
+    random::WorldgenRandom,
     structure::{
         pieces::{Box, Piece},
         template::StructureTemplate,
         template_place::{
-            IGNORE_STRUCTURE_AND_AIR, InputTest, LiquidSettings, PieceOutcome, PlaceSettings,
-            Processor, Rule, template_piece_post_process,
+            IGNORE_STRUCTURE_AND_AIR, InputTest, LiquidSettings, MarkerContext, PieceOutcome,
+            PlaceSettings, Processor, Rule, in_tag, template_piece_post_process,
         },
         templated::{MIRROR_NONE, rotation_ordinal, transform},
     },
@@ -24,13 +25,18 @@ use crate::{
 
 /// `OceanRuinPieces.OceanRuinPiece.postProcess` 的方块部分。
 ///
-/// The block part of `OceanRuinPieces.OceanRuinPiece.postProcess`.
+/// 官方每次都从 `OCEAN_FLOOR_WG` 重算 `templatePosition` 的 Y 并留在结构件上，这里对应
+/// 写回 `TPY`。`random` 是 `postProcess` 的随机源，箱子的战利品种子从它取。
+///
+/// The block part of `OceanRuinPieces.OceanRuinPiece.postProcess`. Vanilla recomputes the
+/// `templatePosition` Y from `OCEAN_FLOOR_WG` on every call and leaves it on the piece,
+/// mirrored here by writing `TPY` back. `random` is the `postProcess` random that chest
+/// loot seeds are drawn from.
 pub fn ocean_ruin(
     world: &mut FeatureWorld<'_>,
-    piece: &Piece,
+    piece: &mut Piece,
     chunk_bb: Box,
-    world_seed: i64,
-    record: bool,
+    random: &WorldgenRandom,
 ) -> Result<PieceOutcome, String> {
     let template_name = piece
         .get_str("Template")
@@ -48,7 +54,7 @@ pub fn ocean_ruin(
         extra_int(piece, "TPZ").ok_or("ocean ruin piece has no TPZ")?,
     );
     let template = StructureTemplate::load(&template_name)?;
-    let settings = settings(rotation, integrity, is_cold, world_seed);
+    let settings = settings(rotation, integrity, is_cold, world.seed);
 
     // `int height = level.getHeight(OCEAN_FLOOR_WG, templatePosition.getX(), getZ())`。
     // `int height = level.getHeight(OCEAN_FLOOR_WG, templatePosition.getX(), getZ())`.
@@ -70,48 +76,66 @@ pub fn ocean_ruin(
         first.2 + corner_local.2,
     );
     let corrected = (first.0, column_height(world, first, corner), first.2);
+    piece.put_int("TPY", corrected.1);
 
-    Ok(template_piece_post_process(
-        world, &template, corrected, &settings, chunk_bb, record,
-    ))
+    let sea_level = world.sea_level;
+    let outcome = template_piece_post_process(
+        world,
+        &template,
+        corrected,
+        &settings,
+        chunk_bb,
+        random,
+        &mut |context, metadata, pos| handle_data_marker(context, metadata, pos, sea_level),
+    );
+    piece.bb = outcome.bounding_box;
+    Ok(outcome)
 }
 
-/// `OceanRuinPiece.handleDataMarker` 写下的方块。
+/// `OceanRuinPiece.handleDataMarker`。
 ///
-/// 官方：`chest` 标记写一个 `ChestBlock`，`WATERLOGGED` 取该位置流体是否为水；
-/// `drowned` 标记在实体创建成功后才写空气 / 水，而假世界造不出实体（`create` 返回
-/// null），所以两侧都不写。
+/// `chest`：写一个箱子，`WATERLOGGED` 取该位置当时的流体是不是水，再给它设战利品表
+/// （`random.nextLong()`）。`drowned`：生成一只溺尸（实体不在这里处理，它的
+/// `finalizeSpawn` 用的是世界随机源而不是 `postProcess` 的随机源），然后把标记格换成
+/// 空气（高于海平面）或水。
 ///
-/// The blocks `OceanRuinPiece.handleDataMarker` writes. A `chest` marker becomes a chest
-/// with `WATERLOGGED` taken from the fluid at that position; a `drowned` marker only
-/// writes air / water after the entity is created, and the fake world cannot create it,
-/// so neither side writes anything there.
-pub fn marker_blocks(
-    outcome: &PieceOutcome,
-    world: &FeatureWorld<'_>,
-) -> Vec<(i32, i32, i32, u32)> {
-    let mut writes = Vec::new();
-    let Some(chest) = mc_bamboo_data::block_by_name("minecraft:chest") else {
-        return writes;
-    };
-    for (metadata, pos) in &outcome.markers {
-        if metadata != "chest" {
-            continue;
+/// `OceanRuinPiece.handleDataMarker`. `chest`: write a chest whose `WATERLOGGED` is
+/// whether the fluid there is water at that moment, then set its loot table
+/// (`random.nextLong()`). `drowned`: spawn a drowned (the entity is not handled here; its
+/// `finalizeSpawn` uses the level random, not the `postProcess` one), then turn the
+/// marker cell into air (above sea level) or water.
+fn handle_data_marker(
+    context: &mut MarkerContext<'_, '_, '_>,
+    metadata: &str,
+    pos: (i32, i32, i32),
+    sea_level: i32,
+) {
+    match metadata {
+        "chest" => {
+            let fluid = mc_bamboo_data::state_fluid(context.world.get_block(pos.0, pos.1, pos.2));
+            let water = fluid.fluid == mc_bamboo_data::registries::fluid::WATER
+                || fluid.fluid == mc_bamboo_data::registries::fluid::FLOWING_WATER;
+            let mut state = mc_bamboo_data::blocks::CHEST;
+            if let Some(next) = crate::feature::state::with_property(
+                state,
+                "waterlogged",
+                if water { "true" } else { "false" },
+            ) {
+                state = next;
+            }
+            context.set_block(pos, state);
+            context.seed_chest_loot_table(pos);
         }
-        let fluid = mc_bamboo_data::state_fluid(world.get_block(pos.0, pos.1, pos.2));
-        let water = fluid.fluid == mc_bamboo_data::registries::fluid::WATER
-            || fluid.fluid == mc_bamboo_data::registries::fluid::FLOWING_WATER;
-        let mut state = chest.default_state;
-        if let Some(next) = crate::feature::state::with_property(
-            state,
-            "waterlogged",
-            if water { "true" } else { "false" },
-        ) {
-            state = next;
+        "drowned" => {
+            let state = if pos.1 > sea_level {
+                mc_bamboo_data::blocks::AIR
+            } else {
+                mc_bamboo_data::blocks::WATER
+            };
+            context.set_block(pos, state);
         }
-        writes.push((pos.0, pos.1, pos.2, state));
+        _ => {}
     }
-    writes
 }
 
 /// `OceanRuinPiece.makeSettings(rotation, integrity, biomeType)`。
@@ -122,15 +146,7 @@ fn settings(rotation: i32, integrity: f32, is_cold: bool, world_seed: i64) -> Pl
     // `(Blocks.GRAVEL, Blocks.SUSPICIOUS_GRAVEL, ...)`（冷水），外面包一层
     // `CappedProcessor(..., ConstantInt.of(5))`。
     //
-    // **本对拍的 Capped 被两侧同时跳过**：`CappedProcessor.finalizeProcessing` 需要
-    // `level.getLevel().getSeed()`，而 `ServerLevel` 是类、假世界造不出来（见 oracle 的
-    // `serverLevelProxy`）。为了让两侧语义一致，这里也把 `Capped` 关掉，只做 `Rule`。
-    // 这是已知未验证项，见汇报。
-    //
     // `archyRuleProcessor(...)` wrapped in `CappedProcessor(..., ConstantInt.of(5))`.
-    // **This oracle skips the cap on both sides**: `finalizeProcessing` needs
-    // `level.getLevel().getSeed()` and `ServerLevel` cannot be faked. The `Capped` wrapper
-    // is therefore off here too, leaving only the `Rule`. Known unverified, see the report.
     let (from, to) = if is_cold {
         ("minecraft:gravel", "minecraft:suspicious_gravel")
     } else {
@@ -182,8 +198,7 @@ fn column_height(world: &FeatureWorld<'_>, pos: (i32, i32, i32), corner: (i32, i
                 let is_air = mc_bamboo_data::state_facts(state) & mc_bamboo_data::facts::AIR != 0;
                 let is_water = fluid.fluid == mc_bamboo_data::registries::fluid::WATER
                     || fluid.fluid == mc_bamboo_data::registries::fluid::FLOWING_WATER;
-                let is_ice = mc_bamboo_data::block_of_state(state)
-                    .is_some_and(|block| block.name == "minecraft:ice");
+                let is_ice = in_tag(state, "minecraft:ice");
                 if !(is_air || is_water || is_ice) || floor_y <= world.min_y + 1 {
                     break;
                 }
@@ -200,26 +215,6 @@ fn column_height(world: &FeatureWorld<'_>, pos: (i32, i32, i32), corner: (i32, i
         new_y = min_y + 1;
     }
     new_y
-}
-
-/// 数据标记的类型。
-///
-/// The data-marker kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Marker {
-    Chest,
-    Drowned,
-}
-
-/// `OceanRuinPiece.handleDataMarker` 的分支判定。
-///
-/// The branch `OceanRuinPiece.handleDataMarker` takes.
-pub fn marker(metadata: &str) -> Option<Marker> {
-    match metadata {
-        "chest" => Some(Marker::Chest),
-        "drowned" => Some(Marker::Drowned),
-        _ => None,
-    }
 }
 
 fn extra_int(piece: &Piece, key: &str) -> Option<i32> {

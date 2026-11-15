@@ -223,10 +223,17 @@ pub fn ordered_blocks(template: &StructureTemplate, palette: usize) -> Vec<usize
         let Some(entry) = template.palettes[palette].get(block.state) else {
             continue;
         };
-        let Some(block_def) = mc_bamboo_data::block_by_name(&entry.name) else {
+        let Some(state) = state_of(entry) else {
             continue;
         };
-        let is_full = state_facts(block_def.default_state) & facts::COLLISION_FULL_BLOCK != 0;
+        // `addToLists`：`!hasDynamicShape() && isCollisionShapeFullBlock`，看的是这一格的
+        // **实际状态**（双层台阶是整方块，单层不是），不是方块的默认状态。
+        // `addToLists`: `!hasDynamicShape() && isCollisionShapeFullBlock`, evaluated on the
+        // **actual state** (a double slab is a full block, a single one is not), not on the
+        // block's default state.
+        let dynamic =
+            mc_bamboo_data::block_of_state(state).is_some_and(|block| block.dynamic_shape);
+        let is_full = !dynamic && state_facts(state) & facts::COLLISION_FULL_BLOCK != 0;
         if is_full {
             full.push(index);
         } else {
@@ -248,10 +255,10 @@ pub fn ordered_blocks(template: &StructureTemplate, palette: usize) -> Vec<usize
 ///
 /// The outcome of one placement.
 pub struct Placed {
-    /// 真正写下的方块，给对拍用；`None` 表示不记录。
+    /// 真正写下的方块，按官方的写入顺序。
     ///
-    /// The blocks actually written, for the oracle; `None` disables recording.
-    pub writes: Option<Vec<(i32, i32, i32, u32)>>,
+    /// The blocks actually written, in vanilla's write order.
+    pub writes: Vec<BlockWrite>,
     /// 带方块实体的位置（模板里带 nbt 的方块写完就是方块实体）。
     ///
     /// Positions holding a block entity (a template block with nbt becomes one).
@@ -270,7 +277,6 @@ pub fn place_in_world(
     position: (i32, i32, i32),
     settings: &PlaceSettings,
     random: &WorldgenRandom,
-    record: bool,
 ) -> Option<Placed> {
     if template.palettes.is_empty() {
         return None;
@@ -281,7 +287,7 @@ pub fn place_in_world(
     let blocks = ordered_blocks(template, palette);
     if blocks.is_empty() || template.size.0 < 1 || template.size.1 < 1 || template.size.2 < 1 {
         return Some(Placed {
-            writes: record.then_some(writes),
+            writes,
             block_entities,
         });
     }
@@ -362,6 +368,17 @@ pub fn place_in_world(
     let mut to_fill: Vec<(i32, i32, i32)> = Vec::new();
     let mut placed_positions: Vec<(i32, i32, i32)> = Vec::new();
     for (pos, state, has_nbt) in processed {
+        // `if (boundingBox == null || boundingBox.isInside(blockPos))`：有
+        // `CappedProcessor` 时 `processBlockInfos` 不按 `chunkBB` 过滤，但写入这一步
+        // 永远只写盒内的方块。
+        // `if (boundingBox == null || boundingBox.isInside(blockPos))`: with a
+        // `CappedProcessor` `processBlockInfos` skips the `chunkBB` filter, yet the write
+        // step always stays inside the box.
+        if let Some(bb) = &settings.chunk_bb
+            && !inside(bb, pos)
+        {
+            continue;
+        }
         let previous_fluid = (settings.liquid == LiquidSettings::ApplyWaterlogging)
             .then(|| *mc_bamboo_data::state_fluid(world.get_block(pos.0, pos.1, pos.2)));
         let state = mirror_rotate(state, settings);
@@ -369,14 +386,26 @@ pub fn place_in_world(
             // `level.setBlock(blockPos, Blocks.BARRIER, 820)`：给方块实体占位。
             // `level.setBlock(blockPos, Blocks.BARRIER, 820)`: a placeholder for the
             // block entity.
-            write(world, pos, blocks::BARRIER, &mut writes, record);
+            write(world, pos, blocks::BARRIER, &mut writes);
         }
-        if !write(world, pos, state, &mut writes, record) {
+        if !write(world, pos, state, &mut writes) {
             continue;
         }
         placed_positions.push(pos);
         if has_nbt {
             block_entities.push(pos);
+            // `level.getBlockEntity(blockPos)` 在 `WorldGenRegion` 里会按 `setBlock` 留下的
+            // DUMMY nbt 现造方块实体；它是 `RandomizableContainer` 时官方取一次
+            // `random.nextLong()` 当 `LootTableSeed`。这一次取数必须发生，后面的
+            // `spreadNetherrack` 等用的是同一个随机源。
+            // `level.getBlockEntity(blockPos)` in a `WorldGenRegion` creates the block
+            // entity from the DUMMY nbt `setBlock` left; when it is a
+            // `RandomizableContainer` vanilla draws one `random.nextLong()` as the
+            // `LootTableSeed`. The draw must happen: `spreadNetherrack` and friends share
+            // this random.
+            if is_randomizable_container(state) {
+                random.next_long();
+            }
         }
         if let Some(previous) = previous_fluid {
             let new_fluid = mc_bamboo_data::state_fluid(state);
@@ -385,7 +414,7 @@ pub fn place_in_world(
             } else if can_hold_liquid(state) {
                 if previous.source {
                     if let Some(filled) = waterlog(state, &previous) {
-                        write(world, pos, filled, &mut writes, record);
+                        write(world, pos, filled, &mut writes);
                     }
                 } else {
                     to_fill.push(pos);
@@ -394,7 +423,7 @@ pub fn place_in_world(
         }
     }
 
-    fill_fluids(world, &mut to_fill, &locked_fluids, &mut writes, record);
+    fill_fluids(world, &mut to_fill, &locked_fluids, &mut writes);
     // `updateShapeAtEdge`：对写入形状的每个外表面，让两侧方块各做一次 `updateShape`。
     // `updateShapeAtEdge`: run `updateShape` on both sides of every outer face of the
     // written shape.
@@ -420,13 +449,12 @@ pub fn place_in_world(
             let state = world.get_block(pos.0, pos.1, pos.2);
             let new_state = crate::feature::shape_update::update_from_neighbour_shapes(world, *pos);
             if new_state != state {
-                write(world, *pos, new_state, &mut writes, record);
+                write(world, *pos, new_state, &mut writes);
             }
         }
     }
-    let _ = random;
     Some(Placed {
-        writes: record.then_some(writes),
+        writes,
         block_entities,
     })
 }
@@ -439,8 +467,7 @@ fn fill_fluids(
     world: &mut FeatureWorld<'_>,
     to_fill: &mut Vec<(i32, i32, i32)>,
     locked: &[(i32, i32, i32)],
-    writes: &mut Vec<(i32, i32, i32, u32)>,
-    record: bool,
+    writes: &mut Vec<BlockWrite>,
 ) {
     const ORDER: [(i32, i32, i32); 5] = [(0, 1, 0), (0, 0, -1), (1, 0, 0), (0, 0, 1), (-1, 0, 0)];
     let mut filled = true;
@@ -460,7 +487,7 @@ fn fill_fluids(
                 if fluid.source && !locked.contains(&neighbour) {
                     let state = world.get_block(pos.0, pos.1, pos.2);
                     if let Some(wet) = waterlog(state, fluid) {
-                        write(world, pos, wet, writes, record);
+                        write(world, pos, wet, writes);
                         placed = true;
                     }
                     break;
@@ -556,67 +583,128 @@ pub fn heightmap_type(ocean_floor: bool) -> HeightmapKind {
     }
 }
 
+/// 一次方块写入：`(x, y, z, 状态)`。
+///
+/// One block write: `(x, y, z, state)`.
+pub type BlockWrite = (i32, i32, i32, u32);
+
 /// 一个 `TemplateStructurePiece.postProcess` 的结果。
 ///
 /// The result of one `TemplateStructurePiece.postProcess`.
 pub struct PieceOutcome {
-    /// 放置结果；模板没有 palette 时是 `None`（官方的 `placeInWorld` 返回 false）。
+    /// `placeInWorld` 是否成功（模板没有 palette 时官方返回 false）。
     ///
-    /// The placement outcome; `None` when the template has no palette (vanilla
-    /// `placeInWorld` returns false).
-    pub placed: Option<Placed>,
-    /// 数据标记：`(metadata, 位置)`，顺序照 `filterBlocks`。
+    /// Whether `placeInWorld` succeeded (vanilla returns false without a palette).
+    pub placed: bool,
+    /// 按官方顺序写下的全部方块：模板放置、数据标记、拼图替换，以及各结构在
+    /// `super.postProcess` 之后追加的方块。
     ///
-    /// Data markers as `(metadata, position)`, in `filterBlocks` order.
-    pub markers: Vec<(String, (i32, i32, i32))>,
-    /// 拼图方块被替换成的状态（`(位置, 状态)`），写完即生效。
+    /// Every block written, in vanilla order: template placement, data markers, jigsaw
+    /// replacement, plus whatever a structure appends after `super.postProcess`.
+    pub writes: Vec<BlockWrite>,
+    /// 带方块实体的位置（模板里带 nbt 的方块）。
     ///
-    /// The states the jigsaw blocks were replaced with as `(position, state)`.
-    pub jigsaw_writes: Vec<((i32, i32, i32), u32)>,
+    /// Positions holding a block entity (template blocks carrying nbt).
+    pub block_entities: Vec<(i32, i32, i32)>,
     /// 放置后的包围盒（官方 `placeInWorld` 之前重算的那一次）。
     ///
     /// The bounding box recomputed just before `placeInWorld`.
     pub bounding_box: Box,
-    /// 放置后的模板位置（`postProcess` 之后 `templatePosition` 的值）。
+    /// 这次放置用的模板位置。
     ///
-    /// The template position after `postProcess`.
+    /// The template position this placement used.
     pub template_position: (i32, i32, i32),
 }
+
+/// `handleDataMarker` 能碰到的东西：世界、`postProcess` 的随机源、写入日志。
+///
+/// What a `handleDataMarker` body may touch: the world, the `postProcess` random and the
+/// write log.
+pub struct MarkerContext<'w, 'a, 'r> {
+    pub world: &'w mut FeatureWorld<'a>,
+    pub random: &'r WorldgenRandom,
+    pub writes: &'w mut Vec<BlockWrite>,
+}
+
+impl MarkerContext<'_, '_, '_> {
+    /// `level.setBlock(pos, state, flags)`，并记进写入日志。
+    ///
+    /// `level.setBlock(pos, state, flags)`, recorded in the write log.
+    pub fn set_block(&mut self, pos: (i32, i32, i32), state: u32) -> bool {
+        write(self.world, pos, state, self.writes)
+    }
+
+    /// `RandomizableContainer.setBlockEntityLootTable(level, random, pos, table)` 的取数：
+    /// `pos` 上是 `RandomizableContainer` 的方块实体时取一次 `random.nextLong()`。
+    ///
+    /// The draw of `RandomizableContainer.setBlockEntityLootTable(level, random, pos,
+    /// table)`: one `random.nextLong()` when `pos` holds a `RandomizableContainer`.
+    pub fn seed_loot_table(&mut self, pos: (i32, i32, i32)) {
+        if is_randomizable_container(self.world.get_block(pos.0, pos.1, pos.2)) {
+            self.random.next_long();
+        }
+    }
+
+    /// `if (level.getBlockEntity(pos) instanceof ChestBlockEntity chest)
+    /// chest.setLootTable(table, random.nextLong())` 的取数。
+    ///
+    /// The draw of `if (level.getBlockEntity(pos) instanceof ChestBlockEntity chest)
+    /// chest.setLootTable(table, random.nextLong())`.
+    pub fn seed_chest_loot_table(&mut self, pos: (i32, i32, i32)) {
+        if is_chest(self.world.get_block(pos.0, pos.1, pos.2)) {
+            self.random.next_long();
+        }
+    }
+}
+
+/// 子类的 `handleDataMarker(metadata, pos, level, random, chunkBB)`。
+///
+/// A subclass's `handleDataMarker(metadata, pos, level, random, chunkBB)`.
+pub type MarkerHandler<'h> = dyn FnMut(&mut MarkerContext<'_, '_, '_>, &str, (i32, i32, i32)) + 'h;
 
 /// `TemplateStructurePiece.postProcess`：重算包围盒、放模板、跑数据标记和拼图替换。
 ///
 /// 官方顺序：`placeSettings.setBoundingBox(chunkBB)` → 重算 `boundingBox` →
 /// `template.placeInWorld(...)`；只有放置成功（有 palette）才处理数据标记和拼图方块。
+/// `random` 是 `postProcess` 收到的那个随机源：箱子的 `LootTableSeed` 从它取数。
+/// `handle_marker` 是子类的 `handleDataMarker(metadata, pos, ...)`。
 ///
 /// Vanilla order: `placeSettings.setBoundingBox(chunkBB)`, recompute the box, then
 /// `template.placeInWorld(...)`; data markers and jigsaw replacement only run when the
-/// placement succeeded (the template has a palette).
+/// placement succeeded (the template has a palette). `random` is the one `postProcess`
+/// received: chest `LootTableSeed`s are drawn from it. `handle_marker` is the subclass's
+/// `handleDataMarker(metadata, pos, ...)`.
 pub fn template_piece_post_process(
     world: &mut FeatureWorld<'_>,
     template: &StructureTemplate,
     template_position: (i32, i32, i32),
     settings: &PlaceSettings,
     chunk_bb: Box,
-    record: bool,
+    random: &WorldgenRandom,
+    handle_marker: &mut MarkerHandler<'_>,
 ) -> PieceOutcome {
     let mut settings = settings.clone();
     settings.chunk_bb = Some(chunk_bb);
     let bounding_box = template_box(template, &settings, template_position);
-    let random = position_random(template_position);
-    let placed = place_in_world(
-        world,
-        template,
-        template_position,
-        &settings,
-        &random,
-        record,
-    );
+    let placed = place_in_world(world, template, template_position, &settings, random);
 
-    let mut markers = Vec::new();
-    let mut jigsaw_writes = Vec::new();
-    if placed.is_some() {
+    let mut outcome = PieceOutcome {
+        placed: placed.is_some(),
+        writes: Vec::new(),
+        block_entities: Vec::new(),
+        bounding_box,
+        template_position,
+    };
+    if let Some(placed) = placed {
+        outcome.writes = placed.writes;
+        outcome.block_entities = placed.block_entities;
         for (metadata, pos) in data_markers(template, template_position, &settings) {
-            markers.push((metadata, pos));
+            let mut context = MarkerContext {
+                world: &mut *world,
+                random,
+                writes: &mut outcome.writes,
+            };
+            handle_marker(&mut context, &metadata, pos);
         }
         for (pos, entry) in
             filter_blocks(template, template_position, &settings, "minecraft:jigsaw")
@@ -624,20 +712,13 @@ pub fn template_piece_post_process(
             let Some(entry) = entry else { continue };
             let final_state =
                 string_field(entry, "final_state").unwrap_or_else(|| "minecraft:air".to_owned());
-            if let Some(state) = state_from_text(&final_state) {
-                world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
-                jigsaw_writes.push((pos, state));
-            }
+            // 解析失败时官方只打日志，仍然写默认的空气。
+            // On a parse failure vanilla only logs and still writes the default air.
+            let state = state_from_text(&final_state).unwrap_or(blocks::AIR);
+            write(world, pos, state, &mut outcome.writes);
         }
     }
-
-    PieceOutcome {
-        placed,
-        markers,
-        jigsaw_writes,
-        bounding_box,
-        template_position,
-    }
+    outcome
 }
 
 /// `TemplateStructurePiece.postProcess` 里数据标记的方块效果。
@@ -781,8 +862,7 @@ fn write(
     world: &mut FeatureWorld<'_>,
     pos: (i32, i32, i32),
     state: u32,
-    writes: &mut Vec<(i32, i32, i32, u32)>,
-    record: bool,
+    writes: &mut Vec<BlockWrite>,
 ) -> bool {
     // 官方走 `ProtoChunk.setBlockState`，它会对 `getPersistedStatus().heightmapsAfter()`
     // （`FEATURES` 阶段是四种 FINAL 高度图）做增量更新。`StructureStart.placeInChunk` 对
@@ -793,7 +873,7 @@ fn write(
     // `placeInChunk` calls `postProcess` once per chunk of the 3×3, and later chunks use
     // `getHeight` to adjust Y, so the heightmaps must be updated here.
     let written = world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
-    if written && record {
+    if written {
         writes.push((pos.0, pos.1, pos.2, state));
     }
     written
@@ -834,13 +914,40 @@ pub fn state_of(entry: &crate::structure::template::PaletteEntry) -> Option<u32>
     Some(state)
 }
 
-/// `BlockState.hasBlockEntity()`：模板里带 nbt 的方块一定属于这一类，这里只用于
-/// 判断 `RandomizableContainer`（箱子、木桶……）。
+/// 方块实体是不是 `RandomizableContainer`：箱子、陷阱箱、木桶、发射器、投掷器、漏斗、
+/// 潜影盒、合成器（都继承 `RandomizableContainerBlockEntity`）和饰纹陶罐。
 ///
-/// `BlockState.hasBlockEntity()`: used to recognise `RandomizableContainer` blocks
-/// (chests, barrels, ...).
-pub fn has_block_entity(state: u32) -> bool {
-    mc_bamboo_data::block_of_state(state).is_some_and(|block| block.block_entity_type.is_some())
+/// Whether the block entity is a `RandomizableContainer`: chest, trapped chest, barrel,
+/// dispenser, dropper, hopper, shulker box, crafter (all extend
+/// `RandomizableContainerBlockEntity`) and the decorated pot.
+pub fn is_randomizable_container(state: u32) -> bool {
+    use mc_bamboo_data::registries::block_entity_type as kind;
+    mc_bamboo_data::block_of_state(state)
+        .and_then(|block| block.block_entity_type)
+        .is_some_and(|id| {
+            [
+                kind::CHEST,
+                kind::TRAPPED_CHEST,
+                kind::BARREL,
+                kind::DISPENSER,
+                kind::DROPPER,
+                kind::HOPPER,
+                kind::SHULKER_BOX,
+                kind::CRAFTER,
+                kind::DECORATED_POT,
+            ]
+            .contains(&id)
+        })
+}
+
+/// 方块实体是不是 `ChestBlockEntity`（箱子或陷阱箱）。
+///
+/// Whether the block entity is a `ChestBlockEntity` (chest or trapped chest).
+pub fn is_chest(state: u32) -> bool {
+    use mc_bamboo_data::registries::block_entity_type as kind;
+    mc_bamboo_data::block_of_state(state)
+        .and_then(|block| block.block_entity_type)
+        .is_some_and(|id| id == kind::CHEST || id == kind::TRAPPED_CHEST)
 }
 
 /// 方块能不能装液体（`LiquidBlockContainer` 的近似：属性表里带 `waterlogged`）。
@@ -870,7 +977,22 @@ fn waterlog(state: u32, fluid: &mc_bamboo_data::FluidFacts) -> Option<u32> {
     if property_of(state, "waterlogged").as_deref() == Some("true") {
         return None;
     }
-    crate::feature::state::with_property(state, "waterlogged", "true")
+    // `SlabBlock.placeLiquid`：双层台阶不进水（`TYPE != DOUBLE` 才走默认实现）。
+    // `SlabBlock.placeLiquid`: a double slab takes no water (only `TYPE != DOUBLE` reaches
+    // the default body).
+    if in_tag(state, "minecraft:slabs") && property_of(state, "type").as_deref() == Some("double") {
+        return None;
+    }
+    let mut wet = crate::feature::state::with_property(state, "waterlogged", "true")?;
+    // `CampfireBlock.placeLiquid` / `CandleBlock.placeLiquid`：进水的同时熄火。
+    // `CampfireBlock.placeLiquid` / `CandleBlock.placeLiquid`: waterlogging also puts the
+    // flame out.
+    if property_of(wet, "lit").as_deref() == Some("true")
+        && let Some(doused) = crate::feature::state::with_property(wet, "lit", "false")
+    {
+        wet = doused;
+    }
+    Some(wet)
 }
 
 impl Processor {
@@ -917,7 +1039,10 @@ impl Processor {
             Processor::LavaSubmerged => {
                 let was_lava = block_name(world.get_block(pos.0, pos.1, pos.2))
                     .is_some_and(|name| name == "minecraft:lava");
-                let full = state_facts(state) & facts::COLLISION_FULL_BLOCK != 0;
+                // `Block.isShapeFullBlock(state.getShape(level, pos))`：看的是轮廓形状。
+                // `Block.isShapeFullBlock(state.getShape(level, pos))`: the outline shape.
+                let full =
+                    mc_bamboo_blocks::shape::is_full_block(mc_bamboo_data::outline_shape(state));
                 if was_lava && !full {
                     Some(block_state("minecraft:lava"))
                 } else {
@@ -1131,7 +1256,7 @@ fn property_of(state: u32, name: &str) -> Option<String> {
 /// 方块是否属于某个方块标签。
 ///
 /// Whether the state's block belongs to a block tag.
-fn in_tag(state: u32, tag: &str) -> bool {
+pub fn in_tag(state: u32, tag: &str) -> bool {
     let Some(ids) = mc_bamboo_data::block_tag(tag) else {
         return false;
     };
