@@ -39,22 +39,27 @@ pub fn template_blocks(
     palette: &[PaletteEntry],
     piece_position: (i32, i32, i32),
     transform: impl Fn((i32, i32, i32)) -> (i32, i32, i32),
-) -> Result<Vec<ProcessBlock>, String> {
+) -> Result<Vec<(ProcessBlock, bool)>, String> {
     let mut blocks = Vec::with_capacity(template.blocks.len());
     for block in &template.blocks {
         let entry = palette
             .get(block.state)
             .ok_or_else(|| format!("palette index {palette_index} has no state {}", block.state))?;
         let local = transform(block.pos);
-        blocks.push(ProcessBlock {
-            pos: block.pos,
-            world_pos: (
-                local.0 + piece_position.0,
-                local.1 + piece_position.1,
-                local.2 + piece_position.2,
-            ),
-            state: BlockStateSpec::from_palette_entry(entry),
-        });
+        blocks.push((
+            ProcessBlock {
+                pos: block.pos,
+                world_pos: (
+                    local.0 + piece_position.0,
+                    local.1 + piece_position.1,
+                    local.2 + piece_position.2,
+                ),
+                state: BlockStateSpec::from_palette_entry(entry),
+            },
+            // `blockInfo.nbt != null`：官方在写这个方块前先放一个 `BARRIER`。
+            // `blockInfo.nbt != null`: vanilla writes a `BARRIER` first.
+            block.nbt.is_some(),
+        ));
     }
     Ok(blocks)
 }
@@ -112,14 +117,52 @@ fn properties_text(properties: &[(String, String)]) -> String {
         .join(",")
 }
 
+/// 一个待写方块附带的信息：是否有 nbt（官方会用 `BARRIER` 占位）。
+///
+/// Per-block extras: whether the block carries nbt (vanilla writes a `BARRIER` first).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlaceBlock {
+    pub pos: (i32, i32, i32),
+    pub state: BlockStateSpec,
+    /// `blockInfo.nbt != null`：官方先写 `Blocks.BARRIER` 再写真正的方块。
+    ///
+    /// `blockInfo.nbt != null`: vanilla writes `Blocks.BARRIER` before the real block.
+    pub has_nbt: bool,
+}
+
+/// `StructureTemplate.calculateRelativePosition(settings, pos)`：`transform(pos, mirror,
+/// rotation, pivot)`，pivot 默认 `BlockPos.ZERO`。位置变换**包含 mirror**（`LEFT_RIGHT`
+/// 取反 Z、`FRONT_BACK` 取反 X，再按 rotation 转）。
+///
+/// `StructureTemplate.calculateRelativePosition(settings, pos)`: `transform(pos, mirror,
+/// rotation, pivot)` with the default zero pivot. The position transform **includes the
+/// mirror** (`LEFT_RIGHT` negates Z, `FRONT_BACK` negates X) before the rotation.
+pub fn relative_position(pos: (i32, i32, i32), mirror: u32, rotation: u32) -> (i32, i32, i32) {
+    let (mut x, y, mut z) = pos;
+    // `Mirror.values()` 顺序是 NONE / LEFT_RIGHT / FRONT_BACK。
+    // `Mirror.values()` order is NONE / LEFT_RIGHT / FRONT_BACK.
+    match mirror {
+        1 => z = -z,
+        2 => x = -x,
+        _ => {}
+    }
+    match rotation {
+        1 => (-z, y, x),
+        2 => (-x, y, -z),
+        3 => (z, y, -x),
+        _ => (x, y, z),
+    }
+}
+
 /// 官方 `StructureTemplate.placeInWorld` 的方块写入循环（processor 已跑完的那部分）：
 /// 对每个处理后的方块做 `state.mirror(...).rotate(...)` 并写进世界，只写落在 `chunk_bb`
-/// 内的位置。
+/// 内的位置；带 nbt 的方块先写一个 `BARRIER`。
 ///
 /// The block-write loop of `StructureTemplate.placeInWorld` after processors have run:
-/// mirror then rotate each state and write it, skipping positions outside `chunk_bb`.
+/// mirror then rotate each state and write it, skipping positions outside `chunk_bb`, and
+/// write a `BARRIER` first when the block carries nbt.
 pub fn place_processed(
-    processed: &[ProcessBlock],
+    processed: &[PlaceBlock],
     chunk_bb: crate::structure::BoundingBox,
     mirror: u32,
     rotation: u32,
@@ -127,29 +170,37 @@ pub fn place_processed(
 ) -> Result<usize, String> {
     let mut written = 0;
     for block in processed {
-        let pos = block.world_pos;
-        if !(chunk_bb.min_x <= pos.0
-            && pos.0 <= chunk_bb.max_x
-            && chunk_bb.min_y <= pos.1
-            && pos.1 <= chunk_bb.max_y
-            && chunk_bb.min_z <= pos.2
-            && pos.2 <= chunk_bb.max_z)
-        {
+        let pos = block.pos;
+        if !chunk_bb.contains(pos.0, pos.1, pos.2) {
             continue;
         }
-        let mut state = state_id_of(&block.state)?;
+        let state = state_id_of(&block.state)?;
         // `BlockState.mirror(...).rotate(...)`，与 `StructureTemplate.placeInWorld` 同序。
         // `BlockState.mirror(...).rotate(...)`, same order as vanilla.
+        let mut state_out = state;
         if mirror > 0 {
-            state = mc_bamboo_data::state_mirror(state, mirror);
+            state_out = mc_bamboo_data::state_mirror(state_out, mirror);
         }
         if rotation > 0 {
-            state = mc_bamboo_data::state_rotation(state, rotation);
+            state_out = mc_bamboo_data::state_rotation(state_out, rotation);
         }
-        world.set_block(pos.0, pos.1, pos.2, state);
+        // `if (blockInfo.nbt != null) level.setBlock(blockPos, Blocks.BARRIER..., 820);`
+        if block.has_nbt {
+            world.set_block(pos.0, pos.1, pos.2, barrier_state());
+        }
+        world.set_block(pos.0, pos.1, pos.2, state_out);
         written += 1;
     }
     Ok(written)
+}
+
+/// `Blocks.BARRIER.defaultBlockState()` 的状态 id。
+///
+/// The state id of `Blocks.BARRIER.defaultBlockState()`.
+fn barrier_state() -> u32 {
+    mc_bamboo_data::block_by_name("minecraft:barrier")
+        .map(|block| block.default_state)
+        .unwrap_or(0)
 }
 
 /// 写入方块的最小接口（`FeatureWorld` 与测试假世界都实现它）。
@@ -175,7 +226,6 @@ pub fn place_piece<L: ProcessorLevel>(
     processors: &[Processor],
     level: &L,
     settings: PlaceSettings<'_>,
-    transform: impl Fn((i32, i32, i32)) -> (i32, i32, i32),
     mirror: u32,
     rotation: u32,
     chunk_bb: crate::structure::BoundingBox,
@@ -190,9 +240,28 @@ pub fn place_piece<L: ProcessorLevel>(
         .palettes
         .get(palette_index)
         .ok_or("palette index out of range")?;
-    let blocks = template_blocks(template, palette_index, palette, piece_position, transform)?;
-    let processed = process_blocks(processors, &blocks, level, settings);
-    place_processed(&processed, chunk_bb, mirror, rotation, world)
+    let blocks = template_blocks(template, palette_index, palette, piece_position, |pos| {
+        relative_position(pos, mirror, rotation)
+    })?;
+    let nbt_positions: std::collections::HashSet<(i32, i32, i32)> = blocks
+        .iter()
+        .filter(|(_, has_nbt)| *has_nbt)
+        .map(|(block, _)| block.world_pos)
+        .collect();
+    let plain: Vec<ProcessBlock> = blocks.into_iter().map(|(block, _)| block).collect();
+    let processed = process_blocks(processors, &plain, level, settings);
+    let place: Vec<PlaceBlock> = processed
+        .into_iter()
+        .map(|block| PlaceBlock {
+            // 官方用处理后的位置查 `blockInfo.nbt`：processor 会改写状态但保留 nbt。
+            // Vanilla looks the nbt up on the processed info: processors rewrite the state
+            // but keep the nbt.
+            has_nbt: nbt_positions.contains(&block.world_pos),
+            pos: block.world_pos,
+            state: block.state,
+        })
+        .collect();
+    place_processed(&place, chunk_bb, mirror, rotation, world)
 }
 
 /// 供调试与日志用：`minecraft:x` 形式的方块名（不含属性）。
@@ -330,7 +399,6 @@ mod tests {
                 level_seed: 0,
                 explicit_random: None,
             },
-            |pos| pos,
             0,
             0,
             chunk_bb,

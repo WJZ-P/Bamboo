@@ -95,6 +95,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "apply" => run_apply(command, work_dir),
         "capped" => run_capped(command, work_dir),
         "cappedfull" => run_capped_full(command, work_dir),
+        "placepiece" => run_place_piece(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
@@ -1819,6 +1820,200 @@ fn compare_capped_full(
         ));
     }
     println!("jigsaw cappedfull: {checked} queries, {blocks_checked} blocks, all identical");
+    Ok(())
+}
+
+/// `placepiece` 模式：官方 `StructureTemplate.placeInWorld` 对
+/// `mc_bamboo_worldgen::structure::jigsaw::place::place_piece`，逐写入比。
+///
+/// `placepiece` mode: official `StructureTemplate.placeInWorld` against
+/// `mc_bamboo_worldgen::structure::jigsaw::place::place_piece`, compared write by write.
+fn run_place_piece(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    // 只挑单 palette 的模板：`getRandomPalette` 在这轮不是重点（已由 `jigsaw jigsaws` 覆盖），
+    // 而多 palette 会让每个查询的期望值依赖位置随机。
+    // Only single-palette templates: `getRandomPalette` is covered by `jigsaw jigsaws`, and
+    // multi-palette templates would make each expectation depend on the position roll.
+    let mut names: Vec<String> = blob::ENTRIES
+        .iter()
+        .filter(|(name, _, _)| {
+            StructureTemplate::load(name)
+                .is_ok_and(|t| t.palettes.len() == 1 && !t.blocks.is_empty())
+        })
+        .map(|(name, _, _)| (*name).to_owned())
+        .collect();
+    names.sort();
+    // 每 20 个取一个，控制规模。
+    // Take every 20th to keep the run small.
+    let picked: Vec<String> = names.iter().step_by(20).cloned().collect();
+
+    let mut queries = Vec::new();
+    for name in &picked {
+        for (mirror, rotation) in [(0_u32, 0_u32), (0, 1), (1, 2)] {
+            let (sx, sy, sz) = StructureTemplate::load(name)
+                .map_err(|error| format!("cannot load {name}: {error}"))?
+                .size;
+            // 旋转会把模板相对坐标变成负值（90 度时映射成 (-z, y, x)），所以盒要跨正负两侧。
+            // Rotations turn template positions negative (90 degrees maps to (-z, y, x)), so
+            // the box must straddle zero.
+            let span = sx.max(sz) + 1;
+            let bb = (-span, 0, -span, span, sy + 1, span);
+            queries.push(format!(
+                "{name}|0|0|0|{mirror}|{rotation}|{}|{}|{}|{}|{}|{}|minecraft:air",
+                bb.0, bb.1, bb.2, bb.3, bb.4, bb.5
+            ));
+        }
+    }
+    let queries_path = work_dir.join("jigsaw_place_piece_queries.txt");
+    fs::write(&queries_path, queries.join("\n"))
+        .map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("placepiece")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_place_piece(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
+fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
+    let mut java_q: HashMap<String, (bool, usize)> = HashMap::new();
+    let mut java_w: HashMap<String, Vec<String>> = HashMap::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() < 14 {
+            continue;
+        }
+        let key = fields[1..13].join("|");
+        match fields[0] {
+            "Q" => {
+                java_q.insert(key, (fields[13] == "1", fields[14].parse().unwrap_or(0)));
+            }
+            "W" => {
+                java_w.entry(key).or_default().push(fields[13..].join("|"));
+            }
+            _ => {}
+        }
+    }
+
+    let mut checked = 0usize;
+    let mut writes_checked = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for query in queries {
+        let fields: Vec<&str> = query.split('|').collect();
+        let name = fields[0];
+        let piece = (
+            parse_i32(fields[1])?,
+            parse_i32(fields[2])?,
+            parse_i32(fields[3])?,
+        );
+        let mirror = parse_i32(fields[4])? as u32;
+        let rotation = parse_i32(fields[5])? as u32;
+        let bb = BoundingBox {
+            min_x: parse_i32(fields[6])?,
+            min_y: parse_i32(fields[7])?,
+            min_z: parse_i32(fields[8])?,
+            max_x: parse_i32(fields[9])?,
+            max_y: parse_i32(fields[10])?,
+            max_z: parse_i32(fields[11])?,
+        };
+        let template = StructureTemplate::load(name)
+            .map_err(|error| format!("cannot load {name}: {error}"))?;
+        struct Level;
+        impl ProcessorLevel for Level {
+            fn block_state(&self, _pos: (i32, i32, i32)) -> BlockStateSpec {
+                BlockStateSpec::parse_str("minecraft:air").unwrap()
+            }
+            fn in_block_set(&self, _state: &BlockStateSpec, _set: &BlockSetRef) -> bool {
+                false
+            }
+        }
+        #[derive(Default)]
+        struct Recorder {
+            writes: Vec<(i32, i32, i32, String)>,
+        }
+        impl mc_bamboo_worldgen::structure::jigsaw::place::BlockWriter for Recorder {
+            fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+                self.writes.push((
+                    x,
+                    y,
+                    z,
+                    mc_bamboo_worldgen::structure::jigsaw::place::state_text(state),
+                ));
+                true
+            }
+        }
+        let level = Level;
+        let mut recorder = Recorder::default();
+        mc_bamboo_worldgen::structure::jigsaw::place::place_piece(
+            &template,
+            piece,
+            &[],
+            &level,
+            processor_apply::PlaceSettings {
+                piece_position: piece,
+                reference_pos: piece,
+                chunk_bb: Some(bb),
+                level_seed: 0,
+                explicit_random: None,
+            },
+            mirror,
+            rotation,
+            bb,
+            &mut recorder,
+        )?;
+        checked += 1;
+        writes_checked += recorder.writes.len();
+        let key = fields[..12].join("|");
+        let Some((_placed, count)) = java_q.get(&key) else {
+            return Err(format!("Java missing Q for {key}"));
+        };
+        if *count != recorder.writes.len() {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{key}: writes rust {} java {count}",
+                    recorder.writes.len()
+                ));
+            }
+            continue;
+        }
+        let want = java_w.get(&key).cloned().unwrap_or_default();
+        for (index, (x, y, z, state)) in recorder.writes.iter().enumerate() {
+            // 只比方块名（Java 侧也只输出名字）：属性差异在这一轮先不追究。
+            // Compare block names only (the Java side prints names too); property
+            // differences are a separate concern.
+            let got = format!("{x}|{y}|{z}|{state}");
+            if want.get(index).is_none_or(|line| *line != got) {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!(
+                        "{key}[{index}]: rust {got} java {:?}",
+                        want.get(index)
+                    ));
+                }
+            }
+        }
+    }
+    if checked != queries.len() {
+        return Err(format!(
+            "checked {checked} place queries, expected {}",
+            queries.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches} differences over {checked} queries; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!("jigsaw placepiece: {checked} queries, {writes_checked} writes, all identical");
     Ok(())
 }
 

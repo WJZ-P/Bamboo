@@ -54,6 +54,8 @@ import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.biome.Climate;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.Mirror;
 import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
@@ -159,6 +161,7 @@ public final class JigsawOracle {
                     case "apply" -> runApply(registries, Path.of(args[1]));
                     case "capped" -> runCapped(Path.of(args[1]));
                     case "cappedfull" -> runCappedFull(registries, Path.of(args[1]));
+                    case "placepiece" -> runPlacePiece(manager, registries, Path.of(args[1]));
                     case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
                 }
@@ -1081,6 +1084,114 @@ public final class JigsawOracle {
         }
         System.out.print(out);
         System.out.flush();
+    }
+
+    /**
+     * placepiece 模式：queries 每行
+     * {@code template|pieceX|pieceY|pieceZ|mirror|rotation|bb(6)|worldState}。
+     * 用官方 {@code StructureTemplate.placeInWorld}（`IGNORE_WATERLOGGING`，无 processor）
+     * 在记录型假世界上放置模板，输出每次 `setBlock` 的世界坐标与最终状态。Rust 侧的
+     * `jigsaw::place::place_piece` 做同样的事，逐写入比较。
+     *
+     * <p>Place-piece mode: runs the official `StructureTemplate.placeInWorld` (no
+     * processors, `IGNORE_WATERLOGGING`) over a recording fake level and prints every
+     * `setBlock` with its final state, comparing the whole place path block by block.
+     */
+    private static void runPlacePiece(
+            StructureTemplateManager manager, RegistryAccess registries, Path queries)
+            throws Exception {
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|");
+            Identifier id = Identifier.parse(p[0]);
+            BlockPos piece = new BlockPos(
+                    Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3]));
+            Mirror mirror = Mirror.values()[Integer.parseInt(p[4])];
+            Rotation rotation = Rotation.values()[Integer.parseInt(p[5])];
+            BoundingBox bb = new BoundingBox(
+                    Integer.parseInt(p[6]), Integer.parseInt(p[7]), Integer.parseInt(p[8]),
+                    Integer.parseInt(p[9]), Integer.parseInt(p[10]), Integer.parseInt(p[11]));
+            StructureTemplate template = manager.get(id).orElseThrow(
+                    () -> new IllegalStateException("template not loaded: " + id));
+            StructurePlaceSettings settings = new StructurePlaceSettings();
+            settings.setRotation(rotation);
+            settings.setMirror(mirror);
+            settings.setBoundingBox(bb);
+            settings.setLiquidSettings(LiquidSettings.IGNORE_WATERLOGGING);
+            RecordingLevel level = new RecordingLevel();
+            // `RandomSource.create(0)`：这一轮不比随机相关行为（没有 processor）。
+            // `RandomSource.create(0)`: nothing random in this round (no processors).
+            boolean placed = template.placeInWorld(
+                    level.proxy(),
+                    piece,
+                    piece,
+                    settings,
+                    RandomSource.create(0L),
+                    2);
+            String key = String.join("|", java.util.Arrays.copyOfRange(p, 0, 12));
+            out.append("Q|").append(key).append('|').append(placed ? 1 : 0).append('|')
+                    .append(level.writes.size()).append('\n');
+            for (var w : level.writes) {
+                out.append("W|").append(key).append('|')
+                        .append(w.pos().getX()).append('|')
+                        .append(w.pos().getY()).append('|')
+                        .append(w.pos().getZ()).append('|')
+                        .append(BuiltInRegistries.BLOCK.getKey(w.state().getBlock())).append('\n');
+            }
+        }
+        System.out.print(out);
+        System.out.flush();
+    }
+
+    /** 一次 `setBlock`：(位置, 状态)。 */
+    private record Write(BlockPos pos, BlockState state) {
+    }
+
+    /**
+     * 记录型假世界：`setBlock` 只记账，`getBlockState` 返回空气。
+     *
+     * <p>Recording fake level: `setBlock` only records, `getBlockState` returns air.
+     */
+    private static final class RecordingLevel {
+        private final List<Write> writes = new java.util.ArrayList<>();
+
+        net.minecraft.world.level.ServerLevelAccessor proxy() {
+            return (net.minecraft.world.level.ServerLevelAccessor)
+                    java.lang.reflect.Proxy.newProxyInstance(
+                            JigsawOracle.class.getClassLoader(),
+                            new Class<?>[] {net.minecraft.world.level.ServerLevelAccessor.class},
+                            (self, method, args) -> switch (method.getName()) {
+                                case "setBlock" -> {
+                                    BlockPos pos = (BlockPos) args[0];
+                                    BlockState state = (BlockState) args[1];
+                                    this.writes.add(new Write(pos.immutable(), state));
+                                    yield true;
+                                }
+                                case "getBlockState" -> Blocks.AIR.defaultBlockState();
+                                case "getFluidState" ->
+                                        Blocks.AIR.defaultBlockState().getFluidState();
+                                case "isEmptyBlock" -> true;
+                                case "getMinY" -> JigsawOracle.MIN_Y;
+                                case "getHeight" ->
+                                        method.getParameterCount() == 0 ? 384 : JigsawOracle.MIN_Y + 1;
+                                case "getBlockEntity" -> null;
+                                case "getRandom" -> RandomSource.create(0L);
+                                case "toString" -> "RecordingLevel";
+                                case "hashCode" -> System.identityHashCode(self);
+                                case "equals" -> self == args[0];
+                                // 其余副作用方法（`updateNeighborsAt` / `blockUpdated` /
+                                // `scheduleTick` / `gameEvent` 等）在真实放置里不改变写入的
+                                // 方块，本轮只比写入，所以一律当无操作返回 `null`。若某个方法
+                                // 该返回非 void，代理会自动装箱默认值，不影响本对拍。
+                                // Other side-effecting methods change no written block during
+                                // placement, so they are no-ops here; a non-void one gets the
+                                // proxy's default value, which is harmless for this oracle.
+                                default -> null;
+                            });
+        }
     }
 
     /**
