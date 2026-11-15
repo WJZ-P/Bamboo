@@ -53,10 +53,13 @@ import net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilde
 import net.minecraft.world.level.levelgen.structure.pools.EmptyPoolElement;
 import net.minecraft.world.level.levelgen.structure.pools.FeaturePoolElement;
 import net.minecraft.world.level.levelgen.structure.pools.JigsawJunction;
+import net.minecraft.world.level.levelgen.structure.pools.JigsawPlacement;
 import net.minecraft.world.level.levelgen.structure.pools.LegacySinglePoolElement;
 import net.minecraft.world.level.levelgen.structure.pools.ListPoolElement;
 import net.minecraft.world.level.levelgen.structure.pools.SinglePoolElement;
 import net.minecraft.world.level.levelgen.structure.pools.StructurePoolElement;
+import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
+import net.minecraft.world.level.levelgen.structure.pools.alias.PoolAliasLookup;
 import net.minecraft.world.level.levelgen.structure.structures.JigsawStructure;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
@@ -111,6 +114,7 @@ public final class JigsawOracle {
                     case "templates" -> runTemplates(manager, Path.of(args[1]));
                     case "jigsaws" -> runJigsaws(manager, Path.of(args[1]));
                     case "pieces" -> runPieces(manager, registries, Path.of(args[1]));
+                    case "pools" -> runPools(manager, registries, Path.of(args[1]));
                     case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
                 }
@@ -206,6 +210,105 @@ public final class JigsawOracle {
                 StructurePiece piece = pieces.get(i);
                 String description = piece instanceof PoolElementStructurePiece pool
                         ? describe(pool) : "other|-|0|0|0|0|0|0|0|0|0|0|0|0";
+                out.append("P|").append(key).append('|').append(i).append('|')
+                        .append(description).append('\n');
+            }
+            System.out.print(out);
+            System.out.flush();
+            out.setLength(0);
+        }
+    }
+
+    /**
+     * pools 模式：queries 每行 {@code pool|seed|cx|cz}。把任意 template pool 当起始 pool
+     * 直接调官方 {@code JigsawPlacement.addPieces}（maxDepth 4、不 project、expansion hack 开），
+     * 输出 stub 位置和全部结构件。这样 feature / list / empty 三种元素当中心件、以及每个
+     * pool 的拼接路径都被逐件比到，不依赖哪个结构碰巧用到它们。
+     *
+     * <p>Pool mode: one {@code pool|seed|cx|cz} per line. Runs vanilla
+     * {@code JigsawPlacement.addPieces} with that pool as the start pool (maxDepth 4, no
+     * projection, expansion hack on) and prints the stub plus every piece, so feature,
+     * list and empty elements as the center piece and every pool's attachment path get
+     * compared per piece instead of relying on which structure happens to use them.
+     */
+    private static void runPools(
+            StructureTemplateManager manager, RegistryAccess registries, Path queries)
+            throws Exception {
+        HolderLookup.RegistryLookup<NormalNoise> noiseLookup =
+                registries.lookupOrThrow(Registries.NOISE);
+        Registry<NoiseGeneratorSettings> settingsReg =
+                registries.lookupOrThrow(Registries.NOISE_SETTINGS);
+        NoiseGeneratorSettings settings =
+                settingsReg.getValue(Identifier.withDefaultNamespace("overworld"));
+        NoiseBasedChunkGenerator generator = new NoiseBasedChunkGenerator(
+                MultiNoiseBiomeSource.createFromPreset(
+                        registries.lookupOrThrow(
+                                        Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST)
+                                .getOrThrow(MultiNoiseBiomeSourceParameterLists.OVERWORLD)),
+                settingsReg.wrapAsHolder(settings));
+        BiomeSource biomeSource = generator.getBiomeSource();
+        LevelHeightAccessor heightAccessor = LevelHeightAccessor.create(
+                settings.noiseSettings().minY(), settings.noiseSettings().height());
+        Registry<StructureTemplatePool> poolReg = registries.lookupOrThrow(Registries.TEMPLATE_POOL);
+
+        Map<Long, RandomState> states = new HashMap<>();
+        Map<Long, Climate.Sampler> samplers = new HashMap<>();
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|");
+            String poolName = p[0];
+            long seed = Long.parseLong(p[1]);
+            int cx = Integer.parseInt(p[2]);
+            int cz = Integer.parseInt(p[3]);
+            RandomState state = states.get(seed);
+            Climate.Sampler sampler = samplers.get(seed);
+            if (state == null || sampler == null) {
+                state = RandomState.create(noiseLookup, seed, settings);
+                sampler = state.createClimateSampler(
+                        SamplerContext.builder().enableCaches().build());
+                states.put(seed, state);
+                samplers.put(seed, sampler);
+            }
+            Holder<StructureTemplatePool> startPool = poolReg
+                    .get(Identifier.parse(poolName))
+                    .orElseThrow(() -> new IllegalStateException("no pool " + poolName));
+            Structure.GenerationContext context = new Structure.GenerationContext(
+                    registries, generator, biomeSource, sampler, state, manager, seed,
+                    new ChunkPos(cx, cz), heightAccessor, biome -> true);
+            String key = poolName + "|" + seed + "|" + cx + "|" + cz;
+            BlockPos startPos = new BlockPos(cx * 16, 64, cz * 16);
+            Optional<Structure.GenerationStub> stub = JigsawPlacement.addPieces(
+                    context,
+                    startPool,
+                    Optional.empty(),
+                    4,
+                    startPos,
+                    true,
+                    Optional.empty(),
+                    new JigsawStructure.MaxDistance(80),
+                    PoolAliasLookup.EMPTY,
+                    JigsawStructure.DEFAULT_DIMENSION_PADDING,
+                    JigsawStructure.DEFAULT_LIQUID_SETTINGS);
+            if (stub.isEmpty()) {
+                out.append("Q|").append(key).append("|0|0|0|0|0\n");
+                System.out.print(out);
+                System.out.flush();
+                out.setLength(0);
+                continue;
+            }
+            StructurePiecesBuilder builder = stub.get().getPiecesBuilder();
+            List<StructurePiece> pieces = builder.build().pieces();
+            BlockPos position = stub.get().position();
+            out.append("Q|").append(key).append("|1|").append(position.getX()).append('|')
+                    .append(position.getY()).append('|').append(position.getZ()).append('|')
+                    .append(pieces.size()).append('\n');
+            for (int i = 0; i < pieces.size(); i++) {
+                StructurePiece piece = pieces.get(i);
+                String description = piece instanceof PoolElementStructurePiece pool
+                        ? describe(pool) : "other|-|0|0|0|0|0|0|0|0|0|0|0|0|0|-|0";
                 out.append("P|").append(key).append('|').append(i).append('|')
                         .append(description).append('\n');
             }

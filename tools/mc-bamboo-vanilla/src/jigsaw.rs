@@ -28,7 +28,9 @@ use mc_bamboo_worldgen::{
     chunk::Generator,
     structure::{
         Structures, allowed_biome_names,
-        jigsaw::{JigsawStructures, Rotation, StructurePieces, TemplatePools, add_pieces},
+        jigsaw::{
+            JigsawConfig, JigsawStructures, Rotation, StructurePieces, TemplatePools, add_pieces,
+        },
         template::StructureTemplate,
     },
 };
@@ -77,6 +79,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "templates" => run_templates(command, work_dir),
         "jigsaws" => run_jigsaws(command, work_dir),
         "pieces" => run_pieces(command, work_dir, options.get(1), options.get(2)),
+        "pools" => run_pools(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
@@ -327,6 +330,152 @@ fn build_queries(seeds: usize, chunks: usize) -> Vec<Query> {
         }
     }
     queries
+}
+
+/// `pools` 模式的查询：每个 template pool × 每组 (seed, chunk)。
+///
+/// `pools` mode queries: every template pool × each (seed, chunk).
+fn run_pools(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    let raw: Value =
+        serde_json::from_str(WORLDGEN).map_err(|error| format!("bad worldgen.json: {error}"))?;
+    let pools = TemplatePools::parse(raw.get("template_pool").ok_or("missing template_pool")?)?;
+    let mut names = pools.names().cloned().collect::<Vec<_>>();
+    names.sort();
+
+    let mut queries = Vec::new();
+    for &seed in &SEEDS[..2] {
+        for &(cx, cz) in &CHUNKS[..2] {
+            for name in &names {
+                queries.push(format!("{name}|{seed}|{cx}|{cz}"));
+            }
+        }
+    }
+    let queries_path = work_dir.join("jigsaw_pool_queries.txt");
+    fs::write(&queries_path, queries.join("\n"))
+        .map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("pools")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_pools(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
+/// Java 的 Q 行 `Q|key|status|sx|sy|sz|n`，P 行 `P|key|idx|type|loc|pos(3)|rot|bb(6)|gld|...`。
+fn compare_pools(stdout: &str, queries: &[String]) -> Result<(), String> {
+    let mut java_q: HashMap<String, Vec<String>> = HashMap::new();
+    let mut java_p: HashMap<String, BTreeMap<usize, Vec<String>>> = HashMap::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() < 6 {
+            continue;
+        }
+        let key = format!("{}|{}|{}|{}", fields[1], fields[2], fields[3], fields[4]);
+        match fields[0] {
+            "Q" => {
+                java_q.insert(key, fields[5..].iter().map(|s| (*s).to_owned()).collect());
+            }
+            "P" => {
+                let index = fields[5]
+                    .parse::<usize>()
+                    .map_err(|error| format!("bad P index: {error}"))?;
+                java_p
+                    .entry(key)
+                    .or_default()
+                    .insert(index, fields[6..].iter().map(|s| (*s).to_owned()).collect());
+            }
+            _ => {}
+        }
+    }
+
+    let worldgen = Worldgen::load()?;
+    let settings = worldgen
+        .settings("minecraft:overworld")
+        .ok_or("missing overworld settings")?;
+    let dims = (settings.min_y, settings.height, settings.sea_level);
+    let raw: Value =
+        serde_json::from_str(WORLDGEN).map_err(|error| format!("bad worldgen.json: {error}"))?;
+    let pools = TemplatePools::parse(raw.get("template_pool").ok_or("missing template_pool")?)?;
+    let allowed = HashSet::new();
+
+    let mut by_seed: BTreeMap<i64, Vec<&String>> = BTreeMap::new();
+    for query in queries {
+        let fields: Vec<&str> = query.split('|').collect();
+        let seed = fields[1]
+            .parse::<i64>()
+            .map_err(|error| format!("bad pool query seed: {error}"))?;
+        by_seed.entry(seed).or_default().push(query);
+    }
+
+    let mut checked = 0usize;
+    let mut pieces_checked = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    let mut type_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for (seed, group) in &by_seed {
+        let generator = Generator::new(&worldgen, *seed)?;
+        for query in group {
+            let mut fields = query.split('|');
+            let pool = fields.next().ok_or("empty pool query")?;
+            let _ = fields.next();
+            let cx: i32 = fields
+                .next()
+                .and_then(|value| value.parse().ok())
+                .ok_or("bad pool query chunk x")?;
+            let cz: i32 = fields
+                .next()
+                .and_then(|value| value.parse().ok())
+                .ok_or("bad pool query chunk z")?;
+            let config = JigsawConfig::for_pool(pool, 64);
+            let result = add_pieces(&config, &pools, &generator, &allowed, dims, *seed, (cx, cz))?;
+            checked += 1;
+            let q = java_q
+                .get(*query)
+                .ok_or_else(|| format!("Java missing Q for {query}"))?;
+            if let Some(diff) = check_query(&result, q, java_p.get(*query))? {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!("{query}: {diff}"));
+                }
+            }
+            if let Some(structure) = &result {
+                pieces_checked += structure.pieces.len();
+                for piece in &structure.pieces {
+                    *type_counts
+                        .entry(piece.element.type_name().to_owned())
+                        .or_default() += 1;
+                }
+            }
+        }
+    }
+
+    if checked != queries.len() {
+        return Err(format!(
+            "checked {checked} pools, expected {}",
+            queries.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches}/{checked} pools differ; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    let summary = type_counts
+        .iter()
+        .map(|(name, count)| format!("{name}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!("jigsaw pools: {checked} pools, {pieces_checked} pieces, all Q/P fields identical");
+    println!("pool element types: {summary}");
+    Ok(())
 }
 
 fn run_pieces(

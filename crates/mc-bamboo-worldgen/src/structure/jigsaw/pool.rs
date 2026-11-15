@@ -141,6 +141,10 @@ impl TemplatePools {
         self.pools.get(name)
     }
 
+    pub fn names(&self) -> impl Iterator<Item = &String> {
+        self.pools.keys()
+    }
+
     pub fn len(&self) -> usize {
         self.pools.len()
     }
