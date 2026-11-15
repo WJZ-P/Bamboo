@@ -114,6 +114,41 @@ enum Composition<'a> {
 }
 
 impl<'a> Composition<'a> {
+    /// 依次访问所有子项（诊断和测试用）。
+    ///
+    /// Visit every child (for diagnostics and tests).
+    #[cfg(test)]
+    fn for_each_child(&self, mut visit: impl FnMut(&Child<'a>)) {
+        match self {
+            Self::RandomSelector { features, default } => {
+                for (_, child) in features {
+                    visit(child);
+                }
+                visit(default);
+            }
+            Self::WeightedRandomSelector { features } => {
+                for (_, child) in features {
+                    visit(child);
+                }
+            }
+            Self::SimpleRandomSelector { features }
+            | Self::Sequence { features }
+            | Self::Overlay { features } => {
+                for child in features {
+                    visit(child);
+                }
+            }
+            Self::RandomBooleanSelector {
+                feature_true,
+                feature_false,
+            } => {
+                visit(feature_true);
+                visit(feature_false);
+            }
+            Self::CoralTree { feature } | Self::CoralClaw { feature } => visit(feature),
+        }
+    }
+
     fn parse(kind: &str, config: &'a Value) -> Option<Self> {
         let object = config.as_object()?;
         match kind {
@@ -532,6 +567,89 @@ fn place_child<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 诊断：逐层打印 `warm_ocean_vegetation` 子树里每个节点的解析结果。
+    ///
+    /// Diagnostic: print how every node under `warm_ocean_vegetation` parses.
+    #[test]
+    fn audits_the_coral_subtree() {
+        fn walk(registry: &Registry, child: &Child<'_>, depth: usize, path: &str) {
+            let pad = "  ".repeat(depth);
+            let Some((feature, placement)) = child.resolve(registry) else {
+                println!("{pad}{path}: RESOLVE FAIL");
+                return;
+            };
+            let Some((kind, config)) = crate::feature::run::resolve_feature(registry, feature)
+            else {
+                println!("{pad}{path}: KIND FAIL");
+                return;
+            };
+            for entry in placement {
+                match Modifier::parse(entry) {
+                    Ok(m) if !m.is_supported() => println!("{pad}{path}: BAD modifier {entry}"),
+                    Err(error) => println!("{pad}{path}: modifier parse error {error}"),
+                    _ => {}
+                }
+            }
+            if parse_leaf(&kind, config).is_some() {
+                println!("{pad}{path}: leaf {kind}");
+                return;
+            }
+            let Some(comp) = Composition::parse(&kind, config) else {
+                let text = config.to_string();
+                println!(
+                    "{pad}{path}: UNSUPPORTED {kind} config={}",
+                    &text[..160.min(text.len())]
+                );
+                return;
+            };
+            println!("{pad}{path}: comp {kind}");
+            let mut index = 0;
+            comp.for_each_child(|child| {
+                walk(registry, child, depth + 1, &format!("{path}.{index}"));
+                index += 1;
+            });
+        }
+
+        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        let registry = Registry::parse(root.as_object().unwrap()).unwrap();
+        let placed = registry
+            .placed_id("minecraft:warm_ocean_vegetation")
+            .unwrap();
+        let def = registry.placed(placed).unwrap();
+        // 顶层：先看 placement 链，再把 feature 当成一个内联 child。
+        for entry in &def.placement {
+            match Modifier::parse(entry) {
+                Ok(m) if !m.is_supported() => println!("root: BAD modifier {entry}"),
+                Err(error) => println!("root: modifier parse error {error}"),
+                _ => {}
+            }
+        }
+        let Some((kind, config)) = crate::feature::run::resolve_feature(&registry, &def.feature)
+        else {
+            panic!("root kind");
+        };
+        println!("root: comp {kind}");
+        let comp = Composition::parse(&kind, config).expect("root composition");
+        let mut index = 0;
+        comp.for_each_child(|child| {
+            walk(&registry, child, 1, &format!("root.{index}"));
+            index += 1;
+        });
+
+        for name in [
+            "minecraft:tube_coral_block",
+            "minecraft:sea_pickle",
+            "minecraft:tube_coral",
+            "minecraft:tube_coral_fan",
+        ] {
+            let state = mc_bamboo_data::block_by_name(name).unwrap().default_state;
+            println!(
+                "survival {name} -> {}",
+                super::super::survival::supports(state)
+            );
+        }
+    }
 
     #[test]
     fn parses_every_step_nine_composition_feature() {

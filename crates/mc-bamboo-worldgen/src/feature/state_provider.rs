@@ -44,6 +44,14 @@ pub enum StateProvider {
     /// `RandomBlockProvider`: pick one block from a set with `nextInt(size)` and use
     /// that block's default state.
     RandomBlock(Vec<u32>),
+    /// `RotatedBlockProvider`：先采样内层 provider，再把方向相关的属性改掉。
+    ///
+    /// `RotatedBlockProvider`: sample the inner provider, then overwrite the
+    /// direction-dependent properties.
+    Rotated {
+        source: Box<StateProvider>,
+        direction: Option<&'static str>,
+    },
     /// `NoiseProvider` / `DualNoiseProvider` / `NoiseThresholdProvider`（按坐标用噪声）。
     Noise(Box<NoiseStateProvider>),
     /// `RuleBasedStateProvider`：按 `BlockPredicate` 顺序试，第一个命中且给出状态的就用它。
@@ -84,6 +92,15 @@ impl StateProvider {
                         source: Box::new(Self::parse(object.get("source")?)?),
                         property: object.get("property")?.as_str()?.to_owned(),
                         values: IntProvider::parse(object.get("values")?).ok()?,
+                    }),
+                    // `RotatedBlockProvider.CODEC`：`state` + 可选 `direction`。
+                    // `RotatedBlockProvider.CODEC`: `state` plus an optional `direction`.
+                    "minecraft:rotated" => Some(Self::Rotated {
+                        source: Box::new(Self::parse(object.get("state")?)?),
+                        direction: match object.get("direction") {
+                            Some(value) => Some(parse_direction(value.as_str()?)?),
+                            None => None,
+                        },
                     }),
                     "minecraft:random_block" => Some(Self::RandomBlock(parse_block_states(
                         object.get("blocks")?,
@@ -126,6 +143,9 @@ impl StateProvider {
             Self::RandomizedInt { source, .. } => source.possible_states(),
             Self::Noise(provider) => provider.possible_states(),
             Self::RandomBlock(states) => states.clone(),
+            // 方向属性不改变方块类，内层 provider 的状态就够了。
+            // The direction properties do not change the block class.
+            Self::Rotated { source, .. } => source.possible_states(),
             // fallback 缺失时官方可能返回 null，`SimpleBlockFeature.place` 直接放弃，
             // 所以只有 fallback 存在时它才是可能状态。
             // A missing fallback makes the official provider return null (the feature gives
@@ -156,7 +176,9 @@ impl StateProvider {
                     .as_ref()
                     .is_none_or(|provider| provider.is_supported())
             }
-            Self::RandomizedInt { source, .. } => source.is_supported(),
+            Self::RandomizedInt { source, .. } | Self::Rotated { source, .. } => {
+                source.is_supported()
+            }
             _ => true,
         }
     }
@@ -208,6 +230,26 @@ impl StateProvider {
                 let value = values.sample(random);
                 with_property(base, property, &value.to_string())
             }
+            // 官方先把 `direction` 定下来（缺省时 `Direction.getRandom(random)` 消费一次
+            // `nextInt(6)`），再采样内层 provider，最后依次尝试 `axis` / `facing` /
+            // `horizontal_facing` 三个属性（有该属性才改）。
+            // The official code resolves `direction` first (consuming one `nextInt(6)` when
+            // absent), samples the inner provider, then tries `axis`, `facing` and
+            // `horizontal_facing` in that order, setting only properties the state has.
+            Self::Rotated { source, direction } => {
+                let direction = match direction {
+                    Some(direction) => *direction,
+                    None => DIRECTIONS[random.next_int(6) as usize],
+                };
+                let base = source.get_optional_state(world, random, pos)?;
+                let state = with_property(base, "axis", axis_of(direction)).unwrap_or(base);
+                let state = with_property(state, "facing", direction).unwrap_or(state);
+                Some(if is_horizontal(direction) {
+                    with_property(state, "horizontal_facing", direction).unwrap_or(state)
+                } else {
+                    state
+                })
+            }
             Self::Noise(provider) => provider.get_state(random, pos),
             // 官方 `RuleBasedStateProvider.getOptionalState`：按顺序试规则，第一个谓词为真且
             // 子 provider 给出状态的就返回；都不行时用 fallback（可能为空）。
@@ -248,6 +290,36 @@ impl StateProvider {
             },
         }
     }
+}
+
+/// `Direction.values()` 的六个方向，顺序即 ordinal。
+///
+/// The six `Direction.values()` entries in ordinal order.
+const DIRECTIONS: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
+
+/// `Direction.CODEC` 的方向名。
+///
+/// A name accepted by `Direction.CODEC`.
+fn parse_direction(name: &str) -> Option<&'static str> {
+    DIRECTIONS.iter().copied().find(|entry| *entry == name)
+}
+
+/// `Direction.getAxis()` 的 `Axis.getName()`。
+///
+/// `Axis.getName()` for `Direction.getAxis()`.
+fn axis_of(direction: &str) -> &'static str {
+    match direction {
+        "up" | "down" => "y",
+        "north" | "south" => "z",
+        _ => "x",
+    }
+}
+
+/// `Direction.Axis.isHorizontal()`。
+///
+/// `Direction.Axis.isHorizontal()`.
+fn is_horizontal(direction: &str) -> bool {
+    !matches!(direction, "up" | "down")
 }
 
 /// `HolderSet<Block>` 展开成每个方块的默认状态 ID：方块名、`#tag`，或它们的数组。
@@ -317,7 +389,8 @@ mod tests {
         // `#minecraft:corals` 有 10 个方块（5 植株 + 5 扇），都要能展开成默认状态。
         // `#minecraft:corals` has ten blocks (five plants, five fans) and every one must
         // expand to its default state.
-        let config: Value = json!({"blocks": "#minecraft:corals", "type": "minecraft:random_block"});
+        let config: Value =
+            json!({"blocks": "#minecraft:corals", "type": "minecraft:random_block"});
         let provider = StateProvider::parse(&config).expect("corals tag parses");
         let states = provider.possible_states();
         assert_eq!(states.len(), 10, "{states:?}");

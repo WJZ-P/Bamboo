@@ -43,6 +43,11 @@ enum Kind {
     SeaPickle,
     /// `SporeBlossomBlock.canSurvive`：上面那格 `canSupportCenter(DOWN)`，且这一格不是水。
     SporeBlossom,
+    /// `BaseCoralWallFanBlock.canSurvive`：沿 `facing` 反方向那格 `isFaceSturdy(facing)`。
+    ///
+    /// `BaseCoralWallFanBlock.canSurvive`: the block at `pos.relative(facing.getOpposite())`
+    /// is `isFaceSturdy(facing)`.
+    CoralWallFan,
     /// `SeagrassBlock.mayPlaceOn`：下面那格 `isFaceSturdy(FULL, UP)` 且不在
     /// `#minecraft:cannot_support_seagrass` 里。
     Seagrass,
@@ -116,6 +121,18 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
             state_facts(above) & (1u64 << facts::STURDY_CENTER) != 0
                 && !unstable
                 && !is_water(state)
+        }
+        // `BaseCoralWallFanBlock.canSurvive`：读状态的 `facing`，看它反方向那格在
+        // `facing` 那一面是不是满面。
+        // `BaseCoralWallFanBlock.canSurvive`: read the state's `facing` and test whether the
+        // block behind it is full on that face.
+        Some(Kind::CoralWallFan) => {
+            let Some(facing) = property_value(state, "facing") else {
+                return false;
+            };
+            let (dx, dy, dz) = offset_of(opposite(facing));
+            let behind = world.get_block(pos.0 + dx, pos.1 + dy, pos.2 + dz);
+            state_facts(behind) & (1u64 << (facts::STURDY_FULL + direction_id(facing))) != 0
         }
         // `SeagrassBlock.mayPlaceOn`：`below.isFaceSturdy(UP) && !below.is(cannot_support_seagrass)`。
         // `SeagrassBlock.mayPlaceOn`: `isFaceSturdy(UP)` and not in
@@ -192,6 +209,7 @@ fn classify(state: u32) -> Option<Kind> {
         // whose `canSurvive` is `isFaceSturdy(UP)` on the block below — the same test
         // `SeagrassBlock` uses.
         BlockClass::CoralPlantBlock | BlockClass::CoralFanBlock => Kind::SturdyFaceUp,
+        BlockClass::CoralWallFanBlock => Kind::CoralWallFan,
         // 直接继承 VegetationBlock、不覆写 canSurvive 的类，标签判定。
         // Classes extending VegetationBlock without overriding canSurvive: a tag check.
         BlockClass::BushBlock
@@ -251,6 +269,51 @@ fn classify(state: u32) -> Option<Kind> {
         // canSurvive/mayPlaceOn: unported.
         _ => return None,
     })
+}
+
+/// `Direction` 的 ordinal（DOWN=0, UP=1, NORTH=2, SOUTH=3, WEST=4, EAST=5）。
+///
+/// The `Direction` ordinal (DOWN=0, UP=1, NORTH=2, SOUTH=3, WEST=4, EAST=5).
+fn direction_id(direction: &str) -> u32 {
+    match direction {
+        "down" => 0,
+        "up" => 1,
+        "north" => 2,
+        "south" => 3,
+        "west" => 4,
+        _ => 5,
+    }
+}
+
+/// `Direction.getOpposite()`。
+fn opposite(direction: &str) -> &'static str {
+    match direction {
+        "up" => "down",
+        "down" => "up",
+        "north" => "south",
+        "south" => "north",
+        "west" => "east",
+        _ => "west",
+    }
+}
+
+/// 方向对应的方块坐标偏移。
+fn offset_of(direction: &str) -> (i32, i32, i32) {
+    match direction {
+        "down" => (0, -1, 0),
+        "up" => (0, 1, 0),
+        "north" => (0, 0, -1),
+        "south" => (0, 0, 1),
+        "west" => (-1, 0, 0),
+        _ => (1, 0, 0),
+    }
+}
+
+/// `BlockState.getValue` 的属性读取（只用于读 `facing`）。
+///
+/// Read a block state property (only used for `facing`).
+fn property_value(state: u32, name: &str) -> Option<&'static str> {
+    super::tree::property_value(state, name)
 }
 
 /// `LevelReader.isWaterAt(pos)`：这一格流体在 `FluidTags.WATER` 里。
