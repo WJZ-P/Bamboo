@@ -457,6 +457,21 @@ Rust `Heightmaps` 存「最高方块 y」、`get_height` 返回 `+1`，正好等
 `ChunkAccess.getHeight`，比 `WorldGenRegion.getHeight` 少 1。把 `get_height` 改成 `+2`
 会让女巫小屋整栋上移一格（2786 处不一致），所以**现有 `+1` 是对的**，不要再改。
 
+**第十五轮（2026-11-14，合并前收尾）**：
+
+* `git merge main` 结果：main 已经是本分支的祖先（`7373539` 的树 / 倒木 / 巨型蘑菇 /
+  `feature/shape_update.rs` 都已在），无需合并，没有冲突。
+* 确认「没验证过的不进游戏」：`structure::post_process`（埋藏的宝藏 / 女巫小屋 / 沙漠神殿的
+  `postProcess` 方块部分）**没有任何生产路径调用**——`feature/run.rs`、`chunk.rs` 都不引用它，
+  只在 `structure/mod.rs` 里 `pub mod` 声明。游戏里结构件仍然一个方块都不放。
+* README 与本文第 7 节的现状表按实测更新：此前写的「埋藏的宝藏与女巫小屋的 `postProcess`
+  逐方块 0 不一致」是**错的**（那是改用写入日志之前的数字），已改成
+  「埋藏的宝藏 0 不一致、**女巫小屋 18 处不一致未通过**、沙漠神殿 `SKIPPED`」。
+* 全量检查：`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+  `cargo test --no-fail-fast`（927 passed，`staged_pipeline_delivers…` 90s 时限在 debug 下超时，
+  `--release` 5.75s 通过）、`gen-world`（0 不一致）、`gen-world --through features`
+  （0 不一致）、九个结构对拍（全 0）、探针（719/719）。
+
 **仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」
 是 `onTopOfChunkCenter` 基线路径的通用判定，**不等于** `Structure.generate` 的最终有效：
@@ -1011,7 +1026,7 @@ structures (Compound)
 | 2 | 数据导出：`worldgen.json` 加四键，Rust 解析骨架 | `extract` 重跑无 diff（除四键）、旧 `chunkgen --through carvers` 仍 0 | **做完**：重跑无 diff、`--through carvers` 小样本 0 不一致 |
 | 3 | 放置：`random_spread`（含频率削减、exclusion zone、spread type）、`concentric_rings` 几何 | 大范围区块「哪个区块有哪个结构起点」0 不一致；新对拍先故意改坏一处确认会失败 | **做完**：20 集 × 464 查询 = 9280 放置比较 + 9744 加权选择比较 0 不一致；`concentric_rings` 6 种子 768 环位置 + 864 `isStructureChunk` 0 不一致 |
 | 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **部分做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿 / 林地府邸（`structure-pieces` 336 查询 77960 结构件 0 不一致）、需要模板的雪屋 / 沉船 / 海底遗迹（`structure-templated` 480 查询 1685 结构件 0 不一致）、废弃传送门（`structure-ruined-portal` 648 查询 110 结构件 0 不一致，含 `findSuitableY` 整列搜索与 `Mirror.FRONT_BACK`）已做；jigsaw 结构件没做 |
-| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分做完（方块部分）**：埋藏的宝藏与女巫小屋的 `postProcess` 逐方块 0 不一致（`structure-place` 32 查询 2202 格）；沙漠神殿的 `postProcess` 已写（`structure::post_process::pyramid`）但坐标和官方对不上、未验证，暂时不进查询集；丛林神殿、processor、方块实体、战利品表、拼图替换没做，也没接进 `feature/run.rs` |
+| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分做完（方块部分）**：`structure-place` 按写入日志逐格比：埋藏的宝藏 16 查询 0 不一致；**女巫小屋 18 处不一致（未通过）**，Java 的地下柱子比 Rust 低一格；沙漠神殿没进查询集（`SKIPPED`），最后实测 6953 处。丛林神殿、processor、方块实体、战利品表、拼图替换没做，**三份 `postProcess` 都没接进 `feature/run.rs`** |
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | **做完（纯函数 + 对拍，`cb-wg-beard`）**：`beard` 12 用例 5,912,076 比较 0 不一致（kernel / sampleValue / sampleVolume / affectedBox / 三阶段方块），`--break-self-test` 会失败；`chunkgen --through carvers` EMPTY 回归仍 0。**没接进 Director**：游戏里仍走 `EMPTY` |
 | 7 | 存档：`structures` 键写/读；海底神殿「只存一个 `MonumentBuilding`、读回重建房间图」的口径见 4.1 | 读回一致，`world-dir` 确认官方能读 | **通用编码做完**：`structure-save` 8 case 规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、`world-dir` 的 `SerializableChunkData.parse` 都能读；各结构件 `addAdditionalSaveData` 字段与读档路径由 `cb-wg-multipiece` 在其上补齐 |
 

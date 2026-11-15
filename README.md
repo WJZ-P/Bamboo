@@ -499,10 +499,13 @@ WebView2 的渲染进程不算在内。
   （`structure-save`，8 case 的规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、
   `world-dir` 的 `SerializableChunkData.parse` 都能读带该键的区块）。仍没做：
   jigsaw 结构件生成、`features` 阶段的 `placeInChunk` /
-  `postProcess` / processors / 方块实体 / 拼图替换（埋藏的宝藏与女巫小屋的
-  `postProcess` 方块部分已对拍 0 不一致，`structure::post_process`，新对拍 `structure-place`
-  32 查询 2202 格；沙漠神殿已写但坐标对不上、未验证，丛林神殿没做），
-  以及把结构起点真正接进 Director（`Beardifier` 见下面单独一条）；
+  `postProcess` / processors / 方块实体 / 拼图替换。`structure::post_process` 里有埋藏的宝藏
+  与女巫小屋、沙漠神殿三份 `postProcess` 的方块部分，新对拍 `structure-place` 按**写入日志**
+  逐格比较（比「写前写后的状态差异」严格：结构写在地形上的方块不算状态变化，但官方确实写了）：
+  32 查询里**埋藏的宝藏 16 查询 0 不一致**，**女巫小屋 18 处不一致（未通过）**——Java 的地下
+  柱子比 Rust 低一格，根因还没定位；沙漠神殿没进查询集（`SKIPPED`），最后一次实测 6953 处
+  不一致。三份 `postProcess` **都没有接进 `feature/run.rs`**，游戏里结构件仍然一个方块都不放。
+  另有把结构起点真正接进 Director（`Beardifier` 见下面单独一条）；
   `.nbt` 结构模板已由 `cb-wg-jigsaw` 分支从官方 jar 原样导出成
   `mc-bamboo-data::structures`（1511 个、4236847 gzip 字节，重跑无 diff），并用官方
   `NbtIo` 逐节点对拍 0 不一致；Rust 侧 `structure::template` 能读出方块、方块实体和拼图方块。
