@@ -15,10 +15,12 @@
 //!   扫半径 64 的区块方阵）。`pieces` 的固定区块只有 5.8% 能通过 `isValidBiome`，
 //!   这个模式能到 55%，真正跑完 `addPieces` 的查询多一个数量级。
 //! - `piecesexact`：在 `piecesbiome` 之上再加 `random_spread` 的**放置门**
-//!   （`StructureState::is_structure_chunk`）。命中率到 83%（69/83），
-//!   `no_stub` 只剩 5 个。
-//! - `pools`：每个 template pool 的结构件生成。
+//!   （`StructureState::is_structure_chunk`）与 `find_valid_generation_point`
+//!   （列群系 + 起点群系）。命中率 **93%（112/120）**，是覆盖 `addPieces` 的主力。
+//! - `pools`：每个 template pool 的结构件生成。245 个池 × 3 种子 × 3 区块
+//!   = 2205 查询 / 19994 件。
 //! - `save` / `load`：结构件 NBT 的编码与读回（含 `regeneratePiecesAfterLoad`）。
+//!   规模与 `pieces` 相同（1944 查询 / 25650 件）。
 //! - `processors` / `apply`：`processor_list` 的解析与 `processBlock` 执行。
 //! - `capped`：`CappedProcessor.finalizeProcessing` 的**端到端**比（真实
 //!   `CappedProcessor(RuleProcessor)`，比存活方块），`cappedraw` 是它的细粒度
