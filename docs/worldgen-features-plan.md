@@ -1672,10 +1672,20 @@ step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_pred
   `underwater_magma`、`vegetation_patch`（floor / ceiling）、`vines`。
 * 已写并接入：`sculk_patch`（`deep_dark` 的 step 7，见下）、
   `waterlogged_vegetation_patch`（`lush_caves_clay`，见下）。
+* 已写但**对拍框架不可比**：`fossil`（`fossil_coal` / `fossil_diamonds`）。
+  实现完整（`feature/fossil.rs`：旋转、模板选择、`OCEAN_FLOOR_WG` 锚点下压、
+  `countEmptyCorners` 门槛、基座与矿脉各放一次、`block_rot` / `protected_blocks` /
+  `rule` 三条 processor 链），但官方 `FossilFeature.place` 第一句就要
+  `level.getLevel().getServer().getStructureTemplateManager()`，而
+  `ChunkgenOracle` 的 `WorldGenLevel` 代理无法转成 `ServerLevel` —— JVM 侧直接抛
+  `ClassCastException`，一格都没写。证据改为两条集成测试：
+  `the_exported_fossil_writes_template_blocks`（导出配置必须写出模板方块）和
+  `block_rot_drops_cells_below_the_integrity`（integrity 0 必须一格不留）。
 * 已知未解决的差异：无。`moss_patch_ceiling` 的 `cave_vines` 错位已随
   `region_random` 改成裸 `RandomSource` 一起消失（见 `reports/cb-wg-aquatic.md`）。
-* 没做：`fossil`、`overlay`（沙漠井，要 `template` 地物）、`root_system`（官方成功路径
-  不可达）、`huge_fungus`、`chorus_plant`、`block_pile`。
+* 没做：`overlay` 的 `desert_well`（`rarity 1000`，600 区块零命中，见
+  `reports/cb-wg-aquatic.md`）、`root_system`（官方成功路径不可达）、
+  `huge_fungus`、`chorus_plant`、`block_pile`（后三者不在主世界 `features_per_step`）。
 
 #### `sculk_patch`（第二十二轮验证）
 
