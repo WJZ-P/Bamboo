@@ -359,12 +359,13 @@ Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_heigh
 * 对拍：`structure-place --feature-types woodland_mansion`，3 种子 × 3 区块 × 3 填充 =
   36 个查询、6318 个结构件、**3 处不一致**（种子 42 的同一个 `chest`，见下）。
 * **已知差异（1 处）**：种子 42 的 `1x2_a1` 结构件（`Mi=LEFT_RIGHT`,
-  `Rot=COUNTERCLOCKWISE_90`）在 (35, 64, 12) 有一个 `ChestSouth` 数据标记。那个位置
-  本来放的是模板里的 `structure_block`（被 `BlockIgnoreProcessor.STRUCTURE_BLOCK`
-  丢弃），官方 `createChest` 于是写入 `CHEST`；Java 对拍里没有这个方块，Rust 写了。
-  两边结构件清单逐字节相同，`1x2_a1` 在 (35,64,12) 之前的方块也都一致；差异只在这一
-  格。尚未查清原因（可能是 Java 侧 `filterBlocks` 的 `boundingBox` 与 `chunkBB` 在
-  该模板上的交互），列入汇报疑点。
+  `Rot=COUNTERCLOCKWISE_90`）在 (35, 64, 12) 有一个 `ChestSouth` 数据标记，模板里那一格
+  是 `structure_block`（被 `BlockIgnoreProcessor.STRUCTURE_BLOCK` 丢弃）。Rust 于是按
+  `createChest` 写入 `CHEST` + 一次 `nextLong()`，Java 对拍里没有这个方块。
+  已确认：两边结构件清单逐字节相同；Java 侧该结构件在区块 (2,0) 确实跑了
+  `postProcess`、`chunkBB.isInside(35,64,12)` 为 true、该格只有一个模板方块
+  （`structure_block`）；所以官方 `createChest` 的 `!getBlockState(pos).is(CHEST)`
+  在这里应当成立并写入，但 Java 输出里没有。原因未查清，列入汇报疑点。
 
 * **没接进 Director**：这些代码只被 oracle 调用，游戏里仍然没有结构。
 
