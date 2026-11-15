@@ -524,6 +524,14 @@ pub fn is_face_sturdy_full(state: u32, dir: Dir) -> bool {
     state_facts(state) & bit != 0
 }
 
+/// `BlockState.isFaceSturdy(level, pos, direction, SupportType.CENTER)`：`CENTER` 那一组位。
+///
+/// `BlockState.isFaceSturdy(level, pos, direction, SupportType.CENTER)`: the `CENTER` bits.
+pub fn is_face_sturdy_center(state: u32, dir: Dir) -> bool {
+    let bit = 1_u64 << (facts::STURDY_CENTER + dir.id() as u32);
+    state_facts(state) & bit != 0
+}
+
 /// `Block.canSupportCenter(level, posAbove, DOWN) && !(block instanceof FallingBlock)`：
 /// 上方能挂住铁链。用「向下的满固体面」近似 `canSupportCenter`，并排除沙 / 沙砾等下落方块。
 ///
@@ -531,7 +539,21 @@ pub fn is_face_sturdy_full(state: u32, dir: Dir) -> bool {
 /// a chain can hang below. Approximated with the DOWN full-sturdy face, excluding
 /// falling blocks (sand, gravel, ...).
 pub fn can_hang_chain_below(state: u32) -> bool {
-    if !is_face_sturdy_full(state, Dir::Down) {
+    // 官方 `Block.canSupportCenter(level, pos, Direction.DOWN)` 用的是
+    // `SupportType.CENTER`，不是 `FULL`；栅栏、墙、铁栏杆这类非满方块 CENTER 为 true，
+    // 所以用 `FULL` 会把它们全判成 false，链条就挂不上。
+    //
+    // `Block.canSupportCenter(level, pos, Direction.DOWN)` uses `SupportType.CENTER`, not
+    // `FULL`. Fences, walls and iron bars are not full blocks but do support the centre,
+    // so probing `FULL` rejects them and the chain never hangs.
+    if !is_face_sturdy_center(state, Dir::Down) {
+        return false;
+    }
+    // `UNSTABLE_BOTTOM_CENTER` 的方块不算能支撑（官方在 `canSupportCenter` 里先排除）。
+    // Blocks in `UNSTABLE_BOTTOM_CENTER` do not support (vanilla rejects them first).
+    if mc_bamboo_blocks::BlockState(state)
+        .is_tagged(mc_bamboo_data::tags::block_tags::UNSTABLE_BOTTOM_CENTER)
+    {
         return false;
     }
     !is_block(state, "minecraft:sand")
