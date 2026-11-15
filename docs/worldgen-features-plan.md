@@ -854,6 +854,14 @@ placement 链、栈 DFS 交错、`Context::uncached()`、603 行
 蘑菇/地毯存活判定）、`3479dd3`（修 `HashMap` 的 resize 顺序 + 记录树化限制）。
 开工前合入 main 的 `753d877`（地形真实路径修复）。
 
+合并进 main 前（`a486b4e`）又做了一次收尾：合入 main 的树 / 倒木 / 巨型蘑菇 /
+`shape_update.rs`；`weighted_list` 取 main 已有一份（`Box<IntProvider>` 版，更通用），
+删掉本分支的那份；`environment_scan` / `surface_relative_threshold_filter` /
+`multiface` / `JavaPosSet` / `vegetation_patch` / `block_state_provider` 的
+`parse_with` main 上没有，保留本分支的。
+`waterlogged_vegetation_patch` 因为**完全没对拍**，`e71a389` 里改成不接入
+（`place_feature` 只认 `minecraft:vegetation_patch`），代码留着，标 `unsupported`。
+
 本轮落地：
 
 * `feature/java_set.rs`：复刻 `java.util.HashSet<BlockPos>` 的迭代顺序。
