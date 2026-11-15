@@ -16,7 +16,7 @@
 //! planks, cobweb, spawner, iron chain) is identity. Only those three are implemented;
 //! unhandled blocks pass through, matching the vanilla default.
 
-use mc_bamboo_data::{block_id_of_state, block_of_state};
+use mc_bamboo_data::{BlockClass, block_id_of_state, block_of_state};
 
 use crate::structure::piece_place::with_property;
 
@@ -115,31 +115,34 @@ pub fn apply_mirror(state: u32, mirror: Mirror) -> u32 {
     let Some(block) = block_of_state(state) else {
         return state;
     };
-    match block.name {
-        // `WallTorchBlock.mirror`：`state.rotate(mirror.getRotation(FACING))`。
-        // `ButtonBlock` 继承 `HorizontalDirectionalBlock`，实现相同。
-        // `WallTorchBlock.mirror`, and `ButtonBlock` via `HorizontalDirectionalBlock`.
-        n if is_horizontal_facing(n) => {
-            let Some(facing) = property_of(state, "facing") else {
-                return state;
-            };
-            let implied = mirror.get_rotation(facing);
-            with_property(state, "facing", implied.rotate_facing(facing)).unwrap_or(state)
-        }
+    match block.class {
+        // 这五类都继承 `HorizontalDirectionalBlock`（或行为相同）：只按
+        // `mirror.getRotation(FACING)` 旋转 `facing`。
+        // These all behave like `HorizontalDirectionalBlock`: rotate `facing` by
+        // `mirror.getRotation(FACING)`.
+        BlockClass::WallTorchBlock
+        | BlockClass::ButtonBlock
+        | BlockClass::LadderBlock
+        | BlockClass::ChestBlock
+        | BlockClass::TrappedChestBlock
+        | BlockClass::EnderChestBlock
+        | BlockClass::EndPortalFrameBlock
+        | BlockClass::RedstoneWallTorchBlock
+        | BlockClass::CopperChestBlock
+        | BlockClass::WeatheringCopperChestBlock => mirror_facing(state, mirror),
         // `DoorBlock.mirror`：先按 `mirror.getRotation(FACING)` 旋转，再 `cycle(HINGE)`。
         // `DoorBlock.mirror`: rotate by `mirror.getRotation(FACING)` then `cycle(HINGE)`.
-        n if is_door(n) => {
-            let Some(facing) = property_of(state, "facing") else {
-                return state;
-            };
-            let implied = mirror.get_rotation(facing);
-            let rotated =
-                with_property(state, "facing", implied.rotate_facing(facing)).unwrap_or(state);
-            cycle_hinge(rotated)
-        }
+        BlockClass::DoorBlock => cycle_hinge(mirror_facing(state, mirror)),
+        // `StairBlock.mirror`：Z 轴方向（LEFT_RIGHT）或 X 轴方向（FRONT_BACK）时整体转 180°
+        // 并按镜像翻转 `shape`。
+        // `StairBlock.mirror`: turn 180° and flip `shape` when the axis matches.
+        BlockClass::StairBlock => mirror_stairs(state, mirror),
         // `CrossCollisionBlock.mirror`：LEFT_RIGHT 交换 north/south，FRONT_BACK 交换 east/west。
         // `CrossCollisionBlock.mirror`: LEFT_RIGHT swaps north/south, FRONT_BACK east/west.
-        name if is_cross_collision(name) => {
+        BlockClass::FenceBlock
+        | BlockClass::WallBlock
+        | BlockClass::IronBarsBlock
+        | BlockClass::StainedGlassPaneBlock => {
             let pairs: &[(&str, &str)] = match mirror {
                 Mirror::LeftRight => &[("north", "south"), ("south", "north")],
                 Mirror::FrontBack => &[("east", "west"), ("west", "east")],
@@ -149,6 +152,64 @@ pub fn apply_mirror(state: u32, mirror: Mirror) -> u32 {
         }
         _ => state,
     }
+}
+
+/// `state.rotate(mirror.getRotation(FACING))`：mirror 对单一 `facing` 的那条路径。
+///
+/// `state.rotate(mirror.getRotation(FACING))`: the single-`facing` mirror path.
+fn mirror_facing(state: u32, mirror: Mirror) -> u32 {
+    let Some(facing) = property_of(state, "facing") else {
+        return state;
+    };
+    let implied = mirror.get_rotation(facing);
+    with_property(state, "facing", implied.rotate_facing(facing)).unwrap_or(state)
+}
+
+/// `StairBlock.mirror`：`LEFT_RIGHT` 且朝 Z 轴、或 `FRONT_BACK` 且朝 X 轴时，
+/// 整体 `rotate(CLOCKWISE_180)` 并按 `shape` 翻转；其它情况走父类（恒等）。
+///
+/// `StairBlock.mirror`: with `LEFT_RIGHT` on a Z facing or `FRONT_BACK` on an X facing,
+/// rotate 180° and flip `shape`; otherwise the parent (identity).
+fn mirror_stairs(state: u32, mirror: Mirror) -> u32 {
+    let Some(facing) = property_of(state, "facing") else {
+        return state;
+    };
+    let axis_z = matches!(facing, "north" | "south");
+    let axis_x = matches!(facing, "east" | "west");
+    let applies = match mirror {
+        Mirror::LeftRight => axis_z,
+        Mirror::FrontBack => axis_x,
+        Mirror::None => false,
+    };
+    if !applies {
+        return state;
+    }
+    let shape = property_of(state, "shape").unwrap_or("straight");
+    // `LEFT_RIGHT`（Z 轴）：outer/inner 的左右互换；`FRONT_BACK`（X 轴）：
+    // straight / inner 不变，outer 左右互换。
+    // `LEFT_RIGHT` (Z axis) swaps the left/right of outer and inner; `FRONT_BACK`
+    // (X axis) keeps straight/inner and swaps outer.
+    let new_shape = match (mirror, shape) {
+        (Mirror::LeftRight, "outer_left") => "outer_right",
+        (Mirror::LeftRight, "outer_right") => "outer_left",
+        (Mirror::LeftRight, "inner_left") => "inner_right",
+        (Mirror::LeftRight, "inner_right") => "inner_left",
+        (Mirror::FrontBack, "outer_left") => "outer_right",
+        (Mirror::FrontBack, "outer_right") => "outer_left",
+        _ => shape,
+    };
+    let rotated = rotate_facing_state(state, Rotation::Clockwise180);
+    with_property(rotated, "shape", new_shape).unwrap_or(rotated)
+}
+
+/// 只旋转 `facing` 的那一半（`StairBlock.rotate` 的行为）。
+///
+/// Just the `facing` half (`StairBlock.rotate`'s behaviour).
+fn rotate_facing_state(state: u32, rotation: Rotation) -> u32 {
+    let Some(facing) = property_of(state, "facing") else {
+        return state;
+    };
+    with_property(state, "facing", rotation.rotate_facing(facing)).unwrap_or(state)
 }
 
 /// `BlockState.rotate(rotation)`。
@@ -161,27 +222,29 @@ pub fn apply_rotation(state: u32, rotation: Rotation) -> u32 {
     let Some(block) = block_of_state(state) else {
         return state;
     };
-    match block.name {
-        // `WallTorchBlock.rotate`：`state.setValue(FACING, rotation.rotate(FACING))`。
-        // `ButtonBlock` 继承 `HorizontalDirectionalBlock`，实现相同。
-        // `WallTorchBlock.rotate`, and `ButtonBlock` via `HorizontalDirectionalBlock`.
-        n if is_horizontal_facing(n) => {
-            let Some(facing) = property_of(state, "facing") else {
-                return state;
-            };
-            with_property(state, "facing", rotation.rotate_facing(facing)).unwrap_or(state)
-        }
-        // `DoorBlock.rotate`：只旋转 `facing`，不动 `hinge`。
-        // `DoorBlock.rotate`: only `facing` turns; `hinge` stays.
-        n if is_door(n) => {
-            let Some(facing) = property_of(state, "facing") else {
-                return state;
-            };
-            with_property(state, "facing", rotation.rotate_facing(facing)).unwrap_or(state)
-        }
+    match block.class {
+        // `HorizontalDirectionalBlock.rotate`：只转 `facing`。
+        // `HorizontalDirectionalBlock.rotate`: only `facing` turns.
+        BlockClass::WallTorchBlock
+        | BlockClass::ButtonBlock
+        | BlockClass::LadderBlock
+        | BlockClass::ChestBlock
+        | BlockClass::TrappedChestBlock
+        | BlockClass::EnderChestBlock
+        | BlockClass::EndPortalFrameBlock
+        | BlockClass::RedstoneWallTorchBlock
+        | BlockClass::CopperChestBlock
+        | BlockClass::WeatheringCopperChestBlock
+        // `DoorBlock.rotate` 和 `StairBlock.rotate` 同样只转 `facing`（不动 `hinge` / `shape`）。
+        // `DoorBlock.rotate` and `StairBlock.rotate` also only turn `facing`.
+        | BlockClass::DoorBlock
+        | BlockClass::StairBlock => rotate_facing_state(state, rotation),
         // `CrossCollisionBlock.rotate` 的四个分支照抄。
         // The four `CrossCollisionBlock.rotate` branches, transcribed.
-        name if is_cross_collision(name) => {
+        BlockClass::FenceBlock
+        | BlockClass::WallBlock
+        | BlockClass::IronBarsBlock
+        | BlockClass::StainedGlassPaneBlock => {
             let pairs: &[(&str, &str)] = match rotation {
                 Rotation::Clockwise180 => &[
                     ("north", "south"),
@@ -205,7 +268,11 @@ pub fn apply_rotation(state: u32, rotation: Rotation) -> u32 {
             };
             swap_properties(state, pairs)
         }
-        name if is_rail(name) => {
+        // `BaseRailBlock.rotate`：转 `shape`。
+        // `BaseRailBlock.rotate` turns `shape`.
+        BlockClass::RailBlock
+        | BlockClass::PoweredRailBlock
+        | BlockClass::DetectorRailBlock => {
             let Some(shape) = property_of(state, "shape") else {
                 return state;
             };
@@ -280,51 +347,6 @@ fn keep(shape: &str) -> &'static str {
     }
 }
 
-/// 是不是 `CrossCollisionBlock` 的子类（栅栏、墙、玻璃板、铁栏杆……）。
-///
-/// Whether the block is a `CrossCollisionBlock` subclass (fences, walls, panes, bars).
-fn is_cross_collision(name: &str) -> bool {
-    name.ends_with("_fence")
-        || name.ends_with("_fence_gate")
-        || name.ends_with("_wall")
-        || name.ends_with("_pane")
-        || name == "minecraft:iron_bars"
-}
-
-/// 是不是 `HorizontalDirectionalBlock` 的子类、且只有 `facing` 一个朝向属性
-/// （墙上火把、按钮、箱子、熔炉……）。要塞用到的是墙上火把和石按钮。
-///
-/// Whether the block is a `HorizontalDirectionalBlock` subclass whose only direction
-/// property is `facing` (wall torches, buttons, chests, furnaces, ...). The stronghold
-/// uses wall torches and stone buttons.
-fn is_horizontal_facing(name: &str) -> bool {
-    matches!(
-        name,
-        "minecraft:wall_torch"
-            | "minecraft:stone_button"
-            | "minecraft:oak_button"
-            | "minecraft:spruce_button"
-            | "minecraft:birch_button"
-            | "minecraft:jungle_button"
-            | "minecraft:acacia_button"
-            | "minecraft:dark_oak_button"
-            | "minecraft:cherry_button"
-            | "minecraft:pale_oak_button"
-            | "minecraft:mangrove_button"
-            | "minecraft:bamboo_button"
-            | "minecraft:crimson_button"
-            | "minecraft:warped_button"
-            | "minecraft:polished_blackstone_button"
-    )
-}
-
-/// 是不是 `DoorBlock`（需要额外的 `cycle(HINGE)`）。
-///
-/// Whether the block is a `DoorBlock` (needs the extra `cycle(HINGE)`).
-fn is_door(name: &str) -> bool {
-    name.ends_with("_door") && name != "minecraft:iron_trapdoor"
-}
-
 /// `with_property` 的多属性版：按给定顺序逐个设置，任一失败就保留原状态。
 ///
 /// Multi-property `with_property`: apply each pair in order, keeping the state as-is if
@@ -348,23 +370,10 @@ fn cycle_hinge(state: u32) -> u32 {
     with_property(state, "hinge", flipped).unwrap_or(state)
 }
 
-/// 是不是 `BaseRailBlock` 的子类。
-///
-/// Whether the block is a `BaseRailBlock` subclass.
-fn is_rail(name: &str) -> bool {
-    matches!(
-        name,
-        "minecraft:rail"
-            | "minecraft:powered_rail"
-            | "minecraft:detector_rail"
-            | "minecraft:activator_rail"
-    )
-}
-
 /// 读一个属性值。
 ///
 /// Read one property value.
-fn property_of(state: u32, name: &str) -> Option<&'static str> {
+pub fn property_of(state: u32, name: &str) -> Option<&'static str> {
     let block = block_of_state(state)?;
     let mut stride = 1_u32;
     for property in block.properties.iter().rev() {

@@ -18,11 +18,11 @@ use mc_bamboo_data::block_id_of_state;
 
 use crate::random::WorldgenRandom;
 use crate::structure::piece_place::{
-    BlockSelector, PieceLevel, block, box_is_inside, is_air, is_interior, maybe_generate_block,
-    with_property,
+    BlockSelector, PieceLevel, block, box_is_inside, is_air, is_block, is_interior,
+    is_solid_render, maybe_generate_block, with_property,
 };
 use crate::structure::pieces::HDir;
-use crate::structure::state_transform::with_props;
+use crate::structure::state_transform::{property_of, with_props};
 
 /// 要塞结构件放置的公共状态。
 ///
@@ -306,15 +306,99 @@ fn create_chest(piece: &mut StrongholdPiece<'_>, random: &WorldgenRandom, x: i32
     if !box_is_inside(&piece.chunk_bb, wx, wy, wz) {
         return;
     }
-    piece.ctx.place_block(
-        piece.level,
-        block("minecraft:chest"),
-        x,
-        y,
-        z,
-        &piece.chunk_bb,
-    );
+    // 官方 `createChest` 在 `blockState == null` 时先调 `reorient` 定朝向。
+    // Vanilla's `createChest` calls `reorient` for the facing when `blockState` is null.
+    let chest = reorient(piece.level, wx, wy, wz, block("minecraft:chest"));
+    piece
+        .ctx
+        .place_block(piece.level, chest, x, y, z, &piece.chunk_bb);
     random.next_long();
+}
+
+/// `StructurePiece.reorient`：按相邻可渲染实心方块决定箱子朝向。
+///
+/// 迭代顺序是 `Direction.Plane.HORIZONTAL` 的 `NORTH, EAST, SOUTH, WEST`：
+/// * 相邻有箱子 → 原样返回；
+/// * 恰好一个方向是实心 → 朝向它的**反方向**；
+/// * 否则从当前朝向起，依次看前 / 反 / 顺时针 / 反，挑第一个后面是实心的。
+///
+/// `StructurePiece.reorient`: pick the chest facing from the neighbouring
+/// solid-render blocks, iterating `NORTH, EAST, SOUTH, WEST`.
+pub fn reorient(level: &dyn PieceLevel, x: i32, y: i32, z: i32, state: u32) -> u32 {
+    // `Direction.Plane.HORIZONTAL` 的顺序就是 `reorient` 的迭代顺序。
+    // `Plane.HORIZONTAL`'s order is `reorient`'s iteration order.
+    let horizontal = [
+        ("north", (0, -1)),
+        ("east", (1, 0)),
+        ("south", (0, 1)),
+        ("west", (-1, 0)),
+    ];
+    let mut solid_neighbour: Option<&str> = None;
+    for (name, (dx, dz)) in horizontal {
+        let neighbour = level.get_block(x + dx, y, z + dz);
+        if is_block(neighbour, "minecraft:chest") {
+            return state;
+        }
+        if is_solid_render(neighbour) {
+            if solid_neighbour.is_some() {
+                solid_neighbour = None;
+                break;
+            }
+            solid_neighbour = Some(name);
+        }
+    }
+
+    if let Some(direction) = solid_neighbour {
+        return with_property(state, "facing", opposite_of(direction)).unwrap_or(state);
+    }
+
+    let mut lock = property_of(state, "facing").unwrap_or("north");
+    let step = step_of(lock);
+    if is_solid_render(level.get_block(x + step.0, y, z + step.1)) {
+        lock = opposite_of(lock);
+    }
+    let step = step_of(lock);
+    if is_solid_render(level.get_block(x + step.0, y, z + step.1)) {
+        lock = rotate_step(lock, 1);
+    }
+    let step = step_of(lock);
+    if is_solid_render(level.get_block(x + step.0, y, z + step.1)) {
+        lock = opposite_of(lock);
+    }
+    with_property(state, "facing", lock).unwrap_or(state)
+}
+
+/// `Direction.getOpposite()` 的名称版（水平四方向）。
+///
+/// Name form of `Direction.getOpposite()` for the four horizontal facings.
+fn opposite_of(facing: &'static str) -> &'static str {
+    match facing {
+        "north" => "south",
+        "south" => "north",
+        "east" => "west",
+        _ => "east",
+    }
+}
+
+/// 水平朝向的 `(dx, dz)`。
+///
+/// `(dx, dz)` of a horizontal facing.
+fn step_of(facing: &'static str) -> (i32, i32) {
+    match facing {
+        "north" => (0, -1),
+        "south" => (0, 1),
+        "east" => (1, 0),
+        _ => (-1, 0),
+    }
+}
+
+/// `Direction.getClockWise()`，按 `NORTH, EAST, SOUTH, WEST` 的顺序转 `steps` 步。
+///
+/// `Direction.getClockWise()`, `steps` times around `NORTH, EAST, SOUTH, WEST`.
+fn rotate_step(facing: &'static str, steps: usize) -> &'static str {
+    let order = ["north", "east", "south", "west"];
+    let index = order.iter().position(|&n| n == facing).unwrap_or(0);
+    order[(index + steps) % 4]
 }
 
 /// `FillerCorridor.postProcess`：`steps` 段石头砖通道，中间三格挖空。
