@@ -780,7 +780,15 @@ fn write(
     writes: &mut Vec<(i32, i32, i32, u32)>,
     record: bool,
 ) -> bool {
-    let written = world.set_block(pos.0, pos.1, pos.2, state);
+    // 官方走 `ProtoChunk.setBlockState`，它会对 `getPersistedStatus().heightmapsAfter()`
+    // （`FEATURES` 阶段是四种 FINAL 高度图）做增量更新。`StructureStart.placeInChunk` 对
+    // 3×3 每个区块各调一次 `postProcess`，后面的区块用 `getHeight` 校正 Y，所以这里必须
+    // 更新高度图，否则第二次起的 `getHeight` 会和官方不同。
+    // Vanilla goes through `ProtoChunk.setBlockState`, which incrementally updates
+    // `getPersistedStatus().heightmapsAfter()` (the four FINAL maps at `FEATURES`).
+    // `placeInChunk` calls `postProcess` once per chunk of the 3×3, and later chunks use
+    // `getHeight` to adjust Y, so the heightmaps must be updated here.
+    let written = world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
     if written && record {
         writes.push((pos.0, pos.1, pos.2, state));
     }
