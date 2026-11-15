@@ -405,8 +405,12 @@ fn run_pools(mut command: Command, work_dir: &Path) -> Result<(), String> {
     names.sort();
 
     let mut queries = Vec::new();
-    for &seed in &SEEDS[..2] {
-        for &(cx, cz) in &CHUNKS[..2] {
+    // 每个池都跑一遍所有 (seed, chunk) 组合：池的洗牌与选中顺序依赖随机源，
+    // 多跑几组才能覆盖不同路径。
+    // Every pool runs under all (seed, chunk) pairs; the pool's shuffle and selection
+    // order depend on the random source, so more pairs cover more paths.
+    for &seed in &SEEDS[..3] {
+        for &(cx, cz) in &CHUNKS[..3] {
             for name in &names {
                 queries.push(format!("{name}|{seed}|{cx}|{cz}"));
             }
