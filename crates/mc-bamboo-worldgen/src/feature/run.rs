@@ -142,6 +142,7 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 registry: ctx.registry,
                 top_feature: Some(placed_id),
             };
+            crate::perf::feature_begin(step, placed_id);
             // 组合类会在 Feature.place 里递归再走一轮修饰器链；整棵树是否都移植
             // 由 place_placed 汇总，任一未移植分支都让本区块标 unsupported。
             // Composition features recurse into more placement chains inside Feature.place;
@@ -155,6 +156,7 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 &random,
                 origin,
             );
+            crate::perf::feature_end();
             if !outcome.supported {
                 unsupported = true;
             }

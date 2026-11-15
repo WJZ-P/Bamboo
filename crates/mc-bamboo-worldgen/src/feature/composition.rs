@@ -166,8 +166,7 @@ pub fn place_placed<'a>(
     {
         Ok(modifiers) => modifiers,
         Err(_) => return PlaceOutcome::unsupported(),
-    };
-    if modifiers.iter().any(|m| !m.is_supported()) {
+    };    if modifiers.iter().any(|m| !m.is_supported()) {
         return PlaceOutcome::unsupported();
     }
     let kind = kind.as_str();

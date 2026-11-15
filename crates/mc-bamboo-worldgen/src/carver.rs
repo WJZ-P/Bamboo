@@ -552,6 +552,7 @@ impl Carvers {
         if mask.is_empty() {
             return Ok(());
         }
+        crate::perf::mark(crate::perf::Phase::CarverApply);
         self.apply_mask(
             &mask,
             layers,
@@ -712,6 +713,9 @@ impl Carvers {
         // Both paths' `topMaterial` uses `withDifferentSource(createUncachedResolver)`, so
         // this stays on the single-point, non-folding source.
         let biome_getter = BiomeGetter::Uncached(biome_manager);
+        // 测量「只生成切割线以上」时，低于切割线的格子已经当作不存在，不再改写。
+        // When measuring "only above the cut line", rows below it are treated as absent.
+        let floor = crate::perf::floors().carver.unwrap_or(i32::MIN);
         let mut error = None;
         mask.visit(&mut |x, z, from, to| {
             if error.is_some() {
@@ -721,6 +725,9 @@ impl Carvers {
             let block_z = min_z + z;
             let mut surface_flag = false;
             for y in (from..=to).rev() {
+                if y < floor {
+                    break;
+                }
                 let state = layer_get(layers, settings.min_y, x, y, z);
                 let block_id = block_id_of_state(state).unwrap_or(0) as i32;
                 if uncarvable.contains(&block_id) {

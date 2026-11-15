@@ -40,7 +40,7 @@ mc-bamboo-recipes = { workspace = true, optional = true }
 mc-bamboo-server = { workspace = true, optional = true }
 mc-bamboo-storage = { workspace = true, optional = true }
 mc-bamboo-world = { workspace = true, optional = true }
-mc-bamboo-worldgen = { workspace = true, optional = true }
+mc-bamboo-worldgen = { workspace = true, optional = true, features = ["perf"] }
 rand_core = { workspace = true, optional = true }
 rsa = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }

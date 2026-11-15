@@ -256,6 +256,7 @@ impl<'a> Generator<'a> {
     ///
     /// 返回每个 section 的 64 个 quart 格（下标 `y*16 + z*4 + x`）的群系注册表 ID。
     pub fn biomes(&self, chunk_x: i32, chunk_z: i32) -> Result<Vec<Vec<u32>>, String> {
+        crate::perf::mark(crate::perf::Phase::Biomes);
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         let sections = (height / 16) as usize;
@@ -312,6 +313,7 @@ impl<'a> Generator<'a> {
         for column in columns {
             context.release(column);
         }
+        crate::perf::pause();
         Ok(result)
     }
 
@@ -388,12 +390,28 @@ impl<'a> Generator<'a> {
     ) -> Result<Vec<Vec<u32>>, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
-        let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
+        crate::perf::mark(crate::perf::Phase::TerrainSetup);
+        // 测量时可能只算切割线以上的密度（见 `perf::Floors`），默认就是整个高度。
+        // Measurement may only fill the density above a cut line (see `perf::Floors`);
+        // by default the whole column is generated.
+        let floor = crate::perf::floors()
+            .noise
+            .unwrap_or(min_y)
+            .clamp(min_y, min_y + height - 1);
+        let density_min_y = if floor > min_y { floor } else { min_y };
+        let density_height = min_y + height - density_min_y;
+        let volume = Volume::blocks(
+            (16, density_height, 16),
+            (chunk_x * 16, density_min_y, chunk_z * 16),
+        );
         let mut context = Context::new(self.cache_count);
         if let Some(beardifier) = beardifier {
             context.set_beardifier(std::sync::Arc::new(beardifier.clone()));
         }
         let mut density = context.acquire(volume.len());
+        let lava = lava_state()?;
+        crate::perf::note_density_floor(density_min_y);
+        crate::perf::mark(crate::perf::Phase::AquiferInit);
         // 官方先建 NoiseChunk（含水层的构造器也在这里求值），再算 finalDensity。
         // Rust 借检查不让两件事同时抱着 context，所以先建含水层，再算密度。
         let aquifer = self.aquifer.as_ref().ok_or("dimension has no aquifers")?;
@@ -404,26 +422,35 @@ impl<'a> Generator<'a> {
             &volume,
             self.settings.sea_level,
             self.default_fluid,
-            lava_state()?,
+            lava,
             self.empty,
         );
+        crate::perf::note_skip_above(aquifer.skip_sampling_above_y());
+        crate::perf::mark(crate::perf::Phase::NoiseDensity);
         self.router
             .final_density
             .sample_volume(&mut context, &mut density, &volume);
 
+        crate::perf::mark(crate::perf::Phase::Substance);
         let mut layers = vec![vec![self.empty; 256]; height as usize];
+        // 切割线以下不生成：按默认方块填满（只为让下游阶段有东西可读，不代表官方结果）。
+        // Below the cut line nothing is generated: fill with the default block so later
+        // stages have something to read (this is not the vanilla result).
+        for layer in layers.iter_mut().take((density_min_y - min_y) as usize) {
+            layer.fill(self.default_block);
+        }
         for z in 0..16 {
             let block_z = chunk_z * 16 + z;
             for x in 0..16 {
                 let block_x = chunk_x * 16 + x;
-                for local_y in (0..height).rev() {
-                    let block_y = min_y + local_y;
+                for local_y in (0..density_height).rev() {
+                    let block_y = density_min_y + local_y;
                     let value = f64::from(density[volume.index(x, local_y, z)]);
                     let state = aquifer
                         .compute_substance(&mut context, block_x, block_y, block_z, value)
                         .unwrap_or(self.default_block);
                     if state != self.empty {
-                        layers[local_y as usize][x as usize * 16 + z as usize] = state;
+                        layers[(block_y - min_y) as usize][x as usize * 16 + z as usize] = state;
                     }
                 }
             }
@@ -439,6 +466,7 @@ impl<'a> Generator<'a> {
         };
         let possible_biomes = region.map(RegionBiomes::possible_biomes);
         if stage >= Stage::Surface {
+            crate::perf::mark(crate::perf::Phase::Surface);
             self.material.build_surface(
                 &mut layers,
                 chunk_x,
@@ -453,6 +481,7 @@ impl<'a> Generator<'a> {
             )?;
         }
         if stage >= Stage::Carvers {
+            crate::perf::mark(crate::perf::Phase::CarverMask);
             self.carvers.generate(
                 &mut layers,
                 chunk_x,
@@ -468,7 +497,46 @@ impl<'a> Generator<'a> {
                 self.seed,
             )?;
         }
+        crate::perf::pause();
         Ok(layers)
+    }
+
+    /// 只把 `finalDensity` 在某一段 y 上成批求值一遍，返回耗时（毫秒）。
+    ///
+    /// 测量用：把 y=-64..320 切成 48 个 8 格高的小段，各跑一次，得到噪声填充的
+    /// 高度分布。每段单独成批求值和整块一次求值的浮点结果不同，但**只用来计时**；
+    /// 含水层不参与，所以 `computeSubstance` 的开销不算在这里。
+    ///
+    /// Sample `finalDensity` over one y span and return the elapsed milliseconds.
+    /// Measurement only: slicing y=-64..320 into forty-eight 8-block spans and running
+    /// each gives the noise fill's height profile. A span sampled alone differs in the
+    /// last bits from one whole-volume pass, but this is only for timing; the aquifer is
+    /// not involved, so `computeSubstance` is not included.
+    #[cfg(feature = "perf")]
+    pub fn sample_density_span(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        from_y: i32,
+        to_y: i32,
+    ) -> Result<f64, String> {
+        let min_y = self.settings.min_y;
+        let height = self.settings.height;
+        let from_y = from_y.clamp(min_y, min_y + height - 1);
+        let to_y = to_y.clamp(from_y, min_y + height - 1);
+        let volume = Volume::blocks(
+            (16, to_y - from_y + 1, 16),
+            (chunk_x * 16, from_y, chunk_z * 16),
+        );
+        let mut context = Context::new(self.cache_count);
+        let mut density = context.acquire(volume.len());
+        let start = std::time::Instant::now();
+        self.router
+            .final_density
+            .sample_volume(&mut context, &mut density, &volume);
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        context.release(density);
+        Ok(elapsed)
     }
 
     /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight(x, z, WORLD_SURFACE_WG, ...)`。
