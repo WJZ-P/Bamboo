@@ -518,6 +518,42 @@ header / features 行里的 `steps` 掩码。
   Rust 侧按 `PropertyDef` 精确还原 ID。
 * `finish()` 打印新增的「features 比较了多少块、跳过多少块、跳过原因分布」。
 
+### 4.5 给带 `biome` 修饰器的地物找定点区块
+
+只在少数群系出现、placement 链里又带 `biome` 修饰器的地物（藤蔓、带 `biome` 的树等），
+随机抽区块很容易一次都碰不到，跑出来「0 不一致」其实是空跑。
+
+**要点：定点区块必须用 `BiomeManager::biome` 扫，不能用 `Generator::biomes`。**
+`biome` 修饰器的 `BiomeFilter.shouldPlace` 走的是
+`LevelReader.getBiome` → `BiomeManager.getBiome`，它是**按 octave 噪声做三维插值**
+（`fiddled_corner`）后查最近 quart 角；而 `Generator::biomes` 是直接读 quart 格。
+两条路径在同一个区块上可能给出**不同群系**，第 10 轮验证藤蔓时就踩过这个坑：
+用 `Generator::biomes` 扫出来的丛林区块 `(-784,-132)`，`biome` 修饰器把 127 个候选
+全判成了 `lukewarm_ocean`，叶子被调用 0 次。
+
+做法（写一个临时集成测试，用完删掉）：
+
+```rust
+let generator = Generator::new(&worldgen, seed)?;
+let manager = BiomeManager::new(generator.biome_source(), seed);
+let samplers = generator.samplers();
+let mut context = Context::uncached();
+// 对一个候选区块，在目标 y 范围内采样若干点，统计目标群系命中数。
+let biome = manager.biome(samplers, &mut context, cx * 16 + dx, y, cz * 16 + dz);
+```
+
+种子 0 的 `chunk (-600, -438)` 在 y=70/80/90 的 27 个采样点全是 `minecraft:jungle`，
+用它跑 `--seeds 1 --chunk -600 -438 --scan 3 --steps 9 --feature-types minecraft:vines`
+得到 0 不一致，且临时日志确认叶子被调用 1312 次。
+
+**另外两点**：
+* `--feature-types` 的每个条目可以是 **placed feature 的注册名**（如
+  `minecraft:glow_lichen`），也可以是 **Feature 类型 ID**（如 `minecraft:multiface_growth`），
+  两边都是精确匹配其一。写错成方块名（如把 `minecraft:glow_lichen` 当 Feature 类型）
+  会被当成 placed feature 名匹配上，看起来一样能跑，容易误判。
+* 确认「真的比到了」的两种做法见 `cur-next-round.md`：定点 `--chunk X Z --scan 3`，
+  或者整批跑完后做一次「故意改坏」并确认每个类型都报不一致。
+
 ### 4.4 种子/区块规模和耗时
 
 `chunkgen` 现有 `--seeds 6 --chunks 36 --salt 1` 是 216 个中心区块；features 阶段每个
