@@ -477,6 +477,27 @@ pub fn process_blocks(
     processed
 }
 
+/// `CappedProcessor.finalizeProcessing` 用的随机源：
+/// `RandomSource.createThreadLocalInstance(levelSeed).forkPositional().at(position)`。
+///
+/// The random source `CappedProcessor.finalizeProcessing` uses:
+/// `RandomSource.createThreadLocalInstance(levelSeed).forkPositional().at(position)`.
+pub fn capped_random(level_seed: i64, piece_position: (i32, i32, i32)) -> Random {
+    Random::Legacy(LegacyRandom::new(level_seed))
+        .fork_positional()
+        .at(piece_position.0, piece_position.1, piece_position.2)
+}
+
+/// `Util.toShuffledList(IntStream.range(0, size), random)` 取前 `count` 个。
+///
+/// The first `count` entries of `Util.toShuffledList(IntStream.range(0, size), random)`.
+pub fn capped_indices(size: usize, count: usize, random: &Random) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..size).collect();
+    shuffle(&mut indices, random);
+    indices.truncate(count.min(size));
+    indices
+}
+
 /// `finalize_capped` 的输入，避免参数过多。
 ///
 /// Inputs of `finalize_capped`, kept in one place to avoid a long argument list.
@@ -515,17 +536,20 @@ fn finalize_capped<L: ProcessorLevel>(input: CappedInput<'_, L>) -> Vec<ProcessB
     // 先 fork 位置工厂再按结构件位置取随机源。
     // `RandomSource.createThreadLocalInstance(levelSeed).forkPositional().at(position)`:
     // fork the positional factory from the level seed, then position it at the piece.
-    let random = Random::Legacy(LegacyRandom::new(level_seed))
-        .fork_positional()
-        .at(piece_position.0, piece_position.1, piece_position.2);
+    let random = capped_random(level_seed, piece_position);
     let max_to_replace = limit.min(processed.len() as i32);
     if max_to_replace < 1 {
         return processed;
     }
-    // `Util.toShuffledList(IntStream.range(0, size), random)`。
-    // `Util.toShuffledList(IntStream.range(0, size), random)`.
-    let mut indices: Vec<usize> = (0..processed.len()).collect();
-    shuffle(&mut indices, &random);
+    // `Util.toShuffledList(IntStream.range(0, size), random)`：**完整**序列，
+    // 不在这里截断。官方靠循环里的 `replaced < maxToReplace` 提前退出，
+    // 而 `replaced` 只在真正改动时递增，所以没改动的下标不消耗配额、必须继续往后取。
+    // 提前截断会漏掉后面的下标。
+    // `Util.toShuffledList(IntStream.range(0, size), random)`: the **full** sequence is
+    // needed here. Vanilla exits early on `replaced < maxToReplace`, and `replaced` only
+    // increments on real changes, so indices that change nothing do not consume the quota
+    // and later ones must still be tried. Truncating first would skip them.
+    let indices = capped_indices(processed.len(), processed.len(), &random);
     let mut replaced = 0;
     for index in indices {
         if replaced >= max_to_replace {

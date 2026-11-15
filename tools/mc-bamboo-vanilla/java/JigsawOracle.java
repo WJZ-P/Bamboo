@@ -173,6 +173,7 @@ public final class JigsawOracle {
                     case "load" -> runLoad(manager, registries, Path.of(args[1]));
                     case "apply" -> runApply(registries, Path.of(args[1]));
                     case "capped" -> runCapped(registries, Path.of(args[1]));
+                    case "cappedraw" -> runCappedRaw(Path.of(args[1]));
                     case "cappedfull" -> runCappedFull(registries, Path.of(args[1]));
                     case "placepiece" -> runPlacePiece(manager, registries, Path.of(args[1]));
                     case "waterpiece" -> runWaterPiece(manager, registries, Path.of(args[1]));
@@ -1136,6 +1137,72 @@ public final class JigsawOracle {
      * `finalizeProcessing` really performs the capped replacement, and prints the final
      * surviving blocks — the end-to-end check the piecewise `capped` mode cannot give.
      */
+    /**
+     * cappedraw 模式：queries 每行 {@code seed|pieceX|pieceY|pieceZ|listSize|limit}。
+     * 只复算 `CappedProcessor.finalizeProcessing` 的三段随机路径，不做任何方块处理：
+     * `limit.sample(random)`、`min(size)`、`toShuffledList` 的**完整**序列与前
+     * `maxToReplace` 个，外加原始 `nextInt(1000)` 序列。这是给 `capped` 端到端比
+     * 提供细粒度定位用的诊断模式：如果将来某个随机序列对不上，这里能直接指出是
+     * 随机源派生、洗牌、还是取样出了问题。
+     *
+     * <p>Capped-raw mode: replays only the three random stages of
+     * `CappedProcessor.finalizeProcessing` (`limit.sample`, `min(size)`, the full
+     * `toShuffledList` and its `maxToReplace` prefix) plus a raw `nextInt(1000)` sequence.
+     * It exists to localise failures that the end-to-end `capped` mode can only report.
+     */
+    private static void runCappedRaw(Path queries) throws Exception {
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.trim().split("\\|");
+            long seed = Long.parseLong(p[0]);
+            BlockPos piece = new BlockPos(
+                    Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3]));
+            int listSize = Integer.parseInt(p[4]);
+            int limit = Integer.parseInt(p[5]);
+            var random = RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece);
+            int sampled = net.minecraft.util.valueproviders.ConstantInt.of(limit).sample(random);
+            int maxToReplace = Math.max(Math.min(sampled, listSize), 0);
+            var indices = net.minecraft.util.Util.toShuffledList(
+                    java.util.stream.IntStream.range(0, listSize), random);
+            String key = String.join("|", p);
+            out.append("C|").append(key).append('|')
+                    .append(sampled).append('|').append(maxToReplace).append('|');
+            for (int i = 0; i < indices.size(); i++) {
+                if (i > 0) {
+                    out.append(',');
+                }
+                out.append(indices.getInt(i));
+            }
+            out.append('\n');
+            // `T|key|`：截断后的前 `maxToReplace` 个。`finalizeProcessing` 真正会处理的就是这些。
+            // `T|key|`: the first `maxToReplace` entries, exactly what `finalizeProcessing`
+            // would process.
+            out.append("T|").append(key).append('|');
+            int shown = Math.min(maxToReplace, indices.size());
+            for (int i = 0; i < shown; i++) {
+                if (i > 0) {
+                    out.append(',');
+                }
+                out.append(indices.getInt(i));
+            }
+            out.append('\n');
+            var src = RandomSource.createThreadLocalInstance(seed).forkPositional().at(piece);
+            out.append("R|").append(key).append('|');
+            for (int i = 0; i < 8; i++) {
+                if (i > 0) {
+                    out.append(',');
+                }
+                out.append(src.nextInt(1000));
+            }
+            out.append('\n');
+        }
+        System.out.print(out);
+        System.out.flush();
+    }
+
     private static void runCappedFull(RegistryAccess registries, Path queries) throws Exception {
         Registry<StructureProcessorList> reg = registries.lookupOrThrow(Registries.PROCESSOR_LIST);
         StringBuilder out = new StringBuilder();

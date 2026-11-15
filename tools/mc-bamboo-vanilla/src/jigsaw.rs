@@ -96,6 +96,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "load" => run_load(command, work_dir),
         "apply" => run_apply(command, work_dir),
         "capped" => run_capped(command, work_dir),
+        "cappedraw" => run_capped_raw(command, work_dir),
         "cappedfull" => run_capped_full(command, work_dir),
         "placepiece" => run_place_piece(command, work_dir),
         "entities" => run_entities(command, work_dir),
@@ -1519,6 +1520,209 @@ fn wool_colour(index: usize) -> &'static str {
         "minecraft:black_wool",
     ];
     COLOURS[index % COLOURS.len()]
+}
+
+/// `cappedraw` 模式：只比 `finalizeProcessing` 的三段随机路径，
+/// 用产品里的 `capped_random` / `capped_indices` 复算，作为 `capped` 端到端比的
+/// 细粒度定位手段。
+///
+/// `cappedraw` mode: compares only the three random stages of `finalizeProcessing`,
+/// recomputed through the production `capped_random` / `capped_indices`, so a failure in
+/// the end-to-end `capped` mode can be localised.
+fn run_capped_raw(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    let mut queries = Vec::new();
+    for seed in [0_i64, 1, -1, 42, 12_345_678_901, -98_765_432_123] {
+        for piece in [
+            (0, 64, 0),
+            (-13, 40, 27),
+            (100, -50, -200),
+            (-1000, 200, 1000),
+        ] {
+            for list_size in [1_usize, 7, 33] {
+                for limit in [0_i32, 1, 5, 33, 1000] {
+                    queries.push(format!(
+                        "{seed}|{}|{}|{}|{list_size}|{limit}",
+                        piece.0, piece.1, piece.2
+                    ));
+                }
+            }
+        }
+    }
+    let queries_path = work_dir.join("jigsaw_capped_raw_queries.txt");
+    fs::write(&queries_path, queries.join("\n"))
+        .map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("cappedraw")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    compare_capped_raw(&String::from_utf8_lossy(&output.stdout), &queries)
+}
+
+/// 解析 `cappedraw` 的输出并逐项比。
+///
+/// Parse the `cappedraw` output and compare it item by item.
+fn compare_capped_raw(stdout: &str, queries: &[String]) -> Result<(), String> {
+    let mut java_c: HashMap<String, (i32, i32, String)> = HashMap::new();
+    let mut java_r: HashMap<String, String> = HashMap::new();
+    let mut java_t: HashMap<String, String> = HashMap::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() < 7 {
+            continue;
+        }
+        // 查询是 6 段，紧跟 `C|` / `R|` / `T|`。
+        // A query has six fields, right after `C|` / `R|` / `T|`.
+        let key = fields[1..7].join("|");
+        match fields[0] {
+            "C" => {
+                java_c.insert(
+                    key,
+                    (
+                        fields[7].parse().unwrap_or(0),
+                        fields[8].parse().unwrap_or(0),
+                        fields[9..].join("|"),
+                    ),
+                );
+            }
+            "R" => {
+                java_r.insert(key, fields[7..].join("|"));
+            }
+            "T" => {
+                java_t.insert(key, fields[7..].join("|"));
+            }
+            _ => {}
+        }
+    }
+
+    let mut checked = 0usize;
+    let mut indices_checked = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for query in queries {
+        let fields: Vec<&str> = query.split('|').collect();
+        let seed = fields[0]
+            .parse::<i64>()
+            .map_err(|error| format!("bad seed {}: {error}", fields[0]))?;
+        let piece = (
+            parse_i32(fields[1])?,
+            parse_i32(fields[2])?,
+            parse_i32(fields[3])?,
+        );
+        let list_size: usize = parse_i32(fields[4])? as usize;
+        let limit: i32 = parse_i32(fields[5])?;
+        checked += 1;
+
+        // `ConstantInt.of(limit).sample(random)` 不取随机数，直接返回常量。
+        // `ConstantInt.of(limit).sample(random)` returns the constant without drawing.
+        let sampled = limit;
+        let max_to_replace = sampled.min(list_size as i32).max(0) as usize;
+        // 产品代码里的随机源派生。完整序列与截断序列各用**独立的**随机源，
+        // 因为 `capped_indices` 每调用一次都会消耗随机数。
+        // The random derivation from product code. The full and truncated sequences use
+        // **independent** sources, because each `capped_indices` call consumes randomness.
+        let full = processor_apply::capped_indices(
+            list_size,
+            list_size,
+            &processor_apply::capped_random(seed, piece),
+        );
+        let truncated = processor_apply::capped_indices(
+            list_size,
+            max_to_replace,
+            &processor_apply::capped_random(seed, piece),
+        );
+        indices_checked += truncated.len();
+        let want_full = full
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let Some((want_sampled, want_max, want_indices)) = java_c.get(query) else {
+            return Err(format!("Java missing C for {query}"));
+        };
+        if *want_sampled != sampled {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{query}: sampled rust {sampled} java {want_sampled}"
+                ));
+            }
+        }
+        if *want_max != max_to_replace as i32 {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{query}: maxToReplace rust {max_to_replace} java {want_max}"
+                ));
+            }
+        }
+        if *want_indices != want_full {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{query}: indices rust {want_full} java {want_indices}"
+                ));
+            }
+        }
+        // `maxToReplace` 已在上面的 `C` 行比过；官方**不**截断洗牌序列（靠循环提前退出），
+        // 所以这里只确认「`maxToReplace` 不超过完整序列长度」。
+        // `maxToReplace` is already compared in the `C` line; vanilla does **not** truncate
+        // the shuffled list (the loop exits early instead), so this only checks that the
+        // quota fits inside the list.
+        if max_to_replace > full.len() {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{query}: maxToReplace {max_to_replace} exceeds list size {}",
+                    full.len()
+                ));
+            }
+        }
+
+        // 原始 `nextInt(1000)` 序列，单独验随机源（用独立随机源，避免被洗牌消耗）。
+        // The raw `nextInt(1000)` sequence, checking the source itself with an independent
+        // source so the shuffle does not consume it.
+        let source = processor_apply::capped_random(seed, piece);
+        let raw = (0..8)
+            .map(|_| source.next_int(1000).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        if java_r.get(query).is_some_and(|want| *want != raw) {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!(
+                    "{query}: raw rust {raw} java {:?}",
+                    java_r.get(query)
+                ));
+            }
+        }
+    }
+
+    if checked != queries.len() {
+        return Err(format!(
+            "checked {checked} capped-raw queries, expected {}",
+            queries.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches} differences over {checked} queries; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!(
+        "jigsaw cappedraw: {checked} queries, {indices_checked} indices, \
+         source + shuffle + sample all identical"
+    );
+    Ok(())
 }
 
 /// `capped` 的 Java 输出是 `C|key|count` 加一串 `S|key|x|y|z|block`。
