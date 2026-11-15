@@ -834,9 +834,8 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
         std::collections::BTreeMap::new();
     let mut all_diffs: Vec<String> = Vec::new();
     let mut write_mismatches = 0usize;
-    /// 每条查询的 `(key, 差异数, 写入次数差异数)`，逐查询定位用。
-    ///
-    /// `(key, mismatch count, write-count diffs)` per query, for per-query locating.
+    // 每条查询的 `(key, 差异数, 写入次数差异数)`，逐查询定位用。
+    // `(key, mismatch count, write-count diffs)` per query, for per-query locating.
     let mut per_query: Vec<(String, usize, usize)> = Vec::new();
 
     for (q, section) in queries.iter().zip(sections.iter()) {
