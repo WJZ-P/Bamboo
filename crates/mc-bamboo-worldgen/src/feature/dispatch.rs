@@ -92,11 +92,7 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         }
         "minecraft:multiface_growth" => Leaf::Multiface(MultifaceGrowthFeature::parse(config)?),
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
-        // `minecraft:sculk_patch` 已写但**未对拍到 0 不一致**（见汇报），按规矩不接入：
-        // 解析返回 `None`，主循环把整个 placed feature 标 `unsupported`。
-        // `minecraft:sculk_patch` is implemented but has not reached zero mismatches
-        // (see the report), so it stays out of dispatch: parsing returns `None` and the
-        // main loop marks the placed feature unsupported.
+        "minecraft:sculk_patch" => Leaf::SculkPatch(SculkPatchFeature::parse(config)?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?),
         "minecraft:speleothem" => Leaf::Speleothem(SpeleothemFeature::parse(config).ok()?),
         "minecraft:speleothem_cluster" => {
