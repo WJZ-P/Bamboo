@@ -72,12 +72,12 @@ impl VerticalAnchor {
 
 /// `IntProvider.sample(random)`。26.3 step 9 的 `count` / `offset` 用到 constant、
 /// uniform、trapezoid、biased_to_bottom、very_biased_to_bottom；递归的 clamped /
-/// weighted_list / clamped_normal 暂不支持，解析时报错让该 placed feature 标 unsupported。
+/// clamped_normal 也已支持，weighted_list 暂不支持。
 ///
 /// `IntProvider.sample(random)`: step 9 uses constant, uniform, trapezoid, and the
-/// two biased variants for `count` / `offset`. Recursive clamped / weighted_list /
-/// clamped_normal stay unsupported for now.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// two biased variants for `count` / `offset`. Recursive clamped / clamped_normal
+/// are supported; weighted_list is not.
+#[derive(Debug, Clone, PartialEq)]
 pub enum IntProvider {
     Constant(i32),
     Uniform {
@@ -102,6 +102,15 @@ pub enum IntProvider {
     /// `ClampedInt`: `clamp(source.sample(random), min, max)` with a recursive source.
     Clamped {
         source: Box<IntProvider>,
+        min: i32,
+        max: i32,
+    },
+    /// `ClampedNormalInt`：`(int)Mth.clamp(Mth.normal(random, mean, deviation), min, max)`。
+    ///
+    /// `ClampedNormalInt`: `(int)Mth.clamp(Mth.normal(random, mean, deviation), min, max)`.
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
         min: i32,
         max: i32,
     },
@@ -136,6 +145,12 @@ impl IntProvider {
                 .map(|n| n as i32)
                 .ok_or_else(|| format!("int provider {kind} has no {name}"))
         };
+        let number = |name: &str| -> Result<f64, String> {
+            object
+                .get(name)
+                .and_then(Value::as_f64)
+                .ok_or_else(|| format!("int provider {kind} has no {name}"))
+        };
         Ok(match kind {
             "minecraft:constant" => Self::Constant(integer("value")?),
             "minecraft:uniform" => Self::Uniform {
@@ -165,6 +180,14 @@ impl IntProvider {
                         .get("source")
                         .ok_or("clamped int provider has no source")?,
                 )?),
+                min: integer("min_inclusive")?,
+                max: integer("max_inclusive")?,
+            },
+            // `ClampedNormalInt`：mean / deviation 是 float，min / max 是 int。
+            // `ClampedNormalInt`: float mean/deviation, int min/max.
+            "minecraft:clamped_normal" => Self::ClampedNormal {
+                mean: number("mean")? as f32,
+                deviation: number("deviation")? as f32,
                 min: integer("min_inclusive")?,
                 max: integer("max_inclusive")?,
             },
@@ -226,6 +249,17 @@ impl IntProvider {
             // ClampedInt.sample：先 sample source（消费随机数），再 clamp。
             // ClampedInt.sample: sample the source (consuming random), then clamp.
             Self::Clamped { source, min, max } => source.sample(random).clamp(*min, *max),
+            // `ClampedNormalInt.sample`：先 `Mth.normal`，再 `Mth.clamp`，最后截断成 int。
+            // `ClampedNormalInt.sample`: `Mth.normal`, then `Mth.clamp`, then a cast to int.
+            Self::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => {
+                let normal = *mean + (random.next_gaussian() as f32) * *deviation;
+                crate::math::clamp(normal, *min as f32, *max as f32) as i32
+            }
             // WeightedList.getRandomOrThrow：nextInt(totalWeight) + 累计权重轮盘，
             // 选中的 IntProvider 再 sample（ConstantInt 不额外取数）。
             // WeightedList.getRandomOrThrow: nextInt(totalWeight) + cumulative wheel,
@@ -245,6 +279,51 @@ impl IntProvider {
             }
         }
     }
+
+    /// `IntProvider.maxInclusive()`：只有常量与几种非递归形态有确定上界。
+    ///
+    /// `IntProvider.maxInclusive()`: only constant and the non-recursive shapes have a
+    /// definite upper bound.
+    pub fn max_value(&self) -> i32 {
+        match self {
+            Self::Constant(value) => *value,
+            Self::Uniform { max, .. }
+            | Self::Trapezoid { max, .. }
+            | Self::BiasedToBottom { max, .. }
+            | Self::VeryBiasedToBottom { max, .. }
+            | Self::Clamped { max, .. }
+            | Self::ClampedNormal { max, .. } => *max,
+            // `WeightedListInt.maxInclusive()`：各个分支上界的最大值。
+            // `WeightedListInt.maxInclusive()`: the largest upper bound among the branches.
+            Self::WeightedList { entries, .. } => entries
+                .iter()
+                .map(|(_, provider)| provider.max_value())
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
+    /// `IntProvider.minInclusive()`。
+    ///
+    /// `IntProvider.minInclusive()`.
+    pub fn min_value(&self) -> i32 {
+        match self {
+            Self::Constant(value) => *value,
+            Self::Uniform { min, .. }
+            | Self::Trapezoid { min, .. }
+            | Self::BiasedToBottom { min, .. }
+            | Self::VeryBiasedToBottom { min, .. }
+            | Self::Clamped { min, .. }
+            | Self::ClampedNormal { min, .. } => *min,
+            // `WeightedListInt.minInclusive()`：各个分支下界的最小值。
+            // `WeightedListInt.minInclusive()`: the smallest lower bound among the branches.
+            Self::WeightedList { entries, .. } => entries
+                .iter()
+                .map(|(_, provider)| provider.min_value())
+                .min()
+                .unwrap_or(0),
+        }
+    }
 }
 
 /// `HeightProvider.sample(random, WorldGenerationContext)`。
@@ -258,6 +337,11 @@ pub enum HeightProvider {
         min: VerticalAnchor,
         max: VerticalAnchor,
         plateau: i32,
+    },
+    VeryBiasedToBottom {
+        min: VerticalAnchor,
+        max: VerticalAnchor,
+        inner: i32,
     },
 }
 
@@ -305,6 +389,18 @@ impl HeightProvider {
                     max: value,
                 })
             }
+            "minecraft:very_biased_to_bottom" => {
+                let inner = object
+                    .get("inner")
+                    .and_then(Value::as_i64)
+                    .map(|n| n as i32)
+                    .unwrap_or(1);
+                Ok(Self::VeryBiasedToBottom {
+                    min: anchor("min_inclusive")?,
+                    max: anchor("max_inclusive")?,
+                    inner,
+                })
+            }
             _ => Err(format!("unsupported height provider {kind}")),
         }
     }
@@ -335,7 +431,30 @@ impl HeightProvider {
                 low + random.next_int_between_inclusive(0, range - slope)
                     + random.next_int_between_inclusive(0, slope)
             }
+            Self::VeryBiasedToBottom { min, max, inner } => {
+                let low = min.resolve(context);
+                let high = max.resolve(context);
+                // 官方 `Mth.nextInt(random, a, b)`：a >= b 时直接返回 a，不取随机数。
+                // Official `Mth.nextInt(random, a, b)`: returns a without drawing when a >= b.
+                if high - low - inner < 0 {
+                    return low;
+                }
+                let upper = mth_next_int(random, low + inner, high);
+                let biased = mth_next_int(random, low, upper - 1);
+                mth_next_int(random, low, biased - 1 + inner)
+            }
         }
+    }
+}
+
+/// `Mth.nextInt(random, min, max)`：含端点，`min >= max` 时不消费随机数直接返回 min。
+///
+/// `Mth.nextInt(random, min, max)`: inclusive; returns min without drawing if min >= max.
+fn mth_next_int(random: &WorldgenRandom, min: i32, max: i32) -> i32 {
+    if min >= max {
+        min
+    } else {
+        random.next_int_between_inclusive(min, max)
     }
 }
 
@@ -483,6 +602,46 @@ mod tests {
         let b = random();
         for _ in 0..1000 {
             let expected = b.next_int_between_inclusive(-3, 1).clamp(0, 1);
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
+
+    #[test]
+    fn weighted_list_selects_then_samples_like_official() {
+        // `cactus` 第二层花：distribution [{data:0,w:3},{data:1,w:1}]，total=4。
+        // getRandomOrThrow 先 nextInt(4)，选中项再 sample（这里都是 Constant，不取数）。
+        // `cactus` flower layer: distribution [{data:0,w:3},{data:1,w:1}], total=4.
+        // getRandomOrThrow consumes nextInt(4), then samples the selected Constant.
+        let value: Value = serde_json::from_str(
+            r#"{"distribution":[{"data":0,"weight":3},{"data":1,"weight":1}],"type":"minecraft:weighted_list"}"#,
+        )
+        .unwrap();
+        let provider = IntProvider::parse(&value).unwrap();
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let selection = b.next_int(4);
+            let expected = if selection < 3 { 0 } else { 1 };
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
+
+    #[test]
+    fn weighted_list_with_nested_provider_consumes_both_draws() {
+        // `cave_vine` 高度：distribution 里是 uniform(0,2)，weight 单项为 1。
+        // nextInt(1) 仍消费一次，再 sample uniform。两个同种子源应完全一致。
+        // `cave_vine` height: distribution holds uniform(0,2), single weight 1.
+        // nextInt(1) still consumes one draw, then the uniform samples.
+        let value: Value = serde_json::from_str(
+            r#"{"distribution":[{"data":{"min_inclusive":0,"max_inclusive":2,"type":"minecraft:uniform"},"weight":1}],"type":"minecraft:weighted_list"}"#,
+        )
+        .unwrap();
+        let provider = IntProvider::parse(&value).unwrap();
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let _ = b.next_int(1);
+            let expected = b.next_int_between_inclusive(0, 2);
             assert_eq!(provider.sample(&a), expected);
         }
     }
