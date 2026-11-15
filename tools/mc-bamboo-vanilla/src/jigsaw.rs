@@ -1133,18 +1133,61 @@ impl ApplyQuery {
 /// Every `processor_list` gets one block set covering each branch, with two fake world
 /// states.
 fn build_apply_queries(lists: &ProcessorLists) -> Vec<String> {
-    // 覆盖 `rule` / `block_rot` / `protected_blocks` / `capped` 会用到的方块：
-    // 深板岩砖（ancient city 规则）、可疑的沙砾（trail ruins）、黑石（bastion）、
-    // 草方块与空气（对照）。
-    // Blocks covering the rules of `rule` / `block_rot` / `protected_blocks` / `capped`:
-    // deepslate bricks, suspicious gravel, blackstone, plus grass and air as controls.
+    // 覆盖数据里**全部** 48 种规则输入方块（从 `processor_list` 的 `input_predicate`
+    // 汇总），加上草方块与空气作对照。这样每条 `rule` 至少命中一次，
+    // `random_block_match` 的概率分支也能被不同方块反复触发。
+    // Every one of the 48 rule input blocks the data actually tests (collected from each
+    // `processor_list`'s `input_predicate`), plus grass and air as controls. That way every
+    // `rule` fires at least once and `random_block_match`'s probability branches get
+    // exercised repeatedly on different blocks.
     let states = [
-        "minecraft:deepslate_bricks",
-        "minecraft:cracked_deepslate_bricks",
-        "minecraft:suspicious_gravel",
+        "minecraft:acacia_log",
+        "minecraft:acacia_planks",
+        "minecraft:acacia_stairs",
+        "minecraft:acacia_wood",
         "minecraft:blackstone",
+        "minecraft:campfire",
+        "minecraft:chiseled_polished_blackstone",
+        "minecraft:coal_ore",
+        "minecraft:cobblestone",
+        "minecraft:cracked_polished_blackstone_bricks",
+        "minecraft:cut_sandstone",
+        "minecraft:deepslate_bricks",
+        "minecraft:deepslate_tile_slab",
+        "minecraft:deepslate_tiles",
+        "minecraft:dirt",
+        "minecraft:dirt_path",
         "minecraft:gilded_blackstone",
+        "minecraft:glass_pane",
+        "minecraft:gold_block",
+        "minecraft:gravel",
+        "minecraft:lantern",
+        "minecraft:magma_block",
+        "minecraft:mossy_cobblestone",
+        "minecraft:mud_bricks",
+        "minecraft:oak_log",
+        "minecraft:oak_planks",
+        "minecraft:oak_stairs",
+        "minecraft:orange_terracotta",
         "minecraft:polished_blackstone_bricks",
+        "minecraft:red_terracotta",
+        "minecraft:smooth_sandstone",
+        "minecraft:smooth_sandstone_slab",
+        "minecraft:smooth_sandstone_stairs",
+        "minecraft:soul_lantern",
+        "minecraft:spruce_log",
+        "minecraft:spruce_planks",
+        "minecraft:spruce_slab",
+        "minecraft:stripped_oak_log",
+        "minecraft:stripped_spruce_log",
+        "minecraft:stripped_spruce_wood",
+        "minecraft:terracotta",
+        "minecraft:torch",
+        "minecraft:wall_torch",
+        "minecraft:waxed_copper_bulb",
+        "minecraft:wheat",
+        "minecraft:white_terracotta",
+        "minecraft:yellow_terracotta",
         "minecraft:grass_block[snowy=false]",
         "minecraft:air",
     ];
@@ -1371,13 +1414,43 @@ fn compare_apply(stdout: &str, queries: &[String], lists: &ProcessorLists) -> Re
             continue;
         }
         let want_states = java_s.get(&key).cloned().unwrap_or_default();
+        // 与 Java 的 `stateName(state, inputProps)` 对齐：只输出**输入方块里出现过的**
+        // 属性名。规则可能给方块加上输入里没有的属性（例如把
+        // `waxed_exposed_copper_bulb` 换成带 `lit` 的变体），那些属性 Java 侧不打印，
+        // 这里也必须省掉，否则会报假差异。
+        // Match Java's `stateName(state, inputProps)`: only print property names that
+        // occurred in the **inputs**. A rule can add properties the inputs never had (for
+        // example turning `waxed_exposed_copper_bulb` into a `lit` variant); Java does not
+        // print those, so neither may this side or the comparison reports a false diff.
+        let mut input_props: Vec<String> = Vec::new();
+        for block in &blocks {
+            for (name, _) in &block.state.properties {
+                if !input_props.iter().any(|seen| seen == name) {
+                    input_props.push(name.clone());
+                }
+            }
+        }
+        input_props.sort();
         for (index, block) in processed.iter().enumerate() {
+            let shown: Vec<String> = input_props
+                .iter()
+                .filter_map(|name| {
+                    block
+                        .state
+                        .properties
+                        .iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(key, value)| format!("{key}={value}"))
+                })
+                .collect();
+            let state_text = if shown.is_empty() {
+                block.state.name.clone()
+            } else {
+                format!("{}[{}]", block.state.name, shown.join(","))
+            };
             let want = format!(
-                "{}|{}|{}|{}",
-                block.world_pos.0,
-                block.world_pos.1,
-                block.world_pos.2,
-                block.state.text()
+                "{}|{}|{}|{state_text}",
+                block.world_pos.0, block.world_pos.1, block.world_pos.2
             );
             if want_states.get(index).is_none_or(|got| *got != want) {
                 mismatches += 1;
@@ -2178,13 +2251,38 @@ fn compare_capped_full(
             continue;
         }
         let want_states = java_s.get(&key).cloned().unwrap_or_default();
+        // 同 `apply`：只输出输入里出现过的属性名，与 Java 的 `stateName(.., inputProps)` 一致。
+        // Same as `apply`: only print property names the inputs had, matching Java's
+        // `stateName(.., inputProps)`.
+        let mut input_props: Vec<String> = Vec::new();
+        for block in &blocks {
+            for (name, _) in &block.state.properties {
+                if !input_props.iter().any(|seen| seen == name) {
+                    input_props.push(name.clone());
+                }
+            }
+        }
+        input_props.sort();
         for (index, block) in processed.iter().enumerate() {
+            let shown: Vec<String> = input_props
+                .iter()
+                .filter_map(|name| {
+                    block
+                        .state
+                        .properties
+                        .iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(key, value)| format!("{key}={value}"))
+                })
+                .collect();
+            let state_text = if shown.is_empty() {
+                block.state.name.clone()
+            } else {
+                format!("{}[{}]", block.state.name, shown.join(","))
+            };
             let want = format!(
-                "{}|{}|{}|{}",
-                block.world_pos.0,
-                block.world_pos.1,
-                block.world_pos.2,
-                block.state.text()
+                "{}|{}|{}|{state_text}",
+                block.world_pos.0, block.world_pos.1, block.world_pos.2
             );
             if want_states.get(index).is_none_or(|got| *got != want) {
                 mismatches += 1;
