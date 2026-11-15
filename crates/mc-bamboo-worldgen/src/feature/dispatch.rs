@@ -81,11 +81,14 @@ pub fn place_leaf(
     leaf: &Leaf,
     world: &mut FeatureWorld<'_>,
     random: &WorldgenRandom,
+    // `level.getRandom()`，只有 `MossyCarpetBlock.placeAt` 这类调用用它。
+    // `level.getRandom()`, used only by calls such as `MossyCarpetBlock.placeAt`.
+    region_random: &WorldgenRandom,
     pos: Pos,
 ) -> bool {
     match leaf {
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
-        Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
+        Leaf::SimpleBlock(feature) => feature.place(world, random, region_random, pos),
         Leaf::Bamboo(feature) => feature.place(world, random, pos),
         Leaf::BlockColumn(feature) => feature.place(world, random, pos),
         Leaf::Multiface(feature) => feature.place(world, random, pos),

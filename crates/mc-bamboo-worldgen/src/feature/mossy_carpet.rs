@@ -91,12 +91,9 @@ impl MossyCarpet {
 
     fn side(state: u32, direction: Direction) -> Option<&'static str> {
         let name = Self::property(direction)?;
-        for value in [NONE, LOW, TALL] {
-            if with_property(state, name, value) == Some(state) {
-                return Some(value);
-            }
-        }
-        None
+        [NONE, LOW, TALL]
+            .into_iter()
+            .find(|value| with_property(state, name, value) == Some(state))
     }
 
     fn set_side(&self, state: u32, direction: Direction, value: &str) -> Option<u32> {

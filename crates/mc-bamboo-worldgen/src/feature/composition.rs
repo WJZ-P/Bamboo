@@ -190,7 +190,7 @@ fn place_feature<'a>(
     pos: Pos,
 ) -> PlaceOutcome {
     if let Some(leaf) = parse_leaf(kind, config, &|name| registry.state_provider(name)) {
-        let placed = place_leaf(&leaf, world, random, pos);
+        let placed = place_leaf(&leaf, world, random, env.region_random, pos);
         return PlaceOutcome {
             supported: true,
             placed,
@@ -325,6 +325,7 @@ pub(crate) fn place_child<'a>(
         biome_at: &mut *env.biome_at,
         registry: env.registry,
         top_feature: None,
+        region_random: env.region_random,
     };
     place_placed(
         registry,

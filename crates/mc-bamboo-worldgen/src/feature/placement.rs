@@ -259,6 +259,10 @@ pub struct PlacementEnv<'a> {
     pub biome_at: &'a mut dyn FnMut(i32, i32, i32) -> u32,
     pub registry: &'a Registry,
     pub top_feature: Option<u32>,
+    /// `WorldGenRegion.getRandom()`，`level.getRandom()` 的等价物。
+    ///
+    /// `WorldGenRegion.getRandom()`, the equivalent of `level.getRandom()`.
+    pub region_random: &'a WorldgenRandom,
 }
 
 /// 一个候选位置。

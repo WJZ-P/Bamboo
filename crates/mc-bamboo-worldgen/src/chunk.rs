@@ -70,6 +70,14 @@ pub struct Generator<'a> {
     aquifer: Option<AquiferFunctions>,
     /// `RandomState.getOrCreateRandomFactory("minecraft:aquifer")`。
     aquifer_random: crate::random::PositionalFactory,
+    /// `RandomState.getOrCreateRandomFactory("minecraft:worldgen_region_random")`。
+    /// `WorldGenRegion.random` 用它按中心区块原点建一个随机源，`MossyCarpetBlock.placeAt`
+    /// 之类的 `level.getRandom()` 调用读的是它，不是地物的 `random` 参数。
+    ///
+    /// `RandomState.getOrCreateRandomFactory("minecraft:worldgen_region_random")`; the
+    /// source behind `WorldGenRegion.random`. `level.getRandom()` calls such as
+    /// `MossyCarpetBlock.placeAt` read it instead of the feature's own `random`.
+    region_random: crate::random::PositionalFactory,
     cache_count: usize,
     material: MaterialRules,
     carvers: Carvers,
@@ -138,6 +146,7 @@ impl<'a> Generator<'a> {
             .map(|value| parse_aquifer(value, noises, functions, &mut compiler))
             .transpose()?;
         let aquifer_random = compiler.random_factory("minecraft:aquifer");
+        let region_random = compiler.random_factory("minecraft:worldgen_region_random");
         let raw_functions = worldgen
             .raw()
             .get("density_function")
@@ -168,6 +177,7 @@ impl<'a> Generator<'a> {
             router,
             aquifer,
             aquifer_random,
+            region_random,
             cache_count,
             material,
             carvers,
@@ -625,6 +635,17 @@ impl<'a> Generator<'a> {
         allowed_kinds: Option<&[String]>,
     ) -> Result<crate::feature::FeatureResult, String> {
         let biomes = BiomeManager::new(self.biomes, self.seed);
+        // `WorldGenRegion.random`：`getOrCreateRandomFactory("worldgen_region_random")`
+        // 在中心区块的**世界原点**（`center.getWorldPosition()`，即区块的 minY 那一格）
+        // 上取一个随机源。整个 `features` 调用共用这一个。
+        //
+        // `WorldGenRegion.random`: the `worldgen_region_random` factory sampled at the
+        // centre chunk's world position; one instance shared by the whole `features` call.
+        let region_random = crate::random::WorldgenRandom::new(self.region_random.at(
+            input.center_x * 16,
+            self.settings.min_y,
+            input.center_z * 16,
+        ));
         let context = crate::feature::run::FeatureContext {
             registry: &self.features,
             samplers: &self.router,
@@ -633,6 +654,7 @@ impl<'a> Generator<'a> {
             seed: self.seed,
             steps_mask,
             allowed_kinds,
+            region_random: &region_random,
         };
         crate::feature::run::features(input, &context)
     }
