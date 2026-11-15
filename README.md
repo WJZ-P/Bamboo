@@ -578,7 +578,8 @@ WebView2 的渲染进程不算在内。
   `clamped` / `clamped_normal` / `weighted_list` IntProvider、`BambooFeature`
   （竹子，逐方块 0 不一致）。另有 `VinesFeature`（藤蔓）和 `MultifaceGrowthFeature`
   （发光地衣）已按官方源码写完但**还没验证**：藤蔓在丛林区块找不到能通过 `biome`
-  修饰器的候选点，发光地衣仍有约 126 处不一致，细节见
+  修饰器的候选点，发光地衣仍有约 70 处不一致（126 → 102 → 70，修掉了
+  `Direction.Plane.HORIZONTAL` 顺序和扩散入口用错这两个真 bug），细节见
   `docs/worldgen-features-plan.md` 5.1 的疑点。
   诚实的已知差异与未做：`rotated` state provider、蘑菇（要 `getRawBrightness`）、
   苔藓地毯（`MossyCarpetBlock.placeAt` 用 `level.getRandom()`）等特殊
