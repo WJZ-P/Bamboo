@@ -113,7 +113,7 @@ impl TreeFeature {
         // `StructureTemplate.updateShapeAtEdge(level, 3, shape, ...)`: both sides of the
         // tree's outer faces run `updateShape`; unsupported vines are removed here.
         if let Some((shape, bounds)) = leaves::update_leaves(&mut place) {
-            update_shape_at_edge(place.world, &shape, bounds.min, bounds.max);
+            let _ = update_shape_at_edge(place.world, &shape, bounds.min, bounds.max);
         }
         true
     }

@@ -47,13 +47,26 @@ pub fn rotation_name(rotation: i32) -> &'static str {
     }
 }
 
+/// `rotation_name` 的反向：从 NBT 字符串读回 `Rotation` 的序号。
+///
+/// The inverse of `rotation_name`: read the `Rotation` ordinal back from the NBT string.
+pub fn rotation_ordinal(name: &str) -> Result<i32, String> {
+    Ok(match name {
+        "NONE" => ROT_NONE,
+        "CLOCKWISE_90" => ROT_CLOCKWISE_90,
+        "CLOCKWISE_180" => ROT_CLOCKWISE_180,
+        "COUNTERCLOCKWISE_90" => ROT_COUNTERCLOCKWISE_90,
+        other => return Err(format!("bad rotation {other}")),
+    })
+}
+
 /// `StructureTemplate.transform(BlockPos, Mirror, Rotation, BlockPos)`（整数版）。
 /// mirror 先把 z（`LEFT_RIGHT`）或 x（`FRONT_BACK`）取反，rotation 再绕 pivot 转。
 ///
 /// Vanilla `StructureTemplate.transform(BlockPos, Mirror, Rotation, BlockPos)` (the
 /// integer overload). The mirror negates z (`LEFT_RIGHT`) or x (`FRONT_BACK`) first,
 /// then the rotation turns the result around the pivot.
-fn transform(
+pub fn transform(
     pos: (i32, i32, i32),
     mirror: i32,
     rotation: i32,
