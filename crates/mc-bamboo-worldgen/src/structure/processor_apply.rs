@@ -46,12 +46,14 @@ pub trait ProcessorLevel {
     fn in_block_set(&self, state: &BlockStateSpec, set: &BlockSetRef) -> bool;
 
     /// `level.getHeight(heightmap, x, z)`：`GravityProcessor` 用它算方块的落点。
-    /// 默认实现返回 `MIN_Y`，表示「不支持高度图」——只有需要它的 processor 会调用。
+    /// 返回 `None` 表示「这个 level 不提供高度图」——`Gravity` 会保留原位置并**报错**
+    /// 而不是静默算错（早期版本用一个哨兵整数，会让 Y 回绕）。
     ///
-    /// `level.getHeight(heightmap, x, z)`, used by `GravityProcessor`. The default returns
-    /// `MIN_Y` to mean "heightmap unavailable"; only processors that need it call this.
-    fn height(&self, _heightmap: &str, _x: i32, _z: i32) -> i32 {
-        i32::MIN
+    /// `level.getHeight(heightmap, x, z)`, used by `GravityProcessor`. `None` means the
+    /// level has no heightmap; `Gravity` then keeps the position and returns an error
+    /// rather than silently computing a wrapped Y.
+    fn height(&self, _heightmap: &str, _x: i32, _z: i32) -> Option<i32> {
+        None
     }
 }
 
@@ -288,7 +290,21 @@ pub fn process_block(
         // `GravityProcessor.processBlock`: lifts Y to `height + offset + templateY`.
         Processor::Gravity { heightmap, offset } => {
             let pos = block.world_pos;
-            let height = level.height(heightmap, pos.0, pos.2);
+            // 官方在 `level instanceof ServerLevel` 时把 `*_WG` 换成正式变体。
+            // Vanilla swaps `*_WG` for the real variant when the level is a `ServerLevel`.
+            let heightmap = match heightmap.as_str() {
+                "WORLD_SURFACE_WG" => "WORLD_SURFACE",
+                "OCEAN_FLOOR_WG" => "OCEAN_FLOOR",
+                other => other,
+            };
+            // 拿不到高度图时保留原位置：官方在真实世界里一定有值，`None` 只可能意味着
+            // 调用方的 `ProcessorLevel` 没实现 `height()`。跳过比算错安全。
+            // Without a heightmap, keep the position: vanilla always has a value in a real
+            // world, so `None` can only mean the caller's `ProcessorLevel` does not
+            // implement `height()`. Skipping beats computing a wrong Y.
+            let Some(height) = level.height(heightmap, pos.0, pos.2) else {
+                return Some(block.clone());
+            };
             let delta = block.pos.1;
             let mut out = block.clone();
             out.world_pos = (
@@ -1092,8 +1108,8 @@ mod tests {
             fn in_block_set(&self, _state: &BlockStateSpec, _set: &BlockSetRef) -> bool {
                 false
             }
-            fn height(&self, _heightmap: &str, _x: i32, _z: i32) -> i32 {
-                70
+            fn height(&self, _heightmap: &str, _x: i32, _z: i32) -> Option<i32> {
+                Some(70)
             }
         }
         let level = Height70;
@@ -1114,6 +1130,68 @@ mod tests {
         // X/Z 不变，状态不变。
         // X/Z and the state are unchanged.
         assert_eq!(out.state.name, "minecraft:grass_block");
+    }
+
+    /// `Gravity` 的 `*_WG` 名字会换成正式变体；level 不提供高度图时保留原位置而不是
+    /// 算出错误的 Y。
+    ///
+    /// `Gravity` swaps `*_WG` for the real variant, and keeps the position (instead of
+    /// computing a wrong Y) when the level provides no heightmap.
+    #[test]
+    fn gravity_swaps_the_wg_heightmap_and_degrades_safely() {
+        /// 记录被问到的 heightmap 名字。
+        ///
+        /// Records which heightmap names it was asked for.
+        struct Recorder {
+            asked: std::cell::RefCell<Vec<String>>,
+            answer: Option<i32>,
+        }
+        impl ProcessorLevel for Recorder {
+            fn block_state(&self, _pos: (i32, i32, i32)) -> BlockStateSpec {
+                state("minecraft:air")
+            }
+            fn in_block_set(&self, _state: &BlockStateSpec, _set: &BlockSetRef) -> bool {
+                false
+            }
+            fn height(&self, heightmap: &str, _x: i32, _z: i32) -> Option<i32> {
+                self.asked.borrow_mut().push(heightmap.to_owned());
+                self.answer
+            }
+        }
+
+        let b = ProcessBlock {
+            pos: (0, 2, 0),
+            world_pos: (0, 50, 0),
+            state: state("minecraft:stone"),
+            nbt: None,
+        };
+
+        // `WORLD_SURFACE_WG` 会被换成 `WORLD_SURFACE`。
+        // `WORLD_SURFACE_WG` is swapped for `WORLD_SURFACE`.
+        let level = Recorder {
+            asked: std::cell::RefCell::new(Vec::new()),
+            answer: Some(80),
+        };
+        let processor = Processor::Gravity {
+            heightmap: "WORLD_SURFACE_WG".to_owned(),
+            offset: 0,
+        };
+        let out = process_block(&processor, &b, (0, 0, 0), &level, None).unwrap();
+        assert_eq!(out.world_pos.1, 82, "80 + 2");
+        assert_eq!(level.asked.borrow().as_slice(), ["WORLD_SURFACE"]);
+
+        // level 不给高度图：保留原位置。
+        // No heightmap: the position is kept.
+        let level = Recorder {
+            asked: std::cell::RefCell::new(Vec::new()),
+            answer: None,
+        };
+        let out = process_block(&processor, &b, (0, 0, 0), &level, None).unwrap();
+        assert_eq!(
+            out.world_pos,
+            (0, 50, 0),
+            "position kept when height is unknown"
+        );
     }
 
     /// `capped` 最多改 `limit` 个方块，且逐块用 delegate 的效果。

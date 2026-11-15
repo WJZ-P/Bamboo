@@ -19,6 +19,7 @@
 //! then write each resulting block with `state.mirror(...).rotate(...)`.
 
 use crate::structure::{
+    jigsaw::element::{PoolElement, Projection},
     processor::{BlockStateSpec, Processor},
     processor_apply::{PlaceSettings, ProcessBlock, ProcessorLevel, process_blocks},
     template::{PaletteEntry, StructureTemplate},
@@ -279,6 +280,77 @@ pub fn state_text(state: u32) -> String {
         .unwrap_or_else(|| format!("unknown:{state}"))
 }
 
+/// `SinglePoolElement.getSettings` 里组装 processor 链的那部分。
+///
+/// 官方顺序（`SinglePoolElement.getSettings`）：
+///
+/// 1. `BlockIgnoreProcessor.STRUCTURE_BLOCK`（忽略结构方块）；
+/// 2. `!keepJigsaws` 时加 `JigsawReplacementProcessor.INSTANCE`；
+/// 3. `this.processors.value().list()`（`pool_element` 里配置的 `processors`）；
+/// 4. `getProjection().getProcessors()`（`TERRAIN_MATCHING` 是
+///    `new GravityProcessor(WORLD_SURFACE_WG, -1)`，`RIGID` 是空）。
+///
+/// **`LegacySinglePoolElement.getSettings` 的额外一步**：它先调父类拿到上面那条链，再
+/// `popProcessor(STRUCTURE_BLOCK)` 把第 1 项摘掉，然后 `addProcessor(STRUCTURE_AND_AIR)`——
+/// 注意是**追加到末尾**，不是原地替换。所以 legacy 的链是
+/// `[JigsawReplacement?, ...配置的, ...projection 的, STRUCTURE_AND_AIR]`。
+///
+/// The processor chain assembly inside `SinglePoolElement.getSettings`: structure-block
+/// ignore, an optional jigsaw replacement, the pool element's configured processors, then
+/// the projection's processors. `LegacySinglePoolElement` pops the structure-block ignore
+/// and **appends** `STRUCTURE_AND_AIR` at the end.
+pub fn assemble_processors(
+    element: &PoolElement,
+    configured: &[Processor],
+    keep_jigsaws: bool,
+) -> Option<Vec<Processor>> {
+    let PoolElement::Single {
+        projection, legacy, ..
+    } = element
+    else {
+        // `ListPoolElement.getShuffledJigsawBlocks` 只用第一个元素的拼图方块，但 `place`
+        // 会逐个调用自己的 `place`；`EmptyPoolElement` 什么都不写。三种都没有自己的
+        // settings，所以这里返回 `None` 表示「不需要 processor 链」。
+        //
+        // `ListPoolElement` delegates to each sub-element's own `place`, and
+        // `EmptyPoolElement` writes nothing, so neither has a settings of its own.
+        return None;
+    };
+
+    let mut chain = vec![Processor::BlockIgnore {
+        to_ignore: vec!["minecraft:structure_block".to_owned()],
+    }];
+    if !keep_jigsaws {
+        chain.push(Processor::JigsawReplacement);
+    }
+    chain.extend_from_slice(configured);
+    if *projection == Projection::TerrainMatching {
+        // `Projection.TERRAIN_MATCHING.getProcessors()` = `[new GravityProcessor(WORLD_SURFACE_WG, -1)]`。
+        // `Projection.TERRAIN_MATCHING.getProcessors()` is that single gravity processor.
+        chain.push(Processor::Gravity {
+            heightmap: "WORLD_SURFACE_WG".to_owned(),
+            offset: -1,
+        });
+    }
+    if *legacy {
+        // `popProcessor(STRUCTURE_BLOCK)` 摘掉链首那一项（它一定是第一个），再追加
+        // `STRUCTURE_AND_AIR`。
+        // `popProcessor(STRUCTURE_BLOCK)` removes the first entry; `STRUCTURE_AND_AIR` is
+        // then appended at the end.
+        chain.retain(|processor| {
+            !matches!(processor, Processor::BlockIgnore { to_ignore }
+                if to_ignore.len() == 1 && to_ignore[0] == "minecraft:structure_block")
+        });
+        chain.push(Processor::BlockIgnore {
+            to_ignore: vec![
+                "minecraft:air".to_owned(),
+                "minecraft:structure_block".to_owned(),
+            ],
+        });
+    }
+    Some(chain)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +406,119 @@ mod tests {
         assert!(state_id_of(&unknown).is_err());
         let bad = BlockStateSpec::parse_str("minecraft:oak_stairs[facing=up]").unwrap();
         assert!(state_id_of(&bad).is_err());
+    }
+
+    /// processor 链的组装顺序照 `SinglePoolElement.getSettings`：结构方块忽略 →
+    /// 可选拼图替换 → 配置的 → 投影的。
+    ///
+    /// The assembled order follows `SinglePoolElement.getSettings`.
+    #[test]
+    fn assemble_processors_follows_the_vanilla_order() {
+        use crate::structure::jigsaw::element::{PoolElement, Projection};
+        use crate::structure::processor::ProcessorListRef;
+
+        let single = |projection: Projection, legacy: bool| PoolElement::Single {
+            location: "minecraft:empty".to_owned(),
+            projection,
+            legacy,
+            processors: ProcessorListRef::Inline(Vec::new()),
+            override_liquid_settings: None,
+        };
+
+        // 1) rigid + 保留拼图 + 无配置：只有结构方块忽略。
+        // rigid, keep jigsaws, nothing configured: only the structure-block ignore.
+        let chain = assemble_processors(&single(Projection::Rigid, false), &[], true).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert!(matches!(chain[0], Processor::BlockIgnore { .. }));
+
+        // 2) 不保留拼图：结构方块忽略 + 拼图替换。
+        // Not keeping jigsaws: the ignore plus the replacement.
+        let chain = assemble_processors(&single(Projection::Rigid, false), &[], false).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert!(matches!(chain[1], Processor::JigsawReplacement));
+
+        // 3) 配置的 processor 在拼图替换之后。
+        // Configured processors come after the replacement.
+        let configured = vec![Processor::ProtectedBlocks {
+            value: crate::structure::processor::BlockSetRef::Blocks(Vec::new()),
+        }];
+        let chain =
+            assemble_processors(&single(Projection::Rigid, false), &configured, false).unwrap();
+        assert_eq!(chain.len(), 3);
+        assert!(matches!(chain[2], Processor::ProtectedBlocks { .. }));
+
+        // 4) `terrain_matching` 在最后追加 gravity。
+        // `terrain_matching` appends gravity last.
+        let chain = assemble_processors(
+            &single(Projection::TerrainMatching, false),
+            &configured,
+            false,
+        )
+        .unwrap();
+        assert_eq!(chain.len(), 4);
+        assert!(
+            matches!(&chain[3], Processor::Gravity { heightmap, offset }
+                if heightmap == "WORLD_SURFACE_WG" && *offset == -1),
+            "terrain matching ends with gravity(WORLD_SURFACE_WG, -1)"
+        );
+
+        // 5) legacy：摘掉链首的结构方块忽略，追加 `STRUCTURE_AND_AIR` 到**末尾**。
+        // legacy: the leading ignore is removed and `STRUCTURE_AND_AIR` is appended last.
+        let chain = assemble_processors(&single(Projection::Rigid, true), &[], false).unwrap();
+        assert_eq!(chain.len(), 2, "jigsaw replacement + structure_and_air");
+        assert!(matches!(chain[0], Processor::JigsawReplacement));
+        let Processor::BlockIgnore { to_ignore } = &chain[1] else {
+            panic!("legacy must end with a block ignore");
+        };
+        assert_eq!(to_ignore, &["minecraft:air", "minecraft:structure_block"]);
+        assert!(
+            !chain.iter().any(
+                |processor| matches!(processor, Processor::BlockIgnore { to_ignore }
+                if to_ignore.len() == 1 && to_ignore[0] == "minecraft:structure_block")
+            ),
+            "the leading STRUCTURE_BLOCK-only ignore must be popped"
+        );
+
+        // 6) legacy + terrain_matching：gravity 在 `STRUCTURE_AND_AIR` 之前。
+        // legacy + terrain_matching: gravity sits before `STRUCTURE_AND_AIR`.
+        let chain =
+            assemble_processors(&single(Projection::TerrainMatching, true), &[], true).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert!(matches!(chain[0], Processor::Gravity { .. }));
+        assert!(matches!(chain[1], Processor::BlockIgnore { .. }));
+    }
+
+    /// 非 `single` 元素没有自己的 settings。
+    ///
+    /// A non-`single` element has no settings of its own.
+    #[test]
+    fn assemble_processors_returns_none_for_other_elements() {
+        use crate::structure::jigsaw::element::{PoolElement, Projection};
+        use crate::structure::processor::ProcessorListRef;
+        assert!(assemble_processors(&PoolElement::Empty, &[], false).is_none());
+        assert!(
+            assemble_processors(
+                &PoolElement::Feature {
+                    feature: "minecraft:x".to_owned(),
+                    projection: Projection::Rigid
+                },
+                &[],
+                false
+            )
+            .is_none()
+        );
+        assert!(
+            assemble_processors(
+                &PoolElement::List {
+                    elements: Vec::new(),
+                    projection: Projection::Rigid
+                },
+                &[],
+                false
+            )
+            .is_none()
+        );
+        let _ = ProcessorListRef::Inline(Vec::new());
     }
 
     /// `set_block` 返回 `false`（状态没变）时不计入返回值，与官方
