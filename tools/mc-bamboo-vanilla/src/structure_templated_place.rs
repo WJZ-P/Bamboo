@@ -307,6 +307,7 @@ fn rust_writes(q: &Query) -> Result<BTreeMap<(i32, i32, i32), u32>, String> {
     };
 
     let mut out: BTreeMap<(i32, i32, i32), u32> = BTreeMap::new();
+    let mut boxes: Vec<[i32; 6]> = pieces.iter().map(|piece| piece.bb).collect();
     // `StructureStart.placeInChunk` 的编排：3×3 每个区块各调一次，世界逐步累积。
     // The `StructureStart.placeInChunk` orchestration: once per chunk of the 3×3 with the
     // world accumulating writes.
@@ -330,13 +331,23 @@ fn rust_writes(q: &Query) -> Result<BTreeMap<(i32, i32, i32), u32>, String> {
                     q.seed,
                 )),
             );
-            for piece in &pieces {
-                if !intersects(&piece.bb, &chunk_bb) {
+            for (index, piece) in pieces.iter().enumerate() {
+                // 官方的 `StructurePiece.boundingBox` 是**可变**的：`TemplateStructurePiece`
+                // 在 `postProcess` 里重新赋值（雪屋 / 沉船 / 海底遗迹都先移动了
+                // `templatePosition`）。`placeInChunk` 每个区块用**当时的**盒子判断相交，
+                // 后面的区块看到的是校正后的盒子。
+                // Vanilla `StructurePiece.boundingBox` is **mutable**:
+                // `TemplateStructurePiece` reassigns it inside `postProcess` after moving
+                // `templatePosition`. `placeInChunk` tests `intersects` against the box at
+                // that moment, so later chunks see the corrected box.
+                if !intersects(&boxes[index], &chunk_bb) {
                     continue;
                 }
+                let mut piece = piece.clone();
+                piece.bb = boxes[index];
                 let writes: Vec<(i32, i32, i32, u32)> = match q.kind {
                     "igloo" => {
-                        let outcome = igloo::igloo(&mut world, piece, chunk_bb, true)?;
+                        let outcome = igloo::igloo(&mut world, &piece, chunk_bb, true)?;
                         let mut writes = outcome
                             .placement
                             .placed
@@ -347,16 +358,19 @@ fn rust_writes(q: &Query) -> Result<BTreeMap<(i32, i32, i32), u32>, String> {
                         if let Some(snow) = outcome.snow {
                             writes.push((snow.0, snow.1, snow.2, snow_state()));
                         }
+                        boxes[index] = outcome.placement.bounding_box;
                         writes
                     }
                     "shipwreck_ocean" => {
                         let outcome =
-                            shipwreck::shipwreck(&mut world, piece, chunk_bb, &random, true)?;
+                            shipwreck::shipwreck(&mut world, &piece, chunk_bb, &random, true)?;
+                        boxes[index] = outcome.bounding_box;
                         outcome.placed.and_then(|p| p.writes).unwrap_or_default()
                     }
                     "ocean_ruin_cold" | "ocean_ruin_warm" => {
                         let outcome =
-                            ocean_ruin::ocean_ruin(&mut world, piece, chunk_bb, q.seed, true)?;
+                            ocean_ruin::ocean_ruin(&mut world, &piece, chunk_bb, q.seed, true)?;
+                        boxes[index] = outcome.bounding_box;
                         outcome.placed.and_then(|p| p.writes).unwrap_or_default()
                     }
                     other => return Err(format!("no Rust postProcess for kind {other}")),
