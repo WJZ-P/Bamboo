@@ -534,7 +534,7 @@ WebView2 的渲染进程不算在内。
   **改坏验证发现的真 bug**：`structure-pieces` 原来把子类存档值压平成十进制，字节与整型
   写错也发现不了；现在类型进 token（`B:` / `I:`），矿井 `D` 按官方写成 Byte 之前会报
   3312 处不一致。
-  结构件放置（`postProcess`）也已经开始移植，**但还没验证到 0 不一致**，所以没有接进游戏：
+  矿井和要塞的结构件放置（`postProcess`）已移植，`structure-place` 对拍 0 不一致，**但还没有接进游戏**：
   * `structure::piece_place`：官方 `StructurePiece` 的放置辅助（`getWorldPos` /
     `placeBlock` / `generateBox` 含 `BlockSelector` 重载 / `generateMaybeBox` /
     `maybeGenerateBlock` / `generateUpperHalfSphere` / `fillColumnDown` / `isInterior` /
@@ -544,17 +544,16 @@ WebView2 的渲染进程不算在内。
     `facing`）、门（`DoorBlock`，镜像时还要 `cycle(HINGE)`）、铁轨（十种 `RailShape`）。
   * `structure::pieces::mineshaft_place`：矿井四种结构件（走廊 / 交叉口 / 楼梯 / 房间）的
     `postProcess`。`structure-place` 对拍（`StructurePlaceOracle.java` 在假
-    `WorldGenLevel` 上跑官方 `postProcess`）目前 **354 处不一致**，集中在栅栏朝向、
-    铁轨走向和少量缺位方块。
+    `WorldGenLevel` 上跑官方 `postProcess`）**0 不一致**（普通 / 恶地各 32 条查询）。
   * `structure::pieces::stronghold_place`：要塞十二种结构件（`ChestCorridor` /
     `FillerCorridor` / `Straight` / `PrisonHall` / `LeftTurn` / `RightTurn` /
     `RoomCrossing` 三种 layout / `StairsDown` / `StraightStairsDown` / `FiveCrossing` /
     `Library` / `PortalRoom`）的 `postProcess`，含 `SmoothStoneSelector` 与四种
-    `SmallDoorType`。**已接入 `structure-place` 但全量对拍还跑不通**（Java 侧某个
-    seed/chunk 组合抛异常，单条 case 正常），未验证。
-  * 对拍口径说明：`structure-place` 只比**非空气**方块。`ProtoChunk` 的
-    `PalettedContainer` 按 `state.isAir()` 判定，`cave_air` / `void_air` 在空 section 里
-    不会真的落盘，读回来就是 `air`；结构件写空气只为挖空，变体没有意义。
+    `SmallDoorType`。`structure-place` 对拍 **0 不一致**（32 条查询，十二种结构件都放到）。
+  * 对拍口径说明：`structure-place` 对整个结构碰到的每个区块调一次 `postProcess`，比
+    结构件清单、每次调用的写入次数（`STRUCTURE_PLACE_TRACE=1` 时比按顺序的每一次写入）
+    和每个写过的位置的最终状态，挖空也比。最终状态里空气家族合并成 `AIR`：
+    `ProtoChunk.getBlockState` 对全空气的 section 直接返回 `air`，读不出 `cave_air`。
   已知限制：以上全是纯函数 + oracle，**放置一律没接进 Director**，游戏里还没有结构；
   布局函数里恶地的 `surfaceHeight` / 府邸的 `startY` 在对拍中仍作为外部输入喂入
   （前置判定模块已用 `Generator` 的高度原语算出并喂给布局）；jigsaw 与其余旧式结构的
