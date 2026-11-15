@@ -122,15 +122,357 @@
   0 不一致，官方 `PiecesContainer.load` / `save` 往返能读 `Children`，`world-dir` 的
   `SerializableChunkData.parse` 能读带该键的 4 个区块；反转 `BB` 的 int 顺序、把
   `References` 键改小写两处故意改坏各报 8 处不一致，还原回 0。
-* **仍没做**：需要模板的单件结构（雪屋 / 沉船 / 海底遗迹 / 废弃传送门）、`features`
-  阶段的 `placeInChunk` / `postProcess` / processors / 方块实体 / 拼图替换、把结构起点
+* **当时没做（本轮已补上前三种）**：需要模板的单件结构（雪屋 / 沉船 / 海底遗迹 / 废弃传送门）、
+  `features` 阶段的 `placeInChunk` / `postProcess` / processors / 方块实体 / 拼图替换、把结构起点
   真正接进 Director。模板结构件的 Java 对拍要构造带 `StructureTemplateManager` 的
   `GenerationContext`，且沉船 / 废弃传送门的包围盒依赖 `getLowestY` /
   `getMeanFirstOccupiedHeight`（terrain 高度），`features` 放置要逐方块比 `postProcess`，
-  两者都是独立的大块工作，本轮未达到 0 不一致，见第 10 节。
+  两者都是独立的大块工作。雪屋 / 沉船 / 海底遗迹已在下一段补上；废弃传送门仍没做。
 
-**仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、
-结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
+**第五轮（2026-11-14，`cb-wg-structures` 续：需要模板的单件结构布局）**：
+
+* 合并 `main` 时本分支已与 `main` 同步（`main` 的 `4405fc3` 含本分支全部提交），
+  工作区里那份没完成的 `git merge main` 冲突已按 main 内容解决（两边子命令都保留）。
+* 新增 `mc-bamboo-worldgen::structure::templated`：需要 `.nbt` 模板的单件结构的结构件布局。
+  公共部分是 `TemplateStructurePiece` 的包围盒算法（`StructureTemplate.transform` 的整数版 +
+  `getBoundingBox(BlockPos, Rotation, pivot, Mirror, Vec3i)`），每个结构一个子模块：
+  * 雪屋（`templated/igloo.rs`，`IglooPieces.addPieces`）：`igloo/top` 恒放，`nextDouble() < 0.5`
+    时先放 `igloo/bottom`（`depth = nextInt(8) + 4`，深度 `depth * 3`）和 `depth - 1` 段
+    `igloo/middle`；三个模板的 rotation pivot `(3,5)` / `(1,1)` / `(3,7)` 与偏移照官方常量表。
+  * 沉船（`templated/shipwreck.rs`，`ShipwreckPieces.addRandomPiece`）：一张模板，
+    pivot `(4,15)`，`is_beached` 决定从 11 项沙滩表还是 20 项海洋表里抽。
+  * 海底遗迹（`templated/ocean_ruin.rs`，`OceanRuinPieces.addPieces`）：`nextFloat() <= large_probability`
+    选大小，冷水遗迹一次 `nextInt` 同号取 brick / cracked / mossy（完好度 0.7 / 0.5），
+    大遗迹再 `nextFloat() <= cluster_probability` 时 `allPositions` 八个候选 + `nextInt(4..8)` 圈。
+* 新对拍 `cargo run -p mc-bamboo-vanilla -- structure-templated <java>` +
+  `java/StructureTemplatedOracle.java`（构造真实 `StructureTemplateManager`，不启服务端 / 读存档 /
+  接受 EULA）：8 种子 × 12 区块 × 5 类 = 480 查询、1685 结构件、1685 行逐项比 0 不一致。
+  故意改坏四处确认会失败：雪屋梯子 pivot 262 处、沉船 pivot 142 处、海底遗迹 cluster
+  候选下界 68 处、冷水 cracked 完好度 263 处，都还原回 0。
+* **仍没做**：废弃传送门（`RuinedPortalPiece` 的 `VerticalPlacement` / `findSuitableY` 要
+  `getBaseColumn` 的整列方块，属放置里程碑）、jigsaw 结构件、`features` 阶段的放置。
+
+**第六轮（2026-11-14，`cb-wg-structures` 续：废弃传送门 / 旋转表 / 放置原语）**：
+
+* 废弃传送门（`templated/ruined_portal.rs`）：`RuinedPortalStructure.findGenerationPoint` 全套——
+  多 `Setup` 的加权抽取（一次 `nextFloat()` 加累减）、`sample` 空腔、5% 巨型模板、
+  `Rotation` / `Mirror`（`FRONT_BACK` 50%）、`pivot = (sizeX/2, sizeZ/2)`、`getBaseHeight`
+  取模板包围盒中心的 `surfaceY`、`findSuitableY` 的四角整列搜索、`isCold` 的群系温度。
+  六种 `VerticalPlacement` 里除了 `IN_NETHER`（本分支只做主世界）都覆盖。
+* `chunk.rs` 新增 `Generator::base_column`（`getBaseColumn` 的整列方块原语）：
+  `iterateNoiseColumn` 的 `columnReference` 分支，1×height×1 体积 + 全新含水层 + EMPTY
+  beardifier，按 Y 升序收全每一层的 `computeSubstance`。
+* 新对拍 `structure-ruined-portal`：`StructureRuinedPortalOracle` 造官方注册表 +
+  真实 `StructureTemplateManager`，调 `RuinedPortalStructure.findValidGenerationPoint`
+  （内部跑官方 `findSuitableY`）；6 个结构变体 × 6 种子 × 18 区块 = 648 查询，
+  110 个查询真的产出结构件、110 行逐项 0 不一致。查询集特意加了种子 0 的沙漠 / 恶地 /
+  雪原 / 丛林 / 深海 / 石岸区块，让 `partly_buried`、`in_mountain`、`on_ocean_floor`
+  三条分支都被比到。两处故意改坏（`findSuitableY` 门槛 3→2 报 23 处、
+  `MIRROR_FRONT_BACK` 常量 2→1 报 68 处）确认失败后还原回 0。
+* 海底遗迹的 `large_probability` / `cluster_probability` 改成从 `worldgen.json` 的
+  `ocean_ruin_warm` / `ocean_ruin_cold` 条目解析（`ocean_ruin::Config::parse`），
+  去掉了上一轮手写的常量；`structure-templated` 仍 0 不一致。
+* 方块状态旋转表：`Extractor.java` 的 `StateTables` 新增 `rotation`（每状态 4 项，
+  `Rotation.ordinal()`）与 `mirror`（每状态 3 项，`Mirror.ordinal()`），经 `extract` 写进
+  `mc-bamboo-data::generated::states` 的 `STATE_ROTATION` / `STATE_MIRROR`，
+  访问函数 `mc_bamboo_data::state_rotation` / `state_mirror`。这张表是结构件
+  `postProcess` 里 `placeBlock` 按朝向变换方块状态的前提，之前项目里没有。
+* 放置原语：新模块 `structure::place`（`PieceContext`：`getWorldX/Y/Z`、`placeBlock`
+  含 mirror→rotation 变换、`generateBox` / `generateAirBox` / `fillColumnDown`、
+  `isReplaceableByStructures`）与 `structure::post_process`（埋藏的宝藏的
+  `postProcess` 方块部分，返回箱子位置，不写战利品表）。
+* **仍是纯函数**：这些放置原语还没接进 `feature/run.rs`，也没有逐方块对拍；
+  `StructureStart.placeInChunk` / `postProcess` 的完整链路（processor、方块实体、
+  战利品表、拼图替换）仍归第 5 步。
+
+**第七轮（2026-11-14，`cb-wg-structures` 续：`postProcess` 方块部分 + 逐方块对拍）**：
+
+* `structure::scattered`：`ScatteredFeaturePiece` 的两个高度校正
+  （`updateAverageGroundHeight` / `updateHeightPositionToLowestGroundHeight`），
+  用 `MOTION_BLOCKING_NO_LEAVES` 高度图在包围盒内求平均 / 最小值并竖直平移。
+* `structure::post_process`（从上一轮的单文件扩成模块）：
+  * `buried_treasure`：从 `OCEAN_FLOOR_WG` 高度往下找砂岩 / 石头层，把六个邻居换成
+    `below` 或 `soft`，返回箱子位置；
+  * `create_chest` / `reorient`：`StructurePiece.createChest` 的方块部分（含箱子朝向的
+    两段 `reorient` 逻辑），战利品表的 `nextLong` 留给调用方；
+  * `post_process::swamp_hut`：`SwampHutPiece.postProcess` 的全部 `generateBox` /
+    `placeBlock` / `fillColumnDown`，含四个 `StairsShape.OUTER_*` 外角。
+* 新对拍 `structure-place`（`java/StructurePiecePlaceOracle.java`）：合成地形
+  （`surface(x,z) = 64 + floorMod(x*31 + z*17, 5) - 2`，表面沙子 / 下一层砂岩 / 更下石头）
+  按同一个公式在两边造出，跑 `postProcess` 后逐格比写前写后的差异。
+  4 种子 × 4 区块 × 2 结构（埋藏的宝藏 / 女巫小屋）= 32 查询、2202 个变化方块、
+  2202 个格比较 0 不一致。女巫和猫是实体，Java 侧在实体那一步抛异常（`T` 行标记，
+  `entityAbort=1` 共 16 条），方块已在此前写完，所以方块比较完整。
+  故意改坏一处（女巫小屋里一段 `generateBox` 的 Y 上界 1 改 2）报 224 处不一致，还原回 0。
+  第二次尝试改坏 `lowest_ground_height` 的初值**没有被抓到**，因为沙漠神殿还没接进对拍，
+  这条分支目前无覆盖，见疑点 12。
+* `structure::place` 的 `PieceContext` 改成两个生命周期参数（`&'a mut FeatureWorld<'b>`），
+  否则调用方在 `postProcess` 之后再读世界会被借用检查拒绝。
+
+**第八轮（2026-11-14，`cb-wg-structures` 续：沙漠神殿 `postProcess`，未验证）**：
+
+* 新模块 `structure::post_process::pyramid`：`DesertPyramidPiece.postProcess` 的方块部分，
+  含 `updateHeightPositionToLowestGroundHeight` 的 `-random.nextInt(3)` 偏移、
+  `addCellarStairs`（`level.getRandom().nextBoolean()` 选沙子 / 砂岩）、
+  `addCellarRoom`、`placeCollapsedRoof`（`nextFloat() < 0.33`）、四个箱子的
+  `Direction.Plane.HORIZONTAL` 顺序、以及 `region_random`（`WorldGenRegion.getRandom()` 的
+  Legacy 位置派生复算）。
+* **状态：已写未验证**。`structure-place` 里接上后报 52427 处不一致——Java 侧沙漠神殿在
+  合成地形上一个方块都不写。排查到 `getHeightmapPos` 的语义（`LevelReader` 默认实现调
+  `this.getHeight`，也就是 `WorldGenRegion.getHeight` 的 `+1` 版本）已经改对，但 `D` 诊断行
+  一直没出现在 Rust 的解析结果里，时间用完前没能定位。该结构暂时加进
+  `structure_place.rs` 的 `SKIPPED` 列表，不进查询集，所以 `structure-place` 仍是
+  32 查询 / 2202 格 / 0 不一致。
+
+**第九轮（2026-11-14，`cb-wg-structures` 续：沙漠神殿偏差的排查结论，无新产出）**：
+
+本轮全部时间用在定位沙漠神殿 `postProcess` 的坐标偏差上，**没有代码提交**（排查中改的
+`region_random`、write-log 对比都回退了，工作树干净）。但拿到了三条确定的结论，下一轮直接照做：
+
+1. **`region_random` 之前写错了**。官方是
+   `RandomState.random = Algorithm.newInstance(seed).forkPositional()`，
+   `getOrCreateRandomFactory(name) = random.fromHashOf(name).forkPositional()`，
+   再 `.at(center.getWorldPosition())`——也就是
+   `Algorithm::new_instance(seed).fork_positional().from_hash_of("minecraft:worldgen_region_random").fork_positional().at(x, 0, z)`。
+   第八轮写的「`WorldgenRandom(worldSeed).nextLong()` 当工厂种子」是错的。
+   `mc-bamboo-worldgen::random` 已有 `fork_positional` / `from_hash_of` 两个原语，直接拼即可。
+2. **oracle 之前只比「状态变化」，漏掉了结构写在地形上的方块**。沙漠神殿的塔身几乎全落在
+   合成地形的沙 / 砂岩上，`before`/`after` 快照判不出变化，于是 Java 侧一直是「0 个变化方块」。
+   正确的做法是让 `WorldGenLevel` 代理记录**每一次 `setBlock`**（`TreeMap<BlockPos, BlockState>`
+   后写覆盖先写），Rust 侧同样在 `PieceContext` 里记 `(x, y, z, state)` 写入日志
+   （含 `fill_column_down`），两边比写入日志而不是比状态差异。
+3. **`getHeight` / `getHeightmapPos` 在区块外不能 `& 15` 折回**。官方 `WorldGenRegion` 的写半径
+   是 1，能读到邻居区块；假世界只有一个区块时把越界坐标折回本区块会让
+   `lowest_ground_height` 读到错误的列。要么造 3×3 假地形，要么按地形公式直接算越界列。
+   改这两处后沙漠神殿的不一致从 52427 降到 23004（剩下的差异还没查完）。
+
+**第十轮（2026-11-14，`cb-wg-structures` 续：按第九轮三条根因重做对拍，仍无代码提交）**：
+
+本轮把第九轮定位的三条根因全部实现并实测，**结论是三条都必要但不充分**，剩下的差异出在
+`fillColumnDown` 的边界上。所有代码改动在收尾时都回退了（工作树干净），只留这份记录。
+
+实现过的三件事（都可复用）：
+
+1. `region_random(seed, use_legacy_random, cx, cz) =
+   Algorithm::new_instance(seed).fork_positional()
+     .from_hash_of("minecraft:worldgen_region_random").fork_positional().at(cx, 0, cz)`，
+   `use_legacy_random` 传主世界 `noise_settings.legacy_random_source`（false）。
+2. `PieceContext` 加 `writes: Option<Vec<(i32, i32, i32, u32)>>`，`place_block` /
+   `fill_column_down` / `create_chest` 都往里记；Java 侧 `PieceLevelHandler.written`
+   （`TreeMap<BlockPos, BlockState>`，后写覆盖先写）是同一语义。**两边都比写入日志**，
+   而不是「写前写后状态差异」。
+3. 假世界改成 3×3 合成地形（9 个区块都按同一公式填），区块外的高度按公式算而不是
+   `& 15` 折回。
+
+实测结果（`structure-place` 48 查询：埋藏的宝藏 / 沙漠神殿 / 女巫小屋各 16）：
+
+| 阶段 | 不一致数 |
+|---|---|
+| 起点（只改对 `region_random`） | 52427 |
+| + 写入日志 | 46980 |
+| + 3×3 地形 | 7945 |
+| 只剩沙漠神殿，埋藏的宝藏与女巫小屋已对上（只剩 18 处女巫小屋） | 18 |
+
+**剩下的 18 处全部是女巫小屋的 `fillColumnDown` 差一格**：Java 把橡木原木填到 `y = 62`，
+Rust 填到 `63`；`(1, 63, 2)` 反过来（Rust 写了、Java 没写）。也就是说
+`fillColumnDown` 的起点或终止条件有一处 `±1`。官方：
+
+```
+BlockPos.MutableBlockPos pos = this.getWorldPos(x, startY, z);
+if (chunkBB.isInside(pos)) {
+   while (this.isReplaceableByStructures(level.getBlockState(pos)) && pos.getY() > level.getMinY() + 1) {
+      level.setBlock(pos, blockState, 2);
+      pos.move(Direction.DOWN);
+   }
+}
+```
+
+注意 `pos` 在**循环体内**被 `move(DOWN)` 推进、而 `isReplaceableByStructures` 读的是
+**推进后**的位置——写的是「当前 `pos`」，判的是「当前 `pos`」，然后在末尾下移一格。
+Rust 的 `place.rs::fill_column_down` 先读 `get_block(pos)`、再 `set_block(pos)`、再 `y -= 1`，
+顺序一致；差异最可能在**起点**：官方 `getWorldPos(x, startY, z)` 的 Y 是
+`startY + boundingBox.minY`，而结构件在 `postProcess` 里已经被 `updateAverageGroundHeight`
+平移过，`boundingBox.minY` 是平移后的值。Rust 传进 `PieceContext.piece_bb` 的也是平移后的
+`new_bb`，但 `fill_column_down` 用的是 `self.world_pos(x, start_y, z)`，其中 `world_y` 读
+`piece_bb[1]`——这条链是对的。
+
+**下一轮应该直接盯着这 18 处对齐**：用一个只含女巫小屋的查询集，把 Java 侧
+`fillColumnDown` 每次 `setBlock` 的坐标打出来，和 Rust 的 `writes` 逐条比，一处一处对。
+
+**第十一轮（2026-11-14，`cb-wg-structures`：对拍改用写入日志，落地三条根因）**：
+
+第九、十轮定位的根因**已实现并提交**（`7175dd0`，WIP）：
+
+* `structure::place` 新增 `Write = (x, y, z, state)` / `WriteLog = Option<Vec<Write>>` /
+  `Placed = (Option<(i32, [i32; 6])>, WriteLog)` 三个别名；`PieceContext.writes` 在
+  `place_block` 与 `fill_column_down` 里记录每次写入（生产路径传 `None`，零开销）。
+* `region_random(seed, use_legacy_random, cx, cz)` 改成官方链路：
+  `Algorithm::new_instance(seed).fork_positional().from_hash_of(
+  "minecraft:worldgen_region_random").fork_positional().at(cx, 0, cz)`。
+* `structure-place` 的 Java oracle：`PieceLevelHandler.written`（`TreeMap<BlockPos, BlockState>`，
+  后写覆盖先写）当结果；`getHeight` / `getHeightmapPos` 在区块外按合成地形公式现算，
+  不再 `& 15` 折回；假世界 9 个区块都填地形。
+* 沙漠神殿的 `fillColumnDown` 21×21 循环改回指令表里官方的位置（塔身之后、正面入口之前），
+  此前误放在指令表末尾。
+* `add_cellar_room` 的四个出口按官方顺序重排（`x+3` → `cut(x+4)` → `chiseled(x+4)` →
+  `x-3` → `cut(x-4)` → `chiseled(x-4)` → 南北两个橙陶瓦）。
+
+**当前状态（不能算通过）**：`structure-place` 是 **18 处不一致**，全部是女巫小屋的
+`fillColumnDown` 差一格（Java 填到 `y = 62`，Rust 到 `63`；`(1, 63, 2)` 反过来）。
+改用写入日志后，这套更严格的语义把此前被「状态差异」掩盖的差异暴露出来了。
+沙漠神殿仍在 `SKIPPED`，本轮把它从 7936 压到 6953 后仍未归零。
+
+**第十二轮（2026-11-14，`cb-wg-structures` 续：女巫小屋差一格的定位，无代码提交）**：
+
+本轮只做了一件事：查第十一轮留下的 18 处 `fillColumnDown` 差一格。**没修好，代码全部回退**
+（工作树干净，仍是 `7172a2e` 的状态）。
+
+已经排除的：
+
+* **不是 `average_ground_height` 的公式问题**。我给 Java oracle 加了一条诊断，在
+  `postProcess` 之后按 `MOTION_BLOCKING_NO_LEAVES` 重算盒子平均值：`chunk 0 0 0` 的
+  `box = (0,64,0)..(6,70,8)`、`avg = 64`、`n = 63`，和 Rust 的 `piece_bb` / 公式完全一致。
+* **不是 `region_random`**。女巫小屋 `postProcess` 不取随机数（`entityAbort` 发生在女巫 / 猫
+  那一步，方块已写完）。
+* **不是 `piece_bb` 没传平移后的盒子**。`swamp_hut` 里 `piece_bb: new_bb` 确认无误。
+
+**未解的矛盾（下一轮从这里开始）**：
+
+用 `Heightmap.Types.MOTION_BLOCKING_NO_LEAVES` 在 `surface = 62` 的列上：
+`ChunkAccess.getHeight` = `Heightmap.getFirstAvailable` = 高度图里存的值 = **最高方块 y + 1** = 63；
+`WorldGenRegion.getHeight` 覆写版再加 1 = **64**；`LevelReader.getHeightmapPos` 调的是
+`this.getHeight`（即覆写版）= **64**。
+Rust 的 `FeatureWorld::get_height` 返回 `stored + 1`，而 `stored` 是「最高方块 y」（`prime_heightmaps`
+的约定）→ **63**。
+
+把 Rust 改成 `+2` 后，`structure-place` 从 18 处**涨到 2786 处**，说明埋藏的宝藏用的
+`get_height(OceanFloorWg)` 在 `+1` 下是对的。也就是说：
+
+* `BuriedTreasurePiece.postProcess` 的 `level.getHeight(OCEAN_FLOOR_WG, x, z)` 与 Rust `+1` 对齐；
+* `ScatteredFeaturePiece.updateAverageGroundHeight` 的 `level.getHeightmapPos(...).getY()`
+  需要 Rust `+2`。
+
+**这两处官方都走 `WorldGenRegion.getHeight`，不该有差别。** 所以要么我对
+`Heightmap.getFirstAvailable` 返回值的理解错一层，要么 `getHeightmapPos` 在
+`WorldGenRegion` 上还有别的覆写。下一轮应该：
+
+1. 直接读 `Heightmap.getFirstAvailable` / `setHeight` / `getHeight` 三个方法确认存的到底是
+   「方块 y」还是「方块 y + 1」；
+2. 在 Java oracle 里对同一个坐标同时打印 `level.getHeight(t, x, z)` 和
+   `level.getHeightmapPos(t, pos).getY()`，看这两个数差几；
+3. 再决定 Rust 侧是加两层 `get_height`（`+1` / `+2` 各一个，名字区分语义），
+   还是统一改正 `prime_heightmaps` 的存储约定。
+
+**第十三轮（2026-11-14，`cb-wg-structures`：`Heightmap` 存储语义已确认，`get_height` 差两层的账）**：
+
+上一轮说「两处官方都走 `WorldGenRegion.getHeight`，不该有差别」，本轮把
+`Heightmap` 的内部约定读清楚了，结论是**差在 Rust 侧的两层 `+1` 记重了**：
+
+官方 `Heightmap`（`net/minecraft/world/level/levelgen/Heightmap.java`）：
+
+```
+private int getFirstAvailable(int index) { return this.data.get(index) + this.chunk.getMinY(); }
+private void setHeight(int x, int z, int height) { this.data.set(getIndex(x, z), height - chunk.getMinY()); }
+public int getHighestTaken(int x, int z) { return this.getFirstAvailable(getIndex(x, z)) - 1; }
+```
+
+`setHeight` 存的是 `height`，而调用它的是 `Heightmap.update` 里的
+`this.setHeight(localX, localZ, localY + 1)` 和 `primeHeightmaps` 里的
+`heightmap.setHeight(x, z, y + 1)`——**`data` 存的是「最高方块 y + 1」**，
+`getFirstAvailable` 返回同一个值，`getHighestTaken` 才是最高方块 y。
+
+`ChunkAccess.getHeight(type, x, z)` 直接返回 `heightmap.getFirstAvailable(...)`
+（`ChunkAccess.java:180`），也就是**最高方块 y + 1**；
+`WorldGenRegion.getHeight` 覆写版再 `+ 1`（`WorldGenRegion.java:462`），
+所以 `WorldGenRegion.getHeight` = **最高方块 y + 2**。
+
+Rust 侧：`feature/heightmap.rs` 的 `Heightmaps` 存的是**最高方块 y**（`update` 里
+`*slot = y`，`prime_heightmaps` 里 `max(y)`），比官方 `data` 少 1；
+`FeatureWorld::get_height` 返回 `stored + 1` = **最高方块 y + 1**，
+即 `ChunkAccess.getHeight`，比 `WorldGenRegion.getHeight` 少 1。
+
+上一轮把 `get_height` 改成 `+2` 后对拍从 18 涨到 2786，是因为**埋藏的宝藏那条路径本来就错**：
+`BuriedTreasurePiece.postProcess` 用 `level.getHeight(OCEAN_FLOOR_WG, x, z)`（`WorldGenRegion`
+覆写版，= 最高 y + 2），而 Rust 用它算出的 `+1` 值恰好和 Java oracle 里**同样少一层的
+代理实现**相互抵消，所以显示 0 不一致。**也就是说 `buried_treasure` 的 0 不一致也是假的**，
+两边的 bug 抵消了。
+
+**正确做法（下一轮执行）**：
+
+1. 把 `feature/heightmap.rs` 的存储约定改成和官方一致（`data` = 最高方块 y + 1），
+   或者把 `FeatureWorld::get_height` 改成 `stored + 2` 并**同时**修正
+   `buried_treasure` 的调用；
+2. Java oracle 的 `PieceLevelHandler.heightAt` 目前返回 `chunk.getHeight(...)`
+   （= 最高 y + 1），`getHeight` / `getHeightmapPos` 各自 `+1`，两边都少一层；
+   应改成 `heightAt` 返回 `chunk.getHeight(...) + 1`（= 最高 y + 2）并去掉外面的 `+1`；
+3. 改完必须重跑 `buried_treasure` 与 `swamp_hut` 两项，确认**同时**归零。
+
+**本轮没有提交代码**（只把这条结论写进文档）：时间用在了读官方 `Heightmap` 与核对
+`ChunkAccess` / `WorldGenRegion` 的两处 `+1`，把「两边 bug 抵消」这一层查清楚了，
+但没有足够的实测时间去同时改 Rust 存储约定 + Java 代理 + 两个结构并验证。
+
+**第十四轮（2026-11-14，`cb-wg-structures` 续：女巫小屋差一格的实测推翻前两轮推断）**：
+
+本轮**用追踪确认了 Java 侧的真实写入**，前面三轮的推断都不对。代码全部回退
+（工作树干净，仍是 `c99e823` 的 18 处基线）。
+
+在 Java oracle 的 `PieceLevelHandler.setBlock` 里加了一条追踪，只打印
+`x = 1, z ∈ {2, 7}, y ∈ 61..64` 的写入，实测（`swamp_hut 0 0 0`）：
+
+```
+Y 1 64 2 140
+Y 1 64 7 140
+Y 1 63 2 140
+Y 1 63 7 140
+```
+
+即 **Java 的 `fillColumnDown` 写的是 64 和 63，不是 62**。Rust 写 63（本轮诊断
+`hpos = 64`、`new_bb[1] = 64`、`world_y(-1) = 63`）。
+
+所以 18 处差异的 `java: 140 (oak_log) @ (1,62,2)` **不是** `fillColumnDown` 写的，
+而是别的地方。已知：
+
+* `fillColumnDown` 只写 63（62 是沙子，`isReplaceableByStructures` 为假，循环停下）；
+* 四根柱子 `generateBox(1,0,2, 1,3,2, logs…)` 写局部 y `0..3` = 世界 `64..67`；
+* 女巫小屋没有任何指令写世界 y < 63。
+
+**矛盾的焦点**：Java 在 `(1, 62, 2)` 写下了橡木原木，但从源码看这条路径走不到那里。
+可能性（下一轮按顺序排除）：
+
+1. **`getWorldY` 的基准在 `fillColumnDown` 调用时不是 64**。`updateAverageGroundHeight`
+   在 `postProcess` 开头把盒子平移到 `minY = heightPosition`（本轮诊断 `hpos = 64`），
+   但官方 `placeCollapsedRoof` / `addCellar` 之类不会改回来。如果 `heightPosition` 实际是
+   63（诊断读到 64 是因为我打印的是平移后的盒子再算一次平均），那么 `world_y(-1) = 62`
+   就解释了 62 这一格。
+2. **`Heightmap.primeHeightmaps` 与 Rust `prime_heightmaps` 对 `MOTION_BLOCKING_NO_LEAVES`
+   的判定不同**（本轮仍未对拍这两份实现）。
+3. `chunkBB.isInside((x, 64, z))` 的边界差一列，导致 `count` 与 `total` 不同。
+
+**下一轮的第一步**：在 Java 的 `updateAverageGroundHeight` 之后**立刻**打印
+`boundingBox.minY`（而不是在 `postProcess` 之后重算），这是唯一还没测过的数。
+
+**本轮同时确认的一条（可复用）**：`Heightmap` 内部 `data` 存的是「最高方块 y + 1」，
+`ChunkAccess.getHeight` = 该值，`WorldGenRegion.getHeight` 覆写版再 +1；
+Rust `Heightmaps` 存「最高方块 y」、`get_height` 返回 `+1`，正好等于
+`ChunkAccess.getHeight`，比 `WorldGenRegion.getHeight` 少 1。把 `get_height` 改成 `+2`
+会让女巫小屋整栋上移一格（2786 处不一致），所以**现有 `+1` 是对的**，不要再改。
+
+**第十五轮（2026-11-14，合并前收尾）**：
+
+* `git merge main` 结果：main 已经是本分支的祖先（`7373539` 的树 / 倒木 / 巨型蘑菇 /
+  `feature/shape_update.rs` 都已在），无需合并，没有冲突。
+* 确认「没验证过的不进游戏」：`structure::post_process`（埋藏的宝藏 / 女巫小屋 / 沙漠神殿的
+  `postProcess` 方块部分）**没有任何生产路径调用**——`feature/run.rs`、`chunk.rs` 都不引用它，
+  只在 `structure/mod.rs` 里 `pub mod` 声明。游戏里结构件仍然一个方块都不放。
+* README 与本文第 7 节的现状表按实测更新：此前写的「埋藏的宝藏与女巫小屋的 `postProcess`
+  逐方块 0 不一致」是**错的**（那是改用写入日志之前的数字），已改成
+  「埋藏的宝藏 0 不一致、**女巫小屋 18 处不一致未通过**、沙漠神殿 `SKIPPED`」。
+* 全量检查：`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+  `cargo test --no-fail-fast`（927 passed，`staged_pipeline_delivers…` 90s 时限在 debug 下超时，
+  `--release` 5.75s 通过）、`gen-world`（0 不一致）、`gen-world --through features`
+  （0 不一致）、九个结构对拍（全 0）、探针（719/719）。
+
+**仍是空实现 / 没接进游戏**：`structure_starts` / `structure_references` 两个阶段、结构件放置（`features` 阶段）仍没做；结构件布局、`Beardifier`、存档 `structures` 键
 已作为纯函数 + oracle 落地，但都没接进 Director，游戏里世界仍是超平坦。`findValidGenerationPoint` 的通用群系 / 高度判定已做（见上），但这里的「是否有效」
 是 `onTopOfChunkCenter` 基线路径的通用判定，**不等于** `Structure.generate` 的最终有效：
 各结构的 `findGenerationPoint`、包围盒、`.nbt` 模板、jigsaw 仍属第 4 步。组合对拍只覆盖
@@ -303,12 +645,15 @@ Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_heigh
   `PieceLevel::level_random`）。
 * `state_transform` 改成按方块类和祖先类分派，覆盖官方所有重写 `rotate` / `mirror` 的方块
   类；`up` / `down` 朝向在旋转时保持不变。
-* 模板放置照 `placeInWorld`：带 NBT 的方块先写 `BARRIER`；`RandomizableContainer` 取一次
-  `nextLong()`（`WorldGenRegion.getBlockEntity` 会把 `DUMMY` 换成真方块实体）；
-  `placeLiquid` 按 `WorldGenRegion` 语义（不做邻居形状更新），`toFill` 与回填循环不看
-  `placeLiquid` 的返回值。生成期天空光读 15（区块还没点光）。
-* **当前状态**：神殿 32 查询 298 万个位置、府邸 32 查询 380 万个位置，0 不一致，每次调用的
-  写入次数也全部相同；抽样开 `STRUCTURE_PLACE_TRACE=1` 也是 0。
+* 合并 main 之后只剩一份模板放置：府邸和雪屋 / 沉船 / 海底遗迹 / 废弃传送门共用
+  `template_place::place_in_world`（`buildInfoList` 顺序、processor 管线、流体回填、
+  `updateShapeAtEdge` + `updateFromNeighbourShapes`）。府邸经 `PieceLevelAccess` 把
+  `PieceLevel` 当 `feature::shape_update::BlockAccess` 用，数据标记按 `data_markers`
+  （`filterBlocks` 顺序）处理。原来府邸专用的 `template_shape_update` 已删，形状更新只剩
+  `feature::shape_update`；它的生成期天空光改读 15（区块还没点光，蘑菇的 `canSurvive`
+  靠它），之前读 0。
+* **当前状态（合并 main 之后）**：神殿 32 查询 298 万个位置、府邸 32 查询 380 万个位置，
+  0 不一致，每次调用的写入次数也全部相同；`structure-templated-place` 334 查询仍 0。
 
 ## 1. 官方 26.3 的结构生成全景
 
@@ -937,11 +1282,21 @@ structures (Compound)
   各结构的 `findGenerationPoint`（结构件生成、模板、jigsaw）没做，`StructureStart`
   仍是数据类型，`start_plans` 只给加权尝试序列。组合对拍只覆盖 6 个 `random_spread`
   结构集、不含 `isStructureChunk` 命中过滤。
-* 第五轮已落地并对拍：`structure::single` 的四个代码生成单件结构布局（第 4 步一部分）、
+* 第五轮已落地并对拍：`structure::single` 的四个代码生成单件结构布局、
+  `structure::templated` 的雪屋 / 沉船 / 海底遗迹布局（第 4 步一部分）、
   `mc-bamboo-worldgen::beardifier`（第 6 步，`cb-wg-beard`，见第 5 节）、`structure::save` 的 `structures` 键（第 7 步）。
-  仍没做：需要模板的单件结构与 jigsaw 结构件生成（第 4 步其余）、`features` 阶段结构件
+  仍没做：jigsaw 结构件生成（第 4 步其余）、`features` 阶段结构件
   放置（第 5 步，`placeInChunk` / `postProcess` / processors / 方块实体 / 拼图替换），
   以及把全部结构起点接进 Director。这些仍是纯函数/类型，没有接进游戏。
+* 废弃传送门的布局已做（第六轮，见下面「第六轮」一段）；它的 `postProcess`
+  （`spreadNetherrack`、`maybeAddVines`、`addNetherrackDripColumnsBelowPortal`）
+  和其余三个结构一样没做。
+* 雪屋 / 沉船 / 海底遗迹的布局只做「结构件列表」：雪屋和沉船的 `postProcess` 会用
+  `getHeight` 把结构件 Y 校正到地表 / 海床，沉船还在模板超过 32 格时于 `generatePieces`
+  里按 `getLowestY` / `getMeanFirstOccupiedHeight` 调 Y；海底遗迹的 `postProcess` 同样按
+  `OCEAN_FLOOR_WG` 重设 Y。这些都依赖 terrain 高度，留给放置里程碑；现有 31 个沉船模板
+  都不超过 9×21×28，`isTooBigToFitInWorldGenRegion()` 恒 false，所以 `generatePieces`
+  里的高度调整在官方也从不触发（Rust 侧对该分支直接报错而不是猜）。
 * `structure-validity` 的整列判定与起点单点判定在这批数据上从未不一致（第 9 节疑点
   10）；两条路径各自用故意改坏单独验过。
 * `structure_references` 的纯函数 `structure_references` 已就位（含 `ChunkPos.pack`
@@ -958,3 +1313,22 @@ structures (Compound)
   接上后，把 `for_structures_in_chunk` 的产物填进同一套输入即可，并可把 `beard` 的
   输入换成真实生成的结构件再对拍一次。
 * 未完成的结构/阶段不假装支持：地物分支用 `unsupported` 标记，结构里程碑沿用同一做法。
+
+## 11. 四个分支合并后的现状（`cb-wg-integrate`，2026-11-14）
+
+`cb-wg-aquatic`、`cb-wg-caves`、`cb-wg-feat-a`、`cb-wg-structures` 四个分支按顺序合入。
+结构这边合并时只发生一处命名冲突，处理如下：
+
+| 冲突 | 处理 |
+|---|---|
+| 两个分支各有一个 `structure-place` 子命令，且**互换了 Java 源文件名** | main 上的 `StructurePlaceOracle.java` 是多件式结构件放置，`cb-wg-structures` 上的 `StructurePiecePlaceOracle.java` 是单件结构的 `postProcess`。按内容重新对应：`structure-place` 仍用 `StructurePlaceOracle.java`（多件式），单件的那份改名成 `structure-post-process` 子命令；`main.rs` 里两个 `const` / `mod` / match 分支 / 空实现函数都补齐成一对 |
+| `Piece.extras` 的类型 | main 改成了带 NBT 类型的 `BTreeMap<String, Extra>`，`cb-wg-structures` 还是 `BTreeMap<String, String>`。保留 main 的类型，并补 `Extra::Float`（海底遗迹的 `Integrity` 是 `putFloat`）；`Extra::token()` 带类型前缀供 `structure-pieces` / `structure-load` 用，新增 `Extra::plain_token()` 给三个只打印数值的 oracle（`structure-single` / `structure-templated` / `structure-ruined-portal`） |
+| `FeatureWorld::new` 的参数 | 多了一个 `seed`（晶洞的固定参数噪声要用），所有调用点已补 |
+
+合并后结构相关的对拍全部重跑（数字见 `reports/cb-wg-integrate.md`）：
+`structures` / `structure-rings` / `structure-validity` / `structure-generation` /
+`structure-single` / `structure-pieces` / `structure-save` / `structure-templated` /
+`structure-ruined-portal` / `beard` 全部 0 不一致；`structure-place`（多件式放置）仍是
+合并前 main 的状态——Java 侧跑全量时抛异常，未验证；`structure-post-process`（单件
+`postProcess`）是 18 处不一致，女巫小屋差一格，未通过。这两项都**没接进
+`feature/run.rs`**，游戏里结构件仍然一个方块都不放。

@@ -22,17 +22,20 @@
 pub mod jigsaw;
 pub mod piece_place;
 pub mod pieces;
+pub mod place;
 pub mod placement;
+pub mod post_process;
 pub mod registry;
 pub mod rings;
 pub mod save;
+pub mod scattered;
 pub mod single;
 pub mod start;
 pub mod start_point;
 pub mod state_transform;
 pub mod template;
 pub mod template_place;
-pub mod template_shape_update;
+pub mod templated;
 pub mod validity;
 
 use std::collections::{HashMap, HashSet};

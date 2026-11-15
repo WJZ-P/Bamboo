@@ -24,7 +24,7 @@ use mc_bamboo_blocks::LegacyRandom;
 
 use crate::{
     random::{Random, WorldgenRandom},
-    structure::{pieces::Piece, template::StructureTemplate},
+    structure::{pieces::Piece, template::StructureTemplate, template_place},
 };
 
 use super::HDir;
@@ -469,53 +469,29 @@ pub fn place_piece(
         int_extra(piece, "TPY"),
         int_extra(piece, "TPZ"),
     );
-    let rotation = rotation_of(rot_of(piece));
-    let mirror = mirror_of(mir_of(piece));
-    let settings = crate::structure::template_place::PlaceSettings::mansion(rotation, mirror);
+    let rot = rot_of(piece);
+    let rotation = rotation_of(rot);
+    let mut settings =
+        template_place::PlaceSettings::new(mir_ordinal(mir_of(piece)), rot_ordinal(rot), (0, 0))
+            .with_processors(vec![template_place::Processor::Ignore(
+                template_place::IGNORE_STRUCTURE_BLOCK,
+            )]);
+    settings.chunk_bb = Some(*chunk_bb);
 
-    let blocks =
-        crate::structure::template_place::blocks_in_chunk(&template, position, settings, chunk_bb)?;
-    let placed =
-        crate::structure::template_place::place_blocks(level, chunk_bb, &blocks, settings, random);
-    // `placeInWorld` 末尾的两步形状更新（`getKnownShape()` 为 false）。
-    // The two shape-update steps at the end of `placeInWorld` (`getKnownShape()` false).
-    crate::structure::template_shape_update::update_shapes(level, &placed);
+    let mut access = template_place::PieceLevelAccess(level);
+    if template_place::place_in_world(&mut access, &template, position, &settings, random).is_none()
+    {
+        return Ok(());
+    }
+    let level = access.0;
 
-    // `TemplateStructurePiece.postProcess` 里数据标记与拼图替换的顺序：官方先遍历
-    // `filterBlocks(..., STRUCTURE_BLOCK)` 调 `handleDataMarker`，再遍历
-    // `filterBlocks(..., JIGSAW)` 替换拼图方块。这里保留同样的先后。
-    // Vanilla's order in `TemplateStructurePiece.postProcess`: first the
-    // `filterBlocks(..., STRUCTURE_BLOCK)` loop calling `handleDataMarker`, then the
-    // `filterBlocks(..., JIGSAW)` loop replacing jigsaw blocks. Kept in the same order.
-
-    // `handleDataMarker`：箱子标记和生物标记。实体不建，但生物标记那格的 `setBlock(AIR)`
-    // 每只生物写一次，悦灵数量取 `level.getRandom()`。
-    // `handleDataMarker`: chest markers and mob markers. No entity is built, but a mob
-    // marker's `setBlock(AIR)` happens once per mob, and the allay count draws from
-    // `level.getRandom()`.
-    for local in &template.blocks {
-        let Some(nbt) = &local.nbt else {
-            continue;
-        };
-        let Some(mode) = nbt_string(nbt, "mode") else {
-            continue;
-        };
-        // 存档里的值来自 `StructureMode.LEGACY_CODEC` 的 `valueOf`，是大写的 `DATA`。
-        // The saved value comes from `StructureMode.LEGACY_CODEC`"'s `valueOf`, so it is `DATA`.
-        if mode != "DATA" {
-            continue;
-        }
-        let metadata = nbt_string(nbt, "metadata").unwrap_or_default();
-        let local_pos =
-            crate::structure::template_place::transform_pos(local.pos, mirror, rotation);
-        let world = (
-            local_pos.0 + position.0,
-            local_pos.1 + position.1,
-            local_pos.2 + position.2,
-        );
-        if !crate::structure::piece_place::box_is_inside(chunk_bb, world.0, world.1, world.2) {
-            continue;
-        }
+    // `handleDataMarker`：箱子标记和生物标记，按 `filterBlocks(..., STRUCTURE_BLOCK)` 的
+    // 顺序。实体不建，但生物标记那格的 `setBlock(AIR)` 每只生物写一次，悦灵数量取
+    // `level.getRandom()`。
+    // `handleDataMarker`: chest markers and mob markers, in `filterBlocks(...,
+    // STRUCTURE_BLOCK)` order. No entity is built, but a mob marker's `setBlock(AIR)`
+    // happens once per mob, and the allay count draws from `level.getRandom()`.
+    for (metadata, world) in template_place::data_markers(&template, position, &settings) {
         if metadata.starts_with("Chest") {
             write_marker_chest(level, world, &metadata, rotation, random);
             continue;
@@ -535,10 +511,37 @@ pub fn place_piece(
     // Jigsaw-block replacement (vanilla's `filterBlocks(..., JIGSAW)` loop). The mansion's
     // templates carry no jigsaw blocks, so this writes nothing for the mansion; it is wired
     // in so the path is ready for other template pieces.
-    crate::structure::template_place::replace_jigsaws(
-        &template, position, settings, chunk_bb, level,
+    template_place::replace_jigsaws(
+        &mut template_place::PieceLevelAccess(level),
+        &template,
+        position,
+        &settings,
+        &mut Vec::new(),
     );
     Ok(())
+}
+
+/// `Rot` 在 `Rotation.values()` 里的序号。
+///
+/// The ordinal of `Rot` in `Rotation.values()`.
+fn rot_ordinal(rot: Rot) -> i32 {
+    match rot {
+        Rot::None => 0,
+        Rot::Cw90 => 1,
+        Rot::Cw180 => 2,
+        Rot::Ccw90 => 3,
+    }
+}
+
+/// `Mir` 在 `Mirror.values()` 里的序号。
+///
+/// The ordinal of `Mir` in `Mirror.values()`.
+fn mir_ordinal(mir: Mir) -> i32 {
+    match mir {
+        Mir::None => template_place::MIRROR_NONE,
+        Mir::LeftRight => template_place::MIRROR_LEFT_RIGHT,
+        Mir::FrontBack => template_place::MIRROR_FRONT_BACK,
+    }
 }
 
 /// 读存档里的 Int 型子类字段。
@@ -586,21 +589,6 @@ fn mir_of(piece: &Piece) -> Mir {
         Some("FRONT_BACK") => Mir::FrontBack,
         _ => Mir::None,
     }
-}
-
-/// `CompoundTag.getStringOr(key, default)`。
-///
-/// `CompoundTag.getStringOr(key, default)`.
-fn nbt_string(tag: &mc_bamboo_nbt::Tag, key: &str) -> Option<String> {
-    let mc_bamboo_nbt::Tag::Compound(entries) = tag else {
-        return None;
-    };
-    entries.iter().find_map(|(name, value)| {
-        (name == key).then(|| match value {
-            mc_bamboo_nbt::Tag::String(text) => Some(text.clone()),
-            _ => None,
-        })?
-    })
 }
 
 /// `handleDataMarker` 的箱子分支：`createChest(level, chunkBB, random, pos,

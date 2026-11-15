@@ -1,524 +1,1453 @@
-//! 结构模板的逐方块放置：`StructureTemplate.placeInWorld` + `processBlockInfos` 的移植。
+//! `StructureTemplate.placeInWorld` 的等价实现，以及它用到的 `StructurePlaceSettings` 与
+//! 几种 `StructureProcessor`（`BlockIgnoreProcessor` / `BlockRotProcessor` /
+//! `RuleProcessor` / `BlockAgeProcessor` / `BlackstoneReplaceProcessor` /
+//! `LavaSubmergedBlockProcessor` / `ProtectedBlockProcessor`）。
 //!
-//! 本轮只覆盖林地府邸用到的组合：`StructurePlaceSettings` 里 rotation / mirror、
-//! `BlockIgnoreProcessor.STRUCTURE_BLOCK`、`setIgnoreEntities(true)`、`setBoundingBox(chunkBB)`。
+//! 逐条照官方 26.3 翻译：
 //!
-//! 逐条照官方翻译（`StructureTemplate.java`）：`getRandomPalette` 的多 palette 按
-//! `Mth.getSeed(position)` 选（不消耗世界随机源）、`calculateRelativePosition`
-//! （`transform(pos, mirror, rotation, pivot)`）、`processBlockInfos` 只处理落在 `chunkBB`
-//! 里的方块并按 `structure_block` 身份过滤、写入循环的 `boundingBox.isInside` →
-//! `mirror` / `rotate` → `setBlock`，以及 `RandomizableContainer` 的 `nextLong()`。
+//! * `getRandomPalette(palettes, pos)`：`palettes.get(getRandom(pos).nextInt(size))`，
+//!   `getRandom(pos)` 是 `RandomSource.create(Mth.getSeed(pos))`，不消耗世界随机源；
+//! * `buildInfoList` 的方块顺序：整方块、其它方块、带 nbt 的方块各自按 `(y, x, z)` 稳定
+//!   排序后拼接（这个顺序决定写入顺序，也决定 processor 的调用顺序）；
+//! * `processBlockInfos`：每个方块按 `settings.getProcessors()` 的顺序过一次，任一
+//!   processor 返回 null 就丢掉这个方块；`chunkBB` 之外的方块不处理（除非有
+//!   `evaluatesEntirePieceState` 的 processor，这四个结构都没用到）；
+//! * 写入：先 `mirror` 再 `rotate`，带 nbt 的方块先写一次 `BARRIER`，再写真实状态。
 //!
-//! 已知限制：官方在 `placeInWorld` 之后还会跑 `updateShapeAtEdge` /
-//! `updateFromNeighbourShapes`（林地府邸没有 `setKnownShape`），这两步留给调用方
-//! （`feature::shape_update` 已有等价实现）。
-//!
-//! Per-block structure template placement: a port of `StructureTemplate.placeInWorld` and
-//! `processBlockInfos`, covering the combination the woodland mansion uses (rotation /
-//! mirror, `BlockIgnoreProcessor.STRUCTURE_BLOCK`, `setIgnoreEntities(true)`,
-//! `setBoundingBox(chunkBB)`).
-//!
-//! Translated point by point from vanilla `StructureTemplate.java`: `getRandomPalette`
-//! picks a multi-palette by `Mth.getSeed(position)` without touching the worldgen random,
-//! `calculateRelativePosition` is `transform(pos, mirror, rotation, pivot)`,
-//! `processBlockInfos` keeps only blocks inside `chunkBB` and filters `structure_block`,
-//! and the write loop goes `boundingBox.isInside` → `mirror` / `rotate` → `setBlock`, with
-//! one `nextLong()` per `RandomizableContainer`.
-//!
-//! Known limits: vanilla also runs `updateShapeAtEdge` / `updateFromNeighbourShapes` after
-//! `placeInWorld` (the mansion never calls `setKnownShape`); those steps are left to the
-//! caller (`feature::shape_update` already has an equivalent).
+//! Port of vanilla `StructureTemplate.placeInWorld` plus the `StructurePlaceSettings` and
+//! `StructureProcessor` flavours it needs. The palette choice, the `buildInfoList` block
+//! order, the processor pipeline and the final `mirror` → `rotate` state transform are
+//! copied step by step from 26.3.
 
-use mc_bamboo_data::BlockAncestor;
+use mc_bamboo_data::{blocks, facts, state_facts};
 
-use crate::structure::piece_place::{PieceLevel, box_is_inside, is_block};
-use crate::structure::state_transform::{Mirror, Rotation, transform};
-use crate::structure::template::{PaletteEntry, StructureTemplate};
+use crate::{
+    feature::{shape_update::BlockAccess, world::HeightmapKind},
+    random::WorldgenRandom,
+    structure::{
+        piece_place::PieceLevel, pieces::Box, template::StructureTemplate, templated::transform,
+    },
+};
 
-/// `StructurePlaceSettings` 里本轮要用的部分。
+/// `Mirror` 的序号。
 ///
-/// The part of `StructurePlaceSettings` this round needs.
-#[derive(Debug, Clone, Copy)]
+/// Ordinals of vanilla `Mirror`.
+pub const MIRROR_NONE: i32 = 0;
+pub const MIRROR_LEFT_RIGHT: i32 = 1;
+pub const MIRROR_FRONT_BACK: i32 = 2;
+
+/// `LiquidSettings`。
+///
+/// Vanilla `LiquidSettings`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiquidSettings {
+    ApplyWaterlogging,
+    IgnoreWaterlogging,
+}
+
+/// `StructureProcessor` 的几种，字段直接对应官方构造参数。
+///
+/// The `StructureProcessor` flavours, with fields matching the vanilla constructors.
+#[derive(Debug, Clone)]
+pub enum Processor {
+    /// `BlockIgnoreProcessor`：方块是列表里的就丢掉。
+    ///
+    /// `BlockIgnoreProcessor`: drop the block when it is one of the listed ones.
+    Ignore(&'static [&'static str]),
+    /// `BlockRotProcessor`（没有 `rottable_blocks`）：`nextFloat() <= integrity` 才保留。
+    ///
+    /// `BlockRotProcessor` without `rottable_blocks`: keep when
+    /// `nextFloat() <= integrity`.
+    Rot(f32),
+    /// `RuleProcessor`：按顺序试每条规则，第一条命中的替换输出状态。
+    ///
+    /// `RuleProcessor`: try every rule in order; the first match replaces the state.
+    Rule(Vec<Rule>),
+    /// `CappedProcessor`：`finalizeProcessing` 里最多替换 `limit` 个方块。
+    ///
+    /// `CappedProcessor`: replace at most `limit` blocks inside `finalizeProcessing`.
+    Capped {
+        limit: i32,
+        delegate: std::boxed::Box<Processor>,
+    },
+    /// `BlockAgeProcessor`。
+    Age(f32),
+    /// `BlackstoneReplaceProcessor.INSTANCE`。
+    Blackstone,
+    /// `LavaSubmergedBlockProcessor.INSTANCE`。
+    LavaSubmerged,
+    /// `ProtectedBlockProcessor(FEATURES_CANNOT_REPLACE)`。
+    Protected,
+}
+
+impl Processor {
+    /// `StructureProcessor.evaluatesEntirePieceState()`：只有 `CappedProcessor` 覆写成 true，
+    /// 它让 `processBlockInfos` 不再按 `chunkBB` 过滤（全量处理后才能在 `finalizeProcessing`
+    /// 里统一挑最多 N 个）。
+    ///
+    /// `StructureProcessor.evaluatesEntirePieceState()`: only `CappedProcessor` overrides it
+    /// to true, which makes `processBlockInfos` skip the `chunkBB` filter so that
+    /// `finalizeProcessing` sees every block.
+    pub const fn evaluates_entire_piece_state(&self) -> bool {
+        matches!(self, Self::Capped { .. })
+    }
+}
+
+/// `BlockIgnoreProcessor.STRUCTURE_BLOCK`。
+///
+/// `BlockIgnoreProcessor.STRUCTURE_BLOCK`.
+pub const IGNORE_STRUCTURE_BLOCK: &[&str] = &["minecraft:structure_block"];
+/// `BlockIgnoreProcessor.STRUCTURE_AND_AIR`。
+///
+/// `BlockIgnoreProcessor.STRUCTURE_AND_AIR`.
+pub const IGNORE_STRUCTURE_AND_AIR: &[&str] = &["minecraft:air", "minecraft:structure_block"];
+
+/// `RuleProcessor` 的一条 `ProcessorRule`。这里只覆盖这四个结构用到的两种输入谓词：
+/// `BlockMatchTest` 与 `RandomBlockMatchTest`；位置谓词都是 `PosAlwaysTrueTest`。
+///
+/// One `ProcessorRule` as used by these four structures: `BlockMatchTest` or
+/// `RandomBlockMatchTest` on the input state, `AlwaysTrueTest` on the world state and
+/// `PosAlwaysTrueTest` on the position.
+#[derive(Debug, Clone)]
+pub struct Rule {
+    pub input: InputTest,
+    pub output: u32,
+}
+
+/// `RuleTest` 的两种。
+///
+/// The two `RuleTest` flavours.
+#[derive(Debug, Clone)]
+pub enum InputTest {
+    /// `BlockMatchTest`：方块相同（不看属性）。不消耗随机数。
+    ///
+    /// `BlockMatchTest`: same block, properties ignored. Draws nothing.
+    Block(&'static str),
+    /// `RandomBlockMatchTest`：方块相同后 `nextFloat() < probability`。
+    ///
+    /// `RandomBlockMatchTest`: same block, then `nextFloat() < probability`.
+    RandomBlock(&'static str, f32),
+    /// `AlwaysTrueTest`。
+    Always,
+}
+
+/// `BlockAgeProcessor` 用到的方块状态，按名字取默认状态。
+///
+/// The block states `BlockAgeProcessor` uses, by name.
+const CRACKED_STONE_BRICKS: &str = "minecraft:cracked_stone_bricks";
+const MOSSY_STONE_BRICKS: &str = "minecraft:mossy_stone_bricks";
+const STONE_BRICK_STAIRS: &str = "minecraft:stone_brick_stairs";
+const MOSSY_STONE_BRICK_STAIRS: &str = "minecraft:mossy_stone_brick_stairs";
+const MOSSY_STONE_BRICK_SLAB: &str = "minecraft:mossy_stone_brick_slab";
+const STONE_SLAB: &str = "minecraft:stone_slab";
+const STONE_BRICK_SLAB: &str = "minecraft:stone_brick_slab";
+const MOSSY_STONE_BRICK_WALL: &str = "minecraft:mossy_stone_brick_wall";
+const CRYING_OBSIDIAN: &str = "minecraft:crying_obsidian";
+
+/// `StructurePlaceSettings` 里放置阶段用到的字段。
+///
+/// The `StructurePlaceSettings` fields the placement stage needs.
+#[derive(Debug, Clone)]
 pub struct PlaceSettings {
-    pub mirror: Mirror,
-    pub rotation: Rotation,
-    /// `BlockIgnoreProcessor.STRUCTURE_BLOCK`：模板里的结构方块不写。
+    pub mirror: i32,
+    pub rotation: i32,
+    /// `rotationPivot` 的 X/Z（`StructureTemplate.transform` 只用这两轴）。
     ///
-    /// `BlockIgnoreProcessor.STRUCTURE_BLOCK`: structure blocks are not written.
-    pub ignore_structure_blocks: bool,
-    /// `LiquidSettings.APPLY_WATERLOGGING`（官方的默认值）。
+    /// The X/Z of `rotationPivot` (`StructureTemplate.transform` ignores Y).
+    pub pivot: (i32, i32),
+    pub liquid: LiquidSettings,
+    pub processors: Vec<Processor>,
+    /// `setBoundingBox(chunkBB)`：只处理盒内的方块。
     ///
-    /// `LiquidSettings.APPLY_WATERLOGGING`, vanilla's default.
-    pub apply_waterlogging: bool,
+    /// `setBoundingBox(chunkBB)`: process only blocks inside the box.
+    pub chunk_bb: Option<Box>,
+    /// 世界种子，`CappedProcessor` 的随机源要用（官方取自
+    /// `level.getLevel().getSeed()`）。`None` 时按 0 处理。
+    ///
+    /// The world seed used by the `CappedProcessor` random (vanilla reads
+    /// `level.getLevel().getSeed()`); `None` means 0.
+    pub world_seed: Option<i64>,
 }
 
 impl PlaceSettings {
-    /// 林地府邸的 `makeSettings`：`setIgnoreEntities(true)` + rotation + mirror +
-    /// `BlockIgnoreProcessor.STRUCTURE_BLOCK`。
-    ///
-    /// The mansion's `makeSettings`: `setIgnoreEntities(true)`, rotation, mirror and
-    /// `BlockIgnoreProcessor.STRUCTURE_BLOCK`.
-    pub fn mansion(rotation: Rotation, mirror: Mirror) -> Self {
+    pub fn new(mirror: i32, rotation: i32, pivot: (i32, i32)) -> Self {
         Self {
             mirror,
             rotation,
-            ignore_structure_blocks: true,
-            apply_waterlogging: true,
+            pivot,
+            liquid: LiquidSettings::ApplyWaterlogging,
+            processors: Vec::new(),
+            chunk_bb: None,
+            world_seed: None,
         }
+    }
+
+    /// 写入 `CappedProcessor` 需要的世界种子。
+    ///
+    /// Set the world seed the `CappedProcessor` needs.
+    pub fn with_world_seed(mut self, seed: i64) -> Self {
+        self.world_seed = Some(seed);
+        self
+    }
+
+    pub fn with_processors(mut self, processors: Vec<Processor>) -> Self {
+        self.processors = processors;
+        self
+    }
+
+    pub fn with_liquid(mut self, liquid: LiquidSettings) -> Self {
+        self.liquid = liquid;
+        self
+    }
+
+    /// `StructureTemplate.calculateRelativePosition(settings, pos)`。
+    ///
+    /// `StructureTemplate.calculateRelativePosition(settings, pos)`.
+    pub fn relative(&self, pos: (i32, i32, i32)) -> (i32, i32, i32) {
+        transform(pos, self.mirror, self.rotation, self.pivot)
     }
 }
 
-/// `StructureTemplate.transform(pos, mirror, rotation, pivot)`，pivot 恒为 `(0, 0, 0)`。
+/// 按 `buildInfoList` 的顺序给出方块下标：整方块、其它方块、带 nbt 的方块，各自按
+/// `(y, x, z)` 稳定排序。
 ///
-/// `StructureTemplate.transform(pos, mirror, rotation, pivot)` with a zero pivot.
-pub fn transform_pos(pos: (i32, i32, i32), mirror: Mirror, rotation: Rotation) -> (i32, i32, i32) {
-    let (mut x, y, mut z) = pos;
-    let mirrored = match mirror {
-        Mirror::LeftRight => {
-            z = -z;
-            true
+/// Indices in `buildInfoList` order: full blocks, other blocks, then nbt-carrying blocks,
+/// each stably sorted by `(y, x, z)`.
+pub fn ordered_blocks(template: &StructureTemplate, palette: usize) -> Vec<usize> {
+    let mut full = Vec::new();
+    let mut other = Vec::new();
+    let mut with_nbt = Vec::new();
+    for (index, block) in template.blocks.iter().enumerate() {
+        if block.nbt.is_some() {
+            with_nbt.push(index);
+            continue;
         }
-        Mirror::FrontBack => {
-            x = -x;
-            true
+        let Some(entry) = template.palettes[palette].get(block.state) else {
+            continue;
+        };
+        let Some(state) = state_of(entry) else {
+            continue;
+        };
+        // `addToLists`：`!hasDynamicShape() && isCollisionShapeFullBlock`，看的是这一格的
+        // **实际状态**（双层台阶是整方块，单层不是），不是方块的默认状态。
+        // `addToLists`: `!hasDynamicShape() && isCollisionShapeFullBlock`, evaluated on the
+        // **actual state** (a double slab is a full block, a single one is not), not on the
+        // block's default state.
+        let dynamic =
+            mc_bamboo_data::block_of_state(state).is_some_and(|block| block.dynamic_shape);
+        let is_full = !dynamic && state_facts(state) & facts::COLLISION_FULL_BLOCK != 0;
+        if is_full {
+            full.push(index);
+        } else {
+            other.push(index);
         }
-        Mirror::None => false,
+    }
+    let by_pos = |a: &usize, b: &usize| {
+        let pa = template.blocks[*a].pos;
+        let pb = template.blocks[*b].pos;
+        (pa.1, pa.0, pa.2).cmp(&(pb.1, pb.0, pb.2))
     };
-    match rotation {
-        Rotation::CounterClockwise90 => (z, y, -x),
-        Rotation::Clockwise90 => (-z, y, x),
-        Rotation::Clockwise180 => (-x, y, -z),
-        Rotation::None => {
-            if mirrored {
-                (x, y, z)
-            } else {
-                pos
+    full.sort_by(by_pos);
+    other.sort_by(by_pos);
+    with_nbt.sort_by(by_pos);
+    full.into_iter().chain(other).chain(with_nbt).collect()
+}
+
+/// 一次放置的结果。
+///
+/// The outcome of one placement.
+pub struct Placed {
+    /// 真正写下的方块，按官方的写入顺序。
+    ///
+    /// The blocks actually written, in vanilla's write order.
+    pub writes: Vec<BlockWrite>,
+    /// 带方块实体的位置（模板里带 nbt 的方块写完就是方块实体）。
+    ///
+    /// Positions holding a block entity (a template block with nbt becomes one).
+    pub block_entities: Vec<(i32, i32, i32)>,
+}
+
+/// `StructureTemplate.placeInWorld(level, position, referencePos, settings, random, 2)`。
+///
+/// 返回 false 表示模板没有 palette（官方的 `palettes.isEmpty()`）。
+///
+/// `StructureTemplate.placeInWorld(...)` with update mode 2. Returns false when the
+/// template has no palette (`palettes.isEmpty()`).
+pub fn place_in_world(
+    world: &mut dyn BlockAccess,
+    template: &StructureTemplate,
+    position: (i32, i32, i32),
+    settings: &PlaceSettings,
+    random: &WorldgenRandom,
+) -> Option<Placed> {
+    if template.palettes.is_empty() {
+        return None;
+    }
+    let palette = template.palette_index(position)?;
+    let mut writes = Vec::new();
+    let mut block_entities = Vec::new();
+    let blocks = ordered_blocks(template, palette);
+    if blocks.is_empty() || template.size.0 < 1 || template.size.1 < 1 || template.size.2 < 1 {
+        return Some(Placed {
+            writes,
+            block_entities,
+        });
+    }
+
+    // `processBlockInfos`：只要有一个 `evaluatesEntirePieceState` 的 processor，就不按
+    // `chunkBB` 过滤（`processOnlyInCurrentChunk = false`）。
+    // `processBlockInfos`: any `evaluatesEntirePieceState` processor disables the `chunkBB`
+    // filter.
+    let filter_by_chunk = !settings
+        .processors
+        .iter()
+        .any(Processor::evaluates_entire_piece_state);
+    // 先过 processor，再统一写入：官方先构造 `processedBlockInfoList`，然后才写方块，
+    // 所以 processor 读到的世界是「本结构件还什么都没写」的状态。
+    // Processors run first, then the writes: vanilla builds `processedBlockInfoList`
+    // before writing anything, so processors see the world without this piece's writes.
+    let mut processed: Vec<((i32, i32, i32), u32, bool)> = Vec::new();
+    let mut originals: Vec<((i32, i32, i32), u32)> = Vec::new();
+    for &index in &blocks {
+        let block = &template.blocks[index];
+        let mut pos = settings.relative(block.pos);
+        pos = (pos.0 + position.0, pos.1 + position.1, pos.2 + position.2);
+        if filter_by_chunk
+            && let Some(bb) = &settings.chunk_bb
+            && !inside(bb, pos)
+        {
+            continue;
+        }
+        let Some(entry) = template.palettes[palette].get(block.state) else {
+            continue;
+        };
+        let Some(state) = state_of(entry) else {
+            continue;
+        };
+        let mut current = state;
+        let mut keep = true;
+        for processor in &settings.processors {
+            if processor.evaluates_entire_piece_state() {
+                // `CappedProcessor.processBlock` 是基类默认实现（原样返回），上限逻辑在
+                // `finalizeProcessing` 里。
+                // `CappedProcessor.processBlock` is the base no-op; the cap lives in
+                // `finalizeProcessing`.
+                continue;
+            }
+            match processor.process(world, pos, block.pos, current, settings) {
+                Some(next) => current = next,
+                None => {
+                    keep = false;
+                    break;
+                }
+            }
+        }
+        if keep {
+            originals.push((pos, state));
+            processed.push((pos, current, block.nbt.is_some()));
+        }
+    }
+
+    // `finalizeProcessing`：按 processor 顺序跑，`CappedProcessor` 的 delegate 每改一个
+    // 方块就把 `replaced` 加一，达到上限就停。
+    // `finalizeProcessing`: run in processor order; the `CappedProcessor` delegate bumps
+    // `replaced` only when the block actually changes, stopping at the cap.
+    for processor in &settings.processors {
+        if let Processor::Capped { limit, delegate } = processor {
+            apply_capped(
+                world,
+                settings,
+                *limit,
+                delegate,
+                &originals,
+                &mut processed,
+                position,
+            );
+        }
+    }
+
+    let mut locked_fluids: Vec<(i32, i32, i32)> = Vec::new();
+    let mut to_fill: Vec<(i32, i32, i32)> = Vec::new();
+    let mut placed_positions: Vec<(i32, i32, i32)> = Vec::new();
+    for (pos, state, has_nbt) in processed {
+        // `if (boundingBox == null || boundingBox.isInside(blockPos))`：有
+        // `CappedProcessor` 时 `processBlockInfos` 不按 `chunkBB` 过滤，但写入这一步
+        // 永远只写盒内的方块。
+        // `if (boundingBox == null || boundingBox.isInside(blockPos))`: with a
+        // `CappedProcessor` `processBlockInfos` skips the `chunkBB` filter, yet the write
+        // step always stays inside the box.
+        if let Some(bb) = &settings.chunk_bb
+            && !inside(bb, pos)
+        {
+            continue;
+        }
+        let previous_fluid = (settings.liquid == LiquidSettings::ApplyWaterlogging)
+            .then(|| *mc_bamboo_data::state_fluid(world.get_block(pos.0, pos.1, pos.2)));
+        let state = mirror_rotate(state, settings);
+        if has_nbt {
+            // `level.setBlock(blockPos, Blocks.BARRIER, 820)`：给方块实体占位。
+            // `level.setBlock(blockPos, Blocks.BARRIER, 820)`: a placeholder for the
+            // block entity.
+            write(world, pos, blocks::BARRIER, &mut writes);
+        }
+        if !write(world, pos, state, &mut writes) {
+            continue;
+        }
+        placed_positions.push(pos);
+        if has_nbt {
+            block_entities.push(pos);
+            // `level.getBlockEntity(blockPos)` 在 `WorldGenRegion` 里会按 `setBlock` 留下的
+            // DUMMY nbt 现造方块实体；它是 `RandomizableContainer` 时官方取一次
+            // `random.nextLong()` 当 `LootTableSeed`。这一次取数必须发生，后面的
+            // `spreadNetherrack` 等用的是同一个随机源。
+            // `level.getBlockEntity(blockPos)` in a `WorldGenRegion` creates the block
+            // entity from the DUMMY nbt `setBlock` left; when it is a
+            // `RandomizableContainer` vanilla draws one `random.nextLong()` as the
+            // `LootTableSeed`. The draw must happen: `spreadNetherrack` and friends share
+            // this random.
+            if is_randomizable_container(state) {
+                random.next_long();
+            }
+        }
+        if let Some(previous) = previous_fluid {
+            let new_fluid = mc_bamboo_data::state_fluid(state);
+            if new_fluid.source {
+                locked_fluids.push(pos);
+            } else if can_hold_liquid(state) {
+                if previous.source {
+                    if let Some(filled) = waterlog(state, &previous) {
+                        write(world, pos, filled, &mut writes);
+                    }
+                } else {
+                    to_fill.push(pos);
+                }
             }
         }
     }
-}
 
-/// palette 名 + 属性还原成状态 ID；未导出的方块报错。
-///
-/// Turn a palette name plus properties into a state id; unknown blocks are an error.
-fn state_of(entry: &PaletteEntry) -> Result<u32, String> {
-    let mut state = mc_bamboo_data::block_by_name(&entry.name)
-        .ok_or_else(|| format!("unknown block {}", entry.name))?
-        .default_state;
-    for (name, value) in &entry.properties {
-        state = crate::feature::state::with_property(state, name, value)
-            .ok_or_else(|| format!("{} has no property {name}={value}", entry.name))?;
-    }
-    Ok(state)
-}
-
-/// 一条已算出世界坐标的模板方块。
-///
-/// One template block with its world position resolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacedBlock {
-    pub pos: (i32, i32, i32),
-    pub state: u32,
-    /// 模板里带方块实体 NBT：战利品表种子要取一次 `nextLong()`。
-    ///
-    /// The template entry carries block-entity NBT, so the loot-table seed needs a
-    /// `nextLong()` draw.
-    pub has_nbt: bool,
-}
-
-/// `placeInWorld` 的「算出要写哪些方块」那一段（不含写入）。
-///
-/// The "which blocks to write" part of `placeInWorld` (writes excluded).
-pub fn blocks_in_chunk(
-    template: &StructureTemplate,
-    position: (i32, i32, i32),
-    settings: PlaceSettings,
-    chunk_bb: &[i32; 6],
-) -> Result<Vec<PlacedBlock>, String> {
-    let Some(palette_index) = template.palette_index(position) else {
-        return Ok(Vec::new());
-    };
-    let palette = &template.palettes[palette_index];
-    let mut out = Vec::new();
-    for entry in &template.blocks {
-        // `calculateRelativePosition(settings, blockInfo.pos).offset(position)`。
-        // `calculateRelativePosition(settings, blockInfo.pos).offset(position)`.
-        let local = transform_pos(entry.pos, settings.mirror, settings.rotation);
-        let world = (
-            local.0 + position.0,
-            local.1 + position.1,
-            local.2 + position.2,
+    fill_fluids(world, &mut to_fill, &locked_fluids, &mut writes);
+    // `updateShapeAtEdge`：对写入形状的每个外表面，让两侧方块各做一次 `updateShape`。
+    // `updateShapeAtEdge`: run `updateShape` on both sides of every outer face of the
+    // written shape.
+    if !placed_positions.is_empty() {
+        let shape: std::collections::HashSet<(i32, i32, i32)> =
+            placed_positions.iter().copied().collect();
+        let min = (
+            placed_positions.iter().map(|pos| pos.0).min().unwrap_or(0),
+            placed_positions.iter().map(|pos| pos.1).min().unwrap_or(0),
+            placed_positions.iter().map(|pos| pos.2).min().unwrap_or(0),
         );
-        if !box_is_inside(chunk_bb, world.0, world.1, world.2) {
-            continue;
+        let max = (
+            placed_positions.iter().map(|pos| pos.0).max().unwrap_or(0),
+            placed_positions.iter().map(|pos| pos.1).max().unwrap_or(0),
+            placed_positions.iter().map(|pos| pos.2).max().unwrap_or(0),
+        );
+        writes.extend(crate::feature::shape_update::update_shape_at_edge(
+            world, &shape, min, max,
+        ));
+        // 再对每个写入位置跑一次 `Block.updateFromNeighbourShapes`。
+        // Then run `Block.updateFromNeighbourShapes` on every written position.
+        for pos in &placed_positions {
+            let state = world.get_block(pos.0, pos.1, pos.2);
+            let new_state = crate::feature::shape_update::update_from_neighbour_shapes(world, *pos);
+            if new_state != state {
+                write(world, *pos, new_state, &mut writes);
+            }
         }
-        let Some(palette_entry) = palette.get(entry.state) else {
-            return Err(format!(
-                "palette index {} out of range (palette has {} entries)",
-                entry.state,
-                palette.len()
-            ));
-        };
-        let state = state_of(palette_entry)?;
-        // `BlockIgnoreProcessor.STRUCTURE_BLOCK` 在 `processBlockInfos` 里丢方块。
-        // `BlockIgnoreProcessor.STRUCTURE_BLOCK` drops blocks in `processBlockInfos`.
-        if settings.ignore_structure_blocks && is_block(state, "minecraft:structure_block") {
-            continue;
-        }
-        out.push(PlacedBlock {
-            pos: world,
-            state,
-            has_nbt: entry.nbt.is_some(),
-        });
     }
-    Ok(out)
+    Some(Placed {
+        writes,
+        block_entities,
+    })
 }
 
-/// `StructureTemplate.placeInWorld` 的写入循环。
+/// 官方的流体回填循环：反复把相邻水源放进还能装水的方块，直到一轮没有变化。
 ///
-/// 官方按 palette 顺序逐块写；每块先过 `boundingBox.isInside`（就是调用方传的
-/// `chunkBB`），再做 `mirror` / `rotate`，然后 `setBlock`。
-///
-/// 带 `nbt` 的方块官方先写一次 `BARRIER`，再写真实状态；之后读
-/// `level.getBlockEntity(pos)`，是 `RandomizableContainer` 时取
-/// `random.nextLong()` 作 `LootTableSeed`。`WorldGenRegion.getBlockEntity` 会把
-/// `setBlock` 留下的 `DUMMY` 占位换成真的方块实体，所以箱子、木桶这类**每个都取一次**。
-///
-/// The write loop of `StructureTemplate.placeInWorld`. Vanilla writes block by block in
-/// palette order; each goes through `boundingBox.isInside` (the caller's `chunkBB`), then
-/// `mirror` / `rotate`, then `setBlock`.
-///
-/// Blocks with `nbt` get a `BARRIER` written first, then the real state; vanilla then
-/// reads `level.getBlockEntity(pos)` and draws `random.nextLong()` as the `LootTableSeed`
-/// of a `RandomizableContainer`. `WorldGenRegion.getBlockEntity` turns the `DUMMY`
-/// placeholder `setBlock` left into a real block entity, so every chest, barrel and the
-/// like draws once.
-pub fn place_blocks(
-    level: &mut dyn PieceLevel,
-    chunk_bb: &[i32; 6],
-    blocks: &[PlacedBlock],
-    settings: PlaceSettings,
-    random: &crate::random::WorldgenRandom,
-) -> Vec<(i32, i32, i32)> {
-    // `LiquidSettings` 的两段：写入前取该格的流体，写完把旧流体回填进含水方块。
-    // The two `LiquidSettings` steps: read the cell's fluid before the write, then pour it
-    // back into waterloggable blocks afterwards.
-    let mut to_fill: Vec<(i32, i32, i32)> = Vec::new();
-    let mut locked: Vec<(i32, i32, i32)> = Vec::new();
-    let mut placed = Vec::with_capacity(blocks.len());
-    for entry in blocks {
-        if !box_is_inside(chunk_bb, entry.pos.0, entry.pos.1, entry.pos.2) {
-            continue;
-        }
-        let previous = settings
-            .apply_waterlogging
-            .then(|| level.get_block(entry.pos.0, entry.pos.1, entry.pos.2));
-        let state = transform(entry.state, settings.mirror, settings.rotation);
-        if entry.has_nbt {
-            level.set_block(
-                entry.pos.0,
-                entry.pos.1,
-                entry.pos.2,
-                crate::structure::piece_place::block("minecraft:barrier"),
-            );
-        }
-        level.set_block(entry.pos.0, entry.pos.1, entry.pos.2, state);
-        placed.push(entry.pos);
-        if entry.has_nbt && is_randomizable_container(state) {
-            random.next_long();
-        }
-
-        let Some(previous) = previous else {
-            continue;
-        };
-        // `state.getFluidState().isSource()` → `lockedFluids.add(blockPos)`。
-        // `state.getFluidState().isSource()` → `lockedFluids.add(blockPos)`.
-        if is_source(state) {
-            locked.push(entry.pos);
-            continue;
-        }
-        // `state.getBlock() instanceof LiquidBlockContainer` → `placeLiquid(...)`，不看它
-        // 成不成功；旧流体不是源（包括空流体）就进 `toFill`。
-        // `state.getBlock() instanceof LiquidBlockContainer` → `placeLiquid(...)` whatever
-        // it returns; a previous fluid that is not a source (empty included) joins `toFill`.
-        if !is_liquid_container(state) {
-            continue;
-        }
-        if !is_empty_fluid(previous) {
-            place_liquid(level, entry.pos, state, previous);
-        }
-        if !is_source(previous) {
-            to_fill.push(entry.pos);
-        }
-    }
-
-    // `while (filled && !toFill.isEmpty())`：按 `[UP, NORTH, EAST, SOUTH, WEST]` 找相邻
-    // 流体源再回填一次，`lockedFluids` 里的位置不参与。
-    // `while (filled && !toFill.isEmpty())`: look for a neighbouring source along
-    // `[UP, NORTH, EAST, SOUTH, WEST]` and pour again, skipping `lockedFluids`.
-    const DIRECTIONS: [(i32, i32, i32); 5] =
-        [(1, 0, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1), (-1, 0, 0)];
-    loop {
-        let mut filled = false;
+/// Vanilla's fluid fill loop: repeatedly pour neighbouring source fluid into blocks that
+/// can hold liquid until a pass changes nothing.
+fn fill_fluids(
+    world: &mut dyn BlockAccess,
+    to_fill: &mut Vec<(i32, i32, i32)>,
+    locked: &[(i32, i32, i32)],
+    writes: &mut Vec<BlockWrite>,
+) {
+    const ORDER: [(i32, i32, i32); 5] = [(0, 1, 0), (0, 0, -1), (1, 0, 0), (0, 0, 1), (-1, 0, 0)];
+    let mut filled = true;
+    while filled && !to_fill.is_empty() {
+        filled = false;
         let mut index = 0;
         while index < to_fill.len() {
             let pos = to_fill[index];
-            let current = level.get_block(pos.0, pos.1, pos.2);
-            let mut fluid = is_source(current).then_some(current);
-            if fluid.is_none() {
-                for (dx, dy, dz) in DIRECTIONS {
-                    let neighbor = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
-                    if locked.contains(&neighbor) {
-                        continue;
+            let mut placed = false;
+            for (dx, dy, dz) in ORDER {
+                let neighbour = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+                let fluid = mc_bamboo_data::state_fluid(world.get_block(
+                    neighbour.0,
+                    neighbour.1,
+                    neighbour.2,
+                ));
+                if fluid.source && !locked.contains(&neighbour) {
+                    let state = world.get_block(pos.0, pos.1, pos.2);
+                    if let Some(wet) = waterlog(state, fluid) {
+                        write(world, pos, wet, writes);
+                        placed = true;
                     }
-                    let neighbor_state = level.get_block(neighbor.0, neighbor.1, neighbor.2);
-                    if is_source(neighbor_state) {
-                        fluid = Some(neighbor_state);
-                        break;
-                    }
+                    break;
                 }
             }
-            let Some(fluid) = fluid else {
-                index += 1;
-                continue;
-            };
-            // 官方只要是 `LiquidBlockContainer` 就算填过、移出 `toFill`，不看 `placeLiquid`
-            // 的结果。
-            // Vanilla counts any `LiquidBlockContainer` as filled and drops it from
-            // `toFill`, whatever `placeLiquid` returns.
-            if is_liquid_container(current) {
-                place_liquid(level, pos, current, fluid);
+            if placed {
                 filled = true;
                 to_fill.remove(index);
-                continue;
+            } else {
+                index += 1;
             }
-            index += 1;
         }
-        if !filled {
+    }
+}
+
+/// `CappedProcessor.finalizeProcessing`：最多改 `limit` 个方块。
+///
+/// 官方的随机源是
+/// `RandomSource.createThreadLocalInstance(level.getLevel().getSeed()).forkPositional().at(position)`；
+/// `SingleThreadedRandomSource` 的算法与 `LegacyRandomSource` 相同（同一个 48 位 LCG），
+/// 所以这里用 `LegacyRandom::new(seed)` 再 `PositionalFactory::Legacy`（`nextLong()` 派生）
+/// 的等价路径。
+///
+/// `CappedProcessor.finalizeProcessing`: change at most `limit` blocks. Vanilla seeds a
+/// `SingleThreadedRandomSource` (the same 48-bit LCG as `LegacyRandomSource`) with the
+/// world seed and derives a positional factory from it, so the legacy positional factory
+/// reproduces the same draws.
+fn apply_capped(
+    world: &dyn BlockAccess,
+    settings: &PlaceSettings,
+    limit: i32,
+    delegate: &Processor,
+    originals: &[((i32, i32, i32), u32)],
+    processed: &mut [((i32, i32, i32), u32, bool)],
+    position: (i32, i32, i32),
+) {
+    if limit == 0 || processed.is_empty() || originals.len() != processed.len() {
+        return;
+    }
+    // `limit.sample(random)`：这里是 `ConstantInt.of(5)`，不取随机数。
+    // `limit.sample(random)`: a `ConstantInt.of(5)` here, which draws nothing.
+    let max_to_replace = limit.min(processed.len() as i32);
+    if max_to_replace < 1 {
+        return;
+    }
+    let seed = settings.world_seed.unwrap_or(0);
+    // `RandomSource.createThreadLocalInstance(seed).forkPositional()` 是
+    // `LegacyPositionalRandomFactory(seed.nextLong())`（`SingleThreadedRandomSource` 与
+    // `LegacyRandomSource` 是同一套 48 位 LCG），再 `.at(position)`。
+    // `forkPositional()` on a `SingleThreadedRandomSource` is
+    // `LegacyPositionalRandomFactory(seed.nextLong())` (the same 48-bit LCG as
+    // `LegacyRandomSource`), then `.at(position)`.
+    let factory_seed = mc_bamboo_blocks::LegacyRandom::new(seed).next_long();
+    let positional = crate::random::PositionalFactory::Legacy { seed: factory_seed };
+    let random =
+        crate::random::WorldgenRandom::new(positional.at(position.0, position.1, position.2));
+    // `Util.toShuffledList(IntStream.range(0, size), random)`。
+    // `Util.toShuffledList(IntStream.range(0, size), random)`.
+    let mut indices: Vec<usize> = (0..processed.len()).collect();
+    for i in (2..=indices.len()).rev() {
+        let swap_to = random.next_int(i as i32) as usize;
+        indices.swap(i - 1, swap_to);
+    }
+    let mut replaced = 0;
+    for index in indices {
+        if replaced >= max_to_replace {
             break;
         }
-    }
-    placed
-}
-
-/// `state.getFluidState().isSource()`。
-///
-/// `state.getFluidState().isSource()`.
-fn is_source(state: u32) -> bool {
-    let fluid = mc_bamboo_blocks::BlockState(state).fluid();
-    !fluid.is_empty() && fluid.is_source()
-}
-
-/// `state.getFluidState().isEmpty()`。
-///
-/// `state.getFluidState().isEmpty()`.
-fn is_empty_fluid(state: u32) -> bool {
-    mc_bamboo_blocks::BlockState(state).fluid().is_empty()
-}
-
-/// 方块是不是 `LiquidBlockContainer`。
-///
-/// Whether the block is a `LiquidBlockContainer`.
-fn is_liquid_container(state: u32) -> bool {
-    has_ancestor(state, &[BlockAncestor::LiquidBlockContainer])
-}
-
-/// 方块实体是不是 `RandomizableContainer`（箱子一族、木桶、合成器、饰纹陶罐、发射器 /
-/// 投掷器、漏斗、潜影盒）。
-///
-/// Whether the block entity is a `RandomizableContainer` (the chest family, barrel,
-/// crafter, decorated pot, dispenser / dropper, hopper, shulker box).
-fn is_randomizable_container(state: u32) -> bool {
-    has_ancestor(
-        state,
-        &[
-            BlockAncestor::ChestBlock,
-            BlockAncestor::BarrelBlock,
-            BlockAncestor::CrafterBlock,
-            BlockAncestor::DecoratedPotBlock,
-            BlockAncestor::DispenserBlock,
-            BlockAncestor::HopperBlock,
-            BlockAncestor::ShulkerBoxBlock,
-        ],
-    )
-}
-
-/// 方块类（含自身）是否继承或实现了其中之一。
-///
-/// Whether the block class (itself included) extends or implements any of these.
-fn has_ancestor(state: u32, wanted: &[BlockAncestor]) -> bool {
-    mc_bamboo_data::block_of_state(state)
-        .is_some_and(|block| block.class.ancestors().iter().any(|a| wanted.contains(a)))
-}
-
-/// 在 `WorldGenRegion` 上调一次 `LiquidBlockContainer.placeLiquid`，返回它是否放进了流体。
-///
-/// 所有会放的实现（`SimpleWaterloggedBlock`、台阶非双层、营火、蜡烛、干涸恶魂）都要求
-/// 方块还没含水、流体是水源（`is(Fluids.WATER)`，流动的水不算），然后
-/// `setBlockAndUpdate` 写一次含水状态；营火和点着的蜡烛顺带熄灭。`WorldGenRegion` 的
-/// `setBlock` 不做邻居形状更新，声音、粒子、计划刻都不改方块。海带、海草恒返回 false。
-///
-/// One `LiquidBlockContainer.placeLiquid` on a `WorldGenRegion`, returning whether the
-/// fluid went in. Every implementation that accepts (`SimpleWaterloggedBlock`, non-double
-/// slabs, campfire, candle, dried ghast) requires the block not to be waterlogged yet and
-/// the fluid to be a water source (`is(Fluids.WATER)`; flowing water does not count), then
-/// writes the waterlogged state once through `setBlockAndUpdate`; campfires and lit candles
-/// are put out as well. `WorldGenRegion.setBlock` runs no neighbour shape updates, and
-/// sounds, particles and scheduled ticks change no block. Kelp and seagrass always refuse.
-fn place_liquid(level: &mut dyn PieceLevel, pos: (i32, i32, i32), state: u32, fluid: u32) -> bool {
-    use crate::structure::state_transform::property_of;
-    if property_of(state, "waterlogged") != Some("false")
-        || property_of(state, "type") == Some("double")
-        || !mc_bamboo_blocks::BlockState(fluid)
-            .fluid()
-            .is(mc_bamboo_data::registries::fluid::WATER)
-    {
-        return false;
-    }
-    let mut new_state =
-        crate::structure::piece_place::with_property(state, "waterlogged", "true").unwrap_or(state);
-    if property_of(new_state, "lit").is_some() {
-        new_state = crate::structure::piece_place::with_property(new_state, "lit", "false")
-            .unwrap_or(new_state);
-    }
-    level.set_block(pos.0, pos.1, pos.2, new_state);
-    true
-}
-
-/// `BlockStateParser.parseForBlock(..., stateString, true)`：解析
-/// `minecraft:oak_planks[axis=y]` 这种拼图方块的 `final_state`。
-///
-/// 官方在 `BlockStateParser` 里把 `name[props]` 拆开、按 `StateDefinition` 逐属性校验；
-/// 这里复用 `mc-bamboo-data` 的方块表与 `feature::state::with_property`，行为相同。
-///
-/// `BlockStateParser.parseForBlock(..., stateString, true)`: parse a jigsaw block's
-/// `final_state` such as `minecraft:oak_planks[axis=y]`. Vanilla splits `name[props]` and
-/// validates each property against the `StateDefinition`; this reuses `mc-bamboo-data`'s
-/// block table and `feature::state::with_property`, which behaves the same.
-pub fn parse_block_state(text: &str) -> Result<u32, String> {
-    let (name, rest) = match text.split_once('[') {
-        Some((name, rest)) => (name, Some(rest.strip_suffix(']').unwrap_or(rest))),
-        None => (text, None),
-    };
-    let mut state = mc_bamboo_data::block_by_name(name)
-        .ok_or_else(|| format!("unknown block {name}"))?
-        .default_state;
-    let Some(props) = rest else {
-        return Ok(state);
-    };
-    for pair in props.split(',') {
-        let pair = pair.trim();
-        if pair.is_empty() {
-            continue;
+        let (pos, _original_state) = originals[index];
+        let current = processed[index].1;
+        // `CappedProcessor` 传给 delegate 的 `templateRelativePos` 是 `originalBlockInfo.pos()`，
+        // 这里用世界位置顶替（`RuleTest` 的位置谓词在这些结构里恒 true）。
+        // The `templateRelativePos` passed to the delegate is `originalBlockInfo.pos()`;
+        // the world position stands in here (the position predicate is always true in these
+        // structures).
+        if let Some(altered) = delegate.process(world, pos, pos, current, settings)
+            && altered != current
+        {
+            replaced += 1;
+            processed[index].1 = altered;
         }
-        let (key, value) = pair
-            .split_once('=')
-            .ok_or_else(|| format!("bad block state property {pair}"))?;
-        state = crate::feature::state::with_property(state, key.trim(), value.trim())
-            .ok_or_else(|| format!("{name} has no property {key}={value}"))?;
     }
-    Ok(state)
 }
 
-/// `TemplateStructurePiece.postProcess` 里那段拼图方块替换。
+/// `PlaceSettings.getHeightmapType`：`ON_OCEAN_FLOOR` 用 `OCEAN_FLOOR_WG`。
 ///
-/// 官方对 `filterBlocks(..., JIGSAW)` 的每个拼图方块读 `final_state`（缺省
-/// `minecraft:air`）、`BlockStateParser.parseForBlock` 解析，然后
-/// `level.setBlockAndUpdate(pos, targetState)`。解析失败只记日志。
+/// `PlaceSettings.getHeightmapType`: `ON_OCEAN_FLOOR` uses `OCEAN_FLOOR_WG`.
+pub fn heightmap_type(ocean_floor: bool) -> HeightmapKind {
+    if ocean_floor {
+        HeightmapKind::OceanFloorWg
+    } else {
+        HeightmapKind::WorldSurfaceWg
+    }
+}
+
+/// 一次方块写入：`(x, y, z, 状态)`。
 ///
-/// The jigsaw-block replacement inside `TemplateStructurePiece.postProcess`. For every
-/// jigsaw block from `filterBlocks(..., JIGSAW)`, vanilla reads `final_state` (default
-/// `minecraft:air`), parses it with `BlockStateParser.parseForBlock` and calls
-/// `level.setBlockAndUpdate(pos, targetState)`. A parse failure is only logged.
+/// One block write: `(x, y, z, state)`.
+pub type BlockWrite = (i32, i32, i32, u32);
+
+/// 一个 `TemplateStructurePiece.postProcess` 的结果。
+///
+/// The result of one `TemplateStructurePiece.postProcess`.
+pub struct PieceOutcome {
+    /// `placeInWorld` 是否成功（模板没有 palette 时官方返回 false）。
+    ///
+    /// Whether `placeInWorld` succeeded (vanilla returns false without a palette).
+    pub placed: bool,
+    /// 按官方顺序写下的全部方块：模板放置、数据标记、拼图替换，以及各结构在
+    /// `super.postProcess` 之后追加的方块。
+    ///
+    /// Every block written, in vanilla order: template placement, data markers, jigsaw
+    /// replacement, plus whatever a structure appends after `super.postProcess`.
+    pub writes: Vec<BlockWrite>,
+    /// 带方块实体的位置（模板里带 nbt 的方块）。
+    ///
+    /// Positions holding a block entity (template blocks carrying nbt).
+    pub block_entities: Vec<(i32, i32, i32)>,
+    /// 放置后的包围盒（官方 `placeInWorld` 之前重算的那一次）。
+    ///
+    /// The bounding box recomputed just before `placeInWorld`.
+    pub bounding_box: Box,
+    /// 这次放置用的模板位置。
+    ///
+    /// The template position this placement used.
+    pub template_position: (i32, i32, i32),
+}
+
+/// `handleDataMarker` 能碰到的东西：世界、`postProcess` 的随机源、写入日志。
+///
+/// What a `handleDataMarker` body may touch: the world, the `postProcess` random and the
+/// write log.
+pub struct MarkerContext<'w, 'a, 'r> {
+    pub world: &'w mut (dyn BlockAccess + 'a),
+    pub random: &'r WorldgenRandom,
+    pub writes: &'w mut Vec<BlockWrite>,
+}
+
+impl MarkerContext<'_, '_, '_> {
+    /// `level.setBlock(pos, state, flags)`，并记进写入日志。
+    ///
+    /// `level.setBlock(pos, state, flags)`, recorded in the write log.
+    pub fn set_block(&mut self, pos: (i32, i32, i32), state: u32) -> bool {
+        write(self.world, pos, state, self.writes)
+    }
+
+    /// `RandomizableContainer.setBlockEntityLootTable(level, random, pos, table)` 的取数：
+    /// `pos` 上是 `RandomizableContainer` 的方块实体时取一次 `random.nextLong()`。
+    ///
+    /// The draw of `RandomizableContainer.setBlockEntityLootTable(level, random, pos,
+    /// table)`: one `random.nextLong()` when `pos` holds a `RandomizableContainer`.
+    pub fn seed_loot_table(&mut self, pos: (i32, i32, i32)) {
+        if is_randomizable_container(self.world.get_block(pos.0, pos.1, pos.2)) {
+            self.random.next_long();
+        }
+    }
+
+    /// `if (level.getBlockEntity(pos) instanceof ChestBlockEntity chest)
+    /// chest.setLootTable(table, random.nextLong())` 的取数。
+    ///
+    /// The draw of `if (level.getBlockEntity(pos) instanceof ChestBlockEntity chest)
+    /// chest.setLootTable(table, random.nextLong())`.
+    pub fn seed_chest_loot_table(&mut self, pos: (i32, i32, i32)) {
+        if is_chest(self.world.get_block(pos.0, pos.1, pos.2)) {
+            self.random.next_long();
+        }
+    }
+}
+
+/// 子类的 `handleDataMarker(metadata, pos, level, random, chunkBB)`。
+///
+/// A subclass's `handleDataMarker(metadata, pos, level, random, chunkBB)`.
+pub type MarkerHandler<'h> = dyn FnMut(&mut MarkerContext<'_, '_, '_>, &str, (i32, i32, i32)) + 'h;
+
+/// `TemplateStructurePiece.postProcess`：重算包围盒、放模板、跑数据标记和拼图替换。
+///
+/// 官方顺序：`placeSettings.setBoundingBox(chunkBB)` → 重算 `boundingBox` →
+/// `template.placeInWorld(...)`；只有放置成功（有 palette）才处理数据标记和拼图方块。
+/// `random` 是 `postProcess` 收到的那个随机源：箱子的 `LootTableSeed` 从它取数。
+/// `handle_marker` 是子类的 `handleDataMarker(metadata, pos, ...)`。
+///
+/// Vanilla order: `placeSettings.setBoundingBox(chunkBB)`, recompute the box, then
+/// `template.placeInWorld(...)`; data markers and jigsaw replacement only run when the
+/// placement succeeded (the template has a palette). `random` is the one `postProcess`
+/// received: chest `LootTableSeed`s are drawn from it. `handle_marker` is the subclass's
+/// `handleDataMarker(metadata, pos, ...)`.
+pub fn template_piece_post_process(
+    world: &mut dyn BlockAccess,
+    template: &StructureTemplate,
+    template_position: (i32, i32, i32),
+    settings: &PlaceSettings,
+    chunk_bb: Box,
+    random: &WorldgenRandom,
+    handle_marker: &mut MarkerHandler<'_>,
+) -> PieceOutcome {
+    let mut settings = settings.clone();
+    settings.chunk_bb = Some(chunk_bb);
+    let bounding_box = template_box(template, &settings, template_position);
+    let placed = place_in_world(world, template, template_position, &settings, random);
+
+    let mut outcome = PieceOutcome {
+        placed: placed.is_some(),
+        writes: Vec::new(),
+        block_entities: Vec::new(),
+        bounding_box,
+        template_position,
+    };
+    if let Some(placed) = placed {
+        outcome.writes = placed.writes;
+        outcome.block_entities = placed.block_entities;
+        for (metadata, pos) in data_markers(template, template_position, &settings) {
+            let mut context = MarkerContext {
+                world: &mut *world,
+                random,
+                writes: &mut outcome.writes,
+            };
+            handle_marker(&mut context, &metadata, pos);
+        }
+        replace_jigsaws(
+            world,
+            template,
+            template_position,
+            &settings,
+            &mut outcome.writes,
+        );
+    }
+    outcome
+}
+
+/// `TemplateStructurePiece.postProcess` 里的拼图方块替换：`filterBlocks(..., JIGSAW)` 的
+/// 每一项读 `final_state`（缺省 `minecraft:air`）并写下。
+///
+/// The jigsaw replacement inside `TemplateStructurePiece.postProcess`: every
+/// `filterBlocks(..., JIGSAW)` entry reads `final_state` (default `minecraft:air`) and is
+/// written.
 pub fn replace_jigsaws(
+    world: &mut dyn BlockAccess,
     template: &StructureTemplate,
     position: (i32, i32, i32),
-    settings: PlaceSettings,
-    chunk_bb: &[i32; 6],
-    level: &mut dyn PieceLevel,
+    settings: &PlaceSettings,
+    writes: &mut Vec<BlockWrite>,
 ) {
-    let Some(palette_index) = template.palette_index(position) else {
-        return;
-    };
-    let Some(jigsaws) = template.palette_jigsaws.get(palette_index) else {
-        return;
-    };
-    for jigsaw in jigsaws {
-        let local = transform_pos(jigsaw.pos, settings.mirror, settings.rotation);
-        let world = (
-            local.0 + position.0,
-            local.1 + position.1,
-            local.2 + position.2,
-        );
-        if !box_is_inside(chunk_bb, world.0, world.1, world.2) {
+    for (pos, entry) in filter_blocks(template, position, settings, "minecraft:jigsaw") {
+        let Some(entry) = entry else { continue };
+        let final_state =
+            string_field(entry, "final_state").unwrap_or_else(|| "minecraft:air".to_owned());
+        // 解析失败时官方只打日志，仍然写默认的空气。
+        // On a parse failure vanilla only logs and still writes the default air.
+        let state = state_from_text(&final_state).unwrap_or(blocks::AIR);
+        write(world, pos, state, writes);
+    }
+}
+
+/// 把结构件放置用的 [`PieceLevel`] 当作 [`BlockAccess`] 用（林地府邸走这条路）。
+///
+/// Use a piece-placement [`PieceLevel`] as a [`BlockAccess`] (the woodland mansion's path).
+pub struct PieceLevelAccess<'l>(pub &'l mut dyn PieceLevel);
+
+impl BlockAccess for PieceLevelAccess<'_> {
+    fn get_block(&self, x: i32, y: i32, z: i32) -> u32 {
+        self.0.get_block(x, y, z)
+    }
+
+    fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+        self.0.set_block(x, y, z, state)
+    }
+
+    fn min_y(&self) -> i32 {
+        self.0.min_y()
+    }
+
+    fn max_y(&self) -> i32 {
+        self.0.max_y()
+    }
+}
+
+/// `TemplateStructurePiece.postProcess` 里数据标记的方块效果。
+///
+/// 官方在 `placeInWorld` 成功之后遍历 `filterBlocks(STRUCTURE_BLOCK)`，对
+/// `mode == data` 的标记调 `handleDataMarker`。这里把标记位置和 metadata 交回调用方，
+/// 由各结构决定写什么方块。
+///
+/// The block effects of data markers inside `TemplateStructurePiece.postProcess`. After a
+/// successful `placeInWorld` vanilla walks `filterBlocks(STRUCTURE_BLOCK)` and, for
+/// markers with `mode == data`, calls `handleDataMarker`. The marker positions and
+/// metadata are handed back here so each structure decides what to write.
+pub fn data_markers(
+    template: &StructureTemplate,
+    position: (i32, i32, i32),
+    settings: &PlaceSettings,
+) -> Vec<(String, (i32, i32, i32))> {
+    let mut markers = Vec::new();
+    for (pos, entry) in filter_blocks(template, position, settings, "minecraft:structure_block") {
+        let Some(entry) = entry else { continue };
+        // `StructureMode.LEGACY_CODEC` 写的是枚举常量名（大写 `DATA`）。
+        // `StructureMode.LEGACY_CODEC` writes the enum constant name (upper-case `DATA`).
+        if string_field(entry, "mode").as_deref() != Some("DATA") {
             continue;
         }
-        // 解析失败只记日志，不中断（官方 `catch (CommandSyntaxException)` 后保留默认 air）。
-        // A parse failure is only logged; vanilla keeps the default air and continues.
-        let Ok(state) = parse_block_state(&jigsaw.final_state) else {
+        let metadata = string_field(entry, "metadata").unwrap_or_default();
+        markers.push((metadata, pos));
+    }
+    markers
+}
+
+/// `StructureTemplate.getBoundingBox(settings, position)`：`(0,0,0)` 和 `size - 1` 两个角
+/// 变换后取包围盒再平移到 `position`。
+///
+/// `StructureTemplate.getBoundingBox(settings, position)`: transform the two corners
+/// `(0,0,0)` and `size - 1`, take their box and translate it by `position`.
+pub fn template_box(
+    template: &StructureTemplate,
+    settings: &PlaceSettings,
+    position: (i32, i32, i32),
+) -> Box {
+    let first = settings.relative((0, 0, 0));
+    let second = settings.relative((
+        template.size.0 - 1,
+        template.size.1 - 1,
+        template.size.2 - 1,
+    ));
+    [
+        first.0.min(second.0) + position.0,
+        first.1.min(second.1) + position.1,
+        first.2.min(second.2) + position.2,
+        first.0.max(second.0) + position.0,
+        first.1.max(second.1) + position.1,
+        first.2.max(second.2) + position.2,
+    ]
+}
+
+/// 一个被 `filterBlocks` 选中的方块：位置和它的 nbt。
+///
+/// One block picked by `filterBlocks`: its position and nbt.
+pub type FilteredBlock<'a> = ((i32, i32, i32), Option<&'a mc_bamboo_nbt::Tag>);
+
+/// `StructureTemplate.filterBlocks(position, settings, block)`：按 `buildInfoList` 的顺序
+/// 给出方块是 `block` 的项，位置变换后落在 `chunkBB` 内才算。
+///
+/// `StructureTemplate.filterBlocks(position, settings, block)`: the blocks matching
+/// `block` in `buildInfoList` order, with positions transformed and filtered by the box.
+fn filter_blocks<'a>(
+    template: &'a StructureTemplate,
+    position: (i32, i32, i32),
+    settings: &PlaceSettings,
+    block: &str,
+) -> Vec<FilteredBlock<'a>> {
+    let Some(palette) = template.palette_index(position) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for index in ordered_blocks(template, palette) {
+        let entry = &template.blocks[index];
+        let Some(palette_entry) = template.palettes[palette].get(entry.state) else {
             continue;
         };
-        level.set_block(world.0, world.1, world.2, state);
+        if palette_entry.name != block {
+            continue;
+        }
+        let relative = settings.relative(entry.pos);
+        let pos = (
+            relative.0 + position.0,
+            relative.1 + position.1,
+            relative.2 + position.2,
+        );
+        if let Some(bb) = &settings.chunk_bb
+            && !inside(bb, pos)
+        {
+            continue;
+        }
+        out.push((pos, entry.nbt.as_ref()));
     }
+    out
+}
+
+/// 读 nbt 里的一个字符串字段（小写键名，和方块实体的 tag 一致）。
+///
+/// Read one string field from an nbt tag (lower-case keys, as block entity tags use).
+pub fn string_field(tag: &mc_bamboo_nbt::Tag, key: &str) -> Option<String> {
+    let mc_bamboo_nbt::Tag::Compound(entries) = tag else {
+        return None;
+    };
+    entries
+        .iter()
+        .find(|(name, _)| name == key)
+        .and_then(|(_, value)| {
+            let mc_bamboo_nbt::Tag::String(text) = value else {
+                return None;
+            };
+            Some(text.clone())
+        })
+}
+
+/// 把 `BlockStateParser.parseForBlock(..., true)` 的字符串（`minecraft:x[a=b]`）解析成状态。
+///
+/// Parse the `BlockStateParser.parseForBlock(..., true)` text (`minecraft:x[a=b]`) into a
+/// state id.
+fn state_from_text(text: &str) -> Option<u32> {
+    let (name, rest) = match text.split_once('[') {
+        Some((name, rest)) => (name, Some(rest.trim_end_matches(']'))),
+        None => (text, None),
+    };
+    let block = mc_bamboo_data::block_by_name(name)?;
+    let mut state = block.default_state;
+    if let Some(properties) = rest {
+        for entry in properties.split(',') {
+            let (key, value) = entry.split_once('=')?;
+            state = crate::feature::state::with_property(state, key, value)?;
+        }
+    }
+    Some(state)
+}
+
+fn write(
+    world: &mut dyn BlockAccess,
+    pos: (i32, i32, i32),
+    state: u32,
+    writes: &mut Vec<BlockWrite>,
+) -> bool {
+    // 官方走 `ProtoChunk.setBlockState`，它会对 `getPersistedStatus().heightmapsAfter()`
+    // （`FEATURES` 阶段是四种 FINAL 高度图）做增量更新。`StructureStart.placeInChunk` 对
+    // 3×3 每个区块各调一次 `postProcess`，后面的区块用 `getHeight` 校正 Y，所以这里必须
+    // 更新高度图，否则第二次起的 `getHeight` 会和官方不同。
+    // Vanilla goes through `ProtoChunk.setBlockState`, which incrementally updates
+    // `getPersistedStatus().heightmapsAfter()` (the four FINAL maps at `FEATURES`).
+    // `placeInChunk` calls `postProcess` once per chunk of the 3×3, and later chunks use
+    // `getHeight` to adjust Y, so the heightmaps must be updated here.
+    let written = world.set_block(pos.0, pos.1, pos.2, state);
+    if written {
+        writes.push((pos.0, pos.1, pos.2, state));
+    }
+    written
+}
+
+fn inside(bb: &Box, pos: (i32, i32, i32)) -> bool {
+    pos.0 >= bb[0]
+        && pos.0 <= bb[3]
+        && pos.1 >= bb[1]
+        && pos.1 <= bb[4]
+        && pos.2 >= bb[2]
+        && pos.2 <= bb[5]
+}
+
+/// `StructureBlockInfo.state.mirror(settings.getMirror()).rotate(settings.getRotation())`。
+///
+/// `StructureBlockInfo.state.mirror(settings.getMirror()).rotate(settings.getRotation())`.
+fn mirror_rotate(state: u32, settings: &PlaceSettings) -> u32 {
+    let mut state = state;
+    if settings.mirror > 0 {
+        state = mc_bamboo_data::state_mirror(state, settings.mirror as u32);
+    }
+    if settings.rotation > 0 {
+        state = mc_bamboo_data::state_rotation(state, settings.rotation as u32);
+    }
+    state
+}
+
+/// palette 里的一项换成状态 ID。
+///
+/// Turn one palette entry into a state id.
+pub fn state_of(entry: &crate::structure::template::PaletteEntry) -> Option<u32> {
+    let block = mc_bamboo_data::block_by_name(&entry.name)?;
+    let mut state = block.default_state;
+    for (key, value) in &entry.properties {
+        state = crate::feature::state::with_property(state, key, value)?;
+    }
+    Some(state)
+}
+
+/// 方块实体是不是 `RandomizableContainer`：箱子、陷阱箱、木桶、发射器、投掷器、漏斗、
+/// 潜影盒、合成器（都继承 `RandomizableContainerBlockEntity`）和饰纹陶罐。
+///
+/// Whether the block entity is a `RandomizableContainer`: chest, trapped chest, barrel,
+/// dispenser, dropper, hopper, shulker box, crafter (all extend
+/// `RandomizableContainerBlockEntity`) and the decorated pot.
+pub fn is_randomizable_container(state: u32) -> bool {
+    use mc_bamboo_data::registries::block_entity_type as kind;
+    mc_bamboo_data::block_of_state(state)
+        .and_then(|block| block.block_entity_type)
+        .is_some_and(|id| {
+            [
+                kind::CHEST,
+                kind::TRAPPED_CHEST,
+                kind::BARREL,
+                kind::DISPENSER,
+                kind::DROPPER,
+                kind::HOPPER,
+                kind::SHULKER_BOX,
+                kind::CRAFTER,
+                kind::DECORATED_POT,
+            ]
+            .contains(&id)
+        })
+}
+
+/// 方块实体是不是 `ChestBlockEntity`（箱子或陷阱箱）。
+///
+/// Whether the block entity is a `ChestBlockEntity` (chest or trapped chest).
+pub fn is_chest(state: u32) -> bool {
+    use mc_bamboo_data::registries::block_entity_type as kind;
+    mc_bamboo_data::block_of_state(state)
+        .and_then(|block| block.block_entity_type)
+        .is_some_and(|id| id == kind::CHEST || id == kind::TRAPPED_CHEST)
+}
+
+/// 方块能不能装液体（`LiquidBlockContainer` 的近似：属性表里带 `waterlogged`）。
+///
+/// Whether a block can hold liquid (an approximation of `LiquidBlockContainer`: the
+/// block has a `waterlogged` property).
+fn can_hold_liquid(state: u32) -> bool {
+    mc_bamboo_data::block_of_state(state).is_some_and(|block| {
+        block
+            .properties
+            .iter()
+            .any(|property| property.name == "waterlogged")
+    })
+}
+
+/// `SimpleWaterloggedBlock.canPlaceLiquid` + `placeLiquid`：只有水、且当前不是
+/// `waterlogged=true` 时才置 true。
+///
+/// `SimpleWaterloggedBlock.canPlaceLiquid` + `placeLiquid`: only water, and only when the
+/// state is not already `waterlogged=true`.
+fn waterlog(state: u32, fluid: &mc_bamboo_data::FluidFacts) -> Option<u32> {
+    if fluid.fluid != mc_bamboo_data::registries::fluid::WATER
+        && fluid.fluid != mc_bamboo_data::registries::fluid::FLOWING_WATER
+    {
+        return None;
+    }
+    if property_of(state, "waterlogged").as_deref() == Some("true") {
+        return None;
+    }
+    // `SlabBlock.placeLiquid`：双层台阶不进水（`TYPE != DOUBLE` 才走默认实现）。
+    // `SlabBlock.placeLiquid`: a double slab takes no water (only `TYPE != DOUBLE` reaches
+    // the default body).
+    if in_tag(state, "minecraft:slabs") && property_of(state, "type").as_deref() == Some("double") {
+        return None;
+    }
+    let mut wet = crate::feature::state::with_property(state, "waterlogged", "true")?;
+    // `CampfireBlock.placeLiquid` / `CandleBlock.placeLiquid`：进水的同时熄火。
+    // `CampfireBlock.placeLiquid` / `CandleBlock.placeLiquid`: waterlogging also puts the
+    // flame out.
+    if property_of(wet, "lit").as_deref() == Some("true")
+        && let Some(doused) = crate::feature::state::with_property(wet, "lit", "false")
+    {
+        wet = doused;
+    }
+    Some(wet)
+}
+
+impl Processor {
+    /// `StructureProcessor.processBlock`：返回 `None` 表示丢掉这个方块。
+    ///
+    /// `StructureProcessor.processBlock`: `None` drops the block.
+    fn process(
+        &self,
+        world: &dyn BlockAccess,
+        pos: (i32, i32, i32),
+        template_pos: (i32, i32, i32),
+        state: u32,
+        settings: &PlaceSettings,
+    ) -> Option<u32> {
+        match self {
+            Processor::Ignore(names) => {
+                let name = block_name(state)?;
+                if names.contains(&name) {
+                    None
+                } else {
+                    Some(state)
+                }
+            }
+            Processor::Rot(integrity) => {
+                // `settings.getRandom(processedBlockInfo.pos())`：按世界位置派生，和
+                // `getRandomPalette` 用同一套种子。
+                let random = position_random(pos);
+                if random.next_float() <= *integrity {
+                    Some(state)
+                } else {
+                    None
+                }
+            }
+            Processor::Rule(rules) => {
+                let random = position_random(pos);
+                for rule in rules {
+                    if rule.input.matches(state, &random) {
+                        return Some(rule.output);
+                    }
+                }
+                Some(state)
+            }
+            Processor::Age(mossiness) => Some(age(state, *mossiness, &position_random(pos))),
+            Processor::LavaSubmerged => {
+                let was_lava = block_name(world.get_block(pos.0, pos.1, pos.2))
+                    .is_some_and(|name| name == "minecraft:lava");
+                // `Block.isShapeFullBlock(state.getShape(level, pos))`：看的是轮廓形状。
+                // `Block.isShapeFullBlock(state.getShape(level, pos))`: the outline shape.
+                let full =
+                    mc_bamboo_blocks::shape::is_full_block(mc_bamboo_data::outline_shape(state));
+                if was_lava && !full {
+                    Some(block_state("minecraft:lava"))
+                } else {
+                    Some(state)
+                }
+            }
+            Processor::Protected => {
+                let world_state = world.get_block(pos.0, pos.1, pos.2);
+                if protected_from_replacement(world_state) {
+                    None
+                } else {
+                    Some(state)
+                }
+            }
+            Processor::Blackstone => Some(blackstone(state)),
+            // `CappedProcessor.processBlock` 是基类默认实现，原样返回；上限在
+            // `finalizeProcessing` 里由 `apply_capped` 处理。
+            // `CappedProcessor.processBlock` is the base no-op; the cap is handled by
+            // `apply_capped` inside `finalizeProcessing`.
+            Processor::Capped { .. } => Some(state),
+        }
+        .inspect(|_| {
+            let _ = (template_pos, settings);
+        })
+    }
+}
+
+impl InputTest {
+    /// `RuleTest.test`：只做输入谓词的判定（位置谓词恒 true）。
+    ///
+    /// `RuleTest.test`: only the input predicate (the position predicate is always true).
+    fn matches(&self, state: u32, random: &WorldgenRandom) -> bool {
+        match self {
+            InputTest::Always => true,
+            InputTest::Block(name) => block_name(state) == Some(name),
+            InputTest::RandomBlock(name, probability) => {
+                block_name(state) == Some(name) && random.next_float() < *probability
+            }
+        }
+    }
+}
+
+/// `RandomSource.create(Mth.getSeed(pos))`。
+///
+/// `RandomSource.create(Mth.getSeed(pos))`.
+fn position_random(pos: (i32, i32, i32)) -> WorldgenRandom {
+    let seed = crate::random::positional_seed(pos.0, pos.1, pos.2);
+    WorldgenRandom::new(crate::random::Random::Legacy(
+        mc_bamboo_blocks::LegacyRandom::new(seed),
+    ))
+}
+
+fn block_name(state: u32) -> Option<&'static str> {
+    let id = mc_bamboo_data::block_id_of_state(state)?;
+    Some(blocks::BLOCKS[id].name)
+}
+
+fn block_state(name: &str) -> u32 {
+    mc_bamboo_data::block_by_name(name)
+        .map(|block| block.default_state)
+        .unwrap_or(blocks::AIR)
+}
+
+/// `BlockAgeProcessor.processBlock`。
+///
+/// `BlockAgeProcessor.processBlock`.
+fn age(state: u32, mossiness: f32, random: &WorldgenRandom) -> u32 {
+    let name = block_name(state).unwrap_or("");
+    if matches!(
+        name,
+        "minecraft:stone_bricks" | "minecraft:stone" | "minecraft:chiseled_stone_bricks"
+    ) {
+        return age_full_stone_block(mossiness, random).unwrap_or(state);
+    }
+    if in_tag(state, "minecraft:stairs") {
+        return age_stairs(state, mossiness, random).unwrap_or(state);
+    }
+    if in_tag(state, "minecraft:slabs") {
+        return if random.next_float() < mossiness {
+            with_properties_of(block_state(MOSSY_STONE_BRICK_SLAB), state)
+        } else {
+            state
+        };
+    }
+    if in_tag(state, "minecraft:walls") {
+        return if random.next_float() < mossiness {
+            with_properties_of(block_state(MOSSY_STONE_BRICK_WALL), state)
+        } else {
+            state
+        };
+    }
+    if name == "minecraft:obsidian" {
+        return if random.next_float() < 0.15 {
+            block_state(CRYING_OBSIDIAN)
+        } else {
+            state
+        };
+    }
+    state
+}
+
+/// `BlockAgeProcessor.maybeReplaceFullStoneBlock`。两个候选数组在判定前就各自
+/// `getRandomFacingStairs` 一次，所以随机数消耗和两个数组的构造顺序一致。
+///
+/// `BlockAgeProcessor.maybeReplaceFullStoneBlock`. Both candidate arrays build their
+/// `getRandomFacingStairs` entry up front, so the draws follow that construction order.
+fn age_full_stone_block(mossiness: f32, random: &WorldgenRandom) -> Option<u32> {
+    if random.next_float() >= 0.5 {
+        return None;
+    }
+    let non_mossy_stairs = random_facing_stairs(STONE_BRICK_STAIRS, random);
+    let mossy_stairs = random_facing_stairs(MOSSY_STONE_BRICK_STAIRS, random);
+    let non_mossy = [block_state(CRACKED_STONE_BRICKS), non_mossy_stairs];
+    let mossy = [block_state(MOSSY_STONE_BRICKS), mossy_stairs];
+    let pick = if random.next_float() < mossiness {
+        mossy
+    } else {
+        non_mossy
+    };
+    Some(pick[random.next_int(2) as usize])
+}
+
+/// `BlockAgeProcessor.maybeReplaceStairs`。
+///
+/// `BlockAgeProcessor.maybeReplaceStairs`.
+fn age_stairs(state: u32, mossiness: f32, random: &WorldgenRandom) -> Option<u32> {
+    if random.next_float() >= 0.5 {
+        return None;
+    }
+    let mossy = [
+        with_properties_of(block_state(MOSSY_STONE_BRICK_STAIRS), state),
+        block_state(MOSSY_STONE_BRICK_SLAB),
+    ];
+    let non_mossy = [block_state(STONE_SLAB), block_state(STONE_BRICK_SLAB)];
+    let pick = if random.next_float() < mossiness {
+        mossy
+    } else {
+        non_mossy
+    };
+    Some(pick[random.next_int(2) as usize])
+}
+
+/// `BlockAgeProcessor.getRandomFacingStairs`：
+/// `Plane.HORIZONTAL.getRandomDirection(random)`（`nextInt(4)`）再
+/// `Util.getRandom(Half.values(), random)`（`nextInt(2)`）。
+///
+/// `BlockAgeProcessor.getRandomFacingStairs`: one `nextInt(4)` for the facing and one
+/// `nextInt(2)` for the half.
+fn random_facing_stairs(block: &str, random: &WorldgenRandom) -> u32 {
+    const FACING: [&str; 4] = ["north", "east", "south", "west"];
+    let facing = FACING[random.next_int(4) as usize];
+    let half = if random.next_int(2) == 0 {
+        "top"
+    } else {
+        "bottom"
+    };
+    let mut state = block_state(block);
+    if let Some(next) = crate::feature::state::with_property(state, "facing", facing) {
+        state = next;
+    }
+    if let Some(next) = crate::feature::state::with_property(state, "half", half) {
+        state = next;
+    }
+    state
+}
+
+/// `BlockBehaviour.BlockStateBase.withPropertiesOf(other)`：只搬两边都有的属性。
+///
+/// `withPropertiesOf(other)`: copy the properties both blocks have.
+fn with_properties_of(state: u32, other: u32) -> u32 {
+    let Some(target) = mc_bamboo_data::block_of_state(state) else {
+        return state;
+    };
+    let Some(source) = mc_bamboo_data::block_of_state(other) else {
+        return state;
+    };
+    let mut result = state;
+    for property in target.properties {
+        let Some(value) = source
+            .properties
+            .iter()
+            .find(|candidate| candidate.name == property.name)
+            .and_then(|_| property_of(other, property.name))
+        else {
+            continue;
+        };
+        if let Some(next) = crate::feature::state::with_property(result, property.name, &value) {
+            result = next;
+        }
+    }
+    result
+}
+
+/// 读一个状态上某个属性的字符串值。
+///
+/// Read one property of a state as a string.
+fn property_of(state: u32, name: &str) -> Option<String> {
+    let block = mc_bamboo_data::block_of_state(state)?;
+    let mut stride = 1_u32;
+    for property in block.properties.iter().rev() {
+        let count = property.values.len() as u32;
+        if property.name == name {
+            let index = (state - block.first_state) / stride % count;
+            return Some(property.values[index as usize].to_owned());
+        }
+        stride *= count;
+    }
+    None
+}
+
+/// 方块是否属于某个方块标签。
+///
+/// Whether the state's block belongs to a block tag.
+pub fn in_tag(state: u32, tag: &str) -> bool {
+    let Some(ids) = mc_bamboo_data::block_tag(tag) else {
+        return false;
+    };
+    let Some(block) = mc_bamboo_data::block_of_state(state) else {
+        return false;
+    };
+    let index = mc_bamboo_data::block_id_of_state(block.default_state).unwrap_or(usize::MAX);
+    ids.iter().any(|&id| id as usize == index)
+}
+
+/// `ProtectedBlockProcessor(FEATURES_CANNOT_REPLACE)`。
+///
+/// `ProtectedBlockProcessor(FEATURES_CANNOT_REPLACE)`.
+fn protected_from_replacement(state: u32) -> bool {
+    in_tag(state, "minecraft:features_cannot_replace")
+}
+
+/// `BlackstoneReplaceProcessor` 的映射表，属性只搬 `facing` / `half` / `type`。
+///
+/// The `BlackstoneReplaceProcessor` map; only `facing`, `half` and `type` carry over.
+fn blackstone(state: u32) -> u32 {
+    const REPLACEMENTS: [(&str, &str); 23] = [
+        ("minecraft:cobblestone", "minecraft:blackstone"),
+        ("minecraft:mossy_cobblestone", "minecraft:blackstone"),
+        ("minecraft:stone", "minecraft:polished_blackstone"),
+        (
+            "minecraft:stone_bricks",
+            "minecraft:polished_blackstone_bricks",
+        ),
+        (
+            "minecraft:mossy_stone_bricks",
+            "minecraft:polished_blackstone_bricks",
+        ),
+        (
+            "minecraft:cobblestone_stairs",
+            "minecraft:blackstone_stairs",
+        ),
+        (
+            "minecraft:mossy_cobblestone_stairs",
+            "minecraft:blackstone_stairs",
+        ),
+        (
+            "minecraft:stone_stairs",
+            "minecraft:polished_blackstone_stairs",
+        ),
+        (
+            "minecraft:stone_brick_stairs",
+            "minecraft:polished_blackstone_brick_stairs",
+        ),
+        (
+            "minecraft:mossy_stone_brick_stairs",
+            "minecraft:polished_blackstone_brick_stairs",
+        ),
+        ("minecraft:cobblestone_slab", "minecraft:blackstone_slab"),
+        (
+            "minecraft:mossy_cobblestone_slab",
+            "minecraft:blackstone_slab",
+        ),
+        (
+            "minecraft:smooth_stone_slab",
+            "minecraft:polished_blackstone_slab",
+        ),
+        ("minecraft:stone_slab", "minecraft:polished_blackstone_slab"),
+        (
+            "minecraft:stone_brick_slab",
+            "minecraft:polished_blackstone_brick_slab",
+        ),
+        (
+            "minecraft:mossy_stone_brick_slab",
+            "minecraft:polished_blackstone_brick_slab",
+        ),
+        (
+            "minecraft:stone_brick_wall",
+            "minecraft:polished_blackstone_brick_wall",
+        ),
+        (
+            "minecraft:mossy_stone_brick_wall",
+            "minecraft:polished_blackstone_brick_wall",
+        ),
+        ("minecraft:cobblestone_wall", "minecraft:blackstone_wall"),
+        (
+            "minecraft:mossy_cobblestone_wall",
+            "minecraft:blackstone_wall",
+        ),
+        (
+            "minecraft:chiseled_stone_bricks",
+            "minecraft:chiseled_polished_blackstone",
+        ),
+        (
+            "minecraft:cracked_stone_bricks",
+            "minecraft:cracked_polished_blackstone_bricks",
+        ),
+        ("minecraft:iron_bars", "minecraft:iron_chain"),
+    ];
+    let Some(name) = block_name(state) else {
+        return state;
+    };
+    let Some((_, target)) = REPLACEMENTS.iter().find(|(from, _)| *from == name) else {
+        return state;
+    };
+    let mut result = block_state(target);
+    for property in ["facing", "half", "type"] {
+        if let Some(value) = property_of(state, property)
+            && let Some(next) = crate::feature::state::with_property(result, property, &value)
+        {
+            result = next;
+        }
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// `(0,0,0)` 起的模板按 `(y, x, z)` 排：整方块在前，带 nbt 的在后。
+    ///
+    /// Blocks are ordered by `(y, x, z)` with full blocks first and nbt blocks last.
     #[test]
-    fn parse_block_state_reads_a_name_and_its_properties() {
-        let plain = parse_block_state("minecraft:stone").unwrap();
-        assert_eq!(
-            mc_bamboo_data::blocks::BLOCKS[mc_bamboo_data::block_id_of_state(plain).unwrap()].name,
-            "minecraft:stone"
-        );
-        let with_props = parse_block_state("minecraft:oak_log[axis=x]").unwrap();
-        let id = mc_bamboo_data::block_id_of_state(with_props).unwrap();
-        assert_eq!(mc_bamboo_data::blocks::BLOCKS[id].name, "minecraft:oak_log");
-        assert_ne!(
-            with_props,
-            parse_block_state("minecraft:oak_log[axis=y]").unwrap()
-        );
+    fn ordered_blocks_puts_nbt_blocks_last() {
+        let template = StructureTemplate::load("minecraft:igloo/top").unwrap();
+        let order = ordered_blocks(&template, 0);
+        assert_eq!(order.len(), template.blocks.len());
+        let last = order.last().copied().unwrap();
+        let has_nbt = template.blocks[last].nbt.is_some();
+        assert!(has_nbt, "the last block should carry nbt");
     }
 
+    /// 属性搬运只搬两边都有的键。
+    ///
+    /// Property copying only takes keys present on both sides.
     #[test]
-    fn parse_block_state_rejects_unknown_blocks_and_properties() {
-        assert!(parse_block_state("minecraft:not_a_block").is_err());
-        assert!(parse_block_state("minecraft:stone[nope=1]").is_err());
+    fn with_properties_of_copies_shared_keys() {
+        let stairs = block_state("minecraft:stone_brick_stairs");
+        let facing = property_of(stairs, "facing").unwrap();
+        let mirrored =
+            with_properties_of(block_state("minecraft:mossy_stone_brick_stairs"), stairs);
+        assert_eq!(property_of(mirrored, "facing"), Some(facing));
     }
 
+    /// `features_cannot_replace` 标签里至少有基岩。
+    ///
+    /// The `features_cannot_replace` tag contains bedrock.
     #[test]
-    fn transform_pos_matches_the_vanilla_corner_cases() {
-        // `StructureTemplate.transform` 的四条分支各取一个点（pivot 为 ZERO）：
-        // CCW90 → `(-z, y, -x)`，CW90 → `(-z, y, x)`，CW180 → `(-x, y, -z)`。
-        // One point per `StructureTemplate.transform` branch with a zero pivot:
-        // CCW90 is `(-z, y, -x)`, CW90 `(-z, y, x)`, CW180 `(-x, y, -z)`.
-        assert_eq!(
-            transform_pos((3, 1, 5), Mirror::None, Rotation::None),
-            (3, 1, 5)
-        );
-        assert_eq!(
-            transform_pos((3, 1, 5), Mirror::None, Rotation::Clockwise180),
-            (-3, 1, -5)
-        );
-        assert_eq!(
-            transform_pos((3, 1, 5), Mirror::None, Rotation::Clockwise90),
-            (-5, 1, 3)
-        );
-        assert_eq!(
-            transform_pos((3, 1, 5), Mirror::None, Rotation::CounterClockwise90),
-            (5, 1, -3)
-        );
-        // 镜像先作用，再旋转。
-        // The mirror runs first, then the rotation.
-        assert_eq!(
-            transform_pos((3, 1, 5), Mirror::LeftRight, Rotation::None),
-            (3, 1, -5)
-        );
-        assert_eq!(
-            transform_pos((3, 1, 5), Mirror::FrontBack, Rotation::None),
-            (-3, 1, 5)
-        );
+    fn protected_blocks_include_bedrock() {
+        assert!(protected_from_replacement(block_state("minecraft:bedrock")));
+        assert!(!protected_from_replacement(block_state("minecraft:stone")));
     }
 }
