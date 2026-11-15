@@ -535,10 +535,14 @@ struct FlatLevel {
     written: Vec<(i32, i32, i32)>,
     fill: &'static str,
     center: (i32, i32),
-    /// 当前结构件调用编号，和 Java 侧的 `D` 行对齐。
+    /// 下一次结构件调用的编号。
     ///
-    /// Current piece-invocation index, aligned with the Java `D` lines.
-    invocation: usize,
+    /// Index of the next piece invocation.
+    next_invocation: usize,
+    /// 当前正在记录的结构件调用编号。
+    ///
+    /// The invocation whose writes are being recorded.
+    current_piece: usize,
     /// 每次调用写过的位置，用于逐件定位差异。
     ///
     /// Positions written per invocation, for per-piece diffing.
@@ -558,7 +562,8 @@ impl FlatLevel {
             written: Vec::new(),
             fill,
             center,
-            invocation: 0,
+            next_invocation: 0,
+            current_piece: 0,
             piece_writes: Vec::new(),
             section_non_air: BTreeMap::new(),
         }
@@ -567,9 +572,13 @@ impl FlatLevel {
     /// 开始一次结构件调用，返回它的编号。
     ///
     /// Start one piece invocation and return its index.
+    /// 开始一次结构件调用，返回它的编号；后续写入记到这个编号下。
+    ///
+    /// Start one piece invocation and return its index; later writes go into that slot.
     fn begin_piece(&mut self) -> usize {
-        let index = self.invocation;
-        self.invocation += 1;
+        let index = self.next_invocation;
+        self.next_invocation += 1;
+        self.current_piece = index;
         while self.piece_writes.len() <= index {
             self.piece_writes.push(Vec::new());
         }
@@ -693,7 +702,7 @@ impl PieceLevel for FlatLevel {
             *count = count.saturating_sub(1);
         }
         self.written.push((x, y, z));
-        if let Some(list) = self.piece_writes.get_mut(self.invocation) {
+        if let Some(list) = self.piece_writes.get_mut(self.current_piece) {
             list.push((x, y, z));
         }
         self.blocks.insert((x, y, z), state);
