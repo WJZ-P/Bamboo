@@ -627,9 +627,19 @@ impl PieceLevel for FlatLevel {
     /// top plus one (`OCEAN_FLOOR_WG`, `Heightmap.Types.isOpaque`), which is exactly the
     /// real heightmap `ProtoChunk` keeps.
     fn ocean_floor_height(&self, x: i32, z: i32) -> i32 {
+        // 高度图不受 `WorldGenRegion` 写区限制：它按整列求值，所以这里直接用
+        // `initial_block` + 写入表，不走 `get_block`（那个对写区外返回空气）。
+        //
+        // The heightmap is not limited by the `WorldGenRegion` write area: it evaluates the
+        // whole column, so read the write table plus the initial fill instead of going
+        // through `get_block` (which returns air outside the write area).
         let mut y = MIN_Y + HEIGHT - 1;
         while y > MIN_Y {
-            let state = self.get_block(x, y, z);
+            let state = self
+                .blocks
+                .get(&(x, y, z))
+                .copied()
+                .unwrap_or_else(|| self.initial_block(y));
             if mc_bamboo_data::state_facts(state) & mc_bamboo_data::facts::MOTION_BLOCKING != 0 {
                 return y + 1;
             }
