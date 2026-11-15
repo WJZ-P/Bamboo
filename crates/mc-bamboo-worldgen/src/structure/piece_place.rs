@@ -74,7 +74,12 @@ impl Dir {
 /// World access needed by piece placement; vanilla `WorldGenLevel` (really
 /// `WorldGenRegion`).
 pub trait PieceLevel {
-    /// `LevelReader.getBlockState`。范围外返回空气（`WorldGenRegion` 也是这样）。
+    /// `LevelReader.getBlockState`。构建高度之外返回空气；水平方向上**不受写区限制**，
+    /// `WorldGenRegion` 读写区外的区块照样返回真实方块（`reorient`、支撑柱都会读到邻区块）。
+    ///
+    /// `LevelReader.getBlockState`. Air outside the build height; horizontally it is
+    /// **not limited to the write zone**: `WorldGenRegion` returns real blocks for chunks
+    /// outside it (`reorient` and the support pillars do read neighbouring chunks).
     fn get_block(&self, x: i32, y: i32, z: i32) -> u32;
     /// `LevelWriter.setBlock(pos, state, flags)`。
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool;
@@ -83,6 +88,16 @@ pub trait PieceLevel {
     /// `LevelReader.getMaxY()`。
     fn max_y(&self) -> i32;
     /// `LevelReader.getHeight(OCEAN_FLOOR_WG, x, z)`。
+    ///
+    /// 必须是地形阶段结束时**冻结**的那张高度图：26.3 里 FEATURES 阶段区块的持久状态是
+    /// TERRAIN，它的 `heightmapsAfter` 只有 FINAL 那一组，所以结构件和地物写方块时
+    /// `OCEAN_FLOOR_WG` 不再更新。实现方不能按当前方块现算。
+    ///
+    /// `LevelReader.getHeight(OCEAN_FLOOR_WG, x, z)`. This must be the heightmap as
+    /// **frozen** at the end of the terrain stage: in 26.3 a chunk's persisted status
+    /// during FEATURES is TERRAIN, whose `heightmapsAfter` holds only the FINAL set, so
+    /// `OCEAN_FLOOR_WG` is no longer updated when pieces and features write blocks.
+    /// Implementations must not recompute it from the current blocks.
     fn ocean_floor_height(&self, x: i32, z: i32) -> i32;
 }
 
@@ -533,34 +548,33 @@ pub fn is_face_sturdy_center(state: u32, dir: Dir) -> bool {
 }
 
 /// `Block.canSupportCenter(level, posAbove, DOWN) && !(block instanceof FallingBlock)`：
-/// 上方能挂住铁链。用「向下的满固体面」近似 `canSupportCenter`，并排除沙 / 沙砾等下落方块。
+/// 上方能挂住铁链。
+///
+/// `canSupportCenter` 对 DOWN 先排除 `UNSTABLE_BOTTOM_CENTER` 标签，再看
+/// `isFaceSturdy(DOWN, SupportType.CENTER)`（不是 `FULL`：栅栏、墙、铁栏杆这类非满方块也
+/// 撑得住中心）。`FallingBlock` 按方块类的祖先表判定，包括沙、沙砾、混凝土粉末、铁砧、龙蛋。
 ///
 /// `Block.canSupportCenter(level, posAbove, DOWN) && !(block instanceof FallingBlock)`:
-/// a chain can hang below. Approximated with the DOWN full-sturdy face, excluding
-/// falling blocks (sand, gravel, ...).
+/// a chain can hang below. For DOWN `canSupportCenter` first rejects the
+/// `UNSTABLE_BOTTOM_CENTER` tag and then tests `isFaceSturdy(DOWN, SupportType.CENTER)`
+/// (not `FULL`: fences, walls and iron bars support the centre too). `FallingBlock` is
+/// decided from the block class ancestor table, covering sand, gravel, concrete powder,
+/// anvils and the dragon egg.
 pub fn can_hang_chain_below(state: u32) -> bool {
-    // 官方 `Block.canSupportCenter(level, pos, Direction.DOWN)` 用的是
-    // `SupportType.CENTER`，不是 `FULL`；栅栏、墙、铁栏杆这类非满方块 CENTER 为 true，
-    // 所以用 `FULL` 会把它们全判成 false，链条就挂不上。
-    //
-    // `Block.canSupportCenter(level, pos, Direction.DOWN)` uses `SupportType.CENTER`, not
-    // `FULL`. Fences, walls and iron bars are not full blocks but do support the centre,
-    // so probing `FULL` rejects them and the chain never hangs.
-    if !is_face_sturdy_center(state, Dir::Down) {
-        return false;
-    }
-    // `UNSTABLE_BOTTOM_CENTER` 的方块不算能支撑（官方在 `canSupportCenter` 里先排除）。
-    // Blocks in `UNSTABLE_BOTTOM_CENTER` do not support (vanilla rejects them first).
     if mc_bamboo_blocks::BlockState(state)
         .is_tagged(mc_bamboo_data::tags::block_tags::UNSTABLE_BOTTOM_CENTER)
     {
         return false;
     }
-    !is_block(state, "minecraft:sand")
-        && !is_block(state, "minecraft:red_sand")
-        && !is_block(state, "minecraft:gravel")
-        && !is_block(state, "minecraft:suspicious_sand")
-        && !is_block(state, "minecraft:suspicious_gravel")
+    if !is_face_sturdy_center(state, Dir::Down) {
+        return false;
+    }
+    !mc_bamboo_data::block_of_state(state).is_some_and(|block| {
+        block
+            .class
+            .ancestors()
+            .contains(&mc_bamboo_data::BlockAncestor::FallingBlock)
+    })
 }
 
 /// 按名字取方块的默认状态，找不到就 panic（对拍里立刻暴露）。
