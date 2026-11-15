@@ -353,6 +353,23 @@
   「递归合并」和「直接覆盖」结果相同，改坏发现不了。加了 `append_static_data` 查询
   （data 用 `{Nested:{A:1}, Extra:7}`，existing 用 `{Nested:{B:2}, Only:3}`）才区分开。
 
+**第十六轮（2026-11-15，`cb-wg-jigsaw` 分支：随机容器的战利品种子）**：
+
+* `place_processed` / `place_piece` 新增 `random: &Random` 参数，照官方
+  `StructureTemplate.placeInWorld` 的方块实体恢复：带 nbt 的方块如果其方块实体是
+  `RandomizableContainer`，就用 `random.nextLong()` **再取一次**覆盖 `LootTableSeed`。
+  这一次取数必须发生，否则世界随机源序列与官方错开。
+* `is_randomizable_container` 按方块实体类型判定，集合是官方实现该接口的十类：
+  箱子 / 陷阱箱 / 发射器 / 投掷器 / 漏斗 / 潜影盒 / 木桶 / 饰纹陶罐 / 合成器 /
+  可疑的方块（`BrushableBlockEntity`）。熔炉、烟熏炉、高炉、酿造台**不是**。
+* 单元测试两个：`randomizable_containers_match_the_vanilla_set`（11 个正例 + 8 个反例）、
+  `placing_a_randomizable_container_draws_the_loot_seed`（箱子得到 `LootTableSeed`、石头
+  不会）。故意改坏：集合里漏掉 `hopper`、不覆盖种子，两处各被一个测试抓到。
+* **没做到的事**：本想用新对拍模式 `rc` 让官方 `instanceof RandomizableContainer` 逐个
+  判定所有 1286 个方块，但 `Block.newBlockEntity` 会触发 `Components not bound yet`
+  （oracle 没初始化组件注册表），Java 侧构造不出方块实体。改用「按方块实体类型判定 +
+  单元测试钉住集合」的替代方案，**所以这个集合没有对拍，只有单元测试**。
+
 **第五轮（2026-11-14，`cb-wg-structures` 续：需要模板的单件结构布局）**：
 
 * 合并 `main` 时本分支已与 `main` 同步（`main` 的 `4405fc3` 含本分支全部提交），
