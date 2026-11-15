@@ -370,6 +370,24 @@
   （oracle 没初始化组件注册表），Java 侧构造不出方块实体。改用「按方块实体类型判定 +
   单元测试钉住集合」的替代方案，**所以这个集合没有对拍，只有单元测试**。
 
+**第十七轮（2026-11-15，`cb-wg-jigsaw` 分支：随机容器集合的官方对拍）**：
+
+* 解决了上一轮「`rc` 对拍跑不起来」的问题：`Block.newBlockEntity` 读组件默认值时抛
+  `Components not bound yet`，因为组件只在服务器资源重载
+  （`ReloadableServerResources`）时绑定。oracle 里手动跑一次
+  `BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(registries)` 并
+  `PendingComponents::apply()`，方块实体就能构造了。
+* 新对拍模式 `jigsaw rc`：官方对全部 **1286 个方块**逐个构造方块实体并
+  `instanceof RandomizableContainer`，与 `is_randomizable_container` 逐条比：
+  `1286 blocks, 33 randomizable, all identical`。
+* **对拍抓到一个真 bug**：我把 `brushable_block`（可疑的沙砾 / 沙子）算成了随机容器，
+  但官方 `BrushableBlockEntity extends BlockEntity`，**没有实现**
+  `RandomizableContainer`。对拍报 `2/1286 blocks differ`，修正后回 0。
+  这意味着上一轮的单元测试把错误的集合钉住了——**单元测试只能验证我想验证的东西，
+  对拍才能发现我想错的东西**。
+* `place_piece` 的参数从 10 个减到 9 个：`chunk_bb` 从 settings 里取（`None` 时用
+  无限盒表示官方的「不过滤」），去掉重复参数。`jigsaw placepiece` 900 查询仍 0 不一致。
+
 **第五轮（2026-11-14，`cb-wg-structures` 续：需要模板的单件结构布局）**：
 
 * 合并 `main` 时本分支已与 `main` 同步（`main` 的 `4405fc3` 含本分支全部提交），
@@ -1331,7 +1349,7 @@ structures (Compound)
 | 2 | 数据导出：`worldgen.json` 加四键，Rust 解析骨架 | `extract` 重跑无 diff（除四键）、旧 `chunkgen --through carvers` 仍 0 | **做完**：重跑无 diff、`--through carvers` 小样本 0 不一致 |
 | 3 | 放置：`random_spread`（含频率削减、exclusion zone、spread type）、`concentric_rings` 几何 | 大范围区块「哪个区块有哪个结构起点」0 不一致；新对拍先故意改坏一处确认会失败 | **做完**：20 集 × 464 查询 = 9280 放置比较 + 9744 加权选择比较 0 不一致；`concentric_rings` 6 种子 768 环位置 + 864 `isStructureChunk` 0 不一致 |
 | 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿 / 林地府邸（`structure-pieces` 336 查询 77960 结构件 0 不一致）、需要模板的雪屋 / 沉船 / 海底遗迹（`structure-templated` 480 查询 1685 结构件 0 不一致）、废弃传送门（`structure-ruined-portal` 648 查询 110 结构件 0 不一致，含 `findSuitableY` 整列搜索与 `Mirror.FRONT_BACK`）、**jigsaw 全部（`cb-wg-jigsaw`：`jigsaw pieces` 972 查询 12467 结构件 / `jigsaw pools` 980 查询 8976 结构件 0 不一致）** 已做 |
-| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分完成**：`structure::piece_place`（放置辅助）、`structure::state_transform`（mirror/rotate）、`structure::pieces::mineshaft_place`（矿井四种）与 `stronghold_place`（要塞十二种）已移植，`structure-place` 对拍对矿井和要塞都是 0 不一致（2026-11-15）。**没有接进 Director**，见第 0 节「多件式结构放置」。<br>**部分做完（方块部分）**：单件结构的 `postProcess` 走独立子命令 `structure-post-process`（`StructurePlaceOracle.java`），按写入日志逐格比：埋藏的宝藏 16 查询 0 不一致；**女巫小屋 18 处不一致（未通过）**，Java 的地下柱子比 Rust 低一格；沙漠神殿没进查询集（`SKIPPED`），最后实测 6953 处。丛林神殿、方块实体、战利品表没做，**三份 `postProcess` 都没接进 `feature/run.rs`**。<br>**jigsaw 侧（`cb-wg-jigsaw`）**：模板放置链路 `structure::jigsaw::place`（选 palette → 位置变换含 mirror/rotation → processor 链 → `BARRIER` → `chunkBB` 过滤 → 状态变换）对官方 `StructureTemplate.placeInWorld` 逐写入比，`jigsaw placepiece` 900 查询 / 610992 次写入 0 不一致；`processor_list` 的四种 processor 与放置阶段硬编码的三种（`block_ignore` / `jigsaw_replacement` / `gravity`）都已移植并各自对拍，`assemble_processors` 照 `SinglePoolElement.getSettings` 的四段顺序组装（含 legacy 的 pop-then-append）；`RuleBlockEntityModifier` 的三种（`passthrough` / `append_loot` / `clear`）与 `append_static` 都已按官方 `apply` 实现并对拍（`jigsaw bemod` 60 查询 0 不一致） |
+| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分完成**：`structure::piece_place`（放置辅助）、`structure::state_transform`（mirror/rotate）、`structure::pieces::mineshaft_place`（矿井四种）与 `stronghold_place`（要塞十二种）已移植，`structure-place` 对拍对矿井和要塞都是 0 不一致（2026-11-15）。**没有接进 Director**，见第 0 节「多件式结构放置」。<br>**部分做完（方块部分）**：单件结构的 `postProcess` 走独立子命令 `structure-post-process`（`StructurePlaceOracle.java`），按写入日志逐格比：埋藏的宝藏 16 查询 0 不一致；**女巫小屋 18 处不一致（未通过）**，Java 的地下柱子比 Rust 低一格；沙漠神殿没进查询集（`SKIPPED`），最后实测 6953 处。丛林神殿、方块实体、战利品表没做，**三份 `postProcess` 都没接进 `feature/run.rs`**。<br>**jigsaw 侧（`cb-wg-jigsaw`）**：模板放置链路 `structure::jigsaw::place`（选 palette → 位置变换含 mirror/rotation → processor 链 → `BARRIER` → `chunkBB` 过滤 → 状态变换）对官方 `StructureTemplate.placeInWorld` 逐写入比，`jigsaw placepiece` 900 查询 / 610992 次写入 0 不一致；`processor_list` 的四种 processor 与放置阶段硬编码的三种（`block_ignore` / `jigsaw_replacement` / `gravity`）都已移植并各自对拍，`assemble_processors` 照 `SinglePoolElement.getSettings` 的四段顺序组装（含 legacy 的 pop-then-append）；`RuleBlockEntityModifier` 的三种（`passthrough` / `append_loot` / `clear`）与 `append_static` 都已按官方 `apply` 实现并对拍（`jigsaw bemod` 60 查询 0 不一致）；`jigsaw rc` 1286 个方块的随机容器判定 0 不一致 |
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | **做完（纯函数 + 对拍，`cb-wg-beard`）**：`beard` 12 用例 5,912,076 比较 0 不一致（kernel / sampleValue / sampleVolume / affectedBox / 三阶段方块），`--break-self-test` 会失败；`chunkgen --through carvers` EMPTY 回归仍 0。**没接进 Director**：游戏里仍走 `EMPTY` |
 | 7 | 存档：`structures` 键写/读；海底神殿「只存一个 `MonumentBuilding`、读回重建房间图」的口径见 4.1 | 读回一致，`world-dir` 确认官方能读 | **通用编码做完**：`structure-save` 8 case 规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、`world-dir` 的 `SerializableChunkData.parse` 都能读。**多件式结构的读回做完**（`cb-wg-multipiece`）：子类字段带 NBT 类型，`PiecesContainer.load` / `loadStaticStart` / `regeneratePiecesAfterLoad` 移植并对拍（`structure-load` 80 查询、8218 读回件、656 重建行 0 不一致），见第 0 节「多件式结构存档」 |
 
