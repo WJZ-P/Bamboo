@@ -590,7 +590,7 @@ WebView2 的渲染进程不算在内。
   （state provider）。它们只能通过 `minecraft:warm_ocean_vegetation` 到达，而那条链
   始终 `0 centers / 9 skipped`——珊瑚的存活判定（`CoralBlock` / `CoralPlantBlock` /
   `CoralFanBlock`）和 `#minecraft:corals` 标签展开都已确认正确（有单测），根因还没找到。
-  诚实的已知差异与未做：`rotated` state provider、蘑菇（要 `getRawBrightness`）、
+  诚实的已知差异与未做：蘑菇（要 `getRawBrightness`）、
   苔藓地毯（`MossyCarpetBlock.placeAt` 用 `level.getRandom()`）等特殊
   `canSurvive`；`schedule_tick` 忽略；`noise_threshold_count` / `noise_based_count` /
   `environment_scan` / `surface_water_depth_filter` / `surface_relative_threshold_filter`
