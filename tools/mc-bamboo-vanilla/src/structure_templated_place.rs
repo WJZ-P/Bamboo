@@ -225,6 +225,7 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
     let mut mismatch_count = 0usize;
     let mut compared = 0usize;
     let mut by_kind: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut bad_by_kind: BTreeMap<&str, usize> = BTreeMap::new();
     for (q, section) in queries.iter().zip(sections.iter()) {
         let key = format!("{} {} {} {}", q.kind, q.seed, q.cx, q.cz);
         if section.key != key {
@@ -243,6 +244,7 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
             let rust = ours.get(&pos).copied();
             if java != rust {
                 mismatch_count += 1;
+                *bad_by_kind.entry(q.kind).or_default() += 1;
                 if failures.len() < 24 {
                     failures.push(format!("[{key}] {pos:?}: java {java:?}, rust {rust:?}"));
                 }
@@ -258,6 +260,14 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
         "structure-templated-place: {} queries ({kinds}), {compared} cell comparisons",
         queries.len()
     );
+    let bad = bad_by_kind
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !bad.is_empty() {
+        println!("structure-templated-place: mismatches by kind: {bad}");
+    }
     if failures.is_empty() {
         println!("STRUCTURE-TEMPLATED-PLACE RESULT: 0 mismatches");
         Ok(())
