@@ -18,11 +18,11 @@ use mc_bamboo_data::block_id_of_state;
 
 use crate::random::WorldgenRandom;
 use crate::structure::piece_place::{
-    BlockSelector, PieceLevel, block, box_is_inside, is_air, is_interior, maybe_generate_block,
-    with_property,
+    BlockSelector, PieceLevel, block, box_is_inside, is_air, is_block, is_interior,
+    is_solid_render, maybe_generate_block, with_property,
 };
 use crate::structure::pieces::HDir;
-use crate::structure::state_transform::with_props;
+use crate::structure::state_transform::{property_of, with_props};
 
 /// 要塞结构件放置的公共状态。
 ///
@@ -296,30 +296,119 @@ pub fn chest_corridor_post_process(
     }
 }
 
-/// `createChest`：写 `CHEST` 方块并消耗一次 `nextLong()`（战利品表种子）。
-/// 方块实体本身不建。
+/// `StructurePiece.createChest(level, chunkBB, random, x, y, z, lootTable)`：位置在
+/// `chunkBB` 内且那里还不是箱子时，用 `reorient` 定朝向，**直接** `level.setBlock`
+/// （不走 `placeBlock`，所以不做结构件的镜像 / 旋转），再取一次 `nextLong()` 当战利品表
+/// 种子。方块实体本身不建。返回值同官方。
 ///
-/// 朝向由 `StructurePiece.reorient` 按四周实体方块决定（官方 `createChest` 的
-/// `blockState == null` 分支），结果直接用 `setBlock` 写入，**不**再经 `placeBlock` 的
-/// mirror / rotate——官方这里走的是 `level.setBlock(pos, blockState, 2)`。
-///
-/// `createChest`: place a `CHEST` and consume one `nextLong()` for the loot table seed.
-/// The block entity itself is not created. The facing comes from
-/// `StructurePiece.reorient` (vanilla's `blockState == null` branch) and is written with
-/// `setBlock` directly, **not** through `placeBlock`'s mirror / rotate, matching vanilla's
-/// `level.setBlock(pos, blockState, 2)`.
-fn create_chest(piece: &mut StrongholdPiece<'_>, random: &WorldgenRandom, x: i32, y: i32, z: i32) {
+/// `StructurePiece.createChest(level, chunkBB, random, x, y, z, lootTable)`: when the
+/// position is inside `chunkBB` and not already a chest, pick the facing with `reorient`,
+/// write it with a **direct** `level.setBlock` (not `placeBlock`, so the piece's mirror
+/// and rotation do not apply) and draw one `nextLong()` as the loot table seed. The block
+/// entity itself is not created. Returns what vanilla returns.
+fn create_chest(
+    piece: &mut StrongholdPiece<'_>,
+    random: &WorldgenRandom,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> bool {
     let (wx, wy, wz) = piece.ctx.world_pos(x, y, z);
-    if !box_is_inside(&piece.chunk_bb, wx, wy, wz) {
-        return;
+    if !box_is_inside(&piece.chunk_bb, wx, wy, wz)
+        || is_block(piece.level.get_block(wx, wy, wz), "minecraft:chest")
+    {
+        return false;
     }
-    let chest = crate::structure::piece_place::reorient(
-        piece.level,
-        (wx, wy, wz),
-        block("minecraft:chest"),
-    );
+    let chest = reorient(piece.level, wx, wy, wz, block("minecraft:chest"));
     piece.level.set_block(wx, wy, wz, chest);
     random.next_long();
+    true
+}
+
+/// `StructurePiece.reorient`：按相邻可渲染实心方块决定箱子朝向。
+///
+/// 迭代顺序是 `Direction.Plane.HORIZONTAL` 的 `NORTH, EAST, SOUTH, WEST`：
+/// * 相邻有箱子 → 原样返回；
+/// * 恰好一个方向是实心 → 朝向它的**反方向**；
+/// * 否则从当前朝向起，依次看前 / 反 / 顺时针 / 反，挑第一个后面是实心的。
+///
+/// `StructurePiece.reorient`: pick the chest facing from the neighbouring
+/// solid-render blocks, iterating `NORTH, EAST, SOUTH, WEST`.
+pub fn reorient(level: &dyn PieceLevel, x: i32, y: i32, z: i32, state: u32) -> u32 {
+    // `Direction.Plane.HORIZONTAL` 的顺序就是 `reorient` 的迭代顺序。
+    // `Plane.HORIZONTAL`'s order is `reorient`'s iteration order.
+    let horizontal = [
+        ("north", (0, -1)),
+        ("east", (1, 0)),
+        ("south", (0, 1)),
+        ("west", (-1, 0)),
+    ];
+    let mut solid_neighbour: Option<&str> = None;
+    for (name, (dx, dz)) in horizontal {
+        let neighbour = level.get_block(x + dx, y, z + dz);
+        if is_block(neighbour, "minecraft:chest") {
+            return state;
+        }
+        if is_solid_render(neighbour) {
+            if solid_neighbour.is_some() {
+                solid_neighbour = None;
+                break;
+            }
+            solid_neighbour = Some(name);
+        }
+    }
+
+    if let Some(direction) = solid_neighbour {
+        return with_property(state, "facing", opposite_of(direction)).unwrap_or(state);
+    }
+
+    let mut lock = property_of(state, "facing").unwrap_or("north");
+    let step = step_of(lock);
+    if is_solid_render(level.get_block(x + step.0, y, z + step.1)) {
+        lock = opposite_of(lock);
+    }
+    let step = step_of(lock);
+    if is_solid_render(level.get_block(x + step.0, y, z + step.1)) {
+        lock = rotate_step(lock, 1);
+    }
+    let step = step_of(lock);
+    if is_solid_render(level.get_block(x + step.0, y, z + step.1)) {
+        lock = opposite_of(lock);
+    }
+    with_property(state, "facing", lock).unwrap_or(state)
+}
+
+/// `Direction.getOpposite()` 的名称版（水平四方向）。
+///
+/// Name form of `Direction.getOpposite()` for the four horizontal facings.
+fn opposite_of(facing: &'static str) -> &'static str {
+    match facing {
+        "north" => "south",
+        "south" => "north",
+        "east" => "west",
+        _ => "east",
+    }
+}
+
+/// 水平朝向的 `(dx, dz)`。
+///
+/// `(dx, dz)` of a horizontal facing.
+fn step_of(facing: &'static str) -> (i32, i32) {
+    match facing {
+        "north" => (0, -1),
+        "south" => (0, 1),
+        "east" => (1, 0),
+        _ => (-1, 0),
+    }
+}
+
+/// `Direction.getClockWise()`，按 `NORTH, EAST, SOUTH, WEST` 的顺序转 `steps` 步。
+///
+/// `Direction.getClockWise()`, `steps` times around `NORTH, EAST, SOUTH, WEST`.
+fn rotate_step(facing: &'static str, steps: usize) -> &'static str {
+    let order = ["north", "east", "south", "west"];
+    let index = order.iter().position(|&n| n == facing).unwrap_or(0);
+    order[(index + steps) % 4]
 }
 
 /// `FillerCorridor.postProcess`：`steps` 段石头砖通道，中间三格挖空。
@@ -422,9 +511,10 @@ pub fn prison_hall_post_process(
 
 /// `LeftTurn.postProcess`。
 ///
-/// 与 `RightTurn` 的方向判定相反：NORTH / EAST 时挖左侧，否则挖右侧。
+/// 与 `RightTurn` 的方向判定相反：NORTH / EAST 时挖 x = 0 那一侧，否则挖 x = 4 那一侧。
 ///
-/// `LeftTurn.postProcess`. The side test is the opposite of `RightTurn`.
+/// `LeftTurn.postProcess`. The side test is the opposite of `RightTurn`: NORTH and EAST
+/// open the x = 0 side, the others the x = 4 side.
 pub fn left_turn_post_process(
     piece: &mut StrongholdPiece<'_>,
     random: &WorldgenRandom,
@@ -445,7 +535,10 @@ pub fn left_turn_post_process(
 
 /// `RightTurn.postProcess`。
 ///
-/// `RightTurn.postProcess`.
+/// 与 `LeftTurn` 相反：NORTH / EAST 时挖 x = 4 那一侧，否则挖 x = 0 那一侧。
+///
+/// `RightTurn.postProcess`. The opposite of `LeftTurn`: NORTH and EAST open the x = 4
+/// side, the others the x = 0 side.
 pub fn right_turn_post_process(
     piece: &mut StrongholdPiece<'_>,
     random: &WorldgenRandom,
@@ -456,10 +549,10 @@ pub fn right_turn_post_process(
     generate_small_door(piece, entry_door, 1, 1, 0);
     match orientation {
         Some(HDir::North | HDir::East) => {
-            piece.box_at(0, 1, 1, 0, 3, 3, cave_air(), cave_air(), false);
+            piece.box_at(4, 1, 1, 4, 3, 3, cave_air(), cave_air(), false);
         }
         _ => {
-            piece.box_at(4, 1, 1, 4, 3, 3, cave_air(), cave_air(), false);
+            piece.box_at(0, 1, 1, 0, 3, 3, cave_air(), cave_air(), false);
         }
     }
 }
