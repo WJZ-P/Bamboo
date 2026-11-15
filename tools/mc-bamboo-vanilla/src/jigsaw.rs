@@ -1528,6 +1528,40 @@ fn compare_apply(stdout: &str, queries: &[String], lists: &ProcessorLists) -> Re
         ));
     }
     println!("jigsaw apply: {checked} queries, {blocks_checked} surviving blocks, all identical");
+    // 报告每种 `processor_type` 出现在多少个被跑的 list 里，避免「全部 0 不一致」
+    // 掩盖某类 processor 从未被执行。
+    // Report how many of the exercised lists contain each `processor_type`, so a clean run
+    // cannot hide a processor kind that never ran.
+    let mut kind_lists: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    for name in lists.names() {
+        let Some(processors) = lists.get(name) else {
+            continue;
+        };
+        let mut kinds: Vec<&'static str> = processors
+            .iter()
+            .map(|processor| match processor {
+                Processor::BlockRot { .. } => "block_rot",
+                Processor::Rule { .. } => "rule",
+                Processor::ProtectedBlocks { .. } => "protected_blocks",
+                Processor::Capped { .. } => "capped",
+                Processor::BlockIgnore { .. } => "block_ignore",
+                Processor::JigsawReplacement => "jigsaw_replacement",
+                Processor::Gravity { .. } => "gravity",
+            })
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        for kind in kinds {
+            *kind_lists.entry(kind).or_default() += 1;
+        }
+    }
+    let summary = kind_lists
+        .iter()
+        .map(|(kind, count)| format!("{kind}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!("processor kinds (lists containing them): {summary}");
     Ok(())
 }
 
