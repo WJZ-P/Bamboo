@@ -924,13 +924,14 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
 配置，并用故意改坏确认过。
 
 
-**`blue_ice` 的空跑限制**：`BlueIceFeature.place` 要先在候选中找到相邻的
+**`blue_ice` 的对拍前提**：`BlueIceFeature.place` 要先在候选中找到相邻的
 `packed_ice`（原版由 `iceberg_packed` / `iceberg_blue` 这两个 `minecraft:iceberg`
-在冻洋水下生成，属 `cb-wg-feat-a` 的冰山、尚未合入）。`--types` 白名单里没有
-`iceberg` 时，冻洋里没有 `packed_ice`，`blue_ice` 每次都提前返回，上面的 0 不一致
-是「没放方块」的空跑。等 `iceberg` 合入后要用
-`--types minecraft:blue_ice,minecraft:iceberg,...` 重新逐方块对拍。实现本身按
-`BlueIceFeature.java` 逐句移植（海平面、水、packed_ice 邻格、200 次偏移扩散）。
+在冻洋水下生成）。`iceberg` 已随 main 合入，所以现在可以把它和 `blue_ice` 一起放开：
+`--types minecraft:blue_ice,minecraft:iceberg --chunk -200 117 --scan 3 --seeds 1 --salt 13`
+（种子 0 的 `frozen_ocean`）是 **0 不一致 / 0 skipped**；把 `place` 开头改成写一格
+`STONE` 会报 **54 处**，确认不是空跑。种子 -1 的 `(53,78)` 附近同样 0 不一致。
+默认坐标（`FIXED_CHUNKS` + 随机）里没有冻洋，单跑 `blue_ice` 仍会空跑。
+实现本身按 `BlueIceFeature.java` 逐句移植（海平面、水、packed_ice 邻格、200 次偏移扩散）。
 
 ### 本轮（cb-wg-caves 收尾）追加
 
@@ -944,7 +945,7 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
 | `modifier::RandomChance` | `sculk_patch_deep_dark` 的 `sequence` 用；已随 `--steps 7` 验证 |
 | 代理补 `isInsideBuildHeight` / `getBrightness` / `canSeeSky` / `playSound` / `levelEvent` / `findBlocksIn` | 支撑上面两项与 sculk 家族 |
 | `survival::classify` 补 `SculkCatalystBlock` / `SculkSensorBlock` / `SculkShriekerBlock` / `CalibratedSculkSensorBlock` → `Kind::Default` | 官方四类都没覆写 `canSurvive`；只影响 `sculk_patch` 的 `sequence` |
-| `feature/sculk_patch.rs`（`SculkPatchFeature` + `SculkSpreader`） | **已写未验证，不接入 dispatch** |
+| `feature/sculk_patch.rs`（`SculkPatchFeature` + `SculkSpreader`） | **已对拍 0 不一致，已接入 dispatch** |
 
 对拍配置（全部在 `--through features` 下）：
 
@@ -952,7 +953,9 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
 |---|---|
 | `--types minecraft:blue_ice,minecraft:disk,minecraft:large_dripstone,minecraft:speleothem,minecraft:speleothem_cluster,minecraft:spike,minecraft:freeze_top_layer --seeds 4 --chunks 6 --salt 13` | 24 中心 / 21233664 方块，**0 不一致 / 0 skipped** |
 | `--steps 7 --types minecraft:sculk_vein --chunk -42 111 --scan 4 --seeds 1 --salt 13` | 9 中心 / 7962624 方块，**0 不一致**；故意改坏 `is_own_block` 报 20 处 |
-| `--steps 7 --types minecraft:sculk_patch_deep_dark --chunk -42 111 --scan 1` | **8 mismatches**（未通过，已断开接入） |
+| `--steps 7 --types minecraft:sculk_patch_deep_dark --chunk -42 111 --scan 3` | **0 不一致 / 0 skipped**（9 中心 / 7962624 方块）；`--seeds 2 --salt 7` 与 `--seeds 3 --salt 42` 各 18 / 27 中心（15925248 / 23887872 方块）也是 0 |
+| 同上，把 `attemptPlaceSculk` 写死的方块换成石头 | **160 处不一致**，确认非空跑 |
+| `--steps 7`（全 7 个 placed feature 一起放开）`--chunk -42 111 --scan 3` | **0 不一致 / 0 skipped** |
 
 ### 还没做
 
@@ -975,14 +978,15 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
   `sculk_vein` 的 `multiface_growth` 由 `cb-wg-aquatic` 移植（`feature/multiface.rs`），
   在 `deep_dark` 定点对拍 0 不一致（9 中心 / 7962624 方块）；
   **默认坐标下它一次都不放方块，必须 `--chunk -42 111 --scan N` 才比得到**。
-  `sculk_patch_deep_dark`（`sequence` 包着 `sculk_patch`）的移植已写在
-  `feature/sculk_patch.rs`（`SculkPatchFeature` + `SculkSpreader` + `SculkBlock` /
-  `SculkVeinBlock` 两个 `SculkBehaviour` + `SculkVeinSpreaderConfig`），
-  但**没对拍到 0 不一致，所以不接入 dispatch**（`parse_leaf` 返回 `None`，
-  主循环把整个 placed feature 标 `unsupported`）。
-  现状：`deep_dark` 单区块 8 mismatches、`--scan 3` 160 处，`--steps 0` 基线为 0；
-  两边的写入序列前 21 行一致、第 22 行分叉，怀疑同一格 `sculk_vein` 的面集合在
-  两个时间点不同。细节与已排除项见 `reports/cb-wg-caves.md` 的疑点清单。
+  `sculk_patch_deep_dark`（`sequence` 包着 `sculk_patch`）也已完成：
+  `feature/sculk_patch.rs` 实现了 `SculkPatchFeature` + `SculkSpreader` + `SculkBlock` /
+  `SculkVeinBlock` 两个 `SculkBehaviour` + `SculkVeinSpreaderConfig`，
+  **已接入 dispatch 并对拍 0 不一致**（三种子 × 三种扫描尺寸，最多 27 中心 /
+  23887872 方块；把 `attemptPlaceSculk` 写成石头会报 160 处）。
+  **踩过的坑**：`BlockPos.betweenClosed` 的遍历顺序是 x 内层、y 中层、z 外层，
+  按 x 外层写会让 `ChargeCursor` 的 18 个邻格洗牌从不同格子起步，所有游标走错路径
+  （表现为写入总量更多但位置全偏，最终 8 处差异）。`sculk_patch_ancient_city`
+  （古城结构专用，`placement` 为空）没做。
 * 具体原因：`fossil` 的结构模板要由生成器导出（不能手写）；`overlay`（沙漠井）依赖
   `minecraft:template` 地物（要落结构模板 + processor），那条线还没做。
   植被类型（树、花、草、patch、selector / sequence 容器，见 5.2）由 `cb-wg-feat-b` 负责。

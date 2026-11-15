@@ -490,7 +490,7 @@ fn place_composition<'a>(
             }
             total
         }
-        // 官方 `OverlayFeature.place`：`placedAny |= placer.place(...)`，**循环到底**，
+        // `OverlayFeature.place`：`placedAny |= placer.place(...)`，**循环到底**，
         // 不因为某个子项失败就停。
         // Official `OverlayFeature.place`: `placedAny |= placer.place(...)` over every
         // child; it never stops early.

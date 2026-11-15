@@ -1001,10 +1001,16 @@ fn regrow(
 /// `ChargeCursor.NON_CORNER_NEIGHBOURS`: the 18 cells of `betweenClosed(-1,-1,-1 ..
 /// 1,1,1)` with a zero coordinate that are not the origin (x, y, z order), shuffled.
 fn non_corner_neighbours(random: &WorldgenRandom) -> Vec<(i32, i32, i32)> {
+    // `BlockPos.betweenClosed` 的遍历顺序是 **x 内层、y 中层、z 外层**
+    // （`int x = index % width; int y = (index / width) % height; int z = index / (width * height)`），
+    // 不是 x 外层！顺序决定洗牌后取到哪个候选，必须照抄。
+    // `BlockPos.betweenClosed` walks **x innermost, then y, then z**
+    // (`x = index % width; y = (index / width) % height; z = index / (width * height)`),
+    // not x outermost. The order decides which candidate the shuffle yields first.
     let mut list = Vec::with_capacity(18);
-    for x in -1..=1 {
+    for z in -1..=1 {
         for y in -1..=1 {
-            for z in -1..=1 {
+            for x in -1..=1 {
                 if (x == 0 || y == 0 || z == 0) && !(x == 0 && y == 0 && z == 0) {
                     list.push((x, y, z));
                 }
@@ -1130,12 +1136,12 @@ mod tests {
 
     #[test]
     fn non_corner_neighbours_have_eighteen_entries_in_order() {
-        // 不洗牌时的顺序：x 外层、y 中层、z 内层。
-        // Unshuffled order: x outer, y middle, z inner.
+        // 不洗牌时的顺序：x 内层、y 中层、z 外层（`BlockPos.betweenClosed`）。
+        // Unshuffled order: x inner, y middle, z outer (`BlockPos.betweenClosed`).
         let mut list = Vec::new();
-        for x in -1..=1 {
+        for z in -1..=1 {
             for y in -1..=1 {
-                for z in -1..=1 {
+                for x in -1..=1 {
                     if (x == 0 || y == 0 || z == 0) && !(x == 0 && y == 0 && z == 0) {
                         list.push((x, y, z));
                     }
@@ -1143,8 +1149,15 @@ mod tests {
             }
         }
         assert_eq!(list.len(), 18);
-        assert_eq!(list[0], (-1, -1, 0));
+        // z=-1 这一层里 x 递增最快：先 (0,-1,-1)，再 y=0 的 (-1,0,-1)、(0,0,-1)、(1,0,-1)。
+        // x varies fastest inside the z=-1 slab: (0,-1,-1) first, then the y=0 row.
+        assert_eq!(list[0], (0, -1, -1));
         assert_eq!(list[1], (-1, 0, -1));
+        assert_eq!(list[2], (0, 0, -1));
+        assert_eq!(list[3], (1, 0, -1));
+        // 最后一个合格项在 z=1、y=1 那一排：(0,1,1)。
+        // The last qualifying item sits in the z=1, y=1 row: (0,1,1).
+        assert_eq!(list[17], (0, 1, 1));
         assert!(list.contains(&(0, 1, 0)));
         assert!(!list.contains(&(0, 0, 0)));
         assert!(!list.contains(&(1, 1, 1)));
@@ -1161,5 +1174,36 @@ mod tests {
         let far = (24, 0, 0);
         let penalty = decay_penalty(far, origin, 100);
         assert!((1..=50).contains(&penalty), "{penalty}");
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn vein_default_state_has_no_faces() {
+        // `Blocks.SCULK_VEIN` 的默认状态：6 个面都是 false、waterlogged=false。
+        // The `Blocks.SCULK_VEIN` default state: all six faces false, waterlogged false.
+        let state = blocks::SCULK_VEIN;
+        for face in Direction::ALL {
+            assert!(!has_face(state, face), "{face:?} should start closed");
+        }
+    }
+
+    #[test]
+    fn has_face_reads_each_property_independently() {
+        // 逐面设置后 `has_face` 只对设过的那一面为真。
+        // After setting one face, `has_face` is true for that one only.
+        for face in Direction::ALL {
+            let state = with_property(blocks::SCULK_VEIN, face_property(face), "true").unwrap();
+            for other in Direction::ALL {
+                assert_eq!(
+                    has_face(state, other),
+                    other == face,
+                    "{face:?} set, checking {other:?}"
+                );
+            }
+        }
     }
 }
