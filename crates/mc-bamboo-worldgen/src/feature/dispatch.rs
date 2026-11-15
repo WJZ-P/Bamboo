@@ -72,9 +72,9 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
         "minecraft:large_dripstone" => {
             Leaf::LargeDripstone(Box::new(LargeDripstoneFeature::parse(config).ok()?))
         }
+        "minecraft:monster_room" => Leaf::MonsterRoom(MonsterRoomFeature::parse(config).ok()?),
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?),
-        "minecraft:monster_room" => Leaf::MonsterRoom(MonsterRoomFeature::parse(config).ok()?),
         "minecraft:speleothem_cluster" => {
             Leaf::SpeleothemCluster(Box::new(SpeleothemClusterFeature::parse(config).ok()?))
         }
@@ -108,8 +108,8 @@ fn is_supported(leaf: &Leaf) -> bool {
         Leaf::Disk(disk) => disk.supported(),
         Leaf::Geode(geode) => geode.supported(),
         Leaf::Lake(lake) => lake.supported(),
-        Leaf::Spike(spike) => spike.supported(),
         Leaf::LargeDripstone(feature) => feature.supported(),
+        Leaf::Spike(spike) => spike.supported(),
         _ => true,
     }
 }
