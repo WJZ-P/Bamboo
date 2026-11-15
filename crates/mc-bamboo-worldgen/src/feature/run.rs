@@ -168,7 +168,10 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
 
 /// 解析 `PlacedFeature.feature`：注册表引用（字符串）或内联配置（对象）。
 /// 返回 `(类型 ID, 配置对象)`。
-pub(crate) fn resolve_feature<'a>(
+///
+/// Resolve `PlacedFeature.feature`: a registry reference (string) or an inline config
+/// (object). Returns `(type id, config object)`.
+pub fn resolve_feature<'a>(
     registry: &'a Registry,
     value: &'a serde_json::Value,
 ) -> Option<(String, &'a serde_json::Value)> {

@@ -29,20 +29,21 @@ use std::{
 };
 
 use mc_bamboo_core::ChunkPos;
-use mc_bamboo_data::{blocks, registries, state_facts};
+use mc_bamboo_data::{registries, state_facts};
 use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT, chunk::Chunk};
 use mc_bamboo_worldgen::{
     Worldgen,
     chunk::{Generator, Stage},
-    feature::{
-        DECORATION_STEPS,
-        world::prime_heightmaps,
-    },
+    feature::{DECORATION_STEPS, world::prime_heightmaps},
     perf::{self, Floors, Phase, Record, Y_BANDS},
 };
 
 const USAGE: &str = "usage: wg-perf [--seeds N] [--chunks N] [--biomes a,b,c] [--repeat N] \
                      [--threads N] [--json] [--skip-cut] [--skip-sky] [--skip-threads]";
+
+/// 辅助测量每轮最多测多少个区块（高度分布、切割线对照、多线程）。
+/// How many chunks the auxiliary measurements cover per round.
+const AUX_LIMIT: usize = 20;
 
 /// 默认按群系采样：平原、森林、山地、海洋、丛林。
 /// The default biome sample: plains, forest, hills, ocean, jungle.
@@ -166,6 +167,7 @@ pub fn run(args: &[&str]) -> Result<(), String> {
 
     let mut measured = Vec::with_capacity(targets.len());
     let mut generators: HashMap<i64, Generator<'_>> = HashMap::new();
+    let mut view_ms = Vec::new();
     for &target in &targets {
         let generator = match generators.entry(target.seed) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -173,27 +175,39 @@ pub fn run(args: &[&str]) -> Result<(), String> {
                 entry.insert(Generator::new(&worldgen, target.seed)?)
             }
         };
+        let view_start = Instant::now();
+        let _ = view_of(generator, target.x, target.z)?;
+        view_ms.push(view_start.elapsed().as_secs_f64() * 1000.0);
         let (item, _) = measure_once(generator, target, options.repeat)?;
         measured.push(item);
     }
+    let mut sorted_views = view_ms.clone();
+    sorted_views.sort_by(f64::total_cmp);
+    println!(
+        "wg-perf: building the 3x3 view costs {:.1} ms per chunk (median) and is NOT part \
+         of the per-chunk numbers below; in the game the neighbours come from the world \
+         thread's CARVERS snapshot cache",
+        sorted_views[sorted_views.len() / 2]
+    );
 
     print_phases(&measured);
     print_biomes(&measured);
-    let band_ms = measure_bands(&worldgen, &targets, options.repeat)?;
-    print_bands(&measured, &band_ms);
-    print_features(&measured, &worldgen);
+    // 辅助测量取一部分区块，免得整轮跑太久。
+    // The auxiliary measurements use a subsample so a round stays affordable.
+    let (aux_targets, aux_measured) = subsample(&targets, &measured, AUX_LIMIT);
+    let bands = measure_bands(&worldgen, &aux_targets, options.repeat)?;
+    print_bands(&bands, &aux_measured);
+    print_features(&worldgen, &aux_targets, options.repeat, &aux_measured)?;
     if !options.skip_cut {
-        measure_cut_lines(&worldgen, &targets, &measured, options.repeat)?;
+        measure_cut_lines(&worldgen, &aux_targets, &aux_measured, options.repeat)?;
     }
     if !options.skip_sky {
-        measure_sky(&worldgen, &targets, &measured, options.repeat)?;
+        measure_sky(&worldgen, &aux_targets, &aux_measured, &bands)?;
     }
     if !options.skip_threads {
-        measure_threads(&worldgen, &targets, options.threads, options.repeat)?;
+        measure_threads(&worldgen, &aux_targets, options.threads, options.repeat)?;
     }
-    if options.json {
-        print_json(&measured, &band_ms);
-    }
+    print_json(&measured, &bands.ms);
     Ok(())
 }
 
@@ -209,8 +223,13 @@ fn seed_for(index: usize) -> i64 {
 
 /// 量一个区块 `repeat` 遍，取每项耗时和总时长的中位数。
 ///
+/// 每个区块的 3×3 视图只建一次、不计入「单区块成本」：游戏里邻居的 CARVERS 地形来自
+/// 世界线程的快照缓存，不重算。建视图的耗时单独报（见 `print_view_cost`）。
+///
 /// Measure one chunk `repeat` times and take the median of every field and of the
-/// wall clock.
+/// wall clock. The 3x3 view is built once per chunk and excluded from the per-chunk
+/// cost: in the game the neighbours' CARVERS terrain comes from the world thread's
+/// snapshot cache, not from a recompute. Its cost is reported separately.
 fn measure_once(
     generator: &Generator<'_>,
     target: Target,
@@ -218,11 +237,12 @@ fn measure_once(
 ) -> Result<(Measured, f64), String> {
     let ocean_floor_min = ocean_floor_min(generator, target)?;
     let cut = cut_line(ocean_floor_min);
+    let view = view_of(generator, target.x, target.z)?;
     let mut records = Vec::with_capacity(repeat);
     let mut times = Vec::with_capacity(repeat);
     for _ in 0..repeat {
         let start = Instant::now();
-        let record = generate_recorded(generator, target, cut)?;
+        let record = generate_recorded(generator, target, cut, &view)?;
         times.push(start.elapsed().as_secs_f64() * 1000.0);
         black_box(&record);
         records.push(record);
@@ -250,14 +270,15 @@ fn cut_line(ocean_floor_min: i32) -> i32 {
     (ocean_floor_min - 24).div_euclid(16) * 16
 }
 
-/// 一次带记录的完整生成：和游戏 `Staged` 流水线做的事一致，但不起线程。
+/// 一次带记录的生成：中心区块自己走完整条链，3×3 视图由调用方给（游戏里来自快照缓存）。
 ///
-/// One recorded full generation: the same steps the in-game `Staged` pipeline runs,
-/// without threads.
+/// One recorded generation: the centre chunk walks the whole chain; the 3x3 view is
+/// supplied by the caller (in the game it comes from the snapshot cache).
 fn generate_recorded(
     generator: &Generator<'_>,
     target: Target,
     cut: i32,
+    view: &[TerrainView; 9],
 ) -> Result<Record, String> {
     let (cx, cz) = (target.x, target.z);
     let min_y = generator.settings().min_y;
@@ -266,12 +287,10 @@ fn generate_recorded(
     let region = generator.biome_region(cx, cz)?;
     perf::mark(Phase::TerrainSetup);
     let blocks = generator.terrain_with_region(cx, cz, Stage::Carvers, None, &region)?;
-    perf::mark(Phase::View);
-    let view = view_of(generator, cx, cz)?;
     perf::mark(Phase::Features);
-    let result = run_features(generator, cx, cz, &view)?;
+    let result = run_features(generator, cx, cz, view)?;
     perf::mark(Phase::LightView);
-    let chunks = light_view(cx, cz, &view)?;
+    let chunks = light_view(cx, cz, view)?;
     perf::mark(Phase::Light);
     let light = mc_bamboo_world::light::generate::generate_light(ChunkPos::new(cx, cz), &chunks);
     perf::mark(Phase::Assembly);
@@ -314,7 +333,31 @@ fn run_features(
     generator.features(&input, (1 << DECORATION_STEPS) - 1, None)
 }
 
-fn light_view(cx: i32, cz: i32, view: &[TerrainView; 9]) -> Result<BTreeMap<ChunkPos, Chunk>, String> {
+/// 只算 `features` 那一段（给地物分布测量用），返回耗时和逐地物记录。
+///
+/// Run just the `features` phase (for the per-feature distribution), returning its
+/// wall clock and the per-feature records.
+fn measure_features(
+    generator: &Generator<'_>,
+    target: Target,
+    view: &[TerrainView; 9],
+    cut: i32,
+) -> Result<(f64, Record), String> {
+    let min_y = generator.settings().min_y;
+    let input = feature_input(view, target.x, target.z, min_y);
+    perf::set_floors(Floors::default());
+    perf::begin(min_y, cut, Phase::Features);
+    let result = generator.features(&input, (1 << DECORATION_STEPS) - 1, None)?;
+    let record = perf::finish().expect("recording was started");
+    black_box(&result);
+    Ok((record.steps_ms.iter().sum(), record))
+}
+
+fn light_view(
+    cx: i32,
+    cz: i32,
+    view: &[TerrainView; 9],
+) -> Result<BTreeMap<ChunkPos, Chunk>, String> {
     let mut chunks = BTreeMap::new();
     for (index, chunk) in view.iter().enumerate() {
         let dx = index as i32 % 3 - 1;
@@ -372,13 +415,6 @@ fn feature_input(
     }
 }
 
-impl std::ops::Index<usize> for TerrainViewList {
-    type Output = TerrainView;
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.0[index]
-    }
-}
-
 /// `OCEAN_FLOOR_WG` 高度图的最小值（`getFirstAvailable`：最高阻挡方块上面一格）。
 ///
 /// The minimum of the `OCEAN_FLOOR_WG` heightmap (`getFirstAvailable`: one above the
@@ -410,16 +446,48 @@ fn ocean_floor_min_of(blocks: &[Vec<u32>]) -> i32 {
 fn median_record(records: Vec<Record>) -> Record {
     let mut merged = records[0].clone();
     for index in 0..merged.phases_ms.len() {
-        let mut values: Vec<f64> = records.iter().map(|record| record.phases_ms[index]).collect();
+        let mut values: Vec<f64> = records
+            .iter()
+            .map(|record| record.phases_ms[index])
+            .collect();
         values.sort_by(f64::total_cmp);
         merged.phases_ms[index] = values[values.len() / 2];
     }
     for index in 0..merged.steps_ms.len() {
-        let mut values: Vec<f64> = records.iter().map(|record| record.steps_ms[index]).collect();
+        let mut values: Vec<f64> = records
+            .iter()
+            .map(|record| record.steps_ms[index])
+            .collect();
         values.sort_by(f64::total_cmp);
         merged.steps_ms[index] = values[values.len() / 2];
     }
     merged
+}
+
+/// 辅助测量（高度分布、切割线对照、多线程）只取一部分区块，免得整轮跑太久。
+///
+/// `limit` 是每轮最多测多少个区块，按等间隔挑。
+///
+/// The auxiliary measurements (height profile, cut-line comparison, threads) run on a
+/// subsample so a full round stays affordable. `limit` is the maximum number of chunks
+/// per round, taken at even intervals.
+fn subsample(
+    targets: &[Target],
+    measured: &[Measured],
+    limit: usize,
+) -> (Vec<Target>, Vec<Measured>) {
+    if targets.len() <= limit {
+        return (targets.to_vec(), measured.to_vec());
+    }
+    let step = targets.len() as f64 / limit as f64;
+    let mut picked_targets = Vec::with_capacity(limit);
+    let mut picked_measured = Vec::with_capacity(limit);
+    for index in 0..limit {
+        let at = (index as f64 * step) as usize;
+        picked_targets.push(targets[at]);
+        picked_measured.push(measured[at].clone());
+    }
+    (picked_targets, picked_measured)
 }
 
 /// 按群系找区块：`Generator::biomes` 的段调色板里目标群系过半就算。
@@ -455,7 +523,11 @@ fn pick_targets(
                     (0, -d),
                 ] {
                     let sections = generator.biomes(x, z)?;
-                    let hits = sections.iter().flatten().filter(|&&id| id == wanted).count();
+                    let hits = sections
+                        .iter()
+                        .flatten()
+                        .filter(|&&id| id == wanted)
+                        .count();
                     let total: usize = sections.iter().map(Vec::len).sum();
                     if hits * 2 > total {
                         targets.push(Target {
@@ -500,7 +572,9 @@ fn print_phases(measured: &[Measured]) {
 
 fn print_biomes(measured: &[Measured]) {
     println!("\n## 按群系（中位数 ms/区块）\n");
-    println!("| 群系 | 区块数 | 墙钟 | 群系 | 噪声填充 | 地表 | 雕刻器 | 地物 | 光照 | 组装 | 切割线 |");
+    println!(
+        "| 群系 | 区块数 | 墙钟 | 群系 | 噪声填充 | 地表 | 雕刻器 | 地物 | 光照 | 组装 | 切割线 |"
+    );
     println!("|---|---|---|---|---|---|---|---|---|---|---|");
     let mut groups: BTreeMap<&str, Vec<&Measured>> = BTreeMap::new();
     for item in measured {
@@ -563,48 +637,81 @@ fn print_biomes(measured: &[Measured]) {
     }
 }
 
-/// 噪声填充按 8 格一层的耗时：y=-64..320 切成 48 段，各单独成批求值。
+/// 噪声填充按 8 格一层的耗时和「整格空气」计数。
 ///
-/// The noise fill per 8-block band: slice y=-64..320 into forty-eight spans and sample
-/// each alone.
+/// 耗时用差分的整列求值：从每个带边界一直算到世界顶部，相邻两次的差就是这一带花的
+/// 时间。这样和「整块一次求值」的口径一致；每带单采样会重复算插值角点，不能用。
+///
+/// The noise fill per 8-block band, both timing and the all-air cell count. Timing uses
+/// whole-column passes from each band boundary to the top of the world; the difference
+/// of consecutive passes is that band's cost. This matches one whole-volume pass, unlike
+/// sampling each band alone (which recomputes the interpolation corners).
 fn measure_bands(
     worldgen: &Worldgen,
     targets: &[Target],
     repeat: usize,
-) -> Result<Vec<f64>, String> {
+) -> Result<BandStats, String> {
     let mut per_band: Vec<Vec<f64>> = vec![Vec::new(); Y_BANDS];
+    let mut air_bands: Vec<u32> = vec![0; Y_BANDS];
     for target in targets {
         let generator = Generator::new(worldgen, target.seed)?;
-        // 预热一次，免得第一段的计时含初始化。
-        generator.sample_density_span(target.x, target.z, MIN_Y, MIN_Y + 7)?;
-        for (band, values) in per_band.iter_mut().enumerate() {
+        // 每一带取累积耗时的最小值（负载抖动只会把时间推高，最小值最接近干净的数）。
+        // Take the minimum cumulative time per boundary: other load only pushes timings
+        // up, so the minimum is closest to the clean number.
+        let mut cumulative = vec![0.0f64; Y_BANDS + 1];
+        for band in 0..=Y_BANDS {
             let from_y = MIN_Y + band as i32 * 8;
             let mut times = Vec::with_capacity(repeat);
             for _ in 0..repeat {
-                times.push(generator.sample_density_span(target.x, target.z, from_y, from_y + 7)?);
+                times.push(generator.sample_density_from(target.x, target.z, from_y)?);
             }
-            times.sort_by(f64::total_cmp);
-            values.push(times[times.len() / 2]);
+            cumulative[band] = times.iter().copied().fold(f64::MAX, f64::min);
+        }
+        for band in 0..Y_BANDS {
+            per_band[band].push((cumulative[band] - cumulative[band + 1]).max(0.0));
+        }
+        let air = generator.density_air_bands(target.x, target.z)?;
+        for (band, &is_air) in air.iter().enumerate() {
+            if is_air {
+                air_bands[band] += 1;
+            }
         }
     }
-    Ok(per_band
-        .into_iter()
-        .map(|values| stats(&values).1)
-        .collect())
+    Ok(BandStats {
+        ms: per_band
+            .into_iter()
+            .map(|values| stats(&values).1)
+            .collect(),
+        air_bands,
+        chunks: targets.len(),
+    })
 }
 
-fn print_bands(measured: &[Measured], band_ms: &[f64]) {
+/// 噪声填充的高度分布结果。
+/// The noise fill's height profile.
+struct BandStats {
+    /// 每个高度带的中位数耗时。 Per-band median milliseconds.
+    ms: Vec<f64>,
+    /// 每个高度带里「整格空气」的区块数。 Chunks whose cell is entirely air, per band.
+    air_bands: Vec<u32>,
+    /// 总区块数。 Total chunks.
+    chunks: usize,
+}
+
+/// 打印噪声填充的高度分布。
+/// Print the noise fill's height distribution.
+fn print_bands(bands: &BandStats, measured: &[Measured]) {
     println!("\n## 噪声填充按高度（每 8 格一层，中位数 ms/区块）\n");
-    println!("| y 范围 | 平均耗时 | 占整块噪声填充 | 分类 |");
-    println!("|---|---|---|---|");
-    let total: f64 = band_ms.iter().sum();
+    println!("| y 范围 | 耗时 | 占整块噪声填充 | 整格空气的区块 | 分类 |");
+    println!("|---|---|---|---|---|");
+    let total: f64 = bands.ms.iter().sum();
     let mut full: Vec<f64> = measured
         .iter()
         .map(|item| item.record.phases_ms[Phase::NoiseDensity.index()])
         .collect();
     full.sort_by(f64::total_cmp);
     let reference = full[full.len() / 2];
-    for (band, &ms) in band_ms.iter().enumerate() {
+    for (band, &ms) in bands.ms.iter().enumerate() {
         let from_y = MIN_Y + band as i32 * 8;
         let to_y = from_y + 7;
         let share = if reference > 0.0 {
@@ -613,11 +720,13 @@ fn print_bands(measured: &[Measured], band_ms: &[f64]) {
             0.0
         };
         println!(
-            "| {from_y}..{to_y} | {ms:.3} | {share:.1}% | {} |",
+            "| {from_y}..{to_y} | {ms:.3} | {share:.1}% | {}/{} | {} |",
+            bands.air_bands[band],
+            bands.chunks,
             classify_band(from_y, to_y, measured)
         );
     }
-    println!("| **合计** | {total:.3} | — | — |");
+    println!("| **合计** | {total:.3} | — | — | — |");
 }
 
 /// 给一个高度带分类：天空层 / 地表附近 / 地下。
@@ -646,16 +755,25 @@ fn classify_band(from_y: i32, to_y: i32, measured: &[Measured]) -> &'static str 
     }
 }
 
-fn print_features(measured: &[Measured], worldgen: &Worldgen) {
+fn print_features(
+    worldgen: &Worldgen,
+    targets: &[Target],
+    repeat: usize,
+    measured: &[Measured],
+) -> Result<(), String> {
+    let records = measure_feature_runs(worldgen, targets, measured, repeat)?;
     println!("\n## 地物按 decoration step\n");
     println!("| step | 名称 | 中位数 ms | 候选位置数 |");
     println!("|---|---|---|---|");
     for step in 0..DECORATION_STEPS {
-        let values = column_of(measured, |record| record.steps_ms[step]);
-        let (_, median, _) = stats(&values);
-        let candidates: u64 = measured
+        let values: Vec<f64> = records
             .iter()
-            .map(|item| item.record.steps_candidates[step])
+            .map(|(_, record)| record.steps_ms[step])
+            .collect();
+        let (_, median, _) = stats(&values);
+        let candidates: u64 = records
+            .iter()
+            .map(|(_, record)| record.steps_candidates[step])
             .sum();
         println!(
             "| {step} | {} | {median:.3} | {candidates} |",
@@ -665,21 +783,22 @@ fn print_features(measured: &[Measured], worldgen: &Worldgen) {
 
     println!("\n## 地物按 placed feature\n");
     println!(
-        "| step | placed feature | 候选数 | 高度范围 | 地表带占比 | 中位数 ms | 地表带 / 深层 |"
+        "| step | placed feature | 类型 | 候选数 | 高度范围 | 地表带占比 | 中位数 ms | 分类 |"
     );
-    println!("|---|---|---|---|---|---|---|");
-    let rows = aggregate_features(measured, worldgen);
+    println!("|---|---|---|---|---|---|---|---|");
+    let rows = aggregate_features(&records);
     for row in &rows {
         println!(
-            "| {} | {} | {} | {}..{} | {:.0}% | {:.3} | {} |",
+            "| {} | {} | {} | {} | {}..{} | {:.0}% | {:.3} | {} |",
             row.step,
             row.name,
+            row.kind,
             row.candidates,
             row.min_y,
             row.max_y,
             row.above_share * 100.0,
             row.ms,
-            row.kind
+            row.band
         );
     }
     let mut surface = 0.0;
@@ -690,47 +809,65 @@ fn print_features(measured: &[Measured], worldgen: &Worldgen) {
         deep += row.ms - above;
     }
     println!(
-        "\n地表带合计 {surface:.3} ms/区块，深层带合计 {deep:.3} ms/区块（按逐地物中位数 × 高度占比估）"
+        "\n地表带合计 {surface:.3} ms/区块，深层带合计 {deep:.3} ms/区块（逐地物中位数 × 高度占比估）"
     );
+    Ok(())
 }
 
 struct FeatureRow {
     step: usize,
     name: String,
+    kind: String,
     candidates: u64,
+    above_cut: u64,
     min_y: i32,
     max_y: i32,
     above_share: f64,
     ms: f64,
-    kind: &'static str,
+    band: &'static str,
 }
 
-fn aggregate_features(measured: &[Measured], worldgen: &Worldgen) -> Vec<FeatureRow> {
-    let _ = worldgen;
+fn aggregate_features(records: &[(f64, Record)]) -> Vec<FeatureRow> {
+    let registry = mc_bamboo_worldgen::feature::registry::Registry::parse(
+        serde_json::from_str::<serde_json::Value>(mc_bamboo_data::worldgen::WORLDGEN)
+            .expect("worldgen json")
+            .as_object()
+            .expect("worldgen object"),
+    )
+    .expect("feature registry");
     let mut rows: BTreeMap<u32, FeatureRow> = BTreeMap::new();
     let mut times: BTreeMap<u32, Vec<f64>> = BTreeMap::new();
-    for item in measured {
-        let cut = item.cut;
-        for feature in &item.record.features {
+    for (_, record) in records {
+        for feature in &record.features {
             let row = rows.entry(feature.placed).or_insert_with(|| FeatureRow {
                 step: feature.step,
-                name: format!("placed#{}", feature.placed),
+                name: registry
+                    .placed(feature.placed)
+                    .map(|placed| placed.name.clone())
+                    .unwrap_or_else(|| format!("placed#{}", feature.placed)),
+                kind: registry
+                    .placed(feature.placed)
+                    .and_then(|placed| {
+                        mc_bamboo_worldgen::feature::run::resolve_feature(
+                            &registry,
+                            &placed.feature,
+                        )
+                    })
+                    .map(|(kind, _)| kind)
+                    .unwrap_or_else(|| "?".to_owned()),
                 candidates: 0,
+                above_cut: 0,
                 min_y: i32::MAX,
                 max_y: i32::MIN,
                 above_share: 0.0,
                 ms: 0.0,
-                kind: "?",
+                band: "?",
             });
             row.candidates += feature.candidates;
+            row.above_cut += feature.above_cut;
             if feature.candidates > 0 {
                 row.min_y = row.min_y.min(feature.min_y);
                 row.max_y = row.max_y.max(feature.max_y);
-                let above: u64 = (0..Y_BANDS)
-                    .filter(|&band| item.record.min_y + band as i32 * 8 >= cut)
-                    .map(|band| feature.y_counts[band])
-                    .sum();
-                row.above_share += above as f64 / feature.candidates as f64;
             }
             times
                 .entry(feature.placed)
@@ -738,7 +875,6 @@ fn aggregate_features(measured: &[Measured], worldgen: &Worldgen) -> Vec<Feature
                 .push(feature.place_ms + feature.modifier_ms);
         }
     }
-    let count = measured.len() as f64;
     let mut out = Vec::new();
     for (placed, mut row) in rows {
         let mut values = times.remove(&placed).unwrap_or_default();
@@ -748,16 +884,44 @@ fn aggregate_features(measured: &[Measured], worldgen: &Worldgen) -> Vec<Feature
         } else {
             values[values.len() / 2]
         };
-        row.above_share /= count;
+        row.above_share = if row.candidates == 0 {
+            0.0
+        } else {
+            row.above_cut as f64 / row.candidates as f64
+        };
         if row.min_y == i32::MAX {
             row.min_y = 0;
             row.max_y = 0;
         }
-        row.kind = classify_feature(&row);
+        row.band = classify_feature(&row);
         out.push(row);
     }
     out.sort_by(|a, b| (a.step, &a.name).cmp(&(b.step, &b.name)));
     out
+}
+
+/// 逐个区块单独跑 `features` 并留记录（整块生成里的记录只留最后一次，不够做统计）。
+///
+/// Run `features` per chunk on its own and keep the records (the whole-chunk recorder
+/// keeps only one record, not enough for statistics).
+fn measure_feature_runs(
+    worldgen: &Worldgen,
+    targets: &[Target],
+    measured: &[Measured],
+    repeat: usize,
+) -> Result<Vec<(f64, Record)>, String> {
+    let mut out = Vec::with_capacity(targets.len());
+    for (target, item) in targets.iter().zip(measured) {
+        let generator = Generator::new(worldgen, target.seed)?;
+        let view = view_of(&generator, target.x, target.z)?;
+        let mut records: Vec<(f64, Record)> = Vec::with_capacity(repeat);
+        for _ in 0..repeat {
+            records.push(measure_features(&generator, *target, &view, item.cut)?);
+        }
+        records.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out.push(records.swap_remove(records.len() / 2));
+    }
+    Ok(out)
 }
 
 /// 按高度分布给地物分类。
@@ -783,7 +947,15 @@ fn step_name(step: usize) -> &'static str {
 
 /// 「只生成切割线以上」的对照：余量 16 / 24 / 32 / 48 各量一遍。
 ///
-/// The "only above the cut line" comparison at margins 16 / 24 / 32 / 48.
+/// 完整生成和半成品交替跑（同一次循环里各跑一遍），两边都取**最小值**：机器上有别的
+/// 负载，抖动只会把时间推高，交替跑还能让两边看到相近的负载。每个区块各算自己的比例，
+/// 再按群系取中位数。同时打印两边的绝对耗时。
+///
+/// The "only above the cut line" comparison at margins 16 / 24 / 32 / 48. The full and
+/// the partial generation alternate inside the loop and both use the **minimum**: other
+/// load only pushes timings up, and alternating makes both see similar load. Each chunk
+/// contributes its own ratio, then the per-biome median is taken. Both absolute times are
+/// printed too.
 fn measure_cut_lines(
     worldgen: &Worldgen,
     targets: &[Target],
@@ -791,106 +963,168 @@ fn measure_cut_lines(
     repeat: usize,
 ) -> Result<(), String> {
     println!("\n## 只生成切割线以上（占完整生成的比例）\n");
-    println!("| 余量 | 平原 | 森林 | 山地 | 海洋 | 丛林 | 总体 |");
-    println!("|---|---|---|---|---|---|---|");
+    let mut biomes: Vec<&str> = Vec::new();
+    for target in targets {
+        if !biomes.contains(&target.biome) {
+            biomes.push(target.biome);
+        }
+    }
+    let mut absolute: BTreeMap<i32, Vec<(f64, f64)>> = BTreeMap::new();
+    let mut table: BTreeMap<i32, Vec<(&'static str, f64)>> = BTreeMap::new();
     for margin in [16, 24, 32, 48] {
-        let mut shares: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
-        let mut all = Vec::new();
         for (target, item) in targets.iter().zip(measured) {
             let generator = Generator::new(worldgen, target.seed)?;
             let cut = (item.ocean_floor_min - margin).div_euclid(16) * 16;
+            let view = view_of(&generator, target.x, target.z)?;
             let floors = Floors {
                 noise: Some(cut),
                 surface: Some(cut),
                 carver: Some(cut),
                 feature: Some(cut),
             };
-            perf::set_floors(floors);
-            // 先跑一遍预热，后面的计时不含缓存填充。
-            black_box(generate_recorded(&generator, *target, cut)?);
-            let mut times = Vec::with_capacity(repeat);
+            let mut full = f64::MAX;
+            let mut partial = f64::MAX;
             for _ in 0..repeat {
+                perf::set_floors(Floors::default());
                 let start = Instant::now();
-                let record = generate_recorded(&generator, *target, cut)?;
-                times.push(start.elapsed().as_secs_f64() * 1000.0);
+                let record = generate_recorded(&generator, *target, item.cut, &view)?;
+                full = full.min(start.elapsed().as_secs_f64() * 1000.0);
+                black_box(&record);
+
+                perf::set_floors(floors);
+                let start = Instant::now();
+                let record = generate_recorded(&generator, *target, cut, &view)?;
+                partial = partial.min(start.elapsed().as_secs_f64() * 1000.0);
                 black_box(&record);
             }
             perf::set_floors(Floors::default());
-            times.sort_by(f64::total_cmp);
-            let partial = times[times.len() / 2];
-            let full = item.total_ms.max(0.001);
-            shares
-                .entry(target.biome)
+            table
+                .entry(margin)
                 .or_default()
-                .push(partial / full * 100.0);
-            all.push(partial / full * 100.0);
+                .push((target.biome, partial / full.max(0.001) * 100.0));
+            absolute.entry(margin).or_default().push((full, partial));
         }
-        let cells: Vec<String> = DEFAULT_BIOMES
-            .iter()
-            .map(|biome| {
-                let values = shares.get(biome).cloned().unwrap_or_default();
-                format!("{:.1}%", stats(&values).1)
-            })
-            .collect();
-        println!("| {margin} | {} | {:.1}% |", cells.join(" | "), stats(&all).1);
+    }
+
+    print!("| 余量 |");
+    for biome in &biomes {
+        print!(" {} |", biome.replace("minecraft:", ""));
+    }
+    println!(" 总体 | 完整 ms | 半成品 ms |");
+    print!("|---|");
+    for _ in 0..biomes.len() {
+        print!("---|");
+    }
+    println!("---|---|---|");
+    for margin in [16, 24, 32, 48] {
+        let rows = table.get(&margin).cloned().unwrap_or_default();
+        print!("| {margin} |");
+        for biome in &biomes {
+            let values: Vec<f64> = rows
+                .iter()
+                .filter(|(name, _)| name == biome)
+                .map(|(_, ratio)| *ratio)
+                .collect();
+            print!(" {:.1}% |", stats(&values).1);
+        }
+        let all: Vec<f64> = rows.iter().map(|(_, ratio)| *ratio).collect();
+        let pairs = absolute.get(&margin).cloned().unwrap_or_default();
+        let fulls: Vec<f64> = pairs.iter().map(|(full, _)| *full).collect();
+        let partials: Vec<f64> = pairs.iter().map(|(_, partial)| *partial).collect();
+        println!(
+            " {:.1}% | {:.1} | {:.1} |",
+            stats(&all).1,
+            stats(&fulls).1,
+            stats(&partials).1
+        );
     }
     Ok(())
 }
 
-/// 天空层：数含水层不再采样的那些噪声 cell 里有多少整格空气，以及它们占噪声填充多少时间。
+/// 天空层：高于含水层 `skipSamplingAboveY` 的噪声 cell 里有多少个整格空气。
 ///
-/// The sky layer: count how many of the noise cells above the aquifer's
-/// `skipSamplingAboveY` are all air, and how much of the noise fill time they take.
+/// 「整格空气」按密度判：这一格 8 行 × 256 列里没有任何一个密度 > 0 的点。含水层在
+/// 这个高度以上直接返回全局流体（y 高于海平面就是空气），所以密度 <= 0 就是空气。
+/// 时间占比用逐带单独成批求值的耗时算；`skipSamplingAboveY` 取各区块记录值的中位数。
+///
+/// The sky layer: how many of the noise cells above the aquifer's `skipSamplingAboveY`
+/// are entirely air. "Entirely air" is judged on the density: no point in the cell's
+/// eight rows by 256 columns has density > 0. Above that height the aquifer returns the
+/// global fluid directly (air above sea level), so a non-positive density means air.
 fn measure_sky(
     worldgen: &Worldgen,
     targets: &[Target],
     measured: &[Measured],
-    repeat: usize,
+    bands: &BandStats,
 ) -> Result<(), String> {
     println!("\n## 天空层\n");
-    let mut air = 0u64;
-    let mut cells = 0u64;
+    let mut skips: Vec<f64> = measured
+        .iter()
+        .filter_map(|item| item.record.skip_above_y)
+        .map(f64::from)
+        .collect();
+    if skips.is_empty() {
+        println!("没有记录到 `skipSamplingAboveY`（`perf` 特性没开？）");
+        return Ok(());
+    }
+    skips.sort_by(f64::total_cmp);
+    let skip = skips[skips.len() / 2] as i32;
+    let mut above_cells = 0u64;
+    let mut air_cells = 0u64;
     let mut above_ms = 0.0;
     let mut all_ms = 0.0;
-    for (target, item) in targets.iter().zip(measured) {
-        let generator = Generator::new(worldgen, target.seed)?;
-        let region = generator.biome_region(target.x, target.z)?;
-        let blocks =
-            generator.terrain_with_region(target.x, target.z, Stage::Noise, None, &region)?;
-        let skip = item.record.skip_above_y.unwrap_or(item.ocean_floor_min);
-        for band in (0..Y_BANDS).map(|band| MIN_Y + band as i32 * 8) {
-            let mut times = Vec::with_capacity(repeat);
-            for _ in 0..repeat {
-                times.push(generator.sample_density_span(target.x, target.z, band, band + 7)?);
-            }
-            times.sort_by(f64::total_cmp);
-            let ms = times[times.len() / 2];
-            all_ms += ms;
-            if band <= skip {
-                continue;
-            }
-            cells += 1;
-            above_ms += ms;
-            let all_air = ((band - MIN_Y)..(band - MIN_Y + 8).min(blocks.len() as i32))
-                .all(|y| blocks[y as usize].iter().all(|&state| state == blocks::AIR));
-            if all_air {
-                air += 1;
-            }
+    for (band, &ms) in bands.ms.iter().enumerate() {
+        let from_y = MIN_Y + band as i32 * 8;
+        all_ms += ms;
+        if from_y <= skip {
+            continue;
         }
+        above_cells += bands.chunks as u64;
+        air_cells += u64::from(bands.air_bands[band]);
+        above_ms += ms;
     }
     println!(
-        "高于 `skipSamplingAboveY` 的噪声 cell：{cells} 个，其中整格空气 {air} 个（{:.1}%）；\
-         这些 cell 占噪声填充 {:.1}% 的时间",
-        air as f64 / cells.max(1) as f64 * 100.0,
+        "`skipSamplingAboveY` 中位数 {skip}；它之上的噪声 cell {above_cells} 个，其中整格空气 \
+         {air_cells} 个（{:.1}%），占噪声填充 {:.1}% 的时间",
+        air_cells as f64 / above_cells.max(1) as f64 * 100.0,
         above_ms / all_ms.max(0.001) * 100.0
+    );
+
+    // 逐区块数整格空气的 cell，乘逐带耗时，得到「全跳过」能给噪声填充省多少（上界）。
+    // Count all-air cells per chunk and multiply by the per-band timings for the upper
+    // bound on what skipping every all-air cell saves in the noise fill.
+    let mut saved_ms = 0.0;
+    let mut noise_ms = 0.0;
+    let mut total_ms = 0.0;
+    for (target, item) in targets.iter().zip(measured) {
+        let generator = Generator::new(worldgen, target.seed)?;
+        let air = generator.density_air_bands(target.x, target.z)?;
+        for (band, &is_air) in air.iter().enumerate() {
+            if is_air {
+                saved_ms += bands.ms[band];
+            }
+        }
+        noise_ms += item.record.phases_ms[Phase::NoiseDensity.index()];
+        total_ms += item.total_ms;
+    }
+    println!(
+        "若整格空气的 cell 全跳过：噪声填充省 {:.2} ms/区块（{:.1}%），整块生成省 {:.1}%\
+         （整块 {:.2} ms/区块）",
+        saved_ms / targets.len() as f64,
+        saved_ms / noise_ms.max(0.001) * 100.0,
+        saved_ms / total_ms.max(0.001) * 100.0,
+        total_ms / targets.len() as f64
     );
     Ok(())
 }
 
 /// 多线程吞吐量：每线程一个 `Generator` 和一份 `Worldgen`，一起生成同一批区块。
 ///
+/// 每个线程自己建 3×3 视图（和单线程那组一样，视图不算进单区块成本）。
+///
 /// Multi-thread throughput: one `Generator` and one `Worldgen` per thread, all
-/// generating the same batch.
+/// generating the same batch. Each worker builds its own 3x3 view, the same way the
+/// single-threaded group does, and the view stays outside the per-chunk cost.
 fn measure_threads(
     worldgen: &Worldgen,
     targets: &[Target],
@@ -899,11 +1133,15 @@ fn measure_threads(
 ) -> Result<(), String> {
     println!("\n## 多线程吞吐量\n");
     let generator = Generator::new(worldgen, targets[0].seed)?;
+    let mut views: Vec<[TerrainView; 9]> = Vec::with_capacity(targets.len());
+    for target in targets {
+        views.push(view_of(&generator, target.x, target.z)?);
+    }
     let mut single = Vec::new();
     for _ in 0..repeat {
         let start = Instant::now();
-        for target in targets {
-            black_box(generate_recorded(&generator, *target, 0)?);
+        for (target, view) in targets.iter().zip(&views) {
+            black_box(generate_recorded(&generator, *target, 0, view)?);
         }
         single.push(targets.len() as f64 / start.elapsed().as_secs_f64());
     }
@@ -930,7 +1168,14 @@ fn measure_threads(
                         let Some(target) = batch.get(index).copied() else {
                             break;
                         };
-                        if let Err(error) = generate_recorded(&generator, target, 0) {
+                        let view = match view_of(&generator, target.x, target.z) {
+                            Ok(view) => view,
+                            Err(error) => {
+                                errors.lock().expect("lock").push(error);
+                                break;
+                            }
+                        };
+                        if let Err(error) = generate_recorded(&generator, target, 0, &view) {
                             errors.lock().expect("lock").push(error);
                             break;
                         }

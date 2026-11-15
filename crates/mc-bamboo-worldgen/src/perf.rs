@@ -52,9 +52,6 @@ pub enum Phase {
     /// `applyBiomeDecoration` 本身。
     /// `applyBiomeDecoration` itself.
     Features,
-    /// 8 个邻居中心溢进本区块的地物重算。
-    /// Recomputing the 8 neighbour centres' feature spills into this chunk.
-    FeatureSpill,
     /// `light` 阶段把 3×3 方块装成光引擎的 `Chunk`。
     /// The `light` stage converting the 3x3 blocks into light-engine `Chunk`s.
     LightView,
@@ -67,7 +64,7 @@ pub enum Phase {
 }
 
 /// [`Phase`] 的项数。 The number of [`Phase`] variants.
-pub const PHASE_COUNT: usize = 14;
+pub const PHASE_COUNT: usize = 13;
 
 impl Phase {
     /// 所有阶段，按 [`Phase::index`] 的顺序。
@@ -83,7 +80,6 @@ impl Phase {
         Self::CarverApply,
         Self::View,
         Self::Features,
-        Self::FeatureSpill,
         Self::LightView,
         Self::Light,
         Self::Assembly,
@@ -102,7 +98,6 @@ impl Phase {
             Self::CarverApply => "carver_apply",
             Self::View => "view",
             Self::Features => "features",
-            Self::FeatureSpill => "feature_spill",
             Self::LightView => "light_view",
             Self::Light => "light",
             Self::Assembly => "assembly",
@@ -213,7 +208,10 @@ pub struct Record {
 impl Record {
     /// 一组阶段的和。 The sum of a set of phases.
     pub fn sum(&self, phases: &[Phase]) -> f64 {
-        phases.iter().map(|phase| self.phases_ms[phase.index()]).sum()
+        phases
+            .iter()
+            .map(|phase| self.phases_ms[phase.index()])
+            .sum()
     }
 
     /// `doFill` 的墙钟（准备 + 含水层 + 密度 + 填方块）。
@@ -247,7 +245,7 @@ mod imp {
         time::{Duration, Instant},
     };
 
-    use super::{FeatureRecord, Phase, Record, Y_BANDS, Floors};
+    use super::{FeatureRecord, Floors, Phase, Record, Y_BANDS};
 
     struct State {
         last: Instant,

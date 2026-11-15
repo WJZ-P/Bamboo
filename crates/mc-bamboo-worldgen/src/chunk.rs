@@ -501,31 +501,28 @@ impl<'a> Generator<'a> {
         Ok(layers)
     }
 
-    /// 只把 `finalDensity` 在某一段 y 上成批求值一遍，返回耗时（毫秒）。
+    /// 从某个 y 到世界顶部成批求值 `finalDensity`，返回耗时（毫秒）。
     ///
-    /// 测量用：把 y=-64..320 切成 48 个 8 格高的小段，各跑一次，得到噪声填充的
-    /// 高度分布。每段单独成批求值和整块一次求值的浮点结果不同，但**只用来计时**；
-    /// 含水层不参与，所以 `computeSubstance` 的开销不算在这里。
+    /// 测量用：把 y 逐个高度带边界抬高，相邻两次整列求值的差就是这一带的边际耗时，
+    /// 和整块一次求值的口径一致（每一带单采样会重复算插值角点，不能用）。
     ///
-    /// Sample `finalDensity` over one y span and return the elapsed milliseconds.
-    /// Measurement only: slicing y=-64..320 into forty-eight 8-block spans and running
-    /// each gives the noise fill's height profile. A span sampled alone differs in the
-    /// last bits from one whole-volume pass, but this is only for timing; the aquifer is
-    /// not involved, so `computeSubstance` is not included.
+    /// Sample `finalDensity` from `from_y` to the top of the world and return the elapsed
+    /// milliseconds. Measurement only: raising `from_y` band by band and taking the
+    /// difference of consecutive whole-column passes gives a per-band cost on the same
+    /// footing as one whole-volume pass (sampling each band alone would recompute the
+    /// interpolation corners). The aquifer is not involved.
     #[cfg(feature = "perf")]
-    pub fn sample_density_span(
+    pub fn sample_density_from(
         &self,
         chunk_x: i32,
         chunk_z: i32,
         from_y: i32,
-        to_y: i32,
     ) -> Result<f64, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         let from_y = from_y.clamp(min_y, min_y + height - 1);
-        let to_y = to_y.clamp(from_y, min_y + height - 1);
         let volume = Volume::blocks(
-            (16, to_y - from_y + 1, 16),
+            (16, min_y + height - from_y, 16),
             (chunk_x * 16, from_y, chunk_z * 16),
         );
         let mut context = Context::new(self.cache_count);
@@ -537,6 +534,83 @@ impl<'a> Generator<'a> {
         let elapsed = start.elapsed().as_secs_f64() * 1000.0;
         context.release(density);
         Ok(elapsed)
+    }
+
+    /// 每个 8 格高度带是不是「整格空气」：一次整列求值，逐带看有没有 `density > 0`。
+    ///
+    /// 含水层在 `skipSamplingAboveY` 之上直接返回全局流体（海平面以上是空气），所以那里
+    /// `density <= 0` 就等于空气；更低的地方这个判定也会把含水的空腔算成「非空气」，
+    /// 用它的地方要注意。
+    ///
+    /// Whether each 8-block band is entirely air: one whole-column pass, then check each
+    /// band for any point with `density > 0`. Above the aquifer's `skipSamplingAboveY`
+    /// `density <= 0` is exactly air (the aquifer returns the global fluid, air above sea
+    /// level); lower down this also counts fluid-filled pockets as non-air.
+    #[cfg(feature = "perf")]
+    pub fn density_air_bands(&self, chunk_x: i32, chunk_z: i32) -> Result<Vec<bool>, String> {
+        let min_y = self.settings.min_y;
+        let height = self.settings.height;
+        let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
+        let mut context = Context::new(self.cache_count);
+        let mut density = context.acquire(volume.len());
+        self.router
+            .final_density
+            .sample_volume(&mut context, &mut density, &volume);
+        let mut bands = vec![true; (height / 8) as usize];
+        for local_y in 0..height {
+            let band = (local_y / 8) as usize;
+            if !bands[band] {
+                continue;
+            }
+            for z in 0..16 {
+                for x in 0..16 {
+                    if density[volume.index(x, local_y, z)] > 0.0 {
+                        bands[band] = false;
+                        break;
+                    }
+                }
+                if !bands[band] {
+                    break;
+                }
+            }
+        }
+        context.release(density);
+        Ok(bands)
+    }
+
+    /// 按 8 格高度带给出「这一格整格是实心」的掩码，供测量「跳过整格空气」的对照。
+    ///
+    /// 返回 `(bands, solid)`：`bands` 是每个高度带里 256 列的 `density > 0` 掩码。
+    ///
+    /// Per-band solid mask at 8-block granularity, for the "skip all-air cells"
+    /// experiment. Returns each band's 256-column `density > 0` mask.
+    #[cfg(feature = "perf")]
+    pub fn density_solid_mask(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Result<Vec<[bool; 256]>, String> {
+        let min_y = self.settings.min_y;
+        let height = self.settings.height;
+        let volume = Volume::blocks((16, height, 16), (chunk_x * 16, min_y, chunk_z * 16));
+        let mut context = Context::new(self.cache_count);
+        let mut density = context.acquire(volume.len());
+        self.router
+            .final_density
+            .sample_volume(&mut context, &mut density, &volume);
+        let mut bands = vec![[false; 256]; (height / 8) as usize];
+        for local_y in 0..height {
+            let band = &mut bands[(local_y / 8) as usize];
+            for z in 0..16 {
+                for x in 0..16 {
+                    if density[volume.index(x, local_y, z)] > 0.0 {
+                        band[x as usize * 16 + z as usize] = true;
+                    }
+                }
+            }
+        }
+        context.release(density);
+        Ok(bands)
     }
 
     /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight(x, z, WORLD_SURFACE_WG, ...)`。
