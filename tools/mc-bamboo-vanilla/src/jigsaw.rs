@@ -97,6 +97,7 @@ pub fn run(command: Command, work_dir: &Path, options: &[&str]) -> Result<(), St
         "cappedfull" => run_capped_full(command, work_dir),
         "placepiece" => run_place_piece(command, work_dir),
         "bemod" => run_block_entity_modifier(command, work_dir),
+        "rc" => run_randomizable_container(command, work_dir),
         "shapes" => crate::jigsaw_shapes::run(command, work_dir, options.get(1)),
         other => Err(format!("unknown jigsaw mode {other}")),
     }
@@ -2255,6 +2256,72 @@ fn parse_snbt(text: &str) -> Result<mc_bamboo_nbt::Tag, String> {
         entries.push((key.trim().to_owned(), tag));
     }
     Ok(Tag::Compound(entries))
+}
+
+/// `rc` 模式：`is_randomizable_container` 对官方 `instanceof RandomizableContainer`，
+/// 全量 1286 个方块逐个比。
+///
+/// `rc` mode: `is_randomizable_container` against vanilla's
+/// `instanceof RandomizableContainer` for every one of the 1286 blocks.
+fn run_randomizable_container(mut command: Command, work_dir: &Path) -> Result<(), String> {
+    let mut names: Vec<&str> = mc_bamboo_data::blocks::BLOCKS
+        .iter()
+        .map(|block| block.name)
+        .collect();
+    names.sort();
+    let queries_path = work_dir.join("jigsaw_rc_queries.txt");
+    fs::write(&queries_path, names.join("\n"))
+        .map_err(|error| format!("cannot write queries: {error}"))?;
+    let output = command
+        .arg("rc")
+        .arg(&queries_path)
+        .output()
+        .map_err(|error| format!("cannot run JigsawOracle: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "JigsawOracle failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut checked = 0usize;
+    let mut randomizable = 0usize;
+    let mut mismatches = 0usize;
+    let mut first: Option<String> = None;
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() != 3 || fields[0] != "R" {
+            continue;
+        }
+        let name = fields[1];
+        let want = fields[2] == "1";
+        let got = mc_bamboo_worldgen::structure::jigsaw::place::is_randomizable_container(name);
+        checked += 1;
+        if want {
+            randomizable += 1;
+        }
+        if got != want {
+            mismatches += 1;
+            if first.is_none() {
+                first = Some(format!("{name}: rust {got} java {want}"));
+            }
+        }
+    }
+    if checked != names.len() {
+        return Err(format!(
+            "checked {checked} blocks, expected {}",
+            names.len()
+        ));
+    }
+    if mismatches > 0 {
+        return Err(format!(
+            "{mismatches}/{checked} blocks differ; first: {}",
+            first.unwrap_or_default()
+        ));
+    }
+    println!("jigsaw rc: {checked} blocks, {randomizable} randomizable, all identical");
+    Ok(())
 }
 
 fn run_pieces(

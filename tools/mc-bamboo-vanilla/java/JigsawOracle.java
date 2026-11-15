@@ -149,6 +149,13 @@ public final class JigsawOracle {
         try (CloseableResourceManager resources =
                 new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected())) {
             RegistryAccess.Frozen registries = loadRegistries(resources).compositeAccess();
+            // `Block.newBlockEntity` 会读组件的默认值，而组件只在服务器资源重载时
+            // （`ReloadableServerResources`）才被绑定。这里手动跑一次，
+            // 让方块实体能被构造出来（`rc` 模式需要）。
+            // `Block.newBlockEntity` reads component defaults, which are bound only during a
+            // server resource reload. Run it once here so block entities can be built.
+            BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(registries)
+                    .forEach(net.minecraft.core.component.DataComponentInitializers.PendingComponents::apply);
             Path temp = Files.createTempDirectory("jigsaw-stm");
             LevelStorageSource storageSource = LevelStorageSource.createDefault(temp);
             try (LevelStorageSource.LevelStorageAccess storage = storageSource.createAccess("world")) {
@@ -169,6 +176,7 @@ public final class JigsawOracle {
                     case "cappedfull" -> runCappedFull(registries, Path.of(args[1]));
                     case "placepiece" -> runPlacePiece(manager, registries, Path.of(args[1]));
                     case "bemod" -> runBlockEntityModifier(registries, Path.of(args[1]));
+                    case "rc" -> runRandomizableContainer(registries, Path.of(args[1]));
                     case "shapes" -> runShapes(Path.of(args[1]));
                     default -> throw new IllegalArgumentException("unknown mode " + args[0]);
                 }
@@ -1218,6 +1226,40 @@ public final class JigsawOracle {
         data.put("Nested", nested);
         data.putInt("Extra", 7);
         return data;
+    }
+
+    /**
+     * rc 模式：queries 每行一个方块 id。输出官方认为它是不是 `RandomizableContainer`
+     * ——直接构造该方块的方块实体再 `instanceof`。这一条钉住
+     * `is_randomizable_container` 的类型集合：它决定放置时要不要多取一次 `nextLong`，
+     * 错了会让世界随机源序列错开。
+     *
+     * <p>Randomizable-container mode: one block id per line, building the block entity and
+     * testing `instanceof RandomizableContainer`. That predicate decides whether placement
+     * draws one extra `nextLong`.
+     */
+    private static void runRandomizableContainer(RegistryAccess registries, Path queries)
+            throws Exception {
+        Registry<Block> blocks = registries.lookupOrThrow(Registries.BLOCK);
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            Identifier id = Identifier.parse(line.trim());
+            Block block = blocks.getValue(id);
+            if (block == null) {
+                throw new IllegalStateException("no block " + id);
+            }
+            BlockState state = block.defaultBlockState();
+            Object be = block instanceof net.minecraft.world.level.block.EntityBlock entityBlock
+                    ? entityBlock.newBlockEntity(BlockPos.ZERO, state)
+                    : null;
+            boolean randomizable = be instanceof net.minecraft.world.RandomizableContainer;
+            out.append("R|").append(id).append('|').append(randomizable ? 1 : 0).append('\n');
+        }
+        System.out.print(out);
+        System.out.flush();
     }
 
     /** 一次 `setBlock`：(位置, 状态)。 */

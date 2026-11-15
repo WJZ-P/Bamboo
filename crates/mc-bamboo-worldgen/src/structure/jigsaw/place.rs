@@ -282,7 +282,6 @@ pub fn is_randomizable_container(block_name: &str) -> bool {
             | be::BARREL
             | be::DECORATED_POT
             | be::CRAFTER
-            | be::BRUSHABLE_BLOCK
     )
 }
 
@@ -764,20 +763,21 @@ mod tests {
     }
 
     /// `is_randomizable_container` 认哪些方块：官方只有
-    /// `RandomizableContainerBlockEntity` 的子类（箱子 / 陷阱箱 / 发射器 / 投掷器 /
-    /// 漏斗 / 潜影盒 / 木桶 / 饰纹陶罐 / 合成器以及可疑的沙砾与沙子用的
-    /// `BrushableBlockEntity`）实现 `RandomizableContainer`。熔炉 / 酿造台 / 烟熏炉 /
-    /// 高炉**不是**（它们是 `AbstractFurnaceBlockEntity` / `BaseContainerBlockEntity`，
-    /// 没有实现该接口）。
+    /// `RandomizableContainerBlockEntity` 的九个子类（箱子 / 陷阱箱 / 发射器 / 投掷器 /
+    /// 漏斗 / 潜影盒 / 木桶 / 饰纹陶罐 / 合成器）实现 `RandomizableContainer`。
+    /// 熔炉 / 酿造台 / 烟熏炉 / 高炉**不是**；可疑的沙砾与沙子**也不是**——
+    /// `BrushableBlockEntity extends BlockEntity`，它自带 `LootTable` 字段但没实现该接口。
+    /// （这一条是 `jigsaw rc` 对拍抓出来的：我最初把 `brushable_block` 算进去了。）
     ///
-    /// Blocks that count: only the `RandomizableContainerBlockEntity` subclasses (chest,
-    /// trapped chest, dispenser, dropper, hopper, shulker box, barrel, decorated pot,
-    /// crafter) plus `BrushableBlockEntity`. Furnaces and brewing stands are not.
+    /// Blocks that count: only the nine `RandomizableContainerBlockEntity` subclasses.
+    /// Furnaces and brewing stands are not; neither is the brushable block
+    /// (`BrushableBlockEntity extends BlockEntity` and has its own `LootTable` field but
+    /// does not implement the interface — the `jigsaw rc` oracle caught this).
     #[test]
     fn randomizable_containers_match_the_vanilla_set() {
         use super::is_randomizable_container;
-        // 是随机容器的。
-        // Randomizable containers.
+        // 是随机容器的：九个。
+        // Randomizable containers: nine of them.
         for name in [
             "minecraft:chest",
             "minecraft:trapped_chest",
@@ -788,22 +788,22 @@ mod tests {
             "minecraft:barrel",
             "minecraft:decorated_pot",
             "minecraft:crafter",
-            "minecraft:suspicious_sand",
-            "minecraft:suspicious_gravel",
         ] {
             assert!(
                 is_randomizable_container(name),
                 "{name} must be randomizable"
             );
         }
-        // 不是随机容器的：同一批「看着像容器」的方块，以及普通方块。
-        // Not randomizable: containers that do not implement the interface, plus plain blocks.
+        // 不是随机容器的。可疑的沙砾 / 沙子与熔炉类都在这里。
+        // Not randomizable, including the brushable blocks and the furnace family.
         for name in [
             "minecraft:furnace",
             "minecraft:blast_furnace",
             "minecraft:smoker",
             "minecraft:brewing_stand",
             "minecraft:ender_chest",
+            "minecraft:suspicious_sand",
+            "minecraft:suspicious_gravel",
             "minecraft:stone",
             "minecraft:jigsaw",
             "minecraft:not_a_block",
