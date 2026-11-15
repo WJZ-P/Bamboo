@@ -51,7 +51,7 @@ use mc_bamboo_worldgen::{
     settings::SeededRouter,
     structure::{
         BoundingBox, StructureSets, StructureState, Structures, allowed_biome_names,
-        column_has_valid_biome,
+        column_has_valid_biome, find_valid_generation_point,
         jigsaw::{
             JigsawConfig, JigsawStructures, Piece, Rotation, StructurePieces, TemplatePools,
             add_pieces,
@@ -3610,8 +3610,16 @@ fn run_pieces_exact(mut command: Command, work_dir: &Path) -> Result<(), String>
     let mut queries = Vec::new();
     let mut scanned = 0usize;
     let mut placement_hits = 0usize;
+    let preset = worldgen
+        .preset("minecraft:overworld")
+        .ok_or("missing overworld preset")?;
     for &seed in SEEDS.iter().take(4) {
         let generator = Generator::new(&worldgen, seed)?;
+        let mut router = SeededRouter::new(settings, seed);
+        let mut resolver = BiomeResolver {
+            router: &mut router,
+            source: preset,
+        };
         for id in &STRUCTURES {
             let allowed = &allowed_cache[*id];
             let names = sets_by_structure.get(*id).cloned().unwrap_or_default();
@@ -3627,7 +3635,21 @@ fn run_pieces_exact(mut command: Command, work_dir: &Path) -> Result<(), String>
                         continue;
                     }
                     placement_hits += 1;
-                    if !column_has_valid_biome(&generator, chunk, allowed, dims)? {
+                    // `find_valid_generation_point` 同时判「列群系」与「起点单点群系」，
+                    // 后者正是 `isValidBiome` 用的那一个。只用 `column_has_valid_biome`
+                    // 会漏掉起点群系不匹配的区块（实测有 9 个）。
+                    // `find_valid_generation_point` checks both the column biome and the
+                    // single-point start biome, and the latter is exactly what
+                    // `isValidBiome` uses. `column_has_valid_biome` alone misses chunks
+                    // whose start point sits in another biome (9 of them in practice).
+                    let point = find_valid_generation_point(
+                        &generator,
+                        &mut resolver,
+                        chunk,
+                        allowed,
+                        dims,
+                    )?;
+                    if !point.valid {
                         continue;
                     }
                     queries.push(Query {
