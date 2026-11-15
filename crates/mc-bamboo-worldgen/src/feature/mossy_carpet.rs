@@ -289,6 +289,46 @@ mod tests {
     }
 
     #[test]
+    fn decode_the_three_states_from_the_failing_chunk() {
+        // 官方 `35584` = `{east:low, south:low, bottom:true}`；
+        // 官方空气对应 `35662` = `{bottom:false, 所有 side:none}`。
+        // Official `35584` is `{east:low, south:low, bottom:true}`; `35662` is
+        // `{bottom:false, every side:none}`.
+        let carpet = MossyCarpet::parse(pale()).unwrap();
+        let east_low_south_low = 35584;
+        assert!(carpet.is_base(east_low_south_low));
+        assert_eq!(
+            MossyCarpet::side(east_low_south_low, Direction::East),
+            Some(LOW)
+        );
+        assert_eq!(
+            MossyCarpet::side(east_low_south_low, Direction::South),
+            Some(LOW)
+        );
+        assert_eq!(
+            MossyCarpet::side(east_low_south_low, Direction::North),
+            Some(NONE)
+        );
+        assert_eq!(
+            MossyCarpet::side(east_low_south_low, Direction::West),
+            Some(NONE)
+        );
+
+        let no_base = 35662;
+        assert!(!carpet.is_base(no_base));
+        // `35662` 是 `{east:low, bottom:false}` —— 有 east 面，所以 `hasFaces` 为真。
+        // 「全 none 且无 base」的情形由 `non_base_without_sides_has_no_faces` 覆盖。
+        // `35662` is `{east:low, bottom:false}`: it has an east face, so `hasFaces` holds.
+        // The "every side none and no base" case is covered by
+        // `non_base_without_sides_has_no_faces`.
+        assert_eq!(MossyCarpet::side(no_base, Direction::East), Some(LOW));
+        assert_eq!(MossyCarpet::side(no_base, Direction::South), Some(NONE));
+        assert_eq!(MossyCarpet::side(no_base, Direction::North), Some(NONE));
+        assert_eq!(MossyCarpet::side(no_base, Direction::West), Some(NONE));
+        assert!(carpet.has_faces(no_base));
+    }
+
+    #[test]
     fn only_pale_moss_carpet_parses() {
         let moss = mc_bamboo_data::block_by_name("minecraft:moss_carpet")
             .unwrap()
