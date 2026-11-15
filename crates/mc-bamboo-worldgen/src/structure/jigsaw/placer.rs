@@ -494,12 +494,11 @@ impl<'a> Placer<'a> {
             }
             let size = match self.pools.get(self.aliases.lookup(&jigsaw.pool)) {
                 Some(pool) => {
-                    let own = pool.max_size()?;
+                    let own = pool.max_size();
                     let fallback = self
                         .pools
                         .get(pool.fallback())
                         .map(|pool| pool.max_size())
-                        .transpose()?
                         .unwrap_or(0);
                     own.max(fallback)
                 }

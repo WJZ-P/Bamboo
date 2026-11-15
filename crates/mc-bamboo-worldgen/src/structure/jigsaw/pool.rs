@@ -25,11 +25,17 @@ pub struct TemplatePool {
     /// `templates`：按 weight 重复的 `elements` 下标。
     expanded: Vec<usize>,
     fallback: String,
-    /// `maxSize`：官方缓存在字段里（`Integer.MIN_VALUE` 表示未算），首次调用才算。
+    /// `maxSize`：官方是懒算的字段（`Integer.MIN_VALUE` 表示未算），这里在解析时就一次
+    /// 算好。理由：官方懒算只是为了省一次遍历，输入全是只读数据，提前算结果相同；而用
+    /// `Cell` 会让本类型（以及 `TemplatePools`）变成 `!Sync`，没法放进 `Arc` 供多线程
+    /// 区块生成共享。提前算换来 `Sync` 是值得的。
     ///
-    /// `maxSize`: vanilla caches it in a field (`Integer.MIN_VALUE` means unset) and
-    /// computes it on first use.
-    max_size: std::cell::Cell<i32>,
+    /// `maxSize`: vanilla computes it lazily (`Integer.MIN_VALUE` means unset). This port
+    /// computes it once during parsing: the lazy form only saves one pass over read-only
+    /// data, so the value is identical, but a `Cell` would make this type (and
+    /// `TemplatePools`) `!Sync` and thus unusable from an `Arc` shared across generation
+    /// threads.
+    max_size: i32,
 }
 
 impl TemplatePool {
@@ -60,12 +66,17 @@ impl TemplatePool {
             .and_then(Value::as_str)
             .ok_or("template_pool has no fallback")?
             .to_owned();
-        Ok(Self {
+        let mut pool = Self {
             elements,
             expanded,
             fallback,
-            max_size: std::cell::Cell::new(i32::MIN),
-        })
+            max_size: 0,
+        };
+        // 解析时就一次性算好（官方懒算，结果相同，见字段注释）。
+        // Computed once during parsing (vanilla is lazy but the value is identical; see the
+        // field comment).
+        pool.max_size = pool.compute_max_size()?;
+        Ok(pool)
     }
 
     /// `StructureTemplatePool.getRandomTemplate(random)`。
@@ -100,13 +111,19 @@ impl TemplatePool {
 
     /// `StructureTemplatePool.getMaxSize(manager)`：展开列表里（除 empty）各 element
     /// 在 `Rotation.NONE` / `BlockPos.ZERO` 下包围盒的最大 `getYSpan()`。
+    /// 解析时已算好，这里只返回。
     ///
     /// `getMaxSize(manager)`: the max `getYSpan()` of every (non-empty) expanded
-    /// element's bounding box at `Rotation.NONE` / `BlockPos.ZERO`.
-    pub fn max_size(&self) -> Result<i32, String> {
-        if self.max_size.get() != i32::MIN {
-            return Ok(self.max_size.get());
-        }
+    /// element's bounding box at `Rotation.NONE` / `BlockPos.ZERO`. Precomputed during
+    /// parsing.
+    pub const fn max_size(&self) -> i32 {
+        self.max_size
+    }
+
+    /// `getMaxSize` 的实际计算，只在 `parse` 里调一次。
+    ///
+    /// The actual `getMaxSize` computation, called once from `parse`.
+    fn compute_max_size(&self) -> Result<i32, String> {
         let mut max = 0;
         for &index in &self.expanded {
             let element = &self.elements[index];
@@ -116,7 +133,6 @@ impl TemplatePool {
             let box_ = element.bounding_box((0, 0, 0), Rotation::None)?;
             max = max.max(box_.max_y - box_.min_y + 1);
         }
-        self.max_size.set(max);
         Ok(max)
     }
 }
@@ -151,5 +167,41 @@ impl TemplatePools {
 
     pub fn is_empty(&self) -> bool {
         self.pools.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `TemplatePools` 必须能跨线程共享：流水线可能把它放进 `Arc` 分给多个生成线程。
+    /// 这条断言会把「有人又给 `TemplatePool` 加回 `Cell`」变成编译错误。
+    ///
+    /// `TemplatePools` must be shareable across threads (the pipeline may put it in an
+    /// `Arc`); this assertion turns a reintroduced `Cell` into a compile error.
+    #[test]
+    fn template_pools_is_sync_and_send() {
+        fn assert_sync_send<T: Sync + Send>() {}
+        assert_sync_send::<TemplatePools>();
+        assert_sync_send::<TemplatePool>();
+    }
+
+    /// `max_size` 提前算的结果要和「按定义现算」一致，覆盖全部 245 个 pool。
+    ///
+    /// The precomputed `max_size` must equal a fresh computation for all 245 pools.
+    #[test]
+    fn precomputed_max_size_matches_a_fresh_computation() {
+        let raw: serde_json::Value =
+            serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
+        let pools = TemplatePools::parse(raw.get("template_pool").unwrap()).unwrap();
+        assert_eq!(pools.len(), 245);
+        for name in pools.names().cloned().collect::<Vec<_>>() {
+            let pool = pools.get(&name).unwrap();
+            assert_eq!(
+                pool.max_size(),
+                pool.compute_max_size().unwrap(),
+                "{name}: precomputed max_size differs"
+            );
+        }
     }
 }
