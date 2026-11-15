@@ -573,7 +573,7 @@ WebView2 的渲染进程不算在内。
   海底神殿「只存一个 `MonumentBuilding`、读回 `regeneratePiecesAfterLoad` 重建房间图」的
   存档口径写在 `docs/worldgen-structures-plan.md` 4.1。
   存档这一块（第 7 步里属于这四个结构的部分）也已落地：`structure::pieces::Piece` 的
-  子类字段带 NBT 类型（`Extra::Byte/Int/Str`），`structure::save::SavePiece::from_layout`
+  子类字段带 NBT 类型（`Extra::Byte/Int/Float/Str`），`structure::save::SavePiece::from_layout`
   逐键写出官方类型（布尔 Byte、`Num`/`Type`/`Steps` Int、矿井 `D` 走
   `Direction.LEGACY_ID_CODEC_2D` 的 Byte、模板名 String，`Entrances` 是
   `BoundingBox.CODEC.listOf()` 的 IntArray 列表）；读回侧移植了
@@ -628,21 +628,25 @@ WebView2 的渲染进程不算在内。
   `LeafLitterBlock` 的 `isFaceSturdy(UP)`）、双高植物 `DoublePlantBlock.placeAt`、
   `would_survive` / `has_sturdy_face` / `matching_fluids` 谓词、组合类
   （`random_selector` / `weighted_random_selector` / `simple_random_selector` /
-  `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）、`clamped` /
-  `weighted_list` IntProvider、`block_column`（仙人掌 / 甘蔗 / 海带 / 洞穴藤蔓）、
+  `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）、`block_column`
+  （仙人掌 / 甘蔗 / 海带 / 洞穴藤蔓）、
   `vines`、`bamboo`、`multiface_growth`（发光地衣 / 幽匿脉络）、`vegetation_patch`
   （苔藓 / 苍白苔藓），以及 `environment_scan` / `surface_relative_threshold_filter` /
-  `noise_based_count` 修饰器。蘑菇的亮度判据（`FEATURES` 阶段 `getRawBrightness` 恒为 15，
+  `noise_based_count` / `random_chance` 修饰器和 `clamped` / `clamped_normal` /
+  `weighted_list` IntProvider。蘑菇的亮度判据（`FEATURES` 阶段 `getRawBrightness` 恒为 15，
   只剩 `overrides_mushroom_light_requirement` 标签生效）、睡莲、孢子花、海泡菜、海草、
   地毯的 `canSurvive` 也都已移植。
-  诚实的已知差异与未做：`weighted_list` 之外还有 `clamped_normal`；苔藓地毯
+  非植被那一批（`block_blob` / `geode` / `iceberg` / `lake` / `monster_room` /
+  `spring_feature` / `disk` / `underwater_magma` / `large_dripstone` / `speleothem` /
+  `speleothem_cluster` / `spike` / `blue_ice` / `freeze_top_layer`）由
+  `cb-wg-feat-a` 与 `cb-wg-caves` 移植，逐方块对拍 0 不一致。
+  诚实的已知差异与未做：苔藓地毯
   （`MossyCarpetBlock` 的 `placeAt`，含侧面 `nextBoolean`）仍未支持；藓类 patch 的
   地表集合用 Java `HashSet` 的迭代顺序决定植被随机数分配，本实现只复刻到链表，
   **桶内 8 个以上元素时官方会转红黑树、顺序不同**（`moss_patch_ceiling` 因此有 10 处
   未解决的 `cave_vines` 错位）；`waterlogged_vegetation_patch`
   （`clay_pool_with_dripleaves`）代码已写但没有任何对拍，**故意不接入**；
-  `noise_threshold_count` / `count_on_every_layer` / `surface_water_depth_filter`
-  修饰器；方块实体数据（蜂巢、可疑沙等）。
+  `noise_threshold_count` / `count_on_every_layer` 修饰器；方块实体数据（蜂巢、可疑沙等）。
   树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）已由 `cb-wg-trees` 合入 main；
   `projected_random_patchy_square` 在 26.3 导出数据里没有条目。
   组合类里只有 `simple_random_selector`（forest_flowers / flower_forest_flowers）

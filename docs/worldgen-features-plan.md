@@ -1359,6 +1359,42 @@ step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_pred
 `chorus_plant`、`huge_fungus`、`delta_feature`、`netherrack_replace_blobs`、`void_start_platform`
 等），它们**不在**主世界 `features_per_step` 里，本轮不做。
 
+## 5.3 四个分支合并后的现状（`cb-wg-integrate`）
+
+`cb-wg-aquatic`、`cb-wg-caves`、`cb-wg-feat-a`、`cb-wg-structures` 四个分支按顺序合入
+`cb-wg-integrate`。合并后 `feature/dispatch.rs` 的叶子、`placement.rs` 的修饰器、
+`provider.rs` 的 `IntProvider`、`state_provider.rs` 的提供者都是两边的并集，按类型 ID
+字母序排列。
+
+**同名实现只留一份**：
+
+| 名字 | 保留 | 原因 |
+|---|---|---|
+| `weighted_list` IntProvider | `provider.rs` 的 `Box<IntProvider>` 版 | main 上已有，且能递归任意子 provider |
+| `environment_scan` 修饰器 | `placement.rs` 的 `direction: i32` 版（`up=+1` / `down=-1`） | `cb-wg-aquatic` 引入，`cave_vines` / `lush_caves_*` 已对拍 0 不一致 |
+| `surface_relative_threshold_filter` | `placement.rs` 的 `SurfaceRelativeThreshold`（`i32` 边界 + `i64` 运算） | 两个分支各写了一份（一份 `i32`、一份 `i64` 字段）；官方的 `min_inclusive` / `max_inclusive` 是 `Codec.INT`，`i32` 更贴近，加法仍按官方用 long |
+| `multiface_growth` | `feature/multiface.rs` | 只有 `cb-wg-aquatic` 有实现 |
+| `clamped_normal` | `provider.rs` 的 `IntProvider::ClampedNormal` + `dripstone_utils::FloatProvider::ClampedNormal` | 两者分别服务 int 与 float 的官方类型（`ClampedNormalInt` / `ClampedNormalFloat`），不是重复 |
+| `FloatProvider`（float 版） | `dripstone_utils.rs` 那份，`provider.rs` 里的删掉 | 两处同名；`dripstone_utils` 版有 `Constant` 变体，裸浮点**不消费**随机数（官方 `ConstantFloat.sample` 不取数），更贴近官方 |
+| `random_chance` 修饰器 | `placement.rs`（只有 `cb-wg-caves` 有） | — |
+| `java_set`（`HashSet<BlockPos>` 迭代序） | `feature/java_set.rs` | 只有 `cb-wg-aquatic` 有 |
+
+**状态**（详细数字见 `reports/cb-wg-integrate.md`）：
+
+* 已验证 0 不一致并且仍接入 `dispatch`：`bamboo`、`block_column`、`block_blob`、
+  `blue_ice`、`disk`、`fallen_tree`、`geode`、`huge_*_mushroom`、`iceberg`、`lake`、
+  `large_dripstone`、`monster_room`、`multiface_growth`、`ore`、`simple_block`、
+  `speleothem`、`speleothem_cluster`、`spike`、`spring_feature`、`tree`、
+  `underwater_magma`、`vegetation_patch`（floor / ceiling）、`vines`。
+* 已写但**不接入**（`parse_leaf` 返回 `None`，整块标 `unsupported`）：`sculk_patch`
+  （`deep_dark` 单区块 8 处不一致，未收敛）、`waterlogged_vegetation_patch`
+  （`clay_pool_with_dripleaves` 完全没对拍）。
+* 已知未解决的差异：`moss_patch_ceiling` 的 10 处 `cave_vines` 错位（根因是
+  `JavaPosSet` 没实现 `java.util.HashMap` 的红黑树化）。
+* 没做：`fossil`、`overlay`（沙漠井，要 `template` 地物）、`root_system`、
+  `huge_fungus`、`chorus_plant`、`block_pile`、`noise_threshold_count` /
+  `count_on_every_layer` 修饰器。
+
 ## 6. 工作量估计
 
 按「每做完一小步就提交」的节奏，单位是人时（单人、含对拍调试，不含等答复）：

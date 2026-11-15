@@ -1281,3 +1281,22 @@ structures (Compound)
   接上后，把 `for_structures_in_chunk` 的产物填进同一套输入即可，并可把 `beard` 的
   输入换成真实生成的结构件再对拍一次。
 * 未完成的结构/阶段不假装支持：地物分支用 `unsupported` 标记，结构里程碑沿用同一做法。
+
+## 11. 四个分支合并后的现状（`cb-wg-integrate`，2026-11-14）
+
+`cb-wg-aquatic`、`cb-wg-caves`、`cb-wg-feat-a`、`cb-wg-structures` 四个分支按顺序合入。
+结构这边合并时只发生一处命名冲突，处理如下：
+
+| 冲突 | 处理 |
+|---|---|
+| 两个分支各有一个 `structure-place` 子命令，且**互换了 Java 源文件名** | main 上的 `StructurePlaceOracle.java` 是多件式结构件放置，`cb-wg-structures` 上的 `StructurePiecePlaceOracle.java` 是单件结构的 `postProcess`。按内容重新对应：`structure-place` 仍用 `StructurePlaceOracle.java`（多件式），单件的那份改名成 `structure-post-process` 子命令；`main.rs` 里两个 `const` / `mod` / match 分支 / 空实现函数都补齐成一对 |
+| `Piece.extras` 的类型 | main 改成了带 NBT 类型的 `BTreeMap<String, Extra>`，`cb-wg-structures` 还是 `BTreeMap<String, String>`。保留 main 的类型，并补 `Extra::Float`（海底遗迹的 `Integrity` 是 `putFloat`）；`Extra::token()` 带类型前缀供 `structure-pieces` / `structure-load` 用，新增 `Extra::plain_token()` 给三个只打印数值的 oracle（`structure-single` / `structure-templated` / `structure-ruined-portal`） |
+| `FeatureWorld::new` 的参数 | 多了一个 `seed`（晶洞的固定参数噪声要用），所有调用点已补 |
+
+合并后结构相关的对拍全部重跑（数字见 `reports/cb-wg-integrate.md`）：
+`structures` / `structure-rings` / `structure-validity` / `structure-generation` /
+`structure-single` / `structure-pieces` / `structure-save` / `structure-templated` /
+`structure-ruined-portal` / `beard` 全部 0 不一致；`structure-place`（多件式放置）仍是
+合并前 main 的状态——Java 侧跑全量时抛异常，未验证；`structure-post-process`（单件
+`postProcess`）是 18 处不一致，女巫小屋差一格，未通过。这两项都**没接进
+`feature/run.rs`**，游戏里结构件仍然一个方块都不放。
