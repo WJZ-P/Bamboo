@@ -313,6 +313,17 @@ mod tests {
     }
 
     #[test]
+    fn expands_the_corals_tag_into_default_states() {
+        // `#minecraft:corals` 有 10 个方块（5 植株 + 5 扇），都要能展开成默认状态。
+        // `#minecraft:corals` has ten blocks (five plants, five fans) and every one must
+        // expand to its default state.
+        let config: Value = json!({"blocks": "#minecraft:corals", "type": "minecraft:random_block"});
+        let provider = StateProvider::parse(&config).expect("corals tag parses");
+        let states = provider.possible_states();
+        assert_eq!(states.len(), 10, "{states:?}");
+    }
+
+    #[test]
     fn parses_weighted_and_randomized_int() {
         let weighted: Value = json!({
             "entries": [
