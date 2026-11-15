@@ -439,6 +439,22 @@ mod tests {
         }
     }
 
+    /// `MossyCarpetBlock` 覆写了 `canSurvive`（看下面那格是否同类 + `BASE`），
+    /// 且 `SimpleBlockFeature` 走 `MossyCarpetBlock.placeAt`（含侧面 `nextBoolean`），
+    /// 所以苍苔藓地毯必须仍是 unported，`pale_moss_vegetation` 才会被整块跳过。
+    ///
+    /// `MossyCarpetBlock` overrides `canSurvive` (same block below plus `BASE`) and
+    /// `SimpleBlockFeature` routes it through `MossyCarpetBlock.placeAt` (with side
+    /// `nextBoolean`), so pale moss carpet must stay unported.
+    #[test]
+    fn pale_moss_carpet_stays_unported() {
+        let pale = state("minecraft:pale_moss_carpet");
+        assert!(!supports(pale), "pale_moss_carpet must be unsupported");
+        // 同类的普通地毯（`CarpetBlock`）已移植，两者不能混。
+        // The plain `CarpetBlock` is ported; the two must not be confused.
+        assert!(supports(state("minecraft:moss_carpet")));
+    }
+
     #[test]
     fn double_plants_are_flagged_for_place_at() {
         assert!(is_double_plant(state("minecraft:tall_grass")));
