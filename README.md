@@ -563,24 +563,33 @@ WebView2 的渲染进程不算在内。
   所以存档读回后游戏里也还不会出现结构。Beardifier 见下面单独一条。
 - 地物（features）阶段的纯函数正按官方 `ChunkGenerator.applyBiomeDecoration` 逐类移植，
   游戏里的接入由流水线分支（邻居快照 + `features` 阶段）负责。已逐方块对拍
-  0 不一致的有 step 6 的矿石，以及 step 9 的植被子集（详见
-  `docs/worldgen-features-plan.md` 5.1）；其余类型仍明确标 `unsupported`，对拍时整块跳过，
-  不假装支持。本轮已移植：`simple_block` 的内联 bare-state 与 `weighted` /
-  `randomized_int` typed provider、一批继承 `VegetationBlock` 的存活判定（含
+  0 不一致的有 step 6 的矿石、step 9 的植被子集，以及水下植被与 `vegetation_patch`
+  （详见 `docs/worldgen-features-plan.md` 5.1）；其余类型仍明确标 `unsupported`，对拍时
+  整块跳过，不假装支持。已移植并接入：`simple_block` 的内联 bare-state 与 `weighted` /
+  `randomized_int` / `random_block` typed provider、holder 字符串引用（本轮补导出
+  `block_state_provider` 注册表）、一批继承 `VegetationBlock` 的存活判定（含
   `LeafLitterBlock` 的 `isFaceSturdy(UP)`）、双高植物 `DoublePlantBlock.placeAt`、
   `would_survive` / `has_sturdy_face` / `matching_fluids` 谓词、组合类
   （`random_selector` / `weighted_random_selector` / `simple_random_selector` /
-  `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）与 `clamped` IntProvider。
-  诚实的已知差异与未做：`to_place` 的 holder 字符串引用（`BLOCK_STATE_PROVIDER` 注册表未
-  导出）、蘑菇（要 `getRawBrightness`）、睡莲、孢子花、苔藓地毯、海泡菜等特殊
-  `canSurvive`；`schedule_tick` 忽略；`noise_threshold_count` / `noise_based_count` /
-  `environment_scan` / `surface_water_depth_filter` / `surface_relative_threshold_filter`
-  修饰器、`clamped_normal` / `weighted_list` IntProvider；方块实体数据（蜂巢、可疑沙等）。
-  树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）和水下/其余植被按分工移交给
-  `cb-wg-trees` / `cb-wg-aquatic`；`projected_random_patchy_square` 在 26.3 导出数据里没有
-  条目。组合类里只有 `simple_random_selector`（forest_flowers / flower_forest_flowers）
-  拿到 0 不一致对拍，其余组合类子项多为树/水生（已移交），place 逻辑按官方源码移植但
-  本轮未逐方块验证。此前 terrain 含水层在个别邻居区块（seed -1、chunk (52,-26)、
+  `random_boolean_selector` / `sequence`，递归 `PlacedFeature.place`）、`clamped` /
+  `weighted_list` IntProvider、`block_column`（仙人掌 / 甘蔗 / 海带 / 洞穴藤蔓）、
+  `vines`、`bamboo`、`multiface_growth`（发光地衣 / 幽匿脉络）、`vegetation_patch`
+  （苔藓 / 苍白苔藓），以及 `environment_scan` / `surface_relative_threshold_filter` /
+  `noise_based_count` 修饰器。蘑菇的亮度判据（`FEATURES` 阶段 `getRawBrightness` 恒为 15，
+  只剩 `overrides_mushroom_light_requirement` 标签生效）、睡莲、孢子花、海泡菜、海草、
+  地毯的 `canSurvive` 也都已移植。
+  诚实的已知差异与未做：`weighted_list` 之外还有 `clamped_normal`；苔藓地毯
+  （`MossyCarpetBlock` 的 `placeAt`，含侧面 `nextBoolean`）仍未支持；藓类 patch 的
+  地表集合用 Java `HashSet` 的迭代顺序决定植被随机数分配，本实现只复刻到链表，
+  **桶内 8 个以上元素时官方会转红黑树、顺序不同**（`moss_patch_ceiling` 因此有 10 处
+  未解决的 `cave_vines` 错位）；`waterlogged_vegetation_patch`
+  （`clay_pool_with_dripleaves`）代码已写但没有任何对拍，**故意不接入**；
+  `noise_threshold_count` / `count_on_every_layer` / `surface_water_depth_filter`
+  修饰器；方块实体数据（蜂巢、可疑沙等）。
+  树（`tree` 全部变种、`fallen_tree`、巨型蘑菇）已由 `cb-wg-trees` 合入 main；
+  `projected_random_patchy_square` 在 26.3 导出数据里没有条目。
+  组合类里只有 `simple_random_selector`（forest_flowers / flower_forest_flowers）
+  拿到 0 不一致对拍，其余组合类的 place 逻辑按官方源码移植但未逐方块验证。此前 terrain 含水层在个别邻居区块（seed -1、chunk (52,-26)、
   y=-54）与官方 3 格不一致，现已修复：补上官方 `Aquifer.NoiseBasedAquifer.computeSubstance`
   在「最近格子给的是水、正下方全局流体是岩浆」时跳过压力计算直接返回水的短路，并
   对齐 `shouldScheduleFluidUpdate` 的 similarity 门槛。该短路只影响岩浆层上边界 y=-54，

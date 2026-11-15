@@ -30,7 +30,7 @@ type Pos = (i32, i32, i32);
 /// `Holder<PlacedFeature>`：注册表引用名，或内联的 `{"feature":..,"placement":[..]}`。
 ///
 /// `Holder<PlacedFeature>`: a registry name or an inline placed-feature object.
-enum Child<'a> {
+pub(crate) enum Child<'a> {
     Registry(&'a str),
     Inline {
         feature: &'a Value,
@@ -39,7 +39,7 @@ enum Child<'a> {
 }
 
 impl<'a> Child<'a> {
-    fn parse(value: &'a Value) -> Option<Self> {
+    pub(crate) fn parse(value: &'a Value) -> Option<Self> {
         match value {
             Value::String(name) => Some(Self::Registry(name.as_str())),
             Value::Object(object) => Some(Self::Inline {
@@ -189,12 +189,35 @@ fn place_feature<'a>(
     random: &WorldgenRandom,
     pos: Pos,
 ) -> PlaceOutcome {
-    if let Some(leaf) = parse_leaf(kind, config) {
+    if let Some(leaf) = parse_leaf(kind, config, &|name| registry.state_provider(name)) {
         let placed = place_leaf(&leaf, world, random, pos);
         return PlaceOutcome {
             supported: true,
             placed,
         };
+    }
+    // `vegetation_patch` 需要注册表和 `PlacementEnv` 才能递归放子地物，不能当叶子。
+    //
+    // **只接 `vegetation_patch`**：`moss_patch`（floor）、`moss_patch_ceiling`
+    // （ceiling，还有 10 处未解决的 `cave_vines` 错位）、`pale_moss_patch` 都跑过逐方块
+    // 对拍；ceiling 的差异根因是 `JavaPosSet` 没实现 `HashMap` 树化，属已知限制。
+    // `waterlogged_vegetation_patch`（`clay_pool_with_dripleaves`）**没有任何对拍**，
+    // 所以不接，标 unsupported。
+    //
+    // `vegetation_patch` needs the registry and `PlacementEnv` to recurse into its child
+    // feature, so it cannot be a leaf.
+    //
+    // **Only `vegetation_patch` is wired**: `moss_patch` (floor), `moss_patch_ceiling`
+    // (ceiling, still 10 unresolved `cave_vines` offsets) and `pale_moss_patch` all went
+    // through per-block comparison; the ceiling difference traces back to `JavaPosSet` not
+    // implementing `HashMap` treeification, a documented limit.
+    // `waterlogged_vegetation_patch` (`clay_pool_with_dripleaves`) has **no comparison at
+    // all**, so it stays unsupported.
+    if kind == "minecraft:vegetation_patch" {
+        let Some(patch) = super::vegetation_patch::VegetationPatch::parse(kind, config) else {
+            return PlaceOutcome::unsupported();
+        };
+        return patch.place(registry, world, env, random, pos);
     }
     let Some(comp) = Composition::parse(kind, config) else {
         return PlaceOutcome::unsupported();
@@ -284,7 +307,7 @@ fn place_composition<'a>(
     }
 }
 
-fn place_child<'a>(
+pub(crate) fn place_child<'a>(
     child: &Child<'a>,
     registry: &'a Registry,
     world: &mut FeatureWorld<'_>,

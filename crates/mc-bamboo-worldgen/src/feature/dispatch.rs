@@ -12,11 +12,15 @@ use serde_json::Value;
 use crate::random::WorldgenRandom;
 
 use super::{
+    bamboo::BambooFeature,
+    block_column::BlockColumnFeature,
     huge_mushroom::HugeMushroomFeature,
+    multiface::MultifaceGrowthFeature,
     ores,
     placement::OreFeature,
     simple_block::SimpleBlockFeature,
     tree::{TreeFeature, fallen::FallenTreeFeature},
+    vines::VinesFeature,
     world::FeatureWorld,
 };
 
@@ -26,18 +30,37 @@ type Pos = (i32, i32, i32);
 pub enum Leaf {
     Ore(OreFeature),
     SimpleBlock(SimpleBlockFeature),
+    Bamboo(BambooFeature),
+    BlockColumn(BlockColumnFeature),
+    Multiface(MultifaceGrowthFeature),
+    Vines(VinesFeature),
     Tree(Box<TreeFeature>),
     FallenTree(Box<FallenTreeFeature>),
     HugeMushroom(Box<HugeMushroomFeature>),
 }
 
 /// 按 `Feature` 类型 ID 解析配置；未移植或解析不了的类型返回 `None`。
+/// `lookup` 用来解析 `Holder<BlockStateProvider>` 的字符串引用。
 ///
 /// Parse a config by `Feature` type ID; return `None` for unported / unparsable types.
-pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
+/// `lookup` resolves `Holder<BlockStateProvider>` string references.
+pub fn parse_leaf<'a>(
+    kind: &str,
+    config: &'a Value,
+    lookup: &dyn Fn(&str) -> Option<&'a Value>,
+) -> Option<Leaf> {
     match kind {
+        "minecraft:bamboo" => Some(Leaf::Bamboo(BambooFeature::parse(config)?)),
+        "minecraft:block_column" => Some(Leaf::BlockColumn(BlockColumnFeature::parse(
+            config, lookup,
+        )?)),
+        "minecraft:multiface_growth" => {
+            Some(Leaf::Multiface(MultifaceGrowthFeature::parse(config)?))
+        }
         "minecraft:ore" => Some(Leaf::Ore(OreFeature::parse(config).ok()?)),
-        "minecraft:simple_block" => Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(config)?)),
+        "minecraft:simple_block" => Some(Leaf::SimpleBlock(SimpleBlockFeature::parse(
+            config, lookup,
+        )?)),
         "minecraft:tree" => TreeFeature::parse(config).map(|tree| Leaf::Tree(Box::new(tree))),
         "minecraft:fallen_tree" => {
             FallenTreeFeature::parse(config).map(|tree| Leaf::FallenTree(Box::new(tree)))
@@ -46,6 +69,7 @@ pub fn parse_leaf(kind: &str, config: &Value) -> Option<Leaf> {
             HugeMushroomFeature::parse(kind, config)
                 .map(|mushroom| Leaf::HugeMushroom(Box::new(mushroom)))
         }
+        "minecraft:vines" => Some(Leaf::Vines(VinesFeature::parse(config)?)),
         _ => None,
     }
 }
@@ -62,6 +86,10 @@ pub fn place_leaf(
     match leaf {
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
+        Leaf::Bamboo(feature) => feature.place(world, random, pos),
+        Leaf::BlockColumn(feature) => feature.place(world, random, pos),
+        Leaf::Multiface(feature) => feature.place(world, random, pos),
+        Leaf::Vines(feature) => feature.place(world, random, pos),
         Leaf::Tree(tree) => tree.place(world, random, pos),
         Leaf::FallenTree(tree) => tree.place(world, random, pos),
         Leaf::HugeMushroom(mushroom) => mushroom.place(world, random, pos),

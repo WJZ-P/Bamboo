@@ -486,4 +486,44 @@ mod tests {
             assert_eq!(provider.sample(&a), expected);
         }
     }
+
+    #[test]
+    fn weighted_list_selects_then_samples_like_official() {
+        // `cactus` 第二层花：distribution [{data:0,w:3},{data:1,w:1}]，total=4。
+        // getRandomOrThrow 先 nextInt(4)，选中项再 sample（这里都是 Constant，不取数）。
+        // `cactus` flower layer: distribution [{data:0,w:3},{data:1,w:1}], total=4.
+        // getRandomOrThrow consumes nextInt(4), then samples the selected Constant.
+        let value: Value = serde_json::from_str(
+            r#"{"distribution":[{"data":0,"weight":3},{"data":1,"weight":1}],"type":"minecraft:weighted_list"}"#,
+        )
+        .unwrap();
+        let provider = IntProvider::parse(&value).unwrap();
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let selection = b.next_int(4);
+            let expected = if selection < 3 { 0 } else { 1 };
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
+
+    #[test]
+    fn weighted_list_with_nested_provider_consumes_both_draws() {
+        // `cave_vine` 高度：distribution 里是 uniform(0,2)，weight 单项为 1。
+        // nextInt(1) 仍消费一次，再 sample uniform。两个同种子源应完全一致。
+        // `cave_vine` height: distribution holds uniform(0,2), single weight 1.
+        // nextInt(1) still consumes one draw, then the uniform samples.
+        let value: Value = serde_json::from_str(
+            r#"{"distribution":[{"data":{"min_inclusive":0,"max_inclusive":2,"type":"minecraft:uniform"},"weight":1}],"type":"minecraft:weighted_list"}"#,
+        )
+        .unwrap();
+        let provider = IntProvider::parse(&value).unwrap();
+        let a = random();
+        let b = random();
+        for _ in 0..1000 {
+            let _ = b.next_int(1);
+            let expected = b.next_int_between_inclusive(0, 2);
+            assert_eq!(provider.sample(&a), expected);
+        }
+    }
 }

@@ -124,6 +124,16 @@ final class FeatureLevelHandler implements InvocationHandler {
                 return chunkAt((BlockPos) args[0]).chunk().getBlockState((BlockPos) args[0]);
             case "getFluidState":
                 return chunkAt((BlockPos) args[0]).chunk().getFluidState((BlockPos) args[0]);
+            case "isWaterAt": {
+                // LevelReader.isWaterAt 的默认实现是 `getFluidState(pos).is(WATER)`；
+                // 代理必须显式转发，否则孢子花之类的 canSurvive 会直接抛异常。
+                // LevelReader.isWaterAt defaults to `getFluidState(pos).is(WATER)`;
+                // the proxy has to forward it or canSurvive checks such as the spore
+                // blossom's throw.
+                BlockPos pos = (BlockPos) args[0];
+                return chunkAt(pos).chunk().getFluidState(pos)
+                        .is(net.minecraft.tags.FluidTags.WATER);
+            }
             case "setBlock": {
                 // LevelWriter 的 default 重载会转调 4 参数的 setBlock(pos,state,flags,recursionLeft)。
                 BlockPos pos = (BlockPos) args[0];
