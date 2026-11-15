@@ -1637,8 +1637,14 @@ fn run_capped_full(mut command: Command, work_dir: &Path) -> Result<(), String> 
         {
             continue;
         }
-        for seed in [0_i64, 1, 42, -7] {
-            for piece in [(0, 64, 0), (-13, 40, 27)] {
+        for seed in [0_i64, 1, 42, -7, 12_345_678_901, -98_765_432_123] {
+            for piece in [
+                (0, 64, 0),
+                (-13, 40, 27),
+                (128, -32, -96),
+                (-1000, 200, 1000),
+                (37, 7, -53),
+            ] {
                 queries.push(build_capped_full_query(&name, seed, piece));
             }
         }
