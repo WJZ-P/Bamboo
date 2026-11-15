@@ -287,7 +287,7 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
 
 fn rust_writes(q: &Query) -> Result<BTreeMap<(i32, i32, i32), u32>, String> {
     let chunks = synthetic_chunks(q.cx, q.cz);
-    let mut world = FeatureWorld::new(&chunks)?;
+    let mut world = FeatureWorld::new(&chunks, 63, q.seed)?;
     let pieces: Vec<Piece> = match q.kind {
         "igloo" => mc_bamboo_worldgen::structure::templated::igloo::generate(q.seed, q.cx, q.cz)?,
         "shipwreck_ocean" => mc_bamboo_worldgen::structure::templated::shipwreck::generate(

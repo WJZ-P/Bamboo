@@ -27,7 +27,7 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: chunkgen <java> [--seeds N] [--chunks N] [--salt S] \
-     [--through STAGE] [--steps 6] [--feature-types IDS] [--ore-only] [--show N] \
+     [--through STAGE] [--steps 6] [--types ID,ID | --feature-types IDS] [--ore-only] [--show N] \
      [--chunk X Z] [--scan N] [--break-self-test] \
      (--chunk X Z + --scan N = contiguous grid centered on X,Z)";
 /// 完整的 11 个地物步骤；`--steps` 只是过渡期的诊断开关。
@@ -113,13 +113,14 @@ struct Options {
     features: bool,
     /// 转发给 Java 侧的 `--steps` 掩码。
     steps: i32,
-    /// `--feature-types` / `--ore-only`：条目是 Feature 类型 ID 或 placed feature
-    /// 注册名；Java 侧只留这些 placed feature，Rust 侧用同一组条目过滤 indices。
-    /// `None` 表示不过滤（跑全部）。
+    /// `--types` / `--feature-types` / `--ore-only`：条目是 Feature 类型 ID 或 placed
+    /// feature 注册名；Java 侧只留这些 placed feature，Rust 侧用同一组条目过滤 indices。
+    /// `None` 表示不过滤（跑全部）。`--types` 是 `--feature-types` 的兼容别名。
     ///
-    /// `--feature-types` / `--ore-only`: each entry is a Feature type ID or a
-    /// placed-feature registry name; Java keeps only those placed features and Rust
-    /// filters indices by the same set. `None` means no filtering.
+    /// `--types` / `--feature-types` / `--ore-only`: each entry is a Feature type ID
+    /// or a placed-feature registry name; Java keeps only those placed features and
+    /// Rust filters indices by the same set. `None` means no filtering. `--types` is
+    /// a compatibility alias for `--feature-types`.
     feature_types: Option<Vec<String>>,
     /// 自检：故意改坏一个方块，确认比较器会报不一致。
     /// Self-test: deliberately break one block so the comparator must report a mismatch.
@@ -142,7 +143,7 @@ impl Options {
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
-                "--seeds" | "--chunks" | "--salt" | "--steps" | "--feature-types" => {
+                "--seeds" | "--chunks" | "--salt" | "--steps" | "--types" | "--feature-types" => {
                     let value = args.next().ok_or(USAGE)?;
                     if arg == "--steps" {
                         let mut mask = 0_i32;
@@ -154,18 +155,24 @@ impl Options {
                             mask |= 1 << step;
                         }
                         options.steps = mask;
-                    }
-                    if arg == "--feature-types" {
-                        let types: Vec<String> = value
+                    } else if arg == "--types" || arg == "--feature-types" {
+                        let selectors: Vec<String> = value
                             .split(',')
                             .map(|s| s.trim().to_owned())
                             .filter(|s| !s.is_empty())
                             .collect();
-                        options.feature_types = Some(types);
+                        options.feature_types = Some(selectors);
                     }
+                    // Java 侧只认 `--feature-types`；`--types` 是兼容别名，转发时改名。
+                    // Java only knows `--feature-types`; `--types` is an alias renamed here.
+                    let forwarded_arg = if arg == "--types" {
+                        "--feature-types".to_owned()
+                    } else {
+                        arg.to_owned()
+                    };
                     options
                         .forwarded
-                        .extend([arg.to_owned(), (*value).to_owned()]);
+                        .extend([forwarded_arg, (*value).to_owned()]);
                 }
                 "--ore-only" => {
                     options.feature_types = Some(vec!["minecraft:ore".to_owned()]);

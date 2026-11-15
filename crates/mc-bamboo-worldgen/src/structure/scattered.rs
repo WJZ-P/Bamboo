@@ -109,7 +109,7 @@ mod tests {
         let bb = [0, 64, 0, 0, 70, 0];
         let chunk_bb = [100, 0, 100, 115, 200, 115];
         let chunks = super::tests::empty_chunks(-64, 384);
-        let world = FeatureWorld::new(&chunks).unwrap();
+        let world = FeatureWorld::new(&chunks, 63, 0).unwrap();
         assert_eq!(average_ground_height(&world, &bb, &chunk_bb, 0), None);
     }
 

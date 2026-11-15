@@ -181,7 +181,7 @@ pub fn center_y(b: &Box) -> i32 {
 /// One piece of layout data. Intentionally richer than `start.rs::StructurePiece`
 /// (rotation / mirror / subclass params) because the oracle compares every field;
 /// kept separate from the save-time `StructurePiece` until the placement milestone.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Piece {
     /// `BuiltInRegistries.STRUCTURE_PIECE.getKey(type)`，例如 `minecraft:msroom`。
     pub id: String,
@@ -203,16 +203,19 @@ pub struct Piece {
 }
 
 /// 一条结构件子类存档字段的值，对应官方 `addAdditionalSaveData` 写的 NBT 类型。
-/// 只覆盖这四个多件式结构用到的类型：`putBoolean` → Byte，`putInt` → Int，
-/// `store(String 枚举 codec)` → String，`store(BYTE codec)`（`Direction` 的 `D`）→ Byte。
+/// 只覆盖这几个结构用到的类型：`putBoolean` → Byte，`putInt` → Int，
+/// `store(String 枚举 codec)` → String，`store(BYTE codec)`（`Direction` 的 `D`）→ Byte，
+/// `putFloat`（海底遗迹的 `Integrity`）→ Float。
 ///
 /// One subclass save value, matching the NBT type written by vanilla
 /// `addAdditionalSaveData`: `putBoolean` → Byte, `putInt` → Int, `store(String enum
-/// codec)` → String, and `store(BYTE codec)` (the mineshaft `D`) → Byte.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// codec)` → String, `store(BYTE codec)` (the mineshaft `D`) → Byte, and `putFloat`
+/// (the ocean ruin `Integrity`) → Float.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Extra {
     Byte(i8),
     Int(i32),
+    Float(f32),
     Str(String),
 }
 
@@ -224,21 +227,51 @@ impl Extra {
         match self {
             Self::Byte(v) => mc_bamboo_nbt::Tag::Byte(*v),
             Self::Int(v) => mc_bamboo_nbt::Tag::Int(*v),
+            Self::Float(v) => mc_bamboo_nbt::Tag::Float(*v),
             Self::Str(v) => mc_bamboo_nbt::Tag::String(v.clone()),
         }
     }
 
     /// 对拍用的标准串：数值带 NBT 类型前缀（`B:` / `I:` …），和 oracle 的 `tagTypeName`
     /// 一致；字符串原样。压平数值会让 Byte/Int 写错也发现不了。
+    /// 官方打印 `asNumber().longValue()`，所以 Float 也按截断成整数打印。
     ///
     /// Oracle token: numbers carry an NBT type prefix (`B:` / `I:` ...) matching the
     /// oracle's `tagTypeName`; strings are verbatim. Flattening numbers would hide
-    /// Byte-vs-Int mistakes.
+    /// Byte-vs-Int mistakes. The oracle prints `asNumber().longValue()`, so a Float is
+    /// truncated toward zero as well.
     pub fn token(&self) -> String {
         match self {
             Self::Byte(v) => format!("B:{v}"),
             Self::Int(v) => format!("I:{v}"),
+            Self::Float(v) => format!("F:{}", *v as i64),
             Self::Str(v) => v.clone(),
+        }
+    }
+
+    /// 不带类型前缀的串：`StructureSingleOracle` / `StructureTemplatedOracle` /
+    /// `StructureRuinedPortalOracle` 只打印 `asNumber().longValue()`，浮点则按
+    /// `Float.toString`（整数也带 `.0`）。
+    ///
+    /// The prefix-free form used by the single-piece, templated and ruined-portal
+    /// oracles, which print `asNumber().longValue()`, or `Float.toString` for floats
+    /// (integral values keep a `.0`).
+    pub fn plain_token(&self) -> String {
+        match self {
+            Self::Byte(v) => v.to_string(),
+            Self::Int(v) => v.to_string(),
+            Self::Float(v) => java_float(*v),
+            Self::Str(v) => v.clone(),
+        }
+    }
+
+    /// 字符串 extras 的借用（模板名这类只当标识用的键）。
+    ///
+    /// Borrow a string extra (for keys such as template names used as identifiers).
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Str(v) => Some(v),
+            _ => None,
         }
     }
 }
@@ -276,18 +309,11 @@ impl Piece {
         self.extras.insert(key.to_owned(), Extra::Int(value));
     }
 
-    /// 浮点 extras：按 Java `Float.toString` 的写法（整数也带 `.0`），对拍两侧一致。
+    /// 浮点 extras：官方 `putFloat` 写的是 `Tag.TAG_FLOAT`。
     ///
-    /// Float extras written the way Java's `Float.toString` does (integral values keep a
-    /// `.0`), so both oracle sides agree.
+    /// Float extras: vanilla `putFloat` writes a `Tag.TAG_FLOAT`.
     pub fn put_float(&mut self, key: &str, value: f32) {
-        let text = format!("{value}");
-        let text = if text.contains('.') || text.contains('e') || text.contains("inf") {
-            text
-        } else {
-            format!("{text}.0")
-        };
-        self.extras.insert(key.to_owned(), Extra::Str(text));
+        self.extras.insert(key.to_owned(), Extra::Float(value));
     }
 
     pub fn put_bool(&mut self, key: &str, value: bool) {
@@ -320,16 +346,31 @@ impl Piece {
 
     /// 对拍用的标准行：`P id bb6 O GD rot mirror extras`。
     /// extras 是按 key 排序的 `k=v`，用逗号连接，空则为 `-`。
-    /// `Entrances` 在这时按当前（已平移过的）盒子格式化。
+    /// `Entrances` 在这时按当前（已平移过的）盒子格式化。数值带 NBT 类型前缀，
+    /// 对应 `StructurePiecesOracle` / `StructureLoadOracle` 的口径。
     ///
     /// Canonical oracle line: `P id bb6 O GD rot mirror extras`. Extras are sorted
     /// `k=v` pairs joined by commas, `-` when empty. `Entrances` is formatted here
-    /// from the current (already-translated) boxes.
+    /// from the current (already-translated) boxes. Numbers carry the NBT type prefix,
+    /// matching the `StructurePiecesOracle` / `StructureLoadOracle` token.
     pub fn canonical_line(&self) -> String {
+        self.line(Extra::token)
+    }
+
+    /// 不带类型前缀的同一行：`StructureSingleOracle` / `StructureTemplatedOracle` /
+    /// `StructureRuinedPortalOracle` 只打印数值。
+    ///
+    /// The same line without the NBT type prefix, as printed by the single-piece,
+    /// templated and ruined-portal oracles.
+    pub fn plain_line(&self) -> String {
+        self.line(Extra::plain_token)
+    }
+
+    fn line(&self, token: fn(&Extra) -> String) -> String {
         let mut extras: BTreeMap<String, String> = self
             .extras
             .iter()
-            .map(|(k, v)| (k.clone(), v.token()))
+            .map(|(k, v)| (k.clone(), token(v)))
             .collect();
         if !self.entrances.is_empty() {
             let mut parts = Vec::with_capacity(self.entrances.len());
@@ -436,6 +477,19 @@ impl Builder {
         }
         let dy = y1_pos - bb[4];
         self.offset_vertically(dy);
+    }
+}
+
+/// `Float.toString(float)` 的文本形式：最短十进制表示，整数补 `.0`。
+///
+/// `Float.toString(float)` as text: the shortest decimal form, with `.0` added for
+/// integral values.
+fn java_float(value: f32) -> String {
+    let text = format!("{value}");
+    if text.contains('.') || text.contains('e') || text.contains("inf") || text.contains("NaN") {
+        text
+    } else {
+        format!("{text}.0")
     }
 }
 

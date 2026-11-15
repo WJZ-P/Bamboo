@@ -289,7 +289,7 @@ fn compare(
             }
         }
 
-        let ours: Vec<String> = ours.iter().map(Piece::canonical_line).collect();
+        let ours: Vec<String> = ours.iter().map(Piece::plain_line).collect();
         let n = java_lines.len().max(ours.len());
         pieces_total += java_lines.len();
         for i in 0..n {

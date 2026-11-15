@@ -105,25 +105,6 @@
   传 `null`），Rust 侧要精确复刻 `Shapes` 的 AABB 布尔运算、`getShuffledJigsawBlocks` 的
   洗牌顺序与 `SequencedPriorityIterator`，本次会话未能达到逐项 0 不一致，见第 10 节。
 
-**第四轮续（2026-11-14，`cb-wg-jigsaw` 分支：jigsaw 结构件生成）**：
-
-* 补完第四轮没做的 `JigsawPlacement.addPieces` 全递归：`structure::jigsaw` 下的
-  `config`（`HeightProvider` / `MaxDistance` / `DimensionPadding`）、`rotation`
-  （`Rotation` / `Util.shuffle` / `shuffledCopy`）、`element`（五种 pool element 的
-  `getSize` / `getBoundingBox` / `getShuffledJigsawBlocks` / `canAttach`）、`pool`
-  （`StructureTemplatePool` 的展开、`getRandomTemplate`、`getShuffledTemplates`、
-  `getMaxSize` 缓存）、`shapes`（`Shapes.join` / `joinIsNotEmpty` / `joinUnoptimized`
-  的乘 4 整数精确复刻）、`alias`（`PoolAliasLookup`）、`placer`（`tryPlacingChildren`
-  递归 + `SequencedPriorityIterator`）。
-* `structure::template` 增加模板按 id 缓存（对齐 `StructureTemplateManager.getOrCreate`，
-  否则 972 个查询要重复解析 NBT 几百万次）与按位置的 `getRandomPalette`
-  （`palette_index` / `jigsaws_at`），多 palette 模板不再固定取第一个。
-* 对拍 `jigsaw` 子命令四个模式：`templates`（1511 个模板的尺寸 / 方块数 / 拼图方块数）、
-  `jigsaws`（24176 个模板 × 旋转 × 位置查询、68352 个拼图方块逐字段）、
-  `pieces`（27 个结构 × 6 种子 × 6 区块 = 972 查询、12467 结构件逐字段，含每个 junction）、
-  `shapes`（120 场景 + 4 个 deflate case）。全部 0 不一致；四处故意改坏各自被抓到并失败。
-* 覆盖了 26.3 新增的 18 个 `abandoned_camp_*` jigsaw 结构（也在本分支范围内）。
-
 **第五轮（2026-11-14，`cb-wg-structures` 分支：单件布局 / Beardifier / 存档）**：
 
 * 合并了 `main` 及队友分支 `cb-fix-main` / `cb-wg-jigsaw` / `cb-wg-multipiece` /
@@ -618,64 +599,6 @@ Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_heigh
 * 仍是纯函数 + oracle：`chunk_nbt` 把 `structures` 当不透明标签原样保留，读回路径没有接进
   世界状态，游戏里仍不会出现结构。
 
-**模板结构放置（2026-11-14，分支 `cb-wg-templates`，部分已验证）**：
-
-* `structure::template_place`：`StructureTemplate.placeInWorld` 的等价实现加
-  `StructurePlaceSettings` 与 7 种 `StructureProcessor`（`BlockIgnoreProcessor` /
-  `BlockRotProcessor` / `RuleProcessor` / `BlockAgeProcessor` /
-  `BlackstoneReplaceProcessor` / `LavaSubmergedBlockProcessor` /
-  `ProtectedBlockProcessor`）。方块顺序照 `buildInfoList`（整方块、其它方块、带 nbt 的
-  方块，各自按 `(y, x, z)` 稳定排序），processor 随机源是
-  `RandomSource.create(Mth.getSeed(pos))`（`positional_seed`），palette 按模板位置选，
-  写完后跑 `updateShapeAtEdge` 与 `updateFromNeighbourShapes`。
-* `structure::post_process::igloo` / `shipwreck` / `ocean_ruin` / `ruined_portal`：四个结构
-  的 `postProcess` 方块部分（高度校正、processor 链、`spreadNetherrack` 等）。
-* 对拍 `cargo run -p mc-bamboo-vanilla -- structure-templated-place <java>` 与
-  `java/StructureTemplatedPlaceOracle.java`：合成地形（西半陆地、东半海）+ 官方
-  `postProcess` 写入日志逐格比。3 种子 × 4 区块 × 4 kind = 48 查询。
-  两边都按 `StructureStart.placeInChunk` 的编排（3×3 区块各一次、`chunkBB` 是该区块的
-  整列盒、世界在调用之间保留、`boundingBox` 可变），共 14435 个格子比较。
-  **当前结果（2026-11-14 第七轮末）**：`igloo=0`、`ocean_ruin_cold=0`、
-  `ocean_ruin_warm=0`、`shipwreck_ocean=29`，**剩 29 处不一致**。
-  故意改坏三处（palette 选择 +1 → 沉船 4154 处；`BlockRotProcessor` 比较方向反转 →
-  海底遗迹 5558 处；雪屋 `height - 90 - 1` 改 `height - 90` → 雪屋 3054 处），三处都被
-  抓到，还原后回到 29。
-  剩余 29 处全部是栅栏连接位（`oak_fence` / `jungle_fence` / `dark_oak_fence` 的
-  `east` / `west` 一个 bool 之差），根因是官方 `placeInWorld` 写完方块后
-  `level.updateNeighborsAt(blockPos, newState.getBlock())`（`StructureTemplate.java`
-  369 行）会触发邻居的 `neighborChanged`，而 `FeatureWorld` 没有这套传播；
-  `update_from_neighbour_shapes` 只覆盖了写入格自身。
-* **`updateShapeAtEdge` 在模板放置路径上暂时关闭**：打开它会让楼梯 / 栅栏的差异从 29 涨到
-  1706，说明 `feature/shape_update.rs`（写于树的上文）在 `updateMode = 2` 语义下不等价。
-  第七轮做了三组对照实验（每次只动一个开关，`SKIP_EDGE` / `SKIP_NEIGHBOURS` 环境变量）：
-  * 两步都关（`SKIP_EDGE=1 SKIP_NEIGHBOURS=1`）：沉船 **1977** 处 —— 说明
-    `updateFromNeighbourShapes` 必须有。
-  * 只跑 `updateFromNeighbourShapes`（当前状态）：**29** 处。
-  * 两步都跑：**1706** 处 —— 说明 `updateShapeAtEdge` 那份实现会把本该是
-    `shape=straight` 的楼梯改成 `outer_right`（差异对全是
-    `jungle_stairs`/`dark_oak_stairs` 的 `straight -> outer_right`），方向是「多改了一步」。
-  29 处全部落在结构件跨区块边界（x/z 在 0、15、16 附近），且都是栅栏的连接位，
-  与「官方 `updateShapeAtEdge` 会更新形状**外**的邻居」这一点吻合：关掉它之后，
-  跨区块那一侧的栅栏连接位没人更新，于是留 29 处差异。**两个开关都不对**：
-  29 处是「少了形状外更新」，1706 处是「形状内更新做错了」。
-* 第七轮修掉的**oracle 伪影**（这些是假世界缺方法造成的，不是产品代码问题）：
-  `isEmptyBlock` / `isStateAtPosition` / `isFluidAtPosition` / `updateNeighborsAt` /
-  `neighborChanged` / `levelEvent` 等 `WorldGenLevel` 方法，之前调用会抛
-  `UnsupportedOperationException` 让整条 query abort（雪屋 8 处），进而跳过
-  `this.templatePosition = oldTemplatePos` 还原、让 Y 偏移跨区块累加。
-  另外 `CappedProcessor` 需要的 `level.getLevel().getSeed()` 用 `Unsafe` 分配
-  `ServerLevel` + `DedicatedServer` + `WorldGenSettings` + `WorldOptions` 并填链上字段，
-  `levelData` 是 `final` 字段所以用 `Unsafe.putObject` 写。
-  还修了两处真 bug：`data_markers` 把 `StructureMode` 的小写 `"data"` 与官方
-  `LEGACY_CODEC` 的大写 `"DATA"` 比较错了（导致所有 marker 都被跳过），
-  以及海底遗迹的 `chest` marker 之前完全没实现（现在写 `ChestBlock` + `waterlogged`）。
-* **废弃传送门的 `postProcess` 已写但没进对拍查询集**（`structure-templated-place` 只有
-  igloo / shipwreck / ocean_ruin 三类）：它的 Java 侧构造需要真实注册表，
-  本轮时间不够，未验证。
-* 箱子内容、实体、战利品表只比方块状态：随机数照取（沉船的 `nextInt(3)`、
-  `BlockRotProcessor` 的 `nextFloat`、`RuleProcessor` 的 `nextFloat`），箱子战利品表的
-  `nextLong` 未取（`getBlockEntity` 在 `ProtoChunk` 里返回 null，两侧一致）。
-
 **多件式结构放置（2026-11-14，分支 `cb-wg-multipiece`，已写未验证）**：
 
 * `structure::piece_place`：官方 `StructurePiece` 的放置辅助层（`getWorldPos` /
@@ -786,9 +709,7 @@ deflate，把每个 gzip 字节按注册名排序拼成 `structures.bin`，另�
 front / top、`name` / `target` / `pool` / 优先级 / `joint`），单元测试解析全部 1511 个
 模板。`structure-templates` 对拍用官方 `NbtIo` 逐节点规范化整棵 NBT 树并校验导出字节
 等于 jar 原文，1511 个模板 0 不一致，故意改坏 Rust 的 int 标记会让 1511 个全部失败。
-多 palette 模板有 20 个，`getRandomPalette` 的按位置随机选择已在结构件生成那一步移植
-（`StructureTemplate::palette_index`，按 `Mth.getSeed(position)` 建随机源，不消耗世界随机源），
-并由 `jigsaw jigsaws` 对拍直接覆盖。
+多 palette 模板有 20 个，`getRandomPalette` 的按位置随机选择留到结构件生成那一步处理。
 
 ### 2.3 为什么用 codec 重编码而不是直接拷 jar 里的 JSON
 
@@ -1159,8 +1080,8 @@ structures (Compound)
 | 1 | 本方案文档 | — | **做完** |
 | 2 | 数据导出：`worldgen.json` 加四键，Rust 解析骨架 | `extract` 重跑无 diff（除四键）、旧 `chunkgen --through carvers` 仍 0 | **做完**：重跑无 diff、`--through carvers` 小样本 0 不一致 |
 | 3 | 放置：`random_spread`（含频率削减、exclusion zone、spread type）、`concentric_rings` 几何 | 大范围区块「哪个区块有哪个结构起点」0 不一致；新对拍先故意改坏一处确认会失败 | **做完**：20 集 × 464 查询 = 9280 放置比较 + 9744 加权选择比较 0 不一致；`concentric_rings` 6 种子 768 环位置 + 864 `isStructureChunk` 0 不一致 |
-| 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **部分做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿 / 林地府邸（`structure-pieces` 336 查询 77960 结构件 0 不一致）、需要模板的雪屋 / 沉船 / 海底遗迹（`structure-templated` 480 查询 1685 结构件 0 不一致）、废弃传送门（`structure-ruined-portal` 648 查询 110 结构件 0 不一致，含 `findSuitableY` 整列搜索与 `Mirror.FRONT_BACK`）、jigsaw 全部（`cb-wg-jigsaw`，`jigsaw pieces` 972 查询 12467 结构件 0 不一致）已做 |
-| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分做完（方块部分）**：`structure-place` 按写入日志逐格比：埋藏的宝藏 16 查询 0 不一致；女巫小屋 18 处不一致；沙漠神殿没进查询集。`cb-wg-templates` 补上四个模板结构的 `postProcess`、`structure::template_place`（`placeInWorld` + 7 种 processor 含 `CappedProcessor`），新对拍 `structure-templated-place` 48 查询 14435 格（按 `placeInChunk` 的 3×3 编排）**雪屋 / 海底遗迹（暖、冷）0 不一致**，**沉船剩 29 处**（栅栏连接位，缺 `updateNeighborsAt` 传播）；三处故意改坏各报 4154 / 5558 / 3054 处后被还原。`updateShapeAtEdge` 在模板路径上暂时关闭（打开会让沉船涨到 1706）。**废弃传送门已写未验证**。方块实体、战利品表、拼图替换没做，**所有 `postProcess` 都没接进 `feature/run.rs`** |
+| 4 | 结构件生成：旧式（沉船、海底遗迹、沙漠/丛林神殿、女巫小屋、雪屋、埋藏宝藏、废弃矿井、要塞、林地府邸、海底神殿、废弃传送门）先做，再 jigsaw（村庄、前哨站、古城、试炼密室、古迹废墟） | 每个结构起点 + 全部结构件的包围盒、朝向、类型 0 不一致 | **部分做完**：四个代码生成单件结构（沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏宝藏，`structure-single` 384 查询 0 不一致）、废弃矿井 / 要塞 / 海底神殿 / 林地府邸（`structure-pieces` 336 查询 77960 结构件 0 不一致）、需要模板的雪屋 / 沉船 / 海底遗迹（`structure-templated` 480 查询 1685 结构件 0 不一致）、废弃传送门（`structure-ruined-portal` 648 查询 110 结构件 0 不一致，含 `findSuitableY` 整列搜索与 `Mirror.FRONT_BACK`）已做；jigsaw 结构件没做 |
+| 5 | `features` 阶段结构件放置：processor、方块实体、拼图替换、战利品表 | `chunkgen --through features` 逐方块 0 不一致 | **部分已写未验证**：`structure::piece_place`（放置辅助）、`structure::state_transform`（mirror/rotate）、`structure::pieces::mineshaft_place`（矿井四种）与 `stronghold_place`（要塞十二种）已移植；`structure-place` 子命令（多件式结构件放置，`StructurePiecePlaceOracle.java`）对矿井是 354 处不一致、对要塞还没跑通。**没有接进 Director**，见第 0 节「多件式结构放置」。<br>**部分做完（方块部分）**：单件结构的 `postProcess` 走独立子命令 `structure-post-process`（`StructurePlaceOracle.java`），按写入日志逐格比：埋藏的宝藏 16 查询 0 不一致；**女巫小屋 18 处不一致（未通过）**，Java 的地下柱子比 Rust 低一格；沙漠神殿没进查询集（`SKIPPED`），最后实测 6953 处。丛林神殿、processor、方块实体、战利品表、拼图替换没做，**三份 `postProcess` 都没接进 `feature/run.rs`** |
 | 6 | `Beardifier` 接进 terrain 密度 | terrain 阶段（EMPTY 回归 + 有结构地基）0 不一致 | **做完（纯函数 + 对拍，`cb-wg-beard`）**：`beard` 12 用例 5,912,076 比较 0 不一致（kernel / sampleValue / sampleVolume / affectedBox / 三阶段方块），`--break-self-test` 会失败；`chunkgen --through carvers` EMPTY 回归仍 0。**没接进 Director**：游戏里仍走 `EMPTY` |
 | 7 | 存档：`structures` 键写/读；海底神殿「只存一个 `MonumentBuilding`、读回重建房间图」的口径见 4.1 | 读回一致，`world-dir` 确认官方能读 | **通用编码做完**：`structure-save` 8 case 规范 NBT 0 不一致，官方 `PiecesContainer.load` / `save` 往返、`world-dir` 的 `SerializableChunkData.parse` 都能读。**多件式结构的读回做完**（`cb-wg-multipiece`）：子类字段带 NBT 类型，`PiecesContainer.load` / `loadStaticStart` / `regeneratePiecesAfterLoad` 移植并对拍（`structure-load` 80 查询、8218 读回件、656 重建行 0 不一致），见第 0 节「多件式结构存档」 |
 
@@ -1299,44 +1220,20 @@ structures (Compound)
 ## 10. 已知限制（第五轮结束时，2026-11-14）
 
 * 主世界以外的维度（下界、末地）不做。Bamboo 目前没有下界/末地维度。
-* **`cb-wg-templates` 分支（2026-11-14，第七轮）**：四个模板结构的 `postProcess`
-  方块部分已写进 `structure::post_process::{igloo, shipwreck, ocean_ruin, ruined_portal}`，
-  底层是 `structure::template_place` 的 `placeInWorld` + 7 种 processor（含
-  `CappedProcessor`）+ `updateFromNeighbourShapes`。
-  `structure-templated-place`（48 查询、按 `placeInChunk` 的 3×3 编排共 14435 格）：
-  **雪屋 0、海底遗迹（暖 / 冷）0 不一致**，**沉船剩 29 处**（栅栏连接位，缺
-  `updateNeighborsAt` 的邻居传播）。三处故意改坏各报 4154 / 5558 / 3054 处，还原后回 29。
-  **`updateShapeAtEdge` 在模板路径上暂时关闭**：打开会让沉船从 29 涨到 1706，说明
-  `feature/shape_update.rs`（写于树的上文）在模板放置的 `updateMode = 2` 语义下不等价。
-  **废弃传送门未进查询集**。箱子内容、实体、战利品表只比方块状态。
 * **全是纯函数 + 对拍，没接进游戏**：`structure_starts` / `structure_references` 两个阶段
   仍是空实现，本模块的结果没有进 Director 的流水线，游戏里世界仍是超平坦。
 * `.nbt` 结构模板**已导出**（第 2.2 节）：`cb-wg-jigsaw` 分支从 jar 原样导出 1511 个、
   4236847 字节，重跑无 diff，Rust 侧可解析并经官方 `NbtIo` 逐节点对拍 0 不一致。
   20 个多 palette 模板的 `StructurePlaceSettings.getRandomPalette`（按位置
-  `RandomSource.create(Mth.getSeed(pos))` 选 palette）已在 jigsaw 结构件生成里移植，
-  并由 `jigsaw jigsaws` 对拍覆盖（见下一条）。
-* **jigsaw 结构件生成已做完（纯函数 + 对拍，`cb-wg-jigsaw`）**：
-  `mc-bamboo-worldgen::structure::jigsaw` 移植了 `JigsawStructure.findGenerationPoint` 与
-  `JigsawPlacement.addPieces` 的完整递归——`HeightProvider.sample`、`Rotation.getRandom` /
-  `getShuffled`、模板按 id 缓存（对齐 `StructureTemplateManager.getOrCreate`）、
-  `getRandomPalette` 的按位置选择、`Palette.jigsaws()` 顺序 + `Util.shuffle` + 稳定按
-  `selectionPriority` 降序、`PoolAliasLookup`（`direct` / `random` / `random_group`）、
-  `getRandomTemplate` / `getShuffledTemplates` / `getMaxSize`、`canAttach`、
-  `Shapes` 的三种布尔运算（乘 4 整数精确复刻 `deflate(0.25)`）、
-  `SequencedPriorityIterator`、`project_start_to_heightmap` / `getFirstFreeHeight`、
-  `isStartTooCloseToWorldHeightLimits`、`doExpansionHack`；五种 pool element 全部支持。
-  对拍 `jigsaw pieces`：27 个结构（村庄 5 种、掠夺者前哨站、古城、试炼密室、古迹废墟、
-  26.3 新增的 18 种 `abandoned_camp`）× 6 种子 × 6 区块 = 972 个查询、12467 个结构件的
-  类型 / 模板名 / 位置 / 旋转 / 包围盒 / `groundLevelDelta` / 全部 junction 字段 0 不一致；
-  `jigsaw jigsaws` 对 1511 个模板 × 4 旋转 × 4 位置 = 24176 个查询、68352 个拼图方块的
-  位置 / front / top / name / target / pool / joint / 优先级 0 不一致；`jigsaw shapes` 120
-  场景 0 不一致。四处故意改坏各自被抓到并失败。
-  仍没做：`Piece` 只有结构件列表，方块写入（`placeInChunk` / `postProcess` / processors /
-  拼图替换 / 方块实体）属第 5 步；`Piece::to_save_piece` 只给 `id` / `BB` / `O=-1` / `GD=0`，
-  `addAdditionalSaveData` 的 `pool_element` / `rotation` / `junctions` 还没编码。
-  `start_height` 只支持 `constant` 与 `uniform`（26.3 主世界全部 28 个 jigsaw 结构只用这两种）；
-  `bastion_remnant` 是下界结构，不做。
+  `RandomSource.create(Mth.getSeed(pos))` 选 palette）尚未移植，结构件生成要用时补。
+* **jigsaw 结构件生成（`JigsawPlacement.addPieces` 及 5 类 jigsaw 结构）没做**：`addPieces`
+  依赖 `StructureTemplateManager` 加载模板、`Shapes` 的 VoxelShape 布尔空间检查（`ONLY_FIRST`
+  / `ONLY_SECOND` / `deflate(0.25)` / `MutableObject` 共享 / `sourceFree` 与 `contextFree`）、
+  `Rotation.getShuffled` / `getShuffledTemplates` / `getRandomTemplate` 的随机取数顺序、
+  `SequencedPriorityIterator` 的 placementPriority 队列，以及各结构 `findGenerationPoint`
+  的 `HeightProvider` / `PoolAliasLookup` / `DimensionPadding` / `LiquidSettings`。官方对拍
+  还要把 `Structure.GenerationContext` 的 `structureTemplateManager` 从 `null` 换成真实实例
+  （构造器需要 `LevelStorageAccess` 与 `DataFixer`）。这些都没移植，不假装支持。
 * `concentric_rings`（要塞）的环几何 + `findBiomeHorizontal` 吸附已移植并对拍
   0 不一致；但要塞的 `isStructureChunk` 必须先由调用方 `set_ring_positions` 注入
   `ring_positions` 的结果，没注入时仍返回 false。`Placement::is_placement_chunk` 单独
@@ -1355,9 +1252,10 @@ structures (Compound)
   结构集、不含 `isStructureChunk` 命中过滤。
 * 第五轮已落地并对拍：`structure::single` 的四个代码生成单件结构布局、
   `structure::templated` 的雪屋 / 沉船 / 海底遗迹布局（第 4 步一部分）、
-  `mc-bamboo-worldgen::beardifier`（第 6 步，`cb-wg-beard`，见第 5 节）、`structure::save` 的 `structures` 键（第 7 步）、
-  以及 `structure::jigsaw` 的 jigsaw 结构件生成（第 4 步的 jigsaw 部分，`cb-wg-jigsaw`，
-  972 查询 / 12467 结构件 0 不一致）。仍是纯函数/类型，没有接进游戏。
+  `mc-bamboo-worldgen::beardifier`（第 6 步，`cb-wg-beard`，见第 5 节）、`structure::save` 的 `structures` 键（第 7 步）。
+  仍没做：jigsaw 结构件生成（第 4 步其余）、`features` 阶段结构件
+  放置（第 5 步，`placeInChunk` / `postProcess` / processors / 方块实体 / 拼图替换），
+  以及把全部结构起点接进 Director。这些仍是纯函数/类型，没有接进游戏。
 * 废弃传送门的布局已做（第六轮，见下面「第六轮」一段）；它的 `postProcess`
   （`spreadNetherrack`、`maybeAddVines`、`addNetherrackDripColumnsBelowPortal`）
   和其余三个结构一样没做。
@@ -1383,3 +1281,22 @@ structures (Compound)
   接上后，把 `for_structures_in_chunk` 的产物填进同一套输入即可，并可把 `beard` 的
   输入换成真实生成的结构件再对拍一次。
 * 未完成的结构/阶段不假装支持：地物分支用 `unsupported` 标记，结构里程碑沿用同一做法。
+
+## 11. 四个分支合并后的现状（`cb-wg-integrate`，2026-11-14）
+
+`cb-wg-aquatic`、`cb-wg-caves`、`cb-wg-feat-a`、`cb-wg-structures` 四个分支按顺序合入。
+结构这边合并时只发生一处命名冲突，处理如下：
+
+| 冲突 | 处理 |
+|---|---|
+| 两个分支各有一个 `structure-place` 子命令，且**互换了 Java 源文件名** | main 上的 `StructurePlaceOracle.java` 是多件式结构件放置，`cb-wg-structures` 上的 `StructurePiecePlaceOracle.java` 是单件结构的 `postProcess`。按内容重新对应：`structure-place` 仍用 `StructurePlaceOracle.java`（多件式），单件的那份改名成 `structure-post-process` 子命令；`main.rs` 里两个 `const` / `mod` / match 分支 / 空实现函数都补齐成一对 |
+| `Piece.extras` 的类型 | main 改成了带 NBT 类型的 `BTreeMap<String, Extra>`，`cb-wg-structures` 还是 `BTreeMap<String, String>`。保留 main 的类型，并补 `Extra::Float`（海底遗迹的 `Integrity` 是 `putFloat`）；`Extra::token()` 带类型前缀供 `structure-pieces` / `structure-load` 用，新增 `Extra::plain_token()` 给三个只打印数值的 oracle（`structure-single` / `structure-templated` / `structure-ruined-portal`） |
+| `FeatureWorld::new` 的参数 | 多了一个 `seed`（晶洞的固定参数噪声要用），所有调用点已补 |
+
+合并后结构相关的对拍全部重跑（数字见 `reports/cb-wg-integrate.md`）：
+`structures` / `structure-rings` / `structure-validity` / `structure-generation` /
+`structure-single` / `structure-pieces` / `structure-save` / `structure-templated` /
+`structure-ruined-portal` / `beard` 全部 0 不一致；`structure-place`（多件式放置）仍是
+合并前 main 的状态——Java 侧跑全量时抛异常，未验证；`structure-post-process`（单件
+`postProcess`）是 18 处不一致，女巫小屋差一格，未通过。这两项都**没接进
+`feature/run.rs`**，游戏里结构件仍然一个方块都不放。

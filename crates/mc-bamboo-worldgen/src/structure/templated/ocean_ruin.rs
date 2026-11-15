@@ -27,6 +27,9 @@ use crate::structure::{
     templated::{MIRROR_NONE, rotation_name, template_bounds},
 };
 
+#[cfg(test)]
+use crate::structure::pieces::Extra;
+
 /// `OceanRuinStructure.Type`：暖水 / 冷水。
 ///
 /// `OceanRuinStructure.Type`: warm or cold.
@@ -344,7 +347,6 @@ pub fn generate(seed: i64, cx: i32, cz: i32, config: Config) -> Result<Vec<Piece
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::structure::pieces::Extra;
 
     const WARM: Config = Config {
         biome_temp: BiomeTemp::Warm,
@@ -365,29 +367,24 @@ mod tests {
     fn templates_follow_the_biome_kind() {
         for seed in 0..32 {
             let warm = generate(seed, 4, 9, WARM).unwrap();
-            let warm_name = warm[0].get_str("Template").unwrap();
-            assert!(WARM_RUINS.contains(&warm_name) || BIG_WARM_RUINS.contains(&warm_name));
+            let warm_template = warm[0].extras["Template"].as_str().unwrap();
+            assert!(WARM_RUINS.contains(&warm_template) || BIG_WARM_RUINS.contains(&warm_template));
             let cold = generate(seed, 4, 9, COLD).unwrap();
             let big = cold[0].extras["IsLarge"] == Extra::Byte(1);
-            let suffix = cold[0]
-                .get_str("Template")
-                .unwrap()
-                .rsplit('_')
-                .next()
-                .unwrap()
-                .to_owned();
+            let template = cold[0].extras["Template"].as_str().unwrap();
+            let suffix = template.rsplit('_').next().unwrap().to_owned();
             for (i, kind) in ["brick", "cracked", "mossy"].iter().enumerate() {
                 assert_eq!(
-                    cold[i].get_str("Template"),
-                    Some(cold_template(kind, big, &suffix).as_str())
+                    cold[i].extras["Template"],
+                    Extra::Str(cold_template(kind, big, &suffix))
                 );
             }
             assert_eq!(
-                cold[0].get_str("Integrity"),
-                Some(if big { "0.9" } else { "0.8" })
+                cold[0].extras["Integrity"],
+                Extra::Float(if big { 0.9 } else { 0.8 })
             );
-            assert_eq!(cold[1].get_str("Integrity"), Some("0.7"));
-            assert_eq!(cold[2].get_str("Integrity"), Some("0.5"));
+            assert_eq!(cold[1].extras["Integrity"], Extra::Float(0.7));
+            assert_eq!(cold[2].extras["Integrity"], Extra::Float(0.5));
         }
     }
 

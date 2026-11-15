@@ -214,7 +214,7 @@ fn rust_lines(
         "shipwreck_beached" => templated::shipwreck::generate(q.seed, q.cx, q.cz, true)?,
         other => return Err(format!("no Rust layout for kind {other}")),
     };
-    Ok(pieces.iter().map(Piece::canonical_line).collect())
+    Ok(pieces.iter().map(Piece::plain_line).collect())
 }
 
 fn compare(

@@ -13,22 +13,32 @@ pub struct FeatureWorld<'a> {
     pub center_z: i32,
     pub min_y: i32,
     pub height: i32,
+    /// `WorldGenRegion.getSeaLevel()`，来自 `NoiseGeneratorSettings.seaLevel()`。
+    ///
+    /// `WorldGenRegion.getSeaLevel()`, from `NoiseGeneratorSettings.seaLevel()`.
+    pub sea_level: i32,
+    /// `level.getSeed()`：世界种子，晶洞这类固定参数噪声要用。
+    ///
+    /// `level.getSeed()`: the world seed, needed by fixed-parameter noises such as the geode.
+    pub seed: i64,
     /// 9 个区块的可变方块；中心在 [`CENTER`]。
     pub blocks: [ChunkBlocks; 9],
     /// 只读的 quart 群系格。
     pub biomes: &'a [Vec<Vec<u32>>; 9],
-    /// primed 高度图（terrain 阶段算好的）；`set_block` 会按 `Heightmap.update` 增量更新
-    /// 四种 FINAL 类型。拥有一份可变拷贝，不借用输入，后续 feature 才能读到更新后的值。
+    /// primed 高度图（terrain 阶段算好的）；`set_block_with_heightmaps` 会按
+    /// `Heightmap.update` 增量更新四种 FINAL 类型。拥有一份可变拷贝，不借用输入，
+    /// 后续 feature 才能读到更新后的值。
     ///
-    /// Primed heightmaps, owned so `set_block` can update the four FINAL types
-    /// incrementally via `Heightmap.update`; later features read the updated values.
+    /// Primed heightmaps, owned so `set_block_with_heightmaps` can update the four
+    /// FINAL types incrementally via `Heightmap.update`; later features read the
+    /// updated values.
     pub heights: [Heightmaps; 9],
     /// 8 个邻居的写增量，中心不记（中心直接交回 `blocks[4]`）。
     pub deltas: [Vec<(i32, i32, i32, u32)>; 9],
 }
 
 impl<'a> FeatureWorld<'a> {
-    pub fn new(input: &'a FeatureChunks) -> Result<Self, String> {
+    pub fn new(input: &'a FeatureChunks, sea_level: i32, seed: i64) -> Result<Self, String> {
         if input.blocks.len() != 9 || input.biomes.len() != 9 || input.heights.len() != 9 {
             return Err("FeatureChunks must contain 9 chunks".to_owned());
         }
@@ -38,6 +48,8 @@ impl<'a> FeatureWorld<'a> {
             center_z: input.center_z,
             min_y: input.min_y,
             height: input.height,
+            sea_level,
+            seed,
             blocks: input.blocks.clone(),
             biomes: &input.biomes,
             heights: input.heights,
@@ -176,6 +188,20 @@ impl<'a> FeatureWorld<'a> {
     /// `BiomeFilter` 需要这个，见 `feature::run`。
     pub fn is_air(&self, x: i32, y: i32, z: i32) -> bool {
         state_facts(self.get_block(x, y, z)) & facts::AIR != 0
+    }
+
+    /// `LevelHeightAccessor.isInsideBuildHeight(y)`。
+    ///
+    /// `LevelHeightAccessor.isInsideBuildHeight(y)`.
+    pub fn is_inside_build_height(&self, y: i32) -> bool {
+        y >= self.min_y && y < self.min_y + self.height
+    }
+
+    /// `LevelHeightAccessor.isOutsideBuildHeight(y)`。
+    ///
+    /// `LevelHeightAccessor.isOutsideBuildHeight(y)`.
+    pub fn is_outside_build_height(&self, y: i32) -> bool {
+        !self.is_inside_build_height(y)
     }
 }
 

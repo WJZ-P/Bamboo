@@ -233,5 +233,8 @@ fn extra_float(piece: &Piece, key: &str) -> Option<f32> {
     piece
         .extras
         .get(key)
-        .and_then(|value| value.token().parse::<f32>().ok())
+        .and_then(|value| match value {
+            crate::structure::pieces::Extra::Float(value) => Some(*value),
+            _ => None,
+        })
 }
