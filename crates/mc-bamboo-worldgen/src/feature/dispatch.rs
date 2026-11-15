@@ -17,6 +17,7 @@ use super::{
     block_column::BlockColumnFeature,
     blue_ice::{self, BlueIceFeature},
     disk::{self, DiskFeature},
+    fossil::FossilFeature,
     geode::{self, GeodeFeature},
     huge_mushroom::HugeMushroomFeature,
     iceberg::{self, IcebergFeature},
@@ -28,7 +29,6 @@ use super::{
     placement::OreFeature,
     sculk_patch::{self, SculkPatchFeature},
     simple_block::SimpleBlockFeature,
-    single_block_pillar::SingleBlockPillarFeature,
     speleothem::{self, SpeleothemFeature},
     speleothem_cluster::{self, SpeleothemClusterFeature},
     spike::{self, SpikeFeature},
@@ -53,6 +53,10 @@ pub enum Leaf {
     BlueIce(BlueIceFeature),
     Disk(DiskFeature),
     FallenTree(Box<FallenTreeFeature>),
+    /// `FossilFeature`：沙漠 / 沼泽地下的化石，基座与矿脉各放一次。
+    ///
+    /// `FossilFeature`: an underground fossil, placed twice (base then ore overlay).
+    Fossil(Box<FossilFeature>),
     Geode(Box<GeodeFeature>),
     HugeMushroom(Box<HugeMushroomFeature>),
     Iceberg(IcebergFeature),
@@ -78,14 +82,6 @@ pub enum Leaf {
     Tree(Box<TreeFeature>),
     UnderwaterMagma(UnderwaterMagmaFeature),
     Vines(VinesFeature),
-    /// `NoOpFeature`：什么都不做，但 `place` 返回 true。
-    ///
-    /// `NoOpFeature`: does nothing but returns true from `place`.
-    NoOp,
-    /// `SingleBlockPillarFeature`：沿竖直方向连续放方块。
-    ///
-    /// `SingleBlockPillarFeature`: stack one block along a vertical axis.
-    SingleBlockPillar(Box<SingleBlockPillarFeature>),
 }
 
 impl Leaf {
@@ -124,6 +120,7 @@ pub fn parse_leaf<'a>(
         "minecraft:blue_ice" => Leaf::BlueIce(BlueIceFeature::parse(config).ok()?),
         "minecraft:disk" => Leaf::Disk(DiskFeature::parse(config).ok()?),
         "minecraft:fallen_tree" => Leaf::FallenTree(Box::new(FallenTreeFeature::parse(config)?)),
+        "minecraft:fossil" => Leaf::Fossil(Box::new(FossilFeature::parse(config)?)),
         "minecraft:geode" => Leaf::Geode(Box::new(GeodeFeature::parse(config).ok()?)),
         "minecraft:huge_brown_mushroom" | "minecraft:huge_red_mushroom" => {
             Leaf::HugeMushroom(Box::new(HugeMushroomFeature::parse(kind, config)?))
@@ -135,9 +132,6 @@ pub fn parse_leaf<'a>(
         }
         "minecraft:monster_room" => Leaf::MonsterRoom(MonsterRoomFeature::parse(config).ok()?),
         "minecraft:multiface_growth" => Leaf::Multiface(MultifaceGrowthFeature::parse(config)?),
-        // `MapCodec.unit(NoOpFeature::new)`：配置里没有字段，`place` 恒返回 true。
-        // `MapCodec.unit(NoOpFeature::new)`: no fields, `place` always returns true.
-        "minecraft:no_op" => Leaf::NoOp,
         "minecraft:ore" => Leaf::Ore(OreFeature::parse(config).ok()?),
         // `ScatteredOreFeature` 复用 `AbstractOreFeature` 的 codec，配置结构相同。
         // `ScatteredOreFeature` shares the `AbstractOreFeature` codec, so the config
@@ -145,9 +139,6 @@ pub fn parse_leaf<'a>(
         "minecraft:scattered_ore" => Leaf::ScatteredOre(OreFeature::parse(config).ok()?),
         "minecraft:sculk_patch" => Leaf::SculkPatch(SculkPatchFeature::parse(config)?),
         "minecraft:simple_block" => Leaf::SimpleBlock(SimpleBlockFeature::parse(config, lookup)?),
-        "minecraft:single_block_pillar" => {
-            Leaf::SingleBlockPillar(Box::new(SingleBlockPillarFeature::parse(config)?))
-        }
         "minecraft:speleothem" => Leaf::Speleothem(SpeleothemFeature::parse(config).ok()?),
         "minecraft:speleothem_cluster" => {
             Leaf::SpeleothemCluster(SpeleothemClusterFeature::parse(config).ok()?)
@@ -176,6 +167,9 @@ pub fn place_leaf(
     leaf: &Leaf,
     world: &mut FeatureWorld<'_>,
     random: &WorldgenRandom,
+    // `level.getRandom()`，只有 `MossyCarpetBlock.placeAt` 这类调用用它。
+    // `level.getRandom()`, used only by calls such as `MossyCarpetBlock.placeAt`.
+    region_random: &crate::random::Random,
     pos: Pos,
 ) -> bool {
     match leaf {
@@ -185,6 +179,7 @@ pub fn place_leaf(
         Leaf::BlueIce(feature) => blue_ice::place(feature, world, random, pos),
         Leaf::Disk(disk) => disk::place(disk, world, random, pos),
         Leaf::FallenTree(tree) => tree.place(world, random, pos),
+        Leaf::Fossil(fossil) => fossil.place(world, random, pos),
         Leaf::Geode(geode) => geode::place(geode, world, random, pos),
         Leaf::HugeMushroom(mushroom) => mushroom.place(world, random, pos),
         Leaf::Iceberg(iceberg) => iceberg::place(iceberg, world, random, pos),
@@ -195,7 +190,7 @@ pub fn place_leaf(
         Leaf::Ore(ore) => ores::place(ore, world, random, pos),
         Leaf::ScatteredOre(ore) => ores::place_scattered(ore, world, random, pos),
         Leaf::SculkPatch(feature) => sculk_patch::place(feature, world, random, pos),
-        Leaf::SimpleBlock(feature) => feature.place(world, random, pos),
+        Leaf::SimpleBlock(feature) => feature.place(world, random, region_random, pos),
         Leaf::Speleothem(feature) => speleothem::place(feature, world, random, pos),
         Leaf::SpeleothemCluster(feature) => speleothem_cluster::place(feature, world, random, pos),
         Leaf::Spike(spike) => spike::place(spike, world, random, pos),
@@ -204,7 +199,5 @@ pub fn place_leaf(
         Leaf::Tree(tree) => tree.place(world, random, pos),
         Leaf::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),
         Leaf::Vines(feature) => feature.place(world, random, pos),
-        Leaf::NoOp => true,
-        Leaf::SingleBlockPillar(pillar) => pillar.place(world, random, pos),
     }
 }

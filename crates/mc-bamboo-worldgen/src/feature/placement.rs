@@ -5,6 +5,7 @@
 //! 要走的 modifier 下标；最后一个 modifier 产生的候选位置按正序交给 `Feature.place`。
 //! 中间层的候选位置倒序压栈，所以最终消费随机数的顺序和顺序展开不同，必须照抄。
 
+use mc_bamboo_data::{block_of_state, facts, state_facts};
 use serde_json::Value;
 
 use crate::random::WorldgenRandom;
@@ -67,8 +68,7 @@ pub enum Modifier {
         allowed_search: BlockPredicate,
         max_steps: i32,
     },
-    /// `SurfaceRelativeThresholdFilter`：候选位置的 y 落在（地表面高度 + 上下限）之间。
-    ///
+    /// `SurfaceRelativeThresholdFilter`：候选位置的 y 落在（地表面高度 + 上下限）之间。    ///
     /// `SurfaceRelativeThresholdFilter`: keep the candidate only when its y lies within
     /// the surface height plus the configured bounds.
     SurfaceRelativeThreshold {
@@ -80,6 +80,20 @@ pub enum Modifier {
     ///
     /// Official `SurfaceWaterDepthFilter`: `WORLD_SURFACE - OCEAN_FLOOR <= maxWaterDepth`.
     SurfaceWaterDepthFilter(i32),
+    /// `CountOnEveryLayerPlacement`：逐层（地下第 n 个「空气→实心」交界面）放一遍。
+    ///
+    /// `CountOnEveryLayerPlacement`: place once per underground layer, walking the
+    /// air-to-solid boundaries bottom-up.
+    CountOnEveryLayer(IntProvider),
+    /// `CuboidPlacement`：把 origin 展开成一个 `xz_size × y_size × xz_size` 的盒子。
+    ///
+    /// `CuboidPlacement`: expand the origin into an `xz_size × y_size × xz_size` box.
+    Cuboid {
+        xz_size: IntProvider,
+        y_size: IntProvider,
+        include_edges: bool,
+        include_interior: bool,
+    },
     /// `RandomlySelectedPlacement`：`Util.getRandom(placements, random)` 选一个再递归
     /// `modify`（会消费一次 `nextInt(len)`）。
     ///
@@ -170,10 +184,12 @@ impl Modifier {
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0),
             },
-            // `NoiseThresholdCountPlacement`：`BIOME_INFO_NOISE` 固定除以 200，和
-            // `noise_based_count` 的 `noise_factor` 不是同一个来源。
-            // `NoiseThresholdCountPlacement` always divides by 200; its noise scale is
-            // fixed and unrelated to `noise_based_count`'s `noise_factor`.
+            // `NoiseThresholdCountPlacement`：三个字段都必填，和官方 `MapCodec` 一致；
+            // `BIOME_INFO_NOISE` 固定除以 200，和 `noise_based_count` 的 `noise_factor`
+            // 不是同一个来源。
+            // `NoiseThresholdCountPlacement`: all three fields are required as in the
+            // official `MapCodec`; the noise is always sampled at `x/200, z/200`, unrelated
+            // to `noise_based_count`'s `noise_factor`.
             "minecraft:noise_threshold_count" => Self::NoiseThresholdCount {
                 noise_level: field("noise_level")?
                     .as_f64()
@@ -232,6 +248,27 @@ impl Modifier {
                     .and_then(Value::as_i64)
                     .unwrap_or(i64::from(i32::MAX)) as i32,
             },
+            // `CountOnEveryLayerPlacement`：count 是 `IntProviders.codec(0, 256)`。
+            // `CountOnEveryLayerPlacement`: count is `IntProviders.codec(0, 256)`.
+            "minecraft:count_on_every_layer" => {
+                Self::CountOnEveryLayer(IntProvider::parse(field("count")?)?)
+            }
+            // `CuboidPlacement`：`xz_size` / `y_size` 是 `codec(1, 16)`，
+            // `include_edges` / `include_interior` 缺省都是 true。
+            // `CuboidPlacement`: `xz_size` / `y_size` are `codec(1, 16)`; both include
+            // flags default to true.
+            "minecraft:cuboid" => Self::Cuboid {
+                xz_size: IntProvider::parse(field("xz_size")?)?,
+                y_size: IntProvider::parse(field("y_size")?)?,
+                include_edges: object
+                    .get("include_edges")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                include_interior: object
+                    .get("include_interior")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            },
             "minecraft:randomly_selected" => {
                 let placements = field("placements")?
                     .as_array()
@@ -284,6 +321,19 @@ pub struct PlacementEnv<'a> {
     pub biome_at: &'a mut dyn FnMut(i32, i32, i32) -> u32,
     pub registry: &'a Registry,
     pub top_feature: Option<u32>,
+    /// `WorldGenRegion.getRandom()`，`level.getRandom()` 的等价物。
+    ///
+    /// 官方 `WorldGenRegion.random` 是**裸 `RandomSource`**（`XoroshiroRandomSource`），
+    /// 不是 `WorldgenRandom` 包装：`MossyCarpetBlock.placeAt` 拿到它调 `nextBoolean()`，
+    /// 走的是 `XoroshiroRandomSource.nextBoolean() = (nextLong() & 1) != 0`，即 **long 的低位**。
+    /// 用 `WorldgenRandom` 会走 `next(1)`（高位），序列完全不同。
+    ///
+    /// `WorldGenRegion.getRandom()`, the equivalent of `level.getRandom()`. Vanilla's
+    /// `WorldGenRegion.random` is a **bare `RandomSource`** (`XoroshiroRandomSource`), not a
+    /// `WorldgenRandom` wrapper: `MossyCarpetBlock.placeAt` calls `nextBoolean()` on it,
+    /// which is `(nextLong() & 1) != 0` — the **low** bit. Wrapping it in `WorldgenRandom`
+    /// would use `next(1)` (the high bit) and produce a different sequence.
+    pub region_random: &'a crate::random::Random,
 }
 
 /// 一个候选位置。
@@ -401,6 +451,46 @@ fn modify(
                 out.push(pos);
             }
         }
+        // `CountOnEveryLayerPlacement`：逐层扫描，会消费随机数。
+        // `CountOnEveryLayerPlacement`: walks layer by layer and consumes random.
+        Modifier::CountOnEveryLayer(count) => {
+            count_on_every_layer(count, ctx.world, ctx.generation, random, pos, out)
+        }
+        // `CuboidPlacement.modify`：先采样 `y_size`，再采样两次 `xz_size`（顺序不能换），
+        // 然后遍历 `0..=width × 0..=height × 0..=length`，按官方那四个条件筛。
+        // `CuboidPlacement.modify`: sample `y_size` first, then `xz_size` twice (order
+        // matters), then walk the box and apply the four official conditions.
+        Modifier::Cuboid {
+            xz_size,
+            y_size,
+            include_edges,
+            include_interior,
+        } => {
+            let height = y_size.sample(random);
+            let width = xz_size.sample(random);
+            let length = xz_size.sample(random);
+            for x in 0..=width {
+                for y in 0..=height {
+                    for z in 0..=length {
+                        let edges_ok = (*include_edges
+                            || x != 0 && x != width
+                            || y != 0 && y != height)
+                            && (*include_edges || z != 0 && z != length || y != 0 && y != height)
+                            && (*include_edges || x != 0 && x != width || z != 0 && z != length);
+                        let interior_ok = *include_interior
+                            || x == 0
+                            || x == width
+                            || y == 0
+                            || y == height
+                            || z == 0
+                            || z == length;
+                        if edges_ok && interior_ok {
+                            out.push((x + pos.0, y + pos.1, z + pos.2));
+                        }
+                    }
+                }
+            }
+        }
         // `EnvironmentScanPlacement`：不消费随机数，只按谓词逐格扫描。
         // `EnvironmentScanPlacement`: no random, purely a predicate walk.
         Modifier::EnvironmentScan {
@@ -495,6 +585,81 @@ fn environment_scan(
     if target.test(world, (x, y, z)) {
         out.push((x, y, z));
     }
+}
+
+/// `CountOnEveryLayerPlacement.modify`：`layer` 从 0 往上递增，每一层对 `count.sample`
+/// 次随机 (x, z) 找该层的「空气在实心之上」交界；某一层一个都没找到就停。
+///
+/// `CountOnEveryLayerPlacement.modify`: `layer` grows from 0; per layer draw `count.sample`
+/// random (x, z) columns and look for that layer's air-over-solid boundary. Stop when a
+/// layer produces nothing.
+fn count_on_every_layer(
+    count: &IntProvider,
+    world: &FeatureWorld<'_>,
+    generation: WorldGenerationContext,
+    random: &WorldgenRandom,
+    pos: Pos,
+    out: &mut Vec<Pos>,
+) {
+    let mut layer = 0;
+    loop {
+        let mut found_any = false;
+        let samples = count.sample(random);
+        for _ in 0..samples.max(0) {
+            let x = random.next_int(16) + pos.0;
+            let z = random.next_int(16) + pos.2;
+            let start_y = world.get_height(HeightmapKind::MotionBlocking, x, z);
+            if let Some(y) = find_on_ground_y(world, generation, x, start_y, z, layer) {
+                out.push((x, y, z));
+                found_any = true;
+            }
+        }
+        layer += 1;
+        if !found_any {
+            return;
+        }
+    }
+}
+
+/// `findOnGroundYPosition`：从 `start_y` 向下扫，数「下面实心、当前空气」的交界，
+/// 第 `layer_to_place_on` 个（从 0 数）返回 `y + 1`。床岩不算支撑。
+///
+/// `findOnGroundYPosition`: scan down from `start_y` counting air-over-solid boundaries,
+/// return `y + 1` for the `layer_to_place_on`-th one (zero based). Bedrock never counts.
+fn find_on_ground_y(
+    world: &FeatureWorld<'_>,
+    generation: WorldGenerationContext,
+    x: i32,
+    start_y: i32,
+    z: i32,
+    layer_to_place_on: i32,
+) -> Option<i32> {
+    let min_y = generation.min_y;
+    let mut current_layer = 0;
+    let mut current = world.get_block(x, start_y, z);
+    for y in (min_y + 1..=start_y).rev() {
+        let below = world.get_block(x, y - 1, z);
+        if !is_empty_block(below) && is_empty_block(current) && !is_bedrock(below) {
+            if current_layer == layer_to_place_on {
+                return Some(y);
+            }
+            current_layer += 1;
+        }
+        current = below;
+    }
+    None
+}
+
+/// `CountOnEveryLayerPlacement.isEmpty`：空气、水或岩浆。
+/// `CountOnEveryLayerPlacement.isEmpty`: air, water or lava.
+fn is_empty_block(state: u32) -> bool {
+    state_facts(state) & facts::AIR != 0
+        || block_of_state(state)
+            .is_some_and(|block| block.name == "minecraft:water" || block.name == "minecraft:lava")
+}
+
+fn is_bedrock(state: u32) -> bool {
+    block_of_state(state).is_some_and(|block| block.name == "minecraft:bedrock")
 }
 
 /// `Direction.VERTICAL_CODEC` 的名字到竖直方向：up 是 `+1`，down 是 `-1`。
@@ -707,6 +872,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_exported_cuboid_modifier() {
+        // `coral/<color>_block` 的 placement 里是 `cuboid`：`xz_size` 与 `y_size` 都是
+        // `uniform`，两个 include 缺省 true。
+        // `coral/<color>_block` uses `cuboid` in its placement: both sizes are `uniform`
+        // and both include flags default to true.
+        let value: Value = serde_json::from_str(
+            r#"{"type":"minecraft:cuboid","xz_size":{"max_inclusive":3,"min_inclusive":1,"type":"minecraft:uniform"},"y_size":{"max_inclusive":2,"min_inclusive":0,"type":"minecraft:uniform"}}"#,
+        )
+        .unwrap();
+        let modifier = Modifier::parse(&value).unwrap();
+        assert!(modifier.is_supported());
+        assert!(matches!(
+            modifier,
+            Modifier::Cuboid {
+                include_edges: true,
+                include_interior: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn noise_threshold_count_picks_a_branch_from_static_noise() {
+        // `noise_threshold_count` 只读静态噪声，不消费随机数。
+        // `noise_threshold_count` reads only the static noise and consumes no random.
+        let value: Value = serde_json::from_str(
+            r#"{"noise_level":-0.5,"below_noise":1,"above_noise":2,"type":"minecraft:noise_threshold_count"}"#,
+        )
+        .unwrap();
+        let modifier = Modifier::parse(&value).unwrap();
+        assert!(modifier.is_supported());
+        assert!(matches!(
+            modifier,
+            Modifier::NoiseThresholdCount {
+                below_noise: 1,
+                above_noise: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn noise_threshold_count_is_supported() {
         let value: Value = serde_json::from_str(
             r#"{"type":"minecraft:noise_threshold_count","noise_level":-0.8,"below_noise":0,"above_noise":7}"#,
@@ -759,7 +966,7 @@ mod tests {
         // 存活判定未移植的 state 仍让整条修饰器 unsupported。
         // A state with an unported survival check still makes the modifier unsupported.
         let mushroom: Value = serde_json::from_str(
-            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:pale_moss_carpet"}}"#,
+            r#"{"type":"minecraft:block_predicate_filter","predicate":{"type":"minecraft:would_survive","state":"minecraft:chorus_flower"}}"#,
         )
         .unwrap();
         assert!(!Modifier::parse(&mushroom).unwrap().is_supported());

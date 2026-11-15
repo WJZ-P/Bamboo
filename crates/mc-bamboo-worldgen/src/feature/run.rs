@@ -35,6 +35,12 @@ pub struct FeatureContext<'a> {
     /// a placed-feature registry name, matched the same way as Java's
     /// `--feature-types` / `--types` allow list (exact match on either). Diagnostic only.
     pub allowed_kinds: Option<&'a [String]>,
+    /// `WorldGenRegion.getRandom()`：`MossyCarpetBlock.placeAt` 一类调用读的是它，
+    /// 不是 `(index, step)` 播种的地物 `random`。整个 `features` 调用共用一份。
+    ///
+    /// `WorldGenRegion.getRandom()`, read by calls such as `MossyCarpetBlock.placeAt`
+    /// instead of the per-feature `random`. Shared by the whole `features` call.
+    pub region_random: &'a crate::random::Random,
 }
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数。
@@ -152,6 +158,7 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 biome_at: &mut biome_at,
                 registry: ctx.registry,
                 top_feature: Some(placed_id),
+                region_random: ctx.region_random,
             };
             crate::perf::feature_begin(step, placed_id);
             // 组合类会在 Feature.place 里递归再走一轮修饰器链；整棵树是否都移植

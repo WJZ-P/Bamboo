@@ -59,7 +59,13 @@ impl SimpleBlockFeature {
     ///
     /// One candidate of official `SimpleBlockFeature.place`: `getOptionalState` (typed
     /// providers consume random), then `canSurvive`, then dispatch by block class.
-    pub fn place(&self, world: &mut FeatureWorld<'_>, random: &WorldgenRandom, pos: Pos) -> bool {
+    pub fn place(
+        &self,
+        world: &mut FeatureWorld<'_>,
+        random: &WorldgenRandom,
+        region_random: &crate::random::Random,
+        pos: Pos,
+    ) -> bool {
         let Some(state) = self.provider.get_optional_state(world, random, pos) else {
             return false;
         };
@@ -68,6 +74,11 @@ impl SimpleBlockFeature {
         }
         if survival::is_double_plant(state) {
             self.place_at(world, pos, state)
+        } else if let Some(carpet) = super::mossy_carpet::MossyCarpet::parse(state) {
+            // `stateToPlace.getBlock() instanceof MossyCarpetBlock` →
+            // `MossyCarpetBlock.placeAt(level, origin, level.getRandom(), 2)`。
+            // `MossyCarpetBlock` goes through `placeAt` with `level.getRandom()`.
+            carpet.place_at(world, region_random, pos)
         } else {
             world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
             true

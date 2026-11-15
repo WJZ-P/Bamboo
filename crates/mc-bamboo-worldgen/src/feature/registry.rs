@@ -310,32 +310,3 @@ mod tests {
         let _ = Worldgen::load().unwrap();
     }
 }
-
-#[cfg(test)]
-mod vines_debug_tests {
-    use super::*;
-
-    #[test]
-    fn vines_resolve_to_a_global_index() {
-        let root: serde_json::Value =
-            serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
-        let registry = Registry::parse(root.as_object().unwrap()).unwrap();
-        let id = registry
-            .placed_id("minecraft:vines")
-            .expect("vines placed feature");
-        let index = registry.steps()[9]
-            .iter()
-            .position(|&g| g == id)
-            .expect("vines in step 9");
-        assert_eq!(index, 94);
-        // jungle 的 step 9 里包含它。
-        // The jungle biome lists it in step 9.
-        let jungle = registry.biome_id("minecraft:jungle").unwrap();
-        assert!(
-            registry
-                .biome_features(jungle, 9)
-                .iter()
-                .any(|n| n == "minecraft:vines")
-        );
-    }
-}

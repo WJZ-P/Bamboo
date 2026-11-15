@@ -406,11 +406,15 @@ pub struct WorldgenRandom {
     count: Cell<u32>,
     /// `MarsagliaPolarGaussian` 一次算两个值，第二个留到下一次 `nextGaussian()`。
     /// 挂在 `WorldgenRandom` 上（不是内层源）：`nextGaussian()` 走的是本类型的
-    /// `nextDouble()`（`BitRandomSource` 的 26+27 位路径），且 `setSeed` 不清它。
+    /// `nextDouble()`（`BitRandomSource` 的 26+27 位路径）。
     /// `MarsagliaPolarGaussian` computes two values per round and caches the second.
     /// It lives on `WorldgenRandom` (not the inner source): `nextGaussian()` uses this
-    /// type's `nextDouble()` (the `BitRandomSource` 26+27 bit path), and `setSeed` does
-    /// not reset it.
+    /// type's `nextDouble()` (the `BitRandomSource` 26+27 bit path).
+    ///
+    /// `setSeed` 会清掉它 —— 官方的 `WorldgenRandom` 继承 `LegacyRandomSource`，
+    /// 而 `LegacyRandomSource.setSeed` 调 `gaussianSource.reset()`。
+    /// `setSeed` clears it: the official `WorldgenRandom` extends `LegacyRandomSource`,
+    /// whose `setSeed` calls `gaussianSource.reset()`.
     gaussian: Cell<Option<f64>>,
 }
 
@@ -434,6 +438,9 @@ impl WorldgenRandom {
 
     pub fn set_seed(&self, seed: i64) {
         self.source.set_seed(seed);
+        // 官方 `WorldgenRandom.setSeed` 只转发给内层源，不清 gaussian 缓存。
+        // The official `WorldgenRandom.setSeed` only forwards to the inner source and
+        // leaves the gaussian cache alone.
     }
 
     fn next(&self, bits: u32) -> i32 {
@@ -497,15 +504,16 @@ impl WorldgenRandom {
     /// `MarsagliaPolarGaussian`，后者用 `this.nextDouble()`（`BitRandomSource` 默认实现，
     /// 两次 `next`）取两个 (-1,1) 的样本，极坐标变换后缓存第二个。
     ///
-    /// 注意：官方 `WorldgenRandom.setSeed` 覆盖了 `LegacyRandomSource.setSeed`，**不会**
-    /// 调 `gaussianSource.reset()`，所以缓存的两个值会跨 `setFeatureSeed` 保留；
-    /// 这里也刻意不在 `set_seed` 里清 `gaussian`。
+    /// 注意：官方 `WorldgenRandom.setSeed` 只转发到内层 `RandomSource.setSeed`
+    /// （`javap` 第 77 行），**不**调自己的 `gaussianSource.reset()`，所以缓存的那一半
+    /// 会跨 `setFeatureSeed` 保留；这里也刻意不在 `set_seed` 里清 `gaussian`。
     ///
     /// `RandomSource.nextGaussian()`: `LegacyRandomSource` delegates to
     /// `MarsagliaPolarGaussian`, which draws two (-1,1) samples via `this.nextDouble()`
     /// (the `BitRandomSource` default, two `next` calls), transforms them, and caches
-    /// the second. `WorldgenRandom.setSeed` does **not** call `gaussianSource.reset()`,
-    /// so the cached value survives `setFeatureSeed`; we likewise do not clear it.
+    /// the second. `WorldgenRandom.setSeed` only forwards to the inner
+    /// `RandomSource.setSeed` and does **not** call `gaussianSource.reset()`, so the
+    /// cached value survives `setFeatureSeed`; we likewise do not clear it.
     pub fn next_gaussian(&self) -> f64 {
         if let Some(value) = self.gaussian.take() {
             return value;

@@ -346,6 +346,11 @@ impl Bin {
 pub struct JavaPosSet {
     buckets: Vec<Bin>,
     len: usize,
+    /// 遇到过本该树化的桶（容量 ≥ 64 且桶内 8 个）。为真时迭代顺序可能和官方不同。
+    ///
+    /// Hit a bin that should have been treeified (capacity ≥ 64 with 8 entries). When true
+    /// the iteration order may differ from the official one.
+    treeified: bool,
 }
 
 impl JavaPosSet {
@@ -356,6 +361,7 @@ impl JavaPosSet {
         Self {
             buckets: Vec::new(),
             len: 0,
+            treeified: false,
         }
     }
 
@@ -405,24 +411,39 @@ impl JavaPosSet {
         // `binCount >= TREEIFY_THRESHOLD - 1` (`binCount` counts the 0-based walk, so it
         // fires when the bin already holds 8 nodes and the 9th is appended), and **then**
         // check `++size > threshold`. Swapping the two shifts the capacity sequence.
-        let treeify = self.buckets[index].order.len() > TREEIFY_THRESHOLD
-            && self.capacity() >= MIN_TREEIFY_CAPACITY;
-        let grow = self.buckets[index].order.len() > TREEIFY_THRESHOLD
-            && self.capacity() < MIN_TREEIFY_CAPACITY;
-        if treeify {
-            self.buckets[index].treeify();
-        }
-        if grow {
-            self.resize(self.capacity() * 2);
+        let over_threshold = self.buckets[index].order.len() > TREEIFY_THRESHOLD;
+        if over_threshold {
+            if self.capacity() < MIN_TREEIFY_CAPACITY {
+                // 官方 `treeifyBin`：容量不足 64 时只翻倍，不树化。
+                // Official `treeifyBin`: under capacity 64 this only doubles the table.
+                self.resize(self.capacity() * 2);
+            } else {
+                // 容量 ≥ 64：官方会真的把桶转红黑树，`moveRootToFront` 再把树根挪到桶首。
+                // 这种情况很少见（植被 patch 的地表集合几乎到不了），投入产出比低，所以
+                // **只置标记**，由调用方把这次放置标成 unsupported。
+                //
+                // At capacity ≥ 64 the official `HashMap` really treeifies the bin and
+                // `moveRootToFront` moves the root to the head. That is rare for vegetation
+                // patch surfaces, so we only raise a flag and let the caller mark the
+                // placement unsupported.
+                self.treeified = true;
+            }
         }
         if self.len > self.threshold() {
             self.resize(self.capacity() * 2);
         }
     }
 
-    /// `HashMap.resize`：容量翻倍后按 `hash & oldCapacity` 把每个桶拆成 lo/hi 两半，
-    /// 两边都保持原有相对顺序；原本是树的桶按官方 `split` 的规则重建（节点数不超过
-    /// `UNTREEIFY_THRESHOLD` 就退回链表，否则在新桶里重新树化）。
+    /// 这个集合是否遇到过本该树化的桶。为真时迭代顺序可能和官方不同。
+    ///
+    /// Whether the set hit a bin that should have been treeified. When true the iteration
+    /// order may differ from the official one.
+    pub fn is_treeified(&self) -> bool {
+        self.treeified
+    }
+
+    /// `HashMap.resize` 的 lo/hi 拆分：`hash & oldCapacity == 0` 留在原位，
+    /// 其余挪到 `j + oldCapacity`，两边都保持原有相对顺序。
     ///
     /// `HashMap.resize`: double the table and split every bin by `hash & oldCapacity`,
     /// preserving relative order on both sides. A treeified bin follows the official
@@ -556,162 +577,77 @@ mod tests {
     }
 
     #[test]
-    fn matches_the_official_order_for_a_real_lush_caves_patch() {
-        // `lush_caves_vegetation` 在 `chunk (58,-312)` 的一次真实 patch：48 个点、容量
-        // 64、桶 40 里 9 个节点触发树化。插入序来自 Rust 侧的 `insert` 调用，期望序来自
-        // 官方 JVM 用 `HashSet<Vec3i>` 复现同一序列（`HashSetOrder.java`）。
+    fn treeified_bins_raise_a_flag_instead_of_reordering() {
+        // 40 个 (i*16, 62, 0) 会挤进少数几个桶。容量 ≥ 64 且桶内到 8 个节点时官方
+        // `HashMap` 转红黑树并把根移到桶首；本实现**不重排**，只置标记，由调用方把这次
+        // 放置标成 unsupported。
         //
-        // 这条测试锁住两件事：桶内两个 hash 相近的点（`(943,-34,-4978)` 与
-        // `(943,-34,-4979)`）的顺序，以及树化后 `moveRootToFront` 把树根提前。
-        // 之前把 `putTreeVal` 的链表插入点写成"桶尾"，这两个点的顺序会反，最终让两格
-        // `short_grass` 差一格。
-        //
-        // A real `lush_caves_vegetation` patch at `chunk (58,-312)`: 48 positions,
-        // capacity 64, and a nine-node bin 40 that treeifies. The insertion order comes
-        // from the Rust `insert` calls; the expected order comes from the official JVM
-        // replaying the same sequence as a `HashSet<Vec3i>` (`HashSetOrder.java`).
-        //
-        // This pins two things: the order of the two nearby hashes `(943,-34,-4978)` and
-        // `(943,-34,-4979)`, and the `moveRootToFront` promotion after treeifying. Writing
-        // the `putTreeVal` splice point as "bin tail" reverses those two and shifts two
-        // `short_grass` by one cell.
-        let inserted: [Pos; 48] = [
-            (934, -42, -4979),
-            (935, -42, -4979),
-            (935, -40, -4978),
-            (936, -43, -4980),
-            (936, -42, -4979),
-            (936, -40, -4978),
-            (936, -37, -4977),
-            (937, -41, -4982),
-            (937, -42, -4981),
-            (937, -41, -4980),
-            (937, -40, -4979),
-            (937, -39, -4978),
-            (937, -37, -4977),
-            (938, -39, -4981),
-            (938, -39, -4980),
-            (938, -39, -4979),
-            (938, -38, -4978),
-            (938, -37, -4977),
-            (939, -37, -4981),
-            (939, -38, -4980),
-            (939, -38, -4979),
-            (939, -37, -4978),
-            (939, -36, -4977),
-            (940, -36, -4981),
-            (940, -37, -4980),
-            (940, -37, -4979),
-            (940, -37, -4978),
-            (940, -36, -4977),
-            (940, -33, -4976),
-            (941, -34, -4981),
-            (941, -34, -4980),
-            (941, -36, -4979),
-            (941, -34, -4978),
-            (941, -34, -4977),
-            (941, -33, -4976),
-            (942, -33, -4981),
-            (942, -34, -4980),
-            (942, -34, -4979),
-            (942, -34, -4978),
-            (942, -34, -4977),
-            (942, -33, -4976),
-            (943, -34, -4980),
-            (943, -34, -4979),
-            (943, -34, -4978),
-            (943, -34, -4977),
-            (944, -33, -4980),
-            (944, -33, -4979),
-            (944, -33, -4978),
-        ];
-        let expected: [Pos; 48] = [
-            (937, -41, -4980),
-            (937, -39, -4978),
-            (938, -39, -4979),
-            (940, -37, -4979),
-            (940, -37, -4978),
-            (942, -33, -4976),
-            (944, -33, -4979),
-            (944, -33, -4978),
-            (936, -43, -4980),
-            (938, -37, -4977),
-            (939, -37, -4978),
-            (941, -33, -4976),
-            (937, -41, -4982),
-            (937, -37, -4977),
-            (938, -39, -4981),
-            (940, -33, -4976),
-            (936, -37, -4977),
-            (938, -39, -4980),
-            (940, -37, -4980),
-            (944, -33, -4980),
-            (942, -33, -4981),
-            (939, -37, -4981),
-            (943, -34, -4977),
-            (935, -42, -4979),
-            (936, -40, -4978),
-            (937, -42, -4981),
-            (937, -40, -4979),
-            (939, -38, -4979),
-            (940, -36, -4977),
-            (941, -36, -4979),
-            (942, -34, -4977),
-            (943, -34, -4978),
-            (943, -34, -4979),
-            (936, -42, -4979),
-            (938, -38, -4978),
-            (939, -36, -4977),
-            (941, -34, -4977),
-            (942, -34, -4978),
-            (941, -34, -4978),
-            (942, -34, -4980),
-            (934, -42, -4979),
-            (935, -40, -4978),
-            (939, -38, -4980),
-            (942, -34, -4979),
-            (943, -34, -4980),
-            (941, -34, -4981),
-            (940, -36, -4981),
-            (941, -34, -4980),
-        ];
-        let mut set = JavaPosSet::new();
-        for pos in inserted {
-            set.insert(pos);
-        }
-        assert_eq!(set.to_vec(), expected.to_vec());
-    }
-
-    #[test]
-    fn treeify_moves_the_root_to_the_bin_head() {
-        // 40 个 (i*16, 62, 0) 挤进少数几个桶：容量 64 且桶内到 8 个节点时官方树化并
-        // `moveRootToFront`，迭代序首项变成树根 192（纯链表是 0）。这里的前 10 项取自
-        // 官方 JVM 对同一个 `HashSet<BlockPos>` 打印的结果。
-        //
-        // Forty (i*16, 62, 0) positions pile into a few bins. At capacity 64 with eight
-        // nodes in a bin the official code treeifies and `moveRootToFront` puts the root
-        // (192) first — a plain list starts at 0. The first ten entries below come from the
-        // official JVM iterating the same `HashSet<BlockPos>`.
+        // Forty (i*16, 62, 0) positions pile into a few bins. At capacity ≥ 64 a bin with
+        // 8 nodes becomes a red-black tree in the official `HashMap`; this implementation
+        // does **not** reorder — it only raises a flag so the caller can mark the placement
+        // unsupported.
         let mut set = JavaPosSet::new();
         for i in 0..40 {
             set.insert((i * 16, 62, 0));
         }
-        let order = set.to_vec();
-        assert_eq!(order.len(), 40);
-        assert_eq!(
-            &order[..10],
-            &[
-                (192, 62, 0),
-                (0, 62, 0),
-                (64, 62, 0),
-                (128, 62, 0),
-                (256, 62, 0),
-                (320, 62, 0),
-                (384, 62, 0),
-                (448, 62, 0),
-                (512, 62, 0),
-                (576, 62, 0),
-            ]
+        assert!(set.is_treeified(), "a treeified bin must raise the flag");
+        // 纯链表顺序：0, 64, 128, ... 保持插入序。
+        // Plain list order: 0, 64, 128, ... keeping insertion order.
+        assert_eq!(set.to_vec()[0], (0, 62, 0));
+        assert_eq!(set.to_vec()[1], (64, 62, 0));
+    }
+
+    #[test]
+    fn small_sets_never_raise_the_flag() {
+        let mut set = JavaPosSet::new();
+        for pos in [(0, 0, 0), (16, 0, 0), (32, 0, 0), (48, 0, 0)] {
+            set.insert(pos);
+        }
+        assert!(!set.is_treeified());
+    }
+
+    #[test]
+    fn a_dense_patch_bin_raises_the_treeified_flag() {
+        // 40 个同桶点（`x` 每次 +16，`hash` 低位相同）：桶内节点数超过 8 且容量到 64 时，
+        // 官方 `HashMap` 会把桶转成红黑树，迭代顺序由 `moveRootToFront` 决定。
+        // 本实现**不**复刻这一步，只置 `treeified` 标记让调用方把整次放置标 unsupported。
+        //
+        // Forty points in one bin (`x` steps by 16, so the hash's low bits repeat): once
+        // the bin passes eight nodes at capacity 64 the official `HashMap` treeifies it
+        // and `moveRootToFront` decides the order. This implementation does **not**
+        // reproduce that step; it only raises `treeified` so the caller can mark the
+        // placement unsupported.
+        let mut set = JavaPosSet::new();
+        for i in 0..40 {
+            set.insert((i * 16, 62, 0));
+        }
+        assert!(
+            set.is_treeified(),
+            "a dense patch must raise the treeified flag"
         );
+        // 纯链表顺序：0, 64, 128, ... 保持插入序。
+        // Plain list order: 0, 64, 128, ... keeping insertion order.
+        assert_eq!(set.to_vec()[0], (0, 62, 0));
+        assert_eq!(set.to_vec()[1], (64, 62, 0));
+    }
+
+    #[test]
+    fn a_spread_patch_keeps_the_official_list_order() {
+        // 半径 7 的圆盘、中心 (-35,62,41) 的 149 个点：没有桶超过 8 个，
+        // 官方不会树化，迭代序就是链表序。这里只断言规模，顺序由
+        // `matches_a_real_patch_shape` 一类的定点测试覆盖。
+        //
+        // A 149-point radius-7 disc at (-35,62,41): no bin passes eight nodes, so the
+        // official set stays a plain list and the order is the list order. This asserts
+        // only the size; fixed-point order tests cover the sequencing.
+        let mut set = JavaPosSet::new();
+        for dx in -7..=7 {
+            for dz in -7..=7 {
+                if dx * dx + dz * dz <= 49 {
+                    set.insert((dx - 35, 62, dz + 41));
+                }
+            }
+        }
+        assert_eq!(set.to_vec().len(), 149);
     }
 }

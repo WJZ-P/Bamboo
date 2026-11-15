@@ -36,6 +36,11 @@ enum Kind {
     DoublePlant(&'static str),
     /// `LeafLitterBlock.canSurvive`：下面那格 `isFaceSturdy(FULL, UP)`。
     SturdyFaceUp,
+    /// `BaseCoralWallFanBlock.canSurvive`：看 `facing` 反方向的邻居在 `facing` 面是否结实。
+    ///
+    /// `BaseCoralWallFanBlock.canSurvive`: the neighbour opposite `facing` must be sturdy
+    /// toward `facing`.
+    CoralWallFan,
     /// `HangingRootsBlock.canSurvive`：上面那格 `isFaceSturdy(FULL, DOWN)`。
     ///
     /// `HangingRootsBlock.canSurvive`: the block above is `isFaceSturdy(FULL, DOWN)`.
@@ -79,6 +84,10 @@ enum Kind {
     /// `MushroomBlock.canSurvive`：下面 `isSolidRender`，且亮度 < 13（或下面在
     /// `overrides_mushroom_light_requirement` 里）。
     Mushroom,
+    /// 苍白苔藓地毯：下面非空气（`BASE`）或下面同类且 `BASE`。
+    ///
+    /// Pale moss carpet: the block below is not air (`BASE`), or the same block with `BASE`.
+    MossyCarpet,
     /// 悬挂的红树胎生苗：上面那格在 `supports_hanging_mangrove_propagule` 标签里。
     ///
     /// A hanging mangrove propagule: the block above is in the
@@ -110,6 +119,7 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         // 即 `isFaceSturdy(FULL)`；Direction.UP 的 ordinal 是 1。
         // `LeafLitterBlock.canSurvive`: `isFaceSturdy(FULL, UP)`; UP's ordinal is 1.
         Some(Kind::SturdyFaceUp) => state_facts(below) & (1u64 << (facts::STURDY_FULL + 1)) != 0,
+        Some(Kind::CoralWallFan) => coral_wall_fan_can_survive(state, world, pos),
         // `HangingRootsBlock.canSurvive`：`above.isFaceSturdy(level, above, Direction.DOWN)`，
         // DIRECTION.DOWN 的 ordinal 是 0。
         // `HangingRootsBlock.canSurvive`: `isFaceSturdy(FULL, DOWN)`, DOWN's ordinal is 0.
@@ -131,6 +141,19 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         // `CarpetBlock.canSurvive` is `!level.isEmptyBlock(pos.below())`.
         Some(Kind::Carpet) => !is_air_block(below),
         Some(Kind::Mushroom) => mushroom_can_survive(world, pos),
+        // `MossyCarpetBlock.canSurvive`：`BASE` 时下面非空气；否则下面同类且 `BASE`。
+        // `MossyCarpetBlock.canSurvive`: with `BASE` the block below is not air; otherwise
+        // the block below is the same block carrying `BASE`.
+        Some(Kind::MossyCarpet) => {
+            if is_air_block(below) {
+                return false;
+            }
+            if is_base_mossy_carpet(state) {
+                true
+            } else {
+                is_base_mossy_carpet(below) && is_mossy_carpet(below)
+            }
+        }
         Some(Kind::HangingPropagule) => {
             let above = world.get_block(pos.0, pos.1 + 1, pos.2);
             let id = block_id_of_state(above).map_or(-1, |id| id as i32);
@@ -140,6 +163,31 @@ pub fn can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
         None => false,
     }
 }
+
+/// `BaseCoralWallFanBlock.canSurvive`：`facing` 反方向的邻居在 `facing` 面结实。
+///
+/// `BaseCoralWallFanBlock.canSurvive`: the neighbour opposite `facing` is sturdy toward
+/// `facing`.
+fn coral_wall_fan_can_survive(state: u32, world: &FeatureWorld<'_>, pos: Pos) -> bool {
+    // `FACING` 的 ordinal 和 `Direction` 一致（north=2 / south=3 / west=4 / east=5）。
+    // `FACING`'s ordinal matches `Direction` (north=2 / south=3 / west=4 / east=5).
+    let Some(ordinal) =
+        (2..=5).find(|&o| with_property(state, "facing", FACE_NAMES[o - 2]) == Some(state))
+    else {
+        return false;
+    };
+    let opposite = HORIZONTAL_OFFSETS[ordinal - 2];
+    let neighbour = world.get_block(pos.0 - opposite.0, pos.1, pos.2 - opposite.2);
+    state_facts(neighbour) & (1u64 << (facts::STURDY_FULL + ordinal as u32)) != 0
+}
+
+/// `Direction` 的四个水平名字，`facing` 属性用的就是它们。
+/// The four horizontal `Direction` names used by the `facing` property.
+const FACE_NAMES: [&str; 4] = ["north", "south", "west", "east"];
+
+/// 四个水平方向的位移，下标和 `FACE_NAMES` 对应。
+/// Offsets of the four horizontal directions, indexed like `FACE_NAMES`.
+const HORIZONTAL_OFFSETS: [(i32, i32, i32); 4] = [(0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0)];
 
 /// `Direction.Plane.HORIZONTAL` 的四个水平偏移；这些判定只读方块，顺序不影响结果。
 ///
@@ -381,6 +429,18 @@ fn is_air_block(state: u32) -> bool {
     state_facts(state) & facts::AIR != 0
 }
 
+/// `state.is(Blocks.PALE_MOSS_CARPET)`。
+/// `state.is(Blocks.PALE_MOSS_CARPET)`.
+fn is_mossy_carpet(state: u32) -> bool {
+    block_of_state(state).is_some_and(|block| block.name == "minecraft:pale_moss_carpet")
+}
+
+/// `state.getValue(MossyCarpetBlock.BASE)`。
+/// `state.getValue(MossyCarpetBlock.BASE)`.
+fn is_base_mossy_carpet(state: u32) -> bool {
+    with_property(state, "bottom", "true") == Some(state)
+}
+
 /// 是否走 `DoublePlantBlock.placeAt`（放上下两格）而不是单格 `setBlock`。
 /// `TallSeagrassBlock` 也继承 `DoublePlantBlock`，官方用的是 `instanceof`。
 ///
@@ -392,10 +452,9 @@ pub fn is_double_plant(state: u32) -> bool {
         Some(BlockClass::DoublePlantBlock)
             | Some(BlockClass::TallFlowerBlock)
             | Some(BlockClass::TallSeagrassBlock)
-            // `SmallDripleafBlock extends DoublePlantBlock`，官方
-            // `SimpleBlockFeature` 的 `instanceof` 覆盖它。
-            // `SmallDripleafBlock extends DoublePlantBlock`, so the official
-            // `SimpleBlockFeature` `instanceof` covers it.
+            // `SmallDripleafBlock extends DoublePlantBlock`，官方用的是 `instanceof`。
+            // `SmallDripleafBlock extends DoublePlantBlock`; the official check is
+            // `instanceof`.
             | Some(BlockClass::SmallDripleafBlock)
     )
 }
@@ -426,6 +485,24 @@ fn classify(state: u32) -> Option<Kind> {
         // the rule_based podzol provider and the rotated basalt provider both rely on it.
         | BlockClass::SnowyBlock
         | BlockClass::RotatedPillarBlock => Kind::Default,
+        // 珊瑚块继承 `Block`，`canSurvive` 恒 true。
+        // Coral blocks extend `Block`, so `canSurvive` is always true.
+        BlockClass::CoralBlock => Kind::Default,
+        // `LeavesBlock` 也继承 `Block`，`canSurvive` 恒 true（树和 `root_system` 的子地物会放它）。
+        // `LeavesBlock` extends `Block` too, so `canSurvive` is always true (trees and
+        // `root_system` children place it).
+        BlockClass::LeavesBlock => Kind::Default,
+        // 珊瑚壁扇（`BaseCoralWallFanBlock`）贴墙：看 `facing` 反方向的邻居在 `facing` 面
+        // 是否结实。
+        // Coral wall fans attach to a wall: check the neighbour opposite `facing` for a
+        // sturdy face toward `facing`.
+        BlockClass::BaseCoralWallFanBlock | BlockClass::CoralWallFanBlock => Kind::CoralWallFan,
+        // 珊瑚植物 / 珊瑚扇（地面）：下面 `isFaceSturdy(UP)`。
+        // Coral plants and floor fans: `isFaceSturdy(UP)` below.
+        BlockClass::BaseCoralPlantBlock
+        | BlockClass::BaseCoralFanBlock
+        | BlockClass::CoralPlantBlock
+        | BlockClass::CoralFanBlock => Kind::SturdyFaceUp,
         // 直接继承 VegetationBlock、不覆写 canSurvive 的类，标签判定。
         // Classes extending VegetationBlock without overriding canSurvive: a tag check.
         BlockClass::BushBlock
@@ -487,6 +564,7 @@ fn classify(state: u32) -> Option<Kind> {
         BlockClass::SporeBlossomBlock => Kind::SporeBlossom,
         BlockClass::CarpetBlock => Kind::Carpet,
         BlockClass::MushroomBlock => Kind::Mushroom,
+        BlockClass::MossyCarpetBlock => Kind::MossyCarpet,
         // 苔藓地毯等仍覆写了 canSurvive/mayPlaceOn，本轮明确不支持。
         // Mossy carpet still overrides canSurvive/mayPlaceOn: unported.
         _ => return None,
@@ -532,9 +610,31 @@ mod tests {
             "minecraft:moss_carpet",
             "minecraft:brown_mushroom",
             "minecraft:red_mushroom",
+            "minecraft:azalea",
+            "minecraft:flowering_azalea",
         ] {
             assert!(supports(state(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn azalea_uses_the_azalea_tag_not_the_generic_one() {
+        // `AzaleaBlock` 覆写 `mayPlaceOn` 为 `supports_azalea`，不是 `supports_vegetation`。
+        // 两者的差别只有 `minecraft:clay`（方块 id 330）—— 它在 `supports_azalea` 里，
+        // 不在 `supports_vegetation` 里，正好用来区分两条分支。
+        // `AzaleaBlock` overrides `mayPlaceOn` with `supports_azalea`, not the generic
+        // tag. The two differ only by `minecraft:clay` (block id 330), which sits in
+        // `supports_azalea` only, so it distinguishes the two branches.
+        let clay = mc_bamboo_data::block_id_of_state(
+            block_by_name("minecraft:clay").unwrap().default_state,
+        )
+        .unwrap() as i32;
+        let azalea_tag = block_tag("minecraft:supports_azalea").unwrap();
+        let vegetation_tag = block_tag("minecraft:supports_vegetation").unwrap();
+        assert!(azalea_tag.contains(&clay));
+        assert!(!vegetation_tag.contains(&clay));
+        assert!(supports(state("minecraft:azalea")));
+        assert!(supports(state("minecraft:flowering_azalea")));
     }
 
     #[test]
@@ -572,11 +672,11 @@ mod tests {
     /// `SimpleBlockFeature` routes it through `MossyCarpetBlock.placeAt` (with side
     /// `nextBoolean`), so pale moss carpet must stay unported.
     #[test]
-    fn pale_moss_carpet_stays_unported() {
+    fn pale_moss_carpet_is_supported_and_needs_support_below() {
         let pale = state("minecraft:pale_moss_carpet");
-        assert!(!supports(pale), "pale_moss_carpet must be unsupported");
-        // 同类的普通地毯（`CarpetBlock`）已移植，两者不能混。
-        // The plain `CarpetBlock` is ported; the two must not be confused.
+        assert!(supports(pale));
+        // 同类的普通地毯（`CarpetBlock`）走另一条分支。
+        // The plain `CarpetBlock` takes a different branch.
         assert!(supports(state("minecraft:moss_carpet")));
     }
 
@@ -585,6 +685,14 @@ mod tests {
         assert!(is_double_plant(state("minecraft:tall_grass")));
         assert!(is_double_plant(state("minecraft:sunflower")));
         assert!(!is_double_plant(state("minecraft:short_grass")));
+        // `SmallDripleafBlock extends DoublePlantBlock`，官方 `SimpleBlockFeature` 用
+        // `instanceof DoublePlantBlock` 判，所以小垂滴叶也要走 `placeAt`。
+        // `SmallDripleafBlock` extends `DoublePlantBlock` and the official
+        // `SimpleBlockFeature` tests `instanceof DoublePlantBlock`, so it uses `placeAt`.
+        assert!(is_double_plant(state("minecraft:small_dripleaf")));
+        // `tall_seagrass` 同样继承 `DoublePlantBlock`。
+        // `tall_seagrass` extends `DoublePlantBlock` as well.
+        assert!(is_double_plant(state("minecraft:tall_seagrass")));
     }
 
     #[test]

@@ -206,10 +206,7 @@ impl RootPlacer {
     /// Official `MangroveRootPlacer.placeRoot`: roots inside mud become muddy roots.
     fn place_root(&self, place: &mut TreePlace<'_, '_>, random: &WorldgenRandom, pos: Pos) {
         if in_set(&self.muddy_roots_in, place.get_block(pos)) {
-            if let Some(muddy) =
-                self.muddy_roots_provider
-                    .get_optional_state(place.world, random, pos)
-            {
+            if let Some(muddy) = self.muddy_roots_provider.get_state(random) {
                 let state = potentially_waterlogged(place, pos, muddy);
                 place.set_root(pos, state);
             }
@@ -219,10 +216,7 @@ impl RootPlacer {
         if !self.can_place_root(place.world, pos) {
             return;
         }
-        if let Some(root) = self
-            .root_provider
-            .get_optional_state(place.world, random, pos)
-        {
+        if let Some(root) = self.root_provider.get_state(random) {
             let state = potentially_waterlogged(place, pos, root);
             place.set_root(pos, state);
         }
@@ -230,7 +224,7 @@ impl RootPlacer {
             let above = (pos.0, pos.1 + 1, pos.2);
             if random.next_float() < *chance
                 && is_air(place.get_block(above))
-                && let Some(state) = provider.get_optional_state(place.world, random, above)
+                && let Some(state) = provider.get_state(random)
             {
                 let state = potentially_waterlogged(place, above, state);
                 place.set_root(above, state);

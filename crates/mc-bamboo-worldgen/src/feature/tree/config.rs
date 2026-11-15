@@ -106,8 +106,7 @@ impl BelowTrunk {
                 }
                 *dirt
             }
-            Self::Provider(provider) => match provider.get_optional_state(place.world, random, pos)
-            {
+            Self::Provider(provider) => match provider.get_state(random) {
                 Some(state) => state,
                 None => return,
             },

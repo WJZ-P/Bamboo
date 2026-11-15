@@ -38,6 +38,8 @@ import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.level.levelgen.PositionalRandomFactory;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.StructureManager;
@@ -262,6 +264,39 @@ final class FeatureLevelHandler implements InvocationHandler {
             case "getSeed":
                 return this.seed;
             case "getRandom":
+                // 诊断开关：把区域随机源包一层，记录 `nextBoolean` 的取值。
+                // `level.getRandom()` 只被 `MossyCarpetBlock.placeAt` 一类调用读，
+                // 打印它的序列就能和 Rust 侧逐次对比。
+                // Diagnostic switch: wrap the region random source to log `nextBoolean`.
+                // `level.getRandom()` is read by calls such as `MossyCarpetBlock.placeAt`,
+                // so the sequence can be compared with the Rust side draw by draw.
+                if (Boolean.getBoolean("bamboo.debug.region-random")) {
+                    return new RandomSource() {
+                        @Override public RandomSource fork() { return random.fork(); }
+                        @Override public PositionalRandomFactory forkPositional() {
+                            return random.forkPositional();
+                        }
+                        @Override public void setSeed(long seed) { random.setSeed(seed); }
+                        @Override public int nextInt() { return random.nextInt(); }
+                        @Override public int nextInt(int bound) { return random.nextInt(bound); }
+                        @Override public long nextLong() { return random.nextLong(); }
+                        @Override public boolean nextBoolean() {
+                            boolean value = random.nextBoolean();
+                            try (java.io.FileWriter writer = new java.io.FileWriter(
+                                    System.getProperty("bamboo.debug.region-random.file",
+                                            "region-random.log"), true)) {
+                                writer.write((value ? "true" : "false") + "\n");
+                            } catch (java.io.IOException ignored) {
+                                // 诊断用，失败就当没开。
+                                // Diagnostic only; ignore IO failures.
+                            }
+                            return value;
+                        }
+                        @Override public float nextFloat() { return random.nextFloat(); }
+                        @Override public double nextDouble() { return random.nextDouble(); }
+                        @Override public double nextGaussian() { return random.nextGaussian(); }
+                    };
+                }
                 return this.random;
             case "getBiome":
                 // LevelReader.getBiome: BiomeManager.getBiome(pos)，不是 quart 格直读。

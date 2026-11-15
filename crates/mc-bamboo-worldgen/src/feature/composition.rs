@@ -94,62 +94,17 @@ enum Composition<'a> {
     Sequence {
         features: Vec<Child<'a>>,
     },
-    /// `OverlayFeature`：把所有子项都放一遍，任一成功就算成功（**不短路**）。
+    /// `OverlayFeature`：对每个子 `PlacedFeature` 依次 `place`，
+    /// `placedAny |= placer.place(...)`（不短路，全部都要跑）。
     ///
-    /// `OverlayFeature`: place every child, succeed if any did (no short-circuit).
+    /// `OverlayFeature`: place every child `PlacedFeature` in turn,
+    /// `placedAny |= placer.place(...)` (no short-circuit; all of them run).
     Overlay {
         features: Vec<Child<'a>>,
-    },
-    /// `CoralTreeFeature`：竖直长主干，再从顶部水平分枝。
-    ///
-    /// `CoralTreeFeature`: a vertical trunk, then horizontal branches from the top.
-    CoralTree {
-        feature: Child<'a>,
-    },
-    /// `CoralClawFeature`：一个主爪方向加两段侧枝。
-    ///
-    /// `CoralClawFeature`: one claw direction plus two side branches.
-    CoralClaw {
-        feature: Child<'a>,
     },
 }
 
 impl<'a> Composition<'a> {
-    /// 依次访问所有子项（诊断和测试用）。
-    ///
-    /// Visit every child (for diagnostics and tests).
-    #[cfg(test)]
-    fn for_each_child(&self, mut visit: impl FnMut(&Child<'a>)) {
-        match self {
-            Self::RandomSelector { features, default } => {
-                for (_, child) in features {
-                    visit(child);
-                }
-                visit(default);
-            }
-            Self::WeightedRandomSelector { features } => {
-                for (_, child) in features {
-                    visit(child);
-                }
-            }
-            Self::SimpleRandomSelector { features }
-            | Self::Sequence { features }
-            | Self::Overlay { features } => {
-                for child in features {
-                    visit(child);
-                }
-            }
-            Self::RandomBooleanSelector {
-                feature_true,
-                feature_false,
-            } => {
-                visit(feature_true);
-                visit(feature_false);
-            }
-            Self::CoralTree { feature } | Self::CoralClaw { feature } => visit(feature),
-        }
-    }
-
     fn parse(kind: &str, config: &'a Value) -> Option<Self> {
         let object = config.as_object()?;
         match kind {
@@ -188,12 +143,6 @@ impl<'a> Composition<'a> {
             }),
             "minecraft:overlay" => Some(Self::Overlay {
                 features: parse_holder_set(object.get("features")?)?,
-            }),
-            "minecraft:coral_tree" => Some(Self::CoralTree {
-                feature: Child::parse(object.get("feature")?)?,
-            }),
-            "minecraft:coral_claw" => Some(Self::CoralClaw {
-                feature: Child::parse(object.get("feature")?)?,
             }),
             "minecraft:random_boolean_selector" => Some(Self::RandomBooleanSelector {
                 feature_true: Child::parse(object.get("feature_true")?)?,
@@ -264,7 +213,7 @@ fn place_feature<'a>(
         };
     }
     if let Some(leaf) = parse_leaf(kind, config, &|name| registry.state_provider(name)) {
-        let placed = place_leaf(&leaf, world, random, pos);
+        let placed = place_leaf(&leaf, world, random, env.region_random, pos);
         return PlaceOutcome {
             supported: true,
             placed,
@@ -299,6 +248,38 @@ fn place_feature<'a>(
             return PlaceOutcome::unsupported();
         };
         return feature.place(registry, world, env, random, pos);
+    }
+    // 珊瑚链：`overlay` / `coral_tree` / `coral_claw` 都要递归放子 `PlacedFeature`。
+    //
+    // The coral chain: `overlay` / `coral_tree` / `coral_claw` all recurse into child
+    // `PlacedFeature`s.
+    if kind == "minecraft:overlay" {
+        let Some(overlay) = super::coral::OverlayFeature::parse(config) else {
+            return PlaceOutcome::unsupported();
+        };
+        return overlay.place(registry, world, env, random, pos);
+    }
+    if kind == "minecraft:coral_tree" {
+        let Some(tree) = super::coral::CoralTree::parse(config) else {
+            return PlaceOutcome::unsupported();
+        };
+        return tree.place(registry, world, env, random, pos);
+    }
+    if kind == "minecraft:coral_claw" {
+        let Some(claw) = super::coral::CoralClaw::parse(config) else {
+            return PlaceOutcome::unsupported();
+        };
+        return claw.place(registry, world, env, random, pos);
+    }
+    // `NoOpFeature`：`MapCodec.unit`，`place` 恒返回 true、不取随机数、不写方块。
+    //
+    // `NoOpFeature`: a unit codec whose `place` returns true without drawing random or
+    // writing blocks.
+    if kind == "minecraft:no_op" {
+        return PlaceOutcome {
+            supported: true,
+            placed: true,
+        };
     }
     let Some(comp) = Composition::parse(kind, config) else {
         return PlaceOutcome::unsupported();
@@ -385,115 +366,8 @@ fn place_composition<'a>(
             }
             total
         }
-        // 官方 `CoralTreeFeature.place`：主干 `nextInt(3)+1` 高，每格放一次子项，放不下
-        // 就直接返回 true；然后从顶部朝 `nextInt(3)+2` 个水平方向分枝，每枝
-        // `nextInt(5)+2` 段，`j == 0 || (segmentLength >= 2 && nextFloat() < 0.25)` 时
-        // 再往外挪一格。
-        // Official `CoralTreeFeature.place`: a trunk of `nextInt(3)+1`, one child placement
-        // per block (returning true as soon as one fails), then `nextInt(3)+2` horizontal
-        // branches from the top, each up to `nextInt(5)+2` segments.
-        Composition::CoralTree { feature } => {
-            let mut pos = pos;
-            let trunk_height = random.next_int(3) + 1;
-            for _ in 0..trunk_height {
-                let outcome = place_child(feature, registry, world, env, random, pos);
-                if !outcome.supported {
-                    return outcome;
-                }
-                if !outcome.placed {
-                    return PlaceOutcome {
-                        supported: true,
-                        placed: true,
-                    };
-                }
-                pos = (pos.0, pos.1 + 1, pos.2);
-            }
-            let trunk_top = pos;
-            let branches = random.next_int(3) + 2;
-            let directions = shuffle_horizontal(random);
-            let mut total = PlaceOutcome {
-                supported: true,
-                placed: false,
-            };
-            for branch in directions.into_iter().take(branches as usize) {
-                let mut pos = step(trunk_top, branch);
-                let branch_height = random.next_int(5) + 2;
-                let mut segment_length = 0;
-                for j in 0..branch_height {
-                    let outcome = place_child(feature, registry, world, env, random, pos);
-                    total.supported &= outcome.supported;
-                    if !outcome.placed {
-                        break;
-                    }
-                    total.placed = true;
-                    segment_length += 1;
-                    pos = (pos.0, pos.1 + 1, pos.2);
-                    if j == 0 || (segment_length >= 2 && random.next_float() < 0.25) {
-                        pos = step(pos, branch);
-                        segment_length = 0;
-                    }
-                }
-            }
-            total
-        }
-        // 官方 `CoralClawFeature.place`：先随机一个爪方向，再在
-        // [爪方向, 顺时针, 逆时针] 里洗牌取 `nextInt(2)+2` 条枝。
-        // Official `CoralClawFeature.place`: pick a claw direction, shuffle
-        // [it, clockwise, counter-clockwise] and take `nextInt(2)+2` branches.
-        Composition::CoralClaw { feature } => {
-            let claw = horizontal_direction(random);
-            let branches = random.next_int(2) + 2;
-            let candidates = [claw, clockwise(claw), counter_clockwise(claw)];
-            let mut directions = candidates;
-            shuffle_slice(&mut directions, random);
-            let mut total = PlaceOutcome {
-                supported: true,
-                placed: false,
-            };
-            for branch in directions.into_iter().take(branches as usize) {
-                let mut pos = step(pos, branch);
-                let sideway_length = random.next_int(2) + 1;
-                let (segment_direction, inway_length) = if branch == claw {
-                    (claw, random.next_int(3) + 2)
-                } else {
-                    pos = (pos.0, pos.1 + 1, pos.2);
-                    let pick = if random.next_int(2) == 0 {
-                        branch
-                    } else {
-                        "up"
-                    };
-                    (pick, random.next_int(3) + 3)
-                };
-                for _ in 0..sideway_length {
-                    let outcome = place_child(feature, registry, world, env, random, pos);
-                    total.supported &= outcome.supported;
-                    if !outcome.placed {
-                        break;
-                    }
-                    total.placed = true;
-                    pos = step(pos, segment_direction);
-                }
-                pos = step(pos, opposite(segment_direction));
-                pos = (pos.0, pos.1 + 1, pos.2);
-                for _ in 0..inway_length {
-                    pos = step(pos, claw);
-                    let outcome = place_child(feature, registry, world, env, random, pos);
-                    total.supported &= outcome.supported;
-                    if !outcome.placed {
-                        break;
-                    }
-                    total.placed = true;
-                    if random.next_float() < 0.25 {
-                        pos = (pos.0, pos.1 + 1, pos.2);
-                    }
-                }
-            }
-            total
-        }
-        // `OverlayFeature.place`：`placedAny |= placer.place(...)`，**循环到底**，
-        // 不因为某个子项失败就停。
-        // Official `OverlayFeature.place`: `placedAny |= placer.place(...)` over every
-        // child; it never stops early.
+        // `OverlayFeature.place`：`placedAny |= placer.place(...)`，不短路。
+        // `OverlayFeature.place`: `placedAny |= placer.place(...)`, no short-circuit.
         Composition::Overlay { features } => {
             let mut total = PlaceOutcome {
                 supported: true,
@@ -506,73 +380,6 @@ fn place_composition<'a>(
             }
             total
         }
-    }
-}
-
-/// `Direction.Plane.HORIZONTAL.shuffledCopy(random)` 的方向集（NORTH, EAST, SOUTH, WEST）。
-const HORIZONTAL: [&str; 4] = ["north", "east", "south", "west"];
-
-/// 洗牌后的水平方向。
-fn shuffle_horizontal(random: &WorldgenRandom) -> [&'static str; 4] {
-    let mut directions = HORIZONTAL;
-    shuffle_slice(&mut directions, random);
-    directions
-}
-
-/// `Direction.Plane.HORIZONTAL.getRandomDirection(random)`。
-fn horizontal_direction(random: &WorldgenRandom) -> &'static str {
-    HORIZONTAL[random.next_int(4) as usize]
-}
-
-/// `Util.shuffle`：从尾部往前，每步 `nextInt(i)`。
-fn shuffle_slice<T>(items: &mut [T], random: &WorldgenRandom) {
-    for i in (2..=items.len()).rev() {
-        let swap_to = random.next_int(i as i32) as usize;
-        items.swap(i - 1, swap_to);
-    }
-}
-
-/// `Direction.getClockWise()`（水平面上）。
-fn clockwise(direction: &'static str) -> &'static str {
-    match direction {
-        "north" => "east",
-        "east" => "south",
-        "south" => "west",
-        _ => "north",
-    }
-}
-
-/// `Direction.getCounterClockWise()`（水平面上）。
-fn counter_clockwise(direction: &'static str) -> &'static str {
-    match direction {
-        "north" => "west",
-        "west" => "south",
-        "south" => "east",
-        _ => "north",
-    }
-}
-
-/// `Direction.getOpposite()`。
-fn opposite(direction: &'static str) -> &'static str {
-    match direction {
-        "up" => "down",
-        "down" => "up",
-        "north" => "south",
-        "south" => "north",
-        "west" => "east",
-        _ => "west",
-    }
-}
-
-/// 沿方向走一格。
-fn step(pos: Pos, direction: &str) -> Pos {
-    match direction {
-        "up" => (pos.0, pos.1 + 1, pos.2),
-        "down" => (pos.0, pos.1 - 1, pos.2),
-        "north" => (pos.0, pos.1, pos.2 - 1),
-        "south" => (pos.0, pos.1, pos.2 + 1),
-        "west" => (pos.0 - 1, pos.1, pos.2),
-        _ => (pos.0 + 1, pos.1, pos.2),
     }
 }
 
@@ -594,6 +401,7 @@ pub(crate) fn place_child<'a>(
         biome_at: &mut *env.biome_at,
         registry: env.registry,
         top_feature: None,
+        region_random: env.region_random,
     };
     place_placed(
         registry,
@@ -609,89 +417,6 @@ pub(crate) fn place_child<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 诊断：逐层打印 `warm_ocean_vegetation` 子树里每个节点的解析结果。
-    ///
-    /// Diagnostic: print how every node under `warm_ocean_vegetation` parses.
-    #[test]
-    fn audits_the_coral_subtree() {
-        fn walk(registry: &Registry, child: &Child<'_>, depth: usize, path: &str) {
-            let pad = "  ".repeat(depth);
-            let Some((feature, placement)) = child.resolve(registry) else {
-                println!("{pad}{path}: RESOLVE FAIL");
-                return;
-            };
-            let Some((kind, config)) = crate::feature::run::resolve_feature(registry, feature)
-            else {
-                println!("{pad}{path}: KIND FAIL");
-                return;
-            };
-            for entry in placement {
-                match Modifier::parse(entry) {
-                    Ok(m) if !m.is_supported() => println!("{pad}{path}: BAD modifier {entry}"),
-                    Err(error) => println!("{pad}{path}: modifier parse error {error}"),
-                    _ => {}
-                }
-            }
-            if parse_leaf(&kind, config, &|_| None).is_some() {
-                println!("{pad}{path}: leaf {kind}");
-                return;
-            }
-            let Some(comp) = Composition::parse(&kind, config) else {
-                let text = config.to_string();
-                println!(
-                    "{pad}{path}: UNSUPPORTED {kind} config={}",
-                    &text[..160.min(text.len())]
-                );
-                return;
-            };
-            println!("{pad}{path}: comp {kind}");
-            let mut index = 0;
-            comp.for_each_child(|child| {
-                walk(registry, child, depth + 1, &format!("{path}.{index}"));
-                index += 1;
-            });
-        }
-
-        let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
-        let registry = Registry::parse(root.as_object().unwrap()).unwrap();
-        let placed = registry
-            .placed_id("minecraft:warm_ocean_vegetation")
-            .unwrap();
-        let def = registry.placed(placed).unwrap();
-        // 顶层：先看 placement 链，再把 feature 当成一个内联 child。
-        for entry in &def.placement {
-            match Modifier::parse(entry) {
-                Ok(m) if !m.is_supported() => println!("root: BAD modifier {entry}"),
-                Err(error) => println!("root: modifier parse error {error}"),
-                _ => {}
-            }
-        }
-        let Some((kind, config)) = crate::feature::run::resolve_feature(&registry, &def.feature)
-        else {
-            panic!("root kind");
-        };
-        println!("root: comp {kind}");
-        let comp = Composition::parse(&kind, config).expect("root composition");
-        let mut index = 0;
-        comp.for_each_child(|child| {
-            walk(&registry, child, 1, &format!("root.{index}"));
-            index += 1;
-        });
-
-        for name in [
-            "minecraft:tube_coral_block",
-            "minecraft:sea_pickle",
-            "minecraft:tube_coral",
-            "minecraft:tube_coral_fan",
-        ] {
-            let state = mc_bamboo_data::block_by_name(name).unwrap().default_state;
-            println!(
-                "survival {name} -> {}",
-                super::super::survival::supports(state)
-            );
-        }
-    }
 
     #[test]
     fn parses_every_step_nine_composition_feature() {
@@ -710,7 +435,6 @@ mod tests {
                     | "minecraft:simple_random_selector"
                     | "minecraft:random_boolean_selector"
                     | "minecraft:sequence"
-                    | "minecraft:overlay"
             );
             if is_composition {
                 assert!(

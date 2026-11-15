@@ -518,42 +518,6 @@ header / features 行里的 `steps` 掩码。
   Rust 侧按 `PropertyDef` 精确还原 ID。
 * `finish()` 打印新增的「features 比较了多少块、跳过多少块、跳过原因分布」。
 
-### 4.5 给带 `biome` 修饰器的地物找定点区块
-
-只在少数群系出现、placement 链里又带 `biome` 修饰器的地物（藤蔓、带 `biome` 的树等），
-随机抽区块很容易一次都碰不到，跑出来「0 不一致」其实是空跑。
-
-**要点：定点区块必须用 `BiomeManager::biome` 扫，不能用 `Generator::biomes`。**
-`biome` 修饰器的 `BiomeFilter.shouldPlace` 走的是
-`LevelReader.getBiome` → `BiomeManager.getBiome`，它是**按 octave 噪声做三维插值**
-（`fiddled_corner`）后查最近 quart 角；而 `Generator::biomes` 是直接读 quart 格。
-两条路径在同一个区块上可能给出**不同群系**，第 10 轮验证藤蔓时就踩过这个坑：
-用 `Generator::biomes` 扫出来的丛林区块 `(-784,-132)`，`biome` 修饰器把 127 个候选
-全判成了 `lukewarm_ocean`，叶子被调用 0 次。
-
-做法（写一个临时集成测试，用完删掉）：
-
-```rust
-let generator = Generator::new(&worldgen, seed)?;
-let manager = BiomeManager::new(generator.biome_source(), seed);
-let samplers = generator.samplers();
-let mut context = Context::uncached();
-// 对一个候选区块，在目标 y 范围内采样若干点，统计目标群系命中数。
-let biome = manager.biome(samplers, &mut context, cx * 16 + dx, y, cz * 16 + dz);
-```
-
-种子 0 的 `chunk (-600, -438)` 在 y=70/80/90 的 27 个采样点全是 `minecraft:jungle`，
-用它跑 `--seeds 1 --chunk -600 -438 --scan 3 --steps 9 --feature-types minecraft:vines`
-得到 0 不一致，且临时日志确认叶子被调用 1312 次。
-
-**另外两点**：
-* `--feature-types` 的每个条目可以是 **placed feature 的注册名**（如
-  `minecraft:glow_lichen`），也可以是 **Feature 类型 ID**（如 `minecraft:multiface_growth`），
-  两边都是精确匹配其一。写错成方块名（如把 `minecraft:glow_lichen` 当 Feature 类型）
-  会被当成 placed feature 名匹配上，看起来一样能跑，容易误判。
-* 确认「真的比到了」的两种做法见 `cur-next-round.md`：定点 `--chunk X Z --scan 3`，
-  或者整批跑完后做一次「故意改坏」并确认每个类型都报不一致。
-
 ### 4.4 种子/区块规模和耗时
 
 `chunkgen` 现有 `--seeds 6 --chunks 36 --salt 1` 是 216 个中心区块；features 阶段每个
@@ -1103,134 +1067,6 @@ step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_pred
   `sequence`；子项为注册表引用或内联配置，子项用 `placeWithBiomeCheck=false`
   （topFeature 为空）。`place_candidates` 改为递归回调并汇总 `supported` / `placed`。
 * `clamped` IntProvider（递归 source + `clamp`）。
-* `noise_state.rs`（接手会话 `416468e`）：`NoiseProvider` / `DualNoiseProvider` /
-  `NoiseThresholdProvider`，`normalize` / `amplitude_modifiers` 交给现有的 `NormalNoise`；
-  `BLOCK_STATE_PROVIDER` 注册表由生成器导出到 `worldgen.json` 的 `block_state_provider`
-  键，`to_place` 的 holder 字符串在解析时展开。三个花园 provider
-  （flower_plain / flower_meadow / flower_flower_forest）0 不一致。
-* `RuleBasedStateProvider`（`73d9be5`）：`if_true` 用 `block_predicate` 求值，规则按顺序试，
-  `getOptionalState` 全不中且没有 fallback 时返回 null（`SimpleBlockFeature` 放弃），
-  `getState` 那一层才退化成当前位置方块。`is_supported` 要求每条规则的谓词和 provider
-  都已移植。`rotated` 仍 `unsupported`（step 9 里没有用到）。
-* `survival.rs` 补齐海草 / 高海草 / 睡莲 / 海泡菜 / 孢子花（`73d9be5`、`f2198fd`），
-  `is_double_plant` 改查祖先表（`TallSeagrassBlock` 是 `DoublePlantBlock` 子类，
-  之前漏判导致高海草只放了半格）。
-* `bamboo.rs`（`b4671bb`）：`BambooFeature` —— 高度 `nextInt(12)+5`、podzol 圆盘
-  （`nextInt(4)+1` 半径、`WORLD_SURFACE - 1`、`#minecraft:beneath_bamboo_podzol_replaceable`）、
-  竹竿三格顶。**对拍 0 不一致**（`--seeds 2 --chunks 14 --salt 5`，28 中心）。
-* `vines.rs`（`44e9782`，**已写未验证**）：`VinesFeature` —— 原点空气、
-  `Direction.values()` 找第一个非 DOWN 且 `MultifaceBlock.canAttachTo` 成立的方向。
-  `face_is_full` 按官方 `getFaceShape` + `isShapeFullBlock` 的等价条件实现
-  （某个盒子贴住该方向的边界且在另两轴上铺满 1×1）。**没能找到真正触发它的区块**：
-  `minecraft:vines` 只在 jungle / bamboo_jungle / sparse_jungle，`count=127`，
-  但丛林区块里 `BiomeManager.getBiome` 的三维平滑把候选点判成海洋，`biome` modifier
-  全部过滤掉。需要别的队员用游戏内实际丛林地表再验。
-* 珊瑚链路的三个真 bug（第 19–20 轮，`4650642e` + `c1f3d0be`）：
-  1. **`minecraft:rotated` state provider 从未实现** —— 这是 `RotatedBlockProvider`，
-     先把 `direction` 定下来（缺省时 `Direction.getRandom` 消费一次 `nextInt(6)`），
-     再采样内层 provider，最后依次尝试 `axis` / `facing` / `horizontal_facing`
-     （有该属性才改，水平方向才设 `horizontal_facing`）。它是
-     `#minecraft:wall_corals` 那条链唯一缺的 provider。
-  2. **`CoralWallFanBlock` 没有存活判定** —— `BaseCoralWallFanBlock.canSurvive`
-     要读状态的 `facing`，再看它反方向那格在 `facing` 那一面是不是满面；
-     与 `CoralPlantBlock` / `CoralFanBlock`（固定看 UP 面）不同。新增
-     `Kind::CoralWallFan`。
-  3. **`minecraft:random_chance` placement modifier 从未实现** ——
-     `RandomChancePlacement` = `nextFloat() < chance`。珊瑚的
-     `coral/block_decoration` 子项每条都带 `{"chance":0.2,"type":"minecraft:random_chance"}`，
-     缺它整条修饰器链被判 unsupported。
-
-  **效果**：`warm_ocean_vegetation` 从「`0 centers / 9 skipped`、0 比对」变成
-  「`1 centers / 8 skipped`、**50 处不一致**」——链路终于真正跑起来了，
-  但珊瑚方块还没放对（`official 18502/18600` vs `bamboo 89`（水））。
-
-  审计方法值得记下来：前几轮靠 `chunkgen` + 临时日志，每轮要重新编译、机器一忙就卡；
-  本轮改成在 `composition.rs` 里写单元测试 `audits_the_coral_subtree`，
-  直接遍历 `warm_ocean_vegetation` 的整棵子树逐层打印解析结果，**秒级出结果**。
-  注意**只查静态解析会漏掉 `Err` 分支**——`random_chance` 就是
-  `Modifier::parse` 直接返回 `Err`，静态审计里被 `Err` 分支吞掉了，
-  要靠运行时 `eprintln` 才发现。
-
-* `multiface.rs`（`237c78a`、`d21458c`，**已写未验证**）：`MultifaceGrowthFeature`
-  （`minecraft:glow_lichen`）。含 `MultifaceSpreader` 的 `SAME_POSITION` /
-  `SAME_PLANE` / `WRAP_AROUND` 三种扩散、`getStateForPlacement` 的 waterlogged 处理。
-  **对拍仍有 126 处不一致**（`--seeds 2 --chunks 20 --salt 11 --steps 9`），
-  表现是 `glow_lichen -> water` / `air -> glow_lichen`，位置差一格左右，
-  疑点在汇报里。本轮修掉一个真 bug（`8f63533`）：`validDirections` 里
-  `Direction.Plane.HORIZONTAL` 的顺序是 **NORTH, EAST, SOUTH, WEST**，
-  之前写成 NORTH, SOUTH, WEST, EAST，导致洗牌结果整体错位。修完单区块
-  （`--chunk 1 0 --scan 1`）仍是 4 处，说明还有别的问题。
-  第 4 轮又修了两处（`fc5df1c`）：扩散时官方在第一个通过 `canSpreadInto` 的位置
-  就「一次定生死」（`getStateForPlacement` 返回 null 就让整条方向失败），
-  我之前会继续试后面的 `SpreadType`；另外加了一个单测穷举 `glow_lichen` 全部 64 种
-  面组合，确认 `with_property(state, face, "true") == Some(state)` 与
-  「该面属性是 true」等价。多点对拍仍是 102 处。
-  **第 4 轮的定位实验**：把 `chance_of_spreading` 强制成 0（不扩散）后，单区块的
-  差异从 4 降到 2 —— 说明一半差异来自扩散，另一半来自主放置。剩的 2 处是官方在
-  `(5,36,0)` 放了 `up`、`(15,42,13)` 放了 `north`，我方这两格没放。
-  **第 7 轮修的真 bug（`07a0942d`）**：`spread` 的起始面必须是**刚放置用的那个方向**
-  ——官方 `placeGrowthIfPossible` 把自己的 `placementDirection` 直接传给
-  `MultifaceSpreader.spreadFromFaceTowardRandomDirection(state, level, pos,
-  startingFace, random, true)`，只洗六个**扩散方向**。我之前错误地实现成了「先洗六个
-  方向当起始面候选、每个再洗一次当扩散方向」，那对应的是**另一个入口**
-  `spreadFromRandomFaceTowardRandomDirection`（只有骨粉路径 `performBonemeal` 用）。
-  修完多点对拍 102 → **70**。
-  **第 8 轮的结论（已解决）**：第 7 轮的修复其实已经让发光地衣**完全对齐**，之前的
-  「70 处」是修复过程中的中间数据。第 8 轮复测同一命令
-  （`--seeds 2 --chunks 20 --salt 11 --steps 9 --feature-types minecraft:glow_lichen`）
-  得到 **0 不一致**（40 中心 / 35389440 方块 / 0 skipped）；把
-  `chance_of_spreading` 强制成 0（关掉扩散）后同命令报 **70 处**，确认这个 0
-  不是空跑——扩散这一半差异正是第 7 轮修掉的那个入口搞混的 bug。
-  **第 6 轮已排除的假设**：(a) `can_be_placed_on` 的方块 ID 映射（逐个核对 10 个名字
-  → 注册表索引，全对）；(b) `can_attach_to` 判据（改成恒 true + 关闭扩散，差异不变）。
-  **第 8 轮排除的假设**：(c) `SpreadType.getSpreadPos` 三个分支（逐行对照
-  `SAME_POSITION` / `SAME_PLANE` / `WRAP_AROUND`，与我的 `offset` 嵌套等价）；
-  (d) `Direction.Axis` 的 ordinal 映射（`X=0, Y=1, Z=2`）。
-* 组合类回归（`6723362` 合并 main 后，`871f2b4`）：树在本分支已经可用，于是把
-  `random_selector` 和 `weighted_random_selector` 放开逐方块对拍。
-  * 6 个 `random_selector` 树（trees_plains / trees_savanna / trees_taiga /
-    trees_birch / trees_flower_forest / trees_windswept_hills），
-    `--seeds 2 --chunks 24 --salt 13 --steps 9`：**0 不一致**，48 中心 /
-    42467328 方块 / 0 skipped。故意把 `random_selector` 的 chance 判定改成恒真
-    （永远选第一个子项）后同一命令报 160 处不一致（`air -> birch_log`），
-    确认这个 0 不是假绿。
-  * `trees_dappled_forest`（`weighted_random_selector`，5 个加权子项），
-    `--seeds 1 --chunk -900 461 --scan 3 --steps 9`：**0 不一致**，9 中心 /
-    7962624 方块 / 0 skipped；临时日志确认树叶子被调用 18 次，不是空跑。
-* 合并 main 时同步改了一处签名：`StateProvider::get_state` 现在要
-  `(world, random, pos)`（`NoiseProvider` / `DualNoiseProvider` /
-  `RuleBasedStateProvider` 都按坐标取值）。main 的树 / 蘑菇 / 装饰器调用点逐个
-  按官方传参补上位置：`TrunkPlacer.placeLog` / `placeBelowTrunkBlock`、
-  `FoliagePlacer`、`RootPlacer.placeRoot`（含 `aboveRootProvider`）、
-  `MangroveRootPlacer.placeRoot`、`AttachedToLeaves` / `AttachedToLogs` /
-  `PlaceOnGround` 装饰器、`FallenTreeFeature`、
-  `AbstractHugeMushroomFeature`（官方蘑菇传的是 `origin`）。
-* `ChunkgenOracle.java` 补 `WorldGenLevel.getRawBrightness`（恒 15，和
-  `BlockOracle` 的既有约定一致）。树合并后 step 9 会走到
-  `MushroomBlock.canSurvive`，之前代理直接抛异常让整个 oracle 崩掉。恒 15 意味着
-  亮度门槛的判定在官方侧一律为假，所以蘑菇在 Rust 侧继续标 `unsupported`
-  （整块跳过），两边不会拿假亮度做比较。副作用：**完整 11 步、不过滤类型的
-  step 9 对拍目前 40 个区块全部 skipped**（`overlay` / `block_column` /
-  `coral_tree` / `vegetation_patch` / `root_system` 还没移植），要等那些分支合进来
-  才能不加 `--feature-types` 跑。
-
-* 第 12 轮新增三个「小类型」（`0459b9b6`）：
-  * `OverlayFeature`（`minecraft:overlay`）—— 和 `sequence` 几乎一样，但**不短路**：
-    `placedAny |= placer.place(...)` 走完所有子项。加在 `composition.rs` 的
-    `Composition::Overlay`。
-  * `NoOpFeature`（`minecraft:no_op`）—— 什么都不做，但 `place` 返回 **true**。
-  * `SingleBlockPillarFeature`（`minecraft:single_block_pillar`）—— 沿竖直方向逐格
-    放同一处方块，条件 `canReplace.test(...) && random.nextFloat() < chanceToContinue`
-    且没超出建造高度；**已知限制**：`cap_feature`（顶盖）要递归 `PlacedFeature.place`
-    并带 `PlacementEnv`，当前叶子接口不传，带 `cap_feature` 的配置解析时返回 `None`。
-
-  **三者都还没有可验证的路径**：`overlay` 只作为**内联子项**出现，没有独立的
-  placed feature；它的父级（`warm_ocean_vegetation` 经 `simple_random_selector` 到
-  `coral_tree` / `coral_claw`，`desert_well` 到 `template`，`basalt_pillar` 到
-  `single_block_pillar` 但带 `cap_feature`）都含还没移植的类型，所以整条会被标
-  unsupported。**回归确认**：已移植的类型（发光地衣 / 藤蔓 / 竹子）在
-  `--seeds 2 --chunks 16 --salt 11 --steps 9` 下仍 **0 不一致**（32 中心 /
-  28311552 方块 / 0 skipped），新代码没有引入回归。
 
 #### 本分支对拍结果（`--through features --steps 9`）
 
@@ -1246,18 +1082,6 @@ step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_pred
 | 故意把 weighted provider 固定选第 0 条（同参数） | 120 处不一致（确认非假绿） |
 | `--steps 6 --ore-only`、`--through carvers`（`--seeds 2 --chunks 4/6 --salt 1`）、`worldgen java` | 各 0 不一致（旧阶段回归） |
 | `cargo test -p mc-bamboo-worldgen` | 115 个测试全过 |
-| 3 个花园 holder provider（flower_plain / flower_meadow / flower_flower_forest / flower_plains / flower_forest_flowers / forest_flowers），`--seeds 2 --chunks 20 --salt 3` | 0 不一致（40 中心 / 35389440 方块，0 skipped） |
-| 海草 5 个（cold / normal / river / swamp / warm，`weighted_random_selector` 子项），`--seeds 2 --chunks 16 --salt 11` | 0 不一致（32 中心 / 28311552 方块，0 skipped） |
-| 睡莲 + 海泡菜 + 孢子花，`--seeds 2 --chunks 16 --salt 11` | 0 不一致（32 中心 / 28311552 方块，0 skipped） |
-| 故意把 `sea_pickle_placeable` 改成恒 true，`--seeds 3 --chunks 30 --salt 21` | 130 处不一致（确认非假绿） |
-| `minecraft:bamboo`（`--seeds 2 --chunks 14 --salt 5 --steps 9`） | **0 不一致**（28 中心 / 24772608 方块，0 skipped） |
-| 故意把竹竿状态换成空气（`--seeds 2 --chunks 24 --salt 33`） | 160 处不一致（确认非假绿；同时暴露 27 处 terrain 既有差异） |
-| `minecraft:vines`（`--seeds 1 --chunk -600 -438 --scan 3 --steps 9 --feature-types minecraft:vines`） | **0 不一致**（9 中心 / 7962624 方块 / 0 skipped）；临时日志确认藤蔓叶子被调用 **1312 次**；故意把面属性固定成 `north` 后同命令报 **17 处**（`vine -> vine`），确认非空跑 |
-| `minecraft:glow_lichen`（`--seeds 2 --chunks 20 --salt 11 --steps 9`） | **0 不一致**（40 中心 / 35389440 方块 / 0 skipped）；关掉扩散后同命令报 70 处（确认非空跑）。轨迹 126 → 102 → 70 → 0 |
-| `minecraft:spore_blossom`（lush_caves，`--seeds 1 --chunk -600 -598 --scan 3 --steps 9`） | 0 不一致但 **simple_block 叶子被调用 0 次**，`environment_scan` 把候选全滤掉，不算验证 |
-| 6 个 `random_selector` 树（`--seeds 2 --chunks 24 --salt 13 --steps 9`） | **0 不一致**（48 中心 / 42467328 方块，0 skipped） |
-| 故意把 `random_selector` 的 chance 改成恒真 | 160 处不一致（确认非假绿） |
-| `trees_dappled_forest`（`--seeds 1 --chunk -900 461 --scan 3 --steps 9`） | **0 不一致**（9 中心 / 7962624 方块，0 skipped；树叶子调用 18 次） |
 
 **terrain 含水层既有差异**：`--salt 7` 下 seed -1、中心 chunk (52,-27) 的 +z 邻居
 (52,-26)、y=-54、x=14、z=1..3 三格，官方是水、Bamboo 是深板岩；`--steps 0`
@@ -1276,9 +1100,9 @@ step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_pred
   `random_boolean_selector` / `sequence` 的 place 逻辑按官方源码逐行移植，但子项多为
   树 / 水生（已移交），本轮未逐方块验证，待对方分支 merge 本分支后再放开对拍。
   `projected_random_patchy_square` 在 26.3 导出数据里没有条目。
-* `to_place` 的 holder 字符串引用已支持（`block_state_provider` 键）；`rotated` provider
-  仍 `unsupported`，step 9 里没有用到。特殊 `canSurvive` 里只剩蘑菇（`getRawBrightness`
-  需要生成期光照）和苔藓地毯（`MossyCarpetBlock.placeAt` 用 `level.getRandom()`）未移植。
+* `to_place` 的 holder 字符串引用（flower_plain / flower_meadow / flower_flower_forest）：
+  `BLOCK_STATE_PROVIDER` 注册表未导出，需生成器补数据；特殊 `canSurvive`
+  （蘑菇、睡莲、孢子花、苔藓地毯、海泡菜）同上。
 * `noise_threshold_count` / `noise_based_count` / `environment_scan` /
   `surface_water_depth_filter` / `surface_relative_threshold_filter` 修饰器、
   `clamped_normal` / `weighted_list` IntProvider、方块实体数据（蜂巢、可疑沙等）。
@@ -1404,6 +1228,267 @@ step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_pred
 完全不同的列；floor 的 `vegetation_chance` 是 0.8，几乎所有列都长植被，顺序错也看不
 出来。
 
+#### 第三轮：`noise_threshold_count`、`clamped_normal`、`count_on_every_layer`、
+`MossyCarpetBlock.placeAt`（分支 `cb-wg-aquatic`）
+
+提交：`8d12409d`、`cad07370`（均为 `WIP:` 开头，按本轮工作模式保留）。
+
+本轮落地：
+
+* `IntProvider::ClampedNormal`：`clamp(mean + (float) nextGaussian * deviation, min, max)`。
+  为此给 `WorldgenRandom` 补了 `next_gaussian`（`MarsagliaPolarGaussian`，缓存另一半，
+  `set_seed` 时清缓存）。导出数据里只有 `pointed_dripstone` / `sulfur_spike` 用它，
+  **不属本分支范围，未对拍**。
+* `Modifier::NoiseThresholdCount`：`BIOME_INFO_NOISE.get(x/200, z/200)` 与
+  `noise_level` 比较，取 `below_noise` / `above_noise`。对拍见下表。
+* `Modifier::CountOnEveryLayer`：逐层找「空气在实心之上」的第 n 个交界，
+  床岩不算支撑。导出数据里只被下界类型用。
+* `feature/mossy_carpet.rs`：`MossyCarpetBlock.placeAt` —— `getUpdatedState`
+  （`BASE` / `LOW` / `TALL` 与上方同类地毯的联动）、`createTopperWithSideChance`
+  （每个非 `NONE` 侧面一次 `nextBoolean`）、放 topper 后再更新一次下层。
+* `survival.rs` 的 `MossyCarpet` 分支（`canSurvive`：`BASE` 时下面非空气，
+  否则下面同类且 `BASE`），`simple_block.rs` 分派到 `placeAt`。
+
+**关键发现：`level.getRandom()` 不是地物的 `random`。** `SimpleBlockFeature.place`
+对 `MossyCarpetBlock` 调的是 `MossyCarpetBlock.placeAt(level, origin,
+level.getRandom(), 2)`（字节码 129 是 `WorldGenLevel.getRandom()`），而
+`WorldGenRegion.random` 来自 `RandomState.getOrCreateRandomFactory("worldgen_region_random")`
+在中心区块**世界原点**上取的随机源，整个 `features` 调用共用一份，和按
+`(index, step)` 重新播种的地物 `random` 完全无关。
+
+为此在 `Generator` 里加了 `region_random: PositionalFactory`，
+`FeatureContext` / `PlacementEnv` 各加一个 `region_random` 字段，
+`place_leaf` / `SimpleBlockFeature::place` 把它传到 `MossyCarpet::place_at`。
+改之前 `pale_moss_patch` 对拍 15 处不一致，改之后降到 2 处。
+
+对拍（`--through features --steps 9`，逐方块）：
+
+| 集合 | 参数 | 结果 |
+|---|---|---|
+| `flower_cherry,flower_plains,patch_grass_meadow,patch_grass_plain,patch_tall_grass_2,wildflowers_meadow`（`noise_threshold_count` 的 6 个 placed feature） | `--seeds 4 --chunks 20 --salt 7` | **0 不一致**（79 中心 / 69894144 方块 / 1 skipped） |
+| 同上，故意把阈值偏 1.0 | `--seeds 2 --chunks 8 --salt 7` | 24 处不一致（确认比到了） |
+| `pale_moss_patch`（`MossyCarpetBlock.placeAt`） | `--seeds 6 --chunks 40 --salt 7` | **2 处未解决**（240 中心 / 212336640 方块 / 0 skipped）。改区域随机源前是 15 处 |
+| 14 个已验证 placed feature 一起放开（`block_column,vines,bamboo,multiface_growth,cave_vines,sea_pickle,seagrass_*×4,patch_waterlily,spore_blossom,kelp_cold,lush_caves_vegetation`） | `--seeds 4 --chunks 12 --salt 7` | **0 不一致**（48 中心 / 42467328 方块 / 0 skipped） |
+
+#### 第五轮：合并 main 后的收尾（分支 `cb-wg-aquatic`）
+
+main 已把本分支（`1c9853c6`）合进去了，所以再 `git merge main` 时两边是同一批改动的两个副本，
+产生了大量「同一项出现两次」的冲突（`Opaque` 式重复枚举项 / match 分支 / 解析分支）。
+
+处理原则：**同一功能两份一模一样时保留 main 那份**，删掉本分支的副本。
+
+* `provider.rs`：`IntProvider::ClampedNormal` 的枚举项、`parse` 分支、`sample` 分支
+  各去重一次（保留 main 的 `number()` 版本）。
+* `placement.rs`：`SurfaceWaterDepthFilter` / `Unsupported` 的 match 分支去重。
+* `dispatch.rs`：`Ore` / `SimpleBlock` 的 `place_leaf` 分支去重。
+* `mod.rs`：`lake` / `large_dripstone` / `monster_room`（main）与
+  `mossy_carpet`（本分支）都保留。
+* `root_system.rs`（别人在本分支上的提交）有一个 `clippy::identity_op`：
+  `1u64 << (facts::STURDY_FULL + 0)` 改成 `1u64 << facts::STURDY_FULL`。
+
+另外修正了 `WorldGenRegion.random` 的采样点：`ChunkPos.getWorldPosition()` 是
+`new BlockPos(minBlockX, **0**, minBlockZ)`，y 恒为 **0**，不是维度的 `minY`。
+之前用 `min_y`（-64）是错的。
+
+#### 第四轮：`HashMap` 桶树化（分支 `cb-wg-aquatic`）
+
+提交：`e27882c6`（`WIP:` 开头，按工作模式保留）。
+
+`VegetationPatchFeature` 把地表位置收进 `HashSet<BlockPos>` 后按迭代顺序分配植被随机数。
+上一轮只复刻了链表形状，桶内到 8 个元素时官方 `HashMap` 会转红黑树，`treeify` 之后
+`moveRootToFront` 把**树根**挪到桶首，迭代顺序因此不同。
+
+本轮实现：
+
+* `java_set.rs` 的 `Tree`：按桶内链表顺序逐个插入红黑树（`putTreeVal` + `balanceInsertion`
+  + `rotateLeft` / `rotateRight`），比较规则是 `HashMap.treeNode` —— hash 优先，再
+  `Vec3i.compareTo`（`y` → `z` → `x`）。`tieBreakOrder` 的 `identityHashCode` 分支用不到：
+  `compareTo` 全等的两个位置必然 `equals`，不可能同时存在于同一个 `HashSet`。
+* `JavaPosSet::insert` 的 `treeifyBin` 分支：容量 < 64 时翻倍，容量 ≥ 64 时调
+  `treeify`（把桶内链表重排成「根在最前、其余保持插入序」）。
+
+单测 `heavy_collisions_move_the_tree_root_to_the_bin_head` 用官方 JVM 实际打印的 40 个
+`(i*16, 62, 0)` 的顺序逐项比对，**40 个全部一致**。
+
+对拍：`moss_patch_ceiling` 从 **20 处降到 14 处**（其中 10 处是 terrain 既有差异，
+地物阶段剩 4 处）。剩下的 4 处见「疑点」。
+
+#### 第六轮：`vegetation_patch` 家族与垂滴叶（分支 `cb-wg-aquatic`）
+
+按队长指示，**停止「让 HashMap 桶树化后迭代顺序和 Java 一致」**（投入产出比低）。
+`java_set.rs` 改成：遇到本该树化的桶（容量 ≥ 64 且桶内 8 个）只置 `treeified` 标记，
+`VegetationPatch::place` 看到标记就把整次放置标 `unsupported`，对拍时跳过该区块。
+红黑树实现已删除。提交 `f749ee66`。
+
+* `survival.rs` 新增三个 `canSurvive`：
+  * `SmallDripleafBlock`：上半格看下半格；下半格看 `supports_small_dripleaf`，
+    或本格上方是水源且下面在 `supports_vegetation` 里。
+  * `BigDripleafBlock`：下面同类、`big_dripleaf_stem`，或 `supports_big_dripleaf`。
+  * `BigDripleafStemBlock`：下面同类或 `supports_big_dripleaf`，**并且**上面同类或
+    `big_dripleaf`。
+* `waterlogged_vegetation_patch`（`clay_pool_with_dripleaves`）重新接进
+  `composition::place_feature`。
+
+对拍（`--through features --steps 9`，繁茂洞穴 `--chunk 0 52`）：
+
+| 集合 | 参数 | 结果 |
+|---|---|---|
+| `lush_caves_clay`（`waterlogged_vegetation_patch` + `dripleaf`） | `--chunk 0 52 --scan 5 --seeds 1` | 0 不一致 / 0 skipped（9 中心 / 7962624 方块） |
+| `lush_caves_vegetation` | `--chunk -1 52 --seeds 1` | 0 不一致 |
+| `lush_caves_ceiling_vegetation` | `--chunk 0 52 --scan 25 --seeds 1` | 0 不一致（25 中心 / 22118400 方块） |
+| 三者一起 | `--chunk 0 52 --scan 25 --seeds 1` | 0 不一致，**2 skipped**（`treeified` 标记生效） |
+
+#### `lush_caves_clay` 为什么在野外几乎不触发（第十三/十四轮诊断）
+
+`lush_caves_clay` 是 `waterlogged_vegetation_patch`（`clay_pool_with_dripleaves`）唯一的入口，
+只属于 `minecraft:lush_caves` 群系（`features_per_step[9]` 的全局 index 32）。它长期对拍
+0 不一致但改坏也不报，第十三轮加了逐修饰器的计数诊断，结论如下：
+
+```
+modifier Count(Constant(62))     -> 62 out
+modifier InSquare                ->  1 out   (×62，每次 in_square 只产 1 个)
+modifier HeightRange(uniform)    ->  1 out   (×62)
+modifier EnvironmentScan{down}   ->  0 out   (×60) / 1 out (×2)
+modifier Offset{y:+1}            ->  1 out   (×2)
+modifier Biome                   ->  0 out   (×2)   ← 全部被 BiomeFilter 杀掉
+```
+
+再给 `Biome` 加诊断，两个候选的拒绝原因都是：
+
+```
+biome filter rejected at (3, 80, 844): biome=29 placed=87
+biome filter rejected at (4, 88, 842): biome=29 placed=87
+```
+
+`biome=29` 是 **`minecraft:jungle`**，而 `lush_caves` 的注册表 ID 是 **31**。
+
+原因是 `BiomeManager.getBiome`（官方 `BiomeFilter` 走的就是它）会按八角距离做平滑，
+而这两个候选的 y 是 **80 / 88** —— `environment_scan` 从 `height_range` 的随机 y 向下
+找到的第一块 solid 在地表附近，那里的平滑群系是 `jungle` 而不是地下的 `lush_caves`。
+**所以 BiomeFilter 杀掉它们是正确的官方行为**，`lush_caves_clay` 只在「扫描落点恰好
+在 `lush_caves` 主导的深度」时才真正跑，野外极少。
+
+结论：`waterlogged_vegetation_patch` / `SmallDripleafBlock` 的 `placeAt` 路径**不是实现有问题**，
+而是这个 placed feature 本身在地表附近几乎不触发。要拿到逐方块对拍证据，需要专门找
+「`environment_scan` 停在深处」的区块，或在集成测试里直接构造（`waterlogged_patch_lays_ground_and_turns_deep_cells_into_water`
+已经这么做了）。
+
+#### 第二十轮：用「低段 `lush_caves` 占多数」的区块跑通了 `waterlogged_vegetation_patch`
+
+上一段说需要「专门找 `environment_scan` 停在深处」的区块。第二十轮用
+`W:\data\bamboo-agents\tools\tmp_find.rs` 的做法（临时集成测试，用完删除）扫出
+seed 0 下**低 8 段（y = -64..63）`lush_caves` 占 75%+** 的区块：
+`(476,0)` 0.760、`(480,0)` 0.803、`(484,0)` 0.814、`(488,0)` 0.812、
+`(-528,528)` 0.781、`(-532,532)` 0.844。
+
+其中 `(480,0)` 一带真的跑到了 `waterlogged=true` 分支（加临时打印确认）：
+
+```
+DIAG vegetation_patch place waterlogged=false origin=(7674, -36, -16)
+DIAG placeGroundPatch waterlogged=false placed=true surface=52
+DIAG vegetation_patch place waterlogged=true  origin=(7675, -21, -5)
+DIAG placeGroundPatch waterlogged=true  placed=true surface=1
+DIAG vegetation_patch place waterlogged=true  origin=(7692, -12, 15)
+DIAG placeGroundPatch waterlogged=true  placed=true surface=29
+DIAG vegetation_patch place waterlogged=true  origin=(7692, -10, 9)
+DIAG placeGroundPatch waterlogged=true  placed=true surface=11
+DIAG vegetation_patch place waterlogged=true  origin=(7689, 44, 29)
+DIAG placeGroundPatch waterlogged=true  placed=true surface=40
+DIAG vegetation_patch place waterlogged=true  origin=(7703, 69, 17)
+DIAG placeGroundPatch waterlogged=true  placed=true surface=30
+```
+
+对拍命令与结果：
+
+| 命令 | 结果 | 改坏验证 |
+|---|---|---|
+| `--through features --steps 9 --feature-types minecraft:lush_caves_clay --chunk 480 0 --scan 9 --seeds 1` | **0 不一致 / 0 skipped**（9 中心 / 7962624 方块） | 把 `is_exposed` 改成恒 `true`（不换任何水）报 **160 处** |
+
+**注意**：`--feature-types` 要写 **placed feature 注册名** `minecraft:lush_caves_clay`，
+不能写类型 ID `minecraft:waterlogged_vegetation_patch` —— 后者会让 Java 侧
+`applyFeatureAllowList` 抛 `feature allow list kept nothing`，因为白名单是按
+**placed feature** 过滤的，而 `clay_pool_with_dripleaves` 没被任何 placed feature 直接引用
+（它只作为 `lush_caves_clay` 的 `random_boolean_selector` 子项出现）。
+
+#### `root_system` 的成功路径在官方 26.3 里几乎不可达（第十六轮核对）
+
+`rooted_azalea_tree` / `rooted_sulfur_spring` 长期「改坏也不报错」。逐字节核对官方
+`RootSystemFeature` 后发现是**官方逻辑本身**的问题，不是移植错误：
+
+```java
+// place
+if (!level.getBlockState(origin).isAir()) return false;      // origin 必须是空气
+placeDirtAndTree(..., workingPos, origin);
+
+// placeDirtAndTree
+for (int y = 0; y < rootColumnMaxHeight; y++) {
+   workingPos.move(UP);                                     // workingPos.y = origin.y + y + 1
+   if (getHeight(WORLD_SURFACE, workingPos) < workingPos.getY()) return false;
+   if (allowedTreePosition.test(level, workingPos) && spaceForTree(level, workingPos)) {
+      BlockPos below = workingPos.below();                  // = origin.y + y
+      if (fluidState(below).is(LAVA) || !state(below).isSolid()) return false;
+      if (treeFeature.place(level, gen, random, workingPos)) {
+         placeDirt(origin, origin.getY() + y, level, random);
+         return true;
+      }
+   }
+}
+```
+
+- 第一次迭代 `y = 0`：`workingPos.y = origin.y + 1`，`below.y = origin.y` ——
+  **`below` 就是 origin 本身**。而 `place` 刚要求过 origin 是空气，
+  所以 `state(below).isSolid()` 必然为 false，**直接 `return false`**。
+- 后续迭代 `y > 0`：`below.y = origin.y + y` 要实心，但 `spaceForTree` 要求
+  `workingPos` 上面连续 `requiredVerticalSpaceForTree` 格可放树（空气或浅水），
+  并且 `allowedTreePosition` 要求 `workingPos` 可放树。二者与「下方某格实心」
+  只在极窄的组合下共存。
+
+**结论**：`RootSystemFeature` 在 26.3 里基本是死代码 —— 这解释了为什么
+`rooted_azalea_tree` 在野外（`--seeds 3 --chunks 20 --salt 7`、繁茂洞穴定点）
+和合成世界里都一次没放成，**改坏验证自然也不会报错**。我的实现如实翻译了这个逻辑，
+所以「0 不一致 + 改坏不报错」是**正确结果**，不是移植缺陷。
+
+`root_system` 因此归入「已写，官方本身不可达」，不再作为待验证项。
+
+#### 第五轮：`root_system`（分支 `cb-wg-aquatic`）
+
+提交：`02887dfa`（`WIP:` 开头）。
+
+* `feature/root_system.rs`：`RootSystemFeature` 全体 —— `placeDirtAndTree`（向上逐格找能
+  放树的位置、`spaceForTree` 的竖直空间与四角检查、下面不能是岩浆且必须 `isSolid`）、
+  `placeDirt` + `placeRootedDirt`（每层 `root_placement_attempts` 次随机水平偏移，
+  只在 `root_replaceable` 里替换）、`placeRoots`（悬挂根，要求空气 + `canSurvive` +
+  上面 `isFaceSturdy(DOWN)`）。
+* 接进 `composition::place_feature`（需要注册表和 `PlacementEnv` 递归调 `treeFeature.place`）。
+* `hanging_root_state_provider` / `root_state_provider` 走 `StateProvider::parse_with`。
+
+对拍：`--steps 1,9 --feature-types minecraft:rooted_azalea_tree,minecraft:rooted_sulfur_spring
+--seeds 3 --chunks 20 --salt 7` → 60 中心 / 53084160 方块 / 0 skipped / 0 不一致；
+`--chunk -300 -275 --scan 5 --seeds 1`（繁茂洞穴）→ 9 中心 / 7962624 方块 / 0 不一致。
+**但两次「故意改坏」都仍是 0 不一致**，说明这两组参数下 `rooted_azalea_tree` 实际上
+一次都没放成（`allowed_tree_position` 或 `root_replaceable` 没匹配上），
+所以这一项应视为**已写未验证**，不是「已验证」。
+
+#### 已知限制（第四轮更新）
+
+* ~~**`moss_patch_ceiling` 还剩 4 处 `cave_vines` 错位**~~ **已修复（第二十一轮）**：
+  上轮把 `region_random` 改成裸 `Random` 之后顺带解决。`--through features --steps 9
+  --feature-types minecraft:lush_caves_ceiling_vegetation --chunk -58 -217 --seeds 2`
+  原本报 14 处（10 terrain + 4 地物），现在该区块整块被 `treeified` 跳过；
+  改用 `--seeds 4 --chunks 20 --salt 7`（80 中心 / 70778880 方块 / 0 skipped）
+  得到 **0 不一致**，把 `distribute_vegetation` 的 `nextFloat` 判断去掉（恒长植被）
+  会报 **160 处**。
+* ~~**`pale_moss_patch` 还剩 2 处**~~ **已修复（第二十轮）**：`chunk (529509,523106)`
+  的 `(12,135,10)` / `(12,136,10)`。根因是 `region_random` 的**类型**：
+  官方 `WorldGenRegion.random` 是裸 `RandomSource`（`XoroshiroRandomSource`），
+  `nextBoolean()` 等于 `(nextLong() & 1) != 0`（long 的**低位**）；我包成了
+  `WorldgenRandom`，它的 `nextBoolean()` 走 `next(1)`（**高位**），两边序列完全不同。
+  JVM 实测同一位置：官方 `false`、Bamboo `true`。
+  改成裸 `Random` 后 `--chunk 529509 523106 --seeds 6` 从 2 处降到 **0 处**；
+  把取数改成 `!random.next_boolean()` 会报 **6 处**（改坏验证通过）。提交 `4941e404`。
+* `clamped_normal` 只有单测，没对拍（用它的两个 placed feature 属洞穴/冰雪分支）。
+* `count_on_every_layer` 只有单测，没对拍（只被下界类型用，主世界不出现）。
+
 #### 蘑菇的亮度判据（已查清并落地）
 
 `WorldGenRegion` **没有覆写** `getRawBrightness`，它转发到 `level.getLightEngine()`
@@ -1421,10 +1506,23 @@ step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_pred
 `cherry_leaves` / `coarse_dirt` / `note_block`）。这一条已按此实现并写进
 `survival.rs` 的注释。
 
-**未验证的部分**：`mushroom_island_vegetation`（蘑菇岛群系，`huge_red/brown_mushroom`
-巨型蘑菇）和 `brown_mushroom_normal` 等 placed feature 没有拿到 0 不一致对拍 ——
-前者依赖 `huge_*_mushroom`（属 `cb-wg-trees`），后者需要专门的群系覆盖。所以「亮度
-恒为 15」这个结论**目前只有源码推导，没有逐方块对拍证据**。
+**已验证（第二十一轮）**：用临时集成测试扫出 seed 0 下全 24 段都是 `mushroom_fields`
+的区块 `(-8628,0)`（1536/1536 个 quart 格），对拍：
+
+```
+--through features --steps 9 \
+  --feature-types minecraft:mushroom_island_vegetation,minecraft:brown_mushroom_taiga,\
+minecraft:red_mushroom_taiga,minecraft:brown_mushroom_normal,minecraft:red_mushroom_normal \
+  --chunk -8628 0 --scan 9 --seeds 1
+```
+
+结果 **0 不一致 / 0 skipped**（9 中心 / 7962624 方块）。改坏验证：把
+`mushroom_can_survive` 改成恒 `true`（无视亮度标签）后报 **160 处**
+（`bamboo 3828` = `brown_mushroom`，`official 0`），证明蘑菇确实被真实放置，
+「亮度恒为 15」这条判据也在起作用。
+
+注意 `mushroom_island_vegetation` 里的 `huge_red/brown_mushroom` 属 `cb-wg-trees`，
+本轮放开的 5 个 placed feature 都能跑到；巨型蘑菇本身仍归树队员。
 
 #### 本分支还没做（诚实标 `unsupported`）
 
@@ -1433,9 +1531,15 @@ step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_pred
   `simple_random_selector`，所以 step 9 仍标 skipped。
 * `root_system`（`rooted_azalea_tree`、`rooted_sulfur_spring`）：需要 `TreeFeature`，
   属 `cb-wg-trees`。
-* `block_pile`、`huge_fungus`、`chorus_plant`：只被组合类内联或只在下界/末地。
+* `block_pile`、`huge_fungus`、`chorus_plant`：**不在主世界的 `features_per_step` 里**
+  （三者的 placed feature 都是 `steps=[]`，且没有任何主世界条目按类型引用它们），
+  下界和末地维度还没做，所以**不需要实现**。第十五轮核对过 `features_per_step` 的全部
+  类型集合里没有这三个。
 * `noise_threshold_count` / `count_on_every_layer` / `surface_water_depth_filter`
-  修饰器：本分支只补了 `environment_scan` 与 `surface_relative_threshold_filter`。
+  修饰器：第三轮（`8d12409d`）已全部移植。
+  `noise_threshold_count` 用在 step 9 的 6 个植被 placed feature 上并对拍 0 不一致；
+  `count_on_every_layer` 只被下界类型（`crimson_fungi` 等）用，主世界不出现；
+  `surface_water_depth_filter` 由 main 移植。
 * `seagrass` / `sea_pickle` / `lily_pad` / `spore_blossom` / `mushroom` 的
   `canSurvive`：全部已移植。`mushroom` 的亮度判据见上文「蘑菇的亮度判据」。
   （`supports_lily_pad` 流体/方块标签 + 上方空流体）、`SporeBlossomBlock`
@@ -1566,14 +1670,42 @@ step 6 的修饰器 `surface_relative_threshold_filter`（3 处）、`block_pred
   `large_dripstone`、`monster_room`、`multiface_growth`、`ore`、`simple_block`、
   `speleothem`、`speleothem_cluster`、`spike`、`spring_feature`、`tree`、
   `underwater_magma`、`vegetation_patch`（floor / ceiling）、`vines`。
-* 已写但**不接入**（`parse_leaf` 返回 `None`，整块标 `unsupported`）：`sculk_patch`
-  （`deep_dark` 单区块 8 处不一致，未收敛）、`waterlogged_vegetation_patch`
-  （`clay_pool_with_dripleaves` 完全没对拍）。
-* 已知未解决的差异：`moss_patch_ceiling` 的 10 处 `cave_vines` 错位（根因是
-  `JavaPosSet` 没实现 `java.util.HashMap` 的红黑树化）。
-* 没做：`fossil`、`overlay`（沙漠井，要 `template` 地物）、`root_system`、
-  `huge_fungus`、`chorus_plant`、`block_pile`、`noise_threshold_count` /
-  `count_on_every_layer` 修饰器。
+* 已写并接入：`sculk_patch`（`deep_dark` 的 step 7，见下）、
+  `waterlogged_vegetation_patch`（`lush_caves_clay`，见下）。
+* 已写但**对拍框架不可比**：`fossil`（`fossil_coal` / `fossil_diamonds`）。
+  实现完整（`feature/fossil.rs`：旋转、模板选择、`OCEAN_FLOOR_WG` 锚点下压、
+  `countEmptyCorners` 门槛、基座与矿脉各放一次、`block_rot` / `protected_blocks` /
+  `rule` 三条 processor 链），但官方 `FossilFeature.place` 第一句就要
+  `level.getLevel().getServer().getStructureTemplateManager()`，而
+  `ChunkgenOracle` 的 `WorldGenLevel` 代理无法转成 `ServerLevel` —— JVM 侧直接抛
+  `ClassCastException`，一格都没写。证据改为两条集成测试：
+  `the_exported_fossil_writes_template_blocks`（导出配置必须写出模板方块）和
+  `block_rot_drops_cells_below_the_integrity`（integrity 0 必须一格不留）。
+* 已知未解决的差异：无。`moss_patch_ceiling` 的 `cave_vines` 错位已随
+  `region_random` 改成裸 `RandomSource` 一起消失（见 `reports/cb-wg-aquatic.md`）。
+* 没做：`overlay` 的 `desert_well`（`rarity 1000`，600 区块零命中，见
+  `reports/cb-wg-aquatic.md`）、`root_system`（官方成功路径不可达）、
+  `huge_fungus`、`chorus_plant`、`block_pile`（后三者不在主世界 `features_per_step`）。
+
+#### `sculk_patch`（第二十二轮验证）
+
+`sculk_patch_deep_dark` 挂在 `minecraft:deep_dark` 的 **step 7**（`count 256`、
+`in_square`、`height_range`、`biome`，没有 `environment_scan`），所以整片深暗之域都会触发。
+定点比对（三个 `deep_dark` 主导区块各 9 中心）：
+
+```
+--through features --steps 7 \
+  --feature-types minecraft:sculk_patch_deep_dark,minecraft:sculk_vein \
+  --chunk 177 -177 --scan 3 --seeds 1     # 0 不一致 / 0 skipped
+  --chunk  78   78 --scan 3 --seeds 1     # 0 不一致 / 0 skipped
+  --chunk 174 -174 --scan 3 --seeds 1     # 0 不一致 / 0 skipped
+```
+
+完整 11 步（不带 `--steps`）下同样 **0 不一致 / 0 skipped**。改坏验证：
+`charge_count` 循环多跑 4 轮 → **160 处**。
+
+此前文档里"`deep_dark` 单区块 8 处不一致"的记录已过时——那是 `region_random`
+静态类型修正之前的状态。
 
 ## 6. 工作量估计
 
