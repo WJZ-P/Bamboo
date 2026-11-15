@@ -362,6 +362,16 @@ pub struct BlockStateSpec {
 }
 
 impl BlockStateSpec {
+    /// 从 `.nbt` 模板的调色板项转过来（`{id, properties}` 形状）。
+    ///
+    /// Convert from a `.nbt` template palette entry (the `{id, properties}` shape).
+    pub fn from_palette_entry(entry: &crate::structure::template::PaletteEntry) -> Self {
+        Self {
+            name: entry.name.clone(),
+            properties: entry.properties.clone(),
+        }
+    }
+
     /// 从 `minecraft:oak_stairs[facing=north,half=bottom]` 这样的文本解析。
     /// 用于对拍与测试构造（JSON 走 `parse`）。
     ///

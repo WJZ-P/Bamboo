@@ -15,6 +15,7 @@ pub mod alias;
 pub mod config;
 pub mod element;
 pub mod load_piece;
+pub mod place;
 pub mod placer;
 pub mod pool;
 pub mod rotation;
