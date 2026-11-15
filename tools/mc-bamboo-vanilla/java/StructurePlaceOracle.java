@@ -178,6 +178,7 @@ public final class StructurePlaceOracle {
             // Same as `StructureStart.placeInChunk`: once per chunk with that chunk's
             // full column box, reseeding the random per chunk.
             int aborted = 0;
+            int invocation = 0;
             for (int dz = -1; dz <= 1; dz++) {
                 for (int dx = -1; dx <= 1; dx++) {
                     ChunkPos at = new ChunkPos(cx + dx, cz + dz);
@@ -191,6 +192,8 @@ public final class StructurePlaceOracle {
                         BlockPos referencePos = new BlockPos(at.getMiddleBlockX(),
                                 piece.getBoundingBox().minY(), at.getMiddleBlockZ());
                         int beforeWrites = level.writtenSize();
+                        level.beginPiece(invocation);
+                        invocation++;
                         try {
                             piece.postProcess(level.proxy(), null, null, random, chunkBB, at,
                                     referencePos);
@@ -221,7 +224,14 @@ public final class StructurePlaceOracle {
                 }
             }
             out.append("A ").append(aborted).append('\n');
-            out.append("B ").append(level.snapshot().size()).append('\n');            for (String block : level.snapshot()) {
+            out.append("B ").append(level.snapshot().size()).append('\n');
+            // 每次结构件调用的写入位置，只在需要时输出（`STRUCTURE_PLACE_TRACE`）。
+            // Per-invocation write positions, only when `STRUCTURE_PLACE_TRACE` is set.
+            if (System.getenv("STRUCTURE_PLACE_TRACE") != null) {
+                for (String traceLine : level.pieceWriteLines()) {
+                    out.append(traceLine).append('\n');
+                }
+            }            for (String block : level.snapshot()) {
                 out.append(block).append('\n');
             }
         }
@@ -357,6 +367,28 @@ public final class StructurePlaceOracle {
         private final String fill;
         /** 所有写过的位置，按首次写入顺序。 */
         private final List<BlockPos> written = new ArrayList<>();
+        /** 当前正在跑的结构件调用编号（两侧一致的全局序号）。 */
+        private int currentInvocation;
+        /** 每次结构件调用写了哪些位置，用于逐件定位差异。 */
+        private final java.util.List<java.util.List<BlockPos>> pieceWrites = new ArrayList<>();
+
+        void beginPiece(int invocation) {
+            this.currentInvocation = invocation;
+            while (pieceWrites.size() <= invocation) {
+                pieceWrites.add(new ArrayList<>());
+            }
+        }
+
+        /** 输出每次调用写过的位置：`D <invocation> <x> <y> <z>`。 */
+        java.util.List<String> pieceWriteLines() {
+            java.util.List<String> out = new ArrayList<>();
+            for (int i = 0; i < pieceWrites.size(); i++) {
+                for (BlockPos pos : pieceWrites.get(i)) {
+                    out.add("D " + i + " " + pos.getX() + " " + pos.getY() + " " + pos.getZ());
+                }
+            }
+            return out;
+        }
         private final PalettedContainerFactory factory;
 
         Level(ChunkPos center, String fill, RegistryAccess.Frozen registries) {
@@ -545,6 +577,7 @@ public final class StructurePlaceOracle {
                         }
                         ProtoChunk chunk = at(pos);
                         written.add(pos.immutable());
+                        pieceWrites.get(currentInvocation).add(pos.immutable());
                         BlockState old = chunk.setBlockState(pos, state, flags);
                         if (state.hasBlockEntity()) {
                             CompoundTag tag = new CompoundTag();

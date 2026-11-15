@@ -79,6 +79,14 @@ fn build_queries() -> Vec<Query> {
             }
         }
     }
+    // `STRUCTURE_PLACE_LIMIT=n` 只跑前 n 个查询，定位单个 case 时省时间。
+    // `STRUCTURE_PLACE_LIMIT=n` keeps only the first n queries to shorten a
+    // single-case investigation.
+    if let Ok(limit) = std::env::var("STRUCTURE_PLACE_LIMIT")
+        && let Ok(limit) = limit.parse::<usize>()
+    {
+        queries.truncate(limit);
+    }
     queries
 }
 
@@ -101,6 +109,10 @@ struct Section {
     ///
     /// Per-piece write counts, as `(chunk_x, chunk_z, count)`.
     writes: Vec<(i32, i32, usize)>,
+    /// 每次调用的写入位置（只在设置了 `STRUCTURE_PLACE_TRACE` 时非空）。
+    ///
+    /// Write positions per invocation (only when `STRUCTURE_PLACE_TRACE` is set).
+    piece_positions: Vec<(usize, i32, i32, i32)>,
     blocks: Vec<String>,
 }
 
@@ -124,6 +136,7 @@ fn parse_output(stdout: &str) -> Result<Vec<Section>, String> {
                     key: fields[1..6].join(" "),
                     pieces: Vec::new(),
                     writes: Vec::new(),
+                    piece_positions: Vec::new(),
                     blocks: Vec::new(),
                 });
                 expected_blocks = None;
@@ -159,6 +172,18 @@ fn parse_output(stdout: &str) -> Result<Vec<Section>, String> {
                         .map_err(|_| format!("bad block count: {line}"))?,
                 );
             }
+            "D" => match &mut current {
+                Some(section) => {
+                    let invocation: usize = fields[1]
+                        .parse()
+                        .map_err(|_| format!("bad invocation: {line}"))?;
+                    let x: i32 = fields[2].parse().map_err(|_| format!("bad x: {line}"))?;
+                    let y: i32 = fields[3].parse().map_err(|_| format!("bad y: {line}"))?;
+                    let z: i32 = fields[4].parse().map_err(|_| format!("bad z: {line}"))?;
+                    section.piece_positions.push((invocation, x, y, z));
+                }
+                None => return Err(format!("D line before any Q: {line}")),
+            },
             other => {
                 // 方块行以坐标开头（数字），其余才是关键字。
                 if other.parse::<i32>().is_ok() {
@@ -195,6 +220,7 @@ fn check_block_count(section: &Section, expected: Option<usize>) -> Result<(), S
 struct RustResult {
     pieces: Vec<String>,
     writes: Vec<(i32, i32, usize)>,
+    piece_writes: Vec<Vec<(i32, i32, i32)>>,
     blocks: Vec<String>,
 }
 
@@ -218,6 +244,7 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
                     continue;
                 }
                 let before = level.written.len();
+                level.begin_piece();
                 if place_piece(
                     q.kind, piece, i, &layout, &mut level, chunk_bb, center, &random,
                 )?
@@ -237,6 +264,7 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
     Ok(RustResult {
         pieces: layout.iter().map(piece_line).collect(),
         writes,
+        piece_writes: level.piece_writes.clone(),
         blocks: level.snapshot(),
     })
 }
@@ -497,6 +525,14 @@ struct FlatLevel {
     written: Vec<(i32, i32, i32)>,
     fill: &'static str,
     center: (i32, i32),
+    /// 当前结构件调用编号，和 Java 侧的 `D` 行对齐。
+    ///
+    /// Current piece-invocation index, aligned with the Java `D` lines.
+    invocation: usize,
+    /// 每次调用写过的位置，用于逐件定位差异。
+    ///
+    /// Positions written per invocation, for per-piece diffing.
+    piece_writes: Vec<Vec<(i32, i32, i32)>>,
     /// 每个 16³ 段里非空气方块的个数（`LevelChunkSection.hasOnlyAir` 的等价物）。
     /// 初始填充先算入，之后每次写入即时维护。
     ///
@@ -512,8 +548,22 @@ impl FlatLevel {
             written: Vec::new(),
             fill,
             center,
+            invocation: 0,
+            piece_writes: Vec::new(),
             section_non_air: BTreeMap::new(),
         }
+    }
+
+    /// 开始一次结构件调用，返回它的编号。
+    ///
+    /// Start one piece invocation and return its index.
+    fn begin_piece(&mut self) -> usize {
+        let index = self.invocation;
+        self.invocation += 1;
+        while self.piece_writes.len() <= index {
+            self.piece_writes.push(Vec::new());
+        }
+        index
     }
 
     /// 段坐标：`(chunk_x, section_y, chunk_z)`。
@@ -633,6 +683,9 @@ impl PieceLevel for FlatLevel {
             *count = count.saturating_sub(1);
         }
         self.written.push((x, y, z));
+        if let Some(list) = self.piece_writes.get_mut(self.invocation) {
+            list.push((x, y, z));
+        }
         self.blocks.insert((x, y, z), state);
         true
     }
@@ -759,6 +812,33 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
                     &mut failures,
                     format!("[{key}] piece #{i} ({at}): java wrote {jcount}, rust wrote {rcount}"),
                 );
+                // 有 `D` 行时把两侧的位置集合差出来，直接看差哪几格。
+                // With `D` lines available, diff the two position sets for this piece.
+                if !section.piece_positions.is_empty() {
+                    let theirs: std::collections::BTreeSet<(i32, i32, i32)> = section
+                        .piece_positions
+                        .iter()
+                        .filter(|(inv, _, _, _)| *inv == i)
+                        .map(|(_, x, y, z)| (*x, *y, *z))
+                        .collect();
+                    let mine: std::collections::BTreeSet<(i32, i32, i32)> = ours
+                        .piece_writes
+                        .get(i)
+                        .map(|list| list.iter().copied().collect())
+                        .unwrap_or_default();
+                    for pos in theirs.difference(&mine).take(6) {
+                        push(
+                            &mut failures,
+                            format!("[{key}]   piece #{i} java wrote {pos:?}, rust did not"),
+                        );
+                    }
+                    for pos in mine.difference(&theirs).take(6) {
+                        push(
+                            &mut failures,
+                            format!("[{key}]   piece #{i} rust wrote {pos:?}, java did not"),
+                        );
+                    }
+                }
             }
         }
         if section.writes.len() != ours.writes.len() {
@@ -874,7 +954,7 @@ fn report_lines(
 }
 
 fn push(list: &mut Vec<String>, line: String) {
-    if list.len() < 24 {
+    if list.len() < 60 {
         list.push(line);
     }
 }
