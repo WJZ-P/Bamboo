@@ -1471,11 +1471,13 @@ for (int y = 0; y < rootColumnMaxHeight; y++) {
 
 #### 已知限制（第四轮更新）
 
-* ~~**`moss_patch_ceiling` 还剩 4 处 `cave_vines` 错位**~~：`chunkgen --through features
-  --steps 9 --feature-types minecraft:lush_caves_ceiling_vegetation --chunk -58 -217
-  --seeds 2` 报 14 处 = 10 处 terrain + 4 处地物。官方在 `(13,-27..-24,6)` 竖着放 4 格
-  `cave_vines`，Bamboo 放到邻块 `(1,0)` 的 `(0,-29..-26,1)`。surface 迭代序（`treeify`）
-  已修正，但仍选到不同列，说明 **surface 集合内容不同或 `nextFloat` 次数不同**。未定位。
+* ~~**`moss_patch_ceiling` 还剩 4 处 `cave_vines` 错位**~~ **已修复（第二十一轮）**：
+  上轮把 `region_random` 改成裸 `Random` 之后顺带解决。`--through features --steps 9
+  --feature-types minecraft:lush_caves_ceiling_vegetation --chunk -58 -217 --seeds 2`
+  原本报 14 处（10 terrain + 4 地物），现在该区块整块被 `treeified` 跳过；
+  改用 `--seeds 4 --chunks 20 --salt 7`（80 中心 / 70778880 方块 / 0 skipped）
+  得到 **0 不一致**，把 `distribute_vegetation` 的 `nextFloat` 判断去掉（恒长植被）
+  会报 **160 处**。
 * ~~**`pale_moss_patch` 还剩 2 处**~~ **已修复（第二十轮）**：`chunk (529509,523106)`
   的 `(12,135,10)` / `(12,136,10)`。根因是 `region_random` 的**类型**：
   官方 `WorldGenRegion.random` 是裸 `RandomSource`（`XoroshiroRandomSource`），
