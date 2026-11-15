@@ -85,6 +85,15 @@ pub enum Modifier {
     /// `CountOnEveryLayerPlacement`: place once per underground layer, walking the
     /// air-to-solid boundaries bottom-up.
     CountOnEveryLayer(IntProvider),
+    /// `CuboidPlacement`：把 origin 展开成一个 `xz_size × y_size × xz_size` 的盒子。
+    ///
+    /// `CuboidPlacement`: expand the origin into an `xz_size × y_size × xz_size` box.
+    Cuboid {
+        xz_size: IntProvider,
+        y_size: IntProvider,
+        include_edges: bool,
+        include_interior: bool,
+    },
     /// 已解析但本轮不生效的修饰器（例如 `noise_threshold_count`）。
     /// 命中时置 `unsupported`，让对拍跳过这个区块。
     Unsupported(String),
@@ -233,6 +242,22 @@ impl Modifier {
             "minecraft:count_on_every_layer" => {
                 Self::CountOnEveryLayer(IntProvider::parse(field("count")?)?)
             }
+            // `CuboidPlacement`：`xz_size` / `y_size` 是 `codec(1, 16)`，
+            // `include_edges` / `include_interior` 缺省都是 true。
+            // `CuboidPlacement`: `xz_size` / `y_size` are `codec(1, 16)`; both include
+            // flags default to true.
+            "minecraft:cuboid" => Self::Cuboid {
+                xz_size: IntProvider::parse(field("xz_size")?)?,
+                y_size: IntProvider::parse(field("y_size")?)?,
+                include_edges: object
+                    .get("include_edges")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                include_interior: object
+                    .get("include_interior")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            },
             _ => Self::Unsupported(kind.to_owned()),
         })
     }
@@ -391,6 +416,41 @@ fn modify(
         // `CountOnEveryLayerPlacement`: walks layer by layer and consumes random.
         Modifier::CountOnEveryLayer(count) => {
             count_on_every_layer(count, ctx.world, ctx.generation, random, pos, out)
+        }
+        // `CuboidPlacement.modify`：先采样 `y_size`，再采样两次 `xz_size`（顺序不能换），
+        // 然后遍历 `0..=width × 0..=height × 0..=length`，按官方那四个条件筛。
+        // `CuboidPlacement.modify`: sample `y_size` first, then `xz_size` twice (order
+        // matters), then walk the box and apply the four official conditions.
+        Modifier::Cuboid {
+            xz_size,
+            y_size,
+            include_edges,
+            include_interior,
+        } => {
+            let height = y_size.sample(random);
+            let width = xz_size.sample(random);
+            let length = xz_size.sample(random);
+            for x in 0..=width {
+                for y in 0..=height {
+                    for z in 0..=length {
+                        let edges_ok = (*include_edges
+                            || x != 0 && x != width
+                            || y != 0 && y != height)
+                            && (*include_edges || z != 0 && z != length || y != 0 && y != height)
+                            && (*include_edges || x != 0 && x != width || z != 0 && z != length);
+                        let interior_ok = *include_interior
+                            || x == 0
+                            || x == width
+                            || y == 0
+                            || y == height
+                            || z == 0
+                            || z == length;
+                        if edges_ok && interior_ok {
+                            out.push((x + pos.0, y + pos.1, z + pos.2));
+                        }
+                    }
+                }
+            }
         }
         // `EnvironmentScanPlacement`：不消费随机数，只按谓词逐格扫描。
         // `EnvironmentScanPlacement`: no random, purely a predicate walk.
@@ -747,6 +807,28 @@ mod tests {
         let second = crate::biome_temperature::biome_info_noise(12.5, -7.25);
         assert_eq!(first, second);
         assert!(first.is_finite());
+    }
+
+    #[test]
+    fn parses_the_exported_cuboid_modifier() {
+        // `coral/<color>_block` 的 placement 里是 `cuboid`：`xz_size` 与 `y_size` 都是
+        // `uniform`，两个 include 缺省 true。
+        // `coral/<color>_block` uses `cuboid` in its placement: both sizes are `uniform`
+        // and both include flags default to true.
+        let value: Value = serde_json::from_str(
+            r#"{"type":"minecraft:cuboid","xz_size":{"max_inclusive":3,"min_inclusive":1,"type":"minecraft:uniform"},"y_size":{"max_inclusive":2,"min_inclusive":0,"type":"minecraft:uniform"}}"#,
+        )
+        .unwrap();
+        let modifier = Modifier::parse(&value).unwrap();
+        assert!(modifier.is_supported());
+        assert!(matches!(
+            modifier,
+            Modifier::Cuboid {
+                include_edges: true,
+                include_interior: true,
+                ..
+            }
+        ));
     }
 
     #[test]
