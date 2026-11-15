@@ -143,19 +143,34 @@ public final class StructureTemplatedPlaceOracle {
         ChunkPos pos = new ChunkPos(cx, cz);
 
         List<StructurePiece> pieces = buildPieces(kind, seed, cx, cz, p);
-        Level level = new Level(pos, registries);
+        Level level = new Level(pos, registries, seed);
         int aborted = 0;
-        for (StructurePiece piece : pieces) {
-            BoundingBox chunkBB = chunkBox(pos);
-            WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(seed));
-            try {
-                piece.postProcess(level.proxy(), null, null, random, chunkBB, pos,
-                        new BlockPos(pos.getMiddleBlockX(), piece.getBoundingBox().minY(),
-                                pos.getMiddleBlockZ()));
-            } catch (Throwable error) {
-                aborted++;
-                System.out.println("T " + kind + " " + seed + " " + cx + " " + cz + " "
-                        + error.getClass().getName());
+        // `StructureStart.placeInChunk` 的编排：3×3 每个区块各调一次，`chunkBB` 是该区块的
+        // 整列盒，`random` 每区块重播，世界在调用之间保留。`CappedProcessor` 每个区块各挑
+        // 一批最多 5 个可疑方块，`updateShape` 也能看到前面区块写下的方块。
+        // The `StructureStart.placeInChunk` orchestration: once per chunk of the 3×3 with
+        // that chunk's column box and a reseeded random, keeping the world between calls.
+        // `CappedProcessor` picks up to five blocks per chunk, and `updateShape` sees the
+        // earlier chunks' writes.
+        for (int dz = -1; dz <= 1; dz++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                ChunkPos at = new ChunkPos(cx + dx, cz + dz);
+                for (StructurePiece piece : pieces) {
+                    if (!piece.getBoundingBox().intersects(chunkBox(at))) {
+                        continue;
+                    }
+                    WorldgenRandom random =
+                            new WorldgenRandom(new LegacyRandomSource(seed));
+                    try {
+                        piece.postProcess(level.proxy(), null, null, random, chunkBox(at), at,
+                                new BlockPos(at.getMiddleBlockX(),
+                                        piece.getBoundingBox().minY(), at.getMiddleBlockZ()));
+                    } catch (Throwable error) {
+                        aborted++;
+                        System.out.println("T " + kind + " " + seed + " " + cx + " " + cz + " "
+                                + error.getClass().getName());
+                    }
+                }
             }
         }
         TreeMap<BlockPos, BlockState> written = level.written;
@@ -233,8 +248,26 @@ public final class StructureTemplatedPlaceOracle {
                 template, rotation, mirror, pivot);
     }
 
-    private static BoundingBox chunkBox(ChunkPos pos) {
-        return new BoundingBox(pos.getMinBlockX(), MIN_Y + 1, pos.getMinBlockZ(),
+    /**
+     * 一个只回答 `getSeed()` 的 `ServerLevel` 代理，给 `CappedProcessor` 用。
+     *
+     * <p>A `ServerLevel` proxy that only answers `getSeed()`, for `CappedProcessor`.
+     */
+    private static Object serverLevelProxy(long seed) {
+        return Proxy.newProxyInstance(StructureTemplatedPlaceOracle.class.getClassLoader(),
+                new Class<?>[] {net.minecraft.server.level.ServerLevel.class},
+                (self, method, args) -> switch (method.getName()) {
+                    case "getSeed" -> seed;
+                    case "getDifficulty" -> net.minecraft.world.Difficulty.NORMAL;
+                    case "toString" -> "TemplatedPlaceServerLevel";
+                    case "hashCode" -> System.identityHashCode(self);
+                    case "equals" -> self == args[0];
+                    default -> throw new UnsupportedOperationException(
+                            "ServerLevel." + method.getName() + " is not implemented");
+                });
+    }
+
+    private static BoundingBox chunkBox(ChunkPos pos) {        return new BoundingBox(pos.getMinBlockX(), MIN_Y + 1, pos.getMinBlockZ(),
                 pos.getMaxBlockX(), MIN_Y + HEIGHT - 1, pos.getMaxBlockZ());
     }
 
@@ -284,10 +317,13 @@ public final class StructureTemplatedPlaceOracle {
         private final RegistryAccess.Frozen registries;
         private final PalettedContainerFactory factory;
         final TreeMap<BlockPos, BlockState> written = new TreeMap<>();
+        final long seed;
+        int aborted = 0;
 
-        Level(ChunkPos center, RegistryAccess.Frozen registries) {
+        Level(ChunkPos center, RegistryAccess.Frozen registries, long seed) {
             this.center = center;
             this.registries = registries;
+            this.seed = seed;
             this.levelBiome = registries.lookupOrThrow(Registries.BIOME).getOrThrow(Biomes.PLAINS);
             this.factory = PalettedContainerFactory.create(registries);
             this.proxy = (WorldGenLevel) Proxy.newProxyInstance(
@@ -403,12 +439,19 @@ public final class StructureTemplatedPlaceOracle {
                     case "getCenter":
                         return center;
                     case "getSeed":
-                        return 0L;
+                        return seed;
                     case "isClientSide":
                         return false;
                     case "getLevel":
                     case "getMinecraftWorld":
-                        return null;
+                        // `CappedProcessor.finalizeProcessing` 会 `level.getLevel().getSeed()`。
+                        // 官方的 `WorldGenLevel.getLevel()` 是 `ServerLevel`，这里用一个只
+                        // 实现 `getSeed()` 的代理顶替，避免 NPE 打断整条 query。
+                        // `CappedProcessor.finalizeProcessing` calls
+                        // `level.getLevel().getSeed()`. Vanilla's `getLevel()` is a
+                        // `ServerLevel`; a proxy that only answers `getSeed()` stands in so
+                        // the whole query is not aborted by an NPE.
+                        return serverLevelProxy(seed);
                     case "getBiome":
                     case "getNoiseBiome":
                         return levelBiome;

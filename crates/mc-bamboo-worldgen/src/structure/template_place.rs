@@ -61,6 +61,13 @@ pub enum Processor {
     ///
     /// `RuleProcessor`: try every rule in order; the first match replaces the state.
     Rule(Vec<Rule>),
+    /// `CappedProcessor`：`finalizeProcessing` 里最多替换 `limit` 个方块。
+    ///
+    /// `CappedProcessor`: replace at most `limit` blocks inside `finalizeProcessing`.
+    Capped {
+        limit: i32,
+        delegate: std::boxed::Box<Processor>,
+    },
     /// `BlockAgeProcessor`。
     Age(f32),
     /// `BlackstoneReplaceProcessor.INSTANCE`。
@@ -69,6 +76,19 @@ pub enum Processor {
     LavaSubmerged,
     /// `ProtectedBlockProcessor(FEATURES_CANNOT_REPLACE)`。
     Protected,
+}
+
+impl Processor {
+    /// `StructureProcessor.evaluatesEntirePieceState()`：只有 `CappedProcessor` 覆写成 true，
+    /// 它让 `processBlockInfos` 不再按 `chunkBB` 过滤（全量处理后才能在 `finalizeProcessing`
+    /// 里统一挑最多 N 个）。
+    ///
+    /// `StructureProcessor.evaluatesEntirePieceState()`: only `CappedProcessor` overrides it
+    /// to true, which makes `processBlockInfos` skip the `chunkBB` filter so that
+    /// `finalizeProcessing` sees every block.
+    pub const fn evaluates_entire_piece_state(&self) -> bool {
+        matches!(self, Self::Capped { .. })
+    }
 }
 
 /// `BlockIgnoreProcessor.STRUCTURE_BLOCK`。
@@ -139,6 +159,12 @@ pub struct PlaceSettings {
     ///
     /// `setBoundingBox(chunkBB)`: process only blocks inside the box.
     pub chunk_bb: Option<Box>,
+    /// 世界种子，`CappedProcessor` 的随机源要用（官方取自
+    /// `level.getLevel().getSeed()`）。`None` 时按 0 处理。
+    ///
+    /// The world seed used by the `CappedProcessor` random (vanilla reads
+    /// `level.getLevel().getSeed()`); `None` means 0.
+    pub world_seed: Option<i64>,
 }
 
 impl PlaceSettings {
@@ -150,7 +176,16 @@ impl PlaceSettings {
             liquid: LiquidSettings::ApplyWaterlogging,
             processors: Vec::new(),
             chunk_bb: None,
+            world_seed: None,
         }
+    }
+
+    /// 写入 `CappedProcessor` 需要的世界种子。
+    ///
+    /// Set the world seed the `CappedProcessor` needs.
+    pub fn with_world_seed(mut self, seed: i64) -> Self {
+        self.world_seed = Some(seed);
+        self
     }
 
     pub fn with_processors(mut self, processors: Vec<Processor>) -> Self {
@@ -251,16 +286,26 @@ pub fn place_in_world(
         });
     }
 
+    // `processBlockInfos`：只要有一个 `evaluatesEntirePieceState` 的 processor，就不按
+    // `chunkBB` 过滤（`processOnlyInCurrentChunk = false`）。
+    // `processBlockInfos`: any `evaluatesEntirePieceState` processor disables the `chunkBB`
+    // filter.
+    let filter_by_chunk = !settings
+        .processors
+        .iter()
+        .any(Processor::evaluates_entire_piece_state);
     // 先过 processor，再统一写入：官方先构造 `processedBlockInfoList`，然后才写方块，
     // 所以 processor 读到的世界是「本结构件还什么都没写」的状态。
     // Processors run first, then the writes: vanilla builds `processedBlockInfoList`
     // before writing anything, so processors see the world without this piece's writes.
     let mut processed: Vec<((i32, i32, i32), u32, bool)> = Vec::new();
+    let mut originals: Vec<((i32, i32, i32), u32)> = Vec::new();
     for &index in &blocks {
         let block = &template.blocks[index];
         let mut pos = settings.relative(block.pos);
         pos = (pos.0 + position.0, pos.1 + position.1, pos.2 + position.2);
-        if let Some(bb) = &settings.chunk_bb
+        if filter_by_chunk
+            && let Some(bb) = &settings.chunk_bb
             && !inside(bb, pos)
         {
             continue;
@@ -274,6 +319,13 @@ pub fn place_in_world(
         let mut current = state;
         let mut keep = true;
         for processor in &settings.processors {
+            if processor.evaluates_entire_piece_state() {
+                // `CappedProcessor.processBlock` 是基类默认实现（原样返回），上限逻辑在
+                // `finalizeProcessing` 里。
+                // `CappedProcessor.processBlock` is the base no-op; the cap lives in
+                // `finalizeProcessing`.
+                continue;
+            }
             match processor.process(world, pos, block.pos, current, settings) {
                 Some(next) => current = next,
                 None => {
@@ -283,7 +335,26 @@ pub fn place_in_world(
             }
         }
         if keep {
+            originals.push((pos, state));
             processed.push((pos, current, block.nbt.is_some()));
+        }
+    }
+
+    // `finalizeProcessing`：按 processor 顺序跑，`CappedProcessor` 的 delegate 每改一个
+    // 方块就把 `replaced` 加一，达到上限就停。
+    // `finalizeProcessing`: run in processor order; the `CappedProcessor` delegate bumps
+    // `replaced` only when the block actually changes, stopping at the cap.
+    for processor in &settings.processors {
+        if let Processor::Capped { limit, delegate } = processor {
+            apply_capped(
+                world,
+                settings,
+                *limit,
+                delegate,
+                &originals,
+                &mut processed,
+                position,
+            );
         }
     }
 
@@ -399,6 +470,75 @@ fn fill_fluids(
             } else {
                 index += 1;
             }
+        }
+    }
+}
+
+/// `CappedProcessor.finalizeProcessing`：最多改 `limit` 个方块。
+///
+/// 官方的随机源是
+/// `RandomSource.createThreadLocalInstance(level.getLevel().getSeed()).forkPositional().at(position)`；
+/// `SingleThreadedRandomSource` 的算法与 `LegacyRandomSource` 相同（同一个 48 位 LCG），
+/// 所以这里用 `LegacyRandom::new(seed)` 再 `PositionalFactory::Legacy`（`nextLong()` 派生）
+/// 的等价路径。
+///
+/// `CappedProcessor.finalizeProcessing`: change at most `limit` blocks. Vanilla seeds a
+/// `SingleThreadedRandomSource` (the same 48-bit LCG as `LegacyRandomSource`) with the
+/// world seed and derives a positional factory from it, so the legacy positional factory
+/// reproduces the same draws.
+fn apply_capped(
+    world: &FeatureWorld<'_>,
+    settings: &PlaceSettings,
+    limit: i32,
+    delegate: &Processor,
+    originals: &[((i32, i32, i32), u32)],
+    processed: &mut [((i32, i32, i32), u32, bool)],
+    position: (i32, i32, i32),
+) {
+    if limit == 0 || processed.is_empty() || originals.len() != processed.len() {
+        return;
+    }
+    // `limit.sample(random)`：这里是 `ConstantInt.of(5)`，不取随机数。
+    // `limit.sample(random)`: a `ConstantInt.of(5)` here, which draws nothing.
+    let max_to_replace = limit.min(processed.len() as i32);
+    if max_to_replace < 1 {
+        return;
+    }
+    let seed = settings.world_seed.unwrap_or(0);
+    // `RandomSource.createThreadLocalInstance(seed).forkPositional()` 是
+    // `LegacyPositionalRandomFactory(seed.nextLong())`（`SingleThreadedRandomSource` 与
+    // `LegacyRandomSource` 是同一套 48 位 LCG），再 `.at(position)`。
+    // `forkPositional()` on a `SingleThreadedRandomSource` is
+    // `LegacyPositionalRandomFactory(seed.nextLong())` (the same 48-bit LCG as
+    // `LegacyRandomSource`), then `.at(position)`.
+    let factory_seed = mc_bamboo_blocks::LegacyRandom::new(seed).next_long();
+    let positional = crate::random::PositionalFactory::Legacy { seed: factory_seed };
+    let random =
+        crate::random::WorldgenRandom::new(positional.at(position.0, position.1, position.2));
+    // `Util.toShuffledList(IntStream.range(0, size), random)`。
+    // `Util.toShuffledList(IntStream.range(0, size), random)`.
+    let mut indices: Vec<usize> = (0..processed.len()).collect();
+    for i in (2..=indices.len()).rev() {
+        let swap_to = random.next_int(i as i32) as usize;
+        indices.swap(i - 1, swap_to);
+    }
+    let mut replaced = 0;
+    for index in indices {
+        if replaced >= max_to_replace {
+            break;
+        }
+        let (pos, _original_state) = originals[index];
+        let current = processed[index].1;
+        // `CappedProcessor` 传给 delegate 的 `templateRelativePos` 是 `originalBlockInfo.pos()`，
+        // 这里用世界位置顶替（`RuleTest` 的位置谓词在这些结构里恒 true）。
+        // The `templateRelativePos` passed to the delegate is `originalBlockInfo.pos()`;
+        // the world position stands in here (the position predicate is always true in these
+        // structures).
+        if let Some(altered) = delegate.process(world, pos, pos, current, settings)
+            && altered != current
+        {
+            replaced += 1;
+            processed[index].1 = altered;
         }
     }
 }
@@ -781,6 +921,11 @@ impl Processor {
                 }
             }
             Processor::Blackstone => Some(blackstone(state)),
+            // `CappedProcessor.processBlock` 是基类默认实现，原样返回；上限在
+            // `finalizeProcessing` 里由 `apply_capped` 处理。
+            // `CappedProcessor.processBlock` is the base no-op; the cap is handled by
+            // `apply_capped` inside `finalizeProcessing`.
+            Processor::Capped { .. } => Some(state),
         }
         .inspect(|_| {
             let _ = (template_pos, settings);

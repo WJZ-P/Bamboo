@@ -203,11 +203,15 @@ pub fn ruined_portal(
     );
     add_netherrack_drip_columns(world, &piece_box, properties, random, &mut writes, record);
     if properties.vines || properties.overgrown {
-        // `BlockPos.betweenClosedStream(this.getBoundingBox())`：x 内层、z 外层。
-        // `BlockPos.betweenClosedStream(this.getBoundingBox())`: x innermost, z outermost.
+        // `BlockPos.betweenClosedStream(this.getBoundingBox())` 的顺序：`index % width` 是
+        // x（变得最快），`(index / width) % height` 是 y，`index / width / height` 是 z。
+        // 所以 x 是最内层循环、y 中间、z 最外层。
+        // `BlockPos.betweenClosedStream(box)` order: `index % width` is x (fastest),
+        // `(index / width) % height` is y, `index / width / height` is z. So x is the
+        // innermost loop, y in the middle and z outermost.
         for z in piece_box[2]..=piece_box[5] {
-            for x in piece_box[0]..=piece_box[3] {
-                for y in piece_box[1]..=piece_box[4] {
+            for y in piece_box[1]..=piece_box[4] {
+                for x in piece_box[0]..=piece_box[3] {
                     if properties.vines {
                         maybe_add_vines(world, (x, y, z), random, &mut writes, record);
                     }

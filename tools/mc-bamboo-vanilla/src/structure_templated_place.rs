@@ -284,14 +284,6 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
 fn rust_writes(q: &Query) -> Result<BTreeMap<(i32, i32, i32), u32>, String> {
     let chunks = synthetic_chunks(q.cx, q.cz);
     let mut world = FeatureWorld::new(&chunks)?;
-    let chunk_bb = [
-        q.cx * 16,
-        MIN_Y + 1,
-        q.cz * 16,
-        q.cx * 16 + 15,
-        MIN_Y + HEIGHT - 1,
-        q.cz * 16 + 15,
-    ];
     let pieces: Vec<Piece> = match q.kind {
         "igloo" => mc_bamboo_worldgen::structure::templated::igloo::generate(q.seed, q.cx, q.cz)?,
         "shipwreck_ocean" => mc_bamboo_worldgen::structure::templated::shipwreck::generate(
@@ -315,40 +307,65 @@ fn rust_writes(q: &Query) -> Result<BTreeMap<(i32, i32, i32), u32>, String> {
     };
 
     let mut out: BTreeMap<(i32, i32, i32), u32> = BTreeMap::new();
-    let random = mc_bamboo_worldgen::structure::pieces::make_random(q.seed, q.cx, q.cz);
-    for (index, piece) in pieces.iter().enumerate() {
-        if !intersects(&piece.bb, &chunk_bb) {
-            continue;
-        }
-        let writes: Vec<(i32, i32, i32, u32)> = match q.kind {
-            "igloo" => {
-                let outcome = igloo::igloo(&mut world, piece, chunk_bb, true)?;
-                let mut writes = outcome
-                    .placement
-                    .placed
-                    .as_ref()
-                    .and_then(|p| p.writes.clone())
-                    .unwrap_or_default();
-                writes.extend(igloo::marker_blocks(&outcome));
-                if let Some(snow) = outcome.snow {
-                    writes.push((snow.0, snow.1, snow.2, snow_state()));
+    // `StructureStart.placeInChunk` 的编排：3×3 每个区块各调一次，世界逐步累积。
+    // The `StructureStart.placeInChunk` orchestration: once per chunk of the 3×3 with the
+    // world accumulating writes.
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let at = (q.cx + dx, q.cz + dz);
+            let chunk_bb = [
+                at.0 * 16,
+                MIN_Y + 1,
+                at.1 * 16,
+                at.0 * 16 + 15,
+                MIN_Y + HEIGHT - 1,
+                at.1 * 16 + 15,
+            ];
+            // 官方的 `random` 是 `applyBiomeDecoration` 里 `setFeatureSeed` 过的那一个；两侧
+            // 都用「世界种子」重建，保证 `calculateBeachedPosition` 的取数位置一致。
+            // Vanilla's `random` is the one seeded by `setFeatureSeed`; both sides rebuild it
+            // from the world seed so `calculateBeachedPosition` draws from the same position.
+            let random = mc_bamboo_worldgen::random::WorldgenRandom::new(
+                mc_bamboo_worldgen::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(
+                    q.seed,
+                )),
+            );
+            for piece in &pieces {
+                if !intersects(&piece.bb, &chunk_bb) {
+                    continue;
                 }
-                writes
+                let writes: Vec<(i32, i32, i32, u32)> = match q.kind {
+                    "igloo" => {
+                        let outcome = igloo::igloo(&mut world, piece, chunk_bb, true)?;
+                        let mut writes = outcome
+                            .placement
+                            .placed
+                            .as_ref()
+                            .and_then(|p| p.writes.clone())
+                            .unwrap_or_default();
+                        writes.extend(igloo::marker_blocks(&outcome));
+                        if let Some(snow) = outcome.snow {
+                            writes.push((snow.0, snow.1, snow.2, snow_state()));
+                        }
+                        writes
+                    }
+                    "shipwreck_ocean" => {
+                        let outcome =
+                            shipwreck::shipwreck(&mut world, piece, chunk_bb, &random, true)?;
+                        outcome.placed.and_then(|p| p.writes).unwrap_or_default()
+                    }
+                    "ocean_ruin_cold" | "ocean_ruin_warm" => {
+                        let outcome =
+                            ocean_ruin::ocean_ruin(&mut world, piece, chunk_bb, q.seed, true)?;
+                        outcome.placed.and_then(|p| p.writes).unwrap_or_default()
+                    }
+                    other => return Err(format!("no Rust postProcess for kind {other}")),
+                };
+                for (x, y, z, state) in writes {
+                    out.insert((x, y, z), state);
+                }
             }
-            "shipwreck_ocean" => {
-                let outcome = shipwreck::shipwreck(&mut world, piece, chunk_bb, &random, true)?;
-                outcome.placed.and_then(|p| p.writes).unwrap_or_default()
-            }
-            "ocean_ruin_cold" | "ocean_ruin_warm" => {
-                let outcome = ocean_ruin::ocean_ruin(&mut world, piece, chunk_bb, true)?;
-                outcome.placed.and_then(|p| p.writes).unwrap_or_default()
-            }
-            other => return Err(format!("no Rust postProcess for kind {other}")),
-        };
-        for (x, y, z, state) in writes {
-            out.insert((x, y, z), state);
         }
-        let _ = index;
     }
     Ok(out)
 }

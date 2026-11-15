@@ -29,6 +29,7 @@ pub fn ocean_ruin(
     world: &mut FeatureWorld<'_>,
     piece: &Piece,
     chunk_bb: Box,
+    world_seed: i64,
     record: bool,
 ) -> Result<PieceOutcome, String> {
     let template_name = piece
@@ -47,7 +48,7 @@ pub fn ocean_ruin(
         extra_int(piece, "TPZ").ok_or("ocean ruin piece has no TPZ")?,
     );
     let template = StructureTemplate::load(&template_name)?;
-    let settings = settings(rotation, integrity, is_cold);
+    let settings = settings(rotation, integrity, is_cold, world_seed);
 
     // `int height = level.getHeight(OCEAN_FLOOR_WG, templatePosition.getX(), getZ())`。
     // `int height = level.getHeight(OCEAN_FLOOR_WG, templatePosition.getX(), getZ())`.
@@ -78,14 +79,12 @@ pub fn ocean_ruin(
 /// `OceanRuinPiece.makeSettings(rotation, integrity, biomeType)`。
 ///
 /// `OceanRuinPiece.makeSettings(rotation, integrity, biomeType)`.
-fn settings(rotation: i32, integrity: f32, is_cold: bool) -> PlaceSettings {
+fn settings(rotation: i32, integrity: f32, is_cold: bool, world_seed: i64) -> PlaceSettings {
     // `archyRuleProcessor(Blocks.SAND, Blocks.SUSPICIOUS_SAND, ...)`（暖水）/
-    // `(Blocks.GRAVEL, Blocks.SUSPICIOUS_GRAVEL, ...)`（冷水）。`CappedProcessor` 的
-    // 「最多 5 个」那一步在 `finalizeProcessing` 里，需要 `level.getSeed()`；本轮先只做
-    // 方块状态，见 README 已知限制。
-    // `archyRuleProcessor(...)`: sand → suspicious sand (warm) / gravel → suspicious
-    // gravel (cold). The `CappedProcessor` cap of 5 lives in `finalizeProcessing` and needs
-    // `level.getSeed()`; this round covers block states only, see the README limitations.
+    // `(Blocks.GRAVEL, Blocks.SUSPICIOUS_GRAVEL, ...)`（冷水），外面包一层
+    // `CappedProcessor(..., ConstantInt.of(5))`：最多 5 个方块被替换成可疑方块。
+    // `archyRuleProcessor(...)` wrapped in `CappedProcessor(..., ConstantInt.of(5))`: at
+    // most five blocks become suspicious.
     let (from, to) = if is_cold {
         ("minecraft:gravel", "minecraft:suspicious_gravel")
     } else {
@@ -96,13 +95,17 @@ fn settings(rotation: i32, integrity: f32, is_cold: bool) -> PlaceSettings {
         .unwrap_or(mc_bamboo_data::blocks::AIR);
     PlaceSettings::new(MIRROR_NONE, rotation, (0, 0))
         .with_liquid(LiquidSettings::ApplyWaterlogging)
+        .with_world_seed(world_seed)
         .with_processors(vec![
             Processor::Rot(integrity),
             Processor::Ignore(IGNORE_STRUCTURE_AND_AIR),
-            Processor::Rule(vec![Rule {
-                input: InputTest::Block(from),
-                output,
-            }]),
+            Processor::Capped {
+                limit: 5,
+                delegate: std::boxed::Box::new(Processor::Rule(vec![Rule {
+                    input: InputTest::Block(from),
+                    output,
+                }])),
+            },
         ])
 }
 
