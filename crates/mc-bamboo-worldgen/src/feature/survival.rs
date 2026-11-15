@@ -186,6 +186,11 @@ fn classify(state: u32) -> Option<Kind> {
         | BlockClass::PumpkinBlock
         | BlockClass::SnowyBlock
         | BlockClass::CoralBlock => Kind::Default,
+        // `BaseCoralPlantTypeBlock.canSurvive`：下面那格 `isFaceSturdy(UP)`。
+        // 珊瑚植株和珊瑚扇都继承它（`BaseCoralPlantBlock` / `BaseCoralFanBlock`）。
+        // `BaseCoralPlantTypeBlock.canSurvive`: the block below is `isFaceSturdy(UP)`.
+        // Both the plant and the fan subclass it.
+        BlockClass::BaseCoralPlantBlock | BlockClass::BaseCoralFanBlock => Kind::SturdyFaceUp,
         // 直接继承 VegetationBlock、不覆写 canSurvive 的类，标签判定。
         // Classes extending VegetationBlock without overriding canSurvive: a tag check.
         BlockClass::BushBlock
