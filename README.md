@@ -538,25 +538,37 @@ WebView2 的渲染进程不算在内。
   `SequencedPriorityIterator`、`project_start_to_heightmap` / `getFirstFreeHeight`、
   `isStartTooCloseToWorldHeightLimits` 与 `doExpansionHack`。五种 pool element
   （`single` / `legacy_single` / `list` / `feature` / `empty`）都支持。
-  对拍 `cargo run -p mc-bamboo-vanilla -- jigsaw <java> [templates|jigsaws|pieces|shapes]`
+  对拍 `cargo run -p mc-bamboo-vanilla -- jigsaw <java> [templates|jigsaws|pieces|pools|save|shapes]`
   用官方 `StructureTemplateManager`（真实数据包）与 `Structure.GenerationContext`：
   `pieces` 覆盖村庄 5 种、掠夺者前哨站、古城、试炼密室、古迹废墟和 26.3 新增的全部
-  18 种 `abandoned_camp`，6 种子 × 6 区块 × 27 结构 = 972 个查询、12467 个结构件的
-  类型 / 模板名 / 位置 / 旋转 / 包围盒 / `groundLevelDelta` / **每个 junction 的全部字段**
-  逐项 0 不一致；`jigsaws` 对 1511 个模板 × 4 种旋转 × 4 个位置 = 24176 个查询、
+  18 种 `abandoned_camp`，3 种子 × 4 区块 × 27 结构 = 324 个查询、4033 个结构件的
+  类型 / 模板名 / 位置 / 旋转 / 包围盒 / `groundLevelDelta` / `getGenDepth` /
+  `liquidSettings` / **每个 junction 的全部字段**，以及 Q 行的 `isValidBiome(stub)`
+  （`findValidGenerationPoint` 的最后一道门，14/324 为 true，真假两支都比到）逐项
+  0 不一致；`pools` 把 245 个 `template_pool` 每一个都当起始 pool 直接调官方
+  `addPieces`（2 种子 × 2 区块 = 980 查询、8976 结构件 0 不一致），把
+  `feature_pool_element`（639 件）和 `list_pool_element`（15 件）当父件的递归路径真的比到；
+  `save` 用真实结构件跑官方 `PoolElementStructurePiece.createTag`，逐 Children 条目比完整
+  规范 NBT（`PosX`/`PosY`/`PosZ`、`ground_level_delta`、`pool_element`、`rotation`、
+  `junctions`、非默认才写的 `liquid_settings`），108 查询、1216 个件标签 0 不一致；
+  `jigsaws` 对 1511 个模板 × 4 种旋转 × 4 个位置 = 24176 个查询、
   68352 个拼图方块的位置 / front / top / name / target / pool / joint / 两个优先级逐项
   0 不一致；`templates` 1511 个模板的尺寸 / 方块数 / 拼图方块数 0 不一致；`shapes`
-  120 个场景 + 4 个 deflate case 0 不一致。四处故意改坏（别名随机源位置 +1、拼图方块
-  orientation 写死 `north_up`、junction 的 `sourceGroundY` +1、`pieces` 的 palette 选择）
-  各自被抓到并失败，还原回 0。
+  120 个场景 + 4 个 deflate case 0 不一致。故意改坏各自被抓到并失败，还原回 0：
+  别名随机源位置 +1、拼图方块 orientation 写死 `north_up`、junction 的 `sourceGroundY` +1、
+  palette 选择、`isValidBiome` 取反（26/324）、expansion hack 的 `expandTo + 1` 改 `+2`
+  （82/980）、`rotation` 写成 `CODEC` 的 `none`（对拍立刻报差异）。
   已知限制：仍是纯函数 + oracle，**没接进 Director 的 `structure_starts` 阶段**（那是流水线的
-  职责）；`Piece` 只带结构件列表（元素、位置、旋转、包围盒、`groundLevelDelta`、junctions），
-  方块写入（`placeInChunk` / `postProcess` / processors / 拼图替换 / 方块实体）属放置那一步，
-  `Piece::to_save_piece` 只给出 `id` / `BB` / `O=-1` / `GD=0` 四个基类字段，
-  `addAdditionalSaveData` 的 `pool_element` / `rotation` / `junctions` 等还没编码。
+  职责）；`Piece` 带结构件列表（元素、位置、旋转、包围盒、`groundLevelDelta`、junctions、
+  `liquid_settings`），方块写入（`placeInChunk` / `postProcess` / processors / 拼图替换 /
+  方块实体）属放置那一步，`Piece::to_full_save_piece` 给出 `pool_element` / `rotation` /
+  `junctions` / `liquid_settings` 全部子类字段的存档标签，但 `processors` 的内联非空对象
+  与 `processor_list` 的逐 processor 编码还没做（26.3 数据里内联对象全是空列表）。
   `start_height` 只支持 `constant`（absolute）与 `uniform`——26.3 主世界全部 28 个 jigsaw
   结构只用这两种，其余 provider 标 unsupported；`bastion_remnant` 是下界结构，按分工不做。
-  `liquid_settings` 只解析不参与结构件生成（官方也要到放置阶段才用）。`Shapes` 按 0.25
+  `liquid_settings` 已随 `Piece` 带到放置阶段（`SinglePoolElement` 用
+  `overrideLiquidSettings.orElse(liquidSettings)`），结构件生成本身不读它。
+  `Shapes` 按 0.25
   的倍数用整数精确复刻，若将来有非 0.25 倍的 AABB 进来（目前没有）会失去精度。
   地物（features）阶段的纯函数正按官方 `ChunkGenerator.applyBiomeDecoration` 逐类移植，
   游戏里的接入由流水线分支（邻居快照 + `features` 阶段）负责。已逐方块对拍

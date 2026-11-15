@@ -124,6 +124,28 @@
   `shapes`（120 场景 + 4 个 deflate case）。全部 0 不一致；四处故意改坏各自被抓到并失败。
 * 覆盖了 26.3 新增的 18 个 `abandoned_camp_*` jigsaw 结构（也在本分支范围内）。
 
+**第四轮续二（2026-11-14，`cb-wg-jigsaw` 分支：连接规则与存档字段的覆盖面）**：
+
+* `pieces` 的 Q 行补上 `isValidBiome(stub)`（`findValidGenerationPoint` 的最后一道门），
+  逐查询比真假；3 种子 × 4 区块 × 27 结构 = 324 查询、4033 结构件 0 不一致，
+  其中 14/324 为 true（真假两支都比到）。故意反转 `isValidBiome` 报 26/324 不一致。
+  P 行同时补 `getGenDepth()`（恒 0）与 `PoolElementStructurePiece.liquidSettings`
+  （官方无访问器，Java 侧反射读）。
+* 新对拍模式 `jigsaw pools`：把 245 个 `template_pool` 每一个都当起始 pool 直接调官方
+  `JigsawPlacement.addPieces`（`maxDepth` 4、expansion hack 开、`MaxDistance(80)`、
+  `PoolAliasLookup.EMPTY`），2 种子 × 2 区块 × 245 pool = 980 查询、8976 结构件 0 不一致。
+  这一条把 `feature_pool_element`（639 件）与 `list_pool_element`（15 件）当父件的路径
+  真的比到了——按结构生成时它们只当叶子，进不了 `addPieces` 的递归。
+  故意把 expansion hack 的 `expandTo + 1` 改成 `+2`，报 82/980 不一致。
+* 新对拍模式 `jigsaw save`：用真实结构件跑官方 `PoolElementStructurePiece.createTag`，
+  逐 Children 条目比完整规范 NBT（`PosX`/`PosY`/`PosZ`、`ground_level_delta`、
+  `pool_element`、`rotation`（`LEGACY_CODEC` 的枚举常量名）、`junctions`、
+  `liquid_settings` 仅在非默认时写）。108 查询、1216 个件标签 0 不一致；
+  故意把 `rotation` 写成 `CODEC` 的 `none`，对拍立刻报差异。
+* `PoolElement` 补上放置阶段要用的 `processors`（注册名或内联对象）与
+  `override_liquid_settings`；`Piece` 补 `liquid_settings`，`Piece::to_full_save_piece`
+  给出带全部子类字段的存档结构件。
+
 **第五轮（2026-11-14，`cb-wg-structures` 分支：单件布局 / Beardifier / 存档）**：
 
 * 合并了 `main` 及队友分支 `cb-fix-main` / `cb-wg-jigsaw` / `cb-wg-multipiece` /
