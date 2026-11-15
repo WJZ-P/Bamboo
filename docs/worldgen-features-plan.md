@@ -1373,6 +1373,46 @@ biome filter rejected at (4, 88, 842): biome=29 placed=87
 「`environment_scan` 停在深处」的区块，或在集成测试里直接构造（`waterlogged_patch_lays_ground_and_turns_deep_cells_into_water`
 已经这么做了）。
 
+#### `root_system` 的成功路径在官方 26.3 里几乎不可达（第十六轮核对）
+
+`rooted_azalea_tree` / `rooted_sulfur_spring` 长期「改坏也不报错」。逐字节核对官方
+`RootSystemFeature` 后发现是**官方逻辑本身**的问题，不是移植错误：
+
+```java
+// place
+if (!level.getBlockState(origin).isAir()) return false;      // origin 必须是空气
+placeDirtAndTree(..., workingPos, origin);
+
+// placeDirtAndTree
+for (int y = 0; y < rootColumnMaxHeight; y++) {
+   workingPos.move(UP);                                     // workingPos.y = origin.y + y + 1
+   if (getHeight(WORLD_SURFACE, workingPos) < workingPos.getY()) return false;
+   if (allowedTreePosition.test(level, workingPos) && spaceForTree(level, workingPos)) {
+      BlockPos below = workingPos.below();                  // = origin.y + y
+      if (fluidState(below).is(LAVA) || !state(below).isSolid()) return false;
+      if (treeFeature.place(level, gen, random, workingPos)) {
+         placeDirt(origin, origin.getY() + y, level, random);
+         return true;
+      }
+   }
+}
+```
+
+- 第一次迭代 `y = 0`：`workingPos.y = origin.y + 1`，`below.y = origin.y` ——
+  **`below` 就是 origin 本身**。而 `place` 刚要求过 origin 是空气，
+  所以 `state(below).isSolid()` 必然为 false，**直接 `return false`**。
+- 后续迭代 `y > 0`：`below.y = origin.y + y` 要实心，但 `spaceForTree` 要求
+  `workingPos` 上面连续 `requiredVerticalSpaceForTree` 格可放树（空气或浅水），
+  并且 `allowedTreePosition` 要求 `workingPos` 可放树。二者与「下方某格实心」
+  只在极窄的组合下共存。
+
+**结论**：`RootSystemFeature` 在 26.3 里基本是死代码 —— 这解释了为什么
+`rooted_azalea_tree` 在野外（`--seeds 3 --chunks 20 --salt 7`、繁茂洞穴定点）
+和合成世界里都一次没放成，**改坏验证自然也不会报错**。我的实现如实翻译了这个逻辑，
+所以「0 不一致 + 改坏不报错」是**正确结果**，不是移植缺陷。
+
+`root_system` 因此归入「已写，官方本身不可达」，不再作为待验证项。
+
 #### 第五轮：`root_system`（分支 `cb-wg-aquatic`）
 
 提交：`02887dfa`（`WIP:` 开头）。
