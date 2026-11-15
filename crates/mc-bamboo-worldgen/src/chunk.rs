@@ -639,11 +639,13 @@ impl<'a> Generator<'a> {
         // 在中心区块的**世界原点**（`center.getWorldPosition()`，即区块的 minY 那一格）
         // 上取一个随机源。整个 `features` 调用共用这一个。
         //
-        // `WorldGenRegion.random`: the `worldgen_region_random` factory sampled at the
-        // centre chunk's world position; one instance shared by the whole `features` call.
+        // `WorldGenRegion.random`: the `worldgen_region_random` factory sampled at
+        // `center.getPos().getWorldPosition()`, which is
+        // `new BlockPos(minBlockX, 0, minBlockZ)` — **y is always 0**, not the dimension's
+        // minimum Y.
         let region_random = crate::random::WorldgenRandom::new(self.region_random.at(
             input.center_x * 16,
-            self.settings.min_y,
+            0,
             input.center_z * 16,
         ));
         let context = crate::feature::run::FeatureContext {
