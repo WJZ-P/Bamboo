@@ -55,6 +55,7 @@ pub fn template_blocks(
                     local.2 + piece_position.2,
                 ),
                 state: BlockStateSpec::from_palette_entry(entry),
+                nbt: block.nbt.clone(),
             },
             // `blockInfo.nbt != null`：官方在写这个方块前先放一个 `BARRIER`。
             // `blockInfo.nbt != null`: vanilla writes a `BARRIER` first.
@@ -168,7 +169,7 @@ pub fn place_processed(
     rotation: u32,
     world: &mut impl BlockWriter,
 ) -> Result<usize, String> {
-    let mut written = 0;
+    let mut changed = 0;
     for block in processed {
         let pos = block.pos;
         if !chunk_bb.contains(pos.0, pos.1, pos.2) {
@@ -188,10 +189,15 @@ pub fn place_processed(
         if block.has_nbt {
             world.set_block(pos.0, pos.1, pos.2, barrier_state());
         }
-        world.set_block(pos.0, pos.1, pos.2, state_out);
-        written += 1;
+        // 官方只在 `level.setBlock(...)` 返回 true 时才把位置计入 `minX..maxZ` 与
+        // `placed`（即 `placeInWorld` 的「实际改了几个方块」），返回值不参与其它判断。
+        // Vanilla counts a position only when `level.setBlock(...)` returns true; that
+        // count is what `placeInWorld` reports as "blocks actually changed".
+        if world.set_block(pos.0, pos.1, pos.2, state_out) {
+            changed += 1;
+        }
     }
-    Ok(written)
+    Ok(changed)
 }
 
 /// `Blocks.BARRIER.defaultBlockState()` 的状态 id。
@@ -328,6 +334,55 @@ mod tests {
         assert!(state_id_of(&unknown).is_err());
         let bad = BlockStateSpec::parse_str("minecraft:oak_stairs[facing=up]").unwrap();
         assert!(state_id_of(&bad).is_err());
+    }
+
+    /// `set_block` 返回 `false`（状态没变）时不计入返回值，与官方
+    /// `if (level.setBlock(...))` 一致。
+    ///
+    /// A `set_block` returning `false` (no state change) is not counted, matching vanilla's
+    /// `if (level.setBlock(...))`.
+    #[test]
+    fn place_processed_counts_only_actual_changes() {
+        use super::{BlockWriter, PlaceBlock, place_processed};
+        use crate::structure::processor::BlockStateSpec;
+
+        /// 前 `accept` 次返回 `true`，之后返回 `false`。
+        ///
+        /// Returns `true` for the first `accept` writes, `false` afterwards.
+        struct PartialWorld {
+            accept: usize,
+            calls: usize,
+        }
+        impl BlockWriter for PartialWorld {
+            fn set_block(&mut self, _x: i32, _y: i32, _z: i32, _state: u32) -> bool {
+                self.calls += 1;
+                self.calls <= self.accept
+            }
+        }
+
+        let bb = crate::structure::BoundingBox {
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            max_x: 10,
+            max_y: 10,
+            max_z: 10,
+        };
+        let blocks: Vec<PlaceBlock> = (0..5)
+            .map(|i| PlaceBlock {
+                pos: (i, 0, 0),
+                state: BlockStateSpec::parse_str("minecraft:stone").unwrap(),
+                has_nbt: false,
+            })
+            .collect();
+
+        let mut world = PartialWorld {
+            accept: 3,
+            calls: 0,
+        };
+        let changed = place_processed(&blocks, bb, 0, 0, &mut world).unwrap();
+        assert_eq!(world.calls, 5, "every block is still attempted");
+        assert_eq!(changed, 3, "only accepted writes count");
     }
 
     /// 完整链路：模板 → processor 链 → 写入，只写 `chunk_bb` 内的位置，且写出的状态

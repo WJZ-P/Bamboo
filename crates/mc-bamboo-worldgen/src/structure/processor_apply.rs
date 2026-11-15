@@ -61,6 +61,12 @@ pub struct ProcessBlock {
     /// The world position (`calculateRelativePosition(settings, pos).offset(position)`).
     pub world_pos: (i32, i32, i32),
     pub state: BlockStateSpec,
+    /// `blockInfo.nbt`：拼图方块的 `JigsawReplacementProcessor` 要读 `final_state`，
+    /// 带 nbt 的方块还要先写 `BARRIER`。
+    ///
+    /// `blockInfo.nbt`: `JigsawReplacementProcessor` reads `final_state` from it, and a
+    /// block carrying nbt gets a `BARRIER` written first.
+    pub nbt: Option<mc_bamboo_nbt::Tag>,
 }
 
 /// `StructurePlaceSettings.getRandom(pos)`：没有显式随机源时按位置派生。
@@ -260,7 +266,62 @@ pub fn process_block(
         // `CappedProcessor.processBlock` 是空实现，它只在 `finalizeProcessing` 里干活。
         // `CappedProcessor.processBlock` is a no-op; it only works in `finalizeProcessing`.
         Processor::Capped { .. } => Some(block.clone()),
+        // `BlockIgnoreProcessor.processBlock`：`toIgnore.contains(state.getBlock())` 时丢弃。
+        // `BlockIgnoreProcessor.processBlock`: drops when the block is in `toIgnore`.
+        Processor::BlockIgnore { to_ignore } => {
+            if to_ignore.contains(&block.state.name) {
+                None
+            } else {
+                Some(block.clone())
+            }
+        }
+        // `JigsawReplacementProcessor.processBlock`：把拼图方块换成 nbt 里的 `final_state`。
+        // `JigsawReplacementProcessor.processBlock`: replaces the jigsaw with `final_state`.
+        Processor::JigsawReplacement => {
+            if block.state.name != "minecraft:jigsaw" {
+                return Some(block.clone());
+            }
+            // 没有 nbt 时官方只打警告并保留原方块（`will not replace`）。
+            // Without nbt, vanilla warns and keeps the block ("will not replace").
+            let Some(nbt) = block.nbt.as_ref() else {
+                return Some(block.clone());
+            };
+            let state_text = nbt_string(nbt, "final_state").unwrap_or("minecraft:air");
+            let Ok(state) = BlockStateSpec::parse_str(state_text) else {
+                // 解析失败时官方返回 null（丢弃）。
+                // Vanilla returns null (drops) when parsing fails.
+                return None;
+            };
+            // `structure_void` 也丢弃。
+            // `structure_void` is dropped as well.
+            if state.name == "minecraft:structure_void" {
+                return None;
+            }
+            let mut out = block.clone();
+            out.state = state;
+            out.nbt = None;
+            Some(out)
+        }
     }
+}
+
+/// 从 NBT 复合里读一个字符串字段。
+///
+/// Read one string field from an NBT compound.
+fn nbt_string<'a>(tag: &'a mc_bamboo_nbt::Tag, key: &str) -> Option<&'a str> {
+    let mc_bamboo_nbt::Tag::Compound(entries) = tag else {
+        return None;
+    };
+    entries.iter().find_map(|(name, value)| {
+        if name == key {
+            match value {
+                mc_bamboo_nbt::Tag::String(text) => Some(text.as_str()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
 }
 
 /// `StructurePlaceSettings` 里与本模块相关的部分：位置、参考点、块过滤、随机源。
@@ -503,6 +564,7 @@ mod tests {
             pos,
             world_pos: pos,
             state: state(name),
+            nbt: None,
         }
     }
 
@@ -761,6 +823,7 @@ mod tests {
             pos: (0, 0, 0),
             world_pos: (0, 200, 0),
             state: state("minecraft:stone"),
+            nbt: None,
         };
         let out = process_block(&processor, &far, (0, 0, 0), &level, None).unwrap();
         assert_eq!(out.state.name, "minecraft:gold_block");
@@ -878,6 +941,116 @@ mod tests {
             settings((0, 0, 0), (0, 0, 0), Some(bb)),
         );
         assert_eq!(out.len(), 2);
+    }
+
+    /// `block_ignore` 丢弃 `to_ignore` 里的方块，其余保留。
+    ///
+    /// `block_ignore` drops blocks in `to_ignore` and keeps the rest.
+    #[test]
+    fn block_ignore_drops_listed_blocks() {
+        let level = OneState {
+            state: state("minecraft:air"),
+            tag_blocks: Vec::new(),
+        };
+        let processor = Processor::BlockIgnore {
+            to_ignore: vec![
+                "minecraft:structure_block".to_owned(),
+                "minecraft:air".to_owned(),
+            ],
+        };
+        assert!(
+            process_block(
+                &processor,
+                &block((0, 64, 0), "minecraft:structure_block"),
+                (0, 64, 0),
+                &level,
+                None
+            )
+            .is_none()
+        );
+        assert!(
+            process_block(
+                &processor,
+                &block((0, 64, 0), "minecraft:air"),
+                (0, 64, 0),
+                &level,
+                None
+            )
+            .is_none()
+        );
+        assert!(
+            process_block(
+                &processor,
+                &block((0, 64, 0), "minecraft:stone"),
+                (0, 64, 0),
+                &level,
+                None
+            )
+            .is_some()
+        );
+    }
+
+    /// `jigsaw_replacement` 把拼图方块换成 nbt 里的 `final_state`；`structure_void` 丢弃；
+    /// 没有 nbt 时保留原方块。
+    ///
+    /// `jigsaw_replacement` turns a jigsaw into its `final_state` nbt; `structure_void`
+    /// drops it; a jigsaw without nbt is kept.
+    #[test]
+    fn jigsaw_replacement_uses_final_state() {
+        use mc_bamboo_nbt::Tag;
+        let level = OneState {
+            state: state("minecraft:air"),
+            tag_blocks: Vec::new(),
+        };
+        let processor = Processor::JigsawReplacement;
+        let with_final = |final_state: &str| ProcessBlock {
+            pos: (0, 64, 0),
+            world_pos: (0, 64, 0),
+            state: state("minecraft:jigsaw"),
+            nbt: Some(Tag::Compound(vec![(
+                "final_state".to_owned(),
+                Tag::String(final_state.to_owned()),
+            )])),
+        };
+
+        let out = process_block(
+            &processor,
+            &with_final("minecraft:stone"),
+            (0, 64, 0),
+            &level,
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.state.name, "minecraft:stone");
+        assert!(out.nbt.is_none(), "the replacement drops the jigsaw nbt");
+
+        assert!(
+            process_block(
+                &processor,
+                &with_final("minecraft:structure_void"),
+                (0, 64, 0),
+                &level,
+                None
+            )
+            .is_none()
+        );
+
+        // 没有 nbt：保留原方块。
+        // No nbt: the block is kept.
+        let bare = ProcessBlock {
+            pos: (0, 64, 0),
+            world_pos: (0, 64, 0),
+            state: state("minecraft:jigsaw"),
+            nbt: None,
+        };
+        let out = process_block(&processor, &bare, (0, 64, 0), &level, None).unwrap();
+        assert_eq!(out.state.name, "minecraft:jigsaw");
+
+        // 非拼图方块不受影响。
+        // A non-jigsaw block is untouched.
+        let other = block((0, 64, 0), "minecraft:stone");
+        let out = process_block(&processor, &other, (0, 64, 0), &level, None).unwrap();
+        assert_eq!(out.state.name, "minecraft:stone");
     }
 
     /// `capped` 最多改 `limit` 个方块，且逐块用 delegate 的效果。

@@ -1230,6 +1230,7 @@ fn compare_apply(stdout: &str, queries: &[String], lists: &ProcessorLists) -> Re
                 // `pos + position`.
                 world_pos: (pos.0 + piece.0, pos.1 + piece.1, pos.2 + piece.2),
                 state: BlockStateSpec::parse_str(&state)?,
+                nbt: None,
             });
         }
         let processors = lists
@@ -1753,6 +1754,7 @@ fn compare_capped_full(
                 pos,
                 world_pos: (pos.0 + piece.0, pos.1 + piece.1, pos.2 + piece.2),
                 state: BlockStateSpec::parse_str(&state)?,
+                nbt: None,
             });
         }
         let processors = lists
@@ -1848,19 +1850,23 @@ fn run_place_piece(mut command: Command, work_dir: &Path) -> Result<(), String> 
 
     let mut queries = Vec::new();
     for name in &picked {
-        for (mirror, rotation) in [(0_u32, 0_u32), (0, 1), (1, 2)] {
-            let (sx, sy, sz) = StructureTemplate::load(name)
-                .map_err(|error| format!("cannot load {name}: {error}"))?
-                .size;
-            // 旋转会把模板相对坐标变成负值（90 度时映射成 (-z, y, x)），所以盒要跨正负两侧。
-            // Rotations turn template positions negative (90 degrees maps to (-z, y, x)), so
-            // the box must straddle zero.
-            let span = sx.max(sz) + 1;
-            let bb = (-span, 0, -span, span, sy + 1, span);
-            queries.push(format!(
-                "{name}|0|0|0|{mirror}|{rotation}|{}|{}|{}|{}|{}|{}|minecraft:air",
-                bb.0, bb.1, bb.2, bb.3, bb.4, bb.5
-            ));
+        // 全部 12 种 mirror × rotation 组合（`Mirror` 3 个 × `Rotation` 4 个）。
+        // All 12 mirror × rotation combinations (3 mirrors × 4 rotations).
+        for mirror in 0_u32..3 {
+            for rotation in 0_u32..4 {
+                let (sx, sy, sz) = StructureTemplate::load(name)
+                    .map_err(|error| format!("cannot load {name}: {error}"))?
+                    .size;
+                // 旋转会把模板相对坐标变成负值（90 度时映射成 (-z, y, x)），所以盒要跨正负两侧。
+                // Rotations turn template positions negative (90 degrees maps to (-z, y, x)), so
+                // the box must straddle zero.
+                let span = sx.max(sz) + 1;
+                let bb = (-span, 0, -span, span, sy + 1, span);
+                queries.push(format!(
+                    "{name}|0|0|0|{mirror}|{rotation}|{}|{}|{}|{}|{}|{}|minecraft:air",
+                    bb.0, bb.1, bb.2, bb.3, bb.4, bb.5
+                ));
+            }
         }
     }
     let queries_path = work_dir.join("jigsaw_place_piece_queries.txt");

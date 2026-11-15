@@ -272,6 +272,27 @@ impl Processor {
                 // The `constant` form of `IntProviders.POSITIVE_CODEC` is a bare int.
                 fields.push(("limit".to_owned(), Tag::Int(*limit)));
             }
+            Self::BlockIgnore { to_ignore } => {
+                fields.push((
+                    "processor_type".to_owned(),
+                    Tag::String("minecraft:block_ignore".to_owned()),
+                ));
+                // `WEIRD_BLOCK_STATE_CODEC` 编码时只写方块默认状态（`Block::defaultBlockState`）。
+                // `WEIRD_BLOCK_STATE_CODEC` writes the block's default state.
+                fields.push((
+                    "blocks".to_owned(),
+                    Tag::List(
+                        to_ignore
+                            .iter()
+                            .map(|name| Tag::String(name.clone()))
+                            .collect(),
+                    ),
+                ));
+            }
+            Self::JigsawReplacement => fields.push((
+                "processor_type".to_owned(),
+                Tag::String("minecraft:jigsaw_replacement".to_owned()),
+            )),
         }
         Ok(Tag::Compound(fields))
     }

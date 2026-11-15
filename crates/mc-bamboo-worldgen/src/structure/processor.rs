@@ -83,6 +83,19 @@ pub enum Processor {
         delegate: Box<Processor>,
         limit: i32,
     },
+    /// `BlockIgnoreProcessor`：`to_ignore` 里的方块直接丢弃（不写进世界）。
+    /// 官方的三个常量实例是 `STRUCTURE_BLOCK`（只忽略结构方块）、`AIR`、
+    /// `STRUCTURE_AND_AIR`。
+    ///
+    /// `BlockIgnoreProcessor`: blocks in `to_ignore` are dropped. Vanilla's three constant
+    /// instances are `STRUCTURE_BLOCK`, `AIR` and `STRUCTURE_AND_AIR`.
+    BlockIgnore { to_ignore: Vec<String> },
+    /// `JigsawReplacementProcessor`：把拼图方块换成它 nbt 里的 `final_state`
+    /// （默认 `minecraft:air`）；换成 `structure_void` 时丢弃。
+    ///
+    /// `JigsawReplacementProcessor`: replaces a jigsaw block with the `final_state` from
+    /// its nbt (default `minecraft:air`); a `structure_void` result drops the block.
+    JigsawReplacement,
 }
 
 impl Processor {
@@ -96,7 +109,6 @@ impl Processor {
     pub const fn evaluates_entire_piece_state(&self) -> bool {
         matches!(self, Self::Capped { .. })
     }
-
     fn parse(raw: &Value) -> Result<Self, String> {
         let kind = raw
             .get("processor_type")
@@ -141,6 +153,30 @@ impl Processor {
                     .and_then(Value::as_i64)
                     .ok_or("capped has no limit")? as i32,
             }),
+            "minecraft:block_ignore" => {
+                let blocks = raw
+                    .get("blocks")
+                    .and_then(Value::as_array)
+                    .ok_or("block_ignore has no blocks")?
+                    .iter()
+                    .map(|entry| {
+                        // `WEIRD_BLOCK_STATE_CODEC` 接受完整方块状态，只取方块名。
+                        // `WEIRD_BLOCK_STATE_CODEC` accepts a full state; keep the block name.
+                        match entry {
+                            Value::String(name) => Ok(name.clone()),
+                            Value::Object(fields) => fields
+                                .get("Name")
+                                .or_else(|| fields.get("id"))
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                                .ok_or_else(|| "block_ignore entry has no name".to_owned()),
+                            other => Err(format!("bad block_ignore entry {other:?}")),
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Self::BlockIgnore { to_ignore: blocks })
+            }
+            "minecraft:jigsaw_replacement" => Ok(Self::JigsawReplacement),
             other => Err(format!("unsupported processor {other}")),
         }
     }
@@ -613,6 +649,8 @@ mod tests {
                     Processor::Rule { .. } => "rule",
                     Processor::ProtectedBlocks { .. } => "protected_blocks",
                     Processor::Capped { .. } => "capped",
+                    Processor::BlockIgnore { .. } => "block_ignore",
+                    Processor::JigsawReplacement => "jigsaw_replacement",
                 };
                 *counts.entry(key).or_insert(0) += 1;
             }

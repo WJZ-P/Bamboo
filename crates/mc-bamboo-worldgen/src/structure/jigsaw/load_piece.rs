@@ -247,6 +247,23 @@ pub fn processor_from_tag(tag: &Tag) -> Result<Processor, String> {
             )?),
             limit: int_field(tag, "limit").ok_or("capped has no limit")?,
         }),
+        "minecraft:block_ignore" => {
+            let to_ignore = match field(tag, "blocks") {
+                Some(Tag::List(entries)) => entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Tag::String(name) => Some(name.clone()),
+                        Tag::Compound(_) => string_field(entry, "id")
+                            .or_else(|| string_field(entry, "Name"))
+                            .map(str::to_owned),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => return Err("block_ignore has no blocks".to_owned()),
+            };
+            Ok(Processor::BlockIgnore { to_ignore })
+        }
+        "minecraft:jigsaw_replacement" => Ok(Processor::JigsawReplacement),
         other => Err(format!("unsupported processor {other}")),
     }
 }
