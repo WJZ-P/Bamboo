@@ -60,6 +60,7 @@ import net.minecraft.world.level.levelgen.structure.pools.StructurePoolElement;
 import net.minecraft.world.level.levelgen.structure.structures.JigsawStructure;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
+import net.minecraft.world.level.levelgen.structure.templatesystem.LiquidSettings;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.storage.LevelStorageSource;
@@ -259,7 +260,11 @@ public final class JigsawOracle {
         }
     }
 
-    /** 类型|模板名|pos|rotation|boundingBox(6)|groundLevelDelta|junctions|junction 详情。 */
+    /**
+     * 类型|模板名|pos|rotation|boundingBox(6)|groundLevelDelta|genDepth|liquid|junctions|junction 详情。
+     *
+     * <p>Type|template|pos|rotation|boundingBox(6)|groundLevelDelta|genDepth|liquid|junctions|details.
+     */
     private static String describe(PoolElementStructurePiece piece) {
         StructurePoolElement element = piece.getElement();
         String type;
@@ -295,6 +300,8 @@ public final class JigsawOracle {
                 .append(box.maxX()).append('|').append(box.maxY()).append('|')
                 .append(box.maxZ()).append('|')
                 .append(piece.getGroundLevelDelta()).append('|')
+                .append(piece.getGenDepth()).append('|')
+                .append(liquidName(piece)).append('|')
                 .append(piece.getJunctions().size());
         // junction 详情：sourceX|sourceGroundY|sourceZ|deltaY|destProjection。
         // Junction detail: sourceX|sourceGroundY|sourceZ|deltaY|destProjection.
@@ -309,7 +316,28 @@ public final class JigsawOracle {
         return line.toString();
     }
 
-    /** 独立小场景：模拟 addPieces 里 free 的 join / joinIsNotEmpty / joinUnoptimized 序列。 */
+    /**
+     * `PoolElementStructurePiece.liquidSettings` 没有公开访问器，用反射读；读不到记 `?`。
+     *
+     * <p>`PoolElementStructurePiece.liquidSettings` has no accessor; read it via
+     * reflection, falling back to `?`.
+     */
+    private static String liquidName(PoolElementStructurePiece piece) {
+        try {
+            java.lang.reflect.Field field =
+                    PoolElementStructurePiece.class.getDeclaredField("liquidSettings");
+            field.setAccessible(true);
+            Object value = field.get(piece);
+            return value instanceof LiquidSettings settings ? settings.getSerializedName() : "?";
+        } catch (ReflectiveOperationException error) {
+            return "?";
+        }
+    }
+
+    /** 独立小场景：模拟 addPieces 里 free 的 join / joinIsNotEmpty / joinUnoptimized 序列。
+     *
+     * <p>Standalone scenes mimicking the free-space join sequence in addPieces.
+     */
     private static void runShapes(Path queries) throws Exception {
         StringBuilder out = new StringBuilder();
         for (String line : Files.readAllLines(queries, StandardCharsets.UTF_8)) {

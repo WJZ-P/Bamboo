@@ -47,9 +47,12 @@ impl Projection {
     }
 }
 
-/// 五种 pool element。processor 字段留到放置阶段，这里只解析结构件生成要用的。
+/// 五种 pool element。`processors` / `override_liquid_settings` 只留给放置阶段，
+/// 结构件生成不读；解析成原始 JSON 是为了让放置那一步不用再回查注册表。
 ///
-/// The five pool element types. Processors are left for the placement stage.
+/// The five pool element types. `processors` / `override_liquid_settings` are only for
+/// the placement stage; piece generation never reads them. They are kept as raw JSON so
+/// the placement stage does not have to re-read the registry.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PoolElement {
     Empty,
@@ -57,6 +60,12 @@ pub enum PoolElement {
         location: String,
         projection: Projection,
         legacy: bool,
+        /// `processors`：注册名（`minecraft:x`）或内联 `{processors: [...]}` 对象。
+        ///
+        /// `processors`: a registry name (`minecraft:x`) or inline `{processors: [...]}`.
+        processors: Value,
+        /// `SinglePoolElement.overrideLiquidSettings`。
+        override_liquid_settings: Option<String>,
     },
     List {
         elements: Vec<PoolElement>,
@@ -131,6 +140,14 @@ impl PoolElement {
                     location: string_field(raw, "location")?,
                     projection: Projection::parse(raw.get("projection"))?,
                     legacy: element_type == "minecraft:legacy_single_pool_element",
+                    processors: raw
+                        .get("processors")
+                        .cloned()
+                        .ok_or("single_pool_element has no processors")?,
+                    override_liquid_settings: raw
+                        .get("override_liquid_settings")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                 })
             }
             "minecraft:list_pool_element" => {

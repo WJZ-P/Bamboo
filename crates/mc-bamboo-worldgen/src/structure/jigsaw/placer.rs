@@ -54,6 +54,47 @@ pub struct Piece {
     pub bounding_box: BoundingBox,
     pub ground_level_delta: i32,
     pub junctions: Vec<Junction>,
+    /// `PoolElementStructurePiece.liquidSettings`：结构配置的 `liquid_settings`。
+    /// 放置时 `SinglePoolElement` 用 `overrideLiquidSettings.orElse(liquidSettings)`。
+    ///
+    /// `PoolElementStructurePiece.liquidSettings`: the structure's `liquid_settings`.
+    /// At placement `SinglePoolElement` uses
+    /// `overrideLiquidSettings.orElse(liquidSettings)`.
+    pub liquid_settings: LiquidSettings,
+}
+
+/// `LiquidSettings`：放置模板时是否给含水方块灌水。
+///
+/// `LiquidSettings`: whether waterloggable blocks get filled during placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiquidSettings {
+    IgnoreWaterlogging,
+    ApplyWaterlogging,
+}
+
+impl LiquidSettings {
+    /// `LiquidSettings.CODEC` 的名字。
+    ///
+    /// The names of `LiquidSettings.CODEC`.
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "ignore_waterlogging" => Ok(Self::IgnoreWaterlogging),
+            "apply_waterlogging" => Ok(Self::ApplyWaterlogging),
+            other => Err(format!("bad liquid_settings {other}")),
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::IgnoreWaterlogging => "ignore_waterlogging",
+            Self::ApplyWaterlogging => "apply_waterlogging",
+        }
+    }
+
+    /// `JigsawStructure.DEFAULT_LIQUID_SETTINGS`。
+    ///
+    /// `JigsawStructure.DEFAULT_LIQUID_SETTINGS`.
+    pub const DEFAULT: Self = Self::ApplyWaterlogging;
 }
 
 /// `JigsawJunction`：结构件之间的地形适配连接点。
@@ -143,6 +184,7 @@ struct Placer<'a> {
     random: &'a WorldgenRandom,
     config: &'a JigsawConfig,
     aliases: &'a PoolAliasLookup,
+    liquid_settings: LiquidSettings,
     pieces: Vec<Piece>,
     placing: PriorityQueue<PieceState>,
 }
@@ -169,6 +211,7 @@ pub fn add_pieces(
         return Ok(None);
     };
     let center = point.center;
+    let liquid_settings = LiquidSettings::parse(&config.liquid_settings)?;
     let mut pieces = vec![Piece {
         element: center.element,
         position: center.position,
@@ -176,6 +219,7 @@ pub fn add_pieces(
         bounding_box: center.bounding_box,
         ground_level_delta: center.ground_level_delta,
         junctions: Vec::new(),
+        liquid_settings,
     }];
 
     if config.max_depth > 0 {
@@ -212,6 +256,7 @@ pub fn add_pieces(
             random: &random,
             config,
             aliases: &aliases,
+            liquid_settings,
             pieces,
             placing: PriorityQueue::default(),
         };
@@ -398,6 +443,7 @@ impl<'a> Placer<'a> {
                                 delta_y: -delta_y,
                                 dest_projection: source_projection,
                             }],
+                            liquid_settings: self.liquid_settings,
                         });
                         // 官方 `depth + 1 <= maxDepth`。
                         // Vanilla `depth + 1 <= maxDepth`.

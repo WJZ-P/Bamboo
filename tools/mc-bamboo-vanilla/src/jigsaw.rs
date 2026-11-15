@@ -424,6 +424,9 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
     let mut pieces_checked = 0usize;
     let mut mismatches = 0usize;
     let mut first: Option<String> = None;
+    // 每种 pool element 类型比到多少件，用来确认五种类型都真的被比过。
+    // How many pieces of each pool element type were compared, proving all five ran.
+    let mut type_counts: BTreeMap<String, usize> = BTreeMap::new();
     for (seed, group) in &by_seed {
         let generator = Generator::new(&worldgen, *seed)?;
         for query in group {
@@ -454,6 +457,11 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
             }
             if let Some(structure) = &result {
                 pieces_checked += structure.pieces.len();
+                for piece in &structure.pieces {
+                    *type_counts
+                        .entry(piece.element.type_name().to_owned())
+                        .or_default() += 1;
+                }
             }
         }
     }
@@ -471,6 +479,22 @@ fn compare_pieces(stdout: &str, queries: &[Query]) -> Result<(), String> {
         ));
     }
     println!("jigsaw pieces: {checked} queries, {pieces_checked} pieces, all Q/P fields identical");
+    let summary = type_counts
+        .iter()
+        .map(|(name, count)| format!("{name}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!("piece element types: {summary}");
+    let missing: Vec<&str> = ["empty", "single", "legacy", "list", "feature"]
+        .into_iter()
+        .filter(|name| !type_counts.contains_key(*name))
+        .collect();
+    if !missing.is_empty() {
+        println!(
+            "note: pool element types never compared: {}",
+            missing.join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -538,6 +562,12 @@ fn check_query(
             piece.bounding_box.max_y.to_string(),
             piece.bounding_box.max_z.to_string(),
             piece.ground_level_delta.to_string(),
+            // `PoolElementStructurePiece` 的构造器是 `super(JIGSAW, 0, bb)`，没有别处调
+            // `setGenDepth`，所以 `getGenDepth()` 恒为 0。
+            // The constructor is `super(JIGSAW, 0, bb)` and nothing calls `setGenDepth`,
+            // so `getGenDepth()` is always 0.
+            "0".to_owned(),
+            piece.liquid_settings.name().to_owned(),
             piece.junctions.len().to_string(),
         ];
         // junction 详情（`sourceX|sourceGroundY|sourceZ|deltaY|destProjection` × N）。
