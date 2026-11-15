@@ -262,12 +262,14 @@ mod imp {
         /// 实验下界独立于记录：不开记录时也能设，用来测「半成品」的整块耗时。
         /// The floors live outside the recording so they can be set with no recording
         /// running, to time a half-built chunk end to end.
-        static FLOORS: RefCell<Floors> = RefCell::new(Floors {
-            noise: None,
-            surface: None,
-            carver: None,
-            feature: None,
-        });
+        static FLOORS: RefCell<Floors> = const {
+            RefCell::new(Floors {
+                noise: None,
+                surface: None,
+                carver: None,
+                feature: None,
+            })
+        };
     }
 
     impl State {

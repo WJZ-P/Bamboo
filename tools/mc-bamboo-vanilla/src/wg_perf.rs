@@ -113,7 +113,7 @@ impl Options {
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
-            let mut value = || args.next().map(|value| *value).ok_or(USAGE.to_owned());
+            let mut value = || args.next().copied().ok_or(USAGE.to_owned());
             match arg {
                 "--seeds" => options.seeds = value()?.parse().map_err(|_| USAGE.to_owned())?,
                 "--chunks" => {
@@ -155,10 +155,10 @@ pub fn run(args: &[&str]) -> Result<(), String> {
 
     // 首次调用的初始化开销单独报：建 `Generator`（编译采样器）+ 第一次生成。
     let init_start = Instant::now();
-    let mut generator = Generator::new(&worldgen, seeds[0])?;
+    let generator = Generator::new(&worldgen, seeds[0])?;
     let build_ms = init_start.elapsed().as_secs_f64() * 1000.0;
     let first_start = Instant::now();
-    let _ = measure_once(&mut generator, targets[0], 1)?;
+    let _ = measure_once(&generator, targets[0], 1)?;
     println!(
         "wg-perf: building the generator {build_ms:.1} ms, first full chunk {:.1} ms \
          (initialisation, excluded from the medians below)",
@@ -661,13 +661,13 @@ fn measure_bands(
         // Take the minimum cumulative time per boundary: other load only pushes timings
         // up, so the minimum is closest to the clean number.
         let mut cumulative = vec![0.0f64; Y_BANDS + 1];
-        for band in 0..=Y_BANDS {
+        for (band, slot) in cumulative.iter_mut().enumerate() {
             let from_y = MIN_Y + band as i32 * 8;
             let mut times = Vec::with_capacity(repeat);
             for _ in 0..repeat {
                 times.push(generator.sample_density_from(target.x, target.z, from_y)?);
             }
-            cumulative[band] = times.iter().copied().fold(f64::MAX, f64::min);
+            *slot = times.iter().copied().fold(f64::MAX, f64::min);
         }
         for band in 0..Y_BANDS {
             per_band[band].push((cumulative[band] - cumulative[band + 1]).max(0.0));
@@ -947,6 +947,10 @@ fn step_name(step: usize) -> &'static str {
         .unwrap_or("?")
 }
 
+/// 每个余量下、每个阶段的两组耗时（完整生成、半成品）。
+/// For each margin and phase, the full and the partial timings.
+type CutPhase = BTreeMap<i32, BTreeMap<usize, (Vec<f64>, Vec<f64>)>>;
+
 /// 「只生成切割线以上」的对照：余量 16 / 24 / 32 / 48 各量一遍。
 ///
 /// 完整生成和半成品交替跑（同一次循环里各跑一遍），两边都取**最小值**：机器上有别的
@@ -974,7 +978,7 @@ fn measure_cut_lines(
         }
     }
     let mut ratios: BTreeMap<i32, Vec<(&'static str, f64)>> = BTreeMap::new();
-    let mut per_phase: BTreeMap<i32, BTreeMap<usize, (Vec<f64>, Vec<f64>)>> = BTreeMap::new();
+    let mut per_phase: CutPhase = BTreeMap::new();
     let mut totals: BTreeMap<i32, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
     for margin in [16, 24, 32, 48] {
         for (target, item) in targets.iter().zip(measured) {
