@@ -84,6 +84,16 @@ public final class StructurePlaceOracle {
     private static final StructurePieceSerializationContext CTX =
             new StructurePieceSerializationContext(null, null, null);
     private static net.minecraft.server.level.ServerLevel serverLevel;
+    /** 林地府邸喂入的 `startY`，必须和 Rust 侧 `MANSION_START_Y` 一致。 */
+    // The `startY` fed to the woodland mansion; must match Rust's `MANSION_START_Y`.
+    private static final int MANSION_START_Y = 64;
+    /** 林地府邸的模板要 `StructureTemplateManager` 来读；只建一次。 */
+    // The mansion's templates come from a `StructureTemplateManager`, built once.
+    private static net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager
+            templateManager;
+    /** `WoodlandMansionStructure`，只为调它的 `afterPlace`。 */
+    // The `WoodlandMansionStructure`, only for its `afterPlace`.
+    private static net.minecraft.world.level.levelgen.structure.Structure mansionStructure;
     private static final java.util.Set<String> BASE_KEYS =
             java.util.Set.of("id", "BB", "O", "GD");
 
@@ -91,11 +101,17 @@ public final class StructurePlaceOracle {
         if (args.length != 1) {
             throw new IllegalArgumentException("usage: StructurePlaceOracle <queries.txt>");
         }
+        // `Bootstrap.bootStrap()` 会把 `System.err` 接到日志上，之后打印的栈就看不到了；
+        // 先把原来的流留下来。
+        // `Bootstrap.bootStrap()` reroutes `System.err` into the logger, which hides stack
+        // traces printed afterwards; keep the original stream.
+        java.io.PrintStream stderr = System.err;
         try {
             run(args[0]);
         } catch (Throwable error) {
-            error.printStackTrace();
-            throw error;
+            error.printStackTrace(stderr);
+            stderr.flush();
+            System.exit(1);
         }
     }
 
@@ -112,6 +128,19 @@ public final class StructurePlaceOracle {
         try (CloseableResourceManager resources =
                 new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected())) {
             RegistryAccess.Frozen registries = loadRegistries(resources).compositeAccess();
+            Path temp = Files.createTempDirectory("structure-place-stm");
+            var storage = net.minecraft.world.level.storage.LevelStorageSource.createDefault(temp)
+                    .createAccess("world");
+            Files.createDirectories(storage.getLevelPath(
+                    net.minecraft.world.level.storage.LevelResource.GENERATED_DIR));
+            templateManager =
+                    new net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager(
+                            resources, storage, net.minecraft.util.datafix.DataFixers.getDataFixer(),
+                            registries.lookupOrThrow(Registries.BLOCK));
+            mansionStructure = registries.lookupOrThrow(Registries.STRUCTURE)
+                    .getOrThrow(net.minecraft.world.level.levelgen.structure.BuiltinStructures
+                            .WOODLAND_MANSION)
+                    .value();
             for (String line : Files.readAllLines(Path.of(queriesFile), StandardCharsets.UTF_8)) {
                 if (line.isBlank()) {
                     continue;
@@ -132,6 +161,158 @@ public final class StructurePlaceOracle {
         @Override
         public void setInitialPos(double x, double y, double z) {
         }
+    }
+
+    /** 不走构造器的远古守卫者：`spawnElder` 调到的方法全部变成空操作。 */
+    // Constructor-less elder guardian: everything `spawnElder` calls is a no-op.
+    private static final class InertElderGuardian
+            extends net.minecraft.world.entity.monster.ElderGuardian {
+        private InertElderGuardian() {
+            super(null, null);
+        }
+
+        @Override
+        public double getAttributeValue(
+                Holder<net.minecraft.world.entity.ai.attributes.Attribute> attribute) {
+            return 0.0;
+        }
+
+        @Override
+        public void heal(float amount) {
+        }
+
+        @Override
+        public void snapTo(double x, double y, double z, float yRot, float xRot) {
+        }
+
+        @Override
+        public BlockPos blockPosition() {
+            return BlockPos.ZERO;
+        }
+
+        @Override
+        public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                net.minecraft.world.level.ServerLevelAccessor level,
+                net.minecraft.world.DifficultyInstance difficulty,
+                net.minecraft.world.entity.EntitySpawnReason reason,
+                net.minecraft.world.entity.SpawnGroupData data) {
+            return data;
+        }
+    }
+
+    /** 不走构造器的唤魔者（府邸的 `Mage` 标记）。 */
+    // Constructor-less evoker (the mansion's `Mage` marker).
+    private static final class InertEvoker extends net.minecraft.world.entity.monster.illager.Evoker {
+        private InertEvoker() {
+            super(null, null);
+        }
+
+        @Override
+        public void setPersistenceRequired() {
+        }
+
+        @Override
+        public void snapTo(BlockPos pos, float yRot, float xRot) {
+        }
+
+        @Override
+        public BlockPos blockPosition() {
+            return BlockPos.ZERO;
+        }
+
+        @Override
+        public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                net.minecraft.world.level.ServerLevelAccessor level,
+                net.minecraft.world.DifficultyInstance difficulty,
+                net.minecraft.world.entity.EntitySpawnReason reason,
+                net.minecraft.world.entity.SpawnGroupData data) {
+            return data;
+        }
+    }
+
+    /** 不走构造器的卫道士（府邸的 `Warrior` 标记）。 */
+    // Constructor-less vindicator (the mansion's `Warrior` marker).
+    private static final class InertVindicator extends net.minecraft.world.entity.monster.illager.Vindicator {
+        private InertVindicator() {
+            super(null, null);
+        }
+
+        @Override
+        public void setPersistenceRequired() {
+        }
+
+        @Override
+        public void snapTo(BlockPos pos, float yRot, float xRot) {
+        }
+
+        @Override
+        public BlockPos blockPosition() {
+            return BlockPos.ZERO;
+        }
+
+        @Override
+        public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                net.minecraft.world.level.ServerLevelAccessor level,
+                net.minecraft.world.DifficultyInstance difficulty,
+                net.minecraft.world.entity.EntitySpawnReason reason,
+                net.minecraft.world.entity.SpawnGroupData data) {
+            return data;
+        }
+    }
+
+    /** 不走构造器的悦灵（府邸的 `Group of Allays` 标记）。 */
+    // Constructor-less allay (the mansion's `Group of Allays` marker).
+    private static final class InertAllay extends net.minecraft.world.entity.animal.allay.Allay {
+        private InertAllay() {
+            super(null, null);
+        }
+
+        @Override
+        public void setPersistenceRequired() {
+        }
+
+        @Override
+        public void snapTo(BlockPos pos, float yRot, float xRot) {
+        }
+
+        @Override
+        public BlockPos blockPosition() {
+            return BlockPos.ZERO;
+        }
+
+        @Override
+        public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                net.minecraft.world.level.ServerLevelAccessor level,
+                net.minecraft.world.DifficultyInstance difficulty,
+                net.minecraft.world.entity.EntitySpawnReason reason,
+                net.minecraft.world.entity.SpawnGroupData data) {
+            return data;
+        }
+    }
+
+    /**
+     * 把一个 `EntityType` 的 `factory` 换成「不经构造器分配一个惰性子类」。实体不比，但官方
+     * 在实体创建成功之后的那些写方块 / 取数必须照常发生（府邸的生物标记会把那一格写成空气）。
+     *
+     * <p>Swap an `EntityType`'s `factory` for one that allocates an inert subclass without
+     * running a constructor. Entities are not compared, but the block writes and draws
+     * vanilla makes once the entity exists must still happen (the mansion's mob markers
+     * write air at the marker).
+     */
+    @SuppressWarnings("unchecked")
+    private static void installInertMob(Object type, Class<?> inert)
+            throws ReflectiveOperationException {
+        sun.misc.Unsafe unsafe = unsafe();
+        setField(net.minecraft.world.entity.EntityType.class, "factory", type,
+                (net.minecraft.world.entity.EntityType.EntityFactory<net.minecraft.world.entity.Entity>)
+                        (t, level) -> {
+                            try {
+                                return (net.minecraft.world.entity.Entity)
+                                        unsafe.allocateInstance(inert);
+                            } catch (InstantiationException error) {
+                                throw new IllegalStateException(error);
+                            }
+                        });
     }
 
     private static sun.misc.Unsafe unsafe() throws ReflectiveOperationException {
@@ -188,9 +369,31 @@ public final class StructurePlaceOracle {
             Object server = unsafe.allocateInstance(
                     net.minecraft.server.dedicated.DedicatedServer.class);
             setField(net.minecraft.server.MinecraftServer.class, "worldData", server, data);
+            installInertMob(net.minecraft.world.entity.EntityTypes.ELDER_GUARDIAN,
+                    InertElderGuardian.class);
+            installInertMob(net.minecraft.world.entity.EntityTypes.EVOKER, InertEvoker.class);
+            installInertMob(net.minecraft.world.entity.EntityTypes.VINDICATOR,
+                    InertVindicator.class);
+            installInertMob(net.minecraft.world.entity.EntityTypes.ALLAY, InertAllay.class);
             Object fakeLevel = unsafe.allocateInstance(
                     net.minecraft.server.level.ServerLevel.class);
             setField(net.minecraft.server.level.ServerLevel.class, "server", fakeLevel, server);
+            // `EntityType.create` 先过 `canSpawn`：怪物在和平难度下不建。给一个只回答难度的
+            // `levelData`（普通难度），让远古守卫者 / 唤魔者 / 卫道士照常创建。
+            // `EntityType.create` goes through `canSpawn`, which refuses monsters on
+            // peaceful. Supply a `levelData` that only answers the difficulty (normal) so the
+            // elder guardian, evoker and vindicator are created as usual.
+            Object levelData = Proxy.newProxyInstance(
+                    StructurePlaceOracle.class.getClassLoader(),
+                    new Class<?>[] {net.minecraft.world.level.storage.ServerLevelData.class},
+                    (self, method, args) -> {
+                        if (method.getName().equals("getDifficulty")) {
+                            return net.minecraft.world.Difficulty.NORMAL;
+                        }
+                        throw new UnsupportedOperationException(
+                                "LevelData." + method.getName());
+                    });
+            setField(net.minecraft.world.level.Level.class, "levelData", fakeLevel, levelData);
             return (net.minecraft.server.level.ServerLevel) fakeLevel;
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException("cannot stub the minecart path", error);
@@ -272,6 +475,26 @@ public final class StructurePlaceOracle {
                         }
                         invocation++;
                     }
+                    if (kind.equals("woodland_mansion")) {
+                        // `StructureStart.placeInChunk` 末尾的 `structure.afterPlace(...)`，记成
+                        // 一次结构件下标为 `pieces.size()` 的调用。
+                        // The `structure.afterPlace(...)` at the end of
+                        // `StructureStart.placeInChunk`, recorded as one invocation whose piece
+                        // index is `pieces.size()`.
+                        level.beginPiece();
+                        mansionStructure.afterPlace(level.proxy(), null, null, random, chunkBB, at,
+                                new PiecesContainer(pieces));
+                        out.append("P ").append(invocation).append(' ').append(pieces.size())
+                                .append(' ').append(at.x()).append(' ').append(at.z()).append(' ')
+                                .append(level.pieceWrites.size()).append('\n');
+                        if (trace) {
+                            for (String write : level.pieceWrites) {
+                                out.append("D ").append(invocation).append(' ').append(write)
+                                        .append('\n');
+                            }
+                        }
+                        invocation++;
+                    }
                 }
             }
             List<String> snapshot = level.snapshot();
@@ -293,6 +516,34 @@ public final class StructurePlaceOracle {
         ChunkPos chunkPos = new ChunkPos(cx, cz);
         StructurePiecesBuilder builder = new StructurePiecesBuilder();
         switch (kind) {
+            case "ocean_monument" -> {
+                // `OceanMonumentStructure.createTopPiece`：只加一个 `MonumentBuilding`，
+                // 房间图是它的私有字段，`postProcess` 自己遍历 `childPieces`。
+                // `OceanMonumentStructure.createTopPiece`: only a `MonumentBuilding` is added;
+                // the room graph is a private field its `postProcess` walks itself.
+                random.setLargeFeatureSeed(seed, cx, cz);
+                Direction orientation = Direction.Plane.HORIZONTAL.getRandomDirection(random);
+                builder.addPiece(new net.minecraft.world.level.levelgen.structure.structures
+                        .OceanMonumentPieces.MonumentBuilding(random,
+                                chunkPos.getMinBlockX() - 29, chunkPos.getMinBlockZ() - 29,
+                                orientation));
+            }
+            case "woodland_mansion" -> {
+                // `WoodlandMansionStructure.findGenerationPoint` / `generatePieces`：先取
+                // rotation，再 `generateMansion`。`startY` 是喂入的常数。
+                // `WoodlandMansionStructure.findGenerationPoint` / `generatePieces`: the
+                // rotation is drawn first, then `generateMansion`. `startY` is a fed constant.
+                random.setLargeFeatureSeed(seed, cx, cz);
+                net.minecraft.world.level.block.Rotation rotation =
+                        net.minecraft.world.level.block.Rotation.getRandom(random);
+                BlockPos startPos = new BlockPos(chunkPos.getBlockX(7), MANSION_START_Y,
+                        chunkPos.getBlockZ(7));
+                List<net.minecraft.world.level.levelgen.structure.structures.WoodlandMansionPieces
+                        .WoodlandMansionPiece> mansion = new java.util.LinkedList<>();
+                net.minecraft.world.level.levelgen.structure.structures.WoodlandMansionPieces
+                        .generateMansion(templateManager, startPos, rotation, mansion, random);
+                mansion.forEach(builder::addPiece);
+            }
             case "mineshaft_normal", "mineshaft_mesa" -> {
                 random.setLargeFeatureSeed(seed, cx, cz);
                 random.nextDouble();
@@ -411,6 +662,10 @@ public final class StructurePlaceOracle {
         private final Holder<Biome> levelBiome;
         private final RegistryAccess.Frozen registries;
         private final String fill;
+        /** `WorldGenRegion.getRandom()` 的替身，固定种子。 */
+        // Stand-in for `WorldGenRegion.getRandom()`, fixed seed.
+        private final net.minecraft.util.RandomSource levelRandom =
+                net.minecraft.util.RandomSource.create(0L);
         /** 所有写过的位置。 */
         private final java.util.Set<BlockPos> written = new java.util.HashSet<>();
         /** 当前这次结构件调用的写入，按顺序：`x y z state`。 */
@@ -527,6 +782,25 @@ public final class StructurePlaceOracle {
                     }
                     return bucket == 12 ? Blocks.WATER.defaultBlockState()
                             : Blocks.STONE.defaultBlockState();
+                }
+                case "ocean": {
+                    // 海：海床高度按 8×8 的格子在 y 30..=45 之间变化（神殿底是 y 39，所以有的
+                    // 地方海床埋住神殿底、有的地方悬空），其上到 y 62 是水，部分 4×4 格子的
+                    // 水面是冰。
+                    // An ocean: the floor varies over y 30..=45 on an 8x8 grid (the monument's
+                    // bottom is y 39, so some of it is buried and some hangs free), water above
+                    // it up to y 62, with ice on the surface of some 4x4 cells.
+                    int floor = 30 + Math.floorMod(
+                            Math.floorDiv(x, 8) * 73856093 ^ Math.floorDiv(z, 8) * 83492791, 16);
+                    if (y <= floor) {
+                        return Blocks.STONE.defaultBlockState();
+                    }
+                    if (y > 62) {
+                        return null;
+                    }
+                    boolean ice = y == 62 && Math.floorMod(
+                            Math.floorDiv(x, 4) * 19349663 ^ Math.floorDiv(z, 4) * 73856093, 5) == 0;
+                    return ice ? Blocks.ICE.defaultBlockState() : Blocks.WATER.defaultBlockState();
                 }
                 default:
                     throw new IllegalArgumentException("unknown fill " + fill);
@@ -683,6 +957,28 @@ public final class StructurePlaceOracle {
                     }
                     case "addFreshEntity":
                         return true;
+                    case "addFreshEntityWithPassengers":
+                    case "getCurrentDifficultyAt":
+                        // 实体不比；这两个只在实体创建之后被调，返回值没人读。
+                        // Entities are not compared; these run only after an entity was
+                        // created and nobody reads the result.
+                        return null;
+                    case "getRandom":
+                        // `WorldGenRegion.getRandom()` 是这个区块的位置随机源，和传给
+                        // `postProcess` 的 `random` 不是同一个。府邸的悦灵数量、生物的
+                        // `finalizeSpawn`、`updateShape` 都从它取，不影响写哪些方块。
+                        // `WorldGenRegion.getRandom()` is the chunk's positional source, a
+                        // different object from the `random` handed to `postProcess`. The
+                        // allay count, mob `finalizeSpawn` and `updateShape` draw from it,
+                        // none of which changes which blocks are written.
+                        return Level.this.levelRandom;
+                    case "isEmptyBlock": {
+                        BlockPos pos = (BlockPos) args[0];
+                        return at(pos).getBlockState(pos).isAir();
+                    }
+                    case "holderLookup":
+                        return registries.lookupOrThrow(
+                                (net.minecraft.resources.ResourceKey) args[0]);
                     case "scheduleTick":
                         // `placeBlock` 写含流体的方块后会给它排一个 0 刻的 tick。假世界不做
                         // 计划刻，方块本身已经写进去了，直接返回。

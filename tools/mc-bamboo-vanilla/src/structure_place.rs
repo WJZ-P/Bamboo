@@ -57,10 +57,35 @@ const CHUNKS: [(i32, i32); 2] = [(0, 0), (34, -50)];
 /// stone, and stone with air and water pockets. They cover interior versus exterior,
 /// supports, pillars and chains, and `isInInvalidLocation`.
 const FILLS: [&str; 4] = ["air", "band", "stone", "caves"];
+/// 海底神殿的初始世界：把 `band` 换成 `ocean`（有海床、海水和冰面，见
+/// [`FlatLevel::initial_block`]），`generateWaterBox` / `generateBoxOnFillOnly` /
+/// `fillColumnDown` 的分支才走得到。
+///
+/// Initial worlds for the ocean monument: `band` is swapped for `ocean` (a sea floor,
+/// water and surface ice, see [`FlatLevel::initial_block`]) so the branches of
+/// `generateWaterBox`, `generateBoxOnFillOnly` and `fillColumnDown` are reached.
+const MONUMENT_FILLS: [&str; 4] = ["air", "ocean", "stone", "caves"];
+/// 林地府邸的初始世界：不用 `air`（`afterPlace` 会把每一列一路填到世界底，输出太大），
+/// 换成 `ocean`，让「往下填圆石」穿过水、停在海床上。
+///
+/// Initial worlds for the woodland mansion: `air` is left out (`afterPlace` would fill
+/// every column down to the world floor, a huge output) in favour of `ocean`, where the
+/// cobblestone fill passes through water and stops on the sea floor.
+const MANSION_FILLS: [&str; 4] = ["ocean", "band", "stone", "caves"];
+/// 林地府邸喂入的 `startY`（官方是 `getLowestYIn5by5Box` 的结果，必须 >= 60），和 Java
+/// 侧的 `MANSION_START_Y` 一致。
+///
+/// The `startY` fed to the woodland mansion (vanilla takes it from
+/// `getLowestYIn5by5Box`, always >= 60); the same value as Java's `MANSION_START_Y`.
+const MANSION_START_Y: i32 = 64;
 
 /// 假世界的 Y 范围，和 Java 侧一致。
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
+/// `level.getSeaLevel()`，和 Java 侧一致。
+///
+/// `level.getSeaLevel()`, the same as on the Java side.
+const SEA_LEVEL: i32 = 63;
 
 /// 一条查询。
 struct Query {
@@ -109,8 +134,14 @@ fn build_queries() -> Vec<Query> {
     let mut queries = Vec::new();
     for &seed in &SEEDS {
         for &(cx, cz) in &CHUNKS {
-            for kind in ["mineshaft_normal", "mineshaft_mesa", "stronghold"] {
-                for &fill in &FILLS {
+            for (kind, fills) in [
+                ("mineshaft_normal", &FILLS),
+                ("mineshaft_mesa", &FILLS),
+                ("stronghold", &FILLS),
+                ("ocean_monument", &MONUMENT_FILLS),
+                ("woodland_mansion", &MANSION_FILLS),
+            ] {
+                for &fill in fills {
                     queries.push(Query {
                         kind,
                         seed,
@@ -271,6 +302,11 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
     // Mutable piece fields that survive the per-chunk invocations (`hasPlacedSpider`,
     // `hasPlacedChest`, `hasPlacedSpawner`), kept by layout index.
     let mut piece_flags: Vec<bool> = vec![false; layout.len()];
+    // 海底神殿的清单里只有一个 `MonumentBuilding`，房间图是它的私有字段；放置要用完整的
+    // 布局（房间图 + 子件）。
+    // The monument's list holds a single `MonumentBuilding` whose room graph is a private
+    // field; placement needs the full layout (room graph plus children).
+    let monument = (q.kind == "ocean_monument").then(|| monument_layout(q));
 
     // 和 Java 侧一样：对结构包围盒碰到的每个区块各调一次（先 z 后 x），`chunkBB` 是该
     // 区块整列盒，`random` 每区块重播，写区是这个区块的 ±1。
@@ -296,17 +332,37 @@ fn rust_result(q: &Query) -> Result<RustResult, String> {
                     continue;
                 }
                 level.piece_writes.clear();
-                place_piece(
-                    q.kind,
-                    piece,
-                    i,
-                    &mut level,
-                    chunk_bb,
-                    &random,
-                    &mut piece_flags,
-                )?;
+                if let Some(monument) = &monument {
+                    pieces::ocean_monument_place::place_in_chunk(
+                        monument, &mut level, chunk_bb, SEA_LEVEL, &random,
+                    );
+                } else {
+                    place_piece(
+                        q.kind,
+                        piece,
+                        i,
+                        &mut level,
+                        chunk_bb,
+                        &random,
+                        &mut piece_flags,
+                    )?;
+                }
                 invocations.push(Invocation {
                     piece: i,
+                    chunk: at,
+                    count: level.piece_writes.len(),
+                    trace: std::mem::take(&mut level.piece_writes),
+                });
+            }
+            if q.kind == "woodland_mansion" {
+                // `StructureStart.placeInChunk` 末尾的 `structure.afterPlace(...)`，和 Java 侧
+                // 一样记成一次结构件下标为 `layout.len()` 的调用。
+                // The `structure.afterPlace(...)` at the end of `StructureStart.placeInChunk`,
+                // recorded like Java as one invocation whose piece index is `layout.len()`.
+                level.piece_writes.clear();
+                pieces::woodland_mansion::after_place(&layout, &mut level, &chunk_bb);
+                invocations.push(Invocation {
+                    piece: layout.len(),
                     chunk: at,
                     count: level.piece_writes.len(),
                     trace: std::mem::take(&mut level.piece_writes),
@@ -327,8 +383,25 @@ fn layout(q: &Query) -> Result<Vec<Piece>, String> {
         "mineshaft_normal" => Ok(pieces::mineshaft::generate(q.seed, q.cx, q.cz, false, 0)),
         "mineshaft_mesa" => Ok(pieces::mineshaft::generate(q.seed, q.cx, q.cz, true, 0)),
         "stronghold" => Ok(pieces::stronghold::generate(q.seed, q.cx, q.cz)),
+        // `Children` 里只存 `MonumentBuilding` 一件（清单的第 0 项）。
+        // Only the `MonumentBuilding` is stored in `Children` (item 0 of the list).
+        "ocean_monument" => Ok(monument_layout(q).pieces().into_iter().take(1).collect()),
+        "woodland_mansion" => {
+            pieces::woodland_mansion::generate(q.seed, q.cx, q.cz, MANSION_START_Y)
+        }
         other => Err(format!("no Rust layout for kind {other}")),
     }
+}
+
+/// `OceanMonumentStructure.createTopPiece`：先取朝向，再造 `MonumentBuilding`（房间图在
+/// 它的构造器里取数）。
+///
+/// `OceanMonumentStructure.createTopPiece`: draw the orientation, then build the
+/// `MonumentBuilding` (its constructor draws the room graph).
+fn monument_layout(q: &Query) -> pieces::ocean_monument::MonumentLayout {
+    let random = pieces::make_random(q.seed, q.cx, q.cz);
+    let dir = HDir::random(&random);
+    pieces::ocean_monument::monument_layout(&random, q.cx * 16 - 29, q.cz * 16 - 29, dir)
 }
 
 /// 按结构件类型调对应的 `postProcess`。
@@ -347,6 +420,9 @@ fn place_piece(
 
     if kind == "stronghold" {
         return place_stronghold_piece(piece, index, level, chunk_bb, random, piece_flags);
+    }
+    if kind == "woodland_mansion" {
+        return pieces::woodland_mansion::place_piece(piece, level, &chunk_bb, random);
     }
 
     let shaft = if kind == "mineshaft_mesa" {
@@ -612,11 +688,14 @@ impl FlatLevel {
 
     /// 初始世界，和 Java 侧 `Level.initial` 是同一个函数：`air` 全空；`band` 只有
     /// y 56..=63 一层石头；`stone` 是 y <= 100 的实心石头；`caves` 在实心石头里按 4×4×4
-    /// 的格子挖空气洞和少量水洞。
+    /// 的格子挖空气洞和少量水洞；`ocean` 是海床（按 8×8 的格子在 y 30..=45 之间变化）
+    /// 加上到 y 62 的水，部分 4×4 格子的水面是冰。
     ///
     /// The initial world, the same function as Java's `Level.initial`: `air` is empty;
     /// `band` is a stone slab at y 56..=63; `stone` is solid stone up to y 100; `caves`
-    /// carves air pockets and a few water pockets out of that stone on a 4x4x4 grid.
+    /// carves air pockets and a few water pockets out of that stone on a 4x4x4 grid;
+    /// `ocean` is a sea floor (varying over y 30..=45 on an 8x8 grid) under water up to
+    /// y 62, with ice on the surface of some 4x4 cells.
     fn initial_block(&self, x: i32, y: i32, z: i32) -> u32 {
         let air = mc_bamboo_data::blocks::AIR;
         match self.fill {
@@ -630,6 +709,24 @@ impl FlatLevel {
                     0..12 => air,
                     12 => block("minecraft:water"),
                     _ => block("minecraft:stone"),
+                }
+            }
+            "ocean" if y <= 62 => {
+                let floor = 30
+                    + (x.div_euclid(8).wrapping_mul(73_856_093)
+                        ^ z.div_euclid(8).wrapping_mul(83_492_791))
+                    .rem_euclid(16);
+                let ice = y == 62
+                    && (x.div_euclid(4).wrapping_mul(19_349_663)
+                        ^ z.div_euclid(4).wrapping_mul(73_856_093))
+                    .rem_euclid(5)
+                        == 0;
+                if y <= floor {
+                    block("minecraft:stone")
+                } else if ice {
+                    block("minecraft:ice")
+                } else {
+                    block("minecraft:water")
                 }
             }
             _ => air,
