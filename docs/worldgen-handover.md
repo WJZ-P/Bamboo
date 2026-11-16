@@ -25,7 +25,14 @@ All passed the full merge check: fmt, clippy, full tests, every oracle at 0 mism
 | 水生与洞穴植被，整步对拍 95 中心 0 不一致 | 8fd828bb |
 | jigsaw 放置进展（模板 processor、`FeatureWorld` 方块实体与流体） | dcc8784d |
 
-**还没接进 Director / Not wired yet:** 结构的方块放置已经验证，但还没接进游戏的生成流水线（Director）。所以游戏里暂时还不生成结构。
+**已接进 Director（本轮）/ Wired into the Director (this round):** 结构起点与引用走
+`structure_starts` / `structure_references` 两个阶段的纯函数，terrain 注入真实
+`Beardifier`，features 每个 decoration step 先放结构件再放地物，区块 NBT 写回
+`structures` 键并能读盘恢复。`structure-pipeline` 对拍把官方 17×17 的
+`createStructures` / `createReferences` 与游戏里的同一条路径逐项比（14 行、
+1261 个结构件 0 不一致，改坏确认会报错）。放置按允许清单跳过尚未对拍的单件结构
+（`structure::single` 四件）与废弃传送门：它们的**起点、引用、Beardifier、存档**
+仍全部照官方生成，只有 `postProcess` 暂不写方块，等 `cb-wg-structures` 合入后打开。
 
 ## 未合并的分支 / Unmerged branches
 

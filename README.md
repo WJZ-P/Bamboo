@@ -10,7 +10,7 @@ A Minecraft server written from scratch in Rust
 
 </div>
 
-> 项目处于早期阶段。多名玩家已经能用 Minecraft 26.3 进入同一个世界，走动、互相看见、放置和破坏方块、在生存模式里按方块硬度和工具挖方块、在告示牌上写字、用书与笔写字并署名、阅读成书、把书放到讲台上翻页、让活塞推方块、打开箱子、聊天。新世界默认 `normal`（和官方一样的噪声地形：群系、地表、洞穴峡谷），`level-type=flat` 可切回超平坦；terrain 阶段的纯函数已接进 Director 流水线并逐方块对拍 0 不一致，但**还没有地物、结构和生物**（见下面世界生成的已知限制）。放置方块仍然不扣物品（往讲台上放书是例外：生存模式扣一本，创造模式不扣）。生存和冒险模式挖掉方块会按战利品表掉在地上，地上的物品能捡起来，按 Q 能丢出来。有 Anvil 存档：关服再开，改过的区块、方块实体、计划刻、三种实体、玩家位置和物品栏都还在，官方服务端能接着读这个世界目录（见「存档」一节和下面的已知限制）。服务器目录里的 `server.properties` / `bamboo.toml` 可以调视距、线程数、红石缓存、区块计算池，以及 `level-seed` / `level-type` / `generator-settings` / `generate-structures` 四个世界生成键；世界目录按 `level-name` 放在服务器目录下。
+> 项目处于早期阶段。多名玩家已经能用 Minecraft 26.3 进入同一个世界，走动、互相看见、放置和破坏方块、在生存模式里按方块硬度和工具挖方块、在告示牌上写字、用书与笔写字并署名、阅读成书、把书放到讲台上翻页、让活塞推方块、打开箱子、聊天。新世界默认 `normal`（和官方一样的噪声地形：群系、地表、洞穴峡谷），`level-type=flat` 可切回超平坦；terrain / 地物 / 结构阶段的纯函数已接进 Director 流水线并逐方块对拍 0 不一致；**还没有生物**，部分结构的方块放置仍标 unsupported（见下面世界生成的已知限制）。放置方块仍然不扣物品（往讲台上放书是例外：生存模式扣一本，创造模式不扣）。生存和冒险模式挖掉方块会按战利品表掉在地上，地上的物品能捡起来，按 Q 能丢出来。有 Anvil 存档：关服再开，改过的区块、方块实体、计划刻、三种实体、玩家位置和物品栏都还在，官方服务端能接着读这个世界目录（见「存档」一节和下面的已知限制）。服务器目录里的 `server.properties` / `bamboo.toml` 可以调视距、线程数、红石缓存、区块计算池，以及 `level-seed` / `level-type` / `generator-settings` / `generate-structures` 四个世界生成键；世界目录按 `level-name` 放在服务器目录下。
 
 ## 运行
 
@@ -432,8 +432,12 @@ WebView2 的渲染进程不算在内。
   游戏里放置，`gen-world --through features` 目前逐方块对拍的是矿石（8 个中心 / 7077888 方块 0 不一致），
   其余已移植类型由 `chunkgen` 单独对拍；还没移植的类型照对拍的做法标 `unsupported` 跳过。
   `initialize_light` / `light` 两个阶段在流水线里用邻居快照算出生成期光照，交付的区块带 `isLightOn=true`，
-  不再等运行时补算（`gen-light` 对拍）。`structure_starts` / `structure_references` 仍是空实现、`spawn` 不刷怪，
-  所以游戏里**还没有结构和生物**。
+  不再等运行时补算（`gen-light` 对拍）。`structure_starts` / `structure_references` 已接成纯函数重算
+  （半径 8 邻域 + 线程本地缓存），terrain 注入真实 `Beardifier`，features 每个 decoration step 先放结构件
+  再放地物，区块 NBT 写 `structures` 键并能读盘恢复；`structure-pipeline` 对拍把官方 17×17 的
+  `createStructures` / `createReferences` 与游戏里的同一条路径逐项比（14 行 / 1261 结构件 0 不一致，
+  改坏确认会失败）。放置已对拍的 jigsaw / 矿井 / 要塞 / 海底神殿 / 林地府邸 / 雪屋 / 沉船 / 海底遗迹
+  会在游戏里写方块；`spawn` 仍不刷怪，游戏里**还没有生物**。
   `features` 与官方的**语义差异**：官方邻居溢出的写来自各邻居区块跑到 `FEATURES` 时的 `WorldGenRegion`，
   结果取决于实际的生成先后；Bamboo 在中心这次 `features` 里用纯函数重算 8 个邻居中心写进来的增量，按
   `(x,y,z,state)` 规范序落盘，同格重复写由规范序里最后一条生效，邻居快照是干净的 CARVERS 地形。结果与线程
@@ -503,7 +507,10 @@ WebView2 的渲染进程不算在内。
   没有改 `Feature::place` 签名（在 `composition.rs` 的 `place_feature` 里单开一个分支）。
   已移植的类型都不产生方块实体，所以 `FeatureResult` 的方块实体 / POI / 后期处理位置表输出
   也还没补；接进游戏时按 `docs/world-model-design.md` 5.3.1 合 9 宫格快照和写增量。
-- 结构生成（`docs/worldgen-structures-plan.md`）目前是纯函数 + 官方对拍，没有接进游戏：
+- 结构生成（`docs/worldgen-structures-plan.md`）已接进 Director（本轮）：**所有**结构的起点、引用、
+  Beardifier 和 `structures` 存档键都照官方生成并存盘；放置按允许清单，`structure::single` 的四件
+  （沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏的宝藏）和全部废弃传送门的 `postProcess` 由另一个分支在修，
+  本轮标 unsupported 跳过写方块，等合入后打开清单即可，不用重新生成世界。以下为历史对拍明细：
   `worldgen.json` 从官方导出了 `structure_set` / `structure` / `template_pool` / `processor_list`
   四个注册表。`mc-bamboo-worldgen::structure` 移植并逐格对拍了 `random_spread` 的潜在起点、
   四种频率削减（9280 个比较 0 不一致）、`createStructures` 的加权选择 / `existingStart` 短路
