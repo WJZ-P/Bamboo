@@ -678,6 +678,23 @@ mod tests {
         assert!(starts.by_structure.is_empty());
     }
 
+    /// 生成期确实会产出结构起点：扫一批区块，至少出现一个有效起点，并写出
+    /// `structures` 标签的 `starts` 复合项。
+    /// Generation really produces starts: scanning a batch of chunks yields at
+    /// least one valid start and a non-empty `structures.starts`.
+    #[test]
+    fn structure_starts_are_generated_for_some_chunks() {
+        let config = normal(42);
+        let mut found = 0usize;
+        for cx in -20..=20 {
+            for cz in -20..=20 {
+                let starts = structure_starts(&config, cx, cz).unwrap();
+                found += starts.by_structure.len();
+            }
+        }
+        assert!(found > 0, "expected at least one structure start");
+    }
+
     /// 同一组区块按不同顺序、清不清缓存，结果逐字节相同（缓存只影响速度）。
     /// Same chunks in different orders / with cache cleared are byte-identical:
     /// the cache only affects speed.
