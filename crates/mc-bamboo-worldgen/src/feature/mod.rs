@@ -25,7 +25,7 @@ pub mod geode;
 pub mod heightmap;
 pub mod huge_mushroom;
 pub mod iceberg;
-pub(crate) mod java_long_set;
+pub mod java_long_set;
 pub mod java_set;
 pub mod lake;
 pub mod large_dripstone;

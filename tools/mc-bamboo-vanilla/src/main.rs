@@ -151,6 +151,8 @@ mod jungle_temple_ops;
 #[cfg(feature = "oracle")]
 mod light;
 #[cfg(feature = "oracle")]
+mod long_set;
+#[cfg(feature = "oracle")]
 mod loot_oracle;
 #[cfg(feature = "oracle")]
 mod machine;
@@ -238,6 +240,8 @@ const PROBE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/Probe.java";
 const ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/BlockOracle.java";
 #[cfg(feature = "oracle")]
 const LIGHT_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LightOracle.java";
+#[cfg(feature = "oracle")]
+const JAVA_SET_SOURCE: &str = "tools/mc-bamboo-vanilla/java/JavaSetOracle.java";
 #[cfg(feature = "oracle")]
 const MACHINE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MachineOracle.java";
 #[cfg(feature = "oracle")]
@@ -411,6 +415,7 @@ fn run() -> Result<(), String> {
         ["chunkgen", java, ref options @ ..] => chunkgen_cli(java, options),
         ["structures", java, ref options @ ..] => structures_cli(java, options),
         ["gen-world", java, ref options @ ..] => gen_world_cli(java, options),
+        ["long-set", java, ref options @ ..] => long_set_cli(java, options),
         ["structure-e2e", java, ref options @ ..] => structure_e2e_cli(java, options),
         ["structure-rings", java, ref options @ ..] => structure_rings_cli(java, options),
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
@@ -665,6 +670,11 @@ fn structures_cli(java: &str, options: &[&str]) -> Result<(), String> {
 #[cfg(feature = "oracle")]
 fn gen_world_cli(java: &str, options: &[&str]) -> Result<(), String> {
     gen_world::run(official_program(java, CHUNKGEN_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn long_set_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    long_set::run(official_program(java, JAVA_SET_SOURCE)?, options)
 }
 
 #[cfg(feature = "oracle")]
@@ -1081,6 +1091,11 @@ fn structures_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn gen_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn long_set_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

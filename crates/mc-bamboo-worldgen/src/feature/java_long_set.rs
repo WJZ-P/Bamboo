@@ -34,12 +34,14 @@ fn mix(value: i64) -> i64 {
     y ^ (y as u64 >> 16) as i64
 }
 
-/// `HashCommon.nextPowerOfTwo(long)`，输入不超过 `1 << 30`。
+/// `HashCommon.nextPowerOfTwo(long)`：
+/// `1L << (64 - Long.numberOfLeadingZeros(x - 1))`，输入不超过 `1 << 30`。
 fn next_power_of_two(value: i64) -> usize {
     if value <= 1 {
         return 1;
     }
-    (1_i64 << (64 - (value - 1).leading_zeros())) as usize
+    let shift = 64 - ((value - 1) as u64).leading_zeros();
+    (1_u64 << shift) as usize
 }
 
 /// `HashCommon.arraySize(expected, f)`。
@@ -107,8 +109,15 @@ impl JavaLongSet {
             }
             self.key[pos] = value;
         }
+        // 官方字节码 96-111 在 `size++` 之后、比较时压栈的是 **自增前的 size**
+        // （`dup_x1` 留下的旧值）；`if_icmplt` 跳过 rehash 的条件是
+        // `oldSize < maxFill`。也就是第 `maxFill+1` 个元素插入时才扩容，
+        // 而 `arraySize(size+1, f)` 用的是自增后的新 size。
+        // Vanilla compares the *pre-increment* size against maxFill: rehash
+        // happens on the (maxFill+1)-th element, and arraySize uses the new size.
+        let old_size = self.size;
         self.size += 1;
-        if self.size >= self.max_fill {
+        if old_size >= self.max_fill {
             let new_n = array_size(self.size + 1, 0.75);
             self.rehash(new_n);
         }
@@ -119,12 +128,13 @@ impl JavaLongSet {
     fn rehash(&mut self, new_n: usize) {
         let old = std::mem::replace(&mut self.key, vec![0; new_n + 1]);
         let new_mask = new_n - 1;
+        // 旧表的非 null 键在 `0..n-1`（下标 n 是键 0 专槽）。从 `n-1` 递减到
+        // **0**（含），跳过空槽；漏掉下标 0 会在扩容时丢一个键。
+        // Non-null keys live at `0..n-1` (index n is the null slot). Walk down to
+        // and including 0; missing index 0 loses a key on every rehash.
         let mut i = self.n;
-        loop {
+        while i > 0 {
             i -= 1;
-            if i == 0 {
-                break;
-            }
             let value = old[i];
             if value == 0 {
                 continue;
@@ -213,5 +223,102 @@ mod tests {
             }
             assert_eq!(set.to_vec(), *expected, "input {input:?}");
         }
+    }
+}
+
+/// 运行时回放官方 `JavaSetOracle --longset --cases 3000` 的输出，逐条比迭代序。
+/// 数据文件由 `long-set` 子命令生成，单元测试读同一份文本保证两条路径一致。
+#[cfg(test)]
+mod oracle_replay {
+    use super::JavaLongSet;
+
+    #[test]
+    fn matches_three_thousand_fastutil_cases() {
+        // 与 `long-set` 子命令共享同一份官方输出（3000 组、含键 0 / 负数 /
+        // 掩码冲突 / 跨扩容边界 / 重复键）。
+        let text = include_str!("java_long_set_cases.txt");
+        let mut lines = text.lines();
+        let mut cases = 0_usize;
+        while let Some(line) = lines.next() {
+            if !line.starts_with("CASE ") {
+                continue;
+            }
+            let case = line.to_owned();
+            let ops = lines
+                .next()
+                .unwrap_or("")
+                .strip_prefix("OPS ")
+                .unwrap_or("");
+            let order = lines
+                .next()
+                .unwrap_or("")
+                .strip_prefix("ORDER ")
+                .unwrap_or("");
+            let mut set = JavaLongSet::new();
+            for value in ops.split(';').filter(|s| !s.is_empty()) {
+                set.insert(value.parse::<i64>().unwrap());
+            }
+            let expected: Vec<i64> = order
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(|value| value.parse::<i64>().unwrap())
+                .collect();
+            let actual = set.to_vec();
+            let first = actual
+                .iter()
+                .zip(expected.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or(actual.len().min(expected.len()));
+            assert_eq!(
+                actual,
+                expected,
+                "{case}: first difference at {first} ({:?} vs {:?})",
+                actual.get(first),
+                expected.get(first)
+            );
+            cases += 1;
+        }
+        assert_eq!(cases, 3000);
+    }
+
+    /// 故意改坏一处：把 `to_vec` 的前两个输出交换，回放断言必须失败
+    /// （防止「两边都空 / 比较器没跑」的假绿）。
+    #[test]
+    fn swapping_two_orders_breaks_the_oracle_replay() {
+        let text = include_str!("java_long_set_cases.txt");
+        let mut lines = text.lines();
+        let mut found = false;
+        while let Some(line) = lines.next() {
+            if !line.starts_with("CASE ") {
+                continue;
+            }
+            let ops = lines
+                .next()
+                .unwrap_or("")
+                .strip_prefix("OPS ")
+                .unwrap_or("");
+            let order = lines
+                .next()
+                .unwrap_or("")
+                .strip_prefix("ORDER ")
+                .unwrap_or("");
+            let mut expected: Vec<i64> = order
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(|value| value.parse::<i64>().unwrap())
+                .collect();
+            if expected.len() < 2 {
+                continue;
+            }
+            expected.swap(0, 1);
+            let mut set = JavaLongSet::new();
+            for value in ops.split(';').filter(|s| !s.is_empty()) {
+                set.insert(value.parse::<i64>().unwrap());
+            }
+            assert_ne!(set.to_vec(), expected, "the comparator stayed green");
+            found = true;
+            break;
+        }
+        assert!(found);
     }
 }
