@@ -138,7 +138,7 @@ pub fn chebyshev(a: ChunkPos, b: ChunkPos) -> i64 {
 
 /// 任务属于哪种每玩家限速。`Save` / `Assemble` 返回 `None`：它们是收尾路径，
 /// 卡住反而会让在途任务永远不释放。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DemandKind {
     Load,
     Generate,

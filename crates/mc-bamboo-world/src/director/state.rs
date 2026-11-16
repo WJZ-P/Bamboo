@@ -3,7 +3,10 @@
 //! 一次 [`Director::handle`] 是纯的：只读自己的状态和事件，只往返回的 [`Effect`]
 //! 列表里写。宿主负责真正跑任务、搬盒子、发消息。
 
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+};
 
 use mc_bamboo_core::ChunkPos;
 
@@ -404,6 +407,14 @@ struct ReclaimDue {
     pos: ChunkPos,
 }
 
+/// 待派任务的排序键：离最近玩家的 rank（带方向加权），同一档按
+/// 「这条流水线已经走到哪一步」把快完工的往前放，最后按 TaskId 兜底。
+/// 键只由 `(需求快照, 位置, 阶段, 编号)` 决定；任务完成、配额变化都不改它。
+type QueueKey = (i64, u8, TaskId);
+
+/// 堆里的一项，带着算键时的需求代数。换快照后旧代数惰性重算。
+type QueueEntry = (QueueKey, TaskId, u64);
+
 /// 区块平面的 Director。见模块文档。
 #[derive(Debug)]
 pub struct Director<C> {
@@ -422,10 +433,17 @@ pub struct Director<C> {
     /// 等着排 `Read` 的记录。只有刚进 `Full` 档、还没派任务的记录才在里面，
     /// 每次 `drive` 只取这一批，不扫整张记录表。
     queued_reads: BTreeSet<ChunkPos>,
-    /// 上一轮被写范围/配额挡住、这一轮还要再试的任务 id。
-    submittable: Vec<TaskId>,
-    /// 上一轮 `drive` 见过的最大任务 id，用来认出这一轮新排的任务。
-    last_seen_task: TaskId,
+    /// 全部待派任务的小顶堆（`Reverse` 包大顶堆）。只在
+    /// 新任务加入、玩家快照变化或者有任务被挡住后重试时才碰它。
+    pending_order: BinaryHeap<Reverse<QueueEntry>>,
+    /// 上一次被写范围/配额挡住、等状态变了再试的任务。
+    deferred: Vec<TaskId>,
+    /// 有任务完成、新任务加入或需求快照变了，才需要再试 `deferred`。
+    needs_retry: bool,
+    /// 需求快照的代数；堆里的键用旧代数算过就惰性重算。
+    demand_epoch: u64,
+    /// 堆里大部分键是按哪一代需求算的；换快照时整堆重算一次即可。
+    heap_epoch: u64,
     /// 逗留到期的队列：按 `unloaded_at` 排，队头不到期就不用再往后看。
     /// 同一个位置可能有旧条目（`unloaded_at` 改过），取出时和记录里的值对一下。
     reclaim_due: BinaryHeap<ReclaimDue>,
@@ -437,9 +455,6 @@ pub struct Director<C> {
     demand_in_flight: HashMap<(u64, DemandKind), usize>,
     /// 每个在途任务归到哪名玩家、属于哪一类，`on_task_done` 收回时减计数。
     task_owners: HashMap<TaskId, (Option<u64>, DemandKind)>,
-    /// 一次 `drive` 里排序用的任务编号和键，跨次复用容量。每次 `drive` 只排
-    /// 「上一轮被挡住 + 这一轮新排的」几百个，不扫整张积压表。
-    priority_order: Vec<(TaskId, (usize, i64, u8, u64))>,
     /// 超时票的 `is_busy` 直接查这张表，不每刻重建。
     busy: BTreeSet<ChunkPos>,
     /// 已交付或正在交付的记录数，随 `Owner` 变化增量维护。
@@ -448,17 +463,14 @@ pub struct Director<C> {
     filtered: u64,
     acted: u64,
     shutting_down: bool,
-    /// 下一轮 `drive` 要把整张 `pending` 都重排（每刻一次）。
-    resort_all: bool,
     /// 每次 `handle` 复用的效果列表容量。
     effects: Vec<Effect<C>>,
     /// 一次等级变化里「跨了 tick 档」的位置，跨次复用容量。
     level_changed: Vec<LevelChange>,
     /// 票表变化列表的只读副本，跨次复用容量。
     changes_scratch: Vec<LevelChange>,
-    /// 新排的读任务和待派任务编号，跨次 `drive` 复用容量。
+    /// 新排的读任务，跨次 `drive` 复用容量。
     reads: Vec<(ChunkPos, u64)>,
-    task_ids: Vec<TaskId>,
     /// 构造一个「生成器输出」的盒子。宿主设置；测试可以用 `C::default`。
     template: Option<fn() -> C>,
 }
@@ -483,25 +495,25 @@ impl<C: ChunkBundle> Director<C> {
             pending_ready: BTreeSet::new(),
             pending_forgot: BTreeSet::new(),
             queued_reads: BTreeSet::new(),
-            submittable: Vec::new(),
-            last_seen_task: 0,
+            pending_order: BinaryHeap::new(),
+            deferred: Vec::new(),
+            needs_retry: false,
+            demand_epoch: 0,
+            heap_epoch: 0,
             reclaim_due: BinaryHeap::new(),
             submitted_this_tick: 0,
             demand: DemandSnapshot::default(),
             demand_in_flight: HashMap::new(),
             task_owners: HashMap::new(),
-            priority_order: Vec::new(),
             busy: BTreeSet::new(),
             loaded: 0,
             filtered: 0,
             acted: 0,
             shutting_down: false,
-            resort_all: false,
             effects: Vec::new(),
             level_changed: Vec::new(),
             changes_scratch: Vec::new(),
             reads: Vec::new(),
-            task_ids: Vec::new(),
             template: None,
         }
     }
@@ -510,10 +522,17 @@ impl<C: ChunkBundle> Director<C> {
         &self.tickets
     }
 
-    /// 更新玩家加载需求的快照。玩家跨格才该调；换快照后待派任务下一次
-    /// `drive` 就按新的距离和方向重排，在途任务仍记在原来的玩家名下。
+    /// 更新玩家加载需求的快照。玩家跨格才该调。
+    ///
+    /// 换快照只推一次代数并标脏；下一次真正要派任务时才整堆重算一次，
+    /// 不是每刻、更不是每个事件重排。在途任务仍记在原来的玩家名下。
     pub fn set_player_demand(&mut self, demand: DemandSnapshot) {
+        if self.demand == demand {
+            return;
+        }
         self.demand = demand;
+        self.demand_epoch = self.demand_epoch.wrapping_add(1);
+        self.needs_retry = true;
     }
 
     /// 当前的需求快照，宿主的读盘、计算池和交付队列用同一个 rank 排序。
@@ -521,11 +540,9 @@ impl<C: ChunkBundle> Director<C> {
         &self.demand
     }
 
-    /// 每刻的预算重置：全部待派任务都该按玩家的新位置重排一次。
-    /// 平时一次 `drive` 只重排「被挡住 + 新排」的那一小批。
+    /// 每刻只重置派出配额。优先级由堆增量维护，不整表重排。
     pub fn begin_tick(&mut self) {
         self.submitted_this_tick = 0;
-        self.resort_all = true;
     }
 
     pub fn tickets_mut(&mut self) -> &mut TicketTable {
@@ -1341,6 +1358,8 @@ impl<C: ChunkBundle> Director<C> {
             self.refresh_busy(pos);
             self.queued_reads.remove(&pos);
         }
+        let kind = Self::demand_kind(&task);
+        let owner = self.demand.owner(pos);
         self.pending.insert(
             id,
             PendingTask {
@@ -1350,6 +1369,7 @@ impl<C: ChunkBundle> Director<C> {
                 task,
             },
         );
+        self.schedule_task(id, owner, kind);
     }
 
     /// 一个任务属于哪种每玩家限速。`Save` / `Assemble` 是收尾路径，不占配额。
@@ -1395,36 +1415,54 @@ impl<C: ChunkBundle> Director<C> {
         if *slot == 0 {
             self.demand_in_flight.remove(&(player, kind));
         }
+        // 配额释放了，上一轮被挡住的任务可以再试。
+        self.needs_retry = true;
     }
 
-    /// 待派任务的排序键：先按每名玩家这一类任务已经派出多少个（轮转，
-    /// 玩家之间公平），再按离最近玩家的距离（带方向加权），同一档按
-    /// 「这条流水线已经走到哪一步」把快完工的往前放，最后按 TaskId 兜底。
-    /// 结果只由 `(任务集合, 需求快照, 当前计数)` 决定，和哈希图遍历顺序无关。
-    fn priority_key(&self, id: TaskId, task: &PendingTask<C>) -> (usize, i64, u8, u64) {
-        let kind = Self::demand_kind(&task.task);
-        let used = self
-            .demand
-            .owner(task.pos)
-            .and_then(|player| self.demand_in_flight.get(&(player, kind)).copied())
-            .unwrap_or(0);
+    /// 把一个待派任务放进小顶堆。键只算一次；玩家快照变了才整堆重算。
+    fn schedule_task(&mut self, id: TaskId, _owner: Option<u64>, _kind: DemandKind) {
+        let key = self.task_key(id);
+        self.pending_order
+            .push(Reverse((key, id, self.demand_epoch)));
+        self.needs_retry = true;
+    }
+
+    /// 一个任务的排序键：rank、阶段进度、TaskId 兜底。
+    fn task_key(&self, id: TaskId) -> QueueKey {
+        let Some(pending) = self.pending.get(&id) else {
+            return (i64::MAX, u8::MAX, id);
+        };
         let stage = self
             .chunks
-            .get(&task.pos)
+            .get(&pending.pos)
             .map_or(0, |record| record.stage as usize as u8);
-        (used, self.demand.rank(task.pos), u8::MAX - stage, id)
+        (self.demand.rank(pending.pos), u8::MAX - stage, id)
     }
 
-    /// 队列里被取消的任务不留到下一轮重排：给它一个「永远最后」的键，
-    /// `drive` 遇到它时查不到 `pending` 就跳过。
-    fn forget_priority_id(&mut self, id: TaskId) {
-        if let Some(entry) = self
-            .priority_order
-            .iter_mut()
-            .find(|(other, _)| *other == id)
-        {
-            entry.1 = (usize::MAX, i64::MAX, u8::MAX, u64::MAX);
+    /// 玩家快照变了才整堆重算键。堆里只有待派任务，且只在
+    /// `set_player_demand` 标脏后的第一次派单做，不是每刻。
+    fn refresh_heap_if_needed(&mut self) {
+        if self.heap_epoch == self.demand_epoch {
+            return;
         }
+        let mut heap = std::mem::take(&mut self.pending_order);
+        let mut fresh = Vec::with_capacity(heap.len());
+        while let Some(Reverse((_, id, _))) = heap.pop() {
+            if self.pending.contains_key(&id) {
+                fresh.push(id);
+            }
+        }
+        for id in fresh {
+            let key = self.task_key(id);
+            self.pending_order
+                .push(Reverse((key, id, self.demand_epoch)));
+        }
+        self.heap_epoch = self.demand_epoch;
+    }
+
+    /// 队列里被取消的任务不用从堆里删：出堆时 `pending` 里查不到就跳过。
+    fn forget_priority_id(&mut self, _id: TaskId) {
+        self.needs_retry = true;
     }
 
     /// 每处理完一个事件，把能推进的状态往前推：
@@ -1434,7 +1472,7 @@ impl<C: ChunkBundle> Director<C> {
         // 只有目标阶段是 `Full`（等级 ≤ 33）的区块才要读盘/生成并交付；
         // 等级 34..44 的区块是依赖圈里的半成品，由 `ensure_dependencies`
         // 建记录，不进 region、不发区块包。
-        // 只排这一批新记录，不扫整张表。`enqueue` 会把它从队列里摘掉。
+        // 只排这一批新记录，不扫整张记录表。`enqueue` 会把它从队列里摘掉。
         let mut reads = std::mem::take(&mut self.reads);
         reads.clear();
         // 新排的读任务先按玩家优先级排，TaskId 因此也是「急的先发」，
@@ -1458,64 +1496,54 @@ impl<C: ChunkBundle> Director<C> {
         }
         self.reads = reads;
 
-        // 按玩家优先级尝试派出；写范围相交或某名玩家配额用完的留到下次。
-        // 看一眼配额：没有可派的余量时连 `pending` 的键都不收集。
         let can_submit = (self.config.max_submits_per_tick == 0
             || self.submitted_this_tick < self.config.max_submits_per_tick)
             && self.in_flight.len() < self.config.max_in_flight;
         if !can_submit {
-            // 这一刻还没轮到整表重排时把标记留着，下一次能派任务时再排。
             self.flush_notifications(out);
             return;
         }
-        // 每刻开头重排整张 `pending`，玩家移动后优先级能跟着变；同一刻的
-        // 后续 `drive` 只重排「上一轮被挡住 + 这一轮新排的」那一小批。
-        let mut order = std::mem::take(&mut self.priority_order);
-        order.clear();
-        let resort_all = std::mem::take(&mut self.resort_all);
-        if resort_all {
-            order.extend(
-                self.pending
-                    .iter()
-                    .map(|(&id, task)| (id, self.priority_key(id, task))),
-            );
-        } else {
-            let mut ids = std::mem::take(&mut self.task_ids);
-            ids.clear();
-            ids.extend(std::mem::take(&mut self.submittable));
-            // 新排的任务编号总在末尾，用范围查询只走这一批的键，
-            // 不把之前积压的整个 `pending` 过滤一遍。
-            ids.extend(
-                self.pending
-                    .range((
-                        std::ops::Bound::Excluded(self.last_seen_task),
-                        std::ops::Bound::Unbounded,
-                    ))
-                    .map(|(&id, _)| id),
-            );
-            order.extend(ids.iter().copied().filter_map(|id| {
-                self.pending
-                    .get(&id)
-                    .map(|task| (id, self.priority_key(id, task)))
-            }));
-            self.task_ids = ids;
+        self.refresh_heap_if_needed();
+        // 被挡住的任务只有在「有新任务、有任务完成或玩家快照变了」时才重试，
+        // 不会每刻把积压整表重排。重试时和新堆项按同一个键比较。
+        let mut deferred = std::mem::take(&mut self.deferred);
+        let retry = self.needs_retry;
+        self.needs_retry = false;
+        if retry {
+            deferred.retain(|id| self.pending.contains_key(id));
+            let mut heap = std::mem::take(&mut self.pending_order);
+            for &id in &deferred {
+                heap.push(Reverse((self.task_key(id), id, self.demand_epoch)));
+            }
+            self.pending_order = heap;
+            deferred.clear();
         }
-        order.retain(|(id, _)| self.pending.contains_key(id));
-        order.sort_by_key(|&(id, key)| (key, id));
-        // 本轮没排到的任务仍留在 `submittable` 里，下一次 `drive` 会再试；
-        // `last_seen_task` 只用来找「这次新排的任务」，不能丢掉它们。
-        self.last_seen_task = self.next_task.wrapping_sub(1);
-        let mut blocked = std::mem::take(&mut self.submittable);
-        blocked.clear();
-        for (id, _) in order.drain(..) {
-            if self.config.max_submits_per_tick > 0
-                && self.submitted_this_tick >= self.config.max_submits_per_tick
+
+        let cap = self.config.max_in_flight;
+        let mut skipped = Vec::new();
+        loop {
+            if (self.config.max_submits_per_tick > 0
+                && self.submitted_this_tick >= self.config.max_submits_per_tick)
+                || self.in_flight.len() >= cap
             {
-                blocked.push(id);
+                break;
+            }
+            let Some(Reverse((key, id, epoch))) = self.pending_order.pop() else {
+                break;
+            };
+            if !self.pending.contains_key(&id) {
                 continue;
             }
-            if self.in_flight.len() >= self.config.max_in_flight {
-                blocked.push(id);
+            // 出堆时核对一次键：阶段推进后同一个任务可能带着旧键。
+            let fresh = self.task_key(id);
+            if epoch != self.demand_epoch || key != fresh {
+                self.pending_order
+                    .push(Reverse((fresh, id, self.demand_epoch)));
+                // 键没变小就别原地打转，留到下一次 drive。
+                if fresh >= key {
+                    skipped.push(id);
+                    continue;
+                }
                 continue;
             }
             let Some(pending) = self.pending.get(&id) else {
@@ -1536,8 +1564,27 @@ impl<C: ChunkBundle> Director<C> {
                 .in_flight
                 .values()
                 .any(|other| write_ranges_overlap(other.pos, other.write_radius, pos, radius));
-            if overlaps || !self.claim_task_owner(id, pos, kind) {
-                blocked.push(id);
+            // 公平轮转：该玩家这一类任务在途数越多，越往后排。
+            // 键不含它，所以只在真正取出时比较，不触发整表重排。
+            let owner = self.demand.owner(pos);
+            let used = owner
+                .and_then(|player| self.demand_in_flight.get(&(player, kind)).copied())
+                .unwrap_or(0);
+            let least_used = self
+                .demand
+                .players()
+                .iter()
+                .map(|player| {
+                    self.demand_in_flight
+                        .get(&(player.id, kind))
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .min()
+                .unwrap_or(0);
+            let rotated = used > least_used;
+            if overlaps || rotated || !self.claim_task_owner(id, pos, kind) {
+                skipped.push(id);
                 continue;
             }
             let pending = self.pending.remove(&id).expect("上面已经确认存在");
@@ -1557,8 +1604,7 @@ impl<C: ChunkBundle> Director<C> {
             });
             let _ = pending.seq;
         }
-        self.submittable = blocked;
-        self.priority_order = order;
+        self.deferred = skipped;
         self.flush_notifications(out);
     }
 
