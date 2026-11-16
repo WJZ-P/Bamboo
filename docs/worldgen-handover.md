@@ -37,6 +37,36 @@ decoration step 先放结构件再放地物，区块 NBT 写回 `structures` 键
 真实 `Beardifier` 已接进 Director 的 terrain 阶段与纯 `game_pipeline`，
 0/2/8 计算线程逐字节相同（见 `docs/worldgen-structures-plan.md` §12）。
 
+## 带结构的整块端到端对拍（2026-11-16 追加）
+
+`gen-world --through features --structures` / `structure-e2e` 已把**开着结构**的整块生成
+纳入 Java 对拍：官方 `createStructures` / `createReferences`（半径 9 网格）+ 真实
+`Beardifier` 的 CARVERS + 带结构的 `applyBiomeDecoration`，与游戏侧
+`game_features_with_mask`（`generate_structures=true`）逐方块比 3×3 九宫格。
+干净跑 42 个结构区块 / 37158912 格 0 不一致；`--break-structure` 六种类型、
+`long-set --break-self-test`（3000 组 / 287248 次比较）、`FeaturePoolElement` 多取一次
+随机数，都做了改坏确认。默认无结构模式完全不变。
+
+本轮修掉的真 bug：结构分支 `WorldgenRandom` 用 Xoroshiro、官方 `LongOpenHashSet`
+引用迭代序、具名 `processor_list` 前缀、`ListPoolElement` / `FeaturePoolElement`
+放置、`minecraft:block_pile` 叶子地物、`GravityProcessor` 的 WG 高度图、
+`BlockWriter` 的 FINAL 高度图更新、假世界的 `getBlockEntity(pos,type)`。
+逐条现象 / 根因 / 盯着的对拍 / 之前漏掉的原因见
+[`docs/worldgen-structures-e2e.md`](worldgen-structures-e2e.md)。
+
+**剩余缺口**：沙漠神殿 / 要塞的 `Layout` 起点区块在真实 `WorldGenRegion` 上还有
+33 / 412 处 `postProcess` 随机方块变体不一致（`--known-gaps` 单独跑，根因未定位）；
+`(42,-32,-16)` 是无结构模式也复现的 `sulfur_pool` 地物差异。默认查询集用这两类的
+被引用邻居覆盖跨区块放置。林地府邸 / 海底神殿 / 丛林神殿 / 海底遗迹在本机扫描里
+没有有效起点，仍由 `structure-pieces` / `structure-place` / `jigsaw pools` 覆盖。
+
+验收（本机 release）：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets`
+0 警告、`cargo test --workspace`、`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game`、
+`cargo check -p mc-bamboo-vanilla --no-default-features` 0 警告；
+`worldgen` / `chunkgen` / `gen-world` / `gen-light` / `structures*` / `beard` /
+`jigsaw` / `structure-pipeline` / `structure-e2e` / `long-set` 全 0 不一致；
+`oracle java --weather clear`；联机探针 719/719 与 `--loaded` 两遍。
+
 ## 未合并的分支 / Unmerged branches
 
 每个分支的详细报告在 `W:\data\bamboo-agents\reports\cb-wg-<名>.md`。

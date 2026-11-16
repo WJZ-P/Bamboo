@@ -153,8 +153,16 @@ pub(crate) fn run_features(
     cz: i32,
     view: [Arc<GeneratedChunk>; 9],
 ) -> Result<FeatureResult, String> {
-    run_features_filtered(config, cx, cz, view, None, (1 << DECORATION_STEPS) - 1)
-        .map(|(result, _)| result)
+    run_features_filtered(
+        config,
+        cx,
+        cz,
+        view,
+        None,
+        (1 << DECORATION_STEPS) - 1,
+        None,
+    )
+    .map(|(result, _)| result)
 }
 
 /// `worldgen.json` 的 `processor_list` 只随数据版本变，和种子、世界类型、区块坐标
@@ -191,6 +199,7 @@ fn run_features_filtered(
     view: [Arc<GeneratedChunk>; 9],
     allowed_kinds: Option<&[String]>,
     steps_mask: i32,
+    skip_structure: Option<&str>,
 ) -> Result<
     (
         FeatureResult,
@@ -292,7 +301,12 @@ fn run_features_filtered(
             starts: group.as_slice(),
         })
         .collect();
-    let placement = StructurePlacement::new(groups, processor_lists()?.clone(), config.seed);
+    let mut placement = StructurePlacement::new(groups, processor_lists()?.clone(), config.seed);
+    // 对拍改坏确认：跳过某个结构类型的结构件放置（`None` 是正常路径）。
+    // Oracle break confirmation: drop one structure type's pieces.
+    if let Some(skip) = skip_structure {
+        placement.skip_type(skip);
+    }
     // 上面反查起点 / 引用会改写一个群的系 R 树 `lastResult`；`BiomeManager`
     // 在 features 里按同样顺序查它，进主循环前清到确定状态。
     // Resolving starts/references above mutates the shared biome R-tree
@@ -335,8 +349,33 @@ pub fn game_features_with_mask(
     allowed_kinds: Option<&[String]>,
     steps_mask: i32,
 ) -> Result<FeatureResult, String> {
+    game_features_with_mask_skipping(config, cx, cz, allowed_kinds, steps_mask, None)
+}
+
+/// 对拍改坏确认用：额外跳过一个结构类型的结构件放置，确认逐方块比较会报差异。
+/// 正常路径（游戏和干净对拍）永远传 `None`。
+///
+/// Break confirmation for the oracle: skip one structure type's piece placement
+/// to prove the block comparator detects it. The game and clean runs pass `None`.
+pub fn game_features_with_mask_skipping(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+    allowed_kinds: Option<&[String]>,
+    steps_mask: i32,
+    skip_structure: Option<&str>,
+) -> Result<FeatureResult, String> {
     let view = build_view(config, cx, cz)?;
-    run_features_filtered(config, cx, cz, view, allowed_kinds, steps_mask).map(|(result, _)| result)
+    run_features_filtered(
+        config,
+        cx,
+        cz,
+        view,
+        allowed_kinds,
+        steps_mask,
+        skip_structure,
+    )
+    .map(|(result, _)| result)
 }
 
 /// 一次「游戏里的完整生成流水线」结果，给 `gen-world --through structures` 对拍用。
@@ -359,6 +398,8 @@ pub struct GamePipelineResult {
     pub starts: Vec<(String, usize)>,
     /// 各结构类型实际放置的结构件次数（每个 step 累计）。
     pub placed_pieces: std::collections::BTreeMap<String, usize>,
+    /// 各结构类型的结构件写过的方块次数。
+    pub placed_blocks: std::collections::BTreeMap<String, usize>,
     /// 对拍没涉及但游戏里标 unsupported 的放置次数。
     pub unsupported_pieces: usize,
 }
@@ -402,8 +443,15 @@ pub fn game_pipeline(
             heightmaps: Default::default(),
         })
     });
-    let (result, stats) =
-        run_features_filtered(config, cx, cz, view, None, (1 << DECORATION_STEPS) - 1)?;
+    let (result, stats) = run_features_filtered(
+        config,
+        cx,
+        cz,
+        view,
+        None,
+        (1 << DECORATION_STEPS) - 1,
+        None,
+    )?;
     let mut final_blocks = blocks;
     final_blocks[CENTER] = result.blocks[CENTER].clone();
     // 4. Director 完工时的规范序：中心自己的写 + 8 个邻居中心溢进来的写。
@@ -462,6 +510,10 @@ pub fn game_pipeline(
         placed_pieces: stats
             .as_ref()
             .map(|s| s.placed_pieces.clone())
+            .unwrap_or_default(),
+        placed_blocks: stats
+            .as_ref()
+            .map(|s| s.placed_blocks.clone())
             .unwrap_or_default(),
         unsupported_pieces: stats.as_ref().map_or(0, |s| s.unsupported_pieces),
     })

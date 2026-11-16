@@ -1755,4 +1755,34 @@ structures (Compound)
   单测打乱顺序 / 清缓存后结果逐字节相同。
 * **未做**：`generate-structures=false` 时 flat 世界的 `structure_overrides`；
   结构生成期实体（村民、悦灵、守卫者）；非 full 的 ProtoChunk 从盘上分阶段续跑时
-  与官方混合（`BlendingData`）；`FeaturePoolElement` / `ListPoolElement` 的放置分支。
+  与官方混合（`BlendingData`）。`FeaturePoolElement` / `ListPoolElement` 的放置分支
+  已在 §13 补上。
+
+## 13. 带结构的整块端到端对拍（2026-11-16，`wg-e2e-struct`）
+
+`gen-world --through features --structures` / `structure-e2e` 把「开着结构」的整块生成
+也逐方块对拍：Java 侧照官方 `createStructures` / `createReferences` 造半径 9 的起点网格，
+用 `Beardifier.forStructuresInChunk` 跑 3×3 的 CARVERS，再让
+`shouldGenerateStructures()==true` 的 `StructureManager` 跑 `applyBiomeDecoration`；
+游戏侧走 `game_features_with_mask`（`generate_structures=true`），是 Director 同一条路径。
+默认无结构模式完全不变。干净跑 42 个结构区块 / 37158912 格 0 不一致，覆盖表与命令见
+[`docs/worldgen-structures-e2e.md`](worldgen-structures-e2e.md)。
+
+对拍抓出并修掉的真 bug（每条都有改坏确认，详见覆盖文档）：
+
+| 修复 | 说明 |
+|---|---|
+| 结构分支随机源 | `WorldgenRandom` 必须包 `XoroshiroRandomSource`（`applyBiomeDecoration` 字节码 90-104），不是 `LegacyRandomSource` |
+| `References` 迭代序 | 官方 `LongOpenHashSet` 的桶序由 `HashCommon.mix` + 线性探测 + 扩容历史决定；`feature/java_long_set.rs` 完整复刻，`long-set` 3000 组对拍 |
+| 具名 `processor_list` | 注册表键带 `minecraft:` 前缀，剥掉会让铜灯氧化等链静默变空 |
+| `ListPoolElement` / `FeaturePoolElement` | 前者按列表顺序递归 `place`，后者调 `PlacedFeature.place` 并复用 `StructureStart` 的随机源；`feature/run.rs` 注入 `FeaturePlacementContext` |
+| `minecraft:block_pile` | 新增叶子地物，照字节码复刻 `BlockPos$4` 迭代序与「`dist2 > threshold` 才走 `nextFloat()<0.031`」的反向分支 |
+| `GravityProcessor` | `WORLD_SURFACE_WG → WORLD_SURFACE` 只在 `ServerLevel` 上发生，FEATURES 阶段保留冻结的 WG 高度图 |
+| `BlockWriter` 高度图 | 结构件写方块走 `set_block_with_heightmaps`，与 `ChunkAccess.setBlockState` 一致 |
+| 存档兼容 | `References` LongArray 顺序变成官方桶序，读回按集合成员处理，旧顺序存档仍可读（单测钉住） |
+
+**剩余缺口**：沙漠神殿 / 要塞的 `Layout` 起点区块在真实 `WorldGenRegion` 上的
+`postProcess` 随机方块变体还有 33 / 412 处不一致（`--known-gaps` 单独跑），根因未定位；
+`(42,-32,-16)` 的 `sulfur_pool` 是和结构无关的既有地物差异。默认查询集用这两类的
+**被引用邻居**覆盖跨区块放置，整块 0 不一致。林地府邸 / 海底神殿 / 丛林神殿 /
+海底遗迹在本机扫描里没有有效起点，仍由 `structure-pieces` / `structure-place` 覆盖。

@@ -10,6 +10,7 @@
 pub mod bamboo;
 pub mod block_blob;
 pub mod block_column;
+pub mod block_pile;
 pub mod block_predicate;
 pub mod blue_ice;
 pub mod composition;
@@ -25,6 +26,7 @@ pub mod geode;
 pub mod heightmap;
 pub mod huge_mushroom;
 pub mod iceberg;
+pub mod java_long_set;
 pub mod java_set;
 pub mod lake;
 pub mod large_dripstone;

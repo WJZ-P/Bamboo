@@ -119,7 +119,21 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
         // Vanilla 238–418: when structures are enabled, place this step's structures
         // first with a per-step local index, then run the step's features.
         if let Some(placement) = ctx.structures {
-            placement.place(&mut world, input, step)?;
+            // `FeaturePoolElement.place` 要跑一个 placed feature，得拿到地物注册表、
+            // 群系、设置与 `WorldGenRegion.getRandom()`。这里直接复用本次
+            // `applyBiomeDecoration` 的上下文，不新建随机源。
+            // `FeaturePoolElement.place` runs a placed feature, so it needs the
+            // feature registry, biomes, settings and the region random from this
+            // very `applyBiomeDecoration` call (no new random source).
+            let feature_ctx = crate::structure::place_step::FeaturePlacementContext {
+                registry: ctx.registry,
+                samplers: ctx.samplers,
+                biomes: ctx.biomes,
+                settings: ctx.settings,
+                region_random: ctx.region_random,
+                feature_chunks: input,
+            };
+            placement.place(&mut world, input, step, Some(&feature_ctx))?;
         }
         let globals = &ctx.registry.steps()[step];
         if globals.is_empty() {

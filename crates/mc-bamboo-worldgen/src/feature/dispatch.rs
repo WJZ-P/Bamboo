@@ -15,6 +15,7 @@ use super::{
     bamboo::BambooFeature,
     block_blob::{self, BlockBlobFeature},
     block_column::BlockColumnFeature,
+    block_pile::{self, BlockPileFeature},
     blue_ice::{self, BlueIceFeature},
     disk::{self, DiskFeature},
     fossil::FossilFeature,
@@ -49,6 +50,7 @@ type Pos = (i32, i32, i32);
 pub enum Leaf {
     Bamboo(BambooFeature),
     BlockBlob(BlockBlobFeature),
+    BlockPile(BlockPileFeature),
     BlockColumn(BlockColumnFeature),
     BlueIce(BlueIceFeature),
     Disk(DiskFeature),
@@ -116,6 +118,7 @@ pub fn parse_leaf<'a>(
     let leaf = match kind {
         "minecraft:bamboo" => Leaf::Bamboo(BambooFeature::parse(config)?),
         "minecraft:block_blob" => Leaf::BlockBlob(BlockBlobFeature::parse(config).ok()?),
+        "minecraft:block_pile" => Leaf::BlockPile(BlockPileFeature::parse(config)?),
         "minecraft:block_column" => Leaf::BlockColumn(BlockColumnFeature::parse(config, lookup)?),
         "minecraft:blue_ice" => Leaf::BlueIce(BlueIceFeature::parse(config).ok()?),
         "minecraft:disk" => Leaf::Disk(DiskFeature::parse(config).ok()?),
@@ -175,6 +178,7 @@ pub fn place_leaf(
     match leaf {
         Leaf::Bamboo(feature) => feature.place(world, random, pos),
         Leaf::BlockBlob(blob) => block_blob::place(blob, world, random, pos),
+        Leaf::BlockPile(feature) => block_pile::place(feature, world, random, pos),
         Leaf::BlockColumn(feature) => feature.place(world, random, pos),
         Leaf::BlueIce(feature) => blue_ice::place(feature, world, random, pos),
         Leaf::Disk(disk) => disk::place(disk, world, random, pos),

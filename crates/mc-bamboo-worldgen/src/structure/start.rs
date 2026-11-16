@@ -262,7 +262,11 @@ pub fn structure_references(
 ) -> References {
     let min_block_x = center_x * 16;
     let min_block_z = center_z * 16;
-    let mut references = References::new();
+    // 官方 `ChunkAccess.structureReferences` 的每个值都是 `LongOpenHashSet`：
+    // `createReferences` 按 dx/dz 扫描顺序 `add(packed)`，`StructureManager` 之后按
+    // 这个集合的迭代序反查起点。插入历史（含扩容、线性探测）决定迭代序，所以先用
+    // 同一顺序填进 `JavaLongSet`，再把官方迭代序写进 `References`。
+    let mut sets: BTreeMap<String, crate::feature::java_long_set::JavaLongSet> = BTreeMap::new();
     for &(source_x, source_z, starts) in neighbors {
         for start in starts.by_structure.values() {
             if start.is_valid()
@@ -273,14 +277,15 @@ pub fn structure_references(
                     min_block_z + 15,
                 )
             {
-                references
-                    .entry(start.structure.clone())
+                sets.entry(start.structure.clone())
                     .or_default()
-                    .push(chunk_pos_pack(source_x, source_z));
+                    .insert(chunk_pos_pack(source_x, source_z));
             }
         }
     }
-    references
+    sets.into_iter()
+        .map(|(name, set)| (name, set.to_vec()))
+        .collect()
 }
 
 #[cfg(test)]

@@ -299,13 +299,16 @@ pub fn process_block(
         // `GravityProcessor.processBlock`: lifts Y to `height + offset + templateY`.
         Processor::Gravity { heightmap, offset } => {
             let pos = block.world_pos;
-            // 官方在 `level instanceof ServerLevel` 时把 `*_WG` 换成正式变体。
-            // Vanilla swaps `*_WG` for the real variant when the level is a `ServerLevel`.
-            let heightmap = match heightmap.as_str() {
-                "WORLD_SURFACE_WG" => "WORLD_SURFACE",
-                "OCEAN_FLOOR_WG" => "OCEAN_FLOOR",
-                other => other,
-            };
+            // `GravityProcessor` 只在 `level instanceof ServerLevel` 时把 `*_WG`
+            // 换成正式变体；`FEATURES` 阶段的 `WorldGenRegion` 不是 ServerLevel，
+            // 所以这里保留 `WORLD_SURFACE_WG`（terrain 阶段冻结、之后不再更新）。
+            // 换成 `WORLD_SURFACE` 会读到结构件自己刚写过的新高度，让后续结构件
+            // 一层比一层高一格（村庄街道的泥土路会悬空）。
+            // Vanilla only swaps `*_WG` for the real variant when the level is a
+            // `ServerLevel`; the FEATURES-stage `WorldGenRegion` is not one, so the
+            // frozen `WORLD_SURFACE_WG` stays in use. Switching to the live
+            // `WORLD_SURFACE` makes later pieces climb one block per earlier write.
+            let heightmap = heightmap.as_str();
             // 拿不到高度图时保留原位置：官方在真实世界里一定有值，`None` 只可能意味着
             // 调用方的 `ProcessorLevel` 没实现 `height()`。跳过比算错安全。
             // Without a heightmap, keep the position: vanilla always has a value in a real
@@ -1171,7 +1174,7 @@ mod tests {
     /// `Gravity` swaps `*_WG` for the real variant, and keeps the position (instead of
     /// computing a wrong Y) when the level provides no heightmap.
     #[test]
-    fn gravity_swaps_the_wg_heightmap_and_degrades_safely() {
+    fn gravity_keeps_the_wg_heightmap_on_a_worldgen_region_and_degrades_safely() {
         /// 记录被问到的 heightmap 名字。
         ///
         /// Records which heightmap names it was asked for.
@@ -1199,8 +1202,11 @@ mod tests {
             nbt: None,
         };
 
-        // `WORLD_SURFACE_WG` 会被换成 `WORLD_SURFACE`。
-        // `WORLD_SURFACE_WG` is swapped for `WORLD_SURFACE`.
+        // `GravityProcessor` 只在 `level instanceof ServerLevel` 时把 `*_WG` 换成
+        // 正式变体；`FEATURES` 阶段的 `WorldGenRegion` 不是 ServerLevel，所以这里
+        // 必须原样问 `WORLD_SURFACE_WG`（terrain 阶段冻结的那张）。
+        // Vanilla only swaps `*_WG` on a `ServerLevel`; the FEATURES-stage
+        // `WorldGenRegion` is not one, so the frozen WG heightmap stays in use.
         let level = Recorder {
             asked: std::cell::RefCell::new(Vec::new()),
             answer: Some(80),
@@ -1211,7 +1217,7 @@ mod tests {
         };
         let out = process_block(&processor, &b, (0, 0, 0), &level, None).unwrap();
         assert_eq!(out.world_pos.1, 82, "80 + 2");
-        assert_eq!(level.asked.borrow().as_slice(), ["WORLD_SURFACE"]);
+        assert_eq!(level.asked.borrow().as_slice(), ["WORLD_SURFACE_WG"]);
 
         // level 不给高度图：保留原位置。
         // No heightmap: the position is kept.

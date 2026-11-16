@@ -1,3 +1,4 @@
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -50,10 +51,17 @@ public class JavaSetOracle {
 
     public static void main(String[] args) {
         int cases = 80;
+        boolean longSet = false;
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("--cases") && i + 1 < args.length) {
                 cases = Integer.parseInt(args[++i]);
+            } else if (args[i].equals("--longset")) {
+                longSet = true;
             }
+        }
+        if (longSet) {
+            System.out.print(longSetCases(cases));
+            return;
         }
         StringBuilder out = new StringBuilder();
         for (int c = 0; c < cases; c++) {
@@ -105,5 +113,47 @@ public class JavaSetOracle {
             out.append('\n');
         }
         System.out.print(out);
+    }
+
+    /**
+     * `LongOpenHashSet` 的插入序列与最终迭代顺序，给 Rust 侧
+     * `feature::java_long_set::JavaLongSet` 逐条对拍。键 0 有专槽；负数、会冲突的
+     * 键（低掩码位相同）、跨过 24 / 48 / 96 等扩容边界的数量都要覆盖。
+     *
+     * Protocol per case: {@code CASE n}, {@code OPS v;v;...}, {@code ORDER v;v;...}.
+     */
+    private static String longSetCases(int cases) {
+        StringBuilder out = new StringBuilder();
+        for (int c = 0; c < cases; c++) {
+            Random random = new Random(c * 7919L + 12345L);
+            int count = 3 + random.nextInt(220);
+            int pattern = c % 8;
+            LongOpenHashSet set = new LongOpenHashSet();
+            StringBuilder ops = new StringBuilder("OPS ");
+            for (int i = 0; i < count; i++) {
+                long value;
+                switch (pattern) {
+                    case 0 -> value = i * 4_294_967_296L;             // 低 32 位恒 0
+                    case 1 -> value = random.nextLong();
+                    case 2 -> value = -random.nextInt(1 << 20) - 1L;   // 负数packed键
+                    case 3 -> value = (i % 40) * 32L;                  // 掩码冲突
+                    case 4 -> value = (long) random.nextInt(1 << 16) << 32
+                            | (random.nextInt(1 << 16) & 0xffff_ffffL);
+                    case 5 -> value = i == 0 ? 0L : random.nextLong();
+                    case 6 -> value = (i / 2) * 1_000_003L;            // 重复键
+                    default -> value = i * 32L + (i % 3);              // 连号 + 少量冲突
+                }
+                set.add(value);
+                ops.append(value).append(';');
+            }
+            out.append("CASE ").append(c).append('\n');
+            out.append(ops).append('\n');
+            out.append("ORDER ");
+            for (long value : set) {
+                out.append(value).append(';');
+            }
+            out.append('\n');
+        }
+        return out.toString();
     }
 }
