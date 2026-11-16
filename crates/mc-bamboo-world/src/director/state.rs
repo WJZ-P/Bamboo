@@ -5,7 +5,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
 };
 
 use mc_bamboo_core::ChunkPos;
@@ -407,8 +407,8 @@ struct ReclaimDue {
     pos: ChunkPos,
 }
 
-/// 每次有状态变化只重试 deferred 队头的这么多个任务。
-const DEFERRED_SLICE: usize = 8;
+/// 一次 `drive` 最多检查多少个被挡住的任务；其余留在堆里等下一次。
+const MAX_SKIPS_PER_DRIVE: usize = 16;
 
 /// 待派任务的排序键：离最近玩家的 rank（带方向加权），同一档按
 /// 「这条流水线已经走到哪一步」把快完工的往前放，最后按 TaskId 兜底。
@@ -439,12 +439,6 @@ pub struct Director<C> {
     /// 全部待派任务的小顶堆（`Reverse` 包大顶堆）。只在
     /// 新任务加入、玩家快照变化或者有任务被挡住后重试时才碰它。
     pending_order: BinaryHeap<Reverse<QueueEntry>>,
-    /// 上一次被写范围/配额挡住、等状态变了再试的任务。
-    deferred: VecDeque<TaskId>,
-    /// 任务完成、新任务加入、玩家快照变化或新的一刻时，给 deferred
-    /// 一小段任务一次回堆的机会；每次只取队头几个，不排序、不去重、
-    /// 不扫整张积压表。
-    needs_retry: bool,
     /// 需求快照的代数；变了之后堆里的键整堆重算一次。
     demand_epoch: u64,
     /// 堆里当前键用的是哪一代需求。
@@ -501,8 +495,6 @@ impl<C: ChunkBundle> Director<C> {
             pending_forgot: BTreeSet::new(),
             queued_reads: BTreeSet::new(),
             pending_order: BinaryHeap::new(),
-            deferred: VecDeque::new(),
-            needs_retry: false,
             demand_epoch: 0,
             heap_epoch: 0,
             reclaim_due: BinaryHeap::new(),
@@ -537,7 +529,6 @@ impl<C: ChunkBundle> Director<C> {
         }
         self.demand = demand;
         self.demand_epoch = self.demand_epoch.wrapping_add(1);
-        self.needs_retry = true;
     }
 
     /// 当前的需求快照，宿主的读盘、计算池和交付队列用同一个 rank 排序。
@@ -545,12 +536,9 @@ impl<C: ChunkBundle> Director<C> {
         &self.demand
     }
 
-    /// 每刻只重置派出配额，并让上一轮被挡住的任务再试一次。
-    /// `drive` 只把 deferred 重新放进堆，不重算任何其它任务的键。
+    /// 每刻只重置派出配额。任务一直留在优先级堆里，不需要整表重排。
     pub fn begin_tick(&mut self) {
         self.submitted_this_tick = 0;
-        // 每刻给 deferred 一次机会（比如上一刻末刚好被挡住）。
-        self.needs_retry = true;
     }
 
     pub fn tickets_mut(&mut self) -> &mut TicketTable {
@@ -1431,7 +1419,6 @@ impl<C: ChunkBundle> Director<C> {
     fn schedule_task(&mut self, id: TaskId) {
         let key = self.task_key(id);
         self.pending_order.push(Reverse((key, id)));
-        self.needs_retry = true;
     }
 
     /// 一个任务的排序键：rank、阶段进度、TaskId 兜底。
@@ -1508,22 +1495,13 @@ impl<C: ChunkBundle> Director<C> {
             return;
         }
         self.refresh_heap_if_needed();
-        // 每次有状态变化只把队头一小段放回堆：成本和积压总数无关，
-        // 但配额一释放，最急的几个被挡住的任务当刻就能继续。
-        if std::mem::take(&mut self.needs_retry) {
-            for _ in 0..DEFERRED_SLICE {
-                let Some(id) = self.deferred.pop_front() else {
-                    break;
-                };
-                if self.pending.contains_key(&id) {
-                    let key = self.task_key(id);
-                    self.pending_order.push(Reverse((key, id)));
-                }
-            }
-        }
 
         let cap = self.config.max_in_flight;
-        let mut skipped = Vec::new();
+        // 被写范围/配额挡住的任务在本轮结束时原样放回堆；一次 drive 最多
+        // 检查 MAX_SKIPS_PER_DRIVE 个，其余仍留在堆里，下一次 drive 自然再看。
+        // 堆按优先级出，所以配额一释放，最急的任务当刻就能继续。
+        let mut skipped: Vec<Reverse<(QueueKey, TaskId)>> = Vec::new();
+        let mut skips = 0;
         loop {
             if (self.config.max_submits_per_tick > 0
                 && self.submitted_this_tick >= self.config.max_submits_per_tick)
@@ -1537,7 +1515,16 @@ impl<C: ChunkBundle> Director<C> {
             if !self.pending.contains_key(&id) {
                 continue;
             }
-            let _ = key;
+            // 阶段推进后键可能过期；重算一次再放回，不重复消费这个任务。
+            let fresh = self.task_key(id);
+            if fresh != key {
+                skipped.push(Reverse((fresh, id)));
+                skips += 1;
+                if skips >= MAX_SKIPS_PER_DRIVE {
+                    break;
+                }
+                continue;
+            }
             let Some(pending) = self.pending.get(&id) else {
                 continue;
             };
@@ -1556,12 +1543,13 @@ impl<C: ChunkBundle> Director<C> {
                 .in_flight
                 .values()
                 .any(|other| write_ranges_overlap(other.pos, other.write_radius, pos, radius));
-            // 公平靠每名玩家的在途硬上限：满了就跳过这个任务，本轮不再试，
-            // 有任务完成时释放配额并标脏，下一轮 deferred 自动回来。
-            // 不用「最少在途数」做硬跳过，否则某个玩家恰好没有待派任务时
-            // 会把其它玩家全部饿死。
+            // 公平靠每名玩家的在途硬上限：满了就跳过这个任务。
             if overlaps || !self.claim_task_owner(id, pos, kind) {
-                skipped.push(id);
+                skipped.push(Reverse((key, id)));
+                skips += 1;
+                if skips >= MAX_SKIPS_PER_DRIVE {
+                    break;
+                }
                 continue;
             }
             let pending = self.pending.remove(&id).expect("上面已经确认存在");
@@ -1581,9 +1569,7 @@ impl<C: ChunkBundle> Director<C> {
             });
             let _ = pending.seq;
         }
-        // 本轮被挡住的任务追加到队尾；出堆时会核对 `pending` 和当前键，
-        // 所以不做排序、去重，也不扫整张积压表。
-        self.deferred.extend(skipped);
+        self.pending_order.extend(skipped);
         self.flush_notifications(out);
     }
 
