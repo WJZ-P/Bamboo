@@ -1886,3 +1886,161 @@ fn an_idle_sleeping_hopper_only_marks_its_chunk_when_content_changes() {
     // 睡着的前 20 刻不必每刻标脏：这一段的差异是省掉无效果的每刻真跑。
     assert!(sleeping[20], "改物品之前漏斗确实在跑这套场景");
 }
+
+/// 单元拆合：四张游戏层表 + 计划刻 / 方块事件 / 方块实体 / 红石记忆
+/// 拆出去再并回来，和从没拆过的 region 逐项相同。
+#[test]
+fn splitting_and_absorbing_a_unit_leaves_the_region_unchanged() {
+    let (mut control, mut split) = pair();
+    let wanted: BTreeSet<ChunkPos> = [CHUNK].into_iter().collect();
+    let before = snapshot(control.region());
+    assert_eq!(snapshot(split.region()), before);
+
+    let unit = split.region().split_off_unit(&wanted, 1).unwrap();
+    // 拆出去那份的四张表只有 0 号区块的内容，原表只剩另一个区块。
+    assert!(unit.containers.keys().all(|pos| pos.chunk() == CHUNK));
+    assert!(unit.block_items.keys().all(|pos| pos.chunk() == CHUNK));
+    assert!(unit.command_blocks.keys().all(|pos| pos.chunk() == CHUNK));
+    assert!(unit.books.keys().all(|pos| pos.chunk() == CHUNK));
+    assert!(!unit.containers.is_empty());
+    assert!(
+        split
+            .region()
+            .containers
+            .keys()
+            .all(|pos| pos.chunk() != CHUNK)
+    );
+
+    split.region().absorb_unit(unit);
+    // 版本号、ticker 顺序这类不可见的内部计数不比，其余逐项相同。
+    let after = snapshot(split.region());
+    assert_eq!(after, before, "拆合前后 region 的可见状态相同");
+
+    // 对照：在另一个区块插一个 x 更小的容器，全局 (x,y,z) 顺序会把它排到
+    // 0 号区块的格子前面，而「按区块再按位置」不会。证明字符串比较能报出
+    // 遍历顺序被改坏。
+    control.region().containers.insert(
+        BlockPos::new(3, Y, 18),
+        ContainerEntry::new(ContainerKind::Chest),
+    );
+    let global: Vec<_> = control.region().containers.keys().copied().collect();
+    let mut chunked = global.clone();
+    chunked.sort_by_key(|pos| (pos.chunk(), *pos));
+    assert_ne!(global, chunked, "这份数据要能区分两种顺序");
+}
+
+/// 忙区块候选：本刻排过计划刻 / 方块事件的区块，加上有醒着 ticker 的区块。
+#[test]
+fn busy_chunks_cover_ticks_events_and_awake_tickers() {
+    let mut server = harness();
+    let region = server.region();
+    region
+        .block_ticks
+        .schedule(p(2, 2), blocks::STONE as usize, 3, TickPriority::Normal);
+    region.block_events.push(mc_bamboo_blocks::BlockEvent {
+        pos: p(18, 2),
+        block: blocks::STONE as usize,
+        param_a: 1,
+        param_b: 0,
+    });
+    let busy = region.busy_chunks();
+    assert!(busy.contains(&CHUNK));
+    assert!(busy.contains(&OTHER_CHUNK));
+    assert!(!busy.contains(&ChunkPos::new(9, 9)));
+}
+
+/// 改前改后交替量的微基准，`--release -- --ignored --nocapture` 跑。
+///
+/// 只量两张表本身：1 万个箱子分散在 600 个区块里的每刻全表遍历（对应
+/// `container::tick` 的重查路径），以及按位置随机查容器 / 方块实体。
+/// 两个版本共用一个入口：容器表一直是 `BTreeMap<BlockPos, _>`，按单元存
+/// 之后存储形状不变；基准用来确认串行路径真的回到基线。
+#[cfg(test)]
+mod storage_bench {
+    use std::{
+        hint::black_box,
+        time::{Duration, Instant},
+    };
+
+    use mc_bamboo_core::BlockPos;
+
+    use crate::{
+        container::{ContainerEntry, ContainerKind},
+        region::Region,
+    };
+
+    const CHUNKS: i32 = 24;
+    /// 24×24=576 个区块，每区块 16 格多一点，合计约 1 万个箱子。
+    const PER_CHUNK: i32 = 18;
+    const TOTAL: usize = (CHUNKS * CHUNKS * PER_CHUNK) as usize;
+
+    fn key(index: usize) -> BlockPos {
+        let i = index as i32;
+        let cx = i % CHUNKS;
+        let cz = (i / CHUNKS) % CHUNKS;
+        let slot = i / (CHUNKS * CHUNKS);
+        BlockPos::new(cx * 16 + slot % 16, slot / 16, cz * 16 + (slot % 256) / 16)
+    }
+
+    fn filled() -> Region {
+        let mut region = Region::new(2, 20, false);
+        for index in 0..TOTAL {
+            region.containers.insert(
+                key(index),
+                ContainerEntry::new(if index % 2 == 0 {
+                    ContainerKind::Chest
+                } else {
+                    ContainerKind::Hopper
+                }),
+            );
+        }
+        region
+    }
+
+    fn best(mut run: impl FnMut() -> usize) -> (Duration, usize) {
+        let mut best = Duration::MAX;
+        let mut count = 0;
+        for _ in 0..7 {
+            let started = Instant::now();
+            count = run();
+            best = best.min(started.elapsed());
+        }
+        (best, count)
+    }
+
+    #[test]
+    #[ignore]
+    fn positional_storage_bench() {
+        let region = filled();
+        assert_eq!(region.containers.len(), TOTAL);
+        let (scan_time, scanned) = best(|| {
+            let mut seen = 0_usize;
+            for (pos, entry) in region.containers.iter() {
+                seen += pos.x as usize + entry.slots.len();
+            }
+            black_box(seen)
+        });
+        assert!(scanned > 0);
+
+        let (lookup_time, lookups) = best(|| {
+            let mut sum = 0_usize;
+            for step in 0..100_000 {
+                let index = (step * 7919) % TOTAL;
+                if let Some(entry) = region.containers.get(&key(index)) {
+                    sum += entry.slots.len();
+                }
+                // 方块实体表也按位置查，冷热路径都不碰别的字段。
+                let pos = key(index);
+                sum += usize::from(region.block_entities.contains(pos));
+            }
+            black_box(sum)
+        });
+        assert!(lookups > 0);
+        println!(
+            "containers {TOTAL} in {} chunks: scan {:.3} ms, 100k positional lookups {:.3} ms",
+            CHUNKS * CHUNKS,
+            scan_time.as_secs_f64() * 1000.0,
+            lookup_time.as_secs_f64() * 1000.0
+        );
+    }
+}

@@ -133,6 +133,9 @@ pub fn block_entity_clock() -> i64 {
     SLEEP_CLOCK.with(|clock| clock.get())
 }
 
+/// 单元编号占 ordinal 的高位；一个单元内不会用到这么多 ordinal。
+const UNIT_SHIFT: u32 = 40;
+
 /// 方块实体和它们的运行顺序。
 ///
 /// 对应官方的 `LevelChunk.blockEntities`、`Level.blockEntityTickers`、
@@ -185,6 +188,10 @@ pub struct BlockEntities {
     border: Option<BlockBox>,
     /// 睡到外部变化的条目关注的格子和实体盒子，见 [`Self::notify_cell`]。
     watchers: Watchers,
+    /// 单元编号占 ordinal 的高 24 位，见 [`Self::split_off`]。
+    unit: u64,
+    /// `absorb` 时临时把新登记的 ordinal 放到这段高位号段，避免和本表低位撞号。
+    absorb_base: Option<u64>,
 }
 
 impl Default for BlockEntities {
@@ -214,6 +221,8 @@ impl Default for BlockEntities {
             next_ordinal: 0,
             border: None,
             watchers: Watchers::default(),
+            unit: 0,
+            absorb_base: None,
         }
     }
 }
@@ -280,8 +289,15 @@ impl BlockEntities {
                 self.slots.len() - 1
             }
         };
-        let ordinal = self.next_ordinal;
-        self.next_ordinal += 1;
+        let ordinal = if let Some(base) = self.absorb_base {
+            let value = base | self.next_ordinal;
+            self.next_ordinal += 1;
+            value
+        } else {
+            let value = (self.unit << UNIT_SHIFT) | self.next_ordinal;
+            self.next_ordinal += 1;
+            value
+        };
         self.slots[index] = Some(Ticker::new(pos, id, ordinal));
         self.ordinals.insert(ordinal, index);
         self.positions.insert(pos, index);
@@ -869,6 +885,193 @@ impl BlockEntities {
             .is_some_and(|stored| stored.id == ticker.id)
     }
 
+    /// 哪些区块里有醒着的 ticker，按区块坐标升序。给下一步的忙区块划分用，
+    /// 复杂度和醒着的 ticker 数成正比，不扫全部方块实体。
+    pub fn awake_chunks(&self) -> BTreeSet<ChunkPos> {
+        let mut out = BTreeSet::new();
+        for &ordinal in &self.awake {
+            if let Some(&index) = self.ordinals.get(&ordinal)
+                && let Some(Some(ticker)) = self.slots.get(index)
+            {
+                out.insert(ticker.pos.chunk());
+            }
+        }
+        out
+    }
+
+    /// 关注关系有没有跨过 `chunks` 这组区块的边界。为真时下一步划单元必须
+    /// 把两侧合成一个单元（本次不改驱动，只报告事实）。
+    pub fn watchers_cross_chunks(&self, chunks: &BTreeSet<ChunkPos>) -> bool {
+        self.watchers.crosses_chunks(chunks)
+    }
+
+    /// 拆出 `chunks` 这些区块的方块实体，造出另一个单元的表。
+    ///
+    /// 走和 `take_chunk` / `insert_chunk` 相同的装盒路径：源表里这些区块的
+    /// ticker 槽位在下一次 `begin_tick` 回收，别的区块的 ordinal 和运行顺序
+    /// 不变；新表按位置升序重新登记，ordinal 用 `unit` 占高位，合回来后
+    /// 全局顺序仍然确定。`watchers` 的跨单元关系不拆，由
+    /// [`Self::watchers_cross_chunks`] 报告给下一步。
+    pub fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>, unit: u64) -> Result<Self, Busy> {
+        if !self.ready_to_move_chunks() {
+            return Err(Busy);
+        }
+        assert_ne!(unit, self.unit, "单元编号不能和原表相同");
+        // 按位置把内容、taken、positions、by_chunk 拆开；ordinal 等调度元数据
+        // 按槽位里的 ticker 位置拆，原 ordinal 原样保留，所以合回来后运行顺序确定。
+        let mut out = Self {
+            unit,
+            now: self.now,
+            cursor: self.cursor,
+            sleep_enabled: self.sleep_enabled,
+            border: self.border,
+            last_ran: self.last_ran,
+            ran: self.ran,
+            ..Self::default()
+        };
+
+        let inside = |pos: BlockPos| chunks.contains(&pos.chunk());
+        let (out_entities, entities) = self.entities.drain().partition(|(pos, _)| inside(*pos));
+        self.entities = entities;
+        out.entities = out_entities;
+        let (out_taken, taken) = self.taken.drain().partition(|(pos, _)| inside(*pos));
+        self.taken = taken;
+        out.taken = out_taken;
+        let (out_positions, positions) = self.positions.drain().partition(|(pos, _)| inside(*pos));
+        self.positions = positions;
+        out.positions = out_positions;
+        let (out_by_chunk, by_chunk) = self
+            .by_chunk
+            .drain()
+            .partition(|(chunk, _)| chunks.contains(chunk));
+        self.by_chunk = by_chunk;
+        out.by_chunk = out_by_chunk;
+
+        // 槽位表按位置分派：两边各自留原来的 Vec 下标结构和 ordinal。
+        let mut slot_map = vec![None; self.slots.len()];
+        for (index, slot) in self.slots.iter().enumerate() {
+            if let Some(ticker) = slot
+                && inside(ticker.pos)
+            {
+                slot_map[index] = Some(out.slots.len());
+                out.slots.push(*slot);
+                out.ordinals.insert(ticker.ordinal, out.slots.len() - 1);
+                if ticker.wake_at.is_none() {
+                    out.awake.insert(ticker.ordinal);
+                } else if let Some(at) = ticker.wake_at {
+                    out.sleeping.entry(at).or_default().insert(ticker.ordinal);
+                }
+            } else if let Some(ticker) = slot {
+                self.ordinals.insert(ticker.ordinal, index);
+            }
+        }
+        // 原表把拆走的槽位置空，留到下一次 begin_tick 回收（和 remove 一致）。
+        for (index, &moved) in slot_map.iter().enumerate() {
+            if moved.is_some() {
+                self.slots[index] = None;
+                self.free.push(index);
+            }
+        }
+        let (out_order, order): (Vec<_>, Vec<_>) = self
+            .order
+            .drain(..)
+            .partition(|index| slot_map[*index].is_some());
+        self.order = order;
+        out.order = out_order
+            .into_iter()
+            .map(|index| slot_map[index].expect("刚判过"))
+            .collect();
+        let (out_pending, pending): (Vec<_>, Vec<_>) = self
+            .pending
+            .drain(..)
+            .partition(|index| slot_map[*index].is_some());
+        self.pending = pending;
+        out.pending = out_pending
+            .into_iter()
+            .map(|index| slot_map[index].expect("刚判过"))
+            .collect();
+        // awake / sleeping / due 只按「这个 ordinal 属于哪份」拆，
+        // `out.ordinals` 是唯一判据，不看已经置空的槽位。
+        let (out_awake, awake): (BTreeSet<_>, BTreeSet<_>) = self
+            .awake
+            .iter()
+            .copied()
+            .partition(|ordinal| out.ordinals.contains_key(ordinal));
+        self.awake = awake;
+        out.awake = out_awake;
+        let sleeping = std::mem::take(&mut self.sleeping);
+        for (at, ordinals) in sleeping {
+            let (moved, rest): (BTreeSet<_>, BTreeSet<_>) = ordinals
+                .into_iter()
+                .partition(|ordinal| out.ordinals.contains_key(ordinal));
+            if !moved.is_empty() {
+                out.sleeping.entry(at).or_default().extend(moved);
+            }
+            if !rest.is_empty() {
+                self.sleeping.insert(at, rest);
+            }
+        }
+        let (out_due, due): (Vec<_>, Vec<_>) = self
+            .due
+            .drain(..)
+            .partition(|ordinal| out.ordinals.contains_key(ordinal));
+        self.due = due;
+        out.due = out_due;
+        out.watchers = self.watchers.clone_split(chunks);
+        // 关注关系跨区块，两边的表都保留完整登记；是否必须合并由
+        // watchers_cross_chunks 报告，下一步划单元时处理。
+        Ok(out)
+    }
+
+    /// 并回一个单元的方块实体表：按原 ordinal 把槽位接在末尾，
+    /// `order` / `awake` / `sleeping` 归并后仍按 ordinal 升序。
+    pub fn absorb(&mut self, mut other: Self) {
+        debug_assert!(self.ready_to_move_chunks() && other.ready_to_move_chunks());
+        // 另一份的槽位下标整体平移，ordinals / order / pending 跟着改。
+        let base = self.slots.len();
+        for (pos, stored) in other.entities.drain() {
+            self.entities.insert(pos, stored);
+        }
+        for (pos, id) in other.taken.drain() {
+            self.taken.insert(pos, id);
+        }
+        for (pos, index) in other.positions.drain() {
+            self.positions.insert(pos, base + index);
+        }
+        for (chunk, positions) in other.by_chunk.drain() {
+            self.by_chunk.entry(chunk).or_default().extend(positions);
+        }
+        self.slots.append(&mut other.slots);
+        // `order` / `pending` 是运行顺序，按 ordinal 升序归并，不能简单接到末尾：
+        // 两个单元各自的 ordinal 号段不同，合回来后仍要等于「从没拆过」的顺序。
+        self.order
+            .extend(other.order.drain(..).map(|index| base + index));
+        self.pending
+            .extend(other.pending.drain(..).map(|index| base + index));
+        let ordinal_of = |index: usize| {
+            self.slots
+                .get(index)
+                .copied()
+                .flatten()
+                .map(|ticker| ticker.ordinal)
+                .unwrap_or(u64::MAX)
+        };
+        self.order.sort_by_key(|&index| ordinal_of(index));
+        self.pending.sort_by_key(|&index| ordinal_of(index));
+        for (ordinal, index) in other.ordinals.drain() {
+            self.ordinals.insert(ordinal, base + index);
+        }
+        self.awake.extend(other.awake);
+        for (at, ordinals) in other.sleeping {
+            self.sleeping.entry(at).or_default().extend(ordinals);
+        }
+        self.due.extend(other.due);
+        self.due.sort_unstable();
+        self.due.dedup();
+        self.watchers.absorb(other.watchers);
+        self.next_ordinal = self.next_ordinal.max(other.next_ordinal);
+    }
+
     /// 把 `chunk` 里的方块实体装进盒子搬走。只在 tick 边界调用。
     ///
     /// 走的是和 [`Self::remove`] 完全相同的删除路径：ticker 槽位留到下一次
@@ -1021,6 +1224,13 @@ pub struct BlockEvent {
 pub struct BlockEvents {
     queue: VecDeque<BlockEvent>,
     queued: HashSet<BlockEvent>,
+    /// 每条事件入队时的全局序号。`absorb` 靠它把拆出去的那份按原顺序插回，
+    /// 而不是简单接到队尾。序号只在拆合时用，平时不影响出队和查重。
+    order: HashMap<BlockEvent, u64>,
+    next_order: u64,
+    /// 本刻第一次排进事件的区块，给下一步的忙区块划分增量更新用。
+    /// 只在入队成功时记一次，不影响出队和查重。
+    touched: Vec<ChunkPos>,
 }
 
 impl BlockEvents {
@@ -1028,6 +1238,12 @@ impl BlockEvents {
     pub fn push(&mut self, event: BlockEvent) {
         if self.queued.insert(event) {
             self.queue.push_back(event);
+            self.order.insert(event, self.next_order);
+            self.next_order += 1;
+            let chunk = event.pos.chunk();
+            if !self.touched.contains(&chunk) {
+                self.touched.push(chunk);
+            }
         }
     }
 
@@ -1040,6 +1256,7 @@ impl BlockEvents {
     pub fn pop(&mut self) -> Option<BlockEvent> {
         let event = self.queue.pop_front()?;
         self.queued.remove(&event);
+        self.order.remove(&event);
         Some(event)
     }
 
@@ -1047,6 +1264,73 @@ impl BlockEvents {
     pub fn reschedule(&mut self, events: Vec<BlockEvent>) {
         for event in events {
             self.push(event);
+        }
+    }
+
+    /// 本刻排过事件的区块，给下一步的忙区块划分用。
+    pub fn drain_touched_chunks(&mut self) -> Vec<ChunkPos> {
+        std::mem::take(&mut self.touched)
+    }
+
+    /// 只读地看本刻排过事件的区块，不清空。
+    pub fn touched_chunks(&self) -> &[ChunkPos] {
+        &self.touched
+    }
+
+    /// 这个区块有没有排着事件（含下一刻才看的重新排队项），给忙区块查询用。
+    pub fn chunk_has_queued(&self, chunk: ChunkPos) -> bool {
+        self.queue.iter().any(|event| event.pos.chunk() == chunk)
+    }
+
+    /// 拆出 `chunks` 这些区块里排着的事件，两边都保持原来的排队顺序。
+    pub fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        let mut out = Self::default();
+        let mut rest = VecDeque::new();
+        for event in std::mem::take(&mut self.queue) {
+            if chunks.contains(&event.pos.chunk()) {
+                out.queued.insert(event);
+                out.queue.push_back(event);
+                if let Some(seq) = self.order.remove(&event) {
+                    out.order.insert(event, seq);
+                    out.next_order = out.next_order.max(seq + 1);
+                }
+                let chunk = event.pos.chunk();
+                if !out.touched.contains(&chunk) {
+                    out.touched.push(chunk);
+                }
+            } else {
+                rest.push_back(event);
+            }
+        }
+        self.queue = rest;
+        self.queued
+            .retain(|event| !chunks.contains(&event.pos.chunk()));
+        self.touched.retain(|chunk| !chunks.contains(chunk));
+        out
+    }
+
+    /// 并回另一份的事件队列：按全局入队序号归并，结果和「从没拆过」逐条相同。
+    pub fn absorb(&mut self, other: Self) {
+        let mut merged: Vec<(u64, BlockEvent)> = self
+            .queue
+            .iter()
+            .map(|&event| (self.order.get(&event).copied().unwrap_or(0), event))
+            .collect();
+        for event in &other.queue {
+            merged.push((
+                other.order.get(event).copied().unwrap_or(self.next_order),
+                *event,
+            ));
+        }
+        merged.sort_by_key(|(seq, _)| *seq);
+        self.queue = merged.iter().map(|(_, event)| *event).collect();
+        self.queued = merged.iter().map(|(_, event)| *event).collect();
+        self.order = merged.iter().map(|(seq, event)| (*event, *seq)).collect();
+        self.next_order = self.next_order.max(other.next_order);
+        for chunk in other.touched {
+            if !self.touched.contains(&chunk) {
+                self.touched.push(chunk);
+            }
         }
     }
 }
@@ -1260,6 +1544,110 @@ mod tests {
     const B1: BlockPos = BlockPos::new(20, 64, 1);
     const B2: BlockPos = BlockPos::new(21, 64, 2);
 
+    /// 关注关系跨过区块边界时要能报告出来，下一步划单元据此合并。
+    #[test]
+    fn cross_chunk_watchers_are_reported() {
+        struct Watcher(BlockPos, BlockPos);
+        impl BlockEntity for Watcher {
+            fn pos(&self) -> BlockPos {
+                self.0
+            }
+            fn tick(&mut self, _world: &mut World) {}
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn as_any_mut(&mut self) -> &mut dyn Any {
+                self
+            }
+            fn write_additional(&self) -> Result<Vec<(String, Tag)>, crate::archive::Error> {
+                Ok(Vec::new())
+            }
+            fn watch(&self) -> Option<Watch> {
+                Some(Watch {
+                    cells: vec![self.1],
+                    boxes: Vec::new(),
+                })
+            }
+        }
+        let mut entities = BlockEntities::default();
+        // 关注者在 0 号区块，关注的是 1 号区块的格子。
+        entities.insert(Box::new(Watcher(A1, B1)));
+        entities.schedule_wake(A1, Some(10));
+        let wanted: BTreeSet<ChunkPos> = [CHUNK_A].into_iter().collect();
+        assert!(entities.watchers_cross_chunks(&wanted));
+        // 只把 0 号连同 1 号一起划进来，就不算跨单元了。
+        let both: BTreeSet<ChunkPos> = [CHUNK_A, B1.chunk()].into_iter().collect();
+        assert!(!entities.watchers_cross_chunks(&both));
+    }
+
+    /// 拆成两个单元再并回来：位置集合、内容、ticker 相对顺序、醒着的区块
+    /// 都和「从没拆过」一致；ordinal 号段不撞号。
+    #[test]
+    fn block_entities_split_and_absorb_keep_content_and_ticker_order() {
+        let mut reference = BlockEntities::default();
+        let mut split = BlockEntities::default();
+        // 按区块交错登记，检查运行顺序不是「按区块再按位置」。
+        for (pos, value) in [(B1, 1), (A1, 2), (B2, 3), (A2, 4)] {
+            reference.insert(Dummy::boxed(pos, value));
+            split.insert(Dummy::boxed(pos, value));
+        }
+        // 参照的全局 ticker 顺序在 0 号区块上的子序列。
+        let global_order = ticker_order(&mut reference);
+        let expected_unit: Vec<_> = global_order
+            .iter()
+            .copied()
+            .filter(|(pos, _)| pos.chunk() == CHUNK_A)
+            .collect();
+        let wanted: BTreeSet<ChunkPos> = [CHUNK_A].into_iter().collect();
+        let unit = split.split_off(&wanted, 1).unwrap();
+        assert_eq!(unit.ticker_positions().count(), 2);
+        assert_eq!(split.ticker_positions().count(), 2);
+        assert_eq!(unit.awake_chunks(), wanted);
+        assert_eq!(split.awake_chunks(), [B1.chunk()].into_iter().collect());
+
+        // 拆出去那份自己的 ticker 顺序是源表该区块上的子序列。
+        let mut unit = unit;
+        let unit_order = ticker_order(&mut unit);
+        assert_eq!(unit_order, expected_unit);
+
+        // 原样合并：全部位置、内容、ticker 顺序等于参照。
+        let mut fresh = BlockEntities::default();
+        for (pos, value) in [(B1, 1), (A1, 2), (B2, 3), (A2, 4)] {
+            fresh.insert(Dummy::boxed(pos, value));
+        }
+        let mut merged = fresh;
+        let unit = merged.split_off(&wanted, 1).unwrap();
+        merged.absorb(unit);
+        let before = ticker_order(&mut reference);
+        let after = ticker_order(&mut merged);
+        assert_eq!(after, before);
+        // 存档字段逐项相同：拆合不能悄悄改内容。
+        let mut before_fields: Vec<_> = reference
+            .entities
+            .values()
+            .map(|stored| format!("{:?}", stored.entity.write_additional()))
+            .collect();
+        let mut after_fields: Vec<_> = merged
+            .entities
+            .values()
+            .map(|stored| format!("{:?}", stored.entity.write_additional()))
+            .collect();
+        before_fields.sort();
+        after_fields.sort();
+        assert_eq!(before_fields, after_fields);
+        // 对照组：按区块再按位置的顺序和真实运行顺序不同。
+        let mut chunked = before.clone();
+        chunked.sort_by_key(|(pos, _)| (pos.chunk(), *pos));
+        assert_ne!(after, chunked);
+
+        // 合并后新登记的 ordinal 不与任何已有 ordinal 撞号。
+        let seen: BTreeSet<u64> = merged.awake.iter().copied().collect();
+        assert_eq!(seen.len(), merged.awake.len(), "ordinal 全局唯一");
+        merged.insert(Dummy::boxed(BlockPos::new(40, 64, 1), 5));
+        let seen2: BTreeSet<u64> = merged.awake.iter().copied().collect();
+        assert_eq!(seen2.len(), merged.awake.len());
+    }
+
     fn ticker_order(entities: &mut BlockEntities) -> Vec<(BlockPos, i32)> {
         entities.begin_tick(0);
         let mut order = Vec::new();
@@ -1299,6 +1687,85 @@ mod tests {
         assert_eq!(events.pop(), Some(event(1, 3)));
         assert_eq!(events.pop(), Some(event(1, 0)));
         assert_eq!(events.pop(), None);
+    }
+
+    /// 改坏确认的对照组：拆合不能把排队顺序变成「按区块再按位置」。
+    #[test]
+    fn block_events_split_and_absorb_keep_the_queue_order() {
+        let at = |x: i32, param_b: i32| BlockEvent {
+            pos: BlockPos::new(x, 2, 3),
+            block: 7,
+            param_a: 1,
+            param_b,
+        };
+        // 两个区块的事件交错，队列顺序和按区块顺序明显不同。
+        let all = [
+            at(20, 1),
+            at(1, 2),
+            at(21, 3),
+            at(2, 4),
+            at(22, 5),
+            at(3, 6),
+        ];
+        let mut reference = BlockEvents::default();
+        let mut split = BlockEvents::default();
+        for &event in &all {
+            reference.push(event);
+            split.push(event);
+        }
+        let wanted: BTreeSet<ChunkPos> = [ChunkPos::new(0, 0)].into_iter().collect();
+        let unit = split.split_off(&wanted);
+        // 拆出去的只剩 0 号区块，顺序仍是原队列里这三条的相对顺序。
+        assert!(unit.chunk_has_queued(ChunkPos::new(0, 0)));
+        assert!(!unit.chunk_has_queued(ChunkPos::new(1, 0)));
+        assert!(split.chunk_has_queued(ChunkPos::new(1, 0)));
+        assert!(!split.chunk_has_queued(ChunkPos::new(0, 0)));
+        let mut unit_events = Vec::new();
+        let mut unit = unit;
+        while let Some(event) = unit.pop() {
+            unit_events.push(event);
+        }
+        assert_eq!(unit_events, [at(1, 2), at(2, 4), at(3, 6)]);
+
+        // 原样合并：整条队列逐条等于参照，不是「先一个区块再另一个」。
+        // 上面那次已经把 0 号区块拆空了，重新造一份。
+        let mut fresh = BlockEvents::default();
+        for &event in &all {
+            fresh.push(event);
+        }
+        let mut split = fresh;
+        unit = split.split_off(&wanted);
+        split.absorb(unit);
+        let mut got = Vec::new();
+        while let Some(event) = split.pop() {
+            got.push(event);
+        }
+        let mut expected = Vec::new();
+        while let Some(event) = reference.pop() {
+            expected.push(event);
+        }
+        assert_eq!(got, expected);
+        // 对照组：按区块再按位置排出来的顺序确实不同。
+        let mut chunked = expected.clone();
+        chunked.sort_by_key(|event| (event.pos.chunk(), event.pos));
+        assert_ne!(got, chunked);
+    }
+
+    #[test]
+    fn block_events_track_touched_chunks_once_per_tick() {
+        let mut events = BlockEvents::default();
+        events.push(event(1, 0));
+        events.push(event(17, 1));
+        events.push(event(2, 2));
+        assert_eq!(
+            events.drain_touched_chunks(),
+            [ChunkPos::new(0, 0), ChunkPos::new(1, 0)]
+        );
+        assert!(events.drain_touched_chunks().is_empty());
+        // 重复入队不记，出队也不记。
+        events.push(event(1, 0));
+        let _ = events.pop();
+        assert!(events.drain_touched_chunks().is_empty());
     }
 
     #[test]
