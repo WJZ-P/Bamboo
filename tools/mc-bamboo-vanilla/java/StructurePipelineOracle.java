@@ -46,7 +46,21 @@ import net.minecraft.world.level.chunk.UpgradeData;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.world.level.biome.BiomeManager;
+import net.minecraft.world.level.biome.BiomeResolver;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.levelgen.Beardifier;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.NoiseChunk;
 import net.minecraft.world.level.levelgen.RandomState;
+import net.minecraft.world.level.levelgen.blending.Blender;
+import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
+import net.minecraft.world.level.levelgen.Aquifer;
+import net.minecraft.world.level.levelgen.material.rule.MaterialRule;
+import java.lang.reflect.Method;
+import java.lang.reflect.Field;
+import java.util.Set;
+import java.util.HashSet;
 import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureSet;
@@ -251,6 +265,22 @@ public final class StructurePipelineOracle {
                 }
             }
             out.add("pieces", pieces);
+            // 官方 `createNoiseChunk`：从中心区块的 References 反查起点，造真实
+            // Beardifier 注入 finalDensity，再跑到 CARVERS，输出中心区块逐方块。
+            // Vanilla `createNoiseChunk`: resolve referenced starts, build the real
+            // Beardifier, run to CARVERS and emit the center chunk's blocks.
+            Beardifier beardifier = Beardifier.forStructuresInChunk(centerManager, center);
+            // 3×3 的 quart 群系格要先填好（buildSurface / carvers 的 biomeManager 要读）。
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    ProtoChunk p = grid[dx + 8][dz + 8];
+                    generator.createBiomes(state, Blender.empty(), null, p).join();
+                    p.setPersistedStatus(ChunkStatus.BIOMES);
+                }
+            }
+            ProtoChunk terrain = grid[8][8];
+            emitTerrainBlocks(seed, cx, cz, terrain, generator, settings, state,
+                    beardifier, grid, center, resizeResolver(state, biomeSource));
             emit(out);
         }
         JsonObject end = new JsonObject();
@@ -261,6 +291,147 @@ public final class StructurePipelineOracle {
     private static void emit(JsonObject line) throws Exception {
         OUT.write(line.toString());
         OUT.write('\n');
+    }
+
+    /** 给 terrain 用的真 `WorldGenRegion`：17×17 缓存 + 生成步骤的写半径。 */
+    private static net.minecraft.server.level.WorldGenRegion terrainRegion(
+            ChunkPos center, ProtoChunk centerChunk, ProtoChunk[][] grid,
+            long seed, RandomState state, BiomeSource source) throws Exception {
+        StaticCache2D<ChunkAccess> cache = StaticCache2D.create(center.x(), center.z(), 8,
+                (x, z) -> grid[x - center.x() + 8][z - center.z() + 8]);
+        java.util.List<ChunkStatus> deps = new java.util.ArrayList<>();
+        deps.add(ChunkStatus.BIOMES);
+        deps.add(ChunkStatus.BIOMES);
+        for (int i = 2; i < 9; i++) {
+            deps.add(ChunkStatus.STRUCTURE_STARTS);
+        }
+        net.minecraft.world.level.chunk.status.ChunkDependencies direct =
+                new net.minecraft.world.level.chunk.status.ChunkDependencies(
+                        com.google.common.collect.ImmutableList.copyOf(deps));
+        net.minecraft.world.level.chunk.status.ChunkStep step =
+                new net.minecraft.world.level.chunk.status.ChunkStep(
+                        ChunkStatus.TERRAIN, direct, direct, 1, null);
+        net.minecraft.server.level.WorldGenRegion region =
+                (net.minecraft.server.level.WorldGenRegion) allocateRegion();
+        setRegionField(region, "cache", cache);
+        setRegionField(region, "center", centerChunk);
+        setRegionField(region, "generatingStep", step);
+        BiomeResolver resolver = source.createUncachedResolver(state);
+        setRegionField(region, "uncachedBiomeResolver", resolver);
+        setRegionField(region, "biomeManager",
+                new BiomeManager(region, BiomeManager.obfuscateSeed(seed)));
+        return region;
+    }
+
+    private static Object allocateRegion() {
+        try {
+            java.lang.reflect.Field f = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            sun.misc.Unsafe u = (sun.misc.Unsafe) f.get(null);
+            return u.allocateInstance(net.minecraft.server.level.WorldGenRegion.class);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static void setRegionField(Object target, String name, Object value) {
+        try {
+            java.lang.reflect.Field f =
+                    net.minecraft.server.level.WorldGenRegion.class.getDeclaredField(name);
+            f.setAccessible(true);
+            f.set(target, value);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static BiomeSource biomeSourceOf(NoiseBasedChunkGenerator generator) {
+        return generator.getBiomeSource();
+    }
+
+    private static BiomeResolver resizeResolver(RandomState state, BiomeSource source) {
+        return source.createUncachedResolver(state);
+    }
+
+    /** 造一个 `NoiseChunk`（带真实 Beardifier）并跑到 CARVERS，输出中心区块方块。 */
+    private static void emitTerrainBlocks(long seed, int cx, int cz, ProtoChunk center,
+            NoiseBasedChunkGenerator generator, NoiseGeneratorSettings settings,
+            RandomState state, Beardifier beardifier, ProtoChunk[][] grid, ChunkPos pos,
+            BiomeResolver resolver) throws Exception {
+        // 与 ChunkgenOracle.buildRealTerrain 一样造 17×17 邻域 + WorldGenRegion。
+        net.minecraft.server.level.WorldGenRegion region =
+                terrainRegion(pos, center, grid, seed, state, biomeSourceOf(generator));
+        Set<Holder<Biome>> possible = new HashSet<>();
+        for (int z = pos.z() - 1; z <= pos.z() + 1; z++) {
+            for (int x = pos.x() - 1; x <= pos.x() + 1; x++) {
+                region.getChunk(x, z).collectBiomesInPalette(possible);
+            }
+        }
+        DensityVolume volume = new DensityVolume(16, settings.noiseSettings().height(), 16,
+                pos.getMinBlockX(), settings.noiseSettings().minY(), pos.getMinBlockZ());
+        Method doFill = NoiseBasedChunkGenerator.class.getDeclaredMethod(
+                "doFill", NoiseChunk.class, ChunkAccess.class);
+        doFill.setAccessible(true);
+        Method buildSurface = NoiseBasedChunkGenerator.class.getDeclaredMethod(
+                "buildSurface", ChunkAccess.class, NoiseChunk.class, RandomState.class,
+                BiomeManager.class, Set.class, MaterialRule.class);
+        buildSurface.setAccessible(true);
+        Method generateCarvers = NoiseBasedChunkGenerator.class.getDeclaredMethod(
+                "generateCarvers", ChunkAccess.class, Blender.class, NoiseChunk.class,
+                RandomState.class, BiomeManager.class,
+                net.minecraft.server.level.WorldGenRegion.class, MaterialRule.class);
+        generateCarvers.setAccessible(true);
+        Field pickerField = NoiseBasedChunkGenerator.class.getDeclaredField("globalFluidPicker");
+        pickerField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        java.util.function.Supplier<Aquifer.FluidPicker> picker =
+                (java.util.function.Supplier<Aquifer.FluidPicker>) pickerField.get(generator);
+        try (NoiseChunk noiseChunk = new NoiseChunk(state, beardifier, settings, picker.get(),
+                Blender.empty(), volume)) {
+            doFill.invoke(generator, noiseChunk, center);
+            buildSurface.invoke(generator, center, noiseChunk, state, region.getBiomeManager(),
+                    possible, settings.materialRule().value());
+            generateCarvers.invoke(generator, center, Blender.empty(), noiseChunk, state,
+                    region.getBiomeManager(), region, settings.materialRule().value());
+        }
+        center.setPersistedStatus(ChunkStatus.TERRAIN);
+        Heightmap.primeHeightmaps(center, ChunkStatus.FINAL_HEIGHTMAPS);
+        JsonObject line = new JsonObject();
+        line.addProperty("type", "terrain");
+        line.addProperty("seed", seed);
+        line.addProperty("x", cx);
+        line.addProperty("z", cz);
+        addBlocks(line, center);
+        emit(line);
+    }
+
+    /** palette + blocks，顺序 y、x、z；和 gen-world 的 CARVERS 行同格式。 */
+    private static void addBlocks(JsonObject line, ChunkAccess chunk) {
+        java.util.List<BlockState> palette = new java.util.ArrayList<>();
+        java.util.Map<BlockState, Integer> ids = new java.util.HashMap<>();
+        JsonArray blocks = new JsonArray();
+        int minY = chunk.getMinY();
+        for (int y = 0; y < chunk.getHeight(); y++) {
+            for (int x = 0; x < 16; x++) {
+                for (int z = 0; z < 16; z++) {
+                    BlockState state = chunk.getSection(chunk.getSectionIndex(minY + y))
+                            .getBlockState(x, y & 15, z);
+                    Integer id = ids.get(state);
+                    if (id == null) {
+                        id = palette.size();
+                        palette.add(state);
+                        ids.put(state, id);
+                    }
+                    blocks.add(id);
+                }
+            }
+        }
+        JsonArray names = new JsonArray();
+        for (BlockState state : palette) {
+            names.add(state.toString());
+        }
+        line.add("palette", names);
+        line.add("blocks", blocks);
     }
 
     /** 只实现 createStructures 需要的 `LevelAccessor` 表面：当前区块与注册表访问。 */

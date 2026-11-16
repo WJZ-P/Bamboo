@@ -97,6 +97,9 @@ struct Stats {
     references: usize,
     pieces: usize,
     mismatches: Vec<String>,
+    /// 逐方块比过的 terrain 格数。
+    terrain_blocks: u64,
+    terrain_chunks: usize,
 }
 
 pub fn run(mut command: Command, queries_path: &Path, options: &[&str]) -> Result<(), String> {
@@ -148,6 +151,7 @@ fn compare(stdout: &str, options: &Options) -> Result<(), String> {
                 header_ok = true;
             }
             "structures" => on_row(&value, options, &mut stats)?,
+            "terrain" => on_terrain(&value, options, &mut stats)?,
             "end" => {}
             other => return Err(format!("unexpected oracle line {other}")),
         }
@@ -161,11 +165,14 @@ fn compare(stdout: &str, options: &Options) -> Result<(), String> {
         starts,
         references,
         pieces,
+        terrain_blocks,
+        terrain_chunks,
         mismatches,
     } = stats;
     println!(
         "structure-pipeline: {rows} rows, {comparisons} comparisons, {starts} starts, \
-         {references} references, {pieces} pieces, {} mismatches",
+         {references} references, {pieces} pieces, {terrain_chunks} terrain chunks / \
+         {terrain_blocks} blocks, {} mismatches",
         mismatches.len()
     );
     if options.break_self_test {
@@ -335,6 +342,88 @@ fn on_row(value: &Value, options: &Options, stats: &mut Stats) -> Result<(), Str
                 want_pieces.len()
             ),
         );
+    }
+    Ok(())
+}
+
+/// 官方带真实 Beardifier 的 CARVERS 方块 vs 游戏 `game_pipeline` 的中心方块，逐格比。
+/// Compare official Beardifier-terrain blocks against the game pipeline's center.
+fn on_terrain(value: &Value, options: &Options, stats: &mut Stats) -> Result<(), String> {
+    let seed = value.get("seed").and_then(Value::as_i64).ok_or("missing seed")?;
+    let x = value.get("x").and_then(Value::as_i64).ok_or("missing x")? as i32;
+    let z = value.get("z").and_then(Value::as_i64).ok_or("missing z")? as i32;
+    let palette: Vec<String> = value
+        .get("palette")
+        .and_then(Value::as_array)
+        .ok_or("missing palette")?
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_owned())
+        .collect();
+    let indices: Vec<i64> = value
+        .get("blocks")
+        .and_then(Value::as_array)
+        .ok_or("missing blocks")?
+        .iter()
+        .map(|v| v.as_i64().ok_or("bad block index"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let config = WorldGenConfig {
+        seed,
+        level_type: LevelType::Normal,
+        ..WorldGenConfig::default()
+    };
+    let pipeline = mc_bamboo_game::worldgen_features::game_pipeline(&config, x, z)
+        .map_err(|e| format!("game_pipeline failed for ({seed},{x},{z}): {e}"))?;
+    // game_pipeline 返回的是跑完 FEATURES 的方块；terrain 阶段对拍只比 CARVERS，
+    // 因此这里用同一份 `generate_chunk_with_beardifier` 重新生成 CARVERS 快照。
+    let refs = mc_bamboo_game::worldgen_structures::structure_references_stage(&config, x, z)?;
+    let beard = mc_bamboo_game::worldgen_structures::beardifier_for_chunk(&config, x, z, &refs)?;
+    let ours = mc_bamboo_game::worldgen::generate_chunk_with_beardifier(
+        &config,
+        x,
+        z,
+        beard.as_ref(),
+    )?;
+    stats.terrain_chunks += 1;
+    let mut differences = 0usize;
+    for (y, layer) in ours.blocks.iter().enumerate() {
+        for x in 0..16 {
+            for z in 0..16 {
+                let index = y * 256 + x * 16 + z;
+                let state = layer[x * 16 + z];
+                let name = mc_bamboo_data::block_of_state(state)
+                    .map(|b| b.name)
+                    .unwrap_or("minecraft:air");
+                let official = palette
+                    .get(indices[index] as usize)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                // 官方调色板是 `Block{name[props]}`，地形只放默认状态，按名字比。
+                let official_name = official
+                    .strip_prefix("Block{")
+                    .and_then(|s| s.split_once('}').map(|(n, _)| n))
+                    .unwrap_or(official);
+                stats.terrain_blocks += 1;
+                if options.break_self_test && index == 0 {
+                    if official_name != "minecraft:broken" {
+                        differences += 1;
+                    }
+                } else if official_name != name {
+                    differences += 1;
+                    if stats.mismatches.len() < 8 {
+                        stats.mismatches.push(format!(
+                            "({seed},{x},{z}) terrain y={} ({x},{z}): game {name} vs {official_name}",
+                            y - 64
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let _ = &pipeline;
+    if differences > 0 && stats.mismatches.len() < 8 && !options.break_self_test {
+        stats.mismatches.push(format!(
+            "({seed},{x},{z}) terrain: {differences} block mismatches"
+        ));
     }
     Ok(())
 }
