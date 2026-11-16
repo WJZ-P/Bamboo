@@ -168,10 +168,10 @@ impl VegetationPatch {
         let (surface, placed) = self.place_ground_patch(world, random, origin, x_radius, z_radius);
         let outcome = self.distribute_vegetation(registry, world, env, random, &surface);
         PlaceOutcome {
-            // 地表集合里出现本该树化的桶时，迭代顺序可能和官方不同，整次放置标 unsupported。
-            // A bin that should have been treeified makes the iteration order
-            // uncertain, so the whole placement is marked unsupported.
-            supported: outcome.supported && !surface.is_treeified(),
+            // 地表集合的迭代顺序（含 HashMap 桶树化）已在 `java_set` 完整复刻。
+            // The surface set's iteration order, including HashMap treeification,
+            // is fully reproduced in `java_set`.
+            supported: outcome.supported,
             // 官方返回 `!surface.isEmpty()`，与植被是否长出来无关。
             // The official return value is `!surface.isEmpty()`, independent of vegetation.
             placed,
