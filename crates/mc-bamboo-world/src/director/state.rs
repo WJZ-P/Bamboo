@@ -5,7 +5,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque},
 };
 
 use mc_bamboo_core::ChunkPos;
@@ -407,10 +407,8 @@ struct ReclaimDue {
     pos: ChunkPos,
 }
 
-/// 每刻最多把 deferred 里的一小段重新入堆几次。
-const RETRIES_PER_TICK: usize = 4;
-/// 每次重试放多少个任务回堆：只取最急的一小段，不扫整张积压表。
-const DEFERRED_SLICE: usize = 32;
+/// 每次有状态变化只重试 deferred 队头的这么多个任务。
+const DEFERRED_SLICE: usize = 8;
 
 /// 待派任务的排序键：离最近玩家的 rank（带方向加权），同一档按
 /// 「这条流水线已经走到哪一步」把快完工的往前放，最后按 TaskId 兜底。
@@ -441,13 +439,12 @@ pub struct Director<C> {
     /// 全部待派任务的小顶堆（`Reverse` 包大顶堆）。只在
     /// 新任务加入、玩家快照变化或者有任务被挡住后重试时才碰它。
     pending_order: BinaryHeap<Reverse<QueueEntry>>,
-    /// 上一次被写范围/配额挡住的任务，按 `(rank, TaskId)` 存成小顶堆。
-    /// 配额满了就整组留着，不每刻重排。
-    deferred: BinaryHeap<Reverse<(QueueKey, TaskId)>>,
-    /// 这一刻还允许把 deferred 重新入堆几次。每个任务完成都可能释放
-    /// 配额，但同一刻有几百个事件；限次后成本是每刻 O(次数 × deferred)，
-    /// 不会退化成「每个事件都重排整张积压表」。
-    retry_budget: usize,
+    /// 上一次被写范围/配额挡住、等状态变了再试的任务。
+    deferred: VecDeque<TaskId>,
+    /// 任务完成、新任务加入、玩家快照变化或新的一刻时，给 deferred
+    /// 一小段任务一次回堆的机会；每次只取队头几个，不排序、不去重、
+    /// 不扫整张积压表。
+    needs_retry: bool,
     /// 需求快照的代数；变了之后堆里的键整堆重算一次。
     demand_epoch: u64,
     /// 堆里当前键用的是哪一代需求。
@@ -504,8 +501,8 @@ impl<C: ChunkBundle> Director<C> {
             pending_forgot: BTreeSet::new(),
             queued_reads: BTreeSet::new(),
             pending_order: BinaryHeap::new(),
-            deferred: BinaryHeap::new(),
-            retry_budget: 0,
+            deferred: VecDeque::new(),
+            needs_retry: false,
             demand_epoch: 0,
             heap_epoch: 0,
             reclaim_due: BinaryHeap::new(),
@@ -540,7 +537,7 @@ impl<C: ChunkBundle> Director<C> {
         }
         self.demand = demand;
         self.demand_epoch = self.demand_epoch.wrapping_add(1);
-        self.retry_budget = self.retry_budget.max(1);
+        self.needs_retry = true;
     }
 
     /// 当前的需求快照，宿主的读盘、计算池和交付队列用同一个 rank 排序。
@@ -549,10 +546,11 @@ impl<C: ChunkBundle> Director<C> {
     }
 
     /// 每刻只重置派出配额，并让上一轮被挡住的任务再试一次。
-    /// 只重算 deferred 这少量任务的键，不碰其它待派任务。
+    /// `drive` 只把 deferred 重新放进堆，不重算任何其它任务的键。
     pub fn begin_tick(&mut self) {
         self.submitted_this_tick = 0;
-        self.retry_budget = RETRIES_PER_TICK;
+        // 每刻给 deferred 一次机会（比如上一刻末刚好被挡住）。
+        self.needs_retry = true;
     }
 
     pub fn tickets_mut(&mut self) -> &mut TicketTable {
@@ -1421,7 +1419,6 @@ impl<C: ChunkBundle> Director<C> {
         let Some((Some(player), kind)) = self.task_owners.remove(&id) else {
             return;
         };
-        let _ = kind;
         let slot = self.demand_in_flight.entry((player, kind)).or_default();
         *slot = slot.saturating_sub(1);
         if *slot == 0 {
@@ -1434,7 +1431,7 @@ impl<C: ChunkBundle> Director<C> {
     fn schedule_task(&mut self, id: TaskId) {
         let key = self.task_key(id);
         self.pending_order.push(Reverse((key, id)));
-        self.retry_budget = self.retry_budget.max(1);
+        self.needs_retry = true;
     }
 
     /// 一个任务的排序键：rank、阶段进度、TaskId 兜底。
@@ -1511,22 +1508,22 @@ impl<C: ChunkBundle> Director<C> {
             return;
         }
         self.refresh_heap_if_needed();
-        // 每刻只把 deferred 里最急的一小段放回堆，其余原地留着。
-        // 每次 drive 的成本是 O(DEFERRED_SLICE × log 积压)，与积压总数无关。
-        if self.retry_budget > 0 && !self.deferred.is_empty() {
-            self.retry_budget -= 1;
+        // 每次有状态变化只把队头一小段放回堆：成本和积压总数无关，
+        // 但配额一释放，最急的几个被挡住的任务当刻就能继续。
+        if std::mem::take(&mut self.needs_retry) {
             for _ in 0..DEFERRED_SLICE {
-                let Some(Reverse((key, id))) = self.deferred.pop() else {
+                let Some(id) = self.deferred.pop_front() else {
                     break;
                 };
                 if self.pending.contains_key(&id) {
+                    let key = self.task_key(id);
                     self.pending_order.push(Reverse((key, id)));
                 }
             }
         }
 
         let cap = self.config.max_in_flight;
-        let mut deferred = BinaryHeap::new();
+        let mut skipped = Vec::new();
         loop {
             if (self.config.max_submits_per_tick > 0
                 && self.submitted_this_tick >= self.config.max_submits_per_tick)
@@ -1540,17 +1537,7 @@ impl<C: ChunkBundle> Director<C> {
             if !self.pending.contains_key(&id) {
                 continue;
             }
-            // 玩家快照变了之后堆里的键过期，按当前状态重算再放回去。
-            let fresh = self.task_key(id);
-            if fresh != key {
-                self.pending_order.push(Reverse((fresh, id)));
-                // 键没变小时避免同一项原地打转，留到下一次 drive。
-                if fresh >= key {
-                    deferred.push(Reverse((fresh, id)));
-                    continue;
-                }
-                continue;
-            }
+            let _ = key;
             let Some(pending) = self.pending.get(&id) else {
                 continue;
             };
@@ -1574,7 +1561,7 @@ impl<C: ChunkBundle> Director<C> {
             // 不用「最少在途数」做硬跳过，否则某个玩家恰好没有待派任务时
             // 会把其它玩家全部饿死。
             if overlaps || !self.claim_task_owner(id, pos, kind) {
-                deferred.push(Reverse((self.task_key(id), id)));
+                skipped.push(id);
                 continue;
             }
             let pending = self.pending.remove(&id).expect("上面已经确认存在");
@@ -1594,9 +1581,9 @@ impl<C: ChunkBundle> Director<C> {
             });
             let _ = pending.seq;
         }
-        // 本轮新被挡住的任务并回 deferred 堆；堆里可能已有旧项，
-        // 出堆时用 `pending` 和当前键核对，重复的旧项直接跳过。
-        self.deferred.extend(deferred);
+        // 本轮被挡住的任务追加到队尾；出堆时会核对 `pending` 和当前键，
+        // 所以不做排序、去重，也不扫整张积压表。
+        self.deferred.extend(skipped);
         self.flush_notifications(out);
     }
 
