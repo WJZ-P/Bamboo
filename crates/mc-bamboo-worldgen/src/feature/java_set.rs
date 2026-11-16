@@ -4,35 +4,35 @@
 //! 随后按迭代顺序逐个判 `nextFloat` 决定是否长植被。迭代顺序因此直接决定哪个位置拿到
 //! 哪一次随机数，必须复刻 `java.util.HashSet`（底层 `HashMap`）的桶序。
 //!
-//! 复刻范围照 OpenJDK `HashMap`：初始容量 16、装载因子 0.75、桶内尾插、
+//! 复刻范围照 OpenJDK `HashMap`（用 JDK 25 的 `javap -c -p java.util.HashMap` /
+//! `java.util.HashMap$TreeNode` 逐条核对）：初始容量 16、装载因子 0.75、桶内尾插、
 //! `hash(key) = h ^ (h >>> 16)`（`h` 是 `Vec3i.hashCode() = (y + z*31)*31 + x`，32 位
 //! 回绕）、索引 `hash & (capacity-1)`、超阈值翻倍（按 `hash & oldCapacity` 拆 lo/hi，
 //! 两边保持相对顺序）。
 //!
-//! 桶内节点数到 8 时调 `treeifyBin`：容量 < 64 只翻倍，否则把链表转红黑树并用
-//! `moveRootToFront` 把树根挪到桶首。**这一步会改变迭代顺序**，必须实现：
-//! `lush_caves_vegetation` 的一个 48 点 patch 就会走到 `cap=64`、单桶 10 个节点，
-//! 只做链表会让两格 `short_grass` 差一格。
+//! 桶内节点数到 9 时 `putVal` 调 `treeifyBin`：容量 < 64 只翻倍，否则把链表换成
+//! `TreeNode` 并 `treeify`（红黑树 + `moveRootToFront` 把树根挪到桶首）。树化桶里
+//! 后续的 `putTreeVal` 把新节点插在**父节点的 `next` 之后**，不是桶尾；扩容的
+//! `TreeNode.split` 两侧都沿 `next` 链保序，`UNTREEIFY_THRESHOLD` 以下退回链表。
+//! 迭代始终沿 `TreeNode.next` 链表，所以这些操作只改变链表顺序，不需要在迭代时
+//! 遍历树结构。植被 patch 的地表集合只做 add，所以这里不实现 remove。
 //!
 //! Iteration order of the official `HashSet<BlockPos>`. `placeGroundPatch` collects the
 //! surface positions into a `HashSet` and `distributeVegetation` draws one `nextFloat` per
 //! element in iteration order, so the bucket order decides which position gets which draw.
 //!
-//! Mirrors OpenJDK `HashMap`: capacity 16, load factor 0.75, tail insertion inside a bin,
-//! `hash(key) = h ^ (h >>> 16)` with `h = (y + z*31)*31 + x`, index `hash & (cap-1)`, and
-//! doubling at the load threshold (low/high split preserving relative order).
-//!
-//! A bin reaching eight nodes calls `treeifyBin`: under capacity 64 that only doubles the
-//! table, otherwise the list becomes a red-black tree and `moveRootToFront` promotes the
-//! root to the bin head. **That step changes the iteration order**, so it has to be
-//! implemented: a 48-position `lush_caves_vegetation` patch already reaches `cap=64` with
-//! ten nodes in one bin, and skipping it shifts two `short_grass` by one cell.
+//! Mirrors OpenJDK `HashMap` (checked against JDK 25 bytecode of `HashMap` and its
+//! `TreeNode`): capacity 16, load factor 0.75, tail insertion, the spread hash, the
+//! low/high resize split, `treeifyBin`/`treeify`/`putTreeVal` and `TreeNode.split`.
+//! `HashSet` is only ever inserted into here, so removal is not implemented.
 
 type Pos = (i32, i32, i32);
 
-/// `HashMap.TREEIFY_THRESHOLD`。
+/// `HashMap.TREEIFY_THRESHOLD`。`putVal` 在 `binCount >= 7` 时调 `treeifyBin`，
+/// 也就是链表长度变成 9 的那一刻。
 ///
-/// `HashMap.TREEIFY_THRESHOLD`.
+/// `HashMap.TREEIFY_THRESHOLD`; `putVal` calls `treeifyBin` once `binCount >= 7`,
+/// i.e. when the list just grew to nine nodes.
 const TREEIFY_THRESHOLD: usize = 8;
 
 /// `HashMap.MIN_TREEIFY_CAPACITY`：容量不到这个数时 `treeifyBin` 只翻倍，不树化。
@@ -63,9 +63,28 @@ fn spread(hash: i32) -> u32 {
     hash ^ (hash >> 16)
 }
 
-/// 一个节点，同时挂在链表和红黑树上（对应官方 `HashMap.TreeNode`）。
+fn bucket_index(hash: u32, capacity: usize) -> usize {
+    hash as usize & (capacity - 1)
+}
+
+/// `Vec3i.compareTo`：先 y，再 z，最后 x。`HashMap.TreeNode` 在 hash 相等时用它，
+/// 因为 `BlockPos` 通过 `Vec3i` 实现了 `Comparable<Vec3i>`。
 ///
-/// A node living in both the list and the red-black tree, like `HashMap.TreeNode`.
+/// `Vec3i.compareTo`: y, then z, then x. `HashMap.TreeNode` uses it when hashes tie,
+/// because `BlockPos` is `Comparable<Vec3i>` through `Vec3i`.
+fn compare_pos(a: Pos, b: Pos) -> i32 {
+    if a.1 != b.1 {
+        return a.1 - b.1;
+    }
+    if a.2 != b.2 {
+        return a.2 - b.2;
+    }
+    a.0 - b.0
+}
+
+/// 一个节点，同时挂在 `next` 链和红黑树上（对应官方 `HashMap.TreeNode`）。
+///
+/// A node living in both the `next` chain and the red-black tree, like `HashMap.TreeNode`.
 #[derive(Debug, Clone, Copy)]
 struct Node {
     pos: Pos,
@@ -76,15 +95,58 @@ struct Node {
     red: bool,
 }
 
-/// 一个桶：`order` 就是官方 `next` 链，迭代顺序就是它的顺序；`nodes` 是树节点的 arena。
+impl Node {
+    fn new(pos: Pos, hash: u32) -> Self {
+        Self {
+            pos,
+            hash,
+            left: None,
+            right: None,
+            parent: None,
+            red: false,
+        }
+    }
+
+    /// 拆桶 / 退树后重建时把树指针清空；`next` 链由 `Bin.order` 单独保存。
+    ///
+    /// Clear the tree links when a split or `untreeify` rebuilds the bin.
+    fn clear_tree(&mut self) {
+        self.left = None;
+        self.right = None;
+        self.parent = None;
+        self.red = false;
+    }
+}
+
+/// 一个桶：`order` 就是官方 `next` 链，迭代顺序就是它的顺序；`nodes` 是节点 arena。
 ///
 /// One bin: `order` is the official `next` chain and therefore the iteration order;
-/// `nodes` is the tree arena.
-#[derive(Debug, Default)]
+/// `nodes` is the node arena.
+#[derive(Default)]
 struct Bin {
     nodes: Vec<Node>,
     order: Vec<usize>,
     root: Option<usize>,
+}
+
+/// `HashMap.TreeNode` 的比较：hash 优先，相同再 `compareComparables`（`compareTo`），
+/// 仍相同才 `tieBreakOrder`。`BlockPos` 的两套判据全等时就一定是同一个位置
+/// （`HashSet` 里不会有两个），所以这里不需要 `identityHashCode` 兜底。
+///
+/// Ordering used by `HashMap.TreeNode`: hash first, then `compareTo`, then
+/// `tieBreakOrder`. Two `BlockPos` values equal under both are the same position,
+/// which a `HashSet` cannot contain twice, so no `identityHashCode` fallback is needed.
+fn tree_direction(node: &Node, other: &Node) -> i32 {
+    // `TreeNode` 用 `if_icmple` / `if_icmpge` 比 `hash`，是 **有符号** int 比较。
+    // `TreeNode` compares `hash` with `if_icmple` / `if_icmpge`: **signed** int.
+    let (hash, other_hash) = (node.hash as i32, other.hash as i32);
+    if hash < other_hash {
+        return -1;
+    }
+    if hash > other_hash {
+        return 1;
+    }
+    compare_pos(node.pos, other.pos)
 }
 
 impl Bin {
@@ -92,75 +154,23 @@ impl Bin {
         self.root.is_some()
     }
 
-    /// 官方 `treeify`：链表头作根，后续节点按 hash 落左右子树，每次插入后
-    /// `balanceInsertion`，最后 `moveRootToFront`。
-    ///
-    /// 官方在 hash 完全相同时会退到 `tieBreakOrder`（`BlockPos` 不实现 `Comparable`，
-    /// 于是用 `System.identityHashCode`，依赖对象地址、无法预测）。这里固定走左子树；
-    /// 只有 `spread(h)` 完全相同的两个坐标才会走到，实测的植被 patch 里没有出现。
-    ///
-    /// The official `treeify`: the list head becomes the root, later nodes descend by
-    /// hash with `balanceInsertion`, then `moveRootToFront`. For two nodes sharing the
-    /// exact spread hash the official code falls back to `tieBreakOrder`
-    /// (`System.identityHashCode`, i.e. object addresses, unpredictable); here they take
-    /// the left subtree. Only identical spread hashes reach that branch.
-    fn treeify(&mut self) {
-        if self.is_tree() || self.order.len() < 2 {
-            return;
+    /// 官方 `root()`：沿 `parent` 一直往上。
+    /// The official `root()`: walk `parent` to the top.
+    fn tree_root(&self, mut node: usize) -> usize {
+        while let Some(parent) = self.nodes[node].parent {
+            node = parent;
         }
-        let ordered = std::mem::take(&mut self.order);
-        self.root = Some(ordered[0]);
-        self.nodes[ordered[0]].red = false;
-        for &node in &ordered[1..] {
-            self.link(node);
-        }
-        let root = self.root.expect("treeify keeps a root");
-        self.order = ordered;
-        self.move_root_to_front(root);
+        node
     }
 
-    /// 从根按 hash 下探到空槽，挂上新节点并做 `balanceInsertion`。返回新根。
-    ///
-    /// Walk down by hash to the first empty slot, attach the node and run
-    /// `balanceInsertion`. Returns the new root.
-    fn link(&mut self, node: usize) -> usize {
-        let hash = self.nodes[node].hash;
-        let mut current = self.root.expect("link only runs with a root");
-        loop {
-            let current_hash = self.nodes[current].hash;
-            let go_left = current_hash >= hash;
-            let slot = if go_left {
-                self.nodes[current].left
-            } else {
-                self.nodes[current].right
-            };
-            match slot {
-                Some(next) => current = next,
-                None => {
-                    self.nodes[node].parent = Some(current);
-                    self.nodes[node].red = true;
-                    if go_left {
-                        self.nodes[current].left = Some(node);
-                    } else {
-                        self.nodes[current].right = Some(node);
-                    }
-                    let root = self.balance_insertion(node);
-                    self.root = Some(root);
-                    return root;
-                }
-            }
-        }
-    }
-
-    /// 官方 `rotateLeft`。
-    /// The official `rotateLeft`.
+    /// 官方 `rotateLeft(root, p)`。
+    /// The official `rotateLeft(root, p)`.
     fn rotate_left(&mut self, mut root: usize, p: usize) -> usize {
         let Some(r) = self.nodes[p].right else {
             return root;
         };
-        let rl = self.nodes[r].left;
-        self.nodes[p].right = rl;
-        if let Some(rl) = rl {
+        self.nodes[p].right = self.nodes[r].left;
+        if let Some(rl) = self.nodes[r].left {
             self.nodes[rl].parent = Some(p);
         }
         let pp = self.nodes[p].parent;
@@ -170,28 +180,22 @@ impl Bin {
                 root = r;
                 self.nodes[r].red = false;
             }
-            Some(pp) => {
-                if self.nodes[pp].left == Some(p) {
-                    self.nodes[pp].left = Some(r);
-                } else {
-                    self.nodes[pp].right = Some(r);
-                }
-            }
+            Some(pp) if self.nodes[pp].left == Some(p) => self.nodes[pp].left = Some(r),
+            Some(pp) => self.nodes[pp].right = Some(r),
         }
         self.nodes[r].left = Some(p);
         self.nodes[p].parent = Some(r);
         root
     }
 
-    /// 官方 `rotateRight`。
-    /// The official `rotateRight`.
+    /// 官方 `rotateRight(root, p)`。
+    /// The official `rotateRight(root, p)`.
     fn rotate_right(&mut self, mut root: usize, p: usize) -> usize {
         let Some(l) = self.nodes[p].left else {
             return root;
         };
-        let lr = self.nodes[l].right;
-        self.nodes[p].left = lr;
-        if let Some(lr) = lr {
+        self.nodes[p].left = self.nodes[l].right;
+        if let Some(lr) = self.nodes[l].right {
             self.nodes[lr].parent = Some(p);
         }
         let pp = self.nodes[p].parent;
@@ -201,21 +205,16 @@ impl Bin {
                 root = l;
                 self.nodes[l].red = false;
             }
-            Some(pp) => {
-                if self.nodes[pp].right == Some(p) {
-                    self.nodes[pp].right = Some(l);
-                } else {
-                    self.nodes[pp].left = Some(l);
-                }
-            }
+            Some(pp) if self.nodes[pp].right == Some(p) => self.nodes[pp].right = Some(l),
+            Some(pp) => self.nodes[pp].left = Some(l),
         }
         self.nodes[l].right = Some(p);
         self.nodes[p].parent = Some(l);
         root
     }
 
-    /// 官方 `balanceInsertion`。
-    /// The official `balanceInsertion`.
+    /// 官方 `balanceInsertion(root, x)`；`self.root` 随之更新。
+    /// The official `balanceInsertion(root, x)`; updates `self.root`.
     fn balance_insertion(&mut self, mut x: usize) -> usize {
         let mut root = self.root.expect("balance_insertion needs a root");
         self.nodes[x].red = true;
@@ -232,8 +231,9 @@ impl Bin {
             };
             if self.nodes[xpp].left == Some(xp) {
                 let uncle = self.nodes[xpp].right;
-                if let Some(uncle) = uncle.filter(|&index| self.nodes[index].red) {
-                    self.nodes[uncle].red = false;
+                if uncle.is_some_and(|u| self.nodes[u].red) {
+                    let u = uncle.expect("checked above");
+                    self.nodes[u].red = false;
                     self.nodes[xp].red = false;
                     self.nodes[xpp].red = true;
                     x = xpp;
@@ -243,17 +243,18 @@ impl Bin {
                     root = self.rotate_left(root, xp);
                     x = xp;
                 }
-                if let Some(xp_now) = self.nodes[x].parent {
-                    self.nodes[xp_now].red = false;
-                    if let Some(xpp_now) = self.nodes[xp_now].parent {
-                        self.nodes[xpp_now].red = true;
-                        root = self.rotate_right(root, xpp_now);
+                if let Some(xp) = self.nodes[x].parent {
+                    self.nodes[xp].red = false;
+                    if let Some(xpp) = self.nodes[xp].parent {
+                        self.nodes[xpp].red = true;
+                        root = self.rotate_right(root, xpp);
                     }
                 }
             } else {
                 let uncle = self.nodes[xpp].left;
-                if let Some(uncle) = uncle.filter(|&index| self.nodes[index].red) {
-                    self.nodes[uncle].red = false;
+                if uncle.is_some_and(|u| self.nodes[u].red) {
+                    let u = uncle.expect("checked above");
+                    self.nodes[u].red = false;
                     self.nodes[xp].red = false;
                     self.nodes[xpp].red = true;
                     x = xpp;
@@ -263,21 +264,21 @@ impl Bin {
                     root = self.rotate_right(root, xp);
                     x = xp;
                 }
-                if let Some(xp_now) = self.nodes[x].parent {
-                    self.nodes[xp_now].red = false;
-                    if let Some(xpp_now) = self.nodes[xp_now].parent {
-                        self.nodes[xpp_now].red = true;
-                        root = self.rotate_left(root, xpp_now);
+                if let Some(xp) = self.nodes[x].parent {
+                    self.nodes[xp].red = false;
+                    if let Some(xpp) = self.nodes[xp].parent {
+                        self.nodes[xpp].red = true;
+                        root = self.rotate_left(root, xpp);
                     }
                 }
             }
         }
     }
 
-    /// 官方 `moveRootToFront`：链表里把树根挪到最前，其余保持相对顺序。
+    /// 官方 `moveRootToFront`：把树根从 `next` 链里摘出来插到桶首，其余保持相对顺序。
     ///
-    /// The official `moveRootToFront`: move the root to the list head, keeping the rest
-    /// in order.
+    /// The official `moveRootToFront`: unlink the root from the `next` chain and put it
+    /// at the bin head, keeping the rest in order.
     fn move_root_to_front(&mut self, root: usize) {
         if self.order.first() == Some(&root) {
             return;
@@ -286,47 +287,111 @@ impl Bin {
         self.order.insert(0, root);
     }
 
+    /// 按 `dir` 把 `node` 挂到 `parent` 的空子树上，并跑 `balanceInsertion`。
+    ///
+    /// Attach `node` to `parent`'s empty child slot given by `dir`, then balance.
+    fn attach(&mut self, parent: usize, node: usize, dir: i32) {
+        self.nodes[node].parent = Some(parent);
+        self.nodes[node].red = true;
+        if dir <= 0 {
+            self.nodes[parent].left = Some(node);
+        } else {
+            self.nodes[parent].right = Some(node);
+        }
+        let root = self.balance_insertion(node);
+        self.root = Some(root);
+    }
+
+    /// `balanceInsertion` 之后官方把新根调到桶首；`treeify` 与 `putTreeVal`
+    /// 都走这一步。
+    ///
+    /// After `balanceInsertion` the official code promotes the new root to the
+    /// bin head; both `treeify` and `putTreeVal` do this.
+    fn finish_insert(&mut self, node: usize, dir: i32, parent: usize) {
+        self.attach(parent, node, dir);
+        let root = self.root.expect("a treeified bin keeps a root");
+        self.move_root_to_front(root);
+    }
+
+    /// 官方 `treeify`：按 `order` 顺序把节点逐个插进红黑树，最后 `moveRootToFront`。
+    /// `order` 本身保持原链表顺序（官方的 `treeify` 只改树指针和 `prev`/`next` 的
+    /// 根位置，不改其余节点的相对顺序）。
+    ///
+    /// The official `treeify`: insert nodes in `order` into the tree, then
+    /// `moveRootToFront`. The rest of the `next` chain keeps its relative order.
+    fn treeify(&mut self) {
+        if self.is_tree() || self.order.len() < 2 {
+            return;
+        }
+        let ordered = self.order.clone();
+        self.root = Some(ordered[0]);
+        self.nodes[ordered[0]].red = false;
+        self.nodes[ordered[0]].parent = None;
+        self.nodes[ordered[0]].left = None;
+        self.nodes[ordered[0]].right = None;
+        for &node in &ordered[1..] {
+            self.nodes[node].left = None;
+            self.nodes[node].right = None;
+            self.nodes[node].parent = None;
+            self.nodes[node].red = false;
+            let mut current = self.root.expect("treeify keeps a root");
+            if self.nodes[current].parent.is_some() {
+                current = self.tree_root(current);
+            }
+            loop {
+                let dir = tree_direction(&self.nodes[node], &self.nodes[current]);
+                let slot = if dir <= 0 {
+                    self.nodes[current].left
+                } else {
+                    self.nodes[current].right
+                };
+                match slot {
+                    Some(next) => current = next,
+                    None => {
+                        self.attach(current, node, dir);
+                        break;
+                    }
+                }
+            }
+        }
+        self.order = ordered;
+        let root = self.root.expect("treeify keeps a root");
+        self.move_root_to_front(root);
+    }
+
     /// 官方 `putTreeVal`（已树化的桶里插入）：按 hash 下探找到树的父节点，把新节点插到
     /// **父节点在链表中的下一个位置**（不是桶尾），再做 `balanceInsertion` 与
     /// `moveRootToFront`。
     ///
-    /// 链表插入位置很关键：桶里后来的节点会插在树的父节点后面，`moveRootToFront` 再把
-    /// 根提到桶首，于是桶内顺序不再是纯插入序。把它当成"追加到桶尾"会让桶内两个 hash
-    /// 相近的元素顺序颠倒，正是 `lush_caves_vegetation` 那两格 `short_grass` 的成因。
-    ///
     /// The official `putTreeVal` on a treeified bin: descend by hash, splice the new node
     /// **after its parent in the list** (not at the bin tail), then `balanceInsertion` and
-    /// `moveRootToFront`. The splice point matters: later members land right after their
-    /// tree parent, and `moveRootToFront` then promotes the root, so the bin order is no
-    /// longer plain insertion order. Treating it as "append to the tail" swaps two nearby
-    /// hashes, which is exactly what shifted the two `short_grass` cells.
+    /// `moveRootToFront`.
     fn put_tree_val(&mut self, node: usize) {
-        let hash = self.nodes[node].hash;
-        let mut current = self.root.expect("putTreeVal only runs on a treeified bin");
+        // `p = this.parent != null ? root() : this`，`this` 是桶首节点。
+        // `p = this.parent != null ? root() : this`, where `this` is the bin head.
+        let head = self.order[0];
+        let mut current = if self.nodes[head].parent.is_some() {
+            self.tree_root(head)
+        } else {
+            head
+        };
         let parent = loop {
-            let current_hash = self.nodes[current].hash;
-            let go_left = current_hash > hash;
-            let slot = if go_left {
+            let dir = tree_direction(&self.nodes[node], &self.nodes[current]);
+            let slot = if dir <= 0 {
                 self.nodes[current].left
             } else {
                 self.nodes[current].right
             };
             match slot {
                 Some(next) => current = next,
-                None => {
-                    self.nodes[node].parent = Some(current);
-                    self.nodes[node].red = true;
-                    if go_left {
-                        self.nodes[current].left = Some(node);
-                    } else {
-                        self.nodes[current].right = Some(node);
-                    }
-                    break current;
-                }
+                None => break current,
             }
         };
-        // `xp.next = x`：新节点插在父节点之后，其余保持原顺序。
-        // `xp.next = x`: the new node follows its parent; the rest keeps its order.
+        let dir = tree_direction(&self.nodes[node], &self.nodes[parent]);
+        // `newTreeNode(h, k, v, xp.next)` 已经把新节点挂在父节点之后；
+        // `putTreeVal` 的下探与平衡都在这个链表状态下进行。
+        // `newTreeNode(h, k, v, xp.next)` already spliced the new node after its
+        // parent; `putTreeVal` descends and balances with that chain in place.
         let after = self
             .order
             .iter()
@@ -334,9 +399,7 @@ impl Bin {
             .map(|position| position + 1)
             .unwrap_or(self.order.len());
         self.order.insert(after, node);
-        let root = self.balance_insertion(node);
-        self.root = Some(root);
-        self.move_root_to_front(root);
+        self.finish_insert(node, dir, parent);
     }
 }
 
@@ -346,11 +409,6 @@ impl Bin {
 pub struct JavaPosSet {
     buckets: Vec<Bin>,
     len: usize,
-    /// 遇到过本该树化的桶（容量 ≥ 64 且桶内 8 个）。为真时迭代顺序可能和官方不同。
-    ///
-    /// Hit a bin that should have been treeified (capacity ≥ 64 with 8 entries). When true
-    /// the iteration order may differ from the official one.
-    treeified: bool,
 }
 
 impl JavaPosSet {
@@ -361,7 +419,6 @@ impl JavaPosSet {
         Self {
             buckets: Vec::new(),
             len: 0,
-            treeified: false,
         }
     }
 
@@ -373,142 +430,111 @@ impl JavaPosSet {
         self.capacity() * 3 / 4
     }
 
-    /// `HashSet.add`。
+    /// `HashSet.add`：新增返回 true，重复返回 false。
     ///
-    /// `HashSet.add`.
-    pub fn insert(&mut self, pos: Pos) {
+    /// `HashSet.add`: true when inserted, false on a duplicate.
+    pub fn insert(&mut self, pos: Pos) -> bool {
+        // `HashSet` 实际是 `HashMap.put(key, PRESENT)`；`putVal` 只按 `hash` 和
+        // `key.equals` 找重复，不会去别的桶里找。
+        // `HashSet.add` is `HashMap.put(key, PRESENT)`; `putVal` looks for duplicates
+        // by hash and `equals` inside the target bin only.
         if self.buckets.is_empty() {
             self.resize(16);
         }
         let hash = spread(vec3i_hash(pos));
-        let index = hash as usize & (self.capacity() - 1);
+        let index = bucket_index(hash, self.capacity());
+        let bin = &mut self.buckets[index];
+        if bin
+            .order
+            .iter()
+            .any(|&node| bin.nodes[node].hash == hash && bin.nodes[node].pos == pos)
         {
-            let bin = &mut self.buckets[index];
-            if bin.order.iter().any(|&node| bin.nodes[node].pos == pos) {
-                return;
-            }
-            let node = bin.nodes.len();
-            bin.nodes.push(Node {
-                pos,
-                hash,
-                left: None,
-                right: None,
-                parent: None,
-                red: false,
-            });
-            if bin.is_tree() {
-                bin.put_tree_val(node);
-            } else {
-                bin.order.push(node);
-            }
+            return false;
+        }
+        let node = bin.nodes.len();
+        bin.nodes.push(Node::new(pos, hash));
+        if bin.is_tree() {
+            bin.put_tree_val(node);
+        } else {
+            bin.order.push(node);
         }
         self.len += 1;
-        // `putVal` 的顺序：先挂到桶尾，`binCount >= TREEIFY_THRESHOLD - 1` 时调
-        // `treeifyBin`（`binCount` 从 0 数到 7，对应"桶里已有 8 个、正要挂第 9 个"），
+        // `putVal` 的顺序：先挂到桶尾，链表长度到 9 时调 `treeifyBin`
+        // （`binCount >= TREEIFY_THRESHOLD - 1`，树化桶走 `putTreeVal`、不重复触发），
         // **然后**才判 `++size > threshold`。两步顺序颠倒会让容量序列不同。
         //
-        // `putVal` order: append to the bin, call `treeifyBin` once
-        // `binCount >= TREEIFY_THRESHOLD - 1` (`binCount` counts the 0-based walk, so it
-        // fires when the bin already holds 8 nodes and the 9th is appended), and **then**
-        // check `++size > threshold`. Swapping the two shifts the capacity sequence.
-        let over_threshold = self.buckets[index].order.len() > TREEIFY_THRESHOLD;
-        if over_threshold {
+        // `putVal` order: append, call `treeifyBin` when the list grows to nine
+        // (`binCount >= TREEIFY_THRESHOLD - 1`; treeified bins use `putTreeVal` and
+        // never re-trigger it), then check `++size > threshold`. Swapping the two
+        // shifts the capacity sequence.
+        if !self.buckets[index].is_tree() && self.buckets[index].order.len() > TREEIFY_THRESHOLD {
             if self.capacity() < MIN_TREEIFY_CAPACITY {
                 // 官方 `treeifyBin`：容量不足 64 时只翻倍，不树化。
                 // Official `treeifyBin`: under capacity 64 this only doubles the table.
                 self.resize(self.capacity() * 2);
             } else {
-                // 容量 ≥ 64：官方会真的把桶转红黑树，`moveRootToFront` 再把树根挪到桶首。
-                // 这种情况很少见（植被 patch 的地表集合几乎到不了），投入产出比低，所以
-                // **只置标记**，由调用方把这次放置标成 unsupported。
-                //
-                // At capacity ≥ 64 the official `HashMap` really treeifies the bin and
-                // `moveRootToFront` moves the root to the head. That is rare for vegetation
-                // patch surfaces, so we only raise a flag and let the caller mark the
-                // placement unsupported.
-                self.treeified = true;
+                self.buckets[index].treeify();
             }
         }
         if self.len > self.threshold() {
             self.resize(self.capacity() * 2);
         }
-    }
-
-    /// 这个集合是否遇到过本该树化的桶。为真时迭代顺序可能和官方不同。
-    ///
-    /// Whether the set hit a bin that should have been treeified. When true the iteration
-    /// order may differ from the official one.
-    pub fn is_treeified(&self) -> bool {
-        self.treeified
+        true
     }
 
     /// `HashMap.resize` 的 lo/hi 拆分：`hash & oldCapacity == 0` 留在原位，
-    /// 其余挪到 `j + oldCapacity`，两边都保持原有相对顺序。
+    /// 其余挪到 `j + oldCapacity`，两边都保持原有相对顺序。树化桶走官方
+    /// `TreeNode.split`：拆完一侧超过 `UNTREEIFY_THRESHOLD` 才重新 `treeify`。
     ///
     /// `HashMap.resize`: double the table and split every bin by `hash & oldCapacity`,
     /// preserving relative order on both sides. A treeified bin follows the official
-    /// `split` rule (a side at or below `UNTREEIFY_THRESHOLD` goes back to a list,
-    /// otherwise it is treeified again in the new bin).
+    /// `split` rule (re-treeify a half only when it exceeds `UNTREEIFY_THRESHOLD`).
     fn resize(&mut self, new_capacity: usize) {
         let old_capacity = self.buckets.len();
-        let old = std::mem::replace(
-            &mut self.buckets,
-            (0..new_capacity).map(|_| Bin::default()).collect(),
-        );
-        for (index, bin) in old.into_iter().enumerate() {
+        let old = if self.buckets.is_empty() {
+            (0..16).map(|_| Bin::default()).collect()
+        } else {
+            std::mem::replace(
+                &mut self.buckets,
+                (0..new_capacity).map(|_| Bin::default()).collect(),
+            )
+        };
+        for (index, mut bin) in old.into_iter().enumerate() {
+            let was_tree = bin.is_tree();
             let mut low: Vec<usize> = Vec::new();
             let mut high: Vec<usize> = Vec::new();
-            let was_tree = bin.is_tree();
-            let mut carry = Bin::default();
-            for node in bin.order {
-                carry.nodes.push(bin.nodes[node]);
-            }
-            for (position, node) in carry.nodes.iter().enumerate() {
-                let slot = if node.hash as usize & old_capacity != 0 {
-                    &mut high
+            for &node in &bin.order {
+                bin.nodes[node].clear_tree();
+                if bin.nodes[node].hash as usize & old_capacity != 0 {
+                    high.push(node);
                 } else {
-                    &mut low
-                };
-                // `order` 存的是 `carry` 的下标，重建时按同样的顺序落进新桶。
-                slot.push(position);
+                    low.push(node);
+                }
             }
-            self.adopt(index, low, &carry.nodes, was_tree, true);
-            self.adopt(index + old_capacity, high, &carry.nodes, was_tree, false);
+            bin.root = None;
+            self.adopt(index, &low, &bin.nodes, was_tree);
+            self.adopt(index + old_capacity, &high, &bin.nodes, was_tree);
+        }
+        if self.buckets.is_empty() {
+            self.buckets = (0..new_capacity).map(|_| Bin::default()).collect();
         }
     }
 
-    /// 把拆分后的一半节点放进新桶：原桶是树且节点数超过 `UNTREEIFY_THRESHOLD` 就重新
-    /// 树化，否则按原顺序组成链表。
+    /// 把拆分后的一半节点放进新桶：原桶是树且这一侧超过 `UNTREEIFY_THRESHOLD`
+    /// 才重新树化。
     ///
-    /// Place one half of a split bin into the new table: rebuild the tree when the source
-    /// bin was a tree and this half exceeds `UNTREEIFY_THRESHOLD`, otherwise keep a list.
-    fn adopt(
-        &mut self,
-        index: usize,
-        members: Vec<usize>,
-        source: &[Node],
-        was_tree: bool,
-        _low: bool,
-    ) {
+    /// Place one half of a split bin into the new table: rebuild the tree only when
+    /// the source bin was a tree and this half exceeds `UNTREEIFY_THRESHOLD`.
+    fn adopt(&mut self, index: usize, members: &[usize], source: &[Node], was_tree: bool) {
         if members.is_empty() {
             return;
         }
-        let tree = was_tree && members.len() > UNTREEIFY_THRESHOLD;
         let bin = &mut self.buckets[index];
-        let base = bin.nodes.len();
-        for (offset, &position) in members.iter().enumerate() {
-            let node = source[position];
-            bin.nodes.push(Node {
-                pos: node.pos,
-                hash: node.hash,
-                left: None,
-                right: None,
-                parent: None,
-                red: false,
-            });
-            bin.order.push(base + offset);
+        for &node in members {
+            bin.nodes.push(source[node]);
         }
-        if tree {
+        bin.order = (0..members.len()).collect();
+        if was_tree && members.len() > UNTREEIFY_THRESHOLD {
             bin.treeify();
         }
     }
@@ -555,12 +581,12 @@ mod tests {
     fn iteration_is_by_bucket_then_insertion_order() {
         let mut set = JavaPosSet::new();
         for pos in [(0, 0, 0), (16, 0, 0), (32, 0, 0)] {
-            set.insert(pos);
+            assert!(set.insert(pos));
         }
         assert_eq!(set.to_vec().len(), 3);
         // 重复插入不改变集合大小。
         // Inserting a duplicate does not change the size.
-        set.insert((0, 0, 0));
+        assert!(!set.insert((0, 0, 0)));
         assert_eq!(set.to_vec().len(), 3);
     }
 
@@ -577,69 +603,21 @@ mod tests {
     }
 
     #[test]
-    fn treeified_bins_raise_a_flag_instead_of_reordering() {
-        // 40 个 (i*16, 62, 0) 会挤进少数几个桶。容量 ≥ 64 且桶内到 8 个节点时官方
-        // `HashMap` 转红黑树并把根移到桶首；本实现**不重排**，只置标记，由调用方把这次
-        // 放置标成 unsupported。
-        //
-        // Forty (i*16, 62, 0) positions pile into a few bins. At capacity ≥ 64 a bin with
-        // 8 nodes becomes a red-black tree in the official `HashMap`; this implementation
-        // does **not** reorder — it only raises a flag so the caller can mark the placement
-        // unsupported.
-        let mut set = JavaPosSet::new();
-        for i in 0..40 {
-            set.insert((i * 16, 62, 0));
-        }
-        assert!(set.is_treeified(), "a treeified bin must raise the flag");
-        // 纯链表顺序：0, 64, 128, ... 保持插入序。
-        // Plain list order: 0, 64, 128, ... keeping insertion order.
-        assert_eq!(set.to_vec()[0], (0, 62, 0));
-        assert_eq!(set.to_vec()[1], (64, 62, 0));
-    }
-
-    #[test]
-    fn small_sets_never_raise_the_flag() {
+    fn small_sets_never_treeify() {
         let mut set = JavaPosSet::new();
         for pos in [(0, 0, 0), (16, 0, 0), (32, 0, 0), (48, 0, 0)] {
             set.insert(pos);
         }
-        assert!(!set.is_treeified());
-    }
-
-    #[test]
-    fn a_dense_patch_bin_raises_the_treeified_flag() {
-        // 40 个同桶点（`x` 每次 +16，`hash` 低位相同）：桶内节点数超过 8 且容量到 64 时，
-        // 官方 `HashMap` 会把桶转成红黑树，迭代顺序由 `moveRootToFront` 决定。
-        // 本实现**不**复刻这一步，只置 `treeified` 标记让调用方把整次放置标 unsupported。
-        //
-        // Forty points in one bin (`x` steps by 16, so the hash's low bits repeat): once
-        // the bin passes eight nodes at capacity 64 the official `HashMap` treeifies it
-        // and `moveRootToFront` decides the order. This implementation does **not**
-        // reproduce that step; it only raises `treeified` so the caller can mark the
-        // placement unsupported.
-        let mut set = JavaPosSet::new();
-        for i in 0..40 {
-            set.insert((i * 16, 62, 0));
-        }
-        assert!(
-            set.is_treeified(),
-            "a dense patch must raise the treeified flag"
-        );
-        // 纯链表顺序：0, 64, 128, ... 保持插入序。
-        // Plain list order: 0, 64, 128, ... keeping insertion order.
-        assert_eq!(set.to_vec()[0], (0, 62, 0));
-        assert_eq!(set.to_vec()[1], (64, 62, 0));
+        assert_eq!(set.to_vec().len(), 4);
     }
 
     #[test]
     fn a_spread_patch_keeps_the_official_list_order() {
         // 半径 7 的圆盘、中心 (-35,62,41) 的 149 个点：没有桶超过 8 个，
-        // 官方不会树化，迭代序就是链表序。这里只断言规模，顺序由
-        // `matches_a_real_patch_shape` 一类的定点测试覆盖。
+        // 官方不会树化，迭代序就是链表序。
         //
         // A 149-point radius-7 disc at (-35,62,41): no bin passes eight nodes, so the
-        // official set stays a plain list and the order is the list order. This asserts
-        // only the size; fixed-point order tests cover the sequencing.
+        // official set stays a plain list and the order is the list order.
         let mut set = JavaPosSet::new();
         for dx in -7..=7 {
             for dz in -7..=7 {
@@ -649,5 +627,84 @@ mod tests {
             }
         }
         assert_eq!(set.to_vec().len(), 149);
+    }
+
+    #[test]
+    fn dense_collisions_follow_the_official_tree_order() {
+        // 40 个同桶点：官方在容量 64 后把桶树化，桶首是红黑树根。
+        // 这组顺序来自 JDK 25 的 `HashSet<BlockPos>` 实际迭代输出。
+        //
+        // Forty points in one bin: the official map treeifies at capacity 64 and the
+        // bin head becomes the red-black root. This order comes from a real JDK 25 run.
+        let mut set = JavaPosSet::new();
+        for i in 0..40 {
+            set.insert((i * 16, 62, 0));
+        }
+        let expected: Vec<Pos> = [
+            192, 0, 64, 128, 256, 320, 384, 448, 512, 576, 208, 16, 80, 144, 272, 336, 400, 464,
+            528, 592, 224, 32, 96, 160, 288, 352, 416, 480, 544, 608, 240, 48, 112, 176, 304, 368,
+            432, 496, 560, 624,
+        ]
+        .into_iter()
+        .map(|x| (x, 62, 0))
+        .collect();
+        assert_eq!(set.to_vec(), expected);
+    }
+
+    /// 读 JDK 25 的 `JavaSetOracle.java` 生成的用例文件，逐个比对增删后的迭代顺序。
+    ///
+    /// Replay the JDK 25 `JavaSetOracle` cases and compare the final iteration order.
+    /// The file is produced by
+    /// `java tools/mc-bamboo-vanilla/java/JavaSetOracle.java > crates/mc-bamboo-worldgen/src/feature/java_set_cases.txt`.
+    #[test]
+    fn matches_the_jdk_hashset_oracle() {
+        let text = include_str!("java_set_cases.txt");
+        let mut lines = text.lines();
+        let mut cases = 0usize;
+        while let Some(line) = lines.next() {
+            if !line.starts_with("CASE ") {
+                continue;
+            }
+            let case = line.to_owned();
+            let ops = lines.next().unwrap_or("");
+            let order = lines.next().unwrap_or("");
+            let ops = ops.strip_prefix("OPS ").unwrap_or("");
+            let order = order.strip_prefix("ORDER ").unwrap_or("");
+            let mut set = JavaPosSet::new();
+            for op in ops.split(';').filter(|s| !s.is_empty()) {
+                let mut parts = op[1..].split(' ');
+                let x: i32 = parts.next().unwrap().parse().unwrap();
+                let y: i32 = parts.next().unwrap().parse().unwrap();
+                let z: i32 = parts.next().unwrap().parse().unwrap();
+                assert_eq!(op.as_bytes()[0], b'+', "{case}: bad op {op}");
+                set.insert((x, y, z));
+            }
+            let expected: Vec<Pos> = order
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(|entry| {
+                    let mut parts = entry.split(' ');
+                    let x: i32 = parts.next().unwrap().parse().unwrap();
+                    let y: i32 = parts.next().unwrap().parse().unwrap();
+                    let z: i32 = parts.next().unwrap().parse().unwrap();
+                    (x, y, z)
+                })
+                .collect();
+            let actual = set.to_vec();
+            let first_bad = actual
+                .iter()
+                .zip(expected.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or(actual.len().min(expected.len()));
+            assert_eq!(
+                actual,
+                expected,
+                "{case}: iteration differs at {first_bad} ({} vs {})",
+                actual.len(),
+                expected.len()
+            );
+            cases += 1;
+        }
+        assert_eq!(cases, 80);
     }
 }
