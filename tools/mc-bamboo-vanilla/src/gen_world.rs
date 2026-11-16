@@ -40,7 +40,7 @@ use crate::oracle::collect_log;
 const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S] [--chunk X Z] [--scan N] \
      [--show N] [--level-type normal|large_biomes|amplified] [--break-self-test] \
      [--through features [--feature-types IDS | --types IDS | --all-features] \
-      [--steps MASK] [--coverage]]";
+      [--steps MASK] [--coverage] [--break-type KIND]]";
 const DEFAULT_SHOW: usize = 8;
 /// 全部 11 个 decoration step（和 `chunkgen.rs` / Java 侧的 `ALL_STEPS` 一致）。
 const ALL_STEPS: i32 = (1 << 11) - 1;
@@ -73,6 +73,9 @@ struct Options {
     /// 打印每个 Feature 类型实际跑到的候选次数（触发统计）。
     /// Print per-Feature-type candidate counts (coverage report).
     coverage: bool,
+    /// 改坏确认：只改这个类型写下的方块。空表示不改。
+    /// Break confirmation: corrupt blocks written only by this Feature type.
+    break_type: Option<String>,
 }
 
 impl Options {
@@ -94,6 +97,7 @@ impl Options {
             feature_types: None,
             steps: ALL_STEPS,
             coverage: false,
+            break_type: None,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -174,6 +178,13 @@ impl Options {
                     }
                     options.coverage = true;
                 }
+                "--break-type" => {
+                    if !options.features {
+                        return Err(format!("--break-type requires --through features: {USAGE}"));
+                    }
+                    options.break_type = Some((*args.next().ok_or(USAGE)?).to_owned());
+                    options.coverage = true;
+                }
                 "--all-features" => {
                     if !options.features {
                         return Err(format!(
@@ -234,6 +245,9 @@ struct Stats {
     heightmap_columns: u64,
     heightmap_words: u64,
     mismatches: Vec<String>,
+    /// 改坏确认里实际被改掉、且确实由目标类型写过的格数。
+    /// Cells actually corrupted during break confirmation, all written by the target type.
+    break_writes: u64,
 }
 
 /// 启动官方进程，一边读一边把收到的线和游戏侧生成结果比较。
@@ -262,6 +276,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         feature_types: options.feature_types.clone(),
         steps: options.steps,
         coverage: options.coverage,
+        break_type: options.break_type.clone(),
         coverage_totals: BTreeMap::new(),
         feature_kinds: if options.coverage {
             feature_kinds()?
@@ -302,6 +317,9 @@ struct Report {
     feature_types: Option<Vec<String>>,
     steps: i32,
     coverage: bool,
+    /// 改坏确认：只改这个类型写下的方块。
+    /// Break confirmation: corrupt blocks written only by this type.
+    break_type: Option<String>,
     /// 每个 Feature 类型 ID 在这批区块里实际交给 `Feature.place` 的候选次数。
     /// Per-Feature-type candidate count actually handed to `Feature.place`.
     coverage_totals: BTreeMap<String, u64>,
@@ -574,6 +592,56 @@ impl Report {
             // Self-test: corrupt one block so the comparison must report a mismatch.
             result.blocks[0][0][0] = mc_bamboo_data::blocks::LAVA;
         }
+        if let Some(kind) = &self.break_type {
+            // 改坏确认：单独跑这个类型，和「一个地物都不跑」的 CARVERS 基线比，
+            // 找到它真正写过的格子，把那一格改坏。随机数按 (index, step) 播种，
+            // 白名单只影响跑哪些 index，所以单独跑的结果和它在完整跑里写的位置一致。
+            // 只改实际写过的格子，才能抓住「这个类型根本没被比到」的假绿。
+            // Break confirmation: run this type alone and diff it against a bare
+            // CARVERS run to locate a cell it actually wrote, then corrupt it.
+            // Feature seeds depend only on (index, step), so an allow list does
+            // not shift the writes of the types it keeps. Corrupting a cell the
+            // type really wrote is what exposes a false green.
+            let only = [kind.clone()];
+            let empty: [String; 0] = [];
+            let target = mc_bamboo_game::worldgen_features::game_features_with_mask(
+                &config,
+                x,
+                z,
+                Some(&only),
+                self.steps,
+            )
+            .map_err(|error| format!("break run failed for seed {seed} ({x},{z}): {error}"))?;
+            let bare = mc_bamboo_game::worldgen_features::game_features_with_mask(
+                &config,
+                x,
+                z,
+                Some(&empty),
+                self.steps,
+            )
+            .map_err(|error| format!("bare run failed for seed {seed} ({x},{z}): {error}"))?;
+            let marker = mc_bamboo_data::blocks::LAVA;
+            let mut broken = false;
+            'outer: for (chunk, (after, before)) in
+                target.blocks.iter().zip(bare.blocks.iter()).enumerate()
+            {
+                for (layer, (after, before)) in after.iter().zip(before.iter()).enumerate() {
+                    for (cell, (&after, &before)) in after.iter().zip(before.iter()).enumerate() {
+                        if after != before && after != marker {
+                            result.blocks[chunk][layer][cell] = marker;
+                            self.stats.break_writes += 1;
+                            broken = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            if !broken {
+                return Err(format!(
+                    "break-type {kind} wrote no comparable block at seed {seed} ({x},{z})"
+                ));
+            }
+        }
         // 未移植的分支会让整个区块标 unsupported；此时 0 不一致是假绿，必须报错。
         // An unported branch marks the whole chunk unsupported; 0 mismatches would
         // then be a false green, so fail loudly instead.
@@ -632,6 +700,7 @@ impl Report {
             heightmap_columns,
             heightmap_words,
             mismatches,
+            break_writes,
         } = self.stats;
         println!(
             "gen-world: {chunks} chunks, {biome_cells} quart cells, {blocks} blocks, \
@@ -665,6 +734,20 @@ impl Report {
         }
         if chunks == 0 {
             return Err("gen-world compared no chunks".to_owned());
+        }
+        if let Some(kind) = &self.break_type {
+            if break_writes == 0 || mismatches.is_empty() {
+                return Err(format!(
+                    "break-type {kind} corrupted {break_writes} cells but reported {} mismatches",
+                    mismatches.len()
+                ));
+            }
+            println!(
+                "gen-world break-type {kind}: detector works ({break_writes} corrupted cells, \
+                 {} mismatches)",
+                mismatches.len()
+            );
+            return Ok(());
         }
         if !mismatches.is_empty() {
             for message in mismatches.iter().take(self.show) {
