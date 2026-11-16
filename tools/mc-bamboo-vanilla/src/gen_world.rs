@@ -24,6 +24,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     io::{BufRead, BufReader, Read},
+    path::Path,
     process::{Command, Stdio},
 };
 
@@ -39,8 +40,9 @@ use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S] [--chunk X Z] [--scan N] \
      [--show N] [--level-type normal|large_biomes|amplified] [--break-self-test] \
-     [--through features [--feature-types IDS | --types IDS | --all-features] \
-      [--steps MASK] [--coverage] [--break-type KIND]]";
+     [--through features [--structures] [--feature-types IDS | --types IDS | --all-features] \
+      [--steps MASK] [--coverage] [--break-type KIND] [--structure-types IDS] \
+      [--break-structure KIND] [--structure-coverage]]";
 const DEFAULT_SHOW: usize = 8;
 /// 全部 11 个 decoration step（和 `chunkgen.rs` / Java 侧的 `ALL_STEPS` 一致）。
 const ALL_STEPS: i32 = (1 << 11) - 1;
@@ -76,6 +78,16 @@ struct Options {
     /// 改坏确认：只改这个类型写下的方块。空表示不改。
     /// Break confirmation: corrupt blocks written only by this Feature type.
     break_type: Option<String>,
+    /// `--structures`：Java 侧跑官方结构起点 / 引用 / 真 Beardifier / 带结构的
+    /// `applyBiomeDecoration`，游戏侧同步打开 `generate_structures`。
+    /// Turn vanilla structures on, on both sides of the comparison.
+    structures: bool,
+    /// 带结构模式下的覆盖统计：打印每种结构放置的结构件数与方块数。
+    /// Print per-structure piece / block counts in structures mode.
+    structure_coverage: bool,
+    /// 带结构模式下的改坏开关：跳过一个特定结构类型的结构件放置。
+    /// Break confirmation in structures mode: skip one structure type.
+    break_structure: Option<String>,
 }
 
 impl Options {
@@ -98,11 +110,14 @@ impl Options {
             steps: ALL_STEPS,
             coverage: false,
             break_type: None,
+            structures: false,
+            structure_coverage: false,
+            break_structure: None,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
-                "--seeds" | "--chunks" | "--salt" | "--scan" => {
+                "--seeds" | "--chunks" | "--salt" | "--scan" | "--seed" => {
                     let value = args.next().ok_or(USAGE)?;
                     options
                         .forwarded
@@ -193,6 +208,31 @@ impl Options {
                     }
                     options.feature_types = Some(Vec::new());
                 }
+                // 带结构对拍：默认无结构模式完全不变，只有显式开关才改两边。
+                // Structures mode is opt-in; the default no-structure oracle is unchanged.
+                "--structures" => {
+                    if !options.features {
+                        return Err("--structures requires --through features".to_owned());
+                    }
+                    options.structures = true;
+                    options.structure_coverage = true;
+                    // 带结构模式下 Java 和游戏都跑全部 11 步、全部地物；白名单
+                    // 只用来做改坏确认，不能把结构件之外的地物一起关掉。
+                    options.feature_types = Some(Vec::new());
+                }
+                "--structure-coverage" => {
+                    if !options.features {
+                        return Err("--structure-coverage requires --through features".to_owned());
+                    }
+                    options.structure_coverage = true;
+                }
+                "--break-structure" => {
+                    if !options.features {
+                        return Err("--break-structure requires --through features".to_owned());
+                    }
+                    options.break_structure = Some((*args.next().ok_or(USAGE)?).to_owned());
+                    options.structure_coverage = true;
+                }
                 "--through" => {
                     let value = args.next().ok_or(USAGE)?;
                     if *value != "features" {
@@ -217,6 +257,9 @@ impl Options {
                 }
                 _ => return Err(USAGE.to_owned()),
             }
+        }
+        if options.structures {
+            options.forwarded.push("--structures".to_owned());
         }
         if options.features {
             match &options.feature_types {
@@ -248,6 +291,12 @@ struct Stats {
     /// 改坏确认里实际被改掉、且确实由目标类型写过的格数。
     /// Cells actually corrupted during break confirmation, all written by the target type.
     break_writes: u64,
+    /// 带结构对拍里比较过的结构统计行数。
+    /// Structure coverage rows compared in structures mode.
+    coverage_rows: u64,
+    /// 带结构对拍里 Java 侧报告的结构件总数。
+    /// Total structure pieces reported by the Java oracle.
+    java_pieces: u64,
 }
 
 /// 启动官方进程，一边读一边把收到的线和游戏侧生成结果比较。
@@ -255,8 +304,24 @@ struct Stats {
 ///
 /// Launch the official process and compare each line against the in-game generator.
 /// `command` already points at `ChunkgenOracle.java`.
-pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
+pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
+    run_with_queries(command, args, None)
+}
+
+/// 带结构覆盖脚本用：额外提供一个 `seed cx cz` 查询文件，Java 与游戏侧按同一批
+/// 坐标逐个对拍。默认路径（无查询文件）完全走原来的 `--seeds/--chunks` 出题。
+///
+/// Structures coverage driver: supply a `seed cx cz` query file so both sides
+/// compare the same coordinates. Without it the usual seed/chunk generator runs.
+pub fn run_with_queries(
+    mut command: Command,
+    args: &[&str],
+    queries: Option<&Path>,
+) -> Result<(), String> {
     let options = Options::parse(args)?;
+    if let Some(path) = queries {
+        command.arg("--chunks-file").arg(path);
+    }
     let mut child = command
         .args(&options.forwarded)
         .stdout(Stdio::piped())
@@ -277,6 +342,11 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         steps: options.steps,
         coverage: options.coverage,
         break_type: options.break_type.clone(),
+        structures: options.structures,
+        structure_coverage: options.structure_coverage,
+        break_structure: options.break_structure.clone(),
+        structure_totals: BTreeMap::new(),
+        pending_coverage: HashMap::new(),
         coverage_totals: BTreeMap::new(),
         feature_kinds: if options.coverage {
             feature_kinds()?
@@ -320,6 +390,21 @@ struct Report {
     /// 改坏确认：只改这个类型写下的方块。
     /// Break confirmation: corrupt blocks written only by this type.
     break_type: Option<String>,
+    /// 带结构对拍：Java 侧与游戏侧都开结构。
+    /// Structures mode: both sides enable structures.
+    structures: bool,
+    /// 打印每种结构放置的结构件数与方块数。
+    /// Print per-structure piece / block counts.
+    structure_coverage: bool,
+    /// 带结构改坏确认：跳过这个结构类型的结构件放置。
+    /// Structures-mode break confirmation: skip this structure type.
+    break_structure: Option<String>,
+    /// 结构类型 ID → (结构件数, 结构件写下的方块数)。
+    /// Structure type → (placed pieces, blocks written by those pieces).
+    structure_totals: BTreeMap<String, (u64, u64)>,
+    /// `(seed,x,z)` → 上一条 coverage 行里的起点结构件总数。
+    /// `(seed,x,z)` → piece count in the last coverage line.
+    pending_coverage: HashMap<(i64, i32, i32), u64>,
     /// 每个 Feature 类型 ID 在这批区块里实际交给 `Feature.place` 的候选次数。
     /// Per-Feature-type candidate count actually handed to `Feature.place`.
     coverage_totals: BTreeMap<String, u64>,
@@ -354,6 +439,7 @@ impl Report {
                 }
                 "carvers" => self.on_carvers(&value)?,
                 "features" if self.features => self.on_features(&value)?,
+                "coverage" if self.features => self.on_coverage(&value)?,
                 "end" => {
                     self.official_checks = value.get("checks").and_then(Value::as_u64).unwrap_or(0);
                 }
@@ -433,6 +519,16 @@ impl Report {
         if through != expected {
             return Err(format!(
                 "oracle ran through {through}, gen-world needs {expected}"
+            ));
+        }
+        let structures = value
+            .get("structures")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if structures != self.structures {
+            return Err(format!(
+                "oracle structures={structures}, gen-world structures={}",
+                self.structures
             ));
         }
         self.header_ok = true;
@@ -561,12 +657,13 @@ impl Report {
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
         };
-        // Java 侧 `--through features` 用 `new StructureManager(level,
-        // new WorldOptions(seed, false, false), null)` 关掉结构分支，terrain 也走
-        // `Beardifier.EMPTY`；游戏侧必须同步关掉，两边才是同一片世界。
-        // Java's features mode disables structures and uses Beardifier.EMPTY;
-        // mirror that on the game side so both compare the same world.
-        config.generate_structures = false;
+        // 默认模式 Java 侧关掉结构分支、terrain 走 `Beardifier.EMPTY`；
+        // `--structures` 则两边都跑官方结构起点 / 引用 / 真 Beardifier 与带结构的
+        // `applyBiomeDecoration`，游戏侧 `game_features_with_mask` 走同一份
+        // `build_view` + `run_features_filtered`。
+        // The default mode disables structures and uses Beardifier.EMPTY;
+        // `--structures` runs official starts/references/Beardifier on both sides.
+        config.generate_structures = self.structures;
         // 和 Java 侧的 `--ore-only` / `--feature-types` 用同一份白名单。
         // Same allow list as Java's `--ore-only` / `--feature-types`.
         let ore_only = ["minecraft:ore".to_owned()];
@@ -576,8 +673,13 @@ impl Report {
             None => Some(&ore_only),
         };
         mc_bamboo_worldgen::perf::begin(-64, i32::MIN, mc_bamboo_worldgen::perf::Phase::Features);
-        let mut result = mc_bamboo_game::worldgen_features::game_features_with_mask(
-            &config, x, z, selectors, self.steps,
+        let mut result = mc_bamboo_game::worldgen_features::game_features_with_mask_skipping(
+            &config,
+            x,
+            z,
+            selectors,
+            self.steps,
+            self.break_structure.as_deref(),
         )
         .map_err(|error| format!("game features failed for seed {seed} ({x},{z}): {error}"))?;
         if self.coverage {
@@ -650,6 +752,9 @@ impl Report {
             ));
         }
         self.stats.chunks += 1;
+        if self.structure_coverage {
+            self.collect_structure_coverage(seed, x, z, &result)?;
+        }
 
         for (index, chunk) in chunks.iter().enumerate() {
             let dz = index as i32 / 3 - 1;
@@ -691,6 +796,225 @@ impl Report {
         Ok(())
     }
 
+    /// Java 侧报告中心区块官方生成的起点和引用；逐项与游戏侧同一条
+    /// `structure_starts` / `structure_references` 纯函数比，避免「只比方块、
+    /// 结构件根本没生成」的假绿。
+    ///
+    /// Compare vanilla's starts/references with the game's pure structure stages
+    /// so a block-only pass cannot hide missing structures.
+    fn on_coverage(&mut self, value: &Value) -> Result<(), String> {
+        let (seed, x, z) = line_key(value)?;
+        let config = WorldGenConfig {
+            seed,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        let data = mc_bamboo_game::worldgen_structures::structure_data(&config, x, z)
+            .map_err(|error| format!("game structure_data failed for ({seed},{x},{z}): {error}"))?;
+        let mut want_starts: Vec<(String, usize)> = Vec::new();
+        let mut total = 0_u64;
+        for entry in value
+            .get("starts")
+            .and_then(Value::as_array)
+            .ok_or("coverage line missing starts")?
+        {
+            let row = entry.as_array().ok_or("start entry is not an array")?;
+            let name = row
+                .first()
+                .and_then(Value::as_str)
+                .ok_or("bad start name")?
+                .to_owned();
+            let count = row
+                .get(1)
+                .and_then(Value::as_u64)
+                .ok_or("bad start count")? as usize;
+            total += count as u64;
+            want_starts.push((name, count));
+        }
+        want_starts.sort();
+        let mut rust_starts: Vec<(String, usize)> = data
+            .starts
+            .by_structure
+            .iter()
+            .map(|(name, start)| {
+                let count = match &start.pieces {
+                    mc_bamboo_worldgen::structure::pipeline::StartPieces::Layout(p) => p.len(),
+                    mc_bamboo_worldgen::structure::pipeline::StartPieces::Jigsaw(p) => p.len(),
+                    mc_bamboo_worldgen::structure::pipeline::StartPieces::Sparse(p) => p.len(),
+                };
+                (name.clone(), count)
+            })
+            .collect();
+        rust_starts.sort();
+        if rust_starts != want_starts {
+            self.stats.mismatches.push(format!(
+                "coverage ({seed},{x},{z}) starts: ours {rust_starts:?} vs {want_starts:?}"
+            ));
+        }
+        let mut want_refs: Vec<(String, i64)> = Vec::new();
+        for entry in value
+            .get("references")
+            .and_then(Value::as_array)
+            .ok_or("coverage line missing references")?
+        {
+            let row = entry.as_array().ok_or("reference entry is not an array")?;
+            want_refs.push((
+                row.first()
+                    .and_then(Value::as_str)
+                    .ok_or("bad reference name")?
+                    .to_owned(),
+                row.get(1)
+                    .and_then(Value::as_i64)
+                    .ok_or("bad reference key")?,
+            ));
+        }
+        want_refs.sort();
+        let mut rust_refs: Vec<(String, i64)> = data
+            .references
+            .iter()
+            .flat_map(|(name, keys)| keys.iter().map(move |&key| (name.clone(), key)))
+            .collect();
+        rust_refs.sort();
+        if rust_refs != want_refs {
+            self.stats.mismatches.push(format!(
+                "coverage ({seed},{x},{z}) references: ours {rust_refs:?} vs {want_refs:?}"
+            ));
+        }
+        // 结构件清单（结构名、类型、六点盒）逐条比，和 structure-pipeline 同口径。
+        let mut want_pieces: Vec<(String, String, [i32; 6])> = Vec::new();
+        for entry in value
+            .get("pieces")
+            .and_then(Value::as_array)
+            .ok_or("coverage line missing pieces")?
+        {
+            let row = entry.as_array().ok_or("piece entry is not an array")?;
+            let mut bb = [0_i32; 6];
+            for (i, target) in bb.iter_mut().enumerate() {
+                *target = row
+                    .get(i + 2)
+                    .and_then(Value::as_i64)
+                    .ok_or("bad piece box")? as i32;
+            }
+            want_pieces.push((
+                row.first()
+                    .and_then(Value::as_str)
+                    .ok_or("bad piece structure")?
+                    .to_owned(),
+                row.get(1)
+                    .and_then(Value::as_str)
+                    .ok_or("bad piece type")?
+                    .to_owned(),
+                bb,
+            ));
+        }
+        // 模板结构件（雪屋 / 沉船 / 海底遗迹 / 埋藏的宝藏）在 `postProcess` 里
+        // 会把 Y 从布局阶段的占位值改到地表 / 海床，所以官方跑完 FEATURES 后的
+        // `getBoundingBox` 与布局阶段的盒只有 XZ 一致。覆盖行只比 XZ 与结构件
+        // 类型，Y 留给逐方块比较去验。
+        // Templated pieces re-anchor Y during `postProcess`, so only XZ and the
+        // piece type are comparable here; the blocks comparison covers Y.
+        let normalize = |pieces: &mut Vec<(String, String, [i32; 6])>| {
+            for (_, _, bb) in pieces.iter_mut() {
+                bb[1] = 0;
+                bb[4] = 0;
+            }
+            pieces.sort();
+        };
+        normalize(&mut want_pieces);
+        let mut rust_pieces: Vec<(String, String, [i32; 6])> = Vec::new();
+        for (name, start) in &data.starts.by_structure {
+            match &start.pieces {
+                mc_bamboo_worldgen::structure::pipeline::StartPieces::Layout(pieces) => {
+                    for piece in pieces {
+                        rust_pieces.push((name.clone(), piece.id.clone(), piece.bb));
+                    }
+                }
+                mc_bamboo_worldgen::structure::pipeline::StartPieces::Jigsaw(pieces) => {
+                    for piece in pieces {
+                        rust_pieces.push((
+                            name.clone(),
+                            "minecraft:jigsaw".to_owned(),
+                            [
+                                piece.bounding_box.min_x,
+                                piece.bounding_box.min_y,
+                                piece.bounding_box.min_z,
+                                piece.bounding_box.max_x,
+                                piece.bounding_box.max_y,
+                                piece.bounding_box.max_z,
+                            ],
+                        ));
+                    }
+                }
+                mc_bamboo_worldgen::structure::pipeline::StartPieces::Sparse(pieces) => {
+                    for piece in pieces {
+                        rust_pieces.push((
+                            name.clone(),
+                            piece.piece_type.clone(),
+                            [
+                                piece.bounding_box.min_x,
+                                piece.bounding_box.min_y,
+                                piece.bounding_box.min_z,
+                                piece.bounding_box.max_x,
+                                piece.bounding_box.max_y,
+                                piece.bounding_box.max_z,
+                            ],
+                        ));
+                    }
+                }
+            }
+        }
+        normalize(&mut rust_pieces);
+        if rust_pieces != want_pieces {
+            let first = rust_pieces
+                .iter()
+                .zip(want_pieces.iter())
+                .find(|(a, b)| a != b);
+            self.stats.mismatches.push(format!(
+                "coverage ({seed},{x},{z}) pieces: ours {} vs {}; first diff {first:?}",
+                rust_pieces.len(),
+                want_pieces.len()
+            ));
+        }
+        self.stats.coverage_rows += 1;
+        self.stats.java_pieces += total;
+        self.pending_coverage.insert((seed, x, z), total);
+        Ok(())
+    }
+
+    /// 统计本次 `game_features_with_mask` 里每种结构实际放置的结构件数与方块数。
+    /// Java 侧的覆盖行保证了这些引用确实来自官方生成。
+    ///
+    /// Record per-structure placed-piece / written-block counts from the game run.
+    fn collect_structure_coverage(
+        &mut self,
+        seed: i64,
+        x: i32,
+        z: i32,
+        result: &mc_bamboo_worldgen::feature::FeatureResult,
+    ) -> Result<(), String> {
+        let config = WorldGenConfig {
+            seed,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        let pipeline = mc_bamboo_game::worldgen_features::game_pipeline(&config, x, z)
+            .map_err(|error| format!("game_pipeline failed for ({seed},{x},{z}): {error}"))?;
+        for (kind, count) in &pipeline.placed_pieces {
+            let blocks = pipeline.placed_blocks.get(kind).copied().unwrap_or(0);
+            let entry = self.structure_totals.entry(kind.clone()).or_default();
+            entry.0 += *count as u64;
+            entry.1 += blocks as u64;
+        }
+        if pipeline.unsupported_pieces > 0 {
+            self.stats.mismatches.push(format!(
+                "features seed {seed} ({x},{z}): {} unsupported structure pieces",
+                pipeline.unsupported_pieces
+            ));
+        }
+        let _ = result;
+        Ok(())
+    }
+
     fn finish(self) -> Result<(), String> {
         let Stats {
             chunks,
@@ -700,14 +1024,26 @@ impl Report {
             heightmap_words,
             mismatches,
             break_writes,
+            coverage_rows,
+            java_pieces,
         } = self.stats;
         println!(
             "gen-world: {chunks} chunks, {biome_cells} quart cells, {blocks} blocks, \
              {heightmap_columns} heightmap columns, {heightmap_words} heightmap words, \
+             {coverage_rows} structure rows / {java_pieces} official pieces, \
              {} mismatches, {} official checks",
             mismatches.len(),
             self.official_checks
         );
+        if self.structure_coverage {
+            println!("gen-world structure placements (pieces / block writes):");
+            if self.structure_totals.is_empty() {
+                println!("  (none)");
+            }
+            for (kind, (pieces, writes)) in &self.structure_totals {
+                println!("  {pieces:10} {writes:12} {kind}");
+            }
+        }
         if self.coverage {
             println!("gen-world feature candidates by type:");
             if self.coverage_totals.is_empty() {
@@ -733,6 +1069,35 @@ impl Report {
         }
         if chunks == 0 {
             return Err("gen-world compared no chunks".to_owned());
+        }
+        if self.structures && coverage_rows != chunks {
+            return Err(format!(
+                "structures mode compared {chunks} chunks but {coverage_rows} coverage rows"
+            ));
+        }
+        if let Some(kind) = &self.break_structure {
+            // 带结构改坏确认：跳过的那种结构必须真的在这批区块里被比较到，
+            // 且逐方块比较器必须报差异；否则是没有覆盖的假绿。
+            // Structures-mode break confirmation: the skipped type must actually
+            // appear in the clean run and the comparator must report a mismatch.
+            let placed = self
+                .structure_totals
+                .get(kind)
+                .copied()
+                .unwrap_or_default()
+                .0;
+            if placed == 0 || mismatches.is_empty() {
+                return Err(format!(
+                    "break-structure {kind} skipped {placed} pieces but reported {} mismatches",
+                    mismatches.len()
+                ));
+            }
+            println!(
+                "gen-world break-structure {kind}: detector works ({placed} clean pieces, \
+                 {} mismatches)",
+                mismatches.len()
+            );
+            return Ok(());
         }
         if let Some(kind) = &self.break_type {
             // 改坏确认要求这批区块里至少有一个中心真的被目标类型写过，

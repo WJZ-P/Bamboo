@@ -378,8 +378,13 @@ fn place_jigsaw_piece(
     let template = StructureTemplate::load(location)?;
     let configured = match &piece.element {
         jigsaw::PoolElement::Single { processors, .. } => match processors {
+            // `processor_list` 注册表键带 `minecraft:` 前缀，解析器保留原名；
+            // 早期代码剥掉前缀会让所有具名 processor 链静默变成空链
+            // （试炼密室铜灯氧化等规则完全不生效）。
+            // Registry keys keep their `minecraft:` prefix; stripping it here made
+            // every named processor list resolve to an empty chain.
             ProcessorListRef::Named(name) => processor_lists
-                .get(name.strip_prefix("minecraft:").unwrap_or(name.as_str()))
+                .get(name.as_str())
                 .map(|v| v.to_vec())
                 .unwrap_or_default(),
             ProcessorListRef::Inline(processors) => processors.clone(),

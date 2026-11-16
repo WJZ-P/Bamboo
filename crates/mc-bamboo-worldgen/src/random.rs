@@ -94,6 +94,10 @@ pub fn positional_seed(x: i32, y: i32, z: i32) -> i64 {
         .wrapping_mul(seed)
         .wrapping_mul(42_317_861)
         .wrapping_add(seed.wrapping_mul(11));
+    // `Mth.getSeed` 末尾是 `lshr`（无符号右移，字节码 31）。i64 的算术右移
+    // 与它的位模式一致：高 16 位补 0，`i64` 值可能为负原样传给随机源。
+    // Vanilla ends with `lshr` (unsigned shift, bytecode 31); an i64 arithmetic
+    // shift has the same bit pattern here, and the resulting long keeps its sign.
     seed >> 16
 }
 

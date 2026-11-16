@@ -35,6 +35,9 @@ pub struct FeatureWorld<'a> {
     pub heights: [Heightmaps; 9],
     /// 8 个邻居的写增量，中心不记（中心直接交回 `blocks[4]`）。
     pub deltas: [Vec<(i32, i32, i32, u32)>; 9],
+    /// 累计的 `setBlock` 次数，结构放置统计用它算每种结构写过的方块数。
+    /// Total `setBlock` calls; structure placement stats use the delta.
+    pub write_count: usize,
     /// 写进去的方块实体 nbt，`(世界坐标, nbt)`，按写入顺序。`ChunkAccess` 在
     /// `setBlockState` 里会把旧方块实体丢掉，所以这里也是「最后写入者胜」。
     ///
@@ -61,6 +64,7 @@ impl<'a> FeatureWorld<'a> {
             biomes: &input.biomes,
             heights: input.heights,
             deltas: empty(),
+            write_count: 0,
             block_entities: Vec::new(),
         })
     }
@@ -153,6 +157,7 @@ impl<'a> FeatureWorld<'a> {
             return false;
         };
         self.blocks[chunk][index / 256][index % 256] = state;
+        self.write_count += 1;
         if chunk != CENTER {
             self.deltas[chunk].push((x, y, z, state));
         }
@@ -172,6 +177,7 @@ impl<'a> FeatureWorld<'a> {
             return false;
         };
         self.blocks[chunk][index / 256][index % 256] = state;
+        self.write_count += 1;
         if chunk != CENTER {
             self.deltas[chunk].push((x, y, z, state));
         }

@@ -11,9 +11,13 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -54,10 +58,18 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.ChunkGeneratorStructureState;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.chunk.ProtoChunk;
 import net.minecraft.world.level.chunk.UpgradeData;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraft.world.level.levelgen.structure.StructureSet;
+import net.minecraft.world.level.levelgen.structure.StructureStart;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
+import net.minecraft.world.level.storage.LevelStorageSource;
+import net.minecraft.util.datafix.DataFixers;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.level.levelgen.Aquifer;
 import net.minecraft.world.level.levelgen.Beardifier;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -92,13 +104,19 @@ final class FeatureLevelHandler implements InvocationHandler {
     private final net.minecraft.util.RandomSource random;
     private final net.minecraft.world.ticks.WorldGenTickAccess<net.minecraft.world.level.block.Block> blockTicks;
     private final net.minecraft.world.ticks.WorldGenTickAccess<net.minecraft.world.level.material.Fluid> fluidTicks;
+    /** 带结构模式下，`startsForStructure` 要按 17×17 网格取起点/引用。 */
+    private final StructureChunkGrid structureGrid;
+    /** 生成期实体要的 ServerLevel 替身；无结构模式为 null。 */
+    private final net.minecraft.server.level.ServerLevel serverLevel;
     private Supplier<String> currentlyGenerating;
     private long nextSubTick;
 
 
     FeatureLevelHandler(ChunkPos center, long seed, NoiseGeneratorSettings settings,
             TerrainChunkView[] chunks, RegistryAccess registries, BiomeManager biomeManager,
-            BiomeResolver uncachedBiomeResolver, RandomState randomState) {
+            BiomeResolver uncachedBiomeResolver, RandomState randomState,
+            StructureChunkGrid structureGrid,
+            net.minecraft.server.level.ServerLevel serverLevel) {
         this.center = center;
         this.seed = seed;
         this.minY = settings.noiseSettings().minY();
@@ -108,6 +126,8 @@ final class FeatureLevelHandler implements InvocationHandler {
         this.registries = registries;
         this.biomeManager = biomeManager;
         this.uncachedBiomeResolver = uncachedBiomeResolver;
+        this.structureGrid = structureGrid;
+        this.serverLevel = serverLevel;
         // WorldGenRegion 构造 106-130：randomState 的 worldgen_region_random factory
         // 在中心区块的 origin 上取一个随机源。地物放置本身不用它，但 getRandom() 要给对。
         this.random = randomState
@@ -172,6 +192,14 @@ final class FeatureLevelHandler implements InvocationHandler {
                 }
                 int x = (Integer) args[0];
                 int z = (Integer) args[1];
+                // `LevelReader.getChunk(x,z,status)` 的 4 参数重载：结构管理器用它
+                // 取 STRUCTURE_REFERENCES / STRUCTURE_STARTS 区块，范围是整个半径 8
+                // 邻域，不是地物的 3×3 写区。没开结构时保持旧的严格 3×3 行为。
+                // LevelReader's 4-arg getChunk: StructureManager resolves references
+                // and starts over the radius-8 neighbourhood, not the 3x3 write zone.
+                if (arity >= 3 && this.structureGrid != null) {
+                    return this.structureGrid.chunk(center, x, z);
+                }
                 return chunk(x, z).chunk();
             }
             case "hasChunk":
@@ -181,6 +209,9 @@ final class FeatureLevelHandler implements InvocationHandler {
                 }
                 int x = (Integer) args[0];
                 int z = (Integer) args[1];
+                if (this.structureGrid != null && arity >= 3) {
+                    return this.structureGrid.has(center, x, z);
+                }
                 return Math.max(Math.abs(x - center.x()), Math.abs(z - center.z())) <= 1;
             }
             case "getHeight": {
@@ -335,8 +366,19 @@ final class FeatureLevelHandler implements InvocationHandler {
                 return this.biomeManager;
             case "registryAccess":
                 return this.registries;
+            case "holderLookup":
+                // `JigsawReplacementProcessor.processBlock` 用 BLOCK 查找解析
+                // 拼图方块的 `final_state`。
+                return this.registries.lookupOrThrow(
+                        (net.minecraft.resources.ResourceKey) args[0]);
             case "getLevel":
-                return proxy;
+                // `WorldGenRegion.getLevel()` 返回 ServerLevel；生成期实体要用它。
+                return this.serverLevel;
+            case "addFreshEntity":
+                return Boolean.TRUE;
+            case "addFreshEntityWithPassengers":
+            case "getCurrentDifficultyAt":
+                return null;
             case "isClientSide":
                 return false;
             case "isStateAtPosition": {
@@ -420,6 +462,12 @@ final class FeatureLevelHandler implements InvocationHandler {
             case "markPosForPostProcessing":
                 chunkAt((BlockPos) args[0]).chunk().markPosForPostProcessing((BlockPos) args[0]);
                 return null;
+            case "updateNeighborsAt":
+                // `LevelAccessor` 的默认实现是空操作，`WorldGenRegion` 没有覆写。
+                return null;
+            case "environmentAttributes":
+                // 放置路径只有流体刻延迟读它，不影响写方块。
+                return net.minecraft.world.attribute.EnvironmentAttributeReader.EMPTY;
             case "getCenter":
                 return this.center;
             case "toString":
@@ -509,6 +557,45 @@ final class FeatureLevelHandler implements InvocationHandler {
 }
 
 /**
+ * 带结构模式下的半径 9 区块网格：`StructureManager.startsForStructure` 需要按
+ * `STRUCTURE_REFERENCES` / `STRUCTURE_STARTS` 读取中心 ±8 的起点，而 3×3 的
+ * terrain 中心各自要引用中心 ±9 范围里的起点，所以整张网格是 19×19。
+ *
+ * <p>网格里的 ProtoChunk 与 3×3 写区的 9 个是**同一批对象**：地形先跑到
+ * CARVERS，引用 / 起点是这些 ProtoChunk 上的字段，`applyBiomeDecoration` 通过
+ * 4 参数 `getChunk` 读到的就是它们。
+ */
+final class StructureChunkGrid {
+    static final int RADIUS = 9;
+    private final ChunkPos origin;
+    private final ProtoChunk[][] chunks;
+
+    StructureChunkGrid(ChunkPos origin, ProtoChunk[][] chunks) {
+        this.origin = origin;
+        this.chunks = chunks;
+    }
+
+    boolean has(ChunkPos center, int x, int z) {
+        int dx = x - origin.x();
+        int dz = z - origin.z();
+        return dx >= -RADIUS && dx <= RADIUS && dz >= -RADIUS && dz <= RADIUS;
+    }
+
+    ProtoChunk chunk(ChunkPos center, int x, int z) {
+        int dx = x - origin.x();
+        int dz = z - origin.z();
+        if (dx < -RADIUS || dx > RADIUS || dz < -RADIUS || dz > RADIUS) {
+            throw new IllegalStateException("structure getChunk outside the grid: " + x + "," + z);
+        }
+        return chunks[dx + RADIUS][dz + RADIUS];
+    }
+
+    static int size() {
+        return RADIUS * 2 + 1;
+    }
+}
+
+/**
  * 区块级对拍：在 JVM 里用官方的 {@code ChunkGenerator}、{@code RandomState} 和
  * {@code ProtoChunk} 生成同一个区块到 NOISE、SURFACE、CARVERS 三个阶段，输出逐方块、
  * 逐 quart 格的结果。不启动服务端、不读存档、不接受 EULA。
@@ -560,7 +647,16 @@ public final class ChunkgenOracle {
                         new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected());
                 Writer out = new BufferedWriter(new OutputStreamWriter(stdout, StandardCharsets.UTF_8), OUTPUT_BUFFER)) {
             RegistryAccess.Frozen registries = loadRegistries(resources).compositeAccess();
-            new Oracle(registries, options, out).run();
+            // `Block.newBlockEntity` 读组件默认值；组件只在服务器资源重载时绑定，
+            // 带结构模式要构造方块实体（试炼密室的宝库等），这里手动绑一次。
+            // Bind data-component defaults once: structure placement builds block
+            // entities (e.g. trial-chamber vaults) whose constructors read them.
+            if (options.structures()) {
+                BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(registries)
+                        .forEach(net.minecraft.core.component.DataComponentInitializers
+                                .PendingComponents::apply);
+            }
+            new Oracle(registries, resources, options, out).run();
         }
     }
 
@@ -587,7 +683,8 @@ public final class ChunkgenOracle {
      */
     private record Options(int seeds, int chunks, long salt, int through, int stepsMask,
             String featureAllowList, boolean realPath, String settings,
-            Integer forcedX, Integer forcedZ, int scan) {
+            Integer forcedX, Integer forcedZ, int scan, boolean structures, Long forcedSeed,
+            Path chunksFile) {
         static final int ALL_STEPS = (1 << 11) - 1;
 
         static Options parse(String[] args) {
@@ -614,6 +711,11 @@ public final class ChunkgenOracle {
             Integer forcedX = null;
             Integer forcedZ = null;
             int scan = 0;
+            // `--structures`：跑官方 createStructures / createReferences、真实
+            // Beardifier 的 CARVERS、带结构的 applyBiomeDecoration。
+            boolean structures = false;
+            Long forcedSeed = null;
+            Path chunksFile = null;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seeds" -> seeds = Integer.parseInt(args[++i]);
@@ -652,16 +754,22 @@ public final class ChunkgenOracle {
                         forcedZ = Integer.parseInt(args[++i]);
                     }
                     case "--scan" -> scan = Integer.parseInt(args[++i]);
+                    case "--structures" -> structures = true;
+                    case "--seed" -> forcedSeed = Long.parseLong(args[++i]);
+                    case "--chunks-file" -> chunksFile = Path.of(args[++i]);
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
             return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath, settings,
-                    forcedX, forcedZ, scan);
+                    forcedX, forcedZ, scan, structures, forcedSeed, chunksFile);
         }
     }
 
     private static final class Oracle {
         private final RegistryAccess registries;
+        /** 带结构模式要按官方方式加载 `.nbt` 模板（不启动服务端、不读存档）。 */
+        private final CloseableResourceManager resources;
+        private final StructureTemplateManager templates;
         private final Registry<net.minecraft.world.level.levelgen.synth.NormalNoise> noises;
         private final Registry<NoiseGeneratorSettings> settings;
         private final HolderLookup.RegistryLookup<net.minecraft.world.level.levelgen.synth.NormalNoise> noiseLookup;
@@ -674,8 +782,11 @@ public final class ChunkgenOracle {
         private final Set<Holder<Biome>> possibleBiomes;
         private long checks;
 
-        Oracle(RegistryAccess registries, Options options, Writer out) throws Exception {
+        Oracle(RegistryAccess registries, CloseableResourceManager resources,
+                Options options, Writer out) throws Exception {
             this.registries = registries;
+            this.resources = resources;
+            this.templates = templateManager(resources);
             this.noises = registries.lookupOrThrow(Registries.NOISE);
             this.settings = registries.lookupOrThrow(Registries.NOISE_SETTINGS);
             this.noiseLookup = registries.lookupOrThrow(Registries.NOISE);
@@ -701,6 +812,15 @@ public final class ChunkgenOracle {
             for (Biome biome : registries.lookupOrThrow(Registries.BIOME)) {
                 this.possibleBiomes.add(registries.lookupOrThrow(Registries.BIOME).wrapAsHolder(biome));
             }
+        }
+
+        private static StructureTemplateManager templateManager(CloseableResourceManager resources)
+                throws Exception {
+            Path temp = Files.createTempDirectory("bamboo-genworld-structures");
+            LevelStorageSource.LevelStorageAccess storage =
+                    LevelStorageSource.createDefault(temp).createAccess("struct");
+            return new StructureTemplateManager(
+                    resources, storage, DataFixers.getDataFixer(), BuiltInRegistries.BLOCK);
         }
 
         void run() throws Exception {
@@ -731,6 +851,7 @@ public final class ChunkgenOracle {
             header.addProperty("seaLevel", generatorSettings.seaLevel());
             header.addProperty("through", this.options.through());
             header.addProperty("steps", this.options.stepsMask());
+            header.addProperty("structures", this.options.structures());
             write(header);
 
             NoiseBasedChunkGenerator generator =
@@ -779,7 +900,12 @@ public final class ChunkgenOracle {
                         continue;
                     }
                     if (this.options.through() >= 4) {
-                        writeFeatures(seed, pos, generator, generatorSettings, state, resolver);
+                        if (this.options.structures()) {
+                            writeStructuredFeatures(seed, pos, generator, generatorSettings, state,
+                                    resolver);
+                        } else {
+                            writeFeatures(seed, pos, generator, generatorSettings, state, resolver);
+                        }
                         continue;
                     }
 
@@ -813,6 +939,362 @@ public final class ChunkgenOracle {
         }
 
         /**
+         * 带结构的 `features` 阶段：照 Director 的 ChunkStatus 顺序，先跑官方
+         * `createStructures` / `createReferences`，再用真实 `Beardifier` 把 3×3 写区
+         * 跑到 CARVERS，最后让官方 `applyBiomeDecoration` 在 `shouldGenerateStructures()`
+         * 为真的 StructureManager 下同时放结构件和地物。
+         *
+         * <p>字节码依据：`ChunkGenerator.applyBiomeDecoration` 238–418 的
+         * `startsForStructure` / `placeInChunk` 分支；`StructureManager.startsForStructure`
+         * 按 STRUCTURE_REFERENCES / STRUCTURE_STARTS 取 17×17 邻域；
+         * `NoiseBasedChunkGenerator.createNoiseChunk` 用
+         * `Beardifier.forStructuresInChunk(manager, chunkPos)`。
+         */
+        private void writeStructuredFeatures(long seed, ChunkPos pos,
+                NoiseBasedChunkGenerator generator, NoiseGeneratorSettings generatorSettings,
+                RandomState randomState, BiomeResolver resolver) throws Exception {
+            int size = StructureChunkGrid.size();
+            ProtoChunk[][] grid = new ProtoChunk[size][size];
+            for (int dx = -StructureChunkGrid.RADIUS; dx <= StructureChunkGrid.RADIUS; dx++) {
+                for (int dz = -StructureChunkGrid.RADIUS; dz <= StructureChunkGrid.RADIUS; dz++) {
+                    grid[dx + StructureChunkGrid.RADIUS][dz + StructureChunkGrid.RADIUS] =
+                            newChunk(new ChunkPos(pos.x() + dx, pos.z() + dz), generatorSettings);
+                }
+            }
+            StructureChunkGrid structureGrid = new StructureChunkGrid(pos, grid);
+            net.minecraft.server.level.ServerLevel entityStub = installEntityStub(seed);
+            WorldOptions worldOptions = new WorldOptions(seed, true, false);
+            HolderLookup<StructureSet> setLookup = registries.lookupOrThrow(Registries.STRUCTURE_SET);
+            ChunkGeneratorStructureState structureState =
+                    ChunkGeneratorStructureState.createForNormal(
+                            randomState, seed, new ChunkPos(0, 0), generator.getBiomeSource(),
+                            setLookup);
+            structureState.ensureStructuresGenerated();
+            // 1. STRUCTURE_STARTS：中心 ±9，够 3×3 写区各自的 createReferences 用。
+            for (int dx = -StructureChunkGrid.RADIUS; dx <= StructureChunkGrid.RADIUS; dx++) {
+                for (int dz = -StructureChunkGrid.RADIUS; dz <= StructureChunkGrid.RADIUS; dz++) {
+                    ProtoChunk chunk = structureGrid.chunk(pos, pos.x() + dx, pos.z() + dz);
+                    StructureManager manager = new StructureManager(
+                            structureLevel(registries, chunk, structureGrid, pos), worldOptions, null);
+                    generator.createStructures(registries, structureState, manager, chunk,
+                            templates, net.minecraft.resources.ResourceKey.create(
+                                    net.minecraft.core.registries.Registries.DIMENSION,
+                                    Identifier.withDefaultNamespace("overworld")));
+                }
+            }
+            // 2. STRUCTURE_REFERENCES：先给中心算，`applyBiomeDecoration` 和中心的
+            // Beardifier 都读它。3×3 里的另外 8 个也要算，因为它们的 CARVERS 地形
+            // 在游戏侧各自带自己的 Beardifier。
+            WorldGenLevel referenceRegion = referenceRegion(pos, structureGrid, registries);
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    ProtoChunk chunk = structureGrid.chunk(pos, pos.x() + dx, pos.z() + dz);
+                    generator.createReferences(referenceRegion,
+                            new StructureManager(referenceRegion, worldOptions, null), chunk);
+                }
+            }
+            // 3. BIOMES + TERRAIN：3×3 每格先填 quart 群系，再按自己的引用造
+            // Beardifier 跑到 CARVERS；高度图用官方 `primeHeightmaps` 补齐。
+            // carverBiome 会读中心 ±8 的群系调色板，整张网格都要填 quart 格，
+            // 但只有 3×3 要跑到 CARVERS。
+            TerrainChunk[] chunks = new TerrainChunk[9];
+            for (int dz = -StructureChunkGrid.RADIUS; dz <= StructureChunkGrid.RADIUS; dz++) {
+                for (int dx = -StructureChunkGrid.RADIUS; dx <= StructureChunkGrid.RADIUS; dx++) {
+                    ProtoChunk chunk = structureGrid.chunk(pos, pos.x() + dx, pos.z() + dz);
+                    generator.createBiomes(randomState, Blender.empty(), null, chunk).join();
+                    chunk.setPersistedStatus(ChunkStatus.BIOMES);
+                    if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) {
+                        chunks[(dz + 1) * 3 + dx + 1] = new TerrainChunk(chunk);
+                    }
+                }
+            }
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    ChunkPos at = new ChunkPos(pos.x() + dx, pos.z() + dz);
+                    ProtoChunk chunk = structureGrid.chunk(pos, at.x(), at.z());
+                    StructureManager manager = new StructureManager(
+                            featureLevelForStructures(pos, seed, generatorSettings, chunks,
+                                    randomState, resolver, structureGrid, entityStub),
+                            worldOptions, null);
+                    buildStructuredTerrain(seed, at, chunk, generator, generatorSettings,
+                            randomState, resolver, structureGrid,
+                            Beardifier.forStructuresInChunk(manager, at));
+                }
+            }
+            // 4. FEATURES：和 writeFeatures 同一个 3×3 写区代理，只是这次
+            // StructureManager 开结构，且 4 参数 getChunk 能看到整张起点网格。
+            final WorldGenLevel[] holder = new WorldGenLevel[1];
+            FeatureLevelHandler handler = new FeatureLevelHandler(pos, seed, generatorSettings,
+                    wrapped(chunks), this.registries,
+                    new BiomeManager((qx, qy, qz) -> holder[0].getNoiseBiome(qx, qy, qz),
+                            BiomeManager.obfuscateSeed(seed)),
+                    resolver, randomState, structureGrid, entityStub);
+            WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
+                    ChunkgenOracle.class.getClassLoader(),
+                    new Class<?>[] {WorldGenLevel.class}, handler);
+            holder[0] = level;
+            // `--steps` 是「只跑这些 step」的对拍开关：Java 侧原本只清空群系的
+            // HolderSet，结构分支仍会在每个 step 放件；这里按 structure.step() 把
+            // 不属于掩码的起点挡掉，与 Rust 的 `features` 循环对称。
+            StructureManager structures = new StructureManager(level, worldOptions, null) {
+                @Override
+                public List<StructureStart> startsForStructure(int x, int z, Structure structure) {
+                    int step = structure.step().ordinal();
+                    if ((options.stepsMask() & (1 << step)) == 0) {
+                        return List.of();
+                    }
+                    return super.startsForStructure(x, z, structure);
+                }
+            };
+            generator.applyBiomeDecoration(level, chunks[4].chunk(), structures);
+
+            JsonArray results = new JsonArray();
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    int index = (dz + 1) * 3 + dx + 1;
+                    JsonObject entry = new JsonObject();
+                    entry.addProperty("dx", dx);
+                    entry.addProperty("dz", dz);
+                    addBlocks(entry, chunks[index].chunk());
+                    results.add(entry);
+                }
+            }
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "features");
+            line.addProperty("seed", seed);
+            line.addProperty("x", pos.x());
+            line.addProperty("z", pos.z());
+            line.add("chunks", results);
+            line.addProperty("steps", this.options.stepsMask());
+            // 诊断：中心区块的 Beardifier 是否非空、引用了哪些结构。
+            line.addProperty("beardifier",
+                    !Beardifier.forStructuresInChunk(structures, pos).equals(Beardifier.EMPTY));
+            line.add("centerRefs", centerRefNames(structureGrid.chunk(pos, pos.x(), pos.z())));
+            write(line);
+            // 覆盖统计：中心区块的起点 / 引用 / 每种结构的结构件数，供 Rust 侧
+            // 和游戏侧 `game_features_with_mask` 的放置次数对账。
+            writeStructureCoverage(seed, pos, structureGrid.chunk(pos, pos.x(), pos.z()));
+        }
+
+        /** 中心区块的引用结构名，用于诊断真 Beardifier 是否生效。 */
+        private JsonArray centerRefNames(ProtoChunk center) {
+            Registry<Structure> structureReg = registries.lookupOrThrow(Registries.STRUCTURE);
+            List<String> names = new ArrayList<>();
+            for (Structure structure : center.getAllReferences().keySet()) {
+                names.add(structureReg.getKey(structure).toString());
+            }
+            names.sort(Comparator.naturalOrder());
+            JsonArray out = new JsonArray();
+            for (String name : names) {
+                out.add(name);
+            }
+            return out;
+        }
+
+        /** 中心区块实际生成了哪些结构、各有多少结构件。 */
+        private void writeStructureCoverage(long seed, ChunkPos pos, ProtoChunk center)
+                throws Exception {
+            Registry<Structure> structureReg = registries.lookupOrThrow(Registries.STRUCTURE);
+            JsonArray starts = new JsonArray();
+            List<String> names = new ArrayList<>();
+            for (Structure structure : center.getAllStarts().keySet()) {
+                names.add(structureReg.getKey(structure).toString());
+            }
+            names.sort(Comparator.naturalOrder());
+            for (String name : names) {
+                Structure key = structureReg.getValue(Identifier.parse(name));
+                StructureStart start = center.getAllStarts().get(key);
+                if (start == null || !start.isValid()) {
+                    continue;
+                }
+                JsonArray row = new JsonArray();
+                row.add(name);
+                row.add(start.getPieces().size());
+                starts.add(row);
+            }
+            JsonArray refs = new JsonArray();
+            List<String> refNames = new ArrayList<>();
+            for (Structure structure : center.getAllReferences().keySet()) {
+                refNames.add(structureReg.getKey(structure).toString());
+            }
+            refNames.sort(Comparator.naturalOrder());
+            for (String name : refNames) {
+                Structure key = structureReg.getValue(Identifier.parse(name));
+                var keys = center.getAllReferences().get(key);
+                if (keys == null) {
+                    continue;
+                }
+                List<Long> packed = new ArrayList<>();
+                for (long value : keys) {
+                    packed.add(value);
+                }
+                java.util.Collections.sort(packed);
+                for (long value : packed) {
+                    JsonArray row = new JsonArray();
+                    row.add(name);
+                    row.add(value);
+                    refs.add(row);
+                }
+            }
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "coverage");
+            line.addProperty("seed", seed);
+            line.addProperty("x", pos.x());
+            line.addProperty("z", pos.z());
+            line.add("starts", starts);
+            line.add("references", refs);
+            // 结构件清单（含包围盒）：先定位「布局错」还是「放置错」。
+            JsonArray pieces = new JsonArray();
+            for (String name : names) {
+                Structure key = structureReg.getValue(Identifier.parse(name));
+                StructureStart start = center.getAllStarts().get(key);
+                if (start == null || !start.isValid()) {
+                    continue;
+                }
+                for (var piece : start.getPieces()) {
+                    JsonArray row = new JsonArray();
+                    row.add(name);
+                    row.add(BuiltInRegistries.STRUCTURE_PIECE.getKey(piece.getType()).toString());
+                    row.add(piece.getBoundingBox().minX());
+                    row.add(piece.getBoundingBox().minY());
+                    row.add(piece.getBoundingBox().minZ());
+                    row.add(piece.getBoundingBox().maxX());
+                    row.add(piece.getBoundingBox().maxY());
+                    row.add(piece.getBoundingBox().maxZ());
+                    pieces.add(row);
+                }
+            }
+            line.add("pieces", pieces);
+            write(line);
+        }
+
+        /** createStructures 的 LevelAccessor：主区块是当前区块，getChunk 也能取邻域。 */
+        private static net.minecraft.world.level.LevelAccessor structureLevel(
+                RegistryAccess registries, ProtoChunk chunk, StructureChunkGrid grid,
+                ChunkPos center) {
+            return (net.minecraft.world.level.LevelAccessor) Proxy.newProxyInstance(
+                    ChunkgenOracle.class.getClassLoader(),
+                    new Class<?>[] {net.minecraft.world.level.LevelAccessor.class},
+                    (proxy, method, args) -> {
+                        switch (method.getName()) {
+                            case "registryAccess": return registries;
+                            case "getChunk": {
+                                if (args != null && args.length >= 2
+                                        && args[0] instanceof Integer) {
+                                    return grid.chunk(center, (Integer) args[0], (Integer) args[1]);
+                                }
+                                return chunk;
+                            }
+                            case "hasChunk": {
+                                if (args != null && args.length >= 2
+                                        && args[0] instanceof Integer) {
+                                    return grid.has(center, (Integer) args[0], (Integer) args[1]);
+                                }
+                                return Boolean.TRUE;
+                            }
+                            case "getSeed": return 0L;
+                            case "getMinY": return chunk.getMinY();
+                            case "getHeight": return chunk.getHeight();
+                            case "getMaxY": return chunk.getMaxY();
+                            case "getBlockState":
+                                return Blocks.AIR.defaultBlockState();
+                            case "getFluidState":
+                                return net.minecraft.world.level.material.Fluids.EMPTY.defaultFluidState();
+                            case "hashCode": return System.identityHashCode(proxy);
+                            case "equals": return proxy == args[0];
+                            case "toString": return "StructureLevel";
+                            default:
+                                if (method.getReturnType() == boolean.class) return false;
+                                if (method.getReturnType() == int.class) return 0;
+                                if (method.getReturnType() == long.class) return 0L;
+                                return null;
+                        }
+                    });
+        }
+
+        /** createReferences 只读 `getChunk(x,z)`（半径 8）。 */
+        private static WorldGenLevel referenceRegion(ChunkPos center, StructureChunkGrid grid,
+                RegistryAccess registries) {
+            return (WorldGenLevel) Proxy.newProxyInstance(
+                    ChunkgenOracle.class.getClassLoader(),
+                    new Class<?>[] {WorldGenLevel.class},
+                    (proxy, method, args) -> {
+                        switch (method.getName()) {
+                            case "getChunk": {
+                                int x, z;
+                                if (args[0] instanceof BlockPos pos) {
+                                    x = pos.getX() >> 4;
+                                    z = pos.getZ() >> 4;
+                                } else {
+                                    x = (Integer) args[0];
+                                    z = (Integer) args[1];
+                                }
+                                return grid.chunk(center, x, z);
+                            }
+                            case "hasChunk": return grid.has(center,
+                                    (Integer) args[0], (Integer) args[1]);
+                            case "registryAccess": return registries;
+                            case "hashCode": return System.identityHashCode(proxy);
+                            case "equals": return proxy == args[0];
+                            case "toString": return "StructureReferenceRegion";
+                            default:
+                                if (method.getReturnType() == boolean.class) return false;
+                                if (method.getReturnType() == int.class) return 0;
+                                if (method.getReturnType() == long.class) return 0L;
+                                return null;
+                        }
+                    });
+        }
+
+        /** Beardifier 要读中心区块的 References 和被引用的起点，用同一个写区代理。 */
+        private WorldGenLevel featureLevelForStructures(ChunkPos center, long seed,
+                NoiseGeneratorSettings settings, TerrainChunk[] chunks, RandomState randomState,
+                BiomeResolver resolver, StructureChunkGrid grid,
+                net.minecraft.server.level.ServerLevel entityStub) throws Exception {
+            final WorldGenLevel[] holder = new WorldGenLevel[1];
+            FeatureLevelHandler handler = new FeatureLevelHandler(center, seed, settings,
+                    wrapped(chunks), this.registries,
+                    new BiomeManager((qx, qy, qz) -> holder[0].getNoiseBiome(qx, qy, qz),
+                            BiomeManager.obfuscateSeed(seed)),
+                    resolver, randomState, grid, entityStub);
+            WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
+                    ChunkgenOracle.class.getClassLoader(),
+                    new Class<?>[] {WorldGenLevel.class}, handler);
+            holder[0] = level;
+            return level;
+        }
+
+        /** 真 Beardifier 的 CARVERS：和 buildRealTerrain 同样走 17×17 WorldGenRegion。 */
+        private void buildStructuredTerrain(long seed, ChunkPos pos, ProtoChunk center,
+                NoiseBasedChunkGenerator generator, NoiseGeneratorSettings gs,
+                RandomState state, BiomeResolver resolver, StructureChunkGrid grid,
+                Beardifier beardifier) throws Exception {
+            ProtoChunk[][] neighbors = new ProtoChunk[17][17];
+            for (int dx = -8; dx <= 8; dx++) {
+                for (int dz = -8; dz <= 8; dz++) {
+                    neighbors[dx + 8][dz + 8] = grid.chunk(pos, pos.x() + dx, pos.z() + dz);
+                }
+            }
+            net.minecraft.server.level.WorldGenRegion region =
+                    makeRegion(center, neighbors, pos, seed, resolver);
+            Set<Holder<Biome>> possibleBiomes = collectPossibleBiomes(region, pos);
+            DensityVolume volume = new DensityVolume(
+                    16, gs.noiseSettings().height(), 16,
+                    pos.getMinBlockX(), gs.noiseSettings().minY(), pos.getMinBlockZ());
+            try (NoiseChunk noiseChunk = new NoiseChunk(
+                    state, beardifier, gs, instancePicker(generator).get(),
+                    Blender.empty(), volume)) {
+                this.doFill.invoke(generator, noiseChunk, center);
+                this.buildSurface.invoke(generator, center, noiseChunk, state,
+                        region.getBiomeManager(), possibleBiomes, gs.materialRule().value());
+                this.generateCarvers.invoke(generator, center, Blender.empty(), noiseChunk,
+                        state, region.getBiomeManager(), region, gs.materialRule().value());
+            }
+            center.setPersistedStatus(ChunkStatus.TERRAIN);
+            Heightmap.primeHeightmaps(center, ChunkStatus.FINAL_HEIGHTMAPS);
+        }
+
+        /**
          * `features` 阶段：造 3×3 个跑到 CARVERS 的 ProtoChunk，用 WorldGenLevel 代理
          * 让官方 `applyBiomeDecoration` 在一个不启动服务端的假世界里跑，输出 9 宫格。
          *
@@ -843,7 +1325,7 @@ public final class ChunkgenOracle {
                     wrapped(chunks), this.registries,
                     new BiomeManager((qx, qy, qz) -> holder[0].getNoiseBiome(qx, qy, qz),
                             BiomeManager.obfuscateSeed(seed)),
-                    resolver, randomState);
+                    resolver, randomState, null, null);
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
                     ChunkgenOracle.class.getClassLoader(),
                     new Class<?>[] {WorldGenLevel.class}, handler);
@@ -1201,6 +1683,250 @@ public final class ChunkgenOracle {
             return out;
         }
 
+        private static void installInertMob(Object type, Class<?> inert) {
+            setField(net.minecraft.world.entity.EntityType.class, type, "factory",
+                    (net.minecraft.world.entity.EntityType.EntityFactory<
+                            net.minecraft.world.entity.Entity>) (t, level) -> {
+                        try {
+                            return (net.minecraft.world.entity.Entity)
+                                    UNSAFE.allocateInstance(inert);
+                        } catch (InstantiationException error) {
+                            throw new IllegalStateException(error);
+                        }
+                    });
+        }
+
+        private static final class InertWitch
+                extends net.minecraft.world.entity.monster.Witch {
+            private InertWitch() {
+                super(null, null);
+            }
+
+            @Override
+            public void setPersistenceRequired() {
+            }
+
+            @Override
+            public void snapTo(double x, double y, double z, float yRot, float xRot) {
+            }
+
+            @Override
+            public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                    net.minecraft.world.level.ServerLevelAccessor level,
+                    net.minecraft.world.DifficultyInstance difficulty,
+                    net.minecraft.world.entity.EntitySpawnReason reason,
+                    net.minecraft.world.entity.SpawnGroupData data) {
+                return data;
+            }
+        }
+
+        private static final class InertCat extends net.minecraft.world.entity.animal.feline.Cat {
+            private InertCat() {
+                super(null, null);
+            }
+
+            @Override
+            public void setPersistenceRequired() {
+            }
+
+            @Override
+            public void snapTo(double x, double y, double z, float yRot, float xRot) {
+            }
+
+            @Override
+            public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                    net.minecraft.world.level.ServerLevelAccessor level,
+                    net.minecraft.world.DifficultyInstance difficulty,
+                    net.minecraft.world.entity.EntitySpawnReason reason,
+                    net.minecraft.world.entity.SpawnGroupData data) {
+                return data;
+            }
+        }
+
+        private static final class InertElderGuardian
+                extends net.minecraft.world.entity.monster.ElderGuardian {
+            private InertElderGuardian() {
+                super(null, null);
+            }
+
+            @Override
+            public void setPersistenceRequired() {
+            }
+
+            @Override
+            public void snapTo(double x, double y, double z, float yRot, float xRot) {
+            }
+
+            @Override
+            public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                    net.minecraft.world.level.ServerLevelAccessor level,
+                    net.minecraft.world.DifficultyInstance difficulty,
+                    net.minecraft.world.entity.EntitySpawnReason reason,
+                    net.minecraft.world.entity.SpawnGroupData data) {
+                return data;
+            }
+        }
+
+        private static final class InertEvoker extends net.minecraft.world.entity.monster.illager.Evoker {
+            private InertEvoker() {
+                super(null, null);
+            }
+
+            @Override
+            public void setPersistenceRequired() {
+            }
+
+            @Override
+            public void snapTo(double x, double y, double z, float yRot, float xRot) {
+            }
+
+            @Override
+            public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                    net.minecraft.world.level.ServerLevelAccessor level,
+                    net.minecraft.world.DifficultyInstance difficulty,
+                    net.minecraft.world.entity.EntitySpawnReason reason,
+                    net.minecraft.world.entity.SpawnGroupData data) {
+                return data;
+            }
+        }
+
+        private static final class InertVindicator
+                extends net.minecraft.world.entity.monster.illager.Vindicator {
+            private InertVindicator() {
+                super(null, null);
+            }
+
+            @Override
+            public void setPersistenceRequired() {
+            }
+
+            @Override
+            public void snapTo(double x, double y, double z, float yRot, float xRot) {
+            }
+
+            @Override
+            public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                    net.minecraft.world.level.ServerLevelAccessor level,
+                    net.minecraft.world.DifficultyInstance difficulty,
+                    net.minecraft.world.entity.EntitySpawnReason reason,
+                    net.minecraft.world.entity.SpawnGroupData data) {
+                return data;
+            }
+        }
+
+        private static final class InertAllay extends net.minecraft.world.entity.animal.allay.Allay {
+            private InertAllay() {
+                super(null, null);
+            }
+
+            @Override
+            public void setPersistenceRequired() {
+            }
+
+            @Override
+            public void snapTo(double x, double y, double z, float yRot, float xRot) {
+            }
+
+            @Override
+            public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                    net.minecraft.world.level.ServerLevelAccessor level,
+                    net.minecraft.world.DifficultyInstance difficulty,
+                    net.minecraft.world.entity.EntitySpawnReason reason,
+                    net.minecraft.world.entity.SpawnGroupData data) {
+                return data;
+            }
+        }
+
+        /** 不走构造器的运输矿车：`createChest` 后续调用全部变成空操作。 */
+        private static final class InertMinecartChest
+                extends net.minecraft.world.entity.vehicle.minecart.MinecartChest {
+            private InertMinecartChest() {
+                super(null, null);
+            }
+
+            @Override
+            public void setInitialPos(double x, double y, double z) {
+            }
+
+            @Override
+            public void setLootTable(net.minecraft.resources.ResourceKey<
+                    net.minecraft.world.level.storage.loot.LootTable> table, long seed) {
+            }
+        }
+
+        /**
+         * 带结构模式里生成期实体（矿车、村民、悦灵、守卫者……）不需要真的进世界，
+         * 但官方 `StructurePiece.createChest` 会调
+         * `EntityTypes.CHEST_MINECART.create(level.getLevel(), ...)` 并接着
+         * `random.nextLong()` 定战利品种子。照 `StructurePlaceOracle` 的做法：
+         * `getLevel()` 返回一个不跑构造器的 ServerLevel，实体工厂返回不跑构造器的
+         * 惰性实体，`addFreshEntity` 只回 true。方块与随机数序列完全按官方走。
+         *
+         * Generation-time entities need not enter a fake world, but vanilla's
+         * `StructurePiece.createChest` calls `EntityTypes.CHEST_MINECART.create` and
+         * then draws `nextLong()` for the loot seed. Mirror `StructurePlaceOracle`:
+         * `getLevel()` returns a constructor-less ServerLevel, the entity factory
+         * returns an inert minecart, and `addFreshEntity` just returns true.
+         */
+        private net.minecraft.server.level.ServerLevel installEntityStub(long seed) {
+            try {
+                Object type = net.minecraft.world.entity.EntityTypes.CHEST_MINECART;
+                setField(net.minecraft.world.entity.EntityType.class, type, "factory",
+                        (net.minecraft.world.entity.EntityType.EntityFactory<
+                                net.minecraft.world.entity.Entity>) (t, level) ->
+                                allocate(InertMinecartChest.class));
+                Object server = allocate(
+                        net.minecraft.server.dedicated.DedicatedServer.class);
+                // `CappedProcessor.finalizeProcessing` 要 `level.getLevel().getSeed()`：
+                // 和 `JigsawOracle.fakeServerLevelWithSeed` 一样接上 worldOptions.seed。
+                Object worldOptions = allocate(net.minecraft.world.level.levelgen.WorldOptions.class);
+                setFieldInHierarchy(worldOptions, "seed", seed);
+                Object genSettings = allocate(
+                        net.minecraft.world.level.levelgen.WorldGenSettings.class);
+                setFieldInHierarchy(genSettings, "options", worldOptions);
+                setFieldInHierarchy(server, "worldGenSettings", genSettings);
+                net.minecraft.world.level.storage.WorldData data =
+                        (net.minecraft.world.level.storage.WorldData) Proxy.newProxyInstance(
+                                ChunkgenOracle.class.getClassLoader(),
+                                new Class<?>[] {net.minecraft.world.level.storage.WorldData.class},
+                                (self, method, args) -> {
+                                    if (method.getName().equals("enabledFeatures")) {
+                                        return net.minecraft.world.flag.FeatureFlags.DEFAULT_FLAGS;
+                                    }
+                                    throw new UnsupportedOperationException(
+                                            "WorldData." + method.getName());
+                                });
+                setField(net.minecraft.server.MinecraftServer.class, server, "worldData", data);
+                Object levelData = Proxy.newProxyInstance(
+                        ChunkgenOracle.class.getClassLoader(),
+                        new Class<?>[] {net.minecraft.world.level.storage.ServerLevelData.class},
+                        (self, method, args) -> {
+                            if (method.getName().equals("getDifficulty")) {
+                                return net.minecraft.world.Difficulty.NORMAL;
+                            }
+                            throw new UnsupportedOperationException(
+                                    "LevelData." + method.getName());
+                        });
+                Object fakeLevel = allocate(net.minecraft.server.level.ServerLevel.class);
+                setField(net.minecraft.server.level.ServerLevel.class, fakeLevel, "server", server);
+                setField(net.minecraft.world.level.Level.class, fakeLevel, "levelData", levelData);
+                // 结构件在 FEATURES 阶段生成的实体都不进假世界，但官方仍要构造它们
+                // （女巫小屋、府邸、海底神殿、前哨、村庄……）。工厂换成惰性实例，
+                // 后面的 `snapTo` / `finalizeSpawn` / `addFreshEntity` 全部空操作。
+                installInertMob(net.minecraft.world.entity.EntityTypes.WITCH, InertWitch.class);
+                installInertMob(net.minecraft.world.entity.EntityTypes.CAT, InertCat.class);
+                installInertMob(net.minecraft.world.entity.EntityTypes.ELDER_GUARDIAN,
+                        InertElderGuardian.class);
+                installInertMob(net.minecraft.world.entity.EntityTypes.EVOKER, InertEvoker.class);
+                installInertMob(net.minecraft.world.entity.EntityTypes.VINDICATOR,
+                        InertVindicator.class);
+                installInertMob(net.minecraft.world.entity.EntityTypes.ALLAY, InertAllay.class);
+                return (net.minecraft.server.level.ServerLevel) fakeLevel;
+            } catch (Exception error) {
+                throw new IllegalStateException("cannot stub generation-time entities", error);
+            }
+        }
+
         private static final sun.misc.Unsafe UNSAFE = loadUnsafe();
 
         private static sun.misc.Unsafe loadUnsafe() {
@@ -1231,6 +1957,23 @@ public final class ChunkgenOracle {
             } catch (ReflectiveOperationException error) {
                 throw new IllegalStateException(error);
             }
+        }
+
+        /** 写一个可能声明在父类上的 final 字段（世界种子链）。 */
+        private static void setFieldInHierarchy(Object target, String name, Object value) {
+            for (Class<?> owner = target.getClass(); owner != null; owner = owner.getSuperclass()) {
+                try {
+                    Field field = owner.getDeclaredField(name);
+                    field.setAccessible(true);
+                    field.set(target, value);
+                    return;
+                } catch (NoSuchFieldException ignored) {
+                    // 继续往父类找。 / Keep walking up the hierarchy.
+                } catch (IllegalAccessException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            throw new IllegalStateException("no field " + name);
         }
 
         private ProtoChunk newChunk(ChunkPos pos, NoiseGeneratorSettings generatorSettings) {
@@ -1340,6 +2083,24 @@ public final class ChunkgenOracle {
         }
 
         private long[] seeds() {
+            if (this.options.chunksFile() != null) {
+                try {
+                    List<Long> parsed = new ArrayList<>();
+                    for (String line : Files.readAllLines(this.options.chunksFile(),
+                            StandardCharsets.UTF_8)) {
+                        if (!line.isBlank()) {
+                            parsed.add(Long.parseLong(line.trim().split("\\s+")[0]));
+                        }
+                    }
+                    // 保留文件里的顺序，去重后按种子分组。
+                    return parsed.stream().distinct().mapToLong(Long::longValue).toArray();
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException("cannot read chunks file", error);
+                }
+            }
+            if (this.options.forcedSeed() != null) {
+                return new long[] {this.options.forcedSeed()};
+            }
             long[] seeds = new long[this.options.seeds()];
             Random random = new Random(this.options.salt());
             for (int i = 0; i < seeds.length; i++) {
@@ -1349,6 +2110,26 @@ public final class ChunkgenOracle {
         }
 
         private int[][] chunks(long seed) {
+            if (this.options.chunksFile() != null) {
+                try {
+                    List<int[]> parsed = new ArrayList<>();
+                    for (String line : Files.readAllLines(this.options.chunksFile(),
+                            StandardCharsets.UTF_8)) {
+                        if (line.isBlank()) {
+                            continue;
+                        }
+                        String[] parts = line.trim().split("\\s+");
+                        if (Long.parseLong(parts[0]) == seed) {
+                            parsed.add(new int[] {
+                                Integer.parseInt(parts[1]), Integer.parseInt(parts[2])
+                            });
+                        }
+                    }
+                    return parsed.toArray(new int[0][]);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException("cannot read chunks file", error);
+                }
+            }
             // `--chunk X Z --scan N`：以 (X,Z) 为中心的一连续网格，密集覆盖含水层
             // 格子边界。稀有分支（如岩浆层上边界 y=-54）只在连续洞穴区域里出现，
             // 稀疏的随机区块扫不到，所以扫描要用相邻区块而不是完全随机的坐标。
