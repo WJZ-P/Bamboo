@@ -521,6 +521,9 @@ pub fn desert_pyramid(
     cz: i32,
     random: &crate::random::WorldgenRandom,
     writes: crate::structure::place::WriteLog,
+    // `DesertPyramidStructure.afterPlace` 需要的数据。
+    // Data consumed by `DesertPyramidStructure.afterPlace`.
+    after: &mut super::pyramid_after::PyramidAfterData,
 ) -> crate::structure::place::Placed {
     // `updateHeightPositionToLowestGroundHeight(level, -random.nextInt(3))`。
     let offset = -random.next_int(3);
@@ -560,7 +563,19 @@ pub fn desert_pyramid(
     // `ChunkPos.getWorldPosition()` 是区块最小角 `(cx*16, 0, cz*16)`，不是中心。
     // `ChunkPos.getWorldPosition()` is the chunk's min corner, not its centre.
     let mut region = region_random(seed, use_legacy_random, cx * 16, cz * 16);
-    add_cellar(&mut ctx, &mut region);
+    add_cellar(&mut ctx, &mut region, &mut after.potential_sand);
+    // `placeCollapsedRoof` 末尾用 `level.getSeed()` 的位置派生随机源算出
+    // `randomCollapsedRoofPos`（只写进字段，`afterPlace` 才用）。
+    let (x, y, z) = (16, -4, 13);
+    let anchor = ctx.world_pos(x - 2, y + 4, z - 2);
+    let roof_rand = mc_bamboo_blocks::LegacyRandom::new(
+        crate::random::positional_seed(anchor.0, anchor.1, anchor.2)
+            ^ mc_bamboo_blocks::LegacyRandom::new(seed).next_long(),
+    );
+    let rx = roof_rand.next_int_between_inclusive(x - 2, x + 2);
+    let rz = roof_rand.next_int_between_inclusive(z - 2, z + 2);
+    after.collapsed_roof_pos = Some(ctx.world_pos(rx, y + 4, rz));
+    after.structure_bb = Some(new_bb);
     let writes = ctx.writes.take();
     (Some((height_position, new_bb)), writes)
 }
@@ -569,9 +584,13 @@ pub fn desert_pyramid(
 ///
 /// `DesertPyramidPiece.addCellar`: stairs plus the burial chamber with
 /// `roomCenter = (16, -4, 13)`.
-fn add_cellar(ctx: &mut PieceContext<'_, '_>, region: &mut Random) {
+fn add_cellar(
+    ctx: &mut PieceContext<'_, '_>,
+    region: &mut Random,
+    potential_sand: &mut Vec<(i32, i32, i32)>,
+) {
     add_cellar_stairs(ctx, region);
-    add_cellar_room(ctx, region);
+    add_cellar_room(ctx, region, potential_sand);
 }
 
 /// `DesertPyramidPiece.addCellarStairs`。
@@ -604,7 +623,11 @@ fn add_cellar_stairs(ctx: &mut PieceContext<'_, '_>, region: &mut Random) {
 /// `DesertPyramidPiece.addCellarRoom`。
 ///
 /// `DesertPyramidPiece.addCellarRoom`.
-fn add_cellar_room(ctx: &mut PieceContext<'_, '_>, region: &mut Random) {
+fn add_cellar_room(
+    ctx: &mut PieceContext<'_, '_>,
+    region: &mut Random,
+    potential_sand: &mut Vec<(i32, i32, i32)>,
+) {
     let (x, y, z) = (16, -4, 13);
     let cut = mc_bamboo_data::blocks::CUT_SANDSTONE;
     let chiseled = mc_bamboo_data::blocks::CHISELED_SANDSTONE;
@@ -629,9 +652,33 @@ fn add_cellar_room(ctx: &mut PieceContext<'_, '_>, region: &mut Random) {
         ctx.generate_box(from, to, block, block, true);
     }
 
-    // `placeSandBox` 只记可疑沙子位置，不写方块；`placeCollapsedRoof` 写屋顶。
-    // `placeSandBox` only records suspicious-sand positions; `placeCollapsedRoof` writes.
+    // `placeSandBox(x-2, y+1, z-2, x+2, y+3, z+2)`：y 外层、x 中层、z 内层，
+    // 每格把 `getWorldPos(x,y,z)` 记进 `potentialSuspiciousSandWorldPositions`，不写方块。
+    // `placeSandBox` only records world positions (y outer, x middle, z inner);
+    // `placeCollapsedRoof` writes the roof.
+    for dy in (y + 1)..=(y + 3) {
+        for dx in (x - 2)..=(x + 2) {
+            for dz in (z - 2)..=(z + 2) {
+                potential_sand.push(ctx.world_pos(dx, dy, dz));
+            }
+        }
+    }
     add_collapsed_roof(ctx, region, (x - 2, y + 4, z - 2), (x + 2, z + 2));
+    // 四个出口各两次 `placeSand`（`addCellarRoom` 字节码 679/703、769/783、
+    // 849/863、893/907），只记位置，不写方块。
+    // Each exit records two `placeSand` positions without writing a block.
+    for &(dx, dy, dz) in &[
+        (3, 1, 0),
+        (3, 2, 0),
+        (-3, 1, 0),
+        (-3, 2, 0),
+        (0, 1, 3),
+        (0, 2, 3),
+        (0, 1, -3),
+        (0, 2, -3),
+    ] {
+        potential_sand.push(ctx.world_pos(x + dx, y + dy, z + dz));
+    }
 
     ctx.place_block(mc_bamboo_data::blocks::BLUE_TERRACOTTA, x, y, z);
     for (dx, dz) in [

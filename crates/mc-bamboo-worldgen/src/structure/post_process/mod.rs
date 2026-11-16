@@ -21,6 +21,7 @@ pub mod igloo;
 pub mod jungle_temple;
 pub mod ocean_ruin;
 pub mod pyramid;
+pub mod pyramid_after;
 pub mod ruined_portal;
 pub mod shipwreck;
 pub mod swamp_hut;
