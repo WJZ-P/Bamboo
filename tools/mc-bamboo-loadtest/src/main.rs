@@ -14,6 +14,7 @@
 mod bot;
 mod chunk_trace;
 mod motion;
+mod scenario;
 mod stats;
 mod wire;
 
@@ -42,7 +43,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     if args.first().is_some_and(|first| first == "serve") {
         return serve(&args[1..]);
     }
+    if args.first().is_some_and(|first| first == "describe") {
+        return describe(&args[1..]);
+    }
     loadtest(&args)
+}
+
+/// 给一键脚本读某个重负载场景的假玩家参数：`bots pattern layout seconds`。
+fn describe(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let name = args.first().ok_or("describe needs a scenario name")?;
+    let kind =
+        scenario::ScenarioKind::parse(name).ok_or_else(|| format!("unknown scenario '{name}'"))?;
+    let (bots, pattern, layout, seconds) = kind.bots();
+    println!("{bots} {pattern} {layout} {seconds}");
+    Ok(())
 }
 
 /// 和命令行版一样的日志初始化：剖析报告是 `tracing::info!` 打出来的。
@@ -70,18 +84,37 @@ async fn serve(args: &[String]) -> Result<(), Box<dyn Error>> {
     let world_dir = option(args, "--world-dir")?.map(PathBuf::from);
     // 区块计算池的线程数，缺省 0（内联，和命令行版默认一致）；世界线程自己再夹上限。
     let chunk_worker_threads = number_option::<usize>(args, "--chunk-worker-threads")?.unwrap_or(0);
+    // 重负载场景：机器布局、真实地形和固定种子都由场景名决定，可重复生成。
+    let kind = option(args, "--scenario")?
+        .map(|name| {
+            scenario::ScenarioKind::parse(&name).ok_or_else(|| format!("unknown scenario '{name}'"))
+        })
+        .transpose()?;
+    if let Some(kind) = kind {
+        mc_bamboo_game::bench::install(scenario::configure(kind));
+    }
+    let world_gen = match kind {
+        Some(kind) if kind.normal() => mc_bamboo_game::WorldGenConfig {
+            seed: 20261116,
+            level_type: mc_bamboo_game::world_options::LevelType::Normal,
+            ..mc_bamboo_game::WorldGenConfig::default()
+        },
+        _ => mc_bamboo_game::WorldGenConfig::default(),
+    };
     let config = mc_bamboo_server::ServerConfig {
         max_players,
         view_distance,
         world_dir,
         chunk_worker_threads,
+        world_gen,
         ..mc_bamboo_server::ServerConfig::default()
     };
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!(
-        "loadtest server is listening on {} for Minecraft {} (max_players={max_players}, view_distance={view_distance}, chunk_worker_threads={chunk_worker_threads})",
+        "loadtest server is listening on {} for Minecraft {} (max_players={max_players}, view_distance={view_distance}, chunk_worker_threads={chunk_worker_threads}, scenario={})",
         listener.local_addr()?,
-        mc_bamboo_server::GAME_VERSION
+        mc_bamboo_server::GAME_VERSION,
+        kind.map(|k| k.name()).unwrap_or("none")
     );
     mc_bamboo_server::Server::new(listener, config)?
         .run(shutdown_signal())
@@ -279,6 +312,15 @@ mod tests {
         assert!(option(&duplicate, "--bots").is_err());
         let not_a_number = args(&["--bots", "many"]);
         assert!(number_option::<usize>(&not_a_number, "--bots").is_err());
+    }
+
+    #[test]
+    fn scenario_names_are_parsed() {
+        assert_eq!(
+            scenario::ScenarioKind::parse("spread-16"),
+            Some(scenario::ScenarioKind::Spread16)
+        );
+        assert_eq!(scenario::ScenarioKind::parse("nope"), None);
     }
 
     #[test]
