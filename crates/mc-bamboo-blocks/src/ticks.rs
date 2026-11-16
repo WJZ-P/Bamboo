@@ -1,14 +1,12 @@
 //! 计划刻队列，对应官方的 `LevelTicks`。方块和流体各有一条，`ServerLevel.tick` 先跑方块的，再跑流体的。
 //!
-//! 官方按区块分容器，这里也按区块分存：每个区块一份方块队列、一份流体队列，
-//! 执行时按完整的排序键（到期时间、优先级、顺序号、位置）归并，得到的全局顺序
-//! 和以前整张 `BTreeMap` 逐位相同。region 级只留时钟、顺序号、在途刻和
-//! 「哪些区块有队头、队头什么时候到期」的可重建索引。
+//! 官方按区块分容器，这里的世界不卸载区块，一个全局队列的执行顺序和官方相同：
+//! 先比到期时间，再比优先级，最后比加入的先后。
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fmt,
-    hash::{BuildHasherDefault, Hash, Hasher},
+    hash::Hash,
 };
 
 use mc_bamboo_core::{BlockPos, ChunkPos};
@@ -16,35 +14,9 @@ use mc_bamboo_core::{BlockPos, ChunkPos};
 /// `ServerLevel.tick` 给每条队列的上限：一刻最多跑这么多个，剩下的留到下一刻。
 const MAX_TICKS_PER_TICK: usize = 65_536;
 
-/// 区块坐标的便宜哈希。坐标是连续的小整数，标准库 SipHash 在排刻热路径太贵。
-#[derive(Default)]
-struct ChunkHasher(u64);
-
-impl Hasher for ChunkHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
-        }
-    }
-
-    fn write_i32(&mut self, value: i32) {
-        let mixed = (value as u32 as u64)
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            .rotate_left(29);
-        self.0 = (self.0 ^ mixed).wrapping_mul(0xff51_afd7_ed55_8ccd);
-        self.0 ^= self.0 >> 33;
-    }
-}
-
-type ChunkMap<V> = HashMap<ChunkPos, V, BuildHasherDefault<ChunkHasher>>;
-
 /// 一张表正在 tick 中途，或者有待放回的方块实体，现在不能整块搬走。
 ///
-/// 只有 [`BlockTicks::take_chunks`] 和 `BlockEntities::take_chunk` 会返回它；
+/// 只有 [`BlockTicks::take_chunk`] 和 `BlockEntities::take_chunk` 会返回它；
 /// 调用方等到 tick 边界再试。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Busy;
@@ -110,170 +82,188 @@ pub struct ScheduledFluidTick {
 type ChunkTickCheck<'a> = dyn Fn(ChunkPos) -> bool + 'a;
 
 /// 一条队列，`T` 是方块或者流体的注册表 ID。
-///
-/// 一个区块自己的那份。主队列按完整排序键有序；`deferred` 是到期时这个区块
-/// 不能 tick 的刻，按原来的排序键升序留着，恢复时整组放回主队列。
 #[derive(Debug, Clone)]
 struct TickQueue<T> {
-    /// 按完整排序键降序的 Vec：队头在末尾，弹出是 O(1)。区块内通常只有
-    /// 几条刻，随机位置插入用二分；100 万个零散区块时比每个区块一棵
-    /// BTreeMap 少上百万次堆分配。
-    queue: Vec<(TickOrder, BlockPos, T)>,
-    /// 搁置的刻，按完整排序键升序。
-    deferred: Vec<(TickOrder, BlockPos, T)>,
+    queue: BTreeMap<TickOrder, (BlockPos, T)>,
+    /// 同一格同一种排队时只留第一个，`LevelChunkTicks.ticksPerPosition`。
+    /// 搁置的刻也留在里面：官方 `sortContainersToTick` 不放行时条目仍在区块容器里。
+    scheduled: HashSet<(BlockPos, T)>,
+    /// 这一刻已经取出、还没有执行的计划刻，`willTickThisTick` 看的就是它们。
+    running: VecDeque<(BlockPos, T)>,
+    /// 到期时所在区块不能 tick 的刻，按区块分组，每条都留着完整的排序键。
+    ///
+    /// 恢复时整组放回 `queue`，和别的刻按（时刻，优先级，子序号，位置）合在一起执行；
+    /// 恢复这一步只扫「有搁置刻的区块数」，不扫搁置的刻数。
+    deferred: BTreeMap<ChunkPos, Vec<(TickOrder, BlockPos, T)>>,
 }
 
 impl<T> Default for TickQueue<T> {
     fn default() -> Self {
         Self {
-            queue: Vec::new(),
-            deferred: Vec::new(),
+            queue: BTreeMap::new(),
+            scheduled: HashSet::new(),
+            running: VecDeque::new(),
+            deferred: BTreeMap::new(),
         }
     }
 }
 
 impl<T: Copy + Eq + Hash> TickQueue<T> {
-    fn schedule(&mut self, pos: BlockPos, kind: T, order: TickOrder) {
-        // 降序存放：新刻排在（按排序键）第一个不大于它的旧刻后面，队头仍在末尾。
-        let at = self
-            .queue
-            .partition_point(|(existing, _, _)| *existing > order);
-        self.queue.insert(at, (order, pos, kind));
+    fn schedule(&mut self, pos: BlockPos, kind: T, order: TickOrder) -> bool {
+        if !self.scheduled.insert((pos, kind)) {
+            return false;
+        }
+        self.queue.insert(order, (pos, kind));
+        true
     }
 
-    fn is_empty(&self) -> bool {
-        self.queue.is_empty() && self.deferred.is_empty()
+    fn has_scheduled(&self, pos: BlockPos, kind: T) -> bool {
+        self.scheduled.contains(&(pos, kind))
     }
 
-    /// 主队列的队头。搁置的刻不进 region 级的队头索引：和分存之前一样，
-    /// 它们要等区块恢复之后整组放回主队列才重新参与执行顺序。
-    fn head(&self) -> Option<TickOrder> {
-        self.queue.last().map(|&(order, _, _)| order)
+    fn will_tick_this_tick(&self, pos: BlockPos, kind: T) -> bool {
+        self.running.contains(&(pos, kind))
     }
 
-    /// 全部排着的刻，按完整排序键。主队列和搁置表两路归并，都是有序的。
-    fn pending(&self) -> impl Iterator<Item = (TickOrder, BlockPos, T)> {
+    /// 全部排着的刻，按执行顺序：主队列和搁置表里都算，按完整排序键归并。
+    ///
+    /// 搁置表为空（默认情况）时直接返回主队列的迭代器，不做任何额外工作；
+    /// 非空时只把少数搁置条目排好，和主队列做两路归并。
+    fn pending(&self) -> impl Iterator<Item = (&TickOrder, BlockPos, T)> {
         let main = self
             .queue
             .iter()
-            .rev()
-            .map(|&(order, pos, kind)| (order, pos, kind));
-        let deferred = self
+            .map(|(order, &(pos, kind))| (order, pos, kind));
+        if self.deferred.is_empty() {
+            return Either::Main(main);
+        }
+        let mut deferred: Vec<_> = self
             .deferred
-            .iter()
-            .map(|&(order, pos, kind)| (order, pos, kind));
-        merge_keys(main, deferred)
+            .values()
+            .flatten()
+            .map(|(order, pos, kind)| (order, *pos, *kind))
+            .collect();
+        deferred.sort_unstable_by_key(|(order, _, _)| **order);
+        Either::Merged(merge_pending(main, deferred.into_iter()))
     }
 
-    /// 把搁置的整组放回主队列，保留原来的排序键。
-    fn restore_deferred(&mut self) {
-        for (order, pos, kind) in std::mem::take(&mut self.deferred) {
-            self.schedule(pos, kind, order);
-        }
-    }
-
-    /// 按完整顺序键弹出队头一条。调用方保证队头已经到期。
-    fn pop_head(&mut self) -> (TickOrder, BlockPos, T) {
-        self.queue.pop().expect("队头存在")
-    }
-
-    /// 装盒：先放搁置的刻（按完整排序键），再放主队列（本来就有序），
-    /// 和分存之前 `take_chunks` 的顺序逐条相同，存档字节因此不变。
-    fn box_entries(&self, now: i64) -> Vec<SavedTick<T>> {
-        let mut out = Vec::with_capacity(self.queue.len() + self.deferred.len());
-        let mut deferred = self.deferred.clone();
-        deferred.sort_unstable_by_key(|(order, _, _)| *order);
-        for (order, pos, kind) in deferred {
-            out.push(saved(order, pos, kind, now));
-        }
-        for &(order, pos, kind) in self.queue.iter().rev() {
-            out.push(saved(order, pos, kind, now));
-        }
-        out
-    }
-}
-
-fn saved<T: Copy>(order: TickOrder, pos: BlockPos, kind: T, now: i64) -> SavedTick<T> {
-    SavedTick {
-        pos,
-        kind,
-        priority: order.priority,
-        delay: order.trigger_tick.saturating_sub(now),
-    }
-}
-
-/// 两个已按完整排序键排好的迭代器归并，键相同时主队列在前。
-fn merge_keys<T: Copy>(
-    mut left: impl Iterator<Item = (TickOrder, BlockPos, T)>,
-    mut right: impl Iterator<Item = (TickOrder, BlockPos, T)>,
-) -> impl Iterator<Item = (TickOrder, BlockPos, T)> {
-    let mut a = left.next();
-    let mut b = right.next();
-    std::iter::from_fn(move || match (a, b) {
-        (Some(x), Some(y)) => {
-            if x.0 <= y.0 {
-                a = left.next();
-                Some(x)
-            } else {
-                b = right.next();
-                Some(y)
+    /// `LevelTicks.sortContainersToTick` 加 `collectTicks`：把到期的计划刻取出来等着执行，
+    /// 之后排的要等下一刻。不能 tick 的区块里到期的刻整组搁置，保留原来的排序键。
+    ///
+    /// `can_tick` 由调用方从 [`crate::Level::chunk_ticks_blocks`] 传进来：搁置表里的
+    /// 每个区块问一次，主队列里每条到期的刻问一次。没到期的刻一条都不碰，
+    /// 排刻路径一行都不改。
+    fn collect_due(&mut self, now: i64, can_tick: &ChunkTickCheck<'_>) {
+        // 先把现在能 tick 的搁置区块整组放回主队列。开销和「有搁置刻的区块数」成正比。
+        if !self.deferred.is_empty() {
+            let ready: Vec<ChunkPos> = self
+                .deferred
+                .keys()
+                .copied()
+                .filter(|&chunk| can_tick(chunk))
+                .collect();
+            for chunk in ready {
+                let entries = self
+                    .deferred
+                    .remove(&chunk)
+                    .expect("key came from the deferred map");
+                for (order, pos, kind) in entries {
+                    self.queue.insert(order, (pos, kind));
+                }
             }
         }
-        (Some(x), None) => {
-            a = left.next();
-            Some(x)
+
+        while self.running.len() < MAX_TICKS_PER_TICK
+            && let Some(entry) = self.queue.first_entry()
+            && entry.key().trigger_tick <= now
+        {
+            let order = *entry.key();
+            let (pos, kind) = entry.remove();
+            if can_tick(pos.chunk()) {
+                self.scheduled.remove(&(pos, kind));
+                self.running.push_back((pos, kind));
+            } else {
+                // 条目只移一次：从此不再经过主队列，直到区块恢复。
+                self.deferred
+                    .entry(pos.chunk())
+                    .or_default()
+                    .push((order, pos, kind));
+            }
         }
-        (None, Some(y)) => {
-            b = right.next();
-            Some(y)
+    }
+
+    fn next_due(&mut self) -> Option<(BlockPos, T)> {
+        self.running.pop_front()
+    }
+}
+
+/// `pending()` 的两种返回形状：搁置表为空时是主队列的迭代器，否则是两路归并。
+enum Either<A, B> {
+    Main(A),
+    Merged(B),
+}
+
+impl<I, A, B> Iterator for Either<A, B>
+where
+    A: Iterator<Item = I>,
+    B: Iterator<Item = I>,
+{
+    type Item = I;
+
+    fn next(&mut self) -> Option<I> {
+        match self {
+            Self::Main(iter) => iter.next(),
+            Self::Merged(iter) => iter.next(),
+        }
+    }
+}
+
+/// 两个都按排序键排好的迭代器归并，键相同的时候主队列在前（和主队列里的顺序一致）。
+fn merge_pending<'a, T: Copy + 'a>(
+    mut main: impl Iterator<Item = (&'a TickOrder, BlockPos, T)> + 'a,
+    mut deferred: impl Iterator<Item = (&'a TickOrder, BlockPos, T)> + 'a,
+) -> impl Iterator<Item = (&'a TickOrder, BlockPos, T)> + 'a {
+    let mut left = main.next();
+    let mut right = deferred.next();
+    std::iter::from_fn(move || match (left, right) {
+        (Some(a), Some(b)) => {
+            if *a.0 <= *b.0 {
+                left = main.next();
+                Some(a)
+            } else {
+                right = deferred.next();
+                Some(b)
+            }
+        }
+        (Some(a), None) => {
+            left = main.next();
+            Some(a)
+        }
+        (None, Some(b)) => {
+            right = deferred.next();
+            Some(b)
         }
         (None, None) => None,
     })
 }
 
-/// 一个区块的两条队列和它在队头索引里登记的那个排序键。
-#[derive(Debug, Clone, Default)]
-struct ChunkQueues {
-    blocks: TickQueue<usize>,
-    fluids: TickQueue<i32>,
-    /// `PistonMovingBlockEntity.lastTicked` 的相对量，只在这一刻内有用。
-    ticked_entities: HashMap<BlockPos, i64>,
-    /// 方块队列在 `block_heads` 里的键。
-    block_head: Option<TickOrder>,
-    /// 流体队列在 `fluid_heads` 里的键。
-    fluid_head: Option<TickOrder>,
-}
-
-/// 全部排队的计划刻：按区块分存，方块和流体各有自己的队列。
+/// 全部排队的计划刻：方块一条队列，流体一条队列。
 ///
-/// `next_order`、`now` 和一刻最多跑多少条的上限都在 region 级。`block_heads` /
-/// `fluid_heads` 是可重建索引：每个有排着刻的区块记它**主队列**的队头（完整
-/// 排序键），`collect_due` 每次只取全局最小的那一条，所以这一刻没有到期刻时
-/// 只是一次 `first()` 判断，不扫任何队列。
+/// 每张队列另有一张「搁置表」：到期时所在区块不能 tick 的刻按区块收起来，
+/// 保留原来的完整排序键；区块恢复时整组放回主队列，和别的刻合在一起执行。
 #[derive(Debug, Clone, Default)]
 pub struct BlockTicks {
     /// 现在的 `gameTime`，由 [`run_scheduled_ticks`](crate::run_scheduled_ticks) 更新。
     now: i64,
-    /// `Level.nextSubTickCount`，两条队列共用、全 region 单调。
+    /// `Level.nextSubTickCount`，两条队列共用。
     next_order: u64,
-    chunks: ChunkMap<ChunkQueues>,
-    /// 「这一格这个种类有没有排着刻」的全局查重索引：按位置查是方块逻辑的
-    /// 热路径，有它就不用先算区块再查两层表。它是可重建索引，不含队列数据。
-    block_scheduled: HashSet<(BlockPos, usize)>,
-    fluid_scheduled: HashSet<(BlockPos, i32)>,
-    /// 队头索引按到期时刻分桶：队头变化时只往那个桶的 Vec 末尾追加一次；
-    /// 桶数通常只有几十个，排刻热路径不碰一棵百万节点的树。同一时刻内
-    /// `collect_due` 现搭一个小根堆，按完整排序键取出，顺序和全局表一致。
-    /// 它们是可重建索引，不含队列数据。
-    block_heads: Heads,
-    fluid_heads: Heads,
-    /// 有搁置刻的区块，恢复时只扫这些。
-    deferred: BTreeSet<ChunkPos>,
-    /// 这一刻已经取出、还没有执行的计划刻，`willTickThisTick` 看的就是它们。
-    running: VecDeque<(BlockPos, usize)>,
-    running_fluids: VecDeque<(BlockPos, i32)>,
+    blocks: TickQueue<usize>,
+    fluids: TickQueue<i32>,
+    /// `PistonMovingBlockEntity.lastTicked` 的相对量：位置 → 最后一次 tick 的 gameTime。
+    /// 官方不存这个字段，读盘回来是 0；这里空表等价于「本刻还没 tick 过」。
+    ticked_entities: HashMap<BlockPos, i64>,
     /// 计划刻增删过的区块，交给游戏层的存档改动标记。
-    dirty: BTreeSet<ChunkPos>,
+    dirty: std::collections::BTreeSet<ChunkPos>,
 }
 
 impl BlockTicks {
@@ -283,22 +273,14 @@ impl BlockTicks {
 
     /// 记下一次方块实体 tick，供活塞的 `lastTicked == gameTime` 比较用。
     pub fn note_block_entity_tick(&mut self, pos: BlockPos) {
-        self.chunks
-            .entry(pos.chunk())
-            .or_default()
-            .ticked_entities
-            .insert(pos, self.now);
+        self.ticked_entities.insert(pos, self.now);
     }
 
     /// 这一格的方块实体本刻是不是已经 tick 过。等价于官方
     /// `level.getGameTime() == moving.getLastTicked()`，但不含绝对时刻，
     /// 所以周期性活塞门的状态能重复、能进缓存键。
     pub fn entity_ticked_this_tick(&self, pos: BlockPos) -> bool {
-        self.chunks
-            .get(&pos.chunk())
-            .and_then(|queues| queues.ticked_entities.get(&pos))
-            .copied()
-            == Some(self.now)
+        self.ticked_entities.get(&pos).copied() == Some(self.now)
     }
 
     fn mark_dirty(&mut self, pos: ChunkPos) {
@@ -310,13 +292,16 @@ impl BlockTicks {
         self.dirty.contains(&pos)
     }
 
-    pub fn take_dirty(&mut self) -> BTreeSet<ChunkPos> {
+    pub fn take_dirty(&mut self) -> std::collections::BTreeSet<ChunkPos> {
         std::mem::take(&mut self.dirty)
     }
 
-    /// 现在能不能按区块搬计划刻：没有取出、还没跑完的刻。
+    /// 现在能不能按区块搬计划刻：两条队列里都没有取出、还没跑完的刻。
+    ///
+    /// [`Self::take_chunks`] 和 [`Self::take_chunk`] 的前提，可以在动手之前只读地问一声，
+    /// 好让一次要搬几张表的调用方先检查全部前提。
     pub fn ready_to_move_chunks(&self) -> bool {
-        self.running.is_empty() && self.running_fluids.is_empty()
+        self.blocks.running.is_empty() && self.fluids.running.is_empty()
     }
 
     /// 现在的 `gameTime`。
@@ -329,32 +314,6 @@ impl BlockTicks {
     /// 官方的假世界直接从一个游戏时间开始，没有先跑一刻；重放动作之前也只要把时钟对上。
     pub fn set_time(&mut self, now: i64) {
         self.now = now;
-    }
-
-    /// 队头变了就在新时刻的桶里追加一项；旧的那项留着，出桶时判旧。
-    fn set_head(heads: &mut Heads, chunk: ChunkPos, new: Option<TickOrder>) {
-        if let Some(order) = new {
-            heads.entry(order.trigger_tick).or_default().push(chunk);
-        }
-    }
-
-    /// 重算两条队列的队头，只在取出、搁置、恢复之后用，不在排刻热路径上。
-    fn recompute_heads(&mut self, chunk: ChunkPos) {
-        let Some(queues) = self.chunks.get_mut(&chunk) else {
-            return;
-        };
-        let blocks = queues.blocks.head();
-        let fluids = queues.fluids.head();
-        let changed_blocks = queues.block_head != blocks;
-        let changed_fluids = queues.fluid_head != fluids;
-        queues.block_head = blocks;
-        queues.fluid_head = fluids;
-        if changed_blocks {
-            Self::set_head(&mut self.block_heads, chunk, blocks);
-        }
-        if changed_fluids {
-            Self::set_head(&mut self.fluid_heads, chunk, fluids);
-        }
     }
 
     fn order(&mut self, pos: BlockPos, delay: i32, priority: TickPriority) -> TickOrder {
@@ -371,17 +330,9 @@ impl BlockTicks {
     /// 给方块排一个刻。这一格这个方块已经排着时什么也不做。
     pub fn schedule(&mut self, pos: BlockPos, block: usize, delay: i32, priority: TickPriority) {
         self.mark_dirty(pos.chunk());
-        let chunk = pos.chunk();
-        if !self.block_scheduled.insert((pos, block)) {
-            return;
-        }
-        let order = self.order(pos, delay, priority);
-        let queues = self.chunks.entry(chunk).or_default();
-        queues.blocks.schedule(pos, block, order);
-        // 新刻只有比现在的队头还早才会换索引，绝大多数排刻都不碰它。
-        if queues.block_head.is_none_or(|head| order < head) {
-            queues.block_head = Some(order);
-            Self::set_head(&mut self.block_heads, chunk, Some(order));
+        if !self.blocks.has_scheduled(pos, block) {
+            let order = self.order(pos, delay, priority);
+            self.blocks.schedule(pos, block, order);
         }
     }
 
@@ -394,48 +345,34 @@ impl BlockTicks {
         priority: TickPriority,
     ) {
         self.mark_dirty(pos.chunk());
-        let chunk = pos.chunk();
-        if !self.fluid_scheduled.insert((pos, fluid)) {
-            return;
-        }
-        let order = self.order(pos, delay, priority);
-        let queues = self.chunks.entry(chunk).or_default();
-        queues.fluids.schedule(pos, fluid, order);
-        if queues.fluid_head.is_none_or(|head| order < head) {
-            queues.fluid_head = Some(order);
-            Self::set_head(&mut self.fluid_heads, chunk, Some(order));
+        if !self.fluids.has_scheduled(pos, fluid) {
+            let order = self.order(pos, delay, priority);
+            self.fluids.schedule(pos, fluid, order);
         }
     }
 
     /// 这一格这种流体是不是已经排着一条流体刻。
     pub fn has_scheduled_fluid(&self, pos: BlockPos, fluid: i32) -> bool {
-        self.fluid_scheduled.contains(&(pos, fluid))
+        self.fluids.has_scheduled(pos, fluid)
     }
 
     /// `getBlockTicks().hasScheduledTick`。
     pub fn has_scheduled_tick(&self, pos: BlockPos, block: usize) -> bool {
-        self.block_scheduled.contains(&(pos, block))
+        self.blocks.has_scheduled(pos, block)
     }
 
     /// `getBlockTicks().willTickThisTick`：已经到期、这一刻还没轮到的计划刻。
     pub fn will_tick_this_tick(&self, pos: BlockPos, block: usize) -> bool {
-        self.running.contains(&(pos, block))
-    }
-
-    /// 这个区块有没有还没执行的计划刻（含搁置的），给下一步的「忙区块」用。
-    pub fn chunk_has_pending_ticks(&self, chunk: ChunkPos) -> bool {
-        self.chunks
-            .get(&chunk)
-            .is_some_and(|queues| !queues.blocks.is_empty() || !queues.fluids.is_empty())
+        self.blocks.will_tick_this_tick(pos, block)
     }
 
     /// 全部排队的方块计划刻，按执行顺序，搁置的也算。oracle 用它比较结果。
     pub fn pending(&self) -> impl Iterator<Item = ScheduledTick> {
-        self.merge_pending(false, None)
-            .into_iter()
+        self.blocks
+            .pending()
             .map(|(order, pos, block)| ScheduledTick {
                 pos,
-                block: block as usize,
+                block,
                 trigger_tick: order.trigger_tick,
                 priority: order.priority,
             })
@@ -443,292 +380,51 @@ impl BlockTicks {
 
     /// 全部排队的流体计划刻，按执行顺序，搁置的也算。
     pub fn pending_fluids(&self) -> impl Iterator<Item = ScheduledFluidTick> {
-        self.merge_pending(true, None)
-            .into_iter()
+        self.fluids
+            .pending()
             .map(|(order, pos, fluid)| ScheduledFluidTick {
                 pos,
-                fluid: fluid as i32,
+                fluid,
                 trigger_tick: order.trigger_tick,
                 priority: order.priority,
             })
     }
 
-    /// `wanted` 这组区块里的刻，按全局完整排序键归并；`None` 是全部区块。
-    /// 下一步的单元并行只归并自己范围内的区块，得到的顺序等于全局顺序在
-    /// 这组区块上的子序列（按完整键取最小，和区块编号无关）。
-    fn merge_pending(
-        &self,
-        fluids: bool,
-        wanted: Option<&BTreeSet<ChunkPos>>,
-    ) -> Vec<(TickOrder, BlockPos, i64)> {
-        let mut sources: Vec<Vec<(TickOrder, BlockPos, i64)>> = Vec::new();
-        for (&chunk, queues) in &self.chunks {
-            if wanted.is_some_and(|set| !set.contains(&chunk)) {
-                continue;
-            }
-            let entries: Vec<_> = if fluids {
-                queues
-                    .fluids
-                    .pending()
-                    .map(|(order, pos, kind)| (order, pos, i64::from(kind)))
-                    .collect()
-            } else {
-                queues
-                    .blocks
-                    .pending()
-                    .map(|(order, pos, kind)| (order, pos, kind as i64))
-                    .collect()
-            };
-            if !entries.is_empty() {
-                sources.push(entries);
-            }
-        }
-        // 小根堆按完整排序键取全局最小；每个区块自己的序列已经有序。
-        let mut heap = std::collections::BinaryHeap::new();
-        for (index, entries) in sources.iter().enumerate() {
-            heap.push(std::cmp::Reverse(PendingCursor {
-                order: entries[0].0,
-                index,
-                at: 0,
-            }));
-        }
-        let mut out = Vec::new();
-        while let Some(std::cmp::Reverse(cursor)) = heap.pop() {
-            let entries = &sources[cursor.index];
-            out.push(entries[cursor.at]);
-            let at = cursor.at + 1;
-            if let Some(&(order, _, _)) = entries.get(at) {
-                heap.push(std::cmp::Reverse(PendingCursor {
-                    order,
-                    index: cursor.index,
-                    at,
-                }));
-            }
-        }
-        out
-    }
-
     /// 把这一刻到期的方块计划刻取出来，同时把时钟拨到 `now`。
     ///
-    /// 只碰队头索引里最小的那几条；没有到期刻的那一刻只有一次 `first()` 判断。
+    /// `can_tick` 是调用方从 [`crate::Level::chunk_ticks_blocks`] 拿来的判断。
     pub(crate) fn collect_due(&mut self, now: i64, can_tick: &ChunkTickCheck<'_>) {
         self.now = now;
-        self.restore_ready_deferred(can_tick);
-        self.collect_by_head(now, can_tick, false);
-    }
-
-    /// 方块的刻都跑完以后，取出这一刻到期的流体计划刻。
-    pub(crate) fn collect_due_fluids(&mut self, can_tick: &ChunkTickCheck<'_>) {
-        self.restore_ready_deferred(can_tick);
-        self.collect_by_head(self.now, can_tick, true);
-    }
-
-    /// 只对 `chunks` 这组区块收这一刻到期的方块刻，给下一步的单元并行用。
-    /// 顺序等于全局顺序在这组区块上的子序列；单元只有几个区块，按完整键
-    /// 归并后收进 `running` 即可。
-    pub fn collect_due_in(
-        &mut self,
-        now: i64,
-        chunks: &BTreeSet<ChunkPos>,
-        can_tick: &ChunkTickCheck<'_>,
-    ) {
-        self.now = now;
-        self.restore_ready_deferred(can_tick);
-        let mut due: Vec<(TickOrder, BlockPos, i64, ChunkPos)> = Vec::new();
-        for &chunk in chunks {
-            let Some(queues) = self.chunks.get_mut(&chunk) else {
-                continue;
-            };
-            if !can_tick(chunk) {
-                continue;
-            }
-            while let Some((order, pos, kind)) = queues.blocks.queue.pop() {
-                if order.trigger_tick > now {
-                    queues.blocks.queue.push((order, pos, kind));
-                    break;
-                }
-                self.block_scheduled.remove(&(pos, kind));
-                due.push((order, pos, kind as i64, chunk));
-            }
-            self.recompute_heads(chunk);
-        }
-        due.sort_unstable_by_key(|(order, _, _, _)| *order);
-        let take = due
-            .len()
-            .min(MAX_TICKS_PER_TICK.saturating_sub(self.running.len()));
-        for (_, pos, kind, _) in due.drain(..take) {
-            self.running.push_back((pos, kind as usize));
-        }
-        for (order, pos, kind, chunk) in due {
-            if let Some(queues) = self.chunks.get_mut(&chunk) {
-                queues.blocks.schedule(pos, kind as usize, order);
-                self.block_scheduled.insert((pos, kind as usize));
-            }
-        }
-        for &chunk in chunks {
-            self.recompute_heads(chunk);
-        }
-    }
-
-    /// 官方 `sortContainersToTick`：区块恢复时把搁置的整组放回主队列。
-    fn restore_ready_deferred(&mut self, can_tick: &ChunkTickCheck<'_>) {
-        if self.deferred.is_empty() {
-            return;
-        }
-        let ready: Vec<ChunkPos> = self
-            .deferred
-            .iter()
-            .copied()
-            .filter(|&chunk| can_tick(chunk))
-            .collect();
-        for chunk in ready {
-            let Some(queues) = self.chunks.get_mut(&chunk) else {
-                self.deferred.remove(&chunk);
-                continue;
-            };
-            queues.blocks.restore_deferred();
-            queues.fluids.restore_deferred();
-            self.deferred.remove(&chunk);
-            self.recompute_heads(chunk);
-        }
-    }
-
-    /// 按全局完整排序键一条一条取：每次从队头索引拿最小的那一条，处理后
-    /// 把这个区块的新队头放回索引。和分存之前 `BTreeMap::first_entry` 的
-    /// 顺序逐位相同，而且只摸到这一刻真会执行（或搁置）的那些刻。
-    fn collect_by_head(&mut self, now: i64, can_tick: &ChunkTickCheck<'_>, fluids: bool) {
-        loop {
-            let running_len = if fluids {
-                self.running_fluids.len()
-            } else {
-                self.running.len()
-            };
-            if running_len >= MAX_TICKS_PER_TICK {
-                break;
-            }
-            let heads = if fluids {
-                &self.fluid_heads
-            } else {
-                &self.block_heads
-            };
-            let Some((&time, _)) = heads.first_key_value() else {
-                break;
-            };
-            if time > now {
-                break;
-            }
-            let heads = if fluids {
-                &mut self.fluid_heads
-            } else {
-                &mut self.block_heads
-            };
-            // 取出这个到期时刻的整桶，逐项留下仍然有效的队头。
-            let candidates = heads.remove(&time).unwrap_or_default();
-            let mut heap = std::collections::BinaryHeap::new();
-            for chunk in candidates {
-                let Some(queues) = self.chunks.get(&chunk) else {
-                    continue;
-                };
-                let head = if fluids {
-                    queues.fluid_head
-                } else {
-                    queues.block_head
-                };
-                if head.is_some_and(|order| order.trigger_tick == time) {
-                    heap.push(std::cmp::Reverse((head.expect("刚判过"), chunk)));
-                }
-            }
-            let mut capped = false;
-            while let Some(std::cmp::Reverse((order, chunk))) = heap.pop() {
-                let running_len = if fluids {
-                    self.running_fluids.len()
-                } else {
-                    self.running.len()
-                };
-                if running_len >= MAX_TICKS_PER_TICK {
-                    // 这一条还没出堆就撞上限了：连它一起留到下一刻。
-                    heap.push(std::cmp::Reverse((order, chunk)));
-                    capped = true;
-                    break;
-                }
-                let Some(queues) = self.chunks.get_mut(&chunk) else {
-                    continue;
-                };
-                let head = if fluids {
-                    queues.fluid_head
-                } else {
-                    queues.block_head
-                };
-                if head != Some(order) {
-                    continue;
-                }
-                let (popped, pos, kind) = if fluids {
-                    let (order, pos, kind) = queues.fluids.pop_head();
-                    (order, pos, i64::from(kind))
-                } else {
-                    let (order, pos, kind) = queues.blocks.pop_head();
-                    (order, pos, kind as i64)
-                };
-                debug_assert_eq!(popped, order);
-                if can_tick(chunk) {
-                    if fluids {
-                        self.fluid_scheduled.remove(&(pos, kind as i32));
-                        self.running_fluids.push_back((pos, kind as i32));
-                    } else {
-                        self.block_scheduled.remove(&(pos, kind as usize));
-                        self.running.push_back((pos, kind as usize));
-                    }
-                } else {
-                    if fluids {
-                        queues.fluids.deferred.push((popped, pos, kind as i32));
-                    } else {
-                        queues.blocks.deferred.push((popped, pos, kind as usize));
-                    }
-                    self.deferred.insert(chunk);
-                }
-                self.recompute_heads(chunk);
-                // 新队头还在同一时刻：直接续进这个堆；更晚的已经进了别的桶，
-                // 由外层循环按时刻升序处理。
-                let next = if fluids {
-                    self.chunks.get(&chunk).and_then(|q| q.fluid_head)
-                } else {
-                    self.chunks.get(&chunk).and_then(|q| q.block_head)
-                };
-                if let Some(next) = next
-                    && next.trigger_tick == time
-                {
-                    heap.push(std::cmp::Reverse((next, chunk)));
-                }
-            }
-            // 堆里剩下的队头还在各自的区块队列里，把它们的新键重新登记，
-            // 下一刻才能继续按全局顺序取。
-            for std::cmp::Reverse((order, chunk)) in heap {
-                let heads = if fluids {
-                    &mut self.fluid_heads
-                } else {
-                    &mut self.block_heads
-                };
-                heads.entry(order.trigger_tick).or_default().push(chunk);
-            }
-            if capped {
-                break;
-            }
-        }
+        self.blocks.collect_due(now, can_tick);
     }
 
     /// 下一个要执行的方块计划刻。
     pub(crate) fn next_due(&mut self) -> Option<(BlockPos, usize)> {
-        self.running.pop_front()
+        self.blocks.next_due()
+    }
+
+    /// 方块的刻都跑完以后，取出这一刻到期的流体计划刻。
+    pub(crate) fn collect_due_fluids(&mut self, can_tick: &ChunkTickCheck<'_>) {
+        self.fluids.collect_due(self.now, can_tick);
     }
 
     /// 下一个要执行的流体计划刻。
     pub(crate) fn next_fluid_due(&mut self) -> Option<(BlockPos, i32)> {
-        self.running_fluids.pop_front()
+        self.fluids.next_due()
     }
 
-    /// 把一批区块里所有排着的计划刻整盒搬走。只在 tick 边界调用。
+    /// 把一批区块里所有排着的计划刻装进盒子搬走。只在 tick 边界调用。
     ///
-    /// 每个区块直接 `remove`，开销和这批区块的条目数成正比，和别的区块无关。
+    /// 每条队列只扫一遍：开销和队列长度成正比，和要取多少个区块无关。
+    /// **这里刻意不维护按区块的索引**：微基准里，每排一条刻多一次哈希和一次
+    /// Vec push 会让「排完再跑完一百万条刻」从 350 ms 变 440 ms、滚动场景从
+    /// 164 ms 变 226 ms，而排刻是红石和流体每刻都在做的热路径，取出区块只在
+    /// 卸载和 region 拆合时发生。调用方要把一整刻要卸载的区块攒成一批，
+    /// 每刻最多调一次 [`Self::take_chunks`]。
+    ///
+    /// 返回的 map 只含有排着刻的区块；`chunks` 里没有刻的区块不给键，也不给空盒子。
+    /// 这一刻已经取出、还没跑完的清单不为空时返回 [`Err`]，因为那些刻已经不在队列里，
+    /// 没法跟着区块走。别的区块的刻原地不动。
     pub fn take_chunks(
         &mut self,
         chunks: &BTreeSet<ChunkPos>,
@@ -736,26 +432,35 @@ impl BlockTicks {
         if !self.ready_to_move_chunks() {
             return Err(Busy);
         }
-        let mut boxes = BTreeMap::new();
-        for &chunk in chunks {
-            let Some(queues) = self.chunks.remove(&chunk) else {
-                continue;
-            };
-            self.deferred.remove(&chunk);
-            self.block_scheduled.retain(|(pos, _)| pos.chunk() != chunk);
-            self.fluid_scheduled.retain(|(pos, _)| pos.chunk() != chunk);
-            boxes.insert(
-                chunk,
-                ChunkTicks {
-                    blocks: queues.blocks.box_entries(self.now),
-                    fluids: queues.fluids.box_entries(self.now),
-                },
-            );
+        let blocks = self.blocks.take_chunks(chunks, self.now);
+        let fluids = self.fluids.take_chunks(chunks, self.now);
+        let mut boxes: BTreeMap<ChunkPos, ChunkTicks> = blocks
+            .into_iter()
+            .map(|(chunk, blocks)| {
+                (
+                    chunk,
+                    ChunkTicks {
+                        blocks,
+                        fluids: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        for (chunk, fluids) in fluids {
+            boxes
+                .entry(chunk)
+                .or_insert_with(|| ChunkTicks {
+                    blocks: Vec::new(),
+                    fluids: Vec::new(),
+                })
+                .fluids = fluids;
         }
         Ok(boxes)
     }
 
     /// 把 `chunk` 里所有排着的计划刻装进盒子搬走。只在 tick 边界调用。
+    ///
+    /// 见 [`Self::take_chunks`]：这也是一次全队列扫描，一次要搬多个区块时用批量接口。
     pub fn take_chunk(&mut self, chunk: ChunkPos) -> Result<ChunkTicks, Busy> {
         let chunks = [chunk].into_iter().collect();
         let mut boxes = self.take_chunks(&chunks)?;
@@ -765,21 +470,13 @@ impl BlockTicks {
         }))
     }
 
-    /// 只读快照：和 [`Self::take_chunk`] 一样的盒子，原表分毫不动。给已加载区块的
+    /// 只读快照：在一份克隆上走 `take_chunk`，原表分毫不动。给已加载区块的
     /// 只读存档编码用（补 11）。tick 中途（有在途刻）时返回 `None`，调用方稍后重试。
-    /// Read-only snapshot: the same box as `take_chunk`, leaving the original
-    /// untouched. Returns `None` mid-tick (there are running ticks).
+    /// Read-only snapshot: run `take_chunk` on a clone, leaving the original
+    /// untouched. Returns `None` mid-tick (there are running ticks); the caller
+    /// retries later. Used by the loaded-chunk read-only encoder (item 11).
     pub fn snapshot_chunk(&self, chunk: ChunkPos) -> Option<ChunkTicks> {
-        if !self.ready_to_move_chunks() {
-            return None;
-        }
-        let Some(queues) = self.chunks.get(&chunk) else {
-            return Some(ChunkTicks::empty());
-        };
-        Some(ChunkTicks {
-            blocks: queues.blocks.box_entries(self.now),
-            fluids: queues.fluids.box_entries(self.now),
-        })
+        self.clone().take_chunk(chunk).ok()
     }
 
     /// 把盒子里的计划刻放回表里。只在 tick 边界调用。
@@ -787,68 +484,19 @@ impl BlockTicks {
     /// 调用方保证表里已经没有 `chunk` 的条目。到期时刻按这张表的 `now` 加上盒子里存的
     /// 相对延迟算出，所以从另一张时钟不同的表搬过来也能保持原来的剩余时间。
     pub fn insert_chunk(&mut self, ticks: ChunkTicks) {
-        let ChunkTicks { blocks, fluids } = ticks;
-        let chunk = blocks
-            .first()
-            .map(|first| first.pos.chunk())
-            .or_else(|| fluids.first().map(|first| first.pos.chunk()));
-        let Some(chunk) = chunk else {
-            return;
-        };
+        // 调用方保证表里已经没有这个区块的条目；盒子本身只装一个区块。
         debug_assert!(
-            blocks.iter().all(|tick| tick.pos.chunk() == chunk)
-                && fluids.iter().all(|tick| tick.pos.chunk() == chunk)
+            ticks
+                .blocks
+                .first()
+                .map(|first| first.pos.chunk())
+                .is_none_or(|chunk| {
+                    ticks.blocks.iter().all(|tick| tick.pos.chunk() == chunk)
+                        && ticks.fluids.iter().all(|tick| tick.pos.chunk() == chunk)
+                })
         );
-        for entry in &blocks {
-            self.block_scheduled.insert((entry.pos, entry.kind));
-        }
-        for entry in &fluids {
-            self.fluid_scheduled.insert((entry.pos, entry.kind));
-        }
-        let queues = self.chunks.entry(chunk).or_default();
-        // `LevelChunkTicks.unpack`：子序号从 `-条目数` 开始递增的负数，
-        // 让读回来的刻排在之后新排的、同一（时刻，优先级）的刻前面。
-        insert_saved(&mut queues.blocks, blocks, self.now);
-        insert_saved(&mut queues.fluids, fluids, self.now);
-        self.recompute_heads(chunk);
-    }
-}
-
-/// 队头索引：到期时刻 → 以它为队头的区块，惰性删除过时项。
-type Heads = BTreeMap<i64, Vec<ChunkPos>>;
-
-/// `merge_pending` 的小根堆游标：`at` 是这个区块序列里下一条的下标。
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct PendingCursor {
-    order: TickOrder,
-    index: usize,
-    at: usize,
-}
-
-impl Ord for PendingCursor {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // `Reverse` 会把这里翻过来，小的排序键先出堆。
-        self.order.cmp(&other.order)
-    }
-}
-
-impl PartialOrd for PendingCursor {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-fn insert_saved<T: Copy + Eq + Hash>(queue: &mut TickQueue<T>, saved: Vec<SavedTick<T>>, now: i64) {
-    let first = -(saved.len() as i64);
-    for (sub_tick_order, entry) in (first..).zip(saved) {
-        let order = TickOrder {
-            trigger_tick: now.saturating_add(entry.delay),
-            priority: entry.priority,
-            sub_tick_order,
-            pos: entry.pos,
-        };
-        debug_assert!(order.sub_tick_order < 0);
-        queue.schedule(entry.pos, entry.kind, order);
+        self.blocks.insert_chunk(ticks.blocks, self.now);
+        self.fluids.insert_chunk(ticks.fluids, self.now);
     }
 }
 
@@ -927,6 +575,77 @@ impl ChunkTicks {
                 priority,
                 delay,
             });
+        }
+    }
+}
+
+impl<T: Copy + Eq + Hash> TickQueue<T> {
+    /// 扫一遍队列，按区块把要搬走的刻分组。每个盒子里的条目天然是执行顺序。
+    ///
+    /// 搁置表里这个区块的刻也一起装盒：它们的到期时刻已经过去，相对延迟是负数或 0，
+    /// 排在这个区块其它刻前面，彼此仍按原来的排序键。
+    fn take_chunks(
+        &mut self,
+        chunks: &BTreeSet<ChunkPos>,
+        now: i64,
+    ) -> BTreeMap<ChunkPos, Vec<SavedTick<T>>> {
+        if chunks.is_empty() {
+            return BTreeMap::new();
+        }
+        let mut boxes: BTreeMap<ChunkPos, Vec<SavedTick<T>>> = BTreeMap::new();
+        // 先放搁置的刻，按完整排序键排好；它们全都已经到期，延迟不会大于 0。
+        for chunk in chunks {
+            let Some(entries) = self.deferred.remove(chunk) else {
+                continue;
+            };
+            let mut entries = entries;
+            entries.sort_unstable_by_key(|(order, _, _)| *order);
+            for (order, pos, kind) in entries {
+                self.scheduled.remove(&(pos, kind));
+                boxes.entry(*chunk).or_default().push(SavedTick {
+                    pos,
+                    kind,
+                    priority: order.priority,
+                    delay: order.trigger_tick.saturating_sub(now),
+                });
+            }
+        }
+        let mut taken: Vec<(ChunkPos, TickOrder, BlockPos, T)> = Vec::new();
+        // `extract_if` 在 Rust 1.96 之前不稳定，用 retain 一次扫描完成删除和分组。
+        self.queue.retain(|&order, &mut (pos, kind)| {
+            let chunk = pos.chunk();
+            if !chunks.contains(&chunk) {
+                return true;
+            }
+            taken.push((chunk, order, pos, kind));
+            false
+        });
+        for (chunk, order, pos, kind) in taken {
+            self.scheduled.remove(&(pos, kind));
+            boxes.entry(chunk).or_default().push(SavedTick {
+                pos,
+                kind,
+                priority: order.priority,
+                delay: order.trigger_tick.saturating_sub(now),
+            });
+        }
+        boxes
+    }
+
+    /// `LevelChunkTicks.unpack`：子序号从 `-条目数` 开始递增的负数。
+    /// 盒子里的条目按（到期时刻，优先级，子序号）排好，只有（时刻，优先级）相同的
+    /// 两条刻才会比到子序号，所以按这个顺序重新分配递增编号和官方按子序号存等价。
+    fn insert_chunk(&mut self, saved: Vec<SavedTick<T>>, now: i64) {
+        let first = -(saved.len() as i64);
+        for (sub_tick_order, entry) in (first..).zip(saved) {
+            let order = TickOrder {
+                trigger_tick: now.saturating_add(entry.delay),
+                priority: entry.priority,
+                sub_tick_order,
+                pos: entry.pos,
+            };
+            debug_assert!(order.sub_tick_order < 0);
+            self.schedule(entry.pos, entry.kind, order);
         }
     }
 }
