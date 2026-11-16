@@ -1990,11 +1990,15 @@ dependencies = [
 name = "mc-bamboo-loadtest"
 version = "0.0.0"
 dependencies = [
+ "mc-bamboo-blocks",
  "mc-bamboo-core",
  "mc-bamboo-data",
+ "mc-bamboo-game",
+ "mc-bamboo-hit-rate",
  "mc-bamboo-nbt",
  "mc-bamboo-protocol",
  "mc-bamboo-server",
+ "mc-bamboo-world",
  "serde_json",
  "tokio",
  "tracing",

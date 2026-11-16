@@ -577,6 +577,8 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
         world_dir: config.world_dir.clone(),
         world_gen: config.world_gen.clone(),
         broadcast_console_to_ops: config.broadcast_console_to_ops,
+        // 压测钩子由 `mc-bamboo-loadtest serve` 在起服前装好；正式服务端是 `None`。
+        bench: mc_bamboo_game::bench::installed(),
     }
 }
 

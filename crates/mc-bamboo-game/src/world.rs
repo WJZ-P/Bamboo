@@ -113,6 +113,13 @@ pub struct WorldConfig {
     /// Official `server.properties` `broadcast-console-to-ops`, for console-feedback
     /// broadcasts to ops.
     pub broadcast_console_to_ops: bool,
+    /// 压测场景接线，只给 `mc-bamboo-loadtest serve` 用，默认 `None`。
+    /// `None` 时每刻只多一次 `Option` 判断，游戏行为完全不变。
+    ///
+    /// Load-test scenario hooks, used only by `mc-bamboo-loadtest serve`.
+    /// `None` keeps the world loop unchanged apart from one `Option` check.
+    #[doc(hidden)]
+    pub bench: Option<crate::bench::BenchHooks>,
 }
 
 impl Default for WorldConfig {
@@ -130,6 +137,7 @@ impl Default for WorldConfig {
             world_dir: None,
             world_gen: crate::world_options::WorldGenConfig::default(),
             broadcast_console_to_ops: true,
+            bench: None,
         }
     }
 }
@@ -163,6 +171,9 @@ pub struct World {
     /// 等着某道 IO 栅栏回执再发成功消息的 `save-all flush`：`(栅栏序号, 玩家)`。
     /// `save-all flush` success messages waiting on an IO barrier: `(seq, player)`.
     pending_save_success: Vec<(u64, PlayerId)>,
+    /// 压测回调的「场景搭好了没有」和回调本身；默认配置下不被读取。
+    bench_hooks: Option<crate::bench::BenchHooks>,
+    bench_ready: bool,
 }
 
 impl World {
@@ -317,6 +328,8 @@ impl World {
             save,
             startup_error,
             pending_save_success: Vec::new(),
+            bench_hooks: config.bench,
+            bench_ready: false,
         };
         world
             .host
@@ -401,7 +414,7 @@ impl World {
 
     /// 一批票的操作。已加载模式交给 Director（会派加载/卸载任务），
     /// 无限超平坦模式只记票、不派任务。
-    fn apply_ticket_ops(&mut self, ops: impl IntoIterator<Item = TicketOp>) {
+    pub(crate) fn apply_ticket_ops(&mut self, ops: impl IntoIterator<Item = TicketOp>) {
         let ops: Vec<TicketOp> = ops.into_iter().collect();
         if ops.is_empty() {
             return;
@@ -558,6 +571,26 @@ impl World {
         );
     }
 
+    /// 每刻一次的压测回调。`None` 时只做一次 `Option` 判断。
+    fn run_bench_hooks(&mut self) {
+        let Some(hooks) = self.bench_hooks else {
+            return;
+        };
+        let ready = self.bench_ready;
+        let finished = {
+            let mut bench = crate::bench::BenchWorld::new(self);
+            if ready {
+                (hooks.tick)(&mut bench);
+                false
+            } else {
+                (hooks.setup)(&mut bench)
+            }
+        };
+        if finished {
+            self.bench_ready = true;
+        }
+    }
+
     /// 拆成 `tick` 和这一段只是为了保证提前返回时也能收尾；顺序仍然是原来的顺序。
     fn tick_phases(&mut self) -> ControlFlow<()> {
         self.host.begin_tick();
@@ -588,6 +621,9 @@ impl World {
             return self.shut_down();
         }
         self.process_inbox()?;
+        // 压测输入跑在收包阶段，等价于一名管理员在世界线程上翻拉杆 / 补物品；
+        // 它的耗时记进 `inbox`，不进后面三个方块侧阶段。默认配置下这里是空操作。
+        self.run_bench_hooks();
         self.consume_save_commands();
         self.sync_player_tickets();
         self.region.profiler.lap(Phase::Inbox);
