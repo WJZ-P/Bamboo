@@ -312,6 +312,41 @@ CARVERS 只比 SURFACE 多约 1.5 ms：17×17 邻域的大部分 carver 在 `isS
 `chunkgen --through carvers` 多种子对拍；没有收益的一项（条件结果的惰性缓存，见下）撤掉了。
 详见 `performance-optimizations.md` 第 10 节。
 
+### 密度求值的列特化（2026-11-16，本机 release，同轮交替量）
+
+上面几组数字都是**这一项之前**的。这一项只改 `finalDensity.sampleVolume` 里噪声的成批
+求值，把 `Noise::add_to_volume` 照官方 `PerlinNoise.addToVolume` 的结构重写：`sample`
+（18 秒、1 ms 间隔、15 016 个主线程样本，只循环整列密度求值）测到
+`Noise::add_to_point` 占 72.1%、`Sampler::sample_volume` 占 18.1%、
+`sample_interpolated_blocks` 占 7.8%，缓冲和样条约 1.3%；编译期消融（4 个 release
+二进制同轮交替，12 区块整列 × 5 遍取最小）显示噪声数学 2.23 ms / 2.83 ms = 79%，
+而**节点分派连同全部非噪声工作上限 0.6 ms**。官方的 `addToVolume` 把 x/z 坐标、
+插值系数和八个角的梯度放在 z、x 循环里、`floorY` 没变时还复用梯度；原来 Rust 侧
+用逐点的 `add_to_point` 每个点重算一遍。按字节码把同样的表达式提到 (z,x) 列外、
+`NoiseStack` 的层常量每块算一次，每个点仍按原顺序逐层累加，逐位不变。
+
+| 口径 | 改之前 | 改之后 | 倍数 |
+|---|---|---|---|
+| `wg-perf noise_density`（1 种子 × 10 群系 × 4 区块 × 3 遍，中位数，两轮） | 2.895 / 2.878 ms | 1.653 / 1.570 ms | 1.9× |
+| `chunk_timing` NOISE（35 区块中位数，两轮） | 3.63 / 3.64 ms | 2.30 / 2.30 ms | 1.6× |
+| `wg-perf` 整块记录合计（两轮） | 27.24 / 26.91 ms | 27.50 / 24.92 ms | — |
+
+`wg-perf surface` 基本不动（2.38 / 2.36 → 2.41 / 2.23 ms）：地表阶段走的是单点
+`sampleValue` 和 15 条条件噪声，不在这一项的范围内。量之前要确认
+`mc-bamboo-vanilla` 的二进制**确实重新链接过**：改了 `mc-bamboo-worldgen` 但依赖
+指纹没变时 cargo 只重链 example，vanilla 仍是旧产物，第一次量出来「没有收益」就是这个坑。
+
+逐位一致靠三层验证：`noise.rs` 的单元测试把列路径和逐点路径在起始值非零的体积上
+逐位比较；`worldgen java`（3 种子、两个 salt）逐位比较密度函数和路由；
+`chunkgen --through carvers` / `--through features` 和 `gen-world --through features`
+（各 3 种子 × 12 区块 × 2 salt）全部 0 不一致。**改坏确认**：把提到循环外的
+`smooth_x` 差一个 ulp，`worldgen` 两个 salt 各报 156 处不一致；但 1 ulp 的密度差
+不足以改变任何方块，`chunkgen` / `gen-world` 都报 0 不一致——这是「逐方块」对拍
+的固有粒度，不是对拍失灵，所以又用 `+0.05` 的粗改坏确认区块级对拍确实会报
+（chunkgen 各 160 处、gen-world 各约 270 万处），改坏后已全部还原并复跑干净。
+
+详见 `performance-optimizations.md` 第 11 节。
+
 ### 本机复测（Windows 16 核，2026-11-14，release）
 
 上面 M4 Pro 那组是另一台机器；这组是**接进游戏这一轮**在同一台 16 核 Windows 上现跑的，

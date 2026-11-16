@@ -1402,22 +1402,7 @@ fn noise_add_to_volume(
     y_scale: f64,
     amplitude: f32,
 ) {
-    let mut index = 0;
-    for z in 0..volume.size_z {
-        let block_z = volume.block_z(z);
-        for x in 0..volume.size_x {
-            let block_x = volume.block_x(x);
-            for y in 0..volume.size_y {
-                out[index] += noise.add_to_point(
-                    (block_x, volume.block_y(y), block_z),
-                    xz_scale,
-                    y_scale,
-                    amplitude,
-                );
-                index += 1;
-            }
-        }
-    }
+    noise.add_to_volume(out, volume, xz_scale, y_scale, amplitude);
 }
 
 /// `RoundFunction.Sampler.apply(value, multiple)`。

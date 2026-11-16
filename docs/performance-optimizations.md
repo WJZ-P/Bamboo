@@ -46,6 +46,8 @@
 | 17 | 地表规则：气候参数按 quart 格缓存，`chunk_timing` SURFACE / CARVERS（10） | 121.36 / 121.85 ms | 40.05 / 40.92 ms | 3.0× |
 | 17 | 同上：条件噪声改惰性求值后（10） | 40.05 / 40.92 ms | 15.99 / 17.47 ms | 2.5× / 2.3× |
 | 17 | 两项合计，一个区块跑到 CARVERS（10） | 121.85 ms | 17.47 ms | 7.0× |
+| 18 | 密度函数成批噪声的列特化：`wg-perf noise_density`（11） | 2.88–2.90 ms | 1.57–1.65 ms | 1.9× |
+| 18 | 同上：`chunk_timing` NOISE 累计（35 区块中位数） | 3.63–3.64 ms | 2.30 ms | 1.6× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -59,8 +61,9 @@
 第 14 项见 7h 节，是缓存的默认关状态也要付的常驻代价：段哈希给写方块加约 6 ns，不是净收益。
 第 15 项见 7i 节，是九台机器里唯一划算的一台；其它八台在正式配置下是 0.99–1.01×（门槛主动放弃了小电路的收益）。
 第 16 项见 `profiling.md` 11.3：世界线程那两列只是提交任务加收回执，池子的等待不计入；墙钟 27.4 / 72.6 ms 才是 4 线程做完这一批的时间。
-第 17 项见第 10 节，是 `mc-bamboo-worldgen` 里唯一一次「纯函数世界生成」的优化：三行分别是两个
-有收益的改动各自的前后数字和合计，口径都是 `chunk_timing` 35 个区块的中位数，不是整机 tick。
+第 17 项见第 10 节，三行分别是两个有收益的改动各自的前后数字和合计；第 18 项见第 11 节，
+是密度求值的列特化，两行的口径分别是 `wg-perf` 单阶段中位数和 `chunk_timing` 累计中位数。
+两者都是「纯函数世界生成」的优化，不是整机 tick。
 
 第 10 行**不是优化**，是 2026-11-11 安静窗口里量到的「还剩多少差距」，见 7e 节和
 `profiling.md` 第 10 节：新旧两版 tick 的区块数、段数、方块数完全相同，差距全在
@@ -72,6 +75,8 @@
 还没做完的项目，9.1 节是闲置漏斗的设计依据和剩余尾巴。
 
 （2026-11-14 按实现更新：本文 7g.4–7g.6 / 7h / 7i / 7k、`profiling.md` 10.6 / 11.3；合并提交 `edce3ab`、`f08c11a`、`fa91b84`、`082a7c9`）
+
+（2026-11-16 追加第 11 节和 §0 第 18 项；提交 `67f972d8`、`564922d3`、`a47f25e3`）
 
 ---
 
@@ -1654,3 +1659,134 @@ cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
 剩下的大头是规则树 `apply` 自身（插桩 15.68 ms/区块）和 R 树查找，以及
 `finalDensity` 的 2.9 ms；并行化、SIMD 和「从已存 quart 格读群系」都不是这一轮
 做的事，后者还会改变官方路径的语义（见 `worldgen.md` 最后一节）。
+
+---
+
+## 11. 密度函数的列特化：`noise_density` 2.9 ms → 1.5 ms / 区块
+
+代码：`crates/mc-bamboo-worldgen/src/noise.rs` 的 `Noise::add_to_volume`，
+`sampler.rs` 的 `noise_add_to_volume` 转发。提交 `67f972d8`、`564922d3`。
+
+### 11.1 原来慢在哪
+
+`doFill` 的 `finalDensity.sampleVolume` 一整块 16 × 384 × 16 求值约 2.9 ms/区块。
+`sample`（18 秒、1 ms 间隔、15 016 个主线程样本，只循环整列密度求值）按栈顶分：
+
+| 位置 | 样本 | 占比 |
+|---|---|---|
+| `Noise::add_to_point`（噪声数学本体） | 10 834 | 72.1% |
+| `Sampler::sample_volume`（节点分派 + 逐点循环 + 缓冲） | 2 714 | 18.1% |
+| `sample_interpolated_blocks`（插值填格） | 1 178 | 7.8% |
+| `Vec::resize` / memset / memmove | 173 | 1.2% |
+| 样条等 | 14 | 0.1% |
+
+编译期消融（4 个 release 二进制、同一轮交替、`sample_density_from` 12 区块 × 5 遍取最小）
+把「节点分派」和「噪声数学」分开：
+
+| 消融 | ms/区块 | 结论 |
+|---|---|---|
+| 基线 | 2.82 / 2.83 | — |
+| `add_to_point` 内部数学返回 0（节点照走） | 0.58 / 0.60 | 噪声数学 ≈ 2.23 ms = 79% |
+| 整个噪声节点填 0 直接返回 | 0.61 / 0.61 | 节点分派本身可忽略 |
+| 关掉 `sample_volume_cached` 的记忆 | 5.52 / 5.59 | cache 是净收益约 2.7 ms |
+
+最后一行值得单说：关掉 `cache` 后节点调用 215 → 524、点求值 18.3 万 → 38 万，
+所以「消掉重复的缓存查找」不但不是优化方向，还会慢一倍。命中时只是一次
+`copy_from_slice`（`sample` 里 memmove 9 / 15 016 样本）。
+
+节点计数（12 个区块整列求值平均）：215 次 `sample_volume`（38 噪声、29 cache、
+18 interpolated/slice、129 其它）、67 次临时缓冲 `child_volume`、15 次 cache 体积
+未命中、5 次 interpolated block-step、约 182 550 次 `add_to_point`（整块本身
+98 304 点，其余来自 4/8 格角体积与插值角点）。
+
+### 11.2 换成了什么
+
+`javap -c -p net.minecraft.world.level.levelgen.synth.PerlinNoise` 核对官方
+`addToVolume`：z 循环算 `z` 坐标 / `floorZ` / `relativeZ` / `smoothstep`，x 循环算
+`x` 坐标 / `floorX` / `relativeX` / 两次 `permute`，y 循环只算 `y` 坐标，而且用
+`lastY != floorY` 把八个角的 `(dotXz, 梯度 y 分量)` 缓存起来。`SmearedPerlinNoise`
+同样，只是 y 上多一个 `computeFudgeY`。`NoiseStack$Perlin.addToVolume` 逐层用
+`xzScale * frequency`、`yScale * frequency`、`amplitude * layer.amplitude` 调层，
+这三个乘法的操作数全是常量。
+
+原来的 Rust 侧把这些全放在 `add_to_point` 里，每个点重算一遍；一层
+`NormalNoise` 有 2 × 八度数个层，一层里有 8 次置换和 8 次点积。改成：
+
+- `Noise::add_to_volume` 在编译期之外（每块体积开始时）把 `NoiseStack` 摊平成
+  具体 `Perlin` / `SmearedPerlin` 层，三个常量乘法每块算一次；
+- 每个 (z,x) 列算一次 x/z 坐标、插值系数和两次置换，逐 y 复用，八个角的梯度
+  按 `floor_y` 缓存；含 `Simplex` 的叠（没有重写 `addToVolume` 的官方默认实现）
+  退回原来的逐点路径；
+- 每个点仍按原顺序逐层累加，最后才加到输出上。
+
+**关键约束：不动任何浮点结合顺序。** 提出去的都是「同样的操作数、同样的运算顺序」
+的表达式，同一列每个 y 用的本来就是同一个值；没有把 `(block * scale) * freq` 改成
+`block * (scale * freq)`，也没有省掉任何一次加法。层累加改在一份临时的 f32 上做、
+最后才加到 `out`，保证 `out` 起始值非零时结合顺序也和逐点路径一致；单个
+`Perlin` / `Smeared` 原本直接返回那一层的值（不从 `0.0` 起加），这里也照着区分，
+免得 `-0.0` 之类的一位之差。单元测试
+`column_volume_matches_pointwise_exactly` 把两条路径在起始值非零、步长非 1 的体积上
+逐位比较（含 `Perlin`、`Smeared`、`NormalNoise` 的一叠）。
+
+### 11.3 没做的三件事
+
+1. **不把 `Sampler` 树压成扁平指令 / 下标**（C2ME 的另一半）。消融给出的天花板是
+   0.6 ms/区块，而且这 0.6 ms 里还含插值填格（0.23 ms）和缓冲拷贝，纯节点分派
+   远不到 0.6 ms；相对整机约 25 ms/区块只有 2.4%。改结构要同时保住
+   `sampleValue` / `sampleVolume` 两条路径的求值顺序、`CacheCell` 记住的「最后一块
+   体积」和 `Arc::ptr_eq` 共享语义，风险与收益不成比例。A 做完后按数字复核过，放弃。
+2. **不做额外的公共子树合并**。官方只在 `DensityFunctionCompiler.reuseOrPrepareCache`
+   里按 `cache.input()` 的结构 `equals` 去重（字节码核对过），Rust 侧已经照做；
+   再合并别的共享子树会改变 `CacheCell` 记住的「上一次成批算过哪块体积」，
+   之后的单点求值可能读到不同的值，逐位一致就没了（`worldgen.md`「两条求值路径」）。
+3. **不做「按 cell 批量」**。现有代码已经是整块批量：`sampleVolume` 一次求
+   16 × 384 × 16、y 最内层，`sample_interpolated_blocks` 也是一次求完所有格角再
+   填格。这一轮只是在这个循环里把重复的常量提出去。
+
+### 11.4 前后数字与复现
+
+同一轮里保留改前 / 改后两个 release 二进制交替跑，测量时不编译（第 8 节）：
+
+| 口径 | 改之前 | 改之后 |
+|---|---|---|
+| `wg-perf noise_density`（1 种子 × 10 群系 × 4 区块 × 3 遍，两轮中位数） | 2.895 / 2.878 ms | 1.653 / 1.570 ms |
+| `chunk_timing` NOISE（35 区块中位数，两轮） | 3.63 / 3.64 ms | 2.30 / 2.30 ms |
+| `wg-perf surface`（两轮中位数） | 2.38 / 2.36 ms | 2.41 / 2.23 ms |
+| `wg-perf` 整块记录合计（两轮中位数） | 27.24 / 26.91 ms | 27.50 / 24.92 ms |
+
+```sh
+cargo build --release -p mc-bamboo-vanilla -p mc-bamboo-worldgen --example chunk_timing
+./target/release/mc-bamboo-vanilla wg-perf --seeds 1 --chunks 4 --repeat 3 \
+    --skip-cut --skip-sky --skip-threads --skip-plans --aux 1
+./target/release/examples/chunk_timing
+```
+
+**量之前确认二进制确实重新链接过。** 只改 `mc-bamboo-worldgen` 时依赖指纹可能不变，
+cargo 会重链 example 却不重链 `mc-bamboo-vanilla`，第一次 `wg-perf` 因此量到
+「改前 2.83 / 改后 2.86，没有收益」——那是旧产物。`touch` 工具的入口再重链后
+才是上表的数字。用二进制时间戳或 `nm | grep add_to_volume` 确认。
+
+### 11.5 怎么确认结果没变
+
+```sh
+cargo test -q -p mc-bamboo-worldgen column_volume_matches_pointwise_exactly
+cargo run --release -q -p mc-bamboo-vanilla -- worldgen java --seeds 3
+cargo run --release -q -p mc-bamboo-vanilla -- worldgen java --seeds 3 --salt 987654321
+cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
+    --seeds 3 --chunks 12 --through carvers --salt 987654321
+cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
+    --seeds 3 --chunks 12 --through features --salt 987654321
+cargo run --release -q -p mc-bamboo-vanilla -- gen-world java --through features
+```
+
+干净跑全部 0 不一致（`worldgen` 逐位比较 4 608 个噪声值、5 364 个密度函数值；
+`chunkgen --through carvers` 每阶段 3 538 944 个方块、`--through features`
+31 850 496 个方块；`gen-world` 同样 31 850 496 个方块），两个 salt 都跑过。
+
+**改坏确认**：把提到循环外的 `smooth_x` 差一个 ulp，`worldgen` 两个 salt 各报
+156 处不一致；但 1 ulp 的密度差不足以改变任何方块，`chunkgen` / `gen-world`
+都报 0 不一致。这是「逐方块」对拍的固有粒度，不是对拍失灵：密度要经过
+`Aquifer` 的阈值才变成方块，末位的扰动通常跨不过阈值。所以又用 `+0.05`
+的粗改坏确认区块级对拍确实会报（`chunkgen --through carvers` / `features`
+各两个 salt 都是 160 处、`gen-world` 两个 salt 各约 270 万处），改坏后全部还原
+并复跑 `worldgen` / `chunkgen --through carvers` 为 0 不一致。
