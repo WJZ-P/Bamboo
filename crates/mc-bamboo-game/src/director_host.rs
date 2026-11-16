@@ -1516,7 +1516,7 @@ impl DirectorHost {
     /// canonically at completion, so the result is order-independent.
     fn merge_generated(&mut self, pos: ChunkPos, output: &GenerateOutput) {
         if let Some(terrain) = &output.terrain {
-            self.partials.insert(pos, Arc::new(terrain.clone()));
+            self.partials.insert(pos, Arc::clone(terrain));
         }
         for (target, deltas) in &output.deltas {
             self.feature_deltas

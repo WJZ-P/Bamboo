@@ -52,9 +52,10 @@ pub(crate) struct GenerateOutput {
     /// 中心推进到这一阶段后的盒子。
     pub(crate) column: Box<RegionColumn>,
     /// `terrain` 阶段的 CARVERS 纯数据，供世界线程的邻居快照缓存用。
+    /// 与全进程地形缓存共用同一个 `Arc`，回执搬回世界线程时不深拷贝。
     /// Clean CARVERS data from the `terrain` stage, for the world-thread
-    /// neighbor snapshot cache.
-    pub(crate) terrain: Option<GeneratedChunk>,
+    /// neighbor snapshot cache; shares the global cache's `Arc` without a copy.
+    pub(crate) terrain: Option<Arc<GeneratedChunk>>,
     /// 给邻居（和中心自身）的写增量，按目标区块坐标分组。
     /// Feature writes grouped by target chunk position.
     pub(crate) deltas: Vec<(ChunkPos, Vec<BlockDelta>)>,
@@ -94,19 +95,21 @@ pub(crate) type SnapshotView<'a> = &'a [(ChunkPos, Option<Arc<GeneratedChunk>>)]
 
 /// 3×3 视图按 `(dz, dx)` 从 -1 到 1 排列，中心在 [`CENTER`]。
 /// 用区块坐标算下标，和 `Task::Generate.neighbors` 的列出顺序无关。
+/// 快照和缓存命中都是 `Arc`，只读视图不再复制 400 KiB 的方块数组。
 ///
 /// Build the 9-chunk view in `(dz, dx)` order, center at `CENTER`, indexing by
-/// chunk position so the list order does not matter.
+/// chunk position so the list order does not matter. Snapshots and cache hits
+/// are `Arc`s, so the read-only view copies no ~400 KiB block arrays.
 pub(crate) fn resolve_view(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
     center: Option<Arc<GeneratedChunk>>,
     neighbors: SnapshotView<'_>,
-) -> Result<[GeneratedChunk; 9], String> {
-    let mut slots: [Option<GeneratedChunk>; 9] = std::array::from_fn(|_| None);
+) -> Result<[Arc<GeneratedChunk>; 9], String> {
+    let mut slots: [Option<Arc<GeneratedChunk>>; 9] = std::array::from_fn(|_| None);
     slots[CENTER] = Some(match center {
-        Some(arc) => (*arc).clone(),
+        Some(arc) => arc,
         None => cached_generate_chunk(config, cx, cz)?,
     });
     for (pos, snapshot) in neighbors {
@@ -117,7 +120,7 @@ pub(crate) fn resolve_view(
         }
         let index = ((dz + 1) * 3 + (dx + 1)) as usize;
         let chunk = match snapshot {
-            Some(arc) => (**arc).clone(),
+            Some(arc) => Arc::clone(arc),
             None => cached_generate_chunk(config, pos.x, pos.z)?,
         };
         slots[index] = Some(chunk);
@@ -136,6 +139,7 @@ pub(crate) fn resolve_view(
 }
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数：只依赖配置、坐标和 3×3 视图。
+/// 视图是只读的 `Arc`；函数内部为了给地物一份可写方块层才复制一次。
 ///
 /// `ChunkGenerator.applyBiomeDecoration` as a pure function of config, position
 /// and the 3×3 view.
@@ -143,7 +147,7 @@ pub(crate) fn run_features(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
-    view: [GeneratedChunk; 9],
+    view: [Arc<GeneratedChunk>; 9],
 ) -> Result<FeatureResult, String> {
     run_features_filtered(config, cx, cz, view, None, (1 << DECORATION_STEPS) - 1)
         .map(|(result, _)| result)
@@ -157,7 +161,7 @@ fn run_features_filtered(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
-    view: [GeneratedChunk; 9],
+    view: [Arc<GeneratedChunk>; 9],
     allowed_kinds: Option<&[String]>,
     steps_mask: i32,
 ) -> Result<
@@ -370,10 +374,12 @@ pub fn game_pipeline(
         }
     }
     // 3. `FEATURES`：先结构后地物，中心这一遍要拿到写增量统计。
-    let view: [GeneratedChunk; 9] = std::array::from_fn(|index| GeneratedChunk {
-        blocks: blocks[index].clone(),
-        biomes: biomes[index].clone(),
-        heightmaps: Default::default(),
+    let view: [Arc<GeneratedChunk>; 9] = std::array::from_fn(|index| {
+        Arc::new(GeneratedChunk {
+            blocks: blocks[index].clone(),
+            biomes: biomes[index].clone(),
+            heightmaps: Default::default(),
+        })
     });
     let (result, stats) =
         run_features_filtered(config, cx, cz, view, None, (1 << DECORATION_STEPS) - 1)?;
@@ -463,10 +469,14 @@ thread_local! {
 }
 const FEATURE_CACHE_CAP: usize = 256;
 
-/// 以 `(cx, cz)` 为中心造 3×3 的 CARVERS 视图（纯函数，带线程本地缓存）。
-/// Build a 3×3 CARVERS view centered on `(cx, cz)` (pure, thread-local cached).
-fn build_view(config: &WorldGenConfig, cx: i32, cz: i32) -> Result<[GeneratedChunk; 9], String> {
-    let mut view: [Option<GeneratedChunk>; 9] = std::array::from_fn(|_| None);
+/// 以 `(cx, cz)` 为中心造 3×3 的 CARVERS 视图（纯函数，带全进程共享缓存）。
+/// Build a 3×3 CARVERS view centered on `(cx, cz)` (pure, globally cached).
+fn build_view(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+) -> Result<[Arc<GeneratedChunk>; 9], String> {
+    let mut view: [Option<Arc<GeneratedChunk>>; 9] = std::array::from_fn(|_| None);
     for dz in -1..=1 {
         for dx in -1..=1 {
             let index = ((dz + 1) * 3 + (dx + 1)) as usize;
@@ -495,15 +505,18 @@ fn cached_generate_chunk_with_structures(
     config: &WorldGenConfig,
     x: i32,
     z: i32,
-) -> Result<GeneratedChunk, String> {
+) -> Result<Arc<GeneratedChunk>, String> {
     if !config.generate_structures {
         return cached_generate_chunk(config, x, z);
     }
     let beardifier = crate::worldgen_structures::beardifier_for(config, x, z)?;
     match beardifier {
-        Some(beardifier) => {
-            crate::worldgen::generate_chunk_with_beardifier(config, x, z, Some(&beardifier))
-        }
+        Some(beardifier) => Ok(Arc::new(crate::worldgen::generate_chunk_with_beardifier(
+            config,
+            x,
+            z,
+            Some(&beardifier),
+        )?)),
         None => cached_generate_chunk(config, x, z),
     }
 }
@@ -630,8 +643,8 @@ pub(crate) fn generate_features_stage(
     center: Option<Arc<GeneratedChunk>>,
     neighbors: SnapshotView<'_>,
 ) -> Result<GenerateOutput, String> {
-    let view = resolve_view(config, cx, cz, center.clone(), neighbors)?;
-    let terrain = view[CENTER].clone();
+    let view = resolve_view(config, cx, cz, center, neighbors)?;
+    let terrain = Arc::clone(&view[CENTER]);
     let result = run_features(config, cx, cz, view)?;
 
     // 给 8 个邻居的写增量（本中心的地物溢出），按目标坐标分组。
@@ -765,7 +778,7 @@ mod tests {
     #[test]
     fn features_are_deterministic() {
         let config = normal(2026);
-        let view: [GeneratedChunk; 9] = std::array::from_fn(|i| {
+        let view: [Arc<GeneratedChunk>; 9] = std::array::from_fn(|i| {
             let dz = i as i32 / 3 - 1;
             let dx = i as i32 % 3 - 1;
             cached_generate_chunk(&config, dx, dz).unwrap()
@@ -817,15 +830,19 @@ mod tests {
         );
         // 若把真实地形喂给邻居重算、EMPTY 地形喂给中心，两侧的结果必然不同：
         // 这就是必须由依赖表固定下来的读写竞争。
-        let view_empty = std::array::from_fn(|_| GeneratedChunk {
-            blocks: empty.blocks.clone(),
-            biomes: empty.biomes.clone(),
-            heightmaps: Default::default(),
+        let view_empty = std::array::from_fn(|_| {
+            Arc::new(GeneratedChunk {
+                blocks: empty.blocks.clone(),
+                biomes: empty.biomes.clone(),
+                heightmaps: Default::default(),
+            })
         });
-        let view_real = std::array::from_fn(|_| GeneratedChunk {
-            blocks: real.blocks.clone(),
-            biomes: real.biomes.clone(),
-            heightmaps: Default::default(),
+        let view_real = std::array::from_fn(|_| {
+            Arc::new(GeneratedChunk {
+                blocks: real.blocks.clone(),
+                biomes: real.biomes.clone(),
+                heightmaps: Default::default(),
+            })
         });
         let a = run_features(&config, cx, cz, view_empty).unwrap();
         let b = run_features(&config, cx, cz, view_real).unwrap();
@@ -840,7 +857,7 @@ mod tests {
     #[test]
     fn apply_deltas_writes_the_expected_cells() {
         let config = normal(1);
-        let mut chunk = cached_generate_chunk(&config, 0, 0).unwrap();
+        let mut chunk = (*cached_generate_chunk(&config, 0, 0).unwrap()).clone();
         apply_deltas(&mut chunk, &[(3, 40, 5, 12345), (0, MIN_Y, 0, 999)]);
         assert_eq!(chunk.blocks[(40 - MIN_Y) as usize][3 * 16 + 5], 12345);
         assert_eq!(chunk.blocks[0][0], 999);
@@ -854,7 +871,7 @@ mod tests {
     fn features_stage_places_blocks() {
         let config = normal(2026);
         let view = build_view(&config, 0, 0).unwrap();
-        let terrain = view[CENTER].clone();
+        let terrain = Arc::clone(&view[CENTER]);
         let result = run_features(&config, 0, 0, view).unwrap();
         let writes = center_writes(0, 0, &terrain, &result);
         assert!(

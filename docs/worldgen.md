@@ -601,10 +601,15 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   邻居和所需阶段，`advance_stage` 把 `(位置, 阶段)` 列进 `Task::Generate.neighbors`。
   世界线程（`director_host.rs` 的 `partials`）把每个区块的 CARVERS 半成品存成不可变
   `Arc<GeneratedChunk>`，发任务时按位置挂到 `ChunkWork::Generate` 上——全是 `Arc` 克隆，
-  不复制方块、不改快照。空缺的邻居由计算线程用 `cached_generate_chunk` 纯函数现算。
-  发出后世界线程不再改这份 `Arc`（只在 `Forgot` / 完工时移除）。
-* **`features` 纯函数**：`resolve_view` 拼 3×3，`run_features` 调
-  `chunk::Generator::features()`（`applyBiomeDecoration`）。已移植的 `minecraft:ore`
+  不复制方块、不改快照。空缺的邻居由计算线程用 `cached_generate_chunk` 纯函数现算；
+  这份 CARVERS 缓存是**全进程共用一份**、按总字节 256 MiB 封顶（16 个分片各一把锁，
+  锁内只查表 / 插入、生成在锁外，值是不可变 `Arc`，命中不复制 400 KiB 方块数组，
+  见 `performance-optimizations.md` 第 12 节）。地形是纯函数，命中、淘汰和分片顺序
+  都不改变结果。`terrain` 阶段交回世界线程的也是同一个 `Arc`，`merge_generated`
+  直接 `Arc::clone` 进 `partials`。发出后世界线程不再改这份 `Arc`（只在
+  `Forgot` / 完工时移除）。
+* **`features` 纯函数**：`resolve_view` 拼 3×3（只读的 `[Arc<GeneratedChunk>; 9]`），
+  `run_features` 调 `chunk::Generator::features()`（`applyBiomeDecoration`）。已移植的 `minecraft:ore`
   照常放，其余类型标 `unsupported` 跳过（`feature/run.rs`，地物 A/B 合入后自动生效）。
 * **写邻居的增量**：中心自己的地物、溢出到 8 个邻居的写、以及 8 个邻居中心溢进来的写
   都表示成世界坐标增量。世界线程按 `TaskId` 顺序（`collect_compute` 已排好序）追加到
@@ -669,7 +674,9 @@ p95 1.3–2.1 ms、最坏一份 max 8.35 ms，远低于 20 TPS 的 50 ms 预算�
 玩家同时在噪声世界飞行、且内存宽裕的部署，再显式把 `chunk_worker_threads` 提到 8，
 以 `compute_backlog` 不再持续增长、`chunk_latency` 回落到亚秒为准；**不要**因为这次
 测到 backlog 就调高默认值。等地物/结构/光照接进来（每区块更贵）后必须重跑本压测
-再评估线程数。
+再评估线程数。（这是当时那版按线程各存一份 CARVERS 缓存的旧数字；缓存后来改成
+全进程共用一份、256 MiB 封顶，8 线程跑 3364 个中心的 RSS 峰值从 4882 MB 降到
+2042 MB，见 `performance-optimizations.md` 第 12 节，但上面这套飞行压测没有重跑。）
 
 ### 分阶段、分高度带的耗时（`wg-perf`）
 
