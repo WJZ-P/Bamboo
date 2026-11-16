@@ -48,6 +48,9 @@
 | 17 | 两项合计，一个区块跑到 CARVERS（10） | 121.85 ms | 17.47 ms | 7.0× |
 | 18 | 密度函数成批噪声的列特化：`wg-perf noise_density`（11） | 2.88–2.90 ms | 1.57–1.65 ms | 1.9× |
 | 18 | 同上：`chunk_timing` NOISE 累计（35 区块中位数） | 3.63–3.64 ms | 2.30 ms | 1.6× |
+| 19 | 地形缓存改全进程共用一份：8 线程 3364 个中心的进程 RSS 峰值（12） | 4882 MB | 2042 MB | 2.4× |
+| 19 | 同上：8 线程整块生成墙钟中位数 / 吞吐（12） | 108.3 ms / 66.5 中心/s | 70.2 ms / 110.5 中心/s | 1.54× / 1.66× |
+| 19 | 同上：4 线程 RSS 峰值 / 墙钟中位数（12） | 2674 MB / 75.4 ms | 1264 MB / 52.5 ms | 2.1× / 1.44× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -1790,3 +1793,151 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java --through features
 的粗改坏确认区块级对拍确实会报（`chunkgen --through carvers` / `features`
 各两个 salt 都是 160 处、`gen-world` 两个 salt 各约 270 万处），改坏后全部还原
 并复跑 `worldgen` / `chunkgen --through carvers` 为 0 不一致。
+
+---
+
+## 12. 地形缓存改成全进程共用一份、按字节封顶：8 线程 RSS 4882 → 2042 MB
+
+代码：`crates/mc-bamboo-game/src/worldgen.rs` 的 `TERRAIN_CACHE`，
+`worldgen_features.rs` / `worldgen_light.rs` / `director_host.rs` 的调用方。
+测量脚手架和改前的仪表见提交 `5b54cdc9`，改法见 `7e4fdee2`。
+
+### 12.1 原来占多少，先量再改
+
+`features` 阶段拼 3×3 视图要 9 个到 CARVERS 的 `GeneratedChunk`。旧缓存是
+`thread_local!` 的 `HashMap<Key, GeneratedChunk>`，每条计算线程各一份、每份按
+**条数** 1024 封顶，超了整表清空；命中时 `chunk.clone()` 又复制一份，调用方
+（`resolve_view`）再各复制一次，`terrain` 阶段把结果交回世界线程时还复制一次。
+
+单条用 `generated_chunk_heap_bytes()` 按各 `Vec` 的 `capacity` 实测
+**414 720 B**（405 KiB）：384 层 × 256 个 `u32` 的 `blocks` 占 393 216 B，
+24 段 × 64 个群系格占 6 144 B，6 张 256 列高度图占 6 144 B，加上 `Vec` 头。
+按条数推算 1024 条 × 4 / 8 线程 = 1.62 / 3.24 GiB，**推算值，下面有实测**。
+
+压测是 `crates/mc-bamboo-game/examples/terrain_cache_bench.rs`：58 × 58 = 3364 个
+中心区块（每个跑游戏里同一份 `game_features`，要 9 个 CARVERS 地形），4 / 8 条
+`std::thread::scope` 工作线程，每条线程各自持有 `Generator`（和线上计算池一样）；
+每批前清缓存、每条线程先各自预热一个不计时的区块再一起进计时段。结构分支关掉
+（和 `gen-world --through features` 同一个世界），`getrusage(RUSAGE_SELF).ru_maxrss`
+读进程 RSS 峰值。种子 2026，机器上有另外三个子代理在跑，**不空闲**，耗时数字有噪声。
+
+改前单独量三轮（release，二进制 `/tmp/terrain_cache_bench_before`，测量时不编译）：
+
+| 线程 | RSS 峰值 MB | 缓存峰值 MB（条目数 × 405 KiB） | 命中率 | 跨线程重复计算 | 墙钟中位 / p95 ms | 吞吐 中心/s |
+|---|---|---|---|---|---|---|
+| 4 | 2669 / 2686 / 2741 | 1600 / 1612 / 1612 | 0.506 / 0.506 / 0.505 | 10380 / 10368 / 10385 | 73.1 / 71.1 / 72.0；127.8 / 113.8 / 113.7 | 49.2 / 53.5 / 52.7 |
+| 8 | 4622 / 5046 / 4585 | 3202 / 3193 / 3198 | 0.285 / 0.287 / 0.292 | 17644 / 17557 / 17451 | 110.5 / 104.9 / 117.3；202.4 / 136.1 / 215.0 | 68.6 / 77.0 / 64.0 |
+
+「跨线程重复计算」按「同一键被几条不同线程各自独立算过，`sum(N-1)`」计数。3364 个
+中心覆盖 60 × 60 个地形区块，8 线程下有约 1.76 万次重复：同一块在多条线程的
+表各存一份、各算一次。缓存峰值 1.6 / 3.2 GiB 与按条数的推算一致，RSS 峰值
+2.7 / 4.6 GiB 里除了缓存还有每条线程一份 `Worldgen` / `Generator` 和地物临时数组。
+
+### 12.2 换成了什么
+
+- **全进程一份、按字节封顶**：`OnceLock<[Mutex<Shard>; 16]>`，键 `(种子, 世界类型, x, z)`
+  按哈希取片，`Shard` 存 `HashMap<Key, Arc<GeneratedChunk>>`、插入顺序 `VecDeque`、
+  实测堆字节数。上限常量 `TERRAIN_CACHE_BYTE_LIMIT = 256 MiB`，依据写在常量注释里：
+  单条 405 KiB，256 MiB 约 647 条，罩住持续跑图的 3×3 工作集，且不再随线程数增长。
+  超过该片预算（256 MiB / 16）就按插入顺序从最旧的条目淘汰，清到 3/4 预算，避免
+  每次插入都淘汰一条。地形是 `config + 坐标` 的纯函数，淘汰顺序不影响任何结果，
+  只影响后续是否命中（`shared_cache_is_bounded_and_order_independent` 用 4 条线程
+  不同访问顺序钉住这一点）。
+- **锁的粒度**：持锁只做查表和插入，生成 `generate_chunk` 在锁外做，地物计算更在
+  锁外。16 片各一把锁，8 条线程不会全堵在一把锁上。两条线程同时算同一键可以接受
+  （结果相同），先插进去的胜出、后到的沿用前者，不等待也不死锁。
+- **`Arc` 值、命中不复制**：`cached_generate_chunk` 返回 `Arc<GeneratedChunk>`；
+  `resolve_view` / `build_view` / `run_features` / `resolve_shared_view` 都改成
+  `[Arc<GeneratedChunk>; 9]`（只读借用，靠 `Deref` 读字段）；`run_features` 内部为
+  了给地物一份可写方块层才复制一次，这是调用方确实要改写的地方。
+  `GenerateOutput.terrain` 改成 `Option<Arc<GeneratedChunk>>`，世界线程的
+  `partials` 直接 `Arc::clone`，回执不再深拷贝 400 KiB。带 Beardifier 的地形仍不进
+  EMPTY 缓存（它是结构区块专属结果），包一层 `Arc` 返回。
+- **没有顺手压小单条**：`blocks` 在地下/空中确实大段是单一方块，但换稀疏或分段
+  存法会改 `GeneratedChunk` 的公开布局和所有下游（光照、组装、对拍）的读法，
+  收益没量过，本轮不做，见 12.5。
+
+### 12.3 为什么这样就快，为什么结果不变
+
+省掉的不是「一次哈希查找」，而是三样东西：每线程各存一份 1.6 / 3.2 GiB 的地形、
+命中时 400 KiB 的 `clone`、同一区块在多条线程重复跑一遍 30 ms 级的 CARVERS。
+共享后命中率 0.51 → 0.77（4 线程）、0.29 → 0.68（8 线程），跨线程重复计算
+10380 → 约 3400、17557 → 约 6000。整块生成中位耗时和吞吐的改善主要来自这里。
+
+结果不变靠两条：键含种子和世界类型、地形是纯函数，命中与淘汰都只影响速度；
+`Arc` 里的 `GeneratedChunk` 从不原地改写（要改写的 `assemble_feature_column` 先
+`clone`，`apply_deltas` 才动）。`shared_cache_hits_share_arcs_and_match_uncached_terrain`
+把「命中 / 清缓存重算」逐字节比，`world::staged_tests` 的 1 / 4 线程逐格比较仍然
+钉住整条流水线。
+
+### 12.4 前后数字与复现
+
+同一轮里保留改前 / 改后两个 release 二进制，**按 B / A / A / B 交替跑三轮**、
+每个配置 6 次，取中位数；测量时不编译（第 8 节）。输出在
+`/tmp/terrain_bench_alternating.txt`，当时机器不空闲。
+
+| 口径（3364 个中心，种子 2026） | 改之前 | 改之后 | 变化 |
+|---|---|---|---|
+| 4 线程：进程 RSS 峰值 MB（6 次中位） | 2674 | 1264 | −53% |
+| 4 线程：缓存峰值 MB | 1612 | 234.5 | −85% |
+| 4 线程：命中率 | 0.506 | 0.769 | — |
+| 4 线程：跨线程重复计算 | 10370 | 约 3400 | −67% |
+| 4 线程：整块墙钟中位数 / p95 ms | 75.4 / 约 121 | 52.5 / 约 65 | −30% / −46% |
+| 4 线程：吞吐 中心/s | 49.6 | 72.5 | +46% |
+| 8 线程：进程 RSS 峰值 MB（6 次中位） | 4882 | 2042 | −58% |
+| 8 线程：缓存峰值 MB | 3198 | 234.5 | −93% |
+| 8 线程：命中率 | 0.287 | 0.683 | — |
+| 8 线程：跨线程重复计算 | 17570 | 约 6000 | −66% |
+| 8 线程：整块墙钟中位数 / p95 ms | 108.3 / 约 170 | 70.2 / 约 90 | −35% / −47% |
+| 8 线程：吞吐 中心/s | 66.5 | 110.5 | +66% |
+
+**生成速度没有变慢**，中位数快 30% / 35%，远超「不得慢过 3%」的门槛。缓存峰值
+234.5 MB 而不是 256 MB：16 片各自到 16 MiB 才淘汰、清到 12 MiB，稳态各片条目数
+不同，全表之和在 223–235 MB 之间摆动；插入后立刻淘汰，最坏瞬时峰值只多一条
+405 KiB。改前 `clears=12/16`、`evictions=12288/16384` 是整表清空，改后
+`clears=276`、`evictions=3036` 是按字节分片淘汰。
+
+```sh
+cargo build --release -p mc-bamboo-game --example terrain_cache_bench
+# 改前 / 改后各留一份二进制，测量时不再编译；每份都是冷启动、每批前清缓存。
+./target/release/examples/terrain_cache_bench --entry-bytes        # 单条 414720 B
+./target/release/examples/terrain_cache_bench --chunks 58 --threads 4 --seed 2026
+./target/release/examples/terrain_cache_bench --chunks 58 --threads 8 --seed 2026
+```
+
+### 12.5 怎么确认结果没变，以及没做的事
+
+```sh
+cargo run --release -q -p mc-bamboo-vanilla -- worldgen java --seeds 3 --salt 987654321
+cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
+    --seeds 2 --chunks 4 --through carvers --salt 9
+cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
+    --seeds 2 --chunks 4 --through features --salt 9
+cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
+    --seeds 2 --chunks 4 --through features --salt 987654321
+cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
+    --through features --seeds 2 --chunks 2 --salt 987654321
+cargo run --release -q -p mc-bamboo-vanilla -- gen-light java --scenes 4 --seed 99
+cargo run --release -q -p mc-bamboo-vanilla -- structure-pipeline java --seeds 2
+```
+
+干净跑全部 0 不一致：`worldgen` 逐位比较 4608 个噪声值、5364 个密度函数值；
+`chunkgen --through features` 两个 salt 各 7077888 个方块；`gen-world --through
+features` 两个 salt、另加 salt 11 / 42 / 2026 各 3538944 个方块；`gen-light`
+4 个场景 786432 格；`structure-pipeline` 28 个结构区块 / 2752512 个方块。
+
+**改坏确认**：临时把缓存命中分支改成「返回同一片里另一个坐标的地形」并重编
+release 二进制，`gen-world --through features --seeds 2 --chunks 2 --salt 9`
+报 **41686 处不一致**（另一种「命中时直接现算 `(x+7,z+7)`」的改法报 60917 处），
+还原后复跑回到 0 不一致。要说明口径：`chunkgen --through features` 走的是
+`chunkgen.rs` 里自己的 `Generator::terrain_with_region`，**不经过这块缓存**；
+`gen-light` 的 Bamboo 侧从官方给的 9 宫格方块重建输入，也不经过；
+`structure-pipeline` 的 terrain 比的是带 Beardifier 的地形（按设计不进 EMPTY 缓存）。
+所以「缓存命中返回错地形」这个改坏只有 `gen-world --through features`（以及游戏
+内 `world::staged_tests`）能抓到，这是各对拍入口的覆盖范围决定的，不是对拍失灵；
+`gen-world` 确实报了。`chunkgen` / `gen-light` / `structure-pipeline` 仍是
+「整条改动没有波及其它路径」的回归证据。
+
+没有做的：`GeneratedChunk.blocks` 的压缩存法。地下和空中大段是单一方块，理论上
+能压，但要改公开布局、所有下游读法和对拍入口，且本轮内存已经从 4.6 GiB 降到
+2.0 GiB、缓存本身只剩 235 MB；没有单独量过收益，按「没有明显收益就不做」留着。
