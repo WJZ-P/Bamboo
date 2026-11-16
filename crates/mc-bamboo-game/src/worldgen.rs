@@ -591,8 +591,8 @@ fn cached_terrain(
     };
 
     // 只有真正跑过 `get_or_init` 闭包的线程才算「计算过」：等待方在
-    // OnceLock 上等到结果，没有重复执行地形计算。`was_computing` 由
-    // 闭包里的原子标记给出。
+    // OnceLock 上等到结果，没有重复执行地形计算。由闭包里的线程本地
+    // `COMPUTED_FLAG` 区分两者。
     // Only the thread that ran the `get_or_init` closure counts as computing;
     // waiters did no terrain work.
     let computed_here = COMPUTED_FLAG.with(|flag| flag.replace(false));
