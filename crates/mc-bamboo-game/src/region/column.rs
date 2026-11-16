@@ -9,6 +9,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    ops::Bound,
     sync::OnceLock,
 };
 
@@ -412,9 +413,11 @@ impl Region {
     /// 一次取出一批区块。任何一个前提不满足时整批都不动。
     ///
     /// 四张按方块位置索引的表（`containers`、`block_items`、`command_blocks`、讲台上的书）
-    /// 按区块分存，这里每柱整盒拿走，开销和这一柱的条目数成正比；
-    /// 全局遍历仍按 `BlockPos` 的位置升序（见 `crate::pos_table`），
-    /// 所以发包顺序不变。
+    /// 仍按整张 `BTreeMap` 存，这里按 `BlockPos` 的 x 带（`Ord` 以 x 为第一关键字）
+    /// 用 `range` 把扫描限制在要搬的区块那 16 格宽的 x 带里，再按区块坐标过滤；
+    /// **表本身和遍历顺序都不变**，所以发包顺序不变。扫描开销和 x 带里的条目数成正比，
+    /// 和 [`mc_bamboo_blocks::BlockTicks::take_chunks`] 一样要求调用方把一次要搬的区块
+    /// 攒成一批，每刻最多调一次。
     ///
     /// 取出后这些坐标在 `ChunkStore` 里读成模板；`block_ticks` / `block_entities` / `redstone`
     /// 里属于它们的条目、区块包缓存和还没发出去的光照/方块变化一并丢掉。别的区块不受影响。
@@ -457,19 +460,34 @@ impl Region {
             .collect();
         self.profiler.end_sub();
 
-        // 四张按位置的表已经按区块分存：每个区块整盒拿走，不扫 x 带。
+        // 四张按位置的表：按 x 带扫，抽出的条目按区块分给各自的盒子。
         self.profiler.start_sub(SubPhase::ReclaimTables);
-        for &pos in chunks {
-            let part = parts.get_mut(&pos).expect("每个要搬的区块都有盒子");
-            for (block_pos, mut entry) in self.containers.take_chunk(pos) {
-                let recheck_in = entry.recheck_at.take().map(|at| self.tick.remaining(at));
-                part.containers
-                    .insert(block_pos, PackedContainer { recheck_in, entry });
-            }
-            part.block_items = self.block_items.take_chunk(pos);
-            part.command_blocks = self.command_blocks.take_chunk(pos);
-            part.books = self.lecterns.books.take_chunk(pos);
-        }
+        take_positions(&mut self.containers, chunks, |pos, mut entry| {
+            let recheck_in = entry.recheck_at.take().map(|at| self.tick.remaining(at));
+            let packed = PackedContainer { recheck_in, entry };
+            parts
+                .get_mut(&pos.chunk())
+                .unwrap()
+                .containers
+                .insert(pos, packed);
+        });
+        take_positions(&mut self.block_items, chunks, |pos, patch| {
+            parts
+                .get_mut(&pos.chunk())
+                .unwrap()
+                .block_items
+                .insert(pos, patch);
+        });
+        take_positions(&mut self.command_blocks, chunks, |pos, data| {
+            parts
+                .get_mut(&pos.chunk())
+                .unwrap()
+                .command_blocks
+                .insert(pos, data);
+        });
+        take_positions(&mut self.lecterns.books, chunks, |pos, book| {
+            parts.get_mut(&pos.chunk()).unwrap().books.insert(pos, book);
+        });
 
         self.profiler.end_sub();
 
@@ -571,9 +589,9 @@ impl Region {
             packed.entry.recheck_at = packed.recheck_in.map(|remaining| self.tick.plus(remaining));
             self.containers.insert(block_pos, packed.entry);
         }
-        self.block_items.insert_chunk(pos, block_items);
-        self.command_blocks.insert_chunk(pos, command_blocks);
-        self.lecterns.books.insert_chunk(pos, books);
+        self.block_items.extend(block_items);
+        self.command_blocks.extend(command_blocks);
+        self.lecterns.books.extend(books);
         if let Some(ticks) = ticks {
             self.block_ticks.insert_chunk(ticks);
         }
@@ -648,5 +666,35 @@ impl Region {
         // an unload save writes, so pending work never changes the snapshot.
         let parts = super::content_snapshot::BorrowedParts::build(self, pos)?;
         Some(crate::chunk_codec::encode_parts(pos, &parts))
+    }
+}
+
+/// 把 `table` 里位置落在 `chunks` 里的条目移出来，逐个交给 `emit`。
+///
+/// 只看每个区块所在的那条 16 格宽的 x 带，再逐个移出，不扫整张表，条目也不复制。
+fn take_positions<T>(
+    table: &mut BTreeMap<BlockPos, T>,
+    chunks: &BTreeSet<ChunkPos>,
+    mut emit: impl FnMut(BlockPos, T),
+) {
+    // `BlockPos` 的 `Ord` 是 (x, y, z)：同一个 x 带里 z 不是连续的一段，所以先按 x 圈出
+    // 16 格宽的带，再按 `pos.chunk() == chunk` 过滤 z。
+    let mut taken: Vec<BlockPos> = Vec::new();
+    for &chunk in chunks {
+        // 区块坐标可能来自客户端，乘 16 会溢出时用饱和算术，不让它触发 panic。
+        let first_x = chunk.x.saturating_mul(16);
+        let from = BlockPos::new(first_x, i32::MIN, i32::MIN);
+        let to = BlockPos::new(first_x.saturating_add(16), i32::MIN, i32::MIN);
+        taken.extend(
+            table
+                .range((Bound::Included(from), Bound::Excluded(to)))
+                .map(|(&pos, _)| pos)
+                .filter(|pos| pos.chunk() == chunk),
+        );
+    }
+    for pos in taken {
+        if let Some(value) = table.remove(&pos) {
+            emit(pos, value);
+        }
     }
 }

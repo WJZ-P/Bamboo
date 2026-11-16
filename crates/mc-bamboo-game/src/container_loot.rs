@@ -8,6 +8,8 @@
 //! from its table on the first read or write and clear the table. The random source
 //! follows `LootContext.Builder.create`.
 
+use std::collections::BTreeMap;
+
 use mc_bamboo_blocks::LevelRandom;
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_loot::{ChestParams, LootContainer, LootStack, RandomSequences, chest_loot};
@@ -78,7 +80,7 @@ impl ContainerLoot {
 /// The fields block logic passes through `Level::unpack_loot_table`.
 pub(crate) struct Unpack<'a> {
     pub chunks: &'a ChunkStore,
-    pub containers: &'a mut crate::pos_table::PosTable<ContainerEntry>,
+    pub containers: &'a mut BTreeMap<BlockPos, ContainerEntry>,
     pub sequences: &'a RandomSequences,
     pub random: &'a LevelRandom,
     /// 战利品条件 `weather_check` 读的天气。
@@ -168,7 +170,7 @@ pub(crate) fn unpack_at(region: &mut Region, pos: BlockPos) {
 
 /// 把物品上的 `container_loot` 或方块实体的 `LootTable` 放进这一格的容器条目。
 pub(crate) fn set(
-    containers: &mut crate::pos_table::PosTable<ContainerEntry>,
+    containers: &mut BTreeMap<BlockPos, ContainerEntry>,
     pos: BlockPos,
     kind: ContainerKind,
     loot: Option<ContainerLoot>,

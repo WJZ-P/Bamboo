@@ -37,7 +37,6 @@ use crate::{
     movement,
     player::Player,
     player_grid::PlayerGrid,
-    pos_table::PosTable,
     profiler::Profiler,
     secure_chat::ServiceProfileKeys,
     tick_levels::TickLevels,
@@ -160,10 +159,10 @@ pub(crate) struct Region {
     /// 排队的计划刻。
     pub(crate) block_ticks: BlockTicks,
     /// 有内容的方块实体，按位置索引。只在这个区域里存在，没有持久化。
-    pub(crate) containers: PosTable<ContainerEntry>,
+    pub(crate) containers: BTreeMap<BlockPos, ContainerEntry>,
     /// 方块实体从物品上带来的组件，官方 `BlockEntity.collectComponents` 的结果，
     /// 见 [`crate::block_items`]。
-    pub(crate) block_items: PosTable<ComponentPatch>,
+    pub(crate) block_items: BTreeMap<BlockPos, ComponentPatch>,
     /// 每名玩家打开的菜单。物品栏菜单不在里面，它没有状态要同步。
     pub(crate) menus: BTreeMap<PlayerId, Menu>,
     /// 讲台上的书和打开着的讲台菜单。
@@ -251,7 +250,7 @@ pub(crate) struct Region {
     /// 命令方块里保存的命令。不执行，也不存档。
     ///
     /// Commands stored in command blocks. They are not executed and not saved.
-    pub(crate) command_blocks: PosTable<crate::command_block::CommandBlockData>,
+    pub(crate) command_blocks: BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
     /// 这一 tick 里改过的管理名单，tick 末尾统一发布并写盘。
     pub(crate) admin_changes: crate::admin::AdminChanges,
     /// 每名玩家最近一次动作的时刻，单位毫秒。官方 `ServerPlayer.lastActionTime`。
@@ -360,8 +359,8 @@ impl Region {
             block_changes: BlockChanges::default(),
             light_changes: BTreeMap::new(),
             block_ticks: BlockTicks::new(),
-            containers: PosTable::new(),
-            block_items: PosTable::new(),
+            containers: BTreeMap::new(),
+            block_items: BTreeMap::new(),
             menus: BTreeMap::new(),
             lecterns: crate::lectern::Tables::default(),
             block_entities: BlockEntities::default(),
@@ -389,7 +388,7 @@ impl Region {
             log_admin_commands: rules.bool(mc_bamboo_data::gamerules::LOG_ADMIN_COMMANDS),
             broadcast_console_to_ops: true,
             command_blocks_work: rules.bool(mc_bamboo_data::gamerules::COMMAND_BLOCKS_WORK),
-            command_blocks: PosTable::new(),
+            command_blocks: BTreeMap::new(),
             admin_changes: crate::admin::AdminChanges::default(),
             last_action_millis: BTreeMap::new(),
             peer_ips: BTreeMap::new(),

@@ -2,7 +2,7 @@
 //! `CloneCommands` 一致。方块实体数据（容器、方块上的物品组件、命令方块内容）
 //! 也一起复制；官方的跨维度分支只有一个世界，按同维度的那份处理。
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use mc_bamboo_blocks::{BlockState, World};
 use mc_bamboo_command::{BlockPredicateInput, ParsedCommand};
@@ -212,9 +212,9 @@ fn passes(
 
 /// 一个世界里三张方块实体表借到同一个 `World` 生命周期之外。
 struct EntityTables<'a> {
-    containers: &'a mut crate::pos_table::PosTable<ContainerEntry>,
-    block_items: &'a mut crate::pos_table::PosTable<ComponentPatch>,
-    command_blocks: &'a mut crate::pos_table::PosTable<crate::command_block::CommandBlockData>,
+    containers: &'a mut BTreeMap<BlockPos, ContainerEntry>,
+    block_items: &'a mut BTreeMap<BlockPos, ComponentPatch>,
+    command_blocks: &'a mut BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
 }
 
 fn read_entity(tables: &EntityTables<'_>, pos: BlockPos) -> Option<EntityData> {

@@ -370,7 +370,7 @@ fn archive_round_trip_keeps_machines_ticks_and_items_running() {
     // 清掉官方不存的状态，让对照 region 与存档往返后一样。
     for region in [source.region(), direct.region()] {
         region.redstone.clear_torch_toggles();
-        for (_, entry) in region.containers.values_mut() {
+        for entry in region.containers.values_mut() {
             entry.dead = false;
             entry.recheck_at = None;
         }
@@ -977,7 +977,7 @@ fn disk_restart_keeps_chunks_players_and_level() {
     settle_light(server.region());
     let region = server.region();
     region.redstone.clear_torch_toggles();
-    for (_, entry) in region.containers.values_mut() {
+    for entry in region.containers.values_mut() {
         entry.dead = false;
         entry.recheck_at = None;
     }

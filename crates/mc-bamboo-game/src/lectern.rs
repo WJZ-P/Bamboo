@@ -32,7 +32,6 @@ use crate::{
     interaction::{self, send_effects},
     inventory::{self, HOTBAR_START, OFF_HAND, menu_slot},
     menu as menus,
-    pos_table::PosTable,
     region::{Region, RegionTick},
 };
 
@@ -51,7 +50,7 @@ const STORAGE_SLOTS: usize = 36;
 /// 这一区域里每座讲台的书，以及谁正在看。
 #[derive(Debug, Default)]
 pub(crate) struct Tables {
-    pub(super) books: PosTable<Book>,
+    pub(super) books: BTreeMap<BlockPos, Book>,
     views: BTreeMap<PlayerId, View>,
     pending: BTreeMap<PlayerId, PendingSlots>,
 }

@@ -7,6 +7,8 @@
 //! Loot uses the table's `random_sequence` and does not touch `level.random`.
 //! Each dropped stack then draws three position doubles from `level.random`.
 
+use std::collections::BTreeMap;
+
 use mc_bamboo_blocks::{BlockState, World};
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_loot::{BlockDropParams, BlockEntityView, LevelView, LootStack, block_drops};
@@ -73,7 +75,7 @@ pub(crate) fn drop_broken_block(
 /// Vanilla `BlockEntity.collectComponents`: take the snapshot before the block entity
 /// disappears with the block write.
 pub(crate) fn collect_block_entity(
-    containers: &crate::pos_table::PosTable<crate::container::ContainerEntry>,
+    containers: &BTreeMap<BlockPos, crate::container::ContainerEntry>,
     pos: BlockPos,
 ) -> Option<BlockEntityView> {
     // 官方 `BlockEntity.collectComponents` 会写 `container` 等隐式组件。这里只认

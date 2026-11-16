@@ -259,8 +259,8 @@ pub(crate) fn collect(region: &Region, pos: BlockPos) -> ComponentPatch {
 ///
 /// `BlockEntity.collectComponents` with only the two tables block logic can borrow.
 pub(crate) fn collect_components_at(
-    block_items: &crate::pos_table::PosTable<ComponentPatch>,
-    containers: &crate::pos_table::PosTable<crate::container::ContainerEntry>,
+    block_items: &std::collections::BTreeMap<BlockPos, ComponentPatch>,
+    containers: &std::collections::BTreeMap<BlockPos, crate::container::ContainerEntry>,
     pos: BlockPos,
 ) -> ComponentPatch {
     let mut patch = block_items.get(&pos).cloned().unwrap_or_default();
