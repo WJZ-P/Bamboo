@@ -46,8 +46,8 @@
 | 17 | 地表规则：气候参数按 quart 格缓存，`chunk_timing` SURFACE / CARVERS（10） | 121.36 / 121.85 ms | 40.05 / 40.92 ms | 3.0× |
 | 17 | 同上：条件噪声改惰性求值后（10） | 40.05 / 40.92 ms | 15.99 / 17.47 ms | 2.5× / 2.3× |
 | 17 | 两项合计，一个区块跑到 CARVERS（10） | 121.85 ms | 17.47 ms | 7.0× |
-| 18 | 密度函数成批噪声的列特化：`wg-perf noise_density`（11） | 2.89–3.01 ms | 1.51–1.65 ms | 1.9× |
-| 18 | 同上：`chunk_timing` NOISE 累计（35 区块中位数） | 3.65–3.71 ms | 2.27–2.29 ms | 1.6× |
+| 18 | 密度函数成批噪声的列特化：`wg-perf noise_density`（11） | 2.88–2.90 ms | 1.57–1.65 ms | 1.9× |
+| 18 | 同上：`chunk_timing` NOISE 累计（35 区块中位数） | 3.63–3.64 ms | 2.30 ms | 1.6× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -76,7 +76,7 @@
 
 （2026-11-14 按实现更新：本文 7g.4–7g.6 / 7h / 7i / 7k、`profiling.md` 10.6 / 11.3；合并提交 `edce3ab`、`f08c11a`、`fa91b84`、`082a7c9`）
 
-（2026-11-16 追加第 11 节和 §0 第 18 项；提交 `67f972d8`）
+（2026-11-16 追加第 11 节和 §0 第 18 项；提交 `67f972d8`、`564922d3`、`a47f25e3`）
 
 ---
 
@@ -1665,7 +1665,7 @@ cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
 ## 11. 密度函数的列特化：`noise_density` 2.9 ms → 1.5 ms / 区块
 
 代码：`crates/mc-bamboo-worldgen/src/noise.rs` 的 `Noise::add_to_volume`，
-`sampler.rs` 的 `noise_add_to_volume` 转发。提交 `67f972d8`。
+`sampler.rs` 的 `noise_add_to_volume` 转发。提交 `67f972d8`、`564922d3`。
 
 ### 11.1 原来慢在哪
 
@@ -1722,7 +1722,9 @@ cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
 **关键约束：不动任何浮点结合顺序。** 提出去的都是「同样的操作数、同样的运算顺序」
 的表达式，同一列每个 y 用的本来就是同一个值；没有把 `(block * scale) * freq` 改成
 `block * (scale * freq)`，也没有省掉任何一次加法。层累加改在一份临时的 f32 上做、
-最后才加到 `out`，保证 `out` 起始值非零时结合顺序也和逐点路径一致。单元测试
+最后才加到 `out`，保证 `out` 起始值非零时结合顺序也和逐点路径一致；单个
+`Perlin` / `Smeared` 原本直接返回那一层的值（不从 `0.0` 起加），这里也照着区分，
+免得 `-0.0` 之类的一位之差。单元测试
 `column_volume_matches_pointwise_exactly` 把两条路径在起始值非零、步长非 1 的体积上
 逐位比较（含 `Perlin`、`Smeared`、`NormalNoise` 的一叠）。
 
@@ -1747,10 +1749,10 @@ cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
 
 | 口径 | 改之前 | 改之后 |
 |---|---|---|
-| `wg-perf noise_density`（1 种子 × 10 群系 × 4 区块 × 3 遍，两轮中位数） | 2.997 / 2.892 ms | 1.601 / 1.506 ms |
-| `chunk_timing` NOISE（35 区块中位数，两轮） | 3.65 / 3.71 ms | 2.27 / 2.29 ms |
-| `wg-perf surface`（两轮中位数） | 2.46 / 2.37 ms | 2.42 / 2.28 ms |
-| `wg-perf` 整块记录合计（两轮中位数） | 28.27 / 27.00 ms | 27.39 / 25.14 ms |
+| `wg-perf noise_density`（1 种子 × 10 群系 × 4 区块 × 3 遍，两轮中位数） | 2.895 / 2.878 ms | 1.653 / 1.570 ms |
+| `chunk_timing` NOISE（35 区块中位数，两轮） | 3.63 / 3.64 ms | 2.30 / 2.30 ms |
+| `wg-perf surface`（两轮中位数） | 2.38 / 2.36 ms | 2.41 / 2.23 ms |
+| `wg-perf` 整块记录合计（两轮中位数） | 27.24 / 26.91 ms | 27.50 / 24.92 ms |
 
 ```sh
 cargo build --release -p mc-bamboo-vanilla -p mc-bamboo-worldgen --example chunk_timing
