@@ -13,10 +13,15 @@ name = "bamboo-loadtest"
 path = "src/main.rs"
 
 [dependencies]
+mc-bamboo-blocks.workspace = true
+mc-bamboo-core.workspace = true
 mc-bamboo-data.workspace = true
+mc-bamboo-game.workspace = true
+mc-bamboo-hit-rate = { path = "../mc-bamboo-hit-rate" }
 mc-bamboo-nbt.workspace = true
 mc-bamboo-protocol.workspace = true
 mc-bamboo-server.workspace = true
+mc-bamboo-world.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
