@@ -678,6 +678,31 @@ The 3×3 repack is gone: the `light` stage now calls `generate_light_from_layers
 which builds light-only sections straight from the snapshot layers. Light is
 bit-identical; `wg-perf --light-compare` measured 35.1 → 11.3 ms (median, 96 chunks).
 
+**2026-11-15 又降了一轮**（Apple M4 Pro、release、本机口径；Windows 那组 40 ms 不能直接和下面比）。
+`--skip-aux` 只跑主阶段表，3 种子 × 5 群系 × 8 区块 = 120 块、每块 3 遍取中位数，
+改前和改后的二进制在同一轮里交替跑两轮：
+
+| 阶段（中位数 ms/区块） | 改前 1 | 改后 1 | 改前 2 | 改后 2 |
+|---|---|---|---|---|
+| biomes | 2.195 | 2.146 | 2.335 | 2.242 |
+| noise_density | 2.905 | 2.897 | 3.070 | 2.916 |
+| substance | 0.848 | 0.826 | 0.889 | 0.829 |
+| surface | 2.393 | 2.337 | 2.485 | 2.338 |
+| carver_mask | 1.047 | 1.055 | 1.103 | 1.045 |
+| features | 6.537 | 6.406 | 6.971 | 6.211 |
+| light | 6.368 | 4.426 | 7.139 | 4.398 |
+| assembly | 1.675 | 0.807 | 1.709 | 0.807 |
+| **墙钟合计** | **25.920** | **23.014** | **27.813** | **22.993** |
+
+改动是：段调色板一次扫描批量打包（不再逐格 `set`）、生成期光照的段省掉重扫与
+红石缓存哈希、四张 FINAL 高度图直接从已算好的 `GeneratedChunk.heightmaps` 打包、
+群系名字按状态索引缓存。`docs/performance-optimizations.md` 第 11 节有每一项的前后
+数字、撤销的尝试和「改坏确认」清单。**整块中位数还没到 20 ms**：剩下的
+`features` 约 6.2 ms、`light` 传播约 4.4 ms、噪声与群系约 6 ms 都没动；地物主循环
+由另一个分支在收尾，光照传播要动运行时引擎，本轮按分工没有碰。每一项都由
+`chunkgen`（carvers / features）、`gen-world --through features`、`gen-light` 多种子
+多 salt 证明 0 不一致，并故意改坏一次确认对拍能报出来。
+
 ## 还没做
 
 * 地物**类型**：`features` 阶段已接进游戏（见上），但只移植了 `minecraft:ore`；其余

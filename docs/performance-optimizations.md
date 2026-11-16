@@ -46,6 +46,10 @@
 | 17 | 地表规则：气候参数按 quart 格缓存，`chunk_timing` SURFACE / CARVERS（10） | 121.36 / 121.85 ms | 40.05 / 40.92 ms | 3.0× |
 | 17 | 同上：条件噪声改惰性求值后（10） | 40.05 / 40.92 ms | 15.99 / 17.47 ms | 2.5× / 2.3× |
 | 17 | 两项合计，一个区块跑到 CARVERS（10） | 121.85 ms | 17.47 ms | 7.0× |
+| 18 | 整块生成：段调色板批量打包，`wg-perf` `assembly`（11） | 1.650 ms | 1.294 ms | 1.28× |
+| 18 | 整块生成：生成期光照段省掉重扫和哈希，`light`（11） | 6.3 / 6.2 ms | 4.25 / 4.31 ms | 约 1.5× |
+| 18 | 整块生成：四张 FINAL 高度图不再逐格重算，`assembly`（11） | 1.32 / 1.30 ms | 0.783 / 0.792 ms | 1.7× |
+| 18 | 以上合计，`wg-perf` 整块墙钟中位数（11） | 25.92 / 27.81 ms | 23.01 / 22.99 ms | 约 1.2× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -61,6 +65,8 @@
 第 16 项见 `profiling.md` 11.3：世界线程那两列只是提交任务加收回执，池子的等待不计入；墙钟 27.4 / 72.6 ms 才是 4 线程做完这一批的时间。
 第 17 项见第 10 节，是 `mc-bamboo-worldgen` 里唯一一次「纯函数世界生成」的优化：三行分别是两个
 有收益的改动各自的前后数字和合计，口径都是 `chunk_timing` 35 个区块的中位数，不是整机 tick。
+第 18 项见第 11 节，量的是 `wg-perf` 里「一个区块从头到尾」的墙钟；前两列和最后一行是
+同一轮里改前/改后两个二进制交替跑两轮的结果，不能和别的节的数字直接相减。
 
 第 10 行**不是优化**，是 2026-11-11 安静窗口里量到的「还剩多少差距」，见 7e 节和
 `profiling.md` 第 10 节：新旧两版 tick 的区块数、段数、方块数完全相同，差距全在
@@ -1654,3 +1660,121 @@ cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
 剩下的大头是规则树 `apply` 自身（插桩 15.68 ms/区块）和 R 树查找，以及
 `finalDensity` 的 2.9 ms；并行化、SIMD 和「从已存 quart 格读群系」都不是这一轮
 做的事，后者还会改变官方路径的语义（见 `worldgen.md` 最后一节）。
+
+---
+
+## 11. 整块真实地形生成：25.9–27.8 → 23.0 ms / 区块（2026-11-15）
+
+这一节量的是**整条生成链**：群系 → `doFill` → 地表 → 雕刻器 → 地物 → 生成期光照 →
+组装，而不是第 10 节的纯函数地形。目标是让 4 线程计算池在玩家飞行时交得更快；
+`docs/worldgen.md`「各阶段耗时与生成能否跟上飞行」有压测的背景。
+
+### 11.1 口径
+
+`wg-perf`（`mc-bamboo-vanilla` 子命令，`mc-bamboo-worldgen` 的 `perf` 特性，默认构建
+里全是空操作）按种子和群系挑区块，每块跑完整链，打印每阶段和整块墙钟的平均 / 中位数 /
+p95。本轮加了 `--skip-aux`：只跑主阶段表，跳过高度分布、切线对照、多线程等辅助测量，
+让「改前 / 改后交替跑」一轮从十几分钟降到约 5 分钟。
+
+```sh
+cargo build --release -p mc-bamboo-vanilla
+./target/release/mc-bamboo-vanilla wg-perf \
+    --seeds 3 --chunks 8 \
+    --biomes minecraft:plains,minecraft:forest,minecraft:ocean,minecraft:desert,minecraft:taiga \
+    --repeat 3 --skip-aux
+```
+
+一组 3 种子 × 5 群系 × 8 区块 = 120 块，每块 3 遍取中位数。工具为每块另建 3×3 邻居
+视图（约 86 ms/块），**不计入**单块数字：游戏里邻居来自世界线程的 CARVERS 快照缓存。
+`/usr/bin/sample <pid> 20 1` 对主测进程采样，叶子最热的是 `climate::search`（R 树最近邻），
+但采样会被建视图时额外 9 次 `Generator::biomes()` 放大约 10 倍；按阶段计时看，改动前
+`features` 6.1 ms、`light` 6.3 ms、`biomes` 2.2 ms、`assembly` 1.65 ms 才是能省的地方。
+
+测量时机器还有别的子代理在跑 Java 对拍和全量测试，同一二进制两轮能差 20% 以上。
+所以每项都**保留改前二进制、改前/改后交替各跑两轮**，用同一轮的两列比较；
+没有稳定收益的改动一律撤销。以下各项的数字都是各自提交时那一轮交替的结果。
+
+### 11.2 做了什么、为什么快
+
+1. **高度图谓词按状态缓存**（`b75f89d3`）。`compute_heightmaps` 原来每列从顶往下扫
+   384 层，每层对六张高度图各调一次 `state_facts` / `state_fluid`，还每列分配两个 `Vec`。
+   六张图的谓词只由方块状态的静态事实决定，于是按状态 ID 缓存成一个 6 位掩码
+   （`1<<6` 当哨兵，让「六位全 0」的空气也能命中），用一个 `u8` 记还没找到的图。
+   这条路径在 `wg-perf` 里不走（工具直接调 `worldgen` crate），游戏路径才走；单测把
+   全部 35723 个状态和原谓词逐位比过。**在 wg-perf 口径里没有单独可测收益**，
+   保留是因为整条链要用它，而且它是后面第 4 项的前提。
+2. **段调色板批量打包**（`f7f8d741`）。`build_region_column` 原来对每个区块跑
+   24 × 4096 次 `PalettedContainer::set`，每次可能触发调色板扩容重打包，再让
+   `packed_for_disk` 把 4096 格重扫一遍。新增 `palette::packed_worldgen_section`：磁盘
+   形式只取决于「值按容器下标的顺序」和「调色板按首次出现顺序」，一次扫描同时产出两者。
+   单测比较两条路径的调色板和 long 数组。`assembly` 1.650 → 1.294 ms。
+3. **群系名字索引 + R 树内联**（`b9e82336`）。每个 quart 格原来线性扫 67 项群系注册表
+   找 ID，改成一次建好的静态名字索引；`find_value` / `search` / `node_distance` 标
+   `#[inline]`。墙钟 25.12/26.31 → 24.62/24.98 ms，但这两轮本身噪声大，只当辅助收益。
+4. **生成期光照的段只扫一次**（`6118921e`）。`Chunk::for_light` 原走
+   `Section::from_disk`，它扫 4096 个打包格算 `index_counts`，`rehash` 再扫 4096 格算
+   128 位段哈希（红石缓存用）。`blocks_from_values` 现在在扫描时按**不同状态**顺手算好
+   非空气 / 会随机刻 / 含流体三种计数，`Section::for_light` 只求和；release 里不存哈希
+   （这些段不进世界、不进红石缓存），debug 里仍算真值以兼容 `block_hash()` 的断言。
+   `light` 6.3/6.2 → 4.25/4.31 ms，墙钟 24.95/24.56 → 22.98/23.56 ms。
+5. **四张 FINAL 高度图不再逐格重算**（`af649221`）。`build_region_column` 原来给
+   `ChunkColumnParts.heightmaps` 全 `None`，`Chunk::from_sections` 因此从 24 × 4096 个
+   方块按四个谓词重新 prime 一次。`GeneratedChunk` 已经带着从同一份最终 CARVERS 方块
+   算好的六张图，直接把其中四张打包成官方的 9 位 long 数组交进去；手工拼的 chunk
+   没有高度图时用同一个 `compute_heightmaps` 现算。`assembly` 1.32/1.30 → 0.783/0.792 ms，
+   墙钟 23.20/23.06 → 21.98/22.44 ms。
+
+最后把**最初的二进制和最终二进制**在同一轮里交替跑两轮（120 块、口径同上）：
+
+| 阶段（中位数 ms/区块） | 改前 1 | 改后 1 | 改前 2 | 改后 2 |
+|---|---|---|---|---|
+| biomes | 2.195 | 2.146 | 2.335 | 2.242 |
+| noise_density | 2.905 | 2.897 | 3.070 | 2.916 |
+| substance | 0.848 | 0.826 | 0.889 | 0.829 |
+| surface | 2.393 | 2.337 | 2.485 | 2.338 |
+| carver_mask | 1.047 | 1.055 | 1.103 | 1.045 |
+| features | 6.537 | 6.406 | 6.971 | 6.211 |
+| light | 6.368 | 4.426 | 7.139 | 4.398 |
+| assembly | 1.675 | 0.807 | 1.709 | 0.807 |
+| **墙钟合计** | **25.920** | **23.014** | **27.813** | **22.993** |
+
+p95 改前 30.974 / 45.157、改后 43.035 / 43.118；高百分位受同机其它负载影响很大，
+不能用来判断收益。**20 ms 目标没达到**：剩下的 23 ms 里 `features` 6.2 ms、
+`light` 传播 4.4 ms、`biomes` 2.2 ms、噪声填充 3.9 ms 都还没动。地物主循环和
+`FeatureWorld` 的写路径当时由另一个分支在改，结构接线也没合进来，本轮按分工没有碰；
+光照传播的剩余 4.4 ms 在 `LightStorage` 的队列里，改它要动运行时光照路径，风险不对等。
+
+### 11.3 怎么确认结果逐位没变
+
+每项都跑了相关的 Java 对拍，并在提交前做「改坏确认」（故意让缓存 / 打包 / 光照输入
+错一点，确认比较器会报不一致，再还原）：
+
+| 对拍 | 干净跑 | 改坏确认 |
+|---|---|---|
+| `gen-world`（CARVERS）多种子、salt 1/7/13 | 0 不一致 | 掩码缓存让 AIR 错一位 → 256 处；翻转一个段打包字 → 4 处；第一列高度 +1 → 4 处 |
+| `gen-world --through features` 多种子、salt 1/7 | 0 不一致 | 同上（同一份方块） |
+| `chunkgen --through carvers` 多种子、salt 1/7 | 0 不一致 | `biome_id` 返回 +1 → 160 处 |
+| `chunkgen --through features` | 0 不一致 | 同上 |
+| `worldgen java` 多种子、多 salt | 0 不一致 | 同上 |
+| `gen-light` 多种子 / 多场景 | 0 不一致 | 一格换成岩浆 → 53830 处；`gen-light --break-self-test` 也报不一致 |
+
+另外 `cargo fmt --all --check`、`cargo clippy --workspace --all-targets`（0 警告）、
+`cargo test --workspace`、`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game`、
+`cargo check -p mc-bamboo-vanilla --no-default-features`、全套 `java` 对拍和联机探针
+都按 `docs/worldgen.md` 的验收口径跑过（结果见本轮汇报）。
+
+### 11.4 试过但没有收益、撤掉的
+
+* **`ParameterList` R 树结果缓存**。按 `(TargetPoint, 查询前的 lastResult)` 记忆化，
+  命中仍照常推进 `last_result`，平局语义可证不变；`HashMap` 版 `biomes`
+  2.17 → 2.56 ms，64 项线性小表版 2.32 → 2.80 ms，都变慢：`last_result` 一直变，
+  命中率低，查表开销大过省下的树遍历。
+* **`node_distance` 提前退出**。距离项非负，部分和超过当前最优就能停；`biomes`
+  2.15 → 2.32 ms，分支预测和 `saturating_mul` 的代价大于省下的几维运算。
+* **直接从 layers 算天空光源表**。`SkyLightSources::fill_from_layers` 跳过调色板解码，
+  但 `light` 4.28/4.16 → 4.63/5.37 ms：新路径每列重复扫整段，比按段缓存的
+  `PalettedContainer::get` 更贵。
+* `compute_heightmaps` 的掩码缓存单独在 `wg-perf` 口径里量不到，见 11.2 第 1 项；
+  它没有撤，因为游戏路径确实少做了每格六次查表，而且第 5 项依赖它。
+
+这些都按第 8 节「没有可测收益就撤掉」的原则撤销，没有提交。
