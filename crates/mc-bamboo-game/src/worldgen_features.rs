@@ -20,6 +20,7 @@
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use mc_bamboo_core::ChunkPos;
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT, light::generate::GeneratedLight};
 use mc_bamboo_worldgen::feature::{
     CENTER, DECORATION_STEPS, FeatureChunks, FeatureResult, Heightmaps, world::prime_heightmaps,
@@ -55,6 +56,11 @@ pub(crate) struct GenerateOutput {
     /// block layers). `None` means this stage computes no light; the world
     /// thread installs it into the delivered column at final assembly.
     pub(crate) light: Option<GeneratedLight>,
+    /// `structure_references` 阶段算好的 `structures` 顶层标签（`starts` + `References`）。
+    /// 世界线程在完工组装时把它装进交付盒子，下一次写盘原样带回。
+    /// The `structures` tag from `structure_references` (starts + References);
+    /// the world thread installs it into the delivered column at assembly.
+    pub(crate) structures: Option<Tag>,
 }
 
 impl GenerateOutput {
@@ -66,6 +72,7 @@ impl GenerateOutput {
             terrain: None,
             deltas: Vec::new(),
             light: None,
+            structures: None,
         }
     }
 }
@@ -384,6 +391,7 @@ pub(crate) fn generate_features_stage(
         terrain: None,
         deltas,
         light: None,
+        structures: None,
     })
 }
 
@@ -403,10 +411,39 @@ pub(crate) fn generate_terrain_stage(
         terrain: Some(chunk),
         deltas: Vec::new(),
         light: None,
+        structures: None,
     })
 }
 
-/// 透传阶段（结构、群系、光照、刷怪、完工）：盒子原样交回。
+/// `ChunkStatus.STRUCTURE_STARTS` / `STRUCTURE_REFERENCES` 的接线。两阶段都是
+/// 纯函数：前者只把结果放进线程本地缓存，后者产出 `structures` 标签交回世界线程。
+/// `generate-structures=false` 时按官方跳过结构起点，仍写空壳标签。
+///
+/// Wiring for `STRUCTURE_STARTS` / `STRUCTURE_REFERENCES`. Both are pure: the
+/// former only fills the thread-local cache, the latter produces the `structures`
+/// tag. With `generate-structures=false` vanilla skips starts but still writes the
+/// empty shell.
+pub(crate) fn generate_structure_stage(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+    center: Option<Box<RegionColumn>>,
+) -> Result<GenerateOutput, String> {
+    // 读盘盒子带来的 `structures` 标签：`structure_starts` 优先从它恢复起点和引用，
+    // 再按纯函数生成相邻区块时两边结果一致。没有标签就是新区块，纯函数生成。
+    // The decoded column's `structures` tag is restored first, so regenerating
+    // neighbours afterwards is identical to generating them in one pass.
+    let disk = center
+        .as_deref()
+        .and_then(crate::worldgen_structures::structures_tag_of);
+    crate::worldgen_structures::install_disk_structures(config, cx, cz, disk.as_ref());
+    let mut output = passthrough_stage(center);
+    let data = crate::worldgen_structures::structure_data(config, cx, cz)?;
+    output.structures = Some(data.tag);
+    Ok(output)
+}
+
+/// 透传阶段（群系、光照、刷怪、完工）：盒子原样交回。
 ///
 /// Pass-through stages: return the box unchanged.
 pub(crate) fn passthrough_stage(center: Option<Box<RegionColumn>>) -> GenerateOutput {

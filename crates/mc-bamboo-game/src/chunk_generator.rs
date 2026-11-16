@@ -28,8 +28,8 @@ use crate::{
     world_options::WorldGenConfig,
     worldgen::GeneratedChunk,
     worldgen_features::{
-        GenerateOutput, SnapshotView, generate_features_stage, generate_terrain_stage,
-        passthrough_stage,
+        GenerateOutput, SnapshotView, generate_features_stage, generate_structure_stage,
+        generate_terrain_stage, passthrough_stage,
     },
     worldgen_light::generate_light_stage,
 };
@@ -103,14 +103,17 @@ impl ChunkGenerator for FlatGenerator {
 
 /// 主世界多阶段生成器：把 `worldgen` 的纯函数接进 Director 的 `Staged` 流水线。
 ///
-/// `structure_starts` / `structure_references` / `biomes` 先接成透传：`terrain`
+/// `structure_starts` / `structure_references` 走纯函数重算并把 `structures` 标签
+/// 交回世界线程；`biomes` 仍透传。`terrain`
 /// 一步同时算出 quart 群系和跑到 CARVERS 的方块；`features` 读半径 1 的邻居
 /// 快照、跑 `Generator::features()`，中心内容和写邻居的增量交回世界线程；
 /// `light` 读同一份 3×3 邻居视图、算中心柱的生成期光照（天空光 + 方块光）交回；
 /// `initialize_light` / `spawn` / `full` 原样透传。每一步都是
 /// `(阶段, 位置, 配置, 输入) → 盒子 + 增量 + 光照` 的纯函数。
 ///
-/// Overworld staged generator. `terrain` computes quart biomes + CARVERS blocks;
+/// Overworld staged generator. The two structure stages recompute starts and
+/// references and return the `structures` tag; `terrain` computes quart biomes
+/// + CARVERS blocks;
 /// `features` reads radius-1 neighbor snapshots, runs `Generator::features()`,
 /// and returns the center content plus neighbor deltas; `light` reads the same
 /// 3×3 view and computes the center column's generation-time sky + block light;
@@ -146,6 +149,7 @@ impl ChunkGenerator for OverworldGenerator {
             let light =
                 generate_light_stage(&self.config, pos.x, pos.z, center_snapshot, neighbors);
             let mut output = passthrough_stage(center);
+            let _ = &mut output;
             match light {
                 Ok(light) => output.light = Some(light),
                 Err(error) => {
@@ -154,7 +158,19 @@ impl ChunkGenerator for OverworldGenerator {
             }
             return output;
         }
+        // 生成阶段失败时要保留输入盒子：只在结构阶段 `take()`，失败分支还能取回。
+        // Keep the input box for the failure path: only the structure stage `take()`s
+        // it, so the error branch can still recover it.
+        let mut center = center;
         let result = match stage {
+            // `ChunkStatus.STRUCTURE_STARTS` / `STRUCTURE_REFERENCES`：纯函数重算
+            // 半径 8 的邻域起点并登记引用；引用阶段把 `structures` 标签交回。
+            // `STRUCTURE_STARTS` / `STRUCTURE_REFERENCES`: recompute the radius-8
+            // neighborhood and register references; the references stage hands back
+            // the `structures` tag.
+            ChunkStatus::StructureStarts | ChunkStatus::StructureReferences => {
+                generate_structure_stage(&self.config, pos.x, pos.z, center.take())
+            }
             // `ChunkStatus.TERRAIN`：算 quart 群系 + doFill → buildSurface →
             // generateCarvers 的方块，并把 CARVERS 纯数据作为邻居快照交回。
             // `ChunkStatus.TERRAIN`: quart biomes + blocks through doFill →
