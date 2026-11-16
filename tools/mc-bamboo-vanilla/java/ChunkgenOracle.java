@@ -87,6 +87,8 @@ final class FeatureLevelHandler implements InvocationHandler {
     private final TerrainChunkView[] chunks;
     private final RegistryAccess registries;
     private final BiomeManager biomeManager;
+    /** `WorldGenRegion.uncachedBiomeResolver`：3×3 之外回退到单点气候重算。 */
+    private final BiomeResolver uncachedBiomeResolver;
     private final net.minecraft.util.RandomSource random;
     private final net.minecraft.world.ticks.WorldGenTickAccess<net.minecraft.world.level.block.Block> blockTicks;
     private final net.minecraft.world.ticks.WorldGenTickAccess<net.minecraft.world.level.material.Fluid> fluidTicks;
@@ -96,7 +98,7 @@ final class FeatureLevelHandler implements InvocationHandler {
 
     FeatureLevelHandler(ChunkPos center, long seed, NoiseGeneratorSettings settings,
             TerrainChunkView[] chunks, RegistryAccess registries, BiomeManager biomeManager,
-            RandomState randomState) {
+            BiomeResolver uncachedBiomeResolver, RandomState randomState) {
         this.center = center;
         this.seed = seed;
         this.minY = settings.noiseSettings().minY();
@@ -105,6 +107,7 @@ final class FeatureLevelHandler implements InvocationHandler {
         this.chunks = chunks;
         this.registries = registries;
         this.biomeManager = biomeManager;
+        this.uncachedBiomeResolver = uncachedBiomeResolver;
         // WorldGenRegion 构造 106-130：randomState 的 worldgen_region_random factory
         // 在中心区块的 origin 上取一个随机源。地物放置本身不用它，但 getRandom() 要给对。
         this.random = randomState
@@ -299,17 +302,34 @@ final class FeatureLevelHandler implements InvocationHandler {
                 }
                 return this.random;
             case "getBiome":
-                // LevelReader.getBiome: BiomeManager.getBiome(pos)，不是 quart 格直读。
+                // LevelReader.getBiome: BiomeManager.getBiome(pos)。这个 BiomeManager 的
+                // BiomeResolver 必须是「本代理」而不是 uncached resolver：官方
+                // WorldGenRegion 构造时传的是 region 自己（字节码 149-165），于是
+                // BiomeFilter 读的是 3×3 区块里 BIOMES 阶段填好的 quart 格。
+                // LevelReader.getBiome: BiomeManager.getBiome(pos). The manager's
+                // BiomeResolver must be this proxy (not the uncached resolver):
+                // vanilla's WorldGenRegion constructor passes the region itself
+                // (bytecode 149-165), so BiomeFilter reads the stored quart cells.
                 return this.biomeManager.getBiome((BlockPos) args[0]);
             case "getNoiseBiome": {
+                // LevelReader.getNoiseBiome 默认实现：先找 3×3 里的区块读 quart 格，
+                // 读不到才回退 getUncachedNoiseBiome()。BiomeManager.getBiome 的
+                // 八角插值选中的 quart 角会走到这里。
+                // LevelReader.getNoiseBiome: find the chunk in the 3x3 and read its
+                // quart cell, falling back to getUncachedNoiseBiome(). This is the
+                // path BiomeManager.getBiome's octant interpolation ends up on.
                 int qx = (Integer) args[0];
                 int qy = (Integer) args[1];
                 int qz = (Integer) args[2];
-                ChunkAccess chunk = chunk(QuartPos.toSection(qx), QuartPos.toSection(qz)).chunk();
-                return chunk.getNoiseBiome(qx, qy, qz);
+                int cx = QuartPos.toSection(qx);
+                int cz = QuartPos.toSection(qz);
+                if (Math.abs(cx - center.x()) <= 1 && Math.abs(cz - center.z()) <= 1) {
+                    return chunk(cx, cz).chunk().getNoiseBiome(qx, qy, qz);
+                }
+                return uncachedBiomeResolver.getNoiseBiome(qx, qy, qz);
             }
             case "getUncachedNoiseBiome":
-                return this.biomeManager.getNoiseBiomeAtQuart((Integer) args[0], (Integer) args[1],
+                return uncachedBiomeResolver.getNoiseBiome((Integer) args[0], (Integer) args[1],
                         (Integer) args[2]);
             case "getBiomeManager":
                 return this.biomeManager;
@@ -759,7 +779,7 @@ public final class ChunkgenOracle {
                         continue;
                     }
                     if (this.options.through() >= 4) {
-                        writeFeatures(seed, pos, generator, generatorSettings, state, biomeManager, resolver);
+                        writeFeatures(seed, pos, generator, generatorSettings, state, resolver);
                         continue;
                     }
 
@@ -801,7 +821,7 @@ public final class ChunkgenOracle {
          */
         private void writeFeatures(long seed, ChunkPos pos, NoiseBasedChunkGenerator generator,
                 NoiseGeneratorSettings generatorSettings, RandomState randomState,
-                BiomeManager biomeManager, BiomeResolver resolver) throws Exception {
+                BiomeResolver resolver) throws Exception {
             TerrainChunk[] chunks = new TerrainChunk[9];
             for (int dz = -1; dz <= 1; dz++) {
                 for (int dx = -1; dx <= 1; dx++) {
@@ -810,11 +830,24 @@ public final class ChunkgenOracle {
                             generatorSettings, randomState, resolver);
                 }
             }
+            // WorldGenRegion 构造 149-165：BiomeManager 的 BiomeResolver 是 region 自己，
+            // 不是 ServerLevel.uncachedBiomeResolver()。这里让代理实现 BiomeResolver，
+            // 用同一份 obfuscateSeed(seed) 建 manager，BiomeFilter 才会读 3×3 里
+            // BIOMES 阶段填好的 quart 格；3×3 之外才回退到 uncached resolver。
+            // WorldGenRegion ctor 149-165: the manager's BiomeResolver is the region
+            // itself, not ServerLevel.uncachedBiomeResolver(). The proxy implements
+            // BiomeResolver so BiomeFilter reads the stored quart cells, falling back
+            // to the uncached resolver outside the 3x3.
+            final WorldGenLevel[] holder = new WorldGenLevel[1];
+            FeatureLevelHandler handler = new FeatureLevelHandler(pos, seed, generatorSettings,
+                    wrapped(chunks), this.registries,
+                    new BiomeManager((qx, qy, qz) -> holder[0].getNoiseBiome(qx, qy, qz),
+                            BiomeManager.obfuscateSeed(seed)),
+                    resolver, randomState);
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
                     ChunkgenOracle.class.getClassLoader(),
-                    new Class<?>[] {WorldGenLevel.class},
-                    new FeatureLevelHandler(pos, seed, generatorSettings, wrapped(chunks),
-                            this.registries, biomeManager, randomState));
+                    new Class<?>[] {WorldGenLevel.class}, handler);
+            holder[0] = level;
             // generateStructures=false：applyBiomeDecoration 的结构分支整段跳过。
             StructureManager structures =
                     new StructureManager(level, new WorldOptions(seed, false, false), null);

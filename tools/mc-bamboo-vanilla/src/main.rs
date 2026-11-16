@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! mc-bamboo-vanilla generate <server.jar> [java 路径]
-//!     从官方服务端生成 mc-bamboo-data 的版本数据
+//!     从官方服务端生成 mc-bamboo-data 的版本数据和丛林神殿指令表
 //! mc-bamboo-vanilla extract [java 路径]
 //!     不重跑官方数据生成器，用 target/vanilla 里上次的报告重新导出数据
 //! mc-bamboo-vanilla probe <地址> <端口> [java 路径]
@@ -147,6 +147,7 @@ mod generate;
 mod jigsaw;
 #[cfg(feature = "oracle")]
 mod jigsaw_shapes;
+mod jungle_temple_ops;
 #[cfg(feature = "oracle")]
 mod light;
 #[cfg(feature = "oracle")]
@@ -501,6 +502,7 @@ fn generate(server_jar: &str, java: &str) -> Result<(), String> {
     fs::create_dir_all(&output_dir).map_err(|error| format!("无法创建输出目录：{error}"))?;
     generate::write_all(&data, &output_dir)?;
     structure_templates::export(&work_dir, &output_dir)?;
+    jungle_temple_ops::export(java, &work_dir, &root)?;
 
     println!(
         "已生成 Minecraft {} 的数据（协议 {}）",
@@ -519,6 +521,7 @@ fn extract(java: &str) -> Result<(), String> {
     fs::create_dir_all(&output_dir).map_err(|error| format!("无法创建输出目录：{error}"))?;
     generate::write_all(&data, &output_dir)?;
     structure_templates::export(&work_dir, &output_dir)?;
+    jungle_temple_ops::export(java, &work_dir, &root)?;
 
     println!(
         "已用现有的报告重新生成 Minecraft {} 的数据（协议 {}）",

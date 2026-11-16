@@ -1674,16 +1674,24 @@ structures (Compound)
   覆盖：234 查询 / 282196 格比较 / 2106 个随机探针，0 不一致。三步分别改坏（概率表首项
   1.0→0.0 报 8064 处、滴水柱边界 +1→+2 报 22853 处、藤蔓方向恒取 0 报 6763 处）后还原，
   确认对拍不是假绿，因此不再给 `structure-ruined-portal` 加独立的放置模式。
-* **丛林神殿 `postProcess` 已移植并逐方块对拍**（2026-11-15）：用官方
+* **丛林神殿 `postProcess` 已移植并逐方块对拍**（2026-11-15）：指令表由
+  `mc-bamboo-vanilla generate` / `extract` 固化生成，写进
+  `crates/mc-bamboo-worldgen/src/structure/post_process/jungle_temple_ops.rs`
+  （`jungle_temple.rs` 用 `include!` 引入，不要手动改）。
+  `tools/mc-bamboo-vanilla/java/JungleTempleOpsExtractor.java` 用官方
   `JungleTemplePiece` 的子类覆盖 `generateBox` / `generateAirBox` / `placeBlock` /
-  `createChest` / `createDispenser`，导出 171 条调用（43 个 `MossStoneSelector`
-  `generateBox` 每格一次 `nextFloat()`、14 个 `generateAirBox`、71 个 `placeBlock`、
-  2 个 `createChest`、2 个 `createDispenser` 及陷阱红石属性状态），按同样顺序复刻。
-  `createDispenser` 内部那次 `placeBlock` 归入同一条指令，状态按 mirror / rotation 变换。
+  `createChest` / `createDispenser`，只记录调用序列：假 `WorldGenLevel` 让
+  `updateAverageGroundHeight` 走完，helper 全部被拦截、不写世界，也不启动服务端或加载
+  数据包注册表。报告是 171 条 helper 调用（71 个 `MossStoneSelector` `generateBox`
+  每格一次 `nextFloat()`、17 个 `generateAirBox`、79 个 `placeBlock`、2 个 `createChest`、
+  2 个 `createDispenser`；字节码里的 43 / 14 / 71 是静态调用点，循环展开后才是这个数），
+  Rust 侧把 `createDispenser` 内部那次 `placeBlock` 并回发射器指令，得到 169 条
+  `Op`（状态按 mirror / rotation 变换），再用同一个 `rustfmt` 排版，重跑逐字节无 diff。
   `structure-post-process` 扩到 64 查询（四结构各 16）、74918 个写入方块、75062 个比较
   **0 不一致**；四种朝向全部覆盖。故意改坏：`MossStoneSelector` 阈值 0.4→0.5 报 1788 处、
   一块苔石换成圆石报 16 处、发射器战利品种子 +1 报 32 处、发射器朝向 north→south
-  报 16 处，还原后回到 0。
+  报 16 处，还原后回到 0；导出流程接好后又改坏导出的那条 `(5,6,0)–(6,6,0)`
+  `generateBox`（上界 x 改成 7），对拍报 880 处，还原后回到 0。
 * 这些 `postProcess` 仍是纯函数 + oracle，**没接进 `feature/run.rs` / Director**，
   游戏里结构件仍然一个方块都不放（接线由 `cb-wg-structwire` 负责）。
 

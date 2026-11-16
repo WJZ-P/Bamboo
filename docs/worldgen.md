@@ -231,7 +231,10 @@ cargo run --release -p mc-bamboo-vanilla -- chunkgen java --seeds 6 --chunks 36 
 
 除了 `worldgen.json`，`generate` 还会写 `generated/` 下的其它文件（含 `saved_world.rs`
 和 `mod.rs`）；只关心世界生成数据时，别把那些无关的改动混进同一个提交。`extract` 需要
-`target/vanilla/generated/reports`，`generate` 会用官方 jar 重建它。
+`target/vanilla/generated/reports`，`generate` 会用官方 jar 重建它。两条命令还会跑
+`JungleTempleOpsExtractor.java`，从官方 `JungleTemplePiece.postProcess` 的 helper 调用序列
+重写 `crates/mc-bamboo-worldgen/src/structure/post_process/jungle_temple_ops.rs`，
+所以重跑后这个文件也应当无 diff（`docs/worldgen-structures-plan.md` 的丛林神殿段有细节）。
 
 ## 区块级对拍
 
@@ -677,6 +680,109 @@ cargo build --release -p mc-bamboo-vanilla
 The 3×3 repack is gone: the `light` stage now calls `generate_light_from_layers`,
 which builds light-only sections straight from the snapshot layers. Light is
 bit-identical; `wg-perf --light-compare` measured 35.1 → 11.3 ms (median, 96 chunks).
+
+## 端到端逐类型对拍
+
+地物分批合进 main 时，每一批各自用 `chunkgen --through features` 对拍过；那是
+`mc-bamboo-worldgen::chunk::Generator::features` 的纯函数路径。这里补的是
+**端到端**那一条：`gen-world --through features` 用 `ChunkgenOracle.java` 在 JVM 里
+按官方 `applyBiomeDecoration` 生成 3×3 九宫格，Bamboo 侧调
+`mc-bamboo-game::worldgen_features::game_features_with_mask`（Director 的 `features`
+阶段用的同一份 `run_features`），逐格比九宫格。两个对拍不能互相替代。
+
+### 命令
+
+```bash
+cargo build --release -p mc-bamboo-vanilla
+
+# 全部 26 个可触发类型：每个类型干净跑 + 改坏确认
+tools/mc-bamboo-vanilla/feature-e2e.sh
+
+# 只跑一个类型
+tools/mc-bamboo-vanilla/feature-e2e.sh minecraft:monster_room
+
+# 手动复现某一行（以 monster_room 为例）
+cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
+    --through features --steps 3 --feature-types minecraft:monster_room \
+    --seeds 1 --chunk 3 -1 --scan 5 --coverage
+cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
+    --through features --steps 3 --feature-types minecraft:monster_room \
+    --seeds 1 --chunk 3 -1 --scan 5 --break-type minecraft:monster_room
+```
+
+`gen-world --through features` 新增的开关：
+
+| 开关 | 作用 |
+|---|---|
+| `--feature-types IDS` / `--types IDS` | 逗号分隔的白名单，条目是 Feature 类型 ID 或 placed feature 注册名；Java 侧把不在白名单里的 `HolderSet` 换空，Bamboo 侧用同一规则收集 `(step, index)`，全局 index 与 `setFeatureSeed` 不变。不传时仍是旧的「只跑矿石」语义。 |
+| `--all-features` | 不放白名单，跑全部 step 的全部地物。 |
+| `--steps MASK` | 逗号分隔的 step 号；两边用同一掩码。 |
+| `--scan N` | `--chunk X Z` 周围连续网格，稀有类型靠它找触发点。 |
+| `--coverage` | 打印每个 Feature 类型交给 `Feature.place` 的候选次数（触发次数）。 |
+| `--break-type KIND` | 改坏确认：只改该类型真正写过的方块，要求对拍报错。 |
+
+逐类型的种子、区块、触发次数和改坏结果见
+[`docs/worldgen-e2e-coverage.md`](worldgen-e2e-coverage.md)：26 个类型全部
+「干净跑 0 不一致 + 改坏确认报不一致」；`overlay`、`fossil`、`root_system`
+是字节码核对过的已知限制，单次扫描不超过 10 分钟，不记作通过。
+
+### 修好的三处假绿
+
+1. **`gen-world --through features` 硬编码 `--ore-only`。** 之前无论对拍哪种地物，
+   Java 和 Bamboo 两边都只跑矿石，所以 `monster_room` 的「0 不一致」是假绿：改坏
+   `MonsterRoomFeature` 不可能被看到。现在命令转发白名单，改坏确认在
+   `--feature-types minecraft:monster_room --break-type minecraft:monster_room` 下
+   报 1 处不一致（见覆盖报告）。
+2. **调色板只解析默认状态。** CARVERS 阶段只有默认状态，但地物会放
+   `water[level=1]`、`log[axis=y]`、楼梯、藤蔓等带属性的状态；`gen_world.rs` 原来
+   把 `BlockState.toString()` 的属性全丢掉，和「只看方块名」等价，属性写错抓不到。
+   地物路径现在走 `mc_bamboo_worldgen::feature::state::state_from_official_name`
+   精确还原状态 ID。另外 `result.unsupported` 为真时直接报错，不再把「未移植分支」
+   当成 0 不一致。
+3. **`BiomeFilter` 用错了群系数据。** 字节码（`BiomeFilter.shouldPlace`、
+   `LevelReader.getBiome` / `getNoiseBiome`、`WorldGenRegion` 构造 149–165）显示：
+   `shouldPlace` 问的是 `PlacementContext.topFeature()` 和
+   `WorldGenLevel.getBiome(BlockPos)`；后者是 `WorldGenRegion.biomeManager.getBiome(pos)`，
+   而这个 `BiomeManager` 构造时传的 `BiomeResolver` 是 **region 自己**。
+   `BiomeManager.getBiome` 先按 `obfuscateSeed(worldSeed)` 做八角 fiddled distance
+   选中一个 quart 角，再走 `LevelReader.getNoiseBiome` 读 3×3 区块里 `BIOMES`
+   阶段成批填好的 quart 格；只有落在 3×3 之外才回退 `getUncachedNoiseBiome()`
+   单点重算气候。地表规则早就因为这个浮点顺序差异改成读格子（`biome_region.rs`），
+   但 `feature/run.rs` 里的 `BiomeFilter` 回调仍用 `createUncachedResolver` 重算，
+   Java oracle 的 `FeatureLevelHandler` 也把 `biomeManager` 建在 uncached resolver 上
+   —— **两边一起错，所以对拍一直是 0 不一致**。
+
+   现在 Java 侧让代理实现 `BiomeResolver`，`BiomeManager` 用它构造；Bamboo 侧
+   `feature::run::features` 的 `biome_at` 先算 `fiddled_corner`，再用
+   `feature::world::noise_biome_in` 读 `FeatureChunks.biomes` 的 3×3 格子，越界才回退
+   `BiomeManager::noise_biome`。暴露场景是 seed 0、chunk `(255,-109)`：那里 quart 格
+   与 uncached 气候在 y=-60 层有 200 个格点群系不同。故意把 Bamboo 改回 uncached
+   路径后
+
+   ```bash
+   gen-world java --through features --seeds 5 --chunks 1 --salt 0 \
+       --chunk 255 -109 --scan 5 \
+       --feature-types minecraft:ore_dirt,minecraft:patch_grass_jungle,minecraft:freeze_top_layer
+   ```
+
+   报 2 处不一致（`(256,-109)` y=62 x=2 z=3/4），改回后 0。step 9
+   （`VEGETAL_DECORATION`）的 `patch_grass_jungle` 一类地物正是靠这个修饰器在群系
+   边界上被放行 / 杀掉，所以这一处影响所有带 `biome` 修饰器的 step 9 地物。
+
+### 新加地物怎么照着用
+
+1. 在 `tools/mc-bamboo-vanilla/feature-e2e.sh` 的 `CASES` 表加一行：
+   `类型 ID|step 掩码|能触发它的种子与区块`。先用
+   `gen-world ... --feature-types <ID> --coverage` 找触发次数不为 0 的坐标；
+   触发次数为 0 就按 `docs/worldgen-features-plan.md` 里记录的定点或群系预设换坐标。
+2. 跑 `tools/mc-bamboo-vanilla/feature-e2e.sh <ID>`，确认 `RESULT=PASS`
+   （干净跑 0 不一致、改坏确认报不一致、改坏格数 > 0）。
+3. 把类型、种子、区块、触发次数和改坏格数补进
+   `docs/worldgen-e2e-coverage.md`；如果扫不出触发点，用 `javap -c -p` 查清
+   触发条件，作为已知限制写进那一节，别把 0 不一致写成通过。
+4. 最后跑一次 `tools/mc-bamboo-vanilla/feature-e2e.sh` 全量回归，以及
+   `gen-world --through features --all-features --seeds 2 --chunks 8 --salt 7`
+   的整步对拍（全部类型一起跑，仍应 0 不一致）。
 
 ## 还没做
 

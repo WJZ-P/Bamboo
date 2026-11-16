@@ -145,7 +145,8 @@ pub(crate) fn run_features(
     cz: i32,
     view: [GeneratedChunk; 9],
 ) -> Result<FeatureResult, String> {
-    run_features_filtered(config, cx, cz, view, None).map(|(result, _)| result)
+    run_features_filtered(config, cx, cz, view, None, (1 << DECORATION_STEPS) - 1)
+        .map(|(result, _)| result)
 }
 
 /// [`run_features`] 加一个地物白名单；游戏里恒为 `None`，只有对拍工具会传。
@@ -158,6 +159,7 @@ fn run_features_filtered(
     cz: i32,
     view: [GeneratedChunk; 9],
     allowed_kinds: Option<&[String]>,
+    steps_mask: i32,
 ) -> Result<
     (
         FeatureResult,
@@ -272,12 +274,7 @@ fn run_features_filtered(
     // `lastResult`; clear it before the feature loop reads it.
     crate::worldgen_structures::reset_generator_biome_state(config)?;
     with_generator(config, |generator| {
-        generator.features_with_structures(
-            &input,
-            (1 << DECORATION_STEPS) - 1,
-            allowed_kinds,
-            Some(&placement),
-        )
+        generator.features_with_structures(&input, steps_mask, allowed_kinds, Some(&placement))
     })
 }
 
@@ -298,8 +295,23 @@ pub fn game_features(
     cz: i32,
     allowed_kinds: Option<&[String]>,
 ) -> Result<FeatureResult, String> {
+    game_features_with_mask(config, cx, cz, allowed_kinds, (1 << DECORATION_STEPS) - 1)
+}
+
+/// [`game_features`] 加上过渡期的 `--steps` 掩码，只有对拍工具用；
+/// 游戏里恒为全部 11 步。
+///
+/// [`game_features`] with the transitional `--steps` mask; only the oracle uses
+/// a narrowed mask, the game always runs all eleven steps.
+pub fn game_features_with_mask(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+    allowed_kinds: Option<&[String]>,
+    steps_mask: i32,
+) -> Result<FeatureResult, String> {
     let view = build_view(config, cx, cz)?;
-    run_features_filtered(config, cx, cz, view, allowed_kinds).map(|(result, _)| result)
+    run_features_filtered(config, cx, cz, view, allowed_kinds, steps_mask).map(|(result, _)| result)
 }
 
 /// 一次「游戏里的完整生成流水线」结果，给 `gen-world --through structures` 对拍用。
@@ -363,7 +375,8 @@ pub fn game_pipeline(
         biomes: biomes[index].clone(),
         heightmaps: Default::default(),
     });
-    let (result, stats) = run_features_filtered(config, cx, cz, view, None)?;
+    let (result, stats) =
+        run_features_filtered(config, cx, cz, view, None, (1 << DECORATION_STEPS) - 1)?;
     let mut final_blocks = blocks;
     final_blocks[CENTER] = result.blocks[CENTER].clone();
     // 4. Director 完工时的规范序：中心自己的写 + 8 个邻居中心溢进来的写。

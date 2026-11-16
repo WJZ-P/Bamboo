@@ -202,18 +202,22 @@ impl<'a> FeatureWorld<'a> {
     }
 
     /// `LevelReader.getNoiseBiome(quartX, quartY, quartZ)`：读已存的 quart 格。
-    pub fn get_noise_biome(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> u32 {
-        let Some(index) = self.index_of(quart_x >> 2, quart_z >> 2) else {
-            return 0;
-        };
-        let sections = &self.biomes[index];
-        let section = (quart_y - (self.min_y >> 2)) as usize;
-        let local_x = ((quart_x & 3) * 16 + (quart_y & 3) * 4 + (quart_z & 3)) as usize;
-        sections
-            .get(section)
-            .and_then(|cells| cells.get(local_x))
-            .copied()
-            .unwrap_or(0)
+    /// 3×3 之外返回 `None`，由调用方回退到 `getUncachedNoiseBiome()` 单点重算。
+    /// quartY 越界按官方 `ChunkAccess.getNoiseBiome` 夹到区块范围内。
+    ///
+    /// `LevelReader.getNoiseBiome`: read the stored quart cell. Outside the 3x3
+    /// this returns `None` so the caller falls back to single-point sampling;
+    /// out-of-range quartY is clamped like vanilla `ChunkAccess.getNoiseBiome`.
+    pub fn get_noise_biome(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> Option<u32> {
+        noise_biome_in(
+            self.biomes,
+            self.center_x,
+            self.center_z,
+            self.min_y,
+            quart_x,
+            quart_y,
+            quart_z,
+        )
     }
 
     /// `BiomeManager.getBiome(x,y,z)` 的逐点平滑：由调用方通过回调给出群系 ID。
@@ -236,6 +240,37 @@ impl<'a> FeatureWorld<'a> {
     pub fn is_outside_build_height(&self, y: i32) -> bool {
         !self.is_inside_build_height(y)
     }
+}
+
+/// `LevelReader.getNoiseBiome` 的纯函数版，只读 3×3 群系格。
+/// `BiomeFilter` 的回调在放置阶段要同时可变借用 `FeatureWorld`，所以这里单独
+/// 收一份只读借用，避免闭包把整个世界借住。
+///
+/// Pure read-only version of `LevelReader.getNoiseBiome`. The `BiomeFilter`
+/// callback runs while `FeatureWorld` is mutably borrowed by placement, so it
+/// takes only the biome array.
+pub fn noise_biome_in(
+    biomes: &[Vec<Vec<u32>>; 9],
+    center_x: i32,
+    center_z: i32,
+    min_y: i32,
+    quart_x: i32,
+    quart_y: i32,
+    quart_z: i32,
+) -> Option<u32> {
+    let dx = (quart_x >> 2) - center_x;
+    let dz = (quart_z >> 2) - center_z;
+    if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dz) {
+        return None;
+    }
+    let index = ((dz + 1) * 3 + dx + 1) as usize;
+    let cells = biomes.get(index)?;
+    let min_quart_y = min_y >> 2;
+    let last_quart_y = min_quart_y + cells.len() as i32 * 4 - 1;
+    let clamped = quart_y.clamp(min_quart_y, last_quart_y.max(min_quart_y));
+    let section = ((clamped - min_quart_y) >> 2) as usize;
+    let local = ((quart_x & 3) * 16 + (clamped & 3) * 4 + (quart_z & 3)) as usize;
+    cells.get(section)?.get(local).copied()
 }
 
 /// `Heightmap.Types` 的六种，顺序和 `heightmaps::TYPES` 一致。

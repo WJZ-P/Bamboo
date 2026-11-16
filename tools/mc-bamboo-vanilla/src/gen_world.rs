@@ -22,7 +22,7 @@
 //! `--level-type` compares each of `normal` / `large_biomes` / `amplified`.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::{BufRead, BufReader, Read},
     process::{Command, Stdio},
 };
@@ -32,13 +32,18 @@ use mc_bamboo_game::{
     world_options::{LevelType, WorldGenConfig},
     worldgen::GeneratedChunk,
 };
+use mc_bamboo_worldgen::feature::state::state_from_official_name;
 use serde_json::Value;
 
 use crate::oracle::collect_log;
 
-const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S] [--chunk X Z] [--show N] \
-     [--level-type normal|large_biomes|amplified] [--break-self-test] [--through features]";
+const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S] [--chunk X Z] [--scan N] \
+     [--show N] [--level-type normal|large_biomes|amplified] [--break-self-test] \
+     [--through features [--feature-types IDS | --types IDS | --all-features] \
+      [--steps MASK] [--coverage] [--break-type KIND]]";
 const DEFAULT_SHOW: usize = 8;
+/// 全部 11 个 decoration step（和 `chunkgen.rs` / Java 侧的 `ALL_STEPS` 一致）。
+const ALL_STEPS: i32 = (1 << 11) - 1;
 
 #[derive(Debug)]
 struct Options {
@@ -51,11 +56,26 @@ struct Options {
     /// 故意把 Bamboo 的第一个方块改坏，确认对拍会报不一致（自检）。
     /// Deliberately corrupt the first Bamboo block to verify the oracle fails (self-test).
     break_self_test: bool,
-    /// 跑到 `features`（只放开已移植的矿石）：Java 侧 `--ore-only`，游戏侧调
-    /// `game_features`，逐方块比 9 宫格。
-    /// Run through `features` (ported ores only): Java `--ore-only`, game calls
-    /// `game_features`, comparing the 9-chunk window block by block.
+    /// 跑到 `features`：Java 侧和游戏侧用同一份地物白名单，逐方块比 9 宫格。
+    /// 不传 `--feature-types` 时仍默认只放矿石，保持旧命令的语义。
+    /// Run through `features`: both sides use the same allow list and compare the
+    /// 9-chunk window block by block. Without `--feature-types` only ores run,
+    /// preserving the old command's meaning.
     features: bool,
+    /// `--feature-types` / `--types` 的白名单；`None` 等价于 `--ore-only`，
+    /// `Some(空)` 表示 `--all-features`（不过滤）。
+    /// The allow list; `None` means `--ore-only`, `Some(empty)` means
+    /// `--all-features` (no filter).
+    feature_types: Option<Vec<String>>,
+    /// Java 侧的 `--steps` 掩码，逐类型对拍时只跑相关 step。
+    /// The Java `--steps` mask; per-type runs narrow this to the relevant steps.
+    steps: i32,
+    /// 打印每个 Feature 类型实际跑到的候选次数（触发统计）。
+    /// Print per-Feature-type candidate counts (coverage report).
+    coverage: bool,
+    /// 改坏确认：只改这个类型写下的方块。空表示不改。
+    /// Break confirmation: corrupt blocks written only by this Feature type.
+    break_type: Option<String>,
 }
 
 impl Options {
@@ -74,11 +94,15 @@ impl Options {
             level_type: LevelType::Normal,
             break_self_test: false,
             features: false,
+            feature_types: None,
+            steps: ALL_STEPS,
+            coverage: false,
+            break_type: None,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
-                "--seeds" | "--chunks" | "--salt" => {
+                "--seeds" | "--chunks" | "--salt" | "--scan" => {
                     let value = args.next().ok_or(USAGE)?;
                     options
                         .forwarded
@@ -111,6 +135,64 @@ impl Options {
                         .extend(["--settings".to_owned(), settings.to_owned()]);
                 }
                 "--break-self-test" => options.break_self_test = true,
+                // 地物白名单：转发给 Java，游戏侧用同一组字符串。
+                // Feature allow list: forwarded to Java; the game uses the same strings.
+                "--types" | "--feature-types" | "--steps" => {
+                    let value = args.next().ok_or(USAGE)?;
+                    if !options.features {
+                        return Err(format!("{arg} requires --through features: {USAGE}"));
+                    }
+                    if arg == "--steps" {
+                        let mut mask = 0_i32;
+                        for part in value.split(',') {
+                            let step: i32 = part.trim().parse().map_err(|_| USAGE)?;
+                            if !(0..11).contains(&step) {
+                                return Err(USAGE.to_owned());
+                            }
+                            mask |= 1 << step;
+                        }
+                        options.steps = mask;
+                    } else {
+                        options.feature_types = Some(
+                            value
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned)
+                                .collect(),
+                        );
+                    }
+                    // `--steps` 直接转发；白名单收尾时统一转发一次，避免
+                    // `--types` 和 `--feature-types` 同时出现时追加两条。
+                    // Forward `--steps` now; the allow list is forwarded once at
+                    // the end so repeated / aliased flags cannot produce two.
+                    if arg == "--steps" {
+                        options
+                            .forwarded
+                            .extend(["--steps".to_owned(), (*value).to_owned()]);
+                    }
+                }
+                "--coverage" => {
+                    if !options.features {
+                        return Err(format!("--coverage requires --through features: {USAGE}"));
+                    }
+                    options.coverage = true;
+                }
+                "--break-type" => {
+                    if !options.features {
+                        return Err(format!("--break-type requires --through features: {USAGE}"));
+                    }
+                    options.break_type = Some((*args.next().ok_or(USAGE)?).to_owned());
+                    options.coverage = true;
+                }
+                "--all-features" => {
+                    if !options.features {
+                        return Err(format!(
+                            "--all-features requires --through features: {USAGE}"
+                        ));
+                    }
+                    options.feature_types = Some(Vec::new());
+                }
                 "--through" => {
                     let value = args.next().ok_or(USAGE)?;
                     if *value != "features" {
@@ -118,10 +200,6 @@ impl Options {
                             "gen-world only supports --through features: {USAGE}"
                         ));
                     }
-                    // 游戏侧只移植了矿石，Java 侧也只留矿石地物；其余类型两边都
-                    // 不放，9 宫格逐方块仍可比（见 docs/worldgen-features-plan.md）。
-                    // Only ores are ported in-game; filter Java to ores too, so the
-                    // 9-chunk windows stay comparable block by block.
                     options.features = true;
                     // 原地替换头两个 `--through carvers`，不动可能已经追加的
                     // `--seeds/--chunks/--salt`。
@@ -132,9 +210,27 @@ impl Options {
                     // Java's `--real-path` takes precedence over `--through features`,
                     // so features mode must not forward it.
                     options.forwarded.retain(|arg| arg != "--real-path");
-                    options.forwarded.push("--ore-only".to_owned());
+                    // 没给白名单时沿用旧行为（只放矿石）。显式白名单要在收尾时
+                    // 把这条默认过滤替换掉，Java 侧不能同时收到两个过滤开关。
+                    // Without an allow list keep the old ores-only behaviour. An
+                    // explicit one replaces this default flag at the end of parsing.
                 }
                 _ => return Err(USAGE.to_owned()),
+            }
+        }
+        if options.features {
+            match &options.feature_types {
+                // 显式白名单：原样转发逗号分隔的条目（Java 侧也接 `--feature-types`）。
+                // Explicit allow list: forward the comma-separated selectors.
+                Some(selectors) if !selectors.is_empty() => {
+                    options
+                        .forwarded
+                        .extend(["--feature-types".to_owned(), selectors.join(",")]);
+                }
+                // `--all-features` 不转发过滤开关；`None` 是旧的默认矿石模式。
+                // `--all-features` forwards nothing; `None` keeps the legacy ores-only mode.
+                Some(_) => {}
+                None => options.forwarded.push("--ore-only".to_owned()),
             }
         }
         Ok(options)
@@ -149,6 +245,9 @@ struct Stats {
     heightmap_columns: u64,
     heightmap_words: u64,
     mismatches: Vec<String>,
+    /// 改坏确认里实际被改掉、且确实由目标类型写过的格数。
+    /// Cells actually corrupted during break confirmation, all written by the target type.
+    break_writes: u64,
 }
 
 /// 启动官方进程，一边读一边把收到的线和游戏侧生成结果比较。
@@ -174,6 +273,16 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         level_type: options.level_type,
         break_self_test: options.break_self_test,
         features: options.features,
+        feature_types: options.feature_types.clone(),
+        steps: options.steps,
+        coverage: options.coverage,
+        break_type: options.break_type.clone(),
+        coverage_totals: BTreeMap::new(),
+        feature_kinds: if options.coverage {
+            feature_kinds()?
+        } else {
+            Vec::new()
+        },
         header_ok: false,
         official_checks: 0,
     };
@@ -203,6 +312,20 @@ struct Report {
     /// 跑到 features：读 `features` 线、调 `game_features` 比 9 宫格。
     /// Features mode: read `features` lines, compare the 9-chunk window via `game_features`.
     features: bool,
+    /// 地物白名单；`None` 对应 Java 的 `--ore-only`。
+    /// Feature allow list; `None` corresponds to Java's `--ore-only`.
+    feature_types: Option<Vec<String>>,
+    steps: i32,
+    coverage: bool,
+    /// 改坏确认：只改这个类型写下的方块。
+    /// Break confirmation: corrupt blocks written only by this type.
+    break_type: Option<String>,
+    /// 每个 Feature 类型 ID 在这批区块里实际交给 `Feature.place` 的候选次数。
+    /// Per-Feature-type candidate count actually handed to `Feature.place`.
+    coverage_totals: BTreeMap<String, u64>,
+    /// `Registry::placed` 下标 → Feature 类型 ID，按导出表顺序。留空表示不统计。
+    /// `Registry::placed` index → Feature type ID; empty when not collecting coverage.
+    feature_kinds: Vec<String>,
     header_ok: bool,
     official_checks: u64,
 }
@@ -416,11 +539,10 @@ impl Report {
     fn on_features(&mut self, value: &Value) -> Result<(), String> {
         let (seed, x, z) = line_key(value)?;
         let steps = value.get("steps").and_then(Value::as_i64).unwrap_or(0);
-        // 全部 11 步：`(1<<11)-1`。Java `--ore-only` 不改 steps，游戏侧也跑全部步。
-        // All 11 steps: `(1<<11)-1`. Java `--ore-only` keeps all steps; so does the game.
-        if steps != 2047 {
+        if steps != i64::from(self.steps) {
             return Err(format!(
-                "features seed {seed} ({x},{z}): oracle ran steps mask {steps}, expected 2047"
+                "features seed {seed} ({x},{z}): oracle ran steps mask {steps}, expected {}",
+                self.steps
             ));
         }
         let chunks = value
@@ -445,18 +567,87 @@ impl Report {
         // Java's features mode disables structures and uses Beardifier.EMPTY;
         // mirror that on the game side so both compare the same world.
         config.generate_structures = false;
-        // 和 Java 侧的 `--ore-only` 同一份白名单：两边都只跑矿石。
-        // Same allow list as Java's `--ore-only`: both sides run ores only.
+        // 和 Java 侧的 `--ore-only` / `--feature-types` 用同一份白名单。
+        // Same allow list as Java's `--ore-only` / `--feature-types`.
         let ore_only = ["minecraft:ore".to_owned()];
-        let mut result =
-            mc_bamboo_game::worldgen_features::game_features(&config, x, z, Some(&ore_only))
-                .map_err(|error| {
-                    format!("game features failed for seed {seed} ({x},{z}): {error}")
-                })?;
+        let selectors: Option<&[String]> = match &self.feature_types {
+            Some(list) if list.is_empty() => None,
+            Some(list) => Some(list),
+            None => Some(&ore_only),
+        };
+        mc_bamboo_worldgen::perf::begin(-64, i32::MIN, mc_bamboo_worldgen::perf::Phase::Features);
+        let mut result = mc_bamboo_game::worldgen_features::game_features_with_mask(
+            &config, x, z, selectors, self.steps,
+        )
+        .map_err(|error| format!("game features failed for seed {seed} ({x},{z}): {error}"))?;
+        if self.coverage {
+            let record = mc_bamboo_worldgen::perf::finish().ok_or("missing perf record")?;
+            for feature in &record.features {
+                let kind = self
+                    .feature_kinds
+                    .get(feature.placed as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("placed#{}", feature.placed));
+                *self.coverage_totals.entry(kind).or_default() += feature.candidates;
+            }
+        } else {
+            let _ = mc_bamboo_worldgen::perf::finish();
+        }
         if self.break_self_test {
             // 自检：把九宫格第一格的第一个方块改成岩浆，确认下面会报不一致。
             // Self-test: corrupt one block so the comparison must report a mismatch.
             result.blocks[0][0][0] = mc_bamboo_data::blocks::LAVA;
+        }
+        if let Some(kind) = &self.break_type {
+            // 改坏确认：单独跑这个类型，和「一个地物都不跑」的 CARVERS 基线比，
+            // 找到它真正写过的格子，把那一格改坏。随机数按 (index, step) 播种，
+            // 白名单只影响跑哪些 index，所以单独跑的结果和它在完整跑里写的位置一致。
+            // 只改实际写过的格子，才能抓住「这个类型根本没被比到」的假绿。
+            // Break confirmation: run this type alone and diff it against a bare
+            // CARVERS run to locate a cell it actually wrote, then corrupt it.
+            // Feature seeds depend only on (index, step), so an allow list does
+            // not shift the writes of the types it keeps. Corrupting a cell the
+            // type really wrote is what exposes a false green.
+            let only = [kind.clone()];
+            let empty: [String; 0] = [];
+            let target = mc_bamboo_game::worldgen_features::game_features_with_mask(
+                &config,
+                x,
+                z,
+                Some(&only),
+                self.steps,
+            )
+            .map_err(|error| format!("break run failed for seed {seed} ({x},{z}): {error}"))?;
+            let bare = mc_bamboo_game::worldgen_features::game_features_with_mask(
+                &config,
+                x,
+                z,
+                Some(&empty),
+                self.steps,
+            )
+            .map_err(|error| format!("bare run failed for seed {seed} ({x},{z}): {error}"))?;
+            let marker = mc_bamboo_data::blocks::LAVA;
+            'outer: for (chunk, (after, before)) in
+                target.blocks.iter().zip(bare.blocks.iter()).enumerate()
+            {
+                for (layer, (after, before)) in after.iter().zip(before.iter()).enumerate() {
+                    for (cell, (&after, &before)) in after.iter().zip(before.iter()).enumerate() {
+                        if after != before && after != marker {
+                            result.blocks[chunk][layer][cell] = marker;
+                            self.stats.break_writes += 1;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        // 未移植的分支会让整个区块标 unsupported；此时 0 不一致是假绿，必须报错。
+        // An unported branch marks the whole chunk unsupported; 0 mismatches would
+        // then be a false green, so fail loudly instead.
+        if result.unsupported {
+            return Err(format!(
+                "features seed {seed} ({x},{z}): bamboo reported unsupported features"
+            ));
         }
         self.stats.chunks += 1;
 
@@ -478,14 +669,16 @@ impl Report {
                 .get("blocks")
                 .and_then(Value::as_array)
                 .ok_or("features chunk missing blocks")?;
-            // 复用 CARVERS 的逐方块比较器（同一套调色板 / 下标语义）。
-            // Reuse the CARVERS block comparator (same palette / index layout).
+            // 复用 CARVERS 的逐方块比较器，但地物会放带属性的状态
+            // （水、原木、楼梯、藤蔓……），必须精确解析调色板而不是取默认状态。
+            // Reuse the CARVERS comparator, but features place states with
+            // properties, so the palette must be parsed exactly.
             let generated = GeneratedChunk {
                 blocks: result.blocks[index].clone(),
                 biomes: Vec::new(),
                 heightmaps: Default::default(),
             };
-            compare_blocks(
+            compare_blocks_exact(
                 &mut self.stats,
                 seed,
                 x + dx,
@@ -506,6 +699,7 @@ impl Report {
             heightmap_columns,
             heightmap_words,
             mismatches,
+            break_writes,
         } = self.stats;
         println!(
             "gen-world: {chunks} chunks, {biome_cells} quart cells, {blocks} blocks, \
@@ -514,6 +708,15 @@ impl Report {
             mismatches.len(),
             self.official_checks
         );
+        if self.coverage {
+            println!("gen-world feature candidates by type:");
+            if self.coverage_totals.is_empty() {
+                println!("  (none)");
+            }
+            for (kind, count) in &self.coverage_totals {
+                println!("  {count:10} {kind}");
+            }
+        }
         if self.break_self_test {
             if mismatches.is_empty() {
                 return Err(
@@ -531,6 +734,24 @@ impl Report {
         if chunks == 0 {
             return Err("gen-world compared no chunks".to_owned());
         }
+        if let Some(kind) = &self.break_type {
+            // 改坏确认要求这批区块里至少有一个中心真的被目标类型写过，
+            // 且改坏被逐方块比较器抓到；否则就是没覆盖到的假绿。
+            // Break confirmation needs at least one center where the type really
+            // wrote a block, and the corrupted cell must be detected.
+            if break_writes == 0 || mismatches.is_empty() {
+                return Err(format!(
+                    "break-type {kind} corrupted {break_writes} cells but reported {} mismatches",
+                    mismatches.len()
+                ));
+            }
+            println!(
+                "gen-world break-type {kind}: detector works ({break_writes} corrupted cells, \
+                 {} mismatches)",
+                mismatches.len()
+            );
+            return Ok(());
+        }
         if !mismatches.is_empty() {
             for message in mismatches.iter().take(self.show) {
                 eprintln!("  MISMATCH {message}");
@@ -540,6 +761,44 @@ impl Report {
         println!("gen-world: 0 mismatches");
         Ok(())
     }
+}
+
+/// 按 `placed_feature` 的导出顺序给出每个条目的 Feature 类型 ID。
+/// 下标和 `perf::FeatureRecord::placed` 一致（`Registry::placed` 的插入序）。
+///
+/// Feature type ID per `placed_feature` entry, in exported order; the index
+/// matches `perf::FeatureRecord::placed` (`Registry::placed` insertion order).
+fn feature_kinds() -> Result<Vec<String>, String> {
+    let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN)
+        .map_err(|error| format!("bad worldgen data: {error}"))?;
+    let placed = root
+        .get("placed_feature")
+        .and_then(Value::as_object)
+        .ok_or("worldgen data has no placed_feature")?;
+    let features = root
+        .get("feature")
+        .and_then(Value::as_object)
+        .ok_or("worldgen data has no feature")?;
+    let mut kinds = Vec::with_capacity(placed.len());
+    for (name, value) in placed {
+        let field = value
+            .get("feature")
+            .ok_or_else(|| format!("placed feature {name} has no feature"))?;
+        let kind = match field {
+            Value::String(reference) => features
+                .get(reference)
+                .and_then(|f| f.get("type"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("unknown feature {reference}"))?,
+            Value::Object(inline) => inline
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("inline feature of {name} has no type"))?,
+            _ => return Err(format!("placed feature {name} has a bad feature field")),
+        };
+        kinds.push(kind.to_owned());
+    }
+    Ok(kinds)
 }
 
 /// JSON 一行里的 `(seed, x, z)`。
@@ -613,38 +872,76 @@ fn compare_blocks(
     indices: &[Value],
     generated: &GeneratedChunk,
 ) -> Result<(), String> {
+    let states = palette
+        .iter()
+        .map(|name| {
+            let text = name
+                .as_str()
+                .ok_or("carvers palette entry is not a string")?;
+            state_of(text).ok_or_else(|| format!("unknown official block state {text}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    compare_indices(stats, seed, x, z, &states, indices, generated)
+}
+
+/// 地物阶段的逐方块比较：调色板按 `BlockState.toString()` 精确还原状态 ID。
+///
+/// Block-by-block comparison for features: resolve each palette entry to its
+/// exact state id, properties included.
+fn compare_blocks_exact(
+    stats: &mut Stats,
+    seed: i64,
+    x: i32,
+    z: i32,
+    palette: &[Value],
+    indices: &[Value],
+    generated: &GeneratedChunk,
+) -> Result<(), String> {
+    let states = palette
+        .iter()
+        .map(|name| {
+            let text = name
+                .as_str()
+                .ok_or("features palette entry is not a string")?;
+            state_from_official_name(text)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    compare_indices(stats, seed, x, z, &states, indices, generated)
+}
+
+fn compare_indices(
+    stats: &mut Stats,
+    seed: i64,
+    x: i32,
+    z: i32,
+    states: &[u32],
+    indices: &[Value],
+    generated: &GeneratedChunk,
+) -> Result<(), String> {
     let height = generated.blocks.len();
     if indices.len() != height * 256 {
         stats.mismatches.push(format!(
-            "carvers seed {seed} ({x},{z}): {} blocks vs official {}",
+            "blocks seed {seed} ({x},{z}): {} blocks vs official {}",
             height * 256,
             indices.len()
         ));
         return Ok(());
     }
-    let mut states = Vec::with_capacity(palette.len());
-    for name in palette {
-        let text = name
-            .as_str()
-            .ok_or("carvers palette entry is not a string")?;
-        states.push(state_of(text).ok_or_else(|| format!("unknown official block state {text}"))?);
-    }
     for (index, entry) in indices.iter().enumerate() {
         let id = entry
             .as_u64()
             .ok_or("carvers block index is not a number")? as usize;
-        if id >= states.len() {
+        let Some(&official) = states.get(id) else {
             stats.mismatches.push(format!(
-                "carvers seed {seed} ({x},{z}) at {index}: palette index {id} out of range"
+                "blocks seed {seed} ({x},{z}) at {index}: palette index {id} out of range"
             ));
             continue;
-        }
-        let official = states[id];
+        };
         let bamboo = generated.blocks[index / 256][index % 256];
         stats.blocks += 1;
         if official != bamboo {
             stats.mismatches.push(format!(
-                "carvers seed {seed} ({x},{z}) y {} x {} z {}: official {official}, game {bamboo}",
+                "blocks seed {seed} ({x},{z}) y {} x {} z {}: official {official}, game {bamboo}",
                 index as i32 / 256 - 64,
                 (index % 256) / 16,
                 index % 16
