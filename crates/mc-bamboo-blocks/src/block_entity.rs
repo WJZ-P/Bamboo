@@ -1579,6 +1579,13 @@ mod tests {
             reference.insert(Dummy::boxed(pos, value));
             split.insert(Dummy::boxed(pos, value));
         }
+        // 参照的全局 ticker 顺序在 0 号区块上的子序列。
+        let global_order = ticker_order(&mut reference);
+        let expected_unit: Vec<_> = global_order
+            .iter()
+            .copied()
+            .filter(|(pos, _)| pos.chunk() == CHUNK_A)
+            .collect();
         let wanted: BTreeSet<ChunkPos> = [CHUNK_A].into_iter().collect();
         let unit = split.split_off(&wanted, 1).unwrap();
         assert_eq!(unit.ticker_positions().count(), 2);
@@ -1586,13 +1593,10 @@ mod tests {
         assert_eq!(unit.awake_chunks(), wanted);
         assert_eq!(split.awake_chunks(), [B1.chunk()].into_iter().collect());
 
-        // 拆出去那份自己的 ticker 顺序是源表该区块子序列（按位置升序）。
+        // 拆出去那份自己的 ticker 顺序是源表该区块上的子序列。
         let mut unit = unit;
-        let mut unit_order = ticker_order(&mut unit);
-        assert_eq!(
-            unit_order.iter().map(|(pos, _)| *pos).collect::<Vec<_>>(),
-            [A1, A2]
-        );
+        let unit_order = ticker_order(&mut unit);
+        assert_eq!(unit_order, expected_unit);
 
         // 原样合并：全部位置、内容、ticker 顺序等于参照。
         let mut fresh = BlockEntities::default();
@@ -1630,7 +1634,6 @@ mod tests {
         merged.insert(Dummy::boxed(BlockPos::new(40, 64, 1), 5));
         let seen2: BTreeSet<u64> = merged.awake.iter().copied().collect();
         assert_eq!(seen2.len(), merged.awake.len());
-        let _ = &mut unit_order;
     }
 
     fn ticker_order(entities: &mut BlockEntities) -> Vec<(BlockPos, i32)> {
