@@ -85,6 +85,7 @@ pub mod worldgen;
 pub mod worldgen_features;
 mod worldgen_light;
 mod worldgen_spawn;
+pub mod worldgen_structures;
 
 pub use command::test_commands;
 pub use director_host::MailBudget;

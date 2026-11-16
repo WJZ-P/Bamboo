@@ -1085,3 +1085,155 @@ fn simulation_only_changes_reach_the_region() {
         );
     }
 }
+
+/// 玩家限速：一批同时进入视距的区块，每名玩家的在途加载数不超过上限。
+#[test]
+fn per_player_load_caps_limit_the_first_batch() {
+    use crate::director::priority::{DemandSnapshot, PlayerDemand};
+
+    let mut director = Director::<Fake>::new(DirectorConfig::default());
+    director.set_template(|| Fake(0));
+    let snapshot = DemandSnapshot::with_caps(
+        vec![PlayerDemand {
+            id: 1,
+            center: ChunkPos::new(0, 0),
+            direction: (0, 0),
+        }],
+        3,
+        100,
+    );
+    director.set_player_demand(snapshot);
+    let mut effects = director.handle(Event::Tickets {
+        ops: vec![TicketOp::Add {
+            ty: crate::ticket::TicketType::Forced,
+            pos: ChunkPos::new(0, 0),
+            level: crate::ticket::FULL_CHUNK_LEVEL,
+        }],
+    });
+    // 一张 forced 票只让一个区块到 Full；再补几张把一批读任务排出来。
+    for x in -3..=3 {
+        effects.extend(director.handle(Event::Tickets {
+            ops: vec![TicketOp::Add {
+                ty: crate::ticket::TicketType::Forced,
+                pos: ChunkPos::new(x, 0),
+                level: crate::ticket::FULL_CHUNK_LEVEL,
+            }],
+        }));
+    }
+    let submitted: usize = effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Submit { .. }))
+        .count();
+    assert!(
+        submitted <= 3,
+        "in-flight loads capped at 3, got {submitted}"
+    );
+    let pending = director.debug_state().pending();
+    assert!(!pending.is_empty(), "the rest stay in the dispatch queue");
+}
+
+/// 优先级：玩家前方的区块先派，站着时近的先派；同样的输入排出同样的顺序。
+#[test]
+fn dispatch_prefers_the_forward_side_and_stays_deterministic() {
+    use crate::director::priority::{DemandSnapshot, PlayerDemand};
+
+    fn first_positions(direction: (i32, i32)) -> Vec<ChunkPos> {
+        let mut director = Director::<Fake>::new(DirectorConfig::default());
+        director.set_template(|| Fake(0));
+        director.set_player_demand(DemandSnapshot::with_caps(
+            vec![PlayerDemand {
+                id: 1,
+                center: ChunkPos::new(0, 0),
+                direction,
+            }],
+            100,
+            100,
+        ));
+        let ops: Vec<TicketOp> = (-4..=4)
+            .map(|x| TicketOp::Add {
+                ty: crate::ticket::TicketType::Forced,
+                pos: ChunkPos::new(x, 0),
+                level: crate::ticket::FULL_CHUNK_LEVEL,
+            })
+            .collect();
+        director
+            .handle(Event::Tickets { ops })
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Submit { task, .. } => Some(task.pos()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let standing = first_positions((0, 0));
+    let flying = first_positions((1, 0));
+    assert_eq!(standing, first_positions((0, 0)), "顺序要确定");
+    assert_eq!(flying, first_positions((1, 0)), "方向变了顺序仍要确定");
+    assert!(!standing.is_empty());
+    assert_ne!(standing, flying, "方向加权应该改变派出顺序");
+    // 脚下 rank 0、前方一格 rank 0，同档按 TaskId 兜底仍是脚下先；
+    // 但前方两格和身后两格的先后必须因方向而不同。
+    assert_eq!(flying[0], ChunkPos::new(0, 0), "脚下永远最先");
+    assert_eq!(standing[0], ChunkPos::new(0, 0), "站着时脚下先派");
+    let at = |order: &[ChunkPos], pos: ChunkPos| {
+        order
+            .iter()
+            .position(|&other| other == pos)
+            .expect("坐标派出了")
+    };
+    assert!(
+        at(&flying, ChunkPos::new(2, 0)) < at(&flying, ChunkPos::new(-2, 0)),
+        "前方两格要先于身后两格: {flying:?}"
+    );
+    assert!(
+        at(&standing, ChunkPos::new(-2, 0)) < at(&standing, ChunkPos::new(2, 0)),
+        "站着时对称位置按坐标序: {standing:?}"
+    );
+}
+
+/// 增量调度：把每玩家在途上限放大后，上一轮被挡住的任务能再派出去，
+/// 不需要整表重排，也不会被永久饿死。
+#[test]
+fn deferred_tasks_retry_after_a_quota_is_released() {
+    use crate::director::priority::{DEFAULT_MAX_LOADS_PER_PLAYER, DemandSnapshot, PlayerDemand};
+
+    let mut director = Director::<Fake>::new(DirectorConfig::default());
+    director.set_template(|| Fake(0));
+    let player = PlayerDemand {
+        id: 1,
+        center: ChunkPos::new(0, 0),
+        direction: (0, 0),
+    };
+    director.set_player_demand(DemandSnapshot::with_caps(vec![player], 1, 100));
+    let ops: Vec<TicketOp> = (-2..=2)
+        .map(|x| TicketOp::Add {
+            ty: crate::ticket::TicketType::Forced,
+            pos: ChunkPos::new(x, 0),
+            level: crate::ticket::FULL_CHUNK_LEVEL,
+        })
+        .collect();
+    let effects = director.handle(Event::Tickets { ops });
+    let submitted = effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Submit { .. }))
+        .count();
+    assert_eq!(submitted, 1, "每玩家在途上限只放一个任务出去");
+    assert_eq!(director.debug_state().pending().len(), 4);
+    // 放宽配额相当于「在途任务完成、额度空出来」；玩家快照变了也触发重试。
+    director.set_player_demand(DemandSnapshot::with_caps(
+        vec![player],
+        DEFAULT_MAX_LOADS_PER_PLAYER,
+        100,
+    ));
+    let effects = director.handle(Event::Tickets { ops: vec![] });
+    let again = effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Submit { .. }))
+        .count();
+    assert!(again > 0, "配额够之后 deferred 任务要能继续派出");
+    assert!(
+        director.debug_state().pending().len() < 4,
+        "不能让被挡住的任务永远留在队列里"
+    );
+}

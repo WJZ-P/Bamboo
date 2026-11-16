@@ -188,6 +188,13 @@ impl Structures {
         self.defs.get(name)
     }
 
+    /// 全部注册名，按 BTreeMap 的名字序。
+    ///
+    /// All registry ids in name order.
+    pub fn names(&self) -> Vec<String> {
+        self.defs.keys().cloned().collect()
+    }
+
     pub fn len(&self) -> usize {
         self.defs.len()
     }

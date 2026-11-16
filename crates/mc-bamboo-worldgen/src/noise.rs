@@ -14,6 +14,7 @@ use crate::{
     interval::Interval,
     math::{floor, lerp3, smoothstep},
     random::Random,
+    volume::Volume,
 };
 
 /// `GradientNoise.GRADIENT`：16 个梯度，后四个是前面的重复。
@@ -156,6 +157,167 @@ impl GradientNoise {
             smoothstep(relative.2),
         );
         lerp3(alpha, corners.dots(relative))
+    }
+}
+
+/// 一叠噪声里摊平后的一层：梯度表、抹平系数、本层的 x/y 缩放和振幅。
+///
+/// 三个缩放都是「原表达式照抄」：`NoiseStack.addToPoint` 本来就把
+/// `xz_scale * frequency`、`y_scale * frequency`、`amplitude * layer.amplitude`
+/// 作为常量乘好再传给层，这里只把它们的计算次数从「每点一次」变成「每块一次」。
+struct ColumnLayer<'a> {
+    perlin: &'a GradientNoise,
+    fudge: Option<f64>,
+    xz_scale: f64,
+    y_scale: f64,
+    amplitude: f32,
+}
+
+/// 一列的 x/z 坐标上不变的量，和官方 `PerlinNoise.addToVolume` 在 z、x 循环里算的那几个
+/// 局部变量一一对应。提到列外面不改变任何表达式：同一列每个 y 用的本来就是同一个值。
+struct PerlinColumnXz {
+    floor_z: i32,
+    relative_x: f32,
+    relative_z: f32,
+    smooth_x: f32,
+    smooth_z: f32,
+    perm_x0: i32,
+    perm_x1: i32,
+}
+
+impl GradientNoise {
+    /// 官方 `addToVolume` 在 x 循环里算的那些量，和逐点路径逐字相同。
+    fn column_xz(&self, block_x: i32, block_z: i32, xz_scale: f64) -> PerlinColumnXz {
+        let z = wrap(f64::from(block_z) * xz_scale) + self.offset_z;
+        let floor_z = floor(z);
+        let relative_z = (z - f64::from(floor_z)) as f32;
+        let x = wrap(f64::from(block_x) * xz_scale) + self.offset_x;
+        let floor_x = floor(x);
+        let relative_x = (x - f64::from(floor_x)) as f32;
+        PerlinColumnXz {
+            floor_z,
+            relative_x,
+            relative_z,
+            smooth_x: smoothstep(relative_x),
+            smooth_z: smoothstep(relative_z),
+            perm_x0: self.permute(floor_x),
+            perm_x1: self.permute(floor_x.wrapping_add(1)),
+        }
+    }
+
+    /// 一个点在这一层上的贡献，和 `add_to_point` 是同一串运算。x/z 的量由
+    /// [`Self::column_xz`] 算好，八个角的梯度按 `floor_y` 缓存在 [`PerlinColumnYCache`]
+    /// （官方 `addToVolume` 也是用 `lastY != floorY` 这么缓存的）。
+    fn column_value(
+        &self,
+        xz: &PerlinColumnXz,
+        cache: &mut PerlinColumnYCache,
+        block_y: i32,
+        y_scale: f64,
+        amplitude: f32,
+        fudge: Option<f64>,
+    ) -> f32 {
+        let original_y = f64::from(block_y) * y_scale;
+        let y_value = wrap(original_y) + self.offset_y;
+        let floor_y = floor(y_value);
+        let relative_y = y_value - f64::from(floor_y);
+        let relative_y_f32 = relative_y as f32;
+        let fudged = match fudge {
+            None => relative_y_f32,
+            Some(fudge_y_scale) => {
+                let fudge_limit = if original_y >= 0.0 && original_y < relative_y {
+                    original_y
+                } else {
+                    relative_y
+                };
+                let fudge = f64::from(floor(fudge_limit / fudge_y_scale + SHIFT_UP_EPSILON))
+                    * fudge_y_scale;
+                (relative_y - fudge) as f32
+            }
+        };
+        let slice = cache.at(
+            self,
+            floor_y,
+            xz.floor_z,
+            xz.perm_x0,
+            xz.perm_x1,
+            (
+                xz.relative_x,
+                xz.relative_x - 1.0,
+                xz.relative_z,
+                xz.relative_z - 1.0,
+            ),
+        );
+        let dots = [
+            slice[0].0 + slice[0].1 * fudged,
+            slice[1].0 + slice[1].1 * fudged,
+            slice[2].0 + slice[2].1 * (fudged - 1.0),
+            slice[3].0 + slice[3].1 * (fudged - 1.0),
+            slice[4].0 + slice[4].1 * fudged,
+            slice[5].0 + slice[5].1 * fudged,
+            slice[6].0 + slice[6].1 * (fudged - 1.0),
+            slice[7].0 + slice[7].1 * (fudged - 1.0),
+        ];
+        amplitude * lerp3((xz.smooth_x, smoothstep(relative_y_f32), xz.smooth_z), dots)
+    }
+}
+
+/// 官方 `addToVolume` 用 `lastY != floorY` 缓存的八个角的 `(xz 点积, 梯度 y 分量)`。
+///
+/// `floor_y` 是 `i32::MIN` 时表示还没算过（官方初始化成 `Integer.MIN_VALUE`）。
+struct PerlinColumnYCache {
+    floor_y: i32,
+    dots: [(f32, f32); 8],
+}
+
+impl PerlinColumnYCache {
+    const fn empty() -> Self {
+        Self {
+            floor_y: i32::MIN,
+            dots: [(0.0, 0.0); 8],
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn at(
+        &mut self,
+        base: &GradientNoise,
+        floor_y: i32,
+        floor_z: i32,
+        perm_x0: i32,
+        perm_x1: i32,
+        relative: (f32, f32, f32, f32),
+    ) -> &[(f32, f32); 8] {
+        if self.floor_y != floor_y {
+            let (rx, rx1, rz, rz1) = relative;
+            let z1 = floor_z.wrapping_add(1);
+            let xy00 = base.permute(perm_x0.wrapping_add(floor_y));
+            let xy01 = base.permute(perm_x0.wrapping_add(floor_y).wrapping_add(1));
+            let xy10 = base.permute(perm_x1.wrapping_add(floor_y));
+            let xy11 = base.permute(perm_x1.wrapping_add(floor_y).wrapping_add(1));
+            let gradients = [
+                base.permute_to_grad(xy00.wrapping_add(floor_z)),
+                base.permute_to_grad(xy10.wrapping_add(floor_z)),
+                base.permute_to_grad(xy01.wrapping_add(floor_z)),
+                base.permute_to_grad(xy11.wrapping_add(floor_z)),
+                base.permute_to_grad(xy00.wrapping_add(z1)),
+                base.permute_to_grad(xy10.wrapping_add(z1)),
+                base.permute_to_grad(xy01.wrapping_add(z1)),
+                base.permute_to_grad(xy11.wrapping_add(z1)),
+            ];
+            self.dots = [
+                (grad_dot_xz(gradients[0], rx, rz), gradients[0][1] as f32),
+                (grad_dot_xz(gradients[1], rx1, rz), gradients[1][1] as f32),
+                (grad_dot_xz(gradients[2], rx, rz), gradients[2][1] as f32),
+                (grad_dot_xz(gradients[3], rx1, rz), gradients[3][1] as f32),
+                (grad_dot_xz(gradients[4], rx, rz1), gradients[4][1] as f32),
+                (grad_dot_xz(gradients[5], rx1, rz1), gradients[5][1] as f32),
+                (grad_dot_xz(gradients[6], rx, rz1), gradients[6][1] as f32),
+                (grad_dot_xz(gradients[7], rx1, rz1), gradients[7][1] as f32),
+            ];
+            self.floor_y = floor_y;
+        }
+        &self.dots
     }
 }
 
@@ -621,6 +783,148 @@ impl Noise {
             Self::Smeared(noise) => noise.get(wrap(x), 0.0, wrap(y)),
             Self::Simplex(noise) => noise.get2(x, y),
             Self::Stack(stack) => stack.get2(x, y),
+        }
+    }
+
+    /// `Noise.addToVolume`：整块体积上每个点加上这个噪声的贡献，体积顺序是 z、x、y。
+    ///
+    /// 官方的 `PerlinNoise` / `SmearedPerlinNoise.addToVolume` 把 x/z 的坐标和八个角的梯度
+    /// 提到 z、x、y 循环外（`floorY` 没变时梯度也复用），这里照做：每一列的这些量本来
+    /// 就是同一个表达式、同一个值，提到循环外不改变任何一次运算。只有
+    /// `Perlin` / `Smeared` 层有这串特化代码；`SimplexNoise` 没有重写 `addToVolume`，
+    /// 走接口的默认实现逐点算，所以含 Simplex 的叠退回逐点路径。
+    pub fn add_to_volume(
+        &self,
+        out: &mut [f32],
+        volume: &Volume,
+        xz_scale: f64,
+        y_scale: f64,
+        amplitude: f32,
+    ) {
+        let layers: Option<Vec<ColumnLayer<'_>>> = match self {
+            Self::Perlin(noise) => Some(vec![ColumnLayer {
+                perlin: &noise.base,
+                fudge: None,
+                xz_scale,
+                y_scale,
+                amplitude,
+            }]),
+            Self::Smeared(noise) => Some(vec![ColumnLayer {
+                perlin: &noise.base,
+                fudge: Some(noise.fudge_y_scale),
+                xz_scale,
+                y_scale,
+                amplitude,
+            }]),
+            Self::Stack(stack) => stack
+                .layers
+                .iter()
+                .map(|layer| match &layer.noise {
+                    Self::Perlin(noise) => Some(ColumnLayer {
+                        perlin: &noise.base,
+                        fudge: None,
+                        xz_scale: xz_scale * layer.frequency,
+                        y_scale: y_scale * layer.frequency,
+                        amplitude: amplitude * layer.amplitude,
+                    }),
+                    Self::Smeared(noise) => Some(ColumnLayer {
+                        perlin: &noise.base,
+                        fudge: Some(noise.fudge_y_scale),
+                        xz_scale: xz_scale * layer.frequency,
+                        y_scale: y_scale * layer.frequency,
+                        amplitude: amplitude * layer.amplitude,
+                    }),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        };
+        let Some(layers) = layers else {
+            return self.add_to_volume_points(out, volume, xz_scale, y_scale, amplitude);
+        };
+        // 每个点按原来的顺序逐层累加，再把累加值加到 out 上；每列只在换列时重算
+        // x/z 的量和八个角的梯度。层的 x/y 缩放、振幅也只在一块体积开始时算一次。
+        let mut columns: Vec<(PerlinColumnXz, PerlinColumnYCache)> = layers
+            .iter()
+            .map(|_| {
+                (
+                    PerlinColumnXz {
+                        floor_z: 0,
+                        relative_x: 0.0,
+                        relative_z: 0.0,
+                        smooth_x: 0.0,
+                        smooth_z: 0.0,
+                        perm_x0: 0,
+                        perm_x1: 0,
+                    },
+                    PerlinColumnYCache::empty(),
+                )
+            })
+            .collect();
+        for z in 0..volume.size_z {
+            let block_z = volume.block_z(z);
+            for x in 0..volume.size_x {
+                let block_x = volume.block_x(x);
+                for (layer, state) in layers.iter().zip(&mut columns) {
+                    state.0 = layer.perlin.column_xz(block_x, block_z, layer.xz_scale);
+                    state.1.floor_y = i32::MIN;
+                }
+                let start = volume.index(x, 0, z);
+                for y in 0..volume.size_y {
+                    // 单个 `Perlin` / `Smeared` 原来直接返回那一层的值，没有 `0.0 +`；
+                    // `NoiseStack` 才是 `let mut value = 0.0; for layer { value += ... }`。
+                    // 这里照着分，免得 `-0.0` 之类的一位之差。
+                    let mut value = None;
+                    for (layer, (xz, cache)) in layers.iter().zip(&mut columns) {
+                        let contribution = layer.perlin.column_value(
+                            xz,
+                            cache,
+                            volume.block_y(y),
+                            layer.y_scale,
+                            layer.amplitude,
+                            layer.fudge,
+                        );
+                        value = Some(match value {
+                            None if self.is_stack() => 0.0_f32 + contribution,
+                            None => contribution,
+                            Some(sum) => sum + contribution,
+                        });
+                    }
+                    out[start + y as usize] += value.unwrap_or(0.0);
+                }
+            }
+        }
+    }
+
+    /// 这一叠是不是官方的 `NoiseStack`（累加从 `0.0` 开始）。
+    fn is_stack(&self) -> bool {
+        matches!(self, Self::Stack(_))
+    }
+
+    /// 逐点路径：`Noise.addToVolume` 的默认实现（含 Simplex 的叠走这里）。
+    fn add_to_volume_points(
+        &self,
+        out: &mut [f32],
+        volume: &Volume,
+        xz_scale: f64,
+        y_scale: f64,
+        amplitude: f32,
+    ) {
+        let mut index = 0;
+        for z in 0..volume.size_z {
+            let block_z = volume.block_z(z);
+            for x in 0..volume.size_x {
+                let block_x = volume.block_x(x);
+                for y in 0..volume.size_y {
+                    out[index] += self.add_to_point(
+                        (block_x, volume.block_y(y), block_z),
+                        xz_scale,
+                        y_scale,
+                        amplitude,
+                    );
+                    index += 1;
+                }
+            }
         }
     }
 
@@ -1116,6 +1420,44 @@ mod tests {
             assert!(
                 (point - volume).abs() < 1.0e-5,
                 "{point} vs {volume} at {block:?}"
+            );
+        }
+    }
+
+    /// 列特化路径和「逐点调 `add_to_point`」在整块体积上逐位相同。
+    #[test]
+    fn column_volume_matches_pointwise_exactly() {
+        use crate::volume::Volume;
+
+        let parameters = NormalNoiseParameters {
+            base_amplitude: 1.0,
+            base_octave: -3,
+            octave_count: 3,
+            normalize: Normalization::Enabled,
+            amplitude_modifiers: Vec::new(),
+        };
+        let stack = NormalNoise::new(parameters).create(&xoroshiro(7));
+        let noises = [
+            stack,
+            Noise::Perlin(PerlinNoise::new(&xoroshiro(9))),
+            Noise::Smeared(SmearedPerlinNoise::new(&xoroshiro(10), 8.0)),
+        ];
+        for (index, noise) in noises.iter().enumerate() {
+            let volume = Volume::new((3, 40, 3), (-17, -63, 31), (2, 3, 4));
+            // 起始值不都是 0：加法结合顺序变了就会在这里露出来。
+            let initial = |i: usize| 0.25_f32 + (i % 7) as f32 * 0.125;
+            let mut column: Vec<f32> = (0..volume.len()).map(initial).collect();
+            let mut pointwise = column.clone();
+            noise.add_to_volume(&mut column, &volume, 0.35, 0.7, 1.5);
+            noise.add_to_volume_points(&mut pointwise, &volume, 0.35, 0.7, 1.5);
+            assert_eq!(
+                column
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .zip(pointwise.iter().map(|value| value.to_bits()))
+                    .position(|(a, b)| a != b),
+                None,
+                "noise {index} 在体积里的某一位不同"
             );
         }
     }

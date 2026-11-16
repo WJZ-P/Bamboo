@@ -930,7 +930,13 @@ sand/clay/gravel 差异；改回后全部 0 不一致。Java 输出里的 palett
 高度提供者、`Heightmap.update` 增量更新均已补齐。这些类型在 `--steps 6` 全量、
 以及跨全部 11 步的 `--types` 白名单下都逐方块 0 不一致。
 
-**还没做**（按 5.2 的分类，仍标 `unsupported` / `skipped`）：
+**以下「还没做」是当时的历史记录，现已被后轮补完**（见
+`docs/worldgen-feat-c-notes.md` 的实测）：`fossil` / `overlay`（desert_well）的 Rust
+实现、邻居快照与 Director 接入、方块实体之外的所有类型都已落地，
+`features_per_step` 171 个条目在真实区块上不再报 `unsupported`。
+`fossil` / `desert_well` 的 JVM 侧 `ClassCastException` 属结构线，不在本轮范围。
+
+原记录保留供追溯：
 
 * step 1/2/3/4/7/10 的其余非植被类型：`fossil`、`overlay`（desert_well）。
   已完成的是 `disk`、`underwater_magma`、`spring_feature`、`iceberg`、`block_blob`、
@@ -1338,6 +1344,26 @@ main 已把本分支（`1c9853c6`）合进去了，所以再 `git merge main` �
 | `lush_caves_ceiling_vegetation` | `--chunk 0 52 --scan 25 --seeds 1` | 0 不一致（25 中心 / 22118400 方块） |
 | 三者一起 | `--chunk 0 52 --scan 25 --seeds 1` | 0 不一致，**2 skipped**（`treeified` 标记生效） |
 
+#### 第二十三轮：`java_set` 桶树化（`cb-wg-feat-c`）
+
+第六轮的「主动跳过」已撤销。`feature/java_set.rs` 按
+`javap -c -p java.util.HashMap` / `java.util.HashMap$TreeNode`（JDK 25）逐条复刻
+`treeifyBin` / `treeify` / `putTreeVal` / `TreeNode.split`；迭代始终沿 `TreeNode.next`
+链表，`putTreeVal` 把新节点插在**树父节点之后**（不是桶尾），`moveRootToFront` 再把
+根提到桶首。植被 patch 的地表集合只做 `add`，所以不实现 `remove`。
+
+新增 `tools/mc-bamboo-vanilla/java/JavaSetOracle.java` 生成 80 组插入序列（含打乱
+顺序的同桶碰撞，专门覆盖 `putTreeVal`），Rust 单测
+`matches_the_jdk_hashset_oracle` 逐个比对最终迭代顺序。
+
+| 命令 | 结果 |
+|---|---|
+| `--through features --chunk -58 -217 --scan 5 --seeds 2` | **0 不一致 / 0 skipped**（18 中心 / 15925248 方块），改之前是 1 skipped |
+| `--through features --chunk 0 52 --scan 9 --seeds 1` | 0 不一致 / 0 skipped |
+| `--through features --seeds 3 --chunks 40 --salt 7 --steps 9` | 0 不一致 / 0 skipped（120 中心 / 106168320 方块） |
+| 故意把 `putTreeVal` 的新节点改成追加桶尾 | `chunkgen` 报 **10 处**；Java 对拍单测在 CASE 7 报不一致 |
+| `gen-world --through features --seeds 2 --chunks 4 --salt 1` | 8 区块 / 0 不一致；`--break-self-test` 报 2 处，确认比较器有效 |
+
 #### `lush_caves_clay` 为什么在野外几乎不触发（第十三/十四轮诊断）
 
 `lush_caves_clay` 是 `waterlogged_vegetation_patch`（`clay_pool_with_dripleaves`）唯一的入口，
@@ -1524,41 +1550,38 @@ minecraft:red_mushroom_taiga,minecraft:brown_mushroom_normal,minecraft:red_mushr
 注意 `mushroom_island_vegetation` 里的 `huge_red/brown_mushroom` 属 `cb-wg-trees`，
 本轮放开的 5 个 placed feature 都能跑到；巨型蘑菇本身仍归树队员。
 
-#### 本分支还没做（诚实标 `unsupported`）
+#### 当前状态（`cb-wg-feat-c` 收尾）
 
-* 珊瑚族：`random_block` 状态提供者已在本轮（`3b8d9d6`）移植并通过单测，
-  但 `warm_ocean_vegetation` 仍依赖 `overlay`（地物 A 的类型）和嵌套
-  `simple_random_selector`，所以 step 9 仍标 skipped。
-* `root_system`（`rooted_azalea_tree`、`rooted_sulfur_spring`）：需要 `TreeFeature`，
-  属 `cb-wg-trees`。
-* `block_pile`、`huge_fungus`、`chorus_plant`：**不在主世界的 `features_per_step` 里**
-  （三者的 placed feature 都是 `steps=[]`，且没有任何主世界条目按类型引用它们），
-  下界和末地维度还没做，所以**不需要实现**。第十五轮核对过 `features_per_step` 的全部
-  类型集合里没有这三个。
-* `noise_threshold_count` / `count_on_every_layer` / `surface_water_depth_filter`
-  修饰器：第三轮（`8d12409d`）已全部移植。
-  `noise_threshold_count` 用在 step 9 的 6 个植被 placed feature 上并对拍 0 不一致；
-  `count_on_every_layer` 只被下界类型（`crimson_fungi` 等）用，主世界不出现；
-  `surface_water_depth_filter` 由 main 移植。
-* `seagrass` / `sea_pickle` / `lily_pad` / `spore_blossom` / `mushroom` 的
-  `canSurvive`：全部已移植。`mushroom` 的亮度判据见上文「蘑菇的亮度判据」。
-  （`supports_lily_pad` 流体/方块标签 + 上方空流体）、`SporeBlossomBlock`
-  （上方 `canSupportCenter(DOWN)` 且本格非水））；只有蘑菇仍不支持，因为它要
-  `level.getRawBrightness(pos, 0) < 13`，而 `FeatureWorld` 没有光照数据。
-* `TallSeagrassBlock` 的 `DoublePlantBlock.placeAt`：`is_double_plant` 现在也认
-  `TallSeagrassBlock`（官方是 `instanceof DoublePlantBlock`），否则上下两格只会放
-  下半格、上半格留成水。
-* holder 字符串引用的 `to_place`（`cave_vines_body` / `cave_vines_head` 等）：
-  `block_state_provider` 注册表已在第二轮（`3b8d9d6`）导出，`cave_vines` 现在真跑通
-  （0 不一致、0 skipped）。
+`features_per_step` 171 个条目在真实区块上不再报 `unsupported`，实测见
+`docs/worldgen-feat-c-notes.md`。此前各节写「还没做 / 标 unsupported」的内容都已落地：
+
+* 睡莲 / 孢子花 / 苔藓地毯（`MossyCarpetBlock.placeAt`，含侧面 `nextBoolean`）/
+  海泡菜（碰撞形状面）/ 海草 / 蘑菇的 `canSurvive` 全在 `survival.rs`；
+  `TallSeagrassBlock` 的 `DoublePlantBlock.placeAt` 也已接上。
+* 修饰器 `noise_threshold_count` / `count_on_every_layer` /
+  `surface_water_depth_filter`、`clamped_normal` IntProvider、
+  `BLOCK_STATE_PROVIDER`（`block_state_provider` 注册表 + holder 字符串）都在 main
+  的 `placement.rs` / `provider.rs` / `registry.rs` / `state_provider.rs` 里。
+* 珊瑚族 `overlay` / `coral_tree` / `coral_claw`、`waterlogged_vegetation_patch`、
+  `root_system` 都接进 `composition::place_feature`。`root_system` 官方成功路径几乎
+  不可达，改坏抓不到是正确结果（见上文第十六轮）。
+* `java_set` 的 `HashMap` 桶树化已按 JDK 25 字节码补上（`treeifyBin` / `treeify` /
+  `putTreeVal` / `TreeNode.split`），`VegetationPatch::place` 不再置 `treeified` 跳过；
+  原来 `--chunk -58 -217 --scan 5 --seeds 2` 的 1 skipped 现在是 0 skipped / 0 不一致。
+* `block_pile` / `huge_fungus` / `chorus_plant` / `projected_random_patchy_square`
+  不在主世界 `features_per_step`（`steps=[]` 或导出数据里没有条目），不需要实现。
+* `fossil` / `desert_well`：Rust 侧实现完整，但官方 `FossilFeature.place` 在
+  `ChunkgenOracle` 的代理上抛 `ClassCastException`（要 `ServerLevel`），属结构线
+  （`cb-wg-structures`），JVM 侧不可比，不在本轮范围。
+* 唯一仍「未做」的是方块实体数据（蜂巢 / 可疑沙等），对拍框架只比方块，不比 NBT。
 
 ### 还没做
 
-* `DiskFeature` / `UnderwaterMagmaFeature` / `surface_relative_threshold_filter`：
-  step 6 里非 ore 的几类 placed feature 目前标 `unsupported`，完整 11 步对拍会跳过
-  这些区块。（`block_predicate_filter` 修饰器本身已由 `cb-wg-feat-b` 移植。）
-* 其它 10 个 step（湖、晶洞、怪物房、积雪等）里仍未移植的类型全部标 `unsupported`；
-  植被类的 step 9 进度见上。
+* **已完成**：step 6 的非 ore 类型（`DiskFeature` / `UnderwaterMagmaFeature`）、
+  `surface_relative_threshold_filter` 修饰器，以及其余 10 个 step 里的地物类型
+  （湖、晶洞、怪物房、积雪、泉水、树、植被等）都已移植并接入 `dispatch`；
+  完整 11 步对拍不再因 `unsupported` 跳过区块（化石的 JVM 侧限制见上文）。
+* 方块实体 NBT、生成期刷怪仍不在对拍范围。
 * `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按
   「已移植集合」输出 `skipped`，`--feature-types` 是手工过滤。
 * 接进 Director 的**多阶段流水线形状**已经就位（流水线分支：`PipelineKind::Staged`

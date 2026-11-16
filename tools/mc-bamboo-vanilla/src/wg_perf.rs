@@ -42,7 +42,8 @@ use mc_bamboo_worldgen::{
 
 const USAGE: &str = "usage: wg-perf [--seeds N] [--chunks N] [--biomes a,b,c] [--repeat N] \
                      [--threads N] [--aux N] [--plan-scan N] [--json] [--skip-cut] [--skip-plans] \
-                     [--skip-sky] [--skip-threads] [--skip-aux] [--light-compare]";
+                     [--skip-sky] [--skip-threads] [--skip-aux] [--light-compare] \
+                     [--structure-timing]";
 
 /// 辅助测量的默认抽样上限（高度分布、切割线对照、多线程）。`--aux N` 可以改。
 /// Default cap on the auxiliary measurements (height profile, cut-line comparison,
@@ -127,6 +128,9 @@ struct Options {
     skip_aux: bool,
     /// 只跑新旧光照路径的交替对照。 Run only the old/new light path comparison.
     light_compare: bool,
+    /// 只量 structure_starts / structure_references 两阶段的每区块耗时。
+    /// Measure only the two structure stages' per-chunk cost.
+    structure_timing: bool,
 }
 
 impl Options {
@@ -149,6 +153,7 @@ impl Options {
             aux: AUX_LIMIT,
             skip_aux: false,
             light_compare: false,
+            structure_timing: false,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -178,6 +183,7 @@ impl Options {
                 "--skip-plans" => options.skip_plans = true,
                 "--skip-aux" => options.skip_aux = true,
                 "--light-compare" => options.light_compare = true,
+                "--structure-timing" => options.structure_timing = true,
                 _ => return Err(USAGE.to_owned()),
             }
         }
@@ -200,6 +206,9 @@ pub fn run(args: &[&str]) -> Result<(), String> {
     );
     if options.light_compare {
         return measure_light_compare(&worldgen, &targets, options.repeat);
+    }
+    if options.structure_timing {
+        return measure_structure_stages(&targets, options.repeat);
     }
 
     // 首次调用的初始化开销单独报：建 `Generator`（编译采样器）+ 第一次生成。
@@ -1281,6 +1290,70 @@ fn ring_positions(ring: i32) -> Vec<(i32, i32)> {
         out.push((ring, z));
     }
     out
+}
+
+/// 量 `structure_starts` / `structure_references` 两阶段每区块的墙钟（release）。
+/// 每个区块重复 `--repeat` 遍取中位数；缓存命中与冷启动分别报。
+///
+/// Measure the two structure stages' per-chunk wall clock (release), repeating
+/// each chunk and reporting both cold and cached medians.
+fn measure_structure_stages(targets: &[Target], repeat: usize) -> Result<(), String> {
+    use mc_bamboo_game::world_options::{LevelType, WorldGenConfig};
+
+    println!("\n## 结构阶段耗时（release，ms/区块）\n");
+    println!("| 阶段 | 平均 | 中位数 | p95 |");
+    println!("|---|---|---|---|");
+    let mut cold_starts = Vec::new();
+    let mut cold_refs = Vec::new();
+    let mut warm_starts = Vec::new();
+    let mut warm_refs = Vec::new();
+    for (index, target) in targets.iter().enumerate() {
+        let config = WorldGenConfig {
+            seed: target.seed,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        let mut start_times = Vec::with_capacity(repeat);
+        let mut ref_times = Vec::with_capacity(repeat);
+        for rep in 0..repeat {
+            // 每个区块第一次进新种子时是冷启动；重复里第一遍清缓存，量真正的生成。
+            if rep == 0 {
+                mc_bamboo_game::worldgen_structures::clear_structure_cache();
+            }
+            let a = Instant::now();
+            let _ =
+                mc_bamboo_game::worldgen_structures::structure_starts(&config, target.x, target.z)?;
+            let starts_ms = a.elapsed().as_secs_f64() * 1000.0;
+            let b = Instant::now();
+            let _ = mc_bamboo_game::worldgen_structures::structure_references_stage(
+                &config, target.x, target.z,
+            )?;
+            let refs_ms = b.elapsed().as_secs_f64() * 1000.0;
+            if rep == 0 {
+                cold_starts.push(starts_ms);
+                cold_refs.push(refs_ms);
+            } else {
+                warm_starts.push(starts_ms);
+                warm_refs.push(refs_ms);
+            }
+            start_times.push(starts_ms);
+            ref_times.push(refs_ms);
+        }
+        let _ = (start_times, ref_times, index);
+    }
+    for (name, values) in [
+        ("structure_starts (cold)", &cold_starts),
+        ("structure_references (cold)", &cold_refs),
+        ("structure_starts (cached)", &warm_starts),
+        ("structure_references (cached)", &warm_refs),
+    ] {
+        if values.is_empty() {
+            continue;
+        }
+        let (mean, median, p95) = stats(values);
+        println!("| {name} | {mean:.3} | {median:.3} | {p95:.3} |");
+    }
+    Ok(())
 }
 
 fn print_phases(measured: &[Measured]) {

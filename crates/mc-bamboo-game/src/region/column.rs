@@ -338,6 +338,23 @@ impl RegionColumn {
         }
     }
 
+    /// 组装时把生成期算好的 `structures` 顶层标签装进这一柱，下一次写盘原样带回。
+    ///
+    /// Install the generated `structures` tag at assembly; the next save writes it
+    /// back verbatim.
+    pub(crate) fn set_structures(&mut self, tag: mc_bamboo_nbt::Tag) {
+        let mut archive = self.column.chunk().archive().clone();
+        archive.structures = Some(tag);
+        self.column.chunk_mut().set_archive(archive);
+    }
+
+    /// 读盘带回来的 `structures` 顶层标签（`None` 表示没有）。
+    ///
+    /// The on-disk `structures` tag (`None` when absent).
+    pub(crate) fn structures(&self) -> Option<mc_bamboo_nbt::Tag> {
+        self.column.chunk().archive().structures.clone()
+    }
+
     /// 这个区块里的方块和光照，给测试和以后组装区块包用。
     #[cfg(test)]
     pub(crate) fn column(&self) -> &ChunkColumn {

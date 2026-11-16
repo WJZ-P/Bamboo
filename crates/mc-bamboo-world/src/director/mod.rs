@@ -11,6 +11,7 @@
 //! 所有表用 `BTreeMap`，任务按 `TaskId` 单调发号，输出按坐标排序；
 //! 同样的初始状态和事件序列一定得到逐字节相同的效果序列。
 
+mod priority;
 mod pyramid;
 mod state;
 
@@ -19,6 +20,7 @@ mod bench_tests;
 #[cfg(test)]
 mod tests;
 
+pub use priority::{DemandKind, DemandSnapshot, PlayerDemand, chebyshev};
 pub use pyramid::{
     GENERATION, LOADING, PipelineKind, Step, loading_step, neighbor_view, stage_index,
 };

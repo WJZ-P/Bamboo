@@ -231,7 +231,10 @@ cargo run --release -p mc-bamboo-vanilla -- chunkgen java --seeds 6 --chunks 36 
 
 除了 `worldgen.json`，`generate` 还会写 `generated/` 下的其它文件（含 `saved_world.rs`
 和 `mod.rs`）；只关心世界生成数据时，别把那些无关的改动混进同一个提交。`extract` 需要
-`target/vanilla/generated/reports`，`generate` 会用官方 jar 重建它。
+`target/vanilla/generated/reports`，`generate` 会用官方 jar 重建它。两条命令还会跑
+`JungleTempleOpsExtractor.java`，从官方 `JungleTemplePiece.postProcess` 的 helper 调用序列
+重写 `crates/mc-bamboo-worldgen/src/structure/post_process/jungle_temple_ops.rs`，
+所以重跑后这个文件也应当无 diff（`docs/worldgen-structures-plan.md` 的丛林神殿段有细节）。
 
 ## 区块级对拍
 
@@ -308,6 +311,41 @@ CARVERS 只比 SURFACE 多约 1.5 ms：17×17 邻域的大部分 carver 在 `isS
 过滤掉了。三项优化里的两项有可测收益，逐项前后都量过 `chunk_timing` 并跑
 `chunkgen --through carvers` 多种子对拍；没有收益的一项（条件结果的惰性缓存，见下）撤掉了。
 详见 `performance-optimizations.md` 第 10 节。
+
+### 密度求值的列特化（2026-11-16，本机 release，同轮交替量）
+
+上面几组数字都是**这一项之前**的。这一项只改 `finalDensity.sampleVolume` 里噪声的成批
+求值，把 `Noise::add_to_volume` 照官方 `PerlinNoise.addToVolume` 的结构重写：`sample`
+（18 秒、1 ms 间隔、15 016 个主线程样本，只循环整列密度求值）测到
+`Noise::add_to_point` 占 72.1%、`Sampler::sample_volume` 占 18.1%、
+`sample_interpolated_blocks` 占 7.8%，缓冲和样条约 1.3%；编译期消融（4 个 release
+二进制同轮交替，12 区块整列 × 5 遍取最小）显示噪声数学 2.23 ms / 2.83 ms = 79%，
+而**节点分派连同全部非噪声工作上限 0.6 ms**。官方的 `addToVolume` 把 x/z 坐标、
+插值系数和八个角的梯度放在 z、x 循环里、`floorY` 没变时还复用梯度；原来 Rust 侧
+用逐点的 `add_to_point` 每个点重算一遍。按字节码把同样的表达式提到 (z,x) 列外、
+`NoiseStack` 的层常量每块算一次，每个点仍按原顺序逐层累加，逐位不变。
+
+| 口径 | 改之前 | 改之后 | 倍数 |
+|---|---|---|---|
+| `wg-perf noise_density`（1 种子 × 10 群系 × 4 区块 × 3 遍，中位数，两轮） | 2.895 / 2.878 ms | 1.653 / 1.570 ms | 1.9× |
+| `chunk_timing` NOISE（35 区块中位数，两轮） | 3.63 / 3.64 ms | 2.30 / 2.30 ms | 1.6× |
+| `wg-perf` 整块记录合计（两轮） | 27.24 / 26.91 ms | 27.50 / 24.92 ms | — |
+
+`wg-perf surface` 基本不动（2.38 / 2.36 → 2.41 / 2.23 ms）：地表阶段走的是单点
+`sampleValue` 和 15 条条件噪声，不在这一项的范围内。量之前要确认
+`mc-bamboo-vanilla` 的二进制**确实重新链接过**：改了 `mc-bamboo-worldgen` 但依赖
+指纹没变时 cargo 只重链 example，vanilla 仍是旧产物，第一次量出来「没有收益」就是这个坑。
+
+逐位一致靠三层验证：`noise.rs` 的单元测试把列路径和逐点路径在起始值非零的体积上
+逐位比较；`worldgen java`（3 种子、两个 salt）逐位比较密度函数和路由；
+`chunkgen --through carvers` / `--through features` 和 `gen-world --through features`
+（各 3 种子 × 12 区块 × 2 salt）全部 0 不一致。**改坏确认**：把提到循环外的
+`smooth_x` 差一个 ulp，`worldgen` 两个 salt 各报 156 处不一致；但 1 ulp 的密度差
+不足以改变任何方块，`chunkgen` / `gen-world` 都报 0 不一致——这是「逐方块」对拍
+的固有粒度，不是对拍失灵，所以又用 `+0.05` 的粗改坏确认区块级对拍确实会报
+（chunkgen 各 160 处、gen-world 各约 270 万处），改坏后已全部还原并复跑干净。
+
+详见 `performance-optimizations.md` 第 11 节。
 
 ### 本机复测（Windows 16 核，2026-11-14，release）
 
@@ -678,11 +716,13 @@ The 3×3 repack is gone: the `light` stage now calls `generate_light_from_layers
 which builds light-only sections straight from the snapshot layers. Light is
 bit-identical; `wg-perf --light-compare` measured 35.1 → 11.3 ms (median, 96 chunks).
 
-**2026-11-15 又降了一轮**（Apple M4 Pro、release、本机口径；Windows 那组 40 ms 不能直接和下面比）。
-`--skip-aux` 只跑主阶段表，3 种子 × 5 群系 × 8 区块 = 120 块、每块 3 遍取中位数，
-改前和改后的二进制在同一轮里交替跑两轮：
+**整块生成再降一轮（2026-11-16，Apple M4 Pro、release、本机口径；Windows 那组 40 ms
+不能直接和下面比）。** 这一节的基线是 `9495ddbb`（密度函数列特化、结构接入、feat-c、
+e2e 合进 main 之后），所以 `noise_density` 已经比上一轮的数字低；本节的数字是
+**把 9495ddbb 的二进制和合入本轮优化后的二进制在同一轮交替跑两轮**得到的
+（`--skip-aux` 只跑主阶段表，3 种子 × 5 群系 × 8 区块 = 120 块、每块 3 遍取中位数）。
 
-| 阶段（中位数 ms/区块） | 改前 1 | 改后 1 | 改前 2 | 改后 2 |
+| 阶段（中位数 ms/区块） | 9495ddbb 1 | 本轮 1 | 9495ddbb 2 | 本轮 2 |
 |---|---|---|---|---|
 | biomes | 2.195 | 2.146 | 2.335 | 2.242 |
 | noise_density | 2.905 | 2.897 | 3.070 | 2.916 |
@@ -694,29 +734,134 @@ bit-identical; `wg-perf --light-compare` measured 35.1 → 11.3 ms (median, 96 c
 | assembly | 1.675 | 0.807 | 1.709 | 0.807 |
 | **墙钟合计** | **25.920** | **23.014** | **27.813** | **22.993** |
 
+（上表是合并前那轮的数字，重测后替换；口径和结论见
+`docs/performance-optimizations.md` 第 13 节。）
+
 改动是：段调色板一次扫描批量打包（不再逐格 `set`）、生成期光照的段省掉重扫与
 红石缓存哈希、四张 FINAL 高度图直接从已算好的 `GeneratedChunk.heightmaps` 打包、
-群系名字按状态索引缓存。`docs/performance-optimizations.md` 第 11 节有每一项的前后
-数字、撤销的尝试和「改坏确认」清单。**整块中位数还没到 20 ms**：剩下的
-`features` 约 6.2 ms、`light` 传播约 4.4 ms、噪声与群系约 6 ms 都没动；地物主循环
-由另一个分支在收尾，光照传播要动运行时引擎，本轮按分工没有碰。每一项都由
-`chunkgen`（carvers / features）、`gen-world --through features`、`gen-light` 多种子
-多 salt 证明 0 不一致，并故意改坏一次确认对拍能报出来。
+群系名字按状态索引缓存。**整块中位数还没到 20 ms**：剩下的 `features`、`light`
+传播、噪声与群系都还有空间。每一项都由 `chunkgen`（carvers / features）、
+`gen-world --through features`、`structure-pipeline`、`gen-light` 多种子多 salt
+证明 0 不一致，并故意改坏一次确认对拍能报出来。
+
+## 端到端逐类型对拍
+
+地物分批合进 main 时，每一批各自用 `chunkgen --through features` 对拍过；那是
+`mc-bamboo-worldgen::chunk::Generator::features` 的纯函数路径。这里补的是
+**端到端**那一条：`gen-world --through features` 用 `ChunkgenOracle.java` 在 JVM 里
+按官方 `applyBiomeDecoration` 生成 3×3 九宫格，Bamboo 侧调
+`mc-bamboo-game::worldgen_features::game_features_with_mask`（Director 的 `features`
+阶段用的同一份 `run_features`），逐格比九宫格。两个对拍不能互相替代。
+
+### 命令
+
+```bash
+cargo build --release -p mc-bamboo-vanilla
+
+# 全部 26 个可触发类型：每个类型干净跑 + 改坏确认
+tools/mc-bamboo-vanilla/feature-e2e.sh
+
+# 只跑一个类型
+tools/mc-bamboo-vanilla/feature-e2e.sh minecraft:monster_room
+
+# 手动复现某一行（以 monster_room 为例）
+cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
+    --through features --steps 3 --feature-types minecraft:monster_room \
+    --seeds 1 --chunk 3 -1 --scan 5 --coverage
+cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
+    --through features --steps 3 --feature-types minecraft:monster_room \
+    --seeds 1 --chunk 3 -1 --scan 5 --break-type minecraft:monster_room
+```
+
+`gen-world --through features` 新增的开关：
+
+| 开关 | 作用 |
+|---|---|
+| `--feature-types IDS` / `--types IDS` | 逗号分隔的白名单，条目是 Feature 类型 ID 或 placed feature 注册名；Java 侧把不在白名单里的 `HolderSet` 换空，Bamboo 侧用同一规则收集 `(step, index)`，全局 index 与 `setFeatureSeed` 不变。不传时仍是旧的「只跑矿石」语义。 |
+| `--all-features` | 不放白名单，跑全部 step 的全部地物。 |
+| `--steps MASK` | 逗号分隔的 step 号；两边用同一掩码。 |
+| `--scan N` | `--chunk X Z` 周围连续网格，稀有类型靠它找触发点。 |
+| `--coverage` | 打印每个 Feature 类型交给 `Feature.place` 的候选次数（触发次数）。 |
+| `--break-type KIND` | 改坏确认：只改该类型真正写过的方块，要求对拍报错。 |
+
+逐类型的种子、区块、触发次数和改坏结果见
+[`docs/worldgen-e2e-coverage.md`](worldgen-e2e-coverage.md)：26 个类型全部
+「干净跑 0 不一致 + 改坏确认报不一致」；`overlay`、`fossil`、`root_system`
+是字节码核对过的已知限制，单次扫描不超过 10 分钟，不记作通过。
+
+### 修好的三处假绿
+
+1. **`gen-world --through features` 硬编码 `--ore-only`。** 之前无论对拍哪种地物，
+   Java 和 Bamboo 两边都只跑矿石，所以 `monster_room` 的「0 不一致」是假绿：改坏
+   `MonsterRoomFeature` 不可能被看到。现在命令转发白名单，改坏确认在
+   `--feature-types minecraft:monster_room --break-type minecraft:monster_room` 下
+   报 1 处不一致（见覆盖报告）。
+2. **调色板只解析默认状态。** CARVERS 阶段只有默认状态，但地物会放
+   `water[level=1]`、`log[axis=y]`、楼梯、藤蔓等带属性的状态；`gen_world.rs` 原来
+   把 `BlockState.toString()` 的属性全丢掉，和「只看方块名」等价，属性写错抓不到。
+   地物路径现在走 `mc_bamboo_worldgen::feature::state::state_from_official_name`
+   精确还原状态 ID。另外 `result.unsupported` 为真时直接报错，不再把「未移植分支」
+   当成 0 不一致。
+3. **`BiomeFilter` 用错了群系数据。** 字节码（`BiomeFilter.shouldPlace`、
+   `LevelReader.getBiome` / `getNoiseBiome`、`WorldGenRegion` 构造 149–165）显示：
+   `shouldPlace` 问的是 `PlacementContext.topFeature()` 和
+   `WorldGenLevel.getBiome(BlockPos)`；后者是 `WorldGenRegion.biomeManager.getBiome(pos)`，
+   而这个 `BiomeManager` 构造时传的 `BiomeResolver` 是 **region 自己**。
+   `BiomeManager.getBiome` 先按 `obfuscateSeed(worldSeed)` 做八角 fiddled distance
+   选中一个 quart 角，再走 `LevelReader.getNoiseBiome` 读 3×3 区块里 `BIOMES`
+   阶段成批填好的 quart 格；只有落在 3×3 之外才回退 `getUncachedNoiseBiome()`
+   单点重算气候。地表规则早就因为这个浮点顺序差异改成读格子（`biome_region.rs`），
+   但 `feature/run.rs` 里的 `BiomeFilter` 回调仍用 `createUncachedResolver` 重算，
+   Java oracle 的 `FeatureLevelHandler` 也把 `biomeManager` 建在 uncached resolver 上
+   —— **两边一起错，所以对拍一直是 0 不一致**。
+
+   现在 Java 侧让代理实现 `BiomeResolver`，`BiomeManager` 用它构造；Bamboo 侧
+   `feature::run::features` 的 `biome_at` 先算 `fiddled_corner`，再用
+   `feature::world::noise_biome_in` 读 `FeatureChunks.biomes` 的 3×3 格子，越界才回退
+   `BiomeManager::noise_biome`。暴露场景是 seed 0、chunk `(255,-109)`：那里 quart 格
+   与 uncached 气候在 y=-60 层有 200 个格点群系不同。故意把 Bamboo 改回 uncached
+   路径后
+
+   ```bash
+   gen-world java --through features --seeds 5 --chunks 1 --salt 0 \
+       --chunk 255 -109 --scan 5 \
+       --feature-types minecraft:ore_dirt,minecraft:patch_grass_jungle,minecraft:freeze_top_layer
+   ```
+
+   报 2 处不一致（`(256,-109)` y=62 x=2 z=3/4），改回后 0。step 9
+   （`VEGETAL_DECORATION`）的 `patch_grass_jungle` 一类地物正是靠这个修饰器在群系
+   边界上被放行 / 杀掉，所以这一处影响所有带 `biome` 修饰器的 step 9 地物。
+
+### 新加地物怎么照着用
+
+1. 在 `tools/mc-bamboo-vanilla/feature-e2e.sh` 的 `CASES` 表加一行：
+   `类型 ID|step 掩码|能触发它的种子与区块`。先用
+   `gen-world ... --feature-types <ID> --coverage` 找触发次数不为 0 的坐标；
+   触发次数为 0 就按 `docs/worldgen-features-plan.md` 里记录的定点或群系预设换坐标。
+2. 跑 `tools/mc-bamboo-vanilla/feature-e2e.sh <ID>`，确认 `RESULT=PASS`
+   （干净跑 0 不一致、改坏确认报不一致、改坏格数 > 0）。
+3. 把类型、种子、区块、触发次数和改坏格数补进
+   `docs/worldgen-e2e-coverage.md`；如果扫不出触发点，用 `javap -c -p` 查清
+   触发条件，作为已知限制写进那一节，别把 0 不一致写成通过。
+4. 最后跑一次 `tools/mc-bamboo-vanilla/feature-e2e.sh` 全量回归，以及
+   `gen-world --through features --all-features --seeds 2 --chunks 8 --salt 7`
+   的整步对拍（全部类型一起跑，仍应 0 不一致）。
 
 ## 还没做
 
 * 地物**类型**：`features` 阶段已接进游戏（见上），但只移植了 `minecraft:ore`；其余
   feature / modifier / predicate 类型照对拍标 `unsupported` 跳过（地物 A/B 在做）。
-  结构（两个阶段是空实现）、生成时的 `initialize_light` / `light`（`light` 已带半径 1
+  结构（两阶段已接入，见下）、生成时的 `initialize_light` / `light`（`light` 已带半径 1
   邻居引用，但真实光照计算没移植，光照由**运行时**引擎在交付后补算）、`spawn` 刷怪仍是空实现。
 * 生成期光照 `initialize_light` / `light` 的真实计算（`isLightOn=true`、天空光 / 方块光
   逐格对拍）：邻居视图的接口已经就位，计算本身是下一轮。
 * 下界和末地（无 `aquifers` 的路径、五群系末地源、下界老 fbm）。
 * `BlendingData` / `Blender` 的非空路径（老存档升级、旧区块混合）。
-* `Beardifier` 的非空密度路径**已移植并对拍**（见 `docs/worldgen-structures-plan.md` 第 5 节
-  和 `cargo run -p mc-bamboo-vanilla -- beard <java>`）：纯函数、密度计算和整条
-  `finalDensity` 接入都逐位一致，但**没接进游戏**——`structure_starts` 阶段还是空实现，
-  游戏里 `terrain` 仍走 `EMPTY` 那支；把真实结构件喂进 `terrain_with_beardifier` 是合并时的事。
+* `Beardifier` 的非空密度路径**已移植、对拍并接进游戏**（见
+  `docs/worldgen-structures-plan.md` 第 5、12 节）：`generate_terrain_stage` 与
+  `build_view` 共用按 `(seed,x,z)` 全局缓存的真实 `Beardifier`，依赖表保证半径 8
+  起点定稿，0/2/8 计算线程结果逐字节相同；`structure-pipeline` 逐格比官方带
+  Beardifier 的 CARVERS 方块 28 区块 / 2752512 格 0 不一致。
 * `possibleBiomes` / `carverBiome` / `region.getBiomeManager()` 已**在游戏侧落地**（见
   「真实服务端路径与简化路径」）：`generate_chunk` 调 `Generator::biome_region` 造 3×3
   群系视图、`terrain_with_region` 读 quart 格并传 3×3 `possibleBiomes` 并集，
@@ -731,3 +876,26 @@ bit-identical; `wg-perf --light-compare` measured 35.1 → 11.3 ms (median, 96 c
 * 非 `full` 的 ProtoChunk 从盘上读回后从它的状态继续生成：流水线按阶段纯函数写好了，
   但读盘路径仍按现有模板/ProtoChunk 逻辑，未针对多阶段重新对拍。
 * 并行化和 SIMD：先有逐位一致的基线再谈优化。
+
+### 结构阶段（本轮接入）
+
+`structure_starts` / `structure_references` 不再是透传：
+`mc-bamboo-game::worldgen_structures` 按种子缓存 `WorldStructureState`（含要塞环位置），
+纯函数重算半径 8 的邻域起点，把 `structures` 标签（`starts` + `References`）随
+`GenerateOutput` 交回世界线程，`Task::Assemble` 装进 `ChunkArchiveMeta.structures`。
+`features` 每个 decoration step 先跑 `StructureStart.placeInChunk` 再跑地物。
+对拍见 `cargo run -p mc-bamboo-vanilla -- structure-pipeline <java>`：官方 17×17 的
+`createStructures` / `createReferences` 与游戏同一条路径逐项比，28 行 / 2482 结构件 / 2752512 格 Beardifier 地形 0 不一致，`--break-self-test` 会失败。
+
+`wg-perf --structure-timing`（release，1 种子 × 10 群系 × 3 区块 × 2 遍）实测：
+
+| 阶段 | 平均 ms | 中位数 ms | p95 ms |
+|---|---:|---:|---:|
+| `structure_starts`（冷） | 49.416 | 0.001 | 0.029 |
+| `structure_references`（冷） | 23.085 | 6.813 | 76.198 |
+| `structure_starts`（缓存） | 0.000 | 0.000 | 0.001 |
+| `structure_references`（缓存） | 0.034 | 0.032 | 0.049 |
+
+冷启动的平均被首个区块建全局状态（环位置、注册表解析）拉高；稳态看缓存列。
+`structure-single` 四件与废弃传送门的 `postProcess` 仍标 unsupported 跳过，但起点、
+引用、Beardifier、存档全部照官方算，等对应分支合入后打开允许清单即可。

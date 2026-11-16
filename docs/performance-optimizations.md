@@ -46,10 +46,17 @@
 | 17 | 地表规则：气候参数按 quart 格缓存，`chunk_timing` SURFACE / CARVERS（10） | 121.36 / 121.85 ms | 40.05 / 40.92 ms | 3.0× |
 | 17 | 同上：条件噪声改惰性求值后（10） | 40.05 / 40.92 ms | 15.99 / 17.47 ms | 2.5× / 2.3× |
 | 17 | 两项合计，一个区块跑到 CARVERS（10） | 121.85 ms | 17.47 ms | 7.0× |
-| 18 | 整块生成：段调色板批量打包，`wg-perf` `assembly`（11） | 1.650 ms | 1.294 ms | 1.28× |
-| 18 | 整块生成：生成期光照段省掉重扫和哈希，`light`（11） | 6.3 / 6.2 ms | 4.25 / 4.31 ms | 约 1.5× |
-| 18 | 整块生成：四张 FINAL 高度图不再逐格重算，`assembly`（11） | 1.32 / 1.30 ms | 0.783 / 0.792 ms | 1.7× |
-| 18 | 以上合计，`wg-perf` 整块墙钟中位数（11） | 25.92 / 27.81 ms | 23.01 / 22.99 ms | 约 1.2× |
+| 18 | 密度函数成批噪声的列特化：`wg-perf noise_density`（11） | 2.88–2.90 ms | 1.57–1.65 ms | 1.9× |
+| 18 | 同上：`chunk_timing` NOISE 累计（35 区块中位数） | 3.63–3.64 ms | 2.30 ms | 1.6× |
+| 19 | 按玩家限速和优先级加载：1 人高速飞行，前方区块到达延迟 p95（12） | 1387 ms | **1090 ms** | 1.3× |
+| 19 | 同上：4 人各朝不同方向飞，前方区块到达延迟 p95（12） | 2388 ms | **2191 ms** | 1.1× |
+| 19 | 同上：4 人场景 `chunk_latency_us` p95（12） | 2 174 852 µs | **1 837 457 µs** | 1.2× |
+| 19 | 同上：4 人场景计算池待办平均（12） | 769 个 | **142 个** | 5.4× |
+| 19 | 同上：4 人场景 tick p95（增量调度后，见 12.5） | 1.3 ms | **1.7 ms** | 多 0.4 ms |
+| 20 | 整块生成：段调色板批量打包，`wg-perf` `assembly`（13） | 1.650 ms | 1.294 ms | 1.28× |
+| 20 | 整块生成：生成期光照段省掉重扫和哈希，`light`（13） | 6.3 / 6.2 ms | 4.25 / 4.31 ms | 约 1.5× |
+| 20 | 整块生成：四张 FINAL 高度图不再逐格重算，`assembly`（13） | 1.32 / 1.30 ms | 0.783 / 0.792 ms | 1.7× |
+| 20 | 以上合计，`wg-perf` 整块墙钟中位数（13） | 25.92 / 27.81 ms | 23.01 / 22.99 ms | 约 1.2× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -63,9 +70,14 @@
 第 14 项见 7h 节，是缓存的默认关状态也要付的常驻代价：段哈希给写方块加约 6 ns，不是净收益。
 第 15 项见 7i 节，是九台机器里唯一划算的一台；其它八台在正式配置下是 0.99–1.01×（门槛主动放弃了小电路的收益）。
 第 16 项见 `profiling.md` 11.3：世界线程那两列只是提交任务加收回执，池子的等待不计入；墙钟 27.4 / 72.6 ms 才是 4 线程做完这一批的时间。
-第 17 项见第 10 节，是 `mc-bamboo-worldgen` 里唯一一次「纯函数世界生成」的优化：三行分别是两个
-有收益的改动各自的前后数字和合计，口径都是 `chunk_timing` 35 个区块的中位数，不是整机 tick。
-第 18 项见第 11 节，量的是 `wg-perf` 里「一个区块从头到尾」的墙钟；前两列和最后一行是
+第 17 项见第 10 节，三行分别是两个有收益的改动各自的前后数字和合计；第 18 项见第 11 节，
+是密度求值的列特化，两行的口径分别是 `wg-perf` 单阶段中位数和 `chunk_timing` 累计中位数。
+两者都是「纯函数世界生成」的优化，不是整机 tick。
+
+第 19 项见第 12 节，是区块到达延迟的端到端墙上时间（客户端量，不是 `chunk_latency_us`），
+和计算池待办长度；数字都取自最终二进制同一轮 A-B-A-B 交替的三对中位数。
+12.5 记录了把「每刻整表重排」改成增量堆之后 tick p95 回到基线附近的过程。
+第 20 项见第 13 节，量的是 `wg-perf` 里「一个区块从头到尾」的墙钟；前两列和最后一行是
 同一轮里改前/改后两个二进制交替跑两轮的结果，不能和别的节的数字直接相减。
 
 第 10 行**不是优化**，是 2026-11-11 安静窗口里量到的「还剩多少差距」，见 7e 节和
@@ -78,6 +90,8 @@
 还没做完的项目，9.1 节是闲置漏斗的设计依据和剩余尾巴。
 
 （2026-11-14 按实现更新：本文 7g.4–7g.6 / 7h / 7i / 7k、`profiling.md` 10.6 / 11.3；合并提交 `edce3ab`、`f08c11a`、`fa91b84`、`082a7c9`）
+
+（2026-11-16 追加第 11 节和 §0 第 18 项；提交 `67f972d8`、`564922d3`、`a47f25e3`）
 
 ---
 
@@ -1663,13 +1677,279 @@ cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
 
 ---
 
-## 11. 整块真实地形生成：25.9–27.8 → 23.0 ms / 区块（2026-11-15）
+## 11. 密度函数的列特化：`noise_density` 2.9 ms → 1.5 ms / 区块
+
+代码：`crates/mc-bamboo-worldgen/src/noise.rs` 的 `Noise::add_to_volume`，
+`sampler.rs` 的 `noise_add_to_volume` 转发。提交 `67f972d8`、`564922d3`。
+
+### 11.1 原来慢在哪
+
+`doFill` 的 `finalDensity.sampleVolume` 一整块 16 × 384 × 16 求值约 2.9 ms/区块。
+`sample`（18 秒、1 ms 间隔、15 016 个主线程样本，只循环整列密度求值）按栈顶分：
+
+| 位置 | 样本 | 占比 |
+|---|---|---|
+| `Noise::add_to_point`（噪声数学本体） | 10 834 | 72.1% |
+| `Sampler::sample_volume`（节点分派 + 逐点循环 + 缓冲） | 2 714 | 18.1% |
+| `sample_interpolated_blocks`（插值填格） | 1 178 | 7.8% |
+| `Vec::resize` / memset / memmove | 173 | 1.2% |
+| 样条等 | 14 | 0.1% |
+
+编译期消融（4 个 release 二进制、同一轮交替、`sample_density_from` 12 区块 × 5 遍取最小）
+把「节点分派」和「噪声数学」分开：
+
+| 消融 | ms/区块 | 结论 |
+|---|---|---|
+| 基线 | 2.82 / 2.83 | — |
+| `add_to_point` 内部数学返回 0（节点照走） | 0.58 / 0.60 | 噪声数学 ≈ 2.23 ms = 79% |
+| 整个噪声节点填 0 直接返回 | 0.61 / 0.61 | 节点分派本身可忽略 |
+| 关掉 `sample_volume_cached` 的记忆 | 5.52 / 5.59 | cache 是净收益约 2.7 ms |
+
+最后一行值得单说：关掉 `cache` 后节点调用 215 → 524、点求值 18.3 万 → 38 万，
+所以「消掉重复的缓存查找」不但不是优化方向，还会慢一倍。命中时只是一次
+`copy_from_slice`（`sample` 里 memmove 9 / 15 016 样本）。
+
+节点计数（12 个区块整列求值平均）：215 次 `sample_volume`（38 噪声、29 cache、
+18 interpolated/slice、129 其它）、67 次临时缓冲 `child_volume`、15 次 cache 体积
+未命中、5 次 interpolated block-step、约 182 550 次 `add_to_point`（整块本身
+98 304 点，其余来自 4/8 格角体积与插值角点）。
+
+### 11.2 换成了什么
+
+`javap -c -p net.minecraft.world.level.levelgen.synth.PerlinNoise` 核对官方
+`addToVolume`：z 循环算 `z` 坐标 / `floorZ` / `relativeZ` / `smoothstep`，x 循环算
+`x` 坐标 / `floorX` / `relativeX` / 两次 `permute`，y 循环只算 `y` 坐标，而且用
+`lastY != floorY` 把八个角的 `(dotXz, 梯度 y 分量)` 缓存起来。`SmearedPerlinNoise`
+同样，只是 y 上多一个 `computeFudgeY`。`NoiseStack$Perlin.addToVolume` 逐层用
+`xzScale * frequency`、`yScale * frequency`、`amplitude * layer.amplitude` 调层，
+这三个乘法的操作数全是常量。
+
+原来的 Rust 侧把这些全放在 `add_to_point` 里，每个点重算一遍；一层
+`NormalNoise` 有 2 × 八度数个层，一层里有 8 次置换和 8 次点积。改成：
+
+- `Noise::add_to_volume` 在编译期之外（每块体积开始时）把 `NoiseStack` 摊平成
+  具体 `Perlin` / `SmearedPerlin` 层，三个常量乘法每块算一次；
+- 每个 (z,x) 列算一次 x/z 坐标、插值系数和两次置换，逐 y 复用，八个角的梯度
+  按 `floor_y` 缓存；含 `Simplex` 的叠（没有重写 `addToVolume` 的官方默认实现）
+  退回原来的逐点路径；
+- 每个点仍按原顺序逐层累加，最后才加到输出上。
+
+**关键约束：不动任何浮点结合顺序。** 提出去的都是「同样的操作数、同样的运算顺序」
+的表达式，同一列每个 y 用的本来就是同一个值；没有把 `(block * scale) * freq` 改成
+`block * (scale * freq)`，也没有省掉任何一次加法。层累加改在一份临时的 f32 上做、
+最后才加到 `out`，保证 `out` 起始值非零时结合顺序也和逐点路径一致；单个
+`Perlin` / `Smeared` 原本直接返回那一层的值（不从 `0.0` 起加），这里也照着区分，
+免得 `-0.0` 之类的一位之差。单元测试
+`column_volume_matches_pointwise_exactly` 把两条路径在起始值非零、步长非 1 的体积上
+逐位比较（含 `Perlin`、`Smeared`、`NormalNoise` 的一叠）。
+
+### 11.3 没做的三件事
+
+1. **不把 `Sampler` 树压成扁平指令 / 下标**（C2ME 的另一半）。消融给出的天花板是
+   0.6 ms/区块，而且这 0.6 ms 里还含插值填格（0.23 ms）和缓冲拷贝，纯节点分派
+   远不到 0.6 ms；相对整机约 25 ms/区块只有 2.4%。改结构要同时保住
+   `sampleValue` / `sampleVolume` 两条路径的求值顺序、`CacheCell` 记住的「最后一块
+   体积」和 `Arc::ptr_eq` 共享语义，风险与收益不成比例。A 做完后按数字复核过，放弃。
+2. **不做额外的公共子树合并**。官方只在 `DensityFunctionCompiler.reuseOrPrepareCache`
+   里按 `cache.input()` 的结构 `equals` 去重（字节码核对过），Rust 侧已经照做；
+   再合并别的共享子树会改变 `CacheCell` 记住的「上一次成批算过哪块体积」，
+   之后的单点求值可能读到不同的值，逐位一致就没了（`worldgen.md`「两条求值路径」）。
+3. **不做「按 cell 批量」**。现有代码已经是整块批量：`sampleVolume` 一次求
+   16 × 384 × 16、y 最内层，`sample_interpolated_blocks` 也是一次求完所有格角再
+   填格。这一轮只是在这个循环里把重复的常量提出去。
+
+### 11.4 前后数字与复现
+
+同一轮里保留改前 / 改后两个 release 二进制交替跑，测量时不编译（第 8 节）：
+
+| 口径 | 改之前 | 改之后 |
+|---|---|---|
+| `wg-perf noise_density`（1 种子 × 10 群系 × 4 区块 × 3 遍，两轮中位数） | 2.895 / 2.878 ms | 1.653 / 1.570 ms |
+| `chunk_timing` NOISE（35 区块中位数，两轮） | 3.63 / 3.64 ms | 2.30 / 2.30 ms |
+| `wg-perf surface`（两轮中位数） | 2.38 / 2.36 ms | 2.41 / 2.23 ms |
+| `wg-perf` 整块记录合计（两轮中位数） | 27.24 / 26.91 ms | 27.50 / 24.92 ms |
+
+```sh
+cargo build --release -p mc-bamboo-vanilla -p mc-bamboo-worldgen --example chunk_timing
+./target/release/mc-bamboo-vanilla wg-perf --seeds 1 --chunks 4 --repeat 3 \
+    --skip-cut --skip-sky --skip-threads --skip-plans --aux 1
+./target/release/examples/chunk_timing
+```
+
+**量之前确认二进制确实重新链接过。** 只改 `mc-bamboo-worldgen` 时依赖指纹可能不变，
+cargo 会重链 example 却不重链 `mc-bamboo-vanilla`，第一次 `wg-perf` 因此量到
+「改前 2.83 / 改后 2.86，没有收益」——那是旧产物。`touch` 工具的入口再重链后
+才是上表的数字。用二进制时间戳或 `nm | grep add_to_volume` 确认。
+
+### 11.5 怎么确认结果没变
+
+```sh
+cargo test -q -p mc-bamboo-worldgen column_volume_matches_pointwise_exactly
+cargo run --release -q -p mc-bamboo-vanilla -- worldgen java --seeds 3
+cargo run --release -q -p mc-bamboo-vanilla -- worldgen java --seeds 3 --salt 987654321
+cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
+    --seeds 3 --chunks 12 --through carvers --salt 987654321
+cargo run --release -q -p mc-bamboo-vanilla -- chunkgen java \
+    --seeds 3 --chunks 12 --through features --salt 987654321
+cargo run --release -q -p mc-bamboo-vanilla -- gen-world java --through features
+```
+
+干净跑全部 0 不一致（`worldgen` 逐位比较 4 608 个噪声值、5 364 个密度函数值；
+`chunkgen --through carvers` 每阶段 3 538 944 个方块、`--through features`
+31 850 496 个方块；`gen-world` 同样 31 850 496 个方块），两个 salt 都跑过。
+
+**改坏确认**：把提到循环外的 `smooth_x` 差一个 ulp，`worldgen` 两个 salt 各报
+156 处不一致；但 1 ulp 的密度差不足以改变任何方块，`chunkgen` / `gen-world`
+都报 0 不一致。这是「逐方块」对拍的固有粒度，不是对拍失灵：密度要经过
+`Aquifer` 的阈值才变成方块，末位的扰动通常跨不过阈值。所以又用 `+0.05`
+的粗改坏确认区块级对拍确实会报（`chunkgen --through carvers` / `features`
+各两个 salt 都是 160 处、`gen-world` 两个 salt 各约 270 万处），改坏后全部还原
+并复跑 `worldgen` / `chunkgen --through carvers` 为 0 不一致。
+
+---
+
+## 12. 按玩家限速和优先级加载区块（2026-11-16）
+
+代码：`crates/mc-bamboo-world/src/director/priority.rs`（纯排队规则）、
+`crates/mc-bamboo-world/src/director/state.rs`（Director 准入）、
+`crates/mc-bamboo-game/src/director_host.rs`（宿主四处排序）、
+`crates/mc-bamboo-game/src/world.rs`（每刻喂玩家需求快照）。
+
+### 12.1 原来慢在哪
+
+一次新区块要依次经过「票表变化 → `Read` → 若干个 `Generate` 阶段 → `Assemble`
+→ `Deliver` → `PlayerChunkSender`」。改之前 `Director::queued_reads` 是坐标序，
+`Director::pending` 按 `TaskId` 派，一个区块的每个生成阶段又重新按 `TaskId` 排队；
+只有宿主的 `read_queue` / `compute_backlog` / `deliveries` 按离最近玩家的切比雪夫
+距离排，且 `compute_backlog` 只在玩家**跨区块**时整堆重排。没有每玩家在途上限，
+没有移动方向，一个玩家一次进服或高速飞行就能把 Director 的待派队列和计算池
+填满。发放速率本身按官方 `desired_chunks_per_tick` 走，不受这里影响。
+
+服务端原有的 `chunk_latency_us` 只量 `pending → 写进出站缓冲`，量不到这些等待：
+同一场景里它稳态只有 11 µs，启动尖峰却有 1.84 s p95。所以在客户端一侧新增
+`tools/mc-bamboo-loadtest/src/chunk_trace.rs`：按假玩家自己的位置复现服务端
+`T(vd)`，记下每个区块第一次进入视距的时刻，再用 `level_chunk_with_light` 包里的
+x/z 配对到达，得到「进入视距 → 客户端收到」的墙上延迟，按全体 / 前方 / 近处
+分别出分位数，另记到达时区块还在玩家前方几格、每刻视距里缺多少区块。
+
+### 12.2 换成了什么
+
+- 一个新的纯 `DemandSnapshot`：`(玩家编号, 所在区块, 移动方向)` 的有序快照。
+  `rank(区块)` = 离最近玩家的切比雪夫距离 ± 最多 2 格的方向加权（站着或方向未知
+  时退化为纯距离），多名玩家取最小值；只归视距半径内离得最近的一名玩家。
+- `World::sync_player_tickets` 在玩家跨格时用相邻两个区块中心的差算方向，
+  位置或方向变了才把快照喂给 Director；没玩家时用票表里的中心按距离兜底。
+- `Director::drive` 用**一个**小顶堆选下一个任务，键是
+  `(rank, 流水线进度, TaskId)`，完全确定。新任务直接入堆；只在玩家需求快照
+  变化（跨格）时整堆重算一次。被写范围排他或每玩家配额挡住的任务原样放回
+  堆里，一次 `drive` 最多检查 16 个被挡住的任务就停下，其余留到下一次；
+  不扫整张积压表，也不维护第二份待办列表。公平靠每名玩家的硬上限。
+- 「加载存档」（`Read` / `Decode`）和「新生成」（`Generate`）各有一个每名玩家
+  在途硬上限（各 24，测试可改）；`Assemble` / `Save` 不占配额，避免卡住收尾。
+  任务完成或取消时精确释放计数。一个任务只归一名玩家，多人共视不会重复扣额度。
+- 宿主的读盘提交、计算池待办、交付信箱和池子优先级全部改读同一个 `rank`，
+  玩家移动后优先级跟着更新；`PlayerChunkSender` 的 `desired_chunks_per_tick`、
+  未确认批次上限、`forget_level_chunk` 和 `chunk_batch` 流程一行没改，票表等级
+  语义和生成纯函数也没改，只改任务顺序。
+
+### 12.3 数字和复现
+
+场景：`bamboo-loadtest serve --view-distance 8 --chunk-worker-threads 4`，
+假玩家 `fly/spread` 直线飞 25 秒（33 格/秒），`BAMBOO_PROFILE=5`，
+`BAMBOO_FAKE_GEN_DELAY_US=25000`（模拟每个生成阶段约 25 ms），
+客户端 `desired_chunks_per_tick=64`；1 人和 4 人（四个方向）两组各用两个
+**编译好的 release 二进制**在同一轮里 A-B-A-B 交替跑三对，取中位数：
+
+```sh
+cargo build --release -p mc-bamboo-loadtest
+# 把旧二进制另存为 baseline-loadtest，改后二进制另存为 priority-loadtest
+# A-B-A-B 交替各三次（1 人），4 人把 BOTS=4、换一个端口再跑一轮
+GEN_DELAY_US=25000 DURATION=25 PROFILE_SECS=5 \
+    tools/mc-bamboo-loadtest/run-chunk-trace.sh <结果目录>/1-A <旧二进制> 26061
+GEN_DELAY_US=25000 DURATION=25 PROFILE_SECS=5 \
+    tools/mc-bamboo-loadtest/run-chunk-trace.sh <结果目录>/1-B <新二进制> 26061
+python3 tools/mc-bamboo-loadtest/summarize-chunk-trace.py <结果目录>/1-A <结果目录>/1-B
+```
+
+两组数字各取三对 A / B 的中位数（A 是改前二进制、B 是最终单堆二进制）：
+
+| 指标（1 人） | 改之前 | 改之后 | 倍数 |
+|---|---:|---:|---:|
+| 前方区块到达 p50 / p95 | 40 / 1387 ms | **40 / 1090 ms** | 1.0× / 1.3× |
+| 全部区块到达 p50 / p95 | 40 / 1545 ms | **41 / 1290 ms** | 1.0× / 1.2× |
+| 近处（±3 区块）到达 p50 / p95 | 340 / 741 ms | **242 / 692 ms** | 1.4× / 1.1× |
+| 视距缺口 p95 | 168 个 | 165 个 | — |
+| 到达时仍在前方几区块 p50 | 8 | 8 | — |
+| `compute_backlog` 每刻平均 | 39.6 个 | 38.6 个 | — |
+| tick p95 | 0.6 ms | 0.6 ms | — |
+
+| 指标（4 人） | 改之前 | 改之后 | 倍数 |
+|---|---:|---:|---:|
+| 前方区块到达 p50 / p95 | 1391 / 2388 ms | **1355 / 2191 ms** | 1.0× / 1.1× |
+| 全部区块到达 p50 / p95 | 1388 / 2290 ms | **1339 / 2156 ms** | 1.0× / 1.1× |
+| 25 秒内到达 / 一直没到 | 4024 / 1085 个 | **4122 / 935 个** | +2.4% / −14% |
+| `compute_backlog` 每刻平均 | 769 个 | **142 个** | 5.4× |
+| `chunk_latency_us` p95（服务端直方图） | 2 174 852 µs | **1 837 457 µs** | 1.2× |
+| 各玩家前方 p95（第 2 对） | 2138, 2289, 2440, 2386 ms | **2192, 2188, 2091, 2136 ms** | 没有一个人被单独甩开 |
+| tick p50 / p95 | 未单独量 / 1.3 ms | 未单独量 / **1.7 ms** | 多 0.4 ms |
+
+三对 1 人场景 A 的前方 p95 是 1387 / 1395 / 1387，B 是 1090 / 1088 / 1090；
+4 人场景 A 是 2323 / 2388 / 2435，B 是 2205 / 2188 / 2191。收益稳定，
+到达总数和积压也变好；tick p95 只多 0.4 ms，远低于主代理要求的 1 ms。
+**同一台机器不同时间段的绝对值能差几倍**（见第 8 节），所以只在同一轮交替的
+A / B 之间比较。
+
+### 12.4 怎么确认结果没变
+
+- 生成结果：纯函数、模板、阶段依赖和写范围排他判断都没改，只改任务派出顺序；
+  `cargo test --workspace` 里 `world::staged_tests::one_and_four_threads_generate_identical_feature_blocks`
+  仍逐字节比对 1 / 4 线程的生成结果。
+- 官方协议：`PlayerChunkSender` 一行没改；`tools/probe.sh` fresh 与 `--loaded`
+  两遍都 719/719，区块到达顺序的三项额外检查（脚下区块、最近先到、第一批
+  3×3）全过；hy4 probe 719/719。
+- 票据：`ticket-oracle java --scenes 100 --seed 12345` 1129 步 0 不一致，
+  `cache_diff 4000` 九台全部 0 刻不一致，`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game`
+  928 通过。
+- 正确性单测：`Director` 的随机事件、阶段依赖、写范围、关服、限速、确定性
+  派单、方向加权和「配额释放后 deferred 任务继续派出」都有测试；
+  `queue_compute` / `submit_reads` / `deliveries` 的排序键共用同一个
+  `DemandSnapshot`，不会出现三处各排各的。
+
+### 12.5 增量调度：把整表重排的代价去掉
+
+第一版实现是「每刻开头把整张 `pending` 按玩家优先级重排一次」。4 人场景确实
+把前方 p95 从 6436 ms 降到 2942 ms、积压从 923 降到 164，但每刻
+`director_events` 多了 8–11 ms，tick p95 从 2.3 ms 涨到 **27.7 ms**：50 ms
+预算里光调度排序就吃掉一半，不能接受。
+
+最终实现是**一个优先级堆**：
+
+- 堆项 `(rank, 阶段, TaskId)`，新任务 `enqueue` 时算一次键入堆；
+  `set_player_demand`（玩家跨格）只推一次代数，下一次真正要派任务时才整堆
+  重算，不是每刻。
+- 派任务时取堆顶；配额满或写范围冲突就把**这一个**任务原样放回堆，
+  一次 `drive` 最多检查 16 个被挡住的任务就停止。其余任务仍按优先级留在
+  堆里，配额一释放、下一次 `drive` 自然取到最急的那个。没有第二份 deferred
+  列表，也不排序、去重或扫描积压表。
+- 公平靠每名玩家的在途硬上限，不用全局「最少在途数」比较（那会在某名玩家
+  暂时没有待派任务时把别人全饿死）。顺序始终由键里的 TaskId 兜底，确定。
+
+同一轮 A-B-A-B 交替三对（4 人，场景同 12.3）：改前 tick p95 是
+1.3 / 1.3 / 1.2 ms，单堆是 1.7 / 1.7 / 1.7 ms，**只多 0.4 ms**；
+前方 p95 仍从 2388 ms 降到 2191 ms，`compute_backlog` 从 769 降到 142，
+`chunk_latency_us` p95 从 2 174 852 降到 1 837 457 µs。1 人场景 tick p95
+两版都是 0.6–0.7 ms。也就是说「tick p95 比改前多不到 1 ms」达到了，
+前方延迟的收益也保住了。
+
+---
+
+## 13. 整块真实地形生成：25.9–27.8 → 23.0 ms / 区块（2026-11-15）
 
 这一节量的是**整条生成链**：群系 → `doFill` → 地表 → 雕刻器 → 地物 → 生成期光照 →
 组装，而不是第 10 节的纯函数地形。目标是让 4 线程计算池在玩家飞行时交得更快；
 `docs/worldgen.md`「各阶段耗时与生成能否跟上飞行」有压测的背景。
 
-### 11.1 口径
+### 13.1 口径
 
 `wg-perf`（`mc-bamboo-vanilla` 子命令，`mc-bamboo-worldgen` 的 `perf` 特性，默认构建
 里全是空操作）按种子和群系挑区块，每块跑完整链，打印每阶段和整块墙钟的平均 / 中位数 /
@@ -1694,7 +1974,7 @@ cargo build --release -p mc-bamboo-vanilla
 所以每项都**保留改前二进制、改前/改后交替各跑两轮**，用同一轮的两列比较；
 没有稳定收益的改动一律撤销。以下各项的数字都是各自提交时那一轮交替的结果。
 
-### 11.2 做了什么、为什么快
+### 13.2 做了什么、为什么快
 
 1. **高度图谓词按状态缓存**（`b75f89d3`）。`compute_heightmaps` 原来每列从顶往下扫
    384 层，每层对六张高度图各调一次 `state_facts` / `state_fluid`，还每列分配两个 `Vec`。
@@ -1744,7 +2024,7 @@ p95 改前 30.974 / 45.157、改后 43.035 / 43.118；高百分位受同机其�
 `FeatureWorld` 的写路径当时由另一个分支在改，结构接线也没合进来，本轮按分工没有碰；
 光照传播的剩余 4.4 ms 在 `LightStorage` 的队列里，改它要动运行时光照路径，风险不对等。
 
-### 11.3 怎么确认结果逐位没变
+### 13.3 怎么确认结果逐位没变
 
 每项都跑了相关的 Java 对拍，并在提交前做「改坏确认」（故意让缓存 / 打包 / 光照输入
 错一点，确认比较器会报不一致，再还原）：
@@ -1763,7 +2043,7 @@ p95 改前 30.974 / 45.157、改后 43.035 / 43.118；高百分位受同机其�
 `cargo check -p mc-bamboo-vanilla --no-default-features`、全套 `java` 对拍和联机探针
 都按 `docs/worldgen.md` 的验收口径跑过（结果见本轮汇报）。
 
-### 11.4 试过但没有收益、撤掉的
+### 13.4 试过但没有收益、撤掉的
 
 * **`ParameterList` R 树结果缓存**。按 `(TargetPoint, 查询前的 lastResult)` 记忆化，
   命中仍照常推进 `last_result`，平局语义可证不变；`HashMap` 版 `biomes`
@@ -1774,7 +2054,7 @@ p95 改前 30.974 / 45.157、改后 43.035 / 43.118；高百分位受同机其�
 * **直接从 layers 算天空光源表**。`SkyLightSources::fill_from_layers` 跳过调色板解码，
   但 `light` 4.28/4.16 → 4.63/5.37 ms：新路径每列重复扫整段，比按段缓存的
   `PalettedContainer::get` 更贵。
-* `compute_heightmaps` 的掩码缓存单独在 `wg-perf` 口径里量不到，见 11.2 第 1 项；
+* `compute_heightmaps` 的掩码缓存单独在 `wg-perf` 口径里量不到，见 13.2 第 1 项；
   它没有撤，因为游戏路径确实少做了每格六次查表，而且第 5 项依赖它。
 
 这些都按第 8 节「没有可测收益就撤掉」的原则撤销，没有提交。

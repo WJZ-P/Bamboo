@@ -227,6 +227,34 @@ fn one_and_four_threads_generate_identical_feature_blocks() {
     }
 }
 
+/// 0 / 2 / 8 计算线程生成同一片结构区块，结果逐字节相同。真实 Beardifier 只从
+/// 依赖表 `GENERATION[4].requires = [(S,8),(B,1)]` 保证定稿的起点/引用算，
+/// 并按 (seed,x,z) 全局缓存，所以任务完成先后不影响结果。
+#[test]
+fn structure_terrain_is_identical_across_worker_counts() {
+    use mc_bamboo_world::director::GENERATION;
+    use mc_bamboo_world::ticket::ChunkStatus;
+    // 依赖表本身要是官方的两条，否则纯函数缓存也救不了调度顺序。
+    assert_eq!(
+        GENERATION[4].requires,
+        &[(ChunkStatus::StructureStarts, 8), (ChunkStatus::Biomes, 1)]
+    );
+    let positions: Vec<ChunkPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| ChunkPos::new(x, z)))
+        .collect();
+    let baseline = generated_cells(0, &positions);
+    for threads in [2usize, 8] {
+        let other = generated_cells(threads, &positions);
+        for (pos, cell) in &baseline {
+            assert_eq!(
+                cell.blocks,
+                other.get(pos).unwrap().blocks,
+                "chunk {pos:?} differs with {threads} workers"
+            );
+        }
+    }
+}
+
 /// 生成期光照真的落进交付盒子：`isLightOn=true`，并且天空光是算过的真值 ——
 /// 露天有 15，深地下被遮成 0，而不是模板那种「全 15」。
 ///

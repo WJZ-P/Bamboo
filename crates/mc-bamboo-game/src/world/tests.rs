@@ -592,6 +592,17 @@ impl Harness {
         self.world.host.region_reclaims_this_tick()
     }
 
+    /// 测试专用：把每名玩家的加载/生成在途上限改小，模拟慢生成时的积压。
+    pub(crate) fn set_demand_caps(&mut self, loads: usize, generates: usize) {
+        let demand = self.world.host.director().player_demand();
+        let snapshot = mc_bamboo_world::director::DemandSnapshot::with_caps(
+            demand.players().to_vec(),
+            loads,
+            generates,
+        );
+        self.world.host.set_player_demand(snapshot);
+    }
+
     /// 测试专用：改这一刻之后的交付/收回上限（不碰进程级环境变量）。
     pub(crate) fn set_mail_budget(&mut self, budget: crate::director_host::MailBudget) {
         self.world.host.set_budget(budget);

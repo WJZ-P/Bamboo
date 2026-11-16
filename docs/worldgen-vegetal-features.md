@@ -125,11 +125,17 @@ step 9（`vegetal_decoration`）占 109 个。
 | 组合类：random_selector / weighted_random_selector / simple_random_selector / random_boolean_selector / sequence | 已做（框架 + 递归 `PlacedFeature.place`） | simple_random_selector（forest_flowers / flower_forest_flowers）90 中心 0 不一致，改坏报 52 处；其余子项多为树 / 水生（已移交），未逐块验证 |
 | 树 / `fallen_tree` / 巨型蘑菇 | 移交 `cb-wg-trees`（**已合入 main**） | — |
 | 水下植被 / 其余植被（见 `docs/worldgen-features-plan.md`「第二轮」） | 已由 `cb-wg-aquatic` 完成大部分 | 见该文档的对拍表 |
-| `noise_threshold_count` / `count_on_every_layer` / `surface_water_depth_filter` 修饰器 | 未做 | 标 `unsupported` |
+| `noise_threshold_count` / `count_on_every_layer` / `surface_water_depth_filter` 修饰器 | 已做（`placement.rs`） | `noise_threshold_count` 在 step 9 的 6 个花/草 placed feature 上 0 不一致；`surface_water_depth_filter` 随 26 个 `trees_*` 对拍；`count_on_every_layer` 主世界 `steps=[]`（只被下界使用），只有单测 |
 | `environment_scan` / `surface_relative_threshold_filter` / `noise_based_count` 修饰器 | 已由 `cb-wg-aquatic` 完成 | `block_column` / `glow_lichen` / `kelp_cold` 多种子 0 不一致 |
 | 蘑菇（亮度）/ 睡莲 / 孢子花 / 海泡菜 / 海草 / 地毯的 `canSurvive` | 已由 `cb-wg-aquatic` 完成 | 见 `docs/worldgen-features-plan.md`「第二轮」 |
-| 苔藓地毯（`MossyCarpetBlock.placeAt`，含侧面 `nextBoolean`） | 未做 | 标 `unsupported` |
+| 苔藓地毯（`MossyCarpetBlock.placeAt`，含侧面 `nextBoolean`） | 已做（`mossy_carpet.rs`，`region_random` 用裸 `RandomSource`） | `pale_moss_patch` 在 `--chunk 529509 523106 --seeds 6` 0 处，改坏 `nextBoolean` 报 6 处 |
 | holder 引用的 `to_place`（`BLOCK_STATE_PROVIDER` 注册表） | 已由 `cb-wg-aquatic` 完成（注册表已导出） | `cave_vines` 24 中心 0 不一致 |
-| `clamped_normal` IntProvider、`projected_random_patchy_square`（26.3 导出数据无条目） | 未做 | 标 `unsupported` / 无条目 |
+| `clamped_normal` IntProvider | 已做（`provider.rs` 的 `ClampedNormal` + `next_gaussian`） | 单测；主世界只被 step 7 的 dripstone 族用到 |
 | `weighted_list` IntProvider | 已做 | 见 `docs/worldgen-features-plan.md`「第二轮」（合并 main 后取 main 的 `Box<IntProvider>` 版） |
+| `java_set`（`HashSet<BlockPos>` 桶树化后的迭代序） | 已做（`cb-wg-feat-c`，按 JDK 25 字节码复刻 `treeifyBin` / `treeify` / `putTreeVal` / `TreeNode.split`） | `JavaSetOracle.java` 80 组插入序列逐个比对；`--chunk -58 -217 --scan 5 --seeds 2` 从 1 skipped 变成 0 skipped / 0 不一致；把 `putTreeVal` 改成追加桶尾报 10 处 |
+| `projected_random_patchy_square` | 26.3 导出数据无条目 | 不需要实现 |
 | 方块实体数据（蜂巢 / 可疑沙等） | 未做 | 无对拍 |
+
+实测说明见 `docs/worldgen-feat-c-notes.md`：`features_per_step` 的 171 个条目在真实区块上
+已不再报 `unsupported`（`fossil` / `desert_well` 的 JVM 侧限制属结构线，不是 Rust 侧跳过）。
+

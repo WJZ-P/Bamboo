@@ -41,6 +41,12 @@ pub struct FeatureContext<'a> {
     /// `WorldGenRegion.getRandom()`, read by calls such as `MossyCarpetBlock.placeAt`
     /// instead of the per-feature `random`. Shared by the whole `features` call.
     pub region_random: &'a crate::random::Random,
+    /// `applyBiomeDecoration` 每个 step 开头要先放结构件；`None` 表示这次调用只跑
+    /// 地物（旧对拍 / 诊断路径）。结构按注册名分组，组内顺序由调用方给。
+    ///
+    /// Vanilla places structures before features at the start of each step. `None`
+    /// runs features only (legacy oracles / diagnostics).
+    pub structures: Option<&'a crate::structure::place_step::StructurePlacement<'a>>,
 }
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数。
@@ -83,6 +89,13 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
     for step in 0..DECORATION_STEPS {
         if ctx.steps_mask & (1 << step) == 0 {
             continue;
+        }
+        // 官方 238–418 行：`shouldGenerateStructures()` 为真时，先按 step 分组放结构，
+        // 每个结构用 per-step 局部 index 播种，再跑本 step 的地物（全局 index）。
+        // Vanilla 238–418: when structures are enabled, place this step's structures
+        // first with a per-step local index, then run the step's features.
+        if let Some(placement) = ctx.structures {
+            placement.place(&mut world, input, step)?;
         }
         let globals = &ctx.registry.steps()[step];
         if globals.is_empty() {
@@ -147,11 +160,44 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 continue;
             };
 
-            // BiomeFilter 需要 level.getBiome(pos)，即 BiomeManager.getBiome 的
-            // 八角 fiddled distance；这里用一个闭包把采样器和上下文带进去。
+            // `BiomeFilter.shouldPlace` 问的是 `WorldGenLevel.getBiome(pos)`，即
+            // `WorldGenRegion.biomeManager.getBiome(pos)`。字节码里这个 BiomeManager
+            // 构造时传的 BiomeResolver 是 **region 自己**：`BiomeManager.getBiome` 先按
+            // `biomeZoomSeed` 做八角 fiddled distance 选中 quart 角，再走
+            // `LevelReader.getNoiseBiome` 读 3×3 区块里 BIOMES 阶段填好的 quart 格；
+            // 只有落在 3×3 之外才回退到 `getUncachedNoiseBiome()` 单点重算气候。
+            //
+            // 地表规则要用 region 的格子（成批与单点浮点顺序不同），地物的
+            // `BiomeFilter` 也必须用同一份格子。以前这里直接重算 `BiomeManager.biome`
+            // 气候，step 9 的植被会在群系边界上被放行 / 杀错。
+            //
+            // `BiomeFilter.shouldPlace` asks `WorldGenLevel.getBiome(pos)`, i.e.
+            // `WorldGenRegion.biomeManager.getBiome(pos)`. The bytecode constructs
+            // that BiomeManager with **the region itself** as BiomeResolver:
+            // `BiomeManager.getBiome` picks a quart corner by octant fiddled
+            // distance, then `LevelReader.getNoiseBiome` reads the quart cell
+            // stored in the 3x3 chunks; only outside the 3x3 does it fall back to
+            // single-point `getUncachedNoiseBiome()` sampling. Recomputing the
+            // climate here lets step-9 vegetation leak across biome borders.
+            let biomes = &input.biomes;
+            let zoom_seed = crate::biome_manager::obfuscate_seed(ctx.seed);
+            let min_y = ctx.settings.min_y;
+            let center_x = input.center_x;
+            let center_z = input.center_z;
             let mut biome_at = |x: i32, y: i32, z: i32| -> u32 {
-                ctx.biomes
-                    .biome(ctx.samplers, &mut density_context, x, y, z)
+                let corner = crate::biome_manager::fiddled_corner(zoom_seed, x, y, z);
+                match super::world::noise_biome_in(
+                    biomes, center_x, center_z, min_y, corner.0, corner.1, corner.2,
+                ) {
+                    Some(id) => id,
+                    None => ctx.biomes.noise_biome(
+                        ctx.samplers,
+                        &mut density_context,
+                        corner.0,
+                        corner.1,
+                        corner.2,
+                    ),
+                }
             };
             let mut env = PlacementEnv {
                 generation,
