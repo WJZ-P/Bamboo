@@ -1679,3 +1679,11 @@ structures (Compound)
   以及陷阱红石那组属性状态都还没写，也没有逐方块对拍。不假装支持。
 * 这些 `postProcess` 仍是纯函数 + oracle，**没接进 `feature/run.rs` / Director**，
   游戏里结构件仍然一个方块都不放（接线由 `cb-wg-structwire` 负责）。
+
+**全套合并检查（2026-11-15，`cb-wg-structures` 中间状态，丛林神殿之前）**：合并 `main`
+（`faeb4c66`）后 `cargo fmt --all --check`、`cargo clippy --workspace --all-targets`
+（0 警告）、`cargo test --workspace`、`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game`、
+`cargo check -p mc-bamboo-vanilla --no-default-features`（0 警告）全过；22 个结构 /
+世界生成对拍全部 0 不一致；`oracle java --weather clear` 10114 cases / 0 fail；
+联机探针 719/719，`--loaded` 连跑两次、两遍各 719/719。
+丛林神殿 `postProcess` 仍按上一段所述**未做**，这段验收不代表它。
