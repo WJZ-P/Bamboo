@@ -18,6 +18,7 @@ use crate::{
 };
 
 pub mod igloo;
+pub mod jungle_temple;
 pub mod ocean_ruin;
 pub mod pyramid;
 pub mod ruined_portal;
@@ -140,6 +141,42 @@ pub fn create_chest(
     let seed = random.next_long();
     entries.push(("LootTableSeed".to_owned(), mc_bamboo_nbt::Tag::Long(seed)));
     world.set_block_entity(pos.0, pos.1, pos.2, &mc_bamboo_nbt::Tag::Compound(entries));
+    Some(state)
+}
+
+/// `StructurePiece.createDispenser(...)`：盒子内且那里不是发射器时写一个发射器，
+/// 再按 `random.nextLong()` 把战利品表写进方块实体。官方走 `placeBlock`，
+/// 所以状态会按结构件的 mirror / rotation 变换；调用方先变换好再传进来。
+///
+/// `StructurePiece.createDispenser`: write a dispenser when inside the box and no
+/// dispenser is already there, then draw `random.nextLong()` for the loot table.
+/// Vanilla goes through `placeBlock`, so the state is already transformed by the caller.
+pub fn create_dispenser(
+    world: &mut FeatureWorld,
+    chunk_bb: &[i32; 6],
+    pos: (i32, i32, i32),
+    state: u32,
+    random: &crate::random::WorldgenRandom,
+    loot_table: &str,
+) -> Option<u32> {
+    if !box_is_inside(chunk_bb, pos.0, pos.1, pos.2)
+        || crate::structure::piece_place::is_block(
+            world.get_block(pos.0, pos.1, pos.2),
+            "minecraft:dispenser",
+        )
+    {
+        return None;
+    }
+    world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+    let seed = random.next_long();
+    let nbt = mc_bamboo_nbt::Tag::Compound(vec![
+        (
+            "LootTable".to_owned(),
+            mc_bamboo_nbt::Tag::String(loot_table.to_owned()),
+        ),
+        ("LootTableSeed".to_owned(), mc_bamboo_nbt::Tag::Long(seed)),
+    ]);
+    world.set_block_entity(pos.0, pos.1, pos.2, &nbt);
     Some(state)
 }
 

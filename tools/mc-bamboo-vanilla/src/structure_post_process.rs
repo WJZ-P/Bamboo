@@ -36,7 +36,12 @@ const CHUNKS: [(i32, i32); 4] = [(0, 0), (1, -1), (-3, 2), (100, -100)];
 /// The block range to compare: `minY..minY + height`.
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
-const KINDS: [&str; 3] = ["buried_treasure", "desert_pyramid", "swamp_hut"];
+const KINDS: [&str; 4] = [
+    "buried_treasure",
+    "desert_pyramid",
+    "swamp_hut",
+    "jungle_temple",
+];
 /// 一条查询。
 struct Query {
     kind: &'static str,
@@ -183,6 +188,25 @@ fn rust_diff(q: &Query) -> Result<RustOutcome, String> {
             // 女巫和猫是实体，Java 侧在这一步 abort；方块部分两边都写完了。
             // The witch and cat are entities; the Java side aborts there after writing blocks.
             true
+        }
+        "jungle_temple" => {
+            let pieces =
+                mc_bamboo_worldgen::structure::single::generate(q.kind, q.seed, q.cx, q.cz)?;
+            let piece = pieces.first().ok_or("no piece")?;
+            let (_, log) = post_process::jungle_temple::jungle_temple(
+                &mut world,
+                &piece.bb,
+                &chunk_bb,
+                Some(mc_bamboo_worldgen::structure::pieces::HDir::from_2d(
+                    piece.o,
+                )),
+                piece.rot,
+                piece.mirror,
+                &random,
+                Some(Vec::new()),
+            );
+            writes.extend(log.unwrap_or_default());
+            false
         }
         "desert_pyramid" => {
             let pieces =
