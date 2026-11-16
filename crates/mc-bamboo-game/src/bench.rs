@@ -68,6 +68,11 @@ impl<'a> BenchWorld<'a> {
         self.world.global.time().0
     }
 
+    /// 世界出生点所在的区块。真实地形场景按它铺开预生成区域。
+    pub fn spawn_chunk(&self) -> ChunkPos {
+        self.world.global.state().spawn.pos.chunk()
+    }
+
     /// 这些区块是不是都已交付。
     pub fn all_loaded(&self, chunks: &[ChunkPos]) -> bool {
         chunks

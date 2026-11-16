@@ -588,6 +588,7 @@ impl World {
         };
         if finished {
             self.bench_ready = true;
+            tracing::info!("bench scenario ready");
         }
     }
 

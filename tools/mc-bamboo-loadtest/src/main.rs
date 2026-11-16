@@ -90,8 +90,8 @@ async fn serve(args: &[String]) -> Result<(), Box<dyn Error>> {
             scenario::ScenarioKind::parse(&name).ok_or_else(|| format!("unknown scenario '{name}'"))
         })
         .transpose()?;
-    if let Some(hooks) = kind.and_then(scenario::configure) {
-        mc_bamboo_game::bench::install(hooks);
+    if let Some(kind) = kind {
+        mc_bamboo_game::bench::install(scenario::configure(kind));
     }
     let world_gen = match kind {
         Some(kind) if kind.normal() => mc_bamboo_game::WorldGenConfig {

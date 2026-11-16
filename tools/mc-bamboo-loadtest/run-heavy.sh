@@ -19,6 +19,8 @@ RAMP=${RAMP:-5}
 PROFILE_SECS=${PROFILE_SECS:-10}
 ROUNDS=${ROUNDS:-3}
 KEEP=${KEEP:-}
+# DURATION 只给冒烟测试用；正式测量用 describe 给出的场景时长。
+DURATION=${DURATION:-}
 
 if [ "$#" -ge 1 ] && [ -n "$1" ]; then
     OUT=$(mkdir -p "$1" && cd "$1" && pwd)
@@ -57,11 +59,14 @@ trap 'cleanup; exit 143' TERM
 trap cleanup EXIT
 
 run_one() {
-    local name=$1 round=$2 dir="$OUT/$name/round-$round"
+    local name=$1
+    local round=$2
+    local dir="$OUT/$name/round-$round"
     mkdir -p "$dir"
     local spec bots pattern layout seconds
     spec=$("$BIN" describe "$name") || { echo "unknown scenario: $name" >&2; return 1; }
     read -r bots pattern layout seconds <<< "$spec"
+    if [ -n "$DURATION" ]; then seconds=$DURATION; fi
     echo "=== $name round $round: $bots bots, $pattern/$layout, ${seconds}s ==="
     # 服务端在临时目录里跑：管理名单和日志都落在那里，不在仓库里留文件。
     (cd "$dir" && exec env BAMBOO_PROFILE="$PROFILE_SECS" BAMBOO_PROFILE_CHUNKS=1 \
@@ -84,6 +89,26 @@ run_one() {
     done
     if [ "$ready" -ne 1 ]; then
         echo "server did not become ready" >&2
+        stop_server
+        return 1
+    fi
+    # 等场景搭好（强制加载的区块全部交付）再放人，否则前几秒量的是生成排队。
+    local staged=0
+    for _ in $(seq 1 600); do
+        if grep -q "bench scenario ready" "$dir/server.log" 2>/dev/null; then
+            staged=1
+            break
+        fi
+        if ! kill -0 "$SERVER" 2>/dev/null; then
+            echo "server exited before the scenario was built:" >&2
+            tail -20 "$dir/server.log" >&2
+            stop_server
+            return 1
+        fi
+        sleep 0.5
+    done
+    if [ "$staged" -ne 1 ]; then
+        echo "scenario did not become ready in 300s" >&2
         stop_server
         return 1
     fi

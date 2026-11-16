@@ -150,8 +150,9 @@ struct Plan {
 /// 一个 `serve` 进程只跑一个场景；`setup` / `tick` 是普通函数指针，状态放这里。
 static PLAN: Mutex<Option<Plan>> = Mutex::new(None);
 
-/// 给 `serve` 用的钩子。没有机器时返回 `None`（真实地形场景不需要搭场景）。
-pub fn configure(kind: ScenarioKind) -> Option<BenchHooks> {
+/// 给 `serve` 用的钩子。所有场景都用同一个 `setup`：先把固定区域强制加载好，
+/// 再（有机器时）摆方块；真实地形场景只做前一步。
+pub fn configure(kind: ScenarioKind) -> BenchHooks {
     let builds = machines::all();
     let placements: Vec<Placement> = (0..kind.machines())
         .map(|i| Placement {
@@ -175,13 +176,10 @@ pub fn configure(kind: ScenarioKind) -> Option<BenchHooks> {
         forced: false,
         installed: false,
     });
-    if kind.machines() == 0 {
-        return None;
-    }
-    Some(BenchHooks {
+    BenchHooks {
         setup: setup_scene,
         tick: tick_scene,
-    })
+    }
 }
 
 fn translate_input(input: Input, origin: (i32, i32), index: i64) -> Vec<Action> {
@@ -230,8 +228,12 @@ fn origin_of(kind: ScenarioKind, index: usize) -> (i32, i32) {
 /// 机器所在的整片矩形都强制加载，保证是一片连通的已加载区域、
 /// 每台机器周围 3×3 都在（方块 tick 的前提）。
 fn forced_chunks(placements: &[Placement]) -> Vec<ChunkPos> {
+    // 真实地形没有机器：改成进程内由 `setup` 按出生点铺开的固定方框。
+    // 这里先给一个以原点为中心的 21×21 区块，`setup` 会按 `spawn_chunk()` 平移。
     if placements.is_empty() {
-        return Vec::new();
+        return (-10..=10)
+            .flat_map(|x| (-10..=10).map(move |z| ChunkPos::new(x, z)))
+            .collect();
     }
     let mut min_x = i32::MAX;
     let mut max_x = i32::MIN;
@@ -267,6 +269,13 @@ fn setup_scene(world: &mut BenchWorld<'_>) -> bool {
         return true;
     };
     if !plan.forced {
+        // 真实地形的出生点由种子决定，启动时才知道；把方框平移到出生点。
+        if plan.placements.is_empty() {
+            let spawn = world.spawn_chunk();
+            for chunk in &mut plan.chunks {
+                *chunk = ChunkPos::new(chunk.x + spawn.x, chunk.z + spawn.z);
+            }
+        }
         world.force_chunks(&plan.chunks);
         plan.forced = true;
         return false;
