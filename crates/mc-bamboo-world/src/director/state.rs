@@ -1073,6 +1073,8 @@ impl<C: ChunkBundle> Director<C> {
         record.task = None;
         self.refresh_busy(pos);
         self.release_task_owner(id);
+        // 不管这个任务占不占配额，都可能有被挡住的任务可以再试。
+        self.needs_retry = true;
         match result {
             TaskResult::Read { bytes: Some(bytes) } => {
                 self.enqueue(out, pos, generation, None, Task::Decode { pos, bytes });
@@ -1537,13 +1539,10 @@ impl<C: ChunkBundle> Director<C> {
             // 出堆时核对一次键：阶段推进后同一个任务可能带着旧键。
             let fresh = self.task_key(id);
             if epoch != self.demand_epoch || key != fresh {
+                // 只把重算过的键放回去，不复制第二份；键在这次 drive 里不再变，
+                // 再弹出时就是当前键，不会原地打转。
                 self.pending_order
                     .push(Reverse((fresh, id, self.demand_epoch)));
-                // 键没变小就别原地打转，留到下一次 drive。
-                if fresh >= key {
-                    skipped.push(id);
-                    continue;
-                }
                 continue;
             }
             let Some(pending) = self.pending.get(&id) else {
@@ -1564,26 +1563,11 @@ impl<C: ChunkBundle> Director<C> {
                 .in_flight
                 .values()
                 .any(|other| write_ranges_overlap(other.pos, other.write_radius, pos, radius));
-            // 公平轮转：该玩家这一类任务在途数越多，越往后排。
-            // 键不含它，所以只在真正取出时比较，不触发整表重排。
-            let owner = self.demand.owner(pos);
-            let used = owner
-                .and_then(|player| self.demand_in_flight.get(&(player, kind)).copied())
-                .unwrap_or(0);
-            let least_used = self
-                .demand
-                .players()
-                .iter()
-                .map(|player| {
-                    self.demand_in_flight
-                        .get(&(player.id, kind))
-                        .copied()
-                        .unwrap_or(0)
-                })
-                .min()
-                .unwrap_or(0);
-            let rotated = used > least_used;
-            if overlaps || rotated || !self.claim_task_owner(id, pos, kind) {
+            // 公平靠每名玩家的在途硬上限：满了就跳过这个任务，本轮不再试，
+            // 有任务完成时释放配额并标脏，下一轮 deferred 自动回来。
+            // 不用「最少在途数」做硬跳过，否则某个玩家恰好没有待派任务时
+            // 会把其它玩家全部饿死。
+            if overlaps || !self.claim_task_owner(id, pos, kind) {
                 skipped.push(id);
                 continue;
             }
