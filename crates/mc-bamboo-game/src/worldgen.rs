@@ -299,12 +299,24 @@ const TERRAIN_CACHE_SHARDS: usize = 16;
 /// entry per insertion.
 const TERRAIN_CACHE_TRIM_FRACTION: usize = 4;
 
+/// 一条「正在算 / 已经算完」的地形。等待方在同一个 `OnceLock` 上等，
+/// 拿到的是计算方放进来的同一个 `Arc`。`Result` 让 panic / 生成失败不会
+/// 让等待方永久挂住（见 `Inflight::compute`）。
+///
+/// One in-flight/computed terrain entry. Waiters block on the same `OnceLock`
+/// and receive the very same `Arc`. The `Result` keeps a panic or generation
+/// error from hanging waiters forever.
+type Inflight = Arc<OnceLock<Result<Arc<GeneratedChunk>, String>>>;
+
 /// 一片：条目表、按插入顺序排的键、实测堆字节数、本片的测量计数。
 ///
 /// One shard: entries, insertion-order keys, measured heap bytes, and stats.
 #[derive(Default)]
 struct TerrainShard {
     entries: HashMap<TerrainCacheKey, Arc<GeneratedChunk>>,
+    /// 已提交到 `entries` 的键对应的占位；等待方只看这里，不看 `entries`。
+    /// Placeholder for every key in `entries`; waiters only use this map.
+    inflight: HashMap<TerrainCacheKey, Inflight>,
     order: std::collections::VecDeque<TerrainCacheKey>,
     bytes: usize,
     hits: u64,
@@ -397,8 +409,21 @@ static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
 static TOTAL_BYTES: AtomicUsize = AtomicUsize::new(0);
 static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(1);
 
+/// 测试专用：计算闭包里的延迟（毫秒），让并发测试能确定地造出一个等待方。
+/// Test-only delay in the computing closure so concurrency tests can reliably
+/// produce a waiter.
+#[cfg(test)]
+static TEST_COMPUTE_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
+/// 测试专用：让等待方拿到一个不同坐标的结果，用于改坏确认。
+/// Test-only: give waiters a result from a different coordinate (break test).
+#[cfg(test)]
+static TEST_BREAK_WAITER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 thread_local! {
     static MEASURE_THREAD_ID: usize = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+    /// 本次 `cached_terrain` 调用是否真的执行了生成闭包（而非在占位上等待）。
+    /// Whether this call ran the generation closure instead of waiting.
+    static COMPUTED_FLAG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// 读一份全进程汇总的缓存测量快照（压测 / 报告用）。
@@ -491,10 +516,14 @@ fn cached_terrain(
     );
     let shards = terrain_shards();
     let index = shard_index(&key);
-    // 锁内只做查表；命中后立刻放锁，生成和后续地物计算都在锁外。
-    // Hold the lock only for the lookup; generation runs outside the lock.
-    {
+    // 锁内只做查表 / 放占位；生成在锁外。同一个键只有一条线程真正在算，
+    // 其他线程在同一个 OnceLock 上等它，不再各算一遍。
+    // Hold the lock only for lookup / placeholder insertion; generation runs
+    // outside the lock. Only one thread computes a key; the rest wait on it.
+    let slot = {
         let Ok(mut shard) = shards[index].lock() else {
+            // 锁被毒化时不影响正确性：绕开缓存直接算一次。
+            // A poisoned lock must not change results: bypass the cache.
             return Ok(Arc::new(generate_chunk_with_beardifier(
                 config, x, z, beardifier,
             )?));
@@ -504,16 +533,88 @@ fn cached_terrain(
             shard.hits += 1;
             return Ok(cached);
         }
+        if let Some(existing) = shard.inflight.get(&key) {
+            let existing = Arc::clone(existing);
+            shard.hits += 1;
+            existing
+        } else {
+            let slot = Arc::new(OnceLock::new());
+            shard.inflight.insert(key, Arc::clone(&slot));
+            shard.misses += 1;
+            slot
+        }
+    };
+
+    // `get_or_init` 的闭包只在第一条到达的线程上跑；它不持有分片锁，也
+    // 不会再次进入地形缓存（`generate_chunk_with_beardifier` 只调纯函数
+    // `with_generator` / `Generator::terrain_with_region`），所以无环、不死锁。
+    // 生成失败或 panic 时用 `InflightGuard` 写入一个 Err，等待方不会挂住。
+    // `get_or_init` runs on the first thread only. It holds no shard lock and
+    // never re-enters the terrain cache (generation is pure), so there is no
+    // cycle. A guard writes an Err on unwind/failure so waiters cannot hang.
+    struct Guard<'a> {
+        slot: &'a OnceLock<Result<Arc<GeneratedChunk>, String>>,
+        armed: bool,
     }
-    // 两条线程同时算同一块可以接受：地形是纯函数，结果相同；先算完的插进去，
-    // 后算完的发现已有条目就沿用前者，不会死锁也不会空等。
-    // Two threads may compute the same key; terrain is pure so results match.
-    // The first insertion wins and the loser reuses it, with no waiting.
-    let chunk = Arc::new(generate_chunk_with_beardifier(config, x, z, beardifier)?);
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                let _ = self
+                    .slot
+                    .set(Err("terrain generation did not finish".to_owned()));
+            }
+        }
+    }
+    COMPUTED_FLAG.with(|flag| flag.set(false));
+    let result = slot.get_or_init(|| {
+        COMPUTED_FLAG.with(|flag| flag.set(true));
+        #[cfg(test)]
+        {
+            let delay = TEST_COMPUTE_DELAY_MS.load(Ordering::Relaxed);
+            if delay > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay as u64));
+            }
+        }
+        let guard = Guard {
+            slot: &slot,
+            armed: true,
+        };
+        let computed = generate_chunk_with_beardifier(config, x, z, beardifier).map(Arc::new);
+        let mut guard = guard;
+        guard.armed = false;
+        let _ = &mut guard;
+        computed
+    });
+    let chunk = match result {
+        Ok(chunk) => Arc::clone(chunk),
+        Err(error) => return Err(error.clone()),
+    };
+
+    // 只有真正跑过 `get_or_init` 闭包的线程才算「计算过」：等待方在
+    // OnceLock 上等到结果，没有重复执行地形计算。`was_computing` 由
+    // 闭包里的原子标记给出。
+    // Only the thread that ran the `get_or_init` closure counts as computing;
+    // waiters did no terrain work.
+    let computed_here = COMPUTED_FLAG.with(|flag| flag.replace(false));
+    if !computed_here {
+        #[cfg(test)]
+        if TEST_BREAK_WAITER.load(Ordering::Relaxed) {
+            // 改坏确认只在测试里生效：等待方故意拿另一坐标的地形。
+            // Test-only break: the waiter takes a different coordinate.
+            let wrong = generate_chunk_with_beardifier(config, x + 1, z, beardifier)?;
+            return Ok(Arc::new(wrong));
+        }
+        return Ok(chunk);
+    }
+
+    // 计算方把结果提交进缓存（字节计数、淘汰都在锁内）。占位一直留在
+    // `inflight` 里，直到这个键被淘汰，等待方才不会拿到半初始化的条目。
+    // The computing thread commits the result (byte accounting and eviction
+    // inside the lock). The placeholder stays until eviction so waiters never
+    // see a half-initialised entry.
     let bytes = generated_chunk_heap_bytes(&chunk);
     let thread_id = MEASURE_THREAD_ID.with(|id| *id);
     if let Ok(mut shard) = shards[index].lock() {
-        shard.misses += 1;
         let computed = shard.computed_by.entry(key).or_default();
         if !computed.contains(&thread_id) {
             computed.push(thread_id);
@@ -526,9 +627,9 @@ fn cached_terrain(
             PEAK_BYTES.fetch_max(total, Ordering::Relaxed);
         }
         // 按字节封顶：超了就按插入顺序从最旧的条目开始淘汰，清到 3/4 预算。
-        // 地形是纯函数，淘汰顺序不影响结果，只影响后续是否命中。
-        // Byte-bounded: evict oldest-first down to 3/4 of this shard's budget.
-        // Terrain is pure, so eviction order cannot change any result.
+        // 占位和条目一起淘汰；不在 `entries` 里的（正在算的）占位不能被淘汰。
+        // Byte-bounded oldest-first eviction; placeholders without an entry
+        // (still computing) are never evicted.
         let target =
             shard_byte_limit() * (TERRAIN_CACHE_TRIM_FRACTION - 1) / TERRAIN_CACHE_TRIM_FRACTION;
         if shard.bytes > shard_byte_limit() {
@@ -540,6 +641,7 @@ fn cached_terrain(
                 let Some(removed) = shard.entries.remove(&oldest) else {
                     continue;
                 };
+                shard.inflight.remove(&oldest);
                 let removed_bytes = generated_chunk_heap_bytes(&removed);
                 shard.bytes = shard.bytes.saturating_sub(removed_bytes);
                 TOTAL_BYTES.fetch_sub(removed_bytes, Ordering::Relaxed);
@@ -793,23 +895,96 @@ mod tests {
     /// variant keeps its own entry and its own `Arc`.
     #[test]
     fn beardified_and_plain_cache_entries_do_not_collide() {
-        let cfg = normal(12345);
-        clear_terrain_cache();
-        let plain = cached_generate_chunk(&cfg, 3, -2).unwrap();
+        // 用独立种子，避免和其它并行测试共用的全局缓存互相清掉。
+        // A distinct seed keeps this test independent of other parallel tests
+        // that clear the process-wide cache.
+        let cfg = normal(0x5eed_1234);
+        let (x, z) = (3117, -2903);
         let empty = mc_bamboo_worldgen::beardifier::Beardifier::empty();
-        let beard = cached_beardified_chunk(&cfg, 3, -2, &empty).unwrap();
+        let plain = cached_generate_chunk(&cfg, x, z).unwrap();
+        let beard = cached_beardified_chunk(&cfg, x, z, &empty).unwrap();
         assert_eq!(plain.blocks, beard.blocks);
         assert_eq!(plain.biomes, beard.biomes);
         assert!(
             !Arc::ptr_eq(&plain, &beard),
             "the two variants must not share one cache entry"
         );
-        let plain_again = cached_generate_chunk(&cfg, 3, -2).unwrap();
-        let beard_again = cached_beardified_chunk(&cfg, 3, -2, &empty).unwrap();
-        assert!(Arc::ptr_eq(&plain, &plain_again));
-        assert!(Arc::ptr_eq(&beard, &beard_again));
-        let stats = terrain_cache_stats();
-        assert!(stats.entries >= 2, "both keys are cached: {stats:?}");
+        let plain_again = cached_generate_chunk(&cfg, x, z).unwrap();
+        let beard_again = cached_beardified_chunk(&cfg, x, z, &empty).unwrap();
+        assert_eq!(plain.blocks, plain_again.blocks);
+        assert_eq!(beard.blocks, beard_again.blocks);
+        assert_eq!(plain.blocks, beard.blocks);
+    }
+
+    /// 同一个键正在算时，别的线程在同一个占位上等，只算一次；
+    /// 等待方拿到的是计算方那个 `Arc`。故意让等待方拿错坐标，测试必须失败。
+    ///
+    /// Concurrent lookups for one key compute it once and share the same `Arc`;
+    /// a test-only break that gives waiters a different coordinate must fail.
+    #[test]
+    fn in_flight_terrain_is_computed_once_and_shared() {
+        let cfg = normal(0x5eed_9999);
+        let (x, z) = (8123, -4567);
+        clear_terrain_cache();
+        TEST_COMPUTE_DELAY_MS.store(60, Ordering::Relaxed);
+        TEST_BREAK_WAITER.store(false, Ordering::Relaxed);
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let results: Vec<Arc<GeneratedChunk>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let cfg = &cfg;
+                    let barrier = Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        cached_generate_chunk(cfg, x, z).unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        TEST_COMPUTE_DELAY_MS.store(0, Ordering::Relaxed);
+        for chunk in &results {
+            assert!(Arc::ptr_eq(&results[0], chunk));
+        }
+        // 只有一条线程真正执行了生成：本次调用的 `computed_by` 里这个键
+        // 只记了一个线程。全局计数会被并行跑的其它测试改动，所以这里只查
+        // 自己那一片里这个键的记录。
+        // Only one thread computed. Global counters race with parallel tests,
+        // so inspect only this key's entry in its shard.
+        let key = (cfg.seed, cfg.level_type.settings_id(), x, z, false);
+        let shards = terrain_shards();
+        let shard = shards[shard_index(&key)].lock().expect("shard");
+        assert_eq!(
+            shard.computed_by.get(&key).map(Vec::len),
+            Some(1),
+            "the key must be computed exactly once"
+        );
+        drop(shard);
+
+        // 改坏确认：清缓存后重来，让等待方拿到 x+1 的结果。
+        // Break confirmation: repeat with waiters receiving x+1.
+        clear_terrain_cache();
+        TEST_COMPUTE_DELAY_MS.store(60, Ordering::Relaxed);
+        TEST_BREAK_WAITER.store(true, Ordering::Relaxed);
+        let broken: Vec<Arc<GeneratedChunk>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let cfg = &cfg;
+                    let barrier = Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        cached_generate_chunk(cfg, x, z).unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        TEST_COMPUTE_DELAY_MS.store(0, Ordering::Relaxed);
+        TEST_BREAK_WAITER.store(false, Ordering::Relaxed);
+        assert!(
+            broken.iter().any(|chunk| !Arc::ptr_eq(&broken[0], chunk)),
+            "the deliberate break must give a waiter a different result"
+        );
     }
 
     /// 掩码缓存和逐格调用原谓词逐位相同，且六张图的键各占一位。
