@@ -412,8 +412,8 @@ struct ReclaimDue {
 /// 键只由 `(需求快照, 位置, 阶段, 编号)` 决定；任务完成、配额变化都不改它。
 type QueueKey = (i64, u8, TaskId);
 
-/// 堆里的一项，带着算键时的需求代数。换快照后旧代数惰性重算。
-type QueueEntry = (QueueKey, TaskId, u64);
+/// 堆里的一项：`(排序键, 任务编号)`。TaskId 已在键里作最后的兜底。
+type QueueEntry = (QueueKey, TaskId);
 
 /// 区块平面的 Director。见模块文档。
 #[derive(Debug)]
@@ -438,11 +438,9 @@ pub struct Director<C> {
     pending_order: BinaryHeap<Reverse<QueueEntry>>,
     /// 上一次被写范围/配额挡住、等状态变了再试的任务。
     deferred: Vec<TaskId>,
-    /// 有任务完成、新任务加入或需求快照变了，才需要再试 `deferred`。
-    needs_retry: bool,
-    /// 需求快照的代数；堆里的键用旧代数算过就惰性重算。
+    /// 需求快照的代数；变了之后堆里的键整堆重算一次。
     demand_epoch: u64,
-    /// 堆里大部分键是按哪一代需求算的；换快照时整堆重算一次即可。
+    /// 堆里当前键用的是哪一代需求。
     heap_epoch: u64,
     /// 逗留到期的队列：按 `unloaded_at` 排，队头不到期就不用再往后看。
     /// 同一个位置可能有旧条目（`unloaded_at` 改过），取出时和记录里的值对一下。
@@ -497,7 +495,6 @@ impl<C: ChunkBundle> Director<C> {
             queued_reads: BTreeSet::new(),
             pending_order: BinaryHeap::new(),
             deferred: Vec::new(),
-            needs_retry: false,
             demand_epoch: 0,
             heap_epoch: 0,
             reclaim_due: BinaryHeap::new(),
@@ -532,7 +529,6 @@ impl<C: ChunkBundle> Director<C> {
         }
         self.demand = demand;
         self.demand_epoch = self.demand_epoch.wrapping_add(1);
-        self.needs_retry = true;
     }
 
     /// 当前的需求快照，宿主的读盘、计算池和交付队列用同一个 rank 排序。
@@ -540,7 +536,8 @@ impl<C: ChunkBundle> Director<C> {
         &self.demand
     }
 
-    /// 每刻只重置派出配额。优先级由堆增量维护，不整表重排。
+    /// 每刻只重置派出配额，并让上一轮被挡住的任务再试一次。
+    /// `drive` 只把 deferred 重新放进堆，不重算任何其它任务的键。
     pub fn begin_tick(&mut self) {
         self.submitted_this_tick = 0;
     }
@@ -725,7 +722,9 @@ impl<C: ChunkBundle> Director<C> {
                 pos,
                 generation,
                 result,
-            } => self.on_task_done(&mut out, id, pos, generation, result),
+            } => {
+                self.on_task_done(&mut out, id, pos, generation, result);
+            }
             Event::Returned {
                 pos,
                 generation,
@@ -1074,7 +1073,6 @@ impl<C: ChunkBundle> Director<C> {
         self.refresh_busy(pos);
         self.release_task_owner(id);
         // 不管这个任务占不占配额，都可能有被挡住的任务可以再试。
-        self.needs_retry = true;
         match result {
             TaskResult::Read { bytes: Some(bytes) } => {
                 self.enqueue(out, pos, generation, None, Task::Decode { pos, bytes });
@@ -1360,8 +1358,6 @@ impl<C: ChunkBundle> Director<C> {
             self.refresh_busy(pos);
             self.queued_reads.remove(&pos);
         }
-        let kind = Self::demand_kind(&task);
-        let owner = self.demand.owner(pos);
         self.pending.insert(
             id,
             PendingTask {
@@ -1371,7 +1367,7 @@ impl<C: ChunkBundle> Director<C> {
                 task,
             },
         );
-        self.schedule_task(id, owner, kind);
+        self.schedule_task(id);
     }
 
     /// 一个任务属于哪种每玩家限速。`Save` / `Assemble` 是收尾路径，不占配额。
@@ -1418,15 +1414,12 @@ impl<C: ChunkBundle> Director<C> {
             self.demand_in_flight.remove(&(player, kind));
         }
         // 配额释放了，上一轮被挡住的任务可以再试。
-        self.needs_retry = true;
     }
 
     /// 把一个待派任务放进小顶堆。键只算一次；玩家快照变了才整堆重算。
-    fn schedule_task(&mut self, id: TaskId, _owner: Option<u64>, _kind: DemandKind) {
+    fn schedule_task(&mut self, id: TaskId) {
         let key = self.task_key(id);
-        self.pending_order
-            .push(Reverse((key, id, self.demand_epoch)));
-        self.needs_retry = true;
+        self.pending_order.push(Reverse((key, id)));
     }
 
     /// 一个任务的排序键：rank、阶段进度、TaskId 兜底。
@@ -1449,23 +1442,20 @@ impl<C: ChunkBundle> Director<C> {
         }
         let mut heap = std::mem::take(&mut self.pending_order);
         let mut fresh = Vec::with_capacity(heap.len());
-        while let Some(Reverse((_, id, _))) = heap.pop() {
+        while let Some(Reverse((_, id))) = heap.pop() {
             if self.pending.contains_key(&id) {
                 fresh.push(id);
             }
         }
         for id in fresh {
             let key = self.task_key(id);
-            self.pending_order
-                .push(Reverse((key, id, self.demand_epoch)));
+            self.pending_order.push(Reverse((key, id)));
         }
         self.heap_epoch = self.demand_epoch;
     }
 
     /// 队列里被取消的任务不用从堆里删：出堆时 `pending` 里查不到就跳过。
-    fn forget_priority_id(&mut self, _id: TaskId) {
-        self.needs_retry = true;
-    }
+    fn forget_priority_id(&mut self, _id: TaskId) {}
 
     /// 每处理完一个事件，把能推进的状态往前推：
     /// 新记录排 `Read`，待派任务按写范围排他派出去，攒着的 Ready/Forgot 发掉。
@@ -1506,19 +1496,14 @@ impl<C: ChunkBundle> Director<C> {
             return;
         }
         self.refresh_heap_if_needed();
-        // 被挡住的任务只有在「有新任务、有任务完成或玩家快照变了」时才重试，
-        // 不会每刻把积压整表重排。重试时和新堆项按同一个键比较。
-        let mut deferred = std::mem::take(&mut self.deferred);
-        let retry = self.needs_retry;
-        self.needs_retry = false;
-        if retry {
-            deferred.retain(|id| self.pending.contains_key(id));
-            let mut heap = std::mem::take(&mut self.pending_order);
-            for &id in &deferred {
-                heap.push(Reverse((self.task_key(id), id, self.demand_epoch)));
+        // 被配额/写范围挡住的任务每次 drive 都回到堆里参与比较；
+        // 只重算这少量任务的键，不碰其它待派任务，更不整表重排。
+        let deferred = std::mem::take(&mut self.deferred);
+        for id in deferred {
+            if self.pending.contains_key(&id) {
+                let key = self.task_key(id);
+                self.pending_order.push(Reverse((key, id)));
             }
-            self.pending_order = heap;
-            deferred.clear();
         }
 
         let cap = self.config.max_in_flight;
@@ -1530,21 +1515,13 @@ impl<C: ChunkBundle> Director<C> {
             {
                 break;
             }
-            let Some(Reverse((key, id, epoch))) = self.pending_order.pop() else {
+            let Some(Reverse((key, id))) = self.pending_order.pop() else {
                 break;
             };
             if !self.pending.contains_key(&id) {
                 continue;
             }
-            // 出堆时核对一次键：阶段推进后同一个任务可能带着旧键。
-            let fresh = self.task_key(id);
-            if epoch != self.demand_epoch || key != fresh {
-                // 只把重算过的键放回去，不复制第二份；键在这次 drive 里不再变，
-                // 再弹出时就是当前键，不会原地打转。
-                self.pending_order
-                    .push(Reverse((fresh, id, self.demand_epoch)));
-                continue;
-            }
+            let _ = key;
             let Some(pending) = self.pending.get(&id) else {
                 continue;
             };
