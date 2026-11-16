@@ -784,6 +784,21 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
    `gen-world --through features --all-features --seeds 2 --chunks 8 --salt 7`
    的整步对拍（全部类型一起跑，仍应 0 不一致）。
 
+### 带结构的整块端到端对拍
+
+`gen-world --through features --structures`（或封装好的 `structure-e2e` 子命令）把
+**开着结构**的整块生成也纳入对拍：Java 侧按官方 `createStructures` /
+`createReferences` 造半径 9 的起点网格、用真实 `Beardifier` 跑 3×3 的 CARVERS、
+再让 `shouldGenerateStructures()==true` 的 `StructureManager` 跑
+`applyBiomeDecoration`；游戏侧 `game_features_with_mask` 打开
+`generate_structures`，走 Director 的同一份 `build_view` + `run_features_filtered`。
+默认无结构模式（`WorldOptions(seed,false,false)` + `Beardifier.EMPTY`）完全不变。
+
+干净跑 42 个结构区块 / 37158912 格 0 不一致；`--break-structure` 跳过某类结构件、
+`long-set` 单独对拍 fastutil `LongOpenHashSet` 引用迭代序（3000 组 / 287248 次比较）、
+均做了改坏确认。命令、每种结构的覆盖区块 / 结构件数 / 方块数、这一轮修掉的 bug
+清单与剩余缺口见 [`docs/worldgen-structures-e2e.md`](worldgen-structures-e2e.md)。
+
 ## 还没做
 
 * 地物**类型**：`features` 阶段已接进游戏（见上），但只移植了 `minecraft:ore`；其余
