@@ -390,10 +390,42 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
             biome_data,
         });
     }
-    // 高度图 None -> 从方块重算；光照层 None、isLightOn=false -> 运行时补算。
-    // Heightmaps None -> recomputed from blocks; light None/off -> settled at runtime.
+    // `GeneratedChunk` 通常已经从最终 CARVERS 方块算好了六张高度图，其中四张就是
+    // 官方 FINAL_HEIGHTMAPS。直接打包交给 `ChunkColumnParts`，省掉
+    // `Chunk::from_sections` 逐格重算（24 段 × 4096 格 × 4 个谓词）。手工拼的
+    // chunk 可能不带高度图，此时用同一份 `compute_heightmaps` 从 layers 现算。
+    //
+    // `GeneratedChunk` normally holds all six heightmaps over the final CARVERS
+    // blocks, including the four vanilla FINAL_HEIGHTMAPS. Packing them here
+    // avoids `Chunk::from_sections` priming every cell again. Hand-built chunks
+    // may omit them; compute from the layers with the same pure function.
+    let owned;
+    let maps = if chunk.heightmaps.len() == HEIGHTMAP_KEYS.len()
+        && HEIGHTMAP_KEYS.iter().all(|key| {
+            chunk
+                .heightmaps
+                .get(key)
+                .is_some_and(|map| map.len() == WIDTH * WIDTH)
+        }) {
+        &chunk.heightmaps
+    } else {
+        owned = compute_heightmaps(&chunk.blocks);
+        &owned
+    };
+    let heightmaps: [Option<Vec<u64>>; HeightmapKind::ALL.len()] = std::array::from_fn(|index| {
+        let key = [
+            "WORLD_SURFACE",
+            "OCEAN_FLOOR",
+            "MOTION_BLOCKING",
+            "MOTION_BLOCKING_NO_LEAVES",
+        ][index];
+        maps.get(key).map(|columns| pack_heightmap_words(columns))
+    });
+    // 光照层 None、isLightOn=false -> 运行时补算。
+    // Light layers None/off -> settled at runtime.
     let parts = ChunkColumnParts {
         sections,
+        heightmaps,
         ..ChunkColumnParts::default()
     };
     let column = ChunkColumn::from_parts(parts)
@@ -409,6 +441,20 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         books: Default::default(),
         entities: Default::default(),
     }))
+}
+
+/// 把 256 列的世界高度编成官方 `LongArrayTag` 的 9 位一项、按字对齐的 long 数组。
+/// Pack 256 world heights into vanilla's 9-bit word-aligned `LongArrayTag`.
+fn pack_heightmap_words(columns: &[i32]) -> Vec<u64> {
+    // `Mth.ceillog2(WORLD_HEIGHT + 1)`：385 -> 9 位。
+    const BITS: usize = 9;
+    const PER_WORD: usize = 64 / BITS;
+    let mut words = vec![0u64; columns.len().div_ceil(PER_WORD)];
+    for (index, &height) in columns.iter().enumerate() {
+        let value = (height - MIN_Y) as u64;
+        words[index / PER_WORD] |= value << ((index % PER_WORD) * BITS);
+    }
+    words
 }
 
 /// 交付/存档会写出的四张 `FINAL_HEIGHTMAPS` 的打包位流（`LongArrayTag` 的内容）。
@@ -487,6 +533,48 @@ mod tests {
             assert_eq!(heightmap_mask(state) & !0x3f, 0, "state {state}");
         }
         assert_eq!(heightmap_mask(blocks::AIR), 0);
+    }
+
+    /// 高度图打包和 `Chunk::from_sections` 从方块重算出的四张 FINAL 字逐字相同，
+    /// 对带高度图的和手工拼的（空 heightmaps）chunk 都成立。
+    /// Packed heightmaps equal the four FINAL word arrays recomputed from blocks,
+    /// both for generated chunks and hand-built ones with empty heightmaps.
+    #[test]
+    fn packed_heightmaps_match_the_assembled_words() {
+        let cfg = normal(12345);
+        let chunk = generate_chunk(&cfg, 5, 7).unwrap();
+        let column = build_region_column(&chunk).unwrap();
+        let world = column.parts().column.chunk();
+        for (key, kind) in [
+            ("WORLD_SURFACE", HeightmapKind::WorldSurface),
+            ("OCEAN_FLOOR", HeightmapKind::OceanFloor),
+            ("MOTION_BLOCKING", HeightmapKind::MotionBlocking),
+            (
+                "MOTION_BLOCKING_NO_LEAVES",
+                HeightmapKind::MotionBlockingNoLeaves,
+            ),
+        ] {
+            assert_eq!(
+                pack_heightmap_words(&chunk.heightmaps[key]),
+                world.heightmap(kind),
+                "{key}"
+            );
+        }
+        let mut bare = chunk.clone();
+        bare.heightmaps.clear();
+        let bare_column = build_region_column(&bare).unwrap();
+        let bare_world = bare_column.parts().column.chunk();
+        for (_, kind) in [
+            ("WORLD_SURFACE", HeightmapKind::WorldSurface),
+            ("OCEAN_FLOOR", HeightmapKind::OceanFloor),
+            ("MOTION_BLOCKING", HeightmapKind::MotionBlocking),
+            (
+                "MOTION_BLOCKING_NO_LEAVES",
+                HeightmapKind::MotionBlockingNoLeaves,
+            ),
+        ] {
+            assert_eq!(bare_world.heightmap(kind), world.heightmap(kind));
+        }
     }
 
     #[test]
