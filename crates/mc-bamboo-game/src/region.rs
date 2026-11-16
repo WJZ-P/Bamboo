@@ -51,6 +51,7 @@ mod column_tests;
 pub(crate) mod content_snapshot;
 pub(crate) mod dirty;
 pub(crate) mod parking;
+pub(crate) mod partition;
 pub(crate) mod unit;
 
 // 区块平面和多 region 是后面的步骤，现在还没有调用方。
@@ -260,6 +261,8 @@ pub(crate) struct Region {
     pub(crate) peer_ips: BTreeMap<PlayerId, String>,
     /// 这个 region 每刻的耗时和数量指标。世界线程独占，一直开着。
     pub(crate) profiler: Profiler,
+    /// 第 2 步的划分状态：默认关，只在调试开关下接进世界循环。
+    pub(crate) partitioning: crate::region::partition::Partitioning,
     /// 「上次保存之后改过没有」的标记，见 [`dirty`]。
     pub(crate) dirty: dirty::Dirty,
 }
@@ -394,6 +397,7 @@ impl Region {
             last_action_millis: BTreeMap::new(),
             peer_ips: BTreeMap::new(),
             profiler: Profiler::default(),
+            partitioning: crate::region::partition::Partitioning::default(),
             dirty: dirty::Dirty::default(),
         }
     }
@@ -428,6 +432,16 @@ impl Region {
         }
     }
 
+    /// 划分阶段取走本刻排过方块事件的区块，并报告还排着事件的区块。
+    /// 两个入口都在 region 里，因为 `block_events` 表只对它可见。
+    pub(crate) fn drain_block_event_activity(&mut self) -> Vec<ChunkPos> {
+        self.block_events.drain_touched_chunks()
+    }
+
+    pub(crate) fn queued_block_event_chunks(&self) -> std::collections::BTreeSet<ChunkPos> {
+        self.block_events.queued_chunks()
+    }
+
     /// 方块逻辑要的世界和计划刻队列。它们借用不同的字段，所以要一起拿。
     pub(crate) fn block_level(&mut self) -> (RegionLevel<'_>, &mut BlockTicks) {
         let level = RegionLevel {
@@ -452,6 +466,8 @@ impl Region {
                 .profiler
                 .chunk_timing_enabled()
                 .then_some(&self.profiler),
+            partition_profiler: self.profiler.partition_enabled().then_some(&self.profiler),
+            partitions: &self.partitioning.partitions,
         };
         (level, &mut self.block_ticks)
     }
@@ -486,6 +502,8 @@ impl Region {
                 .profiler
                 .chunk_timing_enabled()
                 .then_some(&self.profiler),
+            partition_profiler: self.profiler.partition_enabled().then_some(&self.profiler),
+            partitions: &self.partitioning.partitions,
         };
         (level, &mut self.block_ticks, &mut self.redstone_cache)
     }

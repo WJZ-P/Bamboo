@@ -59,6 +59,11 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) dirty: &'a mut crate::region::dirty::Dirty,
     /// 按区块统计三个方块侧阶段时用的剖析器。默认关闭，`None` 时 `observe` 直接返回。
     pub(crate) chunk_profiler: Option<&'a crate::profiler::Profiler>,
+    /// 第 2 步的划分 / 越界统计。默认关闭，两个开关都关时 `observe` 只看两个
+    /// `Option`，方块逻辑的读写完全不受影响；`World::new` 也只问一次布尔值。
+    pub(crate) partition_profiler: Option<&'a crate::profiler::Profiler>,
+    /// `halo = 1 / 2` 两套划分，观察点据此判断触发碰到的区块在不在范围内。
+    pub(crate) partitions: &'a [crate::region::partition::Partition],
 }
 
 impl LevelTables for RegionLevel<'_> {
@@ -518,6 +523,14 @@ impl Level for RegionLevel<'_> {
         if let Some(profiler) = self.chunk_profiler {
             profiler.observe_trigger(event);
         }
+        if let Some(profiler) = self.partition_profiler {
+            profiler.observe_partition(event, self.partitions);
+        }
+    }
+
+    fn observe_partition_enabled(&self) -> bool {
+        self.partition_profiler
+            .is_some_and(crate::profiler::Profiler::partition_enabled)
     }
 }
 

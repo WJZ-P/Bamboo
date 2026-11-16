@@ -382,6 +382,14 @@ impl World {
             }
         }
         world.region.profiler.on_world_start();
+        if world.region.profiler.partition_enabled() {
+            let verify = world.region.profiler.partition_verify();
+            world.region.partitioning.enable(
+                &crate::partition_stats::HALOS,
+                verify,
+                crate::region::partition::QUIET_TICKS,
+            );
+        }
         world
     }
 
@@ -540,6 +548,15 @@ impl World {
         self.region.profiler.begin_tick();
         self.record_tick_counts();
         let flow = self.tick_phases();
+        // 三阶段这一刻的耗时由 `lap` 顺手记下，划分统计拿它当尾段占比的分母。
+        // 开关关着时这里只判一次布尔值。
+        if self.region.profiler.partition_enabled() {
+            let three = self.region.profiler.three_phase_nanos_this_tick();
+            let now = self.region.profiler.now();
+            if let Some(stats) = self.region.profiler.partition_stats_mut() {
+                stats.finish_tick(now, three);
+            }
+        }
         self.region.profiler.end_tick();
         flow
     }
@@ -569,6 +586,43 @@ impl World {
             Metric::LoadedChunks,
             self.region.chunks.loaded_count().unwrap_or(0) as u64,
         );
+    }
+
+    /// 划分阶段：只算不用，三个阶段照常串行。开关关着时只判一次布尔值。
+    ///
+    /// 忙区块的活动增量来自第 1 步的 drain 接口，只处理状态变了的区块；
+    /// 两套 halo 的单元各更新一次，统计打进剖析器。
+    fn run_partition_stage(&mut self, now: i64) {
+        if !self.region.partitioning.enabled {
+            return;
+        }
+        let touched_ticks = self.region.block_ticks.drain_touched_chunks();
+        let touched_events = self.region.drain_block_event_activity();
+        let awake = self.region.block_entities.awake_chunks();
+        let queued = self.region.queued_block_event_chunks();
+        let watchers = crate::region::partition::watcher_pairs(&self.region.block_entities);
+        let nanos = self.region.partitioning.tick(
+            now,
+            touched_ticks,
+            touched_events,
+            &awake,
+            &queued,
+            &watchers,
+        );
+        let verify_nanos = self.region.partitioning.verify_nanos();
+        let topology = self.region.partitioning.topology();
+        let busy = self.region.partitioning.busy_len();
+        let units = self.region.partitioning.units();
+        if let Some(stats) = self.region.profiler.partition_stats_mut() {
+            stats.record_partition(nanos, verify_nanos);
+            stats.record_units(busy, &units, topology.merges, topology.splits);
+        }
+        for partition in &self.region.partitioning.partitions {
+            assert!(
+                partition.areas_disjoint(),
+                "不同单元的范围不重叠：设计稿 4.1 的不变量"
+            );
+        }
     }
 
     /// 每刻一次的压测回调。`None` 时只做一次 `Option` 判断。
@@ -657,6 +711,9 @@ impl World {
         self.global.advance_time();
         self.region.advance_tick();
         self.region.profiler.lap(Phase::WeatherAndTime);
+        // 划分阶段串行、只算不用；三个阶段的执行顺序和行为不变。
+        self.run_partition_stage(self.global.time().0);
+        self.region.profiler.lap(Phase::Partition);
         // 官方 `ServerLevel.tick` 的顺序：方块和流体的计划刻、`chunkSource.tick` 里的随机刻、
         // 方块事件、实体、方块实体。计划刻和随机刻里生成的下落方块和 TNT 同一 tick 就动。
         //
@@ -666,7 +723,9 @@ impl World {
         self.region
             .profiler
             .begin_chunk_phase(ChunkPhase::ScheduledTicks);
+        self.region.profiler.begin_partition_phase();
         interaction::run_block_ticks(&mut self.region, self.global.time());
+        self.region.profiler.end_partition_phase();
         self.region.profiler.end_chunk_phase();
         self.region.profiler.lap(Phase::ScheduledTicks);
         interaction::run_random_ticks(&mut self.region);
@@ -674,7 +733,9 @@ impl World {
         self.region
             .profiler
             .begin_chunk_phase(ChunkPhase::BlockEvents);
+        self.region.profiler.begin_partition_phase();
         interaction::run_block_events(&mut self.region);
+        self.region.profiler.end_partition_phase();
         self.region.profiler.end_chunk_phase();
         self.region.profiler.lap(Phase::BlockEvents);
         interaction::run_entity_ticks(self.entity_threads, &mut self.region);
@@ -684,7 +745,9 @@ impl World {
         self.region
             .profiler
             .begin_chunk_phase(ChunkPhase::BlockEntities);
+        self.region.profiler.begin_partition_phase();
         interaction::run_block_entity_ticks(&mut self.region);
+        self.region.profiler.end_partition_phase();
         self.region.profiler.end_chunk_phase();
         self.region.profiler.lap(Phase::BlockEntities);
         // 玩家自己每 tick 的挖掘进度。官方在实体 tick 里跑 `ServerPlayerGameMode.tick`，

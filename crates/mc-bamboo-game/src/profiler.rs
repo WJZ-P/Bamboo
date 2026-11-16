@@ -21,6 +21,8 @@ use mc_bamboo_core::ChunkPos;
 const PROFILE_ENV: &str = "BAMBOO_PROFILE";
 /// 按区块记三个方块侧阶段的开关；`1` 打开，其余值（含没设）都当成关闭。
 const CHUNK_PROFILE_ENV: &str = "BAMBOO_PROFILE_CHUNKS";
+/// 多区域 tick 第 2 步的划分 / 越界统计；默认关，`1` 打开，`2` 还打开全量对照。
+const PARTITION_ENV: &str = "BAMBOO_PROFILE_PARTITION";
 /// 相邻两刻的起点理想上相隔 50 ms，和 `world.rs` 里的一刻等长。
 const TICK: Duration = Duration::from_millis(50);
 /// 0..15 ns 逐纳秒记，小到一次 lap 的耗时也能分辨。
@@ -164,6 +166,8 @@ pub(crate) enum Phase {
     Delivery,
     LightUpdates,
     WeatherAndTime,
+    /// 第 2 步的划分阶段：串行，只算不用，默认关时不产生耗时。
+    Partition,
     ScheduledTicks,
     RandomTicks,
     BlockEvents,
@@ -185,11 +189,12 @@ pub(crate) enum Phase {
 }
 
 impl Phase {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 19] = [
         Self::Inbox,
         Self::Delivery,
         Self::LightUpdates,
         Self::WeatherAndTime,
+        Self::Partition,
         Self::ScheduledTicks,
         Self::RandomTicks,
         Self::BlockEvents,
@@ -212,6 +217,7 @@ impl Phase {
             Self::Delivery => "delivery",
             Self::LightUpdates => "light_updates",
             Self::WeatherAndTime => "weather_and_time",
+            Self::Partition => "partition",
             Self::ScheduledTicks => "scheduled_ticks",
             Self::RandomTicks => "random_ticks",
             Self::BlockEvents => "block_events",
@@ -589,6 +595,8 @@ pub(crate) struct Profiler {
     chunks_this_tick: u64,
     /// 上一次 `lap` 或 `begin_tick` 的时刻。
     last_lap: Instant,
+    /// 这一刻每个阶段刚记下的耗时（纳秒）；`lap` 顺手写，不额外取时钟。
+    phase_durations: [u64; Phase::ALL.len()],
     /// 上一次 `lap_sub` 或 `end_sub` 的时刻；只在子段计时期间有效。
     sub_start: Instant,
     /// 正在计时的子段。`None` 表示没有未闭合的子段。
@@ -607,6 +615,12 @@ pub(crate) struct Profiler {
     chunk_timing: RefCell<ChunkTiming>,
     /// 开关单独存一份：关着时 `observe` 只要一次布尔判断，不碰 `RefCell`。
     chunk_timing_on: bool,
+    /// 第 2 步的划分 / 越界统计；默认不挂。
+    partition: Option<RefCell<crate::partition_stats::PartitionStats>>,
+    /// 单独存一份开关：`RegionLevel::observe` 每次只判这个布尔值。
+    partition_on: bool,
+    /// 每刻全量对照（默认关，`BAMBOO_PROFILE_PARTITION=2` 打开）。
+    partition_verify: bool,
 }
 
 impl Profiler {
@@ -631,6 +645,7 @@ impl Profiler {
             skipped_catch_ups: 0,
             chunks_this_tick: 0,
             last_lap: now,
+            phase_durations: [0; Phase::ALL.len()],
             sub_start: now,
             open_sub: None,
             tick_start: now,
@@ -641,6 +656,9 @@ impl Profiler {
             last_report: now,
             chunk_timing: RefCell::new(ChunkTiming::default()),
             chunk_timing_on: false,
+            partition: None,
+            partition_on: false,
+            partition_verify: false,
         }
     }
 }
@@ -663,6 +681,15 @@ fn chunk_profile_from_env() -> bool {
     env::var(CHUNK_PROFILE_ENV).is_ok_and(|value| value.trim() == "1")
 }
 
+/// 读第 2 步的开关。`1` 打开统计，`2` 还打开每刻全量对照。
+fn partition_verify_from_env() -> Option<bool> {
+    match env::var(PARTITION_ENV).ok()?.trim() {
+        "1" => Some(false),
+        "2" => Some(true),
+        _ => None,
+    }
+}
+
 /// 读环境变量，构造剖析器。世界创建时调用一次。
 fn report_interval_from_env() -> Option<Duration> {
     let value = env::var(PROFILE_ENV).ok()?;
@@ -678,6 +705,17 @@ impl Profiler {
     pub(crate) fn on_world_start(&mut self) {
         self.report_interval = report_interval_from_env();
         self.chunk_timing_on = chunk_profile_from_env();
+        if let Some(verify) = partition_verify_from_env() {
+            self.partition = Some(RefCell::new(
+                crate::partition_stats::PartitionStats::default(),
+            ));
+            self.partition_on = true;
+            self.partition_verify = verify;
+        } else {
+            self.partition = None;
+            self.partition_on = false;
+            self.partition_verify = false;
+        }
         self.last_report = self.clock.now();
     }
 
@@ -685,6 +723,38 @@ impl Profiler {
     #[inline]
     pub(crate) fn chunk_timing_enabled(&self) -> bool {
         self.chunk_timing_on
+    }
+
+    /// 第 2 步统计开着没有。`RegionLevel::observe` 关着时只看这一个布尔值。
+    #[inline]
+    pub(crate) fn partition_enabled(&self) -> bool {
+        self.partition_on
+    }
+
+    /// 全量对照开着没有。世界创建时读一次。
+    pub(crate) fn partition_verify(&self) -> bool {
+        self.partition_verify
+    }
+
+    /// 方块逻辑报告的读写 / 触发边界。`Observation` 的其余变体直接返回。
+    #[inline]
+    pub(crate) fn observe_partition(
+        &self,
+        event: Observation<'_>,
+        partitions: &[crate::region::partition::Partition],
+    ) {
+        if let Some(stats) = &self.partition {
+            stats
+                .borrow_mut()
+                .observe(event, partitions, self.clock.now());
+        }
+    }
+
+    /// 统计对象的可变引用，给世界循环在划分阶段和 tick 结束时用。
+    pub(crate) fn partition_stats_mut(
+        &mut self,
+    ) -> Option<&mut crate::partition_stats::PartitionStats> {
+        self.partition.as_mut().map(|cell| cell.get_mut())
     }
 
     /// 进入三个方块侧阶段之一；退出时再调 `end_chunk_phase`。
@@ -697,6 +767,19 @@ impl Profiler {
     pub(crate) fn end_chunk_phase(&self) {
         if self.chunk_timing_on {
             self.chunk_timing.borrow_mut().end_phase();
+        }
+    }
+
+    /// 三个方块侧阶段之一开始 / 结束：让越界统计按触发边界配对。
+    pub(crate) fn begin_partition_phase(&self) {
+        if let Some(stats) = &self.partition {
+            stats.borrow_mut().begin_phase();
+        }
+    }
+
+    pub(crate) fn end_partition_phase(&self) {
+        if let Some(stats) = &self.partition {
+            stats.borrow_mut().end_phase();
         }
     }
 
@@ -780,8 +863,25 @@ impl Profiler {
     /// 取时钟、一次时长换算和一次直方图记录。
     pub(crate) fn lap(&mut self, phase: Phase) {
         let now = self.clock.now();
-        self.phases[phase as usize].record_duration(now.saturating_duration_since(self.last_lap));
+        let nanos = now
+            .saturating_duration_since(self.last_lap)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        self.phases[phase as usize].record(nanos);
+        self.phase_durations[phase as usize] = nanos;
         self.last_lap = now;
+    }
+
+    /// 这一刻三个方块侧阶段各花了多少纳秒（划分统计用它算尾段占比）。
+    pub(crate) fn three_phase_nanos_this_tick(&self) -> u64 {
+        [
+            Phase::ScheduledTicks,
+            Phase::BlockEvents,
+            Phase::BlockEntities,
+        ]
+        .iter()
+        .map(|&phase| self.phase_durations[phase as usize])
+        .fold(0_u64, u64::saturating_add)
     }
 
     /// 开始给一个子段计时。子段不能嵌套；调用方保证 `lap_sub` 和 `end_sub` 成对。
@@ -981,6 +1081,9 @@ impl Profiler {
             self.skipped_catch_ups,
             Metric::SkippedCatchUps.unit(),
         );
+        if let Some(stats) = &self.partition {
+            out.push_str(&stats.borrow().report());
+        }
         if self.chunk_timing_on {
             let timing = self.chunk_timing.borrow();
             // 按区块的三阶段累计耗时（纳秒）。一行一个区块，离线脚本据此算
@@ -1046,8 +1149,12 @@ impl Profiler {
             histogram.reset();
         }
         self.sub_totals = [0; SubPhase::ALL.len()];
+        self.phase_durations = [0; Phase::ALL.len()];
         self.open_sub = None;
         self.chunk_timing.borrow_mut().reset();
+        if let Some(stats) = &self.partition {
+            stats.borrow_mut().reset();
+        }
         self.skipped_catch_ups = 0;
         self.chunks_this_tick = 0;
         self.ticks = 0;
