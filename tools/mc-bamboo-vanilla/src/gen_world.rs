@@ -556,11 +556,17 @@ impl Report {
             ));
         }
 
-        let config = WorldGenConfig {
+        let mut config = WorldGenConfig {
             seed,
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
         };
+        // Java 侧 `--through features` 用 `new StructureManager(level,
+        // new WorldOptions(seed, false, false), null)` 关掉结构分支，terrain 也走
+        // `Beardifier.EMPTY`；游戏侧必须同步关掉，两边才是同一片世界。
+        // Java's features mode disables structures and uses Beardifier.EMPTY;
+        // mirror that on the game side so both compare the same world.
+        config.generate_structures = false;
         // 和 Java 侧的 `--ore-only` / `--feature-types` 用同一份白名单。
         // Same allow list as Java's `--ore-only` / `--feature-types`.
         let ore_only = ["minecraft:ore".to_owned()];

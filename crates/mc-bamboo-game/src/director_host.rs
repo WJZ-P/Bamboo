@@ -199,6 +199,11 @@ pub(crate) struct DirectorHost {
     /// Generation-time light from the `light` stage, per chunk; installed into
     /// the delivered column at final assembly and cleared.
     generated_light: BTreeMap<ChunkPos, GeneratedLight>,
+    /// `structure_references` 阶段算好的 `structures` 顶层标签，按区块存；完工组装时
+    /// 装进交付盒子并清掉。
+    /// The `structures` tag from `structure_references`, installed into the
+    /// delivered column at assembly and then cleared.
+    generated_structures: BTreeMap<ChunkPos, mc_bamboo_nbt::Tag>,
     /// 计算池。`None` 是内联执行器：解析、生成、序列化当场做完（精确模式、测试）。
     pool: Option<ComputePool<ChunkJob>>,
     /// 还没交给池子的计算任务（待办）。池子里最多放 `threads × POOL_JOBS_PER_THREAD`
@@ -320,6 +325,7 @@ impl DirectorHost {
             partials: BTreeMap::new(),
             feature_deltas: BTreeMap::new(),
             generated_light: BTreeMap::new(),
+            generated_structures: BTreeMap::new(),
             pool: None,
             compute_backlog: HashMap::new(),
             backlog_order: BinaryHeap::new(),
@@ -1286,6 +1292,13 @@ impl DirectorHost {
                 if let Some(light) = self.generated_light.remove(&pos) {
                     column.set_generated_light(light);
                 }
+                // `structures` 标签最后装：它会从当前列读出读盘元数据并只覆盖
+                // `archive.structures`，不会动光照或方块。
+                // Install `structures` last: it reads the column's archive metadata
+                // and only replaces `archive.structures`, leaving light/blocks intact.
+                if let Some(tag) = self.generated_structures.remove(&pos) {
+                    crate::worldgen_structures::set_structures_tag(&mut column, &tag);
+                }
                 self.partials.remove(&pos);
                 self.feature_deltas.remove(&pos);
                 TaskResult::Assembled { column }
@@ -1472,6 +1485,9 @@ impl DirectorHost {
         }
         if let Some(light) = &output.light {
             self.generated_light.insert(pos, light.clone());
+        }
+        if let Some(structures) = &output.structures {
+            self.generated_structures.insert(pos, structures.clone());
         }
     }
 
@@ -1772,6 +1788,7 @@ impl DirectorHost {
                     self.partials.remove(&pos);
                     self.feature_deltas.remove(&pos);
                     self.generated_light.remove(&pos);
+                    self.generated_structures.remove(&pos);
                 }
             }
         }

@@ -227,6 +227,15 @@ impl SeededRouter {
         }
     }
 
+    /// 清掉 `RandomState` 自带上下文的采样器记忆格子。一条线程复用一个
+    /// `RandomState`，结构阶段的单点群系查询会写它；清掉后区块到达顺序不影响结果。
+    ///
+    /// Clear the `RandomState`'s own sampler cache cells. Structure-stage
+    /// single-point biome queries write it; clearing makes results order-independent.
+    pub fn reset_context(&mut self) {
+        self.context.reset();
+    }
+
     pub fn seed(&self) -> i64 {
         self.compiler.seed()
     }

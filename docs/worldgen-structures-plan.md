@@ -1552,11 +1552,12 @@ structures (Compound)
     `StructureState::start_plans` 的职责，已在 `structures` 对拍里逐格验过（9280 个
     比较），但这里的组合与它没有拼在一起逐格对拍。
 
-## 10. 已知限制（第五轮结束时，2026-11-14）
+## 10. 已知限制（第五轮结束时，2026-11-14；本轮更新见 §12）
 
 * 主世界以外的维度（下界、末地）不做。Bamboo 目前没有下界/末地维度。
-* **全是纯函数 + 对拍，没接进游戏**：`structure_starts` / `structure_references` 两个阶段
-  仍是空实现，本模块的结果没有进 Director 的流水线，游戏里世界仍是超平坦。
+* **已接进游戏（本轮，见 §12）**：`structure_starts` / `structure_references` 走
+  `mc-bamboo-game::worldgen_structures` 的纯函数，terrain 注入真实 Beardifier，
+  features 每 step 先放结构件，`structures` 键写盘/读回。
 * `.nbt` 结构模板**已导出**（第 2.2 节）：`cb-wg-jigsaw` 分支从 jar 原样导出 1511 个、
   4236847 字节，重跑无 diff，Rust 侧可解析并经官方 `NbtIo` 逐节点对拍 0 不一致。
   20 个多 palette 模板的 `StructurePlaceSettings.getRandomPalette`（按位置
@@ -1710,3 +1711,48 @@ structures (Compound)
 `structure-single-place` 都是 64 查询 / 74918 写入方块 / 75062 比较 0 不一致）；
 `oracle java --weather clear` 10114 cases / 0 fail；联机探针 719/719，
 `--loaded` 连跑两次、两遍各 719/719 且世界目录经官方 codec 读回通过。
+
+## 12. 接进 Director（2026-11-15，`cb-wg-structwire`）
+
+* **`structure/pipeline.rs`**：富模型 `WorldStructureStart` / `StartPieces`
+  （`Layout` / `Jigsaw` / `Sparse`），把各结构已对拍过的布局函数串成
+  `createStructures`；`as_sparse()` 投影回 `start.rs` 的稀疏模型，供引用、
+  Beardifier 和存档编码使用，旧 `structure-save` / `structure-load` 对拍不改。
+  `WorldStructureState` 按种子持有 `possibleStructureSets` 过滤、要塞环位置、
+  jigsaw 配置与模板池；`SeededRouter` 仍是每线程一份。
+* **游戏侧 `worldgen_structures.rs`**：两阶段纯函数重算 + 线程本地缓存，
+  `GenerateOutput.structures` 把 `starts` + `References` 标签交给世界线程，
+  `Task::Assemble` 装进 `ChunkArchiveMeta.structures`。读盘标签优先恢复起点，
+  再生成相邻区块与一次性生成一致（单测钉住）。
+* **terrain**：`generate_terrain_stage` 与 `build_view` 都走
+  `cached_generate_chunk_with_structures`，按官方 `createNoiseChunk` 把
+  `Beardifier.forStructuresInChunk` 注进 `terrain_with_region`。依赖表
+  `GENERATION[4].requires = [(S,8),(B,1)]` 保证半径 8 的 `structure_starts` 与中心
+  `structure_references` 定稿；Beardifier 按 `(seed,x,z)` 全局缓存，0/2/8 计算线程
+  逐字节相同（`structure_terrain_is_identical_across_worker_counts`）。
+  **竞争根源与修法**：旧实现里 `build_view`（邻居中心重算地物用）读 EMPTY 地形的
+  `TERRAIN_CACHE`，而 `generate_features_stage` 读世界线程 `partials` 里的真实
+  Beardifier 地形；同一区块哪份快照先落地由计算池调度决定，
+  `neighbor_spills_depend_on_which_terrain_snapshot_arrives` 稳定复现。
+  `structure-pipeline` 现在还把官方带真实 Beardifier 的 CARVERS 方块逐格比：
+  28 个结构区块 / 2752512 格 0 不一致，`--break-self-test` 报 28 处。
+* **features**：`feature/run.rs` 每个 step 的地物之前调
+  `structure/place_step.rs`；per-step 局部 index 数的是整张 `STRUCTURE` 注册表，
+  结构件 `postProcess` 写 `FeatureWorld`（`PieceLevel` / `ProcessorLevel` 适配只加不删）。
+  官方 `StructureStart.placeInChunk` 的包围盒相交、最后 `afterPlace` 都照做。
+* **允许清单**：`cb-wg-structures` 合进 main 后，放置已逐方块对拍 0 的全部类型
+  都打开：jigsaw / 矿井 / 要塞 / 海底神殿 / 林地府邸 / 雪屋 / 沉船 / 海底遗迹 /
+  沙漠神殿 / 丛林神殿 / 女巫小屋 / 埋藏的宝藏 / 废弃传送门。所有结构的起点、引用、
+  Beardifier 与 `structures` 存档本来就照官方算并存盘；现在放置也不再跳过。
+* **对拍**：新子命令 `structure-pipeline <java>`（`StructurePipelineOracle.java`）
+  在 JVM 里造 17×17 个 ProtoChunk，跑官方 `createStructures` / `createReferences`，
+  逐区块比起点 / 引用 / 每个结构件的包围盒：28 行、84 次比较、2482 个结构件、28 个结构区块 /
+  2752512 格带真实 Beardifier 的 CARVERS 方块 0 不一致；`--break-self-test` 报 28 处。
+  另外 `gen-world --through features` / carvers 旧模式仍 0 不一致。
+* **耗时**：`wg-perf --structure-timing`（release，1 种子 × 10 群系 × 3 区块 × 2 遍）
+  实测 `structure_starts` 冷中位数 0.001 ms（首个区块 49 ms 建全局状态）、
+  `structure_references` 冷中位数 6.813 ms、缓存命中 0.032 ms。缓存只影响速度：
+  单测打乱顺序 / 清缓存后结果逐字节相同。
+* **未做**：`generate-structures=false` 时 flat 世界的 `structure_overrides`；
+  结构生成期实体（村民、悦灵、守卫者）；非 full 的 ProtoChunk 从盘上分阶段续跑时
+  与官方混合（`BlendingData`）；`FeaturePoolElement` / `ListPoolElement` 的放置分支。

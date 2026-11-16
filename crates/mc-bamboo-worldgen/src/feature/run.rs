@@ -41,6 +41,12 @@ pub struct FeatureContext<'a> {
     /// `WorldGenRegion.getRandom()`, read by calls such as `MossyCarpetBlock.placeAt`
     /// instead of the per-feature `random`. Shared by the whole `features` call.
     pub region_random: &'a crate::random::Random,
+    /// `applyBiomeDecoration` 每个 step 开头要先放结构件；`None` 表示这次调用只跑
+    /// 地物（旧对拍 / 诊断路径）。结构按注册名分组，组内顺序由调用方给。
+    ///
+    /// Vanilla places structures before features at the start of each step. `None`
+    /// runs features only (legacy oracles / diagnostics).
+    pub structures: Option<&'a crate::structure::place_step::StructurePlacement<'a>>,
 }
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数。
@@ -83,6 +89,13 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
     for step in 0..DECORATION_STEPS {
         if ctx.steps_mask & (1 << step) == 0 {
             continue;
+        }
+        // 官方 238–418 行：`shouldGenerateStructures()` 为真时，先按 step 分组放结构，
+        // 每个结构用 per-step 局部 index 播种，再跑本 step 的地物（全局 index）。
+        // Vanilla 238–418: when structures are enabled, place this step's structures
+        // first with a per-step local index, then run the step's features.
+        if let Some(placement) = ctx.structures {
+            placement.place(&mut world, input, step)?;
         }
         let globals = &ctx.registry.steps()[step];
         if globals.is_empty() {

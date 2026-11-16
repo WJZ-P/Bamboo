@@ -822,6 +822,15 @@ impl<'a> Generator<'a> {
         Ok(names)
     }
 
+    /// 清掉群系参数表 R 树的 `lastResult`。结构起点判定里的单点群系查询会改写它，
+    /// 计算池各区块到达顺序不定；地形生成前先清掉才能与调度无关。
+    ///
+    /// Clear the biome parameter list's R-tree `lastResult`: structure-start
+    /// single-point biome queries mutate it, and chunk arrival order varies.
+    pub fn reset_biome_state(&self) {
+        self.biomes.reset();
+    }
+
     /// `ChunkStatus.FEATURES`：`ChunkGenerator.applyBiomeDecoration`。
     ///
     /// 输入是中心加 8 个邻居到 CARVERS 阶段的结果；输出 9 个区块改成 FEATURES
@@ -833,6 +842,26 @@ impl<'a> Generator<'a> {
         steps_mask: i32,
         allowed_kinds: Option<&[String]>,
     ) -> Result<crate::feature::FeatureResult, String> {
+        self.features_with_structures(input, steps_mask, allowed_kinds, None)
+            .map(|(result, _)| result)
+    }
+
+    /// [`Self::features`] 加上 `applyBiomeDecoration` 里「每 step 先放结构件」的那一段。
+    ///
+    /// `features` plus vanilla's per-step structure placement.
+    pub fn features_with_structures(
+        &self,
+        input: &crate::feature::FeatureChunks,
+        steps_mask: i32,
+        allowed_kinds: Option<&[String]>,
+        structures: Option<&crate::structure::place_step::StructurePlacement<'_>>,
+    ) -> Result<
+        (
+            crate::feature::FeatureResult,
+            Option<crate::structure::place_step::PlaceStats>,
+        ),
+        String,
+    > {
         let biomes = BiomeManager::new(self.biomes, self.seed);
         // `WorldGenRegion.random`：`getOrCreateRandomFactory("worldgen_region_random")`
         // 在中心区块的**世界原点**（`center.getWorldPosition()`）上取一个随机源。
@@ -863,8 +892,11 @@ impl<'a> Generator<'a> {
             steps_mask,
             allowed_kinds,
             region_random: &region_random,
+            structures,
         };
-        crate::feature::run::features(input, &context)
+        let result = crate::feature::run::features(input, &context)?;
+        let stats = structures.map(|placement| placement.total_stats());
+        Ok((result, stats))
     }
 
     /// 地物注册表，对拍报告统计用。

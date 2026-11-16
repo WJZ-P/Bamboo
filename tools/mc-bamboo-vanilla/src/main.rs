@@ -183,6 +183,8 @@ mod structure_load;
 #[cfg(feature = "oracle")]
 mod structure_pieces;
 #[cfg(feature = "oracle")]
+mod structure_pipeline;
+#[cfg(feature = "oracle")]
 mod structure_place;
 #[cfg(feature = "oracle")]
 mod structure_post_process;
@@ -269,6 +271,8 @@ const JIGSAW_SOURCE: &str = "tools/mc-bamboo-vanilla/java/JigsawOracle.java";
 const STRUCTURE_GENERATION_SOURCE: &str =
     "tools/mc-bamboo-vanilla/java/StructureGenerationOracle.java";
 #[cfg(feature = "oracle")]
+const STRUCTURE_PIPELINE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePipelineOracle.java";
+#[cfg(feature = "oracle")]
 const STRUCTURE_SINGLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSingleOracle.java";
 #[cfg(feature = "oracle")]
 const STRUCTURE_TEMPLATED_SOURCE: &str =
@@ -341,7 +345,8 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla beard <java 路径> [--through noise|surface|carvers] [--break-self-test]
       mc-bamboo-vanilla gen-light <java 路径> [--scenes N] [--seed S] [--show N] [--break-self-test]
       mc-bamboo-vanilla wg-perf [--seeds N] [--chunks N] [--biomes a,b,c] [--repeat N] [--threads N] [--json] [--skip-cut] [--skip-sky] [--skip-threads]
-      mc-bamboo-vanilla structure-generation <java 路径>
+      mc-bamboo-vanilla structure-generation <java 路径> [--break-self-test]
+      mc-bamboo-vanilla structure-pipeline <java 路径> [--break-self-test]
       mc-bamboo-vanilla structure-single <java 路径>
       mc-bamboo-vanilla structure-templated <java 路径>
       mc-bamboo-vanilla structure-templated-place <java 路径>
@@ -415,6 +420,7 @@ fn run() -> Result<(), String> {
         #[cfg(feature = "oracle")]
         ["wg-perf", ref options @ ..] => wg_perf::run(options),
         ["structure-generation", java, ref options @ ..] => structure_generation_cli(java, options),
+        ["structure-pipeline", java, ref options @ ..] => structure_pipeline_cli(java, options),
         ["structure-single", java, ref options @ ..] => structure_single_cli(java, options),
         ["structure-templated", java, ref options @ ..] => structure_templated_cli(java, options),
         ["structure-templated-place", java, ref options @ ..] => {
@@ -670,6 +676,17 @@ fn structure_validity_cli(java: &str, options: &[&str]) -> Result<(), String> {
     structure_validity::run(
         official_program(java, STRUCTURE_VALIDITY_SOURCE)?,
         &worldgen_path,
+        &queries_path,
+        options,
+    )
+}
+
+#[cfg(feature = "oracle")]
+fn structure_pipeline_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let queries_path = root.join(WORK_DIR).join("structure_pipeline_queries.txt");
+    structure_pipeline::run(
+        official_program(java, STRUCTURE_PIPELINE_SOURCE)?,
         &queries_path,
         options,
     )
@@ -1074,6 +1091,11 @@ fn structure_templates_cli(_java: &str, _options: &[&str]) -> Result<(), String>
 
 #[cfg(not(feature = "oracle"))]
 fn structure_generation_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_pipeline_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

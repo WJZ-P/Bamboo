@@ -788,16 +788,17 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
 
 * 地物**类型**：`features` 阶段已接进游戏（见上），但只移植了 `minecraft:ore`；其余
   feature / modifier / predicate 类型照对拍标 `unsupported` 跳过（地物 A/B 在做）。
-  结构（两个阶段是空实现）、生成时的 `initialize_light` / `light`（`light` 已带半径 1
+  结构（两阶段已接入，见下）、生成时的 `initialize_light` / `light`（`light` 已带半径 1
   邻居引用，但真实光照计算没移植，光照由**运行时**引擎在交付后补算）、`spawn` 刷怪仍是空实现。
 * 生成期光照 `initialize_light` / `light` 的真实计算（`isLightOn=true`、天空光 / 方块光
   逐格对拍）：邻居视图的接口已经就位，计算本身是下一轮。
 * 下界和末地（无 `aquifers` 的路径、五群系末地源、下界老 fbm）。
 * `BlendingData` / `Blender` 的非空路径（老存档升级、旧区块混合）。
-* `Beardifier` 的非空密度路径**已移植并对拍**（见 `docs/worldgen-structures-plan.md` 第 5 节
-  和 `cargo run -p mc-bamboo-vanilla -- beard <java>`）：纯函数、密度计算和整条
-  `finalDensity` 接入都逐位一致，但**没接进游戏**——`structure_starts` 阶段还是空实现，
-  游戏里 `terrain` 仍走 `EMPTY` 那支；把真实结构件喂进 `terrain_with_beardifier` 是合并时的事。
+* `Beardifier` 的非空密度路径**已移植、对拍并接进游戏**（见
+  `docs/worldgen-structures-plan.md` 第 5、12 节）：`generate_terrain_stage` 与
+  `build_view` 共用按 `(seed,x,z)` 全局缓存的真实 `Beardifier`，依赖表保证半径 8
+  起点定稿，0/2/8 计算线程结果逐字节相同；`structure-pipeline` 逐格比官方带
+  Beardifier 的 CARVERS 方块 28 区块 / 2752512 格 0 不一致。
 * `possibleBiomes` / `carverBiome` / `region.getBiomeManager()` 已**在游戏侧落地**（见
   「真实服务端路径与简化路径」）：`generate_chunk` 调 `Generator::biome_region` 造 3×3
   群系视图、`terrain_with_region` 读 quart 格并传 3×3 `possibleBiomes` 并集，
@@ -812,3 +813,26 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
 * 非 `full` 的 ProtoChunk 从盘上读回后从它的状态继续生成：流水线按阶段纯函数写好了，
   但读盘路径仍按现有模板/ProtoChunk 逻辑，未针对多阶段重新对拍。
 * 并行化和 SIMD：先有逐位一致的基线再谈优化。
+
+### 结构阶段（本轮接入）
+
+`structure_starts` / `structure_references` 不再是透传：
+`mc-bamboo-game::worldgen_structures` 按种子缓存 `WorldStructureState`（含要塞环位置），
+纯函数重算半径 8 的邻域起点，把 `structures` 标签（`starts` + `References`）随
+`GenerateOutput` 交回世界线程，`Task::Assemble` 装进 `ChunkArchiveMeta.structures`。
+`features` 每个 decoration step 先跑 `StructureStart.placeInChunk` 再跑地物。
+对拍见 `cargo run -p mc-bamboo-vanilla -- structure-pipeline <java>`：官方 17×17 的
+`createStructures` / `createReferences` 与游戏同一条路径逐项比，28 行 / 2482 结构件 / 2752512 格 Beardifier 地形 0 不一致，`--break-self-test` 会失败。
+
+`wg-perf --structure-timing`（release，1 种子 × 10 群系 × 3 区块 × 2 遍）实测：
+
+| 阶段 | 平均 ms | 中位数 ms | p95 ms |
+|---|---:|---:|---:|
+| `structure_starts`（冷） | 49.416 | 0.001 | 0.029 |
+| `structure_references`（冷） | 23.085 | 6.813 | 76.198 |
+| `structure_starts`（缓存） | 0.000 | 0.000 | 0.001 |
+| `structure_references`（缓存） | 0.034 | 0.032 | 0.049 |
+
+冷启动的平均被首个区块建全局状态（环位置、注册表解析）拉高；稳态看缓存列。
+`structure-single` 四件与废弃传送门的 `postProcess` 仍标 unsupported 跳过，但起点、
+引用、Beardifier、存档全部照官方算，等对应分支合入后打开允许清单即可。
