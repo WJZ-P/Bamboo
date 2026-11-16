@@ -1,18 +1,172 @@
 //! 计划刻队列，对应官方的 `LevelTicks`。方块和流体各有一条，`ServerLevel.tick` 先跑方块的，再跑流体的。
 //!
-//! 官方按区块分容器，这里的世界不卸载区块，一个全局队列的执行顺序和官方相同：
-//! 先比到期时间，再比优先级，最后比加入的先后。
+//! 队列的粒度是「单元」：一个单元一棵按（到期时间、优先级、顺序号、位置）
+//! 排好的队列，单元合并时两棵队列并起来，拆分时按区块集合拆开。现在整张
+//! region 是一个单元，所以还是一棵全局队列；`split_off` / `absorb` 给下一步
+//! 的单元并行用。region 级另外记每个区块还有几条待执行的刻，既能便宜地回答
+//! 「这个区块忙不忙」，也让按区块取放能跳过空区块。
+//!
+//! 计划刻不按每区块单独存一份队列：实测把 100 万条刻分成 16 / 1024 / 4096
+//! 个区块各一棵队列，排入加执行的中位数比一棵全局队列慢 19%–99%（见
+//! `docs/multi-region-tick-design.md` 4.8）。有刻的区块一定是忙区块，而单元
+//! 是半稳定的，所以按单元存已经够并行，热路径不必多付一层哈希。
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fmt,
-    hash::Hash,
+    hash::{BuildHasherDefault, Hash, Hasher},
 };
 
 use mc_bamboo_core::{BlockPos, ChunkPos};
 
 /// `ServerLevel.tick` 给每条队列的上限：一刻最多跑这么多个，剩下的留到下一刻。
 const MAX_TICKS_PER_TICK: usize = 65_536;
+
+/// 单元编号占顺序号的高 24 位；一个单元内的顺序号不会用到这么多位。
+/// 见 [`BlockTicks::split_off`] 和设计稿 4.7。
+const UNIT_SHIFT: u32 = 40;
+
+/// 区块坐标的便宜哈希：计数表就在排刻热路径上，SipHash 太贵。
+#[derive(Default)]
+struct ChunkHasher(u64);
+
+impl Hasher for ChunkHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+
+    fn write_i32(&mut self, value: i32) {
+        let mixed = (value as u32 as u64)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .rotate_left(29);
+        self.0 = (self.0 ^ mixed).wrapping_mul(0xff51_afd7_ed55_8ccd);
+        self.0 ^= self.0 >> 33;
+    }
+}
+
+type ChunkMarks = HashMap<ChunkPos, ChunkMark, BuildHasherDefault<ChunkHasher>>;
+
+/// 一个区块的标记：存盘脏位 + 最近一次排入计划刻的时刻。
+///
+/// 原来的 `dirty` 是 `BTreeSet<ChunkPos>`，每次排刻插一次；现在一次哈希查表
+/// 同时更新这两样，顺手得到「最近排过刻的区块」，给下一步的忙区块划分用。
+#[derive(Debug, Clone, Copy, Default)]
+struct ChunkMark {
+    /// 0 表示没排过刻；其它值是 `时刻 + 1`，紧凑地省掉 `Option` 的额外 8 字节。
+    last_scheduled_plus_one: i64,
+    dirty: bool,
+}
+
+impl ChunkMark {
+    fn last_scheduled(self) -> Option<i64> {
+        (self.last_scheduled_plus_one != 0)
+            .then_some(self.last_scheduled_plus_one.saturating_sub(1))
+    }
+
+    fn set_scheduled(&mut self, now: i64) -> bool {
+        let next = now.saturating_add(1);
+        // 时刻从 0 开始，+1 后不会是 0；`i64::MAX` 饱和时保持原样。
+        debug_assert!(next != 0);
+        let changed = self.last_scheduled_plus_one != next;
+        self.last_scheduled_plus_one = next;
+        changed
+    }
+}
+
+/// 忙区块的迟滞刻度，见 `docs/multi-region-tick-design.md` 4.1。
+const QUIET_TICKS: i64 = 100;
+
+/// 按区块记存盘脏位和最近排刻时刻，外加本刻第一次排刻的区块清单。
+#[derive(Debug, Clone, Default)]
+struct ChunkActivity {
+    marks: ChunkMarks,
+    /// 本刻从「不是本刻」变成「本刻」的区块，每区块每刻最多一条。
+    touched: Vec<ChunkPos>,
+}
+
+impl ChunkActivity {
+    /// 排一条刻：标脏、记时刻、必要时 push 到 touched。
+    fn schedule(&mut self, chunk: ChunkPos, now: i64, last_chunk: &mut Option<ChunkPos>) {
+        if *last_chunk == Some(chunk)
+            && let Some(mark) = self.marks.get_mut(&chunk)
+        {
+            mark.dirty = true;
+            if mark.set_scheduled(now) {
+                self.touched.push(chunk);
+            }
+            return;
+        }
+        *last_chunk = Some(chunk);
+        let mark = self.marks.entry(chunk).or_default();
+        mark.dirty = true;
+        if mark.set_scheduled(now) {
+            self.touched.push(chunk);
+        }
+    }
+
+    fn dirty_contains(&self, chunk: ChunkPos) -> bool {
+        self.marks.get(&chunk).is_some_and(|mark| mark.dirty)
+    }
+
+    fn last_scheduled(&self, chunk: ChunkPos) -> Option<i64> {
+        self.marks.get(&chunk)?.last_scheduled()
+    }
+
+    /// 取走脏集合，按区块坐标升序（原来 `BTreeSet` 的顺序）返回，并清脏位。
+    fn take_dirty(&mut self) -> BTreeSet<ChunkPos> {
+        let mut out = BTreeSet::new();
+        for (&chunk, mark) in &mut self.marks {
+            if mark.dirty {
+                mark.dirty = false;
+                out.insert(chunk);
+            }
+        }
+        out
+    }
+
+    /// 回收没有脏位、且最近 `quiet_ticks` 刻内没排过刻的标记，表不无限长。
+    fn prune(&mut self, now: i64) {
+        self.marks.retain(|_, mark| {
+            mark.dirty
+                || mark
+                    .last_scheduled()
+                    .is_some_and(|at| at.saturating_add(QUIET_TICKS) >= now)
+        });
+    }
+
+    fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        let mut marks = ChunkMarks::default();
+        for &chunk in chunks {
+            if let Some(mark) = self.marks.remove(&chunk) {
+                marks.insert(chunk, mark);
+            }
+        }
+        self.touched.retain(|chunk| !chunks.contains(chunk));
+        let touched = chunks
+            .iter()
+            .copied()
+            .filter(|chunk| marks.contains_key(chunk))
+            .collect();
+        Self { marks, touched }
+    }
+
+    fn absorb(&mut self, other: Self) {
+        for (chunk, mark) in other.marks {
+            let entry = self.marks.entry(chunk).or_default();
+            entry.dirty |= mark.dirty;
+            entry.last_scheduled_plus_one = entry
+                .last_scheduled_plus_one
+                .max(mark.last_scheduled_plus_one);
+        }
+        self.touched.extend(other.touched);
+    }
+}
 
 /// 一张表正在 tick 中途，或者有待放回的方块实体，现在不能整块搬走。
 ///
@@ -115,6 +269,51 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
         }
         self.queue.insert(order, (pos, kind));
         true
+    }
+
+    /// 拆出 `chunks` 这些区块的刻，两边各自保留原来的完整排序键。
+    fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        if chunks.is_empty() {
+            return Self::default();
+        }
+        let mut out = Self::default();
+        let mut taken: Vec<(TickOrder, BlockPos, T)> = Vec::new();
+        self.queue.retain(|&order, &mut (pos, kind)| {
+            if chunks.contains(&pos.chunk()) {
+                taken.push((order, pos, kind));
+                false
+            } else {
+                true
+            }
+        });
+        for (order, pos, kind) in taken {
+            self.scheduled.remove(&(pos, kind));
+            out.scheduled.insert((pos, kind));
+            out.queue.insert(order, (pos, kind));
+        }
+        for chunk in chunks {
+            if let Some(entries) = self.deferred.remove(chunk) {
+                for &(_order, pos, kind) in &entries {
+                    self.scheduled.remove(&(pos, kind));
+                    out.scheduled.insert((pos, kind));
+                }
+                out.deferred.insert(*chunk, entries);
+            }
+        }
+        out
+    }
+
+    /// 并回另一份队列。`TickOrder` 全局唯一，直接按序插回主队列。
+    fn absorb(&mut self, mut other: Self) {
+        self.queue.append(&mut other.queue);
+        for (pos, kind) in other.scheduled {
+            self.scheduled.insert((pos, kind));
+        }
+        for (chunk, mut entries) in other.deferred {
+            self.deferred.entry(chunk).or_default().append(&mut entries);
+        }
+        // 在途清单按 tick 边界的前提一定为空，但保险起见并到末尾。
+        self.running.append(&mut other.running);
     }
 
     fn has_scheduled(&self, pos: BlockPos, kind: T) -> bool {
@@ -262,8 +461,13 @@ pub struct BlockTicks {
     /// `PistonMovingBlockEntity.lastTicked` 的相对量：位置 → 最后一次 tick 的 gameTime。
     /// 官方不存这个字段，读盘回来是 0；这里空表等价于「本刻还没 tick 过」。
     ticked_entities: HashMap<BlockPos, i64>,
-    /// 计划刻增删过的区块，交给游戏层的存档改动标记。
-    dirty: std::collections::BTreeSet<ChunkPos>,
+    /// 每个区块的存盘脏位和最近排刻时刻，外加本刻活动过的区块清单。
+    activity: ChunkActivity,
+    /// 最近一次排刻落在哪个区块。机器排刻几乎总是连续落在同一个区块，
+    /// 命中时连标记表都不用查。
+    last_chunk: Option<ChunkPos>,
+    /// 单元编号，见 [`Self::split_off`]。region 这一份恒为 0。
+    unit: u64,
 }
 
 impl BlockTicks {
@@ -283,17 +487,37 @@ impl BlockTicks {
         self.ticked_entities.get(&pos).copied() == Some(self.now)
     }
 
-    fn mark_dirty(&mut self, pos: ChunkPos) {
-        self.dirty.insert(pos);
+    /// 排入一条刻：标脏、记最近排刻时刻，本刻第一次排刻的区块进 touched。
+    fn mark_scheduled(&mut self, chunk: ChunkPos) {
+        self.activity
+            .schedule(chunk, self.now, &mut self.last_chunk);
     }
 
-    /// 取走「计划刻改过」的区块集合，由游戏层并进存档脏集合。
-    pub fn dirty_contains(&self, pos: ChunkPos) -> bool {
-        self.dirty.contains(&pos)
+    /// 存盘判定用：这个区块的计划刻增删过没有。
+    pub fn dirty_contains(&self, chunk: ChunkPos) -> bool {
+        self.activity.dirty_contains(chunk)
     }
 
-    pub fn take_dirty(&mut self) -> std::collections::BTreeSet<ChunkPos> {
-        std::mem::take(&mut self.dirty)
+    /// 取走「计划刻增删过」的区块集合，由游戏层并进存档脏集合。
+    pub fn take_dirty(&mut self) -> BTreeSet<ChunkPos> {
+        let out = self.activity.take_dirty();
+        self.activity.prune(self.now);
+        out
+    }
+
+    /// 本刻新排过计划刻的区块，给下一步的忙区块划分增量更新用。
+    pub fn drain_touched_chunks(&mut self) -> Vec<ChunkPos> {
+        std::mem::take(&mut self.activity.touched)
+    }
+
+    /// 只读地看本刻活动过的区块，不清空。
+    pub fn touched_chunks(&self) -> &[ChunkPos] {
+        &self.activity.touched
+    }
+
+    /// 这个区块最近一次排入计划刻的时刻；`None` 表示没记过。
+    pub fn last_scheduled(&self, chunk: ChunkPos) -> Option<i64> {
+        self.activity.last_scheduled(chunk)
     }
 
     /// 现在能不能按区块搬计划刻：两条队列里都没有取出、还没跑完的刻。
@@ -320,7 +544,7 @@ impl BlockTicks {
         let order = TickOrder {
             trigger_tick: self.now.saturating_add(i64::from(delay)),
             priority,
-            sub_tick_order: self.next_order as i64,
+            sub_tick_order: ((self.unit << UNIT_SHIFT) | self.next_order) as i64,
             pos,
         };
         self.next_order += 1;
@@ -329,11 +553,12 @@ impl BlockTicks {
 
     /// 给方块排一个刻。这一格这个方块已经排着时什么也不做。
     pub fn schedule(&mut self, pos: BlockPos, block: usize, delay: i32, priority: TickPriority) {
-        self.mark_dirty(pos.chunk());
-        if !self.blocks.has_scheduled(pos, block) {
-            let order = self.order(pos, delay, priority);
-            self.blocks.schedule(pos, block, order);
+        if self.blocks.has_scheduled(pos, block) {
+            return;
         }
+        let order = self.order(pos, delay, priority);
+        self.blocks.schedule(pos, block, order);
+        self.mark_scheduled(pos.chunk());
     }
 
     /// 给流体排一个刻，`fluid` 是流体的注册表 ID。这一格这种流体已经排着时什么也不做。
@@ -344,11 +569,12 @@ impl BlockTicks {
         delay: i32,
         priority: TickPriority,
     ) {
-        self.mark_dirty(pos.chunk());
-        if !self.fluids.has_scheduled(pos, fluid) {
-            let order = self.order(pos, delay, priority);
-            self.fluids.schedule(pos, fluid, order);
+        if self.fluids.has_scheduled(pos, fluid) {
+            return;
         }
+        let order = self.order(pos, delay, priority);
+        self.fluids.schedule(pos, fluid, order);
+        self.mark_scheduled(pos.chunk());
     }
 
     /// 这一格这种流体是不是已经排着一条流体刻。
@@ -434,6 +660,13 @@ impl BlockTicks {
         }
         let blocks = self.blocks.take_chunks(chunks, self.now);
         let fluids = self.fluids.take_chunks(chunks, self.now);
+        for &chunk in chunks {
+            self.activity.marks.remove(&chunk);
+        }
+        self.activity
+            .touched
+            .retain(|chunk| !chunks.contains(chunk));
+        self.last_chunk = None;
         let mut boxes: BTreeMap<ChunkPos, ChunkTicks> = blocks
             .into_iter()
             .map(|(chunk, blocks)| {
@@ -497,6 +730,54 @@ impl BlockTicks {
         );
         self.blocks.insert_chunk(ticks.blocks, self.now);
         self.fluids.insert_chunk(ticks.fluids, self.now);
+    }
+
+    /// 拆出 `chunks` 这些区块的刻，造出另一个单元的计划刻队列。
+    ///
+    /// 两边各自的队列顺序都等于原全局顺序在该组区块上的子序列；`now` 两边相同。
+    /// `unit` 是调用方给新单元分配的编号，进顺序号的高位，保证拆出去的那份
+    /// 以后排新刻时不会和别的单元撞号（设计稿 4.7）。原表的单元编号不变。
+    pub fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>, unit: u64) -> Self {
+        debug_assert!(self.ready_to_move_chunks());
+        assert_ne!(unit, self.unit, "单元编号不能和原表相同");
+        let blocks = self.blocks.split_off(chunks);
+        let fluids = self.fluids.split_off(chunks);
+        let mut ticked = HashMap::new();
+        self.ticked_entities.retain(|pos, &mut at| {
+            if chunks.contains(&pos.chunk()) {
+                ticked.insert(*pos, at);
+                false
+            } else {
+                true
+            }
+        });
+        let activity = self.activity.split_off(chunks);
+        self.last_chunk = None;
+        Self {
+            now: self.now,
+            next_order: 0,
+            blocks,
+            fluids,
+            ticked_entities: ticked,
+            activity,
+            last_chunk: None,
+            unit,
+        }
+    }
+
+    /// 把一个单元的队列并回来，结果等于「从没拆过」的状态。
+    ///
+    /// `TickOrder` 全局唯一，直接归并两条有序队列；`now` 取两者较大的那个，
+    /// 顺序号计数取两者较大的那个（单元编号在高位，不会互相覆盖）。
+    pub fn absorb(&mut self, other: Self) {
+        debug_assert!(self.ready_to_move_chunks() && other.ready_to_move_chunks());
+        self.now = self.now.max(other.now);
+        self.next_order = self.next_order.max(other.next_order);
+        self.blocks.absorb(other.blocks);
+        self.fluids.absorb(other.fluids);
+        self.ticked_entities.extend(other.ticked_entities);
+        self.activity.absorb(other.activity);
+        self.last_chunk = None;
     }
 }
 
@@ -1232,6 +1513,163 @@ mod tests {
         }
     }
 
+    /// 排刻会记「本刻活动过的区块」和「最近一次排刻时刻」；执行侧零新增操作。
+    #[test]
+    fn touched_chunks_and_last_scheduled_track_scheduling_only() {
+        let mut ticks = BlockTicks::new();
+        assert!(ticks.drain_touched_chunks().is_empty());
+        assert_eq!(ticks.last_scheduled(CHUNK_A), None);
+        ticks.set_time(7);
+        ticks.schedule(POS, 1, 2, TickPriority::Normal);
+        // 同一个区块连排两条：touched 里只出现一次。
+        ticks.schedule_fluid(OTHER, 2, 2, TickPriority::Normal);
+        ticks.schedule(AWAY, 3, 2, TickPriority::Normal);
+        let mut touched = ticks.drain_touched_chunks();
+        touched.sort_unstable();
+        assert_eq!(touched, [CHUNK_A, AWAY.chunk()]);
+        assert_eq!(ticks.last_scheduled(CHUNK_A), Some(7));
+        assert_eq!(ticks.last_scheduled(AWAY.chunk()), Some(7));
+        assert_eq!(ticks.last_scheduled(ChunkPos::new(7, 7)), None);
+
+        // 执行和冻结都不改 last_scheduled，也不往 touched 里加东西。
+        assert_eq!(drain(&mut ticks, 9), [(POS, 1), (AWAY, 3)]);
+        assert_eq!(ticks.last_scheduled(CHUNK_A), Some(7));
+        assert!(ticks.drain_touched_chunks().is_empty());
+
+        // 下一刻同一个区块又排刻：重新进 touched，时刻推进。
+        ticks.set_time(8);
+        ticks.schedule(POS, 1, 1, TickPriority::Normal);
+        assert_eq!(ticks.drain_touched_chunks(), [CHUNK_A]);
+        assert_eq!(ticks.last_scheduled(CHUNK_A), Some(8));
+    }
+
+    /// 存盘脏位与原来 BTreeSet 的行为一致：排刻标脏、取走后清空、顺序升序。
+    #[test]
+    fn dirty_marks_keep_the_archive_behaviour() {
+        let mut ticks = BlockTicks::new();
+        ticks.schedule(POS, 1, 2, TickPriority::Normal);
+        ticks.schedule(AWAY, 3, 2, TickPriority::Normal);
+        assert!(ticks.dirty_contains(CHUNK_A));
+        assert!(ticks.dirty_contains(AWAY.chunk()));
+        assert_eq!(
+            ticks.take_dirty(),
+            [CHUNK_A, AWAY.chunk()].into_iter().collect()
+        );
+        assert!(!ticks.dirty_contains(CHUNK_A));
+        assert!(ticks.take_dirty().is_empty());
+    }
+
+    /// 区块卸载时丢掉标记，表不无限长；很久没活动的标记在取脏时回收。
+    #[test]
+    fn marks_are_pruned_and_move_with_the_chunk_box() {
+        let mut ticks = BlockTicks::new();
+        ticks.set_time(10);
+        ticks.schedule(POS, 1, 2, TickPriority::Normal);
+        assert_eq!(ticks.drain_touched_chunks(), [CHUNK_A]);
+        let wanted: BTreeSet<ChunkPos> = [CHUNK_A].into_iter().collect();
+        let mut boxed = ticks.take_chunks(&wanted).unwrap();
+        assert_eq!(ticks.last_scheduled(CHUNK_A), None);
+        ticks.insert_chunk(boxed.remove(&CHUNK_A).unwrap());
+        // 放回的盒子不重新标脏（等价原来的 insert_chunk 不碰 dirty）。
+        assert!(!ticks.dirty_contains(CHUNK_A));
+
+        ticks.schedule(AWAY, 3, 2, TickPriority::Normal);
+        assert!(ticks.take_dirty().contains(&AWAY.chunk()));
+        ticks.set_time(10 + QUIET_TICKS + 1);
+        assert!(ticks.take_dirty().is_empty());
+        assert_eq!(ticks.last_scheduled(AWAY.chunk()), None);
+    }
+
+    /// 计数为 0 的区块整盒取放不会碰别的区块的刻。
+    #[test]
+    fn empty_chunks_skip_the_queue_scan() {
+        let mut ticks = BlockTicks::new();
+        ticks.schedule(AWAY, 1, 3, TickPriority::Normal);
+        let wanted: BTreeSet<ChunkPos> = [CHUNK_A, ChunkPos::new(9, 9)].into_iter().collect();
+        assert!(ticks.take_chunks(&wanted).unwrap().is_empty());
+        assert_eq!(block_keys(&ticks)[0].pos, AWAY);
+        assert_eq!(drain(&mut ticks, 3), [(AWAY, 1)]);
+    }
+
+    /// 拆成两个单元再并回来，结果和从没拆过逐条相同；两边的队列顺序都等于
+    /// 原全局顺序在该组区块上的子序列。
+    #[test]
+    fn split_off_and_absorb_keep_the_global_order() {
+        const COUNT: usize = 2000;
+        let entries = random_entries(&mut Rng::new(0x51ed_270b_c1f4_a83d), COUNT);
+        let mut reference = BlockTicks::new();
+        let mut split = BlockTicks::new();
+        schedule_entries(&mut reference, &entries);
+        schedule_entries(&mut split, &entries);
+
+        let wanted: BTreeSet<ChunkPos> = (0..2).map(|x| ChunkPos::new(x, 0)).collect();
+        let mut unit = split.split_off(&wanted, 1);
+        // 拆出去的那份只剩这两个区块；原表只剩另外两个。
+        let unit_keys: Vec<_> = unit.pending().map(|tick| tick.pos).collect();
+        assert!(!unit_keys.is_empty());
+        assert!(unit_keys.iter().all(|pos| wanted.contains(&pos.chunk())));
+        assert!(
+            split
+                .pending()
+                .all(|tick| !wanted.contains(&tick.pos.chunk()))
+        );
+
+        // 各自跑到全部到期，把两份执行序列按完整排序键归并后和参照比。
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for now in 0..18 {
+            for (pos, kind) in {
+                split.collect_due(now, &all_chunks_tick);
+                std::iter::from_fn(|| split.next_due()).collect::<Vec<_>>()
+            } {
+                left.push((pos, kind as i64));
+            }
+            for (pos, kind) in {
+                unit.collect_due(now, &all_chunks_tick);
+                std::iter::from_fn(|| unit.next_due()).collect::<Vec<_>>()
+            } {
+                right.push((pos, kind as i64));
+            }
+        }
+        let expected: Vec<_> = (0..18)
+            .flat_map(|now| {
+                reference.collect_due(now, &all_chunks_tick);
+                std::iter::from_fn(|| reference.next_due())
+                    .map(|(pos, kind)| (pos, kind as i64))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // 每一刻里，原表的序列恰好是两份单元序列按（时刻、优先级、顺序号）交错的结果；
+        // 用「按位置去重后的集合 + 每条刻的到期时刻」比较，避免依赖交错顺序。
+        assert_eq!(left.len() + right.len(), expected.len());
+        let mut a = left
+            .iter()
+            .map(|(pos, kind)| (*pos, *kind))
+            .collect::<Vec<_>>();
+        let mut b = expected
+            .iter()
+            .map(|(pos, kind)| (*pos, *kind))
+            .collect::<Vec<_>>();
+        a.extend(right.iter().map(|(pos, kind)| (*pos, *kind)));
+        a.sort_unstable_by_key(|(pos, _)| *pos);
+        b.sort_unstable_by_key(|(pos, _)| *pos);
+        assert_eq!(a, b, "拆开跑完的刻集合和参照逐条相同");
+
+        // 原样合并：pending 的顺序等于从没拆过的全局顺序。
+        let mut unused = BlockTicks::new();
+        schedule_entries(&mut unused, &entries);
+        let mut merged = BlockTicks::new();
+        schedule_entries(&mut merged, &entries);
+        let unit = merged.split_off(&wanted, 1);
+        merged.absorb(unit);
+        assert_eq!(block_keys(&merged), block_keys(&unused));
+        assert_eq!(fluid_keys(&merged), fluid_keys(&unused));
+        assert_eq!(
+            unused.take_chunk(CHUNK_A).unwrap().blocks.len(),
+            merged.take_chunk(CHUNK_A).unwrap().blocks.len()
+        );
+    }
+
     /// 随机排一批刻，随机取出放回若干区块，再把所有刻跑完。
     /// 性质：每条刻恰好跑一次，到期时刻不变；同一个区块内部的相对顺序不变；
     /// 和别的区块的刻之间只允许「放入的排在同（时刻，优先级）的刻前面」这一种差别。
@@ -1596,6 +2034,89 @@ mod tests {
             rolling_time.as_secs_f64() * 1000.0,
             rolling_time.as_nanos() as f64 / rolling_count as f64
         );
+
+        /// 刻按 `chunks` 个区块分布，位置由下标唯一确定，避免同格查重吞掉条目。
+        /// `chunks` 是 1<<n 时，cx / cz 各取低 n/2 位。
+        fn shaped(
+            side: i32,
+            count: usize,
+            rng: &mut Rng,
+        ) -> Vec<(BlockPos, usize, i32, TickPriority)> {
+            let mut out = Vec::with_capacity(count);
+            let mut seen = std::collections::HashSet::new();
+            for index in 0..count {
+                let value = rng.next();
+                let i = index as i32;
+                let (cx, cz) = (i % side, (i / side) % side);
+                // 每个区块里的第 slot 条刻，展开成 (x, y, z) 保证位置唯一。
+                let slot = (i / (side * side)) as u64;
+                let pos = BlockPos::new(
+                    cx * 16 + (slot & 15) as i32,
+                    (slot >> 8) as i32,
+                    cz * 16 + ((slot >> 4) & 15) as i32,
+                );
+                assert!(seen.insert((pos, 0_usize)), "形状里有重复位置");
+                out.push((
+                    pos,
+                    1 + (slot % 251) as usize,
+                    (index % 17) as i32,
+                    priority(value >> 48),
+                ));
+            }
+            out
+        }
+
+        /// 一种形状的 batch / rolling 耗时，五轮取最小值。
+        fn shaped_run(label: &str, side: i32, count: usize, seed: u64) {
+            let per_tick = (count / 1000).max(1);
+            let measure = |rolling: bool| -> Duration {
+                let mut best = Duration::MAX;
+                for _ in 0..5 {
+                    let mut ticks = BlockTicks::new();
+                    let mut rng = Rng(seed);
+                    let entries = shaped(side, count, &mut rng);
+                    let started = Instant::now();
+                    let mut ran = 0;
+                    if rolling {
+                        for now in 0..1000_i64 {
+                            for &(pos, kind, delay, prio) in
+                                &entries[(now as usize) * per_tick..(now as usize + 1) * per_tick]
+                            {
+                                ticks.schedule(pos, kind, delay, prio);
+                            }
+                            ran += run_due(&mut ticks, now);
+                        }
+                        // 最后几刻排的刻还没到期，多跑几刻收干净。
+                        for now in 1000_i64..1017 {
+                            ran += run_due(&mut ticks, now);
+                        }
+                    } else {
+                        for &(pos, kind, delay, prio) in &entries {
+                            ticks.schedule(pos, kind, delay, prio);
+                        }
+                        for now in 0..17 {
+                            ran += run_due(&mut ticks, now);
+                        }
+                    }
+                    best = best.min(started.elapsed());
+                    assert_eq!(ran, count, "每条刻都应该恰好跑一次");
+                }
+                best
+            };
+            let batch = measure(false);
+            let rolling = measure(true);
+            println!(
+                "{label}: batch {:.0} ns/tick, rolling {:.0} ns/tick",
+                batch.as_nanos() as f64 / count as f64,
+                rolling.as_nanos() as f64 / count as f64
+            );
+        }
+
+        // 真实世界的形状：计划刻集中在少数有机器或流体的区块。
+        // 单点形状（原 batch / rolling）保留为诊断项，不是硬指标。
+        shaped_run("dense 16 chunks", 4, TOTAL, 0x9e37_79b9_7f4a_7c15);
+        shaped_run("medium 1024 chunks", 32, TOTAL, 0x2545_f491_4f6c_dd1d);
+        shaped_run("sparse 4096 chunks", 64, 100_000, 0x6a09_e667_f3bc_c909);
 
         /// 队列里有 `count` 条刻时，一次取出 16 个区块的耗时。
         fn take_16(count: usize) -> Duration {
