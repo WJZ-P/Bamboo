@@ -20,13 +20,15 @@
 | `--chunk -8628 0 --scan 9 --seeds 1`（蘑菇岛） | 9 | 0 | 无 |
 | `--chunk 177 -177 --scan 3 --seeds 1`（deep_dark） | 9 | 0 | 无 |
 
-唯一会报 `unsupported` 的条目是 step 9 的 `minecraft:lush_caves_ceiling_vegetation`，
+**补上树化之前**，唯一会报 `unsupported` 的条目是 step 9 的
+`minecraft:lush_caves_ceiling_vegetation`，
 原因不是地物类型没移植，而是 `feature/java_set.rs` 的 `HashMap` 桶树化：
 临时诊断在 `VegetationPatch::place` 里打印出触发时的地表集合是
 `origin=(-914, -27, -3470) size=64`，容量到 64 后有桶超过 8 个节点，官方会转红黑树，
-本实现当时只置 `treeified` 标记让整块跳过。`cb-wg-feat-c` 已补上树化（见
-`docs/worldgen-features-plan.md`「第二十二轮」与 `feature/java_set.rs`），这个 skipped
-随之消失。
+本实现当时只置 `treeified` 标记让整块跳过。`cb-wg-feat-c` 已补上树化（见 `docs/worldgen-features-plan.md`「第二十三轮」、
+`feature/java_set.rs`、`tools/mc-bamboo-vanilla/java/JavaSetOracle.java`），
+这个 skipped 随之消失：`--chunk -58 -217 --scan 5 --seeds 2` 现在是
+**0 skipped / 0 不一致**（18 中心 / 15925248 方块）。
 
 不带 `--steps 9` 的 `--seeds 3 --chunks 40 --salt 7` 会遇到官方
 `FossilFeature.place` 在 `ChunkgenOracle` 的代理上抛
@@ -130,3 +132,32 @@
     `mushroom_island_vegetation` 等 placed feature 上验证；蘑菇岛可用
     `--chunk -8628 0 --scan 9 --seeds 1`（seed 0 下 1536/1536 个 quart 格都是
     `mushroom_fields`）。
+
+
+## 3. `java_set` 桶树化的落地与改坏确认
+
+按 JDK 25 的 `javap -c -p java.util.HashMap` / `java.util.HashMap$TreeNode` 逐条复刻：
+`treeifyBin`（容量 < 64 只翻倍）、`treeify`（链表顺序插红黑树 +
+`balanceInsertion` + 最后一次 `moveRootToFront`）、`putTreeVal`（新节点插在**树父节点
+的 `next` 之后**，不是桶尾）、`TreeNode.split`（lo/hi 拆桶，`> UNTREEIFY_THRESHOLD`
+的一侧重新 `treeify`）。迭代始终沿 `TreeNode.next` 链表。植被 patch 的地表集合只做
+`add`，所以没实现 `remove`。
+
+`JavaSetOracle.java` 生成 80 组插入序列（含打乱顺序的同桶碰撞），Rust 单测
+`matches_the_jdk_hashset_oracle` 逐个比对最终迭代顺序。
+
+改坏确认：
+
+| 改坏方式 | 结果 |
+|---|---|
+| 把 `putTreeVal` 的 `self.order.insert(after, node)` 改成 `self.order.push(node)` | `chunkgen --through features --chunk -58 -217 --scan 5 --seeds 2` 报 **10 处**（`official 33656 / bamboo 0` 等）；Java 对拍单测在 CASE 7 第 7 个位置报不一致 |
+| `gen-world --through features --break-self-test` | 报 2 处，确认比较器有效 |
+
+干净跑（`chunkgen --through features`，全部 0 不一致 / 0 skipped）：
+`--chunk -58 -217 --scan 5 --seeds 2`（18 中心）、`--chunk -58 -217 --scan 9 --seeds 2`
+（18 中心）、`--chunk 0 52 --scan 9 --seeds 1`（9 中心）、
+`--chunk 480 0 --scan 9 --seeds 1`（9 中心）、
+`--chunk 529509 523106 --scan 5 --seeds 2`（18 中心）、
+`--seeds 3 --chunks 40 --salt 7 --steps 9`（120 中心 / 106168320 方块）、
+`--seeds 3 --chunks 12 --salt 7`（36 中心）。
+`gen-world --through features --seeds 2 --chunks 4 --salt 1`：8 区块 / 0 不一致。
