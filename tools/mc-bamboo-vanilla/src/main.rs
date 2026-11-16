@@ -181,6 +181,7 @@ mod structure_generation;
 mod structure_load;
 #[cfg(feature = "oracle")]
 mod structure_pieces;
+#[cfg(feature = "oracle")]
 mod structure_pipeline;
 #[cfg(feature = "oracle")]
 mod structure_place;
@@ -268,6 +269,7 @@ const JIGSAW_SOURCE: &str = "tools/mc-bamboo-vanilla/java/JigsawOracle.java";
 #[cfg(feature = "oracle")]
 const STRUCTURE_GENERATION_SOURCE: &str =
     "tools/mc-bamboo-vanilla/java/StructureGenerationOracle.java";
+#[cfg(feature = "oracle")]
 const STRUCTURE_PIPELINE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePipelineOracle.java";
 #[cfg(feature = "oracle")]
 const STRUCTURE_SINGLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSingleOracle.java";

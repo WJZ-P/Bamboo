@@ -26,13 +26,15 @@ All passed the full merge check: fmt, clippy, full tests, every oracle at 0 mism
 | jigsaw 放置进展（模板 processor、`FeatureWorld` 方块实体与流体） | dcc8784d |
 
 **已接进 Director（本轮）/ Wired into the Director (this round):** 结构起点与引用走
-`structure_starts` / `structure_references` 两个阶段的纯函数，terrain 注入真实
-`Beardifier`，features 每个 decoration step 先放结构件再放地物，区块 NBT 写回
-`structures` 键并能读盘恢复。`structure-pipeline` 对拍把官方 17×17 的
-`createStructures` / `createReferences` 与游戏里的同一条路径逐项比（14 行、
-1261 个结构件 0 不一致，改坏确认会报错）。放置按允许清单跳过尚未对拍的单件结构
-（`structure::single` 四件）与废弃传送门：它们的**起点、引用、Beardifier、存档**
-仍全部照官方生成，只有 `postProcess` 暂不写方块，等 `cb-wg-structures` 合入后打开。
+`structure_starts` / `structure_references` 两个阶段的纯函数，features 每个
+decoration step 先放结构件再放地物，区块 NBT 写回 `structures` 键并能读盘恢复。
+`cb-wg-structures` 合入 main 后，四个代码生成单件结构与废弃传送门的 `postProcess`
+也逐方块对拍 0 不一致，允许清单里所有已验证类型全部打开。`structure-pipeline`
+对拍把官方 17×17 的 `createStructures` / `createReferences` 与游戏里的同一条路径
+逐项比（28 行、84 次比较、2482 个结构件 0 不一致；`--break-self-test` 报 28 处），
+覆盖矿井 / jigsaw / 埋藏的宝藏 / 女巫小屋 / 沉船 / 废弃传送门等 8 类实际放置。
+真实 `Beardifier` 已接进纯 `game_pipeline`，Director 的 terrain 阶段暂仍走 EMPTY
+（计算池调度竞态，见 `docs/worldgen-structures-plan.md` §12）。
 
 ## 未合并的分支 / Unmerged branches
 

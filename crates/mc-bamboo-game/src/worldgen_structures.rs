@@ -785,6 +785,24 @@ mod tests {
         assert!(starts.by_structure.is_empty());
     }
 
+    /// 诊断：找出有指定类型起点的区块（扩大端到端对拍覆盖用），环境变量
+    /// `BAMBOO_SCAN_STRUCTURES` 打开后打印。
+    #[test]
+    fn scan_structure_types() {
+        if std::env::var("BAMBOO_SCAN_STRUCTURES").is_err() {
+            return;
+        }
+        let config = normal(42);
+        for cx in -40..=40 {
+            for cz in -40..=40 {
+                let starts = structure_starts(&config, cx, cz).unwrap();
+                for name in starts.by_structure.keys() {
+                    println!("SCAN {cx} {cz} {name}");
+                }
+            }
+        }
+    }
+
     /// 生成期确实会产出结构起点：扫一批区块，至少出现一个有效起点，并写出
     /// `structures` 标签的 `starts` 复合项。
     /// Generation really produces starts: scanning a batch of chunks yields at

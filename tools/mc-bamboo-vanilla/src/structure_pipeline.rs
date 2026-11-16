@@ -22,6 +22,8 @@ const USAGE: &str =
 /// 覆盖村庄 / 前哨 / 要塞 / 矿井 / 沉船 / 海底遗迹 / 试炼密室等结构的种子与区块。
 /// 种子 42 的 -20..20 扫描已知有矿井 / 试炼密室 / 废弃传送门；其余种子覆盖更多结构。
 const QUERIES: &[(i64, i32, i32)] = &[
+    // 种子 42 的 -40..40 扫描里确认过的起点，覆盖矿井 / 试炼密室 / 废弃传送门 /
+    // 埋藏的宝藏 / 女巫小屋 / 沉船 / 古迹废墟 / 废弃营地 / 村庄等结构集。
     (42, 4, 0),
     (42, -3, -17),
     (42, 0, -17),
@@ -29,6 +31,20 @@ const QUERIES: &[(i64, i32, i32)] = &[
     (42, 17, 7),
     (42, 19, -15),
     (42, -19, 11),
+    (42, -39, -14),
+    (42, -32, -16),
+    (42, -30, 6),
+    (42, -19, -38),
+    (42, -17, 22),
+    (42, -14, 21),
+    (42, -13, 40),
+    (42, 2, -34),
+    (42, 12, 28),
+    (42, 15, 39),
+    (42, 16, 22),
+    (42, 19, -24),
+    (42, 35, 38),
+    (42, 38, -25),
     (0, 0, 0),
     (1, 0, 0),
     (1, 34, 34),
@@ -299,6 +315,13 @@ fn on_row(value: &Value, options: &Options, stats: &mut Stats) -> Result<(), Str
     want_pieces.sort();
     stats.comparisons += 1;
     stats.pieces += rust_pieces.len();
+    // 覆盖统计：跑一遍游戏里的完整流水线，报告这个区块实际放置的结构类型。
+    // Coverage: run the full game pipeline and report what was actually placed.
+    let pipeline = mc_bamboo_game::worldgen_features::game_pipeline(&config, x, z)
+        .map_err(|e| format!("game_pipeline failed for ({seed},{x},{z}): {e}"))?;
+    if !pipeline.placed_pieces.is_empty() {
+        println!("  PLACED ({seed},{x},{z}): {:?}", pipeline.placed_pieces);
+    }
     if rust_pieces != want_pieces {
         let first = rust_pieces
             .iter()

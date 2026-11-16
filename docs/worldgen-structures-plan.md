@@ -1733,7 +1733,7 @@ structures (Compound)
   Beardifier 与 `structures` 存档本来就照官方算并存盘；现在放置也不再跳过。
 * **对拍**：新子命令 `structure-pipeline <java>`（`StructurePipelineOracle.java`）
   在 JVM 里造 17×17 个 ProtoChunk，跑官方 `createStructures` / `createReferences`，
-  逐区块比起点 / 引用 / 每个结构件的包围盒：14 行、42 次比较、1261 个结构件
+  逐区块比起点 / 引用 / 每个结构件的包围盒：28 行、84 次比较、2482 个结构件
   0 不一致；`--break-self-test` 故意改坏一个引用报 14 处不一致后还原。
   另外 `gen-world --through features` / carvers 旧模式仍 0 不一致。
 * **耗时**：`wg-perf --structure-timing`（release，1 种子 × 10 群系 × 3 区块 × 2 遍）
