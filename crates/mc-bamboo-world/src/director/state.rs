@@ -1464,10 +1464,7 @@ impl<C: ChunkBundle> Director<C> {
             || self.submitted_this_tick < self.config.max_submits_per_tick)
             && self.in_flight.len() < self.config.max_in_flight;
         if !can_submit {
-            // 新排的任务还没试过，留到下一次 `drive`；这一刻的整表重排
-            // 标记不能丢，否则玩家移动后它们就一直按旧顺序排。
-            self.resort_all = true;
-            self.last_seen_task = 0;
+            // 这一刻还没轮到整表重排时把标记留着，下一次能派任务时再排。
             self.flush_notifications(out);
             return;
         }
