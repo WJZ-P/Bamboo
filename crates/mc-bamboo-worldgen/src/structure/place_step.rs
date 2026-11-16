@@ -64,6 +64,29 @@ pub struct StructurePlacement<'a> {
     pub stats: RefCell<PlaceStats>,
 }
 
+impl StructurePlacement<'_> {
+    /// 逐结构类型的放置次数，对拍完成后读出来写进报告。
+    ///
+    /// Per-structure-type placement counts, read after the oracle run.
+    pub fn placed_pieces(&self) -> BTreeMap<String, usize> {
+        self.stats.borrow().placed_pieces.clone()
+    }
+
+    /// 因 unsupported 跳过的结构件次数。
+    ///
+    /// Number of pieces skipped as unsupported.
+    pub fn unsupported_pieces(&self) -> usize {
+        self.stats.borrow().unsupported_pieces
+    }
+
+    /// 汇总一份统计（游戏侧 `features_with_structures` 交回调用方）。
+    ///
+    /// Snapshot the accumulated stats (`features_with_structures` hands this back).
+    pub fn total_stats(&self) -> PlaceStats {
+        self.stats.borrow().clone()
+    }
+}
+
 impl<'a> StructurePlacement<'a> {
     pub fn new(groups: Vec<StepStructure<'a>>, processor_lists: ProcessorLists, seed: i64) -> Self {
         Self {

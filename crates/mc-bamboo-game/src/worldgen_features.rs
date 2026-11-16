@@ -148,7 +148,7 @@ pub(crate) fn run_features(
     cz: i32,
     view: [GeneratedChunk; 9],
 ) -> Result<FeatureResult, String> {
-    run_features_filtered(config, cx, cz, view, None)
+    run_features_filtered(config, cx, cz, view, None).map(|(result, _)| result)
 }
 
 /// [`run_features`] 加一个地物白名单；游戏里恒为 `None`，只有对拍工具会传。
@@ -161,18 +161,27 @@ fn run_features_filtered(
     cz: i32,
     view: [GeneratedChunk; 9],
     allowed_kinds: Option<&[String]>,
-) -> Result<FeatureResult, String> {
+) -> Result<
+    (
+        FeatureResult,
+        Option<mc_bamboo_worldgen::structure::place_step::PlaceStats>,
+    ),
+    String,
+> {
     if config.level_type.is_flat() {
         // flat 世界没有噪声地物；流水线也不是 Staged，这里只是防御。
         // Flat worlds have no noise features; the pipeline is not Staged either.
-        return Ok(FeatureResult {
-            blocks: std::array::from_fn(|_| {
-                vec![vec![mc_bamboo_data::blocks::AIR; 256]; WORLD_HEIGHT as usize]
-            }),
-            deltas: std::array::from_fn(|_| Vec::new()),
-            block_entities: Vec::new(),
-            unsupported: false,
-        });
+        return Ok((
+            FeatureResult {
+                blocks: std::array::from_fn(|_| {
+                    vec![vec![mc_bamboo_data::blocks::AIR; 256]; WORLD_HEIGHT as usize]
+                }),
+                deltas: std::array::from_fn(|_| Vec::new()),
+                block_entities: Vec::new(),
+                unsupported: false,
+            },
+            None,
+        ));
     }
     let blocks: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.blocks.clone());
     let biomes: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.biomes.clone());
@@ -220,15 +229,24 @@ fn run_features_filtered(
             }
         }
     }
-    // 结构注册表按名字遍历（官方 `Registry.stream()`）；每组只带自己的起点。
-    // Groups follow the structure registry name order (`Registry.stream()`).
-    starts.sort_by(|a, b| a.structure.cmp(&b.structure));
-    let mut owned: Vec<(String, Vec<StartInput>)> = Vec::new();
+    // 官方 `structuresByStep` 是**整张** `STRUCTURE` 注册表按 `step().ordinal()`
+    // 分组：per-step 局部 index 数的是该 step 的所有结构，不管这个区块有没有引用它。
+    // 因此这里给每个注册结构都建一组（没有引用的组 starts 为空）。
+    // Vanilla's `structuresByStep` groups the **whole** STRUCTURE registry by
+    // `step().ordinal()`: the local index counts every structure at the step,
+    // referenced or not, so every registry structure gets a group.
+    let mut by_name: std::collections::BTreeMap<String, Vec<StartInput>> =
+        std::collections::BTreeMap::new();
     for start in starts {
-        match owned.last_mut() {
-            Some((name, group)) if *name == start.structure => group.push(start),
-            _ => owned.push((start.structure.clone(), vec![start])),
-        }
+        by_name
+            .entry(start.structure.clone())
+            .or_default()
+            .push(start);
+    }
+    let all_structures = crate::worldgen_structures::structure_names(config);
+    let mut owned: Vec<(String, Vec<StartInput>)> = Vec::new();
+    for name in all_structures {
+        owned.push((name.clone(), by_name.remove(&name).unwrap_or_default()));
     }
     let groups: Vec<StepStructure<'_>> = owned
         .iter()
@@ -273,7 +291,7 @@ pub fn game_features(
     allowed_kinds: Option<&[String]>,
 ) -> Result<FeatureResult, String> {
     let view = build_view(config, cx, cz)?;
-    run_features_filtered(config, cx, cz, view, allowed_kinds)
+    run_features_filtered(config, cx, cz, view, allowed_kinds).map(|(result, _)| result)
 }
 
 /// 一次「游戏里的完整生成流水线」结果，给 `gen-world --through structures` 对拍用。
@@ -337,7 +355,7 @@ pub fn game_pipeline(
         biomes: biomes[index].clone(),
         heightmaps: Default::default(),
     });
-    let result = run_features(config, cx, cz, view)?;
+    let (result, stats) = run_features_filtered(config, cx, cz, view, None)?;
     let mut final_blocks = blocks;
     final_blocks[CENTER] = result.blocks[CENTER].clone();
     // 4. Director 完工时的规范序：中心自己的写 + 8 个邻居中心溢进来的写。
@@ -393,8 +411,11 @@ pub fn game_pipeline(
         structures: data.tag,
         references,
         starts,
-        placed_pieces: std::collections::BTreeMap::new(),
-        unsupported_pieces: 0,
+        placed_pieces: stats
+            .as_ref()
+            .map(|s| s.placed_pieces.clone())
+            .unwrap_or_default(),
+        unsupported_pieces: stats.as_ref().map_or(0, |s| s.unsupported_pieces),
     })
 }
 

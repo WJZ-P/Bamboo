@@ -162,6 +162,13 @@ fn with_thread<T>(
     })
 }
 
+/// `STRUCTURE` 注册表的全部名字，按注册名排序（官方 `Registry.stream()` 的口径）。
+///
+/// All `STRUCTURE` registry names in registry order (`Registry.stream()`).
+pub fn structure_names(config: &WorldGenConfig) -> Vec<String> {
+    with_thread(config, |thread| Ok(thread.state.structures.names())).unwrap_or_default()
+}
+
 /// 结构注册名 → `structure` 注册表里的 `type` 字段。
 ///
 /// Structure registry id → the `type` field in the `structure` registry.
