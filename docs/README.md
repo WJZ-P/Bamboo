@@ -28,6 +28,7 @@
 | `m3-storage.md` | M3 存档设计：Anvil 和 Linear 格式、区块 NBT、后台存档线程、崩溃安全、玩家数据和 `level.dat`、转换工具、分步实现计划 |
 | `world-model-discussion.md` | **探讨稿，未定稿**：原版 26.3 世界模型的关键细节、九项决策、多 region 的切分合并和同步设计、调研出处、region 内部并行的选项 |
 | `world-model-design.md` | **已确认，实施中**：世界模型的整套架构。三个平面加主控、区块束、区块加载流水线、region 的形成和调度、实体和生物 AI 的并行、红石热点优化、过载降级、实施顺序 |
+| `multi-region-tick-design.md` | **草稿，等确认**：多区域 tick 的细化设计。外层的岛（各走各的时钟）加内层按方块活动划分的单元（齐步走、并行执行）、越界处理、差异清单、实施顺序 |
 | `worldgen.md` | 世界生成的噪声阶段：26.3 的阶段划分、两条求值路径、含水层、区块级对拍、单区块耗时、还没做的 |
 | `chunk-tickets.md` | 区块平面的第一块：原版 26.3 ticket 机制的事实、`TicketTable` 的接口和不变量、与官方的差异、oracle 的用法和结果、玩家移动基准 |
 | `worldgen-structures-plan.md` | 世界生成的结构部分实施方案：数据导出、`StructurePlacement`、`structure_starts` / `structure_references`、结构件存档、Beardifier、features 阶段结构件放置、移植顺序与对拍方法 |
