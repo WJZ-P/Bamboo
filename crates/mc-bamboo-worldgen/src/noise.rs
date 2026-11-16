@@ -871,9 +871,12 @@ impl Noise {
                 }
                 let start = volume.index(x, 0, z);
                 for y in 0..volume.size_y {
-                    let mut value = 0.0_f32;
+                    // 单个 `Perlin` / `Smeared` 原来直接返回那一层的值，没有 `0.0 +`；
+                    // `NoiseStack` 才是 `let mut value = 0.0; for layer { value += ... }`。
+                    // 这里照着分，免得 `-0.0` 之类的一位之差。
+                    let mut value = None;
                     for (layer, (xz, cache)) in layers.iter().zip(&mut columns) {
-                        value += layer.perlin.column_value(
+                        let contribution = layer.perlin.column_value(
                             xz,
                             cache,
                             volume.block_y(y),
@@ -881,11 +884,21 @@ impl Noise {
                             layer.amplitude,
                             layer.fudge,
                         );
+                        value = Some(match value {
+                            None if self.is_stack() => 0.0_f32 + contribution,
+                            None => contribution,
+                            Some(sum) => sum + contribution,
+                        });
                     }
-                    out[start + y as usize] += value;
+                    out[start + y as usize] += value.unwrap_or(0.0);
                 }
             }
         }
+    }
+
+    /// 这一叠是不是官方的 `NoiseStack`（累加从 `0.0` 开始）。
+    fn is_stack(&self) -> bool {
+        matches!(self, Self::Stack(_))
     }
 
     /// 逐点路径：`Noise.addToVolume` 的默认实现（含 Simplex 的叠走这里）。
