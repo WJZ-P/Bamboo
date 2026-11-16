@@ -22,6 +22,7 @@ impl MultiNoiseBiomeSource {
     }
 
     /// `MultiNoiseBiomeSource.getNoiseBiome(target)`。
+    #[inline]
     pub fn biome(&self, target: TargetPoint) -> &str {
         self.parameters.find_value(target)
     }

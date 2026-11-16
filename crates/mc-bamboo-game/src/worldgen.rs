@@ -28,7 +28,7 @@ use mc_bamboo_world::{
     MIN_Y, SECTION_COUNT, SECTION_SIZE, WORLD_HEIGHT,
     chunk::HeightmapKind,
     column::{ChunkColumn, ChunkColumnParts, SectionParts},
-    palette::PalettedContainer,
+    palette::packed_worldgen_section,
 };
 use mc_bamboo_worldgen::{Worldgen, beardifier::Beardifier, chunk};
 
@@ -138,25 +138,65 @@ pub(crate) fn with_generator<T>(
     })
 }
 
-/// 官方 `Heightmap.Types.isOpaque()` 对某个方块状态的判定。
-///
-/// Vanilla `Heightmap.Types.isOpaque()` for one block state.
-fn heightmap_predicate(key: &str, state: u32) -> bool {
-    let facts = mc_bamboo_data::state_facts(state);
-    let motion = facts & mc_bamboo_data::facts::MOTION_BLOCKING != 0;
-    let motion_no_leaves = facts & mc_bamboo_data::facts::MOTION_BLOCKING_NO_LEAVES != 0;
-    let fluid_nonempty =
-        mc_bamboo_data::state_fluid(state).fluid != mc_bamboo_data::registries::fluid::EMPTY;
+/// [`HEIGHTMAP_KEYS`] 每项的位；键名不在表里时返回 0。
+/// One bit per [`HEIGHTMAP_KEYS`] entry; zero for an unknown key.
+fn predicate_bit(key: &str) -> u8 {
     match key {
-        // `NOT_AIR`：air / cave_air / void_air 都不算地面。
-        // `NOT_AIR`: air, cave_air and void_air are all transparent to this map.
-        "WORLD_SURFACE_WG" | "WORLD_SURFACE" => facts & mc_bamboo_data::facts::AIR == 0,
-        // `MATERIAL_MOTION_BLOCKING`：不含流体。 `MATERIAL_MOTION_BLOCKING`: no fluids.
-        "OCEAN_FLOOR_WG" | "OCEAN_FLOOR" => motion,
-        "MOTION_BLOCKING" => motion || fluid_nonempty,
-        "MOTION_BLOCKING_NO_LEAVES" => motion_no_leaves || fluid_nonempty,
-        _ => false,
+        "WORLD_SURFACE_WG" => 1 << 0,
+        "WORLD_SURFACE" => 1 << 1,
+        "OCEAN_FLOOR_WG" => 1 << 2,
+        "OCEAN_FLOOR" => 1 << 3,
+        "MOTION_BLOCKING" => 1 << 4,
+        "MOTION_BLOCKING_NO_LEAVES" => 1 << 5,
+        _ => 0,
     }
+}
+
+/// 一个方块状态对六张高度图各自算不算「地面」，一次查完状态事实。
+///
+/// `NOT_AIR`（air / cave_air / void_air 都不算）、`MATERIAL_MOTION_BLOCKING`
+/// （不含流体）以及两张含流体的 `MOTION_BLOCKING` 谓词，全部由状态的静态事实决定；
+/// 按状态 ID 缓存这六位，逐列扫方块时就不必每层重复查表。
+///
+/// Which of the six heightmaps count a block state as ground, computed from the
+/// state's static facts once. The mask is cached by state id, so the per-column
+/// top-down scan does not re-query the same facts at every layer.
+fn heightmap_mask(state: u32) -> u8 {
+    use mc_bamboo_data::facts;
+    const MASK_SIZE: usize = blocks::TOTAL_STATES as usize;
+    // 0 表示「还没算过」；`1<<6` 是哨兵，让「六位全 0」也能命中缓存。
+    // 掩码是状态的静态事实，并发写同一个槽只会写入完全相同的值。
+    // Zero means "not computed"; `1<<6` is a sentinel so an all-zero mask is
+    // cached too. Each slot only ever receives the same value, so relaxed
+    // atomics suffice even with concurrent writers.
+    static CACHE: [std::sync::atomic::AtomicU8; MASK_SIZE] =
+        [const { std::sync::atomic::AtomicU8::new(0) }; MASK_SIZE];
+    let slot = &CACHE[state as usize];
+    let cached = slot.load(std::sync::atomic::Ordering::Relaxed);
+    if cached != 0 {
+        return cached & 0x3f;
+    }
+    let facts = mc_bamboo_data::state_facts(state);
+    let not_air = facts & facts::AIR == 0;
+    let motion = facts & facts::MOTION_BLOCKING != 0;
+    let motion_no_leaves = facts & facts::MOTION_BLOCKING_NO_LEAVES != 0;
+    let fluid_nonempty = mc_bamboo_data::state_fluid(state).fluid != registries::fluid::EMPTY;
+    let mut mask = 0;
+    if not_air {
+        mask |= predicate_bit("WORLD_SURFACE_WG") | predicate_bit("WORLD_SURFACE");
+    }
+    if motion {
+        mask |= predicate_bit("OCEAN_FLOOR_WG") | predicate_bit("OCEAN_FLOOR");
+    }
+    if motion || fluid_nonempty {
+        mask |= predicate_bit("MOTION_BLOCKING");
+    }
+    if motion_no_leaves || fluid_nonempty {
+        mask |= predicate_bit("MOTION_BLOCKING_NO_LEAVES");
+    }
+    let stored = mask | 1 << 6;
+    slot.store(stored, std::sync::atomic::Ordering::Relaxed);
+    mask
 }
 
 /// 照 `Heightmap.primeHeightmaps`：每列从顶往下找第一个满足各自谓词的方块，记 `y+1`；
@@ -169,10 +209,9 @@ fn heightmap_predicate(key: &str, state: u32) -> bool {
 /// doFill WG maps are maintained by setBlockState up to CARVERS, so their final
 /// values equal a prime over the final blocks).
 fn compute_heightmaps(blocks: &[Vec<u32>]) -> BTreeMap<&'static str, Vec<i32>> {
-    let mut maps: BTreeMap<&'static str, Vec<i32>> = BTreeMap::new();
-    for &key in &HEIGHTMAP_KEYS {
-        maps.insert(key, vec![MIN_Y; WIDTH * WIDTH]);
-    }
+    const ALL_BITS: u8 = (1 << HEIGHTMAP_KEYS.len()) - 1;
+    let mut columns: [Vec<i32>; HEIGHTMAP_KEYS.len()] =
+        std::array::from_fn(|_| vec![MIN_Y; WIDTH * WIDTH]);
     let height = blocks.len() as i32;
     for x in 0..WIDTH {
         for z in 0..WIDTH {
@@ -182,27 +221,25 @@ fn compute_heightmaps(blocks: &[Vec<u32>]) -> BTreeMap<&'static str, Vec<i32>> {
             // heightmaps use vanilla's `Heightmap.getIndex(x,z) = x + z*16`.
             let block_index = x * WIDTH + z;
             let map_index = x + z * WIDTH;
-            let mut pending: Vec<&'static str> = HEIGHTMAP_KEYS.to_vec();
+            let mut pending = ALL_BITS;
             for local_y in (0..height).rev() {
-                if pending.is_empty() {
+                if pending == 0 {
                     break;
                 }
                 let state = blocks[local_y as usize][block_index];
-                let mut kept = Vec::with_capacity(pending.len());
-                for key in pending {
-                    if heightmap_predicate(key, state) {
-                        if let Some(map) = maps.get_mut(key) {
-                            map[map_index] = MIN_Y + local_y + 1;
+                let found = heightmap_mask(state) & pending;
+                if found != 0 {
+                    for (index, column) in columns.iter_mut().enumerate() {
+                        if found & (1 << index) != 0 {
+                            column[map_index] = MIN_Y + local_y + 1;
                         }
-                    } else {
-                        kept.push(key);
                     }
+                    pending &= !found;
                 }
-                pending = kept;
             }
         }
     }
-    maps
+    HEIGHTMAP_KEYS.into_iter().zip(columns).collect()
 }
 
 /// 超平坦：按预设的层从 `MIN_Y` 往上填方块，整个区块一个群系。
@@ -567,15 +604,19 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         return Err("generated chunk has the wrong number of layers or sections".to_owned());
     }
     let mut sections = Vec::with_capacity(SECTION_COUNT);
+    let mut values = [blocks::AIR; SECTION_SIZE as usize * WIDTH * WIDTH];
+    let mut cells_in_order = [0u32; 64];
     for section in 0..SECTION_COUNT {
-        let mut block_container = PalettedContainer::blocks(blocks::AIR);
-        let mut biome_container = PalettedContainer::biomes(config_default_biome());
-        for local_y in 0..SECTION_SIZE as usize {
-            let layer = &chunk.blocks[section * SECTION_SIZE as usize + local_y];
+        for (local_y, layer) in chunk.blocks
+            [section * SECTION_SIZE as usize..(section + 1) * SECTION_SIZE as usize]
+            .iter()
+            .enumerate()
+        {
             for x in 0..WIDTH {
                 for z in 0..WIDTH {
-                    let index = (local_y << 8) | (z << 4) | x;
-                    block_container.set(index, layer[x * WIDTH + z]);
+                    // 容器下标 `y*256 + z*16 + x`，层里是 `x*16+z`。
+                    // Container index `y*256 + z*16 + x`; layers use `x*16+z`.
+                    values[(local_y << 8) | (z << 4) | x] = layer[x * WIDTH + z];
                 }
             }
         }
@@ -587,13 +628,12 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         for qx in 0..4 {
             for qy in 0..4 {
                 for qz in 0..4 {
-                    let value = cells[qx * 16 + qy * 4 + qz];
-                    biome_container.set(qy * 16 + qz * 4 + qx, value);
+                    cells_in_order[qy * 16 + qz * 4 + qx] = cells[qx * 16 + qy * 4 + qz];
                 }
             }
         }
-        let (block_palette, block_data) = block_container.packed_for_disk();
-        let (biome_palette, biome_data) = biome_container.packed_for_disk();
+        let (block_palette, block_data, biome_palette, biome_data) =
+            packed_worldgen_section(&values, &cells_in_order);
         sections.push(SectionParts {
             block_palette,
             block_data,
@@ -601,10 +641,42 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
             biome_data,
         });
     }
-    // 高度图 None -> 从方块重算；光照层 None、isLightOn=false -> 运行时补算。
-    // Heightmaps None -> recomputed from blocks; light None/off -> settled at runtime.
+    // `GeneratedChunk` 通常已经从最终 CARVERS 方块算好了六张高度图，其中四张就是
+    // 官方 FINAL_HEIGHTMAPS。直接打包交给 `ChunkColumnParts`，省掉
+    // `Chunk::from_sections` 逐格重算（24 段 × 4096 格 × 4 个谓词）。手工拼的
+    // chunk 可能不带高度图，此时用同一份 `compute_heightmaps` 从 layers 现算。
+    //
+    // `GeneratedChunk` normally holds all six heightmaps over the final CARVERS
+    // blocks, including the four vanilla FINAL_HEIGHTMAPS. Packing them here
+    // avoids `Chunk::from_sections` priming every cell again. Hand-built chunks
+    // may omit them; compute from the layers with the same pure function.
+    let owned;
+    let maps = if chunk.heightmaps.len() == HEIGHTMAP_KEYS.len()
+        && HEIGHTMAP_KEYS.iter().all(|key| {
+            chunk
+                .heightmaps
+                .get(key)
+                .is_some_and(|map| map.len() == WIDTH * WIDTH)
+        }) {
+        &chunk.heightmaps
+    } else {
+        owned = compute_heightmaps(&chunk.blocks);
+        &owned
+    };
+    let heightmaps: [Option<Vec<u64>>; HeightmapKind::ALL.len()] = std::array::from_fn(|index| {
+        let key = [
+            "WORLD_SURFACE",
+            "OCEAN_FLOOR",
+            "MOTION_BLOCKING",
+            "MOTION_BLOCKING_NO_LEAVES",
+        ][index];
+        maps.get(key).map(|columns| pack_heightmap_words(columns))
+    });
+    // 光照层 None、isLightOn=false -> 运行时补算。
+    // Light layers None/off -> settled at runtime.
     let parts = ChunkColumnParts {
         sections,
+        heightmaps,
         ..ChunkColumnParts::default()
     };
     let column = ChunkColumn::from_parts(parts)
@@ -620,6 +692,20 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         books: Default::default(),
         entities: Default::default(),
     }))
+}
+
+/// 把 256 列的世界高度编成官方 `LongArrayTag` 的 9 位一项、按字对齐的 long 数组。
+/// Pack 256 world heights into vanilla's 9-bit word-aligned `LongArrayTag`.
+fn pack_heightmap_words(columns: &[i32]) -> Vec<u64> {
+    // `Mth.ceillog2(WORLD_HEIGHT + 1)`：385 -> 9 位。
+    const BITS: usize = 9;
+    const PER_WORD: usize = 64 / BITS;
+    let mut words = vec![0u64; columns.len().div_ceil(PER_WORD)];
+    for (index, &height) in columns.iter().enumerate() {
+        let value = (height - MIN_Y) as u64;
+        words[index / PER_WORD] |= value << ((index % PER_WORD) * BITS);
+    }
+    words
 }
 
 /// 交付/存档会写出的四张 `FINAL_HEIGHTMAPS` 的打包位流（`LongArrayTag` 的内容）。
@@ -650,13 +736,6 @@ pub fn final_heightmap_words(
     Ok(out)
 }
 
-/// 建 biome 容器时用的初始群系；`set` 会立刻覆盖全部 64 格，这个值不进结果。
-/// Initial biome for the container; `set` overwrites all 64 cells so it never
-/// appears in the result. Kept as a concrete valid id.
-fn config_default_biome() -> u32 {
-    registries::biome::PLAINS as u32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,6 +746,85 @@ mod tests {
             seed,
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
+        }
+    }
+
+    /// 掩码缓存和逐格调用原谓词逐位相同，且六张图的键各占一位。
+    /// The cached mask matches the per-cell predicate bit for bit.
+    #[test]
+    fn heightmap_masks_match_the_six_predicates() {
+        use mc_bamboo_data::facts;
+
+        let original = |key: &str, state: u32| -> bool {
+            let found = mc_bamboo_data::state_facts(state);
+            let motion = found & facts::MOTION_BLOCKING != 0;
+            let motion_no_leaves = found & facts::MOTION_BLOCKING_NO_LEAVES != 0;
+            let fluid_nonempty =
+                mc_bamboo_data::state_fluid(state).fluid != registries::fluid::EMPTY;
+            match key {
+                "WORLD_SURFACE_WG" | "WORLD_SURFACE" => found & facts::AIR == 0,
+                "OCEAN_FLOOR_WG" | "OCEAN_FLOOR" => motion,
+                "MOTION_BLOCKING" => motion || fluid_nonempty,
+                "MOTION_BLOCKING_NO_LEAVES" => motion_no_leaves || fluid_nonempty,
+                _ => false,
+            }
+        };
+        for state in 0..blocks::TOTAL_STATES {
+            for (index, &key) in HEIGHTMAP_KEYS.iter().enumerate() {
+                assert_eq!(
+                    heightmap_mask(state) & (1 << index) != 0,
+                    original(key, state),
+                    "state {state} {key}"
+                );
+            }
+        }
+        // 哨兵的存在不能让任何结果多出一位。
+        // The sentinel must not add a spurious bit.
+        for state in 0..blocks::TOTAL_STATES {
+            assert_eq!(heightmap_mask(state) & !0x3f, 0, "state {state}");
+        }
+        assert_eq!(heightmap_mask(blocks::AIR), 0);
+    }
+
+    /// 高度图打包和 `Chunk::from_sections` 从方块重算出的四张 FINAL 字逐字相同，
+    /// 对带高度图的和手工拼的（空 heightmaps）chunk 都成立。
+    /// Packed heightmaps equal the four FINAL word arrays recomputed from blocks,
+    /// both for generated chunks and hand-built ones with empty heightmaps.
+    #[test]
+    fn packed_heightmaps_match_the_assembled_words() {
+        let cfg = normal(12345);
+        let chunk = generate_chunk(&cfg, 5, 7).unwrap();
+        let column = build_region_column(&chunk).unwrap();
+        let world = column.parts().column.chunk();
+        for (key, kind) in [
+            ("WORLD_SURFACE", HeightmapKind::WorldSurface),
+            ("OCEAN_FLOOR", HeightmapKind::OceanFloor),
+            ("MOTION_BLOCKING", HeightmapKind::MotionBlocking),
+            (
+                "MOTION_BLOCKING_NO_LEAVES",
+                HeightmapKind::MotionBlockingNoLeaves,
+            ),
+        ] {
+            assert_eq!(
+                pack_heightmap_words(&chunk.heightmaps[key]),
+                world.heightmap(kind),
+                "{key}"
+            );
+        }
+        let mut bare = chunk.clone();
+        bare.heightmaps.clear();
+        let bare_column = build_region_column(&bare).unwrap();
+        let bare_world = bare_column.parts().column.chunk();
+        for (_, kind) in [
+            ("WORLD_SURFACE", HeightmapKind::WorldSurface),
+            ("OCEAN_FLOOR", HeightmapKind::OceanFloor),
+            ("MOTION_BLOCKING", HeightmapKind::MotionBlocking),
+            (
+                "MOTION_BLOCKING_NO_LEAVES",
+                HeightmapKind::MotionBlockingNoLeaves,
+            ),
+        ] {
+            assert_eq!(bare_world.heightmap(kind), world.heightmap(kind));
         }
     }
 

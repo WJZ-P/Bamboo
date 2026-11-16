@@ -723,6 +723,36 @@ The 3×3 repack is gone: the `light` stage now calls `generate_light_from_layers
 which builds light-only sections straight from the snapshot layers. Light is
 bit-identical; `wg-perf --light-compare` measured 35.1 → 11.3 ms (median, 96 chunks).
 
+**整块生成再降一轮（2026-11-16，Apple M4 Pro、release、本机口径；Windows 那组 40 ms
+不能直接和下面比）。** 这一节的基线是 `9495ddbb`（密度函数列特化、结构接入、feat-c、
+e2e 合进 main 之后），所以 `noise_density` 已经比上一轮的数字低；本节的数字是
+**把 9495ddbb 的二进制和合入本轮优化后的二进制在同一轮交替跑两轮**得到的
+（`--skip-aux` 只跑主阶段表，3 种子 × 5 群系 × 8 区块 = 120 块、每块 3 遍取中位数）。
+
+| 阶段（中位数 ms/区块） | 9495ddbb 1 | 本轮 1 | 9495ddbb 2 | 本轮 2 |
+|---|---|---|---|---|
+| biomes | 2.114 | 2.181 | 2.171 | 2.145 |
+| noise_density | 1.523 | 1.585 | 1.549 | 1.557 |
+| substance | 0.803 | 0.845 | 0.801 | 0.830 |
+| surface | 2.151 | 2.274 | 2.187 | 2.191 |
+| carver_mask | 0.992 | 1.058 | 1.015 | 1.027 |
+| features | 3.481 | 3.831 | 3.667 | 3.705 |
+| light | 5.993 | 4.454 | 6.431 | 4.263 |
+| assembly | 1.637 | 0.823 | 1.641 | 0.806 |
+| **墙钟合计** | **20.303** | **18.561** | **21.659** | **18.259** |
+
+两边都用 `--aux 1` 跳过繁重的辅助测量，主表打印完即结束。**整块墙钟中位数降到
+20 ms 以内**：这是上一节密度函数列特化（约 −1.4 ms）与本轮光照/组装优化
+（`light` 约 −1.8 ms、`assembly` 约 −0.8 ms）叠加的结果，单靠本轮改不到 20 ms。
+口径和每项的前后数字见 `docs/performance-optimizations.md` 第 13 节。
+
+改动是：段调色板一次扫描批量打包（不再逐格 `set`）、生成期光照的段省掉重扫与
+红石缓存哈希、四张 FINAL 高度图直接从已算好的 `GeneratedChunk.heightmaps` 打包、
+群系名字按状态索引缓存。剩下的 `features` 约 3.7 ms、`light` 传播约 4.3 ms、
+`biomes` 约 2.2 ms 还有空间。每一项都由 `chunkgen`（carvers / features）、
+`gen-world --through features`、`structure-pipeline`、`gen-light` 多种子多 salt
+证明 0 不一致，并故意改坏一次确认对拍能报出来。
+
 ## 端到端逐类型对拍
 
 地物分批合进 main 时，每一批各自用 `chunkgen --through features` 对拍过；那是

@@ -344,7 +344,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla flat-world <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla beard <java 路径> [--through noise|surface|carvers] [--break-self-test]
       mc-bamboo-vanilla gen-light <java 路径> [--scenes N] [--seed S] [--show N] [--break-self-test]
-      mc-bamboo-vanilla wg-perf [--seeds N] [--chunks N] [--biomes a,b,c] [--repeat N] [--threads N] [--json] [--skip-cut] [--skip-sky] [--skip-threads]
+      mc-bamboo-vanilla wg-perf [--seeds N] [--chunks N] [--biomes a,b,c] [--repeat N] [--threads N] [--json] [--skip-cut] [--skip-sky] [--skip-threads] [--skip-aux] [--structure-timing]
       mc-bamboo-vanilla structure-generation <java 路径> [--break-self-test]
       mc-bamboo-vanilla structure-pipeline <java 路径> [--break-self-test]
       mc-bamboo-vanilla structure-single <java 路径>
