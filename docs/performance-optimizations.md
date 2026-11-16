@@ -60,6 +60,9 @@
 | 21 | 地形缓存改全进程共用一份：8 线程 3364 个中心的进程 RSS 峰值（14） | 4882 MB | 2042 MB | 2.4× |
 | 21 | 同上：8 线程整块生成墙钟中位数 / 吞吐（14） | 108.3 ms / 66.5 中心/s | 70.2 ms / 110.5 中心/s | 1.54× / 1.66× |
 | 21 | 同上：4 线程 RSS 峰值 / 墙钟中位数（14） | 2674 MB / 75.4 ms | 1264 MB / 52.5 ms | 2.1× / 1.44× |
+| 22 | `features` 不再每区块重新解析 `worldgen.json`：`game_features` 单线程中位（15） | 69.3–71.7 ms | 43.3–45.5 ms | 约 1.6× |
+| 22 | 地物主循环省掉每地物 SHA-256 和线性查表：纯函数逐 step 之和（15） | 2.39 / 2.39 / 2.45 ms | 2.19 / 2.20 / 2.18 ms | 1.1× |
+| 22 | `prime_heightmaps` 掩码缓存 + 提前退出（15） | 0.169–0.190 ms | 0.134 ms | 1.3× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -83,6 +86,8 @@
 第 20 项见第 13 节，量的是 `wg-perf` 里「一个区块从头到尾」的墙钟；前两列和最后一行是
 同一轮里改前/改后两个二进制交替跑两轮的结果，不能和别的节的数字直接相减。
 第 21 项见第 14 节，是地形缓存的进程内存峰值和整块生成的墙钟、吞吐；测量时机器不空闲，以同轮交替的中位数为准。
+第 22 项见第 15 节，量的是**真实 Director 路径**上 `features` 阶段的三处重复工作；第一行是
+`game_features` 每中心墙钟，后两行是能分辨小改动的纯函数微基准，三行口径不同不能相加。
 
 第 10 行**不是优化**，是 2026-11-11 安静窗口里量到的「还剩多少差距」，见 7e 节和
 `profiling.md` 第 10 节：新旧两版 tick 的区块数、段数、方块数完全相同，差距全在
@@ -2225,3 +2230,121 @@ release 二进制，`gen-world --through features --seeds 2 --chunks 2 --salt 9`
 没有做的：`GeneratedChunk.blocks` 的压缩存法。地下和空中大段是单一方块，理论上
 能压，但要改公开布局、所有下游读法和对拍入口，且本轮内存已经从 4.6 GiB 降到
 2.0 GiB、缓存本身只剩 235 MB；没有单独量过收益，按「没有明显收益就不做」留着。
+
+---
+
+## 15. 真实 Director 路径上的 `features`：先搞清三个数字，再省掉重复工作
+
+这一节的代码在 `crates/mc-bamboo-game/src/worldgen_features.rs`、
+`mc-bamboo-worldgen/src/feature/run.rs` / `registry.rs` / `world.rs`。基线是
+`d6e1ba39`（含密度列特化、结构接入、feat-c、e2e、共享地形缓存）。
+
+### 15.1 三个对不上的数字，各自量的是什么
+
+| 数字 | 口径 | 里面有什么 / 没什么 |
+|---|---|---|
+| `wg-perf` 整块约 18.5 ms，`features` 约 3.7 ms | 工具自己拼好 3×3 视图后调 `mc-bamboo-worldgen::chunk::Generator::features` 纯函数 | **省掉了** `build_view`（9 个 CARVERS 地形）、结构起点/引用反查、`structure_starts` / `structure_references` 两阶段、`ProcessorLists` 解析、世界线程合并增量与完工组装。它是「地物纯函数 + 光照纯函数 + 一次组装」的下界，不是玩家等的时间 |
+| `game_features_with_mask` 约 29.8 ms，逐 step 之和只有 ~1.8 ms | 调 `mc-bamboo-game::worldgen_features` 的公共入口：`build_view` → `StructurePlacement` → `FeatureWorld::new/finish` → 11 个 step | 其中约 **24 ms 是 `Worldgen::load()` 每区块重新解析整份 worldgen JSON**（下面 15.2），约 3–4 ms 是 3×3 视图 / 地形缓存未命中，剩下约 1.8 ms 才是各 step 的地物。带结构 / 不带结构两张 step 表几乎相同，因为结构件放置在每 step 的地物之前、不计入 `steps_ms` |
+| 并发压测 4 / 8 线程每中心 52.5 / 70.2 ms | `terrain_cache_bench` 用多条计算线程跑同一个 `game_features`，量的是**每个中心的墙钟** | 包含前两项的开销，另加线程争用；1 线程时同一脚本约 46.7 ms，2 线程 42.3、4 线程 50.9、8 线程 104.7 ms（本机 M4 Pro，见 15.4） |
+
+真实 Director 路径单线程分阶段实测（2 种子 × 16 区块 × 5 遍，中位数）：
+
+| 阶段 | 中位数 | p95 |
+|---|---|---|
+| 一个中心的 terrain（含 3×3 视图里未命中的那些） | 7.958 ms | 8.425 ms |
+| `features`（`game_features`，含视图/结构/`FeatureWorld`） | 30.647 ms | 31.328 ms |
+| `light`（`generate_light_from_layers` 纯函数） | 5.478 ms | 7.941 ms |
+| `assembly`（`build_region_column`） | 0.712 ms | 0.765 ms |
+| 这四项串起来的墙钟 | 44.557 ms | 47.362 ms |
+
+（terrain 与 features 有重叠：features 内部自己也要 3×3 地形，缓存命中时省掉；这张表是
+「单独量每个阶段的单价」，不是流水线阶段相加。）所以 `wg-perf` 的 18.5 ms 少算了大约
+26 ms：`Worldgen::load` 的重复解析、结构阶段反查、3×3 地形生成与缓存、以及完工时
+把多个中心的写增量按规范序合并。**优化优先级按这张真实路径表排，不按 `wg-perf` 排。**
+
+### 15.2 做了什么、为什么快
+
+1. **`processor_list` 解析改成进程一份**（`9d6d6ec1`）。`run_features_filtered` 原来每次
+   调 `Worldgen::load()` 解析整份 `worldgen.json`（实测中位 **24.373 ms**），只为了取
+   `processor_list` 建 `ProcessorLists`（解析本身只要 0.142 ms）。这张表只随编译进去的
+   数据版本变，和种子、世界类型、区块坐标都无关，于是用 `OnceLock` 缓存，每次调用只克隆
+   这张表。同轮交替四轮、32 个中心、`generate_structures=true` 的单线程 `game_features`：
+   中位 69.3–71.7 → 43.3–45.5 ms，约 1.6×。`sample` 里 `serde_json::Value` 和
+   `climate::build` / `sort_nodes`（都是解析时建 R 树）随之从热点消失。
+   单测把缓存结果与新解析逐项比较；改坏确认让缓存换成一张含未知 processor 的表，
+   `structure-pipeline` 直接报 `unsupported processor` 失败。
+2. **地物主循环**（`321c1243`）。每个 placed feature 原来都做一次 SHA-256
+   （`obfuscate_seed`）并重建 `BiomeFilter` 闭包，还用
+   `globals.iter().position(|&g| g == id)` 线性扫 `features_per_step`。改成按 step 预建
+   `placed id → 全局 index` 反查表、把 zoom 种子和闭包提到循环外、`PlacementEnv` 只换
+   `top_feature`。纯函数步基准（9 区块输入、40 遍）逐 step 之和
+   2.39 / 2.39 / 2.45 → 2.19 / 2.20 / 2.18 ms。反查表有逐项对照 `position()` 的单测；
+   把 index 偏移一位，`gen-world --through features` 报 252 处不一致。
+3. **`prime_heightmaps` 掩码缓存 + 提前退出**（`ab1624fe`）。9×256 列 × 至多 384 层原来
+   每层调四次 `is_opaque`（每次重查 `state_facts` / `state_fluid`），且四种都找到后仍扫到
+   底。改成按状态 ID 缓存 4 位掩码 + 待找位集，专用基准 0.169–0.190 → 0.134 ms/区块。
+   单测把全部 35723 个状态与原谓词逐位比较，并对照逐格全扫描。
+
+### 15.3 `structure_references` 冷启动
+
+`wg-perf --structure-timing`（2 种子 × 5 群系 × 6 区块 × 2 遍）：
+`structure_starts` 冷启动中位 0.001 / p95 2.013 ms，`structure_references` 冷启动
+中位 9.000 / **p95 61.350 ms**，缓存命中两阶段都是 0.000。冷启动的几十毫秒来自
+按线程首次建 `Worldgen` / `WorldStructureState` / 群系 R 树（`sample` 里的
+`climate::build` / `sort_nodes`）。真实跑图里它**每个种子 × 世界类型 × 计算线程各触发一次**，
+不是每个区块：计算池默认 4 线程，一次飞行最多 4 次，之后全走 `(seed, x, z)` 缓存。
+另外每个新坐标的 `structure_starts` 与 `structure_references` 仍要算一遍（半径 8 的起点
+反查），但那是确定性纯计算，缓存按坐标命中。**结论：不必为 p95 61 ms 单独优化**，
+它不在稳态每区块成本里；真要削可以把 `Worldgen` 解析结果也做进程级共享，但会动到
+`worldgen.rs` 的地形缓存（另一个分支在改），本轮按分工没碰。
+
+### 15.4 多线程下为什么单块墙钟涨到 50–70 ms
+
+同一脚本（12×12=144 个中心、`generate_structures=false`）在本机实测：
+
+| 线程 | 总墙钟 | 吞吐 | 每中心中位 | p95 |
+|---|---|---|---|---|
+| 1 | 10.862 s | 13.3/s | 46.655 ms | 103.407 ms |
+| 2 | 5.175 s | 27.8/s | 42.297 ms | 65.321 ms |
+| 4 | 3.840 s | **37.5/s** | 50.933 ms | 101.203 ms |
+| 8 | 4.891 s | 29.4/s | 104.746 ms | 204.792 ms |
+
+`/usr/bin/sample` 8 秒 1ms 的栈顶端：`semaphore_wait_trap` 5606 个样本（线程等调度 /
+等锁）、`GradientNoise::sample_and_lerp` 1742、`climate::search` 582、`PerlinNoise::get` 375、
+`malloc/free/memmove` 合计约 800。也就是说：**吞吐在 4 线程最好，8 线程反而下降**，
+主因是 10 个性能核要同时喂 8 条内存带宽吃紧的地形计算线程（每区块 9 × 384 × 256 个
+方块状态、多次整份 `Vec` 克隆），加上全局地形缓存的锁与分配器争用；`semaphore_wait_trap`
+说明还有等待，不是纯算力线性扩展。单块墙钟随线程数上升是「同一份 CPU / 内存带宽被
+分摊」，不是多做了工作。**玩家感受到的是吞吐**，所以 4 线程的 37.5 中心/s 比 1 线程的
+13.3 中心/s 好得多，尽管单块从 46.7 涨到 50.9 ms。这也解释了为什么第 14 节的地形
+缓存（降内存、降重复计算）对多线程吞吐帮助最大。
+
+### 15.5 逐位不变与改坏确认
+
+`chunkgen --through carvers/features`、`gen-world`（CARVERS / `--through features`）、
+`worldgen`、`structure-pipeline`、`gen-light` 在 salt 1 和 987654321 下全部 0 不一致；
+`structure-pipeline --break-self-test` 报 28 处、`gen-light --break-self-test` 报 1 处。
+逐项改坏确认：processor 表换成未知 processor → `structure-pipeline` 失败；
+step index +1 → `gen-world` 252 处；`prime_heightmaps` 掩码错一位 → 两个新增单测都失败。
+
+**已知局限（写进疑点清单）**：把 `prime_heightmaps` 的全部高度图故意写错后，
+`gen-world --through features` 与 `structure-pipeline` 仍报 0 不一致——这批对拍坐标
+没有依赖 primed heightmap 的地物，Java 端到端对拍对这个函数是盲区，等价性只由
+新增的两个单测保证。要补覆盖需换用 `freeze_top_layer` / `vegetation_patch` 等读
+`WORLD_SURFACE_WG` 的坐标。
+
+### 15.6 试过但撤销的
+
+* **`FeatureWorld::new` 按层写时复制**（`Vec<Vec<u32>>` → `Vec<Arc<Vec<u32>>>`，
+  `Arc::make_mut` 只在被写的层复制）。全链路对拍（含 1/4 线程逐字节一致测试）都过，
+  但纯路径基准 `new + 200 次写 + finish` 稳定从 **0.104 → 0.167 ms**（慢 60%）：
+  3456 次 `Arc` 分配加每次写的引用计数检查，比一次整份 `Vec::clone` 更贵；真实
+  `game_features` 口径在 ±8 ms 负载噪声里分辨不出。按「量不出明显收益就撤掉」撤销，
+  未提交。它还会让 `place_step.rs::snapshot_view` 的「放置前快照」语义变复杂
+  （processor 必须看到旧值），也是风险之一。
+* **`last_writes` 改成 HashMap 记最后下标**。基准 `FeatureWorld::finish`（32000 条写）
+  从 0.380 → 0.840 ms，慢 2.2×：HashMap 插入加排序比原来的「反向 + HashSet +
+  reverse」更贵。撤销，但按要求补了一条单测钉住「最后一次写的原先后顺序」，
+  这个顺序影响写邻居增量的合并。
+* **`ParameterList` R 树结果缓存 / `bounded_distance` 提前退出 / 直接从 layers 算天空
+  光源表**：见第 13.4 节，都是本轮之前撤销的尝试。

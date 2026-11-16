@@ -753,6 +753,17 @@ e2e 合进 main 之后），所以 `noise_density` 已经比上一轮的数字�
 `gen-world --through features`、`structure-pipeline`、`gen-light` 多种子多 salt
 证明 0 不一致，并故意改坏一次确认对拍能报出来。
 
+**注意 `wg-perf` 不是玩家等的那个数**：工具由调用方给 3×3 视图，省掉了
+`build_view`（9 个 CARVERS 地形）、结构起点/引用反查、`structure_starts` /
+`structure_references` 两阶段、以及世界线程按规范序合并写增量。真实 Director 路径
+单线程分阶段实测约 44.6 ms/区块（terrain 8.0、`game_features` 30.6、light 5.5、
+assembly 0.7），其中一度有 24 ms 是 `features` 每区块重新解析整份
+`worldgen.json`。这一块已改成进程一份，并顺带省掉地物主循环里每个 placed feature
+的 SHA-256 与线性查表、`prime_heightmaps` 的逐格四次谓词调用。三个口径
+（`wg-perf` 18.5 ms、`game_features` 29.8 ms、并发压测 4/8 线程 52.5/70.2 ms）
+的关系、多线程为什么单块变慢、以及撤销的尝试见
+`docs/performance-optimizations.md` 第 15 节。
+
 ## 端到端逐类型对拍
 
 地物分批合进 main 时，每一批各自用 `chunkgen --through features` 对拍过；那是
