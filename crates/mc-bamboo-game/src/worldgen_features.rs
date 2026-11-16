@@ -17,7 +17,11 @@
 //! The world thread keeps each chunk's half-built column as an immutable
 //! `Arc<GeneratedChunk>` and merges deltas copy-on-write via `Arc::make_mut`.
 
-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_nbt::Tag;
@@ -153,6 +157,29 @@ pub(crate) fn run_features(
         .map(|(result, _)| result)
 }
 
+/// `worldgen.json` 的 `processor_list` 只随数据版本变，和种子、世界类型、区块坐标
+/// 都无关。解析整份 JSON（`Worldgen::load`）实测约 24 ms，若每个区块的 `features`
+/// 调用都重来一次，它会盖过地物本身。进程里缓存一份解析结果，之后只克隆这张表
+/// （每条计算线程各持一份，结构放置只读它）。
+///
+/// `processor_list` depends only on the bundled data version, not on the seed,
+/// world type or chunk position. Parsing the whole JSON costs ~24 ms, which would
+/// dwarf the features work if repeated per chunk; cache it process-wide.
+fn processor_lists() -> Result<&'static ProcessorLists, String> {
+    static LISTS: OnceLock<Result<ProcessorLists, String>> = OnceLock::new();
+    LISTS
+        .get_or_init(|| {
+            let worldgen = Worldgen::load()?;
+            let raw = worldgen
+                .raw()
+                .get("processor_list")
+                .ok_or("missing processor_list")?;
+            ProcessorLists::parse(raw)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 /// [`run_features`] 加一个地物白名单；游戏里恒为 `None`，只有对拍工具会传。
 ///
 /// [`run_features`] with a feature allow list; the game always passes `None`,
@@ -265,13 +292,7 @@ fn run_features_filtered(
             starts: group.as_slice(),
         })
         .collect();
-    let processor_lists = ProcessorLists::parse(
-        Worldgen::load()?
-            .raw()
-            .get("processor_list")
-            .ok_or("missing processor_list")?,
-    )?;
-    let placement = StructurePlacement::new(groups, processor_lists, config.seed);
+    let placement = StructurePlacement::new(groups, processor_lists()?.clone(), config.seed);
     // 上面反查起点 / 引用会改写一个群的系 R 树 `lastResult`；`BiomeManager`
     // 在 features 里按同样顺序查它，进主循环前清到确定状态。
     // Resolving starts/references above mutates the shared biome R-tree
@@ -771,6 +792,35 @@ mod tests {
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
         }
+    }
+
+    /// 缓存的 processor_list 与每次重新解析逐项相同，且解析只发生一次。
+    /// The cached processor list matches a fresh parse item for item.
+    #[test]
+    fn cached_processor_lists_match_a_fresh_parse() {
+        let fresh = ProcessorLists::parse(
+            Worldgen::load()
+                .unwrap()
+                .raw()
+                .get("processor_list")
+                .unwrap(),
+        )
+        .unwrap();
+        let cached = processor_lists().unwrap();
+        assert_eq!(
+            cached.names().collect::<Vec<_>>(),
+            fresh.names().collect::<Vec<_>>()
+        );
+        for name in fresh.names() {
+            assert_eq!(
+                format!("{:?}", cached.get(name)),
+                format!("{:?}", fresh.get(name)),
+                "{name}"
+            );
+        }
+        // 两次调用拿到同一个进程级实例。
+        // Two calls return the same process-wide instance.
+        assert!(std::ptr::eq(cached, processor_lists().unwrap()));
     }
 
     /// 同一输入跑两遍 features，输出逐字节一致（随机源只从种子和坐标派生）。
