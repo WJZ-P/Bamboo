@@ -407,8 +407,10 @@ struct ReclaimDue {
     pos: ChunkPos,
 }
 
-/// 每刻最多把 deferred 列表整体重新入堆几次。
+/// 每刻最多把 deferred 里的一小段重新入堆几次。
 const RETRIES_PER_TICK: usize = 4;
+/// 每次重试放多少个任务回堆：只取最急的一小段，不扫整张积压表。
+const DEFERRED_SLICE: usize = 32;
 
 /// 待派任务的排序键：离最近玩家的 rank（带方向加权），同一档按
 /// 「这条流水线已经走到哪一步」把快完工的往前放，最后按 TaskId 兜底。
@@ -1508,16 +1510,18 @@ impl<C: ChunkBundle> Director<C> {
             return;
         }
         self.refresh_heap_if_needed();
-        // 有任务完成/新任务加入时给 deferred 一次机会，但每刻最多
-        // RETRIES_PER_TICK 次；同一刻几百个事件不会各重排一遍积压表。
+        // 每刻只把 deferred 里最急的一小段放回堆，其余留在 deferred。
+        // 这样每次 drive 的成本是 O(DEFERRED_SLICE)，与积压总数无关。
         if self.retry_budget > 0 && !self.deferred.is_empty() {
             self.retry_budget -= 1;
-            let deferred = std::mem::take(&mut self.deferred);
-            for id in deferred {
-                if self.pending.contains_key(&id) {
-                    let key = self.task_key(id);
-                    self.pending_order.push(Reverse((key, id)));
-                }
+            let mut retry: Vec<TaskId> = self
+                .deferred
+                .drain(..self.deferred.len().min(DEFERRED_SLICE))
+                .collect();
+            retry.retain(|id| self.pending.contains_key(id));
+            for id in retry {
+                let key = self.task_key(id);
+                self.pending_order.push(Reverse((key, id)));
             }
         }
 
@@ -1581,10 +1585,16 @@ impl<C: ChunkBundle> Director<C> {
             let _ = pending.seq;
         }
         // 保留上一轮没轮到的 deferred；本轮新被挡住的任务追加进去。
-        // 直接覆盖会在同一刻多次 `drive` 时把早先被挡住的任务弄丢。
-        self.deferred.extend(skipped);
-        self.deferred.sort_unstable();
-        self.deferred.dedup();
+        // 按 `(rank, TaskId)` 排好，下一次只取最急的一小段重试。
+        let mut deferred = std::mem::take(&mut self.deferred);
+        deferred.extend(skipped);
+        let mut keyed: Vec<(QueueKey, TaskId)> = deferred
+            .into_iter()
+            .map(|id| (self.task_key(id), id))
+            .collect();
+        keyed.sort_unstable();
+        keyed.dedup_by(|a, b| a.1 == b.1);
+        self.deferred = keyed.into_iter().map(|(_, id)| id).collect();
         self.flush_notifications(out);
     }
 
