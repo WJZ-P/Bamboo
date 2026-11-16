@@ -272,8 +272,8 @@ struct TerrainShard {
     misses: u64,
     evictions: u64,
     trims: u64,
-    /// 本片里每个键第一次被哪条线程算出来，用于统计跨线程重复计算。
-    /// First computing thread per key in this shard, for duplicate counts.
+    /// 本片里每个键被哪些线程独立算过，用于统计跨线程重复计算。
+    /// Threads that independently computed each key, for duplicate counts.
     computed_by: HashMap<TerrainCacheKey, Vec<usize>>,
 }
 
@@ -347,11 +347,11 @@ pub struct TerrainCacheStats {
     pub cross_thread_duplicates: u64,
 }
 
-/// 测量用的全局峰值（只在插入后更新，Relaxed 足够，压测报告是跑完读一次）。
-/// Global high-water mark for measurements (read once after a benchmark run).
+/// 测量用的全局字节数 / 峰值（只在插入和淘汰时更新，Relaxed 足够，压测报告跑完读一次）。
+/// Global byte count and high-water mark for measurements (Relaxed is enough;
+/// the benchmark reads the stats once after the run).
 static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
 static TOTAL_BYTES: AtomicUsize = AtomicUsize::new(0);
-static TOTAL_ENTRIES: AtomicUsize = AtomicUsize::new(0);
 static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
@@ -401,14 +401,8 @@ pub fn clear_terrain_cache() {
     }
     PEAK_BYTES.store(0, Ordering::Relaxed);
     TOTAL_BYTES.store(0, Ordering::Relaxed);
-    TOTAL_ENTRIES.store(0, Ordering::Relaxed);
 }
 
-/// 带缓存的 `generate_chunk`，`features` / `light` 阶段拼 3×3 视图用。
-/// 命中返回全进程共享的 `Arc`，不复制 400 KiB 的方块数组。
-///
-/// Cached `generate_chunk` for the `features` / `light` 3x3 views. A hit returns
-/// a process-wide shared `Arc` instead of copying ~400 KiB of block arrays.
 /// 带缓存的 `generate_chunk`，`features` / `light` 阶段拼 3×3 视图用。
 /// 命中返回全进程共享的 `Arc`，不复制 400 KiB 的方块数组。
 ///
@@ -451,9 +445,8 @@ pub(crate) fn cached_generate_chunk(
             shard.order.push_back(key);
             shard.entries.insert(key, Arc::clone(&chunk));
             shard.bytes += bytes;
-            TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed);
-            TOTAL_ENTRIES.fetch_add(1, Ordering::Relaxed);
-            PEAK_BYTES.fetch_max(TOTAL_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
+            let total = TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
+            PEAK_BYTES.fetch_max(total, Ordering::Relaxed);
         }
         // 按字节封顶：超了就按插入顺序从最旧的条目开始淘汰，清到 3/4 预算。
         // 地形是纯函数，淘汰顺序不影响结果，只影响后续是否命中。
@@ -473,7 +466,6 @@ pub(crate) fn cached_generate_chunk(
                 let removed_bytes = generated_chunk_heap_bytes(&removed);
                 shard.bytes = shard.bytes.saturating_sub(removed_bytes);
                 TOTAL_BYTES.fetch_sub(removed_bytes, Ordering::Relaxed);
-                TOTAL_ENTRIES.fetch_sub(1, Ordering::Relaxed);
                 shard.evictions += 1;
             }
         }
