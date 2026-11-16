@@ -126,25 +126,65 @@ pub(crate) fn with_generator<T>(
     })
 }
 
-/// 官方 `Heightmap.Types.isOpaque()` 对某个方块状态的判定。
-///
-/// Vanilla `Heightmap.Types.isOpaque()` for one block state.
-fn heightmap_predicate(key: &str, state: u32) -> bool {
-    let facts = mc_bamboo_data::state_facts(state);
-    let motion = facts & mc_bamboo_data::facts::MOTION_BLOCKING != 0;
-    let motion_no_leaves = facts & mc_bamboo_data::facts::MOTION_BLOCKING_NO_LEAVES != 0;
-    let fluid_nonempty =
-        mc_bamboo_data::state_fluid(state).fluid != mc_bamboo_data::registries::fluid::EMPTY;
+/// [`HEIGHTMAP_KEYS`] 每项的位；键名不在表里时返回 0。
+/// One bit per [`HEIGHTMAP_KEYS`] entry; zero for an unknown key.
+fn predicate_bit(key: &str) -> u8 {
     match key {
-        // `NOT_AIR`：air / cave_air / void_air 都不算地面。
-        // `NOT_AIR`: air, cave_air and void_air are all transparent to this map.
-        "WORLD_SURFACE_WG" | "WORLD_SURFACE" => facts & mc_bamboo_data::facts::AIR == 0,
-        // `MATERIAL_MOTION_BLOCKING`：不含流体。 `MATERIAL_MOTION_BLOCKING`: no fluids.
-        "OCEAN_FLOOR_WG" | "OCEAN_FLOOR" => motion,
-        "MOTION_BLOCKING" => motion || fluid_nonempty,
-        "MOTION_BLOCKING_NO_LEAVES" => motion_no_leaves || fluid_nonempty,
-        _ => false,
+        "WORLD_SURFACE_WG" => 1 << 0,
+        "WORLD_SURFACE" => 1 << 1,
+        "OCEAN_FLOOR_WG" => 1 << 2,
+        "OCEAN_FLOOR" => 1 << 3,
+        "MOTION_BLOCKING" => 1 << 4,
+        "MOTION_BLOCKING_NO_LEAVES" => 1 << 5,
+        _ => 0,
     }
+}
+
+/// 一个方块状态对六张高度图各自算不算「地面」，一次查完状态事实。
+///
+/// `NOT_AIR`（air / cave_air / void_air 都不算）、`MATERIAL_MOTION_BLOCKING`
+/// （不含流体）以及两张含流体的 `MOTION_BLOCKING` 谓词，全部由状态的静态事实决定；
+/// 按状态 ID 缓存这六位，逐列扫方块时就不必每层重复查表。
+///
+/// Which of the six heightmaps count a block state as ground, computed from the
+/// state's static facts once. The mask is cached by state id, so the per-column
+/// top-down scan does not re-query the same facts at every layer.
+fn heightmap_mask(state: u32) -> u8 {
+    use mc_bamboo_data::facts;
+    const MASK_SIZE: usize = blocks::TOTAL_STATES as usize;
+    // 0 表示「还没算过」；`1<<6` 是哨兵，让「六位全 0」也能命中缓存。
+    // 掩码是状态的静态事实，并发写同一个槽只会写入完全相同的值。
+    // Zero means "not computed"; `1<<6` is a sentinel so an all-zero mask is
+    // cached too. Each slot only ever receives the same value, so relaxed
+    // atomics suffice even with concurrent writers.
+    static CACHE: [std::sync::atomic::AtomicU8; MASK_SIZE] =
+        [const { std::sync::atomic::AtomicU8::new(0) }; MASK_SIZE];
+    let slot = &CACHE[state as usize];
+    let cached = slot.load(std::sync::atomic::Ordering::Relaxed);
+    if cached != 0 {
+        return cached & 0x3f;
+    }
+    let facts = mc_bamboo_data::state_facts(state);
+    let not_air = facts & facts::AIR == 0;
+    let motion = facts & facts::MOTION_BLOCKING != 0;
+    let motion_no_leaves = facts & facts::MOTION_BLOCKING_NO_LEAVES != 0;
+    let fluid_nonempty = mc_bamboo_data::state_fluid(state).fluid != registries::fluid::EMPTY;
+    let mut mask = 0;
+    if not_air {
+        mask |= predicate_bit("WORLD_SURFACE_WG") | predicate_bit("WORLD_SURFACE");
+    }
+    if motion {
+        mask |= predicate_bit("OCEAN_FLOOR_WG") | predicate_bit("OCEAN_FLOOR");
+    }
+    if motion || fluid_nonempty {
+        mask |= predicate_bit("MOTION_BLOCKING");
+    }
+    if motion_no_leaves || fluid_nonempty {
+        mask |= predicate_bit("MOTION_BLOCKING_NO_LEAVES");
+    }
+    let stored = mask | 1 << 6;
+    slot.store(stored, std::sync::atomic::Ordering::Relaxed);
+    mask
 }
 
 /// 照 `Heightmap.primeHeightmaps`：每列从顶往下找第一个满足各自谓词的方块，记 `y+1`；
@@ -157,10 +197,9 @@ fn heightmap_predicate(key: &str, state: u32) -> bool {
 /// doFill WG maps are maintained by setBlockState up to CARVERS, so their final
 /// values equal a prime over the final blocks).
 fn compute_heightmaps(blocks: &[Vec<u32>]) -> BTreeMap<&'static str, Vec<i32>> {
-    let mut maps: BTreeMap<&'static str, Vec<i32>> = BTreeMap::new();
-    for &key in &HEIGHTMAP_KEYS {
-        maps.insert(key, vec![MIN_Y; WIDTH * WIDTH]);
-    }
+    const ALL_BITS: u8 = (1 << HEIGHTMAP_KEYS.len()) - 1;
+    let mut columns: [Vec<i32>; HEIGHTMAP_KEYS.len()] =
+        std::array::from_fn(|_| vec![MIN_Y; WIDTH * WIDTH]);
     let height = blocks.len() as i32;
     for x in 0..WIDTH {
         for z in 0..WIDTH {
@@ -170,27 +209,25 @@ fn compute_heightmaps(blocks: &[Vec<u32>]) -> BTreeMap<&'static str, Vec<i32>> {
             // heightmaps use vanilla's `Heightmap.getIndex(x,z) = x + z*16`.
             let block_index = x * WIDTH + z;
             let map_index = x + z * WIDTH;
-            let mut pending: Vec<&'static str> = HEIGHTMAP_KEYS.to_vec();
+            let mut pending = ALL_BITS;
             for local_y in (0..height).rev() {
-                if pending.is_empty() {
+                if pending == 0 {
                     break;
                 }
                 let state = blocks[local_y as usize][block_index];
-                let mut kept = Vec::with_capacity(pending.len());
-                for key in pending {
-                    if heightmap_predicate(key, state) {
-                        if let Some(map) = maps.get_mut(key) {
-                            map[map_index] = MIN_Y + local_y + 1;
+                let found = heightmap_mask(state) & pending;
+                if found != 0 {
+                    for (index, column) in columns.iter_mut().enumerate() {
+                        if found & (1 << index) != 0 {
+                            column[map_index] = MIN_Y + local_y + 1;
                         }
-                    } else {
-                        kept.push(key);
                     }
+                    pending &= !found;
                 }
-                pending = kept;
             }
         }
     }
-    maps
+    HEIGHTMAP_KEYS.into_iter().zip(columns).collect()
 }
 
 /// 超平坦：按预设的层从 `MIN_Y` 往上填方块，整个区块一个群系。
@@ -417,6 +454,43 @@ mod tests {
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
         }
+    }
+
+    /// 掩码缓存和逐格调用原谓词逐位相同，且六张图的键各占一位。
+    /// The cached mask matches the per-cell predicate bit for bit.
+    #[test]
+    fn heightmap_masks_match_the_six_predicates() {
+        use mc_bamboo_data::facts;
+
+        let original = |key: &str, state: u32| -> bool {
+            let found = mc_bamboo_data::state_facts(state);
+            let motion = found & facts::MOTION_BLOCKING != 0;
+            let motion_no_leaves = found & facts::MOTION_BLOCKING_NO_LEAVES != 0;
+            let fluid_nonempty =
+                mc_bamboo_data::state_fluid(state).fluid != registries::fluid::EMPTY;
+            match key {
+                "WORLD_SURFACE_WG" | "WORLD_SURFACE" => found & facts::AIR == 0,
+                "OCEAN_FLOOR_WG" | "OCEAN_FLOOR" => motion,
+                "MOTION_BLOCKING" => motion || fluid_nonempty,
+                "MOTION_BLOCKING_NO_LEAVES" => motion_no_leaves || fluid_nonempty,
+                _ => false,
+            }
+        };
+        for state in 0..blocks::TOTAL_STATES {
+            for (index, &key) in HEIGHTMAP_KEYS.iter().enumerate() {
+                assert_eq!(
+                    heightmap_mask(state) & (1 << index) != 0,
+                    original(key, state),
+                    "state {state} {key}"
+                );
+            }
+        }
+        // 哨兵的存在不能让任何结果多出一位。
+        // The sentinel must not add a spurious bit.
+        for state in 0..blocks::TOTAL_STATES {
+            assert_eq!(heightmap_mask(state) & !0x3f, 0, "state {state}");
+        }
+        assert_eq!(heightmap_mask(blocks::AIR), 0);
     }
 
     #[test]
