@@ -269,6 +269,8 @@ fn run_features_filtered(
                 starts.push(StartInput {
                     structure: structure.clone(),
                     type_id: type_id.clone(),
+                    source_x: sx,
+                    source_z: sz,
                     pieces,
                 });
             }

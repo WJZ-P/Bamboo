@@ -43,7 +43,7 @@ decoration step 先放结构件再放地物，区块 NBT 写回 `structures` 键
 纳入 Java 对拍：官方 `createStructures` / `createReferences`（半径 9 网格）+ 真实
 `Beardifier` 的 CARVERS + 带结构的 `applyBiomeDecoration`，与游戏侧
 `game_features_with_mask`（`generate_structures=true`）逐方块比 3×3 九宫格。
-干净跑 42 个结构区块 / 37158912 格 0 不一致；`--break-structure` 六种类型、
+干净跑 50 个结构区块 / 44236800 格 0 不一致；`--break-structure` 六种类型、
 `long-set --break-self-test`（3000 组 / 287248 次比较）、`FeaturePoolElement` 多取一次
 随机数，都做了改坏确认。默认无结构模式完全不变。
 

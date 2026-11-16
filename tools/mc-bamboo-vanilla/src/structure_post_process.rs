@@ -227,6 +227,7 @@ fn rust_diff(q: &Query) -> Result<RustOutcome, String> {
                 q.cz,
                 &random,
                 Some(Vec::new()),
+                &mut Default::default(),
             );
             writes.extend(log.unwrap_or_default());
             false

@@ -224,17 +224,30 @@ impl PieceContext<'_, '_> {
             return;
         }
         let min_y = self.world.min_y;
-        let mut y = pos.1;
-        while y > min_y + 1 {
-            let current = self.world.get_block(pos.0, y, pos.2);
-            if !is_replaceable_by_structures(current) {
-                break;
-            }
+        // `MineShaftCorridor.fillColumnDown`：先一路向下找第一个「结构不可替换」
+        // 的方块，再要求那一格 `isFaceSturdy(UP)`，不结实就整列都不写；
+        // 最后从它上面一格向上写到 `start_y`。
+        // Vanilla scans down to the first non-replaceable block, requires that
+        // block's UP face to be sturdy (otherwise nothing is written), then
+        // writes upward from the block above it through `start_y`.
+        let mut bottom = pos.1;
+        while bottom > min_y + 1
+            && is_replaceable_by_structures(self.world.get_block(pos.0, bottom, pos.2))
+        {
+            bottom -= 1;
+        }
+        let supporting = self.world.get_block(pos.0, bottom, pos.2);
+        if mc_bamboo_data::state_facts(supporting)
+            & (1u64 << (mc_bamboo_data::facts::STURDY_FULL + 1))
+            == 0
+        {
+            return;
+        }
+        for y in (bottom + 1)..=pos.1 {
             if let Some(writes) = self.writes.as_mut() {
                 writes.push((pos.0, y, pos.2, state));
             }
             self.world.set_block(pos.0, y, pos.2, state);
-            y -= 1;
         }
     }
 }

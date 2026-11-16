@@ -1765,7 +1765,7 @@ structures (Compound)
 用 `Beardifier.forStructuresInChunk` 跑 3×3 的 CARVERS，再让
 `shouldGenerateStructures()==true` 的 `StructureManager` 跑 `applyBiomeDecoration`；
 游戏侧走 `game_features_with_mask`（`generate_structures=true`），是 Director 同一条路径。
-默认无结构模式完全不变。干净跑 42 个结构区块 / 37158912 格 0 不一致，覆盖表与命令见
+默认无结构模式完全不变。干净跑 50 个结构区块 / 44236800 格 0 不一致，覆盖表与命令见
 [`docs/worldgen-structures-e2e.md`](worldgen-structures-e2e.md)。
 
 对拍抓出并修掉的真 bug（每条都有改坏确认，详见覆盖文档）：
