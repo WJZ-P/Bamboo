@@ -1,6 +1,9 @@
 # 生成文件一律用 LF，不受各机器 core.autocrlf 影响；重跑生成器要逐字节无 diff。
 # Generated files always use LF regardless of core.autocrlf, so regenerating them is byte-identical.
 crates/mc-bamboo-data/src/generated/** text eol=lf
+# 丛林神殿指令表也由生成流程写出，重跑要逐字节无 diff。
+# The jungle temple instruction table is generated too; reruns must be byte-identical.
+crates/mc-bamboo-worldgen/src/structure/post_process/jungle_temple_ops.rs text eol=lf
 # 结构模板是一整块二进制，不能被 text/eol 规范化动到字节。
 # The structure blob is binary and must never undergo text/eol normalization.
 crates/mc-bamboo-data/src/generated/structures.bin binary

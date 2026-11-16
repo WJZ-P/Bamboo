@@ -231,7 +231,10 @@ cargo run --release -p mc-bamboo-vanilla -- chunkgen java --seeds 6 --chunks 36 
 
 除了 `worldgen.json`，`generate` 还会写 `generated/` 下的其它文件（含 `saved_world.rs`
 和 `mod.rs`）；只关心世界生成数据时，别把那些无关的改动混进同一个提交。`extract` 需要
-`target/vanilla/generated/reports`，`generate` 会用官方 jar 重建它。
+`target/vanilla/generated/reports`，`generate` 会用官方 jar 重建它。两条命令还会跑
+`JungleTempleOpsExtractor.java`，从官方 `JungleTemplePiece.postProcess` 的 helper 调用序列
+重写 `crates/mc-bamboo-worldgen/src/structure/post_process/jungle_temple_ops.rs`，
+所以重跑后这个文件也应当无 diff（`docs/worldgen-structures-plan.md` 的丛林神殿段有细节）。
 
 ## 区块级对拍
 
