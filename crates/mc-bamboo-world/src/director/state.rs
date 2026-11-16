@@ -910,6 +910,7 @@ impl<C: ChunkBundle> Director<C> {
             }
             self.pending.remove(&id);
             self.release_task_owner(id);
+            self.forget_priority_id(id);
         }
         self.refresh_busy(pos);
         self.queued_reads.remove(&pos);
@@ -1012,6 +1013,8 @@ impl<C: ChunkBundle> Director<C> {
                 out.push(Effect::Cancel { id });
             }
             self.pending.remove(&id);
+            self.release_task_owner(id);
+            self.forget_priority_id(id);
         }
         for pos in drop {
             self.remove_record(pos);
@@ -1405,6 +1408,18 @@ impl<C: ChunkBundle> Director<C> {
         (self.demand.rank(task.pos), u8::MAX - stage, id)
     }
 
+    /// 队列里被取消的任务不留到下一轮重排：给它一个「永远最后」的键，
+    /// `drive` 遇到它时查不到 `pending` 就跳过。
+    fn forget_priority_id(&mut self, id: TaskId) {
+        if let Some(entry) = self
+            .priority_order
+            .iter_mut()
+            .find(|(other, _)| *other == id)
+        {
+            entry.1 = (i64::MAX, u8::MAX, u64::MAX);
+        }
+    }
+
     /// 每处理完一个事件，把能推进的状态往前推：
     /// 新记录排 `Read`，待派任务按写范围排他派出去，攒着的 Ready/Forgot 发掉。
     fn drive(&mut self, out: &mut Vec<Effect<C>>) {
@@ -1442,6 +1457,10 @@ impl<C: ChunkBundle> Director<C> {
             || self.submitted_this_tick < self.config.max_submits_per_tick)
             && self.in_flight.len() < self.config.max_in_flight;
         if !can_submit {
+            // 新排的任务还没试过，留到下一次 `drive`；这一刻的整表重排
+            // 标记不能丢，否则玩家移动后它们就一直按旧顺序排。
+            self.resort_all = true;
+            self.last_seen_task = 0;
             self.flush_notifications(out);
             return;
         }
@@ -1477,7 +1496,11 @@ impl<C: ChunkBundle> Director<C> {
             }));
             self.task_ids = ids;
         }
+        order.retain(|(id, _)| self.pending.contains_key(id));
         order.sort_by_key(|&(id, key)| (key, id));
+        // 本轮没排到的任务下次一定要再试，不能因为 `last_seen_task` 已经
+        // 推到末尾就永远漏掉。
+        self.last_seen_task = 0;
         let mut blocked = std::mem::take(&mut self.submittable);
         blocked.clear();
         for (id, _) in order.drain(..) {
@@ -1532,7 +1555,6 @@ impl<C: ChunkBundle> Director<C> {
         }
         self.submittable = blocked;
         self.priority_order = order;
-        self.last_seen_task = self.next_task.wrapping_sub(1);
         self.flush_notifications(out);
     }
 
