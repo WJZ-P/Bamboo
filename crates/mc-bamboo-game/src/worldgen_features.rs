@@ -734,6 +734,17 @@ mod tests {
         assert_eq!(a.deltas, b.deltas);
     }
 
+    /// 结构区块跑完游戏里完整流水线不报错：起点/引用/Beardifier/features 全链路。
+    /// The full game pipeline runs on a structure chunk without errors.
+    #[test]
+    fn game_pipeline_runs_on_a_structure_chunk() {
+        let config = normal(42);
+        let result = game_pipeline(&config, 4, 0).unwrap();
+        assert!(!result.starts.is_empty(), "chunk (4,0) has a mineshaft start");
+        assert_eq!(result.blocks.len(), 9);
+        assert_eq!(result.blocks[4].len(), WORLD_HEIGHT as usize);
+    }
+
     /// 写增量落进方块数组后能读回来。
     /// Deltas round-trip through the block arrays.
     #[test]
