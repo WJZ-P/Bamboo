@@ -464,7 +464,9 @@ impl<'a> Recording<'a> {
 
     /// 一次读进读集合。
     fn read(&self, pos: Option<BlockPos>, kind: u8, value: impl Hash) {
-        if let Some(pos) = pos {
+        if let Some(pos) = pos
+            && self.level.observe_partition_enabled()
+        {
             self.level
                 .observe(Observation::ChunkAccess { pos, write: false });
         }
@@ -532,7 +534,9 @@ impl<'a> Recording<'a> {
 
     /// 一次写进效果。
     fn write(&self, entry: Write) {
-        if let Some(pos) = entry.pos() {
+        if let Some(pos) = entry.pos()
+            && self.level.observe_partition_enabled()
+        {
             self.level
                 .observe(Observation::ChunkAccess { pos, write: true });
         }
@@ -554,7 +558,9 @@ impl<'a> Recording<'a> {
     }
 
     fn redstone_write(&self, pos: Option<BlockPos>, kind: u8, value: impl Hash) {
-        if let Some(pos) = pos {
+        if let Some(pos) = pos
+            && self.level.observe_partition_enabled()
+        {
             self.level
                 .observe(Observation::ChunkAccess { pos, write: true });
         }
