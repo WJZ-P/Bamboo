@@ -119,6 +119,23 @@ impl Watchers {
         })
     }
 
+    /// 跨区块的关注关系，按两个区块坐标升序去重。给下一个划分阶段当额外的边。
+    pub(crate) fn cross_chunk_pairs(
+        &self,
+    ) -> Vec<(mc_bamboo_core::ChunkPos, mc_bamboo_core::ChunkPos)> {
+        let mut out = std::collections::BTreeSet::new();
+        for (watcher, watch) in &self.by_watcher {
+            let from = watcher.chunk();
+            for cell in &watch.cells {
+                let to = cell.chunk();
+                if from != to {
+                    out.insert((from.min(to), from.max(to)));
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
     pub(crate) fn cell_watchers(&self, pos: BlockPos) -> Option<&[BlockPos]> {
         self.cells.get(&pos).map(Vec::as_slice)
     }

@@ -359,6 +359,8 @@ pub struct World<'a> {
     quiet: usize,
     /// 静默写真改了容器内容的次数，见 [`World::has_content_writes`]。
     content_writes: usize,
+    /// 越界统计开关；`World::new` 问一次 `Level`，之后每次读写只判这个布尔值。
+    partition_enabled: bool,
 }
 
 /// `CollisionGetter.getBlockCollisions`，方块从 `block_at` 读，移动中活塞的形状从
@@ -464,9 +466,22 @@ enum WakeMode {
 }
 
 impl<'a> World<'a> {
+    /// 一次通过 `Level` 读或写这一格。第 2 步的越界统计靠它知道一次触发
+    /// 实际碰到了哪些区块；开关关着时只有一次布尔判断，连虚调用都没有。
+    ///
+    /// Report one positional `Level` read or write. Step-2 out-of-unit statistics
+    /// use it to learn which chunks a trigger actually touched.
+    #[inline]
+    fn note_access(&self, pos: BlockPos, write: bool) {
+        if self.partition_enabled {
+            self.level.observe(Observation::ChunkAccess { pos, write });
+        }
+    }
+
     pub fn new(level: &'a mut dyn Level, ticks: &'a mut BlockTicks) -> Self {
         // 睡着的实体按公式现算数值时要知道现在是哪一刻。
         crate::block_entity::set_block_entity_clock(ticks.now());
+        let partition_enabled = level.observe_partition_enabled();
         Self {
             level,
             ticks,
@@ -480,6 +495,7 @@ impl<'a> World<'a> {
             held_reads: Vec::new(),
             quiet: 0,
             content_writes: 0,
+            partition_enabled,
         }
     }
 
@@ -715,6 +731,7 @@ impl<'a> World<'a> {
 
     /// `getBlockState`。世界外是 `void_air`。
     pub fn block_state(&self, pos: BlockPos) -> BlockState {
+        self.note_access(pos, false);
         self.level.block_state(pos)
     }
 
@@ -850,16 +867,19 @@ impl<'a> World<'a> {
 
     /// `getBrightness(layer, pos)`：只看天空光或者只看方块光。
     pub fn brightness(&self, layer: LightLayer, pos: BlockPos) -> i32 {
+        self.note_access(pos, false);
         self.level.brightness(layer, pos)
     }
 
     /// `getBlockEntity(pos) instanceof SignBlockEntity` 之后读到的内容，不是告示牌时是 `None`。
     pub fn sign(&self, pos: BlockPos) -> Option<SignContent> {
+        self.note_access(pos, false);
         self.level.sign(pos)
     }
 
     /// 改写告示牌的内容。不是告示牌方块时什么也不做，返回 `false`。
     pub fn set_sign(&mut self, pos: BlockPos, content: SignContent) -> bool {
+        self.note_access(pos, true);
         self.level.set_sign(pos, content)
     }
 
@@ -867,16 +887,19 @@ impl<'a> World<'a> {
     ///
     /// 音符盒的 `getCustomSoundId` 读上面那一格，见 [`crate::behaviour::machines`] 里的音符盒。
     pub fn note_block_sound(&self, pos: BlockPos) -> Option<String> {
+        self.note_access(pos, false);
         self.level.note_block_sound(pos)
     }
 
     /// `getBlockEntity(pos)` 之后按类型取。
     pub fn block_entity<T: BlockEntity>(&self, pos: BlockPos) -> Option<&T> {
+        self.note_access(pos, false);
         self.level.block_entity_dyn(pos)?.as_any().downcast_ref()
     }
 
     /// 这一格有没有方块实体。
     pub fn has_block_entity(&self, pos: BlockPos) -> bool {
+        self.note_access(pos, false);
         self.level.has_block_entity(pos)
     }
 
@@ -917,6 +940,7 @@ impl<'a> World<'a> {
     /// Whether a living item sits in the suck box or can trigger `entityInside`.
     /// Uses the exact shared predicates and the entity spatial index.
     pub(crate) fn hopper_has_items(&self, pos: BlockPos) -> bool {
+        self.note_access(pos, false);
         let suck = crate::hopper::suck_box(pos);
         let mut found = false;
         self.level.for_each_entity_in(suck, &mut |public| {
@@ -966,6 +990,7 @@ impl<'a> World<'a> {
     /// 静默写 / 只读访问里也要发的一次：战利品表解包真的改了容器内容。
     /// 没有任何关注登记时直接返回，写入热路径不额外查容器位置。
     fn notify_changed_always(&mut self, pos: BlockPos) {
+        self.note_access(pos, true);
         if !self.level.has_any_block_entity_watchers() {
             return;
         }
@@ -985,6 +1010,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         f: &mut dyn FnMut(&mut dyn crate::container::Container),
     ) -> bool {
+        self.note_access(pos, true);
         self.level.wake_block_entity(pos);
         self.notify_changed(pos);
         self.with_container_inner(pos, f, WakeMode::Always)
@@ -1000,6 +1026,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         mut f: impl FnMut(&dyn crate::container::Container) -> R,
     ) -> Option<R> {
+        self.note_access(pos, true);
         self.quiet += 1;
         self.level.wake_block_entity(pos);
         let mut result = None;
@@ -1068,6 +1095,7 @@ impl<'a> World<'a> {
         f: &mut dyn FnMut(&mut dyn crate::container::Container),
         wake: WakeMode,
     ) -> bool {
+        self.note_access(pos, true);
         if wake == WakeMode::Always {
             self.level.wake_block_entity(pos);
         }
@@ -1115,6 +1143,7 @@ impl<'a> World<'a> {
         len: usize,
         f: &mut dyn FnMut(&mut [mc_bamboo_protocol::item::ItemStack]),
     ) -> bool {
+        self.note_access(pos, true);
         self.level.wake_block_entity(pos);
         self.notify_changed(pos);
         // 陶罐的 `getTheItem/splitTheItem/setTheItem` 和漏斗/比较器读这一格都解包。
@@ -1128,16 +1157,19 @@ impl<'a> World<'a> {
     ///
     /// The container slots at this position. See [`Level::slots_at`].
     pub(crate) fn slots_at(&self, pos: BlockPos) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.note_access(pos, false);
         self.level.slots_at(pos)
     }
 
     /// 比较器从这一格的容器读到的模拟信号，见 [`Level::container_signal`]。
     pub(crate) fn container_signal(&self, pos: BlockPos) -> i32 {
+        self.note_access(pos, false);
         self.level.container_signal(pos)
     }
 
     /// 这一格容器背后的方块位置，见 [`Level::container_positions`]。
     pub(crate) fn container_positions(&self, pos: BlockPos) -> Vec<BlockPos> {
+        self.note_access(pos, false);
         self.level.container_positions(pos)
     }
 
@@ -1147,6 +1179,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         f: &mut dyn FnMut(&mut crate::hopper::HopperEntity),
     ) -> bool {
+        self.note_access(pos, true);
         self.level.wake_block_entity(pos);
         self.notify_changed(pos);
         self.level.with_hopper(pos, f)
@@ -1160,6 +1193,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         f: &mut dyn FnMut(&crate::hopper::HopperEntity),
     ) {
+        self.note_access(pos, true);
         self.quiet += 1;
         let _ = self.level.with_hopper(pos, &mut |hopper| f(&*hopper));
         self.quiet -= 1;
@@ -1187,6 +1221,7 @@ impl<'a> World<'a> {
 
     /// `Level.removeBlockEntity`。
     pub fn remove_block_entity(&mut self, pos: BlockPos) {
+        self.note_access(pos, true);
         self.level.wake_block_entity(pos);
         self.notify_changed(pos);
         let _ = self.level.remove_block_entity(pos);
@@ -1205,6 +1240,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         f: impl FnOnce(&mut T, &mut World) -> R,
     ) -> Option<R> {
+        self.note_access(pos, true);
         self.level.wake_block_entity(pos);
         self.notify_changed(pos);
         let (id, mut entity) = self.level.take_block_entity_at(pos)?;
@@ -1243,6 +1279,7 @@ impl<'a> World<'a> {
         param_a: i32,
         param_b: i32,
     ) {
+        self.note_access(pos, true);
         let block = BlockState(block.default_state).block_id();
         let event = BlockEvent {
             pos,
@@ -1470,6 +1507,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         id: u64,
     ) -> Option<Box<dyn BlockEntity>> {
+        self.note_access(pos, true);
         self.level.take_block_entity(pos, id)
     }
 
@@ -1491,6 +1529,7 @@ impl<'a> World<'a> {
         id: u64,
         mut entity: Box<dyn BlockEntity>,
     ) {
+        self.note_access(pos, true);
         // 和 `run_taken_block_entity` 逐行对齐，只是多一步「把最终状态报给录制层」。
         for _ in 0..4 {
             self.begin_held_reads();
@@ -1537,11 +1576,13 @@ impl<'a> World<'a> {
 
     /// 缓存驱动用：按实体自己的公式算下一次真正需要跑的时刻。
     pub fn block_entity_sleep_from_for_cache(&mut self, pos: BlockPos, now: i64) -> Option<i64> {
+        self.note_access(pos, false);
         self.level.block_entity_sleep_from(pos, now)
     }
 
     /// 缓存驱动用：把下一次要醒来的时刻排回去。
     pub fn schedule_block_entity_wake_for_cache(&mut self, pos: BlockPos, wake: Option<i64>) {
+        self.note_access(pos, true);
         self.level.schedule_block_entity_wake(pos, wake);
     }
 
@@ -1552,6 +1593,7 @@ impl<'a> World<'a> {
     /// request order. A brewing stand pauses after the fuel notification so those reads see the
     /// items from that moment.
     fn run_taken_block_entity(&mut self, pos: BlockPos, id: u64, mut entity: Box<dyn BlockEntity>) {
+        self.note_access(pos, true);
         // 燃料和后面的酿造最多两段。多出来的次数只是拦住停不下来的实现。
         // Fuel and the brew after it are at most two segments. The extra iterations only stop
         // an implementation that never clears its resume flag.
@@ -1576,6 +1618,7 @@ impl<'a> World<'a> {
     ///
     /// Whether this cell's block entity is currently out of the map.
     pub(crate) fn block_entity_is_taken(&self, pos: BlockPos) -> bool {
+        self.note_access(pos, false);
         self.level.is_block_entity_taken(pos)
     }
 
@@ -1646,6 +1689,7 @@ impl<'a> World<'a> {
     /// `Level.isRainingAt(pos)`：下雨、看得见天、这一格不低于 MOTION_BLOCKING 高度图，
     /// 而且群系在这一格的降水类型是雨（雪不算）。
     pub fn is_raining_at(&self, pos: BlockPos) -> bool {
+        self.note_access(pos, false);
         if !self.is_raining() || !self.level.can_see_sky(pos) {
             return false;
         }
@@ -1685,6 +1729,7 @@ impl<'a> World<'a> {
         state: BlockState,
         pos: BlockPos,
     ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.note_access(pos, true);
         self.level.explosion_block_drops(state, pos)
     }
 
@@ -1694,11 +1739,13 @@ impl<'a> World<'a> {
         state: BlockState,
         pos: BlockPos,
     ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.note_access(pos, true);
         self.level.block_loot_drops(state, pos)
     }
 
     /// `BlockState.spawnAfterBreak` 的随机取数，见 [`Level::spawn_after_break_random`]。
     pub(crate) fn spawn_after_break_random(&mut self, state: BlockState, pos: BlockPos) {
+        self.note_access(pos, true);
         self.level.spawn_after_break_random(state, pos);
     }
 
@@ -1730,6 +1777,7 @@ impl<'a> World<'a> {
     /// `ServerLevel.canSpreadFireAround`: `-1` skips the player check. Otherwise fire spreads
     /// only when some player is within that distance.
     pub fn can_spread_fire_around(&self, pos: BlockPos) -> bool {
+        self.note_access(pos, false);
         let radius = self.block_game_rules().fire_spread_radius_around_player;
         // 官方在半径是 -1 时短路，不会调用 `anyPlayerCloseEnoughTo`。
         //
@@ -1859,38 +1907,47 @@ impl<'a> World<'a> {
     /// `World` 不把整张表交出去：这样录制实现能看见每次读了哪一格、写了哪一格。
     /// Every redstone-memory read/write goes through here; see [`crate::LevelSideState`].
     pub fn comparator_output(&self, pos: BlockPos) -> i32 {
+        self.note_access(pos, false);
         self.level.comparator_output(pos)
     }
 
     pub fn set_comparator_output(&mut self, pos: BlockPos, signal: i32) {
+        self.note_access(pos, true);
         self.level.set_comparator_output(pos, signal);
     }
 
     pub fn last_bookshelf_slot(&self, pos: BlockPos) -> Option<usize> {
+        self.note_access(pos, false);
         self.level.last_bookshelf_slot(pos)
     }
 
     pub fn set_last_bookshelf_slot(&mut self, pos: BlockPos, slot: usize) {
+        self.note_access(pos, true);
         self.level.set_last_bookshelf_slot(pos, slot);
     }
 
     pub fn is_jukebox_playing(&self, pos: BlockPos) -> bool {
+        self.note_access(pos, false);
         self.level.is_jukebox_playing(pos)
     }
 
     pub fn set_jukebox_playing(&mut self, pos: BlockPos, playing: bool) {
+        self.note_access(pos, true);
         self.level.set_jukebox_playing(pos, playing);
     }
 
     pub fn crafter_disabled(&self, pos: BlockPos) -> u16 {
+        self.note_access(pos, false);
         self.level.crafter_disabled(pos)
     }
 
     pub fn set_crafter_disabled(&mut self, pos: BlockPos, mask: u16) {
+        self.note_access(pos, true);
         self.level.set_crafter_disabled(pos, mask);
     }
 
     pub fn set_crafter_crafting(&mut self, pos: BlockPos, remaining: i32) {
+        self.note_access(pos, true);
         self.level.set_crafter_crafting(pos, remaining);
     }
 
@@ -1901,10 +1958,12 @@ impl<'a> World<'a> {
 
     /// 这一格合成器还剩几刻，没有记录是 0。
     pub fn crafter_crafting_at(&self, pos: BlockPos) -> i32 {
+        self.note_access(pos, false);
         self.level.crafter_crafting_at(pos)
     }
 
     pub fn forget_block_entity_memory(&mut self, pos: BlockPos) {
+        self.note_access(pos, true);
         self.level.forget_block_entity_memory(pos);
     }
 
@@ -1917,14 +1976,17 @@ impl<'a> World<'a> {
     }
 
     pub fn set_lectern(&mut self, pos: BlockPos, facts: LecternFacts) {
+        self.note_access(pos, true);
         self.level.set_lectern(pos, facts);
     }
 
     pub fn lectern(&self, pos: BlockPos) -> Option<LecternFacts> {
+        self.note_access(pos, false);
         self.level.lectern(pos)
     }
 
     pub fn clear_lectern(&mut self, pos: BlockPos) {
+        self.note_access(pos, true);
         self.level.clear_lectern(pos);
     }
 
@@ -1933,10 +1995,12 @@ impl<'a> World<'a> {
     }
 
     pub fn record_torch_toggle(&mut self, pos: BlockPos, when: i64) {
+        self.note_access(pos, true);
         self.level.record_torch_toggle(pos, when);
     }
 
     pub fn torch_toggle_count(&self, pos: BlockPos) -> usize {
+        self.note_access(pos, false);
         self.level.torch_toggle_count(pos)
     }
 
@@ -1953,6 +2017,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         context: CollisionContext,
     ) -> bool {
+        self.note_access(pos, false);
         let boxes = state.collision_boxes(self, pos, context);
         if boxes.is_empty() {
             return true;
@@ -1974,6 +2039,7 @@ impl<'a> World<'a> {
         delay: i32,
         priority: TickPriority,
     ) {
+        self.note_access(pos, true);
         let id = BlockState(block.default_state).block_id();
         self.level.observe(Observation::TickScheduled {
             pos,
@@ -2014,6 +2080,7 @@ impl<'a> World<'a> {
     /// 缓存重放：按效果序列写一格方块，不触发邻居更新，也不报观察事件。
     /// `flags` 照旧登记广播和光照，见 [`Level::write_block`]。
     pub fn replay_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) {
+        self.note_access(pos, true);
         let _ = self.level.write_block(pos, state, flags);
         // 重放也改了这一格的内容：睡着的漏斗要按原路径一样被叫醒。
         if self.level.has_any_block_entity_watchers() {
@@ -2023,6 +2090,7 @@ impl<'a> World<'a> {
 
     /// 缓存重放：写比较器输出，不报观察事件。
     pub fn replay_comparator(&mut self, pos: BlockPos, signal: i32) {
+        self.note_access(pos, true);
         self.level.set_comparator_output(pos, signal);
     }
 
@@ -2080,6 +2148,7 @@ impl<'a> World<'a> {
 
     /// 缓存重放：移除这一格的方块实体，走原始 `remove`。
     pub fn replay_remove_block_entity(&mut self, pos: BlockPos) {
+        self.note_access(pos, true);
         self.level.wake_block_entity(pos);
         let _ = self.level.remove_block_entity(pos);
     }
@@ -2090,6 +2159,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         slots: Vec<mc_bamboo_protocol::item::ItemStack>,
     ) {
+        self.note_access(pos, true);
         let len = slots.len();
         let mut it = slots.into_iter();
         let _ = self.level.with_slots(pos, len, &mut |target| {
@@ -2103,16 +2173,19 @@ impl<'a> World<'a> {
 
     /// 缓存重放：清掉这一格的容器。
     pub fn replay_clear_container(&mut self, pos: BlockPos) {
+        self.note_access(pos, true);
         self.level.clear_container(pos);
     }
 
     /// 缓存重放：清掉比较器输出等红石记忆。
     pub fn replay_forget_block_entity_memory(&mut self, pos: BlockPos) {
+        self.note_access(pos, true);
         self.level.forget_block_entity_memory(pos);
     }
 
     /// 缓存重放：解包这一格的战利品表。
     pub fn replay_unpack_loot_table(&mut self, pos: BlockPos) {
+        self.note_access(pos, true);
         self.level.unpack_loot_table(pos);
     }
 
@@ -2145,6 +2218,7 @@ impl<'a> World<'a> {
 
     /// `getBlockTicks().hasScheduledTick`。
     pub fn has_scheduled_tick(&self, pos: BlockPos, block: &Block) -> bool {
+        self.note_access(pos, false);
         let id = BlockState(block.default_state).block_id();
         let result = self.ticks.has_scheduled_tick(pos, id);
         self.level.observe(Observation::TickQuery {
@@ -2158,6 +2232,7 @@ impl<'a> World<'a> {
 
     /// `getBlockTicks().willTickThisTick`。
     pub fn will_tick_this_tick(&self, pos: BlockPos, block: &Block) -> bool {
+        self.note_access(pos, false);
         let id = BlockState(block.default_state).block_id();
         let result = self.ticks.will_tick_this_tick(pos, id);
         self.level.observe(Observation::TickQuery {
@@ -2178,6 +2253,7 @@ impl<'a> World<'a> {
 
     /// `scheduleTick(pos, fluid, delay)`。
     pub fn schedule_fluid_tick_with_delay(&mut self, pos: BlockPos, fluid: i32, delay: i32) {
+        self.note_access(pos, true);
         self.level.observe(Observation::TickScheduled {
             pos,
             kind: i64::from(fluid),
@@ -2254,6 +2330,7 @@ impl<'a> World<'a> {
         state: BlockState,
         flags: u32,
     ) -> Option<BlockState> {
+        self.note_access(pos, true);
         self.level.wake_block_entity(pos);
         self.notify_changed(pos);
         let old = self.block_state(pos);
@@ -2365,6 +2442,7 @@ impl<'a> World<'a> {
     /// The entity is out of the map for the callback. Comparator checks that need it stay queued
     /// and run after it is put back, before the caller's `remove`.
     fn pre_remove_block_entity(&mut self, pos: BlockPos, state: BlockState) {
+        self.note_access(pos, true);
         let Some((id, mut entity)) = self.level.take_block_entity_at(pos) else {
             return;
         };
@@ -2537,6 +2615,7 @@ impl<'a> World<'a> {
     /// While this cell's entity is out of the map the call is queued. It runs after the put, so
     /// the comparator reads that put-back value.
     pub fn update_neighbour_for_output_signal(&mut self, pos: BlockPos, block: &'static Block) {
+        self.note_access(pos, true);
         // 比较器读容器内容时官方先 `unpackLootTable(null)`，见容器的
         // `getItem` / `isEmpty`。这条通知会触发那次读，解包要排在前面。
         // A comparator reads `getItem` / `isEmpty`, which unpacks the loot table first.
@@ -2657,6 +2736,7 @@ impl<'a> World<'a> {
     /// Vanilla `RandomizableContainer.unpackLootTable`: fill the table before a
     /// container's contents are dropped.
     pub(crate) fn unpack_container_loot(&mut self, pos: BlockPos) {
+        self.note_access(pos, true);
         self.level.unpack_loot_table(pos);
     }
 
@@ -2668,6 +2748,7 @@ impl<'a> World<'a> {
         pos: BlockPos,
         item: i32,
     ) -> Option<mc_bamboo_protocol::item::ItemStack> {
+        self.note_access(pos, true);
         self.level.creative_container_drop(pos, item)
     }
 

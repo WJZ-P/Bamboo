@@ -464,6 +464,10 @@ impl<'a> Recording<'a> {
 
     /// 一次读进读集合。
     fn read(&self, pos: Option<BlockPos>, kind: u8, value: impl Hash) {
+        if let Some(pos) = pos {
+            self.level
+                .observe(Observation::ChunkAccess { pos, write: false });
+        }
         if !self.accounting() {
             return;
         }
@@ -528,6 +532,10 @@ impl<'a> Recording<'a> {
 
     /// 一次写进效果。
     fn write(&self, entry: Write) {
+        if let Some(pos) = entry.pos() {
+            self.level
+                .observe(Observation::ChunkAccess { pos, write: true });
+        }
         if !self.accounting() {
             return;
         }
@@ -546,6 +554,10 @@ impl<'a> Recording<'a> {
     }
 
     fn redstone_write(&self, pos: Option<BlockPos>, kind: u8, value: impl Hash) {
+        if let Some(pos) = pos {
+            self.level
+                .observe(Observation::ChunkAccess { pos, write: true });
+        }
         let value = stable_hash(&value);
         // 只有这几个子标签有按值还原的效果；其余子标签出现时整条记录作废。
         match (pos, kind) {
@@ -1354,6 +1366,10 @@ impl LevelEntities for Recording<'_> {
 }
 
 impl Level for Recording<'_> {
+    fn observe_partition_enabled(&self) -> bool {
+        self.level.observe_partition_enabled()
+    }
+
     fn block_state(&self, pos: BlockPos) -> BlockState {
         let value = self.level.block_state(pos);
         self.read(Some(pos), K_BLOCK, value.0);
@@ -1757,6 +1773,12 @@ impl Level for Recording<'_> {
             self.set_record_mode(mode);
             return;
         }
+        // 越界统计的观察点必须穿透录制包装：划分统计默认不和红石缓存同开，
+        // 但转发让两者同开时也不会漏记一类访问。
+        if let Observation::ChunkAccess { pos, write } = event {
+            self.level.observe(Observation::ChunkAccess { pos, write });
+            return;
+        }
         // `Off` / `Count` 模式下连触发帧都不建：这是不缓存的触发点最贵的一块开销。
         if self.mode.get() != crate::level::RecordMode::Full {
             return;
@@ -2017,6 +2039,7 @@ impl Level for Recording<'_> {
                 });
             }
             Observation::RecordMode(_) => {}
+            Observation::ChunkAccess { .. } => {}
         }
     }
 }
