@@ -45,12 +45,16 @@ THREADS = 8
 def parse_reports(path):
     reports = []
     current = None
+    # 场景搭好之前（真实地形预生成）的报告全是空服，不能算进稳态。
+    after_ready = False
     for raw in path.read_text(errors="replace").splitlines():
         line = ANSI.sub("", raw)
+        if "bench scenario ready" in line:
+            after_ready = True
         header = HEADER.search(line)
         if header:
             current = {"ticks": int(header.group(1)), "phases": {}, "metrics": {},
-                       "chunks": [], "section": "phases"}
+                       "chunks": [], "section": "phases", "after_ready": after_ready}
             reports.append(current)
             continue
         if current is None:
@@ -118,7 +122,7 @@ def analyse_report(report):
     phases = report["phases"]
     metrics = report["metrics"]
     total = metrics.get("tick_total")
-    if not total or not total[0]:
+    if not total or not total[0] or not report["after_ready"]:
         return None
     chunks = report["chunks"]
     three = sum(phases.get(name, [0, 0])[1] for name in THREE)
@@ -159,15 +163,23 @@ def summarise(root, name):
         if not log.exists():
             continue
         reports = parse_reports(log)
+        client_path = directory / "client.json"
+        target = 1
+        if client_path.exists():
+            target = json.loads(client_path.read_text()).get("bots", 1)
         parsed = [r for r in (analyse_report(x) for x in reports) if r]
-        if not parsed:
-            continue
-        # 预热：丢掉第一份报告（区块还在交付），再只留 loaded_chunks 达到本轮峰值的。
+        # 只留「场景已搭好 + 在线人数达到目标 90% + 区块全部交付」的报告；
+        # 另外丢掉 ready 之后的第一份（可能跨了搭场景那一刻）。
         parsed = parsed[1:] or parsed
-        peak = max(r["loaded_chunks"] for r in parsed)
-        steady = [r for r in parsed if r["loaded_chunks"] >= 0.99 * peak]
+        peak = max((r["loaded_chunks"] for r in parsed), default=0)
+        steady = [
+            r for r in parsed
+            if r["loaded_chunks"] >= 0.99 * peak and r["online_players"] >= 0.9 * target
+        ]
         if not steady:
             steady = parsed
+        if not steady:
+            continue
         weights = [r["samples"] for r in steady]
         merged = {"samples": sum(weights)}
         for key in ("p50", "p95", "p99", "tick_mean", "three", "three_share",
