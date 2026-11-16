@@ -1691,3 +1691,12 @@ structures (Compound)
 世界生成对拍全部 0 不一致；`oracle java --weather clear` 10114 cases / 0 fail；
 联机探针 719/719，`--loaded` 连跑两次、两遍各 719/719。
 这段验收是在丛林神殿移植**之前**跑的；丛林神殿完成后还需重跑一次全套。
+
+**最终全套合并检查（2026-11-15，四个单件结构 `postProcess` 全部完成后）**：
+`cargo fmt --all --check`、`cargo clippy --workspace --all-targets`（0 警告）、
+`cargo test --workspace`、`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game`、
+`cargo check -p mc-bamboo-vanilla --no-default-features`（0 警告）全过；
+22 个世界生成 / 结构对拍全部 0 不一致（`structure-post-process` 与别名
+`structure-single-place` 都是 64 查询 / 74918 写入方块 / 75062 比较 0 不一致）；
+`oracle java --weather clear` 10114 cases / 0 fail；联机探针 719/719，
+`--loaded` 连跑两次、两遍各 719/719 且世界目录经官方 codec 读回通过。
