@@ -18,9 +18,9 @@ use mc_bamboo_core::ChunkPos;
 /// breaks ties between nearby rings; a far chunk never outranks a nearer one.
 pub const MAX_DIRECTION_BONUS: i64 = 2;
 /// 每名玩家同时允许的「加载存档」任务数（`Read` / `Decode`）。
-pub const DEFAULT_MAX_LOADS_PER_PLAYER: usize = 16;
+pub const DEFAULT_MAX_LOADS_PER_PLAYER: usize = 24;
 /// 每名玩家同时允许的「新生成」任务数（`Generate`）。
-pub const DEFAULT_MAX_GENERATES_PER_PLAYER: usize = 16;
+pub const DEFAULT_MAX_GENERATES_PER_PLAYER: usize = 24;
 /// 看得见这个任务的玩家半径：视距上限加一圈。超出的人不为它付费。
 const OWNER_RADIUS: i64 = 33;
 
