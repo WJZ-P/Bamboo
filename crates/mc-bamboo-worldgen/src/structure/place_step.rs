@@ -359,9 +359,16 @@ fn jigsaw_intersects(piece: &jigsaw::Piece, chunk_bb: &[i32; 6]) -> bool {
     intersects(&bb, chunk_bb)
 }
 
-/// 一个 jigsaw 结构件：`SinglePoolElement.place` → `StructureTemplate.placeInWorld`。
+/// 一个 jigsaw 结构件：`StructurePoolElement.place`。
 ///
-/// One jigsaw piece: `SinglePoolElement.place` → `StructureTemplate.placeInWorld`.
+/// `ListPoolElement.place` 按列表顺序逐个调子元素的 `place`
+/// （官方字节码就是一次顺序遍历，不做随机选择）；`EmptyPoolElement` 什么都不写；
+/// `FeaturePoolElement` 交给地物系统，本轮只写方块所以跳过。
+/// `SinglePoolElement.place` 走 `StructureTemplate.placeInWorld`。
+///
+/// One jigsaw piece: `StructurePoolElement.place`. `ListPoolElement` calls
+/// `place` on each child in order, `EmptyPoolElement` writes nothing, and
+/// `FeaturePoolElement` delegates to the feature system (outside block scope).
 fn place_jigsaw_piece(
     world: &mut FeatureWorld<'_>,
     seed: i64,
@@ -370,20 +377,63 @@ fn place_jigsaw_piece(
     random: &WorldgenRandom,
     processor_lists: &ProcessorLists,
 ) -> Result<(), String> {
-    let Some(location) = piece.element.location() else {
-        // `EmptyPoolElement` 不写方块；`Feature`/`List` 元素在 place 阶段交给各自的子元素，
-        // 目前未接（标成 unsupported 而不假装放置）。
+    let inputs = JigsawPlaceInputs {
+        seed,
+        chunk_bb,
+        processor_lists,
+        position: piece.position,
+        rotation: piece.rotation.index() as u32,
+    };
+    place_pool_element(world, &piece.element, &inputs)?;
+    let _ = random;
+    Ok(())
+}
+
+/// 递归 `place_pool_element` 时不变的调用上下文。
+/// Shared context for a recursive `place_pool_element` call.
+struct JigsawPlaceInputs<'a> {
+    seed: i64,
+    chunk_bb: &'a [i32; 6],
+    processor_lists: &'a ProcessorLists,
+    position: (i32, i32, i32),
+    rotation: u32,
+}
+
+fn place_pool_element(
+    world: &mut FeatureWorld<'_>,
+    element: &jigsaw::PoolElement,
+    inputs: &JigsawPlaceInputs<'_>,
+) -> Result<(), String> {
+    match element {
+        jigsaw::PoolElement::Empty | jigsaw::PoolElement::Feature { .. } => Ok(()),
+        jigsaw::PoolElement::List { elements, .. } => {
+            for child in elements {
+                place_pool_element(world, child, inputs)?;
+            }
+            Ok(())
+        }
+        jigsaw::PoolElement::Single { .. } => place_single_pool_element(world, element, inputs),
+    }
+}
+
+fn place_single_pool_element(
+    world: &mut FeatureWorld<'_>,
+    element: &jigsaw::PoolElement,
+    inputs: &JigsawPlaceInputs<'_>,
+) -> Result<(), String> {
+    let Some(location) = element.location() else {
         return Ok(());
     };
     let template = StructureTemplate::load(location)?;
-    let configured = match &piece.element {
+    let configured = match element {
         jigsaw::PoolElement::Single { processors, .. } => match processors {
             // `processor_list` 注册表键带 `minecraft:` 前缀，解析器保留原名；
             // 早期代码剥掉前缀会让所有具名 processor 链静默变成空链
             // （试炼密室铜灯氧化等规则完全不生效）。
             // Registry keys keep their `minecraft:` prefix; stripping it here made
             // every named processor list resolve to an empty chain.
-            ProcessorListRef::Named(name) => processor_lists
+            ProcessorListRef::Named(name) => inputs
+                .processor_lists
                 .get(name.as_str())
                 .map(|v| v.to_vec())
                 .unwrap_or_default(),
@@ -392,8 +442,7 @@ fn place_jigsaw_piece(
         _ => Vec::new(),
     };
     // `SinglePoolElement.getSettings` 的 processor 链（含 legacy 的 pop-then-append）。
-    let chain =
-        jigsaw::place::assemble_processors(&piece.element, &configured, false).unwrap_or_default();
+    let chain = jigsaw::place::assemble_processors(element, &configured, false).unwrap_or_default();
     // processor 只读世界当前状态，先拷一份快照，让 `place_piece` 独占可变 `world`。
     // Processors only read the pre-placement world; snapshot it so `place_piece`
     // can take the mutable borrow.
@@ -401,32 +450,31 @@ fn place_jigsaw_piece(
         view: world.snapshot_view(),
     };
     let settings = ProcessorPlaceSettings {
-        piece_position: piece.position,
-        reference_pos: piece.position,
+        piece_position: inputs.position,
+        reference_pos: inputs.position,
         chunk_bb: Some(crate::structure::BoundingBox {
-            min_x: chunk_bb[0],
-            min_y: chunk_bb[1],
-            min_z: chunk_bb[2],
-            max_x: chunk_bb[3],
-            max_y: chunk_bb[4],
-            max_z: chunk_bb[5],
+            min_x: inputs.chunk_bb[0],
+            min_y: inputs.chunk_bb[1],
+            min_z: inputs.chunk_bb[2],
+            max_x: inputs.chunk_bb[3],
+            max_y: inputs.chunk_bb[4],
+            max_z: inputs.chunk_bb[5],
         }),
-        level_seed: seed,
+        level_seed: inputs.seed,
         explicit_random: None,
     };
     let bare = Random::Legacy(LegacyRandom::new(0));
     jigsaw::place::place_piece(
         &template,
-        piece.position,
+        inputs.position,
         &chain,
         &level,
         settings,
         0,
-        piece.rotation.index() as u32,
+        inputs.rotation,
         &bare,
         world,
     )?;
-    let _ = random;
     Ok(())
 }
 
