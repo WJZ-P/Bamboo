@@ -194,8 +194,6 @@ mod structure_save;
 #[cfg(feature = "oracle")]
 mod structure_single;
 #[cfg(feature = "oracle")]
-mod structure_single_place;
-#[cfg(feature = "oracle")]
 mod structure_templated;
 #[cfg(feature = "oracle")]
 mod structure_templated_place;
@@ -279,13 +277,13 @@ const STRUCTURE_RUINED_PORTAL_SOURCE: &str =
     "tools/mc-bamboo-vanilla/java/StructureRuinedPortalOracle.java";
 // `StructurePlaceOracle.java` 是多件式结构件放置（矿井 / 要塞的 `postProcess`），
 // `StructurePiecePlaceOracle.java` 是单件结构的 `postProcess`；两个分支给它们起的名字
-// 正好互换，合并时按内容重新对应。
+// 正好互换，合并时按内容重新对应。`structure-single-place` 是
+// `structure-post-process` 的历史别名，两者现在跑同一份 Java 源和同一套查询。
 // `StructurePlaceOracle.java` is the multi-piece placement oracle (mineshaft / stronghold
 // `postProcess`); `StructurePiecePlaceOracle.java` is the single-piece `postProcess` one.
 // The two branches named them the other way round, so the merge re-pairs them by content.
-#[cfg(feature = "oracle")]
-const STRUCTURE_SINGLE_PLACE_SOURCE: &str =
-    "tools/mc-bamboo-vanilla/java/StructurePiecePlaceOracle.java";
+// `structure-single-place` is a historical alias of `structure-post-process`: both now run
+// the same Java source and the same queries.
 #[cfg(feature = "oracle")]
 const STRUCTURE_PLACE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePlaceOracle.java";
 #[cfg(feature = "oracle")]
@@ -351,6 +349,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-save <java 路径>
       mc-bamboo-vanilla structure-load <java 路径>
       mc-bamboo-vanilla structure-single-place <java 路径>
+          structure-post-process 的历史别名，跑同一套单件结构放置对拍
       mc-bamboo-vanilla structure-post-process <java 路径>
       mc-bamboo-vanilla transform <java 路径>
       mc-bamboo-vanilla machine <java 路径>
@@ -425,7 +424,7 @@ fn run() -> Result<(), String> {
         }
         ["structure-place", java, ref options @ ..] => structure_place_cli(java, options),
         ["structure-single-place", java, ref options @ ..] => {
-            structure_single_place_cli(java, options)
+            structure_post_process_cli(java, options)
         }
         ["structure-save", java, ref options @ ..] => structure_save_cli(java, options),
         ["structure-load", java, ref options @ ..] => structure_load_cli(java, options),
@@ -764,19 +763,6 @@ fn structure_place_cli(java: &str, options: &[&str]) -> Result<(), String> {
     let queries_path = root.join(WORK_DIR).join("structure_place_queries.txt");
     structure_place::run(
         official_program(java, STRUCTURE_PLACE_SOURCE)?,
-        &queries_path,
-        options,
-    )
-}
-
-#[cfg(feature = "oracle")]
-fn structure_single_place_cli(java: &str, options: &[&str]) -> Result<(), String> {
-    let root = workspace_root();
-    let queries_path = root
-        .join(WORK_DIR)
-        .join("structure_single_place_queries.txt");
-    structure_single_place::run(
-        official_program(java, STRUCTURE_SINGLE_PLACE_SOURCE)?,
         &queries_path,
         options,
     )
@@ -1140,11 +1126,6 @@ fn structure_save_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn structure_load_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
-    Err("这个版本编译时关掉了 oracle 功能".to_owned())
-}
-
-#[cfg(not(feature = "oracle"))]
-fn structure_single_place_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

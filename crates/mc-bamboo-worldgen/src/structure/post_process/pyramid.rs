@@ -544,14 +544,22 @@ pub fn desert_pyramid(
     // Four chests in `Direction.Plane.HORIZONTAL` order (NORTH, EAST, SOUTH, WEST).
     for (dx, dz) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
         let at = ctx.world_pos(10 + dx * 2, -11, 10 + dz * 2);
-        if let Some(state) = create_chest(ctx.world, &chunk, at, None)
-            && let Some(writes) = ctx.writes.as_mut()
+        if let Some(state) = create_chest(
+            ctx.world,
+            &chunk,
+            at,
+            None,
+            random,
+            Some("minecraft:chests/desert_pyramid"),
+        ) && let Some(writes) = ctx.writes.as_mut()
         {
             writes.push((at.0, at.1, at.2, state));
         }
     }
 
-    let mut region = region_random(seed, use_legacy_random, cx * 16 + 8, cz * 16 + 8);
+    // `ChunkPos.getWorldPosition()` 是区块最小角 `(cx*16, 0, cz*16)`，不是中心。
+    // `ChunkPos.getWorldPosition()` is the chunk's min corner, not its centre.
+    let mut region = region_random(seed, use_legacy_random, cx * 16, cz * 16);
     add_cellar(&mut ctx, &mut region);
     let writes = ctx.writes.take();
     (Some((height_position, new_bb)), writes)
