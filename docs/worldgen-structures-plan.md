@@ -944,7 +944,10 @@ Beardifier；`Generator::terrain_with_beardifier` 注入，`first_occupied_heigh
   `Mage` / `Warrior` / `Group of Allays`（每只生物把标记格写一次空气，悦灵数量取
   `PieceLevel::level_random`）。
 * `state_transform` 改成按方块类和祖先类分派，覆盖官方所有重写 `rotate` / `mirror` 的方块
-  类；`up` / `down` 朝向在旋转时保持不变。
+  类；`up` / `down` 朝向在旋转时保持不变。活塞三个类（`PistonBaseBlock` /
+  `PistonHeadBlock` / `MovingPistonBlock`）各自重写了这两步而父类 `DirectionalBlock`
+  没重写，所以必须写明列进 `Facing` 规则，不能靠祖先类查出来；`transform` 对拍把
+  粘性活塞、活塞头、移动中的活塞也加进查询集。
 * 合并 main 之后只剩一份模板放置：府邸和雪屋 / 沉船 / 海底遗迹 / 废弃传送门共用
   `template_place::place_in_world`（`buildInfoList` 顺序、processor 管线、流体回填、
   `updateShapeAtEdge` + `updateFromNeighbourShapes`）。府邸经 `PieceLevelAccess` 把
