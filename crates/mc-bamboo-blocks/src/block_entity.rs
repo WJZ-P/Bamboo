@@ -1416,7 +1416,6 @@ mod tests {
         assert_eq!(unit_events, [at(1, 2), at(2, 4), at(3, 6)]);
 
         // 原样合并：整条队列逐条等于参照，不是「先一个区块再另一个」。
-        let mut unit = split.split_off(&wanted);
         // 上面那次已经把 0 号区块拆空了，重新造一份。
         let mut fresh = BlockEvents::default();
         for &event in &all {
