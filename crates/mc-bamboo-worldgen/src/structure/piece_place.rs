@@ -625,10 +625,21 @@ pub fn property_of_state(state: u32, key: &str) -> Option<&'static str> {
 /// otherwise the current `facing` is probed forward, backward, clockwise, backward and the
 /// first solid direction wins.
 pub fn reorient(level: &dyn PieceLevel, pos: (i32, i32, i32), chest_default: u32) -> u32 {
+    reorient_with(|x, y, z| level.get_block(x, y, z), pos, chest_default)
+}
+
+/// `reorient` 的纯函数版本：邻居方块由闭包给出，不要求实现完整的 [`PieceLevel`]。
+///
+/// Pure form of `reorient`: neighbours come from a closure, no full [`PieceLevel`] needed.
+pub fn reorient_with(
+    block_at: impl Fn(i32, i32, i32) -> u32,
+    pos: (i32, i32, i32),
+    chest_default: u32,
+) -> u32 {
     const HORIZONTAL: [&str; 4] = ["north", "east", "south", "west"];
     let mut solid: Option<&'static str> = None;
     for name in HORIZONTAL {
-        let neighbor = neighbor_towards(level, pos, name);
+        let neighbor = neighbor_towards(&block_at, pos, name);
         if is_block(neighbor, "minecraft:chest") {
             return chest_default;
         }
@@ -646,20 +657,21 @@ pub fn reorient(level: &dyn PieceLevel, pos: (i32, i32, i32), chest_default: u32
             .unwrap_or(chest_default);
     }
 
-    // 从当前 `facing` 出发的四个探测：正前、反方向、顺时针、反方向。
-    // The four probes from the current `facing`: forward, back, clockwise, back.
-    let start =
+    // 官方后半段是三段**顺序**探测，每段只在上一段命中实心块时改变方向：
+    // 正前命中则反向，再命中则顺时针，再命中则反向（每次都用改变后的方向读邻居）。
+    // Vanilla's second half is a sequential chain: each probe only changes the direction
+    // when its neighbour is solid, and the next probe reads the neighbour of the new
+    // direction.
+    let mut facing =
         crate::structure::state_transform::property_of(chest_default, "facing").unwrap_or("north");
-    let mut facing = start;
-    for probe in [
-        start,
-        opposite_facing(start),
-        clock_wise_facing(start),
-        opposite_facing(start),
-    ] {
-        if is_solid_render(neighbor_towards(level, pos, probe)) {
-            facing = probe;
-        }
+    if is_solid_render(neighbor_towards(&block_at, pos, facing)) {
+        facing = opposite_facing(facing);
+    }
+    if is_solid_render(neighbor_towards(&block_at, pos, facing)) {
+        facing = clock_wise_facing(facing);
+    }
+    if is_solid_render(neighbor_towards(&block_at, pos, facing)) {
+        facing = opposite_facing(facing);
     }
     with_property(chest_default, "facing", facing).unwrap_or(chest_default)
 }
@@ -691,14 +703,18 @@ fn clock_wise_facing(facing: &str) -> &'static str {
 /// 朝 `facing` 走一格后那格的方块。
 ///
 /// The block one step along `facing`.
-fn neighbor_towards(level: &dyn PieceLevel, pos: (i32, i32, i32), facing: &str) -> u32 {
+fn neighbor_towards(
+    block_at: &impl Fn(i32, i32, i32) -> u32,
+    pos: (i32, i32, i32),
+    facing: &str,
+) -> u32 {
     let (dx, dz) = match facing {
         "north" => (0, -1),
         "south" => (0, 1),
         "east" => (1, 0),
         _ => (-1, 0),
     };
-    level.get_block(pos.0 + dx, pos.1, pos.2 + dz)
+    block_at(pos.0 + dx, pos.1, pos.2 + dz)
 }
 
 #[cfg(test)]
@@ -845,17 +861,17 @@ mod tests {
             Some("south")
         );
 
-        // 四面都是实体方块 → 两个以上实体邻居，退回「从当前 facing 出发探测」，
-        // 而四面都实体时最后一个探测（反方向）胜出。
-        // Solid on all four sides: more than one solid neighbour, so the probe loop runs and
-        // the last probe (backwards) wins.
+        // 四面都是实体方块 → 超过一个实体邻居，走官方的顺序探测链：
+        // north 前(实心)→ south，south 前(实心)→ west，west 前(实心)→ east。
+        // Solid on all four sides: more than one solid neighbour, so the sequential probe
+        // chain runs north → south → west → east.
         let mut all = TestLevel::new();
         for (dx, dz) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
             all.blocks.insert((dx, 0, dz), stone);
         }
         assert_eq!(
             property_of_state(reorient(&all, (0, 0, 0), chest), "facing"),
-            Some("south")
+            Some("east")
         );
     }
 
