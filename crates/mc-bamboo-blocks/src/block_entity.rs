@@ -1042,10 +1042,22 @@ impl BlockEntities {
             self.by_chunk.entry(chunk).or_default().extend(positions);
         }
         self.slots.append(&mut other.slots);
+        // `order` / `pending` 是运行顺序，按 ordinal 升序归并，不能简单接到末尾：
+        // 两个单元各自的 ordinal 号段不同，合回来后仍要等于「从没拆过」的顺序。
         self.order
             .extend(other.order.drain(..).map(|index| base + index));
         self.pending
             .extend(other.pending.drain(..).map(|index| base + index));
+        let ordinal_of = |index: usize| {
+            self.slots
+                .get(index)
+                .copied()
+                .flatten()
+                .map(|ticker| ticker.ordinal)
+                .unwrap_or(u64::MAX)
+        };
+        self.order.sort_by_key(|&index| ordinal_of(index));
+        self.pending.sort_by_key(|&index| ordinal_of(index));
         for (ordinal, index) in other.ordinals.drain() {
             self.ordinals.insert(ordinal, base + index);
         }
