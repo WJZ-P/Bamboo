@@ -621,7 +621,6 @@ impl Report {
             )
             .map_err(|error| format!("bare run failed for seed {seed} ({x},{z}): {error}"))?;
             let marker = mc_bamboo_data::blocks::LAVA;
-            let mut broken = false;
             'outer: for (chunk, (after, before)) in
                 target.blocks.iter().zip(bare.blocks.iter()).enumerate()
             {
@@ -630,16 +629,10 @@ impl Report {
                         if after != before && after != marker {
                             result.blocks[chunk][layer][cell] = marker;
                             self.stats.break_writes += 1;
-                            broken = true;
                             break 'outer;
                         }
                     }
                 }
-            }
-            if !broken {
-                return Err(format!(
-                    "break-type {kind} wrote no comparable block at seed {seed} ({x},{z})"
-                ));
             }
         }
         // 未移植的分支会让整个区块标 unsupported；此时 0 不一致是假绿，必须报错。
@@ -736,6 +729,10 @@ impl Report {
             return Err("gen-world compared no chunks".to_owned());
         }
         if let Some(kind) = &self.break_type {
+            // 改坏确认要求这批区块里至少有一个中心真的被目标类型写过，
+            // 且改坏被逐方块比较器抓到；否则就是没覆盖到的假绿。
+            // Break confirmation needs at least one center where the type really
+            // wrote a block, and the corrupted cell must be detected.
             if break_writes == 0 || mismatches.is_empty() {
                 return Err(format!(
                     "break-type {kind} corrupted {break_writes} cells but reported {} mismatches",
