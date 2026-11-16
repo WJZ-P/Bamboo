@@ -1,0 +1,86 @@
+# 主世界生成交接（2026-11-15）/ Overworld generation handover
+
+本轮目标：主世界地形、地物、结构与原版 26.3 逐方块一致，全部由 Java oracle 对拍验证。生成期刷怪不在本轮范围。
+
+Goal of this round: overworld terrain, features and structures identical to vanilla 26.3 block for block, every piece verified against a Java oracle. Generation-time mob spawning is out of scope.
+
+## 已合进 main / Merged on main
+
+都已通过全套合并检查：fmt、clippy、全量测试、全部对拍 0 不一致、联机探针 719/719。
+
+All passed the full merge check: fmt, clippy, full tests, every oracle at 0 mismatches, network probe 719/719.
+
+| 内容 | 合并提交 |
+|---|---|
+| 地形（noise、aquifer、surface、carver，含 paths 修正） | 753d877 及之前 |
+| 树引擎（全部树形、巨型蘑菇、mangrove、poplar），`FeatureWorld::finish` 按格取最后一次写入 | 7373539 |
+| 地物集成（水生、洞穴、地物 A、结构布局） | 1c9853c6 |
+| 废弃矿井、要塞放置 | 2ba852ee |
+| 雪屋、沉船、海底遗迹、废弃传送门放置 | 780a291f |
+| 洞穴与冰雪类地物（9 种） | 32c19dde |
+| 地物 A（12 种非植被） | 5c7e9995 |
+| 海底神殿、林地府邸放置 | e4ed2f50 |
+| 生成期光照直接读生成方块（光照阶段 35.1 → 11.3 ms/区块），`wg-perf` 计时工具（`perf` feature，默认关） | 9fb4ee35 |
+| 地物 B（植被、花、竹子、海草、藤蔓等） | cd05c7e5 |
+| 水生与洞穴植被，整步对拍 95 中心 0 不一致 | 8fd828bb |
+| jigsaw 放置进展（模板 processor、`FeatureWorld` 方块实体与流体） | dcc8784d |
+
+**还没接进 Director / Not wired yet:** 结构的方块放置已经验证，但还没接进游戏的生成流水线（Director）。所以游戏里暂时还不生成结构。
+
+## 未合并的分支 / Unmerged branches
+
+每个分支的详细报告在 `W:\data\bamboo-agents\reports\cb-wg-<名>.md`。
+
+| 分支 | main 之外的提交 | 状态 | 下一步 |
+|---|---|---|---|
+| `cb-wg-structwire` | 42 | 结构接入与 jigsaw 存档；报告称本轮对拍全部 0 不一致（含 1944 查询） | 审阅后合并；再接进 Director |
+| `cb-wg-e2e` | 31 | 端到端逐类型对拍，修了 `BiomeFilter`（影响任何 step 9 地物，例如 `patch_grass_jungle`） | 先核实 `BiomeFilter` 修复再合；`monster_room` 的 0 不一致是假绿（改坏抓不到）；另有 20 个类型只做了干净跑，没做改坏确认 |
+| `cb-wg-structures` | 14 | 沙漠神殿、丛林神殿、女巫小屋等 4 个代码生成单件结构的 `postProcess`，64 查询 0 不一致 | 和 main 的 `piece_place.rs` 统一放置辅助后合并（报告第 4 节有对应关系） |
+| `cb-wg-aquatic` | 2 | 主体已合；剩 `waterlogged_vegetation_patch` 野外触发太少、`pale_moss_patch` 2 处疑点 | 见报告第 5 节交接建议 |
+| `cb-wg-feat-b` | 2 | 主体已合；尾部文档 | 可直接并入 |
+| `cb-wg-bands` | 1 | 按段生成原型，已暂停（收益约 7%） | 暂不处理 |
+
+其余 `cb-wg-*` 分支已全部并入 main。
+
+The rest of the `cb-wg-*` branches are fully merged.
+
+## 怎么验证 / How to verify
+
+- **Java**：必须用 `C:\Users\Administrator\.jdks\openjdk-26.0.1\bin\java.exe`。PATH 里的 java 是 17，探针会失败。
+- **全套合并检查**：在仓库根目录运行
+  `bash /w/data/bamboo-agents/tools/merge-checks.sh <名> <端口> [额外对拍子命令...]`。
+  结果写到 `W:\data\bamboo-agents\reports\merge-<名>-checks.txt`。结构类合并要额外加 `structure-place structure-templated-place`，光照类要加 `gen-light`。
+- **单项对拍**：`cargo run -q -p mc-bamboo-vanilla -- <子命令> <java>`，常用子命令：
+  - `gen-world`（`--through features`）
+  - `chunkgen --through features`
+  - `structure-*`
+  - `gen-light`
+- **联机探针怕满载**：机器很忙时会随机超时失败，每次挂的项都不一样。全速再跑一遍才算数；719/719 才算通过。
+- **重活锁**：`W:\data\bamboo-agents\tools\heavy.js`。全量测试、探针、计时同一时间只跑一个。队员环境里的 `shim\cargo.cmd` 会让全量 `cargo test` 和 `wg-perf` 自动排队。
+
+## 队员设施 / Agent infrastructure
+
+全部在 `W:\data\bamboo-agents`：
+- 工作目录：`wt\<名>`；
+- 任务书：`prompts\`；
+- 报告：`reports\`；
+- 日志：`logs\`；
+- 启动脚本：
+  - `cur-run.sh` / `cur-loop.sh`（Cursor CLI）；
+  - `cb-run.sh` / `cb-resume.sh`（CodeBuddy hy4）；
+- 停队员：`kill-agent.ps1 -Name <名>`，必须单独一条命令执行；
+- 限速：`lowprio.sh` 的 `THROTTLE`，配合 `throttle-now.ps1` / `unthrottle-now.ps1`。
+
+模型顺序：
+1. 优先 hy4（CodeBuddy `hy4std`，免费）；
+2. 已在跑的 DS Flash 队员继续用；
+3. 只有长时间无进展的队员，才换 Cursor 的 `claude-opus-5-5-medium`。
+
+DS Flash 会话太长时会空转：每轮只说"开始执行"就退出。遇到这种情况就新开会话。
+
+Model order:
+1. hy4 first (free);
+2. DS Flash for agents already running on it;
+3. Opus 5.5 medium only for agents stalled a long time.
+
+Restart a DS Flash session once it starts looping without acting.
