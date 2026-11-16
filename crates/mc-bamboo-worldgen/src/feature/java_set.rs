@@ -107,9 +107,9 @@ impl Node {
         }
     }
 
-    /// 拆桶 / 退树后重建时把树指针清空；`next` 链由 `Bin.order` 单独保存。
+    /// 拆桶重建时把树指针清空；`next` 链由 `Bin.order` 单独保存。
     ///
-    /// Clear the tree links when a split or `untreeify` rebuilds the bin.
+    /// Clear the tree links when a resize split rebuilds the bin.
     fn clear_tree(&mut self) {
         self.left = None;
         self.right = None;
