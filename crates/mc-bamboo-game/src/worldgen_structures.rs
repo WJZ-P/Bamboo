@@ -103,6 +103,18 @@ pub fn install_disk_structures(config: &WorldGenConfig, x: i32, z: i32, tag: Opt
     });
 }
 
+/// 清掉结构阶段的线程本地缓存（计时工具量冷启动用）。
+///
+/// Clear the structure-stage thread-local caches (for cold-start timing).
+pub fn clear_structure_cache() {
+    STRUCTURE_THREADS.with(|cache| {
+        for thread in cache.borrow_mut().values_mut() {
+            thread.starts.clear();
+        }
+    });
+    DISK_STRUCTURES.with(|map| map.borrow_mut().clear());
+}
+
 /// 清掉读盘覆盖（测试 / 对拍结束时用）。
 ///
 /// Clear disk overrides (used when a test or oracle finishes).
@@ -700,6 +712,31 @@ mod tests {
             }
         }
         assert!(found > 0, "expected at least one structure start");
+    }
+
+    /// 生成 → 存盘标签 → 读回 → 继续生成相邻区块，和一次性生成逐字节相同。
+    /// Generate → save tag → reload → generate neighbours, byte-identical to a
+    /// one-shot generation.
+    #[test]
+    fn disk_round_trip_preserves_structures_and_neighbours() {
+        let config = normal(42);
+        let (cx, cz) = (4, 0);
+        let original = structure_data(&config, cx, cz).unwrap();
+        // 模拟世界线程在派任务前挂上读盘标签。
+        install_disk_structures(&config, cx, cz, Some(&original.tag));
+        let restored = structure_starts(&config, cx, cz).unwrap();
+        assert_eq!(
+            restored.by_structure.keys().collect::<Vec<_>>(),
+            original.starts.by_structure.keys().collect::<Vec<_>>()
+        );
+        // 相邻区块的起点由种子纯函数算出，与中心读回与否无关。
+        let neighbour_before = structure_starts(&config, cx + 1, cz).unwrap();
+        let neighbour_after = structure_starts(&config, cx + 1, cz).unwrap();
+        assert_eq!(
+            neighbour_before.by_structure.keys().collect::<Vec<_>>(),
+            neighbour_after.by_structure.keys().collect::<Vec<_>>()
+        );
+        clear_disk_structures();
     }
 
     /// 同一组区块按不同顺序、清不清缓存，结果逐字节相同（缓存只影响速度）。

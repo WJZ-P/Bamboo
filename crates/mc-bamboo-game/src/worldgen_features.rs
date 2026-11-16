@@ -740,7 +740,10 @@ mod tests {
     fn game_pipeline_runs_on_a_structure_chunk() {
         let config = normal(42);
         let result = game_pipeline(&config, 4, 0).unwrap();
-        assert!(!result.starts.is_empty(), "chunk (4,0) has a mineshaft start");
+        assert!(
+            !result.starts.is_empty(),
+            "chunk (4,0) has a mineshaft start"
+        );
         assert_eq!(result.blocks.len(), 9);
         assert_eq!(result.blocks[4].len(), WORLD_HEIGHT as usize);
     }

@@ -22,6 +22,12 @@
 /// One phase. `mark` attributes the elapsed wall clock to the current phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
+    /// `ChunkStatus.STRUCTURE_STARTS`：判定起点并生成结构件。
+    /// `ChunkStatus.STRUCTURE_STARTS`: decide starts and generate pieces.
+    StructureStarts,
+    /// `ChunkStatus.STRUCTURE_REFERENCES`：17×17 邻域登记起点引用。
+    /// `ChunkStatus.STRUCTURE_REFERENCES`: register starts over the 17x17 ring.
+    StructureReferences,
     /// `ChunkStatus.BIOMES`：一个区块的 quart 群系格。
     /// `ChunkStatus.BIOMES`: one chunk's quart biome cells.
     Biomes,
@@ -64,12 +70,14 @@ pub enum Phase {
 }
 
 /// [`Phase`] 的项数。 The number of [`Phase`] variants.
-pub const PHASE_COUNT: usize = 13;
+pub const PHASE_COUNT: usize = 15;
 
 impl Phase {
     /// 所有阶段，按 [`Phase::index`] 的顺序。
     /// Every phase, in [`Phase::index`] order.
     pub const ALL: [Self; PHASE_COUNT] = [
+        Self::StructureStarts,
+        Self::StructureReferences,
         Self::Biomes,
         Self::TerrainSetup,
         Self::AquiferInit,
@@ -88,6 +96,8 @@ impl Phase {
     /// 报告里用的名字。 The name used in reports.
     pub fn name(self) -> &'static str {
         match self {
+            Self::StructureStarts => "structure_starts",
+            Self::StructureReferences => "structure_references",
             Self::Biomes => "biomes",
             Self::TerrainSetup => "terrain_setup",
             Self::AquiferInit => "aquifer_init",
