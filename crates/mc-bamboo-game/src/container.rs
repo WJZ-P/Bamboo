@@ -7,7 +7,7 @@
 //! （`ContainerOpenersCounter`）和方块事件的排队；事件本身、潜影盒的盖子和动画都在
 //! `mc-bamboo-blocks` 的方块事件队列和方块实体里。菜单和点击在 [`crate::menu`]。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use mc_bamboo_blocks::{
     BlockState, ShulkerBoxEntity, World, open_lid_box,
@@ -27,6 +27,7 @@ use crate::{
     inbound::PlayerId,
     interaction::{self, BLOCK_INTERACTION_RANGE},
     player::Player,
+    pos_table::PosTable,
     region::{Region, RegionTick},
 };
 
@@ -211,7 +212,7 @@ pub(crate) fn kind_at(region: &Region, pos: BlockPos) -> Option<ContainerKind> {
 
 /// 取条目，没有就建一个空的。方块换成另一种容器时重建。
 pub(crate) fn entry_in(
-    containers: &mut BTreeMap<BlockPos, ContainerEntry>,
+    containers: &mut PosTable<ContainerEntry>,
     pos: BlockPos,
     kind: ContainerKind,
 ) -> &mut ContainerEntry {

@@ -69,13 +69,16 @@ impl BorrowedParts {
         let redstone = region
             .redstone
             .snapshot_chunk(pos, region.block_ticks.now());
-        let in_chunk = |at: &BlockPos| at.chunk() == pos;
         let containers = region
             .containers
-            .iter()
-            .filter(|(at, _)| in_chunk(at))
-            .map(|(&at, entry)| (at, PackedContainer::new(entry.clone())))
-            .collect();
+            .chunk(pos)
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(|(&at, entry)| (at, PackedContainer::new(entry.clone())))
+                    .collect()
+            })
+            .unwrap_or_default();
         let block_items = clone_in_chunk(&region.block_items, pos);
         let command_blocks = clone_in_chunk(&region.command_blocks, pos);
         let books = clone_in_chunk(&region.lecterns.books, pos);
@@ -94,12 +97,19 @@ impl BorrowedParts {
     }
 }
 
-fn clone_in_chunk<T: Clone>(table: &BTreeMap<BlockPos, T>, pos: ChunkPos) -> BTreeMap<BlockPos, T> {
+fn clone_in_chunk<T: Clone>(
+    table: &crate::pos_table::PosTable<T>,
+    pos: ChunkPos,
+) -> BTreeMap<BlockPos, T> {
     table
-        .iter()
-        .filter(|(at, _)| at.chunk() == pos)
-        .map(|(&at, value)| (at, value.clone()))
-        .collect()
+        .chunk(pos)
+        .map(|cells| {
+            cells
+                .iter()
+                .map(|(&at, value)| (at, value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl EncodeParts for BorrowedParts {
@@ -159,7 +169,7 @@ pub(crate) fn content_fingerprints(region: &Region) -> BTreeMap<ChunkPos, u64> {
         entries.entry(at.chunk()).or_default().push(text);
     };
 
-    for (&at, entry) in &region.containers {
+    for (&at, entry) in region.containers.iter() {
         push(
             at,
             format!(
@@ -168,13 +178,13 @@ pub(crate) fn content_fingerprints(region: &Region) -> BTreeMap<ChunkPos, u64> {
             ),
         );
     }
-    for (&at, patch) in &region.block_items {
+    for (&at, patch) in region.block_items.iter() {
         push(at, format!("block_item {patch:?}"));
     }
-    for (&at, data) in &region.command_blocks {
+    for (&at, data) in region.command_blocks.iter() {
         push(at, format!("command_block {data:?}"));
     }
-    for (&at, book) in &region.lecterns.books {
+    for (&at, book) in region.lecterns.books.iter() {
         push(at, format!("book {book:?}"));
     }
     for tick in region.block_ticks.pending() {

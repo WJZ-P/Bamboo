@@ -68,6 +68,7 @@ mod player;
 mod player_grid;
 mod player_move;
 mod player_save;
+mod pos_table;
 mod profiler;
 pub mod region;
 mod save_data;

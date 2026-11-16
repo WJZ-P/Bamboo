@@ -7,8 +7,6 @@
 //! Execution, chains and scheduled ticks are not implemented. The record lives only in
 //! memory and disappears on restart.
 
-use std::collections::BTreeMap;
-
 use mc_bamboo_blocks::{BlockState, World, world::UPDATE_CLIENTS};
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{blocks, registries::block_entity_type};
@@ -288,7 +286,7 @@ fn player_can_use(player: &crate::player::Player) -> bool {
 /// Drop the record when the block becomes something else. Switching among the three
 /// command blocks keeps it.
 pub(crate) fn forget_if_replaced(
-    command_blocks: &mut BTreeMap<BlockPos, CommandBlockData>,
+    command_blocks: &mut crate::pos_table::PosTable<CommandBlockData>,
     pos: BlockPos,
     state: BlockState,
 ) {
