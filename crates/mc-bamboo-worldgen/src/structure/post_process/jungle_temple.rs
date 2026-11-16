@@ -961,13 +961,6 @@ fn ops() -> Vec<Op> {
         },
         Op::One {
             state: state_with(
-                blocks::DISPENSER,
-                &[("facing", "north"), ("triggered", "false")],
-            ),
-            at: (3, -2, 1),
-        },
-        Op::One {
-            state: state_with(
                 blocks::VINE,
                 &[
                     ("east", "false"),
@@ -1106,13 +1099,6 @@ fn ops() -> Vec<Op> {
             at: (9, -2, 3),
             facing: "west",
             table: "minecraft:chests/jungle_temple_dispenser",
-        },
-        Op::One {
-            state: state_with(
-                blocks::DISPENSER,
-                &[("facing", "west"), ("triggered", "false")],
-            ),
-            at: (9, -2, 3),
         },
         Op::One {
             state: state_with(
@@ -1378,19 +1364,25 @@ pub fn jungle_temple(
                 }
             }
             Op::Dispenser { at, facing, table } => {
+                // `createDispenser` 内部走 `placeBlock`（状态按 mirror / rotation 变换），
+                // 随后拿发射器方块实体取一次 `nextLong()` 当战利品表种子。
+                // Vanilla `createDispenser` goes through `placeBlock` (state transformed by
+                // mirror / rotation), then draws one `nextLong()` for the loot table.
+                let state = state_with(
+                    blocks::DISPENSER,
+                    &[("facing", facing), ("triggered", "false")],
+                );
+                ctx.place_block(state, at.0, at.1, at.2);
                 let pos = ctx.world_pos(at.0, at.1, at.2);
-                let state = state_with(blocks::DISPENSER, &[("facing", facing)]);
-                if let Some(state) = crate::structure::post_process::create_dispenser(
-                    ctx.world,
-                    &ctx.chunk_bb,
-                    pos,
-                    state,
-                    random,
-                    table,
-                ) && let Some(log) = ctx.writes.as_mut()
-                {
-                    log.push((pos.0, pos.1, pos.2, state));
-                }
+                let seed = random.next_long();
+                let nbt = mc_bamboo_nbt::Tag::Compound(vec![
+                    (
+                        "LootTable".to_owned(),
+                        mc_bamboo_nbt::Tag::String(table.to_owned()),
+                    ),
+                    ("LootTableSeed".to_owned(), mc_bamboo_nbt::Tag::Long(seed)),
+                ]);
+                ctx.world.set_block_entity(pos.0, pos.1, pos.2, &nbt);
             }
         }
     }
