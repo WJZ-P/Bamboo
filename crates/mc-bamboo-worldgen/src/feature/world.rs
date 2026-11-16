@@ -310,23 +310,41 @@ pub fn prime_heightmaps(blocks: &ChunkBlocks, min_y: i32, height: i32) -> Height
     let _ = height;
     let mut result = Heightmaps::new(min_y);
     for column in 0..256 {
+        // 四种谓词都由状态的静态事实决定；按状态 ID 缓存成 4 位掩码，逐列从顶往下
+        // 扫时就不必每层重复查 `state_facts` / `state_fluid`。每种找到最高的一格后
+        // 就不再需要看它，四种都找到即可停。
+        // All four predicates are static facts of a state; cache them as a 4-bit
+        // mask. Once each kind has found its topmost cell the column is done.
+        const SURFACE: u8 = 1 << 0;
+        const OCEAN: u8 = 1 << 1;
+        const MOTION: u8 = 1 << 2;
+        const MOTION_NO_LEAVES: u8 = 1 << 3;
+        let mut pending = SURFACE | OCEAN | MOTION | MOTION_NO_LEAVES;
         let mut world_surface = min_y - 1;
         let mut ocean_floor = min_y - 1;
         let mut motion = min_y - 1;
         let mut motion_no_leaves = min_y - 1;
         for y in (min_y..min_y + blocks.len() as i32).rev() {
+            if pending == 0 {
+                break;
+            }
             let state = blocks[(y - min_y) as usize][column];
-            if is_opaque(state, HeightmapKind::WorldSurfaceWg) {
-                world_surface = world_surface.max(y);
+            let found = opaque_mask(state) & pending;
+            if found & SURFACE != 0 {
+                world_surface = y;
+                pending &= !SURFACE;
             }
-            if is_opaque(state, HeightmapKind::OceanFloorWg) {
-                ocean_floor = ocean_floor.max(y);
+            if found & OCEAN != 0 {
+                ocean_floor = y;
+                pending &= !OCEAN;
             }
-            if is_opaque(state, HeightmapKind::MotionBlocking) {
-                motion = motion.max(y);
+            if found & MOTION != 0 {
+                motion = y;
+                pending &= !MOTION;
             }
-            if is_opaque(state, HeightmapKind::MotionBlockingNoLeaves) {
-                motion_no_leaves = motion_no_leaves.max(y);
+            if found & MOTION_NO_LEAVES != 0 {
+                motion_no_leaves = y;
+                pending &= !MOTION_NO_LEAVES;
             }
         }
         result.world_surface_wg[column] = world_surface;
@@ -337,6 +355,43 @@ pub fn prime_heightmaps(blocks: &ChunkBlocks, min_y: i32, height: i32) -> Height
         result.motion_blocking_no_leaves[column] = motion_no_leaves;
     }
     result
+}
+
+/// 一个方块状态对四种高度图各自算不算「地面」，按状态 ID 缓存。
+///
+/// 0 表示「还没算过」；`1<<4` 是哨兵，让「四位全 0」的空气也能命中缓存。
+/// 掩码是状态的静态事实，并发写同一个槽只会写入完全相同的值。
+///
+/// Which of the four heightmaps count a block state as ground, cached by state id.
+/// Zero means "not computed"; `1<<4` is a sentinel so an all-zero mask is cached too.
+fn opaque_mask(state: u32) -> u8 {
+    use mc_bamboo_data::{facts, state_facts, state_fluid};
+    use std::sync::atomic::{AtomicU8, Ordering};
+    const SIZE: usize = mc_bamboo_data::blocks::TOTAL_STATES as usize;
+    static CACHE: [AtomicU8; SIZE] = [const { AtomicU8::new(0) }; SIZE];
+    let slot = &CACHE[state as usize];
+    let cached = slot.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached & 0xf;
+    }
+    let bits = state_facts(state);
+    let has_fluid = state_fluid(state).fluid != mc_bamboo_data::registries::fluid::EMPTY;
+    let mut mask = 0;
+    if bits & facts::AIR == 0 {
+        mask |= 1 << 0;
+        // WORLD_SURFACE_WG 和 WORLD_SURFACE 是同一个谓词，合成一位。
+    }
+    if bits & facts::MOTION_BLOCKING != 0 {
+        mask |= 1 << 1;
+    }
+    if bits & facts::MOTION_BLOCKING != 0 || has_fluid {
+        mask |= 1 << 2;
+    }
+    if bits & facts::MOTION_BLOCKING_NO_LEAVES != 0 || has_fluid {
+        mask |= 1 << 3;
+    }
+    slot.store(mask | 1 << 4, Ordering::Relaxed);
+    mask
 }
 
 /// `Heightmap.Types.isOpaque()`，转发到 [`super::heightmap::is_opaque`]。
@@ -359,6 +414,93 @@ fn last_writes(deltas: Vec<(i32, i32, i32, u32)>) -> Vec<(i32, i32, i32, u32)> {
 }
 
 #[cfg(test)]
+mod prime_heightmap_tests {
+    use super::*;
+    use mc_bamboo_data::blocks;
+
+    /// 掩码缓存对每个状态、每种高度图都与原谓词逐位相同。
+    /// The cached mask matches the per-cell predicate for every state and kind.
+    #[test]
+    fn cached_masks_match_is_opaque() {
+        for state in 0..blocks::TOTAL_STATES {
+            let mask = opaque_mask(state);
+            assert_eq!(
+                mask & 1 << 0 != 0,
+                is_opaque(state, HeightmapKind::WorldSurface)
+            );
+            assert_eq!(
+                mask & 1 << 1 != 0,
+                is_opaque(state, HeightmapKind::OceanFloor)
+            );
+            assert_eq!(
+                mask & 1 << 2 != 0,
+                is_opaque(state, HeightmapKind::MotionBlocking)
+            );
+            assert_eq!(
+                mask & 1 << 3 != 0,
+                is_opaque(state, HeightmapKind::MotionBlockingNoLeaves)
+            );
+            assert_eq!(mask & !0xf, 0, "state {state}");
+        }
+    }
+
+    /// 提前退出后的 `prime_heightmaps` 与逐格调用 `is_opaque` 的实现等价。
+    /// Early-exit `prime_heightmaps` equals the straightforward per-cell version.
+    #[test]
+    fn early_exit_matches_the_full_scan() {
+        // 三层：全空气 / 混有石头、水、树叶 / 全石头；每列用不同状态交错。
+        let mut blocks: ChunkBlocks = vec![vec![blocks::AIR; 256]; 40];
+        for column in 0..256 {
+            let state = [
+                blocks::AIR,
+                blocks::STONE,
+                blocks::WATER,
+                blocks::OAK_LEAVES,
+            ][column % 4];
+            blocks[7][column] = state;
+            blocks[19][column] = blocks::STONE;
+            blocks[31][column] = if column % 3 == 0 {
+                blocks::WATER
+            } else {
+                blocks::AIR
+            };
+        }
+        let expected = {
+            let mut result = Heightmaps::new(-64);
+            for column in 0..256 {
+                for y in (-64..-64 + blocks.len() as i32).rev() {
+                    let state = blocks[(y + 64) as usize][column];
+                    if is_opaque(state, HeightmapKind::WorldSurfaceWg) {
+                        result.world_surface[column] = result.world_surface[column].max(y);
+                    }
+                    if is_opaque(state, HeightmapKind::OceanFloorWg) {
+                        result.ocean_floor[column] = result.ocean_floor[column].max(y);
+                    }
+                    if is_opaque(state, HeightmapKind::MotionBlocking) {
+                        result.motion_blocking[column] = result.motion_blocking[column].max(y);
+                    }
+                    if is_opaque(state, HeightmapKind::MotionBlockingNoLeaves) {
+                        result.motion_blocking_no_leaves[column] =
+                            result.motion_blocking_no_leaves[column].max(y);
+                    }
+                }
+            }
+            result
+        };
+        let got = prime_heightmaps(&blocks, -64, 40);
+        assert_eq!(got.world_surface, expected.world_surface);
+        assert_eq!(got.ocean_floor, expected.ocean_floor);
+        assert_eq!(got.motion_blocking, expected.motion_blocking);
+        assert_eq!(
+            got.motion_blocking_no_leaves,
+            expected.motion_blocking_no_leaves
+        );
+        assert_eq!(got.world_surface_wg, got.world_surface);
+        assert_eq!(got.ocean_floor_wg, got.ocean_floor);
+    }
+}
+
+#[cfg(test)]
 mod last_write_tests {
     use super::last_writes;
 
@@ -368,6 +510,35 @@ mod last_write_tests {
         // The first cell is written 294 then 270: 270 stays although 294 is larger.
         let deltas = vec![(1, 70, 1, 294), (2, 70, 1, 139), (1, 70, 1, 270)];
         assert_eq!(last_writes(deltas), vec![(2, 70, 1, 139), (1, 70, 1, 270)]);
+    }
+
+    /// 输出顺序是各「最后一次写」在输入里的先后，不是按坐标或状态排序。
+    /// The output keeps the original order of the last writes, not a key/state sort.
+    #[test]
+    fn last_writes_keep_the_original_last_write_order() {
+        let deltas = vec![
+            (7, 64, 3, 10), // A 首次
+            (1, 70, 1, 20), // B 首次（被后面覆写）
+            (9, 80, 9, 30), // C 唯一
+            (1, 70, 1, 21), // B 最后一次
+            (7, 64, 3, 11), // A 最后一次
+            (5, 65, 5, 40), // D 唯一
+            (9, 80, 9, 31), // C 最后一次
+        ];
+        assert_eq!(
+            last_writes(deltas),
+            vec![
+                (1, 70, 1, 21),
+                (7, 64, 3, 11),
+                (5, 65, 5, 40),
+                (9, 80, 9, 31),
+            ]
+        );
+        assert_eq!(last_writes(Vec::new()), Vec::<(i32, i32, i32, u32)>::new());
+        assert_eq!(
+            last_writes(vec![(0, 0, 0, 1), (0, 0, 0, 2), (0, 0, 0, 3)]),
+            vec![(0, 0, 0, 3)]
+        );
     }
 }
 
