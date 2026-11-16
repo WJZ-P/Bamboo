@@ -121,9 +121,12 @@ pub fn transform(state: u32, mirror: Mirror, rotation: Rotation) -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Rule {
     /// `FACING` 按 `rotation.rotate` 转；镜像是 `state.rotate(mirror.getRotation(FACING))`。
+    /// 活塞三个类也是这一套，只是 `FACING` 允许 up / down（旋转和镜像都不动 Y 轴）。
     ///
     /// `FACING` turns by `rotation.rotate`; mirroring is
-    /// `state.rotate(mirror.getRotation(FACING))`.
+    /// `state.rotate(mirror.getRotation(FACING))`. The three piston classes use the same
+    /// two overrides, with a `FACING` that also allows up / down (both steps leave the
+    /// Y axis alone).
     Facing,
     /// `AnvilBlock`：只重写了 `rotate`，镜像恒等。
     ///
@@ -261,6 +264,13 @@ fn rule_of(state: u32) -> Rule {
         "StonecutterBlock",
         "TripWireHookBlock",
         "VaultBlock",
+        // 活塞三个类都自己重写了 rotate / mirror，父类 DirectionalBlock 没有重写，
+        // 所以不能靠祖先类查出来。`sticky_piston` 也是 PistonBaseBlock。
+        // The three piston classes override rotate / mirror themselves; their parent
+        // DirectionalBlock does not. `sticky_piston` is also a PistonBaseBlock.
+        "PistonBaseBlock",
+        "PistonHeadBlock",
+        "MovingPistonBlock",
         "WallBannerBlock",
         "WallHangingSignBlock",
         "WallSignBlock",
@@ -801,6 +811,34 @@ mod tests {
             property_of(apply_rotation(east_west, Rotation::Clockwise180), "shape"),
             Some("east_west")
         );
+    }
+
+    #[test]
+    fn piston_facing_rotates_and_mirrors_over_all_six_directions() {
+        for name in [
+            "minecraft:piston",
+            "minecraft:sticky_piston",
+            "minecraft:piston_head",
+            "minecraft:moving_piston",
+        ] {
+            let north = with_property(block(name), "facing", "north").unwrap();
+            assert_eq!(
+                property_of(apply_rotation(north, Rotation::Clockwise90), "facing"),
+                Some("east"),
+                "{name}"
+            );
+            assert_eq!(
+                property_of(apply_mirror(north, Mirror::LeftRight), "facing"),
+                Some("south"),
+                "{name}"
+            );
+            // Y 轴上的朝向：镜像、旋转都不动它（`Mirror.getRotation` 只看水平轴）。
+            // Facing on the Y axis: neither step touches it (getRotation only looks at
+            // horizontal axes).
+            let up = with_property(block(name), "facing", "up").unwrap();
+            assert_eq!(apply_rotation(up, Rotation::Clockwise90), up, "{name}");
+            assert_eq!(apply_mirror(up, Mirror::LeftRight), up, "{name}");
+        }
     }
 
     #[test]

@@ -264,6 +264,7 @@ const STRUCTURE_TEMPLATES_SOURCE: &str =
 const STRUCTURE_PIECES_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructurePiecesOracle.java";
 #[cfg(feature = "oracle")]
 const JIGSAW_SOURCE: &str = "tools/mc-bamboo-vanilla/java/JigsawOracle.java";
+#[cfg(feature = "oracle")]
 const STRUCTURE_GENERATION_SOURCE: &str =
     "tools/mc-bamboo-vanilla/java/StructureGenerationOracle.java";
 #[cfg(feature = "oracle")]
@@ -294,6 +295,7 @@ const STRUCTURE_SAVE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureSaveO
 const STRUCTURE_LOAD_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StructureLoadOracle.java";
 #[cfg(feature = "oracle")]
 const TRANSFORM_SOURCE: &str = "tools/mc-bamboo-vanilla/java/TransformOracle.java";
+#[cfg(feature = "oracle")]
 const STRUCTURE_TEMPLATED_PLACE_SOURCE: &str =
     "tools/mc-bamboo-vanilla/java/StructureTemplatedPlaceOracle.java";
 #[cfg(feature = "oracle")]
