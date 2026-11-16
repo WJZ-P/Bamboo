@@ -42,7 +42,7 @@ use mc_bamboo_worldgen::{
 
 const USAGE: &str = "usage: wg-perf [--seeds N] [--chunks N] [--biomes a,b,c] [--repeat N] \
                      [--threads N] [--aux N] [--plan-scan N] [--json] [--skip-cut] [--skip-plans] \
-                     [--skip-sky] [--skip-threads] [--light-compare]";
+                     [--skip-sky] [--skip-threads] [--skip-aux] [--light-compare]";
 
 /// 辅助测量的默认抽样上限（高度分布、切割线对照、多线程）。`--aux N` 可以改。
 /// Default cap on the auxiliary measurements (height profile, cut-line comparison,
@@ -121,6 +121,10 @@ struct Options {
     plan_scan: usize,
     /// 辅助测量的抽样上限。 Cap on the auxiliary measurements.
     aux: usize,
+    /// 跳过全部辅助测量，只跑主阶段表（改前/改后交替量时用）。
+    /// Skip every auxiliary measurement and print only the main phase table
+    /// (for alternating before/after measurements).
+    skip_aux: bool,
     /// 只跑新旧光照路径的交替对照。 Run only the old/new light path comparison.
     light_compare: bool,
 }
@@ -143,6 +147,7 @@ impl Options {
             skip_plans: false,
             plan_scan: PLAN_SCAN,
             aux: AUX_LIMIT,
+            skip_aux: false,
             light_compare: false,
         };
         let mut args = args.iter();
@@ -171,6 +176,7 @@ impl Options {
                 "--skip-sky" => options.skip_sky = true,
                 "--skip-threads" => options.skip_threads = true,
                 "--skip-plans" => options.skip_plans = true,
+                "--skip-aux" => options.skip_aux = true,
                 "--light-compare" => options.light_compare = true,
                 _ => return Err(USAGE.to_owned()),
             }
@@ -235,6 +241,9 @@ pub fn run(args: &[&str]) -> Result<(), String> {
 
     print_phases(&measured);
     print_biomes(&measured);
+    if options.skip_aux {
+        return Ok(());
+    }
     // 辅助测量取一部分区块，免得整轮跑太久。
     // The auxiliary measurements use a subsample so a round stays affordable.
     let (aux_targets, aux_measured) = subsample(&targets, &measured, options.aux);
