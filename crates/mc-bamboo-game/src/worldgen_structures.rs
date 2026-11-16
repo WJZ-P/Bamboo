@@ -91,6 +91,9 @@ thread_local! {
 
 const STARTS_CACHE_CAP: usize = 1024;
 
+/// 全局 Beardifier 缓存的上限（所有计算线程共用一份）。
+const BEARDIFIER_CACHE_CAP: usize = 4096;
+
 /// 读盘覆盖表的键：`(seed, settings, x, z)`。
 ///
 /// Key of the disk-overrides map: `(seed, settings, x, z)`.
@@ -510,6 +513,10 @@ pub fn beardifier_for(
     let references = structure_references_stage(config, x, z)?;
     let value = beardifier_for_chunk(config, x, z, &references)?;
     if let Ok(mut map) = cache.lock() {
+        // 和起点缓存一样设上限：服务器长时间跑图时不能无限增长。结果是纯函数，清空只影响速度。
+        if map.len() >= BEARDIFIER_CACHE_CAP {
+            map.clear();
+        }
         map.insert(key, value.clone());
     }
     Ok(value)
