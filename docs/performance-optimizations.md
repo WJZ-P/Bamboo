@@ -2043,3 +2043,18 @@ k 路归并」后，1 万 368 个箱子分散在 576 个区块的基准（5 对�
   拆合、按区块装盒只在拓扑变化和存盘时走，慢一点无所谓。
 - 四次「改前改后交替」都写在这里，包括走不通的七种结构和两次 `git revert`，
   免得后面再试一遍。
+
+### 16.7 存档往返（两个二进制交叉读写）
+
+用官方 probe 在改前 / 改后二进制上各写一份世界目录（本次脚本只配了一名 OP，
+两次都是 `PROBE RESULT 716/719`，完全相同的三项失败来自这个配置；正式探针是
+719/719）。把 A 写的目录交给 B 读回、`save-all flush` 后再 `stop`，反过来也做一遍，
+并与「同一个二进制读自己写的目录」作对照：
+
+- 所有 `region/*.mca`、`entities/*.mca`、`players/data/*.dat`、`data/*.dat`、
+  `chunk_tickets.dat`、`world_border.dat` 的 SHA-256 **逐字节相同**；
+- 唯一变化是 `level.dat` / `level.dat_old`（重启推进了 gameTime 与 `LastPlayed`），
+  而同二进制的对照组也有完全相同的变化，因此不是本次改动引入的。
+
+另外 `tools/probe.sh --loaded` 两遍、联机探针一遍都是 719/719，
+`WORLD-DIR RESULT: official codecs read every item` 通过。
