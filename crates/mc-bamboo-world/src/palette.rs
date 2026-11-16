@@ -285,13 +285,26 @@ impl PalettedContainer {
     /// [`from_blocks_disk`](Self::from_blocks_disk) 读回来的容器读出的值、调色板内容完全相同，
     /// 但省掉逐格 `set` 的扩容重打包和磁盘形式的往返。
     ///
+    /// `counts` 给 [`Section::from_disk`](crate::chunk::Section::from_disk) 用：扫描时
+    /// 顺手数出每种状态出现的次数，不必再扫一遍打包数据。三项分别是非空气、会随机刻、
+    /// 含流体的方块数，顺序和调色板一致；全局 ID 形式时为空。
+    ///
     /// Build a block container straight from 4096 states in container index
     /// order (y, z, x). The palette is in first-appearance order, so reads and
     /// palette contents equal a `packed_for_disk` + `from_blocks_disk` round
-    /// trip, without per-cell `set` repacking or the disk round trip.
-    pub(crate) fn blocks_from_values(values: &[u32; BLOCKS_PER_SECTION]) -> Self {
+    /// trip, without per-cell `set` repacking or the disk round trip. `counts`
+    /// lets the section skip its second scan: non-air / random-ticking / fluid
+    /// cell counts per palette entry (empty for the global-id form).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn blocks_from_values(
+        values: &[u32; BLOCKS_PER_SECTION],
+    ) -> (Self, Vec<(u16, u16, u16)>) {
         let rules = &BLOCK_RULES;
         let mut palette: Vec<u32> = Vec::new();
+        let mut counts: Vec<(u16, u16, u16)> = Vec::new();
+        // 每个调色板项一格贡献的三种计数：状态事实只按「不同状态」查一次。
+        // Per-palette-entry contribution; state facts are queried once per distinct state.
+        let mut unit: Vec<(u16, u16, u16)> = Vec::new();
         let mut stored = [0u32; BLOCKS_PER_SECTION];
         let mut last = None;
         for (slot, &value) in stored.iter_mut().zip(values) {
@@ -302,33 +315,59 @@ impl PalettedContainer {
                         .iter()
                         .position(|&entry| entry == value)
                         .unwrap_or_else(|| {
+                            let found = mc_bamboo_data::state_facts(value);
+                            unit.push((
+                                u16::from(found & mc_bamboo_data::facts::AIR == 0),
+                                u16::from(
+                                    found
+                                        & (mc_bamboo_data::facts::RANDOMLY_TICKING
+                                            | mc_bamboo_data::facts::FLUID_RANDOMLY_TICKING)
+                                        != 0,
+                                ),
+                                u16::from(
+                                    mc_bamboo_data::state_fluid(value).fluid
+                                        != mc_bamboo_data::registries::fluid::EMPTY,
+                                ),
+                            ));
                             palette.push(value);
+                            counts.push((0, 0, 0));
                             palette.len() - 1
                         }) as u32;
                     last = Some((value, position));
                     position
                 }
             };
+            let (non_air, tickers, fluids) = unit[position as usize];
+            let entry = &mut counts[position as usize];
+            entry.0 += non_air;
+            entry.1 += tickers;
+            entry.2 += fluids;
             *slot = position;
         }
         let bits = rules.bits_for_palette(palette.len());
         if bits == 0 {
-            return Self::filled(rules, palette[0]);
+            return (Self::filled(rules, palette[0]), counts);
         }
         if rules.is_global(bits) {
-            return Self {
+            return (
+                Self {
+                    rules,
+                    bits,
+                    palette: Vec::new(),
+                    data: pack_values(values.iter().copied(), bits),
+                },
+                Vec::new(),
+            );
+        }
+        (
+            Self {
                 rules,
                 bits,
-                palette: Vec::new(),
-                data: pack_values(values.iter().copied(), bits),
-            };
-        }
-        Self {
-            rules,
-            bits,
-            palette,
-            data: pack_values(stored.into_iter(), bits),
-        }
+                palette,
+                data: pack_values(stored.into_iter(), bits),
+            },
+            counts,
+        )
     }
 
     /// 磁盘形式的调色板：丢掉没用到的项，按第一次出现的顺序重排，并给出重新打包的 long 数组。
@@ -337,17 +376,15 @@ impl PalettedContainer {
         let mut palette = Vec::new();
         let mut stored = Vec::with_capacity(self.rules.entries);
         for index in 0..self.rules.entries {
-            let value = self.get(index);
-            let position = palette
-                .iter()
-                .position(|&entry| entry == value)
-                .unwrap_or_else(|| {
-                    palette.push(value);
-                    palette.len() - 1
-                });
-            stored.push(position as u32);
+            stored.push(pack_value(&mut palette, self.get(index)));
         }
-        let bits = disk_bits(palette.len(), self.rules.entries == BIOMES_PER_SECTION);
+        Self::pack_stored(palette, stored, self.rules)
+    }
+
+    /// 把「按首次出现顺序排好的下标」和调色板编成磁盘形式。
+    /// Encode first-appearance-ordered indices and their palette into the disk form.
+    fn pack_stored(palette: Vec<u32>, stored: Vec<u32>, rules: &Rules) -> (Vec<u32>, Vec<u64>) {
+        let bits = disk_bits(palette.len(), rules.entries == BIOMES_PER_SECTION);
         let data = if bits == 0 {
             Vec::new()
         } else {
@@ -355,7 +392,59 @@ impl PalettedContainer {
         };
         (palette, data)
     }
+}
 
+/// 把 `value` 记进按首次出现顺序排好的调色板，返回它的下标。
+/// Push `value` into a first-appearance-ordered palette and return its index.
+fn pack_value(palette: &mut Vec<u32>, value: u32) -> u32 {
+    palette
+        .iter()
+        .position(|&entry| entry == value)
+        .unwrap_or_else(|| {
+            palette.push(value);
+            palette.len() - 1
+        }) as u32
+}
+
+/// 只给世界生成用的批量路径：按容器下标排好的 4096 个方块状态和 64 个 quart 群系，
+/// 直接产出磁盘形式的调色板和打包 long 数组。
+///
+/// 磁盘形式只取决于「值按容器下标的顺序」和「调色板按首次出现顺序」；这里一次扫描
+/// 同时完成两件事，不建内存容器，也不逐格 `set` 触发扩容重打包。结果和逐格
+/// `set` 后调 [`PalettedContainer::packed_for_disk`] 逐字节相同。
+///
+/// Worldgen-only bulk path: 4096 block states and 64 quart biome ids in container
+/// index order straight to the disk palette plus packed long words. The disk form
+/// depends only on the value order and the first-appearance palette, so one scan
+/// produces it without building an in-memory container or repacking on every
+/// `set`. Byte-identical to `set` + `packed_for_disk`.
+pub fn packed_worldgen_section(
+    blocks: &[u32; BLOCKS_PER_SECTION],
+    biomes: &[u32; BIOMES_PER_SECTION],
+) -> (Vec<u32>, Vec<u64>, Vec<u32>, Vec<u64>) {
+    fn pack(values: &[u32], rules: &Rules) -> (Vec<u32>, Vec<u64>) {
+        let mut palette = Vec::new();
+        let mut stored = Vec::with_capacity(values.len());
+        let mut last = None;
+        for &value in values {
+            let position = match last {
+                Some((previous, position)) if previous == value => position,
+                _ => {
+                    let position = pack_value(&mut palette, value);
+                    last = Some((value, position));
+                    position
+                }
+            };
+            stored.push(position);
+        }
+        PalettedContainer::pack_stored(palette, stored, rules)
+    }
+    let (block_palette, block_data) = pack(blocks, &BLOCK_RULES);
+    let (biome_palette, biome_data) = pack(biomes, &BIOME_RULES);
+    (block_palette, block_data, biome_palette, biome_data)
+}
+
+impl PalettedContainer {
     /// 每个调色板下标在整段里出现的次数，供 `recalcBlockCounts` 用。
     pub(crate) fn index_counts(&self) -> Vec<u16> {
         let size = match self.palette() {
@@ -544,6 +633,43 @@ mod tests {
         for value in 1..=300u32 {
             assert_eq!(container.get(value as usize), value + 1000);
         }
+    }
+
+    /// 批量磁盘打包和逐格 `set` + `packed_for_disk` 逐字节相同。
+    /// Bulk disk packing is byte-identical to per-cell `set` + `packed_for_disk`.
+    #[test]
+    fn bulk_worldgen_packing_matches_per_cell_set() {
+        let mut blocks = [0u32; BLOCKS_PER_SECTION];
+        let mut biomes = [0u32; BIOMES_PER_SECTION];
+        // 几种状态交错，包含调色板位数增长的边界和连续重复值。
+        for (index, slot) in blocks.iter_mut().enumerate() {
+            *slot = match index % 37 {
+                0..=9 => 7,
+                10..=19 => 3,
+                20 => 500 + (index % 17) as u32,
+                _ => 1,
+            };
+        }
+        for (index, slot) in biomes.iter_mut().enumerate() {
+            *slot = (index % 5) as u32;
+        }
+        let mut block_container = PalettedContainer::blocks(blocks::AIR);
+        for (index, &state) in blocks.iter().enumerate() {
+            block_container.set(index, state);
+        }
+        let mut biome_container = PalettedContainer::biomes(biome::PLAINS as u32);
+        for (index, &id) in biomes.iter().enumerate() {
+            biome_container.set(index, id);
+        }
+        assert_eq!(
+            packed_worldgen_section(&blocks, &biomes),
+            (
+                block_container.packed_for_disk().0,
+                block_container.packed_for_disk().1,
+                biome_container.packed_for_disk().0,
+                biome_container.packed_for_disk().1,
+            )
+        );
     }
 
     #[test]

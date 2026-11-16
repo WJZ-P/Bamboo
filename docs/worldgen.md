@@ -312,6 +312,41 @@ CARVERS 只比 SURFACE 多约 1.5 ms：17×17 邻域的大部分 carver 在 `isS
 `chunkgen --through carvers` 多种子对拍；没有收益的一项（条件结果的惰性缓存，见下）撤掉了。
 详见 `performance-optimizations.md` 第 10 节。
 
+### 密度求值的列特化（2026-11-16，本机 release，同轮交替量）
+
+上面几组数字都是**这一项之前**的。这一项只改 `finalDensity.sampleVolume` 里噪声的成批
+求值，把 `Noise::add_to_volume` 照官方 `PerlinNoise.addToVolume` 的结构重写：`sample`
+（18 秒、1 ms 间隔、15 016 个主线程样本，只循环整列密度求值）测到
+`Noise::add_to_point` 占 72.1%、`Sampler::sample_volume` 占 18.1%、
+`sample_interpolated_blocks` 占 7.8%，缓冲和样条约 1.3%；编译期消融（4 个 release
+二进制同轮交替，12 区块整列 × 5 遍取最小）显示噪声数学 2.23 ms / 2.83 ms = 79%，
+而**节点分派连同全部非噪声工作上限 0.6 ms**。官方的 `addToVolume` 把 x/z 坐标、
+插值系数和八个角的梯度放在 z、x 循环里、`floorY` 没变时还复用梯度；原来 Rust 侧
+用逐点的 `add_to_point` 每个点重算一遍。按字节码把同样的表达式提到 (z,x) 列外、
+`NoiseStack` 的层常量每块算一次，每个点仍按原顺序逐层累加，逐位不变。
+
+| 口径 | 改之前 | 改之后 | 倍数 |
+|---|---|---|---|
+| `wg-perf noise_density`（1 种子 × 10 群系 × 4 区块 × 3 遍，中位数，两轮） | 2.895 / 2.878 ms | 1.653 / 1.570 ms | 1.9× |
+| `chunk_timing` NOISE（35 区块中位数，两轮） | 3.63 / 3.64 ms | 2.30 / 2.30 ms | 1.6× |
+| `wg-perf` 整块记录合计（两轮） | 27.24 / 26.91 ms | 27.50 / 24.92 ms | — |
+
+`wg-perf surface` 基本不动（2.38 / 2.36 → 2.41 / 2.23 ms）：地表阶段走的是单点
+`sampleValue` 和 15 条条件噪声，不在这一项的范围内。量之前要确认
+`mc-bamboo-vanilla` 的二进制**确实重新链接过**：改了 `mc-bamboo-worldgen` 但依赖
+指纹没变时 cargo 只重链 example，vanilla 仍是旧产物，第一次量出来「没有收益」就是这个坑。
+
+逐位一致靠三层验证：`noise.rs` 的单元测试把列路径和逐点路径在起始值非零的体积上
+逐位比较；`worldgen java`（3 种子、两个 salt）逐位比较密度函数和路由；
+`chunkgen --through carvers` / `--through features` 和 `gen-world --through features`
+（各 3 种子 × 12 区块 × 2 salt）全部 0 不一致。**改坏确认**：把提到循环外的
+`smooth_x` 差一个 ulp，`worldgen` 两个 salt 各报 156 处不一致；但 1 ulp 的密度差
+不足以改变任何方块，`chunkgen` / `gen-world` 都报 0 不一致——这是「逐方块」对拍
+的固有粒度，不是对拍失灵，所以又用 `+0.05` 的粗改坏确认区块级对拍确实会报
+（chunkgen 各 160 处、gen-world 各约 270 万处），改坏后已全部还原并复跑干净。
+
+详见 `performance-optimizations.md` 第 11 节。
+
 ### 本机复测（Windows 16 核，2026-11-14，release）
 
 上面 M4 Pro 那组是另一台机器；这组是**接进游戏这一轮**在同一台 16 核 Windows 上现跑的，
@@ -566,10 +601,15 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   邻居和所需阶段，`advance_stage` 把 `(位置, 阶段)` 列进 `Task::Generate.neighbors`。
   世界线程（`director_host.rs` 的 `partials`）把每个区块的 CARVERS 半成品存成不可变
   `Arc<GeneratedChunk>`，发任务时按位置挂到 `ChunkWork::Generate` 上——全是 `Arc` 克隆，
-  不复制方块、不改快照。空缺的邻居由计算线程用 `cached_generate_chunk` 纯函数现算。
-  发出后世界线程不再改这份 `Arc`（只在 `Forgot` / 完工时移除）。
-* **`features` 纯函数**：`resolve_view` 拼 3×3，`run_features` 调
-  `chunk::Generator::features()`（`applyBiomeDecoration`）。已移植的 `minecraft:ore`
+  不复制方块、不改快照。空缺的邻居由计算线程用 `cached_generate_chunk` 纯函数现算；
+  这份 CARVERS 缓存是**全进程共用一份**、按总字节 256 MiB 封顶（16 个分片各一把锁，
+  锁内只查表 / 插入、生成在锁外，值是不可变 `Arc`，命中不复制 400 KiB 方块数组，
+  见 `performance-optimizations.md` 第 12 节）。地形是纯函数，命中、淘汰和分片顺序
+  都不改变结果。`terrain` 阶段交回世界线程的也是同一个 `Arc`，`merge_generated`
+  直接 `Arc::clone` 进 `partials`。发出后世界线程不再改这份 `Arc`（只在
+  `Forgot` / 完工时移除）。
+* **`features` 纯函数**：`resolve_view` 拼 3×3（只读的 `[Arc<GeneratedChunk>; 9]`），
+  `run_features` 调 `chunk::Generator::features()`（`applyBiomeDecoration`）。已移植的 `minecraft:ore`
   照常放，其余类型标 `unsupported` 跳过（`feature/run.rs`，地物 A/B 合入后自动生效）。
 * **写邻居的增量**：中心自己的地物、溢出到 8 个邻居的写、以及 8 个邻居中心溢进来的写
   都表示成世界坐标增量。世界线程按 `TaskId` 顺序（`collect_compute` 已排好序）追加到
@@ -634,7 +674,9 @@ p95 1.3–2.1 ms、最坏一份 max 8.35 ms，远低于 20 TPS 的 50 ms 预算�
 玩家同时在噪声世界飞行、且内存宽裕的部署，再显式把 `chunk_worker_threads` 提到 8，
 以 `compute_backlog` 不再持续增长、`chunk_latency` 回落到亚秒为准；**不要**因为这次
 测到 backlog 就调高默认值。等地物/结构/光照接进来（每区块更贵）后必须重跑本压测
-再评估线程数。
+再评估线程数。（这是当时那版按线程各存一份 CARVERS 缓存的旧数字；缓存后来改成
+全进程共用一份、256 MiB 封顶，8 线程跑 3364 个中心的 RSS 峰值从 4882 MB 降到
+2042 MB，见 `performance-optimizations.md` 第 12 节，但上面这套飞行压测没有重跑。）
 
 ### 分阶段、分高度带的耗时（`wg-perf`）
 
@@ -680,6 +722,47 @@ cargo build --release -p mc-bamboo-vanilla
 The 3×3 repack is gone: the `light` stage now calls `generate_light_from_layers`,
 which builds light-only sections straight from the snapshot layers. Light is
 bit-identical; `wg-perf --light-compare` measured 35.1 → 11.3 ms (median, 96 chunks).
+
+**整块生成再降一轮（2026-11-16，Apple M4 Pro、release、本机口径；Windows 那组 40 ms
+不能直接和下面比）。** 这一节的基线是 `9495ddbb`（密度函数列特化、结构接入、feat-c、
+e2e 合进 main 之后），所以 `noise_density` 已经比上一轮的数字低；本节的数字是
+**把 9495ddbb 的二进制和合入本轮优化后的二进制在同一轮交替跑两轮**得到的
+（`--skip-aux` 只跑主阶段表，3 种子 × 5 群系 × 8 区块 = 120 块、每块 3 遍取中位数）。
+
+| 阶段（中位数 ms/区块） | 9495ddbb 1 | 本轮 1 | 9495ddbb 2 | 本轮 2 |
+|---|---|---|---|---|
+| biomes | 2.114 | 2.181 | 2.171 | 2.145 |
+| noise_density | 1.523 | 1.585 | 1.549 | 1.557 |
+| substance | 0.803 | 0.845 | 0.801 | 0.830 |
+| surface | 2.151 | 2.274 | 2.187 | 2.191 |
+| carver_mask | 0.992 | 1.058 | 1.015 | 1.027 |
+| features | 3.481 | 3.831 | 3.667 | 3.705 |
+| light | 5.993 | 4.454 | 6.431 | 4.263 |
+| assembly | 1.637 | 0.823 | 1.641 | 0.806 |
+| **墙钟合计** | **20.303** | **18.561** | **21.659** | **18.259** |
+
+两边都用 `--aux 1` 跳过繁重的辅助测量，主表打印完即结束。**整块墙钟中位数降到
+20 ms 以内**：这是上一节密度函数列特化（约 −1.4 ms）与本轮光照/组装优化
+（`light` 约 −1.8 ms、`assembly` 约 −0.8 ms）叠加的结果，单靠本轮改不到 20 ms。
+口径和每项的前后数字见 `docs/performance-optimizations.md` 第 13 节。
+
+改动是：段调色板一次扫描批量打包（不再逐格 `set`）、生成期光照的段省掉重扫与
+红石缓存哈希、四张 FINAL 高度图直接从已算好的 `GeneratedChunk.heightmaps` 打包、
+群系名字按状态索引缓存。剩下的 `features` 约 3.7 ms、`light` 传播约 4.3 ms、
+`biomes` 约 2.2 ms 还有空间。每一项都由 `chunkgen`（carvers / features）、
+`gen-world --through features`、`structure-pipeline`、`gen-light` 多种子多 salt
+证明 0 不一致，并故意改坏一次确认对拍能报出来。
+
+**注意 `wg-perf` 不是玩家等的那个数**：工具由调用方给 3×3 视图，省掉了
+`build_view`（9 个 CARVERS 地形）、结构起点/引用反查、`structure_starts` /
+`structure_references` 两阶段、以及世界线程按规范序合并写增量。真实 Director 路径
+单线程分阶段实测约 44.6 ms/区块（terrain 8.0、`game_features` 30.6、light 5.5、
+assembly 0.7），其中一度有 24 ms 是 `features` 每区块重新解析整份
+`worldgen.json`。这一块已改成进程一份，并顺带省掉地物主循环里每个 placed feature
+的 SHA-256 与线性查表、`prime_heightmaps` 的逐格四次谓词调用。三个口径
+（`wg-perf` 18.5 ms、`game_features` 29.8 ms、并发压测 4/8 线程 52.5/70.2 ms）
+的关系、多线程为什么单块变慢、以及撤销的尝试见
+`docs/performance-optimizations.md` 第 15 节。
 
 ## 端到端逐类型对拍
 

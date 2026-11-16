@@ -4,13 +4,23 @@
 //! 再分 [`SUB_BUCKETS`] 个子桶。分位数返回所在桶的下界，是故意偏保守的估计。
 
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     env,
     fmt::Write,
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use mc_bamboo_core::BlockPos;
+
+use mc_bamboo_blocks::{Observation, Trigger};
+use mc_bamboo_core::ChunkPos;
+
 /// 环境变量给的是报告间隔的秒数；没设、`0`、负数或解析不了都当成没设置。
 const PROFILE_ENV: &str = "BAMBOO_PROFILE";
+/// 按区块记三个方块侧阶段的开关；`1` 打开，其余值（含没设）都当成关闭。
+const CHUNK_PROFILE_ENV: &str = "BAMBOO_PROFILE_CHUNKS";
 /// 相邻两刻的起点理想上相隔 50 ms，和 `world.rs` 里的一刻等长。
 const TICK: Duration = Duration::from_millis(50);
 /// 0..15 ns 逐纳秒记，小到一次 lap 的耗时也能分辨。
@@ -433,6 +443,97 @@ impl Metric {
     }
 }
 
+/// 按区块累计耗时的三个方块侧阶段。和 `Phase` 分开，因为存储按区块索引，
+/// 而且只有在 `BAMBOO_PROFILE_CHUNKS=1` 时才累计。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChunkPhase {
+    ScheduledTicks,
+    BlockEvents,
+    BlockEntities,
+}
+
+impl ChunkPhase {
+    const COUNT: usize = 3;
+}
+
+/// 一次触发的计时状态。三个阶段的驱动循环都发 `TriggerBegin` / `TriggerEnd`，
+/// 中间可能有嵌套的方块逻辑，但边界总是成对且按触发顺序到达。
+#[derive(Debug)]
+struct OpenTrigger {
+    chunk: ChunkPos,
+    started: Option<Instant>,
+}
+
+/// 三个方块侧阶段里，每个触发按所在区块累计的耗时（纳秒）。
+///
+/// 开关关闭时这个结构不在热路径上：`RegionLevel::observe` 先判一次布尔值，
+/// 不成立就直接返回，不取时钟、不查表、也不分配。
+#[derive(Debug, Default)]
+struct ChunkTiming {
+    /// 当前正在计时的阶段；`None` 表示不在三个阶段里。
+    phase: Option<ChunkPhase>,
+    open: Option<OpenTrigger>,
+    /// 本报告窗口内每个区块累计的纳秒，打完报告清零。
+    totals: HashMap<ChunkPos, [u64; ChunkPhase::COUNT]>,
+}
+
+impl ChunkTiming {
+    fn begin_phase(&mut self, phase: ChunkPhase) {
+        self.phase = Some(phase);
+    }
+
+    fn end_phase(&mut self) {
+        self.phase = None;
+        // 触发没闭合时丢弃，不能把下一阶段的耗时算到这个区块上。
+        self.open = None;
+    }
+
+    /// 触发开始。坐标只取触发自己的位置，和触发读写到的其它区块无关。
+    fn trigger_begin(&mut self, trigger: Trigger, now: Instant) {
+        let Some(_) = self.phase else {
+            return;
+        };
+        let pos = match trigger {
+            Trigger::ScheduledTick { pos, .. }
+            | Trigger::ScheduledFluidTick { pos, .. }
+            | Trigger::BlockEvent { pos, .. }
+            | Trigger::BlockEntityTick { pos, .. } => pos,
+        };
+        self.open = Some(OpenTrigger {
+            chunk: pos.chunk(),
+            started: Some(now),
+        });
+    }
+
+    /// 触发结束，把耗时累加到触发所在区块。
+    fn trigger_end(&mut self, now: Instant) {
+        let Some(phase) = self.phase else {
+            return;
+        };
+        let Some(open) = self.open.take() else {
+            return;
+        };
+        let Some(started) = open.started else {
+            return;
+        };
+        let nanos = now
+            .saturating_duration_since(started)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        let entry = self
+            .totals
+            .entry(open.chunk)
+            .or_insert([0; ChunkPhase::COUNT]);
+        entry[phase as usize] = entry[phase as usize].saturating_add(nanos);
+    }
+
+    fn reset(&mut self) {
+        self.open = None;
+        self.phase = None;
+        self.totals.clear();
+    }
+}
+
 /// 世界线程取「现在」的地方。生产环境读单调时钟，测试可以钉死再手动推进，
 /// 区块延迟这类墙上时间的指标因此不依赖真实时钟跑多快。
 #[derive(Debug, Clone)]
@@ -501,6 +602,11 @@ pub(crate) struct Profiler {
     /// 没设环境变量时是 `None`：只累计、不打印。
     report_interval: Option<Duration>,
     last_report: Instant,
+    /// 按区块的三个方块侧阶段耗时；默认关闭。
+    /// `RefCell` 让 `Level::observe(&self)` 能累计，运行时只有世界线程碰它。
+    chunk_timing: RefCell<ChunkTiming>,
+    /// 开关单独存一份：关着时 `observe` 只要一次布尔判断，不碰 `RefCell`。
+    chunk_timing_on: bool,
 }
 
 impl Profiler {
@@ -533,6 +639,8 @@ impl Profiler {
             clock,
             report_interval: interval,
             last_report: now,
+            chunk_timing: RefCell::new(ChunkTiming::default()),
+            chunk_timing_on: false,
         }
     }
 }
@@ -550,6 +658,11 @@ pub(crate) enum Series {
     Metric(Metric),
 }
 
+/// 读环境变量。按区块统计只在显式设 `1` 时打开。
+fn chunk_profile_from_env() -> bool {
+    env::var(CHUNK_PROFILE_ENV).is_ok_and(|value| value.trim() == "1")
+}
+
 /// 读环境变量，构造剖析器。世界创建时调用一次。
 fn report_interval_from_env() -> Option<Duration> {
     let value = env::var(PROFILE_ENV).ok()?;
@@ -564,7 +677,47 @@ impl Profiler {
     /// 世界创建时读一次 `BAMBOO_PROFILE`。`World::new` 及其几个入口都会走到这里。
     pub(crate) fn on_world_start(&mut self) {
         self.report_interval = report_interval_from_env();
+        self.chunk_timing_on = chunk_profile_from_env();
         self.last_report = self.clock.now();
+    }
+
+    /// 按区块统计开着没有。方块逻辑的 `observe` 每次触发都先问它。
+    #[inline]
+    pub(crate) fn chunk_timing_enabled(&self) -> bool {
+        self.chunk_timing_on
+    }
+
+    /// 进入三个方块侧阶段之一；退出时再调 `end_chunk_phase`。
+    pub(crate) fn begin_chunk_phase(&self, phase: ChunkPhase) {
+        if self.chunk_timing_on {
+            self.chunk_timing.borrow_mut().begin_phase(phase);
+        }
+    }
+
+    pub(crate) fn end_chunk_phase(&self) {
+        if self.chunk_timing_on {
+            self.chunk_timing.borrow_mut().end_phase();
+        }
+    }
+
+    /// 方块逻辑报告的触发边界。`Observation::TriggerBegin` / `TriggerEnd`。
+    #[inline]
+    pub(crate) fn observe_trigger(&self, event: Observation<'_>) {
+        if !self.chunk_timing_on {
+            return;
+        }
+        // 只要触发边界；其它观察事件不取时钟、不碰累计表。
+        let trigger = match event {
+            Observation::TriggerBegin(trigger) => Some(trigger),
+            Observation::TriggerEnd => None,
+            _ => return,
+        };
+        let now = self.clock.now();
+        let mut timing = self.chunk_timing.borrow_mut();
+        match trigger {
+            Some(trigger) => timing.trigger_begin(trigger, now),
+            None => timing.trigger_end(now),
+        }
     }
 
     /// 世界线程统一的「现在」。区块入队等事件用这个值打时间戳。
@@ -828,6 +981,28 @@ impl Profiler {
             self.skipped_catch_ups,
             Metric::SkippedCatchUps.unit(),
         );
+        if self.chunk_timing_on {
+            let timing = self.chunk_timing.borrow();
+            // 按区块的三阶段累计耗时（纳秒）。一行一个区块，离线脚本据此算
+            // 忙区块、切比雪夫 ≤2 的连通单元和最大的单元占比。
+            let mut chunks: Vec<_> = timing.totals.iter().collect();
+            chunks.sort_unstable_by_key(|(pos, _)| (pos.x, pos.z));
+            let _ = writeln!(
+                out,
+                "chunk-phases (ns per chunk; scheduled_ticks block_events block_entities):"
+            );
+            for (pos, totals) in chunks {
+                let _ = writeln!(
+                    out,
+                    "  chunk {} {} {} {} {}",
+                    pos.x,
+                    pos.z,
+                    totals[ChunkPhase::ScheduledTicks as usize],
+                    totals[ChunkPhase::BlockEvents as usize],
+                    totals[ChunkPhase::BlockEntities as usize],
+                );
+            }
+        }
         out.pop();
         out
     }
@@ -844,6 +1019,14 @@ impl Profiler {
         }
         for (histogram, source) in self.sub_phases.iter_mut().zip(&other.sub_phases) {
             histogram.merge(source);
+        }
+        let other_timing = other.chunk_timing.borrow();
+        let mut mine = self.chunk_timing.borrow_mut();
+        for (&pos, totals) in &other_timing.totals {
+            let entry = mine.totals.entry(pos).or_insert([0; ChunkPhase::COUNT]);
+            for (slot, value) in entry.iter_mut().zip(totals) {
+                *slot = slot.saturating_add(*value);
+            }
         }
         self.skipped_catch_ups = self
             .skipped_catch_ups
@@ -864,6 +1047,7 @@ impl Profiler {
         }
         self.sub_totals = [0; SubPhase::ALL.len()];
         self.open_sub = None;
+        self.chunk_timing.borrow_mut().reset();
         self.skipped_catch_ups = 0;
         self.chunks_this_tick = 0;
         self.ticks = 0;
@@ -1227,5 +1411,59 @@ mod tests {
         profiler.reset_samples();
         assert_eq!(profiler.report_interval, Some(Duration::from_secs(60)));
         assert!(profiler.report().contains("0 ticks"));
+    }
+
+    #[test]
+    fn chunk_timing_is_off_by_default_and_accumulates_only_inside_a_phase() {
+        let mut profiler = Profiler::with_manual_clock();
+        assert!(!profiler.chunk_timing_enabled());
+        let trigger = |pos| Observation::TriggerBegin(Trigger::BlockEntityTick { pos, kind: 0 });
+        let pos = BlockPos::new(20, 64, 36);
+        // 关着的时候连时钟都不该取：报告里仍然没有按区块那一段。
+        profiler.observe_trigger(trigger(pos));
+        profiler.observe_trigger(Observation::TriggerEnd);
+        assert!(!profiler.report().contains("chunk-phases"));
+
+        profiler.chunk_timing_on = true;
+        profiler.begin_tick();
+        // 阶段之外的触发不记。
+        profiler.observe_trigger(trigger(pos));
+        profiler.advance_clock(Duration::from_micros(50));
+        profiler.observe_trigger(Observation::TriggerEnd);
+
+        profiler.begin_chunk_phase(ChunkPhase::BlockEntities);
+        profiler.observe_trigger(trigger(pos));
+        profiler.advance_clock(Duration::from_micros(30));
+        profiler.observe_trigger(Observation::TriggerEnd);
+        profiler.end_chunk_phase();
+
+        profiler.begin_chunk_phase(ChunkPhase::ScheduledTicks);
+        // 没闭合的触发不能漏到下一阶段。
+        profiler.observe_trigger(trigger(pos));
+        profiler.advance_clock(Duration::from_micros(70));
+        profiler.end_chunk_phase();
+
+        let totals = *profiler
+            .chunk_timing
+            .borrow()
+            .totals
+            .get(&pos.chunk())
+            .unwrap();
+        assert_eq!(totals[ChunkPhase::ScheduledTicks as usize], 0);
+        assert_eq!(totals[ChunkPhase::BlockEvents as usize], 0);
+        assert_eq!(totals[ChunkPhase::BlockEntities as usize], 30_000);
+        let report = profiler.report();
+        assert!(report.contains("chunk 1 2 0 0 30000"), "{report}");
+
+        profiler.reset_samples();
+        assert!(profiler.chunk_timing.borrow().totals.is_empty());
+    }
+
+    #[test]
+    fn chunk_timing_units_are_listed_in_the_report_header() {
+        let mut profiler = Profiler::with_manual_clock();
+        profiler.chunk_timing_on = true;
+        let report = profiler.report();
+        assert!(report.contains("scheduled_ticks block_events block_entities"));
     }
 }

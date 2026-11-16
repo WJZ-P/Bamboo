@@ -53,6 +53,13 @@ pub struct Registry {
     /// `FeatureSorter` 排好的每步全局顺序；每个元素是 `placed` 的下标，
     /// 下标本身即 `setFeatureSeed(decorationSeed, index, step)` 用的 index。
     steps: Vec<Vec<u32>>,
+    /// 每步「placed id → 全局 index」的反查表，内容和 `steps` 严格对应。
+    /// 主循环每个群系每个地物都要问一次，原来线性扫 `steps[step]`。
+    ///
+    /// Per-step reverse lookup (placed id -> global index), mirroring `steps`.
+    /// The main loop asks for every biome/feature pair; a linear scan of
+    /// `steps[step]` there was quadratic.
+    step_indices: Vec<HashMap<u32, u32>>,
     /// `block_state_provider` 注册表（`Holder<BlockStateProvider>` 的字符串引用）。
     ///
     /// The `block_state_provider` registry behind `Holder<BlockStateProvider>` strings.
@@ -179,6 +186,19 @@ impl Registry {
             }
             steps.push(ids);
         }
+        // 同一个 placed id 在一步里只出现一次；若数据里重复，保留第一次，
+        // 和原来的 `position()` 语义一致。
+        // A placed id appears once per step; keep the first, matching `position()`.
+        let step_indices: Vec<HashMap<u32, u32>> = steps
+            .iter()
+            .map(|globals| {
+                let mut map = HashMap::with_capacity(globals.len());
+                for (index, &id) in globals.iter().enumerate() {
+                    map.entry(id).or_insert(index as u32);
+                }
+                map
+            })
+            .collect();
 
         Ok(Self {
             features,
@@ -188,6 +208,7 @@ impl Registry {
             biome_features,
             biome_ids,
             steps,
+            step_indices,
             // 缺这个键时保持空表：旧版 `worldgen.json` 仍能加载，字符串 provider 会被
             // 当成不支持，行为和以前一致。
             // Keep an empty table when the key is missing: an older `worldgen.json` still
@@ -233,6 +254,15 @@ impl Registry {
         &self.steps
     }
 
+    /// 某步里 placed id 对应的全局 index；`None` 表示这个地物不在导出的全局顺序里
+    /// （目前只有下界 / 末地群系的条目会落到这种情况）。
+    ///
+    /// Global index of a placed id in a step; `None` means it is missing from the
+    /// exported global order (as with nether/end biome entries today).
+    pub fn step_index(&self, step: usize, placed: u32) -> Option<u32> {
+        self.step_indices.get(step)?.get(&placed).copied()
+    }
+
     /// 某个群系某个 step 的 placed feature 名字列表。
     pub fn biome_features(&self, biome_id: u32, step: usize) -> &[String] {
         static EMPTY: Vec<String> = Vec::new();
@@ -272,6 +302,31 @@ fn object_field<'a>(
 mod tests {
     use super::*;
     use crate::Worldgen;
+
+    /// 反查表与线性 `position()` 逐步、逐 placed id 一致。
+    /// The reverse table agrees with a linear `position()` for every step/id.
+    #[test]
+    fn step_index_matches_the_linear_global_order() {
+        let text = mc_bamboo_data::worldgen::WORLDGEN;
+        let root: serde_json::Value = serde_json::from_str(text).unwrap();
+        let registry = Registry::parse(root.as_object().unwrap()).unwrap();
+        for (step, globals) in registry.steps().iter().enumerate() {
+            for (index, &id) in globals.iter().enumerate() {
+                assert_eq!(
+                    registry.step_index(step, id),
+                    Some(globals.iter().position(|&g| g == id).unwrap() as u32),
+                    "step {step} index {index}"
+                );
+                assert_eq!(
+                    index as u32,
+                    globals.iter().position(|&g| g == id).unwrap() as u32
+                );
+            }
+            // 不在这步里的 id 不能凭空命中。
+            assert_eq!(registry.step_index(step, u32::MAX), None);
+            assert_eq!(registry.step_index(step + 100, 0), None);
+        }
+    }
 
     #[test]
     fn parses_the_exported_feature_registries() {

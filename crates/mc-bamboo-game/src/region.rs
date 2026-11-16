@@ -447,6 +447,10 @@ impl Region {
             command_blocks: &mut self.command_blocks,
             tick_levels: &self.tick_levels,
             dirty: &mut self.dirty,
+            chunk_profiler: self
+                .profiler
+                .chunk_timing_enabled()
+                .then_some(&self.profiler),
         };
         (level, &mut self.block_ticks)
     }
@@ -477,6 +481,10 @@ impl Region {
             command_blocks: &mut self.command_blocks,
             tick_levels: &self.tick_levels,
             dirty: &mut self.dirty,
+            chunk_profiler: self
+                .profiler
+                .chunk_timing_enabled()
+                .then_some(&self.profiler),
         };
         (level, &mut self.block_ticks, &mut self.redstone_cache)
     }

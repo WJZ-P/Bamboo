@@ -270,6 +270,12 @@ impl Section {
     /// 统计每个调色板下标出现的次数，再按调色板汇总三种计数。
     fn recount(&mut self) {
         let counts = self.blocks.index_counts();
+        self.recount_with_counts(&counts);
+    }
+
+    /// 用现成的每格计数统计三种计数（生成期光照的批量路径）。
+    /// Apply per-cell counts (the worldgen-light bulk path).
+    fn recount_with_counts(&mut self, counts: &[u16]) {
         match self.blocks.palette() {
             PaletteView::Single(state) => {
                 self.non_air_blocks = if is_air(state) { 0 } else { 4096 };
@@ -295,6 +301,50 @@ impl Section {
                 }
             }
         }
+    }
+
+    /// 生成期光照专用的段构造：扫描时已经数好了每种状态的三种计数，不用再扫打包数据。
+    ///
+    /// `light_only` 时略过 128 位段哈希：红石缓存只在运行时读写方块时用段哈希，
+    /// 生成期的段不进世界、也不参与缓存。除此之外和 [`from_disk`](Self::from_disk)
+    /// 的方块、计数完全一致。
+    ///
+    /// A light-only section whose per-state counts came from the same scan. The
+    /// 128-bit block hash is skipped: it only exists for the runtime redstone
+    /// cache, and these sections never enter the world. Everything else matches
+    /// [`from_disk`](Self::from_disk) exactly.
+    pub(crate) fn for_light(blocks: PalettedContainer, counts: &[(u16, u16, u16)]) -> Self {
+        let mut section = Self {
+            blocks,
+            biomes: PalettedContainer::biomes(0),
+            non_air_blocks: 0,
+            random_tickers: 0,
+            fluids: 0,
+            block_hash: 0,
+        };
+        // 三种计数在扫描时按状态属性算好了；这里只求和。全局 ID 形式时 counts 为空，
+        // 退回逐格统计（生成期的段几乎不会走到这里）。
+        // The scan already classified every state; just total the three counts.
+        // The global-id form has no palette and falls back to a per-cell scan.
+        if matches!(section.blocks.palette(), PaletteView::Global) {
+            let counts = section.blocks.index_counts();
+            section.recount_with_counts(&counts);
+        } else {
+            for &(non_air, tickers, fluids) in counts {
+                section.non_air_blocks += non_air;
+                section.random_tickers += tickers;
+                section.fluids += fluids;
+            }
+        }
+        // 调试构建里 `block_hash()` 会重算一遍做断言，所以那里仍存真值；release 里
+        // 生成期光照从不问段哈希，留 0 省掉 4096 次哈希。
+        // Debug builds still store the real hash because `block_hash()` asserts;
+        // release builds never query it for these sections.
+        #[cfg(debug_assertions)]
+        {
+            section.rehash();
+        }
+        section
     }
 
     /// 方块在容器里的下标，顺序是 y、z、x。
@@ -562,10 +612,8 @@ impl Chunk {
                     }
                 }
             }
-            sections.push(Section::from_disk(
-                PalettedContainer::blocks_from_values(&values),
-                PalettedContainer::biomes(0),
-            ));
+            let (blocks, counts) = PalettedContainer::blocks_from_values(&values);
+            sections.push(Section::for_light(blocks, &counts));
         }
         let random_ticking_sections = random_ticking_mask(&sections);
         let mut chunk = Self {

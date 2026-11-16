@@ -41,6 +41,7 @@ impl Parameter {
     }
 
     /// `Climate.Parameter.distance(target)`。
+    #[inline]
     fn distance(self, target: i64) -> i64 {
         let above = target.wrapping_sub(self.max);
         let below = self.min.wrapping_sub(target);
@@ -154,6 +155,7 @@ impl Node {
 }
 
 /// `Climate.RTree.Node.distance(target)`。
+#[inline]
 fn node_distance(space: &[Parameter; PARAMETER_COUNT], target: &[i64; PARAMETER_COUNT]) -> i64 {
     let mut distance: i64 = 0;
     for (parameter, value) in space.iter().zip(target) {
@@ -209,6 +211,7 @@ impl<T> ParameterList<T> {
     }
 
     /// `Climate.ParameterList.findValue(target)`，走 R 树。
+    #[inline]
     pub fn find_value(&self, target: TargetPoint) -> &T {
         let array = target.to_array();
         let leaf = search(&self.root, &array, self.last_result.get(), &self.points);
@@ -237,6 +240,7 @@ impl<T> ParameterList<T> {
 }
 
 /// `Climate.RTree.Node.search`。
+#[inline]
 fn search(
     node: &Node,
     target: &[i64; PARAMETER_COUNT],

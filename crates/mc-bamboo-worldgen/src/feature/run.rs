@@ -85,6 +85,30 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
     // SamplerContext.EMPTY_UNCACHED，单点求值不记忆缓存。这里不能用带缓存的
     // Context，否则同一坐标在不同调用顺序下会读到上一次成批求值的缓冲。
     let mut density_context = Context::uncached();
+    // BiomeFilter 的 zoom 种子只跟世界种子有关，和 step / placed feature 无关；
+    // 原来每个 placed feature 都做一次 SHA-256。
+    // The BiomeFilter zoom seed depends only on the world seed; it used to
+    // recompute a SHA-256 for every placed feature.
+    let zoom_seed = crate::biome_manager::obfuscate_seed(ctx.seed);
+    let biomes = &input.biomes;
+    let min_y = ctx.settings.min_y;
+    let center_x = input.center_x;
+    let center_z = input.center_z;
+    let mut biome_at = |x: i32, y: i32, z: i32| -> u32 {
+        let corner = crate::biome_manager::fiddled_corner(zoom_seed, x, y, z);
+        match super::world::noise_biome_in(
+            biomes, center_x, center_z, min_y, corner.0, corner.1, corner.2,
+        ) {
+            Some(id) => id,
+            None => ctx.biomes.noise_biome(
+                ctx.samplers,
+                &mut density_context,
+                corner.0,
+                corner.1,
+                corner.2,
+            ),
+        }
+    };
 
     for step in 0..DECORATION_STEPS {
         if ctx.steps_mask & (1 << step) == 0 {
@@ -155,8 +179,8 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 // order: `features_per_step` is sorted over the overworld biome set only
                 // (see `Extractor.featuresPerStep`), so nether and end entries land here.
                 // Skipping silently would report a false "0 mismatches".
-                if let Some(index) = globals.iter().position(|&g| g == id) {
-                    indices.push(index as u32);
+                if let Some(index) = ctx.registry.step_index(step, id) {
+                    indices.push(index);
                 } else {
                     unsupported = true;
                 }
@@ -174,45 +198,12 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 continue;
             };
 
-            // `BiomeFilter.shouldPlace` 问的是 `WorldGenLevel.getBiome(pos)`，即
-            // `WorldGenRegion.biomeManager.getBiome(pos)`。字节码里这个 BiomeManager
-            // 构造时传的 BiomeResolver 是 **region 自己**：`BiomeManager.getBiome` 先按
-            // `biomeZoomSeed` 做八角 fiddled distance 选中 quart 角，再走
-            // `LevelReader.getNoiseBiome` 读 3×3 区块里 BIOMES 阶段填好的 quart 格；
-            // 只有落在 3×3 之外才回退到 `getUncachedNoiseBiome()` 单点重算气候。
-            //
-            // 地表规则要用 region 的格子（成批与单点浮点顺序不同），地物的
-            // `BiomeFilter` 也必须用同一份格子。以前这里直接重算 `BiomeManager.biome`
-            // 气候，step 9 的植被会在群系边界上被放行 / 杀错。
-            //
-            // `BiomeFilter.shouldPlace` asks `WorldGenLevel.getBiome(pos)`, i.e.
-            // `WorldGenRegion.biomeManager.getBiome(pos)`. The bytecode constructs
-            // that BiomeManager with **the region itself** as BiomeResolver:
-            // `BiomeManager.getBiome` picks a quart corner by octant fiddled
-            // distance, then `LevelReader.getNoiseBiome` reads the quart cell
-            // stored in the 3x3 chunks; only outside the 3x3 does it fall back to
-            // single-point `getUncachedNoiseBiome()` sampling. Recomputing the
-            // climate here lets step-9 vegetation leak across biome borders.
-            let biomes = &input.biomes;
-            let zoom_seed = crate::biome_manager::obfuscate_seed(ctx.seed);
-            let min_y = ctx.settings.min_y;
-            let center_x = input.center_x;
-            let center_z = input.center_z;
-            let mut biome_at = |x: i32, y: i32, z: i32| -> u32 {
-                let corner = crate::biome_manager::fiddled_corner(zoom_seed, x, y, z);
-                match super::world::noise_biome_in(
-                    biomes, center_x, center_z, min_y, corner.0, corner.1, corner.2,
-                ) {
-                    Some(id) => id,
-                    None => ctx.biomes.noise_biome(
-                        ctx.samplers,
-                        &mut density_context,
-                        corner.0,
-                        corner.1,
-                        corner.2,
-                    ),
-                }
-            };
+            // `BiomeFilter` 的闭包只建一次（循环外），这里只换掉本 placed
+            // feature 的 `top_feature`。读 3×3 quart 格、越界回退单点气候的
+            // 语义不变，见上面闭包的注释。
+            // Reuse the single BiomeFilter closure; only `top_feature` changes
+            // per placed feature. The 3x3 quart-cell lookup and out-of-range
+            // single-point climate fallback are unchanged.
             let mut env = PlacementEnv {
                 generation,
                 biome_at: &mut biome_at,

@@ -3,7 +3,10 @@
 //! 一次 [`Director::handle`] 是纯的：只读自己的状态和事件，只往返回的 [`Effect`]
 //! 列表里写。宿主负责真正跑任务、搬盒子、发消息。
 
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+};
 
 use mc_bamboo_core::ChunkPos;
 
@@ -12,6 +15,7 @@ use crate::ticket::{
     is_entity_ticking,
 };
 
+use super::priority::{DemandKind, DemandSnapshot};
 use super::pyramid::{PipelineKind, neighbor_view};
 
 /// 一个完工的区块束。Director 不打开它，只整包搬运。
@@ -403,6 +407,17 @@ struct ReclaimDue {
     pos: ChunkPos,
 }
 
+/// 一次 `drive` 最多检查多少个被挡住的任务；其余留在堆里等下一次。
+const MAX_SKIPS_PER_DRIVE: usize = 16;
+
+/// 待派任务的排序键：离最近玩家的 rank（带方向加权），同一档按
+/// 「这条流水线已经走到哪一步」把快完工的往前放，最后按 TaskId 兜底。
+/// 键只由 `(需求快照, 位置, 阶段, 编号)` 决定；任务完成、配额变化都不改它。
+type QueueKey = (i64, u8, TaskId);
+
+/// 堆里的一项：`(排序键, 任务编号)`。TaskId 已在键里作最后的兜底。
+type QueueEntry = (QueueKey, TaskId);
+
 /// 区块平面的 Director。见模块文档。
 #[derive(Debug)]
 pub struct Director<C> {
@@ -421,15 +436,24 @@ pub struct Director<C> {
     /// 等着排 `Read` 的记录。只有刚进 `Full` 档、还没派任务的记录才在里面，
     /// 每次 `drive` 只取这一批，不扫整张记录表。
     queued_reads: BTreeSet<ChunkPos>,
-    /// 上一轮被写范围/配额挡住、这一轮还要再试的任务 id。
-    submittable: Vec<TaskId>,
-    /// 上一轮 `drive` 见过的最大任务 id，用来认出这一轮新排的任务。
-    last_seen_task: TaskId,
+    /// 全部待派任务的小顶堆（`Reverse` 包大顶堆）。只在
+    /// 新任务加入、玩家快照变化或者有任务被挡住后重试时才碰它。
+    pending_order: BinaryHeap<Reverse<QueueEntry>>,
+    /// 需求快照的代数；变了之后堆里的键整堆重算一次。
+    demand_epoch: u64,
+    /// 堆里当前键用的是哪一代需求。
+    heap_epoch: u64,
     /// 逗留到期的队列：按 `unloaded_at` 排，队头不到期就不用再往后看。
     /// 同一个位置可能有旧条目（`unloaded_at` 改过），取出时和记录里的值对一下。
     reclaim_due: BinaryHeap<ReclaimDue>,
     /// 本刻已经派出去的任务数。
     submitted_this_tick: usize,
+    /// 当前玩家需求和每玩家在途配额。宿主每刻更新，纯状态机测试默认是空快照。
+    demand: DemandSnapshot,
+    /// 每名玩家当前在途的「加载存档」和「新生成」任务数，按 `(玩家编号, 类别)` 记。
+    demand_in_flight: HashMap<(u64, DemandKind), usize>,
+    /// 每个在途任务归到哪名玩家、属于哪一类，`on_task_done` 收回时减计数。
+    task_owners: HashMap<TaskId, (Option<u64>, DemandKind)>,
     /// 超时票的 `is_busy` 直接查这张表，不每刻重建。
     busy: BTreeSet<ChunkPos>,
     /// 已交付或正在交付的记录数，随 `Owner` 变化增量维护。
@@ -444,9 +468,8 @@ pub struct Director<C> {
     level_changed: Vec<LevelChange>,
     /// 票表变化列表的只读副本，跨次复用容量。
     changes_scratch: Vec<LevelChange>,
-    /// 新排的读任务和待派任务编号，跨次 `drive` 复用容量。
+    /// 新排的读任务，跨次 `drive` 复用容量。
     reads: Vec<(ChunkPos, u64)>,
-    task_ids: Vec<TaskId>,
     /// 构造一个「生成器输出」的盒子。宿主设置；测试可以用 `C::default`。
     template: Option<fn() -> C>,
 }
@@ -471,10 +494,14 @@ impl<C: ChunkBundle> Director<C> {
             pending_ready: BTreeSet::new(),
             pending_forgot: BTreeSet::new(),
             queued_reads: BTreeSet::new(),
-            submittable: Vec::new(),
-            last_seen_task: 0,
+            pending_order: BinaryHeap::new(),
+            demand_epoch: 0,
+            heap_epoch: 0,
             reclaim_due: BinaryHeap::new(),
             submitted_this_tick: 0,
+            demand: DemandSnapshot::default(),
+            demand_in_flight: HashMap::new(),
+            task_owners: HashMap::new(),
             busy: BTreeSet::new(),
             loaded: 0,
             filtered: 0,
@@ -484,13 +511,34 @@ impl<C: ChunkBundle> Director<C> {
             level_changed: Vec::new(),
             changes_scratch: Vec::new(),
             reads: Vec::new(),
-            task_ids: Vec::new(),
             template: None,
         }
     }
 
     pub fn tickets(&self) -> &TicketTable {
         &self.tickets
+    }
+
+    /// 更新玩家加载需求的快照。玩家跨格才该调。
+    ///
+    /// 换快照只推一次代数并标脏；下一次真正要派任务时才整堆重算一次，
+    /// 不是每刻、更不是每个事件重排。在途任务仍记在原来的玩家名下。
+    pub fn set_player_demand(&mut self, demand: DemandSnapshot) {
+        if self.demand == demand {
+            return;
+        }
+        self.demand = demand;
+        self.demand_epoch = self.demand_epoch.wrapping_add(1);
+    }
+
+    /// 当前的需求快照，宿主的读盘、计算池和交付队列用同一个 rank 排序。
+    pub fn player_demand(&self) -> &DemandSnapshot {
+        &self.demand
+    }
+
+    /// 每刻只重置派出配额。任务一直留在优先级堆里，不需要整表重排。
+    pub fn begin_tick(&mut self) {
+        self.submitted_this_tick = 0;
     }
 
     pub fn tickets_mut(&mut self) -> &mut TicketTable {
@@ -673,7 +721,9 @@ impl<C: ChunkBundle> Director<C> {
                 pos,
                 generation,
                 result,
-            } => self.on_task_done(&mut out, id, pos, generation, result),
+            } => {
+                self.on_task_done(&mut out, id, pos, generation, result);
+            }
             Event::Returned {
                 pos,
                 generation,
@@ -682,7 +732,7 @@ impl<C: ChunkBundle> Director<C> {
             Event::Delivered { pos, generation } => self.on_delivered(pos, generation),
             Event::Tick { now_tick } => {
                 self.now_tick = now_tick;
-                self.submitted_this_tick = 0;
+                self.begin_tick();
                 self.tick_timeouts();
                 self.consume_level_changes(&mut out);
                 self.expire_reclaim_delay(&mut out);
@@ -874,6 +924,8 @@ impl<C: ChunkBundle> Director<C> {
                 out.push(Effect::Cancel { id });
             }
             self.pending.remove(&id);
+            self.release_task_owner(id);
+            self.forget_priority_id(id);
         }
         self.refresh_busy(pos);
         self.queued_reads.remove(&pos);
@@ -976,6 +1028,8 @@ impl<C: ChunkBundle> Director<C> {
                 out.push(Effect::Cancel { id });
             }
             self.pending.remove(&id);
+            self.release_task_owner(id);
+            self.forget_priority_id(id);
         }
         for pos in drop {
             self.remove_record(pos);
@@ -998,6 +1052,7 @@ impl<C: ChunkBundle> Director<C> {
         result: TaskResult<C>,
     ) {
         let Some(in_flight) = self.in_flight.remove(&id) else {
+            self.release_task_owner(id);
             Self::park_orphan_result(out, pos, result);
             return;
         };
@@ -1015,6 +1070,8 @@ impl<C: ChunkBundle> Director<C> {
         }
         record.task = None;
         self.refresh_busy(pos);
+        self.release_task_owner(id);
+        // 不管这个任务占不占配额，都可能有被挡住的任务可以再试。
         match result {
             TaskResult::Read { bytes: Some(bytes) } => {
                 self.enqueue(out, pos, generation, None, Task::Decode { pos, bytes });
@@ -1309,7 +1366,95 @@ impl<C: ChunkBundle> Director<C> {
                 task,
             },
         );
+        self.schedule_task(id);
     }
+
+    /// 一个任务属于哪种每玩家限速。`Save` / `Assemble` 是收尾路径，不占配额。
+    fn demand_kind(task: &Task<C>) -> DemandKind {
+        match task {
+            Task::Read { .. } | Task::Decode { .. } => DemandKind::Load,
+            Task::Generate { .. } => DemandKind::Generate,
+            Task::Assemble { .. } | Task::Save { .. } => DemandKind::Unbounded,
+        }
+    }
+
+    /// 派出任务时登记它归哪名玩家；返回该任务能不能过每玩家在途上限。
+    fn claim_task_owner(&mut self, id: TaskId, pos: ChunkPos, kind: DemandKind) -> bool {
+        if matches!(kind, DemandKind::Unbounded) || self.demand.players().is_empty() {
+            return true;
+        }
+        let Some(player) = self.demand.owner(pos) else {
+            return true;
+        };
+        let cap = kind.cap(&self.demand);
+        if cap == 0
+            || self
+                .demand_in_flight
+                .get(&(player, kind))
+                .copied()
+                .unwrap_or(0)
+                >= cap
+        {
+            return false;
+        }
+        *self.demand_in_flight.entry((player, kind)).or_default() += 1;
+        self.task_owners.insert(id, (Some(player), kind));
+        true
+    }
+
+    /// 任务完成或取消时释放每玩家计数。每个任务只登记一次，不存在的条目是空操作。
+    fn release_task_owner(&mut self, id: TaskId) {
+        let Some((Some(player), kind)) = self.task_owners.remove(&id) else {
+            return;
+        };
+        let slot = self.demand_in_flight.entry((player, kind)).or_default();
+        *slot = slot.saturating_sub(1);
+        if *slot == 0 {
+            self.demand_in_flight.remove(&(player, kind));
+        }
+        // 配额释放了，上一轮被挡住的任务可以再试。
+    }
+
+    /// 把一个待派任务放进小顶堆。键只算一次；玩家快照变了才整堆重算。
+    fn schedule_task(&mut self, id: TaskId) {
+        let key = self.task_key(id);
+        self.pending_order.push(Reverse((key, id)));
+    }
+
+    /// 一个任务的排序键：rank、阶段进度、TaskId 兜底。
+    fn task_key(&self, id: TaskId) -> QueueKey {
+        let Some(pending) = self.pending.get(&id) else {
+            return (i64::MAX, u8::MAX, id);
+        };
+        let stage = self
+            .chunks
+            .get(&pending.pos)
+            .map_or(0, |record| record.stage as usize as u8);
+        (self.demand.rank(pending.pos), u8::MAX - stage, id)
+    }
+
+    /// 玩家快照变了才整堆重算键。堆里只有待派任务，且只在
+    /// `set_player_demand` 标脏后的第一次派单做，不是每刻。
+    fn refresh_heap_if_needed(&mut self) {
+        if self.heap_epoch == self.demand_epoch {
+            return;
+        }
+        let mut heap = std::mem::take(&mut self.pending_order);
+        let mut fresh = Vec::with_capacity(heap.len());
+        while let Some(Reverse((_, id))) = heap.pop() {
+            if self.pending.contains_key(&id) {
+                fresh.push(id);
+            }
+        }
+        for id in fresh {
+            let key = self.task_key(id);
+            self.pending_order.push(Reverse((key, id)));
+        }
+        self.heap_epoch = self.demand_epoch;
+    }
+
+    /// 队列里被取消的任务不用从堆里删：出堆时 `pending` 里查不到就跳过。
+    fn forget_priority_id(&mut self, _id: TaskId) {}
 
     /// 每处理完一个事件，把能推进的状态往前推：
     /// 新记录排 `Read`，待派任务按写范围排他派出去，攒着的 Ready/Forgot 发掉。
@@ -1318,10 +1463,15 @@ impl<C: ChunkBundle> Director<C> {
         // 只有目标阶段是 `Full`（等级 ≤ 33）的区块才要读盘/生成并交付；
         // 等级 34..44 的区块是依赖圈里的半成品，由 `ensure_dependencies`
         // 建记录，不进 region、不发区块包。
-        // 只排这一批新记录，不扫整张表。`enqueue` 会把它从队列里摘掉。
+        // 只排这一批新记录，不扫整张记录表。`enqueue` 会把它从队列里摘掉。
         let mut reads = std::mem::take(&mut self.reads);
         reads.clear();
-        for pos in std::mem::take(&mut self.queued_reads) {
+        // 新排的读任务先按玩家优先级排，TaskId 因此也是「急的先发」，
+        // 后面所有按 TaskId 兜底的地方都跟着这个顺序走。
+        let mut queued: Vec<ChunkPos> =
+            std::mem::take(&mut self.queued_reads).into_iter().collect();
+        queued.sort_by_key(|&pos| (self.demand.rank(pos), pos.x, pos.z));
+        for pos in queued {
             if self.chunks.get(&pos).is_some_and(|record| {
                 record.owner == Owner::Pipeline
                     && record.task.is_none()
@@ -1337,8 +1487,6 @@ impl<C: ChunkBundle> Director<C> {
         }
         self.reads = reads;
 
-        // 按 TaskId 顺序尝试派出；写范围相交的任务留到下次。
-        // 看一眼配额：没有可派的余量时连 `pending` 的键都不收集。
         let can_submit = (self.config.max_submits_per_tick == 0
             || self.submitted_this_tick < self.config.max_submits_per_tick)
             && self.in_flight.len() < self.config.max_in_flight;
@@ -1346,31 +1494,35 @@ impl<C: ChunkBundle> Director<C> {
             self.flush_notifications(out);
             return;
         }
-        // 只从「上一轮被挡住」和「这一轮新排的」里挑，不收集整张 `pending`。
-        let mut ids = std::mem::take(&mut self.task_ids);
-        ids.clear();
-        ids.extend(std::mem::take(&mut self.submittable));
-        // 新排的任务编号总在末尾，用范围查询只走这一批的键，
-        // 不把之前积压的整个 `pending` 过滤一遍。
-        let new_ids = self
-            .pending
-            .range((
-                std::ops::Bound::Excluded(self.last_seen_task),
-                std::ops::Bound::Unbounded,
-            ))
-            .map(|(&id, _)| id);
-        ids.extend(new_ids);
-        let mut blocked = std::mem::take(&mut self.submittable);
-        blocked.clear();
-        for id in ids.drain(..) {
-            if self.config.max_submits_per_tick > 0
-                && self.submitted_this_tick >= self.config.max_submits_per_tick
+        self.refresh_heap_if_needed();
+
+        let cap = self.config.max_in_flight;
+        // 被写范围/配额挡住的任务在本轮结束时原样放回堆；一次 drive 最多
+        // 检查 MAX_SKIPS_PER_DRIVE 个，其余仍留在堆里，下一次 drive 自然再看。
+        // 堆按优先级出，所以配额一释放，最急的任务当刻就能继续。
+        let mut skipped: Vec<Reverse<(QueueKey, TaskId)>> = Vec::new();
+        let mut skips = 0;
+        loop {
+            if (self.config.max_submits_per_tick > 0
+                && self.submitted_this_tick >= self.config.max_submits_per_tick)
+                || self.in_flight.len() >= cap
             {
-                blocked.push(id);
+                break;
+            }
+            let Some(Reverse((key, id))) = self.pending_order.pop() else {
+                break;
+            };
+            if !self.pending.contains_key(&id) {
                 continue;
             }
-            if self.in_flight.len() >= self.config.max_in_flight {
-                blocked.push(id);
+            // 阶段推进后键可能过期；重算一次再放回，不重复消费这个任务。
+            let fresh = self.task_key(id);
+            if fresh != key {
+                skipped.push(Reverse((fresh, id)));
+                skips += 1;
+                if skips >= MAX_SKIPS_PER_DRIVE {
+                    break;
+                }
                 continue;
             }
             let Some(pending) = self.pending.get(&id) else {
@@ -1386,12 +1538,18 @@ impl<C: ChunkBundle> Director<C> {
             }
             let radius = pending.task.write_radius();
             let pos = pending.pos;
+            let kind = Self::demand_kind(&pending.task);
             let overlaps = self
                 .in_flight
                 .values()
                 .any(|other| write_ranges_overlap(other.pos, other.write_radius, pos, radius));
-            if overlaps {
-                blocked.push(id);
+            // 公平靠每名玩家的在途硬上限：满了就跳过这个任务。
+            if overlaps || !self.claim_task_owner(id, pos, kind) {
+                skipped.push(Reverse((key, id)));
+                skips += 1;
+                if skips >= MAX_SKIPS_PER_DRIVE {
+                    break;
+                }
                 continue;
             }
             let pending = self.pending.remove(&id).expect("上面已经确认存在");
@@ -1411,9 +1569,7 @@ impl<C: ChunkBundle> Director<C> {
             });
             let _ = pending.seq;
         }
-        self.submittable = blocked;
-        self.task_ids = ids;
-        self.last_seen_task = self.next_task.wrapping_sub(1);
+        self.pending_order.extend(skipped);
         self.flush_notifications(out);
     }
 

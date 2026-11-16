@@ -942,10 +942,22 @@ fn block_state(value: Option<&Value>) -> Result<u32, String> {
 }
 
 fn biome_id(name: &str) -> Result<u32, String> {
-    mc_bamboo_data::registries::biome::NAMES
-        .iter()
-        .position(|id| *id == name)
-        .map(|id| id as u32)
+    // 每区块有 24×64 个 quart 格，逐格线性扫注册表会做上万次字符串比较。注册表是
+    // 静态数据，按名字建一次哈希索引即可；内容和原来「第一个同名项」的规则一致。
+    // Each chunk has 24x64 quart cells; a linear scan of the registry would do
+    // tens of thousands of string comparisons. The registry is static, so build
+    // the name index once; it keeps the original "first matching entry" rule.
+    use std::sync::OnceLock;
+    static IDS: OnceLock<HashMap<&'static str, u32>> = OnceLock::new();
+    let ids = IDS.get_or_init(|| {
+        mc_bamboo_data::registries::biome::NAMES
+            .iter()
+            .enumerate()
+            .map(|(index, &name)| (name, index as u32))
+            .collect()
+    });
+    ids.get(name)
+        .copied()
         .ok_or_else(|| format!("unknown biome {name}"))
 }
 

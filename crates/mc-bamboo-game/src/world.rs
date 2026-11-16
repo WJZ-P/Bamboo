@@ -21,7 +21,9 @@ use mc_bamboo_storage::{
     player_data::PlayerData,
     world_dir::{encode_player_data, player_uuid_string},
 };
-use mc_bamboo_world::director::{DirectorConfig, PipelineKind, TicketOp};
+use mc_bamboo_world::director::{
+    DemandSnapshot, DirectorConfig, PipelineKind, PlayerDemand, TicketOp,
+};
 
 use crate::director_host::{DirectorHost, MailBudget};
 use tracing::{debug, error, info, warn};
@@ -38,7 +40,7 @@ use crate::{
     pacing::{Pacer, WallTiming},
     player::shows_hat,
     player_save::{game_mode_from_id, restore_inventory, runtime_player_data},
-    profiler::{Metric, Phase},
+    profiler::{ChunkPhase, Metric, Phase},
     region::{JoinSettings, Region},
     save_session::{SaveCommand, SaveSession},
     secure_chat::{self, ServiceProfileKeys},
@@ -111,6 +113,13 @@ pub struct WorldConfig {
     /// Official `server.properties` `broadcast-console-to-ops`, for console-feedback
     /// broadcasts to ops.
     pub broadcast_console_to_ops: bool,
+    /// 压测场景接线，只给 `mc-bamboo-loadtest serve` 用，默认 `None`。
+    /// `None` 时每刻只多一次 `Option` 判断，游戏行为完全不变。
+    ///
+    /// Load-test scenario hooks, used only by `mc-bamboo-loadtest serve`.
+    /// `None` keeps the world loop unchanged apart from one `Option` check.
+    #[doc(hidden)]
+    pub bench: Option<crate::bench::BenchHooks>,
 }
 
 impl Default for WorldConfig {
@@ -128,6 +137,7 @@ impl Default for WorldConfig {
             world_dir: None,
             world_gen: crate::world_options::WorldGenConfig::default(),
             broadcast_console_to_ops: true,
+            bench: None,
         }
     }
 }
@@ -148,6 +158,10 @@ pub struct World {
     host: DirectorHost,
     /// 上一刻每名玩家所在的区块，用来只在跨区块时发 `PlayerMoved`。
     ticket_centers: std::collections::BTreeMap<PlayerId, ChunkPos>,
+    /// 每名玩家上一次跨区块的方向（只取符号）。需求快照里方向未知时退化为纯距离。
+    player_directions: std::collections::BTreeMap<PlayerId, (i32, i32)>,
+    /// 上次喂给 Director 的需求快照，位置或方向变了才重算。
+    player_demand: Option<DemandSnapshot>,
     /// Director 的逻辑刻数，每次 `tick_ticket_timeouts` 加一。
     director_tick: u64,
     /// 存档会话。`None` 表示这一局不存档。
@@ -157,6 +171,9 @@ pub struct World {
     /// 等着某道 IO 栅栏回执再发成功消息的 `save-all flush`：`(栅栏序号, 玩家)`。
     /// `save-all flush` success messages waiting on an IO barrier: `(seq, player)`.
     pending_save_success: Vec<(u64, PlayerId)>,
+    /// 压测回调的「场景搭好了没有」和回调本身；默认配置下不被读取。
+    bench_hooks: Option<crate::bench::BenchHooks>,
+    bench_ready: bool,
 }
 
 impl World {
@@ -305,10 +322,14 @@ impl World {
                 )
             },
             ticket_centers: std::collections::BTreeMap::new(),
+            player_directions: std::collections::BTreeMap::new(),
+            player_demand: None,
             director_tick: 0,
             save,
             startup_error,
             pending_save_success: Vec::new(),
+            bench_hooks: config.bench,
+            bench_ready: false,
         };
         world
             .host
@@ -393,7 +414,7 @@ impl World {
 
     /// 一批票的操作。已加载模式交给 Director（会派加载/卸载任务），
     /// 无限超平坦模式只记票、不派任务。
-    fn apply_ticket_ops(&mut self, ops: impl IntoIterator<Item = TicketOp>) {
+    pub(crate) fn apply_ticket_ops(&mut self, ops: impl IntoIterator<Item = TicketOp>) {
         let ops: Vec<TicketOp> = ops.into_iter().collect();
         if ops.is_empty() {
             return;
@@ -413,12 +434,19 @@ impl World {
     /// 每刻在玩家跟踪阶段之前调用：只在玩家跨区块时发 `PlayerMoved`。
     fn sync_player_tickets(&mut self) {
         let mut moves = Vec::new();
+        let mut changed = false;
         for (&id, player) in &self.region.players {
             let at = player.chunk_pos();
             if self.ticket_centers.get(&id) == Some(&at) {
                 continue;
             }
-            self.ticket_centers.insert(id, at);
+            if let Some(previous) = self.ticket_centers.insert(id, at) {
+                let direction = ((at.x - previous.x).signum(), (at.z - previous.z).signum());
+                if direction != (0, 0) {
+                    self.player_directions.insert(id, direction);
+                }
+            }
+            changed = true;
             moves.push(TicketOp::PlayerMoved {
                 id: u64::from(id.0 as u32),
                 to: Some(at),
@@ -432,6 +460,8 @@ impl World {
         }
         for id in left {
             self.ticket_centers.remove(&id);
+            self.player_directions.remove(&id);
+            changed = true;
             moves.push(TicketOp::PlayerMoved {
                 id: u64::from(id.0 as u32),
                 to: None,
@@ -440,6 +470,29 @@ impl World {
         if !moves.is_empty() {
             self.apply_ticket_ops(moves);
         }
+        if changed {
+            self.publish_player_demand();
+        }
+    }
+
+    /// 把「每名玩家在哪个区块、朝哪边走」喂给 Director 和宿主。
+    /// 只在跨格或有人进出时调，位置没变时不重排任何队列。
+    fn publish_player_demand(&mut self) {
+        let players: Vec<PlayerDemand> = self
+            .ticket_centers
+            .iter()
+            .map(|(&id, &center)| PlayerDemand {
+                id: u64::from(id.0 as u32),
+                center,
+                direction: self.player_directions.get(&id).copied().unwrap_or((0, 0)),
+            })
+            .collect();
+        let demand = DemandSnapshot::new(players);
+        if self.player_demand.as_ref() == Some(&demand) {
+            return;
+        }
+        self.player_demand = Some(demand.clone());
+        self.host.set_player_demand(demand);
     }
 
     /// 超时票每刻递减。`is_busy` 现在恒为假（区块都隐式存在），
@@ -518,6 +571,27 @@ impl World {
         );
     }
 
+    /// 每刻一次的压测回调。`None` 时只做一次 `Option` 判断。
+    fn run_bench_hooks(&mut self) {
+        let Some(hooks) = self.bench_hooks else {
+            return;
+        };
+        let ready = self.bench_ready;
+        let finished = {
+            let mut bench = crate::bench::BenchWorld::new(self);
+            if ready {
+                (hooks.tick)(&mut bench);
+                false
+            } else {
+                (hooks.setup)(&mut bench)
+            }
+        };
+        if finished {
+            self.bench_ready = true;
+            tracing::info!("bench scenario ready");
+        }
+    }
+
     /// 拆成 `tick` 和这一段只是为了保证提前返回时也能收尾；顺序仍然是原来的顺序。
     fn tick_phases(&mut self) -> ControlFlow<()> {
         self.host.begin_tick();
@@ -548,6 +622,9 @@ impl World {
             return self.shut_down();
         }
         self.process_inbox()?;
+        // 压测输入跑在收包阶段，等价于一名管理员在世界线程上翻拉杆 / 补物品；
+        // 它的耗时记进 `inbox`，不进后面三个方块侧阶段。默认配置下这里是空操作。
+        self.run_bench_hooks();
         self.consume_save_commands();
         self.sync_player_tickets();
         self.region.profiler.lap(Phase::Inbox);
@@ -586,17 +663,29 @@ impl World {
         // Vanilla `ServerLevel.tick` order: block and fluid ticks, random ticks inside
         // `chunkSource.tick`, block events, entities, then block entities. Falling blocks and
         // primed TNT spawned by block or random ticks move in the same game tick.
+        self.region
+            .profiler
+            .begin_chunk_phase(ChunkPhase::ScheduledTicks);
         interaction::run_block_ticks(&mut self.region, self.global.time());
+        self.region.profiler.end_chunk_phase();
         self.region.profiler.lap(Phase::ScheduledTicks);
         interaction::run_random_ticks(&mut self.region);
         self.region.profiler.lap(Phase::RandomTicks);
+        self.region
+            .profiler
+            .begin_chunk_phase(ChunkPhase::BlockEvents);
         interaction::run_block_events(&mut self.region);
+        self.region.profiler.end_chunk_phase();
         self.region.profiler.lap(Phase::BlockEvents);
         interaction::run_entity_ticks(self.entity_threads, &mut self.region);
         if self.entity_threads == 0 {
             self.region.profiler.lap(Phase::Entities);
         }
+        self.region
+            .profiler
+            .begin_chunk_phase(ChunkPhase::BlockEntities);
         interaction::run_block_entity_ticks(&mut self.region);
+        self.region.profiler.end_chunk_phase();
         self.region.profiler.lap(Phase::BlockEntities);
         // 玩家自己每 tick 的挖掘进度。官方在实体 tick 里跑 `ServerPlayerGameMode.tick`，
         // 这里跟着玩家 tick 放在随机刻之后。

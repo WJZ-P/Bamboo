@@ -27,6 +27,8 @@
 //! | `pacing` | 用 `thread::sleep` 睡到下一刻 |
 
 pub mod admin;
+#[doc(hidden)]
+pub mod bench;
 mod block_drops;
 mod block_items;
 mod book;
@@ -87,6 +89,7 @@ mod worldgen_light;
 mod worldgen_spawn;
 pub mod worldgen_structures;
 
+pub use bench::{BenchContainer, BenchHooks, BenchWorld};
 pub use command::test_commands;
 pub use director_host::MailBudget;
 pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};

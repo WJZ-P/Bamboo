@@ -17,7 +17,11 @@
 //! The world thread keeps each chunk's half-built column as an immutable
 //! `Arc<GeneratedChunk>` and merges deltas copy-on-write via `Arc::make_mut`.
 
-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_nbt::Tag;
@@ -52,9 +56,10 @@ pub(crate) struct GenerateOutput {
     /// 中心推进到这一阶段后的盒子。
     pub(crate) column: Box<RegionColumn>,
     /// `terrain` 阶段的 CARVERS 纯数据，供世界线程的邻居快照缓存用。
+    /// 与全进程地形缓存共用同一个 `Arc`，回执搬回世界线程时不深拷贝。
     /// Clean CARVERS data from the `terrain` stage, for the world-thread
-    /// neighbor snapshot cache.
-    pub(crate) terrain: Option<GeneratedChunk>,
+    /// neighbor snapshot cache; shares the global cache's `Arc` without a copy.
+    pub(crate) terrain: Option<Arc<GeneratedChunk>>,
     /// 给邻居（和中心自身）的写增量，按目标区块坐标分组。
     /// Feature writes grouped by target chunk position.
     pub(crate) deltas: Vec<(ChunkPos, Vec<BlockDelta>)>,
@@ -94,19 +99,21 @@ pub(crate) type SnapshotView<'a> = &'a [(ChunkPos, Option<Arc<GeneratedChunk>>)]
 
 /// 3×3 视图按 `(dz, dx)` 从 -1 到 1 排列，中心在 [`CENTER`]。
 /// 用区块坐标算下标，和 `Task::Generate.neighbors` 的列出顺序无关。
+/// 快照和缓存命中都是 `Arc`，只读视图不再复制 400 KiB 的方块数组。
 ///
 /// Build the 9-chunk view in `(dz, dx)` order, center at `CENTER`, indexing by
-/// chunk position so the list order does not matter.
+/// chunk position so the list order does not matter. Snapshots and cache hits
+/// are `Arc`s, so the read-only view copies no ~400 KiB block arrays.
 pub(crate) fn resolve_view(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
     center: Option<Arc<GeneratedChunk>>,
     neighbors: SnapshotView<'_>,
-) -> Result<[GeneratedChunk; 9], String> {
-    let mut slots: [Option<GeneratedChunk>; 9] = std::array::from_fn(|_| None);
+) -> Result<[Arc<GeneratedChunk>; 9], String> {
+    let mut slots: [Option<Arc<GeneratedChunk>>; 9] = std::array::from_fn(|_| None);
     slots[CENTER] = Some(match center {
-        Some(arc) => (*arc).clone(),
+        Some(arc) => arc,
         None => cached_generate_chunk(config, cx, cz)?,
     });
     for (pos, snapshot) in neighbors {
@@ -117,7 +124,7 @@ pub(crate) fn resolve_view(
         }
         let index = ((dz + 1) * 3 + (dx + 1)) as usize;
         let chunk = match snapshot {
-            Some(arc) => (**arc).clone(),
+            Some(arc) => Arc::clone(arc),
             None => cached_generate_chunk(config, pos.x, pos.z)?,
         };
         slots[index] = Some(chunk);
@@ -136,6 +143,7 @@ pub(crate) fn resolve_view(
 }
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数：只依赖配置、坐标和 3×3 视图。
+/// 视图是只读的 `Arc`；函数内部为了给地物一份可写方块层才复制一次。
 ///
 /// `ChunkGenerator.applyBiomeDecoration` as a pure function of config, position
 /// and the 3×3 view.
@@ -143,7 +151,7 @@ pub(crate) fn run_features(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
-    view: [GeneratedChunk; 9],
+    view: [Arc<GeneratedChunk>; 9],
 ) -> Result<FeatureResult, String> {
     run_features_filtered(
         config,
@@ -157,6 +165,29 @@ pub(crate) fn run_features(
     .map(|(result, _)| result)
 }
 
+/// `worldgen.json` 的 `processor_list` 只随数据版本变，和种子、世界类型、区块坐标
+/// 都无关。解析整份 JSON（`Worldgen::load`）实测约 24 ms，若每个区块的 `features`
+/// 调用都重来一次，它会盖过地物本身。进程里缓存一份解析结果，之后只克隆这张表
+/// （每条计算线程各持一份，结构放置只读它）。
+///
+/// `processor_list` depends only on the bundled data version, not on the seed,
+/// world type or chunk position. Parsing the whole JSON costs ~24 ms, which would
+/// dwarf the features work if repeated per chunk; cache it process-wide.
+fn processor_lists() -> Result<&'static ProcessorLists, String> {
+    static LISTS: OnceLock<Result<ProcessorLists, String>> = OnceLock::new();
+    LISTS
+        .get_or_init(|| {
+            let worldgen = Worldgen::load()?;
+            let raw = worldgen
+                .raw()
+                .get("processor_list")
+                .ok_or("missing processor_list")?;
+            ProcessorLists::parse(raw)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 /// [`run_features`] 加一个地物白名单；游戏里恒为 `None`，只有对拍工具会传。
 ///
 /// [`run_features`] with a feature allow list; the game always passes `None`,
@@ -165,7 +196,7 @@ fn run_features_filtered(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
-    view: [GeneratedChunk; 9],
+    view: [Arc<GeneratedChunk>; 9],
     allowed_kinds: Option<&[String]>,
     steps_mask: i32,
     skip_structure: Option<&str>,
@@ -270,13 +301,7 @@ fn run_features_filtered(
             starts: group.as_slice(),
         })
         .collect();
-    let processor_lists = ProcessorLists::parse(
-        Worldgen::load()?
-            .raw()
-            .get("processor_list")
-            .ok_or("missing processor_list")?,
-    )?;
-    let mut placement = StructurePlacement::new(groups, processor_lists, config.seed);
+    let mut placement = StructurePlacement::new(groups, processor_lists()?.clone(), config.seed);
     // 对拍改坏确认：跳过某个结构类型的结构件放置（`None` 是正常路径）。
     // Oracle break confirmation: drop one structure type's pieces.
     if let Some(skip) = skip_structure {
@@ -411,10 +436,12 @@ pub fn game_pipeline(
         }
     }
     // 3. `FEATURES`：先结构后地物，中心这一遍要拿到写增量统计。
-    let view: [GeneratedChunk; 9] = std::array::from_fn(|index| GeneratedChunk {
-        blocks: blocks[index].clone(),
-        biomes: biomes[index].clone(),
-        heightmaps: Default::default(),
+    let view: [Arc<GeneratedChunk>; 9] = std::array::from_fn(|index| {
+        Arc::new(GeneratedChunk {
+            blocks: blocks[index].clone(),
+            biomes: biomes[index].clone(),
+            heightmaps: Default::default(),
+        })
     });
     let (result, stats) = run_features_filtered(
         config,
@@ -515,10 +542,14 @@ thread_local! {
 }
 const FEATURE_CACHE_CAP: usize = 256;
 
-/// 以 `(cx, cz)` 为中心造 3×3 的 CARVERS 视图（纯函数，带线程本地缓存）。
-/// Build a 3×3 CARVERS view centered on `(cx, cz)` (pure, thread-local cached).
-fn build_view(config: &WorldGenConfig, cx: i32, cz: i32) -> Result<[GeneratedChunk; 9], String> {
-    let mut view: [Option<GeneratedChunk>; 9] = std::array::from_fn(|_| None);
+/// 以 `(cx, cz)` 为中心造 3×3 的 CARVERS 视图（纯函数，带全进程共享缓存）。
+/// Build a 3×3 CARVERS view centered on `(cx, cz)` (pure, globally cached).
+fn build_view(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+) -> Result<[Arc<GeneratedChunk>; 9], String> {
+    let mut view: [Option<Arc<GeneratedChunk>>; 9] = std::array::from_fn(|_| None);
     for dz in -1..=1 {
         for dx in -1..=1 {
             let index = ((dz + 1) * 3 + (dx + 1)) as usize;
@@ -547,15 +578,18 @@ fn cached_generate_chunk_with_structures(
     config: &WorldGenConfig,
     x: i32,
     z: i32,
-) -> Result<GeneratedChunk, String> {
+) -> Result<Arc<GeneratedChunk>, String> {
     if !config.generate_structures {
         return cached_generate_chunk(config, x, z);
     }
     let beardifier = crate::worldgen_structures::beardifier_for(config, x, z)?;
     match beardifier {
-        Some(beardifier) => {
-            crate::worldgen::generate_chunk_with_beardifier(config, x, z, Some(&beardifier))
-        }
+        Some(beardifier) => Ok(Arc::new(crate::worldgen::generate_chunk_with_beardifier(
+            config,
+            x,
+            z,
+            Some(&beardifier),
+        )?)),
         None => cached_generate_chunk(config, x, z),
     }
 }
@@ -682,8 +716,8 @@ pub(crate) fn generate_features_stage(
     center: Option<Arc<GeneratedChunk>>,
     neighbors: SnapshotView<'_>,
 ) -> Result<GenerateOutput, String> {
-    let view = resolve_view(config, cx, cz, center.clone(), neighbors)?;
-    let terrain = view[CENTER].clone();
+    let view = resolve_view(config, cx, cz, center, neighbors)?;
+    let terrain = Arc::clone(&view[CENTER]);
     let result = run_features(config, cx, cz, view)?;
 
     // 给 8 个邻居的写增量（本中心的地物溢出），按目标坐标分组。
@@ -812,12 +846,41 @@ mod tests {
         }
     }
 
+    /// 缓存的 processor_list 与每次重新解析逐项相同，且解析只发生一次。
+    /// The cached processor list matches a fresh parse item for item.
+    #[test]
+    fn cached_processor_lists_match_a_fresh_parse() {
+        let fresh = ProcessorLists::parse(
+            Worldgen::load()
+                .unwrap()
+                .raw()
+                .get("processor_list")
+                .unwrap(),
+        )
+        .unwrap();
+        let cached = processor_lists().unwrap();
+        assert_eq!(
+            cached.names().collect::<Vec<_>>(),
+            fresh.names().collect::<Vec<_>>()
+        );
+        for name in fresh.names() {
+            assert_eq!(
+                format!("{:?}", cached.get(name)),
+                format!("{:?}", fresh.get(name)),
+                "{name}"
+            );
+        }
+        // 两次调用拿到同一个进程级实例。
+        // Two calls return the same process-wide instance.
+        assert!(std::ptr::eq(cached, processor_lists().unwrap()));
+    }
+
     /// 同一输入跑两遍 features，输出逐字节一致（随机源只从种子和坐标派生）。
     /// Two runs of `features` on the same input are byte-identical.
     #[test]
     fn features_are_deterministic() {
         let config = normal(2026);
-        let view: [GeneratedChunk; 9] = std::array::from_fn(|i| {
+        let view: [Arc<GeneratedChunk>; 9] = std::array::from_fn(|i| {
             let dz = i as i32 / 3 - 1;
             let dx = i as i32 % 3 - 1;
             cached_generate_chunk(&config, dx, dz).unwrap()
@@ -869,15 +932,19 @@ mod tests {
         );
         // 若把真实地形喂给邻居重算、EMPTY 地形喂给中心，两侧的结果必然不同：
         // 这就是必须由依赖表固定下来的读写竞争。
-        let view_empty = std::array::from_fn(|_| GeneratedChunk {
-            blocks: empty.blocks.clone(),
-            biomes: empty.biomes.clone(),
-            heightmaps: Default::default(),
+        let view_empty = std::array::from_fn(|_| {
+            Arc::new(GeneratedChunk {
+                blocks: empty.blocks.clone(),
+                biomes: empty.biomes.clone(),
+                heightmaps: Default::default(),
+            })
         });
-        let view_real = std::array::from_fn(|_| GeneratedChunk {
-            blocks: real.blocks.clone(),
-            biomes: real.biomes.clone(),
-            heightmaps: Default::default(),
+        let view_real = std::array::from_fn(|_| {
+            Arc::new(GeneratedChunk {
+                blocks: real.blocks.clone(),
+                biomes: real.biomes.clone(),
+                heightmaps: Default::default(),
+            })
         });
         let a = run_features(&config, cx, cz, view_empty).unwrap();
         let b = run_features(&config, cx, cz, view_real).unwrap();
@@ -892,7 +959,7 @@ mod tests {
     #[test]
     fn apply_deltas_writes_the_expected_cells() {
         let config = normal(1);
-        let mut chunk = cached_generate_chunk(&config, 0, 0).unwrap();
+        let mut chunk = (*cached_generate_chunk(&config, 0, 0).unwrap()).clone();
         apply_deltas(&mut chunk, &[(3, 40, 5, 12345), (0, MIN_Y, 0, 999)]);
         assert_eq!(chunk.blocks[(40 - MIN_Y) as usize][3 * 16 + 5], 12345);
         assert_eq!(chunk.blocks[0][0], 999);
@@ -906,7 +973,7 @@ mod tests {
     fn features_stage_places_blocks() {
         let config = normal(2026);
         let view = build_view(&config, 0, 0).unwrap();
-        let terrain = view[CENTER].clone();
+        let terrain = Arc::clone(&view[CENTER]);
         let result = run_features(&config, 0, 0, view).unwrap();
         let writes = center_writes(0, 0, &terrain, &result);
         assert!(

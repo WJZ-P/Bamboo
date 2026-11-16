@@ -58,7 +58,7 @@ fn resolve_shared_view(
     let mut slots: [Option<Arc<GeneratedChunk>>; 9] = std::array::from_fn(|_| None);
     slots[4] = Some(match center {
         Some(arc) => arc,
-        None => Arc::new(cached_generate_chunk(config, cx, cz)?),
+        None => cached_generate_chunk(config, cx, cz)?,
     });
     for (pos, snapshot) in neighbors {
         let dx = pos.x - cx;
@@ -69,14 +69,14 @@ fn resolve_shared_view(
         let index = ((dz + 1) * 3 + (dx + 1)) as usize;
         slots[index] = Some(match snapshot {
             Some(arc) => Arc::clone(arc),
-            None => Arc::new(cached_generate_chunk(config, pos.x, pos.z)?),
+            None => cached_generate_chunk(config, pos.x, pos.z)?,
         });
     }
     for dz in -1..=1 {
         for dx in -1..=1 {
             let index = ((dz + 1) * 3 + (dx + 1)) as usize;
             if slots[index].is_none() {
-                slots[index] = Some(Arc::new(cached_generate_chunk(config, cx + dx, cz + dz)?));
+                slots[index] = Some(cached_generate_chunk(config, cx + dx, cz + dz)?);
             }
         }
     }
