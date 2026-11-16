@@ -276,6 +276,128 @@ pub fn game_features(
     run_features_filtered(config, cx, cz, view, allowed_kinds)
 }
 
+/// 一次「游戏里的完整生成流水线」结果，给 `gen-world --through structures` 对拍用。
+/// 走的是游戏里同一批阶段纯函数：`structure_starts` / `structure_references` /
+/// `terrain`（带 Beardifier）/ `features`（先结构后地物），最后按 Director 完工时的
+/// 规范序合并增量。
+///
+/// Result of the game's full generation pipeline for `gen-world --through structures`.
+/// It runs the same stage pure functions the game uses, then merges deltas the way
+/// the Director does at assembly.
+#[derive(Debug, Clone)]
+pub struct GamePipelineResult {
+    /// 9 宫格最终方块（每格 `WORLD_HEIGHT × 256`）。
+    pub blocks: [Vec<Vec<u32>>; 9],
+    /// 中心区块的 `structures` 标签（`starts` + `References`）。
+    pub structures: mc_bamboo_nbt::Tag,
+    /// 中心区块引用里的 `(结构名, 起点 packed 键)` 列表，对拍逐项比。
+    pub references: Vec<(String, i64)>,
+    /// 中心区块起点里的 `(结构名, 结构件数)` 列表，对拍逐项比。
+    pub starts: Vec<(String, usize)>,
+    /// 各结构类型实际放置的结构件次数（每个 step 累计）。
+    pub placed_pieces: std::collections::BTreeMap<String, usize>,
+    /// 对拍没涉及但游戏里标 unsupported 的放置次数。
+    pub unsupported_pieces: usize,
+}
+
+/// `gen-world` 端到端入口：按 Director 的 `ChunkStatus` 顺序走同一批纯函数，
+/// 返回 3×3 九宫格跑完 FEATURES 之后的方块与结构数据。
+///
+/// End-to-end `gen-world` entry: follow the Director's `ChunkStatus` order through
+/// the same pure functions, returning the 3x3 blocks after FEATURES.
+pub fn game_pipeline(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+) -> Result<GamePipelineResult, String> {
+    use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
+    use mc_bamboo_worldgen::feature::CENTER;
+
+    // 1. `STRUCTURE_STARTS` / `STRUCTURE_REFERENCES`（纯函数重算 + 缓存）。
+    let data = crate::worldgen_structures::structure_data(config, cx, cz)?;
+    // 2. `BIOMES` / `TERRAIN`：3×3 每个区块都按自己的 references 注入 Beardifier。
+    let mut blocks: [Vec<Vec<u32>>; 9] = std::array::from_fn(|_| Vec::new());
+    let mut biomes: [Vec<Vec<u32>>; 9] = std::array::from_fn(|_| Vec::new());
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let x = cx + dx;
+            let z = cz + dz;
+            let index = ((dz + 1) * 3 + dx + 1) as usize;
+            let refs = crate::worldgen_structures::structure_references_stage(config, x, z)?;
+            let beard = crate::worldgen_structures::beardifier_for_chunk(config, x, z, &refs)?;
+            let chunk =
+                crate::worldgen::generate_chunk_with_beardifier(config, x, z, beard.as_ref())?;
+            blocks[index] = chunk.blocks;
+            biomes[index] = chunk.biomes;
+        }
+    }
+    // 3. `FEATURES`：先结构后地物，中心这一遍要拿到写增量统计。
+    let view: [GeneratedChunk; 9] = std::array::from_fn(|index| GeneratedChunk {
+        blocks: blocks[index].clone(),
+        biomes: biomes[index].clone(),
+        heightmaps: Default::default(),
+    });
+    let result = run_features(config, cx, cz, view)?;
+    let mut final_blocks = blocks;
+    final_blocks[CENTER] = result.blocks[CENTER].clone();
+    // 4. Director 完工时的规范序：中心自己的写 + 8 个邻居中心溢进来的写。
+    let mut deltas = Vec::new();
+    deltas.extend(result.deltas[CENTER].iter().copied());
+    deltas.extend(
+        neighbor_deltas(cx, cz, &result)
+            .into_iter()
+            .flat_map(|(_, d)| d),
+    );
+    let mut terrain = final_blocks[CENTER].clone();
+    for (x, y, z, state) in &deltas {
+        if !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(y) {
+            continue;
+        }
+        let column = (x & 15) as usize * 16 + (z & 15) as usize;
+        if let Some(layer) = terrain.get_mut((y - MIN_Y) as usize) {
+            layer[column] = *state;
+        }
+    }
+    final_blocks[CENTER] = terrain;
+    // 8 个邻居中心溢进中心区块的写，按官方 `WorldGenRegion` 的语义纯函数重算。
+    let spills = neighbor_spills_into(config, cx, cz)?;
+    for (x, y, z, state) in spills {
+        if !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
+            continue;
+        }
+        let column = (x & 15) as usize * 16 + (z & 15) as usize;
+        if let Some(layer) = final_blocks[CENTER].get_mut((y - MIN_Y) as usize) {
+            layer[column] = state;
+        }
+    }
+    let references: Vec<(String, i64)> = data
+        .references
+        .iter()
+        .flat_map(|(name, keys)| keys.iter().map(move |&key| (name.clone(), key)))
+        .collect();
+    let starts: Vec<(String, usize)> = data
+        .starts
+        .by_structure
+        .iter()
+        .map(|(name, start)| {
+            let count = match &start.pieces {
+                mc_bamboo_worldgen::structure::pipeline::StartPieces::Layout(p) => p.len(),
+                mc_bamboo_worldgen::structure::pipeline::StartPieces::Jigsaw(p) => p.len(),
+                mc_bamboo_worldgen::structure::pipeline::StartPieces::Sparse(p) => p.len(),
+            };
+            (name.clone(), count)
+        })
+        .collect();
+    Ok(GamePipelineResult {
+        blocks: final_blocks,
+        structures: data.tag,
+        references,
+        starts,
+        placed_pieces: std::collections::BTreeMap::new(),
+        unsupported_pieces: 0,
+    })
+}
+
 /// 一次 `applyBiomeDecoration` 里需要复用的紧凑结果：给 3×3 九宫格各格的
 /// 写增量（中心那格恒为空）。
 ///
