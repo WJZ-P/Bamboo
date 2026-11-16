@@ -1498,9 +1498,9 @@ impl<C: ChunkBundle> Director<C> {
         }
         order.retain(|(id, _)| self.pending.contains_key(id));
         order.sort_by_key(|&(id, key)| (key, id));
-        // 本轮没排到的任务下次一定要再试，不能因为 `last_seen_task` 已经
-        // 推到末尾就永远漏掉。
-        self.last_seen_task = 0;
+        // 本轮没排到的任务仍留在 `submittable` 里，下一次 `drive` 会再试；
+        // `last_seen_task` 只用来找「这次新排的任务」，不能丢掉它们。
+        self.last_seen_task = self.next_task.wrapping_sub(1);
         let mut blocked = std::mem::take(&mut self.submittable);
         blocked.clear();
         for (id, _) in order.drain(..) {
