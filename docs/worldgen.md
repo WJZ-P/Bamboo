@@ -688,11 +688,10 @@ bit-identical; `wg-perf --light-compare` measured 35.1 → 11.3 ms (median, 96 c
   逐格对拍）：邻居视图的接口已经就位，计算本身是下一轮。
 * 下界和末地（无 `aquifers` 的路径、五群系末地源、下界老 fbm）。
 * `BlendingData` / `Blender` 的非空路径（老存档升级、旧区块混合）。
-* `Beardifier` 的非空密度路径**已移植并对拍，也已接进游戏**（见
-  `docs/worldgen-structures-plan.md` 第 5、12 节）：`structure_starts` /
-  `structure_references` 两阶段的纯函数产出起点和引用，terrain 阶段从引用反查
-  结构件构造 `Beardifier.forStructuresInChunk` 注进 `terrain_with_region`；没有结构时
-  仍走 `EMPTY`。`first_occupied_height` 等基线高度查询固定 EMPTY。
+* `Beardifier` 的非空密度路径**已移植并对拍**（见 `docs/worldgen-structures-plan.md`
+  第 5、12 节）：起点/引用纯函数、`game_pipeline` 的真实 `Beardifier` 注入都已落地。
+  **Director 的 `terrain` 阶段仍走 `EMPTY`**：计算池里反查半径 8 起点会改变任务耗时，
+  暴露地物增量规范序在多计算线程下的竞态；等增量合并顺序确定后再打开。
 * `possibleBiomes` / `carverBiome` / `region.getBiomeManager()` 已**在游戏侧落地**（见
   「真实服务端路径与简化路径」）：`generate_chunk` 调 `Generator::biome_region` 造 3×3
   群系视图、`terrain_with_region` 读 quart 格并传 3×3 `possibleBiomes` 并集，

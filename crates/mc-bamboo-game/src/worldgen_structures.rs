@@ -27,6 +27,7 @@ use mc_bamboo_worldgen::{
     beardifier::{self, Beardifier, PieceInput, PieceKind, PoolProjection, StructureStartInput},
     biome::MultiNoiseBiomeSource,
     chunk,
+    climate::{ParameterList, ParameterPoint},
     settings::SeededRouter,
     structure::{
         References, SaveStart,
@@ -64,10 +65,17 @@ type StartsCache = HashMap<(i64, Option<&'static str>, i32, i32), Arc<WorldStruc
 struct StructureThread {
     state: WorldStructureState,
     router: SeededRouter,
-    preset: &'static MultiNoiseBiomeSource,
+    /// 每线程一份：`ParameterList` 的 R 树 `lastResult` 是 `Cell`，不能跨线程共享。
+    /// Per-thread: the parameter list's R-tree `lastResult` is a `Cell`.
+    preset: MultiNoiseBiomeSource,
     settings: &'static mc_bamboo_worldgen::settings::Settings,
     generator: chunk::Generator<'static>,
     starts: StartsCache,
+    /// 每个中心区块的引用结果，纯函数缓存：`features` / `terrain` / 对拍入口
+    /// 会反复问同一个中心，重算 17×17 起点很贵。
+    /// Per-centre references cache: features/terrain/oracles repeatedly ask the
+    /// same centre and recomputing the 17x17 starts is expensive.
+    references: HashMap<(i32, i32), References>,
 }
 
 thread_local! {
@@ -119,6 +127,7 @@ pub fn clear_structure_cache() {
     STRUCTURE_THREADS.with(|cache| {
         for thread in cache.borrow_mut().values_mut() {
             thread.starts.clear();
+            thread.references.clear();
         }
     });
     DISK_STRUCTURES.with(|map| map.borrow_mut().clear());
@@ -150,14 +159,20 @@ fn with_thread<T>(
             let settings = worldgen
                 .settings(settings_id)
                 .ok_or("missing noise settings")?;
-            let preset = worldgen
+            let shared_preset = worldgen
                 .preset("minecraft:overworld")
                 .ok_or("missing overworld preset")?;
+            let entries: Vec<(ParameterPoint, String)> = shared_preset
+                .parameters()
+                .entries()
+                .map(|(point, name)| (*point, name.clone()))
+                .collect();
+            let preset = MultiNoiseBiomeSource::new(ParameterList::new(entries));
             let mut router = SeededRouter::new(settings, config.seed);
             let state = {
                 let mut resolver = mc_bamboo_worldgen::structure::rings::BiomeResolver {
                     router: &mut router,
-                    source: preset,
+                    source: &preset,
                 };
                 WorldStructureState::new(worldgen, config.seed, &mut resolver)?
             };
@@ -174,6 +189,7 @@ fn with_thread<T>(
                 settings,
                 generator,
                 starts: HashMap::new(),
+                references: HashMap::new(),
             });
         }
         f(cache.get_mut(&key).expect("structure thread just inserted"))
@@ -185,6 +201,18 @@ fn with_thread<T>(
 /// All `STRUCTURE` registry names in registry order (`Registry.stream()`).
 pub fn structure_names(config: &WorldGenConfig) -> Vec<String> {
     with_thread(config, |thread| Ok(thread.state.structures.names())).unwrap_or_default()
+}
+
+/// 清掉游戏地形生成器（与结构阶段共用同一个按线程泄漏的 `Worldgen`）的群系
+/// R 树状态，让结构阶段的单点查询不影响随后地形的成批 quart 群系判定。
+///
+/// Clear the game terrain generator's biome R-tree state so structure-stage
+/// single-point queries cannot affect the following batch quart biome lookups.
+pub fn reset_generator_biome_state(config: &WorldGenConfig) -> Result<(), String> {
+    crate::worldgen::with_generator(config, |generator| {
+        generator.reset_biome_state();
+        Ok(())
+    })
 }
 
 /// 结构注册名 → `structure` 注册表里的 `type` 字段。
@@ -366,6 +394,14 @@ pub fn structure_starts(
     let key = (config.seed, config.level_type.settings_id(), x, z);
     let disk = DISK_STRUCTURES.with(|map| map.borrow().get(&key).cloned());
     with_thread(config, |thread| {
+        // 每次调用都把本线程的 R 树 / 采样器状态清到同一起点：计算池里各区块的
+        // 到达顺序不确定，缓存命中与否不能改变之后的群系判定（1/4 线程逐字节一致）。
+        // Reset this thread's R-tree / sampler state on every call: chunk arrival
+        // order in the pool varies, and cache hits must not change later biome
+        // decisions (1-vs-4-thread results are byte-identical).
+        thread.preset.reset();
+        thread.router.reset_context();
+        thread.generator.reset_biome_state();
         if let Some(tag) = &disk {
             let starts = starts_from_tag(tag, config, &thread.state)?;
             if !starts.by_structure.is_empty() || !config.generate_structures {
@@ -387,7 +423,7 @@ pub fn structure_starts(
                 &thread.state,
                 &thread.generator,
                 &mut thread.router,
-                thread.preset,
+                &thread.preset,
                 dims,
                 (x, z),
                 &empty,
@@ -398,6 +434,7 @@ pub fn structure_starts(
         let arc = Arc::new(starts);
         if thread.starts.len() >= STARTS_CACHE_CAP {
             thread.starts.clear();
+            thread.references.clear();
         }
         thread.starts.insert(key, Arc::clone(&arc));
         Ok(arc)
@@ -414,6 +451,15 @@ pub fn structure_references_stage(
     x: i32,
     z: i32,
 ) -> Result<References, String> {
+    if let Some(cached) = STRUCTURE_THREADS.with(|cache| {
+        cache
+            .borrow()
+            .get(&(config.seed, config.level_type.settings_id().unwrap_or("")))
+            .and_then(|thread| thread.references.get(&(x, z)))
+            .cloned()
+    }) {
+        return Ok(cached);
+    }
     let mut neighbors = Vec::with_capacity(17 * 17);
     let mut sparse: Vec<StructureStarts> = Vec::with_capacity(17 * 17);
     for dx in -8..=8 {
@@ -429,7 +475,44 @@ pub fn structure_references_stage(
             index += 1;
         }
     }
-    Ok(structure_references(x, z, &neighbors))
+    let result = structure_references(x, z, &neighbors);
+    STRUCTURE_THREADS.with(|cache| {
+        if let Some(thread) = cache
+            .borrow_mut()
+            .get_mut(&(config.seed, config.level_type.settings_id().unwrap_or("")))
+        {
+            thread.references.insert((x, z), result.clone());
+        }
+    });
+    Ok(result)
+}
+
+/// 每区块的 Beardifier 由「种子 + 坐标」唯一决定，全局只算一次。terrain 阶段
+/// 只查这张表，不在计算池里重新跑 289 个邻域起点（那会让 1/4 线程的任务到达
+/// 顺序改变，暴露地物增量的规范序竞态）。
+///
+/// A chunk's Beardifier depends only on seed and position; compute it once
+/// globally. The terrain stage only looks it up, so the compute pool's task
+/// schedule stays independent of structure work.
+pub fn beardifier_for(
+    config: &WorldGenConfig,
+    x: i32,
+    z: i32,
+) -> Result<Option<Beardifier>, String> {
+    use std::sync::{Mutex, OnceLock};
+    type Key = (i64, i32, i32);
+    static CACHE: OnceLock<Mutex<HashMap<Key, Option<Beardifier>>>> = OnceLock::new();
+    let key = (config.seed, x, z);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(value) = cache.lock().ok().and_then(|map| map.get(&key).cloned()) {
+        return Ok(value);
+    }
+    let references = structure_references_stage(config, x, z)?;
+    let value = beardifier_for_chunk(config, x, z, &references)?;
+    if let Ok(mut map) = cache.lock() {
+        map.insert(key, value.clone());
+    }
+    Ok(value)
 }
 
 /// `ChunkStatus.STRUCTURE_REFERENCES` 的完整数据：起点 + 引用 + 存档标签。
@@ -765,6 +848,7 @@ mod tests {
         STRUCTURE_THREADS.with(|cache| {
             for thread in cache.borrow_mut().values_mut() {
                 thread.starts.clear();
+                thread.references.clear();
             }
         });
         let mut reverse = chunks;

@@ -1716,9 +1716,13 @@ structures (Compound)
   `GenerateOutput.structures` 把 `starts` + `References` 标签交给世界线程，
   `Task::Assemble` 装进 `ChunkArchiveMeta.structures`。读盘标签优先恢复起点，
   再生成相邻区块与一次性生成一致（单测钉住）。
-* **terrain**：`generate_terrain_stage` 从中心引用反查起点，构造
-  `Beardifier.forStructuresInChunk` 注进 `terrain_with_region`；无结构仍走
-  `Beardifier.EMPTY`，`first_occupied_height` 等基线路径永远 EMPTY。
+* **terrain**：`game_pipeline` / `generate_chunk_with_beardifier` 已把
+  `Beardifier.forStructuresInChunk` 注进 `terrain_with_region`（`beard` 对拍逐位一致，
+  `structure-pipeline` 提供真实起点）。**Director 的 `terrain` 阶段仍走 EMPTY**：
+  在计算池里反查半径 8 的 289 个起点会改变任务耗时，暴露地物增量按
+  `(x,y,z,state)` 规范序合并时对 1/4 线程调度的竞态（少量重复写的格子结果不同）。
+  等增量合并带上确定性的生成顺序后再打开这一支；起点、引用、`features` 放置和
+  `structures` 存档都不受影响。
 * **features**：`feature/run.rs` 每个 step 的地物之前调
   `structure/place_step.rs`；per-step 局部 index 数的是整张 `STRUCTURE` 注册表，
   结构件 `postProcess` 写 `FeatureWorld`（`PieceLevel` / `ProcessorLevel` 适配只加不删）。

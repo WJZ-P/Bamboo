@@ -122,6 +122,14 @@ pub(crate) fn with_generator<T>(
             entry.insert(generator);
         }
         let generator = cache.get(&key).expect("generator was just inserted");
+        // 每次进入生成纯函数都清掉群系参数表的 R 树 `lastResult`：结构阶段的
+        // 单点群系查询会改写它，不清的话 1/4 线程的区块到达顺序会让 quart
+        // 群系平局落到不同条目，最终方块不同。官方一条线程一个 `RandomState`，
+        // 这里按线程泄漏的 `Worldgen` 需要显式隔离。
+        // Clear the biome parameter list's R-tree `lastResult` on every entry:
+        // structure-stage single-point queries mutate it, and without this reset
+        // chunk arrival order changes batch quart-biome tie-breaks.
+        generator.reset_biome_state();
         f(generator)
     })
 }

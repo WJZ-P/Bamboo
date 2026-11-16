@@ -28,8 +28,8 @@ use crate::{
     world_options::WorldGenConfig,
     worldgen::GeneratedChunk,
     worldgen_features::{
-        GenerateOutput, SnapshotView, generate_features_stage, generate_structure_stage,
-        generate_terrain_stage, passthrough_stage,
+        GenerateOutput, SnapshotView, generate_features_stage, generate_terrain_stage,
+        passthrough_stage,
     },
     worldgen_light::generate_light_stage,
 };
@@ -163,13 +163,15 @@ impl ChunkGenerator for OverworldGenerator {
         // it, so the error branch can still recover it.
         let mut center = center;
         let result = match stage {
-            // `ChunkStatus.STRUCTURE_STARTS` / `STRUCTURE_REFERENCES`：纯函数重算
-            // 半径 8 的邻域起点并登记引用；引用阶段把 `structures` 标签交回。
-            // `STRUCTURE_STARTS` / `STRUCTURE_REFERENCES`: recompute the radius-8
-            // neighborhood and register references; the references stage hands back
-            // the `structures` tag.
+            // `ChunkStatus.STRUCTURE_STARTS` / `STRUCTURE_REFERENCES` 本身只透传：
+            // 起点与引用由后面的 `terrain`（Beardifier）和 `features`（放置、存档）
+            // 阶段按需以纯函数重算，带线程本地缓存。这样 Director 的任务数与到达
+            // 顺序和官方一致，结构结果又完全由种子和坐标决定。
+            // The two structure stages pass through: starts/references are
+            // recomputed purely (thread-local cached) by terrain (Beardifier) and
+            // features (placement + save), keeping the Director's task schedule.
             ChunkStatus::StructureStarts | ChunkStatus::StructureReferences => {
-                generate_structure_stage(&self.config, pos.x, pos.z, center.take())
+                Ok(passthrough_stage(center.take()))
             }
             // `ChunkStatus.TERRAIN`：算 quart 群系 + doFill → buildSurface →
             // generateCarvers 的方块，并把 CARVERS 纯数据作为邻居快照交回。

@@ -822,6 +822,15 @@ impl<'a> Generator<'a> {
         Ok(names)
     }
 
+    /// 清掉群系参数表 R 树的 `lastResult`。结构起点判定里的单点群系查询会改写它，
+    /// 计算池各区块到达顺序不定；地形生成前先清掉才能与调度无关。
+    ///
+    /// Clear the biome parameter list's R-tree `lastResult`: structure-start
+    /// single-point biome queries mutate it, and chunk arrival order varies.
+    pub fn reset_biome_state(&self) {
+        self.biomes.reset();
+    }
+
     /// `ChunkStatus.FEATURES`：`ChunkGenerator.applyBiomeDecoration`。
     ///
     /// 输入是中心加 8 个邻居到 CARVERS 阶段的结果；输出 9 个区块改成 FEATURES

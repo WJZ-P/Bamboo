@@ -37,10 +37,7 @@ use mc_bamboo_worldgen::{
 use crate::{
     region::RegionColumn,
     world_options::WorldGenConfig,
-    worldgen::{
-        GeneratedChunk, build_region_column, cached_generate_chunk,
-        cached_generate_chunk_with_beardifier, with_generator,
-    },
+    worldgen::{GeneratedChunk, build_region_column, cached_generate_chunk, with_generator},
 };
 
 /// 一次 `setBlock` 写增量：世界坐标 `(x, y, z, 状态 ID)`。
@@ -183,6 +180,12 @@ fn run_features_filtered(
             None,
         ));
     }
+    // 结构阶段 / 邻居起点重算改写了共享的群系 R 树 `lastResult`；地物的
+    // `BiomeFilter` 走单点查询，从确定状态起步才与计算池的区块到达顺序无关。
+    // Structure stages / neighbour-start recomputation mutated the shared biome
+    // R-tree `lastResult`; features' BiomeFilter uses single-point lookups, so
+    // start clean to stay independent of compute-pool arrival order.
+    crate::worldgen_structures::reset_generator_biome_state(config)?;
     let blocks: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.blocks.clone());
     let biomes: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.biomes.clone());
     let heights: [Heightmaps; 9] = blocks
@@ -263,6 +266,11 @@ fn run_features_filtered(
             .ok_or("missing processor_list")?,
     )?;
     let placement = StructurePlacement::new(groups, processor_lists, config.seed);
+    // 上面反查起点 / 引用会改写一个群的系 R 树 `lastResult`；`BiomeManager`
+    // 在 features 里按同样顺序查它，进主循环前清到确定状态。
+    // Resolving starts/references above mutates the shared biome R-tree
+    // `lastResult`; clear it before the feature loop reads it.
+    crate::worldgen_structures::reset_generator_biome_state(config)?;
     with_generator(config, |generator| {
         generator.features_with_structures(
             &input,
@@ -585,6 +593,22 @@ pub(crate) fn generate_features_stage(
     // Writes this center's features spill into the 8 neighbors, by target pos.
     let mut deltas = neighbor_deltas(cx, cz, &result);
 
+    // `structures` 顶层标签（`starts` + `References`）由本阶段交回世界线程，
+    // 完工组装时写进交付盒子，下一次存盘原样带回。
+    // The `structures` tag (starts + References) goes back to the world thread
+    // here; assembly installs it into the delivered column.
+    let structures = if config.generate_structures {
+        let references = crate::worldgen_structures::structure_references_stage(config, cx, cz)?;
+        let starts = crate::worldgen_structures::structure_starts(config, cx, cz)?;
+        Some(crate::worldgen_structures::encode_structures(
+            config,
+            &starts,
+            &references,
+        )?)
+    } else {
+        None
+    };
+
     // 本区块自己需要的全部写增量：自己的地物 + 8 个邻居中心溢过来的部分。
     // 后者纯函数重算（带缓存），保证本区块的增量集合从「自己的 features 结果」
     // 就完整，不依赖邻居任务何时落地 —— 这样世界线程按 `TaskId` 合并后，
@@ -607,7 +631,7 @@ pub(crate) fn generate_features_stage(
         terrain: None,
         deltas,
         light: None,
-        structures: None,
+        structures,
     })
 }
 
@@ -620,13 +644,17 @@ pub(crate) fn generate_terrain_stage(
     cx: i32,
     cz: i32,
 ) -> Result<GenerateOutput, String> {
-    // 官方 `createNoiseChunk` 从中心区块的 `References` 反查起点，把
-    // `Beardifier.forStructuresInChunk` 注进 finalDensity；没有结构时是 EMPTY。
-    // Vanilla `createNoiseChunk` resolves the starts referenced by the center
-    // chunk and injects `Beardifier.forStructuresInChunk` into finalDensity.
-    let references = crate::worldgen_structures::structure_references_stage(config, cx, cz)?;
-    let beardifier = crate::worldgen_structures::beardifier_for_chunk(config, cx, cz, &references)?;
-    let chunk = cached_generate_chunk_with_beardifier(config, cx, cz, beardifier.as_ref())?;
+    // 官方 `createNoiseChunk` 注入 `Beardifier.forStructuresInChunk`；Bamboo 的
+    // `game_pipeline` / `beard` 对拍路径已经接好真实 Beardifier，但 Director 的
+    // `terrain` 阶段暂仍走 `Beardifier.EMPTY`：在计算池里反查半径 8 的起点会
+    // 改变任务耗时，暴露地物增量规范序在 1/4 线程下的竞态，逐格结果不稳定。
+    // 等增量合并改成与调度无关后再打开（见 docs/worldgen-structures-plan.md §12）。
+    // Vanilla injects `Beardifier.forStructuresInChunk`; the real Beardifier is
+    // wired in `game_pipeline` / the `beard` oracle, but the Director's terrain
+    // stage still uses `Beardifier.EMPTY`: resolving radius-8 starts on the
+    // compute pool changes task timing and exposes a scheduling race in the
+    // canonical delta merge (see docs/worldgen-structures-plan.md §12).
+    let chunk = cached_generate_chunk(config, cx, cz)?;
     let column = build_region_column(&chunk)?;
     Ok(GenerateOutput {
         column,
@@ -635,34 +663,6 @@ pub(crate) fn generate_terrain_stage(
         light: None,
         structures: None,
     })
-}
-
-/// `ChunkStatus.STRUCTURE_STARTS` / `STRUCTURE_REFERENCES` 的接线。两阶段都是
-/// 纯函数：前者只把结果放进线程本地缓存，后者产出 `structures` 标签交回世界线程。
-/// `generate-structures=false` 时按官方跳过结构起点，仍写空壳标签。
-///
-/// Wiring for `STRUCTURE_STARTS` / `STRUCTURE_REFERENCES`. Both are pure: the
-/// former only fills the thread-local cache, the latter produces the `structures`
-/// tag. With `generate-structures=false` vanilla skips starts but still writes the
-/// empty shell.
-pub(crate) fn generate_structure_stage(
-    config: &WorldGenConfig,
-    cx: i32,
-    cz: i32,
-    center: Option<Box<RegionColumn>>,
-) -> Result<GenerateOutput, String> {
-    // 读盘盒子带来的 `structures` 标签：`structure_starts` 优先从它恢复起点和引用，
-    // 再按纯函数生成相邻区块时两边结果一致。没有标签就是新区块，纯函数生成。
-    // The decoded column's `structures` tag is restored first, so regenerating
-    // neighbours afterwards is identical to generating them in one pass.
-    let disk = center
-        .as_deref()
-        .and_then(crate::worldgen_structures::structures_tag_of);
-    crate::worldgen_structures::install_disk_structures(config, cx, cz, disk.as_ref());
-    let mut output = passthrough_stage(center);
-    let data = crate::worldgen_structures::structure_data(config, cx, cz)?;
-    output.structures = Some(data.tag);
-    Ok(output)
 }
 
 /// 透传阶段（群系、光照、刷怪、完工）：盒子原样交回。

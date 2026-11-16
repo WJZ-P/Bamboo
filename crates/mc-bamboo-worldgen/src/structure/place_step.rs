@@ -50,6 +50,11 @@ pub const PLACEABLE_TYPES: &[&str] = &[
     "minecraft:igloo",
     "minecraft:shipwreck",
     "minecraft:ocean_ruin",
+    "minecraft:desert_pyramid",
+    "minecraft:jungle_temple",
+    "minecraft:swamp_hut",
+    "minecraft:buried_treasure",
+    "minecraft:ruined_portal",
 ];
 
 /// 一次 `features` 调用里要放的结构（按 step 分组的输入 + 汇聚的统计）。
@@ -382,6 +387,11 @@ fn layout_kind(type_id: &str) -> Option<&'static str> {
         "minecraft:igloo" => "igloo",
         "minecraft:shipwreck" => "shipwreck",
         "minecraft:ocean_ruin" => "ocean_ruin",
+        "minecraft:desert_pyramid" => "desert_pyramid",
+        "minecraft:jungle_temple" => "jungle_temple",
+        "minecraft:swamp_hut" => "swamp_hut",
+        "minecraft:buried_treasure" => "buried_treasure",
+        "minecraft:ruined_portal" => "ruined_portal",
         _ => return None,
     })
 }
@@ -417,6 +427,92 @@ fn place_layout_piece(
         }
         "mineshaft" | "stronghold" | "monument" | "mansion" => {
             place_code_piece(&mut adapter, piece, kind, chunk_bb, random)?;
+        }
+        "desert_pyramid" | "jungle_temple" | "swamp_hut" | "buried_treasure" | "ruined_portal" => {
+            place_single_piece(world, piece, kind, chunk_bb, random)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// 四个代码生成单件结构 + 废弃传送门的 `postProcess`（已由
+/// `structure-post-process` / `structure-templated-place` 逐方块对拍 0 不一致）。
+///
+/// `postProcess` of the four code-built single-piece structures and ruined portals
+/// (verified block-for-block by the corresponding oracles).
+fn place_single_piece(
+    world: &mut FeatureWorld<'_>,
+    piece: &Piece,
+    kind: &str,
+    chunk_bb: &[i32; 6],
+    random: &WorldgenRandom,
+) -> Result<(), String> {
+    let orientation = (piece.o >= 0).then(|| pieces::HDir::from_2d(piece.o));
+    match kind {
+        "buried_treasure" => {
+            let (x, z) = (piece.bb[0], piece.bb[2]);
+            let bb = [x, 90, z, x, 90, z];
+            if let Some((chest, _)) = post_process::buried_treasure(world, &bb, None)
+                && let Some(state) = post_process::create_chest(
+                    world,
+                    chunk_bb,
+                    chest,
+                    None,
+                    random,
+                    Some("minecraft:chests/buried_treasure"),
+                )
+            {
+                let _ = state;
+            }
+        }
+        "swamp_hut" => {
+            post_process::swamp_hut::swamp_hut(
+                world,
+                &piece.bb,
+                chunk_bb,
+                orientation,
+                piece.rot,
+                piece.mirror,
+                None,
+            )?;
+        }
+        "jungle_temple" => {
+            post_process::jungle_temple::jungle_temple(
+                world,
+                &piece.bb,
+                chunk_bb,
+                orientation,
+                piece.rot,
+                piece.mirror,
+                random,
+                None,
+            );
+        }
+        "desert_pyramid" => {
+            post_process::pyramid::desert_pyramid(
+                world,
+                &piece.bb,
+                chunk_bb,
+                orientation,
+                piece.rot,
+                piece.mirror,
+                world.seed,
+                false,
+                world.center_x,
+                world.center_z,
+                random,
+                None,
+            );
+        }
+        "ruined_portal" => {
+            let mut piece = piece.clone();
+            let mut box_ = *chunk_bb;
+            let outcome =
+                post_process::ruined_portal::ruined_portal(world, &mut piece, &mut box_, random)?;
+            for (x, y, z, state) in outcome.writes {
+                world.set_block_with_heightmaps(x, y, z, state);
+            }
         }
         _ => {}
     }
@@ -720,18 +816,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn placeable_list_excludes_the_unverified_single_piece_structures() {
+    fn placeable_list_includes_every_verified_structure_type() {
         for id in [
             "minecraft:desert_pyramid",
             "minecraft:jungle_temple",
             "minecraft:swamp_hut",
             "minecraft:buried_treasure",
             "minecraft:ruined_portal",
+            "minecraft:jigsaw",
+            "minecraft:mineshaft",
+            "minecraft:igloo",
         ] {
-            assert!(!PLACEABLE_TYPES.contains(&id), "{id} must stay unsupported");
-        }
-        for id in ["minecraft:jigsaw", "minecraft:mineshaft", "minecraft:igloo"] {
-            assert!(PLACEABLE_TYPES.contains(&id));
+            assert!(PLACEABLE_TYPES.contains(&id), "{id} must be placeable");
         }
     }
 
