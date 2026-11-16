@@ -179,11 +179,19 @@ ChunkColumn
 由 `Region::ready_to_move_columns` / `take_columns` / `insert_column` 整批取放，
 `RegionColumn: Send`。`Level` trait 对外不变，方块逻辑和 oracle 不受影响。
 
-**存储内部仍然是整张表**：region 里 `containers` 等四张表还是 `BTreeMap<BlockPos, _>`，
-`BlockTicks` / `BlockEntities` / `RedstoneMemory` 也还是全 region 一张表，只是都加了按区块的
-取放接口；按位置查容器、遍历容器重查开合人数这些路径一处没改，遍历和发包顺序也不变。
-按区块取时只扫 `BlockPos` 的 x 带（16 格宽），和计划刻的批量取出一样要求调用方把一批攒齐。
-以后真要多 region 并行，这些表再按区块分存，那时才需要改访问代码。
+**存储内部仍然是整张表，且第 1 步确认不再按区块分存**：region 里 `containers` 等四张表
+还是 `BTreeMap<BlockPos, _>`，`BlockTicks` / `BlockEvents` / `BlockEntities` /
+`RedstoneMemory` 也还是全 region 一张表，只是都加了按区块的取放接口；按位置查容器、
+遍历容器重查开合人数这些路径一处没改，遍历和发包顺序也不变。按区块取时只扫
+`BlockPos` 的 x 带（16 格宽），和计划刻的批量取出一样要求调用方把一批攒齐。
+
+多区域 tick 第 1 步实测（见 `docs/multi-region-tick-design.md` 4.8 和
+`docs/performance-optimizations.md` 第 13 节）否决了「按区块分存」：计划刻排入加执行
+慢 19%–99%，四张游戏层表的全表遍历慢约 100 倍。改为**按单元存**——现在整 region 一个
+单元，就是这些全局表；单元拆合走 `BlockTicks` / `BlockEvents` / `BlockEntities` /
+`RedstoneMemory` 的 `split_off` / `absorb` 和 `Region::split_off_unit` / `absorb_unit`，
+另有忙区块活动索引（`drain_touched_chunks` / `awake_chunks` / `busy_chunks`）。
+方块实体的关注关系可以跨区块，划单元时按 `watchers_cross_chunks` 合并。
 
 按区块取放已经覆盖到实体：`EntityStore::take_chunk` / `insert_chunk` 和 `ChunkEntities` 装的是这个区块的行和读盘时不认识的实体类型，`RegionColumn` 里也带上了 `ChunkEntities`，收回和交付都走它（`f918171`、`c396f2e`、`865bd3f`）。**还没做**的是把 `entity_tracking` 里的玩家配对也按区块切开：那张表仍是全 region 一张 `BTreeMap`，多 region 并行之前要跟着玩家一起搬。存储内部仍是整张表（见上一段），所以「实体表已有按区块的取放」说的是取放接口，不是分区存放。
 
@@ -863,7 +871,7 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 | 步 | 内容 | 得到什么 | 状态 |
 |---|---|---|---|
 | 0 | 剖析器：每个 region、每个 tick 阶段的耗时直方图；区块从请求到发出的延迟；各队列长度；tick 起点抖动；主控处理延迟 | 后面每一步的依据 | **做了一部分**：`mc-bamboo-game` 的剖析器、假玩家压测工具和基线已落地（`a1fd1a0`、`b841143`、`docs/profiling.md`），阶段直方图、墙上时间的区块延迟、起点抖动 / 刻间隔偏差、flush 字节数、按阶段和子项拆分都有；「主控处理延迟」要等主控建起来才有，`chunk_latency_us` 只覆盖排队到写出、不含读盘，和 1.2 的「读盘 p95 < 100 ms」不是一个量 |
-| 1 | 数据模型：区块束；光照和带位置的状态进区块；`Level` 的写入口收窄（第 3、4 节） | 存档、合并拆分、录制的前提。oracle 全绿是验收条件 | **做了一部分**：`Level` 已收窄成 `LevelSideState` / `LevelTables` 和 `LevelEntities` / `EntityTables`（`0442bc4`、`f918171`），`ChunkStore::take_column` / `insert_column`、`RegionColumn::take_columns` / `insert_column` 和实体的按区块取放都能整盒取放（`2b2d5f5`、`a62f179`、`5c1c0d9`、`c396f2e`、`f918171`），每一步的 oracle 都全绿。**存储内部仍是整张表**：`ChunkStore` 是「模板 + 改过的表 + 四份光照表」，计划刻、方块实体、红石记忆和容器等四张表仍按全 region 存，只加了按区块的取放接口（见 4.2）；`LevelEntities` 上又开了三个交出整张实体表的入口，还没收窄到单独 trait（见第 3 节） |
+| 1 | 数据模型：区块束；光照和带位置的状态进区块；`Level` 的写入口收窄（第 3、4 节） | 存档、合并拆分、录制的前提。oracle 全绿是验收条件 | **按多区域 tick 第 1 步的结论收窄并做完**：按区块分存被实测否决，改成按单元存（本表 4.2、`docs/multi-region-tick-design.md` 4.8），四类状态各有 `split_off` / `absorb` 与忙区块活动索引；存储形状、遍历和发包顺序不变，oracle 全绿。以下为早期的区块束 / `Level` 收窄记录：`Level` 已收窄成 `LevelSideState` / `LevelTables` 和 `LevelEntities` / `EntityTables`（`0442bc4`、`f918171`），`ChunkStore::take_column` / `insert_column`、`RegionColumn::take_columns` / `insert_column` 和实体的按区块取放都能整盒取放（`2b2d5f5`、`a62f179`、`5c1c0d9`、`c396f2e`、`f918171`），每一步的 oracle 都全绿。**存储内部仍是整张表**：`ChunkStore` 是「模板 + 改过的表 + 四份光照表」，计划刻、方块实体、红石记忆和容器等四张表仍按全 region 存，只加了按区块的取放接口（见 4.2）；`LevelEntities` 上又开了三个交出整张实体表的入口，还没收窄到单独 trait（见第 3 节） |
 | 2 | 网络：分段出站缓冲、区块帧只压缩一次、广播从推改成拉（第 11 节、第 7 节第 10 段） | 多人同屏时 CPU 下降 | **做了一部分**：`PlayerSink::send(Outgoing)` 分段出站和 `Arc<SharedFrames>` 用 `OnceLock` 只压一次已合入（`32b1a8b`）；包体缓存和帧缓存同时保留，帧仍在世界线程编码、压缩仍在连接任务里做。**广播从推改成拉没做**，多人同屏时 CPU 是否下降没有量过（第一份基线里 200 人扎堆时实体同步和追踪平均 1.3 ms，`docs/profiling.md` 第 6 节） |
 | 3 | 区块平面：ticket、Director、流水线，先用内联执行器，再接计算池和 IO（第 5 节） | M3 存档和 M4 生成的挂载点 | **存档和计算池已做完，M4 多阶段生成还没接进流水线**：`TicketTable`、存档编解码、Director 状态机都接进 `World::tick`；一条 `mc-bamboo-storage::chunk_io` IO 线程读写区域 / 实体文件，带世界目录时所有区块（盘上有和没有）都走同一条异步读流水线，结果下一刻开头经信箱收回，进服第一批仍按距离交付（`docs/m3-storage.md` 第 14 节 `05d8fa1`）。非 `full` 的 `Status` 按 ProtoChunk 读回、方块光照由模板补齐，`.mcc` 外置区块也能扫到。卸载时脏区块序列化后写盘、pristine 直接丢；Parking 只留作写盘途中缓冲。世界目录、`session.lock`、`level.dat`（含 `_old`）、`data/`（游戏规则 / 世界生成设置 / 世界边界）、`chunk_tickets.dat`、玩家数据和 `save-all [flush]` / `save-on` / `save-off` 都接进生命周期，关服按官方 `stopServer` 顺序排空 IO、`sync_all`、释放锁。**计算池已接上**（5.3.1）：`chunk_worker_threads ≥ 1` 时 `Decode` / 每个 `Generate` 阶段 / `Save` 的序列化在常驻后台线程上做，`Read` 仍在 IO 线程、`Assemble` 内联；默认 0 是世界线程上的 `InlineCodec`，内联和池子跑同一场景盘上字节相同。**运行中的匀速保存照官方字节码，不是 D6 原式**：`MinecraftServer.autoSave` 每 6000 刻一次全量（只写改过的）、`ChunkMap.saveChunksEagerly` 每刻最多 20 个、单区块 200 刻冷却；卸载快照另走 `ceil(待写/6000)`（至少 1）的有上限匀速队列。`Region::encode_loaded_column` 从 `&Region` 用 `BorrowedParts` 只读组装一柱，和卸载存盘共用 `chunk_content::encode_parts`，**不取出/放回盒子、不卸载、不算完待算光照、不发任何包、不改运行态表的顺序和版本号**；写出的 NBT 与卸载逐字节一致。纯上层（容器 / 实体 / 计划刻 / 方块实体 / 红石记忆）改动也由 `Region::dirty` 标脏并参与匀速保存，不必等卸载或 `/save-all`。`/save-all` 立刻给所有已加载脏区块拍快照，`/save-off` 照 `noSave` 暂停。**terrain 生成已接进流水线**（本轮，见 `docs/worldgen.md`「接进游戏」）：`World::build` 对非 flat 世界用 `PipelineKind::Staged` + `OverworldGenerator`，`terrain` 阶段把 worldgen 纯函数的结果（quart 群系 + 方块）写进 `RegionColumn`，其余阶段透传；四个 `server.properties` 世界生成键生效、新世界默认 `normal`、`world_gen_settings.dat` 持久化种子与维度生成器、`gen-world` 对拍 0 不一致、默认起小计算池把生成移出世界线程。**第二轮（本轮）**：`features` 阶段接进流水线（见 `docs/worldgen.md`「第二轮」、5.3.1）：`Task::Generate.neighbors` 按 `ChunkStep` 半径带邻居引用、世界线程存不可变 `Arc` CARVERS 快照、计算池跑 `Generator::features()`、写邻居增量按 `TaskId` 合并 + 完工排规范序；`gen-world --through features` 对拍 0 不一致、1/4 线程逐字节相同；`initialize_light` / `light` 已在流水线里用邻居快照算出生成期光照（`b2778a8`，`gen-light` 对拍）；真实服务端路径（`collectPossibleBiomes(region,1)` / `carverBiome` / `region.getBiomeManager()`）和六张高度图也已逐方块、逐列对拍 0 不一致。**还没做**：生成时 `initialize_light` / `light` 以外的`spawn` 刷怪、其余地物类型、结构两阶段、ProtoChunk 从非 full 状态继续生成、多条 IO 线程、预编码帧、`fly-20` 飞行压测。差异与未建模 codec 见 `docs/m3-storage.md` 第 14 节和 README「存档已知限制」。存档只做官方 Anvil 格式，不兼容 26.3 之前的老存档布局 |
 | 4 | 主控和 region 调度：每个维度一个 region（6.2、6.3、6.6） | 精确模式成形；维度之间并行 | **没做**：仍是一条世界线程带一个 `Region`，没有主控线程、没有 tick 线程池，`Global` 和 Director 都在这条线程上 |
