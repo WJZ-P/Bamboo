@@ -4,13 +4,15 @@
 //! 这两步就是结构件 `StructurePiece.placeBlock` 在写方块前做的事，四组
 //! `(mirror, rotation)` 来自 `setOrientation`。对拍覆盖矿井与要塞放置时用到的全部方块
 //! （木板、原木、栅栏、墙、铁栏杆、玻璃板、楼梯、台阶、火把、按钮、门、铁轨、箱子、
-//! 末地传送门框架、刷怪笼、铁链、蜘蛛网……）以及它们的全部状态组合。
+//! 末地传送门框架、刷怪笼、铁链、蜘蛛网……）外加几种常见方块做交叉验证，
+//! 每个方块的全部状态组合都试（活塞三种方块也在里面，丛林神殿会放活塞）。
 //!
 //! Oracle for the two state steps `StructurePiece.placeBlock` runs before writing:
 //! vanilla `BlockState.mirror(mirror).rotate(rotation)` against
 //! `state_transform::transform`. The four `(mirror, rotation)` pairs come from
 //! `setOrientation`. The query set covers every block the mineshaft and stronghold place,
-//! across all of their state combinations.
+//! plus a few common ones for cross-checking, across all of their state combinations
+//! (including the piston blocks, which jungle temples place).
 
 use std::{fs, path::Path, process::Command};
 
@@ -71,6 +73,9 @@ const BLOCKS: &[&str] = &[
     "minecraft:hopper",
     "minecraft:observer",
     "minecraft:piston",
+    "minecraft:sticky_piston",
+    "minecraft:piston_head",
+    "minecraft:moving_piston",
     "minecraft:redstone_torch",
 ];
 
