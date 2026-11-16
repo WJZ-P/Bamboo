@@ -102,9 +102,25 @@ impl TrunkPlacer {
             "minecraft:cherry_trunk_placer" => Kind::Cherry {
                 branch_count: provider("branch_count")?,
                 branch_horizontal_length: provider("branch_horizontal_length")?,
-                branch_start: match provider("branch_start_offset_from_top")? {
-                    IntProvider::Uniform { min, max } => (min, max),
-                    _ => return None,
+                branch_start: match object.get("branch_start_offset_from_top") {
+                    // 26.3 的 `BRANCH_START_CODEC` 是 `UniformInt.MAP_CODEC` 再套
+                    // `Codec.validate`：导出数据里这个字段可能省略 `type`，按
+                    // `min_inclusive` / `max_inclusive` 两个数直接构造 UniformInt。
+                    // The 26.3 `BRANCH_START_CODEC` is `UniformInt.MAP_CODEC` plus a
+                    // validator; the export may omit `type`, so build the UniformInt
+                    // straight from its two bounds.
+                    Some(value) => {
+                        let o = value.as_object()?;
+                        let min = o.get("min_inclusive")?.as_i64()? as i32;
+                        let max = o.get("max_inclusive")?.as_i64()? as i32;
+                        // 官方 `BRANCH_START_CODEC.validate`：`max - min < 1` 报错。
+                        // Official `BRANCH_START_CODEC.validate`: `max - min < 1` fails.
+                        if max - min < 1 {
+                            return None;
+                        }
+                        (min, max)
+                    }
+                    None => return None,
                 },
                 branch_end_offset_from_top: provider("branch_end_offset_from_top")?,
             },
