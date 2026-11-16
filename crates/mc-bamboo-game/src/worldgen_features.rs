@@ -130,7 +130,7 @@ pub(crate) fn run_features(
     cz: i32,
     view: [GeneratedChunk; 9],
 ) -> Result<FeatureResult, String> {
-    run_features_filtered(config, cx, cz, view, None)
+    run_features_filtered(config, cx, cz, view, None, (1 << DECORATION_STEPS) - 1)
 }
 
 /// [`run_features`] 加一个地物白名单；游戏里恒为 `None`，只有对拍工具会传。
@@ -143,6 +143,7 @@ fn run_features_filtered(
     cz: i32,
     view: [GeneratedChunk; 9],
     allowed_kinds: Option<&[String]>,
+    steps_mask: i32,
 ) -> Result<FeatureResult, String> {
     if config.level_type.is_flat() {
         // flat 世界没有噪声地物；流水线也不是 Staged，这里只是防御。
@@ -171,7 +172,7 @@ fn run_features_filtered(
         heights,
     };
     with_generator(config, |generator| {
-        generator.features(&input, (1 << DECORATION_STEPS) - 1, allowed_kinds)
+        generator.features(&input, steps_mask, allowed_kinds)
     })
 }
 
@@ -192,8 +193,23 @@ pub fn game_features(
     cz: i32,
     allowed_kinds: Option<&[String]>,
 ) -> Result<FeatureResult, String> {
+    game_features_with_mask(config, cx, cz, allowed_kinds, (1 << DECORATION_STEPS) - 1)
+}
+
+/// [`game_features`] 加上过渡期的 `--steps` 掩码，只有对拍工具用；
+/// 游戏里恒为全部 11 步。
+///
+/// [`game_features`] with the transitional `--steps` mask; only the oracle uses
+/// a narrowed mask, the game always runs all eleven steps.
+pub fn game_features_with_mask(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+    allowed_kinds: Option<&[String]>,
+    steps_mask: i32,
+) -> Result<FeatureResult, String> {
     let view = build_view(config, cx, cz)?;
-    run_features_filtered(config, cx, cz, view, allowed_kinds)
+    run_features_filtered(config, cx, cz, view, allowed_kinds, steps_mask)
 }
 
 /// 一次 `applyBiomeDecoration` 里需要复用的紧凑结果：给 3×3 九宫格各格的
