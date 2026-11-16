@@ -105,7 +105,7 @@ def parse_reports(path):
         if size:
             current["sizes"][int(size.group(1))] = int(size.group(2))
             continue
-        label = stripped.split(" ", 1)[0]
+        label = stripped.split(" ", 1)[0].split("=", 1)[0]
         values = {k: float(v) for k, v in KV.findall(stripped)}
         if label == "partition_ns":
             current["partition"]["partition_" + "mean"] = values.get("mean", 0.0)
@@ -228,7 +228,7 @@ def summarise(root):
         if not steady:
             continue
         weights = [r["samples"] for r in steady]
-        merged = {"samples": sum(weights)}
+        merged = {"samples": sum(weights), "blocks": {}, "sizes": {}}
         scalar = (
             "p50", "p95", "tick_mean", "three", "partition_ns", "partition_p50",
             "partition_p95", "partition_share", "tick_mean_ms", "three_mean_ms",
@@ -237,6 +237,15 @@ def summarise(root):
         )
         for key in scalar:
             merged[key] = weighted([r[key] for r in steady], weights)
+        for halo in HALOS:
+            for block in set().union(*(r["blocks"].get(halo, {}).keys() for r in steady)):
+                merged["blocks"].setdefault(halo, {})[block] = weighted(
+                    [r["blocks"].get(halo, {}).get(block, 0.0) for r in steady], weights
+                )
+        for size in set().union(*(set(r["sizes"].keys()) for r in steady)):
+            merged["sizes"][size] = weighted(
+                [r["sizes"].get(size, 0.0) for r in steady], weights
+            )
         merged["halos"] = {}
         for halo in HALOS:
             merged["halos"][halo] = {}
@@ -250,8 +259,41 @@ def summarise(root):
                 merged["halos"][halo][key] = weighted(
                     [r["halos"][halo][key] for r in steady], weights
                 )
-        per_round.append((directory.name, merged))
+        per_round.append((directory.parent.name + "/" + directory.name, merged))
     return per_round
+
+
+def by_scenario(per_round):
+    groups = {}
+    for name, r in per_round:
+        groups.setdefault(name.split("/")[0], []).append(r)
+    out = {}
+    for name, rounds in groups.items():
+        merged = {"rounds": len(rounds)}
+        for key in rounds[0]:
+            if isinstance(rounds[0][key], dict):
+                continue
+            merged[key] = median([r[key] for r in rounds])
+        merged["halos"] = {}
+        for halo in HALOS:
+            merged["halos"][halo] = {}
+            for key in rounds[0]["halos"][halo]:
+                if key == "speedup_input":
+                    continue
+                merged["halos"][halo][key] = median([r["halos"][halo][key] for r in rounds])
+            for key in ("speedup", "shortening"):
+                merged["halos"][halo][key] = median([r["halos"][halo][key] for r in rounds])
+        merged["blocks"] = {}
+        merged["sizes"] = {}
+        for halo in HALOS:
+            for k in set().union(*(r["blocks"].get(halo, {}).keys() for r in rounds)):
+                merged["blocks"].setdefault(halo, {})[k] = median(
+                    [r["blocks"].get(halo, {}).get(k, 0) for r in rounds]
+                )
+        for k in set().union(*(set(r["sizes"].keys()) for r in rounds)):
+            merged["sizes"][k] = median([r["sizes"].get(k, 0) for r in rounds])
+        out[name] = merged
+    return out
 
 
 def median(values, default=0.0):
@@ -260,8 +302,8 @@ def median(values, default=0.0):
 
 def main():
     root = Path(sys.argv[1])
-    on = dict(summarise(root))
-    off = {}
+    on = by_scenario(summarise(root))
+    off_rounds = {}
     for directory in sorted((root / "off").glob("*/*")):
         if not directory.is_dir():
             continue
@@ -276,10 +318,16 @@ def main():
         parsed = parsed[1:] or parsed
         if parsed:
             w = [r["samples"] for r in parsed]
-            off[directory.name] = {k: weighted([r[k] for r in parsed], w) for k in ("p50", "p95", "mean")}
+            off_rounds.setdefault(directory.parent.name, []).append(
+                {k: weighted([r[k] for r in parsed], w) for k in ("p50", "p95", "mean")}
+            )
+    off = {
+        name: {k: median([r[k] for r in rounds]) for k in ("p50", "p95", "mean")}
+        for name, rounds in off_rounds.items()
+    }
 
-    keys = sorted(on, key=lambda name: (name.rsplit("-", 1)[0], name))
-    out = {"scenarios": [], "on": on, "off": off}
+    keys = sorted(on)
+    out = {"scenarios": keys, "on": on, "off": off}
     (root / "partition-summary.json").write_text(json.dumps(out, indent=2, ensure_ascii=False, default=str))
 
     print("== 划分阶段：每刻耗时与占一刻（开关打开）==")
@@ -287,8 +335,8 @@ def main():
     for key in keys:
         r = on[key]
         print(" | ".join([
-            key.rsplit("/round", 1)[0] if "/round" in key else key,
-            "1", f"{r['partition_p50']:.0f}/{r['partition_p95']:.0f}",
+            key,
+            str(r["rounds"]), f"{r['partition_p50']:.0f}/{r['partition_p95']:.0f}",
             f"{r['partition_share']:.3f}%",
             f"{r['p50']:.3f}/{r['p95']:.3f}",
             f"{r['three_share']:.1f}%",
