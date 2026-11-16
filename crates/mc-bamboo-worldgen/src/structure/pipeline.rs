@@ -378,12 +378,14 @@ impl StartContext<'_> {
             | "minecraft:mineshaft_mesa"
             | "minecraft:stronghold"
             | "minecraft:monument"
-            | "minecraft:mansion" => {
+            | "minecraft:ocean_monument"
+            | "minecraft:mansion"
+            | "minecraft:woodland_mansion" => {
                 self.code_built_start(structure_id, site, resolver, &allowed)?
             }
             // `SinglePieceStructure`（沙漠 / 丛林神殿）：整列群系 + 四角最低高度 >= 海平面
             // 才放行，起点仍取中心列 WORLD_SURFACE_WG 高度。
-            "minecraft:desert_pyramid" | "minecraft:jungle_pyramid" => {
+            "minecraft:desert_pyramid" | "minecraft:jungle_pyramid" | "minecraft:jungle_temple" => {
                 let (width, depth) = if structure_id == "minecraft:desert_pyramid" {
                     (21, 21)
                 } else {
@@ -409,7 +411,7 @@ impl StartContext<'_> {
                     templated::shipwreck::generate(seed, cx, cz, beached)
                 })?
             }
-            "minecraft:ocean_ruin_cold" | "minecraft:ocean_ruin_warm" => {
+            "minecraft:ocean_ruin_cold" | "minecraft:ocean_ruin_warm" | "minecraft:ocean_ruin" => {
                 let config = templated::ocean_ruin::Config::parse(&def.raw)?;
                 self.on_top_start(chunk, &allowed, true, |_| {
                     templated::ocean_ruin::generate(seed, cx, cz, config)

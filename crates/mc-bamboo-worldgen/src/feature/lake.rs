@@ -3,17 +3,17 @@
 //! 照 `LakeFeature.place`：原点先偏移 `(-8, -4, -8)`，在 16×8×16 的格子里按
 //! `random.nextInt(4) + 4` 个椭球做布尔遮罩；再沿三个方向各扫一遍：先校验边缘格
 //! （`can_place_feature` 与上方流体判定），再填流体/空气，最后铺屏障层。
-//! 主世界导出的两个湖（`lake_lava_underground`、`lake_lava_surface`）的流体都是岩浆，
-//! 官方末段的「水做的湖在表面结冰」分支（`Biome.shouldFreeze`）因此不会进入；Rust 侧
-//! 在流体不是水时同样跳过，并把这个前提写进已知限制。
+//! 主世界导出的两个湖（`lake_lava_underground`、`lake_lava_surface`）的流体都是岩浆；
+//! 另有 `sulfur_pool` 的内联水湖（群系 `sulfur_caves` 不结冰）。官方末段
+//! 「水做的湖在表面结冰」（`Biome.shouldFreeze`）在这批数据里不写方块，但
+//! `LakeFeature.place` 仍返回 true，`SequenceFeature` 才能继续放 `potent_sulfur`。
 //!
 //! `LakeFeature.place`: offset the origin by `(-8, -4, -8)`, fill a 16×8×16 boolean mask
 //! from `random.nextInt(4) + 4` ellipsoids, then sweep the grid three times: validate the
 //! edge cells (`can_place_feature` plus the liquid check above), write fluid/air, and lay
-//! the barrier shell. Both overworld lakes (`lake_lava_underground`, `lake_lava_surface`)
-//! use lava, so the official "freeze a water lake's surface" branch (`Biome.shouldFreeze`)
-//! is never reached; the Rust side skips it for any non-water fluid and records that
-//! precondition as a known limitation.
+//! the barrier shell. Both overworld lakes use lava; `sulfur_pool`'s inline water lake is
+//! in a biome that never freezes. The freeze branch writes nothing for 26.3 data, but
+//! `place` still returns true so `SequenceFeature` continues to the `potent_sulfur` step.
 
 use mc_bamboo_data::{facts, registries, state_facts, state_fluid};
 use serde_json::Value;
@@ -210,10 +210,19 @@ pub fn place(
         }
     }
 
-    // 官方：水做的湖在表面结冰。主世界两个湖都是岩浆，这条永远不会进入。
-    // Official: a water lake freezes over. Both overworld lakes are lava, so this never runs.
+    // 官方 `LakeFeature.place`：水湖在表面按 `Biome.shouldFreeze` 铺冰，然后
+    // **返回 true**。26.3 唯一的水湖是 `sulfur_pool`（内联，群系 `sulfur_caves`
+    // 温度足够高，不结冰），所以这里没有结冰方块要写；但必须返回 true，否则
+    // `SequenceFeature` 会在第一个子项后短路，`sulfur_pool` 的第二步
+    // `simple_block`（放湿润的强效硫磺）整条被跳过。
+    // Official `LakeFeature.place` freezes a water lake's surface and then
+    // **returns true**. 26.3's only water lake is `sulfur_pool` in the warm
+    // `sulfur_caves` biome (no ice), but the return value matters: `SequenceFeature`
+    // short-circuits on false, which used to skip the `potent_sulfur` step.
     if state_fluid(fluid).fluid == registries::fluid::WATER {
-        return false;
+        // `sulfur_caves` 的 `shouldFreeze` 恒 false；其它群系没有水湖配置。
+        // `shouldFreeze` is false for `sulfur_caves`; no other biome has a water lake.
+        return true;
     }
 
     true

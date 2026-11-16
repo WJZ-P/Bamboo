@@ -23,9 +23,7 @@ const QUERIES: &[(i64, i32, i32)] = &[
     (42, 19, -15),
     (42, -19, 11),
     (42, -39, -14),
-    // (42,-32,-16) 触发一个与结构无关的既有地物 bug（sulfur_pool 的第二步），
-    // 无结构模式也复现；见 docs/worldgen-structures-e2e.md 的已知限制。
-    // Skipped: a pre-existing feature mismatch that also reproduces without structures.
+    (42, -32, -16),
     (42, -30, 6),
     (42, -19, -38),
     (42, -17, 22),
@@ -64,6 +62,15 @@ const QUERIES: &[(i64, i32, i32)] = &[
     (42, -374, -22), // desert_pyramid referenced neighbour
     (42, -121, 97),  // stronghold referenced neighbour
     (42, -120, 96),  // stronghold referenced neighbour
+    // 按 `random_spread` 电位起点定位找到的四种稀有结构起点。
+    // Rare-structure starts located via the official `random_spread` planner.
+    (42, -6380, -6052), // woodland_mansion
+    (42, -6380, -2374), // woodland_mansion (second layout)
+    (42, -12, -148),    // ocean_monument
+    (42, 49, -11),      // ocean_monument (second layout)
+    (42, -85, 180),     // jungle_temple
+    (42, 3, 10),        // ocean_ruin_cold
+    (42, -32, -79),     // ocean_ruin_warm
 ];
 
 /// 已定位但尚未修好的整块差异，用 `--known-gaps` 单独跑，不进默认干净跑。

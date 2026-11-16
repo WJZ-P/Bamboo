@@ -838,6 +838,14 @@ impl Report {
             .iter()
             .map(|(name, start)| {
                 let count = match &start.pieces {
+                    // 官方海底神殿只有 `MonumentBuilding` 一件；富模型摊开了房间图子件。
+                    // Vanilla's ocean monument has only `MonumentBuilding`; the rich
+                    // model expands the room-graph children into separate pieces.
+                    mc_bamboo_worldgen::structure::pipeline::StartPieces::Layout(_)
+                        if name == "minecraft:monument" =>
+                    {
+                        1
+                    }
                     mc_bamboo_worldgen::structure::pipeline::StartPieces::Layout(p) => p.len(),
                     mc_bamboo_worldgen::structure::pipeline::StartPieces::Jigsaw(p) => p.len(),
                     mc_bamboo_worldgen::structure::pipeline::StartPieces::Sparse(p) => p.len(),
@@ -925,8 +933,27 @@ impl Report {
         for (name, start) in &data.starts.by_structure {
             match &start.pieces {
                 mc_bamboo_worldgen::structure::pipeline::StartPieces::Layout(pieces) => {
-                    for piece in pieces {
-                        rust_pieces.push((name.clone(), piece.id.clone(), piece.bb));
+                    if name == "minecraft:monument" {
+                        // 官方 `PiecesContainer` 里只有 `MonumentBuilding` 一件，
+                        // 房间图子件是它的私有字段；富模型把它们摊成了多件。
+                        // 覆盖行按官方口径折回一件（包围盒取并集），逐方块比较
+                        // 才真正验证这些子件。
+                        // Vanilla's `PiecesContainer` holds only `MonumentBuilding`;
+                        // the room-graph children are private. Fold the rich model
+                        // back into one piece (union box); the block comparison
+                        // verifies the children for real.
+                        let mut bb = [i32::MAX, i32::MAX, i32::MAX, i32::MIN, i32::MIN, i32::MIN];
+                        for p in pieces {
+                            for i in 0..3 {
+                                bb[i] = bb[i].min(p.bb[i]);
+                                bb[i + 3] = bb[i + 3].max(p.bb[i + 3]);
+                            }
+                        }
+                        rust_pieces.push((name.clone(), "minecraft:omb".to_owned(), bb));
+                    } else {
+                        for piece in pieces {
+                            rust_pieces.push((name.clone(), piece.id.clone(), piece.bb));
+                        }
                     }
                 }
                 mc_bamboo_worldgen::structure::pipeline::StartPieces::Jigsaw(pieces) => {

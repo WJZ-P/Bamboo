@@ -171,6 +171,10 @@ pub struct StartInput {
     pub structure: String,
     /// 结构注册表条目的 `type` 字段（决定 `postProcess` 分派）。
     pub type_id: String,
+    /// 起点所在区块；海底神殿要用它重建房间图。
+    /// The source chunk; the ocean monument needs it to rebuild its room graph.
+    pub source_x: i32,
+    pub source_z: i32,
     /// 结构件列表。jigsaw 走模板链，其余走布局 `Piece`。
     pub pieces: StartPieces,
 }
@@ -341,6 +345,47 @@ fn place_start(
                 return Ok(());
             }
             let kind = kind.unwrap_or_default();
+            // 海底神殿的清单里只有 `MonumentBuilding` 一项，房间图/子件是它的私有
+            // 字段，放置必须按 seed + 起点区块重建完整布局；`place_code_piece`
+            // 对 `monument` 直接返回，就是为了避免按单个 `Piece` 反复放。
+            // The monument's list holds only `MonumentBuilding`; its room graph and
+            // children are private, so placement must rebuild the full layout from
+            // the seed and source chunk instead of iterating pieces one by one.
+            if kind == "monument" {
+                let layout_random =
+                    pieces::make_random(options.seed, start.source_x, start.source_z);
+                let dir = pieces::HDir::random(&layout_random);
+                let layout = pieces::ocean_monument::monument_layout(
+                    &layout_random,
+                    start.source_x * 16 - 29,
+                    start.source_z * 16 - 29,
+                    dir,
+                );
+                let place_random =
+                    pieces::make_random(options.seed ^ 0x5DEECE66D, input.center_x, input.center_z);
+                let before = world.write_count;
+                let mut level = FeaturePieceLevel {
+                    world,
+                    world_random: WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0))),
+                };
+                let sea_level = level.world.sea_level;
+                pieces::ocean_monument_place::place_in_chunk(
+                    &layout,
+                    &mut level,
+                    chunk_bb,
+                    sea_level,
+                    &place_random,
+                );
+                *stats
+                    .placed_pieces
+                    .entry(start.type_id.clone())
+                    .or_default() += 1;
+                *stats
+                    .placed_blocks
+                    .entry(start.type_id.clone())
+                    .or_default() += level.world.write_count.saturating_sub(before);
+                return Ok(());
+            }
             let mut pyramid_after: Option<post_process::pyramid_after::PyramidAfterData> = None;
             for piece in pieces {
                 if !intersects(&piece.bb, &chunk_bb) {

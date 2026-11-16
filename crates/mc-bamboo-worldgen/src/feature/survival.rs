@@ -484,7 +484,12 @@ fn classify(state: u32) -> Option<Kind> {
         // `SnowyBlock` and `RotatedPillarBlock` extend Block directly and keep the default;
         // the rule_based podzol provider and the rotated basalt provider both rely on it.
         | BlockClass::SnowyBlock
-        | BlockClass::RotatedPillarBlock => Kind::Default,
+        | BlockClass::RotatedPillarBlock
+        // `PotentSulfurBlock` 继承 `BaseEntityBlock`，不覆写 `canSurvive`；
+        // `sulfur_pool` 的第二步 `simple_block` 要放它。
+        // `PotentSulfurBlock` extends `BaseEntityBlock` without overriding
+        // `canSurvive`; the second step of `sulfur_pool` places it.
+        | BlockClass::PotentSulfurBlock => Kind::Default,
         // 珊瑚块继承 `Block`，`canSurvive` 恒 true。
         // Coral blocks extend `Block`, so `canSurvive` is always true.
         BlockClass::CoralBlock => Kind::Default,
