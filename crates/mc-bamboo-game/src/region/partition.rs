@@ -291,6 +291,9 @@ pub(crate) struct Partition {
     /// 改坏确认用：故意漏掉一次合并，让全量对照把它报出来。
     #[cfg(test)]
     pub(crate) skip_merge_once: bool,
+    /// 改坏确认用：还要跳过一次范围重叠的补并，否则漏合并会被修好。
+    #[cfg(test)]
+    pub(crate) skip_overlap_merge_once: bool,
 }
 
 impl Partition {
@@ -307,6 +310,8 @@ impl Partition {
             verify_nanos: 0,
             #[cfg(test)]
             skip_merge_once: false,
+            #[cfg(test)]
+            skip_overlap_merge_once: false,
         }
     }
 
@@ -388,7 +393,7 @@ impl Partition {
             pending.remove(&chunk);
         }
         let before = self.units.iter().filter(|unit| unit.is_some()).count();
-        let written = self.insert_groups(pending, busy);
+        let _ = self.insert_groups(pending, busy);
         let after = self.units.iter().filter(|unit| unit.is_some()).count();
         if after < before {
             self.topology.merges = self.topology.merges.saturating_add((before - after) as u64);
@@ -469,6 +474,10 @@ impl Partition {
             written += 1;
         }
         // 关注边可能让两个组的范围相交，按和朴素实现同样的规则并起来。
+        #[cfg(test)]
+        if std::mem::take(&mut self.skip_overlap_merge_once) {
+            return written;
+        }
         self.merge_overlapping_units();
         written
     }
@@ -635,5 +644,266 @@ impl Partitioning {
 
     pub(crate) fn busy_len(&self) -> usize {
         self.busy.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mc_bamboo_core::BlockPos;
+
+    /// 一个简单的确定性随机源，测试不依赖外部 crate。
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    fn c(x: i32, z: i32) -> ChunkPos {
+        ChunkPos::new(x, z)
+    }
+
+    fn sorted(units: &[Unit]) -> Vec<Unit> {
+        let mut out = units.to_vec();
+        out.sort_by(|a, b| a.busy.cmp(&b.busy));
+        out
+    }
+
+    /// 每刻随机增删活动：增量划分和朴素全量划分逐刻相同，范围不重叠，
+    /// 按划分拆开再合回来等于没拆过。
+    #[test]
+    fn random_activity_keeps_incremental_partition_equal_to_naive() {
+        for seed in [1_u64, 7, 12345, 0xdead_beef] {
+            let mut rng = Rng::new(seed);
+            let halo = 1 + (seed % 2) as i32;
+            let mut partition = Partition::new(halo);
+            partition.set_verify(true);
+            let mut busy: BTreeSet<ChunkPos> = BTreeSet::new();
+            let mut watchers: Vec<(ChunkPos, ChunkPos)> = Vec::new();
+            for tick in 0..200_i64 {
+                let mut added = Vec::new();
+                let mut removed = Vec::new();
+                // 机器出现 / 消失：每台机器是一小簇相邻区块。
+                for _ in 0..rng.below(4) {
+                    let x = (rng.below(24) as i32) - 12;
+                    let z = (rng.below(24) as i32) - 12;
+                    for dx in 0..(1 + rng.below(3) as i32) {
+                        let chunk = c(x + dx, z);
+                        if busy.insert(chunk) {
+                            added.push(chunk);
+                        }
+                    }
+                }
+                for _ in 0..rng.below(3) {
+                    if busy.is_empty() {
+                        break;
+                    }
+                    let index = rng.below(busy.len() as u64) as usize;
+                    let chunk = *busy.iter().nth(index).expect("下标来自集合长度");
+                    busy.remove(&chunk);
+                    removed.push(chunk);
+                }
+                // 关注关系偶尔跨区块出现或消失。
+                if tick % 17 == 0 {
+                    let a = c(rng.below(20) as i32, rng.below(20) as i32);
+                    let b = c(a.x + 3, a.z + 3);
+                    watchers = if watchers.is_empty() {
+                        vec![(a, b)]
+                    } else {
+                        Vec::new()
+                    };
+                }
+                partition.update(&busy, &watchers, &added, &removed);
+                let units = partition.units();
+                assert_eq!(
+                    sorted(&units),
+                    naive_partition(&busy, &watchers, halo),
+                    "seed={seed} tick={tick}"
+                );
+                assert!(
+                    partition.areas_disjoint(),
+                    "范围不重叠：seed={seed} tick={tick}"
+                );
+                let mut seen = HashSet::new();
+                for unit in &units {
+                    for &chunk in &unit.area {
+                        assert!(seen.insert(chunk), "范围重叠：seed={seed} tick={tick}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// 改坏确认：故意让增量划分漏掉一次合并，全量对照必须报出来。
+    #[test]
+    fn a_missed_merge_is_detected_by_the_naive_reference() {
+        let mut partition = Partition::new(1);
+        partition.set_verify(true);
+        let a = c(0, 0);
+        let b = c(4, 0);
+        let busy_a = BTreeSet::from([a]);
+        partition.update(&busy_a, &[], &[a], &[]);
+        // 桥接区块让 b 落进「已存在单元」的邻居范围：朴素划分会把三者并成一个单元。
+        let bridge = c(2, 0);
+        let busy_ab = BTreeSet::from([a, bridge]);
+        partition.update(&busy_ab, &[], &[bridge], &[]);
+        let busy = BTreeSet::from([a, bridge, b]);
+        partition.skip_merge_once = true;
+        partition.skip_overlap_merge_once = true;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            partition.update(&busy, &[], &[b], &[]);
+        }));
+        assert!(result.is_err(), "漏掉一次合并时全量对照必须报出来");
+    }
+
+    /// 按划分拆开再合回来等于没拆过：一组区块的带位置状态逐项相同。
+    #[test]
+    fn splitting_units_by_the_partition_and_absorbing_them_is_identity() {
+        use crate::region::column_tests::partition_round_trip;
+        for seed in [3_u64, 99, 4242] {
+            let mut rng = Rng::new(seed);
+            let mut busy = BTreeSet::new();
+            for _ in 0..8 {
+                busy.insert(c(rng.below(6) as i32, rng.below(6) as i32));
+            }
+            let units = naive_partition(&busy, &[], 1);
+            for unit in units {
+                partition_round_trip(&unit.busy);
+            }
+        }
+    }
+
+    /// 划分对极端坐标不 panic：客户端给来的坐标不能让饱和算术溢出。
+    #[test]
+    fn extreme_chunk_positions_do_not_panic() {
+        let busy = BTreeSet::from([c(i32::MIN, i32::MAX), c(i32::MAX, i32::MIN)]);
+        let units = naive_partition(&busy, &[], 2);
+        assert_eq!(units.len(), 2);
+        let mut partition = Partition::new(2);
+        partition.set_verify(true);
+        partition.update(&busy, &[], &busy.iter().copied().collect::<Vec<_>>(), &[]);
+        assert!(partition.areas_disjoint());
+    }
+
+    /// 一个构造出来的「活塞从忙区块推进缓冲圈外」场景：触发在忙区块，
+    /// 写到了范围外的区块；越界统计必须记下来。
+    #[test]
+    fn a_write_outside_the_halo_is_reported_as_an_out_of_unit_trigger() {
+        use crate::partition_stats::PartitionStats;
+        use mc_bamboo_blocks::Trigger;
+        use std::time::Instant;
+
+        let mut partition = Partition::new(1);
+        let busy = BTreeSet::from([c(0, 0)]);
+        partition.update(&busy, &[], &[c(0, 0)], &[]);
+        let mut halo2 = Partition::new(2);
+        halo2.update(&busy, &[], &[c(0, 0)], &[]);
+        let partitions = vec![partition, halo2];
+        let mut stats = PartitionStats::default();
+        let kind = mc_bamboo_data::block_id_of_state(mc_bamboo_data::blocks::PISTON)
+            .expect("活塞有注册 ID");
+        stats.trigger_begin(
+            Trigger::ScheduledTick {
+                pos: BlockPos::new(1, 64, 1),
+                kind,
+            },
+            &partitions,
+            Instant::now(),
+        );
+        // 活塞推到 12 格外，落在 (2,0) 区块：halo=1 的范围是 −1..1，越界；
+        // halo=2 的范围是 −2..2，也越界（活塞加邻居更新能走到 13 格）。
+        stats.chunk_access(BlockPos::new(2 * 16 + 17, 64, 1), true, &partitions);
+        stats.trigger_end(Instant::now());
+        let report = stats.report();
+        assert!(report.contains("halo 1 out_triggers=1"), "{report}");
+        assert!(report.contains("halo 2 out_triggers=1"), "{report}");
+        assert!(report.contains("out-block minecraft:piston"), "{report}");
+        assert!(
+            report.contains(
+                "halo 1 out_triggers=1 unassigned=0 out_units=1 max_distance=2 reads=0 writes=1"
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "halo 2 out_triggers=1 unassigned=0 out_units=1 max_distance=1 reads=0 writes=1"
+            ),
+            "{report}"
+        );
+    }
+
+    /// 改坏确认：故意让越界统计漏记「写」这一种访问，构造好的活塞场景必须报出来。
+    #[test]
+    fn a_missing_write_access_is_detected_by_the_piston_scenario() {
+        use crate::partition_stats::PartitionStats;
+        use mc_bamboo_blocks::Trigger;
+        use std::time::Instant;
+
+        let mut partition = Partition::new(1);
+        let busy = BTreeSet::from([c(0, 0)]);
+        partition.update(&busy, &[], &[c(0, 0)], &[]);
+        let mut halo2 = Partition::new(2);
+        halo2.update(&busy, &[], &[c(0, 0)], &[]);
+        let partitions = vec![partition, halo2];
+        let mut broken = PartitionStats::default();
+        broken.skip_writes = true;
+        let kind = mc_bamboo_data::block_id_of_state(mc_bamboo_data::blocks::PISTON)
+            .expect("活塞有注册 ID");
+        broken.trigger_begin(
+            Trigger::ScheduledTick {
+                pos: BlockPos::new(1, 64, 1),
+                kind,
+            },
+            &partitions,
+            Instant::now(),
+        );
+        broken.chunk_access(BlockPos::new(2 * 16 + 17, 64, 1), true, &partitions);
+        broken.trigger_end(Instant::now());
+        let report = broken.report();
+        assert!(
+            report.contains("halo 1 out_triggers=0"),
+            "漏记写之后越界触发数掉到 0，测试要能发现：{report}"
+        );
+        assert!(report.contains("writes=0"), "{report}");
+    }
+
+    /// 触发位置不在忙区块里（第 2 种越界）也要统计到。
+    #[test]
+    fn unassigned_triggers_are_counted_separately() {
+        use crate::partition_stats::PartitionStats;
+        use mc_bamboo_blocks::Trigger;
+        use std::time::Instant;
+        let mut partition = Partition::new(1);
+        let busy = BTreeSet::from([c(0, 0)]);
+        partition.update(&busy, &[], &[c(0, 0)], &[]);
+        let mut halo2 = Partition::new(2);
+        halo2.update(&busy, &[], &[c(0, 0)], &[]);
+        let partitions = vec![partition.clone(), halo2];
+        let mut stats = PartitionStats::default();
+        stats.trigger_begin(
+            Trigger::BlockEvent {
+                pos: BlockPos::new(9 * 16, 64, 0),
+                kind: mc_bamboo_data::block_id_of_state(mc_bamboo_data::blocks::PISTON)
+                    .expect("活塞有注册 ID"),
+                param_a: 0,
+                param_b: 0,
+            },
+            &partitions,
+            Instant::now(),
+        );
+        stats.trigger_end(Instant::now());
+        let report = stats.report();
+        assert!(report.contains("unassigned=1"), "{report}");
+        assert!(report.contains("max_distance=0"), "{report}");
     }
 }

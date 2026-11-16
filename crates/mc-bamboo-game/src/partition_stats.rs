@@ -113,6 +113,9 @@ pub(crate) struct PartitionStats {
     unit_generation: [usize; HALOS.len()],
     /// 划分变化的代数，每刻由调用方传进来才知道下标有没有换主人（见 `record_units`）。
     last_unit_keys: [Vec<usize>; HALOS.len()],
+    /// 改坏确认用：故意漏记写访问，让构造好的活塞场景能把它报出来。
+    #[cfg(test)]
+    pub(crate) skip_writes: bool,
 }
 
 /// 一个触发的方块名字。注册表 ID 来自方块逻辑，越界时用名字归类。
@@ -236,6 +239,10 @@ impl PartitionStats {
         let Some(open) = self.open.as_mut() else {
             return;
         };
+        #[cfg(test)]
+        if self.skip_writes && write {
+            return;
+        }
         let touched = pos.chunk();
         for (index, partition) in partitions.iter().enumerate() {
             let Some(unit) = partition.unit_for(open.pos.chunk()) else {

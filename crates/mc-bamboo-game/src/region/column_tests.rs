@@ -1887,6 +1887,23 @@ fn an_idle_sleeping_hopper_only_marks_its_chunk_when_content_changes() {
     assert!(sleeping[20], "改物品之前漏斗确实在跑这套场景");
 }
 
+/// 按一组单元区块拆开再合回来，和从没拆过的 region 逐项相同。
+/// 划分的随机测试用这个入口验证「按划分拆合是恒等变换」。
+#[cfg(test)]
+pub(crate) fn partition_round_trip(chunks: &BTreeSet<ChunkPos>) {
+    let (mut control, mut split) = pair();
+    let before = snapshot(control.region());
+    if chunks.is_empty() {
+        return;
+    }
+    let unit = split
+        .region()
+        .split_off_unit(chunks, 1)
+        .expect("测试用的 region 可以拆");
+    split.region().absorb_unit(unit);
+    assert_eq!(snapshot(split.region()), before, "拆合前后可见状态相同");
+}
+
 /// 单元拆合：四张游戏层表 + 计划刻 / 方块事件 / 方块实体 / 红石记忆
 /// 拆出去再并回来，和从没拆过的 region 逐项相同。
 #[test]
