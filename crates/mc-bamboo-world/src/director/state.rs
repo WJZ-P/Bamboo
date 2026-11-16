@@ -438,6 +438,9 @@ pub struct Director<C> {
     pending_order: BinaryHeap<Reverse<QueueEntry>>,
     /// 上一次被写范围/配额挡住、等状态变了再试的任务。
     deferred: Vec<TaskId>,
+    /// 只有「任务完成、取消、新任务加入或玩家快照变了」才重试 deferred。
+    /// 一次事件后最多重试一次，同一刻后续的多次 drive 不再重复入堆。
+    needs_retry: bool,
     /// 需求快照的代数；变了之后堆里的键整堆重算一次。
     demand_epoch: u64,
     /// 堆里当前键用的是哪一代需求。
@@ -495,6 +498,7 @@ impl<C: ChunkBundle> Director<C> {
             queued_reads: BTreeSet::new(),
             pending_order: BinaryHeap::new(),
             deferred: Vec::new(),
+            needs_retry: false,
             demand_epoch: 0,
             heap_epoch: 0,
             reclaim_due: BinaryHeap::new(),
@@ -529,6 +533,7 @@ impl<C: ChunkBundle> Director<C> {
         }
         self.demand = demand;
         self.demand_epoch = self.demand_epoch.wrapping_add(1);
+        self.needs_retry = true;
     }
 
     /// 当前的需求快照，宿主的读盘、计算池和交付队列用同一个 rank 排序。
@@ -540,6 +545,8 @@ impl<C: ChunkBundle> Director<C> {
     /// `drive` 只把 deferred 重新放进堆，不重算任何其它任务的键。
     pub fn begin_tick(&mut self) {
         self.submitted_this_tick = 0;
+        // 每刻给 deferred 一次机会（比如上一刻末刚好被挡住）。
+        self.needs_retry = true;
     }
 
     pub fn tickets_mut(&mut self) -> &mut TicketTable {
@@ -1420,6 +1427,7 @@ impl<C: ChunkBundle> Director<C> {
     fn schedule_task(&mut self, id: TaskId) {
         let key = self.task_key(id);
         self.pending_order.push(Reverse((key, id)));
+        self.needs_retry = true;
     }
 
     /// 一个任务的排序键：rank、阶段进度、TaskId 兜底。
@@ -1496,13 +1504,15 @@ impl<C: ChunkBundle> Director<C> {
             return;
         }
         self.refresh_heap_if_needed();
-        // 被配额/写范围挡住的任务每次 drive 都回到堆里参与比较；
-        // 只重算这少量任务的键，不碰其它待派任务，更不整表重排。
-        let deferred = std::mem::take(&mut self.deferred);
-        for id in deferred {
-            if self.pending.contains_key(&id) {
-                let key = self.task_key(id);
-                self.pending_order.push(Reverse((key, id)));
+        // 只在有事件让状态变了之后把 deferred 放回堆里；同一刻后续的
+        // `drive` 直接跳过这一步，不会每轮重排几百个被挡住的任务。
+        if std::mem::take(&mut self.needs_retry) {
+            let deferred = std::mem::take(&mut self.deferred);
+            for id in deferred {
+                if self.pending.contains_key(&id) {
+                    let key = self.task_key(id);
+                    self.pending_order.push(Reverse((key, id)));
+                }
             }
         }
 

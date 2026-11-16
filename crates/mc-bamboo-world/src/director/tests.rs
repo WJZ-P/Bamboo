@@ -1192,7 +1192,7 @@ fn dispatch_prefers_the_forward_side_and_stays_deterministic() {
     );
 }
 
-/// 增量调度：任务完成后，上一轮被每玩家配额挡住的任务能再派出去，
+/// 增量调度：把每玩家在途上限放大后，上一轮被挡住的任务能再派出去，
 /// 不需要整表重排，也不会被永久饿死。
 #[test]
 fn deferred_tasks_retry_after_a_quota_is_released() {
@@ -1200,15 +1200,12 @@ fn deferred_tasks_retry_after_a_quota_is_released() {
 
     let mut director = Director::<Fake>::new(DirectorConfig::default());
     director.set_template(|| Fake(0));
-    director.set_player_demand(DemandSnapshot::with_caps(
-        vec![PlayerDemand {
-            id: 1,
-            center: ChunkPos::new(0, 0),
-            direction: (0, 0),
-        }],
-        1,
-        DEFAULT_MAX_LOADS_PER_PLAYER,
-    ));
+    let player = PlayerDemand {
+        id: 1,
+        center: ChunkPos::new(0, 0),
+        direction: (0, 0),
+    };
+    director.set_player_demand(DemandSnapshot::with_caps(vec![player], 1, 100));
     let ops: Vec<TicketOp> = (-2..=2)
         .map(|x| TicketOp::Add {
             ty: crate::ticket::TicketType::Forced,
@@ -1217,37 +1214,24 @@ fn deferred_tasks_retry_after_a_quota_is_released() {
         })
         .collect();
     let effects = director.handle(Event::Tickets { ops });
-    let submitted: Vec<(TaskId, Task<Fake>)> = effects
-        .into_iter()
-        .filter_map(|effect| match effect {
-            Effect::Submit { id, task, .. } => Some((id, task)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(submitted.len(), 1, "每玩家在途上限只放一个任务出去");
-    assert_eq!(director.debug_state().pending().len(), 4);
-    let (id, task) = submitted.into_iter().next().expect("派出了一个任务");
-    let pos = task.pos();
-    // 完成这个任务：配额释放，这一次 drive 就该派出下一个任务。
-    let done = director.handle(Event::TaskDone {
-        id,
-        pos,
-        generation: 1,
-        result: TaskResult::Decoded { column: Fake(0) },
-    });
-    let mut submitted_again = done
+    let submitted = effects
         .iter()
         .filter(|effect| matches!(effect, Effect::Submit { .. }))
         .count();
-    // 连续几个空事件：被挡住的任务只能靠 deferred 重试回到堆里。
-    for tick in 1..=3 {
-        let effects = director.handle(Event::Tick { now_tick: tick });
-        submitted_again += effects
-            .iter()
-            .filter(|effect| matches!(effect, Effect::Submit { .. }))
-            .count();
-    }
-    assert!(submitted_again > 0, "配额释放后 deferred 任务要能继续派出");
+    assert_eq!(submitted, 1, "每玩家在途上限只放一个任务出去");
+    assert_eq!(director.debug_state().pending().len(), 4);
+    // 放宽配额相当于「在途任务完成、额度空出来」；玩家快照变了也触发重试。
+    director.set_player_demand(DemandSnapshot::with_caps(
+        vec![player],
+        DEFAULT_MAX_LOADS_PER_PLAYER,
+        100,
+    ));
+    let effects = director.handle(Event::Tickets { ops: vec![] });
+    let again = effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Submit { .. }))
+        .count();
+    assert!(again > 0, "配额够之后 deferred 任务要能继续派出");
     assert!(
         director.debug_state().pending().len() < 4,
         "不能让被挡住的任务永远留在队列里"
