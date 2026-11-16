@@ -3,7 +3,7 @@
 //! 一次 [`Director::handle`] 是纯的：只读自己的状态和事件，只往返回的 [`Effect`]
 //! 列表里写。宿主负责真正跑任务、搬盒子、发消息。
 
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
 use mc_bamboo_core::ChunkPos;
 
@@ -12,6 +12,7 @@ use crate::ticket::{
     is_entity_ticking,
 };
 
+use super::priority::{DemandKind, DemandSnapshot};
 use super::pyramid::{PipelineKind, neighbor_view};
 
 /// 一个完工的区块束。Director 不打开它，只整包搬运。
@@ -430,6 +431,14 @@ pub struct Director<C> {
     reclaim_due: BinaryHeap<ReclaimDue>,
     /// 本刻已经派出去的任务数。
     submitted_this_tick: usize,
+    /// 当前玩家需求和每玩家在途配额。宿主每刻更新，纯状态机测试默认是空快照。
+    demand: DemandSnapshot,
+    /// 每名玩家当前在途的「加载存档」和「新生成」任务数，按 `(玩家编号, 类别)` 记。
+    demand_in_flight: HashMap<(u64, DemandKind), usize>,
+    /// 每个在途任务归到哪几名玩家、属于哪一类，`on_task_done` 收回时减计数。
+    task_owners: HashMap<TaskId, (Vec<u64>, DemandKind)>,
+    /// 一次 `drive` 里排序用的任务编号，跨次复用容量。
+    priority_ids: Vec<TaskId>,
     /// 超时票的 `is_busy` 直接查这张表，不每刻重建。
     busy: BTreeSet<ChunkPos>,
     /// 已交付或正在交付的记录数，随 `Owner` 变化增量维护。
@@ -475,6 +484,10 @@ impl<C: ChunkBundle> Director<C> {
             last_seen_task: 0,
             reclaim_due: BinaryHeap::new(),
             submitted_this_tick: 0,
+            demand: DemandSnapshot::default(),
+            demand_in_flight: HashMap::new(),
+            task_owners: HashMap::new(),
+            priority_ids: Vec::new(),
             busy: BTreeSet::new(),
             loaded: 0,
             filtered: 0,
@@ -491,6 +504,17 @@ impl<C: ChunkBundle> Director<C> {
 
     pub fn tickets(&self) -> &TicketTable {
         &self.tickets
+    }
+
+    /// 更新玩家加载需求的快照。玩家跨格才该调；换快照后待派任务下一次
+    /// `drive` 就按新的距离和方向重排，在途任务仍记在原来的玩家名下。
+    pub fn set_player_demand(&mut self, demand: DemandSnapshot) {
+        self.demand = demand;
+    }
+
+    /// 当前的需求快照，宿主的读盘、计算池和交付队列用同一个 rank 排序。
+    pub fn player_demand(&self) -> &DemandSnapshot {
+        &self.demand
     }
 
     pub fn tickets_mut(&mut self) -> &mut TicketTable {
@@ -874,6 +898,7 @@ impl<C: ChunkBundle> Director<C> {
                 out.push(Effect::Cancel { id });
             }
             self.pending.remove(&id);
+            self.release_task_owners(id);
         }
         self.refresh_busy(pos);
         self.queued_reads.remove(&pos);
@@ -998,6 +1023,7 @@ impl<C: ChunkBundle> Director<C> {
         result: TaskResult<C>,
     ) {
         let Some(in_flight) = self.in_flight.remove(&id) else {
+            self.release_task_owners(id);
             Self::park_orphan_result(out, pos, result);
             return;
         };
@@ -1015,6 +1041,7 @@ impl<C: ChunkBundle> Director<C> {
         }
         record.task = None;
         self.refresh_busy(pos);
+        self.release_task_owners(id);
         match result {
             TaskResult::Read { bytes: Some(bytes) } => {
                 self.enqueue(out, pos, generation, None, Task::Decode { pos, bytes });
@@ -1311,6 +1338,67 @@ impl<C: ChunkBundle> Director<C> {
         );
     }
 
+    /// 一个任务属于哪种每玩家限速。`Save` / `Assemble` 是收尾路径，不占配额。
+    fn demand_kind(task: &Task<C>) -> DemandKind {
+        match task {
+            Task::Read { .. } | Task::Decode { .. } => DemandKind::Load,
+            Task::Generate { .. } => DemandKind::Generate,
+            Task::Assemble { .. } | Task::Save { .. } => DemandKind::Unbounded,
+        }
+    }
+
+    /// 派出任务时登记它归哪几名玩家；返回该任务能不能过每玩家在途上限。
+    fn claim_task_owners(&mut self, id: TaskId, pos: ChunkPos, kind: DemandKind) -> bool {
+        if matches!(kind, DemandKind::Unbounded) || self.demand.players().is_empty() {
+            return true;
+        }
+        let owners = self.demand.owners(pos);
+        if owners.is_empty() || kind.cap(&self.demand) == 0 {
+            self.task_owners.insert(id, (owners, kind));
+            return true;
+        }
+        let cap = kind.cap(&self.demand);
+        if owners.iter().any(|&player| {
+            self.demand_in_flight
+                .get(&(player, kind))
+                .copied()
+                .unwrap_or(0)
+                >= cap
+        }) {
+            return false;
+        }
+        for &player in &owners {
+            *self.demand_in_flight.entry((player, kind)).or_default() += 1;
+        }
+        self.task_owners.insert(id, (owners, kind));
+        true
+    }
+
+    /// 任务完成或取消时释放每玩家计数。每个任务只登记一次，不存在的条目是空操作。
+    fn release_task_owners(&mut self, id: TaskId) {
+        let Some((owners, kind)) = self.task_owners.remove(&id) else {
+            return;
+        };
+        for player in owners {
+            let slot = self.demand_in_flight.entry((player, kind)).or_default();
+            *slot = slot.saturating_sub(1);
+            if *slot == 0 {
+                self.demand_in_flight.remove(&(player, kind));
+            }
+        }
+    }
+
+    /// 待派任务的排序键：先按离最近玩家的距离（带方向加权），同一档按
+    /// 「这条流水线已经走到哪一步」把快完工的往前放，最后按 TaskId 兜底。
+    /// 结果只由 `(任务集合, 需求快照)` 决定，和哈希图遍历顺序无关。
+    fn priority_key(&self, id: TaskId, task: &PendingTask<C>) -> (i64, u8, u64) {
+        let stage = self
+            .chunks
+            .get(&task.pos)
+            .map_or(0, |record| record.stage as usize as u8);
+        (self.demand.rank(task.pos), u8::MAX - stage, id)
+    }
+
     /// 每处理完一个事件，把能推进的状态往前推：
     /// 新记录排 `Read`，待派任务按写范围排他派出去，攒着的 Ready/Forgot 发掉。
     fn drive(&mut self, out: &mut Vec<Effect<C>>) {
@@ -1321,7 +1409,12 @@ impl<C: ChunkBundle> Director<C> {
         // 只排这一批新记录，不扫整张表。`enqueue` 会把它从队列里摘掉。
         let mut reads = std::mem::take(&mut self.reads);
         reads.clear();
-        for pos in std::mem::take(&mut self.queued_reads) {
+        // 新排的读任务先按玩家优先级排，TaskId 因此也是「急的先发」，
+        // 后面所有按 TaskId 兜底的地方都跟着这个顺序走。
+        let mut queued: Vec<ChunkPos> =
+            std::mem::take(&mut self.queued_reads).into_iter().collect();
+        queued.sort_by_key(|&pos| (self.demand.rank(pos), pos.x, pos.z));
+        for pos in queued {
             if self.chunks.get(&pos).is_some_and(|record| {
                 record.owner == Owner::Pipeline
                     && record.task.is_none()
@@ -1337,7 +1430,7 @@ impl<C: ChunkBundle> Director<C> {
         }
         self.reads = reads;
 
-        // 按 TaskId 顺序尝试派出；写范围相交的任务留到下次。
+        // 按玩家优先级尝试派出；写范围相交或某名玩家配额用完的留到下次。
         // 看一眼配额：没有可派的余量时连 `pending` 的键都不收集。
         let can_submit = (self.config.max_submits_per_tick == 0
             || self.submitted_this_tick < self.config.max_submits_per_tick)
@@ -1360,9 +1453,24 @@ impl<C: ChunkBundle> Director<C> {
             ))
             .map(|(&id, _)| id);
         ids.extend(new_ids);
+        // 每次 `drive` 按当前快照重排这一小批，玩家移动后优先级立刻跟着变。
+        // 批外的待派任务不在这里扫，它们下一次进 `submittable` 时自然重排。
+        let mut order = std::mem::take(&mut self.priority_ids);
+        order.clear();
+        order.extend(
+            ids.iter()
+                .copied()
+                .filter(|id| self.pending.contains_key(id)),
+        );
+        order.sort_by_key(|&id| {
+            self.pending
+                .get(&id)
+                .map(|task| self.priority_key(id, task))
+                .unwrap_or((i64::MAX, u8::MAX, id))
+        });
         let mut blocked = std::mem::take(&mut self.submittable);
         blocked.clear();
-        for id in ids.drain(..) {
+        for id in order.drain(..) {
             if self.config.max_submits_per_tick > 0
                 && self.submitted_this_tick >= self.config.max_submits_per_tick
             {
@@ -1386,11 +1494,12 @@ impl<C: ChunkBundle> Director<C> {
             }
             let radius = pending.task.write_radius();
             let pos = pending.pos;
+            let kind = Self::demand_kind(&pending.task);
             let overlaps = self
                 .in_flight
                 .values()
                 .any(|other| write_ranges_overlap(other.pos, other.write_radius, pos, radius));
-            if overlaps {
+            if overlaps || !self.claim_task_owners(id, pos, kind) {
                 blocked.push(id);
                 continue;
             }
@@ -1412,6 +1521,7 @@ impl<C: ChunkBundle> Director<C> {
             let _ = pending.seq;
         }
         self.submittable = blocked;
+        self.priority_ids = order;
         self.task_ids = ids;
         self.last_seen_task = self.next_task.wrapping_sub(1);
         self.flush_notifications(out);

@@ -86,10 +86,14 @@ impl DemandSnapshot {
     /// 这个区块归哪几名玩家：离得最近的几名，按 `(距离, 编号)` 排序。
     /// 没有玩家时返回空，任务仍按坐标/TaskId 兜底排序。
     pub fn owners(&self, pos: ChunkPos) -> Vec<u64> {
+        // 看得见这个任务的玩家才算「请求者」：视距 32 时一个玩家最多覆盖
+        // 65×65，超出这个半径的区块由别的玩家（或没有玩家）负责。
+        let radius = i64::from(crate::ticket::MAX_VIEW_DISTANCE) + 1;
         let mut ranked: Vec<(i64, u64)> = self
             .players
             .iter()
             .map(|player| (chebyshev(pos, player.center), player.id))
+            .filter(|&(distance, _)| distance <= radius)
             .collect();
         ranked.sort_unstable();
         ranked.truncate(MAX_OWNERS);
@@ -137,7 +141,7 @@ pub fn chebyshev(a: ChunkPos, b: ChunkPos) -> i64 {
 
 /// 任务属于哪种每玩家限速。`Save` / `Assemble` 返回 `None`：它们是收尾路径，
 /// 卡住反而会让在途任务永远不释放。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DemandKind {
     Load,
     Generate,
