@@ -48,6 +48,11 @@
 | 17 | 两项合计，一个区块跑到 CARVERS（10） | 121.85 ms | 17.47 ms | 7.0× |
 | 18 | 密度函数成批噪声的列特化：`wg-perf noise_density`（11） | 2.88–2.90 ms | 1.57–1.65 ms | 1.9× |
 | 18 | 同上：`chunk_timing` NOISE 累计（35 区块中位数） | 3.63–3.64 ms | 2.30 ms | 1.6× |
+| 19 | 按玩家限速和优先级加载：1 人高速飞行，前方区块到达延迟 p95（12） | 1387 ms | **1090 ms** | 1.3× |
+| 19 | 同上：4 人各朝不同方向飞，前方区块到达延迟 p95（12） | 2388 ms | **2191 ms** | 1.1× |
+| 19 | 同上：4 人场景 `chunk_latency_us` p95（12） | 2 174 852 µs | **1 837 457 µs** | 1.2× |
+| 19 | 同上：4 人场景计算池待办平均（12） | 769 个 | **142 个** | 5.4× |
+| 19 | 同上：4 人场景 tick p95（增量调度后，见 12.5） | 1.3 ms | **1.7 ms** | 多 0.4 ms |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -64,6 +69,10 @@
 第 17 项见第 10 节，三行分别是两个有收益的改动各自的前后数字和合计；第 18 项见第 11 节，
 是密度求值的列特化，两行的口径分别是 `wg-perf` 单阶段中位数和 `chunk_timing` 累计中位数。
 两者都是「纯函数世界生成」的优化，不是整机 tick。
+
+第 19 项见第 12 节，是区块到达延迟的端到端墙上时间（客户端量，不是 `chunk_latency_us`），
+和计算池待办长度；数字都取自最终二进制同一轮 A-B-A-B 交替的三对中位数。
+12.5 记录了把「每刻整表重排」改成增量堆之后 tick p95 回到基线附近的过程。
 
 第 10 行**不是优化**，是 2026-11-11 安静窗口里量到的「还剩多少差距」，见 7e 节和
 `profiling.md` 第 10 节：新旧两版 tick 的区块数、段数、方块数完全相同，差距全在
@@ -1790,3 +1799,139 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java --through features
 的粗改坏确认区块级对拍确实会报（`chunkgen --through carvers` / `features`
 各两个 salt 都是 160 处、`gen-world` 两个 salt 各约 270 万处），改坏后全部还原
 并复跑 `worldgen` / `chunkgen --through carvers` 为 0 不一致。
+
+---
+
+## 12. 按玩家限速和优先级加载区块（2026-11-16）
+
+代码：`crates/mc-bamboo-world/src/director/priority.rs`（纯排队规则）、
+`crates/mc-bamboo-world/src/director/state.rs`（Director 准入）、
+`crates/mc-bamboo-game/src/director_host.rs`（宿主四处排序）、
+`crates/mc-bamboo-game/src/world.rs`（每刻喂玩家需求快照）。
+
+### 12.1 原来慢在哪
+
+一次新区块要依次经过「票表变化 → `Read` → 若干个 `Generate` 阶段 → `Assemble`
+→ `Deliver` → `PlayerChunkSender`」。改之前 `Director::queued_reads` 是坐标序，
+`Director::pending` 按 `TaskId` 派，一个区块的每个生成阶段又重新按 `TaskId` 排队；
+只有宿主的 `read_queue` / `compute_backlog` / `deliveries` 按离最近玩家的切比雪夫
+距离排，且 `compute_backlog` 只在玩家**跨区块**时整堆重排。没有每玩家在途上限，
+没有移动方向，一个玩家一次进服或高速飞行就能把 Director 的待派队列和计算池
+填满。发放速率本身按官方 `desired_chunks_per_tick` 走，不受这里影响。
+
+服务端原有的 `chunk_latency_us` 只量 `pending → 写进出站缓冲`，量不到这些等待：
+同一场景里它稳态只有 11 µs，启动尖峰却有 1.84 s p95。所以在客户端一侧新增
+`tools/mc-bamboo-loadtest/src/chunk_trace.rs`：按假玩家自己的位置复现服务端
+`T(vd)`，记下每个区块第一次进入视距的时刻，再用 `level_chunk_with_light` 包里的
+x/z 配对到达，得到「进入视距 → 客户端收到」的墙上延迟，按全体 / 前方 / 近处
+分别出分位数，另记到达时区块还在玩家前方几格、每刻视距里缺多少区块。
+
+### 12.2 换成了什么
+
+- 一个新的纯 `DemandSnapshot`：`(玩家编号, 所在区块, 移动方向)` 的有序快照。
+  `rank(区块)` = 离最近玩家的切比雪夫距离 ± 最多 2 格的方向加权（站着或方向未知
+  时退化为纯距离），多名玩家取最小值；只归视距半径内离得最近的一名玩家。
+- `World::sync_player_tickets` 在玩家跨格时用相邻两个区块中心的差算方向，
+  位置或方向变了才把快照喂给 Director；没玩家时用票表里的中心按距离兜底。
+- `Director::drive` 用**一个**小顶堆选下一个任务，键是
+  `(rank, 流水线进度, TaskId)`，完全确定。新任务直接入堆；只在玩家需求快照
+  变化（跨格）时整堆重算一次。被写范围排他或每玩家配额挡住的任务原样放回
+  堆里，一次 `drive` 最多检查 16 个被挡住的任务就停下，其余留到下一次；
+  不扫整张积压表，也不维护第二份待办列表。公平靠每名玩家的硬上限。
+- 「加载存档」（`Read` / `Decode`）和「新生成」（`Generate`）各有一个每名玩家
+  在途硬上限（各 24，测试可改）；`Assemble` / `Save` 不占配额，避免卡住收尾。
+  任务完成或取消时精确释放计数。一个任务只归一名玩家，多人共视不会重复扣额度。
+- 宿主的读盘提交、计算池待办、交付信箱和池子优先级全部改读同一个 `rank`，
+  玩家移动后优先级跟着更新；`PlayerChunkSender` 的 `desired_chunks_per_tick`、
+  未确认批次上限、`forget_level_chunk` 和 `chunk_batch` 流程一行没改，票表等级
+  语义和生成纯函数也没改，只改任务顺序。
+
+### 12.3 数字和复现
+
+场景：`bamboo-loadtest serve --view-distance 8 --chunk-worker-threads 4`，
+假玩家 `fly/spread` 直线飞 25 秒（33 格/秒），`BAMBOO_PROFILE=5`，
+`BAMBOO_FAKE_GEN_DELAY_US=25000`（模拟每个生成阶段约 25 ms），
+客户端 `desired_chunks_per_tick=64`；1 人和 4 人（四个方向）两组各用两个
+**编译好的 release 二进制**在同一轮里 A-B-A-B 交替跑三对，取中位数：
+
+```sh
+cargo build --release -p mc-bamboo-loadtest
+# 把旧二进制另存为 baseline-loadtest，改后二进制另存为 priority-loadtest
+# A-B-A-B 交替各三次（1 人），4 人把 BOTS=4、换一个端口再跑一轮
+GEN_DELAY_US=25000 DURATION=25 PROFILE_SECS=5 \
+    tools/mc-bamboo-loadtest/run-chunk-trace.sh <结果目录>/1-A <旧二进制> 26061
+GEN_DELAY_US=25000 DURATION=25 PROFILE_SECS=5 \
+    tools/mc-bamboo-loadtest/run-chunk-trace.sh <结果目录>/1-B <新二进制> 26061
+python3 tools/mc-bamboo-loadtest/summarize-chunk-trace.py <结果目录>/1-A <结果目录>/1-B
+```
+
+两组数字各取三对 A / B 的中位数（A 是改前二进制、B 是最终单堆二进制）：
+
+| 指标（1 人） | 改之前 | 改之后 | 倍数 |
+|---|---:|---:|---:|
+| 前方区块到达 p50 / p95 | 40 / 1387 ms | **40 / 1090 ms** | 1.0× / 1.3× |
+| 全部区块到达 p50 / p95 | 40 / 1545 ms | **41 / 1290 ms** | 1.0× / 1.2× |
+| 近处（±3 区块）到达 p50 / p95 | 340 / 741 ms | **242 / 692 ms** | 1.4× / 1.1× |
+| 视距缺口 p95 | 168 个 | 165 个 | — |
+| 到达时仍在前方几区块 p50 | 8 | 8 | — |
+| `compute_backlog` 每刻平均 | 39.6 个 | 38.6 个 | — |
+| tick p95 | 0.6 ms | 0.6 ms | — |
+
+| 指标（4 人） | 改之前 | 改之后 | 倍数 |
+|---|---:|---:|---:|
+| 前方区块到达 p50 / p95 | 1391 / 2388 ms | **1355 / 2191 ms** | 1.0× / 1.1× |
+| 全部区块到达 p50 / p95 | 1388 / 2290 ms | **1339 / 2156 ms** | 1.0× / 1.1× |
+| 25 秒内到达 / 一直没到 | 4024 / 1085 个 | **4122 / 935 个** | +2.4% / −14% |
+| `compute_backlog` 每刻平均 | 769 个 | **142 个** | 5.4× |
+| `chunk_latency_us` p95（服务端直方图） | 2 174 852 µs | **1 837 457 µs** | 1.2× |
+| 各玩家前方 p95（第 2 对） | 2138, 2289, 2440, 2386 ms | **2192, 2188, 2091, 2136 ms** | 没有一个人被单独甩开 |
+| tick p50 / p95 | 未单独量 / 1.3 ms | 未单独量 / **1.7 ms** | 多 0.4 ms |
+
+三对 1 人场景 A 的前方 p95 是 1387 / 1395 / 1387，B 是 1090 / 1088 / 1090；
+4 人场景 A 是 2323 / 2388 / 2435，B 是 2205 / 2188 / 2191。收益稳定，
+到达总数和积压也变好；tick p95 只多 0.4 ms，远低于主代理要求的 1 ms。
+**同一台机器不同时间段的绝对值能差几倍**（见第 8 节），所以只在同一轮交替的
+A / B 之间比较。
+
+### 12.4 怎么确认结果没变
+
+- 生成结果：纯函数、模板、阶段依赖和写范围排他判断都没改，只改任务派出顺序；
+  `cargo test --workspace` 里 `world::staged_tests::one_and_four_threads_generate_identical_feature_blocks`
+  仍逐字节比对 1 / 4 线程的生成结果。
+- 官方协议：`PlayerChunkSender` 一行没改；`tools/probe.sh` fresh 与 `--loaded`
+  两遍都 719/719，区块到达顺序的三项额外检查（脚下区块、最近先到、第一批
+  3×3）全过；hy4 probe 719/719。
+- 票据：`ticket-oracle java --scenes 100 --seed 12345` 1129 步 0 不一致，
+  `cache_diff 4000` 九台全部 0 刻不一致，`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game`
+  928 通过。
+- 正确性单测：`Director` 的随机事件、阶段依赖、写范围、关服、限速、确定性
+  派单、方向加权和「配额释放后 deferred 任务继续派出」都有测试；
+  `queue_compute` / `submit_reads` / `deliveries` 的排序键共用同一个
+  `DemandSnapshot`，不会出现三处各排各的。
+
+### 12.5 增量调度：把整表重排的代价去掉
+
+第一版实现是「每刻开头把整张 `pending` 按玩家优先级重排一次」。4 人场景确实
+把前方 p95 从 6436 ms 降到 2942 ms、积压从 923 降到 164，但每刻
+`director_events` 多了 8–11 ms，tick p95 从 2.3 ms 涨到 **27.7 ms**：50 ms
+预算里光调度排序就吃掉一半，不能接受。
+
+最终实现是**一个优先级堆**：
+
+- 堆项 `(rank, 阶段, TaskId)`，新任务 `enqueue` 时算一次键入堆；
+  `set_player_demand`（玩家跨格）只推一次代数，下一次真正要派任务时才整堆
+  重算，不是每刻。
+- 派任务时取堆顶；配额满或写范围冲突就把**这一个**任务原样放回堆，
+  一次 `drive` 最多检查 16 个被挡住的任务就停止。其余任务仍按优先级留在
+  堆里，配额一释放、下一次 `drive` 自然取到最急的那个。没有第二份 deferred
+  列表，也不排序、去重或扫描积压表。
+- 公平靠每名玩家的在途硬上限，不用全局「最少在途数」比较（那会在某名玩家
+  暂时没有待派任务时把别人全饿死）。顺序始终由键里的 TaskId 兜底，确定。
+
+同一轮 A-B-A-B 交替三对（4 人，场景同 12.3）：改前 tick p95 是
+1.3 / 1.3 / 1.2 ms，单堆是 1.7 / 1.7 / 1.7 ms，**只多 0.4 ms**；
+前方 p95 仍从 2388 ms 降到 2191 ms，`compute_backlog` 从 769 降到 142，
+`chunk_latency_us` p95 从 2 174 852 降到 1 837 457 µs。1 人场景 tick p95
+两版都是 0.6–0.7 ms。也就是说「tick p95 比改前多不到 1 ms」达到了，
+前方延迟的收益也保住了。
+

@@ -270,6 +270,13 @@ fn track_client_chunks(held: &mut BTreeSet<ChunkPos>, frame: &super::tests::Fram
 #[test]
 fn the_view_arrives_over_several_ticks_nearest_first() {
     let mut server = Harness::new_loaded(2);
+    // 视距 2 的视野只有几十个区块，把交付上限调小，
+    // 让玩家进服的尖峰在这一刻也只交一部分、剩下的留到下一刻。
+    server.set_mail_budget(crate::director_host::MailBudget {
+        deliveries: 8,
+        reclaims: 8,
+    });
+    server.set_demand_caps(4, 4);
     let client = server.join("Kitten");
     let mut held = BTreeSet::new();
     let mut order: Vec<ChunkPos> = Vec::new();

@@ -21,7 +21,9 @@ use mc_bamboo_storage::{
     player_data::PlayerData,
     world_dir::{encode_player_data, player_uuid_string},
 };
-use mc_bamboo_world::director::{DirectorConfig, PipelineKind, TicketOp};
+use mc_bamboo_world::director::{
+    DemandSnapshot, DirectorConfig, PipelineKind, PlayerDemand, TicketOp,
+};
 
 use crate::director_host::{DirectorHost, MailBudget};
 use tracing::{debug, error, info, warn};
@@ -148,6 +150,10 @@ pub struct World {
     host: DirectorHost,
     /// 上一刻每名玩家所在的区块，用来只在跨区块时发 `PlayerMoved`。
     ticket_centers: std::collections::BTreeMap<PlayerId, ChunkPos>,
+    /// 每名玩家上一次跨区块的方向（只取符号）。需求快照里方向未知时退化为纯距离。
+    player_directions: std::collections::BTreeMap<PlayerId, (i32, i32)>,
+    /// 上次喂给 Director 的需求快照，位置或方向变了才重算。
+    player_demand: Option<DemandSnapshot>,
     /// Director 的逻辑刻数，每次 `tick_ticket_timeouts` 加一。
     director_tick: u64,
     /// 存档会话。`None` 表示这一局不存档。
@@ -305,6 +311,8 @@ impl World {
                 )
             },
             ticket_centers: std::collections::BTreeMap::new(),
+            player_directions: std::collections::BTreeMap::new(),
+            player_demand: None,
             director_tick: 0,
             save,
             startup_error,
@@ -413,12 +421,19 @@ impl World {
     /// 每刻在玩家跟踪阶段之前调用：只在玩家跨区块时发 `PlayerMoved`。
     fn sync_player_tickets(&mut self) {
         let mut moves = Vec::new();
+        let mut changed = false;
         for (&id, player) in &self.region.players {
             let at = player.chunk_pos();
             if self.ticket_centers.get(&id) == Some(&at) {
                 continue;
             }
-            self.ticket_centers.insert(id, at);
+            if let Some(previous) = self.ticket_centers.insert(id, at) {
+                let direction = ((at.x - previous.x).signum(), (at.z - previous.z).signum());
+                if direction != (0, 0) {
+                    self.player_directions.insert(id, direction);
+                }
+            }
+            changed = true;
             moves.push(TicketOp::PlayerMoved {
                 id: u64::from(id.0 as u32),
                 to: Some(at),
@@ -432,6 +447,8 @@ impl World {
         }
         for id in left {
             self.ticket_centers.remove(&id);
+            self.player_directions.remove(&id);
+            changed = true;
             moves.push(TicketOp::PlayerMoved {
                 id: u64::from(id.0 as u32),
                 to: None,
@@ -440,6 +457,29 @@ impl World {
         if !moves.is_empty() {
             self.apply_ticket_ops(moves);
         }
+        if changed {
+            self.publish_player_demand();
+        }
+    }
+
+    /// 把「每名玩家在哪个区块、朝哪边走」喂给 Director 和宿主。
+    /// 只在跨格或有人进出时调，位置没变时不重排任何队列。
+    fn publish_player_demand(&mut self) {
+        let players: Vec<PlayerDemand> = self
+            .ticket_centers
+            .iter()
+            .map(|(&id, &center)| PlayerDemand {
+                id: u64::from(id.0 as u32),
+                center,
+                direction: self.player_directions.get(&id).copied().unwrap_or((0, 0)),
+            })
+            .collect();
+        let demand = DemandSnapshot::new(players);
+        if self.player_demand.as_ref() == Some(&demand) {
+            return;
+        }
+        self.player_demand = Some(demand.clone());
+        self.host.set_player_demand(demand);
     }
 
     /// 超时票每刻递减。`is_busy` 现在恒为假（区块都隐式存在），

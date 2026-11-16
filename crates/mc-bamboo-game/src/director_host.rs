@@ -18,8 +18,8 @@ use mc_bamboo_core::ChunkPos;
 use mc_bamboo_storage::chunk_io::{ChunkIo, Reply};
 use mc_bamboo_world::{
     director::{
-        Desired, Director, DirectorConfig, Effect, Event, RegionMessage, SaveSeq, Task, TaskId,
-        TaskResult, TicketOp,
+        DemandSnapshot, Desired, Director, DirectorConfig, Effect, Event, RegionMessage, SaveSeq,
+        Task, TaskId, TaskResult, TicketOp,
     },
     light::generate::GeneratedLight,
     store::ChunkRevision,
@@ -91,6 +91,9 @@ pub(crate) const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
 /// 留在宿主手里的任务还能按玩家的新位置重排、撤票时直接丢掉，
 /// 不会在池子里排一长串过期的远处任务。
 pub(crate) const POOL_JOBS_PER_THREAD: usize = 4;
+
+/// 排队用的 rank：`(玩家优先级, x, z)`，小的先出。
+type DemandRank = (i64, i32, i32);
 
 /// 一次待落盘的区块快照。
 #[cfg(test)]
@@ -210,10 +213,11 @@ pub(crate) struct DirectorHost {
     /// 个，其余留在这里，每次 `pump` 收尾按离玩家的距离挑最近的补进去；撤票时
     /// 直接从这里删掉。存盘不进待办，直接交给池子。
     compute_backlog: HashMap<TaskId, ChunkJob>,
-    /// 待办的出队顺序：`(离玩家的距离, TaskId)` 小的先出。删掉的任务不从堆里删，
-    /// 出堆时发现它已经不在 `compute_backlog` 里就跳过。
-    backlog_order: BinaryHeap<Reverse<(u64, TaskId)>>,
-    /// 算 `backlog_order` 里那些距离时用的玩家区块。玩家跨了区块就整堆重排。
+    /// 待办的出队顺序：`(rank, TaskId)` 小的先出。`rank` 是
+    /// `(玩家优先级, x, z)`，和 Director 的准入排序同一份需求快照。
+    /// 删掉的任务不从堆里删，出堆时发现它已经不在 `compute_backlog` 里就跳过。
+    backlog_order: BinaryHeap<Reverse<(DemandRank, TaskId)>>,
+    /// 上次整堆重排时的玩家区块；`set_player_demand` 清空它，强制重排。
     backlog_centers: Vec<ChunkPos>,
     /// 还没交给池子就被取消的任务：回执留到下一次收池结果时一起交给 Director，
     /// 保证每个派出去的任务都恰好回一次执。
@@ -380,6 +384,32 @@ impl DirectorHost {
     ///
     /// Swap the generator. `World::build` installs `FlatGenerator` or
     /// `OverworldGenerator` by level type; tests and load tests can also swap it.
+    /// 更新 Director 的玩家加载需求快照；宿主自己的排序直接读同一份。
+    pub(crate) fn set_player_demand(&mut self, demand: DemandSnapshot) {
+        self.director.set_player_demand(demand);
+        // 玩家位置/方向变了，待办里的旧距离全部失效，下一次 submit 重建堆。
+        self.backlog_centers.clear();
+    }
+
+    /// 排队用的 rank：读盘、计算池待办、交付信箱都用这一份需求快照。
+    /// 没有玩家时 rank 全是 0，按坐标排（原来的兜底顺序）。
+    fn demand_rank(&self, pos: ChunkPos) -> DemandRank {
+        let demand = self.director.player_demand();
+        let rank = if demand.players().is_empty() {
+            // 没玩家时退回旧口径：离票表里的玩家中心切比雪夫距离；
+            // 票表也没玩家就按坐标。
+            let centers = self.director.tickets().player_centers();
+            if centers.is_empty() {
+                0
+            } else {
+                Self::distance_to_players(pos, &centers).0 as i64
+            }
+        } else {
+            demand.rank(pos)
+        };
+        (rank, pos.x, pos.z)
+    }
+
     pub(crate) fn set_generator(&mut self, generator: Arc<dyn ChunkGenerator>) {
         self.generator = generator;
     }
@@ -1165,10 +1195,9 @@ impl DirectorHost {
             self.read_queue.clear();
             return;
         };
-        let centers = self.director.tickets().player_centers();
         let mut queued = std::mem::take(&mut self.read_queue);
-        // 稳定排序：同等距离保持 Director 派任务的顺序（TaskId 升序），结果确定。
-        queued.sort_by_key(|&(pos, _, _)| Self::distance_to_players(pos, &centers));
+        // 稳定排序：同等 rank 保持 Director 派任务的顺序（TaskId 升序），结果确定。
+        queued.sort_by_key(|&(pos, _, _)| self.demand_rank(pos));
         for (pos, id, generation) in queued {
             io.submit_read(pos, id, generation);
         }
@@ -1379,8 +1408,8 @@ impl DirectorHost {
             pool.submit(id, 0, job);
             return;
         }
-        let distance = Self::distance_to_players(pos, &self.backlog_centers).0;
-        self.backlog_order.push(Reverse((distance, id)));
+        let rank = self.demand_rank(pos);
+        self.backlog_order.push(Reverse((rank, id)));
         self.compute_backlog.insert(id, job);
     }
 
@@ -1414,24 +1443,36 @@ impl DirectorHost {
             self.backlog_order.clear();
             return;
         };
-        let mut centers = Self::guaranteed_centers(region);
-        centers.sort_unstable();
-        if centers != self.backlog_centers {
+        // 玩家跨格（或方向变了）时 `set_player_demand` 会清空这个标记，
+        // 下一次 submit 整堆重排；平时只从堆顶取。rank 已经含坐标兜底，结果确定。
+        if self.backlog_centers.is_empty() {
+            let demand = self.director.player_demand();
+            let centers = self.director.tickets().player_centers();
+            let rank = |pos: ChunkPos| {
+                let rank = if demand.players().is_empty() && !centers.is_empty() {
+                    Self::distance_to_players(pos, &centers).0 as i64
+                } else {
+                    demand.rank(pos)
+                };
+                (rank, pos.x, pos.z)
+            };
             self.backlog_order = self
                 .compute_backlog
                 .iter()
-                .map(|(&id, job)| Reverse((Self::distance_to_players(job.pos, &centers).0, id)))
+                .map(|(&id, job)| Reverse((rank(job.pos), id)))
                 .collect();
-            self.backlog_centers = centers;
+            self.backlog_centers = Self::sorted_centers(region);
         }
         let cap = pool.threads().saturating_mul(POOL_JOBS_PER_THREAD);
         while pool.in_flight() < cap {
-            let Some(Reverse((distance, id))) = self.backlog_order.pop() else {
+            let Some(Reverse(((rank, _, _), id))) = self.backlog_order.pop() else {
                 break;
             };
             // 已经取消（不在待办里）的堆项直接跳过。
+            // rank 不小于 0；钳到 u64 让坐标救不了方向加权为负的情况。
+            let priority = rank.max(0) as u64;
             if let Some(job) = self.compute_backlog.remove(&id) {
-                pool.submit(id, distance, job);
+                pool.submit(id, priority, job);
             }
         }
     }
@@ -1810,7 +1851,6 @@ impl DirectorHost {
         (nearest, pos.x, pos.z)
     }
 
-    /// 玩家脚下 3×3：不受每刻上限约束，且优先于任何其它位置。
     /// 玩家不能站在一个没加载的地方，进服、传送、高速移动都一样。
     fn is_under_a_player(pos: ChunkPos, centers: &[ChunkPos]) -> bool {
         centers.iter().any(|center| {
@@ -1826,6 +1866,13 @@ impl DirectorHost {
             .values()
             .map(|player| player.chunk_pos())
             .collect()
+    }
+
+    /// 玩家所在区块的有序快照，只用来判断待办要不要整堆重排。
+    fn sorted_centers(region: &Region) -> Vec<ChunkPos> {
+        let mut centers = Self::guaranteed_centers(region);
+        centers.sort_unstable();
+        centers
     }
 
     /// 收回请求瞄着还在信箱里排队的盒子时，直接把盒子还回去。
@@ -1902,13 +1949,13 @@ impl DirectorHost {
         });
         let centers = Self::guaranteed_centers(region);
 
-        // 近的先交付。玩家脚下 3×3 全部交付且不算进上限；同等距离按坐标排。
+        // 近的先交付。玩家脚下 3×3 全部交付且不算进上限；同等 rank 按坐标排。
         region.profiler.start_sub(SubPhase::MailSort);
         let mut ordered: Vec<ChunkPos> = self.deliveries.keys().copied().collect();
-        // BTreeMap 的键已经按 (x, z) 升序，稳定排序让同等距离保持坐标顺序。
+        // BTreeMap 的键已经按 (x, z) 升序，稳定排序让同等 rank 保持坐标顺序。
         ordered.sort_by_key(|&pos| {
             let guaranteed = Self::is_under_a_player(pos, &centers);
-            (!guaranteed, Self::distance_to_players(pos, &centers))
+            (!guaranteed, self.demand_rank(pos))
         });
         region.profiler.end_sub();
         let mut used = 0usize;
