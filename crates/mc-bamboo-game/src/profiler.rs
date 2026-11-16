@@ -884,6 +884,13 @@ impl Profiler {
         .fold(0_u64, u64::saturating_add)
     }
 
+    /// 这一刻所有阶段的耗时之和，用来算划分阶段占一刻的百分比。
+    pub(crate) fn all_phase_nanos_this_tick(&self) -> u64 {
+        self.phase_durations
+            .iter()
+            .fold(0_u64, |sum, &nanos| sum.saturating_add(nanos))
+    }
+
     /// 开始给一个子段计时。子段不能嵌套；调用方保证 `lap_sub` 和 `end_sub` 成对。
     /// 这段耗时只会记到子段里，父阶段的 `lap` 照常用它自己的 `last_lap`，两者互不影响。
     pub(crate) fn start_sub(&mut self, sub: SubPhase) {

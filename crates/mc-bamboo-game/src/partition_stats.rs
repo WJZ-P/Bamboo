@@ -98,9 +98,11 @@ pub(crate) struct PartitionStats {
     splits: crate::profiler::Histogram,
     /// 每刻忙区块数。
     busy_chunks: crate::profiler::Histogram,
-    /// 每刻三阶段总耗时（纳秒）和「过 50 µs 门槛的单元」的三阶段耗时之和，
-    /// 用来按实际划分重算理论上限。
+    /// 每刻三阶段总耗时（纳秒）和整刻总耗时，用来算划分占比和理论上限。
     three_nanos: crate::profiler::Histogram,
+    tick_nanos: crate::profiler::Histogram,
+    /// 每刻的触发数，报告里算越界触发占比。
+    triggers_per_tick: crate::profiler::Histogram,
     tail_share: crate::profiler::Histogram,
     /// 每刻的单元数样本，报告里列大小分布用。
     size_distribution: HashMap<usize, u64>,
@@ -282,8 +284,9 @@ impl PartitionStats {
     }
 
     /// 一刻结束：把这一刻的计数并进直方图，报告窗口末清零。
-    pub(crate) fn finish_tick(&mut self, now: Instant, three_nanos: u64) {
-        let _ = now;
+    pub(crate) fn finish_tick(&mut self, three_nanos: u64, tick_nanos: u64) {
+        self.tick_nanos.record(tick_nanos);
+        self.triggers_per_tick.record(self.tick_triggers);
         for index in 0..HALOS.len() {
             self.halos[index].finish_tick(self.tick_out[index], self.tick_units[index]);
         }
@@ -297,6 +300,7 @@ impl PartitionStats {
         self.tail_share.record(share.min(1_000));
         self.tick_out = [0; HALOS.len()];
         self.tick_units = [0; HALOS.len()];
+        self.tick_triggers = 0;
         self.partition_nanos = 0;
         self.verify_nanos = 0;
         self.open = None;
@@ -320,7 +324,10 @@ impl PartitionStats {
         self.splits.reset();
         self.busy_chunks.reset();
         self.three_nanos.reset();
+        self.tick_nanos.reset();
+        self.triggers_per_tick.reset();
         self.tail_share.reset();
+        self.tick_triggers = 0;
         self.size_distribution.clear();
         for index in 0..HALOS.len() {
             self.unit_nanos[index].clear();
@@ -344,12 +351,22 @@ impl PartitionStats {
             self.partition_hist.max() as f64 / 1_000.0,
             mean(&self.verify_hist),
         );
+        let tick_mean = mean(&self.tick_nanos);
+        let three_mean = mean(&self.three_nanos);
         let _ = writeln!(
             out,
-            "  partition_share={:.4}% tick_mean={:.3}ms three_mean={:.3}ms",
-            mean(&self.partition_hist) / mean(&self.three_nanos).max(1.0) * 100.0,
-            mean(&self.three_nanos) / 1_000_000.0,
-            mean(&self.three_nanos) / 1_000_000.0,
+            "  partition_share={:.4}% tick_mean={:.3}ms three_mean={:.3}ms three_share={:.2}%",
+            mean(&self.partition_hist) / tick_mean.max(1.0) * 100.0,
+            tick_mean / 1_000_000.0,
+            three_mean / 1_000_000.0,
+            three_mean / tick_mean.max(1.0) * 100.0,
+        );
+        let _ = writeln!(
+            out,
+            "  triggers_per_tick mean={:.2} p50={:.2} p95={:.2}",
+            mean(&self.triggers_per_tick),
+            p(&self.triggers_per_tick, 50),
+            p(&self.triggers_per_tick, 95),
         );
         let _ = writeln!(
             out,
@@ -373,7 +390,7 @@ impl PartitionStats {
             let stats = &self.halos[index];
             let _ = writeln!(
                 out,
-                "  halo {} out_triggers={} unassigned={} out_units={} max_distance={} reads={} writes={} out_per_tick_mean={:.3} tail_ns={}",
+                "  halo {} out_triggers={} unassigned={} out_units={} max_distance={} reads={} writes={} out_per_tick_mean={:.3} out_share={:.6} tail_ns={}",
                 halo,
                 stats.out_triggers,
                 stats.unassigned,
@@ -382,6 +399,8 @@ impl PartitionStats {
                 stats.reads,
                 stats.writes,
                 mean(&stats.out_per_tick),
+                stats.out_triggers as f64
+                    / (self.tick_triggers as f64 * self.triggers_per_tick.count() as f64).max(1.0),
                 stats.tail_nanos,
             );
             let mut blocks: Vec<_> = stats.by_block.iter().collect();

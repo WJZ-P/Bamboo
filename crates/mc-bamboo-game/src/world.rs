@@ -552,9 +552,9 @@ impl World {
         // 开关关着时这里只判一次布尔值。
         if self.region.profiler.partition_enabled() {
             let three = self.region.profiler.three_phase_nanos_this_tick();
-            let now = self.region.profiler.now();
+            let total = self.region.profiler.all_phase_nanos_this_tick();
             if let Some(stats) = self.region.profiler.partition_stats_mut() {
-                stats.finish_tick(now, three);
+                stats.finish_tick(three, total);
             }
         }
         self.region.profiler.end_tick();
