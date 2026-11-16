@@ -342,14 +342,19 @@ public final class StructurePiecePlaceOracle {
                     BlockPos pos = (BlockPos) args[0];
                     BlockState state = (BlockState) args[1];
                     this.chunk.setBlockState(pos, state, 2);
-                    this.written.put(pos, state);
+                    // `StructurePiece.fillColumnDown` 复用一个 MutableBlockPos 往下移；直接把它
+                    // 当 TreeMap 的键会随之后的 move 改变，破坏树的顺序并串改已记录的坐标。
+                    // `StructurePiece.fillColumnDown` reuses a MutableBlockPos while moving down;
+                    // using it as a TreeMap key lets later moves corrupt both the ordering and
+                    // the recorded coordinates.
+                    this.written.put(pos.immutable(), state);
                     return true;
                 }
                 case "setBlockAndUpdate": {
                     BlockPos pos = (BlockPos) args[0];
                     BlockState state = (BlockState) args[1];
                     this.chunk.setBlockState(pos, state, 2);
-                    this.written.put(pos, state);
+                    this.written.put(pos.immutable(), state);
                     return true;
                 }
                 case "getHeight": {
