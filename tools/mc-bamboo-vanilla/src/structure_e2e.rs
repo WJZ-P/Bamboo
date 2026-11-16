@@ -45,26 +45,48 @@ const QUERIES: &[(i64, i32, i32)] = &[
     (123456789, 12, -7),
     (123456789, -500, 300),
     (-98765432123, 7, -13),
+    // 按结构类型补的起点区块 / 被引用区块（见 docs/worldgen-structures-e2e.md）。
+    // 村庄五种、前哨、古城、古迹废墟、沙漠神殿、雪屋、要塞等。
+    (42, -383, -289), // village_plains
+    (42, -366, -319), // village_desert
+    (42, -393, -227), // village_savanna
+    (42, 364, -29),   // village_snowy
+    (42, -351, 378),  // village_taiga
+    (42, -379, -303), // pillager_outpost
+    (42, -165, 80),   // ancient_city
+    (42, -405, 273),  // trail_ruins
+    (42, -375, -22),  // desert_pyramid
+    (42, 208, -305),  // igloo
+    (42, -121, 96),   // stronghold
+    (42, 40, 55),     // shipwreck_beached
+    (42, -19, 11),    // ruined_portal_swamp
+    (42, -14, 21),    // abandoned_camp_swamp
 ];
 
-const USAGE: &str =
-    "usage: structure-e2e <java> [--break-self-test] [--structure-types IDS] [--show N]";
+const USAGE: &str = "usage: structure-e2e <java> [--break-self-test] [--break-structure KIND] \
+     [--structure-types IDS] [--show N]";
 
 #[derive(Debug)]
 struct Options {
     show: usize,
     break_self_test: bool,
+    /// 改坏确认：跳过这个结构类型 ID 的结构件放置。
+    break_structure: Option<String>,
 }
 
 impl Options {
     fn parse(args: &[&str]) -> Result<Self, String> {
         let mut show = 8_usize;
         let mut break_self_test = false;
+        let mut break_structure = None;
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
                 "--show" => show = args.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?,
                 "--break-self-test" => break_self_test = true,
+                "--break-structure" => {
+                    break_structure = Some((*args.next().ok_or(USAGE)?).to_owned());
+                }
                 // 只做诊断筛选时用的占位参数；当前查询集固定，两边都跑全部结构。
                 "--structure-types" => {
                     let _ = args.next().ok_or(USAGE)?;
@@ -75,6 +97,7 @@ impl Options {
         Ok(Self {
             show,
             break_self_test,
+            break_structure,
         })
     }
 }
@@ -96,6 +119,10 @@ pub fn run(mut command: Command, queries_path: &Path, options: &[&str]) -> Resul
     ];
     if parsed.break_self_test {
         forwarded.push("--break-self-test".to_owned());
+    }
+    if let Some(kind) = &parsed.break_structure {
+        forwarded.push("--break-structure".to_owned());
+        forwarded.push(kind.clone());
     }
     let _ = &mut command;
     crate::gen_world::run_with_queries(command, &as_refs(&forwarded), Some(queries_path))

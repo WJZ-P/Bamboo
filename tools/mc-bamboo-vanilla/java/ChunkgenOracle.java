@@ -423,22 +423,31 @@ final class FeatureLevelHandler implements InvocationHandler {
                 // left by setBlock, create one and store it. The beehive decorator's
                 // random draws depend on it.
                 BlockPos pos = (BlockPos) args[0];
+                // 2 参数重载 `getBlockEntity(pos, type)` 返回 `Optional<T>`
+                // （`DesertPyramidStructure.placeSuspiciousSand` 用它设置战利品表）。
+                boolean typed = arity >= 2;
                 ChunkAccess chunk = chunkAt(pos).chunk();
                 net.minecraft.world.level.block.entity.BlockEntity found = chunk.getBlockEntity(pos);
-                if (found != null) {
-                    return found;
-                }
-                CompoundTag tag = chunk.getBlockEntityNbt(pos);
-                BlockState state = chunk.getBlockState(pos);
-                if (tag != null && "DUMMY".equals(tag.getStringOr("id", "")) && state.hasBlockEntity()) {
-                    found = ((net.minecraft.world.level.block.EntityBlock) state.getBlock())
-                            .newBlockEntity(pos, state);
-                    if (found != null) {
-                        chunk.setBlockEntity(found);
+                if (found == null) {
+                    CompoundTag tag = chunk.getBlockEntityNbt(pos);
+                    BlockState state = chunk.getBlockState(pos);
+                    if (tag != null && "DUMMY".equals(tag.getStringOr("id", ""))
+                            && state.hasBlockEntity()) {
+                        found = ((net.minecraft.world.level.block.EntityBlock) state.getBlock())
+                                .newBlockEntity(pos, state);
+                        if (found != null) {
+                            chunk.setBlockEntity(found);
+                        }
                     }
-                    return found;
                 }
-                return null;
+                if (typed) {
+                    if (found == null || !((net.minecraft.world.level.block.entity.BlockEntityType<?>)
+                            args[1]).isValid(chunk.getBlockState(pos))) {
+                        return java.util.Optional.empty();
+                    }
+                    return java.util.Optional.of(found);
+                }
+                return found;
             }
             // 假世界没有客户端，声音和等级事件都只有表现作用，对拍只看方块；
             // 但 `SculkSpreader` / `SculkBlock` 会无条件调它们，必须吞掉。
