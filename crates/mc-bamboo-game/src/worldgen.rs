@@ -24,7 +24,7 @@ use mc_bamboo_world::{
     MIN_Y, SECTION_COUNT, SECTION_SIZE, WORLD_HEIGHT,
     chunk::HeightmapKind,
     column::{ChunkColumn, ChunkColumnParts, SectionParts},
-    palette::PalettedContainer,
+    palette::packed_worldgen_section,
 };
 use mc_bamboo_worldgen::{Worldgen, chunk};
 
@@ -353,15 +353,19 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         return Err("generated chunk has the wrong number of layers or sections".to_owned());
     }
     let mut sections = Vec::with_capacity(SECTION_COUNT);
+    let mut values = [blocks::AIR; SECTION_SIZE as usize * WIDTH * WIDTH];
+    let mut cells_in_order = [0u32; 64];
     for section in 0..SECTION_COUNT {
-        let mut block_container = PalettedContainer::blocks(blocks::AIR);
-        let mut biome_container = PalettedContainer::biomes(config_default_biome());
-        for local_y in 0..SECTION_SIZE as usize {
-            let layer = &chunk.blocks[section * SECTION_SIZE as usize + local_y];
+        for (local_y, layer) in chunk.blocks
+            [section * SECTION_SIZE as usize..(section + 1) * SECTION_SIZE as usize]
+            .iter()
+            .enumerate()
+        {
             for x in 0..WIDTH {
                 for z in 0..WIDTH {
-                    let index = (local_y << 8) | (z << 4) | x;
-                    block_container.set(index, layer[x * WIDTH + z]);
+                    // 容器下标 `y*256 + z*16 + x`，层里是 `x*16+z`。
+                    // Container index `y*256 + z*16 + x`; layers use `x*16+z`.
+                    values[(local_y << 8) | (z << 4) | x] = layer[x * WIDTH + z];
                 }
             }
         }
@@ -373,13 +377,12 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         for qx in 0..4 {
             for qy in 0..4 {
                 for qz in 0..4 {
-                    let value = cells[qx * 16 + qy * 4 + qz];
-                    biome_container.set(qy * 16 + qz * 4 + qx, value);
+                    cells_in_order[qy * 16 + qz * 4 + qx] = cells[qx * 16 + qy * 4 + qz];
                 }
             }
         }
-        let (block_palette, block_data) = block_container.packed_for_disk();
-        let (biome_palette, biome_data) = biome_container.packed_for_disk();
+        let (block_palette, block_data, biome_palette, biome_data) =
+            packed_worldgen_section(&values, &cells_in_order);
         sections.push(SectionParts {
             block_palette,
             block_data,
@@ -434,13 +437,6 @@ pub fn final_heightmap_words(
         out.insert(key, world.heightmap(kind));
     }
     Ok(out)
-}
-
-/// 建 biome 容器时用的初始群系；`set` 会立刻覆盖全部 64 格，这个值不进结果。
-/// Initial biome for the container; `set` overwrites all 64 cells so it never
-/// appears in the result. Kept as a concrete valid id.
-fn config_default_biome() -> u32 {
-    registries::biome::PLAINS as u32
 }
 
 #[cfg(test)]
