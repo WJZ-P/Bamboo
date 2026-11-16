@@ -19,6 +19,7 @@ HEADER = [
     "lead p50", "lead p95", "gap p50", "gap p95", "arrived", "unarrived",
     "compute_in_flight", "compute_backlog", "chunks_sent/tick", "chunks_delivered/tick",
     "loaded_chunks", "chunk_latency_us p95", "tick p95",
+    "per-bot front p95",
 ]
 
 
@@ -50,6 +51,11 @@ def summarize(directory):
         rows = [r["metrics"][name] for r in reports if name in r["metrics"]]
         return weighted([row[column] for row in rows], [row[0] for row in rows]) if rows else None
 
+    per_bot = [
+        str(value.get("p95", "n/a"))
+        for _, value in sorted(trace.get("per_bot", {}).items())
+        for value in [value.get("front_latency_ms", {})]
+    ]
     return [
         directory.name,
         quantile(trace, "front_latency_ms", "p50"),
@@ -71,6 +77,7 @@ def summarize(directory):
         metric("loaded_chunks", 1),
         metric("chunk_latency_us", 3),
         metric("tick_total", 3),
+        ",".join(per_bot) if per_bot else "n/a",
     ]
 
 

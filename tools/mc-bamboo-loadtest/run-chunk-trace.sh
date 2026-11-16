@@ -5,7 +5,7 @@
 #   服务端二进制缺省是本工作树 target/release/bamboo-loadtest。
 #   GEN_DELAY_US 是模拟慢生成器的每区块额外耗时（缺省 25000 µs，约 25 ms）。
 #   DURATION 是跑多久（缺省 40 秒），PROFILE_SECS 是服务端剖析报告间隔（缺省 10 秒）。
-#   CHUNK_THREADS 是计算池线程数（缺省 4）。
+#   CHUNK_THREADS 是计算池线程数（缺省 4），BOTS 是朝不同方向飞的玩家数（缺省 1）。
 set -u
 
 TREE=$(cd "$(dirname "$0")/../.." && pwd)
@@ -16,11 +16,12 @@ GEN_DELAY_US=${GEN_DELAY_US:-25000}
 DURATION=${DURATION:-40}
 PROFILE_SECS=${PROFILE_SECS:-10}
 CHUNK_THREADS=${CHUNK_THREADS:-4}
+BOTS=${BOTS:-1}
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 
 (cd "$OUT" && exec env BAMBOO_PROFILE="$PROFILE_SECS" BAMBOO_FAKE_GEN_DELAY_US="$GEN_DELAY_US" \
-    "$BIN" serve --addr "127.0.0.1:$PORT" --max-players 20 --view-distance 8 \
+    "$BIN" serve --addr "127.0.0.1:$PORT" --max-players 500 --view-distance 8 \
     --chunk-worker-threads "$CHUNK_THREADS" > server.log 2>&1) &
 SERVER=$!
 cleanup() {
@@ -49,7 +50,7 @@ if [ "$ready" -ne 1 ]; then
     exit 1
 fi
 
-"$BIN" --addr "127.0.0.1:$PORT" --bots 1 --pattern fly --layout spread \
+"$BIN" --addr "127.0.0.1:$PORT" --bots "$BOTS" --pattern fly --layout spread \
     --duration "$DURATION" --ramp 0 --chunk-trace \
     --json "$OUT/client.json" --trace-json "$OUT/trace.json" > "$OUT/client.log" 2>&1
 CLIENT_STATUS=$?

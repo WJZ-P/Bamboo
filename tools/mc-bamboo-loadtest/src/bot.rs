@@ -48,7 +48,7 @@ pub struct BotConfig {
     pub stop: Instant,
     pub stats: SharedStats,
     pub name_prefix: Arc<str>,
-    /// 打开后按「进入视距 → 收到区块包」计时；多人时只记 0 号玩家。
+    /// 打开后按「进入视距 → 收到区块包」计时，每名假玩家各记一份。
     pub chunk_trace: SharedChunkTrace,
     /// 服务端视距，用来复现 `T(vd)`。
     pub view_distance: i32,
@@ -249,7 +249,7 @@ async fn play(
         view_distance,
         ..
     } = config;
-    let tracing = chunk_trace.as_deref().filter(|_| *index == 0);
+    let tracing = chunk_trace.as_deref();
     let mut second = Second::default();
     let mut second_index = 0_u64;
     // 客户端主动发的 ping 用负数 id，不会和服务端心跳的 id 撞上。
@@ -267,6 +267,7 @@ async fn play(
     let started = Instant::now();
     if let Some(trace) = tracing {
         trace.tick(
+            *index,
             started,
             motion.position(),
             motion.direction(),
@@ -301,6 +302,7 @@ async fn play(
                     &mut pending,
                     motion,
                     tracing,
+                    *index,
                 )
                 .await?;
             }
@@ -329,7 +331,7 @@ async fn play(
             // 被服务端拉回之后从服务端给的位置继续走。
             let position = motion.step(CLIENT_TICK.as_secs_f64());
             if let Some(trace) = tracing {
-                trace.tick(now, position, motion.direction(), *view_distance);
+                trace.tick(*index, now, position, motion.direction(), *view_distance);
             }
             let on_ground = !pattern.needs_flying();
             let batch = [
@@ -367,6 +369,7 @@ async fn drain_available(
     pending: &mut HashMap<i64, Instant>,
     motion: &mut Motion,
     tracing: Option<&crate::chunk_trace::ChunkTrace>,
+    bot: usize,
 ) -> Result<(), String> {
     loop {
         // 只在缓冲区里已有完整帧时解析；没有就读一次 socket。
@@ -391,6 +394,7 @@ async fn drain_available(
         };
         second.packets_in += 1;
         // 一帧的长度前缀不进统计里：read_buf 记的是 socket 上真实收到的字节。
+        let tracing = tracing.map(|trace| (trace, bot));
         handle(
             connection, second, stats, pending, motion, &payload, tracing,
         )
@@ -406,7 +410,7 @@ async fn handle(
     pending: &mut HashMap<i64, Instant>,
     motion: &mut Motion,
     payload: &[u8],
-    tracing: Option<&crate::chunk_trace::ChunkTrace>,
+    tracing: Option<(&crate::chunk_trace::ChunkTrace, usize)>,
 ) -> Result<(), String> {
     match wire::classify(State::Play, payload) {
         ServerPacket::KeepAlive(id) => {
@@ -439,8 +443,15 @@ async fn handle(
         }
         ServerPacket::LevelChunkWithLight { x, z } => {
             second.chunks_in += 1;
-            if let Some(trace) = tracing {
-                trace.chunk(Instant::now(), x, z, motion.position(), motion.direction());
+            if let Some((trace, bot)) = tracing {
+                trace.chunk(
+                    bot,
+                    Instant::now(),
+                    x,
+                    z,
+                    motion.position(),
+                    motion.direction(),
+                );
             }
         }
         ServerPacket::Disconnect(_) => {
