@@ -285,13 +285,26 @@ impl PalettedContainer {
     /// [`from_blocks_disk`](Self::from_blocks_disk) 读回来的容器读出的值、调色板内容完全相同，
     /// 但省掉逐格 `set` 的扩容重打包和磁盘形式的往返。
     ///
+    /// `counts` 给 [`Section::from_disk`](crate::chunk::Section::from_disk) 用：扫描时
+    /// 顺手数出每种状态出现的次数，不必再扫一遍打包数据。三项分别是非空气、会随机刻、
+    /// 含流体的方块数，顺序和调色板一致；全局 ID 形式时为空。
+    ///
     /// Build a block container straight from 4096 states in container index
     /// order (y, z, x). The palette is in first-appearance order, so reads and
     /// palette contents equal a `packed_for_disk` + `from_blocks_disk` round
-    /// trip, without per-cell `set` repacking or the disk round trip.
-    pub(crate) fn blocks_from_values(values: &[u32; BLOCKS_PER_SECTION]) -> Self {
+    /// trip, without per-cell `set` repacking or the disk round trip. `counts`
+    /// lets the section skip its second scan: non-air / random-ticking / fluid
+    /// cell counts per palette entry (empty for the global-id form).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn blocks_from_values(
+        values: &[u32; BLOCKS_PER_SECTION],
+    ) -> (Self, Vec<(u16, u16, u16)>) {
         let rules = &BLOCK_RULES;
         let mut palette: Vec<u32> = Vec::new();
+        let mut counts: Vec<(u16, u16, u16)> = Vec::new();
+        // 每个调色板项一格贡献的三种计数：状态事实只按「不同状态」查一次。
+        // Per-palette-entry contribution; state facts are queried once per distinct state.
+        let mut unit: Vec<(u16, u16, u16)> = Vec::new();
         let mut stored = [0u32; BLOCKS_PER_SECTION];
         let mut last = None;
         for (slot, &value) in stored.iter_mut().zip(values) {
@@ -302,33 +315,59 @@ impl PalettedContainer {
                         .iter()
                         .position(|&entry| entry == value)
                         .unwrap_or_else(|| {
+                            let found = mc_bamboo_data::state_facts(value);
+                            unit.push((
+                                u16::from(found & mc_bamboo_data::facts::AIR == 0),
+                                u16::from(
+                                    found
+                                        & (mc_bamboo_data::facts::RANDOMLY_TICKING
+                                            | mc_bamboo_data::facts::FLUID_RANDOMLY_TICKING)
+                                        != 0,
+                                ),
+                                u16::from(
+                                    mc_bamboo_data::state_fluid(value).fluid
+                                        != mc_bamboo_data::registries::fluid::EMPTY,
+                                ),
+                            ));
                             palette.push(value);
+                            counts.push((0, 0, 0));
                             palette.len() - 1
                         }) as u32;
                     last = Some((value, position));
                     position
                 }
             };
+            let (non_air, tickers, fluids) = unit[position as usize];
+            let entry = &mut counts[position as usize];
+            entry.0 += non_air;
+            entry.1 += tickers;
+            entry.2 += fluids;
             *slot = position;
         }
         let bits = rules.bits_for_palette(palette.len());
         if bits == 0 {
-            return Self::filled(rules, palette[0]);
+            return (Self::filled(rules, palette[0]), counts);
         }
         if rules.is_global(bits) {
-            return Self {
+            return (
+                Self {
+                    rules,
+                    bits,
+                    palette: Vec::new(),
+                    data: pack_values(values.iter().copied(), bits),
+                },
+                Vec::new(),
+            );
+        }
+        (
+            Self {
                 rules,
                 bits,
-                palette: Vec::new(),
-                data: pack_values(values.iter().copied(), bits),
-            };
-        }
-        Self {
-            rules,
-            bits,
-            palette,
-            data: pack_values(stored.into_iter(), bits),
-        }
+                palette,
+                data: pack_values(stored.into_iter(), bits),
+            },
+            counts,
+        )
     }
 
     /// 磁盘形式的调色板：丢掉没用到的项，按第一次出现的顺序重排，并给出重新打包的 long 数组。
