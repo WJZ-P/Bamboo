@@ -716,8 +716,7 @@ bit-identical; `wg-perf --light-compare` measured 35.1 → 11.3 ms (median, 96 c
 `GenerateOutput` 交回世界线程，`Task::Assemble` 装进 `ChunkArchiveMeta.structures`。
 `features` 每个 decoration step 先跑 `StructureStart.placeInChunk` 再跑地物。
 对拍见 `cargo run -p mc-bamboo-vanilla -- structure-pipeline <java>`：官方 17×17 的
-`createStructures` / `createReferences` 与游戏同一条路径逐项比，28 行 / 2482 结构件
-0 不一致，`--break-self-test` 会失败。
+`createStructures` / `createReferences` 与游戏同一条路径逐项比，28 行 / 2482 结构件 / 2752512 格 Beardifier 地形 0 不一致，`--break-self-test` 会失败。
 
 `wg-perf --structure-timing`（release，1 种子 × 10 群系 × 3 区块 × 2 遍）实测：
 
