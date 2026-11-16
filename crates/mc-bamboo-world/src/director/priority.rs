@@ -21,9 +21,8 @@ pub const MAX_DIRECTION_BONUS: i64 = 2;
 pub const DEFAULT_MAX_LOADS_PER_PLAYER: usize = 16;
 /// 每名玩家同时允许的「新生成」任务数（`Generate`）。
 pub const DEFAULT_MAX_GENERATES_PER_PLAYER: usize = 16;
-/// 单个区块任务最多归到几名玩家名下。共用同一个区块的玩家都算，但不会
-/// 因为一大群人挤在一起而让这个任务的计数反复放大。
-const MAX_OWNERS: usize = 4;
+/// 看得见这个任务的玩家半径：视距上限加一圈。超出的人不为它付费。
+const OWNER_RADIUS: i64 = 33;
 
 /// 一名玩家当前的加载需求。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,21 +82,19 @@ impl DemandSnapshot {
         self.max_generates
     }
 
-    /// 这个区块归哪几名玩家：离得最近的几名，按 `(距离, 编号)` 排序。
-    /// 没有玩家时返回空，任务仍按坐标/TaskId 兜底排序。
-    pub fn owners(&self, pos: ChunkPos) -> Vec<u64> {
-        // 看得见这个任务的玩家才算「请求者」：视距 32 时一个玩家最多覆盖
-        // 65×65，超出这个半径的区块由别的玩家（或没有玩家）负责。
-        let radius = i64::from(crate::ticket::MAX_VIEW_DISTANCE) + 1;
-        let mut ranked: Vec<(i64, u64)> = self
-            .players
+    /// 这个区块归哪名玩家：视距内离得最近的那个，同距离按编号小的。
+    /// 只归一个人，每名玩家的在途配额才真的互相独立；多个人都看得见的
+    /// 区块也只占一个人的额度。没有玩家时返回 `None`。
+    ///
+    /// Which player owns this chunk: the nearest one within view range,
+    /// ties broken by id. Exactly one owner keeps per-player quotas disjoint.
+    pub fn owner(&self, pos: ChunkPos) -> Option<u64> {
+        self.players
             .iter()
             .map(|player| (chebyshev(pos, player.center), player.id))
-            .filter(|&(distance, _)| distance <= radius)
-            .collect();
-        ranked.sort_unstable();
-        ranked.truncate(MAX_OWNERS);
-        ranked.into_iter().map(|(_, id)| id).collect()
+            .filter(|&(distance, _)| distance <= OWNER_RADIUS)
+            .min()
+            .map(|(_, id)| id)
     }
 
     /// 排队用的 rank：越小越急。没有玩家或方向未知时是纯切比雪夫距离。
@@ -205,7 +202,8 @@ mod tests {
         assert_eq!(snapshot.players().len(), 2, "重复的玩家编号只留一个");
         // 离 7 号玩家 2 格但在它身后（+2 罚），离 1 号玩家 8 格；取较小的 rank。
         assert_eq!(snapshot.rank(ChunkPos::new(8, 0)), 4);
-        assert_eq!(snapshot.owners(ChunkPos::new(0, 0)), [1, 7]);
+        assert_eq!(snapshot.owner(ChunkPos::new(0, 0)), Some(1));
+        assert_eq!(snapshot.owner(ChunkPos::new(10, 0)), Some(7));
         let mut many: Vec<PlayerDemand> = (0..8)
             .map(|i| PlayerDemand {
                 id: i,
@@ -215,8 +213,8 @@ mod tests {
             .collect();
         many.reverse();
         let many = DemandSnapshot::new(many);
-        assert_eq!(many.owners(ChunkPos::new(0, 0)).len(), MAX_OWNERS);
-        assert_eq!(many.owners(ChunkPos::new(0, 0)), [0, 1, 2, 3]);
+        assert_eq!(many.owner(ChunkPos::new(0, 0)), Some(0));
+        assert_eq!(many.owner(ChunkPos::new(100, 100)), None);
     }
 
     #[test]

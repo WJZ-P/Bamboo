@@ -435,8 +435,8 @@ pub struct Director<C> {
     demand: DemandSnapshot,
     /// 每名玩家当前在途的「加载存档」和「新生成」任务数，按 `(玩家编号, 类别)` 记。
     demand_in_flight: HashMap<(u64, DemandKind), usize>,
-    /// 每个在途任务归到哪几名玩家、属于哪一类，`on_task_done` 收回时减计数。
-    task_owners: HashMap<TaskId, (Vec<u64>, DemandKind)>,
+    /// 每个在途任务归到哪名玩家、属于哪一类，`on_task_done` 收回时减计数。
+    task_owners: HashMap<TaskId, (Option<u64>, DemandKind)>,
     /// 一次 `drive` 里排序用的任务编号和键，跨次复用容量。每次 `drive` 只排
     /// 「上一轮被挡住 + 这一轮新排的」几百个，不扫整张积压表。
     priority_order: Vec<(TaskId, (i64, u8, u64))>,
@@ -909,7 +909,7 @@ impl<C: ChunkBundle> Director<C> {
                 out.push(Effect::Cancel { id });
             }
             self.pending.remove(&id);
-            self.release_task_owners(id);
+            self.release_task_owner(id);
         }
         self.refresh_busy(pos);
         self.queued_reads.remove(&pos);
@@ -1034,7 +1034,7 @@ impl<C: ChunkBundle> Director<C> {
         result: TaskResult<C>,
     ) {
         let Some(in_flight) = self.in_flight.remove(&id) else {
-            self.release_task_owners(id);
+            self.release_task_owner(id);
             Self::park_orphan_result(out, pos, result);
             return;
         };
@@ -1052,7 +1052,7 @@ impl<C: ChunkBundle> Director<C> {
         }
         record.task = None;
         self.refresh_busy(pos);
-        self.release_task_owners(id);
+        self.release_task_owner(id);
         match result {
             TaskResult::Read { bytes: Some(bytes) } => {
                 self.enqueue(out, pos, generation, None, Task::Decode { pos, bytes });
@@ -1358,44 +1358,39 @@ impl<C: ChunkBundle> Director<C> {
         }
     }
 
-    /// 派出任务时登记它归哪几名玩家；返回该任务能不能过每玩家在途上限。
-    fn claim_task_owners(&mut self, id: TaskId, pos: ChunkPos, kind: DemandKind) -> bool {
+    /// 派出任务时登记它归哪名玩家；返回该任务能不能过每玩家在途上限。
+    fn claim_task_owner(&mut self, id: TaskId, pos: ChunkPos, kind: DemandKind) -> bool {
         if matches!(kind, DemandKind::Unbounded) || self.demand.players().is_empty() {
             return true;
         }
-        let owners = self.demand.owners(pos);
-        if owners.is_empty() || kind.cap(&self.demand) == 0 {
-            self.task_owners.insert(id, (owners, kind));
+        let Some(player) = self.demand.owner(pos) else {
             return true;
-        }
+        };
         let cap = kind.cap(&self.demand);
-        if owners.iter().any(|&player| {
-            self.demand_in_flight
+        if cap == 0
+            || self
+                .demand_in_flight
                 .get(&(player, kind))
                 .copied()
                 .unwrap_or(0)
                 >= cap
-        }) {
+        {
             return false;
         }
-        for &player in &owners {
-            *self.demand_in_flight.entry((player, kind)).or_default() += 1;
-        }
-        self.task_owners.insert(id, (owners, kind));
+        *self.demand_in_flight.entry((player, kind)).or_default() += 1;
+        self.task_owners.insert(id, (Some(player), kind));
         true
     }
 
     /// 任务完成或取消时释放每玩家计数。每个任务只登记一次，不存在的条目是空操作。
-    fn release_task_owners(&mut self, id: TaskId) {
-        let Some((owners, kind)) = self.task_owners.remove(&id) else {
+    fn release_task_owner(&mut self, id: TaskId) {
+        let Some((Some(player), kind)) = self.task_owners.remove(&id) else {
             return;
         };
-        for player in owners {
-            let slot = self.demand_in_flight.entry((player, kind)).or_default();
-            *slot = slot.saturating_sub(1);
-            if *slot == 0 {
-                self.demand_in_flight.remove(&(player, kind));
-            }
+        let slot = self.demand_in_flight.entry((player, kind)).or_default();
+        *slot = slot.saturating_sub(1);
+        if *slot == 0 {
+            self.demand_in_flight.remove(&(player, kind));
         }
     }
 
@@ -1514,7 +1509,7 @@ impl<C: ChunkBundle> Director<C> {
                 .in_flight
                 .values()
                 .any(|other| write_ranges_overlap(other.pos, other.write_radius, pos, radius));
-            if overlaps || !self.claim_task_owners(id, pos, kind) {
+            if overlaps || !self.claim_task_owner(id, pos, kind) {
                 blocked.push(id);
                 continue;
             }
