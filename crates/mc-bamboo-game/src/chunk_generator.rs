@@ -112,12 +112,12 @@ impl ChunkGenerator for FlatGenerator {
 /// `(阶段, 位置, 配置, 输入) → 盒子 + 增量 + 光照` 的纯函数。
 ///
 /// Overworld staged generator. The two structure stages recompute starts and
-/// references and return the `structures` tag; `terrain` computes quart biomes
-/// + CARVERS blocks;
-/// `features` reads radius-1 neighbor snapshots, runs `Generator::features()`,
-/// and returns the center content plus neighbor deltas; `light` reads the same
-/// 3×3 view and computes the center column's generation-time sky + block light;
-/// initialize_light/spawn/full pass through. Each step is pure.
+/// references and return the `structures` tag. Terrain computes quart biomes
+/// and CARVERS blocks. Features reads radius-1 neighbor snapshots, runs
+/// `Generator::features()` and returns the center content plus neighbor deltas.
+/// Light reads the same 3x3 view and computes the center column generation-time
+/// sky and block light. The initialize_light, spawn and full stages pass through.
+/// Each step is pure.
 #[derive(Debug, Clone)]
 pub(crate) struct OverworldGenerator {
     config: WorldGenConfig,

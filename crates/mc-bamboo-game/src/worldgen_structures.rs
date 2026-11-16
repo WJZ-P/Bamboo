@@ -71,17 +71,26 @@ struct StructureThread {
 }
 
 thread_local! {
-    static STRUCTURE_THREADS: RefCell<HashMap<(i64, &'static str), StructureThread>> =
+    static STRUCTURE_THREADS: RefCell<HashMap<ThreadKey, StructureThread>> =
         RefCell::new(HashMap::new());
     /// 读盘恢复的 `structures` 覆盖：世界线程在派任务前把盒子上带来的标签挂进来，
     /// 计算线程按区块坐标取。纯函数结果只由标签内容决定。
     /// On-disk `structures` overrides: the world thread installs the tag carried by
     /// the box before dispatch; compute threads read it by chunk position.
-    static DISK_STRUCTURES: RefCell<HashMap<(i64, Option<&'static str>, i32, i32), Tag>> =
+    static DISK_STRUCTURES: RefCell<HashMap<DiskKey, Tag>> =
         RefCell::new(HashMap::new());
 }
 
 const STARTS_CACHE_CAP: usize = 1024;
+
+/// 读盘覆盖表的键：`(seed, settings, x, z)`。
+///
+/// Key of the disk-overrides map: `(seed, settings, x, z)`.
+type DiskKey = (i64, Option<&'static str>, i32, i32);
+/// 每线程解析状态的键：`(seed, settings)`。
+///
+/// Key of the per-thread parsed state: `(seed, settings)`.
+type ThreadKey = (i64, &'static str);
 
 /// 计算池线程上挂一份读盘带来的 `structures` 标签。游戏侧由世界线程在派任务时调用，
 /// 对拍工具用它模拟「读盘再继续生成相邻区块」。
@@ -136,7 +145,7 @@ fn with_thread<T>(
     STRUCTURE_THREADS.with(|cache| {
         let key = (config.seed, settings_id);
         let mut cache = cache.borrow_mut();
-        if !cache.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
             let worldgen: &'static Worldgen = Box::leak(Box::new(Worldgen::load()?));
             let settings = worldgen
                 .settings(settings_id)
@@ -158,17 +167,14 @@ fn with_thread<T>(
                 "minecraft:overworld",
                 config.seed,
             )?;
-            cache.insert(
-                key,
-                StructureThread {
-                    state,
-                    router,
-                    preset,
-                    settings,
-                    generator,
-                    starts: HashMap::new(),
-                },
-            );
+            entry.insert(StructureThread {
+                state,
+                router,
+                preset,
+                settings,
+                generator,
+                starts: HashMap::new(),
+            });
         }
         f(cache.get_mut(&key).expect("structure thread just inserted"))
     })
@@ -453,10 +459,9 @@ pub fn encode_structures(
     let mut saves = BTreeMap::new();
     for (id, start) in &starts.by_structure {
         let children = match &start.pieces {
-            StartPieces::Layout(pieces) => pieces
-                .iter()
-                .map(|piece| save::SavePiece::from_layout(piece))
-                .collect(),
+            StartPieces::Layout(pieces) => {
+                pieces.iter().map(save::SavePiece::from_layout).collect()
+            }
             StartPieces::Jigsaw(pieces) => pieces
                 .iter()
                 .map(|piece| piece.to_full_save_piece())

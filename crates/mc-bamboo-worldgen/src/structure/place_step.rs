@@ -642,7 +642,7 @@ impl processor_apply::ProcessorLevel for FeatureProcessorLevel {
                     .unwrap_or(0);
                 template_place::in_tag(id, name)
             }
-            BlockSetRef::Blocks(ids) => ids.iter().any(|id| *id == state.name),
+            BlockSetRef::Blocks(ids) => ids.contains(&state.name),
         }
     }
 
@@ -696,14 +696,12 @@ fn view_get_block(view: &FeatureWorldView, x: i32, y: i32, z: i32) -> u32 {
 }
 
 fn view_get_height(view: &FeatureWorldView, kind: HeightmapKind, x: i32, z: i32) -> i32 {
-    let Some(index) = (|| {
-        let dx = (x >> 4) - view.center_x;
-        let dz = (z >> 4) - view.center_z;
-        ((-1..=1).contains(&dx) && (-1..=1).contains(&dz))
-            .then_some(((dz + 1) * 3 + dx + 1) as usize)
-    })() else {
+    let dx = (x >> 4) - view.center_x;
+    let dz = (z >> 4) - view.center_z;
+    if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dz) {
         return view.min_y;
-    };
+    }
+    let index = ((dz + 1) * 3 + dx + 1) as usize;
     let column = (x & 15) as usize * 16 + (z & 15) as usize;
     let heights = &view.heights[index];
     let value = match kind {

@@ -310,6 +310,11 @@ impl WorldStructureState {
     }
 }
 
+/// `findGenerationPoint` 的内部产出：`(是否有 stub, stub 位置, 结构件)`。
+///
+/// Internal `findGenerationPoint` output: `(stub present, stub position, pieces)`.
+type StartOutcome = Result<(bool, (i32, i32, i32), StartPieces), String>;
+
 /// 一个结构的 `findValidGenerationPoint` + `findGenerationPoint` 的结果。
 ///
 /// Output of one structure's `findValidGenerationPoint` + `findGenerationPoint`.
@@ -465,7 +470,7 @@ impl StartContext<'_> {
         allowed: &HashSet<String>,
         size: (i32, i32),
         layout: impl FnOnce(i32) -> Result<Vec<Piece>, String>,
-    ) -> Result<(bool, (i32, i32, i32), StartPieces), String> {
+    ) -> StartOutcome {
         let (min_y, height, sea_level) = self.dims;
         if !column_has_valid_biome(self.generator, chunk, allowed, (min_y, height))? {
             return Ok((false, (0, 0, 0), StartPieces::Sparse(Vec::new())));
@@ -491,7 +496,7 @@ impl StartContext<'_> {
         allowed: &HashSet<String>,
         ocean_floor: bool,
         layout: impl FnOnce(i32) -> Result<Vec<Piece>, String>,
-    ) -> Result<(bool, (i32, i32, i32), StartPieces), String> {
+    ) -> StartOutcome {
         let (min_y, height, _) = self.dims;
         if !column_has_valid_biome(self.generator, chunk, allowed, (min_y, height))? {
             return Ok((false, (0, 0, 0), StartPieces::Sparse(Vec::new())));
@@ -519,16 +524,8 @@ impl StartContext<'_> {
         site: Site,
         resolver: &mut BiomeResolver<'_>,
         allowed: &HashSet<String>,
-    ) -> Result<(bool, (i32, i32, i32), StartPieces), String> {
-        let point_kind = match structure_id {
-            "minecraft:mineshaft" => "minecraft:mineshaft",
-            "minecraft:mineshaft_mesa" => "minecraft:mineshaft_mesa",
-            "minecraft:stronghold" => "minecraft:stronghold",
-            "minecraft:monument" => "minecraft:monument",
-            "minecraft:mansion" => "minecraft:mansion",
-            other => other,
-        };
-        let kind = PointKind::from_id(point_kind)
+    ) -> StartOutcome {
+        let kind = PointKind::from_id(structure_id)
             .ok_or_else(|| format!("no start-point kind for {structure_id}"))?;
         let gates = start_point::site_gates(self.generator, resolver, site)?;
         let result =
