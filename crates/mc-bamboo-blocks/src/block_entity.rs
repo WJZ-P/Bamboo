@@ -1021,6 +1021,13 @@ pub struct BlockEvent {
 pub struct BlockEvents {
     queue: VecDeque<BlockEvent>,
     queued: HashSet<BlockEvent>,
+    /// 每条事件入队时的全局序号。`absorb` 靠它把拆出去的那份按原顺序插回，
+    /// 而不是简单接到队尾。序号只在拆合时用，平时不影响出队和查重。
+    order: HashMap<BlockEvent, u64>,
+    next_order: u64,
+    /// 本刻第一次排进事件的区块，给下一步的忙区块划分增量更新用。
+    /// 只在入队成功时记一次，不影响出队和查重。
+    touched: Vec<ChunkPos>,
 }
 
 impl BlockEvents {
@@ -1028,6 +1035,12 @@ impl BlockEvents {
     pub fn push(&mut self, event: BlockEvent) {
         if self.queued.insert(event) {
             self.queue.push_back(event);
+            self.order.insert(event, self.next_order);
+            self.next_order += 1;
+            let chunk = event.pos.chunk();
+            if !self.touched.contains(&chunk) {
+                self.touched.push(chunk);
+            }
         }
     }
 
@@ -1040,6 +1053,7 @@ impl BlockEvents {
     pub fn pop(&mut self) -> Option<BlockEvent> {
         let event = self.queue.pop_front()?;
         self.queued.remove(&event);
+        self.order.remove(&event);
         Some(event)
     }
 
@@ -1047,6 +1061,68 @@ impl BlockEvents {
     pub fn reschedule(&mut self, events: Vec<BlockEvent>) {
         for event in events {
             self.push(event);
+        }
+    }
+
+    /// 本刻排过事件的区块，给下一步的忙区块划分用。
+    pub fn drain_touched_chunks(&mut self) -> Vec<ChunkPos> {
+        std::mem::take(&mut self.touched)
+    }
+
+    /// 这个区块有没有排着事件（含下一刻才看的重新排队项），给忙区块查询用。
+    pub fn chunk_has_queued(&self, chunk: ChunkPos) -> bool {
+        self.queue.iter().any(|event| event.pos.chunk() == chunk)
+    }
+
+    /// 拆出 `chunks` 这些区块里排着的事件，两边都保持原来的排队顺序。
+    pub fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        let mut out = Self::default();
+        let mut rest = VecDeque::new();
+        for event in std::mem::take(&mut self.queue) {
+            if chunks.contains(&event.pos.chunk()) {
+                out.queued.insert(event);
+                out.queue.push_back(event);
+                if let Some(seq) = self.order.remove(&event) {
+                    out.order.insert(event, seq);
+                    out.next_order = out.next_order.max(seq + 1);
+                }
+                let chunk = event.pos.chunk();
+                if !out.touched.contains(&chunk) {
+                    out.touched.push(chunk);
+                }
+            } else {
+                rest.push_back(event);
+            }
+        }
+        self.queue = rest;
+        self.queued
+            .retain(|event| !chunks.contains(&event.pos.chunk()));
+        self.touched.retain(|chunk| !chunks.contains(chunk));
+        out
+    }
+
+    /// 并回另一份的事件队列：按全局入队序号归并，结果和「从没拆过」逐条相同。
+    pub fn absorb(&mut self, other: Self) {
+        let mut merged: Vec<(u64, BlockEvent)> = self
+            .queue
+            .iter()
+            .map(|&event| (self.order.get(&event).copied().unwrap_or(0), event))
+            .collect();
+        for event in &other.queue {
+            merged.push((
+                other.order.get(event).copied().unwrap_or(self.next_order),
+                *event,
+            ));
+        }
+        merged.sort_by_key(|(seq, _)| *seq);
+        self.queue = merged.iter().map(|(_, event)| *event).collect();
+        self.queued = merged.iter().map(|(_, event)| *event).collect();
+        self.order = merged.iter().map(|(seq, event)| (*event, *seq)).collect();
+        self.next_order = self.next_order.max(other.next_order);
+        for chunk in other.touched {
+            if !self.touched.contains(&chunk) {
+                self.touched.push(chunk);
+            }
         }
     }
 }
@@ -1299,6 +1375,86 @@ mod tests {
         assert_eq!(events.pop(), Some(event(1, 3)));
         assert_eq!(events.pop(), Some(event(1, 0)));
         assert_eq!(events.pop(), None);
+    }
+
+    /// 改坏确认的对照组：拆合不能把排队顺序变成「按区块再按位置」。
+    #[test]
+    fn block_events_split_and_absorb_keep_the_queue_order() {
+        let at = |x: i32, param_b: i32| BlockEvent {
+            pos: BlockPos::new(x, 2, 3),
+            block: 7,
+            param_a: 1,
+            param_b,
+        };
+        // 两个区块的事件交错，队列顺序和按区块顺序明显不同。
+        let all = [
+            at(20, 1),
+            at(1, 2),
+            at(21, 3),
+            at(2, 4),
+            at(22, 5),
+            at(3, 6),
+        ];
+        let mut reference = BlockEvents::default();
+        let mut split = BlockEvents::default();
+        for &event in &all {
+            reference.push(event);
+            split.push(event);
+        }
+        let wanted: BTreeSet<ChunkPos> = [ChunkPos::new(0, 0)].into_iter().collect();
+        let unit = split.split_off(&wanted);
+        // 拆出去的只剩 0 号区块，顺序仍是原队列里这三条的相对顺序。
+        assert!(unit.chunk_has_queued(ChunkPos::new(0, 0)));
+        assert!(!unit.chunk_has_queued(ChunkPos::new(1, 0)));
+        assert!(split.chunk_has_queued(ChunkPos::new(1, 0)));
+        assert!(!split.chunk_has_queued(ChunkPos::new(0, 0)));
+        let mut unit_events = Vec::new();
+        let mut unit = unit;
+        while let Some(event) = unit.pop() {
+            unit_events.push(event);
+        }
+        assert_eq!(unit_events, [at(1, 2), at(2, 4), at(3, 6)]);
+
+        // 原样合并：整条队列逐条等于参照，不是「先一个区块再另一个」。
+        let mut unit = split.split_off(&wanted);
+        // 上面那次已经把 0 号区块拆空了，重新造一份。
+        let mut fresh = BlockEvents::default();
+        for &event in &all {
+            fresh.push(event);
+        }
+        let mut split = fresh;
+        unit = split.split_off(&wanted);
+        split.absorb(unit);
+        let mut got = Vec::new();
+        while let Some(event) = split.pop() {
+            got.push(event);
+        }
+        let mut expected = Vec::new();
+        while let Some(event) = reference.pop() {
+            expected.push(event);
+        }
+        assert_eq!(got, expected);
+        // 对照组：按区块再按位置排出来的顺序确实不同。
+        let mut chunked = expected.clone();
+        chunked.sort_by_key(|event| (event.pos.chunk(), event.pos));
+        assert_ne!(got, chunked);
+    }
+
+    #[test]
+    fn block_events_track_touched_chunks_once_per_tick() {
+        let mut events = BlockEvents::default();
+        events.push(event(1, 0));
+        events.push(event(17, 1));
+        events.push(event(2, 2));
+        assert_eq!(
+            events.drain_touched_chunks(),
+            [ChunkPos::new(0, 0), ChunkPos::new(1, 0)]
+        );
+        assert!(events.drain_touched_chunks().is_empty());
+        // 重复入队不记，出队也不记。
+        events.push(event(1, 0));
+        let _ = events.pop();
+        assert!(events.drain_touched_chunks().is_empty());
     }
 
     #[test]
