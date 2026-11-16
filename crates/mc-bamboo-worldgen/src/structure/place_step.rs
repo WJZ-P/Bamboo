@@ -20,7 +20,7 @@ use crate::{
         FeatureChunks,
         world::{FeatureWorld, HeightmapKind},
     },
-    random::{Random, WorldgenRandom},
+    random::{Random, WorldgenRandom, XoroshiroRandom},
     structure::{
         jigsaw::{self},
         piece_place::{self, PieceLevel},
@@ -65,6 +65,9 @@ pub struct StructurePlacement<'a> {
     groups: Vec<StepStructure<'a>>,
     processor_lists: ProcessorLists,
     seed: i64,
+    /// 对拍改坏确认要跳过的结构类型 ID；正常路径为 `None`。
+    /// Structure type ID to skip for the oracle's break confirmation.
+    skip_type: Option<String>,
     /// 逐 step 累计的放置次数，供对拍确认每类结构真的被放到。
     pub stats: RefCell<PlaceStats>,
 }
@@ -98,8 +101,15 @@ impl<'a> StructurePlacement<'a> {
             groups,
             processor_lists,
             seed,
+            skip_type: None,
             stats: RefCell::new(PlaceStats::default()),
         }
+    }
+
+    /// 对拍改坏确认：跳过一种结构类型的结构件放置，其它结构照常。
+    /// Oracle break confirmation: skip one structure type, place the rest.
+    pub fn skip_type(&mut self, type_id: &str) {
+        self.skip_type = Some(type_id.to_owned());
     }
 
     /// 跑当前 step 的结构件放置，统计合进 [`Self::stats`]。
@@ -118,10 +128,14 @@ impl<'a> StructurePlacement<'a> {
             step,
             &self.groups,
             &self.processor_lists,
+            self.skip_type.as_deref(),
         )?;
         let mut stats = self.stats.borrow_mut();
         for (kind, count) in partial.placed_pieces {
             *stats.placed_pieces.entry(kind).or_default() += count;
+        }
+        for (kind, count) in partial.placed_blocks {
+            *stats.placed_blocks.entry(kind).or_default() += count;
         }
         stats.unsupported_pieces += partial.unsupported_pieces;
         Ok(())
@@ -138,6 +152,18 @@ pub struct StartInput {
     pub type_id: String,
     /// 结构件列表。jigsaw 走模板链，其余走布局 `Piece`。
     pub pieces: StartPieces,
+}
+
+/// 一次 `place_start` 调用的公共输入与对拍开关。
+/// Shared inputs and oracle-only switches for one `place_start` call.
+#[derive(Debug, Clone, Copy)]
+pub struct PlaceOptions<'a> {
+    pub seed: i64,
+    pub random: &'a WorldgenRandom,
+    pub processor_lists: &'a ProcessorLists,
+    /// 对拍改坏确认要跳过的结构类型 ID；正常路径为 `None`。
+    /// Structure type ID to skip for break confirmation.
+    pub skip_type: Option<&'a str>,
 }
 
 /// 放置阶段看到的结构件集合。
@@ -159,6 +185,9 @@ pub enum StartPieces {
 pub struct PlaceStats {
     /// `structure type -> 跑过 postProcess 的结构件次数`。
     pub placed_pieces: BTreeMap<String, usize>,
+    /// `structure type -> 结构件写过的方块次数`（含写空气、含重复写）。
+    /// `structure type -> block writes made by its pieces`.
+    pub placed_blocks: BTreeMap<String, usize>,
     /// 因 unsupported 跳过的结构件次数。
     pub unsupported_pieces: usize,
 }
@@ -185,11 +214,22 @@ pub fn place_step(
     step: usize,
     structures: &[StepStructure<'_>],
     processor_lists: &ProcessorLists,
+    skip_type: Option<&str>,
 ) -> Result<PlaceStats, String> {
     let mut stats = PlaceStats::default();
-    let random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
+    // `applyBiomeDecoration` 的那一个随机源是
+    // `new WorldgenRandom(new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()))`
+    // （字节码 90-104）；结构分支和地物分支共用它。不是 LegacyRandomSource：
+    // 后者会让 `nextInt` / `nextFloat` 走另一条 LCG 序列。
+    let random = WorldgenRandom::new(Random::Xoroshiro(XoroshiroRandom::new(0)));
     let decoration_seed =
         random.set_decoration_seed(seed, input.center_x * 16, input.center_z * 16);
+    let options = PlaceOptions {
+        seed,
+        random: &random,
+        processor_lists,
+        skip_type,
+    };
     let mut local_index = 0_i32;
     for group in structures {
         // 官方按 `structure.step().ordinal()` 分组，所以这里只跑属于当前 step 的。
@@ -199,15 +239,7 @@ pub fn place_step(
         random.set_feature_seed(decoration_seed, local_index, step as i32);
         local_index += 1;
         for start in group.starts {
-            place_start(
-                world,
-                input,
-                seed,
-                start,
-                &random,
-                processor_lists,
-                &mut stats,
-            )?;
+            place_start(world, input, start, &mut stats, options)?;
         }
     }
     Ok(stats)
@@ -237,12 +269,13 @@ fn writable_area(input: &FeatureChunks) -> [i32; 6] {
 fn place_start(
     world: &mut FeatureWorld<'_>,
     input: &FeatureChunks,
-    seed: i64,
     start: &StartInput,
-    random: &WorldgenRandom,
-    processor_lists: &ProcessorLists,
     stats: &mut PlaceStats,
+    options: PlaceOptions<'_>,
 ) -> Result<(), String> {
+    if options.skip_type == Some(start.type_id.as_str()) {
+        return Ok(());
+    }
     let chunk_bb = writable_area(input);
     match &start.pieces {
         StartPieces::Jigsaw(pieces) => {
@@ -254,11 +287,23 @@ fn place_start(
                     stats.unsupported_pieces += 1;
                     continue;
                 }
-                place_jigsaw_piece(world, seed, piece, &chunk_bb, random, processor_lists)?;
+                let before = world.write_count;
+                place_jigsaw_piece(
+                    world,
+                    options.seed,
+                    piece,
+                    &chunk_bb,
+                    options.random,
+                    options.processor_lists,
+                )?;
                 *stats
                     .placed_pieces
                     .entry(start.type_id.clone())
                     .or_default() += 1;
+                *stats
+                    .placed_blocks
+                    .entry(start.type_id.clone())
+                    .or_default() += world.write_count.saturating_sub(before);
             }
         }
         StartPieces::Layout(pieces) => {
@@ -272,11 +317,16 @@ fn place_start(
                 if !intersects(&piece.bb, &chunk_bb) {
                     continue;
                 }
-                place_layout_piece(world, piece, kind, &chunk_bb, random)?;
+                let before = world.write_count;
+                place_layout_piece(world, piece, kind, &chunk_bb, options.random)?;
                 *stats
                     .placed_pieces
                     .entry(start.type_id.clone())
                     .or_default() += 1;
+                *stats
+                    .placed_blocks
+                    .entry(start.type_id.clone())
+                    .or_default() += world.write_count.saturating_sub(before);
             }
             if start.type_id == "minecraft:woodland_mansion" {
                 let world_random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
