@@ -272,9 +272,13 @@ struct TerrainShard {
     misses: u64,
     evictions: u64,
     trims: u64,
-    /// 本片里每个键被哪些线程独立算过，用于统计跨线程重复计算。
-    /// Threads that independently computed each key, for duplicate counts.
+    /// 本片里每个**还活着**的键被哪些线程独立算过；淘汰时把该键贡献的重复次数
+    /// 累加进 `duplicate_total` 后删掉，测量表不会随跑图时间无限增长。
+    /// Threads that independently computed each live key; on eviction the key's
+    /// duplicates are folded into `duplicate_total` and the entry is dropped,
+    /// so the measurement map cannot grow without bound.
     computed_by: HashMap<TerrainCacheKey, Vec<usize>>,
+    duplicate_total: u64,
 }
 
 /// 全进程一份的缓存；`OnceLock` 初始化后只读，锁只护查表和插入。
@@ -380,11 +384,12 @@ pub fn terrain_cache_stats() -> TerrainCacheStats {
         stats.clears += shard.trims;
         // 每个键只在一个片里；被 N 条不同线程算过就贡献 N-1 次重复计算。
         // Each key lives in exactly one shard and contributes N-1 duplicates.
-        stats.cross_thread_duplicates += shard
-            .computed_by
-            .values()
-            .map(|threads| threads.len().saturating_sub(1) as u64)
-            .sum::<u64>();
+        stats.cross_thread_duplicates += shard.duplicate_total
+            + shard
+                .computed_by
+                .values()
+                .map(|threads| threads.len().saturating_sub(1) as u64)
+                .sum::<u64>();
     }
     stats
 }
@@ -466,6 +471,9 @@ pub(crate) fn cached_generate_chunk(
                 let removed_bytes = generated_chunk_heap_bytes(&removed);
                 shard.bytes = shard.bytes.saturating_sub(removed_bytes);
                 TOTAL_BYTES.fetch_sub(removed_bytes, Ordering::Relaxed);
+                if let Some(threads) = shard.computed_by.remove(&oldest) {
+                    shard.duplicate_total += threads.len().saturating_sub(1) as u64;
+                }
                 shard.evictions += 1;
             }
         }
