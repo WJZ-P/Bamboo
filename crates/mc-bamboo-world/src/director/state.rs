@@ -1575,7 +1575,11 @@ impl<C: ChunkBundle> Director<C> {
             });
             let _ = pending.seq;
         }
-        self.deferred = skipped;
+        // 保留上一轮没轮到的 deferred；本轮新被挡住的任务追加进去。
+        // 直接覆盖会在同一刻多次 `drive` 时把早先被挡住的任务弄丢。
+        self.deferred.extend(skipped);
+        self.deferred.sort_unstable();
+        self.deferred.dedup();
         self.flush_notifications(out);
     }
 
