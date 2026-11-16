@@ -10,15 +10,15 @@
 //! the sandstone / stone layer holding the chest and turns the neighbours into sand. The other
 //! three (swamp hut, desert pyramid, jungle temple) are appended per structure.
 
-use mc_bamboo_blocks::BlockState;
-use mc_bamboo_data::{blocks, state_facts};
+use mc_bamboo_data::blocks;
 
 use crate::{
     feature::world::{FeatureWorld, HeightmapKind},
-    structure::place::PieceContext,
+    structure::piece_place::{box_is_inside, reorient_with},
 };
 
 pub mod igloo;
+pub mod jungle_temple;
 pub mod ocean_ruin;
 pub mod pyramid;
 pub mod ruined_portal;
@@ -104,126 +104,45 @@ pub fn buried_treasure(
     None
 }
 
-/// `StructurePiece.createChest(level, chunkBB, random, pos, lootTable, null)` 的方块部分：
-/// 盒子内且不是箱子时写一个箱子（朝向用 `reorient`），返回是否写了。
+/// `StructurePiece.createChest(level, chunkBB, random, pos, lootTable, null)`：
+/// 盒子内且不是箱子时写一个箱子（朝向用 `reorient`），再按 `random.nextLong()` 把战利品表
+/// 写进方块实体。返回写下的方块状态。
 ///
-/// 战利品表要 `random.nextLong()`，那一半留给调用方；这里只写方块。
+/// 官方 `getBlockEntity` 拿到的是 `ChestBlockEntity` 才会取数；这里 `chest` 状态自带方块实体，
+/// 所以一定取。`loot_table` 是 `null`（不指定表）时只取数、不写 `LootTable` 键。
 ///
-/// The block part of `StructurePiece.createChest(level, chunkBB, random, pos, lootTable,
-/// null)`: inside the box and not already a chest, write a chest (facing chosen by
-/// `reorient`) and report whether it was written. The loot table draws `random.nextLong()`;
-/// that half stays with the caller.
+/// `StructurePiece.createChest`: write a chest (facing chosen by `reorient`) when inside
+/// the box and no chest is there yet, then draw `random.nextLong()` for the loot table.
+/// Vanilla only draws when `getBlockEntity` returns a `ChestBlockEntity`; a chest state
+/// always has one. A `None` loot table still draws the seed but writes no `LootTable` key.
 pub fn create_chest(
     world: &mut FeatureWorld,
     chunk_bb: &[i32; 6],
     pos: (i32, i32, i32),
     block_state: Option<u32>,
+    random: &crate::random::WorldgenRandom,
+    loot_table: Option<&str>,
 ) -> Option<u32> {
-    if !PieceContext::inside(chunk_bb, pos) || world.get_block(pos.0, pos.1, pos.2) == blocks::CHEST
+    if !box_is_inside(chunk_bb, pos.0, pos.1, pos.2)
+        || world.get_block(pos.0, pos.1, pos.2) == blocks::CHEST
     {
         return None;
     }
-    let state = block_state.unwrap_or_else(|| reorient(world, pos, blocks::CHEST));
+    let state = block_state
+        .unwrap_or_else(|| reorient_with(|x, y, z| world.get_block(x, y, z), pos, blocks::CHEST));
     world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+    let mut entries = Vec::new();
+    if let Some(table) = loot_table {
+        entries.push((
+            "LootTable".to_owned(),
+            mc_bamboo_nbt::Tag::String(table.to_owned()),
+        ));
+    }
+    let seed = random.next_long();
+    entries.push(("LootTableSeed".to_owned(), mc_bamboo_nbt::Tag::Long(seed)));
+    world.set_block_entity(pos.0, pos.1, pos.2, &mc_bamboo_nbt::Tag::Compound(entries));
     Some(state)
 }
-
-/// `StructurePiece.reorient(level, pos, chestState)`：按周围实心方块决定箱子朝向。
-///
-/// `StructurePiece.reorient(level, pos, chestState)`: pick the chest facing from the solid
-/// neighbours.
-fn reorient(world: &FeatureWorld, pos: (i32, i32, i32), chest: u32) -> u32 {
-    // 官方第一段：遍历四个水平方向，遇到箱子原样返回；累计「唯一实心邻居」，两个以上就放弃。
-    // Vanilla part one: walk the four horizontal directions; a chest neighbour returns the
-    // state unchanged, and two or more solid neighbours abandon the search.
-    let mut solid: Option<&'static str> = None;
-    for facing in ["north", "east", "south", "west"] {
-        let (dx, dz) = step(facing);
-        let neighbour = world.get_block(pos.0 + dx, pos.1, pos.2 + dz);
-        if neighbour == blocks::CHEST {
-            return chest;
-        }
-        if is_solid_render(neighbour) {
-            if solid.is_some() {
-                solid = None;
-                break;
-            }
-            solid = Some(facing);
-        }
-    }
-    if let Some(facing) = solid {
-        return with_facing(chest, opposite_of(facing));
-    }
-    // 官方第二段：从当前 FACING（默认 NORTH）开始，指向实心块就反向，再顺时针，再反向。
-    // Vanilla part two: start from the current FACING (default NORTH); a solid block ahead
-    // flips to the opposite, then clockwise, then the opposite again.
-    let mut facing = "north";
-    let (dx, dz) = step(facing);
-    if is_solid_render(world.get_block(pos.0 + dx, pos.1, pos.2 + dz)) {
-        facing = opposite_of(facing);
-        let (dx, dz) = step(facing);
-        if is_solid_render(world.get_block(pos.0 + dx, pos.1, pos.2 + dz)) {
-            facing = clockwise_of(facing);
-            let (dx, dz) = step(facing);
-            if is_solid_render(world.get_block(pos.0 + dx, pos.1, pos.2 + dz)) {
-                facing = opposite_of(facing);
-            }
-        }
-    }
-    with_facing(chest, facing)
-}
-
-fn step(facing: &str) -> (i32, i32) {
-    match facing {
-        "north" => (0, -1),
-        "south" => (0, 1),
-        "east" => (1, 0),
-        _ => (-1, 0),
-    }
-}
-
-fn opposite_of(facing: &str) -> &'static str {
-    match facing {
-        "north" => "south",
-        "south" => "north",
-        "east" => "west",
-        _ => "east",
-    }
-}
-
-fn clockwise_of(facing: &str) -> &'static str {
-    match facing {
-        "north" => "east",
-        "east" => "south",
-        "south" => "west",
-        _ => "north",
-    }
-}
-
-fn with_facing(chest: u32, facing: &str) -> u32 {
-    BlockState(chest)
-        .try_with_text("facing", facing)
-        .map(|state| state.0)
-        .unwrap_or(chest)
-}
-
-fn is_solid_render(state: u32) -> bool {
-    state_facts(state) & mc_bamboo_data::facts::SOLID_RENDER != 0
-}
-
-/// 埋藏的宝藏不需要 `PieceContext`（它不经 `placeBlock` 的 rotation 变换，自己写方块）。
-/// 这个别名让调用方的签名和其它结构保持同一形状。
-///
-/// The buried treasure needs no `PieceContext` (it writes blocks itself, without
-/// `placeBlock`'s rotation). This alias keeps the call shape uniform with other structures.
-pub type PlainWorld<'a, 'b> = (&'a mut FeatureWorld<'b>, &'a [i32; 6]);
-
-/// 占位：`place` 模块的 `PieceContext` 给后续三个结构用，这里先引用一次避免未使用告警。
-///
-/// Placeholder: `PieceContext` from the `place` module is for the remaining three structures;
-/// referenced once so the import is not flagged.
-#[allow(dead_code)]
-fn _piece_context(_: PieceContext<'_, '_>) {}
 
 #[cfg(test)]
 mod tests {

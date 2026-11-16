@@ -19,7 +19,10 @@ use mc_bamboo_data::blocks;
 
 use crate::{
     feature::world::FeatureWorld,
-    structure::pieces::{Box, HDir},
+    structure::{
+        piece_place::{box_is_inside, is_replaceable_by_structures},
+        pieces::{Box, HDir},
+    },
 };
 
 /// 官方 `StructurePiece.postProcess` 的 `level` 和 `chunkBB` 两件参数，外加结构件自己的
@@ -116,12 +119,7 @@ impl PieceContext<'_, '_> {
     ///
     /// `BoundingBox.isInside(pos)`.
     pub fn inside(bb: &Box, pos: (i32, i32, i32)) -> bool {
-        pos.0 >= bb[0]
-            && pos.0 <= bb[3]
-            && pos.1 >= bb[1]
-            && pos.1 <= bb[4]
-            && pos.2 >= bb[2]
-            && pos.2 <= bb[5]
+        box_is_inside(bb, pos.0, pos.1, pos.2)
     }
 
     /// `placeBlock(level, state, x, y, z, chunkBB)`：按 `mirror` / `rotation` 变换后写方块。
@@ -229,7 +227,7 @@ impl PieceContext<'_, '_> {
         let mut y = pos.1;
         while y > min_y + 1 {
             let current = self.world.get_block(pos.0, y, pos.2);
-            if !replaceable_by_structures(current) {
+            if !is_replaceable_by_structures(current) {
                 break;
             }
             if let Some(writes) = self.writes.as_mut() {
@@ -239,16 +237,4 @@ impl PieceContext<'_, '_> {
             y -= 1;
         }
     }
-}
-
-/// `StructurePiece.isReplaceableByStructures(state)`：空气、液体、发光地衣、海草、高海草。
-///
-/// `StructurePiece.isReplaceableByStructures(state)`: air, liquids, glow lichen,
-/// seagrass and tall seagrass.
-pub fn replaceable_by_structures(state: u32) -> bool {
-    state == blocks::AIR
-        || state == blocks::GLOW_LICHEN
-        || state == blocks::SEAGRASS
-        || state == blocks::TALL_SEAGRASS
-        || mc_bamboo_data::state_fluid(state).fluid != mc_bamboo_data::registries::fluid::EMPTY
 }
