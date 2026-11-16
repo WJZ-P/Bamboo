@@ -1978,7 +1978,7 @@ mod storage_bench {
         let i = index as i32;
         let cx = i % CHUNKS;
         let cz = (i / CHUNKS) % CHUNKS;
-        let slot = (i / (CHUNKS * CHUNKS)) as i32;
+        let slot = i / (CHUNKS * CHUNKS);
         BlockPos::new(cx * 16 + slot % 16, slot / 16, cz * 16 + (slot % 256) / 16)
     }
 
