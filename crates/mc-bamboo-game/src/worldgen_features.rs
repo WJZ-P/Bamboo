@@ -41,7 +41,10 @@ use mc_bamboo_worldgen::{
 use crate::{
     region::RegionColumn,
     world_options::WorldGenConfig,
-    worldgen::{GeneratedChunk, build_region_column, cached_generate_chunk, with_generator},
+    worldgen::{
+        GeneratedChunk, build_region_column, cached_beardified_chunk, cached_generate_chunk,
+        with_generator,
+    },
 };
 
 /// 一次 `setBlock` 写增量：世界坐标 `(x, y, z, 状态 ID)`。
@@ -584,12 +587,7 @@ fn cached_generate_chunk_with_structures(
     }
     let beardifier = crate::worldgen_structures::beardifier_for(config, x, z)?;
     match beardifier {
-        Some(beardifier) => Ok(Arc::new(crate::worldgen::generate_chunk_with_beardifier(
-            config,
-            x,
-            z,
-            Some(&beardifier),
-        )?)),
+        Some(beardifier) => cached_beardified_chunk(config, x, z, &beardifier),
         None => cached_generate_chunk(config, x, z),
     }
 }

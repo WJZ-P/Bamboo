@@ -265,11 +265,13 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
     }
 }
 
-/// 地形缓存键：`(种子, 世界类型, x, z)`。地形是纯函数，命中与否只影响速度。
+/// 地形缓存键：`(种子, 世界类型, x, z, 是否带 Beardifier)`。带结构件影响与
+/// `Beardifier.EMPTY` 算出的地形不同，必须分开存；地形是纯函数，命中与否只影响速度。
 ///
-/// Terrain cache key: `(seed, settings, x, z)`. Terrain is pure, so a hit only
-/// affects speed.
-type TerrainCacheKey = (i64, Option<&'static str>, i32, i32);
+/// Terrain cache key: `(seed, settings, x, z, has Beardifier)`. Terrain with
+/// structure influence differs from the `Beardifier.EMPTY` one, so the two must
+/// not share an entry. Terrain is pure; a hit only affects speed.
+type TerrainCacheKey = (i64, Option<&'static str>, i32, i32, bool);
 
 /// 全进程共用的地形缓存上限：256 MiB。
 ///
@@ -455,14 +457,47 @@ pub(crate) fn cached_generate_chunk(
     x: i32,
     z: i32,
 ) -> Result<Arc<GeneratedChunk>, String> {
-    let key = (config.seed, config.level_type.settings_id(), x, z);
+    cached_terrain(config, x, z, None)
+}
+
+/// 与 [`cached_generate_chunk`] 同一张缓存，但这一格带结构件的 Beardifier。
+/// `beardifier` 只由 `(种子, 世界类型, x, z)` 决定，所以键里的 `true` 足以区分；
+/// 基线高度查询仍走 `beardifier=None` 的 `cached_generate_chunk`，不受影响。
+///
+/// Same cache as [`cached_generate_chunk`], for a cell with a structure
+/// Beardifier. The Beardifier is a pure function of the key, so `true` in the
+/// key is enough; baseline height queries keep using the `None` path.
+pub(crate) fn cached_beardified_chunk(
+    config: &WorldGenConfig,
+    x: i32,
+    z: i32,
+    beardifier: &mc_bamboo_worldgen::beardifier::Beardifier,
+) -> Result<Arc<GeneratedChunk>, String> {
+    cached_terrain(config, x, z, Some(beardifier))
+}
+
+fn cached_terrain(
+    config: &WorldGenConfig,
+    x: i32,
+    z: i32,
+    beardifier: Option<&mc_bamboo_worldgen::beardifier::Beardifier>,
+) -> Result<Arc<GeneratedChunk>, String> {
+    let key = (
+        config.seed,
+        config.level_type.settings_id(),
+        x,
+        z,
+        beardifier.is_some(),
+    );
     let shards = terrain_shards();
     let index = shard_index(&key);
     // 锁内只做查表；命中后立刻放锁，生成和后续地物计算都在锁外。
     // Hold the lock only for the lookup; generation runs outside the lock.
     {
         let Ok(mut shard) = shards[index].lock() else {
-            return Ok(Arc::new(generate_chunk(config, x, z)?));
+            return Ok(Arc::new(generate_chunk_with_beardifier(
+                config, x, z, beardifier,
+            )?));
         };
         if let Some(cached) = shard.entries.get(&key) {
             let cached = Arc::clone(cached);
@@ -474,7 +509,7 @@ pub(crate) fn cached_generate_chunk(
     // 后算完的发现已有条目就沿用前者，不会死锁也不会空等。
     // Two threads may compute the same key; terrain is pure so results match.
     // The first insertion wins and the loser reuses it, with no waiting.
-    let chunk = Arc::new(generate_chunk(config, x, z)?);
+    let chunk = Arc::new(generate_chunk_with_beardifier(config, x, z, beardifier)?);
     let bytes = generated_chunk_heap_bytes(&chunk);
     let thread_id = MEASURE_THREAD_ID.with(|id| *id);
     if let Ok(mut shard) = shards[index].lock() {
@@ -747,6 +782,34 @@ mod tests {
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
         }
+    }
+
+    /// 带 Beardifier 与不带的地形缓存键分开：同一坐标两次查询各存一份，
+    /// `EMPTY` Beardifier 的方块内容和不带时逐位相同（官方 `EMPTY` 恒 0），
+    /// 但两次命中必须是同一个 `Arc` 且两类键不能互相覆盖。
+    ///
+    /// Beardified and plain terrain use distinct cache keys. With an EMPTY
+    /// Beardifier the blocks are bit-identical to the plain ones, but each
+    /// variant keeps its own entry and its own `Arc`.
+    #[test]
+    fn beardified_and_plain_cache_entries_do_not_collide() {
+        let cfg = normal(12345);
+        clear_terrain_cache();
+        let plain = cached_generate_chunk(&cfg, 3, -2).unwrap();
+        let empty = mc_bamboo_worldgen::beardifier::Beardifier::empty();
+        let beard = cached_beardified_chunk(&cfg, 3, -2, &empty).unwrap();
+        assert_eq!(plain.blocks, beard.blocks);
+        assert_eq!(plain.biomes, beard.biomes);
+        assert!(
+            !Arc::ptr_eq(&plain, &beard),
+            "the two variants must not share one cache entry"
+        );
+        let plain_again = cached_generate_chunk(&cfg, 3, -2).unwrap();
+        let beard_again = cached_beardified_chunk(&cfg, 3, -2, &empty).unwrap();
+        assert!(Arc::ptr_eq(&plain, &plain_again));
+        assert!(Arc::ptr_eq(&beard, &beard_again));
+        let stats = terrain_cache_stats();
+        assert!(stats.entries >= 2, "both keys are cached: {stats:?}");
     }
 
     /// 掩码缓存和逐格调用原谓词逐位相同，且六张图的键各占一位。
