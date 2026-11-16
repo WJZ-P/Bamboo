@@ -33,8 +33,8 @@ decoration step 先放结构件再放地物，区块 NBT 写回 `structures` 键
 对拍把官方 17×17 的 `createStructures` / `createReferences` 与游戏里的同一条路径
 逐项比（28 行、84 次比较、2482 个结构件 0 不一致；`--break-self-test` 报 28 处），
 覆盖矿井 / jigsaw / 埋藏的宝藏 / 女巫小屋 / 沉船 / 废弃传送门等 8 类实际放置。
-真实 `Beardifier` 已接进纯 `game_pipeline`，Director 的 terrain 阶段暂仍走 EMPTY
-（计算池调度竞态，见 `docs/worldgen-structures-plan.md` §12）。
+真实 `Beardifier` 已接进 Director 的 terrain 阶段与纯 `game_pipeline`，
+0/2/8 计算线程逐字节相同（见 `docs/worldgen-structures-plan.md` §12）。
 
 ## 未合并的分支 / Unmerged branches
 

@@ -1716,13 +1716,18 @@ structures (Compound)
   `GenerateOutput.structures` 把 `starts` + `References` 标签交给世界线程，
   `Task::Assemble` 装进 `ChunkArchiveMeta.structures`。读盘标签优先恢复起点，
   再生成相邻区块与一次性生成一致（单测钉住）。
-* **terrain**：`game_pipeline` / `generate_chunk_with_beardifier` 已把
-  `Beardifier.forStructuresInChunk` 注进 `terrain_with_region`（`beard` 对拍逐位一致，
-  `structure-pipeline` 提供真实起点）。**Director 的 `terrain` 阶段仍走 EMPTY**：
-  在计算池里反查半径 8 的 289 个起点会改变任务耗时，暴露地物增量按
-  `(x,y,z,state)` 规范序合并时对 1/4 线程调度的竞态（少量重复写的格子结果不同）。
-  等增量合并带上确定性的生成顺序后再打开这一支；起点、引用、`features` 放置和
-  `structures` 存档都不受影响。
+* **terrain**：`generate_terrain_stage` 与 `build_view` 都走
+  `cached_generate_chunk_with_structures`，按官方 `createNoiseChunk` 把
+  `Beardifier.forStructuresInChunk` 注进 `terrain_with_region`。依赖表
+  `GENERATION[4].requires = [(S,8),(B,1)]` 保证半径 8 的 `structure_starts` 与中心
+  `structure_references` 定稿；Beardifier 按 `(seed,x,z)` 全局缓存，0/2/8 计算线程
+  逐字节相同（`structure_terrain_is_identical_across_worker_counts`）。
+  **竞争根源与修法**：旧实现里 `build_view`（邻居中心重算地物用）读 EMPTY 地形的
+  `TERRAIN_CACHE`，而 `generate_features_stage` 读世界线程 `partials` 里的真实
+  Beardifier 地形；同一区块哪份快照先落地由计算池调度决定，
+  `neighbor_spills_depend_on_which_terrain_snapshot_arrives` 稳定复现。
+  `structure-pipeline` 现在还把官方带真实 Beardifier 的 CARVERS 方块逐格比：
+  28 个结构区块 / 2752512 格 0 不一致，`--break-self-test` 报 28 处。
 * **features**：`feature/run.rs` 每个 step 的地物之前调
   `structure/place_step.rs`；per-step 局部 index 数的是整张 `STRUCTURE` 注册表，
   结构件 `postProcess` 写 `FeatureWorld`（`PieceLevel` / `ProcessorLevel` 适配只加不删）。
