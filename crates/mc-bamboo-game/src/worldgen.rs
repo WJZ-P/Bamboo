@@ -17,6 +17,10 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use mc_bamboo_data::{blocks, registries};
@@ -230,11 +234,151 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
 // Each compute thread caches CARVERS terrain so the `features` 3×3 view does not
 // recompute it. The key includes seed and world type; terrain is pure, so a hit
 // never changes the result. Bounded: clear the whole table past the cap.
-type TerrainCache = HashMap<(i64, Option<&'static str>, i32, i32), GeneratedChunk>;
+type TerrainCacheKey = (i64, Option<&'static str>, i32, i32);
+type TerrainCache = HashMap<TerrainCacheKey, GeneratedChunk>;
 thread_local! {
     static TERRAIN_CACHE: RefCell<TerrainCache> = RefCell::new(HashMap::new());
 }
 const TERRAIN_CACHE_CAP: usize = 1024;
+
+/// 一个 `GeneratedChunk` 占的堆字节数（各 `Vec` 的 `capacity` 相加）。
+///
+/// Heap bytes held by one `GeneratedChunk` (sum of each `Vec`'s capacity).
+pub fn generated_chunk_heap_bytes(chunk: &GeneratedChunk) -> usize {
+    let blocks: usize = chunk
+        .blocks
+        .iter()
+        .map(|layer| layer.capacity() * size_of::<u32>())
+        .sum();
+    let biomes: usize = chunk
+        .biomes
+        .iter()
+        .map(|section| section.capacity() * size_of::<u32>())
+        .sum();
+    let heightmaps: usize = chunk
+        .heightmaps
+        .values()
+        .map(|map| map.capacity() * size_of::<i32>())
+        .sum();
+    blocks + biomes + heightmaps + chunk.blocks.capacity() * size_of::<Vec<u32>>()
+}
+
+/// 地形缓存的测量快照。`bytes` 是缓存里各条目实测堆字节数之和，`peak_bytes` 是跑图
+/// 过程中这个和的峰值；`cross_thread_duplicates` 是「同一区块被不同计算线程各自
+/// 独立算过」多出来的次数。
+///
+/// Measurement snapshot of the terrain cache. `bytes` is the sum of the entries'
+/// measured heap bytes, `peak_bytes` its high-water mark, and
+/// `cross_thread_duplicates` counts redundant cross-thread computations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TerrainCacheStats {
+    pub entries: usize,
+    pub bytes: usize,
+    pub peak_bytes: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub clears: u64,
+    pub evictions: u64,
+    pub cross_thread_duplicates: u64,
+}
+
+/// 每条线程自己的测量数据。命中是热路径，只碰本线程的 `Arc<Mutex<_>>`，
+/// 不和其他线程抢锁；跑完后由 `terrain_cache_stats` 汇总。
+///
+/// Per-thread measurement data. A hit is the hot path and only touches this
+/// thread's own `Arc<Mutex<_>>`; `terrain_cache_stats` aggregates at the end.
+#[derive(Default)]
+struct ThreadMeasure {
+    hits: u64,
+    misses: u64,
+    clears: u64,
+    evictions: u64,
+    /// 本线程的缓存当前占多少字节（整表清空时用于减掉全局计数）。
+    /// Bytes currently held by this thread's cache (subtracted on a clear).
+    bytes: usize,
+    /// 本线程独立算过的区块键，用于最后统计跨线程重复计算。
+    /// Keys this thread computed, for the cross-thread duplicate count.
+    computed: std::collections::HashSet<TerrainCacheKey>,
+}
+
+static MEASURE_REGISTRY: OnceLock<Mutex<Vec<Arc<Mutex<ThreadMeasure>>>>> = OnceLock::new();
+static TOTAL_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+static TOTAL_BYTES: AtomicUsize = AtomicUsize::new(0);
+static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    static THREAD_MEASURE: Arc<Mutex<ThreadMeasure>> = {
+        let measure = Arc::new(Mutex::new(ThreadMeasure::default()));
+        MEASURE_REGISTRY
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("terrain cache measure registry")
+            .push(Arc::clone(&measure));
+        measure
+    };
+}
+
+fn note_peak() {
+    let bytes = TOTAL_BYTES.load(Ordering::Relaxed);
+    PEAK_BYTES.fetch_max(bytes, Ordering::Relaxed);
+}
+
+/// 读一份全进程汇总的缓存测量快照（压测 / 报告用）。
+///
+/// Read the process-wide aggregate cache measurement snapshot (benchmarks / reports).
+pub fn terrain_cache_stats() -> TerrainCacheStats {
+    let mut stats = TerrainCacheStats {
+        entries: TOTAL_ENTRIES.load(Ordering::Relaxed),
+        bytes: TOTAL_BYTES.load(Ordering::Relaxed),
+        peak_bytes: PEAK_BYTES.load(Ordering::Relaxed),
+        ..TerrainCacheStats::default()
+    };
+    let Some(registry) = MEASURE_REGISTRY.get() else {
+        return stats;
+    };
+    let snapshots: Vec<Arc<Mutex<ThreadMeasure>>> =
+        registry.lock().map(|list| list.clone()).unwrap_or_default();
+    // 每个键被多少条不同的线程算过：`sum(count - 1)` 就是重复计算次数。
+    // Each key computed by N different threads contributes N-1 duplicates.
+    let mut per_key: HashMap<TerrainCacheKey, usize> = HashMap::new();
+    for snapshot in &snapshots {
+        let Ok(measure) = snapshot.lock() else {
+            continue;
+        };
+        stats.hits += measure.hits;
+        stats.misses += measure.misses;
+        stats.clears += measure.clears;
+        stats.evictions += measure.evictions;
+        for key in &measure.computed {
+            *per_key.entry(*key).or_default() += 1;
+        }
+    }
+    stats.cross_thread_duplicates = per_key
+        .values()
+        .map(|count| count.saturating_sub(1) as u64)
+        .sum();
+    stats
+}
+
+/// 清掉地形缓存和测量计数（压测量冷启动时用；只在跑图前调用）。
+///
+/// Clear the terrain cache and measurement counters (cold-start benchmarks;
+/// call only before a run, never from a worker thread).
+pub fn clear_terrain_cache() {
+    TERRAIN_CACHE.with(|cache| cache.borrow_mut().clear());
+    let snapshots: Vec<Arc<Mutex<ThreadMeasure>>> = MEASURE_REGISTRY
+        .get()
+        .and_then(|registry| registry.lock().ok().map(|list| list.clone()))
+        .unwrap_or_default();
+    for snapshot in &snapshots {
+        if let Ok(mut measure) = snapshot.lock() {
+            *measure = ThreadMeasure::default();
+        }
+    }
+    TOTAL_ENTRIES.store(0, Ordering::Relaxed);
+    TOTAL_BYTES.store(0, Ordering::Relaxed);
+    PEAK_BYTES.store(0, Ordering::Relaxed);
+}
 
 /// 带线程本地缓存的 `generate_chunk`，`features` 阶段拼 3×3 视图用。
 ///
@@ -263,14 +407,42 @@ pub(crate) fn cached_generate_chunk_with_beardifier(
     let key = (config.seed, config.level_type.settings_id(), x, z);
     TERRAIN_CACHE.with(|cache| {
         if let Some(chunk) = cache.borrow().get(&key) {
+            THREAD_MEASURE.with(|measure| {
+                if let Ok(mut measure) = measure.lock() {
+                    measure.hits += 1;
+                }
+            });
             return Ok(chunk.clone());
         }
         let chunk = generate_chunk(config, x, z)?;
         let mut cache = cache.borrow_mut();
-        if cache.len() >= TERRAIN_CACHE_CAP {
+        // 旧缓存超限时整表清空；把本线程之前占的字节从全局计数里减掉。
+        // The old cache clears its whole table past the cap; subtract this
+        // thread's previous bytes from the global counter.
+        let cleared = cache.len() >= TERRAIN_CACHE_CAP;
+        let old_len = cache.len();
+        if cleared {
             cache.clear();
         }
+        let bytes = generated_chunk_heap_bytes(&chunk);
         cache.insert(key, chunk.clone());
+        THREAD_MEASURE.with(|measure| {
+            if let Ok(mut measure) = measure.lock() {
+                measure.misses += 1;
+                if cleared {
+                    measure.clears += 1;
+                    measure.evictions += old_len as u64;
+                    TOTAL_ENTRIES.fetch_sub(old_len, Ordering::Relaxed);
+                    TOTAL_BYTES.fetch_sub(measure.bytes, Ordering::Relaxed);
+                    measure.bytes = 0;
+                }
+                measure.bytes += bytes;
+                measure.computed.insert(key);
+            }
+        });
+        TOTAL_ENTRIES.fetch_add(1, Ordering::Relaxed);
+        TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        note_peak();
         Ok(chunk)
     })
 }
