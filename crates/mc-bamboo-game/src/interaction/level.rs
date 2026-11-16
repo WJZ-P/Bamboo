@@ -57,6 +57,8 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) tick_levels: &'a TickLevels,
     /// 「改过没存」的标记，方块逻辑的每一次写都在这里登记。
     pub(crate) dirty: &'a mut crate::region::dirty::Dirty,
+    /// 按区块统计三个方块侧阶段时用的剖析器。默认关闭，`None` 时 `observe` 直接返回。
+    pub(crate) chunk_profiler: Option<&'a crate::profiler::Profiler>,
 }
 
 impl LevelTables for RegionLevel<'_> {
@@ -508,6 +510,14 @@ impl Level for RegionLevel<'_> {
         let slot =
             crate::inventory::set_dispenser_slot(&mut player.inventory, component_slot, stack)?;
         u16::try_from(slot).ok()
+    }
+
+    /// 按区块统计三个方块侧阶段的触发耗时；开关关着时 `chunk_profiler` 是 `None`，
+    /// 这一步只有一次 `Option` 判断，和默认的空实现等价。
+    fn observe(&self, event: mc_bamboo_blocks::Observation<'_>) {
+        if let Some(profiler) = self.chunk_profiler {
+            profiler.observe_trigger(event);
+        }
     }
 }
 

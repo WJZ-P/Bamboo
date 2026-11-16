@@ -40,7 +40,7 @@ use crate::{
     pacing::{Pacer, WallTiming},
     player::shows_hat,
     player_save::{game_mode_from_id, restore_inventory, runtime_player_data},
-    profiler::{Metric, Phase},
+    profiler::{ChunkPhase, Metric, Phase},
     region::{JoinSettings, Region},
     save_session::{SaveCommand, SaveSession},
     secure_chat::{self, ServiceProfileKeys},
@@ -626,17 +626,29 @@ impl World {
         // Vanilla `ServerLevel.tick` order: block and fluid ticks, random ticks inside
         // `chunkSource.tick`, block events, entities, then block entities. Falling blocks and
         // primed TNT spawned by block or random ticks move in the same game tick.
+        self.region
+            .profiler
+            .begin_chunk_phase(ChunkPhase::ScheduledTicks);
         interaction::run_block_ticks(&mut self.region, self.global.time());
+        self.region.profiler.end_chunk_phase();
         self.region.profiler.lap(Phase::ScheduledTicks);
         interaction::run_random_ticks(&mut self.region);
         self.region.profiler.lap(Phase::RandomTicks);
+        self.region
+            .profiler
+            .begin_chunk_phase(ChunkPhase::BlockEvents);
         interaction::run_block_events(&mut self.region);
+        self.region.profiler.end_chunk_phase();
         self.region.profiler.lap(Phase::BlockEvents);
         interaction::run_entity_ticks(self.entity_threads, &mut self.region);
         if self.entity_threads == 0 {
             self.region.profiler.lap(Phase::Entities);
         }
+        self.region
+            .profiler
+            .begin_chunk_phase(ChunkPhase::BlockEntities);
         interaction::run_block_entity_ticks(&mut self.region);
+        self.region.profiler.end_chunk_phase();
         self.region.profiler.lap(Phase::BlockEntities);
         // 玩家自己每 tick 的挖掘进度。官方在实体 tick 里跑 `ServerPlayerGameMode.tick`，
         // 这里跟着玩家 tick 放在随机刻之后。
