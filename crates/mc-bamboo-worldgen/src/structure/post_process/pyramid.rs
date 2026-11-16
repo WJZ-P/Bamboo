@@ -551,7 +551,9 @@ pub fn desert_pyramid(
         }
     }
 
-    let mut region = region_random(seed, use_legacy_random, cx * 16 + 8, cz * 16 + 8);
+    // `ChunkPos.getWorldPosition()` 是区块最小角 `(cx*16, 0, cz*16)`，不是中心。
+    // `ChunkPos.getWorldPosition()` is the chunk's min corner, not its centre.
+    let mut region = region_random(seed, use_legacy_random, cx * 16, cz * 16);
     add_cellar(&mut ctx, &mut region);
     let writes = ctx.writes.take();
     (Some((height_position, new_bb)), writes)

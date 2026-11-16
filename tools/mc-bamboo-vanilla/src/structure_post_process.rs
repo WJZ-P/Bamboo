@@ -37,11 +37,6 @@ const CHUNKS: [(i32, i32); 4] = [(0, 0), (1, -1), (-3, 2), (100, -100)];
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
 const KINDS: [&str; 3] = ["buried_treasure", "desert_pyramid", "swamp_hut"];
-/// 已写但还没对上官方坐标的结构：先不进对拍查询集，等修好再放开。
-///
-/// Structures that are ported but whose coordinates still differ from vanilla: kept out of the
-/// oracle query set until fixed.
-const SKIPPED: [&str; 1] = ["desert_pyramid"];
 /// 一条查询。
 struct Query {
     kind: &'static str,
@@ -166,7 +161,15 @@ fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
             let pieces =
                 mc_bamboo_worldgen::structure::single::generate(q.kind, q.seed, q.cx, q.cz)?;
             let piece = pieces.first().ok_or("no piece")?;
-            let random = mc_bamboo_worldgen::structure::pieces::make_random(q.seed, q.cx, q.cz);
+            // `postProcess` 的随机源是 `applyBiomeDecoration` 的 `setFeatureSeed` 那一个，
+            // oracle 的 Java 侧直接用 `WorldgenRandom(LegacyRandomSource(seed))`；这里一致。
+            // The postProcess random is `setFeatureSeed`'s source from
+            // `applyBiomeDecoration`; the Java oracle uses this same plain seeded source.
+            let random = mc_bamboo_worldgen::random::WorldgenRandom::new(
+                mc_bamboo_worldgen::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(
+                    q.seed,
+                )),
+            );
             let (_, log) = post_process::pyramid::desert_pyramid(
                 &mut world,
                 &piece.bb,
@@ -202,10 +205,7 @@ pub fn run(mut command: Command, queries_path: &Path, _options: &[&str]) -> Resu
         .iter()
         .flat_map(|&seed| {
             CHUNKS.iter().flat_map(move |&(cx, cz)| {
-                KINDS
-                    .iter()
-                    .filter(|&&kind| !SKIPPED.contains(&kind))
-                    .map(move |&kind| Query { kind, seed, cx, cz })
+                KINDS.iter().map(move |&kind| Query { kind, seed, cx, cz })
             })
         })
         .collect();

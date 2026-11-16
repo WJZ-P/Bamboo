@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import net.minecraft.SharedConstants;
@@ -119,19 +120,13 @@ public final class StructurePiecePlaceOracle {
             int cx = Integer.parseInt(p[2]);
             int cz = Integer.parseInt(p[3]);
             ChunkPos pos = new ChunkPos(cx, cz);
-            ProtoChunk chunk = new ProtoChunk(pos, UpgradeData.EMPTY, heightAccessor,
-                    containerFactory, null);
-            fillTerrain(chunk);
-            chunk.setPersistedStatus(ChunkStatus.BIOMES);
-            // 高度图必须由官方 prime：postProcess 的 updateAverageGroundHeight 读它。
-            // The official prime must fill the heightmaps: postProcess reads them.
-            Heightmap.primeHeightmaps(chunk, Set.of(
-                    Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
-                    Heightmap.Types.MOTION_BLOCKING,
-                    Heightmap.Types.WORLD_SURFACE_WG,
-                    Heightmap.Types.OCEAN_FLOOR_WG));
-
-            PieceLevelHandler handler = new PieceLevelHandler(chunk, heightAccessor, seed);
+            // 假世界是 3×3 ProtoChunk，区块外的读写都拿真实相邻列；高度图由官方 prime，
+            // `postProcess` 的 `updateAverageGroundHeight` 读的就是它。
+            // The fake world is a 3x3 ProtoChunk grid: reads and writes outside the centre
+            // chunk hit the real neighbour column. Heightmaps are primed by vanilla because
+            // `updateAverageGroundHeight` reads them.
+            PieceLevelHandler handler =
+                    new PieceLevelHandler(pos, heightAccessor, containerFactory, seed);
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
                     StructurePiecePlaceOracle.class.getClassLoader(),
                     new Class<?>[] {WorldGenLevel.class},
@@ -140,7 +135,6 @@ public final class StructurePiecePlaceOracle {
                     new StructureManager(level, new WorldOptions(seed, false, false), null);
 
             StructurePiece piece = buildPiece(kind, seed, pos);
-            TreeMap<BlockPos, BlockState> before = snapshot(chunk);
             BoundingBox chunkBb = new BoundingBox(pos.getMinBlockX(), MIN_Y + 1, pos.getMinBlockZ(),
                     pos.getMinBlockX() + 15, MIN_Y + HEIGHT - 1, pos.getMinBlockZ() + 15);
             WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(seed));
@@ -241,13 +235,13 @@ public final class StructurePiecePlaceOracle {
      * `WorldGenRegion.getRandom()`：`randomState.getOrCreateRandomFactory("worldgen_region_random")`
      * 在区块中心 `getWorldPosition()` 上的随机源。
      *
-     * <p>和 Rust 侧 `region_random` 走同一条 Legacy 位置派生：先用
-     * `WorldgenRandom(LegacyRandomSource(worldSeed))` 取一次 `nextLong()` 当工厂种子，再
-     * `LegacyPositionalRandomFactory.at(x, 0, z)`。
+     * <p>和 Rust 侧 `region_random` 走同一条位置派生：
+     * `Algorithm.newInstance(seed).forkPositional().fromHashOf(name).forkPositional()
+     * .at(center.getWorldPosition())`；`getWorldPosition()` 是区块最小角 `(cx*16, 0, cz*16)`。
      *
      * <p>The `WorldGenRegion` random source: `randomState.getOrCreateRandomFactory(
-     * "worldgen_region_random")` at the chunk centre. Uses the same Legacy positional
-     * derivation as the Rust `region_random`.
+     * "worldgen_region_random")` at `ChunkPos.getWorldPosition()`, which is the chunk's
+     * min corner rather than its centre.
      */
     private static net.minecraft.util.RandomSource regionRandom(long worldSeed, ChunkPos center) {
         // `RandomState.random = Algorithm.newInstance(seed).forkPositional()`，
@@ -268,29 +262,23 @@ public final class StructurePiecePlaceOracle {
                 .at(center.getWorldPosition());
     }
 
-    /** 逐格快照：只收非空气方块，省内存。 */
-    private static TreeMap<BlockPos, BlockState> snapshot(ProtoChunk chunk) {        TreeMap<BlockPos, BlockState> blocks = new TreeMap<>();
-        ChunkPos pos = chunk.getPos();
-        for (int y = MIN_Y; y < MIN_Y + HEIGHT; y++) {
-            for (int x = 0; x < 16; x++) {
-                for (int z = 0; z < 16; z++) {
-                    BlockPos at = new BlockPos(pos.getMinBlockX() + x, y, pos.getMinBlockZ() + z);
-                    BlockState state = chunk.getBlockState(at);
-                    if (!state.isAir()) {
-                        blocks.put(at, state);
-                    }
-                }
-            }
-        }
-        return blocks;
-    }
-
     /** 假 {@code WorldGenLevel}：只实现 postProcess 用到的方法，其余抛异常。 */
     static final class PieceLevelHandler implements InvocationHandler {
-        private final ProtoChunk chunk;
         private final LevelHeightAccessor heightAccessor;
+        private final PalettedContainerFactory containerFactory;
+        private final Map<ChunkPos, ProtoChunk> chunks = new java.util.HashMap<>();
         private final long seed;
         private final ChunkPos center;
+        /**
+         * `WorldGenRegion.random` 是构造时创建的一个字段，`getRandom()` 每次都返回同一个实例，
+         * 所以 `addCellarStairs` 的 `nextBoolean()` 与 `placeCollapsedRoof` 的 25 次
+         * `nextFloat()` 共用一条取数序列。
+         *
+         * `WorldGenRegion.random` is one field created in the constructor and `getRandom()`
+         * always returns that same instance: `addCellarStairs`' `nextBoolean()` and
+         * `placeCollapsedRoof`'s 25 `nextFloat()` draws share one sequence.
+         */
+        private final net.minecraft.util.RandomSource levelRandom;
         /**
          * 每次 `setBlock` / `setBlockAndUpdate` 真正写下的方块，后写覆盖先写。
          *
@@ -304,11 +292,75 @@ public final class StructurePiecePlaceOracle {
          */
         final TreeMap<BlockPos, BlockState> written = new TreeMap<>();
 
-        PieceLevelHandler(ProtoChunk chunk, LevelHeightAccessor heightAccessor, long seed) {
-            this.chunk = chunk;
+        PieceLevelHandler(ChunkPos center, LevelHeightAccessor heightAccessor,
+                PalettedContainerFactory containerFactory, long seed) {
             this.heightAccessor = heightAccessor;
+            this.containerFactory = containerFactory;
             this.seed = seed;
-            this.center = chunk.getPos();
+            this.center = center;
+            this.levelRandom = regionRandom(seed, this.center);
+            this.chunks.put(center, centerChunk());
+        }
+
+        /** 3×3 写入区，和 Rust 的 `FeatureWorld` / 官方 `WorldGenRegion` 一致。 */
+        private ProtoChunk at(BlockPos pos) {
+            return at(net.minecraft.core.SectionPos.blockToSectionCoord(pos.getX()),
+                    net.minecraft.core.SectionPos.blockToSectionCoord(pos.getZ()));
+        }
+
+        private ProtoChunk at(int cx, int cz) {
+            ChunkPos pos = new ChunkPos(cx, cz);
+            return this.chunks.computeIfAbsent(pos, key -> {
+                ProtoChunk chunk = new ProtoChunk(key, UpgradeData.EMPTY, this.heightAccessor,
+                        this.containerFactory, null);
+                fillTerrain(chunk);
+                chunk.setPersistedStatus(ChunkStatus.BIOMES);
+                Heightmap.primeHeightmaps(chunk, Set.of(
+                        Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                        Heightmap.Types.MOTION_BLOCKING,
+                        Heightmap.Types.WORLD_SURFACE_WG,
+                        Heightmap.Types.OCEAN_FLOOR_WG));
+                return chunk;
+            });
+        }
+
+        private ProtoChunk centerChunk() {
+            ProtoChunk chunk = new ProtoChunk(this.center, UpgradeData.EMPTY, this.heightAccessor,
+                    this.containerFactory, null);
+            fillTerrain(chunk);
+            chunk.setPersistedStatus(ChunkStatus.BIOMES);
+            Heightmap.primeHeightmaps(chunk, Set.of(
+                    Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                    Heightmap.Types.MOTION_BLOCKING,
+                    Heightmap.Types.WORLD_SURFACE_WG,
+                    Heightmap.Types.OCEAN_FLOOR_WG));
+            return chunk;
+        }
+
+        private boolean withinWriteZone(BlockPos pos) {
+            int dx = net.minecraft.core.SectionPos.blockToSectionCoord(pos.getX()) - this.center.x();
+            int dz = net.minecraft.core.SectionPos.blockToSectionCoord(pos.getZ()) - this.center.z();
+            return Math.abs(dx) <= 1 && Math.abs(dz) <= 1;
+        }
+
+        /** 写方块、留 DUMMY 方块实体 nbt，并记录这次写入。 */
+        private void writeBlock(BlockPos pos, BlockState state) {
+            if (!withinWriteZone(pos)) {
+                return;
+            }
+            ProtoChunk chunk = at(pos);
+            BlockState old = chunk.setBlockState(pos, state, 2);
+            if (state.hasBlockEntity()) {
+                net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
+                tag.putInt("x", pos.getX());
+                tag.putInt("y", pos.getY());
+                tag.putInt("z", pos.getZ());
+                tag.putString("id", "DUMMY");
+                chunk.setBlockEntityNbt(tag);
+            } else if (old != null && old.hasBlockEntity()) {
+                chunk.removeBlockEntity(pos);
+            }
+            this.written.put(pos.immutable(), state);
         }
 
         /**
@@ -323,38 +375,36 @@ public final class StructurePiecePlaceOracle {
          * would make `lowest_ground_height` sample the wrong column.
          */
         private int heightAt(Heightmap.Types type, int x, int z) {
-            if (Math.abs(x - this.center.getMinBlockX()) < 16
-                    && Math.abs(z - this.center.getMinBlockZ()) < 16) {
-                return this.chunk.getHeight(type, x & 15, z & 15);
-            }
-            return 64 + Math.floorMod(x * 31 + z * 17, 5) - 2;
+            return at(x >> 4, z >> 4).getHeight(type, x & 15, z & 15);
         }
 
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) {
             String name = method.getName();
             switch (name) {
-                case "getBlockState":
-                    return this.chunk.getBlockState((BlockPos) args[0]);
-                case "getFluidState":
-                    return this.chunk.getFluidState((BlockPos) args[0]);
+                case "getBlockState": {
+                    BlockPos pos = (BlockPos) args[0];
+                    return withinWriteZone(pos) ? at(pos).getBlockState(pos)
+                            : Blocks.AIR.defaultBlockState();
+                }
+                case "getFluidState": {
+                    BlockPos pos = (BlockPos) args[0];
+                    return withinWriteZone(pos) ? at(pos).getFluidState(pos)
+                            : Blocks.AIR.defaultBlockState().getFluidState();
+                }
                 case "setBlock": {
                     BlockPos pos = (BlockPos) args[0];
                     BlockState state = (BlockState) args[1];
-                    this.chunk.setBlockState(pos, state, 2);
                     // `StructurePiece.fillColumnDown` 复用一个 MutableBlockPos 往下移；直接把它
                     // 当 TreeMap 的键会随之后的 move 改变，破坏树的顺序并串改已记录的坐标。
                     // `StructurePiece.fillColumnDown` reuses a MutableBlockPos while moving down;
                     // using it as a TreeMap key lets later moves corrupt both the ordering and
                     // the recorded coordinates.
-                    this.written.put(pos.immutable(), state);
+                    writeBlock(pos, state);
                     return true;
                 }
                 case "setBlockAndUpdate": {
-                    BlockPos pos = (BlockPos) args[0];
-                    BlockState state = (BlockState) args[1];
-                    this.chunk.setBlockState(pos, state, 2);
-                    this.written.put(pos.immutable(), state);
+                    writeBlock((BlockPos) args[0], (BlockState) args[1]);
                     return true;
                 }
                 case "getHeight": {
@@ -386,10 +436,40 @@ public final class StructurePiecePlaceOracle {
                     return MIN_Y + HEIGHT - 1;
                 case "getSeaLevel":
                     return 63;
-                case "getChunk":
-                    return this.chunk;
-                case "getBlockEntity":
-                    return null;
+                case "getChunk": {
+                    if (args != null && args.length >= 1 && args[0] instanceof BlockPos pos) {
+                        return at(pos);
+                    }
+                    return at((Integer) args[1], (Integer) args[2]);
+                }
+                case "getBlockEntity": {
+                    // `WorldGenRegion.getBlockEntity`：带方块实体的状态会在 `setBlock` 时
+                    // 留下 DUMMY nbt，这里要像官方一样现造一个方块实体，否则
+                    // `createChest` / `createDispenser` 不会取战利品表的 `nextLong()`，
+                    // 后续随机取数会整体错位。
+                    // `WorldGenRegion.getBlockEntity`: a state with a block entity leaves a
+                    // DUMMY nbt after `setBlock`. Materialising it here is required for
+                    // `createChest` / `createDispenser` to draw their loot-table `nextLong()`;
+                    // returning null would shift every later random draw.
+                    BlockPos pos = (BlockPos) args[0];
+                    ProtoChunk chunk = at(pos);
+                    net.minecraft.world.level.block.entity.BlockEntity found =
+                            chunk.getBlockEntity(pos);
+                    if (found != null) {
+                        return found;
+                    }
+                    net.minecraft.nbt.CompoundTag tag = chunk.getBlockEntityNbt(pos);
+                    BlockState state = chunk.getBlockState(pos);
+                    if (tag != null && "DUMMY".equals(tag.getStringOr("id", ""))
+                            && state.hasBlockEntity()) {
+                        found = ((net.minecraft.world.level.block.EntityBlock) state.getBlock())
+                                .newBlockEntity(pos, state);
+                        if (found != null) {
+                            chunk.setBlockEntity(found);
+                        }
+                    }
+                    return found;
+                }
                 case "markPosForPostProcessing":
                 case "scheduleTick":
                     return null;
@@ -407,15 +487,15 @@ public final class StructurePiecePlaceOracle {
                     // `WorldGenRegion.getRandom()`:
                     // `randomState.getOrCreateRandomFactory("worldgen_region_random").at(center)`,
                     // recomputed with the same Legacy positional derivation.
-                    return regionRandom(this.seed, this.center);
+                    return this.levelRandom;
                 case "getSeed":
                     return this.seed;
                 case "getCenter":
-                    return this.chunk.getPos();
+                    return this.center;
                 case "getBiomeManager":
                     return new BiomeManager(null, 0L);
                 case "toString":
-                    return "PieceLevelHandler[" + this.chunk.getPos() + "]";
+                    return "PieceLevelHandler[" + this.center + "]";
                 case "hashCode":
                     return System.identityHashCode(proxy);
                 case "equals":
