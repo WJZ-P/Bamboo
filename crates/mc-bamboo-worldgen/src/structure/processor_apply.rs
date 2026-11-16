@@ -299,13 +299,16 @@ pub fn process_block(
         // `GravityProcessor.processBlock`: lifts Y to `height + offset + templateY`.
         Processor::Gravity { heightmap, offset } => {
             let pos = block.world_pos;
-            // 官方在 `level instanceof ServerLevel` 时把 `*_WG` 换成正式变体。
-            // Vanilla swaps `*_WG` for the real variant when the level is a `ServerLevel`.
-            let heightmap = match heightmap.as_str() {
-                "WORLD_SURFACE_WG" => "WORLD_SURFACE",
-                "OCEAN_FLOOR_WG" => "OCEAN_FLOOR",
-                other => other,
-            };
+            // `GravityProcessor` 只在 `level instanceof ServerLevel` 时把 `*_WG`
+            // 换成正式变体；`FEATURES` 阶段的 `WorldGenRegion` 不是 ServerLevel，
+            // 所以这里保留 `WORLD_SURFACE_WG`（terrain 阶段冻结、之后不再更新）。
+            // 换成 `WORLD_SURFACE` 会读到结构件自己刚写过的新高度，让后续结构件
+            // 一层比一层高一格（村庄街道的泥土路会悬空）。
+            // Vanilla only swaps `*_WG` for the real variant when the level is a
+            // `ServerLevel`; the FEATURES-stage `WorldGenRegion` is not one, so the
+            // frozen `WORLD_SURFACE_WG` stays in use. Switching to the live
+            // `WORLD_SURFACE` makes later pieces climb one block per earlier write.
+            let heightmap = heightmap.as_str();
             // 拿不到高度图时保留原位置：官方在真实世界里一定有值，`None` 只可能意味着
             // 调用方的 `ProcessorLevel` 没实现 `height()`。跳过比算错安全。
             // Without a heightmap, keep the position: vanilla always has a value in a real

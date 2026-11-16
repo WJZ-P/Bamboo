@@ -736,17 +736,22 @@ pub trait BlockWriter {
 }
 
 impl BlockWriter for crate::feature::world::FeatureWorld<'_> {
+    /// 官方 `StructureTemplate.placeInWorld` 走 `level.setBlock(...)` →
+    /// `ChunkAccess.setBlockState`，会按 `Heightmap.update` 增量维护四张 FINAL 高度图。
+    /// 结构件写完后的 `freeze_top_layer` 等 step 10 地物会读它们，所以这里不能只改
+    /// `blocks` 不更新 `heights`。
+    ///
+    /// Vanilla's `StructureTemplate.placeInWorld` goes through
+    /// `ChunkAccess.setBlockState`, which incrementally updates the four FINAL
+    /// heightmaps. Step-10 features such as `freeze_top_layer` read those, so the
+    /// plain `set_block` path would leave them stale.
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
-        crate::feature::world::FeatureWorld::set_block(self, x, y, z, state)
+        crate::feature::world::FeatureWorld::set_block_with_heightmaps(self, x, y, z, state)
     }
 
     /// 官方 `blockEntity.loadWithComponents(...)`：nbt 交给假世界的方块实体表。
-    /// 走 `set_block_with_heightmaps` 那条官方路径（`LevelChunk.setBlockState` 也会更新
-    /// 高度图），与地物放置保持一致。
-    ///
-    /// Vanilla `blockEntity.loadWithComponents(...)`: hand the nbt to the fake world's block
-    /// entity store. Goes through `set_block_with_heightmaps` because vanilla's
-    /// `LevelChunk.setBlockState` updates the heightmaps too.
+    /// Vanilla `blockEntity.loadWithComponents(...)`: hand the nbt to the fake world's
+    /// block entity store.
     fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {
         crate::feature::world::FeatureWorld::set_block_entity(self, x, y, z, nbt);
     }
