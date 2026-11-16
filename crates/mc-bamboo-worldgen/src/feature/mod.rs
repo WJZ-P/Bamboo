@@ -10,6 +10,7 @@
 pub mod bamboo;
 pub mod block_blob;
 pub mod block_column;
+pub mod block_pile;
 pub mod block_predicate;
 pub mod blue_ice;
 pub mod composition;
