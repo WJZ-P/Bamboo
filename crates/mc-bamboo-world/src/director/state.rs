@@ -437,8 +437,9 @@ pub struct Director<C> {
     demand_in_flight: HashMap<(u64, DemandKind), usize>,
     /// 每个在途任务归到哪几名玩家、属于哪一类，`on_task_done` 收回时减计数。
     task_owners: HashMap<TaskId, (Vec<u64>, DemandKind)>,
-    /// 一次 `drive` 里排序用的任务编号，跨次复用容量。
-    priority_ids: Vec<TaskId>,
+    /// 一次 `drive` 里排序用的任务编号和键，跨次复用容量。每次 `drive` 只排
+    /// 「上一轮被挡住 + 这一轮新排的」几百个，不扫整张积压表。
+    priority_order: Vec<(TaskId, (i64, u8, u64))>,
     /// 超时票的 `is_busy` 直接查这张表，不每刻重建。
     busy: BTreeSet<ChunkPos>,
     /// 已交付或正在交付的记录数，随 `Owner` 变化增量维护。
@@ -447,6 +448,8 @@ pub struct Director<C> {
     filtered: u64,
     acted: u64,
     shutting_down: bool,
+    /// 下一轮 `drive` 要把整张 `pending` 都重排（每刻一次）。
+    resort_all: bool,
     /// 每次 `handle` 复用的效果列表容量。
     effects: Vec<Effect<C>>,
     /// 一次等级变化里「跨了 tick 档」的位置，跨次复用容量。
@@ -487,12 +490,13 @@ impl<C: ChunkBundle> Director<C> {
             demand: DemandSnapshot::default(),
             demand_in_flight: HashMap::new(),
             task_owners: HashMap::new(),
-            priority_ids: Vec::new(),
+            priority_order: Vec::new(),
             busy: BTreeSet::new(),
             loaded: 0,
             filtered: 0,
             acted: 0,
             shutting_down: false,
+            resort_all: false,
             effects: Vec::new(),
             level_changed: Vec::new(),
             changes_scratch: Vec::new(),
@@ -515,6 +519,13 @@ impl<C: ChunkBundle> Director<C> {
     /// 当前的需求快照，宿主的读盘、计算池和交付队列用同一个 rank 排序。
     pub fn player_demand(&self) -> &DemandSnapshot {
         &self.demand
+    }
+
+    /// 每刻的预算重置：全部待派任务都该按玩家的新位置重排一次。
+    /// 平时一次 `drive` 只重排「被挡住 + 新排」的那一小批。
+    pub fn begin_tick(&mut self) {
+        self.submitted_this_tick = 0;
+        self.resort_all = true;
     }
 
     pub fn tickets_mut(&mut self) -> &mut TicketTable {
@@ -706,7 +717,7 @@ impl<C: ChunkBundle> Director<C> {
             Event::Delivered { pos, generation } => self.on_delivered(pos, generation),
             Event::Tick { now_tick } => {
                 self.now_tick = now_tick;
-                self.submitted_this_tick = 0;
+                self.begin_tick();
                 self.tick_timeouts();
                 self.consume_level_changes(&mut out);
                 self.expire_reclaim_delay(&mut out);
@@ -1439,38 +1450,42 @@ impl<C: ChunkBundle> Director<C> {
             self.flush_notifications(out);
             return;
         }
-        // 只从「上一轮被挡住」和「这一轮新排的」里挑，不收集整张 `pending`。
-        let mut ids = std::mem::take(&mut self.task_ids);
-        ids.clear();
-        ids.extend(std::mem::take(&mut self.submittable));
-        // 新排的任务编号总在末尾，用范围查询只走这一批的键，
-        // 不把之前积压的整个 `pending` 过滤一遍。
-        let new_ids = self
-            .pending
-            .range((
-                std::ops::Bound::Excluded(self.last_seen_task),
-                std::ops::Bound::Unbounded,
-            ))
-            .map(|(&id, _)| id);
-        ids.extend(new_ids);
-        // 每次 `drive` 按当前快照重排这一小批，玩家移动后优先级立刻跟着变。
-        // 批外的待派任务不在这里扫，它们下一次进 `submittable` 时自然重排。
-        let mut order = std::mem::take(&mut self.priority_ids);
+        // 每刻开头重排整张 `pending`，玩家移动后优先级能跟着变；同一刻的
+        // 后续 `drive` 只重排「上一轮被挡住 + 这一轮新排的」那一小批。
+        let mut order = std::mem::take(&mut self.priority_order);
         order.clear();
-        order.extend(
-            ids.iter()
-                .copied()
-                .filter(|id| self.pending.contains_key(id)),
-        );
-        order.sort_by_key(|&id| {
-            self.pending
-                .get(&id)
-                .map(|task| self.priority_key(id, task))
-                .unwrap_or((i64::MAX, u8::MAX, id))
-        });
+        let resort_all = std::mem::take(&mut self.resort_all);
+        if resort_all {
+            order.extend(
+                self.pending
+                    .iter()
+                    .map(|(&id, task)| (id, self.priority_key(id, task))),
+            );
+        } else {
+            let mut ids = std::mem::take(&mut self.task_ids);
+            ids.clear();
+            ids.extend(std::mem::take(&mut self.submittable));
+            // 新排的任务编号总在末尾，用范围查询只走这一批的键，
+            // 不把之前积压的整个 `pending` 过滤一遍。
+            ids.extend(
+                self.pending
+                    .range((
+                        std::ops::Bound::Excluded(self.last_seen_task),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .map(|(&id, _)| id),
+            );
+            order.extend(ids.iter().copied().filter_map(|id| {
+                self.pending
+                    .get(&id)
+                    .map(|task| (id, self.priority_key(id, task)))
+            }));
+            self.task_ids = ids;
+        }
+        order.sort_by_key(|&(id, key)| (key, id));
         let mut blocked = std::mem::take(&mut self.submittable);
         blocked.clear();
-        for id in order.drain(..) {
+        for (id, _) in order.drain(..) {
             if self.config.max_submits_per_tick > 0
                 && self.submitted_this_tick >= self.config.max_submits_per_tick
             {
@@ -1521,8 +1536,7 @@ impl<C: ChunkBundle> Director<C> {
             let _ = pending.seq;
         }
         self.submittable = blocked;
-        self.priority_ids = order;
-        self.task_ids = ids;
+        self.priority_order = order;
         self.last_seen_task = self.next_task.wrapping_sub(1);
         self.flush_notifications(out);
     }
