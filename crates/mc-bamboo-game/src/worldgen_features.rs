@@ -29,7 +29,10 @@ use mc_bamboo_worldgen::feature::{
 use crate::{
     region::RegionColumn,
     world_options::WorldGenConfig,
-    worldgen::{GeneratedChunk, build_region_column, cached_generate_chunk, with_generator},
+    worldgen::{
+        GeneratedChunk, build_region_column, cached_generate_chunk,
+        cached_generate_chunk_with_beardifier, with_generator,
+    },
 };
 
 /// 一次 `setBlock` 写增量：世界坐标 `(x, y, z, 状态 ID)`。
@@ -404,7 +407,13 @@ pub(crate) fn generate_terrain_stage(
     cx: i32,
     cz: i32,
 ) -> Result<GenerateOutput, String> {
-    let chunk = cached_generate_chunk(config, cx, cz)?;
+    // 官方 `createNoiseChunk` 从中心区块的 `References` 反查起点，把
+    // `Beardifier.forStructuresInChunk` 注进 finalDensity；没有结构时是 EMPTY。
+    // Vanilla `createNoiseChunk` resolves the starts referenced by the center
+    // chunk and injects `Beardifier.forStructuresInChunk` into finalDensity.
+    let references = crate::worldgen_structures::structure_references_stage(config, cx, cz)?;
+    let beardifier = crate::worldgen_structures::beardifier_for_chunk(config, cx, cz, &references)?;
+    let chunk = cached_generate_chunk_with_beardifier(config, cx, cz, beardifier.as_ref())?;
     let column = build_region_column(&chunk)?;
     Ok(GenerateOutput {
         column,

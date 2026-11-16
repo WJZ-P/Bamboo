@@ -26,7 +26,7 @@ use mc_bamboo_world::{
     column::{ChunkColumn, ChunkColumnParts, SectionParts},
     palette::PalettedContainer,
 };
-use mc_bamboo_worldgen::{Worldgen, chunk};
+use mc_bamboo_worldgen::{Worldgen, beardifier::Beardifier, chunk};
 
 use crate::{
     region::{RegionColumn, RegionColumnParts},
@@ -236,6 +236,22 @@ pub(crate) fn cached_generate_chunk(
     x: i32,
     z: i32,
 ) -> Result<GeneratedChunk, String> {
+    cached_generate_chunk_with_beardifier(config, x, z, None)
+}
+
+/// 带 Beardifier 的地形：非空密度只在有结构的区块上出现，不进 EMPTY 的缓存。
+///
+/// Terrain with a Beardifier: the non-EMPTY result only occurs on chunks with
+/// structures and is never cached under the EMPTY key.
+pub(crate) fn cached_generate_chunk_with_beardifier(
+    config: &WorldGenConfig,
+    x: i32,
+    z: i32,
+    beardifier: Option<&Beardifier>,
+) -> Result<GeneratedChunk, String> {
+    if beardifier.is_some() {
+        return generate_chunk_with_beardifier(config, x, z, beardifier);
+    }
     let key = (config.seed, config.level_type.settings_id(), x, z);
     TERRAIN_CACHE.with(|cache| {
         if let Some(chunk) = cache.borrow().get(&key) {
@@ -262,12 +278,29 @@ pub(crate) fn cached_generate_chunk(
 /// `Generator::biomes` + `Generator::terrain(Carvers)`; flat uses vanilla
 /// `FlatLevelSource` layers and biome.
 pub fn generate_chunk(config: &WorldGenConfig, x: i32, z: i32) -> Result<GeneratedChunk, String> {
+    generate_chunk_with_beardifier(config, x, z, None)
+}
+
+/// [`generate_chunk`] 加一个本区块的 `Beardifier`。官方 `createNoiseChunk` 用
+/// `Beardifier.forStructuresInChunk(structureManager, chunkPos)`；没有结构时传 `None`
+/// 等于官方 `Beardifier.EMPTY`。`first_occupied_height` 等基线高度查询固定 EMPTY。
+///
+/// `generate_chunk` with the chunk's Beardifier. Vanilla's `createNoiseChunk` uses
+/// `Beardifier.forStructuresInChunk`; `None` equals `Beardifier.EMPTY`. Baseline
+/// height queries stay on EMPTY.
+pub fn generate_chunk_with_beardifier(
+    config: &WorldGenConfig,
+    x: i32,
+    z: i32,
+    beardifier: Option<&Beardifier>,
+) -> Result<GeneratedChunk, String> {
     if config.level_type.is_flat() {
         return Ok(flat_chunk(config));
     }
     with_generator(config, |generator| {
         let region = generator.biome_region(x, z)?;
-        let blocks = generator.terrain_with_region(x, z, chunk::Stage::Carvers, None, &region)?;
+        let blocks =
+            generator.terrain_with_region(x, z, chunk::Stage::Carvers, beardifier, &region)?;
         let biomes = region.center().sections().to_vec();
         let heightmaps = compute_heightmaps(&blocks);
         Ok(GeneratedChunk {
