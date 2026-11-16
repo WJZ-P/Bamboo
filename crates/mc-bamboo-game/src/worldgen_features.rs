@@ -457,10 +457,42 @@ fn build_view(config: &WorldGenConfig, cx: i32, cz: i32) -> Result<[GeneratedChu
     for dz in -1..=1 {
         for dx in -1..=1 {
             let index = ((dz + 1) * 3 + (dx + 1)) as usize;
-            view[index] = Some(cached_generate_chunk(config, cx + dx, cz + dz)?);
+            // 每个格子都按「官方 createNoiseChunk」注入自己的 Beardifier。
+            // `terrain` 阶段的依赖表已保证半径 8 的 `structure_starts` 与中心的
+            // `structure_references` 完成，所以这里读到的起点数据是定稿的；
+            // 计算池任务完成先后不再影响结果。
+            // Every cell injects its own Beardifier like vanilla's
+            // `createNoiseChunk`. The dependency table guarantees the radius-8
+            // starts and center references, so this data is final and task
+            // completion order cannot change the result.
+            let x = cx + dx;
+            let z = cz + dz;
+            view[index] = Some(cached_generate_chunk_with_structures(config, x, z)?);
         }
     }
     Ok(view.map(Option::unwrap))
+}
+
+/// 地形 + 本区块 Beardifier 的确定性快照。`structure_references_stage` 的结果
+/// 按 (seed,x,z) 全局缓存，任何线程、任何调用顺序读到的都是同一份。
+///
+/// Deterministic terrain + Beardifier snapshot. References are cached globally
+/// by (seed,x,z), so every thread and call order sees the same data.
+fn cached_generate_chunk_with_structures(
+    config: &WorldGenConfig,
+    x: i32,
+    z: i32,
+) -> Result<GeneratedChunk, String> {
+    if !config.generate_structures {
+        return cached_generate_chunk(config, x, z);
+    }
+    let beardifier = crate::worldgen_structures::beardifier_for(config, x, z)?;
+    match beardifier {
+        Some(beardifier) => {
+            crate::worldgen::generate_chunk_with_beardifier(config, x, z, Some(&beardifier))
+        }
+        None => cached_generate_chunk(config, x, z),
+    }
 }
 
 /// 以某区块为中心跑一遍 `applyBiomeDecoration`，结果按中心缓存复用。
@@ -644,17 +676,14 @@ pub(crate) fn generate_terrain_stage(
     cx: i32,
     cz: i32,
 ) -> Result<GenerateOutput, String> {
-    // 官方 `createNoiseChunk` 注入 `Beardifier.forStructuresInChunk`；Bamboo 的
-    // `game_pipeline` / `beard` 对拍路径已经接好真实 Beardifier，但 Director 的
-    // `terrain` 阶段暂仍走 `Beardifier.EMPTY`：在计算池里反查半径 8 的起点会
-    // 改变任务耗时，暴露地物增量规范序在 1/4 线程下的竞态，逐格结果不稳定。
-    // 等增量合并改成与调度无关后再打开（见 docs/worldgen-structures-plan.md §12）。
-    // Vanilla injects `Beardifier.forStructuresInChunk`; the real Beardifier is
-    // wired in `game_pipeline` / the `beard` oracle, but the Director's terrain
-    // stage still uses `Beardifier.EMPTY`: resolving radius-8 starts on the
-    // compute pool changes task timing and exposes a scheduling race in the
-    // canonical delta merge (see docs/worldgen-structures-plan.md §12).
-    let chunk = cached_generate_chunk(config, cx, cz)?;
+    // 官方 `createNoiseChunk` 把 `Beardifier.forStructuresInChunk` 注进
+    // finalDensity。依赖表（`GENERATION[4].requires = [(S,8),(B,1)]`）保证半径 8
+    // 的 `structure_starts` 与本区块的 `structure_references` 已完成；Beardifier
+    // 只从这些定稿数据算，并按 (seed,x,z) 全局缓存，计算池的完成顺序不影响结果。
+    // Vanilla `createNoiseChunk` injects `Beardifier.forStructuresInChunk`.
+    // The dependency table guarantees the radius-8 starts and center references;
+    // the Beardifier is derived only from those and cached by (seed,x,z).
+    let chunk = cached_generate_chunk_with_structures(config, cx, cz)?;
     let column = build_region_column(&chunk)?;
     Ok(GenerateOutput {
         column,
@@ -746,6 +775,53 @@ mod tests {
         );
         assert_eq!(result.blocks.len(), 9);
         assert_eq!(result.blocks[4].len(), WORLD_HEIGHT as usize);
+    }
+
+    /// 竞争复现：同一个邻居中心，输入视图用 EMPTY 地形 与 真实 Beardifier 地形时，
+    /// `run_features` 给出的写增量不同。`neighbor_spills_into` 用 `build_view`
+    /// （EMPTY 缓存）而 `generate_features_stage` 用世界线程的 `partials` 快照
+    /// （真实 Beardifier），两者谁先落地由计算池调度决定。
+    #[test]
+    fn neighbor_spills_depend_on_which_terrain_snapshot_arrives() {
+        use mc_bamboo_worldgen::beardifier::Beardifier;
+        let config = normal(42);
+        // 一个有 trial_chambers 起点的区块，Beardifier 非空。
+        let (cx, cz) = (17, 7);
+        let refs =
+            crate::worldgen_structures::structure_references_stage(&config, cx, cz).unwrap();
+        let beard = crate::worldgen_structures::beardifier_for_chunk(&config, cx, cz, &refs)
+            .unwrap()
+            .unwrap_or_else(|| Beardifier::for_structures_in_chunk(cx, cz, &[]));
+        let empty = crate::worldgen::generate_chunk(&config, cx, cz).unwrap();
+        let real =
+            crate::worldgen::generate_chunk_with_beardifier(&config, cx, cz, Some(&beard)).unwrap();
+        let mut differing = 0usize;
+        for (a, b) in empty.blocks.iter().zip(&real.blocks) {
+            differing += a.iter().zip(b).filter(|(x, y)| x != y).count();
+        }
+        assert!(
+            differing > 0,
+            "the Beardifier must change terrain on a structure chunk"
+        );
+        // 若把真实地形喂给邻居重算、EMPTY 地形喂给中心，两侧的结果必然不同：
+        // 这就是必须由依赖表固定下来的读写竞争。
+        let view_empty = std::array::from_fn(|_| GeneratedChunk {
+            blocks: empty.blocks.clone(),
+            biomes: empty.biomes.clone(),
+            heightmaps: Default::default(),
+        });
+        let view_real = std::array::from_fn(|_| GeneratedChunk {
+            blocks: real.blocks.clone(),
+            biomes: real.biomes.clone(),
+            heightmaps: Default::default(),
+        });
+        let a = run_features(&config, cx, cz, view_empty).unwrap();
+        let b = run_features(&config, cx, cz, view_real).unwrap();
+        assert_ne!(
+            a.deltas,
+            b.deltas,
+            "different terrain snapshots must produce different neighbor deltas"
+        );
     }
 
     /// 写增量落进方块数组后能读回来。
