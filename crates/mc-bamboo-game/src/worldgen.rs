@@ -228,18 +228,82 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
     }
 }
 
-// 每条计算线程各缓存一份到 CARVERS 的地形，供 `features` 阶段拼 3×3 视图时免于
-// 反复重算。键含种子和世界类型；地形是纯函数，命中与否不改变结果，只省时间。
-// 只在 `features` 阶段用，条目数封顶，超过就整表清掉（不逐条淘汰、不依赖顺序）。
-// Each compute thread caches CARVERS terrain so the `features` 3×3 view does not
-// recompute it. The key includes seed and world type; terrain is pure, so a hit
-// never changes the result. Bounded: clear the whole table past the cap.
+/// 地形缓存键：`(种子, 世界类型, x, z)`。地形是纯函数，命中与否只影响速度。
+///
+/// Terrain cache key: `(seed, settings, x, z)`. Terrain is pure, so a hit only
+/// affects speed.
 type TerrainCacheKey = (i64, Option<&'static str>, i32, i32);
-type TerrainCache = HashMap<TerrainCacheKey, GeneratedChunk>;
-thread_local! {
-    static TERRAIN_CACHE: RefCell<TerrainCache> = RefCell::new(HashMap::new());
+
+/// 全进程共用的地形缓存上限：256 MiB。
+///
+/// 依据：一条 CARVERS 地形实测 414 720 B（384 层 × 256 个 u32 的 `blocks` 占
+/// 393 216 B，加 24 段群系、6 张高度图和 `Vec` 头）。改前的按线程缓存每条计算线程
+/// 最多 1024 条：4 线程 1.62 GiB、8 线程 3.24 GiB，进程 RSS 峰值实测 2.7 / 4.6 GiB。
+/// 256 MiB 装得下约 647 条，覆盖一片持续跑图时的 3×3 工作集，又给整台机器留出
+/// 余量；这是「所有计算线程合起来」的硬上限，不再随线程数线性增长。
+///
+/// Global terrain cache limit: 256 MiB. One CARVERS entry measures 414 720 B
+/// (393 216 B of block layers + biomes, heightmaps and Vec headers). The old
+/// per-thread 1024-entry cap reached 1.62 GiB on 4 threads and 3.24 GiB on 8,
+/// with measured process RSS peaks of 2.7 / 4.6 GiB. 256 MiB holds ~647 entries,
+/// covers a working 3x3 window, and is a hard process-wide bound independent of
+/// the worker count.
+pub const TERRAIN_CACHE_BYTE_LIMIT: usize = 256 * 1024 * 1024;
+
+/// 分片数：每片一把锁，8 条计算线程不会全堵在一把锁上。键按哈希取片。
+///
+/// Shard count: one lock per shard, keyed by hash, so worker threads do not
+/// serialize behind a single global lock.
+const TERRAIN_CACHE_SHARDS: usize = 16;
+/// 触发淘汰后清到上限的 3/4，避免每次插入都淘汰一条。
+/// After eviction starts, trim to 3/4 of the limit instead of evicting one
+/// entry per insertion.
+const TERRAIN_CACHE_TRIM_FRACTION: usize = 4;
+
+/// 一片：条目表、按插入顺序排的键、实测堆字节数、本片的测量计数。
+///
+/// One shard: entries, insertion-order keys, measured heap bytes, and stats.
+#[derive(Default)]
+struct TerrainShard {
+    entries: HashMap<TerrainCacheKey, Arc<GeneratedChunk>>,
+    order: std::collections::VecDeque<TerrainCacheKey>,
+    bytes: usize,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    trims: u64,
+    /// 本片里每个键第一次被哪条线程算出来，用于统计跨线程重复计算。
+    /// First computing thread per key in this shard, for duplicate counts.
+    computed_by: HashMap<TerrainCacheKey, Vec<usize>>,
 }
-const TERRAIN_CACHE_CAP: usize = 1024;
+
+/// 全进程一份的缓存；`OnceLock` 初始化后只读，锁只护查表和插入。
+///
+/// One process-wide cache. After `OnceLock` init it is read-only; the locks
+/// guard only lookups and inserts.
+static TERRAIN_CACHE: OnceLock<Vec<Mutex<TerrainShard>>> = OnceLock::new();
+
+fn terrain_shards() -> &'static [Mutex<TerrainShard>] {
+    TERRAIN_CACHE.get_or_init(|| {
+        (0..TERRAIN_CACHE_SHARDS)
+            .map(|_| Mutex::new(TerrainShard::default()))
+            .collect()
+    })
+}
+
+fn shard_index(key: &TerrainCacheKey) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    (hasher.finish() as usize) % TERRAIN_CACHE_SHARDS
+}
+
+/// 每片的字节预算；所有片加起来不超过 [`TERRAIN_CACHE_BYTE_LIMIT`]。
+///
+/// Per-shard byte budget; the sum across shards never exceeds the global limit.
+fn shard_byte_limit() -> usize {
+    TERRAIN_CACHE_BYTE_LIMIT / TERRAIN_CACHE_SHARDS
+}
 
 /// 一个 `GeneratedChunk` 占的堆字节数（各 `Vec` 的 `capacity` 相加）。
 ///
@@ -263,64 +327,35 @@ pub fn generated_chunk_heap_bytes(chunk: &GeneratedChunk) -> usize {
     blocks + biomes + heightmaps + chunk.blocks.capacity() * size_of::<Vec<u32>>()
 }
 
-/// 地形缓存的测量快照。`bytes` 是缓存里各条目实测堆字节数之和，`peak_bytes` 是跑图
-/// 过程中这个和的峰值；`cross_thread_duplicates` 是「同一区块被不同计算线程各自
-/// 独立算过」多出来的次数。
+/// 地形缓存的测量快照。`bytes` 是各条目实测堆字节数之和，`peak_bytes` 是本次跑图
+/// 的峰值；`cross_thread_duplicates` 是「同一区块被不同计算线程各自独立算过」多出来
+/// 的次数；`trims` 是字节超限触发的分片清理次数。
 ///
-/// Measurement snapshot of the terrain cache. `bytes` is the sum of the entries'
-/// measured heap bytes, `peak_bytes` its high-water mark, and
-/// `cross_thread_duplicates` counts redundant cross-thread computations.
+/// Measurement snapshot of the terrain cache: live measured heap bytes and its
+/// high-water mark, redundant cross-thread computations, and byte-limit trims.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TerrainCacheStats {
     pub entries: usize,
     pub bytes: usize,
     pub peak_bytes: usize,
+    pub byte_limit: usize,
     pub hits: u64,
     pub misses: u64,
     pub clears: u64,
     pub evictions: u64,
+    pub trims: u64,
     pub cross_thread_duplicates: u64,
 }
 
-/// 每条线程自己的测量数据。命中是热路径，只碰本线程的 `Arc<Mutex<_>>`，
-/// 不和其他线程抢锁；跑完后由 `terrain_cache_stats` 汇总。
-///
-/// Per-thread measurement data. A hit is the hot path and only touches this
-/// thread's own `Arc<Mutex<_>>`; `terrain_cache_stats` aggregates at the end.
-#[derive(Default)]
-struct ThreadMeasure {
-    hits: u64,
-    misses: u64,
-    clears: u64,
-    evictions: u64,
-    /// 本线程的缓存当前占多少字节（整表清空时用于减掉全局计数）。
-    /// Bytes currently held by this thread's cache (subtracted on a clear).
-    bytes: usize,
-    /// 本线程独立算过的区块键，用于最后统计跨线程重复计算。
-    /// Keys this thread computed, for the cross-thread duplicate count.
-    computed: std::collections::HashSet<TerrainCacheKey>,
-}
-
-static MEASURE_REGISTRY: OnceLock<Mutex<Vec<Arc<Mutex<ThreadMeasure>>>>> = OnceLock::new();
-static TOTAL_ENTRIES: AtomicUsize = AtomicUsize::new(0);
-static TOTAL_BYTES: AtomicUsize = AtomicUsize::new(0);
+/// 测量用的全局峰值（只在插入后更新，Relaxed 足够，压测报告是跑完读一次）。
+/// Global high-water mark for measurements (read once after a benchmark run).
 static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+static TOTAL_BYTES: AtomicUsize = AtomicUsize::new(0);
+static TOTAL_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
-    static THREAD_MEASURE: Arc<Mutex<ThreadMeasure>> = {
-        let measure = Arc::new(Mutex::new(ThreadMeasure::default()));
-        MEASURE_REGISTRY
-            .get_or_init(|| Mutex::new(Vec::new()))
-            .lock()
-            .expect("terrain cache measure registry")
-            .push(Arc::clone(&measure));
-        measure
-    };
-}
-
-fn note_peak() {
-    let bytes = TOTAL_BYTES.load(Ordering::Relaxed);
-    PEAK_BYTES.fetch_max(bytes, Ordering::Relaxed);
+    static MEASURE_THREAD_ID: usize = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
 }
 
 /// 读一份全进程汇总的缓存测量快照（压测 / 报告用）。
@@ -328,35 +363,29 @@ fn note_peak() {
 /// Read the process-wide aggregate cache measurement snapshot (benchmarks / reports).
 pub fn terrain_cache_stats() -> TerrainCacheStats {
     let mut stats = TerrainCacheStats {
-        entries: TOTAL_ENTRIES.load(Ordering::Relaxed),
-        bytes: TOTAL_BYTES.load(Ordering::Relaxed),
+        byte_limit: TERRAIN_CACHE_BYTE_LIMIT,
         peak_bytes: PEAK_BYTES.load(Ordering::Relaxed),
         ..TerrainCacheStats::default()
     };
-    let Some(registry) = MEASURE_REGISTRY.get() else {
-        return stats;
-    };
-    let snapshots: Vec<Arc<Mutex<ThreadMeasure>>> =
-        registry.lock().map(|list| list.clone()).unwrap_or_default();
-    // 每个键被多少条不同的线程算过：`sum(count - 1)` 就是重复计算次数。
-    // Each key computed by N different threads contributes N-1 duplicates.
-    let mut per_key: HashMap<TerrainCacheKey, usize> = HashMap::new();
-    for snapshot in &snapshots {
-        let Ok(measure) = snapshot.lock() else {
+    for shard in terrain_shards() {
+        let Ok(shard) = shard.lock() else {
             continue;
         };
-        stats.hits += measure.hits;
-        stats.misses += measure.misses;
-        stats.clears += measure.clears;
-        stats.evictions += measure.evictions;
-        for key in &measure.computed {
-            *per_key.entry(*key).or_default() += 1;
-        }
+        stats.entries += shard.entries.len();
+        stats.bytes += shard.bytes;
+        stats.hits += shard.hits;
+        stats.misses += shard.misses;
+        stats.evictions += shard.evictions;
+        stats.trims += shard.trims;
+        stats.clears += shard.trims;
+        // 每个键只在一个片里；被 N 条不同线程算过就贡献 N-1 次重复计算。
+        // Each key lives in exactly one shard and contributes N-1 duplicates.
+        stats.cross_thread_duplicates += shard
+            .computed_by
+            .values()
+            .map(|threads| threads.len().saturating_sub(1) as u64)
+            .sum::<u64>();
     }
-    stats.cross_thread_duplicates = per_key
-        .values()
-        .map(|count| count.saturating_sub(1) as u64)
-        .sum();
     stats
 }
 
@@ -365,86 +394,95 @@ pub fn terrain_cache_stats() -> TerrainCacheStats {
 /// Clear the terrain cache and measurement counters (cold-start benchmarks;
 /// call only before a run, never from a worker thread).
 pub fn clear_terrain_cache() {
-    TERRAIN_CACHE.with(|cache| cache.borrow_mut().clear());
-    let snapshots: Vec<Arc<Mutex<ThreadMeasure>>> = MEASURE_REGISTRY
-        .get()
-        .and_then(|registry| registry.lock().ok().map(|list| list.clone()))
-        .unwrap_or_default();
-    for snapshot in &snapshots {
-        if let Ok(mut measure) = snapshot.lock() {
-            *measure = ThreadMeasure::default();
+    for shard in terrain_shards() {
+        if let Ok(mut shard) = shard.lock() {
+            *shard = TerrainShard::default();
         }
     }
-    TOTAL_ENTRIES.store(0, Ordering::Relaxed);
-    TOTAL_BYTES.store(0, Ordering::Relaxed);
     PEAK_BYTES.store(0, Ordering::Relaxed);
+    TOTAL_BYTES.store(0, Ordering::Relaxed);
+    TOTAL_ENTRIES.store(0, Ordering::Relaxed);
 }
 
-/// 带线程本地缓存的 `generate_chunk`，`features` 阶段拼 3×3 视图用。
+/// 带缓存的 `generate_chunk`，`features` / `light` 阶段拼 3×3 视图用。
+/// 命中返回全进程共享的 `Arc`，不复制 400 KiB 的方块数组。
 ///
-/// Cached `generate_chunk` for building the `features` 3×3 view.
+/// Cached `generate_chunk` for the `features` / `light` 3x3 views. A hit returns
+/// a process-wide shared `Arc` instead of copying ~400 KiB of block arrays.
+/// 带缓存的 `generate_chunk`，`features` / `light` 阶段拼 3×3 视图用。
+/// 命中返回全进程共享的 `Arc`，不复制 400 KiB 的方块数组。
+///
+/// Cached `generate_chunk` for the `features` / `light` 3x3 views. A hit returns
+/// a process-wide shared `Arc` instead of copying ~400 KiB of block arrays.
 pub(crate) fn cached_generate_chunk(
     config: &WorldGenConfig,
     x: i32,
     z: i32,
-) -> Result<GeneratedChunk, String> {
-    cached_generate_chunk_with_beardifier(config, x, z, None)
-}
-
-/// 带 Beardifier 的地形：非空密度只在有结构的区块上出现，不进 EMPTY 的缓存。
-///
-/// Terrain with a Beardifier: the non-EMPTY result only occurs on chunks with
-/// structures and is never cached under the EMPTY key.
-pub(crate) fn cached_generate_chunk_with_beardifier(
-    config: &WorldGenConfig,
-    x: i32,
-    z: i32,
-    beardifier: Option<&Beardifier>,
-) -> Result<GeneratedChunk, String> {
-    if beardifier.is_some() {
-        return generate_chunk_with_beardifier(config, x, z, beardifier);
-    }
+) -> Result<Arc<GeneratedChunk>, String> {
     let key = (config.seed, config.level_type.settings_id(), x, z);
-    TERRAIN_CACHE.with(|cache| {
-        if let Some(chunk) = cache.borrow().get(&key) {
-            THREAD_MEASURE.with(|measure| {
-                if let Ok(mut measure) = measure.lock() {
-                    measure.hits += 1;
-                }
-            });
-            return Ok(chunk.clone());
+    let shards = terrain_shards();
+    let index = shard_index(&key);
+    // 锁内只做查表；命中后立刻放锁，生成和后续地物计算都在锁外。
+    // Hold the lock only for the lookup; generation runs outside the lock.
+    {
+        let Ok(mut shard) = shards[index].lock() else {
+            return Ok(Arc::new(generate_chunk(config, x, z)?));
+        };
+        if let Some(cached) = shard.entries.get(&key) {
+            let cached = Arc::clone(cached);
+            shard.hits += 1;
+            return Ok(cached);
         }
-        let chunk = generate_chunk(config, x, z)?;
-        let mut cache = cache.borrow_mut();
-        // 旧缓存超限时整表清空；把本线程之前占的字节从全局计数里减掉。
-        // The old cache clears its whole table past the cap; subtract this
-        // thread's previous bytes from the global counter.
-        let cleared = cache.len() >= TERRAIN_CACHE_CAP;
-        let old_len = cache.len();
-        if cleared {
-            cache.clear();
+    }
+    // 两条线程同时算同一块可以接受：地形是纯函数，结果相同；先算完的插进去，
+    // 后算完的发现已有条目就沿用前者，不会死锁也不会空等。
+    // Two threads may compute the same key; terrain is pure so results match.
+    // The first insertion wins and the loser reuses it, with no waiting.
+    let chunk = Arc::new(generate_chunk(config, x, z)?);
+    let bytes = generated_chunk_heap_bytes(&chunk);
+    let thread_id = MEASURE_THREAD_ID.with(|id| *id);
+    if let Ok(mut shard) = shards[index].lock() {
+        shard.misses += 1;
+        let computed = shard.computed_by.entry(key).or_default();
+        if !computed.contains(&thread_id) {
+            computed.push(thread_id);
         }
-        let bytes = generated_chunk_heap_bytes(&chunk);
-        cache.insert(key, chunk.clone());
-        THREAD_MEASURE.with(|measure| {
-            if let Ok(mut measure) = measure.lock() {
-                measure.misses += 1;
-                if cleared {
-                    measure.clears += 1;
-                    measure.evictions += old_len as u64;
-                    TOTAL_ENTRIES.fetch_sub(old_len, Ordering::Relaxed);
-                    TOTAL_BYTES.fetch_sub(measure.bytes, Ordering::Relaxed);
-                    measure.bytes = 0;
-                }
-                measure.bytes += bytes;
-                measure.computed.insert(key);
+        if !shard.entries.contains_key(&key) {
+            shard.order.push_back(key);
+            shard.entries.insert(key, Arc::clone(&chunk));
+            shard.bytes += bytes;
+            TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed);
+            TOTAL_ENTRIES.fetch_add(1, Ordering::Relaxed);
+            PEAK_BYTES.fetch_max(TOTAL_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+        // 按字节封顶：超了就按插入顺序从最旧的条目开始淘汰，清到 3/4 预算。
+        // 地形是纯函数，淘汰顺序不影响结果，只影响后续是否命中。
+        // Byte-bounded: evict oldest-first down to 3/4 of this shard's budget.
+        // Terrain is pure, so eviction order cannot change any result.
+        let target =
+            shard_byte_limit() * (TERRAIN_CACHE_TRIM_FRACTION - 1) / TERRAIN_CACHE_TRIM_FRACTION;
+        if shard.bytes > shard_byte_limit() {
+            shard.trims += 1;
+            while shard.bytes > target {
+                let Some(oldest) = shard.order.pop_front() else {
+                    break;
+                };
+                let Some(removed) = shard.entries.remove(&oldest) else {
+                    continue;
+                };
+                let removed_bytes = generated_chunk_heap_bytes(&removed);
+                shard.bytes = shard.bytes.saturating_sub(removed_bytes);
+                TOTAL_BYTES.fetch_sub(removed_bytes, Ordering::Relaxed);
+                TOTAL_ENTRIES.fetch_sub(1, Ordering::Relaxed);
+                shard.evictions += 1;
             }
-        });
-        TOTAL_ENTRIES.fetch_add(1, Ordering::Relaxed);
-        TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed);
-        note_peak();
-        Ok(chunk)
-    })
+        }
+        return Ok(Arc::clone(shard.entries.get(&key).unwrap_or(&chunk)));
+    }
+    // 锁被毒化时不影响正确性：直接返回这次算出的地形，只是没进缓存。
+    // A poisoned lock must not change results: return the freshly generated
+    // terrain uncached.
+    Ok(chunk)
 }
 
 /// 生成中心区块到 `terrain` 阶段。
@@ -630,6 +668,92 @@ mod tests {
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
         }
+    }
+
+    /// 命中返回的是同一个 `Arc`（不复制 400 KiB 的方块数组），并且和现算的纯函数
+    /// 逐字节相同；两次查表之间清掉缓存后重新算也还是一样（命中与否不改结果）。
+    ///
+    /// A hit hands back the very same `Arc` (no ~400 KiB copy), byte-identical to
+    /// a fresh pure computation; clearing the cache in between changes nothing.
+    #[test]
+    fn shared_cache_hits_share_arcs_and_match_uncached_terrain() {
+        let cfg = normal(12345);
+        clear_terrain_cache();
+        let fresh = generate_chunk(&cfg, 3, -2).expect("uncached terrain");
+        let first = cached_generate_chunk(&cfg, 3, -2).expect("first cached terrain");
+        let second = cached_generate_chunk(&cfg, 3, -2).expect("second cached terrain");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a hit must not clone the chunk"
+        );
+        assert_eq!(first.blocks, fresh.blocks);
+        assert_eq!(first.biomes, fresh.biomes);
+        assert_eq!(first.heightmaps, fresh.heightmaps);
+        clear_terrain_cache();
+        let after_clear = cached_generate_chunk(&cfg, 3, -2).expect("terrain after eviction");
+        assert_eq!(after_clear.blocks, fresh.blocks);
+        assert_eq!(after_clear.biomes, fresh.biomes);
+        assert_eq!(after_clear.heightmaps, fresh.heightmaps);
+    }
+
+    /// 几条线程同时问同一批区块：结果全部逐字节相同，且缓存占用不超过字节上限。
+    ///
+    /// Several threads asking for the same keys: byte-identical results and a
+    /// cache that never exceeds its byte limit.
+    #[test]
+    fn shared_cache_is_bounded_and_order_independent() {
+        let cfg = normal(777);
+        clear_terrain_cache();
+        let positions: Vec<(i32, i32)> =
+            (0..40).flat_map(|x| (0..4).map(move |z| (x, z))).collect();
+        let baseline: Vec<GeneratedChunk> = positions
+            .iter()
+            .take(8)
+            .map(|&(x, z)| generate_chunk(&cfg, x, z).expect("baseline"))
+            .collect();
+        let cfg = std::sync::Arc::new(cfg);
+        let positions = std::sync::Arc::new(positions);
+        std::thread::scope(|scope| {
+            for thread in 0..4 {
+                let cfg = Arc::clone(&cfg);
+                let positions = Arc::clone(&positions);
+                scope.spawn(move || {
+                    // 每条线程用不同顺序问同一批，命中 / 淘汰顺序都不同。
+                    // Different per-thread order changes hit/eviction order.
+                    let mut keys: Vec<usize> = (0..positions.len()).collect();
+                    keys.rotate_left(thread * 7);
+                    for index in keys {
+                        let (x, z) = positions[index];
+                        let chunk = cached_generate_chunk(&cfg, x, z).expect("cached terrain");
+                        let fresh = generate_chunk(&cfg, x, z).expect("fresh terrain");
+                        assert_eq!(chunk.blocks, fresh.blocks);
+                        assert_eq!(chunk.biomes, fresh.biomes);
+                    }
+                });
+            }
+        });
+        for (index, expected) in baseline.iter().enumerate() {
+            let (x, z) = positions[index];
+            let chunk = cached_generate_chunk(&cfg, x, z).expect("after concurrency");
+            assert_eq!(chunk.blocks, expected.blocks);
+        }
+        let stats = terrain_cache_stats();
+        assert_eq!(stats.byte_limit, TERRAIN_CACHE_BYTE_LIMIT);
+        assert!(
+            stats.bytes <= TERRAIN_CACHE_BYTE_LIMIT,
+            "cache holds {} bytes, limit {}",
+            stats.bytes,
+            TERRAIN_CACHE_BYTE_LIMIT
+        );
+        // 峰值允许比上限多一条：插入后才触发淘汰，一条约 405 KiB。
+        // The peak may exceed the limit by one entry (~405 KiB): eviction runs
+        // right after the insertion that crosses the boundary.
+        assert!(
+            stats.peak_bytes <= TERRAIN_CACHE_BYTE_LIMIT + 1024 * 1024,
+            "cache peaked at {} bytes, limit {}",
+            stats.peak_bytes,
+            TERRAIN_CACHE_BYTE_LIMIT
+        );
     }
 
     #[test]

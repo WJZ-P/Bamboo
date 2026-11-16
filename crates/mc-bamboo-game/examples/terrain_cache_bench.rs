@@ -34,7 +34,7 @@ use std::{
 
 use mc_bamboo_game::{
     world_options::{LevelType, WorldGenConfig},
-    worldgen::{clear_terrain_cache, terrain_cache_stats},
+    worldgen::{clear_terrain_cache, generated_chunk_heap_bytes, terrain_cache_stats},
     worldgen_features::game_features,
 };
 
@@ -67,9 +67,16 @@ impl Options {
                 "--threads" => options.threads = value()?.parse().map_err(|e| format!("{e}"))?,
                 "--seed" => options.seed = value()?.parse().map_err(|e| format!("{e}"))?,
                 "--label" => options.label = value()?,
+                "--entry-bytes" => {
+                    let config = config(options.seed);
+                    let chunk = mc_bamboo_game::worldgen::generate_chunk(&config, 123, 456)
+                        .expect("measure one generated chunk");
+                    println!("entry_heap_bytes={}", generated_chunk_heap_bytes(&chunk));
+                    std::process::exit(0);
+                }
                 _ => {
                     return Err(format!(
-                        "usage: terrain_cache_bench [--chunks N] [--threads T] [--seed S] [--label NAME]\nunknown argument {arg}"
+                        "usage: terrain_cache_bench [--chunks N] [--threads T] [--seed S] [--label NAME] [--entry-bytes]\nunknown argument {arg}"
                     ));
                 }
             }
@@ -180,17 +187,26 @@ fn main() {
     // Each worker generates one untimed chunk first so its thread-local
     // `Generator` / parsed `Worldgen` is ready before the timed section.
     let ready = Arc::new(Barrier::new(options.threads + 1));
+    let ready_to_work = Arc::new(Barrier::new(options.threads + 1));
     let mut start = Instant::now();
     thread::scope(|scope| {
-        for _ in 0..options.threads {
+        for thread_index in 0..options.threads {
             let config = Arc::clone(&config);
             let timings = Arc::clone(&timings);
             let next = Arc::clone(&next);
             let ready = Arc::clone(&ready);
+            let ready_to_work = Arc::clone(&ready_to_work);
             let side = options.side;
             scope.spawn(move || {
-                let _ = black_box(one_center(&config, i32::MAX / 4, i32::MAX / 4));
+                // 每条线程用不同坐标预热，避免四条线程都命中同一份冷启动结果。
+                // Distinct warmup coordinates per worker.
+                let _ = black_box(one_center(
+                    &config,
+                    i32::MAX / 4 + thread_index as i32 * 64,
+                    i32::MAX / 4,
+                ));
                 ready.wait();
+                ready_to_work.wait();
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
                     if index >= total {
@@ -207,6 +223,7 @@ fn main() {
         // 清掉工作线程冷启动的缓存和计数，只量下面这批；所有线程都在 barrier 上等着。
         // Clear the warmup cache/counters once every worker is parked on the barrier.
         clear_terrain_cache();
+        ready_to_work.wait();
         start = Instant::now();
     });
     let wall = start.elapsed().as_secs_f64();
