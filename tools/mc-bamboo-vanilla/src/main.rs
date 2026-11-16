@@ -151,6 +151,8 @@ mod jungle_temple_ops;
 #[cfg(feature = "oracle")]
 mod light;
 #[cfg(feature = "oracle")]
+mod long_set;
+#[cfg(feature = "oracle")]
 mod loot_oracle;
 #[cfg(feature = "oracle")]
 mod machine;
@@ -176,6 +178,8 @@ mod seed_world;
 mod spawn;
 #[cfg(feature = "oracle")]
 mod storage_oracle;
+#[cfg(feature = "oracle")]
+mod structure_e2e;
 #[cfg(feature = "oracle")]
 mod structure_generation;
 #[cfg(feature = "oracle")]
@@ -236,6 +240,8 @@ const PROBE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/Probe.java";
 const ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/BlockOracle.java";
 #[cfg(feature = "oracle")]
 const LIGHT_SOURCE: &str = "tools/mc-bamboo-vanilla/java/LightOracle.java";
+#[cfg(feature = "oracle")]
+const JAVA_SET_SOURCE: &str = "tools/mc-bamboo-vanilla/java/JavaSetOracle.java";
 #[cfg(feature = "oracle")]
 const MACHINE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MachineOracle.java";
 #[cfg(feature = "oracle")]
@@ -347,6 +353,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla wg-perf [--seeds N] [--chunks N] [--biomes a,b,c] [--repeat N] [--threads N] [--json] [--skip-cut] [--skip-sky] [--skip-threads] [--skip-aux] [--structure-timing]
       mc-bamboo-vanilla structure-generation <java 路径> [--break-self-test]
       mc-bamboo-vanilla structure-pipeline <java 路径> [--break-self-test]
+      mc-bamboo-vanilla structure-e2e <java 路径> [--break-self-test] [--structure-types IDS]
       mc-bamboo-vanilla structure-single <java 路径>
       mc-bamboo-vanilla structure-templated <java 路径>
       mc-bamboo-vanilla structure-templated-place <java 路径>
@@ -408,6 +415,8 @@ fn run() -> Result<(), String> {
         ["chunkgen", java, ref options @ ..] => chunkgen_cli(java, options),
         ["structures", java, ref options @ ..] => structures_cli(java, options),
         ["gen-world", java, ref options @ ..] => gen_world_cli(java, options),
+        ["long-set", java, ref options @ ..] => long_set_cli(java, options),
+        ["structure-e2e", java, ref options @ ..] => structure_e2e_cli(java, options),
         ["structure-rings", java, ref options @ ..] => structure_rings_cli(java, options),
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
         ["structure-templates", java, ref options @ ..] => structure_templates_cli(java, options),
@@ -661,6 +670,22 @@ fn structures_cli(java: &str, options: &[&str]) -> Result<(), String> {
 #[cfg(feature = "oracle")]
 fn gen_world_cli(java: &str, options: &[&str]) -> Result<(), String> {
     gen_world::run(official_program(java, CHUNKGEN_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn long_set_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    long_set::run(official_program(java, JAVA_SET_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn structure_e2e_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let queries_path = root.join(WORK_DIR).join("structure_e2e_queries.txt");
+    structure_e2e::run(
+        official_program(java, CHUNKGEN_SOURCE)?,
+        &queries_path,
+        options,
+    )
 }
 
 #[cfg(feature = "oracle")]
@@ -1066,6 +1091,16 @@ fn structures_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn gen_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn long_set_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn structure_e2e_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

@@ -784,6 +784,62 @@ mod tests {
         }
     }
 
+    /// 旧存档里的 `References` LongArray 是生成顺序；新存档是官方
+    /// `LongOpenHashSet` 迭代序。读回只把每个 packed 键当集合成员，顺序不影响结果。
+    /// A saved `References` array may be in either order; loading treats keys as
+    /// a set, so both old and new saves resolve the same starts.
+    #[test]
+    fn references_read_back_is_order_independent() {
+        let config = normal(42);
+        let (cx, cz) = (0, -17);
+        let data = structure_data(&config, cx, cz).unwrap();
+        let (sx, sz) = (-3, -17);
+        let keys: Vec<i64> = vec![
+            mc_bamboo_worldgen::structure::chunk_pos_pack(cx, cz),
+            mc_bamboo_worldgen::structure::chunk_pos_pack(sx, sz),
+        ];
+        assert_eq!(keys.len(), 2);
+        let mut reversed = keys.clone();
+        reversed.reverse();
+        let mut refs_a = References::new();
+        refs_a.insert("minecraft:mineshaft".to_owned(), keys);
+        let mut refs_b = References::new();
+        refs_b.insert("minecraft:mineshaft".to_owned(), reversed);
+        let beard_a = beardifier_for_chunk(&config, cx, cz, &refs_a)
+            .unwrap()
+            .is_some();
+        let beard_b = beardifier_for_chunk(&config, cx, cz, &refs_b)
+            .unwrap()
+            .is_some();
+        assert_eq!(beard_a, beard_b);
+        // 读盘标签的 `References` 顺序也不影响 `structures.starts` 的恢复。
+        let mut tag = data.tag.clone();
+        if let Tag::Compound(entries) = &mut tag {
+            for (key, value) in entries.iter_mut() {
+                if key == "References" {
+                    *value = mc_bamboo_worldgen::structure::save::structures_tag(
+                        &std::collections::BTreeMap::new(),
+                        &refs_b,
+                    );
+                    if let Tag::Compound(root) = value {
+                        *value = root
+                            .iter()
+                            .find(|(k, _)| k == "References")
+                            .map(|(_, v)| v.clone())
+                            .unwrap_or_else(|| value.clone());
+                    }
+                }
+            }
+        }
+        install_disk_structures(&config, cx, cz, Some(&tag));
+        let restored = structure_starts(&config, cx, cz).unwrap();
+        assert_eq!(
+            restored.by_structure.keys().collect::<Vec<_>>(),
+            data.starts.by_structure.keys().collect::<Vec<_>>()
+        );
+        clear_disk_structures();
+    }
+
     #[test]
     fn generate_structures_false_produces_empty_starts() {
         let mut config = normal(42);

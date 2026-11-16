@@ -18,9 +18,12 @@ use mc_bamboo_blocks::LegacyRandom;
 use crate::{
     feature::{
         FeatureChunks,
+        placement::PlacementEnv,
+        provider::WorldGenerationContext,
+        registry::Registry,
         world::{FeatureWorld, HeightmapKind},
     },
-    random::{Random, WorldgenRandom},
+    random::{Random, WorldgenRandom, XoroshiroRandom},
     structure::{
         jigsaw::{self},
         piece_place::{self, PieceLevel},
@@ -61,10 +64,29 @@ pub const PLACEABLE_TYPES: &[&str] = &[
 ///
 /// Structure placement inputs for one `features` call, grouped by step, plus the
 /// accumulated statistics.
+/// `FeaturePoolElement.place` 需要的地物上下文：官方把
+/// `StructureStart.placeInChunk` 的那同一个 `WorldgenRandom` 传给
+/// `PlacedFeature.place(level, generator, random, piecePos)`。
+///
+/// Context needed by `FeaturePoolElement.place`: vanilla hands the very same
+/// `WorldgenRandom` from `StructureStart.placeInChunk` to `PlacedFeature.place`.
+pub struct FeaturePlacementContext<'a> {
+    pub registry: &'a Registry,
+    pub samplers: &'a crate::settings::Samplers,
+    pub biomes: &'a crate::biome_manager::BiomeManager<'a>,
+    pub settings: &'a crate::settings::Settings,
+    pub region_random: &'a Random,
+    /// 3×3 quart 群系格，`BiomeFilter` 用。
+    pub feature_chunks: &'a FeatureChunks,
+}
+
 pub struct StructurePlacement<'a> {
     groups: Vec<StepStructure<'a>>,
     processor_lists: ProcessorLists,
     seed: i64,
+    /// 对拍改坏确认要跳过的结构类型 ID；正常路径为 `None`。
+    /// Structure type ID to skip for the oracle's break confirmation.
+    skip_type: Option<String>,
     /// 逐 step 累计的放置次数，供对拍确认每类结构真的被放到。
     pub stats: RefCell<PlaceStats>,
 }
@@ -98,8 +120,15 @@ impl<'a> StructurePlacement<'a> {
             groups,
             processor_lists,
             seed,
+            skip_type: None,
             stats: RefCell::new(PlaceStats::default()),
         }
+    }
+
+    /// 对拍改坏确认：跳过一种结构类型的结构件放置，其它结构照常。
+    /// Oracle break confirmation: skip one structure type, place the rest.
+    pub fn skip_type(&mut self, type_id: &str) {
+        self.skip_type = Some(type_id.to_owned());
     }
 
     /// 跑当前 step 的结构件放置，统计合进 [`Self::stats`]。
@@ -110,6 +139,7 @@ impl<'a> StructurePlacement<'a> {
         world: &mut FeatureWorld<'_>,
         input: &FeatureChunks,
         step: usize,
+        feature_ctx: Option<&FeaturePlacementContext<'_>>,
     ) -> Result<(), String> {
         let partial = place_step(
             world,
@@ -118,10 +148,15 @@ impl<'a> StructurePlacement<'a> {
             step,
             &self.groups,
             &self.processor_lists,
+            self.skip_type.as_deref(),
+            feature_ctx,
         )?;
         let mut stats = self.stats.borrow_mut();
         for (kind, count) in partial.placed_pieces {
             *stats.placed_pieces.entry(kind).or_default() += count;
+        }
+        for (kind, count) in partial.placed_blocks {
+            *stats.placed_blocks.entry(kind).or_default() += count;
         }
         stats.unsupported_pieces += partial.unsupported_pieces;
         Ok(())
@@ -138,6 +173,20 @@ pub struct StartInput {
     pub type_id: String,
     /// 结构件列表。jigsaw 走模板链，其余走布局 `Piece`。
     pub pieces: StartPieces,
+}
+
+/// 一次 `place_start` 调用的公共输入与对拍开关。
+/// Shared inputs and oracle-only switches for one `place_start` call.
+#[derive(Clone, Copy)]
+pub struct PlaceOptions<'a> {
+    pub seed: i64,
+    pub random: &'a WorldgenRandom,
+    pub processor_lists: &'a ProcessorLists,
+    /// 对拍改坏确认要跳过的结构类型 ID；正常路径为 `None`。
+    /// Structure type ID to skip for break confirmation.
+    pub skip_type: Option<&'a str>,
+    /// `FeaturePoolElement` 的地物上下文。
+    pub feature_ctx: Option<&'a FeaturePlacementContext<'a>>,
 }
 
 /// 放置阶段看到的结构件集合。
@@ -159,6 +208,9 @@ pub enum StartPieces {
 pub struct PlaceStats {
     /// `structure type -> 跑过 postProcess 的结构件次数`。
     pub placed_pieces: BTreeMap<String, usize>,
+    /// `structure type -> 结构件写过的方块次数`（含写空气、含重复写）。
+    /// `structure type -> block writes made by its pieces`.
+    pub placed_blocks: BTreeMap<String, usize>,
     /// 因 unsupported 跳过的结构件次数。
     pub unsupported_pieces: usize,
 }
@@ -178,6 +230,8 @@ pub struct StepStructure<'a> {
 ///
 /// Group structures by `step`; group order is the structure registry name order
 /// (`Registry.stream()`), with a per-step local index independent of features.
+// 参数是官方 `applyBiomeDecoration` 在这条路径上的全部输入，拆开只会掩盖调用关系。
+#[allow(clippy::too_many_arguments)]
 pub fn place_step(
     world: &mut FeatureWorld<'_>,
     input: &FeatureChunks,
@@ -185,11 +239,24 @@ pub fn place_step(
     step: usize,
     structures: &[StepStructure<'_>],
     processor_lists: &ProcessorLists,
+    skip_type: Option<&str>,
+    feature_ctx: Option<&FeaturePlacementContext<'_>>,
 ) -> Result<PlaceStats, String> {
     let mut stats = PlaceStats::default();
-    let random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
+    // `applyBiomeDecoration` 的那一个随机源是
+    // `new WorldgenRandom(new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()))`
+    // （字节码 90-104）；结构分支和地物分支共用它。不是 LegacyRandomSource：
+    // 后者会让 `nextInt` / `nextFloat` 走另一条 LCG 序列。
+    let random = WorldgenRandom::new(Random::Xoroshiro(XoroshiroRandom::new(0)));
     let decoration_seed =
         random.set_decoration_seed(seed, input.center_x * 16, input.center_z * 16);
+    let options = PlaceOptions {
+        seed,
+        random: &random,
+        processor_lists,
+        skip_type,
+        feature_ctx,
+    };
     let mut local_index = 0_i32;
     for group in structures {
         // 官方按 `structure.step().ordinal()` 分组，所以这里只跑属于当前 step 的。
@@ -199,15 +266,7 @@ pub fn place_step(
         random.set_feature_seed(decoration_seed, local_index, step as i32);
         local_index += 1;
         for start in group.starts {
-            place_start(
-                world,
-                input,
-                seed,
-                start,
-                &random,
-                processor_lists,
-                &mut stats,
-            )?;
+            place_start(world, input, start, &mut stats, options)?;
         }
     }
     Ok(stats)
@@ -237,12 +296,13 @@ fn writable_area(input: &FeatureChunks) -> [i32; 6] {
 fn place_start(
     world: &mut FeatureWorld<'_>,
     input: &FeatureChunks,
-    seed: i64,
     start: &StartInput,
-    random: &WorldgenRandom,
-    processor_lists: &ProcessorLists,
     stats: &mut PlaceStats,
+    options: PlaceOptions<'_>,
 ) -> Result<(), String> {
+    if options.skip_type == Some(start.type_id.as_str()) {
+        return Ok(());
+    }
     let chunk_bb = writable_area(input);
     match &start.pieces {
         StartPieces::Jigsaw(pieces) => {
@@ -254,11 +314,24 @@ fn place_start(
                     stats.unsupported_pieces += 1;
                     continue;
                 }
-                place_jigsaw_piece(world, seed, piece, &chunk_bb, random, processor_lists)?;
+                let before = world.write_count;
+                place_jigsaw_piece(
+                    world,
+                    options.seed,
+                    piece,
+                    &chunk_bb,
+                    options.random,
+                    options.processor_lists,
+                    options.feature_ctx,
+                )?;
                 *stats
                     .placed_pieces
                     .entry(start.type_id.clone())
                     .or_default() += 1;
+                *stats
+                    .placed_blocks
+                    .entry(start.type_id.clone())
+                    .or_default() += world.write_count.saturating_sub(before);
             }
         }
         StartPieces::Layout(pieces) => {
@@ -272,11 +345,16 @@ fn place_start(
                 if !intersects(&piece.bb, &chunk_bb) {
                     continue;
                 }
-                place_layout_piece(world, piece, kind, &chunk_bb, random)?;
+                let before = world.write_count;
+                place_layout_piece(world, piece, kind, &chunk_bb, options.random)?;
                 *stats
                     .placed_pieces
                     .entry(start.type_id.clone())
                     .or_default() += 1;
+                *stats
+                    .placed_blocks
+                    .entry(start.type_id.clone())
+                    .or_default() += world.write_count.saturating_sub(before);
             }
             if start.type_id == "minecraft:woodland_mansion" {
                 let world_random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
@@ -309,9 +387,16 @@ fn jigsaw_intersects(piece: &jigsaw::Piece, chunk_bb: &[i32; 6]) -> bool {
     intersects(&bb, chunk_bb)
 }
 
-/// 一个 jigsaw 结构件：`SinglePoolElement.place` → `StructureTemplate.placeInWorld`。
+/// 一个 jigsaw 结构件：`StructurePoolElement.place`。
 ///
-/// One jigsaw piece: `SinglePoolElement.place` → `StructureTemplate.placeInWorld`.
+/// `ListPoolElement.place` 按列表顺序逐个调子元素的 `place`
+/// （官方字节码就是一次顺序遍历，不做随机选择）；`EmptyPoolElement` 什么都不写；
+/// `FeaturePoolElement` 交给地物系统，本轮只写方块所以跳过。
+/// `SinglePoolElement.place` 走 `StructureTemplate.placeInWorld`。
+///
+/// One jigsaw piece: `StructurePoolElement.place`. `ListPoolElement` calls
+/// `place` on each child in order, `EmptyPoolElement` writes nothing, and
+/// `FeaturePoolElement` delegates to the feature system (outside block scope).
 fn place_jigsaw_piece(
     world: &mut FeatureWorld<'_>,
     seed: i64,
@@ -319,17 +404,148 @@ fn place_jigsaw_piece(
     chunk_bb: &[i32; 6],
     random: &WorldgenRandom,
     processor_lists: &ProcessorLists,
+    feature_ctx: Option<&FeaturePlacementContext<'_>>,
 ) -> Result<(), String> {
-    let Some(location) = piece.element.location() else {
-        // `EmptyPoolElement` 不写方块；`Feature`/`List` 元素在 place 阶段交给各自的子元素，
-        // 目前未接（标成 unsupported 而不假装放置）。
+    let inputs = JigsawPlaceInputs {
+        seed,
+        chunk_bb,
+        processor_lists,
+        position: piece.position,
+        rotation: piece.rotation.index() as u32,
+        random,
+        feature_ctx,
+    };
+    place_pool_element(world, &piece.element, &inputs)?;
+    let _ = random;
+    Ok(())
+}
+
+/// 递归 `place_pool_element` 时不变的调用上下文。
+/// Shared context for a recursive `place_pool_element` call.
+struct JigsawPlaceInputs<'a> {
+    seed: i64,
+    chunk_bb: &'a [i32; 6],
+    processor_lists: &'a ProcessorLists,
+    position: (i32, i32, i32),
+    rotation: u32,
+    /// `StructureStart.placeInChunk` 传下来的同一个随机源。
+    random: &'a WorldgenRandom,
+    feature_ctx: Option<&'a FeaturePlacementContext<'a>>,
+}
+
+fn place_pool_element(
+    world: &mut FeatureWorld<'_>,
+    element: &jigsaw::PoolElement,
+    inputs: &JigsawPlaceInputs<'_>,
+) -> Result<(), String> {
+    match element {
+        jigsaw::PoolElement::Empty => Ok(()),
+        jigsaw::PoolElement::Feature { feature, .. } => {
+            place_feature_pool_element(world, feature, inputs)
+        }
+        jigsaw::PoolElement::List { elements, .. } => {
+            for child in elements {
+                place_pool_element(world, child, inputs)?;
+            }
+            Ok(())
+        }
+        jigsaw::PoolElement::Single { .. } => place_single_pool_element(world, element, inputs),
+    }
+}
+
+/// `FeaturePoolElement.place`：`feature.value().place(level, generator, random, piecePos)`。
+/// `piecePos` 是 `StructurePiece.position`（`PoolElementStructurePiece.place` 传的第 5 个参数），
+/// 不是包围盒中心；随机源是 `StructureStart.placeInChunk` 传下来的同一个 `WorldgenRandom`。
+///
+/// `FeaturePoolElement.place`: calls `PlacedFeature.place` with the structure piece's
+/// position and the very same random source handed to `StructureStart.placeInChunk`.
+fn place_feature_pool_element(
+    world: &mut FeatureWorld<'_>,
+    feature: &str,
+    inputs: &JigsawPlaceInputs<'_>,
+) -> Result<(), String> {
+    let Some(ctx) = inputs.feature_ctx else {
+        return Ok(());
+    };
+    let placed = ctx
+        .registry
+        .placed_id(feature)
+        .and_then(|id| ctx.registry.placed(id));
+    let Some(placed) = placed else {
+        return Ok(());
+    };
+    let generation = WorldGenerationContext {
+        min_y: ctx.settings.min_y,
+        height: ctx.settings.height,
+        sea_level: ctx.settings.sea_level,
+    };
+    // `BiomeFilter.shouldPlace` 问 `WorldGenLevel.getBiome(pos)`：先按
+    // `obfuscateSeed(worldSeed)` 做八角 fiddled distance 选 quart 角，再读 3×3
+    // 的 quart 格；越界才回退单点气候重算。与主地物循环用同一条路径。
+    let biomes = &ctx.feature_chunks.biomes;
+    let center_x = ctx.feature_chunks.center_x;
+    let center_z = ctx.feature_chunks.center_z;
+    let min_y = ctx.feature_chunks.min_y;
+    let zoom_seed = crate::biome_manager::obfuscate_seed(world.seed);
+    let mut density_context = crate::sampler::Context::uncached();
+    let mut biome_at = |x: i32, y: i32, z: i32| -> u32 {
+        let corner = crate::biome_manager::fiddled_corner(zoom_seed, x, y, z);
+        match crate::feature::world::noise_biome_in(
+            biomes, center_x, center_z, min_y, corner.0, corner.1, corner.2,
+        ) {
+            Some(id) => id,
+            None => ctx.biomes.noise_biome(
+                ctx.samplers,
+                &mut density_context,
+                corner.0,
+                corner.1,
+                corner.2,
+            ),
+        }
+    };
+    let mut env = PlacementEnv {
+        generation,
+        biome_at: &mut biome_at,
+        registry: ctx.registry,
+        top_feature: Some(ctx.registry.placed_id(feature).unwrap_or(u32::MAX)),
+        region_random: ctx.region_random,
+    };
+    let outcome = crate::feature::composition::place_placed(
+        ctx.registry,
+        &placed.feature,
+        &placed.placement,
+        world,
+        &mut env,
+        inputs.random,
+        inputs.position,
+    );
+    if !outcome.supported {
+        // 未移植的 placed feature 不能静默当作 0 不一致；交给上层的
+        // `unsupported` 统计与对拍报错。
+        return Err(format!("unsupported FeaturePoolElement {feature}"));
+    }
+    Ok(())
+}
+
+fn place_single_pool_element(
+    world: &mut FeatureWorld<'_>,
+    element: &jigsaw::PoolElement,
+    inputs: &JigsawPlaceInputs<'_>,
+) -> Result<(), String> {
+    let Some(location) = element.location() else {
         return Ok(());
     };
     let template = StructureTemplate::load(location)?;
-    let configured = match &piece.element {
+    let configured = match element {
         jigsaw::PoolElement::Single { processors, .. } => match processors {
-            ProcessorListRef::Named(name) => processor_lists
-                .get(name.strip_prefix("minecraft:").unwrap_or(name.as_str()))
+            // `processor_list` 注册表键带 `minecraft:` 前缀，解析器保留原名；
+            // 早期代码剥掉前缀会让所有具名 processor 链静默变成空链
+            // （试炼密室铜灯氧化等规则完全不生效）。
+            // Registry keys keep their `minecraft:` prefix; stripping it here made
+            // every named processor list resolve to an empty chain.
+            ProcessorListRef::Named(name) => inputs
+                .processor_lists
+                .get(name.as_str())
                 .map(|v| v.to_vec())
                 .unwrap_or_default(),
             ProcessorListRef::Inline(processors) => processors.clone(),
@@ -337,8 +553,7 @@ fn place_jigsaw_piece(
         _ => Vec::new(),
     };
     // `SinglePoolElement.getSettings` 的 processor 链（含 legacy 的 pop-then-append）。
-    let chain =
-        jigsaw::place::assemble_processors(&piece.element, &configured, false).unwrap_or_default();
+    let chain = jigsaw::place::assemble_processors(element, &configured, false).unwrap_or_default();
     // processor 只读世界当前状态，先拷一份快照，让 `place_piece` 独占可变 `world`。
     // Processors only read the pre-placement world; snapshot it so `place_piece`
     // can take the mutable borrow.
@@ -346,32 +561,37 @@ fn place_jigsaw_piece(
         view: world.snapshot_view(),
     };
     let settings = ProcessorPlaceSettings {
-        piece_position: piece.position,
-        reference_pos: piece.position,
+        piece_position: inputs.position,
+        reference_pos: inputs.position,
         chunk_bb: Some(crate::structure::BoundingBox {
-            min_x: chunk_bb[0],
-            min_y: chunk_bb[1],
-            min_z: chunk_bb[2],
-            max_x: chunk_bb[3],
-            max_y: chunk_bb[4],
-            max_z: chunk_bb[5],
+            min_x: inputs.chunk_bb[0],
+            min_y: inputs.chunk_bb[1],
+            min_z: inputs.chunk_bb[2],
+            max_x: inputs.chunk_bb[3],
+            max_y: inputs.chunk_bb[4],
+            max_z: inputs.chunk_bb[5],
         }),
-        level_seed: seed,
+        level_seed: inputs.seed,
         explicit_random: None,
     };
-    let bare = Random::Legacy(LegacyRandom::new(0));
+    // 官方 `StructureTemplate.placeInWorld` 从 `StructureStart.placeInChunk`
+    // 传下来的那同一个 `WorldgenRandom` 里为随机容器取 `nextLong()` 覆盖
+    // `LootTableSeed`。用一份独立的 `bare` 随机源会让后续 `FeaturePoolElement`
+    // 的随机序列整体错位（南瓜堆半径、植被位置都会偏）。
+    // Vanilla's `StructureTemplate.placeInWorld` draws `nextLong()` from the same
+    // `WorldgenRandom` handed to `StructureStart.placeInChunk`. A separate `bare`
+    // source shifts the random stream for every later `FeaturePoolElement`.
     jigsaw::place::place_piece(
         &template,
-        piece.position,
+        inputs.position,
         &chain,
         &level,
         settings,
         0,
-        piece.rotation.index() as u32,
-        &bare,
+        inputs.rotation,
+        inputs.random.source(),
         world,
     )?;
-    let _ = random;
     Ok(())
 }
 

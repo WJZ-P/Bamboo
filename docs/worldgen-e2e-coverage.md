@@ -90,3 +90,21 @@ tools/mc-bamboo-vanilla/feature-e2e.sh minecraft:ore # 只跑一个类型
 脚本逐类型跑「干净对拍 + 改坏确认」，打印和本表同口径的统计，任一失败就以非 0 退出。
 新加地物时把类型、step 掩码和能触发它的种子/区块加进脚本的 `CASES` 表，再按
 `docs/worldgen.md` 的步骤更新本文。
+
+## 带结构的整块对拍修掉的 bug（2026-11-16）
+
+`gen-world --through features --structures` / `structure-e2e` 把开结构的整块生成
+逐方块对拍后，抓出并修掉了下面这些真 bug。完整覆盖表、命令与剩余缺口见
+[`docs/worldgen-structures-e2e.md`](worldgen-structures-e2e.md)。
+
+| 现象 | 根因 | 现在由哪个对拍盯着 | 之前为什么没发现 |
+|---|---|---|---|
+| 矿井 / 试炼密室随机方块整片错位 | `place_step` 的 `WorldgenRandom` 包 `LegacyRandomSource`；官方 `applyBiomeDecoration` 包 `XoroshiroRandomSource` | `structure-e2e`、`gen-world --structures --steps 3` | 旧结构放置对拍用合成地形 + 自建随机源，不是真实 decoration 随机流 |
+| 多起点反查顺序不同导致后续随机全错 | `References` 用扫描顺序 `Vec`；官方是 `LongOpenHashSet` 的桶序 | `long-set`（3000 组 / 287248 次比较）、`structure-e2e` 的 `(0,-17)` | `structure-pipeline` 比起点前先排序，顺序不影响它 |
+| 试炼密室铜灯不氧化 | 具名 `processor_list` 查表前剥掉了 `minecraft:` 前缀 | `structure-e2e` 的 `(17,7)` | `jigsaw apply` 直接传列表对象，不走注册表 |
+| 前哨瞭望塔 / 部分村庄结构件不生成 | `ListPoolElement` 被当成无模板跳过 | `structure-e2e` 的 `(-379,-303)` 与村庄五种 | `jigsaw placepiece` 只测 `SinglePoolElement` |
+| 村庄植被 / 树 / 南瓜堆不生成 | `FeaturePoolElement` 被跳过；官方调 `PlacedFeature.place` 并复用 `StructureStart` 的随机源 | `structure-e2e` 村庄区块 | 旧查询集没有村庄起点 |
+| 村庄街道逐层抬高 | `GravityProcessor` 无条件把 `WORLD_SURFACE_WG` 换成 `WORLD_SURFACE`；官方只在 `ServerLevel` 上换 | `structure-e2e` 村庄区块 | 只在单件上对拍过 gravity |
+| step 10 地物在村庄读到旧高度 | `BlockWriter for FeatureWorld` 用不更新高度图的 `set_block` | `structure-e2e` 全步、`feature-e2e.sh minecraft:freeze_top_layer` | 无结构模式没有结构件写方块 |
+| 沙漠神殿 `afterPlace` 抛异常 | 假世界没实现 `getBlockEntity(pos,type)` 的 `Optional` 重载 | `structure-e2e` 的 `(-374,-22)` | 旧对拍没跑到 `placeSuspiciousSand` |
+| `minecraft:block_pile` 标 unsupported | 叶子地物未移植；阈值分支方向按字节码是 `dist2 > threshold` 才走 `nextFloat()<0.031` | `structure-e2e` 村庄区块 + 改坏确认 | 主世界 `biome_features` 不含它，只作结构池元素 |
