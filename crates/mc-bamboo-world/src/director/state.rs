@@ -441,8 +441,9 @@ pub struct Director<C> {
     /// 全部待派任务的小顶堆（`Reverse` 包大顶堆）。只在
     /// 新任务加入、玩家快照变化或者有任务被挡住后重试时才碰它。
     pending_order: BinaryHeap<Reverse<QueueEntry>>,
-    /// 上一次被写范围/配额挡住、等状态变了再试的任务。
-    deferred: Vec<TaskId>,
+    /// 上一次被写范围/配额挡住的任务，按 `(rank, TaskId)` 存成小顶堆。
+    /// 配额满了就整组留着，不每刻重排。
+    deferred: BinaryHeap<Reverse<(QueueKey, TaskId)>>,
     /// 这一刻还允许把 deferred 重新入堆几次。每个任务完成都可能释放
     /// 配额，但同一刻有几百个事件；限次后成本是每刻 O(次数 × deferred)，
     /// 不会退化成「每个事件都重排整张积压表」。
@@ -503,7 +504,7 @@ impl<C: ChunkBundle> Director<C> {
             pending_forgot: BTreeSet::new(),
             queued_reads: BTreeSet::new(),
             pending_order: BinaryHeap::new(),
-            deferred: Vec::new(),
+            deferred: BinaryHeap::new(),
             retry_budget: 0,
             demand_epoch: 0,
             heap_epoch: 0,
@@ -1510,23 +1511,22 @@ impl<C: ChunkBundle> Director<C> {
             return;
         }
         self.refresh_heap_if_needed();
-        // 每刻只把 deferred 里最急的一小段放回堆，其余留在 deferred。
-        // 这样每次 drive 的成本是 O(DEFERRED_SLICE)，与积压总数无关。
+        // 每刻只把 deferred 里最急的一小段放回堆，其余原地留着。
+        // 每次 drive 的成本是 O(DEFERRED_SLICE × log 积压)，与积压总数无关。
         if self.retry_budget > 0 && !self.deferred.is_empty() {
             self.retry_budget -= 1;
-            let mut retry: Vec<TaskId> = self
-                .deferred
-                .drain(..self.deferred.len().min(DEFERRED_SLICE))
-                .collect();
-            retry.retain(|id| self.pending.contains_key(id));
-            for id in retry {
-                let key = self.task_key(id);
-                self.pending_order.push(Reverse((key, id)));
+            for _ in 0..DEFERRED_SLICE {
+                let Some(Reverse((key, id))) = self.deferred.pop() else {
+                    break;
+                };
+                if self.pending.contains_key(&id) {
+                    self.pending_order.push(Reverse((key, id)));
+                }
             }
         }
 
         let cap = self.config.max_in_flight;
-        let mut skipped = Vec::new();
+        let mut deferred = BinaryHeap::new();
         loop {
             if (self.config.max_submits_per_tick > 0
                 && self.submitted_this_tick >= self.config.max_submits_per_tick)
@@ -1540,7 +1540,17 @@ impl<C: ChunkBundle> Director<C> {
             if !self.pending.contains_key(&id) {
                 continue;
             }
-            let _ = key;
+            // 玩家快照变了之后堆里的键过期，按当前状态重算再放回去。
+            let fresh = self.task_key(id);
+            if fresh != key {
+                self.pending_order.push(Reverse((fresh, id)));
+                // 键没变小时避免同一项原地打转，留到下一次 drive。
+                if fresh >= key {
+                    deferred.push(Reverse((fresh, id)));
+                    continue;
+                }
+                continue;
+            }
             let Some(pending) = self.pending.get(&id) else {
                 continue;
             };
@@ -1564,7 +1574,7 @@ impl<C: ChunkBundle> Director<C> {
             // 不用「最少在途数」做硬跳过，否则某个玩家恰好没有待派任务时
             // 会把其它玩家全部饿死。
             if overlaps || !self.claim_task_owner(id, pos, kind) {
-                skipped.push(id);
+                deferred.push(Reverse((self.task_key(id), id)));
                 continue;
             }
             let pending = self.pending.remove(&id).expect("上面已经确认存在");
@@ -1584,17 +1594,9 @@ impl<C: ChunkBundle> Director<C> {
             });
             let _ = pending.seq;
         }
-        // 保留上一轮没轮到的 deferred；本轮新被挡住的任务追加进去。
-        // 按 `(rank, TaskId)` 排好，下一次只取最急的一小段重试。
-        let mut deferred = std::mem::take(&mut self.deferred);
-        deferred.extend(skipped);
-        let mut keyed: Vec<(QueueKey, TaskId)> = deferred
-            .into_iter()
-            .map(|id| (self.task_key(id), id))
-            .collect();
-        keyed.sort_unstable();
-        keyed.dedup_by(|a, b| a.1 == b.1);
-        self.deferred = keyed.into_iter().map(|(_, id)| id).collect();
+        // 本轮新被挡住的任务并回 deferred 堆；堆里可能已有旧项，
+        // 出堆时用 `pending` 和当前键核对，重复的旧项直接跳过。
+        self.deferred.extend(deferred);
         self.flush_notifications(out);
     }
 
