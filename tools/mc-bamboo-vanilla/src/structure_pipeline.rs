@@ -349,7 +349,10 @@ fn on_row(value: &Value, options: &Options, stats: &mut Stats) -> Result<(), Str
 /// 官方带真实 Beardifier 的 CARVERS 方块 vs 游戏 `game_pipeline` 的中心方块，逐格比。
 /// Compare official Beardifier-terrain blocks against the game pipeline's center.
 fn on_terrain(value: &Value, options: &Options, stats: &mut Stats) -> Result<(), String> {
-    let seed = value.get("seed").and_then(Value::as_i64).ok_or("missing seed")?;
+    let seed = value
+        .get("seed")
+        .and_then(Value::as_i64)
+        .ok_or("missing seed")?;
     let x = value.get("x").and_then(Value::as_i64).ok_or("missing x")? as i32;
     let z = value.get("z").and_then(Value::as_i64).ok_or("missing z")? as i32;
     let palette: Vec<String> = value
@@ -377,12 +380,8 @@ fn on_terrain(value: &Value, options: &Options, stats: &mut Stats) -> Result<(),
     // 因此这里用同一份 `generate_chunk_with_beardifier` 重新生成 CARVERS 快照。
     let refs = mc_bamboo_game::worldgen_structures::structure_references_stage(&config, x, z)?;
     let beard = mc_bamboo_game::worldgen_structures::beardifier_for_chunk(&config, x, z, &refs)?;
-    let ours = mc_bamboo_game::worldgen::generate_chunk_with_beardifier(
-        &config,
-        x,
-        z,
-        beard.as_ref(),
-    )?;
+    let ours =
+        mc_bamboo_game::worldgen::generate_chunk_with_beardifier(&config, x, z, beard.as_ref())?;
     stats.terrain_chunks += 1;
     let mut differences = 0usize;
     for (y, layer) in ours.blocks.iter().enumerate() {

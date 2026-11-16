@@ -237,10 +237,7 @@ fn structure_terrain_is_identical_across_worker_counts() {
     // 依赖表本身要是官方的两条，否则纯函数缓存也救不了调度顺序。
     assert_eq!(
         GENERATION[4].requires,
-        &[
-            (ChunkStatus::StructureStarts, 8),
-            (ChunkStatus::Biomes, 1)
-        ]
+        &[(ChunkStatus::StructureStarts, 8), (ChunkStatus::Biomes, 1)]
     );
     let positions: Vec<ChunkPos> = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |z| ChunkPos::new(x, z)))

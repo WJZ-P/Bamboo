@@ -787,8 +787,7 @@ mod tests {
         let config = normal(42);
         // 一个有 trial_chambers 起点的区块，Beardifier 非空。
         let (cx, cz) = (17, 7);
-        let refs =
-            crate::worldgen_structures::structure_references_stage(&config, cx, cz).unwrap();
+        let refs = crate::worldgen_structures::structure_references_stage(&config, cx, cz).unwrap();
         let beard = crate::worldgen_structures::beardifier_for_chunk(&config, cx, cz, &refs)
             .unwrap()
             .unwrap_or_else(|| Beardifier::for_structures_in_chunk(cx, cz, &[]));
@@ -818,8 +817,7 @@ mod tests {
         let a = run_features(&config, cx, cz, view_empty).unwrap();
         let b = run_features(&config, cx, cz, view_real).unwrap();
         assert_ne!(
-            a.deltas,
-            b.deltas,
+            a.deltas, b.deltas,
             "different terrain snapshots must produce different neighbor deltas"
         );
     }
