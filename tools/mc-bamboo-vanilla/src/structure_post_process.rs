@@ -99,6 +99,21 @@ fn prime(
 /// One query's diff: `(x, y, z) -> state id`.
 type Diff = BTreeMap<(i32, i32, i32), u32>;
 
+/// 方块实体的战利品表：(位置, 表名, 种子)。
+///
+/// Loot table of a block entity: `(position, table, seed)`.
+type Entities = BTreeMap<(i32, i32, i32), (String, i64)>;
+
+/// 一次查询的 Rust 结果：写入日志、随机探针和方块实体。
+///
+/// Rust result of one query: the write log, the random probe and the block entities.
+struct RustOutcome {
+    diff: Diff,
+    probe: i64,
+    entities: Entities,
+    entity_abort: bool,
+}
+
 /// 跑一个查询的 Rust 侧，返回结构写下的方块。
 ///
 /// 比的是「写入日志」而不是写前写后的状态差异：结构写在地形上的方块（沙漠神殿的塔身几乎
@@ -109,7 +124,7 @@ type Diff = BTreeMap<(i32, i32, i32), u32>;
 /// logs rather than before/after state diffs: a block landing on existing terrain (most of the
 /// desert pyramid) is not a state change yet vanilla wrote it. The Java
 /// `PieceLevelHandler.written` has the same semantics (later writes win).
-fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
+fn rust_diff(q: &Query) -> Result<RustOutcome, String> {
     let chunks = synthetic_chunks(q.cx, q.cz);
     let mut world = FeatureWorld::new(&chunks, 63, 0)?;
     let chunk_bb = [
@@ -121,13 +136,25 @@ fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
         q.cz * 16 + 15,
     ];
     let mut writes: Vec<(i32, i32, i32, u32)> = Vec::new();
+    // 整条查询共用一个 `postProcess` 随机源，和 Java 侧一致。
+    // One postProcess random for the whole query, matching the Java side.
+    let random = mc_bamboo_worldgen::random::WorldgenRandom::new(
+        mc_bamboo_worldgen::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(q.seed)),
+    );
     let entity_abort = match q.kind {
         "buried_treasure" => {
             let x = q.cx * 16 + 9;
             let z = q.cz * 16 + 9;
             if let Some((chest, _)) =
                 post_process::buried_treasure(&mut world, &[x, 90, z, x, 90, z], Some(&mut writes))
-                && let Some(state) = post_process::create_chest(&mut world, &chunk_bb, chest, None)
+                && let Some(state) = post_process::create_chest(
+                    &mut world,
+                    &chunk_bb,
+                    chest,
+                    None,
+                    &random,
+                    Some("minecraft:chests/buried_treasure"),
+                )
             {
                 writes.push((chest.0, chest.1, chest.2, state));
             }
@@ -161,15 +188,6 @@ fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
             let pieces =
                 mc_bamboo_worldgen::structure::single::generate(q.kind, q.seed, q.cx, q.cz)?;
             let piece = pieces.first().ok_or("no piece")?;
-            // `postProcess` 的随机源是 `applyBiomeDecoration` 的 `setFeatureSeed` 那一个，
-            // oracle 的 Java 侧直接用 `WorldgenRandom(LegacyRandomSource(seed))`；这里一致。
-            // The postProcess random is `setFeatureSeed`'s source from
-            // `applyBiomeDecoration`; the Java oracle uses this same plain seeded source.
-            let random = mc_bamboo_worldgen::random::WorldgenRandom::new(
-                mc_bamboo_worldgen::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(
-                    q.seed,
-                )),
-            );
             let (_, log) = post_process::pyramid::desert_pyramid(
                 &mut world,
                 &piece.bb,
@@ -191,13 +209,35 @@ fn rust_diff(q: &Query) -> Result<(Diff, bool), String> {
         }
         other => return Err(format!("no postProcess for {other}")),
     };
+    let probe = if entity_abort { 0 } else { random.next_long() };
     // 后写的覆盖先写的，和 Java 的 `TreeMap` 一致。
     // Later writes win, matching the Java `TreeMap`.
-    let mut out = Diff::new();
+    let mut diff = Diff::new();
     for (x, y, z, state) in writes {
-        out.insert((x, y, z), state);
+        diff.insert((x, y, z), state);
     }
-    Ok((out, entity_abort))
+    let mut entities = Entities::new();
+    for (pos, nbt) in &world.block_entities {
+        let mc_bamboo_nbt::Tag::Compound(entries) = nbt else {
+            continue;
+        };
+        let get = |key: &str| entries.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+        let table = match get("LootTable") {
+            Some(mc_bamboo_nbt::Tag::String(name)) => name.clone(),
+            _ => String::new(),
+        };
+        let seed = match get("LootTableSeed") {
+            Some(mc_bamboo_nbt::Tag::Long(seed)) => *seed,
+            _ => 0,
+        };
+        entities.insert(*pos, (table, seed));
+    }
+    Ok(RustOutcome {
+        diff,
+        probe,
+        entities,
+        entity_abort,
+    })
 }
 
 pub fn run(mut command: Command, queries_path: &Path, _options: &[&str]) -> Result<(), String> {
@@ -239,12 +279,24 @@ fn strip_log_prefix(line: &str) -> &str {
     }
 }
 
-/// 解析 Java 输出：`Q kind seed cx cz count entityAbort` + `B x y z state` 行。
+/// Java 输出的一段：`Q` 头 + `B` 方块 + `R` 随机探针 + `E` 方块实体。
 ///
-/// Parse the Java output: a `Q` header plus `B` lines.
-fn parse_output(stdout: &str) -> Result<Vec<(String, usize, bool, Diff)>, String> {
-    let mut sections = Vec::new();
-    let mut current: Option<(String, usize, bool, Diff)> = None;
+/// One Java section: the `Q` header, `B` blocks, the `R` random probe and `E` entities.
+struct Section {
+    key: String,
+    count: usize,
+    abort: bool,
+    blocks: Diff,
+    probe: i64,
+    entities: Entities,
+}
+
+/// 解析 Java 输出。
+///
+/// Parse the Java output.
+fn parse_output(stdout: &str) -> Result<Vec<Section>, String> {
+    let mut sections: Vec<Section> = Vec::new();
+    let mut current: Option<Section> = None;
     for line in stdout.lines() {
         // Java 的日志框架给 System.out 的每一行加了 `[时间] [main/INFO]: [STDOUT]: ` 前缀，
         // 先剥掉再解析。
@@ -268,12 +320,20 @@ fn parse_output(stdout: &str) -> Result<Vec<(String, usize, bool, Diff)>, String
                     .parse()
                     .map_err(|_| format!("bad count: {line}"))?;
                 let abort = fields[6] == "1";
-                current = Some((key, count, abort, Diff::new()));
+                current = Some(Section {
+                    key,
+                    count,
+                    abort,
+                    blocks: Diff::new(),
+                    probe: 0,
+                    entities: Entities::new(),
+                });
             }
             "B" => {
-                let Some((_, count, _, blocks)) = current.as_mut() else {
+                let Some(section) = current.as_mut() else {
                     return Err(format!("B line before any Q: {line}"));
                 };
+                let blocks = &mut section.blocks;
                 let x: i32 = fields[1].parse().map_err(|_| format!("bad x: {line}"))?;
                 let y: i32 = fields[2].parse().map_err(|_| format!("bad y: {line}"))?;
                 let z: i32 = fields[3].parse().map_err(|_| format!("bad z: {line}"))?;
@@ -281,7 +341,25 @@ fn parse_output(stdout: &str) -> Result<Vec<(String, usize, bool, Diff)>, String
                     .parse()
                     .map_err(|_| format!("bad state: {line}"))?;
                 blocks.insert((x, y, z), state);
-                let _ = count;
+            }
+            "R" => {
+                let Some(section) = current.as_mut() else {
+                    return Err(format!("R line before any Q: {line}"));
+                };
+                section.probe = fields[1]
+                    .parse()
+                    .map_err(|_| format!("bad probe: {line}"))?;
+            }
+            "E" => {
+                let Some(section) = current.as_mut() else {
+                    return Err(format!("E line before any Q: {line}"));
+                };
+                let x: i32 = fields[1].parse().map_err(|_| format!("bad x: {line}"))?;
+                let y: i32 = fields[2].parse().map_err(|_| format!("bad y: {line}"))?;
+                let z: i32 = fields[3].parse().map_err(|_| format!("bad z: {line}"))?;
+                let table = fields[4].to_owned();
+                let seed: i64 = fields[5].parse().map_err(|_| format!("bad seed: {line}"))?;
+                section.entities.insert((x, y, z), (table, seed));
             }
             // `T` 行是 Java 侧 postProcess 抛异常的类型（实体路径），`D` 行是诊断用的包围盒，
             // 都不参与比较。
@@ -312,7 +390,15 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
     let mut cells_total = 0usize;
     let mut by_kind: BTreeMap<&str, usize> = BTreeMap::new();
     let mut aborts = 0usize;
-    for (q, (key, count, java_abort, java_blocks)) in queries.iter().zip(sections.iter()) {
+    for (q, section) in queries.iter().zip(sections.iter()) {
+        let Section {
+            key,
+            count,
+            abort: java_abort,
+            blocks: java_blocks,
+            probe: java_probe,
+            entities: java_entities,
+        } = section;
         let expected_key = format!("{} {} {} {}", q.kind, q.seed, q.cx, q.cz);
         if key != &expected_key {
             return Err(format!("query key mismatch: {key:?} vs {expected_key:?}"));
@@ -327,14 +413,17 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
             aborts += 1;
         }
         *by_kind.entry(q.kind).or_default() += 1;
-        let (ours, _) = rust_diff(q)?;
+        let ours = rust_diff(q)?;
         cells_total += java_blocks.len();
-        let positions: std::collections::BTreeSet<(i32, i32, i32)> =
-            java_blocks.keys().chain(ours.keys()).copied().collect();
+        let positions: std::collections::BTreeSet<(i32, i32, i32)> = java_blocks
+            .keys()
+            .chain(ours.diff.keys())
+            .copied()
+            .collect();
         for pos in positions {
             total += 1;
             let j = java_blocks.get(&pos).copied();
-            let o = ours.get(&pos).copied();
+            let o = ours.diff.get(&pos).copied();
             if j != o {
                 mismatch_count += 1;
                 let describe = |state: Option<u32>| match state {
@@ -354,6 +443,36 @@ fn compare(queries: &[Query], stdout: &str) -> Result<(), String> {
                         describe(j),
                         describe(o)
                     ),
+                );
+            }
+        }
+        // 战利品表 / 种子与随机探针：箱子写对了但少取一次 `nextLong` 也要报。
+        // Loot tables, seeds and the random probe: a missing `nextLong` must fail even when
+        // the chest block itself is right.
+        if !*java_abort && !ours.entity_abort && java_probe != &ours.probe {
+            mismatch_count += 1;
+            push(
+                &mut mismatches,
+                format!(
+                    "[{key}] random probe: java {java_probe}, rust {}",
+                    ours.probe
+                ),
+            );
+        }
+        let all_entities: std::collections::BTreeSet<(i32, i32, i32)> = java_entities
+            .keys()
+            .chain(ours.entities.keys())
+            .copied()
+            .collect();
+        for pos in all_entities {
+            total += 1;
+            let j = java_entities.get(&pos);
+            let o = ours.entities.get(&pos);
+            if j != o {
+                mismatch_count += 1;
+                push(
+                    &mut mismatches,
+                    format!("[{key}] entity {pos:?}: java {j:?}, rust {o:?}"),
                 );
             }
         }

@@ -544,8 +544,14 @@ pub fn desert_pyramid(
     // Four chests in `Direction.Plane.HORIZONTAL` order (NORTH, EAST, SOUTH, WEST).
     for (dx, dz) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
         let at = ctx.world_pos(10 + dx * 2, -11, 10 + dz * 2);
-        if let Some(state) = create_chest(ctx.world, &chunk, at, None)
-            && let Some(writes) = ctx.writes.as_mut()
+        if let Some(state) = create_chest(
+            ctx.world,
+            &chunk,
+            at,
+            None,
+            random,
+            Some("minecraft:chests/desert_pyramid"),
+        ) && let Some(writes) = ctx.writes.as_mut()
         {
             writes.push((at.0, at.1, at.2, state));
         }

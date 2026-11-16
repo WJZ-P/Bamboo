@@ -138,9 +138,15 @@ public final class StructurePiecePlaceOracle {
             BoundingBox chunkBb = new BoundingBox(pos.getMinBlockX(), MIN_Y + 1, pos.getMinBlockZ(),
                     pos.getMinBlockX() + 15, MIN_Y + HEIGHT - 1, pos.getMinBlockZ() + 15);
             WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(seed));
+            // 跑完 postProcess 后再取一次 `nextLong()`：箱子 / 发射器战利品表这类不改方块
+            // 的取数少一次、多一次都会在这里露出来。
+            // One more `nextLong()` after postProcess: a missing or extra loot-table draw
+            // (which changes no block) shows up here.
+            long probe = 0;
             boolean entityAbort = false;
             try {
                 piece.postProcess(level, structures, null, random, chunkBb, pos, BlockPos.ZERO);
+                probe = random.nextLong();
             } catch (Throwable t) {
                 entityAbort = true;
                 // stderr 会混进 oracle 的 stdout 解析，所以写成带前缀的日志行，Rust 侧跳过。
@@ -159,6 +165,12 @@ public final class StructurePiecePlaceOracle {
                         + box.minX() + " " + box.minY() + " " + box.minZ() + " "
                         + box.maxX() + " " + box.maxY() + " " + box.maxZ());
             }
+            for (ProtoChunk chunk : handler.chunks.values()) {
+                for (var entry : chunk.getBlockEntities().entrySet()) {
+                    handler.blockEntities.put(entry.getKey().immutable(),
+                            entry.getValue().saveWithFullMetadata(registries));
+                }
+            }
             // 用「官方真正写下的方块」当结果，不用写前写后状态差异：结构写在地形上的方块
             // （沙漠神殿的塔身几乎全落在沙 / 砂岩上）不是状态变化，但确实写了。
             // Use the blocks vanilla actually wrote rather than a before/after state diff: a
@@ -168,6 +180,15 @@ public final class StructurePiecePlaceOracle {
             out.append("Q ").append(kind).append(' ').append(seed).append(' ').append(cx)
                     .append(' ').append(cz).append(' ').append(changed.size()).append(' ')
                     .append(entityAbort ? 1 : 0).append('\n');
+            out.append("R ").append(probe).append('\n');
+            for (var entry : handler.blockEntities.entrySet()) {
+                var tag = entry.getValue();
+                out.append("E ").append(entry.getKey().getX()).append(' ')
+                        .append(entry.getKey().getY()).append(' ')
+                        .append(entry.getKey().getZ()).append(' ')
+                        .append(tag.getStringOr("LootTable", "")).append(' ')
+                        .append(tag.getLongOr("LootTableSeed", 0L)).append('\n');
+            }
             for (var entry : changed.entrySet()) {
                 BlockPos at = entry.getKey();
                 out.append("B ").append(at.getX()).append(' ').append(at.getY()).append(' ')
@@ -291,6 +312,8 @@ public final class StructurePiecePlaceOracle {
          * vanilla wrote it.
          */
         final TreeMap<BlockPos, BlockState> written = new TreeMap<>();
+        /** 最后留在世界里的方块实体 nbt，按位置排序。 */
+        final TreeMap<BlockPos, net.minecraft.nbt.CompoundTag> blockEntities = new TreeMap<>();
 
         PieceLevelHandler(ChunkPos center, LevelHeightAccessor heightAccessor,
                 PalettedContainerFactory containerFactory, long seed) {

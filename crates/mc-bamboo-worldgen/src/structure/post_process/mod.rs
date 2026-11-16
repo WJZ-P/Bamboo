@@ -103,20 +103,24 @@ pub fn buried_treasure(
     None
 }
 
-/// `StructurePiece.createChest(level, chunkBB, random, pos, lootTable, null)` 的方块部分：
-/// 盒子内且不是箱子时写一个箱子（朝向用 `reorient`），返回是否写了。
+/// `StructurePiece.createChest(level, chunkBB, random, pos, lootTable, null)`：
+/// 盒子内且不是箱子时写一个箱子（朝向用 `reorient`），再按 `random.nextLong()` 把战利品表
+/// 写进方块实体。返回写下的方块状态。
 ///
-/// 战利品表要 `random.nextLong()`，那一半留给调用方；这里只写方块。
+/// 官方 `getBlockEntity` 拿到的是 `ChestBlockEntity` 才会取数；这里 `chest` 状态自带方块实体，
+/// 所以一定取。`loot_table` 是 `null`（不指定表）时只取数、不写 `LootTable` 键。
 ///
-/// The block part of `StructurePiece.createChest(level, chunkBB, random, pos, lootTable,
-/// null)`: inside the box and not already a chest, write a chest (facing chosen by
-/// `reorient`) and report whether it was written. The loot table draws `random.nextLong()`;
-/// that half stays with the caller.
+/// `StructurePiece.createChest`: write a chest (facing chosen by `reorient`) when inside
+/// the box and no chest is there yet, then draw `random.nextLong()` for the loot table.
+/// Vanilla only draws when `getBlockEntity` returns a `ChestBlockEntity`; a chest state
+/// always has one. A `None` loot table still draws the seed but writes no `LootTable` key.
 pub fn create_chest(
     world: &mut FeatureWorld,
     chunk_bb: &[i32; 6],
     pos: (i32, i32, i32),
     block_state: Option<u32>,
+    random: &crate::random::WorldgenRandom,
+    loot_table: Option<&str>,
 ) -> Option<u32> {
     if !box_is_inside(chunk_bb, pos.0, pos.1, pos.2)
         || world.get_block(pos.0, pos.1, pos.2) == blocks::CHEST
@@ -126,6 +130,16 @@ pub fn create_chest(
     let state = block_state
         .unwrap_or_else(|| reorient_with(|x, y, z| world.get_block(x, y, z), pos, blocks::CHEST));
     world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+    let mut entries = Vec::new();
+    if let Some(table) = loot_table {
+        entries.push((
+            "LootTable".to_owned(),
+            mc_bamboo_nbt::Tag::String(table.to_owned()),
+        ));
+    }
+    let seed = random.next_long();
+    entries.push(("LootTableSeed".to_owned(), mc_bamboo_nbt::Tag::Long(seed)));
+    world.set_block_entity(pos.0, pos.1, pos.2, &mc_bamboo_nbt::Tag::Compound(entries));
     Some(state)
 }
 
