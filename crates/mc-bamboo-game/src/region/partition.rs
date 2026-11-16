@@ -334,10 +334,14 @@ impl Partition {
         self.units.get(index)?.as_ref()
     }
 
-    /// 单元下标，用来把一次触发的耗时按单元累计。划分会变，所以下标只在
-    /// 同一刻内有效；报告每刻清零。
-    pub(crate) fn unit_index_for(&self, chunk: ChunkPos) -> Option<usize> {
-        self.owner.get(&chunk).copied()
+    /// 触发所在单元里坐标最小的忙区块，作为这个单元的稳定编号。
+    /// 下标槽位会被复用，最小忙区块不会，所以累计耗时不会串到新单元。
+    pub(crate) fn unit_key_for(&self, chunk: ChunkPos) -> Option<usize> {
+        let key = self.unit_for(chunk)?.busy.iter().next().copied()?;
+        // 把 (x, z) 编成一个下标；坐标可能为负，用饱和算术不让它 panic。
+        let x = (key.x as i64).saturating_add(1 << 31) as u64;
+        let z = (key.z as i64).saturating_add(1 << 31) as u64;
+        Some((x << 32 | z) as usize)
     }
 
     /// 按本刻忙集合的变化更新划分。`added` / `removed` 通常为空；全空且关注
@@ -474,11 +478,14 @@ impl Partition {
             written += 1;
         }
         // 关注边可能让两个组的范围相交，按和朴素实现同样的规则并起来。
+        // 没有关注边时相邻组已按 2×halo 连成一个单元，范围必然不相交。
         #[cfg(test)]
         if std::mem::take(&mut self.skip_overlap_merge_once) {
             return written;
         }
-        self.merge_overlapping_units();
+        if !self.watchers.is_empty() {
+            self.merge_overlapping_units();
+        }
         written
     }
 

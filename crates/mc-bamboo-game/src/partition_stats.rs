@@ -85,6 +85,8 @@ pub(crate) struct PartitionStats {
     tick_units: [u64; HALOS.len()],
     /// 这一刻的触发总数（含没越界的），报告里算越界占比。
     tick_triggers: u64,
+    /// 报告窗口内累计的触发数；每刻的样本另记在 `triggers_per_tick`。
+    window_triggers: u64,
     /// 划分阶段这一刻的耗时（纳秒）。
     partition_nanos: u64,
     partition_hist: crate::profiler::Histogram,
@@ -109,12 +111,6 @@ pub(crate) struct PartitionStats {
     /// 报告窗口内每个 halo、每个单元的三阶段累计耗时（纳秒）。
     /// 单元下标只在划分不变期间有效；划分一变就把旧单元折进 `other_nanos`。
     unit_nanos: [HashMap<usize, u128>; HALOS.len()],
-    /// 折进来的旧单元耗时（无法再按新划分归类的部分），算上限时按串行处理。
-    other_nanos: [u128; HALOS.len()],
-    /// 上一刻看到的单元下标集合；变了就折旧开新。
-    unit_generation: [usize; HALOS.len()],
-    /// 划分变化的代数，每刻由调用方传进来才知道下标有没有换主人（见 `record_units`）。
-    last_unit_keys: [Vec<usize>; HALOS.len()],
     /// 改坏确认用：故意漏记写访问，让构造好的活塞场景能把它报出来。
     #[cfg(test)]
     pub(crate) skip_writes: bool,
@@ -166,18 +162,6 @@ impl PartitionStats {
             self.unit_size.record(unit.busy.len() as u64);
             *self.size_distribution.entry(unit.busy.len()).or_default() += 1;
         }
-        // 单元槽位会被复用：划分拓扑一变，旧下标累计的耗时折进「其它」，
-        // 不能让新单元继承旧单元的耗时。
-        let keys: Vec<usize> = units.iter().map(|unit| unit.busy.len()).collect();
-        for index in 0..HALOS.len() {
-            if keys != self.last_unit_keys[index].as_slice() {
-                self.unit_generation[index] = self.unit_generation[index].wrapping_add(1);
-                for (_, nanos) in self.unit_nanos[index].drain() {
-                    self.other_nanos[index] = self.other_nanos[index].saturating_add(nanos);
-                }
-            }
-            self.last_unit_keys[index] = keys.clone();
-        }
     }
 
     /// 一次触发开始。两套 halo 的划分都要查它属于哪个单元。
@@ -191,9 +175,10 @@ impl PartitionStats {
         let chunk = pos.chunk();
         let mut unit = [None; 2];
         for (index, partition) in partitions.iter().enumerate() {
-            unit[index] = partition.unit_index_for(chunk);
+            unit[index] = partition.unit_key_for(chunk);
         }
         self.tick_triggers = self.tick_triggers.saturating_add(1);
+        self.window_triggers = self.window_triggers.saturating_add(1);
         self.open = Some(OpenTrigger {
             pos,
             block,
@@ -217,8 +202,6 @@ impl PartitionStats {
             let out = open.unit[index].is_none() || open.reported[index];
             if let Some(unit) = open.unit[index] {
                 *self.unit_nanos[index].entry(unit).or_default() += nanos;
-            } else {
-                self.other_nanos[index] = self.other_nanos[index].saturating_add(nanos);
             }
             if !out {
                 continue;
@@ -331,9 +314,8 @@ impl PartitionStats {
         self.size_distribution.clear();
         for index in 0..HALOS.len() {
             self.unit_nanos[index].clear();
-            self.other_nanos[index] = 0;
-            self.last_unit_keys[index].clear();
         }
+        self.window_triggers = 0;
     }
 
     /// 一段多行文本，接在剖析报告末尾。`halo=1/2` 的越界、单元形状、
@@ -399,8 +381,7 @@ impl PartitionStats {
                 stats.reads,
                 stats.writes,
                 mean(&stats.out_per_tick),
-                stats.out_triggers as f64
-                    / (self.tick_triggers as f64 * self.triggers_per_tick.count() as f64).max(1.0),
+                stats.out_triggers as f64 / (self.window_triggers as f64).max(1.0),
                 stats.tail_nanos,
             );
             let mut blocks: Vec<_> = stats.by_block.iter().collect();
@@ -412,22 +393,29 @@ impl PartitionStats {
         let _ = writeln!(
             out,
             "  triggers_in_window={} ticks={}",
-            self.tick_triggers, triggers
+            self.window_triggers, triggers
         );
         // 按实际划分重算 8 线程上限：三阶段总量 S，最贵的单元 u，越界 / 没归属
         // 的触发耗时进串行尾段，余下并行；再扣掉「单元太小就不并行」的门槛。
-        let three = mean(&self.three_nanos);
+        // 一律用「整个报告窗口的合计」，汇总脚本再除以 ticks 换成每刻值。
+        let window = self.three_nanos.sum() as f64;
         for (index, halo) in HALOS.iter().enumerate() {
             let tail = self.halos[index].tail_nanos as f64;
             let biggest = self.unit_nanos[index].values().copied().max().unwrap_or(0) as f64;
-            let other = self.other_nanos[index] as f64;
-            let parallel = (three - tail - other).max(0.0);
-            let serial_tail = tail + other;
+            let parallel = (window - tail).max(0.0);
+            let serial_tail = tail;
             let per_unit = biggest.max(parallel / THREADS);
             let _ = writeln!(
                 out,
-                "  halo {} speedup_input three_ns={:.0} tail_ns={:.0} other_ns={:.0} biggest_unit_ns={:.0} per_unit_ns={:.0} unit_threshold_us={:.0}",
-                halo, three, serial_tail, other, biggest, per_unit, UNIT_THRESHOLD_US,
+                "  halo {} speedup_input three_ns={:.0} tail_ns={:.0} other_ns={:.0} biggest_unit_ns={:.0} per_unit_ns={:.0} unit_threshold_us={:.0} ticks={}",
+                halo,
+                window,
+                serial_tail,
+                0,
+                biggest,
+                per_unit,
+                UNIT_THRESHOLD_US,
+                self.three_nanos.count(),
             );
         }
         out

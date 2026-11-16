@@ -596,12 +596,13 @@ impl World {
         if !self.region.partitioning.enabled {
             return;
         }
+        let start = std::time::Instant::now();
         let touched_ticks = self.region.block_ticks.drain_touched_chunks();
         let touched_events = self.region.drain_block_event_activity();
         let awake = self.region.block_entities.awake_chunks();
         let queued = self.region.queued_block_event_chunks();
         let watchers = crate::region::partition::watcher_pairs(&self.region.block_entities);
-        let nanos = self.region.partitioning.tick(
+        let inner = self.region.partitioning.tick(
             now,
             touched_ticks,
             touched_events,
@@ -609,6 +610,8 @@ impl World {
             &queued,
             &watchers,
         );
+        let nanos = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+        let _ = inner;
         let verify_nanos = self.region.partitioning.verify_nanos();
         let topology = self.region.partitioning.topology();
         let busy = self.region.partitioning.busy_len();
