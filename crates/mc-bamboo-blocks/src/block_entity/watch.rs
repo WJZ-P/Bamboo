@@ -82,6 +82,43 @@ impl Watchers {
     }
 
     /// 关注这一格的方块实体，按登记顺序。
+    /// 把另一份关注表并进来，逐关注者登记（同名的先撤掉自己的）。
+    pub(crate) fn absorb(&mut self, other: Self) {
+        for (watcher, watch) in other.by_watcher {
+            self.watch(watcher, watch);
+        }
+    }
+
+    /// 按 `wanted` 把关注表拆出一份；两边都保留全部登记（关注关系跨界，
+    /// 不在这里切断，由 `crosses_chunks` 报告给划分逻辑）。
+    pub(crate) fn clone_split(
+        &self,
+        wanted: &std::collections::BTreeSet<mc_bamboo_core::ChunkPos>,
+    ) -> Self {
+        let mut out = Self::default();
+        for (watcher, watch) in &self.by_watcher {
+            if wanted.contains(&watcher.chunk()) {
+                out.watch(*watcher, watch.clone());
+            }
+        }
+        out
+    }
+
+    /// 有没有关注者和它关注的格子不在 `chunks` 这同一组里。单元划分时若为真，
+    /// 两侧单元不能分开跑（见 `docs/multi-region-tick-design.md` 4.8）。
+    pub(crate) fn crosses_chunks(
+        &self,
+        wanted: &std::collections::BTreeSet<mc_bamboo_core::ChunkPos>,
+    ) -> bool {
+        self.by_watcher.iter().any(|(watcher, watch)| {
+            let inside = wanted.contains(&watcher.chunk());
+            watch
+                .cells
+                .iter()
+                .any(|cell| wanted.contains(&cell.chunk()) != inside)
+        })
+    }
+
     pub(crate) fn cell_watchers(&self, pos: BlockPos) -> Option<&[BlockPos]> {
         self.cells.get(&pos).map(Vec::as_slice)
     }
