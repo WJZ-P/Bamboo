@@ -1260,6 +1260,11 @@ impl BlockEvents {
         std::mem::take(&mut self.touched)
     }
 
+    /// 只读地看本刻排过事件的区块，不清空。
+    pub fn touched_chunks(&self) -> &[ChunkPos] {
+        &self.touched
+    }
+
     /// 这个区块有没有排着事件（含下一刻才看的重新排队项），给忙区块查询用。
     pub fn chunk_has_queued(&self, chunk: ChunkPos) -> bool {
         self.queue.iter().any(|event| event.pos.chunk() == chunk)

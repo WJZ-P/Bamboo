@@ -1886,3 +1886,65 @@ fn an_idle_sleeping_hopper_only_marks_its_chunk_when_content_changes() {
     // 睡着的前 20 刻不必每刻标脏：这一段的差异是省掉无效果的每刻真跑。
     assert!(sleeping[20], "改物品之前漏斗确实在跑这套场景");
 }
+
+/// 单元拆合：四张游戏层表 + 计划刻 / 方块事件 / 方块实体 / 红石记忆
+/// 拆出去再并回来，和从没拆过的 region 逐项相同。
+#[test]
+fn splitting_and_absorbing_a_unit_leaves_the_region_unchanged() {
+    let (mut control, mut split) = pair();
+    let wanted: BTreeSet<ChunkPos> = [CHUNK].into_iter().collect();
+    let before = snapshot(control.region());
+    assert_eq!(snapshot(split.region()), before);
+
+    let unit = split.region().split_off_unit(&wanted, 1).unwrap();
+    // 拆出去那份的四张表只有 0 号区块的内容，原表只剩另一个区块。
+    assert!(unit.containers.keys().all(|pos| pos.chunk() == CHUNK));
+    assert!(unit.block_items.keys().all(|pos| pos.chunk() == CHUNK));
+    assert!(unit.command_blocks.keys().all(|pos| pos.chunk() == CHUNK));
+    assert!(unit.books.keys().all(|pos| pos.chunk() == CHUNK));
+    assert!(!unit.containers.is_empty());
+    assert!(
+        split
+            .region()
+            .containers
+            .keys()
+            .all(|pos| pos.chunk() != CHUNK)
+    );
+
+    split.region().absorb_unit(unit);
+    // 版本号、ticker 顺序这类不可见的内部计数不比，其余逐项相同。
+    let after = snapshot(split.region());
+    assert_eq!(after, before, "拆合前后 region 的可见状态相同");
+
+    // 对照：在另一个区块插一个 x 更小的容器，全局 (x,y,z) 顺序会把它排到
+    // 0 号区块的格子前面，而「按区块再按位置」不会。证明字符串比较能报出
+    // 遍历顺序被改坏。
+    control.region().containers.insert(
+        BlockPos::new(3, Y, 18),
+        ContainerEntry::new(ContainerKind::Chest),
+    );
+    let global: Vec<_> = control.region().containers.keys().copied().collect();
+    let mut chunked = global.clone();
+    chunked.sort_by_key(|pos| (pos.chunk(), *pos));
+    assert_ne!(global, chunked, "这份数据要能区分两种顺序");
+}
+
+/// 忙区块候选：本刻排过计划刻 / 方块事件的区块，加上有醒着 ticker 的区块。
+#[test]
+fn busy_chunks_cover_ticks_events_and_awake_tickers() {
+    let mut server = harness();
+    let region = server.region();
+    region
+        .block_ticks
+        .schedule(p(2, 2), blocks::STONE as usize, 3, TickPriority::Normal);
+    region.block_events.push(mc_bamboo_blocks::BlockEvent {
+        pos: p(18, 2),
+        block: blocks::STONE as usize,
+        param_a: 1,
+        param_b: 0,
+    });
+    let busy = region.busy_chunks();
+    assert!(busy.contains(&CHUNK));
+    assert!(busy.contains(&OTHER_CHUNK));
+    assert!(!busy.contains(&ChunkPos::new(9, 9)));
+}

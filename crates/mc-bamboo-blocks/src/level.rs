@@ -1053,6 +1053,93 @@ pub struct RedstoneMemory {
     /// 每个区块里**可能**有红石记忆的位置，是超集：一张表里删掉的格子可不去掉。
     /// 只在某张表新增键时登记，按区块取出时只走这个集合。
     by_chunk: HashMap<ChunkPos, HashSet<BlockPos>>,
+    /// 火把开关记录的全局入队序号。`absorb` 靠它把拆出去的那份按原来的
+    /// （时刻、先后）顺序插回，和从没拆过逐条相同。
+    toggle_order: Vec<u64>,
+    next_toggle_order: u64,
+}
+
+/// 按区块拆一张 `BlockPos → V` 的表；`HashMap`、`HashSet`、`BTreeMap` 都用得上。
+fn split_positions<C, V, O>(from: &mut C, to: &mut O, chunks: &std::collections::BTreeSet<ChunkPos>)
+where
+    C: PositionalMap<V>,
+    O: PositionalMap<V>,
+{
+    for (pos, value) in from.split_by(chunks) {
+        to.insert_at(pos, value);
+    }
+}
+
+/// 把拆出去的条目并回一张表。
+fn absorb_positions<C, V>(into: &mut C, from: &mut C)
+where
+    C: PositionalMap<V>,
+{
+    for (pos, value) in from.drain_all() {
+        into.insert_at(pos, value);
+    }
+}
+
+trait PositionalMap<V> {
+    fn split_by(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Vec<(BlockPos, V)>;
+    fn drain_all(&mut self) -> Vec<(BlockPos, V)>;
+    fn insert_at(&mut self, pos: BlockPos, value: V);
+}
+
+macro_rules! positional_map {
+    ($ty:ty, $take:expr) => {
+        impl<V> PositionalMap<V> for $ty {
+            fn split_by(
+                &mut self,
+                chunks: &std::collections::BTreeSet<ChunkPos>,
+            ) -> Vec<(BlockPos, V)> {
+                let keys: Vec<BlockPos> = self
+                    .keys()
+                    .copied()
+                    .filter(|pos| chunks.contains(&pos.chunk()))
+                    .collect();
+                keys.into_iter()
+                    .filter_map(|pos| ($take)(self, &pos).map(|value| (pos, value)))
+                    .collect()
+            }
+
+            fn drain_all(&mut self) -> Vec<(BlockPos, V)> {
+                std::mem::take(self).into_iter().collect()
+            }
+
+            fn insert_at(&mut self, pos: BlockPos, value: V) {
+                self.insert(pos, value);
+            }
+        }
+    };
+}
+
+positional_map!(HashMap<BlockPos, V>, |map: &mut HashMap<BlockPos, V>, pos: &BlockPos| map.remove(pos));
+positional_map!(BTreeMap<BlockPos, V>, |map: &mut BTreeMap<BlockPos, V>, pos: &BlockPos| map.remove(pos));
+
+impl PositionalMap<()> for HashSet<BlockPos> {
+    fn split_by(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Vec<(BlockPos, ())> {
+        let keys: Vec<BlockPos> = self
+            .iter()
+            .copied()
+            .filter(|pos| chunks.contains(&pos.chunk()))
+            .collect();
+        keys.into_iter()
+            .filter(|pos| self.remove(pos))
+            .map(|pos| (pos, ()))
+            .collect()
+    }
+
+    fn drain_all(&mut self) -> Vec<(BlockPos, ())> {
+        std::mem::take(self)
+            .into_iter()
+            .map(|pos| (pos, ()))
+            .collect()
+    }
+
+    fn insert_at(&mut self, pos: BlockPos, _value: ()) {
+        self.insert(pos);
+    }
 }
 
 impl RedstoneMemory {
@@ -1242,6 +1329,7 @@ impl RedstoneMemory {
     /// 清空开关记录。存档往返用：官方不存 `RECENT_TOGGLES`，读回后是空的。
     pub fn clear_torch_toggles(&mut self) {
         self.torch_toggles.clear();
+        self.toggle_order.clear();
     }
 
     /// 扔掉 `when` 之前的开关记录，官方在红石火把的计划刻开头做这件事。
@@ -1252,11 +1340,14 @@ impl RedstoneMemory {
             .position(|&(_, toggled_at)| toggled_at >= when)
             .unwrap_or(self.torch_toggles.len());
         self.torch_toggles.drain(..keep);
+        self.toggle_order.drain(..keep);
     }
 
     /// 记下一次开关。
     pub fn record_torch_toggle(&mut self, pos: BlockPos, when: i64) {
         self.torch_toggles.push((pos, when));
+        self.toggle_order.push(self.next_toggle_order);
+        self.next_toggle_order += 1;
     }
 
     /// 这一格还留着几次开关记录。
@@ -1265,6 +1356,92 @@ impl RedstoneMemory {
             .iter()
             .filter(|&&(toggled, _)| toggled == pos)
             .count()
+    }
+
+    /// 拆出 `chunks` 这些区块的红石记忆，造出另一个单元的表。
+    ///
+    /// 六张按位置的表按 `by_chunk` 里的位置超集拆开（删掉的格子两边都查不到
+    /// 值，结果与不拆一致）；火把开关记录按位置拆，各自仍按时刻升序。
+    /// `pending_lectern` 是一次交互内的瞬时量，tick 边界上一定是 `None`。
+    pub fn split_off(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Self {
+        debug_assert!(self.pending_lectern.is_none());
+        let mut out = Self::default();
+        // 六张表的类型不同，用按位置判定的通用拆分函数逐个处理。
+        split_positions(
+            &mut self.comparator_outputs,
+            &mut out.comparator_outputs,
+            chunks,
+        );
+        split_positions(&mut self.bookshelf_slots, &mut out.bookshelf_slots, chunks);
+        split_positions(&mut self.jukebox_playing, &mut out.jukebox_playing, chunks);
+        split_positions(
+            &mut self.crafter_disabled,
+            &mut out.crafter_disabled,
+            chunks,
+        );
+        split_positions(
+            &mut self.crafter_crafting,
+            &mut out.crafter_crafting,
+            chunks,
+        );
+        split_positions(&mut self.lecterns, &mut out.lecterns, chunks);
+        let (out_by_chunk, by_chunk) = self
+            .by_chunk
+            .drain()
+            .partition(|(chunk, _)| chunks.contains(chunk));
+        self.by_chunk = by_chunk;
+        out.by_chunk = out_by_chunk;
+        let mut kept = Vec::with_capacity(self.torch_toggles.len());
+        for (index, &(pos, when)) in self.torch_toggles.iter().enumerate() {
+            let seq = self
+                .toggle_order
+                .get(index)
+                .copied()
+                .unwrap_or(index as u64);
+            if chunks.contains(&pos.chunk()) {
+                out.torch_toggles.push((pos, when));
+                out.toggle_order.push(seq);
+            } else {
+                kept.push(((pos, when), seq));
+            }
+        }
+        self.torch_toggles = kept.iter().map(|(entry, _)| *entry).collect();
+        self.toggle_order = kept.iter().map(|(_, seq)| *seq).collect();
+        out.next_toggle_order = self.next_toggle_order;
+        out
+    }
+
+    /// 并回一个单元的红石记忆：位置表直接合并，火把记录按全局入队序号稳定
+    /// 归并（先按时刻，同一时刻按原来的先后），结果等于从没拆过。
+    pub fn absorb(&mut self, mut other: Self) {
+        debug_assert!(self.pending_lectern.is_none() && other.pending_lectern.is_none());
+        absorb_positions(&mut self.comparator_outputs, &mut other.comparator_outputs);
+        absorb_positions(&mut self.bookshelf_slots, &mut other.bookshelf_slots);
+        absorb_positions(&mut self.jukebox_playing, &mut other.jukebox_playing);
+        absorb_positions(&mut self.crafter_disabled, &mut other.crafter_disabled);
+        absorb_positions(&mut self.crafter_crafting, &mut other.crafter_crafting);
+        absorb_positions(&mut self.lecterns, &mut other.lecterns);
+        for (chunk, positions) in std::mem::take(&mut other.by_chunk) {
+            self.by_chunk.entry(chunk).or_default().extend(positions);
+        }
+        let mut toggles: Vec<(i64, u64, BlockPos)> = self
+            .torch_toggles
+            .drain(..)
+            .zip(self.toggle_order.drain(..))
+            .map(|((pos, when), seq)| (when, seq, pos))
+            .collect();
+        for (index, &(pos, when)) in other.torch_toggles.iter().enumerate() {
+            let seq = other
+                .toggle_order
+                .get(index)
+                .copied()
+                .unwrap_or(index as u64);
+            toggles.push((when, seq, pos));
+        }
+        toggles.sort_by_key(|&(when, seq, _)| (when, seq));
+        self.torch_toggles = toggles.iter().map(|&(when, _, pos)| (pos, when)).collect();
+        self.toggle_order = toggles.iter().map(|&(_, seq, _)| seq).collect();
+        self.next_toggle_order = self.next_toggle_order.max(other.next_toggle_order);
     }
 
     /// 把 `chunk` 里的红石记忆装进盒子搬走。只在 tick 边界调用。
@@ -1308,7 +1485,21 @@ impl RedstoneMemory {
             .filter(|&&(pos, _)| pos.chunk() == chunk)
             .map(|&(pos, toggled_at)| (pos, now.saturating_sub(toggled_at)))
             .collect();
-        self.torch_toggles.retain(|&(pos, _)| pos.chunk() != chunk);
+        let mut kept_toggles = Vec::with_capacity(self.torch_toggles.len());
+        let mut kept_orders = Vec::with_capacity(self.toggle_order.len());
+        for (index, &entry) in self.torch_toggles.iter().enumerate() {
+            if entry.0.chunk() != chunk {
+                kept_toggles.push(entry);
+                kept_orders.push(
+                    self.toggle_order
+                        .get(index)
+                        .copied()
+                        .unwrap_or(index as u64),
+                );
+            }
+        }
+        self.torch_toggles = kept_toggles;
+        self.toggle_order = kept_orders;
         memory
     }
 
@@ -1379,6 +1570,8 @@ impl RedstoneMemory {
         }
         for (pos, age) in memory.torch_toggles {
             self.torch_toggles.push((pos, now.saturating_sub(age)));
+            self.toggle_order.push(self.next_toggle_order);
+            self.next_toggle_order += 1;
         }
         // 稳定排序：原有条目在前，放入的在后，整体仍按时刻升序。
         self.torch_toggles
@@ -1786,6 +1979,53 @@ mod tests {
         memory.forget_torch_toggles_before(now);
         out.push(format!("toggles:{}", memory.torch_toggles.len()));
         out
+    }
+
+    /// 拆成两个单元再并回来：所有可读的状态、倒计时顺序、火把抖动表的
+    /// （时刻、先后）顺序都和从没拆过逐条相同。
+    #[test]
+    fn redstone_split_and_absorb_keep_every_observation() {
+        let mut reference = RedstoneMemory::default();
+        let mut split = RedstoneMemory::default();
+        fill(&mut reference);
+        fill(&mut split);
+        // 同一时刻的开关，先后由入队顺序决定，拆合要保住这个相对顺序。
+        split.record_torch_toggle(B1, 101);
+        split.record_torch_toggle(A1, 101);
+        reference.record_torch_toggle(B1, 101);
+        reference.record_torch_toggle(A1, 101);
+        let wanted: std::collections::BTreeSet<ChunkPos> = [CHUNK_A].into_iter().collect();
+        let unit = split.split_off(&wanted);
+        // 拆出去那份只剩 0 号区块的记忆。
+        assert_eq!(unit.comparator_output(A1), 7);
+        assert_eq!(unit.comparator_output(B1), 0);
+        assert_eq!(split.comparator_output(A1), 0);
+        assert_eq!(split.comparator_output(B1), 9);
+        assert_eq!(unit.torch_toggle_count(A1), 3);
+        assert_eq!(split.torch_toggle_count(B1), 2);
+
+        split.absorb(unit);
+        let before = observed(&mut reference, 101);
+        let after = observed(&mut split, 101);
+        assert_eq!(after, before);
+        // 火把表的顺序不能变成「按区块再按位置」：和一份不拆的参照逐条比。
+        let mut expected = RedstoneMemory::default();
+        fill(&mut expected);
+        expected.record_torch_toggle(B1, 101);
+        expected.record_torch_toggle(A1, 101);
+        // 官方的开关表按时刻升序；同一时刻的先后按入队顺序（稳定排序）。
+        expected.torch_toggles.sort_by_key(|&(_, when)| when);
+        let mut full = RedstoneMemory::default();
+        fill(&mut full);
+        full.record_torch_toggle(B1, 101);
+        full.record_torch_toggle(A1, 101);
+        let unit = full.split_off(&wanted);
+        full.absorb(unit);
+        assert_eq!(full.torch_toggles, expected.torch_toggles);
+        // 对照组：按区块再按位置排出来的顺序确实不同。
+        let mut chunked = expected.torch_toggles.clone();
+        chunked.sort_by_key(|(pos, when)| (pos.chunk(), *pos, *when));
+        assert_ne!(full.torch_toggles, chunked);
     }
 
     #[test]

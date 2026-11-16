@@ -510,6 +510,11 @@ impl BlockTicks {
         std::mem::take(&mut self.activity.touched)
     }
 
+    /// 只读地看本刻活动过的区块，不清空。
+    pub fn touched_chunks(&self) -> &[ChunkPos] {
+        &self.activity.touched
+    }
+
     /// 这个区块最近一次排入计划刻的时刻；`None` 表示没记过。
     pub fn last_scheduled(&self, chunk: ChunkPos) -> Option<i64> {
         self.activity.last_scheduled(chunk)

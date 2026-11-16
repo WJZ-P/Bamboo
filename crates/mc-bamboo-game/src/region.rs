@@ -51,6 +51,7 @@ mod column_tests;
 pub(crate) mod content_snapshot;
 pub(crate) mod dirty;
 pub(crate) mod parking;
+pub(crate) mod unit;
 
 // 区块平面和多 region 是后面的步骤，现在还没有调用方。
 #[allow(unused_imports)]
