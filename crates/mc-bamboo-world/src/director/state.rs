@@ -439,7 +439,7 @@ pub struct Director<C> {
     task_owners: HashMap<TaskId, (Option<u64>, DemandKind)>,
     /// 一次 `drive` 里排序用的任务编号和键，跨次复用容量。每次 `drive` 只排
     /// 「上一轮被挡住 + 这一轮新排的」几百个，不扫整张积压表。
-    priority_order: Vec<(TaskId, (i64, u8, u64))>,
+    priority_order: Vec<(TaskId, (usize, i64, u8, u64))>,
     /// 超时票的 `is_busy` 直接查这张表，不每刻重建。
     busy: BTreeSet<ChunkPos>,
     /// 已交付或正在交付的记录数，随 `Owner` 变化增量维护。
@@ -1397,15 +1397,22 @@ impl<C: ChunkBundle> Director<C> {
         }
     }
 
-    /// 待派任务的排序键：先按离最近玩家的距离（带方向加权），同一档按
+    /// 待派任务的排序键：先按每名玩家这一类任务已经派出多少个（轮转，
+    /// 玩家之间公平），再按离最近玩家的距离（带方向加权），同一档按
     /// 「这条流水线已经走到哪一步」把快完工的往前放，最后按 TaskId 兜底。
-    /// 结果只由 `(任务集合, 需求快照)` 决定，和哈希图遍历顺序无关。
-    fn priority_key(&self, id: TaskId, task: &PendingTask<C>) -> (i64, u8, u64) {
+    /// 结果只由 `(任务集合, 需求快照, 当前计数)` 决定，和哈希图遍历顺序无关。
+    fn priority_key(&self, id: TaskId, task: &PendingTask<C>) -> (usize, i64, u8, u64) {
+        let kind = Self::demand_kind(&task.task);
+        let used = self
+            .demand
+            .owner(task.pos)
+            .and_then(|player| self.demand_in_flight.get(&(player, kind)).copied())
+            .unwrap_or(0);
         let stage = self
             .chunks
             .get(&task.pos)
             .map_or(0, |record| record.stage as usize as u8);
-        (self.demand.rank(task.pos), u8::MAX - stage, id)
+        (used, self.demand.rank(task.pos), u8::MAX - stage, id)
     }
 
     /// 队列里被取消的任务不留到下一轮重排：给它一个「永远最后」的键，
@@ -1416,7 +1423,7 @@ impl<C: ChunkBundle> Director<C> {
             .iter_mut()
             .find(|(other, _)| *other == id)
         {
-            entry.1 = (i64::MAX, u8::MAX, u64::MAX);
+            entry.1 = (usize::MAX, i64::MAX, u8::MAX, u64::MAX);
         }
     }
 
