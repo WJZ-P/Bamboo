@@ -2327,11 +2327,12 @@ release 二进制，`gen-world --through features --seeds 2 --chunks 2 --salt 9`
 逐项改坏确认：processor 表换成未知 processor → `structure-pipeline` 失败；
 step index +1 → `gen-world` 252 处；`prime_heightmaps` 掩码错一位 → 两个新增单测都失败。
 
-**已知局限（写进疑点清单）**：把 `prime_heightmaps` 的全部高度图故意写错后，
-`gen-world --through features` 与 `structure-pipeline` 仍报 0 不一致——这批对拍坐标
-没有依赖 primed heightmap 的地物，Java 端到端对拍对这个函数是盲区，等价性只由
-新增的两个单测保证。要补覆盖需换用 `freeze_top_layer` / `vegetation_patch` 等读
-`WORLD_SURFACE_WG` 的坐标。
+**这个盲区后来补上了**：原来 `gen-world --through features` 不带白名单时默认只放矿石，
+只有 `OCEAN_FLOOR_WG` 会被读到。现在 `tools/mc-bamboo-vanilla/heightmap-e2e.sh` 用
+`--all-features` 跑一批会触发 `freeze_top_layer`、高度图放置修饰器、`vegetation_patch`、
+树地面检查的坐标，配合 `--break-heightmap` 改坏钩子把六张 primed 图逐张写错
+（整张 +1 和单列 +1 两种），12 组全部报不一致。详见
+`docs/worldgen-e2e-coverage.md` 的「primed 高度图覆盖」一节。
 
 ### 15.6 试过但撤销的
 

@@ -90,3 +90,56 @@ tools/mc-bamboo-vanilla/feature-e2e.sh minecraft:ore # 只跑一个类型
 脚本逐类型跑「干净对拍 + 改坏确认」，打印和本表同口径的统计，任一失败就以非 0 退出。
 新加地物时把类型、step 掩码和能触发它的种子/区块加进脚本的 `CASES` 表，再按
 `docs/worldgen.md` 的步骤更新本文。
+
+## primed 高度图覆盖（2026-11-16）
+
+`mc-bamboo-worldgen::feature::world::prime_heightmaps` 从 CARVERS 方块算出
+`FeatureChunks.heights` 的六张图，地物阶段的下列路径会读它：
+
+| 读哪张图 | 官方读它的位置（`javap -c -p` 核对） | Bamboo 侧 |
+|---|---|---|
+| `WORLD_SURFACE_WG` | `HeightmapPlacement`（`PlacementContext.getHeight`）、`LargeDripstoneFeature` 的向上生长上限、`SurfaceRelativeThresholdFilter`（glow_lichen / underwater_magma / lake_lava_underground） | `placement.rs::Modifier::Heightmap`、`large_dripstone.rs`、`placement.rs::SurfaceRelativeThreshold` |
+| `WORLD_SURFACE` | `BambooFeature`（podzol 铺面）、`SurfaceWaterDepthFilter`（与 OCEAN_FLOOR 之差）、`SurfaceRelativeThresholdFilter` | `bamboo.rs`、`placement.rs` |
+| `OCEAN_FLOOR_WG` | `OreFeature` 的逐列剪枝、`HeightmapPlacement`（disk_* / warm_ocean_vegetation） | `ores.rs`、`placement.rs` |
+| `OCEAN_FLOOR` | `SurfaceWaterDepthFilter`、`HeightmapPlacement`（kelp / seagrass / 树） | `placement.rs` |
+| `MOTION_BLOCKING` | `SnowAndFreezeFeature`（freeze_top_layer）、`HeightmapPlacement`、find_on_ground 的起点 | `freeze_top_layer.rs`、`placement.rs` |
+| `MOTION_BLOCKING_NO_LEAVES` | `TreeDecorator.Context` 的叶藤蔓装饰、`HeightmapPlacement`（pale_garden_flowers / pale_moss_patch） | `tree/decorator.rs`、`placement.rs` |
+
+之前 `gen-world --through features` 不带白名单时**默认只放矿石**（Java 侧
+`--ore-only`），所以只有 `OCEAN_FLOOR_WG` 会被读到；把六张图任意写错，其余五张都
+报 0 不一致——这是端到端对拍的盲区，等价性只剩单测。
+
+现在 `tools/mc-bamboo-vanilla/heightmap-e2e.sh` 用
+`--through features --all-features --seeds 3 --chunks 8 --salt 7`（24 个中心、九宫格
+共 21 233 664 格）跑一批**全部地物**的坐标，配合新增的 `--break-heightmap FIELD:COLUMN`
+改坏钩子（`perf` 特性下把 primed 图的某一列 +1，`COLUMN=all` 时整张图每列 +1）逐张确认：
+
+| 高度图 | 整体 +1 报不一致 | 单列 +1 报不一致 | 结果 |
+|---|---:|---:|---|
+| `WORLD_SURFACE_WG` | 176 | 列 32：6 | PASS |
+| `WORLD_SURFACE` | 3189 | 列 127：184 | PASS |
+| `OCEAN_FLOOR_WG` | 1044 | 列 0：8 | PASS |
+| `OCEAN_FLOOR` | 5616 | 列 0：2 | PASS |
+| `MOTION_BLOCKING` | 1006 | 列 0：2 | PASS |
+| `MOTION_BLOCKING_NO_LEAVES` | 3611 | 列 0：1261 | PASS |
+
+单列列号是**实测会被某个地物候选位置读到**的列：地物只在自己候选位置的
+`(x,z)` 上问 `getHeight`，任意一列不一定被问到，所以不能要求每一列都报错。
+干净跑 0 不一致，12 组改坏全部报不一致；任一报不出来脚本以非 0 退出。
+`feature-e2e.sh` 也在逐类型循环之前加了同一批坐标的 `--all-features` 整步干净跑，
+保证这批坐标常驻在常规回归里。
+
+`--break-heightmap` 只在 `mc-bamboo-worldgen` 的 `perf` 特性下生效（`mc-bamboo-vanilla`
+的 `oracle` 特性会打开它）；默认构建里 `heightmap_break()` 恒为 `None`，
+`prime_heightmaps` 不改任何值，生成结果不变。改坏钩子刻意放在
+`prime_heightmaps` 的返回值上，而不是对拍框架里，这样 Java 侧和 Bamboo 侧用的仍是
+同一套方块，只有 Bamboo 的 primed 图被改坏——比较器必须报出来。
+
+```bash
+cargo build --release -p mc-bamboo-vanilla
+tools/mc-bamboo-vanilla/heightmap-e2e.sh
+# 单独验一张图
+./target/release/mc-bamboo-vanilla gen-world java --through features \
+    --all-features --seeds 3 --chunks 8 --salt 7 \
+    --break-heightmap MOTION_BLOCKING_NO_LEAVES:all
+```

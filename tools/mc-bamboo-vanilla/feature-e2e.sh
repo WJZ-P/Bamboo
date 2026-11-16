@@ -53,6 +53,19 @@ CASES=(
     "minecraft:freeze_top_layer|10|--seeds 1 --chunk 255 -109 --scan 9"
 )
 
+# 全部类型一起跑一次整步对拍：这批坐标会触发读 primed 高度图的地物
+# （freeze_top_layer / 高度图放置修饰器 / vegetation_patch / 树的地面检查），
+# 是 heightmap-e2e.sh 改坏确认所用的同一片世界。
+# Whole-step run with all types: these coordinates trigger the features that
+# read primed heightmaps, the same world heightmap-e2e.sh breaks against.
+ALL_ARGS="--seeds 3 --chunks 8 --salt 7"
+all_out=$("$BIN" gen-world "$JAVA" --through features $ALL_ARGS --all-features 2>&1)
+if ! printf '%s\n' "$all_out" | grep -q '0 mismatches'; then
+    echo "all-features clean run FAILED: $(printf '%s\n' "$all_out" | tail -3 | tr '\n' ' ')" >&2
+    exit 1
+fi
+echo "all-features clean run: $(printf '%s\n' "$all_out" | tail -1)"
+
 selected=("$@")
 printf '%-42s %-6s %8s %8s %10s  %s\n' TYPE STEPS CANDIDATES BROKEN MISMATCHES RESULT
 failed=0

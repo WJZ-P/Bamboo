@@ -354,7 +354,53 @@ pub fn prime_heightmaps(blocks: &ChunkBlocks, min_y: i32, height: i32) -> Height
         result.motion_blocking[column] = motion;
         result.motion_blocking_no_leaves[column] = motion_no_leaves;
     }
+    // 端到端对拍的改坏确认：`perf` 特性下可以故意把某一列的一张高度图写错，
+    // 确认 Java 对拍确实覆盖到这张图。默认构建里 `heightmap_break()` 恒为 `None`，
+    // 不影响生成结果。字段下标顺序和 `HEIGHTMAP_BREAK_FIELDS` 一致。
+    // Break confirmation for the end-to-end oracle: under `perf`, deliberately
+    // corrupt one heightmap column to prove the oracle covers that map.
+    if let Some((field, column)) = crate::perf::heightmap_break() {
+        if column < 0 {
+            for column in 0..256 {
+                if let Some(slot) = heightmap_slot(&mut result, field, column) {
+                    *slot += 1;
+                }
+            }
+        } else if let Some(slot) = heightmap_slot(&mut result, field, column) {
+            *slot += 1;
+        }
+    }
     result
+}
+
+/// 改坏确认用的字段选择；顺序即 [`WorldGenConfig`] 之外传给
+/// `perf::set_heightmap_break` 的字段下标。
+///
+/// Field selector for break confirmation; the index order is the one accepted by
+/// `perf::set_heightmap_break`.
+pub const HEIGHTMAP_BREAK_FIELDS: [&str; 6] = [
+    "WORLD_SURFACE_WG",
+    "WORLD_SURFACE",
+    "OCEAN_FLOOR_WG",
+    "OCEAN_FLOOR",
+    "MOTION_BLOCKING",
+    "MOTION_BLOCKING_NO_LEAVES",
+];
+
+fn heightmap_slot(heights: &mut Heightmaps, field: usize, column: i32) -> Option<&mut i32> {
+    if !(0..256).contains(&column) {
+        return None;
+    }
+    let column = column as usize;
+    Some(match field {
+        0 => &mut heights.world_surface_wg[column],
+        1 => &mut heights.world_surface[column],
+        2 => &mut heights.ocean_floor_wg[column],
+        3 => &mut heights.ocean_floor[column],
+        4 => &mut heights.motion_blocking[column],
+        5 => &mut heights.motion_blocking_no_leaves[column],
+        _ => return None,
+    })
 }
 
 /// 一个方块状态对四种高度图各自算不算「地面」，按状态 ID 缓存。
