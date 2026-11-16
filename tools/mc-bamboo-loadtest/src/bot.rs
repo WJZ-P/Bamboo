@@ -22,6 +22,7 @@ use tokio::{
 };
 
 use crate::{
+    chunk_trace::SharedChunkTrace,
     motion::{Layout, Motion, Pattern},
     stats::{Second, SharedStats},
     wire::{self, ABILITY_FLYING, CLIENT_TICKS_PER_SECOND, ServerPacket, State},
@@ -47,6 +48,10 @@ pub struct BotConfig {
     pub stop: Instant,
     pub stats: SharedStats,
     pub name_prefix: Arc<str>,
+    /// 打开后按「进入视距 → 收到区块包」计时；多人时只记 0 号玩家。
+    pub chunk_trace: SharedChunkTrace,
+    /// 服务端视距，用来复现 `T(vd)`。
+    pub view_distance: i32,
 }
 
 /// 一名假玩家的结果。`Joined` 表示它走到过 Play 状态。
@@ -77,6 +82,7 @@ async fn run_inner(config: &BotConfig) -> Result<Outcome, Outcome> {
         stop: _,
         stats,
         name_prefix,
+        ..
     } = config;
     let name = format!("{name_prefix}{index:04}");
     let stream = tokio::time::timeout(JOIN_TIMEOUT, TcpStream::connect(addr))
@@ -238,8 +244,12 @@ async fn play(
         pattern,
         stop,
         stats,
+        index,
+        chunk_trace,
+        view_distance,
         ..
     } = config;
+    let tracing = chunk_trace.as_deref().filter(|_| *index == 0);
     let mut second = Second::default();
     let mut second_index = 0_u64;
     // 客户端主动发的 ping 用负数 id，不会和服务端心跳的 id 撞上。
@@ -255,6 +265,14 @@ async fn play(
     // 否则一口气塞进去的位置会被速度检查拉回。
     let mut ticks_sent = 0_u64;
     let started = Instant::now();
+    if let Some(trace) = tracing {
+        trace.tick(
+            started,
+            motion.position(),
+            motion.direction(),
+            *view_distance,
+        );
+    }
 
     loop {
         let now = Instant::now();
@@ -276,7 +294,15 @@ async fn play(
             readable = connection.stream.readable(), if sleep > Duration::ZERO => {
                 let _ = readable;
                 // 读满一帧或者读到一个完整包后退出这次 select 分支。
-                drain_available(connection, &mut second, stats, &mut pending, motion).await?;
+                drain_available(
+                    connection,
+                    &mut second,
+                    stats,
+                    &mut pending,
+                    motion,
+                    tracing,
+                )
+                .await?;
             }
             _ = tokio::time::sleep(sleep) => {}
         }
@@ -302,6 +328,9 @@ async fn play(
             ticks_sent = target_ticks.max(ticks_sent + 1);
             // 被服务端拉回之后从服务端给的位置继续走。
             let position = motion.step(CLIENT_TICK.as_secs_f64());
+            if let Some(trace) = tracing {
+                trace.tick(now, position, motion.direction(), *view_distance);
+            }
             let on_ground = !pattern.needs_flying();
             let batch = [
                 wire::move_player_pos_frame(position, on_ground),
@@ -337,6 +366,7 @@ async fn drain_available(
     stats: &SharedStats,
     pending: &mut HashMap<i64, Instant>,
     motion: &mut Motion,
+    tracing: Option<&crate::chunk_trace::ChunkTrace>,
 ) -> Result<(), String> {
     loop {
         // 只在缓冲区里已有完整帧时解析；没有就读一次 socket。
@@ -361,7 +391,10 @@ async fn drain_available(
         };
         second.packets_in += 1;
         // 一帧的长度前缀不进统计里：read_buf 记的是 socket 上真实收到的字节。
-        handle(connection, second, stats, pending, motion, &payload).await?;
+        handle(
+            connection, second, stats, pending, motion, &payload, tracing,
+        )
+        .await?;
     }
 }
 
@@ -373,6 +406,7 @@ async fn handle(
     pending: &mut HashMap<i64, Instant>,
     motion: &mut Motion,
     payload: &[u8],
+    tracing: Option<&crate::chunk_trace::ChunkTrace>,
 ) -> Result<(), String> {
     match wire::classify(State::Play, payload) {
         ServerPacket::KeepAlive(id) => {
@@ -403,7 +437,12 @@ async fn handle(
             second.bytes_out += bytes;
             second.packets_out += 1;
         }
-        ServerPacket::LevelChunkWithLight => second.chunks_in += 1,
+        ServerPacket::LevelChunkWithLight { x, z } => {
+            second.chunks_in += 1;
+            if let Some(trace) = tracing {
+                trace.chunk(Instant::now(), x, z, motion.position(), motion.direction());
+            }
+        }
         ServerPacket::Disconnect(_) => {
             return Err(format!(
                 "kicked: {}",

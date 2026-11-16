@@ -109,10 +109,17 @@ impl Motion {
         }
     }
 
-    /// 当前位置。测试用。
-    #[cfg(test)]
+    /// 当前位置。
+    /// Current position.
     pub const fn position(&self) -> (f64, f64, f64) {
         self.position
+    }
+
+    /// 当前的水平移动方向，单位向量。站立时是布局给定的方向（位移为 0）。
+    /// Current horizontal direction as a unit vector; standing bots keep the
+    /// layout's direction even though they do not move.
+    pub const fn direction(&self) -> (f64, f64) {
+        self.direction
     }
 
     /// 收到一次传送之后把轨迹对齐到服务端给的位置，避免被拉回。

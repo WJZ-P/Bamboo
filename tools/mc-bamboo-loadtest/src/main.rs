@@ -12,6 +12,7 @@
 //! `serve` 和假玩家是脚本里两个独立的进程，不共用一个 tokio 运行时。
 
 mod bot;
+mod chunk_trace;
 mod motion;
 mod stats;
 mod wire;
@@ -23,6 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chunk_trace::ChunkTrace;
 use motion::{Layout, Pattern};
 use stats::Stats;
 use tokio::task::JoinSet;
@@ -113,6 +115,13 @@ async fn loadtest(args: &[String]) -> Result<(), Box<dyn Error>> {
     let ramp = number_option::<f64>(args, "--ramp")?.unwrap_or(0.0);
     let speed = number_option::<f64>(args, "--speed")?.unwrap_or(pattern.default_speed());
     let json_path = option(args, "--json")?.map(PathBuf::from);
+    let trace_json_path = option(args, "--trace-json")?.map(PathBuf::from);
+    let chunk_trace = args.iter().any(|arg| arg == "--chunk-trace").then(|| {
+        if trace_json_path.is_none() {
+            eprintln!("--chunk-trace needs --trace-json <file> to write its report");
+        }
+        ChunkTrace::shared()
+    });
     let name_prefix =
         option(args, "--name-prefix")?.unwrap_or_else(|| DEFAULT_NAME_PREFIX.to_owned());
     if !duration.is_finite() || duration <= 0.0 {
@@ -161,6 +170,8 @@ async fn loadtest(args: &[String]) -> Result<(), Box<dyn Error>> {
             stop,
             stats: stats.clone(),
             name_prefix: name_prefix.clone(),
+            chunk_trace: chunk_trace.clone(),
+            view_distance: 8,
         };
         tasks.spawn(async move {
             if !delay.is_zero() {
@@ -193,6 +204,10 @@ async fn loadtest(args: &[String]) -> Result<(), Box<dyn Error>> {
     if let Some(path) = json_path {
         std::fs::write(&path, serde_json::to_string_pretty(&report.json())?)?;
         println!("json report: {}", path.display());
+    }
+    if let (Some(trace), Some(path)) = (chunk_trace.as_deref(), trace_json_path.as_deref()) {
+        std::fs::write(path, serde_json::to_string_pretty(&trace.report())?)?;
+        println!("chunk trace: {}", path.display());
     }
     Ok(())
 }

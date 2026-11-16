@@ -209,7 +209,7 @@ pub enum ServerPacket {
     KeepAlive(i64),
     ChunkBatchFinished,
     PlayerPosition(PlayerPosition),
-    LevelChunkWithLight,
+    LevelChunkWithLight { x: i32, z: i32 },
     Disconnect(&'static str),
     Other,
 }
@@ -274,7 +274,12 @@ pub fn classify(state: State, payload: &[u8]) -> ServerPacket {
                     z,
                 })
             }
-            play::clientbound::LEVEL_CHUNK_WITH_LIGHT => ServerPacket::LevelChunkWithLight,
+            play::clientbound::LEVEL_CHUNK_WITH_LIGHT => {
+                let (Ok(x), Ok(z)) = (reader.i32(), reader.i32()) else {
+                    return ServerPacket::Other;
+                };
+                ServerPacket::LevelChunkWithLight { x, z }
+            }
             play::clientbound::DISCONNECT => ServerPacket::Disconnect("disconnect"),
             _ => ServerPacket::Other,
         },
