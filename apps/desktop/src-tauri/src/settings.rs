@@ -635,7 +635,10 @@ mod tests {
         // 导入后两个新文件都在；之后 load 就不再看旧文件了。
         assert!(directory.join(PROPERTIES_FILE).exists());
         assert!(directory.join(BAMBOO_FILE).exists());
-        assert_eq!(files.unsupported_keys().len(), 59);
+        // 四个世界生成键和 broadcast-console-to-ops 现在是已实现项，剩下的未实现键是 54 个。
+        // The four world-gen keys and broadcast-console-to-ops are now implemented;
+        // 54 official keys remain unimplemented.
+        assert_eq!(files.unsupported_keys().len(), 54);
     }
 
     #[test]
