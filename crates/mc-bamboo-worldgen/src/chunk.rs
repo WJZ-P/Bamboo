@@ -833,6 +833,19 @@ impl<'a> Generator<'a> {
         steps_mask: i32,
         allowed_kinds: Option<&[String]>,
     ) -> Result<crate::feature::FeatureResult, String> {
+        self.features_with_structures(input, steps_mask, allowed_kinds, None)
+    }
+
+    /// [`Self::features`] 加上 `applyBiomeDecoration` 里「每 step 先放结构件」的那一段。
+    ///
+    /// `features` plus vanilla's per-step structure placement.
+    pub fn features_with_structures(
+        &self,
+        input: &crate::feature::FeatureChunks,
+        steps_mask: i32,
+        allowed_kinds: Option<&[String]>,
+        structures: Option<&crate::structure::place_step::StructurePlacement<'_>>,
+    ) -> Result<crate::feature::FeatureResult, String> {
         let biomes = BiomeManager::new(self.biomes, self.seed);
         // `WorldGenRegion.random`：`getOrCreateRandomFactory("worldgen_region_random")`
         // 在中心区块的**世界原点**（`center.getWorldPosition()`）上取一个随机源。
@@ -863,6 +876,7 @@ impl<'a> Generator<'a> {
             steps_mask,
             allowed_kinds,
             region_random: &region_random,
+            structures,
         };
         crate::feature::run::features(input, &context)
     }

@@ -162,6 +162,43 @@ fn with_thread<T>(
     })
 }
 
+/// 结构注册名 → `structure` 注册表里的 `type` 字段。
+///
+/// Structure registry id → the `type` field in the `structure` registry.
+pub fn structure_type(config: &WorldGenConfig, structure: &str) -> Option<String> {
+    with_thread(config, |thread| {
+        Ok(thread
+            .state
+            .structures
+            .get(structure)
+            .map(|def| def.type_id.clone()))
+    })
+    .ok()
+    .flatten()
+}
+
+/// 结构注册名 → `structure.step()` 的 `Decoration` 序号。
+///
+/// Structure registry id → the `Decoration` ordinal of `structure.step()`.
+pub fn structure_step(config: &WorldGenConfig, structure: &str) -> Option<usize> {
+    with_thread(config, |thread| {
+        Ok(thread
+            .state
+            .structures
+            .get(structure)
+            .map(WorldStructureState::step_of))
+    })
+    .ok()
+    .flatten()
+}
+
+/// `ChunkPos.unpack` 的公开包装，features 阶段反查起点区块用。
+///
+/// Public `ChunkPos.unpack` wrapper for resolving start chunks during features.
+pub fn unpack_chunk_pos(packed: i64) -> (i32, i32) {
+    chunk_pos_unpack(packed)
+}
+
 /// 读盘 `structures.starts` 的起点富模型重建。
 ///
 /// 基类字段逐条恢复；jigsaw 件走 `Piece::from_save_tag` 补回 element / rotation /

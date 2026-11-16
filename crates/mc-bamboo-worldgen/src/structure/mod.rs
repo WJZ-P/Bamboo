@@ -24,6 +24,7 @@ pub mod piece_place;
 pub mod pieces;
 pub mod pipeline;
 pub mod place;
+pub mod place_step;
 pub mod placement;
 pub mod post_process;
 pub mod processor;

@@ -22,8 +22,16 @@ use std::{cell::RefCell, collections::HashMap, sync::Arc};
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT, light::generate::GeneratedLight};
-use mc_bamboo_worldgen::feature::{
-    CENTER, DECORATION_STEPS, FeatureChunks, FeatureResult, Heightmaps, world::prime_heightmaps,
+use mc_bamboo_worldgen::{
+    Worldgen,
+    feature::{
+        CENTER, DECORATION_STEPS, FeatureChunks, FeatureResult, Heightmaps, world::prime_heightmaps,
+    },
+    structure::{
+        pipeline::StartPieces,
+        place_step::{StartInput, StartPieces as PlacePieces, StepStructure, StructurePlacement},
+        processor::ProcessorLists,
+    },
 };
 
 use crate::{
@@ -180,8 +188,70 @@ fn run_features_filtered(
         biomes,
         heights,
     };
+    // `applyBiomeDecoration` 的结构分支：按中心区块的 `References` 反查每个起点，
+    // 按 `structure.step()` 分组；`generate-structures=false` 时整段跳过。
+    // Vanilla's structure branch: resolve the starts referenced by the center,
+    // group by `structure.step()`; skipped when `generate-structures=false`.
+    let references =
+        crate::worldgen_structures::structure_references_stage(config, cx, cz).unwrap_or_default();
+    let mut starts: Vec<StartInput> = Vec::new();
+    if config.generate_structures {
+        for (structure, keys) in &references {
+            let Some(type_id) = crate::worldgen_structures::structure_type(config, structure)
+            else {
+                continue;
+            };
+            for &packed in keys {
+                let (sx, sz) = crate::worldgen_structures::unpack_chunk_pos(packed);
+                let rich = crate::worldgen_structures::structure_starts(config, sx, sz)?;
+                let Some(start) = rich.get(structure) else {
+                    continue;
+                };
+                let pieces = match &start.pieces {
+                    StartPieces::Layout(pieces) => PlacePieces::Layout(pieces.clone()),
+                    StartPieces::Jigsaw(pieces) => PlacePieces::Jigsaw(pieces.clone()),
+                    StartPieces::Sparse(_) => PlacePieces::Sparse,
+                };
+                starts.push(StartInput {
+                    structure: structure.clone(),
+                    type_id: type_id.clone(),
+                    pieces,
+                });
+            }
+        }
+    }
+    // 结构注册表按名字遍历（官方 `Registry.stream()`）；每组只带自己的起点。
+    // Groups follow the structure registry name order (`Registry.stream()`).
+    starts.sort_by(|a, b| a.structure.cmp(&b.structure));
+    let mut owned: Vec<(String, Vec<StartInput>)> = Vec::new();
+    for start in starts {
+        match owned.last_mut() {
+            Some((name, group)) if *name == start.structure => group.push(start),
+            _ => owned.push((start.structure.clone(), vec![start])),
+        }
+    }
+    let groups: Vec<StepStructure<'_>> = owned
+        .iter()
+        .map(|(name, group)| StepStructure {
+            structure: name.as_str(),
+            step: crate::worldgen_structures::structure_step(config, name).unwrap_or(4),
+            starts: group.as_slice(),
+        })
+        .collect();
+    let processor_lists = ProcessorLists::parse(
+        Worldgen::load()?
+            .raw()
+            .get("processor_list")
+            .ok_or("missing processor_list")?,
+    )?;
+    let placement = StructurePlacement::new(groups, processor_lists, config.seed);
     with_generator(config, |generator| {
-        generator.features(&input, (1 << DECORATION_STEPS) - 1, allowed_kinds)
+        generator.features_with_structures(
+            &input,
+            (1 << DECORATION_STEPS) - 1,
+            allowed_kinds,
+            Some(&placement),
+        )
     })
 }
 
