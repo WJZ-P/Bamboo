@@ -1198,6 +1198,54 @@ mod tests {
         }
     }
 
+    /// 全进程地物结果缓存：命中给的写增量和现算一遍逐条相同。种子只在这条测试里
+    /// 用，别的测试并行跑也碰不到这些键。
+    /// The shared feature cache returns exactly what a fresh run computes. The
+    /// seed is private to this test, so parallel tests never touch these keys.
+    #[test]
+    fn feature_cache_hit_equals_a_fresh_run() {
+        let config = normal(0x0fea_7c0c);
+        let (cx, cz) = (5, -3);
+        let fresh = run_features(&config, cx, cz, build_view(&config, cx, cz).unwrap()).unwrap();
+        let first = cached_feature_run(&config, cx, cz).unwrap();
+        let again = cached_feature_run(&config, cx, cz).unwrap();
+        for index in 0..9 {
+            if index == CENTER {
+                continue;
+            }
+            assert_eq!(first.deltas[index], fresh.deltas[index], "cell {index}");
+            assert_eq!(again.deltas[index], fresh.deltas[index], "cell {index}");
+        }
+        assert!(
+            (0..9).any(|index| index != CENTER && !fresh.deltas[index].is_empty()),
+            "the test center must spill into some neighbor"
+        );
+    }
+
+    /// 多条线程同时要同一个中心：只有一条真正去算，其余等它，拿到的是同一个
+    /// `Arc`（各算各的会是不同的分配）。
+    /// Threads asking for the same center at once share one computation: every
+    /// caller gets the very same `Arc`.
+    #[test]
+    fn concurrent_feature_runs_share_one_computation() {
+        let config = normal(0x0fea_7c0d);
+        let barrier = std::sync::Barrier::new(6);
+        let runs: Vec<Arc<FeatureRun>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..6)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        cached_feature_run(&config, -7, 11).unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for run in &runs[1..] {
+            assert!(Arc::ptr_eq(run, &runs[0]), "a caller recomputed the center");
+        }
+    }
+
     /// 写增量落进方块数组后能读回来。
     /// Deltas round-trip through the block arrays.
     #[test]
