@@ -1,10 +1,11 @@
-// 用官方 codec 读 Bamboo 写出的 saved data（游戏规则、世界边界、超平坦和若干噪声
-// world_gen_settings.dat），报告解码结果；读不动就非 0 退出。只加载官方类、不启动
-// 服务端、不接受 EULA。
+// 用官方 codec 读 Bamboo 写出的 saved data（游戏规则、世界边界、世界时钟、超平坦
+// 和若干噪声 world_gen_settings.dat），报告解码结果；读不动就非 0 退出。只加载
+// 官方类、不启动服务端、不接受 EULA。
 //
-// Decode Bamboo's saved-data files (game rules, world border, a flat and several
-// noise world_gen_settings.dat) with the official codecs and report the result;
-// exit non-zero when a file cannot be decoded. No server, no EULA.
+// Decode Bamboo's saved-data files (game rules, world border, world clocks, a
+// flat and several noise world_gen_settings.dat) with the official codecs and
+// report the result; exit non-zero when a file cannot be decoded. No server,
+// no EULA.
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -43,6 +44,8 @@ import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
+import net.minecraft.world.clock.ClockState;
+import net.minecraft.world.clock.PackedClockStates;
 import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.gamerules.GameRule;
 import net.minecraft.world.level.gamerules.GameRuleMap;
@@ -96,11 +99,11 @@ public final class SavedDataOracle {
                 new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected())) {
         RegistryAccess.Frozen registries = loadRegistries(resources);
         RegistryOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, registries);
-        if (args.length < 3) {
-            throw new IllegalArgumentException("usage: SavedDataOracle <game_rules.dat> <world_border.dat> <flat_world_gen_settings.dat> [noise_world_gen_settings.dat ...]");
+        if (args.length < 4) {
+            throw new IllegalArgumentException("usage: SavedDataOracle <game_rules.dat> <world_border.dat> <world_clocks.dat> <flat_world_gen_settings.dat> [noise_world_gen_settings.dat ...]");
         }
 
-        CompoundTag genRoot = NbtIo.readCompressed(Path.of(args[2]), NbtAccounter.unlimitedHeap());
+        CompoundTag genRoot = NbtIo.readCompressed(Path.of(args[3]), NbtAccounter.unlimitedHeap());
         Tag genData = genRoot.get("data");
         if (genData == null) {
             throw new IllegalStateException("world_gen_settings.dat has no data tag");
@@ -130,7 +133,7 @@ public final class SavedDataOracle {
         // Every extra world_gen_settings.dat must be a minecraft:noise generator that
         // the official WorldGenSettings.CODEC accepts; report its decoded shape.
         JsonArray noiseGens = new JsonArray();
-        for (int i = 3; i < args.length; i++) {
+        for (int i = 4; i < args.length; i++) {
             CompoundTag noiseRoot = NbtIo.readCompressed(Path.of(args[i]), NbtAccounter.unlimitedHeap());
             Tag noiseData = noiseRoot.get("data");
             if (noiseData == null) {
@@ -171,6 +174,33 @@ public final class SavedDataOracle {
         DataResult<WorldBorder.Settings> parsedBorder = WorldBorder.Settings.CODEC.parse(NbtOps.INSTANCE, borderData);
         WorldBorder.Settings border = parsedBorder.getOrThrow();
 
+        // world_clocks.dat：PackedClockStates.CODEC 是注册名 → ClockState 的 map。
+        // 用 RegistryOps 才能把 minecraft:overworld / minecraft:the_end 解成 Holder，
+        // 这正是 ServerClockManager.TYPE 的 codec 在读档时用的 ops。
+        // world_clocks.dat: PackedClockStates.CODEC maps registry names to
+        // ClockState. RegistryOps is needed to resolve the WorldClock holders.
+        CompoundTag clocksRoot = NbtIo.readCompressed(Path.of(args[2]), NbtAccounter.unlimitedHeap());
+        Tag clocksData = clocksRoot.get("data");
+        if (clocksData == null) {
+            throw new IllegalStateException("world_clocks.dat has no data tag");
+        }
+        DataResult<PackedClockStates> parsedClocks = PackedClockStates.CODEC.parse(ops, clocksData);
+        PackedClockStates clocks = parsedClocks.getOrThrow();
+        JsonArray clocksArray = new JsonArray();
+        for (var entry : clocks.clocks().entrySet()) {
+            Identifier id = entry.getKey().unwrapKey()
+                    .map(k -> k.identifier())
+                    .orElseThrow(() -> new IllegalStateException("world clock has no registry key"));
+            ClockState state = entry.getValue();
+            JsonObject clock = new JsonObject();
+            clock.addProperty("name", id.toString());
+            clock.addProperty("total_ticks", state.totalTicks());
+            clock.addProperty("partial_tick", state.partialTick());
+            clock.addProperty("rate", state.rate());
+            clock.addProperty("paused", state.paused());
+            clocksArray.add(clock);
+        }
+
         JsonObject result = new JsonObject();
         JsonArray rulesArray = new JsonArray();
         for (GameRule<?> rule : rules.keySet()) {
@@ -200,6 +230,7 @@ public final class SavedDataOracle {
         b.addProperty("lerp_time", border.lerpTime());
         b.addProperty("lerp_target", border.lerpTarget());
         result.add("world_border", b);
+        result.add("world_clocks", clocksArray);
         result.add("world_gen_settings", result0);
         result.add("noise_generators", noiseGens);
 

@@ -2353,6 +2353,128 @@ fn world_time_advances_once_per_tick() {
     assert_eq!(server.world.island.region.tick.since(Default::default()), 5);
 }
 
+/// 存盘 → 重开：官方 `PrimaryLevelData.parse` 从 `level.dat` 的 `Time` 接着走，
+/// 世界时钟从 `world_clocks.dat` 接着走，岛的计划刻时钟也跟着世界时间对上。
+/// 重启前后「还有多少刻到点」不变，漏斗等读盘后的相对时刻不会退货到 0。
+///
+/// Save → restart: vanilla's `PrimaryLevelData.parse` resumes `Time` from
+/// `level.dat`, world clocks resume from `world_clocks.dat`, and the island's
+/// scheduled-tick clock starts at the restored game time. Relative tick
+/// deadlines are unchanged across the restart.
+#[test]
+fn save_and_reopen_resumes_game_time_day_time_and_scheduled_ticks() {
+    use mc_bamboo_storage::world_dir::WorldDir;
+
+    const TICKS_AFTER: usize = 5;
+    let tmp = D6TempDir::new("restore-time");
+    let dir = WorldDir::new(&tmp.0);
+    dir.create_layout().unwrap();
+    let pos = BlockPos::new(3, -60, 3);
+
+    let (saved_time, saved_day_time, before) = {
+        let mut server = Harness::new_loaded_with_save(2, &tmp.0);
+        server.ensure_loaded(&[ChunkPos::new(0, 0)]);
+        // 让主世界时钟真的走起来并留一个非零的流速，重开后必须一起恢复。
+        // Resume the overworld clock with a non-default rate so the restore
+        // checks every field of ClockState.
+        let clock = server
+            .world
+            .master
+            .global
+            .clock_named_mut("minecraft:overworld")
+            .unwrap();
+        clock.set_paused(false);
+        clock.set_rate(2.0);
+        for _ in 0..137 {
+            server.tick();
+        }
+        // 排一个计划刻，记录到点时刻相对当前游戏时间的差。
+        server.world.island.region.block_ticks.schedule(
+            pos,
+            mc_bamboo_data::blocks::STONE as usize,
+            8,
+            mc_bamboo_blocks::ticks::TickPriority::Normal,
+        );
+        let saved_now = server.world.island.region.block_ticks.now();
+        let before: Vec<i64> = server
+            .world
+            .island
+            .region
+            .block_ticks
+            .pending()
+            .map(|tick| tick.trigger_tick - saved_now)
+            .collect();
+        assert!(!before.is_empty(), "存档里应该有一项到点的计划刻");
+        let state = (
+            server.world.master.global.time().0,
+            server.world.master.global.clock().total_ticks,
+            before,
+        );
+        // 走关服路径：写 level.dat / data/（含 Time 和 world_clocks），释放锁。
+        server.shut_down();
+        state
+    };
+    assert!(saved_time > 0, "第一局确实推进过游戏时间");
+    assert!(
+        saved_day_time > crate::global::NOON_TICKS,
+        "第一局确实推进过昼夜时间"
+    );
+
+    let mut reopened = Harness::new_loaded_with_save(2, &tmp.0);
+    assert_eq!(
+        reopened.world.master.global.time().0,
+        saved_time,
+        "游戏时间要从 level.dat 的 Time 恢复"
+    );
+    assert_eq!(
+        reopened.world.island.region.block_ticks.now(),
+        saved_time,
+        "岛的时钟从恢复的游戏时间起算"
+    );
+    assert_eq!(
+        reopened.world.island.region.tick.game_time(),
+        saved_time,
+        "岛的模拟时钟也从恢复的游戏时间起算"
+    );
+    let clock = reopened.world.master.global.clock();
+    assert_eq!(clock.total_ticks, saved_day_time, "昼夜时间接着走");
+    assert_eq!(clock.rate, 2.0, "流速也要从 world_clocks.dat 恢复");
+    assert!(!clock.paused, "暂停标志也要从 world_clocks.dat 恢复");
+    // 全新世界里 world_clocks.dat 写的是默认（0 / rate 1 / 不暂停）的末地时钟。
+    assert_eq!(
+        reopened
+            .world
+            .master
+            .global
+            .clock_named("minecraft:the_end")
+            .unwrap()
+            .rate,
+        1.0
+    );
+
+    // 计划刻读盘后的绝对到点时刻和重启前一致（`ensure_loaded` 为了交付区块
+    // 可能又走了几刻，所以按存盘时的基准比较），再走几刻仍逐刻同步。
+    reopened.ensure_loaded(&[ChunkPos::new(0, 0)]);
+    let after: Vec<i64> = reopened
+        .world
+        .island
+        .region
+        .block_ticks
+        .pending()
+        .map(|tick| tick.trigger_tick - saved_time)
+        .collect();
+    assert_eq!(after, before, "重启前后计划刻的相对到点时刻不变");
+    let resume_at = reopened.world.master.global.time().0;
+    for step in 1..=TICKS_AFTER as i64 {
+        reopened.tick();
+        assert_eq!(reopened.world.master.global.time().0, resume_at + step);
+        assert_eq!(
+            reopened.world.island.region.block_ticks.now(),
+            resume_at + step
+        );
+    }
+}
+
 #[test]
 fn every_decoded_request_reaches_a_module_without_disconnecting() {
     let mut server = Harness::new(8);

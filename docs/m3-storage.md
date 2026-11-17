@@ -574,8 +574,12 @@ Bamboo 的 `LevelData::decode` 只建模「总是写」的键和几个可选键�
 
 ### 9.3 `data/` 下的独立 saved data（26.3 新增，只写建模过的几份）
 
-26.3 把世界生成设置和游戏规则从 `level.dat` 搬到 `data/` 下的独立文件。
-`LevelDatToSavedDataFileFix` 列出了文件名（`level.dat` 在读写时由 file fixer 迁移）：
+26.3 把世界生成设置、游戏规则、世界时钟等从 `level.dat` 搬到 `data/` 下的独立文件。
+`LevelDatToSavedDataFileFix` 列出了文件名（`level.dat` 在读写时由 file fixer 迁移）；
+游戏时间仍留在 `level.dat` 的 `Time`（`PrimaryLevelData.parse` 的 `gameTime`，
+`ServerLevel.tickTime` 每刻 +1），开服从这里接着走；昼夜时钟则在 `world_clocks.dat`
+里（`DayTimeToClockFix` 把旧的 `DayTime` 迁成 `minecraft:overworld` 的 `total_ticks`，
+`ServerClockManager.TYPE` 的 codec 是 `PackedClockStates.CODEC`）：
 
 | 文件（`data/` 下） | 内容 |
 |---|---|
@@ -591,8 +595,8 @@ Bamboo 的 `LevelData::decode` 只建模「总是写」的键和几个可选键�
 
 其它 `SavedDataType`（地图 idcount、袭击、结构等）按各自的 id 落在 `data/` 下，
 文件名是 `<命名空间>/<路径>.dat`。Bamboo 只写建模过的几份：全服 `data/minecraft/` 下的
-`game_rules.dat` / `world_gen_settings.dat`，以及按维度存放的 `world_border.dat` 和空的
-`chunk_tickets.dat`；其余一个都不写。
+`game_rules.dat` / `world_gen_settings.dat` / `world_clocks.dat`，以及按维度存放的
+`world_border.dat` 和空的 `chunk_tickets.dat`；其余一个都不写。
 
 格式：`SavedDataStorage` 用 `NbtIo.readCompressed`（gzip 或未压缩，按文件头判断）读，
 根是 `{ data: <SavedDataType.codec() 编出的值>, DataVersion: int }`；写时
@@ -612,7 +616,11 @@ Bamboo 的 `LevelData::decode` 只建模「总是写」的键和几个可选键�
 `Global`，关服 / 自动保存时写进按维度存放的 `world_border.dat`、启动时读回，
 渐变中的 `lerp_time` 是剩余刻数，恢复时传存档里的游戏时间重新起算。
 `game_rules.dat` 用 `GameRuleMap.CODEC`、`world_gen_settings.dat` 用
-`WorldGenSettings.CODEC`，都由 `saved-data` 子命令用官方 codec 对拍。
+`WorldGenSettings.CODEC`、`world_clocks.dat` 用 `PackedClockStates.CODEC`
+（每项 `ClockState.CODEC` 的四个字段），都由 `saved-data` 子命令用官方 codec 对拍。
+启动时 `Global.time` 从 `level.dat` 的 `Time` 恢复、两份世界时钟从
+`world_clocks.dat` 恢复，边界渐变用的也是这个已恢复的游戏时间；岛的
+`Region::start_clock` 排在启动数据都套上之后，跟着对上。
 
 （2026-11-14 按实现更新：本文第 2 / 12 / 14 节、README「存档」、`crates/mc-bamboo-game/src/save_data.rs`；
 合并提交 `f3953d3`、`d31e954`、`1828b8c`）
@@ -720,10 +728,10 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
    - ✅ **接进游戏那一半**：进服时由连接层读 `players/data/<uuid>.dat`（世界线程解析）、
      离开 / 自动保存 / 关服 / `save-all` 时写；`level.dat` 启动时读、关服 / 自动保存时写，
      `level.dat_old` 轮换、坏文件退回备份；`session.lock` 独占锁；`level.dat` 写回运行时
-     出生点/默认游戏模式/难度，`data/` 的游戏规则和按维度的 `world_border.dat` 写真实值
-     并用官方 codec 对拍，`world_gen_settings.dat` 写官方 codec 编出的超平坦默认值，
-     其余没建模的 saved data 不写文件；`chunk_tickets.dat` 写空
-     tickets 列表。
+     出生点/默认游戏模式/难度和游戏时间，`data/` 的游戏规则、世界时钟和按维度的
+     `world_border.dat` 写真实值并用官方 codec 对拍，`world_gen_settings.dat` 写官方
+     codec 编出的超平坦默认值，其余没建模的 saved data 不写文件；`chunk_tickets.dat`
+     写空 tickets 列表。
      `/save-all [flush]`、`/save-on`、`/save-off` 按官方消息和权限等级 4 实现。
 7. ⬜ **Linear**（Q1 决定：先不做）。
 8. ⬜ **转换工具**（Q7 决定：独立小程序，暂不做）。
@@ -830,11 +838,13 @@ convert <输入目录> <输出目录> --from anvil|linear --to anvil|linear
   把区块重新标脏、按连续次数有上限地退避重试，绝不永久暂停；盒子写成功才释放，
   关服把没写成功的停放盒子全部重新编码提交，磁盘仍在失败就 `error!` 列出未存区块。
   每次 `/save-all` 等自己那道栅栏的回执才发成功 / 失败消息。
-- `level.dat` 写回运行时出生点、默认游戏模式、难度；`data/minecraft/game_rules.dat`
-  用 `GameRuleMap.CODEC`，`data/minecraft/world_gen_settings.dat` 用
+- `level.dat` 写回运行时出生点、默认游戏模式、难度和游戏时间（`Time`，开服从这里
+  恢复）；`data/minecraft/game_rules.dat` 用 `GameRuleMap.CODEC`，
+  `data/minecraft/world_clocks.dat` 用 `PackedClockStates.CODEC` 写两份世界时钟
+  并由 `ServerClockManager.init` 那样读回，`data/minecraft/world_gen_settings.dat` 用
   `WorldGenSettings.CODEC` 编出 `minecraft:flat`（层与 Bamboo 的超平坦模板一致），
   按维度的 `world_border.dat` 用 `WorldBorder::export_settings` / `restore`；
-  `chunk_tickets.dat` 写空 tickets 列表。这五份都由 `mc-bamboo-vanilla saved-data` /
+  `chunk_tickets.dat` 写空 tickets 列表。这六份都由 `mc-bamboo-vanilla saved-data` /
   `world-dir` 用官方 codec 解码对拍，并故意写坏 `level.dat` / 一个键验证会报错。
   没建模的 saved data 不写文件（官方 `computeIfAbsent` 会造默认值）。
 - `game_rules.dat` 读盘照官方 `SavedDataStorage.readSavedData`：`GameRuleMap.CODEC`

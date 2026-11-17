@@ -8,10 +8,12 @@
 //!   布尔规则是 NBT `Byte`，整数规则是 `Int`；只写默认特性开着的规则。
 //! - `WorldBorder.Settings.CODEC`（`RecordCodecBuilder`）：九个必填字段，
 //!   双精度是 `Double`、整数是 `Int`、`lerp_time` 是 `Long`。
+//! - `PackedClockStates.CODEC`：`minecraft:world_clocks` 的注册名 → `ClockState`。
 //! - `PrimaryLevelData.createTag`：`GameType` / `spawn` / `difficulty_settings`。
 //!
 //! Translation between runtime state and the NBT compounds for `level.dat`,
-//! `data/minecraft/game_rules.dat` and the overworld `world_border.dat`.
+//! `data/minecraft/game_rules.dat`, `data/minecraft/world_clocks.dat` and the
+//! overworld `world_border.dat`.
 //! This layer only maps state to NBT; file IO lives in `SaveSession` and
 //! `mc-bamboo-storage`. Layout follows the 26.3 official codecs.
 
@@ -22,6 +24,7 @@ use mc_bamboo_storage::level_dat::LevelData;
 
 use crate::{
     gamerules::{GameRuleSet, Stored},
+    global::Clock,
     player_save::game_mode_from_id,
     world_state::{Difficulty, RespawnData, WorldState},
 };
@@ -119,6 +122,82 @@ pub(crate) fn apply_game_rules(rules: &mut GameRuleSet, tag: &Tag) {
     for (index, stored) in parsed {
         rules.set_saved(index, stored);
     }
+}
+
+/// 把两份世界时钟编成 `world_clocks.dat` 的 `data` 复合标签。
+/// 官方 `PackedClockStates.CODEC` 是 `Codec.unboundedMap(WorldClock.CODEC, ClockState.CODEC)`，
+/// 键是注册名字符串；`ClockState.CODEC` 必填 `total_ticks`，其余三项是可选字段。
+///
+/// Encode both world clocks into the `data` compound of `world_clocks.dat`.
+/// Vanilla uses `Codec.unboundedMap(WorldClock.CODEC, ClockState.CODEC)` with
+/// registry-name keys; `ClockState.CODEC` requires `total_ticks` and makes the
+/// other three fields optional.
+pub(crate) fn world_clocks_tag(global: &crate::global::Global) -> Tag {
+    let entries = global
+        .clocks()
+        .into_iter()
+        .map(|(name, clock)| {
+            (
+                name.to_owned(),
+                Tag::Compound(vec![
+                    ("total_ticks".to_owned(), Tag::Long(clock.total_ticks)),
+                    ("partial_tick".to_owned(), Tag::Float(clock.partial_tick)),
+                    ("rate".to_owned(), Tag::Float(clock.rate)),
+                    ("paused".to_owned(), Tag::Byte(i8::from(clock.paused))),
+                ]),
+            )
+        })
+        .collect();
+    Tag::Compound(entries)
+}
+
+/// 解出 `world_clocks.dat`；任一条坏数据都让整份作废（官方 `resultOrPartial` +
+/// `computeIfAbsent` 的默认构造），返回空表时不改运行时的时钟。
+/// 未知注册名按官方 `unboundedMap` 由键 codec 拒绝，同样整份作废。
+///
+/// Decode `world_clocks.dat`; any bad entry invalidates the whole file (vanilla's
+/// `resultOrPartial` plus the default constructor). Unknown registry names are
+/// rejected by the official key codec, so they invalidate it too.
+pub(crate) fn parse_world_clocks(tag: &Tag) -> Option<Vec<(&'static str, Clock)>> {
+    let Tag::Compound(entries) = tag else {
+        return None;
+    };
+    let mut parsed = Vec::with_capacity(entries.len());
+    for (name, value) in entries {
+        let clock_name = match name.as_str() {
+            "minecraft:overworld" => "minecraft:overworld",
+            "minecraft:the_end" => "minecraft:the_end",
+            _ => return None,
+        };
+        let total_ticks = get_long(value, "total_ticks")?;
+        let partial_tick = match get(value, "partial_tick") {
+            Some(Tag::Float(v)) if v.is_finite() => *v,
+            Some(_) => return None,
+            None => 0.0,
+        };
+        // `ExtraCodecs.POSITIVE_FLOAT` 是 (0, Float.MAX] 的闭区间检查，NaN 也过不了。
+        // `ExtraCodecs.POSITIVE_FLOAT` checks (0, MAX]; NaN fails it too.
+        let rate = match get(value, "rate") {
+            Some(Tag::Float(v)) if *v > 0.0 && v.is_finite() => *v,
+            Some(_) => return None,
+            None => 1.0,
+        };
+        let paused = match get(value, "paused") {
+            Some(Tag::Byte(v)) => *v != 0,
+            Some(_) => return None,
+            None => false,
+        };
+        parsed.push((
+            clock_name,
+            Clock {
+                total_ticks,
+                partial_tick,
+                rate,
+                paused,
+            },
+        ));
+    }
+    Some(parsed)
 }
 
 /// 把世界边界设置编成 `world_border.dat` 的 `data` 复合标签（九个必填字段）。
@@ -236,18 +315,22 @@ pub(crate) fn apply_level_data(state: &mut WorldState, level: &LevelData) {
     state.difficulty_locked = level.difficulty.locked;
 }
 
-/// `level.dat` 里读出来的世界设置和两份 saved data，供 `World::build` 采用。
-/// World settings and the two saved-data compounds loaded at startup.
+/// 启动时从 `data/` 读到的 saved data，供 `World::build` 采用。
+/// Saved-data compounds loaded from `data/` at startup for `World::build`.
 #[derive(Debug, Default)]
 pub(crate) struct StartupData {
     pub(crate) game_rules: Option<Tag>,
     pub(crate) world_border: Option<Tag>,
+    pub(crate) world_clocks: Option<Tag>,
 }
 
 impl StartupData {
-    /// 把游戏规则/边界套到 `Global`/`Region` 上。边界的 `restore` 要传存档里的游戏时间。
-    /// Apply game rules and border to `Global`/`Region`; `restore` takes the saved
-    /// game time as vanilla does.
+    /// 把游戏规则、边界和世界时钟套到 `Global`/`Region` 上。边界的 `restore`
+    /// 要传存档里的游戏时间，和官方 `applyInitialSettings(getGameTime())` 一致。
+    ///
+    /// Apply game rules, border and world clocks to `Global`/`Region`; `restore`
+    /// takes the saved game time, like vanilla's
+    /// `applyInitialSettings(getGameTime())`.
     pub(crate) fn apply(
         &self,
         global: &mut crate::global::Global,
@@ -260,6 +343,11 @@ impl StartupData {
         if let Some(settings) = self.world_border.as_ref().and_then(parse_world_border) {
             *global.world_border_mut() =
                 mc_bamboo_blocks::world_border::WorldBorder::restore(settings, game_time);
+        }
+        if let Some(clocks) = self.world_clocks.as_ref().and_then(parse_world_clocks) {
+            for (name, state) in clocks {
+                global.restore_clock(name, state);
+            }
         }
         global.rules().publish(region);
         global.publish_border(region);
@@ -357,6 +445,102 @@ mod tests {
         // 少一个字段就当坏档退回默认。
         let broken = Tag::Compound(vec![("center_x".to_owned(), Tag::Double(0.0))]);
         assert!(parse_world_border(&broken).is_none());
+    }
+
+    /// `world_clocks.dat` 把两份时钟的四个字段都存在，重新启动时逐字段套回。
+    /// The four fields of both clocks round-trip through `world_clocks.dat`.
+    #[test]
+    fn world_clocks_round_trip_all_four_fields() {
+        let mut global = crate::global::Global::default();
+        let overworld = global.clock_named_mut("minecraft:overworld").unwrap();
+        overworld.total_ticks = 42_000;
+        overworld.partial_tick = 0.25;
+        overworld.rate = 2.5;
+        overworld.paused = false;
+        let end = global.clock_named_mut("minecraft:the_end").unwrap();
+        end.total_ticks = 123;
+        end.paused = true;
+        let tag = world_clocks_tag(&global);
+        let parsed = parse_world_clocks(&tag).expect("合法的世界时钟存档");
+        assert_eq!(parsed.len(), 2);
+
+        let mut restored = crate::global::Global::default();
+        for (name, state) in parsed {
+            restored.restore_clock(name, state);
+        }
+        assert_eq!(restored.clocks(), global.clocks());
+
+        // 官方 `ClockState.CODEC` 的三个可选字段：缺了就补默认值。
+        let minimal = Tag::Compound(vec![(
+            "minecraft:overworld".to_owned(),
+            Tag::Compound(vec![("total_ticks".to_owned(), Tag::Long(7))]),
+        )]);
+        let parsed = parse_world_clocks(&minimal).expect("只带必填字段也合法");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].1.total_ticks, 7);
+        assert_eq!(parsed[0].1.partial_tick, 0.0);
+        assert_eq!(parsed[0].1.rate, 1.0);
+        assert!(!parsed[0].1.paused);
+    }
+
+    /// 官方 `SavedDataStorage` 读坏整份 saved data 就用默认构造；一条坏的时钟
+    /// 不能只忽略那一条、把同文件里其它好条目套上去。
+    /// A bad entry invalidates the whole file, as official `resultOrPartial`
+    /// plus the default constructor do.
+    #[test]
+    fn a_bad_world_clock_entry_invalidates_the_whole_file() {
+        let good = (
+            "minecraft:overworld".to_owned(),
+            Tag::Compound(vec![("total_ticks".to_owned(), Tag::Long(9))]),
+        );
+        let bad = [
+            // 必填字段缺失 / 类型错。
+            Tag::Compound(vec![
+                good.clone(),
+                (
+                    "minecraft:the_end".to_owned(),
+                    Tag::Compound(vec![("rate".to_owned(), Tag::Float(1.0))]),
+                ),
+            ]),
+            Tag::Compound(vec![(
+                "minecraft:overworld".to_owned(),
+                Tag::Compound(vec![("total_ticks".to_owned(), Tag::Int(1))]),
+            )]),
+            // 未知注册名（官方键 codec 会拒绝）。
+            Tag::Compound(vec![
+                good.clone(),
+                (
+                    "minecraft:not_a_clock".to_owned(),
+                    Tag::Compound(vec![("total_ticks".to_owned(), Tag::Long(1))]),
+                ),
+            ]),
+            // rate 必须严格大于 0；paused / partial_tick 类型不对也坏档。
+            Tag::Compound(vec![(
+                "minecraft:overworld".to_owned(),
+                Tag::Compound(vec![
+                    ("total_ticks".to_owned(), Tag::Long(1)),
+                    ("rate".to_owned(), Tag::Float(0.0)),
+                ]),
+            )]),
+            Tag::Compound(vec![(
+                "minecraft:overworld".to_owned(),
+                Tag::Compound(vec![
+                    ("total_ticks".to_owned(), Tag::Long(1)),
+                    ("paused".to_owned(), Tag::Int(1)),
+                ]),
+            )]),
+            Tag::Compound(vec![(
+                "minecraft:overworld".to_owned(),
+                Tag::Compound(vec![
+                    ("total_ticks".to_owned(), Tag::Long(1)),
+                    ("partial_tick".to_owned(), Tag::Float(f32::NAN)),
+                ]),
+            )]),
+            Tag::List(Vec::new()),
+        ];
+        for tag in bad {
+            assert!(parse_world_clocks(&tag).is_none(), "坏档 {tag:?}");
+        }
     }
 
     #[test]

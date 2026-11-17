@@ -26,21 +26,28 @@ use crate::{
 /// 官方的条件是 `++counter > 600`，所以实际周期是 601 tick。
 const LATENCY_BROADCAST_THRESHOLD: u32 = 600;
 
-/// 主世界时钟刚开服时停在正午。`/time` 的 `resume` 可以让它重新走起来。
+/// 全新世界的主世界时钟停在正午。`/time` 的 `resume` 可以让它重新走起来；
+/// 老存档由 `world_clocks.dat` 接着走。
 ///
-/// The overworld clock starts paused at noon. `/time resume` can start it again.
+/// A fresh world's overworld clock starts paused at noon. `/time resume` can
+/// start it again; a saved world continues from `world_clocks.dat`.
 pub(crate) const NOON_TICKS: i64 = 6000;
 
-/// 世界时间。和 [`RegionTick`](crate::region::RegionTick) 同步增长，但不是一回事，不能互相比较。
+/// 世界时间。写进 `level.dat` 的 `Time`，开服从那里恢复（官方
+/// `PrimaryLevelData.parse` 的 `gameTime`）。和
+/// [`RegionTick`](crate::region::RegionTick) 同步增长，但不是一回事，不能互相比较。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct GameTime(pub(crate) i64);
 
-/// 一个世界时钟的状态，官方 `ServerClockInstance`。
+/// 一个世界时钟的状态，官方 `ServerClockInstance`；字段和
+/// `ClockState.CODEC`（`world_clocks.dat`）一一对应。
 ///
-/// 26.x 起主世界和末地各有一个。主世界开服时停在正午，末地用 [`Clock::official`]。
+/// 26.x 起主世界和末地各有一个。主世界新开服时停在正午，末地用 [`Clock::official`]；
+/// 老存档由 `world_clocks.dat` 覆盖这两个初值。
 ///
-/// Since 26.x the overworld and the End each have one. The overworld starts paused at noon;
-/// the End uses [`Clock::official`].
+/// Since 26.x the overworld and the End each have one. A fresh overworld starts
+/// paused at noon; the End uses [`Clock::official`]. Both are overwritten by a
+/// saved `world_clocks.dat` at startup.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Clock {
     pub(crate) total_ticks: i64,
@@ -171,13 +178,17 @@ impl RosterEntry {
 /// 不属于任何区块的状态。`WorldState` 里的随机序列没有 `Debug`。
 pub(crate) struct Global {
     time: GameTime,
-    /// 主世界时钟。开服时停在正午，和现有的 `set_time` 包一致。
+    /// 主世界时钟。全新世界停在正午，和现有的 `set_time` 包一致；老存档从
+    /// `world_clocks.dat` 恢复。
     ///
-    /// The overworld clock. It starts paused at noon, matching the existing `set_time` packet.
+    /// The overworld clock. A fresh world starts paused at noon, matching the
+    /// existing `set_time` packet; a saved world restores `world_clocks.dat`.
     clock: Clock,
-    /// 末地时钟。官方 `ServerClockInstance` 的初值：0 刻、流速 1、没有暂停。
+    /// 末地时钟。官方 `ServerClockInstance` 的初值：0 刻、流速 1、没有暂停；
+    /// 老存档从 `world_clocks.dat` 恢复。
     ///
-    /// The End clock. Official `ServerClockInstance` defaults: tick 0, rate 1, not paused.
+    /// The End clock. Official `ServerClockInstance` defaults: tick 0, rate 1,
+    /// not paused; a saved world restores `world_clocks.dat`.
     end_clock: Clock,
     roster: BTreeMap<PlayerId, RosterEntry>,
     ticks_since_latency_broadcast: u32,
@@ -247,6 +258,37 @@ impl Default for Global {
 impl Global {
     pub(crate) fn time(&self) -> GameTime {
         self.time
+    }
+
+    /// 开服从 `level.dat` 的 `Time` 恢复游戏时间（`PrimaryLevelData.parse` 的 `gameTime`）。
+    /// 在任何 tick 之前调用，岛的时钟随后从这个值起算。
+    ///
+    /// Restore the game time from `level.dat`'s `Time` at startup (vanilla's
+    /// `PrimaryLevelData.parse` `gameTime`). Called before any tick; the island
+    /// clock then starts from this value.
+    pub(crate) fn restore_game_time(&mut self, time: i64) {
+        self.time = GameTime(time);
+    }
+
+    /// 开服从 `world_clocks.dat` 恢复一个世界时钟（`ServerClockInstance.loadFrom`）。
+    ///
+    /// Restore one world clock from `world_clocks.dat` at startup
+    /// (`ServerClockInstance.loadFrom`).
+    pub(crate) fn restore_clock(&mut self, name: &str, state: Clock) {
+        if let Some(clock) = self.clock_named_mut(name) {
+            *clock = state;
+        }
+    }
+
+    /// 两份世界时钟，按注册名。`world_clocks.dat` 的编码从这里读。
+    ///
+    /// Both world clocks keyed by registry name; the `world_clocks.dat`
+    /// encoder reads them.
+    pub(crate) fn clocks(&self) -> [(&'static str, Clock); 2] {
+        [
+            ("minecraft:overworld", self.clock),
+            ("minecraft:the_end", self.end_clock),
+        ]
     }
 
     /// 权威的游戏规则。
