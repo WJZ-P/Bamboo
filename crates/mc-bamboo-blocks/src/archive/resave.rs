@@ -103,7 +103,8 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
 /// 这些键都由本模块自己写回（见各自 codec 函数），所以只有「运行时表确实拥有」的
 /// 少数键才放进 omit。潜影盒 / 唱片机 / 陶罐的内容键没有运行时写入者：容器表读盘时
 /// 不收这四类（`read_game_fields`），组件补丁只拥有 `sherds`，红石表只拥有
-/// `ticks_since_song_started`；其余都由 `non_item_containers` 带回。
+/// `ticks_since_song_started`；其余都由 `jukebox` / `shulker_box` /
+/// `decorated_pot` 各自写回。
 /// Most of these keys are written by this module. The container table does not load
 /// these four types, the component patch owns only `sherds`, and the redstone table
 /// owns only `ticks_since_song_started`; the rest come from each codec function.
