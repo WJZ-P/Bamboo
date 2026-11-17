@@ -703,6 +703,10 @@ impl ConfigFiles {
                 deliveries: self.bamboo.deliveries_per_tick,
                 reclaims: self.bamboo.reclaims_per_tick,
             },
+            // 还不进配置文件：第 7 步加 `island_threads` 之前按环境变量（调试用），缺省齐步。
+            // Not in the files yet: until step 7 adds `island_threads` this follows
+            // the environment (debugging) and defaults to lockstep.
+            island_drive: defaults.island_drive,
             world_gen,
             broadcast_console_to_ops: self.official.broadcast_console_to_ops,
             // 从真实 server.properties 建起来的命令行版才读进程 stdin；嵌入用法不读。

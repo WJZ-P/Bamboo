@@ -26,6 +26,6 @@ pub use pyramid::{
 };
 pub use state::{
     ChunkBundle, ClassifiedLevelChange, DebugRecord, DebugState, Desired, Director, DirectorConfig,
-    Effect, Event, LevelClassification, Owner, OwnerRecord, RegionId, RegionMessage, SaveSeq, Task,
-    TaskId, TaskResult, TicketOp, classify, owner_is_held,
+    Effect, Event, HOME_REGION, LevelClassification, Owner, OwnerRecord, RegionId, RegionMessage,
+    SaveSeq, Task, TaskId, TaskResult, TicketOp, classify, owner_is_held,
 };

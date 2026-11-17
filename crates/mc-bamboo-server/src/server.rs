@@ -574,6 +574,7 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
         redstone_cache: config.redstone_cache,
         chunk_worker_threads: config.chunk_worker_threads,
         mail_budget: config.mail_budget,
+        island_drive: config.island_drive,
         world_dir: config.world_dir.clone(),
         world_gen: config.world_gen.clone(),
         broadcast_console_to_ops: config.broadcast_console_to_ops,

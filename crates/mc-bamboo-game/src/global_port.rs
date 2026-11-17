@@ -155,9 +155,21 @@ pub(crate) fn apply_all(global: &mut Global, region: &mut Region, effects: Vec<G
 
 /// 在权威的 `Global` 上应用一条改动，帧发给 `region` 的玩家。改了快照里的东西就重发快照。
 ///
+/// 这是主控在执行：写给玩家的帧先投进岛的出站信箱，做完再由岛按顺序写进各自的缓冲
+/// （岛的实施计划第 2 节第 28 行），齐步下时点和顺序都和直接写一样。
+///
 /// Apply one change to the authoritative `Global`, sending frames to `region`'s
-/// players. Republish the snapshot when it covers what changed.
+/// players. Republish the snapshot when it covers what changed. This is the
+/// master running: frames go to the island's outbound mailbox and the island
+/// writes them in order when it is done (island plan, section 2, row 28), at
+/// the same point and in the same order as direct writes in lockstep.
 pub(crate) fn apply(global: &mut Global, region: &mut Region, effect: GlobalEffect) {
+    region.links.open_mailbox();
+    apply_on_master(global, region, effect);
+    region.links.deliver_mailbox();
+}
+
+fn apply_on_master(global: &mut Global, region: &mut Region, effect: GlobalEffect) {
     match effect {
         GlobalEffect::Command {
             source,

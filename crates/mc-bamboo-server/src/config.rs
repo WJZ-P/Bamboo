@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use mc_bamboo_auth::{CONNECT_TIMEOUT, READ_TIMEOUT, SESSION_SERVER_URL};
-use mc_bamboo_game::{MailBudget, WorldGenConfig};
+use mc_bamboo_game::{IslandDrive, MailBudget, WorldGenConfig};
 use tracing::warn;
 
 /// 视距的下限，再小客户端就没有可渲染的区块了。
@@ -103,6 +103,15 @@ pub struct ServerConfig {
     pub chunk_worker_threads: usize,
     /// Director 信箱每刻交付/收回区块的个数上限，0 表示不限。
     pub mail_budget: MailBudget,
+    /// 主控和岛怎么交接区块信件：齐步（精确模式，逐位一致）或分离（交付晚一刻）。
+    /// 缺省看环境变量 `BAMBOO_ISLAND_DRIVE`（调试用），没有就是齐步；第 7 步加
+    /// `bamboo.toml` 的 `island_threads` 后由它决定。
+    ///
+    /// How the master and the island hand chunk mail over: lockstep (exact mode,
+    /// bit for bit) or detached (delivery one tick later). The default follows
+    /// `BAMBOO_ISLAND_DRIVE` (debugging) and is lockstep otherwise; step 7's
+    /// `island_threads` in `bamboo.toml` will decide it.
+    pub island_drive: IslandDrive,
     /// 世界生成参数（种子、世界类型、flat 预设、是否生成结构）。
     /// 嵌入用法（测试、oracle、压测）默认超平坦、种子 0；由 `server.properties`
     /// 新建的世界在 `ConfigFiles::to_server_config` 里改成官方默认 `normal`。
@@ -150,6 +159,7 @@ impl Default for ServerConfig {
             redstone_cache: false,
             chunk_worker_threads: 0,
             mail_budget: MailBudget::default(),
+            island_drive: IslandDrive::default_for_world(),
             world_gen: WorldGenConfig::default(),
             broadcast_console_to_ops: true,
             console_enabled: false,

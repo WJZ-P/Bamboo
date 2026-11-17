@@ -623,8 +623,11 @@ pub(crate) struct Profiler {
     partition_on: bool,
     /// 每刻全量对照（默认关，`BAMBOO_PROFILE_PARTITION=2` 打开）。
     partition_verify: bool,
-    /// 第 8 步的分区器统计；默认不挂。
-    islands: Option<RefCell<crate::island_partition_stats::IslandPartitionStats>>,
+    /// 第 8 步的分区器统计；默认不挂。十几个直方图有几十 KB，放在堆上（见 [`histograms`]），
+    /// 否则调试构建按值搬 `Region` 时测试线程的栈会被撑爆。
+    /// Boxed: a dozen histograms are tens of KB (see [`histograms`]); inline
+    /// they overflow test-thread stacks when debug builds move a `Region`.
+    islands: Option<Box<RefCell<crate::island_partition_stats::IslandPartitionStats>>>,
     /// 单独存一份开关：关着时 `pump` 只判这个布尔值。
     islands_on: bool,
     /// 岛划分每刻全量对照（`BAMBOO_PROFILE_ISLANDS=2`）。
@@ -737,9 +740,9 @@ impl Profiler {
             self.partition_verify = false;
         }
         if let Some(verify) = island_verify_from_env() {
-            self.islands = Some(RefCell::new(
+            self.islands = Some(Box::new(RefCell::new(
                 crate::island_partition_stats::IslandPartitionStats::default(),
-            ));
+            )));
             self.islands_on = true;
             self.islands_verify = verify;
         } else {
@@ -962,6 +965,19 @@ impl Profiler {
             .as_nanos()
             .min(u128::from(u64::MAX)) as u64;
         self.sub_totals[index] = self.sub_totals[index].saturating_add(elapsed);
+    }
+
+    /// 把 `master`（主控的剖析器）这一刻累计的子段耗时并进来，并清掉它的。
+    /// 每刻 `end_tick` 之前调一次，报告里的子段就是「岛 + 主控」的合计。
+    ///
+    /// Fold the sub-phase time `master` (the master's profiler) accumulated
+    /// this tick into this one and clear it. Called once per tick before
+    /// `end_tick`, so the report's sub-phases are island + master.
+    pub(crate) fn absorb_sub_totals(&mut self, master: &mut Self) {
+        master.end_sub();
+        for (mine, theirs) in self.sub_totals.iter_mut().zip(master.sub_totals.iter_mut()) {
+            *mine = mine.saturating_add(std::mem::take(theirs));
+        }
     }
 
     /// 量一个闭区间：`start_sub` + `end_sub` 的简写。

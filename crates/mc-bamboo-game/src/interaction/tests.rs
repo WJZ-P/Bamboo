@@ -1111,6 +1111,9 @@ fn clicks_before_the_teleport_is_confirmed_change_nothing() {
     let mut server = Harness::new(8);
     let client = server.join("Kitten");
     server.tick();
+    // 分离驱动下区块晚一刻交付（岛的实施计划第 6 节第 6 步）。
+    // Under the detached drive chunks arrive one tick late (island plan step 6).
+    server.deliver_posted();
     client.take_frames();
     hold(&server, &client, items::STONE);
 

@@ -34,6 +34,14 @@ pub type SaveSeq = u64;
 /// region 的编号。现在只有一个 region（0），类型上留着给分区器。
 pub type RegionId = u32;
 
+/// 现在唯一的岛。交付、收回、换档都发给它；第 10 步起交付的目标岛由分区器给出，
+/// 收回和换档按区块所在的岛分组。
+///
+/// The only island for now. Deliveries, reclaims and level changes all go to
+/// it; from step 10 the partitioner picks a delivery's target island and
+/// reclaims / level changes are grouped by the island that holds each chunk.
+pub const HOME_REGION: RegionId = 0;
+
 /// 区块现在归谁。任何时刻一份盒子恰好在一个地方。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Owner {
@@ -217,8 +225,14 @@ pub enum Event<C> {
         generation: u64,
         column: Option<C>,
     },
-    /// region 确认收到交付。
-    Delivered { pos: ChunkPos, generation: u64 },
+    /// region 确认收到交付。`region` 是收下它的岛。
+    ///
+    /// The island `region` confirms it took the delivery.
+    Delivered {
+        region: RegionId,
+        pos: ChunkPos,
+        generation: u64,
+    },
     /// 每刻推进：超时票递减、收回延迟、限速补充。
     Tick { now_tick: u64 },
     /// 关服：收回全部区块、写完所有快照。
@@ -317,19 +331,29 @@ impl<C> Task<C> {
     }
 }
 
-/// 发给 region 的信箱消息。
+/// 发给 region 的信箱消息。交付、收回、换档带目标岛的编号，宿主按它投进那个岛的信箱。
+///
+/// Mailbox messages for a region. Deliveries, reclaims and level changes carry
+/// the target island; the host posts them into that island's mailbox.
 #[derive(Debug)]
 pub enum RegionMessage<C> {
     Deliver {
+        region: RegionId,
         pos: ChunkPos,
         generation: u64,
         column: C,
         desired: Desired,
     },
     /// 请 region 在 tick 边界交回这些区块，带各自的 generation。
-    Reclaim { positions: Vec<(ChunkPos, u64)> },
+    Reclaim {
+        region: RegionId,
+        positions: Vec<(ChunkPos, u64)>,
+    },
     /// 只在 `Full` 档内换了 tick 级别，盒子不用搬。
-    LevelChanged { changes: Vec<LevelChange> },
+    LevelChanged {
+        region: RegionId,
+        changes: Vec<LevelChange>,
+    },
     /// 已交付、可以进入玩家待发送集合的区块。
     Ready { positions: Vec<ChunkPos> },
     /// 区块不再被跟踪。
@@ -798,7 +822,11 @@ impl<C: ChunkBundle> Director<C> {
                 generation,
                 column,
             } => self.on_returned(&mut out, pos, generation, column),
-            Event::Delivered { pos, generation } => self.on_delivered(pos, generation),
+            Event::Delivered {
+                region,
+                pos,
+                generation,
+            } => self.on_delivered(region, pos, generation),
             Event::Tick { now_tick } => {
                 self.now_tick = now_tick;
                 self.begin_tick();
@@ -884,7 +912,10 @@ impl<C: ChunkBundle> Director<C> {
         }
         if !level_changed.is_empty() {
             let changes = std::mem::take(&mut level_changed);
-            out.push(Effect::ToRegion(RegionMessage::LevelChanged { changes }));
+            out.push(Effect::ToRegion(RegionMessage::LevelChanged {
+                region: HOME_REGION,
+                changes,
+            }));
         }
         self.level_changed = level_changed;
         self.changes_scratch = changes;
@@ -1070,6 +1101,7 @@ impl<C: ChunkBundle> Director<C> {
         }
         if !reclaim.is_empty() {
             out.push(Effect::ToRegion(RegionMessage::Reclaim {
+                region: HOME_REGION,
                 positions: reclaim,
             }));
         }
@@ -1116,6 +1148,7 @@ impl<C: ChunkBundle> Director<C> {
         }
         if !reclaim.is_empty() {
             out.push(Effect::ToRegion(RegionMessage::Reclaim {
+                region: HOME_REGION,
                 positions: reclaim,
             }));
         }
@@ -1318,6 +1351,7 @@ impl<C: ChunkBundle> Director<C> {
         self.set_owner(pos, Owner::Delivering);
         self.set_unloaded_at(pos, None);
         out.push(Effect::ToRegion(RegionMessage::Deliver {
+            region: HOME_REGION,
             pos,
             generation,
             column,
@@ -1325,12 +1359,12 @@ impl<C: ChunkBundle> Director<C> {
         }));
     }
 
-    fn on_delivered(&mut self, pos: ChunkPos, generation: u64) {
+    fn on_delivered(&mut self, region: RegionId, pos: ChunkPos, generation: u64) {
         if let Some(record) = self.chunks.get_mut(&pos)
             && record.generation == generation
             && record.owner == Owner::Delivering
         {
-            self.set_owner(pos, Owner::Region(0));
+            self.set_owner(pos, Owner::Region(region));
             self.pending_ready.insert(pos);
         }
     }
@@ -1385,6 +1419,7 @@ impl<C: ChunkBundle> Director<C> {
             self.set_owner(pos, Owner::Delivering);
             self.set_unloaded_at(pos, None);
             out.push(Effect::ToRegion(RegionMessage::Deliver {
+                region: HOME_REGION,
                 pos,
                 generation,
                 column,

@@ -106,7 +106,7 @@ impl Harness {
                 } => {
                     self.in_mail.insert(pos, (generation, column));
                 }
-                RegionMessage::Reclaim { positions } => {
+                RegionMessage::Reclaim { positions, .. } => {
                     for (pos, generation) in positions {
                         self.reclaim.insert(pos, generation);
                     }
@@ -185,7 +185,11 @@ impl Harness {
     fn region_tick(&mut self) {
         for (pos, (generation, column)) in std::mem::take(&mut self.in_mail) {
             self.region.insert(pos, column);
-            self.handle(Event::Delivered { pos, generation });
+            self.handle(Event::Delivered {
+                region: crate::director::HOME_REGION,
+                pos,
+                generation,
+            });
         }
         let reclaim = std::mem::take(&mut self.reclaim);
         if reclaim.is_empty() {
@@ -984,14 +988,18 @@ fn a_save_result_whose_ticket_returned_is_not_dropped() {
         generation,
         result: TaskResult::Decoded { column: box_ },
     });
-    d.handle(Event::Delivered { pos, generation });
+    d.handle(Event::Delivered {
+        region: crate::director::HOME_REGION,
+        pos,
+        generation,
+    });
     d.leave(1);
     // 收回延迟到点才发 `Reclaim`；region 在 tick 边界交回盒子。
     let reclaims = d.handle(Event::Tick { now_tick: 1 });
     assert!(
         reclaims.iter().any(|effect| matches!(
             effect,
-            Effect::ToRegion(RegionMessage::Reclaim { positions })
+            Effect::ToRegion(RegionMessage::Reclaim { positions, .. })
                 if positions.iter().any(|(p, _)| *p == pos)
         )),
         "该发包含这个坐标的收回消息"
@@ -1114,7 +1122,7 @@ fn simulation_only_changes_reach_the_region() {
     let notified: Vec<_> = effects
         .iter()
         .filter_map(|effect| match effect {
-            Effect::ToRegion(RegionMessage::LevelChanged { changes }) => Some(changes),
+            Effect::ToRegion(RegionMessage::LevelChanged { changes, .. }) => Some(changes),
             _ => None,
         })
         .flatten()

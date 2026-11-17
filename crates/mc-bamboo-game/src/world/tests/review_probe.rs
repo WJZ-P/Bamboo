@@ -391,13 +391,17 @@ fn dirty_detection_cost_does_not_scale_with_loaded_chunks() {
             .redstone
             .record_torch_toggle(BlockPos::new((i % 20_000) * 16, -60, 0), i as i64);
     }
+    let mut island = crate::island::Island::new(
+        mc_bamboo_world::director::HOME_REGION,
+        region,
+        crate::director_host::MailBudget::default(),
+    );
     let mut host = crate::director_host::DirectorHost::new(
         mc_bamboo_world::director::DirectorConfig::default(),
-        crate::director_host::MailBudget::default(),
     );
     let start = std::time::Instant::now();
     for _ in 0..20 {
-        let dirty = host.dirty_loaded_chunks(&mut region, false);
+        let dirty = host.dirty_loaded_chunks(&mut island, false);
         std::hint::black_box(dirty);
     }
     let per_tick_ms = start.elapsed().as_millis() / 20;
@@ -465,6 +469,9 @@ fn a_saved_world_delivers_the_nearest_chunk_first() {
     );
     // 第二刻开头收回所有读结果，一次按距离排序交付。
     server.tick();
+    // 分离驱动下交付晚一刻：读结果投进邮筒，岛第三刻开头才收下。
+    // Detached: the read results are posted and the island takes them next tick.
+    server.deliver_posted();
     let frames = client.take_frames();
     let chunks = crate::world::tests::received_chunks(&frames);
     assert_eq!(chunks.first(), Some(&near), "第一包必须是出生点区块");

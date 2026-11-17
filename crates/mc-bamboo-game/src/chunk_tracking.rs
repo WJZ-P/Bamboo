@@ -967,6 +967,9 @@ mod tests {
         let alice = server.join("Kitten");
         let bob = server.join("Mochi");
         server.tick();
+        // 分离驱动下区块晚一刻交付（岛的实施计划第 6 节第 6 步）。
+        // Under the detached drive chunks arrive one tick late (island plan step 6).
+        server.deliver_posted();
 
         let first = server.shared_chunk_frame(edited).expect("区块帧已经做好");
         let other = server
@@ -1031,6 +1034,9 @@ mod tests {
         let alice = server.join("Kitten");
         let bob = server.join("Mochi");
         server.tick();
+        // 分离驱动下区块晚一刻交付（岛的实施计划第 6 节第 6 步）。
+        // Under the detached drive chunks arrive one tick late (island plan step 6).
+        server.deliver_posted();
         alice.take_frames();
         bob.take_frames();
 

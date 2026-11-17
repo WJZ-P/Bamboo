@@ -61,6 +61,15 @@ pub(crate) fn is_console(id: PlayerId) -> bool {
 /// The console has no island; every command runs on the master with the direct
 /// port (island plan, section 2, item 8).
 pub(crate) fn on_console_command(global: &mut Global, region: &mut Region, line: &str) {
+    // 控制台命令在主控执行：写给玩家的帧经岛的出站信箱（见 `global_port::apply`）。
+    // A console command runs on the master: frames go through the island's
+    // outbound mailbox (see `global_port::apply`).
+    region.links.open_mailbox();
+    run_console_command(global, region, line);
+    region.links.deliver_mailbox();
+}
+
+fn run_console_command(global: &mut Global, region: &mut Region, line: &str) {
     let command = line.strip_prefix('/').unwrap_or(line);
     match commands().graph.parse(command, PERMISSION) {
         Ok(parsed) => run(

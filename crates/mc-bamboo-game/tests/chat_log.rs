@@ -79,6 +79,9 @@ fn chat_is_logged_with_the_not_secure_tag() {
         online_mode: false,
         enforce_secure_profile: false,
         admin: Default::default(),
+        // 期望值逐位比较，显式选齐步驱动（岛的实施计划第 9 节第 7 条）。
+        // Bit-exact expectations: choose the lockstep drive explicitly.
+        island_drive: mc_bamboo_game::IslandDrive::Lockstep,
         ..Default::default()
     };
     let world = World::new(config, receiver);
