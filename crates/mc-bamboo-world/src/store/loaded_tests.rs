@@ -377,3 +377,191 @@ fn loaded_positions_always_have_a_chunk_in_the_edited_table() {
         );
     }
 }
+
+/// 拆岛测试用的两片区块：(0,0) 周围 3×3 和 (10,0) 周围 3×3，中间隔着没加载的区块。
+fn two_clusters() -> (Vec<ChunkPos>, Vec<ChunkPos>) {
+    let square = |cx: i32| -> Vec<ChunkPos> {
+        (cx - 1..=cx + 1)
+            .flat_map(|x| (-1..=1).map(move |z| ChunkPos::new(x, z)))
+            .collect()
+    };
+    (square(0), square(10))
+}
+
+/// 一片区块里放几块会发光、会挡光的方块，跑完光照。
+fn furnish_cluster(store: &mut ChunkStore, cx: i32, salt: i32) {
+    let base = cx * 16;
+    store.set_block(BlockPos::new(base + 3, -60, 4), blocks::GLOWSTONE);
+    store.set_block(BlockPos::new(base + 8 + salt, -58, 9), blocks::STONE);
+    store.set_block(BlockPos::new(base - 5, -55, -6), blocks::GLOWSTONE);
+    for y in -60..-40 {
+        store.set_block(BlockPos::new(base + 12, y, 12 - salt), blocks::STONE);
+    }
+}
+
+/// 一组区块的全部可观察读数：逐格方块、两层光照、高度图，每段的光照数据、段状态、
+/// 版本号、原样判断。
+fn cluster_readings(store: &ChunkStore, chunks: &[ChunkPos]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for &pos in chunks {
+        let _ = write!(
+            out,
+            "{pos:?} loaded={} pristine={} states={:?} ",
+            store.is_loaded(pos),
+            store.is_pristine(pos),
+            store.light().section_states(pos)
+        );
+        for y in crate::light::MIN_LIGHT_SECTION..crate::light::MIN_LIGHT_SECTION + 26 {
+            let section = crate::light::SectionPos::new(pos.x, y, pos.z);
+            let _ = write!(
+                out,
+                "{:?}{:?}",
+                store.light().section(LightLayer::Sky, section),
+                store.light().section(LightLayer::Block, section)
+            );
+        }
+        for x in (0..16).step_by(3) {
+            for z in (0..16).step_by(5) {
+                for y in [-64, -61, -60, -59, -50, -41, 0, 100] {
+                    let block = BlockPos::new(pos.x * 16 + x, y, pos.z * 16 + z);
+                    let _ = write!(
+                        out,
+                        "{:?}{}{}{:?}",
+                        store.block(block),
+                        store.light_value(LightLayer::Sky, block),
+                        store.light_value(LightLayer::Block, block),
+                        store.heightmap_y(block)
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+fn two_cluster_store() -> (ChunkStore, Vec<ChunkPos>, Vec<ChunkPos>) {
+    let (first, second) = two_clusters();
+    let mut store = ChunkStore::loaded();
+    for &pos in first.iter().chain(&second) {
+        store.load(pos, Box::new(ChunkColumn::from_template()));
+    }
+    furnish_cluster(&mut store, 0, 0);
+    furnish_cluster(&mut store, 10, 1);
+    store.finish_light_updates();
+    (store, first, second)
+}
+
+/// 岛的整批拆合：拆出去再合回来逐项相同（含版本号和原样判断）；拆开以后两边各自
+/// 改方块、算光照，合回来等于从没拆过一直这么改。
+#[test]
+fn an_island_split_and_merge_keeps_blocks_light_and_revisions() {
+    let (mut store, first, second) = two_cluster_store();
+    let all: Vec<ChunkPos> = first.iter().chain(&second).copied().collect();
+    let control = store.clone();
+    let pending_changes = store.light().take_changes_len();
+    let before = cluster_readings(&store, &all);
+    let revisions: Vec<_> = all.iter().map(|&pos| store.revision(pos)).collect();
+    let moved: std::collections::BTreeSet<ChunkPos> = second.iter().copied().collect();
+
+    let mut island = store.split_off(&moved).expect("光照已算完");
+    assert_eq!(store.loaded_positions(), first);
+    assert_eq!(island.loaded_positions(), second);
+    // 还没发出去的光照变化按区块跟着走，一条不丢。
+    assert_eq!(
+        island.light().take_changes_len() + store.light().take_changes_len(),
+        pending_changes
+    );
+    assert!(island.light().take_changes_len() > 0);
+    // 拆出去的每一片和原来逐项相同，留下的那一片也是。
+    assert_eq!(
+        cluster_readings(&store, &first) + &cluster_readings(&island, &second),
+        before
+    );
+    for &pos in &second {
+        assert!(!store.is_loaded(pos) && !store.light().has_column(pos));
+        assert!(island.light().has_column(pos));
+    }
+    island.absorb_ok(&mut store);
+    let mut merged = island;
+    assert_eq!(cluster_readings(&merged, &all), before);
+    let after: Vec<_> = all.iter().map(|&pos| merged.revision(pos)).collect();
+    assert_eq!(after, revisions, "整批搬运不换版本号");
+    assert_eq!(merged.loaded_positions(), control.loaded_positions());
+
+    // 拆开以后两边各自改：和不拆的对照一模一样。
+    let mut control = control;
+    let mut island = merged.split_off(&moved).expect("光照已算完");
+    for (target, cx) in [(&mut merged, 0), (&mut island, 10)] {
+        target.set_block(BlockPos::new(cx * 16 + 6, -59, 6), blocks::GLOWSTONE);
+        target.set_block(BlockPos::new(cx * 16 + 3, -60, 4), blocks::AIR);
+        target.finish_light_updates();
+    }
+    for cx in [0, 10] {
+        control.set_block(BlockPos::new(cx * 16 + 6, -59, 6), blocks::GLOWSTONE);
+        control.set_block(BlockPos::new(cx * 16 + 3, -60, 4), blocks::AIR);
+    }
+    control.finish_light_updates();
+    // 版本号每次写都换新值，两边各自数，不比绝对值；比较「改过没改过」。
+    let changed_split: Vec<bool> = all
+        .iter()
+        .map(|&pos| {
+            let now = if moved.contains(&pos) {
+                island.revision(pos)
+            } else {
+                merged.revision(pos)
+            };
+            now != revisions[all.iter().position(|&p| p == pos).unwrap()]
+        })
+        .collect();
+    let changed_control: Vec<bool> = all
+        .iter()
+        .enumerate()
+        .map(|(index, &pos)| control.revision(pos) != revisions[index])
+        .collect();
+    assert_eq!(changed_split, changed_control);
+    merged
+        .absorb(island)
+        .unwrap_or_else(|_| unreachable!("光照已算完"));
+    assert_eq!(
+        cluster_readings(&merged, &all),
+        cluster_readings(&control, &all)
+    );
+}
+
+/// 搬走的区块和留下的已加载区块相邻时拒绝拆：整批搬运不重算邻居段状态。
+#[test]
+#[should_panic(expected = "相邻")]
+fn an_island_split_refuses_adjacent_chunks() {
+    let (mut store, first, _) = two_cluster_store();
+    let half: std::collections::BTreeSet<ChunkPos> = first.iter().take(3).copied().collect();
+    let _ = store.split_off(&half);
+}
+
+/// 合岛时两边相邻也拒绝。
+#[test]
+#[should_panic(expected = "相邻")]
+fn an_island_merge_refuses_adjacent_chunks() {
+    let (mut store, _, second) = two_cluster_store();
+    let moved: std::collections::BTreeSet<ChunkPos> = second.iter().copied().collect();
+    let island = store.split_off(&moved).expect("光照已算完");
+    store.load(ChunkPos::new(8, 0), Box::new(ChunkColumn::from_template()));
+    store.finish_light_updates();
+    let _ = store.absorb(island);
+}
+
+impl ChunkStore {
+    /// 测试辅助：把 `other` 并进自己，`other` 留空表。
+    fn absorb_ok(&mut self, other: &mut ChunkStore) {
+        let taken = std::mem::replace(other, ChunkStore::loaded());
+        self.absorb(taken)
+            .unwrap_or_else(|_| unreachable!("光照已算完"));
+    }
+}
+
+impl crate::light::LevelLight {
+    /// 测试辅助：待发的光照变化有几个区块。
+    fn take_changes_len(&self) -> usize {
+        self.clone().take_changes().len()
+    }
+}

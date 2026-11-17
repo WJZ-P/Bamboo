@@ -701,6 +701,76 @@ impl LightStorage {
         self.assign_revision(pos);
     }
 
+    /// 岛拆分：把 `chunks` 里的柱、版本号和已加载登记整批搬进一份新存储（岛的实施计划
+    /// 3.3）。不重算邻居段状态：调用方保证搬走的这一片和留下的已加载柱不相邻，两边的
+    /// 段状态本来就按「对面没加载」算好了。版本号原样带走、计数器两边都从现在的值接着发，
+    /// 所以同一个位置的版本号永不重复（合并时取较大的计数器）。`lowest_section` 两边都
+    /// 沿用：它只降不升，合并时取较小值，等于从没拆过。
+    ///
+    /// Island split: move the columns, revisions and loaded marks of `chunks`
+    /// into a new storage in one batch, without recomputing neighbour section
+    /// states (the caller guarantees the two parts are not adjacent). Revisions
+    /// move verbatim and both counters continue from the current value, so a
+    /// position never sees the same revision twice. `lowest_section` is kept on
+    /// both sides; it only decreases and a merge takes the minimum.
+    pub(crate) fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        let mut out = Self {
+            layer: self.layer,
+            template: self.template.clone(),
+            columns: HashMap::new(),
+            revisions: HashMap::new(),
+            lowest_section: self.lowest_section,
+            to_remove: BTreeSet::new(),
+            affected: BTreeSet::new(),
+            changed: Vec::new(),
+            has_inconsistencies: self.has_inconsistencies,
+            last_revision: self.last_revision,
+            loaded: self.loaded.as_ref().map(|_| HashSet::default()),
+        };
+        for &pos in chunks {
+            if let Some(column) = self.columns.remove(&pos) {
+                out.columns.insert(pos, column);
+            }
+            if let Some(revision) = self.revisions.remove(&pos) {
+                out.revisions.insert(pos, revision);
+            }
+            if let (Some(from), Some(to)) = (self.loaded.as_mut(), out.loaded.as_mut())
+                && from.remove(&pos)
+            {
+                to.insert(pos);
+            }
+        }
+        // 一轮一清的登记簿在光照算完时都是空的；保险起见也按区块分开。
+        let inside = |section: &SectionPos| chunks.contains(&section.chunk());
+        let (moved, kept) = mem::take(&mut self.to_remove).into_iter().partition(inside);
+        (out.to_remove, self.to_remove) = (moved, kept);
+        let (moved, kept) = mem::take(&mut self.affected).into_iter().partition(inside);
+        (out.affected, self.affected) = (moved, kept);
+        let (moved, kept) = mem::take(&mut self.changed).into_iter().partition(inside);
+        (out.changed, self.changed) = (moved, kept);
+        out
+    }
+
+    /// 岛合并：把另一份存储整批并进来，[`Self::split_off`] 的逆操作。调用方保证两边的
+    /// 已加载柱不相邻。
+    ///
+    /// Island merge: the inverse of [`Self::split_off`]. The caller guarantees
+    /// the two sides' loaded columns are not adjacent.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        debug_assert_eq!(self.layer, other.layer);
+        self.columns.extend(other.columns);
+        self.revisions.extend(other.revisions);
+        if let (Some(into), Some(from)) = (self.loaded.as_mut(), other.loaded) {
+            into.extend(from);
+        }
+        self.lowest_section = self.lowest_section.min(other.lowest_section);
+        self.last_revision = self.last_revision.max(other.last_revision);
+        self.to_remove.extend(other.to_remove);
+        self.affected.extend(other.affected);
+        self.changed.extend(other.changed);
+        self.has_inconsistencies |= other.has_inconsistencies;
+    }
+
     /// 这个位置和它那一轮有关的登记簿都清干净了。
     fn is_settled(&self, pos: ChunkPos) -> bool {
         let none_here = |sections: &BTreeSet<SectionPos>| {

@@ -309,6 +309,31 @@ impl LevelLight {
             .insert_column(pos, [sky, block], &mut self.visible);
     }
 
+    /// 岛拆分：把 `chunks` 的光照整批搬进一份新的光照（两层、引擎和给别人读的两份、
+    /// 待发的变化）。只在光照全部算完时调用；不重算邻居段状态，调用方保证两部分不相邻。
+    ///
+    /// Island split: move the light of `chunks` (both layers, the engine and the
+    /// published copy, pending changes) into a new light in one batch. Only once
+    /// light has settled; neighbour section states are not recomputed, the
+    /// caller guarantees the two parts are not adjacent.
+    pub(crate) fn split_off(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Self {
+        debug_assert!(self.ready_to_move_columns(), "只在光照全部算完时拆");
+        Self {
+            engines: self.engines.split_off(chunks),
+            visible: self.visible.split_off(chunks),
+            queue: TaskQueue::default(),
+        }
+    }
+
+    /// 岛合并：[`Self::split_off`] 的逆操作。两边都要已经算完。
+    ///
+    /// Island merge: the inverse of [`Self::split_off`]; both sides settled.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        debug_assert!(self.ready_to_move_columns() && other.ready_to_move_columns());
+        self.engines.absorb(other.engines);
+        self.visible.absorb(other.visible);
+    }
+
     /// 区块束搬进或搬出这个位置之后调用：按 `chunks` 此刻的方块重算这一柱和
     /// 8 个邻居柱的 `sectionStates`，照官方 `initializeLight` / `updateChunkStatus`
     /// 登记和注销段状态。盒子里带的来源世界计数不跨世界沿用。
