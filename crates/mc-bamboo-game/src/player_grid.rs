@@ -19,7 +19,7 @@
 //! [`Player::set_position`](crate::player::Player::set_position), and players enter and leave
 //! through `Region::insert_player` and [`PlayerGrid::remove`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use mc_bamboo_core::Vec3;
 
@@ -101,6 +101,63 @@ impl PlayerGrid {
             .flatten()
             .copied()
     }
+
+    /// 水平距离不超过 `radius` 的玩家，按 uid 升序；距离用玩家表里的真实位置算，
+    /// 网格只负责给出候选。这个查询不依赖视距，也不要求区块已经发到客户端。
+    ///
+    /// Players within `radius` horizontally, in ascending uid order. The grid
+    /// only supplies candidates; the real positions from the player table give
+    /// the exact distance. No view-distance or tracked-chunk condition applies.
+    /// 第一批生物接进降频 / 刷怪阶段之前没有调用方，允许暂时未被使用。
+    /// The first mob batch is not wired yet, so this has no caller for now.
+    #[allow(dead_code)]
+    pub(crate) fn players_within<'a>(
+        &'a self,
+        x: f64,
+        z: f64,
+        radius: f64,
+        players: &'a BTreeMap<PlayerId, crate::player::Player>,
+    ) -> impl Iterator<Item = (PlayerId, f64)> + 'a {
+        let radius_sq = radius * radius;
+        let mut found: Vec<(PlayerId, f64)> = self
+            .near(x, z, radius)
+            .filter_map(|id| players.get(&id))
+            .filter_map(|player| {
+                let dx = player.position().x - x;
+                let dz = player.position().z - z;
+                let distance_sq = dx * dx + dz * dz;
+                (distance_sq <= radius_sq).then_some((player.id, distance_sq.sqrt()))
+            })
+            .collect();
+        found.sort_unstable_by_key(|(id, _)| *id);
+        found.into_iter()
+    }
+
+    /// 离得最近的水平距离；没有玩家时是 `None`。`radius` 限制网格候选范围，
+    /// 超出这个距离的一律不算（设计稿的休眠档阈值由调用方给）。
+    ///
+    /// Distance to the nearest player, or `None` when there is none. `radius`
+    /// bounds the grid candidate search; the caller supplies the design's
+    /// sleep-tier threshold. Also unused until the first mob batch arrives.
+    #[allow(dead_code)]
+    pub(crate) fn nearest_distance(
+        &self,
+        x: f64,
+        z: f64,
+        radius: f64,
+        players: &BTreeMap<PlayerId, crate::player::Player>,
+    ) -> Option<f64> {
+        let mut best = f64::INFINITY;
+        for id in self.near(x, z, radius) {
+            let Some(player) = players.get(&id) else {
+                continue;
+            };
+            let dx = player.position().x - x;
+            let dz = player.position().z - z;
+            best = best.min((dx * dx + dz * dz).sqrt());
+        }
+        (best <= radius).then_some(best)
+    }
 }
 
 #[cfg(test)]
@@ -142,5 +199,59 @@ mod tests {
         grid.remove(PlayerId(1));
         assert!(near_ids(&grid, 1000.0, 0.0).is_empty());
         assert!(grid.cells.is_empty());
+    }
+    /// 「某个区块若干格内有哪些玩家、最近的玩家多远」的查询接口：
+    /// 网格给候选，玩家表给真实坐标，结果按 uid 升序。
+    #[test]
+    fn nearby_player_queries_use_real_positions_and_uid_order() {
+        use mc_bamboo_core::Vec3;
+        use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+        use uuid::Uuid;
+
+        fn player(id: i32, x: f64, z: f64) -> crate::player::Player {
+            crate::player::Player::new(
+                PlayerId(id),
+                Uuid::nil(),
+                format!("P{id}"),
+                GameMode::Creative,
+                ClientInformation::default(),
+                Vec3::new(x, 64.0, z),
+            )
+        }
+
+        let mut grid = PlayerGrid::default();
+        let mut players = BTreeMap::new();
+        for (id, x, z) in [
+            (9, 30.0, 40.0), // 距离 50
+            (2, 3.0, 4.0),   // 距离 5
+            (7, 100.0, 0.0), // 100，在 64 格外
+            (5, -64.1, 0.0), // 64.1，网格相邻但精确距离超了
+        ] {
+            let p = player(id, x, z);
+            grid.place(PlayerId(id), p.position());
+            players.insert(PlayerId(id), p);
+        }
+        let found: Vec<_> = grid.players_within(0.0, 0.0, 64.0, &players).collect();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].0, PlayerId(2));
+        assert_eq!(found[1].0, PlayerId(9));
+        assert!((found[0].1 - 5.0).abs() < 1.0e-9);
+        assert!((found[1].1 - 50.0).abs() < 1.0e-9);
+        assert_eq!(grid.nearest_distance(0.0, 0.0, 64.0, &players), Some(5.0));
+        assert_eq!(grid.nearest_distance(0.0, 0.0, 4.0, &players), None);
+        assert_eq!(grid.nearest_distance(1000.0, 1000.0, 64.0, &players), None);
+
+        // 玩家跨格子移动后，查询跟着真实位置走；离开世界后不再出现。
+        let moved = player(2, 300.0, 300.0);
+        grid.place(PlayerId(2), moved.position());
+        players.insert(PlayerId(2), moved);
+        assert_eq!(grid.nearest_distance(0.0, 0.0, 64.0, &players), Some(50.0));
+        grid.remove(PlayerId(9));
+        players.remove(&PlayerId(9));
+        assert!(
+            grid.players_within(0.0, 0.0, 64.0, &players)
+                .next()
+                .is_none()
+        );
     }
 }
