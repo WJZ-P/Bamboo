@@ -4,6 +4,8 @@
 # 用法：run-heavy.sh [结果目录] [场景名...]
 #   结果目录缺省是临时目录，脚本结束删掉；传了目录就保留（KEEP=1 也保留）。
 #   PORT（默认 25990）、RAMP（默认 5）、PROFILE_SECS（默认 10）、ROUNDS（默认 3）。
+#   PARTITION（默认 1）：划分 / 越界统计开关，0 = 关闭（性能基线），2 = 再开全量对照。
+#   结果目录按开关分开：<目录>/on 或 <目录>/off，同轮交替比较时分别跑两遍。
 #
 # 场景由 bamboo-loadtest serve --scenario <名字> 在服务端进程里搭：固定的九台机器
 # （tools/mc-bamboo-hit-rate）按固定网格摆好、整片区域走 /forceload 票正式交付；
@@ -21,6 +23,7 @@ ROUNDS=${ROUNDS:-3}
 KEEP=${KEEP:-}
 # DURATION 只给冒烟测试用；正式测量用 describe 给出的场景时长。
 DURATION=${DURATION:-}
+PARTITION=${PARTITION:-1}
 
 if [ "$#" -ge 1 ] && [ -n "$1" ]; then
     OUT=$(mkdir -p "$1" && cd "$1" && pwd)
@@ -34,6 +37,15 @@ if [ "${#SCENES[@]}" -eq 0 ]; then
     SCENES=(spread-4 spread-16 spread-64 big-16 big-64 spread-16-players \
             normal-20-walk normal-20-fly normal-50-walk normal-50-fly)
 fi
+
+# 开关不同不要混进同一份汇总；目录后缀让两遍测量的原始报告都留着。
+if [ "$PARTITION" = "0" ]; then
+    OUT="$OUT/off"
+else
+    OUT="$OUT/on"
+fi
+mkdir -p "$OUT"
+KEEP=1
 
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
     echo "building bamboo-loadtest --release in $TREE"
@@ -69,7 +81,11 @@ run_one() {
     if [ -n "$DURATION" ]; then seconds=$DURATION; fi
     echo "=== $name round $round: $bots bots, $pattern/$layout, ${seconds}s ==="
     # 服务端在临时目录里跑：管理名单和日志都落在那里，不在仓库里留文件。
+    # 第 0 步报告提醒：红石缓存和按区块统计不要一起用；这里同样只跑默认
+    # 缓存关闭状态。PARTITION=0 时把这个变量设成 0，剖析器读环境变量时
+    # 只认 1 / 2，其余值（含 0）都当成关闭。
     (cd "$dir" && exec env BAMBOO_PROFILE="$PROFILE_SECS" BAMBOO_PROFILE_CHUNKS=1 \
+        BAMBOO_PROFILE_PARTITION="$PARTITION" \
         "$BIN" serve --addr "127.0.0.1:$PORT" --max-players 500 --view-distance 8 \
         --scenario "$name" > server.log 2>&1) &
     SERVER=$!

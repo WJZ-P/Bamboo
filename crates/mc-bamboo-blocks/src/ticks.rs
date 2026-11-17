@@ -510,6 +510,12 @@ impl BlockTicks {
         std::mem::take(&mut self.activity.touched)
     }
 
+    /// 划分开关关着时也要每刻清掉本刻清单，否则它会一直增长。
+    /// `ChunkPos` 是 `Copy`，`clear` 只改长度，不遍历元素。
+    pub fn clear_touched_chunks(&mut self) {
+        self.activity.touched.clear();
+    }
+
     /// 只读地看本刻活动过的区块，不清空。
     pub fn touched_chunks(&self) -> &[ChunkPos] {
         &self.activity.touched

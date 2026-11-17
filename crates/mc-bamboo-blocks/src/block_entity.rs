@@ -905,6 +905,13 @@ impl BlockEntities {
         self.watchers.crosses_chunks(chunks)
     }
 
+    /// 睡眠方块实体的关注关系，按区块去重后升序返回 `(关注者, 被关注格)`。
+    /// 只报跨区块的关系：同一区块里的关注不会把两个单元连起来。
+    /// 划分阶段每刻问一次，代价和睡眠条目数成正比。
+    pub fn watcher_pairs(&self) -> Vec<(ChunkPos, ChunkPos)> {
+        self.watchers.cross_chunk_pairs()
+    }
+
     /// 拆出 `chunks` 这些区块的方块实体，造出另一个单元的表。
     ///
     /// 走和 `take_chunk` / `insert_chunk` 相同的装盒路径：源表里这些区块的
@@ -1272,6 +1279,11 @@ impl BlockEvents {
         std::mem::take(&mut self.touched)
     }
 
+    /// 划分开关关着时也要每刻清掉本刻清单，否则它会一直增长。
+    pub fn clear_touched_chunks(&mut self) {
+        self.touched.clear();
+    }
+
     /// 只读地看本刻排过事件的区块，不清空。
     pub fn touched_chunks(&self) -> &[ChunkPos] {
         &self.touched
@@ -1280,6 +1292,11 @@ impl BlockEvents {
     /// 这个区块有没有排着事件（含下一刻才看的重新排队项），给忙区块查询用。
     pub fn chunk_has_queued(&self, chunk: ChunkPos) -> bool {
         self.queue.iter().any(|event| event.pos.chunk() == chunk)
+    }
+
+    /// 还排着事件的全部区块，按坐标升序。划分阶段每刻问一次，队列通常是空的。
+    pub fn queued_chunks(&self) -> BTreeSet<ChunkPos> {
+        self.queue.iter().map(|event| event.pos.chunk()).collect()
     }
 
     /// 拆出 `chunks` 这些区块里排着的事件，两边都保持原来的排队顺序。

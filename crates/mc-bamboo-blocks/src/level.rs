@@ -152,6 +152,12 @@ pub enum Observation<'a> {
         progress: u32,
         progress_o: u32,
     },
+    /// 一次触发通过 `Level` 读或写了这一格。多区域 tick 第 2 步的越界统计
+    /// 只用它判断「碰到的区块在不在自己单元范围内」；默认实现什么都不做。
+    ChunkAccess {
+        pos: BlockPos,
+        write: bool,
+    },
 }
 
 /// 方块状态装不下、跟着位置走的世界数据：方块实体、方块事件、红石记忆。
@@ -1007,6 +1013,15 @@ pub trait Level: LevelSideState + LevelEntities {
     /// read-only paths report events too; a recording implementation uses
     /// interior mutability. An implementation must not change block behaviour.
     fn observe(&self, _event: Observation<'_>) {}
+
+    /// 多区域 tick 第 2 步的越界统计开着没有。`World::new` 问一次并记成布尔值，
+    /// 之后每次读写只有一次布尔判断；关着时连 `observe` 的虚调用都没有。
+    ///
+    /// Whether step-2 out-of-unit statistics are on. `World::new` asks once and
+    /// caches the answer, so a read costs only one bool test when they are off.
+    fn observe_partition_enabled(&self) -> bool {
+        false
+    }
 }
 
 /// 红石用到的、方块状态装不下的世界数据，活得比一次操作长。
