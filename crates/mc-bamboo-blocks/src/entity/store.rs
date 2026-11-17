@@ -415,7 +415,7 @@ impl ChunkEntities {
 ///
 /// 行槽的下标稳定，`take` / `put` O(1)；`index` 是 uid 到行号的映射，`grid` 是 16³ 段的行号索引。
 /// tick 期间新生成的实体进 `pending`，下一 tick 才开始 tick，和官方的 `EntityTickList` 一样。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EntityStore {
     slots: Vec<Option<EntityRow>>,
     index: BTreeMap<EntityUid, usize>,
@@ -440,27 +440,6 @@ pub struct EntityStore {
     taken_snapshots: BTreeMap<EntityUid, (Aabb, Option<ItemStack>)>,
     /// 位置或堆变了的实体的新包围盒，交给方块实体表精确判定。
     wake_events: Vec<Aabb>,
-}
-
-impl Default for EntityStore {
-    fn default() -> Self {
-        Self {
-            slots: Vec::new(),
-            index: BTreeMap::new(),
-            taken: BTreeMap::new(),
-            free: Vec::new(),
-            grid: BTreeMap::new(),
-            by_type: BTreeMap::new(),
-            hard_colliding: BTreeSet::new(),
-            ids: EntityIds::default(),
-            pending: Vec::new(),
-            ticking: false,
-            preserved: Vec::new(),
-            watched_sections: HashSet::new(),
-            taken_snapshots: BTreeMap::new(),
-            wake_events: Vec::new(),
-        }
-    }
 }
 
 impl EntityStore {
