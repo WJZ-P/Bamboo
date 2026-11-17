@@ -6,6 +6,8 @@
 #   PORT（默认 25990）、RAMP（默认 5）、PROFILE_SECS（默认 10）、ROUNDS（默认 3）。
 #   PARTITION（默认 1）：划分 / 越界统计开关，0 = 关闭（性能基线），2 = 再开全量对照。
 #   结果目录按开关分开：<目录>/on 或 <目录>/off，同轮交替比较时分别跑两遍。
+#   INTERLEAVE=1：按「轮」在外、「场景」在内的顺序跑（第 1 轮把每个场景各跑一遍，
+#   再第 2 轮……），机器上有别的任务时同一轮里的场景之间才好比较。缺省按场景跑完再换。
 #
 # 场景由 bamboo-loadtest serve --scenario <名字> 在服务端进程里搭：固定的九台机器
 # （tools/mc-bamboo-hit-rate）按固定网格摆好、整片区域走 /forceload 票正式交付；
@@ -142,15 +144,27 @@ run_one() {
 }
 
 failed=0
-for scene in "${SCENES[@]}"; do
+if [ "${INTERLEAVE:-0}" = "1" ]; then
     for round in $(seq 1 "$ROUNDS"); do
-        if ! run_one "$scene" "$round"; then
-            failed=1
-            stop_server
-            break 2
-        fi
+        for scene in "${SCENES[@]}"; do
+            if ! run_one "$scene" "$round"; then
+                failed=1
+                stop_server
+                break 2
+            fi
+        done
     done
-done
+else
+    for scene in "${SCENES[@]}"; do
+        for round in $(seq 1 "$ROUNDS"); do
+            if ! run_one "$scene" "$round"; then
+                failed=1
+                stop_server
+                break 2
+            fi
+        done
+    done
+fi
 
 echo "=== summary ==="
 python3 "$TREE/tools/mc-bamboo-loadtest/summarize-heavy.py" "$OUT" "${SCENES[@]}"

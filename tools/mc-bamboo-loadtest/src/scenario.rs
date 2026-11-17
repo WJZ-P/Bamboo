@@ -9,10 +9,10 @@
 //! coordinates. `setup` force-loads the area first; `tick` drives the periodic
 //! inputs on the world thread.
 
-use std::sync::Mutex;
+use std::{collections::BTreeSet, sync::Mutex};
 
 use mc_bamboo_blocks::{BlockState, HopperEntity, behaviour::machines::FurnaceEntity};
-use mc_bamboo_core::{BlockPos, ChunkPos};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::{CookingKind, blocks, items};
 use mc_bamboo_game::{BenchContainer, BenchHooks, BenchWorld};
 use mc_bamboo_hit_rate::{machines, world::Input, world::Machine};
@@ -25,6 +25,27 @@ const SPREAD_STRIDE: i32 = 6;
 const BIG_STRIDE: i32 = 24;
 /// 一台机器最多占的格数，用来算要强制加载的区块框。
 const MACHINE_EXTENT: i32 = 20;
+
+/// 「岛」场景里相邻两组的间距（区块）。按总设计稿 6.1，视距 10 时两名玩家的区块
+/// 坐标差到 36 一定不合并；一组自己约占 21 个区块（玩家视野加机器和掉落物），
+/// 64 让组间至少空出 40 多个区块，视距到 16 也仍是不同的岛。
+///
+/// Spacing between groups in the island scenarios, in chunks. Design 6.1 says two
+/// players 36 chunks apart never share a region at view distance 10; one group spans
+/// about 21 chunks, so 64 leaves a gap of 40+ chunks.
+const GROUP_STRIDE_CHUNKS: i32 = 64;
+/// 组内九台机器按 3×3 摆，间距 48 格（3 个区块），机器之间至少隔 1 个区块。
+const GROUP_MACHINE_STRIDE: i32 = 48;
+/// 每组的假玩家数。
+const GROUP_BOTS: usize = 10;
+/// 每组的掉落物按 16×16 摆，间距 2 格，不会互相合并（合并范围水平 0.5 格）。
+const GROUP_ITEM_SIDE: i32 = 16;
+/// 掉落物方阵的西北角，相对组原点。离玩家站的地方约 70 格，假玩家捡不到。
+const GROUP_ITEM_CORNER: (i32, i32) = (-48, -48);
+/// 玩家站的地方，相对组原点：机器方阵南边的中间，离最远的机器约 9 个区块。
+const GROUP_PLAYER_SPOT: (i32, i32) = (58, -24);
+/// 超平坦的站立高度，和 `flat::surface_y()` / 假玩家的 `SPAWN` 一致。
+const FLAT_SURFACE_Y: f64 = -60.0;
 
 /// 场景种类，由 `serve --scenario <名字>` 选。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +64,16 @@ pub enum ScenarioKind {
     Normal20Fly,
     Normal50Walk,
     Normal50Fly,
+    /// 「岛」的基线：K 组，每组 10 名假玩家、九台机器、256 个掉落物，组间隔
+    /// 64 个区块，以后一定是 K 个不同的岛。每组内容逐位相同，`islands-1` 就是
+    /// 「一组单独跑」的对照。
+    ///
+    /// Island baselines: K identical groups (10 bots, nine machines, 256 dropped
+    /// items each) 64 chunks apart, so they will be K separate islands.
+    Islands1,
+    Islands2,
+    Islands4,
+    Islands8,
 }
 
 impl ScenarioKind {
@@ -58,6 +89,10 @@ impl ScenarioKind {
             "normal-20-fly" => Self::Normal20Fly,
             "normal-50-walk" => Self::Normal50Walk,
             "normal-50-fly" => Self::Normal50Fly,
+            "islands-1" => Self::Islands1,
+            "islands-2" => Self::Islands2,
+            "islands-4" => Self::Islands4,
+            "islands-8" => Self::Islands8,
             _ => return None,
         })
     }
@@ -74,6 +109,10 @@ impl ScenarioKind {
             Self::Normal20Fly => "normal-20-fly",
             Self::Normal50Walk => "normal-50-walk",
             Self::Normal50Fly => "normal-50-fly",
+            Self::Islands1 => "islands-1",
+            Self::Islands2 => "islands-2",
+            Self::Islands4 => "islands-4",
+            Self::Islands8 => "islands-8",
         }
     }
 
@@ -92,6 +131,20 @@ impl ScenarioKind {
                 let n = if self == Self::Normal20Fly { 20 } else { 50 };
                 (n, "fly", "spread", 60)
             }
+            Self::Islands1 | Self::Islands2 | Self::Islands4 | Self::Islands8 => {
+                (GROUP_BOTS * self.groups(), "wander", "cluster", 60)
+            }
+        }
+    }
+
+    /// 「岛」场景的组数；别的场景是 0。
+    pub fn groups(self) -> usize {
+        match self {
+            Self::Islands1 => 1,
+            Self::Islands2 => 2,
+            Self::Islands4 => 4,
+            Self::Islands8 => 8,
+            _ => 0,
         }
     }
 
@@ -100,6 +153,9 @@ impl ScenarioKind {
             Self::Spread4 => 4,
             Self::Spread16 | Self::Big16 | Self::Spread16Players => 16,
             Self::Spread64 | Self::Big64 => 64,
+            Self::Islands1 | Self::Islands2 | Self::Islands4 | Self::Islands8 => {
+                machines::all().len() * self.groups()
+            }
             _ => 0,
         }
     }
@@ -143,6 +199,10 @@ struct Plan {
     placements: Vec<Placement>,
     chunks: Vec<ChunkPos>,
     actions: Vec<Action>,
+    /// 「岛」场景的组数，别的场景是 0。
+    groups: usize,
+    /// 已经送到自己那一组的假玩家。
+    placed: BTreeSet<String>,
     forced: bool,
     installed: bool,
 }
@@ -160,19 +220,32 @@ pub fn configure(kind: ScenarioKind) -> BenchHooks {
             origin: origin_of(kind, i),
         })
         .collect();
-    let chunks = forced_chunks(&placements);
+    let groups = kind.groups();
+    let chunks = if groups > 0 {
+        group_chunks(groups)
+    } else {
+        forced_chunks(&placements)
+    };
     let actions: Vec<Action> = placements
         .iter()
         .enumerate()
         .flat_map(|(index, p)| {
             let input = builds[p.build]().input;
-            translate_input(input, p.origin, index as i64)
+            // 岛场景每组的相位相同，组和组的内容逐刻一样。
+            let phase = if groups > 0 {
+                index % builds.len()
+            } else {
+                index
+            };
+            translate_input(input, p.origin, phase as i64)
         })
         .collect();
     *PLAN.lock().expect("scenario plan lock") = Some(Plan {
         placements,
         chunks,
         actions,
+        groups,
+        placed: BTreeSet::new(),
         forced: false,
         installed: false,
     });
@@ -214,6 +287,15 @@ fn translate_input(input: Input, origin: (i32, i32), index: i64) -> Vec<Action> 
 
 /// 网格坐标。`n` 台机器按 ceil(sqrt(n)) 列排；分散时一列 6 个区块，连片时 24 格。
 fn origin_of(kind: ScenarioKind, index: usize) -> (i32, i32) {
+    if kind.groups() > 0 {
+        let per_group = machines::all().len();
+        let (gx, gz) = group_origin(index / per_group);
+        let local = (index % per_group) as i32;
+        return (
+            gx + local % 3 * GROUP_MACHINE_STRIDE,
+            gz + local / 3 * GROUP_MACHINE_STRIDE,
+        );
+    }
     let count = kind.machines();
     let cols = (count as f64).sqrt().ceil() as i32;
     let col = index as i32 % cols;
@@ -223,6 +305,62 @@ fn origin_of(kind: ScenarioKind, index: usize) -> (i32, i32) {
     } else {
         (col * SPREAD_STRIDE * 16, row * SPREAD_STRIDE * 16)
     }
+}
+
+/// 第 `group` 组的原点（方块坐标）。组沿 x 轴排开。
+fn group_origin(group: usize) -> (i32, i32) {
+    (group as i32 * GROUP_STRIDE_CHUNKS * 16, 0)
+}
+
+/// 每组各自强制加载一个矩形：九台机器、掉落物方阵和玩家站的地方。
+/// 组和组之间不加载，所以是 K 片互不相连的已加载区域。
+///
+/// Each group force-loads its own rectangle; nothing between groups is loaded.
+fn group_chunks(groups: usize) -> Vec<ChunkPos> {
+    let mut out = Vec::new();
+    for group in 0..groups {
+        let (ox, oz) = group_origin(group);
+        let min_x = ox + GROUP_ITEM_CORNER.0.min(GROUP_PLAYER_SPOT.0);
+        let min_z = oz + GROUP_ITEM_CORNER.1.min(GROUP_PLAYER_SPOT.1);
+        let max_x = ox + 2 * GROUP_MACHINE_STRIDE + MACHINE_EXTENT;
+        let max_z = oz + 2 * GROUP_MACHINE_STRIDE + MACHINE_EXTENT;
+        for x in (min_x >> 4) - 1..=(max_x >> 4) + 1 {
+            for z in (min_z >> 4) - 1..=(max_z >> 4) + 1 {
+                out.push(ChunkPos::new(x, z));
+            }
+        }
+    }
+    out
+}
+
+/// 第 `group` 组的掉落物：16×16、间距 2 格，物品种类轮换，落在地表上。
+fn group_items(group: usize) -> Vec<(Vec3, ItemStack)> {
+    const KINDS: [i32; 4] = [
+        items::COBBLESTONE,
+        items::DIRT,
+        items::OAK_PLANKS,
+        items::STICK,
+    ];
+    let (ox, oz) = group_origin(group);
+    let mut out = Vec::new();
+    for i in 0..GROUP_ITEM_SIDE {
+        for j in 0..GROUP_ITEM_SIDE {
+            let x = ox + GROUP_ITEM_CORNER.0 + 2 * i;
+            let z = oz + GROUP_ITEM_CORNER.1 + 2 * j;
+            let kind = KINDS[((i + j) % KINDS.len() as i32) as usize];
+            out.push((
+                Vec3::new(f64::from(x) + 0.5, FLAT_SURFACE_Y, f64::from(z) + 0.5),
+                ItemStack::new(kind, 1),
+            ));
+        }
+    }
+    out
+}
+
+/// 假玩家名字末尾的编号（`Bot0007` → 7）。
+fn bot_index(name: &str) -> Option<usize> {
+    let digits = name.trim_start_matches(|c: char| !c.is_ascii_digit());
+    digits.parse().ok()
 }
 
 /// 机器所在的整片矩形都强制加载，保证是一片连通的已加载区域、
@@ -288,6 +426,11 @@ fn setup_scene(world: &mut BenchWorld<'_>) -> bool {
         for placement in &plan.placements {
             install_machine(world, builds[placement.build], placement.origin);
         }
+        for group in 0..plan.groups {
+            for (position, stack) in group_items(group) {
+                world.spawn_item(position, stack);
+            }
+        }
         plan.installed = true;
     }
     true
@@ -349,7 +492,10 @@ fn install_machine(world: &mut BenchWorld<'_>, build: fn() -> Machine, origin: (
 fn tick_scene(world: &mut BenchWorld<'_>) {
     let now = world.game_time();
     let actions = {
-        let guard = PLAN.lock().expect("scenario plan lock");
+        let mut guard = PLAN.lock().expect("scenario plan lock");
+        if let Some(plan) = guard.as_mut() {
+            place_new_bots(world, plan);
+        }
         guard
             .as_ref()
             .map(|plan| plan.actions.clone())
@@ -380,6 +526,29 @@ fn tick_scene(world: &mut BenchWorld<'_>) {
             }
             _ => {}
         }
+    }
+}
+
+/// 岛场景：新进服的假玩家按编号分到 `编号 % K` 组，用控制台的 `/tp` 送过去。
+/// 只在有人没送到的时候查一次在线名单。
+///
+/// Island scenarios: each new bot goes to group `index % K` through a console `/tp`.
+fn place_new_bots(world: &mut BenchWorld<'_>, plan: &mut Plan) {
+    if plan.groups == 0 {
+        return;
+    }
+    for name in world.player_names() {
+        if plan.placed.contains(&name) {
+            continue;
+        }
+        let index = bot_index(&name).unwrap_or(plan.placed.len());
+        let (ox, oz) = group_origin(index % plan.groups);
+        // 同组的人错开几格，免得全挤在一个点上。
+        let spread = (index / plan.groups % 5) as f64 * 2.0 - 4.0;
+        let x = f64::from(ox + GROUP_PLAYER_SPOT.0) + 0.5 + spread;
+        let z = f64::from(oz + GROUP_PLAYER_SPOT.1) + 0.5;
+        world.console_command(&format!("tp {name} {x} {FLAT_SURFACE_Y} {z}"));
+        plan.placed.insert(name);
     }
 }
 
@@ -420,6 +589,39 @@ mod tests {
         let b = origin_of(ScenarioKind::Big16, 1);
         assert!(b.0 - a.0 > MACHINE_EXTENT);
         assert!((b.0 - a.0) / 16 <= 2);
+    }
+
+    #[test]
+    fn island_groups_are_far_apart_and_cover_their_content() {
+        let kind = ScenarioKind::Islands8;
+        let chunks = group_chunks(kind.groups());
+        // 每组一个矩形，组和组的已加载区块之间至少隔 36 个区块（设计稿 6.1 的「一定不合并」）。
+        let group_of = |c: &ChunkPos| (c.x + 16).div_euclid(GROUP_STRIDE_CHUNKS);
+        for a in &chunks {
+            for b in &chunks {
+                if group_of(a) != group_of(b) {
+                    assert!((a.x - b.x).abs().max((a.z - b.z).abs()) > 36);
+                }
+            }
+        }
+        for index in 0..kind.machines() {
+            let (ox, oz) = origin_of(kind, index);
+            for (dx, dz) in [(0, 0), (MACHINE_EXTENT, MACHINE_EXTENT)] {
+                let pos = ChunkPos::new((ox + dx) >> 4, (oz + dz) >> 4);
+                assert!(chunks.contains(&pos), "machine {index} {pos:?} missing");
+            }
+        }
+        for group in 0..kind.groups() {
+            for (position, _) in group_items(group) {
+                let pos = ChunkPos::new(
+                    (position.x.floor() as i32) >> 4,
+                    (position.z.floor() as i32) >> 4,
+                );
+                assert!(chunks.contains(&pos), "item {pos:?} missing");
+            }
+        }
+        assert_eq!(kind.bots().0, 80);
+        assert_eq!(bot_index("Bot0007"), Some(7));
     }
 
     #[test]
