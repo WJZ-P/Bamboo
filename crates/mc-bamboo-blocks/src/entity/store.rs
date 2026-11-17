@@ -8,7 +8,13 @@
 //! design, section 4.3. Row slots keep their indices stable; [`EntityStore::snapshot`] lays
 //! out three parallel arrays for the parallel driver.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering},
+    },
+};
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::entity_types;
@@ -24,6 +30,65 @@ use super::{
 
 /// 发给客户端的实体 ID，也是实体之间互相引用的键。
 pub type EntityUid = i32;
+
+/// 非玩家实体的网络 ID 分配器，所有拿着同一个句柄的实体表共用一个计数器。
+///
+/// 每个世界一个（`docs/island-implementation-plan.md` 第 6 节第 2 步）：以后一个世界
+/// 拆成多个岛、每个岛一张 [`EntityStore`]，号也不会撞。不用进程级静态量，免得同一进程里
+/// 并行跑的测试互相影响。克隆得到的是同一个计数器的另一个句柄。
+/// 只有一张表在分配时，号的序列和原来表内自带的计数器逐个相同：从 [`FIRST_ENTITY_ID`]
+/// 起，每次加一。
+///
+/// Network-id allocator for non-player entities; every store holding the same
+/// handle shares one counter. One per world, so that islands with separate
+/// stores never collide. Not a process-wide static, so tests running in
+/// parallel in one process stay independent. Cloning yields another handle to
+/// the same counter. With a single store allocating, the sequence is exactly
+/// the old per-store counter: from [`FIRST_ENTITY_ID`], one at a time.
+#[derive(Debug, Clone)]
+pub struct EntityIds(Arc<AtomicI32>);
+
+impl Default for EntityIds {
+    fn default() -> Self {
+        Self::starting_at(FIRST_ENTITY_ID)
+    }
+}
+
+impl EntityIds {
+    /// 从 [`FIRST_ENTITY_ID`] 开始的新计数器。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 从 `next` 开始的新计数器。oracle 的假世界用它对齐官方的 `getNextEntityId`。
+    ///
+    /// A fresh counter starting at `next`; oracle worlds use it to line up with
+    /// the official `getNextEntityId`.
+    pub fn starting_at(next: EntityUid) -> Self {
+        Self(Arc::new(AtomicI32::new(next)))
+    }
+
+    /// 取一个号。分配的先后由调用方的顺序决定（现在都在串行路径上）。
+    ///
+    /// Take one id. The order is the callers' order (all serial today).
+    pub fn allocate(&self) -> EntityUid {
+        self.0.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// 下一个会分配出去的号，不消耗。
+    ///
+    /// The id the next allocation will return, without taking it.
+    pub fn peek(&self) -> EntityUid {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// 两个句柄是不是同一个计数器。
+    ///
+    /// Whether two handles share one counter.
+    pub fn same_counter(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 /// 空间索引每段有多少格，和区块段一致。
 const SECTION_SIZE: i32 = 16;
@@ -362,7 +427,9 @@ pub struct EntityStore {
     by_type: BTreeMap<usize, BTreeSet<EntityUid>>,
     /// 硬碰撞实体的 uid 集合，现在恒为空。
     hard_colliding: BTreeSet<EntityUid>,
-    next_id: EntityUid,
+    /// 共享的 ID 分配器句柄；表里不再有自己的计数器。
+    /// Handle to the shared id allocator; the store has no counter of its own.
+    ids: EntityIds,
     pending: Vec<EntityRow>,
     ticking: bool,
     /// 读盘时不认识的实体类型，按区块原样保留。
@@ -385,7 +452,7 @@ impl Default for EntityStore {
             grid: BTreeMap::new(),
             by_type: BTreeMap::new(),
             hard_colliding: BTreeSet::new(),
-            next_id: FIRST_ENTITY_ID,
+            ids: EntityIds::default(),
             pending: Vec::new(),
             ticking: false,
             preserved: Vec::new(),
@@ -401,12 +468,30 @@ impl EntityStore {
         Self::default()
     }
 
-    /// 从指定的实体 ID 开始分配。oracle 的假世界用这个对齐官方的 `getNextEntityId`。
+    /// 从指定的实体 ID 开始分配（自己一个新计数器）。oracle 的假世界用这个对齐官方的
+    /// `getNextEntityId`。
+    ///
+    /// Allocate from `next_id` on a fresh counter of its own; oracle worlds use
+    /// this to line up with the official `getNextEntityId`.
     pub fn with_next_id(next_id: EntityUid) -> Self {
+        Self::with_ids(EntityIds::starting_at(next_id))
+    }
+
+    /// 用世界共享的分配器建一张空表。
+    ///
+    /// An empty store drawing ids from the world's shared allocator.
+    pub fn with_ids(ids: EntityIds) -> Self {
         Self {
-            next_id,
+            ids,
             ..Self::default()
         }
+    }
+
+    /// 这张表取号用的分配器句柄。
+    ///
+    /// The allocator handle this store draws ids from.
+    pub fn ids_handle(&self) -> &EntityIds {
+        &self.ids
     }
 
     pub fn len(&self) -> usize {
@@ -609,8 +694,7 @@ impl EntityStore {
 
     /// `addFreshEntity`：分配 ID 放进世界。tick 期间生成的实体下一 tick 才动。
     pub fn spawn(&mut self, mut entity: Entity) -> EntityUid {
-        entity.id = self.next_id;
-        self.next_id += 1;
+        entity.id = self.ids.allocate();
         entity.random = JavaRandom::new(i64::from(entity.id) ^ ENTITY_RANDOM_SEED);
         // 物品的朝向和初速度用刚设好的实体随机源，不能用 `level.random`。
         entity.finish_item_random();
@@ -626,8 +710,7 @@ impl EntityStore {
 
     /// 从 [`EntityRow`] 直接生成，给命令落地时串行分配 ID 用。
     pub fn spawn_row(&mut self, mut row: EntityRow) -> EntityUid {
-        let uid = self.next_id;
-        self.next_id += 1;
+        let uid = self.ids.allocate();
         row.public.uid = uid;
         row.state.random = JavaRandom::new(i64::from(uid) ^ ENTITY_RANDOM_SEED);
         row.public.removed = false;
@@ -1339,5 +1422,101 @@ mod tests {
             .unwrap()
             .remove(&item);
         assert!(!store.sub_index_matches());
+    }
+
+    fn item_at(x: f64) -> Entity {
+        Entity::ground_item(Vec3::new(x, 64.0, 0.5), ItemStack::new(1, 1))
+    }
+
+    /// 一张表单独分配时，号的序列和原来表内自带的计数器逐个相同：从
+    /// `FIRST_ENTITY_ID` 起每次加一，`spawn` / `spawn_row` / tick 期间进 `pending`
+    /// 的都一样。
+    ///
+    /// A single store allocates exactly like the old per-store counter: from
+    /// `FIRST_ENTITY_ID`, one at a time, through `spawn`, `spawn_row` and the
+    /// pending path during a tick.
+    #[test]
+    fn a_single_store_allocates_the_same_sequence_as_before() {
+        let mut store = EntityStore::new();
+        let mut got = vec![store.spawn(item_at(0.5))];
+        got.push(store.spawn_row(item_at(1.5).split()));
+        store.begin_tick();
+        got.push(store.spawn(item_at(2.5)));
+        got.push(store.spawn_row(item_at(3.5).split()));
+        store.end_tick();
+        got.push(store.spawn(item_at(4.5)));
+        let expected: Vec<EntityUid> = (0..5).map(|n| FIRST_ENTITY_ID + n).collect();
+        assert_eq!(got, expected);
+        assert_eq!(store.ids(), expected);
+        assert_eq!(store.ids_handle().peek(), FIRST_ENTITY_ID + 5);
+    }
+
+    /// 对拍入口：`with_next_id` 从给定的号起，各自一个新计数器。
+    ///
+    /// Oracle entry: `with_next_id` starts at the given id on a fresh counter.
+    #[test]
+    fn with_next_id_starts_its_own_counter() {
+        let mut first = EntityStore::with_next_id(100);
+        let mut second = EntityStore::with_next_id(100);
+        assert_eq!(first.spawn(item_at(0.5)), 100);
+        assert_eq!(first.spawn(item_at(1.5)), 101);
+        assert_eq!(second.spawn(item_at(0.5)), 100);
+        assert!(!first.ids_handle().same_counter(second.ids_handle()));
+    }
+
+    /// 两张表共用一个分配器、交替分配时不撞号，合起来正好是一段连续的号。
+    ///
+    /// Two stores sharing one allocator never collide when they alternate,
+    /// and together they cover one contiguous run of ids.
+    #[test]
+    fn two_stores_sharing_an_allocator_never_collide() {
+        let ids = EntityIds::new();
+        let mut left = EntityStore::with_ids(ids.clone());
+        let mut right = EntityStore::with_ids(ids.clone());
+        let mut seed = 0x5EED_u64;
+        let mut all = Vec::new();
+        for n in 0..400 {
+            // 一个简单的线性同余数决定这一次在哪张表、走哪条路径。
+            // A small LCG picks the store and the path for each allocation.
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let store = if seed >> 63 == 0 {
+                &mut left
+            } else {
+                &mut right
+            };
+            if n % 50 == 0 {
+                if store.ticking {
+                    store.end_tick();
+                } else {
+                    store.begin_tick();
+                }
+            }
+            let x = f64::from(n) + 0.5;
+            let uid = if (seed >> 62) & 1 == 0 {
+                store.spawn(item_at(x))
+            } else {
+                store.spawn_row(item_at(x).split())
+            };
+            all.push(uid);
+        }
+        if left.ticking {
+            left.end_tick();
+        }
+        if right.ticking {
+            right.end_tick();
+        }
+        let left_ids: BTreeSet<EntityUid> = left.ids().into_iter().collect();
+        let right_ids: BTreeSet<EntityUid> = right.ids().into_iter().collect();
+        assert!(left_ids.is_disjoint(&right_ids));
+        assert!(!left_ids.is_empty() && !right_ids.is_empty());
+        let expected: Vec<EntityUid> = (0..400).map(|n| FIRST_ENTITY_ID + n).collect();
+        assert_eq!(all, expected);
+        assert_eq!(ids.peek(), FIRST_ENTITY_ID + 400);
+        assert!(left.ids_handle().same_counter(&ids));
+        // 克隆一张表得到的是同一个计数器的句柄。
+        // Cloning a store keeps a handle to the same counter.
+        assert!(left.clone().ids_handle().same_counter(right.ids_handle()));
     }
 }

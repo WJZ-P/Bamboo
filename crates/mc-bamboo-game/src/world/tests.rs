@@ -2960,3 +2960,28 @@ fn setblock_then_save_all_flush_persists_the_block() {
         "kill -9 之前改的那一格要在盘上"
     );
 }
+
+/// 每个世界一个实体 ID 分配器，从 `FIRST_ENTITY_ID` 起；两个世界互不影响
+/// （不是进程级静态量），岛的实体表拿的就是这个世界的句柄。
+///
+/// One entity-id allocator per world, starting at `FIRST_ENTITY_ID`; two worlds
+/// stay independent (no process-wide static), and the island's store holds the
+/// world's handle.
+#[test]
+fn each_world_has_its_own_entity_id_allocator() {
+    use mc_bamboo_blocks::entity::{Entity, FIRST_ENTITY_ID};
+    let mut first = Harness::new(8);
+    let second = Harness::new(8);
+    let item = || {
+        Entity::ground_item(
+            mc_bamboo_core::Vec3::new(0.5, -60.0, 0.5),
+            mc_bamboo_protocol::item::ItemStack::new(1, 1),
+        )
+    };
+    let entities = &mut first.world.island.region.entities;
+    assert_eq!(entities.spawn(item()), FIRST_ENTITY_ID);
+    assert_eq!(entities.spawn(item()), FIRST_ENTITY_ID + 1);
+    let other = &second.world.island.region.entities;
+    assert_eq!(other.ids_handle().peek(), FIRST_ENTITY_ID);
+    assert!(!other.ids_handle().same_counter(entities.ids_handle()));
+}

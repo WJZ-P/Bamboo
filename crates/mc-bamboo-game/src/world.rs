@@ -267,6 +267,13 @@ impl World {
             config.enforce_secure_profile,
             keys,
         );
+        // 实体 ID 整个世界共用一个分配器（岛的实施计划第 6 节第 2 步），在任何实体
+        // 出现之前接上。现在只有一个岛，句柄只在它的实体表里；以后新建的岛从这张表
+        // 取同一个句柄（`EntityStore::ids_handle`）。
+        // One entity-id allocator for the whole world (island plan step 2),
+        // attached before any entity exists. With one island the handle lives
+        // only in its store; later islands clone it from there.
+        region.use_entity_ids(mc_bamboo_blocks::EntityIds::new());
         // 控制台命令反馈的广播开关来自 `server.properties`，启动时带进世界线程。
         // The console-feedback broadcast flag comes from `server.properties` at startup.
         region.broadcast_console_to_ops = config.broadcast_console_to_ops;

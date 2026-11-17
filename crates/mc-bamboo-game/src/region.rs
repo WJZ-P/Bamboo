@@ -410,6 +410,18 @@ impl Region {
             .unwrap_or_else(crate::secure_chat::now_millis)
     }
 
+    /// 改用世界共享的实体 ID 分配器。只在建好、还没有实体时调用一次。
+    ///
+    /// Switch to the world's shared entity-id allocator. Called once, right
+    /// after construction and before any entity exists.
+    pub(crate) fn use_entity_ids(&mut self, ids: mc_bamboo_blocks::EntityIds) {
+        debug_assert!(
+            self.entities.is_empty(),
+            "switching allocators under live entities"
+        );
+        self.entities = Entities::with_ids(ids);
+    }
+
     pub(crate) fn advance_tick(&mut self) {
         self.tick.0 += 1;
     }
