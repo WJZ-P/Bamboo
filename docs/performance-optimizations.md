@@ -72,6 +72,8 @@
 | 25 | 同上，关结构：每交付区块计算池 CPU，8 线程（18） | 60.7 ms | 39.5 ms | 1.5× |
 | 26 | 玩家捡起物品走空间索引：`islands-8` 的 `entities` 阶段每刻（19） | 12.891 ms（6.29 µs/物品） | 4.364 ms（2.13 µs/物品） | 2.95× |
 | 26 | 同上：微基准 N=16 时捡起段每个物品每刻（19） | 8.304 µs | 0.007 µs | 约 1200× |
+| 27 | 区块段危险寻路方块计数：每次 `Chunk::set_block` 写随机方块状态（20） | 53.1–53.4 ns | 52.5–54.5 ns | 无可测差别（中位数 +0.1 ns） |
+| 28 | 碰撞快路径：实体压测 1 线程 compute（21） | 59.7 ms / 10 刻 | 48.8 ms / 10 刻 | 1.22× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -3183,3 +3185,101 @@ python3 tools/mc-bamboo-loadtest/summarize-islands.py <结果目录>/off
   不是这次的超线性来源，留作以后的候选。
 - K=8 的乐观上限 6.09× 仍低于 8，来源包括同相位的红石尖峰叠加（`profiling.md`
   14.3 第 4 条）和测量噪声，不在第 0 步的范围内。
+## 20. 区块段危险寻路方块计数：给 `set_block` 加 0 ns
+
+生物寻路要判断一格周围 26 个邻居里有没有危险方块（官方
+`WalkNodeEvaluator.checkNeighbourBlocks`）。为每个 16³ 段维护「作为邻居时
+`PathType` 不是 `OPEN`」的方块数：计数为 0 的段可以直接跳过，不必逐格扫。
+`mc_bamboo_data::neighbor_path_type_of_state` 提供按状态的分类；形状依赖方块
+实体的 199 个动态状态预算不出来，保守地算危险，运行时仍能逐格重算。
+
+计数和 7h 的段哈希走同一条路：`Section::set_block` 里按旧状态和新状态各加减一次，
+`from_disk` / `from_sections` / `for_light` 整段重算（生成期光照的批量路径按调色板
+求和），调试构建里 `dangerous_path_neighbor_count()` 每次都断言等于整段重算。
+`is_safe_path_neighbor()` 是给以后寻路阶段用的查询接口，**这次还没有调用方**，
+所以整项现在只有常驻写入代价、没有收益。
+
+### 20.1 数字和复现
+
+`cargo run --release -p mc-bamboo-world --example section_hash_cost changing`，
+200 万次随机写、每轮 5 次取最小、固定随机序列；「改之前」是把 `Section::set_block`
+里那两行 `dangerous_path_neighbors` 临时注掉，同一轮里 A-B-A-B 交替跑三对，
+另外又各连跑五轮看波动。这台机器上有别的子代理在跑，所以只比同一轮的交替结果：
+
+| 轮次 | 没有计数（ns/写） | 有计数（ns/写） | 差 |
+| --- | --- | --- | --- |
+| A | 53.1 | 54.4 | +1.3 |
+| B | 53.4 | 54.1 | +0.7 |
+| C | 53.3 | 54.2 | +0.9 |
+| D（反向交替） | 53.1 / 52.9 / 53.2（中位 53.1） | 53.2 / 53.1 / 52.5（中位 53.1） | 0.0 |
+
+六个回合全部落在 52.5–54.5 ns/写，中位数差 +0.1 ns，比同轮内负载抖动小一个
+量级，结论是**没有可测的常驻代价**（不是「省了多少」）。新加的是两次查表、两次
+`u16` 加减，和 7h 的 128 位哈希一样不进存档。
+
+### 20.2 怎么确认没算错
+
+`dangerous_path_neighbor_count_tracks_thousands_of_random_writes` 随机改 4000 次
+方块，每改一次比较增量计数和按调色板逐格重算；`assembled_sections_count_dangerous_path_neighbors`
+覆盖读盘组装与生成期光照（一整段仙人掌 = 4096、一整段石头 = 0）；
+`ignoring_a_dangerous_write_would_not_match_the_full_recount` 是改坏确认：
+漏掉一次增减时计数立刻和重算不一致。计数用的 `path-type` Java 对拍对全部
+35723 个状态 0 不一致，改坏确认 1 处不一致（`docs/mob-entity-design.md` §5）。
+
+---
+
+## 21. 碰撞收集快路径：算阶段 59.7 → 48.8 ms / 10 刻
+
+### 21.1 先量
+
+`cargo test -p mc-bamboo-blocks --release --lib entity::parallel::tests::stress -- --ignored --nocapture`
+的场景是 3000 个掉落物加 300 个下落方块。把算阶段循环 10 万刻让
+`/usr/bin/sample <pid> 10 1` 采到 9129 个主线程样本：两条
+`collect_block_collisions` 调用路径（实体 `tick` 里的脚下查询 2303 个、
+`sweep_movement` 里的碰撞收集 965 个）加上 `block_collision_boxes` /
+`shape::collision_boxes` 的叶子合计约占算阶段三成以上。热点是官方
+`Shape.joinIsNotEmpty` 的坐标网格、以及 `block_id_of_state` 的二分查找。
+
+### 21.2 做了什么
+
+- `mc_bamboo_data::COLLISION_SHAPE_KIND` 生成期给 35723 个状态预算「无碰撞 /
+  整格 / 单盒 / 其它」。只有形状不随位置、上下文、方块实体或实体变的状态才
+  能拿到前三类；官方重写了四参数 `getCollisionShape` 的类（用 `javap -p`
+  扫全部方块类得出）一律是 `Other`。
+- **无碰撞**：跳过整格（连角格子的超大形状判定也省掉）。**整格**：沿用原来
+  `is_unit_cube` 的 `Aabb::intersects_coords`，但现在不用先算出形状。
+  **全空气段**：`BlockSource::section_has_collision` 经 `ChunkStore` 查段调色板，
+  扫描盒覆盖整段 16³ 时一次跳过。
+- **单盒快路径撤掉**：把 `joinIsNotEmpty` 换成裸 `Aabb` 判交会在 1e-7 附近
+  不一致（下半台阶 `state=15180`、扫描盒一角正好在 `0.9999999`，单测抓到）。
+  官方 1e-7 的截断行为不能变，所以 `SingleBox` 仍走通用扫描。
+- **站着不动缩小扫描盒**：没有接。`Entity.move` 在位移为零时仍会走
+  `setOnGroundWithMovement` / `checkInsideBlocks` / 方块效果等逐格查询，
+  缩小扫描盒会改变这些路径的读数和 1e-7 判定；实测两项快路径已有收益，
+  这一项没有可测收益的证据，按「没有收益的撤掉」不做。
+
+### 21.3 数字
+
+同轮 A-B-A-B 交替三对、每次重编译两个二进制、每轮跑 10 刻取 compute 累计
+（这台机器上同时有几个满载的编译子代理，B 组基线 100.2 ms 是尖峰，不能跨组比）：
+
+| 轮 | 基线（ms/10 刻） | 快路径（ms/10 刻） |
+| --- | --- | --- |
+| A | 53.1 | 48.8 |
+| B | 100.2 | 47.0 |
+| C | 59.7 | 61.0 |
+
+中位数基线 59.7、快路径 48.8，约 **1.22×**。C 组基线比快路径快是同轮负载
+抖动，和第一次量到的 32.6 → 32.2 ms 一样说明绝对值受机器负载影响；只取
+同轮交替的中位数。
+
+### 21.4 怎么确认逐位不变
+
+`move-oracle java` 55 cases / 0 mismatches，`entity-oracle java` 31 cases、
+709 steps / 0 mismatches，`cargo test -p mc-bamboo-blocks --lib` 全过。新增的
+`collision_shape_fast_paths_match_the_generic_scan` 对 9 个状态 × 5 个包围盒 ×
+3 种碰撞上下文比较快路径和「全部 `Other`」的通用路径（含 1e-7 边界），
+并把石头分类表故意说成空形状，确认结果真的会变；
+`all_air_section_skip_matches_the_full_scan` 确认全空气段跳过不改变结果，
+段里有石头时错误跳过会被发现。
+

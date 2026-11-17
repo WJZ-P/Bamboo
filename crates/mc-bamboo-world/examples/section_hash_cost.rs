@@ -5,7 +5,9 @@
 //! ```
 //!
 //! 用 commit 历史里没有哈希的版本对比时，把 `Section::set_block` 里那次
-//! `block_hash ^=` 注掉即可；两边跑同一份固定随机序列。
+//! `block_hash ^=` 注掉即可；两边跑同一份固定随机序列。危险方块计数的开销也是
+//! 在这份基准上量的：把 `Section::set_block` 里那两行 `dangerous_path_neighbors`
+//! 注掉就是「没有计数」的版本，同一轮交替跑多个回合取中位数。
 
 use std::{
     hint::black_box,

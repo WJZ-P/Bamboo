@@ -136,6 +136,7 @@ import net.minecraft.world.level.block.FlowerPotBlock;
 import net.minecraft.world.level.block.PitcherCropBlock;
 import net.minecraft.world.level.block.SupportType;
 import net.minecraft.world.level.block.WeatheringCopper;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
@@ -173,6 +174,9 @@ import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType;
 import net.minecraft.world.level.levelgen.blockpredicates.AllOfPredicate;
 import net.minecraft.world.level.lighting.LightEngine;
+import net.minecraft.world.level.pathfinder.PathType;
+import net.minecraft.world.level.pathfinder.PathfindingContext;
+import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
 import net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate;
 import net.minecraft.world.level.levelgen.blockpredicates.CombiningPredicate;
 import net.minecraft.world.level.levelgen.blockpredicates.MatchingBlockTagPredicate;
@@ -182,14 +186,17 @@ import net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvi
 import net.minecraft.world.level.levelgen.feature.stateproviders.CopyPropertiesProvider;
 import net.minecraft.world.level.levelgen.feature.stateproviders.RuleBasedStateProvider;
 import net.minecraft.world.level.levelgen.feature.stateproviders.SimpleStateProvider;
-import net.minecraft.world.level.lighting.LightEngine;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.CollisionGetter;
+import net.minecraft.world.level.border.WorldBorder;
 import net.minecraft.world.level.material.FlowingFluid;
+import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.CollisionContext;
 import net.minecraft.world.phys.shapes.Shapes;
-import net.minecraft.world.phys.shapes.VoxelShape;
 
 /**
  * 调用官方代码导出 Bamboo 需要的版本数据，写成一个 JSON 文件。
@@ -1814,6 +1821,9 @@ public final class Extractor {
         // reimplementing each block's rotate/mirror.
         private final JsonArray rotation = new JsonArray();
         private final JsonArray mirror = new JsonArray();
+        private final JsonArray pathTypes = new JsonArray();
+        private final JsonArray neighborPathTypes = new JsonArray();
+        private final JsonArray collisionShapesAgree = new JsonArray();
         private static final Map<Block, Boolean> MOVES_SHAPE = new HashMap<>();
 
         JsonObject build() {
@@ -1838,6 +1848,9 @@ public final class Extractor {
             tables.add("shapeFaces", shapeFaces);
             tables.add("rotation", rotation);
             tables.add("mirror", mirror);
+            tables.add("pathTypes", pathTypes);
+            tables.add("neighborPathTypes", neighborPathTypes);
+            tables.add("collisionShapesAgree", collisionShapesAgree);
             return tables;
         }
 
@@ -1860,6 +1873,13 @@ public final class Extractor {
             outline.add(shapeIndex(canonical(state, state.getShape(EMPTY, BlockPos.ZERO), movesShape)));
             support.add(shapeIndex(canonical(state, state.getBlockSupportShape(EMPTY, BlockPos.ZERO), movesShape)));
             addPlacementCollision(id, state, collisionShape);
+            // 空上下文和放置上下文的形状不同就不能预算快路径。
+            // A fast path is only valid when empty and placement contexts agree.
+            collisionShapesAgree.add(
+                    shapeKey(collisionShape).equals(shapeKey(
+                            state.getCollisionShape(EMPTY, BlockPos.ZERO,
+                                    CollisionContext.placementContext(null)))));
+            addPathTypes(state);
         }
 
         /** 放置检查用 placementContext，和普通上下文不同的状态单独列出来。 */
@@ -1871,6 +1891,31 @@ public final class Extractor {
                 entry.add(shapeIndex(shape));
                 placementCollision.add(entry);
             }
+        }
+
+        /** 官方 `WalkNodeEvaluator.getPathTypeFromState` 以及作为邻居时的分类。 */
+        /** Official `WalkNodeEvaluator.getPathTypeFromState` and neighbour classification. */
+        private void addPathTypes(BlockState state) {
+            if (state.getBlock().hasDynamicShape()) {
+                // 形状依赖世界或方块实体，只能运行时算。
+                // Depends on the world or a block entity: compute at runtime.
+                pathTypes.add((String) null);
+                neighborPathTypes.add((String) null);
+                return;
+            }
+            SingleStateView view = new SingleStateView();
+            view.state = state;
+            view.centre = BlockPos.ZERO;
+            pathTypes.add(PathTypes.Evaluator.fromState(view, BlockPos.ZERO).name());
+            view.centre = PathTypes.CENTRE;
+            PathType changed = PathType.OPEN;
+            for (int[] offset : PathTypes.OFFSETS) {
+                changed = WalkNodeEvaluator.checkNeighbourBlocks(PathTypes.context(view),
+                        PathTypes.CENTRE.getX() + offset[0],
+                        PathTypes.CENTRE.getY() + offset[1],
+                        PathTypes.CENTRE.getZ() + offset[2], changed);
+            }
+            neighborPathTypes.add(changed.name());
         }
 
         /** 形状的渲染偏移是按坐标算的，这里还原到偏移之前，运行时再按真实坐标加上。 */
@@ -2024,6 +2069,117 @@ public final class Extractor {
                 }
             }
             return facts;
+        }
+    }
+
+    /** 寻路类型表用的官方 `PathfindingContext`，只有一格假世界，不启动服务端。 */
+    /** A `PathfindingContext` over a one-cell fake world for the path type table. */
+    private static final class PathTypes {
+        static final BlockPos CENTRE = new BlockPos(1, 1, 1);
+        static final int[][] OFFSETS = offsets();
+        private static final PathfindingContext CONTEXT;
+
+        static {
+            try {
+                Field unsafeField = Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe");
+                unsafeField.setAccessible(true);
+                Object unsafe = unsafeField.get(null);
+                var allocate = unsafe.getClass().getMethod("allocateInstance", Class.class);
+                CONTEXT = (PathfindingContext) allocate.invoke(unsafe, PathfindingContext.class);
+                set(CONTEXT, "cache", null);
+                set(CONTEXT, "mobPosition", BlockPos.ZERO);
+                set(CONTEXT, "mutablePos", new BlockPos.MutableBlockPos());
+            } catch (Exception error) {
+                throw new ExceptionInInitializerError(error);
+            }
+        }
+
+        static PathfindingContext context(SingleStateView view) {
+            try {
+                set(CONTEXT, "level", view);
+            } catch (Exception error) {
+                throw new IllegalStateException(error);
+            }
+            return CONTEXT;
+        }
+
+        private static void set(Object target, String name, Object value) throws Exception {
+            Field field = PathfindingContext.class.getDeclaredField(name);
+            field.setAccessible(true);
+            field.set(target, value);
+        }
+
+        private static int[][] offsets() {
+            List<int[]> result = new ArrayList<>();
+            for (int x = -1; x <= 1; x++) {
+                for (int y = -1; y <= 1; y++) {
+                    for (int z = -1; z <= 1; z++) {
+                        if (x != 0 || z != 0) {
+                            result.add(new int[]{x, y, z});
+                        }
+                    }
+                }
+            }
+            return result.toArray(new int[0][]);
+        }
+
+        /** 官方 protected static 方法从子类转发出来。 */
+        /** Forward the protected static official method. */
+        private static final class Evaluator extends WalkNodeEvaluator {
+            static PathType fromState(net.minecraft.world.level.BlockGetter view, BlockPos pos) {
+                return getPathTypeFromState(view, pos);
+            }
+        }
+    }
+
+    /** 3×3×3 的假世界：中心是查的状态，其余是空气。 */
+    /** A 3³ fake world: the queried state at the centre, air everywhere else. */
+    private static final class SingleStateView implements CollisionGetter {
+        BlockState state;
+        BlockPos centre = BlockPos.ZERO;
+
+        @Override
+        public BlockState getBlockState(BlockPos pos) {
+            return pos.equals(centre) ? state : Blocks.AIR.defaultBlockState();
+        }
+
+        @Override
+        public FluidState getFluidState(BlockPos pos) {
+            // 官方 `getPathTypeFromState` 从 BlockState 自己取流体，不读这个视图；
+            // 26 个邻居都是空气。
+            // Official `getPathTypeFromState` reads the fluid from the BlockState
+            // itself, not from this view; all 26 neighbours are air.
+            return Fluids.EMPTY.defaultFluidState();
+        }
+
+        @Override
+        public BlockEntity getBlockEntity(BlockPos pos) {
+            return null;
+        }
+
+        @Override
+        public int getMinY() {
+            return -64;
+        }
+
+        @Override
+        public int getHeight() {
+            return 384;
+        }
+
+        @Override
+        public WorldBorder getWorldBorder() {
+            return null;
+        }
+
+        @Override
+        public net.minecraft.world.level.BlockGetter getChunkForCollisions(int x, int z) {
+            return this;
+        }
+
+        @Override
+        public List<VoxelShape> getEntityCollisions(Entity entity, AABB box) {
+            return List.of();
         }
     }
 

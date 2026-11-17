@@ -405,6 +405,22 @@ impl ChunkStore {
             .section_hash(section_y)
     }
 
+    /// 这个 16³ 段里有没有任何可能产生碰撞形状的方块状态。
+    ///
+    /// `section_y` 是 `pos.y >> 4`；区块没加载时按「可能有」处理。
+    ///
+    /// Whether a 16³ section has any state that can produce a collision shape.
+    /// `section_y` is `pos.y >> 4`; unloaded chunks are treated conservatively.
+    pub fn section_has_any_collision(&self, pos: ChunkPos, section_y: i32) -> bool {
+        if !self.is_loaded(pos) {
+            return true;
+        }
+        self.edited
+            .get(&pos)
+            .unwrap_or(&self.template)
+            .section_has_any_collision(section_y)
+    }
+
     /// 设置方块状态，返回方块是否真的变了。高度超出世界时什么也不做。
     ///
     /// 和官方的 `LevelChunk.setBlockState` 一样：区块段变空或者变满时登记一下，

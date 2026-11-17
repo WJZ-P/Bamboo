@@ -510,6 +510,20 @@ pub struct StateTables {
     ///
     /// Three `mirror` results per state, in `Mirror.ordinal()` order; length is states × 3.
     pub mirror: Vec<u32>,
+    /// 每个状态的 `WalkNodeEvaluator.getPathTypeFromState`，动态形状的状态是 `None`。
+    ///
+    /// Per-state `WalkNodeEvaluator.getPathTypeFromState`; `None` for dynamic shapes.
+    pub path_types: Vec<Option<String>>,
+    /// 每个状态作为 `checkNeighbourBlocks` 唯一邻居时的结果，动态形状的状态是 `None`。
+    ///
+    /// Result when each state is the only neighbour in `checkNeighbourBlocks`;
+    /// `None` for dynamic shapes.
+    pub neighbor_path_types: Vec<Option<String>>,
+    /// 空碰撞上下文和放置上下文的形状是否相同，不同则不能预算碰撞形状快路径。
+    ///
+    /// Whether empty and placement collision contexts agree; disagreement
+    /// disables the precomputed collision-shape fast path.
+    pub collision_shapes_agree: Vec<bool>,
 }
 
 #[derive(Debug, Deserialize)]

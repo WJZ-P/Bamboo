@@ -1945,6 +1945,61 @@ fn write_state_table<T: Debug>(out: &mut String, doc: &str, name: &str, kind: &s
     let _ = writeln!(out, "];\n");
 }
 
+/// 写一张值已经是 Rust 字面量的表；`Debug` 会给字符串加引号，这里不能走 [`write_state_table`]。
+/// Write a table whose values already are Rust literals; `Debug` would quote them.
+fn write_literal_table(out: &mut String, doc: &str, name: &str, kind: &str, values: &[String]) {
+    let _ = writeln!(out, "/// {doc}");
+    let _ = writeln!(out, "pub static {name}: &[{kind}] = &[");
+    for row in values.chunks(32) {
+        let _ = writeln!(out, "    {},", row.join(", "));
+    }
+    let _ = writeln!(out, "];\n");
+}
+
+/// 官方 `PathType` 的枚举名必须是 Rust 认识的，写生成文件时拦住新枚举值。
+fn path_type_name(name: &str) -> Result<String, String> {
+    const NAMES: &[&str] = &[
+        "BLOCKED",
+        "OPEN",
+        "WALKABLE",
+        "WALKABLE_DOOR",
+        "TRAPDOOR",
+        "POWDER_SNOW",
+        "ON_TOP_OF_POWDER_SNOW",
+        "FENCE",
+        "LAVA",
+        "WATER",
+        "WATER_BORDER",
+        "RAIL",
+        "UNPASSABLE_RAIL",
+        "FIRE_IN_NEIGHBOR",
+        "FIRE",
+        "DAMAGING_IN_NEIGHBOR",
+        "DAMAGING",
+        "DOOR_OPEN",
+        "DOOR_WOOD_CLOSED",
+        "DOOR_IRON_CLOSED",
+        "BREACH",
+        "LEAVES",
+        "STICKY_HONEY",
+        "COCOA",
+        "DAMAGE_CAUTIOUS",
+        "ON_TOP_OF_TRAPDOOR",
+        "BIG_MOBS_CLOSE_TO_DANGER",
+    ];
+    if !NAMES.contains(&name) {
+        return Err(format!("官方有新的 PathType: {name}"));
+    }
+    Ok(name
+        .split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            let first = chars.next().unwrap_or_default().to_ascii_uppercase();
+            format!("{}{}", first, chars.as_str().to_ascii_lowercase())
+        })
+        .collect())
+}
+
 fn check_table_length<T>(name: &str, values: &[T], total: u32) -> Result<(), String> {
     if values.len() == total as usize {
         Ok(())
@@ -1961,9 +2016,11 @@ fn states_file(data: &VersionData) -> Result<String, String> {
     check_table_length("LIGHT_DAMPENING", &tables.light_dampening, total)?;
     check_table_length("STATE_ROTATION", &tables.rotation, total * 4)?;
     check_table_length("STATE_MIRROR", &tables.mirror, total * 3)?;
+    check_table_length("STATE_PATH_TYPE", &tables.path_types, total)?;
+    check_table_length("NEIGHBOR_PATH_TYPE", &tables.neighbor_path_types, total)?;
 
     let mut out = String::new();
-    let _ = writeln!(out, "use crate::FluidFacts;\n");
+    let _ = writeln!(out, "use crate::{{FluidFacts, PathType}};\n");
     write_state_table(
         &mut out,
         "每个状态的事实，位的含义见 [`crate::facts`]。",
@@ -1999,6 +2056,36 @@ fn states_file(data: &VersionData) -> Result<String, String> {
         "u32",
         &tables.mirror,
     );
+    fn type_literal(value: &Option<String>) -> Result<String, String> {
+        Ok(match value {
+            Some(name) => format!("Some(PathType::{})", path_type_name(name)?),
+            None => "None".to_owned(),
+        })
+    }
+    let self_types: Vec<String> = tables
+        .path_types
+        .iter()
+        .map(type_literal)
+        .collect::<Result<_, _>>()?;
+    write_literal_table(
+        &mut out,
+        "每个状态的 `WalkNodeEvaluator.getPathTypeFromState`；`None` 要运行时算。",
+        "STATE_PATH_TYPE",
+        "Option<PathType>",
+        &self_types,
+    );
+    let neighbor_types: Vec<String> = tables
+        .neighbor_path_types
+        .iter()
+        .map(type_literal)
+        .collect::<Result<_, _>>()?;
+    write_literal_table(
+        &mut out,
+        "每个状态作为唯一邻居时 `checkNeighbourBlocks` 的结果；`None` 要运行时算。",
+        "NEIGHBOR_PATH_TYPE",
+        "Option<PathType>",
+        &neighbor_types,
+    );
 
     let _ = writeln!(out, "/// 去重后的流体状态，第一项是空流体。");
     let _ = writeln!(out, "pub static FLUID_STATES: &[FluidFacts] = &[");
@@ -2018,6 +2105,57 @@ fn states_file(data: &VersionData) -> Result<String, String> {
     Ok(out)
 }
 
+/// 方块状态 ID 落到哪个方块上，和 `mc_bamboo_data::block_of_state` 同一条规律。
+fn block_of(blocks: &[Block], state: u32) -> &Block {
+    let index =
+        blocks.partition_point(|block| block.states.first().is_some_and(|&first| first <= state));
+    &blocks[index - 1]
+}
+
+/// 重写了官方 `getCollisionShape(state, level, pos, context)` 的类。
+///
+/// `javap -p` 扫过全部官方方块类，下面这些类声明了这个四参数重载；它们可能按
+/// 实体或位置给形状，所以状态表里那份空上下文的形状不能当快路径用。继承的类由
+/// `ancestors` 一起覆盖。
+///
+/// Classes that declare the four-argument official `getCollisionShape` override,
+/// found by scanning every official block class with `javap -p`. Their shapes
+/// may depend on the entity or position, so the empty-context table is not a
+/// valid fast path for them. Subclasses are covered through `ancestors`.
+fn entity_dependent_shape(block: &Block) -> bool {
+    const CLASSES: &[&str] = &[
+        "BambooStalkBlock",
+        "BellBlock",
+        "BigDripleafBlock",
+        "CactusBlock",
+        "ComposterBlock",
+        "CrossCollisionBlock",
+        "FenceGateBlock",
+        "GrindstoneBlock",
+        "HoneyBlock",
+        "LecternBlock",
+        "LiquidBlock",
+        "MossyCarpetBlock",
+        "MudBlock",
+        "PitcherCropBlock",
+        "PowderSnowBlock",
+        "ScaffoldingBlock",
+        "SculkShriekerBlock",
+        "SkullBlock",
+        "SnowLayerBlock",
+        "SoulSandBlock",
+        "WallBlock",
+        "WallHangingSignBlock",
+        "ShulkerBoxBlock",
+        "MovingPistonBlock",
+    ];
+    CLASSES.contains(&block.class.as_str())
+        || block
+            .ancestors
+            .iter()
+            .any(|name| CLASSES.contains(&name.as_str()))
+}
+
 fn shapes_file(data: &VersionData) -> Result<String, String> {
     let tables = &data.state_tables;
     let total = data.block_states.total;
@@ -2026,7 +2164,10 @@ fn shapes_file(data: &VersionData) -> Result<String, String> {
     check_table_length("SUPPORT_SHAPE", &tables.support, total)?;
 
     let mut out = String::new();
-    let _ = writeln!(out, "use mc_bamboo_core::Aabb;\n");
+    let _ = writeln!(
+        out,
+        "use crate::CollisionShapeKind;\nuse mc_bamboo_core::Aabb;\n"
+    );
     let _ = writeln!(
         out,
         "/// 去重后的形状，下标 0 是空形状，下标 1 是完整方块。一个形状是若干盒子的并集。"
@@ -2056,7 +2197,43 @@ fn shapes_file(data: &VersionData) -> Result<String, String> {
         "COLLISION_SHAPE",
         "u16",
         &tables.collision,
+    ); // 只有形状不依赖位置、方块实体或实体状态时才能用快路径。
+    // A fast path only applies when the shape does not depend on the position,
+    // a block entity or the entity itself.
+    let kinds: Vec<String> = (0..total)
+        .map(|id| {
+            let shape = &tables.shapes[usize::from(tables.collision[id as usize])];
+            let block = block_of(&data.blocks, id);
+            let plain = tables.collision_shapes_agree[id as usize]
+                && !block.dynamic_shape
+                && !block.offset.is_some_and(|offset| offset.moves_shape)
+                && !entity_dependent_shape(block);
+            let kind = if !plain {
+                "Other"
+            } else if shape.is_empty() {
+                "Empty"
+            } else if shape.len() == 1 && shape[0] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0] {
+                "FullBlock"
+            } else if shape.len() == 1 {
+                // 单盒仍走通用扫描：`joinIsNotEmpty` 的 1e-7 坐标合并不能
+                // 直接换成 Aabb 判交（见方块的碰撞快路径测试）。
+                // Single boxes keep the generic scan: `joinIsNotEmpty`'s 1e-7
+                // coordinate merge differs from a bare Aabb intersection.
+                "SingleBox"
+            } else {
+                "Other"
+            };
+            format!("CollisionShapeKind::{kind}")
+        })
+        .collect();
+    write_literal_table(
+        &mut out,
+        "每个状态在空上下文下的碰撞形状种类，依赖位置或实体时为 `Other`。",
+        "COLLISION_SHAPE_KIND",
+        "CollisionShapeKind",
+        &kinds,
     );
+
     write_state_table(
         &mut out,
         "`getShape` 在 [`SHAPES`] 里的下标。",

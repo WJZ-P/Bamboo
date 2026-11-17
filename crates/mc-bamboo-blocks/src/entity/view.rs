@@ -11,7 +11,7 @@ use crate::{
     Aabb, BlockGameRules, BlockHit, WorldBorder,
     shape::{self, CollisionContext},
     state::{BlockState, FluidState, SupportType},
-    world::{CollisionBlocks, collect_block_collisions, traverse_blocks},
+    world::{CollisionBlocks, collect_block_collisions_with_sections, traverse_blocks},
 };
 
 use super::ctx::BlockView;
@@ -76,6 +76,16 @@ pub trait BlockSource: Sync {
         None
     }
 
+    /// 这一整段 16³ 里有没有可能产生碰撞形状的方块状态。默认按有算，
+    /// 带区块表的视图覆盖它，让全空气段一次跳过。
+    ///
+    /// Whether a whole 16³ section has any state that can produce a collision
+    /// shape. Defaults to yes; views with a chunk store override it to skip
+    /// all-air sections in one query.
+    fn section_has_collision(&self, _section_x: i32, _section_y: i32, _section_z: i32) -> bool {
+        true
+    }
+
     /// 这个区块里的实体现在 tick 不 tick。默认都 tick。
     ///
     /// 和 [`crate::Level::chunk_ticks_entities`] 必须给出同样的答案：精确驱动的
@@ -123,7 +133,7 @@ impl<T: BlockSource> SourceView<T> {
         box_: Aabb,
         context: CollisionContext,
     ) -> Vec<(BlockPos, Vec<Aabb>)> {
-        collect_block_collisions(
+        collect_block_collisions_with_sections(
             box_,
             context,
             CollisionBlocks {
@@ -137,6 +147,7 @@ impl<T: BlockSource> SourceView<T> {
                 },
                 shulker_at: |pos| self.0.shulker_box_shape(pos),
             },
+            |x, y, z| self.0.section_has_collision(x, y, z),
         )
     }
 
