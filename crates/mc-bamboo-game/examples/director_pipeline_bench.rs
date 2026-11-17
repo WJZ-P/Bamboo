@@ -1,10 +1,11 @@
 //! 真实 Director 流水线的吞吐和阶段耗时测量（不是 `wg-perf` 的纯函数路径）。
 //!
 //! `cargo run --release -p mc-bamboo-game --example director_pipeline_bench -- \
-//!     [--chunks N] [--threads T] [--seed S] [--no-structures] [--label NAME]`
+//!     [--chunks N] [--threads T] [--seed S] [--no-structures] [--cold] [--label NAME]`
 //!
 //! 起一个 `World::new`（`normal` 世界、`Staged` 流水线、计算池），强加载一块
-//! 正方形区块，不睡节拍器地 tick 到全部交付且计算池排空。量每个交付区块的墙钟、
+//! 正方形区块，不睡节拍器地 tick 到全部交付且计算池排空。默认先在远处跑一片同样
+//! 大小的区域把计算线程暖起来（线程本地的生成器 / 结构状态只建一次），`--cold` 不暖。量每个交付区块的墙钟、
 //! 进程 CPU 时间，以及 `worldgen_profile` 里各阶段（terrain / features / build_view /
 //! run_features / light）、地形缓存命中、Director 快照命中、`cached_feature_run` 的
 //! 命中与「每个中心被以多少个不同中心调用」。所有数字按一行 CSV 打印，方便同轮
@@ -32,6 +33,7 @@ struct Options {
     threads: Vec<usize>,
     seed: i64,
     structures: bool,
+    warmup: bool,
     label: String,
 }
 
@@ -42,6 +44,7 @@ impl Options {
             threads: vec![1, 2, 4, 8],
             seed: 2026,
             structures: true,
+            warmup: true,
             label: "run".to_owned(),
         };
         let mut args = env::args().skip(1);
@@ -60,6 +63,7 @@ impl Options {
                 }
                 "--seed" => options.seed = value().parse().expect("number"),
                 "--no-structures" => options.structures = false,
+                "--cold" => options.warmup = false,
                 "--label" => options.label = value(),
                 _ => panic!("unknown argument {arg}"),
             }
@@ -87,8 +91,28 @@ struct RUsage {
     nvcsw: i64,
     nivcsw: i64,
 }
+#[repr(C)]
+struct TimeSpec {
+    sec: i64,
+    nsec: i64,
+}
 unsafe extern "C" {
     fn getrusage(who: i32, usage: *mut RUsage) -> i32;
+    fn clock_gettime(clock: u32, time: *mut TimeSpec) -> i32;
+}
+
+/// 当前线程（世界线程）累计 CPU 毫秒（macOS `CLOCK_THREAD_CPUTIME_ID` = 16）。
+/// 测量循环不睡觉，世界线程等计算池时也在空转，所以要把它从进程 CPU 里分出来。
+///
+/// CPU milliseconds of the calling (world) thread. The measurement loop never
+/// sleeps, so the world thread spins while waiting for the pool; split it out.
+fn thread_cpu_ms() -> f64 {
+    let mut time = TimeSpec { sec: 0, nsec: 0 };
+    let ok = unsafe { clock_gettime(16, &raw mut time) };
+    if ok != 0 {
+        return 0.0;
+    }
+    time.sec as f64 * 1000.0 + time.nsec as f64 / 1_000_000.0
 }
 /// 进程累计 CPU 毫秒（RUSAGE_SELF=0，macOS timeval 是秒/微秒）。
 /// Process-wide accumulated CPU milliseconds.
@@ -117,6 +141,31 @@ fn process_cpu_ms() -> f64 {
     }
     (usage.utime[0] + usage.stime[0]) as f64 * 1000.0
         + (usage.utime[1] + usage.stime[1]) as f64 / 1000.0
+}
+
+/// tick 到这批区块全部交付、计算池排空再多跑 4 刻；返回期间交付的区块数。
+/// Tick until every position is delivered and the pool drained (+4 ticks).
+fn settle(world: &mut World, positions: &[ChunkPos], threads: usize) -> usize {
+    let mut delivered = 0usize;
+    let mut quiet = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(1800);
+    loop {
+        delivered += world.tick_unpaced();
+        let all_loaded = positions.iter().all(|&pos| world.is_chunk_loaded(pos));
+        let idle = world.compute_in_flight() == 0;
+        if all_loaded && idle {
+            quiet += 1;
+            if quiet >= 4 {
+                return delivered;
+            }
+        } else {
+            quiet = 0;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pipeline did not settle in 1800 s (threads={threads})"
+        );
+    }
 }
 
 fn main() {
@@ -148,39 +197,41 @@ fn main() {
             ..WorldConfig::default()
         };
         let mut world = World::new(config, receiver);
+        if options.warmup {
+            // 每条计算线程第一次生成时要建自己的生成器、结构状态和模板表（一次性，
+            // 长跑的服务器只付一次）。先在远处跑一片同样大小的区域把线程暖起来，
+            // 再清掉全进程缓存，量的就是稳态。`--cold` 保留这笔一次性开销。
+            // Each compute thread builds its own generator / structure state /
+            // templates on first use (one-off in a long-running server). Warm the
+            // pool on a far-away area of the same size, then clear the global
+            // caches so the measurement is steady state. `--cold` keeps the cost.
+            let far: Vec<ChunkPos> = positions
+                .iter()
+                .map(|pos| ChunkPos::new(pos.x + 4096, pos.z + 4096))
+                .collect();
+            world.force_chunks_unpaced(&far);
+            settle(&mut world, &far, threads);
+            clear_terrain_cache();
+            clear_feature_cache();
+            worldgen_profile::reset();
+        }
         world.force_chunks_unpaced(&positions);
 
         let wall_started = Instant::now();
         let cpu0 = process_cpu_ms();
-        let mut delivered = 0usize;
-        let mut quiet = 0usize;
-        let deadline = Instant::now() + Duration::from_secs(1800);
-        loop {
-            delivered += world.tick_unpaced();
-            let all_loaded = positions.iter().all(|&pos| world.is_chunk_loaded(pos));
-            let idle = world.compute_in_flight() == 0;
-            if all_loaded && idle {
-                quiet += 1;
-                if quiet >= 4 {
-                    break;
-                }
-            } else {
-                quiet = 0;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "pipeline did not settle in 1800 s (threads={threads})"
-            );
-        }
+        let world_cpu0 = thread_cpu_ms();
+        let delivered = settle(&mut world, &positions, threads);
         let wall = wall_started.elapsed().as_secs_f64();
         let cpu_ms = process_cpu_ms() - cpu0;
+        let world_cpu_ms = thread_cpu_ms() - world_cpu0;
         let p = worldgen_profile::stats();
         worldgen_profile::disable();
         let cache = terrain_cache_stats();
         let ns = |v: u64| v as f64 / 1_000_000.0;
         println!(
-            "{},structures={},threads={},requested={},delivered={},wall_s={:.3},\
+            "{},structures={},warm={},threads={},requested={},delivered={},wall_s={:.3},\
              delivered_per_s={:.2},wall_per_delivered_ms={:.3},cpu_per_delivered_ms={:.3},\
+             pool_cpu_per_delivered_ms={:.3},world_cpu_ms={:.1},\
              terrain_ms={:.3},features_ms={:.3},light_ms={:.3},\
              build_view_ms={:.3},run_features_ms={:.3},view_resolve_ms={:.3},\
              terrain_stage_calls={},feature_stage_calls={},light_stage_calls={},\
@@ -194,6 +245,7 @@ fn main() {
              entries={},bytes_mb={:.1},cross_thread_duplicates={}",
             options.label,
             options.structures,
+            options.warmup,
             threads,
             total,
             delivered,
@@ -201,6 +253,8 @@ fn main() {
             delivered as f64 / wall,
             wall * 1000.0 / delivered as f64,
             cpu_ms / delivered as f64,
+            (cpu_ms - world_cpu_ms) / delivered as f64,
+            world_cpu_ms,
             ns(p.terrain_ns),
             ns(p.features_ns),
             ns(p.light_ns),
