@@ -23,6 +23,8 @@ const PROFILE_ENV: &str = "BAMBOO_PROFILE";
 const CHUNK_PROFILE_ENV: &str = "BAMBOO_PROFILE_CHUNKS";
 /// 多区域 tick 第 2 步的划分 / 越界统计；默认关，`1` 打开，`2` 还打开全量对照。
 const PARTITION_ENV: &str = "BAMBOO_PROFILE_PARTITION";
+/// 岛的实施计划第 8 步的分区器统计；默认关，`1` 打开，`2` 还打开全量对照。
+const ISLAND_ENV: &str = "BAMBOO_PROFILE_ISLANDS";
 /// 相邻两刻的起点理想上相隔 50 ms，和 `world.rs` 里的一刻等长。
 const TICK: Duration = Duration::from_millis(50);
 /// 0..15 ns 逐纳秒记，小到一次 lap 的耗时也能分辨。
@@ -621,6 +623,12 @@ pub(crate) struct Profiler {
     partition_on: bool,
     /// 每刻全量对照（默认关，`BAMBOO_PROFILE_PARTITION=2` 打开）。
     partition_verify: bool,
+    /// 第 8 步的分区器统计；默认不挂。
+    islands: Option<RefCell<crate::island_partition_stats::IslandPartitionStats>>,
+    /// 单独存一份开关：关着时 `pump` 只判这个布尔值。
+    islands_on: bool,
+    /// 岛划分每刻全量对照（`BAMBOO_PROFILE_ISLANDS=2`）。
+    islands_verify: bool,
 }
 
 impl Profiler {
@@ -659,6 +667,9 @@ impl Profiler {
             partition: None,
             partition_on: false,
             partition_verify: false,
+            islands: None,
+            islands_on: false,
+            islands_verify: false,
         }
     }
 }
@@ -684,6 +695,15 @@ fn chunk_profile_from_env() -> bool {
 /// 读第 2 步的开关。`1` 打开统计，`2` 还打开每刻全量对照。
 fn partition_verify_from_env() -> Option<bool> {
     match env::var(PARTITION_ENV).ok()?.trim() {
+        "1" => Some(false),
+        "2" => Some(true),
+        _ => None,
+    }
+}
+
+/// 读第 8 步的开关。`1` 打开统计，`2` 还打开每刻全量对照。
+fn island_verify_from_env() -> Option<bool> {
+    match env::var(ISLAND_ENV).ok()?.trim() {
         "1" => Some(false),
         "2" => Some(true),
         _ => None,
@@ -716,6 +736,17 @@ impl Profiler {
             self.partition_on = false;
             self.partition_verify = false;
         }
+        if let Some(verify) = island_verify_from_env() {
+            self.islands = Some(RefCell::new(
+                crate::island_partition_stats::IslandPartitionStats::default(),
+            ));
+            self.islands_on = true;
+            self.islands_verify = verify;
+        } else {
+            self.islands = None;
+            self.islands_on = false;
+            self.islands_verify = false;
+        }
         self.last_report = self.clock.now();
     }
 
@@ -734,6 +765,24 @@ impl Profiler {
     /// 全量对照开着没有。世界创建时读一次。
     pub(crate) fn partition_verify(&self) -> bool {
         self.partition_verify
+    }
+
+    /// 第 8 步统计开着没有。关着时分区器不建表、不读环境变量。
+    #[inline]
+    pub(crate) fn islands_enabled(&self) -> bool {
+        self.islands_on
+    }
+
+    /// 岛划分的全量对照开着没有。
+    pub(crate) fn islands_verify(&self) -> bool {
+        self.islands_verify
+    }
+
+    /// 第 8 步统计对象的可变引用，宿主在每刻收尾时写。
+    pub(crate) fn island_stats_mut(
+        &mut self,
+    ) -> Option<&mut crate::island_partition_stats::IslandPartitionStats> {
+        self.islands.as_mut().map(|cell| cell.get_mut())
     }
 
     /// 方块逻辑报告的读写 / 触发边界。`Observation` 的其余变体直接返回。
@@ -1091,6 +1140,9 @@ impl Profiler {
         if let Some(stats) = &self.partition {
             out.push_str(&stats.borrow().report());
         }
+        if let Some(stats) = &self.islands {
+            out.push_str(&stats.borrow().report());
+        }
         if self.chunk_timing_on {
             let timing = self.chunk_timing.borrow();
             // 按区块的三阶段累计耗时（纳秒）。一行一个区块，离线脚本据此算
@@ -1160,6 +1212,9 @@ impl Profiler {
         self.open_sub = None;
         self.chunk_timing.borrow_mut().reset();
         if let Some(stats) = &self.partition {
+            stats.borrow_mut().reset();
+        }
+        if let Some(stats) = &self.islands {
             stats.borrow_mut().reset();
         }
         self.skipped_catch_ups = 0;

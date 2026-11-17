@@ -574,6 +574,32 @@ impl Plane {
         self.levels.count
     }
 
+    /// 等级 ≤ `max_level` 的区块，按 (x, z) 升序。遍历的是已分配的块，
+    /// 缺省等级的格子直接跳过；只在全量对照时调用。
+    ///
+    /// Chunks with level ≤ `max_level`, sorted by (x, z). Only allocated
+    /// blocks are visited; used by the reference-check path only.
+    pub fn chunks_at_most(&self, max_level: i32) -> Vec<ChunkPos> {
+        let mut out = Vec::new();
+        for (&key, block) in &self.levels.blocks {
+            for index in 0..BLOCK_CELLS {
+                if block[index] > max_level {
+                    continue;
+                }
+                out.push(ChunkPos::new(
+                    key.0
+                        .saturating_mul(BLOCK_SIZE)
+                        .saturating_add((index / BLOCK_SIZE as usize) as i32),
+                    key.1
+                        .saturating_mul(BLOCK_SIZE)
+                        .saturating_add((index % BLOCK_SIZE as usize) as i32),
+                ));
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
     /// 辅助结构占的块数，测试用来检查长期移动不会让内存一直涨。
     #[doc(hidden)]
     pub fn scratch_blocks(&self) -> usize {

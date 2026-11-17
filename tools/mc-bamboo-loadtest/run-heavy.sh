@@ -5,6 +5,7 @@
 #   结果目录缺省是临时目录，脚本结束删掉；传了目录就保留（KEEP=1 也保留）。
 #   PORT（默认 25990）、RAMP（默认 5）、PROFILE_SECS（默认 10）、ROUNDS（默认 3）。
 #   PARTITION（默认 1）：划分 / 越界统计开关，0 = 关闭（性能基线），2 = 再开全量对照。
+#   ISLANDS（默认 0）：第 8 步的岛分区器统计，1 = 打开，2 = 再开每刻全量对照。
 #   结果目录按开关分开：<目录>/on 或 <目录>/off，同轮交替比较时分别跑两遍。
 #   INTERLEAVE=1：按「轮」在外、「场景」在内的顺序跑（第 1 轮把每个场景各跑一遍，
 #   再第 2 轮……），机器上有别的任务时同一轮里的场景之间才好比较。缺省按场景跑完再换。
@@ -26,6 +27,7 @@ KEEP=${KEEP:-}
 # DURATION 只给冒烟测试用；正式测量用 describe 给出的场景时长。
 DURATION=${DURATION:-}
 PARTITION=${PARTITION:-1}
+ISLANDS=${ISLANDS:-0}
 
 if [ "$#" -ge 1 ] && [ -n "$1" ]; then
     OUT=$(mkdir -p "$1" && cd "$1" && pwd)
@@ -87,7 +89,7 @@ run_one() {
     # 缓存关闭状态。PARTITION=0 时把这个变量设成 0，剖析器读环境变量时
     # 只认 1 / 2，其余值（含 0）都当成关闭。
     (cd "$dir" && exec env BAMBOO_PROFILE="$PROFILE_SECS" BAMBOO_PROFILE_CHUNKS=1 \
-        BAMBOO_PROFILE_PARTITION="$PARTITION" \
+        BAMBOO_PROFILE_PARTITION="$PARTITION" BAMBOO_PROFILE_ISLANDS="$ISLANDS" \
         "$BIN" serve --addr "127.0.0.1:$PORT" --max-players 500 --view-distance 8 \
         --scenario "$name" > server.log 2>&1) &
     SERVER=$!

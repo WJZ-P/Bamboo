@@ -18,8 +18,8 @@ use mc_bamboo_core::ChunkPos;
 use mc_bamboo_storage::chunk_io::{ChunkIo, Reply};
 use mc_bamboo_world::{
     director::{
-        DemandSnapshot, Desired, Director, DirectorConfig, Effect, Event, RegionMessage, SaveSeq,
-        Task, TaskId, TaskResult, TicketOp,
+        DemandSnapshot, Desired, Director, DirectorConfig, Effect, Event, Owner, RegionMessage,
+        SaveSeq, Task, TaskId, TaskResult, TicketOp, owner_is_held,
     },
     light::generate::GeneratedLight,
     store::ChunkRevision,
@@ -31,6 +31,7 @@ use crate::{
     chunk_jobs::{ChunkJob, ChunkOutcome, ChunkReply, ChunkWork, decode_packed, encode_column},
     compute_pool::{ComputePool, PoolJob},
     inbound::PlayerId,
+    island_partition::{ChunkDelta, IslandPartition},
     profiler::{Metric, SubPhase},
     region::{Region, RegionColumn, parking::Parking},
     worldgen::GeneratedChunk,
@@ -289,6 +290,17 @@ pub(crate) struct DirectorHost {
     ready_save_barriers: Vec<(u64, PlayerId)>,
     /// 最近一刻的刻数，失败退避据此算截止刻。
     last_tick: u64,
+    /// 第 8 步的分区器：只算不用。开关关着时不建表，pump 只判一次布尔值。
+    /// 分区器自己也在关着时不存在的 `Option` 里，避免任何额外分配。
+    islands: Option<IslandPartition>,
+    /// 这一刻攒着的区块依据变化，pump 收尾时一次喂给分区器。
+    island_deltas: BTreeMap<ChunkPos, ChunkDelta>,
+    /// 分区器上一次跑的刻，防同一刻重复 tick。
+    island_last_tick: u64,
+    /// 对照模式的开关，从剖析器读一次。
+    islands_verify_flag: bool,
+    /// 本刻 pump 里增量记账的耗时（纳秒），和分区器自己那一段分开报。
+    island_bookkeeping_nanos: u64,
     /// 关服中：F6 背压必须让路，保证所有区块都被收回并保存。
     /// Shutting down: F6 backpressure must stand aside so every chunk is saved.
     shutting_down: bool,
@@ -354,6 +366,11 @@ impl DirectorHost {
             save_all_requests: VecDeque::new(),
             ready_save_barriers: Vec::new(),
             last_tick: 0,
+            islands: None,
+            island_deltas: BTreeMap::new(),
+            island_last_tick: 0,
+            islands_verify_flag: false,
+            island_bookkeeping_nanos: 0,
             shutting_down: false,
             saves_enabled: true,
         }
@@ -583,12 +600,155 @@ impl DirectorHost {
     }
 
     /// 每刻开头重置预算和计数。进服/离开/移动发来的票操作都算在这一刻里。
+    /// 分区器在 World 创建时读一次开关，这里只在第一次用到时建表。
     pub(crate) fn begin_tick(&mut self) {
         self.budget_left = self.budget;
         self.reclaims_spent = 0;
         self.delivered = 0;
         self.reclaimed = 0;
         self.parked = 0;
+    }
+
+    /// 分区器开关：由 `region.profiler` 在世界启动时读一次环境变量决定。
+    /// 宿主第一次见到打开的剖析器时把表和初始状态建出来。
+    fn ensure_islands(&mut self, region: &Region) {
+        if !region.profiler.islands_enabled() {
+            return;
+        }
+        if self.islands.is_none() {
+            let mut partition = IslandPartition::new();
+            let verify = region.profiler.islands_verify();
+            partition.set_verify(verify);
+            self.islands_verify_flag = verify;
+            self.islands = Some(partition);
+        }
+    }
+
+    /// 一次等级变化折算成「票想加载」集合的增量。
+    fn note_level_changes(&mut self) {
+        if self.islands.is_none() {
+            return;
+        }
+        let start = Instant::now();
+        for entry in self.director.classified_level_changes() {
+            let pos = entry.change.pos;
+            let desired = entry.change.loading.1 <= crate::island_partition::DESIRED_LEVEL;
+            self.island_deltas
+                .entry(pos)
+                .or_insert_with(|| ChunkDelta::new(pos, None, None))
+                .desired = Some(desired);
+        }
+        self.island_bookkeeping_nanos = self
+            .island_bookkeeping_nanos
+            .saturating_add(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+    }
+
+    /// owner 转换折算成「还没收回」集合的增量。`None` 表示记录不存在。
+    fn note_owner(&mut self, pos: ChunkPos, owner: Option<Owner>) {
+        if self.islands.is_none() {
+            return;
+        }
+        let start = Instant::now();
+        let held = owner.is_some_and(owner_is_held);
+        self.island_deltas
+            .entry(pos)
+            .or_insert_with(|| ChunkDelta::new(pos, None, None))
+            .held = Some(held);
+        self.island_bookkeeping_nanos = self
+            .island_bookkeeping_nanos
+            .saturating_add(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+    }
+
+    /// 对照模式：用 Director 的当前视图再算一次增量，正式路径不调它。
+    fn reconcile_islands(&mut self) {
+        if !self.islands_verify_flag {
+            return;
+        }
+        let start = Instant::now();
+        let desired: std::collections::BTreeSet<ChunkPos> = self
+            .director
+            .tickets()
+            .loading_chunks_at_most(crate::island_partition::DESIRED_LEVEL)
+            .into_iter()
+            .collect();
+        let held: std::collections::BTreeSet<ChunkPos> = self
+            .director
+            .owner_records()
+            .into_iter()
+            .filter(|record| owner_is_held(record.owner))
+            .map(|record| record.pos)
+            .collect();
+        let deltas = self
+            .islands
+            .as_mut()
+            .expect("上面判过")
+            .reconcile(&desired, &held);
+        for delta in deltas {
+            let slot = self
+                .island_deltas
+                .entry(delta.pos)
+                .or_insert_with(|| ChunkDelta::new(delta.pos, None, None));
+            if let Some(value) = delta.desired {
+                slot.desired = Some(value);
+            }
+            if let Some(value) = delta.held {
+                slot.held = Some(value);
+            }
+        }
+        self.island_bookkeeping_nanos = self
+            .island_bookkeeping_nanos
+            .saturating_add(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+    }
+
+    /// 测试专用：直接拿到分区器，逐刻断言不变量和全量对照。
+    #[cfg(test)]
+    pub(crate) fn islands(&self) -> Option<&IslandPartition> {
+        self.islands.as_ref()
+    }
+
+    /// 测试专用：不经过环境变量，直接打开 / 关闭分区器和全量对照。
+    #[cfg(test)]
+    pub(crate) fn enable_islands(&mut self, verify: bool) {
+        let mut partition = IslandPartition::new();
+        partition.set_verify(verify);
+        self.islands = Some(partition);
+        self.islands_verify_flag = verify;
+        self.island_deltas.clear();
+        self.island_last_tick = 0;
+        self.island_bookkeeping_nanos = 0;
+    }
+
+    /// 每刻收尾：把本刻攒下的增量一次喂给分区器，记进剖析器。
+    /// 关着时只有一次 `Option` 判断。
+    pub(crate) fn finish_island_tick(&mut self, region: &mut Region, now_tick: u64) {
+        if self.island_last_tick == now_tick {
+            return;
+        }
+        self.island_last_tick = now_tick;
+        let deltas: Vec<ChunkDelta> = std::mem::take(&mut self.island_deltas)
+            .into_values()
+            .collect();
+        let result = match &mut self.islands {
+            Some(partition) => partition.tick(now_tick, &deltas),
+            None => return,
+        };
+        let bookkeeping = std::mem::take(&mut self.island_bookkeeping_nanos);
+        if let Some(stats) = region.profiler.island_stats_mut()
+            && let Some(partition) = &self.islands
+        {
+            stats.record_tick(partition, result, bookkeeping);
+        }
+        // 分区器的合并 / 拆分事件只在剖析器开着时攒，避免长局无界增长。
+        if let Some(partition) = &mut self.islands {
+            partition.events.clear();
+        }
+        if result.invariant_failures > 0 {
+            debug_assert!(
+                false,
+                "岛划分不变量被破坏：tick={now_tick} failures={}",
+                result.invariant_failures
+            );
+        }
     }
 
     /// 测试专用：生成期每区块状态还剩多少条
@@ -686,6 +846,11 @@ impl DirectorHost {
         let mut events = std::mem::take(&mut self.initial_scratch);
         events.push(Event::Tick { now_tick });
         self.pump(region, events);
+        // 分区器每刻只推进一次：收包阶段和 poll_io 的 pump 只攒增量。
+        // The partitioner advances once per tick; earlier pumps only accumulate.
+        if self.islands.is_some() {
+            self.finish_island_tick(region, now_tick);
+        }
     }
 
     /// 同一区块在 `save_queue` 里只留最新一份快照（官方 `IOWorker.store`
@@ -1097,6 +1262,12 @@ impl DirectorHost {
     /// 这一刻剩下的预算，预算用完之后它返回空事件，循环就停。
     /// 把一批初始事件处理到收敛。`initial` 在本函数返回时清空，容量留给下次。
     fn pump(&mut self, region: &mut Region, mut initial: Vec<Event<Box<RegionColumn>>>) {
+        // 第 8 步：分区器只在同一个 pump 里消费 Director 的等级变化和 owner
+        // 事件，不碰交付 / 收回本身。开关关着时只有一次布尔判断。
+        // Step 8: feed level changes and owner transitions to the island
+        // partitioner without touching the delivery/reclaim path.
+        self.ensure_islands(region);
+        let islands_on = self.islands.is_some();
         // 一批初始事件（例如同一刻收回的所有读盘结果）一起处理，循环末尾只
         // 交付一次，保证按距离排序、出生点 3×3 在同一批里。
         // A batch of initial events (e.g. all reads collected this tick) is driven
@@ -1122,11 +1293,26 @@ impl DirectorHost {
                     Event::Delivered { .. } | Event::Returned { .. } => SubPhase::DirectorAck,
                     _ => SubPhase::DirectorEvents,
                 };
+                // 回执本身也改 owner：放在 effects 循环之前，效果里的
+                // Deliver / Reclaim 若是同一格以更晚的那条为准。
+                let ack = match &event {
+                    Event::Delivered { pos, .. } | Event::Returned { pos, .. } => Some(*pos),
+                    _ => None,
+                };
                 region.profiler.start_sub(sub);
                 let mut effects = std::mem::take(&mut self.effect_scratch);
                 self.director
                     .handle_effects(event, |out| std::mem::swap(&mut effects, out));
                 region.profiler.end_sub();
+                if islands_on {
+                    self.note_level_changes();
+                    // 用事件处理完之后的真实 owner：过期回执不改变归属，
+                    // 也不会凭空造出「还没收回」的区块。
+                    if let Some(pos) = ack {
+                        let owned = self.director.owner_at(pos);
+                        self.note_owner(pos, owned);
+                    }
+                }
                 for effect in effects.drain(..) {
                     match effect {
                         Effect::Submit {
@@ -1157,7 +1343,22 @@ impl DirectorHost {
                             self.read_queue.retain(|&(_, queued_id, _)| queued_id != id);
                             self.cancel_compute(id);
                         }
-                        Effect::ToRegion(message) => self.region_message(region, message),
+                        Effect::ToRegion(message) => {
+                            if islands_on {
+                                match &message {
+                                    RegionMessage::Deliver { pos, .. } => {
+                                        self.note_owner(*pos, Some(Owner::Delivering));
+                                    }
+                                    RegionMessage::Reclaim { positions } => {
+                                        for &(pos, _) in positions {
+                                            self.note_owner(pos, Some(Owner::Reclaiming));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            self.region_message(region, message);
+                        }
                         Effect::Park { pos, column } => {
                             region.profiler.start_sub(SubPhase::DirectorEvents);
                             self.parking.park(pos, column);
@@ -1180,6 +1381,10 @@ impl DirectorHost {
             if events.is_empty() {
                 self.submit_reads();
                 self.submit_compute(region);
+                // 对照模式只在 pump 收敛后做一次全量对账，正式路径不进这里。
+                if islands_on {
+                    self.reconcile_islands();
+                }
                 self.pump_events = events;
                 return;
             }

@@ -25,7 +25,7 @@ pub use pyramid::{
     GENERATION, LOADING, PipelineKind, Step, loading_step, neighbor_view, stage_index,
 };
 pub use state::{
-    ChunkBundle, DebugRecord, DebugState, Desired, Director, DirectorConfig, Effect, Event,
-    LevelClassification, Owner, RegionId, RegionMessage, SaveSeq, Task, TaskId, TaskResult,
-    TicketOp, classify,
+    ChunkBundle, ClassifiedLevelChange, DebugRecord, DebugState, Desired, Director, DirectorConfig,
+    Effect, Event, LevelClassification, Owner, OwnerRecord, RegionId, RegionMessage, SaveSeq, Task,
+    TaskId, TaskResult, TicketOp, classify, owner_is_held,
 };

@@ -108,7 +108,7 @@
 - **划分的依据是票想要加载的区块**，即两套等级里加载等级 ≤ 33（`generation_status` 给出 `Full`）的区块，再并上 `Owner` 是 `Delivering` / `Region` / `Reclaiming` 的区块（还没收回的）。这比 6.1 的「已交付或正在交付」大，好处是：
   1. 合并在生成期间就发生，而不是卡在交付的路上（生成要好几刻，合并只要等一刻）；
   2. 玩家的方形视野不会因为中间几个区块还没生成好而被误判成两块。
-- **时点**：Director 每次 `run_updates()` 产出的 `LevelChange`（`classify` 为 `Load` / `Unload` 的那些）就是分区器的输入，在同一次 `pump` 里更新 section 计数。任何一个 section 从空变非空时查它周围切比雪夫距离 ≤ 2 的 section：
+- **时点**：Director 每次 `run_updates()` 产出的全部 `LevelChange`（连同 `classify` 的结果；`Promote` / `Demote` 也会跨过 ≤ 33 的边界）就是分区器的输入，再加上 `Deliver` / `Reclaim` / `Delivered` / `Returned` 带来的 owner 变化，在同一次 `pump` 里更新 section 计数。任何一个 section 从空变非空时查它周围切比雪夫距离 ≤ 2 的 section：
   - 一个岛都没有 → 这个 section 归一个新岛（空岛，还没有区块，可以先接玩家，见 4.1）；
   - 恰好一个岛 → 归它；
   - 两个以上 → 登记一次**待合并**，这些 section 暂时记在编号最小的那个岛名下。
@@ -276,12 +276,18 @@
 | 5b | **效果消息和命令分类**：岛对 `Global` 的写变成 `GlobalEffect`；`GlobalPort` 有两种实现——「直接」（立刻应用，单岛和精确模式用）和「排队」（交回时应用）；计分板准则、闲置踢出、延迟广播、Tab 列表拆成「岛算、主控应用」；命令按 4.4 分类，全局类走 `GlobalPort` | `global.rs`、`command/*`（51 个顶层字面量里约 25 个）、`chat.rs`、`secure_chat/deliver.rs`、`scoreboard/`、`admin.rs`、`world.rs` | 逐位一致（「直接」实现） | 同上；单元测试里用「排队」实现跑一遍全部命令测试，只允许反馈晚到、内容不变 | 大（~1500，可再拆两次合并） | 否 |
 | 6 | **岛的停放 / 运行所有权和区块信箱**：`Island: Send`；Director 的 `ToRegion` 改为进岛的信箱（带目标岛编号），宿主不再在 `pump` 里直接拿 `&mut Region`；存盘快照改成「主控出名单、岛编码交回」；宿主记的子项改记主控的剖析器。两种驱动：**齐步**（岛借给主控，信箱在现在的同一个时点当场应用，精确模式；这一步仍是缺省）和**分离**（信箱在岛下一刻开头应用）。所有要求逐位一致的测试、对拍、探针在这一步改成显式选齐步 | `director_host.rs` 的 `pump` / `flush_region_mail_into` / `region_message` / `poll_io` / `save_loaded_dirty` / `snapshot_all_dirty` / `shutdown`；`mc-bamboo-world/src/director/state.rs` 的 `RegionMessage`（加岛编号）；`world.rs`、`region/column.rs`、`profiler.rs`；测试、`mc-bamboo-vanilla`、`tools/probe.sh` 的模式选择 | 齐步：逐位一致；分离：交付晚一刻 | 显式齐步跑全部测试和对拍；缺省配置下全套测试和探针都过；分离模式跑 `BAMBOO_TEST_LOADED` 测试，按「交付晚一刻」调整的少数断言单独列出；`inline_and_pool_produce_identical_worlds` 两种驱动都过 | 大（~1000） | **是**（宿主的邮件路径、`RegionMessage`） |
 | 7 | **tick 线程池和调度（仍一个岛）**：主控线程（20 TPS，`Global` + Director）+ tick 线程池；岛按截止时间派发、跑完交回；分离驱动下主控和岛并行；`bamboo.toml` 加 `island_threads`（0 = 齐步、内联）。**验收通过后缺省改成 ≥ 1（分离驱动）**，具体值按测量定。总设计稿第 12 节第 3 条（等子任务的线程只能帮子任务）这一步不涉及，岛内还没有子任务 | 新 `island_pool.rs`、`world.rs`、`mc-bamboo-server/src/server.rs`、`config_files.rs`、`docs/configuration.md` | `island_threads = 0`：逐位一致；缺省（分离）：同第 6 步分离模式 | 显式 `island_threads = 0` 跑全部测试和对拍；**缺省配置下全套测试和探针都过**；量「主控 ↔ 岛交接」每刻的额外耗时（目标 < 50 µs）；`islands-1` / `normal-*` 打开 / 关闭同轮对比 | 中（~700） | 否 |
-| 8 | **分区器，只算不用**：主控按 3.1 维护 section 计数和岛的划分、待合并 / 待拆分，统计岛数、大小、每秒合并 / 拆分次数，断言不变量；不真的拆 | 新 `island_partition.rs`；`director_host.rs` 的 `pump`（把 `LevelChange` 喂给分区器）；`mc-bamboo-world/src/director/state.rs`（`classify` 的结果对外暴露） | 不变 | 随机移动玩家 / 随机挂票的模糊测试逐刻断言不变量；增量和全量划分逐刻相同（照单元划分第 2 步的做法）；`islands-K` / `normal-*-fly` 下的统计 | 中（~800） | **是** |
+| 8 | ✅ **已完成（2026-11-17）**。**分区器，只算不用**：主控按 3.1 维护 section 计数和岛的划分、待合并 / 待拆分，统计岛数、大小、每秒合并 / 拆分次数，断言不变量；不真的拆（运行时行为不变） | 新 `island_partition.rs` / `island_partition_stats.rs` / `world/island_partition_tests.rs`；`director_host.rs` 的 `pump`（把 `LevelChange` 和 owner 事件喂给分区器）；`mc-bamboo-world/src/director/state.rs`（`classify` 的结果对外暴露）；`profiler.rs`、`lib.rs`、`world.rs` 一行模块声明、`run-heavy.sh` 的 `ISLANDS` | 不变 | `cargo fmt` / `clippy --workspace --all-targets` 0 警告；`cargo test -p mc-bamboo-game -p mc-bamboo-world` 与 `BAMBOO_TEST_LOADED=1` 全过；`ticket-oracle` 400 场景 0 不一致、`chunk-content` 139/139、`oracle java` 10114 例 0 fail、hy4 探针 719/719；随机玩家 / 随机票 5 种子 × 400 刻逐刻断言不变量、增量 == 全量、漏合并改坏确认、拆分迟滞 200 刻与取消；`=2` 的正式 `World::tick` 全量对照不报错；7 场景统计见 `docs/profiling.md` 第 15 节：`islands-K` 稳态正好 K 个岛（25 / 36 个 section）、合并 / 拆分都是 0 / 秒，`island_partition_ns` p50 0.2–1.1 µs、合计 mean 0.29–21.2 µs/刻，`=2` 全量对照 0.19–0.24 ms/刻；3 轮 A-B-A 中位数 `islands-1` 0.851、`normal-20-walk` 1.005，在噪声内 | 中（~800） | **是** |
 | 9 | **岛的拆合（离线）**：`Region::split_off_island(chunks, players)` / `absorb_island(other, delta)`，补齐 3.3 表里缺的零件；还不在运行时调用 | `region.rs`、`region/unit.rs`（扩成岛）、`mc-bamboo-world/src/store.rs`、`mc-bamboo-blocks/src/entity/store.rs`、`tick_levels.rs`、`entity_tracking.rs`、`player_grid.rs` | 不变（运行时不调） | 拆了再合的内容指纹（方块、方块实体、计划刻含顺序、实体去掉网络 ID、容器、追踪配对）逐位相同；平移和不平移的对照；微基准：1000 个区块的拆 / 合耗时（目标 < 5 ms） | 大（~1200） | 否 |
 | 10 | **多岛上线（验收后缺省开）**：分区器驱动真实的拆合；交付按岛路由、合并后再交付；进服 / 离开 / 跨岛 `/tp` 走离境和到达；聊天、全局帧、跨岛命令扇出；`bamboo.toml` 加 `islands`，**这一步验收通过后缺省改成 `true`**，`islands = false` 保留给对拍和测试 | `world.rs`、`director_host.rs`、`island_partition.rs`、`island_pool.rs`、`command/teleport.rs`、`secure_chat/deliver.rs`、`chat.rs`、`command/*`、`docs/configuration.md` | 打开时：第 13 节差异清单新增的几条 | 第 6.2 节的多岛测试；**缺省配置（多岛开）下全套测试和探针都过**，显式精确模式下逐位一致照旧；`islands-K` 和第 14 节基线对比 | 大（~1500） | **是**（`Deliver` 的目标岛） |
 | 11 | **长时间压力验收和调参**：长时间压力、合并拆分频率和等待时间（总设计稿 17.2）、分区器迟滞参数和 `island_threads` 的缺省值按测量调整、把差异写进第 13 节。缺省值已在第 7、10 步改过，这一步不再改开关 | 文档、`tools/mc-bamboo-loadtest`、必要时 `config_files.rs` 的缺省值 | — | 见 6.2 | 小 | 否 |
 
 **第 1–3 步的实测（2026-11-17）**：6.1 的验收全过（`cargo test --workspace` + `BAMBOO_TEST_LOADED=1` 共 4313 个测试 0 失败，11 个对拍 0 不一致，`oracle java` 两种配置 10114 / 0 fail，hy4 探针和 `--loaded` 两遍共 5 次 719/719）。性能同轮 A-B-A（第 0 步合并点对第 3 步末），每场景 5 轮、每次 20 秒，逐轮 `tick_total` 均值比的中位数：`islands-1` 0.904、`spread-16` 1.018、`normal-20-walk` 1.022；同机 A/A 对照（`islands-1`）0.956，单轮范围 0.84–1.07，三个场景都在噪声内。微基准 7 轮 A-B 交替：`cache_bench`（关缓存）0.994；`ticks_bench` 总中位数 1.010（rolling 1.006 / 1.018 / 1.034），只改了计划刻热路径上「最近排刻时刻」的编码，单独对照这一处是中性的，剩下的差别只出现在测试二进制里（第 3 步往同一个测试二进制加了不少测试代码），正式二进制的 `cache_bench` 没有。
+
+**第 8 步的实测（2026-11-17）**：验收结果和 7 个场景的岛数 / 大小 / 合并拆分
+频率 / 分区器耗时写在第 6 节表内，完整数字与口径见 `docs/profiling.md` 第 15 节。
+稳态布局里合并 / 拆分都是 0 次，所以「迟滞参数在真实玩家轨迹上合不合适」这个问题
+还没答，留给第 11 步的长时间压力；模糊测试（随机移动玩家 / 随机挂票）和 `=2`
+的正式 `World::tick` 全量对照覆盖的是分区器自身的不变量和增量正确性。
 
 ### 6.1 单岛阶段（第 0–7 步）怎么验
 
