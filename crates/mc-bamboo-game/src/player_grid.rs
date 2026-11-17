@@ -254,4 +254,45 @@ mod tests {
                 .is_none()
         );
     }
+
+    /// 改坏确认：网格里留着旧格子、或者玩家表给了错的位置，查询都必须看得出来。
+    #[test]
+    fn stale_grid_cells_would_fail_the_nearby_player_queries() {
+        use mc_bamboo_core::Vec3;
+        use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+        use uuid::Uuid;
+
+        let id = PlayerId(1);
+        let mut grid = PlayerGrid::default();
+        let mut players = BTreeMap::new();
+        grid.place(id, Vec3::new(0.0, 64.0, 0.0));
+        let player = crate::player::Player::new(
+            id,
+            Uuid::nil(),
+            "P1".to_owned(),
+            GameMode::Creative,
+            ClientInformation::default(),
+            Vec3::new(0.0, 64.0, 0.0),
+        );
+        players.insert(id, player);
+        assert_eq!(grid.nearest_distance(0.0, 0.0, 64.0, &players), Some(0.0));
+
+        // 把格子改坏（玩家其实已经走远，但网格没更新），精确距离会排除这个候选。
+        grid.place(id, Vec3::new(0.0, 64.0, 0.0));
+        let moved = crate::player::Player::new(
+            id,
+            Uuid::nil(),
+            "P1".to_owned(),
+            GameMode::Creative,
+            ClientInformation::default(),
+            Vec3::new(500.0, 64.0, 0.0),
+        );
+        players.insert(id, moved);
+        assert_eq!(grid.nearest_distance(0.0, 0.0, 64.0, &players), None);
+        assert!(
+            grid.players_within(0.0, 0.0, 64.0, &players)
+                .next()
+                .is_none()
+        );
+    }
 }
