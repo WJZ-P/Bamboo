@@ -208,12 +208,12 @@ fn pickup_candidates_match_the_full_scan_in_uid_order() {
     assert!(far.is_empty(), "远处的物品不该被带进候选");
 }
 
-/// 真正走一次 `pickup_for`：近处两个物品按 uid 升序被捡起，远处的诱饵留在世界里。
+/// 真正走一次 `pickup_for`：近处两个物品被捡起，远处的诱饵留在世界里。
 /// 把候选名单换回全表（不按范围过滤）时，这个测试会抓到多捡或漏捡。
 ///
-/// End-to-end pickup: two nearby items are picked up in ascending uid order while
-/// a far-away decoy stays in the world. Reverting to an unfiltered whole-table
-/// candidate list would make this test catch the wrong pickup set or order.
+/// End-to-end pickup: two nearby items are picked up while a far-away decoy
+/// stays in the world. Reverting to an unfiltered whole-table candidate list
+/// would make this test catch the wrong pickup set or order.
 #[test]
 fn pickup_uses_only_nearby_items_in_uid_order() {
     let mut server = Harness::new(8);
