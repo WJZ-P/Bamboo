@@ -638,37 +638,79 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             ("keepPacked".to_owned(), Tag::Byte(0)),
         ]
     };
-    let bare: &[(&str, &str)] = &[
-        ("mob_spawner-bare", "minecraft:spawner"),
-        ("sign-bare", "minecraft:oak_sign"),
-        ("hanging_sign-bare", "minecraft:oak_hanging_sign"),
-        ("beehive-bare", "minecraft:beehive"),
-        ("jigsaw-bare", "minecraft:jigsaw"),
-        ("end_gateway-bare", "minecraft:end_gateway"),
-        ("sculk_catalyst-bare", "minecraft:sculk_catalyst"),
-        ("beacon-bare", "minecraft:beacon"),
-        ("potent_sulfur-bare", "minecraft:potent_sulfur"),
-        ("structure_block-bare", "minecraft:structure_block"),
-        ("ender_chest-bare", "minecraft:ender_chest"),
-        ("jukebox-bare", "minecraft:jukebox"),
-        ("shulker_box-bare", "minecraft:shulker_box"),
-        ("decorated_pot-bare", "minecraft:decorated_pot"),
-        ("shelf-bare", "minecraft:oak_shelf"),
-        ("command_block-bare", "minecraft:command_block"),
-        ("test_block-bare", "minecraft:test_block"),
-        ("test_instance_block-bare", "minecraft:test_instance_block"),
+    let bare: &[(&str, &str, &str)] = &[
+        (
+            "mob_spawner-bare",
+            "minecraft:spawner",
+            "minecraft:mob_spawner",
+        ),
+        ("sign-bare", "minecraft:oak_sign", "minecraft:sign"),
+        (
+            "hanging_sign-bare",
+            "minecraft:oak_hanging_sign",
+            "minecraft:hanging_sign",
+        ),
+        ("beehive-bare", "minecraft:beehive", "minecraft:beehive"),
+        ("jigsaw-bare", "minecraft:jigsaw", "minecraft:jigsaw"),
+        (
+            "end_gateway-bare",
+            "minecraft:end_gateway",
+            "minecraft:end_gateway",
+        ),
+        (
+            "sculk_catalyst-bare",
+            "minecraft:sculk_catalyst",
+            "minecraft:sculk_catalyst",
+        ),
+        ("beacon-bare", "minecraft:beacon", "minecraft:beacon"),
+        (
+            "potent_sulfur-bare",
+            "minecraft:potent_sulfur",
+            "minecraft:potent_sulfur",
+        ),
+        (
+            "structure_block-bare",
+            "minecraft:structure_block",
+            "minecraft:structure_block",
+        ),
+        (
+            "ender_chest-bare",
+            "minecraft:ender_chest",
+            "minecraft:ender_chest",
+        ),
+        ("jukebox-bare", "minecraft:jukebox", "minecraft:jukebox"),
+        (
+            "shulker_box-bare",
+            "minecraft:shulker_box",
+            "minecraft:shulker_box",
+        ),
+        (
+            "decorated_pot-bare",
+            "minecraft:decorated_pot",
+            "minecraft:decorated_pot",
+        ),
+        ("shelf-bare", "minecraft:oak_shelf", "minecraft:shelf"),
+        (
+            "command_block-bare",
+            "minecraft:command_block",
+            "minecraft:command_block",
+        ),
+        (
+            "test_block-bare",
+            "minecraft:test_block",
+            "minecraft:test_block",
+        ),
+        (
+            "test_instance_block-bare",
+            "minecraft:test_instance_block",
+            "minecraft:test_instance_block",
+        ),
     ];
     let mut out: Vec<_> = bare
         .iter()
-        .map(|(name, state)| {
-            let id = format!("minecraft:{}", name.trim_end_matches("-bare"));
-            let tag = Tag::Compound(meta(&id));
-            (
-                name.to_string(),
-                *state,
-                Box::leak(id.into_boxed_str()) as &'static str,
-                tag,
-            )
+        .map(|(name, state, id)| {
+            let tag = Tag::Compound(meta(id));
+            (name.to_string(), *state, *id, tag)
         })
         .collect();
     // 富字段：非默认数值、可省字段、带列表的 codec。
