@@ -880,6 +880,27 @@ mod tests {
         assert!(report.contains("writes=0"), "{report}");
     }
 
+    /// 开关关着时也要每刻清掉第 1 步攒下的活动清单，否则它无限增长。
+    #[test]
+    fn the_activity_lists_do_not_grow_when_the_switch_is_off() {
+        use crate::world::tests::Harness;
+        use mc_bamboo_blocks::TickPriority;
+        let mut server = Harness::new(2);
+        let pos = BlockPos::new(1, -60, 1);
+        assert!(!server.world_region().partitioning.enabled);
+        server
+            .region()
+            .block_ticks
+            .schedule(pos, 1, 3, TickPriority::Normal);
+        assert_eq!(server.region().block_ticks.touched_chunks().len(), 1);
+        server.tick();
+        assert!(
+            server.region().block_ticks.touched_chunks().is_empty(),
+            "没有消费者也要清掉本刻清单"
+        );
+        assert!(server.region().queued_block_event_chunks().is_empty());
+    }
+
     /// 触发位置不在忙区块里（第 2 种越界）也要统计到。
     #[test]
     fn unassigned_triggers_are_counted_separately() {
