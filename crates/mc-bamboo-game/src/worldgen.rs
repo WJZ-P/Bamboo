@@ -442,9 +442,20 @@ static TEST_COMPUTE_PANIC: std::sync::atomic::AtomicBool =
 #[cfg(test)]
 static TEST_COMPUTE_ERROR: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-/// 这三个并发测试共用进程级的测试开关与全局缓存，必须串行跑。
-/// These concurrency tests share process-wide test switches and the cache,
-/// so they must not run in parallel.
+/// 测试专用：测试种子（[`test_switches_apply`]）的计算闭包真正跑了几次。只有拿着
+/// [`TEST_CACHE_LOCK`] 的并发测试用这些种子，所以计数不受别的测试、清缓存和淘汰影响
+/// （`computed_by` 会随淘汰和清缓存一起丢掉，整套并行跑时会被别的测试挤掉）。
+/// Test-only: how many times the computing closure ran for the test seeds.
+/// Only the concurrency tests holding [`TEST_CACHE_LOCK`] use those seeds, so
+/// the count is immune to other tests, clears and eviction (`computed_by` goes
+/// away with eviction and clears, which other tests trigger in a parallel run).
+#[cfg(test)]
+static TEST_COMPUTATIONS: AtomicUsize = AtomicUsize::new(0);
+/// 这几个测试共用进程级的测试开关与全局缓存（并发测试、会清缓存或填满缓存的测试），
+/// 必须串行跑。
+/// These tests share process-wide test switches and the cache (the
+/// concurrency tests and those that clear or fill it), so they must not run
+/// in parallel.
 #[cfg(test)]
 static TEST_CACHE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -648,6 +659,7 @@ fn cached_terrain(
         COMPUTED_FLAG.with(|flag| flag.set(true));
         #[cfg(test)]
         if test_switches_apply(config.seed) {
+            TEST_COMPUTATIONS.fetch_add(1, Ordering::Relaxed);
             let delay = TEST_COMPUTE_DELAY_MS.load(Ordering::Relaxed);
             if delay > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(delay as u64));
@@ -1028,6 +1040,7 @@ mod tests {
         let cfg = normal(0x5eed_9999);
         let (x, z) = (8123, -4567);
         clear_terrain_cache();
+        TEST_COMPUTATIONS.store(0, Ordering::Relaxed);
         TEST_COMPUTE_DELAY_MS.store(60, Ordering::Relaxed);
         TEST_BREAK_WAITER.store(false, Ordering::Relaxed);
         let barrier = Arc::new(std::sync::Barrier::new(4));
@@ -1048,20 +1061,17 @@ mod tests {
         for chunk in &results {
             assert!(Arc::ptr_eq(&results[0], chunk));
         }
-        // 只有一条线程真正执行了生成：本次调用的 `computed_by` 里这个键
-        // 只记了一个线程。全局计数会被并行跑的其它测试改动，所以这里只查
-        // 自己那一片里这个键的记录。
-        // Only one thread computed. Global counters race with parallel tests,
-        // so inspect only this key's entry in its shard.
-        let key = (cfg.seed, cfg.level_type.settings_id(), x, z, false);
-        let shards = terrain_shards();
-        let shard = shards[shard_index(&key)].lock().expect("shard");
+        // 只有一条线程真正执行了生成：这个测试种子的计算闭包只跑了一次。
+        // 计数只属于测试种子，不读分片里的 `computed_by`：那份记录会随淘汰和
+        // 清缓存丢掉，整套并行跑时会被别的测试挤掉。
+        // Only one thread computed: the closure ran once for this test seed.
+        // The count belongs to the test seeds alone, not the shard's
+        // `computed_by`, which eviction and clears (other tests) can drop.
         assert_eq!(
-            shard.computed_by.get(&key).map(Vec::len),
-            Some(1),
+            TEST_COMPUTATIONS.load(Ordering::Relaxed),
+            1,
             "the key must be computed exactly once"
         );
-        drop(shard);
 
         // 改坏确认：清缓存后重来，让等待方拿到 x+1 的结果。
         // Break confirmation: repeat with waiters receiving x+1.
@@ -1334,6 +1344,9 @@ mod tests {
     /// a fresh pure computation; clearing the cache in between changes nothing.
     #[test]
     fn shared_cache_hits_share_arcs_and_match_uncached_terrain() {
+        // 会清缓存：和并发测试串行，免得清掉它们正看着的条目。
+        // Clears the cache: serialize with the concurrency tests.
+        let _test_guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = normal(12345);
         clear_terrain_cache();
         let fresh = generate_chunk(&cfg, 3, -2).expect("uncached terrain");
@@ -1359,6 +1372,9 @@ mod tests {
     /// cache that never exceeds its byte limit.
     #[test]
     fn shared_cache_is_bounded_and_order_independent() {
+        // 会清缓存：和并发测试串行，免得清掉它们正看着的条目。
+        // Clears the cache: serialize with the concurrency tests.
+        let _test_guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = normal(777);
         clear_terrain_cache();
         let positions: Vec<(i32, i32)> =
