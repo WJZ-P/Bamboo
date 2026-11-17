@@ -479,6 +479,12 @@ final class FeatureLevelHandler implements InvocationHandler {
             case "updateNeighborsAt":
                 // `LevelAccessor` 的默认实现是空操作，`WorldGenRegion` 没有覆写。
                 return null;
+            case "getEntities":
+                // `WorldGenRegion.getEntities` 两个重载都返回 `Collections.emptyList()`；
+                // `SculkVeinBlock.attemptPlaceSculk` → `Block.pushEntitiesUp` 会调它。
+                // Both `WorldGenRegion.getEntities` overloads return an empty list;
+                // `Block.pushEntitiesUp` (from sculk vein spreading) calls it.
+                return java.util.Collections.emptyList();
             case "environmentAttributes":
                 // 放置路径只有流体刻延迟读它，不影响写方块。
                 return net.minecraft.world.attribute.EnvironmentAttributeReader.EMPTY;
@@ -521,6 +527,7 @@ final class FeatureLevelHandler implements InvocationHandler {
             this.countedWrites++;
             this.touchedInTarget.add(pos.asLong());
         }
+        traceWrite(pos, state);
         BlockState old = chunk.setBlockState(pos, state, flags);
         if (state.hasBlockEntity()) {
             // PROTOCHUNK 分支（44-101 / 104-167）：写一份 DUMMY NBT，
@@ -541,6 +548,45 @@ final class FeatureLevelHandler implements InvocationHandler {
             }
         }
         return true;
+    }
+
+    /**
+     * 诊断开关 `-Dbamboo.debug.trace-pos=x,y,z;x,y,z`：记录写到这些位置的每一次
+     * `setBlock`（新状态 + 调用栈），写到 `bamboo.debug.trace-pos.file`。
+     * Diagnostic switch: log every write to the listed positions (new state and
+     * call stack) to `bamboo.debug.trace-pos.file`.
+     */
+    private static final java.util.Set<Long> TRACE_POS = parseTracePos();
+
+    private static java.util.Set<Long> parseTracePos() {
+        java.util.Set<Long> out = new java.util.HashSet<>();
+        String spec = System.getProperty("bamboo.debug.trace-pos", "");
+        for (String part : spec.split(";")) {
+            String[] xyz = part.trim().split(",");
+            if (xyz.length == 3) {
+                out.add(BlockPos.asLong(Integer.parseInt(xyz[0].trim()),
+                        Integer.parseInt(xyz[1].trim()), Integer.parseInt(xyz[2].trim())));
+            }
+        }
+        return out;
+    }
+
+    private static void traceWrite(BlockPos pos, BlockState state) {
+        if (TRACE_POS.isEmpty() || !TRACE_POS.contains(pos.asLong())) {
+            return;
+        }
+        StringBuilder text = new StringBuilder();
+        text.append("WRITE ").append(pos.toShortString()).append(' ').append(state).append('\n');
+        for (StackTraceElement frame : new Throwable().getStackTrace()) {
+            text.append("    at ").append(frame).append('\n');
+        }
+        try (java.io.FileWriter writer = new java.io.FileWriter(
+                System.getProperty("bamboo.debug.trace-pos.file", "trace-pos.log"), true)) {
+            writer.write(text.toString());
+        } catch (java.io.IOException ignored) {
+            // 诊断用，失败就当没开。
+            // Diagnostic only; ignore IO failures.
+        }
     }
 
     private boolean withinWriteZone(BlockPos pos) {
@@ -1707,7 +1753,10 @@ public final class ChunkgenOracle {
                     wrapped(chunks), this.registries,
                     new BiomeManager((qx, qy, qz) -> holder[0].getNoiseBiome(qx, qy, qz),
                             BiomeManager.obfuscateSeed(seed)),
-                    resolver, randomState, null, null);
+                    // 无结构模式也要 `getLevel()`：沙漠水井 / 化石的模板管理器挂在它的服务端上。
+                    // Structure-less runs need `getLevel()` too: the desert well and fossil
+                    // reach the template manager through its server.
+                    resolver, randomState, null, installEntityStub(seed));
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
                     ChunkgenOracle.class.getClassLoader(),
                     new Class<?>[] {WorldGenLevel.class}, handler);
@@ -2305,6 +2354,16 @@ public final class ChunkgenOracle {
                                             "WorldData." + method.getName());
                                 });
                 setField(net.minecraft.server.MinecraftServer.class, server, "worldData", data);
+                // `TemplateFeature.place`（沙漠水井的 `overlay` 子项）和
+                // `FossilFeature.place` 第一步都是
+                // `level.getLevel().getServer().getStructureTemplateManager()`；
+                // 不跑构造器的服务端这个字段是 null，会在放置时抛 NPE。
+                // `TemplateFeature.place` (the desert well's `overlay` child) and
+                // `FossilFeature.place` both start with
+                // `level.getLevel().getServer().getStructureTemplateManager()`, which is
+                // null on a constructor-less server.
+                setField(net.minecraft.server.MinecraftServer.class, server,
+                        "structureTemplateManager", this.templates);
                 Object levelData = Proxy.newProxyInstance(
                         ChunkgenOracle.class.getClassLoader(),
                         new Class<?>[] {net.minecraft.world.level.storage.ServerLevelData.class},

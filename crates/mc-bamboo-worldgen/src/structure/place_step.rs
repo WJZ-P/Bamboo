@@ -694,16 +694,19 @@ fn place_layout_piece(
     match kind {
         "igloo" | "shipwreck" | "ocean_ruin" => {
             let mut piece = piece.clone();
-            let outcome = match kind {
+            match kind {
                 "igloo" => post_process::igloo::igloo(world, &mut piece, *chunk_bb, random)?,
                 "shipwreck" => {
                     post_process::shipwreck::shipwreck(world, &mut piece, *chunk_bb, random)?
                 }
                 _ => post_process::ocean_ruin::ocean_ruin(world, &mut piece, *chunk_bb, random)?,
             };
-            for (x, y, z, state) in outcome.writes {
-                world.set_block_with_heightmaps(x, y, z, state);
-            }
+            // 这三种 `postProcess` 已经直接写进 `FeatureWorld`（`outcome.writes` 只是日志）。
+            // 不能再按日志重放一遍：重放里的 `BARRIER` → 方块实体方块会再走一次
+            // `removeBlockEntity`，把刚写好的战利品表丢掉。
+            // These `postProcess` calls already wrote straight into `FeatureWorld`
+            // (`outcome.writes` is only a log). Replaying it would run the
+            // `BARRIER` → block-entity sequence again and drop the loot table just written.
             Ok(None)
         }
         "mineshaft" | "stronghold" | "monument" | "mansion" => {
@@ -792,11 +795,9 @@ fn place_single_piece(
         "ruined_portal" => {
             let mut piece = piece.clone();
             let mut box_ = *chunk_bb;
-            let outcome =
-                post_process::ruined_portal::ruined_portal(world, &mut piece, &mut box_, random)?;
-            for (x, y, z, state) in outcome.writes {
-                world.set_block_with_heightmaps(x, y, z, state);
-            }
+            // 同上：已直接写进 `FeatureWorld`，不重放日志。
+            // As above: already written into `FeatureWorld`; do not replay the log.
+            post_process::ruined_portal::ruined_portal(world, &mut piece, &mut box_, random)?;
         }
         _ => {}
     }
@@ -839,20 +840,51 @@ fn place_code_piece(
         };
         dispatch_stronghold(&mut sp, piece, random)?;
     } else {
+        let shaft = if piece.id.contains("mesa") || is_mesa(piece) {
+            pieces::mineshaft_place::ShaftType::Mesa
+        } else {
+            pieces::mineshaft_place::ShaftType::Normal
+        };
+        let biome_blocking = mineshaft_biome_blocking(level.world, &piece.bb, chunk_bb)?;
         let mut sp = pieces::mineshaft_place::ShaftPiece {
-            ctx,
-            shaft: if piece.id.contains("mesa") || is_mesa(piece) {
-                pieces::mineshaft_place::ShaftType::Mesa
-            } else {
-                pieces::mineshaft_place::ShaftType::Normal
-            },
+            ctx: ctx.with_can_replace(shaft.can_replace_fn()),
+            shaft,
             level,
             chunk_bb: *chunk_bb,
-            biome_blocking: false,
+            biome_blocking,
         };
         dispatch_mineshaft(&mut sp, piece, random)?;
     }
     Ok(())
+}
+
+/// `MineShaftPiece.isInInvalidLocation` 第 136-152 行：
+/// `level.getBiome(probe).is(BiomeTags.MINESHAFT_BLOCKING)`。`getBiome` 是
+/// `BiomeManager.getBiome`（`obfuscateSeed` 的八角 fiddled 选 quart 角，再读 3×3 里
+/// BIOMES 阶段存好的 quart 格）；探测点裁在中心区块里，选中的角总在 3×3 之内。
+///
+/// `MineShaftPiece.isInInvalidLocation` lines 136-152:
+/// `level.getBiome(probe).is(BiomeTags.MINESHAFT_BLOCKING)`, where `getBiome` is the
+/// fiddled `BiomeManager.getBiome` over the stored 3x3 quart cells. The probe is clipped
+/// to the centre chunk, so the chosen corner always lies inside the 3x3.
+fn mineshaft_biome_blocking(
+    world: &FeatureWorld<'_>,
+    piece_bb: &[i32; 6],
+    chunk_bb: &[i32; 6],
+) -> Result<bool, String> {
+    thread_local! {
+        static BLOCKING: Vec<i32> = crate::structure::registry::resolve_biome_holders(
+            &serde_json::json!("#minecraft:mineshaft_blocking"),
+        )
+        .unwrap_or_default();
+    }
+    let (x, y, z) = pieces::mineshaft_place::invalid_location_probe(piece_bb, chunk_bb);
+    let zoom_seed = crate::biome_manager::obfuscate_seed(world.seed);
+    let corner = crate::biome_manager::fiddled_corner(zoom_seed, x, y, z);
+    let biome = world
+        .get_noise_biome(corner.0, corner.1, corner.2)
+        .ok_or_else(|| format!("mineshaft biome probe ({x},{y},{z}) left the 3x3"))?;
+    Ok(BLOCKING.with(|ids| ids.contains(&(biome as i32))))
 }
 
 fn is_mesa(piece: &Piece) -> bool {

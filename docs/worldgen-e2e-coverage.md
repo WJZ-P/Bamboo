@@ -21,7 +21,7 @@ release 构建上的实跑；每次都先跑干净对拍（要求 0 不一致）
   Java 侧把不在白名单里的 `HolderSet` 换空，Bamboo 侧用同一规则收集 `(step, index)`，
   保持 `setFeatureSeed` 的全局 index 不变。
 
-## 已确认的类型（26 个，全部 PASS）
+## 已确认的类型（28 个，全部 PASS）
 
 | Feature 类型 | step | 种子 / 区块 | 触发次数 | 干净跑 | 改坏格数 | 改坏不一致 | 结果 |
 |---|---:|---|---:|---|---:|---:|---|
@@ -31,6 +31,8 @@ release 构建上的实跑；每次都先跑干净对拍（要求 0 不一致）
 | `minecraft:large_dripstone` | 2 | `--seeds 1 --chunk -53 -206 --scan 5` | 50 | 0 | 3 | 3 | PASS |
 | `minecraft:block_blob` | 2 | `--seeds 2 --chunk 83 -274 --scan 9` | 10 | 0 | 6 | 6 | PASS |
 | `minecraft:monster_room` | 3 | `--seeds 1 --chunk 3 -1 --scan 5` | 126 | 0 | 1 | 1 | PASS |
+| `minecraft:fossil` | 3 | `--seed 42 --chunk -267 -276 --scan 25` | 1 | 0 | 1 | 1 | PASS |
+| `minecraft:overlay`（`desert_well`） | 4 | `--seed 42 --chunk -267 -276 --scan 1` | 1 | 0 | 1 | 1 | PASS |
 | `minecraft:blue_ice` | 4 | `--seeds 1 --chunk 255 -109 --scan 5` | 29 | 0 | 1 | 1 | PASS |
 | `minecraft:spike` | 4 | `--seeds 1 --chunk 268 -300 --scan 3` | 10 | 0 | 1 | 1 | PASS |
 | `minecraft:disk` | 4,6 | `--seeds 3 --chunks 8 --salt 7` | 80 | 0 | 4 | 4 | PASS |
@@ -65,19 +67,15 @@ release 构建上的实跑；每次都先跑干净对拍（要求 0 不一致）
 和 `--break-type`，上表这一行是在「Java 和 Bamboo 都只跑 `minecraft:monster_room`」的
 条件下实跑的：改坏一格报 1 处不一致。
 
-## 已知限制（3 个类型，单次扫描不超过 10 分钟）
+## 已知限制（1 个类型）
 
-这三个类型在下面的扫描里触发次数都是 0，所以**没有改坏确认证据**，不能记作通过。
-触发条件都按 `javap -c -p` 字节码核对过。
+| Feature 类型 | step | 字节码核对的触发条件 |
+|---|---:|---|
+| `minecraft:root_system` | 1,9 | `RootSystemFeature.place` 先要求 `origin` 是空气；`placeDirtAndTree` 第一轮把 `workingPos` 上移一格，然后要求 `workingPos.below()`（**正好就是 origin**）`isSolid()`，不满足直接 `return false`。这是官方 26.3 自身的死代码，见 `docs/worldgen-features-plan.md` 第十六轮核对。 |
 
-| Feature 类型 | step | 试过的种子 / 区块 | 触发次数 | 字节码核对的触发条件 |
-|---|---:|---|---:|---|
-| `minecraft:overlay` | 4 | `--seeds 5 --chunks 20 --salt 13`（100 中心）；`--seeds 5 --chunk -15 -274 --scan 100`（605 中心，沙漠） | 0 | `minecraft:desert_well` 是 `rarity_filter chance=1000`（`nextFloat() < 1/1000`），后面还要过 `heightmap MOTION_BLOCKING`、`offset y=-1`、`all_of{matching_blocks(sand), not(volume_match(±2,-2..-1,±2, air))}` 和 `biome`。`OverlayFeature.place` 只是在子 `PlacedFeature` 上再跑一遍 `FeaturePlacer.place`。 rarity 与地形谓词连乘，命中率极低。 |
-| `minecraft:fossil` | 3 | `--seeds 5 --chunks 20 --salt 13`（100 中心）；`--seeds 1 --chunk -15 -274 --scan 9` | 0 | `FossilFeature.place` 第一句是 `level.getLevel().getServer().getStructureTemplateManager()`；`ChunkgenOracle` 的 `WorldGenLevel` 动态代理的 `getLevel()` 返回自己，强转 `ServerLevel` 会抛 `ClassCastException`。即便找到命中点，JVM 侧也放不出模板方块，属于**对拍框架不可比**，见 `docs/worldgen-features-plan.md` 5.3。 |
-| `minecraft:root_system` | 1,9 | `--seeds 5 --chunks 20 --salt 7`（100 中心）；`--seeds 1 --chunk -300 -275 --scan 25` | 0 | `RootSystemFeature.place` 先要求 `origin` 是空气；`placeDirtAndTree` 第一轮把 `workingPos` 上移一格，然后要求 `workingPos.below()`（**正好就是 origin**）`isSolid()`，不满足直接 `return false`。后面的循环轮次永远到不了。这是官方 26.3 自身的死代码，见 `docs/worldgen-features-plan.md` 第十六轮核对。 |
-
-`overlay` 的 605 中心扫描耗时约 2 分 20 秒，按主代理要求单次不超过 10 分钟就停；
-不再扩大扫描，留作已知限制。`fossil` 和 `root_system` 是机制性不可触发，不是扫描量不够。
+`fossil` 和 `overlay` 原来记在这里：`fossil` 被当成「对拍框架不可比」（JVM 侧抛
+`ClassCastException` / NPE），`overlay` 是 `rarity 1/1000` 扫不到。两者现在都已覆盖，
+见文末「沙漠水井 / 化石」一节。
 
 ## 复跑
 
@@ -181,3 +179,32 @@ tools/mc-bamboo-vanilla/heightmap-e2e.sh
 刷怪笼 / 雪屋箱子缺实体，以及可疑的沙子（沙漠神殿 / 海底遗迹 / 沙漠水井）
 没写战利品表与种子等问题。沙漠神殿起点 3 处残差也在这轮修掉并加回默认集；
 要塞起点还剩 4 处矿井支撑柱差异，留在 `--known-gaps`。
+
+## 沙漠水井 / 化石（`wg-struct-residual`）
+
+* **假世界缺口**：`FossilFeature.place` / `TemplateFeature.place` 第一步都是
+  `level.getLevel().getServer().getStructureTemplateManager()`。无结构模式下
+  `ChunkgenOracle` 的 `getLevel()` 返回 null（`ClassCastException` 的来源），
+  带结构模式下不跑构造器的服务端 `structureTemplateManager` 字段是 null（NPE）。
+  现在两种模式都给 `getLevel()` 接上惰性 `ServerLevel`，服务端字段接上对拍自己的
+  `StructureTemplateManager`。另外补了 `WorldGenRegion.getEntities`（两个重载都返回
+  空表；`SculkVeinBlock` → `Block.pushEntitiesUp` 会调）。
+* **一放出来就翻出的真问题**（字节码核对）：
+  * `TemplateFeature` / `FossilFeature` 都调了 `settings.setRandom(random)`，于是
+    `StructurePlaceSettings.getRandomPalette` 的 `getRandom(pos)` 直接返回地物随机源，
+    单调色板也要取一次 `nextInt(1)`（化石两次 `placeInWorld` 各一次）。少取这一次，
+    水井后两个 `randomly_selected` 选错可疑的沙子的位置。
+  * `TemplateFeature` 写方块要按 `Palette.blocks()`（`buildInfoList` 顺序），带 nbt 的格先
+    写 `BARRIER`；`AppendLoot` 的种子来自 `RuleProcessor.processBlock` 的
+    `Mth.getSeed(blockInfo.pos())`——这里的 `blockInfo` 已经被 `processBlockInfos` 换算成
+    旋转、平移后的**世界坐标**；原实现用模板相对坐标（改回相对坐标即 44 处
+    `LootTableSeed` 不一致，作为改坏确认）。
+  * `FossilFeature` 写方块走 `WorldGenRegion.setBlock`，要更新 FINAL 高度图。
+  * `MonsterRoomFeature` 的箱子（`RandomizableContainer.setBlockEntityLootTable`，
+    `chests/simple_dungeon` + `nextLong` 种子）和刷怪笼（`setEntityId` 写出的默认刷怪
+    数据）方块实体之前只取数不记录。
+* `structure-e2e --scan-desert-well SEED RADIUS` 只算 `desert_well` 放置链的前两步
+  （`rarity_filter` + `in_square`）和候选列的沙漠群系，打印 `seed cx cz` 候选行给
+  `--chunks-file`。种子 42、半径 300 出 29 个候选，整块对拍（方块 + 方块实体）
+  0 不一致；`(42,-267,-276)`（水井）、`(42,-267,-277)`（化石）、`(42,-267,-186)`（地牢）
+  已进 `structure-e2e` 默认集。

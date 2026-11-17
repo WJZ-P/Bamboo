@@ -162,12 +162,48 @@ impl<'a> FeatureWorld<'a> {
         let Some((chunk, index)) = self.block_index(x, y, z) else {
             return false;
         };
+        self.drop_block_entity_if_replaced(x, y, z, chunk, index, state);
         self.blocks[chunk][index / 256][index % 256] = state;
         self.write_count += 1;
         if chunk != CENTER {
             self.deltas[chunk].push((x, y, z, state));
         }
         true
+    }
+
+    /// `WorldGenRegion.setBlock` 第 170-186 行：新状态没有方块实体、旧状态有时
+    /// `ChunkAccess.removeBlockEntity(pos)`，把已经实例化的方块实体（例如上一个模板件
+    /// 放的可疑的沙砾和它的战利品表）一起丢掉。新状态也带方块实体时官方只写一份
+    /// `DUMMY` 占位，`ChunkAccess.setBlockEntityNbt` 在已有实例时什么都不做，所以
+    /// 旧记录保留，等调用方再 `set_block_entity` 覆盖。`OreFeature` 的
+    /// `BulkSectionAccess` 不走这里，但它只替换石头类方块，不会碰到带方块实体的格子。
+    ///
+    /// `WorldGenRegion.setBlock` lines 170-186: when the new state has no block entity
+    /// and the old one does, `ChunkAccess.removeBlockEntity(pos)` discards the
+    /// instantiated block entity (e.g. a previous template piece's suspicious gravel and
+    /// its loot table). When the new state also has one, vanilla only writes a `DUMMY`
+    /// placeholder, which `ChunkAccess.setBlockEntityNbt` ignores while an instance
+    /// exists, so the old record stays until the caller overwrites it. `OreFeature`'s
+    /// `BulkSectionAccess` bypasses this, but it only replaces stone-like blocks.
+    fn drop_block_entity_if_replaced(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        chunk: usize,
+        index: usize,
+        state: u32,
+    ) {
+        if self.block_entities.is_empty() {
+            return;
+        }
+        let has_block_entity = |state: u32| {
+            mc_bamboo_data::block_of_state(state).is_some_and(|b| b.block_entity_type.is_some())
+        };
+        let old = self.blocks[chunk][index / 256][index % 256];
+        if !has_block_entity(state) && has_block_entity(old) {
+            self.block_entities.retain(|(pos, _)| *pos != (x, y, z));
+        }
     }
 
     /// `Feature.safeSetBlock` / `level.setBlock`：先写 `ChunkAccess.setBlockState`，
@@ -182,6 +218,7 @@ impl<'a> FeatureWorld<'a> {
         let Some((chunk, index)) = self.block_index(x, y, z) else {
             return false;
         };
+        self.drop_block_entity_if_replaced(x, y, z, chunk, index, state);
         self.blocks[chunk][index / 256][index % 256] = state;
         self.write_count += 1;
         if chunk != CENTER {
@@ -694,6 +731,49 @@ mod block_writer_tests {
             Some("true"),
             "the slab in the water source is waterlogged"
         );
+    }
+
+    /// 带方块实体的格子被不带方块实体的方块覆盖时，记录随之丢掉
+    /// （`WorldGenRegion.setBlock` → `removeBlockEntity`）。
+    ///
+    /// Overwriting a block-entity block with a plain block drops the record
+    /// (`WorldGenRegion.setBlock` → `removeBlockEntity`).
+    #[test]
+    fn overwriting_a_block_entity_block_drops_its_record() {
+        use mc_bamboo_nbt::Tag;
+
+        let chunks = water_chunks();
+        let mut world = FeatureWorld::new(&chunks, 63, 0).unwrap();
+        let gravel = mc_bamboo_data::block_by_name("minecraft:suspicious_gravel")
+            .unwrap()
+            .default_state;
+        let chest = mc_bamboo_data::blocks::CHEST;
+        let plain = mc_bamboo_data::block_by_name("minecraft:gravel")
+            .unwrap()
+            .default_state;
+        let loot = Tag::Compound(vec![("LootTable".to_owned(), Tag::String("x".to_owned()))]);
+        for (index, set) in [true, false].into_iter().enumerate() {
+            let x = index as i32;
+            world.set_block_with_heightmaps(x, 64, 0, gravel);
+            world.set_block_entity(x, 64, 0, &loot);
+            // 换成另一种带方块实体的方块：官方 `setBlockEntityNbt` 不动已有实例。
+            // Another block-entity block: vanilla's `setBlockEntityNbt` keeps the instance.
+            world.set_block_with_heightmaps(x, 64, 0, chest);
+            assert_eq!(world.block_entities.len(), 1);
+            if set {
+                world.set_block(x, 64, 0, plain);
+            } else {
+                world.set_block_with_heightmaps(x, 64, 0, plain);
+            }
+            assert!(
+                world
+                    .block_entities
+                    .iter()
+                    .all(|(pos, _)| *pos != (x, 64, 0)),
+                "a plain block removes the block entity"
+            );
+        }
+        assert!(world.block_entities.is_empty());
     }
 
     /// `set_block_entity` 记下 nbt，后写覆盖前写。

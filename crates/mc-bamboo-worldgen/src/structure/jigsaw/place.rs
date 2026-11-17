@@ -90,26 +90,25 @@ pub fn state_id_of(state: &crate::structure::processor::BlockStateSpec) -> Resul
     })
 }
 
-/// 按属性列表找状态 id；属性必须全部匹配，顺序无关。
+/// 按属性列表找状态 id：从方块的**默认状态**出发逐个改写列出的属性，没列出的属性保持
+/// 默认值（`BlockStateParser.parseForBlock` 从 `defaultBlockState()` 开始 `setValue`）。
+/// 拼图方块的 `final_state` 常常只写一部分属性（如 `cobblestone_stairs[facing=south]`），
+/// 不能在整张状态表里找「第一个匹配的状态」。
 ///
-/// Find the state id matching every property (order irrelevant).
+/// Find the state id by starting from the block's **default state** and setting each
+/// listed property; unlisted properties keep their defaults (`BlockStateParser`
+/// starts from `defaultBlockState()`). A jigsaw `final_state` often lists only some
+/// properties (e.g. `cobblestone_stairs[facing=south]`), so the first matching state in
+/// the table is wrong.
 fn state_with_properties(
     block: &'static mc_bamboo_data::Block,
     properties: &[(String, String)],
 ) -> Option<u32> {
-    let count = mc_bamboo_data::state_count(
-        mc_bamboo_data::block_id_of_state(block.default_state)? as usize,
-    );
-    for offset in 0..count {
-        let state = block.first_state + offset;
-        if properties.iter().all(|(key, value)| {
-            crate::structure::state_transform::property_of(state, key)
-                .is_some_and(|got| got == value.as_str())
-        }) {
-            return Some(state);
-        }
+    let mut state = block.default_state;
+    for (key, value) in properties {
+        state = crate::structure::piece_place::with_property(state, key, value)?;
     }
-    None
+    Some(state)
 }
 
 fn properties_text(properties: &[(String, String)]) -> String {
@@ -1167,6 +1166,21 @@ pub fn assemble_processors(
 mod tests {
     use super::*;
     use crate::structure::processor::BlockStateSpec;
+
+    /// 只写一部分属性的状态串：没写的属性取默认值（`BlockStateParser` 从
+    /// `defaultBlockState()` 开始）。
+    ///
+    /// A partial property list keeps the defaults for unlisted properties.
+    #[test]
+    fn partial_properties_start_from_the_default_state() {
+        let spec = BlockStateSpec::parse_str("minecraft:cobblestone_stairs[facing=south]").unwrap();
+        let state = state_id_of(&spec).unwrap();
+        let property = |key| crate::structure::state_transform::property_of(state, key);
+        assert_eq!(property("facing"), Some("south"));
+        assert_eq!(property("half"), Some("bottom"));
+        assert_eq!(property("shape"), Some("straight"));
+        assert_eq!(property("waterlogged"), Some("false"));
+    }
 
     /// 不带属性的状态名解析成方块的默认状态。
     ///

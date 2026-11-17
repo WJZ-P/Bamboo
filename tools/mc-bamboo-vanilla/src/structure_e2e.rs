@@ -57,12 +57,13 @@ const QUERIES: &[(i64, i32, i32)] = &[
     (42, 40, 55),     // shipwreck_beached
     (42, -19, 11),    // ruined_portal_swamp
     (42, -14, 21),    // abandoned_camp_swamp
-    // 沙漠神殿起点已修好，和它的被引用邻区块一起进默认集。要塞起点还有已知
-    // 差异（见下），用被引用邻区块覆盖跨区块放置。
-    // The desert-pyramid start is now clean; the stronghold start still has a known
-    // gap, so its referenced neighbours cover cross-chunk placement.
+    // 沙漠神殿起点、要塞起点（与矿井重叠，`MineShaftPiece.canBeReplaced` 保住
+    // 先放的支撑柱）和它们的被引用邻区块。
+    // Desert-pyramid and stronghold starts (the latter overlaps a mineshaft whose
+    // `canBeReplaced` keeps earlier support pillars) plus referenced neighbours.
     (42, -375, -22), // desert_pyramid start
     (42, -374, -22), // desert_pyramid referenced neighbour
+    (42, -121, 96),  // stronghold start + mineshaft
     (42, -121, 97),  // stronghold referenced neighbour
     (42, -120, 96),  // stronghold referenced neighbour
     // 按 `random_spread` 电位起点定位找到的四种稀有结构起点。
@@ -78,19 +79,41 @@ const QUERIES: &[(i64, i32, i32)] = &[
     // Ocean ruin pieces that actually place suspicious gravel with loot tables
     // and seeds (5 brushable blocks + 1 chest).
     (42, -50, -197),
+    // 三个海底遗迹件互相覆盖：后放的件把前一个件的可疑的沙砾换成普通沙砾，方块实体
+    // 必须随 `WorldGenRegion.setBlock` → `removeBlockEntity` 一起消失（6 个刷扫 + 1 个箱子）。
+    // Three overlapping ocean-ruin pieces: a later piece replaces an earlier piece's
+    // suspicious gravel with plain gravel, and the block entity must disappear with it
+    // via `WorldGenRegion.setBlock` → `removeBlockEntity` (6 brushable + 1 chest).
+    (42, 67, -236),
+    // 沙漠水井（`--scan-desert-well 42 300` 找到的候选之一）：井体模板 + 两次
+    // `randomly_selected` 的可疑的沙子与它们的战利品表 / 种子。紧挨着的区块放一个
+    // 化石；最后一个区块带地牢的箱子与刷怪笼方块实体。
+    // A desert well (one of the `--scan-desert-well 42 300` candidates): the well
+    // template plus two `randomly_selected` suspicious sands with loot tables / seeds.
+    // The next chunk places a fossil; the last has a dungeon chest and spawner.
+    (42, -267, -276), // desert_well
+    (42, -267, -277), // fossil
+    (42, -267, -186), // monster_room block entities
+    // 矿井件落在深暗之域（`MINESHAFT_BLOCKING`）：`isInInvalidLocation` 整件跳过。
+    // Mineshaft pieces in the deep dark (`MINESHAFT_BLOCKING`): `isInInvalidLocation`
+    // skips the whole piece.
+    (42, -145, 76),
+    (42, -155, 96),
+    // 针叶林村庄的拼图 `final_state` 只写了一部分属性（`cobblestone_stairs[facing=south]`）。
+    // A taiga-village jigsaw whose `final_state` lists only some properties.
+    (42, -159, 84),
 ];
 
 /// 已定位但尚未修好的整块差异，用 `--known-gaps` 单独跑，不进默认干净跑。
-/// 要塞起点的矿井支柱在真实 `WorldGenRegion` 上还差 4 格；`structure-place`
-/// 用合成地形逐件对拍它是 0 不一致。
 /// Known-but-unfixed whole-chunk gaps, run with `--known-gaps`; the default clean
-/// run excludes them. `structure-place` still covers this piece type block-for-block.
-const KNOWN_GAPS: &[(i64, i32, i32)] = &[
-    (42, -121, 96), // stronghold
-];
+/// run excludes them.
+/// 当前没有已知差异。
+/// No known gaps at the moment.
+const KNOWN_GAPS: &[(i64, i32, i32)] = &[];
 
 const USAGE: &str = "usage: structure-e2e <java> [--break-self-test] [--break-structure KIND] \
-     [--structure-types IDS] [--show N] [--known-gaps] [--chunks-file FILE]";
+     [--structure-types IDS] [--show N] [--known-gaps] [--chunks-file FILE] \
+     | structure-e2e <java> --scan-desert-well SEED RADIUS";
 
 #[derive(Debug)]
 struct Options {
@@ -143,8 +166,17 @@ impl Options {
 
 /// 写查询文件并调 `gen-world --through features --structures`。
 pub fn run(mut command: Command, queries_path: &Path, options: &[&str]) -> Result<(), String> {
+    if let ["--scan-desert-well", seed, radius] = options {
+        let seed = seed.parse().map_err(|_| USAGE)?;
+        let radius = radius.parse().map_err(|_| USAGE)?;
+        return scan_desert_well(seed, radius);
+    }
     let parsed = Options::parse(options)?;
     let queries: &[(i64, i32, i32)] = if parsed.known_gaps {
+        if KNOWN_GAPS.is_empty() {
+            println!("structure-e2e: no known gaps");
+            return Ok(());
+        }
         KNOWN_GAPS
     } else {
         QUERIES
@@ -199,4 +231,51 @@ pub fn run(mut command: Command, queries_path: &Path, options: &[&str]) -> Resul
 
 fn as_refs(values: &[String]) -> Vec<&str> {
     values.iter().map(String::as_str).collect()
+}
+
+/// 找沙漠水井候选区块：只算 `desert_well` 放置链里便宜的前两步——
+/// `setFeatureSeed(decorationSeed, index, 4)` 之后的 `rarity_filter`
+/// （`nextFloat() < 1/1000`）和 `in_square`（两次 `nextInt(16)`），再看候选点那一列
+/// 地表附近的 quart 群系里有没有沙漠。后面的高度图 / 方块谓词 / `BiomeFilter`
+/// 交给整块对拍判定，这里只打印 `seed cx cz` 行给 `--chunks-file`。
+///
+/// Locate desert-well candidate chunks with only the cheap head of the `desert_well`
+/// placement chain: `rarity_filter` (`nextFloat() < 1/1000`) after
+/// `setFeatureSeed(decorationSeed, index, 4)` and `in_square` (two `nextInt(16)`),
+/// then require a desert quart cell near the surface of that column. The heightmap,
+/// block predicate and `BiomeFilter` are left to the whole-chunk oracle; this only
+/// prints `seed cx cz` lines for `--chunks-file`.
+fn scan_desert_well(seed: i64, radius: i32) -> Result<(), String> {
+    use mc_bamboo_worldgen::random::{Algorithm, WorldgenRandom};
+
+    const STEP: usize = 4;
+    let worldgen = mc_bamboo_worldgen::Worldgen::load()?;
+    let generator = mc_bamboo_worldgen::chunk::Generator::new(&worldgen, seed)?;
+    let registry = generator.feature_registry();
+    let placed = registry
+        .placed_id("minecraft:desert_well")
+        .ok_or("no minecraft:desert_well placed feature")?;
+    let index = registry
+        .step_index(STEP, placed)
+        .ok_or("desert_well is not in step 4")?;
+    let random = WorldgenRandom::new(Algorithm::Xoroshiro.new_instance(0));
+    let mut found = 0_u32;
+    for cz in -radius..=radius {
+        for cx in -radius..=radius {
+            let decoration = random.set_decoration_seed(seed, cx * 16, cz * 16);
+            random.set_feature_seed(decoration, index as i32, STEP as i32);
+            if random.next_float() >= 1.0 / 1000.0 {
+                continue;
+            }
+            let x = cx * 16 + random.next_int(16);
+            let z = cz * 16 + random.next_int(16);
+            let names = generator.column_biome_names(x >> 2, z >> 2, 14, 24)?;
+            if names.iter().any(|name| name == "minecraft:desert") {
+                println!("{seed} {cx} {cz}");
+                found += 1;
+            }
+        }
+    }
+    eprintln!("structure-e2e: {found} desert_well candidates");
+    Ok(())
 }

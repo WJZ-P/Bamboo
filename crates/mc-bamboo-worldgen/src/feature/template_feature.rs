@@ -325,13 +325,24 @@ pub fn place(
         origin.2 + offset_x.2 + offset_z.2,
     );
 
-    // `settings.getRandomPalette(palettes, position)`：只有一套调色板时直接用它。
-    // `settings.getRandomPalette(palettes, position)`: one palette means no random pick.
-    let Some(palette) = template.palettes.first() else {
+    // `settings.getRandomPalette(palettes, position)`：`TemplateFeature` 调了
+    // `setRandom(random)`，所以 `getRandom(pos)` 直接返回地物自己的随机源，
+    // 只有一套调色板也要取一次 `nextInt(1)`。少取这一次，`overlay` 后面的
+    // `randomly_selected` 就会选错可疑的沙子的位置。
+    // `settings.getRandomPalette(palettes, position)`: `TemplateFeature` called
+    // `setRandom(random)`, so `getRandom(pos)` returns the feature random itself and a
+    // single palette still draws `nextInt(1)`. Skipping it shifts the later
+    // `randomly_selected` pick of the suspicious sand offset in the `overlay`.
+    if template.palettes.is_empty() {
         return false;
-    };
+    }
+    let palette_index = random.next_int(template.palettes.len() as i32) as usize;
+    let palette = &template.palettes[palette_index];
     let mut placed_any = false;
-    for block in &template.blocks {
+    // `placeInWorld` 按 `Palette.blocks()`（`buildInfoList` 的顺序）逐格放置。
+    // `placeInWorld` walks `Palette.blocks()` in `buildInfoList` order.
+    for index in crate::structure::template_place::ordered_blocks(&template, palette_index) {
+        let block = &template.blocks[index];
         let Some(entry) = palette.get(block.state) else {
             continue;
         };
@@ -357,6 +368,13 @@ pub fn place(
         }
         let rotated = rotate_pos(rotation, block.pos);
         let target = (pos.0 + rotated.0, pos.1 + rotated.1, pos.2 + rotated.2);
+        // `if (blockInfo.nbt != null) level.setBlock(pos, BARRIER, 820)`：先写屏障，
+        // 把这一格原来的方块实体清掉，再写真正的状态。
+        // `if (blockInfo.nbt != null) level.setBlock(pos, BARRIER, 820)`: the barrier
+        // clears any previous block entity before the real state goes in.
+        if loot.is_some() || block.nbt.is_some() {
+            world.set_block_with_heightmaps(target.0, target.1, target.2, barrier_state());
+        }
         world.set_block_with_heightmaps(target.0, target.1, target.2, state);
         placed_any = true;
         // `AppendLoot.apply` 用 `settings.getRandom(pos)`（按位置派生的
@@ -367,12 +385,13 @@ pub fn place(
         // (a per-position `RandomSource.create(Mth.getSeed(pos))`) and hands the tag to
         // `loadWithComponents` along with the template's block-entity nbt.
         if let Some(table) = loot {
-            // `RuleProcessor.processBlock` 的种子来自模板相对坐标 `blockInfo.pos()`。
-            // `RuleProcessor.processBlock` seeds from the template-relative `blockInfo.pos()`.
+            // `RuleProcessor.processBlock` 的种子来自第 5 个参数 `processedBlockInfo.pos()`：
+            // `processBlockInfos` 已经把它换成旋转并平移后的**世界坐标**。
+            // `RuleProcessor.processBlock` seeds from its fifth argument
+            // `processedBlockInfo.pos()`, which `processBlockInfos` has already turned into
+            // the rotated and offset **world** position.
             let seed = mc_bamboo_blocks::LegacyRandom::new(crate::random::positional_seed(
-                block.pos.0,
-                block.pos.1,
-                block.pos.2,
+                target.0, target.1, target.2,
             ))
             .next_long();
             let nbt = mc_bamboo_nbt::Tag::Compound(vec![
@@ -388,6 +407,13 @@ pub fn place(
         }
     }
     placed_any
+}
+
+/// `Blocks.BARRIER.defaultBlockState()`。
+///
+/// `Blocks.BARRIER.defaultBlockState()`.
+fn barrier_state() -> u32 {
+    block_by_name("minecraft:barrier").map_or(mc_bamboo_data::blocks::AIR, |b| b.default_state)
 }
 
 /// `Rotation.rotate(BlockPos)`：模板内的相对坐标跟着旋转。

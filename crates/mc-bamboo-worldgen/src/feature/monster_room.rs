@@ -1,33 +1,22 @@
 //! `MonsterRoomFeature`（地牢：圆石房间 + 箱子 + 刷怪笼）。
 //!
-//! **状态：未接入 dispatch。** 代码按官方 26.3 逐行写完，但逐方块对拍还差 2 格
-//! （箱子落点不同，指向箱子循环之前的随机数消费次数与官方有出入），所以
-//! `dispatch.rs` 里没有注册这个类型，对拍时仍标 `unsupported`。
-//!
-//! **Status: not wired into dispatch.** The code follows the official 26.3 source line by
-//! line, but the block-by-block oracle still differs on 2 cells (the chest lands elsewhere,
-//! pointing at a random-draw count mismatch before the chest loop), so `dispatch.rs` leaves
-//! the type unregistered and the oracle keeps marking it `unsupported`.
-//!
 //! 照 `MonsterRoomFeature.place`：先量 3 层高的房间外框，底部和顶部必须都是实心；
 //! 侧墙的开口数要落在 1..=5；然后逐格把墙换成圆石（底面 3/4 概率苔石）、内部挖成
 //! 洞穴空气，最后按「只有一侧是实心墙」找位置放箱子，并在原点放刷怪笼。
 //!
-//! 方块实体（箱子的 `LootTable` / `LootTableSeed`、刷怪笼的 `SpawnData.id`）本轮不进
-//! 对拍：`ChunkgenOracle` 的 `FeatureResult` 只带方块。但官方在放这两样时会从世界随机源
-//! 取数（`random.nextLong()` 给箱子、`random.nextInt(4)` 给刷怪笼的实体类型），这里照取，
-//! 保证后续地物的随机序列一致。这条差异写在已知限制里。
+//! 方块实体照官方写：箱子是 `RandomizableContainer.setBlockEntityLootTable`
+//! （`chests/simple_dungeon` + 一次 `random.nextLong()` 当种子），刷怪笼是
+//! `SpawnerBlockEntity.setEntityId(randomEntityId(random), random)` 写出的默认刷怪数据。
 //!
 //! `MonsterRoomFeature.place`: size a 3-high room shell whose floor and ceiling must both be
 //! solid, require 1..=5 side openings, then turn the shell into cobblestone (the floor is
 //! mossy 3 times out of 4), hollow the inside into cave air, place a chest where exactly one
 //! horizontal neighbor is a solid wall, and put a spawner at the origin.
 //!
-//! Block entities (the chest's `LootTable` / `LootTableSeed`, the spawner's `SpawnData.id`)
-//! are not compared this round: the `FeatureResult` only carries blocks. The official code
-//! does draw from the world random source for both (a `nextLong()` for the chest and a
-//! `nextInt(4)` for the spawner's entity type), so this port draws them too and keeps the
-//! later feature random sequence identical. That gap is recorded as a known limitation.
+//! Block entities follow vanilla: the chest gets
+//! `RandomizableContainer.setBlockEntityLootTable` (`chests/simple_dungeon` plus one
+//! `random.nextLong()` seed) and the spawner the default spawn data written by
+//! `SpawnerBlockEntity.setEntityId(randomEntityId(random), random)`.
 
 use mc_bamboo_data::{blocks, facts, state_facts, tags};
 use serde_json::Value;
@@ -287,9 +276,28 @@ pub fn place(
             if wall_count == 1 {
                 let state = reorient(world, chest_pos, chest);
                 safe_set_block(world, chest_pos, state, cannot_replace);
-                // `RandomizableContainer.setBlockEntityLootTable` 取一次 `nextLong`。
-                // `RandomizableContainer.setBlockEntityLootTable` draws one `nextLong`.
-                let _loot_seed = random.next_long();
+                // `RandomizableContainer.setBlockEntityLootTable`：取一次 `nextLong` 当种子，
+                // 和战利品表一起写进箱子的方块实体。
+                // `RandomizableContainer.setBlockEntityLootTable`: one `nextLong` seed,
+                // stored with the loot table in the chest's block entity.
+                let loot_seed = random.next_long();
+                world.set_block_entity(
+                    chest_pos.0,
+                    chest_pos.1,
+                    chest_pos.2,
+                    &mc_bamboo_nbt::Tag::Compound(vec![
+                        (
+                            "LootTable".to_owned(),
+                            mc_bamboo_nbt::Tag::String(
+                                "minecraft:chests/simple_dungeon".to_owned(),
+                            ),
+                        ),
+                        (
+                            "LootTableSeed".to_owned(),
+                            mc_bamboo_nbt::Tag::Long(loot_seed),
+                        ),
+                    ]),
+                );
                 break;
             }
         }
@@ -300,7 +308,8 @@ pub fn place(
     // `setEntityId` 只是写入 id。
     // `BaseSpawner.getOrCreateNextSpawnData` draws nothing when `spawnPotentials` is empty,
     // and `setEntityId` only writes the id.
-    let _mob = MOBS[random.next_int(MOBS.len() as i32) as usize];
+    let mob = MOBS[random.next_int(MOBS.len() as i32) as usize];
+    world.set_block_entity(ox, oy, oz, &crate::structure::piece_place::spawner_nbt(mob));
     true
 }
 
