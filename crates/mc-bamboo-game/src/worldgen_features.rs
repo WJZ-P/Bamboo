@@ -900,6 +900,8 @@ pub(crate) fn generate_features_stage(
     let own = cached_feature_run(config, cx, cz)?;
     let mut into_center = own.deltas[CENTER].clone();
     into_center.extend(neighbor_spills_into(config, cx, cz)?);
+    #[cfg(feature = "oracle-samples")]
+    oracle_merge::apply_break(config, cx, cz, &mut into_center)?;
 
     // 中心盒子先回到 CARVERS 地形，增量由世界线程合并进 `Arc` 后再组装。
     // The center column returns to CARVERS terrain here; the world thread
@@ -912,6 +914,105 @@ pub(crate) fn generate_features_stage(
         light: None,
         structures,
     })
+}
+
+/// 邻居溢出合并对拍（`mc-bamboo-vanilla feature-merge`）用的入口和改坏开关，
+/// 只在 `oracle-samples` 下编进来。
+///
+/// Entry points and break switches for the neighbor-spill merge oracle
+/// (`mc-bamboo-vanilla feature-merge`), compiled only with `oracle-samples`.
+#[cfg(feature = "oracle-samples")]
+pub mod oracle_merge {
+    use std::sync::Mutex;
+
+    use super::{BlockDelta, CENTER, WorldGenConfig, cached_feature_run};
+
+    /// 故意改坏合并，确认对拍抓得到。
+    /// A deliberate merge corruption, to prove the oracle catches it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum MergeBreak {
+        /// 丢掉 `(cx+dx, cz+dz)` 这个邻居溢进本区块的写。
+        /// Drop the spill from the neighbor at `(cx+dx, cz+dz)`.
+        DropNeighbor { dx: i32, dz: i32 },
+        /// 同一格多次写时不按规范序，改成「先写的赢」（中心自己最先，邻居按 (dz,dx)）。
+        /// Resolve same-cell writes by "first writer wins" instead of the
+        /// canonical order (the center first, then neighbors in (dz,dx) order).
+        FirstWriterWins,
+    }
+
+    /// 开关只对这一个种子生效，别的世界不受影响。
+    /// The switch is scoped to one seed; other worlds are unaffected.
+    static MERGE_BREAK: Mutex<Option<(i64, MergeBreak)>> = Mutex::new(None);
+
+    /// 设置或清掉改坏开关。
+    /// Set or clear the break switch.
+    pub fn set_merge_break(setting: Option<(i64, MergeBreak)>) {
+        if let Ok(mut slot) = MERGE_BREAK.lock() {
+            *slot = setting;
+        }
+    }
+
+    pub(super) fn apply_break(
+        config: &WorldGenConfig,
+        cx: i32,
+        cz: i32,
+        deltas: &mut Vec<BlockDelta>,
+    ) -> Result<(), String> {
+        let setting = MERGE_BREAK.lock().ok().and_then(|slot| *slot);
+        let Some((seed, mode)) = setting else {
+            return Ok(());
+        };
+        if seed != config.seed {
+            return Ok(());
+        }
+        match mode {
+            MergeBreak::DropNeighbor { dx, dz } => {
+                let run = cached_feature_run(config, cx + dx, cz + dz)?;
+                let index = ((-dz + 1) * 3 + (-dx + 1)) as usize;
+                let dropped: std::collections::HashSet<BlockDelta> =
+                    run.deltas[index].iter().copied().collect();
+                deltas.retain(|delta| !dropped.contains(delta));
+            }
+            MergeBreak::FirstWriterWins => {
+                let mut seen = std::collections::HashSet::new();
+                deltas.retain(|&(x, y, z, _)| seen.insert((x, y, z)));
+            }
+        }
+        Ok(())
+    }
+
+    /// 9 个来源中心各自写进目标区块的 `(x, y, z, 状态)`。
+    /// The `(x, y, z, state)` writes into a target chunk from each of 9 source centers.
+    pub type WritesBySource = [Vec<(i32, i32, i32, u32)>; 9];
+
+    /// 写进 `(cx, cz)` 的全部地物写，按来源中心分 9 份：下标 `(dz+1)*3 + (dx+1)`
+    /// 是以 `(cx+dx, cz+dz)` 为中心那一遍写进本区块的（中心格是本区块自己的）。
+    /// 取自 Director 用的同一份全进程地物缓存。
+    ///
+    /// Every feature write into `(cx, cz)`, split by source center: index
+    /// `(dz+1)*3 + (dx+1)` holds the writes of the run centered on
+    /// `(cx+dx, cz+dz)` (the center cell is the chunk's own). Taken from the same
+    /// process-wide feature cache the Director uses.
+    pub fn feature_writes_into(
+        config: &WorldGenConfig,
+        cx: i32,
+        cz: i32,
+    ) -> Result<WritesBySource, String> {
+        let mut out: [Vec<BlockDelta>; 9] = std::array::from_fn(|_| Vec::new());
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let run = cached_feature_run(config, cx + dx, cz + dz)?;
+                let index = ((-dz + 1) * 3 + (-dx + 1)) as usize;
+                let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
+                out[slot] = if slot == CENTER {
+                    run.deltas[CENTER].clone()
+                } else {
+                    run.deltas[index].clone()
+                };
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// `terrain` 阶段：算 CARVERS 方块，并把纯数据作为邻居快照交回世界线程。

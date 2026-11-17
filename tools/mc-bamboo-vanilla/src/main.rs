@@ -137,6 +137,8 @@ mod components;
 mod entity_oracle;
 mod extract;
 #[cfg(feature = "oracle")]
+mod feature_merge;
+#[cfg(feature = "oracle")]
 mod flat_world;
 #[cfg(feature = "oracle")]
 mod gen_light;
@@ -354,6 +356,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-generation <java 路径> [--break-self-test]
       mc-bamboo-vanilla structure-pipeline <java 路径> [--break-self-test]
       mc-bamboo-vanilla structure-e2e <java 路径> [--break-self-test] [--structure-types IDS]
+      mc-bamboo-vanilla feature-merge <java 路径> [--structures] [--target SEED X Z]... [--orders O1,O2] [--threads N] [--break-drop-neighbor DX DZ | --break-first-writer] | --scan SEED X0 Z0 SIDE
       mc-bamboo-vanilla structure-single <java 路径>
       mc-bamboo-vanilla structure-templated <java 路径>
       mc-bamboo-vanilla structure-templated-place <java 路径>
@@ -417,6 +420,7 @@ fn run() -> Result<(), String> {
         ["gen-world", java, ref options @ ..] => gen_world_cli(java, options),
         ["long-set", java, ref options @ ..] => long_set_cli(java, options),
         ["structure-e2e", java, ref options @ ..] => structure_e2e_cli(java, options),
+        ["feature-merge", java, ref options @ ..] => feature_merge_cli(java, options),
         ["structure-rings", java, ref options @ ..] => structure_rings_cli(java, options),
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
         ["structure-templates", java, ref options @ ..] => structure_templates_cli(java, options),
@@ -675,6 +679,17 @@ fn gen_world_cli(java: &str, options: &[&str]) -> Result<(), String> {
 #[cfg(feature = "oracle")]
 fn long_set_cli(java: &str, options: &[&str]) -> Result<(), String> {
     long_set::run(official_program(java, JAVA_SET_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
+fn feature_merge_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    let root = workspace_root();
+    let queries_path = root.join(WORK_DIR).join("feature_merge_queries.txt");
+    feature_merge::run(
+        official_program(java, CHUNKGEN_SOURCE)?,
+        &queries_path,
+        options,
+    )
 }
 
 #[cfg(feature = "oracle")]
@@ -1096,6 +1111,11 @@ fn gen_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn long_set_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn feature_merge_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

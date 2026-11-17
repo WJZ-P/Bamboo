@@ -571,6 +571,28 @@ impl World {
         self.region.chunks.is_loaded(pos)
     }
 
+    /// 对拍脚手架用：一个已交付区块的全部方块状态，顺序是 y 从下到上、x、z
+    /// 各 0..16（和官方对拍输出的顺序一致）。没交付返回 `None`。
+    /// Oracle scaffolding: every block state of a delivered chunk in y, x, z
+    /// order (the official oracle's order); `None` if not delivered.
+    #[doc(hidden)]
+    pub fn chunk_blocks_unpaced(&self, pos: mc_bamboo_core::ChunkPos) -> Option<Vec<u32>> {
+        use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
+        if !self.region.chunks.is_loaded(pos) {
+            return None;
+        }
+        let mut out = Vec::with_capacity(WORLD_HEIGHT as usize * 256);
+        for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
+            for x in 0..16 {
+                for z in 0..16 {
+                    let at = mc_bamboo_core::BlockPos::new(pos.x * 16 + x, y, pos.z * 16 + z);
+                    out.push(self.region.chunks.block(at)?);
+                }
+            }
+        }
+        Some(out)
+    }
+
     /// 测量脚手架用：计算池里还有没有在途任务。
     /// Benchmark-only: whether the compute pool still has work in flight.
     #[doc(hidden)]
