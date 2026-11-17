@@ -906,6 +906,164 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             ]),
         )],
     );
+    // 有内容的条目：这些键没有游戏层写入者，Bamboo 必须自己按官方 codec 带回。
+    // Rich entries that no game-layer table owns: the archive codec must carry them.
+    let record = mc_bamboo_protocol::components::archive::slots::encode_item(&ItemStack::new(
+        mc_bamboo_data::items::MUSIC_DISC_13,
+        1,
+    ))
+    .map_err(|e| e.to_string());
+    if let Ok(record) = record {
+        full(
+            "jukebox-rich",
+            "minecraft:jukebox",
+            "minecraft:jukebox",
+            vec![
+                ("RecordItem".to_owned(), record),
+                ("ticks_since_song_started".to_owned(), Tag::Long(42)),
+            ],
+        );
+    }
+    let pot_item =
+        mc_bamboo_protocol::components::archive::slots::encode_item(&ItemStack::new(STONE, 3))
+            .map_err(|e| e.to_string());
+    if let Ok(pot_item) = pot_item {
+        full(
+            "decorated_pot-rich",
+            "minecraft:decorated_pot",
+            "minecraft:decorated_pot",
+            vec![("item".to_owned(), pot_item)],
+        );
+    }
+    let shulker_items = mc_bamboo_protocol::components::archive::slots::encode_list(&[
+        mc_bamboo_protocol::components::archive::slots::SlottedItem {
+            slot: 3,
+            stack: ItemStack::new(STONE, 7),
+        },
+    ])
+    .map_err(|e| e.to_string());
+    if let Ok(shulker_items) = shulker_items {
+        full(
+            "shulker_box-rich",
+            "minecraft:shulker_box",
+            "minecraft:shulker_box",
+            vec![("Items".to_owned(), shulker_items)],
+        );
+    }
+    full(
+        "shulker_box-loot-rich",
+        "minecraft:shulker_box",
+        "minecraft:shulker_box",
+        vec![
+            (
+                "LootTable".to_owned(),
+                Tag::String("minecraft:chests/simple_dungeon".to_owned()),
+            ),
+            ("LootTableSeed".to_owned(), Tag::Long(99)),
+        ],
+    );
+    full(
+        "beehive-rich",
+        "minecraft:beehive",
+        "minecraft:beehive",
+        vec![
+            (
+                "bees".to_owned(),
+                Tag::List(vec![Tag::Compound(vec![
+                    (
+                        "entity_data".to_owned(),
+                        Tag::Compound(vec![(
+                            "id".to_owned(),
+                            Tag::String("minecraft:bee".to_owned()),
+                        )]),
+                    ),
+                    ("ticks_in_hive".to_owned(), Tag::Int(12)),
+                    ("min_ticks_in_hive".to_owned(), Tag::Int(20)),
+                ])]),
+            ),
+            ("flower_pos".to_owned(), Tag::IntArray(vec![1, 2, 3])),
+        ],
+    );
+    full(
+        "sign-rich",
+        "minecraft:oak_sign",
+        "minecraft:sign",
+        vec![
+            ("allow_op_features".to_owned(), Tag::Byte(1)),
+            (
+                "front_text".to_owned(),
+                Tag::Compound(vec![
+                    (
+                        "messages".to_owned(),
+                        Tag::List(vec![
+                            Tag::String("hi".to_owned()),
+                            Tag::String(String::new()),
+                            Tag::String(String::new()),
+                            Tag::String(String::new()),
+                        ]),
+                    ),
+                    ("color".to_owned(), Tag::String("red".to_owned())),
+                    ("has_glowing_text".to_owned(), Tag::Byte(1)),
+                ]),
+            ),
+            ("is_waxed".to_owned(), Tag::Byte(1)),
+        ],
+    );
+    full(
+        "command_block-rich",
+        "minecraft:command_block",
+        "minecraft:command_block",
+        vec![
+            ("Command".to_owned(), Tag::String("say hi".to_owned())),
+            ("LastOutput".to_owned(), Tag::String("last".to_owned())),
+            ("LastExecution".to_owned(), Tag::Long(77)),
+            ("SuccessCount".to_owned(), Tag::Int(3)),
+        ],
+    );
+    full(
+        "spawner-rich-subcodecs",
+        "minecraft:spawner",
+        "minecraft:mob_spawner",
+        vec![(
+            "SpawnPotentials".to_owned(),
+            Tag::List(vec![Tag::Compound(vec![
+                (
+                    "data".to_owned(),
+                    Tag::Compound(vec![
+                        (
+                            "entity".to_owned(),
+                            Tag::Compound(vec![(
+                                "id".to_owned(),
+                                Tag::String("minecraft:zombie".to_owned()),
+                            )]),
+                        ),
+                        ("custom_spawn_rules".to_owned(), Tag::Compound(Vec::new())),
+                    ]),
+                ),
+                ("weight".to_owned(), Tag::Int(2)),
+            ])]),
+        )],
+    );
+    full(
+        "beehive-rich-entity-data",
+        "minecraft:beehive",
+        "minecraft:beehive",
+        vec![(
+            "bees".to_owned(),
+            Tag::List(vec![Tag::Compound(vec![
+                (
+                    "entity_data".to_owned(),
+                    Tag::Compound(vec![
+                        ("id".to_owned(), Tag::String("minecraft:bee".to_owned())),
+                        ("HasNectar".to_owned(), Tag::Byte(1)),
+                        ("CustomName".to_owned(), Tag::String("bee".to_owned())),
+                    ]),
+                ),
+                ("ticks_in_hive".to_owned(), Tag::Int(1)),
+                ("min_ticks_in_hive".to_owned(), Tag::Int(2)),
+            ])]),
+        )],
+    );
     full(
         "command_block-full",
         "minecraft:command_block",

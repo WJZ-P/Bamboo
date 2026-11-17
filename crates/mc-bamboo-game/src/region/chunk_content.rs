@@ -445,21 +445,22 @@ fn write_game_fields(
         write_component_fields(entry, problems, id, pos, patch);
     }
     // 命令方块。
-    if id == "minecraft:command_block" {
-        if let Some(data) = parts.command_block(pos) {
-            let data = data.archive();
-            put_string(entry, "Command", data.command);
-            put_int(entry, "SuccessCount", data.success_count);
-            put_bool(entry, "TrackOutput", data.track_output);
-            put_bool(entry, "UpdateLastExecution", data.update_last_execution);
-            put_bool(entry, "powered", data.powered);
-            put_bool(entry, "conditionMet", data.condition_met);
-            put_bool(entry, "auto", data.automatic);
-        }
-        // 官方 TrackOutput 为真时写 LastOutput（可省），我们没建模，删保留值。
-        entry.omit.push("LastOutput".to_owned());
-        entry.omit.push("LastExecution".to_owned());
+    if id == "minecraft:command_block"
+        && let Some(data) = parts.command_block(pos)
+    {
+        let data = data.archive();
+        put_string(entry, "Command", data.command);
+        put_int(entry, "SuccessCount", data.success_count);
+        put_bool(entry, "TrackOutput", data.track_output);
+        put_bool(entry, "UpdateLastExecution", data.update_last_execution);
+        put_bool(entry, "powered", data.powered);
+        put_bool(entry, "conditionMet", data.condition_met);
+        put_bool(entry, "auto", data.automatic);
     }
+    // `LastOutput` / `LastExecution` 由 `archive::resave::command_block` 按
+    // 官方条件写回（没有运行时表拥有它们），不能在这里删掉。
+    // Those two keys have no runtime owner; the archive resave codec writes
+    // them conditionally and they must not be dropped here.
     // 讲台上的书。
     if id == "minecraft:lectern" {
         if let Some(book) = parts.book(pos) {

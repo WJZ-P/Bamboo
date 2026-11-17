@@ -1,4 +1,4 @@
-//! 宝库、幽匿感测器和熔炉的方块实体经 Bamboo「读盘 → 存盘」后的逐键比较。
+//! 全部只保留存档态的方块实体经 Bamboo「读盘 → 存盘」后的逐键比较。
 //!
 //! 官方键名、默认值和 codec 的省略规则按 `javap -c -p` 核对：
 //!
@@ -16,9 +16,9 @@
 //! 这里比的是 Bamboo 读盘再存盘的 NBT 键和值；`chunk-content` oracle 另外用官方
 //! `BlockEntity.loadStatic → saveWithFullMetadata` 跑同一批边界条目，逐键对照官方结果。
 //!
-//! Per-key comparison of vault, sculk and furnace block entities after Bamboo's
-//! load -> save. The `chunk-content` oracle additionally replays the same edge
-//! cases through vanilla's `loadStatic -> saveWithFullMetadata`.
+//! Per-key comparison of all state-only block entities after Bamboo's load -> save.
+//! The `chunk-content` oracle additionally replays the same edge cases through
+//! vanilla's `loadStatic -> saveWithFullMetadata`.
 
 #![cfg(feature = "oracle")]
 
@@ -397,6 +397,51 @@ fn resave_after(
         .map(|(id, _)| entry(id, x_of(id), Vec::new()))
         .collect();
     let chunk = chunk_with(&entries);
+    let decoded = mc_bamboo_game::region::chunk_content::decode(POS, &chunk, None)
+        .expect("Bamboo decodes the chunk");
+    assert!(decoded.problems.is_empty(), "{:?}", decoded.problems);
+    let lower = mc_bamboo_world::column::ChunkColumnParts::read_from(decoded.column.chunk_column());
+    let rebuilt =
+        mc_bamboo_world::column::ChunkColumn::from_parts(lower).expect("lower column rebuilds");
+    let mut parts = mc_bamboo_game::region::RegionColumnParts {
+        column: Box::new(rebuilt),
+        ticks: None,
+        block_entities: Default::default(),
+        redstone: Default::default(),
+        containers: Default::default(),
+        block_items: Default::default(),
+        command_blocks: Default::default(),
+        books: Default::default(),
+        entities: Default::default(),
+    };
+    edit(&mut parts);
+    let column = mc_bamboo_game::region::RegionColumn::from_parts(parts);
+    let encoded = mc_bamboo_game::region::chunk_content::encode(&column, POS)
+        .expect("Bamboo encodes the chunk");
+    let Some(Tag::List(written)) = field(&encoded.chunk, "block_entities") else {
+        panic!("written chunk has block_entities");
+    };
+    let mut out: Vec<(String, Vec<(String, Tag)>)> = written
+        .iter()
+        .map(|tag| {
+            let id = match field(tag, "id") {
+                Some(Tag::String(id)) => id.clone(),
+                _ => String::new(),
+            };
+            (id, sorted_fields(tag))
+        })
+        .collect();
+    out.sort_by(|(a, _), (b, _)| a.cmp(b));
+    out
+}
+
+/// 与 [`resave_after`] 一样，但读盘条目由调用方给出（有内容的场景）。
+/// Like `resave_after`, but the disk entries are provided by the caller.
+fn resave_after_with(
+    entries: &[Tag],
+    mut edit: impl FnMut(&mut mc_bamboo_game::region::RegionColumnParts),
+) -> Vec<(String, Vec<(String, Tag)>)> {
+    let chunk = chunk_with(entries);
     let decoded = mc_bamboo_game::region::chunk_content::decode(POS, &chunk, None)
         .expect("Bamboo decodes the chunk");
     assert!(decoded.problems.is_empty(), "{:?}", decoded.problems);
@@ -909,6 +954,183 @@ fn runtime_edits_win_over_the_disk_entry() {
     );
 }
 
+/// 有内容的条目：读盘 → 不操作 → 存盘，逐键逐值和官方
+/// `loadStatic → saveWithFullMetadata` 的结果相同（官方结果由 `javap` 与
+/// `chunk-content` oracle 的同一批题目核对过）。这里把官方写出的非元数据键
+/// 直接列出来；任何一项丢了，下面的断言立刻失败（改坏确认）。
+/// Rich entries: load, do nothing, save. Every non-metadata key written by the
+/// official codec must survive with the same value.
+#[test]
+fn rich_entries_keep_player_content_on_a_plain_resave() {
+    use mc_bamboo_protocol::components::archive::slots::{SlottedItem, encode_item, encode_list};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let stone = |count: i32| ItemStack::new(mc_bamboo_data::items::STONE, count);
+    let record = encode_item(&ItemStack::new(mc_bamboo_data::items::MUSIC_DISC_13, 1))
+        .expect("disc encodes");
+    let pot_item = encode_item(&stone(3)).expect("pot item encodes");
+    let shulker_items = encode_list(&[SlottedItem {
+        slot: 3,
+        stack: stone(7),
+    }])
+    .expect("shulker items encode");
+    let bee = Tag::Compound(vec![
+        (
+            "entity_data".to_owned(),
+            Tag::Compound(vec![(
+                "id".to_owned(),
+                Tag::String("minecraft:bee".to_owned()),
+            )]),
+        ),
+        ("ticks_in_hive".to_owned(), Tag::Int(12)),
+        ("min_ticks_in_hive".to_owned(), Tag::Int(20)),
+    ]);
+    let front = Tag::Compound(vec![
+        (
+            "messages".to_owned(),
+            Tag::List(vec![
+                Tag::String("hi".to_owned()),
+                Tag::String(String::new()),
+                Tag::String(String::new()),
+                Tag::String(String::new()),
+            ]),
+        ),
+        ("color".to_owned(), Tag::String("red".to_owned())),
+        ("has_glowing_text".to_owned(), Tag::Byte(1)),
+    ]);
+    let blank = Tag::Compound(vec![
+        (
+            "messages".to_owned(),
+            Tag::List(vec![Tag::String(String::new()); 4]),
+        ),
+        ("color".to_owned(), Tag::String("black".to_owned())),
+        ("has_glowing_text".to_owned(), Tag::Byte(0)),
+    ]);
+    let name = Tag::String("named".to_owned());
+    let output = Tag::String("last".to_owned());
+    // 同一格上多个潜影盒条目是两次独立的读盘 → 存盘（互不影响）。
+    type RichCase<'a> = (&'a str, Vec<(String, Tag)>, Vec<(String, Tag)>);
+    let rich_cases: &[RichCase<'_>] = &[
+        (
+            "minecraft:jukebox",
+            vec![
+                ("RecordItem".to_owned(), record.clone()),
+                ("ticks_since_song_started".to_owned(), Tag::Long(42)),
+            ],
+            vec![
+                ("RecordItem".to_owned(), record.clone()),
+                ("ticks_since_song_started".to_owned(), Tag::Long(42)),
+            ],
+        ),
+        (
+            "minecraft:decorated_pot",
+            vec![("item".to_owned(), pot_item.clone())],
+            vec![("item".to_owned(), pot_item.clone())],
+        ),
+        (
+            "minecraft:shulker_box",
+            vec![("Items".to_owned(), shulker_items.clone())],
+            vec![("Items".to_owned(), shulker_items.clone())],
+        ),
+        (
+            "minecraft:shulker_box",
+            vec![
+                (
+                    "LootTable".to_owned(),
+                    Tag::String("minecraft:chests/simple_dungeon".to_owned()),
+                ),
+                ("LootTableSeed".to_owned(), Tag::Long(99)),
+            ],
+            vec![
+                (
+                    "LootTable".to_owned(),
+                    Tag::String("minecraft:chests/simple_dungeon".to_owned()),
+                ),
+                ("LootTableSeed".to_owned(), Tag::Long(99)),
+            ],
+        ),
+        (
+            "minecraft:beehive",
+            vec![
+                ("bees".to_owned(), Tag::List(vec![bee.clone()])),
+                ("flower_pos".to_owned(), Tag::IntArray(vec![1, 2, 3])),
+            ],
+            vec![
+                ("bees".to_owned(), Tag::List(vec![bee.clone()])),
+                ("flower_pos".to_owned(), Tag::IntArray(vec![1, 2, 3])),
+            ],
+        ),
+        (
+            "minecraft:sign",
+            vec![
+                ("allow_op_features".to_owned(), Tag::Byte(1)),
+                ("front_text".to_owned(), front.clone()),
+                ("is_waxed".to_owned(), Tag::Byte(1)),
+            ],
+            vec![
+                ("allow_op_features".to_owned(), Tag::Byte(1)),
+                ("front_text".to_owned(), front.clone()),
+                ("back_text".to_owned(), blank.clone()),
+                ("is_waxed".to_owned(), Tag::Byte(1)),
+            ],
+        ),
+        (
+            "minecraft:command_block",
+            vec![
+                ("Command".to_owned(), Tag::String("say hi".to_owned())),
+                ("CustomName".to_owned(), name.clone()),
+                ("LastOutput".to_owned(), output.clone()),
+                ("LastExecution".to_owned(), Tag::Long(77)),
+                ("SuccessCount".to_owned(), Tag::Int(3)),
+            ],
+            vec![
+                ("Command".to_owned(), Tag::String("say hi".to_owned())),
+                ("CustomName".to_owned(), name.clone()),
+                ("LastOutput".to_owned(), output.clone()),
+                ("LastExecution".to_owned(), Tag::Long(77)),
+                ("SuccessCount".to_owned(), Tag::Int(3)),
+                ("TrackOutput".to_owned(), Tag::Byte(1)),
+                ("UpdateLastExecution".to_owned(), Tag::Byte(1)),
+                ("powered".to_owned(), Tag::Byte(0)),
+                ("conditionMet".to_owned(), Tag::Byte(0)),
+                ("auto".to_owned(), Tag::Byte(0)),
+            ],
+        ),
+    ];
+    for (index, (id, input, want)) in rich_cases.iter().enumerate() {
+        let written = resave(&[entry(id, 0, input.clone())]);
+        let mut fields = expected(want.clone());
+        fields.extend([
+            ("id".to_owned(), Tag::String((*id).to_owned())),
+            ("x".to_owned(), Tag::Int(POS.x * 16 + position_of(id).0)),
+            ("y".to_owned(), Tag::Int(-60)),
+            ("z".to_owned(), Tag::Int(POS.z * 16 + position_of(id).1)),
+        ]);
+        fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let got = written
+            .iter()
+            .find(|(written_id, _)| written_id == id)
+            .map(|(_, fields)| fields.clone())
+            .unwrap_or_else(|| panic!("{id} was written"));
+        assert_eq!(got, fields, "rich case {index}: {id}");
+        // 改坏确认：期望里去掉一个内容键，断言立刻失败。
+        // Break-it check: dropping a content key from the expectation fails.
+        if let Some((key, _)) = want.first() {
+            let mut broken = want.clone();
+            broken.retain(|(existing, _)| existing != key);
+            let mut broken_fields = expected(broken);
+            broken_fields.extend([
+                ("id".to_owned(), Tag::String((*id).to_owned())),
+                ("x".to_owned(), Tag::Int(POS.x * 16 + position_of(id).0)),
+                ("y".to_owned(), Tag::Int(-60)),
+                ("z".to_owned(), Tag::Int(POS.z * 16 + position_of(id).1)),
+            ]);
+            broken_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+            assert_ne!(got, broken_fields, "{id} must keep {key}");
+        }
+    }
+}
+
 /// D9：未知键原样保留（当前数据版本下官方自己写出的存档不会带这种键，
 /// 这是和官方逐键比较时唯一有意的差别）。
 #[test]
@@ -926,5 +1148,333 @@ fn unknown_legacy_keys_stay_preserved() {
     assert_eq!(
         furnace.iter().find(|(key, _)| key == "BurnTime"),
         Some(&("BurnTime".to_owned(), Tag::Short(5)))
+    );
+}
+
+/// 读盘（有内容）→ 游戏里改内容 → 存盘：运行时表拥有的键以新内容为准，
+/// 没被表拥有的键保留读盘内容，两边都不能回退成旧值或丢掉。
+/// Load rich entries, change runtime-owned content, then save: runtime values win
+/// for keys the game layer owns, and unowned content keys keep their disk values.
+#[test]
+fn runtime_edits_keep_or_replace_rich_content() {
+    use mc_bamboo_core::sign::{DyeColor, SignContent};
+    use mc_bamboo_data::{items::STONE, registries::data_component_type as kinds};
+    use mc_bamboo_protocol::components::archive::slots::{SlottedItem, encode_item, encode_list};
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+    use mc_bamboo_protocol::item::ItemStack;
+
+    let stone = |count: i32| ItemStack::new(STONE, count);
+    let record = encode_item(&ItemStack::new(mc_bamboo_data::items::MUSIC_DISC_13, 1))
+        .expect("disc encodes");
+    let pot_item = encode_item(&stone(3)).expect("pot item encodes");
+    let shulker_items = encode_list(&[SlottedItem {
+        slot: 3,
+        stack: stone(7),
+    }])
+    .expect("shulker items encode");
+    // 读盘条目里带内容，运行时表再改：把四种容器都显式建表，模拟玩家操作。
+    let disk = vec![
+        entry(
+            "minecraft:jukebox",
+            0,
+            vec![
+                ("RecordItem".to_owned(), record.clone()),
+                ("ticks_since_song_started".to_owned(), Tag::Long(42)),
+            ],
+        ),
+        entry(
+            "minecraft:decorated_pot",
+            0,
+            vec![("item".to_owned(), pot_item.clone())],
+        ),
+        entry(
+            "minecraft:shulker_box",
+            0,
+            vec![("Items".to_owned(), shulker_items.clone())],
+        ),
+        entry(
+            "minecraft:sign",
+            0,
+            vec![(
+                "front_text".to_owned(),
+                Tag::Compound(vec![
+                    (
+                        "messages".to_owned(),
+                        Tag::List(vec![
+                            Tag::String("old".to_owned()),
+                            Tag::String(String::new()),
+                            Tag::String(String::new()),
+                            Tag::String(String::new()),
+                        ]),
+                    ),
+                    ("color".to_owned(), Tag::String("black".to_owned())),
+                    ("has_glowing_text".to_owned(), Tag::Byte(0)),
+                ]),
+            )],
+        ),
+        entry(
+            "minecraft:command_block",
+            0,
+            vec![("Command".to_owned(), Tag::String("say old".to_owned()))],
+        ),
+    ];
+    let written = resave_after_with(&disk, |parts| {
+        // 唱片机：运行时容器表换了唱片（`Items` 是该层自己的键，官方不写）；
+        // 没有运行时表拥有 `RecordItem`，所以本测试也检查它不丢。
+        let jukebox = mc_bamboo_core::BlockPos::new(
+            POS.x * 16 + position_of("minecraft:jukebox").0,
+            -60,
+            POS.z * 16 + position_of("minecraft:jukebox").1,
+        );
+        let new_record = encode_list(&[SlottedItem {
+            slot: 0,
+            stack: ItemStack::new(mc_bamboo_data::items::MUSIC_DISC_CAT, 1),
+        }])
+        .expect("new disc encodes");
+        parts.containers.insert(
+            jukebox,
+            mc_bamboo_game::region::PackedContainer::new(
+                mc_bamboo_game::region::ContainerEntry::with_items(
+                    mc_bamboo_game::region::ContainerKind::Jukebox,
+                    &new_record,
+                    1,
+                ),
+            ),
+        );
+        // 陶罐：组件补丁换纹样（`sherds` 由补丁写）。
+        let pot = mc_bamboo_core::BlockPos::new(
+            POS.x * 16 + position_of("minecraft:decorated_pot").0,
+            -60,
+            POS.z * 16 + position_of("minecraft:decorated_pot").1,
+        );
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::POT_DECORATIONS,
+            PatchEntry::Set(ComponentValue::PotDecorations {
+                back: None,
+                left: None,
+                right: None,
+                front: None,
+            }),
+        );
+        parts.block_items.insert(pot, patch);
+        // 潜影盒：换内容（容器表显式建表，写新的 `Items`）。
+        let shulker = mc_bamboo_core::BlockPos::new(
+            POS.x * 16 + position_of("minecraft:shulker_box").0,
+            -60,
+            POS.z * 16 + position_of("minecraft:shulker_box").1,
+        );
+        let new_items = encode_list(&[SlottedItem {
+            slot: 5,
+            stack: stone(9),
+        }])
+        .expect("new shulker items encode");
+        parts.containers.insert(
+            shulker,
+            mc_bamboo_game::region::PackedContainer::new(
+                mc_bamboo_game::region::ContainerEntry::with_items(
+                    mc_bamboo_game::region::ContainerKind::ShulkerBox,
+                    &new_items,
+                    27,
+                ),
+            ),
+        );
+        // 告示牌：写新字。
+        let mut content = SignContent::BLANK;
+        content.front.messages[0] = "new".to_owned();
+        content.front.color = DyeColor::Blue;
+        parts.column.chunk_mut().set_sign(
+            position_of("minecraft:sign").0 as usize,
+            -60,
+            position_of("minecraft:sign").1 as usize,
+            content,
+        );
+        // 命令方块：改命令、名字。
+        let command = mc_bamboo_core::BlockPos::new(
+            POS.x * 16 + position_of("minecraft:command_block").0,
+            -60,
+            POS.z * 16 + position_of("minecraft:command_block").1,
+        );
+        parts.command_blocks.insert(
+            command,
+            mc_bamboo_game::region::CommandBlockData::from_archive(
+                mc_bamboo_game::region::ArchiveCommandBlock {
+                    command: "say new".to_owned(),
+                    track_output: true,
+                    automatic: false,
+                    success_count: 0,
+                    powered: false,
+                    condition_met: false,
+                    update_last_execution: true,
+                },
+            ),
+        );
+    });
+    let by_id = |id: &str| {
+        written
+            .iter()
+            .find(|(written_id, _)| written_id == id)
+            .map(|(_, fields)| fields.clone())
+            .unwrap_or_else(|| panic!("{id} was written"))
+    };
+    // 运行时改过的键：当前值（不是读盘旧值）。
+    let shulker = by_id("minecraft:shulker_box");
+    let Tag::List(items) = shulker
+        .iter()
+        .find(|(key, _)| key == "Items")
+        .unwrap()
+        .1
+        .clone()
+    else {
+        panic!("shulker Items is a list");
+    };
+    assert_eq!(items.len(), 1, "shulker box keeps the new item");
+    assert_eq!(
+        mc_bamboo_storage::chunk_nbt::field(&items[0], "Slot"),
+        Some(&Tag::Byte(5))
+    );
+    let sign = by_id("minecraft:sign");
+    let front = sign.iter().find(|(key, _)| key == "front_text").unwrap();
+    assert_eq!(
+        mc_bamboo_storage::chunk_nbt::field(&front.1, "messages"),
+        Some(&Tag::List(vec![
+            Tag::String("new".to_owned()),
+            Tag::String(String::new()),
+            Tag::String(String::new()),
+            Tag::String(String::new()),
+        ]))
+    );
+    let command = by_id("minecraft:command_block");
+    assert_eq!(
+        command.iter().find(|(key, _)| key == "Command").unwrap().1,
+        Tag::String("say new".to_owned())
+    );
+    assert!(
+        !command.iter().any(|(key, _)| key == "CustomName"),
+        "the command block did not have a custom name on disk"
+    );
+    // 运行时表不拥有的键：读盘内容不丢。
+    let jukebox = by_id("minecraft:jukebox");
+    assert_eq!(
+        jukebox
+            .iter()
+            .find(|(key, _)| key == "RecordItem")
+            .unwrap()
+            .1,
+        record
+    );
+    let pot = by_id("minecraft:decorated_pot");
+    assert_eq!(
+        pot.iter().find(|(key, _)| key == "item").unwrap().1,
+        pot_item
+    );
+}
+
+/// 子 codec 没有逐字段规范化时，可选字段必须原样带回、不丢不改：
+/// `SpawnData.custom_spawn_rules` / `SpawnData.equipment` 和
+/// `BeehiveBlockEntity.Occupant.entity_data` 里的任意键都照读盘写出来。
+/// Optional sub-codec fields are carried through verbatim: no loss, no mutation.
+#[test]
+fn optional_subcodec_fields_are_carried_through_verbatim() {
+    let custom = Tag::Compound(vec![
+        (
+            "block".to_owned(),
+            Tag::String("minecraft:stone".to_owned()),
+        ),
+        ("unknown".to_owned(), Tag::Int(7)),
+    ]);
+    let equipment = Tag::String("keep-me".to_owned());
+    let entity_data = Tag::Compound(vec![
+        ("id".to_owned(), Tag::String("minecraft:bee".to_owned())),
+        ("HasNectar".to_owned(), Tag::Byte(1)),
+        ("CustomName".to_owned(), Tag::String("bee".to_owned())),
+    ]);
+    let written = resave(&[
+        entry(
+            "minecraft:mob_spawner",
+            0,
+            vec![(
+                "SpawnPotentials".to_owned(),
+                Tag::List(vec![Tag::Compound(vec![
+                    (
+                        "data".to_owned(),
+                        Tag::Compound(vec![
+                            ("entity".to_owned(), Tag::Compound(Vec::new())),
+                            ("custom_spawn_rules".to_owned(), custom.clone()),
+                            ("equipment".to_owned(), equipment.clone()),
+                        ]),
+                    ),
+                    ("weight".to_owned(), Tag::Int(2)),
+                ])]),
+            )],
+        ),
+        entry(
+            "minecraft:beehive",
+            0,
+            vec![(
+                "bees".to_owned(),
+                Tag::List(vec![Tag::Compound(vec![
+                    ("entity_data".to_owned(), entity_data.clone()),
+                    ("ticks_in_hive".to_owned(), Tag::Int(1)),
+                    ("min_ticks_in_hive".to_owned(), Tag::Int(2)),
+                ])]),
+            )],
+        ),
+    ]);
+    let spawner = written
+        .iter()
+        .find(|(id, _)| id == "minecraft:mob_spawner")
+        .map(|(_, fields)| fields.clone())
+        .expect("spawner was written");
+    let Tag::List(potentials) = spawner
+        .iter()
+        .find(|(key, _)| key == "SpawnPotentials")
+        .unwrap()
+        .1
+        .clone()
+    else {
+        panic!("SpawnPotentials is a list");
+    };
+    let data =
+        mc_bamboo_storage::chunk_nbt::field(&potentials[0], "data").expect("potential has data");
+    assert_eq!(
+        mc_bamboo_storage::chunk_nbt::field(data, "custom_spawn_rules"),
+        Some(&custom),
+        "custom_spawn_rules is unchanged"
+    );
+    assert_eq!(
+        mc_bamboo_storage::chunk_nbt::field(data, "equipment"),
+        Some(&equipment),
+        "equipment is unchanged"
+    );
+    let beehive = written
+        .iter()
+        .find(|(id, _)| id == "minecraft:beehive")
+        .map(|(_, fields)| fields.clone())
+        .expect("beehive was written");
+    let Tag::List(bees) = beehive
+        .iter()
+        .find(|(key, _)| key == "bees")
+        .unwrap()
+        .1
+        .clone()
+    else {
+        panic!("bees is a list");
+    };
+    assert_eq!(
+        mc_bamboo_storage::chunk_nbt::field(&bees[0], "entity_data"),
+        Some(&entity_data),
+        "bee entity_data is unchanged"
+    );
+    // 改坏确认：把期望值换掉，断言立刻失败。
+    // Break-it check: changing one expected value fails.
+    let broken = Tag::Compound(vec![
+        ("id".to_owned(), Tag::String("minecraft:bee".to_owned())),
+        ("CustomName".to_owned(), Tag::String("bee".to_owned())),
+    ]);
+    assert_ne!(
+        mc_bamboo_storage::chunk_nbt::field(&bees[0], "entity_data"),
+        Some(&broken),
+        "the bee entity NBT must keep every key"
     );
 }

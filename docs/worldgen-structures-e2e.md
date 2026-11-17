@@ -226,6 +226,20 @@ gen-world: 60 chunks, 0 quart cells, 53084160 blocks, 133 block entities,
   `block_entity_resave` 的单测固定了这个现状，对拍边界题不放未知键。
   官方认识、只是当前状态不写的键（空 `Items`、等于默认值的可选字段）不在此列，
   按官方去掉。
+* **内容键的归属**：一个键只有在游戏层运行时表确实拥有它、且存盘会写出当前值时，
+  才从读盘条目里删掉交给游戏层；否则 `archive::resave` 自己按官方 codec 带回。
+  唱片机的 `RecordItem` / `ticks_since_song_started`、陶罐的 `item`、潜影盒的
+  `Items` / `LootTable` / `LootTableSeed`、命令方块的 `LastOutput` / `LastExecution`
+  都没有对应的运行时写入者，全部由 `resave` 写回；`sherds` 由组件补丁拥有、
+  `ticks_since_song_started` 由红石表拥有，两者在运行时改过内容时以后者为准。
+  末影箱的物品在玩家身上，官方 `EnderChestBlockEntity` 不写这些键，按官方丢掉。
+  有内容的「读盘 → 不操作 → 存盘」和「读盘 → 游戏里改内容 → 存盘」两组往返都逐值断言。
+* **子 codec 未规范化**：`SpawnData.custom_spawn_rules` / `equipment` 与
+  `BeehiveBlockEntity.Occupant.entity_data` 里的键按读盘值原样带回（不丢、不改），
+  但没有按各自的子 codec 逐字段重新编码；这是存档保真范围内的已知限制，
+  单测固定了「不丢不改」，对拍的富字段题只放官方 codec 能逐值往返的形状。
+  同理，唱片机只在官方能识别 `jukebox_playable` 时写 `ticks_since_song_started`；
+  Bamboo 目前对任意非空唱片保留读盘进度，普通物品做唱片的极端条目可能多写这个键。
 
 ## 存档层面的「原样保留」清单
 
