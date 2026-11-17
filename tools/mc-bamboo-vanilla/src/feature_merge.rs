@@ -47,7 +47,7 @@ use serde_json::Value;
 use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: feature-merge <java> [--structures] [--target SEED X Z]... \
-     [--orders center-first,center-last] [--threads N] [--show N] \
+     [--orders isolated,center-first,center-last] [--threads N] [--show N] \
      [--break-drop-neighbor DX DZ | --break-first-writer] | --scan SEED X0 Z0 SIDE [--structures]";
 
 /// 默认目标（`--scan` 挑的）：(-2,-2) 收到邻居的流体（湖）和树冠溢出，(0,0)、(2,2)
