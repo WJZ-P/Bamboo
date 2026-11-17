@@ -62,6 +62,11 @@ fn harness(groups: usize) -> Harness {
             .set_position(&mut region.player_grid, spot);
         let _ = client.take_frames();
     }
+    assert_eq!(
+        server.region().players.len(),
+        groups * BOTS_PER_GROUP,
+        "每组 10 名玩家都要真的进服，否则量到的不是压测的形态"
+    );
     server
 }
 
