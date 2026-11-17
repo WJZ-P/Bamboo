@@ -1363,6 +1363,15 @@ fn runtime_edits_keep_or_replace_rich_content() {
             .1,
         record
     );
+    assert_eq!(
+        jukebox
+            .iter()
+            .find(|(key, _)| key == "ticks_since_song_started")
+            .unwrap()
+            .1,
+        Tag::Long(42),
+        "the redstone table must not reset the saved song progress"
+    );
     let pot = by_id("minecraft:decorated_pot");
     assert_eq!(
         pot.iter().find(|(key, _)| key == "item").unwrap().1,

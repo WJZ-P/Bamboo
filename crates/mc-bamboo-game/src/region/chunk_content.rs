@@ -186,7 +186,7 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
             world_pos,
             name,
             &parts.redstone().archive_entries(),
-            redstone_facts(name, world_pos, parts, pos),
+            redstone_facts(name, world_pos, parts, pos, raw),
         )
         .map_err(|e| Error::Blocks(e.0))?
         {
@@ -620,6 +620,7 @@ fn redstone_facts(
     pos: BlockPos,
     parts: &impl EncodeParts,
     chunk: ChunkPos,
+    raw: Option<&Tag>,
 ) -> RedstoneFacts {
     let state = parts.chunk_column().chunk().block(
         (pos.x - chunk.x * 16) as usize,
@@ -631,10 +632,21 @@ fn redstone_facts(
         .container(pos)
         .and_then(|game| game.slots.first())
         .is_some_and(|stack| !stack.is_empty());
+    // 唱片机没有运行时进度表：读盘的 `ticks_since_song_started` 交给红石键写回，
+    // 免得被新方块实体的 0 盖掉；没有读盘条目时才按新建写 0。
+    // The jukebox has no runtime progress table: keep the disk ticks when present,
+    // defaulting to 0 only for a freshly generated block entity.
+    let song_ticks = raw
+        .and_then(|tag| field(tag, "ticks_since_song_started"))
+        .and_then(|tag| match tag {
+            Tag::Long(value) => Some(*value),
+            Tag::Int(value) => Some(i64::from(*value)),
+            _ => None,
+        });
     RedstoneFacts {
         jukebox_has_record: id == "minecraft:jukebox" && has_record,
         crafter_triggered: id == "minecraft:crafter" && state.try_get(TRIGGERED) == Some(true),
-        song_ticks: None,
+        song_ticks,
     }
 }
 
