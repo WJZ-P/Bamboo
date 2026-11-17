@@ -58,6 +58,7 @@
 #   KEEP        非空时保留临时目录（含各次的 server.log / probe.log）
 #   PORT2       --loaded 第二遍的端口（默认 <端口>+1）
 #   SEED_RADIUS seed-world 的半径（默认 8，覆盖视距 8 的跟踪范围）
+#   PROBE_ISLAND_THREADS  岛的 tick 线程数（默认 0 = 精确模式）；default = 用服务端缺省
 
 set -u
 
@@ -88,10 +89,19 @@ export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_TEST_DEBUG=line-ta
 # Probe.java runs /stop at wrap-up; the crash test leaves this unset so kill -9
 # still hits a running server.
 export BAMBOO_PROBE_STOP=1
-# 探针按精确模式校准：显式选齐步驱动，不靠缺省值（岛的实施计划第 9 节第 7 条）。
-# The probe is calibrated for exact mode: choose the lockstep drive explicitly
-# instead of relying on the default (island plan, section 9, item 7).
-export BAMBOO_ISLAND_DRIVE=lockstep
+# 探针按精确模式校准：缺省显式选齐步（island_threads = 0），不靠缺省值（岛的实施计划
+# 第 9 节第 7 条）。PROBE_ISLAND_THREADS=<n> 换成别的线程数；=default 不设，走服务端的
+# 缺省配置，用来验「缺省配置下探针也全过」。
+# The probe is calibrated for exact mode: lockstep (island_threads = 0) is chosen
+# explicitly, not by default (island plan, section 9, item 7).
+# PROBE_ISLAND_THREADS=<n> picks another count; =default leaves it unset so the
+# server runs its default configuration.
+PROBE_ISLAND_THREADS=${PROBE_ISLAND_THREADS:-0}
+if [ "$PROBE_ISLAND_THREADS" = "default" ]; then
+    unset BAMBOO_ISLAND_THREADS
+else
+    export BAMBOO_ISLAND_THREADS="$PROBE_ISLAND_THREADS"
+fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/bamboo-probe.XXXXXX")
 WORLD="$TMP/world"

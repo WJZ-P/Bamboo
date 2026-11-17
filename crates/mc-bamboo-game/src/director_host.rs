@@ -1307,22 +1307,54 @@ impl DirectorHost {
         if self.infinite_flat {
             return;
         }
+        island.mailbox.lift_budget();
+        // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
+        island.region.chunks.finish_light_updates();
+        self.shutdown_with(&mut IslandAccess::Lent(&mut *island));
+        island.mailbox.clear();
+    }
+
+    /// 关服时岛卡在 tick 线程上回不来（岛的实施计划第 6 节第 7 步）：照常推完关服事件，
+    /// 只是收回的信件投进邮筒、没人收；主控手里已有的快照和停放的盒子照样写完。
+    /// 岛上的区块存不下来，在日志里列出。
+    ///
+    /// Shutdown while the island is stuck on its tick thread (island plan,
+    /// step 7): drive the shutdown events as usual, except the reclaim mail is
+    /// only posted and never taken; the snapshots and parked boxes the master
+    /// holds are still written. The island's chunks cannot be saved and are logged.
+    pub(crate) fn shutdown_without_island(&mut self) {
+        if self.infinite_flat {
+            return;
+        }
+        let mut lost: Vec<ChunkPos> = self.island_chunks.iter().copied().collect();
+        lost.sort_unstable();
+        self.shutdown_with(&mut IslandAccess::Away);
+        if !lost.is_empty() {
+            tracing::error!(
+                ?lost,
+                "these chunks were on the stuck island; changes after their last save are lost"
+            );
+        }
+    }
+
+    /// 岛里现在有多少个区块（主控的记账）。
+    pub(crate) fn island_chunk_count(&self) -> usize {
+        self.island_chunks.len()
+    }
+
+    fn shutdown_with(&mut self, access: &mut IslandAccess<'_>) {
         // 关服照官方最后全量保存：解除退避和 F6 背压，把内存里还在的
         // 快照再试一次，所有区块都要收回（复查「致命 2」：失败盒子也要重写）。
         // Shutdown is the final full save: lift the backoff and F6 backpressure,
         // retry everything still in memory, including failed parked boxes.
         self.save_retry_after = 0;
         self.shutting_down = true;
-        island.mailbox.lift_budget();
-        // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
-        island.region.chunks.finish_light_updates();
-        let mut access = IslandAccess::Lent(&mut *island);
         let mut events = std::mem::take(&mut self.initial_scratch);
         events.push(Event::Shutdown);
-        self.pump(&mut access, events);
+        self.pump(access, events);
         // 等计算池里的解析/生成/序列化都回来：存盘的盒子要回到世界线程才能
         // 排进写盘队列，收到的结果可能又派出新任务，所以循环到池子空为止。
-        self.drain_compute(&mut access);
+        self.drain_compute(access);
         // 写盘失败后还没写成功的盒子：用同一条编码路径重新提交（致命 2）。
         // Re-encode every parked box whose write never succeeded, using the
         // same codec as unload saves (fatal 2).
@@ -1352,7 +1384,6 @@ impl DirectorHost {
                 io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
             }
         }
-        island.mailbox.clear();
         self.posts.clear();
         self.flush_io();
         // 磁盘到关服还在失败时，明确列出没存下来的区块，再照常退出。

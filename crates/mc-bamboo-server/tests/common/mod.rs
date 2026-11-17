@@ -57,7 +57,7 @@ impl TestServer {
     /// for bit, so the lockstep drive is chosen explicitly, not by default
     /// (island plan, section 9, item 7).
     pub async fn start(mut config: ServerConfig) -> Self {
-        config.island_drive = mc_bamboo_game::IslandDrive::Lockstep;
+        config.island_threads = 0;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = Server::new(listener, config).unwrap();

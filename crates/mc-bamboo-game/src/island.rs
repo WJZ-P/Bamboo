@@ -8,10 +8,11 @@
 //! 邮筒（[`Posted`]），再由岛自己的 [`ChunkMailbox`] 收下、按预算交付 / 收回，把回执
 //! （`Delivered` / `Returned`）交还主控。什么时候收取由驱动决定（[`IslandDrive`]）：
 //!
-//! - **齐步**：岛停放着、借给主控，宿主每轮 `pump` 收敛前当场让岛收取，和以前直接
-//!   写 `Region` 的时点、顺序逐位相同（精确模式）。
-//! - **分离**：宿主只投信，岛在自己下一刻开头收取，回执在这一刻交回时给主控。区块
-//!   因此比齐步晚一刻交付，别的不变。
+//! - **齐步**（`island_threads = 0`）：岛停放着、借给主控，宿主每轮 `pump` 收敛前当场让岛
+//!   收取，和以前直接写 `Region` 的时点、顺序逐位相同（精确模式）。
+//! - **分离**（`island_threads ≥ 1`，缺省）：宿主只投信，岛在自己下一刻开头收取，回执在这一刻
+//!   交回时给主控。区块因此比齐步晚一刻交付。第 7 步起岛这一刻的主体在 tick 线程上跑，
+//!   和主控的 Director 推进并行（`island_pool.rs`、`World::tick_phases`）。
 //!
 //! The island and its chunk mailbox (island plan, section 6, step 6). An island
 //! is a [`Region`] plus the execution state that belongs only to it, and can be
@@ -21,9 +22,11 @@
 //! changes are no longer written into the `Region` by the host: they are posted
 //! ([`Posted`]) and the island's own [`ChunkMailbox`] takes them, delivers and
 //! reclaims within the budget, and hands the acks back. When it takes them is
-//! the drive's choice ([`IslandDrive`]): lockstep applies them on the spot at
-//! the same points as before (exact mode); detached applies them at the start of
-//! the island's next tick, so chunks arrive one tick later and nothing else changes.
+//! the drive's choice ([`IslandDrive`]): lockstep (`island_threads = 0`) applies
+//! them on the spot at the same points as before (exact mode); detached (the
+//! default) applies them at the start of the island's next tick, so chunks
+//! arrive one tick later, and since step 7 runs the island's tick on a tick
+//! thread in parallel with the master's Director step.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -52,39 +55,69 @@ pub(crate) const RECLAIM_DRAIN_TICKS: usize = 20;
 /// 排队用的 rank：`(玩家优先级, x, z)`，小的先出。
 pub(crate) type DemandRank = (i64, i32, i32);
 
-/// 主控和岛之间怎么交接区块信件。
+/// `island_threads` 没有显式给出时的值（岛的实施计划第 6 节第 7 步按测量定）。
 ///
-/// How the master and the island hand chunk mail over.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum IslandDrive {
-    /// 齐步：岛借给主控，信箱在原来的时点当场应用，和官方逐位一致（精确模式）。
-    /// 这一步仍是缺省。
+/// The `island_threads` value when none is given (island plan, step 7, by measurement).
+pub const DEFAULT_ISLAND_THREADS: usize = 1;
+
+/// 改 `island_threads` 缺省值的环境变量：对拍、探针和测试用它整进程切到精确模式（`0`）。
+///
+/// The environment variable that overrides the `island_threads` default:
+/// oracles, probes and tests use it to put a whole process in exact mode (`0`).
+pub const ISLAND_THREADS_ENV: &str = "BAMBOO_ISLAND_THREADS";
+
+/// 环境变量给的 `island_threads`。没设或者不是非负整数时是 `None`。
+///
+/// The `island_threads` given by the environment, or `None` when unset or not
+/// a non-negative integer.
+pub fn island_threads_from_env() -> Option<usize> {
+    let value = std::env::var(ISLAND_THREADS_ENV).ok()?;
+    match value.trim().parse::<usize>() {
+        Ok(threads) => Some(threads.min(crate::island_pool::MAX_ISLAND_THREADS)),
+        Err(_) => {
+            tracing::warn!(%value, "ignoring an invalid {ISLAND_THREADS_ENV}");
+            None
+        }
+    }
+}
+
+/// 没有显式选择时的 `island_threads`：环境变量优先，没有就是 [`DEFAULT_ISLAND_THREADS`]。
+/// 要求逐位一致的测试、对拍和探针都显式给 0，不靠这个缺省值。
+///
+/// The `island_threads` used when nothing is chosen explicitly: the
+/// environment wins, otherwise [`DEFAULT_ISLAND_THREADS`]. Bit-exact tests,
+/// oracles and probes give 0 explicitly instead of relying on it.
+pub fn default_island_threads() -> usize {
+    island_threads_from_env().unwrap_or(DEFAULT_ISLAND_THREADS)
+}
+
+/// 主控和岛之间怎么交接，由 `island_threads` 决定：0 是齐步，≥ 1 是分离。
+///
+/// How the master and the island hand over, decided by `island_threads`:
+/// 0 is lockstep, 1 or more is detached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IslandDrive {
+    /// 齐步（`island_threads = 0`）：岛一直在主控线程上，借给主控，信箱在原来的时点
+    /// 当场应用，和官方逐位一致（精确模式）。
     ///
-    /// Lockstep: the island is lent to the master and mail is applied on the
-    /// spot, bit for bit as before (exact mode). Still the default in this step.
-    #[default]
+    /// Lockstep (`island_threads = 0`): the island stays on the master thread,
+    /// lent to the master, and mail is applied on the spot, bit for bit (exact mode).
     Lockstep,
-    /// 分离：信箱在岛下一刻开头应用，区块交付晚一刻。
+    /// 分离（`island_threads ≥ 1`）：岛的一刻在 tick 线程上跑，和主控的 Director 推进
+    /// 并行；信箱在岛下一刻开头应用，区块交付晚一刻。
     ///
-    /// Detached: mail is applied at the start of the island's next tick, so
-    /// chunk delivery is one tick later.
+    /// Detached (`island_threads ≥ 1`): the island's tick runs on a tick
+    /// thread in parallel with the master's Director step; mail is applied at
+    /// the start of the island's next tick, so chunks arrive one tick later.
     Detached,
 }
 
 impl IslandDrive {
-    /// 没有显式选择时用的驱动。环境变量 `BAMBOO_ISLAND_DRIVE=detached` / `lockstep`
-    /// 可以改它（调试和测试用，整个进程生效）；第 7 步验收后缺省改成分离。
-    /// 要求逐位一致的测试、对拍和探针都显式选齐步，不靠这个缺省值。
-    ///
-    /// The drive used when nothing is chosen explicitly. The environment
-    /// variable `BAMBOO_ISLAND_DRIVE=detached` / `lockstep` overrides it for the
-    /// whole process (debugging and tests); after step 7 the default becomes
-    /// detached. Bit-exact tests, oracles and probes choose lockstep explicitly.
-    pub fn default_for_world() -> Self {
-        match std::env::var("BAMBOO_ISLAND_DRIVE").as_deref() {
-            Ok("detached") => Self::Detached,
-            Ok("lockstep") => Self::Lockstep,
-            _ => Self::default(),
+    pub(crate) fn from_threads(threads: usize) -> Self {
+        if threads == 0 {
+            Self::Lockstep
+        } else {
+            Self::Detached
         }
     }
 }
@@ -147,7 +180,29 @@ pub(crate) struct Island {
     /// The save list the master gave at the last hand-back; a detached island
     /// encodes it at the end of this tick. Always empty in lockstep.
     pub(crate) save_plan: SavePlan,
+    /// 分离驱动下这一刻末尾照名单编好的快照和新的改动，交回时给主控。齐步下一直是空的。
+    ///
+    /// The snapshots encoded from the list and the new changes at the end of
+    /// a detached tick, for the master at hand-back. Always empty in lockstep.
+    pub(crate) save_report: SaveReport,
+    /// 上次跑它的 tick 线程，下次尽量还交给它。
+    ///
+    /// The tick thread that ran it last; it goes back there when possible.
+    pub(crate) last_worker: usize,
     pub(crate) state: IslandState,
+    /// 测试专用：下一刻在 tick 线程上开头要做的事（卡住、panic）。
+    #[cfg(test)]
+    pub(crate) test_hook: Option<IslandTestHook>,
+}
+
+/// 测试专用：岛的下一刻在 tick 线程上开头做的事。
+#[cfg(test)]
+pub(crate) enum IslandTestHook {
+    /// 记下跑这一刻的线程名。
+    RecordThread(std::sync::Arc<std::sync::Mutex<Option<String>>>),
+    /// 卡住，直到这个标志被置上。
+    Stall(std::sync::Arc<std::sync::atomic::AtomicBool>),
+    Panic,
 }
 
 // 岛要能整个交给 tick 线程（第 7 步）。
@@ -156,6 +211,56 @@ const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<Island>();
 };
+
+/// 主控手里放岛的地方。岛停放时在这里（在堆上，交给 tick 线程只搬一个指针）；
+/// 派出去跑的时候整个被拿走，主控这段时间只拿得到自己的状态。停放时可以像
+/// `Island` 一样直接用（`Deref`）。
+///
+/// Where the master keeps the island. A parked island lives here (on the heap,
+/// so handing it to a tick thread moves one pointer); while it runs it is taken
+/// out whole and the master only holds its own state. A parked island is used
+/// like an `Island` through `Deref`.
+pub(crate) struct IslandSlot(Option<Box<Island>>);
+
+impl IslandSlot {
+    pub(crate) fn new(island: Box<Island>) -> Self {
+        Self(Some(island))
+    }
+
+    /// 岛在不在主控手里。
+    pub(crate) fn is_home(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// 拿走岛，交给 tick 线程。
+    pub(crate) fn take(&mut self) -> Box<Island> {
+        self.0.take().expect("岛已经交出去了")
+    }
+
+    /// 岛交回来了。
+    pub(crate) fn put(&mut self, island: Box<Island>) {
+        debug_assert!(self.0.is_none(), "岛已经在主控手里");
+        self.0 = Some(island);
+    }
+}
+
+impl std::ops::Deref for IslandSlot {
+    type Target = Island;
+
+    fn deref(&self) -> &Island {
+        self.0
+            .as_deref()
+            .expect("岛正在 tick 线程上跑，主控碰不到它")
+    }
+}
+
+impl std::ops::DerefMut for IslandSlot {
+    fn deref_mut(&mut self) -> &mut Island {
+        self.0
+            .as_deref_mut()
+            .expect("岛正在 tick 线程上跑，主控碰不到它")
+    }
+}
 
 impl Island {
     pub(crate) fn new(id: RegionId, region: Region, budget: MailBudget) -> Self {
@@ -167,7 +272,28 @@ impl Island {
             mailbox: ChunkMailbox::new(budget),
             replies: MailReport::default(),
             save_plan: SavePlan::default(),
+            save_report: SaveReport::default(),
+            last_worker: 0,
             state: IslandState::Parked,
+            #[cfg(test)]
+            test_hook: None,
+        }
+    }
+
+    /// 测试专用：跑掉下一刻的钩子。
+    #[cfg(test)]
+    pub(crate) fn run_test_hook(&mut self) {
+        match self.test_hook.take() {
+            Some(IslandTestHook::RecordThread(name)) => {
+                *name.lock().unwrap() = std::thread::current().name().map(str::to_owned);
+            }
+            Some(IslandTestHook::Stall(release)) => {
+                while !release.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+            Some(IslandTestHook::Panic) => panic!("岛的测试 panic"),
+            None => {}
         }
     }
 

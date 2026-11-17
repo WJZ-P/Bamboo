@@ -16,7 +16,8 @@ use std::{
 };
 
 use mc_bamboo_game::{
-    MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, MailBudget,
+    DEFAULT_ISLAND_THREADS, ISLAND_THREADS_ENV, MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS,
+    MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MailBudget, island_threads_from_env,
     world_options::WorldGenConfig,
 };
 use toml::{Table, Value};
@@ -137,6 +138,7 @@ const BAMBOO_KEYS: &[&str] = &[
     "chunk_worker_threads",
     "deliveries_per_tick",
     "reclaims_per_tick",
+    "island_threads",
 ];
 
 /// Bamboo 自己的配置项。每一项都对应 [`ServerConfig`] 里的一个字段。
@@ -166,6 +168,13 @@ pub struct BambooConfig {
     pub deliveries_per_tick: usize,
     /// Director 信箱每刻收回区块的个数上限，0 表示不限。
     pub reclaims_per_tick: usize,
+    /// 岛的 tick 线程数：0 = 齐步、内联（精确模式）；≥ 1 = 分离、和主控并行（默认 1）。
+    /// 环境变量 `BAMBOO_ISLAND_THREADS` 在运行时盖过它，但不写回文件。
+    ///
+    /// Island tick threads: 0 is lockstep, inline (exact mode); 1 or more is
+    /// detached, parallel to the master (default 1). `BAMBOO_ISLAND_THREADS`
+    /// overrides it at run time but is never written back to the file.
+    pub island_threads: usize,
 }
 
 impl Default for BambooConfig {
@@ -184,6 +193,10 @@ impl Default for BambooConfig {
             chunk_worker_threads: defaults.chunk_worker_threads,
             deliveries_per_tick: defaults.mail_budget.deliveries,
             reclaims_per_tick: defaults.mail_budget.reclaims,
+            // 文件里的缺省不跟环境变量走：环境变量只在运行时盖过，不能被写回文件。
+            // The file default ignores the environment: the variable only
+            // overrides at run time and must never be written back.
+            island_threads: DEFAULT_ISLAND_THREADS,
         }
     }
 }
@@ -238,6 +251,10 @@ impl BambooConfig {
                 "\n",
                 "# Director 信箱每刻最多收回多少个区块，0 表示不限，默认 64。\n",
                 "reclaims_per_tick = {}\n",
+                "\n",
+                "# 岛的 tick 线程数：0 = 精确模式（岛在世界线程上跑，和官方逐位一致）；\n",
+                "# >= 1 = 岛在这么多条线程上和主控并行跑（默认 1），区块交付晚一刻。\n",
+                "island_threads = {}\n",
             ),
             self.pre_play_timeout.as_secs(),
             self.max_pre_play_connections,
@@ -251,6 +268,7 @@ impl BambooConfig {
             self.chunk_worker_threads,
             self.deliveries_per_tick,
             self.reclaims_per_tick,
+            self.island_threads,
         )
     }
 
@@ -320,6 +338,14 @@ impl BambooConfig {
                 defaults.reclaims_per_tick,
                 0,
                 MAX_MAIL_BUDGET,
+            ),
+            island_threads: integer(
+                table,
+                "island_threads",
+                file,
+                defaults.island_threads,
+                0,
+                MAX_ISLAND_THREADS,
             ),
         }
     }
@@ -703,10 +729,10 @@ impl ConfigFiles {
                 deliveries: self.bamboo.deliveries_per_tick,
                 reclaims: self.bamboo.reclaims_per_tick,
             },
-            // 还不进配置文件：第 7 步加 `island_threads` 之前按环境变量（调试用），缺省齐步。
-            // Not in the files yet: until step 7 adds `island_threads` this follows
-            // the environment (debugging) and defaults to lockstep.
-            island_drive: defaults.island_drive,
+            // 环境变量 `BAMBOO_ISLAND_THREADS` 设了就盖过文件（对拍、探针整进程切精确模式用）。
+            // `BAMBOO_ISLAND_THREADS`, when set, overrides the file (oracles and
+            // probes use it to put a whole process in exact mode).
+            island_threads: island_threads_from_env().unwrap_or(self.bamboo.island_threads),
             world_gen,
             broadcast_console_to_ops: self.official.broadcast_console_to_ops,
             // 从真实 server.properties 建起来的命令行版才读进程 stdin；嵌入用法不读。
@@ -739,6 +765,11 @@ impl ConfigFiles {
         bamboo.chunk_worker_threads = config.chunk_worker_threads;
         bamboo.deliveries_per_tick = config.mail_budget.deliveries;
         bamboo.reclaims_per_tick = config.mail_budget.reclaims;
+        // 环境变量盖过时 `config` 里的值来自环境变量，不写回文件。
+        // Under the environment override the value came from the variable; keep the file's.
+        if island_threads_from_env().is_none() {
+            bamboo.island_threads = config.island_threads;
+        }
         Self { official, bamboo }
     }
 
@@ -879,6 +910,11 @@ impl ConfigFiles {
                 self.bamboo.reclaims_per_tick as u64,
                 defaults.bamboo.reclaims_per_tick as u64,
             ),
+            (
+                "island_threads",
+                self.bamboo.island_threads as u64,
+                defaults.bamboo.island_threads as u64,
+            ),
         ];
         for (key, value, default) in bamboo {
             if value != default {
@@ -999,6 +1035,16 @@ pub fn log_startup(directory: &Path, files: &ConfigFiles) {
     } else {
         info!(properties = %official.display(), bamboo = %bamboo.display(), changed = %non_defaults.join(", "), "configuration files");
     }
+    if let Some(threads) = island_threads_from_env()
+        && threads != files.bamboo.island_threads
+    {
+        info!(
+            env = ISLAND_THREADS_ENV,
+            threads,
+            file = files.bamboo.island_threads,
+            "island_threads comes from the environment, not bamboo.toml"
+        );
+    }
     let unsupported = files.unsupported_keys();
     if !unsupported.is_empty() {
         warn!(keys = %unsupported.join(", "), "these server.properties keys are not implemented by Bamboo yet and currently have no effect");
@@ -1083,6 +1129,7 @@ mod tests {
         assert_eq!(defaults.bamboo.entity_threads, 0);
         assert_eq!(defaults.bamboo.deliveries_per_tick, 64);
         assert_eq!(defaults.bamboo.reclaims_per_tick, 64);
+        assert_eq!(defaults.bamboo.island_threads, 1);
         assert_eq!(defaults.bamboo.forwarding, ForwardingMode::Off);
     }
 
@@ -1126,6 +1173,7 @@ mod tests {
         files.bamboo.forwarding = ForwardingMode::Modern;
         files.bamboo.forwarding_secret = "s\"ec\\ret".to_owned();
         files.bamboo.deliveries_per_tick = 0;
+        files.bamboo.island_threads = 0;
         write(dir.path(), &files).unwrap();
         let properties = fs::read_to_string(dir.path().join(PROPERTIES_FILE)).unwrap();
         let bamboo = fs::read_to_string(dir.path().join(BAMBOO_FILE)).unwrap();
@@ -1176,7 +1224,7 @@ mod tests {
         let dir = Temp::new();
         fs::write(
             dir.path().join(BAMBOO_FILE),
-            "entity_threads = -1\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\n",
+            "entity_threads = -1\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\n",
         )
         .unwrap();
         let loaded = read(dir.path()).unwrap();
@@ -1185,6 +1233,7 @@ mod tests {
         assert_eq!(loaded.bamboo.keep_alive_interval, Duration::from_secs(15));
         assert_eq!(loaded.bamboo.forwarding, ForwardingMode::Off);
         assert_eq!(loaded.bamboo.reclaims_per_tick, 16);
+        assert_eq!(loaded.bamboo.island_threads, 1);
     }
 
     #[test]
@@ -1223,9 +1272,16 @@ mod tests {
         files.official.view_distance = 16;
         files.bamboo.entity_threads = 8;
         files.bamboo.deliveries_per_tick = 32;
+        files.bamboo.island_threads = 3;
         let config = files.to_server_config(dir.path());
         assert_eq!(config.view_distance, 16);
         assert_eq!(config.entity_threads, 8);
+        // 环境变量 `BAMBOO_ISLAND_THREADS` 设了就盖过文件（整套测试可能整进程设成 0）。
+        // The environment variable overrides the file (a test run may set it to 0).
+        assert_eq!(
+            config.island_threads,
+            island_threads_from_env().unwrap_or(3)
+        );
         assert_eq!(config.mail_budget.deliveries, 32);
         assert_eq!(config.list_directory, dir.path());
         // session server 地址只能由代码指定，不出现在任何配置文件里。

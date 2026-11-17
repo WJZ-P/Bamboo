@@ -370,12 +370,18 @@ pub(crate) enum Metric {
     StorageCandidates,
     /// 这一刻拍的只读快照数。
     StorageSnapshots,
+    /// 分离驱动（岛的实施计划第 7 步）：主控线程这一刻自己干活的时间（整刻减去等岛交回）。
+    MasterBusy,
+    /// 分离驱动：岛这一刻在 tick 线程上跑的时间。
+    IslandBusy,
+    /// 分离驱动：交接本身的耗时（派出到线程开跑，加上岛跑完到主控接着干活）。
+    IslandHandoff,
     /// 因为落后太多而放弃追赶的次数，只有累计值，没有直方图。
     SkippedCatchUps,
 }
 
 impl Metric {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 21] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -394,6 +400,9 @@ impl Metric {
         Self::FlushBytes,
         Self::StorageCandidates,
         Self::StorageSnapshots,
+        Self::MasterBusy,
+        Self::IslandBusy,
+        Self::IslandHandoff,
     ];
 
     fn name(self) -> &'static str {
@@ -416,6 +425,9 @@ impl Metric {
             Self::FlushBytes => "flush_bytes",
             Self::StorageCandidates => "storage_candidates",
             Self::StorageSnapshots => "storage_snapshots",
+            Self::MasterBusy => "master_busy",
+            Self::IslandBusy => "island_busy",
+            Self::IslandHandoff => "island_handoff",
             Self::SkippedCatchUps => "skipped_catch_ups",
         }
     }
@@ -439,14 +451,24 @@ impl Metric {
             Self::ChunkLatencyUs => "us",
             Self::FlushBytes => "bytes",
             Self::SkippedCatchUps => "times",
-            Self::TickTotal | Self::TickStartLateness | Self::TickIntervalDeviation => "ms",
+            Self::TickTotal
+            | Self::TickStartLateness
+            | Self::TickIntervalDeviation
+            | Self::MasterBusy
+            | Self::IslandBusy
+            | Self::IslandHandoff => "ms",
         }
     }
 
     fn is_duration(self) -> bool {
         matches!(
             self,
-            Self::TickTotal | Self::TickStartLateness | Self::TickIntervalDeviation
+            Self::TickTotal
+                | Self::TickStartLateness
+                | Self::TickIntervalDeviation
+                | Self::MasterBusy
+                | Self::IslandBusy
+                | Self::IslandHandoff
         )
     }
 }
@@ -922,6 +944,38 @@ impl Profiler {
         self.phases[phase as usize].record(nanos);
         self.phase_durations[phase as usize] = nanos;
         self.last_lap = now;
+    }
+
+    /// 从现在起重新计 `lap`，之前这段不归任何阶段。分离驱动的岛在 tick 线程上开跑、
+    /// 主控接回岛时用：交接本身记在 `island_handoff`，不混进相邻的阶段。
+    ///
+    /// Restart `lap` timing from now; the time since the last lap goes to no
+    /// phase. Used when a detached island starts on its tick thread and when
+    /// the master takes it back: the hand-over itself goes to `island_handoff`.
+    pub(crate) fn restart_lap(&mut self) {
+        self.last_lap = self.clock.now();
+    }
+
+    /// 直接给一个阶段记一条样本。分离驱动下主控的 Director 推进和岛并行，没有可以
+    /// `lap` 的连续时间段，量好的耗时这样记进 `delivery`。
+    ///
+    /// Record one sample for a phase directly. Under the detached drive the
+    /// master's Director step runs beside the island, so its measured time is
+    /// recorded into `delivery` this way instead of by `lap`.
+    pub(crate) fn record_phase(&mut self, phase: Phase, nanos: u64) {
+        self.phases[phase as usize].record(nanos);
+        self.phase_durations[phase as usize] = nanos;
+    }
+
+    /// 这一刻从 `begin_tick` 到现在的时长。
+    pub(crate) fn tick_elapsed(&self) -> Duration {
+        self.clock.now().saturating_duration_since(self.tick_start)
+    }
+
+    /// 记一个时长指标。
+    pub(crate) fn record_duration(&mut self, metric: Metric, value: Duration) {
+        self.histogram_mut(Series::Metric(metric))
+            .record_duration(value);
     }
 
     /// 这一刻三个方块侧阶段各花了多少纳秒（划分统计用它算尾段占比）。

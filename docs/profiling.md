@@ -63,6 +63,12 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo
 | `parked_chunks` | 这一刻交付/收回之后停放表里的区块数 |
 | `compute_in_flight` | 这一刻交付/收回之后已经交给计算池、还没回来的区块任务数（上限是线程数 × 4，存盘不受上限）；内联执行器（`chunk_worker_threads = 0`）恒为 0 |
 | `compute_backlog` | 同一时刻宿主手里还没交给计算池的区块任务数（按离玩家的距离补进池子）；内联执行器恒为 0 |
+| `master_busy` | 只在分离驱动（`island_threads ≥ 1`）下记：主控线程这一刻自己干活的时间，即 `tick_total` 减去等岛交回的那段（岛的实施计划第 7 步） |
+| `island_busy` | 只在分离驱动下记：岛这一刻在 tick 线程上跑的时间 |
+| `island_handoff` | 只在分离驱动下记：交接本身，派出到 tick 线程开跑，加上岛跑完（主控自己的活也做完）到主控接着干活 |
+
+分离驱动下 `delivery` 阶段记的是和岛并行的那段里主控推进 Director 的耗时；岛在 tick 线程上
+开跑和交回主控时各重新计一次 `lap`，交接本身只进 `island_handoff`，不混进相邻的阶段。
 
 `tick_start_lateness` 量的是「每刻都比计划晚多少」，`tick_interval_deviation` 量的是
 「刻与刻之间均不均匀」：睡眠精度带来的固定 4 ms 偏差只会出现在前一项里。
