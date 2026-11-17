@@ -836,15 +836,11 @@ mod tests {
         assert!(report.contains("halo 2 out_triggers=1"), "{report}");
         assert!(report.contains("out-block minecraft:piston"), "{report}");
         assert!(
-            report.contains(
-                "halo 1 out_triggers=1 unassigned=0 out_units=1 max_distance=2 reads=0 writes=1"
-            ),
+            report.contains("halo 1 out_triggers=1 unassigned=0 out_units=1 max_distance=2 total_reads=0 total_writes=1 reads=0 writes=1"),
             "{report}"
         );
         assert!(
-            report.contains(
-                "halo 2 out_triggers=1 unassigned=0 out_units=1 max_distance=1 reads=0 writes=1"
-            ),
+            report.contains("halo 2 out_triggers=1 unassigned=0 out_units=1 max_distance=1 total_reads=0 total_writes=1 reads=0 writes=1"),
             "{report}"
         );
     }
