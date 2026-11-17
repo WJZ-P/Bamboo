@@ -3,7 +3,8 @@
 //! 官方读一条 `block_entities` 条目时按 `id` 造具体方块实体，写盘时无条件写出自己的
 //! 键（有些字段按 codec 的省略规则可省）。这里照同一份规则做「读入 → 写出」，不改变
 //! 方块实体在游戏里的行为：调用方拿返回的键覆盖建模条目，未知键仍按 D9 原样保留。
-//! 世界生成只放下方块、没有读盘条目时用 [`default_additional`] 补构造器默认值。
+//! 世界生成只放下方块、没有读盘条目时用空复合标签跑同一份 `resave_additional`；
+//! 宝库 / 幽匿那四种没有本模块的分支，由 [`default_additional`] 补构造器默认值。
 //!
 //! 字段名、默认值和 codec 的省略规则都用 `javap -c -p` 在
 //! `BaseSpawner` / `SignBlockEntity` / `SignText` / `BeehiveBlockEntity` /
@@ -94,38 +95,9 @@ const TEST_INSTANCE_OMIT: &[&str] = &["errors"];
 
 /// 世界生成放置、没有读盘条目时的构造器默认值。
 pub fn default_additional(id: &str) -> Option<Vec<(String, Tag)>> {
-    if let Some(passive) = super::passive::default_additional(id) {
-        return Some(passive);
-    }
-    let empty = Tag::Compound(Vec::new());
-    let mut fields = resave_additional(id, BlockState(0), &empty)?.fields;
-    if super::block_entity::BlockEntityKind::from_name(id).is_some()
-        || matches!(
-            id,
-            "minecraft:chest"
-                | "minecraft:trapped_chest"
-                | "minecraft:barrel"
-                | "minecraft:dispenser"
-                | "minecraft:dropper"
-                | "minecraft:chiseled_bookshelf"
-                | "minecraft:hopper"
-                | "minecraft:campfire"
-                | "minecraft:crafter"
-        )
-    {
-        return None;
-    }
-    if id == "minecraft:command_block" {
-        // 生成期命令方块的命令由游戏层命令表写；这里只补 7 个构造器键，
-        // 由 `write_default_block_entity_fields` 统一负责（不覆盖运行时表）。
-        return None;
-    }
-    // 空容器：`shelf` 写在 fields 里；其它类型由游戏层的容器表负责。
-    if id == "minecraft:shelf" {
-        fields.retain(|(key, _)| key != "align_items_to_bottom");
-        return Some(vec![("align_items_to_bottom".to_owned(), Tag::Byte(0))]);
-    }
-    Some(fields)
+    // 本模块负责的类型（含生成期无条目）都走 `resave_additional(空复合标签)`；
+    // 这里只留上一轮那四种只保留存档态实体的构造器默认值。
+    super::passive::default_additional(id)
 }
 
 /// 复合标签里的条目按名字查，同名键取最后一个。

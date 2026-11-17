@@ -239,7 +239,8 @@ gen-world: 60 chunks, 0 quart cells, 53084160 blocks, 133 block entities,
 | 类型 | 世界生成会出现 | 旧：读盘 / 生成期 | 修后：读盘 / 生成期 | 备注 |
 |---|---|---|---|---|
 | `vault`、`sculk_sensor`、`calibrated_sculk_sensor`、`sculk_shrieker` | 会 | 一致 / 一致 | 一致 / 一致 | 上一轮修好；`VibrationInfo.game_event` 现在还查注册表 |
-| `furnace`、`smoker`、`blast_furnace`、`brewing_stand`、`campfire`、`piston`、`comparator`、`crafter`、`chiseled_bookshelf`、`hopper`、`chest`、`trapped_chest`、`barrel`、`dispenser`、`dropper` | 部分会 | 一致 / 不一致 | 一致 / 一致 | 生成期没有上层容器表条目时原本缺 `Items` 等键，现由 `write_default_block_entity_fields` 之外的容器表路径补齐并纳入断言 |
+| `furnace`、`smoker`、`blast_furnace`、`brewing_stand`、`campfire`、`piston`、`comparator`、`crafter`、`chiseled_bookshelf`、`hopper` | 部分会 | 一致 / 不一致 | 一致 / 不一致 | 熔炉等 8 种生成期默认键未变；纯 `decode → encode`（没有上层容器表）时箱子 / 漏斗 / 营火 / 合成器 / 书架仍缺 `Items` 等键，真实生成路径由上层表写入，未改 |
+| `chest`、`trapped_chest`、`barrel`、`dispenser`、`dropper` | 部分会 | 一致 / 不一致 | 一致 / 不一致 | 同上：纯 `decode → encode` 缺 `Items`，真实生成路径由容器表写入 |
 | `command_block` | 部分会 | 一致 / 不一致 | 一致 / 一致 | 生成期缺的 7 键已补；运行时命令表优先 |
 | `shelf` | 部分会 | 一致 / 不一致 | 一致 / 一致 | 补 `align_items_to_bottom`（空 `Items` 也写） |
 | `ender_chest`、`jukebox`、`shulker_box`、`decorated_pot` | 会 | 不一致 / 一致 | 一致 / 一致 | 读盘时不再给这四类建空容器条目，`Items` 不再多写；运行时内容仍由容器表 / 组件补丁负责 |
@@ -257,6 +258,7 @@ gen-world: 60 chunks, 0 quart cells, 53084160 blocks, 133 block entities,
 
 `command_block` 与 `lectern` 的「一致」只针对空条目：Bamboo 的游戏层按实际表内容补键，
 非空数据另有自己的往返测试。上一轮清单里「仅生成期」列按纯 `decode → encode`（没有
-上层容器 / 命令方块表）口径判定；现在生成期缺的键都补出并在同一份测试里对照官方。
+上层容器 / 命令方块表）口径判定；本轮 `block_entity_resave` 的 23 种类型（含命令方块 /
+架子 / 熔炉）都补出了生成期缺键并逐值对照官方，其余纯容器类型仍按上层表口径看待。
 「有意的差别」见上面的已知限制：只有条目里带该类型 codec 不认识的键时，Bamboo 仍
 按 D9 原样保留、官方丢掉，其余都逐键一致。

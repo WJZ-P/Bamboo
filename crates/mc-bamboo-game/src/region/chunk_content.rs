@@ -576,16 +576,6 @@ fn write_sign_text(entry: &mut ModeledBlockEntity, content: &mc_bamboo_core::sig
 
 fn write_default_block_entity_fields(entry: &mut ModeledBlockEntity, id: &str) {
     match id {
-        // 生成期没有命令方块表时，补出官方 `BaseCommandBlock.save` 的 7 个默认键。
-        "minecraft:command_block" => {
-            put_string(entry, "Command", String::new());
-            put_int(entry, "SuccessCount", 0);
-            put_bool(entry, "TrackOutput", true);
-            put_bool(entry, "UpdateLastExecution", true);
-            put_bool(entry, "powered", false);
-            put_bool(entry, "conditionMet", false);
-            put_bool(entry, "auto", false);
-        }
         "minecraft:hopper" => put_int(entry, "TransferCooldown", -1),
         "minecraft:furnace" | "minecraft:blast_furnace" | "minecraft:smoker" => {
             put_int(entry, "cooking_time_spent", 0);
