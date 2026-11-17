@@ -591,6 +591,20 @@ impl DirectorHost {
         self.parked = 0;
     }
 
+    /// 测试专用：生成期每区块状态还剩多少条
+    /// （`partials`、`feature_deltas`、`generated_light`、`generated_structures`）。
+    /// Test-only: leftover per-chunk generation state (partials, feature
+    /// deltas, generated light, generated structures).
+    #[cfg(test)]
+    pub(crate) fn generation_leftovers(&self) -> [Vec<ChunkPos>; 4] {
+        [
+            self.partials.keys().copied().collect(),
+            self.feature_deltas.keys().copied().collect(),
+            self.generated_light.keys().copied().collect(),
+            self.generated_structures.keys().copied().collect(),
+        ]
+    }
+
     /// 测试专用：直接改预算，不碰进程级环境变量。
     #[cfg(test)]
     pub(crate) fn set_budget(&mut self, budget: MailBudget) {
@@ -1546,7 +1560,14 @@ impl DirectorHost {
             ChunkOutcome::Decoded(Ok(column)) => TaskResult::Decoded { column },
             ChunkOutcome::Decoded(Err(error)) => TaskResult::BadChunk { error },
             ChunkOutcome::Generated { stage, output } => {
-                self.merge_generated(pos, &output);
+                // 取消时已经在跑的生成：Director 不再认它，`Forgot` 也可能已经清过
+                // 这个位置，合并进来就再没人清。不合并；重派时纯函数给出同样结果。
+                // A generation already running when cancelled: the Director no
+                // longer accepts it and `Forgot` may have cleared this position
+                // already, so merging would leak. Skip; a re-run is identical.
+                if !cancelled {
+                    self.merge_generated(pos, &output);
+                }
                 TaskResult::Generated {
                     stage,
                     column: output.column,

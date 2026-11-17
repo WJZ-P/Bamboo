@@ -67,6 +67,9 @@
 | 23 | 同上：单线程每中心 CPU（17） | 28.5–29.6 ms | 16.7–17.1 ms | 1.7× |
 | 24 | 同一键只算一次：4 线程每中心 CPU（17） | 34.0–34.6 ms | 19.0–20.5 ms | 1.7× |
 | 24 | 同上：8 线程吞吐 / `cross_thread_duplicates`（17） | 228–240 中心/s / 172–184 | 267–273 中心/s / 0 | 1.15× |
+| 25 | 真实 Director 流水线，开结构，每交付区块计算池 CPU，4 / 8 线程（18，地物结果跨线程共享 + 补格修正） | 72.2 / 97.4 ms | 52.0 / 62.4 ms | 1.4× / 1.6× |
+| 25 | 同上：每秒交付区块，4 / 8 线程（18） | 47.4 / 41.4 | 62.5 / 70.6 | 1.3× / 1.7× |
+| 25 | 同上，关结构：每交付区块计算池 CPU，8 线程（18） | 60.7 ms | 39.5 ms | 1.5× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -1332,6 +1335,8 @@ cargo test --release -p mc-bamboo-blocks block_entity_sleep::idle_hopper_phase_b
 | 活塞推实体 | 没做 | 移动中的活塞按方块实体算出的形状挡住实体（`99c91d1`、`4864a49`），但官方 `PistonMovingBlockEntity` 的 `moveCollidedEntities` / `moveStuckEntities` / `fixEntityWithinPistonBase` 三段没实现：掉落物、下落方块和点燃的 TNT 不会被活塞推动，也不会被粘液块、蜂蜜块带着走。README「已知限制」有完整说明 |
 | `possibleBiomes` 接进游戏时的口径 | 现在对拍两边都用「全部群系」 | `ChunkStatusTasks` 的正式流程用周围 3×3 区块群系调色板的并集；这只影响 `BiomeCondition` 的静态优化，逐格判定仍走 `BiomeManager`。地表和雕刻器接进游戏时要改成 3×3 并集并重新对拍，见 `docs/worldgen.md` |
 | 容器引用缓存、信号查询缓存（设计稿 9.5 第 2、3 条） | 没做 | 漏斗的邻居 / 上方容器现在每次 `tryMoveItems` 重查；同一刻里同一位置的 `getSignal` 也不缓存。方块实体休眠（9.5 第 1 条）已经做完，这两条和红石线实验性算法仍按原决定先不做 |
+| 每条计算线程第一次生成的一次性开销 | 每条线程约 1 s CPU（18.2 结论 4）：各自建 `Worldgen`（24 ms 解析）、`Generator`、`WorldStructureState`、解析结构模板 | 没做。长跑的服务器每线程只付一次，但 8 线程冷启动时 terrain 阶段多出约 15 s 墙钟之和。做法是把这些只读状态改成全进程共用一份（同 14 节的地形缓存），要先确认它们真的只读 |
+| 地物同格冲突的合并规则 | 18.10：官方逐中心输出 + 游戏合并路径 0 不一致；和官方共享 ProtoChunk 的先后模型比，8 块里每块差 100–1 000 格，最大一类是同格冲突（游戏取状态 ID 大的，官方先写的赢） | 等拍板：改成「按中心固定先后、先写的赢」，还是保持现状只记录。「看到别人写过的方块」那类差异在干净视图模型下改不掉 |
 
 （2026-11-14 按实现更新：本文 7g.5 / 7g.6 / 7i / 9.1、`docs/worldgen.md`「还没做」、README「已知限制」；合并提交 `edce3ab`、`fa91b84`、`672cb97`、`69cd662`、`4864a49`、`ae76868`）
 
@@ -2371,6 +2376,9 @@ CARVERS 地形，278 × 10.8 ms / 144 ≈ 20.9 ms/中心，和实测多出的 16
    重算 8 个邻居中心 —— 这要改「增量集合不依赖邻居任务时序」的保证，属于
    Director 任务结构改动，**必须先经主代理确认**，本轮没碰。
 
+（后续：第 18 节重量后发现「取视图贵」其实是替别人算地形，方向 1 早已成立；方向 2 的
+设计和实测见 18.6 / 18.7。）
+
 ### 15.6 逐位不变与改坏确认
 
 `chunkgen --through carvers/features`、`gen-world`（CARVERS / `--through features`）、
@@ -2634,3 +2642,417 @@ panic 处理按标准库语义，不做补偿写入：闭包 panic 后 `OnceLock
   不再让 `neighbor_spills_into` 重算 8 个邻居中心）：15.5 量到 `build_view` 累计
   23.5 s、`run_features` 16.6 s，确实是剩下最大的一块，但这会改「写增量集合
   不依赖邻居任务时序」的保证，按分工先报主代理，本轮没动。
+
+---
+
+## 18. 真实 Director 流水线里地物阶段的重复工作：重量、一个确定性 bug、方向 2 的设计（2026-11-16）
+
+代码：`crates/mc-bamboo-game/src/worldgen_profile.rs`（默认关掉的测量插桩）、
+`examples/director_pipeline_bench.rs`（`World::new` + 强加载票 + 不睡节拍器地
+tick 到全部交付）、`worldgen_features.rs` / `worldgen_light.rs` / `worldgen.rs`
+里的计时与计数点。和第 15 节不同，**这里跑的是 `wg-perf` 之外的真实路径**：
+结构 / 群系 / terrain / features / light / 完工组装全由 Director 派任务、计算池
+执行、世界线程合并增量并交付。
+
+### 18.1 口径
+
+```sh
+cargo build --release -p mc-bamboo-game --example director_pipeline_bench
+./target/release/examples/director_pipeline_bench --threads 4            # 开结构，先暖池
+./target/release/examples/director_pipeline_bench --threads 4 --no-structures
+./target/release/examples/director_pipeline_bench --threads 4 --cold     # 不暖池
+```
+
+* `view_distance=4`、`MailBudget { deliveries: 0, reclaims: 0 }`、种子 2026、强加载
+  `(0..5)×(0..5)` 25 个中心，票表把周围一圈带到 FULL，**实际交付 81 个区块**；
+  「每交付区块」都除以 81。随机刻关掉，池子排空后再跑 4 刻。
+* **每个线程数单独起一个进程**，A/B 二进制同轮交替（奇数轮正序、偶数轮倒序），
+  三轮取范围和中位数。上一版（提交 `108ae2a1` 里的旧 18.2）是一个进程里连着跑
+  1/2/4/8，计算池每次新建、线程本地状态全冷，见 18.2 末尾。
+* **先暖池**：同一个 `World` 先在 `(+4096, +4096)` 跑一片同样大小的区域，再清掉全进程
+  地形 / 地物缓存和计数，量的是稳态。每条计算线程第一次用时要各自建 `Worldgen`
+  （24 ms 解析）、`Generator`、`WorldStructureState`、结构模板表，这在长跑的服务器
+  里每线程只付一次；`--cold` 保留这笔开销。
+* **CPU 用「计算池 CPU / 交付区块」**：进程 `getrusage` 减去世界线程自己的
+  `CLOCK_THREAD_CPUTIME_ID`。测量循环不睡觉，世界线程等池子时空转，整段墙钟几乎
+  都记成世界线程 CPU（1 线程 4.1 s ≈ 墙钟 4.2 s），混进去会把「每交付区块 CPU」
+  抬高一倍且和墙钟同涨同落。
+* 阶段计时（terrain / features / light / `build_view` / `run_features`）是各计算线程
+  墙钟之和，包含在 `OnceLock` 上等别的线程算同一个键和被别的进程抢核的时间，只用来
+  看比例；可比的总量是计算池 CPU。机器上同时有另外两个代理在编译，墙钟有抖动。
+
+### 18.2 重量：main 上的基线（开结构，暖池，三轮）
+
+「main」是 `main` 的生产代码 + 默认关闭的插桩（`2c6ec5a3`），地物结果缓存仍是
+`thread_local`。
+
+| 线程 | 交付/秒 | 计算池 CPU/交付区块 | terrain | features | light | `build_view` | `run_features` |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 19.26（18.92–20.61） | 49.0 ms（46.8–49.2） | 0.35 s | 3.32 s | 0.36 s | 1.45 s | 1.30 s |
+| 2 | 24.28（23.67–32.89） | 64.9 ms（56.8–66.4） | 0.64 s | 5.16 s | 0.51 s | 1.74 s | 2.51 s |
+| 4 | 47.41（44.23–50.18） | 72.2 ms（68.9–74.4） | 1.16 s | 4.37 s | 0.36 s | 1.16 s | 2.57 s |
+| 8 | 41.42（38.47–46.57） | 97.4 ms（93.2–99.5） | 2.20 s | 5.39 s | 0.41 s | 1.17 s | 3.62 s |
+
+| 线程 | 快照命中（`snapshot_rate`） | 地形缓存命中率 / 现算 | `cached_feature_run` 命中率 | `run_features` 调用 | `build_view` 调用 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.487 | 0.887 / 216 | 0.813（527 / 648） | 202 | 121 |
+| 2 | 0.491 | 0.921 / 214 | 0.657–0.678 | 290–303 | 209–222 |
+| 4 | 0.512 | 0.942 / 213–215 | 0.458–0.519 | 393–432 | 312–351 |
+| 8 | 0.484 | 0.958 / 212–216 | 0.262–0.281 | 547–559 | 466–478 |
+
+每个线程数都一样：`features` 阶段 81 次（只有交付的 81 个区块跑这一步）、
+`cached_feature_run` 648 次 = 81 × 8 个邻居中心、**121 个不同中心**（11×11，
+外圈 40 个只被「重算邻居」问到），4 个角上的中心只被问 1 次，最多 8 次。
+
+结论：
+
+1. **一个区块的地物结果被邻居各自重算，确实是同一个 `cached_feature_run` 键的查询**；
+   1 线程下 121 次现算正好每个中心一次，多线程掉命中率是因为缓存是 `thread_local`。
+2. **`build_view` 本身不贵，贵的是它替别人算的地形。** `sample` 1 线程 9×9 强加载：
+   `build_view` 下的 1053 个样本里 1031 个在 `cached_terrain` 的 `OnceLock` 初始化里，
+   也就是「谁先要这一格谁算地形」。地形缓存现算总数 13×13 = 169 才是下界
+   （外圈 40 个中心的地物要它们自己的 3×3）。
+3. 15.5 的「`build_view` 23.5 s > `run_features` 16.6 s」已经过期：带 Beardifier 的键
+   进缓存（`70ceb9c1`）、同键只算一次（`6c411057`）之后，`build_view` 稳定在
+   1.2–1.7 s。
+4. **旧 18.2 的数字主要是冷启动**。同一批二进制不暖池（`--cold`，进程 CPU 含世界线程
+   空转）：1/2/4/8 线程 134–139 / 149–152 / 193–201 / 300–317 ms，terrain 阶段之和
+   1.8 / 4.0 / 7.7 / 16.9 s，**每多一条线程多约 2 s**；暖池后 terrain 只有
+   0.35 / 0.64 / 1.16 / 2.20 s。多出来的是每条线程第一次建 `Worldgen` / `Generator` /
+   `WorldStructureState` / 解析模板（`sample` 里 `WorldStructureState::new`、
+   `StructureTemplate::parse`、NBT 解码、`climate::sort_nodes`），不是地物重复。
+   这笔一次性开销（每线程约 1 s CPU）是另一个可以省的点（让这些只读状态全进程共用），
+   不在本节范围。
+
+### 18.3 方向 1：terrain 阶段结果进全进程地形缓存 —— 早就成立，没有改
+
+核对代码：`generate_terrain_stage` 调 `cached_generate_chunk_with_structures`，按
+`beardifier_for` 分到 `cached_beardified_chunk` / `cached_generate_chunk`，两类键由
+`(seed, settings, x, z, has_beardifier)` 区分；返回的就是缓存里的 `Arc`，放进
+`GenerateOutput.terrain`，`merge_generated` 再把**同一个 `Arc`** 插进 `partials`。
+没有第二份方块数组，`partials` 的生命周期也没变（`Task::Assemble` / `Forgot` 时移除）。
+15.5 说的「`merge_generated` 只放进 `self.partials`」是 `0cbb3e86` 之前的代码。
+量到的地形缓存现算数（169，修完 18.4 之后）已经等于 13×13 下界，再做什么也省不下
+地形。按「没有可测收益就不改」，这一项不动生产代码。
+
+### 18.4 顺带发现并修掉的确定性 bug：补格读了不带 Beardifier 的地形
+
+`resolve_view`（features 阶段）和 `resolve_shared_view`（light 阶段）在 Director 没给
+某一格快照时用 `cached_generate_chunk` 现算 —— **不带 Beardifier**；而 terrain 阶段和
+`build_view` 给的都是带 Beardifier 的那份。哪一格有快照取决于调度（18.6.1 说明
+Director 的依赖记录根本不真正跑邻居），所以结构附近 1 线程和 N 线程会生成不同的方块。
+
+复现（临时测试，种子 42，trial_chambers 起点 (17,7) 周围强加载 (15..=19)×(5..=9)，
+1 / 4 / 4 / 8 线程各跑一遍，和纯函数结果逐格比）：22 处「区块 × 线程数」和纯函数
+不一致，例如 (16,6) 1 线程差 2 格、两次 4 线程分别差 88 和 2 格，(19,9) 三种线程数
+都差 97 格；两次 4 线程之间也不一样。把补格改成和 terrain 阶段同一个入口
+`cached_generate_chunk_with_structures` 后全部 0。
+
+修法（`ca1f30d2`）：两处补格都走 `cached_generate_chunk_with_structures`。新增测试：
+
+* `world::staged_tests::director_matches_pure_features_near_structures`：上面那片
+  缩成 3×3，1 / 4 线程交付的方块和纯函数（`build_view` 3×3 + 8 个邻居中心溢出，
+  规范序合并）逐格相同，1 / 4 线程光照相同；
+* `view_fallback_matches_the_terrain_stage_snapshot`（features）和
+  `light_view_fallback_matches_the_terrain_stage_snapshot`（light）：无快照时补的格子
+  和 terrain 阶段交回的快照逐格相同。（features 那条随 α 删掉了：features 阶段不再读
+  邻居快照、也就没有补格，见 18.9；light 那条还在。）
+
+改坏确认：把两处补格临时改回不带 Beardifier，三条测试全部失败（Director 那条报
+「(16,6) 1 线程与纯函数不同」），还原后通过。副作用是省掉了 47 次多余的不带
+Beardifier 地形（地形缓存现算 216 → 169），1 线程计算池 CPU 也跟着降了一点（18.7）。
+
+`one_and_four_threads_generate_identical_feature_blocks`（种子 2026、原点 3×3）没抓到
+它，是因为那片 3×3 及其外圈没有改地形的结构；Java 对拍全走 `build_view`，也不经过
+`resolve_view`。
+
+### 18.5 上一位做的「地物结果跨线程共享」（`108ae2a1`）：核对后保留
+
+`cached_feature_run` 从 `thread_local` 改成进程级 16 分片缓存，键
+`(seed, settings, x, z, generate_structures)`，同键用 `OnceLock` 占位只算一次，按实测
+字节 64 MiB 封顶、按插入顺序淘汰；条目和占位共用同一个 `Arc`。核对：
+
+* 等待方也会走到提交那段，但有 `!entries.contains_key` 挡着，字节不会重复计；
+  失败的占位会被移除；淘汰时占位一起删。都是纯函数结果，淘汰只影响速度。
+* 上一位没加测试，本轮补了 `feature_cache_hit_equals_a_fresh_run`（命中与现算逐条
+  相同）和 `concurrent_feature_runs_share_one_computation`（6 条线程同时要同一个中心，
+  拿到的是同一个 `Arc`），都用各自独有的种子，不受并行测试影响。改坏确认：命中时返回
+  `(cx+1, cz)` 的结果、等待方不共用占位，两条都失败。
+* `worldgen_profile` 的单测原来会在开关打开时读全局计数，同进程别的测试并行走插桩点
+  就会失败；改成只读测试自己的指标和自己种子下的中心（`3dbf476a`）。
+
+效果见 18.7：所有线程数下 `run_features` 都是 202 次（81 次本中心 + 121 个中心各一次），
+4 / 8 线程计算池 CPU 72.2 / 97.4 → 55.3 / 67.6 ms。**但 Java 对拍不经过
+`cached_feature_run`**：`gen-world` / `structure-e2e` 用 `game_features_with_mask`
+（`build_view` + 单次 `run_features`），`structure-pipeline` 只比起点 / 引用 / CARVERS。
+邻居溢出合并的正确性目前只有游戏内测试（上面几条和 `one_and_four_threads_…`）守着。
+
+### 18.6 方向 2 的设计：减少 / 去掉「以 8 个邻居为中心各跑一遍地物」（已按 α 实施，见 18.9）
+
+#### 18.6.1 这条保证保护的是什么
+
+Bamboo 的模型：一个交付区块 C 的最终方块是纯函数
+
+```
+F(C) = CARVERS_beard(C) + 规范序合并 {
+         C 自己的地物写（以 C 为中心、9 格都是干净 CARVERS_beard 的视图），
+         8 个邻居 N 的地物溢进 C 的写（各自以 N 为中心、同样干净的视图） }
+```
+
+`neighbor_spills_into` 让 C 的 features 任务**自己**把后一项算齐。去掉它、只靠邻居
+任务交回的 `neighbor_deltas`，会在三种情况下出错：
+
+1. **邻居的 features 根本不跑。** `Director::ensure_dependencies` 给依赖位置建的是
+   「记账记录」：`stage` 直接设成所需阶段、`dependency: true`，不派任何任务；`drive`
+   派任务时只查写范围是否相交，**不查邻居是否真的到了所需阶段**。所以交付 9×9 时，
+   外圈 11×11 的 40 个位置永远不跑 features（实测 `feature_stage_calls = 81`），它们
+   溢进边缘区块的写只能靠重算。这一类是**确定的缺方块**（和一次性生成对不上）。
+2. **邻居的 features 跑了，但回执晚于 C 的 `Task::Assemble`。** 官方靠 `LIGHT`
+   要求半径 1 的 `INITIALIZE_LIGHT`（其累积依赖就是邻居 FEATURES 已完成）排出先后；
+   Bamboo 的这条要求同样只是记账。时序：
+   `C features → C initialize_light / light / spawn → Assemble(C) 取走并删掉
+   feature_deltas[C] → N 的 features 回执到 → N→C 的写落进一张没人再读的表`。
+   哪条回执先到随线程数和优先级变，于是 **1 线程和 N 线程逐字节不同**。
+3. **邻居在别的时候已经完工。** 从盘上读回的 FULL 邻居、被收回后又重新生成的 C：
+   邻居不会再跑 features，Bamboo 也不存半成品的待落写增量；没有重算，C 就缺这些写，
+   结果取决于这个存档的加载历史。
+
+#### 18.6.2 是不是同一次 `cached_feature_run` 的缓存命中
+
+是（18.2 结论 1）：648 次查询只有 121 个不同键。现在（`108ae2a1` 之后）全进程共享，
+每个中心只算一次；**剩下的重复是 C 自己的 features 任务**：它用 `resolve_view` +
+`run_features` 再跑一遍以 C 为中心的地物（81 次），而这正是邻居们已经通过
+`cached_feature_run(C)` 算过的同一件事。所以问题既不在取视图（18.2 结论 2），也不在
+邻居重算，而在「本中心那一遍没走共享缓存」。另外 `neighbor_deltas` 全是重复：每个
+目标区块都会自己重算同样的写；晚到的那些落进已经组装过的位置，变成没人读的条目
+（临时探针：2 线程强加载 3×3、交付 49 个区块后 `feature_deltas` 里有 70 个键 / 49702 条，
+都是外圈或已组装的位置；收回后才被 `Forgot` 清掉）。
+
+#### 18.6.3 官方怎么做（26.3 字节码，`javap -c -p`）
+
+* `ChunkPyramid.<clinit>` 里 `GENERATION_PYRAMID` 的 FEATURES 那一步（`lambda$static$5`）：
+  `addRequirement(STRUCTURE_STARTS, 8)`、`addRequirement(TERRAIN, 1)`、
+  `blockStateWriteRadius(1)`；LIGHT（`lambda$static$7`）：`addRequirement(INITIALIZE_LIGHT, 1)`。
+  `ChunkStep$Builder(status, parent)` 把 `directDependenciesByRadius[0]` 设成
+  `parent.targetStatus`，`addRequirement(s, r)` 把下标 `0..=r` 取 `ChunkStatus.max`。
+  所以 C 的 LIGHT 要求 8 个邻居到 INITIALIZE_LIGHT，而 INITIALIZE_LIGHT 的父阶段是
+  FEATURES：**官方在 C 点灯之前，8 个邻居的 features 都已真正跑完**，外圈区块也真的
+  生成到 FEATURES（地形要到 13×13）。
+* `ChunkStatusTasks.generateFeatures`：`new WorldGenRegion(level, cache, step, chunk)` →
+  `ChunkGenerator.applyBiomeDecoration(region, chunk, structureManager.forWorldGenRegion(region))`
+  → `Blender.generateBorderTicks` → `completedFuture(chunk)`。`WorldGenRegion` 构造器把
+  `step.blockStateWriteRadius()` 存进 `writeRadius`，`isWithinWriteZone(x, z)` 判
+  `|centerChunkX - x| <= writeRadius && |centerChunkZ - z| <= writeRadius`，
+  `ensureCanWrite` 不在范围内就不写。写直接落进共享的 `ProtoChunk`。
+* `blockStateWriteRadius` 在 26.3 里只被 `WorldGenRegion` 读（`ChunkMap` /
+  `ChunkGenerationTask` / `GenerationChunkHolder` 的字节码里都没有它）。上一版 18.5.3
+  说「调度器用它把写范围相交的 FEATURES 排成不并发」字节码里找不到依据，已删；
+  Bamboo 的 `write_ranges_overlap` 是自己加的排他。
+
+**结构差**：官方 = 真依赖 + 共享可变 `ProtoChunk`，C 的地物会看到先跑完的邻居写过的
+方块，结果和邻居的生成先后有关；Bamboo = 记账依赖 + 不可变 CARVERS 快照 + 每个中心
+看干净视图 + 写增量规范序合并，结果和先后无关（对拍也是「单中心、干净 3×3」）。
+Bamboo 要的保证是 F(C) 与调度无关，不是复刻官方的先后。
+
+#### 18.6.4 候选方案
+
+数字是 18.7 的实测：A 是现状（`108ae2a1` + 18.4 修复）；α 做了**原型**（未提交，
+`director_matches_pure_features_near_structures`、`one_and_four_threads_…` 等
+`staged_tests` 全过）后同轮实测。
+
+| 方案 | 做法 | 收益（开结构，1/2/4/8 线程） | 确定性 | 要改的文件 |
+|---|---|---|---|---|
+| **α：本中心也走共享缓存，不再发 `neighbor_deltas`**（推荐） | `FeatureRun` 增加中心自己的写（`center_writes`，放进 `deltas[CENTER]`）；`generate_features_stage` 改成取 `cached_feature_run(C)` + 8 个邻居的溢出，只交回 `(C, into_center)`；不再调 `resolve_view` / `run_features`，不再发给邻居的增量 | `run_features` 202 → 121（每个中心恰好一次）；计算池 CPU/交付 43.5 / 46.6 / 52.0 / 62.4 → **37.0 / 39.0 / 43.8 / 55.1 ms**；交付/秒 21.0 / 40.2 / 62.5 / 70.6 → **24.6 / 48.6 / 76.0 / 79.7**；关结构 35.8 / 36.3 / 36.7 / 39.5 → 30.8 / 31.2 / 31.7 / 37.2 ms；`feature_deltas` 不再有孤儿条目 | 每个交付区块按构造等于 F(C)，与线程数、到达顺序、加载历史都无关（三种情况都覆盖）；比现状更强：C 自己那一遍也不再依赖快照 | 只有 `worldgen_features.rs`（+测试）。Director、`director_host.rs`、`pyramid` 不动；features 任务带的邻居快照变成不用（可以留着，只是 `Arc` 克隆） |
+| β：依赖做实（官方式先后） | `ensure_dependencies` 真的给依赖位置派到所需阶段的任务、`drive` 等邻居真的到阶段（回执已合并）再派；C 用邻居交回的增量，去掉重算 | 地物次数和 α 一样（外圈 40 个仍要跑，官方也跑）；另要给外圈派 terrain/features 任务、存它们的 `partials`；第 3 种情况（盘上邻居、重新生成）仍要重算兜底。CPU 不会比 α 少 | 先后由依赖保证，但改动面大（撤票、代数变化、读盘快路径、优先级），漏一处就回到 18.6.1 的时序问题 | `director/state.rs`、`pyramid.rs`、`director/tests.rs`、`director_host.rs`、`worldgen_features.rs` |
+| γ：官方式共享可变视图 | 3×3 改成可写共享状态，features 直接写邻居 | 省掉增量数组和重放 | C 会看到邻居先写的方块 —— 结果随先后变，**按设计就不再 1/N 线程逐字节一致**；还要锁 | `director_host.rs`、`chunk_jobs.rs`、`worldgen_features.rs`、`region/` 等 |
+
+只去掉 `neighbor_deltas`、不动本中心那一遍是 α 的子集：省掉孤儿条目和世界线程的
+合并 / 排序，但 CPU 基本不变。
+
+α 的风险和要注意的：
+
+* 缓存条目变大：多存中心自己的写（`center_writes` 的条数），仍在 64 MiB 封顶内，
+  淘汰后重算结果相同。
+* 将来 Director 路径要接地物生成的方块实体（现在 `generate_features_stage` 丢弃
+  `FeatureResult.block_entities`），`FeatureRun` 也得带上中心那份。
+* features 阶段不再读 Director 的快照，`pyramid::neighbor_view(Features)` 保留（它对应
+  官方依赖表），宿主照常附 `Arc`，不会出错；要不要顺手不附，见下面的问题 3。
+
+**请主代理确认**：(1) 按 α 改 `generate_features_stage`（含不再发 `neighbor_deltas`）；
+(2) 保留 `108ae2a1` 的全进程地物缓存（α 依赖它）；(3) features 任务的邻居快照是留着
+（零风险）还是在宿主里不再附（省一点世界线程工作，要动 `director_host.rs`）。
+
+### 18.7 改前改后（开结构，暖池，三轮同轮交替；关结构两轮）
+
+计算池 CPU / 交付区块（ms），括号是范围：
+
+| 线程 | main | A（`108ae2a1`） | 现状（A + 18.4） | α 原型 |
+|---:|---:|---:|---:|---:|
+| 1 | 49.0（46.8–49.2） | 48.1（46.9–48.5） | 43.5（42.1–51.7） | 37.0（35.9–43.0） |
+| 2 | 64.9（56.8–66.4） | 51.2（50.4–51.2） | 46.6（45.6–47.0） | 39.0（38.7–39.9） |
+| 4 | 72.2（68.9–74.4） | 55.3（55.0–58.4） | 52.0（51.1–62.4） | 43.8（43.1–46.3） |
+| 8 | 97.4（93.2–99.5） | 67.6（66.3–75.1） | 62.4（59.5–68.5） | 55.1（53.3–57.9） |
+
+每秒交付区块：
+
+| 线程 | main | A | 现状 | α 原型 |
+|---:|---:|---:|---:|---:|
+| 1 | 19.3（18.9–20.6） | 19.6（19.4–20.4） | 21.0（13.5–22.8） | 24.6（17.0–26.5） |
+| 2 | 24.3（23.7–32.9） | 37.8（35.8–38.4） | 40.2（38.0–41.4） | 48.6（47.0–49.0） |
+| 4 | 47.4（44.2–50.2） | 61.2（54.6–62.4） | 62.5（43.1–64.4） | 76.0（71.6–77.8） |
+| 8 | 41.4（38.5–46.6） | 65.8（50.8–67.5） | 70.6（60.1–72.8） | 79.7（75.6–82.0） |
+
+关结构（`--no-structures`，两轮）：计算池 CPU 35.8 / 41.0 / 49.8 / 60.7（main）→
+35.8 / 36.3 / 36.7 / 39.5（现状）→ 30.8 / 31.2 / 31.7 / 37.2（α 原型）ms；
+交付/秒 26.0 / 46.1 / 63.1 / 57.4 → 26.1 / 52.1 / 86.2 / 98.7 → 30.4 / 58.8 / 95.9 / 96.4。
+
+读法：main 的「每交付区块 CPU 随线程数涨」几乎全是 `thread_local` 地物缓存在不同线程上
+重复跑同一个中心；现状把它压平（关结构 4 / 8 线程只比 1 线程多 1–4 ms）。α 再去掉
+每个交付区块的那次本中心地物（约 6 ms）。现状 1 线程第一轮整体偏慢（墙钟 6.0 s、
+计算池 CPU 51.7 ms，另两轮 3.6–3.9 s、42–43 ms），是那一刻机器上别的编译抢核，
+所以范围宽；比较看中位数。
+
+### 18.8 对拍与改坏确认（现状 `534cb224`）
+
+`cargo run --release -q -p mc-bamboo-vanilla -- <子命令>`：
+
+| 子命令 | 干净跑 | 改坏确认 |
+|---|---|---|
+| `chunkgen java --seeds 2 --chunks 4 --through features --salt 9` | 7077888 格 0 不一致 | —（不经过改动的代码） |
+| `gen-world java --seeds 2 --chunks 2 --salt 9` | 393216 格 0 | — |
+| `gen-world java --through features --seeds 2 --chunks 2 --salt 987654321` | 3538944 格 0 | `--break-self-test`（salt 9）报 4 处 |
+| `gen-world java --through features --structures --seeds 2 --chunks 2 --salt 9` | 3538944 格 0 | — |
+| `gen-world java --through features --structures --seed 42 --chunk 17 7` | 884736 格、313 个官方结构件 0 | — |
+| `structure-e2e java` | 0 | `--break-structure minecraft:jigsaw` 报 41070 处 |
+| `structure-pipeline java` | 28 行 / 2752512 格 0 | `--break-self-test` 报 28 处 |
+| `gen-light java --scenes 4 --seed 99` | 786432 格 0 | `--break-self-test` 报 4 处 |
+
+本节改到的代码（补格、全进程地物缓存）都不在 Java 对拍的路径上，它们的改坏确认是
+18.4 / 18.5 里的游戏内测试；`one_and_four_threads_generate_identical_feature_blocks`
+与 `cargo test -p mc-bamboo-game`（958 通过）都过。
+
+### 18.9 α 实施（`24baf2bf`）
+
+按 18.6.4 的 α 改，只动 `worldgen_features.rs`：
+
+* `FeatureRun.deltas[CENTER]` 存中心自己的地物写（`center_writes`，相对干净 CARVERS
+  不同的格子），8 个邻居格照旧是溢出；`compute_feature_run` 负责算它。
+* `generate_features_stage` 不再调 `resolve_view` / `run_features`：本区块的写 =
+  `cached_feature_run(C).deltas[CENTER]` + 8 个邻居中心溢进 C 的写（同一份全进程缓存），
+  任务只交回 `(C, 增量)` 一条，**不再给邻居发增量**。中心快照只用来造交回的
+  CARVERS 盒子（没有就现算同一份）。
+* 宿主照常附邻居快照，`director_host.rs` / Director 不动（`island-master` 之后要改它们）；
+  `generate_features_stage` 的参数改名 `_neighbors`，注释写明 features 任务现在不读它。
+  `resolve_view` / `terrain_lookup` 随之删掉，`view_resolve_ms` / `view_terrain_misses`
+  两个插桩指标在 features 上恒为 0。
+
+正确性：每个交付区块按构造等于 F(C)（18.6.1），和线程数、回执先后、邻居是否从盘上
+读回都无关。`staged_tests` 全过；改坏确认：把中心自己的写换成空表，
+`director_matches_pure_features_near_structures` 报「(16,6) 1 线程与纯函数不同」。
+`feature_cache_hit_equals_a_fresh_run` 加了一条：缓存条目的中心格等于对干净地形逐格
+比出的那份。
+
+改前（`888331b5` 的 `worldgen_features.rs`，其余代码相同）/ 改后（HEAD），开结构三轮、
+关结构两轮，同轮交替，每个线程数单独一个进程，暖池。计算池 CPU / 交付区块（ms）：
+
+| 线程 | 改前 | 改后 | 交付/秒 改前 | 交付/秒 改后 |
+|---:|---:|---:|---:|---:|
+| 1 | 43.7（42.6–44.4） | **36.9**（36.4–37.3） | 21.7（18.8–21.9） | **25.1**（24.8–26.0） |
+| 2 | 46.5（45.5–47.8） | **39.6**（39.1–40.6） | 39.8（38.3–41.3） | **47.3**（44.3–47.8） |
+| 4 | 50.9（50.6–52.4） | **44.8**（43.8–46.1） | 64.3（62.7–66.2） | **71.2**（65.5–72.6） |
+| 8 | 63.9（59.6–65.7） | **58.1**（52.7–58.9） | 65.3（64.9–70.2） | **75.0**（70.1–85.9） |
+
+关结构：改前 37.0 / 36.0 / 37.5 / 39.2 → 改后 31.3 / 31.3 / 34.9 / 31.4 ms
+（4 线程改后一轮 38.8 是别的编译抢核，另一轮 30.9）；交付/秒 23.7 / 51.3 / 79.0 / 86.5
+→ 29.9 / 57.8 / 75.9 / 118.2。
+
+所有线程数下 `run_features` 202 → **121 次**（每个中心恰好一次），`features` 阶段墙钟
+之和 2.85 → 2.33 s（1 线程）。和 18.7 的原型一致。main 列见 18.7（这次没有重量：main 的
+基准程序没有暖池和「计算池 CPU」这一列，换上新基准又要把 `worldgen_light.rs` 一起回退，
+不是同一份对照）。
+
+### 18.10 邻居溢出合并的整块对拍（`feature-merge`）
+
+`mc-bamboo-vanilla feature-merge java [--structures]`。游戏侧走**真实 Director 流水线**
+（`World::new` + 2 条计算线程 + 强加载目标区块，读交付后的方块，新加的
+`World::chunk_blocks_unpaced`）；官方侧 `ChunkgenOracle.java --merge-neighbors` 造 5×5
+个跑到 CARVERS 的 ProtoChunk（带结构时网格半径 10，先跑官方起点 / 引用，5×5 各带自己的
+Beardifier），以目标 C 和 8 个邻居为中心各跑一次官方 `applyBiomeDecoration`，`runs`
+必须是 9。两种比法：
+
+* **`isolated`（验收，必须 0）**：每个中心在干净 3×3 上跑（跑完把 5×5 的段、高度图、
+  方块实体表还原），交回它写进 C 的格子和最终状态（中心自己按「和干净地形不同」，
+  邻居按 setBlock 落点并上和干净地形不同的格子 —— 矿石走 `BulkSectionAccess` 不经过
+  setBlock）。Rust 侧按游戏的规范序规则合（同一格取状态 ID 最大的那条），和 Director
+  交付的整块逐方块比，另外逐个来源比写集。
+* **`center-first` / `center-last`（只列出）**：9 个中心按先后写进同一批共享 ProtoChunk，
+  后跑的看得到先跑的写 —— 官方真实服务端的语义，先后由调度决定。
+
+默认目标由 `--scan`（只跑游戏侧，列每个区块收到的邻居溢出、有没有树 / 流体、同格冲突）
+挑出：不带结构 (2026,-2,-2)（收到湖的流体和树冠溢出）、(2026,0,0)、(2026,2,2)（树冠）；
+带结构再加种子 42 的试炼密室起点 (17,7) 和邻居 (16,6)、(18,8)。8 个邻居方向都有溢出写进
+某个目标（工具会检查）。
+
+| 用法 | 目标 × 先后 | 格数 | `isolated` 不一致 | 共享 ProtoChunk 不一致 |
+|---|---|---:|---:|---:|
+| 不带结构 | 3 × 3 | 884 736 | **0**（逐来源写集也全同） | center-first 269 / 342 / 109，center-last 771 / 1054 / 577 |
+| `--structures` | 5 × 3 | 1 474 560 | **0**（逐来源写集也全同） | center-first 273 / 563 / 146 / 307 / 109，center-last 211 / 804 / 189 / 809 / 577 |
+
+改坏确认（不带结构，只跑 `isolated`）：`--break-drop-neighbor 1 0`（丢掉 +x 邻居的溢出）
+报 644 / 639 / 544 格；`--break-drop-neighbor -1 -1` 报 5 / 0 / 8 格；
+`--break-first-writer`（同格改成「先写的赢」，中心自己最先）报 81 / 235 / 52 格。开关在
+`generate_features_stage` 里、只在 `oracle-samples` 下编进来、按种子限定，所以抓到的就是
+Director 交付的方块。
+
+**共享 ProtoChunk 下的不一致（模型差异，没有改，等拍板）**。按「游戏侧谁写了这一格」
+分类，两种模式合计：
+
+| 类别（格数：不带结构 3 块 + 带结构 5 块） | center-first | center-last | 例子 |
+|---|---:|---:|---|
+| 同格冲突（≥2 个中心写成不同状态） | 381 + 1 222 | 297 + 1 164 | (46,-12,35)：C 写砾石、(0,-1) 写凝灰岩，游戏取 ID 大的凝灰岩；官方 C 先跑时砾石在先、凝灰岩矿脉只替换石头 / 深板岩，结果是砾石 |
+| 游戏只有一个邻居写，官方不同 | 153 + 113 | 119 + 87 | 邻居的树在官方那边看到 C 已放的方块，长法不同 |
+| 游戏没人写，官方写了 | 170 + 48 | 756 + 448 | 官方的邻居 / 中心在已被改过的视图上多放了树、矿 |
+| 游戏只有 C 自己写，官方不同 | 16 + 15 | 1 229 + 891 | center-last 时 C 最后跑，看到邻居的写 |
+
+（「+」前是不带结构，后是带结构；还有 1 格「多个中心写成同一状态」。）读法：
+
+1. `isolated` 为 0 说明游戏的合并路径（`cached_feature_run`、溢出下标、增量交回、
+   组装排序）对每个中心的官方输出是忠实的；差异全在**合并规则 / 视图模型**上。
+2. 官方自己按不同先后就差几百格（center-first 和 center-last 之间），所以没有一种
+   与调度无关的规则能逐格等于官方；游戏现在的「同格取状态 ID 最大」与两种先后都对不上。
+3. 最大的一类是同格冲突。带结构 center-first 的 1 204 格里：空气 vs 凝灰岩 449、
+   花岗岩 vs 安山岩 282、砾石 vs 凝灰岩 109、空气 vs 黏土 104、闪长岩 vs 安山岩 80，
+   其余是试炼密室的结构件（凝灰岩砖、涂蜡铜块）对苔藓块等。官方里一个中心先写了
+   （包括结构件写的空气），后跑中心的矿团 / 植被只替换石头、深板岩之类的目标方块，
+   所以**先写的赢**；游戏按状态 ID 取大的，空气（ID 0）在冲突里永远输。
+
+要拍板的：是否把同格规则改成「按中心的固定先后，先写的赢」（例如中心自己最先、
+邻居按 (dz,dx)，相当于官方 center-first 的那部分），或者保持现状只记录差异。树长法
+之类「看到别人写过的方块」的差异在干净视图模型下改不掉，要改只能走 18.6.4 的 γ。
+
+### 18.11 组装前撤票的区块：确实泄漏，已修（`080a2029`）
+
+`world::staged_tests::chunks_cancelled_before_assembly_leave_no_generation_state`：
+4 线程强加载 5×5（种子只给这条测试用），等到有区块的地物增量或光照已回到世界线程、
+还有区块没交付时撤掉全部票，`reclaim_delay=0`，跑到计算池排空、Director 没有记录。
+改前**每次都剩**：`feature_deltas` 和 `generated_structures` 各 2 条（例如 (-2,-2)、(-2,4)，
+都是外圈的依赖位置），`partials` / 光照为空。
+
+原因：任务交给池子后被 Director 取消（`Effect::Cancel`），池子里已经在跑的那份撤不掉，
+回执照常回来；`compute_event` 不看 `cancelled` 就 `merge_generated`，而这个位置的
+`Forgot` 已经先清过一次，于是这两张表里留下没人再清的条目。修法只在 `director_host.rs`
+的 `compute_event` 里：被取消的 `Generated` 回执不合并（重派时纯函数给出同样结果）。
+改后 5 次全过；把判断临时改成恒合并，5 次全失败。改动只有几行，和 18.9 不碰的「宿主附
+邻居快照」那段不在一处。
+
+### 18.12 这一轮的验收（合并 `main` 之后，HEAD）
+
+`cargo fmt --all --check`、`cargo clippy --workspace --all-targets`（0 警告）、
+`cargo check -p mc-bamboo-vanilla --no-default-features`（0 警告）；`cargo test --workspace`
+56 个测试二进制 3300 通过 / 0 失败（第一次跑 `uri_oracle` 因没设 `JAVA_HOME` 报 Broken pipe，
+设好后单独与整套重跑都过）；`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game` 966 通过。
+对拍 0 不一致：`worldgen`、`chunkgen --through features`、`gen-world`（CARVERS、features、
+features `--structures`、种子 42 (17,7) 313 个官方结构件）、`gen-light`、`structure-e2e`、
+`structure-pipeline`、`long-set`、`beard`、`jigsaw`、`structures` 与全部 `structure-*`，
+`feature-merge`（带 / 不带结构的 `isolated`）；`oracle java --weather clear` 10114 例 0 失败；
+`probe.sh` 719/719，`tools/probe.sh --loaded` 两遍各 fresh + loaded 719/719，均正常关服。

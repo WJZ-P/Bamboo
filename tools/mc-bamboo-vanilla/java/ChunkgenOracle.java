@@ -110,6 +110,11 @@ final class FeatureLevelHandler implements InvocationHandler {
     private final net.minecraft.server.level.ServerLevel serverLevel;
     private Supplier<String> currentlyGenerating;
     private long nextSubTick;
+    /** 邻居溢出合并对拍：数这个中心有多少次 setBlock 落进目标区块。null 表示不数。 */
+    ChunkPos countWritesInto;
+    long countedWrites;
+    /** 同上，记下落进目标区块的 setBlock 位置（`BlockPos.asLong`）。 */
+    final java.util.Set<Long> touchedInTarget = new HashSet<>();
 
 
     FeatureLevelHandler(ChunkPos center, long seed, NoiseGeneratorSettings settings,
@@ -510,6 +515,12 @@ final class FeatureLevelHandler implements InvocationHandler {
             return false;
         }
         ChunkAccess chunk = chunkAt(pos).chunk();
+        if (this.countWritesInto != null
+                && SectionPos.blockToSectionCoord(pos.getX()) == this.countWritesInto.x()
+                && SectionPos.blockToSectionCoord(pos.getZ()) == this.countWritesInto.z()) {
+            this.countedWrites++;
+            this.touchedInTarget.add(pos.asLong());
+        }
         BlockState old = chunk.setBlockState(pos, state, flags);
         if (state.hasBlockEntity()) {
             // PROTOCHUNK 分支（44-101 / 104-167）：写一份 DUMMY NBT，
@@ -578,25 +589,32 @@ final class StructureChunkGrid {
     static final int RADIUS = 9;
     private final ChunkPos origin;
     private final ProtoChunk[][] chunks;
+    /** 网格半径；邻居溢出合并对拍要 5×5 各自的半径 8，用 10。 */
+    private final int radius;
 
     StructureChunkGrid(ChunkPos origin, ProtoChunk[][] chunks) {
+        this(origin, chunks, RADIUS);
+    }
+
+    StructureChunkGrid(ChunkPos origin, ProtoChunk[][] chunks, int radius) {
         this.origin = origin;
         this.chunks = chunks;
+        this.radius = radius;
     }
 
     boolean has(ChunkPos center, int x, int z) {
         int dx = x - origin.x();
         int dz = z - origin.z();
-        return dx >= -RADIUS && dx <= RADIUS && dz >= -RADIUS && dz <= RADIUS;
+        return dx >= -radius && dx <= radius && dz >= -radius && dz <= radius;
     }
 
     ProtoChunk chunk(ChunkPos center, int x, int z) {
         int dx = x - origin.x();
         int dz = z - origin.z();
-        if (dx < -RADIUS || dx > RADIUS || dz < -RADIUS || dz > RADIUS) {
+        if (dx < -radius || dx > radius || dz < -radius || dz > radius) {
             throw new IllegalStateException("structure getChunk outside the grid: " + x + "," + z);
         }
-        return chunks[dx + RADIUS][dz + RADIUS];
+        return chunks[dx + radius][dz + radius];
     }
 
     static int size() {
@@ -693,7 +711,7 @@ public final class ChunkgenOracle {
     private record Options(int seeds, int chunks, long salt, int through, int stepsMask,
             String featureAllowList, boolean realPath, String settings,
             Integer forcedX, Integer forcedZ, int scan, boolean structures, Long forcedSeed,
-            Path chunksFile) {
+            Path chunksFile, String mergeOrders) {
         static final int ALL_STEPS = (1 << 11) - 1;
 
         static Options parse(String[] args) {
@@ -725,6 +743,11 @@ public final class ChunkgenOracle {
             boolean structures = false;
             Long forcedSeed = null;
             Path chunksFile = null;
+            // `--merge-neighbors ORDERS`：邻居溢出合并对拍，逗号分隔的中心先后
+            // （center-first / center-last），每种先后各输出一条 merged 线。
+            // `--merge-neighbors ORDERS`: neighbor-spill merge oracle, one merged
+            // line per comma-separated run order (center-first / center-last).
+            String mergeOrders = null;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seeds" -> seeds = Integer.parseInt(args[++i]);
@@ -766,11 +789,12 @@ public final class ChunkgenOracle {
                     case "--structures" -> structures = true;
                     case "--seed" -> forcedSeed = Long.parseLong(args[++i]);
                     case "--chunks-file" -> chunksFile = Path.of(args[++i]);
+                    case "--merge-neighbors" -> mergeOrders = args[++i];
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
             return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath, settings,
-                    forcedX, forcedZ, scan, structures, forcedSeed, chunksFile);
+                    forcedX, forcedZ, scan, structures, forcedSeed, chunksFile, mergeOrders);
         }
     }
 
@@ -908,6 +932,13 @@ public final class ChunkgenOracle {
                         writeRealPath(seed, pos, proto, generator, generatorSettings, state, resolver);
                         continue;
                     }
+                    if (this.options.through() >= 4 && this.options.mergeOrders() != null) {
+                        for (String order : this.options.mergeOrders().split(",")) {
+                            writeMergedFeatures(seed, pos, order.trim(), generator,
+                                    generatorSettings, state, resolver);
+                        }
+                        continue;
+                    }
                     if (this.options.through() >= 4) {
                         if (this.options.structures()) {
                             writeStructuredFeatures(seed, pos, generator, generatorSettings, state,
@@ -945,6 +976,347 @@ public final class ChunkgenOracle {
             end.addProperty("checks", this.checks);
             write(end);
             this.out.flush();
+        }
+
+        /**
+         * 邻居溢出合并对拍：目标区块 `pos` 的最终方块要由 9 个中心（它自己和 8 个邻居）
+         * 各自的 `applyBiomeDecoration` 写出来。这里造 5×5 个跑到 CARVERS 的
+         * ProtoChunk（带结构时整张网格先跑官方起点 / 引用，5×5 各按自己的引用带
+         * Beardifier），再按 `order` 依次以 3×3 里的 9 个区块为中心各跑一次
+         * `applyBiomeDecoration`，都写进**同一批**共享 ProtoChunk —— 和官方
+         * `WorldGenRegion` 直接写邻居 ProtoChunk 一样，后跑的中心看得到先跑的写。
+         * 输出目标区块的最终方块，以及每个中心落进目标区块的 setBlock 次数（证明
+         * 8 个邻居的 features 都真的跑过、真的溢出）。
+         *
+         * <p>`order`：`center-first` 先跑目标自己再按 (dz,dx) 跑 8 个邻居，
+         * `center-last` 先跑 8 个邻居再跑目标。官方真实服务端里先后由调度决定。
+         *
+         * Neighbor-spill merge oracle: build a 5×5 of CARVERS ProtoChunks, run vanilla
+         * `applyBiomeDecoration` centered on each of the 9 chunks around `pos` in
+         * `order`, all writing into the same shared ProtoChunks (as vanilla's
+         * `WorldGenRegion` does), then emit the target's blocks and per-center write
+         * counts into the target.
+         */
+        private void writeMergedFeatures(long seed, ChunkPos pos, String order,
+                NoiseBasedChunkGenerator generator, NoiseGeneratorSettings generatorSettings,
+                RandomState randomState, BiomeResolver resolver) throws Exception {
+            boolean structures = this.options.structures();
+            // 5×5 下标 (dz + 2) * 5 + (dx + 2)。
+            TerrainChunk[] area = new TerrainChunk[25];
+            StructureChunkGrid structureGrid = null;
+            net.minecraft.server.level.ServerLevel entityStub = null;
+            WorldOptions worldOptions = new WorldOptions(seed, structures, false);
+            if (structures) {
+                // 5×5 每格的 Beardifier / 引用要读它 ±8 的起点，地形的 carverBiome 读
+                // 它 ±8 的群系：网格半径 10。
+                int radius = 10;
+                int size = radius * 2 + 1;
+                ProtoChunk[][] grid = new ProtoChunk[size][size];
+                for (int dx = -radius; dx <= radius; dx++) {
+                    for (int dz = -radius; dz <= radius; dz++) {
+                        grid[dx + radius][dz + radius] =
+                                newChunk(new ChunkPos(pos.x() + dx, pos.z() + dz), generatorSettings);
+                    }
+                }
+                structureGrid = new StructureChunkGrid(pos, grid, radius);
+                entityStub = installEntityStub(seed);
+                HolderLookup<StructureSet> setLookup = registries.lookupOrThrow(Registries.STRUCTURE_SET);
+                ChunkGeneratorStructureState structureState =
+                        ChunkGeneratorStructureState.createForNormal(
+                                randomState, seed, new ChunkPos(0, 0), generator.getBiomeSource(),
+                                setLookup);
+                structureState.ensureStructuresGenerated();
+                for (int dx = -radius; dx <= radius; dx++) {
+                    for (int dz = -radius; dz <= radius; dz++) {
+                        ProtoChunk chunk = structureGrid.chunk(pos, pos.x() + dx, pos.z() + dz);
+                        StructureManager manager = new StructureManager(
+                                structureLevel(registries, chunk, structureGrid, pos), worldOptions, null);
+                        generator.createStructures(registries, structureState, manager, chunk,
+                                templates, net.minecraft.resources.ResourceKey.create(
+                                        net.minecraft.core.registries.Registries.DIMENSION,
+                                        Identifier.withDefaultNamespace("overworld")));
+                    }
+                }
+                WorldGenLevel referenceRegion = referenceRegion(pos, structureGrid, registries);
+                for (int dz = -2; dz <= 2; dz++) {
+                    for (int dx = -2; dx <= 2; dx++) {
+                        ProtoChunk chunk = structureGrid.chunk(pos, pos.x() + dx, pos.z() + dz);
+                        generator.createReferences(referenceRegion,
+                                new StructureManager(referenceRegion, worldOptions, null), chunk);
+                    }
+                }
+                for (int dz = -radius; dz <= radius; dz++) {
+                    for (int dx = -radius; dx <= radius; dx++) {
+                        ProtoChunk chunk = structureGrid.chunk(pos, pos.x() + dx, pos.z() + dz);
+                        generator.createBiomes(randomState, Blender.empty(), null, chunk).join();
+                        chunk.setPersistedStatus(ChunkStatus.BIOMES);
+                        if (Math.abs(dx) <= 2 && Math.abs(dz) <= 2) {
+                            area[(dz + 2) * 5 + dx + 2] = new TerrainChunk(chunk);
+                        }
+                    }
+                }
+                TerrainChunk[] centerView = view3x3(area, 0, 0);
+                for (int dz = -2; dz <= 2; dz++) {
+                    for (int dx = -2; dx <= 2; dx++) {
+                        ChunkPos at = new ChunkPos(pos.x() + dx, pos.z() + dz);
+                        ProtoChunk chunk = structureGrid.chunk(pos, at.x(), at.z());
+                        StructureManager manager = new StructureManager(
+                                featureLevelForStructures(pos, seed, generatorSettings, centerView,
+                                        randomState, resolver, structureGrid, entityStub),
+                                worldOptions, null);
+                        buildStructuredTerrain(seed, at, chunk, generator, generatorSettings,
+                                randomState, resolver, structureGrid,
+                                Beardifier.forStructuresInChunk(manager, at));
+                    }
+                }
+            } else {
+                for (int dz = -2; dz <= 2; dz++) {
+                    for (int dx = -2; dx <= 2; dx++) {
+                        area[(dz + 2) * 5 + dx + 2] = generateTerrain(
+                                seed, new ChunkPos(pos.x() + dx, pos.z() + dz), generator,
+                                generatorSettings, randomState, resolver);
+                    }
+                }
+            }
+
+            if ("isolated".equals(order)) {
+                writeIsolatedFeatures(seed, pos, area, generator, generatorSettings, randomState,
+                        resolver, structureGrid, entityStub, worldOptions);
+                return;
+            }
+            List<int[]> centers = new ArrayList<>();
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    if (dx != 0 || dz != 0) {
+                        centers.add(new int[] {dx, dz});
+                    }
+                }
+            }
+            switch (order) {
+                case "center-first" -> centers.add(0, new int[] {0, 0});
+                case "center-last" -> centers.add(new int[] {0, 0});
+                default -> throw new IllegalArgumentException("unknown merge order " + order);
+            }
+            long[] writes = new long[9];
+            int runs = 0;
+            for (int[] offset : centers) {
+                int dx = offset[0];
+                int dz = offset[1];
+                ChunkPos center = new ChunkPos(pos.x() + dx, pos.z() + dz);
+                TerrainChunk[] view = view3x3(area, dx, dz);
+                final WorldGenLevel[] holder = new WorldGenLevel[1];
+                FeatureLevelHandler handler = new FeatureLevelHandler(center, seed, generatorSettings,
+                        wrapped(view), this.registries,
+                        new BiomeManager((qx, qy, qz) -> holder[0].getNoiseBiome(qx, qy, qz),
+                                BiomeManager.obfuscateSeed(seed)),
+                        resolver, randomState, structureGrid, entityStub);
+                handler.countWritesInto = pos;
+                WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
+                        ChunkgenOracle.class.getClassLoader(),
+                        new Class<?>[] {WorldGenLevel.class}, handler);
+                holder[0] = level;
+                generator.applyBiomeDecoration(level, view[4].chunk(),
+                        new StructureManager(level, worldOptions, null));
+                writes[(dz + 1) * 3 + dx + 1] = handler.countedWrites;
+                runs++;
+            }
+
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "merged");
+            line.addProperty("seed", seed);
+            line.addProperty("x", pos.x());
+            line.addProperty("z", pos.z());
+            line.addProperty("order", order);
+            line.addProperty("runs", runs);
+            line.addProperty("structures", structures);
+            JsonArray counts = new JsonArray();
+            for (long count : writes) {
+                counts.add(count);
+            }
+            line.add("writes", counts);
+            addBlocks(line, area[12].chunk());
+            write(line);
+        }
+
+        /**
+         * `isolated`：9 个中心各自在**干净**的 3×3 上跑官方 `applyBiomeDecoration`（每跑完
+         * 一个就把 5×5 还原成 CARVERS），记下每个中心写进目标区块的格子和最终状态：
+         * 中心自己按「和干净地形不同」记，邻居按 setBlock 落点并上和干净地形不同的格子
+         * （矿石走 `BulkSectionAccess` 不经过 setBlock）。合并交给 Rust 侧，按游戏的
+         * 规范序规则合；这样比的是「官方每个中心的输出」加「游戏的合并路径」。
+         *
+         * `isolated`: run vanilla `applyBiomeDecoration` for each of the 9 centers on a
+         * clean 3×3 (restoring the 5×5 to CARVERS after each run) and record every
+         * cell each center writes into the target with its final state. The Rust side
+         * merges them with the game's canonical rule.
+         */
+        private void writeIsolatedFeatures(long seed, ChunkPos pos, TerrainChunk[] area,
+                NoiseBasedChunkGenerator generator, NoiseGeneratorSettings generatorSettings,
+                RandomState randomState, BiomeResolver resolver, StructureChunkGrid structureGrid,
+                net.minecraft.server.level.ServerLevel entityStub, WorldOptions worldOptions)
+                throws Exception {
+            AreaSnapshot[] saved = new AreaSnapshot[area.length];
+            for (int i = 0; i < area.length; i++) {
+                saved[i] = AreaSnapshot.take(area[i].chunk());
+            }
+            ProtoChunk target = area[12].chunk();
+            int minY = target.getMinY();
+            int height = target.getHeight();
+            List<BlockState> palette = new ArrayList<>();
+            java.util.Map<BlockState, Integer> ids = new java.util.HashMap<>();
+            JsonArray sources = new JsonArray();
+            int runs = 0;
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int i = 0; i < area.length; i++) {
+                        saved[i].restore(area[i].chunk());
+                    }
+                    ChunkPos center = new ChunkPos(pos.x() + dx, pos.z() + dz);
+                    TerrainChunk[] view = view3x3(area, dx, dz);
+                    final WorldGenLevel[] holder = new WorldGenLevel[1];
+                    FeatureLevelHandler handler = new FeatureLevelHandler(center, seed,
+                            generatorSettings, wrapped(view), this.registries,
+                            new BiomeManager((qx, qy, qz) -> holder[0].getNoiseBiome(qx, qy, qz),
+                                    BiomeManager.obfuscateSeed(seed)),
+                            resolver, randomState, structureGrid, entityStub);
+                    handler.countWritesInto = pos;
+                    WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
+                            ChunkgenOracle.class.getClassLoader(),
+                            new Class<?>[] {WorldGenLevel.class}, handler);
+                    holder[0] = level;
+                    generator.applyBiomeDecoration(level, view[4].chunk(),
+                            new StructureManager(level, worldOptions, null));
+                    runs++;
+                    boolean self = dx == 0 && dz == 0;
+                    JsonArray writes = new JsonArray();
+                    AreaSnapshot clean = saved[12];
+                    for (int y = 0; y < height; y++) {
+                        for (int x = 0; x < 16; x++) {
+                            for (int z = 0; z < 16; z++) {
+                                BlockPos at = new BlockPos(pos.getMinBlockX() + x, minY + y,
+                                        pos.getMinBlockZ() + z);
+                                BlockState now = target.getBlockState(at);
+                                boolean changed = now != clean.state(target, y, x, z);
+                                boolean touched = !self && handler.touchedInTarget.contains(at.asLong());
+                                if (!changed && !touched) {
+                                    continue;
+                                }
+                                Integer id = ids.get(now);
+                                if (id == null) {
+                                    id = palette.size();
+                                    palette.add(now);
+                                    ids.put(now, id);
+                                }
+                                JsonArray write = new JsonArray();
+                                write.add((y * 16 + x) * 16 + z);
+                                write.add(id);
+                                writes.add(write);
+                            }
+                        }
+                    }
+                    sources.add(writes);
+                }
+            }
+            for (int i = 0; i < area.length; i++) {
+                saved[i].restore(area[i].chunk());
+            }
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "isolated");
+            line.addProperty("seed", seed);
+            line.addProperty("x", pos.x());
+            line.addProperty("z", pos.z());
+            line.addProperty("order", "isolated");
+            line.addProperty("runs", runs);
+            JsonArray names = new JsonArray();
+            for (BlockState state : palette) {
+                names.add(state.toString());
+            }
+            line.add("writePalette", names);
+            line.add("sources", sources);
+            addBlocks(line, target);
+            write(line);
+        }
+
+        /**
+         * 一个 ProtoChunk 跑地物前的样子：段（方块 + 群系）、高度图、方块实体表。
+         * 还原时把段换回拷贝，`isolated` 每个中心都从同一份干净地形开始。
+         *
+         * A ProtoChunk before features: sections, heightmaps and block-entity maps,
+         * restored so every `isolated` center starts from the same clean terrain.
+         */
+        private record AreaSnapshot(net.minecraft.world.level.chunk.LevelChunkSection[] sections,
+                java.util.Map<Heightmap.Types, long[]> heightmaps,
+                java.util.Map<BlockPos, CompoundTag> pending,
+                java.util.Map<BlockPos, BlockEntity> entities) {
+            static AreaSnapshot take(ProtoChunk chunk) throws Exception {
+                net.minecraft.world.level.chunk.LevelChunkSection[] live = sections(chunk);
+                net.minecraft.world.level.chunk.LevelChunkSection[] copy =
+                        new net.minecraft.world.level.chunk.LevelChunkSection[live.length];
+                for (int i = 0; i < live.length; i++) {
+                    copy[i] = live[i].copy();
+                }
+                java.util.Map<Heightmap.Types, long[]> maps = new java.util.EnumMap<>(Heightmap.Types.class);
+                for (java.util.Map.Entry<Heightmap.Types, Heightmap> entry : chunk.getHeightmaps()) {
+                    maps.put(entry.getKey(), entry.getValue().getRawData().clone());
+                }
+                @SuppressWarnings("unchecked")
+                java.util.Map<BlockPos, CompoundTag> pending =
+                        (java.util.Map<BlockPos, CompoundTag>) blockEntityMap(chunk, "pendingBlockEntities");
+                @SuppressWarnings("unchecked")
+                java.util.Map<BlockPos, BlockEntity> entities =
+                        (java.util.Map<BlockPos, BlockEntity>) blockEntityMap(chunk, "blockEntities");
+                return new AreaSnapshot(copy, maps, new java.util.HashMap<>(pending),
+                        new java.util.HashMap<>(entities));
+            }
+
+            void restore(ProtoChunk chunk) throws Exception {
+                net.minecraft.world.level.chunk.LevelChunkSection[] live = sections(chunk);
+                for (int i = 0; i < live.length; i++) {
+                    live[i] = this.sections[i].copy();
+                }
+                for (java.util.Map.Entry<Heightmap.Types, long[]> entry : this.heightmaps.entrySet()) {
+                    chunk.setHeightmap(entry.getKey(), entry.getValue().clone());
+                }
+                @SuppressWarnings("unchecked")
+                java.util.Map<BlockPos, CompoundTag> pendingNow =
+                        (java.util.Map<BlockPos, CompoundTag>) blockEntityMap(chunk, "pendingBlockEntities");
+                pendingNow.clear();
+                pendingNow.putAll(this.pending);
+                @SuppressWarnings("unchecked")
+                java.util.Map<BlockPos, BlockEntity> entitiesNow =
+                        (java.util.Map<BlockPos, BlockEntity>) blockEntityMap(chunk, "blockEntities");
+                entitiesNow.clear();
+                entitiesNow.putAll(this.entities);
+            }
+
+            BlockState state(ProtoChunk chunk, int y, int x, int z) {
+                return this.sections[y >> 4].getBlockState(x, y & 15, z);
+            }
+
+            private static net.minecraft.world.level.chunk.LevelChunkSection[] sections(ProtoChunk chunk)
+                    throws Exception {
+                Field field = ChunkAccess.class.getDeclaredField("sections");
+                field.setAccessible(true);
+                return (net.minecraft.world.level.chunk.LevelChunkSection[]) field.get(chunk);
+            }
+
+            private static java.util.Map<?, ?> blockEntityMap(ProtoChunk chunk, String name)
+                    throws Exception {
+                Field field = ChunkAccess.class.getDeclaredField(name);
+                field.setAccessible(true);
+                return (java.util.Map<?, ?>) field.get(chunk);
+            }
+        }
+
+        /** 5×5 里以 (dx, dz) 为中心的 3×3，按 (dz, dx) 排。 */
+        private static TerrainChunk[] view3x3(TerrainChunk[] area, int dx, int dz) {
+            TerrainChunk[] view = new TerrainChunk[9];
+            for (int vz = -1; vz <= 1; vz++) {
+                for (int vx = -1; vx <= 1; vx++) {
+                    view[(vz + 1) * 3 + vx + 1] = area[(dz + vz + 2) * 5 + dx + vx + 2];
+                }
+            }
+            return view;
         }
 
         /**

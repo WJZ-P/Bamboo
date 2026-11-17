@@ -102,11 +102,19 @@ struct ChunkCells {
 }
 
 fn generated_cells(threads: usize, positions: &[ChunkPos]) -> BTreeMap<ChunkPos, ChunkCells> {
+    generated_cells_with_seed(2026, threads, positions)
+}
+
+fn generated_cells_with_seed(
+    seed: i64,
+    threads: usize,
+    positions: &[ChunkPos],
+) -> BTreeMap<ChunkPos, ChunkCells> {
     let (_inbox, receiver) = mpsc::channel();
     let config = WorldConfig {
         view_distance: 3,
         world_gen: WorldGenConfig {
-            seed: 2026,
+            seed,
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
         },
@@ -277,5 +285,131 @@ fn generation_light_is_baked_into_the_delivered_column() {
     assert!(
         center.sky.contains(&0),
         "some deep cell should be fully dark (sky light 0)"
+    );
+}
+
+/// 结构附近（种子 42 的 trial_chambers 起点 (17, 7) 周围）真实 Director 流水线交付的
+/// 方块和纯函数（`build_view` 3×3 + 8 个邻居中心的溢出，规范序合并）逐格相同，1 线程
+/// 和 4 线程的光照也相同。Director 的依赖记录不真正跑邻居的 `terrain`，有没有邻居
+/// 快照取决于调度；补格曾读不带 Beardifier 的地形，这里 1/4 线程会差几十格。
+///
+/// Near structures, the real Director pipeline delivers the same blocks as the
+/// pure functions, and 1 vs 4 threads give the same light. Snapshot presence
+/// depends on scheduling; a Beardifier-less fallback made threads disagree here.
+#[test]
+fn director_matches_pure_features_near_structures() {
+    let config = WorldGenConfig {
+        seed: 42,
+        level_type: LevelType::Normal,
+        ..WorldGenConfig::default()
+    };
+    let positions: Vec<ChunkPos> = (16..=18)
+        .flat_map(|x| (6..=8).map(move |z| ChunkPos::new(x, z)))
+        .collect();
+    let one = generated_cells_with_seed(42, 1, &positions);
+    let four = generated_cells_with_seed(42, 4, &positions);
+    for &pos in &positions {
+        let pure = crate::worldgen_features::pure_feature_blocks_for_test(&config, pos.x, pos.z)
+            .expect("pure features");
+        let pure: Vec<u32> = pure.into_iter().flatten().collect();
+        for (threads, cells) in [(1, &one), (4, &four)] {
+            let got = &cells[&pos];
+            let differing = got.blocks.iter().zip(&pure).filter(|(a, b)| a != b).count();
+            assert_eq!(
+                differing, 0,
+                "chunk {pos:?} with {threads} threads differs from the pure result"
+            );
+        }
+        assert_eq!(one[&pos].sky, four[&pos].sky, "chunk {pos:?} sky light");
+        assert_eq!(
+            one[&pos].block, four[&pos].block,
+            "chunk {pos:?} block light"
+        );
+    }
+}
+
+/// 组装前撤票的区块：生成期每区块状态（`partials`、增量表、光照、结构标签）
+/// 最后都要清掉。强加载一片区块，等到有区块停在地物 / 光照之后、还没全部交付时
+/// 撤掉所有票，跑到计算池排空、Director 没有记录，宿主里不能剩任何一条。
+///
+/// Chunks whose tickets go away before assembly must not leave per-chunk
+/// generation state behind. Force-load an area, drop every ticket once some
+/// chunks are past features / light but not all are delivered, run until the
+/// pool drains and the Director has no records, and expect nothing left.
+#[test]
+fn chunks_cancelled_before_assembly_leave_no_generation_state() {
+    let (_inbox, receiver) = mpsc::channel();
+    let config = WorldConfig {
+        view_distance: 3,
+        world_gen: WorldGenConfig {
+            // 只在这条测试里用的种子，不和别的测试共用地形 / 地物缓存键。
+            // A seed private to this test: no shared terrain / feature cache keys.
+            seed: 0x1eaf_c0de,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        },
+        chunk_worker_threads: 4,
+        ..WorldConfig::default()
+    };
+    let mut world = World::new(config, receiver);
+    world.region.block_rules.random_tick_speed = 0;
+    world.host.set_reclaim_delay(0);
+    let positions: Vec<ChunkPos> = (0..5)
+        .flat_map(|x| (0..5).map(move |z| ChunkPos::new(x, z)))
+        .collect();
+    for &pos in &positions {
+        world.apply_ticket(TicketOp::Forced { pos, forced: true });
+    }
+
+    // 等到有区块的地物增量或光照已经回到世界线程、但还有区块没交付。
+    // Wait until some features deltas or light reached the world thread while
+    // some chunks are still undelivered.
+    let deadline = Instant::now() + Duration::from_secs(600);
+    loop {
+        let _ = world.tick();
+        let [_, deltas, light, _] = world.host.generation_leftovers();
+        let delivered = positions
+            .iter()
+            .filter(|pos| world.region.chunks.is_loaded(**pos))
+            .count();
+        if (!deltas.is_empty() || !light.is_empty()) && delivered < positions.len() {
+            break;
+        }
+        assert!(
+            delivered < positions.len(),
+            "everything was delivered before a mid-pipeline state was observed"
+        );
+        assert!(Instant::now() < deadline, "generation never got going");
+    }
+    for &pos in &positions {
+        world.apply_ticket(TicketOp::Forced { pos, forced: false });
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(600);
+    let mut quiet = 0;
+    loop {
+        let _ = world.tick();
+        let idle = world.host.compute_in_flight() == 0
+            && world.host.director().debug_state().records().is_empty();
+        if idle {
+            quiet += 1;
+            if quiet >= 8 {
+                break;
+            }
+        } else {
+            quiet = 0;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "world did not settle after dropping tickets: {} in flight, {} records",
+            world.host.compute_in_flight(),
+            world.host.director().debug_state().records().len()
+        );
+    }
+    let [partials, deltas, light, structures] = world.host.generation_leftovers();
+    assert!(
+        partials.is_empty() && deltas.is_empty() && light.is_empty() && structures.is_empty(),
+        "leftover generation state: partials {partials:?}, feature deltas {deltas:?}, \
+         light {light:?}, structures {structures:?}"
     );
 }
