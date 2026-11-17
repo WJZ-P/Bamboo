@@ -66,6 +66,7 @@ mod menu;
 mod movement;
 mod outgoing;
 mod pacing;
+mod partition_stats;
 mod player;
 mod player_grid;
 mod player_move;
