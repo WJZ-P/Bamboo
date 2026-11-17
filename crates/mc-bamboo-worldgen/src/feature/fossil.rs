@@ -390,10 +390,23 @@ fn place_in_world(
     box_min: Pos,
     box_max: Pos,
 ) {
-    let Some(palette) = template.palettes.first() else {
+    // `settings.getRandomPalette(palettes, position)`：`FossilFeature` 调了
+    // `setRandom(random)`，`getRandom(pos)` 就是地物随机源，单调色板也取一次 `nextInt(1)`；
+    // 两次 `placeInWorld` 各取一次。
+    // `settings.getRandomPalette(palettes, position)`: `FossilFeature` called
+    // `setRandom(random)`, so `getRandom(pos)` is the feature random and even a single
+    // palette draws `nextInt(1)`, once per `placeInWorld`.
+    if template.palettes.is_empty() {
         return;
-    };
-    for block in &template.blocks {
+    }
+    let palette_index = random.next_int(template.palettes.len() as i32) as usize;
+    let palette = &template.palettes[palette_index];
+    // `processBlockInfos` 按 `Palette.blocks()`（`buildInfoList` 顺序）逐格跑 processor，
+    // `block_rot` 的 `nextFloat` 也按这个顺序取。
+    // `processBlockInfos` walks `Palette.blocks()` in `buildInfoList` order, which is
+    // also the order of `block_rot`'s `nextFloat` draws.
+    for index in crate::structure::template_place::ordered_blocks(template, palette_index) {
+        let block = &template.blocks[index];
         let Some(entry) = palette.get(block.state) else {
             continue;
         };
@@ -467,7 +480,9 @@ fn place_in_world(
             continue;
         }
         state = transform(state, Mirror::None, rotation);
-        world.set_block(target.0, target.1, target.2, state);
+        // `placeInWorld` 走 `level.setBlock` → `WorldGenRegion.setBlock`，会更新 FINAL 高度图。
+        // `placeInWorld` goes through `WorldGenRegion.setBlock`, which updates the FINAL maps.
+        world.set_block_with_heightmaps(target.0, target.1, target.2, state);
     }
 }
 

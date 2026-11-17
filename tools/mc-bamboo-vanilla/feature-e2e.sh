@@ -31,6 +31,8 @@ CASES=(
     "minecraft:large_dripstone|2|--seeds 1 --chunk -53 -206 --scan 5"
     "minecraft:block_blob|2|--seeds 2 --chunk 83 -274 --scan 9"
     "minecraft:monster_room|3|--seeds 1 --chunk 3 -1 --scan 5"
+    "minecraft:fossil|3|--seed 42 --chunk -267 -276 --scan 25"
+    "minecraft:overlay|4|--seed 42 --chunk -267 -276 --scan 1"
     "minecraft:blue_ice|4|--seeds 1 --chunk 255 -109 --scan 5"
     "minecraft:spike|4|--seeds 1 --chunk 268 -300 --scan 3"
     "minecraft:disk|4,6|--seeds 3 --chunks 8 --salt 7"

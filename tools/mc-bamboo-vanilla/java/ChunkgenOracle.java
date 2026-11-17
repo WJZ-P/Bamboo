@@ -1375,7 +1375,10 @@ public final class ChunkgenOracle {
                     wrapped(chunks), this.registries,
                     new BiomeManager((qx, qy, qz) -> holder[0].getNoiseBiome(qx, qy, qz),
                             BiomeManager.obfuscateSeed(seed)),
-                    resolver, randomState, null, null);
+                    // 无结构模式也要 `getLevel()`：沙漠水井 / 化石的模板管理器挂在它的服务端上。
+                    // Structure-less runs need `getLevel()` too: the desert well and fossil
+                    // reach the template manager through its server.
+                    resolver, randomState, null, installEntityStub(seed));
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
                     ChunkgenOracle.class.getClassLoader(),
                     new Class<?>[] {WorldGenLevel.class}, handler);
@@ -1973,6 +1976,16 @@ public final class ChunkgenOracle {
                                             "WorldData." + method.getName());
                                 });
                 setField(net.minecraft.server.MinecraftServer.class, server, "worldData", data);
+                // `TemplateFeature.place`（沙漠水井的 `overlay` 子项）和
+                // `FossilFeature.place` 第一步都是
+                // `level.getLevel().getServer().getStructureTemplateManager()`；
+                // 不跑构造器的服务端这个字段是 null，会在放置时抛 NPE。
+                // `TemplateFeature.place` (the desert well's `overlay` child) and
+                // `FossilFeature.place` both start with
+                // `level.getLevel().getServer().getStructureTemplateManager()`, which is
+                // null on a constructor-less server.
+                setField(net.minecraft.server.MinecraftServer.class, server,
+                        "structureTemplateManager", this.templates);
                 Object levelData = Proxy.newProxyInstance(
                         ChunkgenOracle.class.getClassLoader(),
                         new Class<?>[] {net.minecraft.world.level.storage.ServerLevelData.class},
