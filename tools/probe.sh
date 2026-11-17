@@ -88,6 +88,10 @@ export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_TEST_DEBUG=line-ta
 # Probe.java runs /stop at wrap-up; the crash test leaves this unset so kill -9
 # still hits a running server.
 export BAMBOO_PROBE_STOP=1
+# 探针按精确模式校准：显式选齐步驱动，不靠缺省值（岛的实施计划第 9 节第 7 条）。
+# The probe is calibrated for exact mode: choose the lockstep drive explicitly
+# instead of relying on the default (island plan, section 9, item 7).
+export BAMBOO_ISLAND_DRIVE=lockstep
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/bamboo-probe.XXXXXX")
 WORLD="$TMP/world"
