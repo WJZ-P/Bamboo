@@ -120,6 +120,8 @@ pub(crate) struct PartitionStats {
     /// 改坏确认用：故意漏记写访问，让构造好的活塞场景能把它报出来。
     #[cfg(test)]
     pub(crate) skip_writes: bool,
+    /// 每刻「范围不重叠」检查失败的次数，正常情况下必须是 0。
+    disjoint_failures: u64,
 }
 
 /// 一个触发的方块名字。注册表 ID 来自方块逻辑，越界时用名字归类。
@@ -156,6 +158,13 @@ impl PartitionStats {
     pub(crate) fn record_partition(&mut self, nanos: u64, verify_nanos: u64) {
         self.partition_nanos = self.partition_nanos.saturating_add(nanos);
         self.verify_nanos = self.verify_nanos.saturating_add(verify_nanos);
+    }
+
+    /// 记录每刻的范围不重叠检查；失败只累计，不在世界线程上 panic。
+    pub(crate) fn record_disjoint_check(&mut self, disjoint: bool) {
+        if !disjoint {
+            self.disjoint_failures = self.disjoint_failures.saturating_add(1);
+        }
     }
 
     /// 划分完成后把单元形状记进这一刻的样本。
@@ -308,6 +317,8 @@ impl PartitionStats {
         self.tick_out = [0; HALOS.len()];
         self.tick_units = [0; HALOS.len()];
         self.tick_triggers = 0;
+        self.window_triggers = 0;
+        self.disjoint_failures = 0;
         self.partition_nanos = 0;
         self.verify_nanos = 0;
         self.partition_hist.reset();
@@ -321,12 +332,10 @@ impl PartitionStats {
         self.tick_nanos.reset();
         self.triggers_per_tick.reset();
         self.tail_share.reset();
-        self.tick_triggers = 0;
         self.size_distribution.clear();
         for index in 0..HALOS.len() {
             self.unit_nanos[index].clear();
         }
-        self.window_triggers = 0;
     }
 
     /// 一段多行文本，接在剖析报告末尾。`halo=1/2` 的越界、单元形状、
@@ -354,6 +363,7 @@ impl PartitionStats {
             three_mean / 1_000_000.0,
             three_mean / tick_mean.max(1.0) * 100.0,
         );
+        let _ = writeln!(out, "  disjoint_failures={}", self.disjoint_failures);
         let _ = writeln!(
             out,
             "  triggers_per_tick mean={:.2} p50={:.2} p95={:.2}",

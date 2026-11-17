@@ -442,6 +442,12 @@ impl Region {
         self.block_events.queued_chunks()
     }
 
+    /// 划分开关关着时清掉第 1 步攒下的本刻活动清单，不让它们无限增长。
+    pub(crate) fn clear_activity_touched(&mut self) {
+        self.block_ticks.clear_touched_chunks();
+        self.block_events.clear_touched_chunks();
+    }
+
     /// 方块逻辑要的世界和计划刻队列。它们借用不同的字段，所以要一起拿。
     pub(crate) fn block_level(&mut self) -> (RegionLevel<'_>, &mut BlockTicks) {
         let level = RegionLevel {

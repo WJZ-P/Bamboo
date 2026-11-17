@@ -594,6 +594,8 @@ impl World {
     /// 两套 halo 的单元各更新一次，统计打进剖析器。
     fn run_partition_stage(&mut self, now: i64) {
         if !self.region.partitioning.enabled {
+            // 第 1 步的活动清单是「本刻」的，没有消费者也要每刻清一次。
+            self.region.clear_activity_touched();
             return;
         }
         let start = std::time::Instant::now();
@@ -620,11 +622,16 @@ impl World {
             stats.record_partition(nanos, verify_nanos);
             stats.record_units(busy, &units, topology.merges, topology.splits);
         }
-        for partition in &self.region.partitioning.partitions {
-            assert!(
-                partition.areas_disjoint(),
-                "不同单元的范围不重叠：设计稿 4.1 的不变量"
-            );
+        // 范围不重叠是设计稿 4.1 的不变量；生产路径只记数，不因为客户端
+        // 给的极端坐标 panic（随机测试每刻断言同一条）。
+        let disjoint = self
+            .region
+            .partitioning
+            .partitions
+            .iter()
+            .all(crate::region::partition::Partition::areas_disjoint);
+        if let Some(stats) = self.region.profiler.partition_stats_mut() {
+            stats.record_disjoint_check(disjoint);
         }
     }
 

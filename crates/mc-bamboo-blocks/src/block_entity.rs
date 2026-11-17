@@ -1279,6 +1279,11 @@ impl BlockEvents {
         std::mem::take(&mut self.touched)
     }
 
+    /// 划分开关关着时也要每刻清掉本刻清单，否则它会一直增长。
+    pub fn clear_touched_chunks(&mut self) {
+        self.touched.clear();
+    }
+
     /// 只读地看本刻排过事件的区块，不清空。
     pub fn touched_chunks(&self) -> &[ChunkPos] {
         &self.touched
