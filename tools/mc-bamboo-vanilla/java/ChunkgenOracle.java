@@ -1065,6 +1065,7 @@ public final class ChunkgenOracle {
                     entry.addProperty("dx", dx);
                     entry.addProperty("dz", dz);
                     addBlocks(entry, chunks[index].chunk());
+                    addBlockEntities(entry, chunks[index].chunk());
                     results.add(entry);
                 }
             }
@@ -1352,6 +1353,7 @@ public final class ChunkgenOracle {
                     entry.addProperty("dx", dx);
                     entry.addProperty("dz", dz);
                     addBlocks(entry, chunks[index].chunk());
+                    addBlockEntities(entry, chunks[index].chunk());
                     results.add(entry);
                 }
             }
@@ -2057,6 +2059,36 @@ public final class ChunkgenOracle {
             }
             line.add("palette", names);
             line.add("blocks", blocks);
+        }
+
+        /**
+         * 输出这个区块里所有「真的实例化过」的方块实体：`saveWithFullMetadata` 的
+         * 紧凑 SNBT。只有 `pendingBlockEntities` 里的 DUMMY nbt 不算——那是
+         * `WorldGenRegion.setBlock` 给带方块实体的方块留的占位符，没有实体数据。
+         *
+         * Emit every instantiated block entity of the chunk as compact SNBT from
+         * `saveWithFullMetadata`. The DUMMY nbt left in `pendingBlockEntities` by
+         * `WorldGenRegion.setBlock` is a placeholder, not an entity, so it is skipped.
+         */
+        private void addBlockEntities(JsonObject line, ChunkAccess chunk) {
+            JsonArray entities = new JsonArray();
+            List<BlockPos> positions = new ArrayList<>(chunk.getBlockEntitiesPos());
+            positions.sort(Comparator.comparingInt((BlockPos p) -> p.getY())
+                    .thenComparingInt(p -> p.getX()).thenComparingInt(p -> p.getZ()));
+            for (BlockPos pos : positions) {
+                CompoundTag tag = chunk.getBlockEntityNbtForSaving(pos, registries);
+                if (tag == null || "DUMMY".equals(tag.getStringOr("id", ""))) {
+                    continue;
+                }
+                JsonArray entry = new JsonArray();
+                entry.add(pos.getX());
+                entry.add(pos.getY());
+                entry.add(pos.getZ());
+                entry.add(tag.toString());
+                entities.add(entry);
+            }
+            line.add("block_entities", entities);
+            this.checks += positions.size();
         }
 
         /**

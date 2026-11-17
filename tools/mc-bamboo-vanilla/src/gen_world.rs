@@ -285,6 +285,9 @@ struct Stats {
     chunks: u64,
     biome_cells: u64,
     blocks: u64,
+    /// 比较过的方块实体数量（官方侧与游戏侧都有）。
+    /// Block entities compared (present on both the official and game sides).
+    block_entities: u64,
     heightmap_columns: u64,
     heightmap_words: u64,
     mismatches: Vec<String>,
@@ -792,6 +795,14 @@ impl Report {
                 indices,
                 &generated,
             )?;
+            compare_block_entities(
+                &mut self.stats,
+                seed,
+                x + dx,
+                z + dz,
+                chunk.get("block_entities"),
+                &result.block_entities,
+            )?;
         }
         Ok(())
     }
@@ -1047,6 +1058,7 @@ impl Report {
             chunks,
             biome_cells,
             blocks,
+            block_entities,
             heightmap_columns,
             heightmap_words,
             mismatches,
@@ -1056,7 +1068,8 @@ impl Report {
         } = self.stats;
         println!(
             "gen-world: {chunks} chunks, {biome_cells} quart cells, {blocks} blocks, \
-             {heightmap_columns} heightmap columns, {heightmap_words} heightmap words, \
+             {block_entities} block entities, {heightmap_columns} heightmap columns, \
+             {heightmap_words} heightmap words, \
              {coverage_rows} structure rows / {java_pieces} official pieces, \
              {} mismatches, {} official checks",
             mismatches.len(),
@@ -1299,6 +1312,93 @@ fn compare_blocks_exact(
         })
         .collect::<Result<Vec<_>, _>>()?;
     compare_indices(stats, seed, x, z, &states, indices, generated)
+}
+
+/// 方块实体的「有意义」键：官方 `saveWithFullMetadata` 会补上 id / x / y / z，
+/// 游戏侧写入的 nbt 只带结构件 / 地物真正设置的字段。这些元数据键由位置隐含，
+/// 比较时丢掉；空的 `components` 是 `saveWithoutMetadata` 无条件写的，同样丢掉。
+///
+/// Keys that carry meaning for a block entity: vanilla's `saveWithFullMetadata` adds
+/// id / x / y / z, which the game side does not store because they come from the
+/// position. The empty `components` compound is written unconditionally by
+/// `saveWithoutMetadata`, so it is dropped too.
+fn custom_keys(tag: &mc_bamboo_nbt::Tag) -> Vec<(String, String)> {
+    let mc_bamboo_nbt::Tag::Compound(entries) = tag else {
+        return vec![("#tag".to_owned(), tag.to_snbt())];
+    };
+    let mut out: Vec<(String, String)> = entries
+        .iter()
+        .filter(|(key, _)| !matches!(key.as_str(), "id" | "x" | "y" | "z"))
+        .filter(|(key, value)| {
+            *key != "components"
+                || !matches!(value, mc_bamboo_nbt::Tag::Compound(items) if items.is_empty())
+        })
+        .map(|(key, value)| (key.clone(), value.to_snbt()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// 比较一个区块的方块实体：官方导出的是 `[x,y,z, SNBT]`，游戏侧是
+/// `FeatureResult::block_entities` 的 `(世界坐标, nbt)`。同位置只比最后写入的那份。
+///
+/// Compare one chunk's block entities: the official side emits `[x,y,z, SNBT]`,
+/// the game side holds `(world position, nbt)` in `FeatureResult::block_entities`.
+/// Only the last nbt written at a position counts.
+fn compare_block_entities(
+    stats: &mut Stats,
+    seed: i64,
+    chunk_x: i32,
+    chunk_z: i32,
+    official: Option<&Value>,
+    game: &[((i32, i32, i32), mc_bamboo_nbt::Tag)],
+) -> Result<(), String> {
+    let Some(official) = official else {
+        return Err(format!(
+            "features seed {seed} ({chunk_x},{chunk_z}): oracle has no block_entities"
+        ));
+    };
+    let rows = official
+        .as_array()
+        .ok_or("features block_entities is not an array")?;
+    let mut ours: BTreeMap<(i32, i32, i32), Vec<(String, String)>> = BTreeMap::new();
+    for ((x, y, z), tag) in game {
+        if x >> 4 == chunk_x && z >> 4 == chunk_z {
+            ours.insert((*x, *y, *z), custom_keys(tag));
+        }
+    }
+    for row in rows {
+        let row = row.as_array().ok_or("bad block entity row")?;
+        let at = |index: usize| -> Result<i32, String> {
+            row.get(index)
+                .and_then(Value::as_i64)
+                .map(|value| value as i32)
+                .ok_or_else(|| "bad block entity coordinate".to_owned())
+        };
+        let pos = (at(0)?, at(1)?, at(2)?);
+        let text = row
+            .get(3)
+            .and_then(Value::as_str)
+            .ok_or("bad block entity snbt")?;
+        let tag = mc_bamboo_nbt::parse_snbt(text)
+            .map_err(|error| format!("bad official block entity snbt {text}: {error}"))?;
+        let want = custom_keys(&tag);
+        match ours.remove(&pos) {
+            None => stats.mismatches.push(format!(
+                "block entity seed {seed} ({chunk_x},{chunk_z}) at {pos:?}: official {want:?}, game missing"
+            )),
+            Some(got) if got != want => stats.mismatches.push(format!(
+                "block entity seed {seed} ({chunk_x},{chunk_z}) at {pos:?}: official {want:?}, game {got:?}"
+            )),
+            Some(_) => stats.block_entities += 1,
+        }
+    }
+    for (pos, got) in &ours {
+        stats.mismatches.push(format!(
+            "block entity seed {seed} ({chunk_x},{chunk_z}) at {pos:?}: official missing, game {got:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn compare_indices(
