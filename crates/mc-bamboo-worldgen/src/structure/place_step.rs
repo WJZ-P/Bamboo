@@ -171,6 +171,10 @@ pub struct StartInput {
     pub structure: String,
     /// 结构注册表条目的 `type` 字段（决定 `postProcess` 分派）。
     pub type_id: String,
+    /// 起点所在区块；海底神殿要用它重建房间图。
+    /// The source chunk; the ocean monument needs it to rebuild its room graph.
+    pub source_x: i32,
+    pub source_z: i32,
     /// 结构件列表。jigsaw 走模板链，其余走布局 `Piece`。
     pub pieces: StartPieces,
 }
@@ -341,12 +345,58 @@ fn place_start(
                 return Ok(());
             }
             let kind = kind.unwrap_or_default();
+            // 海底神殿的清单里只有 `MonumentBuilding` 一项，房间图/子件是它的私有
+            // 字段，放置必须按 seed + 起点区块重建完整布局；`place_code_piece`
+            // 对 `monument` 直接返回，就是为了避免按单个 `Piece` 反复放。
+            // The monument's list holds only `MonumentBuilding`; its room graph and
+            // children are private, so placement must rebuild the full layout from
+            // the seed and source chunk instead of iterating pieces one by one.
+            if kind == "monument" {
+                let layout_random =
+                    pieces::make_random(options.seed, start.source_x, start.source_z);
+                let dir = pieces::HDir::random(&layout_random);
+                let layout = pieces::ocean_monument::monument_layout(
+                    &layout_random,
+                    start.source_x * 16 - 29,
+                    start.source_z * 16 - 29,
+                    dir,
+                );
+                let place_random =
+                    pieces::make_random(options.seed ^ 0x5DEECE66D, input.center_x, input.center_z);
+                let before = world.write_count;
+                let mut level = FeaturePieceLevel {
+                    world,
+                    world_random: WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0))),
+                };
+                let sea_level = level.world.sea_level;
+                pieces::ocean_monument_place::place_in_chunk(
+                    &layout,
+                    &mut level,
+                    chunk_bb,
+                    sea_level,
+                    &place_random,
+                );
+                *stats
+                    .placed_pieces
+                    .entry(start.type_id.clone())
+                    .or_default() += 1;
+                *stats
+                    .placed_blocks
+                    .entry(start.type_id.clone())
+                    .or_default() += level.world.write_count.saturating_sub(before);
+                return Ok(());
+            }
+            let mut pyramid_after: Option<post_process::pyramid_after::PyramidAfterData> = None;
             for piece in pieces {
                 if !intersects(&piece.bb, &chunk_bb) {
                     continue;
                 }
                 let before = world.write_count;
-                place_layout_piece(world, piece, kind, &chunk_bb, options.random)?;
+                if let Some(data) =
+                    place_layout_piece(world, piece, kind, &chunk_bb, options.random)?
+                {
+                    pyramid_after = Some(data);
+                }
                 *stats
                     .placed_pieces
                     .entry(start.type_id.clone())
@@ -355,6 +405,15 @@ fn place_start(
                     .placed_blocks
                     .entry(start.type_id.clone())
                     .or_default() += world.write_count.saturating_sub(before);
+            }
+            // `StructureStart.placeInChunk` 在所有件的 `postProcess` 之后调
+            // `structure.afterPlace`。沙漠神殿用它放可疑的沙子 / 塌陷屋顶，
+            // 只有落在写区里的位置才生效，所以只在起点区块看得到差异。
+            // `StructureStart.placeInChunk` calls `structure.afterPlace` after all
+            // pieces. The desert pyramid uses it for suspicious sand / the collapsed
+            // roof, which only lands inside the writable area on the start chunk.
+            if let Some(data) = pyramid_after {
+                post_process::pyramid_after::after_place(world, options.seed, &chunk_bb, &data);
             }
             if start.type_id == "minecraft:woodland_mansion" {
                 let world_random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
@@ -622,7 +681,7 @@ fn place_layout_piece(
     kind: &str,
     chunk_bb: &[i32; 6],
     random: &WorldgenRandom,
-) -> Result<(), String> {
+) -> Result<Option<post_process::pyramid_after::PyramidAfterData>, String> {
     // 模板结构件的 `postProcess` 已经在 `FeatureWorld` 上跑（它们就按这个类型写的）；
     // 多件式结构的 `postProcess` 走 `PieceLevel`，这里给 `FeatureWorld` 加一层适配。
     let world_random = WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0)));
@@ -644,16 +703,17 @@ fn place_layout_piece(
             for (x, y, z, state) in outcome.writes {
                 world.set_block_with_heightmaps(x, y, z, state);
             }
+            Ok(None)
         }
         "mineshaft" | "stronghold" | "monument" | "mansion" => {
             place_code_piece(&mut adapter, piece, kind, chunk_bb, random)?;
+            Ok(None)
         }
         "desert_pyramid" | "jungle_temple" | "swamp_hut" | "buried_treasure" | "ruined_portal" => {
-            place_single_piece(world, piece, kind, chunk_bb, random)?;
+            place_single_piece(world, piece, kind, chunk_bb, random)
         }
-        _ => {}
+        _ => Ok(None),
     }
-    Ok(())
 }
 
 /// 四个代码生成单件结构 + 废弃传送门的 `postProcess`（已由
@@ -667,7 +727,7 @@ fn place_single_piece(
     kind: &str,
     chunk_bb: &[i32; 6],
     random: &WorldgenRandom,
-) -> Result<(), String> {
+) -> Result<Option<post_process::pyramid_after::PyramidAfterData>, String> {
     let orientation = (piece.o >= 0).then(|| pieces::HDir::from_2d(piece.o));
     match kind {
         "buried_treasure" => {
@@ -710,6 +770,7 @@ fn place_single_piece(
             );
         }
         "desert_pyramid" => {
+            let mut after = post_process::pyramid_after::PyramidAfterData::default();
             post_process::pyramid::desert_pyramid(
                 world,
                 &piece.bb,
@@ -723,7 +784,9 @@ fn place_single_piece(
                 world.center_z,
                 random,
                 None,
+                &mut after,
             );
+            return Ok(Some(after));
         }
         "ruined_portal" => {
             let mut piece = piece.clone();
@@ -736,7 +799,7 @@ fn place_single_piece(
         }
         _ => {}
     }
-    Ok(())
+    Ok(None)
 }
 
 fn place_code_piece(
@@ -833,7 +896,21 @@ fn dispatch_stronghold(
             .unwrap_or(0)
     };
     let flag = |key: &str| piece.extras.get(key).is_some_and(|v| v.token() == "B:1");
-    let door = sp_place::random_small_door(random);
+    // `randomSmallDoor` 在结构件的**构造器**（拼图布局阶段）里取一次 `nextInt(5)`
+    // 并把结果存进 `EntryDoor`；`postProcess` 只读这个字段，不再取随机数。
+    // 放置阶段重新取一次会让同一个 `WorldgenRandom` 后续所有 `nextFloat` 错位，
+    // 石砖变体整片不同（`structure-place` 的合成地形用自建随机源，看不出来）。
+    // `randomSmallDoor` is called in the piece constructor during layout and
+    // stored as `EntryDoor`; `postProcess` only reads it. Drawing again here
+    // shifts every later `nextFloat` of the shared `WorldgenRandom`.
+    let door = sp_place::door_type_from_name(
+        piece
+            .extras
+            .get("EntryDoor")
+            .map(|v| v.token())
+            .as_deref()
+            .unwrap_or("OPENING"),
+    );
     let orientation = (piece.o >= 0).then(|| pieces::HDir::from_2d(piece.o));
     match piece.id.as_str() {
         "minecraft:shcc" => {

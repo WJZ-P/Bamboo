@@ -161,3 +161,12 @@ tools/mc-bamboo-vanilla/heightmap-e2e.sh
 | step 10 地物在村庄读到旧高度 | `BlockWriter for FeatureWorld` 用不更新高度图的 `set_block` | `structure-e2e` 全步、`feature-e2e.sh minecraft:freeze_top_layer` | 无结构模式没有结构件写方块 |
 | 沙漠神殿 `afterPlace` 抛异常 | 假世界没实现 `getBlockEntity(pos,type)` 的 `Optional` 重载 | `structure-e2e` 的 `(-374,-22)` | 旧对拍没跑到 `placeSuspiciousSand` |
 | `minecraft:block_pile` 标 unsupported | 叶子地物未移植；阈值分支方向按字节码是 `dist2 > threshold` 才走 `nextFloat()<0.031` | `structure-e2e` 村庄区块 + 改坏确认 | 主世界 `biome_features` 不含它，只作结构池元素 |
+
+## 第 2 部分补查（`wg-e2e-struct` 续）
+
+| 现象 | 根因 | 现在由哪个对拍盯着 |
+|---|---|---|
+| 沙漠神殿起点 33 处 | `DesertPyramidStructure.afterPlace` 未实现（`SortedArraySet` + `Util.shuffle` 放可疑的沙子与塌陷屋顶） | `structure-e2e` 沙漠神殿区块 |
+| 要塞起点 412 处 | `randomSmallDoor` 在放置阶段被重取，官方只读布局阶段存好的 `EntryDoor` | `structure-e2e` 要塞区块 |
+| `(42,-32,-16)` 的 `potent_sulfur[wet]` | `LakeFeature.place` 对水湖返回 true，`SequenceFeature` 才不短路；`PotentSulfurBlock` 需进 `survival::classify` | `gen-world --chunk -32 -16`（已加回 `structure-e2e`） |
+| 四种稀有结构从不出起点 | `generate_start` 按 `type_id` 分派却写了注册 ID；海底神殿的 `place_in_chunk` 没接进 `place_start` | `structure-e2e` 的林地府邸 / 海底神殿 / 丛林神殿 / 海底遗迹起点 |

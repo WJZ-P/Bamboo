@@ -882,9 +882,12 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
 `generate_structures`，走 Director 的同一份 `build_view` + `run_features_filtered`。
 默认无结构模式（`WorldOptions(seed,false,false)` + `Beardifier.EMPTY`）完全不变。
 
-干净跑 42 个结构区块 / 37158912 格 0 不一致；`--break-structure` 跳过某类结构件、
+干净跑 50 个结构区块 / 44236800 格 0 不一致；`--break-structure` 跳过某类结构件、
 `long-set` 单独对拍 fastutil `LongOpenHashSet` 引用迭代序（3000 组 / 287248 次比较）、
-均做了改坏确认。命令、每种结构的覆盖区块 / 结构件数 / 方块数、这一轮修掉的 bug
+均做了改坏确认；后续补上了 `DesertPyramidStructure.afterPlace`、要塞 `EntryDoor` 的
+随机流、`sulfur_pool` 的 `sequence` 短路，以及 `create_structures` 里四种稀有结构
+（`type_id` 分派漏了 `woodland_mansion` / `ocean_monument` / `jungle_temple` /
+`ocean_ruin`）的起点与海底神殿房间图放置。命令、每种结构的覆盖区块 / 结构件数 / 方块数、这一轮修掉的 bug
 清单与剩余缺口见 [`docs/worldgen-structures-e2e.md`](worldgen-structures-e2e.md)。
 
 ## 还没做
