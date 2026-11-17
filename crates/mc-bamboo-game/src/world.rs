@@ -277,22 +277,27 @@ impl World {
         // 控制台命令反馈的广播开关来自 `server.properties`，启动时带进世界线程。
         // The console-feedback broadcast flag comes from `server.properties` at startup.
         region.broadcast_console_to_ops = config.broadcast_console_to_ops;
-        // 启动时把读到的 `level.dat` 世界设置和 `data/` 的游戏规则 / 世界边界
-        // 套回运行时；边界的 `restore` 用存档里的游戏时间。全新世界没有 `level.dat`，
-        // 运行时默认值才是权威（不能拿 `LevelData::default()` 的出生点覆盖它）。
-        // Apply loaded `level.dat` world settings and `data/` game rules / border
-        // back onto runtime; `restore` uses the saved game time. A fresh world has
-        // no `level.dat`, so runtime defaults are authoritative (do not overwrite
-        // them with `LevelData::default()`'s spawn).
+        // 启动时把读到的 `level.dat` 世界设置、`Time`（游戏时间）和 `data/` 的
+        // 游戏规则 / 世界边界 / 世界时钟套回运行时；边界的 `restore` 用存档里的
+        // 游戏时间。全新世界没有 `level.dat`，运行时默认值才是权威（不能拿
+        // `LevelData::default()` 的出生点覆盖它），时间也从 0 开始。
+        // Apply loaded `level.dat` world settings and `Time` (game time) plus
+        // `data/` game rules / border / world clocks back onto runtime; `restore`
+        // uses the saved game time. A fresh world has no `level.dat`, so runtime
+        // defaults are authoritative (do not overwrite them with
+        // `LevelData::default()`'s spawn) and game time starts at 0.
         let fresh_world = save
             .as_ref()
             .is_none_or(|session| !session.has_loaded_level());
         if let Some(save) = &save {
-            if save.has_loaded_level() {
+            let game_time = if save.has_loaded_level() {
                 crate::save_data::apply_level_data(global.state_mut(), save.level());
-            }
-            save.startup()
-                .apply(&mut global, &mut region, save.level().time);
+                global.restore_game_time(save.level().time);
+                save.level().time
+            } else {
+                global.time().0
+            };
+            save.startup().apply(&mut global, &mut region, game_time);
         }
         // 有 `world_gen_settings.dat` 就以存档为准：空 `level-seed` 的随机种子在
         // 首次保存时写进存档，重启后必须用同一个（官方行为），不能重新摇一次。
@@ -422,9 +427,9 @@ impl World {
             }
         }
         // 岛的时钟从世界时间起算（岛的实施计划 5.1）。放在启动数据都套上之后，
-        // 以后从存档恢复世界时间时也对得上。
+        // 从存档恢复的游戏时间自然对得上。
         // The island clock starts at the world time (island plan 5.1), after
-        // all startup data is applied so a restored world time is picked up.
+        // all startup data is applied so the restored game time is picked up.
         let time = world.master.global.time();
         world.island.region.start_clock(time);
         world.island.region.profiler.on_world_start();

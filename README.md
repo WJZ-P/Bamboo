@@ -121,14 +121,19 @@ WebView2 的渲染进程不算在内。
   游戏模式、物品栏、末影箱、选中槽。血量、经验、能力、饥饿、食物等运行时没建模，
   保存用官方默认值。
 - `level.dat` 写回运行时的出生点、默认游戏模式、难度（和 `time` / `last_played`），
-  启动时读回；`data/minecraft/game_rules.dat` 用官方 `GameRuleMap.CODEC` 的键
+  启动时读回：游戏时间从 `Time` 接着上次存盘的值走，岛的计划刻时钟也从这个值起算，
+  所以漏斗、计划刻等和绝对游戏时间比较的逻辑在重启后不用退回 0；
+  `data/minecraft/game_rules.dat` 用官方 `GameRuleMap.CODEC` 的键
   （带命名空间、布尔 Byte / 整数 Int）写 `/gamerule` 的真实值，启动时读回；
   世界边界用 `WorldBorder::export_settings` / `restore`（`restore` 传存档里的游戏时间）
   写到官方按维度存放的 `dimensions/minecraft/overworld/data/minecraft/world_border.dat`，
-  启动时读回。`data/minecraft/world_gen_settings.dat` 写官方 `WorldGenSettings.CODEC`
-  形状的种子与维度生成器（见上一条），读档时再读回。游戏规则 / 世界边界 / 导出的超平坦
-  默认值常量用官方 codec 对拍（`saved-data` 子命令）。
-  天气、世界时钟、计划事件、流浪商人、自定义 Boss 栏、末影龙战斗这些没建模的
+  启动时读回；`data/minecraft/world_clocks.dat` 用官方 `PackedClockStates.CODEC`
+  写主世界和末地的两份世界时钟（`total_ticks` / `partial_tick` / `rate` / `paused`），
+  启动时按官方 `ServerClockManager.init` 读回，昼夜时间也接着走。
+  `data/minecraft/world_gen_settings.dat` 写官方 `WorldGenSettings.CODEC`
+  形状的种子与维度生成器（见上一条），读档时再读回。游戏规则 / 世界边界 /
+  世界时钟 / 导出的超平坦默认值常量用官方 codec 对拍（`saved-data` 子命令）。
+  天气、计划事件、流浪商人、自定义 Boss 栏、末影龙战斗这些没建模的
   saved data 不写文件（官方 `computeIfAbsent` 会自己造默认值）；`/weather` 不写存档。
   `chunk_tickets.dat` 写空 `tickets` 列表（无 `/forceload`）。
 - 盘上 `Status` 不是 `minecraft:full` 的区块当成 ProtoChunk 读回：顶层附加信息、

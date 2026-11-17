@@ -109,7 +109,7 @@ pub use world::{
 pub use world_options::WorldGenConfig;
 
 /// 供 `mc-bamboo-vanilla saved-data` 和官方 codec 对拍：返回 Bamboo 编码器写出的
-/// 两份示例 `data` 复合标签（游戏规则、世界边界）。只暴露公开的 [`Tag`]，
+/// 三份示例 `data` 复合标签（游戏规则、世界边界、世界时钟）。只暴露公开的 [`Tag`]，
 /// 不把运行时类型泄漏到 crate 外。值固定，方便对拍期望值。
 /// 只在 `oracle-samples` feature 下编进库里，正式构建不含这段对拍代码。
 /// Samples of Bamboo's saved-data encoders for the `mc-bamboo-vanilla
@@ -117,7 +117,7 @@ pub use world_options::WorldGenConfig;
 /// fixed values so the tool can assert the expected decoded values. Gated
 /// behind the `oracle-samples` feature so production builds omit it.
 #[cfg(feature = "oracle-samples")]
-pub fn saved_data_samples() -> (mc_bamboo_nbt::Tag, mc_bamboo_nbt::Tag) {
+pub fn saved_data_samples() -> (mc_bamboo_nbt::Tag, mc_bamboo_nbt::Tag, mc_bamboo_nbt::Tag) {
     let mut rules = gamerules::GameRuleSet::vanilla();
     let index = mc_bamboo_data::gamerules::find("minecraft:random_tick_speed").unwrap();
     let _ = rules.assign(index, "7");
@@ -134,9 +134,20 @@ pub fn saved_data_samples() -> (mc_bamboo_nbt::Tag, mc_bamboo_nbt::Tag) {
         lerp_time: 99,
         lerp_target: 200.0,
     };
+    let mut global = global::Global::default();
+    global
+        .clock_named_mut("minecraft:overworld")
+        .unwrap()
+        .total_ticks = 12_345;
+    global.clock_named_mut("minecraft:overworld").unwrap().rate = 2.5;
+    global
+        .clock_named_mut("minecraft:the_end")
+        .unwrap()
+        .total_ticks = 678;
     (
         save_data::game_rules_tag(&rules),
         save_data::world_border_tag(&border),
+        save_data::world_clocks_tag(&global),
     )
 }
 

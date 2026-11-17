@@ -42,6 +42,7 @@ import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.server.packs.resources.MultiPackResourceManager;
 import net.minecraft.tags.TagLoader;
+import net.minecraft.world.clock.PackedClockStates;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LevelHeightAccessor;
@@ -349,10 +350,10 @@ public final class StorageOracle {
             }
 
             // 补 10：对**实际写出的每个** data/ 文件用官方 codec 解码，而不是只
-            // 检查 NbtIo 能读 / 有 data 键。Bamboo 只写三份建模过的 saved data；
+            // 检查 NbtIo 能读 / 有 data 键。Bamboo 只写四份建模过的 saved data；
             // 未建模的（旧世界/官方服务端留下的）只做 NBT 可读性检查，原样保留。
             // Item 10: decode EVERY written data/ file with its official codec,
-            // not just "NbtIo can read it". Bamboo writes only three modelled
+            // not just "NbtIo can read it". Bamboo writes only four modelled
             // saved-data files; unmodelled ones (from older/official worlds) are
             // only checked for readable NBT and left untouched.
             JsonArray codecs = new JsonArray();
@@ -506,6 +507,12 @@ public final class StorageOracle {
                             WorldBorder.Settings.CODEC.parse(NbtOps.INSTANCE, data);
                     border.getOrThrow();
                     return "WorldBorder.Settings.CODEC";
+                case "world_clocks.dat":
+                    DataResult<PackedClockStates> clocks = PackedClockStates.CODEC
+                            .parse(net.minecraft.resources.RegistryOps.create(
+                                    NbtOps.INSTANCE, registries), data);
+                    clocks.getOrThrow();
+                    return "PackedClockStates.CODEC";
                 case "world_gen_settings.dat":
                     DataResult<net.minecraft.world.level.levelgen.WorldGenSettings> settings =
                             net.minecraft.world.level.levelgen.WorldGenSettings.CODEC

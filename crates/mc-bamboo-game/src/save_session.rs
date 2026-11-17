@@ -60,8 +60,8 @@ pub struct SaveSession {
     lock: Option<SessionLock>,
     level: LevelData,
     auto_save: bool,
-    /// 启动时从 `data/` 读到的游戏规则 / 世界边界，供 `World::build` 采用。
-    /// Game rules / world border loaded from `data/` at startup for `World::build`.
+    /// 启动时从 `data/` 读到的游戏规则 / 世界边界 / 世界时钟，供 `World::build` 采用。
+    /// Game rules, world border and world clocks loaded from `data/` at startup.
     startup: StartupData,
     /// `level.dat` 是不是真的从盘上读到（全新世界没有，运行时默认值才是权威）。
     /// Whether `level.dat` was actually read from disk (a fresh world has none,
@@ -103,12 +103,15 @@ impl SaveSession {
         // 补 10：不写未建模的 saved data 空文件；文件不存在时官方 codec 会自己造默认值。
         // Item 10: no empty default files for unmodelled saved data; official
         // codecs construct defaults when a file is absent.
-        // 启动时读回游戏规则（全局 data/）和世界边界（维度 data/）；文件不存在时用默认。
-        // Read back game rules (global data/) and world border (dimension data/) at
-        // startup; a missing file means defaults.
+        // 启动时读回游戏规则 / 世界时钟（全局 data/）和世界边界（维度 data/）；
+        // 文件不存在时用默认，和官方 `computeIfAbsent` 一样。
+        // Read back game rules / world clocks (global data/) and world border
+        // (dimension data/) at startup; a missing file means defaults, like
+        // official `computeIfAbsent`.
         let startup = StartupData {
             game_rules: read_saved_data(&dir, "minecraft:game_rules"),
             world_border: read_saved_data_at(&dir.world_border_dat()),
+            world_clocks: read_saved_data(&dir, "minecraft:world_clocks"),
         };
         let loaded_level = matches!(loaded.source, LevelSource::Primary | LevelSource::Fallback);
         // 世界生成设置（种子 + 维度生成器）存在 `data/` 里；有存档就以存档为准，
@@ -157,8 +160,8 @@ impl SaveSession {
         &mut self.level
     }
 
-    /// 启动时读到的游戏规则 / 世界边界。
-    /// Game rules / world border loaded at startup.
+    /// 启动时读到的游戏规则 / 世界边界 / 世界时钟。
+    /// Game rules / world border / world clocks loaded at startup.
     pub(crate) fn startup(&self) -> &StartupData {
         &self.startup
     }
@@ -215,6 +218,16 @@ impl SaveSession {
                 &global.world_border().export_settings(),
             ))?,
         });
+        // 两份世界时钟按 `PackedClockStates.CODEC` 写进全服的 `world_clocks.dat`；
+        // 官方开服时由 `ServerClockManager.init` 读回，昼夜时间接着上次存盘的值走。
+        // Both clocks go to the server-wide `world_clocks.dat` per
+        // `PackedClockStates.CODEC`; `ServerClockManager.init` reads them back
+        // so day time continues from the last save.
+        files.push(EncodedFile {
+            path: self.dir.saved_data("minecraft:world_clocks"),
+            backup: None,
+            bytes: encode_saved_data(&crate::save_data::world_clocks_tag(global))?,
+        });
         // 按官方 `WorldGenSettings.CODEC` 写出这一局的种子和维度生成器：
         // flat 写 `minecraft:flat` + 地层，噪声世界写 `minecraft:noise` + settings 注册名。
         // 官方服务端再打开这个世界时按同样的生成器继续，种子也固定下来。
@@ -232,9 +245,9 @@ impl SaveSession {
             backup: None,
             bytes: Self::chunk_tickets_bytes()?,
         });
-        // 补 10：只写建模过的五份文件；未建模的 saved data 保持「不存在」，
+        // 补 10：只写建模过的 `data/` 文件；未建模的 saved data 保持「不存在」，
         // 官方 computeIfAbsent 会自己造默认值。已有的这类文件原样保留，不动。
-        // Item 10: only the four modelled files are written; unmodelled saved
+        // Item 10: only the modelled `data/` files are written; unmodelled saved
         // data stays absent (official computeIfAbsent builds defaults). Existing
         // files of that kind are left untouched.
         Ok(files)
@@ -394,8 +407,10 @@ mod tests {
         assert!(!session.auto_save());
     }
 
-    /// 运行时的游戏规则、世界设置、世界边界写盘后再开一局，startup 路径要还原回来。
-    /// Runtime game rules, world settings and world border survive a save/reopen.
+    /// 运行时的游戏规则、世界设置、世界边界、世界时钟和游戏时间写盘后再开一局，
+    /// startup 路径都要还原回来。
+    /// Runtime game rules, world settings, border, clocks and game time all
+    /// survive a save/reopen through the startup path.
     #[test]
     fn runtime_settings_round_trip_through_disk() {
         use mc_bamboo_core::BlockPos;
@@ -417,6 +432,12 @@ mod tests {
         let _ = border.set_center(12.0, -8.0);
         let _ = border.set_size(321.0);
         let _ = border.set_warning_time(42);
+        global.restore_game_time(4242);
+        let clock = global.clock_named_mut("minecraft:overworld").unwrap();
+        clock.set_total_ticks(18_000);
+        clock.set_rate(3.0);
+        clock.set_paused(false);
+        let clocks = global.clocks();
 
         {
             let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
@@ -425,9 +446,11 @@ mod tests {
         }
 
         let (session, _) = SaveSession::open(&tmp.0).unwrap();
+        assert_eq!(session.level().time, 4242, "level.dat 的 Time 是游戏时间");
         let mut restored = Global::default();
         let mut region = crate::region::Region::new(2, 20, false);
         crate::save_data::apply_level_data(restored.state_mut(), session.level());
+        restored.restore_game_time(session.level().time);
         session
             .startup()
             .apply(&mut restored, &mut region, session.level().time);
@@ -444,6 +467,57 @@ mod tests {
         assert_eq!(settings.center_z, -8.0);
         assert_eq!(settings.size, 321.0);
         assert_eq!(settings.warning_time, 42);
+        assert_eq!(restored.time().0, 4242);
+        assert_eq!(restored.clocks(), clocks, "两份世界时钟逐字段恢复");
         assert_eq!(session.level().last_played, 1234);
+    }
+
+    /// `world_clocks.dat` 和 `level.dat` 都是运行时的真值，运行时改了时钟再存，
+    /// 重启后不能用第一次存盘的旧值。
+    /// Re-saving after a clock change must overwrite the previous clocks file.
+    #[test]
+    fn world_clocks_and_game_time_are_resaved_from_runtime() {
+        let tmp = TempDir::new("resave-time");
+        let mut global = Global::default();
+        global.restore_game_time(10);
+        global.restore_clock(
+            "minecraft:overworld",
+            crate::global::Clock {
+                total_ticks: 100,
+                partial_tick: 0.0,
+                rate: 1.0,
+                paused: false,
+            },
+        );
+        {
+            let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
+            session.save_all(&global, 1).unwrap();
+            session.close();
+        }
+        global.restore_game_time(90);
+        global.restore_clock(
+            "minecraft:overworld",
+            crate::global::Clock {
+                total_ticks: 900,
+                partial_tick: 0.5,
+                rate: 2.0,
+                paused: true,
+            },
+        );
+        {
+            let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
+            session.save_all(&global, 2).unwrap();
+            session.close();
+        }
+
+        let (session, _) = SaveSession::open(&tmp.0).unwrap();
+        let mut restored = Global::default();
+        restored.restore_game_time(session.level().time);
+        let mut region = crate::region::Region::new(2, 20, false);
+        session
+            .startup()
+            .apply(&mut restored, &mut region, session.level().time);
+        assert_eq!(restored.time().0, 90);
+        assert_eq!(restored.clocks(), global.clocks());
     }
 }
