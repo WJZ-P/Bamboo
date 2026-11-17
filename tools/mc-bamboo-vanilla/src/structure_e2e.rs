@@ -79,14 +79,20 @@ const QUERIES: &[(i64, i32, i32)] = &[
     // Ocean ruin pieces that actually place suspicious gravel with loot tables
     // and seeds (5 brushable blocks + 1 chest).
     (42, -50, -197),
+    // 三个海底遗迹件互相覆盖：后放的件把前一个件的可疑的沙砾换成普通沙砾，方块实体
+    // 必须随 `WorldGenRegion.setBlock` → `removeBlockEntity` 一起消失（6 个刷扫 + 1 个箱子）。
+    // Three overlapping ocean-ruin pieces: a later piece replaces an earlier piece's
+    // suspicious gravel with plain gravel, and the block entity must disappear with it
+    // via `WorldGenRegion.setBlock` → `removeBlockEntity` (6 brushable + 1 chest).
+    (42, 67, -236),
 ];
 
 /// 已定位但尚未修好的整块差异，用 `--known-gaps` 单独跑，不进默认干净跑。
 /// Known-but-unfixed whole-chunk gaps, run with `--known-gaps`; the default clean
 /// run excludes them.
-const KNOWN_GAPS: &[(i64, i32, i32)] = &[
-    (42, 67, -236), // ocean_ruin: CappedProcessor picks a different gravel set
-];
+/// 当前没有已知差异。
+/// No known gaps at the moment.
+const KNOWN_GAPS: &[(i64, i32, i32)] = &[];
 
 const USAGE: &str = "usage: structure-e2e <java> [--break-self-test] [--break-structure KIND] \
      [--structure-types IDS] [--show N] [--known-gaps] [--chunks-file FILE]";
@@ -144,6 +150,10 @@ impl Options {
 pub fn run(mut command: Command, queries_path: &Path, options: &[&str]) -> Result<(), String> {
     let parsed = Options::parse(options)?;
     let queries: &[(i64, i32, i32)] = if parsed.known_gaps {
+        if KNOWN_GAPS.is_empty() {
+            println!("structure-e2e: no known gaps");
+            return Ok(());
+        }
         KNOWN_GAPS
     } else {
         QUERIES

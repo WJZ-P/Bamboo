@@ -694,16 +694,19 @@ fn place_layout_piece(
     match kind {
         "igloo" | "shipwreck" | "ocean_ruin" => {
             let mut piece = piece.clone();
-            let outcome = match kind {
+            match kind {
                 "igloo" => post_process::igloo::igloo(world, &mut piece, *chunk_bb, random)?,
                 "shipwreck" => {
                     post_process::shipwreck::shipwreck(world, &mut piece, *chunk_bb, random)?
                 }
                 _ => post_process::ocean_ruin::ocean_ruin(world, &mut piece, *chunk_bb, random)?,
             };
-            for (x, y, z, state) in outcome.writes {
-                world.set_block_with_heightmaps(x, y, z, state);
-            }
+            // 这三种 `postProcess` 已经直接写进 `FeatureWorld`（`outcome.writes` 只是日志）。
+            // 不能再按日志重放一遍：重放里的 `BARRIER` → 方块实体方块会再走一次
+            // `removeBlockEntity`，把刚写好的战利品表丢掉。
+            // These `postProcess` calls already wrote straight into `FeatureWorld`
+            // (`outcome.writes` is only a log). Replaying it would run the
+            // `BARRIER` → block-entity sequence again and drop the loot table just written.
             Ok(None)
         }
         "mineshaft" | "stronghold" | "monument" | "mansion" => {
@@ -792,11 +795,9 @@ fn place_single_piece(
         "ruined_portal" => {
             let mut piece = piece.clone();
             let mut box_ = *chunk_bb;
-            let outcome =
-                post_process::ruined_portal::ruined_portal(world, &mut piece, &mut box_, random)?;
-            for (x, y, z, state) in outcome.writes {
-                world.set_block_with_heightmaps(x, y, z, state);
-            }
+            // 同上：已直接写进 `FeatureWorld`，不重放日志。
+            // As above: already written into `FeatureWorld`; do not replay the log.
+            post_process::ruined_portal::ruined_portal(world, &mut piece, &mut box_, random)?;
         }
         _ => {}
     }
