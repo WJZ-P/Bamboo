@@ -3,6 +3,7 @@
 //! 官方 `BlockEntity.saveAdditional` 由 [`BlockEntity::write_additional`] 实现；容器、战利品表、
 //! 名字、锁、合成器、讲台、命令方块这些在 `mc-bamboo-game` 的表里，由那一层补进同一个条目。
 //! 这里只写六种会动的方块实体真正持有的键，以及 `Items`（`ItemStackWithSlot.CODEC`）。
+//! 只保留存档态、没有行为的四种类型在 [`super::passive`]。
 
 use mc_bamboo_core::{BlockPos, Direction};
 use mc_bamboo_data::{BlockAncestor, blocks, registries, registries::block_entity_type as kinds};
@@ -12,7 +13,10 @@ use mc_bamboo_protocol::{
     item::ItemStack,
 };
 
-use super::tag::{self, Error, Result};
+use super::{
+    passive::{PassiveBlockEntity, PassiveKind},
+    tag::{self, Error, Result},
+};
 use crate::{
     BlockEntity, BlockState,
     behaviour::machines::{
@@ -21,7 +25,8 @@ use crate::{
     hopper::HopperEntity,
 };
 
-/// Bamboo 会实例化的方块实体类型。读盘只认这些；其它 `id` 由调用方整条原样保留。
+/// Bamboo 会实例化的会动的方块实体类型。读盘还认 [`PassiveKind`] 那四种只保留
+/// 存档态的类型；其余 `id` 由调用方整条原样保留。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockEntityKind {
     Furnace,
@@ -69,7 +74,8 @@ impl BlockEntityKind {
         }
     }
 
-    /// 每种类型各造一次，测试用它盯住工厂分支不要漏。
+    /// 每种会动的机器各造一次，测试用它盯住工厂分支不要漏。
+    /// 只保留存档态的四种由 [`PassiveKind::ALL`] 单独覆盖。
     pub const ALL: [Self; 8] = [
         Self::Furnace,
         Self::BlastFurnace,
@@ -91,6 +97,11 @@ pub fn create_block_entity(
     _state: BlockState,
     tag: &Tag,
 ) -> Result<Option<Box<dyn BlockEntity>>> {
+    if let Some(passive) = PassiveKind::from_name(id) {
+        return Ok(Some(Box::new(PassiveBlockEntity::read(
+            passive, pos, _state, tag,
+        )?)));
+    }
     let Some(kind) = BlockEntityKind::from_name(id) else {
         return Ok(None);
     };

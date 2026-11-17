@@ -399,3 +399,216 @@ fn hopper_ticked_game_time_stays_relative_across_ticks_and_archive() {
     assert_eq!(rebuilt.ticked_game_time_age(), None);
     assert_eq!(field(&tag, "TransferCooldown"), Some(&Tag::Int(0)));
 }
+
+/// 四种只保留存档态的方块实体：只有 `id` / 坐标的条目也写全官方构造器的默认键，
+/// 写 → 读 → 写不变；类型不会串。
+#[test]
+fn passive_block_entities_round_trip_their_default_keys() {
+    use super::passive::PassiveKind;
+
+    for kind in PassiveKind::ALL {
+        let empty = Tag::Compound(Vec::new());
+        let entity = create_block_entity(kind.name(), POS, BlockState::AIR, &empty)
+            .expect("读回成功")
+            .unwrap_or_else(|| panic!("{} 没有构造分支", kind.name()));
+        let first = write_block_entity_additional(entity.as_ref()).expect("写出成功");
+        assert_eq!(
+            first,
+            super::default_additional(kind.name()).expect("有默认键"),
+            "{kind:?}"
+        );
+        let rebuilt = create_block_entity(
+            kind.name(),
+            POS,
+            BlockState::AIR,
+            &Tag::Compound(first.clone()),
+        )
+        .expect("再读成功")
+        .unwrap_or_else(|| panic!("{} 再读没有构造分支", kind.name()));
+        assert_eq!(
+            write_block_entity_additional(rebuilt.as_ref()).expect("再写成功"),
+            first,
+            "{kind:?}"
+        );
+    }
+    assert_eq!(
+        super::default_additional("minecraft:vault"),
+        Some(vec![
+            (
+                "config".to_owned(),
+                Tag::Compound(vec![(
+                    "key_item".to_owned(),
+                    Tag::Compound(vec![
+                        (
+                            "id".to_owned(),
+                            Tag::String("minecraft:trial_key".to_owned()),
+                        ),
+                        ("count".to_owned(), Tag::Int(1)),
+                    ]),
+                )]),
+            ),
+            ("shared_data".to_owned(), Tag::Compound(Vec::new())),
+            ("server_data".to_owned(), Tag::Compound(Vec::new())),
+        ])
+    );
+    for id in [
+        "minecraft:sculk_sensor",
+        "minecraft:calibrated_sculk_sensor",
+    ] {
+        assert_eq!(
+            super::default_additional(id),
+            Some(vec![
+                ("last_vibration_frequency".to_owned(), Tag::Int(0)),
+                (
+                    "listener".to_owned(),
+                    Tag::Compound(vec![
+                        (
+                            "selector".to_owned(),
+                            Tag::Compound(vec![("tick".to_owned(), Tag::Long(-1))]),
+                        ),
+                        ("event_delay".to_owned(), Tag::Int(0)),
+                    ]),
+                ),
+            ])
+        );
+    }
+    assert_eq!(
+        super::default_additional("minecraft:sculk_shrieker"),
+        Some(vec![
+            ("warning_level".to_owned(), Tag::Int(0)),
+            (
+                "listener".to_owned(),
+                Tag::Compound(vec![
+                    (
+                        "selector".to_owned(),
+                        Tag::Compound(vec![("tick".to_owned(), Tag::Long(-1))]),
+                    ),
+                    ("event_delay".to_owned(), Tag::Int(0)),
+                ]),
+            ),
+        ])
+    );
+    assert_eq!(super::default_additional("minecraft:chest"), None);
+}
+
+/// `VaultConfig.CODEC` 的默认值省略、非默认值保留；`VaultServerData.set` 不搬
+/// `totalEjectionsNeeded`，空列表和计数都被省掉。
+#[test]
+fn vault_codec_omits_defaults_and_keeps_non_defaults() {
+    let uuid = Tag::IntArray(vec![1, 2, 3, 4]);
+    let config = Tag::Compound(vec![
+        (
+            "loot_table".to_owned(),
+            Tag::String("minecraft:chests/trial_chambers/reward".to_owned()),
+        ),
+        ("activation_range".to_owned(), Tag::Double(3.0)),
+        ("deactivation_range".to_owned(), Tag::Double(4.5)),
+        (
+            "override_loot_table_to_display".to_owned(),
+            Tag::String("minecraft:chests/trial_chambers/reward_ominous".to_owned()),
+        ),
+    ]);
+    let shared = Tag::Compound(vec![
+        (
+            "connected_players".to_owned(),
+            Tag::List(vec![uuid.clone()]),
+        ),
+        ("connected_particles_range".to_owned(), Tag::Double(4.5)),
+    ]);
+    let server = Tag::Compound(vec![
+        ("state_updating_resumes_at".to_owned(), Tag::Long(123)),
+        ("items_to_eject".to_owned(), Tag::List(Vec::new())),
+        ("total_ejections_needed".to_owned(), Tag::Int(7)),
+    ]);
+    let tag = Tag::Compound(vec![
+        ("config".to_owned(), config),
+        ("shared_data".to_owned(), shared),
+        ("server_data".to_owned(), server),
+    ]);
+    let entity = create_block_entity("minecraft:vault", POS, BlockState::AIR, &tag)
+        .unwrap()
+        .unwrap();
+    let written = Tag::Compound(write_block_entity_additional(entity.as_ref()).unwrap());
+    assert_eq!(
+        field(&written, "config"),
+        Some(&Tag::Compound(vec![
+            ("activation_range".to_owned(), Tag::Double(3.0)),
+            (
+                "override_loot_table_to_display".to_owned(),
+                Tag::String("minecraft:chests/trial_chambers/reward_ominous".to_owned()),
+            ),
+        ]))
+    );
+    assert_eq!(
+        field(&written, "shared_data"),
+        Some(&Tag::Compound(vec![(
+            "connected_players".to_owned(),
+            Tag::List(vec![uuid]),
+        )]))
+    );
+    assert_eq!(
+        field(&written, "server_data"),
+        Some(&Tag::Compound(vec![(
+            "state_updating_resumes_at".to_owned(),
+            Tag::Long(123)
+        ),]))
+    );
+    // 再读再写仍逐键相同。
+    let rebuilt = create_block_entity("minecraft:vault", POS, BlockState::AIR, &written)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        Tag::Compound(write_block_entity_additional(rebuilt.as_ref()).unwrap()),
+        written
+    );
+}
+
+/// `VibrationSystem.Data.CODEC`：`event_delay` 永远写、`selector.tick` 必写，
+/// `event` 可省；坏条目让整个监听器回到新建默认值。
+#[test]
+fn vibration_listener_always_writes_its_required_keys() {
+    let tag = Tag::Compound(vec![
+        ("last_vibration_frequency".to_owned(), Tag::Int(3)),
+        (
+            "listener".to_owned(),
+            Tag::Compound(vec![(
+                "selector".to_owned(),
+                Tag::Compound(vec![("tick".to_owned(), Tag::Long(42))]),
+            )]),
+        ),
+    ]);
+    let entity = create_block_entity("minecraft:sculk_sensor", POS, BlockState::AIR, &tag)
+        .unwrap()
+        .unwrap();
+    let written = Tag::Compound(write_block_entity_additional(entity.as_ref()).unwrap());
+    assert_eq!(
+        field(&written, "last_vibration_frequency"),
+        Some(&Tag::Int(3))
+    );
+    assert_eq!(
+        field(&written, "listener"),
+        Some(&Tag::Compound(vec![
+            (
+                "selector".to_owned(),
+                Tag::Compound(vec![("tick".to_owned(), Tag::Long(-1))]),
+            ),
+            ("event_delay".to_owned(), Tag::Int(0)),
+        ])),
+        "`VibrationSelector.CODEC` 没有 `event` 时把 tick 折成 -1L"
+    );
+    let broken = Tag::Compound(vec![(
+        "listener".to_owned(),
+        Tag::Compound(vec![("event_delay".to_owned(), Tag::Int(-1))]),
+    )]);
+    let rebuilt = create_block_entity("minecraft:sculk_sensor", POS, BlockState::AIR, &broken)
+        .unwrap()
+        .unwrap();
+    let default = Tag::Compound(write_block_entity_additional(rebuilt.as_ref()).unwrap());
+    assert_eq!(
+        field(&default, "listener"),
+        super::default_additional("minecraft:sculk_sensor")
+            .unwrap()
+            .last()
+            .map(|(_, value)| value)
+    );
+}

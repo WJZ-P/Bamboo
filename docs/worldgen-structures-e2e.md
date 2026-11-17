@@ -212,9 +212,12 @@ gen-world: 60 chunks, 0 quart cells, 53084160 blocks, 133 block entities,
 * 生成期实体（村民、悦灵、守卫者、女巫 / 猫）不进假世界；只保证它们的
   `nextLong` / 方块写入序列与官方一致，不比较实体本身。
 * 官方构造器默认值按白名单忽略。Bamboo 运行时读盘再存盘的情况由
-  `tools/mc-bamboo-vanilla/tests/block_entity_resave.rs` 记录：熔炉写出的键与
+  `tools/mc-bamboo-vanilla/tests/block_entity_resave.rs` 逐键逐值断言：熔炉写出的键与
   `AbstractFurnaceBlockEntity.saveAdditional` 一致（七个键，含 `speed_multiplier`）；
-  宝库、幽匿传感器 / 校准幽匿传感器在 Bamboo 里没有实例，条目原样保留——只有 `id`
-  和坐标的条目存盘后仍缺 `config` / `shared_data` / `server_data` 或
-  `last_vibration_frequency` / `listener`，官方会补出这些键；熔炉条目里官方不认识的
-  旧键（如 `BurnTime`）Bamboo 合并时保留，官方会丢掉。本轮只记录不修。
+  宝库、幽匿感测器 / 校准幽匿感测器 / 幽匿尖啸体现在有只保留存档态的实体，
+  裸条目也写出 `config`（含默认试炼钥匙）/ `shared_data` / `server_data`、
+  `last_vibration_frequency` / `listener` 或 `warning_level` / `listener`，
+  三个宝库 codec 和 `VibrationSystem.Data.CODEC` 的默认值省略规则也照官方。
+  `chunk-content` oracle 用官方 `loadStatic → saveWithFullMetadata` 对同一批边界
+  条目逐值比较。剩下两点：熔炉条目里官方不认识的旧键（如 `BurnTime`）Bamboo 合并时
+  保留、官方会丢掉；其它「原样保留」的方块实体类型仍未实现（见存档层面的清单）。
