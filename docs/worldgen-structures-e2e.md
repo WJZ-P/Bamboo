@@ -214,38 +214,65 @@ gen-world: 60 chunks, 0 quart cells, 53084160 blocks, 133 block entities,
 * 官方构造器默认值按白名单忽略。Bamboo 运行时读盘再存盘的情况由
   `tools/mc-bamboo-vanilla/tests/block_entity_resave.rs` 逐键逐值断言：熔炉写出的键与
   `AbstractFurnaceBlockEntity.saveAdditional` 一致（七个键，含 `speed_multiplier`）；
-  宝库、幽匿感测器 / 校准幽匿感测器 / 幽匿尖啸体现在有只保留存档态的实体，
-  裸条目也写出 `config`（含默认试炼钥匙）/ `shared_data` / `server_data`、
-  `last_vibration_frequency` / `listener` 或 `warning_level` / `listener`，
-  三个宝库 codec 和 `VibrationSystem.Data.CODEC` 的默认值省略规则也照官方。
-  `chunk-content` oracle 用官方 `loadStatic → saveWithFullMetadata` 对同一批边界
-  条目逐值比较。剩下两点：熔炉条目里官方不认识的旧键（如 `BurnTime`）Bamboo 合并时
-  保留、官方会丢掉；其它「原样保留」的方块实体类型仍未实现（见存档层面的清单）。
+  宝库、幽匿感测器 / 校准幽匿感测器 / 幽匿尖啸体、以及清单里本轮修好的类型，
+  裸条目也写出官方 `saveAdditional` 的默认值。`chunk-content` oracle 用官方
+  `loadStatic → saveWithFullMetadata` 对同一批裸 / 富字段边界条目逐值比较，
+  纯函数正式编码路径和对拍共用 `mc-bamboo-blocks::archive::resave_additional`。
+  `VibrationInfo.game_event` 现在按 `minecraft:game_event` 注册表校验，没注册过的
+  名字像官方 `GameEvent.CODEC` 一样把事件丢掉。
+* **有意的差别**：Bamboo 按 D9「不认识的键原样保留」，官方 `loadStatic → save` 会丢掉
+  条目里官方该类型 codec 不认识的键（如熔炉的旧键 `BurnTime`）。当前数据版本下官方
+  自己写出的存档不会带这种键；把这种键放进存档再读一次，两边写出结果会差这一个键。
+  `block_entity_resave` 的单测固定了这个现状，对拍边界题不放未知键。
+  官方认识、只是当前状态不写的键（空 `Items`、等于默认值的可选字段）不在此列，
+  按官方去掉。
+* **内容键的归属**：一个键只有在游戏层运行时表确实拥有它、且存盘会写出当前值时，
+  才从读盘条目里删掉交给游戏层；否则 `archive::resave` 自己按官方 codec 带回。
+  唱片机的 `RecordItem` / `ticks_since_song_started`、陶罐的 `item`、潜影盒的
+  `Items` / `LootTable` / `LootTableSeed`、命令方块的 `LastOutput` / `LastExecution`
+  都没有对应的运行时写入者，全部由 `resave` 写回；`sherds` 由组件补丁拥有、
+  `ticks_since_song_started` 由红石表拥有，两者在运行时改过内容时以后者为准。
+  末影箱的物品在玩家身上，官方 `EnderChestBlockEntity` 不写这些键，按官方丢掉。
+  有内容的「读盘 → 不操作 → 存盘」和「读盘 → 游戏里改内容 → 存盘」两组往返都逐值断言。
+* **子 codec 未规范化**：`SpawnData.custom_spawn_rules` / `equipment` 与
+  `BeehiveBlockEntity.Occupant.entity_data` 里的键按读盘值原样带回（不丢、不改），
+  但没有按各自的子 codec 逐字段重新编码；这是存档保真范围内的已知限制，
+  单测固定了「不丢不改」，对拍的富字段题只放官方 codec 能逐值往返的形状。
+  同理，唱片机只在官方能识别 `jukebox_playable` 时写 `ticks_since_song_started`；
+  Bamboo 目前对任意非空唱片保留读盘进度，普通物品做唱片的极端条目可能多写这个键。
 
 ## 存档层面的「原样保留」清单
 
 下表用官方 `BlockEntity.loadStatic → saveWithFullMetadata` 对每种类型造一份只有
 `id` / 坐标的裸条目，再和 Bamboo `chunk_content::decode → encode` 的写出结果逐键比较。
 「一致」指读盘再存盘的键集合相同；「生成期」指没有 `block_entities` 条目、方块状态
-由世界生成直接放下时是否也一致。官方写出的默认值和 Bamboo 缺失 / 多出的键列在备注里。
-（有些类型 Bamboo 只建模了一部分键，下表按实测结果列出，不是按是否注册过工厂。）
+由世界生成直接放下时是否也一致。「修后」一列是本轮（提交 `1008f748`、`cd895525`、
+`e51d43b4`）之后的结果，三种边界题（裸条目 / 带富字段的条目 / 无存档条目的生成期路径）
+都在 `block_entity_resave` 与 `chunk-content` oracle 里对照过官方。
 
-| 类型 | 世界生成会出现 | 读盘再存盘 | 仅生成期 | 备注 |
+| 类型 | 世界生成会出现 | 旧：读盘 / 生成期 | 修后：读盘 / 生成期 | 备注 |
 |---|---|---|---|---|
-| `vault`、`sculk_sensor`、`calibrated_sculk_sensor`、`sculk_shrieker` | 会 | 一致 | 一致 | 本轮修好；见 `tools/mc-bamboo-vanilla/tests/block_entity_resave.rs` |
-| `furnace`、`smoker`、`blast_furnace`、`brewing_stand`、`campfire`、`piston`、`comparator`、`crafter`、`chiseled_bookshelf`、`hopper`、`chest`、`trapped_chest`、`barrel`、`dispenser`、`dropper`、`shelf`、`command_block` | 部分会 | 一致 | 不一致 | 生成期没有上层表条目时缺 `Items` / `align_items_to_bottom` / `Command` 等 7 键；那些表由玩家 / 结构模板写入 |
-| `ender_chest`、`jukebox`、`shulker_box`、`decorated_pot` | 会 | 不一致 | 一致 | 读盘条目会多出 `Items`（容器表把这几类也建了空条目） |
-| `sign`、`hanging_sign` | 会 | 不一致 | 不一致 | 缺 `front_text` / `back_text` / `is_waxed`；下层 `chunk_nbt` 只在有内容的告示牌上写文字 |
-| `beacon` | 不会 | 不一致 | 不一致 | 缺 `Levels` |
-| `beehive` | 会 | 不一致 | 不一致 | 缺 `bees`（空列表也写） |
-| `end_gateway` | 会 | 不一致 | 不一致 | 缺 `Age` |
-| `jigsaw` | 会 | 不一致 | 不一致 | 缺 `final_state` / `joint` / `name` / `pool` / `target` 等 7 键 |
-| `mob_spawner` | 会 | 不一致 | 不一致 | 缺 `Delay` 等 7 个 short 与 `SpawnPotentials` |
-| `potent_sulfur` | 会 | 不一致 | 不一致 | 缺 `countdown` |
-| `sculk_catalyst` | 会 | 不一致 | 不一致 | 缺 `cursors`（空列表也写） |
-| `structure_block` | 不会 | 不一致 | 不一致 | 缺 `name` / `author` / `posX`… 等 19 键 |
-| `test_block`、`test_instance_block` | 不会 | 不一致 | 不一致 | 缺 `message` / `mode` / `powered` / `data` |
-| `banner`、`skull`、`brushable_block`、`conduit`、`creaking_heart`、`trial_spawner`、`enchanting_table`、`end_portal`、`daylight_detector`、`bell`、`copper_golem_statue`、`lectern` | 部分会 | 一致 | 一致 | 官方裸条目不写自有键；非空内容 / 组件补丁的往返未在本轮覆盖 |
+| `vault`、`sculk_sensor`、`calibrated_sculk_sensor`、`sculk_shrieker` | 会 | 一致 / 一致 | 一致 / 一致 | 上一轮修好；`VibrationInfo.game_event` 现在还查注册表 |
+| `furnace`、`smoker`、`blast_furnace`、`brewing_stand`、`campfire`、`piston`、`comparator`、`crafter`、`chiseled_bookshelf`、`hopper` | 部分会 | 一致 / 不一致 | 一致 / 不一致 | 熔炉等 8 种生成期默认键未变；纯 `decode → encode`（没有上层容器表）时箱子 / 漏斗 / 营火 / 合成器 / 书架仍缺 `Items` 等键，真实生成路径由上层表写入，未改 |
+| `chest`、`trapped_chest`、`barrel`、`dispenser`、`dropper` | 部分会 | 一致 / 不一致 | 一致 / 不一致 | 同上：纯 `decode → encode` 缺 `Items`，真实生成路径由容器表写入 |
+| `command_block` | 部分会 | 一致 / 不一致 | 一致 / 一致 | 生成期缺的 7 键已补；运行时命令表优先 |
+| `shelf` | 部分会 | 一致 / 不一致 | 一致 / 一致 | 补 `align_items_to_bottom`（空 `Items` 也写） |
+| `ender_chest`、`jukebox`、`shulker_box`、`decorated_pot` | 会 | 不一致 / 一致 | 一致 / 一致 | 读盘时不再给这四类建空容器条目，`Items` 不再多写；运行时内容仍由容器表 / 组件补丁负责 |
+| `sign`、`hanging_sign` | 会 | 不一致 / 不一致 | 一致 / 一致 | 补 `front_text` / `back_text` / `is_waxed`；运行时用 `ChunkColumn::signs` 覆盖读盘旧值 |
+| `beacon` | 不会 | 不一致 / 不一致 | 一致 / 一致 | 补 `Levels`（读盘不还原，恒为构造器 0） |
+| `beehive` | 会 | 不一致 / 不一致 | 一致 / 一致 | 补 `bees`（空列表也写）；`flower_pos` 只在非空时写 |
+| `end_gateway` | 会 | 不一致 / 不一致 | 一致 / 一致 | 补 `Age`；`exit_portal` / `ExactTeleport` 按可省规则 |
+| `jigsaw` | 会 | 不一致 / 不一致 | 一致 / 一致 | 补 `final_state` / `joint` / `name` / `pool` / `target` / 两个 priority 共 7 键；`joint` 缺省按方块状态方向推导 |
+| `mob_spawner` | 会 | 不一致 / 不一致 | 一致 / 一致 | 补 `Delay` 等 7 个 short 与 `SpawnPotentials`（含空 `SpawnData` 的默认项） |
+| `potent_sulfur` | 会 | 不一致 / 不一致 | 一致 / 一致 | 补 `countdown`（缺键时保持 -1） |
+| `sculk_catalyst` | 会 | 不一致 / 不一致 | 一致 / 一致 | 补 `cursors`（空列表也写） |
+| `structure_block` | 不会 | 不一致 / 不一致 | 一致 / 一致 | 补 19 键；pos / size 的 clamp、名称与枚举的宽松解码照官方 |
+| `test_block`、`test_instance_block` | 不会 | 不一致 / 不一致 | 一致 / 一致 | 补 `message` / `mode` / `powered` / `data`；仅测试模式出现，仍做了逐值对照 |
+| `banner`、`skull`、`brushable_block`、`conduit`、`creaking_heart`、`trial_spawner`、`enchanting_table`、`end_portal`、`daylight_detector`、`bell`、`copper_golem_statue`、`lectern` | 部分会 | 一致 / 一致 | 一致 / 一致 | 官方裸条目不写自有键；非空内容 / 组件补丁的往返未在本轮覆盖 |
 
 `command_block` 与 `lectern` 的「一致」只针对空条目：Bamboo 的游戏层按实际表内容补键，
-非空数据另有自己的往返测试。上表只做清单，不修这些类型。
+非空数据另有自己的往返测试。上一轮清单里「仅生成期」列按纯 `decode → encode`（没有
+上层容器 / 命令方块表）口径判定；本轮 `block_entity_resave` 的 23 种类型（含命令方块 /
+架子 / 熔炉）都补出了生成期缺键并逐值对照官方，其余纯容器类型仍按上层表口径看待。
+「有意的差别」见上面的已知限制：只有条目里带该类型 codec 不认识的键时，Bamboo 仍
+按 D9 原样保留、官方丢掉，其余都逐键一致。

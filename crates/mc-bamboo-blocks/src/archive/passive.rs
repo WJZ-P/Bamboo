@@ -484,13 +484,17 @@ fn read_selector(input: Option<&Tag>) -> Option<Tag> {
     Some(Tag::Compound(out))
 }
 
-/// `VibrationInfo.CODEC`：`game_event` / `distance` / `pos` 必写，
+/// `VibrationInfo.CODEC`：`game_event` 是 `GameEvent.CODEC`（注册表 holder），
+/// 名字必须是 `minecraft:game_event` 里注册过的条目；`distance` / `pos` 必写，
 /// `source` / `projectile_owner` 用 `lenientOptionalFieldOf` 可省。
 fn vibration_event(input: Option<&Tag>) -> Option<Tag> {
     let Tag::Compound(values) = input? else {
         return None;
     };
     let game_event = identifier(entry(values, "game_event")?)?;
+    // `RegistryCodecs.holder` 解码失败时整个 `VibrationInfo` 解码失败，`lenient`
+    // 字段把事件丢掉；这里照官方做法只按注册表接受名字，不抄注册表内容进存档。
+    mc_bamboo_data::registries::game_event::by_name(&game_event)?;
     let distance = tag::java_f32(entry(values, "distance")?).ok()?;
     if !(0.0..=f32::MAX).contains(&distance) {
         return None;

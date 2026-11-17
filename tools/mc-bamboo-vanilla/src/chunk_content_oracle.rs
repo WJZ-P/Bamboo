@@ -250,7 +250,8 @@ fn run_cases(
             format!("{name}: {}", case.error.as_deref().unwrap_or("")),
         );
         // 容器/战利品表由游戏层第二段负责；方块层这一段的工厂只认会动的六种。
-        if name.starts_with("chest-") {
+        // 振动事件的注册表校验在 `passive.rs`，用官方 load → save 检查这两题。
+        if name.starts_with("chest-") || name.starts_with("sculk-sensor-") {
             continue;
         }
         let rebuilt = mc_bamboo_blocks::archive::create_block_entity(
@@ -325,6 +326,126 @@ fn run_cases(
                 );
             }
         }
+    }
+
+    // 2d. `VibrationInfo.game_event` 是注册表 holder codec：语法合法但没注册的
+    //     名字解不开，官方把整个 event 丢掉（`selector.tick` 也折回 -1L）。
+    //     Bamboo 用同一个 `PassiveBlockEntity` 逐值对照官方结果。
+    for (index, case) in answer.cases.iter().enumerate() {
+        let name = &load_cases[index].0;
+        if !name.starts_with("sculk-sensor-") {
+            continue;
+        }
+        report.check(
+            case.error.is_none(),
+            format!("{name}: {}", case.error.as_deref().unwrap_or("")),
+        );
+        let rebuilt = mc_bamboo_blocks::archive::create_block_entity(
+            "minecraft:sculk_sensor",
+            BlockPos::new(3, 64, 5),
+            BlockState(blocks::AIR),
+            &load_cases[index].2,
+        )
+        .map_err(|error| error.to_string())?
+        .expect("sensor factory");
+        let keys = mc_bamboo_blocks::archive::write_block_entity_additional(rebuilt.as_ref())
+            .map_err(|error| error.to_string())?;
+        let official = case.written.as_ref().map(|v| &v["values"]);
+        let bamboo = canonical_tag(&Tag::Compound(keys))["values"].clone();
+        if let Some(official) = official {
+            for (key, value) in bamboo.as_object().unwrap() {
+                report.check(
+                    official.get(key) == Some(value),
+                    format!(
+                        "{name}: Bamboo wrote {key} as {value}, official {:?}",
+                        official.get(key)
+                    ),
+                );
+            }
+            let metadata = ["id", "x", "y", "z", "components", "keepPacked"];
+            let mut official_keys: Vec<&str> = official
+                .as_object()
+                .map(|map| {
+                    map.keys()
+                        .map(String::as_str)
+                        .filter(|key| !metadata.contains(key))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut bamboo_keys: Vec<&str> = bamboo
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            official_keys.sort_unstable();
+            bamboo_keys.sort_unstable();
+            report.check(
+                official_keys == bamboo_keys,
+                format!("{name}: official keys {official_keys:?}, Bamboo keys {bamboo_keys:?}"),
+            );
+        }
+    }
+
+    // 2c. 只保留存档态的方块实体：官方 loadStatic → saveWithFullMetadata 与
+    //     Bamboo 正式编码路径共用的 `resave_additional` 逐键逐值对照。
+    //     裸条目 + 富字段两种边界题；未知键不进题目（D9 单测另行固定）。
+    let resave_cases = resave_load_cases();
+    let answer = ask(
+        stdin,
+        lines,
+        json!({"command": "block-entities-load", "entities": resave_cases.iter().map(|case| {
+            json!({"name": case.0, "state": case.1, "tag": canonical_tag(&case.3)})
+        }).collect::<Vec<_>>()}),
+    )?;
+    report.check(
+        answer.cases.len() == resave_cases.len(),
+        "official sent the wrong number of resave cases",
+    );
+    for (index, case) in answer.cases.iter().enumerate() {
+        let (name, _, id, tag) = &resave_cases[index];
+        report.check(
+            case.error.is_none(),
+            format!("{name}: {}", case.error.as_deref().unwrap_or("")),
+        );
+        let Some(written) = &case.written else {
+            continue;
+        };
+        let state = match mc_bamboo_data::block_by_name(resave_cases[index].1) {
+            Some(block) => BlockState(block.default_state),
+            None => BlockState::AIR,
+        };
+        let saved = mc_bamboo_blocks::archive::resave_additional(id, state, tag)
+            .unwrap_or_else(|| panic!("{name}: Bamboo has no resave branch"));
+        let official = &written["values"];
+        let metadata = ["id", "x", "y", "z", "components", "keepPacked"];
+        for (key, value) in &saved.fields {
+            report.check(
+                official.get(key) == Some(&canonical_tag(value)),
+                format!(
+                    "{name}: Bamboo wrote {key} as {}, official {}",
+                    canonical_tag(value),
+                    official.get(key).cloned().unwrap_or(Value::Null)
+                ),
+            );
+        }
+        // 官方写出的非元数据键必须就是 Bamboo 写出的键（可省键按官方 omit）。
+        let mut official_keys: Vec<&str> = official
+            .as_object()
+            .map(|map| {
+                map.keys()
+                    .map(String::as_str)
+                    .filter(|key| !metadata.contains(key))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut bamboo_keys: Vec<&str> = saved.fields.iter().map(|(key, _)| key.as_str()).collect();
+        official_keys.sort_unstable();
+        bamboo_keys.sort_unstable();
+        report.check(
+            official_keys == bamboo_keys,
+            format!("{name}: official keys {official_keys:?}, Bamboo keys {bamboo_keys:?}"),
+        );
     }
 
     // 3. SavedTick：官方 codec 写出的 NBT，Bamboo 能解回同样的键，再编回去按键一致；
@@ -501,6 +622,460 @@ fn run_cases(
         );
     }
     Ok(())
+}
+
+/// 只保留存档态的方块实体：裸条目 / 富字段边界题。
+/// 每项：(题名, 方块状态, 官方 `id`, 读盘条目)。`chunk-content` 对拍用同一份
+/// `resave_additional` 逐键逐值对照官方 `loadStatic → saveWithFullMetadata`。
+fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
+    let meta = |id: &str| {
+        vec![
+            ("id".to_owned(), Tag::String(id.to_owned())),
+            ("x".to_owned(), Tag::Int(3)),
+            ("y".to_owned(), Tag::Int(64)),
+            ("z".to_owned(), Tag::Int(5)),
+            ("components".to_owned(), Tag::Compound(Vec::new())),
+            ("keepPacked".to_owned(), Tag::Byte(0)),
+        ]
+    };
+    let bare: &[(&str, &str, &str)] = &[
+        (
+            "mob_spawner-bare",
+            "minecraft:spawner",
+            "minecraft:mob_spawner",
+        ),
+        ("sign-bare", "minecraft:oak_sign", "minecraft:sign"),
+        (
+            "hanging_sign-bare",
+            "minecraft:oak_hanging_sign",
+            "minecraft:hanging_sign",
+        ),
+        ("beehive-bare", "minecraft:beehive", "minecraft:beehive"),
+        ("jigsaw-bare", "minecraft:jigsaw", "minecraft:jigsaw"),
+        (
+            "end_gateway-bare",
+            "minecraft:end_gateway",
+            "minecraft:end_gateway",
+        ),
+        (
+            "sculk_catalyst-bare",
+            "minecraft:sculk_catalyst",
+            "minecraft:sculk_catalyst",
+        ),
+        ("beacon-bare", "minecraft:beacon", "minecraft:beacon"),
+        (
+            "potent_sulfur-bare",
+            "minecraft:potent_sulfur",
+            "minecraft:potent_sulfur",
+        ),
+        (
+            "structure_block-bare",
+            "minecraft:structure_block",
+            "minecraft:structure_block",
+        ),
+        (
+            "ender_chest-bare",
+            "minecraft:ender_chest",
+            "minecraft:ender_chest",
+        ),
+        ("jukebox-bare", "minecraft:jukebox", "minecraft:jukebox"),
+        (
+            "shulker_box-bare",
+            "minecraft:shulker_box",
+            "minecraft:shulker_box",
+        ),
+        (
+            "decorated_pot-bare",
+            "minecraft:decorated_pot",
+            "minecraft:decorated_pot",
+        ),
+        ("shelf-bare", "minecraft:oak_shelf", "minecraft:shelf"),
+        (
+            "command_block-bare",
+            "minecraft:command_block",
+            "minecraft:command_block",
+        ),
+        (
+            "test_block-bare",
+            "minecraft:test_block",
+            "minecraft:test_block",
+        ),
+        (
+            "test_instance_block-bare",
+            "minecraft:test_instance_block",
+            "minecraft:test_instance_block",
+        ),
+    ];
+    let mut out: Vec<_> = bare
+        .iter()
+        .map(|(name, state, id)| {
+            let tag = Tag::Compound(meta(id));
+            (name.to_string(), *state, *id, tag)
+        })
+        .collect();
+    // 富字段：非默认数值、可省字段、带列表的 codec。
+    let mut full =
+        |name: &str, state: &'static str, id: &'static str, extra: Vec<(String, Tag)>| {
+            let mut fields = meta(id);
+            fields.extend(extra);
+            out.push((name.to_owned(), state, id, Tag::Compound(fields)));
+        };
+    full(
+        "mob_spawner-full",
+        "minecraft:spawner",
+        "minecraft:mob_spawner",
+        vec![
+            ("Delay".to_owned(), Tag::Short(7)),
+            ("SpawnCount".to_owned(), Tag::Short(9)),
+            ("MinSpawnDelay".to_owned(), Tag::Short(100)),
+            ("MaxSpawnDelay".to_owned(), Tag::Short(900)),
+            (
+                "SpawnPotentials".to_owned(),
+                Tag::List(vec![Tag::Compound(vec![
+                    (
+                        "data".to_owned(),
+                        Tag::Compound(vec![(
+                            "entity".to_owned(),
+                            Tag::Compound(vec![(
+                                "id".to_owned(),
+                                Tag::String("minecraft:zombie".to_owned()),
+                            )]),
+                        )]),
+                    ),
+                    ("weight".to_owned(), Tag::Int(3)),
+                ])]),
+            ),
+        ],
+    );
+    full(
+        "sign-full",
+        "minecraft:oak_sign",
+        "minecraft:sign",
+        vec![
+            (
+                "front_text".to_owned(),
+                Tag::Compound(vec![
+                    (
+                        "messages".to_owned(),
+                        Tag::List(vec![
+                            Tag::String("hi".to_owned()),
+                            Tag::String(String::new()),
+                            Tag::String(String::new()),
+                            Tag::String(String::new()),
+                        ]),
+                    ),
+                    ("color".to_owned(), Tag::String("red".to_owned())),
+                    ("has_glowing_text".to_owned(), Tag::Byte(1)),
+                ]),
+            ),
+            ("is_waxed".to_owned(), Tag::Byte(1)),
+        ],
+    );
+    full(
+        "beehive-full",
+        "minecraft:beehive",
+        "minecraft:beehive",
+        vec![
+            (
+                "bees".to_owned(),
+                Tag::List(vec![Tag::Compound(vec![
+                    (
+                        "entity_data".to_owned(),
+                        Tag::Compound(vec![(
+                            "id".to_owned(),
+                            Tag::String("minecraft:bee".to_owned()),
+                        )]),
+                    ),
+                    ("ticks_in_hive".to_owned(), Tag::Int(12)),
+                    ("min_ticks_in_hive".to_owned(), Tag::Int(20)),
+                ])]),
+            ),
+            ("flower_pos".to_owned(), Tag::IntArray(vec![1, 2, 3])),
+        ],
+    );
+    full(
+        "jigsaw-full",
+        "minecraft:jigsaw",
+        "minecraft:jigsaw",
+        vec![
+            (
+                "name".to_owned(),
+                Tag::String("minecraft:target".to_owned()),
+            ),
+            ("pool".to_owned(), Tag::String("minecraft:empty".to_owned())),
+            (
+                "final_state".to_owned(),
+                Tag::String("minecraft:stone".to_owned()),
+            ),
+            ("joint".to_owned(), Tag::String("rollable".to_owned())),
+            ("placement_priority".to_owned(), Tag::Int(5)),
+            ("selection_priority".to_owned(), Tag::Int(-2)),
+        ],
+    );
+    full(
+        "end_gateway-full",
+        "minecraft:end_gateway",
+        "minecraft:end_gateway",
+        vec![
+            ("Age".to_owned(), Tag::Long(99)),
+            ("exit_portal".to_owned(), Tag::IntArray(vec![4, 5, 6])),
+            ("ExactTeleport".to_owned(), Tag::Byte(1)),
+        ],
+    );
+    full(
+        "sculk_catalyst-full",
+        "minecraft:sculk_catalyst",
+        "minecraft:sculk_catalyst",
+        vec![(
+            "cursors".to_owned(),
+            Tag::List(vec![Tag::Compound(vec![
+                ("pos".to_owned(), Tag::IntArray(vec![1, 2, 3])),
+                ("charge".to_owned(), Tag::Int(7)),
+                (
+                    "facings".to_owned(),
+                    Tag::List(vec![Tag::String("up".to_owned())]),
+                ),
+            ])]),
+        )],
+    );
+    full(
+        "potent_sulfur-full",
+        "minecraft:potent_sulfur",
+        "minecraft:potent_sulfur",
+        vec![("countdown".to_owned(), Tag::Int(42))],
+    );
+    full(
+        "structure_block-full",
+        "minecraft:structure_block",
+        "minecraft:structure_block",
+        vec![
+            ("name".to_owned(), Tag::String("minecraft:test".to_owned())),
+            ("author".to_owned(), Tag::String("builder".to_owned())),
+            ("posX".to_owned(), Tag::Int(9)),
+            ("sizeY".to_owned(), Tag::Int(4)),
+            (
+                "rotation".to_owned(),
+                Tag::String("CLOCKWISE_90".to_owned()),
+            ),
+            ("mode".to_owned(), Tag::String("LOAD".to_owned())),
+            ("ignoreEntities".to_owned(), Tag::Byte(0)),
+            ("integrity".to_owned(), Tag::Float(0.5)),
+            ("seed".to_owned(), Tag::Long(123)),
+        ],
+    );
+    full(
+        "shelf-full",
+        "minecraft:oak_shelf",
+        "minecraft:shelf",
+        vec![
+            (
+                "Items".to_owned(),
+                Tag::List(vec![Tag::Compound(vec![
+                    ("Slot".to_owned(), Tag::Byte(1)),
+                    ("id".to_owned(), Tag::String("minecraft:stone".to_owned())),
+                    ("count".to_owned(), Tag::Int(3)),
+                ])]),
+            ),
+            ("align_items_to_bottom".to_owned(), Tag::Byte(1)),
+        ],
+    );
+    full(
+        "test_block-full",
+        "minecraft:test_block",
+        "minecraft:test_block",
+        vec![
+            ("mode".to_owned(), Tag::String("accept".to_owned())),
+            ("message".to_owned(), Tag::String("done".to_owned())),
+            ("powered".to_owned(), Tag::Byte(1)),
+        ],
+    );
+    full(
+        "test_instance_block-full",
+        "minecraft:test_instance_block",
+        "minecraft:test_instance_block",
+        vec![(
+            "data".to_owned(),
+            Tag::Compound(vec![
+                ("size".to_owned(), Tag::IntArray(vec![3, 4, 5])),
+                (
+                    "rotation".to_owned(),
+                    Tag::String("clockwise_90".to_owned()),
+                ),
+                ("ignore_entities".to_owned(), Tag::Byte(1)),
+                ("status".to_owned(), Tag::String("running".to_owned())),
+            ]),
+        )],
+    );
+    // 有内容的条目：这些键没有游戏层写入者，Bamboo 必须自己按官方 codec 带回。
+    // Rich entries that no game-layer table owns: the archive codec must carry them.
+    let record = mc_bamboo_protocol::components::archive::slots::encode_item(&ItemStack::new(
+        mc_bamboo_data::items::MUSIC_DISC_13,
+        1,
+    ))
+    .map_err(|e| e.to_string());
+    if let Ok(record) = record {
+        full(
+            "jukebox-rich",
+            "minecraft:jukebox",
+            "minecraft:jukebox",
+            vec![
+                ("RecordItem".to_owned(), record),
+                ("ticks_since_song_started".to_owned(), Tag::Long(42)),
+            ],
+        );
+    }
+    let pot_item =
+        mc_bamboo_protocol::components::archive::slots::encode_item(&ItemStack::new(STONE, 3))
+            .map_err(|e| e.to_string());
+    if let Ok(pot_item) = pot_item {
+        full(
+            "decorated_pot-rich",
+            "minecraft:decorated_pot",
+            "minecraft:decorated_pot",
+            vec![("item".to_owned(), pot_item)],
+        );
+    }
+    let shulker_items = mc_bamboo_protocol::components::archive::slots::encode_list(&[
+        mc_bamboo_protocol::components::archive::slots::SlottedItem {
+            slot: 3,
+            stack: ItemStack::new(STONE, 7),
+        },
+    ])
+    .map_err(|e| e.to_string());
+    if let Ok(shulker_items) = shulker_items {
+        full(
+            "shulker_box-rich",
+            "minecraft:shulker_box",
+            "minecraft:shulker_box",
+            vec![("Items".to_owned(), shulker_items)],
+        );
+    }
+    full(
+        "shulker_box-loot-rich",
+        "minecraft:shulker_box",
+        "minecraft:shulker_box",
+        vec![
+            (
+                "LootTable".to_owned(),
+                Tag::String("minecraft:chests/simple_dungeon".to_owned()),
+            ),
+            ("LootTableSeed".to_owned(), Tag::Long(99)),
+        ],
+    );
+    full(
+        "beehive-rich",
+        "minecraft:beehive",
+        "minecraft:beehive",
+        vec![
+            (
+                "bees".to_owned(),
+                Tag::List(vec![Tag::Compound(vec![
+                    (
+                        "entity_data".to_owned(),
+                        Tag::Compound(vec![(
+                            "id".to_owned(),
+                            Tag::String("minecraft:bee".to_owned()),
+                        )]),
+                    ),
+                    ("ticks_in_hive".to_owned(), Tag::Int(12)),
+                    ("min_ticks_in_hive".to_owned(), Tag::Int(20)),
+                ])]),
+            ),
+            ("flower_pos".to_owned(), Tag::IntArray(vec![1, 2, 3])),
+        ],
+    );
+    full(
+        "sign-rich",
+        "minecraft:oak_sign",
+        "minecraft:sign",
+        vec![
+            ("allow_op_features".to_owned(), Tag::Byte(1)),
+            (
+                "front_text".to_owned(),
+                Tag::Compound(vec![
+                    (
+                        "messages".to_owned(),
+                        Tag::List(vec![
+                            Tag::String("hi".to_owned()),
+                            Tag::String(String::new()),
+                            Tag::String(String::new()),
+                            Tag::String(String::new()),
+                        ]),
+                    ),
+                    ("color".to_owned(), Tag::String("red".to_owned())),
+                    ("has_glowing_text".to_owned(), Tag::Byte(1)),
+                ]),
+            ),
+            ("is_waxed".to_owned(), Tag::Byte(1)),
+        ],
+    );
+    full(
+        "command_block-rich",
+        "minecraft:command_block",
+        "minecraft:command_block",
+        vec![
+            ("Command".to_owned(), Tag::String("say hi".to_owned())),
+            ("LastOutput".to_owned(), Tag::String("last".to_owned())),
+            ("LastExecution".to_owned(), Tag::Long(77)),
+            ("SuccessCount".to_owned(), Tag::Int(3)),
+        ],
+    );
+    full(
+        "spawner-rich-subcodecs",
+        "minecraft:spawner",
+        "minecraft:mob_spawner",
+        vec![(
+            "SpawnPotentials".to_owned(),
+            Tag::List(vec![Tag::Compound(vec![
+                (
+                    "data".to_owned(),
+                    Tag::Compound(vec![
+                        (
+                            "entity".to_owned(),
+                            Tag::Compound(vec![(
+                                "id".to_owned(),
+                                Tag::String("minecraft:zombie".to_owned()),
+                            )]),
+                        ),
+                        ("custom_spawn_rules".to_owned(), Tag::Compound(Vec::new())),
+                    ]),
+                ),
+                ("weight".to_owned(), Tag::Int(2)),
+            ])]),
+        )],
+    );
+    full(
+        "beehive-rich-entity-data",
+        "minecraft:beehive",
+        "minecraft:beehive",
+        vec![(
+            "bees".to_owned(),
+            Tag::List(vec![Tag::Compound(vec![
+                (
+                    "entity_data".to_owned(),
+                    Tag::Compound(vec![
+                        ("id".to_owned(), Tag::String("minecraft:bee".to_owned())),
+                        ("HasNectar".to_owned(), Tag::Byte(1)),
+                        ("CustomName".to_owned(), Tag::String("bee".to_owned())),
+                    ]),
+                ),
+                ("ticks_in_hive".to_owned(), Tag::Int(1)),
+                ("min_ticks_in_hive".to_owned(), Tag::Int(2)),
+            ])]),
+        )],
+    );
+    full(
+        "command_block-full",
+        "minecraft:command_block",
+        "minecraft:command_block",
+        vec![
+            ("Command".to_owned(), Tag::String("say hi".to_owned())),
+            ("SuccessCount".to_owned(), Tag::Int(7)),
+            ("TrackOutput".to_owned(), Tag::Byte(0)),
+            ("auto".to_owned(), Tag::Byte(1)),
+        ],
+    );
+    out
 }
 
 fn block_entity_load_cases() -> Result<Vec<(String, &'static str, Tag)>, String> {
@@ -680,6 +1255,46 @@ fn block_entity_load_cases() -> Result<Vec<(String, &'static str, Tag)>, String>
         "minecraft:sculk_shrieker",
         Tag::Compound(shrieker),
     ));
+    // 振动事件：`game_event` 是注册表 holder codec，注册过的名字保留，
+    // 没注册过的名字让 `selector.event` 回到可省字段的缺省（连同 tick 折成 -1L）。
+    for (name, event) in [
+        ("sculk-sensor-registered-event", "minecraft:step"),
+        ("sculk-sensor-unknown-event", "minecraft:not_a_game_event"),
+    ] {
+        let mut sensor = meta("minecraft:sculk_sensor");
+        sensor.push((
+            "listener".to_owned(),
+            Tag::Compound(vec![
+                (
+                    "selector".to_owned(),
+                    Tag::Compound(vec![
+                        (
+                            "event".to_owned(),
+                            Tag::Compound(vec![
+                                ("game_event".to_owned(), Tag::String(event.to_owned())),
+                                ("distance".to_owned(), Tag::Float(2.5)),
+                                (
+                                    "pos".to_owned(),
+                                    Tag::List(vec![
+                                        Tag::Double(1.0),
+                                        Tag::Double(2.0),
+                                        Tag::Double(3.0),
+                                    ]),
+                                ),
+                            ]),
+                        ),
+                        ("tick".to_owned(), Tag::Long(42)),
+                    ]),
+                ),
+                ("event_delay".to_owned(), Tag::Int(3)),
+            ]),
+        ));
+        out.push((
+            name.to_owned(),
+            "minecraft:sculk_sensor",
+            Tag::Compound(sensor),
+        ));
+    }
     Ok(out)
 }
 
@@ -803,7 +1418,15 @@ fn canonical_tag(tag: &Tag) -> Value {
         Tag::Short(value) => json!({"type": 2, "value": value.to_string()}),
         Tag::Int(value) => json!({"type": 3, "value": value.to_string()}),
         Tag::Long(value) => json!({"type": 4, "value": value.to_string()}),
-        Tag::Float(value) => json!({"type": 5, "value": value.to_string()}),
+        // Java 的 `Float.toString()` 对整数也带小数点，Rust 的 `1.0` 是 "1"。
+        // Java's `Float.toString()` keeps the decimal point for whole values too.
+        Tag::Float(value) => {
+            let mut text = value.to_string();
+            if !text.contains('.') && !text.contains('e') && !text.contains('E') {
+                text.push_str(".0");
+            }
+            json!({"type": 5, "value": text})
+        }
         // Java 的 `Double.toString()` 总带小数点；Rust 的 `3.0.to_string()` 是 "3"。
         // Java's `Double.toString()` keeps the decimal point even for whole values.
         Tag::Double(value) => {

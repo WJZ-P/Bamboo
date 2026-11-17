@@ -135,6 +135,19 @@ pub struct ContainerEntry {
 }
 
 impl ContainerEntry {
+    /// 从带槽位物品的存档列表还原一格，给测试和只读快照用。
+    /// 官方不写这四类的 `Items`；读盘时的旧 `Items` 不会进运行时表。
+    pub fn with_items(kind: ContainerKind, items: &mc_bamboo_nbt::Tag, size: usize) -> Self {
+        let mut entry = Self::new(kind);
+        let decoded = mc_bamboo_protocol::components::archive::slots::decode_list(items, size);
+        for item in decoded.items {
+            if let Some(slot) = entry.slots.get_mut(item.slot as usize) {
+                *slot = item.stack;
+            }
+        }
+        entry
+    }
+
     /// 从容器种类建一个空条目。存档解码用；运行时路径仍走 `entry_in`。
     pub fn new(kind: ContainerKind) -> Self {
         let slots = kind.slots();

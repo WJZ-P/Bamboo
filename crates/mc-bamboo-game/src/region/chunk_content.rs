@@ -15,6 +15,7 @@ use mc_bamboo_blocks::{
         default_additional,
         entity::{read_entity, write_entity},
         redstone::{RedstoneFacts, read_redstone, write_redstone},
+        resave_additional,
         ticks::{decode_chunk_ticks, encode_chunk_ticks},
     },
     entity::{ChunkEntities, EntityRow},
@@ -127,6 +128,34 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
         let z = pos.z * 16 + entity.z as i32;
         let world_pos = BlockPos::new(x, entity.y, z);
         let mut entry = ModeledBlockEntity::new(name, x, entity.y, z);
+        // 只保留存档态的方块实体：按官方 `loadStatic → saveAdditional` 的规则把读盘
+        // 条目往返一遍。没有读盘条目时补构造器默认值；调用方后面写的游戏表 / 活实例
+        // 键优先，不用读盘旧值盖掉运行时改过的内容。
+        let raw = column
+            .chunk()
+            .preserved_block_entity(entity.x, entity.y, entity.z);
+        let state = BlockState(column.chunk().block(entity.x, entity.y, entity.z));
+        let empty = Tag::Compound(Vec::new());
+        let saved = resave_additional(name, state, raw.unwrap_or(&empty));
+        if let Some(saved) = &saved {
+            for key in &saved.omit {
+                entry.omit.push((*key).to_owned());
+            }
+            for (key, value) in &saved.fields {
+                // 有运行时表的类型由后面的 write_game_fields / write_redstone 覆盖。
+                entry.put(key, value.clone());
+            }
+        }
+        // 告示牌的文字在 `ChunkColumn::signs` 里，是运行时内容；按官方
+        // `SignBlockEntity.saveAdditional` 重新编码，不能用读盘旧值覆盖。
+        if matches!(name, "minecraft:sign" | "minecraft:hanging_sign") {
+            let content = column
+                .chunk()
+                .sign(entity.x, entity.y, entity.z)
+                .cloned()
+                .unwrap_or(mc_bamboo_core::sign::SignContent::BLANK);
+            write_sign_text(&mut entry, &content);
+        }
         write_game_fields(&mut entry, &mut problems, name, world_pos, parts, pos);
         // 会动的方块实体自己的键。
         match parts.live_additional(world_pos) {
@@ -141,12 +170,14 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
                 // 宝库 / 幽匿方块实体没有读盘条目，也要补出 `saveAdditional` 的键。
                 // A freshly generated vault or sculk block entity has no disk entry;
                 // its `saveAdditional` keys must still be written.
-                if let Some(fields) = default_additional(name) {
-                    for (key, value) in fields {
-                        entry.put(&key, value);
+                if saved.is_none() {
+                    if let Some(fields) = default_additional(name) {
+                        for (key, value) in fields {
+                            entry.put(&key, value);
+                        }
+                    } else {
+                        write_default_block_entity_fields(&mut entry, name);
                     }
-                } else {
-                    write_default_block_entity_fields(&mut entry, name);
                 }
             }
         }
@@ -155,7 +186,7 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
             world_pos,
             name,
             &parts.redstone().archive_entries(),
-            redstone_facts(name, world_pos, parts, pos),
+            redstone_facts(name, world_pos, parts, pos, raw),
         )
         .map_err(|e| Error::Blocks(e.0))?
         {
@@ -414,21 +445,22 @@ fn write_game_fields(
         write_component_fields(entry, problems, id, pos, patch);
     }
     // 命令方块。
-    if id == "minecraft:command_block" {
-        if let Some(data) = parts.command_block(pos) {
-            let data = data.archive();
-            put_string(entry, "Command", data.command);
-            put_int(entry, "SuccessCount", data.success_count);
-            put_bool(entry, "TrackOutput", data.track_output);
-            put_bool(entry, "UpdateLastExecution", data.update_last_execution);
-            put_bool(entry, "powered", data.powered);
-            put_bool(entry, "conditionMet", data.condition_met);
-            put_bool(entry, "auto", data.automatic);
-        }
-        // 官方 TrackOutput 为真时写 LastOutput（可省），我们没建模，删保留值。
-        entry.omit.push("LastOutput".to_owned());
-        entry.omit.push("LastExecution".to_owned());
+    if id == "minecraft:command_block"
+        && let Some(data) = parts.command_block(pos)
+    {
+        let data = data.archive();
+        put_string(entry, "Command", data.command);
+        put_int(entry, "SuccessCount", data.success_count);
+        put_bool(entry, "TrackOutput", data.track_output);
+        put_bool(entry, "UpdateLastExecution", data.update_last_execution);
+        put_bool(entry, "powered", data.powered);
+        put_bool(entry, "conditionMet", data.condition_met);
+        put_bool(entry, "auto", data.automatic);
     }
+    // `LastOutput` / `LastExecution` 由 `archive::resave::command_block` 按
+    // 官方条件写回（没有运行时表拥有它们），不能在这里删掉。
+    // Those two keys have no runtime owner; the archive resave codec writes
+    // them conditionally and they must not be dropped here.
     // 讲台上的书。
     if id == "minecraft:lectern" {
         if let Some(book) = parts.book(pos) {
@@ -518,6 +550,31 @@ fn write_component_fields(
     }
 }
 
+/// 官方 `SignText.CODEC` 的三个字段；离线模式没有过滤后的文字。
+fn sign_text_tag(text: &mc_bamboo_core::sign::SignText) -> Tag {
+    Tag::Compound(vec![
+        (
+            "messages".to_owned(),
+            Tag::List(text.messages.iter().cloned().map(Tag::String).collect()),
+        ),
+        (
+            "color".to_owned(),
+            Tag::String(text.color.name().to_owned()),
+        ),
+        (
+            "has_glowing_text".to_owned(),
+            Tag::Byte(i8::from(text.glowing)),
+        ),
+    ])
+}
+
+/// 用运行时告示牌内容覆盖读盘条目里的 `front_text` / `back_text` / `is_waxed`。
+fn write_sign_text(entry: &mut ModeledBlockEntity, content: &mc_bamboo_core::sign::SignContent) {
+    entry.put("front_text", sign_text_tag(&content.front));
+    entry.put("back_text", sign_text_tag(&content.back));
+    entry.put("is_waxed", Tag::Byte(i8::from(content.waxed)));
+}
+
 fn write_default_block_entity_fields(entry: &mut ModeledBlockEntity, id: &str) {
     match id {
         "minecraft:hopper" => put_int(entry, "TransferCooldown", -1),
@@ -563,6 +620,7 @@ fn redstone_facts(
     pos: BlockPos,
     parts: &impl EncodeParts,
     chunk: ChunkPos,
+    raw: Option<&Tag>,
 ) -> RedstoneFacts {
     let state = parts.chunk_column().chunk().block(
         (pos.x - chunk.x * 16) as usize,
@@ -574,10 +632,21 @@ fn redstone_facts(
         .container(pos)
         .and_then(|game| game.slots.first())
         .is_some_and(|stack| !stack.is_empty());
+    // 唱片机没有运行时进度表：读盘的 `ticks_since_song_started` 交给红石键写回，
+    // 免得被新方块实体的 0 盖掉；没有读盘条目时才按新建写 0。
+    // The jukebox has no runtime progress table: keep the disk ticks when present,
+    // defaulting to 0 only for a freshly generated block entity.
+    let song_ticks = raw
+        .and_then(|tag| field(tag, "ticks_since_song_started"))
+        .and_then(|tag| match tag {
+            Tag::Long(value) => Some(*value),
+            Tag::Int(value) => Some(i64::from(*value)),
+            _ => None,
+        });
     RedstoneFacts {
         jukebox_has_record: id == "minecraft:jukebox" && has_record,
         crafter_triggered: id == "minecraft:crafter" && state.try_get(TRIGGERED) == Some(true),
-        song_ticks: None,
+        song_ticks,
     }
 }
 
@@ -590,7 +659,16 @@ fn read_game_fields(
     state: BlockState,
 ) {
     // 容器：有 Items 或 LootTable 就建条目，其它字段按新建默认。
-    let is_container = container_kind(id).is_some();
+    // 这四类官方不写 `Items`（末影箱没有自己的存档键，唱片机 / 潜影盒 / 陶罐
+    // 用 `RecordItem` / `item` 等键）：读盘时不建空条目，免得存盘多写 `Items:[]`。
+    let is_container = container_kind(id).is_some()
+        && !matches!(
+            id,
+            "minecraft:ender_chest"
+                | "minecraft:jukebox"
+                | "minecraft:shulker_box"
+                | "minecraft:decorated_pot"
+        );
     if is_container {
         let kind = container_kind(id).unwrap_or(ContainerKind::Chest);
         let mut entry = ContainerEntry::new(kind);

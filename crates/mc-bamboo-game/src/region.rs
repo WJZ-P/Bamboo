@@ -26,7 +26,6 @@ use mc_bamboo_world::{flat, light::LightChanges, store::ChunkStore};
 use crate::{
     chunk_encoding::{ChunkCache, encode_template},
     chunk_tracking,
-    container::ContainerEntry,
     entity_tracking::EntityTracking,
     global::{Clock, GameTime},
     inbound::{JoinRequest, PlayerId},
@@ -54,8 +53,11 @@ pub(crate) mod partition;
 pub(crate) mod unit;
 
 // 区块平面和多 region 是后面的步骤，现在还没有调用方。
+pub use crate::command_block::{ArchiveCommandBlock, CommandBlockData};
+pub use crate::container::ContainerEntry;
+pub use crate::container::ContainerKind;
 #[allow(unused_imports)]
-pub use column::{NotReady, RegionColumn, RegionColumnParts, RegionColumnView};
+pub use column::{NotReady, PackedContainer, RegionColumn, RegionColumnParts, RegionColumnView};
 
 pub(crate) const DIMENSION: &str = "minecraft:overworld";
 /// 默认世界出生点在 `world_state`。进服位置只取它的水平坐标，y 仍按超平坦地表算：

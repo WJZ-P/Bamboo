@@ -612,3 +612,92 @@ fn vibration_listener_always_writes_its_required_keys() {
             .map(|(_, value)| value)
     );
 }
+
+/// `GameEvent.CODEC` 是注册表 holder codec：语法合法但没注册过的 `game_event`
+/// 解不开，整个 `VibrationInfo` 回到 `lenientOptionalFieldOf` 的缺省（不写 event）。
+#[test]
+fn vibration_events_are_looked_up_in_the_game_event_registry() {
+    let selector = |event: &str| {
+        Tag::Compound(vec![
+            (
+                "event".to_owned(),
+                Tag::Compound(vec![
+                    ("game_event".to_owned(), Tag::String(event.to_owned())),
+                    ("distance".to_owned(), Tag::Float(2.0)),
+                    (
+                        "pos".to_owned(),
+                        Tag::List(vec![Tag::Double(1.0), Tag::Double(2.0), Tag::Double(3.0)]),
+                    ),
+                ]),
+            ),
+            ("tick".to_owned(), Tag::Long(9)),
+        ])
+    };
+    let tag = Tag::Compound(vec![(
+        "listener".to_owned(),
+        Tag::Compound(vec![
+            ("selector".to_owned(), selector("minecraft:step")),
+            ("event_delay".to_owned(), Tag::Int(0)),
+        ]),
+    )]);
+    let entity = create_block_entity("minecraft:sculk_sensor", POS, BlockState::AIR, &tag)
+        .unwrap()
+        .unwrap();
+    let written = Tag::Compound(write_block_entity_additional(entity.as_ref()).unwrap());
+    let listener = Tag::Compound(
+        field(&written, "listener")
+            .and_then(|tag| match tag {
+                Tag::Compound(values) => Some(values.clone()),
+                _ => None,
+            })
+            .expect("listener is a compound"),
+    );
+    let selector_written = Tag::Compound(
+        field(&listener, "selector")
+            .and_then(|tag| match tag {
+                Tag::Compound(values) => Some(values.clone()),
+                _ => None,
+            })
+            .expect("selector is a compound"),
+    );
+    assert!(
+        field(&selector_written, "event").is_some(),
+        "a registered game event survives the round trip"
+    );
+
+    let unknown = Tag::Compound(vec![(
+        "listener".to_owned(),
+        Tag::Compound(vec![
+            (
+                "selector".to_owned(),
+                selector("minecraft:not_a_real_event"),
+            ),
+            ("event_delay".to_owned(), Tag::Int(0)),
+        ]),
+    )]);
+    let rebuilt = create_block_entity("minecraft:sculk_sensor", POS, BlockState::AIR, &unknown)
+        .unwrap()
+        .unwrap();
+    let written = Tag::Compound(write_block_entity_additional(rebuilt.as_ref()).unwrap());
+    let listener = Tag::Compound(
+        field(&written, "listener")
+            .and_then(|tag| match tag {
+                Tag::Compound(values) => Some(values.clone()),
+                _ => None,
+            })
+            .expect("listener is a compound"),
+    );
+    let selector_written = Tag::Compound(
+        field(&listener, "selector")
+            .and_then(|tag| match tag {
+                Tag::Compound(values) => Some(values.clone()),
+                _ => None,
+            })
+            .expect("selector is a compound"),
+    );
+    assert!(
+        field(&selector_written, "event").is_none(),
+        "an unregistered game event is dropped like vanilla's lenient codec"
+    );
+    assert_eq!(field(&selector_written, "tick"), Some(&Tag::Long(-1)));
+}
