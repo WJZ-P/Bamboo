@@ -1438,6 +1438,33 @@ impl RedstoneMemory {
         out
     }
 
+    /// 测试和差分用：全部记录按位置排好的文本，火把记录按原来的先后、带绝对时刻。
+    ///
+    /// For tests: every record sorted by position; torch toggles in their
+    /// original order with absolute instants.
+    #[doc(hidden)]
+    pub fn debug_rows(&self) -> String {
+        fn sorted<K: Ord + std::fmt::Debug, V: std::fmt::Debug>(
+            rows: impl Iterator<Item = (K, V)>,
+        ) -> String {
+            let mut rows: Vec<(K, V)> = rows.collect();
+            rows.sort_by(|a, b| a.0.cmp(&b.0));
+            format!("{rows:?}")
+        }
+        let mut jukebox: Vec<&BlockPos> = self.jukebox_playing.iter().collect();
+        jukebox.sort_unstable();
+        format!(
+            "comparators {} bookshelves {} jukebox {jukebox:?} crafter {} crafting {:?} lecterns {} torches {:?} pending {:?}",
+            sorted(self.comparator_outputs.iter()),
+            sorted(self.bookshelf_slots.iter()),
+            sorted(self.crafter_disabled.iter()),
+            self.crafter_crafting,
+            sorted(self.lecterns.iter()),
+            self.torch_toggles,
+            self.pending_lectern,
+        )
+    }
+
     /// 并回一个单元的红石记忆：位置表直接合并，火把记录按全局入队序号稳定
     /// 归并（先按时刻，同一时刻按原来的先后），结果等于从没拆过。
     pub fn absorb(&mut self, mut other: Self) {
