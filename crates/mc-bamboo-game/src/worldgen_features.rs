@@ -45,6 +45,13 @@ use crate::{
         GeneratedChunk, build_region_column, cached_beardified_chunk, cached_generate_chunk,
         with_generator,
     },
+    worldgen_profile::{
+        BUILD_VIEW_CALLS, BUILD_VIEW_CELLS, BUILD_VIEW_NS, BUILD_VIEW_TERRAIN_MISSES,
+        FEATURE_RUN_CALLS, FEATURE_RUN_HITS, FEATURE_RUN_MISSES, FEATURES_CALLS, FEATURES_NS,
+        RUN_FEATURES_CALLS, RUN_FEATURES_NS, SNAPSHOT_NONE, SNAPSHOT_SOME, TERRAIN_CALLS,
+        TERRAIN_HITS, TERRAIN_LOOKUPS, TERRAIN_MISSES, TERRAIN_NS, VIEW_CELLS, VIEW_RESOLVE_NS,
+        VIEW_TERRAIN_MISSES,
+    },
 };
 
 /// 一次 `setBlock` 写增量：世界坐标 `(x, y, z, 状态 ID)`。
@@ -114,10 +121,18 @@ pub(crate) fn resolve_view(
     center: Option<Arc<GeneratedChunk>>,
     neighbors: SnapshotView<'_>,
 ) -> Result<[Arc<GeneratedChunk>; 9], String> {
+    let _profile_timer = crate::worldgen_profile::timer(&VIEW_RESOLVE_NS);
     let mut slots: [Option<Arc<GeneratedChunk>>; 9] = std::array::from_fn(|_| None);
+    crate::worldgen_profile::count(&VIEW_CELLS);
     slots[CENTER] = Some(match center {
-        Some(arc) => arc,
-        None => cached_generate_chunk(config, cx, cz)?,
+        Some(arc) => {
+            crate::worldgen_profile::count(&SNAPSHOT_SOME);
+            arc
+        }
+        None => {
+            crate::worldgen_profile::count(&SNAPSHOT_NONE);
+            terrain_lookup(config, cx, cz)?
+        }
     });
     for (pos, snapshot) in neighbors {
         let dx = pos.x - cx;
@@ -126,9 +141,16 @@ pub(crate) fn resolve_view(
             continue;
         }
         let index = ((dz + 1) * 3 + (dx + 1)) as usize;
+        crate::worldgen_profile::count(&VIEW_CELLS);
         let chunk = match snapshot {
-            Some(arc) => Arc::clone(arc),
-            None => cached_generate_chunk(config, pos.x, pos.z)?,
+            Some(arc) => {
+                crate::worldgen_profile::count(&SNAPSHOT_SOME);
+                Arc::clone(arc)
+            }
+            None => {
+                crate::worldgen_profile::count(&SNAPSHOT_NONE);
+                terrain_lookup(config, pos.x, pos.z)?
+            }
         };
         slots[index] = Some(chunk);
     }
@@ -138,11 +160,34 @@ pub(crate) fn resolve_view(
         for dx in -1..=1 {
             let index = ((dz + 1) * 3 + (dx + 1)) as usize;
             if slots[index].is_none() {
-                slots[index] = Some(cached_generate_chunk(config, cx + dx, cz + dz)?);
+                crate::worldgen_profile::count(&VIEW_CELLS);
+                crate::worldgen_profile::count(&SNAPSHOT_NONE);
+                let x = cx + dx;
+                let z = cz + dz;
+                slots[index] = Some(terrain_lookup(config, x, z)?);
             }
         }
     }
     Ok(slots.map(Option::unwrap))
+}
+
+/// 取一格地形，插桩打开时把这次缓存查询算成命中 / 未命中。
+/// Fetch one terrain cell; when instrumented, classify the cache lookup.
+fn terrain_lookup(config: &WorldGenConfig, x: i32, z: i32) -> Result<Arc<GeneratedChunk>, String> {
+    if !crate::worldgen_profile::enabled() {
+        return cached_generate_chunk(config, x, z);
+    }
+    crate::worldgen_profile::count(&TERRAIN_LOOKUPS);
+    let (hits, misses) = crate::worldgen::terrain_lookup_counts();
+    let chunk = cached_generate_chunk(config, x, z)?;
+    let (hits_after, misses_after) = crate::worldgen::terrain_lookup_counts();
+    if hits_after > hits {
+        crate::worldgen_profile::count(&TERRAIN_HITS);
+    } else if misses_after > misses {
+        crate::worldgen_profile::count(&TERRAIN_MISSES);
+        crate::worldgen_profile::count(&VIEW_TERRAIN_MISSES);
+    }
+    Ok(chunk)
 }
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数：只依赖配置、坐标和 3×3 视图。
@@ -156,6 +201,8 @@ pub(crate) fn run_features(
     cz: i32,
     view: [Arc<GeneratedChunk>; 9],
 ) -> Result<FeatureResult, String> {
+    let _profile_timer = crate::worldgen_profile::timer(&RUN_FEATURES_NS);
+    crate::worldgen_profile::count(&RUN_FEATURES_CALLS);
     run_features_filtered(
         config,
         cx,
@@ -554,6 +601,9 @@ fn build_view(
     cx: i32,
     cz: i32,
 ) -> Result<[Arc<GeneratedChunk>; 9], String> {
+    let _profile_timer = crate::worldgen_profile::timer(&BUILD_VIEW_NS);
+    crate::worldgen_profile::count(&BUILD_VIEW_CALLS);
+    crate::worldgen_profile::count_by(&BUILD_VIEW_CELLS, 9);
     let mut view: [Option<Arc<GeneratedChunk>>; 9] = std::array::from_fn(|_| None);
     for dz in -1..=1 {
         for dx in -1..=1 {
@@ -568,7 +618,22 @@ fn build_view(
             // completion order cannot change the result.
             let x = cx + dx;
             let z = cz + dz;
-            view[index] = Some(cached_generate_chunk_with_structures(config, x, z)?);
+            let instrumented = crate::worldgen_profile::enabled();
+            let counts_before = instrumented
+                .then(crate::worldgen::terrain_lookup_counts)
+                .unwrap_or((0, 0));
+            let chunk = cached_generate_chunk_with_structures(config, x, z)?;
+            if instrumented {
+                crate::worldgen_profile::count(&TERRAIN_LOOKUPS);
+                let (hits, misses) = crate::worldgen::terrain_lookup_counts();
+                if hits > counts_before.0 {
+                    crate::worldgen_profile::count(&TERRAIN_HITS);
+                } else if misses > counts_before.1 {
+                    crate::worldgen_profile::count(&TERRAIN_MISSES);
+                    crate::worldgen_profile::count(&BUILD_VIEW_TERRAIN_MISSES);
+                }
+            }
+            view[index] = Some(chunk);
         }
     }
     Ok(view.map(Option::unwrap))
@@ -601,11 +666,15 @@ fn cached_feature_run(
     cx: i32,
     cz: i32,
 ) -> Result<Arc<FeatureRun>, String> {
+    crate::worldgen_profile::count(&FEATURE_RUN_CALLS);
+    crate::worldgen_profile::record_feature_center(config.seed, cx, cz);
     let key = (config.seed, config.level_type.settings_id(), cx, cz);
     FEATURE_CACHE.with(|cache| {
         if let Some(run) = cache.borrow().get(&key) {
+            crate::worldgen_profile::count(&FEATURE_RUN_HITS);
             return Ok(Arc::clone(run));
         }
+        crate::worldgen_profile::count(&FEATURE_RUN_MISSES);
         let view = build_view(config, cx, cz)?;
         let result = run_features(config, cx, cz, view)?;
         let run = Arc::new(FeatureRun {
@@ -716,6 +785,8 @@ pub(crate) fn generate_features_stage(
     center: Option<Arc<GeneratedChunk>>,
     neighbors: SnapshotView<'_>,
 ) -> Result<GenerateOutput, String> {
+    let _profile_timer = crate::worldgen_profile::timer(&FEATURES_NS);
+    crate::worldgen_profile::count(&FEATURES_CALLS);
     let view = resolve_view(config, cx, cz, center, neighbors)?;
     let terrain = Arc::clone(&view[CENTER]);
     let result = run_features(config, cx, cz, view)?;
@@ -775,6 +846,8 @@ pub(crate) fn generate_terrain_stage(
     cx: i32,
     cz: i32,
 ) -> Result<GenerateOutput, String> {
+    let _profile_timer = crate::worldgen_profile::timer(&TERRAIN_NS);
+    crate::worldgen_profile::count(&TERRAIN_CALLS);
     // 官方 `createNoiseChunk` 把 `Beardifier.forStructuresInChunk` 注进
     // finalDensity。依赖表（`GENERATION[4].requires = [(S,8),(B,1)]`）保证半径 8
     // 的 `structure_starts` 与本区块的 `structure_references` 已完成；Beardifier

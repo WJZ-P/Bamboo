@@ -408,6 +408,20 @@ pub struct TerrainCacheStats {
 static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
 static TOTAL_BYTES: AtomicUsize = AtomicUsize::new(0);
 static NEXT_THREAD_ID: AtomicUsize = AtomicUsize::new(1);
+/// 便宜的全局命中 / 未命中计数（测量插桩按调用差分用，不需要遍历 16 把分片锁）。
+/// Cheap global hit/miss counters for instrumentation deltas (no 16-shard walk).
+static LOOKUP_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LOOKUP_MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 进程累计的地形缓存命中 / 未命中次数，给 `worldgen_profile` 的按次差分用。
+/// Process-wide terrain lookup hit/miss counts, for per-call instrumentation deltas.
+pub fn terrain_lookup_counts() -> (u64, u64) {
+    use std::sync::atomic::Ordering;
+    (
+        LOOKUP_HITS.load(Ordering::Relaxed),
+        LOOKUP_MISSES.load(Ordering::Relaxed),
+    )
+}
 
 /// 测试专用：计算闭包里的延迟（毫秒），让并发测试能确定地造出一个等待方。
 /// Test-only delay in the computing closure so concurrency tests can reliably
@@ -488,6 +502,8 @@ pub fn terrain_cache_stats() -> TerrainCacheStats {
 /// Clear the terrain cache and measurement counters (cold-start benchmarks;
 /// call only before a run, never from a worker thread).
 pub fn clear_terrain_cache() {
+    LOOKUP_HITS.store(0, Ordering::Relaxed);
+    LOOKUP_MISSES.store(0, Ordering::Relaxed);
     for shard in terrain_shards() {
         if let Ok(mut shard) = shard.lock() {
             *shard = TerrainShard::default();
@@ -556,16 +572,19 @@ fn cached_terrain(
         if let Some(cached) = shard.entries.get(&key) {
             let cached = Arc::clone(cached);
             shard.hits += 1;
+            LOOKUP_HITS.fetch_add(1, Ordering::Relaxed);
             return Ok(cached);
         }
         if let Some(existing) = shard.inflight.get(&key) {
             let existing = Arc::clone(existing);
             shard.hits += 1;
+            LOOKUP_HITS.fetch_add(1, Ordering::Relaxed);
             existing
         } else {
             let slot = Arc::new(OnceLock::new());
             shard.inflight.insert(key, Arc::clone(&slot));
             shard.misses += 1;
+            LOOKUP_MISSES.fetch_add(1, Ordering::Relaxed);
             slot
         }
     };

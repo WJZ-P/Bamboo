@@ -39,6 +39,7 @@ use crate::{
     world_options::WorldGenConfig,
     worldgen::{GeneratedChunk, cached_generate_chunk},
     worldgen_features::SnapshotView,
+    worldgen_profile::{LIGHT_CALLS, LIGHT_NS},
 };
 
 /// 和 `resolve_view` 一样拼 3×3，但快照只共享 `Arc`、不复制方块；缺快照时现算。
@@ -99,6 +100,8 @@ pub(crate) fn generate_light_stage(
     center: Option<Arc<GeneratedChunk>>,
     neighbors: SnapshotView<'_>,
 ) -> Result<GeneratedLight, String> {
+    let _profile_timer = crate::worldgen_profile::timer(&LIGHT_NS);
+    crate::worldgen_profile::count(&LIGHT_CALLS);
     let view = resolve_shared_view(config, cx, cz, center, neighbors)?;
     let columns: Vec<(ChunkPos, &[Vec<u32>])> = view
         .iter()

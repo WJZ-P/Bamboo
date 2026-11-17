@@ -86,6 +86,8 @@ mod world_state;
 pub mod worldgen;
 pub mod worldgen_features;
 mod worldgen_light;
+#[doc(hidden)]
+pub mod worldgen_profile;
 mod worldgen_spawn;
 pub mod worldgen_structures;
 

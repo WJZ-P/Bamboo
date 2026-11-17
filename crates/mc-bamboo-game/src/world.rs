@@ -532,6 +532,44 @@ impl World {
         }
     }
 
+    /// 测量脚手架用：不睡节拍器地推进一 tick，返回这一刻交付的区块数。
+    /// 除了不睡觉，走的仍是 [`Self::tick`] 的完整流水线。
+    ///
+    /// Benchmark-only: advance one tick without pacing, returning the number of
+    /// chunks delivered this tick. Runs the exact same pipeline as [`Self::tick`].
+    #[doc(hidden)]
+    pub fn tick_unpaced(&mut self) -> usize {
+        let _ = self.tick();
+        self.host.counters_this_tick().0
+    }
+
+    /// 测量脚手架用：加一批强加载票，并关掉随机刻（避免比较期间草蔓延改方块）。
+    /// Benchmark-only: force-load a set of chunks and disable random ticks.
+    #[doc(hidden)]
+    pub fn force_chunks_unpaced(&mut self, positions: &[mc_bamboo_core::ChunkPos]) {
+        use mc_bamboo_world::director::TicketOp;
+        self.region.block_rules.random_tick_speed = 0;
+        self.apply_ticket_ops(
+            positions
+                .iter()
+                .map(|&pos| TicketOp::Forced { pos, forced: true }),
+        );
+    }
+
+    /// 测量脚手架用：某个区块是否已经交付进 region。
+    /// Benchmark-only: whether a chunk has been delivered into the region.
+    #[doc(hidden)]
+    pub fn is_chunk_loaded(&self, pos: mc_bamboo_core::ChunkPos) -> bool {
+        self.region.chunks.is_loaded(pos)
+    }
+
+    /// 测量脚手架用：计算池里还有没有在途任务。
+    /// Benchmark-only: whether the compute pool still has work in flight.
+    #[doc(hidden)]
+    pub fn compute_in_flight(&self) -> usize {
+        self.host.compute_in_flight()
+    }
+
     /// 推进一 tick。顺序有约束：光照和官方一样在处理完请求之后、下一 tick 之前算，计划刻、随机刻和
     /// 方块实体的 tick 紧跟在时间增长之后（官方 `ServerLevel.tick` 的顺序），新区块排在区块中心和
     /// forget 后面，每个区块的光照变化紧挨在它的方块变化前面，方块变化排在 ack 前面，
