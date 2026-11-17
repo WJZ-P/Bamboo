@@ -46,6 +46,11 @@ use crate::{
     region::{ClockParts, IslandPart, Region, RegionTick},
 };
 
+/// 远期计划刻的延迟：比任何一次测试跑的刻数都长，一直排着。
+const PARKED_DELAY: i32 = 400;
+/// 两半分开跑到第几刻时各自做一次「中途的事」（见 [`mid_run`]）。
+const MID_RUN_STEP: u64 = 2;
+
 /// 地面上一格。
 const Y: i32 = -60;
 /// 两组之间的基本间隔（区块）。
@@ -296,6 +301,17 @@ fn furnish(region: &mut Region, center: ChunkPos, salt: i32, now: RegionTick) {
         TickPriority::Normal,
     );
 
+    // 三条远期的计划刻（那几格没有这个方块，到期时跳过）：拆开以后两边会在同一个
+    // （时刻，优先级）上再排几条，合回来后每组自己的先后要和从没拆过一样。
+    for index in 0..3 {
+        region.block_ticks.schedule(
+            at(center, 1 + index, Y + 5, 13),
+            block_id_of_state(blocks::STONE).expect("石头"),
+            PARKED_DELAY,
+            TickPriority::Normal,
+        );
+    }
+
     // 一格水，流开要好几刻。
     let water = at(center, 10, Y, 8 + salt);
     region.chunks.set_block(water, blocks::WATER);
@@ -345,6 +361,40 @@ fn furnish(region: &mut Region, center: ChunkPos, salt: i32, now: RegionTick) {
     let entry = entry_in(&mut region.containers, ghost, ContainerKind::Chest);
     entry.dead = true;
     entry.recheck_at = Some(now.plus(300));
+}
+
+/// 两半分开跑的中途，每组各做一次同样的事（从没拆过的对照在同一刻对每组都做）：
+/// 新放一个漏斗（方块实体两边都新登记，ordinal 会撞，合并时要重排），再在拆分前那三条
+/// 远期刻的同一个（时刻，优先级）上排三条（顺序号两边各自往上数，合并后每组自己的先后
+/// 要不变）。`elapsed` 是从搭好场景起跑了几刻，`here` 说哪几组在这个岛上。
+fn mid_run(region: &mut Region, centers: &[ChunkPos], here: &BTreeSet<usize>, elapsed: i32) {
+    let hopper_down = BlockState(blocks::HOPPER)
+        .with(FACING_HOPPER, Direction::Down)
+        .0;
+    for (group, &center) in centers.iter().enumerate() {
+        if !here.contains(&group) {
+            continue;
+        }
+        let chest = at(center, 14, Y + 2, 6);
+        let hopper = at(center, 14, Y + 1, 6);
+        region.chunks.set_block(chest, blocks::CHEST);
+        region.chunks.set_block(hopper, hopper_down);
+        entry_in(&mut region.containers, chest, ContainerKind::Chest).slots[0] =
+            ItemStack::new(items::EMERALD, 9);
+        entry_in(&mut region.containers, hopper, ContainerKind::Hopper);
+        region.block_entities.remove(hopper);
+        region
+            .block_entities
+            .insert(Box::new(HopperEntity::new(hopper)));
+        for index in 0..3 {
+            region.block_ticks.schedule(
+                at(center, 1 + index, Y + 5, 14),
+                block_id_of_state(blocks::STONE).expect("石头"),
+                PARKED_DELAY - elapsed,
+                TickPriority::Normal,
+            );
+        }
+    }
 }
 
 /// 一刻：和分离驱动在 tick 线程上跑的同一段，再把出站缓冲刷给假客户端。排队的全局
@@ -823,7 +873,20 @@ fn apart_then_merged(seed: u64, delta: i64, clock: ClockParts) -> Vec<Vec<String
     let apart = 5 + next() % 30;
     let mut child = split(&mut scene, &groups);
     child.region.rebase_clock(-delta);
-    for _ in 0..apart {
+    let rest: BTreeSet<usize> = (0..scene.centers.len())
+        .filter(|group| !groups.contains(group))
+        .collect();
+    for index in 0..apart {
+        if index == MID_RUN_STEP {
+            let elapsed = (warm + index) as i32;
+            mid_run(
+                &mut scene.server.world.island.region,
+                &scene.centers,
+                &rest,
+                elapsed,
+            );
+            mid_run(&mut child.region, &scene.centers, &groups, elapsed);
+        }
         step(island(&mut scene));
         step(&mut child);
     }
@@ -851,7 +914,17 @@ fn never_split(seed: u64) -> Vec<Vec<String>> {
     }
     let _ = random_groups(&mut next, scene.centers.len());
     let apart = 5 + next() % 30;
-    for _ in 0..apart {
+    let all: BTreeSet<usize> = (0..scene.centers.len()).collect();
+    for index in 0..apart {
+        if index == MID_RUN_STEP {
+            let elapsed = (warm + index) as i32;
+            mid_run(
+                &mut scene.server.world.island.region,
+                &scene.centers,
+                &all,
+                elapsed,
+            );
+        }
         step(island(&mut scene));
     }
     scene
