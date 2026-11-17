@@ -109,9 +109,10 @@ async fn serve(args: &[String]) -> Result<(), Box<dyn Error>> {
         world_gen,
         ..mc_bamboo_server::ServerConfig::default()
     };
+    let island_threads = config.island_threads;
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!(
-        "loadtest server is listening on {} for Minecraft {} (max_players={max_players}, view_distance={view_distance}, chunk_worker_threads={chunk_worker_threads}, scenario={})",
+        "loadtest server is listening on {} for Minecraft {} (max_players={max_players}, view_distance={view_distance}, chunk_worker_threads={chunk_worker_threads}, island_threads={island_threads}, scenario={})",
         listener.local_addr()?,
         mc_bamboo_server::GAME_VERSION,
         kind.map(|k| k.name()).unwrap_or("none")

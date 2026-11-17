@@ -254,9 +254,9 @@ fn director_blocks(options: &Options) -> Result<GameBlocks, String> {
                 deliveries: 0,
                 reclaims: 0,
             },
-            // 对拍：显式选齐步驱动，不靠缺省值（岛的实施计划第 9 节第 7 条）。
+            // 对拍：显式选齐步驱动（`island_threads = 0`），不靠缺省值（岛的实施计划第 9 节第 7 条）。
             // Oracle: choose the lockstep drive explicitly, not by default.
-            island_drive: mc_bamboo_game::IslandDrive::Lockstep,
+            island_threads: 0,
             ..WorldConfig::default()
         };
         let mut world = World::new(world_config, receiver);

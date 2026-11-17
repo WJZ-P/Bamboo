@@ -190,6 +190,14 @@ pub(crate) fn client_requesting(view_distance: i8) -> ClientInformation {
     }
 }
 
+/// 显式选的驱动对应的 `island_threads`：齐步 0，分离 1（只有一个岛，多了用不上）。
+fn threads_for(drive: crate::island::IslandDrive) -> usize {
+    match drive {
+        crate::island::IslandDrive::Lockstep => 0,
+        crate::island::IslandDrive::Detached => 1,
+    }
+}
+
 /// 测试里的“连接层”：用内存队列给世界线程发消息。
 pub(crate) struct Harness {
     pub(crate) world: World,
@@ -210,6 +218,21 @@ impl Harness {
         Self::build(view_distance, loaded)
     }
 
+    /// 显式指定岛的 tick 线程数（0 = 齐步），不看环境变量。
+    /// An explicit island thread count (0 = lockstep), regardless of the environment.
+    pub(crate) fn new_with_island_threads(
+        view_distance: i32,
+        loaded: bool,
+        threads: usize,
+    ) -> Self {
+        Self::build_with(view_distance, loaded, threads)
+    }
+
+    /// 主控队列的发端，给要在别的线程上发关服的测试用。
+    pub(crate) fn inbox_sender(&self) -> crate::inbound::InboundSender {
+        self.inbox.clone()
+    }
+
     /// 正式入口（已加载模式）：起点没有加载任何区块，测试自己交付。
     pub(crate) fn new_loaded(view_distance: i32) -> Self {
         Self::build(view_distance, true)
@@ -221,7 +244,7 @@ impl Harness {
         view_distance: i32,
         island_drive: crate::island::IslandDrive,
     ) -> Self {
-        Self::build_with(view_distance, true, island_drive)
+        Self::build_with(view_distance, true, threads_for(island_drive))
     }
 
     /// 已加载模式 + 区块计算池（不接存档）。
@@ -259,7 +282,7 @@ impl Harness {
             view_distance,
             root,
             chunk_worker_threads,
-            crate::island::IslandDrive::default_for_world(),
+            crate::island::IslandDrive::from_threads(crate::island::default_island_threads()),
         )
     }
 
@@ -276,7 +299,7 @@ impl Harness {
             view_distance,
             world_dir: Some(root.to_path_buf()),
             chunk_worker_threads,
-            island_drive,
+            island_threads: threads_for(island_drive),
             ..Default::default()
         };
         let mut world = World::new(config, receiver);
@@ -295,15 +318,11 @@ impl Harness {
         Self::build_with(
             view_distance,
             loaded,
-            crate::island::IslandDrive::default_for_world(),
+            crate::island::default_island_threads(),
         )
     }
 
-    fn build_with(
-        view_distance: i32,
-        loaded: bool,
-        island_drive: crate::island::IslandDrive,
-    ) -> Self {
+    fn build_with(view_distance: i32, loaded: bool, island_threads: usize) -> Self {
         let (inbox, receiver) = crate::inbound::channel();
         let config = WorldConfig {
             view_distance,
@@ -311,7 +330,7 @@ impl Harness {
             online_mode: false,
             enforce_secure_profile: false,
             admin: Default::default(),
-            island_drive,
+            island_threads,
             ..Default::default()
         };
         let mut world = if loaded {

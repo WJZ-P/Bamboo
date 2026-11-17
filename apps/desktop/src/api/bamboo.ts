@@ -43,6 +43,7 @@ export interface ServerSettings {
   chunkWorkerThreads: number;
   deliveriesPerTick: number;
   reclaimsPerTick: number;
+  islandThreads: number;
 }
 
 export type LogLevel = "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE";

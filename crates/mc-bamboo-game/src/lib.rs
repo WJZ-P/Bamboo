@@ -61,6 +61,7 @@ mod inventory;
 mod island;
 mod island_partition;
 mod island_partition_stats;
+mod island_pool;
 mod lectern;
 mod light_updates;
 mod links;
@@ -104,7 +105,10 @@ pub use inbound::{
     PlayerSender, PlayerSink, Sequenced, channel as inbound_channel,
 };
 pub use inventory::receive_like_player;
-pub use island::IslandDrive;
+pub use island::{
+    DEFAULT_ISLAND_THREADS, ISLAND_THREADS_ENV, default_island_threads, island_threads_from_env,
+};
+pub use island_pool::MAX_ISLAND_THREADS;
 pub use lectern::{LecternReplay, LecternSnapshot};
 pub use loot_stacks::loot_stack;
 pub use menu::replay::{Replay, ReplayShape, ReplayWorld, Snapshot};

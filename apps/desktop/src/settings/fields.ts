@@ -115,6 +115,8 @@ const MAX_ENTITY_THREADS = 256;
 /** 服务端能接受的区块计算线程数上限，和 `MAX_CHUNK_WORKER_THREADS` 一致。 */
 const MAX_CHUNK_WORKER_THREADS = 64;
 const MAX_MAIL_BUDGET = 65_536;
+/** 服务端能接受的岛 tick 线程数上限，和 `MAX_ISLAND_THREADS` 一致。 */
+const MAX_ISLAND_THREADS = 64;
 
 export const FIELDS: readonly SettingField[] = [
   {
@@ -340,6 +342,16 @@ export const FIELDS: readonly SettingField[] = [
     min: 0,
     max: MAX_MAIL_BUDGET,
     hint: "Director 信箱每刻最多从世界线程收回多少个区块，默认 64。积压变大时按积压比例放宽，避免很多人同时高速移动时内存没有上界。0 表示不限（只用于对比测量）。",
+  },
+  {
+    key: "islandThreads",
+    group: "performance",
+    fileKey: "island_threads",
+    label: "岛的 tick 线程数",
+    control: "number",
+    min: 0,
+    max: MAX_ISLAND_THREADS,
+    hint: "世界的模拟（方块、实体、发区块）放到多少条 tick 线程上跑，和负责区块加载、全局状态的主控线程并行。0 = 精确模式（默认）：全部在一条线程上跑，和官方逐位一致，对拍和测试用。>= 1 时区块交付晚一刻，别的不变；现在只有一个岛，多于 1 条暂时用不上。",
   },
 ];
 

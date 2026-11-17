@@ -51,7 +51,7 @@ impl Harness {
                 admin: Default::default(),
                 // 期望值逐位比较，显式选齐步驱动（岛的实施计划第 9 节第 7 条）。
                 // Bit-exact expectations: choose the lockstep drive explicitly.
-                island_drive: mc_bamboo_game::IslandDrive::Lockstep,
+                island_threads: 0,
                 ..Default::default()
             },
             receiver,
@@ -115,7 +115,7 @@ impl Harness {
                     online_mode: false,
                     enforce_secure_profile: false,
                     admin: Default::default(),
-                    island_drive: mc_bamboo_game::IslandDrive::Lockstep,
+                    island_threads: 0,
                     ..Default::default()
                 },
                 mc_bamboo_game::inbound_channel().1,
