@@ -1594,6 +1594,14 @@ minecraft:red_mushroom_taiga,minecraft:brown_mushroom_normal,minecraft:red_mushr
   `gen-world --through features`（Java `--ore-only`）0 不一致、1/4 线程逐字节相同。
   **还没做**：其余地物类型（A/B 在做）、`initialize_light` / `light` 的真实计算
   （`light` 已带邻居引用）、`spawn` 刷怪。
+* **Director 路径的邻居溢出（2026-11-16 更新）**：Director 的依赖记录只记账、不真正
+  跑邻居（`ensure_dependencies` 直接把阶段设成所需值，`drive` 不查邻居是否到阶段），
+  所以中心必须自己重算 8 个邻居中心溢进来的写；地物结果缓存已改为全进程共享
+  （每个中心只算一次）。修掉了无快照补格读不带 Beardifier 地形导致结构附近
+  1/N 线程方块不同的 bug（`director_matches_pure_features_near_structures`）。
+  **还没做**：本中心那一遍也走共享缓存、不再发重复的 `neighbor_deltas`
+  （设计与原型实测见 `performance-optimizations.md` 18.6 / 18.7，等确认）；
+  Director 路径接地物生成的方块实体；邻居溢出合并没有 Java 对拍覆盖，只有游戏内测试。
 * 高度图的增量更新：矿石走 `BulkSectionAccess` 直接写 `LevelChunkSection`，
   **绕过** `ChunkAccess.setBlockState`，所以 step 6 期间高度图是 primed 后固定的。
   `cb-wg-feat-b` 已为走 `setBlockState` 的 `simple_block` 补上 `Heightmap.update`；
