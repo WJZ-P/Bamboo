@@ -73,22 +73,23 @@ fn chunk_with(entries: &[Tag]) -> Tag {
         "minecraft:decorated_pot",
         "minecraft:oak_shelf",
         "minecraft:command_block",
+        "minecraft:test_block",
+        "minecraft:test_instance_block",
     ];
     let palette = names
         .iter()
         .map(|name| Tag::Compound(vec![("Name".to_owned(), Tag::String((*name).to_owned()))]))
         .collect();
-    // 22 个调色板项按官方磁盘配置用 5 位：每格 5 位，一个 long 装 12 格，
-    // 整段 342 个 long；第 4 层（y = -60）第 0 行前 21 格。
-    // 22 palette entries use 5 bits per cell: 12 cells per long, 342 longs;
-    // layer 4 (y = -60), row 0, first 21 cells.
+    // 24 个调色板项按官方磁盘配置用 5 位：每格 5 位，一个 long 装 12 格，
+    // 整段 342 个 long。
+    // 24 palette entries use 5 bits per cell: 12 cells per long, 342 longs.
     let base = 4 * 256;
     let mut data = vec![0_i64; 342];
-    // 一行只有 16 格：前 15 个方块实体放第 0 行（下标 1..15），后 6 个放第 1 行
-    // 的前 6 格。容器下标是 (y*256 + z*16 + x)。
+    // 一行只有 16 格：前 15 个方块实体放第 0 行（下标 1..15），后 8 个放第 1 行
+    // 的前 8 格。容器下标是 (y*256 + z*16 + x)。
     // A row is 16 cells: the first 15 block entities sit on row 0 (indices 1..15),
-    // the last 6 on row 1. Container index = y*256 + z*16 + x.
-    for (slot, palette_index) in (1_i64..=21).enumerate() {
+    // the last 8 on row 1. Container index = y*256 + z*16 + x.
+    for (slot, palette_index) in (1_i64..=23).enumerate() {
         let (x, z) = if slot < 15 {
             (slot as i64 + 1, 0_i64)
         } else {
@@ -156,9 +157,9 @@ fn sorted_fields(tag: &Tag) -> Vec<(String, Tag)> {
     out
 }
 
-/// 21 种方块实体的官方裸条目默认键（按 `javap -c -p` 与官方
+/// 23 种方块实体的官方裸条目默认键（按 `javap -c -p` 与官方
 /// `loadStatic → saveWithFullMetadata` 逐值核对）。键序按键名排序，和写出顺序无关。
-/// Official bare-entry defaults for the 21 block entity blocks, verified value by
+/// Official bare-entry defaults for the 23 block entity blocks, verified value by
 /// value against `loadStatic → saveWithFullMetadata`.
 fn bare_defaults() -> Vec<(&'static str, Vec<(String, Tag)>)> {
     let short = |value: i16| Tag::Short(value);
@@ -325,6 +326,26 @@ fn bare_defaults() -> Vec<(&'static str, Vec<(String, Tag)>)> {
                 ("auto".to_owned(), byte(0)),
             ],
         ),
+        (
+            "minecraft:test_block",
+            vec![
+                ("mode".to_owned(), Tag::String("fail".to_owned())),
+                ("message".to_owned(), Tag::String(String::new())),
+                ("powered".to_owned(), byte(0)),
+            ],
+        ),
+        (
+            "minecraft:test_instance_block",
+            vec![(
+                "data".to_owned(),
+                Tag::Compound(vec![
+                    ("size".to_owned(), Tag::IntArray(vec![0, 0, 0])),
+                    ("rotation".to_owned(), Tag::String("none".to_owned())),
+                    ("ignore_entities".to_owned(), byte(0)),
+                    ("status".to_owned(), Tag::String("cleared".to_owned())),
+                ]),
+            )],
+        ),
     ];
     for (_, fields) in &mut out {
         fields.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -332,7 +353,7 @@ fn bare_defaults() -> Vec<(&'static str, Vec<(String, Tag)>)> {
     out
 }
 
-/// 方块状态放在 `(0..21, -60, 0)`；下标 0 是空气，后面按 [`bare_defaults`] 的顺序。
+/// 方块状态放在两行的 23 格；下标 0 是空气，后面按 [`bare_defaults`] 的顺序。
 fn x_of(id: &str) -> i32 {
     bare_defaults()
         .iter()
@@ -468,7 +489,7 @@ fn furnace_defaults() -> Vec<(String, Tag)> {
 /// Bare entries (generation-time placement and freshly placed blocks) all write
 /// vanilla's constructor defaults, key by key and value by value.
 /// 每条只有 `id` / 坐标的条目（世界生成期的放置、玩家新放的方块都会落到这种形状）：
-/// 21 种方块实体都写出官方 `saveAdditional` 的默认值，逐键逐值相等。
+/// 23 种方块实体都写出官方 `saveAdditional` 的默认值，逐键逐值相等。
 ///
 /// Bare entries (generation-time placement and freshly placed blocks) all write
 /// vanilla's constructor defaults, key by key and value by value.
@@ -480,7 +501,7 @@ fn bare_entries_resave_against_vanilla_save_additional() {
         .map(|(id, _)| entry(id, x_of(id), Vec::new()))
         .collect();
     let written = resave(&entries);
-    assert_eq!(written.len(), 21, "each entry survives the round trip");
+    assert_eq!(written.len(), 23, "each entry survives the round trip");
     for (id, fields) in &defaults {
         let _ = position_of(id);
         let mut want = expected(fields.clone());
@@ -610,7 +631,7 @@ fn full_entries_resave_with_vanilla_codec_rules() {
             .map(|(_, fields)| fields.clone())
             .unwrap_or_else(|| panic!("{id} was written"))
     };
-    assert_eq!(written.len(), 21, "each entry survives the round trip");
+    assert_eq!(written.len(), 23, "each entry survives the round trip");
 
     assert_eq!(
         by_id("minecraft:vault"),
@@ -742,7 +763,7 @@ fn full_entries_resave_with_vanilla_codec_rules() {
 fn generated_block_entities_write_defaults_without_a_disk_entry() {
     let written = resave(&[]);
     let defaults = bare_defaults();
-    assert_eq!(written.len(), 21, "every block entity state is written");
+    assert_eq!(written.len(), 23, "every block entity state is written");
     for (id, fields) in &defaults {
         let _ = position_of(id);
         let mut want = expected(fields.clone());

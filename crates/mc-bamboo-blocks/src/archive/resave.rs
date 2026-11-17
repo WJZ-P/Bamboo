@@ -64,6 +64,8 @@ pub fn resave_additional(id: &str, state: BlockState, raw: &Tag) -> Option<Resav
         | "minecraft:decorated_pot" => (non_item_containers(id, raw), NON_ITEM_CONTAINER_OMIT),
         "minecraft:shelf" => (shelf(raw), &[][..]),
         "minecraft:command_block" => (command_block(raw), COMMAND_BLOCK_OMIT),
+        "minecraft:test_block" => (test_block(raw), TEST_BLOCK_OMIT),
+        "minecraft:test_instance_block" => (test_instance_block(raw), TEST_INSTANCE_OMIT),
         _ => return None,
     };
     Some(Resaved::new(fields, omit))
@@ -86,6 +88,9 @@ const NON_ITEM_CONTAINER_OMIT: &[&str] = &[
 ];
 /// `BaseCommandBlock.save` 的可省键；`LastOutput` / `LastExecution` 也在游戏层 `omit` 里。
 const COMMAND_BLOCK_OMIT: &[&str] = &["CustomName", "LastOutput", "LastExecution"];
+/// 测试方块没有可省键；测试实例方块的 `errors` 只在非空时写。
+const TEST_BLOCK_OMIT: &[&str] = &[];
+const TEST_INSTANCE_OMIT: &[&str] = &["errors"];
 
 /// 世界生成放置、没有读盘条目时的构造器默认值。
 pub fn default_additional(id: &str) -> Option<Vec<(String, Tag)>> {
@@ -670,4 +675,68 @@ fn command_block(raw: &Tag) -> Vec<(String, Tag)> {
         ),
         ("auto".to_owned(), bool_tag(raw, "auto", false)),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// TestBlockEntity / TestInstanceBlockEntity（只在测试模式出现）
+// ---------------------------------------------------------------------------
+
+fn test_block(raw: &Tag) -> Vec<(String, Tag)> {
+    let mode = tag::string_or(raw, "mode")
+        .filter(|value| matches!(*value, "start" | "log" | "fail" | "accept"))
+        .unwrap_or("fail");
+    vec![
+        ("mode".to_owned(), Tag::String(mode.to_owned())),
+        ("message".to_owned(), string_tag(raw, "message")),
+        ("powered".to_owned(), bool_tag(raw, "powered", false)),
+    ]
+}
+
+fn test_instance_block(raw: &Tag) -> Vec<(String, Tag)> {
+    // `Data.CODEC` 的四个必填字段和两个可省字段；`errors` 只在非空时写。
+    let data_tag = entry(raw, "data");
+    let mut data = Vec::new();
+    put(
+        &mut data,
+        "size",
+        match data_tag.and_then(|d| entry(d, "size")) {
+            Some(Tag::IntArray(size)) if size.len() == 3 => Tag::IntArray(size.clone()),
+            _ => Tag::IntArray(vec![0, 0, 0]),
+        },
+    );
+    let rotation = data_tag
+        .and_then(|d| tag::string_or(d, "rotation"))
+        .filter(|value| {
+            matches!(
+                *value,
+                "none" | "clockwise_90" | "clockwise_180" | "counterclockwise_90"
+            )
+        })
+        .unwrap_or("none");
+    put(&mut data, "rotation", Tag::String(rotation.to_owned()));
+    put(
+        &mut data,
+        "ignore_entities",
+        match data_tag {
+            Some(tag) => bool_tag(tag, "ignore_entities", false),
+            None => Tag::Byte(0),
+        },
+    );
+    let status = data_tag
+        .and_then(|d| tag::string_or(d, "status"))
+        .filter(|value| matches!(*value, "cleared" | "running" | "finished"))
+        .unwrap_or("cleared");
+    put(&mut data, "status", Tag::String(status.to_owned()));
+    // `test` 是 optionalFieldOf 的 ResourceKey，`error_message` 是聊天组件；
+    // 形状合法时原样带回，其余按 codec 的宽松解码省略。
+    for key in ["test", "error_message"] {
+        if let Some(Tag::String(_)) = data_tag.and_then(|d| entry(d, key)) {
+            put(
+                &mut data,
+                key,
+                data_tag.and_then(|d| entry(d, key)).cloned().unwrap(),
+            );
+        }
+    }
+    vec![("data".to_owned(), Tag::Compound(data))]
 }

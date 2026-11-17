@@ -655,6 +655,8 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
         ("decorated_pot-bare", "minecraft:decorated_pot"),
         ("shelf-bare", "minecraft:oak_shelf"),
         ("command_block-bare", "minecraft:command_block"),
+        ("test_block-bare", "minecraft:test_block"),
+        ("test_instance_block-bare", "minecraft:test_instance_block"),
     ];
     let mut out: Vec<_> = bare
         .iter()
@@ -834,6 +836,33 @@ fn resave_load_cases() -> Vec<(String, &'static str, &'static str, Tag)> {
             ),
             ("align_items_to_bottom".to_owned(), Tag::Byte(1)),
         ],
+    );
+    full(
+        "test_block-full",
+        "minecraft:test_block",
+        "minecraft:test_block",
+        vec![
+            ("mode".to_owned(), Tag::String("accept".to_owned())),
+            ("message".to_owned(), Tag::String("done".to_owned())),
+            ("powered".to_owned(), Tag::Byte(1)),
+        ],
+    );
+    full(
+        "test_instance_block-full",
+        "minecraft:test_instance_block",
+        "minecraft:test_instance_block",
+        vec![(
+            "data".to_owned(),
+            Tag::Compound(vec![
+                ("size".to_owned(), Tag::IntArray(vec![3, 4, 5])),
+                (
+                    "rotation".to_owned(),
+                    Tag::String("clockwise_90".to_owned()),
+                ),
+                ("ignore_entities".to_owned(), Tag::Byte(1)),
+                ("status".to_owned(), Tag::String("running".to_owned())),
+            ]),
+        )],
     );
     full(
         "command_block-full",
