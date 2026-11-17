@@ -125,12 +125,20 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
     let reach = player.bounding_box().inflate(1.0, 0.5, 1.0);
     let owner = *player.uuid.as_bytes();
     let creative = player.game_mode == GameMode::Creative;
-    let ids: Vec<i32> = region
+    // 官方 `ItemEntity.playerTouch` 只碰到玩家附近的物品；原来的全表遍历让
+    // 「玩家数 × 实体数」都进热路径，岛场景里互不相邻的组互相拖慢。
+    // `for_each_in` 内部已经按 `intersects(reach)` 精确过滤、按 uid 升序访问，
+    // 和原来 `iter().filter(intersects)` 的名单和落地顺序逐项相同。
+    //
+    // Vanilla `ItemEntity.playerTouch` only sees items near the player. Scanning
+    // the whole table made the cost proportional to players × entities, so
+    // far-apart island groups slowed each other down. `for_each_in` already
+    // applies the same `intersects(reach)` test and visits in ascending uid
+    // order, giving the same candidate list and order as the old `iter()`.
+    let mut ids = Vec::new();
+    region
         .entities
-        .iter()
-        .filter(|entity| entity.bounding_box().intersects(reach))
-        .map(|entity| entity.id)
-        .collect();
+        .for_each_in(reach, &mut |public| ids.push(public.uid));
     for entity_id in ids {
         let Some(entity) = region.entities.get(entity_id) else {
             continue;
