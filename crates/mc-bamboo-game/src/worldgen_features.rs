@@ -3,7 +3,8 @@
 //! 官方这一步是 `ChunkGenerator.applyBiomeDecoration`：读中心和半径 1 的 8 个
 //! 邻居（3×3）的 CARVERS 方块，写中心、也会写到邻居里。`mc_bamboo_worldgen::feature`
 //! 的 [`Generator::features`] 是这段的纯函数；这里负责在游戏侧拼出 3×3 视图、
-//! 调它、把结果（中心的新内容 + 给邻居的写增量）交回世界线程。
+//! 调它（每个中心整个进程只跑一次，结果进全进程缓存），把本区块完工要的写增量
+//! （自己的地物 + 8 个邻居溢进来的）交回世界线程。
 //!
 //! 世界线程把每个区块的半成品存成不可变 [`Arc<GeneratedChunk>`]：发出任务后这些
 //! `Arc` 不再被改，合并增量时通过 `Arc::make_mut` 写时复制出新的 `Arc`（设计稿
@@ -13,7 +14,8 @@
 //! `ChunkGenerator.applyBiomeDecoration` reads a 3×3 of CARVERS chunks and
 //! writes the center plus neighbor overflow. `mc_bamboo_worldgen::feature`'s
 //! `Generator::features` is the pure function; this module assembles the 3×3
-//! view, calls it, and returns the center's new content plus neighbor deltas.
+//! view, calls it (once per center per process, cached), and returns the writes
+//! this chunk needs (its own features + the 8 neighbors' overflow).
 //! The world thread keeps each chunk's half-built column as an immutable
 //! `Arc<GeneratedChunk>` and merges deltas copy-on-write via `Arc::make_mut`.
 
@@ -48,8 +50,7 @@ use crate::{
         BUILD_VIEW_CALLS, BUILD_VIEW_CELLS, BUILD_VIEW_NS, BUILD_VIEW_TERRAIN_MISSES,
         FEATURE_RUN_CALLS, FEATURE_RUN_HITS, FEATURE_RUN_MISSES, FEATURES_CALLS, FEATURES_NS,
         RUN_FEATURES_CALLS, RUN_FEATURES_NS, SNAPSHOT_NONE, SNAPSHOT_SOME, TERRAIN_CALLS,
-        TERRAIN_HITS, TERRAIN_LOOKUPS, TERRAIN_MISSES, TERRAIN_NS, VIEW_CELLS, VIEW_RESOLVE_NS,
-        VIEW_TERRAIN_MISSES,
+        TERRAIN_HITS, TERRAIN_LOOKUPS, TERRAIN_MISSES, TERRAIN_NS,
     },
 };
 
@@ -109,97 +110,6 @@ impl GenerateOutput {
 /// regenerated cell must equal the `terrain` stage snapshot (with the cell's
 /// Beardifier), otherwise snapshot presence (scheduling) changes the result.
 pub(crate) type SnapshotView<'a> = &'a [(ChunkPos, Option<Arc<GeneratedChunk>>)];
-
-/// 3×3 视图按 `(dz, dx)` 从 -1 到 1 排列，中心在 [`CENTER`]。
-/// 用区块坐标算下标，和 `Task::Generate.neighbors` 的列出顺序无关。
-/// 快照和缓存命中都是 `Arc`，只读视图不再复制 400 KiB 的方块数组。
-///
-/// Build the 9-chunk view in `(dz, dx)` order, center at `CENTER`, indexing by
-/// chunk position so the list order does not matter. Snapshots and cache hits
-/// are `Arc`s, so the read-only view copies no ~400 KiB block arrays.
-pub(crate) fn resolve_view(
-    config: &WorldGenConfig,
-    cx: i32,
-    cz: i32,
-    center: Option<Arc<GeneratedChunk>>,
-    neighbors: SnapshotView<'_>,
-) -> Result<[Arc<GeneratedChunk>; 9], String> {
-    let _profile_timer = crate::worldgen_profile::timer(&VIEW_RESOLVE_NS);
-    let mut slots: [Option<Arc<GeneratedChunk>>; 9] = std::array::from_fn(|_| None);
-    crate::worldgen_profile::count(&VIEW_CELLS);
-    slots[CENTER] = Some(match center {
-        Some(arc) => {
-            crate::worldgen_profile::count(&SNAPSHOT_SOME);
-            arc
-        }
-        None => {
-            crate::worldgen_profile::count(&SNAPSHOT_NONE);
-            terrain_lookup(config, cx, cz)?
-        }
-    });
-    for (pos, snapshot) in neighbors {
-        let dx = pos.x - cx;
-        let dz = pos.z - cz;
-        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dz) {
-            continue;
-        }
-        let index = ((dz + 1) * 3 + (dx + 1)) as usize;
-        crate::worldgen_profile::count(&VIEW_CELLS);
-        let chunk = match snapshot {
-            Some(arc) => {
-                crate::worldgen_profile::count(&SNAPSHOT_SOME);
-                Arc::clone(arc)
-            }
-            None => {
-                crate::worldgen_profile::count(&SNAPSHOT_NONE);
-                terrain_lookup(config, pos.x, pos.z)?
-            }
-        };
-        slots[index] = Some(chunk);
-    }
-    // 补上没给快照的格子（理论上 8 个邻居都该带上；补齐保证视图完整）。
-    // Fill any missing neighbor slots (all 8 should be listed; be defensive).
-    for dz in -1..=1 {
-        for dx in -1..=1 {
-            let index = ((dz + 1) * 3 + (dx + 1)) as usize;
-            if slots[index].is_none() {
-                crate::worldgen_profile::count(&VIEW_CELLS);
-                crate::worldgen_profile::count(&SNAPSHOT_NONE);
-                let x = cx + dx;
-                let z = cz + dz;
-                slots[index] = Some(terrain_lookup(config, x, z)?);
-            }
-        }
-    }
-    Ok(slots.map(Option::unwrap))
-}
-
-/// 取一格地形，插桩打开时把这次缓存查询算成命中 / 未命中。
-///
-/// 和 `terrain` 阶段、`build_view` 走同一个入口（带本格 Beardifier）：Director
-/// 的依赖记录不真正跑邻居的 `terrain`，某格有没有快照取决于调度先后，补格要是
-/// 读不带 Beardifier 的地形，结构附近 1 线程和 N 线程就会生成不同的方块。
-///
-/// Fetch one terrain cell; when instrumented, classify the cache lookup. Same
-/// entry point as the `terrain` stage and `build_view` (with the cell's
-/// Beardifier): whether a cell has a snapshot depends on scheduling, so a
-/// fallback without the Beardifier made 1 and N threads differ near structures.
-fn terrain_lookup(config: &WorldGenConfig, x: i32, z: i32) -> Result<Arc<GeneratedChunk>, String> {
-    if !crate::worldgen_profile::enabled() {
-        return cached_generate_chunk_with_structures(config, x, z);
-    }
-    crate::worldgen_profile::count(&TERRAIN_LOOKUPS);
-    let (hits, misses) = crate::worldgen::terrain_lookup_counts();
-    let chunk = cached_generate_chunk_with_structures(config, x, z)?;
-    let (hits_after, misses_after) = crate::worldgen::terrain_lookup_counts();
-    if hits_after > hits {
-        crate::worldgen_profile::count(&TERRAIN_HITS);
-    } else if misses_after > misses {
-        crate::worldgen_profile::count(&TERRAIN_MISSES);
-        crate::worldgen_profile::count(&VIEW_TERRAIN_MISSES);
-    }
-    Ok(chunk)
-}
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数：只依赖配置、坐标和 3×3 视图。
 /// 视图是只读的 `Arc`；函数内部为了给地物一份可写方块层才复制一次。
@@ -583,10 +493,13 @@ pub fn game_pipeline(
 }
 
 /// 一次 `applyBiomeDecoration` 里需要复用的紧凑结果：给 3×3 九宫格各格的
-/// 写增量（中心那格恒为空）。
+/// 写增量。中心那格是中心自己的地物写（[`center_writes`]，相对干净 CARVERS 地形
+/// 变了的格子），8 个邻居格是溢出去的写。
 ///
-/// Compact reusable result of one `applyBiomeDecoration`: the write deltas for
-/// each of the 9 grid cells (the center cell is always empty).
+/// Compact reusable result of one `applyBiomeDecoration`: write deltas for each
+/// of the 9 grid cells. The center cell holds the center's own feature writes
+/// ([`center_writes`], cells changed against clean CARVERS terrain); the other
+/// eight hold the overflow into the neighbors.
 struct FeatureRun {
     deltas: [Vec<BlockDelta>; 9],
 }
@@ -598,12 +511,12 @@ type FeatureCacheKey = (i64, Option<&'static str>, i32, i32, bool);
 /// the same `OnceLock` and receive the computing thread's very same `Arc`.
 type FeatureSlot = Arc<OnceLock<Result<Arc<FeatureRun>, String>>>;
 /// 全进程一份，按分片加锁。条目和占位一起按插入顺序淘汰，字节预算按实测
-/// 写增量大小算。结果里只有 8 个邻居的写增量（中心恒空），比一整份 CARVERS
-/// 地形小得多；256 条上限覆盖一片持续跑图的工作集。
+/// 写增量大小算。结果只有写增量（中心自己的写 + 8 份溢出），比一整份 CARVERS
+/// 地形小得多。
 ///
 /// One process-wide cache with sharded locks. Entries and placeholders are
 /// evicted together in insertion order under a measured byte budget. A result
-/// holds only the 8 neighbor delta lists (the center is empty), far smaller
+/// holds only write deltas (the center's own + 8 overflow lists), far smaller
 /// than a full CARVERS chunk.
 #[derive(Default)]
 struct FeatureShard {
@@ -798,19 +711,22 @@ fn cached_feature_run(
     Ok(run)
 }
 
-/// 真正跑一遍 `applyBiomeDecoration`：拼视图、调纯函数、只保留 8 份写增量。
+/// 真正跑一遍 `applyBiomeDecoration`：拼视图、调纯函数、只保留 9 份写增量
+/// （中心格换成中心自己的写）。
 /// Actually run `applyBiomeDecoration`: build the view, call the pure function,
-/// keep only the 8 neighbor delta lists.
+/// keep only the 9 delta lists (the center cell replaced by its own writes).
 fn compute_feature_run(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
 ) -> Result<Arc<FeatureRun>, String> {
     let view = build_view(config, cx, cz)?;
+    let terrain = Arc::clone(&view[CENTER]);
     let result = run_features(config, cx, cz, view)?;
-    Ok(Arc::new(FeatureRun {
-        deltas: result.deltas,
-    }))
+    let own = center_writes(cx, cz, &terrain, &result);
+    let mut deltas = result.deltas;
+    deltas[CENTER] = own;
+    Ok(Arc::new(FeatureRun { deltas }))
 }
 
 /// 测试用：只用纯函数（`build_view` 的 3×3 + 8 个邻居中心的溢出）算出一个区块
@@ -919,26 +835,51 @@ fn center_writes(
     out
 }
 
-/// 跑一次 `features`：拼 3×3 视图、调纯函数、返回中心盒子 + 全部写增量。
+/// 跑一次 `features`：返回中心盒子（干净 CARVERS）+ 本区块完工需要的全部写增量。
 ///
-/// Run one `features` stage: build the 3×3 view, call the pure function, return
-/// the center's new column and all deltas (center's own + neighbor overflow).
+/// 本区块的方块是纯函数 F(C) = CARVERS(C) + 规范序合并 { C 自己的地物写，
+/// 8 个邻居中心溢进 C 的写 }，每一项都以对应中心的干净 3×3 视图算出，取自全进程
+/// 地物缓存 [`cached_feature_run`]：每个中心整个进程只算一次，不管它是作为本区块
+/// 还是作为谁的邻居被问到。所以任务只交回 `(C, 增量)` 一条，不再给邻居发增量
+/// （邻居自己的任务会从同一份缓存取到同样的写）。结果与线程数、回执先后、邻居是
+/// 不是从盘上读回都无关（`docs/performance-optimizations.md` 18.6）。
+///
+/// Run one `features` stage: return the center column (clean CARVERS) plus every
+/// write this chunk needs at assembly. The chunk's blocks are the pure function
+/// F(C) = CARVERS(C) + canonical merge { C's own feature writes, the 8 neighbor
+/// centers' spills into C }, each computed on that center's clean 3×3 view and
+/// taken from the process-wide [`cached_feature_run`], so every center runs once
+/// per process whether asked for as itself or as someone's neighbor. The task
+/// returns only `(C, deltas)` and no longer sends deltas to neighbors (their own
+/// tasks read the same cached writes). The result does not depend on thread
+/// count, receipt order or whether neighbors were loaded from disk.
 pub(crate) fn generate_features_stage(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
     center: Option<Arc<GeneratedChunk>>,
-    neighbors: SnapshotView<'_>,
+    // 宿主照常附上 8 个邻居的快照（对应官方的依赖表），但 features 任务现在不读它：
+    // 地物一律在干净的 3×3 视图上从全进程缓存取。
+    // The host still attaches the 8 neighbor snapshots (vanilla's dependency
+    // table), but the features task no longer reads them: features always run on
+    // the clean 3×3 view from the process-wide cache.
+    _neighbors: SnapshotView<'_>,
 ) -> Result<GenerateOutput, String> {
     let _profile_timer = crate::worldgen_profile::timer(&FEATURES_NS);
     crate::worldgen_profile::count(&FEATURES_CALLS);
-    let view = resolve_view(config, cx, cz, center, neighbors)?;
-    let terrain = Arc::clone(&view[CENTER]);
-    let result = run_features(config, cx, cz, view)?;
-
-    // 给 8 个邻居的写增量（本中心的地物溢出），按目标坐标分组。
-    // Writes this center's features spill into the 8 neighbors, by target pos.
-    let mut deltas = neighbor_deltas(cx, cz, &result);
+    // 中心快照就是 terrain 阶段交回的那份（同一个缓存入口）；没有就现算同一份。
+    // The center snapshot is the terrain stage's (same cache entry); recompute
+    // the very same one if absent.
+    let terrain = match center {
+        Some(snapshot) => {
+            crate::worldgen_profile::count(&SNAPSHOT_SOME);
+            snapshot
+        }
+        None => {
+            crate::worldgen_profile::count(&SNAPSHOT_NONE);
+            cached_generate_chunk_with_structures(config, cx, cz)?
+        }
+    };
 
     // `structures` 顶层标签（`starts` + `References`）由本阶段交回世界线程，
     // 完工组装时写进交付盒子，下一次存盘原样带回。
@@ -956,18 +897,9 @@ pub(crate) fn generate_features_stage(
         None
     };
 
-    // 本区块自己需要的全部写增量：自己的地物 + 8 个邻居中心溢过来的部分。
-    // 后者纯函数重算（带缓存），保证本区块的增量集合从「自己的 features 结果」
-    // 就完整，不依赖邻居任务何时落地 —— 这样世界线程按 `TaskId` 合并后，
-    // 完工组装时中心和邻居写入都齐，1/4 线程逐字节相同。
-    // All writes this chunk needs: its own features + the 8 neighbor centers'
-    // spills. The latter are recomputed purely (cached) so this chunk's delta
-    // set is complete from its OWN features result, independent of neighbor
-    // timing; after the world thread merges in `TaskId` order, assembly has
-    // everything and 1/4-thread results are byte-identical.
-    let mut into_center = center_writes(cx, cz, &terrain, &result);
+    let own = cached_feature_run(config, cx, cz)?;
+    let mut into_center = own.deltas[CENTER].clone();
     into_center.extend(neighbor_spills_into(config, cx, cz)?);
-    deltas.push((ChunkPos::new(cx, cz), into_center));
 
     // 中心盒子先回到 CARVERS 地形，增量由世界线程合并进 `Arc` 后再组装。
     // The center column returns to CARVERS terrain here; the world thread
@@ -976,7 +908,7 @@ pub(crate) fn generate_features_stage(
     Ok(GenerateOutput {
         column,
         terrain: None,
-        deltas,
+        deltas: vec![(ChunkPos::new(cx, cz), into_center)],
         light: None,
         structures,
     })
@@ -1123,10 +1055,9 @@ mod tests {
         assert_eq!(result.blocks[4].len(), WORLD_HEIGHT as usize);
     }
 
-    /// 竞争复现：同一个邻居中心，输入视图用 EMPTY 地形 与 真实 Beardifier 地形时，
-    /// `run_features` 给出的写增量不同。`neighbor_spills_into` 用 `build_view`
-    /// （EMPTY 缓存）而 `generate_features_stage` 用世界线程的 `partials` 快照
-    /// （真实 Beardifier），两者谁先落地由计算池调度决定。
+    /// 同一个中心，输入视图用 EMPTY 地形与真实 Beardifier 地形时，`run_features`
+    /// 给出的写增量不同：所有视图都必须走同一个带 Beardifier 的地形入口，否则
+    /// 哪一份先到（调度）会改变结果。
     #[test]
     fn neighbor_spills_depend_on_which_terrain_snapshot_arrives() {
         use mc_bamboo_worldgen::beardifier::Beardifier;
@@ -1172,32 +1103,6 @@ mod tests {
         );
     }
 
-    /// 没有快照时补的格子与 `terrain` 阶段交回的快照逐格相同（结构区块上带
-    /// Beardifier）。改回不带 Beardifier 的 `cached_generate_chunk` 这条就失败。
-    /// A snapshot-less cell equals the `terrain` stage snapshot, Beardifier
-    /// included; reverting to the plain `cached_generate_chunk` fails this.
-    #[test]
-    fn view_fallback_matches_the_terrain_stage_snapshot() {
-        let config = normal(42);
-        // 有 trial_chambers 起点的区块（见上一条测试），Beardifier 会改地形。
-        let (cx, cz) = (17, 7);
-        let staged = generate_terrain_stage(&config, cx, cz)
-            .unwrap()
-            .terrain
-            .expect("terrain stage returns its snapshot");
-        let plain = crate::worldgen::generate_chunk(&config, cx, cz).unwrap();
-        assert_ne!(
-            staged.blocks, plain.blocks,
-            "test chunk must have a terrain-changing Beardifier"
-        );
-        let view = resolve_view(&config, cx, cz, None, &[]).unwrap();
-        assert_eq!(view[CENTER].blocks, staged.blocks);
-        let built = build_view(&config, cx, cz).unwrap();
-        for (index, (a, b)) in view.iter().zip(&built).enumerate() {
-            assert_eq!(a.blocks, b.blocks, "cell {index} differs from build_view");
-        }
-    }
-
     /// 全进程地物结果缓存：命中给的写增量和现算一遍逐条相同。种子只在这条测试里
     /// 用，别的测试并行跑也碰不到这些键。
     /// The shared feature cache returns exactly what a fresh run computes. The
@@ -1216,6 +1121,13 @@ mod tests {
             assert_eq!(first.deltas[index], fresh.deltas[index], "cell {index}");
             assert_eq!(again.deltas[index], fresh.deltas[index], "cell {index}");
         }
+        // 中心格是中心自己的地物写，等于对干净地形逐格比出来的那份。
+        // The center cell holds the center's own writes against clean terrain.
+        let terrain = cached_generate_chunk_with_structures(&config, cx, cz).unwrap();
+        let own = center_writes(cx, cz, &terrain, &fresh);
+        assert!(!own.is_empty(), "the test center must write into itself");
+        assert_eq!(first.deltas[CENTER], own);
+        assert_eq!(again.deltas[CENTER], own);
         assert!(
             (0..9).any(|index| index != CENTER && !fresh.deltas[index].is_empty()),
             "the test center must spill into some neighbor"
