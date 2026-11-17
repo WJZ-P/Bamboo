@@ -839,13 +839,14 @@ fn place_code_piece(
         };
         dispatch_stronghold(&mut sp, piece, random)?;
     } else {
+        let shaft = if piece.id.contains("mesa") || is_mesa(piece) {
+            pieces::mineshaft_place::ShaftType::Mesa
+        } else {
+            pieces::mineshaft_place::ShaftType::Normal
+        };
         let mut sp = pieces::mineshaft_place::ShaftPiece {
-            ctx,
-            shaft: if piece.id.contains("mesa") || is_mesa(piece) {
-                pieces::mineshaft_place::ShaftType::Mesa
-            } else {
-                pieces::mineshaft_place::ShaftType::Normal
-            },
+            ctx: ctx.with_can_replace(shaft.can_replace_fn()),
+            shaft,
             level,
             chunk_bb: *chunk_bb,
             biome_blocking: false,

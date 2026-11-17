@@ -90,6 +90,23 @@ pub fn can_replace(shaft_type: ShaftType, state: u32) -> bool {
     }
 }
 
+impl ShaftType {
+    /// 给 [`PieceCtx::with_can_replace`] 用的 `canBeReplaced` 覆写。`StructurePiece`
+    /// 子类里只有 `MineShaftPiece` 覆写它；`placeBlock`（`generateBox` 等都经过它）
+    /// 不会覆盖本类型的木板 / 原木 / 栅栏 / 铁链，所以后放的走廊挖空气时保留先放的支撑柱。
+    ///
+    /// The `canBeReplaced` override for [`PieceCtx::with_can_replace`]. `MineShaftPiece`
+    /// is the only `StructurePiece` subclass overriding it; `placeBlock` (and therefore
+    /// `generateBox`) keeps this type's planks / log / fence / chain, so a later corridor
+    /// carving air leaves an earlier support pillar intact.
+    pub fn can_replace_fn(self) -> fn(u32) -> bool {
+        match self {
+            Self::Normal => |state| can_replace(ShaftType::Normal, state),
+            Self::Mesa => |state| can_replace(ShaftType::Mesa, state),
+        }
+    }
+}
+
 /// `isInInvalidLocation`：`MINESHAFT_BLOCKING` 群系，或盒边界任一格是液体。
 ///
 /// `isInInvalidLocation`: a `MINESHAFT_BLOCKING` biome, or any liquid on the box

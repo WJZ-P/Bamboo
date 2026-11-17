@@ -434,10 +434,7 @@ fn place_piece(
         place::ShaftType::Normal
     };
     let orientation = (piece.o >= 0).then(|| HDir::from_2d(piece.o));
-    let ctx = PieceCtx::new(piece.bb, orientation).with_can_replace(match shaft {
-        place::ShaftType::Normal => mine_shaft_can_replace_normal,
-        place::ShaftType::Mesa => mine_shaft_can_replace_mesa,
-    });
+    let ctx = PieceCtx::new(piece.bb, orientation).with_can_replace(shaft.can_replace_fn());
     let mut sp = place::ShaftPiece {
         ctx,
         shaft,
@@ -578,22 +575,6 @@ fn chunk_box(pos: (i32, i32)) -> [i32; 6] {
         MIN_Y + HEIGHT - 1,
         pos.1 * 16 + 15,
     ]
-}
-
-/// `MineShaftPiece.canBeReplaced`（普通矿井材质）。
-///
-/// `MineShaftPiece.canBeReplaced` for the normal mineshaft wood.
-fn mine_shaft_can_replace_normal(state: u32) -> bool {
-    use mc_bamboo_worldgen::structure::pieces::mineshaft_place as place;
-    place::can_replace(place::ShaftType::Normal, state)
-}
-
-/// `MineShaftPiece.canBeReplaced`（恶地矿井材质）。
-///
-/// `MineShaftPiece.canBeReplaced` for the mesa mineshaft wood.
-fn mine_shaft_can_replace_mesa(state: u32) -> bool {
-    use mc_bamboo_worldgen::structure::pieces::mineshaft_place as place;
-    place::can_replace(place::ShaftType::Mesa, state)
 }
 
 fn piece_line(piece: &Piece) -> String {

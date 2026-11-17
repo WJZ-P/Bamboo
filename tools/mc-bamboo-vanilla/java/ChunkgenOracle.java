@@ -510,6 +510,7 @@ final class FeatureLevelHandler implements InvocationHandler {
             return false;
         }
         ChunkAccess chunk = chunkAt(pos).chunk();
+        traceWrite(pos, state);
         BlockState old = chunk.setBlockState(pos, state, flags);
         if (state.hasBlockEntity()) {
             // PROTOCHUNK 分支（44-101 / 104-167）：写一份 DUMMY NBT，
@@ -530,6 +531,45 @@ final class FeatureLevelHandler implements InvocationHandler {
             }
         }
         return true;
+    }
+
+    /**
+     * 诊断开关 `-Dbamboo.debug.trace-pos=x,y,z;x,y,z`：记录写到这些位置的每一次
+     * `setBlock`（新状态 + 调用栈），写到 `bamboo.debug.trace-pos.file`。
+     * Diagnostic switch: log every write to the listed positions (new state and
+     * call stack) to `bamboo.debug.trace-pos.file`.
+     */
+    private static final java.util.Set<Long> TRACE_POS = parseTracePos();
+
+    private static java.util.Set<Long> parseTracePos() {
+        java.util.Set<Long> out = new java.util.HashSet<>();
+        String spec = System.getProperty("bamboo.debug.trace-pos", "");
+        for (String part : spec.split(";")) {
+            String[] xyz = part.trim().split(",");
+            if (xyz.length == 3) {
+                out.add(BlockPos.asLong(Integer.parseInt(xyz[0].trim()),
+                        Integer.parseInt(xyz[1].trim()), Integer.parseInt(xyz[2].trim())));
+            }
+        }
+        return out;
+    }
+
+    private static void traceWrite(BlockPos pos, BlockState state) {
+        if (TRACE_POS.isEmpty() || !TRACE_POS.contains(pos.asLong())) {
+            return;
+        }
+        StringBuilder text = new StringBuilder();
+        text.append("WRITE ").append(pos.toShortString()).append(' ').append(state).append('\n');
+        for (StackTraceElement frame : new Throwable().getStackTrace()) {
+            text.append("    at ").append(frame).append('\n');
+        }
+        try (java.io.FileWriter writer = new java.io.FileWriter(
+                System.getProperty("bamboo.debug.trace-pos.file", "trace-pos.log"), true)) {
+            writer.write(text.toString());
+        } catch (java.io.IOException ignored) {
+            // 诊断用，失败就当没开。
+            // Diagnostic only; ignore IO failures.
+        }
     }
 
     private boolean withinWriteZone(BlockPos pos) {

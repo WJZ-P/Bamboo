@@ -57,12 +57,13 @@ const QUERIES: &[(i64, i32, i32)] = &[
     (42, 40, 55),     // shipwreck_beached
     (42, -19, 11),    // ruined_portal_swamp
     (42, -14, 21),    // abandoned_camp_swamp
-    // 沙漠神殿起点已修好，和它的被引用邻区块一起进默认集。要塞起点还有已知
-    // 差异（见下），用被引用邻区块覆盖跨区块放置。
-    // The desert-pyramid start is now clean; the stronghold start still has a known
-    // gap, so its referenced neighbours cover cross-chunk placement.
+    // 沙漠神殿起点、要塞起点（与矿井重叠，`MineShaftPiece.canBeReplaced` 保住
+    // 先放的支撑柱）和它们的被引用邻区块。
+    // Desert-pyramid and stronghold starts (the latter overlaps a mineshaft whose
+    // `canBeReplaced` keeps earlier support pillars) plus referenced neighbours.
     (42, -375, -22), // desert_pyramid start
     (42, -374, -22), // desert_pyramid referenced neighbour
+    (42, -121, 96),  // stronghold start + mineshaft
     (42, -121, 97),  // stronghold referenced neighbour
     (42, -120, 96),  // stronghold referenced neighbour
     // 按 `random_spread` 电位起点定位找到的四种稀有结构起点。
@@ -81,12 +82,10 @@ const QUERIES: &[(i64, i32, i32)] = &[
 ];
 
 /// 已定位但尚未修好的整块差异，用 `--known-gaps` 单独跑，不进默认干净跑。
-/// 要塞起点的矿井支柱在真实 `WorldGenRegion` 上还差 4 格；`structure-place`
-/// 用合成地形逐件对拍它是 0 不一致。
 /// Known-but-unfixed whole-chunk gaps, run with `--known-gaps`; the default clean
-/// run excludes them. `structure-place` still covers this piece type block-for-block.
+/// run excludes them.
 const KNOWN_GAPS: &[(i64, i32, i32)] = &[
-    (42, -121, 96), // stronghold
+    (42, 67, -236), // ocean_ruin: CappedProcessor picks a different gravel set
 ];
 
 const USAGE: &str = "usage: structure-e2e <java> [--break-self-test] [--break-structure KIND] \
