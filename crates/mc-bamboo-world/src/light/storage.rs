@@ -714,18 +714,22 @@ impl LightStorage {
     /// position never sees the same revision twice. `lowest_section` is kept on
     /// both sides; it only decreases and a merge takes the minimum.
     pub(crate) fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        // 先按要搬的个数留好位置，免得一边搬一边扩表重排。
+        let capacity = chunks.len().min(self.columns.len());
         let mut out = Self {
             layer: self.layer,
             template: self.template.clone(),
-            columns: HashMap::new(),
-            revisions: HashMap::new(),
+            columns: HashMap::with_capacity(capacity),
+            revisions: HashMap::with_capacity(capacity),
             lowest_section: self.lowest_section,
             to_remove: BTreeSet::new(),
             affected: BTreeSet::new(),
             changed: Vec::new(),
             has_inconsistencies: self.has_inconsistencies,
             last_revision: self.last_revision,
-            loaded: self.loaded.as_ref().map(|_| HashSet::default()),
+            loaded: self.loaded.as_ref().map(|set| {
+                HashSet::with_capacity_and_hasher(chunks.len().min(set.len()), Default::default())
+            }),
         };
         for &pos in chunks {
             if let Some(column) = self.columns.remove(&pos) {

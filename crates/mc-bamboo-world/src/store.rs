@@ -758,15 +758,22 @@ impl ChunkStore {
                 );
             }
         }
+        // 先按要搬的个数留好位置，免得一边搬一边扩表重排（一个区块好几 KB）。
+        let capacity = chunks.len().min(loaded.len());
         let mut out = Self {
             template: self.template.clone(),
             edited: EditedChunks {
+                chunks: ChunkMap::with_capacity_and_hasher(capacity, Default::default()),
+                revisions: ChunkMap::with_capacity_and_hasher(capacity, Default::default()),
                 last_revision: self.edited.last_revision,
                 ..EditedChunks::default()
             },
             light: self.light.split_off(chunks),
-            loaded: Some(HashSet::default()),
-            pristine: ChunkMap::default(),
+            loaded: Some(HashSet::with_capacity_and_hasher(
+                capacity,
+                Default::default(),
+            )),
+            pristine: ChunkMap::with_capacity_and_hasher(capacity, Default::default()),
             changed: HashSet::default(),
         };
         let into_loaded = out.loaded.as_mut().expect("刚建好");
