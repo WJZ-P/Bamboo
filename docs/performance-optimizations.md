@@ -2580,9 +2580,18 @@ miss 同一个键就各算一遍，`cross_thread_duplicates` 148 / 266 / 184。4
 `OnceLock` 上 `get_or_init` 现算，其他线程查到同一个占位就在锁外等，拿到的是
 同一个 `Arc`。没有递归：`generate_chunk_with_beardifier` 只调纯函数
 `with_generator` / `Generator::terrain_with_region`，不会再回地形缓存，所以无环。
-闭包里有个 guard，panic / 生成失败会写入 `Err`，等待方不会永久挂住。占位在
-算完并提交进 `entries` 之前不计字节、不参与淘汰；占位和条目一起淘汰，且共享
-原来的 256 MiB 预算。等待方不再计入 `computed_by`，测量指标回到「真正算过的次数」。
+panic 处理按标准库语义，不做补偿写入：闭包 panic 后 `OnceLock` 保持未初始化，
+等待它的下一条线程会接着跑自己的闭包重算，panic 在计算线程正常向上传。
+最初版本在 `get_or_init` 闭包里用 guard 对同一把 `OnceLock` 调 `set`，实测会
+死锁（独立最小复现 `timeout 8` 返回 124），因为标准库明确禁止在初始化中重入。
+现在改成一个只清 `inflight` 占位的 guard（不碰 `OnceLock`）：panic 展开时，若
+还没有别的等待方重算成功就移除占位，若已有条目则保留；重算成功的等待方也会
+把占位补回来，保证 `entries` 与 `inflight` 一一对应。生成返回 `Err` 时
+`OnceLock` 里存的就是 Err，失败路径同样只移除指向同一个 `Arc` 的占位，
+不会误删后来者新建的。占位在算完并提交进 `entries` 之前不计字节、不参与
+淘汰；占位和条目一起淘汰，且共享原来的 256 MiB 预算。`clear_terrain_cache`
+会重置整片（含 `inflight`）。等待方不再计入 `computed_by`，测量指标回到
+「真正算过的次数」。
 
 同轮交替三轮（144 中心、开结构）：
 
@@ -2598,10 +2607,22 @@ miss 同一个键就各算一遍，`cross_thread_duplicates` 148 / 266 / 184。4
 接近单线程的 16.4–17.4 ms；8 线程吞吐 228–240 → 267–273 中心/s。单线程吞吐在
 三轮里 60.9→58.8、56.7→58.5、57.3→59.6，变化在 ±3.5% 内且中位数基本一致。
 
-改坏确认：新增确定性并发测试（4 条线程同时问同一个键，测试专用的计算延迟保证
-有等待方），断言四条线程拿到同一个 `Arc`、这个键只算一次；再打开测试专用的
-「等待方拿另一坐标」开关，断言结果出现不同 `Arc`。把断言反转后测试确实失败，
-说明不是假绿。`one_and_four_threads_generate_identical_feature_blocks`、
+改坏确认与失败路径测试（共四个并发单测，用一把测试专用互斥锁串行跑，避免共享的
+进程级测试开关互相干扰）：
+* 4 条线程同时问同一个键，断言拿到同一个 `Arc`、这个键只算一次；
+  打开测试专用的「等待方拿另一坐标」开关，断言结果出现不同 `Arc`
+  （把断言反转后测试确实失败，不是假绿）。
+* 测试专用开关让计算闭包 panic，另外 3 条线程等同一个键；用**detached 线程 +
+  `recv_timeout(10 s)`** 收结果（`thread::scope` 会在 join 时把挂住变成整个测试
+  挂住，超时就失去意义）。断言恰好一条线程 panic、至少一条等待方重算成功、
+  全部在限时内返回，之后同一个键再查一次能拿到正确结果且 `entries` /
+  `inflight` 都齐全。故意让所有线程 park 的改坏确认下，这个测试在 10 s 时
+  因 `Timeout` 失败，证明限时判据有效。
+* 测试专用开关让生成返回 `Err`：断言失败占位被移除、下一次查询重新成功。
+* 手工造「旧占位 + 新占位」，断言清理只删指向同一个 `Arc` 的那个，
+  且 `clear_terrain_cache` 会清空 `inflight`。
+
+`one_and_four_threads_generate_identical_feature_blocks`、
 `cargo test --workspace`、`gen-world --structures` / `structure-e2e` /
 `structure-pipeline` / `chunkgen` / `gen-light` 全部通过。
 
