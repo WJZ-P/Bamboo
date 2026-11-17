@@ -114,6 +114,8 @@ def parse_reports(path):
         elif label == "partition_share":
             for k, v in values.items():
                 current["partition"][k] = v
+        elif label == "disjoint_failures":
+            current["partition"]["disjoint_failures"] = values.get("disjoint_failures", 0.0)
         elif label == "triggers_per_tick":
             current["partition"]["triggers_per_tick"] = values.get("mean", 0.0)
         elif label == "units":
@@ -163,6 +165,7 @@ def analyse(report):
         "splits": p.get("splits", 0.0),
         "triggers_per_tick": p.get("triggers_per_tick", 0.0),
         "ticks": report["ticks"],
+        "disjoint_failures": p.get("disjoint_failures", 0.0),
         "halos": {},
         "blocks": {},
         "sizes": {},
@@ -235,7 +238,7 @@ def summarise(root):
             "p50", "p95", "tick_mean", "three", "partition_ns", "partition_p50",
             "partition_p95", "partition_share", "tick_mean_ms", "three_mean_ms",
             "three_share", "units", "unit_p50", "unit_p95", "busy", "size_mean",
-            "merges", "splits", "triggers_per_tick", "ticks",
+            "merges", "splits", "triggers_per_tick", "ticks", "disjoint_failures",
         )
         for key in scalar:
             merged[key] = weighted([r[key] for r in steady], weights)
