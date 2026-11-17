@@ -411,6 +411,7 @@ pub fn place_processed(
     mirror: u32,
     rotation: u32,
     random: &crate::random::Random,
+    worldgen_random: Option<&crate::random::WorldgenRandom>,
     world: &mut impl BlockWriter,
 ) -> Result<PlacedBlocks, String> {
     let mut placed = PlacedBlocks::default();
@@ -476,7 +477,22 @@ pub fn place_processed(
             let nbt = match &block.nbt {
                 None => None,
                 Some(tag) if is_randomizable_container(&block.state.name) => {
-                    Some(overwrite_loot_table_seed(tag, random.next_long()))
+                    // `StructureStart.placeInChunk` 传下来的是 `WorldgenRandom`（继承
+                    // `LegacyRandomSource`），`BitRandomSource.nextLong` 取两次 `next(32)`；
+                    // 直接问内层的 `Random` 会走 Xoroshiro 的原生一次 64 位，两种种子只差低位。
+                    // 走游戏路径时一定要用那个 `WorldgenRandom`，单独对拍的调用方才退回到
+                    // 传入的 `Random`。
+                    //
+                    // `StructureStart.placeInChunk` passes a `WorldgenRandom` (extending
+                    // `LegacyRandomSource`), whose `BitRandomSource.nextLong` draws two
+                    // `next(32)` values. Asking the inner `Random` instead uses Xoroshiro's
+                    // single 64-bit draw, which only differs in the low bits. The game path
+                    // must use that `WorldgenRandom`; stand-alone oracles fall back to `Random`.
+                    let seed = match worldgen_random {
+                        Some(source) => source.next_long(),
+                        None => random.next_long(),
+                    };
+                    Some(overwrite_loot_table_seed(tag, seed))
                 }
                 Some(tag) => Some(tag.clone()),
             };
@@ -788,6 +804,7 @@ pub fn place_piece<L: ProcessorLevel>(
     mirror: u32,
     rotation: u32,
     random: &crate::random::Random,
+    worldgen_random: Option<&crate::random::WorldgenRandom>,
     world: &mut impl BlockWriter,
 ) -> Result<PlacedBlocks, String> {
     // `settings.getBoundingBox()`：`None` 时官方不过滤（`boundingBox == null`），
@@ -827,7 +844,15 @@ pub fn place_piece<L: ProcessorLevel>(
             state: block.state,
         })
         .collect();
-    let mut placed = place_processed(&place, chunk_bb, mirror, rotation, random, world)?;
+    let mut placed = place_processed(
+        &place,
+        chunk_bb,
+        mirror,
+        rotation,
+        random,
+        worldgen_random,
+        world,
+    )?;
     // `if (!settings.isIgnoreEntities()) placeEntities(...)`。`SinglePoolElement.getSettings`
     // 里 `setIgnoreEntities(false)`，所以 jigsaw 结构件照官方都要放实体。`finalizeEntities`
     // 只影响 `Mob.finalizeSpawn`，那属于实体系统，这里交给调用方。
@@ -1173,6 +1198,8 @@ mod tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            None,
+            None,
             &mut world,
         )
         .unwrap();
@@ -1235,6 +1262,8 @@ mod tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            None,
+            None,
             &mut world,
         )
         .unwrap();
@@ -1261,6 +1290,8 @@ mod tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            None,
+            None,
             &mut world,
         )
         .unwrap();
@@ -1365,7 +1396,7 @@ mod tests {
         }];
         let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(3));
         let mut world = World::default();
-        let placed = place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        let placed = place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         let (_, saved) = &placed.placed[0];
         let saved = saved.as_ref().unwrap();
         let Tag::Compound(entries) = saved else {
@@ -1386,7 +1417,7 @@ mod tests {
             nbt: nbt(),
         }];
         let mut world = World::default();
-        let placed = place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        let placed = place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         let (_, saved) = &placed.placed[0];
         let Tag::Compound(entries) = saved.as_ref().unwrap() else {
             panic!("saved nbt must be a compound");
@@ -1458,7 +1489,7 @@ mod tests {
         // The position was a fluid source, so `waterlogged` becomes true.
         let mut world = World::default();
         world.sources.insert((2, 3, 4));
-        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         let last = world.writes.last().expect("at least one write");
         assert_eq!(last.0, (2, 3, 4));
         assert_eq!(
@@ -1470,7 +1501,7 @@ mod tests {
         // 不是流体源 → 保持 false，且只写一次。
         // Not a fluid source: stays false and only one write happens.
         let mut world = World::default();
-        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         assert_eq!(world.writes.len(), 1, "no extra watering write");
         assert_eq!(
             crate::structure::state_transform::property_of(world.writes[0].1, "waterlogged"),
@@ -1595,7 +1626,7 @@ mod tests {
         }];
         let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0));
         let mut world = World::default();
-        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         assert_eq!(world.writes, 1, "only the block itself is written");
     }
 
@@ -1646,7 +1677,7 @@ mod tests {
         }];
         let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(11));
         let mut world = World::default();
-        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         assert_eq!(world.entities.len(), 1, "one block entity written");
         let (pos, tag) = &world.entities[0];
         assert_eq!(*pos, (0, 5, 0));
@@ -1709,7 +1740,7 @@ mod tests {
         ];
         let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0));
         let mut world = World::default();
-        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         assert_eq!(world.entities, 1, "only the block with nbt");
     }
 
@@ -1785,6 +1816,8 @@ mod tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            None,
+            None,
             &mut world,
         )
         .unwrap();

@@ -649,6 +649,7 @@ fn place_single_pool_element(
         0,
         inputs.rotation,
         inputs.random.source(),
+        Some(inputs.random),
         world,
     )?;
     Ok(())

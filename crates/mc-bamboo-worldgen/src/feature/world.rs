@@ -635,7 +635,7 @@ mod block_writer_tests {
             nbt: None,
         }];
         let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0));
-        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         let state = world.get_block(0, 64, 0);
         assert_eq!(
             crate::structure::state_transform::property_of(state, "waterlogged"),
@@ -757,6 +757,8 @@ mod block_writer_tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            None,
+            None,
             &mut world,
         )
         .unwrap_or_else(|error| panic!("{name}: place_piece failed: {error}"));
