@@ -166,6 +166,11 @@ fn settings(rotation: i32, integrity: f32, is_cold: bool, world_seed: i64) -> Pl
                 delegate: std::boxed::Box::new(Processor::Rule(vec![Rule {
                     input: InputTest::Block(from),
                     output,
+                    loot_table: Some(if is_cold {
+                        "minecraft:archaeology/ocean_ruin_cold"
+                    } else {
+                        "minecraft:archaeology/ocean_ruin_warm"
+                    }),
                 }])),
             },
         ])

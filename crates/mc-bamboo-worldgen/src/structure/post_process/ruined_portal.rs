@@ -67,6 +67,7 @@ fn settings(
         // `getBlockReplaceRule(Blocks.GOLD_BLOCK, 0.3F, Blocks.AIR)`.
         input: InputTest::RandomBlock("minecraft:gold_block", GOLD_GONE),
         output: blocks,
+        loot_table: None,
     }];
     rules.push(lava_rule(placement, properties));
     if !properties.cold {
@@ -75,6 +76,7 @@ fn settings(
             // `getBlockReplaceRule(Blocks.NETHERRACK, 0.07F, Blocks.MAGMA_BLOCK)`.
             input: InputTest::RandomBlock("minecraft:netherrack", MAGMA_INSTEAD_OF_NETHERRACK),
             output: block_state("minecraft:magma_block"),
+            loot_table: None,
         });
     }
     let mut processors = vec![
@@ -100,16 +102,19 @@ fn lava_rule(placement: VerticalPlacement, properties: Properties) -> Rule {
         Rule {
             input: InputTest::Block("minecraft:lava"),
             output: block_state("minecraft:magma_block"),
+            loot_table: None,
         }
     } else if properties.cold {
         Rule {
             input: InputTest::Block("minecraft:lava"),
             output: block_state("minecraft:netherrack"),
+            loot_table: None,
         }
     } else {
         Rule {
             input: InputTest::RandomBlock("minecraft:lava", MAGMA_INSTEAD_OF_LAVA),
             output: block_state("minecraft:magma_block"),
+            loot_table: None,
         }
     }
 }

@@ -168,10 +168,7 @@ fn handle_data_marker(
         // `IGLOO_CHEST` 表与一次 `random.nextLong()`。
         // `IglooPiece.handleDataMarker` sets the `IGLOO_CHEST` table and one
         // `random.nextLong()` seed on the chest below.
-        context.set_chest_loot_table(
-            (pos.0, pos.1 - 1, pos.2),
-            "minecraft:chests/igloo_chest",
-        );
+        context.set_chest_loot_table((pos.0, pos.1 - 1, pos.2), "minecraft:chests/igloo_chest");
     }
 }
 

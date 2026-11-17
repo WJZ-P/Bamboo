@@ -135,7 +135,15 @@ impl PieceContext<'_, '_> {
         if let Some(writes) = self.writes.as_mut() {
             writes.push((pos.0, pos.1, pos.2, state));
         }
-        self.world.set_block(pos.0, pos.1, pos.2, state);
+        // 官方 `placeBlock` 走 `level.setBlock` → `ChunkAccess.setBlockState`，
+        // 会增量更新四张 FINAL 高度图。step 9 的 `heightmap MOTION_BLOCKING`
+        // 读到的是结构件写完后的高度，所以这里不能用不带高度图的 `set_block`。
+        //
+        // Vanilla's `placeBlock` goes through `ChunkAccess.setBlockState`, which
+        // incrementally updates the four FINAL heightmaps. Step-9 features read
+        // MOTION_BLOCKING after the pieces are placed.
+        self.world
+            .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
     }
 
     /// `StructurePiece.placeBlock` 里的状态变换：先 `mirror` 再 `rotation`。
@@ -247,7 +255,7 @@ impl PieceContext<'_, '_> {
             if let Some(writes) = self.writes.as_mut() {
                 writes.push((pos.0, y, pos.2, state));
             }
-            self.world.set_block(pos.0, y, pos.2, state);
+            self.world.set_block_with_heightmaps(pos.0, y, pos.2, state);
         }
     }
 }

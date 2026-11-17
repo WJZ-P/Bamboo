@@ -112,6 +112,10 @@ pub const IGNORE_STRUCTURE_AND_AIR: &[&str] = &["minecraft:air", "minecraft:stru
 pub struct Rule {
     pub input: InputTest,
     pub output: u32,
+    /// 命中这条规则时由 `AppendLoot` 写下的战利品表。
+    ///
+    /// The loot table written by `AppendLoot` when this rule matches.
+    pub loot_table: Option<&'static str>,
 }
 
 /// `RuleTest` 的两种。
@@ -324,6 +328,7 @@ pub fn place_in_world(
         let Some(state) = state_of(entry) else {
             continue;
         };
+        let mut nbt = block.nbt.clone();
         let mut current = state;
         let mut keep = true;
         for processor in &settings.processors {
@@ -334,8 +339,13 @@ pub fn place_in_world(
                 // `finalizeProcessing`.
                 continue;
             }
-            match processor.process(world, pos, block.pos, current, settings) {
-                Some(next) => current = next,
+            match processor.process_with_nbt(world, pos, block.pos, current, settings) {
+                Some((next, rule_nbt)) => {
+                    current = next;
+                    if rule_nbt.is_some() {
+                        nbt = rule_nbt;
+                    }
+                }
                 None => {
                     keep = false;
                     break;
@@ -344,7 +354,7 @@ pub fn place_in_world(
         }
         if keep {
             originals.push((pos, state));
-            processed.push((pos, current, block.nbt.clone()));
+            processed.push((pos, current, nbt));
         }
     }
 
@@ -571,11 +581,15 @@ fn apply_capped(
         // The `templateRelativePos` passed to the delegate is `originalBlockInfo.pos()`;
         // the world position stands in here (the position predicate is always true in these
         // structures).
-        if let Some(altered) = delegate.process(world, pos, pos, current, settings)
+        if let Some((altered, rule_nbt)) =
+            delegate.process_with_nbt(world, pos, pos, current, settings)
             && altered != current
         {
             replaced += 1;
             processed[index].1 = altered;
+            if rule_nbt.is_some() {
+                processed[index].2 = rule_nbt;
+            }
         }
     }
 }
@@ -681,8 +695,7 @@ impl MarkerContext<'_, '_, '_> {
             ),
             ("LootTableSeed".to_owned(), mc_bamboo_nbt::Tag::Long(seed)),
         ]);
-        self.world
-            .set_block_entity(pos.0, pos.1, pos.2, &nbt);
+        self.world.set_block_entity(pos.0, pos.1, pos.2, &nbt);
     }
 }
 
@@ -1099,6 +1112,58 @@ impl Processor {
     ///
     /// `StructureProcessor.processBlock`: `None` drops the block.
     fn process(
+        &self,
+        world: &dyn BlockAccess,
+        pos: (i32, i32, i32),
+        template_pos: (i32, i32, i32),
+        state: u32,
+        settings: &PlaceSettings,
+    ) -> Option<u32> {
+        self.process_state(world, pos, template_pos, state, settings)
+    }
+
+    /// [`Self::process`] 加上命中规则的 `AppendLoot` 方块实体 nbt。
+    ///
+    /// [`Self::process`] plus the block-entity nbt of a matching rule's `AppendLoot`.
+    fn process_with_nbt(
+        &self,
+        world: &dyn BlockAccess,
+        pos: (i32, i32, i32),
+        template_pos: (i32, i32, i32),
+        state: u32,
+        settings: &PlaceSettings,
+    ) -> Option<(u32, Option<mc_bamboo_nbt::Tag>)> {
+        if let Processor::Rule(rules) = self {
+            let random = position_random(pos);
+            for rule in rules {
+                if rule.input.matches(state, &random) {
+                    let nbt = rule.loot_table.map(|table| {
+                        mc_bamboo_nbt::Tag::Compound(vec![
+                            (
+                                "LootTable".to_owned(),
+                                mc_bamboo_nbt::Tag::String(table.to_owned()),
+                            ),
+                            (
+                                "LootTableSeed".to_owned(),
+                                mc_bamboo_nbt::Tag::Long(random.next_long()),
+                            ),
+                        ])
+                    });
+                    return Some((rule.output, nbt));
+                }
+            }
+            return Some((state, None));
+        }
+        let out = self
+            .process(world, pos, template_pos, state, settings)
+            .map(|state| (state, None));
+        out
+    }
+
+    /// processor 的方块改写本体。
+    ///
+    /// The processor's state rewrite.
+    fn process_state(
         &self,
         world: &dyn BlockAccess,
         pos: (i32, i32, i32),

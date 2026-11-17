@@ -1333,11 +1333,7 @@ const BLOCK_ENTITY_DEFAULTS: &[(&str, &str, &str)] = &[
     ("minecraft:smoker", "speed_multiplier", "1.0f"),
     // `SculkSensorBlockEntity.saveAdditional` 存 `lastVibrationFrequency` 与
     // `VibrationSystem.Data.CODEC` 编码的默认监听器。
-    (
-        "minecraft:sculk_sensor",
-        "last_vibration_frequency",
-        "0",
-    ),
+    ("minecraft:sculk_sensor", "last_vibration_frequency", "0"),
     (
         "minecraft:sculk_sensor",
         "listener",

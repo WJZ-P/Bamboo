@@ -359,9 +359,33 @@ pub fn place(
         let target = (pos.0 + rotated.0, pos.1 + rotated.1, pos.2 + rotated.2);
         world.set_block_with_heightmaps(target.0, target.1, target.2, state);
         placed_any = true;
-        // 方块实体只保留 `LootTable`（`append_loot` 的全部内容）。
-        // The block entity keeps only `LootTable`, which is all `append_loot` writes.
-        let _ = loot;
+        // `AppendLoot.apply` 用 `settings.getRandom(pos)`（按位置派生的
+        // `RandomSource.create(Mth.getSeed(pos))`）取一次 `nextLong()` 当种子，
+        // 和模板里的方块实体 nbt 一起交给 `loadWithComponents`。
+        //
+        // `AppendLoot.apply` draws one `nextLong()` from `settings.getRandom(pos)`
+        // (a per-position `RandomSource.create(Mth.getSeed(pos))`) and hands the tag to
+        // `loadWithComponents` along with the template's block-entity nbt.
+        if let Some(table) = loot {
+            // `RuleProcessor.processBlock` 的种子来自模板相对坐标 `blockInfo.pos()`。
+            // `RuleProcessor.processBlock` seeds from the template-relative `blockInfo.pos()`.
+            let seed = mc_bamboo_blocks::LegacyRandom::new(crate::random::positional_seed(
+                block.pos.0,
+                block.pos.1,
+                block.pos.2,
+            ))
+            .next_long();
+            let nbt = mc_bamboo_nbt::Tag::Compound(vec![
+                (
+                    "LootTable".to_owned(),
+                    mc_bamboo_nbt::Tag::String(table.to_owned()),
+                ),
+                ("LootTableSeed".to_owned(), mc_bamboo_nbt::Tag::Long(seed)),
+            ]);
+            world.set_block_entity(target.0, target.1, target.2, &nbt);
+        } else if let Some(tag) = &block.nbt {
+            world.set_block_entity(target.0, target.1, target.2, tag);
+        }
     }
     placed_any
 }

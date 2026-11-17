@@ -759,10 +759,7 @@ fn is_int_when_saved(block_name: &str, key: &str) -> bool {
         "minecraft:furnace" | "minecraft:blast_furnace" | "minecraft:smoker"
     ) && matches!(
         key,
-        "cooking_time_spent"
-            | "cooking_total_time"
-            | "lit_time_remaining"
-            | "lit_total_time"
+        "cooking_time_spent" | "cooking_total_time" | "lit_time_remaining" | "lit_total_time"
     );
     let brewing = block_name == "minecraft:brewing_stand"
         && matches!(key, "BrewTime" | "Fuel" | "total_brew_time" | "total_fuel");
