@@ -15,6 +15,7 @@ use mc_bamboo_blocks::{
         default_additional,
         entity::{read_entity, write_entity},
         redstone::{RedstoneFacts, read_redstone, write_redstone},
+        resave_additional,
         ticks::{decode_chunk_ticks, encode_chunk_ticks},
     },
     entity::{ChunkEntities, EntityRow},
@@ -127,6 +128,34 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
         let z = pos.z * 16 + entity.z as i32;
         let world_pos = BlockPos::new(x, entity.y, z);
         let mut entry = ModeledBlockEntity::new(name, x, entity.y, z);
+        // 只保留存档态的方块实体：按官方 `loadStatic → saveAdditional` 的规则把读盘
+        // 条目往返一遍。没有读盘条目时补构造器默认值；调用方后面写的游戏表 / 活实例
+        // 键优先，不用读盘旧值盖掉运行时改过的内容。
+        let raw = column
+            .chunk()
+            .preserved_block_entity(entity.x, entity.y, entity.z);
+        let state = BlockState(column.chunk().block(entity.x, entity.y, entity.z));
+        let empty = Tag::Compound(Vec::new());
+        let saved = resave_additional(name, state, raw.unwrap_or(&empty));
+        if let Some(saved) = &saved {
+            for key in &saved.omit {
+                entry.omit.push((*key).to_owned());
+            }
+            for (key, value) in &saved.fields {
+                // 有运行时表的类型由后面的 write_game_fields / write_redstone 覆盖。
+                entry.put(key, value.clone());
+            }
+        }
+        // 告示牌的文字在 `ChunkColumn::signs` 里，是运行时内容；按官方
+        // `SignBlockEntity.saveAdditional` 重新编码，不能用读盘旧值覆盖。
+        if matches!(name, "minecraft:sign" | "minecraft:hanging_sign") {
+            let content = column
+                .chunk()
+                .sign(entity.x, entity.y, entity.z)
+                .cloned()
+                .unwrap_or(mc_bamboo_core::sign::SignContent::BLANK);
+            write_sign_text(&mut entry, &content);
+        }
         write_game_fields(&mut entry, &mut problems, name, world_pos, parts, pos);
         // 会动的方块实体自己的键。
         match parts.live_additional(world_pos) {
@@ -141,12 +170,14 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
                 // 宝库 / 幽匿方块实体没有读盘条目，也要补出 `saveAdditional` 的键。
                 // A freshly generated vault or sculk block entity has no disk entry;
                 // its `saveAdditional` keys must still be written.
-                if let Some(fields) = default_additional(name) {
-                    for (key, value) in fields {
-                        entry.put(&key, value);
+                if saved.is_none() {
+                    if let Some(fields) = default_additional(name) {
+                        for (key, value) in fields {
+                            entry.put(&key, value);
+                        }
+                    } else {
+                        write_default_block_entity_fields(&mut entry, name);
                     }
-                } else {
-                    write_default_block_entity_fields(&mut entry, name);
                 }
             }
         }
@@ -518,8 +549,43 @@ fn write_component_fields(
     }
 }
 
+/// 官方 `SignText.CODEC` 的三个字段；离线模式没有过滤后的文字。
+fn sign_text_tag(text: &mc_bamboo_core::sign::SignText) -> Tag {
+    Tag::Compound(vec![
+        (
+            "messages".to_owned(),
+            Tag::List(text.messages.iter().cloned().map(Tag::String).collect()),
+        ),
+        (
+            "color".to_owned(),
+            Tag::String(text.color.name().to_owned()),
+        ),
+        (
+            "has_glowing_text".to_owned(),
+            Tag::Byte(i8::from(text.glowing)),
+        ),
+    ])
+}
+
+/// 用运行时告示牌内容覆盖读盘条目里的 `front_text` / `back_text` / `is_waxed`。
+fn write_sign_text(entry: &mut ModeledBlockEntity, content: &mc_bamboo_core::sign::SignContent) {
+    entry.put("front_text", sign_text_tag(&content.front));
+    entry.put("back_text", sign_text_tag(&content.back));
+    entry.put("is_waxed", Tag::Byte(i8::from(content.waxed)));
+}
+
 fn write_default_block_entity_fields(entry: &mut ModeledBlockEntity, id: &str) {
     match id {
+        // 生成期没有命令方块表时，补出官方 `BaseCommandBlock.save` 的 7 个默认键。
+        "minecraft:command_block" => {
+            put_string(entry, "Command", String::new());
+            put_int(entry, "SuccessCount", 0);
+            put_bool(entry, "TrackOutput", true);
+            put_bool(entry, "UpdateLastExecution", true);
+            put_bool(entry, "powered", false);
+            put_bool(entry, "conditionMet", false);
+            put_bool(entry, "auto", false);
+        }
         "minecraft:hopper" => put_int(entry, "TransferCooldown", -1),
         "minecraft:furnace" | "minecraft:blast_furnace" | "minecraft:smoker" => {
             put_int(entry, "cooking_time_spent", 0);
@@ -590,7 +656,16 @@ fn read_game_fields(
     state: BlockState,
 ) {
     // 容器：有 Items 或 LootTable 就建条目，其它字段按新建默认。
-    let is_container = container_kind(id).is_some();
+    // 这四类官方不写 `Items`（末影箱没有自己的存档键，唱片机 / 潜影盒 / 陶罐
+    // 用 `RecordItem` / `item` 等键）：读盘时不建空条目，免得存盘多写 `Items:[]`。
+    let is_container = container_kind(id).is_some()
+        && !matches!(
+            id,
+            "minecraft:ender_chest"
+                | "minecraft:jukebox"
+                | "minecraft:shulker_box"
+                | "minecraft:decorated_pot"
+        );
     if is_container {
         let kind = container_kind(id).unwrap_or(ContainerKind::Chest);
         let mut entry = ContainerEntry::new(kind);

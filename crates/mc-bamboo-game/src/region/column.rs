@@ -303,6 +303,11 @@ impl RegionColumn {
         })
     }
 
+    /// 这一柱的方块、光照和挂在方块旁的读盘状态。
+    pub fn chunk_column(&self) -> &ChunkColumn {
+        &self.column
+    }
+
     /// 存档编码用的只读部件视图。
     pub fn parts(&self) -> RegionColumnView<'_> {
         RegionColumnView {

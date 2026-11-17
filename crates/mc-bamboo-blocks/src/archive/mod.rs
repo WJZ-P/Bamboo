@@ -12,6 +12,7 @@ pub mod block_entity;
 pub mod entity;
 pub mod passive;
 pub mod redstone;
+pub mod resave;
 pub mod tag;
 pub mod ticks;
 
@@ -20,7 +21,8 @@ mod tests;
 
 pub use block_entity::{BlockEntityKind, create_block_entity, write_block_entity_additional};
 pub use entity::{ENTITY_UUID_PREFIX, entity_uuid, entity_uuid_tag, read_entity, write_entity};
-pub use passive::{PassiveBlockEntity, PassiveKind, default_additional};
+pub use passive::{PassiveBlockEntity, PassiveKind};
 pub use redstone::{read_redstone, write_redstone};
+pub use resave::{Resaved, default_additional, resave_additional};
 pub use tag::{Error, Result, field, put, remove_known, with_defaults};
 pub use ticks::{decode_chunk_ticks, encode_chunk_ticks};
