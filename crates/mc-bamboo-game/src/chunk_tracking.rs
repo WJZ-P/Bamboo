@@ -164,6 +164,26 @@ impl PlayerChunkSender {
         self.pending.contains_key(&pos)
     }
 
+    /// 测试专用：待发区块是不是发完了。正式路径靠客户端确认推进配额。
+    ///
+    /// Test-only: whether every pending chunk has been sent. The real path is
+    /// driven by client acknowledgements.
+    #[cfg(test)]
+    pub(crate) fn pending_is_empty_for_test(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// 测试专用：假装客户端确认了一批，把发送配额推到上限。
+    /// 正式路径由客户端的 `chunk_batch_received` 决定配额。
+    ///
+    /// Test-only: pretend a client acknowledged a batch so the full quota is
+    /// available. The real path is paced by `chunk_batch_received`.
+    #[cfg(test)]
+    pub(crate) fn fill_quota_for_test(&mut self) {
+        self.on_batch_received(f32::MAX);
+        self.batch_quota = 64.0;
+    }
+
     /// 在区块离开 `pending` 之前，把这一刻写进出站缓冲的墙上延迟记进剖析器。
     fn record_batch(&self, batch: &[ChunkPos], profiler: &mut Profiler) {
         let sent = profiler.now();

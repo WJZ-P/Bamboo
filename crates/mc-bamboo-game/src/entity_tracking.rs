@@ -7,9 +7,12 @@
 //! 这两种实体都没有朝向、乘客、属性、装备和拴绳，所以配对包只有 `add_entity`
 //! 和 `set_entity_data` 两项。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use mc_bamboo_blocks::entity::{Entity, EntityKind, PrimedTnt};
+use mc_bamboo_blocks::{
+    entity::{EntityPublic, KindPublic, PrimedTnt},
+    state::BlockState,
+};
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::entity_types;
 use mc_bamboo_protocol::{
@@ -112,32 +115,34 @@ struct Snapshot {
 }
 
 /// 配对和同步时要发的、按实体类型不同的元数据。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum KindData {
-    FallingBlock { state: u32, start: BlockPos },
+    FallingBlock { state: BlockState, start: BlockPos },
     Tnt { fuse: i32 },
     Item(ItemStack),
 }
 
 impl Snapshot {
-    fn of(entity: &Entity) -> Self {
+    /// 从公开数据抄一份。字段和 [`Entity::split`](mc_bamboo_blocks::entity::Entity::split)
+    /// 的 public 半边一一对应，不克隆私有状态、随机数、移动记录和物品堆以外的东西。
+    fn of(public: &EntityPublic) -> Self {
         Self {
-            id: entity.id,
-            entity_type: entity.kind.entity_type(),
-            position: entity.position,
-            delta: entity.delta,
-            on_ground: entity.on_ground,
-            precise: entity.requires_precise_position(),
-            yaw: entity.y_rot,
-            chunk: ChunkPos::containing(entity.position.x, entity.position.z),
-            data: KindData::of(&entity.kind),
+            id: public.uid,
+            entity_type: public.kind.entity_type(),
+            position: public.position,
+            delta: public.delta,
+            on_ground: public.on_ground,
+            precise: public.precise,
+            yaw: public.yaw,
+            chunk: public.chunk_position(),
+            data: KindData::of(&public.kind),
         }
     }
 
     /// `getAddEntityPacket` 的 `data`：下落的方块是它的方块状态，TNT 和物品是 0。
     fn add_data(&self) -> i32 {
         match &self.data {
-            KindData::FallingBlock { state, .. } => *state as i32,
+            KindData::FallingBlock { state, .. } => state.0 as i32,
             KindData::Tnt { .. } | KindData::Item(_) => 0,
         }
     }
@@ -148,14 +153,14 @@ impl Snapshot {
 }
 
 impl KindData {
-    fn of(kind: &EntityKind) -> Self {
+    fn of(kind: &KindPublic) -> Self {
         match kind {
-            EntityKind::FallingBlock(falling) => Self::FallingBlock {
-                state: falling.state.0,
-                start: falling.start_pos,
+            KindPublic::FallingBlock { state, start_pos } => Self::FallingBlock {
+                state: *state,
+                start: *start_pos,
             },
-            EntityKind::Tnt(tnt) => Self::Tnt { fuse: tnt.fuse },
-            EntityKind::Item(item) => Self::Item(item.stack.clone()),
+            KindPublic::Tnt { fuse } => Self::Tnt { fuse: *fuse },
+            KindPublic::Item { stack, .. } => Self::Item(stack.clone()),
         }
     }
 
@@ -205,15 +210,18 @@ impl KindData {
 
 /// tick 第 6 阶段：世界实体的配对、同步和移除。对应 `ChunkMap.tick`。
 pub(crate) fn sync(region: &mut Region) {
-    let snapshots: Vec<Snapshot> = region
-        .entities
-        .iter()
-        .map(|entity| Snapshot::of(&entity))
-        .collect();
+    // 外层仍是全表按 uid 升序：每个实体都要发同步包，消失的也要发移除包。
+    // 只读公开数据，不克隆整行；配对改走每刻预建的粗网格候选表。
+    //
+    // The outer loop still walks the whole table in uid order: every entity sends
+    // sync packets and departed ones send removals. Only public data is read, and
+    // pairing uses a coarse grid of players built once per tick.
+    let snapshots: Vec<Snapshot> = region.entities.iter_public().map(Snapshot::of).collect();
     let live: BTreeSet<i32> = snapshots.iter().map(|snapshot| snapshot.id).collect();
     remove_missing(region, &live);
 
     let view_distance = region.view_distance;
+    let cells = PlayerCells::build(&region.players, view_distance);
     for snapshot in snapshots {
         let tracked = &mut region.entity_tracking.tracked;
         tracked
@@ -222,12 +230,64 @@ pub(crate) fn sync(region: &mut Region) {
         let tracked = tracked.get_mut(&snapshot.id).expect("刚放进去");
         update_pairings(
             &region.players,
+            &cells,
             &mut region.links,
             &snapshot,
             tracked,
             view_distance,
         );
         send_changes(&snapshot, tracked, &mut region.links);
+    }
+}
+
+/// 每刻建一次的粗网格：格子边长不小于任何玩家可能看得见实体的最大水平距离，
+/// 每名玩家登记进自己可见范围覆盖到的少数几个格子（边长不小于半径，最多 3×3 格），
+/// 一个实体只要查自己那一格就能拿到全部候选。格子里的玩家按 `PlayerId` 升序，
+/// 和原来遍历 `players.values()` 的顺序相同。
+///
+/// A coarse grid rebuilt once per tick. Its cell edge is no smaller than the
+/// greatest horizontal distance at which `is_visible` can accept a player, so
+/// each player is registered in the few cells their visible range covers (at
+/// most 3x3 when the edge is no smaller than the radius), and one lookup per
+/// entity yields every candidate. Ids in each cell stay in PlayerId order,
+/// matching the old walk over `players.values()`.
+struct PlayerCells {
+    edge: f64,
+    cells: HashMap<(i64, i64), Vec<PlayerId>>,
+}
+
+impl PlayerCells {
+    fn build(players: &BTreeMap<PlayerId, Player>, view_distance: i32) -> Self {
+        // 视距乘 16 是 `is_visible` 的上界：实体类型的范围和玩家视距取小的那个，
+        // 玩家视距又不超过服务端视距。格子不小于它，落在半径内的玩家必定和
+        // 实体同格或相邻一格；这里把每名玩家登记进自己能看见实体的所有格子，
+        // 等价于在实体侧做一次哈希查找。
+        let edge = f64::from(view_distance * BLOCKS_PER_CHUNK).max(1.0);
+        let mut cells: HashMap<(i64, i64), Vec<PlayerId>> = HashMap::new();
+        for (&id, player) in players {
+            let range = f64::from(player.view_distance(view_distance) * BLOCKS_PER_CHUNK);
+            let x = player.position().x;
+            let z = player.position().z;
+            let first_x = ((x - range) / edge).floor() as i64;
+            let last_x = ((x + range) / edge).floor() as i64;
+            let first_z = ((z - range) / edge).floor() as i64;
+            let last_z = ((z + range) / edge).floor() as i64;
+            for cell_x in first_x..=last_x {
+                for cell_z in first_z..=last_z {
+                    cells.entry((cell_x, cell_z)).or_default().push(id);
+                }
+            }
+        }
+        Self { edge, cells }
+    }
+
+    /// 实体所在的格子里的玩家，按 `PlayerId` 升序。
+    fn candidates(&self, x: f64, z: f64) -> &[PlayerId] {
+        let cell = (
+            (x / self.edge).floor() as i64,
+            (z / self.edge).floor() as i64,
+        );
+        self.cells.get(&cell).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -255,28 +315,35 @@ fn remove_missing(region: &mut Region, live: &BTreeSet<i32>) {
 /// 才重新算；这里每 tick 都算一遍，结果一样，只是多花几次比较。
 fn update_pairings(
     players: &BTreeMap<PlayerId, Player>,
+    cells: &PlayerCells,
     links: &mut Links,
     snapshot: &Snapshot,
     tracked: &mut TrackedEntity,
     view_distance: i32,
 ) {
-    let mut visible: Vec<PlayerId> = Vec::new();
-    for player in players.values() {
-        if is_visible(player, snapshot, view_distance) {
-            visible.push(player.id);
+    // 「停止追踪」直接遍历 `seen_by`：一名玩家是否还看得见，和它在不在候选格
+    // 里无关，传送走或视距变小照样会算到。「开始追踪」只遍历粗网格给出的
+    // 候选：任何看得见的玩家都登记进了实体所在的格子，所以名单不漏。
+    // 两个名单都按 PlayerId 升序，顺序和原来遍历 `players.values()` 逐项相同；
+    // 常见的一刻里两者都是空的，不分配堆内存。
+    //
+    // Stop-tracking walks `seen_by` directly: visibility does not depend on the
+    // candidate cell, so teleports and smaller view distances are still caught.
+    // Start-tracking walks only the coarse-grid candidates, which by construction
+    // include every visible player. Both lists stay in ascending PlayerId order,
+    // exactly like the old walk over `players.values()`, and allocate nothing on
+    // the common tick where nothing changes.
+    let is_visible_to = |id: PlayerId| {
+        players
+            .get(&id)
+            .is_some_and(|player| is_visible(player, snapshot, view_distance))
+    };
+    let mut lost: Vec<PlayerId> = Vec::new();
+    for &id in &tracked.seen_by {
+        if !is_visible_to(id) {
+            lost.push(id);
         }
     }
-    let lost: Vec<PlayerId> = tracked
-        .seen_by
-        .iter()
-        .copied()
-        .filter(|id| !visible.contains(id))
-        .collect();
-    let gained: Vec<PlayerId> = visible
-        .into_iter()
-        .filter(|id| !tracked.seen_by.contains(id))
-        .collect();
-
     if !lost.is_empty() {
         let frames = encode_frames(&RemoveEntities {
             entity_ids: &[snapshot.id],
@@ -284,6 +351,14 @@ fn update_pairings(
         for viewer in lost {
             tracked.seen_by.remove(&viewer);
             links.send_frames(viewer, &frames);
+        }
+    }
+
+    let nearby = cells.candidates(snapshot.position.x, snapshot.position.z);
+    let mut gained: Vec<PlayerId> = Vec::new();
+    for &id in nearby {
+        if !tracked.seen_by.contains(&id) && is_visible_to(id) {
+            gained.push(id);
         }
     }
     if !gained.is_empty() {
