@@ -386,6 +386,48 @@ fn level_change_filter_only_acts_on_stage_boundaries() {
     );
 }
 
+/// 分区器要拿到全部等级变化和分类，特别是跨过 33 的 Promote / Demote。
+/// 还要能查出「还没收回」的记录；没有 `run_updates` 的事件不留下旧列表。
+#[test]
+fn classified_level_changes_and_held_records_are_visible_to_the_host() {
+    let mut h = Harness::new(config(PipelineKind::Flat, 3));
+    h.seed = 1;
+    h.handle(Event::Tickets {
+        ops: vec![TicketOp::PlayerMoved {
+            id: 1,
+            to: Some(ChunkPos::new(0, 0)),
+        }],
+    });
+    let classified = h.director.classified_level_changes();
+    assert!(!classified.is_empty(), "这次挂票要报出等级变化");
+    assert!(
+        classified
+            .iter()
+            .all(|entry| entry.class == classify(entry.change)),
+        "分类和 classify 的结果一致"
+    );
+    assert!(
+        classified
+            .iter()
+            .any(|entry| entry.change.pos == ChunkPos::new(0, 0) && entry.change.loading.1 <= 33),
+        "票想要的区块要出现在变化列表里"
+    );
+    // 流水线到交付需要多轮回执。
+    h.drain(false);
+    let held = h.director.owner_records();
+    assert!(
+        held.iter().any(|record| record.pos == ChunkPos::new(0, 0)
+            && matches!(
+                record.owner,
+                Owner::Delivering | Owner::Region(_) | Owner::Reclaiming
+            )),
+        "已交付 / 正在交付的区块要出现在 owner 视图里：{held:?}"
+    );
+    // 没有等级变化的事件必须清掉上次的变化列表。
+    let _ = h.director.handle(Event::Tick { now_tick: 1 });
+    assert!(h.director.classified_level_changes().is_empty());
+}
+
 #[test]
 fn one_player_loads_then_reclaims_after_the_delay() {
     let mut h = Harness::new(config(PipelineKind::Flat, 3));

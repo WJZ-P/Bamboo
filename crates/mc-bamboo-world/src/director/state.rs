@@ -86,6 +86,37 @@ pub enum LevelClassification {
     LevelOnly,
 }
 
+/// 最近一次 `run_updates` 里的一条变化，连同 `classify` 的结果。
+/// 分区器用它判断「票想要加载的区块」集合怎么变（含 `Promote` / `Demote`）。
+///
+/// One level change together with its classification, for the island
+/// partitioner to update the set of ticket-desired chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassifiedLevelChange {
+    pub change: LevelChange,
+    pub class: LevelClassification,
+}
+
+/// `Owner` 是不是「盒子还没收回」的三类之一。
+///
+/// Whether an owner still holds a delivered (or in-flight) chunk box.
+pub fn owner_is_held(owner: Owner) -> bool {
+    matches!(
+        owner,
+        Owner::Delivering | Owner::Region(_) | Owner::Reclaiming
+    )
+}
+
+/// 一条记录的归属，给分区器补全「还没收回的区块」用。
+///
+/// A chunk record's owner, used by the island partitioner to cover chunks
+/// whose boxes have not been reclaimed yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnerRecord {
+    pub pos: ChunkPos,
+    pub owner: Owner,
+}
+
 /// 一个等级属于 31 / 32 / 33 划分的哪一档。34 以上（含无票）统一算第四档。
 fn tick_tier(level: i32) -> u8 {
     // 33 是完工但不 tick，32 是方块 tick，31 及以内是实体 tick。
@@ -468,6 +499,8 @@ pub struct Director<C> {
     level_changed: Vec<LevelChange>,
     /// 票表变化列表的只读副本，跨次复用容量。
     changes_scratch: Vec<LevelChange>,
+    /// 本刻带着分类的等级变化，供宿主在同一次 pump 里读（分区器用）。
+    classified_changes: Vec<ClassifiedLevelChange>,
     /// 新排的读任务，跨次 `drive` 复用容量。
     reads: Vec<(ChunkPos, u64)>,
     /// 构造一个「生成器输出」的盒子。宿主设置；测试可以用 `C::default`。
@@ -510,6 +543,7 @@ impl<C: ChunkBundle> Director<C> {
             effects: Vec::new(),
             level_changed: Vec::new(),
             changes_scratch: Vec::new(),
+            classified_changes: Vec::new(),
             reads: Vec::new(),
             template: None,
         }
@@ -557,6 +591,40 @@ impl<C: ChunkBundle> Director<C> {
     /// 统计用的计数：(过滤掉的等级变化, 真正动作的区块)。
     pub fn counters(&self) -> (u64, u64) {
         (self.filtered, self.acted)
+    }
+
+    /// 最近一次 `run_updates` 的全部等级变化及分类，按 (x, z) 升序。
+    /// 宿主每次 `handle_effects` 后取走；下一次调用会清空这份列表。
+    ///
+    /// All level changes from the latest `run_updates`, with their
+    /// classification, sorted by (x, z). Consumed by the host after each
+    /// `handle_effects`; the next call clears this list.
+    pub fn classified_level_changes(&self) -> &[ClassifiedLevelChange] {
+        &self.classified_changes
+    }
+
+    /// 一条记录当前的归属；没有记录时是 `None`。宿主在回执事件后用它
+    /// 做增量的 owner 记账，过期回执不会凭空造出「还没收回」的区块。
+    ///
+    /// Current owner of one record, or `None`. The host uses it after an
+    /// ack so a stale ack cannot invent a held chunk.
+    pub fn owner_at(&self, pos: ChunkPos) -> Option<Owner> {
+        self.chunks.get(&pos).map(|record| record.owner)
+    }
+
+    /// 所有记录及其归属，按 (x, z) 升序。对照模式拿它做全量对账，
+    /// 正式路径走增量的 owner 事件。
+    ///
+    /// Every chunk record and its owner, sorted by (x, z). Used by the
+    /// reference-check mode; the live path is incremental.
+    pub fn owner_records(&self) -> Vec<OwnerRecord> {
+        self.chunks
+            .iter()
+            .map(|(&pos, record)| OwnerRecord {
+                pos,
+                owner: record.owner,
+            })
+            .collect()
     }
 
     /// 从和卸载存档同一个计数器里领一个写盘序号。运行中给「仍加载的脏区块」
@@ -707,6 +775,7 @@ impl<C: ChunkBundle> Director<C> {
     /// 效果列表在 Director 里复用：`emit` 返回后清空，下一次 `handle_effects`
     /// 用同一块容量。宿主必须在 `emit` 里把效果消费完或换走。
     pub fn handle_effects(&mut self, event: Event<C>, emit: impl FnOnce(&mut Vec<Effect<C>>)) {
+        self.classified_changes.clear();
         let mut out = std::mem::take(&mut self.effects);
         out.clear();
         match event {
@@ -781,9 +850,19 @@ impl<C: ChunkBundle> Director<C> {
         level_changed.clear();
         let mut changes = std::mem::take(&mut self.changes_scratch);
         changes.clear();
-        changes.extend_from_slice(self.tickets.run_updates());
-        for &change in &changes {
-            let class = classify(change);
+        let mut classified = std::mem::take(&mut self.classified_changes);
+        classified.clear();
+        classified.extend(
+            self.tickets
+                .run_updates()
+                .iter()
+                .map(|&change| ClassifiedLevelChange {
+                    change,
+                    class: classify(change),
+                }),
+        );
+        changes.extend(classified.iter().map(|entry| entry.change));
+        for &ClassifiedLevelChange { change, class } in &classified {
             // 任一套等级跨了 tick 档，都要告诉 region：交付中的区块撤票时会从 31
             // 一步跳到 34 以上，归到 Unload/Demote 而不是 LevelOnly，但 region 里
             // 那份档位照样要降下来（它还会等 100 刻才被收回）。没交付的位置也报，
@@ -809,6 +888,7 @@ impl<C: ChunkBundle> Director<C> {
         }
         self.level_changed = level_changed;
         self.changes_scratch = changes;
+        self.classified_changes = classified;
     }
 
     /// 一条报出来的等级变化：把记录里的两个等级数字同步到票表的新值，
