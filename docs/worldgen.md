@@ -762,7 +762,12 @@ assembly 0.7），其中一度有 24 ms 是 `features` 每区块重新解析整�
 的 SHA-256 与线性查表、`prime_heightmaps` 的逐格四次谓词调用。三个口径
 （`wg-perf` 18.5 ms、`game_features` 29.8 ms、并发压测 4/8 线程 52.5/70.2 ms）
 的关系、多线程为什么单块变慢、以及撤销的尝试见
-`docs/performance-optimizations.md` 第 15 节。
+`docs/performance-optimizations.md` 第 15 节。带结构时另外发现两处「同一块地形
+算了不止一遍」：`Beardifier` 非 `None` 的格子绕过了地形缓存、以及多线程同时
+miss 同一键会各算一遍；两者都已修好，8 线程吞吐达到 4 线程的 2.27 倍（关结构）
+/ 1.30 倍（开结构），见同文档第 17 节。`features` 的 3×3 视图在真实 Director
+流水线里约 42–46% 来自 `terrain` 阶段快照，其余由 `neighbor_spills_into` 重算
+（第 15.5 节），改这一处要动 Director 的任务结构，另行评估。
 
 ## 端到端逐类型对拍
 

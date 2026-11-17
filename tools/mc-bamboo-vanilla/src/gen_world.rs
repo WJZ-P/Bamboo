@@ -41,8 +41,8 @@ use crate::oracle::collect_log;
 const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S] [--chunk X Z] [--scan N] \
      [--show N] [--level-type normal|large_biomes|amplified] [--break-self-test] \
      [--through features [--structures] [--feature-types IDS | --types IDS | --all-features] \
-      [--steps MASK] [--coverage] [--break-type KIND] [--structure-types IDS] \
-      [--break-structure KIND] [--structure-coverage]]";
+      [--steps MASK] [--coverage] [--break-type KIND] [--break-heightmap FIELD:COLUMN] \
+      [--structure-types IDS] [--break-structure KIND] [--structure-coverage]]";
 const DEFAULT_SHOW: usize = 8;
 /// 全部 11 个 decoration step（和 `chunkgen.rs` / Java 侧的 `ALL_STEPS` 一致）。
 const ALL_STEPS: i32 = (1 << 11) - 1;
@@ -78,6 +78,11 @@ struct Options {
     /// 改坏确认：只改这个类型写下的方块。空表示不改。
     /// Break confirmation: corrupt blocks written only by this Feature type.
     break_type: Option<String>,
+    /// 改坏确认：故意把 primed 高度图的某一列写错，证明对拍覆盖到这张图。
+    /// `FIELD` 是 `HEIGHTMAP_BREAK_FIELDS` 里的名字，`COLUMN` 是 0..255。
+    /// Break confirmation: corrupt one primed heightmap column to prove the
+    /// oracle covers that map. Only available in `perf` builds.
+    break_heightmap: Option<(usize, i32)>,
     /// `--structures`：Java 侧跑官方结构起点 / 引用 / 真 Beardifier / 带结构的
     /// `applyBiomeDecoration`，游戏侧同步打开 `generate_structures`。
     /// Turn vanilla structures on, on both sides of the comparison.
@@ -110,6 +115,7 @@ impl Options {
             steps: ALL_STEPS,
             coverage: false,
             break_type: None,
+            break_heightmap: None,
             structures: false,
             structure_coverage: false,
             break_structure: None,
@@ -199,6 +205,28 @@ impl Options {
                     }
                     options.break_type = Some((*args.next().ok_or(USAGE)?).to_owned());
                     options.coverage = true;
+                }
+                "--break-heightmap" => {
+                    if !options.features {
+                        return Err(format!(
+                            "--break-heightmap requires --through features: {USAGE}"
+                        ));
+                    }
+                    let value = args.next().ok_or(USAGE)?;
+                    let (name, column) = value.split_once(':').ok_or(USAGE)?;
+                    let field = mc_bamboo_worldgen::feature::world::HEIGHTMAP_BREAK_FIELDS
+                        .iter()
+                        .position(|known| *known == name)
+                        .ok_or_else(|| format!("unknown heightmap {name}: {USAGE}"))?;
+                    let column: i32 = if column == "all" {
+                        -1
+                    } else {
+                        column.parse().map_err(|_| USAGE)?
+                    };
+                    if column != -1 && !(0..256).contains(&column) {
+                        return Err(format!("heightmap column must be 0..255 or all: {USAGE}"));
+                    }
+                    options.break_heightmap = Some((field, column));
                 }
                 "--all-features" => {
                     if !options.features {
@@ -342,6 +370,7 @@ pub fn run_with_queries(
         steps: options.steps,
         coverage: options.coverage,
         break_type: options.break_type.clone(),
+        break_heightmap: options.break_heightmap,
         structures: options.structures,
         structure_coverage: options.structure_coverage,
         break_structure: options.break_structure.clone(),
@@ -390,6 +419,9 @@ struct Report {
     /// 改坏确认：只改这个类型写下的方块。
     /// Break confirmation: corrupt blocks written only by this type.
     break_type: Option<String>,
+    /// 改坏确认：故意写错的 primed 高度图列。
+    /// Break confirmation: the deliberately wrong primed heightmap column.
+    break_heightmap: Option<(usize, i32)>,
     /// 带结构对拍：Java 侧与游戏侧都开结构。
     /// Structures mode: both sides enable structures.
     structures: bool,
@@ -672,6 +704,7 @@ impl Report {
             Some(list) => Some(list),
             None => Some(&ore_only),
         };
+        mc_bamboo_worldgen::perf::set_heightmap_break(self.break_heightmap);
         mc_bamboo_worldgen::perf::begin(-64, i32::MIN, mc_bamboo_worldgen::perf::Phase::Features);
         let mut result = mc_bamboo_game::worldgen_features::game_features_with_mask_skipping(
             &config,
@@ -695,6 +728,7 @@ impl Report {
         } else {
             let _ = mc_bamboo_worldgen::perf::finish();
         }
+        mc_bamboo_worldgen::perf::set_heightmap_break(None);
         if self.break_self_test {
             // 自检：把九宫格第一格的第一个方块改成岩浆，确认下面会报不一致。
             // Self-test: corrupt one block so the comparison must report a mismatch.
@@ -1096,6 +1130,25 @@ impl Report {
         }
         if chunks == 0 {
             return Err("gen-world compared no chunks".to_owned());
+        }
+        if let Some((field, column)) = self.break_heightmap {
+            let name = mc_bamboo_worldgen::feature::world::HEIGHTMAP_BREAK_FIELDS[field];
+            let column_name = if column < 0 {
+                "all".to_owned()
+            } else {
+                column.to_string()
+            };
+            if mismatches.is_empty() {
+                return Err(format!(
+                    "break-heightmap {name}:{column_name} reported 0 mismatches; \
+                     the oracle does not cover this heightmap"
+                ));
+            }
+            println!(
+                "gen-world break-heightmap {name}:{column_name}: detector works ({} mismatches)",
+                mismatches.len()
+            );
+            return Ok(());
         }
         if self.structures && coverage_rows != chunks {
             return Err(format!(

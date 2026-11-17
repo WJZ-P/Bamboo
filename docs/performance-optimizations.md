@@ -63,6 +63,10 @@
 | 22 | `features` 不再每区块重新解析 `worldgen.json`：`game_features` 单线程中位（15） | 69.3–71.7 ms | 43.3–45.5 ms | 约 1.6× |
 | 22 | 地物主循环省掉每地物 SHA-256 和线性查表：纯函数逐 step 之和（15） | 2.39 / 2.39 / 2.45 ms | 2.19 / 2.20 / 2.18 ms | 1.1× |
 | 22 | `prime_heightmaps` 掩码缓存 + 提前退出（15） | 0.169–0.190 ms | 0.134 ms | 1.3× |
+| 23 | 带 Beardifier 的地形进缓存：单线程吞吐（17） | 33.8–35.0 中心/s | 58.4–59.9 中心/s | 1.7× |
+| 23 | 同上：单线程每中心 CPU（17） | 28.5–29.6 ms | 16.7–17.1 ms | 1.7× |
+| 24 | 同一键只算一次：4 线程每中心 CPU（17） | 34.0–34.6 ms | 19.0–20.5 ms | 1.7× |
+| 24 | 同上：8 线程吞吐 / `cross_thread_duplicates`（17） | 228–240 中心/s / 172–184 | 267–273 中心/s / 0 | 1.15× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -88,6 +92,9 @@
 第 21 项见第 14 节，是地形缓存的进程内存峰值和整块生成的墙钟、吞吐；测量时机器不空闲，以同轮交替的中位数为准。
 第 22 项见第 15 节，量的是**真实 Director 路径**上 `features` 阶段的三处重复工作；第一行是
 `game_features` 每中心墙钟，后两行是能分辨小改动的纯函数微基准，三行口径不同不能相加。
+第 23 / 24 项见第 17 节，量的是 `structure_scale_bench`（144 中心、开结构）在
+1 / 2 / 4 / 8 线程下的吞吐与每中心 CPU 时间；两项的改前数字分别是「只有第 22 项」和
+「第 22 + 23 项」的二进制，同轮交替三轮。
 
 第 10 行**不是优化**，是 2026-11-11 安静窗口里量到的「还剩多少差距」，见 7e 节和
 `profiling.md` 第 10 节：新旧两版 tick 的区块数、段数、方块数完全相同，差距全在
@@ -2298,28 +2305,73 @@ release 二进制，`gen-world --through features --seeds 2 --chunks 2 --salt 9`
 它不在稳态每区块成本里；真要削可以把 `Worldgen` 解析结果也做进程级共享，但会动到
 `worldgen.rs` 的地形缓存（另一个分支在改），本轮按分工没碰。
 
-### 15.4 多线程下为什么单块墙钟涨到 50–70 ms
+### 15.4 多线程扩展性：修掉每区块重复解析后的前后对照
 
-同一脚本（12×12=144 个中心、`generate_structures=false`）在本机实测：
+15.2 第 1 项修掉「每区块重新解析 `worldgen.json`（24 ms）」之后，同一台 M4 Pro 上
+重量的吞吐和之前完全不同。`structure_scale_bench`（144 个中心，`--chunks 12`，
+`generate_structures=true`，同轮三轮）与 `terrain_cache_bench`（同口径、关结构）：
 
-| 线程 | 总墙钟 | 吞吐 | 每中心中位 | p95 |
-|---|---|---|---|---|
-| 1 | 10.862 s | 13.3/s | 46.655 ms | 103.407 ms |
-| 2 | 5.175 s | 27.8/s | 42.297 ms | 65.321 ms |
-| 4 | 3.840 s | **37.5/s** | 50.933 ms | 101.203 ms |
-| 8 | 4.891 s | 29.4/s | 104.746 ms | 204.792 ms |
+| 线程 | 修复前吞吐（关结构） | 修复后（关结构） | 修复后（开结构） | 修复后 8/4 |
+|---|---:|---:|---:|---:|
+| 1 | 13.3/s | 67.8–69.1/s | 25.0–25.1/s | — |
+| 2 | 27.8/s | 83.2–84.5/s | 32.8/s | — |
+| 4 | 37.5/s | 126.5–127.5/s | 43.0–43.6/s | — |
+| 8 | **29.4/s** | **287–292/s** | 55.0–56.7/s | **2.27×**（关结构）/ 1.30×（开结构） |
 
-`/usr/bin/sample` 8 秒 1ms 的栈顶端：`semaphore_wait_trap` 5606 个样本（线程等调度 /
-等锁）、`GradientNoise::sample_and_lerp` 1742、`climate::search` 582、`PerlinNoise::get` 375、
-`malloc/free/memmove` 合计约 800。也就是说：**吞吐在 4 线程最好，8 线程反而下降**，
-主因是 10 个性能核要同时喂 8 条内存带宽吃紧的地形计算线程（每区块 9 × 384 × 256 个
-方块状态、多次整份 `Vec` 克隆），加上全局地形缓存的锁与分配器争用；`semaphore_wait_trap`
-说明还有等待，不是纯算力线性扩展。单块墙钟随线程数上升是「同一份 CPU / 内存带宽被
-分摊」，不是多做了工作。**玩家感受到的是吞吐**，所以 4 线程的 37.5 中心/s 比 1 线程的
-13.3 中心/s 好得多，尽管单块从 46.7 涨到 50.9 ms。这也解释了为什么第 14 节的地形
-缓存（降内存、降重复计算）对多线程吞吐帮助最大。
+「修复前」那一列是 `9d6d6ec1` 之前、每区块多花 24 ms 解析的二进制在本机实测；
+「修复后」是 `c41d1ba1` 之后。**8 线程吞吐不再低于 4 线程，超过「不低于 4 线程」
+的目标**，所以不需要换全局分配器、改缓存锁或复用线程本地缓冲区：
 
-### 15.5 逐位不变与改坏确认
+* `/usr/bin/sample` 8 线程带结构 4 秒 1ms：栈顶端 `semaphore_wait_trap` 2781 个
+  样本**全部来自主线程在 `thread::scope` 里 join 工作线程**；工作线程栈里
+  `__psynch_cvwait` / `__psynch_mutexwait` 都是 0。之前把 `semaphore_wait_trap`
+  读成「工作线程等锁」是错的。计算叶子 `GradientNoise::sample_and_lerp` 2399、
+  `climate::search` 985、`PerlinNoise::get` 620 等，malloc/free 约 153 个样本（<2%）。
+* 临时给 16 把地形缓存分片锁 + Beardifier 全局 `Mutex` 的每次 lock 加 `Instant`：
+  8 线程 144 中心累计锁等待 **0.631 ms**（约 4.4 µs/中心），1 线程 0.582 ms。
+* 自定义全局分配器（临时）测到单中心 36 906 次分配 / 48.5 MB，但插桩本身的原子
+  计数让 8 线程吞吐掉到 14.5/s，不能当扩展性数字用。
+
+**但 1→2→4 线程仍不理想**，用进程级 `getrusage(RUSAGE_SELF)` 的每中心 CPU 时间
+定性（不受别的进程抢墙钟影响，144 中心、关结构，三轮稳定）：
+
+| 线程 | 每中心 CPU | 现算地形次数 | `cross_thread_duplicates` |
+|---|---:|---:|---:|
+| 1 | 14.56–14.82 ms | 196 | 0 |
+| 2 | 24.00–24.30 ms | 358 | 162 |
+| 4 | 31.30–31.59 ms | 474 | 281 |
+| 8 | 25.72–26.73 ms | 371 | 175 |
+
+CPU/中心随线程数明显变长，不是「别的进程抢核」：4 线程比 1 线程多现算 278 次
+CARVERS 地形，278 × 10.8 ms / 144 ≈ 20.9 ms/中心，和实测多出的 16.7 ms/中心同量级。
+根因是**多条线程同时 miss 同一个缓存键就各算一遍**，见第 17.2 节。
+
+### 15.5 真实 Director 流水线里 `features` 的 3×3 视图从哪来
+
+`pyramid::neighbor_view` 给 `FEATURES` 声明半径 1、邻居至少到 `TERRAIN`；
+`director_host.rs` 在派 `Task::Generate` 时把 `self.partials` 里的不可变 `Arc`
+按位置填进 `snapshots`，`resolve_view` 优先用这些快照，缺的才走
+`cached_generate_chunk`。所以**设计上邻居来自 `terrain` 阶段的快照，不是
+`features` 自己重算**。
+
+但实测（临时给 `resolve_view` / `build_view` 加计数，25 个中心、`view_distance=4`、
+4 线程，跑完整 Director 流水线到全部交付）：`snapshot_some=249–283`、
+`snapshot_none=311–372`，**只有约 42–46% 的 3×3 格子拿到 Director 快照**；
+`build_view_cells≈3000`、`feature_run_calls≈334`。原因是 `neighbor_spills_into`
+为了保证「本区块的写增量集合从自己的 features 结果就齐，与邻居任务落地顺序无关」，
+会以 8 个邻居为中心各跑一遍 `cached_feature_run`，每次都从 `build_view` 重新取
+9 个格子的地形。临时计时：`build_view` 累计约 23.5 s、`run_features` 约 16.6 s
+（334 次调用，4 线程 CPU 时间），**取视图比跑地物本身还贵**。
+
+两个可行方向（本轮只量、没改）：
+1. 把 `terrain` 阶段的 CARVERS 快照直接放进全进程地形缓存（现在 `merge_generated`
+   只放进 `self.partials`），能让 `build_view` 大部分命中；但要考虑带 Beardifier
+   与不带的键（第 17.1 节已把两类分开），且不改变 `partials` 的生命周期。
+2. `features` 直接用 Director 带来的 `snapshots`，不再让 `neighbor_spills_into`
+   重算 8 个邻居中心 —— 这要改「增量集合不依赖邻居任务时序」的保证，属于
+   Director 任务结构改动，**必须先经主代理确认**，本轮没碰。
+
+### 15.6 逐位不变与改坏确认
 
 `chunkgen --through carvers/features`、`gen-world`（CARVERS / `--through features`）、
 `worldgen`、`structure-pipeline`、`gen-light` 在 salt 1 和 987654321 下全部 0 不一致；
@@ -2327,13 +2379,14 @@ release 二进制，`gen-world --through features --seeds 2 --chunks 2 --salt 9`
 逐项改坏确认：processor 表换成未知 processor → `structure-pipeline` 失败；
 step index +1 → `gen-world` 252 处；`prime_heightmaps` 掩码错一位 → 两个新增单测都失败。
 
-**已知局限（写进疑点清单）**：把 `prime_heightmaps` 的全部高度图故意写错后，
-`gen-world --through features` 与 `structure-pipeline` 仍报 0 不一致——这批对拍坐标
-没有依赖 primed heightmap 的地物，Java 端到端对拍对这个函数是盲区，等价性只由
-新增的两个单测保证。要补覆盖需换用 `freeze_top_layer` / `vegetation_patch` 等读
-`WORLD_SURFACE_WG` 的坐标。
+**这个盲区后来补上了**：原来 `gen-world --through features` 不带白名单时默认只放矿石，
+只有 `OCEAN_FLOOR_WG` 会被读到。现在 `tools/mc-bamboo-vanilla/heightmap-e2e.sh` 用
+`--all-features` 跑一批会触发 `freeze_top_layer`、高度图放置修饰器、`vegetation_patch`、
+树地面检查的坐标，配合 `--break-heightmap` 改坏钩子把六张 primed 图逐张写错
+（整张 +1 和单列 +1 两种），12 组全部报不一致。详见
+`docs/worldgen-e2e-coverage.md` 的「primed 高度图覆盖」一节。
 
-### 15.6 试过但撤销的
+### 15.8 试过但撤销的
 
 * **`FeatureWorld::new` 按层写时复制**（`Vec<Vec<u32>>` → `Vec<Arc<Vec<u32>>>`，
   `Arc::make_mut` 只在被写的层复制）。全链路对拍（含 1/4 线程逐字节一致测试）都过，
@@ -2471,3 +2524,113 @@ k 路归并」后，1 万 368 个箱子分散在 576 个区块的基准（5 对�
 
 另外 `tools/probe.sh --loaded` 两遍、联机探针一遍都是 719/719，
 `WORLD-DIR RESULT: official codecs read every item` 通过。
+
+---
+
+## 17. 带结构的地形缓存与「同一个键只算一次」（2026-11-16）
+
+代码：`crates/mc-bamboo-game/src/worldgen.rs` 的 `TERRAIN_CACHE`、
+`worldgen_features.rs::cached_generate_chunk_with_structures`，测量脚手架
+`crates/mc-bamboo-game/examples/structure_scale_bench.rs`（144 个中心、
+`generate_structures=true`、每条工作线程各自预热、`getrusage(RUSAGE_SELF)` 量
+每中心 CPU 时间）。基线是 `c41d1ba1`，改前 / 改后二进制同轮交替三轮。
+
+### 17.1 带 Beardifier 的地形绕过缓存（`70ceb9c1`）
+
+拆开「开结构比不开每中心多约 14 ms CPU」这笔账（单线程 14.7 → 28.7 ms）：
+
+| 项（每中心） | 不开结构 | 开结构 |
+|---|---:|---:|
+| `generate_chunk_with_beardifier(Some)` | 0 | **14.52 ms** |
+| `generate_chunk_with_beardifier(None)` | 10.86 ms | 8.50 ms |
+| `structure_starts` / `structure_references_stage` | 0.07 ms | 2.49 ms |
+| `beardifier_for`（含首次构建） | 0 | 1.26 ms |
+
+计数（144 中心，开结构）：3×3 视图问 `beardifier_for` 1296 次、全局缓存命中
+1100 次（84.9%）；其中 428 次（33%）`Some(beardifier)`，这 428 次原来**每次都
+现算整块 doFill→surface→carvers，完全不进缓存**（`Some(beardifier) =>
+Ok(Arc::new(generate_chunk_with_beardifier(...)))`）。`structure_starts` 被调用
+约 41 789 次（半径 8 的 17×17 邻域），但总耗时只有 177 ms，全是线程本地
+`starts` 缓存命中；`refs_calls=144`，每中心恰好一次。
+
+改法：缓存键从 `(seed, settings, x, z)` 扩成 `(seed, settings, x, z, 是否带
+Beardifier)`，新增 `cached_beardified_chunk` 走同一套分片、同一份 256 MiB 字节预算
+和淘汰顺序。`None` 的格子继续用原来的键，开不开结构都能共用；`generate_chunk`
+仍委托 `generate_chunk_with_beardifier(None)`，基线高度查询固定 EMPTY 不变。
+
+同轮交替三轮（144 中心、单线程、开结构）：吞吐 **33.8–35.0 → 58.4–59.9 中心/s**，
+每中心 CPU **28.5–29.6 → 16.7–17.1 ms**，约 1.7×。缓存条目 156 → 196，
+`terrain_cache_hit` 906 → 1100，字节从 61.7 MiB 涨到 77.5 MiB，远在 256 MiB 内。
+
+改坏确认两种：缓存命中时返回相邻坐标的条目 → `gen-world --structures` 报 5544 处；
+带 Beardifier 的查询故意返回不带 Beardifier 的结果 → `structure-e2e` 报 183 907 处。
+`gen-world --structures`、`structure-e2e`、`structure-pipeline`、`chunkgen`、
+`gen-world` 在 salt 1 / 987654321 下都是 0 不一致。新增单测用
+`Beardifier::empty()` 验证两类键不互相覆盖、`EMPTY` 的方块与不带时逐位相同。
+
+### 17.2 同一个键正在算时，别的线程等它（`6c411057`）
+
+17.1 之后，`structure_scale_bench` 在 1 / 2 / 4 / 8 线程下的每中心 CPU 是
+16.4 / 25.7 / 34.0 / 33.0 ms，现算地形 196 / 344 / 462 / 380 次：多条线程同时
+miss 同一个键就各算一遍，`cross_thread_duplicates` 148 / 266 / 184。4 线程一半以上
+的 CPU 是把同一块地形再算一遍。
+
+改法：分片锁里查表；没命中就在 `inflight` 表里放一个
+`Arc<OnceLock<Result<Arc<GeneratedChunk>, String>>>` 占位后放锁，计算线程在
+`OnceLock` 上 `get_or_init` 现算，其他线程查到同一个占位就在锁外等，拿到的是
+同一个 `Arc`。没有递归：`generate_chunk_with_beardifier` 只调纯函数
+`with_generator` / `Generator::terrain_with_region`，不会再回地形缓存，所以无环。
+panic 处理按标准库语义，不做补偿写入：闭包 panic 后 `OnceLock` 保持未初始化，
+等待它的下一条线程会接着跑自己的闭包重算，panic 在计算线程正常向上传。
+最初版本在 `get_or_init` 闭包里用 guard 对同一把 `OnceLock` 调 `set`，实测会
+死锁（独立最小复现 `timeout 8` 返回 124），因为标准库明确禁止在初始化中重入。
+现在改成一个只清 `inflight` 占位的 guard（不碰 `OnceLock`）：panic 展开时，若
+还没有别的等待方重算成功就移除占位，若已有条目则保留；重算成功的等待方也会
+把占位补回来，保证 `entries` 与 `inflight` 一一对应。生成返回 `Err` 时
+`OnceLock` 里存的就是 Err，失败路径同样只移除指向同一个 `Arc` 的占位，
+不会误删后来者新建的。占位在算完并提交进 `entries` 之前不计字节、不参与
+淘汰；占位和条目一起淘汰，且共享原来的 256 MiB 预算。`clear_terrain_cache`
+会重置整片（含 `inflight`）。等待方不再计入 `computed_by`，测量指标回到
+「真正算过的次数」。
+
+同轮交替三轮（144 中心、开结构）：
+
+| 线程 | 改前吞吐 | 改后吞吐 | 改前每中心 CPU | 改后每中心 CPU |
+|---|---:|---:|---:|---:|
+| 1 | 60.9 / 60.9 / 52.3 /s | 58.8 / 58.5 / 59.6 /s | 16.4 / 16.4 / 18.5 ms | 17.0 / 17.1 / 16.8 ms |
+| 2 | 77.6 / 76.7 / 60.6 /s | 89.9 / 64.3 / 80.7 /s | 25.7 / 26.1 / 29.1 ms | 17.5 / 22.7 / 18.4 ms |
+| 4 | 116.8 / 116.8 / 114.8 /s | 128.5 / 126.1 / 123.5 /s | 34.0 / 34.1 / 34.6 ms | 19.0 / 19.2 / 19.6 ms |
+| 8 | 231.6 / 239.5 / 227.8 /s | 272.0 / 272.2 / 272.9 /s | 33.8 / 33.0 / 34.5 ms | 23.0 / 23.1 / 23.0 ms |
+
+`hits` 在 1/2/4/8 线程下都变成 1100（等于单线程的命中数），`misses` 都是 196，
+`cross_thread_duplicates` 全部为 0；4 线程每中心 CPU 从 34 ms 降到 19–20.5 ms，
+接近单线程的 16.4–17.4 ms；8 线程吞吐 228–240 → 267–273 中心/s。单线程吞吐在
+三轮里 60.9→58.8、56.7→58.5、57.3→59.6，变化在 ±3.5% 内且中位数基本一致。
+
+改坏确认与失败路径测试（共四个并发单测，用一把测试专用互斥锁串行跑，避免共享的
+进程级测试开关互相干扰）：
+* 4 条线程同时问同一个键，断言拿到同一个 `Arc`、这个键只算一次；
+  打开测试专用的「等待方拿另一坐标」开关，断言结果出现不同 `Arc`
+  （把断言反转后测试确实失败，不是假绿）。
+* 测试专用开关让计算闭包 panic，另外 3 条线程等同一个键；用**detached 线程 +
+  `recv_timeout(10 s)`** 收结果（`thread::scope` 会在 join 时把挂住变成整个测试
+  挂住，超时就失去意义）。断言恰好一条线程 panic、至少一条等待方重算成功、
+  全部在限时内返回，之后同一个键再查一次能拿到正确结果且 `entries` /
+  `inflight` 都齐全。故意让所有线程 park 的改坏确认下，这个测试在 10 s 时
+  因 `Timeout` 失败，证明限时判据有效。
+* 测试专用开关让生成返回 `Err`：断言失败占位被移除、下一次查询重新成功。
+* 手工造「旧占位 + 新占位」，断言清理只删指向同一个 `Arc` 的那个，
+  且 `clear_terrain_cache` 会清空 `inflight`。
+
+`one_and_four_threads_generate_identical_feature_blocks`、
+`cargo test --workspace`、`gen-world --structures` / `structure-e2e` /
+`structure-pipeline` / `chunkgen` / `gen-light` 全部通过。
+
+### 17.3 没做的
+
+* **换全局分配器 / 复用线程本地缓冲区**：见 15.4，malloc/free 在 8 线程
+  `sample` 里占比 <2%，两项改动都没有可测收益的证据。
+* **改 Director 的任务结构**（让 `features` 直接用 `terrain` 阶段带来的快照、
+  不再让 `neighbor_spills_into` 重算 8 个邻居中心）：15.5 量到 `build_view` 累计
+  23.5 s、`run_features` 16.6 s，确实是剩下最大的一块，但这会改「写增量集合
+  不依赖邻居任务时序」的保证，按分工先报主代理，本轮没动。

@@ -280,6 +280,11 @@ mod imp {
                 feature: None,
             })
         };
+        /// 端到端对拍的改坏确认：`prime_heightmaps` 故意写错的那一列。
+        /// `None` 表示不改坏。只在 `perf` 构建里可设，默认构建不可能改变结果。
+        /// Break confirmation for the end-to-end oracle: which heightmap column
+        /// `prime_heightmaps` deliberately corrupts. `None` keeps the real result.
+        static HEIGHTMAP_BREAK: RefCell<Option<(usize, i32)>> = const { RefCell::new(None) };
     }
 
     impl State {
@@ -528,6 +533,23 @@ mod imp {
         FLOORS.with(|floors| *floors.borrow())
     }
 
+    /// 设置 / 清除「故意改坏哪一列高度图」；`(字段下标, 列号)`，`None` 恢复正常。
+    /// 列号 `-1` 表示整张图都改坏。字段下标顺序和
+    /// [`super::feature::world::HEIGHTMAP_BREAK_FIELDS`] 一致。
+    ///
+    /// Set/clear the deliberate heightmap break; `(field index, column)`.
+    /// Column `-1` corrupts every column of that map.
+    pub fn set_heightmap_break(next: Option<(usize, i32)>) {
+        HEIGHTMAP_BREAK.with(|slot| *slot.borrow_mut() = next);
+    }
+
+    /// 当前要改坏的那一列；返回后由调用方自己改值。
+    /// The column to corrupt, if any; the caller applies the change.
+    #[inline]
+    pub fn heightmap_break() -> Option<(usize, i32)> {
+        HEIGHTMAP_BREAK.with(|slot| *slot.borrow())
+    }
+
     /// 把一段时长累加进一个阶段，供调用方自带计时器时用。
     /// Add a duration to one phase, for callers that time it themselves.
     pub fn add(phase: Phase, elapsed: Duration) {
@@ -597,10 +619,19 @@ mod imp {
     }
 
     #[inline]
+    pub fn set_heightmap_break(_next: Option<(usize, i32)>) {}
+
+    #[inline]
+    pub fn heightmap_break() -> Option<(usize, i32)> {
+        None
+    }
+
+    #[inline]
     pub fn add(_phase: Phase, _elapsed: Duration) {}
 }
 
 pub use imp::{
-    add, begin, candidate, feature_begin, feature_end, finish, floors, mark, note_density_floor,
-    note_skip_above, pause, place_begin, place_end, resume, set_floors, suspend,
+    add, begin, candidate, feature_begin, feature_end, finish, floors, heightmap_break, mark,
+    note_density_floor, note_skip_above, pause, place_begin, place_end, resume, set_floors,
+    set_heightmap_break, suspend,
 };
