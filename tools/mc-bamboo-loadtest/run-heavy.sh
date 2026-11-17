@@ -82,7 +82,8 @@ run_one() {
     echo "=== $name round $round: $bots bots, $pattern/$layout, ${seconds}s ==="
     # 服务端在临时目录里跑：管理名单和日志都落在那里，不在仓库里留文件。
     # 第 0 步报告提醒：红石缓存和按区块统计不要一起用；这里同样只跑默认
-    # 缓存关闭状态。PARTITION=0 时连 BAMBOO_PROFILE_PARTITION 都不设。
+    # 缓存关闭状态。PARTITION=0 时把这个变量设成 0，剖析器读环境变量时
+    # 只认 1 / 2，其余值（含 0）都当成关闭。
     (cd "$dir" && exec env BAMBOO_PROFILE="$PROFILE_SECS" BAMBOO_PROFILE_CHUNKS=1 \
         BAMBOO_PROFILE_PARTITION="$PARTITION" \
         "$BIN" serve --addr "127.0.0.1:$PORT" --max-players 500 --view-distance 8 \
