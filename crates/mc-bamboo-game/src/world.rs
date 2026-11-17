@@ -3,10 +3,7 @@
 use std::{
     ops::ControlFlow,
     path::PathBuf,
-    sync::{
-        Arc,
-        mpsc::{Receiver, TryRecvError},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -34,7 +31,7 @@ use crate::{
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
     command, container, entity_sync, entity_tracking,
     global::{Global, RosterEntry},
-    inbound::{Inbound, JoinRequest, PlayerId},
+    inbound::{Inbound, InboundReceiver, JoinRequest, PlayerId, PlayerInbox, Sequenced},
     interaction::{self, UseItemOn},
     inventory, lectern, light_updates, menu, movement,
     pacing::{Pacer, WallTiming},
@@ -163,7 +160,17 @@ pub struct World {
 /// the master thread at a fixed 20 TPS.
 pub(crate) struct Master {
     pub(crate) global: Global,
-    inbox: Receiver<Inbound>,
+    /// 主控队列（岛的实施计划第 6 节第 4 步）。玩家自己的队列挂在玩家上。
+    inbox: InboundReceiver,
+    /// 进服被拒的连接还会发请求、最后发 `Leave`：它们的队列留在这里照常取空、
+    /// 按序号处理（请求因为链路已关而被忽略），收到 `Leave` 时扔掉。
+    /// 这样连接层看到的和所有消息走一条通道时一样，发送不会失败。
+    ///
+    /// Queues of connections refused at join. They may still send requests and
+    /// finally `Leave`; the queues are drained and handled by number as usual
+    /// (the requests are ignored because the link is closed) and dropped on
+    /// `Leave`, so the connection sees the same as with a single channel.
+    refused_inboxes: Vec<(PlayerId, PlayerInbox)>,
     /// 睡到下一刻用的节拍器。
     pacer: Pacer,
     /// 只有连接层起的世界才用权威 OP 名单重算进服权限。
@@ -203,7 +210,7 @@ pub(crate) struct Island {
 
 impl World {
     /// 创建一个空世界。`config` 的视距超出合法范围时取最接近的值。
-    pub fn new(config: WorldConfig, inbox: Receiver<Inbound>) -> Self {
+    pub fn new(config: WorldConfig, inbox: InboundReceiver) -> Self {
         Self::with_service_keys(config, inbox, secure_chat::empty_keys())
     }
 
@@ -212,7 +219,7 @@ impl World {
     /// `keys` is shared with the connection tasks. The world thread only reads them.
     pub fn with_service_keys(
         config: WorldConfig,
-        inbox: Receiver<Inbound>,
+        inbox: InboundReceiver,
         keys: Arc<ServiceProfileKeys>,
     ) -> Self {
         Self::build(config, inbox, keys, None, false)
@@ -222,7 +229,7 @@ impl World {
     /// 名单变更作为 owned 消息发给连接层，世界线程不会等它。
     pub fn with_admin(
         config: WorldConfig,
-        inbox: Receiver<Inbound>,
+        inbox: InboundReceiver,
         keys: Arc<ServiceProfileKeys>,
         admin: crate::admin::AdminInit,
     ) -> Self {
@@ -231,7 +238,7 @@ impl World {
 
     fn build(
         config: WorldConfig,
-        inbox: Receiver<Inbound>,
+        inbox: InboundReceiver,
         keys: Arc<ServiceProfileKeys>,
         admin: Option<crate::admin::AdminInit>,
         infinite_flat: bool,
@@ -339,6 +346,7 @@ impl World {
             master: Master {
                 global,
                 inbox,
+                refused_inboxes: Vec::new(),
                 pacer: Pacer,
                 authoritative_admin,
                 host: if infinite_flat {
@@ -444,7 +452,7 @@ impl World {
     /// 正式入口（[`new`](Self::new)、[`with_admin`](Self::with_admin)）一律用已加载模式，
     /// 区块由 Director 按 ticket 交付。这个退化实现只给不需要加载语义的单元测试、
     /// 集成测试和 oracle 用；不要在生产代码里调用。
-    pub fn new_infinite_flat_for_tests(config: WorldConfig, inbox: Receiver<Inbound>) -> Self {
+    pub fn new_infinite_flat_for_tests(config: WorldConfig, inbox: InboundReceiver) -> Self {
         Self::build(config, inbox, secure_chat::empty_keys(), None, true)
     }
 
@@ -1013,23 +1021,49 @@ impl World {
         }
     }
 
-    /// 按到达顺序处理这一 tick 之前收到的所有消息。
+    /// 取出这一刻要处理的全部入站消息，按序号归并成一条（岛的实施计划第 6 节第 4 步）。
+    /// 返回主控队列的发端是不是已经全没了。
+    ///
+    /// 先取主控队列，再取玩家的队列：任何一条在某条主控消息之前发出的玩家消息，
+    /// 这时一定已经在玩家队列里了（同一账号的 `Leave` 在下一次 `Join` 之前发出）。
+    /// 这一批里 `Join` 带来的新玩家的队列也一起取，进服后同一刻的请求和现在一样同一刻处理。
+    ///
+    /// Collect this tick's inbound messages and merge them by number (island plan,
+    /// section 6, step 4). Returns whether every master sender is gone. The master
+    /// queue is drained first, then the player queues: any player message sent
+    /// before a drained master message is already in its queue (an account's
+    /// `Leave` is sent before its next `Join`). Queues brought in by this batch's
+    /// `Join`s are drained too, so requests right after a join still run this tick.
+    fn collect_inbound(&mut self) -> (Vec<Sequenced>, bool) {
+        let mut batch = Vec::new();
+        let disconnected = self.master.inbox.drain_into(&mut batch);
+        let mut players = Vec::new();
+        for message in &batch {
+            if let Inbound::Join(request) = &message.message {
+                request.inbox.drain_into(&mut players);
+            }
+        }
+        for player in self.island.region.players.values() {
+            player.inbox.drain_into(&mut players);
+        }
+        for (_, inbox) in &self.master.refused_inboxes {
+            inbox.drain_into(&mut players);
+        }
+        batch.append(&mut players);
+        crate::inbound::merge(&mut batch);
+        (batch, disconnected)
+    }
+
+    /// 按序号处理这一 tick 之前收到的所有消息。
     fn process_inbox(&mut self) -> ControlFlow<()> {
         // 先全部取出再处理：配额要处理完才归还，连接任务补不进新消息，所以这一步一定会结束。
-        let mut messages = Vec::new();
-        let disconnected = loop {
-            match self.master.inbox.try_recv() {
-                Ok(message) => messages.push(message),
-                Err(TryRecvError::Empty) => break false,
-                Err(TryRecvError::Disconnected) => break true,
-            }
-        };
+        let (messages, disconnected) = self.collect_inbound();
 
         self.island
             .region
             .profiler
             .record(Metric::InboundMessages, messages.len() as u64);
-        for message in messages {
+        for Sequenced { message, .. } in messages {
             match message {
                 Inbound::Join(request) => self.on_join(*request),
                 Inbound::Request {
@@ -1093,6 +1127,7 @@ impl World {
             let reason = crate::command::admin::refusal_message(&refusal);
             self.island.region.links.add(id, request.sink);
             self.island.region.links.kick(id, &reason);
+            self.master.refused_inboxes.push((id, request.inbox));
             return;
         }
         let (permission_level, is_op) = if self.master.authoritative_admin {
@@ -1377,6 +1412,9 @@ impl World {
     /// 处理离开，顺序见 `coverage.md` 4.2。可以重复调用：世界里没有这名玩家时直接忽略，
     /// 连接任务还没发 `Join` 就结束时走的就是这条路。
     fn on_leave(&mut self, id: PlayerId) {
+        self.master
+            .refused_inboxes
+            .retain(|(refused, _)| *refused != id);
         if !self.island.region.players.contains_key(&id) {
             return;
         }

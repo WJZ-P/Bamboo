@@ -5,7 +5,6 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
-        mpsc::{self, Sender},
     },
 };
 
@@ -32,6 +31,7 @@ use crate::{
 };
 
 mod fuzz;
+mod inbound_order;
 
 pub(crate) const QUOTA: usize = 4096;
 pub(crate) const SPAWN_X: f64 = 8.5;
@@ -75,6 +75,8 @@ pub(crate) struct Client {
     pub(crate) id: PlayerId,
     pub(crate) uuid: Uuid,
     sink: FakeSink,
+    /// 这名玩家自己的入站队列的发端，和连接层一样。
+    inbox: crate::inbound::PlayerSender,
 }
 
 impl Client {
@@ -191,9 +193,12 @@ pub(crate) fn client_requesting(view_distance: i8) -> ClientInformation {
 /// 测试里的“连接层”：用内存队列给世界线程发消息。
 pub(crate) struct Harness {
     pub(crate) world: World,
-    inbox: Sender<Inbound>,
+    inbox: crate::inbound::InboundSender,
     in_flight: Arc<AtomicUsize>,
     next_id: i32,
+    /// 玩家的请求和离开也走主控队列（第 4 步之前「所有消息一条通道」的样子），
+    /// 对照测试用。
+    single_channel: bool,
 }
 
 impl Harness {
@@ -241,7 +246,7 @@ impl Harness {
         root: &std::path::Path,
         chunk_worker_threads: usize,
     ) -> Self {
-        let (inbox, receiver) = mpsc::channel();
+        let (inbox, receiver) = crate::inbound::channel();
         let config = WorldConfig {
             view_distance,
             world_dir: Some(root.to_path_buf()),
@@ -256,11 +261,12 @@ impl Harness {
             inbox,
             in_flight: Arc::default(),
             next_id: 1,
+            single_channel: false,
         }
     }
 
     fn build(view_distance: i32, loaded: bool) -> Self {
-        let (inbox, receiver) = mpsc::channel();
+        let (inbox, receiver) = crate::inbound::channel();
         let config = WorldConfig {
             view_distance,
             max_players: 20,
@@ -282,6 +288,7 @@ impl Harness {
             inbox,
             in_flight: Arc::default(),
             next_id: 1,
+            single_channel: false,
         }
     }
 
@@ -291,6 +298,7 @@ impl Harness {
         self.next_id += 1;
         let sink = FakeSink::default();
         let uuid = Uuid::from_u128(id.0 as u128);
+        let (player_sender, player_inbox) = self.inbox.player_channel();
         let request = JoinRequest {
             id,
             uuid,
@@ -303,9 +311,15 @@ impl Harness {
             online_at_login: 0,
             player_data: None,
             sink: Box::new(sink.clone()),
+            inbox: player_inbox,
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
-        Client { id, uuid, sink }
+        Client {
+            id,
+            uuid,
+            sink,
+            inbox: player_sender,
+        }
     }
 
     pub(crate) fn join(&mut self, name: &str) -> Client {
@@ -330,6 +344,7 @@ impl Harness {
         let id = PlayerId(self.next_id);
         self.next_id += 1;
         let sink = FakeSink::default();
+        let (player_sender, player_inbox) = self.inbox.player_channel();
         let request = JoinRequest {
             id,
             uuid,
@@ -342,9 +357,15 @@ impl Harness {
             online_at_login: 0,
             player_data,
             sink: Box::new(sink.clone()),
+            inbox: player_inbox,
         };
         self.inbox.send(Inbound::Join(Box::new(request))).unwrap();
-        Client { id, uuid, sink }
+        Client {
+            id,
+            uuid,
+            sink,
+            inbox: player_sender,
+        }
     }
 
     /// 直接改世界出生点（`LevelData` 里的那份），测试出生点包用。
@@ -355,19 +376,37 @@ impl Harness {
 
     pub(crate) fn request(&self, client: &Client, request: PlayRequest) {
         let in_flight = InFlight::acquire(&self.in_flight, QUOTA).expect("测试不会用完配额");
-        self.inbox
-            .send(Inbound::Request {
+        self.send_player_message(
+            client,
+            Inbound::Request {
                 player: client.id,
                 request,
                 in_flight,
-            })
-            .unwrap();
+            },
+        );
     }
 
     pub(crate) fn leave(&self, client: &Client) {
-        self.inbox
-            .send(Inbound::Leave { player: client.id })
-            .unwrap();
+        self.send_player_message(client, Inbound::Leave { player: client.id });
+    }
+
+    /// 一名玩家的请求和离开：照连接层走他自己的队列；对照模式下走主控队列。
+    /// 世界已经扔掉这名玩家的队列（离开之后）时，和连接层一样不算错。
+    ///
+    /// A player's request or leave: through their own queue like the connection
+    /// layer, or through the master queue in comparison mode. Like the
+    /// connection layer, a queue the world has already dropped is not an error.
+    fn send_player_message(&self, client: &Client, message: Inbound) {
+        if self.single_channel {
+            self.inbox.send(message).unwrap();
+        } else {
+            let _ = client.inbox.send(message);
+        }
+    }
+
+    /// 对照模式：之后玩家的请求和离开都走主控队列（第 4 步之前的单通道）。
+    pub(crate) fn use_single_channel(&mut self) {
+        self.single_channel = true;
     }
 
     pub(crate) fn tick(&mut self) {
@@ -1170,6 +1209,7 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
         online_at_login: 0,
         player_data: None,
         sink: Box::new(sink),
+        inbox: server.inbox.player_channel().1,
     };
     server.inbox.send(Inbound::Join(Box::new(request))).unwrap();
     server.tick();
@@ -1256,6 +1296,7 @@ fn rejoin_uses_in_flight_player_save_over_stale_disk() {
         online_at_login: 0,
         player_data: Some(stale),
         sink: Box::new(sink),
+        inbox: server.inbox.player_channel().1,
     };
     server.inbox.send(Inbound::Join(Box::new(request))).unwrap();
     server.tick();

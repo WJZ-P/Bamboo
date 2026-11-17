@@ -121,15 +121,13 @@ fn step(level: f32, rising: bool) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
-
     use mc_bamboo_blocks::LevelRandom;
 
     use super::*;
     use crate::{World, WorldConfig};
 
     fn world() -> World {
-        let (_sender, receiver) = mpsc::channel();
+        let (_sender, receiver) = crate::inbound::channel();
         let mut world = World::new(
             WorldConfig {
                 view_distance: 2,

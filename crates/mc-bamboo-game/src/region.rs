@@ -691,6 +691,7 @@ impl Region {
             online_at_login: _,
             player_data: _,
             sink,
+            inbox,
         } = request;
         self.links.add(id, sink);
         self.peer_ips.insert(id, peer_ip);
@@ -723,6 +724,7 @@ impl Region {
         let mut player = Player::new(id, uuid, name, game_mode, client, position);
         player.permission_level = permission_level;
         player.is_op = is_op;
+        player.inbox = inbox;
         player.yaw = spawn.yaw;
         player.pitch = spawn.pitch;
         movement::teleport(

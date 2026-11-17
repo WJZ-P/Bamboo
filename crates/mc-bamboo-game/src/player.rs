@@ -95,6 +95,13 @@ pub(crate) struct Player {
     ///
     /// Official `ServerPlayer.respawnConfig`. Stored only; there is no death respawn.
     pub(crate) respawn: Option<RespawnData>,
+    /// 这名玩家自己的入站队列（岛的实施计划第 6 节第 4 步）。世界线程每刻取一次，
+    /// 和主控队列、别的玩家的队列按序号归并；跟着玩家走。
+    ///
+    /// This player's own inbound queue (island plan, section 6, step 4). The world
+    /// drains it each tick and merges it with the master queue and the other
+    /// players' queues by number; it moves with the player.
+    pub(crate) inbox: crate::inbound::PlayerInbox,
 }
 
 impl Player {
@@ -137,6 +144,7 @@ impl Player {
             drop_spam: 0,
             chat: PlayerChat::default(),
             respawn: None,
+            inbox: crate::inbound::PlayerInbox::default(),
         }
     }
 

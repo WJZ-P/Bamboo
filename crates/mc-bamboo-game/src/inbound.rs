@@ -1,8 +1,9 @@
 //! 世界线程和连接任务之间的约定。
 
 use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex, PoisonError,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    mpsc::{self, Receiver, Sender, TryRecvError},
 };
 
 use mc_bamboo_protocol::packet::{
@@ -59,12 +60,28 @@ pub struct JoinRequest {
     /// `None` means a new player (no save, or saving disabled).
     pub player_data: Option<Vec<u8>>,
     pub sink: Box<dyn PlayerSink>,
+    /// 这名玩家自己的入站队列的收端，进服后挂在玩家上。发端由连接任务留着。
+    ///
+    /// The receiving end of this player's own inbound queue; it moves onto the
+    /// player on join. The connection task keeps the sending end.
+    pub inbox: PlayerInbox,
 }
 
 /// 连接任务发给世界线程的消息。
 ///
-/// 所有连接共用一条队列，所以同一连接的消息不会乱序，同一账号的
-/// [`Leave`](Inbound::Leave) 也一定排在下一次 [`Join`](Inbound::Join) 前面。
+/// 每条消息发出时盖一个递增的序号（[`Sequenced`]），世界线程按序号处理。
+/// 一名玩家的 [`Request`](Inbound::Request) 和 [`Leave`](Inbound::Leave) 走他自己的队列
+/// （[`PlayerSender`] → [`PlayerInbox`]，收端挂在世界里的玩家上），其余消息走主控队列
+/// （[`InboundSender`] → [`InboundReceiver`]）。同一连接的消息序号递增、不会乱序；
+/// 同一账号的 `Leave` 发出之后下一次 [`Join`](Inbound::Join) 才会发出，所以序号也更小。
+///
+/// Messages from the connection tasks to the world thread. Each is stamped with
+/// an increasing sequence number when sent ([`Sequenced`]) and the world handles
+/// them in that order. A player's `Request` and `Leave` go through that player's
+/// own queue (its receiving end lives on the player in the world); everything
+/// else goes through the master queue. One connection's messages have increasing
+/// numbers, and an account's `Leave` is sent before its next `Join`, so it also
+/// has the smaller number.
 pub enum Inbound {
     Join(Box<JoinRequest>),
     Request {
@@ -115,6 +132,187 @@ impl Drop for InFlight {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+/// 盖了序号的一条入站消息。序号在一个世界的所有发端之间共享、严格递增，
+/// 世界线程按它把主控队列和各玩家的队列归并成一条（岛的实施计划第 6 节第 4 步）。
+///
+/// One stamped inbound message. The number is shared by every sender of one
+/// world and strictly increasing; the world thread merges the master queue and
+/// every player's queue by it (island plan, section 6, step 4).
+pub struct Sequenced {
+    pub seq: u64,
+    pub message: Inbound,
+}
+
+/// 新建主控队列。返回的发端可以克隆，也能给每名玩家开一条自己的队列
+/// （[`InboundSender::player_channel`]），它们共用同一个序号计数器。
+///
+/// Create the master queue. The sender can be cloned and can open a queue per
+/// player ([`InboundSender::player_channel`]); all of them share one counter.
+pub fn channel() -> (InboundSender, InboundReceiver) {
+    let (sender, receiver) = mpsc::channel();
+    let sender = InboundSender {
+        stamp: Stamp(Arc::new(AtomicU64::new(0))),
+        sender,
+    };
+    (sender, InboundReceiver(receiver))
+}
+
+/// 收端已经不在了（世界线程结束，或者世界已经不收这名玩家的消息）。
+///
+/// The receiving end is gone (the world thread ended, or the world no longer
+/// takes this player's messages).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Closed;
+
+/// 序号计数器。一次原子加；同一发端连发的消息序号递增。
+#[derive(Clone)]
+struct Stamp(Arc<AtomicU64>);
+
+impl Stamp {
+    fn seal(&self, message: Inbound) -> Sequenced {
+        Sequenced {
+            seq: self.0.fetch_add(1, Ordering::Relaxed),
+            message,
+        }
+    }
+}
+
+/// 主控队列的发端：进服、延迟、名单重载、控制台命令、关服都走这里。
+/// 玩家的请求和离开也可以走这里（测试和没有玩家队列的场合），世界线程一样按序号处理。
+///
+/// The master queue's sender: join, latency, list reloads, console commands and
+/// shutdown. A player's requests and leave may also come this way (tests, or
+/// places without a player queue); the world handles them by number all the same.
+#[derive(Clone)]
+pub struct InboundSender {
+    stamp: Stamp,
+    sender: Sender<Sequenced>,
+}
+
+impl InboundSender {
+    /// 盖上序号发出。世界线程已经结束时失败。
+    pub fn send(&self, message: Inbound) -> Result<(), Closed> {
+        self.sender
+            .send(self.stamp.seal(message))
+            .map_err(|_| Closed)
+    }
+
+    /// 给一名玩家开一条自己的队列：发端留给连接任务，收端放进 [`JoinRequest::inbox`]。
+    ///
+    /// Open a queue for one player: the connection task keeps the sender and the
+    /// receiver goes into [`JoinRequest::inbox`].
+    pub fn player_channel(&self) -> (PlayerSender, PlayerInbox) {
+        let (sender, receiver) = mpsc::channel();
+        (
+            PlayerSender {
+                stamp: self.stamp.clone(),
+                sender,
+            },
+            PlayerInbox(Mutex::new(receiver)),
+        )
+    }
+}
+
+/// 主控队列的收端，世界线程持有。
+///
+/// The master queue's receiver, held by the world thread.
+pub struct InboundReceiver(Receiver<Sequenced>);
+
+/// 按序号阻塞地逐条取，所有发端都没了时结束。给替换世界线程的测试用。
+///
+/// Blocking iteration in order until every sender is gone; for tests that
+/// replace the world thread.
+impl IntoIterator for InboundReceiver {
+    type Item = Inbound;
+    type IntoIter = std::iter::Map<mpsc::IntoIter<Sequenced>, fn(Sequenced) -> Inbound>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter().map(|sealed| sealed.message)
+    }
+}
+
+impl InboundReceiver {
+    /// 阻塞等下一条。所有发端都没了时返回 `None`。
+    pub fn recv(&self) -> Option<Sequenced> {
+        self.0.recv().ok()
+    }
+
+    /// 不等待地取一条，没有就返回 `None`。
+    pub fn try_recv(&self) -> Option<Sequenced> {
+        self.0.try_recv().ok()
+    }
+
+    /// 取出已经到达的全部消息，追加到 `out`。返回发端是不是已经全没了。
+    pub(crate) fn drain_into(&self, out: &mut Vec<Sequenced>) -> bool {
+        loop {
+            match self.0.try_recv() {
+                Ok(message) => out.push(message),
+                Err(TryRecvError::Empty) => return false,
+                Err(TryRecvError::Disconnected) => return true,
+            }
+        }
+    }
+}
+
+/// 一名玩家自己的队列的发端，连接任务持有，只发这名玩家的
+/// [`Request`](Inbound::Request) 和 [`Leave`](Inbound::Leave)。
+///
+/// The sender of one player's own queue, held by the connection task. It only
+/// carries that player's `Request` and `Leave`.
+pub struct PlayerSender {
+    stamp: Stamp,
+    sender: Sender<Sequenced>,
+}
+
+impl PlayerSender {
+    /// 盖上序号发出。世界已经不收这名玩家的消息时失败。
+    pub fn send(&self, message: Inbound) -> Result<(), Closed> {
+        debug_assert!(matches!(
+            message,
+            Inbound::Request { .. } | Inbound::Leave { .. }
+        ));
+        self.sender
+            .send(self.stamp.seal(message))
+            .map_err(|_| Closed)
+    }
+}
+
+/// 一名玩家自己的队列的收端。进服后挂在世界里的玩家上，跟着玩家走。
+/// 包一层锁只是为了让持有它的类型能在线程之间共享引用（`mpsc::Receiver` 不是
+/// `Sync`）；只有世界线程取，锁永远没有争用。
+///
+/// The receiver of one player's own queue. After join it lives on the player
+/// in the world and moves with them. The lock only makes types holding it
+/// shareable across threads (`mpsc::Receiver` is not `Sync`); only the world
+/// thread drains it, so the lock is never contended.
+pub struct PlayerInbox(Mutex<Receiver<Sequenced>>);
+
+impl PlayerInbox {
+    /// 取出已经到达的全部消息，追加到 `out`。
+    pub(crate) fn drain_into(&self, out: &mut Vec<Sequenced>) {
+        let receiver = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        while let Ok(message) = receiver.try_recv() {
+            out.push(message);
+        }
+    }
+}
+
+impl Default for PlayerInbox {
+    /// 一条没有发端的空队列，给不经过连接层建出来的玩家用。
+    fn default() -> Self {
+        Self(Mutex::new(mpsc::channel().1))
+    }
+}
+
+/// 按序号把这一刻取到的消息归并成一条。每条队列本身已经按序号递增，
+/// 序号全局唯一，所以结果和「所有消息走一条通道」的到达顺序相同。
+///
+/// Merge this tick's messages by number. Each queue is already increasing and
+/// numbers are unique, so the result is the arrival order of a single channel.
+pub(crate) fn merge(batch: &mut [Sequenced]) {
+    batch.sort_unstable_by_key(|message| message.seq);
 }
 
 #[cfg(test)]

@@ -31,7 +31,6 @@ use std::{
     io::{BufRead, BufReader},
     path::Path,
     process::{Command, Stdio},
-    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -246,7 +245,7 @@ fn director_blocks(options: &Options) -> Result<GameBlocks, String> {
     let mut out = HashMap::new();
     for (seed, positions) in by_seed {
         set_merge_break(options.break_mode.map(|mode| (seed, mode)));
-        let (_inbox, receiver) = mpsc::channel();
+        let (_inbox, receiver) = mc_bamboo_game::inbound_channel();
         let world_config = WorldConfig {
             view_distance: 3,
             world_gen: config(seed, options.structures),

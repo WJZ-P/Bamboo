@@ -15,7 +15,6 @@
 
 use std::{
     collections::BTreeMap,
-    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -34,7 +33,7 @@ use crate::{
 /// check the delivered column is real noise terrain.
 #[test]
 fn staged_pipeline_delivers_generated_terrain_through_the_pool() {
-    let (_inbox, receiver) = mpsc::channel();
+    let (_inbox, receiver) = crate::inbound::channel();
     let config = WorldConfig {
         view_distance: 2,
         world_gen: WorldGenConfig {
@@ -111,7 +110,7 @@ fn generated_cells_with_seed(
     threads: usize,
     positions: &[ChunkPos],
 ) -> BTreeMap<ChunkPos, ChunkCells> {
-    let (_inbox, receiver) = mpsc::channel();
+    let (_inbox, receiver) = crate::inbound::channel();
     let config = WorldConfig {
         view_distance: 3,
         world_gen: WorldGenConfig {
@@ -344,7 +343,7 @@ fn director_matches_pure_features_near_structures() {
 /// pool drains and the Director has no records, and expect nothing left.
 #[test]
 fn chunks_cancelled_before_assembly_leave_no_generation_state() {
-    let (_inbox, receiver) = mpsc::channel();
+    let (_inbox, receiver) = crate::inbound::channel();
     let config = WorldConfig {
         view_distance: 3,
         world_gen: WorldGenConfig {
