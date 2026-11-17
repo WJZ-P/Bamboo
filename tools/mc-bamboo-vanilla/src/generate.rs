@@ -30,6 +30,7 @@ const MOB_EFFECT_REGISTRY: &str = "minecraft:mob_effect";
 const BANNER_PATTERN_REGISTRY: &str = "minecraft:banner_pattern";
 const BLOCK_REGISTRY: &str = "minecraft:block";
 const FLUID_REGISTRY: &str = "minecraft:fluid";
+const GAME_EVENT_REGISTRY: &str = "minecraft:game_event";
 const ITEM_REGISTRY: &str = "minecraft:item";
 const JUKEBOX_SONG_REGISTRY: &str = "minecraft:jukebox_song";
 const MENU_REGISTRY: &str = "minecraft:menu";
@@ -3256,6 +3257,7 @@ fn registries_file(data: &VersionData) -> String {
         DATA_COMPONENT_TYPE_REGISTRY,
     );
     write_registry_ids(&mut out, data, "fluid", FLUID_REGISTRY);
+    write_registry_ids(&mut out, data, "game_event", GAME_EVENT_REGISTRY);
     // 战利品表要按名字查这些注册表，比如药水、状态效果和旗帜图案。
     // Loot tables look these registries up by name: potions, effects, and banner patterns.
     write_registry_ids(&mut out, data, "potion", POTION_REGISTRY);

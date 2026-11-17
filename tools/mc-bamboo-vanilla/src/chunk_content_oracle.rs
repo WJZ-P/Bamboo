@@ -250,7 +250,8 @@ fn run_cases(
             format!("{name}: {}", case.error.as_deref().unwrap_or("")),
         );
         // 容器/战利品表由游戏层第二段负责；方块层这一段的工厂只认会动的六种。
-        if name.starts_with("chest-") {
+        // 振动事件的注册表校验在 `passive.rs`，用官方 load → save 检查这两题。
+        if name.starts_with("chest-") || name.starts_with("sculk-sensor-") {
             continue;
         }
         let rebuilt = mc_bamboo_blocks::archive::create_block_entity(
@@ -324,6 +325,65 @@ fn run_cases(
                     format!("{name}: official keys {official_keys:?}, Bamboo keys {bamboo_keys:?}"),
                 );
             }
+        }
+    }
+
+    // 2d. `VibrationInfo.game_event` 是注册表 holder codec：语法合法但没注册的
+    //     名字解不开，官方把整个 event 丢掉（`selector.tick` 也折回 -1L）。
+    //     Bamboo 用同一个 `PassiveBlockEntity` 逐值对照官方结果。
+    for (index, case) in answer.cases.iter().enumerate() {
+        let name = &load_cases[index].0;
+        if !name.starts_with("sculk-sensor-") {
+            continue;
+        }
+        report.check(
+            case.error.is_none(),
+            format!("{name}: {}", case.error.as_deref().unwrap_or("")),
+        );
+        let rebuilt = mc_bamboo_blocks::archive::create_block_entity(
+            "minecraft:sculk_sensor",
+            BlockPos::new(3, 64, 5),
+            BlockState(blocks::AIR),
+            &load_cases[index].2,
+        )
+        .map_err(|error| error.to_string())?
+        .expect("sensor factory");
+        let keys = mc_bamboo_blocks::archive::write_block_entity_additional(rebuilt.as_ref())
+            .map_err(|error| error.to_string())?;
+        let official = case.written.as_ref().map(|v| &v["values"]);
+        let bamboo = canonical_tag(&Tag::Compound(keys))["values"].clone();
+        if let Some(official) = official {
+            for (key, value) in bamboo.as_object().unwrap() {
+                report.check(
+                    official.get(key) == Some(value),
+                    format!(
+                        "{name}: Bamboo wrote {key} as {value}, official {:?}",
+                        official.get(key)
+                    ),
+                );
+            }
+            let metadata = ["id", "x", "y", "z", "components", "keepPacked"];
+            let mut official_keys: Vec<&str> = official
+                .as_object()
+                .map(|map| {
+                    map.keys()
+                        .map(String::as_str)
+                        .filter(|key| !metadata.contains(key))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut bamboo_keys: Vec<&str> = bamboo
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            official_keys.sort_unstable();
+            bamboo_keys.sort_unstable();
+            report.check(
+                official_keys == bamboo_keys,
+                format!("{name}: official keys {official_keys:?}, Bamboo keys {bamboo_keys:?}"),
+            );
         }
     }
 
@@ -966,6 +1026,46 @@ fn block_entity_load_cases() -> Result<Vec<(String, &'static str, Tag)>, String>
         "minecraft:sculk_shrieker",
         Tag::Compound(shrieker),
     ));
+    // 振动事件：`game_event` 是注册表 holder codec，注册过的名字保留，
+    // 没注册过的名字让 `selector.event` 回到可省字段的缺省（连同 tick 折成 -1L）。
+    for (name, event) in [
+        ("sculk-sensor-registered-event", "minecraft:step"),
+        ("sculk-sensor-unknown-event", "minecraft:not_a_game_event"),
+    ] {
+        let mut sensor = meta("minecraft:sculk_sensor");
+        sensor.push((
+            "listener".to_owned(),
+            Tag::Compound(vec![
+                (
+                    "selector".to_owned(),
+                    Tag::Compound(vec![
+                        (
+                            "event".to_owned(),
+                            Tag::Compound(vec![
+                                ("game_event".to_owned(), Tag::String(event.to_owned())),
+                                ("distance".to_owned(), Tag::Float(2.5)),
+                                (
+                                    "pos".to_owned(),
+                                    Tag::List(vec![
+                                        Tag::Double(1.0),
+                                        Tag::Double(2.0),
+                                        Tag::Double(3.0),
+                                    ]),
+                                ),
+                            ]),
+                        ),
+                        ("tick".to_owned(), Tag::Long(42)),
+                    ]),
+                ),
+                ("event_delay".to_owned(), Tag::Int(3)),
+            ]),
+        ));
+        out.push((
+            name.to_owned(),
+            "minecraft:sculk_sensor",
+            Tag::Compound(sensor),
+        ));
+    }
     Ok(out)
 }
 
