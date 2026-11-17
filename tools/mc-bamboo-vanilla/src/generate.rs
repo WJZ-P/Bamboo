@@ -2105,6 +2105,57 @@ fn states_file(data: &VersionData) -> Result<String, String> {
     Ok(out)
 }
 
+/// 方块状态 ID 落到哪个方块上，和 `mc_bamboo_data::block_of_state` 同一条规律。
+fn block_of(blocks: &[Block], state: u32) -> &Block {
+    let index =
+        blocks.partition_point(|block| block.states.first().is_some_and(|&first| first <= state));
+    &blocks[index - 1]
+}
+
+/// 重写了官方 `getCollisionShape(state, level, pos, context)` 的类。
+///
+/// `javap -p` 扫过全部官方方块类，下面这些类声明了这个四参数重载；它们可能按
+/// 实体或位置给形状，所以状态表里那份空上下文的形状不能当快路径用。继承的类由
+/// `ancestors` 一起覆盖。
+///
+/// Classes that declare the four-argument official `getCollisionShape` override,
+/// found by scanning every official block class with `javap -p`. Their shapes
+/// may depend on the entity or position, so the empty-context table is not a
+/// valid fast path for them. Subclasses are covered through `ancestors`.
+fn entity_dependent_shape(block: &Block) -> bool {
+    const CLASSES: &[&str] = &[
+        "BambooStalkBlock",
+        "BellBlock",
+        "BigDripleafBlock",
+        "CactusBlock",
+        "ComposterBlock",
+        "CrossCollisionBlock",
+        "FenceGateBlock",
+        "GrindstoneBlock",
+        "HoneyBlock",
+        "LecternBlock",
+        "LiquidBlock",
+        "MossyCarpetBlock",
+        "MudBlock",
+        "PitcherCropBlock",
+        "PowderSnowBlock",
+        "ScaffoldingBlock",
+        "SculkShriekerBlock",
+        "SkullBlock",
+        "SnowLayerBlock",
+        "SoulSandBlock",
+        "WallBlock",
+        "WallHangingSignBlock",
+        "ShulkerBoxBlock",
+        "MovingPistonBlock",
+    ];
+    CLASSES.contains(&block.class.as_str())
+        || block
+            .ancestors
+            .iter()
+            .any(|name| CLASSES.contains(&name.as_str()))
+}
+
 fn shapes_file(data: &VersionData) -> Result<String, String> {
     let tables = &data.state_tables;
     let total = data.block_states.total;
@@ -2113,7 +2164,10 @@ fn shapes_file(data: &VersionData) -> Result<String, String> {
     check_table_length("SUPPORT_SHAPE", &tables.support, total)?;
 
     let mut out = String::new();
-    let _ = writeln!(out, "use mc_bamboo_core::Aabb;\n");
+    let _ = writeln!(
+        out,
+        "use crate::CollisionShapeKind;\nuse mc_bamboo_core::Aabb;\n"
+    );
     let _ = writeln!(
         out,
         "/// 去重后的形状，下标 0 是空形状，下标 1 是完整方块。一个形状是若干盒子的并集。"
@@ -2143,7 +2197,43 @@ fn shapes_file(data: &VersionData) -> Result<String, String> {
         "COLLISION_SHAPE",
         "u16",
         &tables.collision,
+    ); // 只有形状不依赖位置、方块实体或实体状态时才能用快路径。
+    // A fast path only applies when the shape does not depend on the position,
+    // a block entity or the entity itself.
+    let kinds: Vec<String> = (0..total)
+        .map(|id| {
+            let shape = &tables.shapes[usize::from(tables.collision[id as usize])];
+            let block = block_of(&data.blocks, id);
+            let plain = tables.collision_shapes_agree[id as usize]
+                && !block.dynamic_shape
+                && !block.offset.is_some_and(|offset| offset.moves_shape)
+                && !entity_dependent_shape(block);
+            let kind = if !plain {
+                "Other"
+            } else if shape.is_empty() {
+                "Empty"
+            } else if shape.len() == 1 && shape[0] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0] {
+                "FullBlock"
+            } else if shape.len() == 1 {
+                // 单盒仍走通用扫描：`joinIsNotEmpty` 的 1e-7 坐标合并不能
+                // 直接换成 Aabb 判交（见方块的碰撞快路径测试）。
+                // Single boxes keep the generic scan: `joinIsNotEmpty`'s 1e-7
+                // coordinate merge differs from a bare Aabb intersection.
+                "SingleBox"
+            } else {
+                "Other"
+            };
+            format!("CollisionShapeKind::{kind}")
+        })
+        .collect();
+    write_literal_table(
+        &mut out,
+        "每个状态在空上下文下的碰撞形状种类，依赖位置或实体时为 `Other`。",
+        "COLLISION_SHAPE_KIND",
+        "CollisionShapeKind",
+        &kinds,
     );
+
     write_state_table(
         &mut out,
         "`getShape` 在 [`SHAPES`] 里的下标。",

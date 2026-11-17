@@ -68,6 +68,7 @@
 | 24 | 同一键只算一次：4 线程每中心 CPU（17） | 34.0–34.6 ms | 19.0–20.5 ms | 1.7× |
 | 24 | 同上：8 线程吞吐 / `cross_thread_duplicates`（17） | 228–240 中心/s / 172–184 | 267–273 中心/s / 0 | 1.15× |
 | 25 | 区块段危险寻路方块计数：每次 `Chunk::set_block` 写随机方块状态（18） | 53.1–53.4 ns | 52.5–54.5 ns | 无可测差别（中位数 +0.1 ns） |
+| 26 | 碰撞快路径：实体压测 1 线程 compute（19） | 59.7 ms / 10 刻 | 48.8 ms / 10 刻 | 1.22× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -2678,3 +2679,61 @@ panic 处理按标准库语义，不做补偿写入：闭包 panic 后 `OnceLock
 `ignoring_a_dangerous_write_would_not_match_the_full_recount` 是改坏确认：
 漏掉一次增减时计数立刻和重算不一致。计数用的 `path-type` Java 对拍对全部
 35723 个状态 0 不一致，改坏确认 1 处不一致（`docs/mob-entity-design.md` §5）。
+
+---
+
+## 19. 碰撞收集快路径：算阶段 59.7 → 48.8 ms / 10 刻
+
+### 19.1 先量
+
+`cargo test -p mc-bamboo-blocks --release --lib entity::parallel::tests::stress -- --ignored --nocapture`
+的场景是 3000 个掉落物加 300 个下落方块。把算阶段循环 10 万刻让
+`/usr/bin/sample <pid> 10 1` 采到 9129 个主线程样本：两条
+`collect_block_collisions` 调用路径（实体 `tick` 里的脚下查询 2303 个、
+`sweep_movement` 里的碰撞收集 965 个）加上 `block_collision_boxes` /
+`shape::collision_boxes` 的叶子合计约占算阶段三成以上。热点是官方
+`Shape.joinIsNotEmpty` 的坐标网格、以及 `block_id_of_state` 的二分查找。
+
+### 19.2 做了什么
+
+- `mc_bamboo_data::COLLISION_SHAPE_KIND` 生成期给 35723 个状态预算「无碰撞 /
+  整格 / 单盒 / 其它」。只有形状不随位置、上下文、方块实体或实体变的状态才
+  能拿到前三类；官方重写了四参数 `getCollisionShape` 的类（用 `javap -p`
+  扫全部方块类得出）一律是 `Other`。
+- **无碰撞**：跳过整格（连角格子的超大形状判定也省掉）。**整格**：沿用原来
+  `is_unit_cube` 的 `Aabb::intersects_coords`，但现在不用先算出形状。
+  **全空气段**：`BlockSource::section_has_collision` 经 `ChunkStore` 查段调色板，
+  扫描盒覆盖整段 16³ 时一次跳过。
+- **单盒快路径撤掉**：把 `joinIsNotEmpty` 换成裸 `Aabb` 判交会在 1e-7 附近
+  不一致（下半台阶 `state=15180`、扫描盒一角正好在 `0.9999999`，单测抓到）。
+  官方 1e-7 的截断行为不能变，所以 `SingleBox` 仍走通用扫描。
+- **站着不动缩小扫描盒**：没有接。`Entity.move` 在位移为零时仍会走
+  `setOnGroundWithMovement` / `checkInsideBlocks` / 方块效果等逐格查询，
+  缩小扫描盒会改变这些路径的读数和 1e-7 判定；实测两项快路径已有收益，
+  这一项没有可测收益的证据，按「没有收益的撤掉」不做。
+
+### 19.3 数字
+
+同轮 A-B-A-B 交替三对、每次重编译两个二进制、每轮跑 10 刻取 compute 累计
+（这台机器上同时有几个满载的编译子代理，B 组基线 100.2 ms 是尖峰，不能跨组比）：
+
+| 轮 | 基线（ms/10 刻） | 快路径（ms/10 刻） |
+| --- | --- | --- |
+| A | 53.1 | 48.8 |
+| B | 100.2 | 47.0 |
+| C | 59.7 | 61.0 |
+
+中位数基线 59.7、快路径 48.8，约 **1.22×**。C 组基线比快路径快是同轮负载
+抖动，和第一次量到的 32.6 → 32.2 ms 一样说明绝对值受机器负载影响；只取
+同轮交替的中位数。
+
+### 19.4 怎么确认逐位不变
+
+`move-oracle java` 55 cases / 0 mismatches，`entity-oracle java` 31 cases、
+709 steps / 0 mismatches，`cargo test -p mc-bamboo-blocks --lib` 全过。新增的
+`collision_shape_fast_paths_match_the_generic_scan` 对 9 个状态 × 5 个包围盒 ×
+3 种碰撞上下文比较快路径和「全部 `Other`」的通用路径（含 1e-7 边界），
+并把石头分类表故意说成空形状，确认结果真的会变；
+`all_air_section_skip_matches_the_full_scan` 确认全空气段跳过不改变结果，
+段里有石头时错误跳过会被发现。
+

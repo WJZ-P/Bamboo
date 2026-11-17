@@ -763,6 +763,25 @@ impl Chunk {
     pub fn sections(&self) -> &[Section] {
         &self.sections
     }
+    /// 这个 16³ 段里有没有任何状态可能在碰撞收集里产生形状。
+    ///
+    /// 调色板里全是 `CollisionShapeKind::Empty`，或者整段都是同一种这种状态时，
+    /// 每一格都是空气形状，扫描盒覆盖到的整段可以一次跳过。全局 ID 形式没有
+    /// 调色板，保守返回 `true`。
+    ///
+    /// Whether a 16³ section can produce any collision shape. A palette made
+    /// entirely of `CollisionShapeKind::Empty` states lets a whole covered
+    /// section be skipped. The global-ID form has no palette and conservatively
+    /// returns `true`.
+    pub fn section_has_any_collision(&self, section_y: i32) -> bool {
+        let index = usize::try_from(section_y - (MIN_Y >> 4)).ok();
+        let Some(section) = index.and_then(|index| self.sections.get(index)) else {
+            return true;
+        };
+        section.maybe_has(|state| {
+            mc_bamboo_data::collision_shape_kind(state) != mc_bamboo_data::CollisionShapeKind::Empty
+        })
+    }
 
     /// `section_y` 是 `pos.y >> 4` 的整段方块状态哈希，红石缓存的段哈希键读它。
     /// 不在世界高度内时返回 `None`；只在内存里，不进存档。

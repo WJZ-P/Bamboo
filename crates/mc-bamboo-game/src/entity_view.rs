@@ -68,6 +68,11 @@ impl BlockSource for ReadOnlyWorld<'_> {
         self.shulker_box_shapes.get(&pos).copied()
     }
 
+    fn section_has_collision(&self, section_x: i32, section_y: i32, section_z: i32) -> bool {
+        self.chunks
+            .section_has_any_collision(ChunkPos::new(section_x, section_z), section_y)
+    }
+
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
         ReadOnlyWorld::any_hopper_in(self, min, max)
     }

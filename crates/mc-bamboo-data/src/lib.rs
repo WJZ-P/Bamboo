@@ -195,6 +195,26 @@ impl PathType {
     ];
 }
 
+/// 每个方块状态在空碰撞上下文里预算的碰撞形状种类。
+///
+/// The precomputed collision-shape category of a block state under the empty
+/// collision context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum CollisionShapeKind {
+    /// 没有碰撞形状。
+    Empty,
+    /// 正好一整格。
+    FullBlock,
+    /// 只有一个盒子，但不占满整格。判交仍走通用扫描，保留官方的 1e-7 截断。
+    ///
+    /// A single non-full box. Intersection still uses the generic scan to keep
+    /// the official 1e-7 truncation.
+    SingleBox,
+    /// 多个盒子、动态形状或依赖实体状态，走通用路径。
+    Other,
+}
+
 /// 客户端和服务端都认识的内容包。双方都有时，注册表内容就不需要通过网络传输。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KnownPack {
@@ -812,6 +832,19 @@ pub fn support_shape(state: u32) -> &'static [Aabb] {
 
 fn shape_at(index: u16) -> &'static [Aabb] {
     shapes::SHAPES[usize::from(index)]
+}
+
+/// 状态的碰撞形状种类。查表和 `collision_shape` 用的是同一份生成数据，
+/// 形状跟随渲染偏移、方块实体或实体状态变化时返回 [`CollisionShapeKind::Other`]。
+///
+/// The collision-shape category of a state. Derived from the same generated
+/// data as `collision_shape`; states whose shape depends on a render offset,
+/// a block entity or an entity return [`CollisionShapeKind::Other`].
+pub fn collision_shape_kind(state: u32) -> CollisionShapeKind {
+    shapes::COLLISION_SHAPE_KIND
+        .get(state as usize)
+        .copied()
+        .unwrap_or(CollisionShapeKind::Other)
 }
 
 /// 按注册名找方块。名字要带命名空间，比如 `minecraft:stone`。

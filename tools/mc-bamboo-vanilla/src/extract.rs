@@ -519,6 +519,11 @@ pub struct StateTables {
     /// Result when each state is the only neighbour in `checkNeighbourBlocks`;
     /// `None` for dynamic shapes.
     pub neighbor_path_types: Vec<Option<String>>,
+    /// 空碰撞上下文和放置上下文的形状是否相同，不同则不能预算碰撞形状快路径。
+    ///
+    /// Whether empty and placement collision contexts agree; disagreement
+    /// disables the precomputed collision-shape fast path.
+    pub collision_shapes_agree: Vec<bool>,
 }
 
 #[derive(Debug, Deserialize)]

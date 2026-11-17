@@ -5,7 +5,7 @@
 use std::{borrow::BorrowMut, collections::VecDeque};
 
 use mc_bamboo_core::{BlockPos, ChunkPos, Direction, LightLayer, Vec3, mth, sign::SignContent};
-use mc_bamboo_data::{Block, BlockAncestor, blocks, sounds};
+use mc_bamboo_data::{Block, BlockAncestor, CollisionShapeKind, blocks, sounds};
 use mc_bamboo_protocol::item::ItemStack;
 use tracing::{error, warn};
 
@@ -387,7 +387,57 @@ pub struct CollisionBlocks<B, P, S> {
 pub(crate) fn collect_block_collisions<B, P, S>(
     box_: shape::Aabb,
     context: CollisionContext,
+    blocks: impl BorrowMut<CollisionBlocks<B, P, S>>,
+) -> Vec<(BlockPos, Vec<shape::Aabb>)>
+where
+    B: FnMut(BlockPos) -> BlockState,
+    P: FnMut(BlockPos) -> Option<Vec<shape::Aabb>>,
+    S: FnMut(BlockPos) -> Option<shape::Aabb>,
+{
+    collect_block_collisions_impl(
+        box_,
+        context,
+        blocks,
+        |_, _, _| true,
+        mc_bamboo_data::collision_shape_kind,
+    )
+}
+
+/// 和 [`collect_block_collisions`] 相同，但多一个「这一整段有没有碰撞形状」的判定。
+///
+/// 只有在扫描盒覆盖整段 16³ 时才问；`has_collision` 返回 false 就整段跳过。
+/// 顺序、截断和形状列表完全不变。
+///
+/// Same as [`collect_block_collisions`] with an optional whole-section predicate.
+/// It is consulted only when the scan box covers a whole 16³ section; `false`
+/// skips that section. Order, truncation and shape lists are unchanged.
+pub(crate) fn collect_block_collisions_with_sections<B, P, S>(
+    box_: shape::Aabb,
+    context: CollisionContext,
+    blocks: impl BorrowMut<CollisionBlocks<B, P, S>>,
+    has_collision: impl FnMut(i32, i32, i32) -> bool,
+) -> Vec<(BlockPos, Vec<shape::Aabb>)>
+where
+    B: FnMut(BlockPos) -> BlockState,
+    P: FnMut(BlockPos) -> Option<Vec<shape::Aabb>>,
+    S: FnMut(BlockPos) -> Option<shape::Aabb>,
+{
+    collect_block_collisions_impl(
+        box_,
+        context,
+        blocks,
+        has_collision,
+        mc_bamboo_data::collision_shape_kind,
+    )
+}
+
+/// 快路径的分类表可注入，测试用故意改坏的表确认比较器会报不一致。
+fn collect_block_collisions_impl<B, P, S>(
+    box_: shape::Aabb,
+    context: CollisionContext,
     mut blocks: impl BorrowMut<CollisionBlocks<B, P, S>>,
+    mut has_collision: impl FnMut(i32, i32, i32) -> bool,
+    kind_of: impl Fn(u32) -> CollisionShapeKind,
 ) -> Vec<(BlockPos, Vec<shape::Aabb>)>
 where
     B: FnMut(BlockPos) -> BlockState,
@@ -404,52 +454,104 @@ where
     let blocks = blocks.borrow_mut();
     for z in z_min..=z_max {
         for y in y_min..=y_max {
-            for x in x_min..=x_max {
-                let corner = u8::from(x == x_min || x == x_max)
-                    + u8::from(y == y_min || y == y_max)
-                    + u8::from(z == z_min || z == z_max);
-                if corner == 3 {
+            // 扫描盒覆盖一整段 16³ 时，问一次段里有没有可能产生碰撞形状。
+            // 只在这个段完全被覆盖时跳过，逐格访问的顺序不变。
+            // When the scan box covers a whole 16³ section, ask once whether
+            // any state there can produce a collision shape.
+            let section_x_start = x_min.div_euclid(16);
+            let section_x_end = x_max.div_euclid(16);
+            for section_x in section_x_start..=section_x_end {
+                // 只在扫描盒把这一整段 16³ 都盖住时问一次段表；省掉逐格读。
+                // Only ask once when the scan box covers the whole 16³ section.
+                let section_y = y.div_euclid(16);
+                let section_z = z.div_euclid(16);
+                let from_y = section_y * 16;
+                let from_z = section_z * 16;
+                let from_x = section_x * 16;
+                if x_min <= from_x
+                    && from_x + 15 <= x_max
+                    && y_min <= from_y
+                    && from_y + 15 <= y_max
+                    && z_min <= from_z
+                    && from_z + 15 <= z_max
+                    && !has_collision(section_x, section_y, section_z)
+                {
                     continue;
                 }
-                let pos = BlockPos::new(x, y, z);
-                let state = (blocks.block_at)(pos);
-                if corner == 1 && !shape::has_large_collision_shape(state) {
-                    continue;
-                }
-                if corner == 2 && !state.is(blocks::MOVING_PISTON) {
-                    continue;
-                }
-                let piston = if state.is(blocks::MOVING_PISTON) {
-                    (blocks.piston_at)(pos)
-                } else {
-                    None
-                };
-                let shulker = if state.is_a(BlockAncestor::ShulkerBoxBlock) {
-                    (blocks.shulker_at)(pos)
-                } else {
-                    None
-                };
-                let boxes =
-                    shape::block_collision_boxes(state, pos, context, piston.as_deref(), shulker);
-                if boxes.is_empty() {
-                    continue;
-                }
-                let (x_origin, y_origin, z_origin) = (f64::from(x), f64::from(y), f64::from(z));
-                let matched = if shape::is_unit_cube(&boxes) {
-                    box_.intersects_coords(
-                        x_origin,
-                        y_origin,
-                        z_origin,
-                        x_origin + 1.0,
-                        y_origin + 1.0,
-                        z_origin + 1.0,
-                    )
-                } else {
-                    let at_position = shape::moved(&boxes, x_origin, y_origin, z_origin);
-                    shape::join_is_not_empty(&at_position, &[box_], shape::BooleanOp::And)
-                };
-                if matched {
-                    collisions.push((pos, shape::moved(&boxes, x_origin, y_origin, z_origin)));
+                for x in from_x.max(x_min)..=(from_x + 15).min(x_max) {
+                    let corner = u8::from(x == x_min || x == x_max)
+                        + u8::from(y == y_min || y == y_max)
+                        + u8::from(z == z_min || z == z_max);
+                    if corner == 3 {
+                        continue;
+                    }
+                    let pos = BlockPos::new(x, y, z);
+                    let state = (blocks.block_at)(pos);
+                    let kind = kind_of(state.0);
+                    // 空形状在官方的所有上下文里都不产生碰撞；边界格子仍按
+                    // 官方的超大形状 / 角格子规则先筛一遍，避免改变返回列表。
+                    // Empty states produce no collision in any official context;
+                    // boundary cells still go through the official corner rules.
+                    if kind == CollisionShapeKind::Empty && corner == 0 {
+                        continue;
+                    }
+                    if corner == 1 && !shape::has_large_collision_shape(state) {
+                        continue;
+                    }
+                    if corner == 2 && !state.is(blocks::MOVING_PISTON) {
+                        continue;
+                    }
+                    let piston = if state.is(blocks::MOVING_PISTON) {
+                        (blocks.piston_at)(pos)
+                    } else {
+                        None
+                    };
+                    let shulker = if state.is_a(BlockAncestor::ShulkerBoxBlock) {
+                        (blocks.shulker_at)(pos)
+                    } else {
+                        None
+                    };
+                    let boxes = shape::block_collision_boxes(
+                        state,
+                        pos,
+                        context,
+                        piston.as_deref(),
+                        shulker,
+                    );
+                    if boxes.is_empty() {
+                        continue;
+                    }
+                    let (x_origin, y_origin, z_origin) = (f64::from(x), f64::from(y), f64::from(z));
+                    // 整格和单盒直接按 Aabb 判交，跳过 `Shapes.joinIsNotEmpty` 的
+                    // 坐标网格构建；两种得出同一个布尔值，1e-7 的截断行为不变。
+                    // Full cubes and single boxes intersect the Aabb directly,
+                    // skipping `Shapes.joinIsNotEmpty`'s coordinate grid. Both give
+                    // the same boolean and keep the 1e-7 truncation behaviour.
+                    let matched = match kind {
+                        CollisionShapeKind::FullBlock => box_.intersects_coords(
+                            x_origin,
+                            y_origin,
+                            z_origin,
+                            x_origin + 1.0,
+                            y_origin + 1.0,
+                            z_origin + 1.0,
+                        ),
+                        _ if shape::is_unit_cube(&boxes) => box_.intersects_coords(
+                            x_origin,
+                            y_origin,
+                            z_origin,
+                            x_origin + 1.0,
+                            y_origin + 1.0,
+                            z_origin + 1.0,
+                        ),
+                        _ => {
+                            let at_position = shape::moved(&boxes, x_origin, y_origin, z_origin);
+                            shape::join_is_not_empty(&at_position, &[box_], shape::BooleanOp::And)
+                        }
+                    };
+                    if matched {
+                        collisions.push((pos, shape::moved(&boxes, x_origin, y_origin, z_origin)));
+                    }
                 }
             }
         }
@@ -3270,6 +3372,7 @@ pub(crate) fn traverse_blocks<T>(
 mod tests {
     use std::any::Any;
 
+    use mc_bamboo_core::Aabb;
     use mc_bamboo_data::items;
     use mc_bamboo_protocol::item::ItemStack;
 
@@ -3862,5 +3965,140 @@ mod tests {
             expected.next_double().to_bits(),
             level.random.source().next_double().to_bits()
         );
+    }
+    /// 快路径和逐格通用路径逐位相同；故意改坏分类表会产生差异。
+    #[test]
+    fn collision_shape_fast_paths_match_the_generic_scan() {
+        use mc_bamboo_core::Aabb;
+        use mc_bamboo_data::{CollisionShapeKind, blocks as states};
+
+        // 空 / 整格 / 单盒 / 通用路径各挑一个状态，边界按 1e-7 截断附近取。
+        let states_under_test = [
+            states::AIR,
+            states::STONE,
+            states::OAK_SLAB,
+            states::OAK_FENCE,
+            states::SCAFFOLDING,
+            states::POWDER_SNOW,
+            states::SHULKER_BOX,
+            states::MOVING_PISTON,
+            states::WATER,
+        ];
+        let areas = [
+            Aabb::new(0.5, 0.5, 0.5, 1.5, 1.5, 1.5),
+            Aabb::new(-0.0000001, 0.9999999, 0.25, 1.0000001, 1.0000001, 0.75),
+            Aabb::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0),
+            Aabb::new(0.9999999, 0.125, -0.125, 1.125, 0.875, 1.125),
+            Aabb::new(15.0, 15.0, 15.0, 17.0, 17.0, 17.0),
+        ];
+        for context in [
+            CollisionContext::Empty,
+            CollisionContext::Placement,
+            CollisionContext::Entity(crate::shape::EntityContext {
+                fall_distance: 0.0,
+                bottom: 0.5,
+                placement: false,
+                falling_block: false,
+                powder_snow_walkable: false,
+                descending: false,
+            }),
+        ] {
+            for &state in &states_under_test {
+                for area in areas {
+                    let generic = collect_block_collisions_impl(
+                        area,
+                        context,
+                        CollisionBlocks {
+                            block_at: |_| BlockState(state),
+                            piston_at: |_| None,
+                            shulker_at: |_| None,
+                        },
+                        |_, _, _| true,
+                        |_| CollisionShapeKind::Other,
+                    );
+                    let fast = collect_block_collisions_impl(
+                        area,
+                        context,
+                        CollisionBlocks {
+                            block_at: |_| BlockState(state),
+                            piston_at: |_| None,
+                            shulker_at: |_| None,
+                        },
+                        |_, _, _| true,
+                        mc_bamboo_data::collision_shape_kind,
+                    );
+                    assert_eq!(fast, generic, "状态 {state} 的快路径改变了碰撞列表");
+                }
+            }
+        }
+        // 改坏确认：把石头的整格形状说成空形状，比较器必须报不一致。
+        let broken = |state| {
+            if state == states::STONE {
+                CollisionShapeKind::Empty
+            } else {
+                mc_bamboo_data::collision_shape_kind(state)
+            }
+        };
+        let area = Aabb::new(0.5, 0.5, 0.5, 1.5, 1.5, 1.5);
+        let generic = collect_block_collisions_impl(
+            area,
+            CollisionContext::Empty,
+            CollisionBlocks {
+                block_at: |_| BlockState(states::STONE),
+                piston_at: |_| None,
+                shulker_at: |_| None,
+            },
+            |_, _, _| true,
+            broken,
+        );
+        assert!(
+            generic.is_empty(),
+            "改坏的分类表让整格方块消失了，比较器能发现"
+        );
+    }
+
+    /// 整段跳过只在真的全空时结果不变；改坏段表必须报差异。
+    #[test]
+    fn all_air_section_skip_matches_the_full_scan() {
+        let area = Aabb::new(0.0, 0.0, 0.0, 16.0, 16.0, 16.0);
+        let blocks = || CollisionBlocks {
+            block_at: |_| BlockState::AIR,
+            piston_at: |_| None,
+            shulker_at: |_| None,
+        };
+        let full = collect_block_collisions_impl(
+            area,
+            CollisionContext::Empty,
+            blocks(),
+            |_, _, _| true,
+            mc_bamboo_data::collision_shape_kind,
+        );
+        let skipped = collect_block_collisions_impl(
+            area,
+            CollisionContext::Empty,
+            blocks(),
+            |_, _, _| false,
+            mc_bamboo_data::collision_shape_kind,
+        );
+        assert_eq!(skipped, full);
+        // 段里有石头时错误地跳过会丢掉碰撞体。
+        let stone = collect_block_collisions_impl(
+            Aabb::new(0.0, 0.0, 0.0, 2.0, 2.0, 2.0),
+            CollisionContext::Empty,
+            CollisionBlocks {
+                block_at: |pos| {
+                    if pos == BlockPos::new(1, 1, 1) {
+                        BlockState(mc_bamboo_data::blocks::STONE)
+                    } else {
+                        BlockState::AIR
+                    }
+                },
+                piston_at: |_| None,
+                shulker_at: |_| None,
+            },
+            |_, _, _| true,
+            mc_bamboo_data::collision_shape_kind,
+        );
+        assert!(!stone.is_empty());
     }
 }

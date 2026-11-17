@@ -1823,6 +1823,7 @@ public final class Extractor {
         private final JsonArray mirror = new JsonArray();
         private final JsonArray pathTypes = new JsonArray();
         private final JsonArray neighborPathTypes = new JsonArray();
+        private final JsonArray collisionShapesAgree = new JsonArray();
         private static final Map<Block, Boolean> MOVES_SHAPE = new HashMap<>();
 
         JsonObject build() {
@@ -1849,6 +1850,7 @@ public final class Extractor {
             tables.add("mirror", mirror);
             tables.add("pathTypes", pathTypes);
             tables.add("neighborPathTypes", neighborPathTypes);
+            tables.add("collisionShapesAgree", collisionShapesAgree);
             return tables;
         }
 
@@ -1871,6 +1873,12 @@ public final class Extractor {
             outline.add(shapeIndex(canonical(state, state.getShape(EMPTY, BlockPos.ZERO), movesShape)));
             support.add(shapeIndex(canonical(state, state.getBlockSupportShape(EMPTY, BlockPos.ZERO), movesShape)));
             addPlacementCollision(id, state, collisionShape);
+            // 空上下文和放置上下文的形状不同就不能预算快路径。
+            // A fast path is only valid when empty and placement contexts agree.
+            collisionShapesAgree.add(
+                    shapeKey(collisionShape).equals(shapeKey(
+                            state.getCollisionShape(EMPTY, BlockPos.ZERO,
+                                    CollisionContext.placementContext(null)))));
             addPathTypes(state);
         }
 
