@@ -274,9 +274,6 @@ impl World {
         // attached before any entity exists. With one island the handle lives
         // only in its store; later islands clone it from there.
         region.use_entity_ids(mc_bamboo_blocks::EntityIds::new());
-        // 岛的时钟从此刻的世界时间起算（岛的实施计划 5.1）。
-        // The island clock starts at the current world time (island plan 5.1).
-        region.start_clock(global.time());
         // 控制台命令反馈的广播开关来自 `server.properties`，启动时带进世界线程。
         // The console-feedback broadcast flag comes from `server.properties` at startup.
         region.broadcast_console_to_ops = config.broadcast_console_to_ops;
@@ -424,6 +421,12 @@ impl World {
                 }
             }
         }
+        // 岛的时钟从世界时间起算（岛的实施计划 5.1）。放在启动数据都套上之后，
+        // 以后从存档恢复世界时间时也对得上。
+        // The island clock starts at the world time (island plan 5.1), after
+        // all startup data is applied so a restored world time is picked up.
+        let time = world.master.global.time();
+        world.island.region.start_clock(time);
         world.island.region.profiler.on_world_start();
         if world.island.region.profiler.partition_enabled() {
             let verify = world.island.region.profiler.partition_verify();
