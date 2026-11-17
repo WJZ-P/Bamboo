@@ -1,0 +1,599 @@
+//! 岛的拆合（岛的实施计划第 6 节第 9 步、3.3 节）：把一个岛按区块集合和玩家集合整批
+//! 拆成两个，或者把两个岛整批合成一个。还不在运行时调用，第 10 步由分区器驱动。
+//!
+//! 每一类按位置或按玩家存的数据怎么分、怎么并、要不要平移时间，逐类写在计划 3.3 的
+//! 「岛上每一类数据的拆合」表里；这里的 [`IslandPart`] 和那张表一一对应。拆的时候
+//! 新的 `Region` 用结构体字面量逐个字段给出、合的时候把被吸收方逐个字段解构，
+//! 以后给 `Region` 加字段而忘了在这里决定怎么拆合，编译就不过。
+//!
+//! 两条前提（调用方保证，这里断言）：两部分的已加载区块切比雪夫距离至少 3（实体 tick
+//! 要看半径 2 的邻居都已交付；分区器给的间隔至少 8 个区块），以及视野不跨岛（计划
+//! 4.2：实体的观察者、玩家的观察者都和它在同一个岛）。
+//!
+//! Island split and merge (island plan, section 6 step 9 and 3.3): split one
+//! island into two by a chunk set and a player set, or merge two into one, in
+//! batches. Not called at run time yet; step 10 drives it from the
+//! partitioner. Each class of positional or per-player state is listed in the
+//! plan's 3.3 table and matches [`IslandPart`] here. The split builds the new
+//! `Region` with a struct literal and the merge destructures the absorbed one
+//! field by field, so a new field without a split/merge decision does not
+//! compile. Preconditions (asserted): the two parts' loaded chunks are at
+//! least 3 apart, and no view crosses islands (plan 4.2).
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use mc_bamboo_blocks::{LevelRandom, entity::Entities};
+use mc_bamboo_core::{BlockPos, ChunkPos};
+use mc_bamboo_loot::RandomSequences;
+use mc_bamboo_world::store::ChunkStore;
+
+#[cfg(test)]
+use super::ClockParts;
+use super::{Region, column::NotReady};
+use crate::{
+    chunk_encoding::ChunkCache, inbound::PlayerId, interaction::BlockChanges,
+    island_partition::SectionPos,
+};
+
+/// 两部分的已加载区块之间至少要隔开的切比雪夫距离：方块逻辑看半径 1、实体看半径 2 的
+/// 邻居是否都已交付（`TickLevels`），邻域不能跨两部分。
+///
+/// The minimum Chebyshev distance between the two parts' loaded chunks:
+/// entity ticking looks at radius 2, so no neighbourhood may span both parts.
+pub(crate) const ISLAND_GAP: i32 = 3;
+
+/// 新岛的四个随机源（岛的实施计划第 2 节第 15 行、6.2）。拆的时候由调用方给出——
+/// 怎么派生是第 10 步之前要定的事（见计划 3.3「岛的随机源」），拆合本身不替它选；
+/// [`IslandRandom::derive`] 是「只由岛自己的起源 section 派生」的一种具体做法。
+/// 合并时吸收方留自己的，被吸收方的丢掉（总设计稿 6.4「随机源留大的那个」）。
+///
+/// The new island's four random sources (plan section 2 row 15, 6.2). The
+/// caller supplies them on a split; how they are derived is still to be
+/// decided (plan 3.3), so the split does not choose. [`IslandRandom::derive`]
+/// is one concrete "from the island's own origin section only" scheme. A
+/// merge keeps the absorber's and drops the absorbed island's.
+pub(crate) struct IslandRandom {
+    /// 官方 `Level.random` 和 `randValue`。
+    pub(crate) random: LevelRandom,
+    /// 官方 `Level.soundSeedGenerator`。
+    pub(crate) sound_seed_generator: LevelRandom,
+    /// 战利品表的 `random_sequence`。
+    pub(crate) loot_sequences: RandomSequences,
+    /// `/random` 和 `/loot` 的按名序列。
+    pub(crate) random_sequences: RandomSequences,
+}
+
+impl IslandRandom {
+    /// 只由（`base`，岛的起源 section）派生，和拆分的先后、原岛的随机状态都无关：同一个
+    /// `base` 下，起源 section 相同的岛总拿到同样的四个随机源。两个按名序列沿用原来的
+    /// 世界种子，`salt` 换成按起源 section 派生的值（总设计稿 6.6「按世界种子、序列名、
+    /// region 起源 section 派生」）。
+    ///
+    /// Derived from (`base`, origin section) only, independent of the split
+    /// history and of the parent's random state. The named sequences keep their
+    /// world seed with a `salt` derived from the origin section.
+    pub(crate) fn derive(
+        base: i64,
+        origin: SectionPos,
+        loot_world_seed: i64,
+        sequence_world_seed: i64,
+    ) -> Self {
+        let stream = |index: u64| -> i64 {
+            let key = (u64::from(origin.x as u32) << 32) | u64::from(origin.z as u32);
+            splitmix(splitmix(base as u64 ^ index.wrapping_mul(0xA24B_AED4_963E_E407)) ^ key) as i64
+        };
+        let sequences = |world_seed: i64, index: u64| {
+            let mut sequences = RandomSequences::new(world_seed);
+            sequences.set_seed_defaults(stream(index) as i32, true, true);
+            sequences
+        };
+        Self {
+            random: LevelRandom::new(stream(1)),
+            sound_seed_generator: LevelRandom::new(stream(2)),
+            loot_sequences: sequences(loot_world_seed, 3),
+            random_sequences: sequences(sequence_world_seed, 4),
+        }
+    }
+}
+
+/// SplitMix64 的一步，把相近的输入搅开。
+fn splitmix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// 拆分时要按位置或按玩家分走的每一类数据（计划 3.3 的表）。正式路径一类不落；
+/// 测试用 [`Region::split_off_island_parts`] 故意漏掉一类，确认核对能报出来。
+///
+/// Every class of state a split moves by position or by player (plan 3.3).
+/// Production moves all of them; tests skip one on purpose to make sure the
+/// ownership check reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IslandPart {
+    /// 区块表：方块、两层光照、版本号、原样起点、已加载登记、存盘改动集合。
+    Chunks,
+    /// 每区块的 tick 档位和三个 tick 集合、待交出的成员变化。
+    TickLevels,
+    /// 计划刻（主队列、搁置表、活塞记录、每区块标记）。
+    BlockTicks,
+    /// 方块事件队列。
+    BlockEvents,
+    /// 方块实体和它们的运行顺序、睡眠日程、关注表。
+    BlockEntities,
+    /// 红石记忆（比较器、书架、唱片机、合成器、讲台页码、火把记录）。
+    Redstone,
+    /// 容器内容。
+    Containers,
+    /// 方块实体从物品带来的组件。
+    BlockItems,
+    /// 命令方块里的命令。
+    CommandBlocks,
+    /// 讲台上的书。
+    Books,
+    /// 实体表。
+    Entities,
+    /// 实体和玩家的配对。
+    EntityTracking,
+    /// 上层内容的待存标记。
+    Dirty,
+    /// 还没广播的光照变化。
+    LightChanges,
+    /// 还没广播的方块变化。
+    BlockChanges,
+    /// 区块包缓存（拆走的部分在原岛丢掉，新岛从空的开始）。
+    ChunkCache,
+    /// 玩家表。
+    Players,
+    /// 玩家网格。
+    PlayerGrid,
+    /// 出站链路和缓冲。
+    Links,
+    /// 打开的菜单。
+    Menus,
+    /// 讲台视图和待发格子。
+    LecternViews,
+    /// 对端 IP。
+    PeerIps,
+    /// 最后操作时刻。
+    LastAction,
+}
+
+impl IslandPart {
+    /// 全部类别，测试逐类改坏用。
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 23] = [
+        Self::Chunks,
+        Self::TickLevels,
+        Self::BlockTicks,
+        Self::BlockEvents,
+        Self::BlockEntities,
+        Self::Redstone,
+        Self::Containers,
+        Self::BlockItems,
+        Self::CommandBlocks,
+        Self::Books,
+        Self::Entities,
+        Self::EntityTracking,
+        Self::Dirty,
+        Self::LightChanges,
+        Self::BlockChanges,
+        Self::ChunkCache,
+        Self::Players,
+        Self::PlayerGrid,
+        Self::Links,
+        Self::Menus,
+        Self::LecternViews,
+        Self::PeerIps,
+        Self::LastAction,
+    ];
+}
+
+/// 按键把一张表分成两份：`moves` 为真的搬出去。一遍扫完，和要搬多少无关。
+fn split_map<K: Ord, V>(table: &mut BTreeMap<K, V>, moves: impl Fn(&K) -> bool) -> BTreeMap<K, V> {
+    let (moved, kept) = std::mem::take(table)
+        .into_iter()
+        .partition(|(key, _)| moves(key));
+    *table = kept;
+    moved
+}
+
+/// 按玩家把一张表分成两份。玩家只有几个，逐个取。
+fn split_players<V>(
+    table: &mut BTreeMap<PlayerId, V>,
+    players: &BTreeSet<PlayerId>,
+) -> BTreeMap<PlayerId, V> {
+    players
+        .iter()
+        .filter_map(|id| Some((*id, table.remove(id)?)))
+        .collect()
+}
+
+/// 断言 `moved` 里的已加载区块和 `stays` 里的已加载区块切比雪夫距离至少 [`ISLAND_GAP`]。
+fn assert_gap(
+    moved: impl IntoIterator<Item = ChunkPos>,
+    is_moved: impl Fn(ChunkPos) -> bool,
+    stays: impl Fn(ChunkPos) -> bool,
+) {
+    let reach = ISLAND_GAP - 1;
+    for pos in moved {
+        for dx in -reach..=reach {
+            for dz in -reach..=reach {
+                let near = ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz));
+                assert!(
+                    is_moved(near) || !stays(near),
+                    "岛的两部分靠得太近：{pos:?} 和 {near:?} 都已加载（要隔开至少 {ISLAND_GAP} 个区块）"
+                );
+            }
+        }
+    }
+}
+
+impl Region {
+    /// 用这个岛的两个按名序列的世界种子，按 [`IslandRandom::derive`] 派生新岛的随机源。
+    ///
+    /// Derive a new island's random sources with this island's sequence seeds.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "第 10 步由分区器在运行时驱动拆合 / step 10 drives splits and merges at run time"
+        )
+    )]
+    pub(crate) fn derive_island_random(&self, base: i64, origin: SectionPos) -> IslandRandom {
+        IslandRandom::derive(
+            base,
+            origin,
+            self.loot_sequences.world_seed(),
+            self.random_sequences.world_seed(),
+        )
+    }
+
+    /// 岛拆分：把位置落在 `chunks` 里的一切和 `players` 的一切整批拆出去，造出新岛的
+    /// `Region`。`chunks` 是新岛拥有的全部区块位置（已加载的、还在信箱里的都算）；
+    /// 两边时钟相同，不平移。只在 tick 边界调用，前提不满足时返回 [`NotReady`]、岛不变。
+    ///
+    /// 新岛照抄原岛的时钟、全局快照、配置和区块包模板；红石缓存、单元划分、剖析器
+    /// 从空的开始（缓存和统计，丢掉只损失命中）；管理名单的本刻改动留在原岛
+    /// （它们是全局的，由主控在交回时取走）。随机源由调用方给（[`IslandRandom`]）。
+    ///
+    /// Island split: move everything positioned in `chunks` and everything of
+    /// `players` into a new island's `Region` in one batch. `chunks` is every
+    /// chunk position the new island owns, loaded or still in the mailbox. Both
+    /// clocks are equal, so nothing shifts. Tick boundary only; otherwise
+    /// [`NotReady`] with the island untouched. The new island copies the clock,
+    /// the global snapshot, configuration and the chunk template; the redstone
+    /// cache, unit partitioning and profiler start empty; this tick's admin
+    /// list changes stay. The caller supplies the random sources.
+    pub(crate) fn split_off_island(
+        &mut self,
+        chunks: &BTreeSet<ChunkPos>,
+        players: &BTreeSet<PlayerId>,
+        random: IslandRandom,
+    ) -> Result<Region, NotReady> {
+        self.split_off_island_parts(chunks, players, random, None)
+    }
+
+    /// 同 [`Self::split_off_island`]；`skip` 给出时故意不搬那一类（只给改坏确认用）。
+    ///
+    /// Like [`Self::split_off_island`]; `skip` leaves one class behind on
+    /// purpose (break-it checks only).
+    pub(crate) fn split_off_island_parts(
+        &mut self,
+        chunks: &BTreeSet<ChunkPos>,
+        players: &BTreeSet<PlayerId>,
+        random: IslandRandom,
+        skip: Option<IslandPart>,
+    ) -> Result<Region, NotReady> {
+        assert!(self.chunks.is_loaded_mode(), "只有已加载模式能拆岛");
+        if !self.ready_to_move_columns() {
+            return Err(NotReady);
+        }
+        let store = &self.chunks;
+        assert_gap(
+            chunks.iter().copied().filter(|&pos| store.is_loaded(pos)),
+            |pos| chunks.contains(&pos),
+            |pos| store.is_loaded(pos),
+        );
+        for id in players {
+            assert!(
+                self.players.contains_key(id),
+                "要搬的玩家 {id:?} 不在这个岛上"
+            );
+        }
+        // 视野不跨岛：搬走的玩家只被搬走的玩家看见，留下的只被留下的看见。
+        debug_assert!(self.players.iter().all(|(id, player)| {
+            if players.contains(id) {
+                player.sync.seen_by().is_subset(players)
+            } else {
+                player.sync.seen_by().is_disjoint(players)
+            }
+        }));
+        let moves = |part: IslandPart| skip != Some(part);
+        let inside = |pos: &BlockPos| chunks.contains(&pos.chunk());
+
+        // 前提都检查过了，下面每一步都不会失败。
+        let new_chunks = if moves(IslandPart::Chunks) {
+            self.chunks
+                .split_off(chunks)
+                .unwrap_or_else(|_| unreachable!("前提已经检查过"))
+        } else {
+            ChunkStore::loaded()
+        };
+        let tick_levels = if moves(IslandPart::TickLevels) {
+            self.tick_levels.split_off(chunks)
+        } else {
+            crate::tick_levels::TickLevels::new(self.tick_levels.enabled())
+        };
+        let block_ticks = if moves(IslandPart::BlockTicks) {
+            self.block_ticks.split_off_island(chunks)
+        } else {
+            self.block_ticks.split_off_island(&BTreeSet::new())
+        };
+        let block_events = if moves(IslandPart::BlockEvents) {
+            self.block_events.split_off(chunks)
+        } else {
+            self.block_events.split_off(&BTreeSet::new())
+        };
+        let block_entities = self
+            .block_entities
+            .split_off_island(if moves(IslandPart::BlockEntities) {
+                chunks
+            } else {
+                const { &BTreeSet::new() }
+            })
+            .unwrap_or_else(|_| unreachable!("前提已经检查过"));
+        let redstone = if moves(IslandPart::Redstone) {
+            self.redstone.split_off(chunks)
+        } else {
+            self.redstone.split_off(&BTreeSet::new())
+        };
+        let containers = if moves(IslandPart::Containers) {
+            split_map(&mut self.containers, inside)
+        } else {
+            BTreeMap::new()
+        };
+        let block_items = if moves(IslandPart::BlockItems) {
+            split_map(&mut self.block_items, inside)
+        } else {
+            BTreeMap::new()
+        };
+        let command_blocks = if moves(IslandPart::CommandBlocks) {
+            split_map(&mut self.command_blocks, inside)
+        } else {
+            BTreeMap::new()
+        };
+        let entities = if moves(IslandPart::Entities) {
+            self.entities
+                .split_off(chunks)
+                .unwrap_or_else(|_| unreachable!("前提已经检查过"))
+        } else {
+            Entities::with_ids(self.entities.ids_handle().clone())
+        };
+        let moved_entities: BTreeSet<i32> = entities.ids().into_iter().collect();
+        let entity_tracking = if moves(IslandPart::EntityTracking) {
+            self.entity_tracking.split_off(&moved_entities, players)
+        } else {
+            crate::entity_tracking::EntityTracking::default()
+        };
+        let dirty = if moves(IslandPart::Dirty) {
+            self.dirty.split_off(chunks)
+        } else {
+            super::dirty::Dirty::default()
+        };
+        let light_changes = if moves(IslandPart::LightChanges) {
+            split_map(&mut self.light_changes, |pos| chunks.contains(pos))
+        } else {
+            BTreeMap::new()
+        };
+        let mut block_changes = BlockChanges::default();
+        if moves(IslandPart::BlockChanges) {
+            let (moved, kept) = std::mem::take(&mut self.block_changes.changed)
+                .into_iter()
+                .partition(|pos| inside(pos));
+            self.block_changes.changed = kept;
+            block_changes.changed = moved;
+        }
+        if moves(IslandPart::ChunkCache) {
+            self.chunk_cache.retain(|pos| !chunks.contains(&pos));
+        }
+        let lecterns = self.lecterns.split_off(
+            if moves(IslandPart::Books) {
+                chunks
+            } else {
+                const { &BTreeSet::new() }
+            },
+            if moves(IslandPart::LecternViews) {
+                players
+            } else {
+                const { &BTreeSet::new() }
+            },
+        );
+        let none = const { &BTreeSet::new() };
+        let pick = |part: IslandPart| if moves(part) { players } else { none };
+        let new_players = split_players(&mut self.players, pick(IslandPart::Players));
+        let player_grid = self.player_grid.split_off(pick(IslandPart::PlayerGrid));
+        let links = self.links.split_off(pick(IslandPart::Links));
+        let menus = split_players(&mut self.menus, pick(IslandPart::Menus));
+        let peer_ips = split_players(&mut self.peer_ips, pick(IslandPart::PeerIps));
+        let last_action_millis =
+            split_players(&mut self.last_action_millis, pick(IslandPart::LastAction));
+
+        let IslandRandom {
+            random,
+            sound_seed_generator,
+            loot_sequences,
+            random_sequences,
+        } = random;
+        Ok(Region {
+            players: new_players,
+            player_grid,
+            links,
+            chunks: new_chunks,
+            tick_levels,
+            template_body: self.template_body.clone(),
+            chunk_cache: ChunkCache::default(),
+            block_changes,
+            light_changes,
+            block_ticks,
+            containers,
+            block_items,
+            menus,
+            lecterns,
+            block_entities,
+            block_events,
+            random,
+            redstone_cache: mc_bamboo_blocks::cache::RedstoneCache::new(
+                *self.redstone_cache.config(),
+            ),
+            loot_sequences,
+            random_sequences,
+            sound_seed_generator,
+            entities,
+            entity_tracking,
+            redstone,
+            tick: self.tick,
+            view_distance: self.view_distance,
+            max_players: self.max_players,
+            online_mode: self.online_mode,
+            enforce_secure_profile: self.enforce_secure_profile,
+            service_keys: self.service_keys.clone(),
+            clock_millis: self.clock_millis,
+            global: self.global.clone(),
+            broadcast_console_to_ops: self.broadcast_console_to_ops,
+            command_blocks,
+            admin_changes: crate::admin::AdminChanges::default(),
+            last_action_millis,
+            peer_ips,
+            profiler: self.profiler.fresh_like(),
+            partitioning: self.partitioning.fresh_like(),
+            dirty,
+        })
+    }
+
+    /// 岛合并：把 `other` 整批倒进自己。`delta = 自己的时钟 − other 的时钟`：先按它平移
+    /// 被吸收方的全部绝对时刻（[`Self::rebase_clock`]，计划 5.1），平移之后两边时钟
+    /// 相同，再逐类并。吸收方的时钟、随机源、全局快照、剖析器留下；被吸收方的红石缓存、
+    /// 区块包缓存、剖析器丢掉；单元划分重建。只在两个岛都在 tick 边界时调用（断言）。
+    ///
+    /// Island merge: pour `other` into this island. `delta = self.now −
+    /// other.now`: first shift every absolute instant of the absorbed island
+    /// ([`Self::rebase_clock`], plan 5.1) so both clocks agree, then merge class
+    /// by class. The absorber keeps its clock, random sources, global snapshot
+    /// and profiler; the absorbed redstone cache, chunk cache and profiler are
+    /// dropped; unit partitioning is rebuilt. Both at a tick boundary.
+    pub(crate) fn absorb_island(&mut self, mut other: Region, delta: i64) {
+        self.assert_mergeable(&other);
+        other.rebase_clock(delta);
+        self.merge_rebased(other);
+    }
+
+    /// 同 [`Self::absorb_island`]，平移只做 `clock` 选中的几类（只给改坏确认用）。
+    ///
+    /// Like [`Self::absorb_island`] shifting only the selected classes
+    /// (break-it checks only).
+    #[cfg(test)]
+    pub(crate) fn absorb_island_parts(&mut self, mut other: Region, delta: i64, clock: ClockParts) {
+        self.assert_mergeable(&other);
+        other.rebase_clock_parts(delta, clock);
+        self.merge_rebased(other);
+    }
+
+    fn assert_mergeable(&self, other: &Region) {
+        assert!(
+            self.chunks.is_loaded_mode() && other.chunks.is_loaded_mode(),
+            "只有已加载模式能合岛"
+        );
+        assert!(
+            self.ready_to_move_columns() && other.ready_to_move_columns(),
+            "只能在 tick 边界合岛"
+        );
+    }
+
+    /// 被吸收方已经平移到吸收方的时钟，逐类并进来。
+    fn merge_rebased(&mut self, other: Region) {
+        debug_assert_eq!(other.tick, self.tick, "平移之后两边的时钟要相同");
+        debug_assert_eq!(
+            other.block_ticks.now(),
+            self.block_ticks.now(),
+            "平移之后两边计划刻的时钟要相同"
+        );
+        let mine = &self.chunks;
+        assert_gap(
+            other.chunks.loaded_positions(),
+            |_| false,
+            |pos| mine.is_loaded(pos),
+        );
+        let Region {
+            players,
+            player_grid,
+            links,
+            chunks,
+            tick_levels,
+            template_body: _,
+            chunk_cache: _,
+            block_changes,
+            light_changes,
+            block_ticks,
+            containers,
+            block_items,
+            menus,
+            lecterns,
+            block_entities,
+            block_events,
+            random: _,
+            redstone_cache: _,
+            loot_sequences: _,
+            random_sequences: _,
+            sound_seed_generator: _,
+            entities,
+            entity_tracking,
+            redstone,
+            tick: _,
+            view_distance: _,
+            max_players: _,
+            online_mode: _,
+            enforce_secure_profile: _,
+            service_keys: _,
+            clock_millis: _,
+            global: _,
+            broadcast_console_to_ops: _,
+            command_blocks,
+            admin_changes,
+            last_action_millis,
+            peer_ips,
+            profiler: _,
+            partitioning: _,
+            dirty,
+        } = other;
+        self.chunks
+            .absorb(chunks)
+            .unwrap_or_else(|_| unreachable!("前提已经检查过"));
+        self.tick_levels.absorb(tick_levels);
+        self.block_ticks.absorb(block_ticks);
+        self.block_events.absorb(block_events);
+        self.block_entities.absorb_island(block_entities);
+        self.redstone.absorb(redstone);
+        self.containers.extend(containers);
+        self.block_items.extend(block_items);
+        self.command_blocks.extend(command_blocks);
+        self.entities.absorb(entities);
+        self.entity_tracking.absorb(entity_tracking);
+        self.dirty.absorb(dirty);
+        self.light_changes.extend(light_changes);
+        self.block_changes.changed.extend(block_changes.changed);
+        for (id, player) in players {
+            let previous = self.players.insert(id, player);
+            assert!(previous.is_none(), "玩家 {id:?} 在两个岛上");
+        }
+        self.player_grid.absorb(player_grid);
+        self.links.absorb(links);
+        self.menus.extend(menus);
+        self.lecterns.absorb(lecterns);
+        self.peer_ips.extend(peer_ips);
+        self.last_action_millis.extend(last_action_millis);
+        self.admin_changes.merge(admin_changes);
+        self.partitioning = self.partitioning.fresh_like();
+    }
+}

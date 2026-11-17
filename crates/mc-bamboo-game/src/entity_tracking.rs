@@ -49,6 +49,63 @@ pub(crate) struct EntityTracking {
     tracked: BTreeMap<i32, TrackedEntity>,
 }
 
+impl EntityTracking {
+    /// 岛拆分（岛的实施计划 3.3「实体追踪的配对」）：配对按实体跟着走，`seen_by` 原样带走，
+    /// 不清空重建（重建会重发生成包，玩家看得见）。`entities` 是搬走的实体的网络 ID。
+    /// 实体已经没了、还等着下一刻发移除包的条目跟着它的观察者走。视野不跨岛
+    /// （4.2），所以观察者和实体总在同一边（调试构建断言）。
+    ///
+    /// Island split: pairings follow their entity with `seen_by` intact (a
+    /// rebuild would resend spawn packets). Entries whose entity is already
+    /// gone follow their viewers. Viewers and entity are always on the same
+    /// island (4.2), asserted in debug builds.
+    pub(crate) fn split_off(
+        &mut self,
+        entities: &BTreeSet<i32>,
+        players: &BTreeSet<PlayerId>,
+    ) -> Self {
+        let tracked = std::mem::take(&mut self.tracked);
+        let mut out = Self::default();
+        for (id, entry) in tracked {
+            let moves = entities.contains(&id)
+                || (!entry.seen_by.is_empty() && entry.seen_by.is_subset(players));
+            debug_assert!(
+                if moves {
+                    entry.seen_by.is_subset(players)
+                } else {
+                    entry.seen_by.is_disjoint(players)
+                },
+                "实体 {id} 的观察者跨了两个岛"
+            );
+            if moves {
+                out.tracked.insert(id, entry);
+            } else {
+                self.tracked.insert(id, entry);
+            }
+        }
+        out
+    }
+
+    /// 岛合并：配对并进来。网络 ID 全世界唯一，不会撞。
+    ///
+    /// Island merge: network ids are world-unique, so nothing collides.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        for (id, entry) in other.tracked {
+            let previous = self.tracked.insert(id, entry);
+            debug_assert!(previous.is_none(), "实体 {id} 在两个岛上都有配对");
+        }
+    }
+
+    /// 测试核对拆合用：每个被跟踪的实体和看得见它的玩家。
+    #[cfg(test)]
+    pub(crate) fn pairs(&self) -> Vec<(i32, Vec<PlayerId>)> {
+        self.tracked
+            .iter()
+            .map(|(&id, entry)| (id, entry.seen_by.iter().copied().collect()))
+            .collect()
+    }
+}
+
 /// 官方 `ServerEntity` 里和这两种实体有关的字段。
 #[derive(Debug)]
 struct TrackedEntity {

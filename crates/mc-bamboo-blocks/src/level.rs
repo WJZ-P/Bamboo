@@ -1438,6 +1438,27 @@ impl RedstoneMemory {
         out
     }
 
+    /// 测试用：有记录的全部位置（各张表和火把记录），按位置排序去重。
+    ///
+    /// For tests: every position with a record, sorted and deduplicated.
+    #[doc(hidden)]
+    pub fn positions(&self) -> Vec<BlockPos> {
+        let mut out: Vec<BlockPos> = self
+            .comparator_outputs
+            .keys()
+            .chain(self.bookshelf_slots.keys())
+            .chain(self.jukebox_playing.iter())
+            .chain(self.crafter_disabled.keys())
+            .chain(self.crafter_crafting.keys())
+            .chain(self.lecterns.keys())
+            .copied()
+            .chain(self.torch_toggles.iter().map(|(pos, _)| *pos))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// 测试和差分用：全部记录按位置排好的文本，火把记录按原来的先后、带绝对时刻。
     ///
     /// For tests: every record sorted by position; torch toggles in their

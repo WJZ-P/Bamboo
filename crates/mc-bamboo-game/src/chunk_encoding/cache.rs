@@ -136,6 +136,16 @@ impl ChunkCache {
     }
 
     /// 只留下 `keep` 选中的区块，包体和帧一起清理。
+    /// 有缓存条目的位置，测试核对拆合用。
+    #[cfg(test)]
+    pub(crate) fn positions(&self) -> std::collections::BTreeSet<ChunkPos> {
+        self.bodies
+            .keys()
+            .chain(self.frames.keys())
+            .copied()
+            .collect()
+    }
+
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(ChunkPos) -> bool) {
         let bytes = &mut self.bytes;
         self.bodies.retain(|&pos, entry| {

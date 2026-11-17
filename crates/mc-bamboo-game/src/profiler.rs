@@ -775,6 +775,31 @@ impl Profiler {
         self.last_report = self.clock.now();
     }
 
+    /// 岛拆分时给新岛的剖析器：报告间隔、时钟和各项统计开关照抄，样本从零开始
+    /// （岛的实施计划第 2 节第 26 行：每岛一份）。
+    ///
+    /// The profiler for a newly split island: same report interval, clock and
+    /// switches, empty samples (one per island).
+    pub(crate) fn fresh_like(&self) -> Self {
+        let mut out = Self::with_clock(self.report_interval, self.clock.clone());
+        out.chunk_timing_on = self.chunk_timing_on;
+        if self.partition_on {
+            out.partition = Some(RefCell::new(
+                crate::partition_stats::PartitionStats::default(),
+            ));
+            out.partition_on = true;
+            out.partition_verify = self.partition_verify;
+        }
+        if self.islands_on {
+            out.islands = Some(Box::new(RefCell::new(
+                crate::island_partition_stats::IslandPartitionStats::default(),
+            )));
+            out.islands_on = true;
+            out.islands_verify = self.islands_verify;
+        }
+        out
+    }
+
     /// 按区块统计开着没有。方块逻辑的 `observe` 每次触发都先问它。
     #[inline]
     pub(crate) fn chunk_timing_enabled(&self) -> bool {

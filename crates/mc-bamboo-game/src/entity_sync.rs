@@ -136,6 +136,13 @@ pub(crate) struct EntitySync {
 }
 
 impl EntitySync {
+    /// 看得见这名玩家的人。
+    ///
+    /// The players who can see this player.
+    pub(crate) fn seen_by(&self) -> &BTreeSet<PlayerId> {
+        &self.seen_by
+    }
+
     /// 玩家进入世界时调用，这时朝向是 0，人不在地上。
     ///
     /// 进服第 6 步把 `client` 里的皮肤外层和主手发给了玩家自己，所以这两项算已经发过。

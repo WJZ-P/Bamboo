@@ -85,7 +85,7 @@ impl Deref for EditedChunks {
 }
 
 /// 一个区块的版本号，见 [`ChunkStore::revision`]。只用来比较是否相等。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ChunkRevision {
     chunk: u64,
     /// 天空光和方块光。

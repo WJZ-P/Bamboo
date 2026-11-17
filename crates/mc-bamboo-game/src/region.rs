@@ -49,6 +49,7 @@ pub(crate) use column::take_pristine_cost;
 mod column_tests;
 pub(crate) mod content_snapshot;
 pub(crate) mod dirty;
+pub(crate) mod island_split;
 pub(crate) mod parking;
 pub(crate) mod partition;
 pub(crate) mod unit;
@@ -56,6 +57,9 @@ pub(crate) mod unit;
 // 区块平面和多 region 是后面的步骤，现在还没有调用方。
 #[allow(unused_imports)]
 pub use column::{NotReady, RegionColumn, RegionColumnParts, RegionColumnView};
+#[cfg(test)]
+pub(crate) use island_split::IslandPart;
+pub(crate) use island_split::IslandRandom;
 
 pub(crate) const DIMENSION: &str = "minecraft:overworld";
 /// 默认世界出生点在 `world_state`。进服位置只取它的水平坐标，y 仍按超平坦地表算：
@@ -149,10 +153,6 @@ impl RegionTick {
     /// 平移 `delta` 刻，岛合并时用。
     ///
     /// Shifted by `delta` ticks, for island merges.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "island merges (plan step 9) call it at run time")
-    )]
     pub(crate) fn rebased(self, delta: i64) -> Self {
         Self(self.0.saturating_add(delta))
     }
@@ -171,10 +171,6 @@ impl RegionTick {
 /// [`Region::rebase_clock_parts`] 平移哪几类。正式路径只用 [`Self::ALL`]。
 ///
 /// Which classes [`Region::rebase_clock_parts`] shifts; production uses [`Self::ALL`].
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "island merges (plan step 9) call it at run time")
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ClockParts {
     pub(crate) clock: bool,
@@ -187,10 +183,6 @@ pub(crate) struct ClockParts {
 }
 
 impl ClockParts {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "island merges (plan step 9) call it at run time")
-    )]
     pub(crate) const ALL: Self = Self {
         clock: true,
         block_ticks: true,
@@ -502,10 +494,6 @@ impl Region {
     /// afterwards equals running on a clock that was always `delta` apart.
     /// Tick boundary only. The redstone cache is dropped (replay is
     /// result-identical); partition statistics are rebuilt on merge instead.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "island merges (plan step 9) call it at run time")
-    )]
     pub(crate) fn rebase_clock(&mut self, delta: i64) {
         self.rebase_clock_parts(delta, ClockParts::ALL);
     }
@@ -513,10 +501,6 @@ impl Region {
     /// 同 [`Self::rebase_clock`]，按 `parts` 只平移其中几类。给改坏确认用。
     ///
     /// Like [`Self::rebase_clock`] but only the selected classes; for break-it checks.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "island merges (plan step 9) call it at run time")
-    )]
     pub(crate) fn rebase_clock_parts(&mut self, delta: i64, parts: ClockParts) {
         if parts.clock {
             self.tick = self.tick.rebased(delta);
@@ -565,6 +549,12 @@ impl Region {
             self.block_entities.notify_cell(chest.first);
             self.block_entities.notify_cell(chest.second);
         }
+    }
+
+    /// 测试专用：直接排一条方块事件。
+    #[cfg(test)]
+    pub(crate) fn push_block_event_for_test(&mut self, event: mc_bamboo_blocks::BlockEvent) {
+        self.block_events.push(event);
     }
 
     /// 划分阶段取走本刻排过方块事件的区块，并报告还排着事件的区块。

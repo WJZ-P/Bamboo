@@ -953,9 +953,9 @@ impl BlockEntities {
         let (out_taken, taken) = self.taken.drain().partition(|(pos, _)| inside(*pos));
         self.taken = taken;
         out.taken = out_taken;
-        let (out_positions, positions) = self.positions.drain().partition(|(pos, _)| inside(*pos));
+        let (out_positions, positions): (HashMap<_, _>, HashMap<_, _>) =
+            self.positions.drain().partition(|(pos, _)| inside(*pos));
         self.positions = positions;
-        out.positions = out_positions;
         let (out_by_chunk, by_chunk) = self
             .by_chunk
             .drain()
@@ -981,6 +981,11 @@ impl BlockEntities {
                 self.ordinals.insert(ticker.ordinal, index);
             }
         }
+        // 新表的槽位是压紧的，位置表里的下标跟着换成新表的下标。
+        out.positions = out_positions
+            .into_iter()
+            .filter_map(|(pos, index)| Some((pos, slot_map.get(index).copied().flatten()?)))
+            .collect();
         // 原表把拆走的槽位置空，留到下一次 begin_tick 回收（和 remove 一致）。
         for (index, &moved) in slot_map.iter().enumerate() {
             if moved.is_some() {
@@ -1924,6 +1929,19 @@ mod tests {
 
         // 拆开以后两边都登记新的 ticker：ordinal 撞号，合回来重排。
         let mut island = merged.split_off_island(&wanted).unwrap();
+        // 新表的槽位压紧之后，位置表要指向新的下标（改坏确认：原来的单元拆分漏了这一步）。
+        let consistent = |table: &BlockEntities| {
+            table.positions.iter().all(|(pos, &index)| {
+                table
+                    .slots
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|ticker| ticker.pos == *pos)
+            })
+        };
+        assert!(consistent(&island) && consistent(&merged));
+        assert_eq!(island.positions.len(), 3);
         merged.insert(Dummy::boxed(BlockPos::new(23, 64, 4), 10));
         island.insert(Dummy::boxed(BlockPos::new(4, 64, 4), 11));
         let rest_order = ticker_order(&mut merged);

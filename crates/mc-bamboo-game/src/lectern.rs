@@ -13,7 +13,7 @@ use mc_bamboo_blocks::{
     BlockState, LecternFacts, World, reset_lectern, signal_lectern_page,
     state::{self, HAS_BOOK},
 };
-use mc_bamboo_core::{BlockPos, Direction, Hand, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Direction, Hand, Vec3};
 use mc_bamboo_data::{blocks, items, registries::menu, tags::item_tags};
 use mc_bamboo_protocol::{
     item::ItemStack,
@@ -56,13 +56,75 @@ pub(crate) struct Tables {
 }
 
 impl Tables {
+    /// 岛拆分：讲台上的书按位置跟着区块走，打开的讲台视图和待发格子跟着玩家走。
+    /// 玩家看的讲台一定在他自己的岛上（视野不跨岛）。
+    ///
+    /// Island split: books follow their chunks, open views and pending slots
+    /// follow their players. A player's lectern is always on their island.
+    pub(crate) fn split_off(
+        &mut self,
+        chunks: &std::collections::BTreeSet<ChunkPos>,
+        players: &std::collections::BTreeSet<PlayerId>,
+    ) -> Self {
+        let books = std::mem::take(&mut self.books);
+        let (moved, kept) = books
+            .into_iter()
+            .partition(|(pos, _)| chunks.contains(&pos.chunk()));
+        self.books = kept;
+        let mut out = Self {
+            books: moved,
+            ..Self::default()
+        };
+        for id in players {
+            if let Some(view) = self.views.remove(id) {
+                debug_assert!(chunks.contains(&view.pos.chunk()), "讲台视图跨了两个岛");
+                out.views.insert(*id, view);
+            }
+            if let Some(pending) = self.pending.remove(id) {
+                out.pending.insert(*id, pending);
+            }
+        }
+        out
+    }
+
+    /// 岛合并：三张表各自并进来。
+    ///
+    /// Island merge: the three tables are merged.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.books.extend(other.books);
+        self.views.extend(other.views);
+        self.pending.extend(other.pending);
+    }
+
+    /// 测试专用：直接给一名玩家排上一份待发格子。
+    #[cfg(test)]
+    pub(crate) fn insert_pending_for_test(
+        &mut self,
+        id: PlayerId,
+        slots: Vec<usize>,
+        at: RegionTick,
+    ) {
+        self.pending.insert(
+            id,
+            PendingSlots {
+                slots,
+                deliver_at: at,
+            },
+        );
+    }
+
+    /// 测试核对拆合用：看讲台的玩家和有待发格子的玩家。
+    #[cfg(test)]
+    pub(crate) fn player_keys(&self) -> (Vec<PlayerId>, Vec<PlayerId>) {
+        (
+            self.views.keys().copied().collect(),
+            self.pending.keys().copied().collect(),
+        )
+    }
+
     /// 待发格子的到期时刻平移 `delta`，岛合并时用。
     ///
     /// Shift the pending deliveries' due instants by `delta`, for island merges.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "island merges (plan step 9) call it at run time")
-    )]
     pub(crate) fn rebase(&mut self, delta: i64) {
         for pending in self.pending.values_mut() {
             pending.deliver_at = pending.deliver_at.rebased(delta);
