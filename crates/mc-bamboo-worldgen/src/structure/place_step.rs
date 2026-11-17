@@ -845,16 +845,46 @@ fn place_code_piece(
         } else {
             pieces::mineshaft_place::ShaftType::Normal
         };
+        let biome_blocking = mineshaft_biome_blocking(level.world, &piece.bb, chunk_bb)?;
         let mut sp = pieces::mineshaft_place::ShaftPiece {
             ctx: ctx.with_can_replace(shaft.can_replace_fn()),
             shaft,
             level,
             chunk_bb: *chunk_bb,
-            biome_blocking: false,
+            biome_blocking,
         };
         dispatch_mineshaft(&mut sp, piece, random)?;
     }
     Ok(())
+}
+
+/// `MineShaftPiece.isInInvalidLocation` 第 136-152 行：
+/// `level.getBiome(probe).is(BiomeTags.MINESHAFT_BLOCKING)`。`getBiome` 是
+/// `BiomeManager.getBiome`（`obfuscateSeed` 的八角 fiddled 选 quart 角，再读 3×3 里
+/// BIOMES 阶段存好的 quart 格）；探测点裁在中心区块里，选中的角总在 3×3 之内。
+///
+/// `MineShaftPiece.isInInvalidLocation` lines 136-152:
+/// `level.getBiome(probe).is(BiomeTags.MINESHAFT_BLOCKING)`, where `getBiome` is the
+/// fiddled `BiomeManager.getBiome` over the stored 3x3 quart cells. The probe is clipped
+/// to the centre chunk, so the chosen corner always lies inside the 3x3.
+fn mineshaft_biome_blocking(
+    world: &FeatureWorld<'_>,
+    piece_bb: &[i32; 6],
+    chunk_bb: &[i32; 6],
+) -> Result<bool, String> {
+    thread_local! {
+        static BLOCKING: Vec<i32> = crate::structure::registry::resolve_biome_holders(
+            &serde_json::json!("#minecraft:mineshaft_blocking"),
+        )
+        .unwrap_or_default();
+    }
+    let (x, y, z) = pieces::mineshaft_place::invalid_location_probe(piece_bb, chunk_bb);
+    let zoom_seed = crate::biome_manager::obfuscate_seed(world.seed);
+    let corner = crate::biome_manager::fiddled_corner(zoom_seed, x, y, z);
+    let biome = world
+        .get_noise_biome(corner.0, corner.1, corner.2)
+        .ok_or_else(|| format!("mineshaft biome probe ({x},{y},{z}) left the 3x3"))?;
+    Ok(BLOCKING.with(|ids| ids.contains(&(biome as i32))))
 }
 
 fn is_mesa(piece: &Piece) -> bool {

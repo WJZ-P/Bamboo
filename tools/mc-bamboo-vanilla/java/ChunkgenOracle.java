@@ -474,6 +474,12 @@ final class FeatureLevelHandler implements InvocationHandler {
             case "updateNeighborsAt":
                 // `LevelAccessor` 的默认实现是空操作，`WorldGenRegion` 没有覆写。
                 return null;
+            case "getEntities":
+                // `WorldGenRegion.getEntities` 两个重载都返回 `Collections.emptyList()`；
+                // `SculkVeinBlock.attemptPlaceSculk` → `Block.pushEntitiesUp` 会调它。
+                // Both `WorldGenRegion.getEntities` overloads return an empty list;
+                // `Block.pushEntitiesUp` (from sculk vein spreading) calls it.
+                return java.util.Collections.emptyList();
             case "environmentAttributes":
                 // 放置路径只有流体刻延迟读它，不影响写方块。
                 return net.minecraft.world.attribute.EnvironmentAttributeReader.EMPTY;

@@ -94,6 +94,14 @@ const QUERIES: &[(i64, i32, i32)] = &[
     (42, -267, -276), // desert_well
     (42, -267, -277), // fossil
     (42, -267, -186), // monster_room block entities
+    // 矿井件落在深暗之域（`MINESHAFT_BLOCKING`）：`isInInvalidLocation` 整件跳过。
+    // Mineshaft pieces in the deep dark (`MINESHAFT_BLOCKING`): `isInInvalidLocation`
+    // skips the whole piece.
+    (42, -145, 76),
+    (42, -155, 96),
+    // 针叶林村庄的拼图 `final_state` 只写了一部分属性（`cobblestone_stairs[facing=south]`）。
+    // A taiga-village jigsaw whose `final_state` lists only some properties.
+    (42, -159, 84),
 ];
 
 /// 已定位但尚未修好的整块差异，用 `--known-gaps` 单独跑，不进默认干净跑。
