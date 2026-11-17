@@ -12,8 +12,12 @@
 
 use std::sync::OnceLock;
 
-use mc_bamboo_blocks::{BlockEntity, BlockState, TickPriority, World, world::UPDATE_CLIENTS};
-use mc_bamboo_core::{BlockPos, ChunkPos};
+use mc_bamboo_blocks::{
+    BlockEntity, BlockState, TickPriority, World,
+    entity::{Entity, EntityKind},
+    world::UPDATE_CLIENTS,
+};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_protocol::item::ItemStack;
 
 use crate::{container::ContainerKind, world::World as GameWorld};
@@ -165,6 +169,42 @@ impl<'a> BenchWorld<'a> {
             .region
             .block_ticks
             .schedule(pos, block, delay, priority);
+    }
+
+    /// 在这个位置放一个掉落物，和 `/loot spawn` 一样带默认拾取延迟。
+    ///
+    /// Drops an item entity here with the default pickup delay, like `/loot spawn`.
+    pub fn spawn_item(&mut self, position: Vec3, stack: ItemStack) {
+        let (mut level, ticks) = self.world.region.block_level();
+        let mut world = World::new(&mut level, ticks);
+        let mut entity = Entity::ground_item(position, stack);
+        if let EntityKind::Item(item) = &mut entity.kind {
+            item.set_default_pickup_delay();
+        }
+        world.spawn_entity(entity);
+    }
+
+    /// 在线玩家的名字，按玩家 ID 排。
+    ///
+    /// Names of the online players, in player id order.
+    pub fn player_names(&self) -> Vec<String> {
+        self.world
+            .region
+            .players
+            .values()
+            .map(|player| player.name.clone())
+            .collect()
+    }
+
+    /// 用服务器控制台来源执行一条命令，等价于在控制台里敲。
+    ///
+    /// Runs one command with the server console as its source.
+    pub fn console_command(&mut self, line: &str) {
+        crate::command::console::on_console_command(
+            &mut self.world.global,
+            &mut self.world.region,
+            line,
+        );
     }
 
     /// 当前方块状态，输入翻转时判断现在是红石块还是空气。
