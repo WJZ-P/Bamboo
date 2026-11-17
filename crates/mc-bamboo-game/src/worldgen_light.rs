@@ -37,18 +37,20 @@ use mc_bamboo_world::light::generate::{GeneratedLight, generate_light_from_layer
 
 use crate::{
     world_options::WorldGenConfig,
-    worldgen::{GeneratedChunk, cached_generate_chunk},
-    worldgen_features::SnapshotView,
+    worldgen::GeneratedChunk,
+    worldgen_features::{SnapshotView, cached_generate_chunk_with_structures as terrain_cell},
     worldgen_profile::{LIGHT_CALLS, LIGHT_NS},
 };
 
 /// 和 `resolve_view` 一样拼 3×3，但快照只共享 `Arc`、不复制方块；缺快照时现算。
+/// 现算走和 `terrain` 阶段同一个入口（带本格 Beardifier），有没有快照不改变结果。
 ///
 /// 下标 `(dz + 1) * 3 + (dx + 1)`，中心在 4。快照是不可变的，计算线程只读它们。
 ///
 /// Assemble the 3×3 like `resolve_view`, but share snapshot `Arc`s instead of
-/// copying their blocks; missing snapshots are generated. Index
-/// `(dz + 1) * 3 + (dx + 1)`, center at 4. Snapshots are immutable and only read.
+/// copying their blocks; missing snapshots are generated through the `terrain`
+/// stage's entry point (with the cell's Beardifier), so snapshot presence does
+/// not change the result. Index `(dz + 1) * 3 + (dx + 1)`, center at 4.
 fn resolve_shared_view(
     config: &WorldGenConfig,
     cx: i32,
@@ -59,7 +61,7 @@ fn resolve_shared_view(
     let mut slots: [Option<Arc<GeneratedChunk>>; 9] = std::array::from_fn(|_| None);
     slots[4] = Some(match center {
         Some(arc) => arc,
-        None => cached_generate_chunk(config, cx, cz)?,
+        None => terrain_cell(config, cx, cz)?,
     });
     for (pos, snapshot) in neighbors {
         let dx = pos.x - cx;
@@ -70,14 +72,14 @@ fn resolve_shared_view(
         let index = ((dz + 1) * 3 + (dx + 1)) as usize;
         slots[index] = Some(match snapshot {
             Some(arc) => Arc::clone(arc),
-            None => cached_generate_chunk(config, pos.x, pos.z)?,
+            None => terrain_cell(config, pos.x, pos.z)?,
         });
     }
     for dz in -1..=1 {
         for dx in -1..=1 {
             let index = ((dz + 1) * 3 + (dx + 1)) as usize;
             if slots[index].is_none() {
-                slots[index] = Some(cached_generate_chunk(config, cx + dx, cz + dz)?);
+                slots[index] = Some(terrain_cell(config, cx + dx, cz + dz)?);
             }
         }
     }
@@ -133,6 +135,28 @@ mod tests {
         let b = generate_light_stage(&config, 3, -2, None, &[]).unwrap();
         assert_eq!(a.sky, b.sky);
         assert_eq!(a.block, b.block);
+    }
+
+    /// 缺快照时补的格子和 `terrain` 阶段的快照相同（结构区块带 Beardifier），
+    /// 光照输入不随「快照先到还是后到」变。
+    /// A snapshot-less cell equals the `terrain` stage snapshot (Beardifier
+    /// included), so the light input does not depend on snapshot timing.
+    #[test]
+    fn light_view_fallback_matches_the_terrain_stage_snapshot() {
+        let config = WorldGenConfig {
+            seed: 42,
+            level_type: LevelType::Normal,
+            ..WorldGenConfig::default()
+        };
+        let (cx, cz) = (17, 7);
+        let staged = crate::worldgen_features::generate_terrain_stage(&config, cx, cz)
+            .unwrap()
+            .terrain
+            .expect("terrain stage returns its snapshot");
+        let plain = crate::worldgen::generate_chunk(&config, cx, cz).unwrap();
+        assert_ne!(staged.blocks, plain.blocks);
+        let view = resolve_shared_view(&config, cx, cz, None, &[]).unwrap();
+        assert_eq!(view[4].blocks, staged.blocks);
     }
 
     /// 生成期光照的天空光和方块光都有数据层（不是全 `None`）。

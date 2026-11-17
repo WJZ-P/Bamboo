@@ -100,10 +100,14 @@ impl GenerateOutput {
 }
 
 /// 邻居只读视图：目标是哪些区块、各自不可变的 CARVERS 快照。
-/// `None` 表示世界线程还没有这个位置的快照，计算线程用纯函数现算。
+/// `None` 表示世界线程还没有这个位置的快照，计算线程用纯函数现算 —— 现算的
+/// 必须和 `terrain` 阶段交回的快照是同一份（带本格 Beardifier），否则有没有
+/// 快照（调度先后）会改变结果。
 ///
 /// Read-only neighbor view: target positions and their immutable CARVERS
-/// snapshots; `None` means the compute thread regenerates it purely.
+/// snapshots; `None` means the compute thread regenerates it purely, and the
+/// regenerated cell must equal the `terrain` stage snapshot (with the cell's
+/// Beardifier), otherwise snapshot presence (scheduling) changes the result.
 pub(crate) type SnapshotView<'a> = &'a [(ChunkPos, Option<Arc<GeneratedChunk>>)];
 
 /// 3×3 视图按 `(dz, dx)` 从 -1 到 1 排列，中心在 [`CENTER`]。
@@ -171,14 +175,22 @@ pub(crate) fn resolve_view(
 }
 
 /// 取一格地形，插桩打开时把这次缓存查询算成命中 / 未命中。
-/// Fetch one terrain cell; when instrumented, classify the cache lookup.
+///
+/// 和 `terrain` 阶段、`build_view` 走同一个入口（带本格 Beardifier）：Director
+/// 的依赖记录不真正跑邻居的 `terrain`，某格有没有快照取决于调度先后，补格要是
+/// 读不带 Beardifier 的地形，结构附近 1 线程和 N 线程就会生成不同的方块。
+///
+/// Fetch one terrain cell; when instrumented, classify the cache lookup. Same
+/// entry point as the `terrain` stage and `build_view` (with the cell's
+/// Beardifier): whether a cell has a snapshot depends on scheduling, so a
+/// fallback without the Beardifier made 1 and N threads differ near structures.
 fn terrain_lookup(config: &WorldGenConfig, x: i32, z: i32) -> Result<Arc<GeneratedChunk>, String> {
     if !crate::worldgen_profile::enabled() {
-        return cached_generate_chunk(config, x, z);
+        return cached_generate_chunk_with_structures(config, x, z);
     }
     crate::worldgen_profile::count(&TERRAIN_LOOKUPS);
     let (hits, misses) = crate::worldgen::terrain_lookup_counts();
-    let chunk = cached_generate_chunk(config, x, z)?;
+    let chunk = cached_generate_chunk_with_structures(config, x, z)?;
     let (hits_after, misses_after) = crate::worldgen::terrain_lookup_counts();
     if hits_after > hits {
         crate::worldgen_profile::count(&TERRAIN_HITS);
@@ -689,7 +701,7 @@ fn build_view(
 ///
 /// Deterministic terrain + Beardifier snapshot. References are cached globally
 /// by (seed,x,z), so every thread and call order sees the same data.
-fn cached_generate_chunk_with_structures(
+pub(crate) fn cached_generate_chunk_with_structures(
     config: &WorldGenConfig,
     x: i32,
     z: i32,
@@ -799,6 +811,27 @@ fn compute_feature_run(
     Ok(Arc::new(FeatureRun {
         deltas: result.deltas,
     }))
+}
+
+/// 测试用：只用纯函数（`build_view` 的 3×3 + 8 个邻居中心的溢出）算出一个区块
+/// 完工后的方块，和 Director 交付的盒子逐格比。
+/// Test-only: a chunk's finished blocks from pure functions alone, to compare
+/// cell by cell with what the Director delivers.
+#[cfg(test)]
+pub(crate) fn pure_feature_blocks_for_test(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+) -> Result<Vec<Vec<u32>>, String> {
+    let view = build_view(config, cx, cz)?;
+    let terrain = Arc::clone(&view[CENTER]);
+    let result = run_features(config, cx, cz, view)?;
+    let mut deltas = center_writes(cx, cz, &terrain, &result);
+    deltas.extend(neighbor_spills_into(config, cx, cz)?);
+    deltas.sort_unstable();
+    let mut chunk = (*terrain).clone();
+    apply_deltas(&mut chunk, &deltas);
+    Ok(chunk.blocks)
 }
 
 /// 8 个邻居中心的地物写进本区块的增量合起来。
@@ -1137,6 +1170,32 @@ mod tests {
             a.deltas, b.deltas,
             "different terrain snapshots must produce different neighbor deltas"
         );
+    }
+
+    /// 没有快照时补的格子与 `terrain` 阶段交回的快照逐格相同（结构区块上带
+    /// Beardifier）。改回不带 Beardifier 的 `cached_generate_chunk` 这条就失败。
+    /// A snapshot-less cell equals the `terrain` stage snapshot, Beardifier
+    /// included; reverting to the plain `cached_generate_chunk` fails this.
+    #[test]
+    fn view_fallback_matches_the_terrain_stage_snapshot() {
+        let config = normal(42);
+        // 有 trial_chambers 起点的区块（见上一条测试），Beardifier 会改地形。
+        let (cx, cz) = (17, 7);
+        let staged = generate_terrain_stage(&config, cx, cz)
+            .unwrap()
+            .terrain
+            .expect("terrain stage returns its snapshot");
+        let plain = crate::worldgen::generate_chunk(&config, cx, cz).unwrap();
+        assert_ne!(
+            staged.blocks, plain.blocks,
+            "test chunk must have a terrain-changing Beardifier"
+        );
+        let view = resolve_view(&config, cx, cz, None, &[]).unwrap();
+        assert_eq!(view[CENTER].blocks, staged.blocks);
+        let built = build_view(&config, cx, cz).unwrap();
+        for (index, (a, b)) in view.iter().zip(&built).enumerate() {
+            assert_eq!(a.blocks, b.blocks, "cell {index} differs from build_view");
+        }
     }
 
     /// 写增量落进方块数组后能读回来。

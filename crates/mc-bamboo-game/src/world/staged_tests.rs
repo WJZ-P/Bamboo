@@ -102,11 +102,19 @@ struct ChunkCells {
 }
 
 fn generated_cells(threads: usize, positions: &[ChunkPos]) -> BTreeMap<ChunkPos, ChunkCells> {
+    generated_cells_with_seed(2026, threads, positions)
+}
+
+fn generated_cells_with_seed(
+    seed: i64,
+    threads: usize,
+    positions: &[ChunkPos],
+) -> BTreeMap<ChunkPos, ChunkCells> {
     let (_inbox, receiver) = mpsc::channel();
     let config = WorldConfig {
         view_distance: 3,
         world_gen: WorldGenConfig {
-            seed: 2026,
+            seed,
             level_type: LevelType::Normal,
             ..WorldGenConfig::default()
         },
@@ -278,4 +286,44 @@ fn generation_light_is_baked_into_the_delivered_column() {
         center.sky.contains(&0),
         "some deep cell should be fully dark (sky light 0)"
     );
+}
+
+/// 结构附近（种子 42 的 trial_chambers 起点 (17, 7) 周围）真实 Director 流水线交付的
+/// 方块和纯函数（`build_view` 3×3 + 8 个邻居中心的溢出，规范序合并）逐格相同，1 线程
+/// 和 4 线程的光照也相同。Director 的依赖记录不真正跑邻居的 `terrain`，有没有邻居
+/// 快照取决于调度；补格曾读不带 Beardifier 的地形，这里 1/4 线程会差几十格。
+///
+/// Near structures, the real Director pipeline delivers the same blocks as the
+/// pure functions, and 1 vs 4 threads give the same light. Snapshot presence
+/// depends on scheduling; a Beardifier-less fallback made threads disagree here.
+#[test]
+fn director_matches_pure_features_near_structures() {
+    let config = WorldGenConfig {
+        seed: 42,
+        level_type: LevelType::Normal,
+        ..WorldGenConfig::default()
+    };
+    let positions: Vec<ChunkPos> = (16..=18)
+        .flat_map(|x| (6..=8).map(move |z| ChunkPos::new(x, z)))
+        .collect();
+    let one = generated_cells_with_seed(42, 1, &positions);
+    let four = generated_cells_with_seed(42, 4, &positions);
+    for &pos in &positions {
+        let pure = crate::worldgen_features::pure_feature_blocks_for_test(&config, pos.x, pos.z)
+            .expect("pure features");
+        let pure: Vec<u32> = pure.into_iter().flatten().collect();
+        for (threads, cells) in [(1, &one), (4, &four)] {
+            let got = &cells[&pos];
+            let differing = got.blocks.iter().zip(&pure).filter(|(a, b)| a != b).count();
+            assert_eq!(
+                differing, 0,
+                "chunk {pos:?} with {threads} threads differs from the pure result"
+            );
+        }
+        assert_eq!(one[&pos].sky, four[&pos].sky, "chunk {pos:?} sky light");
+        assert_eq!(
+            one[&pos].block, four[&pos].block,
+            "chunk {pos:?} block light"
+        );
+    }
 }
