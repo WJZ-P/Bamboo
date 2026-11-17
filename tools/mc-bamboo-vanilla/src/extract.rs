@@ -510,6 +510,15 @@ pub struct StateTables {
     ///
     /// Three `mirror` results per state, in `Mirror.ordinal()` order; length is states × 3.
     pub mirror: Vec<u32>,
+    /// 每个状态的 `WalkNodeEvaluator.getPathTypeFromState`，动态形状的状态是 `None`。
+    ///
+    /// Per-state `WalkNodeEvaluator.getPathTypeFromState`; `None` for dynamic shapes.
+    pub path_types: Vec<Option<String>>,
+    /// 每个状态作为 `checkNeighbourBlocks` 唯一邻居时的结果，动态形状的状态是 `None`。
+    ///
+    /// Result when each state is the only neighbour in `checkNeighbourBlocks`;
+    /// `None` for dynamic shapes.
+    pub neighbor_path_types: Vec<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]

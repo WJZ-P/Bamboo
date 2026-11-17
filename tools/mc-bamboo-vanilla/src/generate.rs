@@ -1945,6 +1945,61 @@ fn write_state_table<T: Debug>(out: &mut String, doc: &str, name: &str, kind: &s
     let _ = writeln!(out, "];\n");
 }
 
+/// 写一张值已经是 Rust 字面量的表；`Debug` 会给字符串加引号，这里不能走 [`write_state_table`]。
+/// Write a table whose values already are Rust literals; `Debug` would quote them.
+fn write_literal_table(out: &mut String, doc: &str, name: &str, kind: &str, values: &[String]) {
+    let _ = writeln!(out, "/// {doc}");
+    let _ = writeln!(out, "pub static {name}: &[{kind}] = &[");
+    for row in values.chunks(32) {
+        let _ = writeln!(out, "    {},", row.join(", "));
+    }
+    let _ = writeln!(out, "];\n");
+}
+
+/// 官方 `PathType` 的枚举名必须是 Rust 认识的，写生成文件时拦住新枚举值。
+fn path_type_name(name: &str) -> Result<String, String> {
+    const NAMES: &[&str] = &[
+        "BLOCKED",
+        "OPEN",
+        "WALKABLE",
+        "WALKABLE_DOOR",
+        "TRAPDOOR",
+        "POWDER_SNOW",
+        "ON_TOP_OF_POWDER_SNOW",
+        "FENCE",
+        "LAVA",
+        "WATER",
+        "WATER_BORDER",
+        "RAIL",
+        "UNPASSABLE_RAIL",
+        "FIRE_IN_NEIGHBOR",
+        "FIRE",
+        "DAMAGING_IN_NEIGHBOR",
+        "DAMAGING",
+        "DOOR_OPEN",
+        "DOOR_WOOD_CLOSED",
+        "DOOR_IRON_CLOSED",
+        "BREACH",
+        "LEAVES",
+        "STICKY_HONEY",
+        "COCOA",
+        "DAMAGE_CAUTIOUS",
+        "ON_TOP_OF_TRAPDOOR",
+        "BIG_MOBS_CLOSE_TO_DANGER",
+    ];
+    if !NAMES.contains(&name) {
+        return Err(format!("官方有新的 PathType: {name}"));
+    }
+    Ok(name
+        .split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            let first = chars.next().unwrap_or_default().to_ascii_uppercase();
+            format!("{}{}", first, chars.as_str().to_ascii_lowercase())
+        })
+        .collect())
+}
+
 fn check_table_length<T>(name: &str, values: &[T], total: u32) -> Result<(), String> {
     if values.len() == total as usize {
         Ok(())
@@ -1961,9 +2016,11 @@ fn states_file(data: &VersionData) -> Result<String, String> {
     check_table_length("LIGHT_DAMPENING", &tables.light_dampening, total)?;
     check_table_length("STATE_ROTATION", &tables.rotation, total * 4)?;
     check_table_length("STATE_MIRROR", &tables.mirror, total * 3)?;
+    check_table_length("STATE_PATH_TYPE", &tables.path_types, total)?;
+    check_table_length("NEIGHBOR_PATH_TYPE", &tables.neighbor_path_types, total)?;
 
     let mut out = String::new();
-    let _ = writeln!(out, "use crate::FluidFacts;\n");
+    let _ = writeln!(out, "use crate::{{FluidFacts, PathType}};\n");
     write_state_table(
         &mut out,
         "每个状态的事实，位的含义见 [`crate::facts`]。",
@@ -1998,6 +2055,36 @@ fn states_file(data: &VersionData) -> Result<String, String> {
         "STATE_MIRROR",
         "u32",
         &tables.mirror,
+    );
+    fn type_literal(value: &Option<String>) -> Result<String, String> {
+        Ok(match value {
+            Some(name) => format!("Some(PathType::{})", path_type_name(name)?),
+            None => "None".to_owned(),
+        })
+    }
+    let self_types: Vec<String> = tables
+        .path_types
+        .iter()
+        .map(type_literal)
+        .collect::<Result<_, _>>()?;
+    write_literal_table(
+        &mut out,
+        "每个状态的 `WalkNodeEvaluator.getPathTypeFromState`；`None` 要运行时算。",
+        "STATE_PATH_TYPE",
+        "Option<PathType>",
+        &self_types,
+    );
+    let neighbor_types: Vec<String> = tables
+        .neighbor_path_types
+        .iter()
+        .map(type_literal)
+        .collect::<Result<_, _>>()?;
+    write_literal_table(
+        &mut out,
+        "每个状态作为唯一邻居时 `checkNeighbourBlocks` 的结果；`None` 要运行时算。",
+        "NEIGHBOR_PATH_TYPE",
+        "Option<PathType>",
+        &neighbor_types,
     );
 
     let _ = writeln!(out, "/// 去重后的流体状态，第一项是空流体。");

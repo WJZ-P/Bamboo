@@ -83,6 +83,118 @@ pub mod facts {
     pub const MOTION_BLOCKING_NO_LEAVES: u64 = 1 << 34;
 }
 
+/// 官方 `WalkNodeEvaluator` 给寻路格子分的类别，顺序和官方 `PathType` 一致。
+///
+/// Official `WalkNodeEvaluator` node category, in the same order as vanilla `PathType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum PathType {
+    Blocked,
+    Open,
+    Walkable,
+    WalkableDoor,
+    Trapdoor,
+    PowderSnow,
+    OnTopOfPowderSnow,
+    Fence,
+    Lava,
+    Water,
+    WaterBorder,
+    Rail,
+    UnpassableRail,
+    FireInNeighbor,
+    Fire,
+    DamagingInNeighbor,
+    Damaging,
+    DoorOpen,
+    DoorWoodClosed,
+    DoorIronClosed,
+    Breach,
+    Leaves,
+    StickyHoney,
+    Cocoa,
+    DamageCautious,
+    OnTopOfTrapdoor,
+    BigMobsCloseToDanger,
+}
+
+impl PathType {
+    /// 官方枚举的声明名，`path-type` 对拍和诊断信息用它。
+    ///
+    /// The official enum constant name, used by the `path-type` oracle and diagnostics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Blocked => "BLOCKED",
+            Self::Open => "OPEN",
+            Self::Walkable => "WALKABLE",
+            Self::WalkableDoor => "WALKABLE_DOOR",
+            Self::Trapdoor => "TRAPDOOR",
+            Self::PowderSnow => "POWDER_SNOW",
+            Self::OnTopOfPowderSnow => "ON_TOP_OF_POWDER_SNOW",
+            Self::Fence => "FENCE",
+            Self::Lava => "LAVA",
+            Self::Water => "WATER",
+            Self::WaterBorder => "WATER_BORDER",
+            Self::Rail => "RAIL",
+            Self::UnpassableRail => "UNPASSABLE_RAIL",
+            Self::FireInNeighbor => "FIRE_IN_NEIGHBOR",
+            Self::Fire => "FIRE",
+            Self::DamagingInNeighbor => "DAMAGING_IN_NEIGHBOR",
+            Self::Damaging => "DAMAGING",
+            Self::DoorOpen => "DOOR_OPEN",
+            Self::DoorWoodClosed => "DOOR_WOOD_CLOSED",
+            Self::DoorIronClosed => "DOOR_IRON_CLOSED",
+            Self::Breach => "BREACH",
+            Self::Leaves => "LEAVES",
+            Self::StickyHoney => "STICKY_HONEY",
+            Self::Cocoa => "COCOA",
+            Self::DamageCautious => "DAMAGE_CAUTIOUS",
+            Self::OnTopOfTrapdoor => "ON_TOP_OF_TRAPDOOR",
+            Self::BigMobsCloseToDanger => "BIG_MOBS_CLOSE_TO_DANGER",
+        }
+    }
+
+    /// 名字对应的枚举值，没有时返回 `None`。客户端发来的名字不能触发 panic。
+    ///
+    /// Resolve a name, returning `None` for unknown input. Client-provided names never panic.
+    pub fn by_name(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|value| value.name() == name)
+    }
+
+    /// 官方枚举的全部取值，按声明顺序。
+    ///
+    /// Every official value in declaration order.
+    pub const ALL: [Self; 27] = [
+        Self::Blocked,
+        Self::Open,
+        Self::Walkable,
+        Self::WalkableDoor,
+        Self::Trapdoor,
+        Self::PowderSnow,
+        Self::OnTopOfPowderSnow,
+        Self::Fence,
+        Self::Lava,
+        Self::Water,
+        Self::WaterBorder,
+        Self::Rail,
+        Self::UnpassableRail,
+        Self::FireInNeighbor,
+        Self::Fire,
+        Self::DamagingInNeighbor,
+        Self::Damaging,
+        Self::DoorOpen,
+        Self::DoorWoodClosed,
+        Self::DoorIronClosed,
+        Self::Breach,
+        Self::Leaves,
+        Self::StickyHoney,
+        Self::Cocoa,
+        Self::DamageCautious,
+        Self::OnTopOfTrapdoor,
+        Self::BigMobsCloseToDanger,
+    ];
+}
+
 /// 客户端和服务端都认识的内容包。双方都有时，注册表内容就不需要通过网络传输。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KnownPack {
@@ -633,6 +745,30 @@ pub fn state_mirror(state: u32, mirror: u32) -> u32 {
     states::STATE_MIRROR[state as usize * 3 + mirror as usize]
 }
 
+/// 状态的 `WalkNodeEvaluator.getPathTypeFromState`。`None` 表示形状依赖世界或方块实体，
+/// 必须在运行时按真实上下文重算。状态 ID 不存在时返回 `None`，不 panic。
+///
+/// `WalkNodeEvaluator.getPathTypeFromState` for a state. `None` means the shape
+/// depends on the world or a block entity and has to be computed at runtime.
+/// Unknown state IDs also return `None` instead of panicking.
+pub fn path_type_of_state(state: u32) -> Option<PathType> {
+    states::STATE_PATH_TYPE
+        .get(state as usize)
+        .copied()
+        .flatten()
+}
+
+/// 状态作为 `checkNeighbourBlocks` 唯一邻居时把节点改成什么。`None` 同样表示需要运行时算。
+///
+/// What `checkNeighbourBlocks` turns a node into when this state is its only
+/// neighbour. `None` likewise means runtime computation is required.
+pub fn neighbor_path_type_of_state(state: u32) -> Option<PathType> {
+    states::NEIGHBOR_PATH_TYPE
+        .get(state as usize)
+        .copied()
+        .flatten()
+}
+
 /// 状态的 `getLightEmission`。状态 ID 不存在时 panic。
 pub fn light_emission(state: u32) -> u8 {
     light::LIGHT_EMISSION[state as usize]
@@ -1146,6 +1282,34 @@ mod tests {
         assert!(block(blocks::MOVING_PISTON).unbreakable);
         assert!(!block(blocks::PISTON).unbreakable);
         assert!(!block(blocks::OBSIDIAN).unbreakable);
+    }
+
+    #[test]
+    fn path_types_match_the_well_known_blocks() {
+        assert_eq!(path_type_of_state(blocks::AIR), Some(PathType::Open));
+        assert_eq!(path_type_of_state(blocks::STONE), Some(PathType::Blocked));
+        assert_eq!(path_type_of_state(blocks::WATER), Some(PathType::Water));
+        assert_eq!(path_type_of_state(blocks::LAVA), Some(PathType::Lava));
+        assert_eq!(path_type_of_state(blocks::CACTUS), Some(PathType::Damaging));
+        assert_eq!(
+            neighbor_path_type_of_state(blocks::CACTUS),
+            Some(PathType::DamagingInNeighbor)
+        );
+        assert_eq!(
+            neighbor_path_type_of_state(blocks::WATER),
+            Some(PathType::WaterBorder)
+        );
+        // 潜影盒的形状跟着方块实体走，表里不能预算。
+        assert_eq!(path_type_of_state(blocks::SHULKER_BOX), None);
+        assert_eq!(neighbor_path_type_of_state(blocks::SHULKER_BOX), None);
+        // 未知状态只返回 None，不 panic。
+        assert_eq!(path_type_of_state(blocks::TOTAL_STATES), None);
+        assert_eq!(neighbor_path_type_of_state(u32::MAX), None);
+        for (index, value) in PathType::ALL.iter().enumerate() {
+            assert_eq!(*value as u8 as usize, index);
+            assert_eq!(PathType::by_name(value.name()), Some(*value));
+        }
+        assert_eq!(PathType::by_name("NOT_A_PATH_TYPE"), None);
     }
 
     #[test]
