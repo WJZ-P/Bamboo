@@ -667,6 +667,13 @@ impl BlockEntity for FurnaceEntity {
         }
     }
 
+    fn rebase(&mut self, delta: i64) {
+        if let Some(sleep) = &mut self.sleep {
+            sleep.since = crate::sleep_clock::rebase_instant(sleep.since, delta);
+            sleep.wake_at = crate::sleep_clock::rebase_instant(sleep.wake_at, delta);
+        }
+    }
+
     fn resleep(&mut self, since: i64, wake_at: i64) {
         // 数值已经在装盒时按公式算到源表的最后一刻；目标表的时钟从这一刻起算。
         self.sleep = Some(Sleep {

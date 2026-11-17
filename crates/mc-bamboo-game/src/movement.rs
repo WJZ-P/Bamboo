@@ -907,4 +907,113 @@ mod tests {
         assert!(player(&region).motion.client_horizontal_collision);
         assert!(player(&region).on_ground);
     }
+
+    /// 平移测试的传送脚本：时钟从 `base` 起，随机地服务端传送（记下 `sent_at`）、
+    /// 客户端确认，每刻都来一个移动包；超过 20 刻没确认就重发。观测
+    /// 最新的传送 id 和是否还在等确认。`shift` 给出时第 `mid` 刻后按 `parts` 平移。
+    ///
+    /// Teleport script for the rebase test: random server teleports and acks,
+    /// a stale move every tick, and a resend after 20 unacknowledged ticks.
+    fn teleport_script(
+        seed: u64,
+        base: i64,
+        shift: Option<(i64, i64, crate::region::ClockParts)>,
+    ) -> Vec<(i32, bool)> {
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut region = Region::new(8, 20, false);
+        region.start_clock(crate::global::GameTime(base));
+        let recorder = Recorder::default();
+        region.links.add(PLAYER, Box::new(recorder));
+        let mut joining = Player::new(
+            PLAYER,
+            Uuid::nil(),
+            "Kitten".to_owned(),
+            GameMode::Creative,
+            ClientInformation::default(),
+            Vec3::default(),
+        );
+        teleport(
+            &mut joining,
+            &mut region.links,
+            &mut region.player_grid,
+            region.tick,
+            SPAWN,
+        );
+        region.insert_player(joining);
+        let joined = region.players.get_mut(&PLAYER).expect("刚放进去");
+        joined.motion.sync_goods(SPAWN);
+        joined.motion.mark_loaded();
+        let mut out = Vec::new();
+        for step in 1..=150_i64 {
+            region.advance_tick();
+            match next() % 12 {
+                0 => {
+                    let now = region.tick;
+                    let player = region.players.get_mut(&PLAYER).expect("在线");
+                    teleport(
+                        player,
+                        &mut region.links,
+                        &mut region.player_grid,
+                        now,
+                        SPAWN,
+                    );
+                }
+                1 if player(&region).teleport.is_awaiting() => {
+                    let id = player(&region).teleport.latest_id;
+                    on_accept_teleportation(&mut region, PLAYER, id, SPAWN, (0.0, 0.0));
+                }
+                _ => {}
+            }
+            // 只带地面标志的移动包：等确认时照样走到重发判断。
+            // A status-only move still reaches the resend check while awaiting.
+            on_move_player(&mut region, PLAYER, None, None, true, false);
+            finish_tick(&mut region);
+            assert!(region.links.is_open(PLAYER), "the script never gets kicked");
+            let teleport = &player(&region).teleport;
+            out.push((teleport.latest_id, teleport.is_awaiting()));
+            if let Some((mid, delta, parts)) = shift
+                && step == mid
+            {
+                if parts == crate::region::ClockParts::ALL {
+                    region.rebase_clock(delta);
+                } else {
+                    region.rebase_clock_parts(delta, parts);
+                }
+            }
+        }
+        out
+    }
+
+    /// 玩家传送 `sent_at` 一类的平移：「中途平移 d 再跑」等于「岛的时钟本来就差 d」；
+    /// 改坏确认：漏平移传送这一类会被抓到。
+    ///
+    /// Teleport acks: shifting mid-run equals a clock that was always d apart;
+    /// leaving teleports out is caught.
+    #[test]
+    fn rebasing_teleport_resends_equals_a_clock_that_was_always_apart() {
+        use crate::region::ClockParts;
+        let mut caught = false;
+        for seed in 1..=30_u64 {
+            let base = (seed as i64 * 977) % 4000;
+            let delta = (seed as i64 * 7919) % 6000 - base.min(3000);
+            let apart = teleport_script(seed, base + delta, None);
+            assert_eq!(
+                teleport_script(seed, base, Some((70, delta, ClockParts::ALL))),
+                apart,
+                "seed {seed} base {base} delta {delta}"
+            );
+            let broken = ClockParts {
+                teleports: false,
+                ..ClockParts::ALL
+            };
+            caught |= teleport_script(seed, base, Some((70, delta, broken))) != apart;
+        }
+        assert!(caught, "leaving teleports out of the rebase went unnoticed");
+    }
 }

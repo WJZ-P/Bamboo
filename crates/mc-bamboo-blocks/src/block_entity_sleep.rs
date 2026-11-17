@@ -132,12 +132,23 @@ struct Scene {
     layout: Layout,
     /// 开着的界面每刻读到的数据槽，逐刻比较。
     menu: Vec<i32>,
+    /// 时钟相对脚本刻号的偏移：第 `now` 刻时钟是 `now + offset`。平移测试用。
+    offset: i64,
 }
 
 impl Scene {
     fn new(script: Script, layout: Layout, sleep: bool) -> Self {
+        Self::new_at(script, layout, sleep, 0)
+    }
+
+    /// 时钟从 `base` 起算的场景：搭场景时时钟停在 `base`，第 `now` 刻是 `base + now`。
+    ///
+    /// A scene whose clock starts at `base`; script tick `now` runs at `base + now`.
+    fn new_at(script: Script, layout: Layout, sleep: bool, base: i64) -> Self {
         let mut level = TestLevel::new();
         let mut ticks = BlockTicks::new();
+        ticks.set_time(base);
+        set_block_entity_clock(base);
         let hoppers = layout.has_hoppers();
         if hoppers {
             for pos in [ABOVE, BELOW, HOPPER_BEFORE, HOPPER_AFTER] {
@@ -169,14 +180,16 @@ impl Scene {
             cursor: 0,
             layout,
             menu: Vec::new(),
+            offset: base,
         }
     }
 
     fn step(&mut self, now: i64) {
+        let clock = now + self.offset;
         // 官方 `ServerLevel.tick` 开头的 "world border" 阶段。
         self.level.border.tick();
-        self.ticks.set_time(now);
-        set_block_entity_clock(now);
+        self.ticks.set_time(clock);
+        set_block_entity_clock(clock);
         while self
             .script
             .actions
@@ -185,11 +198,11 @@ impl Scene {
         {
             let action = self.script.actions[self.cursor].1.clone();
             self.cursor += 1;
-            self.apply(action, now);
+            self.apply(action, clock);
         }
         let _ = run_block_entity_tick(&mut self.level, &mut self.ticks);
         // 官方 `broadcastChanges` 在方块实体阶段之后读数据槽。
-        set_block_entity_clock(now);
+        set_block_entity_clock(clock);
         if let Some(entity) = self.level.block_entity::<FurnaceEntity>(FURNACE) {
             self.menu.extend_from_slice(&entity.data_values());
         } else {
@@ -875,12 +888,27 @@ struct SleepScene {
     slept: usize,
     /// 每次 `Restart` 后重新造出来的方块实体读数。
     restarts: Vec<String>,
+    /// 时钟相对脚本刻号的偏移，见 [`Scene::offset`]。
+    offset: i64,
 }
 
 impl SleepScene {
     fn new(script: SleepScript, machine: SleepMachine, layout: SleepLayout, sleep: bool) -> Self {
+        Self::new_at(script, machine, layout, sleep, 0)
+    }
+
+    /// 时钟从 `base` 起算，见 [`Scene::new_at`]。
+    fn new_at(
+        script: SleepScript,
+        machine: SleepMachine,
+        layout: SleepLayout,
+        sleep: bool,
+        base: i64,
+    ) -> Self {
         let mut level = TestLevel::new();
         let mut ticks = BlockTicks::new();
+        ticks.set_time(base);
+        set_block_entity_clock(base);
         let pos = BlockPos::new(0, 64, 0);
         let above = BlockPos::new(0, 65, 0);
         let below = BlockPos::new(0, 63, 0);
@@ -939,10 +967,13 @@ impl SleepScene {
             menu: Vec::new(),
             slept: 0,
             restarts: Vec::new(),
+            offset: base,
         }
     }
 
     fn step(&mut self, now: i64) {
+        let script_now = now;
+        let now = now + self.offset;
         // 官方 `ServerLevel.tick` 开头的 "world border" 阶段。
         self.level.border.tick();
         self.ticks.set_time(now);
@@ -951,7 +982,7 @@ impl SleepScene {
             .script
             .actions
             .get(self.cursor)
-            .is_some_and(|(at, _)| *at == now)
+            .is_some_and(|(at, _)| *at == script_now)
         {
             let action = self.script.actions[self.cursor].1.clone();
             self.cursor += 1;
@@ -1500,6 +1531,7 @@ fn furnace_phase_bench() {
             cursor: 0,
             layout: Layout::Plain,
             menu: Vec::new(),
+            offset: 0,
         }
     }
 
@@ -2120,5 +2152,279 @@ mod idle_hopper {
             "闲置漏斗应该几乎每刻都在睡，实际睡了 {} 刻",
             scene.slept
         );
+    }
+}
+
+// ---- 岛时钟平移（岛的实施计划第 6 节第 3 步）----
+// Island clock rebase (island plan step 3).
+
+/// 平移的做法：正式路径平移全部；其余几种是改坏确认，故意漏掉一类。
+///
+/// How to rebase: production shifts everything; the others leave one class
+/// out on purpose for break-it checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shift {
+    All,
+    /// 漏掉每个方块实体自己存的时刻。
+    ScheduleOnly,
+    /// 漏掉方块实体表的睡眠日程和 `now`。
+    EntitiesOnly,
+    /// 漏掉漏斗自己的时刻。
+    SkipHoppers,
+    /// 漏掉熔炉 / 营火 / 酿造台自己的时刻。
+    SkipMachines,
+    /// 漏掉计划刻。
+    SkipBlockTicks,
+}
+
+fn rebase_tables(level: &mut TestLevel, ticks: &mut BlockTicks, delta: i64, shift: Shift) {
+    let is_hopper = |entity: &dyn crate::BlockEntity| entity.as_any().is::<HopperEntity>();
+    let table = level.block_entities_table_mut();
+    match shift {
+        Shift::All | Shift::SkipBlockTicks => table.rebase(delta),
+        Shift::ScheduleOnly => table.rebase_schedule_only(delta),
+        Shift::EntitiesOnly => table.rebase_entities_only(delta),
+        Shift::SkipHoppers => table.rebase_filtered(delta, &|entity| !is_hopper(entity)),
+        Shift::SkipMachines => table.rebase_filtered(delta, &is_hopper),
+    }
+    level.redstone_table_mut().rebase(delta);
+    if shift != Shift::SkipBlockTicks {
+        ticks.rebase(delta);
+    }
+}
+
+/// 快照里去掉只和绝对时钟有关的那几行，换成相对当刻时钟的量。
+///
+/// Drop the rows that depend on the absolute clock and put relative ones in.
+fn relative_rows(rows: Vec<String>, ticks: &BlockTicks, level: &TestLevel) -> Vec<String> {
+    let now = ticks.now();
+    let mut out: Vec<String> = rows
+        .into_iter()
+        .filter(|row| {
+            !row.starts_with("clock:")
+                && !row.starts_with("scheduled:")
+                && !row.starts_with("hopper")
+        })
+        .collect();
+    let mut scheduled: Vec<_> = ticks
+        .pending()
+        .map(|tick| (tick.trigger_tick - now, tick.priority, tick.pos, tick.block))
+        .collect();
+    scheduled.sort();
+    out.push(format!("scheduled:{scheduled:?}"));
+    for pos in [ABOVE, BELOW, HOPPER_BEFORE, HOPPER_AFTER] {
+        out.push(format!(
+            "hopper{pos:?}:{:?}",
+            level
+                .block_entity::<HopperEntity>(pos)
+                .map(|e| (e.cooldown_time(), e.ticked_game_time_age()))
+        ));
+    }
+    out
+}
+
+/// 熔炉加漏斗的场景跑两份：A 的时钟从 `base` 起，在第 `mid` 刻跑完后按 `shift`
+/// 平移 `delta`；B 的时钟从一开始就是 `base + delta`。逐刻比较相对快照，第一处
+/// 不同返回描述。两边都开休眠，所以睡眠日程、到点时刻和装盒都会被走到。
+///
+/// Run the furnace scene twice: A starts at `base` and rebases by `delta`
+/// after tick `mid`; B starts at `base + delta`. Returns the first difference.
+fn furnace_rebase_difference(
+    seed: u64,
+    layout: Layout,
+    base: i64,
+    delta: i64,
+    shift: Shift,
+) -> Option<String> {
+    const TICKS: i64 = 1200;
+    const MID: i64 = 600;
+    let script = Script::random(seed, TICKS, layout);
+    let mut shifted = Scene::new_at(
+        Script {
+            actions: script.actions.clone(),
+        },
+        layout,
+        true,
+        base,
+    );
+    let mut apart = Scene::new_at(script, layout, true, base + delta);
+    for now in 1..=TICKS {
+        shifted.step(now);
+        let a = relative_rows(shifted.snapshot(), &shifted.ticks, &shifted.level);
+        apart.step(now);
+        let b = relative_rows(apart.snapshot(), &apart.ticks, &apart.level);
+        if a != b {
+            return Some(format!("tick {now}: {a:?} != {b:?}"));
+        }
+        if now == MID {
+            rebase_tables(&mut shifted.level, &mut shifted.ticks, delta, shift);
+            shifted.offset += delta;
+        }
+    }
+    None
+}
+
+/// 营火 / 酿造台加漏斗和比较器的场景，做法同 [`furnace_rebase_difference`]。
+/// 比较器带计划刻，所以漏平移计划刻也看得出来。
+///
+/// Campfire / brewing stand with hoppers and comparators; comparators carry
+/// scheduled ticks, so a missing tick rebase shows up too.
+fn machine_rebase_difference(
+    seed: u64,
+    machine: SleepMachine,
+    layout: SleepLayout,
+    base: i64,
+    delta: i64,
+    shift: Shift,
+) -> Option<String> {
+    const TICKS: i64 = 1200;
+    const MID: i64 = 600;
+    let script = SleepScript::random(seed, TICKS, machine, layout);
+    let mut shifted = SleepScene::new_at(
+        SleepScript {
+            actions: script.actions.clone(),
+        },
+        machine,
+        layout,
+        true,
+        base,
+    );
+    let mut apart = SleepScene::new_at(script, machine, layout, true, base + delta);
+    for now in 1..=TICKS {
+        shifted.step(now);
+        let a = machine_relative_rows(&shifted);
+        apart.step(now);
+        let b = machine_relative_rows(&apart);
+        if a != b {
+            return Some(format!("tick {now}: {a:?} != {b:?}"));
+        }
+        if now == MID {
+            rebase_tables(&mut shifted.level, &mut shifted.ticks, delta, shift);
+            shifted.offset += delta;
+        }
+    }
+    None
+}
+
+fn machine_relative_rows(scene: &SleepScene) -> Vec<String> {
+    let rows = scene.snapshot();
+    let now = scene.ticks.now();
+    let mut out: Vec<String> = rows
+        .into_iter()
+        .filter(|row| {
+            !row.starts_with("clock:")
+                && !row.starts_with("scheduled:")
+                && !row.starts_with("hopper")
+        })
+        .collect();
+    let mut scheduled: Vec<_> = scene
+        .ticks
+        .pending()
+        .map(|tick| (tick.trigger_tick - now, tick.priority, tick.pos, tick.block))
+        .collect();
+    scheduled.sort();
+    out.push(format!("scheduled:{scheduled:?}"));
+    for p in [
+        BlockPos::new(0, 65, 0),
+        BlockPos::new(0, 63, 0),
+        BlockPos::new(-1, 65, 0),
+        BlockPos::new(0, 64, -1),
+    ] {
+        out.push(format!(
+            "hopper{p:?}:{:?}",
+            scene
+                .level
+                .block_entity::<HopperEntity>(p)
+                .map(|e| (e.cooldown_time(), e.ticked_game_time_age()))
+        ));
+    }
+    out
+}
+
+/// 平移用的起点和差值：两边的时钟都不小于 0（漏斗读盘后的 `tickedGameTime` 是绝对的
+/// 0，官方的世界时间不会是负数），差值有正有负。
+///
+/// Bases and deltas for the rebase tests: both clocks stay non-negative and
+/// the delta takes both signs.
+fn rebase_bases(seed: u64) -> (i64, i64) {
+    let base = (seed as i64 * 7_919) % 5_000;
+    let delta = (seed as i64 * 104_729) % 9_000 - base.min(4_500);
+    (base, delta)
+}
+
+/// 方块实体一类的平移（表的睡眠日程、熔炉 / 营火 / 酿造台的睡眠、漏斗的时刻）：
+/// 「中途平移 d 再跑」和「时钟本来就差 d」逐刻相同。
+///
+/// Block entities: shifting mid-run equals a clock that was always d apart.
+#[test]
+fn rebasing_block_entities_equals_a_clock_that_was_always_apart() {
+    for seed in [1, 7, 42, 1337] {
+        let (base, delta) = rebase_bases(seed);
+        for layout in [
+            Layout::Plain,
+            Layout::HoppersBeforeFurnace,
+            Layout::HopperAfterFurnace,
+        ] {
+            if let Some(difference) =
+                furnace_rebase_difference(seed, layout, base, delta, Shift::All)
+            {
+                panic!("seed {seed} layout {layout:?} base {base} delta {delta}: {difference}");
+            }
+        }
+        for machine in [SleepMachine::Campfire, SleepMachine::Brewing] {
+            for layout in [
+                SleepLayout::Plain,
+                SleepLayout::HopperBefore,
+                SleepLayout::HopperAfter,
+            ] {
+                if let Some(difference) =
+                    machine_rebase_difference(seed, machine, layout, base, delta, Shift::All)
+                {
+                    panic!(
+                        "seed {seed} {machine:?} {layout:?} base {base} delta {delta}: {difference}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// 改坏确认：方块实体表的日程、每个方块实体自己的时刻（分漏斗和机器两类）、
+/// 计划刻，漏平移任何一样都要被上面的比较抓到。
+///
+/// Break-it check: leaving out the schedule, the entities' own instants
+/// (hoppers or machines), or the scheduled ticks must be caught.
+#[test]
+fn leaving_out_any_block_entity_rebase_is_caught() {
+    for shift in [
+        Shift::ScheduleOnly,
+        Shift::EntitiesOnly,
+        Shift::SkipHoppers,
+        Shift::SkipMachines,
+        Shift::SkipBlockTicks,
+    ] {
+        let caught = [1_u64, 7, 42, 1337].into_iter().any(|seed| {
+            let (base, delta) = rebase_bases(seed);
+            let furnace = [Layout::Plain, Layout::HoppersBeforeFurnace]
+                .into_iter()
+                .any(|layout| {
+                    furnace_rebase_difference(seed, layout, base, delta, shift).is_some()
+                });
+            furnace
+                || [SleepMachine::Campfire, SleepMachine::Brewing]
+                    .into_iter()
+                    .any(|machine| {
+                        machine_rebase_difference(
+                            seed,
+                            machine,
+                            SleepLayout::HopperBefore,
+                            base,
+                            delta,
+                            shift,
+                        )
+                        .is_some()
+                    })
+        });
+        assert!(caught, "{shift:?} went unnoticed");
     }
 }

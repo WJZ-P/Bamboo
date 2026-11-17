@@ -279,6 +279,18 @@ impl BlockEntity for HopperEntity {
         self.idle_sleeping
     }
 
+    fn rebase(&mut self, delta: i64) {
+        // `last_tick_age` 是相对量，只有量出它的那一刻是绝对的；`None`（官方读盘后的
+        // 初值 0）是绝对的 0，官方也不随时间变，不平移。
+        // `last_tick_age` is relative; only the instant it was measured at is
+        // absolute. `None` (vanilla's post-load 0) is an absolute 0 and is not shifted.
+        self.last_tick_now = self.last_tick_now.saturating_add(delta);
+        if let Some(sleep) = &mut self.sleep {
+            sleep.since = crate::sleep_clock::rebase_instant(sleep.since, delta);
+            sleep.wake_at = crate::sleep_clock::rebase_instant(sleep.wake_at, delta);
+        }
+    }
+
     fn resleep(&mut self, since: i64, wake_at: i64) {
         // 闲置睡眠跨表没有意义：放回后真跑一次，再按当前状态重新睡。
         if wake_at == i64::MAX || wake_at.saturating_sub(since) == i64::MAX {

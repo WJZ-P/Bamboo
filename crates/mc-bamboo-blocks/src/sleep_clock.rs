@@ -34,9 +34,31 @@ impl Sleep {
         .max(0)
     }
 
+    /// 岛合并时把这段睡眠的两个绝对时刻平移 `delta`；「等外部叫醒」的 `i64::MAX` 不动。
+    ///
+    /// Shift both absolute instants by `delta` when islands merge; the
+    /// "until woken" sentinel `i64::MAX` stays as is.
+    pub fn rebase(&mut self, delta: i64) {
+        self.since = rebase_instant(self.since, delta);
+        self.wake_at = rebase_instant(self.wake_at, delta);
+    }
+
     /// 读路径看到的是 `now` 这一刻也真跑过之后的值，所以不截到 `wake_at - 1`。
     pub fn read_steps(&self, now: i64) -> i64 {
         now.saturating_sub(self.since).max(0)
+    }
+}
+
+/// 把一个绝对时刻平移 `delta`。`i64::MAX` 是各处「等外部叫醒 / 永不到期」的哨兵，
+/// 原样保留。
+///
+/// Shift one absolute instant by `delta`, keeping the `i64::MAX` "never due"
+/// sentinel used throughout.
+pub fn rebase_instant(at: i64, delta: i64) -> i64 {
+    if at == i64::MAX {
+        at
+    } else {
+        at.saturating_add(delta)
     }
 }
 

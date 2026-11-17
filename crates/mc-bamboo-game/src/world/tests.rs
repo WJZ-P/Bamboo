@@ -2985,3 +2985,27 @@ fn each_world_has_its_own_entity_id_allocator() {
     assert_eq!(other.ids_handle().peek(), FIRST_ENTITY_ID);
     assert!(!other.ids_handle().same_counter(entities.ids_handle()));
 }
+
+/// 岛的时钟从世界时间起算、每刻和它一起加一；计划刻队列的时钟跟的是岛的时钟，
+/// 不是世界时间：把岛的时钟平移之后，队列的 `now` 跟着走，世界时间不动。
+///
+/// The island clock starts at the world time and advances with it; the
+/// scheduled-tick clock follows the island clock, not the world time.
+#[test]
+fn the_island_clock_drives_scheduled_ticks() {
+    let mut server = Harness::new(8);
+    for _ in 0..5 {
+        server.tick();
+        let region = &server.world.island.region;
+        let time = server.world.master.global.time().0;
+        assert_eq!(region.tick.game_time(), time);
+        assert_eq!(region.block_ticks.now(), time);
+    }
+    server.world.island.region.rebase_clock(1_000);
+    server.tick();
+    let time = server.world.master.global.time().0;
+    let region = &server.world.island.region;
+    assert_eq!(time, 6);
+    assert_eq!(region.tick.game_time(), 1_006);
+    assert_eq!(region.block_ticks.now(), 1_006);
+}

@@ -1358,6 +1358,18 @@ impl RedstoneMemory {
         self.toggle_order.drain(..keep);
     }
 
+    /// 岛合并前把火把开关记录的时刻平移 `delta`。只平移不重排：所有记录同加一个数，
+    /// 时刻顺序和入队序号都不变。其余几张表存的不是时刻。
+    ///
+    /// Shift the torch-toggle instants by `delta` before an island merge. Every
+    /// entry moves by the same amount, so their order and sequence numbers are
+    /// unchanged. The other tables hold no instants.
+    pub fn rebase(&mut self, delta: i64) {
+        for (_, when) in &mut self.torch_toggles {
+            *when = when.saturating_add(delta);
+        }
+    }
+
     /// 记下一次开关。
     pub fn record_torch_toggle(&mut self, pos: BlockPos, when: i64) {
         self.torch_toggles.push((pos, when));
@@ -2144,5 +2156,75 @@ mod tests {
                 .comparator_outputs
                 .is_empty()
         );
+    }
+
+    /// 火把开关记录的随机脚本：每刻按官方火把计划刻的口径先丢掉 60 刻之前的记录、
+    /// 再随机记几次开关，观测每格还剩几次（`isToggledTooFrequently` 看的就是它）。
+    /// `shift` 给出时第 `mid` 刻后平移 `delta`（`apply` 为假时故意不平移）。
+    ///
+    /// Random torch-toggle script; observes the per-cell count the burnout
+    /// check reads. With `shift`, rebase by `delta` after step `mid` (or
+    /// deliberately skip it when `apply` is false).
+    fn torch_script(seed: u64, base: i64, shift: Option<(i64, i64, bool)>) -> Vec<Vec<usize>> {
+        const TORCHES: [BlockPos; 3] = [
+            BlockPos::new(0, 64, 0),
+            BlockPos::new(20, 64, 0),
+            BlockPos::new(40, 64, 7),
+        ];
+        let mut state = seed | 1;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut memory = RedstoneMemory::default();
+        let mut offset = 0;
+        let mut out = Vec::new();
+        for step in 1..=200_i64 {
+            let now = base + offset + step;
+            memory.forget_torch_toggles_before(now - 60);
+            for _ in 0..next() % 3 {
+                let pos = TORCHES[(next() % 3) as usize];
+                memory.record_torch_toggle(pos, now);
+            }
+            out.push(
+                TORCHES
+                    .iter()
+                    .map(|&pos| memory.torch_toggle_count(pos))
+                    .collect(),
+            );
+            if let Some((mid, delta, apply)) = shift
+                && step == mid
+            {
+                if apply {
+                    memory.rebase(delta);
+                }
+                offset = delta;
+            }
+        }
+        out
+    }
+
+    /// 红石火把开关记录一类的平移：「第 100 刻后平移 d 再跑」等于「时钟本来就差 d」；
+    /// 改坏确认：不平移就会被抓到。
+    ///
+    /// Torch toggles: shifting mid-run equals a clock that was always d apart;
+    /// skipping the shift is caught.
+    #[test]
+    fn rebasing_torch_toggles_equals_a_clock_that_was_always_apart() {
+        let mut caught = false;
+        for seed in 1..=30_u64 {
+            let base = (seed as i64 * 977) % 5000 - 2500;
+            let delta = (seed as i64 * 7919) % 9000 - 4500;
+            let apart = torch_script(seed, base + delta, None);
+            assert_eq!(
+                torch_script(seed, base, Some((100, delta, true))),
+                apart,
+                "seed {seed} base {base} delta {delta}"
+            );
+            caught |= torch_script(seed, base, Some((100, delta, false))) != apart;
+        }
+        assert!(caught, "skipping the torch-toggle rebase went unnoticed");
     }
 }

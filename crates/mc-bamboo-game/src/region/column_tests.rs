@@ -444,7 +444,7 @@ fn archive_round_trip_keeps_machines_ticks_and_items_running() {
     // 目标 region 的时钟从 0 开始，源/对照跑了 2 刻；相对延迟要按目标时钟换算。
     let target_ticks = scheduled(target.region());
     let direct_ticks = scheduled(direct.region());
-    let shift = (direct.region().tick.0 - target.region().tick.0) as i64;
+    let shift = direct.region().tick.0 - target.region().tick.0;
     let shifted: (Vec<Tick>, Vec<FluidTick>) = (
         target_ticks
             .0

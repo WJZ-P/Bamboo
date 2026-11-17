@@ -274,6 +274,9 @@ impl World {
         // attached before any entity exists. With one island the handle lives
         // only in its store; later islands clone it from there.
         region.use_entity_ids(mc_bamboo_blocks::EntityIds::new());
+        // 岛的时钟从此刻的世界时间起算（岛的实施计划 5.1）。
+        // The island clock starts at the current world time (island plan 5.1).
+        region.start_clock(global.time());
         // 控制台命令反馈的广播开关来自 `server.properties`，启动时带进世界线程。
         // The console-feedback broadcast flag comes from `server.properties` at startup.
         region.broadcast_console_to_ops = config.broadcast_console_to_ops;
@@ -677,10 +680,10 @@ impl World {
     }
 
     /// 每刻开始时的数量指标，趁状态还没变先记下来。到期的计划刻数是
-    /// 队列里 `trigger_tick <= now + 1` 的那些（`Global::advance_time` 在计划刻之前加一）。
+    /// 队列里 `trigger_tick <= now + 1` 的那些（岛的时钟在计划刻之前加一）。
     /// 队列按到期时刻排好了，所以只看开头到期的那一段，不扫整条队列。
     fn record_tick_counts(&mut self) {
-        let next_time = self.master.global.time().0 + 1;
+        let next_time = self.island.region.tick.game_time() + 1;
         let due = self
             .island
             .region
@@ -848,8 +851,8 @@ impl World {
         self.master.global.advance_time();
         self.island.region.advance_tick();
         self.island.region.profiler.lap(Phase::WeatherAndTime);
-        // 划分阶段串行、只算不用；三个阶段的执行顺序和行为不变。
-        self.run_partition_stage(self.master.global.time().0);
+        // 划分阶段串行、只算不用；三个阶段的执行顺序和行为不变。读岛的时钟。
+        self.run_partition_stage(self.island.region.tick.game_time());
         self.island.region.profiler.lap(Phase::Partition);
         // 官方 `ServerLevel.tick` 的顺序：方块和流体的计划刻、`chunkSource.tick` 里的随机刻、
         // 方块事件、实体、方块实体。计划刻和随机刻里生成的下落方块和 TNT 同一 tick 就动。
@@ -862,7 +865,7 @@ impl World {
             .profiler
             .begin_chunk_phase(ChunkPhase::ScheduledTicks);
         self.island.region.profiler.begin_partition_phase();
-        interaction::run_block_ticks(&mut self.island.region, self.master.global.time());
+        interaction::run_block_ticks(&mut self.island.region);
         self.island.region.profiler.end_partition_phase();
         self.island.region.profiler.end_chunk_phase();
         self.island.region.profiler.lap(Phase::ScheduledTicks);

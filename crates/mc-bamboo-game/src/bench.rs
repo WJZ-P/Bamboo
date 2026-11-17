@@ -67,9 +67,12 @@ impl<'a> BenchWorld<'a> {
         Self { world }
     }
 
-    /// 现在的游戏刻号，驱动周期性输入用。
+    /// 现在的岛内刻号（岛的时钟），驱动周期性输入用。精确模式下等于世界时间。
+    ///
+    /// The island's tick number, for periodic inputs; equal to the world time
+    /// in exact mode.
     pub fn game_time(&self) -> i64 {
-        self.world.master.global.time().0
+        self.world.island.region.tick.game_time()
     }
 
     /// 世界出生点所在的区块。真实地形场景按它铺开预生成区域。

@@ -504,4 +504,10 @@ impl BlockEntity for BrewingStandEntity {
         // 装盒时数值已按公式算到源表的最后一刻；目标表从这一刻起算。
         self.sleep = Some(Sleep::new(since, wake_at));
     }
+
+    fn rebase(&mut self, delta: i64) {
+        if let Some(sleep) = &mut self.sleep {
+            sleep.rebase(delta);
+        }
+    }
 }
