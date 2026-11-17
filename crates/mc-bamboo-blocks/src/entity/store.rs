@@ -79,6 +79,27 @@ impl KindPublic {
     pub const fn is_falling_block(&self) -> bool {
         matches!(self, Self::FallingBlock { .. })
     }
+
+    /// 按类型的子索引用这个 ID；和注册表 ID 一致，以后加生物不用改索引结构。
+    ///
+    /// Key for the per-type sub-index; matches the registry id so future mobs
+    /// need no structural change.
+    pub const fn type_index(&self) -> usize {
+        self.entity_type() as usize
+    }
+}
+
+/// 官方会互相硬碰撞的实体（船、矿车、潜影贝等）。现在三种实体都不是，
+/// 所以这个索引恒为空：只留接口和「以后怎么登记」的判定，不给还不存在的实体写逻辑。
+///
+/// Entities that have hard collisions in vanilla (boats, minecarts, shulkers).
+/// None of the three current kinds is one, so this index stays empty: only
+/// the interface and the future registration rule exist, with no mob logic.
+pub fn is_hard_colliding(public: &EntityPublic) -> bool {
+    // 三种现有实体都不是硬碰撞体；以后按新种类扩充这个判定。
+    // None of the three current kinds is hard-colliding; extend with new kinds.
+    let _ = public;
+    false
 }
 
 /// 只有自己读写、种类特有的部分。
@@ -337,6 +358,10 @@ pub struct EntityStore {
     taken: BTreeMap<EntityUid, usize>,
     free: Vec<usize>,
     grid: BTreeMap<(i32, i32, i32), BTreeSet<usize>>,
+    /// 按注册表实体类型的子索引：类型 ID → uid 升序的行号集合。
+    by_type: BTreeMap<usize, BTreeSet<EntityUid>>,
+    /// 硬碰撞实体的 uid 集合，现在恒为空。
+    hard_colliding: BTreeSet<EntityUid>,
     next_id: EntityUid,
     pending: Vec<EntityRow>,
     ticking: bool,
@@ -358,6 +383,8 @@ impl Default for EntityStore {
             taken: BTreeMap::new(),
             free: Vec::new(),
             grid: BTreeMap::new(),
+            by_type: BTreeMap::new(),
+            hard_colliding: BTreeSet::new(),
             next_id: FIRST_ENTITY_ID,
             pending: Vec::new(),
             ticking: false,
@@ -398,6 +425,7 @@ impl EntityStore {
 
     /// 按 uid 升序的所有 ID，也就是生成的先后。
     pub fn ids(&self) -> Vec<EntityUid> {
+        debug_assert!(self.sub_index_matches(), "实体子索引和主表不一致");
         self.index.keys().copied().collect()
     }
 
@@ -472,6 +500,43 @@ impl EntityStore {
     /// uid 到行号。`ids()` 已经按 uid 升序，所以这个映射也是升序。
     pub fn row_of(&self, uid: EntityUid) -> Option<usize> {
         self.index.get(&uid).copied()
+    }
+    /// 一个类型里全部实体的 uid，按 uid 升序；遍历顺序和 `ids()` 一致。
+    ///
+    /// Uids of all entities of one registry type, in ascending order: the same
+    /// iteration order as `ids()`.
+    pub fn uids_of_type(&self, entity_type: i32) -> impl Iterator<Item = EntityUid> + '_ {
+        let key = usize::try_from(entity_type).unwrap_or(usize::MAX);
+        self.by_type
+            .get(&key)
+            .into_iter()
+            .flat_map(BTreeSet::iter)
+            .copied()
+    }
+
+    /// 硬碰撞实体的 uid，按 uid 升序。现在恒为空。
+    ///
+    /// Uids of hard-colliding entities, in ascending order. Empty today.
+    pub fn hard_colliding_uids(&self) -> impl Iterator<Item = EntityUid> + '_ {
+        self.hard_colliding.iter().copied()
+    }
+
+    /// 这两个子索引是不是和主表一致；调试构建和单测用它守住 O(1) 的取放路径。
+    fn sub_index_matches(&self) -> bool {
+        let mut by_type: BTreeMap<usize, BTreeSet<EntityUid>> = BTreeMap::new();
+        let mut hard = BTreeSet::new();
+        for (&uid, &row) in &self.index {
+            if let Some(entry) = self.slots.get(row).and_then(Option::as_ref) {
+                by_type
+                    .entry(entry.public.kind.type_index())
+                    .or_default()
+                    .insert(uid);
+                if is_hard_colliding(&entry.public) {
+                    hard.insert(uid);
+                }
+            }
+        }
+        self.by_type == by_type && self.hard_colliding == hard
     }
 
     /// 空间索引里覆盖 `area` 的行号，按行号升序（行号来自 uid 升序的槽位分配，
@@ -579,6 +644,7 @@ impl EntityStore {
             self.note_entity_change(row.public.bounding_box());
         }
         let row_index = self.allocate_slot();
+        self.index_sub(row.public.uid, &row.public);
         self.index.insert(row.public.uid, row_index);
         self.grid_insert(row_index, &row.public);
         self.slots[row_index] = Some(row);
@@ -611,9 +677,11 @@ impl EntityStore {
 
     /// 从 tick 列表里拿掉。正在 tick 的实体只标记 `discard`，由 tick 循环丢掉。
     pub fn remove(&mut self, uid: EntityUid) {
-        let Some(row) = self.index.remove(&uid) else {
+        if !self.index.contains_key(&uid) {
             return;
-        };
+        }
+        self.unindex_sub(uid);
+        let row = self.index.remove(&uid).expect("刚查过 uid");
         self.taken.remove(&uid);
         self.taken_snapshots.remove(&uid);
         if let Some(entry) = self.slots[row].take() {
@@ -624,6 +692,7 @@ impl EntityStore {
 
     /// tick 期间取出一行。取出的行不在表里，别的实体读不到它，和现在的 `take` 一致。
     pub fn take(&mut self, uid: EntityUid) -> Option<Entity> {
+        self.unindex_sub(uid);
         let row = self.index.remove(&uid)?;
         let entry = self.slots[row].take()?;
         self.grid_remove(row, &entry.public);
@@ -651,11 +720,30 @@ impl EntityStore {
             .remove(&uid)
             .unwrap_or_else(|| self.allocate_slot());
         self.replace_row(row, split, false);
+        self.index_sub_from_row(uid, row);
         self.index.insert(uid, row);
     }
 
     fn replace_row(&mut self, row: usize, new: EntityRow, note: bool) {
         let old = self.slots[row].take();
+        if let Some(uid) = old
+            .as_ref()
+            .map(|entry| entry.public.uid)
+            .filter(|_| self.index.values().any(|&indexed| indexed == row))
+        {
+            let same_kind = old.as_ref().is_some_and(|entry| {
+                entry.public.kind.type_index() == new.public.kind.type_index()
+                    && is_hard_colliding(&entry.public) == is_hard_colliding(&new.public)
+            });
+            if !same_kind {
+                self.by_type
+                    .get_mut(&old.as_ref().expect("刚才有值").public.kind.type_index())
+                    .expect("类型索引和主表一致")
+                    .remove(&uid);
+                self.hard_colliding.remove(&uid);
+                self.index_sub(uid, &new.public);
+            }
+        }
         if note && !self.watched_sections.is_empty() {
             let now = Self::watch_facts(&new.public);
             let before = old.as_ref().map(|old| Self::watch_facts(&old.public));
@@ -673,6 +761,55 @@ impl EntityStore {
             self.grid_insert(row, &new.public);
         }
         self.slots[row] = Some(new);
+        debug_assert!(self.sub_index_matches(), "实体子索引和主表不一致");
+    }
+
+    fn index_sub(&mut self, uid: EntityUid, public: &EntityPublic) {
+        self.by_type
+            .entry(public.kind.type_index())
+            .or_default()
+            .insert(uid);
+        if is_hard_colliding(public) {
+            self.hard_colliding.insert(uid);
+        }
+    }
+
+    fn unindex_sub(&mut self, uid: EntityUid) {
+        if let Some(entry) = self
+            .index
+            .get(&uid)
+            .and_then(|&row| self.slots[row].as_ref())
+        {
+            let key = entry.public.kind.type_index();
+            if let Some(uids) = self.by_type.get_mut(&key) {
+                uids.remove(&uid);
+                if uids.is_empty() {
+                    self.by_type.remove(&key);
+                }
+            }
+        } else {
+            // 行已经取走时类型未知；全套取出/放回路径都会在放回时重新登记。
+            for uids in self.by_type.values_mut() {
+                uids.remove(&uid);
+            }
+            self.by_type.retain(|_, uids| !uids.is_empty());
+        }
+        self.hard_colliding.remove(&uid);
+    }
+
+    fn index_sub_from_row(&mut self, uid: EntityUid, row: usize) {
+        let Some((type_index, hard)) = self.slots.get(row).and_then(Option::as_ref).map(|entry| {
+            (
+                entry.public.kind.type_index(),
+                is_hard_colliding(&entry.public),
+            )
+        }) else {
+            return;
+        };
+        self.by_type.entry(type_index).or_default().insert(uid);
+        if hard {
+            self.hard_colliding.insert(uid);
+        }
     }
 
     /// 同步关注段集合。方块实体表里的登记变了才调，空集合时以后每次写入只多一个分支。
@@ -787,6 +924,7 @@ impl EntityStore {
             .collect();
         let mut rows = Vec::with_capacity(taken.len());
         for uid in taken {
+            self.unindex_sub(uid);
             let row = self.index.remove(&uid).expect("just indexed");
             self.taken.remove(&uid);
             let entry = self.slots[row].take().expect("indexed row is live");
@@ -1142,4 +1280,64 @@ mod tests {
     }
 
     use mc_bamboo_data::blocks;
+    /// 按类型 / 硬碰撞的子索引：取放、移除、整区块搬进搬出都跟主表一致，
+    /// 遍历顺序仍是 uid 升序。
+    #[test]
+    fn sub_indexes_follow_every_take_and_put_path() {
+        use mc_bamboo_data::registries::entity_type;
+
+        let mut store = EntityStore::new();
+        let falling = store.spawn(Entity::falling_block(
+            BlockPos::new(0, 70, 0),
+            BlockState(blocks::STONE),
+        ));
+        let item = store.spawn(Entity::ground_item(
+            Vec3::new(0.5, 70.0, 0.5),
+            ItemStack::new(1, 1),
+        ));
+        let tnt = store.spawn(Entity::primed_tnt(Vec3::new(0.5, 70.0, 0.5), 0.25));
+        assert!(store.sub_index_matches());
+        assert_eq!(
+            store
+                .uids_of_type(entity_type::FALLING_BLOCK)
+                .collect::<Vec<_>>(),
+            [falling]
+        );
+        assert_eq!(
+            store.uids_of_type(entity_type::ITEM).collect::<Vec<_>>(),
+            [item]
+        );
+        assert_eq!(
+            store.uids_of_type(entity_type::TNT).collect::<Vec<_>>(),
+            [tnt]
+        );
+        assert!(store.hard_colliding_uids().next().is_none());
+
+        // 精确驱动取出来再放回，索引和 uid 顺序不变。
+        let taken = store.take(item).expect("物品在表里");
+        assert!(store.uids_of_type(entity_type::ITEM).next().is_none());
+        assert!(store.sub_index_matches());
+        store.put(taken);
+        assert_eq!(store.ids(), [falling, item, tnt]);
+        assert!(store.sub_index_matches());
+
+        // 移除、区块搬走和搬回也都同步。
+        store.remove(tnt);
+        assert!(store.uids_of_type(entity_type::TNT).next().is_none());
+        assert!(store.sub_index_matches());
+        let boxed = store.take_chunk(ChunkPos::new(0, 0)).expect("静止");
+        assert!(store.uids_of_type(entity_type::ITEM).next().is_none());
+        assert!(store.sub_index_matches());
+        store.insert_chunk(boxed);
+        assert_eq!(store.ids(), [falling, item]);
+        assert!(store.sub_index_matches());
+
+        // 改坏确认：故意漏掉一次登记，断言会抓到不一致。
+        store
+            .by_type
+            .get_mut(&(entity_type::ITEM as usize))
+            .unwrap()
+            .remove(&item);
+        assert!(!store.sub_index_matches());
+    }
 }

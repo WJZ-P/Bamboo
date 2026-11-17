@@ -157,5 +157,5 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 | 方块状态的寻路类型表 | 完成 | `path-type java`：35723 个状态、71446 项比较、199 个「运行时算」、**0 不一致**；`--break-self-test` 1 处不一致。表在 `mc_bamboo_data::STATE_PATH_TYPE` / `NEIGHBOR_PATH_TYPE`，生成期由官方 `WalkNodeEvaluator.getPathTypeFromState` 和 `checkNeighbourBlocks` 导出。 |
 | 区块段危险方块计数 | 完成 | 增量维护 + 读盘 / 生成期光照整段重算；4000 次随机写每步都等于全量重算，另有读盘 / 全段仙人掌 / 漏维护的改坏确认。`section_hash_cost` A-B-A-B 交替 6 个回合：无计数 52.9–53.4 ns/写、有计数 52.5–54.4 ns/写，中位数差 **+0.1 ns/写**，无可测常驻代价。`docs/performance-optimizations.md` §18。 |
 | 碰撞快路径 | 完成（两项有收益） | 压测 `sample` 10 秒：`collect_block_collisions` 及形状查询约占算阶段 **36%**（2303 + 965 / 9129 主线程样本）。状态表预算「无碰撞 / 整格 / 单盒 / 其它」：无碰撞（5109 状态）和整格（3348 状态）走快路径，全空气段按段调色板一次跳过；**单盒快路径撤掉**（`joinIsNotEmpty` 的 1e-7 坐标合并不等于裸 Aabb 判交，单测抓到差异）；**站着不动缩小扫描盒撤掉**（会改变零位移时的逐格读数，没有可测收益）。压测 1 线程 compute 同轮 A-B-A-B 三对中位数：基线 59.7 → **48.8 ms/10 刻（1.22×）**。`move-oracle` 55 / 0、`entity-oracle` 31 例 709 步 / 0 不一致；单测含改坏确认。`docs/performance-optimizations.md` §19。 |
-| 实体子索引 | 待做 | — |
+| 实体子索引 | 完成 | `EntityStore` 加按注册表类型的 uid 升序索引和硬碰撞实体索引（现在恒为空，三种实体都不是硬碰撞体）；取放仍 O(1)，`ids()` / `iter()` 的 uid 顺序不变。单测覆盖 spawn / take / put / remove / take_chunk / insert_chunk，含故意漏登记的改坏确认。 |
 | 每个区块的附近玩家表 | 待做 | — |
