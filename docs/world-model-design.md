@@ -880,6 +880,8 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 | 7 | 实体系统：`EntityStore`、`EntityCtx`、两种驱动；现有三种实体迁过去，entity oracle 全绿（第 8 节） | 生物系统的地基 | **做完**：`f918171`、`b99f8b5`，另有 `bamboo.toml` 的 `entity_threads` 开关和两段式 `compute` / `commit`（8.6.1）；生物系统本身还没开始 |
 | 8 | 生物和 AI，按 8.3、8.4 移植 | — | **没做**：只有下落方块、点燃的 TNT 和掉落物三种实体 |
 
+（2026-11-16）第 4、5 步是下一步要做的。`docs/multi-region-tick-design.md` 把 region 叫「岛」，它的第 3 步（岛内单元并行）和第 4 步（随机刻着色）按 `docs/profiling.md` 13.7 的实测（普通世界约 1.00 倍）由用户决定跳过，直接做这里的第 4、5 步；实施计划和拆分的小步见 `docs/island-implementation-plan.md`。
+
 和主线独立、可以随时插进来的：
 
 - 方块实体休眠（9.5 第 1 条）：**做完**（`docs/performance-optimizations.md` 7g.1–7g.6）。熔炉 / 合成器、营火 / 酿造台 / 漏斗冷却、闲置漏斗、边界外暂停共四轮；容器引用缓存和信号查询缓存（第 2、3 条）**没做**，红石线实验性算法（第 4 条）已决定先不做。
