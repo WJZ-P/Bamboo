@@ -522,11 +522,11 @@ where
                         continue;
                     }
                     let (x_origin, y_origin, z_origin) = (f64::from(x), f64::from(y), f64::from(z));
-                    // 整格和单盒直接按 Aabb 判交，跳过 `Shapes.joinIsNotEmpty` 的
-                    // 坐标网格构建；两种得出同一个布尔值，1e-7 的截断行为不变。
-                    // Full cubes and single boxes intersect the Aabb directly,
-                    // skipping `Shapes.joinIsNotEmpty`'s coordinate grid. Both give
-                    // the same boolean and keep the 1e-7 truncation behaviour.
+                    // 整格按 Aabb 判交（和 `is_unit_cube` 分支相同）；单盒仍走
+                    // `joinIsNotEmpty`，它的 1e-7 坐标合并不能换成裸的 Aabb 判交。
+                    // Full cubes use the same Aabb check as `is_unit_cube`;
+                    // single boxes keep `joinIsNotEmpty`, whose 1e-7 coordinate
+                    // merging cannot be replaced by a bare Aabb intersection.
                     let matched = match kind {
                         CollisionShapeKind::FullBlock => box_.intersects_coords(
                             x_origin,
