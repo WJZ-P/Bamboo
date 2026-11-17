@@ -434,6 +434,16 @@ static TEST_COMPUTE_ERROR: std::sync::atomic::AtomicBool =
 #[cfg(test)]
 static TEST_CACHE_LOCK: Mutex<()> = Mutex::new(());
 
+/// 测试开关只对并发测试自己用的种子生效。同一个测试进程里别的测试也在并行用
+/// 这份缓存，不加这层限制的话，它们会抢走“下一次计算 panic / 返回 Err”的开关。
+/// The test switches only apply to the seeds the concurrency tests use. Other
+/// tests share this cache in the same process and would otherwise consume the
+/// "next computation panics / fails" switch.
+#[cfg(test)]
+fn test_switches_apply(seed: i64) -> bool {
+    matches!(seed, 0x5eed_9999 | 0x5eed_7777 | 0x5eed_6666)
+}
+
 thread_local! {
     static MEASURE_THREAD_ID: usize = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
     /// 本次 `cached_terrain` 调用是否真的执行了生成闭包（而非在占位上等待）。
@@ -618,7 +628,7 @@ fn cached_terrain(
     let result = slot.get_or_init(|| {
         COMPUTED_FLAG.with(|flag| flag.set(true));
         #[cfg(test)]
-        {
+        if test_switches_apply(config.seed) {
             let delay = TEST_COMPUTE_DELAY_MS.load(Ordering::Relaxed);
             if delay > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(delay as u64));
@@ -628,7 +638,7 @@ fn cached_terrain(
             }
         }
         #[cfg(test)]
-        if TEST_COMPUTE_ERROR.swap(false, Ordering::Relaxed) {
+        if test_switches_apply(config.seed) && TEST_COMPUTE_ERROR.swap(false, Ordering::Relaxed) {
             return Err("test-only terrain generation error".to_owned());
         }
         generate_chunk_with_beardifier(config, x, z, beardifier).map(Arc::new)
@@ -662,7 +672,7 @@ fn cached_terrain(
     let computed_here = COMPUTED_FLAG.with(|flag| flag.replace(false));
     if !computed_here {
         #[cfg(test)]
-        if TEST_BREAK_WAITER.load(Ordering::Relaxed) {
+        if test_switches_apply(config.seed) && TEST_BREAK_WAITER.load(Ordering::Relaxed) {
             // 改坏确认只在测试里生效：等待方故意拿另一坐标的地形。
             // Test-only break: the waiter takes a different coordinate.
             let wrong = generate_chunk_with_beardifier(config, x + 1, z, beardifier)?;
