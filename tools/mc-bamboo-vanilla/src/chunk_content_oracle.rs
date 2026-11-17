@@ -261,7 +261,7 @@ fn run_cases(
                 "brewing-mid" => "minecraft:brewing_stand",
                 "campfire-mid" => "minecraft:campfire",
                 "piston-mid" => "minecraft:piston",
-                _ => "minecraft:chest",
+                _ => load_cases[index].1,
             },
             BlockPos::new(3, 64, 5),
             BlockState(blocks::AIR),
@@ -276,10 +276,52 @@ fn run_cases(
             let keys = mc_bamboo_blocks::archive::write_block_entity_additional(entity.as_ref())
                 .map_err(|error| error.to_string())?;
             let official_keys = &written["values"];
-            for (key, _) in &keys {
+            for (key, value) in &keys {
                 report.check(
                     official_keys.get(key).is_some(),
                     format!("{name}: official did not write {key}"),
+                );
+                // 宝库 / 幽匿这四种的键由 codec 完整往返，逐值也要和官方一致。
+                // The four passive types own their keys: compare values too.
+                if name.starts_with("vault-")
+                    || name.starts_with("sculk-")
+                    || name.starts_with("calibrated-")
+                {
+                    report.check(
+                        official_keys.get(key) == Some(&canonical_tag(value)),
+                        format!(
+                            "{name}: Bamboo wrote {key} as {}, official {}",
+                            canonical_tag(value),
+                            official_keys.get(key).cloned().unwrap_or(Value::Null)
+                        ),
+                    );
+                }
+            }
+            // 这四种类型的 `saveAdditional` 键都由方块层独占：官方写出的非元数据键
+            // 和 Bamboo 写出的键必须完全相同，缺一个也不算对上。
+            // These four types own all their `saveAdditional` keys: the official
+            // non-metadata keys must match Bamboo's exactly.
+            if name.starts_with("vault-")
+                || name.starts_with("sculk-")
+                || name.starts_with("calibrated-")
+            {
+                let metadata = ["id", "x", "y", "z", "components", "keepPacked"];
+                let mut official_keys: Vec<&str> = written["values"]
+                    .as_object()
+                    .map(|map| {
+                        map.keys()
+                            .map(String::as_str)
+                            .filter(|key| !metadata.contains(key))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut bamboo_keys: Vec<&str> = keys.iter().map(|(key, _)| key.as_str()).collect();
+                // 官方 `CompoundTag` 是 HashMap，键序不确定：集合相等即可。
+                official_keys.sort_unstable();
+                bamboo_keys.sort_unstable();
+                report.check(
+                    official_keys == bamboo_keys,
+                    format!("{name}: official keys {official_keys:?}, Bamboo keys {bamboo_keys:?}"),
                 );
             }
         }
@@ -567,6 +609,77 @@ fn block_entity_load_cases() -> Result<Vec<(String, &'static str, Tag)>, String>
         "minecraft:moving_piston",
         Tag::Compound(piston),
     ));
+    // 宝库 / 幽匿方块实体：只有坐标的裸条目、codec 默认值省略、非空列表和监听器。
+    // Vault and sculk block entities: bare entries, codec default omission,
+    // non-empty lists and vibration listeners.
+    let uuid = Tag::IntArray(vec![1, 2, 3, 4]);
+    for (name, id) in [
+        ("vault-bare", "minecraft:vault"),
+        ("sculk-sensor-bare", "minecraft:sculk_sensor"),
+        (
+            "calibrated-sculk-sensor-bare",
+            "minecraft:calibrated_sculk_sensor",
+        ),
+        ("sculk-shrieker-bare", "minecraft:sculk_shrieker"),
+    ] {
+        out.push((name.to_owned(), id, Tag::Compound(meta(id))));
+    }
+    let mut vault = meta("minecraft:vault");
+    vault.push((
+        "config".to_owned(),
+        Tag::Compound(vec![
+            (
+                "loot_table".to_owned(),
+                Tag::String("minecraft:chests/trial_chambers/reward".to_owned()),
+            ),
+            ("activation_range".to_owned(), Tag::Double(3.0)),
+            ("deactivation_range".to_owned(), Tag::Double(4.5)),
+        ]),
+    ));
+    vault.push((
+        "shared_data".to_owned(),
+        Tag::Compound(vec![(
+            "connected_players".to_owned(),
+            Tag::List(vec![uuid.clone()]),
+        )]),
+    ));
+    vault.push((
+        "server_data".to_owned(),
+        Tag::Compound(vec![
+            ("items_to_eject".to_owned(), Tag::List(Vec::new())),
+            ("total_ejections_needed".to_owned(), Tag::Int(7)),
+            ("state_updating_resumes_at".to_owned(), Tag::Long(99)),
+        ]),
+    ));
+    out.push((
+        "vault-full".to_owned(),
+        "minecraft:vault",
+        Tag::Compound(vault),
+    ));
+    let mut sensor = meta("minecraft:sculk_sensor");
+    sensor.push(("last_vibration_frequency".to_owned(), Tag::Int(5)));
+    sensor.push((
+        "listener".to_owned(),
+        Tag::Compound(vec![
+            (
+                "selector".to_owned(),
+                Tag::Compound(vec![("tick".to_owned(), Tag::Long(42))]),
+            ),
+            ("event_delay".to_owned(), Tag::Int(3)),
+        ]),
+    ));
+    out.push((
+        "sculk-sensor-full".to_owned(),
+        "minecraft:sculk_sensor",
+        Tag::Compound(sensor),
+    ));
+    let mut shrieker = meta("minecraft:sculk_shrieker");
+    shrieker.push(("warning_level".to_owned(), Tag::Int(2)));
+    out.push((
+        "sculk-shrieker-full".to_owned(),
+        "minecraft:sculk_shrieker",
+        Tag::Compound(shrieker),
+    ));
     Ok(out)
 }
 
@@ -691,7 +804,15 @@ fn canonical_tag(tag: &Tag) -> Value {
         Tag::Int(value) => json!({"type": 3, "value": value.to_string()}),
         Tag::Long(value) => json!({"type": 4, "value": value.to_string()}),
         Tag::Float(value) => json!({"type": 5, "value": value.to_string()}),
-        Tag::Double(value) => json!({"type": 6, "value": value.to_string()}),
+        // Java 的 `Double.toString()` 总带小数点；Rust 的 `3.0.to_string()` 是 "3"。
+        // Java's `Double.toString()` keeps the decimal point even for whole values.
+        Tag::Double(value) => {
+            let mut text = value.to_string();
+            if !text.contains('.') && !text.contains('e') && !text.contains('E') {
+                text.push_str(".0");
+            }
+            json!({"type": 6, "value": text})
+        }
         Tag::String(value) => json!({"type": 8, "value": value}),
         Tag::ByteArray(values) => json!({"type": 7, "values": values}),
         Tag::IntArray(values) => json!({"type": 11, "values": values}),

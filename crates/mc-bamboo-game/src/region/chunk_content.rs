@@ -12,6 +12,7 @@ use mc_bamboo_blocks::{
     BlockState, ChunkBlockEntities, ChunkRedstone, ChunkTicks,
     archive::{
         block_entity::{create_block_entity, items_tag},
+        default_additional,
         entity::{read_entity, write_entity},
         redstone::{RedstoneFacts, read_redstone, write_redstone},
         ticks::{decode_chunk_ticks, encode_chunk_ticks},
@@ -136,8 +137,17 @@ pub(crate) fn encode_parts(parts: &impl EncodeParts, pos: ChunkPos) -> Result<En
             }
             Some(Err(error)) => return Err(Error::Blocks(error)),
             None => {
-                // 官方必写但我们没有实例的键：按官方默认值补齐。
-                write_default_block_entity_fields(&mut entry, name);
+                // 官方必写但我们没有实例的键：按官方默认值补齐。世界生成放下的
+                // 宝库 / 幽匿方块实体没有读盘条目，也要补出 `saveAdditional` 的键。
+                // A freshly generated vault or sculk block entity has no disk entry;
+                // its `saveAdditional` keys must still be written.
+                if let Some(fields) = default_additional(name) {
+                    for (key, value) in fields {
+                        entry.put(&key, value);
+                    }
+                } else {
+                    write_default_block_entity_fields(&mut entry, name);
+                }
             }
         }
         // 红石记忆里属于这一格的那几项。
