@@ -746,6 +746,21 @@ fn misplaced(
             .chain(&island.save_plan.encode)
             .any(|pos| wrong_chunk(*pos)),
     );
+    let report = &island.save_report;
+    check(
+        "SaveReport",
+        report
+            .encoded
+            .iter()
+            .any(|encoded| wrong_chunk(encoded.pos))
+            || report.changes.as_ref().is_some_and(|changes| {
+                changes
+                    .changed
+                    .iter()
+                    .any(|changed| wrong_chunk(changed.pos))
+                    || changes.content.iter().any(|pos| wrong_chunk(*pos))
+            }),
+    );
     out
 }
 
@@ -1025,6 +1040,21 @@ fn leaving_any_class_behind_on_a_split_is_reported() {
                 .extend(players.iter().map(|&id| (id, 7)));
             island.save_plan.remark.push(inside);
             island.save_plan.encode.push(inside);
+            let revision = island.region.chunks.revision(inside);
+            island.save_report.encoded.push(crate::island::Encoded {
+                pos: inside,
+                revision,
+                result: None,
+            });
+            island.save_report.changes = Some(crate::island::SaveChanges {
+                changed: vec![crate::island::ChangedChunk {
+                    pos: inside,
+                    revision,
+                    pristine: false,
+                    upper_dirty: true,
+                }],
+                content: vec![inside],
+            });
             island.mailbox.queue_reclaim(inside, 1);
 
             island
@@ -1060,7 +1090,7 @@ fn leaving_any_class_behind_on_a_split_is_reported() {
             let found: BTreeSet<String> = misplaced(island, &chunks, &players, false)
                 .into_iter()
                 .chain(misplaced(&child, &chunks, &players, true))
-                .filter(|class| class != "Mailbox" && class != "SavePlan")
+                .filter(|class| class != "Mailbox" && class != "SavePlan" && class != "SaveReport")
                 .collect();
             assert!(
                 found.contains(&name),
@@ -1086,6 +1116,10 @@ fn leaving_any_class_behind_on_a_split_is_reported() {
             .save_plan
             .absorb(std::mem::take(&mut child.save_plan));
         assert!(misplaced(parent, &chunks, &players, false).contains("SavePlan"));
+        parent
+            .save_report
+            .absorb(std::mem::take(&mut child.save_report));
+        assert!(misplaced(parent, &chunks, &players, false).contains("SaveReport"));
     });
 }
 
