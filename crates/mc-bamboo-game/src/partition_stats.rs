@@ -34,6 +34,10 @@ pub(crate) struct HaloStats {
     /// 每刻越界涉及的单元数直方图。
     pub(crate) units_per_tick: crate::profiler::Histogram,
     /// 越界来源：按「读 / 写」和触发方块的注册名分组。
+    /// `total_reads` / `total_writes` 是全部访问，用来证明观察点真的在报；
+    /// `reads` / `writes` 只数落在单元范围外的那些。
+    pub(crate) total_reads: u64,
+    pub(crate) total_writes: u64,
     pub(crate) reads: u64,
     pub(crate) writes: u64,
     pub(crate) by_block: HashMap<&'static str, u64>,
@@ -54,6 +58,8 @@ impl HaloStats {
         self.max_distance = 0;
         self.out_per_tick.reset();
         self.units_per_tick.reset();
+        self.total_reads = 0;
+        self.total_writes = 0;
         self.reads = 0;
         self.writes = 0;
         self.by_block.clear();
@@ -230,6 +236,12 @@ impl PartitionStats {
         }
         let touched = pos.chunk();
         for (index, partition) in partitions.iter().enumerate() {
+            let halo = &mut self.halos[index];
+            if write {
+                halo.total_writes = halo.total_writes.saturating_add(1);
+            } else {
+                halo.total_reads = halo.total_reads.saturating_add(1);
+            }
             let Some(unit) = partition.unit_for(open.pos.chunk()) else {
                 continue; // 第 2 种越界，trigger_end 里统一记
             };
@@ -237,7 +249,6 @@ impl PartitionStats {
                 continue;
             }
             let distance = distance_to_area(unit, touched).max(1) as u32;
-            let halo = &mut self.halos[index];
             halo.max_distance = halo.max_distance.max(distance);
             if write {
                 halo.writes = halo.writes.saturating_add(1);
@@ -372,12 +383,14 @@ impl PartitionStats {
             let stats = &self.halos[index];
             let _ = writeln!(
                 out,
-                "  halo {} out_triggers={} unassigned={} out_units={} max_distance={} reads={} writes={} out_per_tick_mean={:.3} out_share={:.6} tail_ns={}",
+                "  halo {} out_triggers={} unassigned={} out_units={} max_distance={} total_reads={} total_writes={} reads={} writes={} out_per_tick_mean={:.3} out_share={:.6} tail_ns={}",
                 halo,
                 stats.out_triggers,
                 stats.unassigned,
                 stats.out_units,
                 stats.max_distance,
+                stats.total_reads,
+                stats.total_writes,
                 stats.reads,
                 stats.writes,
                 mean(&stats.out_per_tick),

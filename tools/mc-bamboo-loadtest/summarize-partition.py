@@ -178,6 +178,8 @@ def analyse(report):
             "writes": h.get("writes", 0.0),
             "out_per_tick": h.get("out_per_tick_mean", 0.0),
             "out_share": h.get("out_share", 0.0),
+            "total_reads": h.get("total_reads", 0.0),
+            "total_writes": h.get("total_writes", 0.0),
             "tail_share": h.get("tail_ns", 0.0) / (p.get("three_mean", 1.0) * 1_000_000 * max(total[0], 1)) if p.get("three_mean") else 0.0,
             "speedup_input": {},
         }
@@ -377,7 +379,7 @@ def main():
             blocks = sorted(r["blocks"].get(halo, {}).items(), key=lambda x: -x[1])[:3]
             print(f"{key} halo={halo}: 越界/刻={h['out']:.1f} 占比={h['out_share'] * 100:.2f}% "
                   f"未归属={h['unassigned']:.0f} 涉及单元={h['units']:.0f} 最远={h['max_distance']:.0f}区块 "
-                  f"读={h['reads']:.0f} 写={h['writes']:.0f} 尾段={h['tail_share'] * 100:.2f}% "
+                  f"总读={h['total_reads']:.0f} 总写={h['total_writes']:.0f} 越界读={h['reads']:.0f} 越界写={h['writes']:.0f} 尾段={h['tail_share'] * 100:.2f}% "
                   f"主要方块={blocks}")
     print()
     print("== 按实际划分重算的理论上限（8 线程，越界单元进串行尾段）==")
