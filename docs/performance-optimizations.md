@@ -67,6 +67,8 @@
 | 23 | 同上：单线程每中心 CPU（17） | 28.5–29.6 ms | 16.7–17.1 ms | 1.7× |
 | 24 | 同一键只算一次：4 线程每中心 CPU（17） | 34.0–34.6 ms | 19.0–20.5 ms | 1.7× |
 | 24 | 同上：8 线程吞吐 / `cross_thread_duplicates`（17） | 228–240 中心/s / 172–184 | 267–273 中心/s / 0 | 1.15× |
+| 25 | 玩家捡起物品走空间索引：`islands-8` 的 `entities` 阶段每刻（18） | 12.891 ms（6.29 µs/物品） | 4.364 ms（2.13 µs/物品） | 2.95× |
+| 25 | 同上：微基准 N=16 时捡起段每个物品每刻（18） | 8.304 µs | 0.007 µs | 约 1200× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -95,6 +97,8 @@
 第 23 / 24 项见第 17 节，量的是 `structure_scale_bench`（144 中心、开结构）在
 1 / 2 / 4 / 8 线程下的吞吐与每中心 CPU 时间；两项的改前数字分别是「只有第 22 项」和
 「第 22 + 23 项」的二进制，同轮交替三轮。
+第 25 项见第 18 节：整机 `islands-8` 的 `entities` 阶段和纯函数微基准是两组不同口径，
+前一行是同一轮里改前/改后两个二进制各自跑 3 轮的中位数，后一行是 N=16 的单价。
 
 第 10 行**不是优化**，是 2026-11-11 安静窗口里量到的「还剩多少差距」，见 7e 节和
 `profiling.md` 第 10 节：新旧两版 tick 的区块数、段数、方块数完全相同，差距全在
@@ -2634,3 +2638,121 @@ panic 处理按标准库语义，不做补偿写入：闭包 panic 后 `OnceLock
   不再让 `neighbor_spills_into` 重算 8 个邻居中心）：15.5 量到 `build_view` 累计
   23.5 s、`run_features` 16.6 s，确实是剩下最大的一块，但这会改「写增量集合
   不依赖邻居任务时序」的保证，按分工先报主代理，本轮没动。
+
+---
+
+## 18. 玩家捡起物品走实体空间索引：去掉大 `Region` 里的超线性（2026-11-16）
+
+代码：`crates/mc-bamboo-game/src/drops.rs::pickup_for` 的候选收集，测量脚手架
+`crates/mc-bamboo-game/src/world/island_scale_tests.rs`。这是
+`docs/island-implementation-plan.md` 的第 0 步；基线在 `docs/profiling.md` 14.3 第 2 条。
+
+### 18.1 原来慢在哪
+
+`islands-K` 场景里 K 组内容互不相邻，每组 256 个掉落物、10 名假玩家、九台机器。
+理论上每组耗时和 K 无关，实测 `entities` 阶段每个掉落物每刻却从 K=1 的 3.5 µs 涨到
+K=8 的 6.3 µs，拆成 K 个岛的乐观上限因此超过 K（8.18×）。候选项包括漏斗的实体关注表、
+吸取盒扫描、`EntityStore.grid` 的 `BTreeMap` 查找和缓存命中、`index` / `taken`、实体同步追踪。
+
+分段计时否掉了这些：`interaction::run_entity_ticks` 里 `drops::pickup_before_entities`
+和 `mc_bamboo_blocks::run_entity_tick` 是两段独立计时，微基准里实体 tick 每个物品稳定在
+2.24–2.29 µs（N = 1 / 2 / 4 / 8 / 16），只有「捡起」这一段随 N 翻倍。原因是
+`pickup_for` 对**每名玩家**跑
+
+```text
+region.entities.iter().filter(|e| e.bounding_box().intersects(reach)).map(|e| e.id)
+```
+
+`EntityStore::iter()` 按 uid 升序遍历整张表，每个实体都 `clone()` 成完整的 `Entity`
+（含 `ItemStack`、两个 `Vec<Movement>`、`JavaRandom`）。玩家数和实体数都随 K 线性增长，
+于是这一段总量 O(K²)、单价 O(K)，远在别的组的玩家也要为不相关的掉落物付一次克隆。
+改前 `islands-8` 服务端 3 秒 `sample` 的调用图里能看到
+`interaction::run_entity_ticks` → `run_entity_tick` 之外的
+`EntityStore::iter` / `EntityRow::into_entity` 栈帧（实体追踪与拾取两条全表路径）；
+3 秒窗口只抓到个位数样本，所以定位主要靠上面的分段计时，不靠 `sample` 的计数。
+
+### 18.2 换成了什么做法、为什么这样就快
+
+只把候选收集换成已有的 `EntityStore::for_each_in(reach)`：它按 16³ 段的空间索引
+`grid` 只查覆盖 `reach` 的段，内部用同一个 `bounding_box().intersects(area)`
+精确过滤，再按 uid 升序访问公开数据，不克隆完整实体。于是每名玩家只看自己附近的
+几个段，和全表规模无关。
+
+**没有改数据结构，也没有改遍历或落地顺序。** `for_each_in` 的过滤谓词和排序与原来的
+`iter().filter(...)` 完全相同，候选名单逐项相等，捡起、发包和移除都仍按 uid 升序。
+改动只涉及 `drops.rs::pickup_for` 一处（外加 `world.rs` 里一行 `#[cfg(test)] mod`），
+没有碰 `world.rs` 主循环、`region.rs`、`EntityStore` 或 Director。
+
+### 18.3 怎么复现数字
+
+微基准（照 `entity/parallel/tests.rs::stress` 的 `#[ignore]` 手工跑写法），
+每组 256 个物品、10 名玩家、组距 1024 格、N = 1 / 2 / 4 / 8 / 16，
+同轮交替 3 轮取中位数，跑 2 刻预热 + 8 刻计时：
+
+```bash
+cargo test -p mc-bamboo-game --release --lib world::island_scale_tests::stress -- --ignored --nocapture
+```
+
+| N | 1 | 2 | 4 | 8 | 16 |
+|---|---:|---:|---:|---:|---:|
+| 改前捡起 µs/刻 | 132.9 | 529.7 | 2118.0 | 8549.6 | 34013.6 |
+| 改前捡起 µs/物品 | 0.519 | 1.034 | 2.068 | 4.175 | 8.304 |
+| 改前实体 tick µs/物品 | 2.237 | 2.256 | 2.260 | 2.271 | 2.292 |
+| 改后捡起 µs/刻 | 0.4 | 0.6 | 2.5 | 6.8 | 27.2 |
+| 改后捡起 µs/物品 | 0.002 | 0.001 | 0.002 | 0.003 | 0.007 |
+| 改后合计 µs/物品 | 2.204 | 2.219 | 2.241 | 2.222 | 2.253 |
+
+改前每次 N 翻倍，捡起单价正好翻倍（0.52 → 1.03 → 2.07 → 4.18 → 8.30），
+总量按 4× 增长，是 O(N²) 的签名；改后合计单价 2.20–2.25 µs，和 N 无关。
+拾取段剩下的绝对耗时随 N 线性增长（0.4 → 27.2 µs/刻），来源是每名玩家都要查一次
+空的索引格子，不是跨组耦合。
+
+整机压测（`INTERLEAVE=1` 轮在外、场景在内，3 轮中位数，`DURATION=35`、
+`PROFILE_SECS=10`、`PARTITION=0`；改前/改后各跑一遍完整命令，只换结果目录）：
+
+```bash
+CARGO_PROFILE_RELEASE_DEBUG=0 cargo build --release -p mc-bamboo-loadtest
+PORT=25981 ROUNDS=3 SKIP_BUILD=1 PARTITION=0 INTERLEAVE=1 DURATION=35 PROFILE_SECS=10 \
+    tools/mc-bamboo-loadtest/run-heavy.sh <结果目录> islands-1 islands-2 islands-4 islands-8
+python3 tools/mc-bamboo-loadtest/summarize-islands.py <结果目录>/off
+```
+
+| 场景 | 改前 `entities` ms | 改后 `entities` ms | 改前 µs/物品 | 改后 µs/物品 | 改前 tick mean ms | 改后 | 改前上限 | 改后上限 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| islands-1 | 0.815 | 0.738 | 3.18 | 2.89 | 2.666 | 2.717 | 1.00× | 1.00× |
+| islands-2 | 1.526 | 1.021 | 2.98 | 1.99 | 4.334 | 3.849 | 1.63× | 1.42× |
+| islands-4 | 4.699 | 2.614 | 4.59 | 2.55 | 11.127 | 10.464 | 3.58× | 3.80× |
+| islands-8 | 12.891 | 4.364 | 6.29 | 2.13 | 24.421 | 16.688 | 8.78× | 6.09× |
+
+同轮里 K=8/K=1 的单价比值：改前 1.93 / 2.55 / 1.55，改后 0.74 / 0.66 / 1.06，
+后者都在噪声里。§0 表里的 2.95× 是 K=8 的 `entities` 阶段 12.891 / 4.364；
+1200× 是微基准 N=16 的拾取段单价 8.304 / 0.007，两者口径不同，不能相加或互推。
+
+### 18.4 逐位一致的证据和改坏确认
+
+- 三个新回归测试：`pickup_candidates_match_the_full_scan_in_uid_order`
+  用 80 个实体（三种类型、跨段、远处同 x 区间的干扰）断言空间索引的候选名单
+  与全表过滤逐项相同且 uid 升序；`pickup_candidates_stay_identical_after_ticks`
+  在 12 刻真实的「拾取 → 移除 → 实体 tick」循环里逐刻重复这个断言；
+  `pickup_uses_only_nearby_items_in_uid_order` 真跑一次拾取，
+  近处两件被捡走、1024 格外的诱饵留在世界里。
+- 改坏确认：把 `pickup_for` 的候选暂时改回「全表 + 反序」，第二个测试立刻以
+  「远处的诱饵不该被捡走」失败；恢复后两个测试都通过。
+- `entity-oracle` 31 cases / 709 steps / 0 mismatches；`move-oracle` 55 cases /
+  0 mismatches；`machine` 10 runs / 1070 ticks / 0 mismatches；
+  `oracle java --weather clear` 10114 cases / 9823 pass / 0 fail / 0 blocked。
+  联机探针一遍、`tools/probe.sh --loaded` 两遍都是 719/719 且 `world-dir` 通过。
+  `cargo fmt --all --check`、`cargo clippy --workspace --all-targets` 0 警告、
+  `cargo test --workspace`、`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game`、
+  `cargo check -p mc-bamboo-vanilla --no-default-features` 全部通过。
+
+### 18.5 剩下的
+
+- 拾取段本身仍是「每名玩家一次查询」，N=16 时 27.2 µs/刻（每个物品 0.007 µs），
+  占比可忽略；玩家数远多于实体数的场景没有单独量过。
+- `entity_tracking::sync` 仍每刻 `region.entities.iter()` 一次（O(实体数)，线性），
+  还有 `update_pairings` 里对每个实体扫全部玩家（O(实体数 × 玩家数))；
+  它在 `entity_sync_and_tracking` 阶段而不在 `entities` 阶段，K=8 时每组 0.16 ms，
+  不是这次的超线性来源，留作以后的候选。
+- K=8 的乐观上限 6.09× 仍低于 8，来源包括同相位的红石尖峰叠加（`profiling.md`
+  14.3 第 4 条）和测量噪声，不在第 0 步的范围内。

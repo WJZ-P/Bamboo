@@ -157,6 +157,14 @@ fn pickup_candidates_match_the_full_scan_in_uid_order() {
         };
         server.spawn_entity(entity);
     }
+    // 已标记移除但还没从表里摘掉的行，两条路径都该看见（后面 `can_pick_up` 会跳过）。
+    let removed = server.spawn_entity(Entity::ground_item(
+        Vec3::new(SPAWN_X, SPAWN_Y, SPAWN_Z),
+        ItemStack::new(1, 1),
+    ));
+    server.region().entities.with_mut(removed, |entity| {
+        entity.discard();
+    });
     let client = server.join("Kitten");
     server.tick();
     let _ = client.take_frames();
@@ -224,4 +232,51 @@ fn pickup_uses_only_nearby_items_in_uid_order() {
     assert!(region.entities.get(first).is_none(), "近处第一件该被捡走");
     assert!(region.entities.get(second).is_none(), "近处第二件该被捡走");
     assert!(region.entities.get(decoy).is_some(), "远处的诱饵不该被捡走");
+}
+
+/// 候选名单在真实的「捡起 → 标记移除 → 实体 tick」循环之后仍和全表扫描一致：
+/// 空间索引里的段登记不能因为位置变化、槽位复用或 `removed` 行而漏项。
+///
+/// The candidate list must still match the full scan after real pickup /
+/// discard / entity-tick cycles: section registrations must survive position
+/// changes, slot reuse and `removed` rows.
+#[test]
+fn pickup_candidates_stay_identical_after_ticks() {
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    for index in 0..24 {
+        let x = 8.5 + f64::from(index % 6) * 0.4;
+        let z = 8.5 + f64::from(index / 6) * 0.4;
+        server.spawn_entity(Entity::ground_item(
+            Vec3::new(x, SPAWN_Y, z),
+            ItemStack::new(1, 1),
+        ));
+    }
+    server.tick();
+    let _ = client.take_frames();
+    for _ in 0..12 {
+        crate::drops::pickup_before_entities(server.region());
+        let (mut level, ticks) = server.region().block_level();
+        let _ = mc_bamboo_blocks::run_entity_tick(&mut level, ticks);
+        let region = server.region();
+        let reach = region
+            .players
+            .get(&client.id)
+            .expect("玩家已进服")
+            .bounding_box()
+            .inflate(1.0, 0.5, 1.0);
+        let old: Vec<i32> = region
+            .entities
+            .iter()
+            .filter(|entity| entity.bounding_box().intersects(reach))
+            .map(|entity| entity.id)
+            .collect();
+        let mut new = Vec::new();
+        region
+            .entities
+            .for_each_in(reach, &mut |public: &EntityPublic| {
+                new.push(public.uid);
+            });
+        assert_eq!(new, old, "每一刻候选名单和顺序都要和全表扫描一致");
+    }
 }

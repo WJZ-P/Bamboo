@@ -1560,12 +1560,36 @@ python3 tools/mc-bamboo-loadtest/summarize-islands.py /tmp/bamboo-islands/off
    K 组的总耗时近似 K 倍；以后留在主控上的串行段 0.02–0.04 ms，按 Amdahl 定律
    K = 8 的上限仍是约 8 倍。这和第 12、13 节的单元并行（普通世界约 1.00 倍）是
    两种负载形态：单元帮的是「一个地方很多机器」，岛帮的是「玩家分散」。
-2. **`islands-8` 的上限 8.18× 略超过 8，原因是实体阶段在一个大 `Region` 里超线性。**
-   掉落物每个每刻的 `entities` 耗时：`islands-1` 3.5 µs、`islands-2` 3.4 µs、
-   `islands-4` 4.2 µs、`islands-8` 6.3 µs。256 × K 个掉落物都在同一张 `EntityStore`
-   里时，单个掉落物越来越贵；拆成 K 个岛之后每张表回到 256 个。**原因还没查**
-   （候选：漏斗的实体关注表或吸取盒扫描按全表规模增长、空间索引的缓存命中）。
-   这是单岛下也该修的性能问题，列在实施计划的「要先量的东西」里。
+2. **基线里 `islands-8` 的上限 8.18× 略超过 8，原因是实体阶段在一个大 `Region` 里超线性
+   （已查清并修掉，见 `docs/performance-optimizations.md` 第 18 节）。**
+   改之前掉落物每个每刻的 `entities` 耗时：`islands-1` 3.5 µs、`islands-2` 3.4 µs、
+   `islands-4` 4.2 µs、`islands-8` 6.3 µs。不是漏斗关注表、吸取盒扫描或
+   `EntityStore.grid` / `index` / `taken` 的缓存问题，而是
+   `crates/mc-bamboo-game/src/drops.rs` 的 `pickup_for`：**每名玩家每刻都把整张
+   `EntityStore` 遍历、克隆成 `Entity`，再按盒子过滤**。每组的玩家数和掉落物数都随 K
+   线性增长，于是这一段的单价 ∝ K、总量 ∝ K²，互不相邻的组互相拖慢。分段计时和
+   `sample` 把增长全归到这一段：微基准里实体 tick 每个物品的耗时在 N = 1→16 时
+   稳定在 2.24–2.29 µs，捡起那一段却从 0.52 µs 涨到 8.30 µs（每次翻倍都正好翻倍）。
+   修法是拿已有的空间索引 `EntityStore::for_each_in(reach)` 代替全表扫描；它内部已按
+   `intersects` 精确过滤并按 uid 升序访问，候选名单和落地顺序逐项不变，所以行为逐位一致。
+
+   **修后数字**（同一台机器、`INTERLEAVE=1` 同轮交替 3 轮中位数，`DURATION=35`、
+   `PROFILE_SECS=10`、`PARTITION=0`；复现命令和逐轮数字见性能优化记录第 18 节）：
+
+   | 场景 | 改前 `entities` (ms) | 改后 `entities` (ms) | 改前 µs/物品 | 改后 µs/物品 | 改前 K 组独立跑上限 | 改后 |
+   |---|---:|---:|---:|---:|---:|---:|
+   | islands-1 | 0.815 | 0.738 | 3.18 | 2.89 | 1.00× | 1.00× |
+   | islands-2 | 1.526 | 1.021 | 2.98 | 1.99 | 1.63× | 1.42× |
+   | islands-4 | 4.699 | 2.614 | 4.59 | 2.55 | 3.58× | 3.80× |
+   | islands-8 | 12.891 | 4.364 | 6.29 | 2.13 | 8.78× | 6.09× |
+
+   「改前」这一列是本次同轮复现（和第 14.2 节 2026-11-16 的 5 轮基线 3.5 / 3.4 /
+   4.2 / 6.3 µs 同口径，比值一致），不是把两轮不同时间的数字混在一起比。
+   修后单价 1.99–2.89 µs 不再随 K 增长（逐轮 K=8/K=1 的比值 0.74 / 0.66 / 1.06，
+   都落在噪声里；改前是 1.93 / 2.55 / 1.55）。`islands-8` 的 `entities` 阶段降了
+   66%，整刻 mean 24.421 → 16.688 ms；拆成 K 个岛的乐观上限也从 8.78× 回落到
+   6.09×（低于 K，符合「超线性已经去掉」的预期）。剩下的 K=8 上限低于 8 主要来自
+   别处的尖峰叠加和噪声，见下面第 4 条。
 3. **其余阶段大体线性。** 每组的 `scheduled_ticks` 0.77–0.90 ms、`light_updates`
    0.28–0.42 ms、`random_ticks` 0.11–0.27 ms；`entity_sync_and_tracking` 在 K = 8 时
    每组 0.16 ms（K = 1–4 时 0.10–0.12），玩家多了配对表稍贵。
@@ -1588,3 +1612,6 @@ python3 tools/mc-bamboo-loadtest/summarize-islands.py /tmp/bamboo-islands/off
 （2026-11-16 按实现更新：`tools/mc-bamboo-loadtest/src/scenario.rs` 的 `Islands*`、
 `crates/mc-bamboo-game/src/bench.rs` 的 `spawn_item` / `player_names` / `console_command`、
 `tools/mc-bamboo-loadtest/run-heavy.sh` 的 `INTERLEAVE`、`summarize-islands.py`）
+
+（2026-11-16 第 0 步：14.3 第 2 条补上 `pickup_for` 全表扫描这个原因和修后同轮数字；
+修复只改 `drops.rs::pickup_for` 的候选收集，14.2 的 5 轮基线保留作历史对照）
