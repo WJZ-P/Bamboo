@@ -59,6 +59,8 @@ mod inbound;
 mod interaction;
 mod inventory;
 mod island;
+mod island_partition;
+mod island_partition_stats;
 mod lectern;
 mod light_updates;
 mod links;

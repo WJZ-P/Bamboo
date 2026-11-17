@@ -462,6 +462,10 @@ impl World {
         world.island.region.start_clock(time);
         world.master.global.publish(&mut world.island.region);
         world.island.region.profiler.on_world_start();
+        world
+            .master
+            .host
+            .ensure_islands(&world.island.region.profiler);
         if world.island.region.profiler.partition_enabled() {
             let verify = world.island.region.profiler.partition_verify();
             world.island.region.partitioning.enable(
@@ -609,6 +613,11 @@ impl World {
             &mut island_access(self.master.drive, &mut self.island),
             self.master.director_tick,
         );
+        if self.master.host.islands_enabled() {
+            self.master
+                .host
+                .finish_island_tick(&mut self.island.region.profiler, self.master.director_tick);
+        }
     }
 
     /// 阻塞运行，直到收到 [`Inbound::Shutdown`] 或者所有发送端都没了。
@@ -2015,6 +2024,9 @@ mod compute_pool_tests;
 #[cfg(test)]
 #[path = "world/tests/island_drive_tests.rs"]
 mod island_drive_tests;
+#[cfg(test)]
+#[path = "world/island_partition_tests.rs"]
+mod island_partition_tests;
 #[cfg(test)]
 #[path = "world/island_scale_tests.rs"]
 mod island_scale_tests;

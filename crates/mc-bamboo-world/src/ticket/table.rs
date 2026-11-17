@@ -165,6 +165,15 @@ impl TicketTable {
         self.loading.level(pos)
     }
 
+    /// 加载平面里所有等级 ≤ `max_level` 的区块，按 (x, z) 升序。
+    /// 只给分区器的全量对照用；正式路径走增量的等级变化。
+    ///
+    /// All chunks whose loading level is at most `max_level`, sorted by (x, z).
+    /// Only for the partitioner's reference check; the live path is incremental.
+    pub fn loading_chunks_at_most(&self, max_level: i32) -> Vec<ChunkPos> {
+        self.loading.chunks_at_most(max_level)
+    }
+
     /// 模拟等级：无票是 33。
     pub fn simulation_level(&self, pos: ChunkPos) -> i32 {
         self.simulation.level(pos)
