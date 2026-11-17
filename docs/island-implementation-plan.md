@@ -214,21 +214,26 @@
 ### 5.1 `time_offset` 和平移
 
 - 一个岛一个时钟。**把 `BlockTicks.now` 改成由岛的时钟驱动**（现在喂的是 `GameTime`），`RegionTick` 和它合成一个；岛建立时的初值取当时的 `GameTime`，所以精确模式下两者永远相等、逐位一致。
-- 带绝对时刻、拆合时要平移的数据 `[事实，逐个查过]`：
+- 带绝对时刻、拆合时要平移的数据 `[事实，逐个查过；2026-11-17 第 3 步动手前按「搜所有存绝对时刻的字段」重核一遍，补了标「补」的三行]`：
 
-  | 数据 | 位置 | 现在搬区块时 |
-  |---|---|---|
-  | 计划刻的 `trigger_tick` | `mc-bamboo-blocks/src/ticks.rs` | 装盒时转相对延迟；单元 `absorb` 取 `max(now)` |
-  | 移动活塞的 `lastTicked`（`ticked_entities`） | `ticks.rs:463,479-488` | 绝对值，随区块拆 |
-  | 红石火把开关记录 | `level.rs:1351-1374` | 装盒转相对年龄 |
-  | 漏斗的 `last_tick_now`、`HopperSleep { since, wake_at }` | `hopper.rs` | 绝对值 |
-  | 熔炉 / 酿造台 / 营火的睡眠日程 `Sleep { since, wake_at }` | `cooking.rs`、`brewing.rs`、`campfire_entity.rs`、`sleep_clock.rs` | 绝对值 |
-  | 容器的 `recheck_at: RegionTick` | `container.rs` | 装盒转相对 |
-  | 讲台的 `deliver_at`、玩家传送的 `sent_at` | `lectern.rs`、`movement.rs` | 跟着玩家，绝对值 |
-  | 红石缓存的 `started_at` / `used` | `cache/mod.rs` | 拆合时丢 |
-  | 单元划分的 `last_active` | `region/partition.rs` | 拆合时重建 |
+  | 数据 | 位置 | 现在搬区块时 | 第 3 步的 `rebase` |
+  |---|---|---|---|
+  | 计划刻的 `trigger_tick`（主队列和搁置表） | `mc-bamboo-blocks/src/ticks.rs` | 装盒时转相对延迟；单元 `absorb` 取 `max(now)` | `BlockTicks::rebase` |
+  | 移动活塞的 `lastTicked`（`ticked_entities`） | `ticks.rs` | 绝对值，随区块拆 | 同上 |
+  | 补：计划刻表自己的 `now`、每区块最近排刻时刻（`ChunkActivity` 的 `ChunkMark`，给存盘修剪和单元划分用） | `ticks.rs` | `now` 不搬；最近排刻时刻随区块拆、`absorb` 取较大值 | 同上。原来用「时刻 + 1，0 表示没有」编码，平移到 −1 会和哨兵撞上，改成 `i64::MIN` 哨兵 |
+  | 红石火把开关记录 | `level.rs`（`RedstoneMemory::torch_toggles`） | 装盒转相对年龄 | `RedstoneMemory::rebase` |
+  | 漏斗的 `last_tick_now`、`HopperSleep { since, wake_at }` | `hopper.rs` | 绝对值 | `BlockEntity::rebase`。`last_tick_age` 是相对量不动；`None`（官方读盘后的 `tickedGameTime = 0`）是绝对的 0，不平移 |
+  | 熔炉 / 酿造台 / 营火的睡眠日程 `Sleep { since, wake_at }` | `behaviour/machines/cooking.rs`、`brewing.rs`、`campfire_entity.rs`、`sleep_clock.rs` | 绝对值 | `BlockEntity::rebase`；`i64::MAX`（等外部叫醒）不动 |
+  | 补：方块实体表自己的 `now`、睡眠分桶 `sleeping` 的键、每个 ticker 的 `wake_at` | `block_entity.rs`（`BlockEntities`） | 装盒转相对剩余刻数 | `BlockEntities::rebase`（含上两行）；`i64::MAX` 不动 |
+  | 容器的 `recheck_at: RegionTick` | `mc-bamboo-game/src/container.rs` | 装盒转相对 | `Region::rebase_clock` |
+  | 讲台的 `deliver_at`、玩家传送的 `sent_at` | `lectern.rs`、`movement.rs` | 跟着玩家，绝对值 | 同上 |
+  | 补：岛的时钟本身 `Region.tick` | `region.rs` | — | 同上。内部从 `u64` 改成 `i64`，平移可以到 0 以下 |
+  | 红石缓存的 `now` / `started_at` / `used` / 每条记录的 `last_used` / 触发点的 `stopped_until` | `mc-bamboo-blocks/src/cache/mod.rs` | 拆合时丢 | `Region::rebase_clock` 直接换一份空的（重放和解释执行逐位相同，丢掉只损失命中） |
+  | 单元划分的 `last_active` | `region/partition.rs` | 拆合时重建 | 不平移，只是统计 |
 
-- **合并时把被吸收方整体平移 `delta = 吸收方.now − 被吸收方.now`**：上表前七行各加一个 `rebase(delta)`。不在每个区块束上存 `time_offset`（对 6.3 的修改，理由见 8.2 第 2 条）。拆分时两边时钟相同，不用平移。
+  核过、不用平移的：线程局部的 `SLEEP_CLOCK`（每次读访问前从表的 `now` 重设）；`BlockEvents` 和火把记录的入队序号（不是时刻）；`EntityStore` 的实体（`age`、`tick_count` 等都是相对量）；玩家的挖掘进度（玩家自己的 `gameTicks` 计数，跟着玩家走）；实体同步的周期计数；合成器的 `craftingTicksRemaining`（剩余刻数）；存盘冷却和 `Dirty`（`director_tick`，主控）；封禁过期和聊天（墙上时钟毫秒）；世界边界渐变（主控的 `GameTime`）。
+  一处要记住的语义：漏斗 `None` 的「绝对 0」不平移，所以「平移后再跑 = 时钟本来就差 d」照样成立；但只有当别的漏斗的 `tickedGameTime`（= 时钟 − 年龄）都 > 0 时，它才和官方「读盘后的漏斗是很久以前」一致。时钟接近 0 时（Bamboo 现在每次启动 `GameTime` 都从 0 起，见最终报告的疑点）两者可能差一刻冷却。第 3 步的随机测试因此让两边时钟都不小于 0。
+- **合并时把被吸收方整体平移 `delta = 吸收方.now − 被吸收方.now`**：上表除最后两行外各有 `rebase(delta)`，`Region::rebase_clock` 一次做完（第 3 步）。不在每个区块束上存 `time_offset`（对 6.3 的修改，理由见 8.2 第 2 条）。拆分时两边时钟相同，不用平移。
 
 ### 5.2 追赶规则
 
