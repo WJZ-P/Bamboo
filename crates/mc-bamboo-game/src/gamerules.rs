@@ -109,16 +109,6 @@ impl GameRuleSet {
         }
     }
 
-    /// 把方块快照和命令反馈用的布尔写到区域上。
-    ///
-    /// Copies the block snapshot and the command-feedback booleans onto the region.
-    pub(crate) fn publish(&self, region: &mut Region) {
-        region.block_rules = self.block_snapshot();
-        region.send_command_feedback = self.bool(gamerules::SEND_COMMAND_FEEDBACK);
-        region.log_admin_commands = self.bool(gamerules::LOG_ADMIN_COMMANDS);
-        region.command_blocks_work = self.bool(gamerules::COMMAND_BLOCKS_WORK);
-    }
-
     /// 存档里要写的规则：默认特性开着的那些，按注册表顺序，键是带命名空间的标识符。
     /// `GameRuleMap.of(filterFeatures(DEFAULT_FLAGS))` 只装启用的规则。
     /// Rules to save: the enabled (default feature set) ones in registry order,
@@ -215,7 +205,9 @@ fn parse_value(index: usize, text: &str) -> Option<Stored> {
 /// `sendGameRuleValues`。没有权限时警告，不发包。
 ///
 /// `sendGameRuleValues`. Without permission this warns and sends nothing.
-pub(crate) fn on_request_values(global: &crate::global::Global, region: &mut Region, id: PlayerId) {
+/// 规则读岛上的全局快照。
+/// The rules come from the island's global snapshot.
+pub(crate) fn on_request_values(region: &mut Region, id: PlayerId) {
     let Some(player) = region.players.get(&id) else {
         return;
     };
@@ -223,7 +215,7 @@ pub(crate) fn on_request_values(global: &crate::global::Global, region: &mut Reg
         warn_denied(&player.name, "request game rule values");
         return;
     }
-    let owned = global.rules().enabled_values();
+    let owned = region.global.rules.enabled_values();
     let entries: Vec<(&str, &str)> = owned
         .iter()
         .map(|(key, value)| (*key, value.as_str()))
@@ -237,8 +229,13 @@ pub(crate) fn on_request_values(global: &crate::global::Global, region: &mut Reg
 /// `handleSetGameRule`. A value that does not parse, including one with trailing
 /// characters, is ignored. A disabled rule is not stored, but the parsed text is still
 /// broadcast.
+///
+/// 权限在岛上查；改规则是全局的，作为效果交给主控（岛的实施计划 4.4）。
+///
+/// Permission is checked on the island; changing rules is global, so it goes
+/// to the master as an effect (island plan 4.4).
 pub(crate) fn on_set_packet(
-    global: &mut crate::global::Global,
+    port: &mut crate::global_port::GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     entries: Vec<(String, String)>,
@@ -251,6 +248,22 @@ pub(crate) fn on_set_packet(
         return;
     }
     let name = player.name.clone();
+    port.submit(
+        region,
+        crate::global_port::GlobalEffect::GameRules { name, entries },
+    );
+}
+
+/// [`on_set_packet`] 的主控一侧：逐条改权威规则、重发快照、广播给 OP。
+///
+/// The master side of [`on_set_packet`]: assign each rule on the authoritative
+/// copy, republish the snapshot, and broadcast to ops.
+pub(crate) fn apply_set_packet(
+    global: &mut crate::global::Global,
+    region: &mut Region,
+    name: &str,
+    entries: Vec<(String, String)>,
+) {
     for (identifier, value) in entries {
         let Some(index) = gamerules::find(&identifier) else {
             warn!(
@@ -263,7 +276,7 @@ pub(crate) fn on_set_packet(
         let short = RULES[index].name;
         match global.rules_mut().assign(index, &value) {
             Assignment::Updated(text) => {
-                global.rules().publish(region);
+                global.publish(region);
                 broadcast_set(region, short, &text);
             }
             Assignment::Unchanged(text) | Assignment::Disabled(text) => {

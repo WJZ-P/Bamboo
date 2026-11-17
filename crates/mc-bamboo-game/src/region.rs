@@ -11,8 +11,7 @@ use std::{
 };
 
 use mc_bamboo_blocks::{
-    BlockEntities, BlockEvents, BlockGameRules, BlockTicks, LevelRandom, RedstoneMemory,
-    WorldBorder, entity::Entities,
+    BlockEntities, BlockEvents, BlockTicks, LevelRandom, RedstoneMemory, entity::Entities,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
@@ -40,7 +39,7 @@ use crate::{
     profiler::Profiler,
     secure_chat::ServiceProfileKeys,
     tick_levels::TickLevels,
-    world_state::{RespawnData, Weather},
+    world_state::RespawnData,
 };
 
 pub mod chunk_content;
@@ -249,6 +248,14 @@ pub(crate) struct Region {
     ///
     /// Loot `random_sequence`s. The flat world seed is 0, the same value as `hashed_seed` in `login`.
     pub(crate) loot_sequences: mc_bamboo_loot::RandomSequences,
+    /// 按世界种子建的随机序列，`/random` 和 `/loot` 共用（官方 `ServerLevel.getRandomSequences`）。
+    /// 随机源归岛（岛的实施计划第 2 节第 15 行），第 5b 步从 `WorldState` 搬过来。
+    ///
+    /// Random sequences seeded from the world seed, shared by `/random` and
+    /// `/loot` (official `ServerLevel.getRandomSequences`). Random sources belong
+    /// to the island (island plan, section 2, row 15); step 5b moved this from
+    /// `WorldState`.
+    pub(crate) random_sequences: mc_bamboo_loot::RandomSequences,
     /// 音效包的随机种子，官方的 `Level.soundSeedGenerator`。和世界随机分开，只影响客户端挑哪个变体。
     ///
     /// Seed for sound packets, vanilla `Level.soundSeedGenerator`. Separate from the world
@@ -285,27 +292,13 @@ pub(crate) struct Region {
     /// Tests pin the chat clock so the same input produces the same bytes.
     /// `None` uses the system clock, matching official `Instant.now`.
     pub(crate) clock_millis: Option<i64>,
-    /// 方块逻辑读的游戏规则快照。权威副本在 `Global`，改规则时当场写过来。
+    /// 主控发布的全局状态快照（岛的实施计划第 6 节第 5a 步）：游戏规则、天气、时间、
+    /// 世界边界、难度、出生点、计分板等。岛里只读这一份，权威副本在 `Global`。
     ///
-    /// The game-rule snapshot block logic reads. The authoritative copy is on `Global`
-    /// and is copied here as soon as a rule changes.
-    pub(crate) block_rules: BlockGameRules,
-    /// 方块逻辑读的天气快照。权威副本在 `Global`，每 tick 推进后写过来。
-    ///
-    /// The weather snapshot block logic reads. The authoritative copy is on `Global`
-    /// and is copied here after each tick's weather advance.
-    pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
-    /// 这一维度的世界边界快照。权威副本在 `Global`，每刻推进渐变后、以及命令改完
-    /// 边界后写过来。方块逻辑、移动校验和实体碰撞都读这一份。
-    ///
-    /// This dimension's world-border snapshot. The authoritative copy is on `Global`
-    /// and is copied here after each tick's lerp step and after a border command.
-    /// Block logic, movement checks and entity collisions all read this copy.
-    pub(crate) world_border: WorldBorder,
-    /// `GameRules.SEND_COMMAND_FEEDBACK`。
-    pub(crate) send_command_feedback: bool,
-    /// `GameRules.LOG_ADMIN_COMMANDS`。
-    pub(crate) log_admin_commands: bool,
+    /// The global-state snapshot the master publishes (island plan, section 6,
+    /// step 5a): rules, weather, time, border, difficulty, spawn, scoreboard and
+    /// so on. The island only reads this; the authoritative copy is on `Global`.
+    pub(crate) global: crate::global::GlobalView,
     /// 官方 `server.properties` 的 `broadcast-console-to-ops`：控制台命令反馈要不要
     /// 广播给在线 OP。`WorldConfig` 启动时带进来，和游戏规则分开、运行中不变。
     ///
@@ -313,8 +306,6 @@ pub(crate) struct Region {
     /// feedback is broadcast to online ops. Set from `WorldConfig` at startup; separate
     /// from game rules and fixed for the run.
     pub(crate) broadcast_console_to_ops: bool,
-    /// `GameRules.COMMAND_BLOCKS_WORK`。
-    pub(crate) command_blocks_work: bool,
     /// 命令方块里保存的命令。不执行，也不存档。
     ///
     /// Commands stored in command blocks. They are not executed and not saved.
@@ -417,7 +408,6 @@ impl Region {
     ) -> Self {
         let chunks = ChunkStore::loaded();
         let template_body = encode_template(&ChunkStore::flat());
-        let rules = crate::gamerules::GameRuleSet::vanilla();
         Self {
             players: BTreeMap::new(),
             player_grid: PlayerGrid::default(),
@@ -440,6 +430,7 @@ impl Region {
                 mc_bamboo_blocks::cache::CacheConfig::default(),
             ),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            random_sequences: mc_bamboo_loot::RandomSequences::new(crate::world_state::WORLD_SEED),
             sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),
             entity_tracking: EntityTracking::default(),
@@ -451,13 +442,8 @@ impl Region {
             enforce_secure_profile,
             service_keys,
             clock_millis: None,
-            block_rules: rules.block_snapshot(),
-            block_weather: mc_bamboo_blocks::BlockWeather::CLEAR,
-            world_border: WorldBorder::default(),
-            send_command_feedback: rules.bool(mc_bamboo_data::gamerules::SEND_COMMAND_FEEDBACK),
-            log_admin_commands: rules.bool(mc_bamboo_data::gamerules::LOG_ADMIN_COMMANDS),
+            global: crate::global::GlobalView::default(),
             broadcast_console_to_ops: true,
-            command_blocks_work: rules.bool(mc_bamboo_data::gamerules::COMMAND_BLOCKS_WORK),
             command_blocks: BTreeMap::new(),
             admin_changes: crate::admin::AdminChanges::default(),
             last_action_millis: BTreeMap::new(),
@@ -611,9 +597,9 @@ impl Region {
             containers: &mut self.containers,
             entities: &mut self.entities,
             loot_sequences: &self.loot_sequences,
-            block_rules: self.block_rules,
-            block_weather: self.block_weather,
-            world_border: self.world_border.clone(),
+            block_rules: self.global.block_rules,
+            block_weather: self.global.block_weather,
+            world_border: self.global.world_border.clone(),
             command_blocks: &mut self.command_blocks,
             tick_levels: &self.tick_levels,
             dirty: &mut self.dirty,
@@ -647,9 +633,9 @@ impl Region {
             containers: &mut self.containers,
             entities: &mut self.entities,
             loot_sequences: &self.loot_sequences,
-            block_rules: self.block_rules,
-            block_weather: self.block_weather,
-            world_border: self.world_border.clone(),
+            block_rules: self.global.block_rules,
+            block_weather: self.global.block_weather,
+            world_border: self.global.world_border.clone(),
             command_blocks: &mut self.command_blocks,
             tick_levels: &self.tick_levels,
             dirty: &mut self.dirty,
@@ -691,6 +677,7 @@ impl Region {
             online_at_login: _,
             player_data: _,
             sink,
+            inbox,
         } = request;
         self.links.add(id, sink);
         self.peer_ips.insert(id, peer_ip);
@@ -723,6 +710,7 @@ impl Region {
         let mut player = Player::new(id, uuid, name, game_mode, client, position);
         player.permission_level = permission_level;
         player.is_op = is_op;
+        player.inbox = inbox;
         player.yaw = spawn.yaw;
         player.pitch = spawn.pitch;
         movement::teleport(
@@ -770,15 +758,17 @@ impl Region {
     /// `game_event` 13 and `set_chunk_cache_center`. `world_spawn` is the world spawn
     /// from `LevelData`, used only for `set_default_spawn_position`; the chunk cache
     /// center comes from `player.chunk_pos()` (the player position).
-    pub(crate) fn start_loading_chunks(
-        &mut self,
-        id: PlayerId,
-        time: GameTime,
-        clock: Clock,
-        world_spawn: RespawnData,
-        weather: Weather,
-        border: &WorldBorder,
-    ) {
+    ///
+    /// 时间、时钟、出生点、天气和边界都读岛上的全局快照。
+    /// Time, clock, spawn, weather and the border come from the island's global snapshot.
+    pub(crate) fn start_loading_chunks(&mut self, id: PlayerId) {
+        let (time, clock, world_spawn, weather) = (
+            self.global.time,
+            self.global.clock,
+            self.global.spawn,
+            self.global.weather,
+        );
+        let border = &self.global.world_border;
         self.links.send(
             id,
             &InitializeBorder {

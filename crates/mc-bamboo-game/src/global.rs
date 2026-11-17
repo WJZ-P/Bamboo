@@ -2,9 +2,9 @@
 //!
 //! 这里碰不到玩家和链路。方法只返回要广播的帧，由 [`World`](crate::World) 决定发给谁。
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
-use mc_bamboo_blocks::WorldBorder;
+use mc_bamboo_blocks::{BlockGameRules, BlockWeather, WorldBorder};
 use mc_bamboo_protocol::{
     packet::{
         play::{
@@ -18,9 +18,12 @@ use mc_bamboo_protocol::{
 use uuid::Uuid;
 
 use crate::{
+    gamerules::GameRuleSet,
     inbound::PlayerId,
     links::encode_frames,
-    world_state::{Difficulty, RespawnData, WorldState},
+    region::Region,
+    scoreboard::Scoreboard,
+    world_state::{Difficulty, RespawnData, Weather, WorldState},
 };
 
 /// 官方的条件是 `++counter > 600`，所以实际周期是 601 tick。
@@ -193,11 +196,12 @@ pub(crate) struct Global {
     roster: BTreeMap<PlayerId, RosterEntry>,
     ticks_since_latency_broadcast: u32,
     /// 游戏规则。按官方 `GameRuleMap.CODEC` 写进 `data/minecraft/game_rules.dat`，
-    /// 启动时读回。
+    /// 启动时读回。和 [`GlobalView`] 共享，改的时候才复制一份。
     ///
     /// Game rules. Saved to `data/minecraft/game_rules.dat` with the official
-    /// `GameRuleMap.CODEC` and read back at startup.
-    rules: crate::gamerules::GameRuleSet,
+    /// `GameRuleMap.CODEC` and read back at startup. Shared with [`GlobalView`];
+    /// copied only when written.
+    rules: Arc<GameRuleSet>,
     /// 难度、出生点、天气等世界设置。难度、默认游戏模式、出生点写进 `level.dat` 并读回；
     /// 天气、种子、随机序列不存档。
     ///
@@ -205,10 +209,11 @@ pub(crate) struct Global {
     /// game mode and spawn are saved to `level.dat` and read back; weather, seed
     /// and random sequences are not saved.
     state: WorldState,
-    /// 全服一份的计分板和队伍。不写存档。
+    /// 全服一份的计分板和队伍。不写存档。和 [`GlobalView`] 共享，改的时候才复制一份。
     ///
-    /// The one scoreboard and team set for the whole server. Never saved.
-    scoreboard: crate::scoreboard::Scoreboard,
+    /// The one scoreboard and team set for the whole server. Never saved. Shared
+    /// with [`GlobalView`]; copied only when written.
+    scoreboard: Arc<Scoreboard>,
     /// 全服一份的自定义 Boss 栏。不写存档。
     ///
     /// The one set of custom boss bars for the whole server. Never saved.
@@ -242,9 +247,9 @@ impl Default for Global {
             end_clock: Clock::official(),
             roster: BTreeMap::new(),
             ticks_since_latency_broadcast: 0,
-            rules: crate::gamerules::GameRuleSet::vanilla(),
+            rules: Arc::new(GameRuleSet::vanilla()),
             state: WorldState::default(),
-            scoreboard: crate::scoreboard::Scoreboard::default(),
+            scoreboard: Arc::default(),
             boss_bars: crate::scoreboard::BossBars::default(),
             world_border: WorldBorder::default(),
             admin: crate::admin::AdminState::default(),
@@ -294,29 +299,32 @@ impl Global {
     /// 权威的游戏规则。
     ///
     /// The authoritative game rules.
-    pub(crate) fn rules(&self) -> &crate::gamerules::GameRuleSet {
+    pub(crate) fn rules(&self) -> &GameRuleSet {
         &self.rules
     }
 
-    /// 权威的游戏规则，可写。
+    /// 权威的游戏规则，可写。改完要调用 [`publish`](Self::publish)，岛才看得到。
     ///
-    /// The authoritative game rules, writable.
-    pub(crate) fn rules_mut(&mut self) -> &mut crate::gamerules::GameRuleSet {
-        &mut self.rules
+    /// The authoritative game rules, writable. Call [`publish`](Self::publish)
+    /// afterwards so the island sees the change.
+    pub(crate) fn rules_mut(&mut self) -> &mut GameRuleSet {
+        Arc::make_mut(&mut self.rules)
     }
 
     /// 全服的计分板和队伍。
     ///
     /// The server-wide scoreboard and teams.
-    pub(crate) fn scoreboard(&self) -> &crate::scoreboard::Scoreboard {
+    pub(crate) fn scoreboard(&self) -> &Scoreboard {
         &self.scoreboard
     }
 
-    /// [`scoreboard`](Self::scoreboard) 的可变版本。
+    /// [`scoreboard`](Self::scoreboard) 的可变版本。快照还拿着同一份时先复制，
+    /// 所以只在真的要写的时候调用。
     ///
-    /// Mutable [`scoreboard`](Self::scoreboard).
-    pub(crate) fn scoreboard_mut(&mut self) -> &mut crate::scoreboard::Scoreboard {
-        &mut self.scoreboard
+    /// Mutable [`scoreboard`](Self::scoreboard). Copies first while a snapshot
+    /// still shares it, so call it only when actually writing.
+    pub(crate) fn scoreboard_mut(&mut self) -> &mut Scoreboard {
+        Arc::make_mut(&mut self.scoreboard)
     }
 
     /// 全服的自定义 Boss 栏。
@@ -340,10 +348,10 @@ impl Global {
         &self.world_border
     }
 
-    /// 权威的世界边界，可写。命令改完要调用 [`publish_border`](Self::publish_border)。
+    /// 权威的世界边界，可写。命令改完要调用 [`publish`](Self::publish)。
     ///
-    /// The authoritative world border, writable. Call
-    /// [`publish_border`](Self::publish_border) after a command changes it.
+    /// The authoritative world border, writable. Call [`publish`](Self::publish)
+    /// after a command changes it.
     pub(crate) fn world_border_mut(&mut self) -> &mut WorldBorder {
         &mut self.world_border
     }
@@ -355,14 +363,51 @@ impl Global {
         self.world_border.tick();
     }
 
-    /// 把权威副本发布给 region：每刻推进渐变后、以及命令改完边界后都要调一次。
+    /// 岛读的只读快照（岛的实施计划第 6 节第 5a 步）。
     ///
-    /// Publish the authoritative copy to the region: after each tick's lerp step and
-    /// after a command changes the border.
-    pub(crate) fn publish_border(&self, region: &mut crate::region::Region) {
-        region.world_border = self.world_border.clone();
+    /// The read-only snapshot the island reads (island plan, section 6, step 5a).
+    pub(crate) fn view(&self) -> GlobalView {
+        GlobalView {
+            time: self.time,
+            clock: self.clock,
+            block_rules: self.rules.block_snapshot(),
+            send_command_feedback: self
+                .rules
+                .bool(mc_bamboo_data::gamerules::SEND_COMMAND_FEEDBACK),
+            log_admin_commands: self
+                .rules
+                .bool(mc_bamboo_data::gamerules::LOG_ADMIN_COMMANDS),
+            command_blocks_work: self
+                .rules
+                .bool(mc_bamboo_data::gamerules::COMMAND_BLOCKS_WORK),
+            rules: Arc::clone(&self.rules),
+            weather: self.state.weather,
+            block_weather: self.state.weather.snapshot(),
+            world_border: self.world_border.clone(),
+            difficulty: self.state.difficulty,
+            difficulty_locked: self.state.difficulty_locked,
+            spawn: self.state.spawn,
+            default_game_mode: self.state.default_game_mode,
+            seed: self.state.seed,
+            idle_timeout_minutes: self.admin.idle_timeout_minutes,
+            scoreboard: Arc::clone(&self.scoreboard),
+        }
     }
 
+    /// 把快照发布给岛。主控每刻在固定的几处发布（开头、边界推进后、天气和时间推进后）；
+    /// 只有一个岛、直接改 `Global` 的时候，每次改完也当场重发，所以岛读到的永远是最新的，
+    /// 行为和直接读 `Global` 逐位相同。
+    ///
+    /// Publish the snapshot to the island. The master publishes at fixed points
+    /// each tick (start, after the border step, after weather and time); while
+    /// there is one island writing `Global` directly, every write republishes at
+    /// once, so the island always reads the latest state, bit for bit like
+    /// reading `Global` itself.
+    pub(crate) fn publish(&self, region: &mut Region) {
+        region.global = self.view();
+    }
+
+    #[cfg(test)]
     pub(crate) fn clock(&self) -> Clock {
         self.clock
     }
@@ -386,10 +431,7 @@ impl Global {
     /// Official `MinecraftServer.sendDifficultyUpdate`: broadcast the current difficulty
     /// and lock flag to everyone.
     pub(crate) fn difficulty_frames(&self) -> Vec<u8> {
-        encode_frames(&ChangeDifficulty {
-            difficulty: self.state.difficulty as u8,
-            locked: self.state.difficulty_locked,
-        })
+        difficulty_frames(self.state.difficulty, self.state.difficulty_locked)
     }
 
     /// 当前难度的显示名，官方 `Difficulty.getDisplayName()` 的翻译键。
@@ -549,6 +591,75 @@ impl Global {
             self.roster.values().map(RosterEntry::tab_entry).collect();
         update_frames(PlayerInfoUpdate::UPDATE_LATENCY, &entries)
     }
+}
+
+/// 主控发布给岛的全局状态只读快照（岛的实施计划第 2 节、第 6 节第 5a 步）。
+/// 岛里读规则、天气、时间和时钟、边界、难度、出生点、默认模式、种子哈希、闲置时限和
+/// 计分板的地方都读这一份，不碰 `Global`。规则和计分板是共享的，发布只是加引用计数。
+/// 方块逻辑读的几项（`block_rules`、`block_weather`、`world_border` 和三个命令布尔）
+/// 是热路径上的现成副本，和权威副本同时发布。
+///
+/// The read-only snapshot of global state the master publishes to the island
+/// (island plan, sections 2 and 6, step 5a). Island code reading rules, weather,
+/// time and clock, the border, difficulty, spawn, default mode, seed hash, idle
+/// timeout and the scoreboard reads this, never `Global`. Rules and the
+/// scoreboard are shared, so publishing only bumps reference counts. The few
+/// items block logic reads (`block_rules`, `block_weather`, `world_border` and
+/// the three command booleans) are ready-made hot-path copies published along.
+#[derive(Clone)]
+pub(crate) struct GlobalView {
+    pub(crate) time: GameTime,
+    /// 主世界时钟。
+    pub(crate) clock: Clock,
+    pub(crate) rules: Arc<GameRuleSet>,
+    /// 方块逻辑读的那几条规则。
+    pub(crate) block_rules: BlockGameRules,
+    /// `GameRules.SEND_COMMAND_FEEDBACK`。
+    pub(crate) send_command_feedback: bool,
+    /// `GameRules.LOG_ADMIN_COMMANDS`。
+    pub(crate) log_admin_commands: bool,
+    /// `GameRules.COMMAND_BLOCKS_WORK`。
+    pub(crate) command_blocks_work: bool,
+    pub(crate) weather: Weather,
+    /// 方块逻辑读的天气。
+    pub(crate) block_weather: BlockWeather,
+    /// 这一维度的世界边界。方块逻辑、移动校验和实体碰撞都读这一份。
+    pub(crate) world_border: WorldBorder,
+    pub(crate) difficulty: Difficulty,
+    pub(crate) difficulty_locked: bool,
+    pub(crate) spawn: RespawnData,
+    pub(crate) default_game_mode: GameMode,
+    /// 世界种子。哈希要算 SHA-256，只在进服时用到，所以发布时不算。
+    pub(crate) seed: i64,
+    /// `/setidletimeout` 的分钟数，0 表示不踢。
+    pub(crate) idle_timeout_minutes: i32,
+    pub(crate) scoreboard: Arc<Scoreboard>,
+}
+
+impl Default for GlobalView {
+    /// 新建的 `Global` 的快照，和发布第一份之前岛上原来的初值一致。
+    fn default() -> Self {
+        Global::default().view()
+    }
+}
+
+impl GlobalView {
+    /// 官方 `MinecraftServer.sendDifficultyUpdate` 的那一包。
+    pub(crate) fn difficulty_frames(&self) -> Vec<u8> {
+        difficulty_frames(self.difficulty, self.difficulty_locked)
+    }
+
+    /// 写进 `login` 包的种子哈希（官方 `BiomeManager.obfuscateSeed`）。
+    pub(crate) fn hashed_seed(&self) -> i64 {
+        crate::world_state::hashed_seed(self.seed)
+    }
+}
+
+fn difficulty_frames(difficulty: Difficulty, locked: bool) -> Vec<u8> {
+    encode_frames(&ChangeDifficulty {
+        difficulty: difficulty as u8,
+        locked,
+    })
 }
 
 fn update_frames(actions: u8, entries: &[PlayerInfoEntry<'_>]) -> Option<Vec<u8>> {

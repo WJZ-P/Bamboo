@@ -88,7 +88,7 @@ pub(crate) fn weather(
     global.state_mut().weather = state;
     // 官方命令本身不广播，但方块逻辑这一刻就要看到新的强度吗？不：强度由循环渐变，
     // 这里只需把还没变的快照保持一致。
-    crate::weather::sync(global, region);
+    global.publish(region);
     let key = match kind {
         Kind::Clear => "commands.weather.set.clear",
         Kind::Rain => "commands.weather.set.rain",

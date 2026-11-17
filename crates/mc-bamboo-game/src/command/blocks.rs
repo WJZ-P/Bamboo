@@ -16,7 +16,7 @@ use mc_bamboo_protocol::text::TranslateArg;
 
 use crate::{
     command::feedback::{self, CommandFail, fail, fail_with},
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     interaction,
     region::Region,
@@ -38,102 +38,102 @@ struct FillStyle {
 }
 
 pub(crate) fn setblock_replace(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     set_block(region, id, parsed, false, false, false)
 }
 
 pub(crate) fn setblock_destroy(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     set_block(region, id, parsed, true, false, false)
 }
 
 pub(crate) fn setblock_keep(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     set_block(region, id, parsed, false, true, false)
 }
 
 pub(crate) fn setblock_strict(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     set_block(region, id, parsed, false, false, true)
 }
 
 pub(crate) fn fill_replace(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     fill(region, id, parsed, FillMode::Replace, false, false)
 }
 
 pub(crate) fn fill_keep(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     fill(region, id, parsed, FillMode::Replace, false, true)
 }
 
 pub(crate) fn fill_outline(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     fill(region, id, parsed, FillMode::Outline, false, false)
 }
 
 pub(crate) fn fill_hollow(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     fill(region, id, parsed, FillMode::Hollow, false, false)
 }
 
 pub(crate) fn fill_destroy(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     fill(region, id, parsed, FillMode::Destroy, false, false)
 }
 
 pub(crate) fn fill_strict(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     fill(region, id, parsed, FillMode::Replace, true, false)
 }
 

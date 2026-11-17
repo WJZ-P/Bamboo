@@ -20,7 +20,7 @@ use crate::{
         players, select,
     },
     container::kind_of,
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     region::Region,
 };
@@ -53,12 +53,12 @@ struct Request {
 macro_rules! variants {
     ($($name:ident : $source:ident, $target:ident;)*) => {
         $(pub(crate) fn $name(
-            global: &mut Global,
+            port: &mut GlobalPort<'_>,
             region: &mut Region,
             id: PlayerId,
             parsed: &ParsedCommand,
         ) -> Result<(), CommandFail> {
-            loot_command(global, region, id, parsed, Request {
+            loot_command(port, region, id, parsed, Request {
                 source: Source::$source,
                 target: Target::$target,
             })
@@ -114,7 +114,7 @@ fn need_entity(request: &Request, parsed: &ParsedCommand) -> Result<(), CommandF
 }
 
 fn loot_command(
-    global: &mut Global,
+    _port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
@@ -139,7 +139,7 @@ fn loot_command(
         .and_then(Value::as_vec3)
         .map(|coords| coords.position(player.position(), player.yaw, player.pitch))
         .unwrap_or(player.position());
-    let stacks = evaluate(global, region, parsed, &request, source_position)?;
+    let stacks = evaluate(region, parsed, &request, source_position)?;
     let count: i32 = stacks.iter().map(|stack| stack.count).sum();
     match request.target {
         Target::Give => {
@@ -300,14 +300,13 @@ fn slot_index(parsed: &ParsedCommand) -> Result<i32, CommandFail> {
 }
 
 fn evaluate(
-    global: &Global,
     region: &Region,
     parsed: &ParsedCommand,
     request: &Request,
     pos: BlockPos,
 ) -> Result<Vec<LootStack>, CommandFail> {
     let fallback = region.random.source();
-    let sequences = &global.state().sequences;
+    let sequences = &region.random_sequences;
     match request.source {
         Source::Loot => {
             let name = parsed

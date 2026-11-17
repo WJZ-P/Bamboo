@@ -144,7 +144,7 @@ pub(crate) fn on_placed(region: &mut Region, pos: BlockPos) {
     if !is_command_block(state) {
         return;
     }
-    let track_output = region.send_command_feedback;
+    let track_output = region.global.send_command_feedback;
     region
         .command_blocks
         .entry(pos)
@@ -250,7 +250,7 @@ pub(crate) fn on_set(region: &mut Region, id: PlayerId, edit: CommandBlockEdit) 
     // `ServerLevel.isCommandBlockEnabled` 在 26.3 只看 `command_blocks_work`。
     //
     // `ServerLevel.isCommandBlockEnabled` in 26.3 only reads `command_blocks_work`.
-    let key = if region.command_blocks_work {
+    let key = if region.global.command_blocks_work {
         "advMode.setCommand.success"
     } else {
         "advMode.setCommand.disabled"

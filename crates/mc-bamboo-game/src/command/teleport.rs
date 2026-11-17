@@ -15,7 +15,7 @@ use crate::{
         feedback::{self, CommandFail, fail},
         select,
     },
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     movement::{self, CommandTeleport},
     player::Player,
@@ -26,12 +26,12 @@ const SPAWN_HORIZONTAL: i32 = 30_000_000;
 const SPAWN_VERTICAL: i32 = 20_000_000;
 
 pub(crate) fn teleport(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let level = level_of(region, id);
     let (source_pos, source_yaw, source_pitch) = source_pose(region, id)?;
     let targets = if let Some(selector) = entity_arg(parsed, "targets") {

@@ -19,7 +19,7 @@ use crate::{
         feedback::{self, CommandFail, fail},
         select, text,
     },
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     region::Region,
 };
@@ -68,7 +68,7 @@ pub(crate) enum Action {
 }
 
 pub(crate) fn run(
-    global: &mut Global,
+    _port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
@@ -119,7 +119,17 @@ pub(crate) fn run(
                     .get(target)
                     .map(|player| player.uuid)
                     .unwrap_or_default();
-                let resolved = text::resolve(global, region, id, *target, uuid, raw.tag(), 0);
+                // 计分板读岛上的全局快照。
+                // The scoreboard comes from the island's global snapshot.
+                let resolved = text::resolve(
+                    &region.global.scoreboard,
+                    region,
+                    id,
+                    *target,
+                    uuid,
+                    raw.tag(),
+                    0,
+                );
                 match action {
                     Action::Title => region
                         .links
@@ -164,12 +174,12 @@ fn required_time(parsed: &ParsedCommand, name: &str) -> Result<i32, CommandFail>
 macro_rules! action {
     ($name:ident, $action:expr) => {
         pub(crate) fn $name(
-            global: &mut Global,
+            port: &mut GlobalPort<'_>,
             region: &mut Region,
             id: PlayerId,
             parsed: &ParsedCommand,
         ) -> Result<(), CommandFail> {
-            run(global, region, id, parsed, $action)
+            run(port, region, id, parsed, $action)
         }
     };
 }

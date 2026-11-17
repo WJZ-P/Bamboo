@@ -54,6 +54,7 @@ mod entity_tracking;
 mod entity_view;
 mod gamerules;
 mod global;
+mod global_port;
 mod inbound;
 mod interaction;
 mod inventory;
@@ -95,7 +96,10 @@ pub mod worldgen_structures;
 pub use bench::{BenchContainer, BenchHooks, BenchWorld};
 pub use command::test_commands;
 pub use director_host::MailBudget;
-pub use inbound::{InFlight, Inbound, JoinRequest, PlayerId, PlayerSink};
+pub use inbound::{
+    InFlight, Inbound, InboundReceiver, InboundSender, JoinRequest, PlayerId, PlayerInbox,
+    PlayerSender, PlayerSink, Sequenced, channel as inbound_channel,
+};
 pub use inventory::receive_like_player;
 pub use lectern::{LecternReplay, LecternSnapshot};
 pub use loot_stacks::loot_stack;

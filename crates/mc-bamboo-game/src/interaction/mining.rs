@@ -210,7 +210,7 @@ fn start_destroy_block(
     //
     // Official `ServerPlayerGameMode`'s `level.mayInteract(player, pos)`: spawn
     // protection is always false, so only `getWorldBorder().isWithinBounds(pos)` matters.
-    if !region.world_border.is_within_bounds_pos(pos) {
+    if !region.global.world_border.is_within_bounds_pos(pos) {
         send_current_block(region, snapshot.id, pos);
         debug!(player = snapshot.id.0, ?pos, "outside the world border");
         return;

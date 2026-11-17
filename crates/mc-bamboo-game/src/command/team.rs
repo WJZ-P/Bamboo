@@ -55,7 +55,7 @@ fn component(
     parsed: &ParsedCommand,
     name: &str,
 ) -> Result<Component, CommandFail> {
-    crate::command::text::resolved_component(global, region, source, parsed, name)
+    crate::command::text::resolved_component(global.scoreboard(), region, source, parsed, name)
 }
 
 /// 队伍成员也是 `score_holder`。`*` 是全部有分数的名字。

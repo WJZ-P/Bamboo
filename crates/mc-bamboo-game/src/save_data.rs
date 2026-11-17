@@ -349,8 +349,7 @@ impl StartupData {
                 global.restore_clock(name, state);
             }
         }
-        global.rules().publish(region);
-        global.publish_border(region);
+        global.publish(region);
     }
 }
 

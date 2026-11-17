@@ -138,7 +138,7 @@ mod tests {
 
     fn setup() -> (Global, Region, PlayerId) {
         let mut region = Region::new(2, 20, false);
-        region.send_command_feedback = true;
+        region.global.send_command_feedback = true;
         let id = PlayerId(1);
         let mut player = Player::new(
             id,

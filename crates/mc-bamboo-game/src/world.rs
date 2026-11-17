@@ -3,10 +3,7 @@
 use std::{
     ops::ControlFlow,
     path::PathBuf,
-    sync::{
-        Arc,
-        mpsc::{Receiver, TryRecvError},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -34,7 +31,8 @@ use crate::{
     chunk_tracking::{self, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE},
     command, container, entity_sync, entity_tracking,
     global::{Global, RosterEntry},
-    inbound::{Inbound, JoinRequest, PlayerId},
+    global_port::{GlobalEffect, GlobalPort, PortMode},
+    inbound::{Inbound, InboundReceiver, JoinRequest, PlayerId, PlayerInbox, Sequenced},
     interaction::{self, UseItemOn},
     inventory, lectern, light_updates, menu, movement,
     pacing::{Pacer, WallTiming},
@@ -163,7 +161,17 @@ pub struct World {
 /// the master thread at a fixed 20 TPS.
 pub(crate) struct Master {
     pub(crate) global: Global,
-    inbox: Receiver<Inbound>,
+    /// 主控队列（岛的实施计划第 6 节第 4 步）。玩家自己的队列挂在玩家上。
+    inbox: InboundReceiver,
+    /// 进服被拒的连接还会发请求、最后发 `Leave`：它们的队列留在这里照常取空、
+    /// 按序号处理（请求因为链路已关而被忽略），收到 `Leave` 时扔掉。
+    /// 这样连接层看到的和所有消息走一条通道时一样，发送不会失败。
+    ///
+    /// Queues of connections refused at join. They may still send requests and
+    /// finally `Leave`; the queues are drained and handled by number as usual
+    /// (the requests are ignored because the link is closed) and dropped on
+    /// `Leave`, so the connection sees the same as with a single channel.
+    refused_inboxes: Vec<(PlayerId, PlayerInbox)>,
     /// 睡到下一刻用的节拍器。
     pacer: Pacer,
     /// 只有连接层起的世界才用权威 OP 名单重算进服权限。
@@ -189,6 +197,13 @@ pub(crate) struct Master {
     /// 压测回调的「场景搭好了没有」和回调本身；默认配置下不被读取。
     bench_hooks: Option<crate::bench::BenchHooks>,
     bench_ready: bool,
+    /// 岛写全局状态用哪种实现（岛的实施计划第 6 节第 5b 步）。缺省直接实现；
+    /// 单元测试可以整体切成排队实现。
+    ///
+    /// Which port implementation island writes to global state use (island
+    /// plan, section 6, step 5b). Direct by default; unit tests can switch the
+    /// whole run to the queued one.
+    pub(crate) port_mode: PortMode,
 }
 
 /// 岛：一个 `Region` 和只属于它的执行配置。以后可以整个交给 tick 线程。
@@ -199,11 +214,16 @@ pub(crate) struct Island {
     pub(crate) region: Region,
     /// 实体阶段的线程数。0 = 精确驱动；≥ 1 = 并行驱动。
     pub(crate) entity_threads: usize,
+    /// 排队实现下这一刻攒下、等交回时由主控应用的全局改动。直接实现下一直是空的。
+    ///
+    /// Global changes collected this tick under the queued port, applied by the
+    /// master at hand-back. Always empty under the direct port.
+    pub(crate) effects: Vec<GlobalEffect>,
 }
 
 impl World {
     /// 创建一个空世界。`config` 的视距超出合法范围时取最接近的值。
-    pub fn new(config: WorldConfig, inbox: Receiver<Inbound>) -> Self {
+    pub fn new(config: WorldConfig, inbox: InboundReceiver) -> Self {
         Self::with_service_keys(config, inbox, secure_chat::empty_keys())
     }
 
@@ -212,7 +232,7 @@ impl World {
     /// `keys` is shared with the connection tasks. The world thread only reads them.
     pub fn with_service_keys(
         config: WorldConfig,
-        inbox: Receiver<Inbound>,
+        inbox: InboundReceiver,
         keys: Arc<ServiceProfileKeys>,
     ) -> Self {
         Self::build(config, inbox, keys, None, false)
@@ -222,7 +242,7 @@ impl World {
     /// 名单变更作为 owned 消息发给连接层，世界线程不会等它。
     pub fn with_admin(
         config: WorldConfig,
-        inbox: Receiver<Inbound>,
+        inbox: InboundReceiver,
         keys: Arc<ServiceProfileKeys>,
         admin: crate::admin::AdminInit,
     ) -> Self {
@@ -231,7 +251,7 @@ impl World {
 
     fn build(
         config: WorldConfig,
-        inbox: Receiver<Inbound>,
+        inbox: InboundReceiver,
         keys: Arc<ServiceProfileKeys>,
         admin: Option<crate::admin::AdminInit>,
         infinite_flat: bool,
@@ -315,13 +335,13 @@ impl World {
         if let Some(save) = save.as_mut() {
             save.set_world_gen(world_gen.clone());
         }
-        // 种子进 `WorldState`（`hashed_seed` 进 login 包、天气、随机序列）。
+        // 种子进 `WorldState`（`hashed_seed` 进 login 包、天气），随机序列在岛上。
         // `level.dat` 里没有建模的 seed 字段，`apply_level_data` 不动它。
         // Put the seed into `WorldState` (hashed_seed for the login packet,
-        // weather, random sequences). `level.dat` has no modelled seed field,
-        // so `apply_level_data` leaves it alone.
+        // weather); the random sequences live on the island. `level.dat` has no
+        // modelled seed field, so `apply_level_data` leaves it alone.
         global.state_mut().seed = world_gen.seed;
-        global.state_mut().sequences = mc_bamboo_loot::RandomSequences::new(world_gen.seed);
+        region.random_sequences = mc_bamboo_loot::RandomSequences::new(world_gen.seed);
         // 全新世界（没有 level.dat）按官方 `MinecraftServer.setInitialSpawn` 选出生点；
         // 读档时用存档里的出生点（已由 `apply_level_data` 套回）。超平坦保持不变。
         // A fresh world (no level.dat) picks a spawn like `setInitialSpawn`;
@@ -344,6 +364,7 @@ impl World {
             master: Master {
                 global,
                 inbox,
+                refused_inboxes: Vec::new(),
                 pacer: Pacer,
                 authoritative_admin,
                 host: if infinite_flat {
@@ -366,10 +387,12 @@ impl World {
                 pending_save_success: Vec::new(),
                 bench_hooks: config.bench,
                 bench_ready: false,
+                port_mode: PortMode::default_for_world(),
             },
             island: Island {
                 region,
                 entity_threads: config.entity_threads.min(MAX_ENTITY_THREADS),
+                effects: Vec::new(),
             },
         };
         world
@@ -432,6 +455,7 @@ impl World {
         // all startup data is applied so the restored game time is picked up.
         let time = world.master.global.time();
         world.island.region.start_clock(time);
+        world.master.global.publish(&mut world.island.region);
         world.island.region.profiler.on_world_start();
         if world.island.region.profiler.partition_enabled() {
             let verify = world.island.region.profiler.partition_verify();
@@ -449,7 +473,7 @@ impl World {
     /// 正式入口（[`new`](Self::new)、[`with_admin`](Self::with_admin)）一律用已加载模式，
     /// 区块由 Director 按 ticket 交付。这个退化实现只给不需要加载语义的单元测试、
     /// 集成测试和 oracle 用；不要在生产代码里调用。
-    pub fn new_infinite_flat_for_tests(config: WorldConfig, inbox: Receiver<Inbound>) -> Self {
+    pub fn new_infinite_flat_for_tests(config: WorldConfig, inbox: InboundReceiver) -> Self {
         Self::build(config, inbox, secure_chat::empty_keys(), None, true)
     }
 
@@ -622,7 +646,13 @@ impl World {
     #[doc(hidden)]
     pub fn force_chunks_unpaced(&mut self, positions: &[mc_bamboo_core::ChunkPos]) {
         use mc_bamboo_world::director::TicketOp;
-        self.island.region.block_rules.random_tick_speed = 0;
+        // 改权威副本再发布：快照每刻都会从 `Global` 重新发布。
+        // Change the authoritative copy and publish: the snapshot is republished every tick.
+        self.master
+            .global
+            .rules_mut()
+            .assign(mc_bamboo_data::gamerules::RANDOM_TICK_SPEED, "0");
+        self.master.global.publish(&mut self.island.region);
         self.apply_ticket_ops(
             positions
                 .iter()
@@ -782,6 +812,9 @@ impl World {
                 (hooks.setup)(&mut bench)
             }
         };
+        // 压测回调可能经命令改了 `Global`。
+        // The hooks may have changed `Global` through a command.
+        self.master.global.publish(&mut self.island.region);
         if finished {
             self.master.bench_ready = true;
             tracing::info!("bench scenario ready");
@@ -817,6 +850,9 @@ impl World {
             error!("chunk compute thread stopped unexpectedly; shutting down");
             return self.shut_down();
         }
+        // 每刻开头给岛发布一份全局快照（岛的实施计划第 6 节第 5a 步）。
+        // Publish this tick's global snapshot to the island (island plan, step 5a).
+        self.master.global.publish(&mut self.island.region);
         self.process_inbox()?;
         // 压测输入跑在收包阶段，等价于一名管理员在世界线程上翻拉杆 / 补物品；
         // 它的耗时记进 `inbox`，不进后面三个方块侧阶段。默认配置下这里是空操作。
@@ -849,14 +885,16 @@ impl World {
         // After the lerp step, publish the new snapshot; this tick's block logic and
         // entity collisions read it.
         self.master.global.tick_world_border();
-        self.master.global.publish_border(&mut self.island.region);
+        self.master.global.publish(&mut self.island.region);
         // 官方 `ServerLevel.tick` 的天气阶段在 `tickTime` 之前；广播帧排在时间包之前发出。
         let weather = weather::advance(&mut self.master.global, &self.island.region);
         if !weather.is_empty() {
             self.island.region.links.broadcast(&weather);
         }
-        weather::sync(&self.master.global, &mut self.island.region);
         self.master.global.advance_time();
+        // 天气和时间推进完再发布一次，这一刻的方块逻辑读它。
+        // Publish again after weather and time; this tick's block logic reads it.
+        self.master.global.publish(&mut self.island.region);
         self.island.region.advance_tick();
         self.island.region.profiler.lap(Phase::WeatherAndTime);
         // 划分阶段串行、只算不用；三个阶段的执行顺序和行为不变。读岛的时钟。
@@ -912,15 +950,13 @@ impl World {
         lectern::tick(&mut self.island.region);
         chat::tick_spam_throttlers(&mut self.island.region);
         crate::drops::tick_drop_throttle(&mut self.island.region);
-        crate::command::admin::tick_idle(&mut self.master.global, &mut self.island.region);
-        // 官方 `ServerPlayer.doTick` 的六个只读准则。Bamboo 用玩家初值，进服后第一刻各写一次。
+        crate::command::admin::tick_idle(&mut self.island.region);
+        // 官方 `ServerPlayer.doTick` 的六个只读准则：岛算变了的值，主控写计分板。
         //
-        // The six read-only criteria from official `ServerPlayer.doTick`. Bamboo uses the
-        // player defaults and writes each once after join.
-        self.master
-            .global
-            .scoreboard_mut()
-            .tick_criteria(&mut self.island.region);
+        // The six read-only criteria from official `ServerPlayer.doTick`: the island
+        // computes the changes, the master writes the scoreboard.
+        let (mut port, region) = self.island_port();
+        crate::scoreboard::tick_criteria(&mut port, region);
         self.island.region.profiler.lap(Phase::PlayerMisc);
 
         entity_sync::update_derived_state(&mut self.island.region);
@@ -942,6 +978,7 @@ impl World {
         chunk_tracking::send_chunks(&mut self.island.region);
         movement::finish_tick(&mut self.island.region);
         self.island.region.profiler.lap(Phase::ChunkSending);
+        self.hand_back();
         let flush_bytes = self.island.region.links.flush();
         self.island
             .region
@@ -1018,23 +1055,49 @@ impl World {
         }
     }
 
-    /// 按到达顺序处理这一 tick 之前收到的所有消息。
+    /// 取出这一刻要处理的全部入站消息，按序号归并成一条（岛的实施计划第 6 节第 4 步）。
+    /// 返回主控队列的发端是不是已经全没了。
+    ///
+    /// 先取主控队列，再取玩家的队列：任何一条在某条主控消息之前发出的玩家消息，
+    /// 这时一定已经在玩家队列里了（同一账号的 `Leave` 在下一次 `Join` 之前发出）。
+    /// 这一批里 `Join` 带来的新玩家的队列也一起取，进服后同一刻的请求和现在一样同一刻处理。
+    ///
+    /// Collect this tick's inbound messages and merge them by number (island plan,
+    /// section 6, step 4). Returns whether every master sender is gone. The master
+    /// queue is drained first, then the player queues: any player message sent
+    /// before a drained master message is already in its queue (an account's
+    /// `Leave` is sent before its next `Join`). Queues brought in by this batch's
+    /// `Join`s are drained too, so requests right after a join still run this tick.
+    fn collect_inbound(&mut self) -> (Vec<Sequenced>, bool) {
+        let mut batch = Vec::new();
+        let disconnected = self.master.inbox.drain_into(&mut batch);
+        let mut players = Vec::new();
+        for message in &batch {
+            if let Inbound::Join(request) = &message.message {
+                request.inbox.drain_into(&mut players);
+            }
+        }
+        for player in self.island.region.players.values() {
+            player.inbox.drain_into(&mut players);
+        }
+        for (_, inbox) in &self.master.refused_inboxes {
+            inbox.drain_into(&mut players);
+        }
+        batch.append(&mut players);
+        crate::inbound::merge(&mut batch);
+        (batch, disconnected)
+    }
+
+    /// 按序号处理这一 tick 之前收到的所有消息。
     fn process_inbox(&mut self) -> ControlFlow<()> {
         // 先全部取出再处理：配额要处理完才归还，连接任务补不进新消息，所以这一步一定会结束。
-        let mut messages = Vec::new();
-        let disconnected = loop {
-            match self.master.inbox.try_recv() {
-                Ok(message) => messages.push(message),
-                Err(TryRecvError::Empty) => break false,
-                Err(TryRecvError::Disconnected) => break true,
-            }
-        };
+        let (messages, disconnected) = self.collect_inbound();
 
         self.island
             .region
             .profiler
             .record(Metric::InboundMessages, messages.len() as u64);
-        for message in messages {
+        for Sequenced { message, .. } in messages {
             match message {
                 Inbound::Join(request) => self.on_join(*request),
                 Inbound::Request {
@@ -1044,6 +1107,10 @@ impl World {
                 } => {
                     self.on_request(player, request);
                     drop(in_flight);
+                    // 玩家请求只经端口写全局状态，端口应用时自己重发快照。
+                    // Player requests write global state only through the port,
+                    // which republishes the snapshot itself when applying.
+                    continue;
                 }
                 Inbound::Latency { player, millis } => {
                     self.master.global.set_latency(player, millis)
@@ -1067,6 +1134,12 @@ impl World {
                 }
                 Inbound::Shutdown => return self.shut_down(),
             }
+            // 主控队列的消息（进服、延迟、名单重载、控制台命令）直接改 `Global`：
+            // 每条处理完重发快照，下一条读到的和直接读 `Global` 一样。
+            // Master-queue messages (join, latency, list reload, console commands)
+            // write `Global` directly: republish after each so the next message
+            // reads exactly what `Global` holds.
+            self.master.global.publish(&mut self.island.region);
         }
         if disconnected {
             return self.shut_down();
@@ -1098,6 +1171,7 @@ impl World {
             let reason = crate::command::admin::refusal_message(&refusal);
             self.island.region.links.add(id, request.sink);
             self.island.region.links.kick(id, &reason);
+            self.master.refused_inboxes.push((id, request.inbox));
             return;
         }
         let (permission_level, is_op) = if self.master.authoritative_admin {
@@ -1141,7 +1215,7 @@ impl World {
         let game_mode = restored
             .as_ref()
             .map(|data| game_mode_from_id(data.game_type))
-            .unwrap_or(self.master.global.state().default_game_mode);
+            .unwrap_or(self.island.region.global.default_game_mode);
         let join_spawn = match &restored {
             Some(data) => RespawnData::of(
                 BlockPos::new(
@@ -1152,7 +1226,7 @@ impl World {
                 data.rotation[0],
                 data.rotation[1],
             ),
-            None => self.master.global.state().spawn,
+            None => self.island.region.global.spawn,
         };
         let uuid = request.uuid;
         let entry = RosterEntry {
@@ -1166,7 +1240,9 @@ impl World {
             chat_session: None,
         };
 
-        let difficulty_frames = self.master.global.difficulty_frames();
+        // 进服序列里读的世界设置都来自岛上的快照（岛的实施计划 4.1：进服由岛做）。
+        // The join sequence reads world settings from the island's snapshot (plan 4.1).
+        let difficulty_frames = self.island.region.global.difficulty_frames();
         let spawn = join_spawn.pos;
         let spawn_chunk = ChunkPos::new(spawn.x >> 4, spawn.z >> 4);
         self.apply_ticket_ops([TicketOp::PlayerMoved {
@@ -1179,7 +1255,7 @@ impl World {
                 game_mode,
                 difficulty_frames: &difficulty_frames,
                 spawn: join_spawn,
-                hashed_seed: self.master.global.state().hashed_seed(),
+                hashed_seed: self.island.region.global.hashed_seed(),
                 permission_level,
                 is_op,
             },
@@ -1222,14 +1298,7 @@ impl World {
         // `set_default_spawn_position` carries the world spawn from `LevelData`, not
         // the saved player position. The player's position comes from
         // `JoinSettings.spawn` above (the save), and the chunk center from `player.chunk_pos()`.
-        self.island.region.start_loading_chunks(
-            id,
-            self.master.global.time(),
-            self.master.global.clock(),
-            self.master.global.state().spawn,
-            self.master.global.state().weather,
-            self.master.global.world_border(),
-        );
+        self.island.region.start_loading_chunks(id);
 
         // 物品栏 / 末影箱 / 朝向等运行时字段在玩家建好之后写回去。
         if let Some(data) = &restored
@@ -1382,6 +1451,9 @@ impl World {
     /// 处理离开，顺序见 `coverage.md` 4.2。可以重复调用：世界里没有这名玩家时直接忽略，
     /// 连接任务还没发 `Join` 就结束时走的就是这条路。
     fn on_leave(&mut self, id: PlayerId) {
+        self.master
+            .refused_inboxes
+            .retain(|(refused, _)| *refused != id);
         if !self.island.region.players.contains_key(&id) {
             return;
         }
@@ -1390,32 +1462,16 @@ impl World {
         self.island.region.last_action_millis.remove(&id);
         self.island.region.peer_ips.remove(&id);
 
-        if let Some(frames) = self.master.global.left_message(id) {
-            // 官方 `PlayerList.broadcastSystemMessage` 逐玩家看可见性。
-            //
-            // Official `PlayerList.broadcastSystemMessage` checks visibility per player.
-            crate::chat::broadcast_system_message(&mut self.island.region, &frames, None);
-        }
+        // 「离开了游戏」和 Tab 名单是全局的，经端口交给主控（岛的实施计划 4.1）。
+        // "Left the game" and the tab list are global; they go to the master
+        // through the port (island plan 4.1).
+        let (mut port, region) = self.island_port();
+        port.submit(region, GlobalEffect::LeaveMessage { player: id });
         entity_sync::on_leave(&mut self.island.region, id);
         entity_tracking::on_leave(&mut self.island.region, id);
         // 玩家断开时官方不回 `container_close`，光标上的东西直接丢弃。
         menu::on_leave(&mut self.island.region, id);
         lectern::on_leave(&mut self.island.region, id);
-        // 官方玩家断开时 `entityRemoved` 直接 return，不广播 reset_score；
-        // 分数和 Boss 栏的 UUID 集合都留着，下次进服还会补发 add 包。
-        //
-        // Official `entityRemoved` returns for players without broadcasting reset_score;
-        // scores and boss-bar UUID sets stay so rejoining gets the add packet again.
-        if let Some(name) = self
-            .island
-            .region
-            .players
-            .get(&id)
-            .map(|player| player.name.clone())
-        {
-            self.master.global.scoreboard_mut().on_leave(&name);
-            self.master.global.boss_bars_mut().on_leave(id);
-        }
         // 官方 `PlayerList.remove` 在移除玩家前先存盘；`PlayerList.save` /
         // `saveAll` 都不看 `noSave`，所以 `/save-off` 期间离开照存（F7）。
         // Official `PlayerList.remove` saves before removing; `PlayerList.save`
@@ -1427,9 +1483,8 @@ impl World {
             id: u64::from(id.0 as u32),
             to: None,
         }]);
-        if let Some(frames) = self.master.global.remove_player(id) {
-            self.island.region.links.broadcast(&frames);
-        }
+        let (mut port, region) = self.island_port();
+        port.submit(region, GlobalEffect::Left { player: id });
     }
 
     /// 把一条请求交给负责它的模块。被踢的玩家要等 `Leave` 才离开世界，这段时间它的请求都忽略。
@@ -1442,13 +1497,8 @@ impl World {
             PlayRequest::ChatCommand { command, signed } => {
                 let command = command.clone();
                 let signed = signed.clone();
-                command::on_command(
-                    &mut self.master.global,
-                    &mut self.island.region,
-                    player,
-                    &command,
-                    signed.as_ref(),
-                );
+                let (mut port, region) = self.island_port();
+                command::on_player_command(&mut port, region, player, &command, signed.as_ref());
                 return;
             }
             PlayRequest::CommandSuggestion { id, command } => {
@@ -1458,11 +1508,9 @@ impl World {
             }
             PlayRequest::ChatSession(session) => {
                 let session = session.clone();
-                if let Some(update) =
-                    secure_chat::on_session(&mut self.island.region, player, session)
-                    && let Some(frames) = self.master.global.initialize_chat(player, &update)
-                {
-                    self.island.region.links.broadcast(&frames);
+                let (mut port, region) = self.island_port();
+                if let Some(update) = secure_chat::on_session(region, player, session) {
+                    port.submit(region, GlobalEffect::ChatSession { player, update });
                 }
                 return;
             }
@@ -1511,7 +1559,6 @@ impl World {
                     region,
                     player,
                     chat::ChatMessage {
-                        global: &self.master.global,
                         text: message,
                         signature: signature.map(|bytes| *bytes),
                         time_millis,
@@ -1533,23 +1580,15 @@ impl World {
                 if action
                     == mc_bamboo_protocol::packet::play::ClientCommandKind::RequestGameRuleValues
                 {
-                    crate::gamerules::on_request_values(
-                        &self.master.global,
-                        &mut self.island.region,
-                        player,
-                    );
+                    crate::gamerules::on_request_values(&mut self.island.region, player);
                 } else {
                     chat::on_client_command(&mut self.island.region, player, action);
                 }
             }
             PlayRequest::ChangeGameMode { mode } => self.on_change_game_mode(player, mode),
             PlayRequest::SetGameRule { entries } => {
-                crate::gamerules::on_set_packet(
-                    &mut self.master.global,
-                    &mut self.island.region,
-                    player,
-                    entries,
-                );
+                let (mut port, region) = self.island_port();
+                crate::gamerules::on_set_packet(&mut port, region, player, entries);
             }
             PlayRequest::SetCommandBlock {
                 pos,
@@ -1697,7 +1736,8 @@ impl World {
             );
             return;
         }
-        command::change_own_mode(&mut self.master.global, &mut self.island.region, id, mode);
+        let (mut port, region) = self.island_port();
+        command::change_own_mode(&mut port, region, id, mode);
     }
 
     /// 客户端的设置变了。视距由下一次跟踪阶段生效，皮肤外层和主手由实体同步发出去。
@@ -1707,10 +1747,38 @@ impl World {
         };
         player.client = information;
 
-        let show_hat = player.shows_hat();
-        if let Some(frames) = self.master.global.set_hat(id, show_hat) {
-            self.island.region.links.broadcast(&frames);
+        let show = player.shows_hat();
+        let (mut port, region) = self.island_port();
+        port.submit(region, GlobalEffect::Hat { player: id, show });
+    }
+
+    /// 岛写全局状态的口子（按 [`Master::port_mode`]）和岛本身。
+    ///
+    /// The island's port for global writes (per [`Master::port_mode`]) and the
+    /// island itself.
+    fn island_port(&mut self) -> (GlobalPort<'_>, &mut Region) {
+        let port = match self.master.port_mode {
+            PortMode::Direct => GlobalPort::Direct(&mut self.master.global),
+            PortMode::Queued => GlobalPort::Queued(&mut self.island.effects),
+        };
+        (port, &mut self.island.region)
+    }
+
+    /// 岛交回：主控按提交顺序应用排队实现攒下的全局改动。放在岛这一刻的活做完、
+    /// 出站缓冲刷出之前，主控产生的帧（命令反馈、Tab 名单）和岛的帧同一刻发出。
+    /// 直接实现下队列是空的，这里什么都不做。
+    ///
+    /// Island hand-back: the master applies the global changes the queued port
+    /// collected, in submission order. It sits after the island's work for the
+    /// tick and before the outbound flush, so frames the master produces
+    /// (command feedback, the tab list) go out in the same tick as the island's.
+    /// Under the direct port the queue is empty and this does nothing.
+    fn hand_back(&mut self) {
+        if self.island.effects.is_empty() {
+            return;
         }
+        let effects = std::mem::take(&mut self.island.effects);
+        crate::global_port::apply_all(&mut self.master.global, &mut self.island.region, effects);
     }
 
     /// 按官方 `stopServer` 顺序关服：先存玩家、再存区块（后续步骤接入 IO 线程后补），
@@ -1722,6 +1790,9 @@ impl World {
     /// and `chunk_tickets.dat`, release the lock, and finally kick everyone.
     /// Every step only logs on error so shutdown can never hang.
     fn shut_down(&mut self) -> ControlFlow<()> {
+        // 还没交回的全局改动先应用，存盘看到的是最新的。
+        // Apply global changes not yet handed back so the save sees them.
+        self.hand_back();
         // 官方顺序：玩家 → 区块 → level.dat / data/ → 解锁。
         // level.dat/data 的字节也在关服的阻塞栅栏之前交给 IO 线程，
         // 世界线程只编码，不逐文件同步写（F3 / R5）。

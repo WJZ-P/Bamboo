@@ -16,8 +16,9 @@
 use mc_bamboo_command::permission;
 
 use crate::{
-    command::{commands, feedback},
+    command::{commands, feedback, run},
     global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     region::Region,
 };
@@ -54,22 +55,21 @@ pub(crate) fn is_console(id: PlayerId) -> bool {
 /// Official `DedicatedServer.handleConsoleInputs` → `Commands.performPrefixedCommand`:
 /// strip one optional leading `/`, parse at permission 4, and run the result through the
 /// same action table player commands use. Console commands skip signed-chat handling.
+///
+/// 控制台没有岛，命令全部在主控以直接实现执行（岛的实施计划 2 节第 8 条）。
+///
+/// The console has no island; every command runs on the master with the direct
+/// port (island plan, section 2, item 8).
 pub(crate) fn on_console_command(global: &mut Global, region: &mut Region, line: &str) {
     let command = line.strip_prefix('/').unwrap_or(line);
     match commands().graph.parse(command, PERMISSION) {
-        Ok(parsed) => {
-            let action = commands()
-                .actions
-                .get(parsed.action)
-                .and_then(|action| *action);
-            if let Some(action) = action {
-                if let Err(failure) = action(global, region, SOURCE, &parsed) {
-                    feedback::report(region, SOURCE, command, &failure);
-                }
-            } else {
-                feedback::report(region, SOURCE, command, &feedback::fail("command.failed"));
-            }
-        }
+        Ok(parsed) => run(
+            &mut GlobalPort::Direct(global),
+            region,
+            SOURCE,
+            command,
+            parsed,
+        ),
         Err(failure) => feedback::report(
             region,
             SOURCE,
@@ -114,7 +114,7 @@ mod tests {
     /// One level-4 online op that can receive the console command's `chat.type.admin`.
     fn world_with_op() -> (Global, Region, Sink) {
         let mut region = Region::new(2, 20, false);
-        region.send_command_feedback = true;
+        region.global.send_command_feedback = true;
         region.broadcast_console_to_ops = true;
         let id = PlayerId(1);
         let mut player = Player::new(

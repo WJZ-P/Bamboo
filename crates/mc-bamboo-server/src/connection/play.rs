@@ -4,14 +4,16 @@
 //! 维持心跳。心跳留在这里，世界线程卡顿或者 socket 写不动时，超时判断都不会跟着停。
 
 use std::{
-    sync::{Arc, atomic::AtomicUsize, mpsc::Sender},
+    sync::{Arc, atomic::AtomicUsize},
     time::Duration,
 };
 
 use bytes::BytesMut;
 use mc_bamboo_auth::{DecryptHalf, EncryptHalf, Encryption};
 use mc_bamboo_data::packets::play::serverbound;
-use mc_bamboo_game::{InFlight, Inbound, JoinRequest, PlayerId, Segment};
+use mc_bamboo_game::{
+    InFlight, Inbound, JoinRequest, PlayerId, PlayerInbox, PlayerSender, Segment,
+};
 use mc_bamboo_protocol::{
     compression,
     frame::append_frame,
@@ -66,14 +68,20 @@ pub(super) async fn serve(
     } = connection;
     let player = PlayerId(session.entity_id);
     let peer_ip = connection.peer_ip.clone();
+    // 这名玩家自己的入站队列：请求和离开走它，收端随 `Join` 交给世界线程。
+    // This player's own inbound queue: requests and the leave go through it,
+    // and the receiver travels to the world thread with `Join`.
+    let (player_inbox, inbox) = shared.inbox.player_channel();
     let leave = LeaveGuard {
-        inbox: &shared.inbox,
+        inbox: &player_inbox,
         player,
     };
 
     let reader = RequestReader {
         player,
         shared,
+        player_inbox: &player_inbox,
+        join_inbox: Some(inbox),
         max_frame_len,
         compression,
         peer_ip,
@@ -100,7 +108,7 @@ pub(super) async fn serve(
 
 /// 连接结束时告诉世界线程。放在析构里，所以连接无论怎么结束都能送达。
 struct LeaveGuard<'a> {
-    inbox: &'a Sender<Inbound>,
+    inbox: &'a PlayerSender,
     player: PlayerId,
 }
 
@@ -125,7 +133,7 @@ fn enqueue<P: ClientboundPacket>(outbound: &Outbound, packet: &P) -> Result<(), 
 async fn exchange(
     stream: &mut TcpStream,
     read_buffer: &mut BytesMut,
-    reader: RequestReader<'_>,
+    mut reader: RequestReader<'_>,
     session: &PlayerSession,
     client: ClientInformation,
     encryption: Option<Encryption>,
@@ -243,6 +251,10 @@ async fn write_queue<W: AsyncWrite + Unpin>(
 struct RequestReader<'a> {
     player: PlayerId,
     shared: &'a Shared,
+    /// 这名玩家自己的入站队列，请求走它；进服和延迟走主控队列。
+    player_inbox: &'a PlayerSender,
+    /// 这条队列的收端，进服时随 `Join` 交给世界线程。
+    join_inbox: Option<PlayerInbox>,
     max_frame_len: usize,
     compression: Option<i32>,
     /// 对端 IP 文本，交给世界线程复查 IP 封禁。
@@ -252,11 +264,12 @@ struct RequestReader<'a> {
 impl RequestReader<'_> {
     /// 把玩家交给世界线程，从这一刻起所有发给客户端的包都由世界线程写。
     fn join(
-        &self,
+        &mut self,
         session: &PlayerSession,
         client: ClientInformation,
         outbound: &Outbound,
     ) -> Result<(), ConnectionError> {
+        let inbox = self.join_inbox.take().expect("每条连接只进服一次");
         let op = self
             .shared
             .admin
@@ -286,13 +299,24 @@ impl RequestReader<'_> {
                 mc_bamboo_game::save_session::load_player_bytes(root, session.uuid.as_bytes())
             }),
             sink: Box::new(outbound.clone()),
+            inbox,
         };
         self.send_to_world(Inbound::Join(Box::new(request)))
     }
 
+    /// 走主控队列：进服和延迟。
+    /// Through the master queue: join and latency.
     fn send_to_world(&self, message: Inbound) -> Result<(), ConnectionError> {
         self.shared
             .inbox
+            .send(message)
+            .map_err(|_| ConnectionError::ServerStopped)
+    }
+
+    /// 走这名玩家自己的队列：请求。
+    /// Through this player's own queue: requests.
+    fn send_request(&self, message: Inbound) -> Result<(), ConnectionError> {
+        self.player_inbox
             .send(message)
             .map_err(|_| ConnectionError::ServerStopped)
     }
@@ -372,7 +396,7 @@ impl RequestReader<'_> {
             {
                 let in_flight = InFlight::acquire(in_flight, IN_FLIGHT_LIMIT)
                     .ok_or(ConnectionError::TooManyRequests)?;
-                self.send_to_world(Inbound::Request {
+                self.send_request(Inbound::Request {
                     player: self.player,
                     request: PlayRequest::Other(id),
                     in_flight,
@@ -382,7 +406,7 @@ impl RequestReader<'_> {
             request => {
                 let in_flight = InFlight::acquire(in_flight, IN_FLIGHT_LIMIT)
                     .ok_or(ConnectionError::TooManyRequests)?;
-                self.send_to_world(Inbound::Request {
+                self.send_request(Inbound::Request {
                     player: self.player,
                     request,
                     in_flight,

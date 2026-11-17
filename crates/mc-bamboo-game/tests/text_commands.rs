@@ -32,7 +32,7 @@ struct Frame {
 }
 
 struct Harness {
-    inbox: std::sync::mpsc::Sender<Inbound>,
+    inbox: mc_bamboo_game::InboundSender,
     world: World,
     quota: Arc<std::sync::atomic::AtomicUsize>,
     next_id: i32,
@@ -41,7 +41,7 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        let (inbox, receiver) = std::sync::mpsc::channel();
+        let (inbox, receiver) = mc_bamboo_game::inbound_channel();
         let world = World::new(
             WorldConfig {
                 view_distance: 2,
@@ -78,6 +78,10 @@ impl Harness {
             online_at_login: 0,
             player_data: None,
             sink: Box::new(sink.clone()),
+            // 请求走主控队列（世界线程一样按序号处理），玩家自己的队列留空。
+            // Requests use the master queue (handled by number all the same);
+            // the player's own queue stays empty.
+            inbox: self.inbox.player_channel().1,
         };
         self.inbox.send(Inbound::Join(Box::new(join))).unwrap();
         self.sinks.push((id, sink));
@@ -110,7 +114,7 @@ impl Harness {
                     admin: Default::default(),
                     ..Default::default()
                 },
-                std::sync::mpsc::channel().1,
+                mc_bamboo_game::inbound_channel().1,
             ),
         );
         world.run();

@@ -115,7 +115,7 @@ fn component(
     parsed: &ParsedCommand,
     name: &str,
 ) -> Result<Component, CommandFail> {
-    crate::command::text::resolved_component(global, region, source, parsed, name)
+    crate::command::text::resolved_component(global.scoreboard(), region, source, parsed, name)
 }
 
 /// 把 SNBT 参数转成数字格式。`blank` 是空格式，`styled` 用样式标签，`fixed` 用组件。
@@ -1564,7 +1564,13 @@ mod tests {
     #[test]
     fn feedback_respects_send_command_feedback() {
         let (mut server, client) = operator("Op");
-        server.region().send_command_feedback = false;
+        // 改权威的规则：快照每刻都从 `Global` 重发。
+        server
+            .world
+            .master
+            .global
+            .rules_mut()
+            .assign(mc_bamboo_data::gamerules::SEND_COMMAND_FEEDBACK, "false");
         run(
             &mut server,
             &client,

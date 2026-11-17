@@ -5,7 +5,7 @@
 
 use std::{
     fmt,
-    sync::{Arc, Mutex, atomic::AtomicUsize, mpsc},
+    sync::{Arc, Mutex, atomic::AtomicUsize},
 };
 
 use mc_bamboo_game::{
@@ -72,7 +72,7 @@ impl PlayerSink for DiscardingSink {
 
 #[test]
 fn chat_is_logged_with_the_not_secure_tag() {
-    let (inbox, receiver) = mpsc::channel();
+    let (inbox, receiver) = mc_bamboo_game::inbound_channel();
     let config = WorldConfig {
         view_distance: 2,
         max_players: 20,
@@ -95,6 +95,7 @@ fn chat_is_logged_with_the_not_secure_tag() {
         online_at_login: 0,
         player_data: None,
         sink: Box::new(DiscardingSink),
+        inbox: inbox.player_channel().1,
     };
     let quota = Arc::new(AtomicUsize::new(0));
     let chat = Inbound::Request {

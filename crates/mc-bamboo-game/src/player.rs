@@ -95,6 +95,21 @@ pub(crate) struct Player {
     ///
     /// Official `ServerPlayer.respawnConfig`. Stored only; there is no death respawn.
     pub(crate) respawn: Option<RespawnData>,
+    /// 这名玩家自己的入站队列（岛的实施计划第 6 节第 4 步）。世界线程每刻取一次，
+    /// 和主控队列、别的玩家的队列按序号归并；跟着玩家走。
+    ///
+    /// This player's own inbound queue (island plan, section 6, step 4). The world
+    /// drains it each tick and merges it with the master queue and the other
+    /// players' queues by number; it moves with the player.
+    pub(crate) inbox: crate::inbound::PlayerInbox,
+    /// 官方 `ServerPlayer` 的六个 `lastRecorded*` 字段（计分板的只读准则），顺序见
+    /// [`tick_criteria`](crate::scoreboard::tick_criteria)。新玩家是构造函数的初值。
+    ///
+    /// The six official `ServerPlayer.lastRecorded*` fields (the scoreboard's
+    /// read-only criteria), ordered as in
+    /// [`tick_criteria`](crate::scoreboard::tick_criteria). A new player starts at
+    /// the constructor defaults.
+    pub(crate) recorded_criteria: [i32; 6],
 }
 
 impl Player {
@@ -137,6 +152,8 @@ impl Player {
             drop_spam: 0,
             chat: PlayerChat::default(),
             respawn: None,
+            inbox: crate::inbound::PlayerInbox::default(),
+            recorded_criteria: crate::scoreboard::UNRECORDED_CRITERIA,
         }
     }
 

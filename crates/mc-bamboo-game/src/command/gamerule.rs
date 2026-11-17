@@ -62,7 +62,7 @@ pub(crate) fn set(
             // 先同步快照。`sendSuccess` 要读到刚写进去的 `send_command_feedback`。
             //
             // Publish first. `sendSuccess` must see the `send_command_feedback` just written.
-            global.rules().publish(region);
+            global.publish(region);
             feedback::success(
                 region,
                 id,
@@ -212,7 +212,7 @@ mod tests {
             None,
         );
         assert_eq!(global.rules().int(gamerules::RANDOM_TICK_SPEED), 7);
-        assert_eq!(region.block_rules.random_tick_speed, 7);
+        assert_eq!(region.global.block_rules.random_tick_speed, 7);
         command::on_command(
             &mut global,
             &mut region,
@@ -228,7 +228,7 @@ mod tests {
             "gamerule tnt_explodes false",
             None,
         );
-        assert!(!region.block_rules.tnt_explodes);
+        assert!(!region.global.block_rules.tnt_explodes);
         command::on_command(
             &mut global,
             &mut region,
@@ -236,6 +236,6 @@ mod tests {
             "gamerule send_command_feedback false",
             None,
         );
-        assert!(!region.send_command_feedback);
+        assert!(!region.global.send_command_feedback);
     }
 }

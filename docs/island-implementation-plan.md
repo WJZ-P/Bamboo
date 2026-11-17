@@ -57,14 +57,14 @@
 | 5 | 游戏规则 | `Global.rules` 权威；`Region.block_rules`、`send_command_feedback` 等四个布尔是快照 | 主控 | 快照；`/gamerule` 在主控执行 |
 | 6 | 世界边界 | `Global.world_border` 权威；`Region.world_border` 快照（`publish_border`） | 主控 | 已经是快照模型，不变 |
 | 7 | 难度、出生点、默认模式、种子 | `Global.state()` | 主控 | 快照；命令在主控执行 |
-| 8 | 计分板、队伍 | `Global.scoreboard`；`tick_criteria(&mut region)` 每刻读玩家 | 主控 | 岛把六个只读准则的变化作为效果交回；计分板帧由主控生成、经信箱下发 |
+| 8 | 计分板、队伍 | `Global.scoreboard`；`tick_criteria(&mut region)` 每刻读玩家；聊天读发送者的队伍前后缀、`/tellraw` / `/title` 读分数（第 5a 步核对时补） | 主控 | 岛把六个只读准则的变化作为效果交回（第 5b 步起每名玩家的 `lastRecorded*` 放在 `Player` 上，同官方）；聊天和文本命令读快照；计分板帧由主控生成、经信箱下发 |
 | 9 | Boss 栏 | `Global.boss_bars`，进服时 `on_join` | 主控 | 同上 |
 | 10 | 玩家列表（Tab）、延迟 | `Global.roster`；`Inbound::Latency` 直接写 Global；每 601 刻广播 | 主控 | 进出、换模式是效果；延迟消息走主控队列；广播帧经信箱 |
 | 11 | 管理名单（op / ban / 白名单）、闲置踢出 | `Global.admin`；本刻的变化攒在 `Region.admin_changes`；`tick_idle(&mut global, &mut region)` | 主控 | 名单命令在主控执行；玩家的权限等级变化作为消息发给玩家所在的岛；闲置时限从快照读，踢人在岛里做 |
 | 12 | 聊天、签名聊天 | 每名接收者的 `player.chat.next_index` / `cache`（`secure_chat/deliver.rs:75-82`）、发送者的链状态，都在 `Player` 上；刷屏计数在 `Player` | 岛（跟着玩家） | 发送者所在岛校验签名后，把消息作为效果交给主控，主控扇出到每个岛，**各岛给自己的玩家逐个打包**（每名接收者的索引和缓存只由他所在的岛改）；跨岛的接收者晚 ≤ 1 刻 |
 | 13 | 命令 | 全部在世界线程以 `(&mut Global, &mut Region)` 执行；控制台命令也是 | 分三类 | 见 4.4 |
 | 14 | 实体 ID | 玩家：服务端静态原子计数；非玩家：每张 `EntityStore` 从 `1 << 24` 计数 | 进程级 | 改成一个共享的原子分配器（见 8.2 第 4 条）；不存盘，所以不影响存档 |
-| 15 | 随机源 | `Region.random`（方块逻辑和天气）、`sound_seed_generator`、`loot_sequences`（`RandomSequences::new(0)`，不存盘）；实体各自带随机源 | 岛 | 拆分时按岛的起源 section 派生，合并时留大的那个；天气另用主控的 |
+| 15 | 随机源 | `Region.random`（方块逻辑和天气）、`sound_seed_generator`、`loot_sequences`（`RandomSequences::new(0)`，不存盘）、`/random` 和 `/loot` 用的按世界种子建的序列（原在 `WorldState.sequences`，第 5b 步搬到 `Region.random_sequences`）；实体各自带随机源 | 岛 | 拆分时按岛的起源 section 派生，合并时留大的那个；天气另用主控的 |
 | 16 | Director、票表、停放表、IO、计算池、存盘队列 | `World.host`（`DirectorHost`） | 主控 | 不变；交付 / 收回改成发到岛的信箱 |
 | 17 | 玩家票中心、移动方向、需求快照 | `World.ticket_centers` / `player_directions` / `player_demand` | 主控 | 岛每刻在交回的报告里带上「哪些玩家跨了区块」 |
 | 18 | 每区块的 tick 档位 | `Region.tick_levels: TickLevels` | 岛 | `LevelChanged` 按区块归属路由到岛 |
@@ -253,6 +253,29 @@
 
 已经读 `region.tick` 的（约 12 处）：容器重查、讲台、传送确认、红石缓存。保持 `GameTime` 的（约 15 处）：`/time`、`SetTime`、`level.dat` 的 `Time`、世界边界渐变、战利品条件的 `game_time` / `day_time`。Director 用自己的 `director_tick`（约 12 处），留在主控不动。
 
+（2026-11-17 第 5a 步核对时补：「战利品条件的 `game_time` / `day_time`」现在其实不读任何时间——`block_drops.rs` 的 `LootLevel` 实现对两者都返回 `None`，`/loot` 的 `LootParams` 也不带时间；以后接上时读岛的快照里的 `GameTime`。岛内真正读 `GameTime` 的只有进服序列里的 `SetTime`（`Region::start_loading_chunks`），第 5a 步起读快照；`/worldborder` 渐变读 `global.time()` 是全局类命令，在主控。）
+
+### 5.4 岛内读 `Global` 的全部位置（2026-11-17 第 5a 步动手前核对）
+
+按「搜所有拿 `&Global` / `&mut Global` 的函数、所有 `global.` 的读」逐个看过。「岛内」= 收包处理、岛类命令（4.4 前两类里的本岛类和可能跨岛类）、岛的各个 tick 阶段；全局类命令以后在主控执行，读权威副本，不算。
+
+| 读的地方 | 读什么 | 第 5a 步 |
+|---|---|---|
+| 方块逻辑、实体碰撞、移动校验、挖掘 | 规则的方块快照、天气快照、世界边界 | 原来 `Region` 上的 `block_rules` / `block_weather` / `world_border` 三份快照并进 `GlobalView`（`region.global.*`），发布时机不变 |
+| 命令反馈、命令方块 | `send_command_feedback` / `log_admin_commands` / `command_blocks_work` | 同上，原来是 `Region` 上的三个布尔 |
+| `chat::on_chat` | 发送者的队伍前后缀（`scoreboard().format_player_name`） | 读快照的计分板。**第 2 节第 8 行没写**：聊天也读计分板 |
+| `/tellraw`、`/title`（`command/text.rs::resolve` 的 `score` 组件） | 分数 | 读快照的计分板；`/scoreboard`、`/team`、`/bossbar` 解析组件参数时仍读权威副本（全局类） |
+| `gamerules::on_request_values` | 全部规则的值 | 读快照 |
+| `command::admin::tick_idle` | 闲置分钟数 | 读快照（第 2 节第 11 行已写） |
+| 进服序列的岛内部分（`World::on_join` → `Region::add_player` / `start_loading_chunks`） | 默认游戏模式、世界出生点、种子哈希、难度包、时间和主世界时钟、天气、边界 | 读快照。Tab 名单、OP 名单复查、`remember_player`、计分板和 Boss 栏的进服包仍在主控 |
+| `/loot`、`/random` | `WorldState.sequences`（按世界种子建的随机序列；`/loot` 经 `get_random_items_with_seed` 的内部可变性推进它，`/random` 直接取） | **不是只读，进不了快照。第 2 节第 15 行漏了这一份**（只写了 `Region.loot_sequences`）。按第 15 行「随机源归岛」，第 5b 步搬到岛上 |
+| `/gamemode`、`change_game_mode` 包、`chat_session_update`、客户端设置的帽子 | 写 Tab 名单 | 写，第 5b 步变效果（`GlobalEffect::GameMode` / `ChatSession` / `Hat`） |
+| `set_game_rule` 包 | 写规则 | 写，第 5b 步权限在岛上查、改规则作为效果（`GlobalEffect::GameRules`） |
+| `ServerPlayer.doTick` 的六个只读准则（`tick_criteria`） | 写计分板 | 写，第 5b 步「岛算、主控应用」：`lastRecorded*` 搬到 `Player` 上（官方也在 `ServerPlayer` 上），岛比对后交回 `GlobalEffect::Criteria`，主控只在有目标跟踪这些准则时才拿可写的计分板。第 5a 步的只读预检 `criteria_pending` 随之去掉 |
+| 玩家离开（`on_leave`） | 写 Tab 名单、Boss 栏在线集合，读「离开了游戏」 | 第 5b 步补：原来直接改 `Global`，改成 `GlobalEffect::LeaveMessage` / `Left` |
+
+`GlobalView` 的发布时机：每刻开头、边界推进后、天气和时间推进后，以及只有一个岛时每处理完一条入站消息、每次准则写入、每次压测回调之后（这些地方以前会直接改 `Global`，重发保证岛读到的永远是最新的，逐位一致）。第 5b 步起玩家请求不再直接改 `Global`，改成「端口应用一条会动到快照的效果后重发」（全局类命令、`set_game_rule` 包、准则写入）；主控队列的消息（进服、延迟、名单重载、控制台命令）仍然每条处理完重发。规则和计分板在 `Global` 里改成 `Arc` 共享，发布只加引用计数，写的时候 `Arc::make_mut` 才复制。直接改快照字段的几处测试和测量脚手架（`force_chunks_unpaced` 关随机刻、两处多阶段生成测试、一处计分板测试）改成改权威规则再发布，否则会被下一次发布覆盖。
+
 ---
 
 ## 6. 实施步骤
@@ -271,9 +294,9 @@
 | 1 | ✅ **已完成（2026-11-17）**。**主控和岛分家（只搬字段）**：`World { master: Master, island: Island }`；`Master` 收 `global`、`host`、节拍、票中心、`director_tick`、存盘会话、压测钩子；`Island` 收 `region`、`entity_threads`。调用顺序一行不变 | `world.rs`、`world/*.rs`、`bench.rs`、`command/console.rs` | 逐位一致 | `cargo test --workspace`、`BAMBOO_TEST_LOADED=1`、全部 oracle、`tools/probe.sh --loaded`、`islands-1` / `spread-16` 同轮 A-B-A 在噪声内 | 中（400–700，机械） | 否 |
 | 2 | ✅ **已完成（2026-11-17）**：`EntityIds`（`Arc<AtomicI32>`）在 `mc-bamboo-blocks/src/entity/store.rs`，`World::build` 建一个交给岛的实体表，`with_next_id` 仍给对拍用（各自一个新计数器）。**实体 ID 共享分配器**：每个 `World` 一个 `Arc<AtomicI32>`，从 `1 << 24` 起，`EntityStore` 不再自带计数器（不用全局静态量，免得并行跑的测试互相影响） | `mc-bamboo-blocks/src/entity/store.rs`、`entity/mod.rs`、`mc-bamboo-game/src/region.rs` | 逐位一致（一个岛时号的序列相同） | 同上；加「两张表交替分配不撞号」的单元测试 | 小（~150） | 否 |
 | 3 | ✅ **已完成（2026-11-17）**：`RegionTick` 改成 `i64`、从 `GameTime` 起算，`run_block_ticks` / 划分阶段 / 剖析器计数 / `BenchWorld::game_time` 都读它；平移入口是 `Region::rebase_clock`，覆盖的字段见 5.1（核对时补了三行）。**岛的时钟**：`BlockTicks.now` 改由岛的时钟驱动，初值取 `GameTime`；去掉岛内对 `global.time()` 的 4 处读；给 5.1 表里的七类数据加 `rebase(delta)` | `world.rs`、`interaction.rs`、`region.rs`、`bench.rs`、`mc-bamboo-blocks` 的 `ticks.rs` / `level.rs` / `hopper.rs` / `cooking.rs` / `brewing.rs` / `campfire_entity.rs` / `sleep_clock.rs` / `block_entity.rs`、`lectern.rs`、`movement.rs` | 逐位一致 | 同上；每类一个「平移 d 后再跑 = 时钟本来就差 d 时跑」的随机测试，加改坏确认（故意漏平移一类要被抓到） | 中（~700） | 否 |
-| 4 | **入站按序号归并**：服务端给每条 `Inbound` 盖一个进程级递增序号；按玩家分队列（队列挂在 `Player` 上，跟着玩家走），非玩家消息进主控队列；世界每刻把主控队列和玩家队列按序号归并 | `mc-bamboo-server` 的 `connection/play.rs`、`players.rs`、`server.rs`、`console.rs`；游戏层 `inbound.rs`、`world.rs`、`player.rs` | 逐位一致（序号就是现在的通道顺序） | 同上；探针；加「两名玩家交错发包、序号归并后顺序和单通道相同」的测试 | 中（~500） | 否 |
-| 5a | **`Global` 快照**：`GlobalView`（规则、天气、时间和时钟、边界、难度、出生点、名单的只读部分）每刻发布一次，岛内所有读 `Global` 的地方改读它 | `global.rs`、`weather.rs`、`gamerules.rs`、`world.rs`、`command/*` 的读路径、`region.rs` 的快照字段 | 逐位一致 | 同上 | 中（~800） | 否 |
-| 5b | **效果消息和命令分类**：岛对 `Global` 的写变成 `GlobalEffect`；`GlobalPort` 有两种实现——「直接」（立刻应用，单岛和精确模式用）和「排队」（交回时应用）；计分板准则、闲置踢出、延迟广播、Tab 列表拆成「岛算、主控应用」；命令按 4.4 分类，全局类走 `GlobalPort` | `global.rs`、`command/*`（51 个顶层字面量里约 25 个）、`chat.rs`、`secure_chat/deliver.rs`、`scoreboard/`、`admin.rs`、`world.rs` | 逐位一致（「直接」实现） | 同上；单元测试里用「排队」实现跑一遍全部命令测试，只允许反馈晚到、内容不变 | 大（~1500，可再拆两次合并） | 否 |
+| 4 | ✅ **已完成（2026-11-17，`7cb7237f`）**。**入站按序号归并**：服务端给每条 `Inbound` 盖一个进程级递增序号；按玩家分队列（队列挂在 `Player` 上，跟着玩家走），非玩家消息进主控队列；世界每刻把主控队列和玩家队列按序号归并 | `mc-bamboo-server` 的 `connection/play.rs`、`players.rs`、`server.rs`、`console.rs`；游戏层 `inbound.rs`、`world.rs`、`player.rs` | 逐位一致（序号就是现在的通道顺序） | 同上；探针；加「两名玩家交错发包、序号归并后顺序和单通道相同」的测试 | 中（~500） | 否 |
+| 5a | ✅ **已完成（2026-11-17，`632c9276`）**：核对结果和发布时机见 5.4。**`Global` 快照**：`GlobalView`（规则、天气、时间和时钟、边界、难度、出生点、名单的只读部分）每刻发布一次，岛内所有读 `Global` 的地方改读它 | `global.rs`、`weather.rs`、`gamerules.rs`、`world.rs`、`command/*` 的读路径、`region.rs` 的快照字段 | 逐位一致 | 同上 | 中（~800） | 否 |
+| 5b | ✅ **已完成（2026-11-17，`482e8c34`）**：`global_port.rs`（`GlobalEffect` 八种、`GlobalPort::{Direct, Queued}`、交回 `hand_back` 在出站刷出之前）；命令动作分 `IslandFn` / `CommandFn` 两种签名，`command/class.rs` 是 4.4 的表并由测试核对 51 个顶层字面量；聊天、`secure_chat/deliver.rs`、延迟广播单岛时不写 `Global`，留给第 10 步。**效果消息和命令分类**：岛对 `Global` 的写变成 `GlobalEffect`；`GlobalPort` 有两种实现——「直接」（立刻应用，单岛和精确模式用）和「排队」（交回时应用）；计分板准则、闲置踢出、延迟广播、Tab 列表拆成「岛算、主控应用」；命令按 4.4 分类，全局类走 `GlobalPort` | `global.rs`、`command/*`（51 个顶层字面量里约 25 个）、`chat.rs`、`secure_chat/deliver.rs`、`scoreboard/`、`admin.rs`、`world.rs` | 逐位一致（「直接」实现） | 同上；单元测试里用「排队」实现跑一遍全部命令测试，只允许反馈晚到、内容不变 | 大（~1500，可再拆两次合并） | 否 |
 | 6 | **岛的停放 / 运行所有权和区块信箱**：`Island: Send`；Director 的 `ToRegion` 改为进岛的信箱（带目标岛编号），宿主不再在 `pump` 里直接拿 `&mut Region`；存盘快照改成「主控出名单、岛编码交回」；宿主记的子项改记主控的剖析器。两种驱动：**齐步**（岛借给主控，信箱在现在的同一个时点当场应用，精确模式；这一步仍是缺省）和**分离**（信箱在岛下一刻开头应用）。所有要求逐位一致的测试、对拍、探针在这一步改成显式选齐步 | `director_host.rs` 的 `pump` / `flush_region_mail_into` / `region_message` / `poll_io` / `save_loaded_dirty` / `snapshot_all_dirty` / `shutdown`；`mc-bamboo-world/src/director/state.rs` 的 `RegionMessage`（加岛编号）；`world.rs`、`region/column.rs`、`profiler.rs`；测试、`mc-bamboo-vanilla`、`tools/probe.sh` 的模式选择 | 齐步：逐位一致；分离：交付晚一刻 | 显式齐步跑全部测试和对拍；缺省配置下全套测试和探针都过；分离模式跑 `BAMBOO_TEST_LOADED` 测试，按「交付晚一刻」调整的少数断言单独列出；`inline_and_pool_produce_identical_worlds` 两种驱动都过 | 大（~1000） | **是**（宿主的邮件路径、`RegionMessage`） |
 | 7 | **tick 线程池和调度（仍一个岛）**：主控线程（20 TPS，`Global` + Director）+ tick 线程池；岛按截止时间派发、跑完交回；分离驱动下主控和岛并行；`bamboo.toml` 加 `island_threads`（0 = 齐步、内联）。**验收通过后缺省改成 ≥ 1（分离驱动）**，具体值按测量定。总设计稿第 12 节第 3 条（等子任务的线程只能帮子任务）这一步不涉及，岛内还没有子任务 | 新 `island_pool.rs`、`world.rs`、`mc-bamboo-server/src/server.rs`、`config_files.rs`、`docs/configuration.md` | `island_threads = 0`：逐位一致；缺省（分离）：同第 6 步分离模式 | 显式 `island_threads = 0` 跑全部测试和对拍；**缺省配置下全套测试和探针都过**；量「主控 ↔ 岛交接」每刻的额外耗时（目标 < 50 µs）；`islands-1` / `normal-*` 打开 / 关闭同轮对比 | 中（~700） | 否 |
 | 8 | **分区器，只算不用**：主控按 3.1 维护 section 计数和岛的划分、待合并 / 待拆分，统计岛数、大小、每秒合并 / 拆分次数，断言不变量；不真的拆 | 新 `island_partition.rs`；`director_host.rs` 的 `pump`（把 `LevelChange` 喂给分区器）；`mc-bamboo-world/src/director/state.rs`（`classify` 的结果对外暴露） | 不变 | 随机移动玩家 / 随机挂票的模糊测试逐刻断言不变量；增量和全量划分逐刻相同（照单元划分第 2 步的做法）；`islands-K` / `normal-*-fly` 下的统计 | 中（~800） | **是** |
@@ -282,6 +305,8 @@
 | 11 | **长时间压力验收和调参**：长时间压力、合并拆分频率和等待时间（总设计稿 17.2）、分区器迟滞参数和 `island_threads` 的缺省值按测量调整、把差异写进第 13 节。缺省值已在第 7、10 步改过，这一步不再改开关 | 文档、`tools/mc-bamboo-loadtest`、必要时 `config_files.rs` 的缺省值 | — | 见 6.2 | 小 | 否 |
 
 **第 1–3 步的实测（2026-11-17）**：6.1 的验收全过（`cargo test --workspace` + `BAMBOO_TEST_LOADED=1` 共 4313 个测试 0 失败，11 个对拍 0 不一致，`oracle java` 两种配置 10114 / 0 fail，hy4 探针和 `--loaded` 两遍共 5 次 719/719）。性能同轮 A-B-A（第 0 步合并点对第 3 步末），每场景 5 轮、每次 20 秒，逐轮 `tick_total` 均值比的中位数：`islands-1` 0.904、`spread-16` 1.018、`normal-20-walk` 1.022；同机 A/A 对照（`islands-1`）0.956，单轮范围 0.84–1.07，三个场景都在噪声内。微基准 7 轮 A-B 交替：`cache_bench`（关缓存）0.994；`ticks_bench` 总中位数 1.010（rolling 1.006 / 1.018 / 1.034），只改了计划刻热路径上「最近排刻时刻」的编码，单独对照这一处是中性的，剩下的差别只出现在测试二进制里（第 3 步往同一个测试二进制加了不少测试代码），正式二进制的 `cache_bench` 没有。
+
+**第 4–5b 步的实测（2026-11-17）**：按压缩验收每步跑 `fmt --check`、`clippy --workspace --all-targets` 0 警告、`cargo test -p mc-bamboo-game`（第 4 步另加 `-p mc-bamboo-server`）和 `BAMBOO_TEST_LOADED=1` 各 978–979 个 0 失败、`entity-oracle` / `move-oracle` / `menu` 0 不一致、`oracle java --weather clear` 10114 / 0 fail、hy4 探针 719/719；第 4 步的交错发包测试做了改坏确认（去掉按序号排序就失败），第 5b 步的分类测试也做了（把 `setworldspawn` 改注册成本岛类就失败）。**排队实现**：`BAMBOO_TEST_GLOBAL_PORT=queued cargo test -p mc-bamboo-game --lib` 979 个里 2 个不同，都是同一件事：离开时「离开了游戏」从实体移除包之前挪到之后（`leave_tells_the_others_in_order`、`entity_sync::tests::leaving_while_watched_removes_the_entity_before_the_tab_entry`，包的内容不变）。另做了一次只用于对照的试验：把交回挪到出站刷出之后（模拟多岛时主控的帧经信箱晚一刻），24 个测试不同，全是「反馈、Tab 名单、计分板 / 队伍 / Boss 栏的包在发令的那一刻还没到」，没有内容差别。性能同轮 A-B-A（第 3 步合并点 `45ec5a2b` 对第 5b 步末），3 轮、每次 20 秒，逐轮 `tick_total` 均值比的中位数：`islands-1` 0.982、`normal-20-walk` 1.099；同机同时段 A/A 对照（`normal-20-walk`）3 轮 0.755 / 1.523 / 0.773，机器负载 22–58，两个场景都在噪声内，但这一轮的噪声比第 1–3 步那次大得多。
 
 ### 6.1 单岛阶段（第 0–7 步）怎么验
 

@@ -14,7 +14,6 @@
 use std::{
     env,
     hint::black_box,
-    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -178,7 +177,7 @@ fn main() {
         clear_terrain_cache();
         clear_feature_cache();
         worldgen_profile::reset();
-        let (_inbox, receiver) = mpsc::channel();
+        let (_inbox, receiver) = mc_bamboo_game::inbound_channel();
         let config = WorldConfig {
             view_distance: 4,
             world_gen: WorldGenConfig {

@@ -36,7 +36,7 @@ impl PlayerSink for Sink {
 /// 一名等级 4 的管理员和一名普通玩家，都能收到命令反馈。
 fn world_with(names: &[(&str, u8)]) -> (Global, Region, Vec<(PlayerId, Sink)>) {
     let mut region = Region::new(2, 20, false);
-    region.send_command_feedback = true;
+    region.global.send_command_feedback = true;
     let mut sinks = Vec::new();
     for (index, (name, level)) in names.iter().enumerate() {
         let id = PlayerId(index as i32 + 1);
@@ -335,7 +335,9 @@ fn idle_players_are_kicked_after_the_timeout() {
     region.last_action_millis.insert(admin, 0);
     region.last_action_millis.insert(target, 0);
     region.clock_millis = Some(120_000);
-    tick_idle(&mut global, &mut region);
+    // 世界每处理完一条消息就重发快照，这里手动发一次。
+    global.publish(&mut region);
+    tick_idle(&mut region);
     assert!(!region.links.is_open(target));
     assert!(!region.links.is_open(admin));
 }

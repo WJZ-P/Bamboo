@@ -1571,7 +1571,7 @@ fn block_entities_outside_the_world_border_pause_and_resume() {
         }
     }
     let resumed_at = resumed_at.expect("边界扩大到熔炉后它恢复");
-    let border = server.world_region().world_border.clone();
+    let border = server.world_region().global.world_border.clone();
     assert!(border.is_within_bounds_pos(outside));
     // 大小 10 → 30 用 20 刻，每刻 +1，中心 6.5。渐变中的 `getMaxX()` 是
     // `getMaxX(0f)`，按 `lerp(0, previousSize, size)` 取上一刻的大小：第 0、1、2 刻的

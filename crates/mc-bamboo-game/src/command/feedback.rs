@@ -164,7 +164,7 @@ pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component,
     let send_own = if console {
         true
     } else {
-        region.send_command_feedback
+        region.global.send_command_feedback
     };
     if send_own {
         send_system(region, source, &message);
@@ -191,12 +191,12 @@ pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component,
     //
     // Official `broadcastToAdmins`: the extra `log_admin_commands` line is skipped when
     // the source is the server itself (the console case); a player's command is logged.
-    if !console && region.log_admin_commands {
+    if !console && region.global.log_admin_commands {
         info!(player = %name, "broadcasting command feedback");
     }
     // `broadcastToAdmins`：其他 OP 的 `chat.type.admin` 也看 `send_command_feedback`。
     // `broadcastToAdmins`: other ops' `chat.type.admin` also checks `send_command_feedback`.
-    if !region.send_command_feedback {
+    if !region.global.send_command_feedback {
         return;
     }
     let admin = Component::translate(

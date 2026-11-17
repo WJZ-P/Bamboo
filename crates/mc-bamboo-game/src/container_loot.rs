@@ -163,7 +163,7 @@ pub(crate) fn unpack_at(region: &mut Region, pos: BlockPos) {
         containers: &mut region.containers,
         sequences: &region.loot_sequences,
         random: &region.random,
-        weather: region.block_weather,
+        weather: region.global.block_weather,
     };
     unpack(state, pos);
 }

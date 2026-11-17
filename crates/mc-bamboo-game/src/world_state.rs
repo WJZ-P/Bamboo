@@ -9,7 +9,6 @@
 //! weather, seed and random sequences are not saved. Per-player respawn points live on `Player`.
 
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_loot::RandomSequences;
 use mc_bamboo_protocol::packet::play::GameMode;
 
 /// 没有存档也没有 `level-seed` 配置项，世界种子固定为 0。
@@ -125,8 +124,6 @@ pub(crate) struct WorldState {
     pub(crate) seed: i64,
     pub(crate) spawn: RespawnData,
     pub(crate) weather: Weather,
-    /// `/random` 和带 `random_sequence` 的战利品表共用。
-    pub(crate) sequences: RandomSequences,
 }
 
 impl Default for WorldState {
@@ -138,7 +135,6 @@ impl Default for WorldState {
             seed: WORLD_SEED,
             spawn: RespawnData::default(),
             weather: Weather::default(),
-            sequences: RandomSequences::new(WORLD_SEED),
         }
     }
 }
@@ -147,13 +143,19 @@ impl WorldState {
     /// 官方 `BiomeManager.obfuscateSeed`：Guava 的 sha256(long)，第一个 long 按小端读。
     ///
     /// `HashCode.asLong()` 取摘要的前 8 字节，Guava 的 `hashLong` 用小端写输入。
+    #[cfg(test)]
     pub(crate) fn hashed_seed(&self) -> i64 {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(self.seed.to_le_bytes());
-        let mut bytes = [0_u8; 8];
-        bytes.copy_from_slice(&digest[..8]);
-        i64::from_le_bytes(bytes)
+        hashed_seed(self.seed)
     }
+}
+
+/// 官方 `BiomeManager.obfuscateSeed`：种子的 SHA-256 取前 8 字节。
+pub(crate) fn hashed_seed(seed: i64) -> i64 {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(seed.to_le_bytes());
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    i64::from_le_bytes(bytes)
 }
 
 #[cfg(test)]

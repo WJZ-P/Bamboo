@@ -22,6 +22,7 @@ use crate::{
         select,
     },
     global::Global,
+    global_port::{GlobalEffect, GlobalPort},
     inbound::PlayerId,
     player::Player,
     region::{self, Region},
@@ -46,7 +47,7 @@ const PLAIN_ATTRIBUTES: [AttributeSnapshot<'static>; 2] = [
 ];
 
 pub(crate) fn gamemode(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
@@ -63,18 +64,18 @@ pub(crate) fn gamemode(
     };
     let protocol = protocol_mode(mode);
     for target in targets {
-        apply_mode(global, region, id, target, mode, protocol);
+        apply_mode(port, region, id, target, mode, protocol);
     }
     Ok(())
 }
 
 pub(crate) fn say(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let raw = required_message(parsed, "message")?;
     let rendered = render(region, id, raw)?;
     publish_command_chat(
@@ -89,12 +90,12 @@ pub(crate) fn say(
 }
 
 pub(crate) fn me(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let raw = required_message(parsed, "action")?;
     let rendered = render(region, id, raw)?;
     publish_command_chat(
@@ -109,12 +110,12 @@ pub(crate) fn me(
 }
 
 pub(crate) fn msg(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let selector = required_players(parsed, "targets")?;
     let targets = select::players(region, id, level_of(region, id), selector)?;
     let raw = required_message(parsed, "message")?;
@@ -200,12 +201,12 @@ pub(crate) fn list(
 }
 
 pub(crate) fn kick(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let selector = required_players(parsed, "targets")?;
     let targets = select::players(region, id, level_of(region, id), selector)?;
     let reason = if let Some(message) = parsed.get("reason").and_then(Value::as_message) {
@@ -261,7 +262,7 @@ pub(crate) fn help(
 ///
 /// `GameModeCommand.setGameMode` for the mode from F3+N / F3+F4. An unchanged mode sends nothing.
 pub(crate) fn change_own_mode(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     protocol: GameMode,
@@ -272,11 +273,11 @@ pub(crate) fn change_own_mode(
         GameMode::Adventure => CommandMode::Adventure,
         GameMode::Spectator => CommandMode::Spectator,
     };
-    apply_mode(global, region, id, id, mode, protocol);
+    apply_mode(port, region, id, id, mode, protocol);
 }
 
 pub(crate) fn apply_mode(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     source: PlayerId,
     target: PlayerId,
@@ -337,9 +338,16 @@ pub(crate) fn apply_mode(
             attributes,
         },
     );
-    if let Some(frames) = global.set_game_mode(target, protocol) {
-        region.links.broadcast(&frames);
-    }
+    // Tab 名单是全局的：经端口交给主控（直接实现下当场广播，和以前同一位置）。
+    // The tab list is global: hand it to the master through the port (the
+    // direct implementation broadcasts right here, as before).
+    port.submit(
+        region,
+        GlobalEffect::GameMode {
+            player: target,
+            mode: protocol,
+        },
+    );
     let mode_name = Component::translate(format!("gameMode.{}", mode.name()), []);
     if source == target {
         feedback::success(
@@ -354,7 +362,7 @@ pub(crate) fn apply_mode(
         //
         // `GameModeCommand.logGamemodeChange`: the target's `gameMode.changed` is gated by
         // `GameRules.SEND_COMMAND_FEEDBACK`.
-        if region.send_command_feedback {
+        if region.global.send_command_feedback {
             let changed = Component::translate("gameMode.changed", [mode_name.clone().into()]);
             // `GameModeCommand.logGamemodeChange` 走 `ServerPlayer.sendSystemMessage`。
             //

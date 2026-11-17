@@ -165,7 +165,7 @@ pub(crate) fn on_move_player(
     // 边界快照在借出玩家表之前取：两种借用互不相交。
     //
     // Take the border snapshot before borrowing the player map: the borrows are disjoint.
-    let border = region.world_border.clone();
+    let border = region.global.world_border.clone();
     let Region {
         players,
         player_grid,
@@ -239,7 +239,7 @@ pub(crate) fn on_accept_teleportation(
     // 边界快照在借出玩家表之前取：两种借用互不相交。
     //
     // Take the border snapshot before borrowing the player map: the borrows are disjoint.
-    let border = region.world_border.clone();
+    let border = region.global.world_border.clone();
     let Region {
         players,
         player_grid,

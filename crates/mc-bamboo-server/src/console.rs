@@ -11,9 +11,9 @@
 //! each line to the world thread as [`Inbound::ConsoleCommand`]; the world thread never
 //! reads stdin.
 
-use std::{io, sync::mpsc::Sender};
+use std::io;
 
-use mc_bamboo_game::Inbound;
+use mc_bamboo_game::{Inbound, InboundSender};
 use tracing::warn;
 
 /// 起一条读 stdin 的守护线程。读到 EOF、世界线程结束或出错时自行退出，永不 join。
@@ -22,7 +22,7 @@ use tracing::warn;
 /// Start a daemon thread reading stdin. It exits on EOF, when the world thread is gone,
 /// or on error, and is never joined. The official console thread is likewise a daemon
 /// that ends with the process.
-pub(crate) fn spawn(inbox: Sender<Inbound>) {
+pub(crate) fn spawn(inbox: InboundSender) {
     if let Err(error) = std::thread::Builder::new()
         .name("bamboo-console".to_owned())
         .spawn(move || run(inbox))
@@ -31,7 +31,7 @@ pub(crate) fn spawn(inbox: Sender<Inbound>) {
     }
 }
 
-fn run(inbox: Sender<Inbound>) {
+fn run(inbox: InboundSender) {
     let stdin = io::stdin();
     loop {
         let mut line = String::new();
@@ -56,7 +56,7 @@ fn run(inbox: Sender<Inbound>) {
 /// Turn one console line into a world-thread message; `false` means the world thread
 /// has ended. Empty lines are skipped and trailing `\r` / `\n` are removed (official
 /// `BufferedReader.readLine` also strips the terminator).
-fn handle_line(inbox: &Sender<Inbound>, line: &str) -> bool {
+fn handle_line(inbox: &InboundSender, line: &str) -> bool {
     let command = line.trim_end_matches(['\r', '\n']);
     if command.is_empty() {
         return true;
@@ -68,42 +68,40 @@ fn handle_line(inbox: &Sender<Inbound>, line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
-
     use super::*;
 
     #[test]
     fn a_command_line_becomes_a_console_message() {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mc_bamboo_game::inbound_channel();
         assert!(handle_line(&sender, "stop\n"));
         assert!(matches!(
-            receiver.recv().unwrap(),
+            receiver.recv().unwrap().message,
             Inbound::ConsoleCommand(command) if command == "stop"
         ));
     }
 
     #[test]
     fn crlf_and_blank_lines_are_handled_like_readline() {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mc_bamboo_game::inbound_channel();
         assert!(handle_line(&sender, "\r\n"));
         assert!(handle_line(&sender, "  \n"));
         assert!(handle_line(&sender, "say hi\r\n"));
         assert!(matches!(
-            receiver.recv().unwrap(),
+            receiver.recv().unwrap().message,
             Inbound::ConsoleCommand(command) if command == "  "
         ));
         assert!(matches!(
-            receiver.recv().unwrap(),
+            receiver.recv().unwrap().message,
             Inbound::ConsoleCommand(command) if command == "say hi"
         ));
         // 只有上面两条消息，没有空行产生的。
         // Only the two messages above; blank lines produce nothing.
-        assert!(receiver.try_recv().is_err());
+        assert!(receiver.try_recv().is_none());
     }
 
     #[test]
     fn a_closed_world_inbox_stops_the_reader() {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mc_bamboo_game::inbound_channel();
         drop(receiver);
         assert!(!handle_line(&sender, "stop\n"));
     }

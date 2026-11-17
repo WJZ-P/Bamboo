@@ -9,7 +9,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Mutex, RwLock,
-        mpsc::{self, Receiver, Sender},
+        mpsc::{self, Receiver},
     },
     thread,
     time::Duration,
@@ -20,7 +20,7 @@ use mc_bamboo_auth::{
 };
 use mc_bamboo_data::{registries, tags};
 use mc_bamboo_game::{
-    Inbound, ServiceProfileKeys, World, WorldConfig,
+    Inbound, InboundReceiver, InboundSender, ServiceProfileKeys, World, WorldConfig,
     admin::{AdminInit, AdminMessage, AdminSnapshot, LoginRefusal, WhitelistReload},
 };
 use mc_bamboo_protocol::{
@@ -156,7 +156,7 @@ pub(crate) struct Shared {
     /// Login waits until then.
     keys_ready: watch::Sender<bool>,
     /// 发给世界线程的消息。世界线程结束后发送会失败。
-    pub(crate) inbox: Sender<Inbound>,
+    pub(crate) inbox: InboundSender,
     status: RwLock<Arc<[u8]>>,
     players: Mutex<HashMap<Uuid, OnlinePlayer>>,
     events: broadcast::Sender<ServerEvent>,
@@ -256,11 +256,11 @@ impl ServerHandle {
 pub struct Server {
     listener: TcpListener,
     shared: Arc<Shared>,
-    inbox: Receiver<Inbound>,
+    inbox: InboundReceiver,
     admin: AdminInit,
     /// 世界线程发布名单变更的接收端，由 `run` 里的写盘任务消费。
     message_receiver: Receiver<AdminMessage>,
-    inbox_sender: Sender<Inbound>,
+    inbox_sender: InboundSender,
     /// 测试构建里等世界线程结束的上限，可由集成测试放宽。
     /// Test-build wait cap; integration tests widen it to wait for a real save.
     #[cfg(test)]
@@ -276,7 +276,7 @@ impl Server {
         let (keys_ready, _) = watch::channel(false);
         let status = encode_status(&config, 0, false)?;
         let (events, _) = broadcast::channel(EVENT_BUFFER_LEN);
-        let (inbox_sender, inbox) = mpsc::channel();
+        let (inbox_sender, inbox) = mc_bamboo_game::inbound_channel();
         let keypair = config.online_mode.then(ServerKeyPair::generate);
         // 官方也是在世界线程启动之前读一次这些名单。
         let lists = ListDirectory::at(config.list_directory.clone());
@@ -355,7 +355,7 @@ impl Server {
     /// [`run`](Self::run) 的本体。测试用它换掉世界线程的内容。
     async fn run_with_world(
         self,
-        world: impl FnOnce(Receiver<Inbound>) + Send + 'static,
+        world: impl FnOnce(InboundReceiver) + Send + 'static,
         shutdown: impl Future<Output = ()>,
     ) {
         let Self {
@@ -584,11 +584,7 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
 
 /// 消费世界线程发布的名单变更：先在专门的线程上写盘，再更新登录用的快照。
 /// `/whitelist reload` 在这里读盘，结果用 `Inbound` 送回世界线程。
-fn spawn_admin_writer(
-    shared: Arc<Shared>,
-    receiver: Receiver<AdminMessage>,
-    inbox: Sender<Inbound>,
-) {
+fn spawn_admin_writer(shared: Arc<Shared>, receiver: Receiver<AdminMessage>, inbox: InboundSender) {
     thread::Builder::new()
         .name("bamboo-admin-lists".to_owned())
         .spawn(move || {
@@ -613,8 +609,8 @@ fn spawn_admin_writer(
 ///
 /// 世界线程 panic 之后状态可能已经不一致，所以不重启，走关闭流程。
 fn spawn_world(
-    world: impl FnOnce(Receiver<Inbound>) + Send + 'static,
-    inbox: Receiver<Inbound>,
+    world: impl FnOnce(InboundReceiver) + Send + 'static,
+    inbox: InboundReceiver,
     stopped: CancellationToken,
 ) -> io::Result<()> {
     thread::Builder::new()
@@ -737,7 +733,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopped_token_fires_after_a_panic_and_after_a_normal_end() {
-        let (_sender, inbox) = mpsc::channel();
+        let (_sender, inbox) = mc_bamboo_game::inbound_channel();
         let stopped = CancellationToken::new();
         spawn_world(
             |_inbox| panic!("世界线程的测试 panic"),
@@ -749,7 +745,7 @@ mod tests {
             .await
             .expect("线程 panic 后要通知服务端");
 
-        let (_sender, inbox) = mpsc::channel();
+        let (_sender, inbox) = mc_bamboo_game::inbound_channel();
         let stopped = CancellationToken::new();
         spawn_world(|_inbox| {}, inbox, stopped.clone()).unwrap();
         timeout(DEADLINE, stopped.cancelled())
@@ -786,7 +782,7 @@ mod tests {
     #[tokio::test]
     async fn players_are_told_why_when_the_world_thread_dies() {
         let (server, address) = test_server().await;
-        let world = |inbox: Receiver<Inbound>| {
+        let world = |inbox: InboundReceiver| {
             for message in inbox {
                 if matches!(message, Inbound::Join(_)) {
                     panic!("世界线程的测试 panic");
@@ -818,10 +814,10 @@ mod tests {
     /// 世界线程卡住了：不处理任何消息，直到 `release` 被丢掉。
     fn stalled_world() -> (
         mpsc::Sender<()>,
-        impl FnOnce(Receiver<Inbound>) + Send + 'static,
+        impl FnOnce(InboundReceiver) + Send + 'static,
     ) {
         let (release, released) = mpsc::channel::<()>();
-        let world = move |inbox: Receiver<Inbound>| {
+        let world = move |inbox: InboundReceiver| {
             let _ = released.recv();
             drop(inbox);
         };
@@ -928,7 +924,7 @@ mod tests {
     #[tokio::test]
     async fn outbound_overflow_aborts_the_connection_without_a_farewell() {
         let (server, address) = test_server().await;
-        let world = |inbox: Receiver<Inbound>| {
+        let world = |inbox: InboundReceiver| {
             let mut sinks = Vec::new();
             for message in inbox {
                 match message {
@@ -1011,7 +1007,7 @@ mod tests {
         let (stop, stopped) = oneshot::channel::<()>();
         let started = std::time::Instant::now();
         let running = tokio::spawn(server.run_with_world(
-            |inbox: Receiver<Inbound>| {
+            |inbox: InboundReceiver| {
                 for message in inbox {
                     if matches!(message, Inbound::Shutdown) {
                         // 模拟一次慢存盘（编码 + flush），比 200ms 兜底长。
