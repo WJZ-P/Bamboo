@@ -168,11 +168,11 @@ pub struct BambooConfig {
     pub deliveries_per_tick: usize,
     /// Director 信箱每刻收回区块的个数上限，0 表示不限。
     pub reclaims_per_tick: usize,
-    /// 岛的 tick 线程数：0 = 齐步、内联（精确模式）；≥ 1 = 分离、和主控并行（默认 0）。
+    /// 岛的 tick 线程数：0 = 齐步、内联（精确模式）；≥ 1 = 分离、和主控并行（默认 1）。
     /// 环境变量 `BAMBOO_ISLAND_THREADS` 在运行时盖过它，但不写回文件。
     ///
     /// Island tick threads: 0 is lockstep, inline (exact mode); 1 or more is
-    /// detached, parallel to the master (default 0). `BAMBOO_ISLAND_THREADS`
+    /// detached, parallel to the master (default 1). `BAMBOO_ISLAND_THREADS`
     /// overrides it at run time but is never written back to the file.
     pub island_threads: usize,
 }
@@ -252,8 +252,8 @@ impl BambooConfig {
                 "# Director 信箱每刻最多收回多少个区块，0 表示不限，默认 64。\n",
                 "reclaims_per_tick = {}\n",
                 "\n",
-                "# 岛的 tick 线程数：0 = 精确模式（默认，岛在世界线程上跑，和官方逐位一致）；\n",
-                "# >= 1 = 岛在这么多条线程上和主控并行跑，区块交付晚一刻。\n",
+                "# 岛的 tick 线程数：0 = 精确模式（岛在世界线程上跑，和官方逐位一致）；\n",
+                "# >= 1 = 岛在这么多条线程上和主控并行跑（默认 1），区块交付晚一刻。\n",
                 "island_threads = {}\n",
             ),
             self.pre_play_timeout.as_secs(),
@@ -1129,7 +1129,7 @@ mod tests {
         assert_eq!(defaults.bamboo.entity_threads, 0);
         assert_eq!(defaults.bamboo.deliveries_per_tick, 64);
         assert_eq!(defaults.bamboo.reclaims_per_tick, 64);
-        assert_eq!(defaults.bamboo.island_threads, 0);
+        assert_eq!(defaults.bamboo.island_threads, 1);
         assert_eq!(defaults.bamboo.forwarding, ForwardingMode::Off);
     }
 
@@ -1233,7 +1233,7 @@ mod tests {
         assert_eq!(loaded.bamboo.keep_alive_interval, Duration::from_secs(15));
         assert_eq!(loaded.bamboo.forwarding, ForwardingMode::Off);
         assert_eq!(loaded.bamboo.reclaims_per_tick, 16);
-        assert_eq!(loaded.bamboo.island_threads, 0);
+        assert_eq!(loaded.bamboo.island_threads, 1);
     }
 
     #[test]

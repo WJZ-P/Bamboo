@@ -154,7 +154,7 @@ pub struct ServerSettings {
     pub deliveries_per_tick: u32,
     /// Director 信箱每刻最多收回多少个区块，0 表示不限。
     pub reclaims_per_tick: u32,
-    /// 岛的 tick 线程数：0 = 精确模式（岛在世界线程上跑），≥ 1 = 和主控并行（默认 0）。
+    /// 岛的 tick 线程数：0 = 精确模式（岛在世界线程上跑），≥ 1 = 和主控并行（默认 1）。
     pub island_threads: u32,
     /// 世界生成参数，从 `server.properties` 的四个键解析而来，不进界面 JSON。
     /// 界面目前不编辑这四项，`as_files` 会原样保留已有值。

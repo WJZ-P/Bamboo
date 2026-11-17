@@ -10,7 +10,7 @@
 //!
 //! - **齐步**（`island_threads = 0`）：岛停放着、借给主控，宿主每轮 `pump` 收敛前当场让岛
 //!   收取，和以前直接写 `Region` 的时点、顺序逐位相同（精确模式）。
-//! - **分离**（`island_threads ≥ 1`）：宿主只投信，岛在自己下一刻开头收取，回执在这一刻
+//! - **分离**（`island_threads ≥ 1`，缺省）：宿主只投信，岛在自己下一刻开头收取，回执在这一刻
 //!   交回时给主控。区块因此比齐步晚一刻交付。第 7 步起岛这一刻的主体在 tick 线程上跑，
 //!   和主控的 Director 推进并行（`island_pool.rs`、`World::tick_phases`）。
 //!
@@ -23,7 +23,8 @@
 //! ([`Posted`]) and the island's own [`ChunkMailbox`] takes them, delivers and
 //! reclaims within the budget, and hands the acks back. When it takes them is
 //! the drive's choice ([`IslandDrive`]): lockstep (`island_threads = 0`) applies
-//! them on the spot at the same points as before (exact mode); detached applies them at the start of the island's next tick, so chunks
+//! them on the spot at the same points as before (exact mode); detached (the
+//! default) applies them at the start of the island's next tick, so chunks
 //! arrive one tick later, and since step 7 runs the island's tick on a tick
 //! thread in parallel with the master's Director step.
 
@@ -57,7 +58,7 @@ pub(crate) type DemandRank = (i64, i32, i32);
 /// `island_threads` 没有显式给出时的值（岛的实施计划第 6 节第 7 步按测量定）。
 ///
 /// The `island_threads` value when none is given (island plan, step 7, by measurement).
-pub const DEFAULT_ISLAND_THREADS: usize = 0;
+pub const DEFAULT_ISLAND_THREADS: usize = 1;
 
 /// 改 `island_threads` 缺省值的环境变量：对拍、探针和测试用它整进程切到精确模式（`0`）。
 ///
