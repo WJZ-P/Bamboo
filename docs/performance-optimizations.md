@@ -74,6 +74,7 @@
 | 26 | 同上：微基准 N=16 时捡起段每个物品每刻（19） | 8.304 µs | 0.007 µs | 约 1200× |
 | 27 | 区块段危险寻路方块计数：每次 `Chunk::set_block` 写随机方块状态（20） | 53.1–53.4 ns | 52.5–54.5 ns | 无可测差别（中位数 +0.1 ns） |
 | 28 | 碰撞快路径：实体压测 1 线程 compute（21） | 59.7 ms / 10 刻 | 48.8 ms / 10 刻 | 1.22× |
+| 29 | 实体追踪配对不再扫全部玩家：`islands-8` 的 `entity_sync_and_tracking` 每刻（22） | 1.230 ms | 0.699 ms | 1.76× |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -104,6 +105,8 @@
 「第 22 + 23 项」的二进制，同轮交替三轮。
 第 25 项见第 18 节：整机 `islands-8` 的 `entities` 阶段和纯函数微基准是两组不同口径，
 前一行是同一轮里改前/改后两个二进制各自跑 3 轮的中位数，后一行是 N=16 的单价。
+第 26 / 27 / 28 项分别见第 19 / 20 / 21 节；第 29 项见第 22 节，量的是 `islands-K` 场景里 `entity_sync_and_tracking` 阶段的每刻耗时，
+同轮 A-B-A 交替三个二进制，机器负载抖动很大，逐轮比值和 A/A 对照一并写在 22.3。
 
 第 10 行**不是优化**，是 2026-11-11 安静窗口里量到的「还剩多少差距」，见 7e 节和
 `profiling.md` 第 10 节：新旧两版 tick 的区块数、段数、方块数完全相同，差距全在
@@ -3283,3 +3286,149 @@ python3 tools/mc-bamboo-loadtest/summarize-islands.py <结果目录>/off
 `all_air_section_skip_matches_the_full_scan` 确认全空气段跳过不改变结果，
 段里有石头时错误跳过会被发现。
 
+
+---
+
+## 22. 实体追踪不再扫全部玩家：`islands-8` 的同步阶段 1.230 → 0.699 ms / 刻（2026-11-17）
+
+代码：`crates/mc-bamboo-game/src/entity_tracking.rs` 的 `sync` / `update_pairings`，
+测试 `crates/mc-bamboo-game/src/entity_tracking/tests.rs`。这是
+`docs/island-implementation-plan.md` 8.1 第 1 条里剩下的那项；基线在
+`docs/profiling.md` 14.3 第 3 条和第 19 节的 19.5。
+
+### 22.1 先量：确认真的是它
+
+`islands-K` 修掉物品拾取的全表扫描（第 19 节）之后，`entities` 阶段每组耗时不再随 K
+增长，但 `entity_sync_and_tracking` 仍是唯一每组耗时随 K 上涨的阶段：K = 1 / 2 / 4 / 8
+时每组 0.117 / 0.105 / 0.114 / 0.163 ms（`profiling.md` 14.2 的 5 轮基线）。
+给剖析器临时加一个 `entity_tracking_sync` 子项，本树 release 二进制
+`INTERLEAVE=1`、`ROUNDS=3`、`DURATION=35`、`PROFILE_SECS=10`、`PARTITION=0`
+量出 `sync` 占这个阶段 94.1% / 93.1% / 91.7% / 89.8%：
+
+| 场景 | tick mean (ms) | `entity_sync_and_tracking` (ms) | `entity_tracking_sync` (ms) | 占该阶段 | 占整刻 |
+|---|---:|---:|---:|---:|---:|
+| islands-1 | 2.620 | 0.119 | 0.112 | 94.1% | 4.3% |
+| islands-2 | 6.200 | 0.277 | 0.258 | 93.1% | 4.6% |
+| islands-4 | 9.536 | 0.546 | 0.501 | 91.7% | 5.3% |
+| islands-8 | 16.063 | 1.359 | 1.225 | 89.8% | 7.5% |
+
+每组 0.112 / 0.129 / 0.125 / 0.153 ms，K = 1→8 涨 1.37 倍；总量 10.9 倍而实体数只涨 8 倍。
+别的主要阶段每组都是平的或下降：`scheduled_ticks` 0.879 / 0.965 / 0.879 / 0.730，
+`entities` 0.687 / 0.842 / 0.629 / 0.546，`light_updates` 0.385 / 0.510 / 0.333 / 0.302。
+所以这一处的残余超线性确实来自 `entity_tracking::sync`，不是别的阶段。插桩只用于测量，
+最终代码里已撤掉。
+
+原因有两层，都是「全部实体 × 全部玩家」：`sync` 每刻 `entities.iter()` 把整行克隆成
+`Entity`（含私有状态、随机源、移动记录）；`update_pairings` 对每个实体遍历
+`players.values()` 全部玩家跑 `is_visible`。K 组时 E 和 P 都 ∝ K，总量 ∝ K²。
+
+### 22.2 换成了什么做法，以及试过但撤销的两种
+
+最终做法（**实体驱动 + 每刻一次预建的粗网格**）：
+
+- `sync` 外层仍按 uid 升序遍历全部实体：每个实体都要发同步包，消失的也要发移除包，
+  这个顺序不能动。快照改从 `EntityStore::iter_public()` 抄公开数据，不克隆整行。
+- 每刻开头建一张 `HashMap<粗网格坐标, Vec<PlayerId>>`。格子边长取服务端视距 × 16
+  （`is_visible` 里玩家可见距离的上界），每名玩家登记进自己可见范围 `[x−r, x+r] × [z−r, z+r]`
+  覆盖到的格子，最多 4 格；表里按 `PlayerId` 升序，和原来 `players.values()` 一样。
+- 每个实体只查自己那一格，`gained`（开始追踪）在这段切片上按原来的 `is_visible` 精确过滤；
+  `lost`（停止追踪）直接遍历已有的 `seen_by`，所以传送、视距变小、区块不再跟踪都不会漏。
+  常见的一刻里两个名单都是空的，不分配堆内存、不排序、不开方。
+- **没有改发包的内容或顺序**：`lost` 先发 `remove_entities`，`gained` 再发配对 bundle，
+  两者都按 `PlayerId` 升序；外层的实体 uid 升序不变。`is_visible` 的条件一个字没改。
+
+试过但撤销的两种（同轮 A-B-A 微基准，见 22.4）：
+
+1. **实体驱动 + `PlayerGrid::players_within`**：对每个实体查 64 格网格的 25 个单元、
+   算 `sqrt()`、收进 `Vec` 排序再并进集合。固定开销 ≫ 原来 E×P 次廉价判断，全场景都变慢
+   （N=1 0.38×，N=16 0.98×）。
+2. **玩家驱动 + `EntityStore::for_each_in`**：每名玩家查一次实体段索引，把结果汇进
+   `BTreeMap<uid, BTreeSet<PlayerId>>`。两千多个小集合的分配同样让全场景变慢
+   （N=1 0.41×，N=16 0.92×）。
+
+两者都在 `entity_tracking.rs` 内部实现、没有改索引的公共接口；粗网格也是本文件内部的，
+`player_grid.rs` 一个字没动。任务里提到的两个已有索引仍在第 19 节和别的模块里照常用。
+
+### 22.3 同轮 A-B-A 的整机数字
+
+两个 release 二进制（`before-clean` = 改前，`after-spatial` = 改后）按
+「轮在外、场景在内、每个场景 A1 → B → A2」交替，3 轮、每轮 35 秒、
+`BAMBOO_PROFILE=10`、`BAMBOO_PROFILE_CHUNKS=1`、`PARTITION=0`、空闲端口 25982。
+复现脚本和原始报告在本分支的 `.measure/`（被 `.gitignore` 忽略）；
+`tools/mc-bamboo-loadtest/summarize-heavy.py` 的稳态筛选口径不变。
+改前列取同一轮 A1 / A2 的均值，再取 3 轮中位数；改后列取 B 的 3 轮中位数。
+
+| 场景 | 改前 tick (ms) | 改后 tick (ms) | 改前 `entity_sync_and_tracking` (ms) | 改后 (ms) | 阶段倍数 | 改前 µs/物品 | 改后 µs/物品 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| islands-1 | 2.792 | 2.765 | 0.1288 | 0.0904 | 1.42× | 0.503 | 0.353 |
+| islands-2 | 5.675 | 3.440 | 0.2727 | 0.1275 | 2.14× | 0.533 | 0.249 |
+| islands-4 | 11.048 | 13.191 | 0.6045 | 0.4915 | 1.23× | 0.590 | 0.480 |
+| islands-8 | 14.985 | 13.822 | 1.2295 | 0.6990 | 1.76× | 0.600 | 0.341 |
+
+逐轮的阶段倍数（改前 / 改后）：
+
+| 场景 | 轮 1 | 轮 2 | 轮 3 |
+|---|---:|---:|---:|
+| islands-1 | 1.42 | 1.47 | 1.26 |
+| islands-2 | 2.04 | 1.47 | 3.12 |
+| islands-4 | 1.23 | 1.46 | 1.29 |
+| islands-8 | 1.74 | 1.86 | 1.78 |
+
+**测量时机器不空闲**（同时有几个满载的编译和压测子代理，1 分钟平均负载 21–29），
+所以整刻绝对耗时在各轮之间差到 2 倍，甚至 `islands-4` 的改后整刻比改前慢：
+同一轮 A/A 对照（A1/A2 的阶段比中位数）是 1.057 / 0.795 / 1.356 / 1.044，
+噪声量级和 1.2–2 倍的收益同阶。**能用的是每一轮的阶段比值和每组单价**：
+12 个逐轮比值全都 > 1；K = 8 每组 `entity_sync_and_tracking` 从 0.154 降到 0.087 ms；
+改后 µs/物品 0.249–0.480，不再随 K 单调上涨。整刻列只作背景，不能跨场景或跨轮相减。
+
+### 22.4 微基准：每实体单价随规模的变化
+
+`cargo test -p mc-bamboo-game --release --lib entity_tracking::tests::stress -- --ignored --nocapture`
+在同一份世界里 A-B-A 交替跑 `sync_full_scan`（测试里保留的旧实现）和新的 `sync`，
+N 组各 256 个掉落物 + 10 名玩家、组距 1024 格，2 刻预热 + 8 刻计时 × 3 轮取中位数：
+
+| N | 改前 µs/刻 | 改前 µs/物品 | 改后 µs/刻 | 改后 µs/物品 | 倍数 |
+|---|---:|---:|---:|---:|---:|
+| 1 | 71.1 | 0.2776 | 44.3 | 0.1731 | 1.60× |
+| 2 | 158.0 | 0.3086 | 94.6 | 0.1847 | 1.67× |
+| 4 | 350.5 | 0.3423 | 195.6 | 0.1910 | 1.79× |
+| 8 | 966.3 | 0.4718 | 443.4 | 0.2165 | 2.18× |
+| 16 | 3157.8 | 0.7710 | 934.2 | 0.2281 | 3.38× |
+
+改前实体数涨 16 倍、耗时涨 44 倍，单价 0.278 → 0.771 µs（2.8 倍），是 O(E×P) 的签名；
+改后单价 0.173 → 0.228 µs，接近常数，总量近似线性。N = 1 到 16 每一档都比改前快。
+
+### 22.5 逐位一致的证据和改坏确认
+
+`entity_tracking/tests.rs` 里 `sync_full_scan` 是改动前的实现，只作测试参照：
+整表 `iter()` 克隆、每个实体扫 `players.values()`、以及完全相同的发包函数。
+
+- `spatial_pairing_matches_the_full_scan_tick_by_tick`：4 个固定种子 × 40 刻的随机场景
+  （生成 / 移除 / 移动实体、玩家传送、客户端视距变化、区块视图和待发区块变化），
+  逐刻比对每位玩家收到的**全部字节**（含顺序）、每个实体的 `seen_by` 集合，
+  以及 `(实体, 玩家, 开始/停止)` 的配对变化序列。
+- `public_snapshots_match_the_full_table_in_uid_order`：80 个跨段、三种类型的实体，
+  逐字段断言 `iter_public()` 的快照和原来的整行克隆相同，uid 升序不变。
+- `simultaneous_pairings_keep_the_player_and_entity_order`：六名玩家同时对六个实体开始追踪，
+  逐刻字节对拍能抓到实体外循环反序。
+- `tracked_players_still_get_stop_tracking_after_a_long_teleport`：传送到 1024 格外后，
+  断言那名玩家收到针对这个实体的 `remove_entities` 帧；视距变小另有
+  `candidate_radius_covers_the_largest_visible_range` 覆盖。
+- `cell_registration_covers_the_full_view_distance`：玩家在相邻格、实体在视距内但不同格时
+  仍要配对成功，钉住「格子登记覆盖可见范围」这个上界。
+
+改坏确认（每次只临时改一处，跑完恢复）：把 `lost` 的 `is_visible` 判定短路，
+三个测试立刻以「玩家收到的字节不一致」失败；把实体外循环反序，随机对拍和
+六人同时配对都失败；只把每名玩家登记进自己那一格，随机对拍和相邻格测试都失败。
+`entity-oracle java` 31 cases / 709 steps / 0 mismatches，`move-oracle java` 55 cases /
+0 mismatches；`cargo fmt --all --check`、`cargo clippy --workspace --all-targets` 0 警告、
+`cargo test -p mc-bamboo-game`、`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game` 全过。
+
+### 22.6 剩下的
+
+- 粗网格每刻重建一次，代价 O(玩家数)，`islands-8` 是 80 名；玩家数远多于实体数、
+  且实体很分散的场景没有单独量过。
+- `sync` 的外层仍是全表一次（O(实体数)），这是发包和移除语义要求的，不能再省；
+  `remove_missing` 每刻也扫一遍 `tracked` 表。
+- 改后 `entity_sync_and_tracking` 阶段里剩下的约 10% 是 `entity_sync::sync_entities`、
+  装备变化、方块变化确认和全局延迟广播，这次没有动。
