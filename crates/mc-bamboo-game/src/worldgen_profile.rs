@@ -135,6 +135,12 @@ struct CenterSnapshot {
 }
 
 fn feature_centers_snapshot() -> CenterSnapshot {
+    feature_centers_matching(|_| true)
+}
+
+/// 只统计满足条件的中心（测试按自己的种子过滤，不被并行测试的查询干扰）。
+/// Count only matching centers (tests filter by their own seed).
+fn feature_centers_matching(keep: impl Fn(&(i64, i32, i32)) -> bool) -> CenterSnapshot {
     let Ok(map) = FEATURE_CENTERS.lock() else {
         return CenterSnapshot {
             count: 0,
@@ -142,10 +148,11 @@ fn feature_centers_snapshot() -> CenterSnapshot {
             max_calls: 0,
         };
     };
+    let calls = || map.iter().filter(|(key, _)| keep(key)).map(|(_, &n)| n);
     CenterSnapshot {
-        count: map.len(),
-        called_once: map.values().filter(|&&n| n == 1).count(),
-        max_calls: map.values().copied().max().unwrap_or(0),
+        count: calls().count(),
+        called_once: calls().filter(|&n| n == 1).count(),
+        max_calls: calls().max().unwrap_or(0),
     }
 }
 
@@ -244,32 +251,36 @@ mod tests {
     use super::*;
 
     /// 关插桩时计数不变；打开后 `count` / `count_by` / `timer` 都记进去。
-    /// With instrumentation off nothing changes; on, every helper records.
+    /// 开关是进程级的，同进程别的测试可能并行走插桩点：这里只读测试自己的
+    /// 指标和自己种子下的中心，不读全局计数。
+    /// With instrumentation off nothing changes; on, every helper records. The
+    /// switch is process-wide and other tests may hit instrumented code in
+    /// parallel, so only this test's own metric and seed are checked.
     #[test]
     fn counters_only_move_when_enabled() {
-        // 这个测试进程里没有别的测量在跑；用完立刻关掉。
-        // No other measurement runs in this process; turn it off right away.
+        static OWN: AtomicU64 = AtomicU64::new(0);
+        const SEED: i64 = -0x005e_ed0f_7e57;
         disable();
-        let before = FEATURE_RUN_CALLS.load(Ordering::Relaxed);
-        count(&FEATURE_RUN_CALLS);
-        count_by(&FEATURE_RUN_CALLS, 3);
-        assert_eq!(FEATURE_RUN_CALLS.load(Ordering::Relaxed), before);
+        count(&OWN);
+        count_by(&OWN, 3);
+        assert_eq!(OWN.load(Ordering::Relaxed), 0);
+        assert!(timer(&OWN).is_none());
         reset();
-        count(&FEATURE_RUN_CALLS);
-        count_by(&FEATURE_RUN_CALLS, 3);
-        assert!(timer(&TERRAIN_NS).is_some());
-        assert_eq!(FEATURE_RUN_CALLS.load(Ordering::Relaxed), before + 4);
-        assert!(stats().terrain_ns > 0);
-        record_feature_center(7, 1, 2);
-        record_feature_center(7, 1, 2);
-        record_feature_center(7, 3, 4);
-        let centers = stats();
-        assert_eq!(centers.distinct_feature_centers, 2);
-        assert_eq!(centers.feature_centers_called_once, 1);
-        assert_eq!(centers.feature_centers_max_calls, 2);
+        count(&OWN);
+        count_by(&OWN, 3);
+        assert_eq!(OWN.load(Ordering::Relaxed), 4);
+        drop(timer(&OWN));
+        assert!(OWN.load(Ordering::Relaxed) >= 4);
+        record_feature_center(SEED, 1, 2);
+        record_feature_center(SEED, 1, 2);
+        record_feature_center(SEED, 3, 4);
+        let centers = feature_centers_matching(|key| key.0 == SEED);
+        assert_eq!(centers.count, 2);
+        assert_eq!(centers.called_once, 1);
+        assert_eq!(centers.max_calls, 2);
         disable();
-        let after = FEATURE_RUN_CALLS.load(Ordering::Relaxed);
-        count(&FEATURE_RUN_CALLS);
-        assert_eq!(FEATURE_RUN_CALLS.load(Ordering::Relaxed), after);
+        let after = OWN.load(Ordering::Relaxed);
+        count(&OWN);
+        assert_eq!(OWN.load(Ordering::Relaxed), after);
     }
 }
