@@ -811,7 +811,18 @@ fn place_code_piece(
     random: &WorldgenRandom,
 ) -> Result<(), String> {
     if kind == "mansion" {
-        return pieces::woodland_mansion::place_piece(piece, level, chunk_bb, random);
+        let mut collected = Vec::new();
+        pieces::woodland_mansion::place_piece_with_entities(
+            piece,
+            level,
+            chunk_bb,
+            random,
+            Some(&mut collected),
+        )?;
+        for (pos, tag) in collected {
+            level.world.set_block_entity(pos.0, pos.1, pos.2, &tag);
+        }
+        return Ok(());
     }
     if kind == "monument" {
         // 海底神殿的房间图需要从 seed / chunk 重建；放置阶段每个区块只跑一次，

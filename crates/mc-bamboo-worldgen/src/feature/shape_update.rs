@@ -40,6 +40,12 @@ pub trait BlockAccess {
     ///
     /// `level.setBlock(pos, state, flags)`, returning whether the block was written.
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool;
+    /// `blockEntity.loadWithComponents(nbt)`：记下该位置的方块实体 nbt。默认丢弃，
+    /// 只有真正在收集方块实体的调用方（`FeatureWorld`）需要实现。
+    ///
+    /// `blockEntity.loadWithComponents(nbt)`: record the block-entity nbt at the
+    /// position. The default drops it; only `FeatureWorld` collects it.
+    fn set_block_entity(&mut self, _x: i32, _y: i32, _z: i32, _nbt: &mc_bamboo_nbt::Tag) {}
     fn min_y(&self) -> i32;
     fn max_y(&self) -> i32;
 }
@@ -51,6 +57,10 @@ impl BlockAccess for FeatureWorld<'_> {
 
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
         self.set_block_with_heightmaps(x, y, z, state)
+    }
+
+    fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {
+        FeatureWorld::set_block_entity(self, x, y, z, nbt);
     }
 
     fn min_y(&self) -> i32 {

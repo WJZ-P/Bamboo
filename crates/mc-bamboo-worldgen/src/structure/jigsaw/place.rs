@@ -477,22 +477,47 @@ pub fn place_processed(
             let nbt = match &block.nbt {
                 None => None,
                 Some(tag) if is_randomizable_container(&block.state.name) => {
-                    // `StructureStart.placeInChunk` 传下来的是 `WorldgenRandom`（继承
-                    // `LegacyRandomSource`），`BitRandomSource.nextLong` 取两次 `next(32)`；
-                    // 直接问内层的 `Random` 会走 Xoroshiro 的原生一次 64 位，两种种子只差低位。
-                    // 走游戏路径时一定要用那个 `WorldgenRandom`，单独对拍的调用方才退回到
-                    // 传入的 `Random`。
+                    // `RandomizableContainer` 读入模板 nbt 时，`LootTable` 不存在就清空
+                    // 整份 `LootTable` 状态；随后写入的 `LootTableSeed`（可能非 0）
+                    // 不会单独存出。古城箱子只有 `Items`、没有表，所以要丢掉这个种子。
                     //
-                    // `StructureStart.placeInChunk` passes a `WorldgenRandom` (extending
-                    // `LegacyRandomSource`), whose `BitRandomSource.nextLong` draws two
-                    // `next(32)` values. Asking the inner `Random` instead uses Xoroshiro's
-                    // single 64-bit draw, which only differs in the low bits. The game path
-                    // must use that `WorldgenRandom`; stand-alone oracles fall back to `Random`.
-                    let seed = match worldgen_random {
-                        Some(source) => source.next_long(),
-                        None => random.next_long(),
-                    };
-                    Some(overwrite_loot_table_seed(tag, seed))
+                    // A `RandomizableContainer` with no `LootTable` in its template nbt
+                    // clears the whole loot-table state; the placement-time
+                    // `LootTableSeed` is then not saved on its own. The ancient-city chest
+                    // has only `Items`, so its seed must be dropped.
+                    if !nbt_has_key(tag, "LootTable") {
+                        let mut cleaned = tag.clone();
+                        nbt_remove_key(&mut cleaned, "LootTableSeed");
+                        Some(cleaned)
+                    } else {
+                        // `StructureStart.placeInChunk` 传下来的是 `WorldgenRandom`（继承
+                        // `LegacyRandomSource`），`BitRandomSource.nextLong` 取两次 `next(32)`；
+                        // 直接问内层的 `Random` 会走 Xoroshiro 的原生一次 64 位，两种种子只差低位。
+                        // 走游戏路径时一定要用那个 `WorldgenRandom`，单独对拍的调用方才退回到
+                        // 传入的 `Random`。
+                        //
+                        // `StructureStart.placeInChunk` passes a `WorldgenRandom` (extending
+                        // `LegacyRandomSource`), whose `BitRandomSource.nextLong` draws two
+                        // `next(32)` values. Asking the inner `Random` instead uses Xoroshiro's
+                        // single 64-bit draw, which only differs in the low bits. The game path
+                        // must use that `WorldgenRandom`; stand-alone oracles fall back to `Random`.
+                        let seed = match worldgen_random {
+                            Some(source) => source.next_long(),
+                            None => random.next_long(),
+                        };
+                        Some(overwrite_loot_table_seed(tag, seed))
+                    }
+                }
+                // `VaultBlockEntity.saveAdditional` 把 `config` 过一遍 `VaultConfig.CODEC`：
+                // 当 `loot_table` 等于该表的默认 `TRIAL_CHAMBERS_REWARD` 时，编码会省略
+                // 它。试炼密室模板里普通宝库写的正是默认值，所以官方存出来没有这一项。
+                //
+                // `VaultBlockEntity.saveAdditional` round-trips `config` through
+                // `VaultConfig.CODEC`, whose encoder omits `loot_table` when it equals the
+                // codec default (`TRIAL_CHAMBERS_REWARD`). Plain trial-chamber vault
+                // templates use exactly that default, so vanilla saves no such key.
+                Some(tag) if block.state.name == "minecraft:vault" => {
+                    Some(normalize_vault_config(tag))
                 }
                 Some(tag) => Some(tag.clone()),
             };
@@ -694,6 +719,57 @@ pub fn is_randomizable_container(block_name: &str) -> bool {
             | be::DECORATED_POT
             | be::CRAFTER
     )
+}
+
+/// `VaultConfig.CODEC` 的默认战利品表（`VaultConfig.DEFAULT` 构造里写死）。
+///
+/// The default loot table of `VaultConfig.CODEC` (`VaultConfig.DEFAULT`'s constructor).
+const DEFAULT_VAULT_LOOT_TABLE: &str = "minecraft:chests/trial_chambers/reward";
+
+/// 按 `VaultConfig.CODEC` 的编码规则省略默认的 `config.loot_table`。
+///
+/// Omit the default `config.loot_table` the way `VaultConfig.CODEC` encodes it.
+fn normalize_vault_config(tag: &Tag) -> Tag {
+    let Tag::Compound(entries) = tag else {
+        return tag.clone();
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        if key != "config" {
+            out.push((key.clone(), value.clone()));
+            continue;
+        }
+        let Tag::Compound(config) = value else {
+            out.push((key.clone(), value.clone()));
+            continue;
+        };
+        let mut fields = Vec::with_capacity(config.len());
+        for (field, field_value) in config {
+            let is_default = *field == "loot_table"
+                && matches!(field_value, Tag::String(text) if text == DEFAULT_VAULT_LOOT_TABLE);
+            if !is_default {
+                fields.push((field.clone(), field_value.clone()));
+            }
+        }
+        out.push((key.clone(), Tag::Compound(fields)));
+    }
+    Tag::Compound(out)
+}
+
+/// 模板 nbt 里有没有某个键。
+///
+/// Whether the template nbt has a key.
+fn nbt_has_key(tag: &Tag, key: &str) -> bool {
+    matches!(tag, Tag::Compound(entries) if entries.iter().any(|(name, _)| name == key))
+}
+
+/// 删掉模板 nbt 里的某个键。
+///
+/// Remove a key from the template nbt.
+fn nbt_remove_key(tag: &mut Tag, key: &str) {
+    if let Tag::Compound(entries) = tag {
+        entries.retain(|(name, _)| name != key);
+    }
 }
 
 /// 用 `seed` 覆盖（或插入）nbt 里的 `LootTableSeed`。

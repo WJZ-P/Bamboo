@@ -1314,6 +1314,67 @@ fn compare_blocks_exact(
     compare_indices(stats, seed, x, z, &states, indices, generated)
 }
 
+/// 官方方块实体构造器在 `saveAdditional` 里无条件写出的默认值。这些值不是模板
+/// 写下的，游戏侧没有对应键；只有官方值恰好等于表里的默认值、且游戏侧缺这个键
+/// 时才忽略，非默认值或双方都写了不同值照样报。
+///
+/// Values unconditionally written by vanilla block-entity constructors in
+/// `saveAdditional`. They are not template data, so the game side has no matching key.
+/// A mismatch is skipped only when the official value equals the table's default AND
+/// the game side omits the key; any other value still fails the comparison.
+const BLOCK_ENTITY_DEFAULTS: &[(&str, &str, &str)] = &[
+    // `VaultBlockEntity.saveAdditional` 用三个 codec 写 `config` / `shared_data` /
+    // `server_data`；新建的宝库里后两个是空复合。
+    ("minecraft:vault", "shared_data", "{}"),
+    ("minecraft:vault", "server_data", "{}"),
+    // `AbstractFurnaceBlockEntity.saveAdditional` 的 `speedMultiplier` 默认 1.0f。
+    ("minecraft:furnace", "speed_multiplier", "1.0f"),
+    ("minecraft:blast_furnace", "speed_multiplier", "1.0f"),
+    ("minecraft:smoker", "speed_multiplier", "1.0f"),
+    // `SculkSensorBlockEntity.saveAdditional` 存 `lastVibrationFrequency` 与
+    // `VibrationSystem.Data.CODEC` 编码的默认监听器。
+    (
+        "minecraft:sculk_sensor",
+        "last_vibration_frequency",
+        "0",
+    ),
+    (
+        "minecraft:sculk_sensor",
+        "listener",
+        "{event_delay:0,selector:{tick:-1L}}",
+    ),
+    (
+        "minecraft:calibrated_sculk_sensor",
+        "last_vibration_frequency",
+        "0",
+    ),
+    (
+        "minecraft:calibrated_sculk_sensor",
+        "listener",
+        "{event_delay:0,selector:{tick:-1L}}",
+    ),
+    // `BrewingStandBlockEntity.saveAdditional` 的两个计时总量。
+    ("minecraft:brewing_stand", "total_brew_time", "400"),
+    ("minecraft:brewing_stand", "total_fuel", "20"),
+    ("minecraft:brewing_stand", "speed_multiplier", "1.0f"),
+];
+
+/// 方块实体类型（`saveWithFullMetadata` 的 `id`）。
+///
+/// Block-entity type (the `id` from `saveWithFullMetadata`).
+fn block_entity_id(tag: &mc_bamboo_nbt::Tag) -> &str {
+    let mc_bamboo_nbt::Tag::Compound(entries) = tag else {
+        return "";
+    };
+    entries
+        .iter()
+        .find_map(|(key, value)| match (key.as_str(), value) {
+            ("id", mc_bamboo_nbt::Tag::String(text)) => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or("")
+}
+
 /// 方块实体的「有意义」键：官方 `saveWithFullMetadata` 会补上 id / x / y / z，
 /// 游戏侧写入的 nbt 只带结构件 / 地物真正设置的字段。这些元数据键由位置隐含，
 /// 比较时丢掉；空的 `components` 是 `saveWithoutMetadata` 无条件写的，同样丢掉。
@@ -1337,6 +1398,41 @@ fn custom_keys(tag: &mc_bamboo_nbt::Tag) -> Vec<(String, String)> {
         .collect();
     out.sort();
     out
+}
+
+/// 官方侧特有的构造器默认值只有在「值等于默认值且游戏侧缺键」时才可以忽略。
+///
+/// Constructor defaults present only on the official side may be ignored only when
+/// their value is the default and the game side omits the key.
+fn official_constructor_defaults(
+    official: &mc_bamboo_nbt::Tag,
+    ours: &mut Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let id = block_entity_id(official);
+    let mc_bamboo_nbt::Tag::Compound(entries) = official else {
+        return Vec::new();
+    };
+    let mut ignored = Vec::new();
+    for (key, value) in entries {
+        let text = value.to_snbt();
+        let default = BLOCK_ENTITY_DEFAULTS
+            .iter()
+            .any(|(kind, name, expected)| *kind == id && *name == key && *expected == text);
+        if !default {
+            continue;
+        }
+        if let Some(index) = ours.iter().position(|(name, _)| name == key) {
+            // 游戏侧真的写了这个键：只有值也等于默认值才算一致，否则仍报错。
+            // The key is really written by the game: it must also hold the default value.
+            if ours[index].1 == text {
+                ours.remove(index);
+                ignored.push((key.clone(), text));
+            }
+        } else {
+            ignored.push((key.clone(), text));
+        }
+    }
+    ignored
 }
 
 /// 比较一个区块的方块实体：官方导出的是 `[x,y,z, SNBT]`，游戏侧是
@@ -1382,15 +1478,35 @@ fn compare_block_entities(
             .ok_or("bad block entity snbt")?;
         let tag = mc_bamboo_nbt::parse_snbt(text)
             .map_err(|error| format!("bad official block entity snbt {text}: {error}"))?;
-        let want = custom_keys(&tag);
+        let mut want = custom_keys(&tag);
+        let ignored = official_constructor_defaults(&tag, &mut want);
         match ours.remove(&pos) {
-            None => stats.mismatches.push(format!(
-                "block entity seed {seed} ({chunk_x},{chunk_z}) at {pos:?}: official {want:?}, game missing"
-            )),
-            Some(got) if got != want => stats.mismatches.push(format!(
-                "block entity seed {seed} ({chunk_x},{chunk_z}) at {pos:?}: official {want:?}, game {got:?}"
-            )),
-            Some(_) => stats.block_entities += 1,
+            None => {
+                if want.is_empty() {
+                    // 官方只有构造器默认值，游戏侧没有任何真实数据：两边等价。
+                    // The official side has only constructor defaults and the game
+                    // side has no real data at all: equivalent.
+                    stats.block_entities += 1;
+                } else {
+                    stats.mismatches.push(format!(
+                        "block entity seed {seed} ({chunk_x},{chunk_z}) at {pos:?}: official {want:?}, game missing"
+                    ));
+                }
+            }
+            Some(mut got) => {
+                // 游戏侧写了官方默认键时，比较器已经把「双方都是默认值」的那一对
+                // 从两边一起删掉；其它情况必须完全一致。
+                // When the game writes a defaulted key, a matching pair is removed
+                // from both sides; everything else must match exactly.
+                let game_ignored = official_constructor_defaults(&tag, &mut got);
+                if got != want || game_ignored != ignored {
+                    stats.mismatches.push(format!(
+                        "block entity seed {seed} ({chunk_x},{chunk_z}) at {pos:?}: official {want:?}, game {got:?}"
+                    ));
+                } else {
+                    stats.block_entities += 1;
+                }
+            }
         }
     }
     for (pos, got) in &ours {

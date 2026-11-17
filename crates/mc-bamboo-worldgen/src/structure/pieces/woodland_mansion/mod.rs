@@ -457,6 +457,20 @@ pub fn place_piece(
     chunk_bb: &[i32; 6],
     random: &WorldgenRandom,
 ) -> Result<(), String> {
+    let mut collected = Vec::new();
+    place_piece_with_entities(piece, level, chunk_bb, random, Some(&mut collected))
+}
+
+/// [`place_piece`] 加一个可选的方块实体 nbt 收集表（游戏路径传 `Some`）。
+///
+/// [`place_piece`] with an optional collector for block-entity nbt (`Some` on the game path).
+pub fn place_piece_with_entities(
+    piece: &Piece,
+    level: &mut dyn crate::structure::piece_place::PieceLevel,
+    chunk_bb: &[i32; 6],
+    random: &WorldgenRandom,
+    mut block_entities: Option<&mut Vec<((i32, i32, i32), mc_bamboo_nbt::Tag)>>,
+) -> Result<(), String> {
     let template_name = piece
         .extras
         .get("Template")
@@ -478,12 +492,15 @@ pub fn place_piece(
             )]);
     settings.chunk_bb = Some(*chunk_bb);
 
-    let mut access = template_place::PieceLevelAccess(level);
+    let mut access = template_place::PieceLevelAccess {
+        level,
+        block_entities: block_entities.as_deref_mut(),
+    };
     if template_place::place_in_world(&mut access, &template, position, &settings, random).is_none()
     {
         return Ok(());
     }
-    let level = access.0;
+    let level = access.level;
 
     // `handleDataMarker`：箱子标记和生物标记，按 `filterBlocks(..., STRUCTURE_BLOCK)` 的
     // 顺序。实体不建，但生物标记那格的 `setBlock(AIR)` 每只生物写一次，悦灵数量取
@@ -512,7 +529,10 @@ pub fn place_piece(
     // templates carry no jigsaw blocks, so this writes nothing for the mansion; it is wired
     // in so the path is ready for other template pieces.
     template_place::replace_jigsaws(
-        &mut template_place::PieceLevelAccess(level),
+        &mut template_place::PieceLevelAccess {
+            level,
+            block_entities: None,
+        },
         &template,
         position,
         &settings,
