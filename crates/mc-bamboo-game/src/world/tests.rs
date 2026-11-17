@@ -2366,6 +2366,10 @@ fn save_and_reopen_resumes_game_time_day_time_and_scheduled_ticks() {
     use mc_bamboo_storage::world_dir::WorldDir;
 
     const TICKS_AFTER: usize = 5;
+    // 交付区块最多可能走 64 刻，排刻延迟要远大于它，免得比较前刻就到期了。
+    // Chunk delivery may take up to 64 ticks, so the scheduled delay must
+    // exceed that or the tick would fire before we compare.
+    const TICK_DELAY: i32 = 1000;
     let tmp = D6TempDir::new("restore-time");
     let dir = WorldDir::new(&tmp.0);
     dir.create_layout().unwrap();
@@ -2392,7 +2396,7 @@ fn save_and_reopen_resumes_game_time_day_time_and_scheduled_ticks() {
         server.world.island.region.block_ticks.schedule(
             pos,
             mc_bamboo_data::blocks::STONE as usize,
-            8,
+            TICK_DELAY,
             mc_bamboo_blocks::ticks::TickPriority::Normal,
         );
         let saved_now = server.world.island.region.block_ticks.now();
