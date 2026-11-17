@@ -60,7 +60,7 @@ fn staged_pipeline_delivers_generated_terrain_through_the_pool() {
     let deadline = Instant::now() + Duration::from_secs(600);
     loop {
         let _ = world.tick();
-        if world.region.chunks.is_loaded(origin) {
+        if world.island.region.chunks.is_loaded(origin) {
             break;
         }
         assert!(
@@ -72,12 +72,13 @@ fn staged_pipeline_delivers_generated_terrain_through_the_pool() {
     // 生成的盒子 `untouched=false`，超平坦模板是 `true`：确认交付的不是模板。
     // Generated boxes are `untouched=false`; the superflat template is `true`.
     assert!(
-        !world.region.chunks.is_pristine(origin),
+        !world.island.region.chunks.is_pristine(origin),
         "delivered chunk is still the pristine superflat template"
     );
     // y=-60 在超平坦里是草方块上方的空气，在噪声地形里是地下的实心方块。
     // y=-60 is air above grass in superflat, but solid underground in noise terrain.
     let deep = world
+        .island
         .region
         .chunks
         .block(BlockPos::new(0, -60, 0))
@@ -128,7 +129,7 @@ fn generated_cells_with_seed(
     // random ticks spread grass onto the dirt under trees and decay leaves out of
     // reach of a log, while the two runs see different numbers of ticks. Turn random
     // ticks off for the comparison.
-    world.region.block_rules.random_tick_speed = 0;
+    world.island.region.block_rules.random_tick_speed = 0;
     for &pos in positions {
         world.apply_ticket(TicketOp::Forced { pos, forced: true });
     }
@@ -139,8 +140,8 @@ fn generated_cells_with_seed(
         let _ = world.tick();
         let all_loaded = positions
             .iter()
-            .all(|pos| world.region.chunks.is_loaded(*pos));
-        let idle = world.host.compute_in_flight() == 0;
+            .all(|pos| world.island.region.chunks.is_loaded(*pos));
+        let idle = world.master.host.compute_in_flight() == 0;
         if all_loaded && idle {
             quiet += 1;
             // 池子空了以后再跑几刻，让待办任务和世界线程的增量合并都落地。
@@ -162,6 +163,7 @@ fn generated_cells_with_seed(
     let mut out = BTreeMap::new();
     for &pos in positions {
         let light_on = world
+            .island
             .region
             .chunks
             .column_clone(pos)
@@ -179,13 +181,17 @@ fn generated_cells_with_seed(
                     let at = BlockPos::new(pos.x * 16 + x, y, pos.z * 16 + z);
                     cells
                         .blocks
-                        .push(world.region.chunks.block(at).unwrap_or(blocks::AIR));
+                        .push(world.island.region.chunks.block(at).unwrap_or(blocks::AIR));
                     cells
                         .sky
-                        .push(world.region.chunks.light_value(LightLayer::Sky, at));
-                    cells
-                        .block
-                        .push(world.region.chunks.light_value(LightLayer::Block, at));
+                        .push(world.island.region.chunks.light_value(LightLayer::Sky, at));
+                    cells.block.push(
+                        world
+                            .island
+                            .region
+                            .chunks
+                            .light_value(LightLayer::Block, at),
+                    );
                 }
             }
         }
@@ -352,8 +358,8 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
         ..WorldConfig::default()
     };
     let mut world = World::new(config, receiver);
-    world.region.block_rules.random_tick_speed = 0;
-    world.host.set_reclaim_delay(0);
+    world.island.region.block_rules.random_tick_speed = 0;
+    world.master.host.set_reclaim_delay(0);
     let positions: Vec<ChunkPos> = (0..5)
         .flat_map(|x| (0..5).map(move |z| ChunkPos::new(x, z)))
         .collect();
@@ -367,10 +373,10 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
     let deadline = Instant::now() + Duration::from_secs(600);
     loop {
         let _ = world.tick();
-        let [_, deltas, light, _] = world.host.generation_leftovers();
+        let [_, deltas, light, _] = world.master.host.generation_leftovers();
         let delivered = positions
             .iter()
-            .filter(|pos| world.region.chunks.is_loaded(**pos))
+            .filter(|pos| world.island.region.chunks.is_loaded(**pos))
             .count();
         if (!deltas.is_empty() || !light.is_empty()) && delivered < positions.len() {
             break;
@@ -389,8 +395,14 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
     let mut quiet = 0;
     loop {
         let _ = world.tick();
-        let idle = world.host.compute_in_flight() == 0
-            && world.host.director().debug_state().records().is_empty();
+        let idle = world.master.host.compute_in_flight() == 0
+            && world
+                .master
+                .host
+                .director()
+                .debug_state()
+                .records()
+                .is_empty();
         if idle {
             quiet += 1;
             if quiet >= 8 {
@@ -402,11 +414,11 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
         assert!(
             Instant::now() < deadline,
             "world did not settle after dropping tickets: {} in flight, {} records",
-            world.host.compute_in_flight(),
-            world.host.director().debug_state().records().len()
+            world.master.host.compute_in_flight(),
+            world.master.host.director().debug_state().records().len()
         );
     }
-    let [partials, deltas, light, structures] = world.host.generation_leftovers();
+    let [partials, deltas, light, structures] = world.master.host.generation_leftovers();
     assert!(
         partials.is_empty() && deltas.is_empty() && light.is_empty() && structures.is_empty(),
         "leftover generation state: partials {partials:?}, feature deltas {deltas:?}, \

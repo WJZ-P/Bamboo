@@ -141,14 +141,14 @@ mod tests {
             },
             receiver,
         );
-        world.region.random = LevelRandom::new(0);
+        world.island.region.random = LevelRandom::new(0);
         world
     }
 
     #[test]
     fn a_rain_command_counts_down_and_stops() {
         let mut world = world();
-        let state = &mut world.global.state_mut().weather;
+        let state = &mut world.master.global.state_mut().weather;
         state.raining = true;
         state.rain_time = 2;
         state.thunder_time = 2;
@@ -156,47 +156,48 @@ mod tests {
         state.o_rain_level = 1.0;
         state.thunder_level = 0.0;
         state.o_thunder_level = 0.0;
-        world.region.block_weather = state.snapshot();
+        world.island.region.block_weather = state.snapshot();
 
         // 饱和的雨强在 `clear_time` 的分支里保持不变，但每一刻仍可能因为
         // `o_rain_level != rain_level` 发强度包；这里只关心状态倒计时。
         for _ in 0..2 {
-            let _ = advance(&mut world.global, &world.region);
-            sync(&world.global, &mut world.region);
+            let _ = advance(&mut world.master.global, &world.island.region);
+            sync(&world.master.global, &mut world.island.region);
         }
-        assert_eq!(world.global.state().weather.rain_time, 0);
-        assert!(!world.global.state().weather.raining);
+        assert_eq!(world.master.global.state().weather.rain_time, 0);
+        assert!(!world.master.global.state().weather.raining);
         // 官方在 WeatherData 翻转后仍要 80 刻渐变才发 STOP_RAINING。
         for _ in 0..20 {
-            let _ = advance(&mut world.global, &world.region);
+            let _ = advance(&mut world.master.global, &world.island.region);
         }
-        assert!(world.global.state().weather.is_raining());
+        assert!(world.master.global.state().weather.is_raining());
         for _ in 0..60 {
-            let _ = advance(&mut world.global, &world.region);
+            let _ = advance(&mut world.master.global, &world.island.region);
         }
-        assert!(!world.global.state().weather.is_raining());
-        assert!(world.global.state().weather.rain_level <= 0.2);
+        assert!(!world.master.global.state().weather.is_raining());
+        assert!(world.master.global.state().weather.rain_level <= 0.2);
     }
 
     #[test]
     fn advance_weather_false_freezes_the_cycle() {
         let mut world = world();
         world
+            .master
             .global
             .rules_mut()
             .assign(gamerules::ADVANCE_WEATHER, "false");
-        let state = world.global.state().weather;
+        let state = world.master.global.state().weather;
         for _ in 0..10 {
-            let _ = advance(&mut world.global, &world.region);
+            let _ = advance(&mut world.master.global, &world.island.region);
         }
-        assert_eq!(world.global.state().weather, state);
+        assert_eq!(world.master.global.state().weather, state);
     }
 
     #[test]
     fn a_fresh_world_starts_a_clear_delay() {
         let mut world = world();
-        let _ = advance(&mut world.global, &world.region);
-        let state = world.global.state().weather;
+        let _ = advance(&mut world.master.global, &world.island.region);
+        let state = world.master.global.state().weather;
         assert!(!state.raining);
         assert!(!state.thundering);
         assert_eq!(state.clear_time, 0);

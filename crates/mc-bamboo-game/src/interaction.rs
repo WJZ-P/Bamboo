@@ -30,7 +30,6 @@ use tracing::debug;
 
 use crate::{
     block_items, book, container, durability, entity_sync,
-    global::GameTime,
     inbound::PlayerId,
     inventory, lectern,
     links::{Links, encode_frames},
@@ -101,16 +100,23 @@ pub(crate) struct UseItemOn {
 }
 
 /// tick 第 2 阶段之后：到期的计划刻。官方 `ServerLevel.tick` 在时间加一之后、区块广播之前跑它们。
-pub(crate) fn run_block_ticks(region: &mut Region, time: GameTime) {
+///
+/// 计划刻队列的时钟由岛的时钟驱动（岛的实施计划第 6 节第 3 步），不再读世界时间；
+/// 岛建立时两者相同、每刻同步加一，所以精确模式下取到的数和原来逐位相同。
+///
+/// The scheduled-tick clock is driven by the island clock, not the world time;
+/// they start equal and advance together, so exact mode sees the same values.
+pub(crate) fn run_block_ticks(region: &mut Region) {
+    let now = region.tick.game_time();
     if region.redstone_cache.config().enabled {
         let (mut level, ticks, cache) = region.block_level_with_cache();
         let outcome =
-            mc_bamboo_blocks::run_due_ticks_with_cache(&mut level, ticks, time.0, Some(cache));
+            mc_bamboo_blocks::run_due_ticks_with_cache(&mut level, ticks, now, Some(cache));
         send_effects(region, None, &outcome.effects);
         return;
     }
     let (mut level, ticks) = region.block_level();
-    let outcome = mc_bamboo_blocks::run_due_ticks(&mut level, ticks, time.0);
+    let outcome = mc_bamboo_blocks::run_due_ticks(&mut level, ticks, now);
     send_effects(region, None, &outcome.effects);
 }
 

@@ -1514,7 +1514,7 @@ fn block_entities_outside_the_world_border_pause_and_resume() {
 
     // 边界缩到 x ∈ [1.5, 11.5)：x = 4 在界内，x = 12 和 13 在界外。
     {
-        let border = server.world.global.world_border_mut();
+        let border = server.world.master.global.world_border_mut();
         border.set_center(6.5, 8.0);
         border.set_size(10.0);
     }
@@ -1550,8 +1550,8 @@ fn block_entities_outside_the_world_border_pause_and_resume() {
 
     // 渐变扩大，第 k 刻把 x = 12 盖进来：之后从原进度接着烧，每刻 +1。
     {
-        let global = &mut server.world.global;
-        let game_time = server.world.region.tick.game_time();
+        let global = &mut server.world.master.global;
+        let game_time = server.world.island.region.tick.game_time();
         let _ = global
             .world_border_mut()
             .lerp_size_between(10.0, 30.0, 20, game_time);

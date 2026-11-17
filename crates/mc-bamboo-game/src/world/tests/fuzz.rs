@@ -341,7 +341,7 @@ impl Model {
                 // A player needs a tab entry first. Ground items, falling blocks and primed TNT do not.
                 if kind == entity_type::PLAYER {
                     assert!(self.tab.contains_key(&uuid), "{}: no tab entry", self.name);
-                    let target = &world.region.players[&PlayerId(id)];
+                    let target = &world.island.region.players[&PlayerId(id)];
                     assert!(
                         self.chunks.contains_key(&target.chunk_pos()),
                         "{}: entity in a chunk it does not have",
@@ -404,7 +404,7 @@ impl Model {
             clientbound::LEVEL_CHUNK_WITH_LIGHT => {
                 let pos = chunk_position(frame);
                 // 改过的区块走编码缓存。发完区块以后这一 tick 没再改世界，收到的字节要和现在重新编码的一样。
-                let chunks = &world.region.chunks;
+                let chunks = &world.island.region.chunks;
                 if !chunks.is_template(pos) {
                     let fresh = crate::chunk_encoding::encode_chunk(chunks, pos);
                     assert!(
@@ -416,7 +416,7 @@ impl Model {
                 let center = self.center.expect("中心先于区块");
                 let distance = (pos.x - center.x).abs().max((pos.z - center.z).abs());
                 assert!(distance <= 35, "{}: chunk out of range", self.name);
-                let snapshot = world.region.chunks.edited(pos).cloned();
+                let snapshot = world.island.region.chunks.edited(pos).cloned();
                 let previous = self.chunks.insert(pos, snapshot);
                 assert!(previous.is_none(), "{}: chunk {pos:?} twice", self.name);
                 self.updates.remove(&pos);
@@ -481,7 +481,7 @@ impl Model {
         let received = self.chunks.get(&pos).expect("区块在客户端手里");
         let mut chunk = received
             .clone()
-            .unwrap_or_else(|| world.region.chunks.template().clone());
+            .unwrap_or_else(|| world.island.region.chunks.template().clone());
         for (block, state) in self.updates.get(&pos).into_iter().flatten() {
             chunk.set_block(local(block.x), block.y, local(block.z), *state);
         }
@@ -1039,7 +1039,7 @@ fn check_footprints(server: &Harness) {
 /// 所有人的客户端都和世界一致：该有的区块、实体都在，方块也一样。
 fn check_convergence(server: &Harness, actors: &[Actor], view_distance: i32) {
     let world = &server.world;
-    let region = &world.region;
+    let region = &world.island.region;
     let tab: BTreeMap<Uuid, bool> = actors
         .iter()
         .map(|actor| (actor.client.uuid, server.player(&actor.client).shows_hat()))

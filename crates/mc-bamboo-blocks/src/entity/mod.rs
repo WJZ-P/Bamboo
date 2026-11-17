@@ -35,8 +35,8 @@ pub use physics::{
 };
 pub use random::JavaRandom;
 pub use store::{
-    ChunkEntities, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid, FallingBlockState,
-    ItemState, KindPublic, KindState,
+    ChunkEntities, EntityIds, EntityPublic, EntityRow, EntityState, EntityStore, EntityUid,
+    FallingBlockState, ItemState, KindPublic, KindState,
 };
 
 /// 世界实体 ID 从这个数开始，玩家 ID 从 1 开始，两边不会撞上。

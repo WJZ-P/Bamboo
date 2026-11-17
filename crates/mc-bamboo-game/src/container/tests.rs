@@ -149,3 +149,101 @@ fn every_player_gets_their_own_ender_chest() {
     // 箱子的默认朝向，测试里用得上。
     assert_eq!(BlockState(blocks::CHEST).get(FACING), Direction::North);
 }
+
+/// 平移测试的容器脚本：几只装着东西的箱子随机被「打开」（开合人数 1、几刻后重查），
+/// 没有玩家，所以到期重查会把它关上。观测每只箱子的开合人数和距下次重查的刻数。
+/// `shift` 给出时第 `mid` 刻后按 `parts` 平移岛的时钟。
+///
+/// Container script for the rebase test: chests are randomly "opened" with a
+/// recheck a few ticks later; with no players the recheck closes them.
+fn container_script(
+    seed: u64,
+    base: i64,
+    shift: Option<(i64, i64, crate::region::ClockParts)>,
+) -> Vec<Vec<(i32, Option<u64>)>> {
+    const CHESTS: [BlockPos; 4] = [
+        BlockPos::new(0, -60, 0),
+        BlockPos::new(3, -60, 0),
+        BlockPos::new(20, -60, 5),
+        BlockPos::new(40, -60, 9),
+    ];
+    let mut state = seed | 1;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut region = Region::new(2, 20, false);
+    region.start_clock(crate::global::GameTime(base));
+    for pos in CHESTS {
+        region.chunks.set_block(pos, blocks::CHEST);
+        let entry = entry_in(&mut region.containers, pos, ContainerKind::Chest);
+        entry.slots[0] = ItemStack::new(1, 1);
+    }
+    let mut out = Vec::new();
+    for step in 1..=150_i64 {
+        region.advance_tick();
+        if next() % 3 == 0 {
+            let pos = CHESTS[(next() % 4) as usize];
+            let at = region.tick.plus(next() % 12);
+            let entry = region.containers.get_mut(&pos).expect("chest entry");
+            entry.open_count = 1;
+            entry.recheck_at = Some(at);
+        }
+        tick(&mut region);
+        let now = region.tick;
+        out.push(
+            CHESTS
+                .iter()
+                .map(|pos| {
+                    let entry = &region.containers[pos];
+                    (
+                        entry.open_count,
+                        entry.recheck_at.map(|at| now.remaining(at)),
+                    )
+                })
+                .collect(),
+        );
+        if let Some((mid, delta, parts)) = shift
+            && step == mid
+        {
+            if parts == crate::region::ClockParts::ALL {
+                region.rebase_clock(delta);
+            } else {
+                region.rebase_clock_parts(delta, parts);
+            }
+        }
+    }
+    out
+}
+
+/// 容器 `recheck_at` 一类的平移：「中途平移 d 再跑」等于「岛的时钟本来就差 d」；
+/// 改坏确认：漏平移容器这一类会被抓到。
+///
+/// Container rechecks: shifting mid-run equals a clock that was always d
+/// apart; leaving containers out is caught.
+#[test]
+fn rebasing_container_rechecks_equals_a_clock_that_was_always_apart() {
+    use crate::region::ClockParts;
+    let mut caught = false;
+    for seed in 1..=30_u64 {
+        let base = (seed as i64 * 977) % 4000;
+        let delta = (seed as i64 * 7919) % 6000 - base.min(3000);
+        let apart = container_script(seed, base + delta, None);
+        assert_eq!(
+            container_script(seed, base, Some((70, delta, ClockParts::ALL))),
+            apart,
+            "seed {seed} base {base} delta {delta}"
+        );
+        let broken = ClockParts {
+            containers: false,
+            ..ClockParts::ALL
+        };
+        caught |= container_script(seed, base, Some((70, delta, broken))) != apart;
+    }
+    assert!(
+        caught,
+        "leaving container rechecks out of the rebase went unnoticed"
+    );
+}

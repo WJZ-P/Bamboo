@@ -58,24 +58,35 @@ type ChunkMarks = HashMap<ChunkPos, ChunkMark, BuildHasherDefault<ChunkHasher>>;
 /// 同时更新这两样，顺手得到「最近排过刻的区块」，给下一步的忙区块划分用。
 #[derive(Debug, Clone, Copy, Default)]
 struct ChunkMark {
-    /// 0 表示没排过刻；其它值是 `时刻 + 1`，紧凑地省掉 `Option` 的额外 8 字节。
-    last_scheduled_plus_one: i64,
+    /// 最近一次排刻的时刻，存成 `时刻 ^ i64::MIN`；0 表示没排过（对应时刻 `i64::MIN`，
+    /// 永远用不到）。紧凑地省掉 `Option` 的额外 8 字节，零初始化就是「没排过」。
+    /// 原来存「时刻 + 1」，岛的时钟平移到 −1 时会和哨兵撞上；异或编码对任何能出现的
+    /// 时刻都不撞，按无符号比较还保持时刻的先后。
+    ///
+    /// The last scheduling instant stored as `instant ^ i64::MIN`; 0 means none
+    /// (instant `i64::MIN`, never used). Zero-initialised means "never". The old
+    /// "instant + 1" encoding collided with the sentinel at −1 once island
+    /// clocks can shift; this one never does and keeps the order as unsigned.
+    last_scheduled_key: i64,
     dirty: bool,
 }
 
 impl ChunkMark {
     fn last_scheduled(self) -> Option<i64> {
-        (self.last_scheduled_plus_one != 0)
-            .then_some(self.last_scheduled_plus_one.saturating_sub(1))
+        (self.last_scheduled_key != 0).then_some(self.last_scheduled_key ^ i64::MIN)
     }
 
     fn set_scheduled(&mut self, now: i64) -> bool {
-        let next = now.saturating_add(1);
-        // 时刻从 0 开始，+1 后不会是 0；`i64::MAX` 饱和时保持原样。
-        debug_assert!(next != 0);
-        let changed = self.last_scheduled_plus_one != next;
-        self.last_scheduled_plus_one = next;
+        let key = now ^ i64::MIN;
+        debug_assert!(key != 0);
+        let changed = self.last_scheduled_key != key;
+        self.last_scheduled_key = key;
         changed
+    }
+
+    /// 按无符号比较取较晚的那一次；「没排过」的 0 最小。
+    fn later_key(a: i64, b: i64) -> i64 {
+        (a as u64).max(b as u64) as i64
     }
 }
 
@@ -160,11 +171,19 @@ impl ChunkActivity {
         for (chunk, mark) in other.marks {
             let entry = self.marks.entry(chunk).or_default();
             entry.dirty |= mark.dirty;
-            entry.last_scheduled_plus_one = entry
-                .last_scheduled_plus_one
-                .max(mark.last_scheduled_plus_one);
+            entry.last_scheduled_key =
+                ChunkMark::later_key(entry.last_scheduled_key, mark.last_scheduled_key);
         }
         self.touched.extend(other.touched);
+    }
+
+    /// 最近排刻时刻整体平移；没排过的哨兵不动。
+    fn rebase(&mut self, delta: i64) {
+        for mark in self.marks.values_mut() {
+            if let Some(at) = mark.last_scheduled() {
+                mark.last_scheduled_key = at.saturating_add(delta) ^ i64::MIN;
+            }
+        }
     }
 }
 
@@ -316,6 +335,28 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
         self.running.append(&mut other.running);
     }
 
+    /// 全部到期时刻平移 `delta`。所有键同加一个数，排序不变，所以主队列按原顺序
+    /// 重新装一遍即可；搁置表的排序键一起平移。只在 tick 边界调用（`running` 为空）。
+    ///
+    /// Shift every trigger instant by `delta`. All keys move together, so the
+    /// order is unchanged; deferred keys move too. Tick boundary only.
+    fn rebase(&mut self, delta: i64) {
+        debug_assert!(self.running.is_empty());
+        let shift = |mut order: TickOrder| {
+            order.trigger_tick = order.trigger_tick.saturating_add(delta);
+            order
+        };
+        self.queue = std::mem::take(&mut self.queue)
+            .into_iter()
+            .map(|(order, entry)| (shift(order), entry))
+            .collect();
+        for entries in self.deferred.values_mut() {
+            for (order, _, _) in entries.iter_mut() {
+                *order = shift(*order);
+            }
+        }
+    }
+
     fn has_scheduled(&self, pos: BlockPos, kind: T) -> bool {
         self.scheduled.contains(&(pos, kind))
     }
@@ -444,6 +485,27 @@ fn merge_pending<'a, T: Copy + 'a>(
         }
         (None, None) => None,
     })
+}
+
+/// [`BlockTicks::rebase_parts`] 选哪几样平移。正式路径只用 [`Self::ALL`]。
+///
+/// Which parts [`BlockTicks::rebase_parts`] shifts; production uses [`Self::ALL`].
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RebaseParts {
+    pub clock: bool,
+    pub queues: bool,
+    pub pistons: bool,
+    pub activity: bool,
+}
+
+impl RebaseParts {
+    pub const ALL: Self = Self {
+        clock: true,
+        queues: true,
+        pistons: true,
+        activity: true,
+    };
 }
 
 /// 全部排队的计划刻：方块一条队列，流体一条队列。
@@ -736,6 +798,43 @@ impl BlockTicks {
         );
         self.blocks.insert_chunk(ticks.blocks, self.now);
         self.fluids.insert_chunk(ticks.fluids, self.now);
+    }
+
+    /// 岛合并前把这张表的全部绝对时刻平移 `delta`（`吸收方.now − 被吸收方.now`）：
+    /// 时钟 `now`、两条队列和搁置表里每条刻的到期时刻、移动活塞的 `lastTicked`、
+    /// 每个区块最近一次排刻的时刻。平移之后再跑，等于时钟本来就差 `delta` 时跑。
+    /// 只在 tick 边界调用。
+    ///
+    /// Shift every absolute instant by `delta` (`absorber.now − absorbed.now`)
+    /// before an island merge: the clock, every trigger instant in both queues
+    /// and the deferred tables, moving pistons' `lastTicked`, and each chunk's
+    /// last scheduling instant. Running after the shift equals running on a
+    /// clock that was always `delta` apart. Tick boundary only.
+    pub fn rebase(&mut self, delta: i64) {
+        self.rebase_parts(delta, RebaseParts::ALL);
+    }
+
+    /// 只给改坏确认用：按 `parts` 只平移其中几样，测试据此确认漏掉任何一样都会被抓到。
+    ///
+    /// Break-it checks only: shift just the selected parts.
+    #[doc(hidden)]
+    pub fn rebase_parts(&mut self, delta: i64, parts: RebaseParts) {
+        debug_assert!(self.ready_to_move_chunks());
+        if parts.clock {
+            self.now = self.now.saturating_add(delta);
+        }
+        if parts.queues {
+            self.blocks.rebase(delta);
+            self.fluids.rebase(delta);
+        }
+        if parts.pistons {
+            for at in self.ticked_entities.values_mut() {
+                *at = at.saturating_add(delta);
+            }
+        }
+        if parts.activity {
+            self.activity.rebase(delta);
+        }
     }
 
     /// 拆出 `chunks` 这些区块的刻，造出另一个单元的计划刻队列。
@@ -2163,5 +2262,170 @@ mod tests {
             "take_chunks 16 chunks, queue   1M: {:.3} ms",
             take_1m.as_secs_f64() * 1000.0
         );
+    }
+
+    /// 平移测试的一份随机脚本：在 `base` 起的时钟上跑 `STEPS` 刻；`shift` 给出时，
+    /// 第 `mid` 刻跑完后按 `parts` 平移 `delta`，之后的时钟都加上 `delta`。每刻的
+    /// 观测一律换成「相对当刻时钟」的量，所以「平移后再跑」和「时钟本来就差
+    /// `delta` 时跑」应该逐条相同。
+    ///
+    /// 每刻：刻开头先看活塞的 `lastTicked`（这时时钟还停在上一刻，平移的边界
+    /// 就在这里），再取出到期的方块刻和流体刻（随机冻结一些区块，到期的刻进搁置表）、
+    /// 记几次活塞 tick、随机排几条新刻，最后读全部排着的刻、每个区块最近排刻的时刻、
+    /// 本刻活动清单，隔几刻取一次脏集合（会按时钟修剪活动表）。
+    ///
+    /// One random script for the rebase test, observed relative to the clock
+    /// at every step so that "shift then run" must equal "run on a clock that
+    /// was always `delta` apart".
+    fn rebase_script(seed: u64, base: i64, shift: Option<(i64, i64, RebaseParts)>) -> Vec<String> {
+        const STEPS: i64 = 160;
+        const PISTONS: [BlockPos; 4] = [
+            BlockPos::new(1, 64, 1),
+            BlockPos::new(17, 64, 2),
+            BlockPos::new(33, 64, 3),
+            BlockPos::new(49, 64, 4),
+        ];
+        let chunks: Vec<ChunkPos> = (0..4).map(|x| ChunkPos::new(x, 0)).collect();
+        let mut rng = Rng::new(seed | 1);
+        let mut ticks = BlockTicks::new();
+        let frozen = FrozenMask::new(0);
+        let mut offset = 0;
+        ticks.set_time(base);
+        let mut out = Vec::new();
+        for step in 1..=STEPS {
+            let now = base + offset + step;
+            let ticked: Vec<bool> = PISTONS
+                .iter()
+                .map(|&pos| ticks.entity_ticked_this_tick(pos))
+                .collect();
+            out.push(format!("{step} pistons-before {ticked:?}"));
+            if rng.next().is_multiple_of(6) {
+                frozen.set((rng.next() % 16) as u32);
+            }
+            ticks.collect_due(now, &frozen.check());
+            let blocks: Vec<_> = std::iter::from_fn(|| ticks.next_due()).collect();
+            ticks.collect_due_fluids(&frozen.check());
+            let fluids: Vec<_> = std::iter::from_fn(|| ticks.next_fluid_due()).collect();
+            out.push(format!("{step} due {blocks:?} {fluids:?}"));
+            for _ in 0..rng.next() % 3 {
+                let pos = PISTONS[(rng.next() % 4) as usize];
+                ticks.note_block_entity_tick(pos);
+            }
+            let ticked: Vec<bool> = PISTONS
+                .iter()
+                .map(|&pos| ticks.entity_ticked_this_tick(pos))
+                .collect();
+            out.push(format!("{step} pistons-after {ticked:?}"));
+            for _ in 0..rng.next() % 4 {
+                let pos = BlockPos::new(
+                    (rng.next() % 64) as i32,
+                    (rng.next() % 4) as i32,
+                    (rng.next() % 8) as i32,
+                );
+                let delay = (rng.next() % 12) as i32;
+                let priority = random_priority(rng.next());
+                if rng.next().is_multiple_of(3) {
+                    ticks.schedule_fluid(pos, 1 + (rng.next() % 2) as i32, delay, priority);
+                } else {
+                    ticks.schedule(pos, 1 + (rng.next() % 3) as usize, delay, priority);
+                }
+            }
+            let pending: Vec<_> = ticks
+                .pending()
+                .map(|tick| (tick.trigger_tick - now, tick.priority, tick.pos, tick.block))
+                .collect();
+            let fluids: Vec<_> = ticks
+                .pending_fluids()
+                .map(|tick| (tick.trigger_tick - now, tick.priority, tick.pos, tick.fluid))
+                .collect();
+            out.push(format!("{step} pending {pending:?} {fluids:?}"));
+            let recent: Vec<Option<i64>> = chunks
+                .iter()
+                .map(|&chunk| ticks.last_scheduled(chunk).map(|at| at - now))
+                .collect();
+            out.push(format!("{step} recent {recent:?}"));
+            out.push(format!("{step} touched {:?}", ticks.drain_touched_chunks()));
+            if step % 5 == 0 {
+                out.push(format!("{step} dirty {:?}", ticks.take_dirty()));
+                let kept: Vec<bool> = chunks
+                    .iter()
+                    .map(|&chunk| ticks.activity.marks.contains_key(&chunk))
+                    .collect();
+                out.push(format!("{step} kept {kept:?}"));
+            }
+            if let Some((mid, delta, parts)) = shift
+                && step == mid
+            {
+                ticks.rebase_parts(delta, parts);
+                offset = delta;
+            }
+        }
+        out
+    }
+
+    /// 计划刻一类的平移：随机脚本里「第 80 刻后平移 d 再跑」和「时钟本来就差 d」
+    /// 逐刻观测相同；d 有正有负，起点也有负数（时刻可以平移到 0 以下）。
+    ///
+    /// Scheduled ticks: shifting by d mid-run equals a clock that was always d
+    /// apart, for positive and negative d and negative bases.
+    #[test]
+    fn rebasing_block_ticks_equals_a_clock_that_was_always_apart() {
+        for seed in 1..=40_u64 {
+            let mut rng = Rng::new(seed * 7919);
+            let base = (rng.next() % 4000) as i64 - 2000;
+            let delta = (rng.next() % 6000) as i64 - 3000;
+            let shifted = rebase_script(seed, base, Some((80, delta, RebaseParts::ALL)));
+            let apart = rebase_script(seed, base + delta, None);
+            assert_eq!(shifted, apart, "seed {seed} base {base} delta {delta}");
+        }
+    }
+
+    /// 改坏确认：漏平移时钟、队列、活塞 `lastTicked`、最近排刻时刻里任何一样，
+    /// 上面的比较都要报出来。
+    ///
+    /// Break-it check: leaving out any one part must be caught.
+    #[test]
+    fn leaving_out_any_part_of_the_block_tick_rebase_is_caught() {
+        let all = RebaseParts::ALL;
+        let broken = [
+            (
+                "clock",
+                RebaseParts {
+                    clock: false,
+                    ..all
+                },
+            ),
+            (
+                "queues",
+                RebaseParts {
+                    queues: false,
+                    ..all
+                },
+            ),
+            (
+                "pistons",
+                RebaseParts {
+                    pistons: false,
+                    ..all
+                },
+            ),
+            (
+                "activity",
+                RebaseParts {
+                    activity: false,
+                    ..all
+                },
+            ),
+        ];
+        for (name, parts) in broken {
+            let caught = (1..=40_u64).any(|seed| {
+                let mut rng = Rng::new(seed * 7919);
+                let base = (rng.next() % 4000) as i64 - 2000;
+                let delta = (rng.next() % 6000) as i64 - 3000;
+                rebase_script(seed, base, Some((80, delta, parts)))
+                    != rebase_script(seed, base + delta, None)
+            });
+            assert!(caught, "leaving out {name} went unnoticed");
+        }
     }
 }

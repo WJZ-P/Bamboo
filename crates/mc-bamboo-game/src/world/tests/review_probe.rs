@@ -149,12 +149,13 @@ fn a_failed_write_is_retried_by_autosave_after_the_disk_recovers() {
     let pos = ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
-    server.world.region.touch(BlockPos::new(3, -60, 3));
-    server.world.region.chunks.finish_light_updates();
+    server.world.island.region.touch(BlockPos::new(3, -60, 3));
+    server.world.island.region.chunks.finish_light_updates();
 
     break_disk(&dir);
     server
         .world
+        .master
         .global
         .save_requests
         .push(SaveCommand::SaveAll {
@@ -164,14 +165,14 @@ fn a_failed_write_is_retried_by_autosave_after_the_disk_recovers() {
     for _ in 0..5 {
         server.tick();
     }
-    server.world.host.flush_io();
+    server.world.master.host.flush_io();
     server.tick();
-    assert!(server.world.host.io_failures() > 0, "写盘确实失败");
+    assert!(server.world.master.host.io_failures() > 0, "写盘确实失败");
     fix_disk(&dir);
     for _ in 0..400 {
         server.tick();
     }
-    server.world.host.flush_io();
+    server.world.master.host.flush_io();
     server.tick();
     assert!(disk_has(&dir, pos), "磁盘恢复后自动保存必须把失败的写补上");
 }
@@ -186,12 +187,13 @@ fn repeated_save_all_after_a_failed_write_recovers_the_chunk() {
     let pos = ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
-    server.world.region.touch(BlockPos::new(3, -60, 3));
-    server.world.region.chunks.finish_light_updates();
+    server.world.island.region.touch(BlockPos::new(3, -60, 3));
+    server.world.island.region.chunks.finish_light_updates();
 
     break_disk(&dir);
     server
         .world
+        .master
         .global
         .save_requests
         .push(SaveCommand::SaveAll {
@@ -201,13 +203,14 @@ fn repeated_save_all_after_a_failed_write_recovers_the_chunk() {
     for _ in 0..5 {
         server.tick();
     }
-    server.world.host.flush_io();
+    server.world.master.host.flush_io();
     server.tick();
-    assert!(server.world.host.io_failures() > 0);
+    assert!(server.world.master.host.io_failures() > 0);
     fix_disk(&dir);
     for _ in 0..20 {
         server
             .world
+            .master
             .global
             .save_requests
             .push(SaveCommand::SaveAll {
@@ -215,7 +218,7 @@ fn repeated_save_all_after_a_failed_write_recovers_the_chunk() {
                 source: crate::inbound::PlayerId(1),
             });
         server.tick();
-        server.world.host.flush_io();
+        server.world.master.host.flush_io();
         server.tick();
     }
     assert!(disk_has(&dir, pos), "反复 save-all 必须能重写失败的区块");
@@ -231,12 +234,13 @@ fn a_failed_in_flight_write_with_no_queue_residue_is_retried() {
     let pos = ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
-    server.world.region.touch(BlockPos::new(3, -60, 3));
-    server.world.region.chunks.finish_light_updates();
+    server.world.island.region.touch(BlockPos::new(3, -60, 3));
+    server.world.island.region.chunks.finish_light_updates();
 
     break_disk(&dir);
     server
         .world
+        .master
         .global
         .save_requests
         .push(SaveCommand::SaveAll {
@@ -246,15 +250,16 @@ fn a_failed_in_flight_write_with_no_queue_residue_is_retried() {
     for _ in 0..5 {
         server.tick();
     }
-    server.world.host.flush_io();
+    server.world.master.host.flush_io();
     server.tick();
-    assert!(server.world.host.io_failures() > 0);
+    assert!(server.world.master.host.io_failures() > 0);
     #[cfg(test)]
-    server.world.host.save_queue.clear();
+    server.world.master.host.save_queue.clear();
     fix_disk(&dir);
     for _ in 0..30 {
         server
             .world
+            .master
             .global
             .save_requests
             .push(SaveCommand::SaveAll {
@@ -263,11 +268,11 @@ fn a_failed_in_flight_write_with_no_queue_residue_is_retried() {
             });
         server.tick();
         #[cfg(test)]
-        server.world.host.save_queue.clear();
-        server.world.host.flush_io();
+        server.world.master.host.save_queue.clear();
+        server.world.master.host.flush_io();
         server.tick();
         #[cfg(test)]
-        server.world.host.save_queue.clear();
+        server.world.master.host.save_queue.clear();
     }
     assert!(disk_has(&dir, pos), "清掉队列残留之后也必须能重写");
 }
@@ -282,13 +287,13 @@ fn shutdown_retries_a_failed_write_parked_before_shutdown() {
     let pos = ChunkPos::new(40, 40);
     server.apply_ticket_for_test(mc_bamboo_world::director::TicketOp::Forced { pos, forced: true });
     for _ in 0..64 {
-        if server.world.region.chunks.is_loaded(pos) {
+        if server.world.island.region.chunks.is_loaded(pos) {
             break;
         }
         server.tick();
     }
-    assert!(server.world.region.chunks.is_loaded(pos));
-    server.world.region.chunks.set_block(
+    assert!(server.world.island.region.chunks.is_loaded(pos));
+    server.world.island.region.chunks.set_block(
         BlockPos::new(pos.x * 16 + 3, -60, pos.z * 16 + 3),
         blocks::GLOWSTONE,
     );
@@ -297,15 +302,17 @@ fn shutdown_retries_a_failed_write_parked_before_shutdown() {
     break_disk(&dir);
     for _ in 0..400 {
         server.tick();
-        if !server.world.region.chunks.is_loaded(pos) && server.world.host.parked_count() > 0 {
+        if !server.world.island.region.chunks.is_loaded(pos)
+            && server.world.master.host.parked_count() > 0
+        {
             break;
         }
     }
-    server.world.host.flush_io();
+    server.world.master.host.flush_io();
     server.tick();
     fix_disk(&dir);
     #[cfg(test)]
-    server.world.host.save_queue.clear();
+    server.world.master.host.save_queue.clear();
     assert!(server.world.shut_down().is_break());
     println!("AFTER_SHUTDOWN disk_has={}", disk_has(&dir, pos));
     assert!(disk_has(&dir, pos), "关服必须重写 parking 里没写成功的盒子");
@@ -321,41 +328,51 @@ fn save_off_keeps_chunks_loaded_like_official_no_save() {
     let pos = ChunkPos::new(40, 40);
     server.apply_ticket_for_test(mc_bamboo_world::director::TicketOp::Forced { pos, forced: true });
     for _ in 0..64 {
-        if server.world.region.chunks.is_loaded(pos) {
+        if server.world.island.region.chunks.is_loaded(pos) {
             break;
         }
         server.tick();
     }
-    assert!(server.world.region.chunks.is_loaded(pos));
-    server.world.region.chunks.set_block(
+    assert!(server.world.island.region.chunks.is_loaded(pos));
+    server.world.island.region.chunks.set_block(
         BlockPos::new(pos.x * 16 + 3, -60, pos.z * 16 + 3),
         blocks::GLOWSTONE,
     );
-    server.world.global.save_requests.push(SaveCommand::SaveOff);
+    server
+        .world
+        .master
+        .global
+        .save_requests
+        .push(SaveCommand::SaveOff);
     server.tick();
     server
         .apply_ticket_for_test(mc_bamboo_world::director::TicketOp::Forced { pos, forced: false });
     for _ in 0..400 {
         server.tick();
     }
-    server.world.host.flush_io();
+    server.world.master.host.flush_io();
     server.tick();
     println!(
         "SAVE_OFF_UNLOAD loaded={} disk_has={}",
-        server.world.region.chunks.is_loaded(pos),
+        server.world.island.region.chunks.is_loaded(pos),
         disk_has(&dir, pos)
     );
     assert!(
-        server.world.region.chunks.is_loaded(pos),
+        server.world.island.region.chunks.is_loaded(pos),
         "save-off 照官方不收回区块"
     );
-    server.world.global.save_requests.push(SaveCommand::SaveOn);
+    server
+        .world
+        .master
+        .global
+        .save_requests
+        .push(SaveCommand::SaveOn);
     for _ in 0..200 {
         server.tick();
     }
-    server.world.host.flush_io();
+    server.world.master.host.flush_io();
     server.tick();
-    assert!(server.world.host.io().unwrap().has_chunk(pos));
+    assert!(server.world.master.host.io().unwrap().has_chunk(pos));
 }
 
 /// 每刻判脏的开销不能和已加载区块数成正比：2 万区块、2 千条火把记录，
@@ -433,7 +450,7 @@ fn a_saved_world_delivers_the_nearest_chunk_first() {
 
     let mut server = Harness::new_loaded_with_save(8, &temp.0);
     assert!(
-        server.world.host.io().unwrap().has_chunk(near),
+        server.world.master.host.io().unwrap().has_chunk(near),
         "启动扫描必须认出盘上已有的区块"
     );
     let client = server.join_with("Kitten", crate::world::tests::client_requesting(8));
@@ -464,7 +481,7 @@ fn a_saved_world_delivers_the_nearest_chunk_first() {
     // IO 信箱里不该有没收回的读回执。
     assert!(
         !matches!(
-            server.world.host.io().unwrap().try_recv(),
+            server.world.master.host.io().unwrap().try_recv(),
             Some(Reply::Read { .. })
         ),
         "读结果已经全部收回"

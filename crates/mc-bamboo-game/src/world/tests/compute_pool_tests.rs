@@ -55,7 +55,7 @@ fn settle(server: &mut Harness) {
     loop {
         server.tick();
         let (deliveries, reclaims, _) = server.director_mail();
-        if server.world.host.compute_in_flight() == 0 && deliveries == 0 && reclaims == 0 {
+        if server.world.master.host.compute_in_flight() == 0 && deliveries == 0 && reclaims == 0 {
             break;
         }
         assert!(Instant::now() < deadline, "区块平面 30 秒内没有安定下来");
@@ -74,11 +74,11 @@ fn force(server: &mut Harness, positions: &[ChunkPos], forced: bool) {
 
 fn edit(server: &mut Harness, pos: BlockPos, state: u32) {
     assert!(
-        server.world.region.chunks.is_loaded(pos.chunk()),
+        server.world.island.region.chunks.is_loaded(pos.chunk()),
         "改方块之前区块要已经交付：{pos:?}"
     );
     server.set_block(pos, state);
-    server.world.region.touch(pos);
+    server.world.island.region.touch(pos);
 }
 
 /// 盘上每个区块的两份 NBT（解压后的字节），按 (目录, 位置) 排好。
@@ -122,7 +122,7 @@ fn run_scenario(threads: usize) -> BTreeMap<(String, i32, i32), Vec<u8>> {
     let mut server = Harness::new_loaded_with_save_and_threads(2, &tmp.0, threads);
     server.set_reclaim_delay(1);
     assert_eq!(
-        server.world.host.compute_in_flight(),
+        server.world.master.host.compute_in_flight(),
         0,
         "刚开局没有在途任务"
     );
@@ -141,7 +141,7 @@ fn run_scenario(threads: usize) -> BTreeMap<(String, i32, i32), Vec<u8>> {
             edit(&mut server, block, blocks::GLOWSTONE);
         }
     }
-    server.world.region.chunks.finish_light_updates();
+    server.world.island.region.chunks.finish_light_updates();
     settle(&mut server);
 
     // 2. 卸载左边那块：序列化在池子里做，改过的写盘、原样的丢掉。
@@ -151,7 +151,7 @@ fn run_scenario(threads: usize) -> BTreeMap<(String, i32, i32), Vec<u8>> {
     settle(&mut server);
     for pos in &gone {
         assert!(
-            !server.world.region.chunks.is_loaded(*pos),
+            !server.world.island.region.chunks.is_loaded(*pos),
             "没票的区块要被收回：{pos:?}"
         );
     }
@@ -167,12 +167,12 @@ fn run_scenario(threads: usize) -> BTreeMap<(String, i32, i32), Vec<u8>> {
         let block = BlockPos::new(pos.x * 16 + 1, -59, pos.z * 16 + 1);
         edit(&mut server, block, blocks::GOLD_BLOCK);
     }
-    server.world.region.chunks.finish_light_updates();
+    server.world.island.region.chunks.finish_light_updates();
     settle(&mut server);
 
     // 4. 关服：等池子清空，全部写盘。
     server.shut_down();
-    let [decoded, generated, saved] = server.world.host.pooled_kinds;
+    let [decoded, generated, saved] = server.world.master.host.pooled_kinds;
     if threads > 0 {
         assert!(
             decoded > 0 && generated > 0 && saved > 0,
@@ -180,11 +180,15 @@ fn run_scenario(threads: usize) -> BTreeMap<(String, i32, i32), Vec<u8>> {
         );
     } else {
         assert_eq!(
-            server.world.host.pooled_kinds, [0; 3],
+            server.world.master.host.pooled_kinds, [0; 3],
             "内联执行器不经过池子"
         );
     }
-    assert_eq!(server.world.host.compute_in_flight(), 0, "关服时池子已排空");
+    assert_eq!(
+        server.world.master.host.compute_in_flight(),
+        0,
+        "关服时池子已排空"
+    );
     drop(server);
     disk_contents(&tmp.0)
 }
@@ -224,6 +228,7 @@ fn a_slow_generator_runs_off_the_world_thread() {
         let mut server = Harness::new_loaded_with_threads(2, threads);
         server
             .world
+            .master
             .host
             .set_generator(Arc::new(FlatGenerator { delay }));
         let started = Instant::now();
@@ -233,7 +238,7 @@ fn a_slow_generator_runs_off_the_world_thread() {
         settle(&mut server);
         for pos in &positions {
             assert!(
-                server.world.region.chunks.is_loaded(*pos),
+                server.world.island.region.chunks.is_loaded(*pos),
                 "线程数 {threads}：区块最终都要交付"
             );
         }
@@ -280,30 +285,38 @@ fn the_pool_holds_a_bounded_number_of_jobs_and_cancels_the_backlog() {
     let cap = threads * POOL_JOBS_PER_THREAD;
     let mut server = Harness::new_loaded_with_threads(2, threads);
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    server.world.host.set_generator(Arc::new(CountingGenerator {
-        inner: FlatGenerator {
-            delay: Duration::from_millis(20),
-        },
-        calls: Arc::clone(&calls),
-    }));
+    server
+        .world
+        .master
+        .host
+        .set_generator(Arc::new(CountingGenerator {
+            inner: FlatGenerator {
+                delay: Duration::from_millis(20),
+            },
+            calls: Arc::clone(&calls),
+        }));
     let positions: Vec<ChunkPos> = (40..46)
         .flat_map(|x| (40..46).map(move |z| ChunkPos::new(x, z)))
         .collect();
     force(&mut server, &positions, true);
     server.tick();
     assert!(
-        server.world.host.compute_in_pool() <= cap,
+        server.world.master.host.compute_in_pool() <= cap,
         "池子里最多 {cap} 个：{}",
-        server.world.host.compute_in_pool()
+        server.world.master.host.compute_in_pool()
     );
-    let queued = server.world.host.compute_backlog();
+    let queued = server.world.master.host.compute_backlog();
     assert!(queued > 0, "超出上限的任务留在待办里");
 
     // 撤掉全部票：待办里的任务当场取消，只剩池子里那几个在跑。
     force(&mut server, &positions, false);
-    assert_eq!(server.world.host.compute_backlog(), 0, "撤票后待办清空");
+    assert_eq!(
+        server.world.master.host.compute_backlog(),
+        0,
+        "撤票后待办清空"
+    );
     settle(&mut server);
-    assert_eq!(server.world.host.compute_in_flight(), 0);
+    assert_eq!(server.world.master.host.compute_in_flight(), 0);
     let ran = calls.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
         ran <= cap * 2,

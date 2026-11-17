@@ -55,6 +55,21 @@ pub(crate) struct Tables {
     pending: BTreeMap<PlayerId, PendingSlots>,
 }
 
+impl Tables {
+    /// 待发格子的到期时刻平移 `delta`，岛合并时用。
+    ///
+    /// Shift the pending deliveries' due instants by `delta`, for island merges.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "island merges (plan step 9) call it at run time")
+    )]
+    pub(crate) fn rebase(&mut self, delta: i64) {
+        for pending in self.pending.values_mut() {
+            pending.deliver_at = pending.deliver_at.rebased(delta);
+        }
+    }
+}
+
 /// 放在讲台上的那一本。`page` 为 -1 只出现在总页数是 0 的夹取之后。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Book {
@@ -1297,5 +1312,96 @@ mod tests {
         let turned = replay.press(102);
         assert_eq!(turned.page, 2);
         assert_eq!(turned.state_id, 1);
+    }
+
+    /// 平移测试的讲台脚本：随机给几名（不在线的）玩家排上「取书之后要发的格子」，
+    /// 到期时 `flush_pending` 把它们发掉。观测每名玩家还有没有待发、距到期几刻。
+    /// `shift` 给出时第 `mid` 刻后按 `parts` 平移岛的时钟。
+    ///
+    /// Lectern script for the rebase test: pending slot deliveries for a few
+    /// (offline) players are flushed when due.
+    fn pending_script(
+        seed: u64,
+        base: i64,
+        shift: Option<(i64, i64, crate::region::ClockParts)>,
+    ) -> Vec<Vec<Option<u64>>> {
+        let ids = [PlayerId(3), PlayerId(4), PlayerId(5)];
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut region = Region::new(2, 20, false);
+        region.start_clock(crate::global::GameTime(base));
+        let mut out = Vec::new();
+        for step in 1..=150_i64 {
+            region.advance_tick();
+            if next() % 3 == 0 {
+                let id = ids[(next() % 3) as usize];
+                let deliver_at = region.tick.plus(next() % 6);
+                region.lecterns.pending.insert(
+                    id,
+                    PendingSlots {
+                        slots: vec![0],
+                        deliver_at,
+                    },
+                );
+            }
+            tick(&mut region);
+            let now = region.tick;
+            out.push(
+                ids.iter()
+                    .map(|id| {
+                        region
+                            .lecterns
+                            .pending
+                            .get(id)
+                            .map(|pending| now.remaining(pending.deliver_at))
+                    })
+                    .collect(),
+            );
+            if let Some((mid, delta, parts)) = shift
+                && step == mid
+            {
+                if parts == crate::region::ClockParts::ALL {
+                    region.rebase_clock(delta);
+                } else {
+                    region.rebase_clock_parts(delta, parts);
+                }
+            }
+        }
+        out
+    }
+
+    /// 讲台待发格子一类的平移：「中途平移 d 再跑」等于「岛的时钟本来就差 d」；
+    /// 改坏确认：漏平移讲台这一类会被抓到。
+    ///
+    /// Lectern deliveries: shifting mid-run equals a clock that was always d
+    /// apart; leaving lecterns out is caught.
+    #[test]
+    fn rebasing_lectern_deliveries_equals_a_clock_that_was_always_apart() {
+        use crate::region::ClockParts;
+        let mut caught = false;
+        for seed in 1..=30_u64 {
+            let base = (seed as i64 * 977) % 4000;
+            let delta = (seed as i64 * 7919) % 6000 - base.min(3000);
+            let apart = pending_script(seed, base + delta, None);
+            assert_eq!(
+                pending_script(seed, base, Some((70, delta, ClockParts::ALL))),
+                apart,
+                "seed {seed} base {base} delta {delta}"
+            );
+            let broken = ClockParts {
+                lecterns: false,
+                ..ClockParts::ALL
+            };
+            caught |= pending_script(seed, base, Some((70, delta, broken))) != apart;
+        }
+        assert!(
+            caught,
+            "leaving lectern deliveries out of the rebase went unnoticed"
+        );
     }
 }

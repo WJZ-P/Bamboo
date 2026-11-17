@@ -98,6 +98,15 @@ pub trait BlockEntity: Any + Send {
     /// Re-arm a sleep after a chunk box is put into a table with a different clock.
     fn resleep(&mut self, _since: i64, _wake_at: i64) {}
 
+    /// 岛合并时把自己存的绝对时刻（睡眠的基准和到点时刻、上一次真跑的刻）平移
+    /// `delta`，让「平移后再跑」等于「时钟本来就差 `delta` 时跑」。相对量不动。
+    /// 默认实现不存绝对时刻，什么都不做。
+    ///
+    /// Shift every absolute instant this entity stores by `delta` when islands
+    /// merge, so that running after the shift equals running on a clock that
+    /// was always `delta` apart. Relative values stay. The default stores none.
+    fn rebase(&mut self, _delta: i64) {}
+
     /// 刚排上日程的睡眠要关注什么：这些格子的方块 / 容器内容变了、或者有实体进出
     /// 这些盒子时要叫醒它。`None` = 只关注自己这一格（默认；到点或自己被写时醒）。
     ///
@@ -1077,6 +1086,64 @@ impl BlockEntities {
         self.due.dedup();
         self.watchers.absorb(other.watchers);
         self.next_ordinal = self.next_ordinal.max(other.next_ordinal);
+    }
+
+    /// 岛合并前把这张表的全部绝对时刻平移 `delta`（`吸收方.now − 被吸收方.now`）：
+    /// 表自己的 `now`、睡眠日程的分桶键和每个 ticker 的 `wake_at`（`i64::MAX` 的
+    /// 「等外部叫醒」不动），以及每个方块实体自己存的时刻（[`BlockEntity::rebase`]）。
+    /// 只在 tick 边界调用。
+    ///
+    /// Shift every absolute instant in this table by `delta` before an island
+    /// merge: the table's `now`, the sleep buckets and each ticker's `wake_at`
+    /// (keeping the `i64::MAX` "until woken" sentinel), and each entity's own
+    /// instants. Tick boundary only.
+    pub fn rebase(&mut self, delta: i64) {
+        self.rebase_filtered(delta, &|_| true);
+    }
+
+    /// 同 [`Self::rebase`]，但只平移 `include` 选中的方块实体自己存的时刻；表的日程
+    /// 照常平移。给改坏确认用：故意漏掉一类，测试要能抓到。
+    ///
+    /// Like [`Self::rebase`] but only entities picked by `include` shift their
+    /// own instants; the schedule always shifts. For break-it checks.
+    #[doc(hidden)]
+    pub fn rebase_filtered(&mut self, delta: i64, include: &dyn Fn(&dyn BlockEntity) -> bool) {
+        debug_assert!(self.ready_to_move_chunks());
+        use crate::sleep_clock::rebase_instant;
+        self.now = self.now.saturating_add(delta);
+        self.sleeping = std::mem::take(&mut self.sleeping)
+            .into_iter()
+            .map(|(at, ordinals)| (rebase_instant(at, delta), ordinals))
+            .collect();
+        for ticker in self.slots.iter_mut().flatten() {
+            if let Some(at) = &mut ticker.wake_at {
+                *at = rebase_instant(*at, delta);
+            }
+        }
+        for stored in self.entities.values_mut() {
+            if include(stored.entity.as_ref()) {
+                stored.entity.rebase(delta);
+            }
+        }
+    }
+
+    /// 只给改坏确认用：只平移表的睡眠日程，不平移方块实体自己存的时刻。
+    ///
+    /// Break-it checks only: shift the table's schedule but no entity's own instants.
+    #[doc(hidden)]
+    pub fn rebase_schedule_only(&mut self, delta: i64) {
+        self.rebase_filtered(delta, &|_| false);
+    }
+
+    /// 只给改坏确认用：只平移方块实体自己存的时刻，不平移表的 `now` 和睡眠日程。
+    ///
+    /// Break-it checks only: shift entities' own instants but not the table's
+    /// `now` or sleep schedule.
+    #[doc(hidden)]
+    pub fn rebase_entities_only(&mut self, delta: i64) {
+        for stored in self.entities.values_mut() {
+            stored.entity.rebase(delta);
+        }
     }
 
     /// 把 `chunk` 里的方块实体装进盒子搬走。只在 tick 边界调用。

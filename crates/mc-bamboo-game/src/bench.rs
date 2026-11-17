@@ -67,21 +67,24 @@ impl<'a> BenchWorld<'a> {
         Self { world }
     }
 
-    /// 现在的游戏刻号，驱动周期性输入用。
+    /// 现在的岛内刻号（岛的时钟），驱动周期性输入用。精确模式下等于世界时间。
+    ///
+    /// The island's tick number, for periodic inputs; equal to the world time
+    /// in exact mode.
     pub fn game_time(&self) -> i64 {
-        self.world.global.time().0
+        self.world.island.region.tick.game_time()
     }
 
     /// 世界出生点所在的区块。真实地形场景按它铺开预生成区域。
     pub fn spawn_chunk(&self) -> ChunkPos {
-        self.world.global.state().spawn.pos.chunk()
+        self.world.master.global.state().spawn.pos.chunk()
     }
 
     /// 这些区块是不是都已交付。
     pub fn all_loaded(&self, chunks: &[ChunkPos]) -> bool {
         chunks
             .iter()
-            .all(|&pos| self.world.region.chunks.is_loaded(pos))
+            .all(|&pos| self.world.island.region.chunks.is_loaded(pos))
     }
 
     /// 正式的 `/forceload` 票：让这一片保持在已加载模式里并参与方块 tick。
@@ -96,32 +99,32 @@ impl<'a> BenchWorld<'a> {
 
     /// 直接摆一个方块状态，不触发邻居更新。搭场景用，等价于读存档得到的方块。
     pub fn set_block(&mut self, pos: BlockPos, state: u32) {
-        let _ = self.world.region.chunks.set_block(pos, state);
-        self.world.region.touch(pos);
+        let _ = self.world.island.region.chunks.set_block(pos, state);
+        self.world.island.region.touch(pos);
     }
 
     /// 像玩家拉杆那样换一格并通知邻居。周期性输入走这里。
     pub fn set_block_and_update(&mut self, pos: BlockPos, state: u32) {
-        let (mut level, ticks) = self.world.region.block_level();
+        let (mut level, ticks) = self.world.island.region.block_level();
         let mut world = World::new(&mut level, ticks);
         world.set_block_and_update(pos, BlockState(state));
         let effects = world.into_effects();
-        crate::interaction::send_effects(&mut self.world.region, None, &effects);
-        self.world.region.touch(pos);
+        crate::interaction::send_effects(&mut self.world.island.region, None, &effects);
+        self.world.island.region.touch(pos);
     }
 
     /// 写一张容器槽位表；`kind` 决定格数。
     pub fn set_container(&mut self, pos: BlockPos, kind: BenchContainer, slots: Vec<ItemStack>) {
         let kind = kind.into_game();
-        let entry = crate::container::entry_in(&mut self.world.region.containers, pos, kind);
+        let entry = crate::container::entry_in(&mut self.world.island.region.containers, pos, kind);
         entry.slots = slots;
-        self.world.region.touch(pos);
+        self.world.island.region.touch(pos);
     }
 
     /// 往源头箱子的第一个空格补一组物品，然后通知邻居。
     pub fn refill(&mut self, pos: BlockPos, stack: ItemStack) -> bool {
         let mut changed = false;
-        let entry = self.world.region.containers.get_mut(&pos);
+        let entry = self.world.island.region.containers.get_mut(&pos);
         let Some(entry) = entry else {
             return false;
         };
@@ -137,24 +140,25 @@ impl<'a> BenchWorld<'a> {
         }
         let state = self
             .world
+            .island
             .region
             .chunks
             .block(pos)
             .map(BlockState)
             .unwrap_or(BlockState::AIR);
-        let (mut level, ticks) = self.world.region.block_level();
+        let (mut level, ticks) = self.world.island.region.block_level();
         let mut world = World::new(&mut level, ticks);
         world.set_block(pos, state, UPDATE_CLIENTS);
         world.update_neighbour_for_output_signal(pos, state.block());
         let effects = world.into_effects();
-        crate::interaction::send_effects(&mut self.world.region, None, &effects);
-        self.world.region.touch(pos);
+        crate::interaction::send_effects(&mut self.world.island.region, None, &effects);
+        self.world.island.region.touch(pos);
         true
     }
 
     /// 登记一个会动的方块实体（漏斗、熔炉等）。
     pub fn insert_block_entity(&mut self, entity: Box<dyn BlockEntity>) {
-        self.world.region.block_entities.insert(entity);
+        self.world.island.region.block_entities.insert(entity);
     }
 
     /// 排一条方块计划刻。
@@ -166,6 +170,7 @@ impl<'a> BenchWorld<'a> {
         priority: TickPriority,
     ) {
         self.world
+            .island
             .region
             .block_ticks
             .schedule(pos, block, delay, priority);
@@ -175,7 +180,7 @@ impl<'a> BenchWorld<'a> {
     ///
     /// Drops an item entity here with the default pickup delay, like `/loot spawn`.
     pub fn spawn_item(&mut self, position: Vec3, stack: ItemStack) {
-        let (mut level, ticks) = self.world.region.block_level();
+        let (mut level, ticks) = self.world.island.region.block_level();
         let mut world = World::new(&mut level, ticks);
         let mut entity = Entity::ground_item(position, stack);
         if let EntityKind::Item(item) = &mut entity.kind {
@@ -189,6 +194,7 @@ impl<'a> BenchWorld<'a> {
     /// Names of the online players, in player id order.
     pub fn player_names(&self) -> Vec<String> {
         self.world
+            .island
             .region
             .players
             .values()
@@ -201,8 +207,8 @@ impl<'a> BenchWorld<'a> {
     /// Runs one command with the server console as its source.
     pub fn console_command(&mut self, line: &str) {
         crate::command::console::on_console_command(
-            &mut self.world.global,
-            &mut self.world.region,
+            &mut self.world.master.global,
+            &mut self.world.island.region,
             line,
         );
     }
@@ -210,6 +216,7 @@ impl<'a> BenchWorld<'a> {
     /// 当前方块状态，输入翻转时判断现在是红石块还是空气。
     pub fn block_state(&self, pos: BlockPos) -> u32 {
         self.world
+            .island
             .region
             .chunks
             .block(pos)

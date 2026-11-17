@@ -84,14 +84,15 @@ fn autosaving_every_tick_is_invisible_to_the_running_world() {
             }
         }
         // 每刻都走一次自动保存路径（没有 IO 线程时只做只读编码与记账）。
-        saved
-            .world
-            .host
-            .save_loaded_dirty(&mut saved.world.region, tick as u64 + 1, true);
+        saved.world.master.host.save_loaded_dirty(
+            &mut saved.world.island.region,
+            tick as u64 + 1,
+            true,
+        );
         saved.tick();
         control.tick();
-        let a = fingerprint(&saved.world.region, &saved_client);
-        let b = fingerprint(&control.world.region, &control_client);
+        let a = fingerprint(&saved.world.island.region, &saved_client);
+        let b = fingerprint(&control.world.island.region, &control_client);
         assert_eq!(a, b, "第 {tick} 刻自动保存改变了世界状态或发出的包");
     }
 }

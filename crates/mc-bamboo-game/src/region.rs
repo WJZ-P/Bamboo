@@ -106,24 +106,56 @@ pub(crate) const CREATIVE_ATTRIBUTES: [AttributeSnapshot<'static>; 2] = [
     },
 ];
 
-/// 调度用的时钟。和 [`GameTime`] 同步增长，但不是一回事，不能互相比较。
+/// 岛的时钟（模拟时间）。计划刻队列的 `now`、方块实体的休眠时钟、容器重查、讲台、
+/// 传送确认、红石缓存都以它为准（岛的实施计划 5.1）。岛建立时取当时的
+/// [`GameTime`]，之后每刻加一；精确模式下两者永远相等，但仍不是一回事：
+/// [`GameTime`] 归主控，昼夜、`/time`、存盘的 `Time` 读它。
+///
+/// 内部用 `i64`：合并时被吸收方的时刻要平移 `吸收方 − 被吸收方`，可能平移到 0 以下。
+///
+/// The island clock (simulation time). Scheduled ticks, block-entity sleep,
+/// container rechecks, lecterns, teleport acks and the redstone cache all use
+/// it. It starts at the current [`GameTime`] and advances by one per tick, so
+/// the two are always equal in exact mode, but [`GameTime`] belongs to the
+/// master. Stored as `i64` because a merge may shift instants below zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct RegionTick(u64);
+pub(crate) struct RegionTick(i64);
 
 impl RegionTick {
-    /// 现在的游戏刻号。
+    /// 岛建立时的初值：当时的世界时间。
+    ///
+    /// The initial value when an island is created: the world time then.
+    pub(crate) fn starting_at(time: GameTime) -> Self {
+        Self(time.0)
+    }
+
+    /// 现在的刻号，给方块逻辑当 `getGameTime()` 用。
     pub(crate) fn game_time(self) -> i64 {
-        i64::try_from(self.0).unwrap_or(i64::MAX)
+        self.0
     }
 
     /// 从 `earlier` 到现在过了多少 tick。
     pub(crate) fn since(self, earlier: Self) -> u64 {
-        self.0.saturating_sub(earlier.0)
+        u64::try_from(self.0.saturating_sub(earlier.0)).unwrap_or(0)
     }
 
     /// `later` 个 tick 之后。
     pub(crate) fn plus(self, later: u64) -> Self {
-        Self(self.0.saturating_add(later))
+        Self(
+            self.0
+                .saturating_add(i64::try_from(later).unwrap_or(i64::MAX)),
+        )
+    }
+
+    /// 平移 `delta` 刻，岛合并时用。
+    ///
+    /// Shifted by `delta` ticks, for island merges.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "island merges (plan step 9) call it at run time")
+    )]
+    pub(crate) fn rebased(self, delta: i64) -> Self {
+        Self(self.0.saturating_add(delta))
     }
 
     /// 是否已经到了 `at` 这一刻。这一 tick 开始时增长，所以到期的刻在自己这一 tick 跑。
@@ -133,8 +165,42 @@ impl RegionTick {
 
     /// `at` 距现在还有多少刻，已经到期的算 0。搬区块时把绝对时刻换算成相对值用。
     pub(crate) fn remaining(self, at: Self) -> u64 {
-        at.0.saturating_sub(self.0)
+        u64::try_from(at.0.saturating_sub(self.0)).unwrap_or(0)
     }
+}
+
+/// [`Region::rebase_clock_parts`] 平移哪几类。正式路径只用 [`Self::ALL`]。
+///
+/// Which classes [`Region::rebase_clock_parts`] shifts; production uses [`Self::ALL`].
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "island merges (plan step 9) call it at run time")
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClockParts {
+    pub(crate) clock: bool,
+    pub(crate) block_ticks: bool,
+    pub(crate) redstone: bool,
+    pub(crate) block_entities: bool,
+    pub(crate) containers: bool,
+    pub(crate) lecterns: bool,
+    pub(crate) teleports: bool,
+}
+
+impl ClockParts {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "island merges (plan step 9) call it at run time")
+    )]
+    pub(crate) const ALL: Self = Self {
+        clock: true,
+        block_ticks: true,
+        redstone: true,
+        block_entities: true,
+        containers: true,
+        lecterns: true,
+        teleports: true,
+    };
 }
 
 /// 世界的一块区域。`players` 和 `links` 是两个字段，遍历玩家时可以写链路。
@@ -410,8 +476,91 @@ impl Region {
             .unwrap_or_else(crate::secure_chat::now_millis)
     }
 
+    /// 改用世界共享的实体 ID 分配器。只在建好、还没有实体时调用一次。
+    ///
+    /// Switch to the world's shared entity-id allocator. Called once, right
+    /// after construction and before any entity exists.
+    pub(crate) fn use_entity_ids(&mut self, ids: mc_bamboo_blocks::EntityIds) {
+        debug_assert!(
+            self.entities.is_empty(),
+            "switching allocators under live entities"
+        );
+        self.entities = Entities::with_ids(ids);
+    }
+
     pub(crate) fn advance_tick(&mut self) {
         self.tick.0 += 1;
+    }
+
+    /// 岛建立时把时钟定在当时的世界时间；计划刻队列的时钟一起对上。
+    ///
+    /// Set the island clock to the world time when the island is created, and
+    /// line the scheduled-tick clock up with it.
+    pub(crate) fn start_clock(&mut self, time: GameTime) {
+        self.tick = RegionTick::starting_at(time);
+        self.block_ticks.set_time(self.tick.game_time());
+    }
+
+    /// 岛合并前把被吸收方的全部绝对时刻平移 `delta = 吸收方.now − 被吸收方.now`
+    /// （岛的实施计划 5.1）。平移之后再跑，等于这个岛的时钟本来就差 `delta` 时跑。
+    /// 只在 tick 边界调用。
+    ///
+    /// 平移的七类：计划刻（含搁置表、活塞的 `lastTicked`、每区块最近排刻时刻和时钟）、
+    /// 红石火把开关记录、方块实体表的睡眠日程和每个方块实体自己存的时刻（漏斗、
+    /// 熔炉、酿造台、营火）、容器的 `recheck_at`、讲台待发的格子、玩家传送的
+    /// `sent_at`，以及岛的时钟本身。红石缓存直接丢掉重建（结果和解释执行逐位相同，
+    /// 只是暂时没有记录）；单元划分的统计不平移，合并时重建。
+    ///
+    /// Shift every absolute instant of the absorbed island by
+    /// `delta = absorber.now − absorbed.now` before a merge, so that running
+    /// afterwards equals running on a clock that was always `delta` apart.
+    /// Tick boundary only. The redstone cache is dropped (replay is
+    /// result-identical); partition statistics are rebuilt on merge instead.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "island merges (plan step 9) call it at run time")
+    )]
+    pub(crate) fn rebase_clock(&mut self, delta: i64) {
+        self.rebase_clock_parts(delta, ClockParts::ALL);
+    }
+
+    /// 同 [`Self::rebase_clock`]，按 `parts` 只平移其中几类。给改坏确认用。
+    ///
+    /// Like [`Self::rebase_clock`] but only the selected classes; for break-it checks.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "island merges (plan step 9) call it at run time")
+    )]
+    pub(crate) fn rebase_clock_parts(&mut self, delta: i64, parts: ClockParts) {
+        if parts.clock {
+            self.tick = self.tick.rebased(delta);
+        }
+        if parts.block_ticks {
+            self.block_ticks.rebase(delta);
+        }
+        if parts.redstone {
+            self.redstone.rebase(delta);
+        }
+        if parts.block_entities {
+            self.block_entities.rebase(delta);
+        }
+        if parts.containers {
+            for entry in self.containers.values_mut() {
+                if let Some(at) = &mut entry.recheck_at {
+                    *at = at.rebased(delta);
+                }
+            }
+        }
+        if parts.lecterns {
+            self.lecterns.rebase(delta);
+        }
+        if parts.teleports {
+            for player in self.players.values_mut() {
+                player.teleport.sent_at = player.teleport.sent_at.rebased(delta);
+            }
+        }
+        self.redstone_cache =
+            mc_bamboo_blocks::cache::RedstoneCache::new(*self.redstone_cache.config());
     }
 
     /// 游戏层直接改了按位置索引的上层表：把那一格所在区块标脏。
