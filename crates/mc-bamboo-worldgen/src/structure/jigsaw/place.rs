@@ -411,6 +411,7 @@ pub fn place_processed(
     mirror: u32,
     rotation: u32,
     random: &crate::random::Random,
+    worldgen_random: Option<&crate::random::WorldgenRandom>,
     world: &mut impl BlockWriter,
 ) -> Result<PlacedBlocks, String> {
     let mut placed = PlacedBlocks::default();
@@ -476,9 +477,54 @@ pub fn place_processed(
             let nbt = match &block.nbt {
                 None => None,
                 Some(tag) if is_randomizable_container(&block.state.name) => {
-                    Some(overwrite_loot_table_seed(tag, random.next_long()))
+                    // `RandomizableContainer` 读入模板 nbt 时，`LootTable` 不存在就清空
+                    // 整份 `LootTable` 状态；随后写入的 `LootTableSeed`（可能非 0）
+                    // 不会单独存出。古城箱子只有 `Items`、没有表，所以要丢掉这个种子。
+                    //
+                    // A `RandomizableContainer` with no `LootTable` in its template nbt
+                    // clears the whole loot-table state; the placement-time
+                    // `LootTableSeed` is then not saved on its own. The ancient-city chest
+                    // has only `Items`, so its seed must be dropped.
+                    if !nbt_has_key(tag, "LootTable") {
+                        let mut cleaned = tag.clone();
+                        nbt_remove_key(&mut cleaned, "LootTableSeed");
+                        Some(cleaned)
+                    } else {
+                        // `StructureStart.placeInChunk` 传下来的是 `WorldgenRandom`（继承
+                        // `LegacyRandomSource`），`BitRandomSource.nextLong` 取两次 `next(32)`；
+                        // 直接问内层的 `Random` 会走 Xoroshiro 的原生一次 64 位，两种种子只差低位。
+                        // 走游戏路径时一定要用那个 `WorldgenRandom`，单独对拍的调用方才退回到
+                        // 传入的 `Random`。
+                        //
+                        // `StructureStart.placeInChunk` passes a `WorldgenRandom` (extending
+                        // `LegacyRandomSource`), whose `BitRandomSource.nextLong` draws two
+                        // `next(32)` values. Asking the inner `Random` instead uses Xoroshiro's
+                        // single 64-bit draw, which only differs in the low bits. The game path
+                        // must use that `WorldgenRandom`; stand-alone oracles fall back to `Random`.
+                        let seed = match worldgen_random {
+                            Some(source) => source.next_long(),
+                            None => random.next_long(),
+                        };
+                        Some(overwrite_loot_table_seed(tag, seed))
+                    }
                 }
-                Some(tag) => Some(tag.clone()),
+                // `VaultBlockEntity.saveAdditional` 把 `config` 过一遍 `VaultConfig.CODEC`：
+                // 当 `loot_table` 等于该表的默认 `TRIAL_CHAMBERS_REWARD` 时，编码会省略
+                // 它。试炼密室模板里普通宝库写的正是默认值，所以官方存出来没有这一项。
+                //
+                // `VaultBlockEntity.saveAdditional` round-trips `config` through
+                // `VaultConfig.CODEC`, whose encoder omits `loot_table` when it equals the
+                // codec default (`TRIAL_CHAMBERS_REWARD`). Plain trial-chamber vault
+                // templates use exactly that default, so vanilla saves no such key.
+                Some(tag) if block.state.name == "minecraft:vault" => {
+                    Some(normalize_vault_config(tag))
+                }
+                // 模板里的数值字段用的是旧式短/字节类型；官方的 `saveAdditional`
+                // 按 `putInt` 写回，告示牌文本也要过 `SignText.CODEC`。
+                // Template numeric fields use legacy short/byte types; vanilla's
+                // `saveAdditional` writes them back as ints, and sign text is
+                // round-tripped through `SignText.CODEC`.
+                Some(tag) => Some(normalize_block_entity_nbt(&block.state.name, tag)),
             };
             // 官方 `blockEntity.loadWithComponents(...)`：nbt 写进方块实体。
             // Vanilla `blockEntity.loadWithComponents(...)`: the nbt goes into the block
@@ -680,6 +726,161 @@ pub fn is_randomizable_container(block_name: &str) -> bool {
     )
 }
 
+/// 按官方各类方块实体的 `saveAdditional` 重新编码模板 nbt 里的字段。
+///
+/// Re-encode the template nbt fields the way each vanilla block entity's
+/// `saveAdditional` does.
+pub fn normalize_block_entity_nbt(block_name: &str, tag: &Tag) -> Tag {
+    let Tag::Compound(entries) = tag else {
+        return tag.clone();
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        let next = if is_int_when_saved(block_name, key) {
+            numeric_as_int(value)
+        } else if is_sign_text(block_name, key) {
+            normalize_sign_text(value)
+        } else {
+            value.clone()
+        };
+        out.push((key.clone(), next));
+    }
+    Tag::Compound(out)
+}
+
+/// `AbstractFurnaceBlockEntity` / `BrewingStandBlockEntity` 用 `putInt` 写计时字段，
+/// 模板里却存成 short / byte。
+///
+/// `AbstractFurnaceBlockEntity` / `BrewingStandBlockEntity` write their timers with
+/// `putInt`, while the templates store them as shorts / bytes.
+fn is_int_when_saved(block_name: &str, key: &str) -> bool {
+    let furnace = matches!(
+        block_name,
+        "minecraft:furnace" | "minecraft:blast_furnace" | "minecraft:smoker"
+    ) && matches!(
+        key,
+        "cooking_time_spent" | "cooking_total_time" | "lit_time_remaining" | "lit_total_time"
+    );
+    let brewing = block_name == "minecraft:brewing_stand"
+        && matches!(key, "BrewTime" | "Fuel" | "total_brew_time" | "total_fuel");
+    furnace || brewing
+}
+
+fn numeric_as_int(value: &Tag) -> Tag {
+    match value {
+        Tag::Byte(number) => Tag::Int(i32::from(*number)),
+        Tag::Short(number) => Tag::Int(i32::from(*number)),
+        _ => value.clone(),
+    }
+}
+
+/// `SignBlockEntity.saveAdditional` 把 `front_text` / `back_text` 过
+/// `SignText.CODEC`：文本组件压成纯字符串，`filtered_messages` 与 `messages`
+/// 相同时省略。
+///
+/// `SignBlockEntity.saveAdditional` round-trips `front_text` / `back_text`
+/// through `SignText.CODEC`: text components collapse to plain strings and
+/// `filtered_messages` is omitted when equal to `messages`.
+fn is_sign_text(block_name: &str, key: &str) -> bool {
+    block_name.contains("sign")
+        && !block_name.contains("hanging_sign")
+        && matches!(key, "front_text" | "back_text")
+}
+
+fn component_text(value: &Tag) -> Tag {
+    let Tag::Compound(entries) = value else {
+        return value.clone();
+    };
+    if entries.len() == 1
+        && let Some((_, Tag::String(text))) = entries.first()
+        && entries[0].0 == "text"
+    {
+        return Tag::String(text.clone());
+    }
+    value.clone()
+}
+
+fn normalize_sign_text(value: &Tag) -> Tag {
+    let Tag::Compound(entries) = value else {
+        return value.clone();
+    };
+    let mut messages: Option<Vec<Tag>> = None;
+    let mut filtered: Option<Vec<Tag>> = None;
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, field) in entries {
+        match (key.as_str(), field) {
+            ("messages", Tag::List(list)) => {
+                let normalized: Vec<Tag> = list.iter().map(component_text).collect();
+                messages = Some(normalized.clone());
+                out.push((key.clone(), Tag::List(normalized)));
+            }
+            ("filtered_messages", Tag::List(list)) => {
+                filtered = Some(list.iter().map(component_text).collect());
+            }
+            _ => out.push((key.clone(), field.clone())),
+        }
+    }
+    // `SignText.filteredMessagesForSerialization`：两份列表相等时不写。
+    // `SignText.filteredMessagesForSerialization`: omit it when the lists are equal.
+    if let (Some(filtered), Some(messages)) = (filtered, messages)
+        && filtered != messages
+    {
+        out.push(("filtered_messages".to_owned(), Tag::List(filtered)));
+    }
+    Tag::Compound(out)
+}
+
+/// `VaultConfig.CODEC` 的默认战利品表（`VaultConfig.DEFAULT` 构造里写死）。
+///
+/// The default loot table of `VaultConfig.CODEC` (`VaultConfig.DEFAULT`'s constructor).
+const DEFAULT_VAULT_LOOT_TABLE: &str = "minecraft:chests/trial_chambers/reward";
+
+/// 按 `VaultConfig.CODEC` 的编码规则省略默认的 `config.loot_table`。
+///
+/// Omit the default `config.loot_table` the way `VaultConfig.CODEC` encodes it.
+fn normalize_vault_config(tag: &Tag) -> Tag {
+    let Tag::Compound(entries) = tag else {
+        return tag.clone();
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        if key != "config" {
+            out.push((key.clone(), value.clone()));
+            continue;
+        }
+        let Tag::Compound(config) = value else {
+            out.push((key.clone(), value.clone()));
+            continue;
+        };
+        let mut fields = Vec::with_capacity(config.len());
+        for (field, field_value) in config {
+            let is_default = *field == "loot_table"
+                && matches!(field_value, Tag::String(text) if text == DEFAULT_VAULT_LOOT_TABLE);
+            if !is_default {
+                fields.push((field.clone(), field_value.clone()));
+            }
+        }
+        out.push((key.clone(), Tag::Compound(fields)));
+    }
+    Tag::Compound(out)
+}
+
+/// 模板 nbt 里有没有某个键。
+///
+/// Whether the template nbt has a key.
+fn nbt_has_key(tag: &Tag, key: &str) -> bool {
+    matches!(tag, Tag::Compound(entries) if entries.iter().any(|(name, _)| name == key))
+}
+
+/// 删掉模板 nbt 里的某个键。
+///
+/// Remove a key from the template nbt.
+fn nbt_remove_key(tag: &mut Tag, key: &str) {
+    if let Tag::Compound(entries) = tag {
+        entries.retain(|(name, _)| name != key);
+    }
+}
+
 /// 用 `seed` 覆盖（或插入）nbt 里的 `LootTableSeed`。
 ///
 /// Overwrite (or insert) `LootTableSeed` in the nbt.
@@ -788,6 +989,7 @@ pub fn place_piece<L: ProcessorLevel>(
     mirror: u32,
     rotation: u32,
     random: &crate::random::Random,
+    worldgen_random: Option<&crate::random::WorldgenRandom>,
     world: &mut impl BlockWriter,
 ) -> Result<PlacedBlocks, String> {
     // `settings.getBoundingBox()`：`None` 时官方不过滤（`boundingBox == null`），
@@ -827,7 +1029,15 @@ pub fn place_piece<L: ProcessorLevel>(
             state: block.state,
         })
         .collect();
-    let mut placed = place_processed(&place, chunk_bb, mirror, rotation, random, world)?;
+    let mut placed = place_processed(
+        &place,
+        chunk_bb,
+        mirror,
+        rotation,
+        random,
+        worldgen_random,
+        world,
+    )?;
     // `if (!settings.isIgnoreEntities()) placeEntities(...)`。`SinglePoolElement.getSettings`
     // 里 `setIgnoreEntities(false)`，所以 jigsaw 结构件照官方都要放实体。`finalizeEntities`
     // 只影响 `Mob.finalizeSpawn`，那属于实体系统，这里交给调用方。
@@ -1173,6 +1383,7 @@ mod tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            None,
             &mut world,
         )
         .unwrap();
@@ -1235,6 +1446,7 @@ mod tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            None,
             &mut world,
         )
         .unwrap();
@@ -1261,6 +1473,7 @@ mod tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            None,
             &mut world,
         )
         .unwrap();
@@ -1365,7 +1578,7 @@ mod tests {
         }];
         let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(3));
         let mut world = World::default();
-        let placed = place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        let placed = place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         let (_, saved) = &placed.placed[0];
         let saved = saved.as_ref().unwrap();
         let Tag::Compound(entries) = saved else {
@@ -1386,7 +1599,7 @@ mod tests {
             nbt: nbt(),
         }];
         let mut world = World::default();
-        let placed = place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        let placed = place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         let (_, saved) = &placed.placed[0];
         let Tag::Compound(entries) = saved.as_ref().unwrap() else {
             panic!("saved nbt must be a compound");
@@ -1458,7 +1671,7 @@ mod tests {
         // The position was a fluid source, so `waterlogged` becomes true.
         let mut world = World::default();
         world.sources.insert((2, 3, 4));
-        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         let last = world.writes.last().expect("at least one write");
         assert_eq!(last.0, (2, 3, 4));
         assert_eq!(
@@ -1470,7 +1683,7 @@ mod tests {
         // 不是流体源 → 保持 false，且只写一次。
         // Not a fluid source: stays false and only one write happens.
         let mut world = World::default();
-        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         assert_eq!(world.writes.len(), 1, "no extra watering write");
         assert_eq!(
             crate::structure::state_transform::property_of(world.writes[0].1, "waterlogged"),
@@ -1595,7 +1808,7 @@ mod tests {
         }];
         let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0));
         let mut world = World::default();
-        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         assert_eq!(world.writes, 1, "only the block itself is written");
     }
 
@@ -1646,7 +1859,7 @@ mod tests {
         }];
         let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(11));
         let mut world = World::default();
-        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         assert_eq!(world.entities.len(), 1, "one block entity written");
         let (pos, tag) = &world.entities[0];
         assert_eq!(*pos, (0, 5, 0));
@@ -1709,7 +1922,7 @@ mod tests {
         ];
         let random = crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0));
         let mut world = World::default();
-        place_processed(&blocks, bb, 0, 0, &random, &mut world).unwrap();
+        place_processed(&blocks, bb, 0, 0, &random, None, &mut world).unwrap();
         assert_eq!(world.entities, 1, "only the block with nbt");
     }
 
@@ -1785,6 +1998,7 @@ mod tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
+            None,
             &mut world,
         )
         .unwrap();

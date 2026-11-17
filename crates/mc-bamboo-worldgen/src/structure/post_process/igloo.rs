@@ -164,7 +164,11 @@ fn handle_data_marker(
 ) {
     if metadata == "chest" {
         context.set_block(pos, mc_bamboo_data::blocks::AIR);
-        context.seed_chest_loot_table((pos.0, pos.1 - 1, pos.2));
+        // `IglooPiece.handleDataMarker` 给下面那格的箱子设
+        // `IGLOO_CHEST` 表与一次 `random.nextLong()`。
+        // `IglooPiece.handleDataMarker` sets the `IGLOO_CHEST` table and one
+        // `random.nextLong()` seed on the chest below.
+        context.set_chest_loot_table((pos.0, pos.1 - 1, pos.2), "minecraft:chests/igloo_chest");
     }
 }
 

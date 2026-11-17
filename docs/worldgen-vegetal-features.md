@@ -134,7 +134,7 @@ step 9（`vegetal_decoration`）占 109 个。
 | `weighted_list` IntProvider | 已做 | 见 `docs/worldgen-features-plan.md`「第二轮」（合并 main 后取 main 的 `Box<IntProvider>` 版） |
 | `java_set`（`HashSet<BlockPos>` 桶树化后的迭代序） | 已做（`cb-wg-feat-c`，按 JDK 25 字节码复刻 `treeifyBin` / `treeify` / `putTreeVal` / `TreeNode.split`） | `JavaSetOracle.java` 80 组插入序列逐个比对；`--chunk -58 -217 --scan 5 --seeds 2` 从 1 skipped 变成 0 skipped / 0 不一致；把 `putTreeVal` 改成追加桶尾报 10 处 |
 | `projected_random_patchy_square` | 26.3 导出数据无条目 | 不需要实现 |
-| 方块实体数据（蜂巢 / 可疑沙等） | 未做 | 无对拍 |
+| 方块实体数据（蜂巢 / 可疑沙等） | 已做（结构线 `structure-e2e` 现在比 NBT；可疑的沙子的表与种子已按字节码写入） | `gen-world --through features --structures` / `structure-e2e` 52 区块 117 个方块实体 0 不一致 |
 
 实测说明见 `docs/worldgen-feat-c-notes.md`：`features_per_step` 的 171 个条目在真实区块上
 已不再报 `unsupported`（`fossil` / `desert_well` 的 JVM 侧限制属结构线，不是 Rust 侧跳过）。

@@ -284,6 +284,17 @@ pub fn corridor_post_process(
                 piece
                     .level
                     .set_block(wx, wy, wz, block("minecraft:spawner"));
+                // `SpawnerBlockEntity.setEntityId(CAVE_SPIDER, random)` 把默认刷怪数据
+                // 的实体 id 改掉；官方存盘时会把这一整套默认值写进方块实体。
+                // `SpawnerBlockEntity.setEntityId(CAVE_SPIDER, random)` overwrites the
+                // entity id of the default spawn data; vanilla saves the whole default
+                // spawner record to the block entity.
+                piece.level.set_block_entity(
+                    wx,
+                    wy,
+                    wz,
+                    &crate::structure::piece_place::spawner_nbt("minecraft:cave_spider"),
+                );
             }
         }
     }

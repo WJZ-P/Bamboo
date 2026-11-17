@@ -83,6 +83,12 @@ pub trait PieceLevel {
     fn get_block(&self, x: i32, y: i32, z: i32) -> u32;
     /// `LevelWriter.setBlock(pos, state, flags)`。
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool;
+    /// `WorldGenRegion.getBlockEntity(...)` 之后写进方块实体的 nbt。默认丢弃；只有
+    /// 收集方块实体的调用方（`FeaturePieceLevel`）需要实现。
+    ///
+    /// The nbt written to a block entity after `WorldGenRegion.getBlockEntity(...)`.
+    /// The default drops it; only `FeaturePieceLevel` collects it.
+    fn set_block_entity(&mut self, _x: i32, _y: i32, _z: i32, _nbt: &mc_bamboo_nbt::Tag) {}
     /// `LevelReader.getMinY()`。
     fn min_y(&self) -> i32;
     /// `LevelReader.getMaxY()`。
@@ -105,6 +111,34 @@ pub trait PieceLevel {
     /// `LevelAccessor.getRandom()`: the `WorldGenRegion`'s own positional source, separate
     /// from the `random` passed to `postProcess` (the mansion's allay count draws from it).
     fn level_random(&self) -> &crate::random::WorldgenRandom;
+}
+
+/// `BaseSpawner` 的默认记录（`Delay` / `SpawnPotentials` / 各计时字段）加上
+/// `setEntityId` 写入的 `SpawnData.entity.id`。`WeightedList.of()` 是空表，
+/// `getOrCreateNextSpawnData` 在没有 potential 时造一份空的 `SpawnData`。
+///
+/// The default `BaseSpawner` record plus the `SpawnData.entity.id` written by
+/// `setEntityId`. `WeightedList.of()` is empty, so `getOrCreateNextSpawnData`
+/// creates an empty `SpawnData` when no potential exists.
+pub fn spawner_nbt(entity: &str) -> mc_bamboo_nbt::Tag {
+    use mc_bamboo_nbt::Tag;
+    Tag::Compound(vec![
+        ("Delay".to_owned(), Tag::Short(20)),
+        ("MaxNearbyEntities".to_owned(), Tag::Short(6)),
+        ("MaxSpawnDelay".to_owned(), Tag::Short(800)),
+        ("MinSpawnDelay".to_owned(), Tag::Short(200)),
+        ("RequiredPlayerRange".to_owned(), Tag::Short(16)),
+        ("SpawnCount".to_owned(), Tag::Short(4)),
+        (
+            "SpawnData".to_owned(),
+            Tag::Compound(vec![(
+                "entity".to_owned(),
+                Tag::Compound(vec![("id".to_owned(), Tag::String(entity.to_owned()))]),
+            )]),
+        ),
+        ("SpawnPotentials".to_owned(), Tag::List(Vec::new())),
+        ("SpawnRange".to_owned(), Tag::Short(4)),
+    ])
 }
 
 /// `BoundingBox.isInside(pos)`：三轴都含端点。

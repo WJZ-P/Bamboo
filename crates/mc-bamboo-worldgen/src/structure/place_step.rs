@@ -649,6 +649,7 @@ fn place_single_pool_element(
         0,
         inputs.rotation,
         inputs.random.source(),
+        Some(inputs.random),
         world,
     )?;
     Ok(())
@@ -810,7 +811,18 @@ fn place_code_piece(
     random: &WorldgenRandom,
 ) -> Result<(), String> {
     if kind == "mansion" {
-        return pieces::woodland_mansion::place_piece(piece, level, chunk_bb, random);
+        let mut collected = Vec::new();
+        pieces::woodland_mansion::place_piece_with_entities(
+            piece,
+            level,
+            chunk_bb,
+            random,
+            Some(&mut collected),
+        )?;
+        for (pos, tag) in collected {
+            level.world.set_block_entity(pos.0, pos.1, pos.2, &tag);
+        }
+        return Ok(());
     }
     if kind == "monument" {
         // 海底神殿的房间图需要从 seed / chunk 重建；放置阶段每个区块只跑一次，
@@ -966,6 +978,10 @@ impl PieceLevel for FeaturePieceLevel<'_, '_> {
 
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
         self.world.set_block_with_heightmaps(x, y, z, state)
+    }
+
+    fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {
+        self.world.set_block_entity(x, y, z, nbt);
     }
 
     fn min_y(&self) -> i32 {

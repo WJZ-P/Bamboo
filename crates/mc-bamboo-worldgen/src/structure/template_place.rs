@@ -29,6 +29,11 @@ use crate::{
     },
 };
 
+/// 一个处理完待写入的方块：`(世界坐标, 状态, 方块实体 nbt)`。
+///
+/// A processed block pending writing: `(world position, state, block-entity nbt)`.
+type PendingBlock = ((i32, i32, i32), u32, Option<mc_bamboo_nbt::Tag>);
+
 /// `Mirror` 的序号。
 ///
 /// Ordinals of vanilla `Mirror`.
@@ -112,6 +117,10 @@ pub const IGNORE_STRUCTURE_AND_AIR: &[&str] = &["minecraft:air", "minecraft:stru
 pub struct Rule {
     pub input: InputTest,
     pub output: u32,
+    /// 命中这条规则时由 `AppendLoot` 写下的战利品表。
+    ///
+    /// The loot table written by `AppendLoot` when this rule matches.
+    pub loot_table: Option<&'static str>,
 }
 
 /// `RuleTest` 的两种。
@@ -306,7 +315,7 @@ pub fn place_in_world(
     // 所以 processor 读到的世界是「本结构件还什么都没写」的状态。
     // Processors run first, then the writes: vanilla builds `processedBlockInfoList`
     // before writing anything, so processors see the world without this piece's writes.
-    let mut processed: Vec<((i32, i32, i32), u32, bool)> = Vec::new();
+    let mut processed: Vec<PendingBlock> = Vec::new();
     let mut originals: Vec<((i32, i32, i32), u32)> = Vec::new();
     for &index in &blocks {
         let block = &template.blocks[index];
@@ -324,6 +333,7 @@ pub fn place_in_world(
         let Some(state) = state_of(entry) else {
             continue;
         };
+        let mut nbt = block.nbt.clone();
         let mut current = state;
         let mut keep = true;
         for processor in &settings.processors {
@@ -334,8 +344,13 @@ pub fn place_in_world(
                 // `finalizeProcessing`.
                 continue;
             }
-            match processor.process(world, pos, block.pos, current, settings) {
-                Some(next) => current = next,
+            match processor.process_with_nbt(world, pos, block.pos, current, settings) {
+                Some((next, rule_nbt)) => {
+                    current = next;
+                    if rule_nbt.is_some() {
+                        nbt = rule_nbt;
+                    }
+                }
                 None => {
                     keep = false;
                     break;
@@ -344,7 +359,7 @@ pub fn place_in_world(
         }
         if keep {
             originals.push((pos, state));
-            processed.push((pos, current, block.nbt.is_some()));
+            processed.push((pos, current, nbt));
         }
     }
 
@@ -369,7 +384,7 @@ pub fn place_in_world(
     let mut locked_fluids: Vec<(i32, i32, i32)> = Vec::new();
     let mut to_fill: Vec<(i32, i32, i32)> = Vec::new();
     let mut placed_positions: Vec<(i32, i32, i32)> = Vec::new();
-    for (pos, state, has_nbt) in processed {
+    for (pos, state, nbt) in processed {
         // `if (boundingBox == null || boundingBox.isInside(blockPos))`：有
         // `CappedProcessor` 时 `processBlockInfos` 不按 `chunkBB` 过滤，但写入这一步
         // 永远只写盒内的方块。
@@ -384,7 +399,7 @@ pub fn place_in_world(
         let previous_fluid = (settings.liquid == LiquidSettings::ApplyWaterlogging)
             .then(|| *mc_bamboo_data::state_fluid(world.get_block(pos.0, pos.1, pos.2)));
         let state = mirror_rotate(state, settings);
-        if has_nbt {
+        if nbt.is_some() {
             // `level.setBlock(blockPos, Blocks.BARRIER, 820)`：给方块实体占位。
             // `level.setBlock(blockPos, Blocks.BARRIER, 820)`: a placeholder for the
             // block entity.
@@ -394,20 +409,26 @@ pub fn place_in_world(
             continue;
         }
         placed_positions.push(pos);
-        if has_nbt {
+        if let Some(mut nbt) = nbt {
             block_entities.push(pos);
-            // `level.getBlockEntity(blockPos)` 在 `WorldGenRegion` 里会按 `setBlock` 留下的
-            // DUMMY nbt 现造方块实体；它是 `RandomizableContainer` 时官方取一次
-            // `random.nextLong()` 当 `LootTableSeed`。这一次取数必须发生，后面的
-            // `spreadNetherrack` 等用的是同一个随机源。
-            // `level.getBlockEntity(blockPos)` in a `WorldGenRegion` creates the block
-            // entity from the DUMMY nbt `setBlock` left; when it is a
-            // `RandomizableContainer` vanilla draws one `random.nextLong()` as the
-            // `LootTableSeed`. The draw must happen: `spreadNetherrack` and friends share
-            // this random.
+            // `StructureTemplate.placeInWorld` 把模板里的 nbt 交给该位置的方块实体
+            // （`loadWithComponents`）；随机容器还要取一次 `random.nextLong()` 覆盖
+            // `LootTableSeed`。这一次取数必须发生，后面的 `spreadNetherrack` 等用的是
+            // 同一个随机源。
+            //
+            // `StructureTemplate.placeInWorld` loads the template nbt into the block
+            // entity at this position; a randomizable container also draws one
+            // `random.nextLong()` to overwrite `LootTableSeed`.
             if is_randomizable_container(state) {
-                random.next_long();
+                set_loot_table_seed(&mut nbt, random.next_long());
             }
+            let nbt = super::jigsaw::place::normalize_block_entity_nbt(
+                mc_bamboo_data::block_of_state(state)
+                    .map(|block| block.name)
+                    .unwrap_or(""),
+                &nbt,
+            );
+            world.set_block_entity(pos.0, pos.1, pos.2, &nbt);
         }
         if let Some(previous) = previous_fluid {
             let new_fluid = mc_bamboo_data::state_fluid(state);
@@ -523,7 +544,7 @@ fn apply_capped(
     limit: i32,
     delegate: &Processor,
     originals: &[((i32, i32, i32), u32)],
-    processed: &mut [((i32, i32, i32), u32, bool)],
+    processed: &mut [PendingBlock],
     position: (i32, i32, i32),
 ) {
     if limit == 0 || processed.is_empty() || originals.len() != processed.len() {
@@ -560,16 +581,19 @@ fn apply_capped(
         }
         let (pos, _original_state) = originals[index];
         let current = processed[index].1;
-        // `CappedProcessor` 传给 delegate 的 `templateRelativePos` 是 `originalBlockInfo.pos()`，
-        // 这里用世界位置顶替（`RuleTest` 的位置谓词在这些结构里恒 true）。
-        // The `templateRelativePos` passed to the delegate is `originalBlockInfo.pos()`;
-        // the world position stands in here (the position predicate is always true in these
-        // structures).
-        if let Some(altered) = delegate.process(world, pos, pos, current, settings)
+        // `RuleProcessor` 用 `Mth.getSeed(processedBlockInfo.pos())` 播种，
+        // `pos` 是 `calculateRelativePosition + piecePos` 的世界坐标。
+        // `RuleProcessor` seeds from `Mth.getSeed(processedBlockInfo.pos())`,
+        // where `pos` is the world position after the piece transform.
+        if let Some((altered, rule_nbt)) =
+            delegate.process_with_nbt(world, pos, pos, current, settings)
             && altered != current
         {
             replaced += 1;
             processed[index].1 = altered;
+            if rule_nbt.is_some() {
+                processed[index].2 = rule_nbt;
+            }
         }
     }
 }
@@ -656,6 +680,26 @@ impl MarkerContext<'_, '_, '_> {
         if is_chest(self.world.get_block(pos.0, pos.1, pos.2)) {
             self.random.next_long();
         }
+    }
+
+    /// `ChestBlockEntity.setLootTable(table, random.nextLong())`：把表和种子写进
+    /// 该位置的方块实体 nbt；不是箱子时只按官方取一次数（调用方保证）。
+    ///
+    /// `ChestBlockEntity.setLootTable(table, random.nextLong())`: write the table and
+    /// seed to the block-entity nbt at that position.
+    pub fn set_chest_loot_table(&mut self, pos: (i32, i32, i32), table: &str) {
+        if !is_chest(self.world.get_block(pos.0, pos.1, pos.2)) {
+            return;
+        }
+        let seed = self.random.next_long();
+        let nbt = mc_bamboo_nbt::Tag::Compound(vec![
+            (
+                "LootTable".to_owned(),
+                mc_bamboo_nbt::Tag::String(table.to_owned()),
+            ),
+            ("LootTableSeed".to_owned(), mc_bamboo_nbt::Tag::Long(seed)),
+        ]);
+        self.world.set_block_entity(pos.0, pos.1, pos.2, &nbt);
     }
 }
 
@@ -746,23 +790,36 @@ pub fn replace_jigsaws(
 /// 把结构件放置用的 [`PieceLevel`] 当作 [`BlockAccess`] 用（林地府邸走这条路）。
 ///
 /// Use a piece-placement [`PieceLevel`] as a [`BlockAccess`] (the woodland mansion's path).
-pub struct PieceLevelAccess<'l>(pub &'l mut dyn PieceLevel);
+pub struct PieceLevelAccess<'l> {
+    pub level: &'l mut dyn PieceLevel,
+    /// 收集方块实体 nbt 时给出目标表（游戏路径）；逐件对拍传 `None`。
+    ///
+    /// Target collection for block-entity nbt (game path); per-piece oracles pass `None`.
+    pub block_entities: Option<&'l mut crate::feature::world::BlockEntityList>,
+}
 
 impl BlockAccess for PieceLevelAccess<'_> {
     fn get_block(&self, x: i32, y: i32, z: i32) -> u32 {
-        self.0.get_block(x, y, z)
+        self.level.get_block(x, y, z)
     }
 
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
-        self.0.set_block(x, y, z, state)
+        self.level.set_block(x, y, z, state)
+    }
+
+    fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {
+        if let Some(out) = self.block_entities.as_deref_mut() {
+            out.retain(|(pos, _)| *pos != (x, y, z));
+            out.push(((x, y, z), nbt.clone()));
+        }
     }
 
     fn min_y(&self) -> i32 {
-        self.0.min_y()
+        self.level.min_y()
     }
 
     fn max_y(&self) -> i32 {
-        self.0.max_y()
+        self.level.max_y()
     }
 }
 
@@ -901,6 +958,20 @@ fn state_from_text(text: &str) -> Option<u32> {
         }
     }
     Some(state)
+}
+
+/// `CompoundTag.putLong("LootTableSeed", seed)`：覆盖（或插入）模板 nbt 里的种子。
+///
+/// `CompoundTag.putLong("LootTableSeed", seed)`: overwrite (or insert) the seed in the
+/// template nbt.
+fn set_loot_table_seed(tag: &mut mc_bamboo_nbt::Tag, seed: i64) {
+    if let mc_bamboo_nbt::Tag::Compound(entries) = tag {
+        if let Some((_, value)) = entries.iter_mut().find(|(key, _)| key == "LootTableSeed") {
+            *value = mc_bamboo_nbt::Tag::Long(seed);
+        } else {
+            entries.push(("LootTableSeed".to_owned(), mc_bamboo_nbt::Tag::Long(seed)));
+        }
+    }
 }
 
 fn write(
@@ -1045,6 +1116,56 @@ impl Processor {
     ///
     /// `StructureProcessor.processBlock`: `None` drops the block.
     fn process(
+        &self,
+        world: &dyn BlockAccess,
+        pos: (i32, i32, i32),
+        template_pos: (i32, i32, i32),
+        state: u32,
+        settings: &PlaceSettings,
+    ) -> Option<u32> {
+        self.process_state(world, pos, template_pos, state, settings)
+    }
+
+    /// [`Self::process`] 加上命中规则的 `AppendLoot` 方块实体 nbt。
+    ///
+    /// [`Self::process`] plus the block-entity nbt of a matching rule's `AppendLoot`.
+    fn process_with_nbt(
+        &self,
+        world: &dyn BlockAccess,
+        pos: (i32, i32, i32),
+        template_pos: (i32, i32, i32),
+        state: u32,
+        settings: &PlaceSettings,
+    ) -> Option<(u32, Option<mc_bamboo_nbt::Tag>)> {
+        if let Processor::Rule(rules) = self {
+            let random = position_random(pos);
+            for rule in rules {
+                if rule.input.matches(state, &random) {
+                    let nbt = rule.loot_table.map(|table| {
+                        mc_bamboo_nbt::Tag::Compound(vec![
+                            (
+                                "LootTable".to_owned(),
+                                mc_bamboo_nbt::Tag::String(table.to_owned()),
+                            ),
+                            (
+                                "LootTableSeed".to_owned(),
+                                mc_bamboo_nbt::Tag::Long(random.next_long()),
+                            ),
+                        ])
+                    });
+                    return Some((rule.output, nbt));
+                }
+            }
+            return Some((state, None));
+        }
+        self.process(world, pos, template_pos, state, settings)
+            .map(|state| (state, None))
+    }
+
+    /// processor 的方块改写本体。
+    ///
+    /// The processor's state rewrite.
+    fn process_state(
         &self,
         world: &dyn BlockAccess,
         pos: (i32, i32, i32),

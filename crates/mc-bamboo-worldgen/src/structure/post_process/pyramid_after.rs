@@ -81,7 +81,9 @@ pub fn after_place(
         let j = random.next_int(i as i32) as usize;
         positions.swap(i - 1, j);
     }
-    let count = random.next_int_between_inclusive(5, 8).max(0) as usize;
+    // 官方调的是 `RandomSource.nextInt(5, 8)`：上界**不含**，结果是 5..=7。
+    // `bites`: vanilla calls `RandomSource.nextInt(5, 8)` with an exclusive bound (5..=7).
+    let count = (random.next_int(3) + 5).max(0) as usize;
     let mut remaining = count.min(positions.len());
     for pos in positions {
         if remaining > 0 {
@@ -96,11 +98,25 @@ pub fn after_place(
     }
 }
 
-/// `placeSuspiciousSand`：只在 box 内写 `suspicious_sand`。
+/// `placeSuspiciousSand`：只在 box 内写 `suspicious_sand`，并给刷扫方块实体设
+/// `DESERT_PYRAMID_ARCHAEOLOGY` 与 `pos.asLong()` 作种子（字节码里的 lambda 参数）。
+///
+/// `placeSuspiciousSand`: write `suspicious_sand` inside the box, then set the
+/// brushable block entity's loot table to `DESERT_PYRAMID_ARCHAEOLOGY` with
+/// `pos.asLong()` as the seed (the lambda's argument in the bytecode).
 fn place_suspicious_sand(world: &mut FeatureWorld<'_>, chunk_bb: &[i32; 6], pos: Pos) {
     if !crate::structure::pieces::intersects(&[pos.0, pos.1, pos.2, pos.0, pos.1, pos.2], chunk_bb)
     {
         return;
     }
     world.set_block_with_heightmaps(pos.0, pos.1, pos.2, blocks::SUSPICIOUS_SAND);
+    let seed = crate::sampler::block_pos_as_long(pos.0, pos.1, pos.2);
+    let nbt = mc_bamboo_nbt::Tag::Compound(vec![
+        (
+            "LootTable".to_owned(),
+            mc_bamboo_nbt::Tag::String("minecraft:archaeology/desert_pyramid".to_owned()),
+        ),
+        ("LootTableSeed".to_owned(), mc_bamboo_nbt::Tag::Long(seed)),
+    ]);
+    world.set_block_entity(pos.0, pos.1, pos.2, &nbt);
 }

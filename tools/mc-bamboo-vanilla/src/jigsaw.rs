@@ -2778,6 +2778,7 @@ fn compare_water_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
             mirror,
             rotation,
             &mc_bamboo_worldgen::random::Random::Legacy(LegacyRandom::new(0)),
+            None,
             &mut recorder,
         )?;
         checked += 1;
@@ -3173,6 +3174,7 @@ fn compare_place_piece(stdout: &str, queries: &[String]) -> Result<(), String> {
             mirror,
             rotation,
             &mc_bamboo_worldgen::random::Random::Legacy(LegacyRandom::new(0)),
+            None,
             &mut recorder,
         )?;
         checked += 1;
