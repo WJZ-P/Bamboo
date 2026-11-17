@@ -67,6 +67,7 @@
 | 23 | 同上：单线程每中心 CPU（17） | 28.5–29.6 ms | 16.7–17.1 ms | 1.7× |
 | 24 | 同一键只算一次：4 线程每中心 CPU（17） | 34.0–34.6 ms | 19.0–20.5 ms | 1.7× |
 | 24 | 同上：8 线程吞吐 / `cross_thread_duplicates`（17） | 228–240 中心/s / 172–184 | 267–273 中心/s / 0 | 1.15× |
+| 25 | 区块段危险寻路方块计数：每次 `Chunk::set_block` 写随机方块状态（18） | 53.1–53.4 ns | 52.5–54.5 ns | 无可测差别（中位数 +0.1 ns） |
 
 第 4 项比较特别：它不是把一个慢的东西变快，而是加一个新功能时两次差点把热路径拖慢，
 两次都靠基准发现并换了做法。它值得记，是因为“没有变慢”背后的原则和其它几项是同一条。
@@ -2634,3 +2635,46 @@ panic 处理按标准库语义，不做补偿写入：闭包 panic 后 `OnceLock
   不再让 `neighbor_spills_into` 重算 8 个邻居中心）：15.5 量到 `build_view` 累计
   23.5 s、`run_features` 16.6 s，确实是剩下最大的一块，但这会改「写增量集合
   不依赖邻居任务时序」的保证，按分工先报主代理，本轮没动。
+
+---
+
+## 18. 区块段危险寻路方块计数：给 `set_block` 加 0 ns
+
+生物寻路要判断一格周围 26 个邻居里有没有危险方块（官方
+`WalkNodeEvaluator.checkNeighbourBlocks`）。为每个 16³ 段维护「作为邻居时
+`PathType` 不是 `OPEN`」的方块数：计数为 0 的段可以直接跳过，不必逐格扫。
+`mc_bamboo_data::neighbor_path_type_of_state` 提供按状态的分类；形状依赖方块
+实体的 199 个动态状态预算不出来，保守地算危险，运行时仍能逐格重算。
+
+计数和 7h 的段哈希走同一条路：`Section::set_block` 里按旧状态和新状态各加减一次，
+`from_disk` / `from_sections` / `for_light` 整段重算（生成期光照的批量路径按调色板
+求和），调试构建里 `dangerous_path_neighbor_count()` 每次都断言等于整段重算。
+`is_safe_path_neighbor()` 是给以后寻路阶段用的查询接口，**这次还没有调用方**，
+所以整项现在只有常驻写入代价、没有收益。
+
+### 18.1 数字和复现
+
+`cargo run --release -p mc-bamboo-world --example section_hash_cost changing`，
+200 万次随机写、每轮 5 次取最小、固定随机序列；「改之前」是把 `Section::set_block`
+里那两行 `dangerous_path_neighbors` 临时注掉，同一轮里 A-B-A-B 交替跑三对，
+另外又各连跑五轮看波动。这台机器上有别的子代理在跑，所以只比同一轮的交替结果：
+
+| 轮次 | 没有计数（ns/写） | 有计数（ns/写） | 差 |
+| --- | --- | --- | --- |
+| A | 53.1 | 54.4 | +1.3 |
+| B | 53.4 | 54.1 | +0.7 |
+| C | 53.3 | 54.2 | +0.9 |
+| D（反向交替） | 53.1 / 52.9 / 53.2（中位 53.1） | 53.2 / 53.1 / 52.5（中位 53.1） | 0.0 |
+
+六个回合全部落在 52.5–54.5 ns/写，中位数差 +0.1 ns，比同轮内负载抖动小一个
+量级，结论是**没有可测的常驻代价**（不是「省了多少」）。新加的是两次查表、两次
+`u16` 加减，和 7h 的 128 位哈希一样不进存档。
+
+### 18.2 怎么确认没算错
+
+`dangerous_path_neighbor_count_tracks_thousands_of_random_writes` 随机改 4000 次
+方块，每改一次比较增量计数和按调色板逐格重算；`assembled_sections_count_dangerous_path_neighbors`
+覆盖读盘组装与生成期光照（一整段仙人掌 = 4096、一整段石头 = 0）；
+`ignoring_a_dangerous_write_would_not_match_the_full_recount` 是改坏确认：
+漏掉一次增减时计数立刻和重算不一致。计数用的 `path-type` Java 对拍对全部
+35723 个状态 0 不一致，改坏确认 1 处不一致（`docs/mob-entity-design.md` §5）。

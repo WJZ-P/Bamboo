@@ -7,7 +7,8 @@ use mc_bamboo_core::{
     sign::SignContent,
 };
 use mc_bamboo_data::{
-    block_of_state, blocks, facts, heightmaps, registries, state_facts, state_fluid,
+    PathType, block_of_state, blocks, facts, heightmaps, neighbor_path_type_of_state, registries,
+    state_facts, state_fluid,
 };
 use mc_bamboo_nbt::Tag;
 
@@ -222,6 +223,8 @@ pub struct Section {
     /// 会随机刻的方块数，官方 `tickingBlockCount` 和 `tickingFluidCount` 合在一起。
     random_tickers: u16,
     fluids: u16,
+    /// 邻居类型不是 OPEN 的方块数；计数为 0 时寻路不用扫 26 个邻居。
+    dangerous_path_neighbors: u16,
     /// 整段方块状态的 128 位哈希，红石缓存的段哈希键用它。只在内存里，不进存档。
     block_hash: u128,
 }
@@ -233,6 +236,14 @@ fn random_ticking_mask(sections: &[Section]) -> u32 {
         .enumerate()
         .filter(|(_, section)| section.is_randomly_ticking())
         .fold(0, |mask, (index, _)| mask | 1 << index)
+}
+
+/// 这个状态作为寻路邻居时是不是危险方块。
+///
+/// 官方 `checkNeighbourBlocks` 只把四种类型换成非 OPEN；动态形状（形状依赖方块实体）
+/// 的状态预算不出来，保守地算危险，让运行时逐格重算（和 Lithium 的兜底一致）。
+fn is_dangerous_path_neighbor(state: u32) -> bool {
+    neighbor_path_type_of_state(state) != Some(PathType::Open)
 }
 
 /// 这个状态的方块或者它的流体有随机刻。
@@ -248,6 +259,7 @@ impl Section {
             non_air_blocks: 0,
             random_tickers: 0,
             fluids: 0,
+            dangerous_path_neighbors: 0,
             block_hash: empty_section_hash(),
         }
     }
@@ -260,6 +272,7 @@ impl Section {
             non_air_blocks: 0,
             random_tickers: 0,
             fluids: 0,
+            dangerous_path_neighbors: 0,
             block_hash: 0,
         };
         section.recount();
@@ -281,6 +294,11 @@ impl Section {
                 self.non_air_blocks = if is_air(state) { 0 } else { 4096 };
                 self.random_tickers = if ticks_randomly(state) { 4096 } else { 0 };
                 self.fluids = if fluid_is_empty(state) { 0 } else { 4096 };
+                self.dangerous_path_neighbors = if is_dangerous_path_neighbor(state) {
+                    4096
+                } else {
+                    0
+                };
             }
             PaletteView::Indirect(states) => {
                 for (index, &count) in counts.iter().enumerate() {
@@ -288,6 +306,8 @@ impl Section {
                         self.non_air_blocks += u16::from(!is_air(state)) * count;
                         self.random_tickers += u16::from(ticks_randomly(state)) * count;
                         self.fluids += u16::from(!fluid_is_empty(state)) * count;
+                        self.dangerous_path_neighbors +=
+                            u16::from(is_dangerous_path_neighbor(state)) * count;
                     }
                 }
             }
@@ -298,6 +318,36 @@ impl Section {
                     self.non_air_blocks += u16::from(!is_air(state));
                     self.random_tickers += u16::from(ticks_randomly(state));
                     self.fluids += u16::from(!fluid_is_empty(state));
+                    self.dangerous_path_neighbors += u16::from(is_dangerous_path_neighbor(state));
+                }
+            }
+        }
+    }
+
+    /// 按调色板重数危险寻路邻居，生成期光照的批量路径用它。
+    /// Recount dangerous pathfinding neighbours from the palette (light-only bulk path).
+    fn recount_dangerous_path_neighbors(&mut self) {
+        match self.blocks.palette() {
+            PaletteView::Single(state) => {
+                self.dangerous_path_neighbors = if is_dangerous_path_neighbor(state) {
+                    4096
+                } else {
+                    0
+                };
+            }
+            PaletteView::Indirect(states) => {
+                let counts = self.blocks.index_counts();
+                for (index, &count) in counts.iter().enumerate() {
+                    if let Some(&state) = states.get(index) {
+                        self.dangerous_path_neighbors +=
+                            u16::from(is_dangerous_path_neighbor(state)) * count;
+                    }
+                }
+            }
+            PaletteView::Global => {
+                for index in 0..4096 {
+                    self.dangerous_path_neighbors +=
+                        u16::from(is_dangerous_path_neighbor(self.blocks.get(index)));
                 }
             }
         }
@@ -320,6 +370,7 @@ impl Section {
             non_air_blocks: 0,
             random_tickers: 0,
             fluids: 0,
+            dangerous_path_neighbors: 0,
             block_hash: 0,
         };
         // 三种计数在扫描时按状态属性算好了；这里只求和。全局 ID 形式时 counts 为空，
@@ -335,6 +386,7 @@ impl Section {
                 section.random_tickers += tickers;
                 section.fluids += fluids;
             }
+            section.recount_dangerous_path_neighbors();
         }
         // 调试构建里 `block_hash()` 会重算一遍做断言，所以那里仍存真值；release 里
         // 生成期光照从不问段哈希，留 0 省掉 4096 次哈希。
@@ -374,6 +426,8 @@ impl Section {
         }
         self.random_tickers -= u16::from(ticks_randomly(previous));
         self.random_tickers += u16::from(ticks_randomly(state));
+        self.dangerous_path_neighbors -= u16::from(is_dangerous_path_neighbor(previous));
+        self.dangerous_path_neighbors += u16::from(is_dangerous_path_neighbor(state));
         match (fluid_is_empty(previous), fluid_is_empty(state)) {
             (true, false) => self.fluids += 1,
             (false, true) => self.fluids -= 1,
@@ -420,6 +474,51 @@ impl Section {
     /// `hasOnlyAir`。
     pub fn is_empty(&self) -> bool {
         self.non_air_blocks == 0
+    }
+    /// 邻居类型不是 OPEN 的方块数。寻路判断一格时，覆盖到的段全是 0 就不用扫 26 个邻居。
+    ///
+    /// Number of blocks whose neighbour path type is not OPEN. When every
+    /// covered section has zero, pathfinding can skip the 26-neighbour scan.
+    pub fn dangerous_path_neighbor_count(&self) -> u16 {
+        debug_assert_eq!(
+            self.dangerous_path_neighbors,
+            self.count_dangerous_path_neighbors(),
+            "危险方块计数和整段方块状态不一致"
+        );
+        self.dangerous_path_neighbors
+    }
+
+    /// 没有危险邻居方块时，这一整段都不会改变 `checkNeighbourBlocks` 的结果。
+    ///
+    /// A section with no dangerous neighbours cannot change `checkNeighbourBlocks`.
+    pub fn is_safe_path_neighbor(&self) -> bool {
+        self.dangerous_path_neighbor_count() == 0
+    }
+
+    /// 整段重算危险方块数，调试构建里断言增量维护没算错。
+    fn count_dangerous_path_neighbors(&self) -> u16 {
+        match self.blocks.palette() {
+            PaletteView::Single(state) => {
+                if is_dangerous_path_neighbor(state) {
+                    4096
+                } else {
+                    0
+                }
+            }
+            PaletteView::Indirect(states) => {
+                let counts = self.blocks.index_counts();
+                states
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &state)| {
+                        u16::from(is_dangerous_path_neighbor(state)) * counts[index]
+                    })
+                    .sum()
+            }
+            PaletteView::Global => (0..4096)
+                .map(|index| u16::from(is_dangerous_path_neighbor(self.blocks.get(index))))
+                .sum(),
+        }
     }
 
     /// `maybeHas`：调色板里有满足条件的状态。没有调色板时不知道，按有算。
@@ -1196,6 +1295,79 @@ mod tests {
         assert_eq!(
             order(&forward),
             [(-60, 9, 2), (7, 1, 0), (7, 2, 0), (7, 2, 1)]
+        );
+    }
+
+    /// 随机改几千次方块，增量计数必须一直等于逐格重算。
+    #[test]
+    fn dangerous_path_neighbor_count_tracks_thousands_of_random_writes() {
+        let mut chunk = Chunk::empty(0);
+        for section in chunk.sections() {
+            assert_eq!(section.dangerous_path_neighbor_count(), 0);
+            assert!(section.is_safe_path_neighbor());
+        }
+        let mut seed = 0x9876_5432_10fe_dcba_u64;
+        for _ in 0..4000 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let x = (seed >> 16) as usize & 15;
+            let z = (seed >> 24) as usize & 15;
+            let y = MIN_Y + ((seed >> 32) as i32).rem_euclid(WORLD_HEIGHT);
+            let state = (seed >> 48) as u32 % 96;
+            chunk.set_block(x, y, z, state);
+            let (index, _) = Chunk::locate(y);
+            let section = &chunk.sections()[index];
+            let expected = section.count_dangerous_path_neighbors();
+            assert_eq!(section.dangerous_path_neighbor_count(), expected);
+            assert_eq!(section.is_safe_path_neighbor(), expected == 0);
+        }
+    }
+
+    /// 读盘组装和生成期光照的段也带正确的危险方块计数。
+    #[test]
+    fn assembled_sections_count_dangerous_path_neighbors() {
+        let mut source = Chunk::empty(0);
+        source.set_block(3, MIN_Y + 2, 4, blocks::STONE);
+        source.set_block(15, MIN_Y + 15, 15, blocks::CACTUS);
+        source.set_block(8, 0, 8, blocks::WATER);
+        let rebuilt = Chunk::from_sections(source.sections().to_vec(), &[None, None, None, None])
+            .expect("读盘组装");
+        for (index, section) in rebuilt.sections().iter().enumerate() {
+            assert_eq!(
+                section.dangerous_path_neighbor_count(),
+                source.sections()[index].dangerous_path_neighbor_count(),
+                "段 {index} 的危险方块计数在读盘组装后变了"
+            );
+        }
+        // 一整段全是危险方块，另一整段全是安全方块，覆盖两种调色板形式。
+        let mut layers = vec![vec![blocks::AIR; 256]; WORLD_HEIGHT as usize];
+        for layer in layers.iter_mut().take(16) {
+            layer.fill(blocks::CACTUS);
+        }
+        for layer in layers.iter_mut().skip(16).take(16) {
+            layer.fill(blocks::STONE);
+        }
+        let light = Chunk::for_light(&layers).expect("生成期光照区块");
+        assert_eq!(light.sections()[0].dangerous_path_neighbor_count(), 4096);
+        assert_eq!(light.sections()[1].dangerous_path_neighbor_count(), 0);
+        assert!(light.sections()[1].is_safe_path_neighbor());
+    }
+
+    /// 改坏确认：随便漏维护一次增减，调试断言和逐格重算都会抓到。
+    #[test]
+    fn ignoring_a_dangerous_write_would_not_match_the_full_recount() {
+        let mut chunk = Chunk::empty(0);
+        chunk.set_block(2, MIN_Y + 3, 5, blocks::CACTUS);
+        let (index, _) = Chunk::locate(MIN_Y + 3);
+        let before = chunk.sections()[index].dangerous_path_neighbor_count();
+        assert_eq!(before, 1);
+        assert_eq!(chunk.sections()[index].count_dangerous_path_neighbors(), 1);
+        // 换了空气后计数要归零，不能停在旧值。
+        chunk.set_block(2, MIN_Y + 3, 5, blocks::AIR);
+        assert_eq!(
+            chunk.sections()[index].dangerous_path_neighbor_count(),
+            before - 1
         );
     }
 
