@@ -11,7 +11,7 @@
 cargo build --release -p mc-bamboo-vanilla
 JAVA=/Users/wjz/Desktop/Github/Bamboo/.deps/jdk-25.0.5+8/Contents/Home/bin/java
 
-# 52 个结构区块，干净跑（默认）
+# 60 个结构区块，干净跑（默认）
 cargo run --release -q -p mc-bamboo-vanilla -- structure-e2e "$JAVA"
 
 # 单个区块手动复现（--seed 是新增的诊断开关，固定种子）
@@ -22,8 +22,11 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world "$JAVA" \
 cargo run --release -q -p mc-bamboo-vanilla -- structure-e2e "$JAVA" \
     --break-structure minecraft:jigsaw
 
-# 已知差异区块（不进默认干净跑）
+# 已知差异区块（不进默认干净跑；目前为空）
 cargo run --release -q -p mc-bamboo-vanilla -- structure-e2e "$JAVA" --known-gaps
+
+# 沙漠水井候选区块（只算放置链前两步 + 沙漠群系，输出给 --chunks-file）
+cargo run --release -q -p mc-bamboo-vanilla -- structure-e2e "$JAVA" --scan-desert-well 42 300
 
 # fastutil LongOpenHashSet 迭代序单独对拍（3000 组）
 cargo run --release -q -p mc-bamboo-vanilla -- long-set "$JAVA" --cases 3000
@@ -48,8 +51,8 @@ Java 侧 `ChunkgenOracle.java` 用 `StructureTemplateManager`、真实注册表�
 ## 干净跑结果（release，本机）
 
 ```
-gen-world: 52 chunks, 0 quart cells, 46006272 blocks, 117 block entities,
-           52 structure rows / 4590 official pieces, 0 mismatches, 46086265 official checks
+gen-world: 60 chunks, 0 quart cells, 53084160 blocks, 133 block entities,
+           60 structure rows / 4743 official pieces, 0 mismatches, 53176461 official checks
 ```
 
 每种结构实际放置的结构件数 / 方块数（`--structure-coverage` 的合计）：
@@ -125,11 +128,10 @@ gen-world: 52 chunks, 0 quart cells, 46006272 blocks, 117 block entities,
 | 要塞起点 412 处（苔石 / 裂石 / 虫蚀石砖整片错位） | `dispatch_stronghold` 在放置阶段重新调 `randomSmallDoor(random)`；官方在**结构件构造器**（布局阶段）取一次 `nextInt(5)` 存成 `EntryDoor`，`postProcess` 只读这个字段。多取一次让同一 `WorldgenRandom` 后续所有 `nextFloat` 错位 | 从 `piece.extras["EntryDoor"]` 读 → 412 → 4 |
 | `(42,-32,-16)` 的 `potent_sulfur[wet]` 1 处（无结构也复现） | `sulfur_pool` 是 `sequence`：第一步水做的 `lake` 放硫磺屏障，第二步 `simple_block` 放湿润的强效硫磺。`LakeFeature.place` 对水湖返回 **true**（`SequenceFeature` 在第一个子项返回 false 时短路），我们的 `lake::place` 提前 `return false`；另外 `PotentSulfurBlock` 没进 `survival::classify` 的 `Kind::Default` | 两处都修 → 0 不一致，该坐标已加回默认查询集 |
 
-33 → 3 和 412 → 4 的残差后来分别定位为 `StructurePiece.placeBlock` 漏了 FINAL
-高度图更新（step 9 的 `heightmap MOTION_BLOCKING` 读到旧高度，已修）与矿井
-支撑柱的 `isFaceSturdy` 边界（剩 4 处，见「已知限制」）。
-`structure-e2e --known-gaps` 现在只单独跑要塞起点区块。默认查询集用
-`(-374,-22)` 等被引用邻居验证跨区块结构件放置，整块 0 不一致。
+33 → 3 的残差后来定位为 `StructurePiece.placeBlock` 漏了 FINAL 高度图更新
+（step 9 的 `heightmap MOTION_BLOCKING` 读到旧高度，已修）；412 → 4 的残差当时怀疑是
+栅栏的 `isFaceSturdy` 边界，实际是游戏路径漏了 `MineShaftPiece.canBeReplaced`
+覆写（见「三处残差的根因」，已修）。
 
 ## 稀有结构起点定位
 
@@ -157,7 +159,7 @@ gen-world: 52 chunks, 0 quart cells, 46006272 blocks, 117 block entities,
 `(方块实体类型, 键, 官方默认值)` 白名单忽略；只有官方值等于默认值且游戏侧
 缺这个键才忽略，游戏侧写了不同的值照样报不一致。
 
-52 个默认查询区块现在 `46006272 blocks / 117 block entities / 0 mismatches`。
+60 个默认查询区块现在 `53084160 blocks / 133 block entities / 0 mismatches`。
 
 这一轮加比较器后翻出并修掉的真问题：
 
@@ -183,28 +185,36 @@ gen-world: 52 chunks, 0 quart cells, 46006272 blocks, 117 block entities,
 `--chunks-file FILE` 可以用外部 `seed cx cz` 文件代替内置查询集，方便定位新结构
 区块；默认不用。
 
+## 三处残差的根因（`wg-struct-residual`）
+
+每处都先在官方侧定位「哪个结构件、哪个方法、哪一次调用」写的：`ChunkgenOracle.java`
+新增诊断开关 `-Dbamboo.debug.trace-pos=x,y,z;...`（`-Dbamboo.debug.trace-pos.file=`），
+`FeatureLevelHandler.setBlock` 对这些位置记下新状态与调用栈。用法：
+`JAVA_TOOL_OPTIONS="-Dbamboo.debug.trace-pos=-1922,8,1548" mc-bamboo-vanilla structure-e2e ...`。
+
+| 现象 | 官方写入来源 | 根因（字节码核对） | 改坏确认 |
+|---|---|---|---|
+| 要塞起点 `(42,-121,96)` 4 处（官方 `oak_log`，游戏 `oak_fence` / `oak_planks`） | 四格都由 `MineShaftCorridor.postProcess` → `placeDoubleLowerOrUpperSupport` → `fillPillarDownOrChainUp` → `fillColumnBetween` 写成 `oak_log`，**之后**再也没有被改写；游戏侧同一走廊先写 `oak_log`，后面另一条走廊的 `generateBox`（空气 / 栅栏）又把它覆盖 | `StructurePiece` 子类里只有 `MineShaftPiece` 覆写 `canBeReplaced`：本类型的木板 / 原木 / 栅栏 / 铁链不可替换，`placeBlock`（`generateBox` 等都经过它）跳过这些格。`structure-place` 的旧对拍注入了覆写，游戏路径 `place_code_piece` 没注入。和栅栏 `isFaceSturdy` 无关 | 去掉覆写即原 4 处不一致 |
+| 海底遗迹 `(42,67,-236)`：官方 6 个刷扫方块实体，游戏在另外 7 个位置写了表 | 三个遗迹件互相覆盖：前一件 `placeInWorld` 写了可疑的沙砾 + 战利品表，后一件把同一格写成普通沙砾 / 深色橡木板 | 不是 `CappedProcessor`：`WorldGenRegion.setBlock` 在新状态没有方块实体、旧状态有时调 `ChunkAccess.removeBlockEntity`，我们的 `FeatureWorld` 不删记录。修掉后又暴露 `place_layout_piece` 对已经直接写进世界的 `outcome.writes` 再重放一遍，重放里的 `BARRIER` 把刚写的表删掉（第二次的 6 处「game missing」） | 去掉删除逻辑即原 7 处；保留重放即 11 处 |
+| 沙漠水井找不到、`FossilFeature` 抛异常 | — | 见 `docs/worldgen-e2e-coverage.md`「沙漠水井 / 化石」：假世界 `getLevel()` / 模板管理器缺失；放出来以后修了模板地物的调色板取数、写入顺序、`AppendLoot` 种子坐标、化石高度图、地牢方块实体 | 调色板不取数：水井 70 处 / 化石 16 处；种子用相对坐标：44 处 |
+
+扩大扫描又翻出并修掉的两个问题：
+
+| 现象 | 根因 | 改坏确认 |
+|---|---|---|
+| 深暗之域里的矿井件官方不放、游戏照放 | `MineShaftPiece.isInInvalidLocation` 第 136-152 行先查 `level.getBiome(probe).is(MINESHAFT_BLOCKING)`；游戏路径把 `biome_blocking` 写死成 false。现在按 `BiomeManager.getBiome`（fiddled 角 + 3×3 quart 格）查 | 写死 false：`(42,-145,76)` 等 4 区块 1678 处 |
+| 针叶林村庄 `(42,-159,84)` 1 处台阶（官方 `half=bottom,waterlogged=false`） | 拼图 `final_state` 是 `cobblestone_stairs[facing=south]`；`BlockStateParser.parseForBlock` 从 `defaultBlockState()` 起逐个 `setValue`，`state_id_of` 却在状态表里取第一个匹配的状态 | 单测 `partial_properties_start_from_the_default_state` + 该区块进默认集 |
+
+`structure-e2e --known-gaps` 现在为空；上面的区块都已进默认集。
+
 ## 已知限制
 
-* **`(42,-121,96)` 要塞起点 4 处**：官方在 `y=8/9` 的两根矿井支撑柱是
-  `oak_log`，游戏是 `oak_fence` / `oak_planks`。只在真实 `WorldGenRegion` 上分叉，
-  `structure-place` 的合成地形对拍 0 不一致。已用 `javap -c -p` 核对
-  `MineShaftCorridor.fillColumnDown` / `fillPillarDownOrChainUp` /
-  `setPlanksBlock` / `StructurePiece.fillColumnDown` / `isSupportingBox` /
-  `fillColumnBetween`，怀疑是带连接形状的栅栏在真实世界里 `isFaceSturdy(UP)`
-  的边界，但还没定位到具体调用点。用 `--known-gaps` 单独跑；默认查询集用
-  被引用邻居（`(-121,97)`、`(-120,96)`）覆盖跨区块放置，整块 0 不一致。
-  沙漠神殿起点 `(42,-375,-22)` 的 3 处已修（`PieceContext::place_block` 漏了
-  FINAL 高度图更新，step 9 的 `heightmap MOTION_BLOCKING` 读到旧高度），
-  已挪回默认查询集。
-* 少数**其它**海底神殿 / 沙漠神殿 / 丛林神殿 / 海底遗迹起点区块仍有
-  1–65 处同类残差：例如 `(42,67,-236)` 的海底遗迹 `CappedProcessor` 选中了
-  另一组 `suspicious_gravel`（官方 6 个刷扫方块实体，游戏在另 7 个位置写了
-  表）。`desert_well` 是 `rarity 1/1000` 的 `overlay`，沙漠区块的 JVM 侧
-  `FossilFeature` 还会抛 `ClassCastException`，本机没找到能在整块对拍里稳定
-  触发且 0 不一致的沙漠水井区块；沙漠水井的 `AppendLoot` 实现由
-  `feature/template_feature.rs` 的单测与字节码核对覆盖。默认查询集只收录
-  已确认 0 不一致的代表区块（含一个确实触发海底遗迹刷扫方块的区块）。
 * 生成期实体（村民、悦灵、守卫者、女巫 / 猫）不进假世界；只保证它们的
   `nextLong` / 方块写入序列与官方一致，不比较实体本身。
-* 官方构造器默认值按白名单忽略；Bamboo 运行时把宝库 / 熔炉 / 幽匿传感器
-  读回再存盘时是否会补出这些字段，属于存盘格式，未在本轮验证。
+* 官方构造器默认值按白名单忽略。Bamboo 运行时读盘再存盘的情况由
+  `tools/mc-bamboo-vanilla/tests/block_entity_resave.rs` 记录：熔炉写出的键与
+  `AbstractFurnaceBlockEntity.saveAdditional` 一致（七个键，含 `speed_multiplier`）；
+  宝库、幽匿传感器 / 校准幽匿传感器在 Bamboo 里没有实例，条目原样保留——只有 `id`
+  和坐标的条目存盘后仍缺 `config` / `shared_data` / `server_data` 或
+  `last_vibration_frequency` / `listener`，官方会补出这些键；熔炉条目里官方不认识的
+  旧键（如 `BurnTime`）Bamboo 合并时保留，官方会丢掉。本轮只记录不修。
