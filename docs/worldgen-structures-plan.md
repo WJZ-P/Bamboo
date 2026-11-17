@@ -1781,8 +1781,14 @@ structures (Compound)
 | `BlockWriter` 高度图 | 结构件写方块走 `set_block_with_heightmaps`，与 `ChunkAccess.setBlockState` 一致 |
 | 存档兼容 | `References` LongArray 顺序变成官方桶序，读回按集合成员处理，旧顺序存档仍可读（单测钉住） |
 
-**剩余缺口**：沙漠神殿 / 要塞的 `Layout` 起点区块在真实 `WorldGenRegion` 上的
-`postProcess` 随机方块变体还有 33 / 412 处不一致（`--known-gaps` 单独跑），根因未定位；
-`(42,-32,-16)` 的 `sulfur_pool` 是和结构无关的既有地物差异。默认查询集用这两类的
+**方块实体**：`gen-world --through features` / `structure-e2e` 现在也导出并比较
+3×3 每格实例化过的方块实体（SNBT），`FeatureResult::block_entities` 由
+`FeatureWorld::set_block_entity` 累计；官方构造器默认值按
+`(类型, 键, 默认值)` 白名单忽略。默认 52 区块 117 个方块实体 0 不一致。
+
+**剩余缺口**：要塞的 `Layout` 起点区块在真实 `WorldGenRegion` 上还有 4 处
+矿井支撑柱差异（`--known-gaps` 单独跑），沙漠神殿的 3 处已修（结构件写方块
+漏了 FINAL 高度图更新，step 9 的 `heightmap MOTION_BLOCKING` 读到旧高度）。
+`(42,-32,-16)` 的 `sulfur_pool` 已修并加回默认集。默认查询集仍用要塞的
 **被引用邻居**覆盖跨区块放置，整块 0 不一致。林地府邸 / 海底神殿 / 丛林神殿 /
-海底遗迹在本机扫描里没有有效起点，仍由 `structure-pieces` / `structure-place` 覆盖。
+海底遗迹的起点已由 `random_spread` 电位定位加入查询集。

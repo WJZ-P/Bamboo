@@ -1848,6 +1848,31 @@ public final class ChunkgenOracle {
             }
         }
 
+        /** 海底遗迹的 `drowned` 数据标记会造一只溺尸；同样用不走构造器的惰性实例。 */
+        private static final class InertDrowned
+                extends net.minecraft.world.entity.monster.zombie.Drowned {
+            private InertDrowned() {
+                super(null, null);
+            }
+
+            @Override
+            public void setPersistenceRequired() {
+            }
+
+            @Override
+            public void snapTo(double x, double y, double z, float yRot, float xRot) {
+            }
+
+            @Override
+            public net.minecraft.world.entity.SpawnGroupData finalizeSpawn(
+                    net.minecraft.world.level.ServerLevelAccessor level,
+                    net.minecraft.world.DifficultyInstance difficulty,
+                    net.minecraft.world.entity.EntitySpawnReason reason,
+                    net.minecraft.world.entity.SpawnGroupData data) {
+                return data;
+            }
+        }
+
         /** 不走构造器的运输矿车：`createChest` 后续调用全部变成空操作。 */
         private static final class InertMinecartChest
                 extends net.minecraft.world.entity.vehicle.minecart.MinecartChest {
@@ -1932,6 +1957,8 @@ public final class ChunkgenOracle {
                 installInertMob(net.minecraft.world.entity.EntityTypes.VINDICATOR,
                         InertVindicator.class);
                 installInertMob(net.minecraft.world.entity.EntityTypes.ALLAY, InertAllay.class);
+                installInertMob(net.minecraft.world.entity.EntityTypes.DROWNED,
+                        InertDrowned.class);
                 return (net.minecraft.server.level.ServerLevel) fakeLevel;
             } catch (Exception error) {
                 throw new IllegalStateException("cannot stub generation-time entities", error);

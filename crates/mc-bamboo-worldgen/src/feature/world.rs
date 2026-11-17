@@ -7,6 +7,12 @@ use mc_bamboo_data::{facts, state_facts};
 
 use super::{CENTER, ChunkBlocks, FeatureChunks, FeatureResult, Heightmaps, heightmap::is_opaque};
 
+/// `(世界坐标, 方块实体 nbt)` 列表，结构放置和 `FeatureResult` 共用。
+///
+/// `(world position, block-entity nbt)` list shared by structure placement and
+/// `FeatureResult`.
+pub type BlockEntityList = Vec<((i32, i32, i32), mc_bamboo_nbt::Tag)>;
+
 /// 3×3 世界生成空间的读写接口。
 pub struct FeatureWorld<'a> {
     pub center_x: i32,
@@ -757,7 +763,6 @@ mod block_writer_tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
-            None,
             None,
             &mut world,
         )

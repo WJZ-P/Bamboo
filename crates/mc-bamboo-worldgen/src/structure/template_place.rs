@@ -29,6 +29,11 @@ use crate::{
     },
 };
 
+/// 一个处理完待写入的方块：`(世界坐标, 状态, 方块实体 nbt)`。
+///
+/// A processed block pending writing: `(world position, state, block-entity nbt)`.
+type PendingBlock = ((i32, i32, i32), u32, Option<mc_bamboo_nbt::Tag>);
+
 /// `Mirror` 的序号。
 ///
 /// Ordinals of vanilla `Mirror`.
@@ -310,7 +315,7 @@ pub fn place_in_world(
     // 所以 processor 读到的世界是「本结构件还什么都没写」的状态。
     // Processors run first, then the writes: vanilla builds `processedBlockInfoList`
     // before writing anything, so processors see the world without this piece's writes.
-    let mut processed: Vec<((i32, i32, i32), u32, Option<mc_bamboo_nbt::Tag>)> = Vec::new();
+    let mut processed: Vec<PendingBlock> = Vec::new();
     let mut originals: Vec<((i32, i32, i32), u32)> = Vec::new();
     for &index in &blocks {
         let block = &template.blocks[index];
@@ -539,7 +544,7 @@ fn apply_capped(
     limit: i32,
     delegate: &Processor,
     originals: &[((i32, i32, i32), u32)],
-    processed: &mut [((i32, i32, i32), u32, Option<mc_bamboo_nbt::Tag>)],
+    processed: &mut [PendingBlock],
     position: (i32, i32, i32),
 ) {
     if limit == 0 || processed.is_empty() || originals.len() != processed.len() {
@@ -576,11 +581,10 @@ fn apply_capped(
         }
         let (pos, _original_state) = originals[index];
         let current = processed[index].1;
-        // `CappedProcessor` 传给 delegate 的 `templateRelativePos` 是 `originalBlockInfo.pos()`，
-        // 这里用世界位置顶替（`RuleTest` 的位置谓词在这些结构里恒 true）。
-        // The `templateRelativePos` passed to the delegate is `originalBlockInfo.pos()`;
-        // the world position stands in here (the position predicate is always true in these
-        // structures).
+        // `RuleProcessor` 用 `Mth.getSeed(processedBlockInfo.pos())` 播种，
+        // `pos` 是 `calculateRelativePosition + piecePos` 的世界坐标。
+        // `RuleProcessor` seeds from `Mth.getSeed(processedBlockInfo.pos())`,
+        // where `pos` is the world position after the piece transform.
         if let Some((altered, rule_nbt)) =
             delegate.process_with_nbt(world, pos, pos, current, settings)
             && altered != current
@@ -791,7 +795,7 @@ pub struct PieceLevelAccess<'l> {
     /// 收集方块实体 nbt 时给出目标表（游戏路径）；逐件对拍传 `None`。
     ///
     /// Target collection for block-entity nbt (game path); per-piece oracles pass `None`.
-    pub block_entities: Option<&'l mut Vec<((i32, i32, i32), mc_bamboo_nbt::Tag)>>,
+    pub block_entities: Option<&'l mut crate::feature::world::BlockEntityList>,
 }
 
 impl BlockAccess for PieceLevelAccess<'_> {
@@ -1154,10 +1158,8 @@ impl Processor {
             }
             return Some((state, None));
         }
-        let out = self
-            .process(world, pos, template_pos, state, settings)
-            .map(|state| (state, None));
-        out
+        self.process(world, pos, template_pos, state, settings)
+            .map(|state| (state, None))
     }
 
     /// processor 的方块改写本体。

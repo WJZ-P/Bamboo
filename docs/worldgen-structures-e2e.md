@@ -11,7 +11,7 @@
 cargo build --release -p mc-bamboo-vanilla
 JAVA=/Users/wjz/Desktop/Github/Bamboo/.deps/jdk-25.0.5+8/Contents/Home/bin/java
 
-# 50 个结构区块，干净跑（默认）
+# 52 个结构区块，干净跑（默认）
 cargo run --release -q -p mc-bamboo-vanilla -- structure-e2e "$JAVA"
 
 # 单个区块手动复现（--seed 是新增的诊断开关，固定种子）
@@ -48,26 +48,26 @@ Java 侧 `ChunkgenOracle.java` 用 `StructureTemplateManager`、真实注册表�
 ## 干净跑结果（release，本机）
 
 ```
-gen-world: 50 chunks, 0 quart cells, 44236800 blocks, 50 structure rows /
-           4581 official pieces, 0 mismatches, 44313600 official checks
+gen-world: 52 chunks, 0 quart cells, 46006272 blocks, 117 block entities,
+           52 structure rows / 4590 official pieces, 0 mismatches, 46086265 official checks
 ```
 
 每种结构实际放置的结构件数 / 方块数（`--structure-coverage` 的合计）：
 
 | 结构类型 ID | 结构件数 | 方块写入数 | 代表区块（种子 42） |
 |---|---:|---:|---|
-| `minecraft:jigsaw`（村庄五种 / 前哨 / 古城 / 试炼密室 / 古迹废墟 / 废弃营地 / 沉船等） | 134 | 35063 | `(-383,-289)` 平原村庄、`(-366,-319)` 沙漠村庄、`(-393,-227)` 热带草原村庄、`(364,-29)` 雪原村庄、`(-351,378)` 针叶林村庄、`(-379,-303)` 前哨、`(-165,80)` 古城、`(17,7)` 试炼密室、`(-405,273)` 古迹废墟、`(-14,21)` 废弃营地 |
-| `minecraft:mineshaft` | 107 | 9929 | `(4,0)`、`(0,-17)`、`(1,34,34)` 等 |
+| `minecraft:jigsaw`（村庄五种 / 前哨 / 古城 / 试炼密室 / 古迹废墟 / 废弃营地 / 沉船等） | 138 | 41783 | `(-383,-289)` 平原村庄、`(-366,-319)` 沙漠村庄、`(-393,-227)` 热带草原村庄、`(364,-29)` 雪原村庄、`(-351,378)` 针叶林村庄、`(-379,-303)` 前哨、`(-165,80)` 古城、`(17,7)` 试炼密室、`(-405,273)` 古迹废墟、`(-14,21)` 废弃营地 |
+| `minecraft:mineshaft` | 115 | 10606 | `(4,0)`、`(0,-17)`、`(1,34,34)` 等 |
 | `minecraft:ruined_portal` | 5 | 3036 | `(-19,11)`、`(16,22)`、`(19,-24)` |
 | `minecraft:shipwreck` | 2 | 1172 | `(12,28)`、`(40,55)`（搁浅） |
 | `minecraft:igloo` | 12 | 1014 | `(208,-305)` |
-| `minecraft:desert_pyramid` | 1 | 649 | 起点 `(-375,-22)` 的被引用邻居 `(-374,-22)` |
+| `minecraft:desert_pyramid` | 2 | 5273 | 起点 `(-375,-22)` 与被引用邻居 `(-374,-22)` |
 | `minecraft:buried_treasure` | 2 | 5 | `(-39,-14)`、`(-13,40)` |
 | `minecraft:swamp_hut` | 1 | 153 | `(-17,22)` |
 | `minecraft:woodland_mansion` | 65 | 15361 | `(-6380,-6052)`、`(-6380,-2374)` |
 | `minecraft:ocean_monument` | 2 | 5846 | `(-12,-148)`、`(49,-11)` |
 | `minecraft:jungle_temple` | 1 | 2302 | `(-85,180)` |
-| `minecraft:ocean_ruin` | 4 | 0 | `(3,10)` 冷海、`(-32,-79)` 暖海 |
+| `minecraft:ocean_ruin` | 6 | 166 | `(3,10)` 冷海、`(-32,-79)` 暖海、`(-50,-197)` 带 5 个刷扫方块实体 |
 
 村庄 `FeaturePoolElement` 里五种 placed feature 的触发（以 `(-351,378)` 为例）：
 `patch_taiga_grass`、`pine`、`spruce`、`pile_pumpkin`、`patch_berry_bush`。
@@ -76,22 +76,27 @@ gen-world: 50 chunks, 0 quart cells, 44236800 blocks, 50 structure rows /
 
 `structure-e2e` 的查询集还包含 `structure-pipeline` 原来的 28 个起点 / 引用区块
 （含已修好的 `(42,-32,-16)`），补充的村庄五种 / 前哨 / 古城 / 古迹废墟 /
-沙漠神殿 / 雪屋 / 要塞邻居，以及按 `random_spread` 电位起点定位到的四种稀有结构
+沙漠神殿 / 雪屋 / 要塞邻居 / 一个带刷扫方块的海底遗迹，以及按 `random_spread` 电位起点定位到的四种稀有结构
 起点（林地府邸、海底神殿、丛林神殿、海底遗迹）。
 
 ## 改坏确认
 
 | 改坏方式 | 结果 |
 |---|---|
-| `--break-structure minecraft:jigsaw` | 134 个干净结构件 → 34356 处不一致 |
-| `--break-structure minecraft:mineshaft` | 91 个干净结构件 → 9886 处不一致 |
+| `--break-structure minecraft:jigsaw` | 138 个干净结构件 → 41155 处不一致 |
+| `--break-structure minecraft:mineshaft` | 115 个干净结构件 → 11412 处不一致 |
 | `--break-structure minecraft:ruined_portal` | 4 个 → 650 处 |
 | `--break-structure minecraft:swamp_hut` | 1 个 → 348 处 |
 | `--break-structure minecraft:shipwreck` | 1 个 → 265 处 |
 | `--break-structure minecraft:buried_treasure` | 2 个 → 5 处 |
 | `block_pile::place` 多取一次 `next_float()` | 25 处不一致（还原后 0） |
 | `long-set --break-self-test`（交换前两个输出） | 8 处不一致（还原后 3000 组 / 287248 次比较 0） |
-| `structure-e2e --break-self-test` | 破坏第一个方块，逐格比较器报错 |
+| `structure-e2e --break-self-test` | 破坏第一个方块 → 52 处不一致（逐格比较器报错） |
+| 方块实体比较器白名单改坏：把一个白名单键在游戏侧写成非默认值 | 117 处不一致（还原后 52 区块 0 不一致） |
+| `place_suspicious_sand` 去掉 `set_block_entity` | 沙漠神殿起点 4 个刷扫方块实体报「game missing」 |
+| 海底遗迹 `archyRuleProcessor` 的 `AppendLoot` 去掉 | `(-50,-197)` 的 5 个刷扫方块实体报「game missing」 |
+| 把 `WorldgenRandom.next_long()` 换回内层 `Random::next_long()` | 20+ 处 `LootTableSeed` 不一致 |
+| `PieceContext::place_block` 换回不带高度图的 `set_block` | 沙漠神殿起点 3 处 step-9 干草不一致 |
 
 ## 这一轮修掉的 bug
 
@@ -120,9 +125,10 @@ gen-world: 50 chunks, 0 quart cells, 44236800 blocks, 50 structure rows /
 | 要塞起点 412 处（苔石 / 裂石 / 虫蚀石砖整片错位） | `dispatch_stronghold` 在放置阶段重新调 `randomSmallDoor(random)`；官方在**结构件构造器**（布局阶段）取一次 `nextInt(5)` 存成 `EntryDoor`，`postProcess` 只读这个字段。多取一次让同一 `WorldgenRandom` 后续所有 `nextFloat` 错位 | 从 `piece.extras["EntryDoor"]` 读 → 412 → 4 |
 | `(42,-32,-16)` 的 `potent_sulfur[wet]` 1 处（无结构也复现） | `sulfur_pool` 是 `sequence`：第一步水做的 `lake` 放硫磺屏障，第二步 `simple_block` 放湿润的强效硫磺。`LakeFeature.place` 对水湖返回 **true**（`SequenceFeature` 在第一个子项返回 false 时短路），我们的 `lake::place` 提前 `return false`；另外 `PotentSulfurBlock` 没进 `survival::classify` 的 `Kind::Default` | 两处都修 → 0 不一致，该坐标已加回默认查询集 |
 
-33 → 3 和 412 → 4 的残差分别是 step-9 干草的 `canSurvive`（`suspicious_sand`
-vs `sand`）与矿井支柱 `fillColumnDown` 的 `isFaceSturdy` 边界；已定位到具体结构件
-和具体规则，`structure-e2e --known-gaps` 单独跑这两个起点区块。默认查询集用
+33 → 3 和 412 → 4 的残差后来分别定位为 `StructurePiece.placeBlock` 漏了 FINAL
+高度图更新（step 9 的 `heightmap MOTION_BLOCKING` 读到旧高度，已修）与矿井
+支撑柱的 `isFaceSturdy` 边界（剩 4 处，见「已知限制」）。
+`structure-e2e --known-gaps` 现在只单独跑要塞起点区块。默认查询集用
 `(-374,-22)` 等被引用邻居验证跨区块结构件放置，整块 0 不一致。
 
 ## 稀有结构起点定位
@@ -138,14 +144,67 @@ vs `sand`）与矿井支柱 `fillColumnDown` 的 `isFaceSturdy` 边界；已定�
 覆盖行的「结构件数 / 清单」按官方 `PiecesContainer` 口径把房间图子件折回
 `MonumentBuilding` 一件，子件由逐方块比较验证。
 
+## 方块实体比较
+
+`gen-world --through features` / `structure-e2e` 现在除了逐方块，还比较 3×3 每格
+**实例化过**的方块实体：官方侧导出 `BlockEntity.saveWithFullMetadata` 的紧凑 SNBT
+（跳过只是 `DUMMY` 占位的 pending nbt），Rust 侧用
+`FeatureResult::block_entities`（`FeatureWorld::set_block_entity` 累计）逐位置比。
+`id` / `x` / `y` / `z` / 空 `components` 是存盘元数据，比较时丢掉。官方构造器
+无条件写出的默认值（`VaultBlockEntity` 的空 `server_data` / `shared_data`、
+`AbstractFurnaceBlockEntity` 的 `speed_multiplier`、`SignBlockEntity` 的
+`is_waxed`、`SculkSensorBlockEntity` 的监听器、酿造台的计时总量）按
+`(方块实体类型, 键, 官方默认值)` 白名单忽略；只有官方值等于默认值且游戏侧
+缺这个键才忽略，游戏侧写了不同的值照样报不一致。
+
+52 个默认查询区块现在 `46006272 blocks / 117 block entities / 0 mismatches`。
+
+这一轮加比较器后翻出并修掉的真问题：
+
+| 现象 | 根因（字节码核对） |
+|---|---|
+| 20+ 处 `LootTableSeed` 整组移位 / 低位小偏移 | `StructureTemplate.placeInWorld` 用的是 `StructureStart.placeInChunk` 传下来的 `WorldgenRandom`（`BitRandomSource.nextLong` = 两次 `next(32)`），不是内层 Xoroshiro 的原生 `nextLong` |
+| 模板里的方块实体完全没进 `FeatureResult` | `place_in_world` / `place_processed` 只写方块，`BlockAccess` 和 `PieceLevel` 没有 nbt 钩子 |
+| 古城箱子多一个 `LootTableSeed` | `RandomizableContainer.tryLoadLootTable` 在没有 `LootTable` 时清掉整份状态，`trySaveLootTable` 不会单独存种子 |
+| 宝库 `config.loot_table` 官方没有 | `VaultConfig.CODEC.encode` 对等于默认 `TRIAL_CHAMBERS_REWARD` 的表省略该键 |
+| 熔炉 / 酿造台计时字段类型、告示牌文本 | 模板 nbt 用 short / byte / 组件对象，`saveAdditional` 用 `putInt`、`SignText.CODEC` 存纯字符串 |
+| 矿井 / 府邸刷怪笼、雪屋箱子缺实体 | 放置时没有 `setBlockEntity` 对应的记录 |
+
+可疑的沙子相关修复：`DesertPyramidStructure.afterPlace` 现在给刷扫方块实体设
+`minecraft:archaeology/desert_pyramid` 与 `pos.asLong()` 作种子（字节码里 lambda
+的参数，不是随机数）；`OceanRuinPieces.archyRuleProcessor` 的 `AppendLoot`
+（`ocean_ruin_warm` / `ocean_ruin_cold`）、海底遗迹箱子的 `UNDERWATER_RUIN_*` 表
+和 `desert_well` 模板链的 `AppendLoot`（`desert_well`）也照
+`RuleProcessor.processBlock` 的按位置随机源写表 + 种子。`structure-e2e` 默认集
+新增 `(42,-50,-197)`：海底遗迹真的放下 5 个可疑的沙砾 + 1 个箱子，方块实体
+逐项 0 不一致。为了让官方假世界能跑完海底遗迹的 `drowned` 数据标记，
+`ChunkgenOracle` 的惰性实体桩补了 `InertDrowned`。
+
+`--chunks-file FILE` 可以用外部 `seed cx cz` 文件代替内置查询集，方便定位新结构
+区块；默认不用。
+
 ## 已知限制
 
-* **`(42,-375,-22)` 沙漠神殿起点 3 处 / `(42,-121,96)` 要塞起点 4 处**：
-  主导根因已修（见上表），残差是 step-9 干草的 `canSurvive` 与矿井支柱
-  `fillColumnDown` 的 `isFaceSturdy` 边界（真实地形才分叉，合成地形全是空气 /
-  石头时两种写法结果一样）。用 `--known-gaps` 单独跑；默认查询集用被引用邻居
-  （`(-374,-22)`、`(-121,97)`、`(-120,96)`）覆盖跨区块放置，整块 0 不一致。
-* 少数**其它**海底神殿 / 沙漠神殿 / 丛林神殿起点区块仍有 1–65 处同类残差；
-  默认查询集只收录已确认 0 不一致的代表区块。
+* **`(42,-121,96)` 要塞起点 4 处**：官方在 `y=8/9` 的两根矿井支撑柱是
+  `oak_log`，游戏是 `oak_fence` / `oak_planks`。只在真实 `WorldGenRegion` 上分叉，
+  `structure-place` 的合成地形对拍 0 不一致。已用 `javap -c -p` 核对
+  `MineShaftCorridor.fillColumnDown` / `fillPillarDownOrChainUp` /
+  `setPlanksBlock` / `StructurePiece.fillColumnDown` / `isSupportingBox` /
+  `fillColumnBetween`，怀疑是带连接形状的栅栏在真实世界里 `isFaceSturdy(UP)`
+  的边界，但还没定位到具体调用点。用 `--known-gaps` 单独跑；默认查询集用
+  被引用邻居（`(-121,97)`、`(-120,96)`）覆盖跨区块放置，整块 0 不一致。
+  沙漠神殿起点 `(42,-375,-22)` 的 3 处已修（`PieceContext::place_block` 漏了
+  FINAL 高度图更新，step 9 的 `heightmap MOTION_BLOCKING` 读到旧高度），
+  已挪回默认查询集。
+* 少数**其它**海底神殿 / 沙漠神殿 / 丛林神殿 / 海底遗迹起点区块仍有
+  1–65 处同类残差：例如 `(42,67,-236)` 的海底遗迹 `CappedProcessor` 选中了
+  另一组 `suspicious_gravel`（官方 6 个刷扫方块实体，游戏在另 7 个位置写了
+  表）。`desert_well` 是 `rarity 1/1000` 的 `overlay`，沙漠区块的 JVM 侧
+  `FossilFeature` 还会抛 `ClassCastException`，本机没找到能在整块对拍里稳定
+  触发且 0 不一致的沙漠水井区块；沙漠水井的 `AppendLoot` 实现由
+  `feature/template_feature.rs` 的单测与字节码核对覆盖。默认查询集只收录
+  已确认 0 不一致的代表区块（含一个确实触发海底遗迹刷扫方块的区块）。
 * 生成期实体（村民、悦灵、守卫者、女巫 / 猫）不进假世界；只保证它们的
   `nextLong` / 方块写入序列与官方一致，不比较实体本身。
+* 官方构造器默认值按白名单忽略；Bamboo 运行时把宝库 / 熔炉 / 幽匿传感器
+  读回再存盘时是否会补出这些字段，属于存盘格式，未在本轮验证。

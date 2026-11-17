@@ -117,3 +117,14 @@ tools/mc-bamboo-vanilla/feature-e2e.sh minecraft:ore # 只跑一个类型
 | 要塞起点 412 处 | `randomSmallDoor` 在放置阶段被重取，官方只读布局阶段存好的 `EntryDoor` | `structure-e2e` 要塞区块 |
 | `(42,-32,-16)` 的 `potent_sulfur[wet]` | `LakeFeature.place` 对水湖返回 true，`SequenceFeature` 才不短路；`PotentSulfurBlock` 需进 `survival::classify` | `gen-world --chunk -32 -16`（已加回 `structure-e2e`） |
 | 四种稀有结构从不出起点 | `generate_start` 按 `type_id` 分派却写了注册 ID；海底神殿的 `place_in_chunk` 没接进 `place_start` | `structure-e2e` 的林地府邸 / 海底神殿 / 丛林神殿 / 海底遗迹起点 |
+
+## 带结构的整块对拍：方块实体（后续一轮）
+
+`gen-world --through features` / `structure-e2e` 现在也导出并比较 3×3 每格
+实例化过的方块实体，详见 [`docs/worldgen-structures-e2e.md`](worldgen-structures-e2e.md)
+的「方块实体比较」。默认 52 区块 `46006272 blocks / 117 block entities /
+0 mismatches`。新比较器翻出并修掉了 `LootTableSeed` 随机源类型、模板实体 nbt
+未记录、古城箱子多写种子、宝库 `config` 默认表、数值字段类型、告示牌文本编码、
+刷怪笼 / 雪屋箱子缺实体，以及可疑的沙子（沙漠神殿 / 海底遗迹 / 沙漠水井）
+没写战利品表与种子等问题。沙漠神殿起点 3 处残差也在这轮修掉并加回默认集；
+要塞起点还剩 4 处矿井支撑柱差异，留在 `--known-gaps`。

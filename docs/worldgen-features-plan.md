@@ -1573,7 +1573,11 @@ minecraft:red_mushroom_taiga,minecraft:brown_mushroom_normal,minecraft:red_mushr
 * `fossil` / `desert_well`：Rust 侧实现完整，但官方 `FossilFeature.place` 在
   `ChunkgenOracle` 的代理上抛 `ClassCastException`（要 `ServerLevel`），属结构线
   （`cb-wg-structures`），JVM 侧不可比，不在本轮范围。
-* 唯一仍「未做」的是方块实体数据（蜂巢 / 可疑沙等），对拍框架只比方块，不比 NBT。
+* 方块实体数据（蜂巢 / 可疑沙等）已由结构线的 `gen-world --through features`
+  / `structure-e2e` 覆盖：官方导出 `saveWithFullMetadata` 的 SNBT，Rust 侧用
+  `FeatureResult::block_entities` 逐位置比，默认 52 区块 117 个实体 0 不一致。
+  可疑的沙子（沙漠神殿 / 海底遗迹 / 沙漠水井）的战利品表与种子已按字节码写入。
+  详见 `docs/worldgen-structures-e2e.md`「方块实体比较」。
 
 ### 还没做
 
@@ -1581,7 +1585,8 @@ minecraft:red_mushroom_taiga,minecraft:brown_mushroom_normal,minecraft:red_mushr
   `surface_relative_threshold_filter` 修饰器，以及其余 10 个 step 里的地物类型
   （湖、晶洞、怪物房、积雪、泉水、树、植被等）都已移植并接入 `dispatch`；
   完整 11 步对拍不再因 `unsupported` 跳过区块（化石的 JVM 侧限制见上文）。
-* 方块实体 NBT、生成期刷怪仍不在对拍范围。
+* 生成期刷怪仍不在对拍范围；方块实体 NBT 已由 `gen-world --through features`
+  / `structure-e2e` 比较（见 `docs/worldgen-structures-e2e.md`）。
 * `skipped` 白名单目前只在 Rust 侧用 `unsupported` 标记；Java 侧还没按
   「已移植集合」输出 `skipped`，`--feature-types` 是手工过滤。
 * 接进 Director 的**多阶段流水线形状**已经就位（流水线分支：`PipelineKind::Staged`

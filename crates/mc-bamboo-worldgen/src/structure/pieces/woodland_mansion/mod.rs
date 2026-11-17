@@ -469,7 +469,7 @@ pub fn place_piece_with_entities(
     level: &mut dyn crate::structure::piece_place::PieceLevel,
     chunk_bb: &[i32; 6],
     random: &WorldgenRandom,
-    mut block_entities: Option<&mut Vec<((i32, i32, i32), mc_bamboo_nbt::Tag)>>,
+    block_entities: Option<&mut crate::feature::world::BlockEntityList>,
 ) -> Result<(), String> {
     let template_name = piece
         .extras
@@ -494,7 +494,7 @@ pub fn place_piece_with_entities(
 
     let mut access = template_place::PieceLevelAccess {
         level,
-        block_entities: block_entities.as_deref_mut(),
+        block_entities,
     };
     if template_place::place_in_world(&mut access, &template, position, &settings, random).is_none()
     {

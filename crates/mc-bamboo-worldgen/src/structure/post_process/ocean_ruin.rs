@@ -48,6 +48,10 @@ pub fn ocean_ruin(
         .get_str("BiomeType")
         .ok_or("ocean ruin piece has no BiomeType")?
         == "COLD";
+    let is_large = piece
+        .extras
+        .get("IsLarge")
+        .is_some_and(|value| matches!(value, crate::structure::pieces::Extra::Byte(1)));
     let template_position = (
         extra_int(piece, "TPX").ok_or("ocean ruin piece has no TPX")?,
         extra_int(piece, "TPY").ok_or("ocean ruin piece has no TPY")?,
@@ -86,7 +90,9 @@ pub fn ocean_ruin(
         &settings,
         chunk_bb,
         random,
-        &mut |context, metadata, pos| handle_data_marker(context, metadata, pos, sea_level),
+        &mut |context, metadata, pos| {
+            handle_data_marker(context, metadata, pos, sea_level, is_large)
+        },
     );
     piece.bb = outcome.bounding_box;
     Ok(outcome)
@@ -109,6 +115,7 @@ fn handle_data_marker(
     metadata: &str,
     pos: (i32, i32, i32),
     sea_level: i32,
+    is_large: bool,
 ) {
     match metadata {
         "chest" => {
@@ -124,7 +131,19 @@ fn handle_data_marker(
                 state = next;
             }
             context.set_block(pos, state);
-            context.seed_chest_loot_table(pos);
+            // `OceanRuinPiece.handleDataMarker` 给箱子设
+            // `UNDERWATER_RUIN_BIG` / `UNDERWATER_RUIN_SMALL` 表与一次
+            // `random.nextLong()` 种子，和 `IglooPiece` 是同一条路径。
+            // `OceanRuinPiece.handleDataMarker` sets the `UNDERWATER_RUIN_*`
+            // loot table and one `random.nextLong()` seed on the chest.
+            context.set_chest_loot_table(
+                pos,
+                if is_large {
+                    "minecraft:chests/underwater_ruin_big"
+                } else {
+                    "minecraft:chests/underwater_ruin_small"
+                },
+            );
         }
         "drowned" => {
             let state = if pos.1 > sea_level {

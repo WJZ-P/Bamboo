@@ -791,12 +791,11 @@ fn component_text(value: &Tag) -> Tag {
     let Tag::Compound(entries) = value else {
         return value.clone();
     };
-    if entries.len() == 1 {
-        if let Some((_, Tag::String(text))) = entries.first()
-            && entries[0].0 == "text"
-        {
-            return Tag::String(text.clone());
-        }
+    if entries.len() == 1
+        && let Some((_, Tag::String(text))) = entries.first()
+        && entries[0].0 == "text"
+    {
+        return Tag::String(text.clone());
     }
     value.clone()
 }
@@ -1385,7 +1384,6 @@ mod tests {
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
             None,
-            None,
             &mut world,
         )
         .unwrap();
@@ -1449,7 +1447,6 @@ mod tests {
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
             None,
-            None,
             &mut world,
         )
         .unwrap();
@@ -1476,7 +1473,6 @@ mod tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
-            None,
             None,
             &mut world,
         )
@@ -2002,7 +1998,6 @@ mod tests {
             0,
             0,
             &crate::random::Random::Legacy(mc_bamboo_blocks::LegacyRandom::new(0)),
-            None,
             None,
             &mut world,
         )

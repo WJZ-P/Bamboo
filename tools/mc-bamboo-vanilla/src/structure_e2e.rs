@@ -57,8 +57,11 @@ const QUERIES: &[(i64, i32, i32)] = &[
     (42, 40, 55),     // shipwreck_beached
     (42, -19, 11),    // ruined_portal_swamp
     (42, -14, 21),    // abandoned_camp_swamp
-    // 沙漠神殿 / 要塞用「被引用的相邻区块」覆盖：起点区块本身有已知差异（见下），
-    // 但结构件跨区块的放置在这些邻居上整块 0 不一致。
+    // 沙漠神殿起点已修好，和它的被引用邻区块一起进默认集。要塞起点还有已知
+    // 差异（见下），用被引用邻区块覆盖跨区块放置。
+    // The desert-pyramid start is now clean; the stronghold start still has a known
+    // gap, so its referenced neighbours cover cross-chunk placement.
+    (42, -375, -22), // desert_pyramid start
     (42, -374, -22), // desert_pyramid referenced neighbour
     (42, -121, 97),  // stronghold referenced neighbour
     (42, -120, 96),  // stronghold referenced neighbour
@@ -71,20 +74,23 @@ const QUERIES: &[(i64, i32, i32)] = &[
     (42, -85, 180),     // jungle_temple
     (42, 3, 10),        // ocean_ruin_cold
     (42, -32, -79),     // ocean_ruin_warm
+    // 海底遗迹真的放下可疑的沙砾并带战利品表 / 种子（5 个刷扫 + 1 个箱子）。
+    // Ocean ruin pieces that actually place suspicious gravel with loot tables
+    // and seeds (5 brushable blocks + 1 chest).
+    (42, -50, -197),
 ];
 
 /// 已定位但尚未修好的整块差异，用 `--known-gaps` 单独跑，不进默认干净跑。
-/// `Layout` 结构（沙漠神殿 / 要塞）在真实 `WorldGenRegion` 上的 `postProcess`
-/// 随机序列还有偏差；`structure-place` 用合成地形逐件对拍它们是 0 不一致。
+/// 要塞起点的矿井支柱在真实 `WorldGenRegion` 上还差 4 格；`structure-place`
+/// 用合成地形逐件对拍它是 0 不一致。
 /// Known-but-unfixed whole-chunk gaps, run with `--known-gaps`; the default clean
-/// run excludes them. `structure-place` still covers these piece types block-for-block.
+/// run excludes them. `structure-place` still covers this piece type block-for-block.
 const KNOWN_GAPS: &[(i64, i32, i32)] = &[
-    (42, -375, -22), // desert_pyramid
-    (42, -121, 96),  // stronghold
+    (42, -121, 96), // stronghold
 ];
 
 const USAGE: &str = "usage: structure-e2e <java> [--break-self-test] [--break-structure KIND] \
-     [--structure-types IDS] [--show N] [--known-gaps]";
+     [--structure-types IDS] [--show N] [--known-gaps] [--chunks-file FILE]";
 
 #[derive(Debug)]
 struct Options {
@@ -94,6 +100,9 @@ struct Options {
     break_structure: Option<String>,
     /// 只跑已知差异区块，供继续排查用。
     known_gaps: bool,
+    /// 用外部 `seed cx cz` 文件代替内置查询集（诊断新区块用）。
+    /// Use an external `seed cx cz` file instead of the built-in query set.
+    chunks_file: Option<String>,
 }
 
 impl Options {
@@ -102,6 +111,7 @@ impl Options {
         let mut break_self_test = false;
         let mut break_structure = None;
         let mut known_gaps = false;
+        let mut chunks_file = None;
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
@@ -115,6 +125,9 @@ impl Options {
                     let _ = args.next().ok_or(USAGE)?;
                 }
                 "--known-gaps" => known_gaps = true,
+                "--chunks-file" => {
+                    chunks_file = Some((*args.next().ok_or(USAGE)?).to_owned());
+                }
                 _ => return Err(USAGE.to_owned()),
             }
         }
@@ -123,6 +136,7 @@ impl Options {
             break_self_test,
             break_structure,
             known_gaps,
+            chunks_file,
         })
     }
 }
@@ -135,11 +149,36 @@ pub fn run(mut command: Command, queries_path: &Path, options: &[&str]) -> Resul
     } else {
         QUERIES
     };
-    let text = queries
-        .iter()
-        .map(|(seed, x, z)| format!("{seed} {x} {z}\n"))
-        .collect::<String>();
-    fs::write(queries_path, &text).map_err(|e| format!("cannot write queries: {e}"))?;
+    if let Some(path) = &parsed.chunks_file {
+        let text =
+            fs::read_to_string(path).map_err(|e| format!("cannot read chunks file {path}: {e}"))?;
+        let rows: Vec<(i64, i32, i32)> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() != 3 {
+                    return Err(format!("bad chunks file line: {line}"));
+                }
+                Ok((
+                    parts[0].parse().map_err(|_| format!("bad seed: {line}"))?,
+                    parts[1].parse().map_err(|_| format!("bad x: {line}"))?,
+                    parts[2].parse().map_err(|_| format!("bad z: {line}"))?,
+                ))
+            })
+            .collect::<Result<_, String>>()?;
+        let text = rows
+            .iter()
+            .map(|(seed, x, z)| format!("{seed} {x} {z}\n"))
+            .collect::<String>();
+        fs::write(queries_path, &text).map_err(|e| format!("cannot write queries: {e}"))?;
+    } else {
+        let text = queries
+            .iter()
+            .map(|(seed, x, z)| format!("{seed} {x} {z}\n"))
+            .collect::<String>();
+        fs::write(queries_path, &text).map_err(|e| format!("cannot write queries: {e}"))?;
+    }
     let mut forwarded = vec![
         "--through".to_owned(),
         "features".to_owned(),
