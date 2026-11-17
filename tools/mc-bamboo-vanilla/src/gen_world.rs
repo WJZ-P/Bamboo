@@ -1357,6 +1357,9 @@ const BLOCK_ENTITY_DEFAULTS: &[(&str, &str, &str)] = &[
     ("minecraft:brewing_stand", "total_brew_time", "400"),
     ("minecraft:brewing_stand", "total_fuel", "20"),
     ("minecraft:brewing_stand", "speed_multiplier", "1.0f"),
+    // `SignBlockEntity.saveAdditional` 无条件写 `putBoolean("is_waxed", false)`。
+    ("minecraft:sign", "is_waxed", "0b"),
+    ("minecraft:hanging_sign", "is_waxed", "0b"),
 ];
 
 /// 方块实体类型（`saveWithFullMetadata` 的 `id`）。

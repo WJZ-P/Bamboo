@@ -519,7 +519,12 @@ pub fn place_processed(
                 Some(tag) if block.state.name == "minecraft:vault" => {
                     Some(normalize_vault_config(tag))
                 }
-                Some(tag) => Some(tag.clone()),
+                // 模板里的数值字段用的是旧式短/字节类型；官方的 `saveAdditional`
+                // 按 `putInt` 写回，告示牌文本也要过 `SignText.CODEC`。
+                // Template numeric fields use legacy short/byte types; vanilla's
+                // `saveAdditional` writes them back as ints, and sign text is
+                // round-tripped through `SignText.CODEC`.
+                Some(tag) => Some(normalize_block_entity_nbt(&block.state.name, tag)),
             };
             // 官方 `blockEntity.loadWithComponents(...)`：nbt 写进方块实体。
             // Vanilla `blockEntity.loadWithComponents(...)`: the nbt goes into the block
@@ -719,6 +724,114 @@ pub fn is_randomizable_container(block_name: &str) -> bool {
             | be::DECORATED_POT
             | be::CRAFTER
     )
+}
+
+/// 按官方各类方块实体的 `saveAdditional` 重新编码模板 nbt 里的字段。
+///
+/// Re-encode the template nbt fields the way each vanilla block entity's
+/// `saveAdditional` does.
+pub fn normalize_block_entity_nbt(block_name: &str, tag: &Tag) -> Tag {
+    let Tag::Compound(entries) = tag else {
+        return tag.clone();
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        let next = if is_int_when_saved(block_name, key) {
+            numeric_as_int(value)
+        } else if is_sign_text(block_name, key) {
+            normalize_sign_text(value)
+        } else {
+            value.clone()
+        };
+        out.push((key.clone(), next));
+    }
+    Tag::Compound(out)
+}
+
+/// `AbstractFurnaceBlockEntity` / `BrewingStandBlockEntity` 用 `putInt` 写计时字段，
+/// 模板里却存成 short / byte。
+///
+/// `AbstractFurnaceBlockEntity` / `BrewingStandBlockEntity` write their timers with
+/// `putInt`, while the templates store them as shorts / bytes.
+fn is_int_when_saved(block_name: &str, key: &str) -> bool {
+    let furnace = matches!(
+        block_name,
+        "minecraft:furnace" | "minecraft:blast_furnace" | "minecraft:smoker"
+    ) && matches!(
+        key,
+        "cooking_time_spent"
+            | "cooking_total_time"
+            | "lit_time_remaining"
+            | "lit_total_time"
+    );
+    let brewing = block_name == "minecraft:brewing_stand"
+        && matches!(key, "BrewTime" | "Fuel" | "total_brew_time" | "total_fuel");
+    furnace || brewing
+}
+
+fn numeric_as_int(value: &Tag) -> Tag {
+    match value {
+        Tag::Byte(number) => Tag::Int(i32::from(*number)),
+        Tag::Short(number) => Tag::Int(i32::from(*number)),
+        _ => value.clone(),
+    }
+}
+
+/// `SignBlockEntity.saveAdditional` 把 `front_text` / `back_text` 过
+/// `SignText.CODEC`：文本组件压成纯字符串，`filtered_messages` 与 `messages`
+/// 相同时省略。
+///
+/// `SignBlockEntity.saveAdditional` round-trips `front_text` / `back_text`
+/// through `SignText.CODEC`: text components collapse to plain strings and
+/// `filtered_messages` is omitted when equal to `messages`.
+fn is_sign_text(block_name: &str, key: &str) -> bool {
+    block_name.contains("sign")
+        && !block_name.contains("hanging_sign")
+        && matches!(key, "front_text" | "back_text")
+}
+
+fn component_text(value: &Tag) -> Tag {
+    let Tag::Compound(entries) = value else {
+        return value.clone();
+    };
+    if entries.len() == 1 {
+        if let Some((_, Tag::String(text))) = entries.first()
+            && entries[0].0 == "text"
+        {
+            return Tag::String(text.clone());
+        }
+    }
+    value.clone()
+}
+
+fn normalize_sign_text(value: &Tag) -> Tag {
+    let Tag::Compound(entries) = value else {
+        return value.clone();
+    };
+    let mut messages: Option<Vec<Tag>> = None;
+    let mut filtered: Option<Vec<Tag>> = None;
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, field) in entries {
+        match (key.as_str(), field) {
+            ("messages", Tag::List(list)) => {
+                let normalized: Vec<Tag> = list.iter().map(component_text).collect();
+                messages = Some(normalized.clone());
+                out.push((key.clone(), Tag::List(normalized)));
+            }
+            ("filtered_messages", Tag::List(list)) => {
+                filtered = Some(list.iter().map(component_text).collect());
+            }
+            _ => out.push((key.clone(), field.clone())),
+        }
+    }
+    // `SignText.filteredMessagesForSerialization`：两份列表相等时不写。
+    // `SignText.filteredMessagesForSerialization`: omit it when the lists are equal.
+    if let (Some(filtered), Some(messages)) = (filtered, messages)
+        && filtered != messages
+    {
+        out.push(("filtered_messages".to_owned(), Tag::List(filtered)));
+    }
+    Tag::Compound(out)
 }
 
 /// `VaultConfig.CODEC` 的默认战利品表（`VaultConfig.DEFAULT` 构造里写死）。

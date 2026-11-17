@@ -1028,6 +1028,12 @@ pub fn portal_room_post_process(
         piece
             .level
             .set_block(wx, wy, wz, block("minecraft:spawner"));
+        piece.level.set_block_entity(
+            wx,
+            wy,
+            wz,
+            &crate::structure::piece_place::spawner_nbt("minecraft:silverfish"),
+        );
     }
 }
 /// 供对拍比较用的方块名（调试与断言）。

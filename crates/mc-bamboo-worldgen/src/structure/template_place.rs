@@ -407,6 +407,12 @@ pub fn place_in_world(
             if is_randomizable_container(state) {
                 set_loot_table_seed(&mut nbt, random.next_long());
             }
+            let nbt = super::jigsaw::place::normalize_block_entity_nbt(
+                mc_bamboo_data::block_of_state(state)
+                    .map(|block| block.name)
+                    .unwrap_or(""),
+                &nbt,
+            );
             world.set_block_entity(pos.0, pos.1, pos.2, &nbt);
         }
         if let Some(previous) = previous_fluid {
@@ -656,6 +662,27 @@ impl MarkerContext<'_, '_, '_> {
         if is_chest(self.world.get_block(pos.0, pos.1, pos.2)) {
             self.random.next_long();
         }
+    }
+
+    /// `ChestBlockEntity.setLootTable(table, random.nextLong())`：把表和种子写进
+    /// 该位置的方块实体 nbt；不是箱子时只按官方取一次数（调用方保证）。
+    ///
+    /// `ChestBlockEntity.setLootTable(table, random.nextLong())`: write the table and
+    /// seed to the block-entity nbt at that position.
+    pub fn set_chest_loot_table(&mut self, pos: (i32, i32, i32), table: &str) {
+        if !is_chest(self.world.get_block(pos.0, pos.1, pos.2)) {
+            return;
+        }
+        let seed = self.random.next_long();
+        let nbt = mc_bamboo_nbt::Tag::Compound(vec![
+            (
+                "LootTable".to_owned(),
+                mc_bamboo_nbt::Tag::String(table.to_owned()),
+            ),
+            ("LootTableSeed".to_owned(), mc_bamboo_nbt::Tag::Long(seed)),
+        ]);
+        self.world
+            .set_block_entity(pos.0, pos.1, pos.2, &nbt);
     }
 }
 

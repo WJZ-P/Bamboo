@@ -980,6 +980,10 @@ impl PieceLevel for FeaturePieceLevel<'_, '_> {
         self.world.set_block_with_heightmaps(x, y, z, state)
     }
 
+    fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {
+        self.world.set_block_entity(x, y, z, nbt);
+    }
+
     fn min_y(&self) -> i32 {
         self.world.min_y
     }
