@@ -22,6 +22,7 @@ use mc_bamboo_game::{
     MailBudget, World, WorldConfig,
     world_options::{LevelType, WorldGenConfig},
     worldgen::{clear_terrain_cache, terrain_cache_stats},
+    worldgen_features::clear_feature_cache,
     worldgen_profile,
 };
 
@@ -126,6 +127,7 @@ fn main() {
         .collect();
     for &threads in &options.threads {
         clear_terrain_cache();
+        clear_feature_cache();
         worldgen_profile::reset();
         let (_inbox, receiver) = mpsc::channel();
         let config = WorldConfig {

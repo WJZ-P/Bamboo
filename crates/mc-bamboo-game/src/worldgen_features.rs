@@ -18,7 +18,6 @@
 //! `Arc<GeneratedChunk>` and merges deltas copy-on-write via `Arc::make_mut`.
 
 use std::{
-    cell::RefCell,
     collections::HashMap,
     sync::{Arc, OnceLock},
 };
@@ -580,19 +579,65 @@ struct FeatureRun {
     deltas: [Vec<BlockDelta>; 9],
 }
 
-type FeatureCache = HashMap<(i64, Option<&'static str>, i32, i32), Arc<FeatureRun>>;
-thread_local! {
-    // 每条计算线程各缓存一份「以某区块为中心」的地物结果。中心区块在生成
-    // 自己的 `features` 时，要重算 8 个邻居中心的地物、取它们写进本区块的
-    // 增量；缓存后每个中心只真正算一次。`applyBiomeDecoration` 是纯函数，
-    // 命中与否不改结果。条目数封顶，超了整表清掉。
-    // Each compute thread caches the feature result centered on a chunk. A
-    // center needs the 8 neighbor centers' results to collect the writes they
-    // spill into it; caching makes each center run once. Pure, so hits never
-    // change the result. Bounded: clear the whole table past the cap.
-    static FEATURE_CACHE: RefCell<FeatureCache> = RefCell::new(HashMap::new());
+type FeatureCacheKey = (i64, Option<&'static str>, i32, i32, bool);
+/// 一个中心的地物结果，或正在算它的线程占位。等待方在 `OnceLock` 上等，
+/// 拿到的是计算方放进来的同一个 `Arc`。
+/// A center's feature result, or the in-flight placeholder. Waiters block on
+/// the same `OnceLock` and receive the computing thread's very same `Arc`.
+type FeatureSlot = Arc<OnceLock<Result<Arc<FeatureRun>, String>>>;
+/// 全进程一份，按分片加锁。条目和占位一起按插入顺序淘汰，字节预算按实测
+/// 写增量大小算。结果里只有 8 个邻居的写增量（中心恒空），比一整份 CARVERS
+/// 地形小得多；256 条上限覆盖一片持续跑图的工作集。
+///
+/// One process-wide cache with sharded locks. Entries and placeholders are
+/// evicted together in insertion order under a measured byte budget. A result
+/// holds only the 8 neighbor delta lists (the center is empty), far smaller
+/// than a full CARVERS chunk.
+#[derive(Default)]
+struct FeatureShard {
+    entries: HashMap<FeatureCacheKey, Arc<FeatureRun>>,
+    inflight: HashMap<FeatureCacheKey, FeatureSlot>,
+    order: std::collections::VecDeque<FeatureCacheKey>,
+    bytes: usize,
 }
-const FEATURE_CACHE_CAP: usize = 256;
+
+const FEATURE_CACHE_SHARDS: usize = 16;
+const FEATURE_CACHE_BYTE_LIMIT: usize = 64 * 1024 * 1024;
+static FEATURE_CACHE: OnceLock<Vec<std::sync::Mutex<FeatureShard>>> = OnceLock::new();
+
+fn feature_shards() -> &'static [std::sync::Mutex<FeatureShard>] {
+    FEATURE_CACHE.get_or_init(|| {
+        (0..FEATURE_CACHE_SHARDS)
+            .map(|_| std::sync::Mutex::new(FeatureShard::default()))
+            .collect()
+    })
+}
+
+fn feature_shard_index(key: &FeatureCacheKey) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    (hasher.finish() as usize) % FEATURE_CACHE_SHARDS
+}
+
+/// 一条地物结果的实测堆字节数（9 份写增量的容量之和）。
+/// Measured heap bytes held by one feature result (sum of 9 delta capacities).
+fn feature_run_heap_bytes(run: &FeatureRun) -> usize {
+    run.deltas
+        .iter()
+        .map(|deltas| deltas.capacity() * size_of::<BlockDelta>())
+        .sum()
+}
+
+/// 测量 / 冷启动用：清掉整份地物结果缓存。
+/// Clear the whole feature-result cache (measurements / cold starts).
+pub fn clear_feature_cache() {
+    for shard in feature_shards() {
+        if let Ok(mut shard) = shard.lock() {
+            *shard = FeatureShard::default();
+        }
+    }
+}
 
 /// 以 `(cx, cz)` 为中心造 3×3 的 CARVERS 视图（纯函数，带全进程共享缓存）。
 /// Build a 3×3 CARVERS view centered on `(cx, cz)` (pure, globally cached).
@@ -668,25 +713,92 @@ fn cached_feature_run(
 ) -> Result<Arc<FeatureRun>, String> {
     crate::worldgen_profile::count(&FEATURE_RUN_CALLS);
     crate::worldgen_profile::record_feature_center(config.seed, cx, cz);
-    let key = (config.seed, config.level_type.settings_id(), cx, cz);
-    FEATURE_CACHE.with(|cache| {
-        if let Some(run) = cache.borrow().get(&key) {
+    let key = (
+        config.seed,
+        config.level_type.settings_id(),
+        cx,
+        cz,
+        config.generate_structures,
+    );
+    let shards = feature_shards();
+    let index = feature_shard_index(&key);
+    // 锁内只查表 / 放占位；地物在锁外算。同一个中心只有一条线程真正在算，
+    // 其它线程在同一个 OnceLock 上等，拿到的是同一个 Arc。
+    // Hold the lock only for lookup / placeholder insertion; features run
+    // outside it. Only one thread computes a center; the rest wait on it.
+    let slot = {
+        let Ok(mut shard) = shards[index].lock() else {
+            return compute_feature_run(config, cx, cz);
+        };
+        if let Some(run) = shard.entries.get(&key) {
             crate::worldgen_profile::count(&FEATURE_RUN_HITS);
             return Ok(Arc::clone(run));
         }
-        crate::worldgen_profile::count(&FEATURE_RUN_MISSES);
-        let view = build_view(config, cx, cz)?;
-        let result = run_features(config, cx, cz, view)?;
-        let run = Arc::new(FeatureRun {
-            deltas: result.deltas.clone(),
-        });
-        let mut cache = cache.borrow_mut();
-        if cache.len() >= FEATURE_CACHE_CAP {
-            cache.clear();
+        if let Some(existing) = shard.inflight.get(&key) {
+            crate::worldgen_profile::count(&FEATURE_RUN_HITS);
+            Arc::clone(existing)
+        } else {
+            crate::worldgen_profile::count(&FEATURE_RUN_MISSES);
+            let slot = Arc::new(OnceLock::new());
+            shard.inflight.insert(key, Arc::clone(&slot));
+            slot
         }
-        cache.insert(key, Arc::clone(&run));
-        Ok(run)
-    })
+    };
+    let result = slot.get_or_init(|| compute_feature_run(config, cx, cz));
+    let run = match result {
+        Ok(run) => Arc::clone(run),
+        Err(error) => {
+            // 失败的占位要移除，否则这个键以后一直拿旧的 Err。
+            // Remove a failed placeholder or the key returns the stale Err forever.
+            if let Ok(mut shard) = shards[index].lock()
+                && shard
+                    .inflight
+                    .get(&key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &slot))
+            {
+                shard.inflight.remove(&key);
+            }
+            return Err(error.clone());
+        }
+    };
+    // 只有计算方提交条目；等待方直接返回，避免重复计字节。
+    // Only the computing thread commits; waiters just return.
+    if let Ok(mut shard) = shards[index].lock()
+        && !shard.entries.contains_key(&key)
+    {
+        shard.order.push_back(key);
+        shard.entries.insert(key, Arc::clone(&run));
+        shard.bytes += feature_run_heap_bytes(&run);
+        let target = FEATURE_CACHE_BYTE_LIMIT / FEATURE_CACHE_SHARDS * 3 / 4;
+        if shard.bytes > FEATURE_CACHE_BYTE_LIMIT / FEATURE_CACHE_SHARDS {
+            while shard.bytes > target {
+                let Some(oldest) = shard.order.pop_front() else {
+                    break;
+                };
+                let Some(removed) = shard.entries.remove(&oldest) else {
+                    continue;
+                };
+                shard.bytes = shard.bytes.saturating_sub(feature_run_heap_bytes(&removed));
+                shard.inflight.remove(&oldest);
+            }
+        }
+    }
+    Ok(run)
+}
+
+/// 真正跑一遍 `applyBiomeDecoration`：拼视图、调纯函数、只保留 8 份写增量。
+/// Actually run `applyBiomeDecoration`: build the view, call the pure function,
+/// keep only the 8 neighbor delta lists.
+fn compute_feature_run(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+) -> Result<Arc<FeatureRun>, String> {
+    let view = build_view(config, cx, cz)?;
+    let result = run_features(config, cx, cz, view)?;
+    Ok(Arc::new(FeatureRun {
+        deltas: result.deltas,
+    }))
 }
 
 /// 8 个邻居中心的地物写进本区块的增量合起来。
