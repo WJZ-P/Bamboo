@@ -189,6 +189,31 @@ impl Engines {
         [sky, block]
     }
 
+    /// 岛拆分：两层存储按区块拆，待发的变化按区块拆，引擎里的工作队列在光照算完时
+    /// 都是空的，新的一份从空队列开始。
+    ///
+    /// Island split: both storages and the pending changes split by chunk; the
+    /// work queues are empty once light has settled.
+    pub(super) fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        debug_assert!(!self.in_round(), "一轮算到一半不能拆");
+        debug_assert!(!self.sky.has_light_work() && !self.block.has_light_work());
+        let changes = self.changes.split_off(chunks);
+        Self {
+            sky: LightEngine::new(self.sky.storage.split_off(chunks)),
+            block: LightEngine::new(self.block.storage.split_off(chunks)),
+            changes,
+            round: None,
+        }
+    }
+
+    /// 岛合并：[`Self::split_off`] 的逆操作。
+    pub(super) fn absorb(&mut self, other: Self) {
+        debug_assert!(!self.in_round() && !other.in_round());
+        self.sky.storage.absorb(other.sky.storage);
+        self.block.storage.absorb(other.block.storage);
+        self.changes.0.extend(other.changes.0);
+    }
+
     /// `onLightUpdate`。
     fn collect_changes(&mut self, layer: LightLayer) {
         let engine = match layer {
@@ -220,6 +245,17 @@ impl Changes {
 
     fn take(&mut self) -> BTreeMap<ChunkPos, LightChanges> {
         std::mem::take(&mut self.0)
+    }
+
+    /// 按区块拆出还没发出去的变化。
+    fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        let mut out = BTreeMap::new();
+        for pos in chunks {
+            if let Some(changes) = self.0.remove(pos) {
+                out.insert(*pos, changes);
+            }
+        }
+        Self(out)
     }
 }
 
@@ -259,6 +295,19 @@ impl Visible {
     /// 取出一个区块柱在给别人读的那份里的天空光和方块光。
     pub(super) fn take_column(&mut self, pos: ChunkPos) -> [LightColumn; 2] {
         [self.sky.take_column(pos), self.block.take_column(pos)]
+    }
+
+    /// 岛拆分 / 合并：两层各自按区块拆、并。
+    pub(super) fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        Self {
+            sky: self.sky.split_off(chunks),
+            block: self.block.split_off(chunks),
+        }
+    }
+
+    pub(super) fn absorb(&mut self, other: Self) {
+        self.sky.absorb(other.sky);
+        self.block.absorb(other.block);
     }
 
     pub(super) fn storage(&self, layer: LightLayer) -> &LightStorage {

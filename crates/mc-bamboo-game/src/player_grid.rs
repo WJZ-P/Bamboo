@@ -86,6 +86,42 @@ impl PlayerGrid {
         }
     }
 
+    /// 岛拆分：把 `players` 的格子登记搬进一份新网格。格子里的先后不影响任何人收到的包。
+    ///
+    /// Island split: move the cells of `players` into a new grid.
+    pub(crate) fn split_off(&mut self, players: &std::collections::BTreeSet<PlayerId>) -> Self {
+        let mut out = Self::default();
+        for &id in players {
+            if let Some(cell) = self.placed.remove(&id) {
+                self.take_out(id, cell);
+                out.placed.insert(id, cell);
+                out.cells.entry(cell).or_default().push(id);
+            }
+        }
+        out
+    }
+
+    /// 岛合并：按玩家编号把另一份网格的登记并进来。
+    ///
+    /// Island merge: add the other grid's players in id order.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        let mut placed: Vec<(PlayerId, Cell)> = other.placed.into_iter().collect();
+        placed.sort_unstable();
+        for (id, cell) in placed {
+            debug_assert!(!self.placed.contains_key(&id), "玩家在两个岛上");
+            self.placed.insert(id, cell);
+            self.cells.entry(cell).or_default().push(id);
+        }
+    }
+
+    /// 登记过的玩家，按编号升序。测试核对拆合用。
+    #[cfg(test)]
+    pub(crate) fn placed_players(&self) -> Vec<PlayerId> {
+        let mut out: Vec<PlayerId> = self.placed.keys().copied().collect();
+        out.sort_unstable();
+        out
+    }
+
     /// 水平方向上 x、z 各自离得不到 `radius` 的玩家都在里面。
     ///
     /// 结果可能多出几个远一点的人，调用方要再按真实距离筛一遍。

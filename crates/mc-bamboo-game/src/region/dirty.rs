@@ -30,6 +30,42 @@ pub(crate) struct Dirty {
 }
 
 impl Dirty {
+    /// 岛拆分：`chunks` 的待存标记搬进一份新的。
+    ///
+    /// Island split: move the pending marks of `chunks`.
+    pub(crate) fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        let pending = std::mem::take(&mut self.pending);
+        let (moved, kept) = pending.into_iter().partition(|pos| chunks.contains(pos));
+        self.pending = kept;
+        #[cfg(test)]
+        let last_bytes = {
+            let all = std::mem::take(&mut self.last_bytes);
+            let (moved, kept) = all.into_iter().partition(|(pos, _)| chunks.contains(pos));
+            self.last_bytes = kept;
+            moved
+        };
+        Self {
+            pending: moved,
+            #[cfg(test)]
+            last_bytes,
+        }
+    }
+
+    /// 岛合并：两份标记并起来。
+    ///
+    /// Island merge: union of both.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.pending.extend(other.pending);
+        #[cfg(test)]
+        self.last_bytes.extend(other.last_bytes);
+    }
+
+    /// 待存的区块，测试核对拆合用。
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> &BTreeSet<ChunkPos> {
+        &self.pending
+    }
+
     pub(crate) fn mark(&mut self, pos: ChunkPos) {
         self.pending.insert(pos);
     }

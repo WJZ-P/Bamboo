@@ -7,7 +7,7 @@
 //! 每个区块有一个版本号 [`ChunkRevision`]，区块和它那一列光照每被写一次就换一个新值，区块包的缓存靠它判断内容变没变。
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ops::Deref,
 };
 
@@ -85,7 +85,7 @@ impl Deref for EditedChunks {
 }
 
 /// 一个区块的版本号，见 [`ChunkStore::revision`]。只用来比较是否相等。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ChunkRevision {
     chunk: u64,
     /// 天空光和方块光。
@@ -707,7 +707,161 @@ impl ChunkStore {
         );
         Ok(())
     }
+
+    /// 已加载的区块坐标，按坐标升序；无限模式返回空。拆岛时找连通块、测试核对用。
+    ///
+    /// The loaded positions in ascending order; empty in infinite-flat mode.
+    pub fn loaded_positions(&self) -> Vec<ChunkPos> {
+        let mut out: Vec<ChunkPos> = self
+            .loaded
+            .as_ref()
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        out.sort_unstable();
+        out
+    }
+
+    /// 岛拆分（岛的实施计划 3.3「区块柱整批搬」）：把 `chunks` 里的区块整批搬进一张新
+    /// 表——方块、两层光照、版本号、原样起点、已加载登记、存盘的改动集合——**不逐柱
+    /// 重算邻居段状态**。`chunks` 里没加载的位置没有内容，跳过。
+    ///
+    /// 前提：已加载模式、光照全部算完（否则返回 [`LightPending`]，表不变）；搬走的
+    /// 已加载区块的 8 个邻居要么也在 `chunks` 里、要么没加载（断言）。满足时两边的段
+    /// 状态本来就按「对面没加载」算好了，所以重算全是空操作。
+    ///
+    /// 版本号原样带走，两边的计数器都从现在的值接着发：同一个位置的版本号仍然只增
+    /// 不重复，存盘判脏、区块包缓存、原样判断都不受影响。
+    ///
+    /// Island split (island plan 3.3): move the chunks in `chunks` — blocks,
+    /// both light layers, revisions, pristine marks, loaded marks and the save
+    /// change set — into a new store in one batch, **without recomputing
+    /// neighbour section states per column**. Requires loaded mode and settled
+    /// light (else [`LightPending`], unchanged), and asserts that every moved
+    /// loaded chunk's eight neighbours are either moved too or not loaded.
+    /// Revisions move verbatim and both counters continue, so a position never
+    /// sees the same revision twice.
+    pub fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Result<Self, LightPending> {
+        assert!(self.is_loaded_mode(), "只有已加载模式能拆岛");
+        if !self.ready_to_move_columns() {
+            return Err(LightPending);
+        }
+        let loaded = self.loaded.as_ref().expect("已加载模式");
+        for &pos in chunks {
+            if !loaded.contains(&pos) {
+                continue;
+            }
+            for (dx, dz) in NEIGHBOURS {
+                let neighbour = ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz));
+                assert!(
+                    chunks.contains(&neighbour) || !loaded.contains(&neighbour),
+                    "拆岛时搬走的区块 {pos:?} 和留下的已加载区块 {neighbour:?} 相邻"
+                );
+            }
+        }
+        // 先按要搬的个数留好位置，免得一边搬一边扩表重排（一个区块好几 KB）。
+        let capacity = chunks.len().min(loaded.len());
+        let mut out = Self {
+            template: self.template.clone(),
+            edited: EditedChunks {
+                chunks: ChunkMap::with_capacity_and_hasher(capacity, Default::default()),
+                revisions: ChunkMap::with_capacity_and_hasher(capacity, Default::default()),
+                last_revision: self.edited.last_revision,
+                ..EditedChunks::default()
+            },
+            light: self.light.split_off(chunks),
+            loaded: Some(HashSet::with_capacity_and_hasher(
+                capacity,
+                Default::default(),
+            )),
+            pristine: ChunkMap::with_capacity_and_hasher(capacity, Default::default()),
+            changed: HashSet::default(),
+        };
+        let into_loaded = out.loaded.as_mut().expect("刚建好");
+        let from_loaded = self.loaded.as_mut().expect("已加载模式");
+        for &pos in chunks {
+            if let Some(chunk) = self.edited.chunks.remove(&pos) {
+                out.edited.chunks.insert(pos, chunk);
+            }
+            if let Some(revision) = self.edited.revisions.remove(&pos) {
+                out.edited.revisions.insert(pos, revision);
+            }
+            if self.edited.changed.remove(&pos) {
+                out.edited.changed.insert(pos);
+            }
+            if let Some(mark) = self.pristine.remove(&pos) {
+                out.pristine.insert(pos, mark);
+            }
+            if self.changed.remove(&pos) {
+                out.changed.insert(pos);
+            }
+            if from_loaded.remove(&pos) {
+                into_loaded.insert(pos);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 岛合并：把另一张表整批并进来，[`Self::split_off`] 的逆操作。两边都要是已加载
+    /// 模式、光照都已算完；断言两边的已加载区块不相邻，所以同样不用重算段状态。
+    /// 版本号计数器取较大值。
+    ///
+    /// Island merge: the inverse of [`Self::split_off`]. Both sides are in loaded
+    /// mode with settled light; asserts their loaded chunks are not adjacent,
+    /// so no section state needs recomputing. The revision counter takes the max.
+    pub fn absorb(&mut self, other: Self) -> Result<(), (LightPending, Box<Self>)> {
+        assert!(
+            self.is_loaded_mode() && other.is_loaded_mode(),
+            "只有已加载模式能合岛"
+        );
+        if !self.ready_to_move_columns() || !other.ready_to_move_columns() {
+            return Err((LightPending, Box::new(other)));
+        }
+        let mine = self.loaded.as_ref().expect("已加载模式");
+        let theirs = other.loaded.as_ref().expect("已加载模式");
+        for &pos in theirs {
+            assert!(!mine.contains(&pos), "两个岛都有区块 {pos:?}");
+            for (dx, dz) in NEIGHBOURS {
+                let neighbour = ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz));
+                assert!(
+                    !mine.contains(&neighbour),
+                    "合岛时两边的已加载区块 {pos:?} 和 {neighbour:?} 相邻"
+                );
+            }
+        }
+        let Self {
+            template: _,
+            edited,
+            light,
+            loaded,
+            pristine,
+            changed,
+        } = other;
+        self.edited.chunks.extend(edited.chunks);
+        self.edited.revisions.extend(edited.revisions);
+        self.edited.changed.extend(edited.changed);
+        self.edited.last_revision = self.edited.last_revision.max(edited.last_revision);
+        self.light.absorb(light);
+        self.loaded
+            .as_mut()
+            .expect("已加载模式")
+            .extend(loaded.expect("已加载模式"));
+        self.pristine.extend(pristine);
+        self.changed.extend(changed);
+        Ok(())
+    }
 }
+
+/// 一个区块的 8 个邻居。
+const NEIGHBOURS: [(i32, i32); 8] = [
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, -1),
+    (0, 1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+];
 
 const fn is_inside_world(y: i32) -> bool {
     y >= MIN_Y && y < MIN_Y + WORLD_HEIGHT

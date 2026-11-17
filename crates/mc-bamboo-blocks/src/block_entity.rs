@@ -953,9 +953,9 @@ impl BlockEntities {
         let (out_taken, taken) = self.taken.drain().partition(|(pos, _)| inside(*pos));
         self.taken = taken;
         out.taken = out_taken;
-        let (out_positions, positions) = self.positions.drain().partition(|(pos, _)| inside(*pos));
+        let (out_positions, positions): (HashMap<_, _>, HashMap<_, _>) =
+            self.positions.drain().partition(|(pos, _)| inside(*pos));
         self.positions = positions;
-        out.positions = out_positions;
         let (out_by_chunk, by_chunk) = self
             .by_chunk
             .drain()
@@ -981,6 +981,11 @@ impl BlockEntities {
                 self.ordinals.insert(ticker.ordinal, index);
             }
         }
+        // 新表的槽位是压紧的，位置表里的下标跟着换成新表的下标。
+        out.positions = out_positions
+            .into_iter()
+            .filter_map(|(pos, index)| Some((pos, slot_map.get(index).copied().flatten()?)))
+            .collect();
         // 原表把拆走的槽位置空，留到下一次 begin_tick 回收（和 remove 一致）。
         for (index, &moved) in slot_map.iter().enumerate() {
             if moved.is_some() {
@@ -1037,6 +1042,155 @@ impl BlockEntities {
         // 关注关系跨区块，两边的表都保留完整登记；是否必须合并由
         // watchers_cross_chunks 报告，下一步划单元时处理。
         Ok(out)
+    }
+
+    /// 岛拆分（岛的实施计划 3.3）：拆出 `chunks` 的方块实体。和 [`Self::split_off`] 一样按
+    /// 位置拆内容、槽位和日程，原 ordinal 原样保留；不同的是：
+    ///
+    /// - 新表**不占新的单元编号**，`next_ordinal` / `next_id` 照抄原表，两边接着往上数
+    ///   （合并时撞号由 [`Self::absorb_island`] 重排）；
+    /// - 原表里搬走的 ordinal 一并删掉；
+    /// - 关注表真的分开（[`Watchers::split_off`]）：岛之间不相邻，关注关系不会跨岛
+    ///   （调试构建断言）。
+    ///
+    /// Island split: like [`Self::split_off`] but with no new unit number (the
+    /// counters are copied), the moved ordinals removed from this table, and
+    /// the watchers really split (no watch relation crosses islands).
+    pub fn split_off_island(&mut self, chunks: &BTreeSet<ChunkPos>) -> Result<Self, Busy> {
+        if !self.ready_to_move_chunks() {
+            return Err(Busy);
+        }
+        debug_assert!(
+            !self.watchers.crosses_chunks(chunks),
+            "方块实体的关注关系跨了两个岛"
+        );
+        let unit = self.unit;
+        // 先借 `split_off` 的按位置拆分，再把单元编号和计数改回岛的规则。`split_off`
+        // 要求编号不同，临时给原表换一个不会出现的编号。
+        self.unit = u64::MAX;
+        let mut out = self.split_off(chunks, unit)?;
+        self.unit = unit;
+        out.next_id = self.next_id;
+        out.next_ordinal = self.next_ordinal;
+        for ordinal in out.ordinals.keys() {
+            self.ordinals.remove(ordinal);
+        }
+        out.watchers = self.watchers.split_off(chunks);
+        Ok(out)
+    }
+
+    /// 岛合并：[`Self::split_off_island`] 的逆操作。两边拆开以后各自新登记的 ticker
+    /// 可能用了同一个 ordinal；撞了就把两边的全部 ticker 按（ordinal，吸收方在前）排好、
+    /// 从 0 重新编号——每个岛自己的运行顺序不变，新登记的仍排在最后。没撞（拆了马上
+    /// 合，或者只有一边登记过）时原样保留，结果和从没拆过逐位相同。
+    ///
+    /// Island merge: the inverse of [`Self::split_off_island`]. Tickers both
+    /// sides registered after the split may share ordinals; if so, renumber
+    /// every ticker from 0 in (ordinal, absorber first) order, which keeps each
+    /// island's run order. Without a collision nothing is renumbered.
+    pub fn absorb_island(&mut self, mut other: Self) {
+        debug_assert!(self.ready_to_move_chunks() && other.ready_to_move_chunks());
+        debug_assert_eq!(self.now, other.now, "合并前两边的时钟要先对齐");
+        let collides = other
+            .ordinals
+            .keys()
+            .any(|ordinal| self.ordinals.contains_key(ordinal));
+        if collides {
+            let mut all: Vec<(u64, u8, u64)> = self
+                .slots
+                .iter()
+                .flatten()
+                .map(|ticker| (ticker.ordinal, 0, ticker.ordinal))
+                .chain(
+                    other
+                        .slots
+                        .iter()
+                        .flatten()
+                        .map(|ticker| (ticker.ordinal, 1, ticker.ordinal)),
+                )
+                .collect();
+            all.sort_unstable();
+            let mut mine = HashMap::new();
+            let mut theirs = HashMap::new();
+            for (next, (_, side, old)) in all.into_iter().enumerate() {
+                let renumbered = (self.unit << UNIT_SHIFT) | next as u64;
+                if side == 0 {
+                    mine.insert(old, renumbered);
+                } else {
+                    theirs.insert(old, renumbered);
+                }
+            }
+            let count = (mine.len() + theirs.len()) as u64;
+            self.renumber(&mine);
+            other.renumber(&theirs);
+            self.next_ordinal = count;
+            other.next_ordinal = count;
+        }
+        let free_base = self.slots.len();
+        let other_free: Vec<usize> = other
+            .free
+            .drain(..)
+            .map(|index| free_base + index)
+            .collect();
+        let next_id = other.next_id;
+        self.absorb(other);
+        self.free.extend(other_free);
+        self.next_id = self.next_id.max(next_id);
+    }
+
+    /// 按 `map` 换掉每个 ticker 的 ordinal，日程和反查表跟着换。只在 tick 边界用。
+    fn renumber(&mut self, map: &HashMap<u64, u64>) {
+        debug_assert!(self.due.is_empty() && !self.ticking);
+        for ticker in self.slots.iter_mut().flatten() {
+            ticker.ordinal = map[&ticker.ordinal];
+        }
+        self.ordinals = self
+            .ordinals
+            .drain()
+            .filter_map(|(ordinal, index)| Some((*map.get(&ordinal)?, index)))
+            .collect();
+        self.awake = self
+            .awake
+            .iter()
+            .filter_map(|ordinal| map.get(ordinal).copied())
+            .collect();
+        self.sleeping = std::mem::take(&mut self.sleeping)
+            .into_iter()
+            .map(|(at, ordinals)| {
+                (
+                    at,
+                    ordinals
+                        .iter()
+                        .filter_map(|ordinal| map.get(ordinal).copied())
+                        .collect(),
+                )
+            })
+            .collect();
+    }
+
+    /// 测试和差分用：表的 `now`，以及按运行顺序（ordinal 升序）排好的每个 ticker 的
+    /// 位置和睡到第几刻（`None` 是醒着）。不含 ordinal 的绝对值。
+    ///
+    /// For tests: the table's `now` and every ticker in run order with its
+    /// position and wake instant (`None` when awake), without raw ordinals.
+    #[doc(hidden)]
+    pub fn schedule_rows(&self) -> (i64, Vec<(BlockPos, Option<i64>)>) {
+        let mut rows: Vec<(u64, BlockPos, Option<i64>)> = self
+            .slots
+            .iter()
+            .flatten()
+            .filter(|ticker| {
+                self.entities
+                    .get(&ticker.pos)
+                    .is_some_and(|stored| stored.id == ticker.id)
+            })
+            .map(|ticker| (ticker.ordinal, ticker.pos, ticker.wake_at))
+            .collect();
+        rows.sort_unstable_by_key(|row| row.0);
+        (
+            self.now,
+            rows.into_iter().map(|(_, pos, at)| (pos, at)).collect(),
+        )
     }
 
     /// 并回一个单元的方块实体表：按原 ordinal 把槽位接在末尾，
@@ -1368,7 +1522,11 @@ impl BlockEvents {
 
     /// 拆出 `chunks` 这些区块里排着的事件，两边都保持原来的排队顺序。
     pub fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
-        let mut out = Self::default();
+        // 拆出去的那份从原表的序号接着数：两边各自新排的事件都排在拆之前的后面。
+        let mut out = Self {
+            next_order: self.next_order,
+            ..Self::default()
+        };
         let mut rest = VecDeque::new();
         for event in std::mem::take(&mut self.queue) {
             if chunks.contains(&event.pos.chunk()) {
@@ -1376,7 +1534,6 @@ impl BlockEvents {
                 out.queue.push_back(event);
                 if let Some(seq) = self.order.remove(&event) {
                     out.order.insert(event, seq);
-                    out.next_order = out.next_order.max(seq + 1);
                 }
                 let chunk = event.pos.chunk();
                 if !out.touched.contains(&chunk) {
@@ -1730,6 +1887,85 @@ mod tests {
         merged.insert(Dummy::boxed(BlockPos::new(40, 64, 1), 5));
         let seen2: BTreeSet<u64> = merged.awake.iter().copied().collect();
         assert_eq!(seen2.len(), merged.awake.len());
+    }
+
+    /// 岛的拆合：两边按原 ordinal 各自保序；拆开以后两边都新登记 ticker（ordinal 撞号），
+    /// 合回来重排后每一边的运行顺序不变、新登记的排在最后、ordinal 全局唯一。
+    /// 拆了马上合则逐项不变（不重排）。
+    #[test]
+    fn island_split_and_absorb_keep_each_side_in_order() {
+        let mut table = BlockEntities::default();
+        // 两个区块交错登记，运行顺序和「按区块」明显不同。
+        let positions = [
+            A1,
+            B1,
+            A2,
+            B2,
+            BlockPos::new(3, 64, 3),
+            BlockPos::new(22, 64, 3),
+        ];
+        for (value, &pos) in positions.iter().enumerate() {
+            table.insert(Dummy::boxed(pos, value as i32));
+        }
+        let wanted: BTreeSet<ChunkPos> = [CHUNK_A].into_iter().collect();
+        let control_rows = table.schedule_rows();
+
+        // 拆了马上合：逐项相同，ordinal 不变。
+        let mut round_trip = table.split_off_island(&wanted).unwrap();
+        assert_eq!(round_trip.next_ordinal, table.next_ordinal);
+        assert!(
+            round_trip
+                .ordinals
+                .keys()
+                .all(|o| !table.ordinals.contains_key(o))
+        );
+        let mut merged = BlockEntities::default();
+        std::mem::swap(&mut merged, &mut table);
+        merged.absorb_island(std::mem::take(&mut round_trip));
+        assert_eq!(merged.schedule_rows(), control_rows);
+        let mut ordinals: Vec<u64> = merged.ordinals.keys().copied().collect();
+        ordinals.sort_unstable();
+        assert_eq!(ordinals, (0..6).collect::<Vec<u64>>(), "拆了马上合不重排");
+
+        // 拆开以后两边都登记新的 ticker：ordinal 撞号，合回来重排。
+        let mut island = merged.split_off_island(&wanted).unwrap();
+        // 新表的槽位压紧之后，位置表要指向新的下标（改坏确认：原来的单元拆分漏了这一步）。
+        let consistent = |table: &BlockEntities| {
+            table.positions.iter().all(|(pos, &index)| {
+                table
+                    .slots
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|ticker| ticker.pos == *pos)
+            })
+        };
+        assert!(consistent(&island) && consistent(&merged));
+        assert_eq!(island.positions.len(), 3);
+        merged.insert(Dummy::boxed(BlockPos::new(23, 64, 4), 10));
+        island.insert(Dummy::boxed(BlockPos::new(4, 64, 4), 11));
+        let rest_order = ticker_order(&mut merged);
+        let island_order = ticker_order(&mut island);
+        assert_eq!(
+            rest_order.iter().map(|row| row.1).collect::<Vec<_>>(),
+            [1, 3, 5, 10]
+        );
+        assert_eq!(
+            island_order.iter().map(|row| row.1).collect::<Vec<_>>(),
+            [0, 2, 4, 11]
+        );
+        merged.absorb_island(island);
+        let order: Vec<i32> = ticker_order(&mut merged).iter().map(|row| row.1).collect();
+        // 原来的六个按原顺序，两边新登记的在后面（同一个 ordinal 时吸收方在前）。
+        assert_eq!(order, [0, 1, 2, 3, 4, 5, 10, 11]);
+        let unique: BTreeSet<u64> = merged.ordinals.keys().copied().collect();
+        assert_eq!(unique.len(), 8);
+        merged.insert(Dummy::boxed(BlockPos::new(5, 64, 5), 12));
+        assert_eq!(
+            ticker_order(&mut merged).last().map(|row| row.1),
+            Some(12),
+            "合并后新登记的仍排在最后"
+        );
     }
 
     fn ticker_order(entities: &mut BlockEntities) -> Vec<(BlockPos, i32)> {

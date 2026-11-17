@@ -60,6 +60,10 @@ impl Default for BusyChunks {
 }
 
 impl BusyChunks {
+    pub(crate) fn quiet_ticks(&self) -> i64 {
+        self.quiet_ticks
+    }
+
     pub(crate) fn new(quiet_ticks: i64) -> Self {
         Self {
             last_active: HashMap::new(),
@@ -604,6 +608,22 @@ impl Partitioning {
                 partition
             })
             .collect();
+    }
+
+    /// 拆合时重建（岛的实施计划第 2 节第 25 行）：同样的开关和参数，统计从头开始。
+    ///
+    /// Rebuilt on split and merge: same switches and parameters, empty statistics.
+    pub(crate) fn fresh_like(&self) -> Self {
+        let mut out = Self::default();
+        if self.enabled {
+            let halos: Vec<i32> = self
+                .partitions
+                .iter()
+                .map(|partition| partition.halo)
+                .collect();
+            out.enable(&halos, self.verify, self.busy.quiet_ticks());
+        }
+        out
     }
 
     /// 一个世界刻的划分阶段。返回本刻的耗时（纳秒）。

@@ -2411,6 +2411,9 @@ mod island_pool_tests;
 #[path = "world/island_scale_tests.rs"]
 mod island_scale_tests;
 #[cfg(test)]
+#[path = "world/island_split_tests.rs"]
+mod island_split_tests;
+#[cfg(test)]
 mod loaded_tests;
 #[cfg(test)]
 #[path = "world/tests/review_probe.rs"]

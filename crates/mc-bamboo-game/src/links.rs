@@ -123,6 +123,40 @@ impl Links {
         self.depth > 0
     }
 
+    /// 岛拆分：`players` 的链路（连同还没刷出去的缓冲）搬进一份新的。只在岛停放时调用，
+    /// 这时出站信箱是关着的、空的。
+    ///
+    /// Island split: move the links of `players`, buffers included. Only while
+    /// the island is parked, when the outbound mailbox is closed and empty.
+    pub(crate) fn split_off(&mut self, players: &std::collections::BTreeSet<PlayerId>) -> Self {
+        debug_assert!(self.depth == 0 && self.mail.is_empty(), "出站信箱还开着");
+        let mut out = Self::default();
+        for id in players {
+            if let Some(link) = self.links.remove(id) {
+                out.links.insert(*id, link);
+            }
+        }
+        out
+    }
+
+    /// 岛合并：另一份的链路并进来。
+    ///
+    /// Island merge: take the other side's links.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        debug_assert!(self.depth == 0 && self.mail.is_empty(), "出站信箱还开着");
+        debug_assert!(other.depth == 0 && other.mail.is_empty(), "出站信箱还开着");
+        for (id, link) in other.links {
+            let previous = self.links.insert(id, link);
+            debug_assert!(previous.is_none(), "玩家在两个岛上");
+        }
+    }
+
+    /// 有链路的玩家，按编号升序。测试核对拆合用。
+    #[cfg(test)]
+    pub(crate) fn players(&self) -> Vec<PlayerId> {
+        self.links.keys().copied().collect()
+    }
+
     pub(crate) fn add(&mut self, id: PlayerId, sink: Box<dyn PlayerSink>) {
         let link = Link {
             sink,

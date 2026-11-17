@@ -308,6 +308,83 @@ impl Island {
         self.state = IslandState::Parked;
     }
 
+    /// 岛拆分（岛的实施计划第 6 节第 9 步）：拆出 `chunks` 和 `players`，造出编号为 `id`
+    /// 的新岛。`Region` 的部分见 [`Region::split_off_island`]；岛这一层再分区块信箱、存盘
+    /// 名单和存盘报告。只在岛停放、交回已经处理完时调用：排队的全局改动和回执这时
+    /// 一定是空的（断言）。和信箱交付前一样先把攒着的光照算完。新岛停放着，执行配置照抄。
+    ///
+    /// Island split: carve `chunks` and `players` off into a new island `id`.
+    /// See [`Region::split_off_island`] for the region; this level also splits
+    /// the chunk mailbox, the save plan and the save report. Parked islands
+    /// only, after the hand-back was processed (queued effects and acks empty).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "第 10 步由分区器在运行时驱动拆合 / step 10 drives splits and merges at run time"
+        )
+    )]
+    pub(crate) fn split_off_island(
+        &mut self,
+        id: RegionId,
+        chunks: &std::collections::BTreeSet<ChunkPos>,
+        players: &std::collections::BTreeSet<crate::inbound::PlayerId>,
+        random: crate::region::IslandRandom,
+    ) -> Result<Self, crate::region::NotReady> {
+        assert_eq!(self.state, IslandState::Parked, "只能拆停放着的岛");
+        assert!(
+            self.effects.is_empty() && self.replies.is_empty(),
+            "交回还没处理完就拆岛"
+        );
+        // 和信箱交付前一样，先把攒着的光照算完：拆合要求没有算到一半的轮次。算出来的变化
+        // 留在光照引擎里，下一刻开头照常取走、广播，所以和不拆时一样。
+        self.region.chunks.finish_light_updates();
+        let region = self.region.split_off_island(chunks, players, random)?;
+        let mut out = Self::new(id, region, self.mailbox.budget);
+        out.mailbox = self.mailbox.split_off(chunks);
+        out.save_plan = self.save_plan.split_off(chunks);
+        out.save_report = self.save_report.split_off(chunks);
+        out.entity_threads = self.entity_threads;
+        out.last_worker = self.last_worker;
+        Ok(out)
+    }
+
+    /// 岛合并：把停放着的 `other` 倒进自己。`delta = 自己的时钟 − other 的时钟`，见
+    /// [`Region::absorb_island`]。区块信箱、存盘名单和报告接在后面。
+    ///
+    /// Island merge: pour the parked `other` into this island, with
+    /// `delta = self.now − other.now` (see [`Region::absorb_island`]).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "第 10 步由分区器在运行时驱动拆合 / step 10 drives splits and merges at run time"
+        )
+    )]
+    pub(crate) fn absorb_island(&mut self, mut other: Self, delta: i64) {
+        assert!(
+            self.state == IslandState::Parked && other.state == IslandState::Parked,
+            "只能合停放着的岛"
+        );
+        assert!(
+            other.effects.is_empty() && other.replies.is_empty(),
+            "交回还没处理完就合岛"
+        );
+        self.region.chunks.finish_light_updates();
+        other.region.chunks.finish_light_updates();
+        let Self {
+            region,
+            mailbox,
+            save_plan,
+            save_report,
+            ..
+        } = other;
+        self.region.absorb_island(region, delta);
+        self.mailbox.absorb(mailbox);
+        self.save_plan.absorb(save_plan);
+        self.save_report.absorb(save_report);
+    }
+
     /// 收下邮筒里的信，按 `order` 交付、收回，回执写进 `report`。
     ///
     /// Take the posted mail, deliver and reclaim per `order`, and write the
@@ -421,6 +498,90 @@ impl Island {
         let encoded = self.follow_save_plan(plan);
         let changes = drain.then(|| self.drain_save_changes());
         SaveReport { encoded, changes }
+    }
+}
+
+impl SavePlan {
+    /// 岛拆分：名单里的位置按区块分；两个剖析指标留在原岛，是否交回改动两边相同。
+    ///
+    /// Island split: positions split by chunk; the metrics stay, `drain` is copied.
+    pub(crate) fn split_off(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Self {
+        let inside = |pos: &ChunkPos| chunks.contains(pos);
+        let (remark, kept) = std::mem::take(&mut self.remark)
+            .into_iter()
+            .partition(inside);
+        self.remark = kept;
+        let (encode, kept) = std::mem::take(&mut self.encode)
+            .into_iter()
+            .partition(inside);
+        self.encode = kept;
+        #[cfg(test)]
+        let verify = {
+            let (verify, kept) = std::mem::take(&mut self.verify)
+                .into_iter()
+                .partition(|(pos, _)| chunks.contains(pos));
+            self.verify = kept;
+            verify
+        };
+        Self {
+            remark,
+            encode,
+            metrics: None,
+            drain: self.drain,
+            #[cfg(test)]
+            verify,
+        }
+    }
+
+    /// 岛合并：名单接起来。「放回改动集合」的那份绝不能丢，否则那些区块不再判脏。
+    ///
+    /// Island merge: lists are concatenated; the remark list must never be lost.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.remark.extend(other.remark);
+        self.encode.extend(other.encode);
+        self.metrics = self.metrics.or(other.metrics);
+        self.drain |= other.drain;
+        #[cfg(test)]
+        self.verify.extend(other.verify);
+    }
+}
+
+impl SaveReport {
+    /// 岛拆分：编好的快照和交回的改动按区块分。
+    ///
+    /// Island split: encoded snapshots and handed-back changes split by chunk.
+    pub(crate) fn split_off(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Self {
+        let (encoded, kept) = std::mem::take(&mut self.encoded)
+            .into_iter()
+            .partition(|encoded| chunks.contains(&encoded.pos));
+        self.encoded = kept;
+        let changes = self.changes.as_mut().map(|changes| {
+            let (changed, kept) = std::mem::take(&mut changes.changed)
+                .into_iter()
+                .partition(|changed| chunks.contains(&changed.pos));
+            changes.changed = kept;
+            let (content, kept) = std::mem::take(&mut changes.content)
+                .into_iter()
+                .partition(|pos| chunks.contains(pos));
+            changes.content = kept;
+            SaveChanges { changed, content }
+        });
+        Self { encoded, changes }
+    }
+
+    /// 岛合并：接起来。
+    ///
+    /// Island merge: concatenated.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.encoded.extend(other.encoded);
+        match (&mut self.changes, other.changes) {
+            (Some(mine), Some(theirs)) => {
+                mine.changed.extend(theirs.changed);
+                mine.content.extend(theirs.content);
+            }
+            (mine @ None, theirs) => *mine = theirs,
+            (Some(_), None) => {}
+        }
     }
 }
 
@@ -612,6 +773,48 @@ impl ChunkMailbox {
     /// 本刻交付 / 收回的区块数。
     pub(crate) fn counters_this_tick(&self) -> (usize, usize) {
         (self.delivered, self.reclaimed)
+    }
+
+    /// 岛拆分：位置落在 `chunks` 里的待交付盒子和待收回位置搬进一份新信箱（岛的实施计划
+    /// 3.3「区块信箱里的信」）。预算照抄；本刻的计数从零开始，新岛下一刻开头本来也要重置。
+    ///
+    /// Island split: boxes and reclaims for positions in `chunks` move to a new
+    /// mailbox. The budget is copied; this tick's counters start from zero.
+    pub(crate) fn split_off(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Self {
+        let mut out = Self::new(self.budget);
+        out.budget_left = self.budget_left;
+        for pos in chunks {
+            if let Some(entry) = self.deliveries.remove(pos) {
+                out.deliveries.insert(*pos, entry);
+            }
+        }
+        let (moved, kept) = std::mem::take(&mut self.reclaims)
+            .into_iter()
+            .partition(|(pos, _)| chunks.contains(pos));
+        self.reclaims = kept;
+        out.reclaims = moved;
+        out
+    }
+
+    /// 岛合并：另一份信箱里的盒子和收回请求并进来，按原来的先后接在后面。
+    ///
+    /// Island merge: the other mailbox's boxes and reclaims are appended.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        for (pos, entry) in other.deliveries {
+            let previous = self.deliveries.insert(pos, entry);
+            debug_assert!(previous.is_none(), "两个岛的信箱里有同一个位置的盒子");
+        }
+        self.reclaims.extend(other.reclaims);
+    }
+
+    /// 待交付和待收回的位置，测试核对拆合用。
+    #[cfg(test)]
+    pub(crate) fn positions(&self) -> Vec<ChunkPos> {
+        self.deliveries
+            .keys()
+            .copied()
+            .chain(self.reclaims.iter().map(|(pos, _)| *pos))
+            .collect()
     }
 
     /// 关服收尾：信箱里没交付的盒子不再有人要。

@@ -202,6 +202,68 @@ impl TickLevels {
         self.recompute_around(changed);
     }
 
+    /// 岛拆分（岛的实施计划 3.3）：`chunks` 的档位、三个集合和还没交出去的成员变化整批
+    /// 搬进一份新表，不重算。方块逻辑看半径 1、实体看半径 2 的邻居是否已交付，所以要求
+    /// 两部分的已交付区块切比雪夫距离至少 3（调用方断言；分区器保证至少隔 8 个区块），
+    /// 这时没有一个中心的邻域跨两部分，拆前算好的集合两边都还对。
+    ///
+    /// Island split: move the tiers, the three sets and the pending membership
+    /// changes of `chunks` into a new table without recomputing. Block logic
+    /// looks at radius 1 and entities at radius 2, so the two parts' delivered
+    /// chunks must be at least 3 apart (asserted by the caller), and then no
+    /// neighbourhood spans both parts.
+    pub(crate) fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        let mut out = Self::new(self.enabled);
+        for &pos in chunks {
+            if let Some(tiers) = self.tiers.remove(&pos) {
+                out.tiers.insert(pos, tiers);
+            }
+            for (from, to) in [
+                (&mut self.blocks, &mut out.blocks),
+                (&mut self.entities, &mut out.entities),
+            ] {
+                if from.remove(&pos) {
+                    to.insert(pos);
+                }
+            }
+            for (from, to) in [
+                (&mut self.blocks_ordered, &mut out.blocks_ordered),
+                (&mut self.entities_ordered, &mut out.entities_ordered),
+                (&mut self.random, &mut out.random),
+            ] {
+                if from.remove(&pos) {
+                    to.insert(pos);
+                }
+            }
+        }
+        let (moved, kept) = std::mem::take(&mut self.block_tick_changes)
+            .into_iter()
+            .partition(|(pos, _)| chunks.contains(pos));
+        self.block_tick_changes = kept;
+        out.block_tick_changes = moved;
+        out
+    }
+
+    /// 岛合并：[`Self::split_off`] 的逆操作，同样要求两边隔开至少 3 个区块。
+    ///
+    /// Island merge: the inverse of [`Self::split_off`], with the same gap.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        debug_assert_eq!(self.enabled, other.enabled);
+        self.tiers.extend(other.tiers);
+        self.blocks.extend(other.blocks);
+        self.blocks_ordered.extend(other.blocks_ordered);
+        self.entities.extend(other.entities);
+        self.entities_ordered.extend(other.entities_ordered);
+        self.random.extend(other.random);
+        self.block_tick_changes.extend(other.block_tick_changes);
+    }
+
+    /// 已交付（有档位）的区块，按坐标升序。测试核对拆合用。
+    #[cfg(test)]
+    pub(crate) fn delivered(&self) -> BTreeSet<ChunkPos> {
+        self.tiers.keys().copied().collect()
+    }
+
     /// 只重算受影响的中心：一个位置换档或改了「已交付」状态，只会影响它自己
     /// 和把它当邻居的那些位置，方块集合半径 1、实体集合半径 2。
     fn recompute_around(&mut self, positions: Vec<ChunkPos>) {

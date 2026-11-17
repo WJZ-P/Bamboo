@@ -167,6 +167,22 @@ impl ChunkActivity {
         Self { marks, touched }
     }
 
+    /// 岛拆分：标记按区块搬，本刻清单按原来的先后分成两份（[`Self::split_off`] 给新
+    /// 单元的是「有标记的区块」，岛要的是原来那份清单的子序列）。
+    fn split_off_island(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        let mut marks = ChunkMarks::default();
+        for &chunk in chunks {
+            if let Some(mark) = self.marks.remove(&chunk) {
+                marks.insert(chunk, mark);
+            }
+        }
+        let (touched, kept) = std::mem::take(&mut self.touched)
+            .into_iter()
+            .partition(|chunk| chunks.contains(chunk));
+        self.touched = kept;
+        Self { marks, touched }
+    }
+
     fn absorb(&mut self, other: Self) {
         for (chunk, mark) in other.marks {
             let entry = self.marks.entry(chunk).or_default();
@@ -324,7 +340,9 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
 
     /// 并回另一份队列。`TickOrder` 全局唯一，直接按序插回主队列。
     fn absorb(&mut self, mut other: Self) {
+        let expected = self.queue.len() + other.queue.len();
         self.queue.append(&mut other.queue);
+        debug_assert_eq!(self.queue.len(), expected, "两份队列的排序键撞了");
         for (pos, kind) in other.scheduled {
             self.scheduled.insert((pos, kind));
         }
@@ -867,6 +885,48 @@ impl BlockTicks {
             activity,
             last_chunk: None,
             unit,
+        }
+    }
+
+    /// 岛拆分（岛的实施计划 3.3）：拆出 `chunks` 的刻，两边都保留原来的完整排序键。
+    ///
+    /// 和 [`Self::split_off`] 不同，新岛**不占新的单元编号**：单元编号和顺序号计数都
+    /// 照抄原表，两边从同一个值接着往上数。同一个位置的刻只会由当时拥有它的那个岛排，
+    /// 而拥有它的岛的计数总是不小于这个位置用过的任何顺序号（拆时照抄，合时取较大值），
+    /// 所以（时刻、优先级、顺序号、位置）合并后仍然唯一；每个岛自己的刻按排入先后
+    /// 执行，和从没拆过时在这一组区块上的先后相同。岛编号不进高位，就不会有 24 位
+    /// 用完、或者编号复用后撞号的问题。
+    ///
+    /// Island split (island plan 3.3): both sides keep the full sort keys. Unlike
+    /// [`Self::split_off`] the new island takes **no new unit number**: unit and
+    /// order counter are copied and both sides count on from the same value.
+    /// A position is only ever scheduled by the island owning it, whose counter
+    /// is never below any order used at that position, so keys stay unique
+    /// after a merge and each island runs its ticks in scheduling order.
+    pub fn split_off_island(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
+        debug_assert!(self.ready_to_move_chunks());
+        let blocks = self.blocks.split_off(chunks);
+        let fluids = self.fluids.split_off(chunks);
+        let mut ticked = HashMap::new();
+        self.ticked_entities.retain(|pos, &mut at| {
+            if chunks.contains(&pos.chunk()) {
+                ticked.insert(*pos, at);
+                false
+            } else {
+                true
+            }
+        });
+        let activity = self.activity.split_off_island(chunks);
+        self.last_chunk = None;
+        Self {
+            now: self.now,
+            next_order: self.next_order,
+            blocks,
+            fluids,
+            ticked_entities: ticked,
+            activity,
+            last_chunk: None,
+            unit: self.unit,
         }
     }
 
@@ -1698,6 +1758,45 @@ mod tests {
 
     /// 拆成两个单元再并回来，结果和从没拆过逐条相同；两边的队列顺序都等于
     /// 原全局顺序在该组区块上的子序列。
+    #[test]
+    fn island_split_keeps_each_side_in_scheduling_order_and_merges_without_collisions() {
+        let a = |x: i32| BlockPos::new(x, 64, 0);
+        let b = |x: i32| BlockPos::new(32 + x, 64, 0);
+        let mut control = BlockTicks::new();
+        let mut split = BlockTicks::new();
+        // 两组交错地排，同一时刻、同一优先级，只靠顺序号分先后。
+        for x in 0..4 {
+            for table in [&mut control, &mut split] {
+                table.schedule(a(x), 1, 2, TickPriority::Normal);
+                table.schedule(b(x), 1, 2, TickPriority::Normal);
+            }
+        }
+        let wanted: BTreeSet<ChunkPos> = [ChunkPos::new(2, 0)].into_iter().collect();
+        let mut island = split.split_off_island(&wanted);
+        assert_eq!(island.unit, split.unit, "岛不占新的单元编号");
+        assert_eq!(island.next_order, split.next_order);
+        // 拆开以后两边各自在同一格排新刻（种类不同），合回来不撞键。
+        for table in [&mut control, &mut split] {
+            table.schedule(a(0), 2, 1, TickPriority::Normal);
+        }
+        control.schedule(b(0), 2, 1, TickPriority::Normal);
+        island.schedule(b(0), 2, 1, TickPriority::Normal);
+        let side = |ticks: &BlockTicks, chunk: i32| -> Vec<(BlockPos, usize, i64)> {
+            ticks
+                .pending()
+                .filter(|tick| tick.pos.chunk().x == chunk)
+                .map(|tick| (tick.pos, tick.block, tick.trigger_tick))
+                .collect()
+        };
+        // 每一边的执行顺序都是对照在这一组区块上的子序列。
+        assert_eq!(side(&split, 0), side(&control, 0));
+        assert_eq!(side(&island, 2), side(&control, 2));
+        split.absorb(island);
+        assert_eq!(split.pending().count(), control.pending().count());
+        assert_eq!(side(&split, 0), side(&control, 0));
+        assert_eq!(side(&split, 2), side(&control, 2));
+    }
+
     #[test]
     fn split_off_and_absorb_keep_the_global_order() {
         const COUNT: usize = 2000;

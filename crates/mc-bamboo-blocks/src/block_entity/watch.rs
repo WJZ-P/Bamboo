@@ -104,6 +104,33 @@ impl Watchers {
         out
     }
 
+    /// 岛拆分：关注者在 `wanted` 里的登记整份搬出去，原表撤掉它们。两边的段集合都记成
+    /// 「变过」，实体表那份在下一次同步时收紧。调用方保证关注关系不跨两部分。
+    ///
+    /// Island split: watchers inside `wanted` move out and are dropped here.
+    /// Both sides mark their sections changed so the entity table resyncs.
+    pub(crate) fn split_off(
+        &mut self,
+        wanted: &std::collections::BTreeSet<mc_bamboo_core::ChunkPos>,
+    ) -> Self {
+        let mut moved: Vec<(BlockPos, Watch)> = self
+            .by_watcher
+            .iter()
+            .filter(|(watcher, _)| wanted.contains(&watcher.chunk()))
+            .map(|(&watcher, watch)| (watcher, watch.clone()))
+            .collect();
+        // 按位置登记，格子里关注者列表的先后不随哈希表的遍历顺序变。
+        moved.sort_unstable_by_key(|(watcher, _)| *watcher);
+        let mut out = Self::default();
+        for (watcher, watch) in moved {
+            self.unwatch(watcher);
+            out.watch(watcher, watch);
+        }
+        self.sections_changed = true;
+        out.sections_changed = true;
+        out
+    }
+
     /// 有没有关注者和它关注的格子不在 `chunks` 这同一组里。单元划分时若为真，
     /// 两侧单元不能分开跑（见 `docs/multi-region-tick-design.md` 4.8）。
     pub(crate) fn crosses_chunks(

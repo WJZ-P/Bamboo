@@ -64,7 +64,7 @@
 | 12 | 聊天、签名聊天 | 每名接收者的 `player.chat.next_index` / `cache`（`secure_chat/deliver.rs:75-82`）、发送者的链状态，都在 `Player` 上；刷屏计数在 `Player` | 岛（跟着玩家） | 发送者所在岛校验签名后，把消息作为效果交给主控，主控扇出到每个岛，**各岛给自己的玩家逐个打包**（每名接收者的索引和缓存只由他所在的岛改）；跨岛的接收者晚 ≤ 1 刻 |
 | 13 | 命令 | 全部在世界线程以 `(&mut Global, &mut Region)` 执行；控制台命令也是 | 分三类 | 见 4.4 |
 | 14 | 实体 ID | 玩家：服务端静态原子计数；非玩家：每张 `EntityStore` 从 `1 << 24` 计数 | 进程级 | 改成一个共享的原子分配器（见 8.2 第 4 条）；不存盘，所以不影响存档 |
-| 15 | 随机源 | `Region.random`（方块逻辑和天气）、`sound_seed_generator`、`loot_sequences`（`RandomSequences::new(0)`，不存盘）、`/random` 和 `/loot` 用的按世界种子建的序列（原在 `WorldState.sequences`，第 5b 步搬到 `Region.random_sequences`）；实体各自带随机源 | 岛 | 拆分时按岛的起源 section 派生，合并时留大的那个；天气另用主控的 |
+| 15 | 随机源 | `Region.random`（方块逻辑和天气）、`sound_seed_generator`、`loot_sequences`（`RandomSequences::new(0)`，不存盘）、`/random` 和 `/loot` 用的按世界种子建的序列（原在 `WorldState.sequences`，第 5b 步搬到 `Region.random_sequences`）；实体各自带随机源 | 岛 | 拆分时按岛的起源 section 派生，合并时留大的那个；天气另用主控的（第 9 步核对：取数的地方和待定的几处见 3.3「岛的随机源」） |
 | 16 | Director、票表、停放表、IO、计算池、存盘队列 | `World.host`（`DirectorHost`） | 主控 | 不变；交付 / 收回改成发到岛的信箱 |
 | 17 | 玩家票中心、移动方向、需求快照 | `World.ticket_centers` / `player_directions` / `player_demand` | 主控 | 岛每刻在交回的报告里带上「哪些玩家跨了区块」 |
 | 18 | 每区块的 tick 档位 | `Region.tick_levels: TickLevels` | 岛 | `LevelChanged` 按区块归属路由到岛 |
@@ -136,7 +136,7 @@
 
 `[事实]` 第 1 步交付的是「单元」级的拆合：`BlockTicks` / `BlockEvents` / `BlockEntities` / `RedstoneMemory` 的 `split_off` / `absorb`，加上游戏层 `Region::split_off_unit` / `absorb_unit`（容器、`block_items`、命令方块、讲台的书）。另有按区块整盒取放的 `take_columns` / `insert_column`（含 `ChunkStore` 柱、光照、实体）。
 
-拆岛的时候拿它们当零件**还缺这些**：
+拆岛的时候拿它们当零件**还缺这些**（第 9 步全部补上；「单元编号的高位」一行改了做法，见表下「第 9 步做完以后」）：
 
 | 缺什么 | 为什么 | 怎么补 |
 |---|---|---|
@@ -151,6 +151,62 @@
 | 跨区块的方块实体关注 | `watchers_cross_chunks` | 按不变量不可能跨岛；拆的时候断言 |
 
 已经够用的：四类单元表的拆合（含按入队序号稳定归并）、`RegionColumn: Send`、光照的「装进不同邻居中间」逻辑（整批搬时用不上）。
+
+#### 第 9 步做完以后（2026-11-17）：岛上每一类数据的拆合
+
+入口是 `Region::split_off_island(chunks, players, random)` / `absorb_island(other, delta)`（`region/island_split.rs`）和岛这一层的 `Island::split_off_island` / `absorb_island`（`island.rs`）。拆的时候新 `Region` 用结构体字面量逐个字段给出、合的时候把被吸收方逐个字段解构，以后给 `Region` 加字段而没决定怎么拆合，编译就不过。清单按代码重新搜过（`Region` / `Island` 的全部字段、各张表自己的全部字段、`thread_local!` / `static`、所有存绝对时刻的字段），不是照抄第 2 节。
+
+前提（断言）：只在 tick 边界、岛停放、交回已经处理完（`effects` / `replies` 为空）时做；岛这一层先把攒着的光照算完；两部分的已加载区块切比雪夫距离 ≥ 3（`ISLAND_GAP`：实体看半径 2 的邻居是否已交付，分区器给的间隔 ≥ 8）；视野不跨岛（4.2，调试构建断言：搬走的玩家只被搬走的玩家看见）。拆分时两边时钟相同，不平移；合并前被吸收方整体 `rebase_clock(delta)`（`delta = 吸收方.now − 被吸收方.now`，第 3 步的入口，现在有了正式调用者，去掉了那些 `expect(dead_code)`）。
+
+| 类别（测试里的 `IslandPart`） | 拆 | 合 | 平移 |
+|---|---|---|---|
+| 区块表 `Chunks`：方块、两层光照（引擎的存储和给别人读的一份）、版本号、原样起点、已加载登记、存盘的两个改动集合、还没发出去的光照变化 | 按区块整批搬，**不逐柱重算邻居段状态**（断言搬走的每个已加载区块的 8 个邻居要么也搬、要么没加载）；按要搬的个数预留容量；版本号原样带走，两边的版本号计数器照抄、接着往上发 | 并；断言两边不相邻、不重叠；版本号计数器取较大值、`lowest_section` 取较小值 | 无 |
+| `TickLevels`：档位、方块 / 实体两个集合和它们的有序版、随机刻集合、待交出的成员变化 | 按区块搬，不重算（隔 ≥ 3 时没有邻域跨两部分） | 并 | 无 |
+| 计划刻 `BlockTicks`：主队列和搁置表（方块、流体）、`scheduled` 去重集、移动活塞的 `lastTicked`、`ChunkActivity` 的标记和本刻清单 | 按区块；**新岛不占新的单元编号**，`unit` 和顺序号计数照抄，两边从同一个值接着往上数 | 按（时刻、优先级、顺序号、位置）归并；断言排序键不撞 | `trigger_tick`、`lastTicked`、最近排刻时刻、`now` |
+| 方块事件 `BlockEvents` | 按区块，保留入队序号 | 按序号归并 | 无 |
+| 方块实体 `BlockEntities`：内容、槽位、ordinal 运行顺序、睡眠分桶和 `wake_at`、位置表（拆完指向新表压紧后的下标）、按区块索引、关注表 `Watchers` | 按区块；`next_ordinal` / `next_id` 照抄；关注表真的分开，两边的段集合都记成「变过」 | 两边拆开以后新登记的 ticker 可能撞 ordinal：撞了就按（ordinal，吸收方在前）从 0 重新编号，每个岛自己的运行顺序不变；没撞时原样 | 表的 `now`、睡眠分桶、`wake_at`、漏斗和三种机器的 `Sleep`（第 3 步） |
+| 红石记忆 `Redstone`：比较器、书架、唱片机、合成器两张、讲台页码、火把记录 | 按位置；火把记录保持先后 | 并 | 火把时刻 |
+| 容器 `Containers`、方块组件 `BlockItems`、命令方块 `CommandBlocks` | 按位置 | 并 | 容器的 `recheck_at` |
+| 讲台 `Books` / `LecternViews`：书、打开的讲台视图、待发格子 | 书按位置；视图和待发格子按玩家（断言视图的讲台在同一边） | 并 | 待发格子的 `deliver_at` |
+| 实体表 `Entities`：主表、行号、uid 索引、按类型 / 硬碰撞两个子索引、空间网格、不认识的保留条目、关注段集合、还没交出去的位置事件 | 只扫一遍主表，搬走的行在新表重新分配行号（外面看不见）、子索引和网格在新表里建；保留条目按 `Pos`；关注段集合两边各抄一份（多出来的段只会多报一次位置事件，方块实体表再按真实关注盒筛）；位置事件按盒子所在区块；**ID 分配器共用，不重新取号** | 按 uid 升序放进来；断言共用一个分配器、uid 不重复 | 无（`age` 等都是相对量） |
+| 实体追踪 `EntityTracking` | 按实体（搬走的网络 ID）跟着走，`seen_by` 原样带走，不清空重建；实体已经没了、等着下一刻发移除包的条目跟它的观察者走 | 并；断言不重复 | 无 |
+| 待存标记 `Dirty`、待广播的光照 / 方块变化 `LightChanges` / `BlockChanges` | 按区块（后两类在 tick 边界通常是空的） | 并 | 无 |
+| 区块包缓存 `ChunkCache` | 原岛丢掉被拆走的那部分，新岛从空的开始 | 被吸收方的丢掉 | 无 |
+| 玩家表 `Players`（`Player` 整个搬：传送确认、实体同步、已发区块、聊天链和签名缓存、入站队列、玩家自己的随机源等） | 按玩家 | 并；断言一名玩家不在两个岛上 | 传送确认的 `sent_at` |
+| 玩家网格 `PlayerGrid`、出站链路 `Links`（含没刷出去的缓冲）、菜单 `Menus`、对端 IP `PeerIps`、最后操作时刻 `LastAction` | 按玩家；`Links` 断言出站信箱关着、空着 | 并（网格按玩家编号） | 无（最后操作时刻是墙上时钟毫秒） |
+| 管理名单的本刻改动 `admin_changes` | 留在原岛（全局的，由主控交回时取走） | `merge` | 无 |
+| 四个随机源 | 调用方给（`IslandRandom`），见下「岛的随机源」 | 留吸收方的，被吸收方的丢掉 | — |
+| 红石缓存、单元划分统计、剖析器 | 新岛从空的开始（照抄配置和开关） | 红石缓存在平移时已经换成空的；单元划分重建；被吸收方的剖析器丢掉 | 缓存直接换空（第 3 步） |
+| 岛的时钟、视距、人数上限、正版验证、会话公钥、聊天时钟、全局快照、区块包模板 | 照抄 | 留吸收方的 | 时钟 |
+| 岛这一层：区块信箱（待交付的盒子、待收回的位置）、存盘名单 `SavePlan`、存盘报告 `SaveReport` | 按区块；信箱预算照抄、本刻计数从零；名单的剖析指标留原岛、`drain` 照抄 | 接在后面（名单里「放回改动集合」那份绝不能丢）；信箱断言同一个位置不在两边 | 无 |
+| 岛这一层：排队的全局改动、回执、状态 | 断言为空 / 停放 | 同左 | — |
+
+**按代码重搜时补的**（第 2 节和上一张表没写）：岛这一层的区块信箱、存盘名单和存盘报告；方块实体的关注表；实体表的保留条目、关注段集合和位置事件；`TickLevels` 待交出的成员变化；光照引擎里还没发出去的变化；`ChunkActivity`；讲台的待发格子；管理名单的本刻改动；每个实体的随机源由网络 ID 派生（见下第 4 条）。核过、不用管的：线程局部的 `SLEEP_CLOCK`（每次读访问前从表的 `now` 重设）；`taken` / `taken_snapshots` / `pending` 这几张实体表的 tick 内暂存（tick 边界为空，`ready_to_move_chunks` 守着）。
+
+**改了做法的一行**：「单元编号的高位，岛编号复用这一位段」**没有照做**。计划刻和方块实体的新岛都不占新的单元编号，计数器照抄、两边接着往上数：同一个位置的刻只由当时拥有它的岛排，而它的计数总不小于这个位置用过的任何顺序号，所以合并后排序键仍然唯一、每个岛自己的先后不变；方块实体的 ordinal 两边可能撞，合并时重编号。这样不会有 24 位用完、岛编号复用后撞号的问题。两个岛之间同一（时刻、优先级）上的先后按顺序号交错，和从没拆过时不一定相同——这正是 6.2「分开跑」允许的。
+
+**还不在这一步、第 10 步接运行时要做的**：宿主里按岛分开的**邮筒**（主控已经投出、岛还没收的交付 / 收回 / 换档）拆合时要按区块改投到新岛，Director 的 `Owner::Region`、玩家 → 岛的路由表、岛的代数跟着改；拆合本身只碰岛。
+
+#### 岛的随机源（第 9 步核对，**有几处要审阅人拍板**）
+
+岛上现在的随机源和取数的地方：
+
+| 随机源 | 谁取 | 拆 / 合现在怎么做 |
+|---|---|---|
+| `Region.random`（官方 `Level.random`） | 随机刻和方块逻辑（经 `interaction/level.rs` 的 `World::random`）、方块掉落（`block_drops.rs:58`）、容器战利品的兜底（`container_loot.rs:165`）、不带序列的 `/random`（`command/random.rs:49`）、`/loot` 的兜底（`command/loot.rs:308`）、`/playsound` 的种子（`command/playsound.rs:76`）、`/weather` 的时长（`command/weather.rs:60`）、**天气推进**（`weather.rs:28`） | 新岛由调用方给；原岛接着用自己的；合并留吸收方的 |
+| `sound_seed_generator` | 音效种子（`interaction.rs:532`） | 同上 |
+| `loot_sequences`（`RandomSequences::new(0)`） | 方块掉落、容器战利品、`interaction/level.rs` 的战利品 | 同上 |
+| `random_sequences`（按世界种子建的按名序列） | 带序列的 `/random`、`/loot`（`command/random.rs`、`command/loot.rs:309`） | 同上 |
+| 每个实体的 `JavaRandom` | 实体自己的逻辑 | 跟着实体走；**种子是网络 ID ^ 常数**（`entity/store.rs:677,694`） |
+| 每名玩家的随机源 | 掉落散布、砂轮等 | 跟着玩家走 |
+
+`IslandRandom::derive(base, origin)` 给了「只由（`base`，起源 section）派生、和原岛的随机状态无关」的一种具体做法（四个源各取一条 SplitMix 流，两个按名序列沿用世界种子、`salt` 按起源 section 派生），但**拆合本身不替调用方选**：`split_off_island` 只收一份 `IslandRandom`。离线测试按 6.2 第 2 条的前提避开了随机数（`randomTickSpeed = 0`、机器不取随机数、指纹里实体的随机源和网络 ID 清零）。要定的：
+
+1. **6.2 和总设计稿 6.4 矛盾**。6.2 第 1 条要「岛的随机源只由岛自己的起源 section 派生，不依赖拆分的先后」；总设计稿 6.4 写的是拆分时「随机源按 section 坐标顺序**从原来的**派生」，结果取决于原岛的随机状态、也就是拆分的先后。只能留一个。
+2. 如果选「只由起源 section 派生」：**起源 section 是什么**没有定义（建议：拆分那一刻岛的 section 集合里按（x，z）最小的那个）；`base` 取什么（世界种子？）；**原岛要不要也重新派生**（它的起源可能变了；不重派，原岛的状态仍然依赖历史，严格说 6.2 第 1 条就不成立）；合并后的岛要不要按新起源重派。每次拆合都重派，等于每次拆合都把随机流重置一次。
+3. **按名序列**（`/random ... <序列>`）。官方是全世界一份、存在 `random_sequences.dat`。现在拆分时新岛拿到新派生的一份，玩家被拆到新岛后同名序列从别处重新开始；合并时被吸收方的序列进度丢掉。另两种做法：拆分时两边各抄一份（两个岛会出同样的数），或者把按名序列挪到主控、带序列的 `/random` / `/loot` 改成全局类命令（改 4.4 的分类）。
+4. **实体的随机源由网络 ID 派生**。网络 ID 用世界共享的分配器（第 2 步），多个岛交替取号以后，同一个实体在「拆开跑」和「一起跑」里拿到的 ID 不同，取随机数的实体行为就不同，6.2 第 1 条「网络 ID 不进指纹」不够。官方每个实体是不带种子的 `RandomSource.create()`，所以改成「生成时从岛的随机源取种子」不违反官方；但精确模式下现在的序列会变（对拍不比实体随机源，要确认）。
+5. 天气用岛的随机源：第 10 步按 8.2 第 6 条给主控自己的随机源，已经定了，这里只是再列一次。
 
 ---
 
@@ -302,7 +358,7 @@
 | 6 | ✅ **已完成（2026-11-17）**：`island.rs`（`Island`、`ChunkMailbox`、`IslandDrive::{Lockstep, Detached}`、`SavePlan` / `SaveReport`），`RegionMessage` 的交付 / 收回 / 换档和 `Event::Delivered` 带岛编号（`HOME_REGION = 0`），宿主只往按岛分开的邮筒投信、不再拿 `Region`；出站缓冲加「主控执行期间先进岛的出站信箱」（第 5b 步留下的全局类 / 控制台命令）；`WorldConfig` / `ServerConfig` 加 `island_drive`，缺省齐步，`BAMBOO_ISLAND_DRIVE` 环境变量可改。实测见表下「第 6 步的实测」。**岛的停放 / 运行所有权和区块信箱**：`Island: Send`；Director 的 `ToRegion` 改为进岛的信箱（带目标岛编号），宿主不再在 `pump` 里直接拿 `&mut Region`；存盘快照改成「主控出名单、岛编码交回」；宿主记的子项改记主控的剖析器。两种驱动：**齐步**（岛借给主控，信箱在现在的同一个时点当场应用，精确模式；这一步仍是缺省）和**分离**（信箱在岛下一刻开头应用）。所有要求逐位一致的测试、对拍、探针在这一步改成显式选齐步 | `director_host.rs` 的 `pump` / `flush_region_mail_into` / `region_message` / `poll_io` / `save_loaded_dirty` / `snapshot_all_dirty` / `shutdown`；`mc-bamboo-world/src/director/state.rs` 的 `RegionMessage`（加岛编号）；`world.rs`、`region/column.rs`、`profiler.rs`；测试、`mc-bamboo-vanilla`、`tools/probe.sh` 的模式选择 | 齐步：逐位一致；分离：交付晚一刻 | 显式齐步跑全部测试和对拍；缺省配置下全套测试和探针都过；分离模式跑 `BAMBOO_TEST_LOADED` 测试，按「交付晚一刻」调整的少数断言单独列出；`inline_and_pool_produce_identical_worlds` 两种驱动都过 | 大（~1000） | **是**（宿主的邮件路径、`RegionMessage`） |
 | 7 | ✅ **已完成（2026-11-17）**：新 `island_pool.rs`（`IslandPool`：常驻线程 `bamboo-island-N`、每条 64 MiB 栈、岛尽量回到上次的线程、`catch_unwind` 把 panic 连同岛交回）；`World.island` 改成 `IslandSlot`（`Box<Island>`，派出时整个拿走、主控这时只拿得到自己的状态）；分离驱动的一刻分三段：① 岛停放：收上一刻的信、主控收包、边界 / 天气 / 时间；② 岛在 tick 线程上跑（光照到发区块，最后照名单编存盘快照），主控同时推进 Director（只投信）；③ 岛交回：回执和排队的全局改动、延迟广播、刷出站缓冲、下一份存盘名单、`/save-all`、关服。齐步（`island_threads = 0`）照原顺序内联、一行不差。岛的 panic 在主控线程上 `resume_unwind`，走世界线程原来的崩溃路径；tick 线程全没了也当崩溃；关服请求到达时岛还在跑，再等 10 秒不回来就不等了（全局状态照常写盘、放锁、列出存不下来的区块）。剖析器加 `master_busy` / `island_busy` / `island_handoff`。`bamboo.toml` 的 `island_threads` 取代第 6 步的 `island_drive`，`BAMBOO_ISLAND_THREADS` 取代 `BAMBOO_ISLAND_DRIVE`（盖过文件和缺省、不写回文件），桌面端设置页同步加一项；**验收后缺省改成 1**。实测见表下「第 7 步的实测」。**tick 线程池和调度（仍一个岛）**：主控线程（20 TPS，`Global` + Director）+ tick 线程池；岛按截止时间派发、跑完交回；分离驱动下主控和岛并行；`bamboo.toml` 加 `island_threads`（0 = 齐步、内联）。**验收通过后缺省改成 ≥ 1（分离驱动）**，具体值按测量定。总设计稿第 12 节第 3 条（等子任务的线程只能帮子任务）这一步不涉及，岛内还没有子任务 | 新 `island_pool.rs`、`world.rs`、`island.rs`、`director_host.rs`（关服拆出不带岛的一条）、`profiler.rs`、`mc-bamboo-server/src/server.rs`、`config.rs`、`config_files.rs`、桌面端设置、`tools/probe.sh`、`mc-bamboo-vanilla` 两处显式齐步、`docs/configuration.md` | `island_threads = 0`：逐位一致；缺省（分离）：同第 6 步分离模式，另有两处同一刻内的先后变化（准则写计分板、延迟广播排到岛这一刻的包后面，同一次刷出） | 显式 `island_threads = 0` 跑全部测试和对拍；**缺省配置下全套测试和探针都过**；量「主控 ↔ 岛交接」每刻的额外耗时（目标 < 50 µs）；`islands-1` / `normal-*` 打开 / 关闭同轮对比 | 中（实际 ~1800，含测试） | 否 |
 | 8 | ✅ **已完成（2026-11-17）**。**分区器，只算不用**：主控按 3.1 维护 section 计数和岛的划分、待合并 / 待拆分，统计岛数、大小、每秒合并 / 拆分次数，断言不变量；不真的拆（运行时行为不变） | 新 `island_partition.rs` / `island_partition_stats.rs` / `world/island_partition_tests.rs`；`director_host.rs` 的 `pump`（把 `LevelChange` 和 owner 事件喂给分区器）；`mc-bamboo-world/src/director/state.rs`（`classify` 的结果对外暴露）；`profiler.rs`、`lib.rs`、`world.rs` 一行模块声明、`run-heavy.sh` 的 `ISLANDS` | 不变 | `cargo fmt` / `clippy --workspace --all-targets` 0 警告；`cargo test -p mc-bamboo-game -p mc-bamboo-world` 与 `BAMBOO_TEST_LOADED=1` 全过；`ticket-oracle` 400 场景 0 不一致、`chunk-content` 139/139、`oracle java` 10114 例 0 fail、hy4 探针 719/719；随机玩家 / 随机票 5 种子 × 400 刻逐刻断言不变量、增量 == 全量、漏合并改坏确认、拆分迟滞 200 刻与取消；`=2` 的正式 `World::tick` 全量对照不报错；7 场景统计见 `docs/profiling.md` 第 15 节：`islands-K` 稳态正好 K 个岛（25 / 36 个 section）、合并 / 拆分都是 0 / 秒，`island_partition_ns` p50 0.2–1.1 µs、合计 mean 0.29–21.2 µs/刻，`=2` 全量对照 0.19–0.24 ms/刻；3 轮 A-B-A 中位数 `islands-1` 0.851、`normal-20-walk` 1.005，在噪声内 | 中（~800） | **是** |
-| 9 | **岛的拆合（离线）**：`Region::split_off_island(chunks, players)` / `absorb_island(other, delta)`，补齐 3.3 表里缺的零件；还不在运行时调用 | `region.rs`、`region/unit.rs`（扩成岛）、`mc-bamboo-world/src/store.rs`、`mc-bamboo-blocks/src/entity/store.rs`、`tick_levels.rs`、`entity_tracking.rs`、`player_grid.rs` | 不变（运行时不调） | 拆了再合的内容指纹（方块、方块实体、计划刻含顺序、实体去掉网络 ID、容器、追踪配对）逐位相同；平移和不平移的对照；微基准：1000 个区块的拆 / 合耗时（目标 < 5 ms） | 大（~1200） | 否 |
+| 9 | ✅ **已完成（2026-11-17）**：新 `region/island_split.rs`（`Region::split_off_island(chunks, players, random)` / `absorb_island(other, delta)`、`IslandPart`、`IslandRandom`），`Island::split_off_island` / `absorb_island` 再分区块信箱、存盘名单和报告；每一类怎么拆、怎么并、要不要平移见 3.3「第 9 步做完以后」，随机源的待定事项见 3.3「岛的随机源」；`rebase_clock` 有了正式调用者，去掉 `expect(dead_code)`。实测见表下「第 9 步的实测」。**岛的拆合（离线）**：`Region::split_off_island(chunks, players)` / `absorb_island(other, delta)`，补齐 3.3 表里缺的零件；还不在运行时调用 | 实际：`region/island_split.rs`（新）、`region.rs`、`island.rs`、`mc-bamboo-world` 的 `store.rs` / `light/{mod,level,storage}.rs`、`mc-bamboo-blocks` 的 `entity/store.rs` / `ticks.rs` / `block_entity.rs` / `block_entity/watch.rs` / `level.rs`、`tick_levels.rs`、`entity_tracking.rs`、`entity_sync.rs`、`player_grid.rs`、`links.rs`、`lectern.rs`、`chunk_encoding/cache.rs`、`region/dirty.rs`、`region/partition.rs`、`profiler.rs`、新测试 `world/island_split_tests.rs`；没动 `region/unit.rs`（单元拆合原样保留，岛的拆合另起一套入口） | 不变（运行时不调） | 拆了再合的内容指纹（方块、方块实体、计划刻含顺序、实体去掉网络 ID、容器、追踪配对）逐位相同；平移和不平移的对照；微基准：1000 个区块的拆 / 合耗时（目标 < 5 ms） | 大（实际 ~3400，含测试） | 否 |
 | 10 | **多岛上线（验收后缺省开）**：分区器驱动真实的拆合；交付按岛路由、合并后再交付；进服 / 离开 / 跨岛 `/tp` 走离境和到达；聊天、全局帧、跨岛命令扇出；`bamboo.toml` 加 `islands`，**这一步验收通过后缺省改成 `true`**，`islands = false` 保留给对拍和测试 | `world.rs`、`director_host.rs`、`island_partition.rs`、`island_pool.rs`、`command/teleport.rs`、`secure_chat/deliver.rs`、`chat.rs`、`command/*`、`docs/configuration.md` | 打开时：第 13 节差异清单新增的几条 | 第 6.2 节的多岛测试；**缺省配置（多岛开）下全套测试和探针都过**，显式精确模式下逐位一致照旧；`islands-K` 和第 14 节基线对比 | 大（~1500） | **是**（`Deliver` 的目标岛） |
 | 11 | **长时间压力验收和调参**：长时间压力、合并拆分频率和等待时间（总设计稿 17.2）、分区器迟滞参数和 `island_threads` 的缺省值按测量调整、把差异写进第 13 节。缺省值已在第 7、10 步改过，这一步不再改开关 | 文档、`tools/mc-bamboo-loadtest`、必要时 `config_files.rs` 的缺省值 | — | 见 6.2 | 小 | 否 |
 
@@ -321,6 +377,8 @@
 稳态布局里合并 / 拆分都是 0 次，所以「迟滞参数在真实玩家轨迹上合不合适」这个问题
 还没答，留给第 11 步的长时间压力；模糊测试（随机移动玩家 / 随机挂票）和 `=2`
 的正式 `World::tick` 全量对照覆盖的是分区器自身的不变量和增量正确性。
+
+**第 9 步的实测（2026-11-17）**：`fmt --check`、`clippy --workspace --all-targets` 0 警告；`cargo test -p mc-bamboo-game -p mc-bamboo-world -p mc-bamboo-blocks` 全过（game 1013 个 + 集成 11 个、blocks 576 个、world 169 个）；`BAMBOO_TEST_LOADED=1` 显式 `BAMBOO_ISLAND_THREADS=0` 和缺省配置各 1013 / 0 失败；`entity-oracle` 31 例 709 步 0 不一致、`machine` 10 轮 1070 刻 0 不一致、`oracle java --weather clear` 10114 例 9823 过 / 0 fail / 291 排除；hy4 探针 719/719、正常关服、`world-dir` 通过。**离线测试**（`world/island_split_tests.rs`。场景：三组相隔 24–27 个区块的内容，每组一到两名玩家、漏斗链、在烧的熔炉、互相盯着的侦测器、流动的水、掉落的沙子、地上的物品、讲台、命令方块、带组件的箱子、红石记忆、等着重查的容器、打开的菜单、待发的讲台格子、没确认的传送；`randomTickSpeed = 0`，机器不取随机数；一刻用分离驱动在 tick 线程上跑的同一段 `run_detached_island`）：① 拆了马上合回来：4 个种子 × 30 刻里随机 3 个时刻、随机的组，和从没拆过的世界逐位相同（含网络 ID、版本号、跨组的先后），之后每刻的指纹和每名玩家收到的字节也逐位相同；② 拆开、两半各自跑 5–34 刻再合回来（中途两边各新放一个漏斗、在拆分前三条远期刻的同一（时刻、优先级）上各排三条，逼出 ordinal 撞号和顺序号交错）：4 个种子，合并那一刻和之后 20 刻每组的内容逐刻等于从没拆过（实体不比网络 ID 和由它派生的随机源，不比跨组的先后）；③ 合并时两边时钟差 3 / 17 刻，结果等于时钟相同；④ **改坏确认**：漏平移 7 类里任何一类（岛的时钟、计划刻、红石火把记录、方块实体、容器重查、讲台待发、传送确认）都被抓到；拆分时漏搬 23 类 `IslandPart` 里任何一类，按位置 / 按玩家的核对都报出那一类；岛这一层的区块信箱、存盘名单、存盘报告拆完手动塞回原岛，也都报出来。各张表自己的单元测试另测了按 uid / 入队序号保序、子索引一致、位置表指向压紧后的下标（原来的单元拆分漏了这一步，顺手修了）。**微基准**（`island_split_and_merge_bench`，release：2000 个已加载区块拆走 1000 个再合回，每个区块有改过的方块、4 条计划刻、一个漏斗方块实体、两个容器、一个地上的物品；每遍 7 轮取中位数，跑 7 遍）：拆 3.7–4.2 ms（单轮最大 6.4 ms，是每遍的第一轮）、合 1.7–1.9 ms，中位数达到 < 5 ms 的目标。拆的耗时大头：区块表 ≈ 1.1 ms、计划刻 ≈ 0.8 ms、方块实体和红石 ≈ 0.65 ms、实体 ≈ 0.4 ms、容器 ≈ 0.3 ms、`TickLevels` ≈ 0.25 ms；区块表和光照按要搬的个数预留容量省了约 15%（4.7–4.9 → 3.9–4.2 ms）。按位置的几张 `BTreeMap`（容器、组件、命令方块等）拆的时候要扫整张表，耗时和岛的总大小成正比、不只和拆走的部分成正比；拆分本来就有 200 刻迟滞，先不改。性能同轮 A-B-A（`main` 合并点 `a8d5cbfa` 对第 9 步末，缺省配置，3 轮、每次 20 秒，逐轮 `tick_total` 均值比 B / A）：`islands-1` 0.847 / 0.997 / 1.036、`normal-20-walk` 1.025 / 1.019 / 0.991，负载 3–14，在噪声内（运行时没有调用拆合）。
 
 ### 6.1 单岛阶段（第 0–7 步）怎么验
 

@@ -705,6 +705,11 @@ impl EntityStore {
         if !self.watched_sections.is_empty() {
             self.note_entity_change(row.public.bounding_box());
         }
+        self.insert_row_quietly(row);
+    }
+
+    /// 放进一行，不报告位置事件：岛的拆合只是换了张表，实体没有出现也没有动。
+    fn insert_row_quietly(&mut self, row: EntityRow) {
         let row_index = self.allocate_slot();
         self.index_sub(row.public.uid, &row.public);
         self.index.insert(row.public.uid, row_index);
@@ -1027,6 +1032,89 @@ impl EntityStore {
         Some(ChunkEntities { rows, preserved })
     }
 
+    /// 岛拆分（岛的实施计划 3.3「实体表整批搬」）：把位置落在 `chunks` 里的实体整批搬进
+    /// 一张新表，只扫一遍主表，和要搬几个区块无关。两边都按 uid 保序；搬过去的行在新表
+    /// 里重新分配行号（行号只是槽位，外面看不见）。ID 分配器是同一个，不重新取号。
+    /// 不认识的保留条目按 `Pos` 分；关注段集合两边各抄一份（多出来的段只会多报一次
+    /// 位置事件，方块实体表按真实的关注盒再筛）；还没交出去的位置事件按盒子所在区块分。
+    /// 只在 tick 边界调用，tick 中途返回 [`Busy`]。
+    ///
+    /// Island split (island plan 3.3): move every entity whose position lies in
+    /// `chunks` into a new store in one pass over the table, independent of the
+    /// number of chunks. Both sides keep uid order; moved rows get new slots in
+    /// the new store. The id allocator is shared, nothing is re-allocated.
+    /// Preserved entries split by `Pos`; watched sections are copied to both
+    /// sides (a superset only reports extra events that the block-entity table
+    /// filters); undelivered wake events split by chunk. Tick boundary only.
+    pub fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Result<Self, Busy> {
+        if !self.ready_to_move_chunks() {
+            return Err(Busy);
+        }
+        debug_assert!(self.pending.is_empty(), "tick 边界上没有待并入的实体");
+        let moved: Vec<EntityUid> = self
+            .index
+            .iter()
+            .filter(|(_, row)| {
+                self.slots[**row]
+                    .as_ref()
+                    .is_some_and(|entry| chunks.contains(&entry.public.chunk_position()))
+            })
+            .map(|(&uid, _)| uid)
+            .collect();
+        let mut out = Self {
+            ids: self.ids.clone(),
+            watched_sections: self.watched_sections.clone(),
+            ..Self::default()
+        };
+        for uid in moved {
+            self.unindex_sub(uid);
+            let row = self.index.remove(&uid).expect("just indexed");
+            let entry = self.slots[row].take().expect("indexed row is live");
+            self.grid_remove(row, &entry.public);
+            self.free.push(row);
+            out.insert_row_quietly(entry);
+        }
+        let (moved, kept): (Vec<Tag>, Vec<Tag>) = std::mem::take(&mut self.preserved)
+            .into_iter()
+            .partition(|tag| chunks.contains(&preserved_chunk(tag)));
+        self.preserved = kept;
+        out.preserved = moved;
+        let (moved, kept): (Vec<Aabb>, Vec<Aabb>) = std::mem::take(&mut self.wake_events)
+            .into_iter()
+            .partition(|area| {
+                chunks.contains(&ChunkPos::new(
+                    (area.min_x.floor() as i32) >> 4,
+                    (area.min_z.floor() as i32) >> 4,
+                ))
+            });
+        self.wake_events = kept;
+        out.wake_events = moved;
+        Ok(out)
+    }
+
+    /// 岛合并：[`Self::split_off`] 的逆操作。另一张表的实体按 uid 升序放进来，行号
+    /// 重新分配；两张表必须共用同一个 ID 分配器。只在 tick 边界调用。
+    ///
+    /// Island merge: the inverse of [`Self::split_off`]. The other table's rows
+    /// go in by ascending uid with new slots; both tables share one allocator.
+    pub fn absorb(&mut self, mut other: Self) {
+        debug_assert!(self.ready_to_move_chunks() && other.ready_to_move_chunks());
+        debug_assert!(other.pending.is_empty(), "tick 边界上没有待并入的实体");
+        debug_assert!(
+            self.ids.same_counter(&other.ids),
+            "合并的两张实体表必须共用一个 ID 分配器"
+        );
+        let rows: Vec<usize> = other.index.values().copied().collect();
+        for row in rows {
+            let entry = other.slots[row].take().expect("indexed row is live");
+            debug_assert!(!self.index.contains_key(&entry.public.uid), "实体 ID 重复");
+            self.insert_row_quietly(entry);
+        }
+        self.preserved.append(&mut other.preserved);
+        self.watched_sections.extend(other.watched_sections);
+        self.wake_events.append(&mut other.wake_events);
+    }
+
     /// 把盒子里的实体放回表里。调用方保证表里已经没有这个区块的实体。
     /// 不认识的实体类型不进表，只在 `take_chunk` 时原样带回盒子。
     pub fn insert_chunk(&mut self, entities: ChunkEntities) {
@@ -1049,6 +1137,12 @@ impl EntityStore {
         self.preserved = kept;
         taken
     }
+}
+
+/// 保留条目所在的区块，按它的 `Pos`；缺失时按原点算，和 [`EntityStore::take_chunk`] 一致。
+fn preserved_chunk(tag: &Tag) -> ChunkPos {
+    let [x, _, z] = crate::archive::tag::vec3(tag, "Pos", [0.0; 3]);
+    ChunkPos::new(x.floor() as i32 >> 4, z.floor() as i32 >> 4)
 }
 
 /// 一个盒子可能跨多个 16³ 段，每一段都要登记，范围查询才不会漏。
@@ -1447,6 +1541,55 @@ mod tests {
     ///
     /// Two stores sharing one allocator never collide when they alternate,
     /// and together they cover one contiguous run of ids.
+    /// 岛的整批拆合：按区块分走、两边按 uid 保序、子索引和空间查询都对；共用分配器，
+    /// 拆开以后两边新生成的实体不撞号；合回来和从没拆过逐项相同。
+    #[test]
+    fn an_island_split_moves_whole_chunks_and_merges_back() {
+        let ids = EntityIds::new();
+        let mut store = EntityStore::with_ids(ids.clone());
+        // 两个区块交错生成。
+        for step in 0..6 {
+            let x = if step % 2 == 0 {
+                1.5 + f64::from(step)
+            } else {
+                40.5 + f64::from(step)
+            };
+            store.spawn(item_at(x));
+        }
+        let before: Vec<Entity> = store.iter().collect();
+        let wanted: BTreeSet<ChunkPos> = [ChunkPos::new(2, 0)].into_iter().collect();
+        let mut island = store.split_off(&wanted).unwrap();
+        assert!(store.sub_index_matches() && island.sub_index_matches());
+        let rest: Vec<i32> = store.ids();
+        let moved: Vec<i32> = island.ids();
+        assert_eq!(rest.len() + moved.len(), before.len());
+        assert!(
+            moved
+                .iter()
+                .all(|&uid| island.get(uid).unwrap().position.x > 32.0)
+        );
+        assert!(rest.windows(2).all(|pair| pair[0] < pair[1]));
+        let area = Aabb::new(32.0, -100.0, -10.0, 64.0, 400.0, 10.0);
+        let mut found = Vec::new();
+        island.for_each_in(area, &mut |public| found.push(public.uid));
+        assert_eq!(found, moved);
+        let mut none = Vec::new();
+        store.for_each_in(area, &mut |public| none.push(public.uid));
+        assert!(none.is_empty());
+
+        // 两边各生成一个：共用分配器，不撞号。
+        let left = store.spawn(item_at(3.5));
+        let right = island.spawn(item_at(45.5));
+        assert_ne!(left, right);
+        store.remove(left);
+        island.remove(right);
+
+        store.absorb(island);
+        assert!(store.sub_index_matches());
+        let after: Vec<Entity> = store.iter().collect();
+        assert_eq!(after, before);
+    }
+
     #[test]
     fn two_stores_sharing_an_allocator_never_collide() {
         let ids = EntityIds::new();
