@@ -199,8 +199,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             chunks,
             entities,
             block_entities,
-            block_rules,
-            world_border,
+            global,
             tick_levels,
             profiler,
             ..
@@ -213,7 +212,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
         let facts = ViewFacts {
             min_y: mc_bamboo_world::MIN_Y,
             max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
-            rules: *block_rules,
+            rules: global.block_rules,
             ..ViewFacts::default()
         };
         let view = crate::entity_view::EntityBlockView::new(crate::entity_view::ReadOnlyWorld {
@@ -224,7 +223,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             moving_piston_shapes: block_entity_shapes.moving_piston_shapes,
             shulker_box_shapes: block_entity_shapes.shulker_box_shapes,
             hopper_positions,
-            world_border: world_border.clone(),
+            world_border: global.world_border.clone(),
         });
         let executor = ScopedThreads { threads };
         let computed = compute(&view, entities, &executor);
@@ -251,7 +250,7 @@ pub(crate) fn run_random_ticks(region: &mut Region) {
     let chunks = random_ticking_chunks(region);
     // 官方 `tickSpawningChunk` 只在下雨且打雷时调 `tickThunder`；晴天一个随机数都不取。
     // 这里先按天气快照短路，避免每 tick 为每个区块建一次方块世界。
-    if region.block_weather.is_raining() && region.block_weather.is_thundering() {
+    if region.global.block_weather.is_raining() && region.global.block_weather.is_thundering() {
         for chunk in &chunks {
             let (mut level, ticks) = region.block_level();
             let outcome = mc_bamboo_blocks::tick_thunder(&mut level, ticks, *chunk);
@@ -259,7 +258,7 @@ pub(crate) fn run_random_ticks(region: &mut Region) {
         }
     }
     for chunk in chunks {
-        let speed = region.block_rules.random_tick_speed;
+        let speed = region.global.block_rules.random_tick_speed;
         let (mut level, ticks) = region.block_level();
         // `ServerChunkCache.tickChunks` 把 `GameRules.RANDOM_TICK_SPEED` 传给 `tickChunk`。
         //
@@ -768,7 +767,7 @@ pub(crate) fn on_use_item_on(region: &mut Region, id: PlayerId, packet: UseItemO
     // Official `handleUseItemOn`'s `level.mayInteract(player, pos)`: outside the
     // border the click is refused with `sendBuildLimitMessage(true, maxY)`, yet both
     // block updates are still sent.
-    if !region.world_border.is_within_bounds_pos(pos) {
+    if !region.global.world_border.is_within_bounds_pos(pos) {
         send_build_limit(&mut region.links, id, TOO_HIGH, MAX_Y);
         send_current_block(region, id, pos);
         send_current_block(region, id, pos.relative(face));

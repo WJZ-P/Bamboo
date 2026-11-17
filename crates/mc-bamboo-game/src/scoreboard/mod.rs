@@ -143,7 +143,21 @@ impl Team {
 /// 官方 `ServerScoreboard`。重启后是空的。
 ///
 /// Official `ServerScoreboard`. A restart leaves it empty.
-#[derive(Debug, Default)]
+/// 官方 `ServerPlayer.doTick` 的六个只读准则和 Bamboo 用的玩家初值，顺序是 health、
+/// food、air、armor、xp、level。
+///
+/// The six read-only criteria from official `ServerPlayer.doTick` with the player
+/// defaults Bamboo uses: health, food, air, armor, xp, level.
+const CRITERIA_VALUES: [(&str, i32); 6] = [
+    ("health", 20),
+    ("food", 20),
+    ("air", 300),
+    ("armor", 0),
+    ("xp", 0),
+    ("level", 0),
+];
+
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Scoreboard {
     objectives: Vec<Objective>,
     /// 玩家名到各目标的分数。没有分数的玩家不留在这里。
@@ -832,14 +846,6 @@ impl Scoreboard {
     /// hunger, air, armor or experience system, so each uses the player's default value;
     /// the order matches official: health, food, air, armor, xp, level.
     pub(crate) fn tick_criteria(&mut self, region: &mut Region) {
-        const VALUES: [(&str, i32); 6] = [
-            ("health", 20),
-            ("food", 20),
-            ("air", 300),
-            ("armor", 0),
-            ("xp", 0),
-            ("level", 0),
-        ];
         let names: Vec<String> = region
             .players
             .values()
@@ -852,7 +858,7 @@ impl Scoreboard {
             // Official fields start at `Float.MIN_VALUE` / `Integer.MIN_VALUE`, so every
             // criterion is written once on the first tick and never again while unchanged.
             let recorded = self.recorded.entry(name.clone()).or_insert([i32::MIN; 6]);
-            let changed: Vec<(usize, i32)> = VALUES
+            let changed: Vec<(usize, i32)> = CRITERIA_VALUES
                 .iter()
                 .enumerate()
                 .filter(|(index, (_, value))| recorded[*index] != *value)
@@ -869,7 +875,7 @@ impl Scoreboard {
                 display: Some(self.format_player_name(&name)),
             };
             for (index, value) in changed {
-                let criteria = VALUES[index].0;
+                let criteria = CRITERIA_VALUES[index].0;
                 let objectives: Vec<String> = self
                     .objectives
                     .iter()
@@ -881,6 +887,23 @@ impl Scoreboard {
                 }
             }
         }
+    }
+
+    /// [`tick_criteria`](Self::tick_criteria) 这一刻有没有要写的：只读，供调用方决定
+    /// 要不要拿可写的计分板。
+    ///
+    /// Whether [`tick_criteria`](Self::tick_criteria) has anything to write this
+    /// tick. Read-only, so the caller can decide whether to take the scoreboard
+    /// mutably.
+    pub(crate) fn criteria_pending(&self, region: &Region) -> bool {
+        region.players.values().any(|player| {
+            self.recorded.get(&player.name).is_none_or(|recorded| {
+                CRITERIA_VALUES
+                    .iter()
+                    .zip(recorded)
+                    .any(|((_, value), recorded)| recorded != value)
+            })
+        })
     }
 
     fn forget_criteria(&mut self, name: &str) {

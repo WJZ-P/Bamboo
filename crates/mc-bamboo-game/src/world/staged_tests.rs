@@ -128,7 +128,7 @@ fn generated_cells_with_seed(
     // random ticks spread grass onto the dirt under trees and decay leaves out of
     // reach of a log, while the two runs see different numbers of ticks. Turn random
     // ticks off for the comparison.
-    world.island.region.block_rules.random_tick_speed = 0;
+    disable_random_ticks(&mut world);
     for &pos in positions {
         world.apply_ticket(TicketOp::Forced { pos, forced: true });
     }
@@ -357,7 +357,7 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
         ..WorldConfig::default()
     };
     let mut world = World::new(config, receiver);
-    world.island.region.block_rules.random_tick_speed = 0;
+    disable_random_ticks(&mut world);
     world.master.host.set_reclaim_delay(0);
     let positions: Vec<ChunkPos> = (0..5)
         .flat_map(|x| (0..5).map(move |z| ChunkPos::new(x, z)))
@@ -423,4 +423,15 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
         "leftover generation state: partials {partials:?}, feature deltas {deltas:?}, \
          light {light:?}, structures {structures:?}"
     );
+}
+
+/// 关掉随机刻：改权威的游戏规则再发布，快照每刻都会从 `Global` 重发。
+/// Turn random ticks off on the authoritative rules; the snapshot is republished every tick.
+fn disable_random_ticks(world: &mut World) {
+    world
+        .master
+        .global
+        .rules_mut()
+        .assign(mc_bamboo_data::gamerules::RANDOM_TICK_SPEED, "0");
+    world.master.global.publish(&mut world.island.region);
 }

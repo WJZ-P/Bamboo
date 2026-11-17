@@ -114,7 +114,7 @@ mod tests {
     /// One level-4 online op that can receive the console command's `chat.type.admin`.
     fn world_with_op() -> (Global, Region, Sink) {
         let mut region = Region::new(2, 20, false);
-        region.send_command_feedback = true;
+        region.global.send_command_feedback = true;
         region.broadcast_console_to_ops = true;
         let id = PlayerId(1);
         let mut player = Player::new(

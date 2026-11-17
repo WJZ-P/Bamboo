@@ -435,6 +435,7 @@ impl World {
         // all startup data is applied so a restored world time is picked up.
         let time = world.master.global.time();
         world.island.region.start_clock(time);
+        world.master.global.publish(&mut world.island.region);
         world.island.region.profiler.on_world_start();
         if world.island.region.profiler.partition_enabled() {
             let verify = world.island.region.profiler.partition_verify();
@@ -625,7 +626,13 @@ impl World {
     #[doc(hidden)]
     pub fn force_chunks_unpaced(&mut self, positions: &[mc_bamboo_core::ChunkPos]) {
         use mc_bamboo_world::director::TicketOp;
-        self.island.region.block_rules.random_tick_speed = 0;
+        // 改权威副本再发布：快照每刻都会从 `Global` 重新发布。
+        // Change the authoritative copy and publish: the snapshot is republished every tick.
+        self.master
+            .global
+            .rules_mut()
+            .assign(mc_bamboo_data::gamerules::RANDOM_TICK_SPEED, "0");
+        self.master.global.publish(&mut self.island.region);
         self.apply_ticket_ops(
             positions
                 .iter()
@@ -785,6 +792,9 @@ impl World {
                 (hooks.setup)(&mut bench)
             }
         };
+        // 压测回调可能经命令改了 `Global`。
+        // The hooks may have changed `Global` through a command.
+        self.master.global.publish(&mut self.island.region);
         if finished {
             self.master.bench_ready = true;
             tracing::info!("bench scenario ready");
@@ -820,6 +830,9 @@ impl World {
             error!("chunk compute thread stopped unexpectedly; shutting down");
             return self.shut_down();
         }
+        // 每刻开头给岛发布一份全局快照（岛的实施计划第 6 节第 5a 步）。
+        // Publish this tick's global snapshot to the island (island plan, step 5a).
+        self.master.global.publish(&mut self.island.region);
         self.process_inbox()?;
         // 压测输入跑在收包阶段，等价于一名管理员在世界线程上翻拉杆 / 补物品；
         // 它的耗时记进 `inbox`，不进后面三个方块侧阶段。默认配置下这里是空操作。
@@ -852,14 +865,16 @@ impl World {
         // After the lerp step, publish the new snapshot; this tick's block logic and
         // entity collisions read it.
         self.master.global.tick_world_border();
-        self.master.global.publish_border(&mut self.island.region);
+        self.master.global.publish(&mut self.island.region);
         // 官方 `ServerLevel.tick` 的天气阶段在 `tickTime` 之前；广播帧排在时间包之前发出。
         let weather = weather::advance(&mut self.master.global, &self.island.region);
         if !weather.is_empty() {
             self.island.region.links.broadcast(&weather);
         }
-        weather::sync(&self.master.global, &mut self.island.region);
         self.master.global.advance_time();
+        // 天气和时间推进完再发布一次，这一刻的方块逻辑读它。
+        // Publish again after weather and time; this tick's block logic reads it.
+        self.master.global.publish(&mut self.island.region);
         self.island.region.advance_tick();
         self.island.region.profiler.lap(Phase::WeatherAndTime);
         // 划分阶段串行、只算不用；三个阶段的执行顺序和行为不变。读岛的时钟。
@@ -915,15 +930,25 @@ impl World {
         lectern::tick(&mut self.island.region);
         chat::tick_spam_throttlers(&mut self.island.region);
         crate::drops::tick_drop_throttle(&mut self.island.region);
-        crate::command::admin::tick_idle(&mut self.master.global, &mut self.island.region);
+        crate::command::admin::tick_idle(&mut self.island.region);
         // 官方 `ServerPlayer.doTick` 的六个只读准则。Bamboo 用玩家初值，进服后第一刻各写一次。
+        // 先只读地看一眼有没有要写的，免得每刻都让计分板和快照分家复制一份。
         //
         // The six read-only criteria from official `ServerPlayer.doTick`. Bamboo uses the
-        // player defaults and writes each once after join.
-        self.master
+        // player defaults and writes each once after join. Check read-only first so the
+        // scoreboard is not copied away from the snapshot every tick.
+        if self
+            .master
             .global
-            .scoreboard_mut()
-            .tick_criteria(&mut self.island.region);
+            .scoreboard()
+            .criteria_pending(&self.island.region)
+        {
+            self.master
+                .global
+                .scoreboard_mut()
+                .tick_criteria(&mut self.island.region);
+            self.master.global.publish(&mut self.island.region);
+        }
         self.island.region.profiler.lap(Phase::PlayerMisc);
 
         entity_sync::update_derived_state(&mut self.island.region);
@@ -1096,6 +1121,11 @@ impl World {
                 }
                 Inbound::Shutdown => return self.shut_down(),
             }
+            // 只有一个岛时消息处理会直接改 `Global`：每条处理完重发快照，
+            // 下一条读到的和直接读 `Global` 一样（第 5b 步改成效果消息后由端口负责）。
+            // With one island, handlers still write `Global` directly: republish
+            // after each message so the next one reads exactly what `Global` holds.
+            self.master.global.publish(&mut self.island.region);
         }
         if disconnected {
             return self.shut_down();
@@ -1171,7 +1201,7 @@ impl World {
         let game_mode = restored
             .as_ref()
             .map(|data| game_mode_from_id(data.game_type))
-            .unwrap_or(self.master.global.state().default_game_mode);
+            .unwrap_or(self.island.region.global.default_game_mode);
         let join_spawn = match &restored {
             Some(data) => RespawnData::of(
                 BlockPos::new(
@@ -1182,7 +1212,7 @@ impl World {
                 data.rotation[0],
                 data.rotation[1],
             ),
-            None => self.master.global.state().spawn,
+            None => self.island.region.global.spawn,
         };
         let uuid = request.uuid;
         let entry = RosterEntry {
@@ -1196,7 +1226,9 @@ impl World {
             chat_session: None,
         };
 
-        let difficulty_frames = self.master.global.difficulty_frames();
+        // 进服序列里读的世界设置都来自岛上的快照（岛的实施计划 4.1：进服由岛做）。
+        // The join sequence reads world settings from the island's snapshot (plan 4.1).
+        let difficulty_frames = self.island.region.global.difficulty_frames();
         let spawn = join_spawn.pos;
         let spawn_chunk = ChunkPos::new(spawn.x >> 4, spawn.z >> 4);
         self.apply_ticket_ops([TicketOp::PlayerMoved {
@@ -1209,7 +1241,7 @@ impl World {
                 game_mode,
                 difficulty_frames: &difficulty_frames,
                 spawn: join_spawn,
-                hashed_seed: self.master.global.state().hashed_seed(),
+                hashed_seed: self.island.region.global.hashed_seed(),
                 permission_level,
                 is_op,
             },
@@ -1252,14 +1284,7 @@ impl World {
         // `set_default_spawn_position` carries the world spawn from `LevelData`, not
         // the saved player position. The player's position comes from
         // `JoinSettings.spawn` above (the save), and the chunk center from `player.chunk_pos()`.
-        self.island.region.start_loading_chunks(
-            id,
-            self.master.global.time(),
-            self.master.global.clock(),
-            self.master.global.state().spawn,
-            self.master.global.state().weather,
-            self.master.global.world_border(),
-        );
+        self.island.region.start_loading_chunks(id);
 
         // 物品栏 / 末影箱 / 朝向等运行时字段在玩家建好之后写回去。
         if let Some(data) = &restored
@@ -1544,7 +1569,6 @@ impl World {
                     region,
                     player,
                     chat::ChatMessage {
-                        global: &self.master.global,
                         text: message,
                         signature: signature.map(|bytes| *bytes),
                         time_millis,
@@ -1566,11 +1590,7 @@ impl World {
                 if action
                     == mc_bamboo_protocol::packet::play::ClientCommandKind::RequestGameRuleValues
                 {
-                    crate::gamerules::on_request_values(
-                        &self.master.global,
-                        &mut self.island.region,
-                        player,
-                    );
+                    crate::gamerules::on_request_values(&mut self.island.region, player);
                 } else {
                     chat::on_client_command(&mut self.island.region, player, action);
                 }

@@ -1646,7 +1646,7 @@ fn d6_saves_a_chunk_with_only_a_container_edit() {
 #[test]
 fn save_all_sends_success_after_handoff() {
     let mut server = Harness::new_loaded(2);
-    server.world.island.region.send_command_feedback = true;
+    server.world.island.region.global.send_command_feedback = true;
     let client = server.join("Admin");
     server.tick();
     client.take_frames();
@@ -1678,7 +1678,7 @@ fn save_all_flush_success_waits_for_the_io_barrier() {
     let dir = WorldDir::new(&tmp.0);
     dir.create_layout().unwrap();
     let mut server = Harness::new_loaded(2);
-    server.world.island.region.send_command_feedback = true;
+    server.world.island.region.global.send_command_feedback = true;
     let client = server.join("Admin");
     server.tick();
     client.take_frames();
@@ -1726,7 +1726,7 @@ fn non_flush_save_all_with_io_waits_for_the_mailbox_barrier() {
     let dir = WorldDir::new(&tmp.0);
     dir.create_layout().unwrap();
     let mut server = Harness::new_loaded(2);
-    server.world.island.region.send_command_feedback = true;
+    server.world.island.region.global.send_command_feedback = true;
     let client = server.join("Admin");
     server.tick();
     client.take_frames();
@@ -1779,7 +1779,7 @@ fn save_all_reports_failed_when_the_io_write_fails() {
     }
 
     let mut server = Harness::new_loaded(2);
-    server.world.island.region.send_command_feedback = true;
+    server.world.island.region.global.send_command_feedback = true;
     let client = server.join("Admin");
     server.tick();
     client.take_frames();

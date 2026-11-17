@@ -354,7 +354,7 @@ fn format_fixed(value: f64, digits: usize) -> String {
 /// After a border change: publish the snapshot, then broadcast the packet that
 /// `BorderChangeListener` would send.
 fn apply(global: &mut Global, region: &mut Region, event: BorderEvent) {
-    global.publish_border(region);
+    global.publish(region);
     let border = global.world_border();
     let frames = match event {
         BorderEvent::SetSize { .. } => encode_frames(&SetBorderSize {
@@ -446,7 +446,7 @@ mod tests {
         player.permission_level = 2;
         player.is_op = true;
         region.insert_player(player);
-        global.publish_border(&mut region);
+        global.publish(&mut region);
         (global, region, id)
     }
 
@@ -459,7 +459,7 @@ mod tests {
         let (mut global, mut region, id) = world();
         run(&mut global, &mut region, id, "worldborder set 100");
         assert_eq!(global.world_border().size(), 100.0);
-        assert_eq!(region.world_border.size(), 100.0);
+        assert_eq!(region.global.world_border.size(), 100.0);
         run(
             &mut global,
             &mut region,
@@ -468,7 +468,7 @@ mod tests {
         );
         assert_eq!(global.world_border().center_x(), 10.5);
         assert_eq!(global.world_border().center_z(), -20.5);
-        assert_eq!(region.world_border.center_x(), 10.5);
+        assert_eq!(region.global.world_border.center_x(), 10.5);
     }
 
     #[test]

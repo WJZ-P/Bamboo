@@ -23,6 +23,7 @@ use crate::{
     global::Global,
     inbound::PlayerId,
     region::Region,
+    scoreboard::Scoreboard,
 };
 
 /// 官方 `ComponentUtils.DEFAULT_SEPARATOR`：灰色、文本是 `","`。
@@ -54,7 +55,7 @@ pub(crate) fn component(parsed: &ParsedCommand, name: &str) -> Result<Component,
 /// against the command source. `ResolutionContext.create(source)` has no entity
 /// override, so `*` in a score component means the source itself.
 pub(crate) fn resolved_component(
-    global: &Global,
+    scoreboard: &Scoreboard,
     region: &Region,
     source: PlayerId,
     parsed: &ParsedCommand,
@@ -69,7 +70,7 @@ pub(crate) fn resolved_component(
         .get(&source)
         .map(|player| player.uuid)
         .unwrap_or_default();
-    Ok(resolve(global, region, source, source, uuid, tag, 0))
+    Ok(resolve(scoreboard, region, source, source, uuid, tag, 0))
 }
 
 /// 官方 `ComponentUtils.resolve`：发给每个目标前把动态内容展开。
@@ -81,7 +82,7 @@ pub(crate) fn resolved_component(
 /// inside a `score`/`selector` component resolves to; the source still owns the
 /// selector's position and permission checks.
 pub(crate) fn resolve(
-    global: &Global,
+    scoreboard: &Scoreboard,
     region: &Region,
     source: PlayerId,
     target: PlayerId,
@@ -96,7 +97,15 @@ pub(crate) fn resolve(
         Tag::List(items) => {
             let mut first = Component::text("");
             for (index, item) in items.iter().enumerate() {
-                let part = resolve(global, region, source, target, target_uuid, item, depth + 1);
+                let part = resolve(
+                    scoreboard,
+                    region,
+                    source,
+                    target,
+                    target_uuid,
+                    item,
+                    depth + 1,
+                );
                 if index == 0 {
                     first = part;
                 } else {
@@ -106,12 +115,19 @@ pub(crate) fn resolve(
             first
         }
         Tag::Compound(entries) => {
-            let mut out =
-                resolve_content(global, region, source, target, target_uuid, entries, depth);
+            let mut out = resolve_content(
+                scoreboard,
+                region,
+                source,
+                target,
+                target_uuid,
+                entries,
+                depth,
+            );
             if let Some(Tag::List(children)) = field(entries, "extra") {
                 for child in children {
                     out = out.extra(resolve(
-                        global,
+                        scoreboard,
                         region,
                         source,
                         target,
@@ -130,7 +146,7 @@ pub(crate) fn resolve(
 }
 
 fn resolve_content(
-    global: &Global,
+    scoreboard: &Scoreboard,
     region: &Region,
     source: PlayerId,
     target: PlayerId,
@@ -162,7 +178,7 @@ fn resolve_content(
                 for value in with {
                     let arg = match value {
                         Tag::Compound(_) | Tag::List(_) => resolve(
-                            global,
+                            scoreboard,
                             region,
                             source,
                             target,
@@ -189,9 +205,25 @@ fn resolve_content(
             "keybind",
             Tag::String(string_field(entries, "keybind").unwrap_or_default()),
         ),
-        "selector" => selector_text(global, region, source, target, target_uuid, entries, depth),
-        "score" => score_text(global, region, source, target, target_uuid, entries),
-        "object" => object_text(global, region, source, target, target_uuid, entries, depth),
+        "selector" => selector_text(
+            scoreboard,
+            region,
+            source,
+            target,
+            target_uuid,
+            entries,
+            depth,
+        ),
+        "score" => score_text(scoreboard, region, source, target, target_uuid, entries),
+        "object" => object_text(
+            scoreboard,
+            region,
+            source,
+            target,
+            target_uuid,
+            entries,
+            depth,
+        ),
         // 没有实体和方块实体的 NBT 数据源：官方 `NbtContents.resolve` 在取不到数据时
         // 把流 reduce 成空，结果就是空文本。
         "nbt" => Component::text(""),
@@ -202,7 +234,7 @@ fn resolve_content(
 /// 官方 `ScoreContents.resolve`：`*` 换成接收者，选择器要求正好一个实体，
 /// 然后按 `ScoreContents.getScore` 到计分板取分数并套用数字格式。
 fn score_text(
-    global: &Global,
+    scoreboard: &Scoreboard,
     region: &Region,
     source: PlayerId,
     target: PlayerId,
@@ -231,8 +263,7 @@ fn score_text(
         let [only] = found.as_slice() else {
             // 官方 `findTargetName`：零个结果退回原文，多个结果报错（这里按空文本）。
             return if found.is_empty() {
-                global
-                    .scoreboard()
+                scoreboard
                     .formatted_score(&name, &objective)
                     .unwrap_or_else(|| Component::text(""))
             } else {
@@ -242,8 +273,7 @@ fn score_text(
         scoreboard_name(region, *only)
     };
     let _ = target_uuid;
-    global
-        .scoreboard()
+    scoreboard
         .formatted_score(&holder, &objective)
         .unwrap_or_else(|| Component::text(""))
 }
@@ -259,7 +289,7 @@ fn scoreboard_name(region: &Region, id: PlayerId) -> String {
 /// 官方 `ObjectContents.resolve`：默认的对象校验器恒为真，所以图集精灵和玩家头像
 /// 都原样保留；`fallback` 先按 `ComponentUtils.resolve` 展开，再一起写回去。
 fn object_text(
-    global: &Global,
+    scoreboard: &Scoreboard,
     region: &Region,
     source: PlayerId,
     target: PlayerId,
@@ -278,7 +308,7 @@ fn object_text(
     }
     if let Some(fallback) = field(entries, "fallback") {
         let resolved = resolve(
-            global,
+            scoreboard,
             region,
             source,
             target,
@@ -292,7 +322,7 @@ fn object_text(
 }
 
 fn selector_text(
-    global: &Global,
+    scoreboard: &Scoreboard,
     region: &Region,
     source: PlayerId,
     target: PlayerId,
@@ -329,7 +359,15 @@ fn selector_text(
         })
         .collect::<Vec<_>>();
     let separator = match field(entries, "separator") {
-        Some(tag) => resolve(global, region, source, target, target_uuid, tag, depth + 1),
+        Some(tag) => resolve(
+            scoreboard,
+            region,
+            source,
+            target,
+            target_uuid,
+            tag,
+            depth + 1,
+        ),
         None => Component::text(DEFAULT_SEPARATOR).color(mc_bamboo_protocol::text::Color::Gray),
     };
     let mut list = Component::text("");
@@ -357,7 +395,7 @@ fn string_field(entries: &[(String, Tag)], name: &str) -> Option<String> {
 }
 
 pub(crate) fn tellraw(
-    global: &mut Global,
+    _global: &mut Global,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
@@ -374,7 +412,17 @@ pub(crate) fn tellraw(
             .get(&target)
             .map(|player| player.uuid)
             .unwrap_or_default();
-        let resolved = resolve(global, region, id, target, target_uuid, raw.tag(), 0);
+        // 计分板读岛上的全局快照。
+        // The scoreboard comes from the island's global snapshot.
+        let resolved = resolve(
+            &region.global.scoreboard,
+            region,
+            id,
+            target,
+            target_uuid,
+            raw.tag(),
+            0,
+        );
         // 官方 `TellRawCommand` 对每个目标调 `player.sendSystemMessage`，隐藏聊天的不发。
         //
         // Official `TellRawCommand` calls `player.sendSystemMessage` for each target;
@@ -426,7 +474,7 @@ mod tests {
             ]),
         )]);
         assert_eq!(
-            resolve(&global, &region, id, id, Uuid::nil(), &score, 0),
+            resolve(global.scoreboard(), &region, id, id, Uuid::nil(), &score, 0),
             Component::text("7")
         );
         let nbt = Tag::Compound(vec![
@@ -434,7 +482,7 @@ mod tests {
             ("entity".into(), Tag::String("@s".into())),
         ]);
         assert_eq!(
-            resolve(&global, &region, id, id, Uuid::nil(), &nbt, 0),
+            resolve(global.scoreboard(), &region, id, id, Uuid::nil(), &nbt, 0),
             Component::text("")
         );
     }
@@ -443,7 +491,15 @@ mod tests {
     fn selectors_are_joined_with_the_official_separator() {
         let (global, region, id) = crate::command::tests::world_with("Kitten", 2);
         let selector = Tag::Compound(vec![("selector".into(), Tag::String("@a".into()))]);
-        let resolved = resolve(&global, &region, id, id, Uuid::nil(), &selector, 0);
+        let resolved = resolve(
+            global.scoreboard(),
+            &region,
+            id,
+            id,
+            Uuid::nil(),
+            &selector,
+            0,
+        );
         let mut out = Vec::new();
         resolved.write(&mut out);
         // 一个目标时不写分隔符；转成标签后检查名字在里面。
@@ -458,7 +514,15 @@ mod tests {
             ("sprite".into(), Tag::String("minecraft:block/stone".into())),
             ("fallback".into(), Tag::String("stone".into())),
         ]);
-        let resolved = resolve(&global, &region, id, id, Uuid::nil(), &component, 0);
+        let resolved = resolve(
+            global.scoreboard(),
+            &region,
+            id,
+            id,
+            Uuid::nil(),
+            &component,
+            0,
+        );
         let Tag::Compound(entries) = resolved.tag() else {
             panic!("object 应该还是复合标签");
         };

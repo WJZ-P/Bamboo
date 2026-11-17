@@ -354,7 +354,7 @@ pub(crate) fn apply_mode(
         //
         // `GameModeCommand.logGamemodeChange`: the target's `gameMode.changed` is gated by
         // `GameRules.SEND_COMMAND_FEEDBACK`.
-        if region.send_command_feedback {
+        if region.global.send_command_feedback {
             let changed = Component::translate("gameMode.changed", [mode_name.clone().into()]);
             // `GameModeCommand.logGamemodeChange` 走 `ServerPlayer.sendSystemMessage`。
             //

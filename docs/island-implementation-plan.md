@@ -253,6 +253,28 @@
 
 已经读 `region.tick` 的（约 12 处）：容器重查、讲台、传送确认、红石缓存。保持 `GameTime` 的（约 15 处）：`/time`、`SetTime`、`level.dat` 的 `Time`、世界边界渐变、战利品条件的 `game_time` / `day_time`。Director 用自己的 `director_tick`（约 12 处），留在主控不动。
 
+（2026-11-17 第 5a 步核对时补：「战利品条件的 `game_time` / `day_time`」现在其实不读任何时间——`block_drops.rs` 的 `LootLevel` 实现对两者都返回 `None`，`/loot` 的 `LootParams` 也不带时间；以后接上时读岛的快照里的 `GameTime`。岛内真正读 `GameTime` 的只有进服序列里的 `SetTime`（`Region::start_loading_chunks`），第 5a 步起读快照；`/worldborder` 渐变读 `global.time()` 是全局类命令，在主控。）
+
+### 5.4 岛内读 `Global` 的全部位置（2026-11-17 第 5a 步动手前核对）
+
+按「搜所有拿 `&Global` / `&mut Global` 的函数、所有 `global.` 的读」逐个看过。「岛内」= 收包处理、岛类命令（4.4 前两类里的本岛类和可能跨岛类）、岛的各个 tick 阶段；全局类命令以后在主控执行，读权威副本，不算。
+
+| 读的地方 | 读什么 | 第 5a 步 |
+|---|---|---|
+| 方块逻辑、实体碰撞、移动校验、挖掘 | 规则的方块快照、天气快照、世界边界 | 原来 `Region` 上的 `block_rules` / `block_weather` / `world_border` 三份快照并进 `GlobalView`（`region.global.*`），发布时机不变 |
+| 命令反馈、命令方块 | `send_command_feedback` / `log_admin_commands` / `command_blocks_work` | 同上，原来是 `Region` 上的三个布尔 |
+| `chat::on_chat` | 发送者的队伍前后缀（`scoreboard().format_player_name`） | 读快照的计分板。**第 2 节第 8 行没写**：聊天也读计分板 |
+| `/tellraw`、`/title`（`command/text.rs::resolve` 的 `score` 组件） | 分数 | 读快照的计分板；`/scoreboard`、`/team`、`/bossbar` 解析组件参数时仍读权威副本（全局类） |
+| `gamerules::on_request_values` | 全部规则的值 | 读快照 |
+| `command::admin::tick_idle` | 闲置分钟数 | 读快照（第 2 节第 11 行已写） |
+| 进服序列的岛内部分（`World::on_join` → `Region::add_player` / `start_loading_chunks`） | 默认游戏模式、世界出生点、种子哈希、难度包、时间和主世界时钟、天气、边界 | 读快照。Tab 名单、OP 名单复查、`remember_player`、计分板和 Boss 栏的进服包仍在主控 |
+| `/loot`、`/random` | `WorldState.sequences`（按世界种子建的随机序列；`/loot` 经 `get_random_items_with_seed` 的内部可变性推进它，`/random` 直接取） | **不是只读，进不了快照。第 2 节第 15 行漏了这一份**（只写了 `Region.loot_sequences`）。按第 15 行「随机源归岛」，第 5b 步搬到岛上 |
+| `/gamemode`、`change_game_mode` 包、`chat_session_update`、客户端设置的帽子 | 写 Tab 名单 | 写，第 5b 步变效果 |
+| `set_game_rule` 包 | 写规则 | 写，第 5b 步按全局类命令走端口 |
+| `ServerPlayer.doTick` 的六个只读准则（`tick_criteria`） | 写计分板 | 写，第 5b 步「岛算、主控应用」；第 5a 步先加只读的预检（`criteria_pending`），没有要写的就不拿可写的计分板，免得每刻都把计分板和快照拆开复制 |
+
+`GlobalView` 的发布时机：每刻开头、边界推进后、天气和时间推进后，以及只有一个岛时每处理完一条入站消息、每次准则写入、每次压测回调之后（这些地方以前会直接改 `Global`，重发保证岛读到的永远是最新的，逐位一致）。规则和计分板在 `Global` 里改成 `Arc` 共享，发布只加引用计数，写的时候 `Arc::make_mut` 才复制。直接改快照字段的几处测试和测量脚手架（`force_chunks_unpaced` 关随机刻、两处多阶段生成测试、一处计分板测试）改成改权威规则再发布，否则会被下一次发布覆盖。
+
 ---
 
 ## 6. 实施步骤

@@ -112,8 +112,10 @@ fn moved(region: &Region, player: PlayerId, request: &PlayRequest) -> bool {
 }
 
 /// 官方 `ServerGamePacketListenerImpl.tick`：超过设定分钟数才踢。
-pub(crate) fn tick_idle(global: &mut Global, region: &mut Region) {
-    let minutes = global.admin.idle_timeout_minutes;
+/// 闲置时限读岛上的全局快照。
+/// The idle limit comes from the island's global snapshot.
+pub(crate) fn tick_idle(region: &mut Region) {
+    let minutes = region.global.idle_timeout_minutes;
     if minutes <= 0 {
         return;
     }

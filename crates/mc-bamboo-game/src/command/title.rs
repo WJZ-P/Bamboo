@@ -68,7 +68,7 @@ pub(crate) enum Action {
 }
 
 pub(crate) fn run(
-    global: &mut Global,
+    _global: &mut Global,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
@@ -119,7 +119,17 @@ pub(crate) fn run(
                     .get(target)
                     .map(|player| player.uuid)
                     .unwrap_or_default();
-                let resolved = text::resolve(global, region, id, *target, uuid, raw.tag(), 0);
+                // 计分板读岛上的全局快照。
+                // The scoreboard comes from the island's global snapshot.
+                let resolved = text::resolve(
+                    &region.global.scoreboard,
+                    region,
+                    id,
+                    *target,
+                    uuid,
+                    raw.tag(),
+                    0,
+                );
                 match action {
                     Action::Title => region
                         .links

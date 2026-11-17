@@ -114,11 +114,10 @@ pub(crate) fn reject_illegal_command(region: &mut Region, id: PlayerId, command:
 ///
 /// `handleChat`. The caller counts chat spam when this returns `true`. Official servers do that
 /// only after a message was actually broadcast.
-/// 聊天消息的内容。`&Global` 单独传，避免把整个世界都借给聊天。
+/// 聊天消息的内容。发送者的队伍显示读岛上的全局快照。
 ///
-/// The chat message. `&Global` is separate so chat does not borrow the whole world.
+/// The chat message. The sender's team display comes from the island's global snapshot.
 pub(crate) struct ChatMessage<'a> {
-    pub global: &'a crate::global::Global,
     pub text: String,
     pub signature: Option<[u8; 256]>,
     pub time_millis: i64,
@@ -128,7 +127,6 @@ pub(crate) struct ChatMessage<'a> {
 
 pub(crate) fn on_chat(region: &mut Region, id: PlayerId, message: ChatMessage<'_>) -> bool {
     let ChatMessage {
-        global,
         text: message,
         signature,
         time_millis,
@@ -175,7 +173,7 @@ pub(crate) fn on_chat(region: &mut Region, id: PlayerId, message: ChatMessage<'_
         Ok(signed) => {
             let trusted = signed.is_trusted(region.now_millis());
             log_player_broadcast(trusted, chat_type::CHAT, &name, &message);
-            let display = global.scoreboard().format_player_name(&name);
+            let display = region.global.scoreboard.format_player_name(&name);
             secure_chat::broadcast_signed(region, &signed, chat_type::CHAT, &display, None, None);
             true
         }

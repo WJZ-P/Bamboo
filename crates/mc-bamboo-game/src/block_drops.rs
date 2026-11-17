@@ -40,7 +40,7 @@ pub(crate) fn drop_broken_block(
     });
     let view = ChunkLevel {
         chunks: &region.chunks,
-        weather: region.block_weather,
+        weather: region.global.block_weather,
     };
     let params = BlockDropParams {
         state,

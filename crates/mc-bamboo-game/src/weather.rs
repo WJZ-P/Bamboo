@@ -106,11 +106,6 @@ pub(crate) fn advance(global: &mut Global, region: &Region) -> Vec<u8> {
     frames
 }
 
-/// 权威状态变了之后把快照复制给方块逻辑。
-pub(crate) fn sync(global: &Global, region: &mut Region) {
-    region.block_weather = global.state().weather.snapshot();
-}
-
 fn step(level: f32, rising: bool) -> f32 {
     if rising {
         (level + LEVEL_STEP).min(1.0)
@@ -154,13 +149,13 @@ mod tests {
         state.o_rain_level = 1.0;
         state.thunder_level = 0.0;
         state.o_thunder_level = 0.0;
-        world.island.region.block_weather = state.snapshot();
+        world.master.global.publish(&mut world.island.region);
 
         // 饱和的雨强在 `clear_time` 的分支里保持不变，但每一刻仍可能因为
         // `o_rain_level != rain_level` 发强度包；这里只关心状态倒计时。
         for _ in 0..2 {
             let _ = advance(&mut world.master.global, &world.island.region);
-            sync(&world.master.global, &mut world.island.region);
+            world.master.global.publish(&mut world.island.region);
         }
         assert_eq!(world.master.global.state().weather.rain_time, 0);
         assert!(!world.master.global.state().weather.raining);

@@ -261,8 +261,7 @@ impl StartupData {
             *global.world_border_mut() =
                 mc_bamboo_blocks::world_border::WorldBorder::restore(settings, game_time);
         }
-        global.rules().publish(region);
-        global.publish_border(region);
+        global.publish(region);
     }
 }
 

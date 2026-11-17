@@ -47,7 +47,7 @@ fn component(
     parsed: &ParsedCommand,
     name: &str,
 ) -> Result<Component, CommandFail> {
-    crate::command::text::resolved_component(global, region, source, parsed, name)
+    crate::command::text::resolved_component(global.scoreboard(), region, source, parsed, name)
 }
 
 fn amount(parsed: &ParsedCommand, name: &str) -> Result<i32, CommandFail> {
