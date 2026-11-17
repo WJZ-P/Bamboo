@@ -192,6 +192,9 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
   `whitelist.json`）固定在服务器目录里，不单独配置。
 - `BAMBOO_PROFILE=<秒>`（剖析器）和 `BAMBOO_TEST_LOADED=1`（测试走已加载模式）
   是调试用的环境变量，保持环境变量，不进配置文件。`RUST_LOG` 调日志级别。
+- `BAMBOO_ISLAND_DRIVE=lockstep|detached`（岛的实施计划第 6 步）：主控和岛交接区块信件的方式，
+  缺省 `lockstep`（齐步，精确模式）；`detached` 时区块交付晚一刻。调试用，第 7 步加
+  `island_threads` 之后由配置文件决定。对拍、探针和逐位比较的测试显式选齐步。
 - 精确节拍（`BAMBOO_TICK_SLEEP` / `BAMBOO_TICK_SPIN_MAX_US` / `BAMBOO_TICK_QOS`）
   已于 2026-11-12 废弃并删除，见 `performance-optimizations.md` 第 6 节。
 
