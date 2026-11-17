@@ -3044,3 +3044,15 @@ Director 交付的方块。
 的 `compute_event` 里：被取消的 `Generated` 回执不合并（重派时纯函数给出同样结果）。
 改后 5 次全过；把判断临时改成恒合并，5 次全失败。改动只有几行，和 18.9 不碰的「宿主附
 邻居快照」那段不在一处。
+
+### 18.12 这一轮的验收（合并 `main` 之后，HEAD）
+
+`cargo fmt --all --check`、`cargo clippy --workspace --all-targets`（0 警告）、
+`cargo check -p mc-bamboo-vanilla --no-default-features`（0 警告）；`cargo test --workspace`
+56 个测试二进制 3300 通过 / 0 失败（第一次跑 `uri_oracle` 因没设 `JAVA_HOME` 报 Broken pipe，
+设好后单独与整套重跑都过）；`BAMBOO_TEST_LOADED=1 cargo test -p mc-bamboo-game` 966 通过。
+对拍 0 不一致：`worldgen`、`chunkgen --through features`、`gen-world`（CARVERS、features、
+features `--structures`、种子 42 (17,7) 313 个官方结构件）、`gen-light`、`structure-e2e`、
+`structure-pipeline`、`long-set`、`beard`、`jigsaw`、`structures` 与全部 `structure-*`，
+`feature-merge`（带 / 不带结构的 `isolated`）；`oracle java --weather clear` 10114 例 0 失败；
+`probe.sh` 719/719，`tools/probe.sh --loaded` 两遍各 fresh + loaded 719/719，均正常关服。
