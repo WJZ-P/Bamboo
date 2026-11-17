@@ -102,6 +102,14 @@ pub(crate) struct Player {
     /// drains it each tick and merges it with the master queue and the other
     /// players' queues by number; it moves with the player.
     pub(crate) inbox: crate::inbound::PlayerInbox,
+    /// 官方 `ServerPlayer` 的六个 `lastRecorded*` 字段（计分板的只读准则），顺序见
+    /// [`tick_criteria`](crate::scoreboard::tick_criteria)。新玩家是构造函数的初值。
+    ///
+    /// The six official `ServerPlayer.lastRecorded*` fields (the scoreboard's
+    /// read-only criteria), ordered as in
+    /// [`tick_criteria`](crate::scoreboard::tick_criteria). A new player starts at
+    /// the constructor defaults.
+    pub(crate) recorded_criteria: [i32; 6],
 }
 
 impl Player {
@@ -145,6 +153,7 @@ impl Player {
             chat: PlayerChat::default(),
             respawn: None,
             inbox: crate::inbound::PlayerInbox::default(),
+            recorded_criteria: crate::scoreboard::UNRECORDED_CRITERIA,
         }
     }
 

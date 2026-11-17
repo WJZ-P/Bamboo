@@ -13,7 +13,7 @@ use mc_bamboo_protocol::{
 
 use crate::{
     command::feedback::{self, CommandFail, fail},
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     links::encode_frames,
     region::Region,
@@ -22,7 +22,7 @@ use crate::{
 /// 官方 `randomSample`：不带序列名时从 `Level.random` 取数，带序列名时从
 /// 服务器的 `RandomSequences` 取。范围按 `MinMaxBounds.Ints` 解析。
 pub(crate) fn sample(
-    global: &mut Global,
+    _port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
@@ -43,7 +43,7 @@ pub(crate) fn sample(
     }
     let value = match parsed.get("sequence").and_then(Value::as_str) {
         Some(name) => {
-            let source = global.state().sequences.get(name);
+            let source = region.random_sequences.get(name);
             source.next_int(max - min + 1) + min
         }
         None => RandomSource::next_int_between_inclusive(region.random.source(), min, max),
@@ -81,31 +81,31 @@ pub(crate) fn sample(
 }
 
 pub(crate) fn value(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    sample(global, region, id, parsed, false)
+    sample(port, region, id, parsed, false)
 }
 
 pub(crate) fn roll(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    sample(global, region, id, parsed, true)
+    sample(port, region, id, parsed, true)
 }
 
 /// 官方 `resetSequence` / `resetAllSequences` / `resetAllSequencesAndSetNewDefaults`。
 pub(crate) fn reset(
-    global: &mut Global,
+    _port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let sequences = &mut global.state_mut().sequences;
+    let sequences = &mut region.random_sequences;
     let sequence_name = parsed.get("sequence").and_then(Value::as_str);
     let count = if let Some(salt) = parsed.get("seed").and_then(Value::as_integer) {
         // 官方的两条 reset 分支：`*` 改全局默认后清空；带名字的只替换这一条。
@@ -188,13 +188,13 @@ mod tests {
     fn named_sequences_share_a_stream_and_reset_returns_to_the_first_value() {
         let (mut global, mut region, id) = world();
         let expected = {
-            let source = global.state().sequences.get("minecraft:test");
+            let source = region.random_sequences.get("minecraft:test");
             let first = source.next_int(10);
             let second = source.next_int(10);
             (first, second)
         };
-        global.state_mut().sequences.reset("minecraft:test");
-        let source = global.state().sequences.get("minecraft:test");
+        region.random_sequences.reset("minecraft:test");
+        let source = region.random_sequences.get("minecraft:test");
         assert_eq!(source.next_int(10), expected.0);
         // 命令树里带名字的 value 也能解析。
         assert!(
@@ -210,7 +210,7 @@ mod tests {
             "random value 1..10 minecraft:test",
             None,
         );
-        assert_eq!(global.state().sequences.len(), 1);
+        assert_eq!(region.random_sequences.len(), 1);
     }
 
     #[test]

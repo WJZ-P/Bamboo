@@ -229,8 +229,13 @@ pub(crate) fn on_request_values(region: &mut Region, id: PlayerId) {
 /// `handleSetGameRule`. A value that does not parse, including one with trailing
 /// characters, is ignored. A disabled rule is not stored, but the parsed text is still
 /// broadcast.
+///
+/// 权限在岛上查；改规则是全局的，作为效果交给主控（岛的实施计划 4.4）。
+///
+/// Permission is checked on the island; changing rules is global, so it goes
+/// to the master as an effect (island plan 4.4).
 pub(crate) fn on_set_packet(
-    global: &mut crate::global::Global,
+    port: &mut crate::global_port::GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     entries: Vec<(String, String)>,
@@ -243,6 +248,22 @@ pub(crate) fn on_set_packet(
         return;
     }
     let name = player.name.clone();
+    port.submit(
+        region,
+        crate::global_port::GlobalEffect::GameRules { name, entries },
+    );
+}
+
+/// [`on_set_packet`] 的主控一侧：逐条改权威规则、重发快照、广播给 OP。
+///
+/// The master side of [`on_set_packet`]: assign each rule on the authoritative
+/// copy, republish the snapshot, and broadcast to ops.
+pub(crate) fn apply_set_packet(
+    global: &mut crate::global::Global,
+    region: &mut Region,
+    name: &str,
+    entries: Vec<(String, String)>,
+) {
     for (identifier, value) in entries {
         let Some(index) = gamerules::find(&identifier) else {
             warn!(

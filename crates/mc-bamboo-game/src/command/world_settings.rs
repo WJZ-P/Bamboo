@@ -12,6 +12,7 @@ use crate::{
         players, select,
     },
     global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     player::Player,
     region::{DIMENSION, Region},
@@ -109,7 +110,16 @@ pub(crate) fn default_gamemode(
     if FORCE_GAME_MODE {
         let online: Vec<PlayerId> = region.players.keys().copied().collect();
         for target in online {
-            players::apply_mode(global, region, target, target, mode, protocol);
+            // 主控上的全局类命令，经直接实现写 Tab 名单。
+            // A global command on the master: the tab list goes through the direct port.
+            players::apply_mode(
+                &mut GlobalPort::Direct(global),
+                region,
+                target,
+                target,
+                mode,
+                protocol,
+            );
         }
     }
     let name = Component::translate(format!("gameMode.{}", mode.name()), []);
@@ -192,12 +202,12 @@ pub(crate) fn set_world_spawn(
 ///
 /// 官方 `CommandResponseTracker` 按目标人数选 single/multiple 的反馈。
 pub(crate) fn spawnpoint(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let spawn = target_spawn(region, id, parsed)?;
     let targets = if let Some(selector) = parsed.get("targets").and_then(Value::as_entity) {
         select::players(region, id, players::level_of(region, id), selector)?

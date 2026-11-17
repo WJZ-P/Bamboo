@@ -11,10 +11,10 @@ use mc_bamboo_protocol::{packet::play::Sound, text::Component};
 
 use crate::{
     command::{
-        CommandFn, effects,
+        IslandFn, effects,
         feedback::{CommandFail, fail},
     },
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     region::Region,
 };
@@ -40,13 +40,13 @@ fn sound_argument(name: &str) -> Component {
 }
 
 pub(crate) fn run(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
     source: SoundSource,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let name = parsed
         .get("sound")
         .and_then(Value::as_str)
@@ -145,7 +145,7 @@ pub(crate) fn suggest_sounds(_arguments: &[(String, Value)], lower: &str, out: &
 }
 
 /// 按 `SoundSource.values()` 排列的可执行函数，供命令树注册。
-pub(crate) const ACTIONS: [CommandFn; 11] = [
+pub(crate) const ACTIONS: [IslandFn; 11] = [
     master, music, records, weather, blocks, hostile, neutral, players, ambient, voice, ui,
 ];
 
@@ -153,12 +153,12 @@ pub(crate) const ACTIONS: [CommandFn; 11] = [
 macro_rules! source_fn {
     ($name:ident, $source:expr) => {
         pub(crate) fn $name(
-            global: &mut Global,
+            port: &mut GlobalPort<'_>,
             region: &mut Region,
             id: PlayerId,
             parsed: &ParsedCommand,
         ) -> Result<(), CommandFail> {
-            run(global, region, id, parsed, $source)
+            run(port, region, id, parsed, $source)
         }
     };
 }
@@ -177,10 +177,10 @@ source_fn!(ui, sounds::UI);
 
 /// 只写了 `sound` 的那一层：官方用 `MASTER`，目标只有执行者。
 pub(crate) fn sound_only(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    run(global, region, id, parsed, sounds::MASTER)
+    run(port, region, id, parsed, sounds::MASTER)
 }

@@ -54,6 +54,7 @@ mod entity_tracking;
 mod entity_view;
 mod gamerules;
 mod global;
+mod global_port;
 mod inbound;
 mod interaction;
 mod inventory;

@@ -20,7 +20,7 @@ use crate::{
         feedback::{self, CommandFail, fail},
         select,
     },
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     region::Region,
     scoreboard::Scoreboard,
@@ -395,7 +395,7 @@ fn string_field(entries: &[(String, Tag)], name: &str) -> Option<String> {
 }
 
 pub(crate) fn tellraw(
-    _global: &mut Global,
+    _port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,

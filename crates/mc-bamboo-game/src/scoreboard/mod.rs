@@ -21,7 +21,11 @@ use mc_bamboo_protocol::{
     text::Component,
 };
 
-use crate::{links::encode_frames, region::Region};
+use crate::{
+    global_port::{GlobalEffect, GlobalPort},
+    links::encode_frames,
+    region::Region,
+};
 
 #[allow(unused_imports)]
 pub(crate) use boss::{BossBars, BossColor, BossStyle};
@@ -140,9 +144,6 @@ impl Team {
     }
 }
 
-/// 官方 `ServerScoreboard`。重启后是空的。
-///
-/// Official `ServerScoreboard`. A restart leaves it empty.
 /// 官方 `ServerPlayer.doTick` 的六个只读准则和 Bamboo 用的玩家初值，顺序是 health、
 /// food、air、armor、xp、level。
 ///
@@ -157,6 +158,17 @@ const CRITERIA_VALUES: [(&str, i32); 6] = [
     ("level", 0),
 ];
 
+/// 官方 `ServerPlayer` 六个 `lastRecorded*` 字段的构造函数初值（`Float.MIN_VALUE` 和
+/// `Integer.MIN_VALUE`），所以进服后的第一刻每个准则都会写一次。
+///
+/// The constructor defaults of the six official `ServerPlayer.lastRecorded*`
+/// fields (`Float.MIN_VALUE` / `Integer.MIN_VALUE`), so every criterion is written
+/// once on the first tick after join.
+pub(crate) const UNRECORDED_CRITERIA: [i32; 6] = [i32::MIN; 6];
+
+/// 官方 `ServerScoreboard`。重启后是空的。
+///
+/// Official `ServerScoreboard`. A restart leaves it empty.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Scoreboard {
     objectives: Vec<Objective>,
@@ -168,10 +180,6 @@ pub(crate) struct Scoreboard {
     display: [Option<String>; 19],
     teams: Vec<Team>,
     membership: BTreeMap<String, String>,
-    /// 官方 `ServerPlayer` 的六个 `lastRecorded*` 字段。缺省就是构造函数的初值。
-    ///
-    /// The six official `ServerPlayer.lastRecorded*` fields. Absence means the constructor default.
-    recorded: BTreeMap<String, [i32; 6]>,
 }
 
 impl Scoreboard {
@@ -822,95 +830,51 @@ impl Scoreboard {
         frames
     }
 
-    /// 玩家断开时什么都不广播。
+    /// 有没有目标在跟踪这些准则里的某一个。只读，没有就不用拿可写的计分板。
     ///
-    /// 官方 `ServerLevel$EntityCallbacks.onDestroyed` 调的是 `Scoreboard.entityRemoved`，
-    /// 它第一句就是「是 `Player` 就 return」；`ServerScoreboard.onPlayerRemoved` 只由
-    /// `resetAllPlayerScores` / `resetSinglePlayerScore` 触发，也就是 `/scoreboard players reset`。
-    /// 所以别人侧边栏上这名离线玩家的分数还留着。分数本身当然也不删。
-    ///
-    /// Nothing is broadcast when a player disconnects.
-    ///
-    /// Official `ServerLevel$EntityCallbacks.onDestroyed` calls `Scoreboard.entityRemoved`,
-    /// which returns immediately for a `Player`; `ServerScoreboard.onPlayerRemoved` is only
-    /// reached from `resetAllPlayerScores` / `resetSinglePlayerScore`, i.e.
-    /// `/scoreboard players reset`. Other clients keep the offline player's scores.
-    pub(crate) fn on_leave(&mut self, name: &str) {
-        self.forget_criteria(name);
-    }
-
-    /// 官方 `ServerPlayer.doTick` 里的六个只读准则。Bamboo 没有生命、饥饿、氧气、盔甲和
-    /// 经验系统，值就取玩家的初值；顺序和官方一样是 health、food、air、armor、xp、level。
-    ///
-    /// The six read-only criteria from official `ServerPlayer.doTick`. Bamboo has no health,
-    /// hunger, air, armor or experience system, so each uses the player's default value;
-    /// the order matches official: health, food, air, armor, xp, level.
-    pub(crate) fn tick_criteria(&mut self, region: &mut Region) {
-        let names: Vec<String> = region
-            .players
-            .values()
-            .map(|player| player.name.clone())
-            .collect();
-        for name in names {
-            // 官方每个字段的初值都不是这些默认值（`Float.MIN_VALUE` 和 `Integer.MIN_VALUE`），
-            // 所以进服后的第一刻每个准则都会写一次，之后值没变就不写。
-            //
-            // Official fields start at `Float.MIN_VALUE` / `Integer.MIN_VALUE`, so every
-            // criterion is written once on the first tick and never again while unchanged.
-            let recorded = self.recorded.entry(name.clone()).or_insert([i32::MIN; 6]);
-            let changed: Vec<(usize, i32)> = CRITERIA_VALUES
+    /// Whether any objective tracks one of these criteria. Read-only, so the
+    /// scoreboard need not be taken mutably when none does.
+    pub(crate) fn tracks_criteria(&self, changes: &[(usize, i32)]) -> bool {
+        changes.iter().any(|(index, _)| {
+            let criteria = CRITERIA_VALUES[*index].0;
+            self.objectives
                 .iter()
-                .enumerate()
-                .filter(|(index, (_, value))| recorded[*index] != *value)
-                .map(|(index, (_, value))| (index, *value))
-                .collect();
-            if changed.is_empty() {
-                continue;
-            }
-            for (index, value) in &changed {
-                recorded[*index] = *value;
-            }
-            let holder = Holder {
-                name: name.clone(),
-                display: Some(self.format_player_name(&name)),
-            };
-            for (index, value) in changed {
-                let criteria = CRITERIA_VALUES[index].0;
-                let objectives: Vec<String> = self
-                    .objectives
-                    .iter()
-                    .filter(|objective| objective.criteria == criteria)
-                    .map(|objective| objective.name.clone())
-                    .collect();
-                for objective in objectives {
-                    self.write_forced(&holder, &objective, value, region);
-                }
-            }
-        }
-    }
-
-    /// [`tick_criteria`](Self::tick_criteria) 这一刻有没有要写的：只读，供调用方决定
-    /// 要不要拿可写的计分板。
-    ///
-    /// Whether [`tick_criteria`](Self::tick_criteria) has anything to write this
-    /// tick. Read-only, so the caller can decide whether to take the scoreboard
-    /// mutably.
-    pub(crate) fn criteria_pending(&self, region: &Region) -> bool {
-        region.players.values().any(|player| {
-            self.recorded.get(&player.name).is_none_or(|recorded| {
-                CRITERIA_VALUES
-                    .iter()
-                    .zip(recorded)
-                    .any(|((_, value), recorded)| recorded != value)
-            })
+                .any(|objective| objective.criteria == criteria)
         })
     }
 
-    fn forget_criteria(&mut self, name: &str) {
-        // 官方新 `ServerPlayer` 实例的六个 `lastRecorded*` 字段都回到构造函数初值。
-        //
-        // A new official `ServerPlayer` resets all six `lastRecorded*` fields.
-        self.recorded.remove(name);
+    /// 把一名玩家这一刻变了的只读准则写进跟踪它们的目标（岛算出的
+    /// [`tick_criteria`]，主控应用）。玩家断开时这里什么都不做：官方
+    /// `Scoreboard.entityRemoved` 对 `Player` 直接 return，分数留着；
+    /// `lastRecorded*` 在 `Player` 上，跟着玩家一起没了。
+    ///
+    /// Write one player's changed read-only criteria into the objectives that
+    /// track them (computed by the island with [`tick_criteria`], applied by
+    /// the master). Nothing happens here on disconnect: official
+    /// `Scoreboard.entityRemoved` returns for a `Player` and keeps the scores;
+    /// the `lastRecorded*` values live on `Player` and go with it.
+    pub(crate) fn write_criteria(
+        &mut self,
+        name: &str,
+        changes: &[(usize, i32)],
+        region: &mut Region,
+    ) {
+        let holder = Holder {
+            name: name.to_owned(),
+            display: Some(self.format_player_name(name)),
+        };
+        for (index, value) in changes {
+            let criteria = CRITERIA_VALUES[*index].0;
+            let objectives: Vec<String> = self
+                .objectives
+                .iter()
+                .filter(|objective| objective.criteria == criteria)
+                .map(|objective| objective.name.clone())
+                .collect();
+            for objective in objectives {
+                self.write_forced(&holder, &objective, *value, region);
+            }
+        }
     }
 
     fn update_team(&mut self, name: &str, region: &mut Region, change: impl FnOnce(&mut Team)) {
@@ -1062,6 +1026,41 @@ impl Scoreboard {
             }
         }
         region.links.broadcast(&frames);
+    }
+}
+
+/// 官方 `ServerPlayer.doTick` 的六个只读准则，岛这一侧：按玩家表的顺序比对每名玩家的
+/// `lastRecorded*`，变了的记下新值，作为效果交给主控写计分板。Bamboo 没有生命、饥饿、
+/// 氧气、盔甲和经验系统，值就取玩家的初值，所以进服后第一刻各写一次，之后不再变。
+///
+/// The island side of the six read-only criteria from official
+/// `ServerPlayer.doTick`: compare each player's `lastRecorded*` in player-table
+/// order, record the new values, and hand the changes to the master to write
+/// the scoreboard. Bamboo has no health, hunger, air, armor or experience system,
+/// so each uses the player's default value: written once on the first tick after
+/// join and never again.
+pub(crate) fn tick_criteria(port: &mut GlobalPort<'_>, region: &mut Region) {
+    let mut effects = Vec::new();
+    for player in region.players.values_mut() {
+        let changes: Vec<(usize, i32)> = CRITERIA_VALUES
+            .iter()
+            .enumerate()
+            .filter(|(index, (_, value))| player.recorded_criteria[*index] != *value)
+            .map(|(index, (_, value))| (index, *value))
+            .collect();
+        if changes.is_empty() {
+            continue;
+        }
+        for (index, value) in &changes {
+            player.recorded_criteria[*index] = *value;
+        }
+        effects.push(GlobalEffect::Criteria {
+            name: player.name.clone(),
+            changes,
+        });
+    }
+    for effect in effects {
+        port.submit(region, effect);
     }
 }
 

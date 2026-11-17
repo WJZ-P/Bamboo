@@ -17,18 +17,18 @@ use crate::{
         feedback::{self, CommandFail, fail, fail_with},
         players, select,
     },
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     region::Region,
 };
 
 pub(crate) fn enchant(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let selector = parsed
         .get("targets")
         .and_then(Value::as_entity)

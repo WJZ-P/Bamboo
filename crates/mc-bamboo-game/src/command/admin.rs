@@ -24,6 +24,7 @@ use crate::{
         select,
     },
     global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     region::Region,
 };
@@ -916,12 +917,12 @@ pub(crate) fn set_idle_timeout(
 }
 
 pub(crate) fn transfer(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let hostname = required_text(parsed, "hostname")?.to_owned();
     let port = parsed
         .get("port")

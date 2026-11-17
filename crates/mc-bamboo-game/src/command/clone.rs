@@ -16,7 +16,7 @@ use crate::{
         feedback::{self, CommandFail, fail, fail_with},
     },
     container::ContainerEntry,
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     interaction,
     region::Region,
@@ -268,12 +268,12 @@ fn remove_entity(tables: &mut EntityTables<'_>, pos: BlockPos) {
 macro_rules! variants {
     ($($name:ident : $filter:ident, $mode:ident, $strict:expr;)*) => {
         $(pub(crate) fn $name(
-            global: &mut Global,
+            port: &mut GlobalPort<'_>,
             region: &mut Region,
             id: PlayerId,
             parsed: &ParsedCommand,
         ) -> Result<(), CommandFail> {
-            clone_command(global, region, id, parsed, Style {
+            clone_command(port, region, id, parsed, Style {
                 filter: Filter::$filter,
                 mode: CloneMode::$mode,
                 strict: $strict,
@@ -304,13 +304,13 @@ variants! {
 }
 
 fn clone_command(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
     style: Style,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let (from, to, destination, filter) = {
         let player = region
             .players

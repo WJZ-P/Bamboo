@@ -10,7 +10,7 @@ use crate::{
         feedback::{self, CommandFail, fail},
         players, select,
     },
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     links::encode_frames,
     region::Region,
@@ -32,12 +32,12 @@ const SOURCES: [(&str, SoundSource); 11] = [
 ];
 
 pub(crate) fn stop_sound(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let selector = parsed
         .get("targets")
         .and_then(Value::as_entity)

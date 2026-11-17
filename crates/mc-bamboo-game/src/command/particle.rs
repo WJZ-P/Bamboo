@@ -17,7 +17,7 @@ use crate::{
         feedback::{CommandFail, fail},
         text::level_of,
     },
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     region::Region,
 };
@@ -28,13 +28,13 @@ fn delta(region: &Region, id: PlayerId, parsed: &ParsedCommand) -> Result<Vec3, 
 }
 
 pub(crate) fn run(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
     force: bool,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let particle = parsed
         .get("name")
         .and_then(Value::as_particle)
@@ -123,19 +123,19 @@ fn optional_int(parsed: &ParsedCommand, name: &str, default: i32) -> Result<i32,
 }
 
 pub(crate) fn normal(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    run(global, region, id, parsed, false)
+    run(port, region, id, parsed, false)
 }
 
 pub(crate) fn force(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    run(global, region, id, parsed, true)
+    run(port, region, id, parsed, true)
 }

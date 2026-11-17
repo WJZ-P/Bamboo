@@ -14,6 +14,7 @@ pub(crate) mod admin;
 mod blocks;
 mod bossbar;
 mod catalog;
+mod class;
 mod clone;
 pub(crate) mod console;
 mod effects;
@@ -51,19 +52,44 @@ use mc_bamboo_protocol::packet::play::{
 use tracing::error;
 
 use crate::{
-    chat, command::feedback::CommandFail, global::Global, inbound::PlayerId, links::Links,
-    region::Region, secure_chat,
+    chat,
+    command::feedback::CommandFail,
+    global::Global,
+    global_port::{GlobalEffect, GlobalPort},
+    inbound::PlayerId,
+    links::Links,
+    region::Region,
+    secure_chat,
 };
 
-/// 一个可执行节点对应的函数。下标是命令树节点的 ID。
+/// 全局类命令（岛的实施计划 4.4）的函数：拿权威的 `Global`，只在主控执行。
 ///
-/// The function for one executable node. The index is the command-tree node id.
+/// A global command's function (island plan 4.4): it takes the authoritative
+/// `Global` and runs only on the master.
 pub(crate) type CommandFn =
     fn(&mut Global, &mut Region, PlayerId, &ParsedCommand) -> Result<(), CommandFail>;
 
+/// 只动本岛和可能跨岛的命令（4.4）的函数：在岛上当场执行，对全局状态的写经
+/// [`GlobalPort`]，读全局状态读快照。
+///
+/// The function of an island-local or possibly cross-island command (4.4): it
+/// runs on the island at once, writes global state through [`GlobalPort`], and
+/// reads it from the snapshot.
+pub(crate) type IslandFn =
+    fn(&mut GlobalPort<'_>, &mut Region, PlayerId, &ParsedCommand) -> Result<(), CommandFail>;
+
+/// 一个可执行节点的动作。下标是命令树节点的 ID。
+///
+/// The action of one executable node. The index is the command-tree node id.
+#[derive(Clone, Copy)]
+pub(crate) enum Action {
+    Island(IslandFn),
+    Global(CommandFn),
+}
+
 pub(crate) struct Commands {
     pub(crate) graph: CommandGraph,
-    actions: Vec<Option<CommandFn>>,
+    actions: Vec<Option<Action>>,
     /// 和 `actions` 对齐。`/gamerule` 的节点记下规则下标，别的命令是 `None`。
     ///
     /// Parallel to `actions`. `/gamerule` nodes store the rule index; other commands are `None`.
@@ -141,9 +167,15 @@ pub(crate) fn send_session(links: &mut Links, id: PlayerId, level: u8, entity_id
 
 /// 官方 `chat_command` / `chat_command_signed`。
 ///
-/// Official `chat_command` / `chat_command_signed`.
-pub(crate) fn on_command(
-    global: &mut Global,
+/// 解析、签名校验和刷屏计数在岛上做。本岛类和可能跨岛类当场执行；全局类经 `port`
+/// 交给主控（岛的实施计划 4.4），直接实现下也是当场执行。
+///
+/// Official `chat_command` / `chat_command_signed`. Parsing, signature checks
+/// and spam counting happen on the island. Island and possibly cross-island
+/// commands run at once; global commands go to the master through `port`
+/// (island plan 4.4), which the direct implementation also runs at once.
+pub(crate) fn on_player_command(
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     command: &str,
@@ -172,17 +204,7 @@ pub(crate) fn on_command(
                 //
                 // A signature mismatch already sent the system message. The command does not run.
             } else {
-                let action = commands()
-                    .actions
-                    .get(parsed.action)
-                    .and_then(|action| *action);
-                if let Some(action) = action {
-                    if let Err(failure) = action(global, region, id, &parsed) {
-                        feedback::report(region, id, command, &failure);
-                    }
-                } else {
-                    feedback::report(region, id, command, &feedback::fail("command.failed"));
-                }
+                run(port, region, id, command, parsed);
             }
         }
         Err(failure) => {
@@ -215,6 +237,71 @@ pub(crate) fn on_command(
         }
     }
     chat::detect_command_rate_spam(region, id);
+}
+
+/// 执行解析好的命令：本岛类当场跑，全局类交给 `port`。
+///
+/// Run a parsed command: island commands at once, global ones through `port`.
+pub(crate) fn run(
+    port: &mut GlobalPort<'_>,
+    region: &mut Region,
+    source: PlayerId,
+    command: &str,
+    parsed: ParsedCommand,
+) {
+    match commands()
+        .actions
+        .get(parsed.action)
+        .and_then(|action| *action)
+    {
+        Some(Action::Island(action)) => {
+            if let Err(failure) = action(port, region, source, &parsed) {
+                feedback::report(region, source, command, &failure);
+            }
+        }
+        Some(Action::Global(action)) => port.submit(
+            region,
+            GlobalEffect::Command {
+                source,
+                command: command.to_owned(),
+                parsed,
+                action,
+            },
+        ),
+        None => feedback::report(region, source, command, &feedback::fail("command.failed")),
+    }
+}
+
+/// 单元测试用：按 `BAMBOO_TEST_GLOBAL_PORT` 选直接或排队实现执行一条玩家命令；
+/// 排队时命令执行完立刻按顺序应用攒下的改动（相当于岛马上交回）。
+///
+/// For unit tests: run one player command with the direct or queued port as
+/// `BAMBOO_TEST_GLOBAL_PORT` selects; with the queued port the collected
+/// changes are applied in order right after (as if the island handed back at once).
+#[cfg(test)]
+pub(crate) fn on_command(
+    global: &mut Global,
+    region: &mut Region,
+    id: PlayerId,
+    command: &str,
+    signed: Option<&SignedCommand>,
+) {
+    match crate::global_port::PortMode::default_for_world() {
+        crate::global_port::PortMode::Direct => {
+            on_player_command(&mut GlobalPort::Direct(global), region, id, command, signed);
+        }
+        crate::global_port::PortMode::Queued => {
+            let mut queue = Vec::new();
+            on_player_command(
+                &mut GlobalPort::Queued(&mut queue),
+                region,
+                id,
+                command,
+                signed,
+            );
+            crate::global_port::apply_all(global, region, queue);
+        }
+    }
 }
 
 /// 官方补全。协议里没有光标，光标算在字符串末尾。最多 1000 条。

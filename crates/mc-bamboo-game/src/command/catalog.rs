@@ -7,14 +7,14 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    CommandFn, Commands, admin, blocks, bossbar, clone, enchant, gamerule, items, loot, particle,
-    players, playsound, random, save, scoreboard, stopsound, team, teleport, text, time, title,
-    weather, world_border, world_settings,
+    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, enchant, gamerule, items,
+    loot, particle, players, playsound, random, save, scoreboard, stopsound, team, teleport, text,
+    time, title, weather, world_border, world_settings,
 };
 
 struct Builder {
     graph: CommandGraph,
-    actions: Vec<Option<CommandFn>>,
+    actions: Vec<Option<Action>>,
     rules: Vec<Option<u16>>,
 }
 
@@ -39,7 +39,21 @@ impl Builder {
         id
     }
 
+    /// 全局类命令（岛的实施计划 4.4）。
+    ///
+    /// A global command (island plan 4.4).
     fn run(&mut self, node: usize, action: CommandFn) -> usize {
+        self.set_action(node, Action::Global(action))
+    }
+
+    /// 只动本岛或可能跨岛的命令（4.4）。
+    ///
+    /// An island-local or possibly cross-island command (4.4).
+    fn run_island(&mut self, node: usize, action: IslandFn) -> usize {
+        self.set_action(node, Action::Island(action))
+    }
+
+    fn set_action(&mut self, node: usize, action: Action) -> usize {
         self.graph.executable(node);
         self.ensure(node);
         self.actions[node] = Some(action);
@@ -49,6 +63,11 @@ impl Builder {
     fn bind_literal(&mut self, parent: usize, name: &str, action: CommandFn) {
         let node = self.literal(parent, name, 0);
         self.run(node, action);
+    }
+
+    fn bind_island(&mut self, parent: usize, name: &str, action: IslandFn) {
+        let node = self.literal(parent, name, 0);
+        self.run_island(node, action);
     }
 
     fn run_rule(&mut self, node: usize, rule: usize, action: CommandFn) {
@@ -248,11 +267,11 @@ fn register_bossbar(builder: &mut Builder, root: usize) {
 
 fn register_clear(builder: &mut Builder, root: usize) {
     let clear = builder.literal(root, "clear", permission::GAMEMASTERS);
-    builder.run(clear, items::clear);
+    builder.run_island(clear, items::clear);
     let targets = builder.argument(clear, "targets", players_argument(), 0);
-    builder.run(targets, items::clear);
+    builder.run_island(targets, items::clear);
     let item = builder.argument(targets, "item", ArgumentType::ItemPredicate, 0);
-    builder.run(item, items::clear);
+    builder.run_island(item, items::clear);
     let count = builder.argument(
         item,
         "maxCount",
@@ -262,13 +281,13 @@ fn register_clear(builder: &mut Builder, root: usize) {
         },
         0,
     );
-    builder.run(count, items::clear);
+    builder.run_island(count, items::clear);
 }
 
 fn register_me(builder: &mut Builder, root: usize) {
     let me = builder.literal(root, "me", permission::ALL);
     let action = builder.argument(me, "action", ArgumentType::Message, 0);
-    builder.run(action, players::me);
+    builder.run_island(action, players::me);
 }
 
 fn register_fill(builder: &mut Builder, root: usize) {
@@ -278,33 +297,33 @@ fn register_fill(builder: &mut Builder, root: usize) {
     let block = builder.argument(to, "block", ArgumentType::BlockState, 0);
     wrap_fill_modes(builder, block);
     let replace = builder.literal(block, "replace", 0);
-    builder.run(replace, blocks::fill_replace);
+    builder.run_island(replace, blocks::fill_replace);
     let filter = builder.argument(replace, "filter", ArgumentType::BlockPredicate, 0);
     wrap_fill_modes(builder, filter);
-    builder.bind_literal(block, "keep", blocks::fill_keep);
+    builder.bind_island(block, "keep", blocks::fill_keep);
 }
 
 fn wrap_fill_modes(builder: &mut Builder, parent: usize) {
-    builder.run(parent, blocks::fill_replace);
-    builder.bind_literal(parent, "outline", blocks::fill_outline);
-    builder.bind_literal(parent, "hollow", blocks::fill_hollow);
-    builder.bind_literal(parent, "destroy", blocks::fill_destroy);
-    builder.bind_literal(parent, "strict", blocks::fill_strict);
+    builder.run_island(parent, blocks::fill_replace);
+    builder.bind_island(parent, "outline", blocks::fill_outline);
+    builder.bind_island(parent, "hollow", blocks::fill_hollow);
+    builder.bind_island(parent, "destroy", blocks::fill_destroy);
+    builder.bind_island(parent, "strict", blocks::fill_strict);
 }
 
 fn register_gamemode(builder: &mut Builder, root: usize) {
     let gamemode = builder.literal(root, "gamemode", permission::GAMEMASTERS);
     let mode = builder.argument(gamemode, "gamemode", ArgumentType::GameMode, 0);
-    builder.run(mode, players::gamemode);
+    builder.run_island(mode, players::gamemode);
     let target = builder.argument(mode, "target", players_argument(), 0);
-    builder.run(target, players::gamemode);
+    builder.run_island(target, players::gamemode);
 }
 
 fn register_give(builder: &mut Builder, root: usize) {
     let give = builder.literal(root, "give", permission::GAMEMASTERS);
     let targets = builder.argument(give, "targets", players_argument(), 0);
     let item = builder.argument(targets, "item", ArgumentType::Item, 0);
-    builder.run(item, items::give);
+    builder.run_island(item, items::give);
     let count = builder.argument(
         item,
         "count",
@@ -314,7 +333,7 @@ fn register_give(builder: &mut Builder, root: usize) {
         },
         0,
     );
-    builder.run(count, items::give);
+    builder.run_island(count, items::give);
 }
 
 fn register_help(builder: &mut Builder, root: usize) {
@@ -327,9 +346,9 @@ fn register_help(builder: &mut Builder, root: usize) {
 fn register_kick(builder: &mut Builder, root: usize) {
     let kick = builder.literal(root, "kick", permission::ADMINS);
     let targets = builder.argument(kick, "targets", players_argument(), 0);
-    builder.run(targets, players::kick);
+    builder.run_island(targets, players::kick);
     let reason = builder.argument(targets, "reason", ArgumentType::Message, 0);
-    builder.run(reason, players::kick);
+    builder.run_island(reason, players::kick);
 }
 
 fn register_list(builder: &mut Builder, root: usize) {
@@ -342,7 +361,7 @@ fn register_msg(builder: &mut Builder, root: usize) {
     let msg = builder.literal(root, "msg", permission::ALL);
     let targets = builder.argument(msg, "targets", players_argument(), 0);
     let message = builder.argument(targets, "message", ArgumentType::Message, 0);
-    builder.run(message, players::msg);
+    builder.run_island(message, players::msg);
     let tell = builder.literal(root, "tell", permission::ALL);
     builder.graph.redirect(tell, msg);
     let whisper = builder.literal(root, "w", permission::ALL);
@@ -355,9 +374,9 @@ fn register_msg(builder: &mut Builder, root: usize) {
 fn register_particle(builder: &mut Builder, root: usize) {
     let command = builder.literal(root, "particle", permission::GAMEMASTERS);
     let name = builder.argument(command, "name", ArgumentType::Particle, 0);
-    builder.run(name, particle::normal);
+    builder.run_island(name, particle::normal);
     let pos = builder.argument(name, "pos", ArgumentType::Vec3, 0);
-    builder.run(pos, particle::normal);
+    builder.run_island(pos, particle::normal);
     let spread = builder.argument(pos, "delta", ArgumentType::Vec3Uncentered, 0);
     let speed = builder.argument(
         spread,
@@ -377,14 +396,14 @@ fn register_particle(builder: &mut Builder, root: usize) {
         },
         0,
     );
-    builder.run(count, particle::normal);
-    let force_action: CommandFn = particle::force;
-    let normal_action: CommandFn = particle::normal;
+    builder.run_island(count, particle::normal);
+    let force_action: IslandFn = particle::force;
+    let normal_action: IslandFn = particle::normal;
     for (mode, action) in [("force", force_action), ("normal", normal_action)] {
         let branch = builder.literal(count, mode, 0);
-        builder.run(branch, action);
+        builder.run_island(branch, action);
         let viewers = builder.argument(branch, "viewers", players_argument(), 0);
-        builder.run(viewers, action);
+        builder.run_island(viewers, action);
     }
 }
 
@@ -394,18 +413,18 @@ fn register_playsound(builder: &mut Builder, root: usize) {
     builder
         .graph
         .suggest_with(sound, playsound::SUGGESTION, playsound::suggest_sounds);
-    builder.run(sound, playsound::sound_only);
+    builder.run_island(sound, playsound::sound_only);
     for (name, action) in playsound::SOURCES
         .iter()
         .map(|(name, _)| *name)
         .zip(playsound::ACTIONS)
     {
         let branch = builder.literal(sound, name, 0);
-        builder.run(branch, action);
+        builder.run_island(branch, action);
         let targets = builder.argument(branch, "targets", players_argument(), 0);
-        builder.run(targets, action);
+        builder.run_island(targets, action);
         let pos = builder.argument(targets, "pos", ArgumentType::Vec3, 0);
-        builder.run(pos, action);
+        builder.run_island(pos, action);
         let volume = builder.argument(
             pos,
             "volume",
@@ -415,39 +434,39 @@ fn register_playsound(builder: &mut Builder, root: usize) {
             },
             0,
         );
-        builder.run(volume, action);
+        builder.run_island(volume, action);
         let pitch = builder.argument(
             volume,
             "pitch",
             ArgumentType::Float { min: 0.0, max: 2.0 },
             0,
         );
-        builder.run(pitch, action);
+        builder.run_island(pitch, action);
         let min_volume = builder.argument(
             pitch,
             "minVolume",
             ArgumentType::Float { min: 0.0, max: 1.0 },
             0,
         );
-        builder.run(min_volume, action);
+        builder.run_island(min_volume, action);
     }
 }
 
 fn register_say(builder: &mut Builder, root: usize) {
     let say = builder.literal(root, "say", permission::GAMEMASTERS);
     let message = builder.argument(say, "message", ArgumentType::Message, 0);
-    builder.run(message, players::say);
+    builder.run_island(message, players::say);
 }
 
 fn register_setblock(builder: &mut Builder, root: usize) {
     let setblock = builder.literal(root, "setblock", permission::GAMEMASTERS);
     let pos = builder.argument(setblock, "pos", ArgumentType::BlockPos, 0);
     let block = builder.argument(pos, "block", ArgumentType::BlockState, 0);
-    builder.run(block, blocks::setblock_replace);
-    builder.bind_literal(block, "destroy", blocks::setblock_destroy);
-    builder.bind_literal(block, "keep", blocks::setblock_keep);
-    builder.bind_literal(block, "replace", blocks::setblock_replace);
-    builder.bind_literal(block, "strict", blocks::setblock_strict);
+    builder.run_island(block, blocks::setblock_replace);
+    builder.bind_island(block, "destroy", blocks::setblock_destroy);
+    builder.bind_island(block, "keep", blocks::setblock_keep);
+    builder.bind_island(block, "replace", blocks::setblock_replace);
+    builder.bind_island(block, "strict", blocks::setblock_strict);
 }
 
 /// `TellRawCommand.register`：权限 2，只给每个目标发系统消息，没有成功反馈。
@@ -455,7 +474,7 @@ fn register_tellraw(builder: &mut Builder, root: usize) {
     let tellraw = builder.literal(root, "tellraw", permission::GAMEMASTERS);
     let targets = builder.argument(tellraw, "targets", players_argument(), 0);
     let message = builder.argument(targets, "message", ArgumentType::Component, 0);
-    builder.run(message, text::tellraw);
+    builder.run_island(message, text::tellraw);
 }
 
 /// `TitleCommand.register`：权限 2，六种动作；`times` 用 `TimeArgument`（min 0）。
@@ -467,7 +486,7 @@ fn register_title(builder: &mut Builder, root: usize) {
         ("reset", title::Action::Reset),
     ] {
         let node = builder.literal(targets, name, 0);
-        builder.run(node, action_fn(action));
+        builder.run_island(node, action_fn(action));
     }
     for (name, action) in [
         ("title", title::Action::Title),
@@ -476,16 +495,16 @@ fn register_title(builder: &mut Builder, root: usize) {
     ] {
         let branch = builder.literal(targets, name, 0);
         let text = builder.argument(branch, "title", ArgumentType::Component, 0);
-        builder.run(text, action_fn(action));
+        builder.run_island(text, action_fn(action));
     }
     let times = builder.literal(targets, "times", 0);
     let fade_in = builder.argument(times, "fadeIn", ArgumentType::Time { minimum: 0 }, 0);
     let stay = builder.argument(fade_in, "stay", ArgumentType::Time { minimum: 0 }, 0);
     let fade_out = builder.argument(stay, "fadeOut", ArgumentType::Time { minimum: 0 }, 0);
-    builder.run(fade_out, title::run_times);
+    builder.run_island(fade_out, title::run_times);
 }
 
-fn action_fn(action: title::Action) -> CommandFn {
+fn action_fn(action: title::Action) -> IslandFn {
     match action {
         title::Action::Clear => title::clear,
         title::Action::Reset => title::reset,
@@ -499,24 +518,24 @@ fn action_fn(action: title::Action) -> CommandFn {
 fn register_teleport(builder: &mut Builder, root: usize) {
     let teleport = builder.literal(root, "teleport", permission::GAMEMASTERS);
     let location = builder.argument(teleport, "location", ArgumentType::Vec3, 0);
-    builder.run(location, teleport::teleport);
+    builder.run_island(location, teleport::teleport);
     let destination = builder.argument(teleport, "destination", entity_argument(), 0);
-    builder.run(destination, teleport::teleport);
+    builder.run_island(destination, teleport::teleport);
     let targets = builder.argument(teleport, "targets", entities_argument(), 0);
     let targets_location = builder.argument(targets, "location", ArgumentType::Vec3, 0);
-    builder.run(targets_location, teleport::teleport);
+    builder.run_island(targets_location, teleport::teleport);
     let rotation = builder.argument(targets_location, "rotation", ArgumentType::Rotation, 0);
-    builder.run(rotation, teleport::teleport);
+    builder.run_island(rotation, teleport::teleport);
     let facing = builder.literal(targets_location, "facing", 0);
     let entity = builder.literal(facing, "entity", 0);
     let facing_entity = builder.argument(entity, "facingEntity", entity_argument(), 0);
-    builder.run(facing_entity, teleport::teleport);
+    builder.run_island(facing_entity, teleport::teleport);
     let anchor = builder.argument(facing_entity, "facingAnchor", ArgumentType::EntityAnchor, 0);
-    builder.run(anchor, teleport::teleport);
+    builder.run_island(anchor, teleport::teleport);
     let facing_location = builder.argument(facing, "facingLocation", ArgumentType::Vec3, 0);
-    builder.run(facing_location, teleport::teleport);
+    builder.run_island(facing_location, teleport::teleport);
     let targets_destination = builder.argument(targets, "destination", entity_argument(), 0);
-    builder.run(targets_destination, teleport::teleport);
+    builder.run_island(targets_destination, teleport::teleport);
     let alias = builder.literal(root, "tp", permission::GAMEMASTERS);
     builder.graph.redirect(alias, teleport);
 }
@@ -901,7 +920,7 @@ fn clone_destination(builder: &mut Builder, parent: usize) {
     let destination = builder.argument(parent, "destination", ArgumentType::BlockPos, 0);
     clone_modes(builder, destination, false);
     let strict = builder.literal(destination, "strict", 0);
-    builder.run(strict, clone::strict_replace_normal);
+    builder.run_island(strict, clone::strict_replace_normal);
     clone_filter_modes(builder, strict, true);
 }
 
@@ -911,7 +930,7 @@ fn clone_modes(builder: &mut Builder, parent: usize, strict: bool) {
     } else {
         clone::replace_normal
     };
-    builder.run(parent, normal);
+    builder.run_island(parent, normal);
     clone_filter_modes(builder, parent, strict);
 }
 
@@ -932,7 +951,7 @@ enum FilterKind {
 }
 
 fn bind_clone_modes(builder: &mut Builder, parent: usize, filter: FilterKind, strict: bool) {
-    let actions: [CommandFn; 3] = match (filter, strict) {
+    let actions: [IslandFn; 3] = match (filter, strict) {
         (FilterKind::Replace, false) => [
             clone::replace_normal,
             clone::replace_force,
@@ -964,16 +983,16 @@ fn bind_clone_modes(builder: &mut Builder, parent: usize, filter: FilterKind, st
             clone::strict_filtered_move,
         ],
     };
-    builder.run(parent, actions[0]);
-    builder.bind_literal(parent, "force", actions[1]);
-    builder.bind_literal(parent, "move", actions[2]);
-    builder.bind_literal(parent, "normal", actions[0]);
+    builder.run_island(parent, actions[0]);
+    builder.bind_island(parent, "force", actions[1]);
+    builder.bind_island(parent, "move", actions[2]);
+    builder.bind_island(parent, "normal", actions[0]);
 }
 
 fn register_stopsound(builder: &mut Builder, root: usize) {
     let command = builder.literal(root, "stopsound", permission::GAMEMASTERS);
     let targets = builder.argument(command, "targets", players_argument(), 0);
-    builder.run(targets, stopsound::stop_sound);
+    builder.run_island(targets, stopsound::stop_sound);
     let all = builder.literal(targets, "*", 0);
     add_sound_name(builder, all);
     for name in [
@@ -981,37 +1000,37 @@ fn register_stopsound(builder: &mut Builder, root: usize) {
         "voice", "ui",
     ] {
         let source = builder.literal(targets, name, 0);
-        builder.run(source, stopsound::stop_sound);
+        builder.run_island(source, stopsound::stop_sound);
         add_sound_name(builder, source);
     }
 }
 
 fn add_sound_name(builder: &mut Builder, parent: usize) {
     let sound = builder.argument(parent, "sound", ArgumentType::ResourceLocation, 0);
-    builder.run(sound, stopsound::stop_sound);
+    builder.run_island(sound, stopsound::stop_sound);
 }
 
 fn register_random(builder: &mut Builder, root: usize) {
     let command = builder.literal(root, "random", 0);
-    let actions: [(&str, CommandFn); 2] = [("value", random::value), ("roll", random::roll)];
+    let actions: [(&str, IslandFn); 2] = [("value", random::value), ("roll", random::roll)];
     for (name, action) in actions {
         let branch = builder.literal(command, name, 0);
         let range = builder.argument(branch, "range", ArgumentType::IntRange, 0);
-        builder.run(range, action);
+        builder.run_island(range, action);
         let sequence = builder.argument(
             range,
             "sequence",
             ArgumentType::ResourceLocation,
             permission::GAMEMASTERS,
         );
-        builder.run(sequence, action);
+        builder.run_island(sequence, action);
     }
     let reset = builder.literal(command, "reset", permission::GAMEMASTERS);
     let all = builder.literal(reset, "*", 0);
-    builder.run(all, random::reset);
+    builder.run_island(all, random::reset);
     add_reset_seed(builder, all);
     let sequence = builder.argument(reset, "sequence", ArgumentType::ResourceLocation, 0);
-    builder.run(sequence, random::reset);
+    builder.run_island(sequence, random::reset);
     add_reset_seed(builder, sequence);
 }
 
@@ -1025,11 +1044,11 @@ fn add_reset_seed(builder: &mut Builder, parent: usize) {
         },
         0,
     );
-    builder.run(seed, random::reset);
+    builder.run_island(seed, random::reset);
     let world = builder.argument(seed, "includeWorldSeed", ArgumentType::Bool, 0);
-    builder.run(world, random::reset);
+    builder.run_island(world, random::reset);
     let sequence_id = builder.argument(world, "includeSequenceId", ArgumentType::Bool, 0);
-    builder.run(sequence_id, random::reset);
+    builder.run_island(sequence_id, random::reset);
 }
 
 fn register_enchant(builder: &mut Builder, root: usize) {
@@ -1043,7 +1062,7 @@ fn register_enchant(builder: &mut Builder, root: usize) {
         },
         0,
     );
-    builder.run(enchantment, enchant::enchant);
+    builder.run_island(enchantment, enchant::enchant);
     let level = builder.argument(
         enchantment,
         "level",
@@ -1053,7 +1072,7 @@ fn register_enchant(builder: &mut Builder, root: usize) {
         },
         0,
     );
-    builder.run(level, enchant::enchant);
+    builder.run_island(level, enchant::enchant);
 }
 
 /// 官方 `LootCommand.addTargets`：四种目标，每个目标后面是同一组来源后缀。
@@ -1129,10 +1148,10 @@ fn add_loot_sources(builder: &mut Builder, parent: usize, target: LootTarget) {
 }
 
 fn add_tool_suffixes(builder: &mut Builder, parent: usize, target: LootTarget, source: LootSource) {
-    builder.bind_literal(parent, "mainhand", loot_action(target, source));
-    builder.bind_literal(parent, "offhand", loot_action(target, source));
+    builder.bind_island(parent, "mainhand", loot_action(target, source));
+    builder.bind_island(parent, "offhand", loot_action(target, source));
     let tool = builder.argument(parent, "tool", ArgumentType::Item, 0);
-    builder.run(tool, loot_action(target, source));
+    builder.run_island(tool, loot_action(target, source));
 }
 
 #[derive(Clone, Copy)]
@@ -1143,7 +1162,7 @@ enum LootSource {
     Fish,
 }
 
-fn loot_action(target: LootTarget, source: LootSource) -> CommandFn {
+fn loot_action(target: LootTarget, source: LootSource) -> IslandFn {
     match (target, source) {
         (LootTarget::Give, LootSource::Loot) => loot::give_loot,
         (LootTarget::Give, LootSource::Mine) => loot::give_mine,
@@ -1169,7 +1188,7 @@ fn loot_action(target: LootTarget, source: LootSource) -> CommandFn {
 }
 
 fn bind_loot(builder: &mut Builder, parent: usize, target: LootTarget, source: LootSource) {
-    builder.run(parent, loot_action(target, source));
+    builder.run_island(parent, loot_action(target, source));
 }
 
 /// `WorldBorderCommand.register`：整棵树要等级 2。距离是 `doubleArg(-MAX, MAX)`，
@@ -1257,13 +1276,13 @@ fn register_spawns(builder: &mut Builder, root: usize) {
     builder.run(rotation, world_settings::set_world_spawn);
 
     let spawnpoint = builder.literal(root, "spawnpoint", permission::GAMEMASTERS);
-    builder.run(spawnpoint, world_settings::spawnpoint);
+    builder.run_island(spawnpoint, world_settings::spawnpoint);
     let targets = builder.argument(spawnpoint, "targets", players_argument(), 0);
-    builder.run(targets, world_settings::spawnpoint);
+    builder.run_island(targets, world_settings::spawnpoint);
     let pos = builder.argument(targets, "pos", ArgumentType::BlockPos, 0);
-    builder.run(pos, world_settings::spawnpoint);
+    builder.run_island(pos, world_settings::spawnpoint);
     let rotation = builder.argument(pos, "rotation", ArgumentType::Rotation, 0);
-    builder.run(rotation, world_settings::spawnpoint);
+    builder.run_island(rotation, world_settings::spawnpoint);
 }
 
 fn register_default_gamemode(builder: &mut Builder, root: usize) {
@@ -1382,16 +1401,16 @@ fn register_transfer(builder: &mut Builder, root: usize) {
         ArgumentType::String(StringKind::Quotable),
         0,
     );
-    builder.run(hostname, admin::transfer);
+    builder.run_island(hostname, admin::transfer);
     let port = builder.argument(
         hostname,
         "port",
         ArgumentType::Integer { min: 1, max: 65535 },
         0,
     );
-    builder.run(port, admin::transfer);
+    builder.run_island(port, admin::transfer);
     let players = builder.argument(port, "players", players_argument(), 0);
-    builder.run(players, admin::transfer);
+    builder.run_island(players, admin::transfer);
 }
 
 fn register_version(builder: &mut Builder, root: usize) {

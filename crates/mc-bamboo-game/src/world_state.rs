@@ -9,7 +9,6 @@
 //! weather, seed and random sequences are not saved. Per-player respawn points live on `Player`.
 
 use mc_bamboo_core::BlockPos;
-use mc_bamboo_loot::RandomSequences;
 use mc_bamboo_protocol::packet::play::GameMode;
 
 /// 没有存档也没有 `level-seed` 配置项，世界种子固定为 0。
@@ -125,8 +124,6 @@ pub(crate) struct WorldState {
     pub(crate) seed: i64,
     pub(crate) spawn: RespawnData,
     pub(crate) weather: Weather,
-    /// `/random` 和带 `random_sequence` 的战利品表共用。
-    pub(crate) sequences: RandomSequences,
 }
 
 impl Default for WorldState {
@@ -138,7 +135,6 @@ impl Default for WorldState {
             seed: WORLD_SEED,
             spawn: RespawnData::default(),
             weather: Weather::default(),
-            sequences: RandomSequences::new(WORLD_SEED),
         }
     }
 }

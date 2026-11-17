@@ -19,7 +19,7 @@ use crate::{
         feedback::{self, CommandFail, fail},
         select, text,
     },
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     region::Region,
 };
@@ -68,7 +68,7 @@ pub(crate) enum Action {
 }
 
 pub(crate) fn run(
-    _global: &mut Global,
+    _port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
@@ -174,12 +174,12 @@ fn required_time(parsed: &ParsedCommand, name: &str) -> Result<i32, CommandFail>
 macro_rules! action {
     ($name:ident, $action:expr) => {
         pub(crate) fn $name(
-            global: &mut Global,
+            port: &mut GlobalPort<'_>,
             region: &mut Region,
             id: PlayerId,
             parsed: &ParsedCommand,
         ) -> Result<(), CommandFail> {
-            run(global, region, id, parsed, $action)
+            run(port, region, id, parsed, $action)
         }
     };
 }

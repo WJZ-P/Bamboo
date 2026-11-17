@@ -14,19 +14,19 @@ use crate::{
         feedback::{self, CommandFail, fail, fail_with},
         select,
     },
-    global::Global,
+    global_port::GlobalPort,
     inbound::PlayerId,
     inventory,
     region::Region,
 };
 
 pub(crate) fn give(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let selector = required_entity(parsed, "targets")?;
     let targets = select::players(region, id, level_of(region, id), selector)?;
     let item = parsed
@@ -99,12 +99,12 @@ pub(crate) fn give(
 }
 
 pub(crate) fn clear(
-    global: &mut Global,
+    port: &mut GlobalPort<'_>,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let _ = global;
+    let _ = port;
     let level = level_of(region, id);
     let targets = if let Some(selector) = parsed.get("targets").and_then(|value| value.as_entity())
     {
