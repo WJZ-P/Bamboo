@@ -19,7 +19,7 @@ use mc_bamboo_storage::{
     world_dir::{encode_player_data, player_uuid_string},
 };
 use mc_bamboo_world::director::{
-    DemandSnapshot, DirectorConfig, PipelineKind, PlayerDemand, TicketOp,
+    DemandSnapshot, DirectorConfig, HOME_REGION, PipelineKind, PlayerDemand, TicketOp,
 };
 
 use crate::director_host::{DirectorHost, MailBudget};
@@ -34,7 +34,9 @@ use crate::{
     global_port::{GlobalEffect, GlobalPort, PortMode},
     inbound::{Inbound, InboundReceiver, JoinRequest, PlayerId, PlayerInbox, Sequenced},
     interaction::{self, UseItemOn},
-    inventory, lectern, light_updates, menu, movement,
+    inventory,
+    island::{Island, IslandAccess, IslandDrive, Posted},
+    lectern, light_updates, menu, movement,
     pacing::{Pacer, WallTiming},
     player::shows_hat,
     player_save::{game_mode_from_id, restore_inventory, runtime_player_data},
@@ -96,6 +98,13 @@ pub struct WorldConfig {
     pub chunk_worker_threads: usize,
     /// Director 信箱每刻交付/收回的区块数上限，0 表示不限。
     pub mail_budget: MailBudget,
+    /// 主控和岛怎么交接区块信件（岛的实施计划第 6 节第 6 步）。齐步 = 精确模式，
+    /// 逐位一致；分离 = 区块交付晚一刻。要求逐位一致的地方显式选齐步。
+    ///
+    /// How the master and the island hand chunk mail over (island plan,
+    /// section 6, step 6). Lockstep is exact mode, bit for bit; detached
+    /// delivers chunks one tick later. Bit-exact callers choose lockstep explicitly.
+    pub island_drive: IslandDrive,
     /// 世界目录。`None` 表示不存档（测试、oracle、压测都走这条路）。
     ///
     /// The world directory. `None` disables saving (tests, oracle, load tests).
@@ -132,6 +141,7 @@ impl Default for WorldConfig {
             redstone_cache: false,
             chunk_worker_threads: 0,
             mail_budget: MailBudget::default(),
+            island_drive: IslandDrive::default_for_world(),
             world_dir: None,
             world_gen: crate::world_options::WorldGenConfig::default(),
             broadcast_console_to_ops: true,
@@ -204,21 +214,15 @@ pub(crate) struct Master {
     /// plan, section 6, step 5b). Direct by default; unit tests can switch the
     /// whole run to the queued one.
     pub(crate) port_mode: PortMode,
-}
-
-/// 岛：一个 `Region` 和只属于它的执行配置。以后可以整个交给 tick 线程。
-///
-/// An island: one `Region` plus the execution settings that belong to it.
-/// It will later be handed whole to a tick thread.
-pub(crate) struct Island {
-    pub(crate) region: Region,
-    /// 实体阶段的线程数。0 = 精确驱动；≥ 1 = 并行驱动。
-    pub(crate) entity_threads: usize,
-    /// 排队实现下这一刻攒下、等交回时由主控应用的全局改动。直接实现下一直是空的。
+    /// 齐步还是分离（[`IslandDrive`]）。
+    pub(crate) drive: IslandDrive,
+    /// 分离驱动下岛还在跑时收到的 `/save-all`：等岛交回、停放之后再过栅栏。
     ///
-    /// Global changes collected this tick under the queued port, applied by the
-    /// master at hand-back. Always empty under the direct port.
-    pub(crate) effects: Vec<GlobalEffect>,
+    /// `/save-all` requests that arrived while a detached island was running:
+    /// they pass the barrier once the island has handed back and parked.
+    deferred_save_all: Vec<(bool, PlayerId)>,
+    /// 分离驱动下岛开头收信用的信件列表，跨刻复用容量。
+    posted_scratch: Vec<Posted>,
 }
 
 impl World {
@@ -370,13 +374,7 @@ impl World {
                 host: if infinite_flat {
                     DirectorHost::new_infinite_flat(Default::default())
                 } else {
-                    DirectorHost::new(
-                        director_config,
-                        MailBudget {
-                            deliveries: config.mail_budget.deliveries.min(MAX_MAIL_BUDGET),
-                            reclaims: config.mail_budget.reclaims.min(MAX_MAIL_BUDGET),
-                        },
-                    )
+                    DirectorHost::new(director_config)
                 },
                 ticket_centers: std::collections::BTreeMap::new(),
                 player_directions: std::collections::BTreeMap::new(),
@@ -388,11 +386,18 @@ impl World {
                 bench_hooks: config.bench,
                 bench_ready: false,
                 port_mode: PortMode::default_for_world(),
+                drive: config.island_drive,
+                deferred_save_all: Vec::new(),
+                posted_scratch: Vec::new(),
             },
-            island: Island {
-                region,
-                entity_threads: config.entity_threads.min(MAX_ENTITY_THREADS),
-                effects: Vec::new(),
+            island: {
+                let budget = MailBudget {
+                    deliveries: config.mail_budget.deliveries.min(MAX_MAIL_BUDGET),
+                    reclaims: config.mail_budget.reclaims.min(MAX_MAIL_BUDGET),
+                };
+                let mut island = Island::new(HOME_REGION, region, budget);
+                island.entity_threads = config.entity_threads.min(MAX_ENTITY_THREADS);
+                island
             },
         };
         world
@@ -511,7 +516,9 @@ impl World {
                 };
             }
         }
-        self.master.host.tickets(&mut self.island.region, ops);
+        self.master
+            .host
+            .tickets(&mut island_access(self.master.drive, &mut self.island), ops);
     }
 
     /// 每刻在玩家跟踪阶段之前调用：只在玩家跨区块时发 `PlayerMoved`。
@@ -598,9 +605,10 @@ impl World {
             .as_ref()
             .is_none_or(|save| save.auto_save());
         self.master.host.set_saves_enabled(saves_enabled);
-        self.master
-            .host
-            .tick(&mut self.island.region, self.master.director_tick);
+        self.master.host.tick(
+            &mut island_access(self.master.drive, &mut self.island),
+            self.master.director_tick,
+        );
     }
 
     /// 阻塞运行，直到收到 [`Inbound::Shutdown`] 或者所有发送端都没了。
@@ -638,7 +646,7 @@ impl World {
     #[doc(hidden)]
     pub fn tick_unpaced(&mut self) -> usize {
         let _ = self.tick();
-        self.master.host.counters_this_tick().0
+        self.island.mailbox.counters_this_tick().0
     }
 
     /// 测量脚手架用：加一批强加载票，并关掉随机刻（避免比较期间草蔓延改方块）。
@@ -713,6 +721,13 @@ impl World {
                 stats.finish_tick(three, total);
             }
         }
+        // 主控（宿主）这一刻记的子段并进岛的报告：只有一个岛时就是合计。
+        // Fold the master's (host's) sub-phases into the island's report: with
+        // one island that is the total.
+        self.island
+            .region
+            .profiler
+            .absorb_sub_totals(&mut self.master.host.profiler);
         self.island.region.profiler.end_tick();
         flow
     }
@@ -824,9 +839,15 @@ impl World {
     /// 拆成 `tick` 和这一段只是为了保证提前返回时也能收尾；顺序仍然是原来的顺序。
     fn tick_phases(&mut self) -> ControlFlow<()> {
         self.master.host.begin_tick();
+        self.island.mailbox.begin_tick();
+        if self.master.drive == IslandDrive::Detached {
+            self.start_island_tick();
+        }
         // 上一刻发出去的读盘请求，结果在这一刻开头经信箱收回。
         // Read requests dispatched last tick are collected at the start of this tick.
-        self.master.host.poll_io(&mut self.island.region);
+        self.master
+            .host
+            .poll_io(&mut island_access(self.master.drive, &mut self.island));
         // 每次 `/save-all` 等自己那道栅栏；请求里全部快照提交完之后才登记等待。
         // Each `/save-all` waits for its own barrier, registered only after all
         // of its snapshots have been handed to IO (review 8/9).
@@ -861,7 +882,7 @@ impl World {
         self.sync_player_tickets();
         self.island.region.profiler.lap(Phase::Inbox);
         self.tick_ticket_timeouts();
-        let (delivered, reclaimed) = self.master.host.counters_this_tick();
+        let (delivered, reclaimed) = self.island.mailbox.counters_this_tick();
         let profiler = &mut self.island.region.profiler;
         profiler.record(Metric::ChunksDelivered, delivered as u64);
         profiler.record(Metric::ChunksReclaimed, reclaimed as u64);
@@ -1019,11 +1040,29 @@ impl World {
             .save
             .as_ref()
             .is_some_and(|save| save.auto_save());
-        self.master.host.save_loaded_dirty(
-            &mut self.island.region,
-            self.master.director_tick,
-            save_enabled,
-        );
+        match self.master.drive {
+            IslandDrive::Lockstep => self.master.host.save_loaded_dirty(
+                &mut self.island,
+                self.master.director_tick,
+                save_enabled,
+            ),
+            IslandDrive::Detached => {
+                // 岛这一刻的最后一件事：照上次交回时的名单编码，连同新的改动交回、停放。
+                // 主控收下快照、判脏，给出下一份名单。
+                // The island's last step this tick: encode the list from the
+                // last hand-back, hand it back with the new changes, and park.
+                // The master takes the snapshots, judges, and gives the next list.
+                let report = self.island.save_pass();
+                self.island.park();
+                self.island.save_plan =
+                    self.master
+                        .host
+                        .plan_saves(report, self.master.director_tick, save_enabled);
+                for (flush, source) in std::mem::take(&mut self.master.deferred_save_all) {
+                    self.save_all(flush, source);
+                }
+            }
+        }
         if self.master.global.admin.stop_requested {
             let flow = self.shut_down();
             self.island.region.profiler.lap(Phase::TickTail);
@@ -1314,48 +1353,12 @@ impl World {
         for request in requests {
             match request {
                 SaveCommand::SaveAll { flush, source } => {
-                    // 照官方 saveEverything：先给所有脏的已加载区块拍快照交给 IO 线程，
-                    // 再存玩家，最后把 level.dat / data/ 的字节交给 IO 线程。
-                    // 世界线程只编码、不碰磁盘，也不阻塞等 IO（R5 / F3）。
-                    // Like official saveEverything: snapshot dirty loaded chunks,
-                    // save players, then hand level.dat/data bytes to the IO
-                    // thread. The world thread only encodes, never blocks on IO.
-                    self.master
-                        .host
-                        .snapshot_all_dirty(&mut self.island.region, self.master.director_tick);
-                    self.save_all_players();
-                    let files = self.master.save.as_mut().map(|save| {
-                        save.encode_saves(&self.master.global, crate::admin::now_millis())
-                    });
-                    let encoded = match files {
-                        Some(Ok(files)) => {
-                            self.master.host.submit_file_writes(files);
-                            true
-                        }
-                        Some(Err(error)) => {
-                            // 编码就失败了：绝不能报成功，直接发 commands.save.failed（F9）。
-                            warn!(%error, "save-all could not encode level data");
-                            false
-                        }
-                        None => true,
-                    };
-                    if !encoded {
-                        self.send_save_failure(source);
-                        continue;
-                    }
-                    // 这次请求的全部快照都交给 IO 线程之后才排一道自己的栅栏。
-                    // 阻塞的 flush() 只允许出现在关服；flush 标志按官方解析保留。
-                    // Queue this request's own barrier after all of its snapshots
-                    // reach IO. Blocking flush() remains shutdown-only.
-                    debug!(flush, "save-all handed its writes to the bounded queue");
-                    if self.master.host.begin_save_all(source).is_none() {
-                        // 这一局没接磁盘：没有 IO 要等，直接发。
-                        self.send_save_success(source);
+                    if self.master.drive == IslandDrive::Detached {
+                        // 岛还在跑：等它这一刻交回、停放之后再过栅栏（第 2 节第 23 行）。
+                        // The island is running: pass the barrier once it parks.
+                        self.master.deferred_save_all.push((flush, source));
                     } else {
-                        // 取回刚登记好的栅栏，等自己的 IO 回执（中 9）。
-                        for (seq, owner) in self.master.host.take_ready_save_barriers() {
-                            self.master.pending_save_success.push((seq, owner));
-                        }
+                        self.save_all(flush, source);
                     }
                 }
                 SaveCommand::SaveOn => {
@@ -1368,6 +1371,55 @@ impl World {
                         save.set_auto_save(false);
                     }
                 }
+            }
+        }
+    }
+
+    /// 照官方 saveEverything：先给所有脏的已加载区块拍快照交给 IO 线程，
+    /// 再存玩家，最后把 level.dat / data/ 的字节交给 IO 线程。
+    /// 世界线程只编码、不碰磁盘，也不阻塞等 IO（R5 / F3）。岛这时一定停放着。
+    /// Like official saveEverything: snapshot dirty loaded chunks, save
+    /// players, then hand level.dat/data bytes to the IO thread. The world
+    /// thread only encodes, never blocks on IO. The island is parked here.
+    fn save_all(&mut self, flush: bool, source: PlayerId) {
+        debug_assert_eq!(self.island.state, crate::island::IslandState::Parked);
+        self.master
+            .host
+            .snapshot_all_dirty(&mut self.island, self.master.director_tick);
+        self.save_all_players();
+        let files = self
+            .master
+            .save
+            .as_mut()
+            .map(|save| save.encode_saves(&self.master.global, crate::admin::now_millis()));
+        let encoded = match files {
+            Some(Ok(files)) => {
+                self.master.host.submit_file_writes(files);
+                true
+            }
+            Some(Err(error)) => {
+                // 编码就失败了：绝不能报成功，直接发 commands.save.failed（F9）。
+                warn!(%error, "save-all could not encode level data");
+                false
+            }
+            None => true,
+        };
+        if !encoded {
+            self.send_save_failure(source);
+            return;
+        }
+        // 这次请求的全部快照都交给 IO 线程之后才排一道自己的栅栏。
+        // 阻塞的 flush() 只允许出现在关服；flush 标志按官方解析保留。
+        // Queue this request's own barrier after all of its snapshots
+        // reach IO. Blocking flush() remains shutdown-only.
+        debug!(flush, "save-all handed its writes to the bounded queue");
+        if self.master.host.begin_save_all(source).is_none() {
+            // 这一局没接磁盘：没有 IO 要等，直接发。
+            self.send_save_success(source);
+        } else {
+            // 取回刚登记好的栅栏，等自己的 IO 回执（中 9）。
+            for (seq, owner) in self.master.host.take_ready_save_barriers() {
+                self.master.pending_save_success.push((seq, owner));
             }
         }
     }
@@ -1774,11 +1826,39 @@ impl World {
     /// (command feedback, the tab list) go out in the same tick as the island's.
     /// Under the direct port the queue is empty and this does nothing.
     fn hand_back(&mut self) {
+        // 分离驱动下岛这一刻开头收信产生的回执交给 Director；齐步下回执当场就给了。
+        // Under the detached drive, feed the acks from this tick's mail to the
+        // Director; in lockstep they were handed over on the spot.
+        if !self.island.replies.is_empty() {
+            let mut replies = std::mem::take(&mut self.island.replies);
+            self.master.host.accept_replies(
+                &mut island_access(self.master.drive, &mut self.island),
+                &mut replies,
+            );
+            self.island.replies = replies;
+        }
         if self.island.effects.is_empty() {
             return;
         }
         let effects = std::mem::take(&mut self.island.effects);
         crate::global_port::apply_all(&mut self.master.global, &mut self.island.region, effects);
+    }
+
+    /// 分离驱动下岛这一刻的开头：停放 → 运行，收下主控上一刻投来的信，交付 / 收回，
+    /// 回执留到交回时给主控。
+    ///
+    /// The start of a detached island's tick: parked → running, take the
+    /// mail the master posted last tick, deliver and reclaim, and keep the acks
+    /// for the hand-back.
+    fn start_island_tick(&mut self) {
+        self.island.dispatch();
+        let mut posted = std::mem::take(&mut self.master.posted_scratch);
+        self.master.host.take_posted(self.island.id, &mut posted);
+        let order = self.master.host.mail_order();
+        let mut replies = std::mem::take(&mut self.island.replies);
+        self.island.take_mail(&mut posted, &order, &mut replies);
+        self.island.replies = replies;
+        self.master.posted_scratch = posted;
     }
 
     /// 按官方 `stopServer` 顺序关服：先存玩家、再存区块（后续步骤接入 IO 线程后补），
@@ -1790,8 +1870,10 @@ impl World {
     /// and `chunk_tickets.dat`, release the lock, and finally kick everyone.
     /// Every step only logs on error so shutdown can never hang.
     fn shut_down(&mut self) -> ControlFlow<()> {
-        // 还没交回的全局改动先应用，存盘看到的是最新的。
-        // Apply global changes not yet handed back so the save sees them.
+        // 关服是栅栏：岛停下来交回。还没交回的回执和全局改动先应用，存盘看到的是最新的。
+        // Shutdown is a barrier: the island stops and hands back. Apply acks and
+        // global changes not yet handed back so the save sees them.
+        self.island.park();
         self.hand_back();
         // 官方顺序：玩家 → 区块 → level.dat / data/ → 解锁。
         // level.dat/data 的字节也在关服的阻塞栅栏之前交给 IO 线程，
@@ -1822,7 +1904,7 @@ impl World {
         // 这是唯一允许世界线程阻塞等 IO 的地方。
         // Reclaim every loaded chunk, hand over every queued write, then drain
         // and sync_all: the only place the world thread may block on IO.
-        self.master.host.shutdown(&mut self.island.region);
+        self.master.host.shutdown(&mut self.island);
         if let Some(save) = &mut self.master.save {
             save.close();
         }
@@ -1834,6 +1916,20 @@ impl World {
         let reason = Component::translate(SERVER_SHUTDOWN, []);
         self.island.region.links.kick_all(&reason);
         ControlFlow::Break(())
+    }
+}
+
+/// 主控这一次调用怎么拿岛：齐步借出去、信件当场收取；分离只投信，岛下一刻开头收取。
+///
+/// How the master reaches the island for one call: lockstep lends it and the
+/// mail is taken on the spot; detached only posts, for the island's next tick.
+fn island_access(drive: IslandDrive, island: &mut Island) -> IslandAccess<'_> {
+    match drive {
+        IslandDrive::Lockstep => {
+            debug_assert_eq!(island.state, crate::island::IslandState::Parked);
+            IslandAccess::Lent(island)
+        }
+        IslandDrive::Detached => IslandAccess::Away,
     }
 }
 
@@ -1916,6 +2012,9 @@ impl Schedule {
 #[cfg(test)]
 #[path = "world/tests/compute_pool_tests.rs"]
 mod compute_pool_tests;
+#[cfg(test)]
+#[path = "world/tests/island_drive_tests.rs"]
+mod island_drive_tests;
 #[cfg(test)]
 #[path = "world/island_scale_tests.rs"]
 mod island_scale_tests;

@@ -243,6 +243,9 @@ impl ServerSettings {
                 deliveries: self.deliveries_per_tick as usize,
                 reclaims: self.reclaims_per_tick as usize,
             },
+            // 岛的驱动还不是设置项（第 7 步加 `island_threads`），用缺省值。
+            // The island drive is not a setting yet (step 7 adds `island_threads`).
+            island_drive: defaults.island_drive,
             world_gen: self.world_gen.clone(),
             // 桌面端有 GUI 控制台，不读进程 stdin；广播默认按官方 true。
             // The desktop has a GUI console, so it does not read process stdin;

@@ -1025,10 +1025,10 @@ fn check_footprints(server: &Harness) {
         let center = player.chunk_pos();
         for dx in -1..=1 {
             for dz in -1..=1 {
+                // 分离驱动下交付晚一刻：已经投进邮筒的也算到位。
+                // Detached: a box already posted counts as in place.
                 assert!(
-                    region
-                        .chunks
-                        .is_loaded(ChunkPos::new(center.x + dx, center.z + dz)),
+                    server.footprint_ready(ChunkPos::new(center.x + dx, center.z + dz)),
                     "脚下 {center:?} 的 3×3 没交付"
                 );
             }

@@ -58,6 +58,7 @@ mod global_port;
 mod inbound;
 mod interaction;
 mod inventory;
+mod island;
 mod lectern;
 mod light_updates;
 mod links;
@@ -101,6 +102,7 @@ pub use inbound::{
     PlayerSender, PlayerSink, Sequenced, channel as inbound_channel,
 };
 pub use inventory::receive_like_player;
+pub use island::IslandDrive;
 pub use lectern::{LecternReplay, LecternSnapshot};
 pub use loot_stacks::loot_stack;
 pub use menu::replay::{Replay, ReplayShape, ReplayWorld, Snapshot};

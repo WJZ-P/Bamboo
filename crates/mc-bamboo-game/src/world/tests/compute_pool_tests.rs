@@ -22,7 +22,7 @@ use mc_bamboo_storage::{
 };
 use mc_bamboo_world::director::TicketOp;
 
-use crate::{chunk_generator::FlatGenerator, world::tests::Harness};
+use crate::{chunk_generator::FlatGenerator, island::IslandDrive, world::tests::Harness};
 
 struct TempWorld(std::path::PathBuf);
 
@@ -117,9 +117,9 @@ fn disk_contents(root: &std::path::Path) -> BTreeMap<(String, i32, i32), Vec<u8>
 }
 
 /// 一个覆盖生成、解析、序列化、停放、重新加载的场景，返回关服后盘上的内容。
-fn run_scenario(threads: usize) -> BTreeMap<(String, i32, i32), Vec<u8>> {
-    let tmp = TempWorld::new(&format!("scenario-{threads}"));
-    let mut server = Harness::new_loaded_with_save_and_threads(2, &tmp.0, threads);
+fn run_scenario(threads: usize, drive: IslandDrive) -> BTreeMap<(String, i32, i32), Vec<u8>> {
+    let tmp = TempWorld::new(&format!("scenario-{threads}-{drive:?}"));
+    let mut server = Harness::new_loaded_with_save_threads_and_drive(2, &tmp.0, threads, drive);
     server.set_reclaim_delay(1);
     assert_eq!(
         server.world.master.host.compute_in_flight(),
@@ -194,22 +194,34 @@ fn run_scenario(threads: usize) -> BTreeMap<(String, i32, i32), Vec<u8>> {
 }
 
 /// 核心验收：内联执行器和 4 线程池各跑一遍同样的场景，盘上内容逐字节相同。
-/// 交付时刻可以不同（见模块文档），内容不能不同。
+/// 交付时刻可以不同（见模块文档），内容不能不同。齐步和分离两种驱动各跑一遍，
+/// 两种驱动之间也必须逐字节相同（分离只是交付晚一刻）。
+///
+/// Inline vs. a 4-thread pool, under both the lockstep and the detached drive:
+/// the bytes on disk must match pairwise and across drives (detached only
+/// delivers one tick later).
 #[test]
 fn inline_and_pool_produce_identical_worlds() {
-    let inline = run_scenario(0);
-    let pooled = run_scenario(4);
-    assert!(!inline.is_empty(), "场景要写出区块");
-    assert_eq!(
-        inline.keys().collect::<Vec<_>>(),
-        pooled.keys().collect::<Vec<_>>(),
-        "两边盘上的区块集合要相同"
-    );
-    for (key, bytes) in &inline {
-        assert!(
-            pooled.get(key) == Some(bytes),
-            "区块 {key:?} 的字节不同：内联和池子算出的内容必须相同"
+    let mut worlds = Vec::new();
+    for drive in [IslandDrive::Lockstep, IslandDrive::Detached] {
+        for threads in [0, 4] {
+            worlds.push(((drive, threads), run_scenario(threads, drive)));
+        }
+    }
+    let ((_, _), reference) = &worlds[0];
+    assert!(!reference.is_empty(), "场景要写出区块");
+    for ((drive, threads), world) in &worlds[1..] {
+        assert_eq!(
+            reference.keys().collect::<Vec<_>>(),
+            world.keys().collect::<Vec<_>>(),
+            "{drive:?} / {threads} 线程：盘上的区块集合要和齐步内联相同"
         );
+        for (key, bytes) in reference {
+            assert!(
+                world.get(key) == Some(bytes),
+                "{drive:?} / {threads} 线程：区块 {key:?} 的字节和齐步内联不同"
+            );
+        }
     }
 }
 

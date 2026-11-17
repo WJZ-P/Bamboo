@@ -915,6 +915,19 @@ impl Profiler {
         self.sub_totals[index] = self.sub_totals[index].saturating_add(elapsed);
     }
 
+    /// 把 `master`（主控的剖析器）这一刻累计的子段耗时并进来，并清掉它的。
+    /// 每刻 `end_tick` 之前调一次，报告里的子段就是「岛 + 主控」的合计。
+    ///
+    /// Fold the sub-phase time `master` (the master's profiler) accumulated
+    /// this tick into this one and clear it. Called once per tick before
+    /// `end_tick`, so the report's sub-phases are island + master.
+    pub(crate) fn absorb_sub_totals(&mut self, master: &mut Self) {
+        master.end_sub();
+        for (mine, theirs) in self.sub_totals.iter_mut().zip(master.sub_totals.iter_mut()) {
+            *mine = mine.saturating_add(std::mem::take(theirs));
+        }
+    }
+
     /// 量一个闭区间：`start_sub` + `end_sub` 的简写。
     pub(crate) fn time_sub<T>(&mut self, sub: SubPhase, work: impl FnOnce() -> T) -> T {
         self.start_sub(sub);

@@ -18,7 +18,7 @@ use mc_bamboo_core::ChunkPos;
 use mc_bamboo_storage::chunk_io::{ChunkIo, Reply};
 use mc_bamboo_world::{
     director::{
-        DemandSnapshot, Desired, Director, DirectorConfig, Effect, Event, RegionMessage, SaveSeq,
+        DemandSnapshot, Director, DirectorConfig, Effect, Event, RegionId, RegionMessage, SaveSeq,
         Task, TaskId, TaskResult, TicketOp,
     },
     light::generate::GeneratedLight,
@@ -31,8 +31,12 @@ use crate::{
     chunk_jobs::{ChunkJob, ChunkOutcome, ChunkReply, ChunkWork, decode_packed, encode_column},
     compute_pool::{ComputePool, PoolJob},
     inbound::PlayerId,
-    profiler::{Metric, SubPhase},
-    region::{Region, RegionColumn, parking::Parking},
+    island::{
+        DemandRank, Encoded, Island, IslandAccess, MailOrder, MailReport, Posted, SaveChanges,
+        SavePlan, SaveReport, distance_to_players,
+    },
+    profiler::{Profiler, SubPhase},
+    region::{RegionColumn, parking::Parking},
     worldgen::GeneratedChunk,
     worldgen_features::{BlockDelta, GenerateOutput, assemble_feature_column},
 };
@@ -92,9 +96,6 @@ pub(crate) const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
 /// 不会在池子里排一长串过期的远处任务。
 pub(crate) const POOL_JOBS_PER_THREAD: usize = 4;
 
-/// 排队用的 rank：`(玩家优先级, x, z)`，小的先出。
-type DemandRank = (i64, i32, i32);
-
 /// 一次待落盘的区块快照。
 #[cfg(test)]
 pub(crate) struct PendingWrite {
@@ -111,17 +112,18 @@ struct PendingWrite {
     entities: Option<Vec<u8>>,
 }
 
+/// 主控判脏的结果。
+struct JudgedDirty {
+    dirty: Vec<ChunkPos>,
+    remark: Vec<ChunkPos>,
+    #[cfg(test)]
+    verify: Vec<(ChunkPos, ChunkRevision)>,
+}
+
 /// 卸载快照的匀速提交：`ceil(待写数 / 6000)`，至少 1 个。
 fn save_batch_size(queue_len: usize) -> usize {
     (queue_len as u64).div_ceil(SAVE_INTERVAL_TICKS).max(1) as usize
 }
-
-/// 收回的积压大了之后，每刻收掉其中的这么多分之一。
-///
-/// 交付的上限是为了削进服的尖峰；收回要是也卡死在固定的个数上，很多人同时
-/// 高速移动时每刻新排进来的比收走的多，已加载的区块数和内存就没有上界。
-/// 按积压的比例收，积压会稳定在「每刻新排进来的个数 × 这个数」附近。
-pub(crate) const RECLAIM_DRAIN_TICKS: usize = 20;
 
 /// 信箱的每刻预算。`0` 表示不限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,37 +147,50 @@ pub(crate) struct DirectorHost {
     /// 无限超平坦模式：票表照常记，但不派任何交付/收回。
     infinite_flat: bool,
     parking: Parking,
-    budget: MailBudget,
-    /// 发给 region 的信箱：待交付的盒子（带交付时的等级）、待收回的位置。
-    deliveries: BTreeMap<ChunkPos, (u64, Desired, Box<RegionColumn>)>,
-    reclaims: Vec<(ChunkPos, u64)>,
+    /// 主控的邮筒：Director 发给各岛、岛还没收取的信，按岛编号分开、按投递顺序排。
+    /// 交付的预算、排序和收回的上限都在岛的信箱里（`island::ChunkMailbox`）。
+    ///
+    /// The master's postbox: letters from the Director not yet taken by their
+    /// island, per island id in posting order. Budgets, ordering and reclaim caps
+    /// live in the island's own mailbox (`island::ChunkMailbox`).
+    posts: BTreeMap<RegionId, Vec<Posted>>,
+    /// 主控的剖析器：宿主的子项（票、Director 事件、回执）记在这里，每刻末尾并进岛的
+    /// 那份报告（只有一个岛时就是合计）。
+    ///
+    /// The master's profiler: the host's sub-phases (tickets, Director events,
+    /// acks) are recorded here and folded into the island's report at the end of
+    /// each tick (with one island that is the total).
+    pub(crate) profiler: Profiler,
+    /// 和 Director 同一份玩家需求快照，岛收信时排交付顺序用；共享，换快照才复制。
+    ///
+    /// The same player-demand snapshot as the Director's, shared with the island
+    /// for delivery order; copied only when it changes.
+    demand: Arc<DemandSnapshot>,
+    /// 主控眼里岛上已经交付的区块：按岛交回的回执增删，和岛的 `ChunkStore` 已加载集合
+    /// 一致（齐步下每次收信之后，分离下每次交回之后）。存盘记账按它剪枝。
+    ///
+    /// The master's view of the chunks delivered to the island, kept from the
+    /// island's acks; it matches the island's loaded set after each mail
+    /// application (lockstep) or hand-back (detached). Save bookkeeping is pruned by it.
+    island_chunks: HashSet<ChunkPos>,
+    /// 齐步收信时的回执，跨次复用容量。
+    mail_report: MailReport,
     /// 一次 `pump` 里攒着的异步读请求，收尾时按离玩家的距离排序后一起交给
     /// IO 线程。IO 线程按 FIFO 处理：近处的回执先到，`PlayerChunkSender` 的
     /// 第一批就一定是最近的区块，远处的模板不会抢在近处的盘上区块之前。
     /// Async reads collected during one `pump`, submitted in distance order at
     /// the end. The IO worker is FIFO, so near replies arrive first.
     read_queue: Vec<(ChunkPos, TaskId, u64)>,
-    /// 本刻还没花掉的预算。整刻内所有 `pump` 共用，进服/离开/移动各发一批票
-    /// 也不会把上限乘上好几倍；每刻开头由 `begin_tick` 重置。
-    budget_left: MailBudget,
-    /// 这一刻已经从 region 取回了多少个区块。收回的上限会随积压放宽，
-    /// 所以不能用「剩余额度」记，要记花掉的个数。
-    reclaims_spent: usize,
     /// 每次 `Director::handle_effects` 复用的效果列表容量。
     effect_scratch: Vec<Effect<Box<RegionColumn>>>,
     /// 信箱泵的事件队列，跨刻复用容量。
     pump_events: Vec<Event<Box<RegionColumn>>>,
     /// 交给 `pump` 的单事件批次，跨刻复用容量。
     initial_scratch: Vec<Event<Box<RegionColumn>>>,
-    /// 交付/收回回执列表，测试版 `flush_region_mail` 跨次复用容量。
-    #[cfg(test)]
-    mail_events: Vec<Event<Box<RegionColumn>>>,
     /// IO 回执和读盘结果事件列表，跨刻复用容量。
     io_replies: Vec<Reply>,
     done_scratch: Vec<Event<Box<RegionColumn>>>,
-    /// 统计：本刻交付/收回/停放的区块数，给剖析器用。
-    delivered: usize,
-    reclaimed: usize,
+    /// 统计：本刻停放的区块数。
     parked: usize,
     /// 区块 IO 线程。`None` 表示这一局不接磁盘（测试 / 无限超平坦）。
     io: Option<ChunkIo>,
@@ -217,7 +232,7 @@ pub(crate) struct DirectorHost {
     /// `(玩家优先级, x, z)`，和 Director 的准入排序同一份需求快照。
     /// 删掉的任务不从堆里删，出堆时发现它已经不在 `compute_backlog` 里就跳过。
     backlog_order: BinaryHeap<Reverse<(DemandRank, TaskId)>>,
-    /// 上次整堆重排时的玩家区块；`set_player_demand` 清空它，强制重排。
+    /// 上次整堆重排时票表里的玩家区块；`set_player_demand` 清空它，强制重排。
     backlog_centers: Vec<ChunkPos>,
     /// 还没交给池子就被取消的任务：回执留到下一次收池结果时一起交给 Director，
     /// 保证每个派出去的任务都恰好回一次执。
@@ -301,28 +316,24 @@ pub(crate) struct DirectorHost {
 }
 
 impl DirectorHost {
-    pub(crate) fn new(config: DirectorConfig, budget: MailBudget) -> Self {
+    pub(crate) fn new(config: DirectorConfig) -> Self {
         let mut director = Director::new(config);
         director.set_template(|| Box::new(RegionColumn::from_template()));
         Self {
             infinite_flat: false,
             director,
             parking: Parking::default(),
-            budget,
-            budget_left: budget,
-            reclaims_spent: 0,
-            deliveries: BTreeMap::new(),
-            reclaims: Vec::new(),
+            posts: BTreeMap::new(),
+            profiler: Profiler::default(),
+            demand: Arc::default(),
+            island_chunks: HashSet::new(),
+            mail_report: MailReport::default(),
             read_queue: Vec::new(),
             effect_scratch: Vec::new(),
             pump_events: Vec::new(),
             initial_scratch: Vec::new(),
-            #[cfg(test)]
-            mail_events: Vec::new(),
             io_replies: Vec::new(),
             done_scratch: Vec::new(),
-            delivered: 0,
-            reclaimed: 0,
             parked: 0,
             io: None,
             generator: Arc::new(FlatGenerator::from_env()),
@@ -386,6 +397,7 @@ impl DirectorHost {
     /// `OverworldGenerator` by level type; tests and load tests can also swap it.
     /// 更新 Director 的玩家加载需求快照；宿主自己的排序直接读同一份。
     pub(crate) fn set_player_demand(&mut self, demand: DemandSnapshot) {
+        self.demand = Arc::new(demand.clone());
         self.director.set_player_demand(demand);
         // 玩家位置/方向变了，待办里的旧距离全部失效，下一次 submit 重建堆。
         self.backlog_centers.clear();
@@ -402,12 +414,29 @@ impl DirectorHost {
             if centers.is_empty() {
                 0
             } else {
-                Self::distance_to_players(pos, &centers).0 as i64
+                distance_to_players(pos, &centers).0 as i64
             }
         } else {
             demand.rank(pos)
         };
         (rank, pos.x, pos.z)
+    }
+
+    /// 岛收信时要的主控状态：需求快照、需求为空时的票表玩家中心、要不要跳过收回。
+    ///
+    /// The master state an island needs to take its mail.
+    pub(crate) fn mail_order(&self) -> MailOrder {
+        let centers = if self.demand.players().is_empty() {
+            self.director.tickets().player_centers()
+        } else {
+            Vec::new()
+        };
+        MailOrder {
+            demand: Arc::clone(&self.demand),
+            centers,
+            // F6 背压只跳收回；`/save-off` 时也不收回（官方 noSave 跳过 processUnloads）。
+            skip_reclaims: self.save_backpressure() || (!self.saves_enabled && !self.shutting_down),
+        }
     }
 
     pub(crate) fn set_generator(&mut self, generator: Arc<dyn ChunkGenerator>) {
@@ -546,7 +575,7 @@ impl DirectorHost {
 
     /// 测试/无限超平坦专用：只记账，不派任务也不碰 region。
     pub(crate) fn new_infinite_flat(config: DirectorConfig) -> Self {
-        let mut host = Self::new(config, MailBudget::default());
+        let mut host = Self::new(config);
         host.infinite_flat = true;
         host
     }
@@ -577,17 +606,8 @@ impl DirectorHost {
         self.parking.len()
     }
 
-    /// 本刻交付/收回的区块数。
-    pub(crate) fn counters_this_tick(&self) -> (usize, usize) {
-        (self.delivered, self.reclaimed)
-    }
-
-    /// 每刻开头重置预算和计数。进服/离开/移动发来的票操作都算在这一刻里。
+    /// 每刻开头重置计数。交付 / 收回的预算在岛的信箱里，由岛自己重置。
     pub(crate) fn begin_tick(&mut self) {
-        self.budget_left = self.budget;
-        self.reclaims_spent = 0;
-        self.delivered = 0;
-        self.reclaimed = 0;
         self.parked = 0;
     }
 
@@ -605,46 +625,55 @@ impl DirectorHost {
         ]
     }
 
-    /// 测试专用：直接改预算，不碰进程级环境变量。
-    #[cfg(test)]
-    pub(crate) fn set_budget(&mut self, budget: MailBudget) {
-        self.budget = budget;
-        self.budget_left = budget;
-        self.reclaims_spent = 0;
-    }
-
-    /// 这一刻从 region 取回的区块数（不含直接从信箱退回的盒子）。
-    #[cfg(test)]
-    pub(crate) fn region_reclaims_this_tick(&self) -> usize {
-        self.reclaims_spent
-    }
-
     #[cfg(test)]
     pub(crate) fn set_reclaim_delay(&mut self, delay: u64) {
         self.director.config_mut().reclaim_delay_ticks = delay;
     }
 
-    /// 本刻还欠着多少交付/收回。测试用它给信箱长度一个上界。
+    /// 邮筒里还没被岛收取的信数。
     #[cfg(test)]
-    pub(crate) fn mail_backlog(&self) -> (usize, usize) {
-        (self.deliveries.len(), self.reclaims.len())
+    pub(crate) fn posted_len(&self) -> usize {
+        self.posts.values().map(Vec::len).sum()
+    }
+
+    /// 邮筒里还没被岛收取的（交付的盒子数，收回的位置数）。
+    #[cfg(test)]
+    pub(crate) fn posted_counts(&self) -> (usize, usize) {
+        let mut counts = (0, 0);
+        for letter in self.posts.values().flatten() {
+            match letter {
+                Posted::Deliver { .. } => counts.0 += 1,
+                Posted::Reclaim(positions) => counts.1 += positions.len(),
+                Posted::Levels(_) => {}
+            }
+        }
+        counts
+    }
+
+    /// `pos` 的盒子已经投进邮筒、等着岛下一刻开头收取。
+    #[cfg(test)]
+    pub(crate) fn has_posted_delivery(&self, pos: ChunkPos) -> bool {
+        self.posts
+            .values()
+            .flatten()
+            .any(|letter| matches!(letter, Posted::Deliver { pos: at, .. } if *at == pos))
     }
 
     /// 一批票的操作：喂给 Director，把效果跑到底。
-    pub(crate) fn tickets(&mut self, region: &mut Region, ops: Vec<TicketOp>) {
+    pub(crate) fn tickets(&mut self, island: &mut IslandAccess<'_>, ops: Vec<TicketOp>) {
         if self.infinite_flat {
             // 只把票喂给票表，不产生效果。
-            region.profiler.start_sub(SubPhase::TicketUpdate);
+            self.profiler.start_sub(SubPhase::TicketUpdate);
             for op in ops {
                 self.apply_infinite_ticket(op);
             }
             let _ = self.director.tickets_mut().run_updates();
-            region.profiler.end_sub();
+            self.profiler.end_sub();
             return;
         }
         let mut events = std::mem::take(&mut self.initial_scratch);
         events.push(Event::Tickets { ops });
-        self.pump(region, events);
+        self.pump(island, events);
     }
 
     fn apply_infinite_ticket(&mut self, op: TicketOp) {
@@ -672,20 +701,20 @@ impl DirectorHost {
     }
 
     /// 每刻推进。预算和计数由 [`Self::begin_tick`] 在刻开头重置。
-    pub(crate) fn tick(&mut self, region: &mut Region, now_tick: u64) {
+    pub(crate) fn tick(&mut self, island: &mut IslandAccess<'_>, now_tick: u64) {
         self.last_tick = now_tick;
         if self.infinite_flat {
-            region.profiler.start_sub(SubPhase::TicketUpdate);
+            self.profiler.start_sub(SubPhase::TicketUpdate);
             self.director.tickets_mut().tick(&mut |_| false);
             let _ = self.director.tickets_mut().run_updates();
-            region.profiler.end_sub();
+            self.profiler.end_sub();
             return;
         }
         self.pace_saves(now_tick);
         self.release_ready_save_barriers();
         let mut events = std::mem::take(&mut self.initial_scratch);
         events.push(Event::Tick { now_tick });
-        self.pump(region, events);
+        self.pump(island, events);
     }
 
     /// 同一区块在 `save_queue` 里只留最新一份快照（官方 `IOWorker.store`
@@ -762,122 +791,117 @@ impl DirectorHost {
         }
     }
 
-    /// 列出「已加载、方块/光照版本号或上层内容改动标记和上次成功写盘不同」的脏区块。
-    /// 上层内容只从 `Region::dirty` 集合取，绝不每刻扫全局表或所有已加载区块
-    /// （复查报告「高 3」）。`content_fingerprints` 只在 `cfg(test)` 里作校验器。
-    /// List loaded chunks whose block/light revision OR upper-content dirty mark
-    /// differs from the last successful write. Upper-layer changes come only
-    /// from the per-chunk dirty set, never a full-table scan (review high 3).
-    #[cfg(test)]
-    pub(crate) fn dirty_loaded_chunks(
-        &mut self,
-        region: &mut Region,
-        force: bool,
-    ) -> Vec<ChunkPos> {
-        self.dirty_loaded_chunks_impl(region, force)
-    }
-
-    #[cfg(not(test))]
-    fn dirty_loaded_chunks(&mut self, region: &mut Region, force: bool) -> Vec<ChunkPos> {
-        self.dirty_loaded_chunks_impl(region, force)
-    }
-
-    fn dirty_loaded_chunks_impl(&mut self, region: &mut Region, force: bool) -> Vec<ChunkPos> {
+    /// 用岛交回的改动判脏：方块/光照版本号和上次成功写盘不同、或上层内容改过的
+    /// 已加载区块，加上还欠一次保存的。返回（脏区块，版本变了但这次不存、要放回岛
+    /// 改动集合的区块）。上层内容只来自岛的改动集合，绝不扫全局表或所有已加载区块
+    /// （复查报告「高 3」）。
+    ///
+    /// Judge dirtiness from the changes the island handed over: loaded chunks
+    /// whose block/light revision differs from the last successful write or
+    /// whose upper content changed, plus those still owed a save. Returns
+    /// (dirty chunks, chunks to put back into the island's change set).
+    fn judge_dirty(&mut self, changes: SaveChanges, force: bool) -> JudgedDirty {
+        self.profiler.start_sub(SubPhase::StorageDirty);
         let mut dirty = Vec::new();
-        // 方块/光照的版本号：只取「版本真的变过」的区块集合，不扫全部已加载区块。
-        let changed = region.chunks.take_changed_chunks();
-        for pos in changed {
-            if !region.chunks.is_loaded(pos) {
-                continue;
-            }
-            let revision = region.chunks.revision(pos);
+        let mut remark = Vec::new();
+        for changed in changes.changed {
+            let pos = changed.pos;
             let saved = self.saved_revisions.get(&pos).copied();
             let revision_changed =
-                saved.is_none_or(|(saved_revision, _)| saved_revision != revision);
+                saved.is_none_or(|(saved_revision, _)| saved_revision != changed.revision);
             // 从盘上/模板交付进来的区块还没存过：照官方 `isUnsaved` 只有真被
             // 改过的才算，原样区块不写。已保存过的区块只按版本变化判脏。
-            let changed_from_generator = !region.chunks.is_pristine(pos);
-            let upper_dirty =
-                region.dirty.pending_contains(pos) || region.block_ticks.dirty_contains(pos);
             if revision_changed
-                && (saved.is_some() || changed_from_generator || upper_dirty || force)
+                && (saved.is_some() || !changed.pristine || changed.upper_dirty || force)
             {
                 dirty.push(pos);
             } else if revision_changed {
                 // 版本变了但这一刻不该存：把标记留到下一刻再判。
-                region.chunks.mark_changed(pos);
+                remark.push(pos);
             }
         }
         // 上层内容改动集合：只有真正改过的区块在这里，开销和集合大小有关。
-        // 计划刻的增删单独记在 BlockTicks 里，一并取走。
-        for pos in region.block_ticks.take_dirty() {
-            region.dirty.mark(pos);
-        }
-        for pos in region.dirty.take() {
-            if region.chunks.is_loaded(pos) && !dirty.contains(&pos) {
+        for pos in changes.content {
+            if !dirty.contains(&pos) {
                 dirty.push(pos);
             }
         }
         for pos in &self.retry_dirty {
-            if region.chunks.is_loaded(*pos) && !dirty.contains(pos) {
+            if self.island_chunks.contains(pos) && !dirty.contains(pos) {
                 dirty.push(*pos);
             }
         }
         dirty.sort_unstable();
         dirty.dedup();
         #[cfg(test)]
-        {
-            // 校验器：被判成「没改过」的已保存区块，重新编码必须和上次写出的字节一致。
-            for (pos, (revision, _)) in self.saved_revisions.clone() {
-                if !dirty.contains(&pos) && region.chunks.revision(pos) == revision {
-                    let immutable: &Region = region;
-                    immutable.dirty.verify_clean(immutable, pos);
-                }
-            }
+        let verify = self
+            .saved_revisions
+            .iter()
+            .filter(|(pos, _)| !dirty.contains(pos))
+            .map(|(&pos, &(revision, _))| (pos, revision))
+            .collect();
+        self.profiler.end_sub();
+        JudgedDirty {
+            dirty,
+            remark,
+            #[cfg(test)]
+            verify,
         }
-        dirty
     }
 
-    /// D6：每刻给 `ceil(已加载脏区块数 / 6000)`（至少 1）个仍加载的脏区块拍快照
-    /// 交给 IO 线程，单区块 10 秒冷却；`enabled=false`（`save-off`）时整个停掉。
-    /// 快照用 `encode_loaded_column` 走和卸载存盘同一条验证过的编码路径，不卸载区块。
-    ///
-    /// D6: each tick snapshot `ceil(dirty/6000)` (at least 1) still-loaded dirty
-    /// chunks to the IO thread with a per-chunk 10s cooldown; fully disabled
-    /// during save-off. Snapshots go through the verified unload-save encoder.
-    pub(crate) fn save_loaded_dirty(&mut self, region: &mut Region, now_tick: u64, enabled: bool) {
-        if !enabled || self.io.is_none() {
-            return;
-        }
-        // 卸载后不必留着记账，避免长局里无界增长。
-        // Drop bookkeeping for unloaded chunks so it cannot grow without bound.
-        self.saved_revisions
-            .retain(|pos, _| region.chunks.is_loaded(*pos));
-        self.loaded_save_tick
-            .retain(|pos, _| region.chunks.is_loaded(*pos));
+    /// 测试专用：判一次脏（岛交出改动、主控判、放回不存的），返回脏区块。
+    /// Test-only: one dirty check (island hands changes, master judges, puts back the rest).
+    #[cfg(test)]
+    pub(crate) fn dirty_loaded_chunks(
+        &mut self,
+        island: &mut Island,
+        force: bool,
+    ) -> Vec<ChunkPos> {
+        let changes = island.drain_save_changes();
+        let judged = self.judge_dirty(changes, force);
+        let _ = island.follow_save_plan(SavePlan {
+            remark: judged.remark,
+            verify: judged.verify,
+            ..SavePlan::default()
+        });
+        judged.dirty
+    }
 
-        region.profiler.start_sub(SubPhase::StorageDirty);
-        let mut dirty = self.dirty_loaded_chunks(region, false);
-        region.profiler.end_sub();
+    /// 卸载后不必留着记账，避免长局里无界增长。
+    /// Drop bookkeeping for unloaded chunks so it cannot grow without bound.
+    fn prune_saved(&mut self) {
+        let loaded = &self.island_chunks;
+        self.saved_revisions.retain(|pos, _| loaded.contains(pos));
+        self.loaded_save_tick.retain(|pos, _| loaded.contains(pos));
+    }
+
+    /// 从脏区块里挑这一刻要拍快照的：6000 刻那一次全量，其余每刻最多 20 个，
+    /// 单区块 10 秒冷却（失败重试的不受冷却限制）；没轮到的留到下一刻。
+    /// 返回（要拍的，判脏候选数）。
+    ///
+    /// Pick this tick's snapshots from the dirty chunks: everything on the
+    /// 6000-tick pass, otherwise at most 20 with a per-chunk cooldown; the rest
+    /// waits. Returns (chosen, candidate count).
+    fn choose_snapshots(
+        &mut self,
+        mut dirty: Vec<ChunkPos>,
+        now_tick: u64,
+    ) -> (Vec<ChunkPos>, u64) {
         // 上一刻没轮到的脏区块留在集合里，不会因为改动标记被取走而丢掉。
         for pos in std::mem::take(&mut self.dirty_pending) {
-            if region.chunks.is_loaded(pos) && !dirty.contains(&pos) {
+            if self.island_chunks.contains(&pos) && !dirty.contains(&pos) {
                 dirty.push(pos);
             }
         }
         dirty.sort_unstable();
         dirty.dedup();
-        // 6000 刻那一次全量：把改动集合里的全部都拍下来，其余每刻最多 20 个。
-        // 单区块 10 秒冷却；失败重试和待算光照推迟的区块不受冷却限制。
         let full = now_tick.is_multiple_of(SAVE_INTERVAL_TICKS);
         let count = if full {
             usize::MAX
         } else {
             EAGER_SAVES_PER_TICK
         };
-        region
-            .profiler
-            .record(Metric::StorageCandidates, dirty.len() as u64);
+        let candidates = dirty.len() as u64;
         let mut remaining = Vec::new();
         let mut eligible = Vec::new();
         for pos in dirty {
@@ -892,16 +916,14 @@ impl DirectorHost {
             }
         }
         self.dirty_pending.extend(remaining);
-        region
-            .profiler
-            .record(Metric::StorageSnapshots, eligible.len() as u64);
-        for pos in eligible {
-            self.snapshot_loaded(region, pos, now_tick);
-        }
-        // 照官方 `ChunkMap.saveChunksEagerly`：每刻最多 20 个交给 IO 线程。
-        // 仍走同一个有上限的队列，`pace_saves` 只负责卸载快照的匀速部分。
-        // Official `saveChunksEagerly`: at most 20 per tick, through the same
-        // bounded queue; `pace_saves` only paces unload snapshots.
+        (eligible, candidates)
+    }
+
+    /// 照官方 `ChunkMap.saveChunksEagerly`：每刻最多 20 个交给 IO 线程。
+    /// 仍走同一个有上限的队列，`pace_saves` 只负责卸载快照的匀速部分。
+    /// Official `saveChunksEagerly`: at most 20 per tick, through the same
+    /// bounded queue; `pace_saves` only paces unload snapshots.
+    fn submit_eager_saves(&mut self) {
         if let Some(io) = &self.io {
             for _ in 0..20 {
                 let Some(pending) = self.save_queue.pop_front() else {
@@ -912,22 +934,106 @@ impl DirectorHost {
         }
     }
 
+    /// D6：每刻给 `ceil(已加载脏区块数 / 6000)`（至少 1）个仍加载的脏区块拍快照
+    /// 交给 IO 线程，单区块 10 秒冷却；`enabled=false`（`save-off`）时整个停掉。
+    /// 主控出名单、岛编码交回（齐步：岛借给这次调用，当场做完，和以前逐位相同）。
+    ///
+    /// D6: each tick snapshot `ceil(dirty/6000)` (at least 1) still-loaded dirty
+    /// chunks to the IO thread with a per-chunk 10s cooldown; fully disabled
+    /// during save-off. The master picks the list and the island encodes it
+    /// (lockstep: the island is lent and it all happens on the spot).
+    pub(crate) fn save_loaded_dirty(&mut self, island: &mut Island, now_tick: u64, enabled: bool) {
+        if !enabled || self.io.is_none() {
+            return;
+        }
+        self.prune_saved();
+        let changes = island.drain_save_changes();
+        let judged = self.judge_dirty(changes, false);
+        let (eligible, candidates) = self.choose_snapshots(judged.dirty, now_tick);
+        let encoded = island.follow_save_plan(SavePlan {
+            remark: judged.remark,
+            metrics: Some((candidates, eligible.len() as u64)),
+            encode: eligible,
+            drain: false,
+            #[cfg(test)]
+            verify: judged.verify,
+        });
+        self.accept_snapshots(encoded, now_tick);
+        self.submit_eager_saves();
+    }
+
+    /// 分离驱动的交回：收下岛照上一份名单编好的快照，用它交回的改动判脏，给出下一份
+    /// 名单（岛下一刻末尾编码）。`save-off` 时判出来的脏区块留到恢复后再存。
+    ///
+    /// Detached hand-back: take the snapshots the island encoded from the last
+    /// list, judge the changes it handed over, and return the next list (encoded
+    /// at the end of the island's next tick). During save-off the dirty chunks
+    /// wait until saving resumes.
+    pub(crate) fn plan_saves(
+        &mut self,
+        report: SaveReport,
+        now_tick: u64,
+        enabled: bool,
+    ) -> SavePlan {
+        self.accept_snapshots(report.encoded, now_tick);
+        let saving = enabled && self.io.is_some();
+        let mut plan = SavePlan {
+            drain: saving,
+            ..SavePlan::default()
+        };
+        if let Some(changes) = report.changes {
+            self.prune_saved();
+            let judged = self.judge_dirty(changes, false);
+            plan.remark = judged.remark;
+            #[cfg(test)]
+            {
+                plan.verify = judged.verify;
+            }
+            if saving {
+                let (eligible, candidates) = self.choose_snapshots(judged.dirty, now_tick);
+                plan.metrics = Some((candidates, eligible.len() as u64));
+                plan.encode = eligible;
+            } else {
+                self.dirty_pending.extend(judged.dirty);
+            }
+        }
+        if saving {
+            self.submit_eager_saves();
+        }
+        plan
+    }
+
     /// `/save-all`：立刻给所有已加载脏区块拍快照交给 IO 线程，不受匀速和冷却限制。
+    /// 这是栅栏：岛一定停放着、借给这次调用；分离驱动下还没编码的上一份名单也并进来。
     /// `/save-all`: snapshot every loaded dirty chunk to the IO thread at once,
-    /// ignoring the pacing and cooldown.
-    pub(crate) fn snapshot_all_dirty(&mut self, region: &mut Region, now_tick: u64) {
+    /// ignoring the pacing and cooldown. A barrier: the island is parked and
+    /// lent; under the detached drive the pending list is folded in too.
+    pub(crate) fn snapshot_all_dirty(&mut self, island: &mut Island, now_tick: u64) {
         if self.io.is_none() {
             return;
         }
+        // 分离驱动下还没编码的名单：放回该放的，要拍的并进这次。齐步下它是空的。
+        // A pending detached list: put back what it puts back, fold its chunks in.
+        let pending = std::mem::take(&mut island.save_plan);
+        let drain = pending.drain;
+        self.dirty_pending.extend(pending.encode.iter().copied());
+        let _ = island.follow_save_plan(SavePlan {
+            remark: pending.remark,
+            drain,
+            ..SavePlan::default()
+        });
+        island.save_plan.drain = drain;
         // `/save-all` 是显式的强制重试：清掉退避，把内存里还在的快照再提交一次。
         // 后续失败会重新按连续次数退避，但绝不永久暂停。
         // `save-all` is an explicit forced retry: clear the backoff and submit
         // everything still in memory. Later failures back off again, never pause forever.
         self.save_retry_after = 0;
-        let mut dirty = self.dirty_loaded_chunks(region, true);
+        let changes = island.drain_save_changes();
+        let judged = self.judge_dirty(changes, true);
+        let mut dirty = judged.dirty;
         // 冷却期 / 匀速没轮到而留到下一刻的脏区块，强制保存也要一起写。
         for pos in std::mem::take(&mut self.dirty_pending) {
-            if region.chunks.is_loaded(pos) && !dirty.contains(&pos) {
+            if self.island_chunks.contains(&pos) && !dirty.contains(&pos) {
                 dirty.push(pos);
             }
         }
@@ -935,9 +1041,15 @@ impl DirectorHost {
         dirty.dedup();
         // 强制保存不看单区块冷却。
         self.loaded_save_tick.clear();
-        for pos in dirty {
-            self.snapshot_loaded(region, pos, now_tick);
-        }
+        let encoded = island.follow_save_plan(SavePlan {
+            remark: judged.remark,
+            encode: dirty,
+            metrics: None,
+            drain: false,
+            #[cfg(test)]
+            verify: judged.verify,
+        });
+        self.accept_snapshots(encoded, now_tick);
         // 强制保存：把这次刚拍的快照立刻交给 IO 线程，不等匀速（官方
         // `saveEverything` 同步存所有已经改过的区块）。仍走同一个有上限的队列。
         // Force: hand the fresh snapshots to IO immediately (official
@@ -949,50 +1061,53 @@ impl DirectorHost {
         }
     }
 
-    /// 给一个已加载脏区块拍快照交给 IO 线程，并记下落定后的版本号和这一刻。
+    /// 收下岛编好的快照：排进写盘队列，记下落定后的版本号和这一刻。
     /// 编码失败或这一刻不适合搬盒子就什么也不记，下一刻重试。
-    /// Snapshot one loaded dirty chunk to the IO thread and record the settled
-    /// revision and tick. On failure (or when the tables are busy) record nothing
-    /// so it is retried on a later tick.
-    fn snapshot_loaded(&mut self, region: &mut Region, pos: ChunkPos, now_tick: u64) {
-        region.profiler.start_sub(SubPhase::StorageEncode);
-        let result = region.encode_loaded_column(pos);
-        region.profiler.end_sub();
-        let Some(result) = result else {
-            // 有待算光照 / 表正忙：推迟到下一刻，不记「已存」。
-            self.retry_dirty.insert(pos);
-            self.loaded_save_tick.remove(&pos);
-            return;
-        };
-        match result {
-            Ok(packed) => {
-                // 和卸载写共用同一个单调递增的 seq，IO 线程据此丢旧快照。
-                // Share one monotonic seq source with unload saves.
-                let seq = self.director.allocate_save_seq();
-                // 和卸载写走同一条有上限的队列，不再直接塞进无界 IO 信箱
-                // （复查报告「中：snapshot_loaded 绕过队列和背压」）。
-                // Use the same bounded queue as unload saves instead of
-                // submitting straight into the unbounded IO mailbox.
-                self.enqueue_snapshot(PendingWrite {
-                    pos,
-                    seq,
-                    chunk: packed.chunk,
-                    entities: packed.entities,
-                });
-                self.pending_writes.insert(pos, seq);
-                // 「已保存」只在 Written 回执到达时记（复查「致命 2」）：
-                // 快照刚排进队列时记成已存会让写盘失败的改动永远不再判脏。
-                // "Saved" is only recorded on the Written ack: recording it
-                // at enqueue time makes a failed write never dirty again.
-                self.acked_revisions
-                    .insert(seq, (pos, region.chunks.revision(pos), 0));
-                self.loaded_save_tick.insert(pos, now_tick);
-                self.dirty_pending.remove(&pos);
-                // 已经重新拍成新快照了：不再每刻重复重拍，等 Written 回执再彻底清。
-                self.retry_dirty.remove(&pos);
-            }
-            Err(error) => {
-                tracing::warn!(%error, ?pos, "could not encode a loaded chunk for saving");
+    /// Take the island's encoded snapshots: queue them for writing and record
+    /// the settled revision and tick. On failure (or when the tables are busy)
+    /// record nothing so it is retried on a later tick.
+    fn accept_snapshots(&mut self, encoded: Vec<Encoded>, now_tick: u64) {
+        for Encoded {
+            pos,
+            revision,
+            result,
+        } in encoded
+        {
+            let Some(result) = result else {
+                // 有待算光照 / 表正忙：推迟到下一刻，不记「已存」。
+                self.retry_dirty.insert(pos);
+                self.loaded_save_tick.remove(&pos);
+                continue;
+            };
+            match result {
+                Ok(packed) => {
+                    // 和卸载写共用同一个单调递增的 seq，IO 线程据此丢旧快照。
+                    // Share one monotonic seq source with unload saves.
+                    let seq = self.director.allocate_save_seq();
+                    // 和卸载写走同一条有上限的队列，不再直接塞进无界 IO 信箱
+                    // （复查报告「中：snapshot_loaded 绕过队列和背压」）。
+                    // Use the same bounded queue as unload saves instead of
+                    // submitting straight into the unbounded IO mailbox.
+                    self.enqueue_snapshot(PendingWrite {
+                        pos,
+                        seq,
+                        chunk: packed.chunk,
+                        entities: packed.entities,
+                    });
+                    self.pending_writes.insert(pos, seq);
+                    // 「已保存」只在 Written 回执到达时记（复查「致命 2」）：
+                    // 快照刚排进队列时记成已存会让写盘失败的改动永远不再判脏。
+                    // "Saved" is only recorded on the Written ack: recording it
+                    // at enqueue time makes a failed write never dirty again.
+                    self.acked_revisions.insert(seq, (pos, revision, 0));
+                    self.loaded_save_tick.insert(pos, now_tick);
+                    self.dirty_pending.remove(&pos);
+                    // 已经重新拍成新快照了：不再每刻重复重拍，等 Written 回执再彻底清。
+                    self.retry_dirty.remove(&pos);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, ?pos, "could not encode a loaded chunk for saving");
+                }
             }
         }
     }
@@ -1004,7 +1119,11 @@ impl DirectorHost {
     /// Shutdown: reclaim every loaded chunk, hand dirty snapshots to the IO thread,
     /// then drain it. No per-tick budget at shutdown; `flush_io` waits for all writes
     /// and calls `sync_all`.
-    pub(crate) fn shutdown(&mut self, region: &mut Region) {
+    ///
+    /// 关服是栅栏：岛一定停放着、借给这次调用，两种驱动都当场收信。
+    /// Shutdown is a barrier: the island is parked and lent, so both drives
+    /// take the mail on the spot.
+    pub(crate) fn shutdown(&mut self, island: &mut Island) {
         if self.infinite_flat {
             return;
         }
@@ -1014,19 +1133,16 @@ impl DirectorHost {
         // retry everything still in memory, including failed parked boxes.
         self.save_retry_after = 0;
         self.shutting_down = true;
-        self.budget = MailBudget {
-            deliveries: 0,
-            reclaims: 0,
-        };
-        self.budget_left = self.budget;
+        island.mailbox.lift_budget();
         // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
-        region.chunks.finish_light_updates();
+        island.region.chunks.finish_light_updates();
+        let mut access = IslandAccess::Lent(&mut *island);
         let mut events = std::mem::take(&mut self.initial_scratch);
         events.push(Event::Shutdown);
-        self.pump(region, events);
+        self.pump(&mut access, events);
         // 等计算池里的解析/生成/序列化都回来：存盘的盒子要回到世界线程才能
         // 排进写盘队列，收到的结果可能又派出新任务，所以循环到池子空为止。
-        self.drain_compute(region);
+        self.drain_compute(&mut access);
         // 写盘失败后还没写成功的盒子：用同一条编码路径重新提交（致命 2）。
         // Re-encode every parked box whose write never succeeded, using the
         // same codec as unload saves (fatal 2).
@@ -1056,8 +1172,8 @@ impl DirectorHost {
                 io.submit_write(pending.pos, pending.seq, pending.chunk, pending.entities);
             }
         }
-        self.deliveries.clear();
-        self.reclaims.clear();
+        island.mailbox.clear();
+        self.posts.clear();
         self.flush_io();
         // 磁盘到关服还在失败时，明确列出没存下来的区块，再照常退出。
         if self.io_failures > 0 && !unsaved.is_empty() {
@@ -1070,13 +1186,8 @@ impl DirectorHost {
 
     /// `pump` 达到收敛上限：不 panic，关服时明确列出没收回、没存下来的区块。
     /// On a non-convergent pump, log the chunks that were never reclaimed/saved.
-    fn report_unconverged_pump(&self, region: &Region, rounds: usize) {
-        let mut left: Vec<ChunkPos> = region
-            .chunks
-            .loaded_states()
-            .into_iter()
-            .map(|(pos, _, _)| pos)
-            .collect();
+    fn report_unconverged_pump(&self, rounds: usize) {
+        let mut left: Vec<ChunkPos> = self.island_chunks.iter().copied().collect();
         left.sort_unstable();
         tracing::error!(
             rounds,
@@ -1090,13 +1201,20 @@ impl DirectorHost {
 
     /// 处理一个事件和它引发的全部任务，直到没有新效果。
     /// 内联执行器不设每刻上限（提交 5/6 的要求）：任务的纯函数部分当场做完，
-    /// 盒子攒进信箱，由 `flush_region_mail` 按预算交付/收回。
+    /// 盒子投进岛的邮筒，由岛的信箱按预算交付/收回。
     ///
     /// 同一刻里 Director 可能因为 `Delivered` / `Returned` 又派出新任务，
-    /// 所以主循环要跑到没有新消息为止；`flush_region_mail` 每轮都只花掉
-    /// 这一刻剩下的预算，预算用完之后它返回空事件，循环就停。
+    /// 所以主循环要跑到没有新消息为止；岛借给这次调用时（齐步）每轮收敛前让岛
+    /// 收一次信，信箱每轮都只花掉这一刻剩下的预算，预算用完之后没有回执，循环就停。
+    /// 岛不在手里时（分离）信件留在邮筒里，回执在岛交回时再喂进来。
+    /// 宿主自己不碰 `Region`。
     /// 把一批初始事件处理到收敛。`initial` 在本函数返回时清空，容量留给下次。
-    fn pump(&mut self, region: &mut Region, mut initial: Vec<Event<Box<RegionColumn>>>) {
+    ///
+    /// Drive a batch of events to convergence. Mail goes to the island's
+    /// postbox; when the island is lent (lockstep) it takes the mail before each
+    /// convergence check, otherwise (detached) its acks come back at hand-back.
+    /// The host never touches the `Region` itself.
+    fn pump(&mut self, island: &mut IslandAccess<'_>, mut initial: Vec<Event<Box<RegionColumn>>>) {
         // 一批初始事件（例如同一刻收回的所有读盘结果）一起处理，循环末尾只
         // 交付一次，保证按距离排序、出生点 3×3 在同一批里。
         // A batch of initial events (e.g. all reads collected this tick) is driven
@@ -1112,7 +1230,7 @@ impl DirectorHost {
             while let Some(event) = events.pop() {
                 rounds += 1;
                 if rounds >= PUMP_ROUND_LIMIT {
-                    self.report_unconverged_pump(region, rounds);
+                    self.report_unconverged_pump(rounds);
                     return;
                 }
                 // `Tickets` 和 `Tick` 里包含 `run_updates()`（等级传播 + 消费变化列表），
@@ -1122,11 +1240,11 @@ impl DirectorHost {
                     Event::Delivered { .. } | Event::Returned { .. } => SubPhase::DirectorAck,
                     _ => SubPhase::DirectorEvents,
                 };
-                region.profiler.start_sub(sub);
+                self.profiler.start_sub(sub);
                 let mut effects = std::mem::take(&mut self.effect_scratch);
                 self.director
                     .handle_effects(event, |out| std::mem::swap(&mut effects, out));
-                region.profiler.end_sub();
+                self.profiler.end_sub();
                 for effect in effects.drain(..) {
                     match effect {
                         Effect::Submit {
@@ -1136,12 +1254,12 @@ impl DirectorHost {
                         } => {
                             rounds += 1;
                             if rounds >= PUMP_ROUND_LIMIT {
-                                self.report_unconverged_pump(region, rounds);
+                                self.report_unconverged_pump(rounds);
                                 return;
                             }
-                            region.profiler.start_sub(SubPhase::DirectorEvents);
+                            self.profiler.start_sub(SubPhase::DirectorEvents);
                             let next = self.run_task(id, generation, task);
-                            region.profiler.end_sub();
+                            self.profiler.end_sub();
                             // 异步读盘任务这一刻不产生回执，结果在下一刻开头从信箱收回。
                             // An async disk read produces no ack this tick; its result
                             // is collected from the mailbox at the start of the next tick.
@@ -1157,12 +1275,12 @@ impl DirectorHost {
                             self.read_queue.retain(|&(_, queued_id, _)| queued_id != id);
                             self.cancel_compute(id);
                         }
-                        Effect::ToRegion(message) => self.region_message(region, message),
+                        Effect::ToRegion(message) => self.region_message(message),
                         Effect::Park { pos, column } => {
-                            region.profiler.start_sub(SubPhase::DirectorEvents);
+                            self.profiler.start_sub(SubPhase::DirectorEvents);
                             self.parking.park(pos, column);
                             self.parked += 1;
-                            region.profiler.end_sub();
+                            self.profiler.end_sub();
                         }
                         Effect::DropSnapshot { pos, seq } => {
                             if let Some(io) = &self.io {
@@ -1174,12 +1292,12 @@ impl DirectorHost {
                 }
                 self.effect_scratch = effects;
             }
-            // 再把 region 信箱里的交付/收回变成 Delivered / Returned 事件。
+            // 岛在手里就让它收信，交付/收回的回执变成 Delivered / Returned 事件。
             // 没有新消息就收敛了。
-            self.flush_region_mail_into(region, &mut events);
+            self.flush_mail(island, &mut events);
             if events.is_empty() {
                 self.submit_reads();
-                self.submit_compute(region);
+                self.submit_compute();
                 self.pump_events = events;
                 return;
             }
@@ -1441,7 +1559,7 @@ impl DirectorHost {
     /// 从待办里按离玩家的距离挑最近的补进池子，直到池子里有
     /// `threads × POOL_JOBS_PER_THREAD` 个任务。玩家跨了区块才整堆重排，
     /// 平时只从堆顶取。
-    fn submit_compute(&mut self, region: &Region) {
+    fn submit_compute(&mut self) {
         if self.compute_backlog.is_empty() {
             self.backlog_order.clear();
             return;
@@ -1464,7 +1582,7 @@ impl DirectorHost {
             let centers = self.director.tickets().player_centers();
             let rank = |pos: ChunkPos| {
                 let rank = if demand.players().is_empty() && !centers.is_empty() {
-                    Self::distance_to_players(pos, &centers).0 as i64
+                    distance_to_players(pos, &centers).0 as i64
                 } else {
                     demand.rank(pos)
                 };
@@ -1475,7 +1593,10 @@ impl DirectorHost {
                 .iter()
                 .map(|(&id, job)| Reverse((rank(job.pos), id)))
                 .collect();
-            self.backlog_centers = Self::sorted_centers(region);
+            // 记下重排时的玩家中心：非空就说明排过了，下次 `set_player_demand` 再清。
+            let mut centers = centers;
+            centers.sort_unstable();
+            self.backlog_centers = centers;
         }
         let cap = pool.threads().saturating_mul(POOL_JOBS_PER_THREAD);
         while pool.in_flight() < cap {
@@ -1601,7 +1722,7 @@ impl DirectorHost {
     /// Drain the compute pool at shutdown, feeding results to the Director. A
     /// dead pool or endlessly resubmitted tasks must never hang the world thread:
     /// no progress or a wall-clock timeout logs the unsaved chunks and returns.
-    fn drain_compute(&mut self, region: &mut Region) {
+    fn drain_compute(&mut self, island: &mut IslandAccess<'_>) {
         let started = Instant::now();
         let mut idle_rounds = 0;
         while self.compute_in_flight() > 0 {
@@ -1612,7 +1733,7 @@ impl DirectorHost {
                 );
                 return;
             }
-            self.submit_compute(region);
+            self.submit_compute();
             let events = self.collect_compute(Some(Duration::from_millis(100)));
             if events.is_empty() {
                 idle_rounds += 1;
@@ -1626,7 +1747,7 @@ impl DirectorHost {
                 continue;
             }
             idle_rounds = 0;
-            self.pump(region, events);
+            self.pump(island, events);
         }
     }
 
@@ -1635,7 +1756,7 @@ impl DirectorHost {
     ///
     /// Drain the IO mailbox at the start of each tick: read results become
     /// `TaskDone` events; write acks release the write-in-progress buffer.
-    pub(crate) fn poll_io(&mut self, region: &mut Region) {
+    pub(crate) fn poll_io(&mut self, island: &mut IslandAccess<'_>) {
         let mut replies = std::mem::take(&mut self.io_replies);
         replies.clear();
         if let Some(io) = &self.io {
@@ -1795,7 +1916,7 @@ impl DirectorHost {
         done.extend(self.collect_compute(None));
         // 所有读盘结果一次性喂给 Director，只交付一次，保住 3×3 和距离顺序。
         if !done.is_empty() {
-            self.pump(region, done);
+            self.pump(island, done);
         } else {
             done.clear();
             self.done_scratch = done;
@@ -1803,41 +1924,34 @@ impl DirectorHost {
         self.io_replies = replies;
     }
 
-    fn region_message(&mut self, region: &mut Region, message: RegionMessage<Box<RegionColumn>>) {
-        match message {
+    /// Director 发给岛的信：交付、收回、换档投进目标岛的邮筒，不碰 `Region`；
+    /// `Ready` / `Forgot` 只动主控自己的记账。
+    ///
+    /// A Director letter for an island: deliveries, reclaims and level changes
+    /// go to the target island's postbox without touching the `Region`;
+    /// `Ready` / `Forgot` only touch the master's own bookkeeping.
+    fn region_message(&mut self, message: RegionMessage<Box<RegionColumn>>) {
+        let (region, letter) = match message {
             RegionMessage::Deliver {
+                region,
                 pos,
                 generation,
                 column,
                 desired,
-            } => {
-                region.profiler.time_sub(SubPhase::DirectorEvents, || {
-                    self.deliveries.insert(pos, (generation, desired, column));
-                });
-            }
-            RegionMessage::Reclaim { positions } => {
-                region.profiler.time_sub(SubPhase::DirectorEvents, || {
-                    self.reclaims.extend(positions);
-                });
-            }
-            RegionMessage::LevelChanged { changes } => {
-                // 同一个 pump 里可能先收到档位变化、后 flush 交付：信箱里那份档位
-                // 也要跟着变，否则新交付的区块会带着旧档位进 region。尚未交付的
-                // 位置在 region 里没有记录，`level_changed` 只更新已交付的那些。
-                region.profiler.time_sub(SubPhase::DirectorEvents, || {
-                    for change in &changes {
-                        if let Some(entry) = self.deliveries.get_mut(&change.pos) {
-                            entry.1 = Desired::new(change.loading.1, change.simulation.1);
-                        }
-                    }
-                });
-                region.profiler.time_sub(SubPhase::LevelsUpdate, || {
-                    region.tick_levels.level_changed(&changes);
-                });
-            }
+            } => (
+                region,
+                Posted::Deliver {
+                    pos,
+                    generation,
+                    desired,
+                    column,
+                },
+            ),
+            RegionMessage::Reclaim { region, positions } => (region, Posted::Reclaim(positions)),
+            RegionMessage::LevelChanged { region, changes } => (region, Posted::Levels(changes)),
             // `Ready` 不用另存一份集合：`ChunkStore::is_loaded` 就是已交付集合，
             // 发区块时直接问它；多存一份只会多一处要保持一致的状态。
-            RegionMessage::Ready { .. } => {}
+            RegionMessage::Ready { .. } => return,
             RegionMessage::Forgot { positions } => {
                 // F6：区块被遗忘时清掉各处的每区块记账，避免长局无界增长。
                 // F6: clear per-chunk bookkeeping when a chunk is forgotten.
@@ -1852,245 +1966,79 @@ impl DirectorHost {
                     self.generated_light.remove(&pos);
                     self.generated_structures.remove(&pos);
                 }
+                return;
+            }
+        };
+        self.profiler.start_sub(SubPhase::DirectorEvents);
+        self.posts.entry(region).or_default().push(letter);
+        self.profiler.end_sub();
+    }
+
+    /// 取走投给 `island` 的信，给分离驱动的岛在自己一刻开头收取。
+    ///
+    /// Take the letters posted to `island`, for a detached island to take at
+    /// the start of its own tick.
+    pub(crate) fn take_posted(&mut self, island: RegionId, into: &mut Vec<Posted>) {
+        if let Some(posted) = self.posts.get_mut(&island) {
+            into.append(posted);
+        }
+    }
+
+    /// 记下岛的回执里真正进出 `Region` 的区块，回执本身接到 `events` 后面。
+    fn note_report(&mut self, report: &mut MailReport, events: &mut Vec<Event<Box<RegionColumn>>>) {
+        for (pos, entered) in report.moves.drain(..) {
+            if entered {
+                self.island_chunks.insert(pos);
+            } else {
+                self.island_chunks.remove(&pos);
             }
         }
+        events.append(&mut report.events);
     }
 
-    /// 离最近的玩家有多远（切比雪夫距离）。没有玩家时所有位置一样远。
-    fn distance_to_players(pos: ChunkPos, centers: &[ChunkPos]) -> (u64, i32, i32) {
-        let nearest = centers
-            .iter()
-            .map(|center| {
-                let dx = i64::from(pos.x) - i64::from(center.x);
-                let dz = i64::from(pos.z) - i64::from(center.z);
-                // 差值非负，两个 i32 相减放进 i64 不会溢出。
-                dx.abs().max(dz.abs()) as u64
-            })
-            .min()
-            .unwrap_or(u64::MAX);
-        // 同距离按坐标排，结果不依赖 BTreeMap 之外的任何顺序。
-        (nearest, pos.x, pos.z)
-    }
-
-    /// 玩家不能站在一个没加载的地方，进服、传送、高速移动都一样。
-    fn is_under_a_player(pos: ChunkPos, centers: &[ChunkPos]) -> bool {
-        centers.iter().any(|center| {
-            (i64::from(pos.x) - i64::from(center.x)).abs() <= 1
-                && (i64::from(pos.z) - i64::from(center.z)).abs() <= 1
-        })
-    }
-
-    /// 玩家所在的区块。刻预算用完时，脚下 3×3 仍然要交付完。
-    fn guaranteed_centers(region: &Region) -> Vec<ChunkPos> {
-        region
-            .players
-            .values()
-            .map(|player| player.chunk_pos())
-            .collect()
-    }
-
-    /// 玩家所在区块的有序快照，只用来判断待办要不要整堆重排。
-    fn sorted_centers(region: &Region) -> Vec<ChunkPos> {
-        let mut centers = Self::guaranteed_centers(region);
-        centers.sort_unstable();
-        centers
-    }
-
-    /// 收回请求瞄着还在信箱里排队的盒子时，直接把盒子还回去。
+    /// 岛借给这次调用时让它收信，回执写进 `events`（先清空）；岛不在手里就什么都不做。
     ///
-    /// 代数用 `Reclaim` 带来的那个：它和 `Deliver` 时的代数相同，
-    /// `Director::on_returned` 核对的就是它。盒子没进过 region，所以
-    /// 不需要碰 region、档位表里也没有它要清的条目、不算「交付」、
-    /// 也不占每刻的收回额度；信箱里为它记的等级随整条记录一起删掉。
-    fn return_pending_deliveries(&mut self, events: &mut Vec<Event<Box<RegionColumn>>>) {
-        if self.reclaims.is_empty() || self.deliveries.is_empty() {
-            return;
-        }
-        self.reclaims.retain(|(pos, generation)| {
-            let Some((_, _, column)) = self.deliveries.remove(pos) else {
-                return true;
-            };
-            self.reclaimed += 1;
-            events.push(Event::Returned {
-                pos: *pos,
-                generation: *generation,
-                column: Some(column),
-            });
-            false
-        });
-    }
-
-    /// region 在 tick 边界收信箱：先交付、后收回，返回要回给 Director 的事件。
-    ///
-    /// 整刻最多交付 `budget.deliveries` 个非豁免区块（`0` 表示不限），
-    /// 收回的上限见 [`Self::reclaim_cap`]，剩下的留到下一刻。
-    /// 同一刻内 `pump` 会多次调用它，交付共用 `budget_left` 里的剩余额度，
-    /// 收回共用 `reclaims_spent`。
-    #[cfg(test)]
-    fn flush_region_mail(&mut self, region: &mut Region) -> Vec<Event<Box<RegionColumn>>> {
-        let mut events = std::mem::take(&mut self.mail_events);
-        events.clear();
-        self.flush_region_mail_into(region, &mut events);
-        events
-    }
-
-    /// 把这一轮产生的回执写进 `events`。
-    fn flush_region_mail_into(
+    /// When the island is lent, let it take its mail and write the acks into
+    /// `events` (cleared first); otherwise do nothing.
+    fn flush_mail(
         &mut self,
-        region: &mut Region,
+        island: &mut IslandAccess<'_>,
         events: &mut Vec<Event<Box<RegionColumn>>>,
     ) {
-        let delivery_left = self.budget_left.deliveries;
-        let limited_deliveries = self.budget.deliveries > 0;
         events.clear();
-        // 收回优先：盒子可能还在 `deliveries` 里排队（交付有了每刻上限之后，
-        // 一个盒子可以在信箱里等好几刻）。这时 Director 已经把它记成
-        // `Reclaiming`，盒子必须原封不动地作为 `Returned` 回去，绝不能先进
-        // region 再被取出来，更不能晚几刻变成一个没人管的孤儿。
-        // 这一步不碰 region，不占交付/收回上限，也不需要等光照。
-        region.profiler.time_sub(SubPhase::ReturnBoxes, || {
-            self.return_pending_deliveries(events);
-        });
-        if self.deliveries.is_empty() && self.reclaims.is_empty() {
+        let IslandAccess::Lent(island) = island else {
             return;
-        }
-        // F6 背压只跳收回，交付（含玩家脚下 3×3）照常（复查「中 4」）。
-        // 官方 `ChunkMap.tick` 在 `noSave` 时也跳过整个 processUnloads，
-        // 所以 save-off 期间连收回都不做，区块保持加载（复查「中 7」）。
-        // Backpressure skips only reclaims, never deliveries (review 4).
-        // Official `ChunkMap.tick` skips processUnloads under noSave, so
-        // save-off also keeps chunks loaded (review 7).
-        let skip_reclaims =
-            self.save_backpressure() || (!self.saves_enabled && !self.shutting_down);
-        // 只有信箱里真有要交付/收回的东西时才把光照算完：这个函数每刻都调，
-        // 无条件 `finish_light_updates` 会绕开「光照每刻有预算」的设计。
-        // 交付/收回要求「没有算到一半的轮次」。
-        region.profiler.time_sub(SubPhase::DeliveryLightFinish, || {
-            region.chunks.finish_light_updates();
-        });
-        let centers = Self::guaranteed_centers(region);
-
-        // 近的先交付。玩家脚下 3×3 全部交付且不算进上限；同等 rank 按坐标排。
-        region.profiler.start_sub(SubPhase::MailSort);
-        let mut ordered: Vec<ChunkPos> = self.deliveries.keys().copied().collect();
-        // BTreeMap 的键已经按 (x, z) 升序，稳定排序让同等 rank 保持坐标顺序。
-        ordered.sort_by_key(|&pos| {
-            let guaranteed = Self::is_under_a_player(pos, &centers);
-            (!guaranteed, self.demand_rank(pos))
-        });
-        region.profiler.end_sub();
-        let mut used = 0usize;
-        // 一批交付只重算一次受影响的邻域，不逐块重算；每次成功都要把
-        // 信箱里记着的最新等级交给 region（脚下 3×3 和下一刻才轮到的都算）。
-        let mut delivered_levels = Vec::new();
-        for pos in ordered {
-            let guaranteed = Self::is_under_a_player(pos, &centers);
-            if !guaranteed && limited_deliveries && used >= delivery_left {
-                continue;
-            }
-            let Some((generation, desired, column)) = self.deliveries.remove(&pos) else {
-                continue;
-            };
-            match region.deliver_column(pos, column) {
-                Ok(()) => {
-                    self.delivered += 1;
-                    if !guaranteed {
-                        used += 1;
-                    }
-                    delivered_levels.push((pos, desired));
-                    events.push(Event::Delivered { pos, generation });
-                }
-                Err((_, column)) => {
-                    // 前提不满足（例如某张表正在 tick 中途）：留在信箱里，
-                    // 下一次 pump 再试，绝不把盒子丢掉。
-                    tracing::warn!(?pos, "chunk delivery was not ready, will retry");
-                    self.deliveries.insert(pos, (generation, desired, column));
-                }
-            }
-        }
-        // 一批交付只重算一次受影响的邻域，不逐块重算。
-        region.profiler.time_sub(SubPhase::LevelsUpdate, || {
-            region.tick_levels.deliver(delivered_levels);
-        });
-        if limited_deliveries {
-            self.budget_left.deliveries = delivery_left.saturating_sub(used);
-        }
-
-        if self.reclaims.is_empty() || skip_reclaims {
-            return;
-        }
-        let reclaimed_before = self.reclaimed;
-        // 远的先收回：这些区块不急，玩家脚下的票也没了时先留着更保险。
-        region.profiler.start_sub(SubPhase::MailSort);
-        let mut by_generation = BTreeMap::new();
-        for (pos, generation) in std::mem::take(&mut self.reclaims) {
-            by_generation.insert(pos, generation);
-        }
-        let mut ordered: Vec<ChunkPos> = by_generation.keys().copied().collect();
-        let distance = |pos: &ChunkPos| Self::distance_to_players(*pos, &centers);
-        // 距离取相反数，远的在前；同距离按坐标升序。
-        // 积压可以有几千个，到玩家的距离每个位置只算一次。
-        ordered.sort_by_cached_key(|pos| {
-            let (far, x, z) = distance(pos);
-            (std::cmp::Reverse(far), x, z)
-        });
-        region.profiler.end_sub();
-        // 这一刻要收回的总数 = 已经收的 + 还在信箱里的。收一个，前一项加一、
-        // 后一项减一，总数不变；所以同一刻里不管 `pump` 调用几次，
-        // 上限只会因为新排进来的请求变大，不会因为多调用几次而重新发一份额度。
-        let cap = Self::reclaim_cap(self.budget.reclaims, self.reclaims_spent + ordered.len());
-        let count = ordered.len().min(cap.saturating_sub(self.reclaims_spent));
-        if count == 0 {
-            // 这一刻的额度用完了，全部留到下一刻。
-            self.reclaims.extend(by_generation);
-            return;
-        }
-        let batch: Vec<(ChunkPos, u64)> = ordered
-            .into_iter()
-            .take(count)
-            .map(|pos| {
-                let generation = by_generation.remove(&pos).expect("键在表里");
-                (pos, generation)
-            })
-            .collect();
-        // 没轮到的留在信箱里，下一次 tick 再收。
-        self.reclaims.extend(by_generation);
-        let positions = batch.iter().map(|&(pos, _)| pos).collect();
-        match region.reclaim_columns(&positions) {
-            Ok(mut boxes) => {
-                region.profiler.time_sub(SubPhase::LevelsUpdate, || {
-                    region.tick_levels.reclaim(positions.iter());
-                });
-                region.profiler.start_sub(SubPhase::ReturnBoxes);
-                for (pos, generation) in batch {
-                    self.reclaimed += 1;
-                    events.push(Event::Returned {
-                        pos,
-                        generation,
-                        column: boxes.remove(&pos),
-                    });
-                }
-                region.profiler.end_sub();
-            }
-            Err(_) => {
-                // 失败时整批放回信箱，下次 tick 边界再试：Director 还以为这些
-                // 区块「正在收回」，丢了这条列表它就永远等不到回执。
-                tracing::warn!("chunk reclaim was not ready, will retry");
-                self.reclaims.extend(batch);
-            }
-        }
-        self.reclaims_spent += self.reclaimed.saturating_sub(reclaimed_before);
+        };
+        let order = self.mail_order();
+        let mut report = std::mem::take(&mut self.mail_report);
+        let posted = self.posts.entry(island.id).or_default();
+        island.take_mail(posted, &order, &mut report);
+        self.note_report(&mut report, events);
+        self.mail_report = report;
     }
 
-    /// 一刻里最多从 region 取回多少个区块。`demand` 是这一刻要收回的总数。
+    /// 岛交回：把分离驱动下岛自己收信产生的回执喂给 Director。
     ///
-    /// 积压小的时候就是配置的上限；积压大了每刻收掉它的
-    /// 1/[`RECLAIM_DRAIN_TICKS`]。配置成 0 表示不限。
-    fn reclaim_cap(configured: usize, demand: usize) -> usize {
-        if configured == 0 {
-            return usize::MAX;
+    /// Hand-back: feed the acks a detached island produced to the Director.
+    pub(crate) fn accept_replies(
+        &mut self,
+        island: &mut IslandAccess<'_>,
+        replies: &mut MailReport,
+    ) {
+        if replies.is_empty() {
+            return;
         }
-        configured.max(demand.div_ceil(RECLAIM_DRAIN_TICKS))
+        let mut events = std::mem::take(&mut self.initial_scratch);
+        self.note_report(replies, &mut events);
+        self.pump(island, events);
+    }
+
+    /// 测试专用：让岛收一次信，返回回执。
+    #[cfg(test)]
+    fn flush_region_mail(&mut self, island: &mut Island) -> Vec<Event<Box<RegionColumn>>> {
+        let mut events = Vec::new();
+        self.flush_mail(&mut IslandAccess::Lent(island), &mut events);
+        events
     }
 }
 
@@ -2099,8 +2047,19 @@ mod tests {
     use mc_bamboo_blocks::entity::{Entity, EntityKind, PrimedTnt};
     use mc_bamboo_core::{ChunkPos, Vec3};
 
+    use mc_bamboo_world::director::{Desired, HOME_REGION};
+
     use super::*;
-    use crate::world::tests::Harness;
+    use crate::{region::Region, world::tests::Harness};
+
+    /// 一个只有 `Region` 的岛，给不需要整个世界的测试用。
+    fn bare_island() -> Island {
+        Island::new(
+            HOME_REGION,
+            Region::new(2, 20, false),
+            MailBudget::default(),
+        )
+    }
 
     const ORIGIN: ChunkPos = ChunkPos::new(0, 0);
 
@@ -2122,21 +2081,25 @@ mod tests {
 
     #[test]
     fn a_failed_reclaim_is_put_back_and_retried() {
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         let mut server = Harness::new(2);
-        let region = server.region();
-        host.reclaims.push((ORIGIN, 1));
-        let entity = borrowed_entity(region);
-        let first = host.flush_region_mail(region);
+        let island = server.island();
+        island.mailbox.queue_reclaim(ORIGIN, 1);
+        let entity = borrowed_entity(&mut island.region);
+        let first = host.flush_region_mail(island);
         assert!(
             first.is_empty(),
             "前提不满足时不产生 Returned，Director 还在等"
         );
-        assert_eq!(host.reclaims, vec![(ORIGIN, 1)], "失败的收回要放回信箱");
+        assert_eq!(
+            island.mailbox.reclaims(),
+            &[(ORIGIN, 1)],
+            "失败的收回要放回信箱"
+        );
 
-        region.entities.put(entity);
-        let second = host.flush_region_mail(region);
-        assert!(host.reclaims.is_empty(), "重试成功之后信箱清空");
+        island.region.entities.put(entity);
+        let second = host.flush_region_mail(island);
+        assert!(island.mailbox.reclaims().is_empty(), "重试成功之后信箱清空");
         assert_eq!(second.len(), 1, "这一刻要给 Director 回 Returned");
         assert!(matches!(second[0], Event::Returned { pos, .. } if pos == ORIGIN));
     }
@@ -2145,19 +2108,18 @@ mod tests {
     /// 盒子原样还回去，绝不先进 region 再被取出来。
     #[test]
     fn a_reclaim_and_a_delivery_for_one_position_take_the_box_once() {
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         let mut server = Harness::new_loaded(2);
         let pos = ChunkPos::new(20, 20);
-        host.deliveries.insert(
+        let island = server.island();
+        island.mailbox.queue_delivery(
             pos,
-            (
-                7,
-                Desired::UNLOADED,
-                Box::new(RegionColumn::from_template()),
-            ),
+            7,
+            Desired::UNLOADED,
+            Box::new(RegionColumn::from_template()),
         );
-        host.reclaims.push((pos, 7));
-        let events = host.flush_region_mail(server.region());
+        island.mailbox.queue_reclaim(pos, 7);
+        let events = host.flush_region_mail(island);
         assert_eq!(events.len(), 1, "只回一条 Returned");
         assert!(matches!(
             events[0],
@@ -2167,50 +2129,55 @@ mod tests {
                 column: Some(_)
             } if at == pos
         ));
-        assert_eq!(host.mail_backlog(), (0, 0), "两个信箱都清空");
+        assert_eq!(server.island().mailbox.backlog(), (0, 0), "两个信箱都清空");
         assert!(!server.region().chunks.is_loaded(pos), "盒子没进 region");
-        assert_eq!(host.delivered, 0, "不占交付额度");
+        assert_eq!(
+            server.island().mailbox.counters_this_tick().0,
+            0,
+            "不占交付额度"
+        );
     }
 
     /// 交付因为前提不满足失败时，盒子一定原样回到信箱，且 region 里
     /// 没有留下半插入的状态；前提恢复后下一次 flush 能成功交付。
     #[test]
     fn a_failed_delivery_puts_the_box_back_without_a_half_insert() {
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         let mut server = Harness::new_loaded(2);
-        let region = server.region();
-        host.deliveries.insert(
+        let island = server.island();
+        island.mailbox.queue_delivery(
             ORIGIN,
-            (
-                3,
-                Desired::UNLOADED,
-                Box::new(RegionColumn::from_template()),
-            ),
+            3,
+            Desired::UNLOADED,
+            Box::new(RegionColumn::from_template()),
         );
         // 方块实体正在 tick 中途：`deliver_column` 的只读前提不满足。
-        region.block_entities.begin_tick(0);
-        assert!(!region.ready_to_move_columns(), "前提确实不满足");
+        island.region.block_entities.begin_tick(0);
+        assert!(!island.region.ready_to_move_columns(), "前提确实不满足");
 
-        let first = host.flush_region_mail(region);
+        let first = host.flush_region_mail(island);
         assert!(first.is_empty(), "失败时不产生 Delivered");
-        assert_eq!(host.mail_backlog(), (1, 0), "盒子回到信箱");
+        assert_eq!(island.mailbox.backlog(), (1, 0), "盒子回到信箱");
         assert!(
-            !region.chunks.is_loaded(ORIGIN),
+            !island.region.chunks.is_loaded(ORIGIN),
             "region 里没有半插入的区块"
         );
-        assert_eq!(host.delivered, 0, "失败不占额度");
+        assert_eq!(island.mailbox.counters_this_tick().0, 0, "失败不占额度");
 
         // 同一个 pump 轮次里再调一次也还是失败，盒子不会丢、不会重复插入。
-        let again = host.flush_region_mail(region);
+        let again = host.flush_region_mail(island);
         assert!(again.is_empty(), "前提没恢复前一直失败");
-        assert_eq!(host.mail_backlog(), (1, 0), "重试没有把盒子弄丢");
+        assert_eq!(island.mailbox.backlog(), (1, 0), "重试没有把盒子弄丢");
 
-        region.block_entities.end_tick();
-        let third = host.flush_region_mail(region);
+        island.region.block_entities.end_tick();
+        let third = host.flush_region_mail(island);
         assert_eq!(third.len(), 1, "前提恢复后交付成功");
-        assert!(matches!(third[0], Event::Delivered { pos, generation: 3 } if pos == ORIGIN));
-        assert!(region.chunks.is_loaded(ORIGIN), "只插入了一次");
-        assert_eq!(host.mail_backlog(), (0, 0), "信箱清空");
+        assert!(matches!(
+            third[0],
+            Event::Delivered { region: HOME_REGION, pos, generation: 3 } if pos == ORIGIN
+        ));
+        assert!(island.region.chunks.is_loaded(ORIGIN), "只插入了一次");
+        assert_eq!(island.mailbox.backlog(), (0, 0), "信箱清空");
     }
 
     #[test]
@@ -2250,7 +2217,7 @@ mod tests {
         let tmp = TempDir::new();
         let dir = WorldDir::new(&tmp.0);
         dir.create_layout().unwrap();
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         host.set_io(ChunkIo::open(&dir).unwrap());
         for i in 0..3 {
             host.save_queue.push_back(PendingWrite {
@@ -2275,12 +2242,12 @@ mod tests {
     /// and logs instead of panicking.
     #[test]
     fn pump_handles_a_large_batch_without_panicking() {
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
-        let mut region = Region::new(2, 20, false);
+        let mut host = DirectorHost::new(DirectorConfig::default());
+        let mut island = bare_island();
         let events: Vec<_> = (0..5_000_u64)
             .map(|now_tick| Event::Tick { now_tick })
             .collect();
-        host.pump(&mut region, events);
+        host.pump(&mut IslandAccess::Lent(&mut island), events);
         // 能跑到这里就说明一批 5000 个事件没有触发收敛护栏、也没有 panic。
     }
 
@@ -2316,7 +2283,7 @@ mod tests {
         let tmp = Tmp::new();
         let dir = WorldDir::new(&tmp.0);
         dir.create_layout().unwrap();
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         host.set_io(ChunkIo::open(&dir).unwrap());
         let pos = ChunkPos::new(3, 4);
         let snapshot = |seq| PendingWrite {
@@ -2345,7 +2312,7 @@ mod tests {
     /// F6: only the newest snapshot per chunk stays in `save_queue`.
     #[test]
     fn save_queue_keeps_only_the_newest_snapshot_per_chunk() {
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         let pos = ChunkPos::new(1, 1);
         let other = ChunkPos::new(2, 2);
         let snapshot = |pos, seq| PendingWrite {
@@ -2374,7 +2341,7 @@ mod tests {
     /// F6: hitting a cap defers reclaims to the next tick.
     #[test]
     fn a_full_save_queue_defers_reclaims_as_backpressure() {
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         for i in 0..MAX_PENDING_WRITES {
             host.enqueue_snapshot(PendingWrite {
                 pos: ChunkPos::new(i as i32, 0),
@@ -2384,11 +2351,15 @@ mod tests {
             });
         }
         assert!(host.save_backpressure());
-        let mut region = Region::new(2, 20, false);
+        let mut island = bare_island();
         let pos = ChunkPos::new(0, 0);
-        host.reclaims.push((pos, 0));
-        let _ = host.flush_region_mail(&mut region);
-        assert_eq!(host.reclaims.len(), 1, "reclaim must be deferred");
+        island.mailbox.queue_reclaim(pos, 0);
+        let _ = host.flush_region_mail(&mut island);
+        assert_eq!(
+            island.mailbox.reclaims().len(),
+            1,
+            "reclaim must be deferred"
+        );
         let _ = pos;
         // 队列腾空后背压解除。
         host.save_queue.clear();
@@ -2399,19 +2370,16 @@ mod tests {
     /// F6: per-chunk bookkeeping is cleared when a chunk is forgotten.
     #[test]
     fn forgetting_a_chunk_clears_its_bookkeeping() {
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
-        let mut region = Region::new(2, 20, false);
+        let mut host = DirectorHost::new(DirectorConfig::default());
+        let region = Region::new(2, 20, false);
         let pos = ChunkPos::new(5, 5);
         host.save_cooldown.insert(pos, 10);
         host.loaded_save_tick.insert(pos, 20);
         host.saved_revisions
             .insert(pos, (region.chunks.revision(pos), 0));
-        host.region_message(
-            &mut region,
-            RegionMessage::Forgot {
-                positions: vec![pos],
-            },
-        );
+        host.region_message(RegionMessage::Forgot {
+            positions: vec![pos],
+        });
         assert!(!host.save_cooldown.contains_key(&pos));
         assert!(!host.loaded_save_tick.contains_key(&pos));
         assert!(!host.saved_revisions.contains_key(&pos));
@@ -2459,7 +2427,7 @@ mod tests {
             std::fs::write(&directory, b"not a directory").unwrap();
         }
         let pos = ChunkPos::new(4, -2);
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         host.set_io(io);
         host.parking
             .park(pos, Box::new(RegionColumn::from_template()));
@@ -2473,8 +2441,8 @@ mod tests {
 
         host.pace_saves(1);
         let _ = host.io().unwrap().flush(); // 故意写失败，flush 如实报 Err，只当同步点
-        let mut region = Region::new(2, 20, false);
-        host.poll_io(&mut region);
+        let mut island = bare_island();
+        host.poll_io(&mut IslandAccess::Lent(&mut island));
 
         assert!(
             host.parking.contains(pos),
@@ -2501,7 +2469,7 @@ mod tests {
             });
             host.pace_saves(2 + u64::from(i));
             let _ = host.io().unwrap().flush(); // 故意写失败，flush 如实报 Err，只当同步点
-            host.poll_io(&mut region);
+            host.poll_io(&mut IslandAccess::Lent(&mut island));
         }
         assert!(
             host.save_retry_after > 0,
@@ -2523,7 +2491,7 @@ mod tests {
             "once the backoff expires normal saving retries"
         );
         // `/save-all` 是显式强制重试：清掉剩余的退避。
-        host.snapshot_all_dirty(&mut region, 60);
+        host.snapshot_all_dirty(&mut island, 60);
         assert_eq!(
             host.save_retry_after, 0,
             "save-all forces an immediate retry"
@@ -2566,7 +2534,7 @@ mod tests {
         let tmp = Tmp::new();
         let dir = WorldDir::new(&tmp.0);
         dir.create_layout().unwrap();
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         host.set_io(ChunkIo::open(&dir).unwrap());
 
         // 造一个改过的盒子。
@@ -2651,7 +2619,7 @@ mod tests {
         let tmp = Tmp::new();
         let dir = WorldDir::new(&tmp.0);
         dir.create_layout().unwrap();
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         host.set_io(ChunkIo::open(&dir).unwrap());
         let before = codec_nanos();
         for i in 0..SAVES {
@@ -2708,7 +2676,7 @@ mod tests {
         let temp = Temp::new();
         let dir = WorldDir::new(&temp.0);
         dir.create_layout().unwrap();
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         // 没接 IO：当刻同步回模板。
         assert!(matches!(
             host.run_task(0, 0, Task::Read { pos: ORIGIN }),
@@ -2729,7 +2697,7 @@ mod tests {
         }
         host.flush_io();
         let mut server = Harness::new_loaded(2);
-        host.poll_io(server.region());
+        host.poll_io(&mut IslandAccess::Lent(server.island()));
         let mut seen = Vec::new();
         while let Some(reply) = host.io().unwrap().try_recv() {
             if let Reply::Read { pos, .. } = reply {
@@ -2775,7 +2743,7 @@ mod tests {
         let temp = Temp::new();
         let dir = WorldDir::new(&temp.0);
         dir.create_layout().unwrap();
-        let mut host = DirectorHost::new(DirectorConfig::default(), MailBudget::default());
+        let mut host = DirectorHost::new(DirectorConfig::default());
         host.set_io(ChunkIo::open(&dir).unwrap());
         // 玩家只在票表里（模拟进服派读时尚未 region.add_player），region 里没有玩家。
         // The player is only in the ticket table (reads queued before add_player).

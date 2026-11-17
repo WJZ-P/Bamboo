@@ -215,6 +215,15 @@ impl Harness {
         Self::build(view_distance, true)
     }
 
+    /// 已加载模式，显式指定驱动（齐步 / 分离），不看环境变量。
+    /// Loaded mode with an explicit drive, regardless of the environment.
+    pub(crate) fn new_loaded_with_drive(
+        view_distance: i32,
+        island_drive: crate::island::IslandDrive,
+    ) -> Self {
+        Self::build_with(view_distance, true, island_drive)
+    }
+
     /// 已加载模式 + 区块计算池（不接存档）。
     pub(crate) fn new_loaded_with_threads(view_distance: i32, chunk_worker_threads: usize) -> Self {
         let mut harness = Self::build(view_distance, true);
@@ -246,11 +255,28 @@ impl Harness {
         root: &std::path::Path,
         chunk_worker_threads: usize,
     ) -> Self {
+        Self::new_loaded_with_save_threads_and_drive(
+            view_distance,
+            root,
+            chunk_worker_threads,
+            crate::island::IslandDrive::default_for_world(),
+        )
+    }
+
+    /// 同上，另外显式指定驱动（齐步 / 分离），不看环境变量。
+    /// The same with an explicit drive, regardless of the environment.
+    pub(crate) fn new_loaded_with_save_threads_and_drive(
+        view_distance: i32,
+        root: &std::path::Path,
+        chunk_worker_threads: usize,
+        island_drive: crate::island::IslandDrive,
+    ) -> Self {
         let (inbox, receiver) = crate::inbound::channel();
         let config = WorldConfig {
             view_distance,
             world_dir: Some(root.to_path_buf()),
             chunk_worker_threads,
+            island_drive,
             ..Default::default()
         };
         let mut world = World::new(config, receiver);
@@ -266,6 +292,18 @@ impl Harness {
     }
 
     fn build(view_distance: i32, loaded: bool) -> Self {
+        Self::build_with(
+            view_distance,
+            loaded,
+            crate::island::IslandDrive::default_for_world(),
+        )
+    }
+
+    fn build_with(
+        view_distance: i32,
+        loaded: bool,
+        island_drive: crate::island::IslandDrive,
+    ) -> Self {
         let (inbox, receiver) = crate::inbound::channel();
         let config = WorldConfig {
             view_distance,
@@ -273,6 +311,7 @@ impl Harness {
             online_mode: false,
             enforce_secure_profile: false,
             admin: Default::default(),
+            island_drive,
             ..Default::default()
         };
         let mut world = if loaded {
@@ -495,7 +534,14 @@ impl Harness {
         );
     }
 
-    /// 一直回确认，直到没有新区块，返回收到的全部区块。
+    /// 一直回确认，直到没有新区块、也没有还等着岛收取的区块信件，返回收到的全部区块。
+    /// 齐步驱动下每刻结束时邮筒总是空的，和只看「这一刻有没有新批次」相同；分离驱动下
+    /// 交付晚一刻，进服那一刻还没有区块可发，要等岛下一刻开头把信收走。
+    ///
+    /// Keep acknowledging until a tick brings no batch and no chunk mail is
+    /// still waiting for the island. In lockstep the postbox is always empty at
+    /// the end of a tick, so this is the old condition; under the detached drive
+    /// delivery is one tick late and the join tick has nothing to send yet.
     pub(crate) fn receive_all_chunks(&mut self, client: &Client) -> Vec<ChunkPos> {
         let mut received = Vec::new();
         loop {
@@ -506,7 +552,7 @@ impl Harness {
             for _ in 0..finished {
                 self.acknowledge_batch(client, 64.0);
             }
-            if finished == 0 {
+            if finished == 0 && self.world.master.host.posted_len() == 0 {
                 return received;
             }
         }
@@ -621,20 +667,69 @@ impl Harness {
         &mut self.world.island.region
     }
 
+    pub(crate) fn island(&mut self) -> &mut crate::island::Island {
+        &mut self.world.island
+    }
+
     /// 测试并行驱动时直接设线程数，不碰进程级环境变量（同一进程里测试并行跑）。
     pub(crate) fn set_entity_threads(&mut self, threads: usize) {
         self.world.island.entity_threads = threads;
     }
 
-    /// 已加载模式的测试专用：本刻交付/收回的个数、信箱里还欠着的个数。
+    /// 已加载模式的测试专用：本刻交付/收回的个数、信箱里还欠着的个数（含邮筒里
+    /// 还没被岛收取的；齐步下每刻结束时邮筒是空的）。
     pub(crate) fn director_mail(&self) -> (usize, usize, (usize, usize)) {
-        let (delivered, reclaimed) = self.world.master.host.counters_this_tick();
-        (delivered, reclaimed, self.world.master.host.mail_backlog())
+        let mailbox = &self.world.island.mailbox;
+        let (delivered, reclaimed) = mailbox.counters_this_tick();
+        let (queued_deliveries, queued_reclaims) = mailbox.backlog();
+        let (posted_deliveries, posted_reclaims) = self.world.master.host.posted_counts();
+        (
+            delivered,
+            reclaimed,
+            (
+                queued_deliveries + posted_deliveries,
+                queued_reclaims + posted_reclaims,
+            ),
+        )
+    }
+
+    /// 这个世界走分离驱动。
+    pub(crate) fn detached(&self) -> bool {
+        self.world.master.drive == crate::island::IslandDrive::Detached
+    }
+
+    /// 分离驱动下区块晚一刻交付：邮筒里还有信就再跑一刻，让岛在开头收走。
+    /// 齐步下每刻结束时邮筒总是空的，这里什么都不做。只用在「交付晚一刻」要调整的断言前。
+    ///
+    /// Under the detached drive chunks arrive one tick late: if letters are
+    /// still posted, run one more tick so the island takes them at its start.
+    /// In lockstep the postbox is always empty at the end of a tick, so this
+    /// does nothing. Used only before assertions adjusted for the late delivery.
+    pub(crate) fn deliver_posted(&mut self) {
+        if self.world.master.host.posted_len() > 0 {
+            self.tick();
+        }
+    }
+
+    /// 脚下 3×3 的一格「已经到位」：已交付；或者（分离驱动下）盒子已经投进邮筒，
+    /// 或者岛这一刻开头收下时玩家还没走到这里、按预算排在了信箱里——两种都在岛下一刻
+    /// 开头按玩家的新位置豁免预算交付。齐步下收信时玩家已经在这里，就是「已交付」。
+    ///
+    /// A footprint chunk is in place: delivered; or (detached) its box is posted,
+    /// or was taken at the start of this tick before the player got here and
+    /// waits in the mailbox under the budget. Either way the island delivers it
+    /// at its next tick start, exempt from the budget for the player's new
+    /// position. In lockstep the player is already here when mail is taken, so
+    /// this is just "delivered".
+    pub(crate) fn footprint_ready(&self, pos: ChunkPos) -> bool {
+        self.world.island.region.chunks.is_loaded(pos)
+            || self.world.master.host.has_posted_delivery(pos)
+            || (self.detached() && self.world.island.mailbox.has_delivery(pos))
     }
 
     /// 这一刻从 region 取回的区块数（不含直接从信箱退回的盒子）。
     pub(crate) fn region_reclaims_this_tick(&self) -> usize {
-        self.world.master.host.region_reclaims_this_tick()
+        self.world.island.mailbox.region_reclaims_this_tick()
     }
 
     /// 测试专用：把每名玩家的加载/生成在途上限改小，模拟慢生成时的积压。
@@ -650,7 +745,7 @@ impl Harness {
 
     /// 测试专用：改这一刻之后的交付/收回上限（不碰进程级环境变量）。
     pub(crate) fn set_mail_budget(&mut self, budget: crate::director_host::MailBudget) {
-        self.world.master.host.set_budget(budget);
+        self.world.island.mailbox.set_budget(budget);
     }
 
     /// 测试专用：Director 里已交付/在途的区块数。
@@ -727,6 +822,9 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
     let client = server.join("Kitten");
 
     server.tick();
+    // 分离驱动下第一批区块晚一刻：前面的进服序列不变，区块批次接在下一刻。
+    // Detached: the join sequence is unchanged and the first batch follows next tick.
+    server.deliver_posted();
 
     let mut expected = vec![
         clientbound::LOGIN,
@@ -940,6 +1038,9 @@ fn first_batch_is_exactly_the_three_by_three_around_the_spawn() {
     let client = server.join_with("Kitten", client_requesting(8));
 
     server.tick();
+    // 分离驱动下区块晚一刻交付（岛的实施计划第 6 节第 6 步）。
+    // Under the detached drive chunks arrive one tick late (island plan step 6).
+    server.deliver_posted();
 
     let frames = client.take_frames();
     let chunks: BTreeSet<ChunkPos> = received_chunks(&frames).into_iter().collect();
@@ -958,6 +1059,9 @@ fn no_more_chunks_without_an_acknowledgement() {
     let mut server = Harness::new(8);
     let client = server.join("Kitten");
     server.tick();
+    // 分离驱动下区块晚一刻交付（岛的实施计划第 6 节第 6 步）。
+    // Under the detached drive chunks arrive one tick late (island plan step 6).
+    server.deliver_posted();
     client.take_frames();
 
     for _ in 0..50 {
@@ -1065,6 +1169,9 @@ fn walking_before_the_chunks_arrived_drops_them_without_forgetting() {
     let client = server.join("Kitten");
     server.confirm_teleport(&client);
     server.tick();
+    // 分离驱动下区块晚一刻交付（岛的实施计划第 6 节第 6 步）。
+    // Under the detached drive chunks arrive one tick late (island plan step 6).
+    server.deliver_posted();
     client.take_frames();
 
     // 第一批确认之前就走远了：新视图和旧视图没有交集。
@@ -1312,10 +1419,10 @@ fn rejoin_uses_in_flight_player_save_over_stale_disk() {
 
 /// 临时世界目录，测试结束自动删。IO 线程要在删目录前关掉，所以 tmp 先声明、
 /// server 后声明（drop 时 server 先关）。
-struct D6TempDir(std::path::PathBuf);
+pub(crate) struct D6TempDir(pub(crate) std::path::PathBuf);
 
 impl D6TempDir {
-    fn new(tag: &str) -> Self {
+    pub(crate) fn new(tag: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
             "bamboo-d6-{tag}-{}-{}",
             std::process::id(),
@@ -1336,7 +1443,9 @@ impl Drop for D6TempDir {
 }
 
 /// 收回 IO 信箱里所有 `Written`，返回写过的区块坐标。
-fn written_chunks(host: &crate::director_host::DirectorHost) -> Vec<mc_bamboo_core::ChunkPos> {
+pub(crate) fn written_chunks(
+    host: &crate::director_host::DirectorHost,
+) -> Vec<mc_bamboo_core::ChunkPos> {
     use mc_bamboo_storage::chunk_io::Reply;
     let io = host.io().expect("测试接了 IO 线程");
     std::iter::from_fn(|| io.try_recv())
@@ -1400,7 +1509,7 @@ fn d6_saves_a_loaded_dirty_chunk_and_keeps_it_loaded() {
             .world
             .master
             .host
-            .save_loaded_dirty(&mut server.world.island.region, t, true);
+            .save_loaded_dirty(&mut server.world.island, t, true);
     }
     server.world.master.host.flush_io();
 
@@ -1424,7 +1533,7 @@ fn d6_saves_a_loaded_dirty_chunk_and_keeps_it_loaded() {
             .world
             .master
             .host
-            .save_loaded_dirty(&mut server.world.island.region, t, true);
+            .save_loaded_dirty(&mut server.world.island, t, true);
         server.world.master.host.flush_io();
         assert!(
             !written_chunks(&server.world.master.host).contains(&pos),
@@ -1457,7 +1566,7 @@ fn d6_stops_when_auto_save_is_off() {
         .world
         .master
         .host
-        .save_loaded_dirty(&mut server.world.island.region, 1, false);
+        .save_loaded_dirty(&mut server.world.island, 1, false);
     server.world.master.host.flush_io();
     assert!(
         written_chunks(&server.world.master.host).is_empty(),
@@ -1503,7 +1612,7 @@ fn save_all_snapshots_every_dirty_loaded_chunk() {
         .world
         .master
         .host
-        .snapshot_all_dirty(&mut server.world.island.region, 1);
+        .snapshot_all_dirty(&mut server.world.island, 1);
     server.world.master.host.flush_io();
     let written = written_chunks(&server.world.master.host);
     assert!(
@@ -1634,7 +1743,7 @@ fn d6_saves_a_chunk_with_only_a_container_edit() {
         .world
         .master
         .host
-        .save_loaded_dirty(&mut server.world.island.region, 1, true);
+        .save_loaded_dirty(&mut server.world.island, 1, true);
     server.world.master.host.flush_io();
     assert!(
         written_chunks(&server.world.master.host).contains(&pos),
@@ -1661,6 +1770,13 @@ fn save_all_sends_success_after_handoff() {
             source: client.id,
         });
     server.tick();
+    if server.detached() {
+        // 分离驱动下 `/save-all` 等岛这一刻交回、停放之后才过栅栏，成功消息排在
+        // 这一刻刷出之后，下一刻才到客户端。
+        // Detached: `/save-all` passes its barrier after the island hands back,
+        // so the success message is flushed one tick later.
+        server.tick();
+    }
     assert!(
         has_save_success(&client),
         "non-flush success is sent once snapshots are handed off"
@@ -2500,13 +2616,18 @@ fn save_and_reopen_resumes_game_time_day_time_and_scheduled_ticks() {
     // 计划刻读盘后的绝对到点时刻和重启前一致（`ensure_loaded` 为了交付区块
     // 可能又走了几刻，所以按存盘时的基准比较），再走几刻仍逐刻同步。
     reopened.ensure_loaded(&[ChunkPos::new(0, 0)]);
+    // 区块不在岛上时它的计划刻不走，到点时刻从交付那一刻算起。分离驱动下交付晚一刻，
+    // 所以基准也晚一刻。
+    // A chunk's scheduled ticks do not advance while it is away; they count from
+    // delivery. Under the detached drive delivery is one tick later, and so is the base.
+    let delivered_at = saved_time + i64::from(reopened.detached());
     let after: Vec<i64> = reopened
         .world
         .island
         .region
         .block_ticks
         .pending()
-        .map(|tick| tick.trigger_tick - saved_time)
+        .map(|tick| tick.trigger_tick - delivered_at)
         .collect();
     assert_eq!(after, before, "重启前后计划刻的相对到点时刻不变");
     let resume_at = reopened.world.master.global.time().0;

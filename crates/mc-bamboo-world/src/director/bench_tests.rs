@@ -92,7 +92,7 @@ impl Inline {
                     } => {
                         self.in_mail.insert(pos, (generation, column));
                     }
-                    RegionMessage::Reclaim { positions } => self.reclaim.extend(positions),
+                    RegionMessage::Reclaim { positions, .. } => self.reclaim.extend(positions),
                     RegionMessage::LevelChanged { .. }
                     | RegionMessage::Ready { .. }
                     | RegionMessage::Forgot { .. } => {}
@@ -140,7 +140,11 @@ impl Inline {
         let mut events = Vec::new();
         // 只有这一轮信箱里新到的交付才回执；已确认过的不再重复发。
         for (pos, (generation, column)) in std::mem::take(&mut self.in_mail) {
-            events.push(Event::Delivered { pos, generation });
+            events.push(Event::Delivered {
+                region: crate::director::HOME_REGION,
+                pos,
+                generation,
+            });
             self.region.insert(pos, (generation, column));
         }
         for (pos, generation) in std::mem::take(&mut self.reclaim) {

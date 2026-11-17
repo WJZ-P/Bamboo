@@ -187,6 +187,9 @@ fn the_loaded_set_eventually_covers_every_players_view() {
 /// 已加载模式的公共检查：每名玩家脚下 3×3 每一刻都必须已交付。
 /// 这是设计稿第 10 节的下限（玩家不能站在没加载的地方），也是限速之后
 /// 唯一还「当刻成立」的加载不变量；整个视野改成「若干刻后收齐」。
+/// 分离驱动下交付晚一刻：盒子已经投进邮筒、岛下一刻开头收下的也算到位。
+/// Under the detached drive delivery is one tick late, so a box already posted
+/// for the island's next tick counts as in place.
 fn assert_footprints_loaded(server: &Harness) {
     let region = server.world_region();
     for player in region.players.values() {
@@ -195,7 +198,7 @@ fn assert_footprints_loaded(server: &Harness) {
             for dz in -1..=1 {
                 let pos = ChunkPos::new(center.x + dx, center.z + dz);
                 assert!(
-                    region.chunks.is_loaded(pos),
+                    server.footprint_ready(pos),
                     "玩家脚下 {pos:?} 还没交付（中心 {center:?}）"
                 );
             }
@@ -383,6 +386,9 @@ fn teleport_lands_on_a_loaded_footprint_and_the_view_follows() {
     // 这一刻就让票变成交付动作，脚下 3×3 必须当刻到位。
     server.acknowledge_batch(&client, 64.0);
     server.tick();
+    // 分离驱动下交付晚一刻：落地这一刻盒子投进邮筒，岛下一刻开头收下。
+    // Detached: the boxes are posted on landing and taken at the next tick start.
+    server.deliver_posted();
     assert_footprints_loaded(&server);
     let frames = client.take_frames();
     for frame in &frames {
@@ -506,8 +512,7 @@ fn many_fast_players_keep_the_loaded_count_and_reclaim_backlog_bounded() {
         assert!(mail.1 < bound, "第 {step} 刻收回收信箱有界：{mail:?}");
         // 这一刻要收回的总数是「收了的 + 还欠着的」，上限按它算。
         let spent = server.region_reclaims_this_tick();
-        let cap = RECLAIM_BUDGET
-            .max((spent + mail.1).div_ceil(crate::director_host::RECLAIM_DRAIN_TICKS));
+        let cap = RECLAIM_BUDGET.max((spent + mail.1).div_ceil(crate::island::RECLAIM_DRAIN_TICKS));
         assert!(
             spent <= cap,
             "第 {step} 刻从 region 收回 {spent} 个，超过这一刻的上限 {cap}（还欠 {}）",
@@ -1019,6 +1024,14 @@ fn assert_tick_sets(server: &Harness) {
             );
         }
     }
+    // 分离驱动下岛的档位落后于票表、直到它收下邮筒里的换档：只在邮筒空的时候和定义比。
+    // 齐步下每刻结束时邮筒总是空的。
+    // Under the detached drive the island's tiers lag the ticket table until it
+    // takes the posted level changes, so compare with the definition only when
+    // the postbox is empty (always the case in lockstep).
+    if server.world.master.host.posted_len() > 0 {
+        return;
+    }
     let (blocks, entities, random) = expected_sets(server);
     assert_eq!(levels.block_chunks(), &blocks, "方块集合与定义不一致");
     assert_eq!(levels.entity_chunks(), &entities, "实体集合与定义不一致");
@@ -1355,6 +1368,9 @@ fn a_chunk_waiting_for_reclaim_stops_ticking_as_soon_as_its_ticket_goes() {
 
     server.leave(&client);
     server.tick();
+    // 分离驱动下换档也晚一刻到岛（岛的实施计划第 6 节第 6 步）。
+    // Under the detached drive the level change also reaches the island one tick late.
+    server.deliver_posted();
     let region = server.world_region();
     assert!(
         region.chunks.is_loaded(center),
