@@ -220,7 +220,7 @@
   |---|---|---|---|
   | 计划刻的 `trigger_tick`（主队列和搁置表） | `mc-bamboo-blocks/src/ticks.rs` | 装盒时转相对延迟；单元 `absorb` 取 `max(now)` | `BlockTicks::rebase` |
   | 移动活塞的 `lastTicked`（`ticked_entities`） | `ticks.rs` | 绝对值，随区块拆 | 同上 |
-  | 补：计划刻表自己的 `now`、每区块最近排刻时刻（`ChunkActivity` 的 `ChunkMark`，给存盘修剪和单元划分用） | `ticks.rs` | `now` 不搬；最近排刻时刻随区块拆、`absorb` 取较大值 | 同上。原来用「时刻 + 1，0 表示没有」编码，平移到 −1 会和哨兵撞上，改成 `i64::MIN` 哨兵 |
+  | 补：计划刻表自己的 `now`、每区块最近排刻时刻（`ChunkActivity` 的 `ChunkMark`，给存盘修剪和单元划分用） | `ticks.rs` | `now` 不搬；最近排刻时刻随区块拆、`absorb` 取较大值 | 同上。原来用「时刻 + 1，0 表示没有」编码，平移到 −1 会和哨兵撞上，改成存 `时刻 ^ i64::MIN`（0 仍表示没有、零初始化不变，按无符号比较保持先后） |
   | 红石火把开关记录 | `level.rs`（`RedstoneMemory::torch_toggles`） | 装盒转相对年龄 | `RedstoneMemory::rebase` |
   | 漏斗的 `last_tick_now`、`HopperSleep { since, wake_at }` | `hopper.rs` | 绝对值 | `BlockEntity::rebase`。`last_tick_age` 是相对量不动；`None`（官方读盘后的 `tickedGameTime = 0`）是绝对的 0，不平移 |
   | 熔炉 / 酿造台 / 营火的睡眠日程 `Sleep { since, wake_at }` | `behaviour/machines/cooking.rs`、`brewing.rs`、`campfire_entity.rs`、`sleep_clock.rs` | 绝对值 | `BlockEntity::rebase`；`i64::MAX`（等外部叫醒）不动 |

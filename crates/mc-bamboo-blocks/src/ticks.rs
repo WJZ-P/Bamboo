@@ -56,41 +56,37 @@ type ChunkMarks = HashMap<ChunkPos, ChunkMark, BuildHasherDefault<ChunkHasher>>;
 ///
 /// 原来的 `dirty` 是 `BTreeSet<ChunkPos>`，每次排刻插一次；现在一次哈希查表
 /// 同时更新这两样，顺手得到「最近排过刻的区块」，给下一步的忙区块划分用。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct ChunkMark {
-    /// 最近一次排刻的时刻；[`NEVER_SCHEDULED`] 表示没排过，紧凑地省掉 `Option`
-    /// 的额外 8 字节。原来用「时刻 + 1，0 表示没有」，岛的时钟平移之后时刻可以是
-    /// 负数（−1 会和哨兵撞上），所以哨兵改成 `i64::MIN`。
+    /// 最近一次排刻的时刻，存成 `时刻 ^ i64::MIN`；0 表示没排过（对应时刻 `i64::MIN`，
+    /// 永远用不到）。紧凑地省掉 `Option` 的额外 8 字节，零初始化就是「没排过」。
+    /// 原来存「时刻 + 1」，岛的时钟平移到 −1 时会和哨兵撞上；异或编码对任何能出现的
+    /// 时刻都不撞，按无符号比较还保持时刻的先后。
     ///
-    /// The last scheduling instant; [`NEVER_SCHEDULED`] means none. The old
-    /// "instant + 1, 0 means none" encoding broke once island clocks can shift
-    /// below zero, so the sentinel is now `i64::MIN`.
-    last_scheduled: i64,
+    /// The last scheduling instant stored as `instant ^ i64::MIN`; 0 means none
+    /// (instant `i64::MIN`, never used). Zero-initialised means "never". The old
+    /// "instant + 1" encoding collided with the sentinel at −1 once island
+    /// clocks can shift; this one never does and keeps the order as unsigned.
+    last_scheduled_key: i64,
     dirty: bool,
-}
-
-/// [`ChunkMark::last_scheduled`] 的「没排过」哨兵。
-const NEVER_SCHEDULED: i64 = i64::MIN;
-
-impl Default for ChunkMark {
-    fn default() -> Self {
-        Self {
-            last_scheduled: NEVER_SCHEDULED,
-            dirty: false,
-        }
-    }
 }
 
 impl ChunkMark {
     fn last_scheduled(self) -> Option<i64> {
-        (self.last_scheduled != NEVER_SCHEDULED).then_some(self.last_scheduled)
+        (self.last_scheduled_key != 0).then_some(self.last_scheduled_key ^ i64::MIN)
     }
 
     fn set_scheduled(&mut self, now: i64) -> bool {
-        debug_assert!(now != NEVER_SCHEDULED);
-        let changed = self.last_scheduled != now;
-        self.last_scheduled = now;
+        let key = now ^ i64::MIN;
+        debug_assert!(key != 0);
+        let changed = self.last_scheduled_key != key;
+        self.last_scheduled_key = key;
         changed
+    }
+
+    /// 按无符号比较取较晚的那一次；「没排过」的 0 最小。
+    fn later_key(a: i64, b: i64) -> i64 {
+        (a as u64).max(b as u64) as i64
     }
 }
 
@@ -175,8 +171,8 @@ impl ChunkActivity {
         for (chunk, mark) in other.marks {
             let entry = self.marks.entry(chunk).or_default();
             entry.dirty |= mark.dirty;
-            // 哨兵是 `i64::MIN`，取较大值时自然让位给真实时刻。
-            entry.last_scheduled = entry.last_scheduled.max(mark.last_scheduled);
+            entry.last_scheduled_key =
+                ChunkMark::later_key(entry.last_scheduled_key, mark.last_scheduled_key);
         }
         self.touched.extend(other.touched);
     }
@@ -184,8 +180,8 @@ impl ChunkActivity {
     /// 最近排刻时刻整体平移；没排过的哨兵不动。
     fn rebase(&mut self, delta: i64) {
         for mark in self.marks.values_mut() {
-            if mark.last_scheduled != NEVER_SCHEDULED {
-                mark.last_scheduled = mark.last_scheduled.saturating_add(delta);
+            if let Some(at) = mark.last_scheduled() {
+                mark.last_scheduled_key = at.saturating_add(delta) ^ i64::MIN;
             }
         }
     }
