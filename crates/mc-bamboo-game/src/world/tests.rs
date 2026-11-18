@@ -61,6 +61,10 @@ impl PlayerSink for FakeSink {
     fn close(&mut self) {
         self.0.lock().unwrap().closed = true;
     }
+
+    fn second_handle(&self) -> Option<Box<dyn PlayerSink>> {
+        Some(Box::new(self.clone()))
+    }
 }
 
 /// 一个包：ID 和后面的内容。

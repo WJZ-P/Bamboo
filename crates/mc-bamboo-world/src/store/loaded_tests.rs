@@ -529,6 +529,109 @@ fn an_island_split_and_merge_keeps_blocks_light_and_revisions() {
     );
 }
 
+/// 两片区块各改一批方块（不算光照）。`many` 为真时每片改一千多格：光照任务每 1000 个
+/// 排成一轮，这样拆合时既有排好的轮次、又有正在攒的一轮，还有留着的区块副本；最后
+/// 再把一处光源放上又拆掉（排好的轮次之后的改动）。
+fn queue_changes(store: &mut ChunkStore, many: bool) {
+    for (cx, salt) in [(0, 0), (10, 1)] {
+        let base = cx * 16;
+        store.set_block(BlockPos::new(base + 6, -59, 6), blocks::GLOWSTONE);
+        store.set_block(BlockPos::new(base + 3, -60, 4), blocks::AIR);
+        if many {
+            for index in 0..1100 {
+                let (x, z) = (index % 16, (index / 16) % 16);
+                let y = -40 + index / 256;
+                store.set_block(BlockPos::new(base + x, y, z + salt), blocks::STONE);
+            }
+            store.set_block(BlockPos::new(base + 9, -59, 2), blocks::GLOWSTONE);
+            store.set_block(BlockPos::new(base + 9, -59, 2), blocks::AIR);
+            store.set_block(BlockPos::new(base - 3, -58, 7), blocks::GLOWSTONE);
+        }
+    }
+}
+
+/// 排着还没开始算的光照任务跟着区块拆合：改完方块不算光照就拆，两边各自算，和不拆
+/// 直接算的结果逐项相同，标成「变过」的段也相同；两边各自排着任务时并起来再算也一样。
+/// 任务不到一轮和超过一轮（有排好的轮次和留着的区块副本）两种都测。
+///
+/// Light tasks queued but not started travel with their chunks: splitting
+/// right after block changes and computing each side alone gives exactly
+/// what computing unsplit gives, including which sections are flagged as
+/// changed; merging two sides that each hold queued tasks and then computing
+/// is the same too. Both under one round and past one round (queued rounds
+/// and kept chunk copies).
+#[test]
+fn queued_light_tasks_travel_with_their_chunks() {
+    for many in [false, true] {
+        let (mut store, first, second) = two_cluster_store();
+        let all: Vec<ChunkPos> = first.iter().chain(&second).copied().collect();
+        let moved: std::collections::BTreeSet<ChunkPos> = second.iter().copied().collect();
+        let _ = store.take_light_changes();
+        let mut control = store.clone();
+        let mut joined = store.clone();
+
+        // 对照：不拆，直接算。
+        queue_changes(&mut control, many);
+        assert!(control.has_pending_light_updates());
+        control.finish_light_updates();
+        let expected = cluster_readings(&control, &all);
+        let expected_changes = control.take_light_changes();
+        assert!(!expected_changes.is_empty(), "many={many}：光照真的变了");
+
+        // 改完就拆（光照任务还排着），两边各自算，再并。
+        queue_changes(&mut store, many);
+        assert!(!store.ready_to_move_columns() && store.ready_to_split());
+        let mut island = store.split_off(&moved).expect("没有算到一半的轮次");
+        assert!(store.has_pending_light_updates() && island.has_pending_light_updates());
+        store.finish_light_updates();
+        island.finish_light_updates();
+        let mut changes = store.take_light_changes();
+        for (pos, change) in island.take_light_changes() {
+            assert!(changes.insert(pos, change).is_none(), "一个区块只在一边");
+        }
+        assert_eq!(changes, expected_changes, "many={many}：变过的段");
+        store
+            .absorb(island)
+            .unwrap_or_else(|_| unreachable!("光照已算完"));
+        assert_eq!(cluster_readings(&store, &all), expected, "many={many}");
+
+        // 先拆开，两边各自改（任务各自排着），不算就并起来，再算。
+        let mut island = joined.split_off(&moved).expect("光照已算完");
+        let mut scratch = ChunkStore::loaded();
+        std::mem::swap(&mut scratch, &mut joined);
+        // `queue_changes` 两片都改；没加载的那一片写不进去，正好各改各的。
+        queue_changes(&mut scratch, many);
+        queue_changes(&mut island, many);
+        scratch
+            .absorb(island)
+            .unwrap_or_else(|_| unreachable!("没有算到一半的轮次"));
+        assert!(scratch.has_pending_light_updates());
+        scratch.finish_light_updates();
+        assert_eq!(
+            scratch.take_light_changes(),
+            expected_changes,
+            "many={many}"
+        );
+        assert_eq!(cluster_readings(&scratch, &all), expected, "many={many}");
+    }
+}
+
+/// 有算到一半的光照轮次时不能拆：拆合不碰引擎里做了一半的工作。
+///
+/// A split is refused while a light round is half done.
+#[test]
+fn an_island_split_waits_for_a_running_light_round() {
+    let (mut store, _, second) = two_cluster_store();
+    let moved: std::collections::BTreeSet<ChunkPos> = second.iter().copied().collect();
+    queue_changes(&mut store, true);
+    // 只给一点工作量：第一轮开始了没算完。
+    store.run_light_updates(5);
+    assert!(!store.ready_to_split());
+    assert!(store.split_off(&moved).is_err());
+    store.finish_light_updates();
+    assert!(store.split_off(&moved).is_ok());
+}
+
 /// 搬走的区块和留下的已加载区块相邻时拒绝拆：整批搬运不重算邻居段状态。
 #[test]
 #[should_panic(expected = "相邻")]

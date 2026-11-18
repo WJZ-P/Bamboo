@@ -28,6 +28,23 @@ pub trait PlayerSink: Send {
 
     /// 已经交出的帧都写完之后关闭连接。
     fn close(&mut self);
+
+    /// 指向同一条连接的第二个出口。世界平时只经玩家所在的岛写他的出口；岛的 tick 线程
+    /// 卡死、岛被判死时（`docs/island-implementation-plan.md` 5.6），主控够不着那个出口，
+    /// 靠这一个发断开包并关闭连接。之后原来那个出口再写的帧必须被丢掉（连接已经结束）。
+    /// 给不出第二个出口时返回 `None`：那样的玩家在他的岛被判死时不会被主动断开。
+    ///
+    /// A second exit to the same connection. The world normally writes a
+    /// player's sink only through the island they are on; when that island's
+    /// tick thread is stuck and the island is declared dead
+    /// (`docs/island-implementation-plan.md` 5.6) the master cannot reach it
+    /// and uses this one to send the disconnect and close. Frames the first
+    /// sink writes afterwards must be dropped (the connection has ended).
+    /// `None` when no second exit exists; such a player is not disconnected
+    /// actively when their island dies.
+    fn second_handle(&self) -> Option<Box<dyn PlayerSink>> {
+        None
+    }
 }
 
 /// 一名玩家进入世界需要的全部信息。

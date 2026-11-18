@@ -30,6 +30,20 @@ pub(crate) fn encode_frames<P: ClientboundPacket>(packet: &P) -> Vec<u8> {
     frames
 }
 
+/// 不经链路表、直接经一个出口踢人：发带原因的 `disconnect` 包，再关闭连接。主控把一个
+/// 卡死的岛判死时用（岛的实施计划 5.6.2），那些玩家的链路在死岛里。
+///
+/// Kick through a bare sink, outside the link table: the `disconnect` packet
+/// with its reason, then close. Used when the master declares a stuck island
+/// dead (island plan 5.6.2); those players' links are inside the dead island.
+pub(crate) fn kick_through(sink: &mut dyn PlayerSink, reason: &Component) {
+    let frames = encode_frames(&Disconnect { reason });
+    if !frames.is_empty() {
+        let _ = sink.send(Outgoing::from_raw(frames));
+    }
+    sink.close();
+}
+
 struct Link {
     sink: Box<dyn PlayerSink>,
     buffer: Outgoing,
@@ -96,6 +110,21 @@ pub(crate) enum FanOut {
     Kick(PlayerId, Component),
     /// 在这个岛上执行的一小段投递。
     Run(IslandTask),
+}
+
+impl FanOut {
+    /// 这一条占出站队列多少字节（给上限记账，岛的实施计划 5.6.5）：帧按长度算，踢人和
+    /// 在岛上执行的投递按一个固定的小数算。
+    ///
+    /// What this entry costs against the queue's byte limit (island plan
+    /// 5.6.5): frames by length, kicks and island-side deliveries a small
+    /// fixed amount.
+    pub(crate) fn cost(&self) -> usize {
+        match self {
+            Self::All(frames) | Self::To(_, frames) => frames.len(),
+            Self::Kick(..) | Self::Run(_) => 64,
+        }
+    }
 }
 
 /// 主控当场做一件事时对「不在主控手里的岛」的收集（计划 5.5.3）。

@@ -1189,12 +1189,13 @@ public final class ChunkgenOracle {
          * 一个就把 5×5 还原成 CARVERS），记下每个中心写进目标区块的格子和最终状态：
          * 中心自己按「和干净地形不同」记，邻居按 setBlock 落点并上和干净地形不同的格子
          * （矿石走 `BulkSectionAccess` 不经过 setBlock）。合并交给 Rust 侧，按游戏的
-         * 规范序规则合；这样比的是「官方每个中心的输出」加「游戏的合并路径」。
+         * 固定先后规则合（同格先写的赢）；这样比的是「官方每个中心的输出」加
+         * 「游戏的合并路径」。
          *
          * `isolated`: run vanilla `applyBiomeDecoration` for each of the 9 centers on a
          * clean 3×3 (restoring the 5×5 to CARVERS after each run) and record every
          * cell each center writes into the target with its final state. The Rust side
-         * merges them with the game's canonical rule.
+         * merges them with the game's fixed-order first-writer rule.
          */
         private void writeIsolatedFeatures(long seed, ChunkPos pos, TerrainChunk[] area,
                 NoiseBasedChunkGenerator generator, NoiseGeneratorSettings generatorSettings,

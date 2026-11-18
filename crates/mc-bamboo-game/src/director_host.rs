@@ -40,7 +40,7 @@ use crate::{
     profiler::{Profiler, SubPhase},
     region::{RegionColumn, parking::Parking},
     worldgen::GeneratedChunk,
-    worldgen_features::{BlockDelta, GenerateOutput, assemble_feature_column},
+    worldgen_features::{FeatureWrites, GenerateOutput, assemble_feature_column},
 };
 
 /// 编解码累计耗时（纳秒）。解析/序列化内联在世界线程上做，这里量出总耗时，
@@ -211,12 +211,12 @@ pub(crate) struct DirectorHost {
     /// copy-on-writes a new `Arc` via `Arc::make_mut` (design 5.3.1). Only the
     /// world thread mutates; the compute pool gets read-only `Arc` clones.
     partials: BTreeMap<ChunkPos, Arc<GeneratedChunk>>,
-    /// 每个区块累计的地物写增量，按世界线程收到结果的顺序（`TaskId` 升序）
-    /// 追加；完工组装时排成规范序再落盘，结果与追加顺序无关。
-    /// Per-chunk feature write deltas, appended in the order the world thread
-    /// receives results (ascending `TaskId`); sorted canonically at assembly so
-    /// the final blocks do not depend on append order.
-    feature_deltas: BTreeMap<ChunkPos, Vec<BlockDelta>>,
+    /// 每个区块累计的地物写，按世界线程收到结果的顺序（`TaskId` 升序）追加；
+    /// 每条都带来源中心下标，完工组装时按固定先后合，与追加顺序无关。
+    /// Per-chunk feature writes, appended in the order the world thread receives
+    /// results (ascending `TaskId`); each carries its source center index and
+    /// assembly merges in a fixed order, independent of append order.
+    feature_deltas: BTreeMap<ChunkPos, Vec<FeatureWrites>>,
     /// `light` 阶段算出的生成期光照，按区块存；完工组装时装进交付盒子并清掉。
     /// Generation-time light from the `light` stage, per chunk; installed into
     /// the delivered column at final assembly and cleared.
@@ -964,6 +964,26 @@ impl DirectorHost {
             .collect()
     }
 
+    /// 邮筒里投给 `id`、它还没取走的收回信说到的位置。这些区块还在 `id` 手里（Director
+    /// 记着 `Reclaiming`，不带岛编号），岛被判死时它们和它的别的区块一起丢（计划 5.6.3）。
+    ///
+    /// Positions named by reclaim letters posted to `id` and not yet taken.
+    /// Those chunks are still in `id`'s hands (the Director records
+    /// `Reclaiming`, without an island id), and are lost with its other chunks
+    /// when it is declared dead (plan 5.6.3).
+    pub(crate) fn posted_reclaims(&self, id: RegionId) -> Vec<ChunkPos> {
+        self.posts
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|letter| match letter {
+                Posted::Reclaim(positions) => Some(positions.iter().map(|(pos, _)| *pos)),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
     /// 邮筒里投给 `id` 的信件数（测试用）。
     #[cfg(test)]
     pub(crate) fn posted_to(&self, id: RegionId) -> usize {
@@ -1639,6 +1659,67 @@ impl DirectorHost {
         }
     }
 
+    /// 拿着 `positions` 的岛被判死了（岛的实施计划 5.6.3）：这些位置里 Director 还记在
+    /// region 一侧的，按「盒子没了」处理——删记录，票还要的重新加载（读到的是上次存盘
+    /// 的内容）；所有岛的邮筒里说到它们的收回和换档删掉（代数已经作废）；主控这边
+    /// 「还欠一次保存」的记账去掉（没有东西可拍了）。已经编好、在队列里或者写盘途中的
+    /// 快照照常写完。返回真正丢了的位置（升序）。
+    ///
+    /// The island holding `positions` was declared dead (island plan 5.6.3).
+    /// Of these, the ones the Director still records on the region side are
+    /// handled as "the box is gone": the record is removed and reloaded if
+    /// tickets still want it (reading what was last saved); reclaims and level
+    /// changes about them are dropped from every postbox (their generation is
+    /// void); the master's "still owes a save" bookkeeping for them is
+    /// cleared. Snapshots already encoded, queued or being written are still
+    /// written. Returns the positions really lost, ascending.
+    pub(crate) fn lose_chunks(
+        &mut self,
+        island: &mut IslandAccess<'_>,
+        positions: &[ChunkPos],
+    ) -> Vec<ChunkPos> {
+        if self.infinite_flat {
+            return Vec::new();
+        }
+        let lost: BTreeSet<ChunkPos> = positions
+            .iter()
+            .copied()
+            .filter(|&pos| self.director.owner_at(pos).is_some_and(owner_is_held))
+            .collect();
+        if lost.is_empty() {
+            return Vec::new();
+        }
+        for letters in self.posts.values_mut() {
+            let kept: Vec<Posted> = std::mem::take(letters)
+                .into_iter()
+                .filter_map(|letter| match letter {
+                    Posted::Reclaim(mut positions) => {
+                        positions.retain(|(pos, _)| !lost.contains(pos));
+                        (!positions.is_empty()).then_some(Posted::Reclaim(positions))
+                    }
+                    Posted::Levels(mut changes) => {
+                        changes.retain(|change| !lost.contains(&change.pos));
+                        (!changes.is_empty()).then_some(Posted::Levels(changes))
+                    }
+                    deliver @ Posted::Deliver { .. } => Some(deliver),
+                })
+                .collect();
+            *letters = kept;
+        }
+        for pos in &lost {
+            self.island_chunks.remove(pos);
+            self.dirty_pending.remove(pos);
+            self.retry_dirty.remove(pos);
+        }
+        let lost: Vec<ChunkPos> = lost.into_iter().collect();
+        let mut events = std::mem::take(&mut self.initial_scratch);
+        events.push(Event::Lost {
+            positions: lost.clone(),
+        });
+        self.pump(island, events);
+        lost
+    }
+
     /// 岛里现在有多少个区块（主控的记账）。
     pub(crate) fn island_chunk_count(&self) -> usize {
         self.island_chunks.len()
@@ -1764,6 +1845,13 @@ impl DirectorHost {
                     Event::Delivered { pos, .. } | Event::Returned { pos, .. } => Some(*pos),
                     _ => None,
                 };
+                // 岛没了（`Lost`）同样改 owner：处理完按每个位置的真实归属告诉分区器。
+                // A lost island changes owners too: tell the partitioner each
+                // position's real owner afterwards.
+                let lost = match &event {
+                    Event::Lost { positions } if islands_on => positions.clone(),
+                    _ => Vec::new(),
+                };
                 self.profiler.start_sub(sub);
                 let mut effects = std::mem::take(&mut self.effect_scratch);
                 self.director
@@ -1774,6 +1862,10 @@ impl DirectorHost {
                     // 用事件处理完之后的真实 owner：过期回执不改变归属，
                     // 也不会凭空造出「还没收回」的区块。
                     if let Some(pos) = ack {
+                        let owned = self.director.owner_at(pos);
+                        self.note_owner(pos, owned);
+                    }
+                    for pos in lost {
                         let owned = self.director.owner_at(pos);
                         self.note_owner(pos, owned);
                     }
@@ -1985,12 +2077,13 @@ impl DirectorHost {
                 }
             }
             Task::Assemble { column, .. } => {
-                // 生成到完工后用不可变的 CARVERS 快照 + 累计的地物增量组装交付
-                // 盒子（增量排规范序，和合并顺序无关）；flat / 读盘路径没有这份
-                // 快照，原盒子照旧。组装和生成用的是同一个 `build_region_column`。
+                // 生成到完工后用不可变的 CARVERS 快照 + 累计的地物写组装交付
+                // 盒子（按来源中心固定先后合，和回执顺序无关）；flat / 读盘路径
+                // 没有这份快照，原盒子照旧。组装和生成用的是同一个
+                // `build_region_column`。
                 // At completion, assemble from the immutable CARVERS snapshot +
-                // accumulated feature deltas (canonical order, merge-order
-                // independent); flat / disk paths keep the original box.
+                // accumulated feature writes (fixed source-center order, reply-
+                // order independent); flat / disk paths keep the original box.
                 let mut column = match self.partials.get(&pos) {
                     Some(snapshot) => {
                         let mut deltas = self.feature_deltas.remove(&pos).unwrap_or_default();
@@ -2192,15 +2285,16 @@ impl DirectorHost {
     }
 
     /// 合并一次生成结果：`terrain` 的 CARVERS 快照进缓存（不可变 `Arc`，不改
-    /// 已有的那份）；地物写增量按 `TaskId` 顺序追加到目标区块的增量表。
+    /// 已有的那份）；地物写按 `TaskId` 顺序追加到目标区块的增量表。
     /// `compute_event` 已按 `TaskId` 升序、内联路径也在同一世界线程调用，所以
-    /// 追加顺序确定；完工时 `assemble_feature_column` 再排规范序，结果与顺序无关。
+    /// 追加顺序确定；完工时 `assemble_feature_column` 按来源的固定先后合，结果与
+    /// 追加顺序无关。
     ///
     /// Merge one generation result: cache the `terrain` CARVERS snapshot as an
     /// immutable `Arc` (never mutate an existing snapshot) and append feature
-    /// deltas to each target chunk's delta list in `TaskId` order. `compute_event`
-    /// calls this in ascending `TaskId` order; `assemble_feature_column` sorts
-    /// canonically at completion, so the result is order-independent.
+    /// writes to each target chunk's list in `TaskId` order. `compute_event`
+    /// calls this in ascending `TaskId` order; `assemble_feature_column` merges
+    /// by fixed source order at completion, so the result is order-independent.
     fn merge_generated(&mut self, pos: ChunkPos, output: &GenerateOutput) {
         if let Some(terrain) = &output.terrain {
             self.partials.insert(pos, Arc::clone(terrain));

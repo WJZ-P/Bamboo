@@ -594,6 +594,16 @@ impl ChunkStore {
         self.light.ready_to_move_columns()
     }
 
+    /// 现在能不能整批拆合（[`Self::split_off`] / [`Self::absorb`]）：没有算到一半的光照
+    /// 轮次。排着还没开始算的光照任务跟着区块走，不用先算完。
+    ///
+    /// Whether a batch split or merge ([`Self::split_off`] / [`Self::absorb`])
+    /// may happen now: no light round is running. Light tasks queued but not
+    /// started travel with their chunks and need not be finished first.
+    pub fn ready_to_split(&self) -> bool {
+        self.light.ready_to_split()
+    }
+
     /// 只读快照：克隆 `pos` 这一柱的方块和光照，各表分毫不动（补 11）。
     /// 存档编码需要的是一份 `ChunkColumn`，这里按 `take_column` 同样的方式组装。
     /// Read-only clone of this column's blocks and light (item 11). Save
@@ -725,7 +735,8 @@ impl ChunkStore {
     /// 表——方块、两层光照、版本号、原样起点、已加载登记、存盘的改动集合——**不逐柱
     /// 重算邻居段状态**。`chunks` 里没加载的位置没有内容，跳过。
     ///
-    /// 前提：已加载模式、光照全部算完（否则返回 [`LightPending`]，表不变）；搬走的
+    /// 前提：已加载模式、没有算到一半的光照轮次（[`Self::ready_to_split`]，否则返回
+    /// [`LightPending`]，表不变；排着还没开始算的光照任务跟着区块走）；搬走的
     /// 已加载区块的 8 个邻居要么也在 `chunks` 里、要么没加载（断言）。满足时两边的段
     /// 状态本来就按「对面没加载」算好了，所以重算全是空操作。
     ///
@@ -735,14 +746,16 @@ impl ChunkStore {
     /// Island split (island plan 3.3): move the chunks in `chunks` — blocks,
     /// both light layers, revisions, pristine marks, loaded marks and the save
     /// change set — into a new store in one batch, **without recomputing
-    /// neighbour section states per column**. Requires loaded mode and settled
-    /// light (else [`LightPending`], unchanged), and asserts that every moved
+    /// neighbour section states per column**. Requires loaded mode and no light
+    /// round running ([`Self::ready_to_split`]; else [`LightPending`],
+    /// unchanged; light tasks queued but not started travel with their
+    /// chunks), and asserts that every moved
     /// loaded chunk's eight neighbours are either moved too or not loaded.
     /// Revisions move verbatim and both counters continue, so a position never
     /// sees the same revision twice.
     pub fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Result<Self, LightPending> {
         assert!(self.is_loaded_mode(), "只有已加载模式能拆岛");
-        if !self.ready_to_move_columns() {
+        if !self.ready_to_split() {
             return Err(LightPending);
         }
         let loaded = self.loaded.as_ref().expect("已加载模式");
@@ -802,7 +815,7 @@ impl ChunkStore {
     }
 
     /// 岛合并：把另一张表整批并进来，[`Self::split_off`] 的逆操作。两边都要是已加载
-    /// 模式、光照都已算完；断言两边的已加载区块不相邻，所以同样不用重算段状态。
+    /// 模式、没有算到一半的光照轮次；断言两边的已加载区块不相邻，所以同样不用重算段状态。
     /// 版本号计数器取较大值。
     ///
     /// Island merge: the inverse of [`Self::split_off`]. Both sides are in loaded
@@ -813,7 +826,7 @@ impl ChunkStore {
             self.is_loaded_mode() && other.is_loaded_mode(),
             "只有已加载模式能合岛"
         );
-        if !self.ready_to_move_columns() || !other.ready_to_move_columns() {
+        if !self.ready_to_split() || !other.ready_to_split() {
             return Err((LightPending, Box::new(other)));
         }
         let mine = self.loaded.as_ref().expect("已加载模式");

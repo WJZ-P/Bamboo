@@ -279,6 +279,22 @@ fn prepare_pair(multi: &mut Scene, control: &mut Scene, sand_delay: i32) {
                 .or_insert(mc_bamboo_world::light::LightChanges { sky: 1, block: 0 });
             region.block_changes.changed.push(at(center, 0, Y, 0));
         }
+        // 离场生物留下的事件平时在 tick 边界上也是空的（实体阶段放进去、同一刻的同步阶段
+        // 取走）：每组放一条，记在这一组的中心区块上。实体号用不到的大数，没有人看着它，
+        // 下一刻同步层取走时什么都不发。
+        // Departed-mob events are empty at a tick boundary too (kept in the
+        // entity phase, taken by the same tick's sync phase): one per group,
+        // recorded on the group's centre chunk. The ids are large unused
+        // numbers nobody watches, so the next sync takes them and sends nothing.
+        for (group, &center) in scene.centers.clone().iter().enumerate() {
+            region_at(&mut scene.server.world, center)
+                .entities
+                .keep_departed_events_at(
+                    i32::MAX - 16 - group as i32,
+                    center,
+                    vec![mc_bamboo_blocks::entity::mob::MobEvent::Poof],
+                );
+        }
     }
     let world = &mut multi.server.world;
     let partition = world.master.host.partition_mut().expect("多岛开着");
@@ -441,10 +457,10 @@ fn runtime_splits_and_merges_keep_every_group_as_on_one_island() {
     });
 }
 
-/// 改坏确认：运行时拆岛漏搬任何一类（24 类），按组拼指纹时都要报出来（那一组的东西
+/// 改坏确认：运行时拆岛漏搬任何一类（25 类），按组拼指纹时都要报出来（那一组的东西
 /// 留在了别的岛上），或者之后某一刻的内容对不上。
 ///
-/// Break-it check: leaving any of the 24 classes behind on a run-time split
+/// Break-it check: leaving any of the 25 classes behind on a run-time split
 /// must be caught (that group's content stays on another island) or show
 /// up as a content difference later.
 #[test]
@@ -1202,4 +1218,127 @@ fn stress(seed: u64, threads: usize, ticks: u64) {
             client.id
         );
     }
+}
+
+/// 经验球记着它正在跟随的玩家（`following`，玩家的实体号）。多岛和整个世界一个岛逐刻
+/// 比玩家身边的一个球（位置、速度、跟随谁）：窗口里先由别的岛上的 OP 借全部玩家执行一条
+/// 作用到球旁边那名玩家的命令（`/give @a`），再把球所在的岛强制并进家岛、再强制拆开。
+/// 两边每一刻都相同：借玩家时球不跑，拆合按位置搬球、`following` 原样带着；玩家 8 格以内
+/// 的东西总在玩家的岛上。
+///
+/// 现在世界还没把玩家交给实体看（`Level::for_each_player` 用的是空的缺省实现），所以两边
+/// 的球都不跟随任何人、`following` 一直是空的；等玩家接上以后，这条比较自动连「跟随谁」
+/// 一起核对。
+///
+/// An experience orb remembers the player it follows (`following`, the
+/// player's entity id). The multi-island world is compared with a single
+/// island tick by tick on one orb next to a player (position, velocity, whom
+/// it follows): in the window an op on another island first runs a command
+/// on every borrowed player (`/give @a`), then the orb's island is forced
+/// into home and split off again. Both sides match every tick: orbs do not
+/// tick while players are borrowed, splits and merges move the orb by
+/// position with `following` intact, and anything within 8 blocks of a
+/// player is on that player's island. The world does not show players to
+/// entities yet (`Level::for_each_player` is the empty default), so neither
+/// orb follows anyone and `following` stays empty; once players are wired
+/// in, this comparison covers whom it follows as well.
+#[test]
+fn an_orb_beside_a_player_matches_one_island_through_borrowing_and_splits() {
+    with_stack(|| {
+        let seed = 71;
+        let mut multi = set_up(seed, Harness::new_islands(2, 0));
+        let mut control = set_up(
+            seed,
+            Harness::new_loaded_with_drive(2, IslandDrive::Lockstep),
+        );
+        align(&mut multi, &mut control);
+        let op = super::island_crossing_tests::first_of(&multi, 0);
+        super::island_crossing_tests::make_op(&mut multi, &op);
+        let op_control = super::island_crossing_tests::first_of(&control, 0);
+        super::island_crossing_tests::make_op(&mut control, &op_control);
+        let target = super::island_crossing_tests::first_of(&multi, 1);
+        let island = multi
+            .server
+            .world
+            .islands
+            .island_of_player(target.id)
+            .expect("在某个岛上");
+        assert_ne!(island, HOME_REGION, "第 1 组不在家岛上");
+        let spawn = |scene: &mut Scene, island: RegionId| -> i32 {
+            let region = &mut scene
+                .server
+                .world
+                .islands
+                .get_mut(island)
+                .expect("停放着")
+                .region;
+            region.entities.set_entity_seeds(4242);
+            let at = region.players[&target.id].position();
+            region
+                .entities
+                .spawn(mc_bamboo_blocks::entity::Entity::experience_orb(
+                    Vec3::new(at.x + 3.0, at.y + 0.5, at.z),
+                    5,
+                ))
+        };
+        let orb = spawn(&mut multi, island);
+        let orb_control = spawn(&mut control, HOME_REGION);
+        let state = |scene: &Scene, uid: i32| -> (Vec3, Vec3, Option<i32>) {
+            let entity = scene
+                .server
+                .world
+                .islands
+                .iter()
+                .find_map(|island| island.region.entities.get(uid))
+                .expect("球还在");
+            let mc_bamboo_blocks::entity::EntityKind::ExperienceOrb(state) = &entity.kind else {
+                panic!("是经验球");
+            };
+            (entity.position, entity.delta, state.following)
+        };
+        let mut split_back = false;
+        for tick in 0..16 {
+            match tick {
+                3 => {
+                    for (scene, client) in [(&multi, &op), (&control, &op_control)] {
+                        scene.server.request(
+                            client,
+                            mc_bamboo_protocol::packet::play::PlayRequest::unsigned_command(
+                                "give @a minecraft:stone 1",
+                            ),
+                        );
+                    }
+                }
+                5 => {
+                    let world = &mut multi.server.world;
+                    let partition = world.master.host.partition_mut().expect("多岛开着");
+                    assert!(partition.force_merge(HOME_REGION, island));
+                    world.master.host.take_partition_ops();
+                    world.settle_islands();
+                    assert!(!world.islands.contains(island), "并进家岛了");
+                }
+                8 => {
+                    let world = &mut multi.server.world;
+                    let partition = world.master.host.partition_mut().expect("多岛开着");
+                    assert!(!partition.force_split(HOME_REGION).is_empty(), "拆开了");
+                    world.master.host.take_partition_ops();
+                    world.settle_islands();
+                }
+                _ => {}
+            }
+            multi.server.tick();
+            control.server.tick();
+            let (mine, theirs) = (state(&multi, orb), state(&control, orb_control));
+            assert_eq!(mine, theirs, "tick {tick}：球的位置、速度、跟随谁");
+            let world = &mut multi.server.world;
+            if tick >= 8
+                && world.islands.island_of_player(target.id)
+                    != world.islands.island_of_player(op.id)
+            {
+                split_back = true;
+            }
+            world.assert_island_invariants();
+        }
+        assert!(split_back, "第 1 组又拆成了自己的岛");
+    });
 }

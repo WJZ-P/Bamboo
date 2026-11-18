@@ -260,6 +260,10 @@ impl ServerSettings {
             // 和命令行版一样，环境变量 `BAMBOO_ISLANDS` 设了就盖过设置（不写回文件）。
             // Like the CLI, `BAMBOO_ISLANDS` overrides the setting (never saved).
             islands: mc_bamboo_game::islands_from_env().unwrap_or(self.islands),
+            // 判死时限不在界面上：用缺省（环境变量 `BAMBOO_ISLAND_DEAD_SECONDS` 优先）。
+            // The dead-island timeout is not in the UI: the default (the
+            // `BAMBOO_ISLAND_DEAD_SECONDS` environment variable wins).
+            island_dead_timeout: defaults.island_dead_timeout,
             world_gen: self.world_gen.clone(),
             // 桌面端有 GUI 控制台，不读进程 stdin；广播默认按官方 true。
             // The desktop has a GUI console, so it does not read process stdin;
@@ -272,6 +276,9 @@ impl ServerSettings {
     /// 把界面上的值写回两份文件内容，保留已有的未实现官方键。
     fn as_files(&self, existing: &ConfigFiles) -> ConfigFiles {
         let mut files = ConfigFiles::from_server_config(&self.to_server_config(), existing);
+        // 界面上没有的判死时限照文件里原来的写回，不被缺省值盖掉。
+        // The dead-island timeout is not in the UI; keep the file's value.
+        files.bamboo.island_dead_timeout = existing.bamboo.island_dead_timeout;
         files.official.server_ip = if self.host.trim() == "0.0.0.0" {
             String::new()
         } else {

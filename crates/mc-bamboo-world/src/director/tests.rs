@@ -1287,3 +1287,131 @@ fn deferred_tasks_retry_after_a_quota_is_released() {
         "不能让被挡住的任务永远留在队列里"
     );
 }
+
+/// 把 `pos` 交付到 region（读盘结果直接是一个改过的盒子），返回交付时的代数。
+fn deliver_to_region(d: &mut Deferred, pos: ChunkPos) -> u64 {
+    d.join(1, pos);
+    let (id, generation) = d.task_at(pos);
+    d.handle(Event::TaskDone {
+        id,
+        pos,
+        generation,
+        result: TaskResult::Decoded { column: Fake(17) },
+    });
+    d.handle(Event::Delivered {
+        region: crate::director::HOME_REGION,
+        pos,
+        generation,
+    });
+    assert_eq!(
+        d.director.owner_at(pos),
+        Some(Owner::Region(crate::director::HOME_REGION))
+    );
+    generation
+}
+
+/// `pos` 最新的在途任务。
+fn newest_task_at(d: &Deferred, pos: ChunkPos) -> (TaskId, u64) {
+    let (&id, &(_, generation)) = d
+        .tasks
+        .iter()
+        .rev()
+        .find(|&(_, &(p, _))| p == pos)
+        .expect("这个坐标有在途任务");
+    (id, generation)
+}
+
+/// 拿着区块的岛没了（`Event::Lost`），票还在：记录回到流水线、重新读盘，代数往上数，
+/// 迟到的旧回执不再起作用；宿主收到 `Forgot` 清掉这个位置的记账。
+///
+/// The island holding a chunk is gone (`Event::Lost`) while its ticket
+/// stays: the record goes back to the pipeline and reads again with a newer
+/// generation, late acks of the old one do nothing, and the host gets a
+/// `Forgot` to clear its bookkeeping.
+#[test]
+fn a_lost_chunk_is_read_again_while_its_ticket_stays() {
+    let mut d = Deferred::new(0);
+    let pos = ChunkPos::new(0, 0);
+    let generation = deliver_to_region(&mut d, pos);
+    let (old_task, _) = newest_task_at(&d, pos);
+    let loaded = d.director.loaded_count();
+    let effects = d.handle(Event::Lost {
+        positions: vec![pos],
+    });
+    assert_eq!(d.director.owner_at(pos), Some(Owner::Pipeline));
+    assert_eq!(d.director.loaded_count(), loaded - 1);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::ToRegion(RegionMessage::Forgot { positions }) if positions.contains(&pos)
+        )),
+        "宿主要收到这个位置的 Forgot"
+    );
+    let (read, newer) = newest_task_at(&d, pos);
+    assert_ne!(read, old_task, "重新派了读盘任务");
+    assert!(newer > generation, "代数往上数");
+    // 死岛迟到的回执：对不上代数，什么都不改。
+    // A late ack from the dead island no longer matches.
+    d.handle(Event::Returned {
+        pos,
+        generation,
+        column: Some(Fake(99)),
+    });
+    d.handle(Event::Delivered {
+        region: crate::director::HOME_REGION,
+        pos,
+        generation,
+    });
+    assert_eq!(d.director.owner_at(pos), Some(Owner::Pipeline));
+    // 读盘回来照常交付：重新加载出来的是盘上那份。
+    // The read completes and delivers as usual: what loads is the disk copy.
+    let effects = d.handle(Event::TaskDone {
+        id: read,
+        pos,
+        generation: newer,
+        result: TaskResult::Decoded { column: Fake(5) },
+    });
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::ToRegion(RegionMessage::Deliver { pos: delivered, column: Fake(5), .. })
+            if *delivered == pos
+    )));
+}
+
+/// 岛没了、票也没了：记录直接删掉，不留在「正在收回」里等一个永远不来的回执。正在
+/// 收回（`Reclaiming`）的也一样。不在 region 一侧的记录不动。
+///
+/// The island is gone and so is the ticket: the record is removed instead of
+/// waiting in `Reclaiming` for an ack that never comes. Records not on the
+/// region side are untouched.
+#[test]
+fn a_lost_chunk_without_a_ticket_is_forgotten() {
+    let mut d = Deferred::new(0);
+    let pos = ChunkPos::new(0, 0);
+    let generation = deliver_to_region(&mut d, pos);
+    d.leave(1);
+    d.handle(Event::Tick { now_tick: 1 });
+    assert_eq!(d.director.owner_at(pos), Some(Owner::Reclaiming));
+    d.handle(Event::Lost {
+        positions: vec![pos, ChunkPos::new(50, 50)],
+    });
+    assert_eq!(d.director.owner_at(pos), None);
+    d.handle(Event::Returned {
+        pos,
+        generation,
+        column: Some(Fake(99)),
+    });
+    assert_eq!(d.director.owner_at(pos), None, "迟到的回执不会把记录造回来");
+    assert!(d.parked.is_empty(), "死岛迟到的盒子不进停放表");
+
+    // 还在流水线里的记录（没进过 region）不受影响。
+    // A record still in the pipeline (never on the region side) is unaffected.
+    let other = ChunkPos::new(3, 0);
+    d.join(2, other);
+    let before = newest_task_at(&d, other);
+    d.handle(Event::Lost {
+        positions: vec![other],
+    });
+    assert_eq!(d.director.owner_at(other), Some(Owner::Pipeline));
+    assert_eq!(newest_task_at(&d, other), before);
+}

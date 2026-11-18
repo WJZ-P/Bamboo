@@ -154,6 +154,11 @@ pub(crate) struct HybridState {
     gave_up: bool,
     /// 登录包里的人数上限（家岛不在主控手里时进服复查名单要用）。
     pub(crate) max_players: i32,
+    /// 岛卡死的兜底（计划 5.6）：玩家的第二个出口、等着判死的岛、判死记录。
+    ///
+    /// The dead-island fallback (plan 5.6): players' second exits, islands
+    /// waiting to be declared dead and the death records.
+    pub(crate) death: super::island_death::DeathState,
     /// 测试专用：哪个岛在哪几刻不回来（计划 5.5.7）。
     #[cfg(test)]
     pub(crate) stalls: Vec<Stall>,
@@ -177,6 +182,14 @@ impl HybridState {
                 }
             }
         }
+    }
+
+    /// 丢掉一个来源排着队的全部事（它的岛被判死了，计划 5.6.2）。
+    ///
+    /// Drop everything held for one source (its island was declared dead,
+    /// plan 5.6.2).
+    pub(crate) fn forget_source(&mut self, source: Source) {
+        self.held.remove(&source);
     }
 
     /// 排着队的事的件数。
@@ -449,7 +462,8 @@ impl World {
                 if !self.islands.all_parked() {
                     return wait(Inbound::ConsoleCommand(line));
                 }
-                self.on_master(HOME_REGION, Borrow::All, |global, region| {
+                let borrow = crate::command::borrow_for_console(&line);
+                self.on_master(HOME_REGION, borrow, |global, region| {
                     crate::command::console::on_console_command(global, region, &line);
                 });
                 Ok(())
@@ -512,6 +526,11 @@ impl World {
     /// no head can move. Only heads are considered, so each source keeps its
     /// order. The queues are always empty under the other drives.
     pub(super) fn drain_held(&mut self) {
+        // 判死的岛的后事先办完（撤票、丢掉的区块、让别人看到它的玩家离开），排着的事看到
+        // 的才是收拾好的世界（计划 5.6.2）。
+        // Finish what dead islands left first (tickets, lost chunks, showing
+        // the departures), so held work sees a settled world (plan 5.6.2).
+        self.hold_funerals();
         if self.master.hybrid.held.is_empty() {
             return;
         }
@@ -589,12 +608,29 @@ impl World {
         if self.master.hybrid.breaks.drop_fan_out {
             return;
         }
+        let cost: usize = items.iter().map(FanOut::cost).sum();
+        let (max_items, max_bytes) = self.master.hybrid.death.fan_out_limit();
         for &id in away {
             let queue = self.master.hybrid.fan_out.entry(id).or_default();
             queue.extend(items.iter().cloned());
             #[cfg(test)]
             if self.master.hybrid.breaks.fan_out_twice {
                 queue.extend(items.iter().cloned());
+            }
+            // 出站队列有上限（计划 5.6.5）：超了不丢包，下一个判定点把这个岛判死。
+            // The queue is bounded (plan 5.6.5): past the limit nothing is
+            // dropped; the island is declared dead at the next check.
+            let items_now = queue.len();
+            let bytes = self
+                .master
+                .hybrid
+                .death
+                .fan_out_bytes
+                .entry(id)
+                .or_default();
+            *bytes = bytes.saturating_add(cost);
+            if items_now > max_items || *bytes > max_bytes {
+                self.master.hybrid.death.doomed.insert(id);
             }
         }
     }
@@ -611,6 +647,8 @@ impl World {
     /// master). Under the other drives the first two are always empty and
     /// this is the old hand-back.
     pub(super) fn land_island(&mut self, id: RegionId) {
+        self.master.hybrid.death.fan_out_bytes.remove(&id);
+        self.master.hybrid.death.doomed.remove(&id);
         #[cfg_attr(not(test), allow(unused_mut))]
         if let Some(mut items) = self.master.hybrid.fan_out.remove(&id) {
             #[cfg(test)]
@@ -641,7 +679,7 @@ impl World {
     /// The last step of a lagging island's landing: flush its outbound
     /// buffers and stash its save report and list changes with the master
     /// (the island may be dispatched again at once to catch up).
-    fn flush_island(&mut self, id: RegionId) {
+    pub(super) fn flush_island(&mut self, id: RegionId) {
         let Some(island) = self.islands.get_mut(id) else {
             return;
         };
@@ -658,14 +696,26 @@ impl World {
     /// An island is back: seat it in its slot (parked), remember its thread
     /// and tick time, drop the ticks it owes if past the limit, and keep the
     /// payload if it panicked. Returns its id.
-    fn seat(&mut self, back: HandBack) -> RegionId {
+    ///
+    /// 派出号对不上它的槽位（槽位没了，或者同一个编号后来建了新岛）说明它被判死过：
+    /// 整个丢弃，返回 `None`（计划 5.6.1）。
+    ///
+    /// A ticket matching no slot (the slot is gone, or a new island took the
+    /// id) means it was declared dead: it is discarded whole and `None` is
+    /// returned (plan 5.6.1).
+    fn seat(&mut self, back: HandBack) -> Option<RegionId> {
         let HandBack {
             mut island,
+            ticket,
             worker,
             started,
             finished,
             panic,
         } = back;
+        if self.islands.away_ticket(island.id) != Some(ticket) {
+            self.discard_zombie(island, ticket);
+            return None;
+        }
         island.park();
         island.last_worker = worker;
         island.region.profiler.record_duration(
@@ -688,7 +738,7 @@ impl World {
         {
             self.master.hybrid.panic = Some(payload);
         }
-        id
+        Some(id)
     }
 
     /// 刚放回槽位的岛按编号落地、刷出，再把排着队的事里能做的做掉。有岛 panic 了就改成
@@ -721,13 +771,17 @@ impl World {
         loop {
             let pool = self.master.pool.as_mut().expect("分离驱动一定有线程池");
             match pool.wait(Duration::ZERO) {
-                Wait::Back(back) => ids.push(self.seat(*back)),
+                Wait::Back(back) => ids.extend(self.seat(*back)),
                 Wait::Lost => {
                     panic!("every island tick thread is gone; the islands cannot come back")
                 }
                 Wait::Pending => break,
             }
         }
+        // 收完已经交回的再判死：刚好跑完的岛不会被误判（计划 5.6.1）。
+        // Judge only after taking in what is back, so an island that just
+        // finished is never misjudged (plan 5.6.1).
+        self.bury_overdue();
         self.land_seated(ids);
     }
 
@@ -763,7 +817,7 @@ impl World {
             let pool = self.master.pool.as_mut().expect("分离驱动一定有线程池");
             match pool.wait(left.min(ISLAND_WAIT_SLICE)) {
                 Wait::Back(back) => {
-                    self.seat(*back);
+                    let _ = self.seat(*back);
                 }
                 Wait::Lost => break,
                 Wait::Pending => {}
@@ -786,14 +840,33 @@ impl World {
         };
         self.recall(budget);
         self.raise_island_panic();
+        // 到点还没回来的岛按同一套判死（计划 5.6.6）：同样的日志和收拾，玩家收到关服的
+        // 断开原因；之后世界里只剩停放着的岛，走平常的关服顺序。还排在线程池里没开跑的
+        // 岛拿回来照常存。
+        // Islands still out are declared dead by the same procedure (plan
+        // 5.6.6): the same log and clean-up, with the shutdown reason for
+        // their players; afterwards only parked islands remain for the usual
+        // shutdown order. Islands still queued in the pool, never started,
+        // are taken back and saved as usual.
         let away = self.islands.away_ids();
         if !away.is_empty() {
             error!(
                 islands = ?away,
                 timeout_secs = self.master.island_stop_timeout.as_secs_f64(),
-                "islands did not hand back after the shutdown request; stopping without them, \
-                 their chunks and players keep only what was saved before"
+                "islands did not hand back after the shutdown request; declaring them dead"
             );
+        }
+        for id in away {
+            self.bury(id, super::island_death::DeathCause::Shutdown);
+        }
+        // 判死的那一刻正好跑完的岛不判死，它的交回在通道里，收下来照常存。
+        // An island that finished right at the verdict is not dead; its
+        // hand-back is in the channel and it is saved as usual.
+        if !self.islands.all_parked() {
+            self.recall(ISLAND_WAIT_SLICE);
+            for id in self.islands.away_ids() {
+                self.bury(id, super::island_death::DeathCause::Shutdown);
+            }
         }
     }
 
@@ -822,11 +895,12 @@ impl World {
         #[cfg(test)]
         self.arm_stall(id);
         let pool = self.master.pool.as_mut().expect("分离驱动一定有线程池");
+        let ticket = self.islands.next_ticket();
         let slot = self.islands.slot_mut(id).expect("岛在表里");
-        let mut island = slot.take();
+        let mut island = slot.take(ticket);
         island.dispatch();
         let hint = island.last_worker;
-        if let Err(mut island) = pool.dispatch(hint, island) {
+        if let Err(mut island) = pool.dispatch(hint, island, ticket) {
             island.park();
             slot.put(island);
             panic!("the island tick threads are gone");
@@ -894,7 +968,7 @@ impl World {
             let pool = self.master.pool.as_mut().expect("分离驱动一定有线程池");
             match pool.wait(slice) {
                 Wait::Back(back) => {
-                    ids.push(self.seat(*back));
+                    ids.extend(self.seat(*back));
                     continue;
                 }
                 Wait::Lost => {
@@ -902,6 +976,12 @@ impl World {
                 }
                 Wait::Pending => {}
             }
+            // 等的每一个时间片都判一次：没有截止时间、等全部岛的时候，卡死的岛判死以后
+            // 就不用再等它（计划 5.6.1）。后事等岛落地了再办。
+            // Judge every slice: with no deadline, waiting for every island,
+            // a stuck island stops being waited for once it is declared dead
+            // (plan 5.6.1). What it leaves is handled once islands have landed.
+            self.bury_overdue();
             if deadline.is_some() {
                 continue;
             }
@@ -1174,8 +1254,8 @@ impl World {
         let now = self.master.hybrid.tick;
         self.master.hybrid.stalls.push(Stall {
             island,
-            from: now + first,
-            to: now + last,
+            from: now.saturating_add(first),
+            to: now.saturating_add(last),
             gate: None,
         });
     }
@@ -1212,12 +1292,47 @@ impl World {
             while !self.islands.is_parked(stall.island) {
                 let pool = self.master.pool.as_mut().expect("分离驱动一定有线程池");
                 match pool.wait(ISLAND_WAIT_SLICE) {
-                    Wait::Back(back) => ids.push(self.seat(*back)),
+                    Wait::Back(back) => ids.extend(self.seat(*back)),
                     Wait::Lost => panic!("every island tick thread is gone"),
                     Wait::Pending => {}
                 }
             }
         }
         self.land_seated(ids);
+    }
+
+    /// 测试专用：岛 `id` 被判死了，它的闸交给「僵尸」名单：同编号的新岛不算卡住，
+    /// [`Self::release_stalls_for_test`] 还能开闸让死岛回来。
+    #[cfg(test)]
+    pub(super) fn retire_stalls(&mut self, id: RegionId) {
+        let (dead, kept): (Vec<Stall>, Vec<Stall>) = std::mem::take(&mut self.master.hybrid.stalls)
+            .into_iter()
+            .partition(|stall| stall.island == id && stall.gate.is_some());
+        self.master.hybrid.stalls = kept;
+        self.master
+            .hybrid
+            .death
+            .zombie_gates
+            .extend(dead.into_iter().filter_map(|stall| stall.gate));
+    }
+
+    /// 测试专用：把全部闸打开（还卡着的岛和被判死的岛都放掉）。判死的岛回来以后被丢弃
+    /// （计划 5.6.7）；每条卡死的测试收尾时调它，免得线程留在进程里空转。
+    ///
+    /// Test only: open every gate (islands still stalled and islands declared
+    /// dead). A dead island that returns is discarded (plan 5.6.7); every
+    /// test that sticks an island calls this at the end so no thread keeps
+    /// spinning in the process.
+    #[cfg(test)]
+    pub(crate) fn release_stalls_for_test(&mut self) {
+        use std::sync::atomic::Ordering;
+        for stall in &self.master.hybrid.stalls {
+            if let Some(gate) = &stall.gate {
+                gate.store(true, Ordering::Release);
+            }
+        }
+        for gate in &self.master.hybrid.death.zombie_gates {
+            gate.store(true, Ordering::Release);
+        }
     }
 }

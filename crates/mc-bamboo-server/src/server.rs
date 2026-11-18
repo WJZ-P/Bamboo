@@ -576,6 +576,7 @@ fn world_config(config: &ServerConfig) -> WorldConfig {
         mail_budget: config.mail_budget,
         island_threads: config.island_threads,
         islands: config.islands,
+        island_dead_timeout: config.island_dead_timeout,
         world_dir: config.world_dir.clone(),
         world_gen: config.world_gen.clone(),
         broadcast_console_to_ops: config.broadcast_console_to_ops,

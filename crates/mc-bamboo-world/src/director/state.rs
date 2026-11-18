@@ -237,6 +237,18 @@ pub enum Event<C> {
         pos: ChunkPos,
         generation: u64,
     },
+    /// 拿着这些区块的岛没了（它的 tick 线程卡死、被判死，盒子拿不回来；岛的实施计划
+    /// 5.6.3）。归属还在 region 一侧（`Delivering` / `Region` / `Reclaiming`）的记录照
+    /// 「收回但没有盒子」处理：删掉记录，票还想要它就当场按新加载重建、重新读盘。
+    /// 别的状态的记录不动。
+    ///
+    /// The island holding these chunks is gone (its tick thread is stuck and
+    /// it was declared dead, so the boxes cannot come back; island plan
+    /// 5.6.3). Records still owned on the region side (`Delivering`, `Region`,
+    /// `Reclaiming`) are treated as returned without a box: the record is
+    /// removed and, if tickets still want the chunk, recreated as a fresh
+    /// load that reads from disk again. Records in other states are left alone.
+    Lost { positions: Vec<ChunkPos> },
     /// 每刻推进：超时票递减、收回延迟、限速补充。
     Tick { now_tick: u64 },
     /// 关服：收回全部区块、写完所有快照。
@@ -847,6 +859,7 @@ impl<C: ChunkBundle> Director<C> {
                 pos,
                 generation,
             } => self.on_delivered(region, pos, generation),
+            Event::Lost { positions } => self.on_lost(&mut out, positions),
             Event::Tick { now_tick } => {
                 self.now_tick = now_tick;
                 self.begin_tick();
@@ -1386,6 +1399,47 @@ impl<C: ChunkBundle> Director<C> {
         {
             self.set_owner(pos, Owner::Region(region));
             self.pending_ready.insert(pos);
+        }
+    }
+
+    /// [`Event::Lost`]：region 一侧的盒子没了。代数接着往上数，之后迟到的 `Delivered` /
+    /// `Returned` 都对不上；重建的记录和等级刚进加载带时新建的一样（44 以内但不到
+    /// `Full` 的是生成依赖，`Full` 的排进读盘队列，读盘照常先看停放表和写盘途中的缓冲）。
+    ///
+    /// [`Event::Lost`]: the region-side box is gone. The generation keeps
+    /// counting so late `Delivered` / `Returned` acks no longer match; a
+    /// recreated record is what a fresh load creates (a generation dependency
+    /// below `Full`, queued for a read at `Full`, and reads look at parked
+    /// boxes and in-flight writes first as always).
+    fn on_lost(&mut self, out: &mut Vec<Effect<C>>, positions: Vec<ChunkPos>) {
+        for pos in positions {
+            let Some(record) = self.chunks.get(&pos) else {
+                continue;
+            };
+            if !owner_is_held(record.owner) {
+                continue;
+            }
+            let (desired, generation) = (record.desired, record.generation);
+            self.cancel_task(out, pos);
+            self.remove_record(pos);
+            if desired.target.is_none() || self.shutting_down {
+                continue;
+            }
+            self.chunks.insert(
+                pos,
+                ChunkRecord {
+                    desired,
+                    owner: Owner::Pipeline,
+                    stage: ChunkStatus::Empty,
+                    task: None,
+                    generation: generation.wrapping_add(1),
+                    snapshot: None,
+                    unloaded_at: None,
+                    dependency: desired.target != Some(ChunkStatus::Full),
+                },
+            );
+            self.refresh_busy(pos);
+            self.queue_read_if_needed(pos);
         }
     }
 

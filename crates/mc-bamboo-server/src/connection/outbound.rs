@@ -90,6 +90,14 @@ impl PlayerSink for Outbound {
     fn close(&mut self) {
         self.finish();
     }
+
+    /// 同一条队列的另一个写入端：`Close` 之后排进来的帧连接任务不再写。
+    ///
+    /// Another writer of the same queue; frames queued after `Close` are
+    /// never written by the connection task.
+    fn second_handle(&self) -> Option<Box<dyn PlayerSink>> {
+        Some(Box::new(self.clone()))
+    }
 }
 
 impl OutboundQueue {

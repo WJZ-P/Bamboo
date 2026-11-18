@@ -119,6 +119,63 @@ pub fn islands_from_env() -> Option<bool> {
     }
 }
 
+/// `island_dead_seconds` 没有显式给出时的值：一个岛的同一刻在 tick 线程上连续跑超过
+/// 这么多秒就判为死岛（岛的实施计划 5.6.1）。正常的慢以 2 秒为界（落后 2 秒以内追赶），
+/// 30 秒是它的 15 倍；又比官方看门狗的 60 秒和连接层在途配额用完的两三分钟短。
+///
+/// The `island_dead_seconds` value when none is given: an island whose tick
+/// keeps running on its thread for more than this many seconds is declared
+/// dead (island plan 5.6.1). Ordinary slowness ends at 2 seconds (the
+/// catch-up window); 30 is fifteen times that, and shorter than the vanilla
+/// watchdog's 60 seconds and the few minutes a connection's in-flight quota lasts.
+pub const DEFAULT_ISLAND_DEAD_SECONDS: u64 = 30;
+
+/// `island_dead_seconds` 的下限：再短就会把一次很重的 tick 当成卡死。
+///
+/// The lower bound of `island_dead_seconds`; anything shorter would take one
+/// heavy tick for a stuck island.
+pub const MIN_ISLAND_DEAD_SECONDS: u64 = 5;
+
+/// `island_dead_seconds` 的上限（一小时）：再长就和不判死没有区别。
+///
+/// The upper bound of `island_dead_seconds` (an hour); longer is no
+/// different from never.
+pub const MAX_ISLAND_DEAD_SECONDS: u64 = 3600;
+
+/// 在运行时盖过 `island_dead_seconds` 的环境变量（秒，在 [`MIN_ISLAND_DEAD_SECONDS`] 和
+/// [`MAX_ISLAND_DEAD_SECONDS`] 之间）。
+///
+/// The environment variable that overrides `island_dead_seconds` at run time
+/// (seconds, between [`MIN_ISLAND_DEAD_SECONDS`] and [`MAX_ISLAND_DEAD_SECONDS`]).
+pub const ISLAND_DEAD_SECONDS_ENV: &str = "BAMBOO_ISLAND_DEAD_SECONDS";
+
+/// 环境变量给的 `island_dead_seconds`。没设或者不是上下限之间的整数时是 `None`。
+///
+/// The `island_dead_seconds` given by the environment, or `None` when unset
+/// or not an integer within the bounds.
+pub fn island_dead_seconds_from_env() -> Option<u64> {
+    let value = std::env::var(ISLAND_DEAD_SECONDS_ENV).ok()?;
+    match value.trim().parse::<u64>() {
+        Ok(seconds) if (MIN_ISLAND_DEAD_SECONDS..=MAX_ISLAND_DEAD_SECONDS).contains(&seconds) => {
+            Some(seconds)
+        }
+        _ => {
+            tracing::warn!(%value, "ignoring an invalid {ISLAND_DEAD_SECONDS_ENV}");
+            None
+        }
+    }
+}
+
+/// 没有显式选择时的判死时限：环境变量优先，没有就是 [`DEFAULT_ISLAND_DEAD_SECONDS`]。
+///
+/// The dead-island timeout used when nothing is chosen explicitly: the
+/// environment wins, otherwise [`DEFAULT_ISLAND_DEAD_SECONDS`].
+pub fn default_island_dead_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(
+        island_dead_seconds_from_env().unwrap_or(DEFAULT_ISLAND_DEAD_SECONDS),
+    )
+}
+
 /// 没有显式选择时的 `islands`：环境变量优先，没有就是 [`DEFAULT_ISLANDS`]。
 ///
 /// The `islands` used when nothing is chosen explicitly: the environment
@@ -278,6 +335,11 @@ pub(crate) struct IslandSlot {
     /// the master uses it to know that a player is on an island that is not
     /// parked (plan 5.5.1). Empty while parked.
     away_players: Vec<crate::inbound::PlayerId>,
+    /// 岛不在主控手里时这一次派出的情况（见 [`Away`]）。停放时是 `None`。
+    ///
+    /// This dispatch's details while the island is away (see [`Away`]);
+    /// `None` while parked.
+    away: Option<Away>,
     /// 这个岛欠几刻：主控每次派出时它不在就加一，追赶时每多跑一刻减一（计划 5.5.1）。
     /// 只有混合驱动用；别的驱动下一直是 0。
     ///
@@ -287,13 +349,58 @@ pub(crate) struct IslandSlot {
     pub(crate) debt: u32,
 }
 
+/// 一次派出时主控记下的东西（岛的实施计划 5.6）。岛要是再也不回来，主控靠它知道丢了
+/// 什么。
+///
+/// What the master notes at a dispatch (island plan 5.6); if the island
+/// never returns, this is how the master knows what was lost.
+pub(crate) struct Away {
+    /// 派出号：只增不减，岛回来时拿它对槽位。岛的编号会被复用，不能拿来认岛。
+    ///
+    /// The dispatch ticket: ever increasing, matched against the slot when
+    /// the island returns. Island ids are reused and cannot identify one.
+    pub(crate) ticket: u64,
+    /// 派出时岛的时钟。
+    pub(crate) clock: i64,
+    /// 派出时 Director 还不知道在这个岛手里的位置：信箱里没交付的盒子和没收回的位置，
+    /// 以及这一刻开头收信产生、还没交给 Director 的回执（刚交付的、刚收回的盒子）。
+    /// 已经确认交付的区块 Director 自己记着（`Owner::Region(这个岛)`），不用抄。
+    ///
+    /// Positions the Director does not yet know to be in this island's hands
+    /// at dispatch: undelivered boxes and unreclaimed positions in its
+    /// mailbox, and the acks from this tick's mail not yet handed to the
+    /// Director (boxes just delivered or just reclaimed). Chunks already
+    /// acknowledged are on the Director's own record (`Owner::Region(this)`).
+    pub(crate) unacked: Vec<ChunkPos>,
+}
+
+/// 被判死的岛留给主控的东西（[`Islands::bury`]）。
+///
+/// What a dead island leaves the master ([`Islands::bury`]).
+pub(crate) struct Buried {
+    /// 它上面的玩家。
+    pub(crate) players: Vec<crate::inbound::PlayerId>,
+    /// 派出时记下的情况。
+    pub(crate) away: Away,
+    /// 它欠的刻数。
+    pub(crate) debt: u32,
+}
+
 impl IslandSlot {
     pub(crate) fn new(island: Box<Island>) -> Self {
         Self {
             island: Some(island),
             away_players: Vec::new(),
+            away: None,
             debt: 0,
         }
+    }
+
+    /// 岛不在主控手里时这一次派出的派出号。
+    ///
+    /// The ticket of the current dispatch while the island is away.
+    pub(crate) fn away_ticket(&self) -> Option<u64> {
+        self.away.as_ref().map(|away| away.ticket)
     }
 
     /// 岛在不在主控手里。
@@ -301,19 +408,48 @@ impl IslandSlot {
         self.island.is_some()
     }
 
-    /// 拿走岛，交给 tick 线程。记下它的玩家编号。
+    /// 拿走岛，交给 tick 线程。记下它的玩家编号和这次派出的情况（[`Away`]）。
     ///
-    /// Take the island for a tick thread, remembering its player ids.
-    pub(crate) fn take(&mut self) -> Box<Island> {
+    /// Take the island for a tick thread, remembering its player ids and this
+    /// dispatch's details ([`Away`]).
+    pub(crate) fn take(&mut self, ticket: u64) -> Box<Island> {
         let island = self.island.take().expect("岛已经交出去了");
         self.away_players = island.region.players.keys().copied().collect();
+        let mut unacked = island.mailbox.positions();
+        unacked.extend(
+            island
+                .replies
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Delivered { pos, .. } | Event::Returned { pos, .. } => Some(*pos),
+                    _ => None,
+                }),
+        );
+        self.away = Some(Away {
+            ticket,
+            clock: island.region.tick.game_time(),
+            unacked,
+        });
         island
+    }
+
+    /// 拿走停放着的岛，但它的玩家不记进「不在时的名单」：主控把全部岛临时拼成一个时
+    /// （[`Islands::unify`]），这个岛的玩家跟着 `Region` 并进了发起人的岛，在那边找得到。
+    ///
+    /// Take the parked island without recording its players as away: while
+    /// the master temporarily joins every island into one
+    /// ([`Islands::unify`]) its players are on the sender's island with the
+    /// `Region` and are found there.
+    fn lift(&mut self) -> Box<Island> {
+        self.island.take().expect("只能拼停放着的岛")
     }
 
     /// 岛交回来了。
     pub(crate) fn put(&mut self, island: Box<Island>) {
         debug_assert!(self.island.is_none(), "岛已经在主控手里");
         self.away_players.clear();
+        self.away = None;
         self.island = Some(island);
     }
 
@@ -377,12 +513,28 @@ pub(crate) struct Islands {
     /// Origin sections that already had a new island's random sources derived
     /// at this game time ([`Self::note_derivation`]).
     derived: (i64, Vec<SectionPos>),
+    /// 下一个派出号（[`Away::ticket`]）。
+    next_ticket: u64,
+    /// 空白岛：开服时从家岛拆出来的空 `Region`，从不派出、不进岛表，只在家岛被判死时
+    /// 当模板，换一个空的家岛进槽位（岛的实施计划 5.6.2「家岛」）。只有混合驱动留它。
+    ///
+    /// The blank island: an empty `Region` split off home at start-up, never
+    /// dispatched and not in the table, used only as the template for a fresh
+    /// empty home when home is declared dead (island plan 5.6.2). Kept under
+    /// the hybrid drive only.
+    blueprint: Option<Box<Island>>,
     /// 测试专用：借玩家时一个都不借（改坏确认）。
     #[cfg(test)]
     pub(crate) lend_nothing: bool,
     /// 测试专用：借玩家时不按时钟差平移（改坏确认）。
     #[cfg(test)]
     pub(crate) lend_unshifted: bool,
+    /// 测试专用：要整个世界的命令退回只借玩家（只看得见发起人的岛的方块，改坏确认）。
+    #[cfg(test)]
+    pub(crate) world_view_off: bool,
+    /// 测试专用：拼了几次（确认命令真的走了这条路）。
+    #[cfg(test)]
+    pub(crate) unified: usize,
 }
 
 impl Islands {
@@ -391,11 +543,127 @@ impl Islands {
         Self {
             slots: BTreeMap::from([(HOME_REGION, IslandSlot::new(home))]),
             derived: (i64::MIN, Vec::new()),
+            next_ticket: 1,
+            blueprint: None,
             #[cfg(test)]
             lend_nothing: false,
             #[cfg(test)]
             lend_unshifted: false,
+            #[cfg(test)]
+            world_view_off: false,
+            #[cfg(test)]
+            unified: 0,
         }
+    }
+
+    /// 领一个派出号。
+    ///
+    /// Allocate a dispatch ticket.
+    pub(crate) fn next_ticket(&mut self) -> u64 {
+        let ticket = self.next_ticket;
+        self.next_ticket += 1;
+        ticket
+    }
+
+    /// 留一份空白岛（见 [`Self::blueprint`] 字段）。家岛停放着、在 tick 边界时调用一次。
+    ///
+    /// Keep a blank island (see the `blueprint` field); called once with
+    /// home parked at a tick boundary.
+    pub(crate) fn keep_blueprint(&mut self) {
+        let home = &mut **self.slots.get_mut(&HOME_REGION).expect("家岛一直在");
+        let random = home
+            .region
+            .derive_island_random(home.region.global.seed, SectionPos::of(ChunkPos::new(0, 0)));
+        let Ok(region) = home.region.split_off_island(
+            &std::collections::BTreeSet::new(),
+            &std::collections::BTreeSet::new(),
+            random,
+        ) else {
+            tracing::warn!("could not keep a blank island; a dead home island cannot be replaced");
+            return;
+        };
+        self.blueprint = Some(Box::new(Self::fresh(HOME_REGION, region, home)));
+    }
+
+    /// 空白岛的 `Region`（主控换家岛之前给它重发全局快照）。
+    pub(crate) fn blueprint_region_mut(&mut self) -> Option<&mut Region> {
+        self.blueprint
+            .as_deref_mut()
+            .map(|island| &mut island.region)
+    }
+
+    /// 拿着派出号 `ticket` 的岛（它不在主控手里）。
+    ///
+    /// The island that is away on dispatch `ticket`.
+    pub(crate) fn island_of_ticket(&self, ticket: u64) -> Option<RegionId> {
+        self.slots
+            .iter()
+            .find(|(_, slot)| slot.away_ticket() == Some(ticket))
+            .map(|(&id, _)| id)
+    }
+
+    /// 岛 `id` 不在主控手里时这一次派出的派出号。
+    pub(crate) fn away_ticket(&self, id: RegionId) -> Option<u64> {
+        self.slots.get(&id).and_then(IslandSlot::away_ticket)
+    }
+
+    /// 不在主控手里的岛 `id` 这一次派出时记下的情况。
+    ///
+    /// What was noted when island `id`, now away, was dispatched.
+    pub(crate) fn away(&self, id: RegionId) -> Option<&Away> {
+        self.slots.get(&id).and_then(|slot| slot.away.as_ref())
+    }
+
+    /// 把不在主控手里的岛 `id` 判死（岛的实施计划 5.6.2）：拿掉它的槽位，返回派出时记下的
+    /// 东西。之后「全部岛停放」不再算它；它哪天回来了，派出号对不上任何槽位，主控丢弃。
+    /// 家岛不能没有：从空白岛拆一份空的换进槽位，时钟设成它没卡住的话现在该有的时钟
+    /// （派出时的时钟 + 1 + 欠的刻数），随机源按世界种子、原点 section 和现在的全局游戏
+    /// 时间派生。岛停放着、或者不存在时返回 `None`。
+    ///
+    /// Declare island `id`, which is away, dead (island plan 5.6.2): drop its
+    /// slot and return what was noted at dispatch. It no longer counts for
+    /// "every island parked", and if it ever returns its ticket matches no
+    /// slot and the master discards it. Home must exist: a fresh empty one is
+    /// split off the blank island with the clock home would have had if it
+    /// had not stuck (clock at dispatch + 1 + ticks owed) and random sources
+    /// derived from the world seed, the origin section and the current game
+    /// time. `None` if the island is parked or missing.
+    pub(crate) fn bury(&mut self, id: RegionId) -> Option<Buried> {
+        if self.slots.get(&id).is_none_or(IslandSlot::is_home) {
+            return None;
+        }
+        let slot = self.slots.remove(&id).expect("刚看过");
+        let buried = Buried {
+            players: slot.away_players,
+            away: slot.away.expect("不在主控手里的岛记着这次派出"),
+            debt: slot.debt,
+        };
+        if id == HOME_REGION {
+            let blueprint = self
+                .blueprint
+                .as_deref_mut()
+                .expect("混合驱动留着空白岛，家岛判死时拿它换一个空的");
+            let clock = buried.away.clock + 1 + i64::from(buried.debt);
+            let delta = clock - blueprint.region.tick.game_time();
+            if delta != 0 {
+                blueprint.region.rebase_clock(delta);
+            }
+            let random = blueprint.region.derive_island_random(
+                blueprint.region.global.seed,
+                SectionPos::of(ChunkPos::new(0, 0)),
+            );
+            let region = blueprint
+                .region
+                .split_off_island(
+                    &std::collections::BTreeSet::new(),
+                    &std::collections::BTreeSet::new(),
+                    random,
+                )
+                .unwrap_or_else(|_| panic!("空白岛上拆不出空的家岛"));
+            let island = Box::new(Self::fresh(HOME_REGION, region, blueprint));
+            self.slots.insert(HOME_REGION, IslandSlot::new(island));
+        }
+        Some(buried)
     }
 
     /// 岛的个数（含空的家岛）。
@@ -430,10 +698,6 @@ impl Islands {
 
     pub(crate) fn slot_mut(&mut self, id: RegionId) -> Option<&mut IslandSlot> {
         self.slots.get_mut(&id)
-    }
-
-    pub(crate) fn slots_mut(&mut self) -> impl Iterator<Item = &mut IslandSlot> {
-        self.slots.values_mut()
     }
 
     /// 全部停放着的岛，按编号升序。
@@ -703,7 +967,7 @@ impl Islands {
             return gathered;
         }
         let others: Vec<RegionId> = match borrow {
-            Borrow::All => self
+            Borrow::All | Borrow::World => self
                 .parked_ids()
                 .into_iter()
                 .filter(|&id| id != into)
@@ -766,6 +1030,108 @@ impl Islands {
         }
     }
 
+    /// 主控要在整个世界上执行一条命令（计划 4.5）：把 `into` 以外的每个岛的 `Region`
+    /// 整个并进 `into`，命令在拼好的 `Region` 上执行，看到的方块、方块实体、容器、实体和
+    /// 玩家都和整个世界一个岛时一样；做完用 [`Self::divide`] 按原样拆回去。每个被并进来
+    /// 的岛记下它的区块集合、玩家集合、四个随机源的状态和剖析器、和 `into` 的时钟差；
+    /// 岛这一层的东西（区块信箱、存盘名单和报告、排队的全局改动、回执、欠刻）留在
+    /// 槽位里不动。全部岛都要停放着（断言）。只有一个岛时什么都不做。
+    ///
+    /// 什么都没有的岛（没有区块也没有玩家，比如空着的家岛）不并：拆的时候按区块和玩家
+    /// 分，它没有这两样，并进来的东西就回不去了。
+    ///
+    /// 光照：排着还没开始算的任务跟着区块走，不用先算完；哪个岛正好有算到一半的轮次
+    /// 就先把它算完（见计划 4.5「光照」）。
+    ///
+    /// The master runs a command on the whole world (plan 4.5): every other
+    /// island's `Region` is poured into `into`, the command runs on the joined
+    /// `Region` and sees the blocks, block entities, containers, entities and
+    /// players exactly as on a single island, and [`Self::divide`] splits them
+    /// back afterwards. For each absorbed island its chunk set, player set,
+    /// random-source state, profiler and clock difference are kept; its
+    /// island-level state (chunk mailbox, save lists, queued global changes,
+    /// acks, ticks owed) stays untouched in its slot. Every island must be
+    /// parked (asserted). A no-op with one island. Islands with neither
+    /// chunks nor players (an empty home) are left alone, since the split
+    /// back goes by chunks and players. Light tasks queued but not started
+    /// travel with their chunks; a round that is half done is finished first.
+    pub(crate) fn unify(&mut self, into: RegionId) -> Unified {
+        let mut unified = Unified(Vec::new());
+        if self.slots.len() <= 1 {
+            return unified;
+        }
+        assert!(self.all_parked(), "要整个世界的命令等全部岛停放");
+        #[cfg(test)]
+        {
+            self.unified += 1;
+        }
+        let others: Vec<RegionId> = self.ids().into_iter().filter(|&id| id != into).collect();
+        for id in others {
+            let region = &mut self.get_mut(id).expect("在表里").region;
+            let chunks: std::collections::BTreeSet<ChunkPos> =
+                region.chunks.loaded_positions().into_iter().collect();
+            let players: std::collections::BTreeSet<_> = region.players.keys().copied().collect();
+            if chunks.is_empty() && players.is_empty() {
+                continue;
+            }
+            if !region.chunks.ready_to_split() {
+                region.chunks.finish_light_updates();
+            }
+            let island = self.slots.get_mut(&id).expect("在表里").lift();
+            let (shell, region) = island.into_shell();
+            let target = &mut self.get_mut(into).expect("发起人的岛在表里").region;
+            if !target.chunks.ready_to_split() {
+                target.chunks.finish_light_updates();
+            }
+            let delta = target.tick.game_time() - region.tick.game_time();
+            let identity = target.absorb_island_keeping(region, delta);
+            unified.0.push(UnifiedIsland {
+                shell,
+                chunks,
+                players,
+                identity,
+                delta,
+            });
+        }
+        unified
+    }
+
+    /// [`Self::unify`] 的逆操作：把每个并进来的岛按记下的区块和玩家拆回去，换上它自己的
+    /// 随机源状态和剖析器，时钟平移回去，放回槽位。命令期间新出现的东西按位置（方块、
+    /// 计划刻、方块实体、容器、实体、待广播的变化）或者按玩家（缓冲里写好的包、菜单）
+    /// 各回各的岛；被命令送到别的岛的位置上的玩家回他原来的岛，之后由
+    /// `World::relocate_players` 搬。拆不回去说明不在 tick 边界，panic。
+    ///
+    /// The inverse of [`Self::unify`]: split every absorbed island back by its
+    /// recorded chunks and players, give it its own random-source state and
+    /// profiler, rebase its clock back and seat it. What the command created
+    /// goes by position or by player to the island that owns it; a player the
+    /// command sent onto another island's ground returns to their old island
+    /// and is moved later by `World::relocate_players`. Failing to split
+    /// means this is not a tick boundary and panics.
+    pub(crate) fn divide(&mut self, into: RegionId, unified: Unified) {
+        for part in unified.0 {
+            let UnifiedIsland {
+                shell,
+                chunks,
+                mut players,
+                identity,
+                delta,
+            } = part;
+            let id = shell.id;
+            let joined = &mut self.get_mut(into).expect("发起人的岛在表里").region;
+            players.retain(|player| joined.players.contains_key(player));
+            let mut region = joined
+                .split_off_island_restoring(&chunks, &players, identity)
+                .unwrap_or_else(|_| panic!("命令执行完以后拆不回岛 {id}（不在 tick 边界）"));
+            if delta != 0 {
+                region.rebase_clock(-delta);
+            }
+            let island = Box::new(Island::from_shell(shell, region));
+            self.slots.get_mut(&id).expect("槽位留着").put(island);
+        }
+    }
+
     /// 借玩家时要不要按时钟差平移（正式构建恒为真）。
     fn lend_shift(&self) -> bool {
         #[cfg(test)]
@@ -788,6 +1154,14 @@ pub(crate) enum Borrow {
     ///
     /// Every island's players: selectors, server-wide broadcasts, feedback to ops.
     All,
+    /// 整个世界：全部岛的 `Region` 临时拼成一个（[`Islands::unify`]），命令里的方块坐标、
+    /// 容器、实体和读方块的玩家命令都和整个世界一个岛时一样（计划 4.5）。要全部岛停放。
+    ///
+    /// The whole world: every island's `Region` is temporarily joined
+    /// ([`Islands::unify`]) so block positions, containers, entities and
+    /// player commands that read blocks behave as on a single island (plan
+    /// 4.5). Needs every island parked.
+    World,
     /// 只要这几名玩家所在的岛。
     ///
     /// Only the islands these players are on.
@@ -799,6 +1173,43 @@ pub(crate) enum Borrow {
         )
     )]
     PlayersOf(Vec<crate::inbound::PlayerId>),
+}
+
+/// [`Islands::unify`] 并进发起人的岛的全部岛，等着 [`Islands::divide`] 拆回去。
+///
+/// Every island [`Islands::unify`] poured into the sender's, waiting for
+/// [`Islands::divide`].
+pub(crate) struct Unified(Vec<UnifiedIsland>);
+
+/// 一个并进去的岛留在外面的部分。
+struct UnifiedIsland {
+    /// 岛这一层的东西（不跟着 `Region` 并进去）。
+    shell: IslandShell,
+    /// 拼之前它已加载的区块。
+    chunks: std::collections::BTreeSet<ChunkPos>,
+    /// 拼之前它的玩家。
+    players: std::collections::BTreeSet<crate::inbound::PlayerId>,
+    /// 它自己的随机源状态和剖析器。
+    identity: crate::region::IslandIdentity,
+    /// 发起人的岛的时钟减它的时钟（并进去时平移了这么多，拆回来时平移回去）。
+    delta: i64,
+}
+
+/// 一个岛除了 `Region` 以外的全部字段（见 [`Island::into_shell`]）。
+///
+/// Every field of an island except its `Region` (see [`Island::into_shell`]).
+struct IslandShell {
+    id: RegionId,
+    entity_threads: usize,
+    effects: Vec<GlobalEffect>,
+    mailbox: ChunkMailbox,
+    replies: MailReport,
+    save_plan: SavePlan,
+    save_report: SaveReport,
+    last_worker: usize,
+    state: IslandState,
+    #[cfg(test)]
+    test_hook: Option<IslandTestHook>,
 }
 
 /// [`Islands::gather`] 借走的玩家：岛编号和那个岛的玩家编号。
@@ -834,6 +1245,76 @@ impl Island {
             && self.save_plan.remark.is_empty()
             && self.save_report.encoded.is_empty()
             && self.save_report.changes.is_none()
+    }
+
+    /// 把岛拆成 `Region` 和其余的字段。逐个字段解构：以后给 `Island` 加字段而没决定它在
+    /// 「拼成一个」时留在哪边，编译就不过。
+    ///
+    /// Take the island apart into its `Region` and everything else, field by
+    /// field, so a new `Island` field without a decision for the joined view
+    /// does not compile.
+    fn into_shell(self: Box<Self>) -> (IslandShell, Region) {
+        let Self {
+            id,
+            region,
+            entity_threads,
+            effects,
+            mailbox,
+            replies,
+            save_plan,
+            save_report,
+            last_worker,
+            state,
+            #[cfg(test)]
+            test_hook,
+        } = *self;
+        (
+            IslandShell {
+                id,
+                entity_threads,
+                effects,
+                mailbox,
+                replies,
+                save_plan,
+                save_report,
+                last_worker,
+                state,
+                #[cfg(test)]
+                test_hook,
+            },
+            region,
+        )
+    }
+
+    /// [`Self::into_shell`] 的逆操作。
+    fn from_shell(shell: IslandShell, region: Region) -> Self {
+        let IslandShell {
+            id,
+            entity_threads,
+            effects,
+            mailbox,
+            replies,
+            save_plan,
+            save_report,
+            last_worker,
+            state,
+            #[cfg(test)]
+            test_hook,
+        } = shell;
+        Self {
+            id,
+            region,
+            entity_threads,
+            effects,
+            mailbox,
+            replies,
+            save_plan,
+            save_report,
+            last_worker,
+            state,
+            #[cfg(test)]
+            test_hook,
+        }
     }
 
     pub(crate) fn new(id: RegionId, region: Region, budget: MailBudget) -> Self {

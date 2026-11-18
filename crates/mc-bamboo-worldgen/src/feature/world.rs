@@ -78,14 +78,15 @@ impl<'a> FeatureWorld<'a> {
     /// 交出结果。写增量里每一格只留最后一次写：一次地物运行可能把同一格写好几次
     /// （树叶先放成 `distance=7`，`updateLeaves` 再改成真实距离；藤蔓放下后又被
     /// `updateShapeAtEdge` 移除），邻居区块要的是最终状态。调用方之后把多个中心的增量
-    /// 合到一起、按规范序落盘，那一步分不出先后，所以必须在这里先收敛。
+    /// 合到一起、按来源中心的固定先后落盘，那一步分不出同一中心内的先后，
+    /// 所以必须在这里先收敛。
     ///
     /// Hand back the result. Each cell keeps only its last write: one feature run can
     /// write a cell several times (a leaf is placed with `distance=7` and `updateLeaves`
     /// then rewrites the real distance; a vine is placed and `updateShapeAtEdge` removes
     /// it), and the neighbour chunk needs the final state. The caller later merges
-    /// several centres' deltas and applies them in canonical order, which cannot tell
-    /// earlier from later, so the collapse has to happen here.
+    /// several centres' deltas and applies them in a fixed center order, which cannot
+    /// tell earlier from later within one center, so the collapse has to happen here.
     pub fn finish(self, unsupported: bool) -> FeatureResult {
         FeatureResult {
             blocks: self.blocks,

@@ -97,6 +97,109 @@ pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("say", CommandClass::CrossIsland),
 ];
 
+/// 一条命令执行时要看得见多大的世界（岛的实施计划 4.5）。多岛时主控按它决定怎么借。
+///
+/// How much of the world a command must see while it runs (island plan 4.5);
+/// with several islands the master borrows accordingly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandScope {
+    /// 只读写玩家身上的状态、出站链路和全局状态：把别的岛上的玩家借过来就够。
+    ///
+    /// Only players' own state, their links and global state: borrowing the
+    /// other islands' players is enough.
+    Players,
+    /// 可能读写方块、方块实体、容器或者非玩家实体（含读目标玩家脚下的方块）：全部岛
+    /// 临时拼成一个再执行。
+    ///
+    /// May read or write blocks, block entities, containers or non-player
+    /// entities (including the block under a target player): every island is
+    /// temporarily joined into one first.
+    World,
+}
+
+/// 4.5 的表：每个顶层字面量的范围。按代码核过：`World` 的几条用 `Region::block_level`、
+/// 容器、实体表，或者经 `players::apply_mode` 读目标玩家脚下的方块；其余只碰 `players` /
+/// `links` / `global` / 管理名单 / 发起人岛的随机源。新命令不在表里时测试失败；拿不准的
+/// 归 `World`。
+///
+/// The 4.5 table: the scope of every root literal, checked against the code.
+/// The `World` ones use `Region::block_level`, containers or the entity table,
+/// or read the block under a target player through `players::apply_mode`; the
+/// rest touch only `players`, `links`, `global`, the admin lists and the
+/// sender island's random source. A new command missing here fails the test;
+/// when in doubt it is `World`.
+pub(crate) const SCOPES: &[(&str, CommandScope)] = &[
+    ("setblock", CommandScope::World),
+    ("fill", CommandScope::World),
+    ("clone", CommandScope::World),
+    ("summon", CommandScope::World),
+    ("loot", CommandScope::World),
+    ("gamemode", CommandScope::World),
+    ("defaultgamemode", CommandScope::World),
+    ("particle", CommandScope::Players),
+    ("playsound", CommandScope::Players),
+    ("enchant", CommandScope::Players),
+    ("experience", CommandScope::Players),
+    ("xp", CommandScope::Players),
+    ("stopsound", CommandScope::Players),
+    ("spawnpoint", CommandScope::Players),
+    ("transfer", CommandScope::Players),
+    ("time", CommandScope::Players),
+    ("weather", CommandScope::Players),
+    ("gamerule", CommandScope::Players),
+    ("difficulty", CommandScope::Players),
+    ("worldborder", CommandScope::Players),
+    ("seed", CommandScope::Players),
+    ("setworldspawn", CommandScope::Players),
+    ("op", CommandScope::Players),
+    ("deop", CommandScope::Players),
+    ("ban", CommandScope::Players),
+    ("ban-ip", CommandScope::Players),
+    ("banlist", CommandScope::Players),
+    ("pardon", CommandScope::Players),
+    ("pardon-ip", CommandScope::Players),
+    ("whitelist", CommandScope::Players),
+    ("save-all", CommandScope::Players),
+    ("save-on", CommandScope::Players),
+    ("save-off", CommandScope::Players),
+    ("stop", CommandScope::Players),
+    ("setidletimeout", CommandScope::Players),
+    ("version", CommandScope::Players),
+    ("help", CommandScope::Players),
+    ("list", CommandScope::Players),
+    ("scoreboard", CommandScope::Players),
+    ("team", CommandScope::Players),
+    ("bossbar", CommandScope::Players),
+    ("random", CommandScope::Players),
+    ("teleport", CommandScope::Players),
+    ("tp", CommandScope::Players),
+    ("give", CommandScope::Players),
+    ("clear", CommandScope::Players),
+    ("kick", CommandScope::Players),
+    ("title", CommandScope::Players),
+    ("tellraw", CommandScope::Players),
+    ("msg", CommandScope::Players),
+    ("tell", CommandScope::Players),
+    ("w", CommandScope::Players),
+    ("me", CommandScope::Players),
+    ("say", CommandScope::Players),
+];
+
+/// 一行命令（可以带开头的 `/`）的范围，按它的第一个词查 [`SCOPES`]。认不出来的词解析
+/// 不过，只会发一条反馈，按 `Players` 算。
+///
+/// The scope of a command line (a leading `/` allowed), by its first word in
+/// [`SCOPES`]. An unknown word does not parse and only produces feedback, so
+/// it counts as `Players`.
+pub(crate) fn scope_of(line: &str) -> CommandScope {
+    let line = line.strip_prefix('/').unwrap_or(line);
+    let root = line.split_whitespace().next().unwrap_or("");
+    SCOPES
+        .iter()
+        .find(|(name, _)| *name == root)
+        .map_or(CommandScope::Players, |(_, scope)| *scope)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -141,6 +244,12 @@ mod tests {
         // The 51 of 4.4 plus `/summon`, `/experience` and `/xp`.
         assert_eq!(roots.len(), 54);
         assert_eq!(CLASSES.len(), 54);
+        // 每个顶层字面量都定了范围（计划 4.5），不多不少。
+        // Every root literal has a scope (plan 4.5), no more and no fewer.
+        let scoped: BTreeSet<&str> = SCOPES.iter().map(|(name, _)| *name).collect();
+        assert_eq!(scoped.len(), SCOPES.len(), "范围表里不该有重复");
+        let registered: BTreeSet<&str> = roots.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(scoped, registered, "范围表和注册的顶层字面量不一致");
         let names: BTreeSet<&str> = CLASSES.iter().map(|(name, _)| *name).collect();
         assert_eq!(names.len(), CLASSES.len(), "表里不该有重复");
         for (name, root) in roots {
@@ -156,5 +265,48 @@ mod tests {
                 "{name} 的动作和 4.4 的类别 {class:?} 不一致"
             );
         }
+    }
+
+    #[test]
+    fn the_scope_of_a_line_follows_its_first_word() {
+        assert_eq!(scope_of("setblock 1 2 3 stone"), CommandScope::World);
+        assert_eq!(scope_of("/fill 1 2 3 4 5 6 stone"), CommandScope::World);
+        assert_eq!(scope_of("gamemode creative @a"), CommandScope::World);
+        assert_eq!(scope_of("msg someone hi"), CommandScope::Players);
+        assert_eq!(scope_of("  "), CommandScope::Players);
+        assert_eq!(scope_of("nosuchcommand 1"), CommandScope::Players);
+    }
+
+    /// 要整个世界的命令只在发起人的权限够用它时才借整个世界：不够的解析一定失败，不拼。
+    ///
+    /// A whole-world command borrows the whole world only when the sender may
+    /// use it; otherwise it cannot parse and nothing is joined.
+    #[test]
+    fn a_command_the_sender_may_not_use_borrows_only_players() {
+        use crate::{
+            command::{borrow_for, borrow_for_console},
+            island::Borrow,
+        };
+        use mc_bamboo_command::permission;
+        assert!(matches!(
+            borrow_for("setblock 1 2 3 stone", permission::GAMEMASTERS),
+            Borrow::World
+        ));
+        assert!(matches!(
+            borrow_for("setblock 1 2 3 stone", permission::ALL),
+            Borrow::All
+        ));
+        assert!(matches!(
+            borrow_for("/gamemode creative", permission::ALL),
+            Borrow::All
+        ));
+        assert!(matches!(
+            borrow_for("msg a hi", permission::OWNERS),
+            Borrow::All
+        ));
+        assert!(matches!(
+            borrow_for_console("fill 0 0 0 1 1 1 stone"),
+            Borrow::World
+        ));
     }
 }
