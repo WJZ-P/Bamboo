@@ -4,7 +4,10 @@
 
 use mc_bamboo_blocks::entity::{JavaRandom, ctx::PlayerView};
 use mc_bamboo_core::{Aabb, ChunkPos, Hand, Vec3};
-use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode, MODEL_PART_HAT};
+use mc_bamboo_protocol::{
+    item::ItemStack,
+    packet::play::{ClientInformation, EquipmentSlot, GameMode, MODEL_PART_HAT},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -19,6 +22,7 @@ use crate::{
     menu::station::InventoryCursor,
     movement::Teleport,
     player_grid::PlayerGrid,
+    player_health::PlayerHealth,
     player_move::Motion,
     secure_chat::PlayerChat,
     world_state::RespawnData,
@@ -128,6 +132,20 @@ pub(crate) struct Player {
     /// [`tick_criteria`](crate::scoreboard::tick_criteria). A new player starts at
     /// the constructor defaults.
     pub(crate) recorded_criteria: [i32; 6],
+    /// 官方 `Player` / `LivingEntity` 的生命、受伤冷却和饥饿状态。
+    /// 全都是相对倒计时，随 `IslandPart::Players` 整行搬，不需要时钟平移。
+    ///
+    /// Health, hurt cooldowns and hunger. All relative countdowns, moved with
+    /// the whole player row and needing no clock rebasing.
+    pub(crate) health: PlayerHealth,
+    /// `ServerPlayer.lastSentHealth` / `lastSentFood` / `lastFoodSaturationZero` 的合并快照。
+    /// 官方构造时是 -1e8 / -99999999 / true，进服第一刻必发一包 `set_health`。
+    ///
+    /// The combined official "last sent health" snapshot. The constructor values
+    /// force one `set_health` on the first tick.
+    pub(crate) health_sync: crate::player_hurt::HealthSync,
+    /// `CombatTracker.inCombat`：第一次被非玩家生物打伤时置真，1b 的死亡消息要用。
+    pub(crate) in_combat: bool,
 }
 
 impl Player {
@@ -182,6 +200,9 @@ impl Player {
             respawn: None,
             inbox: crate::inbound::PlayerInbox::default(),
             recorded_criteria: crate::scoreboard::UNRECORDED_CRITERIA,
+            health: PlayerHealth::default(),
+            health_sync: crate::player_hurt::HealthSync::INITIAL,
+            in_combat: false,
         }
     }
 
@@ -272,6 +293,27 @@ impl Player {
         shows_hat(&self.client)
     }
 
+    /// 四格盔甲里非空的比例，官方 `getArmorCoverPercentage()`。
+    pub(crate) fn armor_cover(&self) -> f32 {
+        let empty = mc_bamboo_protocol::item::ItemStack::empty();
+        let equipment = self.equipment_stacks(&empty);
+        PlayerHealth::armor_cover(&equipment)
+    }
+
+    /// 六个装备槽，顺序是主手、副手、靴子、护腿、胸甲、头盔。
+    /// `fallback` 只在槽位表缺格时用，正常路径不会用到。
+    pub(crate) fn equipment_stacks<'a>(&'a self, fallback: &'a ItemStack) -> [&'a ItemStack; 6] {
+        let get = |slot| self.inventory.equipment(slot).unwrap_or(fallback);
+        [
+            get(EquipmentSlot::MainHand),
+            get(EquipmentSlot::OffHand),
+            get(EquipmentSlot::Feet),
+            get(EquipmentSlot::Legs),
+            get(EquipmentSlot::Chest),
+            get(EquipmentSlot::Head),
+        ]
+    }
+
     /// 眼睛离脚底多高。
     pub(crate) fn eye_height(&self) -> f64 {
         if self.sync.is_crouching() {
@@ -296,14 +338,14 @@ impl Player {
             uid: id.0,
             position: self.position,
             eye_height: self.eye_height() as f32,
-            // Bamboo 还没有玩家生命和药水效果。
-            // Bamboo has no player health or potion effects yet.
-            alive: true,
+            // 药水效果还没有；`armor_cover` 按四格盔甲里非空的比例算。
+            // Potion effects are not modelled; armor cover follows the worn slots.
+            alive: !self.health.is_dead_or_dying(),
             spectator: self.game_mode == GameMode::Spectator,
             creative: self.game_mode == GameMode::Creative,
             sneaking: self.sync.is_crouching(),
             invisible: false,
-            armor_cover: 0.0,
+            armor_cover: self.armor_cover(),
             main_hand: if main.is_empty() { 0 } else { main.item },
             off_hand: if off.is_empty() { 0 } else { off.item },
         }

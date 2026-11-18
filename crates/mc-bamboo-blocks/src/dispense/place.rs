@@ -128,9 +128,9 @@ fn skull_rotation(facing: Direction) -> i32 {
 /// `WitherSkullBlock.canSpawnMob`. Difficulty is not peaceful, and the cell is at least two
 /// above the world's minimum Y.
 fn can_spawn_wither(world: &World, pos: BlockPos) -> bool {
-    // `Difficulty.PEACEFUL` 是 0。`World::difficulty_id` 固定是普通。
+    // `Difficulty.PEACEFUL` 是 0，难度来自全局快照。
     //
-    // `Difficulty.PEACEFUL` is 0. `World::difficulty_id` is fixed at normal.
+    // `Difficulty.PEACEFUL` is 0; the difficulty comes from the global snapshot.
     pos.y >= world.min_y() + 2
         && world.difficulty_id() != 0
         && find(world, WITHER_BASE, pos).is_some()

@@ -1139,6 +1139,23 @@ pub(crate) fn sync(region: &mut Region) {
     }
 }
 
+/// 对拍专用：只发这一刻攒下的生物事件，不跑配对和同步包。
+/// 玩家受伤对拍里的 `damage_event` 走的就是正式的事件分发路径。
+///
+/// Oracle-only: sends this tick's mob events without pairing or sync packets.
+#[cfg(feature = "oracle-samples")]
+pub(crate) fn drain_events_for_oracle(region: &mut Region, viewer: crate::inbound::PlayerId) {
+    // 对拍假世界没有区块加载流程，`seen_by` 是空的。这里用同一份
+    // `event_packets` 编码器直接把事件包写给观察者，不复制编码逻辑。
+    let events = region.entities.take_mob_events();
+    let sound_seed = region.sound_seed_generator.source().seed();
+    let source = mc_bamboo_blocks::LegacyRandom::new(sound_seed);
+    for body in event_packets(&events, &mut || source.next_long()) {
+        let frames = frame_from_body(&body);
+        region.links.send_frames(viewer, &frames);
+    }
+}
+
 /// 每刻建一次的粗网格：格子边长不小于任何玩家可能看得见实体的最大水平距离，
 /// 每名玩家登记进自己可见范围覆盖到的少数几个格子（边长不小于半径，最多 3×3 格），
 /// 一个实体只要查自己那一格就能拿到全部候选。格子里的玩家按 `PlayerId` 升序，

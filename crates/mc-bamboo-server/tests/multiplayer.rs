@@ -1470,20 +1470,41 @@ async fn packets_the_server_does_not_decode_are_dropped_quietly() {
     let mark = alice.mark();
 
     // `coverage.md` 1.3：真实客户端会发、服务端可以丢弃的包，内容是什么都不算错。
-    // `container_close` 和 `interact` 不在里面：它们现在会被解码，坏包和官方一样让连接断开。
-    // `container_close` and `interact` are not here: they are decoded now, and a
-    // malformed one ends the connection as it does on the official server.
+    // `container_close`、`interact` 和 `attack` 不在里面：它们现在会被解码，
+    // 坏包和官方一样让连接断开。
+    // `container_close`, `interact` and `attack` are not here: they are decoded
+    // now, and a malformed one ends the connection as it does on vanilla.
     for id in [
         serverbound::CLIENT_TICK_END,
         serverbound::PLAYER_LOADED,
         serverbound::SEEN_ADVANCEMENTS,
-        serverbound::ATTACK,
     ] {
         alice
             .send(&common::frame(&[id as u8, 0xff, 0xff, 0xff]))
             .await;
     }
 
+    alice.assert_world_ticks().await;
+    assert!(alice.since::<Disconnect>(mark).is_empty());
+}
+
+/// `serverbound_attack` 现在会被解码：合法的包不打断连接，多余字节按官方断开。
+#[tokio::test]
+async fn a_well_formed_attack_packet_is_accepted() {
+    let server = TestServer::start(small_world()).await;
+    let alice = server.enter("Alice").await;
+    let mark = alice.mark();
+    // entityId = -1（不存在的实体）：`handleAttack` 找不到目标就返回。
+    alice
+        .send(&common::frame(&[
+            serverbound::ATTACK as u8,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            0x0f,
+        ]))
+        .await;
     alice.assert_world_ticks().await;
     assert!(alice.since::<Disconnect>(mark).is_empty());
 }

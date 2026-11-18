@@ -144,8 +144,14 @@ pub enum PlayRequest {
     PlayerAbilities {
         flags: u8,
     },
-    /// 左键挥手。
+    /// 左键挥空（没打到实体）。
     Punch,
+    /// 左键打实体，官方 `ServerboundAttackPacket`：只有一个实体 ID。
+    ///
+    /// Left-clicking an entity, vanilla `ServerboundAttackPacket`: just an id.
+    Attack {
+        entity_id: i32,
+    },
     /// 右键点击实体。官方 `ServerboundInteractPacket`：`usingSecondaryAction` 是潜行，
     /// `location` 是点在实体身上的相对位置。
     ///
@@ -357,6 +363,9 @@ impl PlayRequest {
                 flags: reader.u8()?,
             },
             serverbound::PUNCH => Self::Punch,
+            serverbound::ATTACK => Self::Attack {
+                entity_id: reader.varint()?,
+            },
             serverbound::INTERACT => Self::Interact {
                 entity_id: reader.varint()?,
                 hand: Hand::from_id(reader.varint()?),
@@ -1315,6 +1324,18 @@ mod tests {
         for (id, action) in kinds.into_iter().enumerate() {
             assert_eq!(by_ordinal(&PlayerCommandKind::ALL, id as i32), Ok(action));
         }
+    }
+
+    #[test]
+    fn decodes_attack_and_rejects_a_body() {
+        assert_eq!(
+            decode_body(serverbound::ATTACK, "07"),
+            Ok(PlayRequest::Attack { entity_id: 7 })
+        );
+        assert_eq!(
+            decode_body(serverbound::ATTACK, ""),
+            Err(DecodeError::UnexpectedEnd)
+        );
     }
 
     #[test]

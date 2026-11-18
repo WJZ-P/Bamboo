@@ -329,6 +329,42 @@ fn run_cases(
         }
     }
 
+    // 3a. 生命 / 饥饿的运行时存档往返：正式的 `runtime_player_data` →
+    // `restore_inventory`，逐字段按原始位比较，不另写一份转换逻辑。
+    #[allow(
+        clippy::type_complexity,
+        reason = "the eight official save fields are passed as one row"
+    )]
+    let health_cases: [(f32, i16, i16, f32, i32, i32, f32, f32); 5] = [
+        (20.0, 0, 0, 0.0, 20, 0, 5.0, 0.0),
+        (7.5, 9, 3, 4.25, 13, 77, 1.5, 3.75),
+        (0.0, i16::MAX, i16::MAX, 0.0, 0, i32::MAX, 0.0, 39.5),
+        (1.0, 1, 0, 0.5, 1, 1, 0.25, 0.1),
+        (19.9375, 10, 19, 7.0, 19, 80, 6.0, 12.75),
+    ];
+    for (index, &(health, hurt, death, absorption, food, tick, saturation, exhaustion)) in
+        health_cases.iter().enumerate()
+    {
+        let got = mc_bamboo_game::replay_health_save(
+            health, hurt, death, absorption, food, tick, saturation, exhaustion,
+        );
+        let expected = [
+            health.to_bits() as i32,
+            i32::from(hurt),
+            i32::from(death),
+            absorption.to_bits() as i32,
+            food,
+            tick,
+            saturation.to_bits() as i32,
+            exhaustion.to_bits() as i32,
+        ];
+        report.cases += 1;
+        report.check(
+            got == expected,
+            format!("health save case {index}: official fields {expected:?}, bamboo {got:?}"),
+        );
+    }
+
     // 3b. 玩家经验：官方 Player / ServerPlayer 的公式、存档往返，逐位比较。
     run_xp_cases(stdin, lines, report)?;
     run_xp_seed_cases(stdin, lines, report)?;
@@ -1059,6 +1095,30 @@ fn player_cases() -> Vec<(String, PlayerData)> {
     xp_bits.xp_seed = i32::MIN;
     xp_bits.score = i32::MAX;
     cases.push(("player extreme experience".into(), xp_bits));
+
+    // 生命 / 受伤 / 饥饿字段的非默认值往返：1a 起这些键接上运行时状态，
+    // `runtime_player_data` 和 `restore_inventory` 都要逐字段保真。
+    let mut wounded = cases[0].1.clone();
+    wounded.health = 7.5;
+    wounded.hurt_time = 9;
+    wounded.death_time = 3;
+    wounded.absorption = 4.25;
+    wounded.food_level = 13;
+    wounded.food_tick_timer = 77;
+    wounded.food_saturation = 1.5;
+    wounded.food_exhaustion = 3.75;
+    cases.push(("player wounded health and food".into(), wounded));
+
+    let mut extreme_food = cases[1].1.clone();
+    extreme_food.health = 0.0;
+    extreme_food.absorption = -0.0;
+    extreme_food.hurt_time = i16::MAX;
+    extreme_food.death_time = i16::MAX;
+    extreme_food.food_level = 0;
+    extreme_food.food_tick_timer = i32::MAX;
+    extreme_food.food_saturation = 0.0;
+    extreme_food.food_exhaustion = 39.5;
+    cases.push(("player extreme health and food".into(), extreme_food));
 
     let mut unknown = cases[3].1.clone();
     let mut tag = unknown.encode();

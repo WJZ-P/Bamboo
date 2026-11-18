@@ -972,11 +972,13 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
         clientbound::SET_DEFAULT_SPAWN_POSITION,
         clientbound::GAME_EVENT,
         clientbound::SET_CHUNK_CACHE_CENTER,
-        // 官方 `placeNewPlayer` 不发经验包；`ServerPlayer.doTick` 在进服这一刻
-        // 发现 `lastSentExp` 还是构造时的 -99999999，于是补发一包。
+        // 官方 `placeNewPlayer` 不发这两包；`ServerPlayer.doTick` 在进服这一刻
+        // 发现 `lastSentHealth` 和 `lastSentExp` 还是构造时的哨兵值，
+        // 先补 `set_health`，再补 `set_experience`。
         //
-        // Official `placeNewPlayer` sends no experience packet; `doTick`
-        // sends one on the join tick because `lastSentExp` is -99999999.
+        // Official `placeNewPlayer` sends neither; `doTick` sends health first
+        // then experience on the join tick because both snapshots are sentinels.
+        clientbound::SET_HEALTH,
         clientbound::SET_EXPERIENCE,
         clientbound::CHUNK_BATCH_START,
     ];
@@ -3448,4 +3450,82 @@ fn the_island_clock_drives_scheduled_ticks() {
     assert_eq!(time, 6);
     assert_eq!(region.tick.game_time(), 1_006);
     assert_eq!(region.block_ticks.now(), 1_006);
+}
+
+/// `/damage` 对玩家：难度缩放、护甲、吸收和出站包。这一期血量归零不触发死亡。
+#[test]
+fn damage_command_hurts_a_player_and_sends_health_packets() {
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    server
+        .world
+        .islands
+        .region
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .permission_level = 4;
+
+    // 缺省是创造模式（能力无敌），先切到生存。
+    server.request(
+        &client,
+        PlayRequest::unsigned_command("gamemode survival @s"),
+    );
+    server.tick();
+    client.take_frames();
+    server.request(&client, PlayRequest::unsigned_command("damage @s 5"));
+    server.tick();
+    let player = server.world.islands.region.players.get(&client.id).unwrap();
+    assert_eq!(player.health.health, 15.0);
+    assert_eq!(player.health.damage_cooldown, 19);
+    assert_eq!(player.health.hurt_time, 9);
+    let ids: Vec<i32> = client.take_frames().iter().map(|frame| frame.id).collect();
+    assert!(ids.contains(&clientbound::SET_HEALTH), "{ids:?}");
+    assert!(ids.contains(&clientbound::DAMAGE_EVENT), "{ids:?}");
+
+    // 冷却期内同样大小的伤害打不进来；`/damage` 明确报错。
+    server.request(&client, PlayRequest::unsigned_command("damage @s 5"));
+    server.tick();
+    assert_eq!(
+        server
+            .world
+            .islands
+            .region
+            .players
+            .get(&client.id)
+            .unwrap()
+            .health
+            .health,
+        15.0
+    );
+}
+
+/// 左键打牛：一次 `player_attack` 伤害，空手伤害是 2。
+#[test]
+fn left_click_attack_hurts_a_cow() {
+    use mc_bamboo_blocks::entity::Entity;
+
+    let mut server = Harness::new(8);
+    let client = server.join("Kitten");
+    server.tick();
+    client.take_frames();
+    let region = &mut server.world.islands.region;
+    // 牛放在玩家身边，够距判定才会通过。
+    let position = region.players.get(&client.id).unwrap().position();
+    let cow = region.entities.spawn(Entity::cow(position));
+    server.request(&client, PlayRequest::Attack { entity_id: cow });
+    server.tick();
+    let health = server
+        .world
+        .islands
+        .region
+        .entities
+        .public_at(cow)
+        .and_then(|public| match &public.kind {
+            mc_bamboo_blocks::entity::KindPublic::Mob(mob) => Some(mob.health),
+            _ => None,
+        });
+    assert_eq!(health, Some(8.0), "空手一次攻击扣 2 点");
 }

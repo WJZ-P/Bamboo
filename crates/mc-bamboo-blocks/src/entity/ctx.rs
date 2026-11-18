@@ -122,6 +122,23 @@ pub trait BlockView {
         0
     }
 
+    /// `getDifficulty().getId()`：0 和平到 3 困难。默认普通。
+    ///
+    /// `getDifficulty().getId()`, 0 peaceful through 3 hard. Normal by default.
+    fn difficulty(&self) -> i32 {
+        2
+    }
+
+    /// `canSeeSky(pos)`：天空光是 15 就看得见天。
+    fn can_see_sky(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// `getMaxLocalRawBrightness(pos, skyDarken)`：方块光和减去天色后的天空光里亮的那个。
+    fn max_local_raw_brightness(&self, _pos: BlockPos, _darken: i32) -> i32 {
+        0
+    }
+
     /// `Level.isRainingAt(pos)`。
     fn is_raining_at(&self, _pos: BlockPos) -> bool {
         false
@@ -282,6 +299,19 @@ impl BlockView for World<'_> {
 
     fn sky_darken(&self) -> i32 {
         self.level().sky_darken()
+    }
+
+    fn difficulty(&self) -> i32 {
+        self.level().difficulty_id()
+    }
+
+    fn can_see_sky(&self, pos: BlockPos) -> bool {
+        self.level().can_see_sky(pos)
+    }
+
+    fn max_local_raw_brightness(&self, pos: BlockPos, darken: i32) -> i32 {
+        self.brightness(LightLayer::Block, pos)
+            .max(self.brightness(LightLayer::Sky, pos) - darken)
     }
 
     fn is_raining_at(&self, pos: BlockPos) -> bool {

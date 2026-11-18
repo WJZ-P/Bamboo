@@ -2469,6 +2469,9 @@ impl World {
                 entity_sync::on_player_abilities(region, player, flags);
             }
             PlayRequest::Punch => entity_sync::on_punch(region, player),
+            PlayRequest::Attack { entity_id } => {
+                crate::player_hurt::on_attack(region, player, entity_id);
+            }
             PlayRequest::Interact {
                 entity_id,
                 hand,
@@ -3031,6 +3034,12 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     lectern::tick(region);
     chat::tick_spam_throttlers(region);
     crate::drops::tick_drop_throttle(region);
+    // 官方 `ServerPlayer.doTick` 里 `set_health` 在 `set_experience` 之前。
+    // 伤害冷却递减、按需补 `set_health`。
+    //
+    // In `ServerPlayer.doTick` `set_health` comes before `set_experience`:
+    // tick the hurt cooldowns and send health if the snapshot moved.
+    crate::player_hurt::tick(region);
     // 官方 `ServerPlayer.doTick`：总经验变了就给这名玩家补一包 `set_experience`。
     //
     // Official `ServerPlayer.doTick`: a changed total sends one `set_experience`.

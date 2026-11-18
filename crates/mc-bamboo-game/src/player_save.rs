@@ -23,7 +23,7 @@ use crate::{experience::Experience, player::Player};
 /// 从一名在线玩家造出要存档的 `PlayerData`。
 pub fn runtime_player_data(player: &Player) -> PlayerData {
     let position = player.position();
-    PlayerData::from_runtime_parts(&RuntimeParts {
+    let mut data = PlayerData::from_runtime_parts(&RuntimeParts {
         uuid: *player.uuid.as_bytes(),
         position: [position.x, position.y, position.z],
         rotation: [player.yaw, player.pitch],
@@ -37,7 +37,9 @@ pub fn runtime_player_data(player: &Player) -> PlayerData {
         xp_total: player.experience.total,
         xp_seed: player.enchantment_seed,
         score: player.score,
-    })
+    });
+    player.health.save(&mut data);
+    data
 }
 
 /// 官方 `GameType.LEGACY_ID_CODEC`：0 生存、1 创造、2 冒险、3 旁观，其余折回生存。
@@ -81,15 +83,16 @@ pub fn restore_experience_seed(player: &mut Player, data: Option<&PlayerData>) {
     };
 }
 
-/// 把 `PlayerData` 里的物品栏、末影箱和经验写回玩家。其它字段（血量、饥饿、能力等）
-/// 目前没有对应的运行时状态，保存时用官方默认值；这里只恢复建模过的部分。
+/// 把 `PlayerData` 里的物品栏、末影箱、经验、生命和饥饿写回玩家。
+/// 能力还没有对应的运行时状态，保存时用官方默认值。
 /// `XpSeed` 由 [`restore_experience_seed`] 单独处理，因为要不要取随机数取决于它。
 ///
-/// Restores the inventory, ender chest and experience from `PlayerData`. Health,
-/// hunger and abilities still have no live state and keep the official defaults.
+/// Restores inventory, ender chest, experience, health and hunger from
+/// `PlayerData`. Abilities still keep the official defaults.
 /// [`restore_experience_seed`] handles `XpSeed` because it decides whether a
 /// random number is drawn.
 pub fn restore_inventory(player: &mut Player, data: &PlayerData) {
+    player.health.restore(data);
     player.experience = Experience {
         level: data.xp_level,
         total: data.xp_total,

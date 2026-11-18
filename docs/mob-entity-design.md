@@ -305,3 +305,81 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
     `Score` 原样搬到重生后的玩家；`enchantmentSeed` 也在这一段里一起复制。
 - 这一轮没有引入半成品死亡系统；等玩家伤害 / 死亡 / 重生流程实现时，再一起接上
   `getBaseExperienceReward`、`keepInventory` 两条分支和官方对拍。
+
+---
+
+## 6. 玩家生命期 0 + 1a（2026-11-18）
+
+期 0 的公共接缝和期 1a 的「受伤与减伤」已合入。以下列出**本期范围**和**已知差异**，
+供 1b（死亡、掉落、重生）和期 2/3 的敌对生物接着做。
+
+### 6.1 已做
+
+- `DamageKind` 扩到 22 种（含 `MobAttackNoAggro`、`Arrow`、`Starve`、`Thorns`、`Magic`、
+  `Explosion`），`DamageSource` 补 `direct` / `raw_position` / `scale_when_non_player` /
+  `weapon`；护甲 / 附魔 / 吸收 / 无敌帧 / 冷却 / 饥饿消耗的纯函数在
+  `mc-bamboo-blocks/src/entity/mob/damage.rs`。
+- `BlockView::difficulty` / `sky_darken` / `can_see_sky` / `max_local_raw_brightness`
+  / `game_time` 在精确 `World` 和并行 `SourceView` 上给同一份答案；权威副本仍是
+  `GlobalView`，`World::difficulty_id()` 不再写死为普通。
+- `Player` 增加 `health`（血量、吸收、三个倒计时、饥饿四字段、上次伤害种类 / 方向），
+  与 `PlayerData` 的 `Health` / `HurtTime` / `DeathTime` / `AbsorptionAmount` / `food*`
+  双向接上；`Player::view` 填真实 `alive` 和 `armor_cover`。
+- 出站包：`set_health`、`damage_event`、`hurt_animation`、`player_combat_enter`、
+  受伤音效，以及 `set_entity_data` 里的真实血量。`/damage <target> <amount> [type]
+  [at|by [from]]` 接在 `SCOPES` 的 `World` 范围里；`serverbound::ATTACK` 能打非玩家
+  实体，伤害按手持物品的 `attribute_modifiers`。
+- 对拍：`mob-oracle` 原 52 场景加 36 个 `player_hurt_*` 场景，逐刻比血量 / 吸收 /
+  无敌帧 / 冷却 / 饥饿 / 速度 / 随机源 / 包字节；`player-data` 增加生命和饥饿的
+  非默认往返用例；五处故意改坏（难度缩放、护甲、保护附魔、无敌帧、击退）都能抓到。
+
+### 6.2 新增的按玩家字段（岛拆合逐个说明）
+
+`Player` 整体随 `IslandPart::Players` 搬，**没有新增 `IslandPart`**，也没有改
+`crates/mc-bamboo-game/src/region/island_split.rs`。逐字段：
+
+| 字段 | 类型 | 绝对时刻？ | 拆岛 / 并岛 |
+|---|---|---|---|
+| `health.health` | `f32` | 否 | 整行搬 |
+| `health.absorption` | `f32` | 否 | 整行搬 |
+| `health.hurt_time` | `i32` 倒计时 | **否** | 整行搬，不需平移 |
+| `health.hurt_duration` | `i32` 倒计时 | **否** | 整行搬，不需平移 |
+| `health.damage_cooldown` | `i32` 倒计时 | **否** | 整行搬，不需平移 |
+| `health.last_hurt` | `f32` | 否 | 整行搬 |
+| `health.invulnerable_time` | `i32` 倒计时 | **否** | 整行搬，不需平移 |
+| `health.death_time` | `i32` 倒计时（本期恒 0） | **否** | 整行搬，不需平移 |
+| `health.food.{food_level, saturation, exhaustion, tick_timer}` | 数值 | 否 | 整行搬 |
+| `health.last_damage_source` | `Option<DamageKind>` | 否 | 整行搬 |
+| `health.hurt_dir` | `f32` | 否 | 整行搬 |
+| `health_sync`（`lastSentHealth` 等三个判据） | 数值快照 | 否 | 整行搬 |
+| `in_combat` | `bool` | 否 | 整行搬 |
+
+这一期**刻意不建** `last_damage_stamp`（官方存的是 `Level.getGameTime()` 的绝对值），
+它只在 1b 拼死亡消息时需要。届时要么存相对倒计时，要么登记进 `ClockParts` 的
+`players` 一类（当前 `ClockParts` 没有这一类并需要在报告里明说）。
+
+### 6.3 已知差异（1a 的范围）
+
+- **减伤精度选项 A**：只做护甲值 / 韧性 + `minecraft:protection` 等级的静态求和。
+  武器 `minecraft:breach`（`modifyArmorEffectiveness`）、抗性效果、格挡
+  (`BLOCKS_ATTACKS`)、不死图腾、四种专性保护附魔都**未做**。对拍场景里用无附魔
+  武器、无药水效果。
+- **饥饿**：四个字段按官方缺省值存读档，不 tick（`FoodData.tick`、自然回血、
+  `ServerPlayer.tickRegeneration` 的和平回血、饥饿掉血都未做）。受伤时
+  `causeFoodExhaustion` 的累加照官方做（只累加，不触发后果）。
+- **攻击**：左键只对非玩家实体造成一次 `player_attack`；无攻击冷却、无暴击、
+  无横扫、无附魔伤害加成、无 `minimum_attack_charge` 校验、无物品耐久 / 音效。
+  PVP（打玩家）未做：官方 `Player.canHarmPlayer` 的队伍判定缺失，目前明确忽略。
+  旁观者和非法目标按官方 `handleAttack` 忽略（非法目标官方会断开连接，Bamboo 目前
+  只忽略，见下一条）。
+- **死亡**：血量可以降到 0，但**不触发死亡**、不掉落、不清经验、不发死亡消息、
+  不重生；`/kill` 对玩家仍明确返回 `command.failed`。这些全部留给 1b。
+- **玩家受伤音效**：`DamageType.effects` 的六种变体和 `thorns` 的第二声已按官方发；
+  但 `LivingEntity.handleDamageEvent` 的 `getVoicePitch()` 随机变体（玩家恒 1.0）
+  未做，`playSecondaryHurtSound` 只覆盖 `thorns`。
+- **实体事件**：1a 不发 `entity_event`（官方玩家受伤时 `markHurt` 只置
+  `syncVelocity`，不广播 2 号事件）；`set_entity_motion` 的速度同步包未单独对拍。
+- **天色 / 时钟**：这一期不碰，`sky_darken` 仍恒 0（时钟停在正午），
+  `ViewFacts::sky_darken` 由调用方填 0；`SourceView` 和 `World` 的读数一致。
+- **服务器连接层**：`serverbound::ATTACK` 的畸形包按官方会断开，Bamboo 目前
+  只在解码层报 `TrailingBytes`，连接层是否断开由通用解码路径决定。

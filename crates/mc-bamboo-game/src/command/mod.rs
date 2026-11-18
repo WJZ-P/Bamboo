@@ -64,6 +64,7 @@ mod catalog;
 mod class;
 mod clone;
 pub(crate) mod console;
+mod damage;
 pub(crate) mod data;
 pub(crate) mod data_source;
 mod effects;

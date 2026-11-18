@@ -25,6 +25,11 @@ pub struct ViewFacts {
     /// 天空光和方块光的常量值。有逐格光照的视图覆盖 [`BlockSource::brightness`]。
     pub sky_brightness: i32,
     pub block_brightness: i32,
+    /// `getDifficulty().getId()`、`getSkyDarken()` 和 `getGameTime()` 的快照。
+    /// 精确模式的 `World` 从 `Level` 读同一份答案。
+    pub difficulty: i32,
+    pub sky_darken: i32,
+    pub game_time: i64,
 }
 
 impl Default for ViewFacts {
@@ -35,6 +40,9 @@ impl Default for ViewFacts {
             rules: BlockGameRules::vanilla(),
             sky_brightness: 15,
             block_brightness: 0,
+            difficulty: 2,
+            sky_darken: 0,
+            game_time: 0,
         }
     }
 }
@@ -371,6 +379,27 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn world_border(&self) -> WorldBorder {
         self.0.world_border()
+    }
+
+    fn sky_darken(&self) -> i32 {
+        self.0.facts().sky_darken
+    }
+
+    fn difficulty(&self) -> i32 {
+        self.0.facts().difficulty
+    }
+
+    fn game_time(&self) -> i64 {
+        self.0.facts().game_time
+    }
+
+    fn can_see_sky(&self, pos: BlockPos) -> bool {
+        self.brightness(LightLayer::Sky, pos) >= 15
+    }
+
+    fn max_local_raw_brightness(&self, pos: BlockPos, darken: i32) -> i32 {
+        self.brightness(LightLayer::Block, pos)
+            .max(self.brightness(LightLayer::Sky, pos) - darken)
     }
 }
 

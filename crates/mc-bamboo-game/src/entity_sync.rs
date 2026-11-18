@@ -37,8 +37,8 @@ const POSITION_TOLERANCE: f64 = 1.0 / 131_072.0;
 /// 玩家的 `clientTrackingRange` 是 32 区块。
 const MAX_TRACKING_RANGE: i32 = 512;
 const BLOCKS_PER_CHUNK: i32 = 16;
-/// M2 没有伤害，血量一直是满的。
-const PLAYER_HEALTH: f32 = 20.0;
+/// 官方 `LivingEntity.DATA_HEALTH_ID` 的默认值是 1，玩家构造函数才设成 20。
+const DEFAULT_HEALTH_ON_PAIRING: f32 = 20.0;
 
 /// 玩家有的装备槽，按 ordinal 排序。
 const EQUIPMENT_SLOTS: [EquipmentSlot; 6] = [
@@ -78,7 +78,7 @@ impl Metadata {
         Self {
             shared_flags: player.sync.shared_flags,
             pose: player.sync.pose(),
-            health: PLAYER_HEALTH,
+            health: player.health.health,
             main_hand: player.client.main_hand,
             model_customisation: player.client.model_customisation,
         }
@@ -161,7 +161,7 @@ impl EntitySync {
             teleport_delay: 0,
             ticks_since_cycle: -1,
             sent_metadata: Metadata {
-                health: PLAYER_HEALTH,
+                health: DEFAULT_HEALTH_ON_PAIRING,
                 main_hand: client.main_hand,
                 model_customisation: client.model_customisation,
                 ..Metadata::DEFAULT

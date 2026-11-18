@@ -77,6 +77,8 @@ mod pacing;
 mod partition_stats;
 mod player;
 mod player_grid;
+pub(crate) mod player_health;
+pub(crate) mod player_hurt;
 mod player_move;
 mod player_save;
 mod profiler;
@@ -250,6 +252,69 @@ pub fn replay_experience_save(
         restored.experience.total,
         restored.enchantment_seed,
         restored.score,
+    ]
+}
+
+/// 供 `mc-bamboo-vanilla player-data` 对拍：把生命 / 受伤 / 饥饿写进玩家，
+/// 走正式的 `runtime_player_data` 再 `restore_inventory` 读回来，返回读回后的
+/// `[health 位, hurt_time, death_time, absorption 位, food_level, food_tick_timer,
+/// saturation 位, exhaustion 位]`。只在 `oracle-samples` 下编进库里。
+///
+/// Round-trips health and hunger through the real player-save functions.
+#[cfg(feature = "oracle-samples")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the save round-trip mirrors the eight official fields"
+)]
+pub fn replay_health_save(
+    health: f32,
+    hurt_time: i16,
+    death_time: i16,
+    absorption: f32,
+    food_level: i32,
+    food_tick_timer: i32,
+    saturation: f32,
+    exhaustion: f32,
+) -> [i32; 8] {
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+
+    let mut player = player::Player::new(
+        inbound::PlayerId(1),
+        uuid::Uuid::nil(),
+        String::new(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::default(),
+    );
+    player.health.health = health;
+    player.health.absorption = absorption;
+    player.health.hurt_time = i32::from(hurt_time);
+    player.health.death_time = i32::from(death_time);
+    player.health.food.food_level = food_level;
+    player.health.food.tick_timer = food_tick_timer;
+    player.health.food.saturation = saturation;
+    player.health.food.exhaustion = exhaustion;
+    let data = player_save::runtime_player_data(&player);
+    let mut restored = player::Player::new(
+        inbound::PlayerId(1),
+        uuid::Uuid::nil(),
+        String::new(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::default(),
+    );
+    restored.health = player_health::PlayerHealth::default();
+    player_save::restore_inventory(&mut restored, &data);
+    [
+        restored.health.health.to_bits() as i32,
+        restored.health.hurt_time,
+        restored.health.death_time,
+        restored.health.absorption.to_bits() as i32,
+        restored.health.food.food_level,
+        restored.health.food.tick_timer,
+        restored.health.food.saturation.to_bits() as i32,
+        restored.health.food.exhaustion.to_bits() as i32,
     ]
 }
 
@@ -616,6 +681,295 @@ pub fn replay_execute(line: &str) -> [i32; 6] {
         feedback_mark(line, &feedback),
         feedback_oracle_hash(&feedback),
     ]
+}
+
+/// 玩家受伤对拍的一次重放：用正式的 `Player` / `Region` / [`player_hurt`]
+/// 走完整个场景，返回逐刻状态（原始位）和每刻发出的包字节（base64）。
+/// 只在 `oracle-samples` feature 下编进库里。
+///
+/// Replays a whole player-hurt scene through the production hurt path for the
+/// official comparison. Returns per-tick raw-bit state and per-tick packet
+/// bytes. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec<Vec<Vec<u8>>>) {
+    use mc_bamboo_blocks::entity::mob::DamageSource;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl inbound::PlayerSink for Capture {
+        fn send(&mut self, frames: outgoing::Outgoing) -> bool {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(frames.to_raw_bytes());
+            true
+        }
+        fn close(&mut self) {}
+    }
+    let frames = |capture: &Capture, other: &Capture| -> Vec<Vec<u8>> {
+        let mut bytes = std::mem::take(&mut *capture.0.lock().unwrap());
+        bytes.extend(std::mem::take(&mut *other.0.lock().unwrap()));
+        let mut rest = bytes.as_slice();
+        let mut out = Vec::new();
+        while !rest.is_empty() {
+            let Some(bounds) = mc_bamboo_protocol::frame::find_frame(
+                rest,
+                mc_bamboo_protocol::frame::MAX_FRAME_LEN,
+            )
+            .ok()
+            .flatten() else {
+                break;
+            };
+            let end = bounds.header_len + bounds.payload_len;
+            out.push(rest[bounds.header_len..end].to_vec());
+            rest = &rest[end..];
+        }
+        out
+    };
+    let mut region = region::Region::new(2, 20, false);
+    // 官方 `FakeLevel` 里的玩家 ID 从 FIRST_ID 起，包里的实体 ID 要对得上。
+    let id = inbound::PlayerId(1 << 24);
+    let mut player = player::Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Kitten".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    // 第二名玩家只作为观察者：`PlayerList.broadcast` 排除受伤者之后发音效。
+    // 官方假世界的 `Chunks.sendToTrackingPlayersAndSelf` 不检查实际连接，
+    // 这里补一个真正的收件人，包字节才可比。
+    let observer = inbound::PlayerId((1 << 24) + 1);
+    let watcher = player::Player::new(
+        observer,
+        Uuid::from_u128(2),
+        "Observer".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    let observer_capture = Capture::default();
+    region
+        .links
+        .add(observer, Box::new(observer_capture.clone()));
+    region.insert_player(watcher);
+    player.health.health = scene.health;
+    player.health.absorption = scene.absorption;
+    player.health.food.exhaustion = scene.exhaustion;
+    // 六个装备槽按官方顺序构造，带默认组件（铁甲 / 保护附魔）。
+    // Java 场景里的顺序是 [靴子, 护腿, 胸甲, 头盔, 主手]，
+    // Bamboo 的菜单槽位是主手 36、副手 45、靴子 8、护腿 7、胸甲 6、头盔 5。
+    let menu_slots = [8_usize, 7, 6, 5, 36];
+    for (index, &menu) in menu_slots.iter().enumerate() {
+        let item = scene.equipment[index];
+        if item == 0 {
+            continue;
+        }
+        let mut stack = mc_bamboo_protocol::item::ItemStack::new(item, 1);
+        if index < 4 && scene.protection[index] > 0 {
+            // `minecraft:enchantments` 的线上补丁：单个 (28, level)。
+            let mut bytes = Vec::new();
+            mc_bamboo_protocol::codec::write_varint(&mut bytes, 1); // 一项
+            mc_bamboo_protocol::codec::write_varint(&mut bytes, 28); // minecraft:protection
+            mc_bamboo_protocol::codec::write_varint(&mut bytes, scene.protection[index]);
+            stack.added.push((
+                mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+                bytes,
+            ));
+        }
+        player.inventory.slots[menu] = stack;
+    }
+    player.random = mc_bamboo_blocks::entity::JavaRandom::from_state(scene.seed);
+    let capture = Capture::default();
+    region.links.add(id, Box::new(capture.clone()));
+    region.insert_player(player);
+    region.global.difficulty = scene.difficulty_value();
+    region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(12345);
+    let cow = if scene.attack_cow {
+        // Java 假世界里玩家先占 FIRST_ID，牛接着拿 FIRST_ID+1。
+        let _ = region
+            .entities
+            .spawn(mc_bamboo_blocks::entity::Entity::cow(Vec3::new(
+                20.5, 64.0, 0.5,
+            )));
+        Some(
+            region
+                .entities
+                .spawn(mc_bamboo_blocks::entity::Entity::cow(Vec3::new(
+                    2.5, 64.0, 0.5,
+                ))),
+        )
+    } else {
+        None
+    };
+    // 初始的 `set_health` 也归到 tick 0，和官方 `doTick` 一样。
+    let mut steps = Vec::new();
+    let mut packets = Vec::new();
+    player_hurt::tick(&mut region);
+    let target = region.players.get(&id).expect("玩家");
+    steps.push(PlayerHurtStep::of(target));
+    region.links.flush();
+    // 观察者在进服这一刻也会收到自己的 `set_health`，官方假世界没有这第二名玩家。
+    let _ = std::mem::take(&mut *observer_capture.0.lock().unwrap());
+    let _ = std::mem::take(&mut *capture.0.lock().unwrap());
+    // 官方 `ServerPlayer.doTick` 进服这一刻补的 `set_health`。
+    region.links.send(
+        id,
+        &mc_bamboo_protocol::packet::play::SetHealth {
+            health: scene.health,
+            food: 20,
+            saturation: 5.0,
+        },
+    );
+    region.links.flush();
+    packets.push(frames(&capture, &observer_capture));
+
+    for tick in 1..=scene.ticks {
+        for action in scene.actions.iter().filter(|action| action.tick == tick) {
+            if action.attack_cow {
+                if let Some(cow) = cow {
+                    // 先让正式同步层登记这对实体，事件才会发给跟踪者。
+                    entity_tracking::sync(&mut region);
+                    let _ = std::mem::take(&mut *capture.0.lock().unwrap());
+                    let _ = std::mem::take(&mut *observer_capture.0.lock().unwrap());
+                    player_hurt::on_attack(&mut region, id, cow);
+                    entity_tracking::drain_events_for_oracle(&mut region, observer);
+                }
+                continue;
+            }
+            let kind = mc_bamboo_blocks::entity::mob::DamageKind::by_name(&action.kind)
+                .unwrap_or(mc_bamboo_blocks::entity::mob::DamageKind::Generic);
+            let mut source = DamageSource::environment(kind)
+                .with_non_player_cause(true)
+                .with_attacker_uuid([0; 16]);
+            source.attacker = Some(1 << 24);
+            source.direct = Some(1 << 24);
+            if let Some(at) = action.at {
+                source = source.with_position(Vec3::new(
+                    f64::from_bits(at[0] as u64),
+                    f64::from_bits(at[1] as u64),
+                    f64::from_bits(at[2] as u64),
+                ));
+            } else {
+                // 官方 `DamageSource.getSourcePosition()` 在 `sourcePositionRaw`
+                // 为空时回退到 `directEntity.position()`；Java 场景里的攻击者牛
+                // 固定放在 (3, 64, 0.5)。
+                source.position = Some(Vec3::new(3.0, 64.0, 0.5));
+            }
+            if scene.no_cooldown
+                && let Some(target) = region.players.get_mut(&id)
+            {
+                target.health.damage_cooldown = 0;
+            }
+            if scene.no_knockback {
+                source.position = None;
+            }
+            let mut random = Some(region.players.get(&id).expect("玩家").random);
+            player_hurt::hurt_player(
+                &mut region,
+                id,
+                source,
+                f32::from_bits(action.amount as u32),
+                &mut random,
+            );
+            if let (Some(state), Some(target)) = (random, region.players.get_mut(&id)) {
+                target.random = state;
+            }
+        }
+        player_hurt::tick(&mut region);
+        let target = region.players.get(&id).expect("玩家");
+        steps.push(PlayerHurtStep::of(target));
+        region.links.flush();
+        packets.push(frames(&capture, &observer_capture));
+    }
+    (steps, packets)
+}
+
+/// 一次玩家受伤对拍场景。`amount` / `at` 用原始位传浮点，和官方一侧一致。
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ReplayPlayerHurt {
+    pub ticks: usize,
+    pub difficulty: i32,
+    pub health: f32,
+    pub absorption: f32,
+    pub exhaustion: f32,
+    pub seed: i64,
+    pub equipment: [i32; 6],
+    pub protection: [i32; 4],
+    pub attack_cow: bool,
+    pub actions: Vec<ReplayPlayerAction>,
+    /// 对拍改坏确认：跳过无敌帧 / 击退。
+    pub no_cooldown: bool,
+    pub no_knockback: bool,
+}
+
+#[cfg(feature = "oracle-samples")]
+impl ReplayPlayerHurt {
+    fn difficulty_value(&self) -> world_state::Difficulty {
+        match self.difficulty {
+            0 => world_state::Difficulty::Peaceful,
+            1 => world_state::Difficulty::Easy,
+            3 => world_state::Difficulty::Hard,
+            _ => world_state::Difficulty::Normal,
+        }
+    }
+}
+
+/// 对拍场景里的一个动作：伤害玩家，或者左键打牛。
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ReplayPlayerAction {
+    pub tick: usize,
+    pub kind: String,
+    pub amount: i32,
+    pub at: Option<[i64; 3]>,
+    pub attack_cow: bool,
+}
+
+/// 玩家受伤对拍的逐刻状态，全部用原始位比较。
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerHurtStep {
+    pub hp: i32,
+    pub abs: i32,
+    pub ht: i32,
+    pub hd: i32,
+    pub cd: i32,
+    pub lh: i32,
+    pub food: i32,
+    pub sat: i32,
+    pub exh: i32,
+    pub dx: i64,
+    pub dy: i64,
+    pub dz: i64,
+    pub seed: i64,
+}
+
+#[cfg(feature = "oracle-samples")]
+impl PlayerHurtStep {
+    fn of(player: &player::Player) -> Self {
+        Self {
+            hp: player.health.health.to_bits() as i32,
+            abs: player.health.absorption.to_bits() as i32,
+            ht: player.health.hurt_time,
+            hd: player.health.hurt_duration,
+            cd: player.health.damage_cooldown,
+            lh: player.health.last_hurt.to_bits() as i32,
+            food: player.health.food.food_level,
+            sat: player.health.food.saturation.to_bits() as i32,
+            exh: player.health.food.exhaustion.to_bits() as i32,
+            dx: player.motion.delta.x.to_bits() as i64,
+            dy: player.motion.delta.y.to_bits() as i64,
+            dz: player.motion.delta.z.to_bits() as i64,
+            seed: player.random.state(),
+        }
+    }
 }
 
 /// 官方条件失败不执行链尾，这里用一个稳定的数字表示「有没有跑到 `run`」。
