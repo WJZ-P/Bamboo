@@ -97,7 +97,7 @@ Context {
 ## 6. 对拍
 
 `tools/mc-bamboo-vanilla execute-oracle` 用官方 `Commands.performCommand`
-在假世界里跑 34 条 `/execute` 命令；假世界补全了 `ServerLevel` 的实体 getter、
+在假世界里跑 32 条 `/execute` 命令；假世界补全了 `ServerLevel` 的实体 getter、
 `ChunkMap` 和真正的牛实体，所以 `as @e[type=cow]`、`at @e`、`if entity @e[...]`
 真的会选出牛并分叉。记录：
 

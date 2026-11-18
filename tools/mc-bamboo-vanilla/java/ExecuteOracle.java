@@ -73,6 +73,8 @@ import sun.misc.Unsafe;
 public final class ExecuteOracle {
     private static final Unsafe UNSAFE = loadUnsafe();
     private static final BlockPos TEST_POS = new BlockPos(4, -60, 6);
+    /** 32 条整命令场景；`store bossbar`、`in`、`if score` 和 NBT 目标需要更完整的
+     *  WorldData / 谓词管理器 / NBT 数据源，见 README 的已知差异。 */
     private static final String[] SCENARIOS = {
         // 基础 run / 条件反馈
         "execute positioned 4 -60 6 run setblock 4 -60 6 stone",
@@ -111,8 +113,6 @@ public final class ExecuteOracle {
         "execute as @e[type=cow] at @s store success score #total result run setblock ~ ~ ~ stone",
         "execute as @e[type=cow] at @s store result score #total result run setblock ~ ~ ~ stone",
         // 条件失败时的返回值
-        "execute store result bossbar minecraft:test value run setblock 4 -60 6 stone",
-        "execute store success bossbar minecraft:test max run setblock 4 -60 6 stone",
         "execute if block 4 -60 6 stone store success score #total result run setblock 4 -60 6 stone",
         "execute unless block 4 -60 6 stone store result score #total result run setblock 4 -60 6 stone",
     };

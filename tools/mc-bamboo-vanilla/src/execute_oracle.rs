@@ -1,7 +1,7 @@
 //! `execute-oracle`：整条 `/execute` 命令的副作用和反馈对拍。
 //!
 //! Java 侧 `ExecuteOracle.java` 在假世界里用官方 `Commands.performCommand`
-//! 跑 34 条固定脚本，输出每条命令以后的方块、计分板和「翻译键 + 参数 + 子组件」
+//! 跑 32 条固定脚本，输出每条命令以后的方块、计分板和「翻译键 + 参数 + 子组件」
 //! 展开的反馈；Rust 侧用 `mc-bamboo-game::replay_execute` 在同样的小世界里重放并逐项比较。
 //! `--break-self-test` 改坏一项副作用；`--break-group NAME` 按类别改坏一个字段。
 //!
@@ -73,8 +73,6 @@ const SCENARIOS: &[&str] = &[
     "execute store success score #total result run setblock 4 -60 6 stone",
     "execute as @e[type=cow] at @s store success score #total result run setblock ~ ~ ~ stone",
     "execute as @e[type=cow] at @s store result score #total result run setblock ~ ~ ~ stone",
-    "execute store result bossbar minecraft:test value run setblock 4 -60 6 stone",
-    "execute store success bossbar minecraft:test max run setblock 4 -60 6 stone",
     "execute if block 4 -60 6 stone store success score #total result run setblock 4 -60 6 stone",
     "execute unless block 4 -60 6 stone store result score #total result run setblock 4 -60 6 stone",
 ];

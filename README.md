@@ -1014,7 +1014,7 @@ WebView2 的渲染进程不算在内。
   `run`；链上每层用 `CommandGraph` 的重定向上下文保存参数，执行来源按 `source::with_override`
   临时替换，`as` 分叉出的每个分支当场顺序执行，`store score` 在所有分支结束后写回。
   设计见 `docs/command-execution-context.md`；`execute-oracle` 用补全了实体 getter 的官方假世界
-  跑 34 条整命令（含 `as @e[type=cow]` 分叉），逐条比较方块、计分板、是否跑到 `run` 和
+  跑 32 条整命令（含 `as @e[type=cow]` 分叉），逐条比较方块、计分板、是否跑到 `run` 和
   翻译键/参数递归展开后的反馈；`--break-self-test` 和按类别的 `--break-group` 确认能抓到改坏。
   已知差异：只有主世界，`in` 其它维度明确失败；`on`、`summon`、`positioned over`、
   `if biome|data|items|slots|stopwatch|function|dimension|loaded` 和 `store ... block|entity|storage`
