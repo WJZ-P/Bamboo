@@ -24,7 +24,8 @@ use std::{
 
 use mc_bamboo_core::ChunkPos;
 
-/// section 的边长（区块）。三个迟滞数都是 `[判断]`，第 11 步按实测调。
+/// section 的边长（区块）。三个迟滞数都是 `[判断]`，第 11 步按长时间压测复核过
+/// （`docs/profiling.md` 第 17 节）。
 pub(crate) const SECTION_SIZE: i32 = 4;
 /// 非空 section 之间切比雪夫距离 ≤ 2 就属于同一个岛。
 pub(crate) const MERGE_DISTANCE: i32 = 2;
@@ -34,6 +35,61 @@ pub(crate) const SPLIT_DISTANCE: i32 = 4;
 pub(crate) const SPLIT_DELAY_TICKS: u64 = 200;
 /// 每 20 刻检查一次最近有 section 变空的岛。
 pub(crate) const CONNECTIVITY_INTERVAL_TICKS: u64 = 20;
+/// 调参对比用的环境变量：盖过合并距离、拆分距离和拆分迟滞（刻）。不进 `bamboo.toml`，
+/// 正式运行不设；设了不合法的值（合并距离 < 1、拆分距离 ≤ 合并距离）就忽略并警告。
+///
+/// Environment variables for tuning comparisons: override the merge
+/// distance, split distance and split delay (ticks). Not in `bamboo.toml` and
+/// unset in production; invalid values (merge < 1, split ≤ merge) are ignored
+/// with a warning.
+pub(crate) const MERGE_DISTANCE_ENV: &str = "BAMBOO_ISLAND_MERGE_DISTANCE";
+pub(crate) const SPLIT_DISTANCE_ENV: &str = "BAMBOO_ISLAND_SPLIT_DISTANCE";
+pub(crate) const SPLIT_DELAY_ENV: &str = "BAMBOO_ISLAND_SPLIT_DELAY";
+
+/// 分区器的迟滞参数。缺省就是上面三个常量；只有调参时用环境变量换。
+///
+/// The partitioner's hysteresis parameters: the constants above unless a
+/// tuning run overrides them through the environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PartitionParams {
+    pub(crate) merge_distance: i32,
+    pub(crate) split_distance: i32,
+    pub(crate) split_delay_ticks: u64,
+}
+
+impl PartitionParams {
+    pub(crate) const DEFAULT: Self = Self {
+        merge_distance: MERGE_DISTANCE,
+        split_distance: SPLIT_DISTANCE,
+        split_delay_ticks: SPLIT_DELAY_TICKS,
+    };
+
+    /// 缺省值，被设了的环境变量盖过；组合不合法时整组退回缺省。
+    ///
+    /// The defaults, overridden by whichever variables are set; an invalid
+    /// combination falls back to the defaults as a whole.
+    pub(crate) fn from_env() -> Self {
+        fn read<T: std::str::FromStr>(name: &str) -> Option<T> {
+            let value = std::env::var(name).ok()?;
+            let parsed = value.trim().parse().ok();
+            if parsed.is_none() {
+                tracing::warn!(%value, "ignoring an invalid {name}");
+            }
+            parsed
+        }
+        let params = Self {
+            merge_distance: read(MERGE_DISTANCE_ENV).unwrap_or(MERGE_DISTANCE),
+            split_distance: read(SPLIT_DISTANCE_ENV).unwrap_or(SPLIT_DISTANCE),
+            split_delay_ticks: read(SPLIT_DELAY_ENV).unwrap_or(SPLIT_DELAY_TICKS),
+        };
+        if params.merge_distance < 1 || params.split_distance <= params.merge_distance {
+            tracing::warn!(?params, "ignoring invalid island partition parameters");
+            return Self::DEFAULT;
+        }
+        params
+    }
+}
+
 /// 加载等级 ≤ 33 就是「票想要加载」。
 pub(crate) const DESIRED_LEVEL: i32 = 33;
 /// 家岛的编号，和 `HOME_REGION` 一致（运行时一直在）。
@@ -92,7 +148,10 @@ fn section_neighbours(at: SectionPos, radius: i32) -> Vec<SectionPos> {
 ///
 /// Full reference: connect non-empty sections within `MERGE_DISTANCE`.
 /// Split hysteresis is time-dependent and is covered by separate tests.
-pub(crate) fn naive_partition(sections: &BTreeSet<SectionPos>) -> Vec<BTreeSet<SectionPos>> {
+pub(crate) fn naive_partition(
+    sections: &BTreeSet<SectionPos>,
+    merge_distance: i32,
+) -> Vec<BTreeSet<SectionPos>> {
     let mut seen: HashSet<SectionPos> = HashSet::new();
     let mut groups: Vec<BTreeSet<SectionPos>> = Vec::new();
     for &start in sections {
@@ -103,7 +162,7 @@ pub(crate) fn naive_partition(sections: &BTreeSet<SectionPos>) -> Vec<BTreeSet<S
         let mut queue = VecDeque::from([start]);
         while let Some(at) = queue.pop_front() {
             group.insert(at);
-            for other in section_neighbours(at, MERGE_DISTANCE) {
+            for other in section_neighbours(at, merge_distance) {
                 if sections.contains(&other) && seen.insert(other) {
                     queue.push_back(other);
                 }
@@ -117,8 +176,11 @@ pub(crate) fn naive_partition(sections: &BTreeSet<SectionPos>) -> Vec<BTreeSet<S
 /// 一个岛内部的连通性检查：只连「切比雪夫距离 < split_distance」的边，
 /// 返回的每个连通块是拆分后的一个岛。半径至少是合并距离，这样
 /// 「曾经合并过」的边总还在。
-fn split_group(group: BTreeSet<SectionPos>, split_distance: i32) -> Vec<BTreeSet<SectionPos>> {
-    let radius = split_distance.saturating_sub(1).max(MERGE_DISTANCE);
+fn split_group(group: BTreeSet<SectionPos>, params: PartitionParams) -> Vec<BTreeSet<SectionPos>> {
+    let radius = params
+        .split_distance
+        .saturating_sub(1)
+        .max(params.merge_distance);
     let mut seen: HashSet<SectionPos> = HashSet::new();
     let mut out = Vec::new();
     for &start in &group {
@@ -220,6 +282,8 @@ pub(crate) struct IslandPartition {
     split_candidates: BTreeSet<u32>,
     /// 每刻全量对照。
     verify: bool,
+    /// 迟滞参数（缺省是常量，调参时由环境变量换）。
+    params: PartitionParams,
     pub(crate) now: u64,
     pub(crate) events: Vec<TopologyEvent>,
     /// 运行时要照做的拆合（第 10 步）。只在 `record_ops` 打开时攒。
@@ -253,6 +317,7 @@ impl IslandPartition {
             split_since: BTreeMap::new(),
             split_candidates: BTreeSet::new(),
             verify: false,
+            params: PartitionParams::from_env(),
             now: 0,
             events: Vec::new(),
             ops: Vec::new(),
@@ -263,6 +328,11 @@ impl IslandPartition {
             #[cfg(test)]
             instant_split: false,
         }
+    }
+
+    /// 这个分区器用的迟滞参数。
+    pub(crate) fn params(&self) -> PartitionParams {
+        self.params
     }
 
     pub(crate) fn set_verify(&mut self, on: bool) {
@@ -453,7 +523,8 @@ impl IslandPartition {
             );
             assert!(
                 self.invariants_hold(),
-                "不同岛的非空 section 距离必须 > {MERGE_DISTANCE}：tick={now}"
+                "不同岛的非空 section 距离必须 > {}：tick={now}",
+                self.params.merge_distance
             );
             result.verify_nanos =
                 verify_start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
@@ -474,7 +545,7 @@ impl IslandPartition {
             {
                 return false;
             }
-            for other in section_neighbours(section, MERGE_DISTANCE) {
+            for other in section_neighbours(section, self.params.merge_distance) {
                 if let Some(&other_id) = self.owner.get(&other)
                     && other_id != id
                 {
@@ -495,7 +566,7 @@ impl IslandPartition {
     /// missed merge edges are checked independently by `invariants_hold`.
     pub(crate) fn full_recompute(&self) -> Vec<BTreeSet<SectionPos>> {
         let mut by_island: BTreeMap<u32, BTreeSet<SectionPos>> = BTreeMap::new();
-        for group in naive_partition(&self.sections()) {
+        for group in naive_partition(&self.sections(), self.params.merge_distance) {
             let mut ids = BTreeSet::new();
             for section in &group {
                 if let Some(&id) = self.owner.get(section) {
@@ -589,7 +660,7 @@ impl IslandPartition {
     /// 一个 section 从空变非空：查周围 ≤2 的 section，按 3.1 归入 0 / 1 / 多个岛。
     fn add_section(&mut self, section: SectionPos, result: &mut TickResult) {
         let mut neighbours = BTreeSet::new();
-        for other in section_neighbours(section, MERGE_DISTANCE) {
+        for other in section_neighbours(section, self.params.merge_distance) {
             if let Some(&id) = self.owner.get(&other)
                 && id != u32::MAX
             {
@@ -700,7 +771,7 @@ impl IslandPartition {
             let Some(group) = self.islands.get(&id).cloned() else {
                 continue;
             };
-            let components = split_group(group, SPLIT_DISTANCE);
+            let components = split_group(group, self.params);
             if components.len() <= 1 {
                 if self.split_since.remove(&id).is_some() {
                     result.cancelled_splits += 1;
@@ -710,9 +781,10 @@ impl IslandPartition {
             result.pending_splits += 1;
             let since = *self.split_since.entry(id).or_insert(now);
             #[cfg(test)]
-            let ready = self.instant_split || now.saturating_sub(since) >= SPLIT_DELAY_TICKS;
+            let ready =
+                self.instant_split || now.saturating_sub(since) >= self.params.split_delay_ticks;
             #[cfg(not(test))]
-            let ready = now.saturating_sub(since) >= SPLIT_DELAY_TICKS;
+            let ready = now.saturating_sub(since) >= self.params.split_delay_ticks;
             if !ready {
                 self.events.push(TopologyEvent {
                     at_tick: now,
@@ -782,7 +854,7 @@ impl IslandPartition {
         let Some(group) = self.islands.get(&id).cloned() else {
             return Vec::new();
         };
-        let components = split_group(group, SPLIT_DISTANCE);
+        let components = split_group(group, self.params);
         if components.len() <= 1 {
             return Vec::new();
         }
@@ -832,7 +904,7 @@ impl IslandPartition {
         if seen.len() != sections.len() {
             return false;
         }
-        for group in naive_partition(&sections) {
+        for group in naive_partition(&sections, self.params.merge_distance) {
             // 同一个朴素连通块必须属于同一个岛，或者它内部所有跨岛边
             // 都是已经满足拆分条件的远距离裂片（距离 ≥ SPLIT_DISTANCE）。
             let entries: Vec<(SectionPos, u32)> = group
@@ -843,7 +915,7 @@ impl IslandPartition {
                 for &(b, b_id) in &entries[i + 1..] {
                     // 同一条 ≤2 连通链里的 section 必须属于同一个岛；
                     // 拆开后的两块相距 ≥4，不会落在同一条链里。
-                    if a_id != b_id && chebyshev(a, b) <= MERGE_DISTANCE {
+                    if a_id != b_id && chebyshev(a, b) <= self.params.merge_distance {
                         return false;
                     }
                 }
@@ -878,7 +950,7 @@ impl IslandPartition {
                     for &right in b {
                         let dx = (i64::from(left.x) - i64::from(right.x)).abs();
                         let dz = (i64::from(left.z) - i64::from(right.z)).abs();
-                        if dx.max(dz) <= i64::from(MERGE_DISTANCE) {
+                        if dx.max(dz) <= i64::from(self.params.merge_distance) {
                             return false;
                         }
                     }
@@ -1023,7 +1095,7 @@ mod tests {
                 );
                 // 每个朴素连通块必须完整落在一个岛里（漏合并会被这条抓到，
                 // 已经真的拆开的裂片之间距离 ≥4，不在同一条链里）。
-                for group in naive_partition(&partition.sections()) {
+                for group in naive_partition(&partition.sections(), MERGE_DISTANCE) {
                     let ids: BTreeSet<u32> = group
                         .iter()
                         .filter_map(|section| partition.owner.get(section).copied())

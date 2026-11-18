@@ -764,8 +764,26 @@ impl DirectorHost {
             partition.set_verify(true);
             self.islands_verify_flag = true;
         }
+        let params = partition.params();
+        if params != crate::island_partition::PartitionParams::DEFAULT {
+            tracing::warn!(
+                ?params,
+                "island partition parameters overridden from the environment (tuning only)"
+            );
+        }
         partition.record_ops();
         self.live_islands = true;
+    }
+
+    /// 每刻全量对照开着（`BAMBOO_PROFILE_ISLANDS=2`）：分区器每刻全量重算，世界在每次照做
+    /// 拆合之后连 release 构建也断言计划 6.2 第 3 条的不变量（长时间压测用）。
+    ///
+    /// Whether the per-tick full check is on (`BAMBOO_PROFILE_ISLANDS=2`): the
+    /// partitioner recomputes in full every tick and the world asserts the
+    /// invariants of plan 6.2 item 3 after every settle, release builds too
+    /// (for long load runs).
+    pub(crate) fn islands_verify(&self) -> bool {
+        self.islands_verify_flag
     }
 
     /// 把攒着的区块依据变化先喂给分区器，取走它定下的拆合。投信之前调：新区块要先

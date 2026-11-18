@@ -313,12 +313,17 @@ fn move_entity(region: &mut Region, uid: i32, absolute: Vec3, plan: RotationPlan
 }
 
 /// 压测场景用：把玩家放到 `absolute`，和 `/tp <玩家> <x> <y> <z>` 走同一段移动（朝向不变）。
-/// 控制台现在用不了带坐标的 `/tp`（控制台来源没有位置），压测钩子靠它分组送人。
+/// 控制台的 `/tp` 现在也能带坐标，但它是主控上的命令，多岛时要等全部岛停放才执行（计划
+/// 5.5），进服时成批分组送人会一再卡住；钩子用这个在玩家自己的岛上当场放人。长时间压测
+/// （`islands-roam`）另外照常从控制台发 `/tp`。
 ///
 /// For load-test scenes: put a player at `absolute` through the same move as
-/// `/tp <player> <x> <y> <z>` (rotation kept). The console cannot use `/tp`
-/// with coordinates today (its source has no position), so the load-test
-/// hooks use this to send bots to their groups.
+/// `/tp <player> <x> <y> <z>` (rotation kept). The console's `/tp` takes
+/// coordinates now too, but it is a master command that waits for every
+/// island to park with several islands (plan 5.5), which would stall again
+/// and again while bots are sent to their groups on joining; the hooks use
+/// this to place a player on their own island at once. The long run
+/// (`islands-roam`) also sends console `/tp` as usual.
 pub(crate) fn place_player(region: &mut Region, id: PlayerId, absolute: Vec3) {
     move_player(
         region,
