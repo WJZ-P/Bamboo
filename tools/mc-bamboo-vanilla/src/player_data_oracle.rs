@@ -331,6 +331,7 @@ fn run_cases(
 
     // 3b. 玩家经验：官方 Player / ServerPlayer 的公式、存档往返，逐位比较。
     run_xp_cases(stdin, lines, report)?;
+    run_xp_seed_cases(stdin, lines, report)?;
 
     // 4. level.dat：双向，逐字段用官方 PrimaryLevelData.parse 核对。
     for (name, level) in &level_cases() {
@@ -594,6 +595,71 @@ fn run_xp_cases(
             report.check(
                 got[3] == want[3],
                 format!("xp save: XpSeed changed {got:?} expected {want:?}"),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `XpSeed` 读档时的随机数消耗：新玩家 / 存档写 0 要抽一次，存档非 0 不抽。
+/// 比较附魔种子本身和「恢复后再取一次 nextInt」的值，多取/少取都会被抓到。
+///
+/// Random draws on loading `XpSeed`: a new player or a zero saved seed draws
+/// once, a non-zero saved seed draws none. Compare the seed and the next
+/// `nextInt` after restore so an extra or missing draw is caught.
+fn run_xp_seed_cases(
+    stdin: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, std::io::Error>>,
+    report: &mut Report,
+) -> Result<(), String> {
+    let cases: Vec<(Option<i32>, i64)> = vec![
+        (None, 0),
+        (Some(0), 0),
+        (Some(-77), 0),
+        (Some(i32::MIN), 0x1234_5678_i64),
+        (Some(i32::MAX), -0x5eed_1234_i64),
+        (None, 0x5eed_1234_5678_i64),
+        (Some(0), 0x5eed_1234_5678_i64),
+        (Some(12345), 0x5eed_1234_5678_i64),
+    ];
+    let specs: Vec<Value> = cases
+        .iter()
+        .map(|&(saved, seed)| {
+            json!({
+                "saved": saved.unwrap_or(0),
+                "seed": seed,
+            })
+        })
+        .collect();
+    let answer = ask(
+        stdin,
+        lines,
+        json!({"command": "xp-seed-load", "cases": specs}),
+    )?;
+    let results = answer
+        .results
+        .as_ref()
+        .ok_or("xp-seed-load has no results")?;
+    report.check(
+        results.len() == cases.len(),
+        format!(
+            "xp seed: official returned {} results, expected {}",
+            results.len(),
+            cases.len()
+        ),
+    );
+    for (index, (row, &(saved, seed))) in results.iter().zip(&cases).enumerate() {
+        let official = row
+            .as_array()
+            .ok_or_else(|| format!("xp seed case {index}: result is not an array"))?;
+        let ours = mc_bamboo_game::replay_experience_seed(saved, seed);
+        report.cases += 1;
+        for (want, got) in ours.iter().zip(official) {
+            report.check(
+                got.as_i64() == Some(i64::from(*want)),
+                format!(
+                    "xp seed case {index} (saved={saved:?} seed={seed}) field: official {got}, bamboo {want}"
+                ),
             );
         }
     }

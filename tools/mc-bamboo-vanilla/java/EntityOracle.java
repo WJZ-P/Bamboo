@@ -816,14 +816,16 @@ public final class EntityOracle {
     private static int orbPickup(Official official, Writer out) throws Exception {
         int cases = 0;
         Object[][] specs = {
-            // value, count, delay, damage, mending, xpLevel, progress, xpTotal, seed, ticks
-            {7, 1, 0, 0, false, 0, 0.0f, 0, 0x1234_5678L, 3},
-            {17, 3, 0, 0, false, 0, 0.0f, 0, 0x1234_5678L, 6},
-            {7, 1, 2, 0, false, 0, 0.0f, 0, 0x1234_5678L, 5},
-            {7, 1, 0, 100, true, 0, 0.0f, 0, 0x1234_5678L, 2},
-            {25, 1, 0, 3, true, 5, 0.5f, 37, 0x1234_5678L, 2},
-            {1, 1, 0, 10, true, 30, 0.25f, 2000, 0x5eed_1234L, 2},
-            {2477, 2, 0, 500, true, 0, 0.0f, 0, 0x1234_5678L, 4},
+            // value, count, delay, damage, mending, xpLevel, progress, xpTotal, seed, ticks, spectator
+            {7, 1, 0, 0, false, 0, 0.0f, 0, 0x1234_5678L, 3, false},
+            {17, 3, 0, 0, false, 0, 0.0f, 0, 0x1234_5678L, 6, false},
+            {7, 1, 2, 0, false, 0, 0.0f, 0, 0x1234_5678L, 5, false},
+            {7, 1, 0, 100, true, 0, 0.0f, 0, 0x1234_5678L, 2, false},
+            {25, 1, 0, 3, true, 5, 0.5f, 37, 0x1234_5678L, 2, false},
+            {1, 1, 0, 10, true, 30, 0.25f, 2000, 0x5eed_1234L, 2, false},
+            {2477, 2, 0, 500, true, 0, 0.0f, 0, 0x1234_5678L, 4, false},
+            {7, 1, 0, 0, false, 0, 0.0f, 0, 0x1234_5678L, 3, true},
+            {25, 1, 0, 100, true, 3, 0.0f, 17, 0x5eed_1234L, 3, true},
         };
         for (int index = 0; index < specs.length; index++) {
             Object[] spec = specs[index];
@@ -837,6 +839,7 @@ public final class EntityOracle {
             int xpTotal = (int) spec[7];
             long seed = (long) spec[8];
             int ticks = (int) spec[9];
+            boolean spectator = (boolean) spec[10];
 
             Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
             blocks.put(BlockPos.asLong(0, 63, 0), Blocks.STONE.defaultBlockState());
@@ -864,7 +867,11 @@ public final class EntityOracle {
                 if (player.takeXpDelay > 0) {
                     player.takeXpDelay -= 1;
                 }
-                if (!orb.isRemoved()) {
+                // `Player.aiStep` 有 `getHealth() > 0 && !isSpectator()` 的门，
+                // 旁观者连 `Util.getRandom` 都不取，也不碰球。
+                // `Player.aiStep` is gated by `getHealth() > 0 && !isSpectator()`,
+                // so a spectator draws nothing and touches no orb.
+                if (!spectator && !orb.isRemoved()) {
                     // 只有一颗球，`Util.getRandom` 仍会取一次 `nextInt(1)`。
                     player.getRandom().nextInt(1);
                     orb.playerTouch(player);
@@ -885,6 +892,7 @@ public final class EntityOracle {
             tail.append(",\"orbProgress\":").append(Float.floatToRawIntBits(progress));
             tail.append(",\"orbTotal\":").append(xpTotal);
             tail.append(",\"orbSeed\":").append(seed);
+            tail.append(",\"orbSpectator\":").append(spectator);
             tail.append(",\"orbSteps\":").append(steps).append("}\n");
             out.write("{\"type\":\"case\",\"name\":\"orb_pickup_" + index + "\",\"kind\":\"orb_pickup\"");
             out.write(",\"state\":0,\"x\":0,\"y\":0,\"z\":0,\"levelSeed\":1,\"entitySeed\":1");

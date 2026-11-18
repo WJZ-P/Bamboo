@@ -105,6 +105,8 @@ struct Case {
     #[serde(default)]
     orb_seed: i64,
     #[serde(default)]
+    orb_spectator: bool,
+    #[serde(default)]
     orb_steps: Vec<[i32; 9]>,
     /// 物品场景才有。下落方块和 TNT 的题不写这些字段。
     ///
@@ -834,6 +836,7 @@ impl Report {
             case.orb_total,
             case.orb_seed,
             ticks,
+            case.orb_spectator,
         );
         if ours.len() != case.orb_steps.len() {
             self.mismatch(format!(

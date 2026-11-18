@@ -237,6 +237,7 @@ pub fn replay_experience_save(
     restored.experience = experience::Experience::default();
     restored.enchantment_seed = 0;
     restored.score = 0;
+    player_save::restore_experience_seed(&mut restored, Some(&data));
     player_save::restore_inventory(&mut restored, &data);
     [
         restored.experience.level,
@@ -256,7 +257,10 @@ pub fn replay_experience_save(
 /// Returns per-tick `[level, raw progress bits, total, score, delay, count,
 /// removed, take, damage]`. Gated behind the `oracle-samples` feature.
 #[cfg(feature = "oracle-samples")]
-#[allow(clippy::too_many_arguments, reason = "oracle case spec is a flat JSON row")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "oracle case spec is a flat JSON row"
+)]
 pub fn replay_orb_pickup(
     value: i32,
     count: i32,
@@ -268,6 +272,7 @@ pub fn replay_orb_pickup(
     xp_total: i32,
     seed: i64,
     ticks: i32,
+    spectator: bool,
 ) -> Vec<[i32; 9]> {
     use mc_bamboo_blocks::entity::{Entity, EntityKind, JavaRandom, pick_up as take_orb};
     use mc_bamboo_core::Vec3;
@@ -349,9 +354,11 @@ pub fn replay_orb_pickup(
         if player.take_xp_delay > 0 {
             player.take_xp_delay -= 1;
         }
-        if !orb.removed {
-            // `Player.aiStep` 的单球选择仍会取一次 `nextInt(1)`。
-            // `Player.aiStep` still draws one `nextInt(1)` for a single orb.
+        if !spectator && !orb.removed {
+            // `Player.aiStep` 的单球选择仍会取一次 `nextInt(1)`；旁观者被
+            // `!isSpectator()` 挡在 aiStep 门外，连这次取数都没有。
+            // `Player.aiStep` draws one `nextInt(1)` for a single orb; a
+            // spectator is gated out and draws nothing.
             let _ = player.random.next_int_bounded(1);
             if player.take_xp_delay == 0 {
                 player.take_xp_delay = 2;
@@ -368,6 +375,39 @@ pub fn replay_orb_pickup(
         steps.push(row(&player, &orb, take_count));
     }
     steps
+}
+
+/// 供 `mc-bamboo-vanilla player-data` 对拍 `Player.readAdditionalSaveData` 里
+/// `XpSeed` 的取数：`None` 表示新玩家（没有存档）。返回
+/// `[enchantment_seed, 恢复后再取一次 nextInt 的值]`，后者能抓到多取/少取随机数。
+/// 只在 `oracle-samples` feature 下编进库里。
+///
+/// Replays the `XpSeed` part of `Player.readAdditionalSaveData` for
+/// `mc-bamboo-vanilla player-data`. `None` means a new player with no save.
+/// Returns `[enchantment_seed, the next nextInt after restore]`, so an extra
+/// or missing draw is caught. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_experience_seed(saved: Option<i32>, seed: i64) -> [i32; 2] {
+    use mc_bamboo_blocks::entity::JavaRandom;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use mc_bamboo_storage::player_data::PlayerData;
+
+    let mut player = player::Player::new(
+        inbound::PlayerId(1),
+        uuid::Uuid::nil(),
+        String::new(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::default(),
+    );
+    player.random = JavaRandom::new(seed);
+    let data = saved.map(|xp_seed| PlayerData {
+        xp_seed,
+        ..PlayerData::default()
+    });
+    player_save::restore_experience_seed(&mut player, data.as_ref());
+    [player.enchantment_seed, player.random.next_int()]
 }
 
 /// 供 `mc-bamboo-vanilla saved-data` 和官方 codec 对拍：返回 Bamboo 编码器写出的

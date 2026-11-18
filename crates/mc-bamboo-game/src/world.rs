@@ -40,7 +40,9 @@ use crate::{
     lectern, light_updates, menu, movement,
     pacing::{Pacer, WallTiming},
     player::shows_hat,
-    player_save::{game_mode_from_id, restore_inventory, runtime_player_data},
+    player_save::{
+        game_mode_from_id, restore_experience_seed, restore_inventory, runtime_player_data,
+    },
     profiler::{ChunkPhase, Metric, Phase},
     region::{JoinSettings, Region},
     save_session::{SaveCommand, SaveSession},
@@ -1894,6 +1896,15 @@ impl World {
         // `JoinSettings.spawn` above (the save), and the chunk center from `player.chunk_pos()`.
         region.start_loading_chunks(id);
 
+        // `XpSeed == 0`（没有存档或存档里写 0）时按官方从玩家随机源抽一次种子；
+        // 保存过非 0 种子时不取随机数。两种情况的后续随机序列都和官方一致。
+        //
+        // Official draws a seed from the player's random source only when
+        // `XpSeed == 0` (no save, or a save with zero); a saved non-zero seed
+        // consumes no random number. Either way the following sequence matches.
+        if let Some(player) = region.players.get_mut(&id) {
+            restore_experience_seed(player, restored.as_ref());
+        }
         // 物品栏 / 末影箱 / 朝向等运行时字段在玩家建好之后写回去。
         if let Some(data) = &restored
             && let Some(player) = region.players.get_mut(&id)

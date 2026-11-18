@@ -209,6 +209,7 @@ public final class PlayerDataOracle {
                 case "level-read" -> levelRead(request, response);
                 case "level-write" -> levelWrite(request, response);
                 case "xp-arithmetic" -> xpArithmetic(request, response);
+                case "xp-seed-load" -> xpSeedLoad(request, response);
                 default -> response.addProperty("error", "unknown command " + command);
             }
         }
@@ -323,6 +324,31 @@ public final class PlayerDataOracle {
             root.put("Data", data);
             response.addProperty("gzip", gzip(root));
             response.add("canonical", canonical(root));
+        }
+
+        /**
+         * 官方 {@code Player.readAdditionalSaveData} 里 {@code XpSeed} 的一段：
+         * {@code enchantmentSeed = input.getIntOr("XpSeed", 0)}，只有 0 才
+         * {@code this.random.nextInt()}。这里用官方 {@code RandomSource.create(seed)}
+         * 把这几次取数算出来，再取一次 nextInt 暴露随机源状态；Bamboo 的
+         * {@code Player} 构造与读档必须产生同样的序列。
+         */
+        private void xpSeedLoad(JsonObject request, JsonObject response) {
+            JsonArray results = new JsonArray();
+            for (var element : request.getAsJsonArray("cases")) {
+                JsonObject spec = element.getAsJsonObject();
+                int saved = spec.get("saved").getAsInt();
+                RandomSource random = RandomSource.create(spec.get("seed").getAsLong());
+                int enchantment = saved;
+                if (enchantment == 0) {
+                    enchantment = random.nextInt();
+                }
+                JsonArray row = new JsonArray();
+                row.add(enchantment);
+                row.add(random.nextInt());
+                results.add(row);
+            }
+            response.add("results", results);
         }
 
         /**

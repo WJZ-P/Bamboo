@@ -139,8 +139,14 @@ impl Player {
         client: ClientInformation,
         position: Vec3,
     ) -> Self {
-        let mut random = crate::drops::player_random(id);
-        let enchantment_seed = random.next_int();
+        let random = crate::drops::player_random(id);
+        // 官方 `Player` 构造函数把 `enchantmentSeed` 设为 0；只有读档时
+        // `XpSeed == 0` 才从 `this.random` 抽一次（见 player_save 的恢复函数）。
+        //
+        // Official `Player`'s constructor leaves `enchantmentSeed` at 0; only
+        // a load with `XpSeed == 0` draws once from `this.random`
+        // (see [`restore_experience_seed`]).
+        let enchantment_seed = 0;
         Self {
             id,
             uuid,

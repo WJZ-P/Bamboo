@@ -18,8 +18,8 @@ use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_protocol::packet::play::{
     AttributeModifier, AttributeOperation, AttributeSnapshot, EntityData, GameEvent, GameMode,
-    InitializeBorder, Login, PlayerAbilities, SetDefaultSpawnPosition, SetEntityData,
-    SetExperience, SetTime, UpdateAttributes,
+    InitializeBorder, Login, PlayerAbilities, SetDefaultSpawnPosition, SetEntityData, SetTime,
+    UpdateAttributes,
 };
 use mc_bamboo_world::{flat, light::LightChanges, store::ChunkStore};
 
@@ -639,14 +639,16 @@ impl Region {
         (level, &mut self.block_ticks, &mut self.redstone_cache)
     }
 
-    /// 进服开头：`login`、`change_difficulty`、`set_experience`、`player_abilities`、
-    /// 权限事件、命令树、`player_position`。官方 `PlayerList.placeNewPlayer` 把难度包
-    /// 放在 login 后面、经验包紧接在难度包后面。
+    /// 进服开头：`login`、`change_difficulty`、`player_abilities`、权限事件、命令树、
+    /// `player_position`。官方 `PlayerList.placeNewPlayer` 把难度包放在 login 后面，
+    /// **不发** `set_experience`：那一包由 `ServerPlayer.doTick` 在进服这一刻
+    /// （`lastSentExp` 仍是构造时的 -99999999）补发。
     ///
-    /// The start of join: `login`, `change_difficulty`, `set_experience`,
-    /// `player_abilities`, the permission event, the command tree, then
-    /// `player_position`. Official `placeNewPlayer` puts the difficulty packet
-    /// right after `login`, with the experience packet immediately after it.
+    /// The start of join: `login`, `change_difficulty`, `player_abilities`, the
+    /// permission event, the command tree, then `player_position`. Official
+    /// `placeNewPlayer` puts the difficulty packet right after `login` and does
+    /// **not** send `set_experience`: `ServerPlayer.doTick` sends it on the join
+    /// tick because `lastSentExp` is still -99999999.
     pub(crate) fn add_player(&mut self, request: JoinRequest, settings: JoinSettings<'_>) {
         let JoinSettings {
             game_mode,
@@ -693,14 +695,6 @@ impl Region {
         self.links.send(id, &login);
         // 官方在 login 后立刻同步难度；帧已经由 `Global` 编码好，广播时也用它。
         self.links.send_frames(id, difficulty_frames);
-        self.links.send(
-            id,
-            &SetExperience {
-                experience_progress: experience.progress,
-                experience_level: experience.level,
-                total_experience: experience.total,
-            },
-        );
         self.links.send(id, &ABILITIES);
         // 官方在能力包之后、传送之前发权限事件和命令树。
         //

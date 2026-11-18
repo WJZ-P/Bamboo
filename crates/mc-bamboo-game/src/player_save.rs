@@ -62,11 +62,33 @@ fn disk_to_menu(disk: i32) -> Option<usize> {
     }
 }
 
+/// 官方 `Player.readAdditionalSaveData` 里 `XpSeed` 的那一段：
+/// `enchantmentSeed = input.getIntOr("XpSeed", 0)`；只有 0（NO_ENCHANTMENT_SEED）
+/// 才 `this.random.nextInt()` 重抽。没有存档的新玩家同样走「0 → 抽一次」。
+/// 分开成一个函数，是因为 `Player` 构造函数自己不取随机数。
+///
+/// The `XpSeed` part of official `Player.readAdditionalSaveData`:
+/// `enchantmentSeed = input.getIntOr("XpSeed", 0)`, and only a zero value
+/// (NO_ENCHANTMENT_SEED) draws `this.random.nextInt()`. A new player with no
+/// save takes the same "zero → draw once" path. This is separate because the
+/// `Player` constructor itself draws nothing.
+pub fn restore_experience_seed(player: &mut Player, data: Option<&PlayerData>) {
+    let saved = data.map_or(0, |data| data.xp_seed);
+    player.enchantment_seed = if saved == 0 {
+        player.random.next_int()
+    } else {
+        saved
+    };
+}
+
 /// 把 `PlayerData` 里的物品栏、末影箱和经验写回玩家。其它字段（血量、饥饿、能力等）
 /// 目前没有对应的运行时状态，保存时用官方默认值；这里只恢复建模过的部分。
+/// `XpSeed` 由 [`restore_experience_seed`] 单独处理，因为要不要取随机数取决于它。
 ///
 /// Restores the inventory, ender chest and experience from `PlayerData`. Health,
 /// hunger and abilities still have no live state and keep the official defaults.
+/// [`restore_experience_seed`] handles `XpSeed` because it decides whether a
+/// random number is drawn.
 pub fn restore_inventory(player: &mut Player, data: &PlayerData) {
     player.experience = Experience {
         level: data.xp_level,
@@ -74,15 +96,6 @@ pub fn restore_inventory(player: &mut Player, data: &PlayerData) {
         progress: data.xp_p,
     };
     player.score = data.score;
-    // 官方 `Player.readAdditionalSaveData`：0 是 NO_ENCHANTMENT_SEED，要从 `this.random`
-    // 重抽。新建玩家的构造函数已经抽过一次，这里不再重复取数。
-    //
-    // Official `Player.readAdditionalSaveData`: 0 is NO_ENCHANTMENT_SEED and a
-    // fresh value is drawn from `this.random`. The constructor already drew that
-    // value for a new player, so no second draw happens here.
-    if data.xp_seed != 0 {
-        player.enchantment_seed = data.xp_seed;
-    }
     player.yaw = data.rotation[0];
     player.pitch = data.rotation[1];
     player.head_yaw = data.rotation[0];
