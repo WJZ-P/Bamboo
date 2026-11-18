@@ -1220,28 +1220,18 @@ fn stress(seed: u64, threads: usize, ticks: u64) {
     }
 }
 
-/// 经验球记着它正在跟随的玩家（`following`，玩家的实体号）。多岛和整个世界一个岛逐刻
-/// 比玩家身边的一个球（位置、速度、跟随谁）：窗口里先由别的岛上的 OP 借全部玩家执行一条
-/// 作用到球旁边那名玩家的命令（`/give @a`），再把球所在的岛强制并进家岛、再强制拆开。
-/// 两边每一刻都相同：借玩家时球不跑，拆合按位置搬球、`following` 原样带着；玩家 8 格以内
-/// 的东西总在玩家的岛上。
+/// 经验球现在会跟随玩家、被玩家吸收并给经验。多岛和整个世界一个岛逐刻比玩家身边的
+/// 同一个球：窗口里先由别的岛上的 OP 借全部玩家执行 `/give @a`，再把球所在的岛强制并进
+/// 家岛、再强制拆开。每一刻都核对球的位置、速度、跟随谁和 count，直到球被吸收；
+/// 两边必须在同一刻吸收，玩家的经验等级 / 进度 / 总经验和收到的字节也要逐项相同。
 ///
-/// 现在世界还没把玩家交给实体看（`Level::for_each_player` 用的是空的缺省实现），所以两边
-/// 的球都不跟随任何人、`following` 一直是空的；等玩家接上以后，这条比较自动连「跟随谁」
-/// 一起核对。
-///
-/// An experience orb remembers the player it follows (`following`, the
-/// player's entity id). The multi-island world is compared with a single
-/// island tick by tick on one orb next to a player (position, velocity, whom
-/// it follows): in the window an op on another island first runs a command
-/// on every borrowed player (`/give @a`), then the orb's island is forced
-/// into home and split off again. Both sides match every tick: orbs do not
-/// tick while players are borrowed, splits and merges move the orb by
-/// position with `following` intact, and anything within 8 blocks of a
-/// player is on that player's island. The world does not show players to
-/// entities yet (`Level::for_each_player` is the empty default), so neither
-/// orb follows anyone and `following` stays empty; once players are wired
-/// in, this comparison covers whom it follows as well.
+/// An experience orb now follows, is absorbed by and grants experience to a
+/// player. The multi-island world is compared with a single island tick by
+/// tick on one orb next to a player: an op on another island borrows all
+/// players for `/give @a`, then the orb's island is forced into home and
+/// split off again. Position, velocity, `following` and `count` are compared
+/// until the orb is absorbed; both sides must absorb on the same tick, and
+/// the player's level / progress / total experience and received bytes match.
 #[test]
 fn an_orb_beside_a_player_matches_one_island_through_borrowing_and_splits() {
     with_stack(|| {
@@ -1252,11 +1242,19 @@ fn an_orb_beside_a_player_matches_one_island_through_borrowing_and_splits() {
             Harness::new_loaded_with_drive(2, IslandDrive::Lockstep),
         );
         align(&mut multi, &mut control);
+        // 反馈和聊天带服务端的墙上时钟毫秒：两边固定成同一个值才能逐字节比。
+        // Feedback and chat carry wall-clock millis; pin both for byte comparison.
+        for scene in [&mut multi, &mut control] {
+            for island in scene.server.world.islands.iter_mut() {
+                island.region.clock_millis = Some(1_700_000_000_000);
+            }
+        }
         let op = super::island_crossing_tests::first_of(&multi, 0);
         super::island_crossing_tests::make_op(&mut multi, &op);
         let op_control = super::island_crossing_tests::first_of(&control, 0);
         super::island_crossing_tests::make_op(&mut control, &op_control);
         let target = super::island_crossing_tests::first_of(&multi, 1);
+        let target_control = super::island_crossing_tests::first_of(&control, 1);
         let island = multi
             .server
             .world
@@ -1283,21 +1281,50 @@ fn an_orb_beside_a_player_matches_one_island_through_borrowing_and_splits() {
         };
         let orb = spawn(&mut multi, island);
         let orb_control = spawn(&mut control, HOME_REGION);
-        let state = |scene: &Scene, uid: i32| -> (Vec3, Vec3, Option<i32>) {
+        #[derive(Debug, PartialEq)]
+        struct OrbState {
+            position: Vec3,
+            delta: Vec3,
+            following: Option<i32>,
+            count: i32,
+        }
+        let state = |scene: &Scene, uid: i32| -> Option<OrbState> {
             let entity = scene
                 .server
                 .world
                 .islands
                 .iter()
-                .find_map(|island| island.region.entities.get(uid))
-                .expect("球还在");
+                .find_map(|island| island.region.entities.get(uid))?;
+            if entity.removed {
+                return None;
+            }
             let mc_bamboo_blocks::entity::EntityKind::ExperienceOrb(state) = &entity.kind else {
                 panic!("是经验球");
             };
-            (entity.position, entity.delta, state.following)
+            Some(OrbState {
+                position: entity.position,
+                delta: entity.delta,
+                following: state.following,
+                count: state.count,
+            })
+        };
+        let experience = |scene: &Scene, id: crate::inbound::PlayerId| -> (i32, u32, i32) {
+            let player = scene
+                .server
+                .world
+                .islands
+                .iter()
+                .find_map(|island| island.region.players.get(&id))
+                .expect("目标还在世界里");
+            (
+                player.experience.level,
+                player.experience.progress.to_bits(),
+                player.experience.total,
+            )
         };
         let mut split_back = false;
-        for tick in 0..16 {
+        let mut absorbed_at = None;
+        for tick in 0..24 {
             match tick {
                 3 => {
                     for (scene, client) in [(&multi, &op), (&control, &op_control)] {
@@ -1329,7 +1356,24 @@ fn an_orb_beside_a_player_matches_one_island_through_borrowing_and_splits() {
             multi.server.tick();
             control.server.tick();
             let (mine, theirs) = (state(&multi, orb), state(&control, orb_control));
-            assert_eq!(mine, theirs, "tick {tick}：球的位置、速度、跟随谁");
+            assert_eq!(mine, theirs, "tick {tick}：球的状态");
+            assert_eq!(
+                experience(&multi, target.id),
+                experience(&control, target_control.id),
+                "tick {tick}：玩家的等级、进度和总经验"
+            );
+            assert_eq!(
+                target.take_frames(),
+                target_control.take_frames(),
+                "tick {tick}：目标玩家收到的字节"
+            );
+            // 两边逐刻的状态相等，所以「同一刻吸收」由上面的 assert 保证；
+            // 继续跑到拆合结束，别提前退出窗口。
+            // Equal states each tick guarantee absorption on the same tick;
+            // keep ticking through the split instead of leaving the window.
+            if mine.is_none() && theirs.is_none() && absorbed_at.is_none() {
+                absorbed_at = Some(tick);
+            }
             let world = &mut multi.server.world;
             if tick >= 8
                 && world.islands.island_of_player(target.id)
@@ -1339,6 +1383,7 @@ fn an_orb_beside_a_player_matches_one_island_through_borrowing_and_splits() {
             }
             world.assert_island_invariants();
         }
+        assert!(absorbed_at.is_some(), "窗口里球应该被玩家吸收");
         assert!(split_back, "第 1 组又拆成了自己的岛");
     });
 }

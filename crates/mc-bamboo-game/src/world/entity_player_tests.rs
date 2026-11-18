@@ -6,11 +6,24 @@
 //! toward a nearby player. No fake world from `testing.rs` is used.
 
 use mc_bamboo_blocks::entity::{Entity, EntityKind, mob::goals::Goal};
-use mc_bamboo_core::{Hand, Vec3};
+use mc_bamboo_core::{ChunkPos, Hand, Vec3};
 use mc_bamboo_data::items;
 use mc_bamboo_protocol::item::ItemStack;
 
 use super::tests::{Harness, SPAWN_Y};
+
+/// 已加载模式里实体只在「半径 2 的邻居都已交付」的区块上 tick；
+/// 无限超平坦模式下 `ensure_loaded` 直接返回。两种模式都让场景可 tick。
+///
+/// In loaded mode entities tick only when the radius-2 neighbourhood of
+/// their chunk has been delivered; `ensure_loaded` is a no-op in infinite
+/// flat mode. Both modes therefore get a tickable scene.
+fn ensure_ticking(server: &mut Harness) {
+    let positions: Vec<ChunkPos> = (-2..=2)
+        .flat_map(|x| (-2..=2).map(move |z| ChunkPos::new(x, z)))
+        .collect();
+    server.ensure_loaded(&positions);
+}
 
 /// 直接跑实体阶段，不牵扯区块发送和进服包序。
 fn entity_tick(server: &mut Harness) {
@@ -64,6 +77,7 @@ fn a_wheat_holding_player_makes_a_cow_look_and_walk_over() {
     let mut server = Harness::new(2);
     let client = server.join("Farmer");
     server.tick(); // 处理进服
+    ensure_ticking(&mut server);
     let _ = client.take_frames();
     let at = Vec3::new(12.5, SPAWN_Y, 8.5);
     place_player(&mut server, client.id, at, items::WHEAT);
@@ -101,6 +115,7 @@ fn an_empty_handed_player_does_not_tempt_a_cow() {
     let mut server = Harness::new(2);
     let client = server.join("Farmer");
     server.tick();
+    ensure_ticking(&mut server);
     let _ = client.take_frames();
     let at = Vec3::new(12.5, SPAWN_Y, 8.5);
     place_player(&mut server, client.id, at, 0);
@@ -136,6 +151,7 @@ fn a_cow_looks_at_a_nearby_player() {
     let mut server = Harness::new(2);
     let client = server.join("Watcher");
     server.tick();
+    ensure_ticking(&mut server);
     let _ = client.take_frames();
     let at = Vec3::new(11.5, SPAWN_Y, 8.5);
     place_player(&mut server, client.id, at, 0);
@@ -166,6 +182,7 @@ fn an_experience_orb_accelerates_toward_a_nearby_player() {
     let mut server = Harness::new(2);
     let client = server.join("Collector");
     server.tick();
+    ensure_ticking(&mut server);
     let _ = client.take_frames();
     let at = Vec3::new(12.5, SPAWN_Y, 8.5);
     place_player(&mut server, client.id, at, 0);
@@ -193,6 +210,7 @@ fn the_parallel_compute_phase_sees_the_same_players() {
     let mut server = Harness::new(2);
     let client = server.join("Collector");
     server.tick();
+    ensure_ticking(&mut server);
     let _ = client.take_frames();
     let at = Vec3::new(12.5, SPAWN_Y, 8.5);
     place_player(&mut server, client.id, at, 0);
@@ -217,6 +235,7 @@ fn a_spectator_does_not_attract_an_experience_orb() {
     let mut server = Harness::new(2);
     let client = server.join("Ghost");
     server.tick();
+    ensure_ticking(&mut server);
     let _ = client.take_frames();
     let at = Vec3::new(12.5, SPAWN_Y, 8.5);
     place_player(&mut server, client.id, at, 0);
@@ -244,6 +263,7 @@ fn an_orb_on_the_player_grants_experience_and_disappears() {
     let mut server = Harness::new(2);
     let client = server.join("Collector");
     server.tick();
+    ensure_ticking(&mut server);
     let _ = client.take_frames();
     let at = Vec3::new(12.5, SPAWN_Y, 8.5);
     place_player(&mut server, client.id, at, 0);
@@ -271,6 +291,7 @@ fn the_pickup_cooldown_blocks_a_second_orb_until_it_expires() {
     let mut server = Harness::new(2);
     let client = server.join("Collector");
     server.tick();
+    ensure_ticking(&mut server);
     let _ = client.take_frames();
     let at = Vec3::new(12.5, SPAWN_Y, 8.5);
     place_player(&mut server, client.id, at, 0);
@@ -306,6 +327,7 @@ fn a_damaged_mending_item_uses_the_orb_before_experience() {
     let mut server = Harness::new(2);
     let client = server.join("Mender");
     server.tick();
+    ensure_ticking(&mut server);
     let _ = client.take_frames();
     let at = Vec3::new(12.5, SPAWN_Y, 8.5);
     place_player(&mut server, client.id, at, 0);
