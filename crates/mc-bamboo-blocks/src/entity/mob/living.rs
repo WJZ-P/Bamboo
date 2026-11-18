@@ -24,6 +24,7 @@ use super::{
     motion,
     navigation::NavMob,
     path::PathMob,
+    timing,
 };
 use crate::{
     entity::{
@@ -57,6 +58,7 @@ pub(crate) fn with_mob<R>(
 }
 
 fn tick_mob(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    timing::span!(Other);
     check_despawn(me, mob, ctx);
     if me.removed {
         return;
@@ -434,9 +436,13 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // 走。
     let input = Vec3::new(f64::from(mob.xxa), f64::from(mob.yya), f64::from(mob.zza));
     if !mob.no_ai {
+        timing::span!(Travel);
         travel(me, mob, ctx, input);
     }
-    motion::apply_effects_from_blocks(me, mob, ctx);
+    {
+        timing::span!(BlockEffects);
+        motion::apply_effects_from_blocks(me, mob, ctx);
+    }
     // 冻结。
     if !mob.in_powder_snow {
         mob.ticks_frozen = (mob.ticks_frozen - 2).max(0);
@@ -466,7 +472,10 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             1.0,
         );
     }
-    push_entities(me, mob, ctx);
+    {
+        timing::span!(Push);
+        push_entities(me, mob, ctx);
+    }
     // `AgeableMob.aiStep`。
     if mob.forced_age_timer > 0 {
         if mob.forced_age_timer % 4 == 0 {
@@ -526,14 +535,18 @@ pub(crate) fn set_age(me: &mut Entity, mob: &mut Mob, age: i32) {
 fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     mob.no_action_time += 1;
     mob.seen.clear();
-    let mut goals = std::mem::take(&mut mob.goals);
-    let phase = me.tick_count.wrapping_add(me.id);
-    if phase % 2 != 0 && me.tick_count > 1 {
-        goals.tick_running(false, me, mob, ctx);
-    } else {
-        goals.tick(me, mob, ctx);
+    {
+        timing::span!(Goals);
+        let mut goals = std::mem::take(&mut mob.goals);
+        let phase = me.tick_count.wrapping_add(me.id);
+        if phase % 2 != 0 && me.tick_count > 1 {
+            goals.tick_running(false, me, mob, ctx);
+        } else {
+            goals.tick(me, mob, ctx);
+        }
+        mob.goals = goals;
     }
-    mob.goals = goals;
+    timing::span!(Navigation);
     let nav = nav_mob(me, mob, ctx.blocks());
     if let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
         mob.mover

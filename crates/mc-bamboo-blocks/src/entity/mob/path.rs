@@ -301,6 +301,7 @@ struct Search<'a> {
 
 /// `PathFinder.findPath` 加上 `PathNavigation.createPath` 里那段 `findPath` 调用。
 pub fn find_path(view: &dyn BlockView, request: &PathRequest) -> Option<Path> {
+    super::timing::span!(Path);
     let mut search = Search::new(view, request.mob, request.flags);
     let start = search.get_start();
     let mut target = {

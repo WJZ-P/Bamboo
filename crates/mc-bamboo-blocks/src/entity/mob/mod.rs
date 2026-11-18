@@ -18,6 +18,7 @@ pub mod motion;
 pub mod navigation;
 pub mod nbt;
 pub mod path;
+pub(crate) mod timing;
 
 use mc_bamboo_core::{BlockPos, Vec3};
 
