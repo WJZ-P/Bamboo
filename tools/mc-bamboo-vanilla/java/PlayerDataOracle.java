@@ -14,13 +14,20 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintStream;
 import java.io.Writer;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import sun.misc.Unsafe;
 import net.minecraft.SharedConstants;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.Mth;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
@@ -92,8 +99,19 @@ import net.minecraft.world.level.storage.ValueInput;
  */
 public final class PlayerDataOracle {
     private static final int OUTPUT_BUFFER = 1 << 20;
+    private static final Unsafe UNSAFE = loadUnsafe();
 
     private PlayerDataOracle() {
+    }
+
+    private static Unsafe loadUnsafe() {
+        try {
+            Field field = Unsafe.class.getDeclaredField("theUnsafe");
+            field.setAccessible(true);
+            return (Unsafe) field.get(null);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     public static void main(String[] args) {
@@ -190,6 +208,7 @@ public final class PlayerDataOracle {
                 case "player-write" -> playerWrite(request, response);
                 case "level-read" -> levelRead(request, response);
                 case "level-write" -> levelWrite(request, response);
+                case "xp-arithmetic" -> xpArithmetic(request, response);
                 default -> response.addProperty("error", "unknown command " + command);
             }
         }
@@ -304,6 +323,95 @@ public final class PlayerDataOracle {
             root.put("Data", data);
             response.addProperty("gzip", gzip(root));
             response.add("canonical", canonical(root));
+        }
+
+        /**
+         * 用官方 Player / ServerPlayer 的方法跑一组经验题目，不构造服务端。
+         *
+         * <p>{@code give_points} / {@code give_levels} / {@code set_points} /
+         * {@code set_levels} / {@code on_enchantment} 都调真实的官方方法；
+         * {@code query_points} 和 {@code need} 用官方 {@code Mth.floor} 和
+         * {@code getXpNeededForNextLevel}。返回每个字段的原始位，Rust 侧重放后逐项比。
+         */
+        private void xpArithmetic(JsonObject request, JsonObject response) throws Exception {
+            JsonArray results = new JsonArray();
+            for (var element : request.getAsJsonArray("cases")) {
+                JsonObject spec = element.getAsJsonObject();
+                XpPlayer player = XpPlayer.create(spec);
+                String op = spec.get("op").getAsString();
+                int value = spec.get("value").getAsInt();
+                int points = 0;
+                switch (op) {
+                    case "give_points" -> player.giveExperiencePoints(value);
+                    case "give_levels" -> player.giveExperienceLevels(value);
+                    case "set_points" -> player.setExperiencePoints(value);
+                    case "set_levels" -> player.setExperienceLevels(value);
+                    case "on_enchantment" -> player.onEnchantmentPerformed(ItemStack.EMPTY, value);
+                    case "query_points" -> points = Mth.floor(player.experienceProgress
+                            * player.getXpNeededForNextLevel());
+                    case "need" -> points = player.getXpNeededForNextLevel();
+                    default -> throw new IllegalArgumentException("unknown xp op " + op);
+                }
+                JsonArray row = new JsonArray();
+                row.add(player.experienceLevel);
+                row.add(Float.floatToRawIntBits(player.experienceProgress));
+                row.add(player.totalExperience);
+                row.add(player.trackedScore);
+                row.add(player.lastSentExp());
+                if (op.equals("on_enchantment")) {
+                    row.add(player.getEnchantmentSeed());
+                } else {
+                    row.add(points);
+                }
+                results.add(row);
+            }
+            response.add("results", results);
+        }
+
+        /**
+         * 不跑构造函数：ServerPlayer 的构造函数要一个完整的服务端。
+         * 只覆盖 {@code increaseScore}，避开没有初始化的 {@code entityData}；
+         * 经验公式本身仍是官方 {@code Player.giveExperiencePoints}。
+         */
+        private static final class XpPlayer extends ServerPlayer {
+            int trackedScore;
+
+            private XpPlayer() {
+                super(null, null, null, null);
+            }
+
+            static XpPlayer create(JsonObject spec) throws Exception {
+                XpPlayer player = (XpPlayer) UNSAFE.allocateInstance(XpPlayer.class);
+                set(Player.class, player, "experienceLevel", spec.get("level").getAsInt());
+                set(Player.class, player, "experienceProgress",
+                        Float.intBitsToFloat(spec.get("progress_bits").getAsInt()));
+                set(Player.class, player, "totalExperience", spec.get("total").getAsInt());
+                set(net.minecraft.world.entity.Entity.class, player, "tickCount", 0);
+                set(Player.class, player, "lastLevelUpTime", 0);
+                set(net.minecraft.world.entity.Entity.class, player, "random",
+                        RandomSource.create(spec.get("seed").getAsLong()));
+                set(ServerPlayer.class, player, "lastSentExp", -99999999);
+                player.trackedScore = spec.get("score").getAsInt();
+                return player;
+            }
+
+            @Override
+            public void increaseScore(int amount) {
+                trackedScore += amount;
+            }
+
+            int lastSentExp() throws Exception {
+                Field field = ServerPlayer.class.getDeclaredField("lastSentExp");
+                field.setAccessible(true);
+                return field.getInt(this);
+            }
+        }
+
+        private static void set(Class<?> owner, Object target, String name, Object value)
+                throws Exception {
+            Field field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            field.set(target, value);
         }
 
         private net.minecraft.resources.RegistryOps<Tag> ops() {

@@ -19,6 +19,7 @@ mod clone;
 pub(crate) mod console;
 mod effects;
 mod enchant;
+mod experience;
 pub(crate) mod feedback;
 mod gamerule;
 mod items;

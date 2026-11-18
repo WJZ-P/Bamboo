@@ -19,7 +19,7 @@ use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_protocol::packet::play::{
     AttributeModifier, AttributeOperation, AttributeSnapshot, EntityData, GameEvent, GameMode,
     InitializeBorder, Login, PlayerAbilities, SetDefaultSpawnPosition, SetEntityData, SetTime,
-    UpdateAttributes,
+    SetExperience, UpdateAttributes,
 };
 use mc_bamboo_world::{flat, light::LightChanges, store::ChunkStore};
 
@@ -27,6 +27,7 @@ use crate::{
     chunk_encoding::{ChunkCache, encode_template},
     chunk_tracking,
     entity_tracking::EntityTracking,
+    experience::Experience,
     global::{Clock, GameTime},
     inbound::{JoinRequest, PlayerId},
     interaction::{BlockChanges, level::RegionLevel},
@@ -325,10 +326,11 @@ const _: () = {
 };
 
 /// 进服时世界线程替这名玩家定好的东西：游戏模式、全局状态里的难度包、出生点和种子哈希，
-/// 以及按权威 OP 名单查出的权限。
+/// 以及按权威 OP 名单查出的权限和存档里的经验。
 ///
 /// What the world thread settled for a joining player: the game mode, the difficulty frames,
-/// spawn and seed hash from the world state, and the permissions from the authoritative op list.
+/// spawn and seed hash from the world state, the permissions from the authoritative op list,
+/// and the saved experience.
 pub(crate) struct JoinSettings<'a> {
     pub(crate) game_mode: GameMode,
     pub(crate) difficulty_frames: &'a [u8],
@@ -336,6 +338,7 @@ pub(crate) struct JoinSettings<'a> {
     pub(crate) hashed_seed: i64,
     pub(crate) permission_level: u8,
     pub(crate) is_op: bool,
+    pub(crate) experience: Experience,
 }
 
 impl Region {
@@ -636,12 +639,14 @@ impl Region {
         (level, &mut self.block_ticks, &mut self.redstone_cache)
     }
 
-    /// 进服开头：`login`、`change_difficulty`、`player_abilities`、权限事件、命令树、
-    /// `player_position`。官方 `PlayerList.placeNewPlayer` 把难度包放在 login 后面。
+    /// 进服开头：`login`、`change_difficulty`、`set_experience`、`player_abilities`、
+    /// 权限事件、命令树、`player_position`。官方 `PlayerList.placeNewPlayer` 把难度包
+    /// 放在 login 后面、经验包紧接在难度包后面。
     ///
-    /// The start of join: `login`, `change_difficulty`, `player_abilities`, the permission
-    /// event, the command tree, then `player_position`. Official `placeNewPlayer` puts
-    /// the difficulty packet right after `login`.
+    /// The start of join: `login`, `change_difficulty`, `set_experience`,
+    /// `player_abilities`, the permission event, the command tree, then
+    /// `player_position`. Official `placeNewPlayer` puts the difficulty packet
+    /// right after `login`, with the experience packet immediately after it.
     pub(crate) fn add_player(&mut self, request: JoinRequest, settings: JoinSettings<'_>) {
         let JoinSettings {
             game_mode,
@@ -650,6 +655,7 @@ impl Region {
             hashed_seed: state_seed_hash,
             permission_level,
             is_op,
+            experience,
         } = settings;
         // 属性已经进了 Tab 名单，这里用不到。
         let JoinRequest {
@@ -687,6 +693,14 @@ impl Region {
         self.links.send(id, &login);
         // 官方在 login 后立刻同步难度；帧已经由 `Global` 编码好，广播时也用它。
         self.links.send_frames(id, difficulty_frames);
+        self.links.send(
+            id,
+            &SetExperience {
+                experience_progress: experience.progress,
+                experience_level: experience.level,
+                total_experience: experience.total,
+            },
+        );
         self.links.send(id, &ABILITIES);
         // 官方在能力包之后、传送之前发权限事件和命令树。
         //
@@ -695,6 +709,7 @@ impl Region {
 
         let position = spawn_position(spawn);
         let mut player = Player::new(id, uuid, name, game_mode, client, position);
+        player.experience = experience;
         player.permission_level = permission_level;
         player.is_op = is_op;
         player.inbox = inbox;

@@ -12,6 +12,7 @@ use crate::{
     chunk_tracking::{ChunkTracker, MIN_VIEW_DISTANCE},
     container::EnderChest,
     entity_sync::EntitySync,
+    experience::Experience,
     inbound::PlayerId,
     interaction::{BlockPrediction, mining::Mining},
     inventory::Inventory,
@@ -83,6 +84,23 @@ pub(crate) struct Player {
     ///
     /// Vanilla `Player.enchantmentSeed`, drawn from `this.random` on join.
     pub(crate) enchantment_seed: i32,
+    /// 官方 `Player` 的经验等级、进度和总经验。
+    ///
+    /// Vanilla `Player`'s experience level, progress and total.
+    pub(crate) experience: Experience,
+    /// 官方 `Player.takeXpDelay`，每刻减 1，为 0 才能碰到经验球。
+    ///
+    /// Vanilla `Player.takeXpDelay`: decremented each tick; an orb is taken only at zero.
+    pub(crate) take_xp_delay: i32,
+    /// 官方 `Player.DATA_SCORE_ID`（存档里的 `Score`），`giveExperiencePoints` 也加它。
+    ///
+    /// Vanilla `Player.DATA_SCORE_ID` (the saved `Score`); `giveExperiencePoints` adds to it too.
+    pub(crate) score: i32,
+    /// 官方 `ServerPlayer.lastSentExp`，构造时是 `-99999999`；总经验变了才发包。
+    ///
+    /// Vanilla `ServerPlayer.lastSentExp`, `-99999999` on construction. A packet
+    /// goes out only when the total changes.
+    pub(crate) last_sent_exp: i32,
     /// 创造模式把物品拖出界面的 `TickThrottler(20, 1480)`。
     ///
     /// Creative drags out of the screen use `TickThrottler(20, 1480)`.
@@ -149,6 +167,10 @@ impl Player {
             spam: SpamThrottlers::default(),
             random,
             enchantment_seed,
+            experience: Experience::default(),
+            take_xp_delay: 0,
+            score: 0,
+            last_sent_exp: -99_999_999,
             drop_spam: 0,
             chat: PlayerChat::default(),
             respawn: None,
@@ -162,6 +184,60 @@ impl Player {
     /// Entity position, the feet.
     pub(crate) fn position(&self) -> Vec3 {
         self.position
+    }
+
+    /// 官方 `ServerPlayer.giveExperiencePoints`（0 是空操作，改动强制下一刻发包）。
+    ///
+    /// Official `ServerPlayer.giveExperiencePoints`: zero is a no-op; changes
+    /// force a packet on the next tick.
+    pub(crate) fn give_experience_points(&mut self, points: i32) {
+        if points == 0 {
+            return;
+        }
+        self.experience.give_points(points, &mut self.score);
+        self.last_sent_exp = -1;
+    }
+
+    /// 官方 `ServerPlayer.giveExperienceLevels`。
+    pub(crate) fn give_experience_levels(&mut self, levels: i32) {
+        if levels == 0 {
+            return;
+        }
+        self.experience.give_levels(levels);
+        self.last_sent_exp = -1;
+    }
+
+    /// 官方 `ServerPlayer.setExperiencePoints`。
+    pub(crate) fn set_experience_points(&mut self, points: i32) -> bool {
+        let changed = self.experience.set_points(points);
+        if changed {
+            self.last_sent_exp = -1;
+        }
+        changed
+    }
+
+    /// 官方 `ServerPlayer.setExperienceLevels`。
+    pub(crate) fn set_experience_levels(&mut self, level: i32) {
+        if level == self.experience.level {
+            return;
+        }
+        self.experience.set_level(level);
+        self.last_sent_exp = -1;
+    }
+
+    /// 官方 `Player.onEnchantmentPerformed`：扣等级并从玩家随机源换新种子。
+    ///
+    /// Official `Player.onEnchantmentPerformed`: subtracts levels and draws
+    /// a new seed from the player's random source.
+    pub(crate) fn on_enchantment_performed(&mut self, levels: i32) {
+        self.experience.level = self.experience.level.wrapping_sub(levels);
+        if self.experience.level < 0 {
+            self.experience.level = 0;
+            self.experience.progress = 0.0;
+            self.experience.total = 0;
+        }
+        self.enchantment_seed = self.random.next_int();
+        self.last_sent_exp = -1;
     }
 
     /// 改位置，网格跟着更新。广播靠网格找附近的玩家，绕过这里改位置会让玩家漏收包。

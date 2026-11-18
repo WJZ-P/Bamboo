@@ -1821,6 +1821,20 @@ impl World {
         let origin = self.master.host.island_origin(target, spawn_chunk);
         let region = &mut self.islands.ensure(target, origin).region;
         let hashed_seed = region.global.hashed_seed();
+        // 官方 `Player.readAdditionalSaveData` 把 `XpP` / `XpLevel` / `XpTotal` 直接读进
+        // 玩家，再由 `placeNewPlayer` 发第一包 `set_experience`。
+        //
+        // Official `Player.readAdditionalSaveData` reads `XpP` / `XpLevel` /
+        // `XpTotal` into the player, then `placeNewPlayer` sends the first
+        // `set_experience` packet.
+        let join_experience = restored
+            .as_ref()
+            .map(|data| crate::experience::Experience {
+                level: data.xp_level,
+                total: data.xp_total,
+                progress: data.xp_p,
+            })
+            .unwrap_or_default();
         region.add_player(
             request,
             JoinSettings {
@@ -1830,6 +1844,7 @@ impl World {
                 hashed_seed,
                 permission_level,
                 is_op,
+                experience: join_experience,
             },
         );
         let now = region.now_millis();
@@ -2843,6 +2858,10 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     lectern::tick(region);
     chat::tick_spam_throttlers(region);
     crate::drops::tick_drop_throttle(region);
+    // 官方 `ServerPlayer.doTick`：总经验变了就给这名玩家补一包 `set_experience`。
+    //
+    // Official `ServerPlayer.doTick`: a changed total sends one `set_experience`.
+    crate::experience::sync_dirty(region);
     crate::command::admin::tick_idle(region);
     // 官方 `ServerPlayer.doTick` 的六个只读准则：岛算变了的值，主控写计分板。
     //

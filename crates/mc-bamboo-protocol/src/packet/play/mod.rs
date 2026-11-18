@@ -118,6 +118,27 @@ impl ClientboundPacket for Login<'_> {
     }
 }
 
+/// 同步等级、进度条和总经验，官方 `ClientboundSetExperiencePacket`。
+///
+/// Sends the level, progress bar and total experience, vanilla
+/// `ClientboundSetExperiencePacket`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetExperience {
+    pub experience_progress: f32,
+    pub experience_level: i32,
+    pub total_experience: i32,
+}
+
+impl ClientboundPacket for SetExperience {
+    const ID: i32 = clientbound::SET_EXPERIENCE;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_f32(out, self.experience_progress);
+        write_varint(out, self.experience_level);
+        write_varint(out, self.total_experience);
+    }
+}
+
 /// 同步世界难度，官方 `ClientboundChangeDifficultyPacket`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeDifficulty {
@@ -494,6 +515,7 @@ mod tests {
             (SetCursorItem::ID, 98),
             (SetEntityData::ID, 101),
             (SetEquipment::ID, 104),
+            (SetExperience::ID, 105),
             (SetHeldSlot::ID, 107),
             (SwingAnimation::ID, 123),
             (SystemChat::ID, 124),
@@ -502,6 +524,29 @@ mod tests {
         for (actual, expected) in ids {
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn set_experience_matches_official_layout() {
+        // 进度是 Float，等级和总经验是两个 VarInt（官方构造函数的参数顺序不同）。
+        // Progress is a Float; level and total are two VarInts (the official
+        // constructor takes them in the opposite order).
+        assert_eq!(
+            body(&SetExperience {
+                experience_progress: 0.5,
+                experience_level: 30,
+                total_experience: 300,
+            }),
+            hex("3f 00 00 00 1e ac 02")
+        );
+        assert_eq!(
+            body(&SetExperience {
+                experience_progress: -0.0,
+                experience_level: -1,
+                total_experience: i32::MAX,
+            }),
+            hex("80 00 00 00 ff ff ff ff 0f ff ff ff ff 07")
+        );
     }
 
     #[test]

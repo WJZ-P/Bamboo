@@ -109,6 +109,13 @@ pub(crate) fn spawn_throw(region: &mut Region, id: PlayerId, stack: ItemStack) {
 ///
 /// Items a player is touching are picked up before entity ticks.
 pub(crate) fn pickup_before_entities(region: &mut Region) {
+    // 官方 `Player.tick` 先减拾取冷却，实体再碰玩家。
+    // Vanilla `Player.tick` decrements the pickup cooldown before entities touch players.
+    for player in region.players.values_mut() {
+        if player.take_xp_delay > 0 {
+            player.take_xp_delay -= 1;
+        }
+    }
     let players: Vec<PlayerId> = region.players.keys().copied().collect();
     for id in players {
         pickup_for(region, id);

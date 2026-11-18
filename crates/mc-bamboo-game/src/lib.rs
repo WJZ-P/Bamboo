@@ -53,6 +53,7 @@ mod entity_sync;
 #[doc(hidden)]
 pub mod entity_tracking;
 mod entity_view;
+mod experience;
 mod gamerules;
 mod global;
 mod global_port;
@@ -121,6 +122,129 @@ pub use world::{
     MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_MAIL_BUDGET, World, WorldConfig,
 };
 pub use world_options::WorldGenConfig;
+
+/// 供 `mc-bamboo-vanilla player-data` 对拍：把一组经验操作在一名 Bamboo 玩家身上重放，
+/// 返回 `[level, progress 的原始位, total, score, last_sent_exp, enchantment_seed]`。
+/// `progress_bits` 是 `Float.floatToRawIntBits`，`op` 见对拍工具里的题目表。
+/// 只在 `oracle-samples` feature 下编进库里。
+///
+/// Replays one experience operation on a Bamboo player for the
+/// `mc-bamboo-vanilla player-data` comparison. Returns
+/// `[level, raw progress bits, total, score, last_sent_exp, enchantment_seed]`.
+/// `progress_bits` is `Float.floatToRawIntBits`; see the oracle's case table
+/// for `op`. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_experience(
+    op: &str,
+    level: i32,
+    progress_bits: u32,
+    total: i32,
+    score: i32,
+    value: i32,
+    seed: i64,
+) -> [i32; 6] {
+    use mc_bamboo_blocks::entity::JavaRandom;
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+
+    let mut player = player::Player::new(
+        inbound::PlayerId(1),
+        uuid::Uuid::nil(),
+        String::new(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::default(),
+    );
+    player.experience = experience::Experience {
+        level,
+        total,
+        progress: f32::from_bits(progress_bits),
+    };
+    player.score = score;
+    player.random = JavaRandom::new(seed);
+    match op {
+        "give_points" => player.give_experience_points(value),
+        "give_levels" => player.give_experience_levels(value),
+        "set_points" => {
+            let _ = player.set_experience_points(value);
+        }
+        "set_levels" => player.set_experience_levels(value),
+        "on_enchantment" => player.on_enchantment_performed(value),
+        "query_points" | "need" => {}
+        _ => panic!("unknown experience operation"),
+    }
+    let points = if op == "query_points" {
+        player.experience.points_in_level()
+    } else if op == "need" {
+        player.experience.needed_for_next_level()
+    } else {
+        0
+    };
+    [
+        player.experience.level,
+        player.experience.progress.to_bits() as i32,
+        player.experience.total,
+        player.score,
+        player.last_sent_exp,
+        if op == "on_enchantment" {
+            player.enchantment_seed
+        } else {
+            points
+        },
+    ]
+}
+
+/// 供 `mc-bamboo-vanilla player-data` 对拍：把一组经验值写进玩家，走一次存档
+/// `runtime_player_data` 再 `restore_inventory` 读回来，返回读回后的
+/// `[level, progress 原始位, total, xp_seed, score]`。只在 `oracle-samples` 下编进库里。
+///
+/// Saves and restores one experience state through Bamboo's real player-save
+/// functions for the `mc-bamboo-vanilla player-data` comparison. Returns
+/// `[level, raw progress bits, total, xp_seed, score]`. Gated behind
+/// the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_experience_save(
+    level: i32,
+    progress_bits: u32,
+    total: i32,
+    seed: i32,
+    score: i32,
+) -> [i32; 5] {
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+
+    let make = || {
+        let mut player = player::Player::new(
+            inbound::PlayerId(1),
+            uuid::Uuid::nil(),
+            String::new(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            Vec3::default(),
+        );
+        player.experience = experience::Experience {
+            level,
+            total,
+            progress: f32::from_bits(progress_bits),
+        };
+        player.enchantment_seed = seed;
+        player.score = score;
+        player
+    };
+    let data = player_save::runtime_player_data(&make());
+    let mut restored = make();
+    restored.experience = experience::Experience::default();
+    restored.enchantment_seed = 0;
+    restored.score = 0;
+    player_save::restore_inventory(&mut restored, &data);
+    [
+        restored.experience.level,
+        restored.experience.progress.to_bits() as i32,
+        restored.experience.total,
+        restored.enchantment_seed,
+        restored.score,
+    ]
+}
 
 /// 供 `mc-bamboo-vanilla saved-data` 和官方 codec 对拍：返回 Bamboo 编码器写出的
 /// 三份示例 `data` 复合标签（游戏规则、世界边界、世界时钟）。只暴露公开的 [`Tag`]，

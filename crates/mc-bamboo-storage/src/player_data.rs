@@ -695,7 +695,7 @@ fn numeric_list(entries: &[(String, Tag)], key: &'static str) -> Result<Vec<f64>
 /// 从游戏层的公开值造一份玩家存档（只是转换函数，不接进进服 / 离服流程）。
 ///
 /// 这里只接受必要的字段，避免存档层依赖游戏层的私有类型。没有对应运行时状态的字段
-/// 用官方默认值：血量恒 20、饥饿 / 经验 / 能力从游戏模式推。速度（`Motion`）和摔落
+/// 用官方默认值：血量恒 20、饥饿 / 能力从游戏模式推。速度（`Motion`）和摔落
 /// 距离（`fall_distance`）游戏层也有，但要保存它们的调用方在拿到结果后自己填。
 impl PlayerData {
     pub fn from_runtime_parts(parts: &RuntimeParts<'_>) -> Self {
@@ -710,6 +710,11 @@ impl PlayerData {
         data.game_type = parts.game_type;
         data.abilities = Abilities::for_game_type(parts.game_type);
         data.selected_item_slot = parts.selected_slot;
+        data.xp_p = parts.xp_p;
+        data.xp_level = parts.xp_level;
+        data.xp_total = parts.xp_total;
+        data.xp_seed = parts.xp_seed;
+        data.score = parts.score;
         // 菜单槽 5..8 是装备，9..35 是背包，36..44 是快捷栏，45 是副手。
         // 官方 `Inventory.items` 的顺序是快捷栏 0..8、背包 9..35、装备 36..39、副手 40。
         const MENU_SLOTS: usize = 46;
@@ -753,6 +758,16 @@ pub struct RuntimeParts<'a> {
     pub menu_slots: &'a [ItemStack],
     /// `EnderChest::slots` 的 27 格。
     pub ender_slots: &'a [ItemStack],
+    /// 官方 `XpP`：进度条，浮点。
+    pub xp_p: f32,
+    /// 官方 `XpLevel`。
+    pub xp_level: i32,
+    /// 官方 `XpTotal`。
+    pub xp_total: i32,
+    /// 官方 `XpSeed`，也是 `Player.enchantmentSeed`。
+    pub xp_seed: i32,
+    /// 官方 `Score`。
+    pub score: i32,
 }
 
 fn menu_to_disk(slot: usize) -> Option<i32> {
