@@ -81,6 +81,10 @@ pub mod facts {
     pub const MOTION_BLOCKING: u64 = 1 << 33;
     /// `is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP_NO_LEAVES)`，`MOTION_BLOCKING_NO_LEAVES` 用。
     pub const MOTION_BLOCKING_NO_LEAVES: u64 = 1 << 34;
+    /// `isPathfindable(PathComputationType.LAND)`，寻路起点向下找落脚点时用。
+    pub const PATHFINDABLE_LAND: u64 = 1 << 35;
+    /// `isSuffocating(EmptyBlockGetter, pos)`，`Entity.isInWall` 用。
+    pub const SUFFOCATING: u64 = 1 << 36;
 }
 
 /// 官方 `WalkNodeEvaluator` 给寻路格子分的类别，顺序和官方 `PathType` 一致。

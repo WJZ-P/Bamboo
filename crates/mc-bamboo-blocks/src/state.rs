@@ -212,6 +212,16 @@ impl BlockState {
         self.fact(facts::SOLID_RENDER)
     }
 
+    /// `isPathfindable(PathComputationType.LAND)`。
+    pub fn is_pathfindable_land(self) -> bool {
+        self.fact(facts::PATHFINDABLE_LAND)
+    }
+
+    /// `isSuffocating(level, pos)`，按空世界算。
+    pub fn is_suffocating(self) -> bool {
+        self.fact(facts::SUFFOCATING)
+    }
+
     /// `isSignalSource`。
     pub fn is_signal_source(self) -> bool {
         self.fact(facts::SIGNAL_SOURCE)
@@ -968,6 +978,11 @@ impl FluidState {
 }
 
 /// `item` 在这个物品标签里。
+/// 流体注册表 ID 在不在这个流体标签里，`fluid.is(tag)`。
+pub fn fluid_type_is_tagged(fluid: i32, tag: FluidTag) -> bool {
+    usize::try_from(fluid).is_ok_and(|fluid| FLUID_TAGS[tag.index].contains(fluid))
+}
+
 pub fn item_is_tagged(item: i32, tag: ItemTag) -> bool {
     usize::try_from(item).is_ok_and(|id| ITEM_TAGS[tag.index].contains(id))
 }
