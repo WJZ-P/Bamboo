@@ -59,7 +59,6 @@ pub use crate::container::ContainerEntry;
 pub use crate::container::ContainerKind;
 #[allow(unused_imports)]
 pub use column::{NotReady, PackedContainer, RegionColumn, RegionColumnParts, RegionColumnView};
-#[cfg(test)]
 pub(crate) use island_split::IslandPart;
 pub(crate) use island_split::IslandRandom;
 

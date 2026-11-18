@@ -408,7 +408,9 @@ impl Islands {
     pub(crate) fn ensure(&mut self, id: RegionId, origin: SectionPos) -> &mut Island {
         if !self.slots.contains_key(&id) {
             let home = &mut **self.slots.get_mut(&HOME_REGION).expect("家岛一直在");
-            let random = home.region.derive_island_random(home.region.global.seed, origin);
+            let random = home
+                .region
+                .derive_island_random(home.region.global.seed, origin);
             let region = home
                 .region
                 .split_off_island(
@@ -492,11 +494,17 @@ impl Islands {
         if self.slots.len() <= 1 || !self.slots.contains_key(&into) {
             return gathered;
         }
-        let others: Vec<RegionId> = self.slots.keys().copied().filter(|&id| id != into).collect();
+        let others: Vec<RegionId> = self
+            .slots
+            .keys()
+            .copied()
+            .filter(|&id| id != into)
+            .collect();
         for id in others {
             let lent = {
                 let region = &mut self.get_mut(id).expect("在表里").region;
-                let players: std::collections::BTreeSet<_> = region.players.keys().copied().collect();
+                let players: std::collections::BTreeSet<_> =
+                    region.players.keys().copied().collect();
                 if players.is_empty() {
                     continue;
                 }
@@ -738,7 +746,8 @@ impl Island {
             ChunkMailbox::new(self.mailbox.budget),
         ));
         self.save_plan.absorb(std::mem::take(&mut other.save_plan));
-        self.save_report.absorb(std::mem::take(&mut other.save_report));
+        self.save_report
+            .absorb(std::mem::take(&mut other.save_report));
         self.effects.append(&mut other.effects);
         let Self { region, .. } = *other;
         self.region.absorb_island(region, delta);

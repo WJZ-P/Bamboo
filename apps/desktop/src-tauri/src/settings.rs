@@ -156,6 +156,12 @@ pub struct ServerSettings {
     pub reclaims_per_tick: u32,
     /// 岛的 tick 线程数：0 = 精确模式（岛在世界线程上跑），≥ 1 = 和主控并行（默认 1）。
     pub island_threads: u32,
+    /// 多岛：false = 整个世界一个岛（精确模式，默认）；true = 相距很远的玩家群各自一个岛。
+    ///
+    /// Multi-island mode: `false` keeps the whole world one island (exact mode,
+    /// the default); `true` splits distant groups onto their own islands.
+    #[serde(default)]
+    pub islands: bool,
     /// 世界生成参数，从 `server.properties` 的四个键解析而来，不进界面 JSON。
     /// 界面目前不编辑这四项，`as_files` 会原样保留已有值。
     ///
@@ -205,6 +211,7 @@ impl ServerSettings {
             deliveries_per_tick: u32::try_from(bamboo.deliveries_per_tick).unwrap_or(u32::MAX),
             reclaims_per_tick: u32::try_from(bamboo.reclaims_per_tick).unwrap_or(u32::MAX),
             island_threads: u32::try_from(bamboo.island_threads).unwrap_or(u32::MAX),
+            islands: bamboo.islands,
             world_gen: mc_bamboo_game::world_options::WorldGenConfig::from_properties(
                 &official.level_seed,
                 &official.level_type,
@@ -250,6 +257,9 @@ impl ServerSettings {
             // Like the CLI, `BAMBOO_ISLAND_THREADS` overrides the setting (never saved).
             island_threads: mc_bamboo_game::island_threads_from_env()
                 .unwrap_or((self.island_threads as usize).min(mc_bamboo_game::MAX_ISLAND_THREADS)),
+            // 和命令行版一样，环境变量 `BAMBOO_ISLANDS` 设了就盖过设置（不写回文件）。
+            // Like the CLI, `BAMBOO_ISLANDS` overrides the setting (never saved).
+            islands: mc_bamboo_game::islands_from_env().unwrap_or(self.islands),
             world_gen: self.world_gen.clone(),
             // 桌面端有 GUI 控制台，不读进程 stdin；广播默认按官方 true。
             // The desktop has a GUI console, so it does not read process stdin;
@@ -511,6 +521,7 @@ mod tests {
             deliveries_per_tick: 16,
             reclaims_per_tick: 8,
             island_threads: 2,
+            islands: true,
             world_gen: Default::default(),
         };
         let config = settings.to_server_config();
@@ -536,6 +547,10 @@ mod tests {
         assert_eq!(
             config.island_threads,
             mc_bamboo_game::island_threads_from_env().unwrap_or(2)
+        );
+        assert_eq!(
+            config.islands,
+            mc_bamboo_game::islands_from_env().unwrap_or(true)
         );
         assert_eq!(config.list_directory, PathBuf::from("/tmp/server"));
     }

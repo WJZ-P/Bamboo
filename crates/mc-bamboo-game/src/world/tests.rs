@@ -70,7 +70,8 @@ pub(crate) struct Frame {
     pub(crate) body: Vec<u8>,
 }
 
-/// 假客户端。收到的字节按帧拆开，不解释内容。
+/// 假客户端。收到的字节按帧拆开，不解释内容。克隆出来的是同一个连接的另一个把手。
+#[derive(Clone)]
 pub(crate) struct Client {
     pub(crate) id: PlayerId,
     pub(crate) uuid: Uuid,
@@ -1376,7 +1377,14 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
     server.inbox.send(Inbound::Join(Box::new(request))).unwrap();
     server.tick();
 
-    let ids: Vec<PlayerId> = server.world.islands.region.players.keys().copied().collect();
+    let ids: Vec<PlayerId> = server
+        .world
+        .islands
+        .region
+        .players
+        .keys()
+        .copied()
+        .collect();
     assert_eq!(ids, [new_id]);
 }
 
@@ -2562,7 +2570,10 @@ fn world_time_advances_once_per_tick() {
 
     assert_eq!(server.world.master.global.time().0, 5);
     assert_eq!(server.world.islands.region.block_ticks.now(), 5);
-    assert_eq!(server.world.islands.region.tick.since(Default::default()), 5);
+    assert_eq!(
+        server.world.islands.region.tick.since(Default::default()),
+        5
+    );
 }
 
 /// 存盘 → 重开：官方 `PrimaryLevelData.parse` 从 `level.dat` 的 `Time` 接着走，

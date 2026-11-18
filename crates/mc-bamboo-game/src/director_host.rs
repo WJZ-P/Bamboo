@@ -1373,14 +1373,17 @@ impl DirectorHost {
         let changes = drain_all_save_changes(islands);
         let judged = self.judge_dirty(changes, false);
         let (eligible, candidates) = self.choose_snapshots(judged.dirty, now_tick);
-        let encoded = follow_all(islands, SavePlan {
-            remark: judged.remark,
-            metrics: Some((candidates, eligible.len() as u64)),
-            encode: eligible,
-            drain: false,
-            #[cfg(test)]
-            verify: judged.verify,
-        });
+        let encoded = follow_all(
+            islands,
+            SavePlan {
+                remark: judged.remark,
+                metrics: Some((candidates, eligible.len() as u64)),
+                encode: eligible,
+                drain: false,
+                #[cfg(test)]
+                verify: judged.verify,
+            },
+        );
         self.accept_snapshots(encoded, now_tick);
         self.submit_eager_saves();
     }
@@ -1466,14 +1469,17 @@ impl DirectorHost {
         dirty.dedup();
         // 强制保存不看单区块冷却。
         self.loaded_save_tick.clear();
-        let encoded = follow_all(islands, SavePlan {
-            remark: judged.remark,
-            encode: dirty,
-            metrics: None,
-            drain: false,
-            #[cfg(test)]
-            verify: judged.verify,
-        });
+        let encoded = follow_all(
+            islands,
+            SavePlan {
+                remark: judged.remark,
+                encode: dirty,
+                metrics: None,
+                drain: false,
+                #[cfg(test)]
+                verify: judged.verify,
+            },
+        );
         self.accept_snapshots(encoded, now_tick);
         // 强制保存：把这次刚拍的快照立刻交给 IO 线程，不等匀速（官方
         // `saveEverything` 同步存所有已经改过的区块）。仍走同一个有上限的队列。

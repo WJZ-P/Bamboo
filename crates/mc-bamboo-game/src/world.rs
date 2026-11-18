@@ -302,6 +302,15 @@ pub(crate) struct Master {
     /// 测试专用：运行时拆岛时故意漏搬这一类（改坏确认）。
     #[cfg(test)]
     pub(crate) split_skip: Option<crate::region::IslandPart>,
+    /// 测试专用：拆合之后故意弄坏新生成实体的状态（改坏确认，见
+    /// `world/island_runtime_tests.rs`）。`LoseEntity` 丢掉一个实体，`LoseTracking`
+    /// 清掉一个新实体的追踪配对。
+    ///
+    /// Test only: corrupt freshly spawned entities after a split or merge
+    /// (break-it checks, see `world/island_runtime_tests.rs`). `LoseEntity`
+    /// drops one entity; `LoseTracking` clears one fresh entity's pairing.
+    #[cfg(test)]
+    pub(crate) split_break: Option<crate::world::island_runtime::FreshEntityBreak>,
 }
 
 impl World {
@@ -480,6 +489,8 @@ impl World {
                 transit: std::collections::BTreeMap::new(),
                 #[cfg(test)]
                 split_skip: None,
+                #[cfg(test)]
+                split_break: None,
             },
             islands: {
                 let budget = MailBudget {
@@ -634,9 +645,10 @@ impl World {
                 };
             }
         }
-        self.master
-            .host
-            .tickets(&mut island_access(self.master.drive, &mut self.islands), ops);
+        self.master.host.tickets(
+            &mut island_access(self.master.drive, &mut self.islands),
+            ops,
+        );
         self.settle_islands();
     }
 
@@ -676,7 +688,10 @@ impl World {
         }
         let mut left = Vec::new();
         for &id in self.master.ticket_centers.keys() {
-            if players.binary_search_by_key(&id, |&(player, _)| player).is_err() {
+            if players
+                .binary_search_by_key(&id, |&(player, _)| player)
+                .is_err()
+            {
                 left.push(id);
             }
         }
@@ -1232,7 +1247,10 @@ impl World {
             if island.id == HOME_REGION {
                 home_busy = busy;
             } else {
-                island.region.profiler.record_duration(Metric::IslandBusy, busy);
+                island
+                    .region
+                    .profiler
+                    .record_duration(Metric::IslandBusy, busy);
             }
             let id = island.id;
             self.islands
@@ -1975,7 +1993,7 @@ impl World {
                     signature.clone(),
                     *time_millis,
                     *salt,
-                    last_seen.clone(),
+                    *last_seen,
                 );
                 self.with_all_players(island, |_, region| {
                     if chat::on_chat(
@@ -2749,8 +2767,6 @@ impl Schedule {
     }
 }
 
-#[path = "world/island_runtime.rs"]
-mod island_runtime;
 #[cfg(test)]
 #[path = "world/tests/compute_pool_tests.rs"]
 mod compute_pool_tests;
@@ -2763,12 +2779,14 @@ mod island_partition_tests;
 #[cfg(test)]
 #[path = "world/tests/island_pool_tests.rs"]
 mod island_pool_tests;
-#[cfg(test)]
-#[path = "world/island_scale_tests.rs"]
-mod island_scale_tests;
+#[path = "world/island_runtime.rs"]
+mod island_runtime;
 #[cfg(test)]
 #[path = "world/island_runtime_tests.rs"]
 mod island_runtime_tests;
+#[cfg(test)]
+#[path = "world/island_scale_tests.rs"]
+mod island_scale_tests;
 #[cfg(test)]
 #[path = "world/island_split_tests.rs"]
 mod island_split_tests;

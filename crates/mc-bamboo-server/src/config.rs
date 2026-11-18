@@ -114,6 +114,15 @@ pub struct ServerConfig {
     /// tick later. See `mc_bamboo_game::default_island_threads` for the default
     /// (`BAMBOO_ISLAND_THREADS` wins); bit-exact tests give 0 explicitly.
     pub island_threads: usize,
+    /// 多岛（`bamboo.toml` 的 `islands`）：`false` = 整个世界一个岛（精确模式、对拍、
+    /// 要求逐位一致的测试）；`true` = 分区器按相距很远的玩家群拆出各自的岛。缺省见
+    /// `mc_bamboo_game::default_islands`（环境变量 `BAMBOO_ISLANDS` 优先）。
+    ///
+    /// Multi-island mode (`islands` in `bamboo.toml`): `false` keeps the whole
+    /// world one island (exact mode, oracles, bit-exact tests); `true` lets the
+    /// partitioner split distant groups onto their own islands. See
+    /// `mc_bamboo_game::default_islands` for the default (`BAMBOO_ISLANDS` wins).
+    pub islands: bool,
     /// 世界生成参数（种子、世界类型、flat 预设、是否生成结构）。
     /// 嵌入用法（测试、oracle、压测）默认超平坦、种子 0；由 `server.properties`
     /// 新建的世界在 `ConfigFiles::to_server_config` 里改成官方默认 `normal`。
@@ -162,6 +171,7 @@ impl Default for ServerConfig {
             chunk_worker_threads: 0,
             mail_budget: MailBudget::default(),
             island_threads: mc_bamboo_game::default_island_threads(),
+            islands: mc_bamboo_game::default_islands(),
             world_gen: WorldGenConfig::default(),
             broadcast_console_to_ops: true,
             console_enabled: false,

@@ -45,6 +45,19 @@ const TRANSIT_PATIENCE: u64 = 40;
 /// 一次照做里最多来回几轮（放信可能让分区器又定下新的合并）。
 const SETTLE_ROUNDS: usize = 8;
 
+/// 测试专用：拆合之后故意弄坏一个新生成的实体（改坏确认）。正式构建里不存在。
+///
+/// Test only: corrupt one freshly spawned entity after a split or merge
+/// (break-it check). Absent in production builds.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FreshEntityBreak {
+    /// 拆出来的岛里丢掉一个下落方块实体。
+    LoseEntity,
+    /// 拆出来的岛里清掉一个新实体的追踪配对。
+    LoseTracking,
+}
+
 impl World {
     /// 照做分区器定下的拆合、搬跨岛的玩家、拆掉空岛、放出扣着的信（见模块说明）。
     /// 只在多岛开着、全部岛都停放时做；别的时候什么都不做。
@@ -81,6 +94,10 @@ impl World {
             }
             let moved = self.relocate_players();
             crossings += moved;
+            #[cfg(test)]
+            if changed && let Some(break_kind) = self.master.split_break {
+                self.apply_fresh_entity_break(break_kind);
+            }
             self.islands.drop_empty();
             if !changed && moved == 0 {
                 break;
@@ -100,6 +117,44 @@ impl World {
         self.assert_island_invariants();
     }
 
+    /// 改坏确认：拆合之后在刚变化的岛上丢掉一个新生成的下落方块实体，或者清掉它的追踪
+    /// 配对，用来确认「含新实体」的对照会抓到。正式构建里不存在。
+    ///
+    /// Break-it check: after a structural change, drop one fresh falling-block
+    /// entity or clear its tracking entry on the changed island, to confirm
+    /// the fresh-entity comparison catches it. Absent in production builds.
+    #[cfg(test)]
+    fn apply_fresh_entity_break(&mut self, kind: FreshEntityBreak) {
+        use mc_bamboo_blocks::entity::KindPublic;
+
+        let fresh: Vec<(RegionId, i32)> = self
+            .islands
+            .iter()
+            .flat_map(|island| {
+                island
+                    .region
+                    .entities
+                    .iter_public()
+                    .filter(|public| matches!(public.kind, KindPublic::FallingBlock { .. }))
+                    .map(|public| (island.id, public.uid))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let Some(&(id, uid)) = fresh.first() else {
+            return;
+        };
+        let island = self.islands.get_mut(id).expect("在表里");
+        match kind {
+            FreshEntityBreak::LoseEntity => island.region.entities.remove(uid),
+            FreshEntityBreak::LoseTracking => {
+                // 清掉配对：这一刻它的观察者名单空了，和对照世界的名单对不上。
+                // Clear the pairing: its watcher list is now empty and differs
+                // from the control world's.
+                island.region.entity_tracking.forget_watchers(uid);
+            }
+        }
+    }
+
     /// 把岛 `from` 整个倒进 `into`（`into` 不在就先建一个空的）。被吸收方的绝对时刻按
     /// 两岛时钟差平移（计划 5.1），邮筒跟着并，Director 里改记归属。
     ///
@@ -110,7 +165,10 @@ impl World {
         if into == from {
             return;
         }
-        assert_ne!(from, HOME_REGION, "家岛总是吸收方（分区器并进编号最小的岛）");
+        assert_ne!(
+            from, HOME_REGION,
+            "家岛总是吸收方（分区器并进编号最小的岛）"
+        );
         let Some(other) = self.islands.remove(from) else {
             self.master.host.merge_posts(into, from, &[]);
             return;
@@ -134,7 +192,12 @@ impl World {
     /// players standing there off island `from` into `to` (merged into `to`
     /// when it already exists, e.g. an empty home). Returns `false` while the
     /// two sides' views or entity pairings still overlap (someone crossing).
-    fn apply_split(&mut self, from: RegionId, to: RegionId, sections: &BTreeSet<SectionPos>) -> bool {
+    fn apply_split(
+        &mut self,
+        from: RegionId,
+        to: RegionId,
+        sections: &BTreeSet<SectionPos>,
+    ) -> bool {
         let inside = |pos: ChunkPos| sections.contains(&SectionPos::of(pos));
         let Some(island) = self.islands.get_mut(from) else {
             self.master.host.split_posts(from, to, sections, &[]);
@@ -147,7 +210,13 @@ impl World {
             .into_iter()
             .filter(|&pos| inside(pos))
             .collect();
-        chunks.extend(island.mailbox.positions().into_iter().filter(|&pos| inside(pos)));
+        chunks.extend(
+            island
+                .mailbox
+                .positions()
+                .into_iter()
+                .filter(|&pos| inside(pos)),
+        );
         let players: BTreeSet<PlayerId> = island
             .region
             .players
@@ -266,8 +335,7 @@ impl World {
             let source = self.islands.get_mut(from).expect("在表里");
             let origin = SectionPos::of(*chunks.first().expect("不为空"));
             let random = source.region.derive_island_random(0, origin);
-            let Ok(carrier) =
-                source.split_off_island_boxed(to, &chunks, &BTreeSet::new(), random)
+            let Ok(carrier) = source.split_off_island_boxed(to, &chunks, &BTreeSet::new(), random)
             else {
                 continue;
             };
@@ -334,7 +402,10 @@ impl World {
                 for dz in -1..=1 {
                     let near = ChunkPos::new(pos.x + dx, pos.z + dz);
                     if let Some(&other) = owner.get(&near) {
-                        assert_eq!(other, id, "岛 {id} 的 {pos:?} 和岛 {other} 的 {near:?} 相邻");
+                        assert_eq!(
+                            other, id,
+                            "岛 {id} 的 {pos:?} 和岛 {other} 的 {near:?} 相邻"
+                        );
                     }
                 }
             }

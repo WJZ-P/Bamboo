@@ -84,11 +84,11 @@ fn autosaving_every_tick_is_invisible_to_the_running_world() {
             }
         }
         // 每刻都走一次自动保存路径（没有 IO 线程时只做只读编码与记账）。
-        saved
-            .world
-            .master
-            .host
-            .save_loaded_dirty(&mut saved.world.islands.all_mut(), tick as u64 + 1, true);
+        saved.world.master.host.save_loaded_dirty(
+            &mut saved.world.islands.all_mut(),
+            tick as u64 + 1,
+            true,
+        );
         saved.tick();
         control.tick();
         let a = fingerprint(&saved.world.islands.region, &saved_client);

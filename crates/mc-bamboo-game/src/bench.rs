@@ -116,7 +116,8 @@ impl<'a> BenchWorld<'a> {
     /// 写一张容器槽位表；`kind` 决定格数。
     pub fn set_container(&mut self, pos: BlockPos, kind: BenchContainer, slots: Vec<ItemStack>) {
         let kind = kind.into_game();
-        let entry = crate::container::entry_in(&mut self.world.islands.region.containers, pos, kind);
+        let entry =
+            crate::container::entry_in(&mut self.world.islands.region.containers, pos, kind);
         entry.slots = slots;
         self.world.islands.region.touch(pos);
     }

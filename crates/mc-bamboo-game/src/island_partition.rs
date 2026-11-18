@@ -644,7 +644,10 @@ impl IslandPartition {
             };
             result.merges += 1;
             if self.record_ops {
-                self.ops.push(TopologyOp::Merge { into: target, from: id });
+                self.ops.push(TopologyOp::Merge {
+                    into: target,
+                    from: id,
+                });
             }
             for section in &group {
                 self.owner.insert(*section, target);

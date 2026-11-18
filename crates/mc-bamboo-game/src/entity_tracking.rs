@@ -112,9 +112,28 @@ impl EntityTracking {
     /// players outside it (a split waits until it is false).
     pub(crate) fn straddles(&self, players: &std::collections::BTreeSet<PlayerId>) -> bool {
         self.tracked.values().any(|entry| {
-            let inside = entry.seen_by.iter().filter(|id| players.contains(id)).count();
+            let inside = entry
+                .seen_by
+                .iter()
+                .filter(|id| players.contains(id))
+                .count();
             inside != 0 && inside != entry.seen_by.len()
         })
+    }
+
+    /// 只给改坏确认用：清掉一个实体的全部观察者，模拟「合并后追踪条目丢了」。
+    ///
+    /// Break-it checks only: clear an entity's watchers, simulating a lost
+    /// tracking entry after a merge.
+    #[cfg(test)]
+    pub(crate) fn forget_watchers(&mut self, entity: i32) -> bool {
+        match self.tracked.get_mut(&entity) {
+            Some(entry) => {
+                entry.seen_by.clear();
+                true
+            }
+            None => false,
+        }
     }
 
     /// 测试核对拆合用：每个被跟踪的实体和看得见它的玩家。

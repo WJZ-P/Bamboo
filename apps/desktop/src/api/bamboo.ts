@@ -44,6 +44,7 @@ export interface ServerSettings {
   deliveriesPerTick: number;
   reclaimsPerTick: number;
   islandThreads: number;
+  islands: boolean;
 }
 
 export type LogLevel = "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE";

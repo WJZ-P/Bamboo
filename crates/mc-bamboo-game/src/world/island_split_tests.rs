@@ -136,7 +136,10 @@ pub(super) fn at(center: ChunkPos, x: i32, y: i32, z: i32) -> BlockPos {
 }
 
 fn build(seed: u64) -> Scene {
-    let mut scene = set_up(seed, Harness::new_loaded_with_drive(2, IslandDrive::Lockstep));
+    let mut scene = set_up(
+        seed,
+        Harness::new_loaded_with_drive(2, IslandDrive::Lockstep),
+    );
     furnish_scene(&mut scene);
     scene
 }
@@ -198,6 +201,23 @@ pub(super) fn region_of_player(world: &mut super::World, id: PlayerId) -> &mut R
 
 /// 每组放上机器、打开菜单、排好待发的讲台格子和一条方块事件（见 [`furnish`]）。
 pub(super) fn furnish_scene(scene: &mut Scene) {
+    furnish_scene_with_sand(scene, 2)
+}
+
+/// 同 [`Self::furnish_scene`]，`sand_delay` 给出悬空沙子变成实体的计划刻延迟。严格逐字节
+/// 对照（岛的实施计划 6.2 第 2 条）把这次新生成推到比较窗口之后：实体网络 ID 是全进程
+/// 共享的原子分配器给的，多岛按岛编号轮流驱动时，同一批新实体领号的顺序本来就可能和
+/// 一个岛时不同；计划 6.2 第 1 条也明确「实体网络 ID 不进指纹」。沙子方块和计划刻仍留在
+/// 场景里参与拆合和指纹。
+///
+/// Like [`Self::furnish_scene`], with `sand_delay` as the delay of the sand's
+/// scheduled tick that spawns a falling-block entity. The strict byte-for-byte
+/// comparison (plan 6.2 item 2) pushes that spawn past its window: entity
+/// network ids come from a process-wide shared allocator, so several islands
+/// driven in id order may take them in a different order than one island;
+/// plan 6.2 item 1 also says network ids are not part of the fingerprint. The
+/// sand block and its scheduled tick still take part in splits and in the print.
+pub(super) fn furnish_scene_with_sand(scene: &mut Scene, sand_delay: i32) {
     let Scene {
         server,
         centers,
@@ -211,7 +231,7 @@ pub(super) fn furnish_scene(scene: &mut Scene) {
             region.tick_levels.chunk_ticks_entities(center),
             "第 {group} 组的中心区块要能跑实体"
         );
-        furnish(region, center, group as i32, now);
+        furnish_with_sand(region, center, group as i32, now, sand_delay);
     }
     for (group, client) in clients.iter() {
         let region = region_of_player(&mut server.world, client.id);
@@ -237,8 +257,19 @@ pub(super) fn furnish_scene(scene: &mut Scene) {
     }
 }
 
-/// 一组的机器和各张带位置的表。`salt` 让各组略有不同。
-pub(super) fn furnish(region: &mut Region, center: ChunkPos, salt: i32, now: RegionTick) {
+/// 一组的机器和各张带位置的表。`salt` 让各组略有不同，`sand_delay` 是悬空沙子的计划刻
+/// 延迟（见 [`Self::furnish_scene_with_sand`]）。
+///
+/// One group's machines and positioned tables. `salt` makes groups differ;
+/// `sand_delay` is the sand's scheduled tick delay (see
+/// [`Self::furnish_scene_with_sand`]).
+pub(super) fn furnish_with_sand(
+    region: &mut Region,
+    center: ChunkPos,
+    salt: i32,
+    now: RegionTick,
+    sand_delay: i32,
+) {
     let hopper_down = BlockState(blocks::HOPPER)
         .with(FACING_HOPPER, Direction::Down)
         .0;
@@ -353,7 +384,7 @@ pub(super) fn furnish(region: &mut Region, center: ChunkPos, salt: i32, now: Reg
     region.block_ticks.schedule(
         sand,
         block_id_of_state(blocks::SAND).expect("沙子"),
-        2,
+        sand_delay,
         TickPriority::Normal,
     );
 
@@ -395,7 +426,12 @@ pub(super) fn furnish(region: &mut Region, center: ChunkPos, salt: i32, now: Reg
 /// 新放一个漏斗（方块实体两边都新登记，ordinal 会撞，合并时要重排），再在拆分前那三条
 /// 远期刻的同一个（时刻，优先级）上排三条（顺序号两边各自往上数，合并后每组自己的先后
 /// 要不变）。`elapsed` 是从搭好场景起跑了几刻，`here` 说哪几组在这个岛上。
-pub(super) fn mid_run(region: &mut Region, centers: &[ChunkPos], here: &BTreeSet<usize>, elapsed: i32) {
+pub(super) fn mid_run(
+    region: &mut Region,
+    centers: &[ChunkPos],
+    here: &BTreeSet<usize>,
+    elapsed: i32,
+) {
     let hopper_down = BlockState(blocks::HOPPER)
         .with(FACING_HOPPER, Direction::Down)
         .0;
