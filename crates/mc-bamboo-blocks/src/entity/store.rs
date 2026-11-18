@@ -405,6 +405,13 @@ pub struct ChunkEntities {
     /// 读盘时不认识的实体类型（官方世界里的生物等），整条原样保留、写回。
     /// 它们不进 `EntityStore`，不参与逻辑，也不发给客户端。
     preserved: Vec<Tag>,
+    /// 刚从存档解出来：uid 只是占位、随机源还没有种子。放进表时按行的先后重新取号、
+    /// 从这个岛的种子源取种子。在岛之间整盒搬运的盒子没有这个标记，原样放回。
+    ///
+    /// Freshly decoded from disk: uids are placeholders and the random sources are
+    /// unseeded. Inserting takes new ids and seeds in row order. Boxes moved live
+    /// between islands lack the flag and go back unchanged.
+    from_disk: bool,
 }
 
 impl ChunkEntities {
@@ -423,9 +430,16 @@ impl ChunkEntities {
         &self.preserved
     }
 
-    /// 从实体行和保留条目建盒子，存档解码时用。
+    /// 从实体行和保留条目建盒子，存档解码时用：放进表时重新取号、取种子。
+    ///
+    /// Build a box from decoded rows and preserved entries. Inserting it assigns
+    /// fresh ids and seeds.
     pub fn from_parts(rows: Vec<EntityRow>, preserved: Vec<Tag>) -> Self {
-        Self { rows, preserved }
+        Self {
+            rows,
+            preserved,
+            from_disk: true,
+        }
     }
 }
 
@@ -433,7 +447,7 @@ impl ChunkEntities {
 ///
 /// 行槽的下标稳定，`take` / `put` O(1)；`index` 是 uid 到行号的映射，`grid` 是 16³ 段的行号索引。
 /// tick 期间新生成的实体进 `pending`，下一 tick 才开始 tick，和官方的 `EntityTickList` 一样。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct EntityStore {
     slots: Vec<Option<EntityRow>>,
     index: BTreeMap<EntityUid, usize>,
@@ -448,6 +462,18 @@ pub struct EntityStore {
     /// 共享的 ID 分配器句柄；表里不再有自己的计数器。
     /// Handle to the shared id allocator; the store has no counter of its own.
     ids: EntityIds,
+    /// 这个岛的实体种子源：每个实体生成（或读盘放进来）时从这里取一个 `nextLong` 当
+    /// 自己随机源的种子，见 [`Self::next_entity_seed`]。官方实体的随机源不带种子，
+    /// 所以种子从哪来不影响和官方一致；放在实体表上，拆合时跟着表走，取过的种子
+    /// 留在实体身上。和网络 ID 无关：多个岛交替取号也不改变谁拿到哪个种子。
+    ///
+    /// The island's entity seed source. Every entity spawned (or loaded from disk)
+    /// takes one `nextLong` from it as the seed of its own random. Vanilla entity
+    /// randoms are unseeded, so the source does not affect vanilla parity. It lives
+    /// on the table and splits and merges with it; a drawn seed stays on its entity.
+    /// Independent of network ids, so islands interleaving id allocation do not
+    /// change which entity gets which seed.
+    seeds: JavaRandom,
     pending: Vec<EntityRow>,
     ticking: bool,
     /// 读盘时不认识的实体类型，按区块原样保留。
@@ -460,9 +486,53 @@ pub struct EntityStore {
     wake_events: Vec<Aabb>,
 }
 
+impl Default for EntityStore {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            index: BTreeMap::new(),
+            taken: BTreeMap::new(),
+            free: Vec::new(),
+            grid: BTreeMap::new(),
+            by_type: BTreeMap::new(),
+            hard_colliding: BTreeSet::new(),
+            ids: EntityIds::default(),
+            seeds: JavaRandom::new(ENTITY_RANDOM_SEED),
+            pending: Vec::new(),
+            ticking: false,
+            preserved: Vec::new(),
+            watched_sections: HashSet::new(),
+            taken_snapshots: BTreeMap::new(),
+            wake_events: Vec::new(),
+        }
+    }
+}
+
 impl EntityStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 换掉种子源。对拍的假世界用它和官方那边的种子序列对齐。
+    ///
+    /// Replace the seed source; oracle worlds use it to line up with the
+    /// official side's seed sequence.
+    pub fn set_entity_seeds(&mut self, seed: i64) {
+        self.seeds = JavaRandom::new(seed);
+    }
+
+    /// 取下一个实体种子：新实体的随机源是 `JavaRandom::new(这个数)`。
+    ///
+    /// The next entity seed: a new entity's random is `JavaRandom::new(seed)`.
+    pub fn next_entity_seed(&mut self) -> i64 {
+        self.seeds.next_long()
+    }
+
+    /// 种子源现在的状态，拆合核对和测试用。
+    ///
+    /// The seed source's current state, for split checks and tests.
+    pub const fn entity_seed_state(&self) -> i64 {
+        self.seeds.state()
     }
 
     /// 从指定的实体 ID 开始分配（自己一个新计数器）。oracle 的假世界用这个对齐官方的
@@ -692,7 +762,7 @@ impl EntityStore {
     /// `addFreshEntity`：分配 ID 放进世界。tick 期间生成的实体下一 tick 才动。
     pub fn spawn(&mut self, mut entity: Entity) -> EntityUid {
         entity.id = self.ids.allocate();
-        entity.random = JavaRandom::new(i64::from(entity.id) ^ ENTITY_RANDOM_SEED);
+        entity.random = JavaRandom::new(self.next_entity_seed());
         // 物品的朝向和初速度用刚设好的实体随机源，不能用 `level.random`。
         entity.finish_item_random();
         entity.finish_mob_random();
@@ -710,7 +780,7 @@ impl EntityStore {
     pub fn spawn_row(&mut self, mut row: EntityRow) -> EntityUid {
         let uid = self.ids.allocate();
         row.public.uid = uid;
-        row.state.random = JavaRandom::new(i64::from(uid) ^ ENTITY_RANDOM_SEED);
+        row.state.random = JavaRandom::new(self.next_entity_seed());
         row.public.removed = false;
         if self.ticking {
             self.pending.push(row);
@@ -1039,6 +1109,7 @@ impl EntityStore {
         Ok(ChunkEntities {
             rows,
             preserved: self.take_preserved(chunk),
+            from_disk: false,
         })
     }
 
@@ -1065,7 +1136,11 @@ impl EntityStore {
             })
             .cloned()
             .collect();
-        Some(ChunkEntities { rows, preserved })
+        Some(ChunkEntities {
+            rows,
+            preserved,
+            from_disk: false,
+        })
     }
 
     /// 岛拆分（岛的实施计划 3.3「实体表整批搬」）：把位置落在 `chunks` 里的实体整批搬进
@@ -1097,8 +1172,18 @@ impl EntityStore {
             })
             .map(|(&uid, _)| uid)
             .collect();
+        // 新岛的种子源由原岛种子源现在的状态和搬走的最小区块搅出来：确定、和网络 ID
+        // 无关，原岛的种子源不动（拆了马上合回来逐位相同）。拆分的先后仍会影响它，
+        // 和岛的其余随机源一样等第 10 步定（计划 3.3「岛的随机源」）。
+        // The new island's seed source mixes the old source's state with the
+        // smallest moved chunk: deterministic, independent of network ids, and
+        // the old source is untouched, so split-then-merge stays bit-identical.
+        let origin = chunks.first().copied().unwrap_or(ChunkPos::new(0, 0));
+        let key = (u64::from(origin.x as u32) << 32) | u64::from(origin.z as u32);
+        let seeds = JavaRandom::new(splitmix(self.seeds.state() as u64 ^ splitmix(key)) as i64);
         let mut out = Self {
             ids: self.ids.clone(),
+            seeds,
             watched_sections: self.watched_sections.clone(),
             ..Self::default()
         };
@@ -1153,8 +1238,16 @@ impl EntityStore {
 
     /// 把盒子里的实体放回表里。调用方保证表里已经没有这个区块的实体。
     /// 不认识的实体类型不进表，只在 `take_chunk` 时原样带回盒子。
+    /// 刚读盘的盒子按行的先后重新取号、取种子（[`ChunkEntities::from_parts`]）。
+    ///
+    /// Put a box back. Unknown types stay out of the table. A freshly decoded box
+    /// takes new ids and seeds in row order.
     pub fn insert_chunk(&mut self, entities: ChunkEntities) {
-        for row in entities.rows {
+        for mut row in entities.rows {
+            if entities.from_disk {
+                row.public.uid = self.ids.allocate();
+                row.state.random = JavaRandom::new(self.next_entity_seed());
+            }
             self.insert_row(row);
         }
         self.preserved.extend(entities.preserved);
@@ -1173,6 +1266,14 @@ impl EntityStore {
         self.preserved = kept;
         taken
     }
+}
+
+/// SplitMix64 的一步，把相近的输入搅开。
+fn splitmix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// 保留条目所在的区块，按它的 `Pos`；缺失时按原点算，和 [`EntityStore::take_chunk`] 一致。
@@ -1537,6 +1638,13 @@ mod tests {
         Entity::ground_item(Vec3::new(x, 64.0, 0.5), ItemStack::new(1, 1))
     }
 
+    /// 生成时不取随机数的实体，测种子用。
+    fn block_at(x: f64) -> Entity {
+        let mut entity = Entity::falling_block(BlockPos::new(0, 64, 0), BlockState(blocks::SAND));
+        entity.position = Vec3::new(x, 64.0, 0.5);
+        entity
+    }
+
     /// 一张表单独分配时，号的序列和原来表内自带的计数器逐个相同：从
     /// `FIRST_ENTITY_ID` 起每次加一，`spawn` / `spawn_row` / tick 期间进 `pending`
     /// 的都一样。
@@ -1594,7 +1702,11 @@ mod tests {
         }
         let before: Vec<Entity> = store.iter().collect();
         let wanted: BTreeSet<ChunkPos> = [ChunkPos::new(2, 0)].into_iter().collect();
+        let seed_state = store.entity_seed_state();
         let mut island = store.split_off(&wanted).unwrap();
+        // 拆分不动原岛的种子源；新岛的种子源是另一条。
+        assert_eq!(store.entity_seed_state(), seed_state);
+        assert_ne!(island.entity_seed_state(), seed_state);
         assert!(store.sub_index_matches() && island.sub_index_matches());
         let rest: Vec<i32> = store.ids();
         let moved: Vec<i32> = island.ids();
@@ -1676,5 +1788,84 @@ mod tests {
         // 克隆一张表得到的是同一个计数器的句柄。
         // Cloning a store keeps a handle to the same counter.
         assert!(left.clone().ids_handle().same_counter(right.ids_handle()));
+    }
+
+    /// 实体随机源的种子只由它在自己岛上出现的先后决定：另一个岛插进来取了多少个网络
+    /// ID，都不改变这个岛上第 k 个实体拿到的种子。改坏确认：换回按网络 ID 派生时这条
+    /// 测试会失败（两种取号次序下的种子不同）。
+    ///
+    /// An entity's seed depends only on its order of appearance on its island:
+    /// another island taking ids in between does not change the k-th seed.
+    #[test]
+    fn entity_seeds_do_not_depend_on_network_ids() {
+        let seeds_of = |interleave: bool| {
+            let ids = EntityIds::new();
+            let mut mine = EntityStore::with_ids(ids.clone());
+            let mut other = EntityStore::with_ids(ids);
+            let mut seeds = Vec::new();
+            for n in 0..20 {
+                if interleave && n % 3 == 0 {
+                    other.spawn(block_at(100.5));
+                }
+                let uid = mine.spawn(block_at(f64::from(n) + 0.5));
+                seeds.push((uid, mine.get(uid).unwrap().random));
+            }
+            seeds
+        };
+        let alone = seeds_of(false);
+        let shared = seeds_of(true);
+        assert_ne!(
+            alone.iter().map(|(uid, _)| *uid).collect::<Vec<_>>(),
+            shared.iter().map(|(uid, _)| *uid).collect::<Vec<_>>(),
+            "交替取号时网络 ID 应该不同"
+        );
+        assert_eq!(
+            alone.iter().map(|(_, random)| *random).collect::<Vec<_>>(),
+            shared.iter().map(|(_, random)| *random).collect::<Vec<_>>(),
+        );
+        // 第 k 个实体的种子就是种子源的第 k 个 `nextLong`。
+        let mut source = JavaRandom::new(ENTITY_RANDOM_SEED);
+        for (_, random) in &alone {
+            assert_eq!(*random, JavaRandom::new(source.next_long()));
+        }
+    }
+
+    /// 刚读盘的盒子放进表时按行的先后重新取号、取种子（两个盒子的占位 uid 相同也不撞）；
+    /// 在岛之间整盒搬的盒子原样放回，号和随机源都不变。
+    ///
+    /// A freshly decoded box takes new ids and seeds in row order (two boxes with
+    /// the same placeholder uids do not collide); a live box keeps both.
+    #[test]
+    fn disk_boxes_take_fresh_ids_and_seeds_and_live_boxes_keep_theirs() {
+        let mut store = EntityStore::new();
+        let first = store.spawn(block_at(0.5));
+        let placeholder = |x: f64| {
+            let mut row = block_at(x).split();
+            row.public.uid = FIRST_ENTITY_ID;
+            row.state.random = JavaRandom::default();
+            row
+        };
+        store.insert_chunk(ChunkEntities::from_parts(
+            vec![placeholder(16.5)],
+            Vec::new(),
+        ));
+        store.insert_chunk(ChunkEntities::from_parts(
+            vec![placeholder(32.5)],
+            Vec::new(),
+        ));
+        assert_eq!(store.ids(), [first, first + 1, first + 2]);
+        let mut source = JavaRandom::new(ENTITY_RANDOM_SEED);
+        for uid in store.ids() {
+            assert_eq!(
+                store.get(uid).unwrap().random,
+                JavaRandom::new(source.next_long())
+            );
+        }
+        let before: Vec<Entity> = store.iter().collect();
+        let state = store.entity_seed_state();
+        let moved = store.take_chunk(ChunkPos::new(1, 0)).unwrap();
+        store.insert_chunk(moved);
+        assert_eq!(store.iter().collect::<Vec<_>>(), before);
+        assert_eq!(store.entity_seed_state(), state, "整盒搬运不取种子");
     }
 }

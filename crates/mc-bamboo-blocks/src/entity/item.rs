@@ -210,7 +210,17 @@ impl Entity {
             }
         } else {
             let movement = me.delta;
-            me.move_entity(ctx.blocks(), movement);
+            if no_physics {
+                // `Entity.move` 的 `noPhysics` 分支：直接挪位置、清四个碰撞标志，不做碰撞。
+                // The `noPhysics` branch of `Entity.move`: move straight through and clear
+                // the four collision flags.
+                me.position = me.position.add(movement);
+                me.horizontal_collision = false;
+                me.vertical_collision = false;
+                me.vertical_collision_below = false;
+            } else {
+                me.move_entity(ctx.blocks(), movement);
+            }
             if !no_physics {
                 me.apply_effects_from_blocks(ctx.blocks());
                 Self::item_hazards(me, ctx);
