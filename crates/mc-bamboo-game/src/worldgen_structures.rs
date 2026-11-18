@@ -492,7 +492,7 @@ pub fn structure_references_stage(
 
 /// 每区块的 Beardifier 由「种子 + 坐标」唯一决定，全局只算一次。terrain 阶段
 /// 只查这张表，不在计算池里重新跑 289 个邻域起点（那会让 1/4 线程的任务到达
-/// 顺序改变，暴露地物增量的规范序竞态）。
+/// 顺序改变，暴露地物增量的合并先后竞态）。
 ///
 /// A chunk's Beardifier depends only on seed and position; compute it once
 /// globally. The terrain stage only looks it up, so the compute pool's task

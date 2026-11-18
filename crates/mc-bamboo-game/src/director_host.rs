@@ -40,7 +40,7 @@ use crate::{
     profiler::{Profiler, SubPhase},
     region::{RegionColumn, parking::Parking},
     worldgen::GeneratedChunk,
-    worldgen_features::{BlockDelta, GenerateOutput, assemble_feature_column},
+    worldgen_features::{FeatureWrites, GenerateOutput, assemble_feature_column},
 };
 
 /// 编解码累计耗时（纳秒）。解析/序列化内联在世界线程上做，这里量出总耗时，
@@ -211,12 +211,12 @@ pub(crate) struct DirectorHost {
     /// copy-on-writes a new `Arc` via `Arc::make_mut` (design 5.3.1). Only the
     /// world thread mutates; the compute pool gets read-only `Arc` clones.
     partials: BTreeMap<ChunkPos, Arc<GeneratedChunk>>,
-    /// 每个区块累计的地物写增量，按世界线程收到结果的顺序（`TaskId` 升序）
-    /// 追加；完工组装时排成规范序再落盘，结果与追加顺序无关。
-    /// Per-chunk feature write deltas, appended in the order the world thread
-    /// receives results (ascending `TaskId`); sorted canonically at assembly so
-    /// the final blocks do not depend on append order.
-    feature_deltas: BTreeMap<ChunkPos, Vec<BlockDelta>>,
+    /// 每个区块累计的地物写，按世界线程收到结果的顺序（`TaskId` 升序）追加；
+    /// 每条都带来源中心下标，完工组装时按固定先后合，与追加顺序无关。
+    /// Per-chunk feature writes, appended in the order the world thread receives
+    /// results (ascending `TaskId`); each carries its source center index and
+    /// assembly merges in a fixed order, independent of append order.
+    feature_deltas: BTreeMap<ChunkPos, Vec<FeatureWrites>>,
     /// `light` 阶段算出的生成期光照，按区块存；完工组装时装进交付盒子并清掉。
     /// Generation-time light from the `light` stage, per chunk; installed into
     /// the delivered column at final assembly and cleared.
@@ -2077,12 +2077,13 @@ impl DirectorHost {
                 }
             }
             Task::Assemble { column, .. } => {
-                // 生成到完工后用不可变的 CARVERS 快照 + 累计的地物增量组装交付
-                // 盒子（增量排规范序，和合并顺序无关）；flat / 读盘路径没有这份
-                // 快照，原盒子照旧。组装和生成用的是同一个 `build_region_column`。
+                // 生成到完工后用不可变的 CARVERS 快照 + 累计的地物写组装交付
+                // 盒子（按来源中心固定先后合，和回执顺序无关）；flat / 读盘路径
+                // 没有这份快照，原盒子照旧。组装和生成用的是同一个
+                // `build_region_column`。
                 // At completion, assemble from the immutable CARVERS snapshot +
-                // accumulated feature deltas (canonical order, merge-order
-                // independent); flat / disk paths keep the original box.
+                // accumulated feature writes (fixed source-center order, reply-
+                // order independent); flat / disk paths keep the original box.
                 let mut column = match self.partials.get(&pos) {
                     Some(snapshot) => {
                         let mut deltas = self.feature_deltas.remove(&pos).unwrap_or_default();
@@ -2284,15 +2285,16 @@ impl DirectorHost {
     }
 
     /// 合并一次生成结果：`terrain` 的 CARVERS 快照进缓存（不可变 `Arc`，不改
-    /// 已有的那份）；地物写增量按 `TaskId` 顺序追加到目标区块的增量表。
+    /// 已有的那份）；地物写按 `TaskId` 顺序追加到目标区块的增量表。
     /// `compute_event` 已按 `TaskId` 升序、内联路径也在同一世界线程调用，所以
-    /// 追加顺序确定；完工时 `assemble_feature_column` 再排规范序，结果与顺序无关。
+    /// 追加顺序确定；完工时 `assemble_feature_column` 按来源的固定先后合，结果与
+    /// 追加顺序无关。
     ///
     /// Merge one generation result: cache the `terrain` CARVERS snapshot as an
     /// immutable `Arc` (never mutate an existing snapshot) and append feature
-    /// deltas to each target chunk's delta list in `TaskId` order. `compute_event`
-    /// calls this in ascending `TaskId` order; `assemble_feature_column` sorts
-    /// canonically at completion, so the result is order-independent.
+    /// writes to each target chunk's list in `TaskId` order. `compute_event`
+    /// calls this in ascending `TaskId` order; `assemble_feature_column` merges
+    /// by fixed source order at completion, so the result is order-independent.
     fn merge_generated(&mut self, pos: ChunkPos, output: &GenerateOutput) {
         if let Some(terrain) = &output.terrain {
             self.partials.insert(pos, Arc::clone(terrain));

@@ -2,15 +2,16 @@
 //!
 //! 一个区块 C 交付时的方块是 9 个中心（C 自己和 8 个邻居）各跑一遍地物、写进 C
 //! 的结果合起来。`gen-world` / `structure-e2e` 只比「以 C 为中心跑一遍」的 3×3，
-//! 经过不了游戏里把邻居溢出合进 C 的那条路径（`cached_feature_run` + 规范序合并）。
+//! 经过不了游戏里把邻居溢出合进 C 的那条路径（`cached_feature_run` + 固定先后合并）。
 //! 这里两边都走完整路径再比整块：
 //!
 //! * 官方：`ChunkgenOracle.java --merge-neighbors ORDERS` 造 5×5 个跑到 CARVERS 的
 //!   ProtoChunk，以 9 个中心各跑一次官方 `applyBiomeDecoration`（`runs` 必须是 9，
 //!   8 个邻居都真的跑过）。两种用法：
 //!   - `isolated`：每个中心都在干净的 3×3 上跑（跑完还原），交回每个中心写进 C 的
-//!     格子；这里按游戏的规范序规则（同一格取状态 ID 最大的）合成整块。比的是「官方
-//!     每个中心的输出」+「游戏的合并路径」，**必须 0 不一致**，另外逐个来源比写集。
+//!     格子；这里调游戏同一个 `merge_feature_writes`（按中心固定先后、同格先写的赢）
+//!     合成整块。比的是「官方每个中心的输出」+「游戏的合并路径」，**必须 0 不一致**，
+//!     另外逐个来源比写集。
 //!   - `center-first` / `center-last`：9 个中心按先后写进同一批共享 ProtoChunk（官方
 //!     `WorldGenRegion` 的语义，后跑的看得到先跑的写），交回 C 的最终方块。这和游戏
 //!     「每个中心看干净视图」的模型本来就不同，不一致只列出来，不算失败。
@@ -21,9 +22,10 @@
 //!
 //! `feature-merge`: whole-chunk oracle for merging neighbor feature spills. Vanilla
 //! runs `applyBiomeDecoration` on all 9 centers around C, either each on a clean
-//! view (`isolated`, merged here with the game's canonical rule; must match) or in
-//! order over shared ProtoChunks (`center-first` / `center-last`; model differences
-//! are listed only). The game delivers C through the real Director pipeline.
+//! view (`isolated`, merged here with the game's own `merge_feature_writes`; must
+//! match) or in order over shared ProtoChunks (`center-first` / `center-last`;
+//! model differences are listed only). The game delivers C through the real
+//! Director pipeline.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -38,7 +40,11 @@ use mc_bamboo_core::ChunkPos;
 use mc_bamboo_game::{
     MailBudget, World, WorldConfig,
     world_options::{LevelType, WorldGenConfig},
-    worldgen_features::oracle_merge::{MergeBreak, feature_writes_into, set_merge_break},
+    worldgen::GeneratedChunk,
+    worldgen_features::{
+        FeatureWrites, merge_feature_writes,
+        oracle_merge::{MergeBreak, feature_writes_into, set_merge_break},
+    },
 };
 use mc_bamboo_worldgen::feature::state::{official_name, state_from_official_name};
 use serde_json::Value;
@@ -47,7 +53,7 @@ use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: feature-merge <java> [--structures] [--target SEED X Z]... \
      [--orders isolated,center-first,center-last] [--threads N] [--show N] \
-     [--break-drop-neighbor DX DZ | --break-first-writer] | --scan SEED X0 Z0 SIDE [--structures]";
+     [--break-drop-neighbor DX DZ | --break-largest-state] | --scan SEED X0 Z0 SIDE [--structures]";
 
 /// 默认目标（`--scan` 挑的）：(-2,-2) 收到邻居的流体（湖）和树冠溢出，(0,0)、(2,2)
 /// 收到树冠溢出；三块都收到 8 个方向里大部分邻居的溢出。
@@ -126,7 +132,7 @@ impl Options {
                     }
                     options.break_mode = Some(MergeBreak::DropNeighbor { dx, dz });
                 }
-                "--break-first-writer" => options.break_mode = Some(MergeBreak::FirstWriterWins),
+                "--break-largest-state" => options.break_mode = Some(MergeBreak::LargestStateWins),
                 "--scan" => {
                     let seed = number(next(&mut index)?)?;
                     let x = number(next(&mut index)?)? as i32;
@@ -349,12 +355,12 @@ impl Report<'_> {
         self.compare(seed, x, z, order, &official, note)
     }
 
-    /// `isolated` 线：官方 9 个中心各自在干净视图上写进目标的格子，用游戏的规范序
-    /// 规则合（同一格取状态 ID 最大的那条，即 `(x,y,z,state)` 排序后最后一条），
-    /// 再和 Director 交付的方块比；另外逐个来源比「写了哪些格、写成什么」。
+    /// `isolated` 线：官方 9 个中心各自在干净视图上写进目标的格子，调游戏同一个
+    /// `merge_feature_writes`（按中心固定先后、同格先写的赢）合成整块，再和 Director
+    /// 交付的方块比；另外逐个来源比「写了哪些格、写成什么」。
     /// `isolated` line: merge the 9 vanilla per-center write sets with the game's
-    /// canonical rule (largest state id per cell), compare with the Director's
-    /// blocks, and diff each source's writes against the game's.
+    /// own `merge_feature_writes` (fixed center order, first writer wins), compare
+    /// with the Director's blocks, and diff each source's writes against the game's.
     fn on_isolated(&mut self, value: &Value) -> Result<(), String> {
         let get = |key: &str| {
             value
@@ -368,7 +374,7 @@ impl Report<'_> {
                 "seed {seed} ({x},{z}) isolated: not all 9 centers ran"
             ));
         }
-        let mut merged = official_blocks(value)?;
+        let baseline = official_blocks(value)?;
         let palette = value
             .get("writePalette")
             .and_then(Value::as_array)
@@ -387,19 +393,30 @@ impl Report<'_> {
             ));
         }
         let game = feature_writes_into(&config(seed, self.options.structures), x, z)?;
-        let mut best: HashMap<usize, u32> = HashMap::new();
+        let mut groups = Vec::with_capacity(sources.len());
         let mut source_diffs = Vec::new();
         for (slot, writes) in sources.iter().enumerate() {
             let mut official_writes: BTreeMap<usize, u32> = BTreeMap::new();
+            let mut deltas = Vec::new();
             for write in writes.as_array().ok_or("source is not an array")? {
                 let pair = write.as_array().ok_or("write is not a pair")?;
                 let cell = pair.first().and_then(Value::as_u64).ok_or("bad cell")? as usize;
                 let id = pair.get(1).and_then(Value::as_u64).ok_or("bad state")? as usize;
                 let state = *palette.get(id).ok_or("write state out of palette")?;
                 official_writes.insert(cell, state);
-                let entry = best.entry(cell).or_insert(state);
-                *entry = (*entry).max(state);
+                // 官方的 cell 下标是 (y*16+x)*16+z；转回世界坐标，交给游戏的
+                // 合并函数（它按来源下标排先后）。
+                // The oracle's cell index is (y*16+x)*16+z; turn it back into
+                // world coordinates and let the game's merge order the sources.
+                let y = mc_bamboo_world::MIN_Y + (cell / 256) as i32;
+                let lx = ((cell / 16) % 16) as i32;
+                let lz = (cell % 16) as i32;
+                deltas.push((x * 16 + lx, y, z * 16 + lz, state));
             }
+            groups.push(FeatureWrites {
+                slot: slot as u8,
+                deltas,
+            });
             let mut game_writes: BTreeMap<usize, u32> = BTreeMap::new();
             for &(wx, wy, wz, state) in &game[slot] {
                 let cell = ((wy - mc_bamboo_world::MIN_Y) as usize * 16 + (wx - x * 16) as usize)
@@ -422,9 +439,23 @@ impl Report<'_> {
                 ));
             }
         }
-        for (cell, state) in best {
-            merged[cell] = state;
-        }
+        // 官方整块线给的是干净 CARVERS 方块（9 个中心跑完还原后的目标区块），
+        // 逐格用它当地形，再调游戏同一份合并函数写进 9 个中心的写。
+        // `merge_feature_writes` 只读写 `blocks`，群系 / 高度图留空即可。
+        // The oracle's `blocks` array is the restored clean CARVERS target; use
+        // it as the terrain and apply the 9 centers' writes with the game's own
+        // merge function. Only `blocks` is read/written, so biomes and
+        // heightmaps can stay empty.
+        let mut merged = GeneratedChunk {
+            blocks: baseline
+                .chunks(256)
+                .map(<[u32]>::to_vec)
+                .collect::<Vec<Vec<u32>>>(),
+            biomes: Vec::new(),
+            heightmaps: Default::default(),
+        };
+        merge_feature_writes(&mut merged, groups);
+        let merged = merged.blocks.into_iter().flatten().collect::<Vec<u32>>();
         let note = if source_diffs.is_empty() {
             "per-source writes identical".to_owned()
         } else {
@@ -560,9 +591,9 @@ impl Report<'_> {
             }
         }
         println!(
-            "feature-merge: {} target×order lines, {} cells; isolated (canonical merge of \
-             vanilla per-center writes) {} differing; shared ProtoChunk orders {} differing; \
-             game spill writes by source {:?}",
+            "feature-merge: {} target×order lines, {} cells; isolated (fixed-order \
+             first-writer merge of vanilla per-center writes) {} differing; shared ProtoChunk \
+             orders {} differing; game spill writes by source {:?}",
             self.compared,
             self.cells,
             self.isolated_differing,

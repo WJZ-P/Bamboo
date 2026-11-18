@@ -59,6 +59,83 @@ use crate::{
 /// One feature `setBlock` write in world coordinates `(x, y, z, state id)`.
 pub(crate) type BlockDelta = (i32, i32, i32, u32);
 
+/// 一个来源中心写进目标区块的全部地物写。`slot` 是来源中心相对目标区块的
+/// 3×3 下标 `(dz+1)*3+(dx+1)`；中心自己是 4，其余按 `slot` 升序后到。
+/// 只有 `features` 阶段产生这些写，完工时 `assemble_feature_column` 按 `slot`
+/// 的先后合，同一格由先写的那个中心定下最终状态。
+///
+/// All feature writes from one source center into a target chunk. `slot` is the
+/// source center's 3×3 index `(dz+1)*3+(dx+1)` relative to the target: 4 for the
+/// target itself, then neighbors in ascending slot order. Only the `features`
+/// stage produces these; `assemble_feature_column` merges by `slot` order, so
+/// the first writer of a cell determines its final state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeatureWrites {
+    /// 来源中心的 3×3 下标；`assemble_feature_column` 按它升序排先后。
+    /// The source center's 3×3 index; assembly orders writers by it.
+    pub slot: u8,
+    /// 这一中心的写增量（同一格最多一条，见 `feature::world::last_writes`）。
+    /// The center's writes (at most one per cell, see `feature::world::last_writes`).
+    pub deltas: Vec<BlockDelta>,
+}
+
+/// 按中心的固定先后合并一组写：中心自己（`CENTER`）最先，其余 8 个来源按
+/// `slot` 升序，即 `(dz,dx)` 升序；同一格取最先写下的那条状态。
+///
+/// 游戏完工组装和 `feature-merge` 的 `isolated` 比法都调这里，保证两边合成规则
+/// 只有一份。各来源之间的先后只由 `slot` 决定，与分组传入顺序无关；同一来源对
+/// 同一格写了多次时，以它最后写下的那条为该中心的最终状态（真实数据里每个来源
+/// 每格最多一条，见 `feature::world::last_writes`）。越界的 y 由 `apply_deltas`
+/// 忽略。
+///
+/// Merge writes by fixed source order: the target itself (`CENTER`) first, then
+/// the eight neighbors in ascending slot / `(dz,dx)` order; the first write to a
+/// cell wins. Both assembly and the `isolated` oracle comparison call this, so
+/// the rule lives in one place. The order between sources depends only on `slot`,
+/// not on group order; repeated writes to a cell from one source resolve to its
+/// last write (real data has at most one per source per cell, see
+/// `feature::world::last_writes`). Out-of-range y values are ignored by
+/// `apply_deltas`.
+pub fn merge_feature_writes(
+    chunk: &mut GeneratedChunk,
+    groups: impl IntoIterator<Item = FeatureWrites>,
+) {
+    // 先按来源收敛：同一来源对同一格的多次写留下最后一条，作为该中心的最终状态。
+    // First collapse each source: its last write to a cell is its final state.
+    let mut per_slot: std::collections::BTreeMap<
+        u8,
+        std::collections::HashMap<(i32, i32, i32), u32>,
+    > = std::collections::BTreeMap::new();
+    for group in groups {
+        let writes = per_slot.entry(group.slot).or_default();
+        for &(x, y, z, state) in &group.deltas {
+            if (MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
+                writes.insert((x, y, z), state);
+            }
+        }
+    }
+    // 固定先后：中心自己最先，其余按 slot 升序。从后往前覆盖，先写的留下。
+    // Fixed order: the center first, then ascending slots. Walk backwards so
+    // earlier sources overwrite later ones and the first writer survives.
+    let mut order: Vec<u8> = per_slot.keys().copied().collect();
+    order.sort_by_key(|&slot| (u8::from(slot != CENTER as u8), slot));
+    let mut winners: std::collections::HashMap<(i32, i32, i32), u32> =
+        std::collections::HashMap::new();
+    for slot in order.into_iter().rev() {
+        for ((x, y, z), state) in per_slot.remove(&slot).unwrap_or_default() {
+            winners.insert((x, y, z), state);
+        }
+    }
+    let mut out: Vec<BlockDelta> = winners
+        .into_iter()
+        .map(|((x, y, z), state)| (x, y, z, state))
+        .collect();
+    // 每格只留一条，排序只为让落盘顺序也确定，与哈希表迭代次序无关。
+    // One entry per cell; sorted so even the apply order is deterministic.
+    out.sort_unstable();
+    apply_deltas(chunk, &out);
+}
+
 /// 一个生成阶段的产物。
 ///
 /// Output of one generation stage.
@@ -70,9 +147,9 @@ pub(crate) struct GenerateOutput {
     /// Clean CARVERS data from the `terrain` stage, for the world-thread
     /// neighbor snapshot cache; shares the global cache's `Arc` without a copy.
     pub(crate) terrain: Option<Arc<GeneratedChunk>>,
-    /// 给邻居（和中心自身）的写增量，按目标区块坐标分组。
-    /// Feature writes grouped by target chunk position.
-    pub(crate) deltas: Vec<(ChunkPos, Vec<BlockDelta>)>,
+    /// 给邻居（和中心自身）的地物写，按目标区块坐标分组，组内按来源中心分组。
+    /// Feature writes grouped by target chunk and, inside, by source center.
+    pub(crate) deltas: Vec<(ChunkPos, Vec<FeatureWrites>)>,
     /// `light` 阶段算出的生成期光照（中心柱的天空光 + 方块光）。`None` 表示
     /// 这一阶段不算光；世界线程在完工组装时装进交付盒子。
     /// Generation-time light for the center column from the `light` stage (sky +
@@ -354,7 +431,7 @@ pub fn game_features_with_mask_skipping(
 /// 一次「游戏里的完整生成流水线」结果，给 `gen-world --through structures` 对拍用。
 /// 走的是游戏里同一批阶段纯函数：`structure_starts` / `structure_references` /
 /// `terrain`（带 Beardifier）/ `features`（先结构后地物），最后按 Director 完工时的
-/// 规范序合并增量。
+/// 来源固定先后合并增量（先写的赢）。
 ///
 /// Result of the game's full generation pipeline for `gen-world --through structures`.
 /// It runs the same stage pure functions the game uses, then merges deltas the way
@@ -387,7 +464,6 @@ pub fn game_pipeline(
     cx: i32,
     cz: i32,
 ) -> Result<GamePipelineResult, String> {
-    use mc_bamboo_world::{MIN_Y, WORLD_HEIGHT};
     use mc_bamboo_worldgen::feature::CENTER;
 
     // 1. `STRUCTURE_STARTS` / `STRUCTURE_REFERENCES`（纯函数重算 + 缓存）。
@@ -416,7 +492,7 @@ pub fn game_pipeline(
             heightmaps: Default::default(),
         })
     });
-    let (result, stats) = run_features_filtered(
+    let (_result, stats) = run_features_filtered(
         config,
         cx,
         cz,
@@ -426,37 +502,24 @@ pub fn game_pipeline(
         None,
     )?;
     let mut final_blocks = blocks;
-    final_blocks[CENTER] = result.blocks[CENTER].clone();
-    // 4. Director 完工时的规范序：中心自己的写 + 8 个邻居中心溢进来的写。
-    let mut deltas = Vec::new();
-    deltas.extend(result.deltas[CENTER].iter().copied());
-    deltas.extend(
-        neighbor_deltas(cx, cz, &result)
-            .into_iter()
-            .flat_map(|(_, d)| d),
-    );
-    let mut terrain = final_blocks[CENTER].clone();
-    for (x, y, z, state) in &deltas {
-        if !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(y) {
-            continue;
-        }
-        let column = (x & 15) as usize * 16 + (z & 15) as usize;
-        if let Some(layer) = terrain.get_mut((y - MIN_Y) as usize) {
-            layer[column] = *state;
-        }
-    }
-    final_blocks[CENTER] = terrain;
-    // 8 个邻居中心溢进中心区块的写，按官方 `WorldGenRegion` 的语义纯函数重算。
-    let spills = neighbor_spills_into(config, cx, cz)?;
-    for (x, y, z, state) in spills {
-        if !(MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
-            continue;
-        }
-        let column = (x & 15) as usize * 16 + (z & 15) as usize;
-        if let Some(layer) = final_blocks[CENTER].get_mut((y - MIN_Y) as usize) {
-            layer[column] = state;
-        }
-    }
+    // 4. Director 完工时的合并规则：中心自己的写 + 8 个邻居中心溢进来的写，
+    //    按中心固定先后合、同格先写的赢（和正式组装路径用同一个函数）。
+    //    单中心 3×3 跑出的 `result.deltas[CENTER]` 是给邻居的增量，中心格要用
+    //    「相对干净地形变了哪些格」那一份；邻居的溢出由纯函数重算（带缓存）。
+    // 4. Assembly rule: the center's own writes plus 8 neighbor centers' spills,
+    //    merged by fixed center order with first-writer-wins (same function as the
+    //    real assembly path). `result.deltas[CENTER]` from this single 3×3 run is
+    //    the center's writes into other chunks; the center cell needs the diff
+    //    against clean terrain. Neighbor spills come from the cached pure runs.
+    let terrain = cached_generate_chunk_with_structures(config, cx, cz)?;
+    let mut chunk = (*terrain).clone();
+    merge_feature_writes(&mut chunk, feature_writes_into(config, cx, cz)?);
+    final_blocks[CENTER] = chunk.blocks;
+    // 这一步还交回单中心 3×3 的结构放置统计；方块取上面 9 个中心合出来的结果，
+    // `_result.blocks` / `_result.deltas` 不再用于交付盒子。
+    // This run also supplies the structure placement stats; blocks come from the
+    // merged 9-center result above, so the single-center blocks / deltas are not
+    // used for the delivered box.
     let references: Vec<(String, i64)> = data
         .references
         .iter()
@@ -739,80 +802,63 @@ pub(crate) fn pure_feature_blocks_for_test(
     cx: i32,
     cz: i32,
 ) -> Result<Vec<Vec<u32>>, String> {
-    let view = build_view(config, cx, cz)?;
-    let terrain = Arc::clone(&view[CENTER]);
-    let result = run_features(config, cx, cz, view)?;
-    let mut deltas = center_writes(cx, cz, &terrain, &result);
-    deltas.extend(neighbor_spills_into(config, cx, cz)?);
-    deltas.sort_unstable();
+    let terrain = cached_generate_chunk_with_structures(config, cx, cz)?;
     let mut chunk = (*terrain).clone();
-    apply_deltas(&mut chunk, &deltas);
+    merge_feature_writes(&mut chunk, feature_writes_into(config, cx, cz)?);
     Ok(chunk.blocks)
 }
 
-/// 8 个邻居中心的地物写进本区块的增量合起来。
+/// 9 个来源中心各自写进目标区块 `(cx,cz)` 的地物写，按来源下标分组。
 ///
-/// 官方里这些写来自邻居区块各自跑到 `FEATURES` 的 `WorldGenRegion`；Bamboo
-/// 的调度不保证它们都在本区块组装前完成，所以在中心这次 `features` 里纯函数
-/// 重算一遍（带缓存），保证本区块需要的增量集合**从自己的 features 结果就齐**，
-/// 与邻居任务什么时候落地无关。世界线程仍按 `TaskId` 顺序把各中心的增量合并、
-/// 完工排规范序，1/4 线程结果逐字节相同。
+/// 官方里这些写来自各区块跑到 `FEATURES` 的 `WorldGenRegion`；Bamboo 的调度不保证
+/// 邻居都在本区块组装前完成，所以在中心这次 `features` 里纯函数重算一遍（带缓存），
+/// 保证本区块需要的写集合**从自己的 features 结果就齐**，与邻居任务落地先后无关。
+/// 组装按中心的固定先后合，1/4 线程、缓存命中与否都逐字节相同。
 ///
-/// Writes that the 8 neighbor centers' features spill into this chunk. Vanilla
-/// gets these from neighbors' `WorldGenRegion`s; Bamboo's scheduler does not
-/// guarantee they all finish before this chunk is assembled, so recompute them
-/// purely here (cached) so this chunk's delta set is complete from its OWN
-/// features result, independent of neighbor timing. The world thread still
-/// merges every center's deltas in `TaskId` order and sorts canonically, so
-/// 1/4-thread results are byte-identical.
-fn neighbor_spills_into(
+/// The 9 source centers' writes into `(cx,cz)`, grouped by source index. Vanilla
+/// gets these from each center's `WorldGenRegion`; Bamboo's scheduler does not
+/// guarantee neighbors finish first, so this center's `features` task recomputes
+/// them purely (cached) and the chunk's write set is complete from its own task.
+/// Assembly merges in fixed center order, byte-identical for 1/4 threads and
+/// cache hits.
+pub fn feature_writes_into(
     config: &WorldGenConfig,
     cx: i32,
     cz: i32,
-) -> Result<Vec<BlockDelta>, String> {
-    let mut out = Vec::new();
+) -> Result<Vec<FeatureWrites>, String> {
+    let own = cached_feature_run(config, cx, cz)?;
+    let mut out = vec![FeatureWrites {
+        slot: CENTER as u8,
+        deltas: own.deltas[CENTER].clone(),
+    }];
     for dz in -1..=1 {
         for dx in -1..=1 {
-            if dx == 0 && dz == 0 {
+            let slot = ((dz + 1) * 3 + dx + 1) as usize;
+            if slot == CENTER {
                 continue;
             }
             let run = cached_feature_run(config, cx + dx, cz + dz)?;
             // 本区块在「以邻居为中心」的 3×3 里的格子下标。
             // This chunk's grid index in the neighbor-centered 3×3 view.
             let index = ((-dz + 1) * 3 + (-dx + 1)) as usize;
-            out.extend_from_slice(&run.deltas[index]);
+            out.push(FeatureWrites {
+                slot: slot as u8,
+                deltas: run.deltas[index].clone(),
+            });
         }
     }
     Ok(out)
 }
 
-/// `FeatureResult` 里给 8 个邻居的写增量，按目标区块坐标分组。
-///
-/// Group `FeatureResult`'s neighbor deltas by target chunk position.
-fn neighbor_deltas(cx: i32, cz: i32, result: &FeatureResult) -> Vec<(ChunkPos, Vec<BlockDelta>)> {
-    let mut out = Vec::new();
-    for index in 0..9 {
-        if index == CENTER || result.deltas[index].is_empty() {
-            continue;
-        }
-        let dz = index as i32 / 3 - 1;
-        let dx = index as i32 % 3 - 1;
-        out.push((
-            ChunkPos::new(cx + dx, cz + dz),
-            result.deltas[index].clone(),
-        ));
-    }
-    out
-}
-
 /// 中心「自己的地物」写增量：`blocks[CENTER]` 相对 CARVERS 地形变了的格子。
 ///
 /// 官方 `applyBiomeDecoration` 把中心自己的地物写进中心 ProtoChunk；把它表示成
-/// 增量，好和邻居溢出的增量一起按 `TaskId` 顺序合并（设计稿 5.3.1）。
+/// 增量，好和邻居溢出的增量一起按来源中心的固定先后合并（设计稿 5.3.1、
+/// `performance-optimizations.md` 18.10）。
 ///
 /// The center's own feature writes: cells where `blocks[CENTER]` differs from
 /// the clean CARVERS terrain. Expressed as deltas so they merge with neighbor
-/// overflow in `TaskId` order (design 5.3.1).
+/// overflow in fixed source-center order (design 5.3.1, section 18.10).
 fn center_writes(
     cx: i32,
     cz: i32,
@@ -837,22 +883,23 @@ fn center_writes(
 
 /// 跑一次 `features`：返回中心盒子（干净 CARVERS）+ 本区块完工需要的全部写增量。
 ///
-/// 本区块的方块是纯函数 F(C) = CARVERS(C) + 规范序合并 { C 自己的地物写，
-/// 8 个邻居中心溢进 C 的写 }，每一项都以对应中心的干净 3×3 视图算出，取自全进程
-/// 地物缓存 [`cached_feature_run`]：每个中心整个进程只算一次，不管它是作为本区块
-/// 还是作为谁的邻居被问到。所以任务只交回 `(C, 增量)` 一条，不再给邻居发增量
-/// （邻居自己的任务会从同一份缓存取到同样的写）。结果与线程数、回执先后、邻居是
-/// 不是从盘上读回都无关（`docs/performance-optimizations.md` 18.6）。
+/// 本区块的方块是纯函数 F(C) = CARVERS(C) + 固定先后合并 { C 自己的地物写，
+/// 8 个邻居中心溢进 C 的写 }，同格先写的赢。每一项都以对应中心的干净 3×3 视图算出，
+/// 取自全进程地物缓存 [`cached_feature_run`]：每个中心整个进程只算一次，不管它是作为
+/// 本区块还是作为谁的邻居被问到。所以任务只交回 `(C, 按来源分组的写)` 一条，不再给
+/// 邻居发增量（邻居自己的任务会从同一份缓存取到同样的写）。结果与线程数、回执先后、
+/// 邻居是不是从盘上读回都无关（`docs/performance-optimizations.md` 18.6）。
 ///
 /// Run one `features` stage: return the center column (clean CARVERS) plus every
 /// write this chunk needs at assembly. The chunk's blocks are the pure function
-/// F(C) = CARVERS(C) + canonical merge { C's own feature writes, the 8 neighbor
-/// centers' spills into C }, each computed on that center's clean 3×3 view and
-/// taken from the process-wide [`cached_feature_run`], so every center runs once
-/// per process whether asked for as itself or as someone's neighbor. The task
-/// returns only `(C, deltas)` and no longer sends deltas to neighbors (their own
-/// tasks read the same cached writes). The result does not depend on thread
-/// count, receipt order or whether neighbors were loaded from disk.
+/// F(C) = CARVERS(C) + fixed-order merge { C's own feature writes, the 8 neighbor
+/// centers' spills into C }, first writer wins per cell. Each item is computed on
+/// that center's clean 3×3 view and taken from the process-wide
+/// [`cached_feature_run`], so every center runs once per process whether asked for
+/// as itself or as someone's neighbor. The task returns only `(C, writes grouped
+/// by source)` and no longer sends deltas to neighbors (their own tasks read the
+/// same cached writes). The result does not depend on thread count, receipt order
+/// or whether neighbors were loaded from disk.
 pub(crate) fn generate_features_stage(
     config: &WorldGenConfig,
     cx: i32,
@@ -897,20 +944,19 @@ pub(crate) fn generate_features_stage(
         None
     };
 
-    let own = cached_feature_run(config, cx, cz)?;
-    let mut into_center = own.deltas[CENTER].clone();
-    into_center.extend(neighbor_spills_into(config, cx, cz)?);
+    #[allow(unused_mut)]
+    let mut groups = feature_writes_into(config, cx, cz)?;
     #[cfg(feature = "oracle-samples")]
-    oracle_merge::apply_break(config, cx, cz, &mut into_center)?;
+    oracle_merge::apply_break(config, cx, cz, &mut groups)?;
 
-    // 中心盒子先回到 CARVERS 地形，增量由世界线程合并进 `Arc` 后再组装。
+    // 中心盒子先回到 CARVERS 地形，写增量由世界线程按来源分组收集，完工再组装。
     // The center column returns to CARVERS terrain here; the world thread
-    // merges deltas into the `Arc` snapshot before final assembly.
+    // collects the source-grouped writes and assembles them at completion.
     let column = build_region_column(&terrain)?;
     Ok(GenerateOutput {
         column,
         terrain: None,
-        deltas: vec![(ChunkPos::new(cx, cz), into_center)],
+        deltas: vec![(ChunkPos::new(cx, cz), groups)],
         light: None,
         structures,
     })
@@ -925,7 +971,9 @@ pub(crate) fn generate_features_stage(
 pub mod oracle_merge {
     use std::sync::Mutex;
 
-    use super::{BlockDelta, CENTER, WorldGenConfig, cached_feature_run};
+    use super::{
+        CENTER, FeatureWrites, WorldGenConfig, feature_writes_into as game_feature_writes_into,
+    };
 
     /// 故意改坏合并，确认对拍抓得到。
     /// A deliberate merge corruption, to prove the oracle catches it.
@@ -934,10 +982,9 @@ pub mod oracle_merge {
         /// 丢掉 `(cx+dx, cz+dz)` 这个邻居溢进本区块的写。
         /// Drop the spill from the neighbor at `(cx+dx, cz+dz)`.
         DropNeighbor { dx: i32, dz: i32 },
-        /// 同一格多次写时不按规范序，改成「先写的赢」（中心自己最先，邻居按 (dz,dx)）。
-        /// Resolve same-cell writes by "first writer wins" instead of the
-        /// canonical order (the center first, then neighbors in (dz,dx) order).
-        FirstWriterWins,
+        /// 同格冲突退回旧规则：状态 ID 最大的赢。
+        /// Revert same-cell conflicts to the old rule: the largest state id wins.
+        LargestStateWins,
     }
 
     /// 开关只对这一个种子生效，别的世界不受影响。
@@ -954,9 +1001,9 @@ pub mod oracle_merge {
 
     pub(super) fn apply_break(
         config: &WorldGenConfig,
-        cx: i32,
-        cz: i32,
-        deltas: &mut Vec<BlockDelta>,
+        _cx: i32,
+        _cz: i32,
+        groups: &mut Vec<FeatureWrites>,
     ) -> Result<(), String> {
         let setting = MERGE_BREAK.lock().ok().and_then(|slot| *slot);
         let Some((seed, mode)) = setting else {
@@ -967,23 +1014,28 @@ pub mod oracle_merge {
         }
         match mode {
             MergeBreak::DropNeighbor { dx, dz } => {
-                let run = cached_feature_run(config, cx + dx, cz + dz)?;
-                let index = ((-dz + 1) * 3 + (-dx + 1)) as usize;
-                let dropped: std::collections::HashSet<BlockDelta> =
-                    run.deltas[index].iter().copied().collect();
-                deltas.retain(|delta| !dropped.contains(delta));
+                let slot = ((dz + 1) * 3 + dx + 1) as u8;
+                groups.retain(|group| group.slot != slot);
             }
-            MergeBreak::FirstWriterWins => {
-                let mut seen = std::collections::HashSet::new();
-                deltas.retain(|&(x, y, z, _)| seen.insert((x, y, z)));
+            MergeBreak::LargestStateWins => {
+                // 旧规则：按 `(x,y,z,state)` 排序后同格最后一条（状态 ID 最大）生效。
+                // 把全部写混进一个来源组，组内后面的写覆盖前面的，效果与旧规则一致。
+                // Old rule: after sorting `(x,y,z,state)` the last entry (largest
+                // state id) wins. Mixing all writes into one group in that sorted
+                // order gives the same result, since later in-group writes win.
+                let mut all: Vec<super::BlockDelta> = groups
+                    .iter()
+                    .flat_map(|group| group.deltas.iter().copied())
+                    .collect();
+                all.sort_unstable();
+                for group in groups.iter_mut() {
+                    group.deltas.clear();
+                }
+                groups[CENTER].deltas = all;
             }
         }
         Ok(())
     }
-
-    /// 9 个来源中心各自写进目标区块的 `(x, y, z, 状态)`。
-    /// The `(x, y, z, state)` writes into a target chunk from each of 9 source centers.
-    pub type WritesBySource = [Vec<(i32, i32, i32, u32)>; 9];
 
     /// 写进 `(cx, cz)` 的全部地物写，按来源中心分 9 份：下标 `(dz+1)*3 + (dx+1)`
     /// 是以 `(cx+dx, cz+dz)` 为中心那一遍写进本区块的（中心格是本区块自己的）。
@@ -997,19 +1049,11 @@ pub mod oracle_merge {
         config: &WorldGenConfig,
         cx: i32,
         cz: i32,
-    ) -> Result<WritesBySource, String> {
-        let mut out: [Vec<BlockDelta>; 9] = std::array::from_fn(|_| Vec::new());
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                let run = cached_feature_run(config, cx + dx, cz + dz)?;
-                let index = ((-dz + 1) * 3 + (-dx + 1)) as usize;
-                let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
-                out[slot] = if slot == CENTER {
-                    run.deltas[CENTER].clone()
-                } else {
-                    run.deltas[index].clone()
-                };
-            }
+    ) -> Result<[Vec<super::BlockDelta>; 9], String> {
+        let groups = game_feature_writes_into(config, cx, cz)?;
+        let mut out: [Vec<super::BlockDelta>; 9] = std::array::from_fn(|_| Vec::new());
+        for group in groups {
+            out[group.slot as usize] = group.deltas;
         }
         Ok(out)
     }
@@ -1064,23 +1108,21 @@ pub(crate) fn apply_deltas(chunk: &mut GeneratedChunk, deltas: &[BlockDelta]) {
     }
 }
 
-/// 完工时用「CARVERS 地形 + 一组写增量」组装交付盒子。
+/// 完工时用「CARVERS 地形 + 按来源分组的地物写」组装交付盒子。
 ///
-/// 写增量在交付前按 `(x, y, z, state)` 排成规范序再落盘：合进缓存的先后
-/// （`TaskId` 批处理顺序、1 线程还是 4 线程）不影响最终方块。同格重复写时
-/// 规范序里最后那条生效，结果逐字节确定。
+/// [`merge_feature_writes`] 按来源中心的固定先后合、同格先写的赢：追加顺序
+/// （`TaskId` 批处理顺序、1 线程还是 4 线程）不影响最终方块，结果逐字节确定。
 ///
-/// Assemble the delivered box from CARVERS terrain + a set of deltas. Deltas
-/// are sorted into canonical `(x, y, z, state)` order before being applied, so
-/// the merge order (`TaskId` batching, 1 vs 4 threads) cannot change the final
-/// blocks; a duplicate cell resolves to the last entry of that canonical order.
+/// Assemble the delivered box from CARVERS terrain + source-grouped feature
+/// writes. [`merge_feature_writes`] merges in a fixed center order with
+/// first-writer-wins, so append order (`TaskId` batching, 1 vs 4 threads) cannot
+/// change the final blocks; results are byte-identical.
 pub(crate) fn assemble_feature_column(
     terrain: &GeneratedChunk,
-    deltas: &mut [BlockDelta],
+    groups: &mut Vec<FeatureWrites>,
 ) -> Result<Box<RegionColumn>, String> {
-    deltas.sort_unstable();
     let mut chunk = terrain.clone();
-    apply_deltas(&mut chunk, deltas);
+    merge_feature_writes(&mut chunk, groups.drain(..));
     build_region_column(&chunk)
 }
 
@@ -1288,25 +1330,125 @@ mod tests {
         );
     }
 
-    /// 增量合并按 `(x,y,z,state)` 规范序：追加顺序不同，最终方块也相同。
-    /// Canonical `(x,y,z,state)` sort: different append orders give equal blocks.
+    /// 同一格多次写按来源中心的固定先后、先写的赢：中心自己最先，邻居按
+    /// `(dz,dx)`；追加顺序不同不改变最终方块；同一来源对同一格写两次时以它
+    /// 最后写下的那条为该中心的最终状态。
+    /// First-writer-wins by source order: the center first, then neighbors in
+    /// `(dz,dx)`; append order does not change the final blocks, and repeated
+    /// writes from one source resolve to its last write.
     #[test]
-    fn assemble_is_independent_of_delta_order() {
+    fn assemble_resolves_conflicts_by_first_writer() {
         let config = normal(7);
         let terrain = cached_generate_chunk(&config, 0, 0).unwrap();
-        let mut a = vec![(3, 0, 5, 111), (4, 1, 6, 222), (3, 0, 5, 111)];
-        let mut b = vec![(4, 1, 6, 222), (3, 0, 5, 111), (3, 0, 5, 111)];
+        let groups = |order: &[u8]| {
+            order
+                .iter()
+                .map(|&slot| FeatureWrites {
+                    slot,
+                    deltas: vec![(3, 0, 5, 100 + slot as u32), (slot as i32, 1, 6, 222)],
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut a = groups(&[CENTER as u8, 0, 8]);
+        let mut b = groups(&[8, 0, CENTER as u8]);
+        let mut c = groups(&[0, 8, CENTER as u8]);
+        // 一个中心对同一格写了两次：以它最后写下的为准。
+        // One center wrote the same cell twice: its last write is the final one.
+        c.push(FeatureWrites {
+            slot: CENTER as u8,
+            deltas: vec![(3, 0, 5, 999)],
+        });
         let ca = assemble_feature_column(&terrain, &mut a).unwrap();
         let cb = assemble_feature_column(&terrain, &mut b).unwrap();
-        assert_eq!(ca.parts().column.untouched(), cb.parts().column.untouched());
-        let wa = ca.parts().column.chunk();
-        let wb = cb.parts().column.chunk();
-        for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
-            for x in 0..16 {
-                for z in 0..16 {
-                    assert_eq!(wa.block(x, y, z), wb.block(x, y, z), "at ({x},{y},{z})");
+        let cc = assemble_feature_column(&terrain, &mut c).unwrap();
+        assert_eq!(
+            ca.parts().column.chunk().block(3, 0, 5),
+            100 + CENTER as u32,
+            "the center writes first even when appended last"
+        );
+        assert_eq!(
+            cb.parts().column.chunk().block(3, 0, 5),
+            100 + CENTER as u32,
+            "group order does not matter"
+        );
+        assert_eq!(
+            cc.parts().column.chunk().block(3, 0, 5),
+            999,
+            "a source's last write to a cell is its final state"
+        );
+        assert_eq!(
+            ca.parts().column.chunk().block(3, 0, 5),
+            cb.parts().column.chunk().block(3, 0, 5)
+        );
+        for (wa, wb) in [(ca.parts().column.chunk(), cb.parts().column.chunk())] {
+            for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
+                for x in 0..16 {
+                    for z in 0..16 {
+                        assert_eq!(wa.block(x, y, z), wb.block(x, y, z), "at ({x},{y},{z})");
+                    }
                 }
             }
         }
+    }
+
+    /// 同一个中心的写增量（中心自己的写、8 份溢出）每格最多一条：中心写由
+    /// 逐格比对得出，溢出由 `feature::world::last_writes` 收敛成最后一次写。
+    /// Each source center's deltas contain at most one write per cell.
+    #[test]
+    fn feature_writes_have_one_write_per_source_and_cell() {
+        let config = normal(0x0fea_7c0e);
+        for &(cx, cz) in &[(5, -3), (6, -3), (5, -2)] {
+            let groups = feature_writes_into(&config, cx, cz).unwrap();
+            assert_eq!(groups.len(), 9);
+            for group in &groups {
+                let mut cells: std::collections::HashSet<(i32, i32, i32)> =
+                    std::collections::HashSet::new();
+                for &(x, y, z, _) in &group.deltas {
+                    assert!(
+                        cells.insert((x, y, z)),
+                        "slot {} wrote a cell twice",
+                        group.slot
+                    );
+                }
+            }
+        }
+        assert!(
+            feature_writes_into(&config, 5, -3)
+                .unwrap()
+                .iter()
+                .any(|group| !group.deltas.is_empty()),
+            "the test area must have feature writes"
+        );
+    }
+
+    /// 合并规则和「按来源先后逐条写、同格只在第一次写时落下」等价，
+    /// 且对分组顺序、缓存命中与否都不敏感（真实数据每个来源每格只有一条写）。
+    /// The merge equals a literal sequential first-writer-wins pass and is
+    /// insensitive to group order and cache hits (real data has one write per
+    /// source per cell).
+    #[test]
+    fn merge_feature_writes_matches_a_sequential_first_pass() {
+        let config = normal(0x0fea_7c0f);
+        let terrain = cached_generate_chunk(&config, 0, 0).unwrap();
+        let groups = feature_writes_into(&config, 0, 0).unwrap();
+        let mut chunk = (*terrain).clone();
+        merge_feature_writes(&mut chunk, groups.iter().cloned());
+        let mut expected = (*terrain).clone();
+        let mut written = std::collections::HashSet::new();
+        let mut ordered = groups.clone();
+        ordered.sort_by_key(|group| (u8::from(group.slot != CENTER as u8), group.slot));
+        for group in ordered {
+            for &(x, y, z, state) in &group.deltas {
+                if written.insert((x, y, z)) {
+                    apply_deltas(&mut expected, &[(x, y, z, state)]);
+                }
+            }
+        }
+        assert_eq!(chunk.blocks, expected.blocks);
+        let mut reversed = groups;
+        reversed.reverse();
+        let mut again = (*terrain).clone();
+        merge_feature_writes(&mut again, reversed);
+        assert_eq!(again.blocks, expected.blocks);
     }
 }
