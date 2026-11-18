@@ -2613,7 +2613,8 @@ public final class Probe {
                             && actor.commandParses("kick " + late.player)
                             && actor.commandParses("gamerule random_tick_speed")
                             && actor.commandParses("gamerule random_tick_speed 1")
-                            && actor.commandParses("gamerule minecraft:tnt_explodes false"));
+                            && actor.commandParses("gamerule minecraft:tnt_explodes false")
+                            && actor.commandParses("summon minecraft:cow 12 -60 8"));
             check("commands: incomplete or unknown input fails in the client tree",
                     !actor.commandParses("nope")
                             && !actor.commandParses("gamemode")
@@ -2647,6 +2648,21 @@ public final class Probe {
             await("commands: stairs keep the named facing", () -> {
                 BlockState state = actor.blocks.get(stairs);
                 return state != null && state.is(Blocks.OAK_STAIRS) && state.getValue(StairBlock.FACING) == Direction.EAST;
+            });
+
+            // 牛的生成包、元数据、属性包和之后的移动包，都要能被官方的包定义解析。
+            // The cow's spawn, metadata, attributes and later movement packets must
+            // all decode with the official packet definitions.
+            actor.send(new ServerboundChatCommandPacket("summon minecraft:cow 12 -60 8"));
+            await("cow: /summon sends an add_entity", () -> actor.cowAdds == 1);
+            await("cow: the pairing bundle carries metadata", () -> actor.cowData >= 1);
+            await("cow: the pairing bundle carries attributes", () -> actor.cowAttributes >= 1);
+            check("cow: the client knows the new entity", actor.remotes.containsKey(actor.lastCowId));
+            check("cow: the client sees a cow",
+                    actor.remotes.get(actor.lastCowId).type == EntityTypes.COW);
+            await("cow: the cow moves or turns as the ticks pass", () -> {
+                Remote cow = actor.remotes.get(actor.lastCowId);
+                return cow != null && (cow.moves + cow.syncs > 0);
             });
 
             actor.send(new ServerboundChatCommandPacket("fill 6 -59 6 7 -59 7 dirt"));
@@ -3083,6 +3099,10 @@ public final class Probe {
         int takenAmount;
         /** 最近一次出现的物品实体。 */
         int lastItemId = -1;
+        int lastCowId = -1;
+        int cowAdds;
+        int cowAttributes;
+        int cowData;
         int lastAck = -1;
         /** 最近一次 `CHANGE_GAME_MODE` 的参数。还没收到时是 NaN。 */
         // The latest `CHANGE_GAME_MODE` parameter. NaN until one arrives.
@@ -3850,6 +3870,9 @@ public final class Probe {
 
         private void onEntityData(ClientboundSetEntityDataPacket packet) {
             entityDataPackets += 1;
+            if (packet.id() == lastCowId) {
+                cowData += 1;
+            }
             var values = packet.packedItems();
             Map<Integer, Object> known = metadata.computeIfAbsent(packet.id(), id -> new HashMap<>());
             values.forEach(value -> known.put(value.id(), value.value()));
@@ -3875,6 +3898,13 @@ public final class Probe {
         }
 
         private void onAttributes(ClientboundUpdateAttributesPacket packet) {
+            if (packet.getEntityId() == lastCowId) {
+                cowAttributes += 1;
+                check("cow: attributes carry the cow's movement speed",
+                        packet.getValues().stream().anyMatch(snapshot ->
+                                snapshot.attribute().unwrapKey().map(key -> key.identifier().getPath().equals("movement_speed")).orElse(false)));
+                return;
+            }
             check("play: attributes are only sent to the player itself", packet.getEntityId() == entityId);
             // 进服第一包是创造触及距离。`/gamemode` 之后还会再发。
             //
@@ -3974,7 +4004,15 @@ public final class Probe {
             boolean falling = packet.getType() == EntityTypes.FALLING_BLOCK;
             boolean tnt = packet.getType() == EntityTypes.TNT;
             boolean item = packet.getType() == EntityTypes.ITEM;
-            check("entity: only players, falling blocks, primed tnt and items are added", player || falling || tnt || item);
+            boolean cow = packet.getType() == EntityTypes.COW;
+            check("entity: only players, falling blocks, primed tnt, items and cows are added",
+                    player || falling || tnt || item || cow);
+            if (cow) {
+                lastCowId = packet.getId();
+                cowAdds += 1;
+                check("cow: add_entity has no payload data", packet.getData() == 0);
+                check("cow: add_entity starts with no movement", packet.getMovement().equals(Vec3.ZERO));
+            }
             if (item) {
                 lastItemId = packet.getId();
             }

@@ -2669,3 +2669,37 @@ fn adventure_mode_can_break_does_not_allow_placing() {
 
     assert_eq!(block_at(&mut server, ABOVE), Some(blocks::AIR));
 }
+
+/// 牛的刷怪蛋：右键地面生成一头牛，生存模式消耗一个，之后的同步会把它发给客户端。
+#[test]
+fn a_cow_spawn_egg_places_a_cow_and_consumes_the_egg() {
+    let mut server = Harness::new(2);
+    let client = server.join_and_settle("kitten");
+    server
+        .region()
+        .chunks
+        .set_block(GROUND, blocks::GRASS_BLOCK);
+    {
+        let player = server.region().players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        player.inventory.slots[slot] = ItemStack::new(items::COW_SPAWN_EGG, 2);
+        player.game_mode = GameMode::Survival;
+    }
+    client.take_frames();
+    click_top(&server, &client, GROUND, 1);
+    // `EntityTickList` 下一刻才把新牛并进表，再走一次追踪同步。
+    server.tick();
+    let frames: Vec<Frame> = client.take_frames();
+    assert!(
+        frames_with_id(&frames, clientbound::ADD_ENTITY).len() == 1,
+        "客户端应该收到一头牛的生成包"
+    );
+    let player = server.region().players.get(&client.id).unwrap();
+    let slot = player.inventory.hand_slot(Hand::Main);
+    assert_eq!(player.inventory.slots[slot].count, 1, "刷怪蛋要消耗一个");
+    assert_eq!(
+        server.region().entities.ids().len(),
+        1,
+        "世界里应该有一头牛"
+    );
+}

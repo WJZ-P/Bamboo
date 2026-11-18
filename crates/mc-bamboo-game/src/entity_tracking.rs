@@ -77,6 +77,7 @@ impl EntityTracking {
     ) -> Self {
         let tracked = std::mem::take(&mut self.tracked);
         let mut out = Self::default();
+
         for (id, entry) in tracked {
             let moves = entities.contains(&id)
                 || (!entry.seen_by.is_empty() && entry.seen_by.is_subset(players));
@@ -935,6 +936,18 @@ pub(crate) fn sync(region: &mut Region) {
     let snapshots: Vec<Snapshot> = region.entities.iter_public().map(Snapshot::of).collect();
     let live: BTreeSet<i32> = snapshots.iter().map(|snapshot| snapshot.id).collect();
     remove_missing(region, &live);
+    // 新实体的 `TrackedEntity` 用生成那一刻的样子建，配对包的速度才和官方一致。
+    // New entities get their `TrackedEntity` from the spawn-time snapshot, so
+    // the pairing packet's velocity matches vanilla.
+    for public in region.entities.take_spawn_snapshots() {
+        if !region.entity_tracking.tracked.contains_key(&public.uid) {
+            let snapshot = Snapshot::of(&public);
+            region
+                .entity_tracking
+                .tracked
+                .insert(public.uid, TrackedEntity::new(&snapshot));
+        }
+    }
 
     let view_distance = region.view_distance;
     let cells = PlayerCells::build(&region.players, view_distance);

@@ -484,6 +484,12 @@ pub struct EntityStore {
     taken_snapshots: BTreeMap<EntityUid, (Aabb, Option<ItemStack>)>,
     /// 位置或堆变了的实体的新包围盒，交给方块实体表精确判定。
     wake_events: Vec<Aabb>,
+    /// 刚进世界的实体的公开数据，供同步层按官方 `ChunkMap.addEntity` 的时机建
+    /// `ServerEntity`。`sync` 每刻取走一次。
+    ///
+    /// Public data for entities that just joined the world, so the sync layer
+    /// can create its tracking state at vanilla `ChunkMap.addEntity` timing.
+    spawn_snapshots: BTreeMap<EntityUid, EntityPublic>,
 }
 
 impl Default for EntityStore {
@@ -504,6 +510,7 @@ impl Default for EntityStore {
             watched_sections: HashSet::new(),
             taken_snapshots: BTreeMap::new(),
             wake_events: Vec::new(),
+            spawn_snapshots: BTreeMap::new(),
         }
     }
 }
@@ -796,6 +803,7 @@ impl EntityStore {
     pub fn add(&mut self, entity: Entity) -> EntityUid {
         let uid = entity.id;
         let row = entity.split();
+        self.spawn_snapshots.insert(uid, row.public.clone());
         if self.ticking {
             self.pending.push(row);
         } else {
@@ -819,6 +827,7 @@ impl EntityStore {
         row.public.uid = uid;
         row.state.random = JavaRandom::new(self.next_entity_seed());
         row.public.removed = false;
+        self.spawn_snapshots.insert(uid, row.public.clone());
         if self.ticking {
             self.pending.push(row);
         } else {
@@ -1008,6 +1017,15 @@ impl EntityStore {
     /// 同步关注段集合。方块实体表里的登记变了才调，空集合时以后每次写入只多一个分支。
     pub fn set_watched_sections(&mut self, sections: HashSet<(i32, i32, i32)>) {
         self.watched_sections = sections;
+    }
+
+    /// 取走这一刻刚进世界的实体快照（uid 升序），同步层用它建跟踪状态。
+    ///
+    /// Take this tick's spawn snapshots in uid order for the sync layer.
+    pub fn take_spawn_snapshots(&mut self) -> Vec<EntityPublic> {
+        std::mem::take(&mut self.spawn_snapshots)
+            .into_values()
+            .collect()
     }
 
     /// 取走这一刻攒下的实体位置事件，按生成顺序。
