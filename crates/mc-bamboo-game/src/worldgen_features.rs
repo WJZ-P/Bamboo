@@ -83,37 +83,47 @@ pub struct FeatureWrites {
 /// `slot` 升序，即 `(dz,dx)` 升序；同一格取最先写下的那条状态。
 ///
 /// 游戏完工组装和 `feature-merge` 的 `isolated` 比法都调这里，保证两边合成规则
-/// 只有一份。传入的分组顺序、同一 `slot` 的重复分组都不改变结果；同格重复写在同一
-/// 个 `slot` 内以最后一条为准（一个中心对同一格跑完地物后的最终状态）。
-/// 越界的 y 由 `apply_deltas` 忽略。
+/// 只有一份。各来源之间的先后只由 `slot` 决定，与分组传入顺序无关；同一来源对
+/// 同一格写了多次时，以它最后写下的那条为该中心的最终状态（真实数据里每个来源
+/// 每格最多一条，见 `feature::world::last_writes`）。越界的 y 由 `apply_deltas`
+/// 忽略。
 ///
 /// Merge writes by fixed source order: the target itself (`CENTER`) first, then
 /// the eight neighbors in ascending slot / `(dz,dx)` order; the first write to a
 /// cell wins. Both assembly and the `isolated` oracle comparison call this, so
-/// the rule lives in one place. Group order and duplicate groups do not change
-/// the result; within one slot the last write to a cell is that center's final
-/// state. Out-of-range y values are ignored by `apply_deltas`.
+/// the rule lives in one place. The order between sources depends only on `slot`,
+/// not on group order; repeated writes to a cell from one source resolve to its
+/// last write (real data has at most one per source per cell, see
+/// `feature::world::last_writes`). Out-of-range y values are ignored by
+/// `apply_deltas`.
 pub fn merge_feature_writes(
     chunk: &mut GeneratedChunk,
     groups: impl IntoIterator<Item = FeatureWrites>,
 ) {
-    let mut ordered: Vec<FeatureWrites> = groups.into_iter().collect();
-    // `sort_by_key` 是稳定排序：同一个 slot 的多份分组保持传入顺序，组内后面的
-    // 写覆盖前面的，最后留下的就是该中心对这格的最终状态。
-    // Stable sort: groups with the same slot keep their input order, so a later
-    // write in that slot wins as the center's final state for the cell.
-    ordered.sort_by_key(|group| (u8::from(group.slot != CENTER as u8), group.slot));
-    // 从后往前写进胜者表：先到的（固定先后里更靠前的中心）覆盖后到的，
-    // 于是同一格最后留下的是最先写下的那条状态。
-    // Walk the groups backwards into a winner map: earlier centers overwrite
-    // later ones, so each cell ends up with its first writer's state.
-    let mut winners: std::collections::HashMap<(i32, i32, i32), u32> =
-        std::collections::HashMap::new();
-    for group in ordered.iter().rev() {
+    // 先按来源收敛：同一来源对同一格的多次写留下最后一条，作为该中心的最终状态。
+    // First collapse each source: its last write to a cell is its final state.
+    let mut per_slot: std::collections::BTreeMap<
+        u8,
+        std::collections::HashMap<(i32, i32, i32), u32>,
+    > = std::collections::BTreeMap::new();
+    for group in groups {
+        let writes = per_slot.entry(group.slot).or_default();
         for &(x, y, z, state) in &group.deltas {
             if (MIN_Y..MIN_Y + WORLD_HEIGHT).contains(&y) {
-                winners.insert((x, y, z), state);
+                writes.insert((x, y, z), state);
             }
+        }
+    }
+    // 固定先后：中心自己最先，其余按 slot 升序。从后往前覆盖，先写的留下。
+    // Fixed order: the center first, then ascending slots. Walk backwards so
+    // earlier sources overwrite later ones and the first writer survives.
+    let mut order: Vec<u8> = per_slot.keys().copied().collect();
+    order.sort_by_key(|&slot| (u8::from(slot != CENTER as u8), slot));
+    let mut winners: std::collections::HashMap<(i32, i32, i32), u32> =
+        std::collections::HashMap::new();
+    for slot in order.into_iter().rev() {
+        for ((x, y, z), state) in per_slot.remove(&slot).unwrap_or_default() {
+            winners.insert((x, y, z), state);
         }
     }
     let mut out: Vec<BlockDelta> = winners
@@ -1370,10 +1380,16 @@ mod tests {
             100 + CENTER as u32,
             "group order does not matter"
         );
-        for (wa, wb) in [
-            (ca.parts().column.chunk(), cb.parts().column.chunk()),
-            (ca.parts().column.chunk(), cc.parts().column.chunk()),
-        ] {
+        assert_eq!(
+            cc.parts().column.chunk().block(3, 0, 5),
+            999,
+            "a source's last write to a cell is its final state"
+        );
+        assert_eq!(
+            ca.parts().column.chunk().block(3, 0, 5),
+            cb.parts().column.chunk().block(3, 0, 5)
+        );
+        for (wa, wb) in [(ca.parts().column.chunk(), cb.parts().column.chunk())] {
             for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
                 for x in 0..16 {
                     for z in 0..16 {
