@@ -3025,6 +3025,11 @@ center-last 的 2590 → 1678 砍掉了约 35%；不带结构反而多 60 格：
 （在已经排好序的列表上丢掉重复格）确实正确表达了这套先后。旧规则的两组数也用
 新的 `--break-largest-state` 开关在同一份 jar 上重新跑过，逐目标与旧记录相同。
 
+确定性：`feature-merge --orders isolated --threads 1 / 2 / 4` 三份交付方块都是
+`isolated` 0 不一致（也就是逐字节相同），游戏内 1 / 4 线程的
+`one_and_four_threads_generate_identical_feature_blocks`、
+`director_matches_pure_features_near_structures` 和缓存命中测试都继续通过。
+
 改坏确认（不带结构，只跑 `isolated`）：`--break-drop-neighbor 1 0`（丢掉 +x 邻居的溢出）
 报 634 / 529 / 513 格；`--break-drop-neighbor -1 -1` 报 4 / 0 / 8 格；
 `--break-largest-state`（退回旧规则，同格取状态 ID 最大的）报 81 / 235 / 52 格
