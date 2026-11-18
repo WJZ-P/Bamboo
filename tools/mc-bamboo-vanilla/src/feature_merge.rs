@@ -2,7 +2,7 @@
 //!
 //! 一个区块 C 交付时的方块是 9 个中心（C 自己和 8 个邻居）各跑一遍地物、写进 C
 //! 的结果合起来。`gen-world` / `structure-e2e` 只比「以 C 为中心跑一遍」的 3×3，
-//! 经过不了游戏里把邻居溢出合进 C 的那条路径（`cached_feature_run` + 规范序合并）。
+//! 经过不了游戏里把邻居溢出合进 C 的那条路径（`cached_feature_run` + 固定先后合并）。
 //! 这里两边都走完整路径再比整块：
 //!
 //! * 官方：`ChunkgenOracle.java --merge-neighbors ORDERS` 造 5×5 个跑到 CARVERS 的

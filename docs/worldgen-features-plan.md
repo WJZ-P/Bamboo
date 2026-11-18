@@ -1594,7 +1594,8 @@ minecraft:red_mushroom_taiga,minecraft:brown_mushroom_normal,minecraft:red_mushr
   **第二轮（本轮）已把 features 接进游戏**：`Task::Generate.neighbors` 按 `ChunkStep`
   半径带邻居引用，世界线程存不可变 `Arc` CARVERS 快照（`director_host.rs::partials`），
   计算池跑 `Generator::features()`，写邻居增量按 `TaskId` 追加、完工
-  `assemble_feature_column` 排规范序落盘；中心还会纯函数重算 8 个邻居中心溢进来的写，
+  `assemble_feature_column` 按来源中心固定先后合（先写的赢，见
+  `performance-optimizations.md` 18.10）；中心还会纯函数重算 8 个邻居中心溢进来的写，
   保证集合与邻居任务落地时刻无关。见 `docs/worldgen.md`「第二轮」、`mc-bamboo-game/src/worldgen_features.rs`。
   `gen-world --through features`（Java `--ore-only`）0 不一致、1/4 线程逐字节相同。
   **还没做**：其余地物类型（A/B 在做）、`initialize_light` / `light` 的真实计算

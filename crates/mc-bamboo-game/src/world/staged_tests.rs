@@ -200,12 +200,13 @@ fn generated_cells_with_seed(
 }
 
 /// 验收：1 线程和 4 线程的计算池生成同一片 normal 世界区块，逐格方块、天空光、
-/// 方块光都完全相同。`features` 的邻居写增量按 `TaskId` 顺序合并、完工排规范序，
-/// `light` 阶段的生成期光照是从只读快照算出的纯函数，两者都与线程调度无关。
+/// 方块光都完全相同。`features` 的邻居写增量按 `TaskId` 顺序追加、完工按来源中心的
+/// 固定先后合并，`light` 阶段的生成期光照是从只读快照算出的纯函数，两者都与线程
+/// 调度无关。
 ///
 /// Acceptance: 1-thread and 4-thread compute pools produce byte-identical
 /// blocks AND sky/block light for the same area. Feature deltas merge in
-/// `TaskId` order and are canonically sorted; generation-time light is a pure
+/// `TaskId` order and are merged in a fixed source order; generation-time light is a pure
 /// function of the read-only snapshots, so neither depends on scheduling.
 #[test]
 fn one_and_four_threads_generate_identical_feature_blocks() {
@@ -294,7 +295,7 @@ fn generation_light_is_baked_into_the_delivered_column() {
 }
 
 /// 结构附近（种子 42 的 trial_chambers 起点 (17, 7) 周围）真实 Director 流水线交付的
-/// 方块和纯函数（`build_view` 3×3 + 8 个邻居中心的溢出，规范序合并）逐格相同，1 线程
+/// 方块和纯函数（`build_view` 3×3 + 8 个邻居中心的溢出，按来源固定先后合并）逐格相同，1 线程
 /// 和 4 线程的光照也相同。Director 的依赖记录不真正跑邻居的 `terrain`，有没有邻居
 /// 快照取决于调度；补格曾读不带 Beardifier 的地形，这里 1/4 线程会差几十格。
 ///

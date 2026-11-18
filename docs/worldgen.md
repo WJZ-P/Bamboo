@@ -612,9 +612,11 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   `run_features` 调 `chunk::Generator::features()`（`applyBiomeDecoration`）。已移植的 `minecraft:ore`
   照常放，其余类型标 `unsupported` 跳过（`feature/run.rs`，地物 A/B 合入后自动生效）。
 * **写邻居的增量**：中心自己的地物、溢出到 8 个邻居的写、以及 8 个邻居中心溢进来的写
-  都表示成世界坐标增量。世界线程按 `TaskId` 顺序（`collect_compute` 已排好序）追加到
-  目标区块的增量表，`Task::Assemble` 时 `assemble_feature_column` 排 `(x,y,z,state)`
-  规范序再落到交付盒子——与线程调度、回执到达顺序无关。
+  都表示成世界坐标增量，每条都带来源中心的 3×3 下标。世界线程按 `TaskId` 顺序
+  （`collect_compute` 已排好序）追加到目标区块的增量表，`Task::Assemble` 时
+  `assemble_feature_column` 按来源中心的固定先后（C 自己最先、邻居按 `(dz,dx)` 升序）
+  合、同格先写的赢——与线程调度、回执到达顺序无关（`merge_feature_writes`，
+  `performance-optimizations.md` 18.10）。
 * **确定性重算**：Bamboo 的调度不保证 8 个邻居的 `features` 都在中心组装前落地，所以中心
   这次 `features` 用 `cached_feature_run`（线程本地缓存）纯函数重算 8 个邻居中心写进来的
   增量，保证本区块需要的集合从自己的 features 结果就齐。`features` 是纯函数、随机数只从
@@ -626,9 +628,10 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   用 1 线程和 4 线程计算池生成同一片 3×3 normal 区块，逐格方块相同。
 
 和官方的**语义差异**（写进本轮汇报的疑点清单）：官方邻居溢出的写来自各邻居区块跑到
-`FEATURES` 时的 `WorldGenRegion`，Bamboo 改为中心纯函数重算；增量按规范序而非官方生成顺序
-生效；同格重复写由规范序里最后一条生效；邻居快照是干净 CARVERS 地形，`WorldGenRegion`
-读的可能是邻居更靠后阶段的内容。这些都不改变「已移植矿石」的逐格结果（对拍 0 不一致），
+`FEATURES` 时的 `WorldGenRegion`，Bamboo 改为中心纯函数重算；增量按中心的固定先后
+（先写的赢）而非官方由调度决定的生成顺序生效，同一中心对同一格以它最终写下的为准；
+邻居快照是干净 CARVERS 地形，`WorldGenRegion` 读的可能是邻居更靠后阶段的内容、后跑的
+中心也看得到先跑中心的写。这些都不改变「已移植矿石」的逐格结果（对拍 0 不一致），
 但在换上更多地物、结构、生成期光照后要重新核对。
 
 ### 各阶段耗时与生成能否跟上飞行
@@ -774,7 +777,7 @@ e2e 合进 main 之后），所以 `noise_density` 已经比上一轮的数字�
 
 **注意 `wg-perf` 不是玩家等的那个数**：工具由调用方给 3×3 视图，省掉了
 `build_view`（9 个 CARVERS 地形）、结构起点/引用反查、`structure_starts` /
-`structure_references` 两阶段、以及世界线程按规范序合并写增量。真实 Director 路径
+`structure_references` 两阶段、以及世界线程按来源固定先后合并写增量。真实 Director 路径
 单线程分阶段实测约 44.6 ms/区块（terrain 8.0、`game_features` 30.6、light 5.5、
 assembly 0.7），其中一度有 24 ms 是 `features` 每区块重新解析整份
 `worldgen.json`。这一块已改成进程一份，并顺带省掉地物主循环里每个 placed feature

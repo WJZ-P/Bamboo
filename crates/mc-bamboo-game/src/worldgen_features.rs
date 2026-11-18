@@ -421,7 +421,7 @@ pub fn game_features_with_mask_skipping(
 /// 一次「游戏里的完整生成流水线」结果，给 `gen-world --through structures` 对拍用。
 /// 走的是游戏里同一批阶段纯函数：`structure_starts` / `structure_references` /
 /// `terrain`（带 Beardifier）/ `features`（先结构后地物），最后按 Director 完工时的
-/// 规范序合并增量。
+/// 来源固定先后合并增量（先写的赢）。
 ///
 /// Result of the game's full generation pipeline for `gen-world --through structures`.
 /// It runs the same stage pure functions the game uses, then merges deltas the way
