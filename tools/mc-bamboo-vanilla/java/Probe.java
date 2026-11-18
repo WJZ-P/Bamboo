@@ -127,6 +127,7 @@ import net.minecraft.network.protocol.game.ClientboundResetScorePacket;
 import net.minecraft.network.protocol.game.ClientboundSetDisplayObjectivePacket;
 import net.minecraft.network.protocol.game.ClientboundSetObjectivePacket;
 import net.minecraft.network.protocol.game.ClientboundSetExperiencePacket;
+import net.minecraft.network.protocol.game.ClientboundSetHealthPacket;
 import net.minecraft.network.protocol.game.ClientboundSetPlayerTeamPacket;
 import net.minecraft.network.protocol.game.ClientboundSetScorePacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
@@ -455,6 +456,7 @@ public final class Probe {
             "handleSetEntityMotion",
             "handleSetEquipment",
             "handleSetExperience",
+            "handleSetHealth",
             "handleSetHeldSlot",
             "handleSetPlayerInventory",
             "handleSetSpawn",
@@ -3660,6 +3662,9 @@ public final class Probe {
             handlers.put("handleSetHeldSlot", value -> heldSlot = ((ClientboundSetHeldSlotPacket) value).slot());
             handlers.put("handleSetExperience",
                     value -> onExperience((ClientboundSetExperiencePacket) value));
+            // 官方 `ServerPlayer.doTick` 在进服这一刻补 `set_health`；解码器能解包就算通过。
+            handlers.put("handleSetHealth",
+                    value -> check("play: set_health decodes", value instanceof ClientboundSetHealthPacket));
             handlers.put("handleSystemChat", value -> onSystemChat((ClientboundSystemChatPacket) value));
             handlers.put("handleDisguisedChat", value -> onDisguisedChat((ClientboundDisguisedChatPacket) value));
             handlers.put("handlePlayerChat", value -> onPlayerChat((ClientboundPlayerChatPacket) value));
