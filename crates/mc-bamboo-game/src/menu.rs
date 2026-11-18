@@ -10,7 +10,7 @@ mod anvil;
 mod cartography;
 mod enchantment;
 mod enchantments;
-mod grindstone;
+pub(crate) mod grindstone;
 mod item_patch;
 mod loom;
 pub(crate) mod station;

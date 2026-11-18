@@ -16,6 +16,7 @@ use mc_bamboo_data::{
     block_of_state, blocks,
     registries::{block_entity_type as entities, data_component_type as kinds, entity_type},
 };
+use mc_bamboo_loot::block_experience_set;
 use mc_bamboo_protocol::{
     components::{ComponentPatch, ComponentValue},
     item::ItemStack,
@@ -37,6 +38,9 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) changes: &'a mut BlockChanges,
     /// 方块实体从物品带来的组件，换了方块就丢，见 [`crate::block_items`]。
     pub(crate) block_items: &'a mut BTreeMap<BlockPos, ComponentPatch>,
+    /// 这次挖方块的主手物品，读 `processBlockExperience`。
+    /// 只在 [`RegionLevel::set_break_tool`] 里由挖矿路径设置，其余路径是空手。
+    pub(crate) break_tool: mc_bamboo_protocol::item::ItemStack,
     pub(crate) players: &'a mut BTreeMap<PlayerId, Player>,
     pub(crate) random: &'a LevelRandom,
     pub(crate) redstone: &'a mut RedstoneMemory,
@@ -111,6 +115,17 @@ impl EntityTables for RegionLevel<'_> {
 }
 
 impl RegionLevel<'_> {
+    /// 官方 `Block.dropResources` 把挖矿者的主手物品一路传给
+    /// `spawnAfterBreak` → `tryDropExperience`；这里在破坏之前把它挂到这次
+    /// 的方块世界上。别的破坏路径不调用，看到的仍是空手。
+    ///
+    /// Official `Block.dropResources` passes the breaker's main-hand item to
+    /// `spawnAfterBreak` → `tryDropExperience`; attach it to this block world
+    /// before the break. Other break paths leave it empty.
+    pub(crate) fn set_break_tool(&mut self, tool: mc_bamboo_protocol::item::ItemStack) {
+        self.break_tool = tool;
+    }
+
     /// 这一格（以及双箱另一半）的容器内容可能变了：叫醒关注它的睡眠方块实体。
     /// 和 `Region::touch` 是同一条规则，方块逻辑直接写上层表时走这里。
     fn notify_container(&mut self, pos: BlockPos) {
@@ -162,7 +177,7 @@ impl Level for RegionLevel<'_> {
         else {
             return;
         };
-        let amount = if min == max {
+        let mut amount = if min == max {
             min
         } else {
             min + self
@@ -170,6 +185,26 @@ impl Level for RegionLevel<'_> {
                 .source()
                 .next_int(max.wrapping_sub(min).wrapping_add(1))
         };
+        // 官方 `EnchantmentHelper.processBlockExperience`：附魔的
+        // `minecraft:block_experience` 效果可以改掉采样值；26.3 里精准采集
+        // 用 `set(0)` 让矿石不掉经验，时运没有这个效果所以值不变。
+        // `MutableFloat` 按 float 累加，最后截断成 int。
+        //
+        // Official `EnchantmentHelper.processBlockExperience`: the enchantment's
+        // `minecraft:block_experience` effects may change the sampled value.
+        // In 26.3 silk touch sets it to zero; fortune has no such effect.
+        let patch = self.break_tool.patch();
+        if let Some(ComponentValue::Enchantments(levels)) = patch.get(kinds::ENCHANTMENTS) {
+            let mut value = amount as f32;
+            for (id, level) in levels {
+                if *level > 0
+                    && let Some(set) = block_experience_set(*id)
+                {
+                    value = set;
+                }
+            }
+            amount = value as i32;
+        }
         if amount <= 0 || !self.block_rules.block_drops {
             return;
         }

@@ -16,6 +16,7 @@ use std::{
     process::{Command, Stdio},
 };
 
+use mc_bamboo_blocks::entity::EntityKind;
 use mc_bamboo_blocks::{
     BlockEntities, BlockEvents, BlockState, BlockTicks, EntityStore, EntityTables, Level,
     LevelRandom, LevelTables, RedstoneMemory, World,
@@ -23,7 +24,7 @@ use mc_bamboo_blocks::{
     entity::Entities,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
-use mc_bamboo_data::{CookingKind, blocks};
+use mc_bamboo_data::{CookingKind, blocks, recipes};
 use mc_bamboo_protocol::{
     components::{ComponentPatch, cursor::Cursor},
     item::ItemStack,
@@ -53,6 +54,18 @@ struct Run {
     after_take: Option<i64>,
     #[serde(rename = "afterItems")]
     after_items: Option<Vec<(i32, i32, String)>>,
+    /// 取出产物后生成的经验球 `[value, count, x 位, y 位, z 位]`。
+    #[serde(default, rename = "afterOrbs")]
+    after_orbs: Vec<[i64; 5]>,
+    /// 直接塞进 `recipesUsed` 的配方（名字、次数）。
+    #[serde(default)]
+    recipes: Vec<(String, i32)>,
+    /// 砂轮题：两件物品的非诅咒附魔 `min_cost` 之和。
+    #[serde(default, rename = "xpSumInput")]
+    xp_sum_input: i32,
+    /// 砂轮题：官方 `getExperienceAmount` 的结果。
+    #[serde(default, rename = "xpReward")]
+    xp_reward: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,6 +258,21 @@ impl Machine {
         }
     }
 
+    fn set_recipes(&mut self, recipes: &[(String, i32)]) {
+        if let Self::Furnace(entity) = self {
+            let used: Vec<(&'static str, i32)> = recipes
+                .iter()
+                .filter_map(|(name, count)| {
+                    recipes::RECIPES
+                        .iter()
+                        .find(|recipe| recipe.id == name)
+                        .map(|recipe| (recipe.id, *count))
+                })
+                .collect();
+            entity.set_archive_values(entity.speed_multiplier(), used);
+        }
+    }
+
     fn award(&mut self, world: &mut World) {
         if let Self::Furnace(entity) = self {
             // 官方题目传 `Vec3.ZERO`。
@@ -306,6 +334,7 @@ fn replay(run: &Run, ticks: &mut usize, mismatches: &mut Vec<String>) -> Result<
     let state = BlockState(run.block);
     let mut level = MachineLevel::new(run.seed, state);
     let mut machine = Machine::open(&run.kind, state);
+    machine.set_recipes(&run.recipes);
     for (slot, triple) in run.slots.iter().enumerate() {
         machine.set_item(slot, stack_from(triple)?);
     }
@@ -314,6 +343,9 @@ fn replay(run: &Run, ticks: &mut usize, mismatches: &mut Vec<String>) -> Result<
     }
     let mut scheduled = BlockTicks::new();
     let mut world = World::new(&mut level, &mut scheduled);
+    if run.kind.starts_with("grindstone_xp") {
+        return replay_grindstone(run, &world, mismatches);
+    }
     for (index, frame) in run.ticks.iter().enumerate() {
         machine.tick(&mut world);
         *ticks += 1;
@@ -370,8 +402,87 @@ fn replay(run: &Run, ticks: &mut usize, mismatches: &mut Vec<String>) -> Result<
                 mismatches,
             )?;
         }
+        let ours = orbs(&world);
+        if ours != run.after_orbs {
+            mismatches.push(format!(
+                "{} after take orbs {:?} != {:?}",
+                run.kind, ours, run.after_orbs
+            ));
+        }
     }
     Ok(())
+}
+
+/// 砂轮经验：`getExperienceAmount` 的一次 `nextInt` + `ExperienceOrb.award` 的拆分。
+///
+/// Grindstone XP: one `nextInt` from `getExperienceAmount` plus the
+/// `ExperienceOrb.award` split.
+fn replay_grindstone(run: &Run, world: &World, mismatches: &mut Vec<String>) -> Result<(), String> {
+    if let Some(before) = run.before_take
+        && world.random().seed() != before
+    {
+        mismatches.push(format!(
+            "{} before take seed {} != {before}",
+            run.kind,
+            world.random().seed()
+        ));
+    }
+    let (reward, values) = mc_bamboo_game::replay_grindstone_xp(run.xp_sum_input, run.seed);
+    if reward != run.xp_reward {
+        mismatches.push(format!("{} reward {reward} != {}", run.kind, run.xp_reward));
+    }
+    // 按官方顺序在同一个世界随机源上取数，再核对最终种子。
+    // Draw on the same world random source in official order, then check the seed.
+    let half = ((run.xp_sum_input as f64) / 2.0).ceil() as i32;
+    if run.xp_sum_input > 0 {
+        let _ = world.random().next_int(half);
+    }
+    for _ in &values {
+        let _ = world.random().next_int(40);
+    }
+    if let Some(after) = run.after_take
+        && world.random().seed() != after
+    {
+        mismatches.push(format!(
+            "{} after take seed {} != {after}",
+            run.kind,
+            world.random().seed()
+        ));
+    }
+    let center = 0.5_f64.to_bits() as i64;
+    let expected: Vec<[i64; 5]> = values
+        .into_iter()
+        .map(|value| [i64::from(value), 1, center, center, center])
+        .collect();
+    if expected != run.after_orbs {
+        mismatches.push(format!(
+            "{} orbs {expected:?} != {:?}",
+            run.kind, run.after_orbs
+        ));
+    }
+    Ok(())
+}
+
+/// 从方块世界里读出刚生成的经验球，顺序按 uid。
+///
+/// Reads spawned experience orbs from the block world, in uid order.
+fn orbs(world: &World) -> Vec<[i64; 5]> {
+    let level = world.level();
+    level
+        .entity_uids()
+        .into_iter()
+        .filter_map(|uid| level.entity(uid))
+        .filter_map(|entity| match &entity.kind {
+            EntityKind::ExperienceOrb(orb) => Some([
+                i64::from(orb.value),
+                i64::from(orb.count),
+                entity.position.x.to_bits() as i64,
+                entity.position.y.to_bits() as i64,
+                entity.position.z.to_bits() as i64,
+            ]),
+            _ => None,
+        })
+        .collect()
 }
 
 fn push_items(

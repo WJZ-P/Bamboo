@@ -449,9 +449,65 @@ pub fn repair_with_xp_factor(enchantment: i32, level: i32) -> f32 {
     result
 }
 
+/// `Enchantment.effects["minecraft:block_experience"]` 里的 `minecraft:set` 值。
+/// 26.3 的数据包里只有精准采集写了 `0.0`（挖矿不掉经验）；时运没有这一项，
+/// `EnchantmentHelper.processBlockExperience` 保持原值。
+///
+/// The `minecraft:set` value in `Enchantment.effects["minecraft:block_experience"]`.
+/// In 26.3 only silk touch sets `0.0`; fortune has none and
+/// `EnchantmentHelper.processBlockExperience` keeps the sampled amount.
+pub fn block_experience_set(enchantment: i32) -> Option<f32> {
+    static VALUES: OnceLock<Vec<Option<f32>>> = OnceLock::new();
+    let values = VALUES.get_or_init(|| {
+        loot::ENCHANTMENTS
+            .iter()
+            .map(|(_, raw)| {
+                let Ok(value) = serde_json::from_str::<Value>(raw) else {
+                    return None;
+                };
+                let effects = value
+                    .get("effects")?
+                    .get("minecraft:block_experience")?
+                    .as_array()?;
+                for entry in effects {
+                    if entry
+                        .get("effect")
+                        .and_then(|effect| effect.get("type"))
+                        .and_then(Value::as_str)
+                        != Some("minecraft:set")
+                    {
+                        continue;
+                    }
+                    if let Some(set) = entry
+                        .get("effect")
+                        .and_then(|effect| effect.get("value"))
+                        .and_then(Value::as_f64)
+                    {
+                        return Some(set as f32);
+                    }
+                }
+                None
+            })
+            .collect()
+    });
+    usize::try_from(enchantment)
+        .ok()
+        .and_then(|index| values.get(index))
+        .copied()
+        .flatten()
+}
+
 #[cfg(test)]
 mod repair_tests {
     use super::*;
+
+    #[test]
+    fn silk_touch_zeroes_block_experience_but_fortune_does_not() {
+        let silk = enchantment_id("minecraft:silk_touch").unwrap();
+        let fortune = enchantment_id("minecraft:fortune").unwrap();
+        assert_eq!(block_experience_set(silk), Some(0.0));
+        assert_eq!(block_experience_set(fortune), None);
+    }
 
     #[test]
     fn mending_has_repair_with_xp() {

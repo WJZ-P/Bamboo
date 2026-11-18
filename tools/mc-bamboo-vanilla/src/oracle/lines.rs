@@ -31,6 +31,12 @@ pub struct Mine {
     pub seed: i64,
     pub drops: Vec<MineDrop>,
     pub random_seed: i64,
+    /// 挖矿时生成的经验球的值。
+    #[serde(default)]
+    pub xp_orbs: Vec<i32>,
+    /// 工具上的附魔 `[名字, 等级]`，`processBlockExperience` 要用。
+    #[serde(default)]
+    pub tool_enchantments: Vec<(String, i32)>,
 }
 
 #[derive(Debug, Deserialize)]

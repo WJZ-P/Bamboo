@@ -157,14 +157,18 @@ impl Team {
 /// The six criteria names in `ServerPlayer.doTick` order.
 pub(crate) const CRITERIA_NAMES: [&str; 6] = ["health", "food", "air", "armor", "xp", "level"];
 
-fn criteria_values(player: &crate::player::Player) -> [(&'static str, i32); 6] {
+pub(crate) fn criteria_values(player: &crate::player::Player) -> [(&'static str, i32); 6] {
+    // 官方 `Mth.ceil((float) value)`：大整数先转成 f32 会丢精度，不能直接用 int。
+    // Official `Mth.ceil((float) value)`: converting a large int to f32 first
+    // loses precision, so the int cannot be used directly.
+    let ceil = |value: i32| (value as f32).ceil() as i32;
     [
         (CRITERIA_NAMES[0], 20),
         (CRITERIA_NAMES[1], 20),
         (CRITERIA_NAMES[2], 300),
         (CRITERIA_NAMES[3], 0),
-        (CRITERIA_NAMES[4], player.experience.total),
-        (CRITERIA_NAMES[5], player.experience.level),
+        (CRITERIA_NAMES[4], ceil(player.experience.total)),
+        (CRITERIA_NAMES[5], ceil(player.experience.level)),
     ]
 }
 

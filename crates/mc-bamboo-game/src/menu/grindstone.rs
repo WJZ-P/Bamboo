@@ -69,7 +69,7 @@ pub(super) fn experience_sum(input: &ItemStack, additional: &ItemStack) -> i32 {
 /// Official `GrindstoneMenu$4.getExperienceAmount`:
 /// `ceil(amount/2) + nextInt(ceil(amount/2))`. The result goes to
 /// `ExperienceOrb.award`; a non-positive `amount` draws nothing.
-pub(super) fn experience_amount(random: &impl RandomSource, amount: i32) -> i32 {
+pub(crate) fn experience_amount(random: &impl RandomSource, amount: i32) -> i32 {
     if amount <= 0 {
         return 0;
     }
