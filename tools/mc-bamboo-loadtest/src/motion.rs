@@ -286,16 +286,18 @@ impl Motion {
         }
     }
 
-    /// 下一个去处：一个营地里离中心不远的地方，或者某个营地外 24–40 个区块的野外。
+    /// 下一个去处：一个营地里离中心不远的地方，或者某个营地外 40–64 个区块的野外（营地连同
+    /// 里面的人约 20 个区块宽，这样野外的人多半和营地分得开）。
     ///
-    /// The next place: near the centre of a camp, or 24–40 chunks out from
-    /// some camp into the wild.
+    /// The next place: near the centre of a camp, or 40–64 chunks out from
+    /// some camp into the wild (a camp with its bots is about 20 chunks wide,
+    /// so a bot in the wild is usually apart from it).
     fn next_destination(&mut self) -> (f64, f64) {
         let camp = (self.next_f64() * ROAM_CAMPS as f64) as usize % ROAM_CAMPS;
         let (x, z) = roam_camp_spot(camp);
         if self.next_f64() < ROAM_WILD_CHANCE {
             let angle = self.next_f64() * TAU;
-            let distance = (24.0 + self.next_f64() * 16.0) * 16.0;
+            let distance = (40.0 + self.next_f64() * 24.0) * 16.0;
             return (x + angle.cos() * distance, z + angle.sin() * distance);
         }
         (

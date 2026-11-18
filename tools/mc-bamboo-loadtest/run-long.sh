@@ -6,7 +6,7 @@
 # 用法：run-long.sh <工作树> [名字]
 #   DURATION（默认 3600 秒）、PROFILE_SECS（默认 30）、SAMPLE_SECS（默认 10）、PORT（默认 25997）、
 #   OUT（默认 /tmp/bamboo-long）、BOTS（缺省用场景自己的人数）、RAMP（默认 20 秒）、
-#   WORLD_COMMAND_EVERY（默认 1200 刻：每分钟一条要整个世界的命令）、VERIFY（默认 2，
+#   WORLD_COMMAND_EVERY（默认 0：场景自己每分钟发一条 `defaultgamemode creative`）、VERIFY（默认 2，
 #   给 BAMBOO_PROFILE_ISLANDS；1 = 只统计不全量对照）。其余 BAMBOO_* 环境变量原样传给服务端
 #   （调参时用来换分区器参数或线程数）。
 #
@@ -24,7 +24,7 @@ SAMPLE_SECS=${SAMPLE_SECS:-10}
 PORT=${PORT:-25997}
 OUT=${OUT:-/tmp/bamboo-long}
 RAMP=${RAMP:-20}
-WORLD_COMMAND_EVERY=${WORLD_COMMAND_EVERY:-1200}
+WORLD_COMMAND_EVERY=${WORLD_COMMAND_EVERY:-0}
 VERIFY=${VERIFY:-2}
 SCENE=islands-roam
 BIN="$TREE/target/release/bamboo-loadtest"
@@ -85,7 +85,19 @@ SAMPLER=$!
 uptime > "$DIR/load-before.txt"
 "$BIN" --addr "127.0.0.1:$PORT" --bots "$bots" --pattern "$pattern" \
     --layout "$layout" --duration "$DURATION" --ramp "$RAMP" \
-    --json "$DIR/client.json" > "$DIR/client.log" 2>&1
+    --json "$DIR/client.json" > "$DIR/client.log" 2>&1 &
+CLIENT=$!
+# 服务端中途退出（崩溃、不变量失败）就停掉假玩家，不让它们对着关掉的端口重连到时长用完。
+# If the server exits early (a crash, a failed invariant), stop the bots
+# instead of letting them reconnect to a closed port until the run ends.
+while kill -0 "$CLIENT" 2>/dev/null; do
+    if ! kill -0 "$SERVER" 2>/dev/null || grep -q "the world thread panicked" "$DIR/server.log"; then
+        kill "$CLIENT" 2>/dev/null
+        break
+    fi
+    sleep 5
+done
+wait "$CLIENT" 2>/dev/null
 uptime > "$DIR/load-after.txt"
 sleep 2
 kill -0 "$SERVER" 2>/dev/null && echo "alive" > "$DIR/server-state.txt" || echo "exited" > "$DIR/server-state.txt"

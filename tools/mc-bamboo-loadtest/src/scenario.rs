@@ -114,8 +114,17 @@ pub enum ScenarioKind {
 /// `islands-roam` 的营地数，排成 [`ROAM_COLUMNS`] 列。
 pub const ROAM_CAMPS: usize = 6;
 const ROAM_COLUMNS: usize = 3;
-/// 相邻营地隔几个区块：飞（33 格/秒）过去约 23 秒，走（4.3 格/秒）要 3 分钟。
-const ROAM_CAMP_STRIDE_CHUNKS: i32 = 48;
+/// 相邻营地隔几个区块：飞（33 格/秒）过去约 47 秒。一个营地连同在里面游走的人约占 20 个
+/// 区块宽，隔 96 个区块时两营地之间空出 70 多个区块，路上的人才会和出发的营地拆开、再并进
+/// 要去的营地；隔 48 个区块时 40 个人在路上和野外的视野把六个营地一直连成一个岛，一小时里
+/// 一次拆分都没有（`docs/profiling.md` 第 17 节）。
+///
+/// Camps are this many chunks apart (about 47 s of flying). A camp with the
+/// bots wandering in it is about 20 chunks wide; 96 leaves 70+ chunks
+/// between camps, so travellers split off the camp they left and merge into
+/// the one they reach. At 48 the views of 40 bots travelling and in the wild
+/// kept all six camps one island and nothing ever split.
+const ROAM_CAMP_STRIDE_CHUNKS: i32 = 96;
 /// `islands-roam` 的假玩家数。
 pub const ROAM_BOTS: usize = 40;
 /// `islands-roam` 的控制台动作的周期（刻）。
@@ -126,8 +135,15 @@ const ROAM_TIME_EVERY: i64 = 1200;
 const ROAM_WEATHER_EVERY: i64 = 2400;
 const ROAM_SETBLOCK_EVERY: i64 = 1800;
 const ROAM_GAMERULE_EVERY: i64 = 3000;
+/// `islands-roam` 每隔这么多刻从控制台发一次 `defaultgamemode creative`（要整个世界的命令）。
+/// 第一刻也发一次：假玩家进服时就是创造模式，飞着赶路不会因为「悬空太久」被踢。
+///
+/// Every this many ticks `islands-roam` sends `defaultgamemode creative`
+/// (a whole-world command) from the console; also on its first tick, so bots
+/// join in creative mode and are not kicked for floating while they fly.
+const ROAM_WORLD_EVERY: i64 = 1200;
 
-/// 第 `camp` 个营地里假玩家游走的中心（方块坐标的 x、z）。
+/// 第 `camp` 个营地里假玩家游走的中心（方块坐标的 x、z）。离营地原点不远，在强制加载的范围里。
 ///
 /// Where bots wander inside camp `camp` (block x, z).
 pub fn roam_camp_spot(camp: usize) -> (f64, f64) {
@@ -348,6 +364,8 @@ struct Plan {
     world_command_every: i64,
     /// 已经送到自己那一组的假玩家。
     placed: BTreeSet<String>,
+    /// `islands-roam` 已经发过第一条 `defaultgamemode creative`。
+    roam_started: bool,
     forced: bool,
     installed: bool,
 }
@@ -400,6 +418,7 @@ pub fn configure(kind: ScenarioKind) -> BenchHooks {
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or(0),
         placed: BTreeSet::new(),
+        roam_started: false,
         forced: false,
         installed: false,
     });
@@ -785,6 +804,10 @@ fn roam_actions(world: &mut BenchWorld<'_>, plan: &mut Plan) {
         x ^= x >> 29;
         (x % below.max(1) as u64) as usize
     };
+    if !plan.roam_started || now % ROAM_WORLD_EVERY == 0 {
+        world.console_command("defaultgamemode creative");
+        plan.roam_started = true;
+    }
     let names = world.player_names();
     if now % ROAM_PLACE_EVERY == 0 && !names.is_empty() {
         let name = &names[pick(1, names.len())];
