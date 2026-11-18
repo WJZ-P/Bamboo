@@ -362,6 +362,10 @@ pub(crate) struct Away {
     pub(crate) ticket: u64,
     /// 派出时岛的时钟。
     pub(crate) clock: i64,
+    /// 派出的时刻（量交接耗时用）。
+    ///
+    /// When it was dispatched (for the hand-over timing).
+    pub(crate) dispatched: std::time::Instant,
     /// 派出时 Director 还不知道在这个岛手里的位置：信箱里没交付的盒子和没收回的位置，
     /// 以及这一刻开头收信产生、还没交给 Director 的回执（刚交付的、刚收回的盒子）。
     /// 已经确认交付的区块 Director 自己记着（`Owner::Region(这个岛)`），不用抄。
@@ -429,6 +433,7 @@ impl IslandSlot {
         self.away = Some(Away {
             ticket,
             clock: island.region.tick.game_time(),
+            dispatched: std::time::Instant::now(),
             unacked,
         });
         island

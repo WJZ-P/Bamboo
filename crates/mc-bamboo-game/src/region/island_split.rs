@@ -538,16 +538,20 @@ impl Region {
     /// 岛合并：把 `other` 整批倒进自己。`delta = 自己的时钟 − other 的时钟`：先按它平移
     /// 被吸收方的全部绝对时刻（[`Self::rebase_clock`]，计划 5.1），平移之后两边时钟
     /// 相同，再逐类并。吸收方的时钟、随机源、全局快照、剖析器留下；被吸收方的红石缓存、
-    /// 区块包缓存、剖析器丢掉；单元划分重建。只在两个岛都在 tick 边界时调用（断言）。
+    /// 区块包缓存丢掉，剖析器的样本并进吸收方的；单元划分重建。只在两个岛都在 tick 边界时调用（断言）。
     ///
     /// Island merge: pour `other` into this island. `delta = self.now −
     /// other.now`: first shift every absolute instant of the absorbed island
     /// ([`Self::rebase_clock`], plan 5.1) so both clocks agree, then merge class
     /// by class. The absorber keeps its clock, random sources, global snapshot
-    /// and profiler; the absorbed redstone cache, chunk cache and profiler are
-    /// dropped; unit partitioning is rebuilt. Both at a tick boundary.
+    /// and profiler; the absorbed redstone cache and chunk cache are dropped
+    /// and its profiler's samples join the absorber's; unit partitioning is rebuilt. Both at a tick boundary.
     pub(crate) fn absorb_island(&mut self, other: Region, delta: i64) {
-        let _ = self.absorb_island_keeping(other, delta);
+        let identity = self.absorb_island_keeping(other, delta);
+        // 被吸收方还没报告的样本并进吸收方的，不白丢（剖析器不影响行为）。
+        // The absorbed island's unreported samples join the absorber's
+        // instead of being lost (profilers never affect behaviour).
+        self.profiler.merge(&identity.profiler);
     }
 
     /// 同 [`Self::absorb_island`]，但把被吸收方「只属于它自己」的东西交还给调用方，而不是

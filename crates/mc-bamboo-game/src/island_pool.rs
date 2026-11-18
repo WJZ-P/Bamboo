@@ -91,6 +91,11 @@ pub(crate) struct HandBack {
     /// 这一刻在 tick 线程上开始 / 结束的时刻。
     pub(crate) started: Instant,
     pub(crate) finished: Instant,
+    /// 派出时全部线程都忙着、岛进了公共队列：开跑之前等过别的岛让出线程。
+    ///
+    /// Every thread was busy at dispatch and the island went to the shared
+    /// queue: it waited for another island to free a thread before starting.
+    pub(crate) queued: bool,
     /// 跑的时候 panic 了：载荷，主控在自己线程上重新抛出。
     pub(crate) panic: Option<Box<dyn Any + Send>>,
 }
@@ -138,6 +143,8 @@ struct Queues {
 struct Job {
     island: Box<Island>,
     ticket: u64,
+    /// 进的是公共队列。
+    shared: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -421,13 +428,20 @@ impl IslandPool {
                 .filter(|&index| !queues.retired[index])
                 .min_by_key(|&index| (queues.busy[index], index));
         }
-        let job = Job { island, ticket };
+        let mut job = Job {
+            island,
+            ticket,
+            shared: false,
+        };
         match idle {
             Some(index) => {
                 queues.busy[index] += 1;
                 queues.own[index].push_back(job);
             }
-            None => queues.shared.push_back(job),
+            None => {
+                job.shared = true;
+                queues.shared.push_back(job);
+            }
         }
         drop(queues);
         self.dispatch.wake.notify_all();
@@ -524,7 +538,11 @@ impl Drop for Alive<'_> {
 fn run_worker(index: usize, dispatch: &Dispatch, replies: &Sender<HandBack>, body: IslandBody) {
     let _alive = Alive(dispatch, index);
     loop {
-        let Job { mut island, ticket } = {
+        let Job {
+            mut island,
+            ticket,
+            shared,
+        } = {
             let mut queues = dispatch.lock();
             let job = loop {
                 if queues.retired[index] {
@@ -569,6 +587,7 @@ fn run_worker(index: usize, dispatch: &Dispatch, replies: &Sender<HandBack>, bod
             worker: index,
             started,
             finished,
+            queued: shared,
             panic: outcome.err(),
         };
         if replies.send(back).is_err() {

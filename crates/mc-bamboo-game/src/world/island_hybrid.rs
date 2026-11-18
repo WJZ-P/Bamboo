@@ -284,7 +284,7 @@ impl World {
     /// Handle one inbound message: run it now if possible; if an island it
     /// needs is not parked, or its source already has held work, queue it
     /// behind that source to keep the order. Shutdown is the caller's.
-    pub(super) fn accept_message(&mut self, message: Inbound) {
+    pub(crate) fn accept_message(&mut self, message: Inbound) {
         let source = match &message {
             Inbound::Join(request) => Source::Player(request.id),
             Inbound::Request { player, .. } | Inbound::Leave { player } => Source::Player(*player),
@@ -703,25 +703,59 @@ impl World {
     /// A ticket matching no slot (the slot is gone, or a new island took the
     /// id) means it was declared dead: it is discarded whole and `None` is
     /// returned (plan 5.6.1).
-    fn seat(&mut self, back: HandBack) -> Option<RegionId> {
+    ///
+    /// `waiting_since`：主控从什么时候起闲着等岛（`None` 表示主控没在等，比如第 ⓪ 段不等待地
+    /// 收岛）。交接耗时按岛记两半（计划 5.5，第 10 步 d 段补上交回那一半）：派出到线程开跑
+    /// （线程空着时；全部线程都忙、岛进了公共队列时这一段另记 `island_queue_wait`），加上
+    /// 主控在等时岛跑完到主控接着干活。
+    ///
+    /// `waiting_since`: since when the master has been idle waiting for
+    /// islands (`None` when it was not waiting, e.g. part 0 taking islands in
+    /// without waiting). The hand-over is recorded per island in two halves:
+    /// dispatch to start on a thread (when one was idle; with every thread
+    /// busy, the island waited in the shared queue and that goes to
+    /// `island_queue_wait`), plus, while the master waits, the island
+    /// finishing to the master carrying on.
+    fn seat(&mut self, back: HandBack, waiting_since: Option<Instant>) -> Option<RegionId> {
+        let seated = Instant::now();
         let HandBack {
             mut island,
             ticket,
             worker,
             started,
             finished,
+            queued,
             panic,
         } = back;
         if self.islands.away_ticket(island.id) != Some(ticket) {
             self.discard_zombie(island, ticket);
             return None;
         }
+        let dispatched = self
+            .islands
+            .away(island.id)
+            .map_or(started, |away| away.dispatched);
         island.park();
         island.last_worker = worker;
         island.region.profiler.record_duration(
             Metric::IslandBusy,
             finished.saturating_duration_since(started),
         );
+        let start = started.saturating_duration_since(dispatched);
+        let back_half = waiting_since.map_or(Duration::ZERO, |since| {
+            seated.saturating_duration_since(finished.max(since))
+        });
+        let profiler = &mut *self.master.profiler;
+        if queued {
+            profiler.record_duration(Metric::IslandQueueWait, start);
+            profiler.record_duration(Metric::IslandHandoff, back_half);
+        } else {
+            profiler.record_duration(Metric::IslandHandoff, start + back_half);
+        }
+        // 岛这一刻（含开头收信）记的子段并进主控这一刻的合计。
+        // The sub-phases the island recorded (mail at its start included) join
+        // the master's totals for this tick.
+        profiler.absorb_sub_totals(&mut island.region.profiler);
         let id = island.id;
         let slot = self.islands.slot_mut(id).expect("交出去的岛回到自己的槽位");
         slot.put(island);
@@ -731,7 +765,14 @@ impl World {
                 ticks = slot.debt,
                 "an island can't keep up; dropping the ticks it owes"
             );
+            let dropped = u64::from(slot.debt);
             slot.debt = 0;
+            if let Some(island) = slot.parked_mut() {
+                island
+                    .region
+                    .profiler
+                    .record(Metric::IslandDroppedTicks, dropped);
+            }
         }
         if let Some(payload) = panic
             && self.master.hybrid.panic.is_none()
@@ -771,7 +812,7 @@ impl World {
         loop {
             let pool = self.master.pool.as_mut().expect("分离驱动一定有线程池");
             match pool.wait(Duration::ZERO) {
-                Wait::Back(back) => ids.extend(self.seat(*back)),
+                Wait::Back(back) => ids.extend(self.seat(*back, None)),
                 Wait::Lost => {
                     panic!("every island tick thread is gone; the islands cannot come back")
                 }
@@ -817,7 +858,7 @@ impl World {
             let pool = self.master.pool.as_mut().expect("分离驱动一定有线程池");
             match pool.wait(left.min(ISLAND_WAIT_SLICE)) {
                 Wait::Back(back) => {
-                    let _ = self.seat(*back);
+                    let _ = self.seat(*back, None);
                 }
                 Wait::Lost => break,
                 Wait::Pending => {}
@@ -968,7 +1009,7 @@ impl World {
             let pool = self.master.pool.as_mut().expect("分离驱动一定有线程池");
             match pool.wait(slice) {
                 Wait::Back(back) => {
-                    ids.extend(self.seat(*back));
+                    ids.extend(self.seat(*back, Some(began)));
                     continue;
                 }
                 Wait::Lost => {
@@ -1020,7 +1061,6 @@ impl World {
     /// back. Returned islands are only seated; they land in part 3 by id, in
     /// the old wait-for-all order.
     pub(super) fn run_hybrid_round(&mut self) -> ControlFlow<()> {
-        let dispatched = Instant::now();
         for id in self.islands.away_ids() {
             if let Some(slot) = self.islands.slot_mut(id) {
                 slot.debt = slot.debt.saturating_add(1);
@@ -1050,14 +1090,8 @@ impl World {
             Phase::Delivery,
             director.as_nanos().min(u128::from(u64::MAX)) as u64,
         );
-        // 交接：派出到主控自己的活开始，加上主控的活做完到接着干活之间多等的那一段里
-        // 岛已经回来的部分算不出来（各岛各自回来），这里只记派出本身。
-        // The hand-over: only the dispatch itself is recorded here (islands
-        // come back one by one, so the return side has no single figure).
-        profiler.record_duration(
-            Metric::IslandHandoff,
-            master_started.saturating_duration_since(dispatched),
-        );
+        // 交接按岛记在落座时（[`Self::seat`]）。
+        // The hand-over is recorded per island when it is seated ([`Self::seat`]).
         self.finish_partition_tick();
         self.record_delivery_metrics();
         ControlFlow::Continue(())
@@ -1090,7 +1124,11 @@ impl World {
             if !self.awaited() || deadline.is_some_and(|at| Instant::now() >= at) {
                 return ControlFlow::Continue(());
             }
+            // 追赶时等岛的时间也不算主控干活（`master_busy`）。
+            // Waiting for islands while catching up is not master work either.
+            let waiting = Instant::now();
             let ids = self.await_islands(deadline, true)?;
+            self.master.island_wait += waiting.elapsed();
             self.land_seated(ids);
         }
     }
@@ -1292,7 +1330,7 @@ impl World {
             while !self.islands.is_parked(stall.island) {
                 let pool = self.master.pool.as_mut().expect("分离驱动一定有线程池");
                 match pool.wait(ISLAND_WAIT_SLICE) {
-                    Wait::Back(back) => ids.extend(self.seat(*back)),
+                    Wait::Back(back) => ids.extend(self.seat(*back, None)),
                     Wait::Lost => panic!("every island tick thread is gone"),
                     Wait::Pending => {}
                 }

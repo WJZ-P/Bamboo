@@ -317,11 +317,19 @@ pub(crate) struct Master {
     /// that is away, held work, players still joining, save lists kept for
     /// absent islands, and so on. Always empty under the other drives.
     pub(crate) hybrid: island_hybrid::HybridState,
-    /// 家岛不在主控手里时，主控这一段的剖析记到这里（不进报告）；打报告的那份跟着家岛。
+    /// 主控自己的剖析器。混合驱动下打报告的就是它：主控的各段记在这里，各岛的样本在岛
+    /// 交回时（子段）和打报告前（其余）并进来，每个岛另起一行（计划第 2 节第 26 行）。
+    /// 别的驱动下打报告的那份跟着家岛，这一份只在家岛不在主控手里时（关服时没等到卡住
+    /// 的岛）接住主控这一段，不进报告。
     ///
-    /// Where the master's profiling goes while the home island is away (not
-    /// reported); the reporting profiler travels with the home island.
-    spare_profiler: Box<crate::profiler::Profiler>,
+    /// The master's own profiler. Under the hybrid drive it is the reporting
+    /// one: the master's parts are recorded here and every island's samples
+    /// are folded in at hand-back (sub-phases) and before each report (the
+    /// rest), with a line per island (plan section 2, row 26). Under the
+    /// other drives the reporting profiler travels with the home island and
+    /// this one only catches the master's part while home is away (stuck at
+    /// shutdown), unreported.
+    profiler: Box<crate::profiler::Profiler>,
     /// 测试专用：运行时拆岛时故意漏搬这一类（改坏确认）。
     #[cfg(test)]
     pub(crate) split_skip: Option<crate::region::IslandPart>,
@@ -511,7 +519,7 @@ impl World {
                 islands_mode: config.islands && !infinite_flat,
                 transit: std::collections::BTreeMap::new(),
                 hybrid: island_hybrid::HybridState::default(),
-                spare_profiler: Box::default(),
+                profiler: Box::default(),
                 #[cfg(test)]
                 split_skip: None,
                 #[cfg(test)]
@@ -629,6 +637,10 @@ impl World {
             // The hybrid drive keeps a blank island to replace a dead home
             // with an empty one (plan 5.6.2).
             world.islands.keep_blueprint();
+            // 混合驱动下打报告的是主控自己的剖析器，开关和报告间隔照家岛的。
+            // Under the hybrid drive the master's own profiler reports, with
+            // the home island's switches and report interval.
+            *world.master.profiler = world.islands.region.profiler.fresh_like();
         }
         if world.islands.region.profiler.partition_enabled() {
             let verify = world.islands.region.profiler.partition_verify();
@@ -652,7 +664,8 @@ impl World {
 
     /// 打报告的剖析器（见 [`report_profiler`]）。
     fn profiler(&mut self) -> &mut crate::profiler::Profiler {
-        report_profiler(&mut self.islands, &mut self.master.spare_profiler)
+        let hybrid = self.hybrid();
+        report_profiler(&mut self.islands, &mut self.master.profiler, hybrid)
     }
 
     /// 票表的只读视图，给测试核对玩家票和等级用。
@@ -800,8 +813,9 @@ impl World {
     /// 分区器这一刻收尾，统计写进岛的剖析器（打报告的那份）。
     fn finish_partition_tick(&mut self) {
         if self.master.host.islands_enabled() {
+            let hybrid = self.hybrid();
             self.master.host.finish_island_tick(
-                report_profiler(&mut self.islands, &mut self.master.spare_profiler),
+                report_profiler(&mut self.islands, &mut self.master.profiler, hybrid),
                 self.master.director_tick,
             );
         }
@@ -927,11 +941,12 @@ impl World {
         self.master.island_wait = Duration::ZERO;
         self.record_tick_counts();
         let flow = self.tick_phases();
-        // 家岛不在主控手里（关服时没等到卡住的岛，或者混合驱动下它落后了）：剖析器跟着岛
-        // 走了，这一刻不再收尾。
-        // The home island is away (stuck at shutdown, or lagging under the
-        // hybrid drive): its profiler went with it.
-        if !self.islands.is_home() {
+        let hybrid = self.hybrid();
+        // 家岛不在主控手里（关服时没等到卡住的岛）：剖析器跟着岛走了，这一刻不再收尾。
+        // 混合驱动下打报告的是主控自己的，照常收尾。
+        // The home island is away (stuck at shutdown): its profiler went with
+        // it. Under the hybrid drive the master's own reports and finishes as usual.
+        if !hybrid && !self.islands.is_home() {
             return flow;
         }
         // 三阶段这一刻的耗时由 `lap` 顺手记下，划分统计拿它当尾段占比的分母。
@@ -943,25 +958,84 @@ impl World {
                 stats.finish_tick(three, total);
             }
         }
-        // 主控（宿主）这一刻记的子段并进岛的报告：只有一个岛时就是合计。
-        // Fold the master's (host's) sub-phases into the island's report: with
-        // one island that is the total.
-        self.islands
-            .region
-            .profiler
+        // 主控（宿主）这一刻记的子段并进报告：只有一个岛时就是合计。
+        // Fold the master's (host's) sub-phases into the report: with one
+        // island that is the total.
+        report_profiler(&mut self.islands, &mut self.master.profiler, hybrid)
             .absorb_sub_totals(&mut self.master.host.profiler);
         if self.master.drive == IslandDrive::Detached {
             // 主控线程这一刻自己干活的时间：整刻减去等岛交回的那段。
             // The master thread's own work this tick: the whole tick minus the
             // wait for the island.
-            let profiler = &mut self.islands.region.profiler;
-            let busy = profiler
-                .tick_elapsed()
-                .saturating_sub(self.master.island_wait);
+            let wait = self.master.island_wait;
+            let profiler = self.profiler();
+            let busy = profiler.tick_elapsed().saturating_sub(wait);
             profiler.record_duration(Metric::MasterBusy, busy);
+        }
+        if hybrid && self.master.profiler.report_due() {
+            self.fold_island_profiles();
         }
         self.profiler().end_tick();
         flow
+    }
+
+    /// 混合驱动下打报告之前：停放着的岛的样本并进主控的剖析器（之后清零），每个岛另记一行
+    /// （跑了几刻、每刻多久、丢了几刻、还欠几刻）。不在主控手里的岛的样本留到下一份报告。
+    ///
+    /// Before a report under the hybrid drive: fold every parked island's
+    /// samples into the master's profiler (and clear them), with one line per
+    /// island (ticks run, time per tick, ticks dropped, ticks owed). Islands
+    /// that are away keep theirs for the next report.
+    fn fold_island_profiles(&mut self) {
+        use std::fmt::Write as _;
+        let seconds = self.master.profiler.since_report().as_secs_f64();
+        let mut text = format!(
+            "islands (over {seconds:.2} s; ticks = island ticks run, busy = ms per island tick):\n"
+        );
+        for id in self.islands.ids() {
+            let debt = self.islands.debt(id);
+            let Some(island) = self
+                .islands
+                .slot_mut(id)
+                .and_then(crate::island::IslandSlot::parked_mut)
+            else {
+                let _ = writeln!(text, "  island {id:<4} away owed={debt}");
+                continue;
+            };
+            let region = &mut island.region;
+            let busy = region
+                .profiler
+                .histogram(crate::profiler::Series::Metric(Metric::IslandBusy));
+            let dropped = region
+                .profiler
+                .histogram(crate::profiler::Series::Metric(Metric::IslandDroppedTicks))
+                .sum();
+            let ms = |nanos: u64| nanos as f64 / 1e6;
+            let mean = if busy.count() == 0 {
+                0.0
+            } else {
+                busy.sum() as f64 / busy.count() as f64 / 1e6
+            };
+            let _ = writeln!(
+                text,
+                "  island {id:<4} chunks={} players={} entities={} ticks={} tps={:.2} busy mean={mean:.3} p50={:.3} p99={:.3} max={:.3} dropped={dropped} owed={debt}",
+                region.chunks.loaded_count().unwrap_or(0),
+                region.players.len(),
+                region.entities.len(),
+                busy.count(),
+                if seconds > 0.0 {
+                    busy.count() as f64 / seconds
+                } else {
+                    0.0
+                },
+                ms(busy.p50()),
+                ms(busy.p99()),
+                ms(busy.max()),
+            );
+            self.master.profiler.merge(&region.profiler);
+            region.profiler.reset_samples();
+        }
+        self.master.profiler.append_to_report(&text);
     }
 
     /// 每刻开始时的数量指标，趁状态还没变先记下来。到期的计划刻数是
@@ -1000,11 +1074,9 @@ impl World {
         let Some(hooks) = self.master.bench_hooks else {
             return;
         };
-        // 压测回调直接改家岛；它不在主控手里的这一刻跳过。
-        // The hooks edit the home island directly; skip while it is away.
-        if !self.islands.is_home() {
-            return;
-        }
+        // 压测回调按位置找停放着的岛（`BenchWorld`），不在主控手里的岛这一刻碰不到。
+        // The hooks find parked islands by position (`BenchWorld`); islands
+        // that are away are out of reach this tick.
         let ready = self.master.bench_ready;
         let finished = {
             let mut bench = crate::bench::BenchWorld::new(self);
@@ -1301,10 +1373,17 @@ impl World {
             // `Region` is temporarily joined, the command runs on it, and the
             // islands are split back as they were. Commands already wait for
             // every island to be parked (plan 5.5.2).
+            let joining = Instant::now();
             let unified = self.islands.unify(into);
+            let joined = joining.elapsed();
             let region = &mut self.islands.get_mut(into).expect("岛在表里").region;
             let out = work(&mut self.master.global, region);
+            let dividing = Instant::now();
             self.islands.divide(into, unified);
+            let divided = dividing.elapsed();
+            let profiler = self.profiler();
+            profiler.record_duration(Metric::IslandUnify, joined);
+            profiler.record_duration(Metric::IslandDivide, divided);
             self.publish_global();
             return out;
         }
@@ -1394,6 +1473,7 @@ impl World {
                 worker,
                 started,
                 finished,
+                queued: _,
                 panic,
             } = *back;
             island.park();
@@ -2780,19 +2860,21 @@ impl World {
     }
 }
 
-/// 打报告的剖析器：跟着家岛；家岛不在主控手里时给一份不进报告的备用的（混合驱动下家岛
-/// 也可能落后）。
+/// 打报告的剖析器：混合驱动下是主控自己的（家岛也可能落后，主控的各段不能跟着它走）；
+/// 别的驱动下跟着家岛，家岛不在主控手里时给主控那份（不进报告）。
 ///
-/// The reporting profiler travels with the home island; while home is away
-/// (it too may lag under the hybrid drive) a spare that is never reported.
+/// The reporting profiler: the master's own under the hybrid drive (home
+/// may lag too, and the master's parts must not depend on it); otherwise the
+/// home island's, or the master's unreported one while home is away.
 fn report_profiler<'a>(
     islands: &'a mut Islands,
-    spare: &'a mut crate::profiler::Profiler,
+    master: &'a mut crate::profiler::Profiler,
+    hybrid: bool,
 ) -> &'a mut crate::profiler::Profiler {
-    if islands.is_home() {
+    if !hybrid && islands.is_home() {
         &mut islands.region.profiler
     } else {
-        spare
+        master
     }
 }
 

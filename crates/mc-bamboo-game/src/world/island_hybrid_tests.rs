@@ -2322,3 +2322,84 @@ fn on_time_hybrid_does_not_depend_on_the_thread_count() {
         }
     });
 }
+
+/// 混合驱动下的剖析没有盲点（第 10 步 d 段）：家岛落后的那几刻，主控这一段照样进报告
+/// （原来记进一份不进报告的备用剖析器）；每个岛的每一刻都有一条耗时和一条交接（原来只记
+/// 派出那一半、每刻一条）；打报告前各岛的样本并进来，每个岛一行。
+///
+/// Profiling has no blind spot under the hybrid drive (step 10 part d): the
+/// master's part of the ticks in which the home island lags still reaches
+/// the report (it used to go to an unreported spare profiler); every island
+/// tick has one busy sample and one hand-over sample (only the dispatch half
+/// was recorded before, once per tick); before a report every island's
+/// samples are folded in, with one line per island.
+#[test]
+fn profiling_covers_every_master_tick_and_every_island_tick() {
+    use crate::profiler::{Metric, Series};
+    bounded(|| {
+        let mut scene = scene(54, 4);
+        for _ in 0..3 {
+            scene.server.tick();
+        }
+        let world = &mut scene.server.world;
+        let islands = world.islands.len() as u64;
+        assert!(islands >= 3, "每组一个岛");
+        world.master.profiler.reset_samples();
+        for island in world.islands.iter_mut() {
+            island.region.profiler.reset_samples();
+        }
+        world.stall_island(HOME_REGION, 1, 6);
+        const TICKS: u64 = 10;
+        for tick in 1..=TICKS {
+            scene.server.tick();
+            if tick <= 6 {
+                assert!(!scene.server.world.islands.is_parked(HOME_REGION));
+            }
+        }
+        let world = &mut scene.server.world;
+        assert!(world.islands.all_parked());
+        assert_eq!(world.islands.debt(HOME_REGION), 0, "家岛追上了");
+        let count = |world: &crate::world::World, metric| {
+            world
+                .master
+                .profiler
+                .histogram(Series::Metric(metric))
+                .count()
+        };
+        assert_eq!(
+            count(world, Metric::TickTotal),
+            TICKS,
+            "主控的每一刻都进报告"
+        );
+        assert_eq!(count(world, Metric::MasterBusy), TICKS);
+        assert_eq!(
+            count(world, Metric::IslandHandoff),
+            TICKS * islands,
+            "每个岛的每一刻一条交接"
+        );
+        world.fold_island_profiles();
+        assert_eq!(
+            count(world, Metric::IslandBusy),
+            TICKS * islands,
+            "并进来的是每个岛的每一刻"
+        );
+        let report = world.master.profiler.report();
+        for id in world.islands.ids() {
+            assert!(
+                report.contains(&format!("  island {id:<4} ")),
+                "岛 {id} 有一行：{report}"
+            );
+        }
+        for island in world.islands.iter() {
+            assert_eq!(
+                island
+                    .region
+                    .profiler
+                    .histogram(Series::Metric(Metric::IslandBusy))
+                    .count(),
+                0,
+                "并进来以后岛自己的清零"
+            );
+        }
+    });
+}
