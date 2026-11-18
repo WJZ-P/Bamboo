@@ -64,13 +64,25 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         Tag::List(vec![Tag::Float(public.yaw), Tag::Float(mob.x_rot)]),
     );
     put(&mut out, "fall_distance", Tag::Double(state.fall_distance));
-    put(&mut out, "Fire", Tag::Short(state.remaining_fire_ticks as i16));
+    put(
+        &mut out,
+        "Fire",
+        Tag::Short(state.remaining_fire_ticks as i16),
+    );
     put(&mut out, "Air", Tag::Short(mob.air_supply as i16));
     put(&mut out, "OnGround", Tag::Byte(i8::from(public.on_ground)));
-    put(&mut out, "Invulnerable", Tag::Byte(i8::from(mob.invulnerable)));
+    put(
+        &mut out,
+        "Invulnerable",
+        Tag::Byte(i8::from(mob.invulnerable)),
+    );
     put(&mut out, "PortalCooldown", Tag::Int(mob.portal_cooldown));
     if mob.invulnerable_time > 0 {
-        put(&mut out, "invulnerable_time", Tag::Int(mob.invulnerable_time));
+        put(
+            &mut out,
+            "invulnerable_time",
+            Tag::Int(mob.invulnerable_time),
+        );
     }
     put(&mut out, "UUID", uuid_tag(&mob.uuid));
     if let Some(name) = &mob.custom_name {
@@ -148,7 +160,11 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     }
     put(&mut out, "LeftHanded", Tag::Byte(i8::from(mob.left_handed)));
     if mob.loot_table_seed != 0 {
-        put(&mut out, "DeathLootTableSeed", Tag::Long(mob.loot_table_seed));
+        put(
+            &mut out,
+            "DeathLootTableSeed",
+            Tag::Long(mob.loot_table_seed),
+        );
     }
     if mob.no_ai {
         put(&mut out, "NoAI", Tag::Byte(1));
@@ -162,7 +178,11 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "LoveCause", uuid_tag(uuid));
     }
     // ---- Cow ----
-    put(&mut out, "variant", Tag::String(mob.variant.name().to_owned()));
+    put(
+        &mut out,
+        "variant",
+        Tag::String(mob.variant.name().to_owned()),
+    );
     put(
         &mut out,
         "sound_variant",
@@ -263,9 +283,9 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
             tag::int_or(tag, "last_hurt_by_player_memory_time", 0);
         mob.last_hurt_by_mob_ref = uuid_field(tag, "last_hurt_by_mob");
         mob.last_hurt_by_mob = None;
-        mob.last_hurt_by_mob_timestamp = me
-            .tick_count
-            .wrapping_sub(tag::int_or(tag, "ticks_since_last_hurt_by_mob", 0));
+        mob.last_hurt_by_mob_timestamp =
+            me.tick_count
+                .wrapping_sub(tag::int_or(tag, "ticks_since_last_hurt_by_mob", 0));
         mob.impulse_grace_time = tag::int_or(tag, "current_impulse_context_reset_grace_time", 0);
         // ---- Mob.readAdditionalSaveData ----
         mob.can_pick_up_loot = tag::bool_or(tag, "CanPickUpLoot", false);
@@ -320,8 +340,7 @@ fn apply_attributes(mob: &mut Mob, entries: &[Tag]) {
         let Some(instance) = mob.attributes.instance(id) else {
             continue;
         };
-        if let Some(base) = tag::field(entry, "base").and_then(|value| tag::java_f64(value).ok())
-        {
+        if let Some(base) = tag::field(entry, "base").and_then(|value| tag::java_f64(value).ok()) {
             instance.base = base;
         }
         let Some(Tag::List(modifiers)) = tag::field(entry, "modifiers") else {

@@ -799,7 +799,8 @@ impl EntityStore {
     ///
     /// Whether a mob with this UUID is in the table, pending ones included.
     pub fn has_mob_uuid(&self, uuid: &[u8; 16]) -> bool {
-        let matches = |row: &EntityRow| matches!(&row.public.kind, KindPublic::Mob(mob) if &mob.uuid == uuid);
+        let matches =
+            |row: &EntityRow| matches!(&row.public.kind, KindPublic::Mob(mob) if &mob.uuid == uuid);
         self.slots.iter().flatten().any(matches) || self.pending.iter().any(matches)
     }
 

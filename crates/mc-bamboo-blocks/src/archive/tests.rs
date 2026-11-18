@@ -311,12 +311,44 @@ fn three_entity_kinds_round_trip() {
 fn unknown_entity_ids_are_left_to_the_caller() {
     let tag = Tag::Compound(vec![(
         "id".to_owned(),
-        Tag::String("minecraft:cow".to_owned()),
+        Tag::String("minecraft:pig".to_owned()),
     )]);
     assert!(read_entity(&tag, 1).unwrap().is_none());
     assert_eq!(
         field(&tag, "id"),
+        Some(&Tag::String("minecraft:pig".to_owned()))
+    );
+}
+
+/// 牛是已经建模的实体：读盘进实体表，写盘时按官方的键写回。
+///
+/// Cows are modelled now: a disk entry becomes a live entity and is written
+/// back with the vanilla keys.
+#[test]
+fn cow_entity_ids_are_read_and_written() {
+    let tag = Tag::Compound(vec![
+        ("id".to_owned(), Tag::String("minecraft:cow".to_owned())),
+        (
+            "Pos".to_owned(),
+            Tag::List(vec![
+                Tag::Double(1.5),
+                Tag::Double(64.0),
+                Tag::Double(-2.25),
+            ]),
+        ),
+        ("UUID".to_owned(), Tag::IntArray(vec![1, 2, 3, 4])),
+    ]);
+    let row = read_entity(&tag, 1).unwrap().expect("牛能读进来");
+    assert_eq!(row.public.position, Vec3::new(1.5, 64.0, -2.25));
+    assert!(matches!(row.public.kind, crate::entity::KindPublic::Mob(_)));
+    let again = write_entity(&row).unwrap();
+    assert_eq!(
+        field(&again, "id"),
         Some(&Tag::String("minecraft:cow".to_owned()))
+    );
+    assert_eq!(
+        field(&again, "UUID"),
+        Some(&Tag::IntArray(vec![1, 2, 3, 4]))
     );
 }
 

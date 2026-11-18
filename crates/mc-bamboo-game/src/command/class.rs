@@ -32,12 +32,15 @@ pub(crate) enum CommandClass {
     CrossIsland,
 }
 
-/// 4.4 的表：51 个顶层字面量各属哪一类（别名单列）。
+/// 4.4 的表：51 个顶层字面量各属哪一类（别名单列），加上后来接入的 `/summon`。
+/// `/summon` 只动本岛的实体表，归本岛类。
 ///
-/// The 4.4 table: the class of each of the 51 root literals (aliases listed).
+/// The 4.4 table: the class of each of the 51 root literals (aliases listed),
+/// plus `/summon`, which only touches the island's own entity table.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("setblock", CommandClass::Island),
+    ("summon", CommandClass::Island),
     ("fill", CommandClass::Island),
     ("clone", CommandClass::Island),
     ("particle", CommandClass::Island),
@@ -130,8 +133,10 @@ mod tests {
             };
             roots.push((name.clone(), child));
         }
-        assert_eq!(roots.len(), 51, "4.4 写的是 51 个顶层字面量");
-        assert_eq!(CLASSES.len(), 51);
+        // 4.4 的 51 个加上 `/summon`。
+        // The 51 of 4.4 plus `/summon`.
+        assert_eq!(roots.len(), 52);
+        assert_eq!(CLASSES.len(), 52);
         let names: BTreeSet<&str> = CLASSES.iter().map(|(name, _)| *name).collect();
         assert_eq!(names.len(), CLASSES.len(), "表里不该有重复");
         for (name, root) in roots {

@@ -503,9 +503,10 @@ impl Report {
                         f64::from_bits(summon.y as u64),
                         f64::from_bits(summon.z as u64),
                     );
-                    let nbt = summon.nbt.as_deref().map(|text| {
-                        mc_bamboo_nbt::parse_snbt(text).expect("scene SNBT parses")
-                    });
+                    let nbt = summon
+                        .nbt
+                        .as_deref()
+                        .map(|text| mc_bamboo_nbt::parse_snbt(text).expect("scene SNBT parses"));
                     if let Ok(id) = spawn::summon_cow(&mut world, position, nbt.as_ref()) {
                         ids.push(id);
                     }

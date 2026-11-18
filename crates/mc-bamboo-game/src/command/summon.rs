@@ -84,7 +84,9 @@ fn summon(
             .get(&id)
             .ok_or_else(|| fail("permissions.requires.player"))?;
         match parsed.get("pos").and_then(|value| value.as_vec3()) {
-            Some(coords) if with_pos => coords.position(player.position(), player.yaw, player.pitch),
+            Some(coords) if with_pos => {
+                coords.position(player.position(), player.yaw, player.pitch)
+            }
             _ => player.position(),
         }
     };

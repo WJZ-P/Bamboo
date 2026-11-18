@@ -1475,10 +1475,7 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
             ("NoGravity", Tag::Byte(1)),
             ("Glowing", Tag::Byte(1)),
             ("TicksFrozen", Tag::Int(55)),
-            (
-                "Tags",
-                Tag::List(vec![Tag::String("milked".to_owned())]),
-            ),
+            ("Tags", Tag::List(vec![Tag::String("milked".to_owned())])),
             ("Health", Tag::Float(7.5)),
             ("HurtTime", Tag::Short(3)),
             ("DeathTime", Tag::Short(0)),
@@ -1505,10 +1502,7 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
                 ]),
             ),
             ("FallFlying", Tag::Byte(0)),
-            (
-                "last_hurt_by_player",
-                Tag::IntArray(vec![1, 2, 3, 4]),
-            ),
+            ("last_hurt_by_player", Tag::IntArray(vec![1, 2, 3, 4])),
             ("last_hurt_by_player_memory_time", Tag::Int(60)),
             ("last_hurt_by_mob", Tag::IntArray(vec![1, 2, 3, 4])),
             ("ticks_since_last_hurt_by_mob", Tag::Int(40)),
@@ -1547,10 +1541,7 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
     let mut store = mc_bamboo_blocks::EntityStore::new();
     let uid = store.spawn(Entity::cow(Vec3::new(8.5, 65.0, 8.5)));
     let row = store.get(uid).expect("刚生成").split();
-    out.push((
-        "spawned".to_owned(),
-        write_entity(&row).expect("牛能写出"),
-    ));
+    out.push(("spawned".to_owned(), write_entity(&row).expect("牛能写出")));
     out
 }
 
