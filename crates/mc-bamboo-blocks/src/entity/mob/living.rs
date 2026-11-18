@@ -301,16 +301,34 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.last_hurt_by_player_memory_time -= 1;
     } else {
         mob.last_hurt_by_player = None;
+        mob.last_hurt_by_player_ref = None;
     }
-    if let Some(attacker) = mob.last_hurt_by_mob
-        && let Some(other) = ctx.other(attacker)
-    {
-        let alive = match &other.kind {
-            KindPublic::Mob(public) => public.is_alive() && !other.removed,
-            _ => !other.removed,
+    if mob.last_hurt_by_mob.is_some() || mob.last_hurt_by_mob_ref.is_some() {
+        // `getLastHurtByMob()` 按引用找实体：玩家不在实体表里，从玩家表找；读盘后只剩
+        // UUID 的引用找不到实体，当作没了。
+        // Players are not in the entity table; a reference left with only a UUID
+        // after a load resolves to nothing.
+        let alive = match mob.last_hurt_by_mob {
+            Some(attacker) => match ctx.other(attacker) {
+                Some(other) => match &other.kind {
+                    KindPublic::Mob(public) => public.is_alive() && !other.removed,
+                    _ => !other.removed,
+                },
+                None => {
+                    let mut alive = false;
+                    ctx.blocks().for_each_player(&mut |player| {
+                        if player.uid == attacker {
+                            alive = player.alive;
+                        }
+                    });
+                    alive
+                }
+            },
+            None => false,
         };
         if !alive || me.tick_count - mob.last_hurt_by_mob_timestamp > 100 {
             mob.last_hurt_by_mob = None;
+            mob.last_hurt_by_mob_ref = None;
         }
     }
     mob.y_head_rot_o = mob.y_head_rot;
@@ -322,9 +340,46 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         mob.ambient_sound_time += 1;
         if roll < time {
             mob.ambient_sound_time = -120;
-            voice_pitch(me, mob);
+            let pitch = voice_pitch(me, mob);
+            play_sound(
+                me,
+                mob,
+                mob.sound_variant.ambient(),
+                COW_SOUND_VOLUME,
+                pitch,
+            );
         }
     }
+}
+
+/// `AbstractCow.getSoundVolume()`：叫声、受伤和死亡都用这个音量。
+const COW_SOUND_VOLUME: f32 = 0.4;
+
+/// `Entity.playSound`：静音的生物不出声（音高这些参数调用方已经取过）。
+///
+/// `Entity.playSound`: a silent mob makes no sound (the caller already drew the pitch).
+pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume: f32, pitch: f32) {
+    if mob.silent {
+        return;
+    }
+    mob.events.push(MobEvent::Sound {
+        sound,
+        volume,
+        pitch,
+        position: me.position,
+    });
+}
+
+/// `Mob.playAmbientSound`：`makeSound(getAmbientSound())`。
+pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
+    let pitch = voice_pitch(me, mob);
+    play_sound(
+        me,
+        mob,
+        mob.sound_variant.ambient(),
+        COW_SOUND_VOLUME,
+        pitch,
+    );
 }
 
 /// `getVoicePitch()`：两个 `nextFloat`，牛的叫声从不为空，静音时也照取。
@@ -456,7 +511,7 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         let amount = -0.05_f32 * percent;
         if let Some(speed) = mob.attributes.instance(attribute::MOVEMENT_SPEED) {
             speed.modifiers.push(super::attributes::Modifier {
-                id: POWDER_SNOW_SLOW,
+                id: POWDER_SNOW_SLOW.to_owned(),
                 amount: f64::from(amount),
                 operation: super::attributes::Operation::AddValue,
                 permanent: false,
@@ -1051,9 +1106,11 @@ pub(crate) fn hurt_server(
     };
     if let Some(attacker) = source.attacker {
         mob.last_hurt_by_mob = Some(attacker);
+        mob.last_hurt_by_mob_ref = source.attacker_uuid;
         mob.last_hurt_by_mob_timestamp = me.tick_count;
         if source.attacker_is_player {
             mob.last_hurt_by_player = Some(attacker);
+            mob.last_hurt_by_player_ref = source.attacker_uuid;
             mob.last_hurt_by_player_memory_time = 100;
         }
     }
@@ -1074,13 +1131,15 @@ pub(crate) fn hurt_server(
     }
     if mob.is_dead_or_dying() {
         if full_hit {
-            voice_pitch(me, mob);
+            let pitch = voice_pitch(me, mob);
+            play_sound(me, mob, mob.sound_variant.death(), COW_SOUND_VOLUME, pitch);
         }
         die(me, mob, ctx, source);
     } else if full_hit {
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
         mob.ambient_sound_time = -120;
-        voice_pitch(me, mob);
+        let pitch = voice_pitch(me, mob);
+        play_sound(me, mob, mob.sound_variant.hurt(), COW_SOUND_VOLUME, pitch);
     }
     mob.last_damage_source = Some(source);
     mob.last_damage_stamp = ctx.blocks().game_time();

@@ -95,6 +95,10 @@ impl VecDelta {
         match self {
             Self::Linear(delta) => delta.write(out),
             Self::Stepped { ticks, delta } => {
+                // 官方的步数在 `packProperties` 里（`stepCount << 1`），这里每步只有
+                // 一个 ticks 的 VarInt 和三个 short，没有另写步数。
+                // Vanilla puts the step count in `packProperties`; each step here
+                // is just a ticks VarInt and three shorts.
                 write_varint(out, ticks);
                 delta.write(out);
             }
@@ -200,7 +204,9 @@ impl PositionPath {
             }
             Self::Stepped { position, ticks } => {
                 write_varint(out, 1);
-                // 步数。
+                // 官方 `PositionPath.Stepped.STREAM_CODEC`：步数，然后每步
+                // position 三个 double + 一个 ticks。
+                // Vanilla `PositionPath.Stepped`: step count, then position + ticks per step.
                 write_varint(out, 1);
                 write_vec3(out, position);
                 write_varint(out, ticks);

@@ -294,6 +294,10 @@ fn step_effects(
     if !(me.on_ground || climbable) {
         return false;
     }
+    if play_sound {
+        // `AbstractCow.playStepSound`：`playSound(stepSound, 0.15F, 1.0F)`。
+        super::living::play_sound(me, mob, mob.sound_variant.step(), 0.15, 1.0);
+    }
     if play_sound
         && state.is_tagged(block_tags::CRYSTAL_SOUND_BLOCKS)
         && me.tick_count >= mob.last_crystal_sound_tick + 20

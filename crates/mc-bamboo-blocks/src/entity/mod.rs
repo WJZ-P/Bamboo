@@ -43,9 +43,15 @@ pub use store::{
 /// 世界实体 ID 从这个数开始，玩家 ID 从 1 开始，两边不会撞上。
 pub const FIRST_ENTITY_ID: i32 = 1 << 24;
 
-/// 这个世界随机源的固定种子。官方用 `RandomSupport.generateUniqueSeed()`，每次开服都不同。
-/// 每个实体的随机源的种子是这个常数和实体 ID 异或出来的。官方实体的随机源是独立的，
-/// 种子同样不可复现；这里让它只由 ID 决定，测试才比得了。
+/// 岛的实体种子源的初始种子（[`EntityStore`] 的缺省值）。每个实体生成或读盘放进岛时
+/// 从种子源取一个 `nextLong` 当自己随机源的种子。官方实体的随机源是不带种子的
+/// `RandomSource.create()`，种子不可复现；这里让它只由岛上实体出现的先后决定，
+/// 和网络 ID 无关，测试才比得了。
+///
+/// The initial seed of an island's entity seed source (the [`EntityStore`]
+/// default). Each entity draws one `nextLong` from it on spawn or when loaded.
+/// Vanilla uses unseeded randoms; here only the order of appearance on the island
+/// matters, independent of network ids.
 pub const ENTITY_RANDOM_SEED: i64 = 0x0DDB_1A5E_5BAD_5EED;
 
 /// 下落的方块，对应 `FallingBlockEntity`。

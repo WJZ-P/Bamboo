@@ -136,6 +136,10 @@ pub enum ArgumentType {
     ///
     /// Official `TeamColorArgument`.
     TeamColor,
+    /// 官方 `CompoundTagArgument`：一个 SNBT 复合标签。
+    ///
+    /// Official `CompoundTagArgument`: one SNBT compound.
+    CompoundTag,
 }
 
 impl ArgumentType {
@@ -178,6 +182,7 @@ impl ArgumentType {
             Self::ScoreHolder { .. } => "minecraft:score_holder",
             Self::Style => "minecraft:style",
             Self::TeamColor => "minecraft:team_color",
+            Self::CompoundTag => "minecraft:nbt_compound_tag",
         }
     }
 
@@ -221,6 +226,7 @@ impl ArgumentType {
             Self::ScoreHolder { .. } => registry::SCORE_HOLDER,
             Self::Style => registry::STYLE,
             Self::TeamColor => registry::TEAM_COLOR,
+            Self::CompoundTag => registry::NBT_COMPOUND_TAG,
         }
     }
 
@@ -295,6 +301,7 @@ impl ArgumentType {
             }
             Self::Style => scoreboard::parse_style(reader),
             Self::TeamColor => scoreboard::parse_team_color(reader),
+            Self::CompoundTag => parse_compound_tag(reader),
         }
     }
 
@@ -363,6 +370,22 @@ fn parse_game_profile(
     )))
 }
 
+/// 官方 `TagParser.parseCompoundAsArgument`：读一个 SNBT 值，不是复合标签就报
+/// `argument.nbt.expected.compound`。
+///
+/// Official `TagParser.parseCompoundAsArgument`: one SNBT value that must be a compound.
+fn parse_compound_tag(reader: &mut StringReader) -> Result<Value, ParseError> {
+    let start = reader.cursor();
+    let rest = reader.remaining();
+    let (tag, used) = mc_bamboo_nbt::parse_snbt_argument(&rest)
+        .map_err(|error| ParseError::text("argument.nbt.invalid", error.message))?;
+    if !matches!(tag, mc_bamboo_nbt::Tag::Compound(_)) {
+        return Err(ParseError::new("argument.nbt.expected.compound"));
+    }
+    reader.set_cursor(start + used);
+    Ok(Value::Nbt(tag))
+}
+
 /// 官方 `ResourceArgument.parse`：读一个标识符，不在注册表里就报 `argument.resource.not_found`。
 ///
 /// Official `ResourceArgument.parse`: read an identifier, or `argument.resource.not_found`.
@@ -386,6 +409,11 @@ fn parse_resource_location(reader: &mut StringReader) -> Result<Value, ParseErro
 }
 
 fn registry_entries(registry: &str) -> Option<&'static [&'static str]> {
+    // 实体类型是内置注册表，不在同步给客户端的那一组里。
+    // Entity types are a built-in registry, not one of the synced ones.
+    if registry == "minecraft:entity_type" {
+        return Some(mc_bamboo_data::registries::entity_type::NAMES);
+    }
     mc_bamboo_data::registries::SYNCED_REGISTRIES
         .iter()
         .find(|synced| synced.name == registry)

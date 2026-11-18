@@ -379,6 +379,7 @@ public final class EntityOracle {
     }
 
     private static final int FIRST_ITEM_ID = 1 << 24;
+    /** Bamboo 的 `ENTITY_RANDOM_SEED`：岛的实体种子源的初始种子。 */
     private static final long ENTITY_RANDOM_SEED = 0x0DDB1A5E5BAD5EEDL;
 
     /**
@@ -980,6 +981,7 @@ public final class EntityOracle {
         static Scene items(Official official, Long2ObjectMap<BlockState> blocks, boolean hopper) {
             FakeLevel level = FakeLevel.create(official, 1L);
             level.nextId = FIRST_ITEM_ID;
+            level.firstId = FIRST_ITEM_ID;
             level.blocks.putAll(blocks);
             Scene scene = new Scene(level);
             if (hopper) {
@@ -1005,8 +1007,9 @@ public final class EntityOracle {
         void spawnItem(double x, double y, double z, ItemStack stack, int pickupDelay, boolean exactDelay) {
             ItemEntity item = new ItemEntity(level, x, y, z, stack);
             level.addFreshEntity(item);
-            // 构造函数先用了未设种子的随机源。换成和 Bamboo 一样的 `id ^ seed` 之后，把朝向和速度重新取一遍。
-            long seed = (long) item.getId() ^ ENTITY_RANDOM_SEED;
+            // 构造函数先用了未设种子的随机源。换成和 Bamboo 一样从种子源取的种子之后，把朝向和速度重新取一遍。
+            // The constructor drew from an unseeded random. Reseed like Bamboo, then redraw facing and velocity.
+            long seed = level.entitySeed(item.getId());
             setRandom(item, seed);
             RandomSource random = item.getRandom();
             random.nextFloat();
@@ -1038,6 +1041,7 @@ public final class EntityOracle {
                 int firstId) {
             FakeLevel level = FakeLevel.create(official, levelSeed);
             level.nextId = firstId;
+            level.firstId = firstId;
             level.blocks.putAll(blocks);
             BlockPos pos = new BlockPos(x, y, z);
             Entity entity;
@@ -1091,11 +1095,11 @@ public final class EntityOracle {
                     if (!fallingDrops) {
                         continue;
                     }
-                    // `RandomSource.create()` 每次运行都换种子。改成和 Bamboo 一样的
-                    // `id ^ seed`，再按官方构造顺序重放朝向和速度。
-                    // `RandomSource.create()` uses a fresh seed every run. Reseed by
-                    // `id ^ seed` as Bamboo does, then replay the facing and velocity draws.
-                    long seed = (long) item.getId() ^ ENTITY_RANDOM_SEED;
+                    // `RandomSource.create()` 每次运行都换种子。改成和 Bamboo 一样从种子源
+                    // 取的种子，再按官方构造顺序重放朝向和速度。
+                    // `RandomSource.create()` uses a fresh seed every run. Reseed from the
+                    // seed source as Bamboo does, then replay the facing and velocity draws.
+                    long seed = level.entitySeed(item.getId());
                     setRandom(item, seed);
                     RandomSource random = item.getRandom();
                     random.nextFloat();
@@ -1486,7 +1490,25 @@ public final class EntityOracle {
         private LevelTicks<Fluid> fluidTicks;
         private ServerChunkCache chunkSource;
         private int nextId = 1;
+        /** 这个场景第一个实体的 ID：Bamboo 的种子源从它起按生成先后取数。 */
+        private int firstId = 1;
         private FluidChunk fluidChunk;
+
+        /**
+         * Bamboo 的岛实体种子源：种子源从 {@code ENTITY_RANDOM_SEED} 开始，第 k 个生成的实体
+         * 取第 k 个 {@code nextLong}。ID 也按生成先后分配，所以第 k 个就是 {@code id - firstId}。
+         *
+         * <p>Bamboo's island entity seed source: the k-th spawned entity takes the k-th
+         * {@code nextLong}. Ids follow spawn order too, so k is {@code id - firstId}.
+         */
+        long entitySeed(int id) {
+            RandomSource seeds = RandomSource.create(ENTITY_RANDOM_SEED);
+            long seed = 0L;
+            for (int i = firstId; i <= id; i++) {
+                seed = seeds.nextLong();
+            }
+            return seed;
+        }
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);

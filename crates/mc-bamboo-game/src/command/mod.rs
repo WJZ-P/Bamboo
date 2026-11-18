@@ -31,6 +31,7 @@ mod save;
 mod scoreboard;
 mod select;
 mod stopsound;
+mod summon;
 mod team;
 mod teleport;
 mod text;
@@ -470,7 +471,8 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::Operation
         | ArgumentType::DisplaySlot
         | ArgumentType::Style
-        | ArgumentType::TeamColor => ArgumentProperties::None,
+        | ArgumentType::TeamColor
+        | ArgumentType::CompoundTag => ArgumentProperties::None,
     }
 }
 
@@ -1333,6 +1335,7 @@ mod official_tree {
     /// (node kind, parser, properties, executable and permissions). The seven other
     /// roots are checked by the path/parser tests above.
     const ADMIN_ROOTS: &[&str] = &[
+        "summon",
         "op",
         "deop",
         "ban",

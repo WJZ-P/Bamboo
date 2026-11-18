@@ -29,11 +29,12 @@ pub(crate) use honeycomb::waxed;
 mod ignite;
 pub(crate) use ignite::can_light;
 mod shears;
+mod spawn_egg;
 mod transformer;
 
 pub use debug_stick::{StickSelect, select as debug_stick_select};
 
-use mc_bamboo_data::{Item, ItemKind};
+use mc_bamboo_data::{Item, ItemKind, items};
 
 use crate::{context::UseContext, interact::InteractionResult, world::World};
 
@@ -51,6 +52,11 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         // `BrushItem.useOn` 只开始使用物品，结果总是 `CONSUME`。
         ItemKind::Brush => InteractionResult::Consume,
         ItemKind::BoneMeal => bone_meal::use_on(world, ctx),
+        // `SpawnEggItem.useOn`：点中的那一格（不是相邻格）上生成，方块本身
+        // 是流体时不生成。`shouldOffsetYMore` 恒为 false，见官方的调用点。
+        // `SpawnEggItem.useOn`: spawn on the clicked block (not the adjacent
+        // one), never in a fluid block. `shouldOffsetYMore` is false there.
+        _ if ctx.item == items::COW_SPAWN_EGG => spawn_egg::cow(world, ctx),
         _ => default_use_on(world, item, ctx),
     }
 }

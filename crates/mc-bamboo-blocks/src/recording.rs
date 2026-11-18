@@ -1291,6 +1291,27 @@ impl LevelEntities for Recording<'_> {
         uid
     }
 
+    fn prepare_entity(&mut self, entity: Entity) -> Entity {
+        self.note_entities(5);
+        let entity = self.level.prepare_entity(entity);
+        self.read(None, K_ENTITIES, (5_u8, entity.id));
+        entity
+    }
+
+    fn add_prepared_entity(&mut self, entity: Entity) -> EntityUid {
+        self.note_entities(5);
+        let uid = self.level.add_prepared_entity(entity);
+        self.read(None, K_ENTITIES, (5_u8, uid));
+        uid
+    }
+
+    fn has_mob_uuid(&self, uuid: &[u8; 16]) -> bool {
+        self.note_entities(0);
+        let value = self.level.has_mob_uuid(uuid);
+        self.read(None, K_ENTITIES, (0_u8, value));
+        value
+    }
+
     fn with_just_spawned(&mut self, uid: EntityUid, f: &mut dyn FnMut(&mut Entity)) -> bool {
         self.note_entities(6);
         let value = self.level.with_just_spawned(uid, f);

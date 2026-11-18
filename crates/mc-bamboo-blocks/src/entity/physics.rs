@@ -901,6 +901,11 @@ pub(crate) fn world_boxes(boxes: &[Aabb], pos: BlockPos) -> Vec<Aabb> {
     shape::moved(boxes, f64::from(pos.x), f64::from(pos.y), f64::from(pos.z))
 }
 
+/// [`collide_axis`] 给别的模块用：沿一根轴对一组世界坐标的盒子扫掠。
+pub(crate) fn collide_along(axis: Axis, moving: Aabb, boxes: &[Aabb], distance: f64) -> f64 {
+    collide_axis(axis, moving, boxes, distance)
+}
+
 /// `Shapes.collide`：沿一根轴扫掠，返回实际能走的距离。
 ///
 /// 每次换形状前都要再看一眼距离是不是已经归零，官方就是这么写的。

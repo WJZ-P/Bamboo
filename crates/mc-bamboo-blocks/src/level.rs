@@ -510,6 +510,12 @@ pub trait LevelEntities {
     fn for_each_entity_in(&self, area: Aabb, visit: &mut dyn FnMut(&EntityPublic));
     /// `addFreshEntity`：tick 期间生成的实体下一 tick 才动。
     fn spawn_entity(&mut self, entity: Entity) -> EntityUid;
+    /// 构造实体：分配 ID、取种子和构造时的随机数，还不放进世界，见 [`EntityStore::prepare`]。
+    fn prepare_entity(&mut self, entity: Entity) -> Entity;
+    /// 放进一个 [`Self::prepare_entity`] 过的实体。
+    fn add_prepared_entity(&mut self, entity: Entity) -> EntityUid;
+    /// 世界里有没有这个 UUID 的生物。
+    fn has_mob_uuid(&self, uuid: &[u8; 16]) -> bool;
     /// 刚生成、还没并进 tick 列表的实体也找得到。
     fn with_just_spawned(&mut self, uid: EntityUid, f: &mut dyn FnMut(&mut Entity)) -> bool;
     /// 只打上 `removed` 标记，实体还留在这一拍的名单里。
@@ -576,6 +582,19 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
     fn spawn_entity(&mut self, entity: Entity) -> EntityUid {
         self.mark_chunk_dirty(entity.block_position().chunk());
         self.entities_table_mut().spawn(entity)
+    }
+
+    fn prepare_entity(&mut self, entity: Entity) -> Entity {
+        self.entities_table_mut().prepare(entity)
+    }
+
+    fn add_prepared_entity(&mut self, entity: Entity) -> EntityUid {
+        self.mark_chunk_dirty(entity.block_position().chunk());
+        self.entities_table_mut().add(entity)
+    }
+
+    fn has_mob_uuid(&self, uuid: &[u8; 16]) -> bool {
+        self.entities_table().has_mob_uuid(uuid)
     }
 
     fn with_just_spawned(&mut self, uid: EntityUid, f: &mut dyn FnMut(&mut Entity)) -> bool {
@@ -818,6 +837,13 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 群系调色板再按 `mc-bamboo-worldgen` 算温度。
     fn precipitation_facts(&self, _pos: BlockPos) -> crate::weather::PrecipitationFacts {
         crate::weather::PrecipitationFacts::PLAINS
+    }
+
+    /// 这一格的群系注册表 ID（`level.getBiome(pos)`），生物按群系挑花色用。默认平原（测试用）。
+    ///
+    /// The biome registry id at this cell, for mob variants. Plains by default.
+    fn biome_id(&self, _pos: BlockPos) -> i32 {
+        mc_bamboo_data::registries::biome::PLAINS
     }
 
     /// 这一格的物品栏，对应官方的 `getBlockContainer`（摆在方块里的那个）。

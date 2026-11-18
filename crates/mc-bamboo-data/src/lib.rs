@@ -718,6 +718,67 @@ pub fn block_of_state(state: u32) -> Option<&'static Block> {
     blocks::BLOCKS.get(block_id_of_state(state)?)
 }
 
+/// `Attribute.isClientSyncable()`：官方在 `Attributes` 静态块里给这些属性调了
+/// `setSyncable(true)`。`getSyncableAttributes` 只收这些，配对时发 `update_attributes`。
+///
+/// `Attribute.isClientSyncable()`: vanilla calls `setSyncable(true)` for these
+/// in `Attributes`' static block. `getSyncableAttributes` sends only these.
+const CLIENT_SYNCABLE_ATTRIBUTES: &[&str] = &[
+    "minecraft:air_drag_modifier",
+    "minecraft:armor",
+    "minecraft:armor_toughness",
+    "minecraft:attack_speed",
+    "minecraft:below_name_distance",
+    "minecraft:block_break_speed",
+    "minecraft:block_interaction_range",
+    "minecraft:bounciness",
+    "minecraft:burning_time",
+    "minecraft:camera_distance",
+    "minecraft:entity_interaction_range",
+    "minecraft:explosion_knockback_resistance",
+    "minecraft:fall_damage_multiplier",
+    "minecraft:flying_speed",
+    "minecraft:friction_modifier",
+    "minecraft:gravity",
+    "minecraft:jump_strength",
+    "minecraft:luck",
+    "minecraft:max_absorption",
+    "minecraft:max_health",
+    "minecraft:mining_efficiency",
+    "minecraft:movement_efficiency",
+    "minecraft:movement_speed",
+    "minecraft:name_tag_distance",
+    "minecraft:oxygen_bonus",
+    "minecraft:safe_fall_distance",
+    "minecraft:scale",
+    "minecraft:sneaking_speed",
+    "minecraft:step_height",
+    "minecraft:submerged_mining_speed",
+    "minecraft:sweeping_damage_ratio",
+    "minecraft:water_movement_efficiency",
+];
+
+/// `minecraft:damage_type` 注册表 ID；顺序和配置阶段同步给客户端的表一致。
+///
+/// The `minecraft:damage_type` registry id, in the order sent to the client.
+pub fn damage_type_id(name: &str) -> Option<i32> {
+    registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:damage_type")?
+        .entries
+        .iter()
+        .position(|entry| *entry == name)
+        .and_then(|id| i32::try_from(id).ok())
+}
+
+/// 这个属性 ID 要不要同步给客户端（`Attribute.isClientSyncable`）。
+///
+/// Whether this attribute id is synced to the client.
+pub fn is_client_syncable_attribute(id: i32) -> bool {
+    registries::attribute::name_of(id)
+        .is_some_and(|name| CLIENT_SYNCABLE_ATTRIBUTES.binary_search(&name).is_ok())
+}
+
 /// 一个状态所属方块的注册表 ID，状态 ID 不存在时返回 `None`。
 pub fn block_id_of_state(state: u32) -> Option<usize> {
     if state >= blocks::TOTAL_STATES {
@@ -890,6 +951,34 @@ pub fn item_tag(name: &str) -> Option<&'static [i32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 同步属性表按名字排序，且每个名字都是真实存在的属性。改坏确认：把表里的
+    /// `attack_damage`（官方不同步）加进来，或者漏掉一项，这里都会失败。
+    ///
+    /// The syncable list is sorted and every name exists. A wrong or missing
+    /// entry is caught here.
+    #[test]
+    fn syncable_attributes_match_the_official_set() {
+        assert!(CLIENT_SYNCABLE_ATTRIBUTES.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(CLIENT_SYNCABLE_ATTRIBUTES.len(), 32);
+        for name in CLIENT_SYNCABLE_ATTRIBUTES {
+            assert!(
+                registries::attribute::by_name(name).is_some(),
+                "{name} 不是属性"
+            );
+        }
+        // 官方不同步攻击伤害、击退和跟随距离。
+        // Vanilla does not sync attack damage, knockback or follow range.
+        assert!(!is_client_syncable_attribute(
+            registries::attribute::ATTACK_DAMAGE
+        ));
+        assert!(!is_client_syncable_attribute(
+            registries::attribute::FOLLOW_RANGE
+        ));
+        assert!(is_client_syncable_attribute(
+            registries::attribute::MAX_HEALTH
+        ));
+    }
 
     fn short(name: &str) -> &str {
         name.strip_prefix("minecraft:").unwrap_or(name)

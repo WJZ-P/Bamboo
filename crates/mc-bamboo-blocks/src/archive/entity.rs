@@ -13,10 +13,7 @@ use mc_bamboo_protocol::{components::archive::slots, item::ItemStack};
 use super::tag::{self, Error, Result, put};
 use crate::{
     BlockState,
-    entity::{
-        ENTITY_RANDOM_SEED, Entity, EntityKind, EntityRow, FallingBlock, GroundItem, JavaRandom,
-        PrimedTnt,
-    },
+    entity::{Entity, EntityKind, EntityRow, FallingBlock, GroundItem, JavaRandom, PrimedTnt},
 };
 
 /// 官方实体的 UUID 是随机的；Bamboo 由实体 ID 推出来，网络层和存档共用这一份。
@@ -147,8 +144,9 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
 
 /// 官方 `EntityType.loadEntityRecursive` 的 Bamboo 版。
 ///
-/// 不认识的 `id` 返回 [`Ok(None)`]，由调用方整条原样保留。`uid` 由生成流程重新分配，
-/// 官方文件里的 `UUID` 不保留；实体随机源按 uid 重建。
+/// 不认识的 `id` 返回 [`Ok(None)`]，由调用方整条原样保留。`uid` 只是占位：放进岛的
+/// 实体表时重新取号，随机源也在那时从岛的种子源取种子
+/// （[`crate::entity::ChunkEntities::from_parts`]）。官方文件里的 `UUID` 不保留。
 pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
     let id = match tag::string_or(tag, "id") {
         Some(value) => value,
@@ -230,7 +228,9 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
         movement_this_tick: Vec::new(),
         final_movements: Vec::new(),
         requires_precise_position: false,
-        random: JavaRandom::new(i64::from(uid) ^ ENTITY_RANDOM_SEED),
+        // 占位，放进实体表时换成从岛的种子源取的种子。
+        // Placeholder; replaced by a seed from the island's source on insert.
+        random: JavaRandom::default(),
         y_rot: rotation[0],
         first_tick: true,
         remaining_fire_ticks: i32::from(tag::short_or(tag, "Fire", 0)),

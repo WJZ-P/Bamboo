@@ -19,10 +19,13 @@ pub enum Operation {
     AddMultipliedTotal,
 }
 
-/// 一个修饰符。`id` 是官方 `Identifier` 的文本。
+/// 一个修饰符。`id` 是官方 `Identifier` 的文本；存档里读回的修饰符名字任意，所以是 `String`。
+///
+/// A modifier. `id` is the text of the vanilla `Identifier`; names read back from
+/// disk are arbitrary, hence a `String`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Modifier {
-    pub id: &'static str,
+    pub id: String,
     pub amount: f64,
     pub operation: Operation,
     /// 永久修饰符会存盘，临时的（细雪减速）不会。
