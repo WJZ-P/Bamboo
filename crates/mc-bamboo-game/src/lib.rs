@@ -170,7 +170,9 @@ pub fn replay_experience(
             let _ = player.set_experience_points(value);
         }
         "set_levels" => player.set_experience_levels(value),
-        "on_enchantment" => player.on_enchantment_performed(value),
+        "on_enchantment" => {
+            let _ = player.on_enchantment_performed(value);
+        }
         "query_points" | "need" => {}
         _ => panic!("unknown experience operation"),
     }

@@ -231,12 +231,13 @@ impl Player {
         self.last_sent_exp = -1;
     }
 
-    /// 官方 `Player.onEnchantmentPerformed`：扣等级并从玩家随机源换新种子。
+    /// 官方 `Player.onEnchantmentPerformed`：扣等级并从玩家随机源换新种子，
+    /// 返回新种子（菜单的 `enchantmentSeed` DataSlot 要用）。
     ///
-    /// Official `Player.onEnchantmentPerformed`: subtracts levels and draws
-    /// a new seed from the player's random source.
-    #[cfg_attr(not(feature = "oracle-samples"), allow(dead_code))]
-    pub(crate) fn on_enchantment_performed(&mut self, levels: i32) {
+    /// Official `Player.onEnchantmentPerformed`: subtracts levels, draws a new
+    /// seed from the player's random source, and returns it for the menu's
+    /// `enchantmentSeed` DataSlot.
+    pub(crate) fn on_enchantment_performed(&mut self, levels: i32) -> i32 {
         self.experience.level = self.experience.level.wrapping_sub(levels);
         if self.experience.level < 0 {
             self.experience.level = 0;
@@ -245,6 +246,7 @@ impl Player {
         }
         self.enchantment_seed = self.random.next_int();
         self.last_sent_exp = -1;
+        self.enchantment_seed
     }
 
     /// 改位置，网格跟着更新。广播靠网格找附近的玩家，绕过这里改位置会让玩家漏收包。

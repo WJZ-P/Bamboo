@@ -49,7 +49,7 @@ pub enum ReplayShape {
 }
 
 /// 重放题里假世界的固定状态：附魔种子、地图比例/锁定、书架数和换出的新种子。
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ReplayWorld {
     pub seed: i32,
     pub fixed: bool,
@@ -57,6 +57,13 @@ pub struct ReplayWorld {
     pub map_locked: bool,
     pub bookshelves: i32,
     pub next_seed: Option<i32>,
+    /// 每次成功附魔依次换出的新种子（`Player.random.nextInt()` 的序列）。
+    ///
+    /// The successive `Player.random.nextInt()` values from each successful
+    /// enchantment.
+    pub next_seeds: Vec<i32>,
+    /// 官方 `Player.experienceLevel`，附魔台和铁砧的等级判定。
+    pub experience_level: i32,
 }
 
 impl ReplayShape {

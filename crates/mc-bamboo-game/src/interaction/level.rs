@@ -11,7 +11,7 @@ use mc_bamboo_blocks::{
     level::EquipTarget,
     shape::{self, BooleanOp},
 };
-use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, sign::SignContent};
+use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::{
     block_of_state, blocks,
     registries::{block_entity_type as entities, data_component_type as kinds, entity_type},
@@ -144,6 +144,50 @@ impl Level for RegionLevel<'_> {
     fn for_each_player(&self, visit: &mut dyn FnMut(&mc_bamboo_blocks::entity::ctx::PlayerView)) {
         for (id, player) in self.players.iter() {
             visit(&player.view(*id));
+        }
+    }
+
+    /// 官方 `Block.tryDropExperience` + `Block.popExperience`：
+    /// `xpRange.sample(level.random)`（常数区间不取数），然后
+    /// `ExperienceOrb.award(level, Vec3.atCenterOf(pos), amount)` 拆成球。
+    /// `block_drops` 规则只挡生成球，不挡前面那次取数。
+    ///
+    /// Official `Block.tryDropExperience` + `Block.popExperience`: sample
+    /// `xpRange` from `level.random` (constants draw nothing), then split it
+    /// with `ExperienceOrb.award(level, Vec3.atCenterOf(pos), amount)`.
+    /// The `block_drops` rule only suppresses the orbs, not the sample.
+    fn spawn_after_break_random(&mut self, state: BlockState, pos: BlockPos) {
+        let Some((min, max)) =
+            mc_bamboo_blocks::block_experience::experience_range(state.block_id() as u32)
+        else {
+            return;
+        };
+        let amount = if min == max {
+            min
+        } else {
+            min + self
+                .random
+                .source()
+                .next_int(max.wrapping_sub(min).wrapping_add(1))
+        };
+        if amount <= 0 || !self.block_rules.block_drops {
+            return;
+        }
+        let center = Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        );
+        let mut left = amount;
+        while left > 0 {
+            let value = mc_bamboo_blocks::entity::experience_value(left);
+            left -= value;
+            // `ExperienceOrb.tryMergeToExisting` 的 `level.random.nextInt(40)`。
+            let _ = self.random.source().next_int(40);
+            mc_bamboo_blocks::level::LevelEntities::spawn_entity(
+                self,
+                mc_bamboo_blocks::entity::Entity::experience_orb(center, value),
+            );
         }
     }
 

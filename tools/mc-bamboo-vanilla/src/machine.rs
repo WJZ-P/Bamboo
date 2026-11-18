@@ -247,7 +247,8 @@ impl Machine {
 
     fn award(&mut self, world: &mut World) {
         if let Self::Furnace(entity) = self {
-            entity.award_experience(world);
+            // 官方题目传 `Vec3.ZERO`。
+            entity.award_experience(world, mc_bamboo_core::Vec3::default());
         }
     }
 }

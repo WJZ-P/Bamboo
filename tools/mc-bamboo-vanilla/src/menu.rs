@@ -81,6 +81,12 @@ struct Case {
     /// 附魔成功后官方从玩家随机源换出的新种子。
     #[serde(default)]
     next_seed: Option<i32>,
+    /// 假玩家的 `experienceLevel`，附魔台 / 铁砧的等级判定。
+    #[serde(default)]
+    xp_level: i32,
+    /// 每次成功附魔依次换出的新种子。
+    #[serde(default)]
+    next_seeds: Vec<i32>,
     /// 打开带战利品表的箱子：容器里的东西已经是官方 `LootTable.fill` 填好的。
     ///
     /// A chest with a loot table: its contents were already filled by vanilla.
@@ -300,6 +306,8 @@ impl Report {
                     map_locked: case.map_locked,
                     bookshelves: case.bookshelves,
                     next_seed: case.next_seed,
+                    next_seeds: case.next_seeds.clone(),
+                    experience_level: case.xp_level,
                 },
             );
             // 材料先按物品和数量放进去，再盖上组件。下标是格子序号，合成格要加一。

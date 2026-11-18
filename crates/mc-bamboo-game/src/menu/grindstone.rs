@@ -1,14 +1,15 @@
 //! 砂轮的结果和取出时的经验，对应 `GrindstoneMenu` 和 `ExperienceOrb.award`。
 //!
 //! 诅咒留下，其余附魔去掉。两件同样的物品按官方公式合并耐久。经验先把两边非诅咒附魔的
-//! `min_cost` 加起来，再从调用方给的随机源取数。经验球不生成，但每一次 `nextInt` 都照取。
+//! `min_cost` 加起来，再由 `getExperienceAmount` 从世界随机源取一次 `nextInt`；
+//! 拆成经验球的 `nextInt(40)` 由 `mc_bamboo_blocks` 的 `orb::award` 负责。
 //!
 //! Grindstone results and the experience awarded on take, matching `GrindstoneMenu` and
 //! `ExperienceOrb.award`.
 //!
 //! Curses stay and every other enchantment is removed. Two of the same item merge durability with
-//! the vanilla formula. Experience sums `min_cost` of the non-curse enchantments, then draws from
-//! the caller's random source. No experience orb is spawned, but every `nextInt` is still drawn.
+//! the vanilla formula. Experience sums `min_cost` of the non-curse enchantments; the game layer
+//! then draws `getExperienceAmount`'s `nextInt` and lets `orb::award` split it into orbs.
 
 use std::sync::OnceLock;
 
@@ -24,11 +25,6 @@ use mc_bamboo_protocol::{
 };
 
 use super::item_patch::{assign, patch_of, resolved};
-
-/// `ExperienceOrb.getExperienceValue` 的分段上限。
-///
-/// The thresholds in `ExperienceOrb.getExperienceValue`.
-const EXPERIENCE_VALUES: [i32; 10] = [2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3];
 
 const ENCHANTMENT_REGISTRY: &str = "minecraft:enchantment";
 const CURSE_TAG: &str = "minecraft:curse";
@@ -67,24 +63,18 @@ pub(super) fn experience_sum(input: &ItemStack, additional: &ItemStack) -> i32 {
     experience_of(input) + experience_of(additional)
 }
 
-/// 官方 `getExperienceAmount` 里的 `nextInt`，接着 `ExperienceOrb.award` 的每一次 `nextInt(40)`。
+/// 官方 `GrindstoneMenu$4.getExperienceAmount`：`ceil(amount/2) + nextInt(ceil(amount/2))`。
+/// 结果交给 `ExperienceOrb.award` 拆成球；`amount <= 0` 时官方一次都不取。
 ///
-/// 没有经验球。`amount` 不大于 0 时官方一次都不取。
-///
-/// The `nextInt` inside `getExperienceAmount`, then one `nextInt(40)` per split inside
-/// `ExperienceOrb.award`. No orb is spawned. A non-positive `amount` draws nothing.
-pub(super) fn award(random: &impl RandomSource, amount: i32) {
+/// Official `GrindstoneMenu$4.getExperienceAmount`:
+/// `ceil(amount/2) + nextInt(ceil(amount/2))`. The result goes to
+/// `ExperienceOrb.award`; a non-positive `amount` draws nothing.
+pub(super) fn experience_amount(random: &impl RandomSource, amount: i32) -> i32 {
     if amount <= 0 {
-        return;
+        return 0;
     }
     let half = ((amount as f64) / 2.0).ceil() as i32;
-    let mut left = half + random.next_int(half);
-    while left > 0 {
-        left -= experience_value(left);
-        // `tryMergeToExisting` 先取这个数，再发现附近没有经验球。
-        // `tryMergeToExisting` draws this before it finds no orb nearby.
-        random.next_int(40);
-    }
+    half + random.next_int(half)
 }
 
 fn merge(input: &ItemStack, additional: &ItemStack) -> ItemStack {
@@ -285,15 +275,6 @@ fn enchantment_cost(id: i32, level: i32) -> i32 {
     base + per_level * (level - 1)
 }
 
-fn experience_value(amount: i32) -> i32 {
-    for limit in EXPERIENCE_VALUES {
-        if amount >= limit {
-            return limit;
-        }
-    }
-    1
-}
-
 fn is_curse(id: i32) -> bool {
     curse_ids().contains(&id)
 }
@@ -401,16 +382,15 @@ mod tests {
     }
 
     #[test]
-    fn a_positive_award_draws_the_half_and_one_merge_attempt() {
+    fn get_experience_amount_draws_only_the_half() {
         let random = LegacyRandom::new(3);
-        award(&random, 1);
+        let reward = experience_amount(&random, 1);
         let expected = LegacyRandom::new(3);
-        let xp = 1 + expected.next_int(1);
-        assert_eq!(xp, 1);
-        expected.next_int(40);
+        assert_eq!(reward, 1 + expected.next_int(1));
+        assert_eq!(reward, 1);
         assert_eq!(random.seed(), expected.seed());
         let untouched = LegacyRandom::new(3);
-        award(&untouched, 0);
+        assert_eq!(experience_amount(&untouched, 0), 0);
         assert_eq!(untouched.seed(), LegacyRandom::new(3).seed());
     }
 }

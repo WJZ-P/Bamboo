@@ -15,6 +15,7 @@ pub mod archive;
 pub mod behaviour;
 mod block_container;
 pub mod block_entity;
+pub mod block_experience;
 pub mod cache;
 pub mod cache_run;
 mod composter;
