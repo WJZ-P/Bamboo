@@ -515,10 +515,11 @@ pub fn game_pipeline(
     let mut chunk = (*terrain).clone();
     merge_feature_writes(&mut chunk, feature_writes_into(config, cx, cz)?);
     final_blocks[CENTER] = chunk.blocks;
-    // 这一步还交回单中心 3×3 的结构放置统计，方块取上面 9 个中心合出来的结果。
+    // 这一步还交回单中心 3×3 的结构放置统计；方块取上面 9 个中心合出来的结果，
+    // `result.blocks` / `result.deltas` 不再用于交付盒子。
     // This run also supplies the structure placement stats; blocks come from the
-    // merged 9-center result above.
-    let _ = &result;
+    // merged 9-center result above, so `result.blocks` / `result.deltas` are not
+    // used for the delivered box.
     let references: Vec<(String, i64)> = data
         .references
         .iter()
