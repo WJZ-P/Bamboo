@@ -348,35 +348,27 @@ fn the_cache_forgets_chunks_nobody_tracks() {
     server.tick();
 
     // 无限模式里新视图共用模板帧，缓存全空；已加载模式里新视图每个区块
-    // 各编一份包体，所以条数正好是这片视图的区块数。
+    // 各编一份包体，所以条数正好是这片视图的区块数。多岛时走远是跨岛传送，玩家落到
+    // 新视图那个岛上：看他所在的岛的缓存；旧视图所在的家岛另外查一遍。
+    // With several islands the far move crosses islands: check the cache of
+    // the island the player is on, and the home island the old view was on.
     let expected_bodies = if server.world_region().chunks.is_loaded_mode() {
         view.len()
     } else {
         0
     };
-    assert_eq!(server.region().chunk_cache.bodies.len(), expected_bodies);
+    let cache = &server.player_region(&client).chunk_cache;
+    assert_eq!(cache.bodies.len(), expected_bodies);
     // 旧视图的坐标一个都不留。
+    assert!(!cache.bodies.contains_key(&edited.chunk()));
     assert!(
-        !server
-            .region()
-            .chunk_cache
-            .bodies
-            .contains_key(&edited.chunk())
-    );
-    assert!(
-        server
-            .region()
-            .chunk_cache
-            .bodies
-            .keys()
-            .all(|pos| view.contains(pos)),
+        cache.bodies.keys().all(|pos| view.contains(pos)),
         "留下的都是当前视图里的包体"
     );
+    assert!(!cache.frames.contains_key(&edited.chunk()));
+    let home = &server.region().chunk_cache;
     assert!(
-        !server
-            .region()
-            .chunk_cache
-            .frames
-            .contains_key(&edited.chunk())
+        !home.bodies.contains_key(&edited.chunk()) && !home.frames.contains_key(&edited.chunk()),
+        "家岛也不留旧视图的包体和帧"
     );
 }

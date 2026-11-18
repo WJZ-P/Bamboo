@@ -368,7 +368,13 @@ fn deliveries_are_capped_and_the_rest_wait_in_the_mailbox() {
 /// 传送到很远的地方：落地那一刻脚下 3×3 已加载，视野之后陆续收齐。
 #[test]
 fn teleport_lands_on_a_loaded_footprint_and_the_view_follows() {
-    let mut server = Harness::new_loaded(2);
+    // 一个岛（显式 `islands = false`，分离驱动）：断言看的是家岛的信箱计数。多岛时远距离
+    // 传送换岛、晚一刻落地，见下面的 `a_far_teleport_lands_on_its_own_island_a_tick_later`。
+    // One island (`islands = false` explicitly, detached drive): the
+    // assertions read the home island's mailbox counters. With several
+    // islands a far teleport changes island and lands a tick later, see
+    // `a_far_teleport_lands_on_its_own_island_a_tick_later` below.
+    let mut server = Harness::new_loaded_with_drive(2, crate::island::IslandDrive::Detached);
     server.set_mail_budget(crate::director_host::MailBudget {
         deliveries: 8,
         reclaims: 8,
@@ -954,14 +960,37 @@ impl Rng {
 
 /// 从票表和已加载集合从头按定义算两个集合；测试拿它和 region 的增量集合比。
 fn expected_sets(server: &Harness) -> (BTreeSet<ChunkPos>, BTreeSet<ChunkPos>, BTreeSet<ChunkPos>) {
-    let region = server.world_region();
+    expected_sets_on(server, server.world_region())
+}
+
+/// 同 [`expected_sets`]，按 `region`（一个岛）已加载的区块算。候选位置取全部岛上的玩家
+/// 周围：多岛时不同岛的已加载区块不相邻，一圈都已加载的区块只能在一个岛上。
+///
+/// Like [`expected_sets`], against the chunks `region` (one island) has
+/// loaded. Candidates surround the players of every island: islands never
+/// touch, so a chunk with its whole ring loaded lies on one island.
+fn expected_sets_on(
+    server: &Harness,
+    region: &Region,
+) -> (BTreeSet<ChunkPos>, BTreeSet<ChunkPos>, BTreeSet<ChunkPos>) {
     let tickets = server.tickets();
     let mut blocks = BTreeSet::new();
     let mut entities = BTreeSet::new();
     let mut random = BTreeSet::new();
+    let centers: Vec<ChunkPos> = server
+        .world
+        .islands
+        .iter()
+        .flat_map(|island| {
+            island
+                .region
+                .players
+                .values()
+                .map(|player| player.chunk_pos())
+        })
+        .collect();
     // 视野级别的范围足够覆盖所有可能进集合的位置；票表之外的等级都是「没票」。
-    for player in region.players.values() {
-        let center = player.chunk_pos();
+    for center in centers {
         for dx in -40..=40 {
             for dz in -40..=40 {
                 let pos = ChunkPos::new(center.x.saturating_add(dx), center.z.saturating_add(dz));
@@ -999,7 +1028,14 @@ fn expected_sets(server: &Harness) -> (BTreeSet<ChunkPos>, BTreeSet<ChunkPos>, B
 
 /// 每刻断言：集合里的区块周围一圈/两圈都已交付，且两个集合和从头算的一致。
 fn assert_tick_sets(server: &Harness) {
-    let region = server.world_region();
+    // 多岛时每个岛各有自己的档位集合，按岛查（只有一个岛时就是家岛）。
+    // With several islands each has its own tier sets; check island by island.
+    for island in server.world.islands.iter() {
+        assert_tick_sets_on(server, &island.region);
+    }
+}
+
+fn assert_tick_sets_on(server: &Harness, region: &Region) {
     let levels = &region.tick_levels;
     levels.assert_invariants();
     let neighborhood = |pos: ChunkPos, radius: i32| {
@@ -1032,7 +1068,7 @@ fn assert_tick_sets(server: &Harness) {
     if server.world.master.host.posted_len() > 0 {
         return;
     }
-    let (blocks, entities, random) = expected_sets(server);
+    let (blocks, entities, random) = expected_sets_on(server, region);
     assert_eq!(levels.block_chunks(), &blocks, "方块集合与定义不一致");
     assert_eq!(levels.entity_chunks(), &entities, "实体集合与定义不一致");
     assert_eq!(
@@ -1593,4 +1629,73 @@ fn block_entities_outside_the_world_border_pause_and_resume() {
     // `getMaxX(0f)`，按 `lerp(0, previousSize, size)` 取上一刻的大小：第 0、1、2 刻的
     // 右边界是 11.5、12、12.5。`isWithinBounds` 右边不含，x = 12 第 2 刻才回到界内。
     assert_eq!(resumed_at, 2, "右边界 12.5 那一刻熔炉回到界内");
+}
+
+/// 多岛时远距离传送：玩家换到新落脚处自己的岛上，下一刻脚下 3×3 交付（跨岛晚一刻，
+/// 总设计稿第 13 节），之后视野陆续收齐，旧视野全部忘掉。
+///
+/// A far teleport with several islands: the player moves to the island of
+/// the new spot, the 3×3 footprint arrives the next tick (crossing islands
+/// is a tick late, design section 13), then the view fills in and the old
+/// view is all forgotten.
+#[test]
+fn a_far_teleport_lands_on_its_own_island_a_tick_later() {
+    let mut server = Harness::new_islands(2, 4);
+    server.set_mail_budget(crate::director_host::MailBudget {
+        deliveries: 8,
+        reclaims: 8,
+    });
+    let client = server.join("Kitten");
+    let mut held = BTreeSet::new();
+    run_ticks(&mut server, &client, 12, 8, &mut held);
+    assert_eq!(held, tracking_set(&server, &client), "传送前已收齐视野");
+    let far = Vec3::new(4000.5, -60.0, -3000.5);
+    server.move_to_position(&client, far);
+    let center = ChunkPos::new(250, -188);
+    let footprint = || {
+        (-1..=1)
+            .flat_map(move |dx| (-1..=1).map(move |dz| ChunkPos::new(center.x + dx, center.z + dz)))
+    };
+    let mut landed = None;
+    for tick in 1..=30 {
+        server.acknowledge_batch(&client, 64.0);
+        server.tick();
+        let frames = client.take_frames();
+        for frame in &frames {
+            track_client_chunks(&mut held, frame);
+        }
+        for _ in super::tests::frames_with_id(&frames, clientbound::CHUNK_BATCH_FINISHED) {
+            server.acknowledge_batch(&client, 64.0);
+        }
+        let island = server
+            .world
+            .islands
+            .island_of_player(client.id)
+            .expect("在一个岛上");
+        if landed.is_none()
+            && footprint().all(|pos| server.world.islands.island_of_chunk(pos) == Some(island))
+        {
+            landed = Some(tick);
+        }
+    }
+    assert!(
+        landed.is_some_and(|tick| tick <= 2),
+        "脚下 3×3 最多晚一刻到：{landed:?}"
+    );
+    let island = server
+        .world
+        .islands
+        .island_of_player(client.id)
+        .expect("在一个岛上");
+    assert_ne!(
+        server.world.islands.island_of_chunk(ChunkPos::new(0, 0)),
+        Some(island),
+        "新落脚处不和出生点在一个岛上"
+    );
+    assert_tick_sets(&server);
+    assert_eq!(
+        held,
+        tracking_set(&server, &client),
+        "视野收齐，旧视野全部忘掉"
+    );
 }

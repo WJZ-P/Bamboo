@@ -16,11 +16,11 @@ use std::{
 };
 
 use mc_bamboo_game::{
-    DEFAULT_ISLAND_DEAD_SECONDS, DEFAULT_ISLAND_THREADS, DEFAULT_ISLANDS, ISLAND_DEAD_SECONDS_ENV,
-    ISLAND_THREADS_ENV, ISLANDS_ENV, MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS,
-    MAX_ISLAND_DEAD_SECONDS, MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MIN_ISLAND_DEAD_SECONDS,
-    MailBudget, island_dead_seconds_from_env, island_threads_from_env, islands_from_env,
-    world_options::WorldGenConfig,
+    DEFAULT_ISLAND_DEAD_SECONDS, DEFAULT_ISLANDS, ISLAND_DEAD_SECONDS_ENV, ISLAND_THREADS_ENV,
+    ISLANDS_ENV, MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_ISLAND_DEAD_SECONDS,
+    MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MIN_ISLAND_DEAD_SECONDS, MailBudget,
+    island_dead_seconds_from_env, island_threads_from_env, islands_from_env,
+    recommended_island_threads, world_options::WorldGenConfig,
 };
 use toml::{Table, Value};
 use tracing::{info, warn};
@@ -172,20 +172,23 @@ pub struct BambooConfig {
     pub deliveries_per_tick: usize,
     /// Director 信箱每刻收回区块的个数上限，0 表示不限。
     pub reclaims_per_tick: usize,
-    /// 岛的 tick 线程数：0 = 齐步、内联（精确模式）；≥ 1 = 分离、和主控并行（默认 1）。
-    /// 环境变量 `BAMBOO_ISLAND_THREADS` 在运行时盖过它，但不写回文件。
+    /// 岛的 tick 线程数：0 = 齐步、内联（精确模式）；≥ 1 = 分离、和主控并行（默认逻辑核数的
+    /// 一半，夹在 2 到 8 之间，见 `mc_bamboo_game::recommended_island_threads`）。环境变量
+    /// `BAMBOO_ISLAND_THREADS` 在运行时盖过它，但不写回文件。
     ///
     /// Island tick threads: 0 is lockstep, inline (exact mode); 1 or more is
-    /// detached, parallel to the master (default 1). `BAMBOO_ISLAND_THREADS`
-    /// overrides it at run time but is never written back to the file.
+    /// detached, parallel to the master (default half the logical cores,
+    /// clamped to 2..=8, see `mc_bamboo_game::recommended_island_threads`).
+    /// `BAMBOO_ISLAND_THREADS` overrides it at run time but is never written
+    /// back to the file.
     pub island_threads: usize,
-    /// 多岛：`false` = 整个世界一个岛（精确模式，默认）；`true` = 分区器把相距很远的
-    /// 玩家群拆成各自的岛。环境变量 `BAMBOO_ISLANDS` 在运行时盖过它，不写回文件。
+    /// 多岛：`true`（默认）= 分区器把相距很远的玩家群拆成各自的岛；`false` = 整个世界一个
+    /// 岛（精确模式）。环境变量 `BAMBOO_ISLANDS` 在运行时盖过它，不写回文件。
     ///
-    /// Multi-island mode: `false` keeps the whole world one island (exact mode,
-    /// the default); `true` lets the partitioner split distant groups onto
-    /// their own islands. `BAMBOO_ISLANDS` overrides it at run time and is
-    /// never written back to the file.
+    /// Multi-island mode: `true` (the default) lets the partitioner split
+    /// distant groups onto their own islands; `false` keeps the whole world
+    /// one island (exact mode). `BAMBOO_ISLANDS` overrides it at run time and
+    /// is never written back to the file.
     pub islands: bool,
     /// 多岛的混合驱动下判死的时限：一个岛的同一刻在 tick 线程上连续跑超过这么久，它的
     /// 玩家被断开、区块从上次存盘重新加载（默认 30 秒）。环境变量
@@ -218,7 +221,7 @@ impl Default for BambooConfig {
             // 文件里的缺省不跟环境变量走：环境变量只在运行时盖过，不能被写回文件。
             // The file default ignores the environment: the variable only
             // overrides at run time and must never be written back.
-            island_threads: DEFAULT_ISLAND_THREADS,
+            island_threads: recommended_island_threads(),
             // 文件里的缺省也不跟环境变量走，理由同上。
             // The file default ignores the environment for the same reason.
             islands: DEFAULT_ISLANDS,
@@ -279,11 +282,13 @@ impl BambooConfig {
                 "reclaims_per_tick = {}\n",
                 "\n",
                 "# 岛的 tick 线程数：0 = 精确模式（岛在世界线程上跑，和官方逐位一致）；\n",
-                "# >= 1 = 岛在这么多条线程上和主控并行跑（默认 1），区块交付晚一刻。\n",
+                "# >= 1 = 岛在这么多条线程上和主控并行跑，区块交付晚一刻。默认是这台机器\n",
+                "# 逻辑核数的一半，夹在 2 到 8 之间（第一次启动时算好写在这里）；多岛时至少 2 条，\n",
+                "# 一个过载的岛才不会拖住别的岛。\n",
                 "island_threads = {}\n",
                 "\n",
-                "# 多岛：false = 整个世界一个岛（精确模式，默认）；true = 相距很远的玩家群\n",
-                "# 各自一个岛。要求逐位一致的对拍和探针显式选 false。\n",
+                "# 多岛：true = 相距很远的玩家群各自一个岛，并行跑（默认）；false = 整个世界一个岛\n",
+                "# （精确模式）。要求逐位一致的对拍和探针显式选 false。\n",
                 "islands = {}\n",
                 "\n",
                 "# 多岛时一个岛卡死多久判为死岛，单位秒，默认 30（5 到 3600）：它上面的玩家被断开，\n",
@@ -1213,10 +1218,11 @@ mod tests {
         assert_eq!(defaults.bamboo.entity_threads, 0);
         assert_eq!(defaults.bamboo.deliveries_per_tick, 64);
         assert_eq!(defaults.bamboo.reclaims_per_tick, 64);
-        assert_eq!(defaults.bamboo.island_threads, 1);
-        // 多岛在这一步验收之前保持关（岛的实施计划第 6 节第 10 步）。
-        // Multi-island stays off until step 10 is accepted (island plan, 6).
-        assert!(!defaults.bamboo.islands);
+        assert_eq!(defaults.bamboo.island_threads, recommended_island_threads());
+        assert!((2..=8).contains(&defaults.bamboo.island_threads));
+        // 多岛在第 10 步验收后缺省打开（岛的实施计划第 6 节第 10 步）。
+        // Multi-island is on by default once step 10 is accepted (island plan, 6).
+        assert!(defaults.bamboo.islands);
         assert_eq!(defaults.bamboo.forwarding, ForwardingMode::Off);
     }
 
@@ -1311,7 +1317,7 @@ mod tests {
         let dir = Temp::new();
         fs::write(
             dir.path().join(BAMBOO_FILE),
-            "entity_threads = -1\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\nislands = \"true\"\n",
+            "entity_threads = -1\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\nislands = \"false\"\n",
         )
         .unwrap();
         let loaded = read(dir.path()).unwrap();
@@ -1320,8 +1326,8 @@ mod tests {
         assert_eq!(loaded.bamboo.keep_alive_interval, Duration::from_secs(15));
         assert_eq!(loaded.bamboo.forwarding, ForwardingMode::Off);
         assert_eq!(loaded.bamboo.reclaims_per_tick, 16);
-        assert_eq!(loaded.bamboo.island_threads, 1);
-        assert!(!loaded.bamboo.islands, "坏的多岛值回落到关");
+        assert_eq!(loaded.bamboo.island_threads, recommended_island_threads());
+        assert!(loaded.bamboo.islands, "坏的多岛值回落到缺省的开");
     }
 
     /// `islands` 写进文件、读回来、到达 `ServerConfig`，`true` 和 `false` 都不丢。

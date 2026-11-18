@@ -2322,3 +2322,177 @@ fn on_time_hybrid_does_not_depend_on_the_thread_count() {
         }
     });
 }
+
+/// 混合驱动下的剖析没有盲点（第 10 步 d 段）：家岛落后的那几刻，主控这一段照样进报告
+/// （原来记进一份不进报告的备用剖析器）；每个岛的每一刻都有一条耗时和一条交接（原来只记
+/// 派出那一半、每刻一条）；打报告前各岛的样本并进来，每个岛一行。
+///
+/// Profiling has no blind spot under the hybrid drive (step 10 part d): the
+/// master's part of the ticks in which the home island lags still reaches
+/// the report (it used to go to an unreported spare profiler); every island
+/// tick has one busy sample and one hand-over sample (only the dispatch half
+/// was recorded before, once per tick); before a report every island's
+/// samples are folded in, with one line per island.
+#[test]
+fn profiling_covers_every_master_tick_and_every_island_tick() {
+    use crate::profiler::{Metric, Phase, Series};
+    bounded(|| {
+        let mut scene = scene(54, 4);
+        for _ in 0..3 {
+            scene.server.tick();
+        }
+        let world = &mut scene.server.world;
+        let islands = world.islands.len() as u64;
+        assert!(islands >= 3, "每组一个岛");
+        world.master.profiler.reset_samples();
+        for island in world.islands.iter_mut() {
+            island.region.profiler.reset_samples();
+        }
+        world.stall_island(HOME_REGION, 1, 6);
+        const TICKS: u64 = 10;
+        for tick in 1..=TICKS {
+            scene.server.tick();
+            if tick <= 6 {
+                assert!(!scene.server.world.islands.is_parked(HOME_REGION));
+            }
+        }
+        let world = &mut scene.server.world;
+        assert!(world.islands.all_parked());
+        assert_eq!(world.islands.debt(HOME_REGION), 0, "家岛追上了");
+        let count = |world: &crate::world::World, metric| {
+            world
+                .master
+                .profiler
+                .histogram(Series::Metric(metric))
+                .count()
+        };
+        assert_eq!(
+            count(world, Metric::TickTotal),
+            TICKS,
+            "主控的每一刻都进报告"
+        );
+        assert_eq!(count(world, Metric::MasterBusy), TICKS);
+        assert_eq!(
+            count(world, Metric::IslandHandoff),
+            TICKS * islands,
+            "每个岛的每一刻一条交接"
+        );
+        world.fold_island_profiles();
+        assert_eq!(
+            count(world, Metric::IslandBusy),
+            TICKS * islands,
+            "并进来的是每个岛的每一刻"
+        );
+        let report = world.master.profiler.report();
+        for id in world.islands.ids() {
+            assert!(
+                report.contains(&format!("  island {id:<4} ")),
+                "岛 {id} 有一行：{report}"
+            );
+        }
+        for island in world.islands.iter() {
+            assert_eq!(
+                island
+                    .region
+                    .profiler
+                    .histogram(Series::Phase(Phase::LightUpdates))
+                    .count(),
+                0,
+                "并进来以后岛自己的清零"
+            );
+        }
+        assert_eq!(
+            world
+                .master
+                .profiler
+                .histogram(Series::Phase(Phase::LightUpdates))
+                .count(),
+            TICKS * islands,
+            "岛的各阶段并进来了"
+        );
+    });
+}
+
+/// 混合驱动下岛在一刻开头收了信、回执还没交回，同一刻收包阶段里（进服挂票）照做一条
+/// 卷进它的拆分：拆分要等交回以后（这一刻收尾）再做，不能拆一个回执还没交出去的岛
+/// （压测里 `islands-8` 进人时世界线程曾因此 panic：「交回还没处理完就拆岛」）。合并
+/// 不会碰上：待合并的岛的信由 Director 扣着，不投。
+///
+/// Under the hybrid drive an island took mail at the start of a tick and
+/// its acks are not handed back yet when, in the same tick's inbound phase
+/// (a join placing a ticket), a split of it becomes due: the split must
+/// wait for the hand-back at the end of the tick instead of splitting an
+/// island whose acks are still out (the world thread once panicked on this
+/// in the `islands-8` load test while bots joined). Merges cannot hit it:
+/// the Director holds mail for islands about to merge.
+#[test]
+fn a_split_waits_for_acks_taken_at_the_start_of_the_tick() {
+    bounded(|| {
+        let mut scene = scene(54, 4);
+        for _ in 0..3 {
+            scene.server.tick();
+        }
+        // 先把第 0、1 组并成一个岛（两块相距很远，之后一拆就是两块）。
+        // First merge groups 0 and 1 into one island (far apart, so a split
+        // later yields two parts).
+        let first = island_of_group(&mut scene, 0);
+        let second = island_of_group(&mut scene, 1);
+        let (into, from) = (first.min(second), first.max(second));
+        let world = &mut scene.server.world;
+        let partition = world.master.host.partition_mut().expect("多岛开着");
+        assert!(partition.force_merge(into, from));
+        world.master.host.take_partition_ops();
+        world.settle_islands();
+        assert!(!world.islands.contains(from), "并成了一个岛");
+        scene.server.tick();
+        // 这个岛每刻只交付一个区块，旁边挂几张强加载票：信下一刻开头收进信箱，交付一个，
+        // 剩下的留在信箱里，之后每刻开头接着交付（回执在交回之前一直在岛上）。
+        // This island delivers one chunk per tick, and a few forced tickets
+        // go beside it: the letters land in its mailbox at the next tick
+        // start, one is delivered and the rest wait there, delivered at later
+        // tick starts (the acks stay on the island until the hand-back).
+        scene
+            .server
+            .world
+            .islands
+            .get_mut(into)
+            .expect("停放着")
+            .mailbox
+            .set_budget(crate::director_host::MailBudget {
+                deliveries: 1,
+                reclaims: 0,
+            });
+        let mut pos = scene.centers[1];
+        while scene.server.world.islands.island_of_chunk(pos).is_some() {
+            pos = ChunkPos::new(pos.x + 1, pos.z);
+        }
+        for dz in 0..4 {
+            scene.server.apply_ticket_for_test(TicketOp::Forced {
+                pos: ChunkPos::new(pos.x, pos.z + dz),
+                forced: true,
+            });
+        }
+        scene.server.tick();
+        let world = &mut scene.server.world;
+        assert!(
+            world.islands.get(into).expect("停放着").mailbox.backlog().0 > 0,
+            "信箱里还有没交付的盒子"
+        );
+        let partition = world.master.host.partition_mut().expect("多岛开着");
+        let made = partition.force_split(into);
+        assert_eq!(made.len(), 1, "拆成两块");
+        world.master.host.take_partition_ops();
+        // 进服在收包阶段挂票，触发一次照做拆合；这时要拆的岛刚收完信、回执还在手里。
+        // The join places a ticket in the inbound phase and triggers a
+        // replay of changes while the island to split holds fresh acks.
+        let _late = scene.server.join("Latecomer");
+        scene.server.tick();
+        let world = &mut scene.server.world;
+        assert!(world.islands.contains(made[0]), "这一刻收尾时拆开了");
+        world.assert_island_invariants();
+        for _ in 0..5 {
+            scene.server.tick();
+        }
+        scene.server.world.assert_island_invariants();
+    });
+}

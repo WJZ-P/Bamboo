@@ -108,6 +108,13 @@ fn default_enforce_secure_profile() -> bool {
     true
 }
 
+/// 老版本界面的 JSON 里没有 `islands` 时用服务端的缺省（开）。
+///
+/// The server's default (on) when JSON from an older UI lacks `islands`.
+fn default_islands() -> bool {
+    mc_bamboo_game::DEFAULT_ISLANDS
+}
+
 /// 界面里可以修改的服务端设置，分成「官方设置」和「Bamboo 优化设置」两组。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -154,13 +161,17 @@ pub struct ServerSettings {
     pub deliveries_per_tick: u32,
     /// Director 信箱每刻最多收回多少个区块，0 表示不限。
     pub reclaims_per_tick: u32,
-    /// 岛的 tick 线程数：0 = 精确模式（岛在世界线程上跑），≥ 1 = 和主控并行（默认 1）。
+    /// 岛的 tick 线程数：0 = 精确模式（岛在世界线程上跑），≥ 1 = 和主控并行（默认逻辑核数的
+    /// 一半，夹在 2 到 8 之间）。
     pub island_threads: u32,
-    /// 多岛：false = 整个世界一个岛（精确模式，默认）；true = 相距很远的玩家群各自一个岛。
+    /// 多岛：true = 相距很远的玩家群各自一个岛（默认）；false = 整个世界一个岛（精确模式）。
+    /// 缺省是 `true`，理由同 `enforce_secure_profile`：`bool` 的 `Default` 是 `false`。
     ///
-    /// Multi-island mode: `false` keeps the whole world one island (exact mode,
-    /// the default); `true` splits distant groups onto their own islands.
-    #[serde(default)]
+    /// Multi-island mode: `true` (the default) splits distant groups onto
+    /// their own islands; `false` keeps the whole world one island (exact
+    /// mode). Defaults to `true`, so like `enforce_secure_profile` it names
+    /// its own default.
+    #[serde(default = "default_islands")]
     pub islands: bool,
     /// 世界生成参数，从 `server.properties` 的四个键解析而来，不进界面 JSON。
     /// 界面目前不编辑这四项，`as_files` 会原样保留已有值。

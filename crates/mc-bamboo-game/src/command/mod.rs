@@ -85,6 +85,8 @@ mod stopsound;
 mod summon;
 mod team;
 mod teleport;
+
+pub(crate) use teleport::place_player;
 mod text;
 mod time;
 mod title;

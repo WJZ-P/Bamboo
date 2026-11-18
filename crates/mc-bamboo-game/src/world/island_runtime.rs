@@ -94,14 +94,22 @@ impl World {
                     TopologyOp::Merge { into, from } => [*into, *from],
                     TopologyOp::Split { from, to, .. } => [*from, *to],
                 };
-                // 能做：两个岛都没被前面留着的拆合挡住，并且各自要么停放着、要么还不存在
-                // （不存在的要有停放着的岛可以照抄）。
+                // 能做：两个岛都没被前面留着的拆合挡住，并且各自要么停放着、回执都交回了，要么
+                // 还不存在（不存在的要有停放着的岛可以照抄）。混合驱动下岛在一刻开头收信（信箱
+                // 里攒着的盒子不受扣信影响，照样交付），回执要到这一刻收尾交回；这期间收包阶段
+                // 挂票触发的照做不能拆合它，留到收尾那一次（第 10 步 d 段压测里碰上的 panic）。
                 // Ready: neither island is blocked by an earlier pending
-                // change, and each is parked or absent (an absent one needs a
-                // parked island to copy).
+                // change, and each is parked with its acks handed back, or
+                // absent (an absent one needs a parked island to copy). Under
+                // the hybrid drive an island takes mail at the start of a tick
+                // (boxes already in its mailbox are delivered even while its
+                // mail is held) and hands the acks back at the end; a replay
+                // triggered by tickets in the inbound phase meanwhile must not
+                // split or merge it, and waits for the one at the end (a panic
+                // the step 10 part d load test ran into).
                 let ready = ids.iter().all(|id| {
                     !blocked.contains(id)
-                        && (self.islands.is_parked(*id)
+                        && (self.islands.acks_handed_back(*id)
                             || (!self.islands.contains(*id) && self.islands.template().is_some()))
                 });
                 if !ready {
@@ -458,7 +466,7 @@ impl World {
     /// 停放着的岛没有被派出去。
     ///
     /// The invariants of plan 6.2 item 3 (debug builds, after each settle).
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn assert_island_invariants(&mut self) {
         let mut owner: std::collections::HashMap<ChunkPos, RegionId> =
             std::collections::HashMap::new();

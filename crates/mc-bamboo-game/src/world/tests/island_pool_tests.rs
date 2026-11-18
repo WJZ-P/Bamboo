@@ -447,3 +447,52 @@ fn handoff_cost() {
         }
     });
 }
+
+/// 只有一个岛时多岛模式（混合驱动）比多岛关着（分离驱动等唯一的岛）每刻多花多少：已加载
+/// 模式、一名站着的玩家，两边都背靠背不睡地跑，差值就是混合驱动自己的记账（分区器、
+/// 截止时间、落地和追赶的检查、按岛的交接记录）。A-B-A 交替。只用来测量：
+/// `cargo test -p mc-bamboo-game --release --lib island_pool_tests::one_island_hybrid_cost -- --ignored --nocapture`
+///
+/// How much more a tick costs with multi-island mode on (the hybrid drive)
+/// than off (the detached drive waiting for its one island) while there is
+/// only one island: loaded mode, one standing player, both run back to back
+/// without sleeping, so the difference is the hybrid drive's own
+/// bookkeeping. Alternates A-B-A. Measurement only.
+#[test]
+#[ignore]
+fn one_island_hybrid_cost() {
+    const TICKS: usize = 4000;
+    fn run(islands: bool) -> f64 {
+        let mut server = if islands {
+            Harness::new_islands(2, 4)
+        } else {
+            Harness::new_with_island_threads(2, true, 1)
+        };
+        let client = server.join_and_settle("Kitten");
+        for _ in 0..200 {
+            server.world.tick_unpaced();
+        }
+        assert_eq!(server.world.islands.len(), 1, "只有一个岛");
+        client.take_frames();
+        let started = Instant::now();
+        for _ in 0..TICKS {
+            server.world.tick_unpaced();
+        }
+        let per_tick = started.elapsed().as_secs_f64() * 1e6 / TICKS as f64;
+        client.take_frames();
+        per_tick
+    }
+    with_timeout(|| {
+        for round in 1..=7 {
+            let a1 = run(false);
+            let b = run(true);
+            let a2 = run(false);
+            let off = (a1 + a2) / 2.0;
+            println!(
+                "round {round}: islands off {a1:.1} / {a2:.1} us/tick, on {b:.1} us/tick, extra {:.1} us ({:.3}x)",
+                b - off,
+                b / off
+            );
+        }
+    });
+}
