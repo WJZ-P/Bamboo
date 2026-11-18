@@ -118,5 +118,6 @@ Rust 侧在同一串命令上重放并逐项比较；`--break-self-test` 改坏�
 - `/data` 的 `modify ... string|compute` 和 int/float provider 变体：命令树完整注册，
   执行时明确报 `command.exception`（官方没有「暂不支持」的统一翻译键）。
 - `if predicate` 需要战利品表谓词管理器，`in` 需要多维度；两者解析照常、执行时明确报错。
-- 方块实体「活实例自己的 `saveAdditional` 键」没有统一的 `read_additional` 入口，
-  `/data merge block` 回写这类键时报 `command.failed`，不静默丢掉。
+- 常见的方块实体类型（箱子、木桶、告示牌、讲台、熔炉类、漏斗、发射器、投掷器等）
+  已接游戏层运行时表和 `archive::create_block_entity` 工厂；未建模的存档键仍报
+  `command.failed`，不静默丢掉。完整清单见 `docs/data-block-entities.md`。

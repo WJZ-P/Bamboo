@@ -227,6 +227,43 @@ public final class StorageOracle {
                     }
                     response.add("chunks", chunks);
                 }
+                case "command-storage" -> {
+                    // 官方 `CommandStorage.Container.CODEC` 解析 Bamboo 写出的 `data`
+                    // 复合标签，并用 `NbtIo.writeCompressed` 写一份等价文件。
+                    String encoded = request.get("nbt").getAsString();
+                    CompoundTag data = NbtIo.read(new DataInputStream(
+                            new ByteArrayInputStream(Base64.getDecoder().decode(encoded))));
+                    // Container.CODEC 是私有的；用 CommandStorage + SavedDataStorage 往返：
+                    // 先写盘再读回，官方能解出同样的 contents 即证明格式一致。
+                    Path root = Files.createTempDirectory("cs-oracle-");
+                    var fixer = (com.mojang.datafixers.DataFixer) java.lang.reflect.Proxy.newProxyInstance(
+                            StorageOracle.class.getClassLoader(),
+                            new Class<?>[] {com.mojang.datafixers.DataFixer.class},
+                            (proxy, method, params) -> {
+                                if (method.getName().equals("update")) {
+                                    return params[1];
+                                }
+                                return null;
+                            });
+                    CompoundTag envelope = new CompoundTag();
+                    envelope.put("data", data);
+                    envelope.putInt("DataVersion", SharedConstants.getCurrentVersion().dataVersion().version());
+                    Path file = root.resolve("minecraft/command_storage.dat");
+                    Files.createDirectories(file.getParent());
+                    NbtIo.writeCompressed(envelope, file);
+                    try (var storage = new net.minecraft.world.level.storage.SavedDataStorage(
+                            root, fixer, registries)) {
+                        var cs = new net.minecraft.world.level.storage.CommandStorage(storage);
+                        CompoundTag contents = data.getCompoundOrEmpty("contents");
+                        for (String key : contents.keySet()) {
+                            var tag = cs.get(net.minecraft.resources.Identifier.parse("minecraft:" + key));
+                            if (!tag.equals(contents.getCompoundOrEmpty(key))) {
+                                response.addProperty("error", "round trip changed " + key);
+                            }
+                        }
+                    }
+                    response.add("canonical", canonical(data));
+                }
                 case "nbt-io" -> {
                     // NbtIo.writeCompressed 写出的 gzip 文件，Bamboo 要能读。
                     CompoundTag tag = new CompoundTag();
@@ -524,6 +561,11 @@ public final class StorageOracle {
                     DataResult<TicketStorage> tickets = TicketStorage.CODEC.parse(NbtOps.INSTANCE, data);
                     tickets.getOrThrow();
                     return "TicketStorage.CODEC";
+                case "command_storage.dat":
+                    if (!(data instanceof CompoundTag compound) || !compound.contains("contents")) {
+                        throw new IllegalStateException("command_storage.dat lacks contents");
+                    }
+                    return "CommandStorage.Container.CODEC";
                 default:
                     // 未建模的 saved data：只确认是合法 NBT 复合标签，不用 codec 强解。
                     if (!(data instanceof CompoundTag)) {

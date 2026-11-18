@@ -322,6 +322,8 @@ pub(crate) struct StartupData {
     pub(crate) game_rules: Option<Tag>,
     pub(crate) world_border: Option<Tag>,
     pub(crate) world_clocks: Option<Tag>,
+    /// 每个命名空间一份 `command_storage.dat` 的 `data` 复合标签。
+    pub(crate) command_storage: Vec<(String, Tag)>,
 }
 
 impl StartupData {
@@ -348,6 +350,9 @@ impl StartupData {
             for (name, state) in clocks {
                 global.restore_clock(name, state);
             }
+        }
+        for (namespace, tag) in &self.command_storage {
+            global.command_storage.load_namespace(namespace, tag);
         }
         global.publish(region);
     }

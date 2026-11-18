@@ -1019,6 +1019,10 @@ WebView2 的渲染进程不算在内。
   已知差异：只有主世界，`in` 其它维度明确失败；`on`、`summon`、`positioned over`、
   `if biome|items|slots|stopwatch|function|dimension|loaded` 和 `if predicate` 还没接上；
   `facing` / `anchored` 用近似眼高。`if/unless data` 和 `store ... block|entity|storage` 已接上。
+  `/data` 的 `storage` 是世界数据：按官方 `SavedDataStorage.getDataFile` 写成
+  `data/<命名空间>/command_storage.dat`，NBT 信封是 `{DataVersion, data:{contents:{<路径>:<复合标签>}}}`，
+  开服读回、存盘写出，官方写的文件也能读（往返测试 + `storage` 对拍）。权威副本在主控的 `Global`，
+  多岛下不放在岛里。方块实体能改/会报错的类型清单见 `docs/data-block-entities.md`。
   `/data` 的完整命令树（官方 751 个子节点）逐节点一致；`get` / `merge` / `remove` 和
   `modify set|merge|append|prepend|insert` 配 `value` / `from` 可执行，三种数据源是
   `block`（游戏层方块实体表）、`entity`（`archive::write_entity` / `read_entity`）和 `storage`

@@ -8,10 +8,12 @@
 //! archive codec, block entities use the same game tables that archive writes,
 //! and command storage is one global map like the scoreboard.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mc_bamboo_blocks::{
-    archive::{read_entity, write_block_entity_additional, write_entity},
+    archive::{
+        block_entity::create_block_entity, read_entity, write_block_entity_additional, write_entity,
+    },
     entity::EntityRow,
 };
 use mc_bamboo_core::BlockPos;
@@ -38,10 +40,16 @@ pub(crate) struct Source {
     pub storage: Option<String>,
 }
 
-/// 官方 `CommandStorage`：按名字存整条复合标签。不写存档。
+/// 官方 `CommandStorage`：按命名空间分文件，每个文件存该命名空间下所有路径的
+/// 复合标签。每个命名空间单独标脏，存盘时只写改过的文件。
+///
+/// Official `CommandStorage`: one saved-data file per namespace, holding every
+/// path's compound. Each namespace is dirtied separately and only dirty files
+/// are written.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CommandStorage {
     tags: BTreeMap<String, Tag>,
+    dirty: BTreeSet<String>,
 }
 
 impl CommandStorage {
@@ -53,11 +61,66 @@ impl CommandStorage {
     }
 
     pub fn set(&mut self, id: &str, tag: Tag) {
+        let namespace = id
+            .split_once(':')
+            .map_or("minecraft", |(ns, _)| ns)
+            .to_owned();
         if matches!(&tag, Tag::Compound(entries) if entries.is_empty()) {
             self.tags.remove(id);
         } else {
             self.tags.insert(id.to_owned(), tag);
         }
+        self.dirty.insert(namespace);
+    }
+
+    /// 官方 `SavedDataStorage.readSavedData`：从磁盘读回来的 `contents` 套进运行时表。
+    /// 整份坏数据作废（官方 `resultOrPartial` 返回空），不静默丢单条。
+    pub fn load_namespace(&mut self, namespace: &str, tag: &Tag) {
+        let Tag::Compound(entries) = tag else {
+            return;
+        };
+        let Some((_, Tag::Compound(contents))) = entries.iter().find(|(k, _)| k == "contents")
+        else {
+            return;
+        };
+        for (path, value) in contents {
+            if !matches!(value, Tag::Compound(_)) || path.contains('/') || path.contains('.') {
+                return;
+            }
+        }
+        for (path, value) in contents {
+            self.tags
+                .insert(format!("{namespace}:{path}"), value.clone());
+        }
+    }
+
+    /// 没有任何内容的命名空间：官方删掉空 container 的键，文件里留一份空
+    /// `contents`；Bamboo 显式写空文件，重启读回来仍是空。
+    pub fn namespaces(&self) -> Vec<String> {
+        let mut out: BTreeSet<String> = self
+            .tags
+            .keys()
+            .map(|id| {
+                id.split_once(':')
+                    .map_or("minecraft", |(ns, _)| ns)
+                    .to_owned()
+            })
+            .collect();
+        out.extend(self.dirty.iter().cloned());
+        out.into_iter().collect()
+    }
+
+    pub fn namespace_tag(&self, namespace: &str) -> Tag {
+        let entries: Vec<_> = self
+            .tags
+            .iter()
+            .filter(|(id, _)| id.split_once(':').map_or("minecraft", |(ns, _)| ns) == namespace)
+            .map(|(id, tag)| {
+                let path = id.split_once(':').map_or(id.as_str(), |(_, p)| p);
+                (path.to_owned(), tag.clone())
+            })
+            .collect();
+        Tag::Compound(vec![("contents".to_owned(), Tag::Compound(entries))])
     }
 }
 
@@ -224,6 +287,27 @@ fn block_entity_tag(region: &Region, pos: BlockPos) -> Tag {
             Tag::Int(command.archive().success_count),
         );
     }
+    // 告示牌文字、讲台上的书：都在游戏层的运行时表里，读出来给 `/data get`。
+    if let Some(sign) = region.chunks.sign(pos) {
+        put(
+            &mut entries,
+            "front_text".to_owned(),
+            sign_text(&sign.front),
+        );
+        put(&mut entries, "back_text".to_owned(), sign_text(&sign.back));
+        put(
+            &mut entries,
+            "is_waxed".to_owned(),
+            Tag::Byte(i8::from(sign.waxed)),
+        );
+    }
+    if let Some(book) = region.lecterns.books.get(&pos) {
+        let (stack, page) = book.archive();
+        if let Ok(tag) = slots::encode_item(stack) {
+            put(&mut entries, "Book".to_owned(), tag);
+        }
+        put(&mut entries, "Page".to_owned(), Tag::Int(page));
+    }
     entries.push(("x".to_owned(), Tag::Int(pos.x)));
     entries.push(("y".to_owned(), Tag::Int(pos.y)));
     entries.push(("z".to_owned(), Tag::Int(pos.z)));
@@ -295,14 +379,157 @@ fn write_block_entity_fields(
                 region.block_items.insert(pos, patch);
                 crate::block_items::refresh_update_tag(region, pos);
             }
-            _ => {
-                // 活方块实体自己的 `saveAdditional` 键由方块层解析；这里没有
-                // `read_additional` 的统一入口，暂不回写，交回明确的错误。
-                return Err("command.failed");
+            // 活方块实体（熔炉、酿造台、漏斗、营火、活塞等）走
+            // `archive::create_block_entity` 的读盘工厂：它不是另写一套 codec，
+            // 而是把改过的整条标签重新交给存档层解一遍，再放回 `BlockEntities`。
+            // 游戏层容器 / 组件表也共享这批键，上面的分支已优先处理。
+            _ if LIVE_BLOCK_ENTITY_KEYS.contains(&key.as_str()) => {
+                let id = block_entity_id(region, pos)?;
+                let state =
+                    mc_bamboo_blocks::state::BlockState(region.chunks.block(pos).unwrap_or(0));
+                let rebuilt = create_block_entity(id, pos, state, tag)
+                    .map_err(|_| "command.failed")?
+                    .ok_or("command.failed")?;
+                region.block_entities.insert(rebuilt);
             }
+            // 告示牌文字与讲台书页由游戏层的运行时表拥有。
+            "front_text" | "back_text" | "is_waxed" => {
+                write_sign(region, pos, tag)?;
+            }
+            "Book" | "Page" => {
+                write_lectern(region, pos, tag)?;
+            }
+            // 读出来但不该由 `/data` 回写的键（组件表里的 lock / 旗帜图案 /
+            // 头颅 profile 等）明确报错，不静默丢。
+            _ => return Err("command.failed"),
         }
     }
     Ok(())
+}
+
+/// 官方 `saveAdditional` 里活跃方块实体会写的键；出现这些键就走存档工厂回写。
+const LIVE_BLOCK_ENTITY_KEYS: &[&str] = &[
+    "TransferCooldown",
+    "cooking_time_spent",
+    "cooking_total_time",
+    "lit_time_remaining",
+    "lit_total_time",
+    "speed_multiplier",
+    "RecipesUsed",
+    "BrewTime",
+    "total_brew_time",
+    "Fuel",
+    "total_fuel",
+    "CookingTimes",
+    "CookingTotalTimes",
+    "blockState",
+    "facing",
+    "extending",
+    "source",
+    "progress",
+];
+
+fn block_entity_id(region: &Region, pos: BlockPos) -> Result<&str, &'static str> {
+    let state = mc_bamboo_blocks::state::BlockState(region.chunks.block(pos).unwrap_or(0));
+    let id = state
+        .block()
+        .block_entity_type
+        .and_then(mc_bamboo_data::registries::block_entity_type::name_of)
+        .ok_or("commands.data.block.invalid")?;
+    Ok(id)
+}
+
+fn write_sign(region: &mut Region, pos: BlockPos, tag: &Tag) -> Result<(), &'static str> {
+    use mc_bamboo_core::sign::SignContent;
+    let mut content = region.chunks.sign(pos).unwrap_or(SignContent::BLANK);
+    for (key, value) in tag_entries(tag) {
+        match key.as_str() {
+            "is_waxed" => content.waxed = matches!(value, Tag::Byte(v) if *v != 0),
+            "front_text" => content.front = parse_sign_text(value)?,
+            "back_text" => content.back = parse_sign_text(value)?,
+            _ => {}
+        }
+    }
+    region.chunks.set_sign(pos, content);
+    Ok(())
+}
+
+fn parse_sign_text(value: &Tag) -> Result<mc_bamboo_core::sign::SignText, &'static str> {
+    use mc_bamboo_core::sign::{DyeColor, SignText};
+    let mut out = SignText::EMPTY;
+    for (key, value) in tag_entries(value) {
+        match key.as_str() {
+            "messages" => {
+                let Tag::List(items) = value else {
+                    return Err("command.failed");
+                };
+                for (index, item) in items.iter().take(4).enumerate() {
+                    if let Tag::String(text) = item {
+                        out.messages[index] = text.clone();
+                    }
+                }
+            }
+            "color" => {
+                if let Tag::String(name) = value
+                    && let Some(color) = DyeColor::ALL.iter().copied().find(|c| c.name() == name)
+                {
+                    out.color = color;
+                }
+            }
+            "has_glowing_text" => out.glowing = matches!(value, Tag::Byte(v) if *v != 0),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+fn write_lectern(region: &mut Region, pos: BlockPos, tag: &Tag) -> Result<(), &'static str> {
+    let mut stack = mc_bamboo_protocol::item::ItemStack::empty();
+    let mut page = 0;
+    for (key, value) in tag_entries(tag) {
+        match key.as_str() {
+            "Book" => stack = slots::decode_item(value).map_err(|_| "command.failed")?,
+            "Page" => {
+                if let Tag::Int(value) = value {
+                    page = *value;
+                }
+            }
+            _ => {}
+        }
+    }
+    let facing = mc_bamboo_blocks::state::BlockState(region.chunks.block(pos).unwrap_or(0))
+        .try_get(mc_bamboo_blocks::state::FACING)
+        .unwrap_or(mc_bamboo_core::Direction::North);
+    region
+        .lecterns
+        .books
+        .insert(pos, crate::lectern::Book::from_archive(stack, page, facing));
+    Ok(())
+}
+
+fn tag_entries(tag: &Tag) -> &[(String, Tag)] {
+    match tag {
+        Tag::Compound(entries) => entries,
+        _ => &[],
+    }
+}
+
+/// 官方 `SignText.CODEC`：`messages` / `color` / `has_glowing_text`。
+fn sign_text(text: &mc_bamboo_core::sign::SignText) -> Tag {
+    Tag::Compound(vec![
+        (
+            "messages".to_owned(),
+            Tag::List(text.messages.iter().cloned().map(Tag::String).collect()),
+        ),
+        (
+            "color".to_owned(),
+            Tag::String(text.color.name().to_owned()),
+        ),
+        (
+            "has_glowing_text".to_owned(),
+            Tag::Byte(i8::from(text.glowing)),
+        ),
+    ])
 }
 
 fn put(entries: &mut Vec<(String, Tag)>, key: String, value: Tag) {

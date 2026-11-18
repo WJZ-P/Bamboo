@@ -77,6 +77,33 @@ pub struct SaveSession {
     world_gen: crate::world_options::WorldGenConfig,
 }
 
+/// 开服时读回所有 `data/<命名空间>/command_storage.dat`。
+/// 文件名由 `Identifier(ns, "command_storage").withSuffix(".dat").resolveAgainst(data)`
+/// 得到；实测 26.3 写的是 `<ns>/command_storage.dat`，不是
+/// `command_storage_<ns>.dat`。坏文件整份跳过，和官方 `readSavedData` 一致。
+///
+/// Read every `data/<namespace>/command_storage.dat` at startup.
+fn read_command_storage(dir: &WorldDir) -> Vec<(String, Tag)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir.root().join("data")) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(namespace) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let file = path.join("command_storage.dat");
+        if let Some(tag) = read_saved_data_at(&file) {
+            out.push((namespace, tag));
+        }
+    }
+    out
+}
+
 impl SaveSession {
     /// 建目录、拿独占锁、读关卡数据、写出默认的 `data/` 文件。
     /// 拿不到锁时返回错误，调用方应拒绝启动。
@@ -112,6 +139,7 @@ impl SaveSession {
             game_rules: read_saved_data(&dir, "minecraft:game_rules"),
             world_border: read_saved_data_at(&dir.world_border_dat()),
             world_clocks: read_saved_data(&dir, "minecraft:world_clocks"),
+            command_storage: read_command_storage(&dir),
         };
         let loaded_level = matches!(loaded.source, LevelSource::Primary | LevelSource::Fallback);
         // 世界生成设置（种子 + 维度生成器）存在 `data/` 里；有存档就以存档为准，
@@ -146,6 +174,12 @@ impl SaveSession {
     /// Record the config used this session for `encode_saves` to persist.
     pub(crate) fn set_world_gen(&mut self, world_gen: crate::world_options::WorldGenConfig) {
         self.world_gen = world_gen;
+    }
+
+    /// 官方 `SavedDataStorage.getDataFile`：`data/<命名空间>/command_storage.dat`。
+    /// Official `SavedDataStorage.getDataFile`: `data/<namespace>/command_storage.dat`.
+    pub(crate) fn command_storage_path(&self, namespace: &str) -> PathBuf {
+        self.dir.saved_data(&format!("{namespace}:command_storage"))
     }
 
     pub fn dir(&self) -> &WorldDir {
@@ -245,6 +279,18 @@ impl SaveSession {
             backup: None,
             bytes: Self::chunk_tickets_bytes()?,
         });
+        // 官方 `CommandStorage.Container.CODEC`：每个命名空间一份
+        // `data/<ns>/command_storage.dat`，`set()` 标脏后由 `scheduleSave` 写。
+        // Bamboo 在每次保存时写所有已知命名空间（含空 contents），保证重启不丢数据。
+        // Official `CommandStorage.Container.CODEC`: one saved-data file per
+        // namespace; `set()` marks it dirty before `scheduleSave` writes it.
+        for namespace in global.command_storage.namespaces() {
+            files.push(EncodedFile {
+                path: self.command_storage_path(&namespace),
+                backup: None,
+                bytes: encode_saved_data(&global.command_storage.namespace_tag(&namespace))?,
+            });
+        }
         // 补 10：只写建模过的 `data/` 文件；未建模的 saved data 保持「不存在」，
         // 官方 computeIfAbsent 会自己造默认值。已有的这类文件原样保留，不动。
         // Item 10: only the modelled `data/` files are written; unmodelled saved
@@ -470,6 +516,93 @@ mod tests {
         assert_eq!(restored.time().0, 4242);
         assert_eq!(restored.clocks(), clocks, "两份世界时钟逐字段恢复");
         assert_eq!(session.level().last_played, 1234);
+    }
+
+    /// `/data modify storage` 写下的标签必须跨重启存活：文件名、NBT 信封和
+    /// `contents` 结构都按官方 `CommandStorage` / `SavedDataStorage`。
+    #[test]
+    fn command_storage_round_trips_through_official_layout() {
+        use mc_bamboo_nbt::Tag;
+        use mc_bamboo_storage::world_dir::read_saved_data_at;
+
+        let tmp = TempDir::new("command-storage");
+        let mut global = Global::default();
+        global.command_storage.set(
+            "minecraft:test",
+            Tag::Compound(vec![
+                ("Value".to_owned(), Tag::Int(7)),
+                ("Name".to_owned(), Tag::String("hi".to_owned())),
+            ]),
+        );
+        global.command_storage.set(
+            "bamboo:other",
+            Tag::Compound(vec![("Other".to_owned(), Tag::Int(3))]),
+        );
+        {
+            let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
+            session.save_all(&global, 1).unwrap();
+            session.close();
+        }
+        let expected_minecraft = Tag::Compound(vec![(
+            "contents".to_owned(),
+            Tag::Compound(vec![(
+                "test".to_owned(),
+                Tag::Compound(vec![
+                    ("Value".to_owned(), Tag::Int(7)),
+                    ("Name".to_owned(), Tag::String("hi".to_owned())),
+                ]),
+            )]),
+        )]);
+        assert_eq!(
+            read_saved_data_at(&tmp.0.join("data/minecraft/command_storage.dat")),
+            Some(expected_minecraft)
+        );
+        assert!(
+            tmp.0.join("data/bamboo/command_storage.dat").exists(),
+            "非 minecraft 命名空间也单独一份"
+        );
+        let (session, _) = SaveSession::open(&tmp.0).unwrap();
+        let mut restored = Global::default();
+        let mut region = crate::region::Region::new(2, 20, false);
+        session.startup().apply(&mut restored, &mut region, 0);
+        assert_eq!(
+            restored.command_storage.get("minecraft:test"),
+            global.command_storage.get("minecraft:test")
+        );
+        assert_eq!(
+            restored.command_storage.get("bamboo:other"),
+            global.command_storage.get("bamboo:other")
+        );
+    }
+
+    /// 官方服务器写出的 `command_storage.dat` 也要能读回来：额外直接写一份
+    /// gzip 信封（等价于官方 `NbtIo.writeCompressed`），再开一局。
+    #[test]
+    fn command_storage_reads_official_written_files() {
+        use mc_bamboo_nbt::Tag;
+        use mc_bamboo_storage::world_dir::write_saved_data_at;
+
+        let tmp = TempDir::new("official-command-storage");
+        let (mut session, _) = SaveSession::open(&tmp.0).unwrap();
+        let path = session.command_storage_path("minecraft");
+        let data = Tag::Compound(vec![(
+            "contents".to_owned(),
+            Tag::Compound(vec![(
+                "test".to_owned(),
+                Tag::Compound(vec![("Value".to_owned(), Tag::Int(9))]),
+            )]),
+        )]);
+        write_saved_data_at(&path, &data).unwrap();
+        session.close();
+
+        let (session, _) = SaveSession::open(&tmp.0).unwrap();
+        let mut restored = Global::default();
+        let mut region = crate::region::Region::new(2, 20, false);
+        session.startup().apply(&mut restored, &mut region, 0);
+        assert_eq!(
+            restored.command_storage.get("minecraft:test"),
+            Tag::Compound(vec![("Value".to_owned(), Tag::Int(9))])
+        );
     }
 
     /// `world_clocks.dat` 和 `level.dat` 都是运行时的真值，运行时改了时钟再存，

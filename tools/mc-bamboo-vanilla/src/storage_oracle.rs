@@ -220,6 +220,43 @@ fn run_cases(
         ),
     );
 
+    // 1b. `/data` 的 `command_storage.dat`：官方 `CommandStorage` 能读回 Bamboo
+    //     写出的 `contents`，并按官方 codec 比对整份 NBT。
+    let command_storage = Tag::Compound(vec![(
+        "contents".to_owned(),
+        Tag::Compound(vec![
+            (
+                "test".to_owned(),
+                Tag::Compound(vec![
+                    ("Value".to_owned(), Tag::Int(7)),
+                    ("Name".to_owned(), Tag::String("hi".to_owned())),
+                ]),
+            ),
+            (
+                "alpha".to_owned(),
+                Tag::Compound(vec![("Other".to_owned(), Tag::Int(3))]),
+            ),
+        ]),
+    )]);
+    let mut nbt_bytes = Vec::new();
+    mc_bamboo_nbt::write_named("", &command_storage, &mut nbt_bytes);
+    let answer = ask(
+        stdin,
+        lines,
+        json!({"command": "command-storage", "nbt": encode_b64(&nbt_bytes)}),
+    )?;
+    report.check(
+        answer.error.is_none(),
+        format!(
+            "official CommandStorage rejected Bamboo data: {:?}",
+            answer.error
+        ),
+    );
+    report.check(
+        answer.canonical.as_ref() == Some(&canonical_tag(&command_storage)),
+        "official CommandStorage canonical JSON differs",
+    );
+
     // 2. Bamboo 写出的区块 NBT，官方 `SerializableChunkData.parse` 能读，
     //    `write()` 回来后按键比较内容。
     for (label, seed) in [("flat", None), ("rich-1", Some(1u64)), ("rich-9", Some(9))] {

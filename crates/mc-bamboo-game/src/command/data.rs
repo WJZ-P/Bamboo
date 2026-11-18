@@ -641,3 +641,115 @@ mod tests {
         assert_eq!(storage_tag(&global, "minecraft:a"), before, "不静默成功");
     }
 }
+
+#[cfg(test)]
+mod block_entity_tests {
+    use mc_bamboo_core::{BlockPos, Direction};
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_protocol::item::ItemStack;
+
+    use crate::{
+        command::{on_command, tests::world_with},
+        global::Global,
+        inbound::PlayerId,
+        region::Region,
+    };
+
+    fn world() -> (Global, Region, PlayerId) {
+        world_with("Kitten", 2)
+    }
+
+    fn pos() -> BlockPos {
+        BlockPos::new(4, -60, 6)
+    }
+
+    #[test]
+    fn chest_barrel_hopper_dispenser_dropper_items_are_writable() {
+        for (name, state) in [
+            ("chest", blocks::CHEST),
+            ("barrel", blocks::BARREL),
+            ("hopper", blocks::HOPPER),
+            ("dispenser", blocks::DISPENSER),
+            ("dropper", blocks::DROPPER),
+        ] {
+            let (mut global, mut region, id) = world();
+            let at = pos();
+            region.chunks.set_block(at, state);
+            region.containers.insert(
+                at,
+                crate::container::ContainerEntry::new(crate::container::ContainerKind::Chest),
+            );
+            on_command(
+                &mut global,
+                &mut region,
+                id,
+                "data modify block 4 -60 6 Items set value [{Slot:0b,id:\"minecraft:stone\",count:2}]",
+                None,
+            );
+            assert_eq!(
+                region.containers[&at].slots[0].item,
+                mc_bamboo_data::items::STONE,
+                "{name} 的 Items 没写进去"
+            );
+        }
+    }
+
+    #[test]
+    fn sign_text_is_writable() {
+        let (mut global, mut region, id) = world();
+        let at = pos();
+        region.chunks.set_block(at, blocks::OAK_SIGN);
+        on_command(
+            &mut global,
+            &mut region,
+            id,
+            "data merge block 4 -60 6 {front_text:{messages:[\"hello\",\"\",\"\",\"\"],color:\"black\",has_glowing_text:0b},is_waxed:1b}",
+            None,
+        );
+        let sign = region.chunks.sign(at).expect("告示牌文字存在");
+        assert_eq!(sign.front.messages[0], "hello");
+        assert!(sign.waxed);
+    }
+
+    #[test]
+    fn lectern_book_is_writable() {
+        let (mut global, mut region, id) = world();
+        let at = pos();
+        region.chunks.set_block(at, blocks::LECTERN);
+        region.lecterns.books.insert(
+            at,
+            crate::lectern::Book::from_archive(ItemStack::empty(), 0, Direction::North),
+        );
+        on_command(
+            &mut global,
+            &mut region,
+            id,
+            "data merge block 4 -60 6 {Book:{id:\"minecraft:writable_book\",count:1,components:{writable_book_content:{pages:[\"hello\"]}}},Page:0}",
+            None,
+        );
+        assert_eq!(
+            region.lecterns.books[&at].archive().0.item,
+            mc_bamboo_data::items::WRITABLE_BOOK
+        );
+    }
+
+    #[test]
+    fn furnace_class_fields_use_the_archive_factory() {
+        for state in [blocks::FURNACE, blocks::BLAST_FURNACE, blocks::SMOKER] {
+            let (mut global, mut region, id) = world();
+            let at = pos();
+            region.chunks.set_block(at, state);
+            on_command(
+                &mut global,
+                &mut region,
+                id,
+                "data merge block 4 -60 6 {cooking_time_spent:3,cooking_total_time:10,lit_time_remaining:4,lit_total_time:8,speed_multiplier:1.0f,RecipesUsed:{},Items:[]}",
+                None,
+            );
+            assert!(
+                region.block_entities.find_dyn(at).is_some(),
+                "熔炉类走存档工厂回写"
+            );
+        }
+    }
+}
