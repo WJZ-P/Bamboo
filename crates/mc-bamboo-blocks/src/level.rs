@@ -925,6 +925,28 @@ pub trait Level: LevelSideState + LevelEntities {
         Vec::new()
     }
 
+    /// 生物死时的战利品，`LivingEntity.dropFromLootTable`。`table` 是战利品表名，
+    /// 随机数取这张表的随机序列。默认没有战利品。
+    ///
+    /// Mob death loot. The draw uses the table's random sequence. Default: nothing.
+    fn mob_loot_drops(
+        &mut self,
+        table: &str,
+        on_fire: bool,
+        killer: Option<EntityUid>,
+    ) -> Vec<ItemStack> {
+        let _ = (table, on_fire, killer);
+        Vec::new()
+    }
+
+    /// 世界里的玩家，按加入顺序。生物的 AI 读它。
+    fn for_each_player(&self, _visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {}
+
+    /// `getSkyDarken()`。
+    fn sky_darken(&self) -> i32 {
+        0
+    }
+
     /// 官方 `RandomizableContainer.unpackLootTable` 的调用点。有战利品表的容器在
     /// 第一次被读或写之前先填好内容。默认空实现用于没有战利品表的假世界。
     ///

@@ -51,6 +51,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::FallingBlock { .. } => kinds::FALLING_BLOCK,
         crate::entity::KindPublic::Tnt { .. } => kinds::TNT,
         crate::entity::KindPublic::Item { .. } => kinds::ITEM,
+        crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
         &mut out,
@@ -114,6 +115,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
                 tag::encode_block_state(BlockState(blocks::TNT)),
             );
         }
+        crate::entity::KindPublic::Mob(_) => {}
         crate::entity::KindPublic::Item {
             stack,
             pickup_delay,
@@ -155,8 +157,13 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
     let position = vec3_value(tag, "Pos", [0.0; 3]);
     let delta = vec3_value(tag, "Motion", [0.0; 3]);
     let rotation = tag::vec2(tag, "Rotation", [0.0; 2]);
+    if let Some(row) = crate::entity::mob::nbt::read_mob(tag, id, uid)? {
+        return Ok(Some(row));
+    }
     let entity = Entity {
         id: uid,
+        // `split` 不读尺寸，拼回来时按 `kind` 重算。
+        dimensions: (0.0, 0.0),
         kind: match id {
             "minecraft:falling_block" => {
                 let block = match tag::field(tag, "BlockState") {

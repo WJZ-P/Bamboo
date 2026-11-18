@@ -1835,6 +1835,16 @@ impl<'a> World<'a> {
         self.level.explosion_block_drops(state, pos)
     }
 
+    /// 生物死时的战利品，见 [`Level::mob_loot_drops`]。
+    pub(crate) fn mob_loot_drops(
+        &mut self,
+        table: &str,
+        on_fire: bool,
+        killer: Option<crate::entity::EntityUid>,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        self.level.mob_loot_drops(table, on_fire, killer)
+    }
+
     /// `Block.getDrops`，见 [`Level::block_loot_drops`]。
     pub(crate) fn block_loot_drops(
         &mut self,
@@ -2919,6 +2929,31 @@ impl<'a> World<'a> {
         let fuse = short_fuse(PrimedTnt::DEFAULT_FUSE, self.random());
         entity.set_fuse(fuse);
         self.spawn_entity(entity)
+    }
+
+    /// `hurtServer`：从外面打一个生物（玩家攻击、命令、对拍）。不是生物或者找不到时返回假。
+    ///
+    /// `hurtServer` from outside (player attacks, commands, oracles). False when the id is
+    /// not a mob or is missing.
+    pub fn hurt_mob(
+        &mut self,
+        id: i32,
+        source: crate::entity::mob::DamageSource,
+        amount: f32,
+    ) -> bool {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return false;
+        };
+        let hurt = {
+            let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
+            entity
+                .with_mob(|me, mob| {
+                    crate::entity::mob::living::hurt_server(me, mob, &mut ctx, source, amount)
+                })
+                .unwrap_or(false)
+        };
+        self.level.put_entity(entity);
+        hurt
     }
 
     /// `addFreshEntity` 之后按 ID 改这个实体。刚生成、还没并进 tick 列表的也找得到。

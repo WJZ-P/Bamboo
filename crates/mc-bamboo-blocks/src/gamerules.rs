@@ -46,6 +46,12 @@ pub struct BlockGameRules {
     pub max_snow_accumulation_height: i32,
     /// `GameRules.SPAWN_MOBS`。`ServerLevel.tickThunder` 在雷击命中时读它。
     pub spawn_mobs: bool,
+    /// `GameRules.MOB_GRIEFING`。
+    pub mob_griefing: bool,
+    /// `GameRules.MOB_DROPS`：生物死时掉不掉战利品和经验。
+    pub mob_drops: bool,
+    /// `GameRules.MAX_ENTITY_CRAMMING`：`pushEntities` 的挤压上限。
+    pub max_entity_cramming: i32,
 }
 
 impl BlockGameRules {
@@ -67,6 +73,9 @@ impl BlockGameRules {
             max_block_modifications: int_default(gamerules::MAX_BLOCK_MODIFICATIONS),
             max_snow_accumulation_height: int_default(gamerules::MAX_SNOW_ACCUMULATION_HEIGHT),
             spawn_mobs: bool_default(gamerules::SPAWN_MOBS),
+            mob_griefing: bool_default(gamerules::MOB_GRIEFING),
+            mob_drops: bool_default(gamerules::MOB_DROPS),
+            max_entity_cramming: int_default(gamerules::MAX_ENTITY_CRAMMING),
         }
     }
 }
@@ -150,6 +159,8 @@ fn assign_bool(rules: &mut BlockGameRules, name: &str, value: bool) {
         "lava_source_conversion" => rules.lava_source_conversion = value,
         "spread_vines" => rules.spread_vines = value,
         "spawn_mobs" => rules.spawn_mobs = value,
+        "mob_griefing" => rules.mob_griefing = value,
+        "mob_drops" => rules.mob_drops = value,
         _ => {}
     }
 }
@@ -160,6 +171,7 @@ fn assign_int(rules: &mut BlockGameRules, name: &str, value: i32) {
         "fire_spread_radius_around_player" => rules.fire_spread_radius_around_player = value,
         "max_block_modifications" => rules.max_block_modifications = value,
         "max_snow_accumulation_height" => rules.max_snow_accumulation_height = value,
+        "max_entity_cramming" => rules.max_entity_cramming = value,
         _ => {}
     }
 }

@@ -699,7 +699,7 @@ fn damage_tag(name: &str) -> &'static [i32] {
         .unwrap_or(&[])
 }
 
-fn friction(state: BlockState) -> f32 {
+pub(crate) fn friction(state: BlockState) -> f32 {
     if state.is(blocks::ICE) || state.is(blocks::PACKED_ICE) || state.is(blocks::FROSTED_ICE) {
         0.98
     } else if state.is(blocks::BLUE_ICE) {
@@ -763,7 +763,7 @@ fn splash(entity: &mut Entity) {
     // Two `nextFloat`s for the pitch, then the two particle loops. Width 0.25 means six each.
     let _ = entity.random.next_float();
     let _ = entity.random.next_float();
-    let width = entity.kind.dimensions().0;
+    let width = entity.dimensions.0;
     let limit = 1.0 + width * 20.0;
     let mut index = 0;
     while (index as f32) < limit {
@@ -881,7 +881,7 @@ fn scale_flow(flow: Vec3, height: f64) -> Vec3 {
     }
 }
 
-fn apply_current(entity: &mut Entity, accumulated: &Vec3, scale: f64) {
+pub(crate) fn apply_current(entity: &mut Entity, accumulated: &Vec3, scale: f64) {
     if accumulated.length_sqr() < f64::from(1.0e-5_f32) {
         return;
     }
@@ -925,7 +925,7 @@ fn fluid_area_loaded(
 /// `FlowingFluid.getFlow`。
 ///
 /// `FlowingFluid.getFlow`.
-fn flow_vector(world: &dyn BlockView, pos: BlockPos, fluid: FluidState) -> Vec3 {
+pub(crate) fn flow_vector(world: &dyn BlockView, pos: BlockPos, fluid: FluidState) -> Vec3 {
     let Some(kind) = Fluid::of(fluid) else {
         return Vec3::default();
     };
@@ -996,7 +996,7 @@ fn solid_face(world: &dyn BlockView, kind: Fluid, pos: BlockPos, direction: Dire
     world.is_face_sturdy(pos, direction, SupportType::Full)
 }
 
-fn fluid_box(world: &dyn BlockView, pos: BlockPos, fluid: FluidState) -> Option<Aabb> {
+pub(crate) fn fluid_box(world: &dyn BlockView, pos: BlockPos, fluid: FluidState) -> Option<Aabb> {
     if fluid.is_empty() {
         return None;
     }
