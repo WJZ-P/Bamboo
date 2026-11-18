@@ -2,10 +2,10 @@
 //! 命令。齐步驱动下，多岛世界和整个世界一个岛逐刻比每组的内容指纹、岛的时钟和每名玩家
 //! 收到的全部字节；目标全在别的岛、源和目标在不同的岛、范围跨两个岛的情况都有。
 //!
-//! Bamboo 现在没有 `/execute`、`/kill`、`/data`，选择器 `@e` 只返回玩家（单岛也一样），
-//! 所以这里覆盖的是现有命令里碰方块和非玩家实体的那些：`/setblock`、`/fill`、`/clone`、
-//! `/loot spawn|insert|replace block`、`/summon`、`/gamemode` / `/defaultgamemode`（读目标
-//! 玩家脚下的方块），玩家发起和控制台发起各有。
+//! 这里覆盖碰方块和非玩家实体的命令：`/setblock`、`/fill`、`/clone`、
+//! `/loot spawn|insert|replace block`、`/summon`、`/kill @e`、`/gamemode` /
+//! `/defaultgamemode`（读目标玩家脚下的方块），玩家发起和控制台发起各有。
+//! `/execute` 和 `/data` 还没有；`@e` 现在也会选中非玩家实体。
 //!
 //! Commands reaching other islands (island plan 4.5): block positions,
 //! containers, entities spawned by commands and player commands that read
@@ -13,10 +13,8 @@
 //! single-island one tick by tick: per-group content prints, island clocks
 //! and every byte each player receives, with targets entirely on another
 //! island, source and destination on different islands and a range spanning
-//! two islands. Bamboo has no `/execute`, `/kill` or `/data` yet and `@e`
-//! returns players only (on one island too), so this covers the existing
-//! commands that touch blocks and non-player entities, from players and from
-//! the console.
+//! two islands. `/execute` and `/data` are not implemented yet; `@e` now
+//! selects non-player entities too.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -93,11 +91,9 @@ fn script(scene: &mut Scene) -> Vec<(u64, Step)> {
             1,
             Step::Player(0, format!("setblock {} minecraft:stone", c(1, 3, 1, 3))),
         ),
-        // 控制台发的方块命令在 Bamboo 里现在报 `permissions.requires.player`（控制台来源
-        // 没有位置，和岛无关）：两边要报同样的错。
-        // Block commands from the console currently fail with
-        // `permissions.requires.player` in Bamboo (the console source has no
-        // position, islands or not); both worlds must report the same.
+        // 控制台发的方块命令按世界出生点执行：两边要放同样的方块。
+        // Block commands from the console run at the world spawn; both worlds
+        // must place the same block.
         (
             2,
             Step::Console(format!("setblock {} minecraft:stone", c(2, 8, 1, 3))),
@@ -203,6 +199,12 @@ fn script(scene: &mut Scene) -> Vec<(u64, Step)> {
                 1,
                 format!("setblock {} minecraft:redstone_block", c(0, 2, 3, 2)),
             ),
+        ),
+        // 控制台按 `@e[type=item,distance=..1,x=8,y=0,z=8]` 在别的岛的出生点
+        // 之外选中空集：命令仍然要借整个世界才能解析选择器，且不取随机数。
+        (
+            20,
+            Step::Console("kill @e[type=item,x=2000000,y=0,z=2000000,distance=..1]".to_owned()),
         ),
     ];
     out.sort_by_key(|(tick, _)| *tick);

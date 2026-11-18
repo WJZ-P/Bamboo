@@ -312,13 +312,11 @@ fn clone_command(
 ) -> Result<(), CommandFail> {
     let _ = port;
     let (from, to, destination, filter) = {
-        let player = region
-            .players
-            .get(&id)
-            .ok_or_else(|| fail("permissions.requires.player"))?;
-        let from = block_position(required_block_pos(parsed, "begin")?, player);
-        let to = block_position(required_block_pos(parsed, "end")?, player);
-        let destination = block_position(required_block_pos(parsed, "destination")?, player);
+        let command_source = crate::command::source::of(region, id);
+        let from = block_position(required_block_pos(parsed, "begin")?, command_source);
+        let to = block_position(required_block_pos(parsed, "end")?, command_source);
+        let destination =
+            block_position(required_block_pos(parsed, "destination")?, command_source);
         let filter = parsed
             .get("filter")
             .and_then(|value| value.as_block_predicate())

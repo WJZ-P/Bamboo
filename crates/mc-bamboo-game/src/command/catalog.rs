@@ -8,7 +8,7 @@ use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
     Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, enchant, experience,
-    gamerule, items, loot, particle, players, playsound, random, save, scoreboard, stopsound,
+    gamerule, items, kill, loot, particle, players, playsound, random, save, scoreboard, stopsound,
     summon, team, teleport, text, time, title, weather, world_border, world_settings,
 };
 
@@ -108,6 +108,7 @@ pub(crate) fn build() -> Commands {
     register_give(&mut builder, root);
     register_help(&mut builder, root);
     register_kick(&mut builder, root);
+    register_kill(&mut builder, root);
     register_list(&mut builder, root);
     register_playsound(&mut builder, root);
     register_msg(&mut builder, root);
@@ -343,6 +344,16 @@ fn register_help(builder: &mut Builder, root: usize) {
     builder.run(help, players::help);
     let command = builder.argument(help, "command", ArgumentType::String(StringKind::Greedy), 0);
     builder.run(command, players::help);
+}
+
+/// `KillCommand.register`：权限 2；根节点本身就是 `kill @s`。
+///
+/// `KillCommand.register`: level 2; the root node is `kill @s` itself.
+fn register_kill(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "kill", permission::GAMEMASTERS);
+    builder.run_island(command, kill::kill);
+    let targets = builder.argument(command, "targets", entities_argument(), 0);
+    builder.run_island(targets, kill::kill);
 }
 
 fn register_kick(builder: &mut Builder, root: usize) {

@@ -70,6 +70,7 @@ mod experience;
 pub(crate) mod feedback;
 mod gamerule;
 mod items;
+mod kill;
 mod loot;
 mod particle;
 mod players;
@@ -77,7 +78,8 @@ mod playsound;
 mod random;
 mod save;
 mod scoreboard;
-mod select;
+pub(crate) mod select;
+pub(crate) mod source;
 mod stopsound;
 mod summon;
 mod team;
@@ -556,14 +558,7 @@ fn view_node(node: &OwnedNode) -> CommandNode<'_> {
 /// (official `LevelBasedPermissionSet.OWNER`); players use their level, missing ones
 /// fall back to `permission::ALL`.
 fn level_of(region: &Region, id: PlayerId) -> u8 {
-    if console::is_console(id) {
-        return console::PERMISSION;
-    }
-    region
-        .players
-        .get(&id)
-        .map(|player| player.permission_level)
-        .unwrap_or(permission::ALL)
+    source::level(region, id)
 }
 
 #[cfg(test)]
@@ -1383,6 +1378,7 @@ mod official_tree {
     /// (node kind, parser, properties, executable and permissions). The seven other
     /// roots are checked by the path/parser tests above.
     const ADMIN_ROOTS: &[&str] = &[
+        "kill",
         "summon",
         "op",
         "deop",

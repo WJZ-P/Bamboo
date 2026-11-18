@@ -9,12 +9,11 @@ use mc_bamboo_protocol::text::{Component, TranslateArg};
 use crate::{
     command::{
         feedback::{self, CommandFail, fail, fail_with},
-        players, select,
+        players, select, source,
     },
     global::Global,
     global_port::GlobalPort,
     inbound::PlayerId,
-    player::Player,
     region::{DIMENSION, Region},
     world_state::{Difficulty, FORCE_GAME_MODE, RespawnData},
 };
@@ -155,26 +154,19 @@ fn target_spawn(
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<RespawnData, CommandFail> {
-    let player = region
-        .players
-        .get(&id)
-        .ok_or_else(|| fail("permissions.requires.player"))?;
+    let command_source = source::of(region, id);
     let pos = if let Some(coords) = parsed.get("pos").and_then(Value::as_block_pos) {
-        block_pos(coords, player)
+        block_pos(coords, command_source)
     } else {
-        BlockPos::containing(player.position())
+        BlockPos::containing(command_source.position)
     };
     let pos = spawnable_pos(pos)?;
-    let (yaw, pitch) = parsed
-        .get("rotation")
-        .and_then(Value::as_rotation)
-        .map(|rotation| rotation.resolve(player.yaw, player.pitch))
-        .unwrap_or((0.0, 0.0));
+    let (yaw, pitch) = source::rotation(parsed, "rotation", command_source).unwrap_or((0.0, 0.0));
     Ok(RespawnData::of(pos, yaw, pitch))
 }
 
-fn block_pos(coords: Coordinates, player: &Player) -> BlockPos {
-    BlockPos::containing(coords.position(player.position(), player.yaw, player.pitch))
+fn block_pos(coords: Coordinates, source: source::Source) -> BlockPos {
+    BlockPos::containing(source::position(coords, source))
 }
 
 /// `/setworldspawn`：世界出生点，改动时按官方广播 `set_default_spawn_position`。
