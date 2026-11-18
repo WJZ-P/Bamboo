@@ -74,7 +74,58 @@ pub enum ScenarioKind {
     Islands2,
     Islands4,
     Islands8,
+    Islands16,
+    /// 同 `islands-K`，但第 0 组另外多放一大批不能堆叠的掉落物（个数由
+    /// `BAMBOO_LOADTEST_HEAVY_ITEMS` 给，缺省 [`DEFAULT_HEAVY_ITEMS`]），让这一组单独就跑不满
+    /// 20 TPS：量「一个岛过载只拖慢它自己」。
+    ///
+    /// Like `islands-K`, but group 0 also gets a large batch of unstackable
+    /// dropped items (`BAMBOO_LOADTEST_HEAVY_ITEMS`, default
+    /// [`DEFAULT_HEAVY_ITEMS`]) so that group alone cannot keep 20 TPS: to
+    /// measure whether one overloaded island only slows itself.
+    IslandsHeavy4,
+    IslandsHeavy8,
+    /// 拆合：8 名站着的假玩家排成一列（相邻两人隔 30 个区块，已加载区域相接，并成一个岛）；每
+    /// [`SHUTTLE_PERIOD`] 刻单数号的人被送到很远的地方、再送回来。他们一走，这一列断成
+    /// 几段，迟滞过后拆开；他们一回来，各段又并起来。量拆合的次数和每次耗时。
+    ///
+    /// Splits and merges: 8 standing bots in a row (30 chunks apart, loaded
+    /// areas nearly touching, one island); every [`SHUTTLE_PERIOD`] ticks the odd-numbered
+    /// bots are sent far away and then back. When they leave the row breaks
+    /// into pieces that split after the hysteresis; when they return the
+    /// pieces merge again. Measures how often and how long these take.
+    IslandsShuttle,
 }
+
+/// 拆合场景里单数号的人每隔这么多刻换一次位置（走 / 回）。拆分有 200 刻迟滞，这里给足。
+///
+/// Every this many ticks the odd-numbered bots of the shuttle scene switch
+/// place (away / back); splits wait 200 ticks, so this leaves room.
+pub const SHUTTLE_PERIOD: i64 = 400;
+/// 拆合场景的人数。
+const SHUTTLE_BOTS: usize = 8;
+/// 拆合场景一列里相邻两人隔几个区块。视距 8 时一名玩家加载的范围约 27 个区块宽：隔 30 个
+/// 区块时相邻两人的已加载区域只空 3 个区块，并成一个岛；单数号的人走开以后剩下的人隔
+/// 60 个区块，空出 30 多个区块，够拆分的距离。
+const SHUTTLE_STRIDE_CHUNKS: i32 = 30;
+/// 拆合场景里走开的人去的地方离那一列多远（区块）。
+const SHUTTLE_AWAY_CHUNKS: i32 = 200;
+
+/// 重的那一组额外的掉落物个数（缺省）。
+///
+/// Extra dropped items in the heavy group (default).
+pub const DEFAULT_HEAVY_ITEMS: usize = 20_000;
+/// 改重的那一组掉落物个数的环境变量。
+///
+/// The environment variable overriding the heavy group's item count.
+pub const HEAVY_ITEMS_ENV: &str = "BAMBOO_LOADTEST_HEAVY_ITEMS";
+/// 每隔这么多刻从控制台发一条要整个世界的命令（`defaultgamemode survival`），量多岛时
+/// 把全部岛拼起来再拆回去的耗时。缺省 0（不发）。
+///
+/// Every this many ticks, send a whole-world command from the console
+/// (`defaultgamemode survival`) to time joining and splitting every island.
+/// Default 0 (never).
+pub const WORLD_COMMAND_ENV: &str = "BAMBOO_LOADTEST_WORLD_COMMAND_EVERY";
 
 impl ScenarioKind {
     pub fn parse(name: &str) -> Option<Self> {
@@ -93,6 +144,10 @@ impl ScenarioKind {
             "islands-2" => Self::Islands2,
             "islands-4" => Self::Islands4,
             "islands-8" => Self::Islands8,
+            "islands-16" => Self::Islands16,
+            "islands-heavy-4" => Self::IslandsHeavy4,
+            "islands-heavy-8" => Self::IslandsHeavy8,
+            "islands-shuttle" => Self::IslandsShuttle,
             _ => return None,
         })
     }
@@ -113,6 +168,10 @@ impl ScenarioKind {
             Self::Islands2 => "islands-2",
             Self::Islands4 => "islands-4",
             Self::Islands8 => "islands-8",
+            Self::Islands16 => "islands-16",
+            Self::IslandsHeavy4 => "islands-heavy-4",
+            Self::IslandsHeavy8 => "islands-heavy-8",
+            Self::IslandsShuttle => "islands-shuttle",
         }
     }
 
@@ -131,9 +190,14 @@ impl ScenarioKind {
                 let n = if self == Self::Normal20Fly { 20 } else { 50 };
                 (n, "fly", "spread", 60)
             }
-            Self::Islands1 | Self::Islands2 | Self::Islands4 | Self::Islands8 => {
-                (GROUP_BOTS * self.groups(), "wander", "cluster", 60)
-            }
+            Self::Islands1
+            | Self::Islands2
+            | Self::Islands4
+            | Self::Islands8
+            | Self::Islands16
+            | Self::IslandsHeavy4
+            | Self::IslandsHeavy8 => (GROUP_BOTS * self.groups(), "wander", "cluster", 60),
+            Self::IslandsShuttle => (SHUTTLE_BOTS, "stand", "cluster", 90),
         }
     }
 
@@ -143,9 +207,24 @@ impl ScenarioKind {
             Self::Islands1 => 1,
             Self::Islands2 => 2,
             Self::Islands4 => 4,
-            Self::Islands8 => 8,
+            Self::Islands8 | Self::IslandsHeavy8 => 8,
+            Self::Islands16 => 16,
+            Self::IslandsHeavy4 => 4,
             _ => 0,
         }
+    }
+
+    /// 第 0 组额外的掉落物个数；不是重场景时是 0。
+    ///
+    /// Extra dropped items in group 0; 0 unless a heavy scenario.
+    fn heavy_items(self) -> usize {
+        if !matches!(self, Self::IslandsHeavy4 | Self::IslandsHeavy8) {
+            return 0;
+        }
+        std::env::var(HEAVY_ITEMS_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(DEFAULT_HEAVY_ITEMS)
     }
 
     fn machines(self) -> usize {
@@ -153,9 +232,13 @@ impl ScenarioKind {
             Self::Spread4 => 4,
             Self::Spread16 | Self::Big16 | Self::Spread16Players => 16,
             Self::Spread64 | Self::Big64 => 64,
-            Self::Islands1 | Self::Islands2 | Self::Islands4 | Self::Islands8 => {
-                machines::all().len() * self.groups()
-            }
+            Self::Islands1
+            | Self::Islands2
+            | Self::Islands4
+            | Self::Islands8
+            | Self::Islands16
+            | Self::IslandsHeavy4
+            | Self::IslandsHeavy8 => machines::all().len() * self.groups(),
             _ => 0,
         }
     }
@@ -201,6 +284,12 @@ struct Plan {
     actions: Vec<Action>,
     /// 「岛」场景的组数，别的场景是 0。
     groups: usize,
+    /// 第 0 组额外的掉落物个数（重场景）。
+    heavy_items: usize,
+    /// 拆合场景：每名假玩家上次被送到的是「在列里」还是「走开」。
+    shuttle: Option<std::collections::BTreeMap<String, bool>>,
+    /// 每隔几刻发一条要整个世界的命令，0 = 不发。
+    world_command_every: i64,
     /// 已经送到自己那一组的假玩家。
     placed: BTreeSet<String>,
     forced: bool,
@@ -221,7 +310,9 @@ pub fn configure(kind: ScenarioKind) -> BenchHooks {
         })
         .collect();
     let groups = kind.groups();
-    let chunks = if groups > 0 {
+    let chunks = if kind == ScenarioKind::IslandsShuttle {
+        Vec::new()
+    } else if groups > 0 {
         group_chunks(groups)
     } else {
         forced_chunks(&placements)
@@ -245,6 +336,12 @@ pub fn configure(kind: ScenarioKind) -> BenchHooks {
         chunks,
         actions,
         groups,
+        heavy_items: kind.heavy_items(),
+        shuttle: (kind == ScenarioKind::IslandsShuttle).then(std::collections::BTreeMap::new),
+        world_command_every: std::env::var(WORLD_COMMAND_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0),
         placed: BTreeSet::new(),
         forced: false,
         installed: false,
@@ -357,6 +454,30 @@ fn group_items(group: usize) -> Vec<(Vec3, ItemStack)> {
     out
 }
 
+/// 重的那一组（第 0 组）额外的掉落物：不能堆叠的钻石剑，不会互相合并，摆在机器方阵西边
+/// 那条空地上（x 在 −46..−2，z 在 −46..114），每格放几把、错开一点。
+///
+/// The heavy group's (group 0's) extra items: unstackable diamond swords that
+/// never merge, on the free strip west of the machines (x −46..−2, z
+/// −46..114), a few per block, slightly offset.
+fn heavy_items(count: usize) -> Vec<(Vec3, ItemStack)> {
+    const WIDTH: usize = 45;
+    const LENGTH: usize = 161;
+    let mut out = Vec::with_capacity(count);
+    for index in 0..count {
+        let spot = index % (WIDTH * LENGTH);
+        let layer = index / (WIDTH * LENGTH);
+        let x = -46 + (spot % WIDTH) as i32;
+        let z = -46 + (spot / WIDTH) as i32;
+        let shift = 0.2 + 0.15 * (layer % 4) as f64;
+        out.push((
+            Vec3::new(f64::from(x) + shift, FLAT_SURFACE_Y, f64::from(z) + shift),
+            ItemStack::new(items::DIAMOND_SWORD, 1),
+        ));
+    }
+    out
+}
+
 /// 假玩家名字末尾的编号（`Bot0007` → 7）。
 fn bot_index(name: &str) -> Option<usize> {
     let digits = name.trim_start_matches(|c: char| !c.is_ascii_digit());
@@ -431,6 +552,9 @@ fn setup_scene(world: &mut BenchWorld<'_>) -> bool {
                 world.spawn_item(position, stack);
             }
         }
+        for (position, stack) in heavy_items(plan.heavy_items) {
+            world.spawn_item(position, stack);
+        }
         plan.installed = true;
     }
     true
@@ -488,26 +612,38 @@ fn install_machine(world: &mut BenchWorld<'_>, build: fn() -> Machine, origin: (
     // `connect_wires` 在假世界里摆好的状态已经带属性，不需要重跑。
 }
 
-/// `setup` 成功之后的每刻输入。
+/// `setup` 成功之后的每刻输入。多岛时每台机器按它所在的岛的时钟翻（落后的岛慢），那个岛
+/// 这一刻不在主控手里就跳过。
+///
+/// Each tick's inputs once `setup` succeeded. With several islands each
+/// machine follows its own island's clock (a lagging island is behind) and
+/// is skipped while that island is away.
 fn tick_scene(world: &mut BenchWorld<'_>) {
-    let now = world.game_time();
-    let actions = {
+    let (actions, world_command_every) = {
         let mut guard = PLAN.lock().expect("scenario plan lock");
         if let Some(plan) = guard.as_mut() {
             place_new_bots(world, plan);
+            shuttle_bots(world, plan);
         }
         guard
             .as_ref()
-            .map(|plan| plan.actions.clone())
+            .map(|plan| (plan.actions.clone(), plan.world_command_every))
             .unwrap_or_default()
     };
+    if world_command_every > 0 && world.game_time() % world_command_every == 0 {
+        world.console_command("defaultgamemode survival");
+    }
     for action in actions {
         match action {
             Action::Clock {
                 pos,
                 period,
                 offset,
-            } if period > 0 && (now + offset) % period == 0 => {
+            } if period > 0
+                && world
+                    .game_time_at(pos)
+                    .is_some_and(|now| (now + offset) % period == 0) =>
+            {
                 let on = BlockState(world.block_state(pos)).is(blocks::REDSTONE_BLOCK);
                 let next = if on {
                     BlockState::AIR.0
@@ -521,7 +657,11 @@ fn tick_scene(world: &mut BenchWorld<'_>) {
                 stack,
                 period,
                 offset,
-            } if period > 0 && (now + offset) % period == 0 => {
+            } if period > 0
+                && world
+                    .game_time_at(pos)
+                    .is_some_and(|now| (now + offset) % period == 0) =>
+            {
                 world.refill(pos, stack);
             }
             _ => {}
@@ -529,10 +669,44 @@ fn tick_scene(world: &mut BenchWorld<'_>) {
     }
 }
 
-/// 岛场景：新进服的假玩家按编号分到 `编号 % K` 组，用控制台的 `/tp` 送过去。
-/// 只在有人没送到的时候查一次在线名单。
+/// 拆合场景：按家岛的时钟，前半个周期全部在列里，后半个周期单数号的人走开；每名假玩家
+/// 位置变了才送一次，送不成（他的岛不在手里）下一刻再试。
 ///
-/// Island scenarios: each new bot goes to group `index % K` through a console `/tp`.
+/// The shuttle scene: by the home clock, everyone is in the row for the
+/// first half of each period and the odd-numbered bots are away for the
+/// second half; a bot is sent only when its place changes, retried next tick
+/// while its island is away.
+fn shuttle_bots(world: &mut BenchWorld<'_>, plan: &mut Plan) {
+    let Some(sent) = plan.shuttle.as_mut() else {
+        return;
+    };
+    let away_phase = world.game_time().div_euclid(SHUTTLE_PERIOD) % 2 == 1;
+    for name in world.player_names() {
+        let index = bot_index(&name).unwrap_or(0);
+        let away = away_phase && index % 2 == 1;
+        if sent.get(&name) == Some(&away) {
+            continue;
+        }
+        let x = index as i32 * SHUTTLE_STRIDE_CHUNKS * 16 + 8;
+        let z = if away {
+            SHUTTLE_AWAY_CHUNKS * 16 + 8
+        } else {
+            8
+        };
+        let at = Vec3::new(f64::from(x) + 0.5, FLAT_SURFACE_Y, f64::from(z) + 0.5);
+        if world.teleport_player(&name, at) {
+            sent.insert(name, away);
+        }
+    }
+}
+
+/// 岛场景：新进服的假玩家按编号分到 `编号 % K` 组，直接送过去（控制台的 `/tp` 用不了坐标：
+/// 控制台来源没有位置）。他所在的岛这一刻不在手里就下一刻再送。只在有人没送到的时候查一次
+/// 在线名单。
+///
+/// Island scenarios: each new bot goes to group `index % K`, placed directly
+/// (the console's `/tp` cannot take coordinates: the console source has no
+/// position); retried next tick while their island is away.
 fn place_new_bots(world: &mut BenchWorld<'_>, plan: &mut Plan) {
     if plan.groups == 0 {
         return;
@@ -547,8 +721,9 @@ fn place_new_bots(world: &mut BenchWorld<'_>, plan: &mut Plan) {
         let spread = (index / plan.groups % 5) as f64 * 2.0 - 4.0;
         let x = f64::from(ox + GROUP_PLAYER_SPOT.0) + 0.5 + spread;
         let z = f64::from(oz + GROUP_PLAYER_SPOT.1) + 0.5;
-        world.console_command(&format!("tp {name} {x} {FLAT_SURFACE_Y} {z}"));
-        plan.placed.insert(name);
+        if world.teleport_player(&name, Vec3::new(x, FLAT_SURFACE_Y, z)) {
+            plan.placed.insert(name);
+        }
     }
 }
 

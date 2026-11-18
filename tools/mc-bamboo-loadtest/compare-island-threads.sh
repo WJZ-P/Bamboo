@@ -6,6 +6,7 @@
 #   ROUNDS（默认 3）、DURATION（默认 20 秒）、PROFILE_SECS（默认 5）、PORT（默认 25994）。
 #   A_THREADS（默认 0 = 齐步）、B_THREADS（默认 1 = 分离）：两边的 BAMBOO_ISLAND_THREADS。
 #   A/A 对照把两个都设成同一个值。
+#   比的是一个岛时的两种驱动，所以两边都显式关掉多岛（BAMBOO_ISLANDS=0），不随缺省变。
 #
 # 同一个二进制，只换环境变量。每一对里按 A-B-A 顺序各跑一个全新进程，丢掉第一份剖析
 # 报告（搭场景），其余报告取中位数；逐轮报 B 对两次 A 中位数的比值。另外报分离那一遍
@@ -44,7 +45,7 @@ run_one() {
     local spec bots pattern layout seconds
     spec=$("$BIN" describe "$scene") || return 1
     read -r bots pattern layout seconds <<< "$spec"
-    (cd "$dir" && exec env BAMBOO_PROFILE="$PROFILE_SECS" BAMBOO_ISLAND_THREADS="$threads" \
+    (cd "$dir" && exec env BAMBOO_PROFILE="$PROFILE_SECS" BAMBOO_ISLANDS=0 BAMBOO_ISLAND_THREADS="$threads" \
         "$BIN" serve --addr "127.0.0.1:$PORT" --max-players 500 \
         --view-distance 8 --scenario "$scene" > server.log 2>&1) &
     SERVER=$!

@@ -12,8 +12,14 @@ use mc_bamboo_world::{
 use crate::{island_partition::DESIRED_LEVEL, world::tests::Harness};
 
 /// 测试专用：把分区器打开，并跑几刻让状态追上。
+/// 第 8 步只统计的分区器：挂在一个岛的世界上（显式 `islands = false`）。多岛开着时
+/// 分区器是活的，换掉它就和各岛对不上了。
+///
+/// The statistics-only partitioner of step 8, on a one-island world
+/// (`islands = false` explicitly). With multi-island mode on the partitioner
+/// is live and replacing it would no longer match the islands.
 fn with_islands(view_distance: i32, verify: bool) -> Harness {
-    let mut server = Harness::new_loaded(view_distance);
+    let mut server = Harness::new_with_island_threads(view_distance, true, 1);
     server.world.master.host.enable_islands(verify);
     server
 }
@@ -85,8 +91,9 @@ fn the_pump_feeds_the_partitioner_every_tick_without_changing_behaviour() {
         let union: BTreeSet<ChunkPos> = desired(&server).union(&held(&server)).copied().collect();
         assert!(union.iter().all(|&pos| partition.island_of(pos).is_some()));
     }
-    // 开关关着的世界不建表。
-    let plain = Harness::new_loaded(2);
+    // 开关关着（一个岛、没打开统计）的世界不建表。
+    // A one-island world without the statistics switch builds no table.
+    let plain = Harness::new_with_island_threads(2, true, 1);
     assert!(plain.world.master.host.islands().is_none());
 }
 

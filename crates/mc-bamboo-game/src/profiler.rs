@@ -386,12 +386,34 @@ pub(crate) enum Metric {
     IslandTopologyWait,
     /// 多岛：这一刻跨岛搬过去的玩家数。
     IslandCrossings,
+    /// 多岛：要整个世界的命令把全部岛拼成一个的耗时（每次一条样本，计划 4.5）。
+    ///
+    /// Multi-island: joining every island into one for a whole-world command
+    /// (one sample per command, plan 4.5).
+    IslandUnify,
+    /// 多岛：命令做完把拼起来的世界按原样拆回各岛的耗时（每次一条样本）。
+    ///
+    /// Multi-island: splitting the joined world back into its islands after
+    /// the command (one sample per command).
+    IslandDivide,
+    /// 混合驱动：岛派出时全部 tick 线程都忙着，从派出到开跑等了多久（每次一条样本）。
+    /// 这一段不算交接（`island_handoff` 只记线程空着时的唤醒和交回）。
+    ///
+    /// Hybrid drive: how long an island dispatched while every tick thread
+    /// was busy waited to start (one sample each). Not part of
+    /// `island_handoff`, which only covers waking an idle thread and the return.
+    IslandQueueWait,
+    /// 混合驱动：一个岛落后超过 2 秒、丢掉的欠刻数（每次丢一条样本）。
+    ///
+    /// Hybrid drive: ticks an island dropped after falling more than 2
+    /// seconds behind (one sample per drop).
+    IslandDroppedTicks,
     /// 因为落后太多而放弃追赶的次数，只有累计值，没有直方图。
     SkippedCatchUps,
 }
 
 impl Metric {
-    const ALL: [Self; 26] = [
+    const ALL: [Self; 30] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -418,6 +440,10 @@ impl Metric {
         Self::IslandSplit,
         Self::IslandTopologyWait,
         Self::IslandCrossings,
+        Self::IslandUnify,
+        Self::IslandDivide,
+        Self::IslandQueueWait,
+        Self::IslandDroppedTicks,
     ];
 
     fn name(self) -> &'static str {
@@ -448,6 +474,10 @@ impl Metric {
             Self::IslandSplit => "island_split",
             Self::IslandTopologyWait => "island_topology_wait",
             Self::IslandCrossings => "island_crossings",
+            Self::IslandUnify => "island_unify",
+            Self::IslandDivide => "island_divide",
+            Self::IslandQueueWait => "island_queue_wait",
+            Self::IslandDroppedTicks => "island_dropped_ticks",
             Self::SkippedCatchUps => "skipped_catch_ups",
         }
     }
@@ -471,7 +501,7 @@ impl Metric {
             Self::ChunkLatencyUs => "us",
             Self::FlushBytes => "bytes",
             Self::IslandCount => "islands",
-            Self::IslandTopologyWait => "ticks",
+            Self::IslandTopologyWait | Self::IslandDroppedTicks => "ticks",
             Self::IslandCrossings => "players",
             Self::SkippedCatchUps => "times",
             Self::TickTotal
@@ -481,7 +511,10 @@ impl Metric {
             | Self::IslandBusy
             | Self::IslandHandoff
             | Self::IslandMerge
-            | Self::IslandSplit => "ms",
+            | Self::IslandSplit
+            | Self::IslandUnify
+            | Self::IslandDivide
+            | Self::IslandQueueWait => "ms",
         }
     }
 
@@ -496,6 +529,9 @@ impl Metric {
                 | Self::IslandHandoff
                 | Self::IslandMerge
                 | Self::IslandSplit
+                | Self::IslandUnify
+                | Self::IslandDivide
+                | Self::IslandQueueWait
         )
     }
 }
@@ -681,6 +717,17 @@ pub(crate) struct Profiler {
     islands_on: bool,
     /// 岛划分每刻全量对照（`BAMBOO_PROFILE_ISLANDS=2`）。
     islands_verify: bool,
+    /// 混合驱动下每个岛在这一段报告里跑完的刻（主控在岛落座时记，岛不在手里也记得到）。
+    ///
+    /// Under the hybrid drive, the ticks each island finished in this report
+    /// period (recorded by the master as islands are seated, so islands that
+    /// are away still count).
+    island_runs: std::collections::BTreeMap<u32, IslandRuns>,
+    /// 接在报告末尾的几行（混合驱动下主控写的每个岛一行），打完报告清空。
+    ///
+    /// Lines appended to the next report (one per island, written by the
+    /// master under the hybrid drive); cleared once reported.
+    appendix: String,
 }
 
 impl Profiler {
@@ -722,6 +769,8 @@ impl Profiler {
             islands: None,
             islands_on: false,
             islands_verify: false,
+            island_runs: std::collections::BTreeMap::new(),
+            appendix: String::new(),
         }
     }
 }
@@ -730,6 +779,16 @@ impl Default for Profiler {
     fn default() -> Self {
         Self::with_report_interval(None)
     }
+}
+
+/// 一个岛在一段报告里跑完的刻：每刻的耗时和丢掉的刻数。
+///
+/// The ticks one island finished in a report period: the time of each and
+/// the ticks it dropped.
+#[derive(Default)]
+pub(crate) struct IslandRuns {
+    pub(crate) busy: Box<Histogram>,
+    pub(crate) dropped: u64,
 }
 
 /// 取单个直方图时用的键：要么是阶段耗时，要么是别的指标。
@@ -1154,6 +1213,59 @@ impl Profiler {
         self.chunks_this_tick = 0;
     }
 
+    /// 这一刻结束时 [`Self::end_tick`] 会不会打报告。混合驱动下主控先把各岛的样本并进来。
+    ///
+    /// Whether [`Self::end_tick`] will report at the end of this tick. Under
+    /// the hybrid drive the master folds the islands' samples in first.
+    pub(crate) fn report_due(&self) -> bool {
+        self.report_interval
+            .is_some_and(|interval| self.clock.now().duration_since(self.last_report) >= interval)
+    }
+
+    /// 上次报告到现在的时长。
+    ///
+    /// The time since the last report.
+    pub(crate) fn since_report(&self) -> Duration {
+        self.clock.now().saturating_duration_since(self.last_report)
+    }
+
+    /// 混合驱动：岛 `id` 跑完一刻，耗时 `busy`（也记进合计的 `island_busy`）。
+    ///
+    /// Hybrid drive: island `id` finished a tick taking `busy` (also counted
+    /// in the overall `island_busy`).
+    pub(crate) fn record_island_run(&mut self, id: u32, busy: Duration) {
+        self.record_duration(Metric::IslandBusy, busy);
+        self.island_runs
+            .entry(id)
+            .or_default()
+            .busy
+            .record_duration(busy);
+    }
+
+    /// 混合驱动：岛 `id` 落后太多，丢掉 `ticks` 刻（也记进合计的 `island_dropped_ticks`）。
+    ///
+    /// Hybrid drive: island `id` fell too far behind and dropped `ticks`
+    /// (also counted in the overall `island_dropped_ticks`).
+    pub(crate) fn record_island_dropped(&mut self, id: u32, ticks: u64) {
+        self.record(Metric::IslandDroppedTicks, ticks);
+        let runs = self.island_runs.entry(id).or_default();
+        runs.dropped = runs.dropped.saturating_add(ticks);
+    }
+
+    /// 这一段报告里各岛跑完的刻。
+    ///
+    /// The ticks each island finished in this report period.
+    pub(crate) fn island_runs(&self) -> &std::collections::BTreeMap<u32, IslandRuns> {
+        &self.island_runs
+    }
+
+    /// 给下一份报告末尾接一段文字。
+    ///
+    /// Append text to the end of the next report.
+    pub(crate) fn append_to_report(&mut self, text: &str) {
+        self.appendix.push_str(text);
+    }
+
     /// tick 结束：记总耗时，到点就打一份报告并清零。
     pub(crate) fn end_tick(&mut self) {
         let now = self.clock.now();
@@ -1229,8 +1341,9 @@ impl Profiler {
     /// 一份多行报告：阶段按平均耗时降序，之后是总耗时、调度偏差和各计数指标。
     pub(crate) fn report(&self) -> String {
         let mut out = format!(
-            "tick profile: {} ticks, phase times in ms\nphases (by mean):\n",
-            self.ticks
+            "tick profile: {} ticks over {:.2} s, phase times in ms\nphases (by mean):\n",
+            self.ticks,
+            self.since_report().as_secs_f64()
         );
         let mut phases: Vec<(Phase, &Histogram)> = Phase::ALL
             .iter()
@@ -1265,6 +1378,7 @@ impl Profiler {
         if let Some(stats) = &self.islands {
             out.push_str(&stats.borrow().report());
         }
+        out.push_str(&self.appendix);
         if self.chunk_timing_on {
             let timing = self.chunk_timing.borrow();
             // 按区块的三阶段累计耗时（纳秒）。一行一个区块，离线脚本据此算
@@ -1291,9 +1405,12 @@ impl Profiler {
         out
     }
 
-    /// 把另一个 region 的样本并进来，供主控汇总多个 region 的报告。
-    /// 现在只有一个 region，暂未接线；测试覆盖它。
-    #[allow(dead_code)]
+    /// 把另一个 region 的样本并进来：混合驱动下主控打报告前并各岛的，岛合并时吸收方并
+    /// 被吸收方的。
+    ///
+    /// Fold another region's samples in: the master folds every island's in
+    /// before a report under the hybrid drive, and a merge folds the absorbed
+    /// island's into the absorber's.
     pub(crate) fn merge(&mut self, other: &Self) {
         for (histogram, source) in self.phases.iter_mut().zip(&other.phases) {
             histogram.merge(source);
@@ -1342,6 +1459,8 @@ impl Profiler {
         self.skipped_catch_ups = 0;
         self.chunks_this_tick = 0;
         self.ticks = 0;
+        self.island_runs.clear();
+        self.appendix.clear();
         // 清零后不再有「上一刻」可比，第一刻和报告之间的间隔不算样本。
         self.previous_tick_start = None;
     }
