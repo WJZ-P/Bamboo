@@ -1139,8 +1139,23 @@ impl BlockEntities {
     }
 
     /// 按 `map` 换掉每个 ticker 的 ordinal，日程和反查表跟着换。只在 tick 边界用。
+    ///
+    /// tick 之外 `due` 不一定是空的：方块实体阶段之后（收包、实体阶段）新登记或被叫醒的
+    /// ticker 也会排进去，下一刻 `begin_tick` 再按 `awake` 重建。这里照样换号，不要求它空。
+    ///
+    /// Outside a tick `due` may be non-empty: tickers registered or woken
+    /// after the block-entity phase (inbound, entity phase) are pushed there and
+    /// `begin_tick` rebuilds it from `awake`. It is renumbered too.
     fn renumber(&mut self, map: &HashMap<u64, u64>) {
-        debug_assert!(self.due.is_empty() && !self.ticking);
+        debug_assert!(!self.ticking);
+        let mut due: Vec<u64> = self
+            .due
+            .iter()
+            .filter_map(|ordinal| map.get(ordinal).copied())
+            .collect();
+        due.sort_unstable();
+        due.dedup();
+        self.due = due;
         for ticker in self.slots.iter_mut().flatten() {
             ticker.ordinal = map[&ticker.ordinal];
         }
@@ -1966,6 +1981,38 @@ mod tests {
             Some(12),
             "合并后新登记的仍排在最后"
         );
+    }
+
+    /// 拆开以后两边在 tick 之外各登记一个 ticker（还在 `due` 里、没跑过一刻），马上合并：
+    /// ordinal 撞号要重排，`due` 里的号跟着换，不能因为 `due` 非空就拒绝（运行时拆合发生在
+    /// 收包阶段，玩家刚放下的漏斗就是这种状态）。
+    ///
+    /// Both sides register a ticker outside a tick after a split (still in
+    /// `due`, never ticked) and merge at once: the ordinals collide and are
+    /// renumbered, `due` follows, and a non-empty `due` is not refused (a run-time
+    /// merge in the inbound phase sees a freshly placed hopper in this state).
+    #[test]
+    fn island_absorb_renumbers_tickers_registered_outside_a_tick() {
+        let mut table = BlockEntities::default();
+        for (value, &pos) in [A1, B1, A2, B2].iter().enumerate() {
+            table.insert(Dummy::boxed(pos, value as i32));
+        }
+        let _ = ticker_order(&mut table);
+        let wanted: BTreeSet<ChunkPos> = [CHUNK_A].into_iter().collect();
+        let mut island = table.split_off_island(&wanted).unwrap();
+        table.insert(Dummy::boxed(BlockPos::new(23, 64, 4), 10));
+        island.insert(Dummy::boxed(BlockPos::new(4, 64, 4), 11));
+        assert!(!table.due.is_empty() && !island.due.is_empty());
+        table.absorb_island(island);
+        assert!(
+            table
+                .due
+                .iter()
+                .all(|ordinal| table.ordinals.contains_key(ordinal)),
+            "due 里的号都换成了新号"
+        );
+        let order: Vec<i32> = ticker_order(&mut table).iter().map(|row| row.1).collect();
+        assert_eq!(order, [0, 1, 2, 3, 10, 11]);
     }
 
     fn ticker_order(entities: &mut BlockEntities) -> Vec<(BlockPos, i32)> {

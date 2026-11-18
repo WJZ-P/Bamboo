@@ -23,12 +23,12 @@ use std::{
 };
 
 use mc_bamboo_core::{ChunkPos, Vec3};
-use mc_bamboo_protocol::packet::play::GameMode;
 use mc_bamboo_world::director::{HOME_REGION, Owner, RegionId, TicketOp};
 
 use super::{
     island_split_tests::{
-        Scene, fingerprint, furnish_scene, furnish_scene_with_sand, print, rng, set_up, with_stack,
+        Scene, Y, at, fingerprint, furnish_scene, furnish_scene_with_sand, group_of, misplaced,
+        print, region_at, rng, set_up, with_stack,
     },
     tests::{Client, Frame, Harness},
 };
@@ -78,6 +78,59 @@ fn print_islands(scene: &mut Scene) -> (Vec<String>, BTreeSet<i64>) {
     (out, clocks)
 }
 
+/// 每个岛上的每一类东西都属于这个岛拿着的组（第 9 步离线测试的按类核对 `misplaced`，
+/// 用在运行时）：按位置的看位置所在区块属于哪一组，按玩家的看玩家站在哪一组，岛这一层
+/// 的信箱、存盘名单也看位置。指纹不覆盖的类（红石记忆、对端 IP 等）漏搬了也报在这里，
+/// 报出的是类名。
+///
+/// Every class on every island belongs to a group that island holds (step 9's
+/// per-class `misplaced` check, at run time): positioned entries by the
+/// group of their chunk, per-player entries by the group the player stands
+/// in, the island-level mailbox and save lists by position. Classes the
+/// fingerprint does not cover (redstone memory, peer IPs, …) are caught
+/// here, by name.
+fn assert_in_place(scene: &Scene, what: &str) {
+    let world = &scene.server.world;
+    let centers = &scene.centers;
+    let holder: Vec<RegionId> = centers
+        .iter()
+        .map(|&center| {
+            world
+                .islands
+                .island_of_chunk(center)
+                .expect("每组的中心区块都加载着")
+        })
+        .collect();
+    let mut chunks = BTreeSet::new();
+    let mut players = BTreeMap::new();
+    for island in world.islands.iter() {
+        chunks.extend(island.region.chunks.loaded_positions());
+        chunks.extend(island.mailbox.positions());
+        for player in island.region.players.values() {
+            players.insert(player.id, group_of(centers, player.chunk_pos()));
+        }
+    }
+    for island in world.islands.iter() {
+        let mine = |group: usize| holder[group] == island.id;
+        let own_chunks: BTreeSet<ChunkPos> = chunks
+            .iter()
+            .copied()
+            .filter(|&pos| mine(group_of(centers, pos)))
+            .collect();
+        let own_players: BTreeSet<crate::inbound::PlayerId> = players
+            .iter()
+            .filter(|&(_, &group)| mine(group))
+            .map(|(&id, _)| id)
+            .collect();
+        let wrong = misplaced(island, &own_chunks, &own_players, true);
+        assert!(
+            wrong.is_empty(),
+            "{what}：岛 {} 上有不属于它的组的东西：{wrong:?}",
+            island.id
+        );
+    }
+}
+
 /// 对照（一个岛）的按组指纹，去掉全岛共有的那一份。
 fn print_control(scene: &mut Scene) -> Vec<String> {
     let mut out = print(scene, false);
@@ -114,51 +167,132 @@ fn align(a: &mut Scene, b: &mut Scene) {
     }
 }
 
-/// 把全部岛的随机源固定成种子 0（测试脚手架只对家岛这么做）。派生的岛后来合并时留
-/// 吸收方的随机源，值一样，所以合并前后仍是同一条序列。
+/// 把全部岛的方块随机源和音效种子源固定成种子 0（测试脚手架建世界时只对家岛这么做）。
+/// 只在 [`prepare_pair`] 里、两个世界都只剩一个内容相同的岛时调用：那一刻两边的岛是同一个
+/// 岛，此前的差别只来自设计允许的地方（对照的天气从岛的随机源取数，多岛的天气用主控自己的；
+/// 多岛拆出来的岛按起源 section 派生），对齐成同一状态等于从这里开始对照。
 ///
-/// Fix every island's random sources to seed 0 (the harness only does the home
-/// island this way). A merge keeps the absorber's sources, which are identical,
-/// so the sequence is the same before and after.
+/// Fix every island's block random and sound-seed sources to seed 0 (the
+/// harness only does the home island when building a world). Only called from
+/// [`prepare_pair`], when both worlds are down to one island with identical
+/// content: they are the same island at that point and differ only where the
+/// design allows (the control's weather draws from the island source while
+/// the multi-island weather uses the master's own; split-off islands derive
+/// theirs from their origin section), so aligning them is the comparison's start.
 fn fix_island_randoms(scene: &mut Scene) {
+    assert_eq!(
+        scene.server.world.islands.len(),
+        1,
+        "只在一个岛时对齐随机源"
+    );
     for island in scene.server.world.islands.iter_mut() {
         island.region.random = mc_bamboo_blocks::LevelRandom::new(0);
         island.region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(0);
     }
-    // 多岛时天气用主控自己的随机源（计划 3.3 第 4 条）；正式启动它的种子来自时钟，
-    // 对照场景里同样固定成 0，和脚手架对家岛做的一样。
-    //
-    // With several islands the weather uses the master's own random source
-    // (plan 3.3 item 4); its seed comes from the clock on a real start, so
-    // fix it to 0 here too, just as the harness fixes the home island's.
-    scene.server.world.master.weather_random = mc_bamboo_blocks::LevelRandom::new(0);
 }
 
-/// 用旁观者模式摆场景：官方旁观者打开容器不计数、盖子不动也不响，所以「开箱子菜单」
-/// 这一步不从岛的随机源取音高。计划 6.2 第 2 条要求对照场景不取随机数；多岛时每个岛
-/// 的随机源由起源 section 派生，和对照那一个岛的序列本来就不一样，少了这次取数才能
-/// 逐字节比包。摆完恢复原来的模式。
+/// 每个岛的方块随机源和音效种子源现在的状态（含内部种子），按岛编号。
 ///
-/// Furnish as a spectator: vanilla skips the chest-open sound (and opener
-/// count) for spectators, so opening the menus draws no pitch from the
-/// island's random source. Plan 6.2 item 2 needs a scene without random
-/// draws; every island derives its own source from its origin section, which
-/// cannot match the control's single sequence, so this is required for a
-/// byte-for-byte comparison. The original game modes are restored afterwards.
-fn furnish_without_random(scene: &mut Scene, sand_delay: i32) {
-    let mut modes = BTreeMap::new();
-    for island in scene.server.world.islands.iter_mut() {
-        for (id, player) in island.region.players.iter_mut() {
-            modes.insert(*id, player.game_mode);
-            player.game_mode = GameMode::Spectator;
+/// Every island's block random and sound-seed source state (internal seed
+/// included), by island id.
+fn random_states(scene: &Scene) -> BTreeMap<RegionId, String> {
+    scene
+        .server
+        .world
+        .islands
+        .iter()
+        .map(|island| {
+            (
+                island.id,
+                format!(
+                    "{:?} {:?}",
+                    island.region.random, island.region.sound_seed_generator
+                ),
+            )
+        })
+        .collect()
+}
+
+/// 计划 6.2 第 2 条的前提「对照场景不取随机数」：这一刻前后都在的岛，随机源的状态没变
+/// （合并留吸收方的、拆分时原岛留自己的，所以拆合本身不改它）。多岛时各岛的随机源本来就
+/// 和对照那一个岛的不同（计划 3.3「岛的随机源」），取了数的场景不能逐字节比；这里把前提
+/// 变成断言，场景以后改得取了随机数会直接报在这里。
+///
+/// The premise of plan 6.2 item 2, "the scene draws no random numbers", as an
+/// assertion: islands present before and after a tick kept their random
+/// state (a merge keeps the absorber's, a split leaves the original's, so the
+/// structural changes do not touch it). Multi-island sources differ from the
+/// control's by design (plan 3.3), so a scene that draws cannot be compared
+/// byte for byte; a future scene change that draws fails here.
+fn assert_no_draws(
+    before: &BTreeMap<RegionId, String>,
+    after: &BTreeMap<RegionId, String>,
+    what: &str,
+) {
+    for (id, state) in before {
+        if let Some(now) = after.get(id) {
+            assert_eq!(state, now, "{what}：岛 {id} 的随机源在比较窗口里被取过数");
         }
     }
-    furnish_scene_with_sand(scene, sand_delay);
-    for island in scene.server.world.islands.iter_mut() {
-        for (id, player) in island.region.players.iter_mut() {
-            player.game_mode = modes[id];
+}
+
+/// 两个世界的场景准备（严格对照和含新实体对照共用）：多岛那份先把全部岛并成一个，两边
+/// 对齐随机源、摆好同样的机器和菜单（这时两边都是一个岛，摆的过程逐位相同，开箱音效
+/// 取的音高也相同），然后多岛那份马上按组拆回三个岛。拆分发生在摆完、还没跑过一刻的
+/// 时候，每一类都有东西：排着的方块事件、刚登记还没跑过的方块实体、开着的菜单、待发的
+/// 讲台格子、没确认的传送……漏搬哪一类都看得见（改坏确认靠这一点）。
+///
+/// Scene preparation for both comparisons: the multi-island world first
+/// merges every island into one, both sides align their random sources and
+/// get the same machines and menus (one island each, so furnishing is
+/// identical down to the chest sound's pitch), then the multi-island world
+/// splits back into one island per group at once. The split happens before
+/// any tick, when every class holds something (queued block events, block
+/// entities registered but never ticked, open menus, pending lectern slots,
+/// unconfirmed teleports), so leaving any class behind is visible; the
+/// break-it check relies on that.
+fn prepare_pair(multi: &mut Scene, control: &mut Scene, sand_delay: i32) {
+    let world = &mut multi.server.world;
+    let partition = world.master.host.partition_mut().expect("多岛开着");
+    let ids = partition.island_ids();
+    for &id in &ids[1..] {
+        assert!(partition.force_merge(ids[0], id), "并进岛 {}", ids[0]);
+    }
+    world.master.host.take_partition_ops();
+    world.settle_islands();
+    assert_eq!(world.islands.len(), 1, "全部并成了一个岛");
+    fix_island_randoms(multi);
+    fix_island_randoms(control);
+    furnish_scene_with_sand(multi, sand_delay);
+    furnish_scene_with_sand(control, sand_delay);
+    // 平时在 tick 边界上是空的两类（还没广播的光照和方块变化），和第 9 步的离线核对一样
+    // 每组各放一条，两边放的相同，下一刻照常广播。
+    // The two classes that are normally empty at a tick boundary (unsent light
+    // and block changes) get one entry per group, as in step 9's offline
+    // check, identically on both sides; the next tick broadcasts them.
+    for scene in [&mut *multi, &mut *control] {
+        for &center in &scene.centers.clone() {
+            let region = region_at(&mut scene.server.world, center);
+            region
+                .light_changes
+                .entry(center)
+                .or_insert(mc_bamboo_world::light::LightChanges { sky: 1, block: 0 });
+            region.block_changes.changed.push(at(center, 0, Y, 0));
         }
     }
+    let world = &mut multi.server.world;
+    let partition = world.master.host.partition_mut().expect("多岛开着");
+    let home = partition.island_ids()[0];
+    let made = partition.force_split(home);
+    assert_eq!(made.len() + 1, multi.centers.len(), "按组拆开");
+    world.master.host.take_partition_ops();
+    world.settle_islands();
+    assert_eq!(
+        multi.server.world.islands.len(),
+        multi.centers.len(),
+        "摆完马上拆回每组一个岛"
+    );
+    assert_in_place(multi, "摆完拆开");
 }
 
 /// 让分区器当场做一次拆合（不等迟滞），再照做：有两个以上的岛时随机并两个，不然拆开
@@ -209,41 +343,25 @@ fn run_against_control(seed: u64, ticks: u64, skip: Option<IslandPart>) -> (usiz
         multi.centers.len(),
         "seed {seed}：三组各自一个岛"
     );
-    // 摆场景时打开箱子菜单会发开箱音效，音高取自所在岛的 `Level.random`；每个多岛的
-    // 随机源由起源 section 派生，和对照那一个岛的序列不一样。计划 6.2 第 2 条要求对照
-    // 场景不取随机数，所以两边都用旁观者模式摆场景（官方不响这声），并把全部随机源固定
-    // 成种子 0（和脚手架建世界时做的一样）：之后的每刻仍逐字节比全部包，不丢包、不跳过
-    // 任何一刻。拆合时吸收方留自己的随机源，值一样。
-    //
-    // Furnishing opens chest menus whose pitch is drawn from that island's
-    // `Level.random`; every multi island derives its own from its origin
-    // section, unlike the control's single sequence. Plan 6.2 item 2 needs a
-    // scene without random draws, so furnish both sides in spectator mode
-    // (vanilla skips that sound) and fix every source to seed 0, as the harness
-    // does when building a world. Every later tick still compares all bytes,
-    // dropping no frame and skipping no tick. A merge keeps the absorber's
-    // sources, which are identical.
-    fix_island_randoms(&mut multi);
-    fix_island_randoms(&mut control);
     // 悬空沙子的计划刻推到比较窗口之后：那一刻它会生成新的下落方块实体，而实体网络 ID
     // 来自全进程共享的原子分配器。多岛按岛编号轮流驱动，同一批新实体领号的顺序和单岛
-    // 不同，包里的 ID 就不可能逐字节相同；计划 6.2 第 1 条明确「实体网络 ID 不进指纹」，
-    // 6.2 第 2 条的对照场景也不取随机数。沙子方块和这条计划刻仍在场景里参与拆合与指纹，
-    // 只是不在比较窗口里到期。含新生成实体的情形由另一条测试按自己的口径覆盖。
+    // 不同，包里的 ID 就不可能逐字节相同；计划 6.2 第 1 条明确「实体网络 ID 不进指纹」。
+    // 沙子方块和这条计划刻仍在场景里参与拆合与指纹，只是不在比较窗口里到期。含新生成
+    // 实体的情形由另一条测试按自己的口径覆盖。
     //
     // Push the sand's scheduled tick past the comparison window: it spawns a
     // new falling-block entity, and entity network ids come from the shared
     // process-wide allocator. Islands are driven in id order, so those ids are
     // taken in a different order than on one island and the id bytes cannot
     // match; plan 6.2 item 1 explicitly leaves network ids out of the
-    // fingerprint, and item 2 asks for a scene without random draws. The sand
-    // block and its tick still take part in splits and in the print, they just
-    // do not come due during the window. Fresh entities are covered by a
-    // separate test with its own comparison rules.
+    // fingerprint. The sand block and its tick still take part in splits and
+    // in the print, they just do not come due during the window. Fresh
+    // entities are covered by a separate test with its own comparison rules.
     let late_sand = i32::try_from(ticks + 1).expect("刻数放得下 i32");
-    furnish_without_random(&mut multi, late_sand);
-    furnish_without_random(&mut control, late_sand);
+    // 拆分时就要漏搬（改坏确认），所以在摆场景之前设好。
+    // Set before preparing: the preparation's split must already leave it behind.
     multi.server.world.master.split_skip = skip;
+    prepare_pair(&mut multi, &mut control, late_sand);
     let mut next = rng(seed ^ 0x7E57);
     let trips: BTreeSet<u64> = (0..6).map(|_| next() % ticks).collect();
     let (mut merges, mut splits) = (0, 0);
@@ -255,8 +373,13 @@ fn run_against_control(seed: u64, ticks: u64, skip: Option<IslandPart>) -> (usiz
                 None => {}
             }
         }
+        let draws = (random_states(&multi), random_states(&control));
         multi.server.tick();
         control.server.tick();
+        let what = format!("seed {seed} tick {tick}");
+        assert_no_draws(&draws.0, &random_states(&multi), &what);
+        assert_no_draws(&draws.1, &random_states(&control), &what);
+        assert_in_place(&multi, &what);
         let (groups, clocks) = print_islands(&mut multi);
         let expected = print_control(&mut control);
         for (group, (left, right)) in groups.iter().zip(&expected).enumerate() {
@@ -327,6 +450,11 @@ fn runtime_splits_and_merges_keep_every_group_as_on_one_island() {
 #[test]
 fn leaving_any_class_behind_on_a_runtime_split_is_caught() {
     with_stack(|| {
+        // 同样的参数、不漏搬时必须通过：下面抓到的失败只能来自漏搬的那一类。
+        // The same run without a skip must pass, so every failure below comes
+        // from the class left behind.
+        let (_, splits) = run_against_control(2, 24, None);
+        assert!(splits > 0, "比较窗口里也有拆分");
         for part in IslandPart::ALL {
             let caught = std::panic::catch_unwind(|| run_against_control(2, 24, Some(part)));
             assert!(caught.is_err(), "运行时拆岛漏搬「{part:?}」没有被抓到");
@@ -365,6 +493,9 @@ fn fresh_state(scene: &mut Scene) -> (BTreeSet<i32>, Vec<Vec<(i32, usize)>>) {
     (all, frames)
 }
 
+/// 含新实体对照里一定会强制拆合的那一刻（沙子在第 1 刻变成实体之后）。
+const FRESH_TRIP: u64 = 3;
+
 /// 计划 6.2 第 1、2 条的补集：比较窗口里真的会新生成实体（悬空沙子落地变成下落方块），
 /// 拆合也照旧随机发生。实体网络 ID 来自全进程共享的原子分配器，多岛按岛编号轮流驱动时
 /// 领号的先后和单岛不同，所以这里（且只在这里）按三条口径比：按组内容指纹和岛时钟必须
@@ -401,34 +532,22 @@ fn run_fresh_entities(
         multi.centers.len(),
         "seed {seed}：三组各自一个岛"
     );
-    // 和逐字节对照同一套场景准备：不取随机数的机器、旁观者摆菜单、随机源固定成 0。
-    // 沙子按原来的 delay = 2 落地，比较窗口里因此会有新实体。
+    // 和逐字节对照同一套场景准备（[`prepare_pair`]）。沙子按原来的 delay = 2 落地，比较
+    // 窗口里因此会有新实体。
     //
-    // The same scene preparation as the byte-for-byte comparison: random-free
-    // machines, spectator-mode furnishing, sources fixed to 0. The sand keeps
-    // its original delay of 2, so fresh entities appear inside the window.
-    fix_island_randoms(&mut multi);
-    fix_island_randoms(&mut control);
-    furnish_without_random(&mut multi, 2);
-    furnish_without_random(&mut control, 2);
-    // 摆场景直接登记了方块实体，还没跑过一刻的话方块实体表不在 tick 边界（`due` 非空），
-    // 这时拆合会撞上「只能拆停放着的岛」的前提。两边先各跑一刻、丢掉这一刻的包：之后
-    // 是真正的 tick 边界，而沙子的 delay = 2 还没到期，新实体仍在比较窗口里生成。
-    //
-    // Furnishing registers block entities directly, so before any tick the
-    // block-entity table is not yet at a tick boundary (`due` is non-empty)
-    // and a split or merge would violate its precondition. Run one settling
-    // tick on both worlds and drop its frames: from here it is a real tick
-    // boundary, and the sand's delay of 2 has not come due yet, so the fresh
-    // entities still spawn inside the comparison window.
-    multi.server.tick();
-    control.server.tick();
-    for (_, client) in multi.clients.iter().chain(&control.clients) {
-        let _ = client.take_frames();
-    }
+    // The same preparation as the byte-for-byte comparison ([`prepare_pair`]).
+    // The sand keeps its original delay of 2, so fresh entities appear inside
+    // the window.
+    prepare_pair(&mut multi, &mut control, 2);
     multi.server.world.master.split_break = break_kind;
     let mut next = rng(seed ^ 0x7E57);
-    let trips: BTreeSet<u64> = (0..6).map(|_| next() % ticks).collect();
+    let mut trips: BTreeSet<u64> = (0..6).map(|_| next() % ticks).collect();
+    // 至少一次拆合落在沙子变成实体之后（delay = 2：第 1 刻生成），新实体真的经历拆合，
+    // 改坏确认也一定有东西可弄坏。
+    // At least one structural change after the sand became an entity (delay 2:
+    // spawned on tick 1), so fresh entities really go through one and the
+    // break-it check always has something to corrupt.
+    trips.insert(FRESH_TRIP);
     let (mut merges, mut splits) = (0, 0);
     let mut seen_fresh = false;
     let mut last_peak = multi
@@ -449,8 +568,13 @@ fn run_fresh_entities(
                 None => {}
             }
         }
+        let draws = (random_states(&multi), random_states(&control));
         multi.server.tick();
         control.server.tick();
+        let what = format!("seed {seed} tick {tick}");
+        assert_no_draws(&draws.0, &random_states(&multi), &what);
+        assert_no_draws(&draws.1, &random_states(&control), &what);
+        assert_in_place(&multi, &what);
         let (groups, clocks) = print_islands(&mut multi);
         let expected = print_control(&mut control);
         for (group, (left, right)) in groups.iter().zip(&expected).enumerate() {
@@ -531,6 +655,9 @@ fn fresh_entities_survive_runtime_splits_and_merges() {
 fn losing_a_fresh_entity_or_its_pairing_is_caught() {
     use super::island_runtime::FreshEntityBreak;
     with_stack(|| {
+        // 同样的参数、不弄坏时必须通过：下面抓到的失败只能来自故意弄坏的那一处。
+        // The same run without a break must pass, so failures below come from it.
+        run_fresh_entities(2, 16, None);
         for kind in [FreshEntityBreak::LoseEntity, FreshEntityBreak::LoseTracking] {
             let caught = std::panic::catch_unwind(|| run_fresh_entities(2, 16, Some(kind)));
             assert!(caught.is_err(), "拆合后弄坏「{kind:?}」没有被抓到");
