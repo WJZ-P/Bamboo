@@ -11,16 +11,13 @@
 
 use mc_bamboo_blocks::entity::{JavaRandom, mob::DamageSource};
 use mc_bamboo_core::{Hand, Vec3};
+use mc_bamboo_data::sounds;
 use mc_bamboo_protocol::{
     frame::packet_body,
-    packet::play::{DamageEvent, EntityEvent, HurtAnimation, SetHealth},
+    packet::play::{DamageEvent, HurtAnimation, PlayerCombatEnter, SetHealth, Sound},
 };
 
 use crate::{inbound::PlayerId, player::Player, region::Region};
-
-/// `LivingEntity.ENTITY_EVENT_HURT`：官方 `hurtServer` 之后由
-/// `markHurt` 触发，发给正在跟踪这名玩家的人。
-const ENTITY_EVENT_HURT: u8 = 2;
 
 /// 官方 `ServerPlayer.doTick` 里 `set_health` 的上次值和三个判据。
 /// 血量、饥饿或饱和度是否为 0 变了，才补发一包。
@@ -118,15 +115,26 @@ pub(crate) fn hurt_player(
         )
     };
     if outcome.full_hit {
+        // 官方 `Player.actuallyHurt` 在吸收之后 `amount == 0` 就提前 return：
+        // 没有 `CombatTracker.recordDamage`，也没有饥饿消耗。
+        // 进入战斗包只在那条路径里发；伤害事件、音效和击退由外层骨架发。
+        if outcome.damage > 0.0 {
+            send_player_combat_enter(region, id, &source);
+        }
         broadcast_damage_event(region, id, &source);
-    }
-    if outcome.full_hit && !source.kind.no_impact() {
-        broadcast_hurt_event(region, id);
+        play_hurt_sound(region, id, &source, position);
     }
     if outcome.knockback {
         let player = region.players.get_mut(&id).expect("玩家刚才还在");
         knockback(player, &source, position, random);
-        broadcast_hurt_animation(region, id, hurt_yaw);
+        // `ServerPlayer.indicateDamage` 只发给玩家自己。
+        region.links.send(
+            id,
+            &HurtAnimation {
+                entity_id: id.0,
+                yaw: hurt_yaw,
+            },
+        );
     }
     let player = region.players.get_mut(&id).expect("玩家刚才还在");
     if sync != player.health_sync {
@@ -151,33 +159,76 @@ fn broadcast_damage_event(region: &mut Region, id: PlayerId, source: &DamageSour
         damage_type,
         source_cause: source.attacker,
         source_direct: source.direct.or(source.attacker),
-        position: source.position,
+        // 官方 `ClientboundDamageEventPacket` 读 `sourcePositionRaw()`：
+        // 只有 `at <location>` 显式给的位置才发，攻击者位置不写进包里。
+        position: source.raw_position,
     }));
     send_to_tracking_and_self(region, id, &packet);
 }
 
-/// `LivingEntity.markHurt`：受伤实体事件发给跟踪者（含自己）。
-fn broadcast_hurt_event(region: &mut Region, id: PlayerId) {
-    let event = frame_from_body(&packet_body(&EntityEvent {
-        entity_id: id.0,
-        event: ENTITY_EVENT_HURT,
-    }));
-    send_to_tracking_and_self(region, id, &event);
+/// `CombatTracker.recordDamage`：造成者是非玩家生物时，`ServerPlayer.onEnterCombat`
+/// 给玩家自己发一个没有包体的 `player_combat_enter`。
+fn send_player_combat_enter(region: &mut Region, id: PlayerId, source: &DamageSource) {
+    if source.attacker.is_some() && region.players.get(&id).is_some_and(|p| !p.in_combat) {
+        if let Some(player) = region.players.get_mut(&id) {
+            player.in_combat = true;
+        }
+        region.links.send(id, &PlayerCombatEnter);
+    }
 }
 
-/// `ServerPlayer.indicateDamage`：`hurt_animation` 发给跟踪者（含自己）。
-fn broadcast_hurt_animation(region: &mut Region, id: PlayerId, hurt_yaw: f32) {
-    let animation = frame_from_body(&packet_body(&HurtAnimation {
-        entity_id: id.0,
-        yaw: hurt_yaw,
-    }));
-    send_to_tracking_and_self(region, id, &animation);
+/// `LivingEntity.playHurtSound`：官方 `Level.playSound` 取一次世界随机源当种子，
+/// 广播给范围内除自己以外的玩家。音效由 `DamageType.effects` 决定。
+fn play_hurt_sound(region: &mut Region, id: PlayerId, source: &DamageSource, position: Vec3) {
+    let name = match source.kind {
+        mc_bamboo_blocks::entity::mob::DamageKind::Drown => "minecraft:entity.player.hurt_drown",
+        mc_bamboo_blocks::entity::mob::DamageKind::Freeze => "minecraft:entity.player.hurt_freeze",
+        mc_bamboo_blocks::entity::mob::DamageKind::OnFire
+        | mc_bamboo_blocks::entity::mob::DamageKind::InFire
+        | mc_bamboo_blocks::entity::mob::DamageKind::Lava
+        | mc_bamboo_blocks::entity::mob::DamageKind::HotFloor => {
+            "minecraft:entity.player.hurt_on_fire"
+        }
+        mc_bamboo_blocks::entity::mob::DamageKind::SweetBerryBush => {
+            "minecraft:entity.player.hurt_sweet_berry_bush"
+        }
+        _ => "minecraft:entity.player.hurt",
+    };
+    let seed = region.sound_seed_generator.source().next_long();
+    let sound = Sound {
+        sound: i32::from(sounds::sound_event(name)),
+        inline: None,
+        source: sounds::PLAYERS,
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        volume: 1.0,
+        pitch: 1.0,
+        seed,
+    };
+    crate::interaction::send_sound(region, Some(id), &sound);
+    // `LivingEntity.playSecondaryHurtSound`：`thorns` 类型再多一声。
+    if source.kind == mc_bamboo_blocks::entity::mob::DamageKind::Thorns {
+        let seed = region.sound_seed_generator.source().next_long();
+        let secondary = Sound {
+            sound: i32::from(sounds::sound_event("minecraft:enchant.thorns.hit")),
+            inline: None,
+            source: sounds::PLAYERS,
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            volume: 1.0,
+            pitch: 1.0,
+            seed,
+        };
+        crate::interaction::send_sound(region, Some(id), &secondary);
+    }
 }
 
 /// 把已经编码好的「ID + 包体」加上帧长头。
 fn frame_from_body(body: &[u8]) -> Vec<u8> {
-    let header = mc_bamboo_protocol::codec::encode_varint(body.len() as i32);
     let mut frames = Vec::with_capacity(body.len() + 3);
+    let header = mc_bamboo_protocol::codec::encode_varint(body.len() as i32);
     frames.extend_from_slice(&header.0[..header.1]);
     frames.extend_from_slice(body);
     frames
@@ -223,14 +274,15 @@ fn knockback(
     if dx * dx + dz * dz < 1.0e-5 {
         return;
     }
-    let strength = 0.4_f64;
+    // 官方 `dealDefaultKnockback` 传的是 float 0.4f，转成 double 后是 0.4000000059604645。
+    let strength = f64::from(0.4_f32);
     let length = (dx * dx + dz * dz).sqrt();
     let push_x = dx / length * strength;
     let push_z = dz / length * strength;
     let delta = player.motion.delta;
     // `Math.min(0.4, dy/2 + strength)` 只在着地时用。
     let dy = if player.on_ground {
-        (0.4_f64).min(delta.y / 2.0 + strength)
+        f64::from(0.4_f32).min(delta.y / 2.0 + strength)
     } else {
         delta.y
     };
@@ -283,7 +335,14 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
         ok
     };
     if ok {
-        // 挥手包：官方打中实体时给观察者发主手挥手。
+        // 官方 `Player.attack` 打中之后 `causeFoodExhaustion(0.1f)`，
+        // 挥手包由 `attackVisualEffects` 发给观察者。
+        if let Some(player) = region.players.get_mut(&id) {
+            let food = &mut player.health.food;
+            food.exhaustion =
+                (food.exhaustion + 0.1).min(mc_bamboo_blocks::entity::mob::damage::MAX_EXHAUSTION);
+            player.health_sync = HealthSync::of(player);
+        }
         crate::entity_sync::broadcast_swing(region, id, Hand::Main);
     }
 }
@@ -319,7 +378,7 @@ mod tests {
         let source = DamageSource::environment(DamageKind::MobAttack)
             .with_position(Vec3::new(2.0, 0.0, 0.0));
         knockback(&mut player, &source, Vec3::default(), &mut None);
-        assert_eq!(player.motion.delta.x, -0.4);
+        assert_eq!(player.motion.delta.x, -f64::from(0.4_f32));
         assert_eq!(player.motion.delta.z, 0.0);
     }
 }

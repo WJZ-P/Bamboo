@@ -27,8 +27,12 @@ pub type DifficultyId = i32;
 
 /// 官方 `PLAYER_HEALTH` / `LivingEntity.MAX_HEALTH` 的缺省上限。
 pub const MAX_HEALTH: f32 = 20.0;
-/// 官方 `LivingEntity.MAX_ABSORPTION` 的缺省上限。
-pub const MAX_ABSORPTION: f32 = 20.0;
+/// 官方 `Attributes.MAX_ABSORPTION` 的基础值是 0；没有状态效果时吸收血量恒为 0。
+/// 存档里读回的值也夹到这个上限，见 `LivingEntity.readAdditionalSaveData`。
+///
+/// Vanilla `Attributes.MAX_ABSORPTION` starts at 0, so without effects the
+/// absorption amount is always zero.
+pub const MAX_ABSORPTION: f32 = 0.0;
 /// 官方 `FoodData.addExhaustion` 的上限。
 pub const MAX_EXHAUSTION: f32 = 40.0;
 /// `hurtServer` 完整受击后的伤害冷却，`LivingEntity.hurtServer`。
@@ -399,5 +403,32 @@ mod tests {
             3.0
         );
         assert_eq!(args(1.0, 0.0, DamageKind::PlayerAttack), None);
+    }
+}
+
+#[cfg(test)]
+mod debug_armor {
+    use super::*;
+    use mc_bamboo_data::items;
+
+    #[test]
+    fn iron_armor_defaults_sum_to_fifteen() {
+        let empty = ItemStack::empty();
+        let stacks: [&ItemStack; 6] = [
+            &empty,
+            &empty,
+            &ItemStack::new(items::IRON_BOOTS, 1),
+            &ItemStack::new(items::IRON_LEGGINGS, 1),
+            &ItemStack::new(items::IRON_CHESTPLATE, 1),
+            &ItemStack::new(items::IRON_HELMET, 1),
+        ];
+        let refs: Vec<&ItemStack> = stacks.to_vec();
+        let array: [&ItemStack; 6] = [refs[0], refs[1], refs[2], refs[3], refs[4], refs[5]];
+        assert_eq!(
+            armor_values(&array).armor,
+            15.0,
+            "{:?}",
+            armor_values(&array)
+        );
     }
 }

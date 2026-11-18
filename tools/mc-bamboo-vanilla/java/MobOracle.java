@@ -53,6 +53,10 @@ import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
+import net.minecraft.server.network.ServerCommonPacketListenerImpl;
+import net.minecraft.network.Connection;
+import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
@@ -260,6 +264,20 @@ public final class MobOracle {
         int fireTicks;
         /** 每项是（刻、牛下标、玩家下标、主手物品 ID、创造模式 1/0）。 */
         final List<int[]> interactions = new ArrayList<>();
+        /** 玩家受伤场景：`getDifficulty()` 的值，缺省 NORMAL。 */
+        int difficulty = 2;
+        /** 玩家受伤场景：逐刻的动作，见 `PlayerAction`。 */
+        final List<PlayerAction> playerActions = new ArrayList<>();
+        /** 玩家受伤场景：起始装备（四件盔甲 + 主手），按物品 ID。 */
+        final List<int[]> playerEquipment = new ArrayList<>();
+        /** 玩家受伤场景：护甲附魔等级（保护附魔，四件盔甲各一个）。 */
+        final List<int[]> playerEnchants = new ArrayList<>();
+        /** 玩家受伤场景：起步血量、吸收和饥饿消耗。 */
+        float playerHealth = 20.0F;
+        float playerAbsorption = 0.0F;
+        float playerExhaustion = 0.0F;
+        /** 玩家受伤场景：逐刻比玩家自己的包字节。 */
+        boolean playerPackets;
 
         Scene(String name) {
             this.name = name;
@@ -346,6 +364,64 @@ public final class MobOracle {
         Scene interact(int tick, int cow, int player, int item, int creative) {
             interactions.add(new int[] {tick, cow, player, item, creative});
             return this;
+        }
+
+        Scene difficulty(int id) {
+            difficulty = id;
+            return this;
+        }
+
+        Scene playerPackets() {
+            playerPackets = true;
+            return this;
+        }
+
+        Scene playerHealth(float health, float absorption, float exhaustion) {
+            playerHealth = health;
+            playerAbsorption = absorption;
+            playerExhaustion = exhaustion;
+            return this;
+        }
+
+        /** 一名玩家的装备：靴子、护腿、胸甲、头盔、主手，以及四件盔甲的保护等级。 */
+        Scene equipment(int[] items, int[] protection) {
+            playerEquipment.add(items);
+            playerEnchants.add(protection);
+            return this;
+        }
+
+        /** 打玩家：`kind` 是 damage_type 的名字，`amount` 是伤害量，`at` 是来源位置。 */
+        Scene hurt(int tick, String kind, float amount, double[] at) {
+            playerActions.add(new PlayerAction(tick, 0, kind, amount, at, false));
+            return this;
+        }
+
+        /** 玩家左键打一头牛。 */
+        Scene attack(int tick, int cow) {
+            playerActions.add(new PlayerAction(tick, 1, null, 0.0F, null, false));
+            playerActions.get(playerActions.size() - 1).cow = cow;
+            return this;
+        }
+    }
+
+    /** 玩家受伤场景的一个动作：打玩家或者左键打牛。 */
+    static final class PlayerAction {
+        final int tick;
+        /** 0 打玩家，1 左键打牛。 */
+        final int action;
+        final String kind;
+        final float amount;
+        final double[] at;
+        final boolean creative;
+        int cow;
+
+        PlayerAction(int tick, int action, String kind, float amount, double[] at, boolean creative) {
+            this.tick = tick;
+            this.action = action;
+            this.kind = kind;
+            this.amount = amount;
+            this.at = at;
+            this.creative = creative;
         }
     }
 
@@ -748,6 +824,76 @@ public final class MobOracle {
                 creativeMilk.interact(2, 0, 0, BuiltInRegistries.ITEM.getId(Items.BUCKET), 1);
                 scenes.add(creativeMilk);
             }
+            // ---- 玩家受伤：`player_hurt_*` ----
+            // 四档难度 × 无甲 / 铁甲 / 保护 IV，每个场景三次伤害看冷却和击退。
+            // 总伤害有意低于 20，血量归零的死亡 / 重生流程留到 1b。
+            for (int difficulty = 0; difficulty < 4; difficulty++) {
+                for (String armor : new String[] {"none", "iron", "protection"}) {
+                    Scene hurt = new Scene("player_hurt_" + difficulty + "_" + armor)
+                            .ticks(30).difficulty(difficulty).playerPackets().packets();
+                    ground(hurt, 4);
+                    hurt.player(0.5, 64.0, 0.5, Items.AIR);
+                    if (!armor.equals("none")) {
+                        int[] items = {BuiltInRegistries.ITEM.getId(Items.IRON_BOOTS),
+                                BuiltInRegistries.ITEM.getId(Items.IRON_LEGGINGS),
+                                BuiltInRegistries.ITEM.getId(Items.IRON_CHESTPLATE),
+                                BuiltInRegistries.ITEM.getId(Items.IRON_HELMET),
+                                BuiltInRegistries.ITEM.getId(Items.AIR)};
+                        int[] protection = armor.equals("protection")
+                                ? new int[] {4, 4, 4, 4} : new int[] {0, 0, 0, 0};
+                        hurt.equipment(items, protection);
+                    } else {
+                        hurt.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                    }
+                    hurt.hurt(1, "minecraft:mob_attack", 3.0F, new double[] {3.0, 64.0, 0.5});
+                    hurt.hurt(2, "minecraft:mob_attack", 2.0F, new double[] {3.0, 64.0, 0.5});
+                    hurt.hurt(15, "minecraft:mob_attack", 4.0F, new double[] {3.0, 64.0, 0.5});
+                    scenes.add(hurt);
+                }
+            }
+            // `/damage` 的每种伤害类型各一个场景，单独打一次，避免冷却互相挡住。
+            for (String kind : new String[] {"generic", "player_attack", "mob_attack",
+                    "mob_attack_no_aggro", "magic", "on_fire", "in_fire", "lava", "hot_floor",
+                    "cactus", "fall", "freeze", "starve", "arrow", "thorns", "explosion",
+                    "cramming", "drown", "in_wall", "sweet_berry_bush", "out_of_world"}) {
+                Scene one = new Scene("player_hurt_type_" + kind).ticks(20)
+                        .difficulty(2).playerPackets().packets();
+                ground(one, 4);
+                one.player(0.5, 64.0, 0.5, Items.AIR);
+                one.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                one.hurt(1, "minecraft:" + kind, 5.0F, null);
+                scenes.add(one);
+            }
+            {
+                Scene absorption = new Scene("player_hurt_absorption").ticks(30)
+                        .playerHealth(20.0F, 6.0F, 2.5F).playerPackets().packets();
+                ground(absorption, 4);
+                absorption.player(0.5, 64.0, 0.5, Items.AIR);
+                absorption.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                absorption.hurt(1, "minecraft:mob_attack", 3.0F, null);
+                absorption.hurt(2, "minecraft:mob_attack", 5.0F, null);
+                scenes.add(absorption);
+            }
+            {
+                Scene knockback = new Scene("player_hurt_knockback").ticks(30)
+                        .playerPackets().packets();
+                ground(knockback, 4);
+                knockback.player(0.5, 64.0, 0.5, Items.AIR);
+                knockback.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                knockback.hurt(1, "minecraft:player_attack", 3.0F, new double[] {2.5, 64.0, 0.5});
+                scenes.add(knockback);
+            }
+            {
+                Scene cow = new Scene("player_hurt_attack_cow").ticks(30)
+                        .playerPackets().packets();
+                ground(cow, 4);
+                cow.player(0.5, 64.0, 0.5, Items.DIAMOND_SWORD);
+                cow.cow(2.5, 64.0, 0.5, 0.0F, 91L);
+                cow.equipment(new int[] {0, 0, 0, 0,
+                        BuiltInRegistries.ITEM.getId(Items.DIAMOND_SWORD)}, new int[] {0, 0, 0, 0});
+                cow.attack(1, 0);
+                scenes.add(cow);
+            }
             return scenes;
         }
     }
@@ -772,12 +918,31 @@ public final class MobOracle {
         level.blocks.putAll(scene.blocks);
         level.dropUuids = scene.drops;
         level.nextId = FIRST_ID;
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.values()[scene.difficulty];
         List<ServerPlayer> players = new ArrayList<>();
+        /** 玩家受伤场景：逐刻状态和这名玩家自己收到的包。 */
+        List<List<String>> playerPackets = scene.playerPackets ? new ArrayList<>() : null;
+        List<List<String>> playerSteps = scene.playerPackets ? new ArrayList<>() : null;
+        List<Bytes> playerSinks = scene.playerPackets ? new ArrayList<>() : null;
+        if (scene.playerPackets) {
+            for (int tick = 0; tick <= scene.ticks; tick++) {
+                playerPackets.add(new ArrayList<>());
+                playerSteps.add(new ArrayList<>());
+            }
+        }
         for (int i = 0; i < scene.players.size(); i++) {
             double[] at = scene.players.get(i);
             GameProfile profile = new GameProfile(new UUID(1L, 2L + i), "Oracle" + i);
             ServerPlayer player = new ServerPlayer(official.server, level, profile, ClientInformation.createDefault());
             player.setPos(at[0], at[1], at[2]);
+            // 官方 `ServerPlayer` 的实体随机源不带种子；对拍里按玩家 ID 固定，
+            // 朝向也固定成 0，让击退的兜底随机数可比。
+            setRandom(player, 0x0DDB1A5E5BAD5EEDL + i);
+            // 官方构造函数用实体随机源给朝向取随机数；对拍里固定成 0，
+            // 这样 `indicateDamage` 的 yaw 只由伤害方向决定。
+            player.setYRot(0.0F);
+            player.setYHeadRot(0.0F);
+            player.setYBodyRot(0.0F);
             ItemStack held = new ItemStack(scene.playerItems.get(i));
             int looting = scene.lootingLevels.get(i);
             if (looting > 0) {
@@ -785,6 +950,61 @@ public final class MobOracle {
                 held.enchant(enchantments.getOrThrow(net.minecraft.world.item.enchantment.Enchantments.LOOTING), looting);
             }
             player.setItemInHand(InteractionHand.MAIN_HAND, held);
+            if (i < scene.playerEquipment.size()) {
+                int[] items = scene.playerEquipment.get(i);
+                int[] protection = scene.playerEnchants.get(i);
+                var enchantments = official.registries.lookupOrThrow(Registries.ENCHANTMENT);
+                var protectionHolder = enchantments.getOrThrow(
+                        net.minecraft.world.item.enchantment.Enchantments.PROTECTION);
+                net.minecraft.world.entity.EquipmentSlot[] armorSlots = {
+                        net.minecraft.world.entity.EquipmentSlot.FEET,
+                        net.minecraft.world.entity.EquipmentSlot.LEGS,
+                        net.minecraft.world.entity.EquipmentSlot.CHEST,
+                        net.minecraft.world.entity.EquipmentSlot.HEAD};
+                for (int slot = 0; slot < 4; slot++) {
+                    ItemStack armor = new ItemStack(Item.byId(items[slot]));
+                    if (protection[slot] > 0) {
+                        armor.enchant(protectionHolder, protection[slot]);
+                    }
+                    player.setItemSlot(armorSlots[slot], armor);
+                }
+                if (items[4] != 0) {
+                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Item.byId(items[4])));
+                }
+            }
+            if (scene.playerPackets) {
+                // 只发给玩家自己的包（`set_health` / `hurt_animation`）走这里。
+                // 观察者那份走 `ChunkMap.sendToTrackingPlayersAndSelf`，和牛的同步包同一条路。
+                Bytes sink = new Bytes(official.registries);
+                playerSinks.add(sink);
+                ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+                put(ServerGamePacketListenerImpl.class, connection, "player", player);
+                put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                        connection, "server", official.server);
+                put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                        connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+                ((RecordingListener) connection).bytes = sink;
+                put(ServerPlayer.class, player, "connection", connection);
+            }
+            // 官方在 `Player.tick` 里从装备刷新属性；这里直接调那一段的等价入口。
+            // `setItemSlot` 之后 armor 属性还没同步，必须刷新一次减伤才生效。
+            // 官方在 `LivingEntity.baseTick` 里 `detectEquipmentUpdates()` 才把
+            // 装备的 `attribute_modifiers` 和 location-dependent 附魔刷进属性表。
+            java.lang.reflect.Method detect = LivingEntity.class.getDeclaredMethod("detectEquipmentUpdates");
+            detect.setAccessible(true);
+            detect.invoke(player);
+            player.setHealth(scene.playerHealth);
+            // `Attributes.MAX_ABSORPTION` 的基础值是 0，`setAbsorptionAmount`
+            // 会把它夹成 0。对拍里把上限设成 20，让吸收血量的分支真的跑到。
+            var maxAbsorption = player.getAttribute(
+                    net.minecraft.world.entity.ai.attributes.Attributes.MAX_ABSORPTION);
+            if (maxAbsorption != null) {
+                maxAbsorption.setBaseValue(20.0);
+            }
+            player.setAbsorptionAmount(scene.playerAbsorption);
+            if (scene.playerExhaustion > 0.0F) {
+                player.getFoodData().addExhaustion(scene.playerExhaustion);
+            }
             players.add(player);
         }
         level.playersList().addAll(players);
@@ -908,8 +1128,25 @@ public final class MobOracle {
         }
         line.append("],\"steps\":[");
         line.append(stepJson(cows));
+        if (scene.playerPackets && !players.isEmpty()) {
+            playerSteps.get(0).add(playerStepJson(players.get(0)));
+            // 官方 `placeNewPlayer` 之后 `ServerPlayer.doTick` 的第一次调用就补
+            // `set_health`，这里把那一包记在 tick 0。
+            ServerPlayer target = players.get(0);
+            float health = target.getHealth();
+            int food = target.getFoodData().getFoodLevel();
+            float saturation = target.getFoodData().getSaturationLevel();
+            playerSinks.get(0).add(new net.minecraft.network.protocol.game.ClientboundSetHealthPacket(
+                    health, food, saturation));
+            playerPackets.get(0).addAll(playerSinks.get(0).take());
+        }
         /** 已经发过 `remove_entities` 的牛，按 `cows` 下标。 */
         java.util.Set<Integer> removed = new java.util.HashSet<>();
+        // `ServerPlayer` 构造时的三个哨兵值，进服第一刻会发一包 `set_health`。
+        float lastSentHealth = players.isEmpty() ? -1.0e8f : players.get(0).getHealth();
+        int lastSentFood = players.isEmpty() ? -99999999 : players.get(0).getFoodData().getFoodLevel();
+        boolean lastSaturationZero = players.isEmpty()
+                || players.get(0).getFoodData().getSaturationLevel() == 0.0F;
         for (int tick = 1; tick <= scene.ticks; tick++) {
             level.gameTime++;
             for (int[] action : scene.interactions) {
@@ -958,6 +1195,65 @@ public final class MobOracle {
                         addSync(level, official, cow, syncs, packets, tick);
                     }
                 }
+            }
+            if (scene.playerPackets) {
+                for (PlayerAction action : scene.playerActions) {
+                    if (action.tick != tick) {
+                        continue;
+                    }
+                    if (action.action == 0) {
+                        var damageTypes = official.registries.lookupOrThrow(Registries.DAMAGE_TYPE);
+                        var holder = damageTypes.getOrThrow(net.minecraft.resources.ResourceKey.create(
+                                Registries.DAMAGE_TYPE, Identifier.parse(action.kind)));
+                        // `when_caused_by_living_non_player` 要一个非玩家生物当造成者。
+                        // 这名攻击者不放进实体表，只作伤害来源。
+                        Cow attacker = EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
+                        attacker.setId(1 << 24);
+                        attacker.setPos(action.at == null ? 3.0 : action.at[0], 64.0,
+                                action.at == null ? 0.5 : action.at[2]);
+                        net.minecraft.world.damagesource.DamageSource source;
+                        if (action.at == null) {
+                            source = new net.minecraft.world.damagesource.DamageSource(holder, attacker);
+                        } else {
+                            var ctor = net.minecraft.world.damagesource.DamageSource.class
+                                    .getDeclaredConstructor(net.minecraft.core.Holder.class, Entity.class,
+                                            Entity.class, Vec3.class);
+                            ctor.setAccessible(true);
+                            source = ctor.newInstance(holder, attacker, attacker,
+                                    new Vec3(action.at[0], action.at[1], action.at[2]));
+                        }
+                        players.get(0).hurtServer(level, source, action.amount);
+                    } else {
+                        // 官方 `ServerGamePacketListenerImpl.handleAttack` 的伤害入口。
+                        Cow target = cows.get(action.cow);
+                        players.get(0).attack(target);
+                    }
+                }
+                // 只推进 1a 建模的三处：`ServerPlayer.tick` 递减 damageCooldownTime，
+                // `LivingEntity.baseTick` 递减 hurtTime，以及 `ServerPlayer.doTick`
+                // 里 `lastSentHealth` 变了就补 `set_health`。不跑 FoodData.tick /
+                // tickRegeneration / 物理，那些留给 1b。
+                ServerPlayer target = players.get(0);
+                if (target.damageCooldownTime > 0) {
+                    target.damageCooldownTime--;
+                }
+                if (target.hurtTime > 0) {
+                    target.hurtTime--;
+                }
+                float health = target.getHealth();
+                int food = target.getFoodData().getFoodLevel();
+                float saturation = target.getFoodData().getSaturationLevel();
+                if (Float.floatToRawIntBits(health) != Float.floatToRawIntBits(lastSentHealth)
+                        || food != lastSentFood
+                        || (saturation == 0.0F) != lastSaturationZero) {
+                    lastSentHealth = health;
+                    lastSentFood = food;
+                    lastSaturationZero = saturation == 0.0F;
+                    playerSinks.get(0).add(new net.minecraft.network.protocol.game.ClientboundSetHealthPacket(
+                            health, food, saturation));
+                }
+                playerSteps.get(tick).add(playerStepJson(target));
+                playerPackets.get(tick).addAll(playerSinks.get(0).take());
             }
             for (int[] egg : scene.eggs) {
                 if (egg[0] != tick) {
@@ -1055,6 +1351,49 @@ public final class MobOracle {
         }
         line.append("],\"interactions\":");
         appendSpawns(line, interactions);
+        line.append(",\"difficulty\":").append(scene.difficulty);
+        line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(scene.playerHealth));
+        line.append(",\"playerAbsorption\":").append(Float.floatToRawIntBits(scene.playerAbsorption));
+        line.append(",\"playerExhaustion\":").append(Float.floatToRawIntBits(scene.playerExhaustion));
+        line.append(",\"playerEquipment\":[");
+        for (int i = 0; i < scene.playerEquipment.size(); i++) {
+            if (i > 0) line.append(',');
+            line.append('[');
+            int[] items = scene.playerEquipment.get(i);
+            for (int j = 0; j < items.length; j++) {
+                if (j > 0) line.append(',');
+                line.append(items[j]);
+            }
+            line.append(']');
+        }
+        line.append("],\"playerProtection\":[");
+        for (int i = 0; i < scene.playerEnchants.size(); i++) {
+            if (i > 0) line.append(',');
+            line.append('[');
+            int[] levels = scene.playerEnchants.get(i);
+            for (int j = 0; j < levels.length; j++) {
+                if (j > 0) line.append(',');
+                line.append(levels[j]);
+            }
+            line.append(']');
+        }
+        line.append("],\"playerActions\":[");
+        for (int i = 0; i < scene.playerActions.size(); i++) {
+            if (i > 0) line.append(',');
+            PlayerAction action = scene.playerActions.get(i);
+            line.append("{\"tick\":").append(action.tick).append(",\"action\":").append(action.action);
+            line.append(",\"kind\":").append(action.kind == null ? "null" : jsonString(action.kind));
+            line.append(",\"amount\":").append(Float.floatToRawIntBits(action.amount));
+            line.append(",\"at\":").append(action.at == null ? "null"
+                    : ("[" + Double.doubleToRawLongBits(action.at[0]) + ","
+                            + Double.doubleToRawLongBits(action.at[1]) + ","
+                            + Double.doubleToRawLongBits(action.at[2]) + "]"));
+            line.append(",\"cow\":").append(action.cow).append('}');
+        }
+        line.append("],\"playerSteps\":");
+        appendPackets(line, playerSteps);
+        line.append(",\"playerPackets\":");
+        appendPackets(line, playerPackets);
         line.append("}\n");
         out.write(line.toString());
         out.flush();
@@ -1198,6 +1537,28 @@ public final class MobOracle {
         return out.append('"').toString();
     }
 
+    /** 玩家受伤场景的逐刻状态：血量、吸收、冷却、饥饿、速度和随机源。 */
+    private static String playerStepJson(ServerPlayer player) throws Exception {
+        StringBuilder out = new StringBuilder(256);
+        out.append("{\"hp\":").append(Float.floatToRawIntBits(player.getHealth()));
+        out.append(",\"abs\":").append(Float.floatToRawIntBits(player.getAbsorptionAmount()));
+        out.append(",\"ht\":").append(player.hurtTime);
+        out.append(",\"hd\":").append(player.hurtDuration);
+        out.append(",\"cd\":").append(player.damageCooldownTime);
+        out.append(",\"lh\":").append(Float.floatToRawIntBits(
+                getFloat(LivingEntity.class, player, "lastHurt")));
+        out.append(",\"food\":").append(player.getFoodData().getFoodLevel());
+        out.append(",\"sat\":").append(Float.floatToRawIntBits(player.getFoodData().getSaturationLevel()));
+        out.append(",\"exh\":").append(Float.floatToRawIntBits(
+                getFloat(net.minecraft.world.food.FoodData.class, player.getFoodData(), "exhaustionLevel")));
+        out.append(",\"dx\":").append(Double.doubleToRawLongBits(player.getDeltaMovement().x));
+        out.append(",\"dy\":").append(Double.doubleToRawLongBits(player.getDeltaMovement().y));
+        out.append(",\"dz\":").append(Double.doubleToRawLongBits(player.getDeltaMovement().z));
+        out.append(",\"seed\":").append(randomSeed(player));
+        out.append(",\"yr\":").append(Float.floatToRawIntBits(player.getYRot()));
+        return out.append('}').toString();
+    }
+
     private static String stepJson(List<Cow> cows) throws Exception {
         StringBuilder out = new StringBuilder(512);
         out.append('[');
@@ -1332,6 +1693,16 @@ public final class MobOracle {
         }
     }
 
+    private static float getFloat(Class<?> owner, Object target, String name) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            return field.getFloat(target);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
     private static void putBoolean(Class<?> owner, Object target, String name, boolean value) {
         try {
             Field field = owner.getDeclaredField(name);
@@ -1347,6 +1718,23 @@ public final class MobOracle {
             UNSAFE.putObject(target, UNSAFE.objectFieldOffset(field), value);
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
+        }
+    }
+
+    /** 只记 `connection.send` 的包：玩家自己收到的 `set_health` / `hurt_animation`。 */
+    private static final class RecordingListener extends ServerGamePacketListenerImpl {
+        private RecordingListener() {
+            super(null, null, null, null);
+        }
+
+        Bytes bytes;
+
+        @Override
+        public void send(net.minecraft.network.protocol.Packet<?> packet) {
+            @SuppressWarnings("unchecked")
+            net.minecraft.network.protocol.Packet<? super net.minecraft.network.protocol.game.ClientGamePacketListener> cast =
+                    (net.minecraft.network.protocol.Packet<? super net.minecraft.network.protocol.game.ClientGamePacketListener>) packet;
+            bytes.add(cast);
         }
     }
 
@@ -1496,6 +1884,7 @@ public final class MobOracle {
     /** 游戏时间可以前进的世界数据。 */
     private static final class TickingLevelData implements LevelData {
         private final FakeLevel level;
+        private Difficulty difficulty = Difficulty.NORMAL;
 
         TickingLevelData(FakeLevel level) {
             this.level = level;
@@ -1518,7 +1907,7 @@ public final class MobOracle {
 
         @Override
         public Difficulty getDifficulty() {
-            return Difficulty.NORMAL;
+            return difficulty;
         }
 
         @Override
@@ -1881,7 +2270,7 @@ public final class MobOracle {
 
         @Override
         public Difficulty getDifficulty() {
-            return Difficulty.NORMAL;
+            return levelData != null ? ((TickingLevelData) levelData).difficulty : Difficulty.NORMAL;
         }
 
         @Override

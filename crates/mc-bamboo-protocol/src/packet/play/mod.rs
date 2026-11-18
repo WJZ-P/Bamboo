@@ -181,6 +181,18 @@ impl ClientboundPacket for HurtAnimation {
     }
 }
 
+/// 进入战斗，官方 `ClientboundPlayerCombatEnterPacket`。没有包体，只发给玩家自己。
+///
+/// Vanilla `ClientboundPlayerCombatEnterPacket`: no body, only to the player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerCombatEnter;
+
+impl ClientboundPacket for PlayerCombatEnter {
+    const ID: i32 = clientbound::PLAYER_COMBAT_ENTER;
+
+    fn write_body(&self, _out: &mut Vec<u8>) {}
+}
+
 /// 同步世界难度，官方 `ClientboundChangeDifficultyPacket`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeDifficulty {
@@ -561,6 +573,7 @@ mod tests {
             (SetHealth::ID, 106),
             (SetHeldSlot::ID, 107),
             (HurtAnimation::ID, 43),
+            (PlayerCombatEnter::ID, 68),
             (SwingAnimation::ID, 123),
             (SystemChat::ID, 124),
             (UpdateAttributes::ID, 134),

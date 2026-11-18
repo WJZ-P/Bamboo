@@ -117,6 +117,42 @@ struct Case {
     /// 每项是（刻、牛下标、玩家下标、物品 ID、创造模式）。
     #[serde(default)]
     interact_actions: Vec<[i32; 5]>,
+    /// 玩家受伤场景：难度、起始血量 / 吸收 / 消耗、装备和动作。
+    #[serde(default)]
+    difficulty: i32,
+    #[serde(default)]
+    player_health: i32,
+    #[serde(default)]
+    player_absorption: i32,
+    #[serde(default)]
+    player_exhaustion: i32,
+    #[serde(default)]
+    player_actions: Vec<PlayerActionSetup>,
+    #[serde(default)]
+    player_equipment: Vec<[i32; 5]>,
+    #[serde(default)]
+    player_protection: Vec<[i32; 4]>,
+    #[serde(default)]
+    player_steps: Option<Vec<Vec<String>>>,
+    #[serde(default)]
+    player_packets: Option<Vec<Vec<String>>>,
+}
+
+/// Java `PlayerAction` 的线上格式。`amount` / `at` 用原始位。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayerActionSetup {
+    tick: usize,
+    action: i32,
+    kind: Option<String>,
+    amount: i32,
+    at: Option<[i64; 3]>,
+    #[serde(default)]
+    #[allow(
+        dead_code,
+        reason = "the Java action also names the cow for attack scenes"
+    )]
+    cow: i32,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -420,11 +456,14 @@ struct Report {
     mismatches: Vec<String>,
     ended: bool,
     show: usize,
+    /// 故意改坏一处，确认对拍真的抓得到。
+    break_test: Option<String>,
 }
 
 /// 启动官方进程，逐个场景重放。
 pub fn run(mut command: Command, options: &[&str]) -> Result<(), String> {
     let mut show = 12;
+    let mut break_test: Option<String> = None;
     let mut index = 0;
     while index < options.len() {
         match options[index] {
@@ -434,6 +473,10 @@ pub fn run(mut command: Command, options: &[&str]) -> Result<(), String> {
             }
             "--show" if index + 1 < options.len() => {
                 show = options[index + 1].parse().map_err(|_| USAGE.to_owned())?;
+                index += 2;
+            }
+            "--break-self-test" if index + 1 < options.len() => {
+                break_test = Some(options[index + 1].to_owned());
                 index += 2;
             }
             _ => return Err(USAGE.to_owned()),
@@ -456,6 +499,7 @@ pub fn run(mut command: Command, options: &[&str]) -> Result<(), String> {
         mismatches: Vec::new(),
         ended: false,
         show,
+        break_test,
     };
     let read = report.read(BufReader::new(stdout));
     if read.is_err() {
@@ -557,6 +601,10 @@ impl Report {
 
     fn replay(&mut self, case: &Case) {
         self.cases += 1;
+        if case.player_steps.is_some() {
+            self.replay_player_hurt(case);
+            return;
+        }
         let mut level = MobLevel {
             blocks: HashMap::new(),
             random: LevelRandom::new(1),
@@ -1010,6 +1058,173 @@ impl Report {
         }
     }
 
+    /// 玩家受伤场景：走正式的 `Region` / `Player` / `player_hurt` 重放，
+    /// 逐刻比状态原始位和包字节。
+    fn replay_player_hurt(&mut self, case: &Case) {
+        use mc_bamboo_game::{ReplayPlayerAction, ReplayPlayerHurt, replay_player_hurt};
+
+        let Some(expected_steps) = &case.player_steps else {
+            return;
+        };
+        let seed = case
+            .player_steps
+            .as_ref()
+            .and_then(|steps| steps.first())
+            .and_then(|step| step.first())
+            .and_then(|text| serde_json::from_str::<PlayerStepJson>(text).ok())
+            .map(|step| step.seed)
+            .unwrap_or(0);
+        let mut equipment = [0_i32; 6];
+        if let Some(items) = case.player_equipment.first() {
+            equipment[..5].copy_from_slice(items);
+        }
+        let protection = case.player_protection.first().copied().unwrap_or([0; 4]);
+        let actions: Vec<ReplayPlayerAction> = case
+            .player_actions
+            .iter()
+            .map(|action| ReplayPlayerAction {
+                tick: action.tick,
+                kind: action
+                    .kind
+                    .as_deref()
+                    .and_then(|name| name.strip_prefix("minecraft:"))
+                    .unwrap_or("generic")
+                    .to_owned(),
+                amount: action.amount,
+                at: action.at,
+                attack_cow: action.action == 1,
+            })
+            .collect();
+        let mut scene = ReplayPlayerHurt {
+            ticks: expected_steps.len() - 1,
+            difficulty: case.difficulty,
+            health: f32::from_bits(case.player_health as u32),
+            absorption: f32::from_bits(case.player_absorption as u32),
+            exhaustion: f32::from_bits(case.player_exhaustion as u32),
+            seed,
+            equipment,
+            protection,
+            attack_cow: actions.iter().any(|action| action.attack_cow),
+            actions,
+            no_cooldown: false,
+            no_knockback: false,
+        };
+        // 五处故意改坏：难度缩放、护甲公式（用空装备）、保护附魔等级、
+        // 无敌帧（每次伤害前清冷却）、击退（去掉来源位置）。
+        // 每一项都让对拍的逐刻状态或包字节失败，证明比较没有放松。
+        match self.break_test.as_deref() {
+            Some("difficulty") => scene.difficulty = 2,
+            Some("armor") => scene.equipment = [0; 6],
+            Some("protection") => scene.protection = [0; 4],
+            Some("cooldown") => scene.no_cooldown = true,
+            Some("knockback") => {
+                for action in &mut scene.actions {
+                    action.at = None;
+                }
+                scene.no_knockback = true;
+            }
+            _ => {}
+        }
+        let (steps, packets) = replay_player_hurt(&scene);
+        for (tick, expected) in expected_steps.iter().enumerate() {
+            self.steps += 1;
+            let Some(ours) = steps.get(tick) else {
+                self.mismatch(format!("{} tick {tick}: no Bamboo player step", case.name));
+                continue;
+            };
+            let Some(text) = expected.first() else {
+                self.mismatch(format!(
+                    "{} tick {tick}: no official player step",
+                    case.name
+                ));
+                continue;
+            };
+            let Ok(official) = serde_json::from_str::<PlayerStepJson>(text) else {
+                self.mismatch(format!(
+                    "{} tick {tick}: bad official player JSON",
+                    case.name
+                ));
+                continue;
+            };
+            if !official.matches(ours) {
+                self.mismatch(format!(
+                    "{} tick {tick} player state: official {official:?}, bamboo {ours:?}",
+                    case.name
+                ));
+            }
+            // 官方的两组包：自己收到的 + 跟踪者收到的，合起来按发生顺序比。
+            // `playerPackets` 是 `connection.send`，`packets` 是 Chunks/events。
+            // 生产代码把两类包都写进同一条链路，按 ID 分类后再和官方逐项比。
+            let official_self = case
+                .player_packets
+                .as_ref()
+                .and_then(|steps| steps.get(tick))
+                .cloned()
+                .unwrap_or_default();
+            let official_tracking = case
+                .packets
+                .as_ref()
+                .and_then(|steps| steps.get(tick))
+                .cloned()
+                .unwrap_or_default();
+            let mut ours_self = Vec::new();
+            let mut ours_tracking = Vec::new();
+            for body in packets.get(tick).cloned().unwrap_or_default() {
+                if is_self_packet(&body) {
+                    ours_self.push(body);
+                } else {
+                    ours_tracking.push(body);
+                }
+            }
+            compare_player_packets(
+                &mut self.mismatches,
+                &self.show,
+                &case.name,
+                tick,
+                "self",
+                &ours_self,
+                &official_self,
+            );
+            // 牛的同步包留在 `packets` 里，这一期只比玩家受伤产生的包。
+            // 左键打牛场景里牛自己也会发出带种子的环境音/受伤音，那只牛的行为
+            // 不在 1a 的比对范围里，所以这一场景只比 `damage_event`。
+            let tracking: Vec<String> = official_tracking
+                .iter()
+                .filter(|text| {
+                    base64_stub::decode(text)
+                        .ok()
+                        .is_some_and(|bytes| is_tracking_hurt_packet(&bytes))
+                })
+                .filter(|text| {
+                    !case.name.ends_with("attack_cow")
+                        || base64_stub::decode(text)
+                            .ok()
+                            .and_then(|bytes| packet_id(&bytes))
+                            == Some(mc_bamboo_data::packets::play::clientbound::DAMAGE_EVENT)
+                })
+                .cloned()
+                .collect();
+            let ours_tracking: Vec<Vec<u8>> = ours_tracking
+                .into_iter()
+                .filter(|bytes| {
+                    !case.name.ends_with("attack_cow")
+                        || packet_id(bytes)
+                            == Some(mc_bamboo_data::packets::play::clientbound::DAMAGE_EVENT)
+                })
+                .collect();
+            let ours_tracking = &ours_tracking;
+            compare_player_packets(
+                &mut self.mismatches,
+                &self.show,
+                &case.name,
+                tick,
+                "tracking",
+                ours_tracking,
+                &tracking,
+            );
+        }
+    }
+
     fn finish(self) -> Result<(), String> {
         if !self.ended {
             return Err("mob oracle stopped before the end line".to_owned());
@@ -1026,6 +1241,124 @@ impl Report {
             self.cases, self.steps
         );
         Ok(())
+    }
+}
+
+/// Java 一侧的 `playerStepJson`，整数都是原始位。
+#[derive(Debug, Deserialize)]
+struct PlayerStepJson {
+    hp: i32,
+    abs: i32,
+    ht: i32,
+    hd: i32,
+    cd: i32,
+    lh: i32,
+    food: i32,
+    sat: i32,
+    exh: i32,
+    dx: i64,
+    dy: i64,
+    dz: i64,
+    seed: i64,
+}
+
+impl PlayerStepJson {
+    fn matches(&self, ours: &mc_bamboo_game::PlayerHurtStep) -> bool {
+        self.hp == ours.hp
+            && self.abs == ours.abs
+            && self.ht == ours.ht
+            && self.hd == ours.hd
+            && self.cd == ours.cd
+            && self.lh == ours.lh
+            && self.food == ours.food
+            && self.sat == ours.sat
+            && self.exh == ours.exh
+            && self.dx == ours.dx
+            && self.dy == ours.dy
+            && self.dz == ours.dz
+            && self.seed == ours.seed
+    }
+}
+
+/// 包 ID + 包体（不含帧长头）的 ID。
+fn packet_id(bytes: &[u8]) -> Option<i32> {
+    let mut value = 0_i32;
+    let mut shift = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        value |= i32::from(byte & 0x7f).checked_shl(shift).unwrap_or(0);
+        if byte & 0x80 == 0 {
+            return (index < 5).then_some(value);
+        }
+        shift += 7;
+    }
+    None
+}
+
+/// 只发给玩家自己的包：`player_combat_enter` / `hurt_animation` / `set_health`。
+fn is_self_packet(bytes: &[u8]) -> bool {
+    matches!(
+        packet_id(bytes),
+        Some(
+            mc_bamboo_data::packets::play::clientbound::PLAYER_COMBAT_ENTER
+                | mc_bamboo_data::packets::play::clientbound::HURT_ANIMATION
+                | mc_bamboo_data::packets::play::clientbound::SET_HEALTH
+        )
+    )
+}
+
+/// 玩家受伤产生的、发给跟踪者的包：`damage_event` 和带种子的 hurt 音效。
+fn is_tracking_hurt_packet(bytes: &[u8]) -> bool {
+    matches!(
+        packet_id(bytes),
+        Some(
+            mc_bamboo_data::packets::play::clientbound::DAMAGE_EVENT
+                | mc_bamboo_data::packets::play::clientbound::SOUND
+        )
+    )
+}
+
+/// 逐刻比两组包字节。`official_b64` 是官方编码后的 base64 串。
+fn compare_player_packets(
+    mismatches: &mut Vec<String>,
+    show: &usize,
+    name: &str,
+    tick: usize,
+    group: &str,
+    ours: &[Vec<u8>],
+    official_b64: &[String],
+) {
+    if mismatches.len() >= *show {
+        return;
+    }
+    let place = format!("{name} tick {tick} {group} packets");
+    if ours.len() != official_b64.len() {
+        mismatches.push(format!(
+            "{place}: official {} packets {:?}, bamboo {} packets {:?}",
+            official_b64.len(),
+            official_b64
+                .iter()
+                .map(|s| hex(&base64_stub::decode(s).unwrap_or_default()))
+                .collect::<Vec<_>>(),
+            ours.len(),
+            ours.iter().map(|b| hex(b)).collect::<Vec<_>>(),
+        ));
+        return;
+    }
+    for (index, (ours, text)) in ours.iter().zip(official_b64).enumerate() {
+        let Ok(expected) = base64_stub::decode(text) else {
+            mismatches.push(format!(
+                "{place}[{index}]: bad base64 from the official side"
+            ));
+            return;
+        };
+        if ours != &expected {
+            mismatches.push(format!(
+                "{place}[{index}]: official {}, bamboo {}",
+                hex(&expected),
+                hex(ours)
+            ));
+            return;
+        }
     }
 }
 

@@ -376,8 +376,10 @@ pub struct DamageSource {
     pub attacker_is_player: bool,
     /// 攻击者是不是创造模式的玩家（`isCreativePlayer`）。
     pub creative_player: bool,
-    /// `getSourcePosition()`，`at <location>` 时用显式位置覆盖。
+    /// `getSourcePosition()`：显式位置，或者回退到攻击者位置。击退方向读它。
     pub position: Option<Vec3>,
+    /// `sourcePositionRaw()`：只有 `at <location>` 才有值，`DamageEvent` 读它。
+    pub raw_position: Option<Vec3>,
     /// 冲刺攻击时玩家的朝向，`causeExtraKnockback` 的方向用它。
     pub sprint_yaw: Option<f32>,
     /// 攻击者的 UUID，存进 `last_hurt_by_*`。
@@ -399,6 +401,7 @@ impl DamageSource {
             attacker_is_player: false,
             creative_player: false,
             position: None,
+            raw_position: None,
             sprint_yaw: None,
             attacker_uuid: None,
             scale_when_non_player: false,
@@ -415,6 +418,7 @@ impl DamageSource {
     /// 覆盖来源位置（`/damage ... at <location>`）。
     pub const fn with_position(mut self, position: Vec3) -> Self {
         self.position = Some(position);
+        self.raw_position = Some(position);
         self
     }
 
@@ -439,6 +443,7 @@ impl DamageSource {
             attacker_is_player: true,
             creative_player: creative,
             position: Some(position),
+            raw_position: None,
             sprint_yaw: None,
             attacker_uuid: None,
             scale_when_non_player: false,

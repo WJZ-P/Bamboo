@@ -144,6 +144,8 @@ pub(crate) struct Player {
     /// The combined official "last sent health" snapshot. The constructor values
     /// force one `set_health` on the first tick.
     pub(crate) health_sync: crate::player_hurt::HealthSync,
+    /// `CombatTracker.inCombat`：第一次被非玩家生物打伤时置真，1b 的死亡消息要用。
+    pub(crate) in_combat: bool,
 }
 
 impl Player {
@@ -200,6 +202,7 @@ impl Player {
             recorded_criteria: crate::scoreboard::UNRECORDED_CRITERIA,
             health: PlayerHealth::default(),
             health_sync: crate::player_hurt::HealthSync::INITIAL,
+            in_combat: false,
         }
     }
 

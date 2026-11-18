@@ -70,7 +70,7 @@ impl Default for PlayerHealth {
             health: rules::MAX_HEALTH,
             absorption: 0.0,
             hurt_time: 0,
-            hurt_duration: 10,
+            hurt_duration: 0,
             damage_cooldown: 0,
             last_hurt: 0.0,
             invulnerable_time: 0,
@@ -184,7 +184,8 @@ impl PlayerHealth {
             // `ServerPlayer.indicateDamage`: atan2(dz, dx) 转角度再减玩家朝向。
             let dx = at.x - position.x;
             let dz = at.z - position.z;
-            self.hurt_dir = mc_bamboo_core::mth::atan2(dz, dx).to_degrees() as f32;
+            // 官方 `Mth.atan2` 再乘 `57.2957763671875d`（常量，不是 180/PI）。
+            self.hurt_dir = (mc_bamboo_core::mth::atan2(dz, dx) * 57.295_776_367_187_5_f64) as f32;
         }
         Some(outcome)
     }
@@ -192,9 +193,11 @@ impl PlayerHealth {
     /// 把官方存盘字段写进运行时。
     pub fn restore(&mut self, data: &PlayerData) {
         self.health = data.health.clamp(0.0, rules::MAX_HEALTH);
-        self.absorption = data.absorption.clamp(0.0, rules::MAX_ABSORPTION);
+        // 官方 `LivingEntity.readAdditionalSaveData` 走 `internalSetAbsorptionAmount`，
+        // 不夹到属性上限；`setAbsorptionAmount` 的夹取只发生在效果变化那一路上。
+        self.absorption = data.absorption.max(0.0);
         self.hurt_time = i32::from(data.hurt_time).max(0);
-        self.hurt_duration = self.hurt_time.max(10);
+        self.hurt_duration = 0;
         self.damage_cooldown = 0;
         self.last_hurt = 0.0;
         self.invulnerable_time = 0;
