@@ -74,18 +74,29 @@ pub fn finish_spawn(me: &mut Entity, motion: Vec3) {
 /// `level.random.nextInt(40)`; an orb that cannot merge draws four numbers from
 /// its own random source in [`finish_spawn`].
 pub fn award(world: &mut crate::world::World, position: Vec3, amount: i32) {
-    let mut left = amount;
-    while left > 0 {
-        let value = experience_value(left);
-        left -= value;
-        // `tryMergeToExisting` 的 `level.random.nextInt(40)`。生成的球都进实体表；
-        // 同值旧球在 `scan_for_merges` 里合并。
-        // Vanilla's `tryMergeToExisting` draws `level.random.nextInt(40)`. Every
-        // orb enters the entity table; same-valued ones merge in `scan_for_merges`.
-        let _ = world.random().next_int(40);
+    for value in award_values(world.random(), amount) {
         let entity = Entity::experience_orb(position, value);
         world.spawn_entity(entity);
     }
+}
+
+/// 官方 `ExperienceOrb.awardWithDirection` 的拆分：每颗球先取一次
+/// `level.random.nextInt(40)`（`tryMergeToExisting`），再按 [`experience_value`] 减掉这一颗的值。
+/// 对拍用它重放取数顺序，不必真的生成实体。
+///
+/// The split inside official `ExperienceOrb.awardWithDirection`: each orb
+/// draws one `level.random.nextInt(40)` before its value is subtracted.
+/// Oracles replay the draw order without spawning entities.
+pub fn award_values<R: crate::random::RandomSource + ?Sized>(random: &R, amount: i32) -> Vec<i32> {
+    let mut left = amount;
+    let mut values = Vec::new();
+    while left > 0 {
+        let value = experience_value(left);
+        left -= value;
+        let _ = random.next_int(40);
+        values.push(value);
+    }
+    values
 }
 
 /// `ExperienceOrb.tick()`。

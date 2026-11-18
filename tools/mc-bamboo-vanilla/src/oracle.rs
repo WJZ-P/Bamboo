@@ -666,16 +666,23 @@ impl Session {
             .map(|drop| Ok((self.names.item(&drop.item)?.0, drop.count)))
             .collect::<Result<Vec<_>, String>>()?;
         official.sort();
-        match crate::entity_oracle::mined_outcome(mine.seed, mine.state, tool) {
-            Ok((ours, seed)) if ours == official && seed == mine.random_seed => {
+        match crate::entity_oracle::mined_outcome(
+            mine.seed,
+            mine.state,
+            tool,
+            &mine.tool_enchantments,
+        ) {
+            Ok((ours, orbs, seed))
+                if ours == official && orbs == mine.xp_orbs && seed == mine.random_seed =>
+            {
                 self.report.mine_checked(block, true, "");
             }
-            Ok((ours, seed)) => self.report.mine_checked(
+            Ok((ours, orbs, seed)) => self.report.mine_checked(
                 block,
                 false,
                 &format!(
-                    "{}: drops official {official:?} bamboo {ours:?}, random official {} bamboo {seed}",
-                    mine.block, mine.random_seed
+                    "{}: drops official {official:?} bamboo {ours:?}, xp official {:?} bamboo {orbs:?}, random official {} bamboo {seed}",
+                    mine.block, mine.xp_orbs, mine.random_seed
                 ),
             ),
             Err(error) => {

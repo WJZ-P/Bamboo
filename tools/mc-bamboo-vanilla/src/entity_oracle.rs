@@ -1054,7 +1054,8 @@ pub(crate) fn mined_outcome(
     seed: i64,
     state: u32,
     tool: i32,
-) -> Result<(Vec<(i32, i32)>, i64), String> {
+    tool_enchantments: &[(String, i32)],
+) -> Result<(Vec<(i32, i32)>, Vec<i32>, i64), String> {
     let pos = BlockPos::new(0, 64, 0);
     let mut level = PhysicsLevel::new(seed);
     level.blocks.insert(pos, BlockState(state));
@@ -1066,7 +1067,15 @@ pub(crate) fn mined_outcome(
         let tool_stack = if tool == 0 {
             None
         } else {
-            Some(LootStack::new(tool, 1))
+            let mut stack = LootStack::new(tool, 1);
+            if !tool_enchantments.is_empty() {
+                let levels = tool_enchantments
+                    .iter()
+                    .map(|(name, level)| (name.clone(), *level))
+                    .collect();
+                stack.set_enchantment_levels("minecraft:enchantments", levels);
+            }
+            Some(stack)
         };
         let params = BlockDropParams {
             state: BlockState(state),
@@ -1107,7 +1116,39 @@ pub(crate) fn mined_outcome(
         drops.sort();
         drops
     };
-    Ok((drops, level.random.source().seed()))
+    // 官方 `Block.dropResources` 在 popResource 之后才 `spawnAfterBreak`：
+    // 先采样 xpRange，再按工具附魔改值，最后 `ExperienceOrb.award` 拆球。
+    // Vanilla's `Block.dropResources` calls `spawnAfterBreak` after
+    // popResource: sample xpRange, apply tool enchantments, then
+    // `ExperienceOrb.award` splits it.
+    let xp_orbs = {
+        let random = level.random.source();
+        let mut values = Vec::new();
+        if let Some((min, max)) = mc_bamboo_blocks::block_experience::experience_range(
+            BlockState(state).block_id() as u32,
+        ) {
+            let sampled = if min == max {
+                min
+            } else {
+                min + random.next_int(max.wrapping_sub(min).wrapping_add(1))
+            };
+            let mut amount = sampled as f32;
+            for (name, level) in tool_enchantments {
+                if *level > 0
+                    && let Some(id) = mc_bamboo_loot::enchantment_id(name)
+                    && let Some(set) = mc_bamboo_loot::block_experience_set(id)
+                {
+                    amount = set;
+                }
+            }
+            let reward = amount as i32;
+            if reward > 0 {
+                values = mc_bamboo_blocks::entity::award_values(random, reward);
+            }
+        }
+        values
+    };
+    Ok((drops, xp_orbs, level.random.source().seed()))
 }
 
 /// 战利品条件只看这一格。

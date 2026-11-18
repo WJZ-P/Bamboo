@@ -281,3 +281,27 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 - 拾取音效不另发 `sound` 包：官方 `ExperienceOrb.playerTouch` 和
   `LivingEntity.take` 都只发 `take_item_entity`，客户端收到后本地播
   `entity.experience_orb.pickup`（字幕键 `subtitles.entity.experience_orb.pickup`）。
+
+
+### 5.7 玩家死亡掉经验：未实现（2026-11-2x，已知差异）
+
+- **现状**：Bamboo 的玩家不会死。`Player` 没有血量 / 伤害 / 死亡字段，
+  `Player::view` 的 `alive` 恒为 true；`player_move.rs` 只记录 `fallDistance`，不转成伤害；
+  没有玩家 `die` / `hurtServer` 路径，也没有重生流程。新合进来的 `/kill` 命令
+  （`command/kill.rs`）遇到玩家目标会明确返回 `command.failed`，不会假装成功；
+  它只对非玩家实体走官方 `LivingEntity.kill` / `Entity.kill`。
+  因此「玩家死亡掉经验」目前没有可以接的调用点，也没有任何经验球生成、
+  经验清零或 `keepInventory` 保留行为。
+- **官方字节码要点**（等死亡流程做的时候照这个接，并对拍后再删本节）：
+  - `Player.getBaseExperienceReward(ServerLevel)`：
+    `keepInventory` 为真 **或** `isSpectator()` 时返回 0，否则
+    `min(experienceLevel * 7, 100)`（`Math.min`，int 乘法可能溢出）。
+  - `Player.die` / `LivingEntity.dropAllDeathLoot` 在 `keepInventory` 为假时把
+    `experienceLevel` / `experienceProgress` / `totalExperience` 清零，并用
+    `ExperienceOrb.award(level, position, reward)` 把上面的值拆成经验球
+    （`tryMergeToExisting` 的 `nextInt(40)` 取数顺序和别处一样）。
+  - `PlayerList.respawn` 在 `keepInventory` 为真时调
+    `ServerPlayer.transferInventoryXpAndScore`，把物品栏、等级 / 进度 / 总经验和
+    `Score` 原样搬到重生后的玩家；`enchantmentSeed` 也在这一段里一起复制。
+- 这一轮没有引入半成品死亡系统；等玩家伤害 / 死亡 / 重生流程实现时，再一起接上
+  `getBaseExperienceReward`、`keepInventory` 两条分支和官方对拍。

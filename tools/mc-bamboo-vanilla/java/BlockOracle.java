@@ -1,3 +1,4 @@
+import com.google.gson.JsonArray;
 import com.google.common.collect.ImmutableList;
 import com.mojang.authlib.GameProfile;
 import com.mojang.serialization.DataResult;
@@ -138,6 +139,7 @@ import net.minecraft.world.item.GameMasterBlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemCooldowns;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.enchantment.ItemEnchantments;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.PlaceOnWaterBlockItem;
 import net.minecraft.world.item.SolidBucketItem;
@@ -1335,6 +1337,8 @@ public final class BlockOracle {
         private List<ServerPlayer> playersInWorld;
         /** 容器掉落生成的物品。漏斗的 `getItemsAtAndAbove` 要找得到它们。 */
         private List<Entity> groundItems;
+        /** 挖掘时生成的经验球的值，按生成顺序。 */
+        private List<Integer> xpOrbs;
         private List<Destroyed> destroyed;
         private List<LevelPlay> levelEvents;
         private List<SoundPlay> sounds;
@@ -1365,6 +1369,7 @@ public final class BlockOracle {
             level.recordedFluidTicks = new RecordingTicks<>();
             level.playersInWorld = new ArrayList<>();
             level.groundItems = new ArrayList<>();
+            level.xpOrbs = new ArrayList<>();
             level.destroyed = new ArrayList<>();
             level.levelEvents = new ArrayList<>();
             level.sounds = new ArrayList<>();
@@ -2030,6 +2035,8 @@ public final class BlockOracle {
             // Falling blocks and TNT are still only recorded.
             if (entity.getType() == EntityTypes.ITEM) {
                 groundItems.add(entity);
+            } else if (entity instanceof net.minecraft.world.entity.ExperienceOrb orb) {
+                xpOrbs.add(orb.getValue());
             }
             return true;
         }
@@ -4513,11 +4520,18 @@ public final class BlockOracle {
     }
 
     /** 一道生存挖掘题。 */
-    private record MineSpec(Block block, Item tool, long seed) {}
+    private record MineSpec(Block block, Item tool, long seed, String[] enchantments, int[] levels) {
+        private MineSpec(Block block, Item tool, long seed) {
+            this(block, tool, seed, new String[0], new int[0]);
+        }
+    }
 
     /** 跑题、写答案、做汇总。 */
     private static final class Oracle {
         private static final char[] HEX = "0123456789abcdef".toCharArray();
+
+        /** 当前挖掘题的工具附魔，写答案时要用。 */
+        private JsonArray specToolEnchants = new JsonArray();
 
         private final Official official;
         private final Options options;
@@ -4667,6 +4681,21 @@ public final class BlockOracle {
                     new MineSpec(Blocks.STONE, Items.AIR, 16L),
                     new MineSpec(Blocks.STONE, Items.WOODEN_PICKAXE, 17L),
                     new MineSpec(Blocks.COBBLESTONE, Items.AIR, 18L),
+                    // 矿石经验：普通、时运、精准采集（精准采集不掉经验），以及常数 / 无经验区间。
+                    new MineSpec(Blocks.COAL_ORE, Items.WOODEN_PICKAXE, 31L),
+                    new MineSpec(Blocks.COAL_ORE, Items.WOODEN_PICKAXE, 32L),
+                    new MineSpec(Blocks.DIAMOND_ORE, Items.IRON_PICKAXE, 33L,
+                            new String[] {"minecraft:fortune"}, new int[] {3}),
+                    new MineSpec(Blocks.DIAMOND_ORE, Items.IRON_PICKAXE, 34L,
+                            new String[] {"minecraft:silk_touch"}, new int[] {1}),
+                    new MineSpec(Blocks.NETHER_QUARTZ_ORE, Items.WOODEN_PICKAXE, 35L,
+                            new String[] {"minecraft:fortune"}, new int[] {2}),
+                    new MineSpec(Blocks.EMERALD_ORE, Items.IRON_PICKAXE, 36L,
+                            new String[] {"minecraft:silk_touch"}, new int[] {1}),
+                    new MineSpec(Blocks.IRON_ORE, Items.STONE_PICKAXE, 37L),
+                    new MineSpec(Blocks.SCULK, Items.WOODEN_PICKAXE, 38L),
+                    new MineSpec(Blocks.STONE, Items.WOODEN_PICKAXE, 39L,
+                            new String[] {"minecraft:fortune"}, new int[] {3}),
             };
             List<MineSpec> matched = new ArrayList<>();
             for (MineSpec spec : specs) {
@@ -4690,7 +4719,27 @@ public final class BlockOracle {
                 BlockState state = spec.block.defaultBlockState();
                 level.blocks.put(pos.asLong(), state);
                 ItemStack tool = spec.tool == Items.AIR ? ItemStack.EMPTY : new ItemStack(spec.tool);
+                if (!tool.isEmpty() && spec.enchantments.length > 0) {
+                    ItemEnchantments.Mutable enchants = new ItemEnchantments.Mutable(ItemEnchantments.EMPTY);
+                    JsonArray toolEnchants = new JsonArray();
+                    for (int i = 0; i < spec.enchantments.length; i++) {
+                        var holder = official.registries.lookupOrThrow(Registries.ENCHANTMENT)
+                                .getOrThrow(net.minecraft.resources.ResourceKey.create(
+                                        Registries.ENCHANTMENT,
+                                        net.minecraft.resources.Identifier.parse(spec.enchantments[i])));
+                        enchants.set(holder, spec.levels[i]);
+                        JsonArray row = new JsonArray();
+                        row.add(spec.enchantments[i]);
+                        row.add(spec.levels[i]);
+                        toolEnchants.add(row);
+                    }
+                    tool.set(DataComponents.ENCHANTMENTS, enchants.toImmutable());
+                    specToolEnchants = toolEnchants;
+                } else {
+                    specToolEnchants = new JsonArray();
+                }
                 level.groundItems.clear();
+                level.xpOrbs.clear();
                 // `Player.hasCorrectToolForDrops`：不要求工具的方块，空手也掉。
                 if (!state.requiresCorrectToolForDrops() || tool.isCorrectToolForDrops(state)) {
                     Block.dropResources(state, level, pos, null, null, tool);
@@ -4717,6 +4766,14 @@ public final class BlockOracle {
                         line.append(',');
                     }
                     line.append(rows.get(i));
+                }
+                line.append("],\"toolEnchantments\":").append(specToolEnchants);
+                line.append(",\"xpOrbs\":[");
+                for (int i = 0; i < level.xpOrbs.size(); i++) {
+                    if (i > 0) {
+                        line.append(',');
+                    }
+                    line.append(level.xpOrbs.get(i));
                 }
                 line.append("],\"randomSeed\":").append(legacySeed(random)).append("}\n");
                 out.append(line);

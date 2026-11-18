@@ -363,9 +363,17 @@ fn destroy_block(region: &mut Region, snapshot: &Snapshot, pos: BlockPos) -> boo
     // Vanilla `destroyBlock` takes the block entity before `removeBlock`; the
     // loot table still sees it.
     let block_entity = crate::block_drops::collect_from_region(region, pos);
+    // `Block.tryDropExperience` 要读主手物品上的附魔（精准采集 / 时运）。
+    // `processBlockExperience` reads the enchantments on the main-hand item.
+    let tool = region
+        .players
+        .get(&snapshot.id)
+        .map(|player| player.inventory.held(Hand::Main).clone())
+        .unwrap_or_else(mc_bamboo_protocol::item::ItemStack::empty);
     // `GameMasterBlock` 的权限检查在这里面。没有 `canUseGameMasterBlocks` 时挖不动。
     let outcome = durability::run(region, snapshot.id, Hand::Main, |region| {
         let (mut level, ticks) = region.block_level();
+        level.set_break_tool(tool);
         mc_bamboo_blocks::destroy_block(&mut level, ticks, &snapshot.actor, pos)
     });
     send_effects(region, Some(snapshot.id), &outcome.effects);

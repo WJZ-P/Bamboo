@@ -414,6 +414,46 @@ pub fn replay_experience_seed(saved: Option<i32>, seed: i64) -> [i32; 2] {
     [player.enchantment_seed, player.random.next_int()]
 }
 
+/// 供 `mc-bamboo-vanilla machine` 对拍砂轮经验：给定附魔 `min_cost` 之和与世界随机源
+/// 种子，返回 `(reward, 拆分出的每颗球的值)`。只在 `oracle-samples` feature 下编进库里。
+///
+/// Replays grindstone XP for `mc-bamboo-vanilla machine`: given the sum of
+/// enchantment `min_cost` and the world random seed, returns
+/// `(reward, each orb value)`. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_grindstone_xp(amount: i32, seed: i64) -> (i32, Vec<i32>) {
+    use mc_bamboo_blocks::{LegacyRandom, entity::award_values};
+
+    let random = LegacyRandom::new(seed);
+    let reward = menu::grindstone::experience_amount(&random, amount);
+    (reward, award_values(&random, reward))
+}
+
+/// 供 `mc-bamboo-vanilla player-data` 对拍 `ServerPlayer.doTick` 的六个只读准则：
+/// 给定 total / level，返回 `[health, food, air, armor, xp, level]`。
+/// 只在 `oracle-samples` feature 下编进库里。
+///
+/// Replays the six read-only criteria of `ServerPlayer.doTick` for
+/// `mc-bamboo-vanilla player-data`: given total / level, returns
+/// `[health, food, air, armor, xp, level]`. Gated behind `oracle-samples`.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_criteria_values(total: i32, level: i32) -> [i32; 6] {
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+
+    let mut player = player::Player::new(
+        inbound::PlayerId(1),
+        uuid::Uuid::nil(),
+        String::new(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::default(),
+    );
+    player.experience.total = total;
+    player.experience.level = level;
+    scoreboard::criteria_values(&player).map(|(_, value)| value)
+}
+
 /// 供 `mc-bamboo-vanilla saved-data` 和官方 codec 对拍：返回 Bamboo 编码器写出的
 /// 三份示例 `data` 复合标签（游戏规则、世界边界、世界时钟）。只暴露公开的 [`Tag`]，
 /// 不把运行时类型泄漏到 crate 外。值固定，方便对拍期望值。
