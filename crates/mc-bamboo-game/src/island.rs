@@ -136,20 +136,29 @@ pub const DEFAULT_ISLAND_DEAD_SECONDS: u64 = 30;
 /// heavy tick for a stuck island.
 pub const MIN_ISLAND_DEAD_SECONDS: u64 = 5;
 
-/// 改 `island_dead_seconds` 缺省值的环境变量（秒，不小于 [`MIN_ISLAND_DEAD_SECONDS`]）。
+/// `island_dead_seconds` 的上限（一小时）：再长就和不判死没有区别。
 ///
-/// The environment variable that overrides the `island_dead_seconds` default
-/// (seconds, at least [`MIN_ISLAND_DEAD_SECONDS`]).
+/// The upper bound of `island_dead_seconds` (an hour); longer is no
+/// different from never.
+pub const MAX_ISLAND_DEAD_SECONDS: u64 = 3600;
+
+/// 在运行时盖过 `island_dead_seconds` 的环境变量（秒，在 [`MIN_ISLAND_DEAD_SECONDS`] 和
+/// [`MAX_ISLAND_DEAD_SECONDS`] 之间）。
+///
+/// The environment variable that overrides `island_dead_seconds` at run time
+/// (seconds, between [`MIN_ISLAND_DEAD_SECONDS`] and [`MAX_ISLAND_DEAD_SECONDS`]).
 pub const ISLAND_DEAD_SECONDS_ENV: &str = "BAMBOO_ISLAND_DEAD_SECONDS";
 
-/// 环境变量给的 `island_dead_seconds`。没设或者不是不小于下限的整数时是 `None`。
+/// 环境变量给的 `island_dead_seconds`。没设或者不是上下限之间的整数时是 `None`。
 ///
 /// The `island_dead_seconds` given by the environment, or `None` when unset
-/// or not an integer at or above the lower bound.
+/// or not an integer within the bounds.
 pub fn island_dead_seconds_from_env() -> Option<u64> {
     let value = std::env::var(ISLAND_DEAD_SECONDS_ENV).ok()?;
     match value.trim().parse::<u64>() {
-        Ok(seconds) if seconds >= MIN_ISLAND_DEAD_SECONDS => Some(seconds),
+        Ok(seconds) if (MIN_ISLAND_DEAD_SECONDS..=MAX_ISLAND_DEAD_SECONDS).contains(&seconds) => {
+            Some(seconds)
+        }
         _ => {
             tracing::warn!(%value, "ignoring an invalid {ISLAND_DEAD_SECONDS_ENV}");
             None
@@ -407,10 +416,16 @@ impl IslandSlot {
         let island = self.island.take().expect("岛已经交出去了");
         self.away_players = island.region.players.keys().copied().collect();
         let mut unacked = island.mailbox.positions();
-        unacked.extend(island.replies.events.iter().filter_map(|event| match event {
-            Event::Delivered { pos, .. } | Event::Returned { pos, .. } => Some(*pos),
-            _ => None,
-        }));
+        unacked.extend(
+            island
+                .replies
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Delivered { pos, .. } | Event::Returned { pos, .. } => Some(*pos),
+                    _ => None,
+                }),
+        );
         self.away = Some(Away {
             ticket,
             clock: island.region.tick.game_time(),
@@ -556,10 +571,9 @@ impl Islands {
     /// home parked at a tick boundary.
     pub(crate) fn keep_blueprint(&mut self) {
         let home = &mut **self.slots.get_mut(&HOME_REGION).expect("家岛一直在");
-        let random = home.region.derive_island_random(
-            home.region.global.seed,
-            SectionPos::of(ChunkPos::new(0, 0)),
-        );
+        let random = home
+            .region
+            .derive_island_random(home.region.global.seed, SectionPos::of(ChunkPos::new(0, 0)));
         let Ok(region) = home.region.split_off_island(
             &std::collections::BTreeSet::new(),
             &std::collections::BTreeSet::new(),
@@ -573,7 +587,9 @@ impl Islands {
 
     /// 空白岛的 `Region`（主控换家岛之前给它重发全局快照）。
     pub(crate) fn blueprint_region_mut(&mut self) -> Option<&mut Region> {
-        self.blueprint.as_deref_mut().map(|island| &mut island.region)
+        self.blueprint
+            .as_deref_mut()
+            .map(|island| &mut island.region)
     }
 
     /// 拿着派出号 `ticket` 的岛（它不在主控手里）。
@@ -591,11 +607,11 @@ impl Islands {
         self.slots.get(&id).and_then(IslandSlot::away_ticket)
     }
 
-    /// 不在主控手里的岛 `id` 上有几名玩家。
-    pub(crate) fn away_player_count(&self, id: RegionId) -> usize {
-        self.slots
-            .get(&id)
-            .map_or(0, |slot| slot.away_players.len())
+    /// 不在主控手里的岛 `id` 这一次派出时记下的情况。
+    ///
+    /// What was noted when island `id`, now away, was dispatched.
+    pub(crate) fn away(&self, id: RegionId) -> Option<&Away> {
+        self.slots.get(&id).and_then(|slot| slot.away.as_ref())
     }
 
     /// 把不在主控手里的岛 `id` 判死（岛的实施计划 5.6.2）：拿掉它的槽位，返回派出时记下的
@@ -682,10 +698,6 @@ impl Islands {
 
     pub(crate) fn slot_mut(&mut self, id: RegionId) -> Option<&mut IslandSlot> {
         self.slots.get_mut(&id)
-    }
-
-    pub(crate) fn slots_mut(&mut self) -> impl Iterator<Item = &mut IslandSlot> {
-        self.slots.values_mut()
     }
 
     /// 全部停放着的岛，按编号升序。

@@ -3110,14 +3110,14 @@ mod island_command_tests;
 #[cfg(test)]
 #[path = "world/island_crossing_tests.rs"]
 mod island_crossing_tests;
-#[cfg(test)]
-#[path = "world/tests/island_drive_tests.rs"]
-mod island_drive_tests;
 #[path = "world/island_death.rs"]
 mod island_death;
 #[cfg(test)]
 #[path = "world/island_death_tests.rs"]
 mod island_death_tests;
+#[cfg(test)]
+#[path = "world/tests/island_drive_tests.rs"]
+mod island_drive_tests;
 #[path = "world/island_hybrid.rs"]
 mod island_hybrid;
 #[cfg(test)]

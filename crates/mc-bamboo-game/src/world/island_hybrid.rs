@@ -621,7 +621,13 @@ impl World {
             // The queue is bounded (plan 5.6.5): past the limit nothing is
             // dropped; the island is declared dead at the next check.
             let items_now = queue.len();
-            let bytes = self.master.hybrid.death.fan_out_bytes.entry(id).or_default();
+            let bytes = self
+                .master
+                .hybrid
+                .death
+                .fan_out_bytes
+                .entry(id)
+                .or_default();
             *bytes = bytes.saturating_add(cost);
             if items_now > max_items || *bytes > max_bytes {
                 self.master.hybrid.death.doomed.insert(id);
@@ -673,7 +679,7 @@ impl World {
     /// The last step of a lagging island's landing: flush its outbound
     /// buffers and stash its save report and list changes with the master
     /// (the island may be dispatched again at once to catch up).
-    fn flush_island(&mut self, id: RegionId) {
+    pub(super) fn flush_island(&mut self, id: RegionId) {
         let Some(island) = self.islands.get_mut(id) else {
             return;
         };
@@ -852,6 +858,15 @@ impl World {
         }
         for id in away {
             self.bury(id, super::island_death::DeathCause::Shutdown);
+        }
+        // 判死的那一刻正好跑完的岛不判死，它的交回在通道里，收下来照常存。
+        // An island that finished right at the verdict is not dead; its
+        // hand-back is in the channel and it is saved as usual.
+        if !self.islands.all_parked() {
+            self.recall(ISLAND_WAIT_SLICE);
+            for id in self.islands.away_ids() {
+                self.bury(id, super::island_death::DeathCause::Shutdown);
+            }
         }
     }
 
@@ -1239,8 +1254,8 @@ impl World {
         let now = self.master.hybrid.tick;
         self.master.hybrid.stalls.push(Stall {
             island,
-            from: now + first,
-            to: now + last,
+            from: now.saturating_add(first),
+            to: now.saturating_add(last),
             gate: None,
         });
     }

@@ -964,6 +964,26 @@ impl DirectorHost {
             .collect()
     }
 
+    /// 邮筒里投给 `id`、它还没取走的收回信说到的位置。这些区块还在 `id` 手里（Director
+    /// 记着 `Reclaiming`，不带岛编号），岛被判死时它们和它的别的区块一起丢（计划 5.6.3）。
+    ///
+    /// Positions named by reclaim letters posted to `id` and not yet taken.
+    /// Those chunks are still in `id`'s hands (the Director records
+    /// `Reclaiming`, without an island id), and are lost with its other chunks
+    /// when it is declared dead (plan 5.6.3).
+    pub(crate) fn posted_reclaims(&self, id: RegionId) -> Vec<ChunkPos> {
+        self.posts
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|letter| match letter {
+                Posted::Reclaim(positions) => Some(positions.iter().map(|(pos, _)| *pos)),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
     /// 邮筒里投给 `id` 的信件数（测试用）。
     #[cfg(test)]
     pub(crate) fn posted_to(&self, id: RegionId) -> usize {

@@ -123,6 +123,18 @@ pub struct ServerConfig {
     /// partitioner split distant groups onto their own islands. See
     /// `mc_bamboo_game::default_islands` for the default (`BAMBOO_ISLANDS` wins).
     pub islands: bool,
+    /// 多岛的混合驱动下判死的时限（`bamboo.toml` 的 `island_dead_seconds`）：一个岛的同一刻
+    /// 在 tick 线程上连续跑超过这么久就判为死岛，它的玩家被断开、区块从上次存盘重新
+    /// 加载。缺省见 `mc_bamboo_game::default_island_dead_timeout`（30 秒，环境变量
+    /// `BAMBOO_ISLAND_DEAD_SECONDS` 优先）。
+    ///
+    /// The dead-island timeout under the multi-island hybrid drive
+    /// (`island_dead_seconds` in `bamboo.toml`): an island whose tick runs on
+    /// its thread longer than this is declared dead, its players disconnected
+    /// and its chunks reloaded from the last save. See
+    /// `mc_bamboo_game::default_island_dead_timeout` for the default (30 s,
+    /// `BAMBOO_ISLAND_DEAD_SECONDS` wins).
+    pub island_dead_timeout: Duration,
     /// 世界生成参数（种子、世界类型、flat 预设、是否生成结构）。
     /// 嵌入用法（测试、oracle、压测）默认超平坦、种子 0；由 `server.properties`
     /// 新建的世界在 `ConfigFiles::to_server_config` 里改成官方默认 `normal`。
@@ -172,6 +184,7 @@ impl Default for ServerConfig {
             mail_budget: MailBudget::default(),
             island_threads: mc_bamboo_game::default_island_threads(),
             islands: mc_bamboo_game::default_islands(),
+            island_dead_timeout: mc_bamboo_game::default_island_dead_timeout(),
             world_gen: WorldGenConfig::default(),
             broadcast_console_to_ops: true,
             console_enabled: false,

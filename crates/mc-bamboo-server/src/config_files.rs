@@ -16,9 +16,11 @@ use std::{
 };
 
 use mc_bamboo_game::{
-    DEFAULT_ISLAND_THREADS, DEFAULT_ISLANDS, ISLAND_THREADS_ENV, ISLANDS_ENV,
-    MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MailBudget,
-    island_threads_from_env, islands_from_env, world_options::WorldGenConfig,
+    DEFAULT_ISLAND_DEAD_SECONDS, DEFAULT_ISLAND_THREADS, DEFAULT_ISLANDS, ISLAND_DEAD_SECONDS_ENV,
+    ISLAND_THREADS_ENV, ISLANDS_ENV, MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS,
+    MAX_ISLAND_DEAD_SECONDS, MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MIN_ISLAND_DEAD_SECONDS,
+    MailBudget, island_dead_seconds_from_env, island_threads_from_env, islands_from_env,
+    world_options::WorldGenConfig,
 };
 use toml::{Table, Value};
 use tracing::{info, warn};
@@ -140,6 +142,7 @@ const BAMBOO_KEYS: &[&str] = &[
     "reclaims_per_tick",
     "island_threads",
     "islands",
+    "island_dead_seconds",
 ];
 
 /// Bamboo 自己的配置项。每一项都对应 [`ServerConfig`] 里的一个字段。
@@ -184,6 +187,16 @@ pub struct BambooConfig {
     /// their own islands. `BAMBOO_ISLANDS` overrides it at run time and is
     /// never written back to the file.
     pub islands: bool,
+    /// 多岛的混合驱动下判死的时限：一个岛的同一刻在 tick 线程上连续跑超过这么久，它的
+    /// 玩家被断开、区块从上次存盘重新加载（默认 30 秒）。环境变量
+    /// `BAMBOO_ISLAND_DEAD_SECONDS` 在运行时盖过它，不写回文件。
+    ///
+    /// The dead-island timeout under the multi-island hybrid drive: an
+    /// island whose tick runs on its thread longer than this has its players
+    /// disconnected and its chunks reloaded from the last save (default 30
+    /// s). `BAMBOO_ISLAND_DEAD_SECONDS` overrides it at run time and is never
+    /// written back to the file.
+    pub island_dead_timeout: Duration,
 }
 
 impl Default for BambooConfig {
@@ -209,6 +222,7 @@ impl Default for BambooConfig {
             // 文件里的缺省也不跟环境变量走，理由同上。
             // The file default ignores the environment for the same reason.
             islands: DEFAULT_ISLANDS,
+            island_dead_timeout: Duration::from_secs(DEFAULT_ISLAND_DEAD_SECONDS),
         }
     }
 }
@@ -271,6 +285,10 @@ impl BambooConfig {
                 "# 多岛：false = 整个世界一个岛（精确模式，默认）；true = 相距很远的玩家群\n",
                 "# 各自一个岛。要求逐位一致的对拍和探针显式选 false。\n",
                 "islands = {}\n",
+                "\n",
+                "# 多岛时一个岛卡死多久判为死岛，单位秒，默认 30（5 到 3600）：它上面的玩家被断开，\n",
+                "# 它的区块从上次存盘重新加载，之后的改动丢失。只在 islands = true 时有用。\n",
+                "island_dead_seconds = {}\n",
             ),
             self.pre_play_timeout.as_secs(),
             self.max_pre_play_connections,
@@ -286,6 +304,7 @@ impl BambooConfig {
             self.reclaims_per_tick,
             self.island_threads,
             self.islands,
+            self.island_dead_timeout.as_secs(),
         )
     }
 
@@ -365,6 +384,14 @@ impl BambooConfig {
                 MAX_ISLAND_THREADS,
             ),
             islands: boolean(table, "islands", file, defaults.islands),
+            island_dead_timeout: Duration::from_secs(integer(
+                table,
+                "island_dead_seconds",
+                file,
+                defaults.island_dead_timeout.as_secs() as usize,
+                MIN_ISLAND_DEAD_SECONDS as usize,
+                MAX_ISLAND_DEAD_SECONDS as usize,
+            ) as u64),
         }
     }
 }
@@ -752,6 +779,8 @@ impl ConfigFiles {
             // probes use it to put a whole process in exact mode).
             island_threads: island_threads_from_env().unwrap_or(self.bamboo.island_threads),
             islands: islands_from_env().unwrap_or(self.bamboo.islands),
+            island_dead_timeout: island_dead_seconds_from_env()
+                .map_or(self.bamboo.island_dead_timeout, Duration::from_secs),
             world_gen,
             broadcast_console_to_ops: self.official.broadcast_console_to_ops,
             // 从真实 server.properties 建起来的命令行版才读进程 stdin；嵌入用法不读。
@@ -791,6 +820,9 @@ impl ConfigFiles {
         }
         if islands_from_env().is_none() {
             bamboo.islands = config.islands;
+        }
+        if island_dead_seconds_from_env().is_none() {
+            bamboo.island_dead_timeout = config.island_dead_timeout;
         }
         Self { official, bamboo }
     }
@@ -942,6 +974,11 @@ impl ConfigFiles {
                 u64::from(self.bamboo.islands),
                 u64::from(defaults.bamboo.islands),
             ),
+            (
+                "island_dead_seconds",
+                self.bamboo.island_dead_timeout.as_secs(),
+                defaults.bamboo.island_dead_timeout.as_secs(),
+            ),
         ];
         for (key, value, default) in bamboo {
             if value != default {
@@ -1080,6 +1117,16 @@ pub fn log_startup(directory: &Path, files: &ConfigFiles) {
             islands,
             file = files.bamboo.islands,
             "islands comes from the environment, not bamboo.toml"
+        );
+    }
+    if let Some(seconds) = island_dead_seconds_from_env()
+        && seconds != files.bamboo.island_dead_timeout.as_secs()
+    {
+        info!(
+            env = ISLAND_DEAD_SECONDS_ENV,
+            seconds,
+            file = files.bamboo.island_dead_timeout.as_secs(),
+            "island_dead_seconds comes from the environment, not bamboo.toml"
         );
     }
     let unsupported = files.unsupported_keys();
@@ -1295,6 +1342,43 @@ mod tests {
                     .to_server_config(dir.path())
                     .islands,
                 islands_from_env().unwrap_or(value)
+            );
+        }
+    }
+
+    /// `island_dead_seconds` 写进文件、读回来、到达 `ServerConfig`；超出 5 到 3600 的值
+    /// 回落到缺省 30。
+    ///
+    /// `island_dead_seconds` survives a file round trip and reaches
+    /// `ServerConfig`; values outside 5 to 3600 fall back to the default 30.
+    #[test]
+    fn island_dead_seconds_round_trip_and_reach_server_config() {
+        let dir = Temp::new();
+        let mut files = ConfigFiles::default();
+        assert_eq!(files.bamboo.island_dead_timeout, Duration::from_secs(30));
+        files.bamboo.island_dead_timeout = Duration::from_secs(90);
+        write(dir.path(), &files).unwrap();
+        let loaded = read(dir.path()).unwrap();
+        assert_eq!(loaded.bamboo.island_dead_timeout, Duration::from_secs(90));
+        assert_eq!(
+            loaded.to_server_config(dir.path()).island_dead_timeout,
+            Duration::from_secs(island_dead_seconds_from_env().unwrap_or(90))
+        );
+        assert!(
+            loaded
+                .non_defaults()
+                .contains(&"island_dead_seconds=90".to_owned())
+        );
+        for bad in ["1", "4000", "\"x\""] {
+            fs::write(
+                dir.path().join(BAMBOO_FILE),
+                format!("island_dead_seconds = {bad}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                read(dir.path()).unwrap().bamboo.island_dead_timeout,
+                Duration::from_secs(30),
+                "{bad} 回落到缺省"
             );
         }
     }

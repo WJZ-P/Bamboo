@@ -286,7 +286,10 @@ impl IslandPool {
             return queues.shared.remove(at).map(|job| job.island);
         }
         for index in 0..queues.own.len() {
-            if let Some(at) = queues.own[index].iter().position(|job| job.ticket == ticket) {
+            if let Some(at) = queues.own[index]
+                .iter()
+                .position(|job| job.ticket == ticket)
+            {
                 queues.busy[index] = queues.busy[index].saturating_sub(1);
                 return queues.own[index].remove(at).map(|job| job.island);
             }
@@ -297,6 +300,7 @@ impl IslandPool {
     /// 派出号 `ticket` 是不是已经在某条线程上开跑、还没跑完。
     ///
     /// Whether dispatch `ticket` has started on a thread and not finished.
+    #[cfg(test)]
     pub(crate) fn is_running(&self, ticket: u64) -> bool {
         let queues = self.dispatch.lock();
         queues
@@ -321,9 +325,11 @@ impl IslandPool {
     pub(crate) fn abandon(&mut self, ticket: u64) -> bool {
         let replace = {
             let mut queues = self.dispatch.lock();
-            let Some(index) = queues.running.iter().position(|running| {
-                running.is_some_and(|running| running.ticket == ticket)
-            }) else {
+            let Some(index) = queues
+                .running
+                .iter()
+                .position(|running| running.is_some_and(|running| running.ticket == ticket))
+            else {
                 return false;
             };
             if queues.retired[index] {
@@ -401,7 +407,8 @@ impl IslandPool {
             return Err(island);
         }
         let hint = hint.min(queues.busy.len() - 1);
-        let free = |queues: &Queues, index: usize| queues.busy[index] == 0 && !queues.retired[index];
+        let free =
+            |queues: &Queues, index: usize| queues.busy[index] == 0 && !queues.retired[index];
         #[cfg_attr(not(test), allow(unused_mut))]
         let mut idle = if free(&queues, hint) {
             Some(hint)
@@ -567,5 +574,159 @@ fn run_worker(index: usize, dispatch: &Dispatch, replies: &Sender<HandBack>, bod
         if replies.send(back).is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+    use crate::island::IslandTestHook;
+
+    /// 测试用的岛的一刻：带着闸就卡在闸上，直到闸打开。
+    fn stall_body(island: &mut Island) {
+        if let Some(IslandTestHook::Stall(gate)) = &island.test_hook {
+            while !gate.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    /// 一个只有空 `Region`、带着闸的岛。
+    fn stalled_island(gate: &Arc<AtomicBool>) -> Box<Island> {
+        let mut island = Island::new(
+            mc_bamboo_world::director::HOME_REGION,
+            crate::region::Region::new(2, 20, false),
+            crate::director_host::MailBudget::default(),
+        );
+        island.test_hook = Some(IslandTestHook::Stall(Arc::clone(gate)));
+        Box::new(island)
+    }
+
+    /// 等派出号 `ticket` 在某条线程上开跑。
+    fn wait_running(pool: &IslandPool, ticket: u64) {
+        let started = Instant::now();
+        while !pool.is_running(ticket) {
+            assert!(started.elapsed() < Duration::from_secs(30), "没开跑");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// 放弃线程（岛的实施计划 5.6.4）：前 [`MAX_ABANDONED_THREADS`] 次各补一条新线程，
+    /// 活着的线程数不变；之后不再补，活着的线程数一次少一条，到 0 时派岛失败、等岛报
+    /// 「线程全没了」。排在被放弃的线程后面的岛改由别的线程跑；只看开跑了多久，排着队的
+    /// 不算超时；被放弃的线程跑完以后照常交回（带着派出号）然后退出。
+    ///
+    /// Abandoning threads (island plan 5.6.4): the first
+    /// [`MAX_ABANDONED_THREADS`] each start a replacement and the live count
+    /// stays; afterwards none is started, each abandon costs a live thread,
+    /// and at 0 dispatching fails and waiting reports every thread gone.
+    /// Islands queued behind an abandoned thread run elsewhere; only time
+    /// spent running counts as overdue; an abandoned thread that finishes
+    /// hands back as usual (with its ticket) and exits.
+    #[test]
+    fn abandoned_threads_are_replaced_up_to_the_limit() {
+        let mut pool = IslandPool::new(2, stall_body).expect("起线程池");
+        let mut gates = Vec::new();
+        let mut ticket = 0_u64;
+        // 两条线程都卡住，第三个岛排在公共队列里。
+        // Both threads stuck, a third island waits in the shared queue.
+        for _ in 0..2 {
+            ticket += 1;
+            let gate = Arc::new(AtomicBool::new(false));
+            assert!(pool.dispatch(0, stalled_island(&gate), ticket).is_ok());
+            wait_running(&pool, ticket);
+            gates.push(gate);
+        }
+        let queued_gate = Arc::new(AtomicBool::new(true));
+        ticket += 1;
+        let queued = ticket;
+        assert!(
+            pool.dispatch(0, stalled_island(&queued_gate), queued)
+                .is_ok()
+        );
+        assert!(!pool.is_running(queued), "两条线程都忙着，它排着");
+        assert_eq!(pool.running_for(queued), None);
+        pool.backdate(1, Duration::from_secs(100));
+        assert_eq!(
+            pool.overdue(Duration::from_secs(50)),
+            vec![1],
+            "只有开跑了 50 秒以上的算超时，排着的不算"
+        );
+        assert!(pool.abandon(1), "放弃正在跑 1 号的线程");
+        assert!(!pool.abandon(1), "已经放弃过");
+        assert_eq!(pool.live_threads(), 2, "补了一条");
+        assert_eq!(pool.threads(), 3);
+        // 排着的岛由补上的线程跑完交回。
+        // The queued island runs on the replacement and comes back.
+        let started = Instant::now();
+        loop {
+            match pool.wait(Duration::from_millis(50)) {
+                Wait::Back(back) => {
+                    assert_eq!(back.ticket, queued);
+                    break;
+                }
+                Wait::Pending => assert!(started.elapsed() < Duration::from_secs(30)),
+                Wait::Lost => panic!("线程没全没"),
+            }
+        }
+        assert!(
+            pool.overdue(Duration::from_secs(50)).is_empty(),
+            "被放弃的不再算"
+        );
+        assert!(pool.abandon(2), "另一条卡住的也放弃");
+        assert_eq!(pool.live_threads(), 2, "又补了一条");
+        // 接着放弃：补到上限为止。
+        // Keep abandoning: replacements stop at the limit.
+        let mut live = pool.live_threads();
+        let mut abandoned = 2;
+        while live > 0 {
+            ticket += 1;
+            let gate = Arc::new(AtomicBool::new(false));
+            assert!(pool.dispatch(0, stalled_island(&gate), ticket).is_ok());
+            wait_running(&pool, ticket);
+            gates.push(gate);
+            assert!(pool.abandon(ticket));
+            abandoned += 1;
+            let now = pool.live_threads();
+            if abandoned <= MAX_ABANDONED_THREADS {
+                assert_eq!(now, live, "第 {abandoned} 次放弃补了一条");
+            } else {
+                assert_eq!(now, live - 1, "第 {abandoned} 次放弃不再补");
+            }
+            live = now;
+        }
+        assert_eq!(
+            abandoned,
+            MAX_ABANDONED_THREADS + 2,
+            "补满以后两条线程各放弃一次"
+        );
+        let gate = Arc::new(AtomicBool::new(true));
+        assert!(
+            pool.dispatch(0, stalled_island(&gate), ticket + 1).is_err(),
+            "没有线程了"
+        );
+        assert!(matches!(pool.wait(Duration::ZERO), Wait::Lost));
+        // 开闸：被放弃的线程把岛交回（带着当时的派出号）然后退出。
+        // Open the gates: abandoned threads hand back with their tickets and exit.
+        for gate in &gates {
+            gate.store(true, Ordering::Release);
+        }
+        let mut back = Vec::new();
+        let started = Instant::now();
+        while back.len() < gates.len() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "被放弃的线程没交回"
+            );
+            if let Ok(hand) = pool.replies.recv_timeout(Duration::from_millis(50)) {
+                back.push(hand.ticket);
+            }
+        }
+        back.sort_unstable();
+        let mut expected: Vec<u64> = (1..=ticket).filter(|&t| t != queued).collect();
+        expected.sort_unstable();
+        assert_eq!(back, expected);
     }
 }

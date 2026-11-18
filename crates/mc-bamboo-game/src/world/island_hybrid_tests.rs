@@ -40,10 +40,10 @@ use crate::{inbound::Inbound, island::IslandTestHook};
 ///
 /// The time limit for each test: a concurrency bug usually shows as a hang
 /// rather than a failed assertion.
-const LIMIT: Duration = Duration::from_secs(240);
+pub(super) const LIMIT: Duration = Duration::from_secs(240);
 
 /// 在一条栈够大的线程上跑测试，超过 [`LIMIT`] 就失败。
-fn bounded(body: impl FnOnce() + Send + 'static) {
+pub(super) fn bounded(body: impl FnOnce() + Send + 'static) {
     let (done, finished) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         with_stack(body);
@@ -69,7 +69,7 @@ fn bounded(body: impl FnOnce() + Send + 'static) {
 /// op, the chat clock pinned and the machines placed (the hanging sand is
 /// pushed past the window, so no entity spawns in it). `threads = 0` is
 /// lockstep, 1 or more the hybrid drive.
-fn scene(seed: u64, threads: usize) -> Scene {
+pub(super) fn scene(seed: u64, threads: usize) -> Scene {
     let scene = set_up(seed, Harness::new_islands(2, threads));
     assert_eq!(
         scene.server.world.islands.len(),
@@ -156,7 +156,7 @@ fn set_up_pair(seed: u64, mut a: Harness, mut b: Harness) -> (Scene, Scene) {
 }
 
 /// 两个世界对齐以后做的准备（见 [`scene`]）。
-fn prepare(scene: &mut Scene) {
+pub(super) fn prepare(scene: &mut Scene) {
     for group in 0..scene.centers.len() {
         let client = first_of(scene, group);
         make_op(scene, &client);
@@ -186,7 +186,7 @@ fn prepare(scene: &mut Scene) {
 }
 
 /// 拿着第 `group` 组的岛（按分区器）。
-fn island_of_group(scene: &mut Scene, group: usize) -> RegionId {
+pub(super) fn island_of_group(scene: &mut Scene, group: usize) -> RegionId {
     let center = scene.centers[group];
     scene
         .server
@@ -201,7 +201,7 @@ fn island_of_group(scene: &mut Scene, group: usize) -> RegionId {
 ///
 /// The fingerprint of group `group` and its island's clock, or `None` while
 /// that island is away.
-fn group_state(scene: &mut Scene, group: usize) -> Option<(String, i64)> {
+pub(super) fn group_state(scene: &mut Scene, group: usize) -> Option<(String, i64)> {
     let id = island_of_group(scene, group);
     let Scene {
         server,
@@ -332,7 +332,7 @@ fn assert_same_print_shifted(left: &str, right: &str, delta: i128, what: &str) {
 
 /// 第 `group` 组的第一名玩家发一条命令（不带斜杠）。和 `act` 不同，不碰任何岛（有岛
 /// 不在主控手里时也能用）。
-fn command(scene: &Scene, group: usize, line: &str) {
+pub(super) fn command(scene: &Scene, group: usize, line: &str) {
     let client = first_of(scene, group);
     scene
         .server
@@ -340,7 +340,7 @@ fn command(scene: &Scene, group: usize, line: &str) {
 }
 
 /// 控制台命令。
-fn console(scene: &Scene, line: &str) {
+pub(super) fn console(scene: &Scene, line: &str) {
     scene
         .server
         .inbox_sender()
@@ -349,7 +349,7 @@ fn console(scene: &Scene, line: &str) {
 }
 
 /// 第 `group` 组的玩家。
-fn clients_of(scene: &Scene, group: usize) -> Vec<Client> {
+pub(super) fn clients_of(scene: &Scene, group: usize) -> Vec<Client> {
     scene
         .clients
         .iter()
@@ -359,7 +359,7 @@ fn clients_of(scene: &Scene, group: usize) -> Vec<Client> {
 }
 
 /// 帧里出现了几次 `marker`（聊天和系统消息的正文原样在包体里）。
-fn count_marker(frames: &[Frame], marker: &str) -> usize {
+pub(super) fn count_marker(frames: &[Frame], marker: &str) -> usize {
     let needle = marker.as_bytes();
     frames
         .iter()
@@ -391,7 +391,7 @@ fn marker_order(frames: &[Frame], markers: &[&str]) -> Vec<String> {
 /// 带截止时间跑一刻（混合驱动在 `World::run` 里的样子）。
 ///
 /// Run one tick with a deadline, as the hybrid drive does inside `World::run`.
-fn tick_within(server: &mut Harness, window: Duration) -> ControlFlow<()> {
+pub(super) fn tick_within(server: &mut Harness, window: Duration) -> ControlFlow<()> {
     server.world.master.host.flush_io();
     server.world.master.hybrid.deadline = Some(Instant::now() + window);
     let flow = server.world.tick();
@@ -1957,7 +1957,7 @@ fn master_broadcasts_reach_a_slow_island_when_it_lands() {
 ///
 /// Read one block straight from the region file without starting a world;
 /// `None` if the chunk was never saved.
-fn block_on_disk(root: &std::path::Path, pos: mc_bamboo_core::BlockPos) -> Option<u32> {
+pub(super) fn block_on_disk(root: &std::path::Path, pos: mc_bamboo_core::BlockPos) -> Option<u32> {
     use mc_bamboo_storage::{
         anvil::{RegionCompression, RegionPos, open_region},
         chunk_nbt,

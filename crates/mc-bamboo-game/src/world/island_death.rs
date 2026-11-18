@@ -5,12 +5,12 @@
 //!
 //! - 判定（[`World::bury_overdue`]）：一个岛的同一刻在 tick 线程上连续跑了超过
 //!   `island_dead_timeout`，或者主控给它攒的出站投递超过上限，或者关服时到点没回来；
-//! - 判死的那一刻（[`World::bury`]）：线程池放弃那条线程并补一条，槽位从岛表里拿掉
-//!   （家岛换一个空的），经进服时留下的第二个出口把它的玩家踢掉，丢掉主控手里只属于它
-//!   的东西；
-//! - 后事（[`World::hold_funerals`]，在岛都落地了的时点做）：撤它的玩家的票，Director 里
-//!   它拿着的区块按「盒子没了」处理、票还要的重新读盘，写错误日志，把「离开了游戏」和
-//!   Tab 名单的移除排给全部玩家；
+//! - 判死的那一刻（[`World::bury`]）：写错误日志，线程池放弃那条线程并补一条，槽位从
+//!   岛表里拿掉（家岛换一个空的），经进服时留下的第二个出口把它的玩家踢掉，丢掉主控手里
+//!   只属于它的东西，撤它的玩家的票，Director 里它拿着的区块按「盒子没了」处理、票还要的
+//!   重新读盘；
+//! - 岛都落地以后（[`World::hold_funerals`]）：把「离开了游戏」和 Tab 名单的移除发给
+//!   别的玩家；
 //! - 死岛后来回来了：派出号对不上任何槽位，整个丢弃（`World::seat`）。
 //!
 //! The fallback for a stuck island: declaring it dead (island plan 5.6). The
@@ -19,28 +19,24 @@
 //! queue without bound. This module holds the verdict
 //! ([`World::bury_overdue`]: a tick running past `island_dead_timeout` on its
 //! thread, an outbound queue past its limit, or not back in time at
-//! shutdown), what happens at once ([`World::bury`]: abandon and replace the
-//! thread, drop the slot or swap in an empty home, kick its players through
-//! the second exits kept at join, drop what the master held for it alone) and
-//! the rest done once the islands have landed ([`World::hold_funerals`]: drop
-//! its players' tickets, treat its chunks as lost boxes so wanted ones read
-//! from disk again, log the error, announce the departures). A dead island
+//! shutdown), what happens at once ([`World::bury`]: log the error, abandon
+//! and replace the thread, drop the slot or swap in an empty home, kick its
+//! players through the second exits kept at join, drop what the master held
+//! for it alone, drop its players' tickets and treat its chunks as lost boxes
+//! so wanted ones read from disk again) and what waits until the islands have
+//! landed ([`World::hold_funerals`]: announce the departures). A dead island
 //! that comes back later matches no slot by ticket and is discarded
 //! (`World::seat`).
 
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_protocol::text::Component;
-use mc_bamboo_world::director::{HOME_REGION, Owner, RegionId, TicketOp};
+use mc_bamboo_world::director::{HOME_REGION, Owner, RegionId, TicketOp, owner_is_held};
 use tracing::{error, warn};
 
 use super::{SERVER_SHUTDOWN, World, island_access, island_hybrid::Source};
-use crate::{
-    global_port::GlobalEffect,
-    inbound::PlayerId,
-    island::{Borrow, Buried},
-};
+use crate::{global_port::GlobalEffect, inbound::PlayerId, island::Borrow};
 
 /// 主控给一个不在手里的岛攒的出站投递最多这么多条（岛的实施计划 5.6.5）。
 ///
@@ -85,6 +81,7 @@ pub(crate) enum DeathCause {
 ///
 /// The record of one death (what the log says).
 #[derive(Clone, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct Death {
     pub(crate) island: RegionId,
     pub(crate) cause: DeathCause,
@@ -96,14 +93,13 @@ pub(crate) struct Death {
     pub(crate) chunks: Vec<ChunkPos>,
 }
 
-/// 判死之后还没办的后事。
+/// 判死之后还没办的事：让别的玩家看到它的玩家离开。要借全部玩家，等岛都落地了再做。
+///
+/// What is left after a death: showing the others that its players left.
+/// It borrows every player, so it waits until the islands have landed.
 struct Funeral {
-    island: RegionId,
-    cause: DeathCause,
-    running_for: Option<Duration>,
-    buried: Buried,
-    /// 玩家的名字（判死时从全局名单里抄下来，日志用）。
-    names: Vec<String>,
+    /// 它上面的玩家。
+    players: Vec<PlayerId>,
 }
 
 /// 判死这一部分的状态，只由主控线程读写。
@@ -179,20 +175,24 @@ impl World {
         }
     }
 
-    /// 把不在主控手里的岛 `id` 判死，做当场能做的那一半（岛的实施计划 5.6.2 的第 2–5
-    /// 步）；剩下的（票、区块、日志、让别的玩家看到他们离开）留给
+    /// 把不在主控手里的岛 `id` 判死，做当场能做的那一部分（岛的实施计划 5.6.2 的第 1–5
+    /// 步）：写错误日志、放弃那条线程、拿掉槽位（家岛换一个空的）、踢它的玩家、丢掉主控
+    /// 手里只属于它的东西，并且当场算好它拿着的区块；票和 Director 留给
     /// [`Self::hold_funerals`]，等岛都落地了再做。岛停放着时什么都不做。
     ///
     /// 岛还排在线程池的队列里没开跑时不判死：把它原样拿回来、落地（它没卡住，只是没
-    /// 轮到线程）。
+    /// 轮到线程）。这一刻已经跑完、交回还在路上时也不判死：它马上就落地了。
     ///
-    /// Declare island `id`, which is away, dead and do the half that can be
-    /// done at once (steps 2–5 of island plan 5.6.2); the rest (tickets,
-    /// chunks, the log, showing the departures to others) waits for
+    /// Declare island `id`, which is away, dead and do what can be done at
+    /// once (steps 1–5 of island plan 5.6.2): log the error, abandon the
+    /// thread, drop the slot (an empty home replaces home), kick its players,
+    /// drop what the master held for it alone, and work out the chunks it
+    /// held right now; tickets and the Director wait for
     /// [`Self::hold_funerals`] once the islands have landed. A no-op for a
     /// parked island. An island still queued in the pool, not started, is not
     /// dead: it is taken back as it is and landed (it is not stuck, it just
-    /// had no thread yet).
+    /// had no thread yet). Neither is one whose tick just finished and whose
+    /// hand-back is on its way: it lands in a moment.
     pub(super) fn bury(&mut self, id: RegionId, cause: DeathCause) {
         let Some(ticket) = self.islands.away_ticket(id) else {
             return;
@@ -209,10 +209,22 @@ impl World {
             return;
         }
         let running_for = pool.running_for(ticket);
-        pool.abandon(ticket);
-        // 家岛要换一个空的：先给空白岛重发全局快照，新家岛的随机源按现在的游戏时间派生。
-        // Home is replaced by an empty one: republish to the blank island
-        // first so the new home's random sources derive from the current time.
+        if !pool.abandon(ticket) {
+            // 已经跑完、交回在通道里：下一次收岛时照常落地（出站队列也就发掉了）。
+            // Already finished, the hand-back is in the channel: it lands at
+            // the next take-in as usual (and its outbound queue goes out).
+            return;
+        }
+        // 它拿着的区块（计划 5.6.3）：Director 记在它名下的、派出时还没回执的、以及
+        // 收回信还在邮筒里没取的。现在就算：家岛马上换成同编号的新岛，以后再按编号查会
+        // 把新岛的区块算进来。
+        // Its chunks (plan 5.6.3): those the Director records under it, those
+        // not yet acknowledged at dispatch, and those whose reclaim letter is
+        // still posted. Worked out now: home is replaced by a new island with
+        // the same id at once, and a later lookup by id would include its chunks.
+        let chunks = self.chunks_of_dead(id);
+        // 家岛要换一个空的：先给空白岛重发全局快照。
+        // Home is replaced by an empty one: republish to the blank island first.
         if id == HOME_REGION
             && let Some(region) = self.islands.blueprint_region_mut()
         {
@@ -260,17 +272,84 @@ impl World {
             ?cause,
             running_secs = running_for.map(|time| time.as_secs_f64()),
             ticks_owed = buried.debt,
-            players = buried.players.len(),
-            "an island stopped responding and was declared dead; its players are disconnected \
-             and its chunks will be reloaded from the last save"
+            player_count = buried.players.len(),
+            players = ?names,
+            chunk_count = chunks.len(),
+            ?chunks,
+            "an island stopped responding and was declared dead: its players were disconnected, \
+             its chunks will be reloaded from their last save, and every change to those chunks \
+             and those players since their last save is lost"
         );
-        self.master.hybrid.death.funerals.push(Funeral {
+        let deaths = &mut self.master.hybrid.death.deaths;
+        if deaths.len() >= DEATHS_KEPT {
+            deaths.remove(0);
+        }
+        deaths.push(Death {
             island: id,
             cause,
             running_for,
-            buried,
-            names,
+            ticks_owed: buried.debt,
+            players: buried.players.clone(),
+            chunks: chunks.clone(),
         });
+        // 撤它的玩家的票（票中心和方向一起清），再把它拿着的区块按「盒子没了」交给
+        // Director：先撤票，只有这些玩家要的区块就不用再从磁盘读一遍。这两步只推 Director、
+        // 往邮筒投信，有岛不在、刚交回的岛还没落地时也能做；当场做，Director 的记录和岛表
+        // 就不会有一段对不上。拆合（分区器因此定下的）照常留到下一次 `settle_islands`。
+        // Drop its players' tickets (centres and directions too), then hand
+        // the chunks it held to the Director as lost boxes; tickets first, so
+        // chunks only these players wanted are not read again. Both only drive
+        // the Director and post mail, so they are safe while islands are away
+        // or seated but not landed; done at once, the Director's records never
+        // disagree with the island table. Structural changes the partitioner
+        // decides because of it wait for the next `settle_islands` as usual.
+        for player in &buried.players {
+            self.master.player_directions.remove(player);
+            self.master.ticket_centers.remove(player);
+        }
+        let ops: Vec<TicketOp> = buried
+            .players
+            .iter()
+            .map(|player| TicketOp::PlayerMoved {
+                id: u64::from(player.0 as u32),
+                to: None,
+            })
+            .collect();
+        let mut access = island_access(self.master.drive, &mut self.islands);
+        if !ops.is_empty() {
+            self.master.host.tickets(&mut access, ops);
+        }
+        self.master.host.lose_chunks(&mut access, &chunks);
+        self.publish_player_demand();
+        // 关服时不用让别人看到离开（大家马上都被踢）。
+        // Not at shutdown, where everyone is about to be kicked.
+        if cause != DeathCause::Shutdown && !buried.players.is_empty() {
+            self.master.hybrid.death.funerals.push(Funeral {
+                players: buried.players,
+            });
+        }
+    }
+
+    /// 刚判死的岛 `id` 拿着的区块（见 [`Self::bury`]），只留 Director 还记在 region 一侧的，
+    /// 升序。
+    ///
+    /// The chunks island `id`, being declared dead, holds (see
+    /// [`Self::bury`]), keeping those the Director still records on the
+    /// region side, ascending.
+    fn chunks_of_dead(&self, id: RegionId) -> Vec<ChunkPos> {
+        let director = self.master.host.director();
+        let mut chunks: BTreeSet<ChunkPos> = director
+            .owner_records()
+            .into_iter()
+            .filter(|record| record.owner == Owner::Region(id))
+            .map(|record| record.pos)
+            .collect();
+        if let Some(away) = self.islands.away(id) {
+            chunks.extend(away.unacked.iter().copied());
+        }
+        chunks.extend(self.master.host.posted_reclaims(id));
+        chunks.retain(|&pos| director.owner_at(pos).is_some_and(owner_is_held));
+        chunks.into_iter().collect()
     }
 
     /// 从线程池的队列里拿回来的岛（没开跑）落地：和平常回来的岛一样先发排给它的出站投递、
@@ -283,89 +362,26 @@ impl World {
     fn land_withdrawn(&mut self, id: RegionId) {
         self.master.hybrid.death.doomed.remove(&id);
         self.land_island(id);
-        if let Some(island) = self.islands.get_mut(id) {
-            let _ = island.region.links.flush();
-        }
+        self.flush_island(id);
     }
 
-    /// 办后事（岛的实施计划 5.6.2 的第 6–7 步和日志）。只在岛都落地了的时点调用
-    /// （排着队的事开做之前）：这里会动票、推 Director、照做拆合。
+    /// 让别的玩家看到判死的岛上的玩家离开（岛的实施计划 5.6.2 第 6 步的后一半）：和正常
+    /// 离开相同的两条全局改动。只在岛都落地了的时点调用（排着队的事开做之前）。有停放着
+    /// 的岛就当场发（和正常离开一样，不在的岛经出站队列补发），同一账号马上重进时「离开」
+    /// 一定排在他重进之前；一个停放的岛都没有时作为主控的一件事排队。
     ///
-    /// The rest of a death (steps 6–7 of island plan 5.6.2 and the log). Only
-    /// called where the islands have landed (before held work runs): this
-    /// moves tickets, drives the Director and replays structural changes.
+    /// Show the others that a dead island's players left (the second half of
+    /// step 6 of island plan 5.6.2): the same two global changes as a normal
+    /// leave. Only called where the islands have landed (before held work
+    /// runs). With some island parked it happens at once (as a normal leave;
+    /// absent islands get it through their outbound queues), so the leave
+    /// always precedes the same account joining again; with none parked it
+    /// is queued as master work.
     pub(super) fn hold_funerals(&mut self) {
-        if self.master.hybrid.death.funerals.is_empty() {
-            return;
-        }
-        for funeral in std::mem::take(&mut self.master.hybrid.death.funerals) {
-            let Funeral {
-                island,
-                cause,
-                running_for,
-                buried,
-                names,
-            } = funeral;
-            // 它拿着的区块：Director 记在它名下的，加上派出时还没回执的那些。
-            // Its chunks: those the Director records under it, plus the ones
-            // not yet acknowledged at dispatch.
-            let mut positions = buried.away.unacked.clone();
-            positions.extend(
-                self.master
-                    .host
-                    .director()
-                    .owner_records()
-                    .into_iter()
-                    .filter(|record| record.owner == Owner::Region(island))
-                    .map(|record| record.pos),
-            );
-            let chunks = self.master.host.lose_chunks(
-                &mut island_access(self.master.drive, &mut self.islands),
-                &positions,
-            );
-            // 撤它的玩家的票（票中心一起清）；方向和需求快照跟着更新。
-            // Drop its players' tickets (and centres); directions and the
-            // demand snapshot follow.
-            for player in &buried.players {
-                self.master.player_directions.remove(player);
-            }
-            self.apply_ticket_ops(buried.players.iter().map(|player| TicketOp::PlayerMoved {
-                id: u64::from(player.0 as u32),
-                to: None,
-            }));
-            self.publish_player_demand();
-            error!(
-                island,
-                ?cause,
-                running_secs = running_for.map(|time| time.as_secs_f64()),
-                ticks_owed = buried.debt,
-                player_count = buried.players.len(),
-                players = ?names,
-                chunk_count = chunks.len(),
-                ?chunks,
-                "a dead island's chunks were dropped: every change to them since their last \
-                 save is lost, and so is what its players did since their last save"
-            );
-            let deaths = &mut self.master.hybrid.death.deaths;
-            if deaths.len() >= DEATHS_KEPT {
-                deaths.remove(0);
-            }
-            deaths.push(Death {
-                island,
-                cause,
-                running_for,
-                ticks_owed: buried.debt,
-                players: buried.players.clone(),
-                chunks,
-            });
-            // 别的玩家要看到他们离开：和正常离开相同的两条全局改动，作为主控的一件事
-            // 排队（和排着的控制台命令保持先后）。关服时不用（大家马上都被踢）。
-            // The others must see them leave: the same two global changes as
-            // a normal leave, queued as master work (keeping its order with
-            // held console commands). Not at shutdown, where everyone is
-            // about to be kicked.
-            if cause != DeathCause::Shutdown && !buried.players.is_empty() {
-                let players = buried.players;
+        for Funeral { players } in std::mem::take(&mut self.master.hybrid.death.funerals) {
+            if self.islands.template().is_some() {
+                self.announce_departures(&players);
+            } else {
                 self.run_or_hold(Box::new(move |world: &mut Self| {
                     world.announce_departures(&players);
                 }));
