@@ -93,8 +93,6 @@ pub const MAX_CHAINED_NEIGHBOR_UPDATES: u32 = 1_000_000;
 const WORLD_BOUND: i32 = 30_000_000;
 /// `ChunkPos.isValid` 的边界，单位是区块。
 const VALID_CHUNK_BOUND: i32 = 2_097_061;
-/// `Difficulty.NORMAL.getId()`。
-const NORMAL_DIFFICULTY: i32 = 2;
 /// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
 const SKY_DARKEN: i32 = 0;
 
@@ -1808,9 +1806,9 @@ impl<'a> World<'a> {
             .any(|at| self.is_raining_at(at))
     }
 
-    /// `getDifficulty().getId()`。这个世界没有难度设置，客户端收不到难度时显示普通，这里也按普通算。
-    pub const fn difficulty_id(&self) -> i32 {
-        NORMAL_DIFFICULTY
+    /// `getDifficulty().getId()`，权威副本在全局快照里。
+    pub fn difficulty_id(&self) -> i32 {
+        self.level.difficulty_id()
     }
 
     /// 只取一个 `next_float()`，见 [`Level::next_random_float`]。

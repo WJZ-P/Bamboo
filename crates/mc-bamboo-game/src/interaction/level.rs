@@ -52,6 +52,8 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) block_rules: BlockGameRules,
     /// 方块逻辑读到的天气快照。权威副本在 `Global`，改完立刻写过来。
     pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
+    /// 这一刻的难度 ID，权威副本在 `GlobalView`。
+    pub(crate) difficulty: crate::world_state::Difficulty,
     /// 这一维度的世界边界快照，`Level.getWorldBorder()`。
     ///
     /// This dimension's world-border snapshot, `Level.getWorldBorder()`.
@@ -342,6 +344,11 @@ impl Level for RegionLevel<'_> {
 
     fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
         self.block_weather
+    }
+
+    /// `getDifficulty().getId()`：权威副本在 `GlobalView`，这里读每刻发布的快照。
+    fn difficulty_id(&self) -> i32 {
+        self.difficulty as i32
     }
 
     /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`：读区块里算好的真实高度图。

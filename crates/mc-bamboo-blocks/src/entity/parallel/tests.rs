@@ -473,3 +473,31 @@ fn skipped_entities_remain_in_the_compute_phase_snapshot() {
     commit(computed, &mut world);
     assert_eq!(world.entity_ids().len(), 2);
 }
+
+/// 期 0 的公共接缝：精确模式和并行只读视图对同一份难度、天色、时钟、
+/// 光照读数一致。改动任何一边都要让这个用例失败。
+#[test]
+fn both_drives_read_the_same_global_facts() {
+    use crate::entity::ctx::BlockView;
+    use mc_bamboo_core::{BlockPos, LightLayer};
+
+    let facts = ViewFacts {
+        difficulty: 3,
+        sky_darken: 4,
+        game_time: 1234,
+        sky_brightness: 12,
+        block_brightness: 7,
+        ..ViewFacts::default()
+    };
+    let view = SourceView::new(FlatSource { floor_y: 64, facts });
+    assert_eq!(view.difficulty(), 3);
+    assert_eq!(view.sky_darken(), 4);
+    assert_eq!(view.game_time(), 1234);
+    let pos = BlockPos::new(1, 70, 1);
+    assert_eq!(view.brightness(LightLayer::Sky, pos), 12);
+    assert_eq!(view.max_local_raw_brightness(pos, 4), 8);
+    assert!(!view.can_see_sky(pos));
+    assert!(!view.is_raining_at(pos));
+    assert_eq!(view.level_random_float(), 0.0);
+    assert!(!view.level_random_boolean());
+}

@@ -982,6 +982,17 @@ pub trait Level: LevelSideState + LevelEntities {
         0
     }
 
+    /// `getDifficulty().getId()`：0 和平、1 简单、2 普通、3 困难。
+    /// 权威副本在 `GlobalView`，方块世界和并行只读视图都要给同一份答案。
+    /// 默认是普通，和没有难度配置时的旧行为一致。
+    ///
+    /// `getDifficulty().getId()`: 0 peaceful, 1 easy, 2 normal, 3 hard.
+    /// The authoritative value lives in `GlobalView`; both the block world and
+    /// the parallel read-only view must answer alike. Normal by default.
+    fn difficulty_id(&self) -> i32 {
+        2
+    }
+
     /// 官方 `RandomizableContainer.unpackLootTable` 的调用点。有战利品表的容器在
     /// 第一次被读或写之前先填好内容。默认空实现用于没有战利品表的假世界。
     ///

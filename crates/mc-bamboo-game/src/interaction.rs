@@ -189,6 +189,7 @@ pub(crate) fn run_entity_ticks(entity_threads: usize, region: &mut Region) {
 /// 每刻起线程的 [`ScopedThreads`] 开销大，只用于实验；常驻线程池留给任务系统
 /// （设计稿第 12 节）。
 pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
+    let game_time = region.tick.game_time();
     use mc_bamboo_blocks::entity::{
         parallel::{ScopedThreads, commit, compute},
         view::ViewFacts,
@@ -215,6 +216,9 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             min_y: mc_bamboo_world::MIN_Y,
             max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
             rules: global.block_rules,
+            difficulty: global.difficulty as i32,
+            sky_darken: 0,
+            game_time,
             ..ViewFacts::default()
         };
         let view = crate::entity_view::EntityBlockView::new(crate::entity_view::ReadOnlyWorld {

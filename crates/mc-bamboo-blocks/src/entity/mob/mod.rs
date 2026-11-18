@@ -12,6 +12,7 @@
 
 pub mod attributes;
 pub mod control;
+pub mod damage;
 pub mod goals;
 pub mod interact;
 pub mod living;
@@ -163,7 +164,9 @@ pub struct FluidTracker {
     pub eyes_inside: bool,
 }
 
-/// 伤害的种类，带着官方 `DamageType` 标签里牛用得到的那几条。
+/// 伤害的种类，`minecraft:damage_type` 注册表里的一项。
+///
+/// A kind of damage: one entry of the `minecraft:damage_type` registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DamageKind {
     Generic,
@@ -182,6 +185,12 @@ pub enum DamageKind {
     OutOfWorld,
     PlayerAttack,
     MobAttack,
+    MobAttackNoAggro,
+    Arrow,
+    Starve,
+    Thorns,
+    Magic,
+    Explosion,
 }
 
 impl DamageKind {
@@ -204,12 +213,57 @@ impl DamageKind {
             Self::OutOfWorld => "minecraft:out_of_world",
             Self::PlayerAttack => "minecraft:player_attack",
             Self::MobAttack => "minecraft:mob_attack",
+            Self::MobAttackNoAggro => "minecraft:mob_attack_no_aggro",
+            Self::Arrow => "minecraft:arrow",
+            Self::Starve => "minecraft:starve",
+            Self::Thorns => "minecraft:thorns",
+            Self::Magic => "minecraft:magic",
+            Self::Explosion => "minecraft:explosion",
         }
+    }
+
+    /// 按官方短名找一种伤害。未知名字返回 `None`，调用方按解析失败处理。
+    ///
+    /// Finds a kind by its short official name. Unknown names return `None`.
+    pub fn by_name(name: &str) -> Option<Self> {
+        let all: [DamageKind; 22] = [
+            Self::Generic,
+            Self::GenericKill,
+            Self::InWall,
+            Self::Cramming,
+            Self::Drown,
+            Self::OnFire,
+            Self::InFire,
+            Self::Lava,
+            Self::HotFloor,
+            Self::Cactus,
+            Self::SweetBerryBush,
+            Self::Fall,
+            Self::Freeze,
+            Self::OutOfWorld,
+            Self::PlayerAttack,
+            Self::MobAttack,
+            Self::MobAttackNoAggro,
+            Self::Arrow,
+            Self::Starve,
+            Self::Thorns,
+            Self::Magic,
+            Self::Explosion,
+        ];
+        all.into_iter()
+            .find(|kind| kind.name().strip_prefix("minecraft:") == Some(name))
     }
 
     /// `#no_knockback`。
     pub const fn no_knockback(self) -> bool {
-        !matches!(self, Self::PlayerAttack | Self::MobAttack)
+        !matches!(
+            self,
+            Self::PlayerAttack
+                | Self::MobAttack
+                | Self::MobAttackNoAggro
+                | Self::Arrow
+                | Self::Thorns
+        )
     }
 
     /// `#bypasses_armor`。
@@ -226,6 +280,16 @@ impl DamageKind {
                 | Self::OutOfWorld
                 | Self::GenericKill
         )
+    }
+
+    /// `#bypasses_effects`：抗性效果和保护附魔都不生效。
+    pub const fn bypasses_effects(self) -> bool {
+        matches!(self, Self::OutOfWorld | Self::GenericKill)
+    }
+
+    /// `#bypasses_enchantments`：保护附魔不生效。
+    pub const fn bypasses_enchantments(self) -> bool {
+        matches!(self, Self::OutOfWorld | Self::GenericKill)
     }
 
     /// `#is_fire`。
@@ -246,12 +310,50 @@ impl DamageKind {
         matches!(self, Self::OutOfWorld | Self::GenericKill)
     }
 
+    /// `#bypasses_cooldown`：26.3 的数据包里这个标签是空的。
+    pub const fn bypasses_cooldown(self) -> bool {
+        let _ = self;
+        false
+    }
+
+    /// `DamageSource.scalesWithDifficulty()`：只有 `always` 缩放，以及
+    /// `when_caused_by_living_non_player` 且造成者是非玩家生物时缩放。
+    /// 玩家的 `causing_entity` 类型由 [`DamageSource::scale_when_non_player`] 给出。
+    ///
+    /// `DamageSource.scalesWithDifficulty()`: only `always`, or
+    /// `when_caused_by_living_non_player` with a non-player living cause.
+    pub const fn scales_with_difficulty(self) -> bool {
+        matches!(self, Self::Explosion)
+    }
+
+    /// `DamageType.exhaustion`：受伤后累加的饥饿消耗。
+    pub const fn exhaustion(self) -> f32 {
+        const TENTH: f32 = 0.1;
+        match self {
+            Self::PlayerAttack
+            | Self::MobAttack
+            | Self::MobAttackNoAggro
+            | Self::Arrow
+            | Self::Thorns
+            | Self::Explosion
+            | Self::Cactus
+            | Self::InFire
+            | Self::Lava
+            | Self::HotFloor
+            | Self::SweetBerryBush => TENTH,
+            _ => 0.0,
+        }
+    }
+
     /// `#panic_causes`。
     pub const fn panic_causes(self) -> bool {
         matches!(
             self,
             Self::PlayerAttack
                 | Self::MobAttack
+                | Self::MobAttackNoAggro
+                | Self::Arrow
+                | Self::Thorns
                 | Self::Cactus
                 | Self::Freeze
                 | Self::HotFloor
@@ -266,18 +368,25 @@ impl DamageKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DamageSource {
     pub kind: DamageKind,
-    /// `getEntity()`。
+    /// `getEntity()`：造成伤害的实体，也是 `DamageEvent` 的 `source_cause`。
     pub attacker: Option<EntityUid>,
+    /// `getDirectEntity()`：直接打到目标的实体，是 `DamageEvent` 的 `source_direct`。
+    pub direct: Option<EntityUid>,
     /// 攻击者是不是玩家；玩家的伤害会让牛记住它，死时掉经验。
     pub attacker_is_player: bool,
     /// 攻击者是不是创造模式的玩家（`isCreativePlayer`）。
     pub creative_player: bool,
-    /// `getSourcePosition()`。
+    /// `getSourcePosition()`，`at <location>` 时用显式位置覆盖。
     pub position: Option<Vec3>,
     /// 冲刺攻击时玩家的朝向，`causeExtraKnockback` 的方向用它。
     pub sprint_yaw: Option<f32>,
     /// 攻击者的 UUID，存进 `last_hurt_by_*`。
     pub attacker_uuid: Option<[u8; 16]>,
+    /// 造成伤害的是非玩家生物：`when_caused_by_living_non_player` 缩放要读它。
+    pub scale_when_non_player: bool,
+    /// 主手武器带来的附魔（这一期只读破甲之外的效果，见 `damage::protection`）。
+    /// 空表示没有武器。
+    pub weapon: Option<u16>,
 }
 
 impl DamageSource {
@@ -286,11 +395,14 @@ impl DamageSource {
         Self {
             kind,
             attacker: None,
+            direct: None,
             attacker_is_player: false,
             creative_player: false,
             position: None,
             sprint_yaw: None,
             attacker_uuid: None,
+            scale_when_non_player: false,
+            weapon: None,
         }
     }
 
@@ -300,17 +412,44 @@ impl DamageSource {
         self
     }
 
+    /// 覆盖来源位置（`/damage ... at <location>`）。
+    pub const fn with_position(mut self, position: Vec3) -> Self {
+        self.position = Some(position);
+        self
+    }
+
+    /// 记录造成伤害的实体种类，供难度缩放判断。
+    pub const fn with_non_player_cause(mut self, non_player: bool) -> Self {
+        self.scale_when_non_player = non_player;
+        self
+    }
+
+    /// 记录主手武器的物品 ID（没有武器时是 `None`）。
+    pub const fn with_weapon(mut self, item: u16) -> Self {
+        self.weapon = Some(item);
+        self
+    }
+
     /// `damageSources().playerAttack(player)`。
     pub const fn player(uid: EntityUid, position: Vec3, creative: bool) -> Self {
         Self {
             kind: DamageKind::PlayerAttack,
             attacker: Some(uid),
+            direct: Some(uid),
             attacker_is_player: true,
             creative_player: creative,
             position: Some(position),
             sprint_yaw: None,
             attacker_uuid: None,
+            scale_when_non_player: false,
+            weapon: None,
         }
+    }
+
+    /// `DamageSource.scalesWithDifficulty()`：`always` 恒缩放，
+    /// `when_caused_by_living_non_player` 只在造成者是非玩家生物时缩放。
+    pub const fn scales_with_difficulty(self) -> bool {
+        self.kind.scales_with_difficulty() || self.scale_when_non_player
     }
 }
 
