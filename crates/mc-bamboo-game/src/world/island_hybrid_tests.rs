@@ -2496,3 +2496,126 @@ fn a_split_waits_for_acks_taken_at_the_start_of_the_tick() {
         scene.server.world.assert_island_invariants();
     });
 }
+
+/// 同上，换成跨岛的玩家：原来的岛这一刻开头收了信、回执还没交回时，收包阶段触发的照做不搬
+/// 他（搬人要从原来的岛拆出一块），留到这一刻收尾交回以后。长时间压测（`islands-roam`）里
+/// 世界线程曾因此 panic：「交回还没处理完就拆岛」。改坏确认：去掉搬人前的回执检查，这条
+/// 测试就在照做那一步 panic。
+///
+/// As above for a crossing player: while the old island holds acks from
+/// mail taken at the start of the tick, a settle triggered in the inbound
+/// phase does not move them (moving splits a piece off the old island); the
+/// move waits for the hand-back at the end of the tick. The long run
+/// (`islands-roam`) once panicked on this: "split before the hand-back".
+#[test]
+fn a_crossing_player_waits_for_acks_taken_at_the_start_of_the_tick() {
+    bounded(|| {
+        let mut scene = scene(55, 4);
+        // 跑够刻数，后面才能判「等太久」（跨岛等原来的岛清干净最多等 40 刻）。
+        // Run enough ticks to judge "waited too long" later (a crossing
+        // waits at most 40 ticks for the old island to clear).
+        while scene.server.world.master.director_tick <= 50 {
+            scene.server.tick();
+        }
+        let from = island_of_group(&mut scene, 1);
+        let to = island_of_group(&mut scene, 0);
+        assert_ne!(from, to);
+        // 原来的岛每刻只交付一个区块，旁边挂几张强加载票：之后每刻开头都从信箱里交付一个，
+        // 回执在交回之前一直在岛上。
+        // The old island delivers one chunk per tick and gets a few forced
+        // tickets beside it: every later tick start delivers one from its
+        // mailbox, and the acks stay on the island until the hand-back.
+        scene
+            .server
+            .world
+            .islands
+            .get_mut(from)
+            .expect("停放着")
+            .mailbox
+            .set_budget(crate::director_host::MailBudget {
+                deliveries: 1,
+                reclaims: 0,
+            });
+        let mut pos = scene.centers[1];
+        while scene.server.world.islands.island_of_chunk(pos).is_some() {
+            pos = ChunkPos::new(pos.x + 1, pos.z);
+        }
+        for dz in 0..4 {
+            scene.server.apply_ticket_for_test(TicketOp::Forced {
+                pos: ChunkPos::new(pos.x, pos.z + dz),
+                forced: true,
+            });
+        }
+        scene.server.tick();
+        assert!(
+            scene
+                .server
+                .world
+                .islands
+                .get(from)
+                .expect("停放着")
+                .mailbox
+                .backlog()
+                .0
+                > 0,
+            "信箱里还有没交付的盒子"
+        );
+        // 第 1 组的一名玩家站到第 0 组的区块上，并且已经等够了久（不再等原来的岛清干净）。
+        // A group 1 player stands on a group 0 chunk and has waited long
+        // enough (no more waiting for the old island to clear them).
+        let client = scene
+            .clients
+            .iter()
+            .find(|(group, _)| *group == 1)
+            .map(|(_, client)| client.clone())
+            .expect("第 1 组有人");
+        let target = scene.centers[0];
+        scene.server.move_to_position(
+            &client,
+            Vec3::new(
+                f64::from(target.x * 16) + 8.5,
+                -60.0,
+                f64::from(target.z * 16) + 8.5,
+            ),
+        );
+        let world = &mut scene.server.world;
+        world.master.transit.insert(client.id, 0);
+        // 这一刻开头：信箱重置预算，岛收信，回执留在岛上；收包阶段（这里直接调）照做拆合和
+        // 搬人。
+        // The tick starts: mailboxes reset their budgets, islands take mail
+        // and keep the acks; the inbound phase (called directly here)
+        // settles changes and crossings.
+        for island in world.islands.parked_mut() {
+            island.mailbox.begin_tick();
+        }
+        world.start_island_ticks();
+        assert!(!world.islands.acks_handed_back(from), "回执还在岛上");
+        world.settle_islands();
+        assert_eq!(
+            world.islands.island_of_player(client.id),
+            Some(from),
+            "回执交回之前不搬"
+        );
+        // 等着搬的人记在跨岛途中，不变量照样成立（以前等回执时没记，不变量检查会把他当成
+        // 「站在别的岛的区块上却不在那个岛」）。
+        // The waiting player is recorded as crossing, so the invariants
+        // hold (without the record the check took them for a player on
+        // another island's chunk).
+        assert!(world.master.transit.contains_key(&client.id));
+        world.assert_island_invariants();
+        // 这一刻照常跑完：收尾交回以后搬过去。
+        // The tick runs on: after the hand-back at its end the player moves.
+        scene.server.tick();
+        let world = &mut scene.server.world;
+        assert_eq!(
+            world.islands.island_of_player(client.id),
+            Some(to),
+            "收尾时搬过去了"
+        );
+        world.assert_island_invariants();
+        for _ in 0..5 {
+            scene.server.tick();
+        }
+        scene.server.world.assert_island_invariants();
+    });
+}

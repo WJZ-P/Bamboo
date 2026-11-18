@@ -84,6 +84,11 @@ impl World {
         if !self.hybrid() && !self.islands.all_parked() {
             return;
         }
+        // 上次因为回执没交回而没搬的实体，先试着搬。
+        // Entities left behind last time because acks were out go first.
+        for from in std::mem::take(&mut self.master.stray_sources) {
+            self.move_stray_entities(from);
+        }
         let mut crossings = 0;
         for _ in 0..SETTLE_ROUNDS {
             let mut changed = false;
@@ -368,13 +373,29 @@ impl World {
                 self.master.transit.remove(&id);
                 continue;
             }
-            // 目的地的岛不在主控手里（混合驱动）：等它停放再搬。
-            // The destination island is away (hybrid drive): move once it parks.
-            if !self.islands.can_ensure(to) {
+            // 先记下他在跨岛途中（不变量检查跳过途中的人），再看能不能搬。
+            // Record the crossing first (the invariant check skips players
+            // in transit), then see whether the move can happen now.
+            let now = self.master.director_tick;
+            let since = *self.master.transit.entry(id).or_insert(now);
+            // 目的地的岛不在主控手里（混合驱动）：等它停放再搬。两边谁这一刻开头收了信、回执
+            // 还没交回，也等交回以后（这一刻收尾那次照做）再搬：搬人要从原来的岛拆出一块，
+            // 和拆分一样不能拆回执还在手里的岛（长时间压测里，收包阶段挂票触发的照做撞上过
+            // 「交回还没处理完就拆岛」）。
+            // The destination island is away (hybrid drive): move once it
+            // parks. If either side took mail at the start of this tick and
+            // its acks are not handed back, also wait for the hand-back (the
+            // settle at the end of the tick): moving a player splits a piece
+            // off the old island and, like a split, must not split an island
+            // whose acks are out (the long run hit "split before the
+            // hand-back" in a settle triggered by tickets in the inbound phase).
+            if !self.islands.can_ensure(to)
+                || !self.islands.acks_handed_back(from)
+                || (self.islands.contains(to) && !self.islands.acks_handed_back(to))
+            {
                 continue;
             }
-            let now = self.master.director_tick;
-            let waited = now.saturating_sub(*self.master.transit.entry(id).or_insert(now));
+            let waited = now.saturating_sub(since);
             let region = &self.islands.get(from).expect("在表里").region;
             let clean = player_clear_of(region, id);
             if !clean {
@@ -418,6 +439,18 @@ impl World {
     /// island (plan 6.5's departure and arrival). Positions no island has
     /// loaded stay as before.
     pub(crate) fn move_stray_entities(&mut self, from: RegionId) {
+        if !self.islands.contains(from) {
+            return;
+        }
+        // 不在主控手里（混合驱动）或者回执还没交回的岛拆不了（同 `relocate_players`），记下来，
+        // 下一次照做拆合时再搬。
+        // An island that is away (hybrid drive) or has acks out cannot be
+        // split (as in `relocate_players`); remember it and move at the next
+        // settle.
+        if !self.islands.acks_handed_back(from) {
+            self.master.stray_sources.insert(from);
+            return;
+        }
         let Some(island) = self.islands.get(from) else {
             return;
         };
@@ -434,6 +467,10 @@ impl World {
             }
         }
         for (to, chunks) in strays {
+            if !self.islands.acks_handed_back(to) {
+                self.master.stray_sources.insert(from);
+                continue;
+            }
             let source = self.islands.get_mut(from).expect("在表里");
             let origin = SectionPos::of(*chunks.first().expect("不为空"));
             let random = source.region.derive_island_random(0, origin);
@@ -556,10 +593,17 @@ impl World {
                         if let Some(&id) = owner.get(&pos)
                             && player.chunks.is_chunk_tracked(pos)
                         {
+                            let partition = self.master.host.islands();
                             assert_eq!(
-                                id, island.id,
-                                "玩家 {:?} 跟踪着别的岛 {id} 的区块 {pos:?}",
-                                player.id
+                                id,
+                                island.id,
+                                "玩家 {:?} 跟踪着别的岛 {id} 的区块 {pos:?}（玩家在 {chunk:?}、视野中心 \
+                                 {center:?}，分区器里玩家的区块在岛 {:?}、这个区块在岛 {:?}，还有没做的拆合：\
+                                 {}）",
+                                player.id,
+                                partition.and_then(|partition| partition.island_of_chunk(chunk)),
+                                partition.and_then(|partition| partition.island_of_chunk(pos)),
+                                self.master.host.has_topology(),
                             );
                         }
                     }
