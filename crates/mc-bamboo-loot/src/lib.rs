@@ -48,5 +48,8 @@ pub use predicate::{
     MovementPredicate, PartialComponent, RaiderPredicate, StatePropertiesPredicate,
 };
 pub use random_sequence::{RandomSequence, RandomSequences};
-pub use stack::{Components, EnchantmentLevels, LootStack, NoEnchantments};
+pub use stack::{
+    Components, ENCHANTMENTS as ENCHANTMENTS_COMPONENT, EnchantmentLevels, LootStack,
+    NoEnchantments,
+};
 pub use table::{LootContainer, LootTable, create_stack_splitter, shuffle_and_split_items};

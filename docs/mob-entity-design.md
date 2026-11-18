@@ -194,3 +194,45 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 - 未做：死亡掉落和经验球、读盘后牛真的进实体表跑起来、喂小麦 / 繁殖 / 成长 / 挤奶、
   拴绳和命名牌、并行模式的逐位一致性。
 
+
+### 5.4 第 2 步第三段：牛的生活周期（2026-11-19）
+
+- 死亡：击退、无敌帧、死亡动画 20 刻都在上一轮的地基里；这一轮把
+  `LivingEntity.dropAllDeathLoot` 接进游戏世界。牛死时按真的
+  `minecraft:entities/cow` 战利品表掉皮革 / 牛肉（着火或带 `#smelts_loot`
+  时熟牛肉、抢夺附魔增加数量），经验按 `Animal.getBaseExperienceReward`
+  拆成经验球。掉落物和经验球都进实体表、发配对包、能存盘。
+- 经验球是新的实体类别：重力 / 阻力、朝最近玩家的吸引、岩浆里的随机位移、
+  每 20 刻同值合并、6000 刻消失、官方 NBT（`Health` / `Age` / `Value` / `Count`）。
+  玩家拾取这一支留了 `entity::pick_up` 入口，等玩家经验系统（等级 / 进度条 /
+  `set_experience` 包）单独做；**已知差异**：游戏里经验球被玩家碰到不会消失，
+  直到 6000 刻寿命结束。熔炉 / 砂轮那些「只取随机数不生成球」的地方本轮未动。
+- 存档：`minecraft:cow` 和 `minecraft:experience_orb` 都进建模实体清单，读盘后
+  放进实体表继续 tick。`archive::tests::a_loaded_cow_keeps_running_from_its_saved_state`
+  验证读盘后的成年牛继续减求爱计时、幼年牛继续长大、位置被 AI 推动。
+- 交互：`/summon` 之外的右键路径接上了 `serverbound::INTERACT`。喂小麦让成年牛
+  进入 600 刻求爱（`InLove` + 爱心事件 18）、喂幼年牛按官方公式加速成长、
+  两头求爱的牛配对生小牛（`Age -24000`、父母 6000 刻冷却、一颗经验球、
+  长大时碰撞箱变化）。空桶右键成年牛得到奶桶，`Player.playSound` 的音源是
+  PLAYERS，创造模式和背包满时按 `ItemUtils.createFilledResult` / `Inventory.add`。
+- 出站包：伤害事件、死亡 / 冒烟 / 爱心实体事件、移除实体、掉落物和经验球的
+  生成包、挤奶音效都走上一轮那条「事件只发给跟踪者、音效按范围」的路径，
+  逐包逐字节对拍。死亡元数据按官方改成 `Pose.DYING`，不是滑翔标志位。
+- 对拍：`mob-oracle` 52 个场景 50640 刻 **0 不一致**。新增 4 个死亡场景
+  （玩家打死 / 摔死 / 烧死 / 抢夺 III）和 5 个交互场景（喂成年 / 喂幼年 /
+  繁殖 / 挤奶 / 创造模式挤奶），逐刻比 `InLove`、掉落物和经验球、玩家手里的
+  物品、以及出站包字节。故意改坏（掉落数量 +1、`experience_value` 分段改错、
+  不读 `InLove`、求爱时间改成 500、奶桶换成水桶、幼崽年龄改成 -20000）
+  都能被对拍或单测抓到。
+- `chunk-content` 439 项、`entity-oracle` 31 例 709 步、`move-oracle` 55 例、
+  探针 728/728 全过。
+- 未做：拴绳、命名牌、玩家经验系统与经验球拾取、并行模式逐位一致性。
+
+#### 岛的拆合（新增的按实体状态）
+
+- `EntityStore.departed_mob_events`（被丢弃生物留下的事件，按 uid，每刻清空，
+  不带绝对时刻）在 `split_off` 里按 uid 跟着搬走的实体分配、在 `absorb` 里 append。
+  已经离表的实体不在 `moved` 里，它的事件留在原岛；这类事件一刻内就会发出。
+- `Mob.pending_breed`（同一刻内消费，不跨刻，不带绝对时刻）和
+  `ExperienceOrb` 的字段（年龄、健康、值、数量、跟随的玩家 uid）全在实体行上，
+  整行搬走即可，不需要改 `IslandPart` 清单；`region/island_split.rs` 本轮未改。

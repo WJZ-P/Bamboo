@@ -550,8 +550,15 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             mob.navigation
                 .move_to_entity(ctx.blocks(), &nav, other.position, *speed);
             *love_time += 1;
-            // 繁殖本身（生成幼崽、经验球）这一轮没有接；`inLove` 只能靠喂食设上，现在设不上。
-            // Breeding itself is not wired this round; `inLove` cannot be set yet.
+            // `BreedGoal.tick`：累计 `adjustedTickDelay(60)` 刻且距离小于 3 格时生小牛。
+            // 非每刻目标把 60 折成 30，因为整套目标隔刻才跑一次。
+            if *love_time >= reduced_tick_delay(60)
+                && me.position.distance_to_sqr(other.position) < 9.0
+            {
+                // 生物状态此刻被从 `me.kind` 里借出来，`Command` 落地要等
+                // `living::tick` 把 `kind` 放回去之后；见 `Mob::pending_breed`。
+                mob.pending_breed = Some(other.uid);
+            }
         }
         Goal::Tempt { speed, player, .. } => {
             let Some(player) = player.and_then(|uid| player_by_uid(ctx.blocks(), uid)) else {

@@ -600,6 +600,20 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             goals.tick(me, mob, ctx);
         }
         mob.goals = goals;
+        // `BreedGoal.breed` 就在这一刻发生：父亲的年龄先设成 6000，
+        // 后面 `aiStep` 会照官方再减一；伴侣和幼崽交给命令落地。
+        if let Some(partner) = mob.pending_breed.take() {
+            mob.in_love = 0;
+            set_age(me, mob, 6000);
+            mob.events.push(MobEvent::Hearts);
+            ctx.emit(
+                Command::BreedCows {
+                    partner,
+                    position: me.position,
+                },
+                me,
+            );
+        }
     }
     timing::span!(Navigation);
     let nav = nav_mob(me, mob, ctx.blocks());
@@ -1234,6 +1248,52 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
 }
 
+/// [`Command::BreedCows`] 的落地：`Animal.spawnChildFromBreeding` 和
+/// `finalizeSpawnChildFromBreeding`。父母的年龄设成 6000、求爱清零，父亲发爱心事件，
+/// 按 `mob_drops` 生成一颗 `1 + random.nextInt(7)` 的经验球。
+///
+/// Breeding: spawn the calf, set both parents' age to 6000, reset their love,
+/// broadcast hearts on this parent and award one experience orb.
+pub(crate) fn apply_breed(
+    me: &mut Entity,
+    partner: crate::entity::EntityUid,
+    position: Vec3,
+    world: &mut crate::world::World,
+) {
+    // `Cow.getBreedOffspring` 从父亲随机源取一个 `nextBoolean` 选花色，
+    // 然后 `finalizeSpawnChildFromBreeding` 取 `nextInt(7)+1` 定经验值。
+    let _from_father = me.random.next_boolean();
+    let xp = 1 + me.random.next_int_bounded(7);
+    world.with_entity_mut(partner, &mut |entity| {
+        entity.with_mob(|me, mob| {
+            mob.in_love = 0;
+            set_age(me, mob, 6000);
+        });
+    });
+    // 官方先构造幼崽（拿到 ID）再构造经验球；岛种子源和网络 ID 都按这个顺序。
+    let mut calf = Entity::cow(position);
+    // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
+    // 构造时的 `yHeadRot` 保留。
+    calf.y_rot = 0.0;
+    calf.with_mob(|me, mob| {
+        set_age(me, mob, -24000);
+        mob.y_rot_o = 0.0;
+        mob.y_body_rot = 0.0;
+        mob.y_body_rot_o = 0.0;
+    });
+    let calf_id = world.spawn_entity(calf);
+    // `finish_mob_random` 在分配 ID 之后重取了朝向；`snapTo` 把 yRot 清成 0，
+    // 但构造时的 yHeadRot 要保留。
+    world.with_entity_mut(calf_id, &mut |entity| {
+        entity.y_rot = 0.0;
+    });
+    if world.block_game_rules().mob_drops {
+        // 繁殖不是 `ExperienceOrb.award`：只生成一颗球，值就是 `1 + nextInt(7)`。
+        let orb = Entity::experience_orb(position, xp);
+        world.spawn_entity(orb);
+    }
+}
+
 /// `FluidTracker` 的构造，给 [`super::motion`] 用。
 pub(crate) fn tracker_for(trackers: &mut Vec<FluidTracker>, fluid: i32) -> usize {
     if let Some(index) = trackers.iter().position(|tracker| tracker.fluid == fluid) {
@@ -1291,20 +1351,9 @@ pub(crate) fn apply_death_drops(
             }
         }
     }
-    let mut left = experience;
-    while left > 0 {
-        let value = experience_value(left);
-        left -= value;
-        let _ = world.random().next_int(40);
-        // 现在没有经验球实体：取数照官方，球不生成。
-        // There is no experience-orb entity yet: the draw happens, no orb spawns.
-    }
-}
-
-/// `ExperienceOrb.getExperienceValue`。
-fn experience_value(amount: i32) -> i32 {
-    [2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3]
-        .into_iter()
-        .find(|&value| amount >= value)
-        .unwrap_or(1)
+    // `ExperienceOrb.award` 的拆分和每个 `nextInt(40)` 都在这一条路径里；
+    // 生成的球进实体表、发配对包、能存盘。
+    // `ExperienceOrb.award` splits the amount and draws one `nextInt(40)` per
+    // orb. The orbs enter the entity table, are paired and can be saved.
+    super::super::orb::award(world, me.position, experience);
 }

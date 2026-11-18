@@ -490,6 +490,77 @@ impl Level for RegionLevel<'_> {
         )
     }
 
+    /// `LivingEntity.dropFromLootTable`：牛死时的战利品表。
+    /// `on_fire` 决定牛肉是不是熟的，攻击者的主手附魔决定抢夺和熔炼加成。
+    ///
+    /// `LivingEntity.dropFromLootTable` for a dying cow. `on_fire` decides whether
+    /// the beef is cooked; the killer's held item supplies the looting level.
+    fn mob_loot_drops(
+        &mut self,
+        table: &str,
+        on_fire: bool,
+        killer: Option<mc_bamboo_blocks::EntityUid>,
+    ) -> Vec<ItemStack> {
+        let mut attacker = None;
+        let mut direct = None;
+        let mut last_player = None;
+        if let Some(uid) = killer {
+            let held = self
+                .players
+                .values()
+                .find(|player| player.id.0 == uid)
+                .map(|player| {
+                    game_stack_to_loot(player.inventory.held(mc_bamboo_core::Hand::Main))
+                });
+            let mut view =
+                mc_bamboo_loot::EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER);
+            view.is_living = true;
+            if let Some(stack) = held {
+                view.equipment[mc_bamboo_loot::EquipmentSlot::Mainhand.index()] = Some(stack);
+            }
+            let boxed = Box::new(view.clone());
+            attacker = Some(view.clone());
+            direct = Some(view);
+            last_player = Some(*boxed);
+        }
+        let mut victim =
+            mc_bamboo_loot::EntityView::new(mc_bamboo_data::registries::entity_type::COW);
+        victim.is_living = true;
+        victim.is_on_fire = on_fire;
+        let view = crate::block_drops::ChunkLevel {
+            chunks: self.chunks,
+            weather: self.block_weather,
+        };
+        let params = mc_bamboo_loot::EntityDeathParams {
+            entity: victim,
+            origin: mc_bamboo_loot::Position::new(0.0, 0.0, 0.0),
+            damage_source: mc_bamboo_loot::DamageSourceView {
+                damage_type: 0,
+                direct_entity: direct.clone().map(Box::new),
+                source_entity: attacker.clone().map(Box::new),
+                is_direct: true,
+            },
+            attacking_entity: attacker,
+            direct_attacking_entity: direct,
+            last_damage_player: last_player,
+            luck: 0.0,
+            level: Some(&view),
+        };
+        match mc_bamboo_loot::entity_death_drops(
+            table,
+            &params,
+            0,
+            Some(self.loot_sequences),
+            self.random.source(),
+        ) {
+            Ok(stacks) => stacks.iter().map(crate::loot_stacks::loot_stack).collect(),
+            Err(error) => {
+                tracing::debug!(%error, "skipping mob drops: the loot table needs missing data");
+                Vec::new()
+            }
+        }
+    }
+
     /// `getEntitiesOfClass(LivingEntity)`。玩家按 `PlayerId` 排序，和实体列表的顺序不一定相同。
     ///
     /// `getEntitiesOfClass(LivingEntity)`. Players are ordered by `PlayerId`, which is not
@@ -558,4 +629,29 @@ fn equip_target(player: &Player) -> EquipTarget {
             worn(Saddle),
         ],
     }
+}
+
+/// 把游戏里的物品堆换成战利品能读的一堆，保留 `minecraft:enchantments` 里的等级。
+/// 官方 `LootItemFunctions` 的条件和 `enchanted_count_increase` 只问这个组件。
+///
+/// Converts a game item stack into a loot stack, carrying the enchantment levels
+/// that loot conditions and `enchanted_count_increase` read.
+fn game_stack_to_loot(stack: &ItemStack) -> mc_bamboo_loot::LootStack {
+    let mut out = mc_bamboo_loot::LootStack::new(stack.item, stack.count);
+    if let Some(mc_bamboo_protocol::components::ComponentValue::Enchantments(levels)) =
+        mc_bamboo_protocol::components::defaults::resolve(
+            stack.item,
+            &stack.patch(),
+            kinds::ENCHANTMENTS,
+        )
+    {
+        let mut map = std::collections::BTreeMap::new();
+        for &(id, level) in levels {
+            if let Some(name) = mc_bamboo_loot::enchantment_name(id) {
+                map.insert(name.to_owned(), level);
+            }
+        }
+        out.set_enchantment_levels(mc_bamboo_loot::ENCHANTMENTS_COMPONENT, map);
+    }
+    out
 }

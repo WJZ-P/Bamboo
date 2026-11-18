@@ -146,6 +146,17 @@ pub enum PlayRequest {
     },
     /// 左键挥手。
     Punch,
+    /// 右键点击实体。官方 `ServerboundInteractPacket`：`usingSecondaryAction` 是潜行，
+    /// `location` 是点在实体身上的相对位置。
+    ///
+    /// Right-clicking an entity, vanilla `ServerboundInteractPacket`.
+    /// `using_secondary_action` is the shift key; `location` is the relative hit point.
+    Interact {
+        entity_id: i32,
+        hand: Hand,
+        location: Vec3,
+        using_secondary_action: bool,
+    },
     /// 选中了快捷栏的另一格。官方接受范围外的值，只是不生效，所以这里也不算解码错误。
     SetCarriedItem {
         slot: i16,
@@ -346,6 +357,12 @@ impl PlayRequest {
                 flags: reader.u8()?,
             },
             serverbound::PUNCH => Self::Punch,
+            serverbound::INTERACT => Self::Interact {
+                entity_id: reader.varint()?,
+                hand: Hand::from_id(reader.varint()?),
+                location: reader.lp_vec3()?,
+                using_secondary_action: reader.bool()?,
+            },
             serverbound::SET_CARRIED_ITEM => Self::SetCarriedItem {
                 slot: reader.i16()?,
             },
@@ -1298,6 +1315,20 @@ mod tests {
         for (id, action) in kinds.into_iter().enumerate() {
             assert_eq!(by_ordinal(&PlayerCommandKind::ALL, id as i32), Ok(action));
         }
+    }
+
+    #[test]
+    fn decodes_interact_with_a_zero_location() {
+        // entityId=7 (VarInt), hand=1, LpVec3.ZERO (单字节 00), sneaking=true。
+        assert_eq!(
+            decode_body(serverbound::INTERACT, "07010001"),
+            Ok(PlayRequest::Interact {
+                entity_id: 7,
+                hand: Hand::Off,
+                location: Vec3::default(),
+                using_secondary_action: true,
+            })
+        );
     }
 
     #[test]

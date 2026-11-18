@@ -537,7 +537,7 @@ fn run_cases(
     let mut file = EntityFile::empty(ChunkPos::new(3, -9));
     file.entities = entities.iter().take(3).cloned().collect();
     file.preserved_entities = vec![Tag::Compound(vec![
-        ("id".to_owned(), Tag::String("minecraft:cow".to_owned())),
+        ("id".to_owned(), Tag::String("minecraft:pig".to_owned())),
         ("Health".to_owned(), Tag::Float(10.0)),
     ])];
     file.preserved
@@ -557,6 +557,25 @@ fn run_cases(
     report.check(
         modeled.len() == 3 && preserved.is_empty(),
         "entity split lost modeled entities",
+    );
+    // 牛和经验球现在都是建模实体，读盘后要进实体表跑起来。
+    let (modeled_new, preserved_new) = split_entity_entries(vec![
+        Tag::Compound(vec![(
+            "id".to_owned(),
+            Tag::String("minecraft:cow".to_owned()),
+        )]),
+        Tag::Compound(vec![(
+            "id".to_owned(),
+            Tag::String("minecraft:experience_orb".to_owned()),
+        )]),
+        Tag::Compound(vec![(
+            "id".to_owned(),
+            Tag::String("minecraft:pig".to_owned()),
+        )]),
+    ]);
+    report.check(
+        modeled_new.len() == 2 && preserved_new.len() == 1,
+        "cow and experience orb are not modeled",
     );
 
     // 5b. 牛的重存（照方块实体那套）：同一份条目，官方 `loadEntityRecursive -> save`
@@ -1542,6 +1561,45 @@ fn cow_resave_cases() -> Vec<(String, Tag)> {
     let uid = store.spawn(Entity::cow(Vec3::new(8.5, 65.0, 8.5)));
     let row = store.get(uid).expect("刚生成").split();
     out.push(("spawned".to_owned(), write_entity(&row).expect("牛能写出")));
+    // 经验球的重存：裸条目、带富字段、Bamboo 刚生成又写出。
+    // 非生物实体的 UUID 由网络 ID 派生（存档和网络层共用），所以题里用同一个推导。
+    let orb_uuid = mc_bamboo_blocks::archive::entity_uuid_tag(99);
+    out.push((
+        "orb_bare".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:experience_orb".to_owned())),
+            ("Pos", doubles([1.5, 70.0, -2.25])),
+            ("UUID", orb_uuid.clone()),
+        ]),
+    ));
+    out.push((
+        "orb_rich".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:experience_orb".to_owned())),
+            ("Pos", doubles([-3.25, 66.5, 12.75])),
+            ("Motion", doubles([0.02, -0.05, 0.01])),
+            (
+                "Rotation",
+                Tag::List(vec![Tag::Float(17.5), Tag::Float(0.0)]),
+            ),
+            ("UUID", orb_uuid),
+            ("fall_distance", Tag::Double(0.75)),
+            ("Fire", Tag::Short(11)),
+            ("OnGround", Tag::Byte(1)),
+            ("Health", Tag::Short(3)),
+            ("Age", Tag::Short(1200)),
+            ("Value", Tag::Short(37)),
+            ("Count", Tag::Int(4)),
+        ]),
+    ));
+    let orb_uid = store.spawn(Entity::experience_orb(Vec3::new(2.5, 64.0, 2.5), 7));
+    let mut orb_row = store.get(orb_uid).expect("刚生成").split();
+    // 重存题用 uid 99 读回，UUID 由 uid 派生，写题时也用同一个 uid。
+    orb_row.public.uid = 99;
+    out.push((
+        "orb_spawned".to_owned(),
+        write_entity(&orb_row).expect("经验球能写出"),
+    ));
     out
 }
 

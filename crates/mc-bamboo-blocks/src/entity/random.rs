@@ -47,6 +47,18 @@ impl JavaRandom {
         self.seed as i64
     }
 
+    /// 直接设成官方 `LegacyRandomSource.seed` 的值。对拍把官方构造完之后的
+    /// 随机源状态搬进 Bamboo 的实体时用。
+    ///
+    /// Sets the internal state from vanilla's `LegacyRandomSource.seed`. Used
+    /// by oracles that carry an official entity's post-construction state over.
+    pub const fn from_state(state: i64) -> Self {
+        Self {
+            seed: (state as u64) & MASK,
+            next_gaussian: None,
+        }
+    }
+
     /// 有没有缓存着的第二个高斯数，官方的 `haveNextNextGaussian`。
     pub const fn has_cached_gaussian(&self) -> bool {
         self.next_gaussian.is_some()

@@ -689,9 +689,18 @@ pub struct Snapshot {
 /// 配对和同步时要发的、按实体类型不同的元数据。
 #[derive(Debug, Clone, PartialEq)]
 pub enum KindData {
-    FallingBlock { state: BlockState, start: BlockPos },
-    Tnt { fuse: i32 },
+    FallingBlock {
+        state: BlockState,
+        start: BlockPos,
+    },
+    Tnt {
+        fuse: i32,
+    },
     Item(ItemStack),
+    /// `ExperienceOrb.DATA_VALUE`：非默认的经验值。
+    ExperienceOrb {
+        value: i32,
+    },
     Mob(Box<mc_bamboo_blocks::entity::mob::MobPublic>),
 }
 
@@ -720,7 +729,10 @@ impl Snapshot {
     fn add_data(&self) -> i32 {
         match &self.data {
             KindData::FallingBlock { state, .. } => state.0 as i32,
-            KindData::Tnt { .. } | KindData::Item(_) | KindData::Mob(_) => 0,
+            KindData::Tnt { .. }
+            | KindData::Item(_)
+            | KindData::ExperienceOrb { .. }
+            | KindData::Mob(_) => 0,
         }
     }
 
@@ -738,6 +750,7 @@ impl KindData {
             },
             KindPublic::Tnt { fuse } => Self::Tnt { fuse: *fuse },
             KindPublic::Item { stack, .. } => Self::Item(stack.clone()),
+            KindPublic::ExperienceOrb { value } => Self::ExperienceOrb { value: *value },
             KindPublic::Mob(mob) => Self::Mob(mob.clone()),
         }
     }
@@ -745,7 +758,10 @@ impl KindData {
     /// 同步用到的那个数字。下落的方块和物品没有。
     fn fuse(&self) -> Option<i32> {
         match self {
-            Self::FallingBlock { .. } | Self::Item(_) | Self::Mob(_) => None,
+            Self::FallingBlock { .. }
+            | Self::Item(_)
+            | Self::ExperienceOrb { .. }
+            | Self::Mob(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -753,7 +769,10 @@ impl KindData {
     fn stack(&self) -> Option<&ItemStack> {
         match self {
             Self::Item(stack) => Some(stack),
-            Self::FallingBlock { .. } | Self::Tnt { .. } | Self::Mob(_) => None,
+            Self::FallingBlock { .. }
+            | Self::Tnt { .. }
+            | Self::ExperienceOrb { .. }
+            | Self::Mob(_) => None,
         }
     }
 
@@ -794,6 +813,10 @@ impl KindData {
             Self::Tnt { .. } => Vec::new(),
             Self::Item(stack) if !stack.is_empty() => vec![EntityData::Item(stack.clone())],
             Self::Item(_) => Vec::new(),
+            Self::ExperienceOrb { value } if *value != 0 => {
+                vec![EntityData::ExperienceValue(*value)]
+            }
+            Self::ExperienceOrb { .. } => Vec::new(),
             Self::Mob(mob) => mob_non_default_data(mob),
         }
     }
@@ -811,6 +834,7 @@ fn default_data(index: u8) -> EntityData {
         3 => EntityData::CustomNameVisible(false),
         4 => EntityData::Silent(false),
         5 => EntityData::NoGravity(false),
+        6 => EntityData::Pose(mc_bamboo_protocol::packet::play::Pose::Standing),
         7 => EntityData::TicksFrozen(0),
         9 => EntityData::Health(1.0),
         15 => EntityData::MobFlags(0),
@@ -836,21 +860,29 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
         ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING,
     };
     let mut flags = 0u8;
-    // `FLAG_ONFIRE` = 1<<0，`FLAG_GLOWING` = 1<<6，滑翔位在生物上是 1<<7。
-    // `FLAG_ONFIRE` is 1<<0, `FLAG_GLOWING` is 1<<6, fall flying is 1<<7.
+    // `FLAG_ONFIRE` = 1<<0，`FLAG_GLOWING` = 1<<6。死亡时官方把 `Pose` 设成
+    // `DYING`（元数据 index 6），不是 SharedFlags 的滑翔位。
+    // `FLAG_ONFIRE` is 1<<0 and `FLAG_GLOWING` is 1<<6. On death vanilla sets
+    // the `Pose` metadata (index 6) to `DYING`, not the shared-flags bit.
     if mob.on_fire {
         flags |= 1;
     }
     if mob.glowing {
         flags |= 1 << 6;
     }
-    if mob.dying {
-        flags |= ENTITY_FLAG_FALL_FLYING;
-    }
-    let _ = (ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING);
+    let _ = (
+        ENTITY_FLAG_FALL_FLYING,
+        ENTITY_FLAG_SHIFT_KEY_DOWN,
+        ENTITY_FLAG_SPRINTING,
+    );
     let mut out = Vec::new();
     if flags != 0 {
         out.push(EntityData::SharedFlags(flags));
+    }
+    if mob.dying {
+        out.push(EntityData::Pose(
+            mc_bamboo_protocol::packet::play::Pose::Dying,
+        ));
     }
     if mob.air_supply != 300 {
         out.push(EntityData::AirSupply(mob.air_supply));
@@ -965,6 +997,23 @@ fn event_packet(
             entity_id: id,
             event: 60,
         })),
+        MobEvent::Hearts => EventPacket::Tracking(packet_body(&EntityEvent {
+            entity_id: id,
+            event: 18,
+        })),
+        MobEvent::MilkSound { position } => EventPacket::Sound(Sound {
+            sound: i32::from(mc_bamboo_data::sounds::sound_event(
+                "minecraft:entity.cow.milk",
+            )),
+            inline: None,
+            source: mc_bamboo_data::sounds::PLAYERS,
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            volume: 1.0,
+            pitch: 1.0,
+            seed: sound_seed(),
+        }),
         MobEvent::Damage { kind, attacker } => {
             let damage_type = mc_bamboo_data::damage_type_id(kind.name()).unwrap_or(0);
             EventPacket::Tracking(packet_body(&DamageEvent {

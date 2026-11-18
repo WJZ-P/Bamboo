@@ -1003,3 +1003,90 @@ pub(crate) fn on_use_item(
 
 #[cfg(test)]
 mod tests;
+
+/// `ServerGamePacketListenerImpl.handleInteract`：官方先校验实体存在、世界边界和够距，
+/// 再按 `Player.interactOn` 的顺序用请求的手试一次，没成功再试另一只手。
+///
+/// Vanilla's `handleInteract`: validate the entity and the reach, then let
+/// `Player.interactOn` try the requested hand and fall back to the other one.
+pub(crate) fn on_interact_entity(
+    region: &mut Region,
+    id: PlayerId,
+    entity_id: i32,
+    hand: Hand,
+    using_secondary_action: bool,
+) {
+    // 官方把 `usingSecondaryAction` 记成潜行键；牛的交互不读这个标志。
+    let _ = using_secondary_action;
+    // 先把玩家和目标的只读数据抄出来，`block_level()` 要独占借 `region`。
+    let Some((game_mode, position, eye_height, player_uuid, main_held, off_held)) =
+        region.players.get(&id).map(|player| {
+            (
+                player.game_mode,
+                player.position(),
+                player.eye_height(),
+                *player.uuid.as_bytes(),
+                player.inventory.held(Hand::Main).clone(),
+                player.inventory.held(Hand::Off).clone(),
+            )
+        })
+    else {
+        return;
+    };
+    if game_mode == GameMode::Spectator {
+        return;
+    }
+    let Some(target) = region.entities.public_at(entity_id) else {
+        return;
+    };
+    if target.removed || !matches!(target.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) {
+        return;
+    }
+    // 够距：玩家眼睛到实体所在格的距离，和方块交互同一套判定。
+    let reach = interaction_range(game_mode);
+    if !within_block_interaction_range(
+        position,
+        eye_height,
+        reach,
+        mc_bamboo_core::BlockPos::containing(target.position),
+        3.0,
+    ) {
+        return;
+    }
+    let creative = game_mode == GameMode::Creative;
+    let other = match hand {
+        Hand::Main => Hand::Off,
+        Hand::Off => Hand::Main,
+    };
+    for try_hand in [hand, other] {
+        let held = match try_hand {
+            Hand::Main => main_held.clone(),
+            Hand::Off => off_held.clone(),
+        };
+        let request = mc_bamboo_blocks::entity::mob::interact::MobInteractRequest {
+            player_uid: id.0,
+            player_uuid,
+            hand: try_hand,
+            held,
+            creative,
+            position,
+        };
+        let outcome = {
+            let (mut level, ticks) = region.block_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            world.interact_mob(entity_id, &request)
+        };
+        if !outcome.result.consumes_action() {
+            continue;
+        }
+        if outcome.shrink_held {
+            inventory::shrink_held(region, id, try_hand);
+        }
+        if let Some(replacement) = outcome.replacement {
+            inventory::give_filled_result(region, id, try_hand, replacement, true);
+        }
+        // 生物事件（爱心、挤奶音效）留在实体表里，同步阶段按官方收件人发出去。
+        swing(region, id, try_hand, outcome.result);
+        return;
+    }
+}

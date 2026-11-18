@@ -2976,6 +2976,26 @@ impl<'a> World<'a> {
         hurt
     }
 
+    /// `Player.interactOn` 里的 `Entity.interact`：对一头生物跑右键交互。
+    /// 不是生物、找不到、或者已经没了时返回 `PASS`。
+    ///
+    /// The `Entity.interact` step of `Player.interactOn`. Returns `PASS` when
+    /// there is no such living mob.
+    pub fn interact_mob(
+        &mut self,
+        id: i32,
+        request: &crate::entity::mob::interact::MobInteractRequest,
+    ) -> crate::entity::mob::interact::MobInteraction {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return crate::entity::mob::interact::MobInteraction::pass();
+        };
+        let outcome = entity
+            .with_mob(|me, mob| crate::entity::mob::interact::interact(me, mob, request))
+            .unwrap_or_else(crate::entity::mob::interact::MobInteraction::pass);
+        self.level.put_entity(entity);
+        outcome
+    }
+
     /// `addFreshEntity` 之后按 ID 改这个实体。刚生成、还没并进 tick 列表的也找得到。
     pub fn with_entity_mut(&mut self, id: i32, f: &mut dyn FnMut(&mut Entity)) -> bool {
         self.level.with_just_spawned(id, f)
@@ -3024,7 +3044,13 @@ impl<'a> World<'a> {
                 let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
                 entity.tick(&mut ctx);
             }
-            if !entity.removed {
+            if entity.removed {
+                // 行离表之后事件就没了：先把这一刻攒下的生物事件交给实体表，
+                // 同步层 `take_mob_events` 才会把它们发出去。
+                // The row leaves the table; hand its pending events to the store
+                // first so the sync layer can send them.
+                self.level.keep_departed_mob_events(&entity);
+            } else {
                 self.level.put_entity(entity);
             }
         }

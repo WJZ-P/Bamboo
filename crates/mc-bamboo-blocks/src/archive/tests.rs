@@ -733,3 +733,75 @@ fn vibration_events_are_looked_up_in_the_game_event_registry() {
     );
     assert_eq!(field(&selector_written, "tick"), Some(&Tag::Long(-1)));
 }
+
+/// 读盘的牛不是静止的展品：进实体表后每刻继续跑 AI、年龄和求爱计时。
+#[test]
+fn a_loaded_cow_keeps_running_from_its_saved_state() {
+    use crate::{
+        BlockTicks, World,
+        entity::{ChunkEntities, EntityKind},
+        testing::TestLevel,
+    };
+
+    let cow = |age: i32, love: i32, x: f64| {
+        Tag::Compound(vec![
+            ("id".to_owned(), Tag::String("minecraft:cow".to_owned())),
+            (
+                "Pos".to_owned(),
+                Tag::List(vec![Tag::Double(x), Tag::Double(64.0), Tag::Double(-2.25)]),
+            ),
+            ("UUID".to_owned(), Tag::IntArray(vec![1, 2, 3, age + 9])),
+            ("Age".to_owned(), Tag::Int(age)),
+            ("InLove".to_owned(), Tag::Int(love)),
+            (
+                "Rotation".to_owned(),
+                Tag::List(vec![Tag::Float(45.0), Tag::Float(0.0)]),
+            ),
+        ])
+    };
+    // 一头成年牛在求爱，一头幼年牛在长大；两者都要接着跑。
+    let adult = read_entity(&cow(0, 500, 1.5), 99)
+        .unwrap()
+        .expect("成年牛能读进来");
+    let baby = read_entity(&cow(-24000, 0, 5.5), 98)
+        .unwrap()
+        .expect("幼年牛能读进来");
+    let mut level = TestLevel::new();
+    level
+        .entities_mut_for_test()
+        .insert_chunk(ChunkEntities::from_parts(vec![adult, baby], Vec::new()));
+    let ids = level.entities().ids();
+    let (adult_id, baby_id) = (ids[0], ids[1]);
+    let adult_before = level.entities().get(adult_id).expect("成年牛在表里");
+    let baby_before = level.entities().get(baby_id).expect("幼年牛在表里");
+    let EntityKind::Mob(adult_mob) = &adult_before.kind else {
+        panic!("读进来的不是生物");
+    };
+    assert_eq!(adult_mob.in_love, 500);
+    assert_eq!(adult_mob.age, 0);
+    let EntityKind::Mob(baby_mob) = &baby_before.kind else {
+        panic!("读进来的不是生物");
+    };
+    assert_eq!(baby_mob.age, -24000);
+    // `Age != 0` 时官方把求爱计时清零，幼年牛的 InLove 本来就是 0。
+    let adult_start = adult_before.position;
+
+    let mut ticks = BlockTicks::new();
+    for _ in 0..8 {
+        let mut world = World::new(&mut level, &mut ticks);
+        world.tick_entities();
+    }
+    let adult_after = level.entities().get(adult_id).expect("成年牛还活着");
+    let baby_after = level.entities().get(baby_id).expect("幼年牛还活着");
+    let EntityKind::Mob(adult_mob) = &adult_after.kind else {
+        panic!("tick 之后还是生物");
+    };
+    let EntityKind::Mob(baby_mob) = &baby_after.kind else {
+        panic!("tick 之后还是生物");
+    };
+    // 求爱计时每刻减一，幼年年龄每刻加一，位置被 AI 推着走。
+    assert_eq!(adult_mob.in_love, 500 - 8);
+    assert_eq!(baby_mob.age, -24000 + 8);
+    assert!(adult_after.tick_count > 0);
+    assert_ne!(adult_after.position, adult_start);
+}

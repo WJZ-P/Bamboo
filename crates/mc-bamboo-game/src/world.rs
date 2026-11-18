@@ -2283,6 +2283,18 @@ impl World {
                 entity_sync::on_player_abilities(region, player, flags);
             }
             PlayRequest::Punch => entity_sync::on_punch(region, player),
+            PlayRequest::Interact {
+                entity_id,
+                hand,
+                using_secondary_action,
+                ..
+            } => interaction::on_interact_entity(
+                region,
+                player,
+                entity_id,
+                hand,
+                using_secondary_action,
+            ),
             PlayRequest::SetCarriedItem { slot } => {
                 inventory::on_set_carried_item(region, player, slot);
             }

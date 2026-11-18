@@ -19,6 +19,7 @@ pub mod view;
 mod explosion;
 mod falling;
 mod item;
+mod orb;
 mod physics;
 mod tnt;
 
@@ -30,6 +31,7 @@ use crate::{shape::Aabb, state::BlockState};
 
 pub(crate) use item::merge_explosion;
 pub use item::{can_pick_up, set_throw_velocity, take_stack};
+pub use orb::{experience_value, pick_up};
 pub use physics::{
     TravelSegment, collide_border_only, enclosed_in_air, no_block_collision, overlaps_new_blocks,
     stuck_speed, sweep_movement,
@@ -157,6 +159,39 @@ pub struct GroundItem {
     pub target: Option<[u8; 16]>,
 }
 
+/// 经验球，对应 `ExperienceOrb`。字段在 [`orb`] 里读写。
+///
+/// An experience orb, vanilla `ExperienceOrb`. [`orb`] holds its behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExperienceOrb {
+    /// `age`：到 6000 刻消失。
+    pub age: i32,
+    /// `health`，默认 5。
+    pub health: i32,
+    /// 同步的 `Value`，决定这一球值多少经验。
+    pub value: i32,
+    /// `count`：合并进来的球数。
+    pub count: i32,
+    /// 正在跟随的玩家；存档不写，读盘时为空。
+    pub following: Option<EntityUid>,
+}
+
+impl ExperienceOrb {
+    pub const DEFAULT_HEALTH: i32 = 5;
+    pub const DEFAULT_VALUE: i32 = 0;
+    pub const DEFAULT_COUNT: i32 = 1;
+
+    pub const fn new(value: i32) -> Self {
+        Self {
+            age: 0,
+            health: Self::DEFAULT_HEALTH,
+            value,
+            count: Self::DEFAULT_COUNT,
+            following: None,
+        }
+    }
+}
+
 /// 实体类型。物品堆不能 `Copy`，所以这个枚举也不再 `Copy`。
 ///
 /// An item stack is not `Copy`, so neither is this enum.
@@ -165,6 +200,7 @@ pub enum EntityKind {
     FallingBlock(FallingBlock),
     Tnt(PrimedTnt),
     Item(GroundItem),
+    ExperienceOrb(ExperienceOrb),
     /// 生物。状态很大，装箱存。
     ///
     /// A mob. Its state is large, so it is boxed.
@@ -178,6 +214,7 @@ impl EntityKind {
             Self::FallingBlock(_) => mc_bamboo_data::registries::entity_type::FALLING_BLOCK,
             Self::Tnt(_) => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item(_) => mc_bamboo_data::registries::entity_type::ITEM,
+            Self::ExperienceOrb(_) => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -373,8 +410,21 @@ impl Entity {
             EntityKind::FallingBlock(_) => falling::tick_falling_block(self, ctx),
             &EntityKind::Tnt(data) => tnt::tick_tnt(self, data, ctx),
             EntityKind::Item(_) => Entity::tick_item(self, ctx),
+            EntityKind::ExperienceOrb(_) => orb::tick_orb(self, ctx),
             EntityKind::Mob(_) => {}
         }
+    }
+
+    /// `new ExperienceOrb(level, pos, Vec3.ZERO, value)`：构造时的朝向和初速度
+    /// 由 [`orb::finish_spawn`] 在实体拿到种子之后取。
+    ///
+    /// Vanilla's orb constructor. [`orb::finish_spawn`] draws its facing and
+    /// initial velocity once the entity has its seed.
+    pub fn experience_orb(position: Vec3, value: i32) -> Self {
+        Self::new(
+            EntityKind::ExperienceOrb(ExperienceOrb::new(value)),
+            position,
+        )
     }
 
     /// `EntityType.COW.create`：构造函数链。UUID 和朝向的随机数在

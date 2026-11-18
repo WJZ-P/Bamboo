@@ -123,6 +123,10 @@ pub enum KindPublic {
         health: i32,
         target: Option<[u8; 16]>,
     },
+    /// 经验球：同步只需要 `Value`。
+    ExperienceOrb {
+        value: i32,
+    },
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
 }
@@ -134,6 +138,7 @@ impl KindPublic {
             Self::FallingBlock { .. } => mc_bamboo_data::registries::entity_type::FALLING_BLOCK,
             Self::Tnt { .. } => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item { .. } => mc_bamboo_data::registries::entity_type::ITEM,
+            Self::ExperienceOrb { .. } => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -180,6 +185,8 @@ pub enum KindState {
     #[default]
     Tnt,
     Item(ItemState),
+    /// 经验球自己的字段（年龄、健康、数量、跟随的玩家）。
+    ExperienceOrb(super::ExperienceOrb),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
 }
@@ -291,6 +298,10 @@ impl EntityRow {
                 roll_velocity: private.roll_velocity,
                 target,
             }),
+            (KindPublic::ExperienceOrb { value }, KindState::ExperienceOrb(mut orb)) => {
+                orb.value = value;
+                EntityKind::ExperienceOrb(orb)
+            }
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -356,6 +367,10 @@ impl Entity {
                     bob_offs: data.bob_offs,
                     roll_velocity: data.roll_velocity,
                 }),
+            ),
+            EntityKind::ExperienceOrb(orb) => (
+                KindPublic::ExperienceOrb { value: orb.value },
+                KindState::ExperienceOrb(orb),
             ),
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(
@@ -490,6 +505,13 @@ pub struct EntityStore {
     /// Public data for entities that just joined the world, so the sync layer
     /// can create its tracking state at vanilla `ChunkMap.addEntity` timing.
     spawn_snapshots: BTreeMap<EntityUid, EntityPublic>,
+    /// 这一刻被丢弃的生物身上还没发出去的事件（例如死亡动画结束的 `Poof`）。
+    /// 实体行已经离表，`take_mob_events` 从这里补上，顺序按 uid。
+    ///
+    /// Events left on mobs discarded this tick (e.g. the `Poof` at the end of
+    /// the death animation). Their rows are gone; `take_mob_events` appends
+    /// these in uid order.
+    departed_mob_events: BTreeMap<EntityUid, Vec<super::mob::MobEvent>>,
 }
 
 impl Default for EntityStore {
@@ -511,6 +533,7 @@ impl Default for EntityStore {
             taken_snapshots: BTreeMap::new(),
             wake_events: Vec::new(),
             spawn_snapshots: BTreeMap::new(),
+            departed_mob_events: BTreeMap::new(),
         }
     }
 }
@@ -784,6 +807,7 @@ impl EntityStore {
         entity.random = JavaRandom::new(self.next_entity_seed());
         // 物品的朝向和初速度用刚设好的实体随机源，不能用 `level.random`。
         entity.finish_item_random();
+        super::orb::finish_spawn(&mut entity, Vec3::default());
         entity.finish_mob_random();
         entity
     }
@@ -1050,7 +1074,20 @@ impl EntityStore {
                 out.push(events);
             }
         }
+        out.extend(std::mem::take(&mut self.departed_mob_events));
         out
+    }
+
+    /// 实体这一拍被丢弃时，把它身上攒下的事件留给同步层。
+    ///
+    /// Keep a discarded entity's pending events for the sync layer.
+    pub fn keep_departed_events(&mut self, entity: &Entity) {
+        if let Some(mob) = entity.kind.mob()
+            && !mob.events.is_empty()
+        {
+            self.departed_mob_events
+                .insert(entity.id, mob.events.clone());
+        }
     }
 
     /// 这个包围盒摸到的段里有没有人关注；顺带把「变化」记进事件表。
@@ -1278,7 +1315,19 @@ impl EntityStore {
                 self.spawn_snapshots.insert(uid, public);
             }
         }
-        for uid in moved {
+        // 被丢弃生物留下的事件也跟着实体走：键按 uid，搬走的 uid 交给新岛。
+        // Events left by discarded mobs follow their entity by uid.
+        let departed = std::mem::take(&mut self.departed_mob_events);
+        let moved_ids: BTreeSet<EntityUid> = moved.iter().copied().collect();
+        for (uid, events) in departed {
+            if moved_ids.contains(&uid) {
+                out.departed_mob_events.insert(uid, events);
+            } else {
+                self.departed_mob_events.insert(uid, events);
+            }
+        }
+        let moved_iter = moved_ids.iter().copied();
+        for uid in moved_iter {
             self.unindex_sub(uid);
             let row = self.index.remove(&uid).expect("just indexed");
             let entry = self.slots[row].take().expect("indexed row is live");
@@ -1325,6 +1374,8 @@ impl EntityStore {
         self.preserved.append(&mut other.preserved);
         self.watched_sections.extend(other.watched_sections);
         self.wake_events.append(&mut other.wake_events);
+        self.departed_mob_events
+            .append(&mut other.departed_mob_events);
         for (uid, public) in std::mem::take(&mut other.spawn_snapshots) {
             let previous = self.spawn_snapshots.insert(uid, public);
             debug_assert!(previous.is_none(), "生成快照的实体 ID 重复");

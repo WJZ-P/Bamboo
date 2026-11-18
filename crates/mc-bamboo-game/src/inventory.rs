@@ -607,6 +607,27 @@ pub(crate) fn apply_item_exchange(
     }
 }
 
+/// `ItemStack.consume(1, player)`：生存模式右键生物喂掉或挤掉一个。
+/// 创造模式不扣；`shrink` 之前由调用方挡住。
+///
+/// `ItemStack.consume(1, player)` for feeding or milking in survival mode.
+pub(crate) fn shrink_held(region: &mut Region, id: PlayerId, hand: Hand) {
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    if player.game_mode == GameMode::Creative {
+        return;
+    }
+    let slot = player.inventory.hand_slot(hand);
+    let stack = &mut player.inventory.slots[slot];
+    if stack.count > 0 {
+        stack.count -= 1;
+    }
+    if stack.is_empty() {
+        *stack = ItemStack::empty();
+    }
+}
+
 /// `ItemUtils.createFilledResult`：交还舀起或倒出之后的那一堆。
 ///
 /// `ItemUtils.createFilledResult`: hand back the stack from a scoop or a pour.
