@@ -371,6 +371,7 @@
 - **欠刻和追赶**：每次第 ② 段派出时不在的岛欠刻加一；岛回来落地时欠刻超过 40（2 秒）就清零并记一条警告（丢刻，它的时钟从此比别的岛慢这么多，合并时按 5.1 平移），否则留着在第 ④ 段连续追。岛的时钟只在它自己跑一刻时加一，所以追平以后和别的岛相同。
 - **落地**（岛回到主控手里时，主控线程上）：① 放回槽位；② 按顺序执行它不在期间排给它的出站投递（5.5.3）；③ 收下留给它的存盘名单；④ 回执交给 Director、排队的全局改动由主控应用；⑤ 取走它的名单改动；⑥ 刷它的出站缓冲、存盘报告存到主控手里。第 ③ 段里一轮回来的岛按编号做完 ②–⑤、发延迟广播，再一起做 ⑥，和以前的先后相同。
 - **新岛的模板**：建空岛原来照家岛抄配置和时钟；家岛不在时照编号最小的停放着的岛抄，一个停放的都没有就等。
+- **线程池不让岛排在某一条忙线程后面**：岛先回上次跑它的线程，它忙着就给一条空着的；全都忙着时进公共队列，哪条线程先空出来哪条跑。原来是「排到手里岛最少的那条线程后面」，那条线程上要是正跑着一个卡死的岛，排在它后面的健康的岛就再也回不来。隔离的前提是 tick 线程够用：线程数少于同时在跑的岛数时，岛要等别的岛跑完才轮得到（`island_threads` 的缺省值现在是 1，多岛缺省打开时要一起调，见 5.5.8）。
 
 #### 5.5.2 主控的事分三种做法
 
@@ -417,7 +418,8 @@
 |---|---|---|
 | 岛（`Box<Island>`） | 停放时归主控，派出后归那条 tick 线程，交回后又归主控 | 靠拿走 / 放回转移，同一时刻只有一方拿得到；没有锁、没有新的 `unsafe` |
 | 实体 ID 分配器（`Arc<AtomicI32>`） | 进程级 | 任何线程，原子加 |
-| 派出 / 交回通道 | 线程池 | 主控发岛、tick 线程交回 |
+| 派出队列（每条线程一条，加一条公共的）和每条线程手里的岛数 | 线程池，一把锁 | 主控派岛、tick 线程取岛的那一下拿锁；岛跑的时候不拿 |
+| 交回通道 | 线程池 | tick 线程发、主控收 |
 | `Global`、Director 宿主、邮筒、岛的出站队列、欠刻、排着队的事 | 主控 | 只有主控线程 |
 | 玩家的入站队列收端 | 跟着玩家（在岛上） | 只有主控线程在岛停放时取 |
 | 玩家的出站链路 | 跟着玩家（在岛上） | 岛在 tick 线程上时由那条线程写，停放时由主控写 |
@@ -431,7 +433,32 @@
 1. 命令里的方块坐标和 `@e` 仍然只看发起人所在的岛（上一任记的限制）。原因：命令的实现拿到的是一个 `Region`，要按位置路由就得把命令拆成按岛的子命令、反馈由主控汇总（4.4 原来的设计），是对命令执行框架的改动，不属于驱动这一段；现在「等全部岛停放再借玩家」保证了不漏玩家，但不解决别的岛上的方块和非玩家实体。
 2. 不涉及别的岛的玩家命令也要等全部岛停放（5.5.2）。
 3. 有等全部岛的事排着、而两个以上的岛长期错开着落后时，没有「强制凑齐」的机制；岛卡死期间等全部岛的事（包括控制台的 `/stop`）做不了，只能用关服信号。
-4. 多岛缺省仍然关着；性能测量是第 c2 段。
+4. 多岛缺省仍然关着；性能测量是第 c2 段。`island_threads` 的缺省值仍是 1：一条线程时慢岛占着线程，别的岛照样要等它，缺省打开多岛时线程数要按核数一起定。
+5. 岛卡死（不是慢，是再也不回来）期间：它的出站队列一直攒着不清；它的玩家、和发过命令在等它的玩家的入站消息一直占着连接层的在途配额（4096 条），用完以后连接层按 `TooManyRequests` 断开他们；发过命令又断开的玩家要等它回来才从世界里移除。卷进一条「和慢岛合并」的拆合的岛，区块信件跟着被扣到合并做完。
+
+#### 5.5.9 实现和测试（2026-11-18）
+
+代码：`world/island_hybrid.rs`（一刻的收岛 / 派出 / 等待 / 落地 / 追赶、排队、延后投递、存盘名单的分配、关服收岛、测试钩子），`world.rs`（各段改成只碰停放着的岛、进服拆成两半、`on_master` 借停放的岛并收集给不在的岛的投递），`world/island_runtime.rs`（拆合跳过卷进不在的岛的），`island.rs`（槽位记不在时的玩家名单和欠刻）、`links.rs`（收集）、`island_pool.rs`（公共队列）、`region/island_split.rs`（借玩家按时钟差平移）。没有新的 `unsafe`。
+
+测试在 `world/island_hybrid_tests.rs`，直接调 `World::tick`（不给截止时间）加 `stall_island` 是确定的；每条带 240 秒上限。
+
+| 要求 | 测试 | 改坏确认（都核对了失败的文字是那一处） |
+|---|---|---|
+| 都按时 = 齐步，逐字节 | `hybrid_with_every_island_on_time_matches_lockstep`：两个种子，齐步对 4 条 tick 线程，26 刻里 16 步跨岛的命令、聊天、控制台命令、按名随机序列，每刻比每组的内容、时钟和每名玩家收到的全部字节。两个世界一步一步一起搭、同一刻并拆一次对齐随机源（两边交付的时刻不同，单独搭出来的历史长短不一）。不含换岛和进出服（会挂票，分离驱动的交付本来就晚一刻） | 混合那份不借玩家 |
+| 都按时时结果与线程数无关 | `on_time_hybrid_does_not_depend_on_the_thread_count`：1 条对 8 条线程，30 刻里带进服、离开和三次换岛的传送，每刻比每个岛上每组的内容和每名玩家收到的全部字节 | — |
+| 慢岛只拖慢自己、追赶后时钟和内容正确 | `a_slow_island_only_slows_itself_and_catches_up`：慢 8 刻，慢的岛分别是三组（含家岛）；对照是没有慢岛的同一个世界。慢的每一刻健康的组的内容、时钟、玩家收到的字节和对照相同；回来的那一刻慢岛的时钟、内容和对照相同、不欠刻；之后连它的玩家收到的字节也和对照逐刻相同 | 不追赶 |
+| 欠刻超过 2 秒丢掉 | `ticks_owed_beyond_two_seconds_are_dropped`：慢 45 刻，回来以后欠刻清零、时钟慢 44 刻，再合并不出错 | — |
+| 排队的事按原来的先后各做一次 | `work_held_for_a_slow_island_runs_in_order_exactly_once`：慢岛不在时发 3 条控制台命令、2 名玩家各一条命令、其中一名紧跟一条聊天和一次移动；回来之前谁都没收到、移动没被处理，回来以后每名玩家（含慢岛上的）按排队的先后各收到一次 | 倒着做；排进来就丢；命令不等全部岛 |
+| 发往慢岛的聊天都送达、顺序正确 | `chat_for_a_slow_island_arrives_in_order`：两个健康的岛上 5 条聊天，慢岛回来以后它自己的玩家再说一句；每名玩家收到的聊天包（含他自己的消息序号）和对照逐字节相同。用的是不带签名的聊天；带签名时签名缓存的正确性见 5.5.3 的推导，没有单独的测试 | 倒着发；丢掉；抄两份 |
+| 涉及慢岛的拆合推迟后仍然发生 | `merges_involving_a_slow_island_wait_and_still_happen`：四个岛，「慢岛并进家岛」先登记、「另外两个岛合并」后登记；后一条照做，前一条留到慢岛回来。合并前后慢岛那一组的指纹逐行逐项比，除了绝对时刻整体平移 4 刻以外相同 | 卷进不在的岛的拆合直接丢掉 |
+| 时钟不同的岛之间借玩家 | `borrowing_players_across_different_clocks_rebases_their_instants`：借出方时钟慢 7 刻，传送确认的 `sent_at` 和讲台的 `deliver_at` 在借来的岛上离「现在」的距离不变，还回去原样 | 不平移（差 7 刻） |
+| 投给不存在的岛编号的信 | `mail_for_an_island_that_does_not_exist_yet_creates_it` | 不建岛（区块永远交付不了） |
+| 进服、离开 | `a_join_waits_for_its_island_and_keeps_its_ticket`、`leaving_while_the_join_still_waits_cancels_it`、`joins_and_leaves_reach_a_slow_island_later_in_order` | — |
+| 全服广播、存盘 | `master_broadcasts_reach_a_slow_island_when_it_lands`、`paced_saves_do_not_wait_for_a_slow_island`、`save_all_waits_for_a_slow_island_and_then_saves_everything`（直接读区域文件） | — |
+| 卡死、panic | `a_stuck_island_is_left_behind_and_the_others_are_saved`（真的截止时间，主控 6 刻不等它，关服等够超时后停放着的岛上的改动在盘上、锁放掉）、`an_island_panic_is_raised_even_with_another_island_stuck`、`a_healthy_island_never_queues_behind_a_stuck_one`（两条线程三个岛） | 线程都忙时排到一条线程后面 |
+| 多线程烟雾 | `slow_islands_under_a_real_deadline_keep_every_invariant`：1 / 4 / 8 条线程，每刻只等 8 ms，两个岛（含家岛）每刻真的睡 12–30 ms；200 刻随机的聊天、玩家命令（含 `@a` 和跨岛传送）、控制台命令、进服、离开、改模式。断言这一遍真的碰到了迟到、排队和延后投递；收尾后全部不变量成立、每名在线玩家恰好在一个岛上、出站队列发完 | — |
+
+原有的三组对照（多岛 = 单岛、分开跑 = 一起跑、跨岛）、24 类漏搬改坏确认、panic 和卡住的测试一条没改，全部通过（它们直接调 `World::tick`，等全部岛回来）。
 
 
 ---
@@ -459,7 +486,7 @@
 | 7 | ✅ **已完成（2026-11-17）**：新 `island_pool.rs`（`IslandPool`：常驻线程 `bamboo-island-N`、每条 64 MiB 栈、岛尽量回到上次的线程、`catch_unwind` 把 panic 连同岛交回）；`World.island` 改成 `IslandSlot`（`Box<Island>`，派出时整个拿走、主控这时只拿得到自己的状态）；分离驱动的一刻分三段：① 岛停放：收上一刻的信、主控收包、边界 / 天气 / 时间；② 岛在 tick 线程上跑（光照到发区块，最后照名单编存盘快照），主控同时推进 Director（只投信）；③ 岛交回：回执和排队的全局改动、延迟广播、刷出站缓冲、下一份存盘名单、`/save-all`、关服。齐步（`island_threads = 0`）照原顺序内联、一行不差。岛的 panic 在主控线程上 `resume_unwind`，走世界线程原来的崩溃路径；tick 线程全没了也当崩溃；关服请求到达时岛还在跑，再等 10 秒不回来就不等了（全局状态照常写盘、放锁、列出存不下来的区块）。剖析器加 `master_busy` / `island_busy` / `island_handoff`。`bamboo.toml` 的 `island_threads` 取代第 6 步的 `island_drive`，`BAMBOO_ISLAND_THREADS` 取代 `BAMBOO_ISLAND_DRIVE`（盖过文件和缺省、不写回文件），桌面端设置页同步加一项；**验收后缺省改成 1**。实测见表下「第 7 步的实测」。**tick 线程池和调度（仍一个岛）**：主控线程（20 TPS，`Global` + Director）+ tick 线程池；岛按截止时间派发、跑完交回；分离驱动下主控和岛并行；`bamboo.toml` 加 `island_threads`（0 = 齐步、内联）。**验收通过后缺省改成 ≥ 1（分离驱动）**，具体值按测量定。总设计稿第 12 节第 3 条（等子任务的线程只能帮子任务）这一步不涉及，岛内还没有子任务 | 新 `island_pool.rs`、`world.rs`、`island.rs`、`director_host.rs`（关服拆出不带岛的一条）、`profiler.rs`、`mc-bamboo-server/src/server.rs`、`config.rs`、`config_files.rs`、桌面端设置、`tools/probe.sh`、`mc-bamboo-vanilla` 两处显式齐步、`docs/configuration.md` | `island_threads = 0`：逐位一致；缺省（分离）：同第 6 步分离模式，另有两处同一刻内的先后变化（准则写计分板、延迟广播排到岛这一刻的包后面，同一次刷出） | 显式 `island_threads = 0` 跑全部测试和对拍；**缺省配置下全套测试和探针都过**；量「主控 ↔ 岛交接」每刻的额外耗时（目标 < 50 µs）；`islands-1` / `normal-*` 打开 / 关闭同轮对比 | 中（实际 ~1800，含测试） | 否 |
 | 8 | ✅ **已完成（2026-11-17）**。**分区器，只算不用**：主控按 3.1 维护 section 计数和岛的划分、待合并 / 待拆分，统计岛数、大小、每秒合并 / 拆分次数，断言不变量；不真的拆（运行时行为不变） | 新 `island_partition.rs` / `island_partition_stats.rs` / `world/island_partition_tests.rs`；`director_host.rs` 的 `pump`（把 `LevelChange` 和 owner 事件喂给分区器）；`mc-bamboo-world/src/director/state.rs`（`classify` 的结果对外暴露）；`profiler.rs`、`lib.rs`、`world.rs` 一行模块声明、`run-heavy.sh` 的 `ISLANDS` | 不变 | `cargo fmt` / `clippy --workspace --all-targets` 0 警告；`cargo test -p mc-bamboo-game -p mc-bamboo-world` 与 `BAMBOO_TEST_LOADED=1` 全过；`ticket-oracle` 400 场景 0 不一致、`chunk-content` 139/139、`oracle java` 10114 例 0 fail、hy4 探针 719/719；随机玩家 / 随机票 5 种子 × 400 刻逐刻断言不变量、增量 == 全量、漏合并改坏确认、拆分迟滞 200 刻与取消；`=2` 的正式 `World::tick` 全量对照不报错；7 场景统计见 `docs/profiling.md` 第 15 节：`islands-K` 稳态正好 K 个岛（25 / 36 个 section）、合并 / 拆分都是 0 / 秒，`island_partition_ns` p50 0.2–1.1 µs、合计 mean 0.29–21.2 µs/刻，`=2` 全量对照 0.19–0.24 ms/刻；3 轮 A-B-A 中位数 `islands-1` 0.851、`normal-20-walk` 1.005，在噪声内 | 中（~800） | **是** |
 | 9 | ✅ **已完成（2026-11-17）**：新 `region/island_split.rs`（`Region::split_off_island(chunks, players, random)` / `absorb_island(other, delta)`、`IslandPart`、`IslandRandom`），`Island::split_off_island` / `absorb_island` 再分区块信箱、存盘名单和报告；每一类怎么拆、怎么并、要不要平移见 3.3「第 9 步做完以后」，随机源的待定事项见 3.3「岛的随机源」；`rebase_clock` 有了正式调用者，去掉 `expect(dead_code)`。实测见表下「第 9 步的实测」。**岛的拆合（离线）**：`Region::split_off_island(chunks, players)` / `absorb_island(other, delta)`，补齐 3.3 表里缺的零件；还不在运行时调用 | 实际：`region/island_split.rs`（新）、`region.rs`、`island.rs`、`mc-bamboo-world` 的 `store.rs` / `light/{mod,level,storage}.rs`、`mc-bamboo-blocks` 的 `entity/store.rs` / `ticks.rs` / `block_entity.rs` / `block_entity/watch.rs` / `level.rs`、`tick_levels.rs`、`entity_tracking.rs`、`entity_sync.rs`、`player_grid.rs`、`links.rs`、`lectern.rs`、`chunk_encoding/cache.rs`、`region/dirty.rs`、`region/partition.rs`、`profiler.rs`、新测试 `world/island_split_tests.rs`；没动 `region/unit.rs`（单元拆合原样保留，岛的拆合另起一套入口） | 不变（运行时不调） | 拆了再合的内容指纹（方块、方块实体、计划刻含顺序、实体去掉网络 ID、容器、追踪配对）逐位相同；平移和不平移的对照；微基准：1000 个区块的拆 / 合耗时（目标 < 5 ms） | 大（实际 ~3400，含测试） | 否 |
-| 10 | **多岛上线（验收后缺省开）**：分区器驱动真实的拆合；交付按岛路由、合并后再交付；进服 / 离开 / 跨岛 `/tp` 走离境和到达；聊天、全局帧、跨岛命令扇出；`bamboo.toml` 加 `islands`，**这一步验收通过后缺省改成 `true`**，`islands = false` 保留给对拍和测试 | `world.rs`、`director_host.rs`、`island_partition.rs`、`island_pool.rs`、`command/teleport.rs`、`secure_chat/deliver.rs`、`chat.rs`、`command/*`、`docs/configuration.md` | 打开时：第 13 节差异清单新增的几条 | 第 6.2 节的多岛测试；**缺省配置（多岛开）下全套测试和探针都过**，显式精确模式下逐位一致照旧；`islands-K` 和第 14 节基线对比 | 大（~1500） | **是**（`Deliver` 的目标岛） |
+| 10 | **a、b 段和 c 段的第一部分（混合驱动，5.5）已完成（2026-11-18），多岛缺省仍然关着；剩性能测量和缺省打开。** **多岛上线（验收后缺省开）**：分区器驱动真实的拆合；交付按岛路由、合并后再交付；进服 / 离开 / 跨岛 `/tp` 走离境和到达；聊天、全局帧、跨岛命令扇出；`bamboo.toml` 加 `islands`，**这一步验收通过后缺省改成 `true`**，`islands = false` 保留给对拍和测试 | `world.rs`、`director_host.rs`、`island_partition.rs`、`island_pool.rs`、`command/teleport.rs`、`secure_chat/deliver.rs`、`chat.rs`、`command/*`、`docs/configuration.md` | 打开时：第 13 节差异清单新增的几条 | 第 6.2 节的多岛测试；**缺省配置（多岛开）下全套测试和探针都过**，显式精确模式下逐位一致照旧；`islands-K` 和第 14 节基线对比 | 大（~1500） | **是**（`Deliver` 的目标岛） |
 | 11 | **长时间压力验收和调参**：长时间压力、合并拆分频率和等待时间（总设计稿 17.2）、分区器迟滞参数和 `island_threads` 的缺省值按测量调整、把差异写进第 13 节。缺省值已在第 7、10 步改过，这一步不再改开关 | 文档、`tools/mc-bamboo-loadtest`、必要时 `config_files.rs` 的缺省值 | — | 见 6.2 | 小 | 否 |
 
 **第 1–3 步的实测（2026-11-17）**：6.1 的验收全过（`cargo test --workspace` + `BAMBOO_TEST_LOADED=1` 共 4313 个测试 0 失败，11 个对拍 0 不一致，`oracle java` 两种配置 10114 / 0 fail，hy4 探针和 `--loaded` 两遍共 5 次 719/719）。性能同轮 A-B-A（第 0 步合并点对第 3 步末），每场景 5 轮、每次 20 秒，逐轮 `tick_total` 均值比的中位数：`islands-1` 0.904、`spread-16` 1.018、`normal-20-walk` 1.022；同机 A/A 对照（`islands-1`）0.956，单轮范围 0.84–1.07，三个场景都在噪声内。微基准 7 轮 A-B 交替：`cache_bench`（关缓存）0.994；`ticks_bench` 总中位数 1.010（rolling 1.006 / 1.018 / 1.034），只改了计划刻热路径上「最近排刻时刻」的编码，单独对照这一处是中性的，剩下的差别只出现在测试二进制里（第 3 步往同一个测试二进制加了不少测试代码），正式二进制的 `cache_bench` 没有。

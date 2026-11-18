@@ -2211,3 +2211,71 @@ fn a_healthy_island_never_queues_behind_a_stuck_one() {
         );
     });
 }
+
+/// 都按时的时候，混合驱动的结果和 tick 线程数无关：1 条和 8 条线程，带进服、离开和换岛
+/// 的传送（这些和齐步比不了，分离驱动的交付晚一刻），每刻每组的内容、时钟和每名玩家
+/// 收到的全部字节相同。
+///
+/// With every island on time the hybrid drive does not depend on the thread
+/// count: 1 and 8 threads, with a join, a leave and island-changing teleports
+/// (which cannot be compared with lockstep, as detached deliveries are a tick
+/// later), give the same content, clocks and bytes every tick.
+#[test]
+fn on_time_hybrid_does_not_depend_on_the_thread_count() {
+    bounded(|| {
+        let script: Vec<(u64, Act)> = vec![
+            (1, Act::Command(0, "gamemode creative @a")),
+            (2, Act::Chat(1, "hello")),
+            (3, Act::Join("late")),
+            (5, Act::Command(2, "tellraw @a {\"text\":\"hi\"}")),
+            (6, Act::Command(0, "tp {g0} {c1}")),
+            (9, Act::Console("say from the console")),
+            (12, Act::Command(1, "tp {g1} {c2}")),
+            (15, Act::Leave(2)),
+            (17, Act::Chat(0, "bye")),
+            (20, Act::Command(0, "tp {g0} {c0}")),
+        ];
+        let (mut one, mut eight) =
+            set_up_pair(43, Harness::new_islands(2, 1), Harness::new_islands(2, 8));
+        assert_eq!(
+            one.server.world.master.director_tick,
+            eight.server.world.master.director_tick
+        );
+        prepare(&mut one);
+        prepare(&mut eight);
+        for tick in 0..30_u64 {
+            for (_, step) in script.iter().filter(|(at, _)| *at == tick) {
+                act(&mut one, step);
+                act(&mut eight, step);
+            }
+            one.server.tick();
+            eight.server.tick();
+            let what = format!("tick {tick}");
+            assert!(
+                one.server.world.islands.all_parked() && eight.server.world.islands.all_parked()
+            );
+            assert_eq!(
+                one.server.world.islands.ids(),
+                eight.server.world.islands.ids(),
+                "{what}：岛的编号"
+            );
+            for id in one.server.world.islands.ids() {
+                for group in 0..one.centers.len() {
+                    assert_same_print(
+                        &group_print_on(&mut one, id, group),
+                        &group_print_on(&mut eight, id, group),
+                        &format!("{what}：岛 {id} 上第 {group} 组的内容"),
+                    );
+                }
+            }
+            for ((_, mine), (_, theirs)) in one.clients.iter().zip(&eight.clients) {
+                assert_eq!(
+                    mine.take_frames(),
+                    theirs.take_frames(),
+                    "{what}：玩家 {:?} 收到的字节",
+                    mine.id
+                );
+            }
+        }
+    });
+}
