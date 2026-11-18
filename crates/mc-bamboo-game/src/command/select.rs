@@ -230,6 +230,12 @@ fn find(
     Ok(sort_and_limit(region, found, selector, origin))
 }
 
+/// 官方 `Entity.getPlainTextName()`：自定义名字取组件的纯文本，否则取类型翻译键。
+/// `typeName()` 是按注册表 ID 查的语言键，Bamboo 没有语言表，用实体的英文类名。
+///
+/// Official `Entity.getPlainTextName()`: the custom name's plain text, or the
+/// type translation key. Bamboo has no language file, so the English type name
+/// stands in for the key.
 /// 官方 `EntitySelectorParser.limitToType`：正值的 `type=` 已经把候选缩到一个类型；
 /// 这里用它跳过肯定不匹配的另一类实体（过滤仍会逐项复核）。
 ///
@@ -339,8 +345,9 @@ fn matches(
         }
     }
     for (tag, inverted) in &selector.tag_filters {
-        // `Entity.entityTags()`；Bamboo 只有牛的 `Tags`，其余实体没有标签。
-        // `Entity.entityTags()`; Bamboo only has a mob's `Tags`.
+        // 官方 `Entity.entityTags()`：空字符串判断标签集合是否为空，否则查集合里有没有它。
+        // Official `Entity.entityTags()`: the empty string tests whether the set
+        // is empty; any other value is looked up in the set.
         let has = if tag.is_empty() {
             !facts.tags.is_empty()
         } else {
@@ -350,12 +357,14 @@ fn matches(
             return false;
         }
     }
-    // `level=` 只对 `ServerPlayer.experienceLevel` 生效，Bamboo 的玩家等级恒为 0。
-    // `level=` tests `ServerPlayer.experienceLevel`; Bamboo players are always level 0.
+    // `level=` 只对 `ServerPlayer.experienceLevel` 生效：非玩家实体永远不匹配，
+    // Bamboo 的玩家等级恒为 0。
+    // `level=` tests `ServerPlayer.experienceLevel` only: non-player entities
+    // never match; Bamboo players are always level 0.
     if selector
         .level
         .as_ref()
-        .is_some_and(|bounds| !bounds.contains(if player.is_some() { 0 } else { -1 }))
+        .is_some_and(|bounds| player.is_none() || !bounds.contains(0))
     {
         return false;
     }
@@ -477,10 +486,18 @@ fn plain_name_of(
     if let Some(mc_bamboo_blocks::entity::KindState::Mob(mob)) = row.map(|row| &row.state.kind)
         && let Some(tag) = &mob.custom_name
     {
-        if let mc_bamboo_nbt::Tag::String(text) = tag {
-            return text.clone();
-        }
-        return String::new();
+        return match tag {
+            mc_bamboo_nbt::Tag::String(text) => text.clone(),
+            mc_bamboo_nbt::Tag::Compound(entries) => entries
+                .iter()
+                .find(|(key, _)| key == "text")
+                .and_then(|(_, value)| match value {
+                    mc_bamboo_nbt::Tag::String(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
     }
     match public.kind.entity_type() {
         entity_type::COW => "Cow",

@@ -125,8 +125,7 @@ pub(crate) fn entity_name(region: &Region, entity: Entity) -> Option<String> {
         Entity::World(uid) => {
             let public = region.entities.public_at(uid)?;
             if let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind
-                && let Some(name) = &mob.custom_name
-                && let mc_bamboo_nbt::Tag::String(text) = name
+                && let Some(mc_bamboo_nbt::Tag::String(text)) = &mob.custom_name
             {
                 return Some(text.clone());
             }
