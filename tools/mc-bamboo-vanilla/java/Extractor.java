@@ -232,6 +232,8 @@ public final class Extractor {
     private static final long FACT_USE_SHAPE_FOR_LIGHT_OCCLUSION = 1L << 32;
     private static final long FACT_MOTION_BLOCKING = 1L << 33;
     private static final long FACT_MOTION_BLOCKING_NO_LEAVES = 1L << 34;
+    private static final long FACT_PATHFINDABLE_LAND = 1L << 35;
+    private static final long FACT_SUFFOCATING = 1L << 36;
     private static final int LIGHT_BLOCKED = 16;
     private static final int STURDY_MASK = (1 << 18) - 1;
     /** 26.3 主世界多噪声预设 `collectPossibleBiomes().distinct()` 的数量。 */
@@ -2012,6 +2014,10 @@ public final class Extractor {
             facts |= state.useShapeForLightOcclusion() ? FACT_USE_SHAPE_FOR_LIGHT_OCCLUSION : 0;
             facts |= state.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP) ? FACT_MOTION_BLOCKING : 0;
             facts |= state.is(BlockTags.BLOCKS_MOTION_IN_HEIGHTMAP_NO_LEAVES) ? FACT_MOTION_BLOCKING_NO_LEAVES : 0;
+            // 寻路起点向下找落脚点时问的 `isPathfindable(LAND)`，窒息判定的 `isSuffocating`。
+            facts |= state.isPathfindable(net.minecraft.world.level.pathfinder.PathComputationType.LAND)
+                    ? FACT_PATHFINDABLE_LAND : 0;
+            facts |= state.isSuffocating(EMPTY, pos) ? FACT_SUFFOCATING : 0;
             return facts;
         }
 

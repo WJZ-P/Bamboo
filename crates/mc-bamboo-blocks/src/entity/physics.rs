@@ -86,7 +86,7 @@ fn pick(axis: Axis, values: (i32, i32, i32)) -> i32 {
 impl Entity {
     /// `makeBoundingBox(position)`：实体在某个位置的碰撞盒。
     pub fn make_bounding_box_at(&self, position: Vec3) -> Aabb {
-        let (width, height) = self.kind.dimensions();
+        let (width, height) = self.dimensions;
         let half = f64::from(width / 2.0);
         let height = f64::from(height);
         Aabb::new(
@@ -223,7 +223,7 @@ impl Entity {
     /// `Entity.checkSupportingBlock`：脚下这一小片里哪个方块撑着实体。
     ///
     /// 站着不动时用整块实体盒子，被推着走时把这片区域往回挪，看挪之前的位置。
-    fn check_supporting_block(
+    pub(crate) fn check_supporting_block(
         &mut self,
         world: &dyn BlockView,
         on_ground: bool,
@@ -285,7 +285,7 @@ impl Entity {
     }
 
     /// `getBlockSpeedFactor`：当前方块的速度系数，是 1 时看脚下那一格。
-    fn block_speed_factor(&self, world: &dyn BlockView) -> f32 {
+    pub(crate) fn block_speed_factor(&self, world: &dyn BlockView) -> f32 {
         let state = world.block_state(self.block_position());
         let here = state.block().speed_factor;
         if !state.is(blocks::WATER) && !state.is(blocks::BUBBLE_COLUMN) && here == 1.0 {
@@ -887,7 +887,7 @@ fn step_heights(ground_min_y: f64, boxes: &[Aabb], max_step: f32, skip: f32) -> 
 }
 
 /// `Vec3.pos.relative(axis.getPositive(), distance)`。
-fn offset_along(pos: Vec3, axis: Axis, distance: f64) -> Vec3 {
+pub(crate) fn offset_along(pos: Vec3, axis: Axis, distance: f64) -> Vec3 {
     let (x, y, z) = axis.positive().normal();
     pos.add(Vec3::new(
         f64::from(x) * distance,
@@ -897,7 +897,7 @@ fn offset_along(pos: Vec3, axis: Axis, distance: f64) -> Vec3 {
 }
 
 /// 形状表里的盒子是相对方块的，挪到世界坐标。
-fn world_boxes(boxes: &[Aabb], pos: BlockPos) -> Vec<Aabb> {
+pub(crate) fn world_boxes(boxes: &[Aabb], pos: BlockPos) -> Vec<Aabb> {
     shape::moved(boxes, f64::from(pos.x), f64::from(pos.y), f64::from(pos.z))
 }
 
@@ -961,7 +961,7 @@ fn find_index(shape: Aabb, axis: Axis, value: f64) -> i32 {
 /// `BlockGetter.forEachBlockIntersectedBetween`：沿实体盒子最远的角扫过所有碰到的方块。
 ///
 /// `visit` 返回 `false` 时提前结束，整个函数也返回 `false`。
-fn for_each_block_intersected_between(
+pub(crate) fn for_each_block_intersected_between(
     from: Vec3,
     to: Vec3,
     aabb_at_target: Aabb,

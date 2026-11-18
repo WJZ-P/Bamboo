@@ -19,6 +19,10 @@ const DOUBLE_MULTIPLIER: f64 = 1.110_223e-16_f32 as f64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JavaRandom {
     seed: u64,
+    /// `MarsagliaPolarGaussian.nextNextGaussian`，没有缓存时是 `None`。
+    ///
+    /// The cached second Gaussian of `MarsagliaPolarGaussian`, `None` when empty.
+    next_gaussian: Option<u64>,
 }
 
 impl Default for JavaRandom {
@@ -32,7 +36,49 @@ impl JavaRandom {
     pub fn new(seed: i64) -> Self {
         Self {
             seed: (seed as u64 ^ MULTIPLIER) & MASK,
+            next_gaussian: None,
         }
+    }
+
+    /// 内部的 48 位状态，也就是官方 `LegacyRandomSource.seed` 的值。对拍时比较用。
+    ///
+    /// The internal 48-bit state, the value of vanilla `LegacyRandomSource.seed`.
+    pub const fn state(&self) -> i64 {
+        self.seed as i64
+    }
+
+    /// 有没有缓存着的第二个高斯数，官方的 `haveNextNextGaussian`。
+    pub const fn has_cached_gaussian(&self) -> bool {
+        self.next_gaussian.is_some()
+    }
+
+    /// `nextBoolean()`：`next(1) != 0`。
+    pub fn next_boolean(&mut self) -> bool {
+        self.next(1) != 0
+    }
+
+    /// `MarsagliaPolarGaussian.nextGaussian`。官方用 `Math.log` 和 `Math.sqrt`。
+    pub fn next_gaussian(&mut self) -> f64 {
+        if let Some(bits) = self.next_gaussian.take() {
+            return f64::from_bits(bits);
+        }
+        loop {
+            let first = 2.0 * self.next_double() - 1.0;
+            let second = 2.0 * self.next_double() - 1.0;
+            let square = first * first + second * second;
+            if square >= 1.0 || square == 0.0 {
+                continue;
+            }
+            let multiplier = (-2.0 * square.ln() / square).sqrt();
+            self.next_gaussian = Some((second * multiplier).to_bits());
+            return first * multiplier;
+        }
+    }
+
+    /// `triangle(mode, deviation)`：第一个数是被减数。
+    pub fn triangle(&mut self, mode: f64, deviation: f64) -> f64 {
+        let first = self.next_double();
+        mode + deviation * (first - self.next_double())
     }
 
     /// `next(bits)`。

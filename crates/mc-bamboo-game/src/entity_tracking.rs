@@ -177,6 +177,7 @@ enum KindData {
     FallingBlock { state: BlockState, start: BlockPos },
     Tnt { fuse: i32 },
     Item(ItemStack),
+    Mob(Box<mc_bamboo_blocks::entity::mob::MobPublic>),
 }
 
 impl Snapshot {
@@ -200,7 +201,7 @@ impl Snapshot {
     fn add_data(&self) -> i32 {
         match &self.data {
             KindData::FallingBlock { state, .. } => state.0 as i32,
-            KindData::Tnt { .. } | KindData::Item(_) => 0,
+            KindData::Tnt { .. } | KindData::Item(_) | KindData::Mob(_) => 0,
         }
     }
 
@@ -218,13 +219,14 @@ impl KindData {
             },
             KindPublic::Tnt { fuse } => Self::Tnt { fuse: *fuse },
             KindPublic::Item { stack, .. } => Self::Item(stack.clone()),
+            KindPublic::Mob(mob) => Self::Mob(mob.clone()),
         }
     }
 
     /// 同步用到的那个数字。下落的方块和物品没有。
     fn fuse(&self) -> Option<i32> {
         match self {
-            Self::FallingBlock { .. } | Self::Item(_) => None,
+            Self::FallingBlock { .. } | Self::Item(_) | Self::Mob(_) => None,
             Self::Tnt { fuse } => Some(*fuse),
         }
     }
@@ -232,7 +234,7 @@ impl KindData {
     fn stack(&self) -> Option<&ItemStack> {
         match self {
             Self::Item(stack) => Some(stack),
-            Self::FallingBlock { .. } | Self::Tnt { .. } => None,
+            Self::FallingBlock { .. } | Self::Tnt { .. } | Self::Mob(_) => None,
         }
     }
 
@@ -248,7 +250,7 @@ impl KindData {
             }
             Self::Tnt { .. } => Vec::new(),
             Self::Item(stack) if !stack.is_empty() => vec![EntityData::Item(stack.clone())],
-            Self::Item(_) => Vec::new(),
+            Self::Item(_) | Self::Mob(_) => Vec::new(),
         }
     }
 
@@ -260,7 +262,7 @@ impl KindData {
             Self::Tnt { fuse } if *fuse != last_fuse => vec![EntityData::TntFuse(*fuse)],
             Self::Tnt { .. } => Vec::new(),
             Self::Item(stack) if stack != last_stack => vec![EntityData::Item(stack.clone())],
-            Self::Item(_) => Vec::new(),
+            Self::Item(_) | Self::Mob(_) => Vec::new(),
         }
     }
 }

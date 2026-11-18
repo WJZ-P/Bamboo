@@ -123,6 +123,8 @@ pub enum KindPublic {
         health: i32,
         target: Option<[u8; 16]>,
     },
+    /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
+    Mob(Box<super::mob::MobPublic>),
 }
 
 impl KindPublic {
@@ -132,11 +134,15 @@ impl KindPublic {
             Self::FallingBlock { .. } => mc_bamboo_data::registries::entity_type::FALLING_BLOCK,
             Self::Tnt { .. } => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item { .. } => mc_bamboo_data::registries::entity_type::ITEM,
+            Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
 
     /// `EntityDimensions`。
     pub fn dimensions(&self) -> (f32, f32) {
+        if let Self::Mob(mob) = self {
+            return mob.dimensions();
+        }
         let facts = &entity_types::FACTS[self.entity_type() as usize];
         (facts.width, facts.height)
     }
@@ -174,6 +180,8 @@ pub enum KindState {
     #[default]
     Tnt,
     Item(ItemState),
+    /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
+    Mob(Box<super::mob::Mob>),
 }
 
 /// `FallingBlockEntity` 里别人不读的字段。
@@ -283,12 +291,15 @@ impl EntityRow {
                 roll_velocity: private.roll_velocity,
                 target,
             }),
+            (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
         };
+        let dimensions = kind.dimensions();
         Entity {
             id: public.uid,
             kind,
+            dimensions,
             position: public.position,
             delta: public.delta,
             old_position: state.old_position,
@@ -345,6 +356,13 @@ impl Entity {
                     bob_offs: data.bob_offs,
                     roll_velocity: data.roll_velocity,
                 }),
+            ),
+            EntityKind::Mob(mob) => (
+                KindPublic::Mob(Box::new(super::mob::MobPublic::of(
+                    &mob,
+                    self.remaining_fire_ticks,
+                ))),
+                KindState::Mob(mob),
             ),
         };
         EntityRow {
@@ -677,6 +695,7 @@ impl EntityStore {
         entity.random = JavaRandom::new(i64::from(entity.id) ^ ENTITY_RANDOM_SEED);
         // 物品的朝向和初速度用刚设好的实体随机源，不能用 `level.random`。
         entity.finish_item_random();
+        entity.finish_mob_random();
         let uid = entity.id;
         let row = entity.split();
         if self.ticking {
@@ -915,6 +934,23 @@ impl EntityStore {
             _ => None,
         };
         (public.bounding_box(), stack)
+    }
+
+    /// 岛合并时把各实体记着的绝对时刻平移 `delta`。现在只有生物有：
+    /// 受伤时刻、导航的卡住检查和重算时刻。tick 中被拿走的行不在表里，
+    /// 合并只在两刻之间发生，所以不会漏。
+    ///
+    /// Shift every absolute time stamp held by entities by `delta` on an island
+    /// merge. Only mobs have any: the damage stamp and the navigation stuck-check
+    /// and recompute times. Rows taken out mid-tick are absent, but merges only
+    /// happen between ticks.
+    pub fn rebase(&mut self, delta: i64) {
+        let rows = self.slots.iter_mut().flatten().chain(&mut self.pending);
+        for row in rows {
+            if let KindState::Mob(mob) = &mut row.state.kind {
+                mob.rebase(delta);
+            }
+        }
     }
 
     pub fn begin_tick(&mut self) {

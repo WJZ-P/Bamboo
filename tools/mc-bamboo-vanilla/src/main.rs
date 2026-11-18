@@ -92,6 +92,7 @@
 //! mc-bamboo-vanilla path-type <java 路径> [--break-self-test] [--show N]
 //!     把每个方块状态预算的寻路类型和官方 WalkNodeEvaluator 逐项对拍
 //! mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
+//! mc-bamboo-vanilla mob-oracle <java 路径> [--only 前缀] [--show N]
 //!     让官方 `handleMovePlayer` 对一组移动包出题，用 Bamboo 重放，
 //!     比较接受、拉回还是断开，以及最终位置和摔落距离
 //! mc-bamboo-vanilla storage <java 路径> [--show N]
@@ -162,6 +163,8 @@ mod loot_oracle;
 mod machine;
 #[cfg(feature = "oracle")]
 mod menu;
+#[cfg(feature = "oracle")]
+mod mob_oracle;
 #[cfg(feature = "oracle")]
 mod move_oracle;
 #[cfg(feature = "probe-online")]
@@ -322,6 +325,8 @@ const ENTITY_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/EntityOracle.ja
 #[cfg(feature = "oracle")]
 const MOVE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MovementOracle.java";
 #[cfg(feature = "oracle")]
+const MOB_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MobOracle.java";
+#[cfg(feature = "oracle")]
 const PATH_TYPE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/PathTypeOracle.java";
 #[cfg(feature = "oracle")]
 const STORAGE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StorageOracle.java";
@@ -378,6 +383,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla entity-oracle <java 路径>
       mc-bamboo-vanilla path-type <java 路径> [--break-self-test] [--show N]
       mc-bamboo-vanilla move-oracle <java 路径> [--cases N] [--seed S] [--show N]
+      mc-bamboo-vanilla mob-oracle <java 路径> [--only 前缀] [--show N]
       mc-bamboo-vanilla storage <java 路径> [--show N]
       mc-bamboo-vanilla saved-data <java 路径>
       mc-bamboo-vanilla player-data <java 路径> [--show N]
@@ -461,6 +467,7 @@ fn run() -> Result<(), String> {
         ["transform", java, ref options @ ..] => transform_cli(java, options),
         ["entity-oracle", java] => entity_oracle(java),
         ["move-oracle", java, ref options @ ..] => move_oracle(java, options),
+        ["mob-oracle", java, ref options @ ..] => mob_oracle(java, options),
         ["path-type", java, ref options @ ..] => path_type_oracle(java, options),
         ["storage", java, ref options @ ..] => storage_oracle(java, options),
         ["saved-data", java] => saved_data_cli(java),
@@ -926,6 +933,16 @@ fn path_type_oracle(java: &str, options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn path_type_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(feature = "oracle")]
+fn mob_oracle(java: &str, options: &[&str]) -> Result<(), String> {
+    mob_oracle::run(official_program(java, MOB_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn mob_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

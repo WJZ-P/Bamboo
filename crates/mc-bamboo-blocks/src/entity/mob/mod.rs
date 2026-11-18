@@ -1,0 +1,564 @@
+//! 生物：官方 `LivingEntity` → `Mob` → `PathfinderMob` → `AgeableMob` → `Animal` → `Cow`。
+//!
+//! 这一轮只有牛。状态都在 [`Mob`] 里，按官方的类分组；一刻的流程在 [`living`]，
+//! 移动和方块效果在 [`motion`]，目标在 [`goals`]，寻路在 [`path`] 和 [`navigation`]。
+//!
+//! tick 期间 [`Mob`] 被从 `Entity.kind` 里暂时取出来，和 `Entity` 本身分开借用；
+//! 实体的尺寸因此存在 [`Entity::dimensions`] 上，不从 `kind` 推。
+//!
+//! Mobs: vanilla `LivingEntity` through `Cow`. Only cows this round. During a tick the
+//! [`Mob`] is moved out of `Entity.kind` so it can be borrowed apart from the entity;
+//! sizes therefore live on [`Entity::dimensions`].
+
+pub mod attributes;
+pub mod control;
+pub mod goals;
+pub mod living;
+pub mod motion;
+pub mod navigation;
+pub mod nbt;
+pub mod path;
+pub(crate) mod timing;
+
+use mc_bamboo_core::{BlockPos, Vec3};
+
+use self::{
+    attributes::Attributes,
+    control::{BodyRotationControl, JumpControl, LookControl, MoveControl},
+    goals::GoalSelector,
+    navigation::Navigation,
+    path::Malus,
+};
+use super::{EntityUid, JavaRandom};
+
+/// 生物种类。现在只有牛。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobType {
+    Cow,
+}
+
+impl MobType {
+    /// 注册表 ID。
+    pub const fn entity_type(self) -> i32 {
+        match self {
+            Self::Cow => mc_bamboo_data::registries::entity_type::COW,
+        }
+    }
+
+    /// 成年和幼年的（宽，高，眼高）。
+    pub const fn dimensions(self, baby: bool) -> (f32, f32, f32) {
+        match (self, baby) {
+            (Self::Cow, false) => (0.9, 1.4, 1.3),
+            // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
+            (Self::Cow, true) => (0.45, 0.7, 0.69),
+        }
+    }
+}
+
+/// 牛的花纹，`cow_variant` 注册表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CowVariant {
+    #[default]
+    Temperate,
+    Warm,
+    Cold,
+}
+
+impl CowVariant {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Temperate => "minecraft:temperate",
+            Self::Warm => "minecraft:warm",
+            Self::Cold => "minecraft:cold",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Temperate, Self::Warm, Self::Cold]
+            .into_iter()
+            .find(|variant| variant.name() == name)
+    }
+}
+
+/// 牛的叫声，`cow_sound_variant` 注册表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CowSoundVariant {
+    #[default]
+    Classic,
+    Moody,
+}
+
+impl CowSoundVariant {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Classic => "minecraft:classic",
+            Self::Moody => "minecraft:moody",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Classic, Self::Moody]
+            .into_iter()
+            .find(|variant| variant.name() == name)
+    }
+}
+
+/// 一种流体的跟踪器，`EntityFluidInteraction.Tracker`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FluidTracker {
+    /// 流体注册表 ID（静止和流动的水是两种）。
+    pub fluid: i32,
+    pub height: f64,
+    pub eyes_inside: bool,
+}
+
+/// 伤害的种类，带着官方 `DamageType` 标签里牛用得到的那几条。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DamageKind {
+    Generic,
+    GenericKill,
+    InWall,
+    Cramming,
+    Drown,
+    OnFire,
+    InFire,
+    Lava,
+    HotFloor,
+    Cactus,
+    SweetBerryBush,
+    Fall,
+    Freeze,
+    OutOfWorld,
+    PlayerAttack,
+    MobAttack,
+}
+
+impl DamageKind {
+    /// 注册名。
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Generic => "minecraft:generic",
+            Self::GenericKill => "minecraft:generic_kill",
+            Self::InWall => "minecraft:in_wall",
+            Self::Cramming => "minecraft:cramming",
+            Self::Drown => "minecraft:drown",
+            Self::OnFire => "minecraft:on_fire",
+            Self::InFire => "minecraft:in_fire",
+            Self::Lava => "minecraft:lava",
+            Self::HotFloor => "minecraft:hot_floor",
+            Self::Cactus => "minecraft:cactus",
+            Self::SweetBerryBush => "minecraft:sweet_berry_bush",
+            Self::Fall => "minecraft:fall",
+            Self::Freeze => "minecraft:freeze",
+            Self::OutOfWorld => "minecraft:out_of_world",
+            Self::PlayerAttack => "minecraft:player_attack",
+            Self::MobAttack => "minecraft:mob_attack",
+        }
+    }
+
+    /// `#no_knockback`。
+    pub const fn no_knockback(self) -> bool {
+        !matches!(self, Self::PlayerAttack | Self::MobAttack)
+    }
+
+    /// `#bypasses_armor`。
+    pub const fn bypasses_armor(self) -> bool {
+        matches!(
+            self,
+            Self::OnFire
+                | Self::InWall
+                | Self::Cramming
+                | Self::Drown
+                | Self::Generic
+                | Self::Fall
+                | Self::Freeze
+                | Self::OutOfWorld
+                | Self::GenericKill
+        )
+    }
+
+    /// `#is_fire`。
+    pub const fn is_fire(self) -> bool {
+        matches!(
+            self,
+            Self::InFire | Self::OnFire | Self::Lava | Self::HotFloor
+        )
+    }
+
+    /// `#no_impact`。
+    pub const fn no_impact(self) -> bool {
+        matches!(self, Self::Drown)
+    }
+
+    /// `#bypasses_invulnerability`。
+    pub const fn bypasses_invulnerability(self) -> bool {
+        matches!(self, Self::OutOfWorld | Self::GenericKill)
+    }
+
+    /// `#panic_causes`。
+    pub const fn panic_causes(self) -> bool {
+        matches!(
+            self,
+            Self::PlayerAttack
+                | Self::MobAttack
+                | Self::Cactus
+                | Self::Freeze
+                | Self::HotFloor
+                | Self::InFire
+                | Self::Lava
+                | Self::OnFire
+        )
+    }
+}
+
+/// 一次伤害的来源，`DamageSource`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DamageSource {
+    pub kind: DamageKind,
+    /// `getEntity()`。
+    pub attacker: Option<EntityUid>,
+    /// 攻击者是不是玩家；玩家的伤害会让牛记住它，死时掉经验。
+    pub attacker_is_player: bool,
+    /// 攻击者是不是创造模式的玩家（`isCreativePlayer`）。
+    pub creative_player: bool,
+    /// `getSourcePosition()`。
+    pub position: Option<Vec3>,
+    /// 冲刺攻击时玩家的朝向，`causeExtraKnockback` 的方向用它。
+    pub sprint_yaw: Option<f32>,
+}
+
+impl DamageSource {
+    /// 没有攻击者的环境伤害。
+    pub const fn environment(kind: DamageKind) -> Self {
+        Self {
+            kind,
+            attacker: None,
+            attacker_is_player: false,
+            creative_player: false,
+            position: None,
+            sprint_yaw: None,
+        }
+    }
+
+    /// `damageSources().playerAttack(player)`。
+    pub const fn player(uid: EntityUid, position: Vec3, creative: bool) -> Self {
+        Self {
+            kind: DamageKind::PlayerAttack,
+            attacker: Some(uid),
+            attacker_is_player: true,
+            creative_player: creative,
+            position: Some(position),
+            sprint_yaw: None,
+        }
+    }
+}
+
+/// 一个生物的全部状态。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mob {
+    pub mob_type: MobType,
+    pub uuid: [u8; 16],
+    // ---- Entity 里普通实体没有的部分 ----
+    pub x_rot: f32,
+    pub y_rot_o: f32,
+    pub x_rot_o: f32,
+    pub eye_height: f32,
+    /// `Entity.invulnerableTime`：临时无敌，不是受伤冷却。
+    pub invulnerable_time: i32,
+    pub minor_horizontal_collision: bool,
+    pub fluid_trackers: Vec<FluidTracker>,
+    pub was_eye_in_water: bool,
+    pub in_powder_snow: bool,
+    pub was_in_powder_snow: bool,
+    pub ticks_frozen: i32,
+    pub air_supply: i32,
+    pub move_dist: f32,
+    pub fly_dist: f32,
+    pub next_step: f32,
+    pub crystal_sound_intensity: f32,
+    pub last_crystal_sound_tick: i32,
+    pub silent: bool,
+    pub no_gravity: bool,
+    pub invulnerable: bool,
+    pub custom_name: Option<String>,
+    pub custom_name_visible: bool,
+    pub glowing: bool,
+    pub portal_cooldown: i32,
+    pub tags: Vec<String>,
+    // ---- LivingEntity ----
+    pub attributes: Attributes,
+    pub health: f32,
+    pub dead: bool,
+    pub hurt_time: i32,
+    pub hurt_duration: i32,
+    pub death_time: i32,
+    /// `damageCooldownTime`：受伤后 20 刻内的减伤冷却。
+    pub damage_cooldown: i32,
+    pub last_hurt: f32,
+    pub last_damage_source: Option<DamageSource>,
+    /// 绝对时刻（岛的时钟），合并时要平移。
+    pub last_damage_stamp: i64,
+    pub last_hurt_by_mob: Option<EntityUid>,
+    pub last_hurt_by_mob_timestamp: i32,
+    pub last_hurt_by_player: Option<EntityUid>,
+    pub last_hurt_by_player_memory_time: i32,
+    pub no_action_time: i32,
+    pub speed: f32,
+    pub xxa: f32,
+    pub yya: f32,
+    pub zza: f32,
+    pub jumping: bool,
+    pub no_jump_delay: i32,
+    pub absorption: f32,
+    pub y_head_rot: f32,
+    pub y_head_rot_o: f32,
+    pub y_body_rot: f32,
+    pub y_body_rot_o: f32,
+    pub last_pos: Option<BlockPos>,
+    pub last_climbable_pos: Option<BlockPos>,
+    pub fall_flying: bool,
+    // ---- Mob ----
+    pub ambient_sound_time: i32,
+    pub look: LookControl,
+    pub mover: MoveControl,
+    pub jump: JumpControl,
+    pub body: BodyRotationControl,
+    pub navigation: Navigation,
+    pub goals: GoalSelector,
+    /// `Sensing` 的视线缓存，每刻清空。
+    pub seen: Vec<(EntityUid, bool)>,
+    pub malus: Malus,
+    pub persistence_required: bool,
+    pub left_handed: bool,
+    pub no_ai: bool,
+    pub can_pick_up_loot: bool,
+    pub home: Option<(BlockPos, i32)>,
+    pub loot_table_seed: i64,
+    // ---- AgeableMob / Animal / Cow ----
+    pub age: i32,
+    pub forced_age: i32,
+    pub forced_age_timer: i32,
+    pub age_lock_particle_timer: i32,
+    pub age_locked: bool,
+    pub in_love: i32,
+    pub love_cause: Option<[u8; 16]>,
+    pub variant: CowVariant,
+    pub sound_variant: CowSoundVariant,
+    /// 这一刻要广播的实体事件（受伤、死亡），游戏层同步时取走。
+    pub events: Vec<MobEvent>,
+    /// `hurtMarked`：速度要强制同步一次。
+    pub hurt_marked: bool,
+}
+
+/// 要发给客户端的一次生物事件。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MobEvent {
+    /// `broadcastDamageEvent`：受了一次完整的伤害。
+    Damage {
+        kind: DamageKind,
+        attacker: Option<EntityUid>,
+    },
+    /// `broadcastEntityEvent(this, 3)`：死亡。
+    Death,
+    /// `broadcastEntityEvent(this, 60)`：死亡动画结束，冒烟。
+    Poof,
+}
+
+impl Mob {
+    /// `EntityType.create`：构造函数链。随机数（UUID 两个 `nextLong`、`yRot` 一个
+    /// `nextFloat`）由调用方在实体拿到 ID 之后取，见 [`super::Entity::cow`]。
+    pub fn cow() -> Self {
+        let attributes = Attributes::cow();
+        let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+        let mut navigation = Navigation::new(follow_range);
+        let goals = GoalSelector::cow(&mut navigation);
+        let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
+        Self {
+            mob_type: MobType::Cow,
+            uuid: [0; 16],
+            x_rot: 0.0,
+            y_rot_o: 0.0,
+            x_rot_o: 0.0,
+            eye_height: MobType::Cow.dimensions(false).2,
+            invulnerable_time: 0,
+            minor_horizontal_collision: false,
+            fluid_trackers: Vec::new(),
+            was_eye_in_water: false,
+            in_powder_snow: false,
+            was_in_powder_snow: false,
+            ticks_frozen: 0,
+            air_supply: 300,
+            move_dist: 0.0,
+            fly_dist: 0.0,
+            next_step: 1.0,
+            crystal_sound_intensity: 0.0,
+            last_crystal_sound_tick: 0,
+            silent: false,
+            no_gravity: false,
+            invulnerable: false,
+            custom_name: None,
+            custom_name_visible: false,
+            glowing: false,
+            portal_cooldown: 0,
+            tags: Vec::new(),
+            attributes,
+            health,
+            dead: false,
+            hurt_time: 0,
+            hurt_duration: 0,
+            death_time: 0,
+            damage_cooldown: 0,
+            last_hurt: 0.0,
+            last_damage_source: None,
+            last_damage_stamp: 0,
+            last_hurt_by_mob: None,
+            last_hurt_by_mob_timestamp: 0,
+            last_hurt_by_player: None,
+            last_hurt_by_player_memory_time: 0,
+            no_action_time: 0,
+            speed: 0.0,
+            xxa: 0.0,
+            yya: 0.0,
+            zza: 0.0,
+            jumping: false,
+            no_jump_delay: 0,
+            absorption: 0.0,
+            y_head_rot: 0.0,
+            y_head_rot_o: 0.0,
+            y_body_rot: 0.0,
+            y_body_rot_o: 0.0,
+            last_pos: None,
+            last_climbable_pos: None,
+            fall_flying: false,
+            ambient_sound_time: 0,
+            look: LookControl::default(),
+            mover: MoveControl::default(),
+            jump: JumpControl::default(),
+            body: BodyRotationControl::default(),
+            navigation,
+            goals,
+            seen: Vec::new(),
+            malus: Malus::animal(),
+            persistence_required: false,
+            left_handed: false,
+            no_ai: false,
+            can_pick_up_loot: false,
+            home: None,
+            loot_table_seed: 0,
+            age: 0,
+            forced_age: 0,
+            forced_age_timer: 0,
+            age_lock_particle_timer: 0,
+            age_locked: false,
+            in_love: 0,
+            love_cause: None,
+            variant: CowVariant::Temperate,
+            sound_variant: CowSoundVariant::Classic,
+            events: Vec::new(),
+            hurt_marked: false,
+        }
+    }
+
+    pub fn is_baby(&self) -> bool {
+        self.age < 0
+    }
+
+    /// （宽，高）。
+    pub fn dimensions(&self) -> (f32, f32) {
+        let (width, height, _) = self.mob_type.dimensions(self.is_baby());
+        (width, height)
+    }
+
+    /// `isDeadOrDying`。
+    pub fn is_dead_or_dying(&self) -> bool {
+        self.health <= 0.0 || self.dead
+    }
+
+    /// `PathfinderMob.isPanicking`：正在跑的目标里有恐慌。
+    pub fn is_panicking(&self) -> bool {
+        self.goals.is_panicking()
+    }
+
+    /// 岛合并时把绝对时刻平移 `delta`。
+    pub fn rebase(&mut self, delta: i64) {
+        self.last_damage_stamp = self.last_damage_stamp.saturating_add(delta);
+        self.navigation.rebase(delta);
+    }
+}
+
+/// 别的实体和追踪同步能读到的生物数据。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MobPublic {
+    pub mob_type: MobType,
+    pub uuid: [u8; 16],
+    pub health: f32,
+    pub baby: bool,
+    pub x_rot: f32,
+    pub y_head_rot: f32,
+    pub y_body_rot: f32,
+    pub in_love: i32,
+    pub age: i32,
+    pub panicking: bool,
+    pub no_ai: bool,
+    pub silent: bool,
+    pub no_gravity: bool,
+    pub variant: CowVariant,
+    pub sound_variant: CowSoundVariant,
+    pub on_fire: bool,
+    pub ticks_frozen: i32,
+    pub air_supply: i32,
+    pub custom_name: Option<String>,
+    pub custom_name_visible: bool,
+    pub glowing: bool,
+    pub left_handed: bool,
+    pub dying: bool,
+}
+
+impl MobPublic {
+    pub fn of(mob: &Mob, remaining_fire_ticks: i32) -> Self {
+        Self {
+            mob_type: mob.mob_type,
+            uuid: mob.uuid,
+            health: mob.health,
+            baby: mob.is_baby(),
+            x_rot: mob.x_rot,
+            y_head_rot: mob.y_head_rot,
+            y_body_rot: mob.y_body_rot,
+            in_love: mob.in_love,
+            age: mob.age,
+            panicking: mob.is_panicking(),
+            no_ai: mob.no_ai,
+            silent: mob.silent,
+            no_gravity: mob.no_gravity,
+            variant: mob.variant,
+            sound_variant: mob.sound_variant,
+            on_fire: remaining_fire_ticks > 0,
+            ticks_frozen: mob.ticks_frozen,
+            air_supply: mob.air_supply,
+            custom_name: mob.custom_name.clone(),
+            custom_name_visible: mob.custom_name_visible,
+            glowing: mob.glowing,
+            left_handed: mob.left_handed,
+            dying: mob.is_dead_or_dying(),
+        }
+    }
+
+    pub fn dimensions(&self) -> (f32, f32) {
+        let (width, height, _) = self.mob_type.dimensions(self.baby);
+        (width, height)
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.health > 0.0
+    }
+}
+
+/// `Mth.createInsecureUUID(random)`：两个 `nextLong`，按版本 4 打标。
+pub fn insecure_uuid(random: &mut JavaRandom) -> [u8; 16] {
+    let most = (random.next_long() & -61441) | 16384;
+    let least = (random.next_long() & 4_611_686_018_427_387_903) | i64::MIN;
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&most.to_be_bytes());
+    bytes[8..].copy_from_slice(&least.to_be_bytes());
+    bytes
+}

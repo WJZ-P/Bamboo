@@ -105,6 +105,69 @@ pub trait BlockView {
     fn chunk_ticks_entities(&self, _chunk: ChunkPos) -> bool {
         true
     }
+
+    /// `getGameTime()`：岛的时钟。没有时钟的视图给 0。
+    fn game_time(&self) -> i64 {
+        0
+    }
+
+    /// 世界里的玩家，按官方 `ServerLevel.players()` 的顺序。生物的视线、诱惑、
+    /// 消失判定都从这里读。默认没有玩家。
+    ///
+    /// The players, in `ServerLevel.players()` order. Default: none.
+    fn for_each_player(&self, _visit: &mut dyn FnMut(&PlayerView)) {}
+
+    /// `getSkyDarken()`：昼夜和天气让天空光暗了多少。
+    fn sky_darken(&self) -> i32 {
+        0
+    }
+
+    /// `Level.isRainingAt(pos)`。
+    fn is_raining_at(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
+    /// `level.random.nextFloat()`。只有精确模式的世界能当场取世界随机数；
+    /// 并行的只读视图给 0，取数的地方列在设计稿的性能模式差异里。
+    fn level_random_float(&self) -> f32 {
+        0.0
+    }
+
+    /// `level.random.nextBoolean()`，并行视图同上。
+    fn level_random_boolean(&self) -> bool {
+        false
+    }
+}
+
+/// 生物看得见的一个玩家。
+///
+/// A player as seen by mobs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerView {
+    pub uid: EntityUid,
+    pub position: Vec3,
+    pub eye_height: f32,
+    pub alive: bool,
+    pub spectator: bool,
+    pub creative: bool,
+    /// `isDiscrete()`，也就是潜行。
+    pub sneaking: bool,
+    pub invisible: bool,
+    /// `getArmorCoverPercentage()`，隐身时才用。
+    pub armor_cover: f32,
+    /// 主手和副手的物品 ID，空手是 0。
+    pub main_hand: i32,
+    pub off_hand: i32,
+}
+
+impl PlayerView {
+    pub fn eye_y(&self) -> f64 {
+        self.position.y + f64::from(self.eye_height)
+    }
+
+    pub fn eye_position(&self) -> Vec3 {
+        Vec3::new(self.position.x, self.eye_y(), self.position.z)
+    }
 }
 
 impl BlockView for World<'_> {
@@ -208,6 +271,30 @@ impl BlockView for World<'_> {
     fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
         self.level().chunk_ticks_entities(chunk)
     }
+
+    fn game_time(&self) -> i64 {
+        World::game_time(self)
+    }
+
+    fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
+        self.level().for_each_player(visit);
+    }
+
+    fn sky_darken(&self) -> i32 {
+        self.level().sky_darken()
+    }
+
+    fn is_raining_at(&self, pos: BlockPos) -> bool {
+        World::is_raining_at(self, pos)
+    }
+
+    fn level_random_float(&self) -> f32 {
+        self.random().next_float()
+    }
+
+    fn level_random_boolean(&self) -> bool {
+        self.random().next_boolean()
+    }
 }
 
 /// 实体一刻能用到的全部上下文。精确和并行各有一个实现。
@@ -269,6 +356,21 @@ pub enum Command {
     SuckIntoHopper,
     /// `Entity.spawnAtLocation`：生成一件掉落物。
     DropItem { stack: ItemStack },
+    /// `LivingEntity.pushEntities` 里的一次 `doPush`：对方被推开，自己被推回来。
+    /// 落地时按双方当前的位置重算，`from` 是算阶段看到的对方位置。
+    PushMob {
+        other: EntityUid,
+        from: Vec3,
+        self_pushable: bool,
+    },
+    /// `LivingEntity.dropAllDeathLoot`：按战利品表掉东西，再按经验值生成经验球。
+    /// 表名为空时只掉经验。
+    DropMobLoot {
+        table: &'static str,
+        on_fire: bool,
+        killer: Option<EntityUid>,
+        experience: i32,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -292,6 +394,17 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::DropItem { stack } => {
             world.spawn_at_location(me.position, stack);
         }
+        Command::PushMob {
+            other,
+            from,
+            self_pushable,
+        } => super::mob::living::apply_push(me, other, from, self_pushable, world),
+        Command::DropMobLoot {
+            table,
+            on_fire,
+            killer,
+            experience,
+        } => super::mob::living::apply_death_drops(me, table, on_fire, killer, experience, world),
     }
 }
 

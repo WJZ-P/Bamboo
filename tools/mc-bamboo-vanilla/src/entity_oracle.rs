@@ -858,6 +858,7 @@ fn snap_of(entity: Entity) -> OfficialEntity {
             data.pickup_delay,
             data.health,
         ),
+        EntityKind::Mob(_) => ("mob".to_owned(), -1, -1, -1, 0, -1, -1, -1),
     };
     OfficialEntity {
         kind,

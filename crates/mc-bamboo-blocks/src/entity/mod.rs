@@ -10,6 +10,7 @@
 //! block entities; those already ran inside the scheduled-tick step.
 
 pub mod ctx;
+pub mod mob;
 pub mod parallel;
 pub mod random;
 pub mod store;
@@ -158,6 +159,10 @@ pub enum EntityKind {
     FallingBlock(FallingBlock),
     Tnt(PrimedTnt),
     Item(GroundItem),
+    /// 生物。状态很大，装箱存。
+    ///
+    /// A mob. Its state is large, so it is boxed.
+    Mob(Box<mob::Mob>),
 }
 
 impl EntityKind {
@@ -167,13 +172,31 @@ impl EntityKind {
             Self::FallingBlock(_) => mc_bamboo_data::registries::entity_type::FALLING_BLOCK,
             Self::Tnt(_) => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item(_) => mc_bamboo_data::registries::entity_type::ITEM,
+            Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
 
     /// `EntityDimensions`。
     pub fn dimensions(&self) -> (f32, f32) {
+        if let Self::Mob(mob) = self {
+            return mob.dimensions();
+        }
         let facts = &entity_types::FACTS[self.entity_type() as usize];
         (facts.width, facts.height)
+    }
+
+    pub fn mob(&self) -> Option<&mob::Mob> {
+        match self {
+            Self::Mob(mob) => Some(mob),
+            _ => None,
+        }
+    }
+
+    pub fn mob_mut(&mut self) -> Option<&mut mob::Mob> {
+        match self {
+            Self::Mob(mob) => Some(mob),
+            _ => None,
+        }
     }
 
     pub const fn is_falling_block(&self) -> bool {
@@ -197,6 +220,10 @@ pub struct Movement {
 pub struct Entity {
     pub id: i32,
     pub kind: EntityKind,
+    /// `Entity.dimensions` 的（宽，高）。生物长大时会变，所以存在实体上，不从 `kind` 推。
+    ///
+    /// The (width, height) of `Entity.dimensions`; stored because mobs change size.
+    pub dimensions: (f32, f32),
     pub position: Vec3,
     pub delta: Vec3,
     /// 上一 tick 的位置，官方的 `xo`、`yo`、`zo`。
@@ -242,9 +269,11 @@ pub struct Entity {
 impl Entity {
     /// 新建一个实体。ID 在 [`Entities::spawn`] 里分配。
     pub fn new(kind: EntityKind, position: Vec3) -> Self {
+        let dimensions = kind.dimensions();
         Self {
             id: 0,
             kind,
+            dimensions,
             position,
             delta: Vec3::default(),
             old_position: position,
@@ -313,7 +342,7 @@ impl Entity {
 
     /// `getY(progress)`。
     pub fn y_at(&self, progress: f64) -> f64 {
-        self.position.y + f64::from(self.kind.dimensions().1) * progress
+        self.position.y + f64::from(self.dimensions.1) * progress
     }
 
     /// `commonTick()`：`ServerLevel.tickNonPassenger` 在 `tick()` 之前调它。
@@ -327,12 +356,41 @@ impl Entity {
 
     /// 这个 tick 的 `tick()`。逻辑只看得到上下文接口，见 [`ctx`]。
     pub(crate) fn tick(&mut self, ctx: &mut dyn ctx::EntityCtx) {
-        self.common_tick();
-        match self.kind.clone() {
-            EntityKind::FallingBlock(_) => falling::tick_falling_block(self, ctx),
-            EntityKind::Tnt(data) => tnt::tick_tnt(self, data, ctx),
-            EntityKind::Item(_) => Entity::tick_item(self, ctx),
+        // 生物在 `commonTick` 之前还要跑 `checkDespawn`，整段自己管。
+        // Mobs run `checkDespawn` before `commonTick`, so they handle the whole tick.
+        if matches!(self.kind, EntityKind::Mob(_)) {
+            mob::living::tick(self, ctx);
+            return;
         }
+        self.common_tick();
+        match &self.kind {
+            EntityKind::FallingBlock(_) => falling::tick_falling_block(self, ctx),
+            &EntityKind::Tnt(data) => tnt::tick_tnt(self, data, ctx),
+            EntityKind::Item(_) => Entity::tick_item(self, ctx),
+            EntityKind::Mob(_) => {}
+        }
+    }
+
+    /// `EntityType.COW.create`：构造函数链。UUID 和朝向的随机数在
+    /// [`EntityStore::spawn`] 设好随机源以后取，见 [`Entity::finish_mob_random`]。
+    pub fn cow(position: Vec3) -> Self {
+        Self::new(EntityKind::Mob(Box::new(mob::Mob::cow())), position)
+    }
+
+    /// 构造函数里的随机数：`Entity` 的 UUID 两个 `nextLong`，`LivingEntity` 的
+    /// `yRot = nextFloat() * 6.2831855F`（弧度当角度用，官方就是这样）。
+    pub(crate) fn finish_mob_random(&mut self) {
+        let EntityKind::Mob(mob) = &mut self.kind else {
+            return;
+        };
+        mob.uuid = mob::insecure_uuid(&mut self.random);
+        self.y_rot = self.random.next_float() * 6.283_185_5;
+        mob.y_head_rot = self.y_rot;
+    }
+
+    /// 对生物跑一段逻辑；不是生物时返回 `None`。
+    pub fn with_mob<R>(&mut self, f: impl FnOnce(&mut Entity, &mut mob::Mob) -> R) -> Option<R> {
+        mob::living::with_mob(self, f)
     }
 
     /// `isInWater()`。

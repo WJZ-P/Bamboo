@@ -182,6 +182,7 @@ pub(crate) struct ClockParts {
     pub(crate) containers: bool,
     pub(crate) lecterns: bool,
     pub(crate) teleports: bool,
+    pub(crate) entities: bool,
 }
 
 impl ClockParts {
@@ -193,6 +194,7 @@ impl ClockParts {
         containers: true,
         lecterns: true,
         teleports: true,
+        entities: true,
     };
 }
 
@@ -530,6 +532,9 @@ impl Region {
             for player in self.players.values_mut() {
                 player.teleport.sent_at = player.teleport.sent_at.rebased(delta);
             }
+        }
+        if parts.entities {
+            self.entities.rebase(delta);
         }
         self.redstone_cache =
             mc_bamboo_blocks::cache::RedstoneCache::new(*self.redstone_cache.config());
@@ -905,6 +910,93 @@ mod tests {
         }
         region.advance_tick();
         assert!(region.tick.reached(at));
+    }
+
+    /// 生物的平移脚本：几头牛随机在「现在」记下受伤、卡住检查和重算时刻，
+    /// 每刻观测距这三个时刻过了几刻。`shift` 给出时第 `mid` 刻后按 `parts`
+    /// 平移岛的时钟。
+    ///
+    /// Mob rebase script: a few cows randomly stamp their damage, stuck-check
+    /// and recompute times at "now"; each tick observes how long ago each was.
+    fn mob_script(seed: u64, base: i64, shift: Option<(i64, i64, ClockParts)>) -> Vec<[i64; 9]> {
+        use mc_bamboo_blocks::entity::Entity;
+        use mc_bamboo_core::Vec3;
+
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut region = Region::new(2, 20, false);
+        region.start_clock(crate::global::GameTime(base));
+        let cows: Vec<_> = (0..3)
+            .map(|i| {
+                let mut cow = Entity::cow(Vec3::new(f64::from(i) * 4.0, -60.0, 0.0));
+                let now = region.tick.game_time();
+                let mob = cow.kind.mob_mut().expect("cow is a mob");
+                mob.last_damage_stamp = now;
+                mob.navigation.last_timeout_check = now;
+                mob.navigation.time_last_recompute = now;
+                region.entities.spawn(cow)
+            })
+            .collect();
+        let mut out = Vec::new();
+        for step in 1..=150_i64 {
+            region.advance_tick();
+            let now = region.tick.game_time();
+            let mut row = [0; 9];
+            for (i, &uid) in cows.iter().enumerate() {
+                let roll = next();
+                let seen = region.entities.with_mut(uid, |cow| {
+                    let mob = cow.kind.mob_mut().expect("cow is a mob");
+                    match roll % 7 {
+                        0 => mob.last_damage_stamp = now,
+                        1 => mob.navigation.last_timeout_check = now,
+                        2 => mob.navigation.time_last_recompute = now,
+                        _ => {}
+                    }
+                    [
+                        now - mob.last_damage_stamp,
+                        now - mob.navigation.last_timeout_check,
+                        now - mob.navigation.time_last_recompute,
+                    ]
+                });
+                row[i * 3..i * 3 + 3].copy_from_slice(&seen.expect("cow is stored"));
+            }
+            out.push(row);
+            if let Some((mid, delta, parts)) = shift
+                && step == mid
+            {
+                region.rebase_clock_parts(delta, parts);
+            }
+        }
+        out
+    }
+
+    /// 岛合并平移时钟后，生物记着的绝对时刻跟着平移；漏掉生物会被发现。
+    ///
+    /// After a clock rebase, mob time stamps move along; leaving mobs out is caught.
+    #[test]
+    fn mob_time_stamps_follow_a_clock_rebase() {
+        let mut caught = false;
+        for seed in 1..=8_u64 {
+            let base = 1_000 + (seed as i64) * 37;
+            let delta = 5_000 + (seed as i64) * 11;
+            let apart = mob_script(seed, base + delta, None);
+            assert_eq!(
+                mob_script(seed, base, Some((70, delta, ClockParts::ALL))),
+                apart,
+                "seed {seed}"
+            );
+            let broken = ClockParts {
+                entities: false,
+                ..ClockParts::ALL
+            };
+            caught |= mob_script(seed, base, Some((70, delta, broken))) != apart;
+        }
+        assert!(caught, "leaving mobs out of the rebase went unnoticed");
     }
 
     #[test]

@@ -56,6 +56,8 @@ pub(crate) struct TestLevel {
     pub(crate) drop_order: Vec<(&'static str, usize)>,
     /// `Level.getWorldBorder()`。默认是官方默认边界。
     pub(crate) border: crate::WorldBorder,
+    /// 生物能看见的玩家。默认没有。
+    pub(crate) players: Vec<crate::entity::ctx::PlayerView>,
 }
 
 impl TestLevel {
@@ -79,6 +81,7 @@ impl TestLevel {
             loot: Vec::new(),
             drop_order: Vec::new(),
             border: crate::WorldBorder::default(),
+            players: Vec::new(),
         }
     }
 
@@ -193,6 +196,12 @@ impl EntityTables for TestLevel {
 }
 
 impl Level for TestLevel {
+    fn for_each_player(&self, visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {
+        for player in &self.players {
+            visit(player);
+        }
+    }
+
     fn world_border(&self) -> crate::WorldBorder {
         self.border.clone()
     }
