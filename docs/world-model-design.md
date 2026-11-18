@@ -773,8 +773,13 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 | 后台任务 | 内联执行 | 计算池 |
 | 机器缓存 | 可开（结果不变） | 开 |
 | 用途 | oracle、probe、单元测试、调试 | 正式运行 |
+| 配置（2026-11-18） | `islands = false`、`island_threads = 0`、`entity_threads = 0` | 缺省：`islands = true`、`island_threads` = 逻辑核数的一半（2 到 8）；`entity_threads` 仍缺省 0 |
 
-**所有 oracle 继续在精确模式下跑。**
+**所有 oracle 继续在精确模式下跑。** 对拍、探针、端到端测试和要求逐位一致的单元测试都
+**显式**选精确模式，不靠缺省值（岛的实施计划第 9 节第 7 条）。缺省配置下探针同样全过。
+
+中间档：`islands = false`、`island_threads ≥ 1`（一个岛、分离驱动）只有第 8 条的「区块交付
+晚一刻」和第 11 条第 ⑧ 项的同一刻内先后两处差别，别的和精确模式相同。
 
 性能模式相对原版的差异：
 
@@ -842,6 +847,31 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
    延迟超过冻结时长的刻才有差别。官方自己存盘再读回时用的也是相对延迟，所以
    这条差异只在「同一局里区块被收回又重新交付」时出现。见 5.5 节。
 
+11. **多岛（`islands = true`，岛的实施计划第 5 节、第 6 节第 10 步）相对精确模式的差异汇总。**
+   上面第 1–4、6 条里带「多岛」的段落是来历，这里按玩家看得见的东西列全：
+   ① 区块交付晚一刻（≤ 50 ms，分离驱动，信件下一刻开头收）。
+   ② 跨岛的传送（`/tp` 到别的岛、远距离放置）晚一刻落地，到达方脚下 3×3 也晚一刻交付。
+   ③ 聊天、Tab 名单、进出服消息、全局帧、`SetTime` 给别的岛的玩家晚 ≤ 1 刻；两个岛几乎
+     同时发的两条消息，不同岛的接收者看到的先后可以不同。
+   ④ 一个岛落后时：它的时钟比别的岛慢，2 秒以内追平，超过就丢掉欠的刻（这个岛里的机器
+     整体少跑了这些刻，和官方「Can't keep up」时整服跳刻同类，但只发生在这个岛）；
+     给它的玩家的全局消息等它跑完再到；**玩家命令、控制台命令、改规则包、`/save-all`
+     要等全部岛停放才执行**，所以一个落后的岛会让别处发的命令一起晚到它回来。
+   ⑤ 碰方块的那 7 条命令（第 4 条）在拼成的一个世界上执行，结果同一个岛；拼和拆让那一刻
+     多花「每 1000 个已加载区块约 6.5 ms」。
+   ⑥ 随机源：每个岛自己的四个随机源（第 3 条），新生成实体的种子、UUID 和一个岛时不同；
+     天气由主控用自己的随机源推进，天气序列和官方不同；按名随机序列全世界一份。
+   ⑦ 拆合：合并时按时钟差平移被吸收的岛（计划刻、红石记忆等相对时序不变）；拆合那一刻
+     两边多花约 1–5 ms（`docs/profiling.md` 第 16 节）。
+   ⑧ 同一刻内的先后：岛里算出的计分板准则变化、每 30 秒的延迟广播排到这一刻岛写的包
+     后面（一个岛时同一次刷出；多岛时晚 ≤ 1 刻）。
+   ⑨ **判死**（计划 5.6）：一个岛的同一刻在 tick 线程上跑超过 `island_dead_seconds`
+     （默认 30 秒）就丢掉这个岛：它的玩家被断开，它的区块从上次存盘重新加载，**上次存盘
+     之后这一片的改动丢失**；服务端和别的岛照常跑。官方没有对应物（官方是看门狗在
+     `max-tick-time` 60 秒后整服崩溃）。
+   ⑩ 岛内的一切（方块、红石、实体、机器的相对时序、发给本岛玩家的包的内容和先后）和
+     一个岛时逐位相同（「分开跑 = 一起跑」，岛的实施计划第 9 步的测试）。
+
 同一个 region 内部，性能模式的结果仍然是确定的：同样的输入、不同的线程数，结果相同。这让性能模式自己也能做回归测试。
 
 ---
@@ -890,8 +920,8 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
 | 1 | 数据模型：区块束；光照和带位置的状态进区块；`Level` 的写入口收窄（第 3、4 节） | 存档、合并拆分、录制的前提。oracle 全绿是验收条件 | **按多区域 tick 第 1 步的结论收窄并做完**：按区块分存被实测否决，改成按单元存（本表 4.2、`docs/multi-region-tick-design.md` 4.8），四类状态各有 `split_off` / `absorb` 与忙区块活动索引；存储形状、遍历和发包顺序不变，oracle 全绿。以下为早期的区块束 / `Level` 收窄记录：`Level` 已收窄成 `LevelSideState` / `LevelTables` 和 `LevelEntities` / `EntityTables`（`0442bc4`、`f918171`），`ChunkStore::take_column` / `insert_column`、`RegionColumn::take_columns` / `insert_column` 和实体的按区块取放都能整盒取放（`2b2d5f5`、`a62f179`、`5c1c0d9`、`c396f2e`、`f918171`），每一步的 oracle 都全绿。**存储内部仍是整张表**：`ChunkStore` 是「模板 + 改过的表 + 四份光照表」，计划刻、方块实体、红石记忆和容器等四张表仍按全 region 存，只加了按区块的取放接口（见 4.2）；`LevelEntities` 上又开了三个交出整张实体表的入口，还没收窄到单独 trait（见第 3 节） |
 | 2 | 网络：分段出站缓冲、区块帧只压缩一次、广播从推改成拉（第 11 节、第 7 节第 10 段） | 多人同屏时 CPU 下降 | **做了一部分**：`PlayerSink::send(Outgoing)` 分段出站和 `Arc<SharedFrames>` 用 `OnceLock` 只压一次已合入（`32b1a8b`）；包体缓存和帧缓存同时保留，帧仍在世界线程编码、压缩仍在连接任务里做。**广播从推改成拉没做**，多人同屏时 CPU 是否下降没有量过（第一份基线里 200 人扎堆时实体同步和追踪平均 1.3 ms，`docs/profiling.md` 第 6 节） |
 | 3 | 区块平面：ticket、Director、流水线，先用内联执行器，再接计算池和 IO（第 5 节） | M3 存档和 M4 生成的挂载点 | **存档和计算池已做完，M4 多阶段生成还没接进流水线**：`TicketTable`、存档编解码、Director 状态机都接进 `World::tick`；一条 `mc-bamboo-storage::chunk_io` IO 线程读写区域 / 实体文件，带世界目录时所有区块（盘上有和没有）都走同一条异步读流水线，结果下一刻开头经信箱收回，进服第一批仍按距离交付（`docs/m3-storage.md` 第 14 节 `05d8fa1`）。非 `full` 的 `Status` 按 ProtoChunk 读回、方块光照由模板补齐，`.mcc` 外置区块也能扫到。卸载时脏区块序列化后写盘、pristine 直接丢；Parking 只留作写盘途中缓冲。世界目录、`session.lock`、`level.dat`（含 `_old`）、`data/`（游戏规则 / 世界生成设置 / 世界边界）、`chunk_tickets.dat`、玩家数据和 `save-all [flush]` / `save-on` / `save-off` 都接进生命周期，关服按官方 `stopServer` 顺序排空 IO、`sync_all`、释放锁。**计算池已接上**（5.3.1）：`chunk_worker_threads ≥ 1` 时 `Decode` / 每个 `Generate` 阶段 / `Save` 的序列化在常驻后台线程上做，`Read` 仍在 IO 线程、`Assemble` 内联；默认 0 是世界线程上的 `InlineCodec`，内联和池子跑同一场景盘上字节相同。**运行中的匀速保存照官方字节码，不是 D6 原式**：`MinecraftServer.autoSave` 每 6000 刻一次全量（只写改过的）、`ChunkMap.saveChunksEagerly` 每刻最多 20 个、单区块 200 刻冷却；卸载快照另走 `ceil(待写/6000)`（至少 1）的有上限匀速队列。`Region::encode_loaded_column` 从 `&Region` 用 `BorrowedParts` 只读组装一柱，和卸载存盘共用 `chunk_content::encode_parts`，**不取出/放回盒子、不卸载、不算完待算光照、不发任何包、不改运行态表的顺序和版本号**；写出的 NBT 与卸载逐字节一致。纯上层（容器 / 实体 / 计划刻 / 方块实体 / 红石记忆）改动也由 `Region::dirty` 标脏并参与匀速保存，不必等卸载或 `/save-all`。`/save-all` 立刻给所有已加载脏区块拍快照，`/save-off` 照 `noSave` 暂停。**terrain 生成已接进流水线**（本轮，见 `docs/worldgen.md`「接进游戏」）：`World::build` 对非 flat 世界用 `PipelineKind::Staged` + `OverworldGenerator`，`terrain` 阶段把 worldgen 纯函数的结果（quart 群系 + 方块）写进 `RegionColumn`，其余阶段透传；四个 `server.properties` 世界生成键生效、新世界默认 `normal`、`world_gen_settings.dat` 持久化种子与维度生成器、`gen-world` 对拍 0 不一致、默认起小计算池把生成移出世界线程。**第二轮（本轮）**：`features` 阶段接进流水线（见 `docs/worldgen.md`「第二轮」、5.3.1）：`Task::Generate.neighbors` 按 `ChunkStep` 半径带邻居引用、世界线程存不可变 `Arc` CARVERS 快照、计算池跑 `Generator::features()`、写邻居增量按 `TaskId` 合并 + 完工排规范序；`gen-world --through features` 对拍 0 不一致、1/4 线程逐字节相同；`initialize_light` / `light` 已在流水线里用邻居快照算出生成期光照（`b2778a8`，`gen-light` 对拍）；真实服务端路径（`collectPossibleBiomes(region,1)` / `carverBiome` / `region.getBiomeManager()`）和六张高度图也已逐方块、逐列对拍 0 不一致。**还没做**：生成时 `initialize_light` / `light` 以外的`spawn` 刷怪、其余地物类型、结构两阶段、ProtoChunk 从非 full 状态继续生成、多条 IO 线程、预编码帧、`fly-20` 飞行压测。差异与未建模 codec 见 `docs/m3-storage.md` 第 14 节和 README「存档已知限制」。存档只做官方 Anvil 格式，不兼容 26.3 之前的老存档布局 |
-| 4 | 主控和 region 调度：每个维度一个 region（6.2、6.3、6.6） | 精确模式成形；维度之间并行 | **没做**：仍是一条世界线程带一个 `Region`，没有主控线程、没有 tick 线程池，`Global` 和 Director 都在这条线程上 |
-| 5 | 分区器、合并拆分、离境和到达（6.1、6.4、6.5） | 多 region | **没做** |
+| 4 | 主控和 region 调度：每个维度一个 region（6.2、6.3、6.6） | 精确模式成形；维度之间并行 | **做完（2026-11-18，按 `docs/island-implementation-plan.md` 第 6 节第 0–7 步）**：世界线程就是主控（`Global` + Director），岛在常驻的 tick 线程上跑（`island_threads`）；`island_threads = 0` 是精确模式。现在只有主世界一个维度，「维度之间并行」没有对象 |
+| 5 | 分区器、合并拆分、离境和到达（6.1、6.4、6.5） | 多 region | **做完（2026-11-18，岛的实施计划第 8–10 步）**：分区器、按需拆合、跨岛离境和到达、混合驱动、判死、整个世界的命令；**缺省打开**（`islands = true`）。差异见第 13 节第 11 条，测量见 `docs/profiling.md` 第 16 节；长时间压力和调参是计划第 11 步，没做 |
 | 6 | 任务系统的子任务、只读收尾并行、降级阶梯（第 7、10、12 节） | 扎堆场景 | **没做**：后台计算池已经有了（5.3.1，只跑区块的解析、生成、序列化），tick 线程池没有；实体并行用 `ScopedThreads` 每刻起线程（只用于实验），以后可以改成往计算池交任务；只读收尾仍是串行，降级阶梯没有实现 |
 | 7 | 实体系统：`EntityStore`、`EntityCtx`、两种驱动；现有三种实体迁过去，entity oracle 全绿（第 8 节） | 生物系统的地基 | **做完**：`f918171`、`b99f8b5`，另有 `bamboo.toml` 的 `entity_threads` 开关和两段式 `compute` / `commit`（8.6.1）；生物系统本身还没开始 |
 | 8 | 生物和 AI，按 8.3、8.4 移植 | — | **没做**：只有下落方块、点燃的 TNT 和掉落物三种实体 |

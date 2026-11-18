@@ -3295,6 +3295,8 @@ python3 tools/mc-bamboo-loadtest/summarize-islands.py <结果目录>/off
 测试 `crates/mc-bamboo-game/src/entity_tracking/tests.rs`。这是
 `docs/island-implementation-plan.md` 8.1 第 1 条里剩下的那项；基线在
 `docs/profiling.md` 14.3 第 3 条和第 19 节的 19.5。
+（2026-11-18 更正：`islands-K` 场景当时的假玩家全部留在第 0 组，没有分到各组，见
+`docs/profiling.md` 16.1；本节的前后对比用的是同一个场景，相对数字仍然成立。）
 
 ### 22.1 先量：确认真的是它
 
