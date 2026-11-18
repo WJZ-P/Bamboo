@@ -737,15 +737,12 @@ impl World {
             .map_or(started, |away| away.dispatched);
         island.park();
         island.last_worker = worker;
-        island.region.profiler.record_duration(
-            Metric::IslandBusy,
-            finished.saturating_duration_since(started),
-        );
         let start = started.saturating_duration_since(dispatched);
         let back_half = waiting_since.map_or(Duration::ZERO, |since| {
             seated.saturating_duration_since(finished.max(since))
         });
         let profiler = &mut *self.master.profiler;
+        profiler.record_island_run(island.id, finished.saturating_duration_since(started));
         if queued {
             profiler.record_duration(Metric::IslandQueueWait, start);
             profiler.record_duration(Metric::IslandHandoff, back_half);
@@ -767,12 +764,7 @@ impl World {
             );
             let dropped = u64::from(slot.debt);
             slot.debt = 0;
-            if let Some(island) = slot.parked_mut() {
-                island
-                    .region
-                    .profiler
-                    .record(Metric::IslandDroppedTicks, dropped);
-            }
+            self.master.profiler.record_island_dropped(id, dropped);
         }
         if let Some(payload) = panic
             && self.master.hybrid.panic.is_none()

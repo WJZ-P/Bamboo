@@ -264,6 +264,33 @@ impl<'a> BenchWorld<'a> {
         players.into_iter().map(|(_, name)| name).collect()
     }
 
+    /// 把在线玩家 `name` 送到 `at`（和 `/tp` 同一段移动）。他所在的岛这一刻不在主控手里、
+    /// 或者没有这名玩家时返回 `false`，下一刻再试。多岛时他落到别的岛的区块上，之后照常
+    /// 由原岛清掉视野再搬过去（和命令送人一样）。
+    ///
+    /// Send online player `name` to `at` (the same move as `/tp`). Returns
+    /// `false` when their island is away this tick or there is no such
+    /// player; try again next tick. With several islands they land on another
+    /// island's chunk and are moved over afterwards as with a command.
+    pub fn teleport_player(&mut self, name: &str, at: Vec3) -> bool {
+        let found = self.world.islands.parked().find_map(|island| {
+            island
+                .region
+                .players
+                .iter()
+                .find(|(_, player)| player.name == name)
+                .map(|(&id, _)| (island.id, id))
+        });
+        let Some((island, id)) = found else {
+            return false;
+        };
+        let Some(island) = self.world.islands.get_mut(island) else {
+            return false;
+        };
+        crate::command::place_player(&mut island.region, id, at);
+        true
+    }
+
     /// 用服务器控制台来源执行一条命令，等价于在控制台里敲：和连接层送来的控制台命令走
     /// 同一条路（多岛时借全部玩家或者把全部岛拼起来，混合驱动下有岛不在就排队）。
     ///

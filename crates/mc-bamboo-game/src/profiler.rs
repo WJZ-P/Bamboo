@@ -717,6 +717,12 @@ pub(crate) struct Profiler {
     islands_on: bool,
     /// 岛划分每刻全量对照（`BAMBOO_PROFILE_ISLANDS=2`）。
     islands_verify: bool,
+    /// 混合驱动下每个岛在这一段报告里跑完的刻（主控在岛落座时记，岛不在手里也记得到）。
+    ///
+    /// Under the hybrid drive, the ticks each island finished in this report
+    /// period (recorded by the master as islands are seated, so islands that
+    /// are away still count).
+    island_runs: std::collections::BTreeMap<u32, IslandRuns>,
     /// 接在报告末尾的几行（混合驱动下主控写的每个岛一行），打完报告清空。
     ///
     /// Lines appended to the next report (one per island, written by the
@@ -763,6 +769,7 @@ impl Profiler {
             islands: None,
             islands_on: false,
             islands_verify: false,
+            island_runs: std::collections::BTreeMap::new(),
             appendix: String::new(),
         }
     }
@@ -772,6 +779,16 @@ impl Default for Profiler {
     fn default() -> Self {
         Self::with_report_interval(None)
     }
+}
+
+/// 一个岛在一段报告里跑完的刻：每刻的耗时和丢掉的刻数。
+///
+/// The ticks one island finished in a report period: the time of each and
+/// the ticks it dropped.
+#[derive(Default)]
+pub(crate) struct IslandRuns {
+    pub(crate) busy: Box<Histogram>,
+    pub(crate) dropped: u64,
 }
 
 /// 取单个直方图时用的键：要么是阶段耗时，要么是别的指标。
@@ -1212,6 +1229,36 @@ impl Profiler {
         self.clock.now().saturating_duration_since(self.last_report)
     }
 
+    /// 混合驱动：岛 `id` 跑完一刻，耗时 `busy`（也记进合计的 `island_busy`）。
+    ///
+    /// Hybrid drive: island `id` finished a tick taking `busy` (also counted
+    /// in the overall `island_busy`).
+    pub(crate) fn record_island_run(&mut self, id: u32, busy: Duration) {
+        self.record_duration(Metric::IslandBusy, busy);
+        self.island_runs
+            .entry(id)
+            .or_default()
+            .busy
+            .record_duration(busy);
+    }
+
+    /// 混合驱动：岛 `id` 落后太多，丢掉 `ticks` 刻（也记进合计的 `island_dropped_ticks`）。
+    ///
+    /// Hybrid drive: island `id` fell too far behind and dropped `ticks`
+    /// (also counted in the overall `island_dropped_ticks`).
+    pub(crate) fn record_island_dropped(&mut self, id: u32, ticks: u64) {
+        self.record(Metric::IslandDroppedTicks, ticks);
+        let runs = self.island_runs.entry(id).or_default();
+        runs.dropped = runs.dropped.saturating_add(ticks);
+    }
+
+    /// 这一段报告里各岛跑完的刻。
+    ///
+    /// The ticks each island finished in this report period.
+    pub(crate) fn island_runs(&self) -> &std::collections::BTreeMap<u32, IslandRuns> {
+        &self.island_runs
+    }
+
     /// 给下一份报告末尾接一段文字。
     ///
     /// Append text to the end of the next report.
@@ -1412,6 +1459,7 @@ impl Profiler {
         self.skipped_catch_ups = 0;
         self.chunks_this_tick = 0;
         self.ticks = 0;
+        self.island_runs.clear();
         self.appendix.clear();
         // 清零后不再有「上一刻」可比，第一刻和报告之间的间隔不算样本。
         self.previous_tick_start = None;

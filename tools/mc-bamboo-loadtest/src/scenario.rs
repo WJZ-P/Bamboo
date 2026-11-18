@@ -636,10 +636,13 @@ fn tick_scene(world: &mut BenchWorld<'_>) {
     }
 }
 
-/// 岛场景：新进服的假玩家按编号分到 `编号 % K` 组，用控制台的 `/tp` 送过去。
-/// 只在有人没送到的时候查一次在线名单。
+/// 岛场景：新进服的假玩家按编号分到 `编号 % K` 组，直接送过去（控制台的 `/tp` 用不了坐标：
+/// 控制台来源没有位置）。他所在的岛这一刻不在手里就下一刻再送。只在有人没送到的时候查一次
+/// 在线名单。
 ///
-/// Island scenarios: each new bot goes to group `index % K` through a console `/tp`.
+/// Island scenarios: each new bot goes to group `index % K`, placed directly
+/// (the console's `/tp` cannot take coordinates: the console source has no
+/// position); retried next tick while their island is away.
 fn place_new_bots(world: &mut BenchWorld<'_>, plan: &mut Plan) {
     if plan.groups == 0 {
         return;
@@ -654,8 +657,9 @@ fn place_new_bots(world: &mut BenchWorld<'_>, plan: &mut Plan) {
         let spread = (index / plan.groups % 5) as f64 * 2.0 - 4.0;
         let x = f64::from(ox + GROUP_PLAYER_SPOT.0) + 0.5 + spread;
         let z = f64::from(oz + GROUP_PLAYER_SPOT.1) + 0.5;
-        world.console_command(&format!("tp {name} {x} {FLAT_SURFACE_Y} {z}"));
-        plan.placed.insert(name);
+        if world.teleport_player(&name, Vec3::new(x, FLAT_SURFACE_Y, z)) {
+            plan.placed.insert(name);
+        }
     }
 }
 

@@ -265,6 +265,22 @@ enum RotationPlan {
     },
 }
 
+/// 压测场景用：把玩家放到 `absolute`，和 `/tp <玩家> <x> <y> <z>` 走同一段移动（朝向不变）。
+/// 控制台现在用不了带坐标的 `/tp`（控制台来源没有位置），压测钩子靠它分组送人。
+///
+/// For load-test scenes: put a player at `absolute` through the same move as
+/// `/tp <player> <x> <y> <z>` (rotation kept). The console cannot use `/tp`
+/// with coordinates today (its source has no position), so the load-test
+/// hooks use this to send bots to their groups.
+pub(crate) fn place_player(region: &mut Region, id: PlayerId, absolute: Vec3) {
+    move_player(
+        region,
+        id,
+        absolute,
+        RotationPlan::Keep { position_bits: 0 },
+    );
+}
+
 fn move_player(region: &mut Region, id: PlayerId, absolute: Vec3, plan: RotationPlan) {
     let Some(player) = region.players.get(&id) else {
         return;

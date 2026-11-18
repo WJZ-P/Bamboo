@@ -980,60 +980,76 @@ impl World {
     }
 
     /// 混合驱动下打报告之前：停放着的岛的样本并进主控的剖析器（之后清零），每个岛另记一行
-    /// （跑了几刻、每刻多久、丢了几刻、还欠几刻）。不在主控手里的岛的样本留到下一份报告。
+    /// （这一段跑完了几刻、自己的 TPS、每刻多久、丢了几刻、还欠几刻；刻数和耗时是主控在岛
+    /// 落座时记的，岛不在手里也算得到）。不在主控手里的岛的各阶段样本留到下一份报告。
     ///
     /// Before a report under the hybrid drive: fold every parked island's
     /// samples into the master's profiler (and clear them), with one line per
-    /// island (ticks run, time per tick, ticks dropped, ticks owed). Islands
-    /// that are away keep theirs for the next report.
+    /// island (ticks finished in the period, its own TPS, time per tick,
+    /// ticks dropped and owed; ticks and times are recorded by the master as
+    /// islands are seated, so islands that are away count too). Islands that
+    /// are away keep their phase samples for the next report.
     fn fold_island_profiles(&mut self) {
         use std::fmt::Write as _;
         let seconds = self.master.profiler.since_report().as_secs_f64();
         let mut text = format!(
-            "islands (over {seconds:.2} s; ticks = island ticks run, busy = ms per island tick):\n"
+            "islands (over {seconds:.2} s; ticks = island ticks finished, busy = ms per island tick):\n"
         );
-        for id in self.islands.ids() {
-            let debt = self.islands.debt(id);
-            let Some(island) = self
+        let mut ids: std::collections::BTreeSet<mc_bamboo_world::director::RegionId> =
+            self.islands.ids().into_iter().collect();
+        ids.extend(self.master.profiler.island_runs().keys().copied());
+        let ms = |nanos: u64| nanos as f64 / 1e6;
+        for id in ids {
+            let (ticks, mean, p50, p99, max, dropped) =
+                match self.master.profiler.island_runs().get(&id) {
+                    Some(runs) => {
+                        let busy = &runs.busy;
+                        let mean = if busy.count() == 0 {
+                            0.0
+                        } else {
+                            busy.sum() as f64 / busy.count() as f64 / 1e6
+                        };
+                        (
+                            busy.count(),
+                            mean,
+                            ms(busy.p50()),
+                            ms(busy.p99()),
+                            ms(busy.max()),
+                            runs.dropped,
+                        )
+                    }
+                    None => (0, 0.0, 0.0, 0.0, 0.0, 0),
+                };
+            let tps = if seconds > 0.0 {
+                ticks as f64 / seconds
+            } else {
+                0.0
+            };
+            let state = if !self.islands.contains(id) {
+                "gone".to_owned()
+            } else if let Some(island) = self
                 .islands
                 .slot_mut(id)
                 .and_then(crate::island::IslandSlot::parked_mut)
-            else {
-                let _ = writeln!(text, "  island {id:<4} away owed={debt}");
-                continue;
-            };
-            let region = &mut island.region;
-            let busy = region
-                .profiler
-                .histogram(crate::profiler::Series::Metric(Metric::IslandBusy));
-            let dropped = region
-                .profiler
-                .histogram(crate::profiler::Series::Metric(Metric::IslandDroppedTicks))
-                .sum();
-            let ms = |nanos: u64| nanos as f64 / 1e6;
-            let mean = if busy.count() == 0 {
-                0.0
+            {
+                let region = &mut island.region;
+                let state = format!(
+                    "chunks={} players={} entities={}",
+                    region.chunks.loaded_count().unwrap_or(0),
+                    region.players.len(),
+                    region.entities.len(),
+                );
+                self.master.profiler.merge(&region.profiler);
+                region.profiler.reset_samples();
+                state
             } else {
-                busy.sum() as f64 / busy.count() as f64 / 1e6
+                "away".to_owned()
             };
             let _ = writeln!(
                 text,
-                "  island {id:<4} chunks={} players={} entities={} ticks={} tps={:.2} busy mean={mean:.3} p50={:.3} p99={:.3} max={:.3} dropped={dropped} owed={debt}",
-                region.chunks.loaded_count().unwrap_or(0),
-                region.players.len(),
-                region.entities.len(),
-                busy.count(),
-                if seconds > 0.0 {
-                    busy.count() as f64 / seconds
-                } else {
-                    0.0
-                },
-                ms(busy.p50()),
-                ms(busy.p99()),
-                ms(busy.max()),
+                "  island {id:<4} {state} ticks={ticks} tps={tps:.2} busy mean={mean:.3} p50={p50:.3} p99={p99:.3} max={max:.3} dropped={dropped} owed={}",
+                self.islands.debt(id),
             );
-            self.master.profiler.merge(&region.profiler);
-            region.profiler.reset_samples();
         }
         self.master.profiler.append_to_report(&text);
     }

@@ -23,9 +23,10 @@ METRIC = re.compile(
     r"\s+p99=\s*([\d.]+)\s+max=\s*([\d.]+)"
 )
 ISLAND = re.compile(
-    r"^\s+island (\d+)\s+chunks=(\d+) players=(\d+) entities=(\d+) ticks=(\d+) tps=([\d.]+)"
-    r" busy mean=([\d.]+) p50=([\d.]+) p99=([\d.]+) max=([\d.]+) dropped=(\d+) owed=(\d+)"
+    r"^\s+island (\d+)\s+(.*?)\s*ticks=(\d+) tps=([\d.]+) busy mean=([\d.]+) p50=([\d.]+)"
+    r" p99=([\d.]+) max=([\d.]+) dropped=(\d+) owed=(\d+)"
 )
+STATE = re.compile(r"chunks=(\d+) players=(\d+) entities=(\d+)")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 RAMP = 2.0
 
@@ -77,18 +78,19 @@ def reports(path, start, end):
             continue
         i = ISLAND.match(line)
         if i:
+            state = STATE.search(i.group(2))
             current["islands"].append(
                 {
                     "id": int(i.group(1)),
-                    "chunks": int(i.group(2)),
-                    "players": int(i.group(3)),
-                    "entities": int(i.group(4)),
-                    "ticks": int(i.group(5)),
-                    "tps": float(i.group(6)),
-                    "busy_mean": float(i.group(7)),
-                    "busy_p99": float(i.group(9)),
-                    "busy_max": float(i.group(10)),
-                    "dropped": int(i.group(11)),
+                    "chunks": int(state.group(1)) if state else None,
+                    "players": int(state.group(2)) if state else None,
+                    "entities": int(state.group(3)) if state else None,
+                    "ticks": int(i.group(3)),
+                    "tps": float(i.group(4)),
+                    "busy_mean": float(i.group(5)),
+                    "busy_p99": float(i.group(7)),
+                    "busy_max": float(i.group(8)),
+                    "dropped": int(i.group(9)),
                 }
             )
     if current is not None:
@@ -170,9 +172,9 @@ def summarize_run(directory):
             "tps": statistics.median(i["tps"] for i in v),
             "busy_mean": statistics.median(i["busy_mean"] for i in v),
             "busy_p99": statistics.median(i["busy_p99"] for i in v),
-            "entities": max(i["entities"] for i in v),
-            "players": max(i["players"] for i in v),
-            "chunks": max(i["chunks"] for i in v),
+            "entities": max((i["entities"] for i in v if i["entities"] is not None), default=None),
+            "players": max((i["players"] for i in v if i["players"] is not None), default=None),
+            "chunks": max((i["chunks"] for i in v if i["chunks"] is not None), default=None),
             "dropped": sum(i["dropped"] for i in v),
         }
         for k, v in sorted(per_island.items())

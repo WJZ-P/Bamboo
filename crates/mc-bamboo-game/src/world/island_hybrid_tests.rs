@@ -2335,7 +2335,7 @@ fn on_time_hybrid_does_not_depend_on_the_thread_count() {
 /// samples are folded in, with one line per island.
 #[test]
 fn profiling_covers_every_master_tick_and_every_island_tick() {
-    use crate::profiler::{Metric, Series};
+    use crate::profiler::{Metric, Phase, Series};
     bounded(|| {
         let mut scene = scene(54, 4);
         for _ in 0..3 {
@@ -2395,11 +2395,20 @@ fn profiling_covers_every_master_tick_and_every_island_tick() {
                 island
                     .region
                     .profiler
-                    .histogram(Series::Metric(Metric::IslandBusy))
+                    .histogram(Series::Phase(Phase::LightUpdates))
                     .count(),
                 0,
                 "并进来以后岛自己的清零"
             );
         }
+        assert_eq!(
+            world
+                .master
+                .profiler
+                .histogram(Series::Phase(Phase::LightUpdates))
+                .count(),
+            TICKS * islands,
+            "岛的各阶段并进来了"
+        );
     });
 }
