@@ -1291,20 +1291,9 @@ pub(crate) fn apply_death_drops(
             }
         }
     }
-    let mut left = experience;
-    while left > 0 {
-        let value = experience_value(left);
-        left -= value;
-        let _ = world.random().next_int(40);
-        // 现在没有经验球实体：取数照官方，球不生成。
-        // There is no experience-orb entity yet: the draw happens, no orb spawns.
-    }
-}
-
-/// `ExperienceOrb.getExperienceValue`。
-fn experience_value(amount: i32) -> i32 {
-    [2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3]
-        .into_iter()
-        .find(|&value| amount >= value)
-        .unwrap_or(1)
+    // `ExperienceOrb.award` 的拆分和每个 `nextInt(40)` 都在这一条路径里；
+    // 生成的球进实体表、发配对包、能存盘。
+    // `ExperienceOrb.award` splits the amount and draws one `nextInt(40)` per
+    // orb. The orbs enter the entity table, are paired and can be saved.
+    super::super::orb::award(world, me.position, experience);
 }

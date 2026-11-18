@@ -14,8 +14,14 @@ use crate::chunk_nbt::{ChunkEncodeExtra, field};
 
 /// 官方 `EntityStorage.storeEntities` 认识的根键。
 const ENTITY_ROOT_KEYS: [&str; 3] = ["DataVersion", "Position", "Entities"];
-/// Bamboo 建模的三种实体。
-const MODELED_ENTITIES: [&str; 3] = ["minecraft:falling_block", "minecraft:tnt", "minecraft:item"];
+/// Bamboo 建模的实体。牛走 [`crate::entity::mob::nbt`]，经验球走共通键加四个专属键。
+const MODELED_ENTITIES: [&str; 5] = [
+    "minecraft:falling_block",
+    "minecraft:tnt",
+    "minecraft:item",
+    "minecraft:experience_orb",
+    "minecraft:cow",
+];
 
 /// 区块上层内容编解码失败的原因。所有输入都当成不可信数据，不 panic。
 #[derive(Debug, thiserror::Error)]
@@ -506,7 +512,7 @@ mod tests {
         file.entities
             .push(raw_entity("minecraft:tnt", &[("fuse", Tag::Short(80))]));
         file.preserved_entities
-            .push(raw_entity("minecraft:cow", &[("Health", Tag::Float(10.0))]));
+            .push(raw_entity("minecraft:pig", &[("Health", Tag::Float(10.0))]));
         file.preserved
             .push(("ModData".to_owned(), Tag::String("keep".to_owned())));
         let tag = file.encode().expect("非空实体文件");

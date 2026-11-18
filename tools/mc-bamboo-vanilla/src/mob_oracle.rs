@@ -102,6 +102,30 @@ struct Case {
     /// `requiresPrecisePosition`、`isFallFlying`。
     #[serde(default)]
     sync_flags: Option<Vec<Vec<String>>>,
+    /// 每刻新生成的掉落物和经验球。
+    #[serde(default)]
+    spawns: Option<Vec<Vec<Spawn>>>,
+    /// 致死伤害的种类：0 玩家攻击，1 摔落，2 着火。
+    #[serde(default)]
+    death_kind: i32,
+    /// 场景开始时给每头牛设的着火刻数。
+    #[serde(default)]
+    fire_ticks: i32,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct Spawn {
+    id: i32,
+    x: i64,
+    y: i64,
+    z: i64,
+    kind: String,
+    #[serde(default)]
+    item: i32,
+    #[serde(default)]
+    count: i32,
+    #[serde(default)]
+    value: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +154,8 @@ struct PlayerSetup {
     z: i64,
     eye: i32,
     item: i32,
+    #[serde(default)]
+    looting: i32,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -175,6 +201,10 @@ struct End {
 struct MobLevel {
     blocks: HashMap<BlockPos, BlockState>,
     random: LevelRandom,
+    /// 战利品表的随机序列，世界种子为 0，和官方一侧一样。
+    loot_sequences: mc_bamboo_loot::RandomSequences,
+    /// 死亡时攻击者的主手抢夺等级，按玩家下标。
+    looting: Vec<i32>,
     rules: mc_bamboo_blocks::BlockGameRules,
     redstone: mc_bamboo_blocks::RedstoneMemory,
     block_entities: BlockEntities,
@@ -293,6 +323,70 @@ impl Level for MobLevel {
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
         for player in &self.players {
             visit(player);
+        }
+    }
+
+    /// `LivingEntity.dropFromLootTable`：官方一侧用真的 `minecraft:entities/cow` 表，
+    /// 世界种子 0 的随机序列，攻击者的主手带抢夺等级。
+    ///
+    /// Matches `LivingEntity.dropFromLootTable` on the official side: the real
+    /// cow table, a world-seed-0 random sequence and the killer's looting level.
+    fn mob_loot_drops(
+        &mut self,
+        table: &str,
+        on_fire: bool,
+        killer: Option<mc_bamboo_blocks::EntityUid>,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        use mc_bamboo_loot::{
+            DamageSourceView, EntityDeathParams, EntityView, LootStack, Position,
+            entity_death_drops,
+        };
+        let mut victim = EntityView::new(mc_bamboo_data::registries::entity_type::COW);
+        victim.is_living = true;
+        victim.is_on_fire = on_fire;
+        let mut killer_view = None;
+        if let Some(uid) = killer {
+            let mut view = EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER);
+            view.is_living = true;
+            if let Some(index) = self.players.iter().position(|p| p.uid == uid) {
+                let level = self.looting[index];
+                if level > 0 {
+                    let mut held = LootStack::new(mc_bamboo_data::items::DIAMOND_SWORD, 1);
+                    let mut enchants = std::collections::BTreeMap::new();
+                    enchants.insert("minecraft:looting".to_owned(), level);
+                    held.set_enchantment_levels(mc_bamboo_loot::ENCHANTMENTS_COMPONENT, enchants);
+                    view.equipment[mc_bamboo_loot::EquipmentSlot::Mainhand.index()] = Some(held);
+                }
+            }
+            killer_view = Some(view);
+        }
+        let params = EntityDeathParams {
+            entity: victim,
+            origin: Position::new(0.0, 0.0, 0.0),
+            damage_source: DamageSourceView {
+                damage_type: 0,
+                direct_entity: killer_view.clone().map(Box::new),
+                source_entity: killer_view.clone().map(Box::new),
+                is_direct: true,
+            },
+            attacking_entity: killer_view.clone(),
+            direct_attacking_entity: killer_view.clone(),
+            last_damage_player: killer_view,
+            luck: 0.0,
+            level: None,
+        };
+        match entity_death_drops(
+            table,
+            &params,
+            0,
+            Some(&self.loot_sequences),
+            self.random.source(),
+        ) {
+            Ok(stacks) => stacks
+                .iter()
+                .map(|stack| mc_bamboo_protocol::item::ItemStack::new(stack.item, stack.count))
+                .collect(),
+            Err(_) => Vec::new(),
         }
     }
 }
@@ -443,6 +537,8 @@ impl Report {
         let mut level = MobLevel {
             blocks: HashMap::new(),
             random: LevelRandom::new(1),
+            loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
+            looting: case.players.iter().map(|player| player.looting).collect(),
             rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
@@ -503,6 +599,7 @@ impl Report {
                         mob.y_head_rot = yaw;
                         mob.y_body_rot = yaw;
                     }
+                    entity.remaining_fire_ticks = case.fire_ticks;
                 });
                 ids.push(id);
             }
@@ -513,6 +610,8 @@ impl Report {
         };
         let ours = snapshot(&level, &ids);
         self.compare(&case.name, 0, &ours, first);
+        // 已经发过 `remove_entities` 的牛，按 `ids` 下标。
+        let mut removed_ids = std::collections::HashSet::new();
         // 出站包逐刻比字节：官方一侧每头牛一个 `ServerEntity`，这里用游戏层
         // 同一份 `TrackedEntity` 逻辑，绝不在对拍里另写一份发包。
         if let Some(packets) = &case.packets {
@@ -554,11 +653,16 @@ impl Report {
                         f64::from_bits(player.y as u64),
                         f64::from_bits(player.z as u64),
                     );
-                    world.hurt_mob(
-                        ids[cow as usize],
-                        DamageSource::player(player.id, position, false),
-                        f32::from_bits(amount as u32),
-                    );
+                    let source = match case.death_kind {
+                        1 => DamageSource::environment(
+                            mc_bamboo_blocks::entity::mob::DamageKind::Fall,
+                        ),
+                        2 => DamageSource::environment(
+                            mc_bamboo_blocks::entity::mob::DamageKind::OnFire,
+                        ),
+                        _ => DamageSource::player(player.id, position, false),
+                    };
+                    world.hurt_mob(ids[cow as usize], source, f32::from_bits(amount as u32));
                 }
                 for summon in &case.summons {
                     if summon.tick != index {
@@ -611,9 +715,28 @@ impl Report {
                 let tracked = tracking.tracked_for_oracle(&snapshot);
                 spawn_pairings.extend(tracked.pairing_packets(&snapshot));
             }
+            // 死亡场景：逐刻比新生成的掉落物和经验球（种类、数量、位置）。
+            if let Some(expected_spawns) = &case.spawns {
+                let ours_spawns = spawn_snapshot(&level, &spawn_public);
+                compare_spawns(
+                    &mut self.mismatches,
+                    &self.show,
+                    &case.name,
+                    index,
+                    &ours_spawns,
+                    &expected_spawns[index],
+                );
+            }
             self.steps += 1;
             let ours = snapshot(&level, &ids);
             self.compare(&case.name, index, &ours, expected);
+            // 官方 `ChunkMap.removeEntity` 在被丢弃的那一刻发移除包。
+            let mut gone = Vec::new();
+            for &id in &ids {
+                if level.entities.public_at(id).is_none() && removed_ids.insert(id) {
+                    gone.push(id);
+                }
+            }
             if let Some(packets) = &case.packets {
                 let flags = case.sync_flags.as_ref().expect("有包就有标志位");
                 let tick = &flags[index];
@@ -636,6 +759,11 @@ impl Report {
                 }
                 let events = level.entities.take_mob_events();
                 ours_packets.extend(event_packets(&events, || sound_source.next_long()));
+                if !gone.is_empty() {
+                    ours_packets.push(mc_bamboo_protocol::frame::packet_body(
+                        &mc_bamboo_protocol::packet::play::RemoveEntities { entity_ids: &gone },
+                    ));
+                }
                 ours_packets.extend(sync_packets);
                 compare_packet_list(
                     &mut self.mismatches,
@@ -777,6 +905,68 @@ fn apply_flags(snapshot: &mut Snapshot, bits: &str) -> (bool, bool, bool) {
         snapshot.precise = true;
     }
     (flag(0), flag(1), flag(2))
+}
+
+/// 把新生成的掉落物和经验球转成可比的一条记录。
+fn spawn_snapshot(
+    _level: &MobLevel,
+    spawned: &[mc_bamboo_blocks::entity::EntityPublic],
+) -> Vec<Spawn> {
+    use mc_bamboo_blocks::entity::KindPublic;
+    spawned
+        .iter()
+        .filter_map(|public| {
+            let (kind, item, count, value) = match &public.kind {
+                KindPublic::Item { stack, .. } => ("item".to_owned(), stack.item, stack.count, 0),
+                KindPublic::ExperienceOrb { value } => ("orb".to_owned(), 0, 0, *value),
+                _ => return None,
+            };
+            Some(Spawn {
+                id: public.uid,
+                x: public.position.x.to_bits() as i64,
+                y: public.position.y.to_bits() as i64,
+                z: public.position.z.to_bits() as i64,
+                kind,
+                item,
+                count,
+                value,
+            })
+        })
+        .collect()
+}
+
+/// 死亡掉落逐刻比对：顺序、种类、物品数量、经验值和位置都按位比。
+fn compare_spawns(
+    mismatches: &mut Vec<String>,
+    show: &usize,
+    name: &str,
+    tick: usize,
+    ours: &[Spawn],
+    official: &[Spawn],
+) {
+    if mismatches.len() >= *show {
+        return;
+    }
+    let place = format!("{name} tick {tick} spawns");
+    if ours.len() != official.len() {
+        mismatches.push(format!(
+            "{place}: official {} entities {:?}, bamboo {} entities {:?}",
+            official.len(),
+            official,
+            ours.len(),
+            ours
+        ));
+        return;
+    }
+    for (index, (ours, expected)) in ours.iter().zip(official).enumerate() {
+        if ours == expected {
+            continue;
+        }
+        mismatches.push(format!(
+            "{place}[{index}]: official {expected:?}, bamboo {ours:?}"
+        ));
+        return;
+    }
 }
 
 /// 逐刻比字节：每个包单独比，长度不同或任意字节不同都记一条不一致。

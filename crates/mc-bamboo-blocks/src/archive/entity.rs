@@ -13,7 +13,10 @@ use mc_bamboo_protocol::{components::archive::slots, item::ItemStack};
 use super::tag::{self, Error, Result, put};
 use crate::{
     BlockState,
-    entity::{Entity, EntityKind, EntityRow, FallingBlock, GroundItem, JavaRandom, PrimedTnt},
+    entity::{
+        Entity, EntityKind, EntityRow, ExperienceOrb, FallingBlock, GroundItem, JavaRandom,
+        PrimedTnt,
+    },
 };
 
 /// 官方实体的 UUID 是随机的；Bamboo 由实体 ID 推出来，网络层和存档共用这一份。
@@ -48,6 +51,7 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
         crate::entity::KindPublic::FallingBlock { .. } => kinds::FALLING_BLOCK,
         crate::entity::KindPublic::Tnt { .. } => kinds::TNT,
         crate::entity::KindPublic::Item { .. } => kinds::ITEM,
+        crate::entity::KindPublic::ExperienceOrb { .. } => kinds::EXPERIENCE_ORB,
         crate::entity::KindPublic::Mob(_) => return crate::entity::mob::nbt::write_mob(row),
     };
     put(
@@ -113,6 +117,17 @@ pub fn write_entity(row: &EntityRow) -> Result<Tag> {
             );
         }
         crate::entity::KindPublic::Mob(_) => {}
+        crate::entity::KindPublic::ExperienceOrb { value } => {
+            let crate::entity::KindState::ExperienceOrb(saved) = &state.kind else {
+                return Err(Error::new("mismatched experience orb entity halves"));
+            };
+            // 官方 `ExperienceOrb.addAdditionalSaveData` 的顺序：Health、Age、Value、Count。
+            // Vanilla writes Health, Age, Value and Count in this order.
+            put(&mut out, "Health", Tag::Short(clamp_short(saved.health)));
+            put(&mut out, "Age", Tag::Short(clamp_short(saved.age)));
+            put(&mut out, "Value", Tag::Short(clamp_short(*value)));
+            put(&mut out, "Count", Tag::Int(saved.count));
+        }
         crate::entity::KindPublic::Item {
             stack,
             pickup_delay,
@@ -208,6 +223,14 @@ pub fn read_entity(tag: &Tag, uid: i32) -> Result<Option<EntityRow>> {
                         _ => None,
                     },
                 })
+            }
+            "minecraft:experience_orb" => {
+                let value = i32::from(tag::short_or(tag, "Value", 0));
+                let mut orb = ExperienceOrb::new(value);
+                orb.health = i32::from(tag::short_or(tag, "Health", 5));
+                orb.age = i32::from(tag::short_or(tag, "Age", 0));
+                orb.count = tag::int_or(tag, "Count", 1).max(1);
+                EntityKind::ExperienceOrb(orb)
             }
             _ => return Ok(None),
         },

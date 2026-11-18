@@ -859,6 +859,16 @@ fn snap_of(entity: Entity) -> OfficialEntity {
             data.health,
         ),
         EntityKind::Mob(_) => ("mob".to_owned(), -1, -1, -1, 0, -1, -1, -1),
+        EntityKind::ExperienceOrb(data) => (
+            "experience_orb".to_owned(),
+            -1,
+            -1,
+            -1,
+            data.count,
+            data.age,
+            -1,
+            data.health,
+        ),
     };
     OfficialEntity {
         kind,

@@ -371,6 +371,8 @@ pub enum Command {
         killer: Option<EntityUid>,
         experience: i32,
     },
+    /// `ExperienceOrb.scanForMerges`：周围同值的球合并到自己身上。
+    MergeExperienceOrbs { others: Vec<EntityUid>, value: i32 },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -405,6 +407,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             killer,
             experience,
         } => super::mob::living::apply_death_drops(me, table, on_fire, killer, experience, world),
+        Command::MergeExperienceOrbs { others, value } => {
+            super::orb::apply_merge(me, &others, value, world)
+        }
     }
 }
 

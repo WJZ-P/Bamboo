@@ -3024,7 +3024,13 @@ impl<'a> World<'a> {
                 let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
                 entity.tick(&mut ctx);
             }
-            if !entity.removed {
+            if entity.removed {
+                // 行离表之后事件就没了：先把这一刻攒下的生物事件交给实体表，
+                // 同步层 `take_mob_events` 才会把它们发出去。
+                // The row leaves the table; hand its pending events to the store
+                // first so the sync layer can send them.
+                self.level.keep_departed_mob_events(&entity);
+            } else {
                 self.level.put_entity(entity);
             }
         }

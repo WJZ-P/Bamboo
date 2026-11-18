@@ -170,6 +170,10 @@ pub enum EntityData {
     CowVariant(i32),
     /// index 19，COW_SOUND_VARIANT。`Cow.DATA_SOUND_VARIANT_ID`。
     CowSoundVariant(i32),
+    /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
+    ///
+    /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
+    ExperienceValue(i32),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -196,7 +200,8 @@ impl EntityData {
             Self::Item(_)
             | Self::FallingBlockStart(_)
             | Self::TntFuse(_)
-            | Self::LivingFlags(_) => 8,
+            | Self::LivingFlags(_)
+            | Self::ExperienceValue(_) => 8,
             Self::TntBlockState(_) | Self::Health(_) => 9,
             Self::MobFlags(_) => 15,
             Self::MainHand(_) | Self::Baby(_) => 16,
@@ -225,6 +230,10 @@ impl EntityData {
             Self::TntFuse(fuse) => {
                 write_data_header(out, 8, SERIALIZER_INT);
                 write_varint(out, *fuse);
+            }
+            Self::ExperienceValue(value) => {
+                write_data_header(out, 8, SERIALIZER_INT);
+                write_varint(out, *value);
             }
             Self::TntBlockState(state) => {
                 write_data_header(out, 9, SERIALIZER_BLOCK_STATE);

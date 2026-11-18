@@ -518,6 +518,11 @@ pub trait LevelEntities {
     fn has_mob_uuid(&self, uuid: &[u8; 16]) -> bool;
     /// 刚生成、还没并进 tick 列表的实体也找得到。
     fn with_just_spawned(&mut self, uid: EntityUid, f: &mut dyn FnMut(&mut Entity)) -> bool;
+    /// 实体这一拍被丢弃时，把它身上攒下的生物事件留给同步层。
+    /// 默认什么都不做，按实体表建模的世界覆盖。
+    ///
+    /// Keep a discarded entity's pending mob events for the sync layer.
+    fn keep_departed_mob_events(&mut self, _entity: &crate::entity::Entity) {}
     /// 只打上 `removed` 标记，实体还留在这一拍的名单里。
     fn discard_entity(&mut self, uid: EntityUid) -> bool;
     /// 从 tick 列表里立刻拿掉。
@@ -601,6 +606,10 @@ impl<T: EntityTables + ?Sized> LevelEntities for T {
         self.entities_table_mut()
             .with_mut_including_pending(uid, f)
             .is_some()
+    }
+
+    fn keep_departed_mob_events(&mut self, entity: &crate::entity::Entity) {
+        self.entities_table_mut().keep_departed_events(entity);
     }
 
     fn discard_entity(&mut self, uid: EntityUid) -> bool {
