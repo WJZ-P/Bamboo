@@ -243,6 +243,25 @@ impl Region {
         )
     }
 
+    /// 换上一份新的四个随机源（空着的岛被当作新岛接手一块时，计划 3.3「岛的随机源」
+    /// 第 1 条：新岛的随机源只由世界种子和它的起源 section 派生）。
+    ///
+    /// Install a fresh set of the four random sources (an empty island taking
+    /// over a part as a new island, plan 3.3 item 1: a new island's sources come
+    /// from the world seed and its origin section only).
+    pub(crate) fn replace_random(&mut self, random: IslandRandom) {
+        let IslandRandom {
+            random,
+            sound_seed_generator,
+            loot_sequences,
+            random_sequences,
+        } = random;
+        self.random = random;
+        self.sound_seed_generator = sound_seed_generator;
+        self.loot_sequences = loot_sequences;
+        self.random_sequences = random_sequences;
+    }
+
     /// 岛拆分：把位置落在 `chunks` 里的一切和 `players` 的一切整批拆出去，造出新岛的
     /// `Region`。`chunks` 是新岛拥有的全部区块位置（已加载的、还在信箱里的都算）；
     /// 两边时钟相同，不平移。只在 tick 边界调用，前提不满足时返回 [`NotReady`]、岛不变。
@@ -588,5 +607,92 @@ impl Region {
         self.last_action_millis.extend(last_action_millis);
         self.admin_changes.merge(admin_changes);
         self.partitioning = self.partitioning.fresh_like();
+    }
+}
+
+/// 一批玩家在一个岛上的全部「跟着玩家走」的表（计划 3.3 表里按玩家分的七类：玩家、
+/// 玩家网格、出站链路、菜单、讲台视图和待发格子、对端 IP、最后操作时刻）。主控借玩家
+/// （[`Region::lend_players`]）时整套借出、整套还回，和拆合时搬的是同一套，少一类都会
+/// 让借来的玩家在发起人的岛上留下东西（比如 `/tp` 写进网格的登记）。
+///
+/// Every player-following table of a batch of players on one island (the
+/// seven per-player classes of plan 3.3: players, player grid, outbound
+/// links, menus, lectern views and pending slots, peer IPs, last action).
+/// The master's borrowing ([`Region::lend_players`]) moves the whole set out
+/// and back, the same set a split moves; missing one would leave something of
+/// a borrowed player on the sender's island (such as a grid entry written by
+/// `/tp`).
+pub(crate) struct PlayerTables {
+    players: BTreeMap<PlayerId, crate::player::Player>,
+    player_grid: crate::player_grid::PlayerGrid,
+    links: crate::links::Links,
+    menus: BTreeMap<PlayerId, crate::menu::Menu>,
+    lecterns: crate::lectern::Tables,
+    peer_ips: BTreeMap<PlayerId, String>,
+    last_action_millis: BTreeMap<PlayerId, i64>,
+    /// 借出时岛的时钟。玩家身上有按岛时钟记的绝对时刻（传送确认的 `sent_at`、讲台待发
+    /// 格子的 `deliver_at`），只能借给时钟相同的岛。
+    ///
+    /// The lending island's clock. Players carry absolute instants on the
+    /// island clock (`sent_at` of an unconfirmed teleport, `deliver_at` of a
+    /// pending lectern slot), so they may only go to an island with the same clock.
+    clock: i64,
+}
+
+impl PlayerTables {
+    /// 借出来的玩家，按编号升序。
+    pub(crate) fn ids(&self) -> Vec<PlayerId> {
+        self.players.keys().copied().collect()
+    }
+}
+
+impl Region {
+    /// 把 `players` 的七类表整套借出去（见 [`PlayerTables`]）。不在这个岛上的编号跳过。
+    ///
+    /// Lend the seven tables of `players` (see [`PlayerTables`]); ids not on
+    /// this island are skipped.
+    pub(crate) fn lend_players(&mut self, players: &BTreeSet<PlayerId>) -> PlayerTables {
+        PlayerTables {
+            players: split_players(&mut self.players, players),
+            player_grid: self.player_grid.split_off(players),
+            links: self.links.split_off(players),
+            menus: split_players(&mut self.menus, players),
+            lecterns: self.lecterns.split_off(&BTreeSet::new(), players),
+            peer_ips: split_players(&mut self.peer_ips, players),
+            last_action_millis: split_players(&mut self.last_action_millis, players),
+            clock: self.tick.game_time(),
+        }
+    }
+
+    /// 收下借来（或还回来）的玩家表。两个岛的时钟必须相同（见 [`PlayerTables::clock`]）。
+    ///
+    /// Take borrowed (or returned) player tables. Both clocks must agree (see
+    /// [`PlayerTables::clock`]).
+    pub(crate) fn take_players(&mut self, tables: PlayerTables) {
+        let PlayerTables {
+            players,
+            player_grid,
+            links,
+            menus,
+            lecterns,
+            peer_ips,
+            last_action_millis,
+            clock,
+        } = tables;
+        assert_eq!(
+            clock,
+            self.tick.game_time(),
+            "只能把玩家借给时钟相同的岛（玩家身上有按岛时钟记的绝对时刻）"
+        );
+        for (id, player) in players {
+            let previous = self.players.insert(id, player);
+            assert!(previous.is_none(), "玩家 {id:?} 在两个岛上");
+        }
+        self.player_grid.absorb(player_grid);
+        self.links.absorb(links);
+        self.menus.extend(menus);
+        self.lecterns.absorb(lecterns);
+        self.peer_ips.extend(peer_ips);
+        self.last_action_millis.extend(last_action_millis);
     }
 }

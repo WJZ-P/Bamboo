@@ -319,6 +319,9 @@ impl std::ops::DerefMut for IslandSlot {
 /// empty. Iteration is by ascending id, so the lockstep order is fixed.
 pub(crate) struct Islands {
     slots: BTreeMap<RegionId, IslandSlot>,
+    /// 测试专用：借玩家时一个都不借（改坏确认）。
+    #[cfg(test)]
+    pub(crate) lend_nothing: bool,
 }
 
 impl Islands {
@@ -326,6 +329,8 @@ impl Islands {
         debug_assert_eq!(home.id, HOME_REGION);
         Self {
             slots: BTreeMap::from([(HOME_REGION, IslandSlot::new(home))]),
+            #[cfg(test)]
+            lend_nothing: false,
         }
     }
 
@@ -472,34 +477,53 @@ impl Islands {
         self.iter_mut().collect()
     }
 
-    /// 主控要在所有岛停放时执行一件跟玩家有关的事（全局类命令、控制台命令、交回的全局
-    /// 改动、进出服的全局部分、跨岛命令、聊天）：先把别的岛上的玩家（`Player`、出站链路、
-    /// 对端 IP、最后操作时刻）借到 `into` 上，事情做完再按原样还回去（[`Self::scatter`]）。
-    /// 借过来的玩家和本来就在这里的玩家一起按编号排，所以选择器、给 OP 的广播、每名
-    /// 接收者的签名聊天状态都和所有人在一个岛上时一样。别的岛这时都停放着，主控写进
-    /// 借来的链路就等于岛按顺序收下主控的出站信件（计划 4.3）。只有一个岛时什么都不做。
+    /// 主控要在岛停放时执行一件跟别的岛上的玩家有关的事（经 `World::on_master` 这个唯一
+    /// 入口：全局类命令、控制台命令、交回的全局改动、进出服的全局部分、跨岛命令、聊天）：
+    /// 先把 `borrow` 说的那些岛上的玩家连同跟着玩家走的七类表（`region/island_split.rs`
+    /// 的 `PlayerTables`）整套借到 `into` 上，事情做完再按原样还回去（[`Self::scatter`]）。
+    /// 借过来的玩家和本来就在这里的玩家一起按编号排，所以选择器、给 OP 的广播、每名接收者
+    /// 的签名聊天状态都和所有人在一个岛上时一样。这些岛这时都停放着，主控写进借来的链路
+    /// 就等于岛按顺序收下主控的出站信件（计划 4.3）。只有一个岛时什么都不做。
     ///
-    /// The master runs something about players while every island is parked
-    /// (global or console commands, handed-back global changes, the global part
+    /// The master does something involving players of other islands while
+    /// the islands are parked (through the single entry `World::on_master`:
+    /// global or console commands, handed-back global changes, the global part
     /// of joins and leaves, cross-island commands, chat): first borrow the
-    /// players of every other island (`Player`, outbound link, peer IP, last
-    /// action) onto `into`, and give them back unchanged afterwards
+    /// players of the islands named by `borrow`, with all seven
+    /// player-following tables (`PlayerTables` in `region/island_split.rs`),
+    /// onto `into`, and give them back unchanged afterwards
     /// ([`Self::scatter`]). Borrowed players sort with the local ones by id, so
     /// selectors, broadcasts to ops and every receiver's signed-chat state work
-    /// as if everyone were on one island. The other islands are parked, so the
-    /// master writing into a borrowed link equals the island taking the
-    /// master's outbound mail in order (plan 4.3). A no-op with one island.
-    pub(crate) fn gather(&mut self, into: RegionId) -> Gathered {
+    /// as if everyone were on one island. Those islands are parked, so writing
+    /// into a borrowed link equals the island taking the master's outbound
+    /// mail in order (plan 4.3). A no-op with one island.
+    pub(crate) fn gather(&mut self, into: RegionId, borrow: &Borrow) -> Gathered {
         let mut gathered = Gathered(Vec::new());
         if self.slots.len() <= 1 || !self.slots.contains_key(&into) {
             return gathered;
         }
-        let others: Vec<RegionId> = self
-            .slots
-            .keys()
-            .copied()
-            .filter(|&id| id != into)
-            .collect();
+        #[cfg(test)]
+        if self.lend_nothing {
+            return gathered;
+        }
+        let others: Vec<RegionId> = match borrow {
+            Borrow::All => self
+                .slots
+                .keys()
+                .copied()
+                .filter(|&id| id != into)
+                .collect(),
+            Borrow::PlayersOf(players) => {
+                let mut ids: Vec<RegionId> = players
+                    .iter()
+                    .filter_map(|&player| self.island_of_player(player))
+                    .filter(|&id| id != into)
+                    .collect();
+                ids.sort_unstable();
+                ids.dedup();
+                ids
+            }
+        };
         for id in others {
             let lent = {
                 let region = &mut self.get_mut(id).expect("在表里").region;
@@ -508,73 +532,71 @@ impl Islands {
                 if players.is_empty() {
                     continue;
                 }
-                Lent::take(region, &players)
+                region.lend_players(&players)
             };
-            let ids = lent.ids.clone();
-            lent.put(&mut self.get_mut(into).expect("在表里").region);
+            let ids = lent.ids();
+            self.get_mut(into)
+                .expect("在表里")
+                .region
+                .take_players(lent);
             gathered.0.push((id, ids));
         }
         gathered
     }
 
-    /// 把 [`Self::gather`] 借来的玩家还回原来的岛。
+    /// 把 [`Self::gather`] 借来的玩家（七类表整套）还回原来的岛。原来的岛不在了（不会发生：
+    /// 借着的时候不拆合）就留在 `into`。
     ///
-    /// Give the players borrowed by [`Self::gather`] back to their islands.
+    /// Give the players borrowed by [`Self::gather`] (all seven tables) back to
+    /// their islands; if an island vanished meanwhile (cannot happen: nothing
+    /// splits or merges while borrowed) they stay on `into`.
     pub(crate) fn scatter(&mut self, into: RegionId, gathered: Gathered) {
         for (id, ids) in gathered.0 {
             let set: std::collections::BTreeSet<_> = ids.iter().copied().collect();
-            let lent = Lent::take(&mut self.get_mut(into).expect("在表里").region, &set);
+            let lent = self
+                .get_mut(into)
+                .expect("在表里")
+                .region
+                .lend_players(&set);
             match self.get_mut(id) {
-                Some(island) => lent.put(&mut island.region),
-                None => lent.put(&mut self.get_mut(into).expect("在表里").region),
+                Some(island) => island.region.take_players(lent),
+                None => self
+                    .get_mut(into)
+                    .expect("在表里")
+                    .region
+                    .take_players(lent),
             }
         }
     }
 }
 
+/// 主控借玩家时要哪些岛上的玩家（借玩家的唯一入口 `World::on_master` 的参数）。以后
+/// 各岛不再每刻一起停放时（计划 5.2），入口可以按它判断要等哪些岛。
+///
+/// Whose players the master borrows (the parameter of the single borrowing
+/// entry `World::on_master`). Once islands no longer park together every tick
+/// (plan 5.2), the entry can use it to know which islands to wait for.
+pub(crate) enum Borrow {
+    /// 全部岛上的玩家：选择器（`@a`、玩家名）、全服广播（Tab 名单、进出服消息、聊天）、
+    /// 给 OP 的反馈。
+    ///
+    /// Every island's players: selectors, server-wide broadcasts, feedback to ops.
+    All,
+    /// 只要这几名玩家所在的岛。
+    ///
+    /// Only the islands these players are on.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "现在每个用途都要全部岛 / every use needs all islands today"
+        )
+    )]
+    PlayersOf(Vec<crate::inbound::PlayerId>),
+}
+
 /// [`Islands::gather`] 借走的玩家：岛编号和那个岛的玩家编号。
 pub(crate) struct Gathered(Vec<(RegionId, Vec<crate::inbound::PlayerId>)>);
-
-/// 借到别的岛上的一批玩家。
-struct Lent {
-    ids: Vec<crate::inbound::PlayerId>,
-    players: BTreeMap<crate::inbound::PlayerId, crate::player::Player>,
-    links: crate::links::Links,
-    peer_ips: BTreeMap<crate::inbound::PlayerId, String>,
-    last_action: BTreeMap<crate::inbound::PlayerId, i64>,
-}
-
-impl Lent {
-    fn take(
-        region: &mut Region,
-        players: &std::collections::BTreeSet<crate::inbound::PlayerId>,
-    ) -> Self {
-        fn pick<V>(
-            table: &mut BTreeMap<crate::inbound::PlayerId, V>,
-            players: &std::collections::BTreeSet<crate::inbound::PlayerId>,
-        ) -> BTreeMap<crate::inbound::PlayerId, V> {
-            players
-                .iter()
-                .filter_map(|id| Some((*id, table.remove(id)?)))
-                .collect()
-        }
-        let moved_players = pick(&mut region.players, players);
-        Self {
-            ids: moved_players.keys().copied().collect(),
-            players: moved_players,
-            links: region.links.split_off(players),
-            peer_ips: pick(&mut region.peer_ips, players),
-            last_action: pick(&mut region.last_action_millis, players),
-        }
-    }
-
-    fn put(self, region: &mut Region) {
-        region.players.extend(self.players);
-        region.links.absorb(self.links);
-        region.peer_ips.extend(self.peer_ips);
-        region.last_action_millis.extend(self.last_action);
-    }
-}
 
 impl std::ops::Deref for Islands {
     type Target = IslandSlot;

@@ -35,7 +35,7 @@ use crate::{
     inbound::{Inbound, InboundReceiver, JoinRequest, PlayerId, PlayerInbox, Sequenced},
     interaction::{self, UseItemOn},
     inventory,
-    island::{Island, IslandAccess, IslandDrive, Islands, Posted},
+    island::{Borrow, Island, IslandAccess, IslandDrive, Islands, Posted},
     island_pool::{IslandPool, MAX_ISLAND_THREADS, Wait},
     lectern, light_updates, menu, movement,
     pacing::{Pacer, WallTiming},
@@ -1154,26 +1154,46 @@ impl World {
         }
     }
 
-    /// 主控在 `into` 这个岛上做一件跟玩家有关的事，别的岛上的玩家先借过来（[`Islands::gather`]）。
-    /// 做完重发全局快照。只有一个岛时就是直接做。
+    /// **借玩家的唯一入口**：主控在 `into` 这个岛上做一件涉及别的岛上的玩家的事，`borrow`
+    /// 说的那些岛上的玩家先整套借过来（[`Islands::gather`]），做完还回去、重发全局快照，再把
+    /// 落到别的岛已加载区块上的实体搬过去（[`Self::move_stray_entities`]：`/give` 掉在远处
+    /// 玩家脚下的东西、`/loot spawn` 到别的岛的位置）。只有一个岛时就是直接做。
     ///
-    /// The master does something about players on island `into`, with every
-    /// other island's players borrowed first ([`Islands::gather`]); the
-    /// snapshot is republished afterwards. With one island it just runs.
+    /// 命令、聊天、会话更新、改规则、改模式的实现只拿到 `into` 的 `Region`，不直接碰别的岛；
+    /// 现在齐步驱动和分离驱动每刻都有一次全部岛停放，这里当场借、当场做。以后各岛不再一起
+    /// 停放时（计划 5.2）只改这里：要的岛没停放就排队，等它停放再做。调用方里**依赖当场
+    /// 执行**的（结果要和同一名玩家后面的包保持先后、或者要接着往同一条缓冲里写）在调用处
+    /// 标了「当场执行」。
+    ///
+    /// **The single entry for borrowing players**: the master does something
+    /// on island `into` that involves players of other islands. The players of
+    /// the islands named by `borrow` are borrowed whole first
+    /// ([`Islands::gather`]), returned afterwards, the snapshot republished,
+    /// and entities that landed on another island's loaded chunk are moved
+    /// there ([`Self::move_stray_entities`]). With one island it just runs.
+    /// Commands, chat, chat sessions, game rules and game modes only see
+    /// `into`'s `Region` and never touch other islands directly. Today every
+    /// island parks once per tick under both drives, so this borrows and runs
+    /// at once; if islands stop parking together (plan 5.2) only this entry
+    /// changes (queue until the islands it needs are parked). Callers that
+    /// **rely on running at once** (ordering against the same player's later
+    /// packets, or writing on into the same buffer) are marked at the call site.
     fn on_master<R>(
         &mut self,
         into: mc_bamboo_world::director::RegionId,
+        borrow: crate::island::Borrow,
         work: impl FnOnce(&mut Global, &mut Region) -> R,
     ) -> R {
         if !self.islands.several() {
             let region = &mut self.islands.get_mut(into).expect("岛在表里").region;
             return work(&mut self.master.global, region);
         }
-        let gathered = self.islands.gather(into);
+        let gathered = self.islands.gather(into, &borrow);
         let region = &mut self.islands.get_mut(into).expect("岛在表里").region;
         let out = work(&mut self.master.global, region);
         self.islands.scatter(into, gathered);
         self.publish_global();
+        self.move_stray_entities(into);
         out
     }
 
@@ -1529,7 +1549,7 @@ impl World {
                 Inbound::Leave { player } => self.on_leave(player),
                 Inbound::WhitelistReload(reload) => {
                     self.master.global.admin.whitelist = reload.entries;
-                    self.on_master(HOME_REGION, |global, region| {
+                    self.on_master(HOME_REGION, Borrow::All, |global, region| {
                         crate::command::admin::after_reload(global, region);
                     });
                 }
@@ -1538,7 +1558,7 @@ impl World {
                 // A console line read by the connection layer runs here with the
                 // server-console source, on the master with every player borrowed (plan 4.4).
                 Inbound::ConsoleCommand(line) => {
-                    self.on_master(HOME_REGION, |global, region| {
+                    self.on_master(HOME_REGION, Borrow::All, |global, region| {
                         crate::command::console::on_console_command(global, region, &line);
                     });
                 }
@@ -1687,9 +1707,12 @@ impl World {
         region.last_action_millis.insert(id, now);
 
         // Tab 名单、进服消息、计分板和 Boss 栏是主控的帧：别的岛上的玩家借过来一起收。
+        // 当场执行：这些帧和后面的 `start_loading_chunks` 写同一条缓冲，先后是进服序列的一部分。
         // The tab list, join message, scoreboard and boss bars are master
         // frames: players on other islands are borrowed to receive them too.
-        self.on_master(target, |global, region| {
+        // Runs at once: these frames and `start_loading_chunks` below share one
+        // buffer, and their order is part of the join sequence.
+        self.on_master(target, Borrow::All, |global, region| {
             if let Some(frames) = global.tab_list() {
                 region.links.send_frames(id, &frames);
             }
@@ -1813,7 +1836,7 @@ impl World {
     /// Send `commands.save.success` (broadcast to ops), as the command did.
     fn send_save_success(&mut self, source: PlayerId) {
         let island = self.islands.island_of_player(source).unwrap_or(HOME_REGION);
-        self.on_master(island, |_, region| {
+        self.on_master(island, Borrow::All, |_, region| {
             crate::command::feedback::success(
                 region,
                 source,
@@ -1856,7 +1879,7 @@ impl World {
     fn send_save_failure(&mut self, source: PlayerId) {
         let failure = crate::command::feedback::fail("commands.save.failed");
         let island = self.islands.island_of_player(source).unwrap_or(HOME_REGION);
-        self.on_master(island, |_, region| {
+        self.on_master(island, Borrow::All, |_, region| {
             crate::command::feedback::report(region, source, "save-all", &failure);
         });
     }
@@ -1909,11 +1932,14 @@ impl World {
         region.last_action_millis.remove(&id);
         region.peer_ips.remove(&id);
 
-        // 「离开了游戏」和 Tab 名单是全局的，经端口交给主控（岛的实施计划 4.1）。
+        // 「离开了游戏」和 Tab 名单是全局的，经端口交给主控（岛的实施计划 4.1）；多岛时
+        // 经借玩家的入口当场发给所有岛的玩家，和一个岛时的先后相同。
         // "Left the game" and the tab list are global; they go to the master
-        // through the port (island plan 4.1).
-        let (mut port, region) = self.island_port(island);
-        port.submit(region, GlobalEffect::LeaveMessage { player: id });
+        // through the port (island plan 4.1), with several islands through the
+        // borrowing entry, at once and in the single-island order.
+        self.with_players(island, Borrow::All, |port, region| {
+            port.submit(region, GlobalEffect::LeaveMessage { player: id });
+        });
         let region = &mut self.islands.get_mut(island).expect("在表里").region;
         entity_sync::on_leave(region, id);
         entity_tracking::on_leave(region, id);
@@ -1940,8 +1966,9 @@ impl World {
         } else {
             HOME_REGION
         };
-        let (mut port, region) = self.island_port(island);
-        port.submit(region, GlobalEffect::Left { player: id });
+        self.with_players(island, Borrow::All, |port, region| {
+            port.submit(region, GlobalEffect::Left { player: id });
+        });
     }
 
     /// 把一条请求交给负责它的模块。被踢的玩家要等 `Leave` 才离开世界，这段时间它的请求都忽略。
@@ -1957,19 +1984,29 @@ impl World {
             PlayRequest::ChatCommand { command, signed } => {
                 let command = command.clone();
                 let signed = signed.clone();
-                self.with_all_players(island, |port, region| {
+                // 当场执行：命令的结果（传送、改模式、物品）要排在这名玩家后面的包之前。
+                // Runs at once: the outcome (teleport, mode, items) must precede
+                // this player's later packets.
+                self.with_players(island, Borrow::All, |port, region| {
                     command::on_player_command(port, region, player, &command, signed.as_ref());
                 });
                 return;
             }
             PlayRequest::CommandSuggestion { id, command } => {
                 let (transaction, command) = (*id, command.clone());
-                command::on_suggestion(self.region_of(island), player, transaction, &command);
+                // 补全玩家名要看得见所有岛的玩家（和一个岛时一样）。
+                // Name completion must see every island's players, as on one island.
+                self.with_players(island, Borrow::All, |_, region| {
+                    command::on_suggestion(region, player, transaction, &command);
+                });
                 return;
             }
             PlayRequest::ChatSession(session) => {
                 let session = session.clone();
-                self.with_all_players(island, |port, region| {
+                // 当场执行：新会话决定这名玩家后面的聊天怎么验签。
+                // Runs at once: the new session decides how this player's later
+                // chat is verified.
+                self.with_players(island, Borrow::All, |port, region| {
                     if let Some(update) = secure_chat::on_session(region, player, session) {
                         port.submit(region, GlobalEffect::ChatSession { player, update });
                     }
@@ -1995,7 +2032,10 @@ impl World {
                     *salt,
                     *last_seen,
                 );
-                self.with_all_players(island, |_, region| {
+                // 当场执行：签名链和确认按这名玩家的包的先后走。
+                // Runs at once: the signature chain and acks follow this player's
+                // packet order.
+                self.with_players(island, Borrow::All, |_, region| {
                     if chat::on_chat(
                         region,
                         player,
@@ -2014,7 +2054,7 @@ impl World {
             }
             PlayRequest::SetGameRule { entries } => {
                 let entries = entries.clone();
-                self.with_all_players(island, |port, region| {
+                self.with_players(island, Borrow::All, |port, region| {
                     crate::gamerules::on_set_packet(port, region, player, entries);
                 });
                 return;
@@ -2223,7 +2263,10 @@ impl World {
             );
             return;
         }
-        self.with_all_players(island, |port, region| {
+        // 当场执行：模式决定这名玩家后面的包（飞行、挖掘）怎么处理。
+        // Runs at once: the mode decides how this player's later packets
+        // (flight, digging) are handled.
+        self.with_players(island, Borrow::All, |port, region| {
             command::change_own_mode(port, region, id, mode);
         });
     }
@@ -2241,7 +2284,7 @@ impl World {
         player.client = information;
 
         let show = player.shows_hat();
-        self.with_all_players(island, |port, region| {
+        self.with_players(island, Borrow::All, |port, region| {
             port.submit(region, GlobalEffect::Hat { player: id, show });
         });
     }
@@ -2254,16 +2297,11 @@ impl World {
         &mut self,
         island: mc_bamboo_world::director::RegionId,
     ) -> (GlobalPort<'_>, &mut Region) {
-        // 不止一个岛时一律排队：全局改动交回时由主控应用，帧扇出给所有岛（计划 4.4）。
-        // With several islands always queue: the master applies the change at
-        // hand-back and the frames fan out to every island (plan 4.4).
-        let mode = if self.islands.several() {
-            PortMode::Queued
-        } else {
-            self.master.port_mode
-        };
+        // 只有一个岛时才用：多岛时一律经借玩家的入口 [`Self::with_players`]。
+        // One island only: with several everything goes through [`Self::with_players`].
+        debug_assert!(!self.islands.several());
         let island = self.islands.get_mut(island).expect("岛在表里");
-        let port = match mode {
+        let port = match self.master.port_mode {
             PortMode::Direct => GlobalPort::Direct(&mut self.master.global),
             PortMode::Queued => GlobalPort::Queued(&mut island.effects),
         };
@@ -2275,25 +2313,21 @@ impl World {
         &mut self.islands.get_mut(island).expect("岛在表里").region
     }
 
-    /// 收包阶段处理一条和全体玩家有关的请求（命令、聊天、会话、规则、模式、帽子）。只有
-    /// 一个岛时就是原来那样经端口；多岛时收包阶段所有岛都停放着，主控把别的岛的玩家借到
-    /// 发起人的岛上、用直接端口当场执行（计划 4.4：全局类在主控执行；可能跨岛的选择器
-    /// 看得见所有岛的玩家），帧经借来的链路发给各岛的玩家。执行完把落到别的岛的区块上的
-    /// 实体（`/give` 掉在远处的东西、`/tp` 走的实体）搬过去。
+    /// 收包阶段处理一条和别的岛上的玩家有关的请求（命令、聊天、会话、规则、模式、帽子）。
+    /// 只有一个岛时就是原来那样经端口；多岛时经借玩家的唯一入口 [`Self::on_master`]，用直接
+    /// 端口当场执行（计划 4.4：全局类在主控执行；可能跨岛的选择器看得见所有岛的玩家），
+    /// 帧经借来的链路发给各岛的玩家。
     ///
-    /// Handle a request that concerns every player (commands, chat, chat
-    /// sessions, game rules, game mode, hat) during the inbound phase. With one
-    /// island it goes through the port as before. With several, every island
-    /// is parked during the inbound phase, so the master borrows the other
-    /// islands' players onto the sender's island and runs it at once with the
-    /// direct port (plan 4.4: global commands run on the master; selectors of
-    /// possibly cross-island commands see every island's players); frames
-    /// reach each island's players through the borrowed links. Entities that
-    /// end up on another island's chunk (a `/give` dropped far away, an entity
-    /// moved by `/tp`) are moved there afterwards.
-    fn with_all_players(
+    /// Handle a request that involves players of other islands (commands,
+    /// chat, chat sessions, game rules, game mode, hat) during the inbound
+    /// phase. With one island it goes through the port as before; with
+    /// several it goes through the single borrowing entry [`Self::on_master`]
+    /// and runs with the direct port (plan 4.4), frames reaching each island's
+    /// players through the borrowed links.
+    fn with_players(
         &mut self,
         island: mc_bamboo_world::director::RegionId,
+        borrow: crate::island::Borrow,
         work: impl FnOnce(&mut GlobalPort<'_>, &mut Region),
     ) {
         if !self.islands.several() {
@@ -2301,11 +2335,10 @@ impl World {
             work(&mut port, region);
             return;
         }
-        self.on_master(island, |global, region| {
+        self.on_master(island, borrow, |global, region| {
             let mut port = GlobalPort::Direct(global);
             work(&mut port, region);
         });
-        self.move_stray_entities(island);
     }
 
     /// 岛交回：主控按提交顺序应用排队实现攒下的全局改动。放在岛这一刻的活做完、
@@ -2349,7 +2382,7 @@ impl World {
             return;
         }
         let effects = std::mem::take(&mut island.effects);
-        self.on_master(id, |global, region| {
+        self.on_master(id, Borrow::All, |global, region| {
             crate::global_port::apply_all(global, region, effects);
         });
     }
@@ -2770,6 +2803,9 @@ impl Schedule {
 #[cfg(test)]
 #[path = "world/tests/compute_pool_tests.rs"]
 mod compute_pool_tests;
+#[cfg(test)]
+#[path = "world/island_crossing_tests.rs"]
+mod island_crossing_tests;
 #[cfg(test)]
 #[path = "world/tests/island_drive_tests.rs"]
 mod island_drive_tests;

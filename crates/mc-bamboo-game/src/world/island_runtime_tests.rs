@@ -40,7 +40,7 @@ use crate::{island::IslandDrive, region::IslandPart};
 /// The per-group fingerprint of a multi-island world (see the module docs),
 /// plus every island's clock. Panics, naming the class, if a group's
 /// content shows up on another island.
-fn print_islands(scene: &mut Scene) -> (Vec<String>, BTreeSet<i64>) {
+pub(super) fn print_islands(scene: &mut Scene) -> (Vec<String>, BTreeSet<i64>) {
     let Scene {
         server,
         centers,
@@ -89,7 +89,7 @@ fn print_islands(scene: &mut Scene) -> (Vec<String>, BTreeSet<i64>) {
 /// in, the island-level mailbox and save lists by position. Classes the
 /// fingerprint does not cover (redstone memory, peer IPs, …) are caught
 /// here, by name.
-fn assert_in_place(scene: &Scene, what: &str) {
+pub(super) fn assert_in_place(scene: &Scene, what: &str) {
     let world = &scene.server.world;
     let centers = &scene.centers;
     let holder: Vec<RegionId> = centers
@@ -132,7 +132,7 @@ fn assert_in_place(scene: &Scene, what: &str) {
 }
 
 /// 对照（一个岛）的按组指纹，去掉全岛共有的那一份。
-fn print_control(scene: &mut Scene) -> Vec<String> {
+pub(super) fn print_control(scene: &mut Scene) -> Vec<String> {
     let mut out = print(scene, false);
     out.pop();
     out
@@ -143,7 +143,7 @@ fn print_control(scene: &mut Scene) -> Vec<String> {
 ///
 /// Run both worlds to the same `director_tick`, idle a few ticks together and
 /// drop what the clients received: the clocks match from here on.
-fn align(a: &mut Scene, b: &mut Scene) {
+pub(super) fn align(a: &mut Scene, b: &mut Scene) {
     loop {
         let (left, right) = (
             a.server.world.master.director_tick,
@@ -195,7 +195,7 @@ fn fix_island_randoms(scene: &mut Scene) {
 ///
 /// Every island's block random and sound-seed source state (internal seed
 /// included), by island id.
-fn random_states(scene: &Scene) -> BTreeMap<RegionId, String> {
+pub(super) fn random_states(scene: &Scene) -> BTreeMap<RegionId, String> {
     scene
         .server
         .world
@@ -224,7 +224,7 @@ fn random_states(scene: &Scene) -> BTreeMap<RegionId, String> {
 /// structural changes do not touch it). Multi-island sources differ from the
 /// control's by design (plan 3.3), so a scene that draws cannot be compared
 /// byte for byte; a future scene change that draws fails here.
-fn assert_no_draws(
+pub(super) fn assert_no_draws(
     before: &BTreeMap<RegionId, String>,
     after: &BTreeMap<RegionId, String>,
     what: &str,

@@ -241,6 +241,17 @@ impl World {
         };
         let moved = child.region.chunks.loaded_positions();
         if let Some(target) = self.islands.get_mut(to) {
+            // 空着的岛（一直在的家岛）接手这一块就是新岛：随机源换成按起源派生的那份，
+            // 和新建一个岛时一样，不沿用它以前的状态（计划 3.3「岛的随机源」第 1 条）。
+            // An empty island (the ever-present home) taking this part over is a
+            // new island: give it the sources derived from the origin, as a fresh
+            // island would get, instead of its old state (plan 3.3).
+            if target.is_empty() {
+                let random = target
+                    .region
+                    .derive_island_random(target.region.global.seed, origin);
+                target.region.replace_random(random);
+            }
             let delta = target.region.tick.game_time() - child.region.tick.game_time();
             target.absorb_island_boxed(child, delta);
         } else {
