@@ -682,7 +682,7 @@ fn send_level_event(
 
 /// `playSeededSound` 的广播。范围是音效的固定范围，没有就是音量大于 1 时的 16 × 音量，否则 16。
 /// 内联的音效是 `createVariableRangeEvent`，没有固定范围。
-fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &Sound) {
+pub(crate) fn send_sound(region: &mut Region, except: Option<PlayerId>, sound: &Sound) {
     let range = if sound.inline.is_some() {
         if sound.volume > 1.0 {
             16.0 * sound.volume

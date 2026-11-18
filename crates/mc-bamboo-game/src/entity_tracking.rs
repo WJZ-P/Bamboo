@@ -902,61 +902,123 @@ pub fn event_packets(
     events: &[(i32, Vec<mc_bamboo_blocks::entity::mob::MobEvent>)],
     mut sound_seed: impl FnMut() -> i64,
 ) -> Vec<Vec<u8>> {
-    use mc_bamboo_blocks::entity::mob::MobEvent;
-    use mc_bamboo_protocol::packet::play::{DamageEvent, EntityEvent, Sound};
-
     let mut out = Vec::new();
     for (id, mob_events) in events {
         for event in mob_events {
-            match event {
-                MobEvent::Death => out.push(packet_body(&EntityEvent {
-                    entity_id: *id,
-                    event: 3,
-                })),
-                MobEvent::Poof => out.push(packet_body(&EntityEvent {
-                    entity_id: *id,
-                    event: 60,
-                })),
-                MobEvent::Damage { kind, attacker } => {
-                    let damage_type = mc_bamboo_data::damage_type_id(kind.name()).unwrap_or(0);
-                    out.push(packet_body(&DamageEvent {
-                        entity_id: *id,
-                        damage_type,
-                        source_cause: *attacker,
-                        source_direct: *attacker,
-                        position: None,
-                    }));
-                }
-                MobEvent::Sound {
-                    sound,
-                    volume,
-                    pitch,
-                    position,
-                } => out.push(packet_body(&Sound {
-                    sound: i32::from(mc_bamboo_data::sounds::sound_event(sound)),
-                    inline: None,
-                    source: mc_bamboo_data::sounds::NEUTRAL,
-                    x: position.x,
-                    y: position.y,
-                    z: position.z,
-                    volume: *volume,
-                    pitch: *pitch,
-                    seed: sound_seed(),
-                })),
-            }
+            out.push(event_packet(*id, event, &mut sound_seed).body());
         }
     }
     out
 }
 
-/// 把「ID + 包体」字节加上帧长前缀，成批发给所有玩家。
-fn broadcast_bodies(region: &mut Region, bodies: &[Vec<u8>]) {
-    let mut frames = Vec::new();
-    for body in bodies {
-        frames.extend(frame_from_body(body));
+/// 一次生物事件的包；种类决定发给谁。
+///
+/// One mob event's packet; its kind decides who receives it.
+enum EventPacket {
+    /// `broadcastEntityEvent` / `broadcastDamageEvent`：官方
+    /// `ServerChunkCache.sendToTrackingPlayersAndSelf`，发给正在跟踪这个实体的玩家。
+    ///
+    /// Sent to the players tracking the entity (vanilla
+    /// `sendToTrackingPlayersAndSelf`).
+    Tracking(Vec<u8>),
+    /// `playSeededSound`：官方 `PlayerList.broadcast`，发给音效范围内的玩家。
+    ///
+    /// Sent to the players within the sound's range (vanilla `PlayerList.broadcast`).
+    Sound(mc_bamboo_protocol::packet::play::Sound),
+}
+
+impl EventPacket {
+    fn body(&self) -> Vec<u8> {
+        match self {
+            Self::Tracking(body) => body.clone(),
+            Self::Sound(sound) => packet_body(sound),
+        }
     }
-    if !frames.is_empty() {
-        region.links.broadcast(&frames);
+}
+
+/// 一次生物事件的包。音效的种子由 `sound_seed` 当场取一个。
+///
+/// One mob event's packet; a sound takes its seed from `sound_seed` on the spot.
+fn event_packet(
+    id: i32,
+    event: &mc_bamboo_blocks::entity::mob::MobEvent,
+    sound_seed: &mut impl FnMut() -> i64,
+) -> EventPacket {
+    use mc_bamboo_blocks::entity::mob::MobEvent;
+    use mc_bamboo_protocol::packet::play::{DamageEvent, EntityEvent, Sound};
+
+    match event {
+        MobEvent::Death => EventPacket::Tracking(packet_body(&EntityEvent {
+            entity_id: id,
+            event: 3,
+        })),
+        MobEvent::Poof => EventPacket::Tracking(packet_body(&EntityEvent {
+            entity_id: id,
+            event: 60,
+        })),
+        MobEvent::Damage { kind, attacker } => {
+            let damage_type = mc_bamboo_data::damage_type_id(kind.name()).unwrap_or(0);
+            EventPacket::Tracking(packet_body(&DamageEvent {
+                entity_id: id,
+                damage_type,
+                source_cause: *attacker,
+                source_direct: *attacker,
+                position: None,
+            }))
+        }
+        MobEvent::Sound {
+            sound,
+            volume,
+            pitch,
+            position,
+        } => EventPacket::Sound(Sound {
+            sound: i32::from(mc_bamboo_data::sounds::sound_event(sound)),
+            inline: None,
+            source: mc_bamboo_data::sounds::NEUTRAL,
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            volume: *volume,
+            pitch: *pitch,
+            seed: sound_seed(),
+        }),
+    }
+}
+
+/// 把这一刻的生物事件按官方的收件人发出去：实体事件和伤害事件给正在跟踪这个实体的
+/// 玩家（跟踪关系是上一刻同步阶段定的，和官方实体 tick 时的 `seenBy` 一样），音效给
+/// 范围内的玩家（`interaction::send_sound`，和方块音效同一条路）。事件按发生顺序，
+/// 每名玩家收到的先后不变。以前发给岛上的全体玩家：远处的人也收得到，多岛时收件人
+/// 还和岛的划分有关。
+///
+/// Send this tick's mob events to vanilla's recipients: entity and damage
+/// events to the players tracking the entity (pairings from last tick's sync,
+/// like vanilla's `seenBy` during entity ticks), sounds to the players in range
+/// (`interaction::send_sound`, the block-sound path). Events keep their order.
+/// They used to reach every player on the island, so distant players got them
+/// and, with several islands, the recipients depended on the partition.
+fn send_mob_events(
+    region: &mut Region,
+    events: &[(i32, Vec<mc_bamboo_blocks::entity::mob::MobEvent>)],
+) {
+    for (id, mob_events) in events {
+        for event in mob_events {
+            let packet = event_packet(*id, event, &mut || {
+                region.sound_seed_generator.source().next_long()
+            });
+            match packet {
+                EventPacket::Tracking(body) => {
+                    let Some(tracked) = region.entity_tracking.tracked.get(id) else {
+                        continue;
+                    };
+                    let frames = frame_from_body(&body);
+                    for &player in &tracked.seen_by {
+                        region.links.send_frames(player, &frames);
+                    }
+                }
+                EventPacket::Sound(sound) => crate::interaction::send_sound(region, None, &sound),
+            }
+        }
     }
 }
 
@@ -969,8 +1031,7 @@ fn prepare_sync(region: &mut Region) {
     // 生物事件（受伤、死亡、音效）先发，再发这一刻的配对和同步包。
     // Mob events go out before this tick's pairing and sync packets.
     let events = region.entities.take_mob_events();
-    let bodies = event_packets(&events, || region.sound_seed_generator.source().next_long());
-    broadcast_bodies(region, &bodies);
+    send_mob_events(region, &events);
     let live: BTreeSet<i32> = region
         .entities
         .iter_public()

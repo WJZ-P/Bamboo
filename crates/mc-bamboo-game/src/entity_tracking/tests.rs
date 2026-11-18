@@ -738,3 +738,74 @@ fn stress_reports_sync_cost_against_group_count() {
         );
     }
 }
+
+/// 原始出站字节里每一帧的包 ID。
+fn packet_ids(bytes: &[u8]) -> Vec<i32> {
+    use mc_bamboo_protocol::codec::decode_varint;
+    let mut rest = bytes;
+    let mut ids = Vec::new();
+    while !rest.is_empty() {
+        let (len, header) = decode_varint(rest).expect("帧长");
+        let payload = &rest[header..header + len as usize];
+        ids.push(decode_varint(payload).expect("包 ID").0);
+        rest = &rest[header + len as usize..];
+    }
+    ids
+}
+
+/// 生物事件按官方的收件人发：伤害和实体事件只给正在跟踪这个实体的玩家
+/// （`sendToTrackingPlayersAndSelf`），音效给范围内的玩家（`PlayerList.broadcast`，
+/// 音量 1 时 16 格、严格小于）。同一岛上的远处玩家两样都收不到。改坏确认：发给全体
+/// （原来的做法）时远处的人会收到，这条测试失败。
+///
+/// Mob events go to vanilla's recipients: damage and entity events only to the
+/// players tracking the entity, sounds to players in range (16 blocks at
+/// volume 1, strict). A distant player on the same island gets neither.
+#[test]
+fn mob_events_reach_trackers_and_sounds_reach_listeners_in_range() {
+    use mc_bamboo_blocks::entity::mob::{DamageKind, MobEvent};
+    use mc_bamboo_data::packets::play::clientbound::{DAMAGE_EVENT, ENTITY_EVENT, SOUND};
+
+    let mut region = Region::new(2, 20, false);
+    let mut sinks = BTreeMap::new();
+    // 1：跟踪着；2：没跟踪、离音源 15.9 格；3：没跟踪、离音源 16 格整；4：很远。
+    // 1 tracks; 2 does not, 15.9 blocks from the sound; 3 exactly 16; 4 far.
+    for (id, x) in [(1, 0.5), (2, 16.4), (3, 16.5), (4, 500.5)] {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        region
+            .links
+            .add(PlayerId(id), Box::new(RecordingSink(sink.clone())));
+        let mut player = player(id, x, 0.5, 2);
+        player.set_position(&mut region.player_grid, Vec3::new(x, -60.0, 0.5));
+        region.insert_player(player);
+        sinks.insert(id, sink);
+    }
+    let uid = region.entities.spawn_row(entity(0, 0.5, 0.5));
+    let public = region.entities.public_at(uid).expect("刚生成").clone();
+    let mut tracked = TrackedEntity::new(&Snapshot::of(&public));
+    tracked.seen_by.insert(PlayerId(1));
+    region.entity_tracking.tracked.insert(uid, tracked);
+    let events = vec![(
+        uid,
+        vec![
+            MobEvent::Damage {
+                kind: DamageKind::Generic,
+                attacker: None,
+            },
+            MobEvent::Sound {
+                sound: "minecraft:entity.cow.ambient",
+                volume: 1.0,
+                pitch: 1.0,
+                position: Vec3::new(0.5, -60.0, 0.5),
+            },
+            MobEvent::Death,
+        ],
+    )];
+    send_mob_events(&mut region, &events);
+    region.links.flush();
+    let received = |id: i32| packet_ids(&sinks[&id].lock().expect("没有别人写"));
+    assert_eq!(received(1), [DAMAGE_EVENT, SOUND, ENTITY_EVENT]);
+    assert_eq!(received(2), [SOUND], "范围内没跟踪的人只听得到声音");
+    assert!(received(3).is_empty(), "正好 16 格听不到（严格小于）");
+    assert!(received(4).is_empty(), "远处的人什么都收不到");
+}
