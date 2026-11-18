@@ -37,7 +37,8 @@ pub use function::LootFunction;
 pub use names::{
     EnchantmentDef, Registry, biome_id, block_id, block_name, enchantment_def,
     enchantment_defs_all, enchantment_id, enchantment_name, entity_type_id, entity_type_name,
-    instrument_name, item_id, item_name, mob_effect_name, potion_name, tag_ids,
+    has_repair_with_xp, instrument_name, item_id, item_name, mob_effect_name, potion_name,
+    repair_with_xp_factor, tag_ids,
 };
 pub use number::{FloatProvider, IntProvider, LevelBasedValue};
 pub use pool::LootPool;

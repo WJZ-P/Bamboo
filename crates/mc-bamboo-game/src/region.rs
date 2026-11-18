@@ -27,6 +27,7 @@ use crate::{
     chunk_encoding::{ChunkCache, encode_template},
     chunk_tracking,
     entity_tracking::EntityTracking,
+    experience::Experience,
     global::{Clock, GameTime},
     inbound::{JoinRequest, PlayerId},
     interaction::{BlockChanges, level::RegionLevel},
@@ -325,10 +326,11 @@ const _: () = {
 };
 
 /// 进服时世界线程替这名玩家定好的东西：游戏模式、全局状态里的难度包、出生点和种子哈希，
-/// 以及按权威 OP 名单查出的权限。
+/// 以及按权威 OP 名单查出的权限和存档里的经验。
 ///
 /// What the world thread settled for a joining player: the game mode, the difficulty frames,
-/// spawn and seed hash from the world state, and the permissions from the authoritative op list.
+/// spawn and seed hash from the world state, the permissions from the authoritative op list,
+/// and the saved experience.
 pub(crate) struct JoinSettings<'a> {
     pub(crate) game_mode: GameMode,
     pub(crate) difficulty_frames: &'a [u8],
@@ -336,6 +338,7 @@ pub(crate) struct JoinSettings<'a> {
     pub(crate) hashed_seed: i64,
     pub(crate) permission_level: u8,
     pub(crate) is_op: bool,
+    pub(crate) experience: Experience,
 }
 
 impl Region {
@@ -637,11 +640,15 @@ impl Region {
     }
 
     /// 进服开头：`login`、`change_difficulty`、`player_abilities`、权限事件、命令树、
-    /// `player_position`。官方 `PlayerList.placeNewPlayer` 把难度包放在 login 后面。
+    /// `player_position`。官方 `PlayerList.placeNewPlayer` 把难度包放在 login 后面，
+    /// **不发** `set_experience`：那一包由 `ServerPlayer.doTick` 在进服这一刻
+    /// （`lastSentExp` 仍是构造时的 -99999999）补发。
     ///
-    /// The start of join: `login`, `change_difficulty`, `player_abilities`, the permission
-    /// event, the command tree, then `player_position`. Official `placeNewPlayer` puts
-    /// the difficulty packet right after `login`.
+    /// The start of join: `login`, `change_difficulty`, `player_abilities`, the
+    /// permission event, the command tree, then `player_position`. Official
+    /// `placeNewPlayer` puts the difficulty packet right after `login` and does
+    /// **not** send `set_experience`: `ServerPlayer.doTick` sends it on the join
+    /// tick because `lastSentExp` is still -99999999.
     pub(crate) fn add_player(&mut self, request: JoinRequest, settings: JoinSettings<'_>) {
         let JoinSettings {
             game_mode,
@@ -650,6 +657,7 @@ impl Region {
             hashed_seed: state_seed_hash,
             permission_level,
             is_op,
+            experience,
         } = settings;
         // 属性已经进了 Tab 名单，这里用不到。
         let JoinRequest {
@@ -695,6 +703,7 @@ impl Region {
 
         let position = spawn_position(spawn);
         let mut player = Player::new(id, uuid, name, game_mode, client, position);
+        player.experience = experience;
         player.permission_level = permission_level;
         player.is_op = is_op;
         player.inbox = inbox;

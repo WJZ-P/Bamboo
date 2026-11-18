@@ -204,9 +204,9 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   拆成经验球。掉落物和经验球都进实体表、发配对包、能存盘。
 - 经验球是新的实体类别：重力 / 阻力、朝最近玩家的吸引、岩浆里的随机位移、
   每 20 刻同值合并、6000 刻消失、官方 NBT（`Health` / `Age` / `Value` / `Count`）。
-  玩家拾取这一支留了 `entity::pick_up` 入口，等玩家经验系统（等级 / 进度条 /
-  `set_experience` 包）单独做；**已知差异**：游戏里经验球被玩家碰到不会消失，
-  直到 6000 刻寿命结束。熔炉 / 砂轮那些「只取随机数不生成球」的地方本轮未动。
+  玩家拾取已经接上：`Player.aiStep` 每刻只碰一颗附近的球，按 `takeXpDelay`、
+  `count`、经验修补和 `take_item_entity` 包走官方顺序（见 5.6）。
+  熔炉 / 砂轮那些「只取随机数不生成球」的地方本轮未动。
 - 存档：`minecraft:cow` 和 `minecraft:experience_orb` 都进建模实体清单，读盘后
   放进实体表继续 tick。`archive::tests::a_loaded_cow_keeps_running_from_its_saved_state`
   验证读盘后的成年牛继续减求爱计时、幼年牛继续长大、位置被 AI 推动。
@@ -226,7 +226,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   都能被对拍或单测抓到。
 - `chunk-content` 439 项、`entity-oracle` 31 例 709 步、`move-oracle` 55 例、
   探针 728/728 全过。
-- 未做：拴绳、命名牌、玩家经验系统与经验球拾取、并行模式逐位一致性。
+- 未做：拴绳、命名牌、并行模式逐位一致性；玩家经验系统与经验球拾取已在 5.6 接上。
 
 #### 岛的拆合（新增的按实体状态）
 
@@ -236,3 +236,48 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 - `Mob.pending_breed`（同一刻内消费，不跨刻，不带绝对时刻）和
   `ExperienceOrb` 的字段（年龄、健康、值、数量、跟随的玩家 uid）全在实体行上，
   整行搬走即可，不需要改 `IslandPart` 清单；`region/island_split.rs` 本轮未改。
+
+
+### 5.5 实体逻辑看得见游戏里的玩家（2026-11-20）
+
+- `mc-bamboo-blocks` 的 `Level::for_each_player` 原来在正式世界是空实现，只有
+  `testing.rs` 和几个对拍上下文给了玩家。于是 `LookAtPlayerGoal` / `TemptGoal`
+  看不见人、经验球不会朝玩家飞；`mob-oracle` 用自己的假世界上下文，所以没暴露。
+  现在 `RegionLevel`（精确驱动）和 `ReadOnlyWorld` / `SourceView`（并行算阶段）
+  都把本岛 `Region.players` 按 `PlayerId` 升序映射成 `PlayerView`。
+  顺序对应官方 `ServerLevel.players()` 的进服顺序（实体 ID 单调递增）；
+  旁观者、死亡状态和隐身等不在这一层过滤，由 `NO_SPECTATORS` /
+  `TargetingConditions` / `ExperienceOrb.followNearbyPlayer` 各自按官方条件处理。
+- **为什么只看本岛够用**：`island_partition.rs` 把「票想加载的区块」（等级 ≤ 33）
+  按 4×4 区块一个 section 计数，切比雪夫距离 ≤ 2 的非空 section 连成一个岛，
+  岛间至少隔 3 个 section（≥ 8 个区块 = 128 格）；`docs/island-implementation-plan.md`
+  4.2 由此推出「玩家的视野不跨两个岛」。牛的注视 6 格、诱惑 10 格、经验球跟随
+  8 格都远小于这个间隔：能和实体发生这些交互的玩家，其加载票覆盖的区块和实体
+  所在区块连通，必在同一个岛。`check_despawn` 用的是 32 格，也仍在间隔内；
+  更大的跨岛目标（例如将来加入 `FOLLOW_RANGE` 很大的生物）需要跨岛查询，
+  当前没有这类实体，这是已知的边界，不改分区器。
+- 测试在真实 `World`（`Harness`）上：拿小麦的玩家让牛转头并走过去、空手不动、
+  注视目标被选中、经验球朝玩家加速、旁观者不吸引经验球、并行算阶段结果相同。
+  把 `RegionLevel::for_each_player` 退回空实现后，前三个正向断言全部失败，
+  恢复后 `6/6` 通过。`mob-oracle` 用自己的上下文，不受影响。
+
+
+### 5.6 经验球拾取（2026-11-20）
+
+- `entity::pick_up` 现在是 `ExperienceOrb.playerTouch` 的实体侧：减 `count`，归零
+  时 `discard`。游戏层 `experience_pickup.rs` 负责 `takeXpDelay`、
+  `LivingEntity.take` 的 `take_item_entity` 包、`repairPlayerItems` 和
+  `giveExperiencePoints`；`set_experience` 由下一刻 `ServerPlayer.doTick` 补发。
+- `Player.aiStep` 的形状照字节码：附近实体先逐个碰（掉落物），经验球单独收集，
+  最后用 `Util.getRandom(list, this.random)` 抽一颗碰。名单非空就取一次
+  `nextInt(size)`，即使 `takeXpDelay` 没过也会取；`playerTouch` 自己判冷却。
+  冷却设为 2 刻，每刻 `Player.tick` 先减 1。
+- `repairPlayerItems` 按 `EquipmentSlot.VALUES` 扫主手 / 副手 / 四件盔甲，
+  挑有 `minecraft:repair_with_xp` 且损坏的装备（每个附魔条目各算一个候选），
+  用玩家随机源抽一件。`modifyDurabilityToRepairFromXp` 从数据包的
+  `multiply` 因子算修复量（mending 是 2.0），`repair = min(repairAmount, damage)`，
+  剩余经验按 `amount - repair * amount / repairAmount` 递归给下一件；
+  没有装备可修时全部经验给玩家。改过的物品栏槽发 `container_set_slot`。
+- 拾取音效不另发 `sound` 包：官方 `ExperienceOrb.playerTouch` 和
+  `LivingEntity.take` 都只发 `take_item_entity`，客户端收到后本地播
+  `entity.experience_orb.pickup`（字幕键 `subtitles.entity.experience_orb.pickup`）。

@@ -611,3 +611,94 @@ fn weather_commands_draw_from_the_masters_source_with_several_islands() {
         assert!(scene.server.world.master.global.state().weather.raining);
     });
 }
+
+/// `/xp add @a` 的目标跨两个岛：多岛借玩家执行时，每一名玩家的反馈字节、
+/// `set_experience` 包和经验三字段都要和「整个世界一个岛」逐位相同。
+///
+/// `/xp add @a` targets players on two islands: while the master borrows
+/// them, every player's feedback bytes, `set_experience` packet and the three
+/// experience fields must match the single-island world bit for bit.
+#[test]
+fn an_experience_command_across_islands_matches_one_island() {
+    use super::island_runtime_tests::align;
+    use crate::island::IslandDrive;
+
+    with_stack(|| {
+        let seed = 73;
+        let mut multi = set_up(seed, Harness::new_islands(2, 0));
+        let mut control = set_up(
+            seed,
+            Harness::new_loaded_with_drive(2, IslandDrive::Lockstep),
+        );
+        align(&mut multi, &mut control);
+        // 命令反馈带服务端的墙上时钟毫秒；两边固定成同一个值。
+        // Command feedback carries the server's wall-clock millis; pin it.
+        for scene in [&mut multi, &mut control] {
+            for island in scene.server.world.islands.iter_mut() {
+                island.region.clock_millis = Some(1_700_000_000_000);
+            }
+        }
+        let sender = first_of(&multi, 0);
+        let target = first_of(&multi, 1);
+        let control_sender = first_of(&control, 0);
+        make_op(&mut multi, &sender);
+        make_op(&mut control, &control_sender);
+        assert_ne!(
+            island_of(&multi, &sender),
+            island_of(&multi, &target),
+            "发起人和目标在不同的岛上"
+        );
+        assert!(multi.server.world.islands.several(), "多岛世界有多个岛");
+
+        multi
+            .server
+            .request(&sender, PlayRequest::unsigned_command("xp add @a 7 levels"));
+        control.server.request(
+            &control_sender,
+            PlayRequest::unsigned_command("xp add @a 7 levels"),
+        );
+        multi.server.tick();
+        control.server.tick();
+
+        let experience = |scene: &Scene| -> Vec<(i32, i32, u32, i32)> {
+            let mut out: Vec<_> = scene
+                .server
+                .world
+                .islands
+                .iter()
+                .flat_map(|island| {
+                    island.region.players.values().map(|player| {
+                        (
+                            player.id.0,
+                            player.experience.level,
+                            player.experience.progress.to_bits(),
+                            player.experience.total,
+                        )
+                    })
+                })
+                .collect();
+            out.sort_unstable();
+            out
+        };
+        assert_eq!(
+            experience(&multi),
+            experience(&control),
+            "每个玩家的经验等级、进度和总经验"
+        );
+        assert!(
+            experience(&multi)
+                .iter()
+                .all(|(_, level, _, _)| *level == 7),
+            "所有目标都加了 7 级"
+        );
+        for ((_, mine), (_, theirs)) in multi.clients.iter().zip(&control.clients) {
+            assert_eq!(
+                mine.take_frames(),
+                theirs.take_frames(),
+                "玩家 {:?} 收到的字节",
+                mine.id
+            );
+        }
+        multi.server.world.assert_island_invariants();
+    });
+}

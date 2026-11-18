@@ -7,9 +7,9 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, enchant, gamerule, items,
-    loot, particle, players, playsound, random, save, scoreboard, stopsound, summon, team,
-    teleport, text, time, title, weather, world_border, world_settings,
+    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, enchant, experience,
+    gamerule, items, loot, particle, players, playsound, random, save, scoreboard, stopsound,
+    summon, team, teleport, text, time, title, weather, world_border, world_settings,
 };
 
 struct Builder {
@@ -129,6 +129,7 @@ pub(crate) fn build() -> Commands {
     register_stopsound(&mut builder, root);
     register_random(&mut builder, root);
     register_enchant(&mut builder, root);
+    register_experience(&mut builder, root);
     register_loot(&mut builder, root);
     register_weather(&mut builder, root);
     register_worldborder(&mut builder, root);
@@ -1096,6 +1097,62 @@ fn register_enchant(builder: &mut Builder, root: usize) {
         0,
     );
     builder.run_island(level, enchant::enchant);
+}
+
+/// 官方 `ExperienceCommand.register`：`experience` 是主名，`xp` 重定向到它。
+/// `add` / `set` 的 `amount` 节点本身可执行（默认 `points`），`query` 必须带后缀。
+///
+/// Official `ExperienceCommand.register`: `experience` is the main name, `xp`
+/// redirects to it. The `amount` node of `add` / `set` is executable by itself
+/// (defaulting to `points`); `query` requires a suffix.
+fn register_experience(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "experience", permission::GAMEMASTERS);
+
+    let add = builder.literal(command, "add", 0);
+    let target = builder.argument(add, "target", players_argument(), 0);
+    let amount = builder.argument(
+        target,
+        "amount",
+        ArgumentType::Integer {
+            min: i32::MIN,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run_island(amount, experience::add_points);
+    builder.bind_island(amount, "points", experience::add_points);
+    builder.bind_island(amount, "levels", experience::add_levels);
+
+    let set = builder.literal(command, "set", 0);
+    let target = builder.argument(set, "target", players_argument(), 0);
+    let amount = builder.argument(
+        target,
+        "amount",
+        ArgumentType::Integer {
+            min: 0,
+            max: i32::MAX,
+        },
+        0,
+    );
+    builder.run_island(amount, experience::set_points);
+    builder.bind_island(amount, "points", experience::set_points);
+    builder.bind_island(amount, "levels", experience::set_levels);
+
+    let query = builder.literal(command, "query", 0);
+    let target = builder.argument(
+        query,
+        "target",
+        ArgumentType::Entity {
+            single: true,
+            players_only: true,
+        },
+        0,
+    );
+    builder.bind_island(target, "points", experience::query_points);
+    builder.bind_island(target, "levels", experience::query_levels);
+
+    let alias = builder.literal(root, "xp", permission::GAMEMASTERS);
+    builder.graph.redirect(alias, command);
 }
 
 /// 官方 `LootCommand.addTargets`：四种目标，每个目标后面是同一组来源后缀。

@@ -78,6 +78,22 @@ impl Inventory {
         self.slots.get(index)
     }
 
+    /// 这个装备槽的可变引用，顺序和官方 `EquipmentSlot.VALUES` 一致。
+    ///
+    /// Mutable access to an equipment slot, in `EquipmentSlot.VALUES` order.
+    pub(crate) fn equipment_mut(&mut self, slot: EquipmentSlot) -> Option<&mut ItemStack> {
+        let index = match slot {
+            EquipmentSlot::MainHand => self.hand_slot(Hand::Main),
+            EquipmentSlot::OffHand => self.hand_slot(Hand::Off),
+            EquipmentSlot::Feet => 8,
+            EquipmentSlot::Legs => 7,
+            EquipmentSlot::Chest => 6,
+            EquipmentSlot::Head => 5,
+            EquipmentSlot::Body | EquipmentSlot::Saddle => return None,
+        };
+        self.slots.get_mut(index)
+    }
+
     /// 这只手里的物品。
     pub(crate) fn held(&self, hand: Hand) -> &ItemStack {
         &self.slots[self.hand_slot(hand)]

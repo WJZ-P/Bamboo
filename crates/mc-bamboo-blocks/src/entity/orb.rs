@@ -1,13 +1,15 @@
 //! 经验球，官方 `ExperienceOrb`。
 //!
 //! 构造时的位置偏移、重力 / 阻力、朝玩家加速、岩浆里的随机位移、每隔 20 刻合并
-//! 同值球、6000 刻消失都按官方字节码的顺序。玩家碰到球之后的拾取要等玩家经验
-//! 系统，入口留在 [`pick_up`]，现在什么也不做。
+//! 同值球、6000 刻消失都按官方字节码的顺序。玩家碰到球之后的拾取入口是
+//! [`pick_up`]：它只管实体这一侧的 `count` 和消失，经验修补、加经验、发包在
+//! 游戏层（`Player.takeXpDelay` 是玩家状态）。
 //!
 //! The experience orb, vanilla `ExperienceOrb`. Constructor offset, gravity and
 //! drag, player attraction, lava movement, 20-tick merging and the 6000-tick
-//! lifetime follow the official bytecode. Pickup waits for the player
-//! experience system; [`pick_up`] is the entry and currently does nothing.
+//! lifetime follow the official bytecode. [`pick_up`] is the entity-side half
+//! of `playerTouch`: it decrements `count` and discards the orb; item repair,
+//! experience and packets live in the game layer, which owns player state.
 
 use mc_bamboo_core::{Axis, BlockPos, Vec3};
 use mc_bamboo_data::tags::fluid_tags;
@@ -265,11 +267,22 @@ pub(crate) fn apply_merge(
     }
 }
 
-/// 玩家碰到经验球的入口：官方 `ExperienceOrb.playerTouch`。
-/// 玩家经验系统（等级、进度条、`set_experience` 包）还没有实现，所以现在不消失、不发经验。
+/// `ExperienceOrb.playerTouch` 的实体侧：取走一颗 `count`，返回这一颗的经验值。
+/// 计数归零时打上 `discard` 标记；调用方负责 `take_item_entity`、经验修补和加经验。
+/// 冷却、`take`、修补都发生在这一侧之前，所以这里不改别的字段。
 ///
-/// The `playerTouch` entry. Bamboo has no player experience system yet, so the
-/// orb stays until its 6000-tick lifetime expires.
-pub fn pick_up(_me: &mut Entity, _player: EntityUid) -> bool {
-    false
+/// The entity side of `ExperienceOrb.playerTouch`: consumes one `count` and
+/// returns that orb's value, discarding the entity when the count reaches zero.
+/// The caller handles `take_item_entity`, mending and experience; the pickup
+/// cooldown and `take` happen before this call.
+pub fn pick_up(me: &mut Entity) -> Option<i32> {
+    let EntityKind::ExperienceOrb(orb) = &mut me.kind else {
+        return None;
+    };
+    let value = orb.value;
+    orb.count -= 1;
+    if orb.count == 0 {
+        me.discard();
+    }
+    Some(value)
 }

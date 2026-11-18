@@ -1,15 +1,16 @@
 //! 熔炉、高炉、烟熏炉的方块实体：`AbstractFurnaceBlockEntity` 和它的三个子类。
 //!
 //! ticker 逐行照官方 `serverTick`：燃料、烹饪进度、`lit` 方块状态和配方统计都在这里。
-//! 取走结果时官方会给经验，这个世界没有经验球，但 `createExperience` 和
-//! `ExperienceOrb.award` 抽的世界随机数一个都不能少，否则后面的随机刻就错位了。
+//! 取走结果 / 方块被挖掉时按 `AbstractFurnaceBlockEntity.awardUsedRecipesAndPopExperience`
+//! 生成经验球；`createExperience` 的 `nextFloat` 和 `ExperienceOrb.award` 每次迭代的
+//! `nextInt(40)` 一个都不能少。
 //!
 //! 数据槽（`ContainerData`）给菜单读，顺序是剩余燃烧时间、总燃烧时间、
 //! 烹饪进度、总烹饪时间。
 
 use std::any::Any;
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::{BlockClass, CookingKind, Recipe, RecipeKind, RecipeType, items};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_protocol::item::ItemStack;
@@ -40,9 +41,6 @@ const BURN_TIME_STANDARD: i32 = 200;
 const BURN_COOL_SPEED: i32 = 2;
 /// `Container.getMaxStackSize()` 的默认值。
 const CONTAINER_STACK_LIMIT: i32 = 99;
-
-/// `ExperienceOrb.getExperienceValue` 的分段上限。
-const EXPERIENCE_VALUES: [i32; 10] = [2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3];
 
 /// `AbstractFurnaceBlockEntity`。
 ///
@@ -384,10 +382,13 @@ impl FurnaceEntity {
     }
 
     /// 官方 `getRecipesToAwardAndPopExperience`：每条统计过的配方给经验。
+    /// `position` 是官方传进来的球生成位置：取出成品时用玩家位置，方块被挖掉时
+    /// 用方块中心。
     ///
-    /// 经验球不存在，但 `createExperience` 的 `nextFloat` 和
-    /// `ExperienceOrb.award` 每次迭代的 `nextInt(40)` 都照抽。
-    pub fn award_experience(&mut self, world: &mut World) {
+    /// Official `getRecipesToAwardAndPopExperience`: each used recipe grants
+    /// experience. `position` is where vanilla spawns the orbs: the player's
+    /// position when taking the result, the block centre when the furnace breaks.
+    pub fn award_experience(&mut self, world: &mut World, position: Vec3) {
         self.materialize(block_entity_clock().saturating_sub(1));
         let used = std::mem::take(&mut self.recipes_used);
         for (id, count) in used {
@@ -397,7 +398,7 @@ impl FurnaceEntity {
             let RecipeKind::Cooking { experience, .. } = recipe.kind else {
                 continue;
             };
-            create_experience(world, count, experience);
+            create_experience(world, position, count, experience);
         }
     }
 
@@ -583,7 +584,14 @@ impl FurnaceEntity {
 /// 有一段小数概率时抽一次 `nextFloat`；随后按 `getExperienceValue` 分段把总量拆成好几个球，
 /// 每个球在 `tryMergeToExisting` 里抽一次 `nextInt(40)`。世界没有实体，合并永远失败，
 /// 但随机数照抽。
-fn create_experience(world: &mut World, amount: i32, value: f32) {
+/// 官方 `AbstractFurnaceBlockEntity.createExperience`：
+/// `reward = floor(amount * experience)`，小数部分按一次 `nextFloat` 决定要不要 +1，
+/// 然后 `ExperienceOrb.award(level, position, reward)` 拆成球。
+///
+/// Official `AbstractFurnaceBlockEntity.createExperience`: the fractional part
+/// decides one extra point via a single `nextFloat`, then
+/// `ExperienceOrb.award(level, position, reward)` splits it into orbs.
+fn create_experience(world: &mut World, position: Vec3, amount: i32, value: f32) {
     let experience = amount as f32 * value;
     let floor = experience.floor();
     let mut reward = floor as i32;
@@ -591,21 +599,7 @@ fn create_experience(world: &mut World, amount: i32, value: f32) {
     if fraction != 0.0 && world.random().next_float() < fraction {
         reward += 1;
     }
-    let mut remaining = reward;
-    while remaining > 0 {
-        remaining -= experience_value(remaining);
-        world.random().next_int(40);
-    }
-}
-
-/// 官方 `ExperienceOrb.getExperienceValue`。
-fn experience_value(amount: i32) -> i32 {
-    for limit in EXPERIENCE_VALUES {
-        if amount >= limit {
-            return limit;
-        }
-    }
-    1
+    crate::entity::award(world, position, reward);
 }
 
 impl BlockEntity for FurnaceEntity {
@@ -622,7 +616,13 @@ impl BlockEntity for FurnaceEntity {
         for stack in &self.items {
             drop_item_stack(world, self.pos, stack);
         }
-        self.award_experience(world);
+        // 官方用 `Vec3.atCenterOf(pos)`，不是玩家位置。
+        let center = Vec3::new(
+            f64::from(self.pos.x) + 0.5,
+            f64::from(self.pos.y) + 0.5,
+            f64::from(self.pos.z) + 0.5,
+        );
+        self.award_experience(world, center);
     }
 
     fn as_any(&self) -> &dyn Any {

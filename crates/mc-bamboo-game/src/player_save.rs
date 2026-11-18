@@ -7,11 +7,18 @@
 //! Conversion between a live `Player` and the persisted `PlayerData` fields.
 //! Saving uses `PlayerData::from_runtime_parts` (menu slots -> official inventory
 //! slots); loading uses [`restore_inventory`] with the inverse [`disk_to_menu`].
+//!
+//! 经验三字段和 `XpSeed` 也走同一对函数：存档里 `XpSeed == 0` 表示要从玩家随机源
+//! 抽一个新的附魔种子，见 [`restore_inventory`]。
+//!
+//! The three experience fields and `XpSeed` take the same route. A saved
+//! `XpSeed == 0` means a new enchantment seed is drawn from the player's
+//! random source, see [`restore_inventory`].
 
 use mc_bamboo_protocol::packet::play::GameMode;
 use mc_bamboo_storage::player_data::{PlayerData, RuntimeParts};
 
-use crate::player::Player;
+use crate::{experience::Experience, player::Player};
 
 /// 从一名在线玩家造出要存档的 `PlayerData`。
 pub fn runtime_player_data(player: &Player) -> PlayerData {
@@ -25,6 +32,11 @@ pub fn runtime_player_data(player: &Player) -> PlayerData {
         selected_slot: i32::from(player.inventory.selected),
         menu_slots: &player.inventory.slots,
         ender_slots: &player.ender_chest.slots,
+        xp_p: player.experience.progress,
+        xp_level: player.experience.level,
+        xp_total: player.experience.total,
+        xp_seed: player.enchantment_seed,
+        score: player.score,
     })
 }
 
@@ -50,9 +62,40 @@ fn disk_to_menu(disk: i32) -> Option<usize> {
     }
 }
 
-/// 把 `PlayerData` 里的物品栏和末影箱写回玩家。其它字段（血量、经验、能力等）
+/// 官方 `Player.readAdditionalSaveData` 里 `XpSeed` 的那一段：
+/// `enchantmentSeed = input.getIntOr("XpSeed", 0)`；只有 0（NO_ENCHANTMENT_SEED）
+/// 才 `this.random.nextInt()` 重抽。没有存档的新玩家同样走「0 → 抽一次」。
+/// 分开成一个函数，是因为 `Player` 构造函数自己不取随机数。
+///
+/// The `XpSeed` part of official `Player.readAdditionalSaveData`:
+/// `enchantmentSeed = input.getIntOr("XpSeed", 0)`, and only a zero value
+/// (NO_ENCHANTMENT_SEED) draws `this.random.nextInt()`. A new player with no
+/// save takes the same "zero → draw once" path. This is separate because the
+/// `Player` constructor itself draws nothing.
+pub fn restore_experience_seed(player: &mut Player, data: Option<&PlayerData>) {
+    let saved = data.map_or(0, |data| data.xp_seed);
+    player.enchantment_seed = if saved == 0 {
+        player.random.next_int()
+    } else {
+        saved
+    };
+}
+
+/// 把 `PlayerData` 里的物品栏、末影箱和经验写回玩家。其它字段（血量、饥饿、能力等）
 /// 目前没有对应的运行时状态，保存时用官方默认值；这里只恢复建模过的部分。
+/// `XpSeed` 由 [`restore_experience_seed`] 单独处理，因为要不要取随机数取决于它。
+///
+/// Restores the inventory, ender chest and experience from `PlayerData`. Health,
+/// hunger and abilities still have no live state and keep the official defaults.
+/// [`restore_experience_seed`] handles `XpSeed` because it decides whether a
+/// random number is drawn.
 pub fn restore_inventory(player: &mut Player, data: &PlayerData) {
+    player.experience = Experience {
+        level: data.xp_level,
+        total: data.xp_total,
+        progress: data.xp_p,
+    };
+    player.score = data.score;
     player.yaw = data.rotation[0];
     player.pitch = data.rotation[1];
     player.head_yaw = data.rotation[0];

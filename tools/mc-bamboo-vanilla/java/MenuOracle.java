@@ -482,7 +482,12 @@ public final class MenuOracle {
             };
             boolean creative = variant % 2 == 0;
             int seed = variant * 31 + 17;
+            // 固定题要覆盖不同等级（附魔/铁砧的等级判定）和不同书架数。
+            // Fixed cases cover different levels and bookshelf counts.
+            int xpLevel = (variant * 7 + 3) % 41;
+            int bookshelves = shape == Shape.ENCHANTMENT ? (variant * 5) % 16 : 0;
             FakePlayer player = FakePlayer.create(seed, creative);
+            set(Player.class, player, "experienceLevel", xpLevel);
             Inventory inventory = player.getInventory();
             ItemStack[] grid = new ItemStack[shape.size];
             for (int i = 0; i < grid.length; i++) {
@@ -512,8 +517,7 @@ public final class MenuOracle {
             MapId mapId = new MapId(variant + 1);
             byte scale = (byte) (variant % 5);
             boolean locked = variant % 4 == 0;
-            FakeLevel level = FakeLevel.create(
-                    seed, shape == Shape.ENCHANTMENT && variant % 2 == 0, mapId, scale, locked);
+            FakeLevel level = FakeLevel.create(seed, bookshelves, mapId, scale, locked);
             set(Entity.class, player, "level", level);
             ContainerLevelAccess access = ContainerLevelAccess.create(level, BlockPos.ZERO);
             AbstractContainerMenu menu = switch (shape) {
@@ -534,12 +538,21 @@ public final class MenuOracle {
             line.addProperty("fixedWorld", true);
             line.addProperty("mapScale", scale);
             line.addProperty("mapLocked", locked);
-            line.addProperty("bookshelves", shape == Shape.ENCHANTMENT && variant % 2 == 0 ? 15 : 0);
+            line.addProperty("bookshelves", bookshelves);
+            line.addProperty("xpLevel", xpLevel);
             if (shape == Shape.ENCHANTMENT) {
-                // `onEnchantmentPerformed` 从玩家自己的随机源换种子；这里提前算出来。
+                // `onEnchantmentPerformed` 每次成功都从玩家自己的随机源换种子；
+                // 题目按点击顺序提前算出足够多的值。
+                // Each successful enchant draws a new seed from the player's
+                // random source; precompute enough values for the click sequence.
                 net.minecraft.util.RandomSource playerRandom =
                         net.minecraft.util.RandomSource.create(seed);
-                line.addProperty("nextSeed", playerRandom.nextInt());
+                com.google.gson.JsonArray seeds = new com.google.gson.JsonArray();
+                for (int i = 0; i < 32; i++) {
+                    seeds.add(playerRandom.nextInt());
+                }
+                line.addProperty("nextSeed", seeds.get(0).getAsInt());
+                line.add("nextSeeds", seeds);
             }
             line.add("container", stacks(grid));
             line.add("inventory", inventoryItems(inventory));
@@ -1617,13 +1630,13 @@ public final class MenuOracle {
             return allocate(FakeLevel.class);
         }
 
-        static FakeLevel create(int seed, boolean bookshelves, MapId mapId, byte scale, boolean locked) {
+        static FakeLevel create(int seed, int bookshelves, MapId mapId, byte scale, boolean locked) {
             FakeLevel level = allocate(FakeLevel.class);
             level.init(seed, bookshelves, mapId, scale, locked);
             return level;
         }
 
-        private void init(int seed, boolean bookshelves, MapId mapId, byte scale, boolean locked) {
+        private void init(int seed, int bookshelves, MapId mapId, byte scale, boolean locked) {
             this.blocks = new HashMap<>();
             this.maps = new HashMap<>();
             this.nextMapId = 1000;
@@ -1641,17 +1654,19 @@ public final class MenuOracle {
             set(Level.class, this, "isClientSide", false);
             set(Level.class, this, "isDebug", false);
             this.seed = seed;
-            if (bookshelves) {
-                for (int x = -2; x <= 2; x++) {
-                    for (int y = 0; y <= 1; y++) {
-                        for (int z = -2; z <= 2; z++) {
-                            if (Math.abs(x) != 2 && Math.abs(z) != 2) {
-                                continue;
-                            }
-                            BlockPos at = BlockPos.ZERO.offset(x, y, z);
-                            blocks.put(at, Blocks.BOOKSHELF.defaultBlockState());
-                            blocks.put(BlockPos.ZERO.offset(x / 2, y, z / 2), Blocks.AIR.defaultBlockState());
+            int placed = 0;
+            for (int x = -2; x <= 2 && placed < bookshelves; x++) {
+                for (int y = 0; y <= 1 && placed < bookshelves; y++) {
+                    for (int z = -2; z <= 2 && placed < bookshelves; z++) {
+                        if (Math.abs(x) != 2 && Math.abs(z) != 2) {
+                            continue;
                         }
+                        BlockPos at = BlockPos.ZERO.offset(x, y, z);
+                        // 官方要求书架与附魔台之间的格子是空气。
+                        // Official requires air between the shelf and the table.
+                        blocks.put(BlockPos.ZERO.offset(x / 2, y, z / 2), Blocks.AIR.defaultBlockState());
+                        blocks.put(at, Blocks.BOOKSHELF.defaultBlockState());
+                        placed += 1;
                     }
                 }
             }

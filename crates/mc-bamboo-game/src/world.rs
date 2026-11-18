@@ -40,7 +40,9 @@ use crate::{
     lectern, light_updates, menu, movement,
     pacing::{Pacer, WallTiming},
     player::shows_hat,
-    player_save::{game_mode_from_id, restore_inventory, runtime_player_data},
+    player_save::{
+        game_mode_from_id, restore_experience_seed, restore_inventory, runtime_player_data,
+    },
     profiler::{ChunkPhase, Metric, Phase},
     region::{JoinSettings, Region},
     save_session::{SaveCommand, SaveSession},
@@ -1878,6 +1880,20 @@ impl World {
         let origin = self.master.host.island_origin(target, spawn_chunk);
         let region = &mut self.islands.ensure(target, origin).region;
         let hashed_seed = region.global.hashed_seed();
+        // 官方 `Player.readAdditionalSaveData` 把 `XpP` / `XpLevel` / `XpTotal` 直接读进
+        // 玩家，再由 `placeNewPlayer` 发第一包 `set_experience`。
+        //
+        // Official `Player.readAdditionalSaveData` reads `XpP` / `XpLevel` /
+        // `XpTotal` into the player, then `placeNewPlayer` sends the first
+        // `set_experience` packet.
+        let join_experience = restored
+            .as_ref()
+            .map(|data| crate::experience::Experience {
+                level: data.xp_level,
+                total: data.xp_total,
+                progress: data.xp_p,
+            })
+            .unwrap_or_default();
         region.add_player(
             request,
             JoinSettings {
@@ -1887,6 +1903,7 @@ impl World {
                 hashed_seed,
                 permission_level,
                 is_op,
+                experience: join_experience,
             },
         );
         let now = region.now_millis();
@@ -1936,6 +1953,15 @@ impl World {
         // `JoinSettings.spawn` above (the save), and the chunk center from `player.chunk_pos()`.
         region.start_loading_chunks(id);
 
+        // `XpSeed == 0`（没有存档或存档里写 0）时按官方从玩家随机源抽一次种子；
+        // 保存过非 0 种子时不取随机数。两种情况的后续随机序列都和官方一致。
+        //
+        // Official draws a seed from the player's random source only when
+        // `XpSeed == 0` (no save, or a save with zero); a saved non-zero seed
+        // consumes no random number. Either way the following sequence matches.
+        if let Some(player) = region.players.get_mut(&id) {
+            restore_experience_seed(player, restored.as_ref());
+        }
         // 物品栏 / 末影箱 / 朝向等运行时字段在玩家建好之后写回去。
         if let Some(data) = &restored
             && let Some(player) = region.players.get_mut(&id)
@@ -2907,6 +2933,10 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     lectern::tick(region);
     chat::tick_spam_throttlers(region);
     crate::drops::tick_drop_throttle(region);
+    // 官方 `ServerPlayer.doTick`：总经验变了就给这名玩家补一包 `set_experience`。
+    //
+    // Official `ServerPlayer.doTick`: a changed total sends one `set_experience`.
+    crate::experience::sync_dirty(region);
     crate::command::admin::tick_idle(region);
     // 官方 `ServerPlayer.doTick` 的六个只读准则：岛算变了的值，主控写计分板。
     //
@@ -3101,6 +3131,9 @@ impl Schedule {
 #[cfg(test)]
 #[path = "world/tests/compute_pool_tests.rs"]
 mod compute_pool_tests;
+#[cfg(test)]
+#[path = "world/entity_player_tests.rs"]
+mod entity_player_tests;
 #[cfg(test)]
 #[path = "world/island_alone_tests.rs"]
 mod island_alone_tests;

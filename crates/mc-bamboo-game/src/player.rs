@@ -2,8 +2,8 @@
 //!
 //! 每个领域的状态放在各自模块的类型里，这里只把它们组合起来。
 
-use mc_bamboo_blocks::entity::JavaRandom;
-use mc_bamboo_core::{Aabb, ChunkPos, Vec3};
+use mc_bamboo_blocks::entity::{JavaRandom, ctx::PlayerView};
+use mc_bamboo_core::{Aabb, ChunkPos, Hand, Vec3};
 use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode, MODEL_PART_HAT};
 use uuid::Uuid;
 
@@ -12,6 +12,7 @@ use crate::{
     chunk_tracking::{ChunkTracker, MIN_VIEW_DISTANCE},
     container::EnderChest,
     entity_sync::EntitySync,
+    experience::Experience,
     inbound::PlayerId,
     interaction::{BlockPrediction, mining::Mining},
     inventory::Inventory,
@@ -83,6 +84,23 @@ pub(crate) struct Player {
     ///
     /// Vanilla `Player.enchantmentSeed`, drawn from `this.random` on join.
     pub(crate) enchantment_seed: i32,
+    /// 官方 `Player` 的经验等级、进度和总经验。
+    ///
+    /// Vanilla `Player`'s experience level, progress and total.
+    pub(crate) experience: Experience,
+    /// 官方 `Player.takeXpDelay`，每刻减 1，为 0 才能碰到经验球。
+    ///
+    /// Vanilla `Player.takeXpDelay`: decremented each tick; an orb is taken only at zero.
+    pub(crate) take_xp_delay: i32,
+    /// 官方 `Player.DATA_SCORE_ID`（存档里的 `Score`），`giveExperiencePoints` 也加它。
+    ///
+    /// Vanilla `Player.DATA_SCORE_ID` (the saved `Score`); `giveExperiencePoints` adds to it too.
+    pub(crate) score: i32,
+    /// 官方 `ServerPlayer.lastSentExp`，构造时是 `-99999999`；总经验变了才发包。
+    ///
+    /// Vanilla `ServerPlayer.lastSentExp`, `-99999999` on construction. A packet
+    /// goes out only when the total changes.
+    pub(crate) last_sent_exp: i32,
     /// 创造模式把物品拖出界面的 `TickThrottler(20, 1480)`。
     ///
     /// Creative drags out of the screen use `TickThrottler(20, 1480)`.
@@ -121,8 +139,14 @@ impl Player {
         client: ClientInformation,
         position: Vec3,
     ) -> Self {
-        let mut random = crate::drops::player_random(id);
-        let enchantment_seed = random.next_int();
+        let random = crate::drops::player_random(id);
+        // 官方 `Player` 构造函数把 `enchantmentSeed` 设为 0；只有读档时
+        // `XpSeed == 0` 才从 `this.random` 抽一次（见 player_save 的恢复函数）。
+        //
+        // Official `Player`'s constructor leaves `enchantmentSeed` at 0; only
+        // a load with `XpSeed == 0` draws once from `this.random`
+        // (see [`restore_experience_seed`]).
+        let enchantment_seed = 0;
         Self {
             id,
             uuid,
@@ -149,6 +173,10 @@ impl Player {
             spam: SpamThrottlers::default(),
             random,
             enchantment_seed,
+            experience: Experience::default(),
+            take_xp_delay: 0,
+            score: 0,
+            last_sent_exp: -99_999_999,
             drop_spam: 0,
             chat: PlayerChat::default(),
             respawn: None,
@@ -162,6 +190,63 @@ impl Player {
     /// Entity position, the feet.
     pub(crate) fn position(&self) -> Vec3 {
         self.position
+    }
+
+    /// 官方 `ServerPlayer.giveExperiencePoints`（0 是空操作，改动强制下一刻发包）。
+    ///
+    /// Official `ServerPlayer.giveExperiencePoints`: zero is a no-op; changes
+    /// force a packet on the next tick.
+    pub(crate) fn give_experience_points(&mut self, points: i32) {
+        if points == 0 {
+            return;
+        }
+        self.experience.give_points(points, &mut self.score);
+        self.last_sent_exp = -1;
+    }
+
+    /// 官方 `ServerPlayer.giveExperienceLevels`。
+    pub(crate) fn give_experience_levels(&mut self, levels: i32) {
+        if levels == 0 {
+            return;
+        }
+        self.experience.give_levels(levels);
+        self.last_sent_exp = -1;
+    }
+
+    /// 官方 `ServerPlayer.setExperiencePoints`。
+    pub(crate) fn set_experience_points(&mut self, points: i32) -> bool {
+        let changed = self.experience.set_points(points);
+        if changed {
+            self.last_sent_exp = -1;
+        }
+        changed
+    }
+
+    /// 官方 `ServerPlayer.setExperienceLevels`。
+    pub(crate) fn set_experience_levels(&mut self, level: i32) {
+        if level == self.experience.level {
+            return;
+        }
+        self.experience.set_level(level);
+        self.last_sent_exp = -1;
+    }
+
+    /// 官方 `Player.onEnchantmentPerformed`：扣等级并从玩家随机源换新种子，
+    /// 返回新种子（菜单的 `enchantmentSeed` DataSlot 要用）。
+    ///
+    /// Official `Player.onEnchantmentPerformed`: subtracts levels, draws a new
+    /// seed from the player's random source, and returns it for the menu's
+    /// `enchantmentSeed` DataSlot.
+    pub(crate) fn on_enchantment_performed(&mut self, levels: i32) -> i32 {
+        self.experience.level = self.experience.level.wrapping_sub(levels);
+        if self.experience.level < 0 {
+            self.experience.level = 0;
+            self.experience.progress = 0.0;
+            self.experience.total = 0;
+        }
+        self.enchantment_seed = self.random.next_int();
+        self.last_sent_exp = -1;
+        self.enchantment_seed
     }
 
     /// 改位置，网格跟着更新。广播靠网格找附近的玩家，绕过这里改位置会让玩家漏收包。
@@ -196,6 +281,34 @@ impl Player {
         }
     }
 
+    /// 实体逻辑看到的玩家视图，对应官方 `Level.players()` 里的一个 `Player`。
+    /// 这里不筛选旁观者或死亡状态：`getNearestPlayer` 的谓词、
+    /// `TargetingConditions` 和 `ExperienceOrb.followNearbyPlayer` 各自按官方条件过滤。
+    ///
+    /// The player view seen by entity logic, one entry of `Level.players()`.
+    /// Spectators and dead players are not filtered here: `getNearestPlayer`'s
+    /// predicate, `TargetingConditions` and `ExperienceOrb.followNearbyPlayer`
+    /// each apply the official conditions themselves.
+    pub(crate) fn view(&self, id: PlayerId) -> PlayerView {
+        let main = self.inventory.held(Hand::Main);
+        let off = self.inventory.held(Hand::Off);
+        PlayerView {
+            uid: id.0,
+            position: self.position,
+            eye_height: self.eye_height() as f32,
+            // Bamboo 还没有玩家生命和药水效果。
+            // Bamboo has no player health or potion effects yet.
+            alive: true,
+            spectator: self.game_mode == GameMode::Spectator,
+            creative: self.game_mode == GameMode::Creative,
+            sneaking: self.sync.is_crouching(),
+            invisible: false,
+            armor_cover: 0.0,
+            main_hand: if main.is_empty() { 0 } else { main.item },
+            off_hand: if off.is_empty() { 0 } else { off.item },
+        }
+    }
+
     /// 碰撞盒，世界坐标。
     pub(crate) fn bounding_box(&self) -> Aabb {
         let height = if self.sync.is_crouching() {
@@ -213,6 +326,21 @@ impl Player {
             z + HALF_WIDTH,
         )
     }
+}
+
+/// 按 `PlayerId` 升序列出本岛的玩家，和官方 `ServerLevel.players()` 的进服顺序一致：
+/// 实体 ID 单调递增，进服时追加到表尾，离开时删掉。
+///
+/// Lists this island's players by ascending `PlayerId`, matching the join order
+/// of `ServerLevel.players()`: entity ids grow monotonically, joins append and
+/// leaves remove.
+pub(crate) fn player_views(
+    players: &std::collections::BTreeMap<PlayerId, Player>,
+) -> Vec<PlayerView> {
+    players
+        .iter()
+        .map(|(id, player)| player.view(*id))
+        .collect()
 }
 
 /// 客户端设置里帽子层是不是打开的。

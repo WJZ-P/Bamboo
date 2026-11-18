@@ -109,6 +109,13 @@ pub(crate) fn spawn_throw(region: &mut Region, id: PlayerId, stack: ItemStack) {
 ///
 /// Items a player is touching are picked up before entity ticks.
 pub(crate) fn pickup_before_entities(region: &mut Region) {
+    // 官方 `Player.tick` 先减拾取冷却，实体再碰玩家。
+    // Vanilla `Player.tick` decrements the pickup cooldown before entities touch players.
+    for player in region.players.values_mut() {
+        if player.take_xp_delay > 0 {
+            player.take_xp_delay -= 1;
+        }
+    }
     let players: Vec<PlayerId> = region.players.keys().copied().collect();
     for id in players {
         pickup_for(region, id);
@@ -136,9 +143,17 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
     // applies the same `intersects(reach)` test and visits in ascending uid
     // order, giving the same candidate list and order as the old `iter()`.
     let mut ids = Vec::new();
-    region
-        .entities
-        .for_each_in(reach, &mut |public| ids.push(public.uid));
+    let mut orbs = Vec::new();
+    region.entities.for_each_in(reach, &mut |public| {
+        if matches!(
+            public.kind,
+            mc_bamboo_blocks::entity::KindPublic::ExperienceOrb { .. }
+        ) {
+            orbs.push(public.uid);
+        } else {
+            ids.push(public.uid);
+        }
+    });
     for entity_id in ids {
         let Some(entity) = region.entities.get(entity_id) else {
             continue;
@@ -178,6 +193,20 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
         entity_tracking::broadcast_take(region, entity_id, id, shown);
         // `discard` 只打上标记。实体还留在这一拍的名单里，轮到它时不再 tick，然后才删掉。
         // `discard` only marks the entity. It stays on this tick's list, skips its tick, then goes.
+    }
+    // 官方 `Player.aiStep` 把经验球单独收集起来，最后只碰一颗：
+    // `Util.getRandom(list, this.random)` 在名单非空时取一次 `nextInt(size)`。
+    // 其它实体（掉落物）是逐个碰的，上面已经按 uid 升序做完。
+    //
+    // Official `Player.aiStep` collects orbs separately and touches exactly one
+    // at the end: `Util.getRandom(list, this.random)` draws one `nextInt(size)`
+    // when the list is non-empty. Other entities were touched above in uid order.
+    if !orbs.is_empty() {
+        let Some(player) = region.players.get_mut(&id) else {
+            return;
+        };
+        let chosen = orbs[player.random.next_int_bounded(orbs.len() as i32) as usize];
+        crate::experience_pickup::pickup_orb(region, id, chosen);
     }
 }
 

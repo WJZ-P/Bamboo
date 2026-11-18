@@ -359,3 +359,104 @@ pub fn enchantment_def(id: i32) -> Option<&'static EnchantmentDef> {
 pub fn enchantment_defs_all() -> &'static [EnchantmentDef] {
     enchantment_defs()
 }
+
+/// 这个附魔有没有 `minecraft:repair_with_xp` 效果（官方
+/// `EnchantmentHelper.getRandomItemWith` 的候选条件）。
+///
+/// Whether an enchantment has the `minecraft:repair_with_xp` effect, the
+/// official `EnchantmentHelper.getRandomItemWith` candidate condition.
+pub fn has_repair_with_xp(enchantment: i32) -> bool {
+    static PRESENT: OnceLock<Vec<bool>> = OnceLock::new();
+    let flags = PRESENT.get_or_init(|| {
+        loot::ENCHANTMENTS
+            .iter()
+            .map(|(_, raw)| {
+                let Ok(value) = serde_json::from_str::<Value>(raw) else {
+                    return false;
+                };
+                value
+                    .get("effects")
+                    .and_then(|effects| effects.get("minecraft:repair_with_xp"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|effects| !effects.is_empty())
+            })
+            .collect()
+    });
+    usize::try_from(enchantment)
+        .ok()
+        .and_then(|index| flags.get(index))
+        .copied()
+        .unwrap_or(false)
+}
+
+/// `Enchantment.modifyDurabilityToRepairFromXp`：把附魔的
+/// `minecraft:repair_with_xp` 效果按等级乘到经验球的值上。数据包里目前只有
+/// `minecraft:mending` 的一条 `minecraft:multiply`，因子 2.0；没有这个效果时返回 1。
+///
+/// `Enchantment.modifyDurabilityToRepairFromXp`: the product of the
+/// enchantment's `minecraft:repair_with_xp` `multiply` effects, applied once
+/// per level. Only `minecraft:mending` has one (factor 2.0); other
+/// enchantments return 1.
+pub fn repair_with_xp_factor(enchantment: i32, level: i32) -> f32 {
+    static FACTORS: OnceLock<Vec<f32>> = OnceLock::new();
+    let factors = FACTORS.get_or_init(|| {
+        loot::ENCHANTMENTS
+            .iter()
+            .map(|(_, raw)| {
+                let mut product = 1.0_f32;
+                let Ok(value) = serde_json::from_str::<Value>(raw) else {
+                    return product;
+                };
+                let Some(effects) = value
+                    .get("effects")
+                    .and_then(|v| v.get("minecraft:repair_with_xp"))
+                    .and_then(Value::as_array)
+                else {
+                    return product;
+                };
+                for entry in effects {
+                    if entry
+                        .get("effect")
+                        .and_then(|v| v.get("type"))
+                        .and_then(Value::as_str)
+                        != Some("minecraft:multiply")
+                    {
+                        continue;
+                    }
+                    if let Some(factor) = entry
+                        .get("effect")
+                        .and_then(|v| v.get("factor"))
+                        .and_then(Value::as_f64)
+                    {
+                        product *= factor as f32;
+                    }
+                }
+                product
+            })
+            .collect()
+    });
+    let base = usize::try_from(enchantment)
+        .ok()
+        .and_then(|index| factors.get(index))
+        .copied()
+        .unwrap_or(1.0);
+    // 每个等级各跑一次 `runIterationOnItem`，`multiply` 逐次累乘。
+    // `runIterationOnItem` runs once per level, multiplying each time.
+    let mut result = 1.0_f32;
+    for _ in 0..level.max(0) {
+        result *= base;
+    }
+    result
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+
+    #[test]
+    fn mending_has_repair_with_xp() {
+        let id = enchantment_id("minecraft:mending").unwrap();
+        assert!(has_repair_with_xp(id), "{}", enchantment_name(id).unwrap());
+        assert_eq!(repair_with_xp_factor(id, 1), 2.0);
+    }
+}

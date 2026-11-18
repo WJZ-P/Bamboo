@@ -126,6 +126,7 @@ import net.minecraft.network.protocol.game.ClientboundBossEventPacket;
 import net.minecraft.network.protocol.game.ClientboundResetScorePacket;
 import net.minecraft.network.protocol.game.ClientboundSetDisplayObjectivePacket;
 import net.minecraft.network.protocol.game.ClientboundSetObjectivePacket;
+import net.minecraft.network.protocol.game.ClientboundSetExperiencePacket;
 import net.minecraft.network.protocol.game.ClientboundSetPlayerTeamPacket;
 import net.minecraft.network.protocol.game.ClientboundSetScorePacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
@@ -449,6 +450,7 @@ public final class Probe {
             "handleSetEntityData",
             "handleSetEntityMotion",
             "handleSetEquipment",
+            "handleSetExperience",
             "handleSetHeldSlot",
             "handleSetPlayerInventory",
             "handleSetSpawn",
@@ -2772,6 +2774,46 @@ public final class Probe {
             actor.send(new ServerboundChatCommandPacket("gamerule random_tick_speed 3"));
             await("gamerules: random tick speed is restored",
                     () -> containsText(actor, "Game rule random_tick_speed is now set to 3"));
+
+            // `/experience` 和重定向 `/xp`：语法树、反馈文本、`set_experience` 包。
+            // `/experience` and its `/xp` redirect: tree, feedback and the
+            // `set_experience` packet.
+            String self = actor.player;
+            check("experience: add points parses", actor.commandParses("experience add " + self + " 7 points"));
+            check("experience: xp add levels parses", actor.commandParses("xp add " + self + " 2 levels"));
+            check("experience: set levels parses", actor.commandParses("experience set " + self + " 3 levels"));
+            check("experience: xp set points parses", actor.commandParses("xp set " + self + " 5 points"));
+            check("experience: query points parses", actor.commandParses("experience query " + self + " points"));
+            check("experience: xp query levels parses", actor.commandParses("xp query " + self + " levels"));
+            check("experience: bare amount defaults to points", actor.commandParses("experience add " + self + " 7"));
+            check("experience: query needs a suffix", !actor.commandParses("xp query " + self));
+            check("experience: set_experience arrived on join",
+                    actor.experiencePackets > 0 && actor.experienceLevel == 0
+                            && actor.totalExperience == 0 && actor.experienceProgress == 0.0f);
+            actor.send(new ServerboundChatCommandPacket("xp add @s 7 points"));
+            await("experience: add points is announced",
+                    () -> containsText(actor, "Gave 7 experience points to " + actor.player));
+            await("experience: add points updates the client",
+                    () -> actor.experienceLevel == 1 && actor.totalExperience == 7);
+            actor.send(new ServerboundChatCommandPacket("experience query @s levels"));
+            await("experience: query levels is announced",
+                    () -> containsText(actor, actor.player + " has 1 experience levels"));
+            actor.send(new ServerboundChatCommandPacket("xp set @s 3 levels"));
+            await("experience: set levels is announced",
+                    () -> containsText(actor, "Set 3 experience levels on " + actor.player));
+            await("experience: set levels updates the client", () -> actor.experienceLevel == 3);
+            actor.send(new ServerboundChatCommandPacket("experience query @s points"));
+            await("experience: query points is announced",
+                    () -> containsText(actor, actor.player + " has 0 experience points"));
+            actor.send(new ServerboundChatCommandPacket("xp add @s 10"));
+            await("experience: add points without a suffix is points",
+                    () -> containsText(actor, "Gave 10 experience points to " + actor.player));
+            await("experience: added points update total and progress",
+                    () -> actor.totalExperience == 17 && actor.experienceLevel == 3
+                            && actor.experienceProgress > 0.0f);
+            actor.send(new ServerboundChatCommandPacket("xp set @s 20 points"));
+            await("experience: set points above the level maximum is refused",
+                    () -> containsText(actor, "Cannot set experience points above the maximum"));
         }
 
         /** 没有权限的客户端：界面要不到规则，F3+F4 和 `/gamerule` 都被拒绝，值不变。 */
@@ -3063,6 +3105,11 @@ public final class Probe {
         private boolean permissionEventChecked;
         private boolean abilitiesChecked;
         private boolean attributesChecked;
+        /** `/xp` 对拍：客户端最后一次收到的经验三字段，以及累计收到过几包。 */
+        private volatile float experienceProgress;
+        private volatile int experienceLevel;
+        private volatile int totalExperience;
+        private volatile int experiencePackets;
         private boolean timeChecked;
         private boolean loadEventChecked;
         final Map<UUID, String> tab = new HashMap<>();
@@ -3583,6 +3630,8 @@ public final class Probe {
             handlers.put("handleContainerClose", value -> onContainerClose((ClientboundContainerClosePacket) value));
             handlers.put("handleContainerSetSlot", value -> onSetSlot((ClientboundContainerSetSlotPacket) value));
             handlers.put("handleSetHeldSlot", value -> heldSlot = ((ClientboundSetHeldSlotPacket) value).slot());
+            handlers.put("handleSetExperience",
+                    value -> onExperience((ClientboundSetExperiencePacket) value));
             handlers.put("handleSystemChat", value -> onSystemChat((ClientboundSystemChatPacket) value));
             handlers.put("handleDisguisedChat", value -> onDisguisedChat((ClientboundDisguisedChatPacket) value));
             handlers.put("handlePlayerChat", value -> onPlayerChat((ClientboundPlayerChatPacket) value));
@@ -3685,6 +3734,13 @@ public final class Probe {
                 abilitiesChecked = true;
                 check("play: creative abilities", packet.canFly() && packet.canInstabuild() && packet.isInvulnerable());
             }
+        }
+
+        private void onExperience(ClientboundSetExperiencePacket packet) {
+            experienceProgress = packet.getExperienceProgress();
+            experienceLevel = packet.getExperienceLevel();
+            totalExperience = packet.getTotalExperience();
+            experiencePackets += 1;
         }
 
         private void onPosition(ClientboundPlayerPositionPacket packet) {

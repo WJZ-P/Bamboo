@@ -336,6 +336,13 @@ pub(crate) struct Station {
     quickcraft_slots: Vec<usize>,
     suppress: bool,
     creative: bool,
+    /// 官方 `Player.experienceLevel`：附魔台 / 铁砧的等级判定和扣等级都读它。
+    /// 重放题由 `ReplayWorld` 给；真实世界每次点击前从 `Player` 刷新。
+    ///
+    /// Official `Player.experienceLevel`: enchantment/anvil level checks and
+    /// the level cost read it. Replays get it from `ReplayWorld`; a real world
+    /// refreshes it from `Player` before every click.
+    experience_level: i32,
     selected: u8,
     /// 切石机上次看到的输入物品。只比物品种类，不比数量。
     ///
@@ -362,14 +369,20 @@ pub(crate) struct Station {
     ///
     /// Grindstone experience totals for this click, before the world random draws.
     awards: Vec<i32>,
+    /// 这次点击取出铁砧结果要扣的经验等级（创造模式是 0）。
+    ///
+    /// Experience levels to charge for the anvil result taken by this click
+    /// (zero in creative mode).
+    anvil_cost: i32,
     /// 菜单是在真实世界上打开的。重放不取砂轮的经验随机数。
     ///
     /// The menu was opened on a real world. Replays do not draw grindstone experience.
     in_world: bool,
     /// 重放题有可用的假世界（`access.execute` 会执行）。
     replay_world: bool,
-    /// 重放题里附魔成功后官方换出的新种子。
-    replay_next_seed: Option<i32>,
+    /// 重放题里每次成功附魔依次换出的新种子。
+    replay_next_seeds: Vec<i32>,
+    replay_seed_index: usize,
     /// 铁砧改名框里当前的名字。`None` 是还没发过 `rename_item`。
     ///
     /// The anvil name field. `None` means no `rename_item` has arrived.
@@ -427,6 +440,7 @@ impl Station {
             quickcraft_slots: Vec::new(),
             suppress: false,
             creative: false,
+            experience_level: 0,
             selected: 0,
             stone_input: ItemStack::empty(),
             stone_recipes: Vec::new(),
@@ -437,9 +451,11 @@ impl Station {
             awards: Vec::new(),
             in_world: false,
             replay_world: false,
-            replay_next_seed: None,
+            replay_next_seeds: Vec::new(),
+            replay_seed_index: 0,
             item_name: None,
             anvil_outcome: anvil::Outcome::default(),
+            anvil_cost: 0,
             menu_random: LegacyRandom::new(0),
             bookshelves: 0,
             map_scale: 0,
@@ -631,8 +647,11 @@ impl Station {
             return false;
         }
         if self.kind == Kind::Anvil && matches!(self.role(index), Role::AnvilResult) {
-            // Bamboo 没有经验系统：生存模式按 0 级处理。
-            return anvil::may_pickup(self.data.first().copied().unwrap_or(0), self.creative, 0);
+            return anvil::may_pickup(
+                self.data.first().copied().unwrap_or(0),
+                self.creative,
+                self.experience_level,
+            );
         }
         true
     }
@@ -1701,9 +1720,20 @@ impl Station {
             if self.replay_world {
                 // 重放的假世界执行官方附魔 lambda；新种子由题目给出。
                 let seed = self
-                    .replay_next_seed
+                    .replay_next_seeds
+                    .get(self.replay_seed_index)
+                    .copied()
                     .unwrap_or_else(|| self.data.get(enchantment::SEED_SLOT).copied().unwrap_or(0));
-                return self.click_enchantment(button, seed);
+                self.replay_seed_index += 1;
+                let done = self.click_enchantment(button, seed);
+                if done {
+                    // 官方 `onEnchantmentPerformed` 扣 `button + 1` 级，之后的
+                    // 按钮点击会看到更低的等级。
+                    // Official `onEnchantmentPerformed` subtracts `button + 1`
+                    // levels; later button clicks see the lower level.
+                    self.experience_level = (self.experience_level - (button + 1)).max(0);
+                }
+                return done;
             }
             return false;
         }
@@ -1944,8 +1974,12 @@ impl Station {
         self.set_by_player(0, ItemStack::empty());
         if self.in_world {
             self.effects.push(WorldEffect::Anvil);
+            // 官方 `AnvilMenu.onTake` 只在非创造模式扣 `cost` 级。
+            // Official `AnvilMenu.onTake` charges `cost` levels outside creative.
+            if !self.creative {
+                self.anvil_cost = cost;
+            }
         }
-        let _ = cost;
     }
 
     /// `AnvilMenu.setItemName`：先改结果槽的组件，再重算结果。
@@ -2014,13 +2048,46 @@ impl Station {
         self.broadcast();
     }
 
+    /// 官方 `clickMenuButton` 在 `access.execute` 里的前置判定：等级够不够、
+    /// 青金石够不够，以及 `getEnchantmentList` 会不会返回空表。空表时官方
+    /// 不调用 `onEnchantmentPerformed`，玩家随机源不取数，种子也不换。
+    /// 这里重算一次菜单随机源（每次都会 `setSeed`，所以没有额外副作用）。
+    ///
+    /// Official `clickMenuButton`'s pre-check inside `access.execute`: level,
+    /// lapis, and whether `getEnchantmentList` is non-empty. An empty list
+    /// skips `onEnchantmentPerformed`, so the player random source is not
+    /// consumed and the seed does not change. Recomputing here is harmless
+    /// because the menu random is reseeded on each call.
+    pub(crate) fn enchantment_click_possible(&self, button: i32) -> bool {
+        let item = &self.slots[0];
+        let lapis = &self.slots[1];
+        if !enchantment::can_click(
+            button,
+            &self.data,
+            item,
+            lapis,
+            self.creative,
+            self.experience_level,
+        ) {
+            return false;
+        }
+        let random = LegacyRandom::new(0);
+        random.set_seed(i64::from(self.data[enchantment::SEED_SLOT]) + i64::from(button));
+        !enchantment::select(&random, item, button, self.data[button as usize]).is_empty()
+    }
+
     /// `EnchantmentMenu.clickMenuButton` 的 `access.execute` 部分。
     fn click_enchantment(&mut self, button: i32, seed: i32) -> bool {
         let item = self.slots[0].clone();
         let lapis = self.slots[1].clone();
-        // 官方的假玩家 `experienceLevel` 固定为 0；Bamboo 真实世界也按 0 级。
-        let ok = enchantment::can_click(button, &self.data, &item, &lapis, self.creative, 0);
-        if !ok {
+        if !enchantment::can_click(
+            button,
+            &self.data,
+            &item,
+            &lapis,
+            self.creative,
+            self.experience_level,
+        ) {
             return false;
         }
         let level = self.data[button as usize];
@@ -2432,7 +2499,13 @@ pub(crate) fn prepare_replay(
         world.map_locked,
         world.bookshelves,
     );
-    station.replay_next_seed = world.next_seed;
+    station.replay_next_seeds = world.next_seeds;
+    if station.replay_next_seeds.is_empty()
+        && let Some(seed) = world.next_seed
+    {
+        station.replay_next_seeds.push(seed);
+    }
+    station.experience_level = world.experience_level;
     let mut slots = vec![ItemStack::empty(); 46];
     for (index, stack) in inventory.iter().enumerate().take(slots.len()) {
         slots[index] = stack.clone();
@@ -2685,7 +2758,7 @@ fn pull_machine(region: &mut Region, station: &mut Station) {
     }
 }
 
-fn flush_machine(region: &mut Region, station: &mut Station) {
+fn flush_machine(region: &mut Region, id: PlayerId, station: &mut Station) {
     if station.kind == Kind::Crafter {
         flush_crafter(region, station);
         return;
@@ -2706,6 +2779,20 @@ fn flush_machine(region: &mut Region, station: &mut Station) {
             let stacks = station.slots[..3].to_vec();
             let touched =
                 set[..3].iter().any(|flag| *flag) || content[..3].iter().any(|flag| *flag);
+            // 官方 `awardUsedRecipesAndPopExperience(player)` 用玩家脚底的位置生成球。
+            // Official `awardUsedRecipesAndPopExperience(player)` spawns orbs at the
+            // player's feet position.
+            let position = region
+                .players
+                .get(&id)
+                .map(|player| player.position())
+                .unwrap_or_else(|| {
+                    Vec3::new(
+                        f64::from(pos.x) + 0.5,
+                        f64::from(pos.y) + 0.5,
+                        f64::from(pos.z) + 0.5,
+                    )
+                });
             let (mut level, ticks) = region.block_level();
             let mut world = World::new(&mut level, ticks);
             let _ = world.with_block_entity::<FurnaceEntity, _>(pos, |entity, world| {
@@ -2717,7 +2804,7 @@ fn flush_machine(region: &mut Region, station: &mut Station) {
                     }
                 }
                 for _ in 0..awards {
-                    entity.award_experience(world);
+                    entity.award_experience(world, position);
                 }
             });
             // 菜单格子的 `setChanged`。原料格的 `setItem` 自己也会通知，这里内容已经是最终的，合并成一次。
@@ -2859,10 +2946,18 @@ fn roll_grindstone(region: &mut Region, station: &mut Station) {
     let effects = {
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
+        let center = Vec3::new(
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        );
         for amount in std::mem::take(&mut station.awards) {
-            grindstone::award(world.random(), amount);
-            // 官方在经验取完之后发 `levelEvent(1042)`。这一下不取随机数。
-            // Vanilla sends `levelEvent(1042)` after the experience draws. This one draws nothing.
+            // 官方先 `getExperienceAmount`（一次 `nextInt`），再在方块中心调
+            // `ExperienceOrb.award`，最后发 `levelEvent(1042)`。
+            // Official draws `getExperienceAmount`'s `nextInt` first, then calls
+            // `ExperienceOrb.award` at the block centre, then sends `levelEvent(1042)`.
+            let reward = grindstone::experience_amount(world.random(), amount);
+            mc_bamboo_blocks::entity::award(&mut world, center, reward);
             world.level_event(1042, pos, 0);
         }
         world.drain_effects()
@@ -2871,17 +2966,19 @@ fn roll_grindstone(region: &mut Region, station: &mut Station) {
 }
 
 fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet: &ClickPacket) {
-    let (creative, selected, inv) = {
+    let (creative, experience_level, selected, inv) = {
         let Some(player) = region.players.get(&id) else {
             return;
         };
         (
             player.game_mode == GameMode::Creative,
+            player.experience.level,
             player.inventory.selected,
             player.inventory.slots.clone(),
         )
     };
     station.creative = creative;
+    station.experience_level = experience_level;
     station.load_player(&inv, selected);
     if station.kind == Kind::Enchantment {
         station.bookshelves = refresh_bookshelves(region, station.pos);
@@ -2897,12 +2994,18 @@ fn apply_click(region: &mut Region, id: PlayerId, station: &mut Station, packet:
         station.receive(*slot, hash.clone());
     }
     station.remote_carried.receive(packet.carried.clone());
+    let anvil_cost = std::mem::take(&mut station.anvil_cost);
+    if anvil_cost > 0
+        && let Some(player) = region.players.get_mut(&id)
+    {
+        player.give_experience_levels(-anvil_cost);
+    }
     roll_grindstone(region, station);
     roll_world_effects(region, id, station);
     if let Some(player) = region.players.get_mut(&id) {
         station.write_player(&mut player.inventory);
     }
-    flush_machine(region, station);
+    flush_machine(region, id, station);
     pull_machine(region, station);
     if packet.state_id != before {
         station.send_all();
@@ -2928,19 +3031,23 @@ pub(crate) fn try_open(region: &mut Region, id: PlayerId, pos: BlockPos) -> bool
     if region.menus.contains_key(&id) {
         super::close_menu(region, id);
     }
-    let Some((container_id, creative, selected, inv)) = region.players.get_mut(&id).map(|player| {
-        player.container_counter = player.container_counter % 100 + 1;
-        (
-            player.container_counter,
-            player.game_mode == GameMode::Creative,
-            player.inventory.selected,
-            player.inventory.slots.clone(),
-        )
-    }) else {
+    let Some((container_id, creative, experience_level, selected, inv)) =
+        region.players.get_mut(&id).map(|player| {
+            player.container_counter = player.container_counter % 100 + 1;
+            (
+                player.container_counter,
+                player.game_mode == GameMode::Creative,
+                player.experience.level,
+                player.inventory.selected,
+                player.inventory.slots.clone(),
+            )
+        })
+    else {
         return false;
     };
     let mut station = Station::create(kind, container_id, pos);
     station.creative = creative;
+    station.experience_level = experience_level;
     station.in_world = true;
     station.load_player(&inv, selected);
     if kind == Kind::Enchantment {
@@ -3155,18 +3262,28 @@ pub(crate) fn on_button(region: &mut Region, id: PlayerId, container_id: i32, bu
     if let Some(station) = menu.station.as_mut() {
         if station.kind == Kind::Enchantment {
             station.bookshelves = refresh_bookshelves(region, station.pos);
-            let mut seed = station
-                .data
-                .get(enchantment::SEED_SLOT)
-                .copied()
-                .unwrap_or(0);
-            if let Some(player) = region.players.get_mut(&id) {
-                // 官方 `onEnchantmentPerformed` 从玩家自己的随机源换新种子。
-                seed = player.random.next_int();
-                player.enchantment_seed = seed;
+            if let Some(player) = region.players.get(&id) {
+                station.experience_level = player.experience.level;
             }
-            if station.click_enchantment(button, seed) {
-                station.broadcast();
+            // 官方只在 `getEnchantmentList` 非空时才 `onEnchantmentPerformed`：
+            // 扣等级、从玩家随机源换新种子，再把 DataSlot 设成新种子。
+            // Official calls `onEnchantmentPerformed` only when the list is
+            // non-empty: deduct levels, draw a new seed, then set the DataSlot.
+            if station.enchantment_click_possible(button) {
+                let seed = region
+                    .players
+                    .get_mut(&id)
+                    .map(|player| player.on_enchantment_performed(button + 1))
+                    .unwrap_or_else(|| {
+                        station
+                            .data
+                            .get(enchantment::SEED_SLOT)
+                            .copied()
+                            .unwrap_or(0)
+                    });
+                if station.click_enchantment(button, seed) {
+                    station.broadcast();
+                }
             }
             roll_world_effects(region, id, station);
         } else if station.click_button(button) {

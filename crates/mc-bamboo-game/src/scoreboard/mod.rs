@@ -144,19 +144,29 @@ impl Team {
     }
 }
 
-/// 官方 `ServerPlayer.doTick` 的六个只读准则和 Bamboo 用的玩家初值，顺序是 health、
-/// food、air、armor、xp、level。
+/// 官方 `ServerPlayer.doTick` 的六个只读准则，顺序是 health、food、air、armor、
+/// xp、level。前四项 Bamboo 还没有对应状态，用官方初值；后两项跟着玩家经验走。
+/// 官方对这两项取的是 `Mth.ceil((float) value)`，整数转成 float 再取整还是原值。
 ///
-/// The six read-only criteria from official `ServerPlayer.doTick` with the player
-/// defaults Bamboo uses: health, food, air, armor, xp, level.
-const CRITERIA_VALUES: [(&str, i32); 6] = [
-    ("health", 20),
-    ("food", 20),
-    ("air", 300),
-    ("armor", 0),
-    ("xp", 0),
-    ("level", 0),
-];
+/// The six read-only criteria from official `ServerPlayer.doTick`: health, food,
+/// air, armor, xp, level. The first four still use the official defaults; the
+/// last two follow the player's experience. Official applies
+/// `Mth.ceil((float) value)`, which is the same integer for these int fields.
+/// 六个准则的名字，顺序和 `ServerPlayer.doTick` 一致。
+///
+/// The six criteria names in `ServerPlayer.doTick` order.
+pub(crate) const CRITERIA_NAMES: [&str; 6] = ["health", "food", "air", "armor", "xp", "level"];
+
+fn criteria_values(player: &crate::player::Player) -> [(&'static str, i32); 6] {
+    [
+        (CRITERIA_NAMES[0], 20),
+        (CRITERIA_NAMES[1], 20),
+        (CRITERIA_NAMES[2], 300),
+        (CRITERIA_NAMES[3], 0),
+        (CRITERIA_NAMES[4], player.experience.total),
+        (CRITERIA_NAMES[5], player.experience.level),
+    ]
+}
 
 /// 官方 `ServerPlayer` 六个 `lastRecorded*` 字段的构造函数初值（`Float.MIN_VALUE` 和
 /// `Integer.MIN_VALUE`），所以进服后的第一刻每个准则都会写一次。
@@ -836,7 +846,7 @@ impl Scoreboard {
     /// scoreboard need not be taken mutably when none does.
     pub(crate) fn tracks_criteria(&self, changes: &[(usize, i32)]) -> bool {
         changes.iter().any(|(index, _)| {
-            let criteria = CRITERIA_VALUES[*index].0;
+            let criteria = CRITERIA_NAMES[*index];
             self.objectives
                 .iter()
                 .any(|objective| objective.criteria == criteria)
@@ -864,7 +874,7 @@ impl Scoreboard {
             display: Some(self.format_player_name(name)),
         };
         for (index, value) in changes {
-            let criteria = CRITERIA_VALUES[*index].0;
+            let criteria = CRITERIA_NAMES[*index];
             let objectives: Vec<String> = self
                 .objectives
                 .iter()
@@ -1036,13 +1046,12 @@ impl Scoreboard {
 /// The island side of the six read-only criteria from official
 /// `ServerPlayer.doTick`: compare each player's `lastRecorded*` in player-table
 /// order, record the new values, and hand the changes to the master to write
-/// the scoreboard. Bamboo has no health, hunger, air, armor or experience system,
-/// so each uses the player's default value: written once on the first tick after
-/// join and never again.
+/// the scoreboard. `xp` / `level` follow the live experience.
 pub(crate) fn tick_criteria(port: &mut GlobalPort<'_>, region: &mut Region) {
     let mut effects = Vec::new();
     for player in region.players.values_mut() {
-        let changes: Vec<(usize, i32)> = CRITERIA_VALUES
+        let values = criteria_values(player);
+        let changes: Vec<(usize, i32)> = values
             .iter()
             .enumerate()
             .filter(|(index, (_, value))| player.recorded_criteria[*index] != *value)

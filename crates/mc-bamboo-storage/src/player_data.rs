@@ -276,7 +276,7 @@ impl PlayerData {
             Tag::List(
                 self.position
                     .iter()
-                    .map(|value| Tag::Double(*value))
+                    .map(|value| zero_double(*value))
                     .collect(),
             ),
         );
@@ -286,7 +286,7 @@ impl PlayerData {
             Tag::List(
                 self.motion
                     .iter()
-                    .map(|value| Tag::Double(*value))
+                    .map(|value| zero_double(*value))
                     .collect(),
             ),
         );
@@ -296,11 +296,11 @@ impl PlayerData {
             Tag::List(
                 self.rotation
                     .iter()
-                    .map(|value| Tag::Float(*value))
+                    .map(|value| zero_float(*value))
                     .collect(),
             ),
         );
-        push(&mut root, "fall_distance", Tag::Double(self.fall_distance));
+        push(&mut root, "fall_distance", zero_double(self.fall_distance));
         push(&mut root, "Fire", Tag::Short(self.fire));
         push(&mut root, "Air", Tag::Short(self.air));
         push(&mut root, "OnGround", Tag::Byte(i8::from(self.on_ground)));
@@ -311,10 +311,10 @@ impl PlayerData {
         );
         push(&mut root, "PortalCooldown", Tag::Int(self.portal_cooldown));
         push(&mut root, "UUID", Tag::IntArray(self.uuid.to_vec()));
-        push(&mut root, "Health", Tag::Float(self.health));
+        push(&mut root, "Health", zero_float(self.health));
         push(&mut root, "HurtTime", Tag::Short(self.hurt_time));
         push(&mut root, "DeathTime", Tag::Short(self.death_time));
-        push(&mut root, "AbsorptionAmount", Tag::Float(self.absorption));
+        push(&mut root, "AbsorptionAmount", zero_float(self.absorption));
         push(
             &mut root,
             "FallFlying",
@@ -329,7 +329,7 @@ impl PlayerData {
             Tag::Int(self.selected_item_slot),
         );
         push(&mut root, "SleepTimer", Tag::Short(self.sleep_timer));
-        push(&mut root, "XpP", Tag::Float(self.xp_p));
+        push(&mut root, "XpP", zero_float(self.xp_p));
         push(&mut root, "XpLevel", Tag::Int(self.xp_level));
         push(&mut root, "XpTotal", Tag::Int(self.xp_total));
         push(&mut root, "XpSeed", Tag::Int(self.xp_seed));
@@ -339,12 +339,12 @@ impl PlayerData {
         push(
             &mut root,
             "foodSaturationLevel",
-            Tag::Float(self.food_saturation),
+            zero_float(self.food_saturation),
         );
         push(
             &mut root,
             "foodExhaustionLevel",
-            Tag::Float(self.food_exhaustion),
+            zero_float(self.food_exhaustion),
         );
         push(&mut root, "abilities", self.abilities_tag());
         if let Ok(items) = slots::encode_list(&self.ender_items) {
@@ -463,8 +463,8 @@ impl PlayerData {
             ("mayfly".to_owned(), Tag::Byte(i8::from(a.may_fly))),
             ("instabuild".to_owned(), Tag::Byte(i8::from(a.instabuild))),
             ("mayBuild".to_owned(), Tag::Byte(i8::from(a.may_build))),
-            ("flySpeed".to_owned(), Tag::Float(a.fly_speed)),
-            ("walkSpeed".to_owned(), Tag::Float(a.walk_speed)),
+            ("flySpeed".to_owned(), zero_float(a.fly_speed)),
+            ("walkSpeed".to_owned(), zero_float(a.walk_speed)),
         ];
         for (path, value) in &self.nested_preserved {
             let Some((parent, key)) = path.split_once('/') else {
@@ -535,6 +535,21 @@ fn field_of<'a>(entries: &'a [(String, Tag)], key: &str) -> Option<&'a Tag> {
 
 fn push(entries: &mut Vec<(String, Tag)>, key: &str, value: Tag) {
     entries.push((key.to_owned(), value));
+}
+
+/// 官方 `FloatTag.valueOf` / `DoubleTag.valueOf` 对 `0.0` 返回共享的 ZERO：
+/// `fcmpl` / `dcmpl` 把 `-0.0` 也当成 0，所以写进文件的负零是正零。
+/// NaN 和无穷值照原样写。
+///
+/// Official `FloatTag.valueOf` / `DoubleTag.valueOf` return the shared ZERO
+/// for `0.0`: `fcmpl` / `dcmpl` treat `-0.0` as zero, so a written negative
+/// zero becomes a positive zero. NaN and infinities keep their bits.
+fn zero_float(value: f32) -> Tag {
+    Tag::Float(if value == 0.0 { 0.0 } else { value })
+}
+
+fn zero_double(value: f64) -> Tag {
+    Tag::Double(if value == 0.0 { 0.0 } else { value })
 }
 
 fn bad(name: &'static str, message: impl Into<String>) -> PlayerDataError {
@@ -695,7 +710,7 @@ fn numeric_list(entries: &[(String, Tag)], key: &'static str) -> Result<Vec<f64>
 /// 从游戏层的公开值造一份玩家存档（只是转换函数，不接进进服 / 离服流程）。
 ///
 /// 这里只接受必要的字段，避免存档层依赖游戏层的私有类型。没有对应运行时状态的字段
-/// 用官方默认值：血量恒 20、饥饿 / 经验 / 能力从游戏模式推。速度（`Motion`）和摔落
+/// 用官方默认值：血量恒 20、饥饿 / 能力从游戏模式推。速度（`Motion`）和摔落
 /// 距离（`fall_distance`）游戏层也有，但要保存它们的调用方在拿到结果后自己填。
 impl PlayerData {
     pub fn from_runtime_parts(parts: &RuntimeParts<'_>) -> Self {
@@ -710,6 +725,11 @@ impl PlayerData {
         data.game_type = parts.game_type;
         data.abilities = Abilities::for_game_type(parts.game_type);
         data.selected_item_slot = parts.selected_slot;
+        data.xp_p = parts.xp_p;
+        data.xp_level = parts.xp_level;
+        data.xp_total = parts.xp_total;
+        data.xp_seed = parts.xp_seed;
+        data.score = parts.score;
         // 菜单槽 5..8 是装备，9..35 是背包，36..44 是快捷栏，45 是副手。
         // 官方 `Inventory.items` 的顺序是快捷栏 0..8、背包 9..35、装备 36..39、副手 40。
         const MENU_SLOTS: usize = 46;
@@ -753,6 +773,16 @@ pub struct RuntimeParts<'a> {
     pub menu_slots: &'a [ItemStack],
     /// `EnderChest::slots` 的 27 格。
     pub ender_slots: &'a [ItemStack],
+    /// 官方 `XpP`：进度条，浮点。
+    pub xp_p: f32,
+    /// 官方 `XpLevel`。
+    pub xp_level: i32,
+    /// 官方 `XpTotal`。
+    pub xp_total: i32,
+    /// 官方 `XpSeed`，也是 `Player.enchantmentSeed`。
+    pub xp_seed: i32,
+    /// 官方 `Score`。
+    pub score: i32,
 }
 
 fn menu_to_disk(slot: usize) -> Option<i32> {

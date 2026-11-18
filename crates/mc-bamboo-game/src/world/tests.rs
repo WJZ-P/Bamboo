@@ -901,6 +901,12 @@ fn join_writes_the_ten_steps_in_order_in_one_tick() {
         clientbound::SET_DEFAULT_SPAWN_POSITION,
         clientbound::GAME_EVENT,
         clientbound::SET_CHUNK_CACHE_CENTER,
+        // 官方 `placeNewPlayer` 不发经验包；`ServerPlayer.doTick` 在进服这一刻
+        // 发现 `lastSentExp` 还是构造时的 -99999999，于是补发一包。
+        //
+        // Official `placeNewPlayer` sends no experience packet; `doTick`
+        // sends one on the join tick because `lastSentExp` is -99999999.
+        clientbound::SET_EXPERIENCE,
         clientbound::CHUNK_BATCH_START,
     ];
     expected.extend([clientbound::LEVEL_CHUNK_WITH_LIGHT; 9]);
