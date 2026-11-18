@@ -128,7 +128,13 @@ pub(crate) fn query_points(
         .get(&target)
         .map(|player| player.experience.points_in_level())
         .unwrap_or(0);
-    query(region, id, target, "commands.experience.query.points", value);
+    query(
+        region,
+        id,
+        target,
+        "commands.experience.query.points",
+        value,
+    );
     Ok(())
 }
 
@@ -145,7 +151,13 @@ pub(crate) fn query_levels(
         .get(&target)
         .map(|player| player.experience.level)
         .unwrap_or(0);
-    query(region, id, target, "commands.experience.query.levels", value);
+    query(
+        region,
+        id,
+        target,
+        "commands.experience.query.levels",
+        value,
+    );
     Ok(())
 }
 
@@ -229,4 +241,31 @@ fn query(region: &mut Region, id: PlayerId, target: PlayerId, key: &'static str,
         Component::translate(key, [name, value.into()]),
         false,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::command::test_commands;
+
+    #[test]
+    fn every_experience_form_parses_and_the_alias_redirects() {
+        let (graph, _) = test_commands();
+        for text in [
+            "experience add @s 7 points",
+            "experience add @s 7 levels",
+            "experience add @s 7",
+            "experience set @s 3 points",
+            "experience set @s 3 levels",
+            "experience set @s 3",
+            "experience query @s points",
+            "experience query @s levels",
+            "xp add @s 2 levels",
+            "xp set @s 5 points",
+            "xp query @s levels",
+        ] {
+            assert!(graph.parse(text, 2).is_ok(), "{text}");
+        }
+        assert!(graph.parse("xp query @s", 2).is_err());
+        assert!(graph.parse("experience add @s 7 points", 1).is_err());
+    }
 }

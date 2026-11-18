@@ -32,11 +32,11 @@ pub(crate) enum CommandClass {
     CrossIsland,
 }
 
-/// 4.4 的表：51 个顶层字面量各属哪一类（别名单列），加上后来接入的 `/summon`。
-/// `/summon` 只动本岛的实体表，归本岛类。
+/// 4.4 的表：51 个顶层字面量各属哪一类（别名单列），加上后来接入的
+/// `/summon`、`/experience` 和 `/xp`；三个都只动本岛。
 ///
 /// The 4.4 table: the class of each of the 51 root literals (aliases listed),
-/// plus `/summon`, which only touches the island's own entity table.
+/// plus `/summon`, `/experience` and `/xp`, all island-local.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("setblock", CommandClass::Island),
@@ -46,6 +46,8 @@ pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("particle", CommandClass::Island),
     ("playsound", CommandClass::Island),
     ("enchant", CommandClass::Island),
+    ("experience", CommandClass::Island),
+    ("xp", CommandClass::Island),
     ("stopsound", CommandClass::Island),
     ("spawnpoint", CommandClass::Island),
     ("transfer", CommandClass::Island),
@@ -135,10 +137,10 @@ mod tests {
             };
             roots.push((name.clone(), child));
         }
-        // 4.4 的 51 个加上 `/summon`。
-        // The 51 of 4.4 plus `/summon`.
-        assert_eq!(roots.len(), 52);
-        assert_eq!(CLASSES.len(), 52);
+        // 4.4 的 51 个加上 `/summon`、`/experience`、`/xp`。
+        // The 51 of 4.4 plus `/summon`, `/experience` and `/xp`.
+        assert_eq!(roots.len(), 54);
+        assert_eq!(CLASSES.len(), 54);
         let names: BTreeSet<&str> = CLASSES.iter().map(|(name, _)| *name).collect();
         assert_eq!(names.len(), CLASSES.len(), "表里不该有重复");
         for (name, root) in roots {
