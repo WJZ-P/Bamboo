@@ -18,8 +18,8 @@ use mc_bamboo_data::registries::{attribute, dimension_type, world_clock};
 use mc_bamboo_protocol::components::ComponentPatch;
 use mc_bamboo_protocol::packet::play::{
     AttributeModifier, AttributeOperation, AttributeSnapshot, EntityData, GameEvent, GameMode,
-    InitializeBorder, Login, PlayerAbilities, SetDefaultSpawnPosition, SetEntityData, SetTime,
-    SetExperience, UpdateAttributes,
+    InitializeBorder, Login, PlayerAbilities, SetDefaultSpawnPosition, SetEntityData,
+    SetExperience, SetTime, UpdateAttributes,
 };
 use mc_bamboo_world::{flat, light::LightChanges, store::ChunkStore};
 

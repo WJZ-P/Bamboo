@@ -276,7 +276,7 @@ impl PlayerData {
             Tag::List(
                 self.position
                     .iter()
-                    .map(|value| Tag::Double(*value))
+                    .map(|value| zero_double(*value))
                     .collect(),
             ),
         );
@@ -286,7 +286,7 @@ impl PlayerData {
             Tag::List(
                 self.motion
                     .iter()
-                    .map(|value| Tag::Double(*value))
+                    .map(|value| zero_double(*value))
                     .collect(),
             ),
         );
@@ -296,11 +296,11 @@ impl PlayerData {
             Tag::List(
                 self.rotation
                     .iter()
-                    .map(|value| Tag::Float(*value))
+                    .map(|value| zero_float(*value))
                     .collect(),
             ),
         );
-        push(&mut root, "fall_distance", Tag::Double(self.fall_distance));
+        push(&mut root, "fall_distance", zero_double(self.fall_distance));
         push(&mut root, "Fire", Tag::Short(self.fire));
         push(&mut root, "Air", Tag::Short(self.air));
         push(&mut root, "OnGround", Tag::Byte(i8::from(self.on_ground)));
@@ -311,10 +311,10 @@ impl PlayerData {
         );
         push(&mut root, "PortalCooldown", Tag::Int(self.portal_cooldown));
         push(&mut root, "UUID", Tag::IntArray(self.uuid.to_vec()));
-        push(&mut root, "Health", Tag::Float(self.health));
+        push(&mut root, "Health", zero_float(self.health));
         push(&mut root, "HurtTime", Tag::Short(self.hurt_time));
         push(&mut root, "DeathTime", Tag::Short(self.death_time));
-        push(&mut root, "AbsorptionAmount", Tag::Float(self.absorption));
+        push(&mut root, "AbsorptionAmount", zero_float(self.absorption));
         push(
             &mut root,
             "FallFlying",
@@ -329,7 +329,7 @@ impl PlayerData {
             Tag::Int(self.selected_item_slot),
         );
         push(&mut root, "SleepTimer", Tag::Short(self.sleep_timer));
-        push(&mut root, "XpP", Tag::Float(self.xp_p));
+        push(&mut root, "XpP", zero_float(self.xp_p));
         push(&mut root, "XpLevel", Tag::Int(self.xp_level));
         push(&mut root, "XpTotal", Tag::Int(self.xp_total));
         push(&mut root, "XpSeed", Tag::Int(self.xp_seed));
@@ -339,12 +339,12 @@ impl PlayerData {
         push(
             &mut root,
             "foodSaturationLevel",
-            Tag::Float(self.food_saturation),
+            zero_float(self.food_saturation),
         );
         push(
             &mut root,
             "foodExhaustionLevel",
-            Tag::Float(self.food_exhaustion),
+            zero_float(self.food_exhaustion),
         );
         push(&mut root, "abilities", self.abilities_tag());
         if let Ok(items) = slots::encode_list(&self.ender_items) {
@@ -463,8 +463,8 @@ impl PlayerData {
             ("mayfly".to_owned(), Tag::Byte(i8::from(a.may_fly))),
             ("instabuild".to_owned(), Tag::Byte(i8::from(a.instabuild))),
             ("mayBuild".to_owned(), Tag::Byte(i8::from(a.may_build))),
-            ("flySpeed".to_owned(), Tag::Float(a.fly_speed)),
-            ("walkSpeed".to_owned(), Tag::Float(a.walk_speed)),
+            ("flySpeed".to_owned(), zero_float(a.fly_speed)),
+            ("walkSpeed".to_owned(), zero_float(a.walk_speed)),
         ];
         for (path, value) in &self.nested_preserved {
             let Some((parent, key)) = path.split_once('/') else {
@@ -535,6 +535,21 @@ fn field_of<'a>(entries: &'a [(String, Tag)], key: &str) -> Option<&'a Tag> {
 
 fn push(entries: &mut Vec<(String, Tag)>, key: &str, value: Tag) {
     entries.push((key.to_owned(), value));
+}
+
+/// 官方 `FloatTag.valueOf` / `DoubleTag.valueOf` 对 `0.0` 返回共享的 ZERO：
+/// `fcmpl` / `dcmpl` 把 `-0.0` 也当成 0，所以写进文件的负零是正零。
+/// NaN 和无穷值照原样写。
+///
+/// Official `FloatTag.valueOf` / `DoubleTag.valueOf` return the shared ZERO
+/// for `0.0`: `fcmpl` / `dcmpl` treat `-0.0` as zero, so a written negative
+/// zero becomes a positive zero. NaN and infinities keep their bits.
+fn zero_float(value: f32) -> Tag {
+    Tag::Float(if value == 0.0 { 0.0 } else { value })
+}
+
+fn zero_double(value: f64) -> Tag {
+    Tag::Double(if value == 0.0 { 0.0 } else { value })
 }
 
 fn bad(name: &'static str, message: impl Into<String>) -> PlayerDataError {

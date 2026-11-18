@@ -329,7 +329,10 @@ impl Player {
 pub(crate) fn player_views(
     players: &std::collections::BTreeMap<PlayerId, Player>,
 ) -> Vec<PlayerView> {
-    players.iter().map(|(id, player)| player.view(*id)).collect()
+    players
+        .iter()
+        .map(|(id, player)| player.view(*id))
+        .collect()
 }
 
 /// 客户端设置里帽子层是不是打开的。

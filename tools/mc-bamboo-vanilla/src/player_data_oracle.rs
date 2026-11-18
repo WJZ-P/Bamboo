@@ -507,15 +507,7 @@ fn xp_cases() -> Vec<(&'static str, i32, u32, i32, i32, i32, i64)> {
                 0x5eed_1234_5678_i64,
             ));
         }
-        cases.push((
-            "query_points",
-            level,
-            bit(progress),
-            total,
-            score,
-            0,
-            0,
-        ));
+        cases.push(("query_points", level, bit(progress), total, score, 0, 0));
         cases.push(("need", level, bit(progress), total, score, 0, 0));
     }
     // 存档往返也覆盖极端值：`XpP` 的每一位都要写回。
@@ -553,11 +545,16 @@ fn run_xp_cases(
         .ok_or("xp-arithmetic has no results")?;
     report.check(
         results.len() == cases.len(),
-        format!("xp: official returned {} results, expected {}", results.len(), cases.len()),
+        format!(
+            "xp: official returned {} results, expected {}",
+            results.len(),
+            cases.len()
+        ),
     );
     for (index, (row, case)) in results.iter().zip(&cases).enumerate() {
         let &(op, level, bits, total, score, value, seed) = case;
-        let expected = mc_bamboo_game::replay_experience(op, level, bits, total, score, value, seed);
+        let expected =
+            mc_bamboo_game::replay_experience(op, level, bits, total, score, value, seed);
         let actual = row
             .as_array()
             .ok_or_else(|| format!("xp case {index}: result is not an array"))?;
@@ -585,11 +582,7 @@ fn run_xp_cases(
             level,
             bits as i32,
             total,
-            if seed == 0 {
-                0
-            } else {
-                seed
-            },
+            if seed == 0 { 0 } else { seed },
             score,
         ];
         report.cases += 1;
@@ -635,14 +628,21 @@ fn check_player_fields(report: &mut Report, name: &str, data: &PlayerData, field
         get("xp_level") == json!(data.xp_level),
         format!("{name}: XpLevel"),
     );
-    // `XpP` 是 float：用原始位比较，NaN 和 -0.0 也不能放过。
-    // `XpP` is a float: compare raw bits so NaN and -0.0 are covered too.
+    // `XpP` 是 float：用原始位比较，NaN 也要一致。官方 `FloatTag.valueOf`
+    // 把 `-0.0` 归一成 +0.0，所以期望值同样归一。
+    // `XpP` is a float: compare raw bits so NaN agrees too. Official
+    // `FloatTag.valueOf` normalizes `-0.0` to +0.0, so normalize the expectation.
+    let expected_bits = if data.xp_p == 0.0 {
+        0
+    } else {
+        data.xp_p.to_bits()
+    };
     report.check(
         get("xp_p")
             .as_f64()
             .map(|value| value as f32)
             .map(f32::to_bits)
-            == Some(data.xp_p.to_bits()),
+            == Some(expected_bits),
         format!("{name}: XpP"),
     );
     report.check(

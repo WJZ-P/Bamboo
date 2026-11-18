@@ -200,7 +200,9 @@ mod tests {
         xp.give_points(-8, &mut score);
         assert_eq!(xp.level, 1);
         assert_eq!(xp.total, 9);
-        assert!((xp.progress - 1.0 / 9.0).abs() < 1.0e-6);
+        // `1 + (-7)/9`：退一级后溢出点数按 9 重算。
+        // `1 + (-7)/9`: the overflow is rescaled with the new level's 9.
+        assert!((xp.progress - 2.0 / 9.0).abs() < 1.0e-6);
         xp.give_points(-100, &mut score);
         assert_eq!(xp.level, 0);
         assert_eq!(xp.total, 0);

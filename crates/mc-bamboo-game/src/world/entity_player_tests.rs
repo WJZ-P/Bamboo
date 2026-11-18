@@ -54,12 +54,7 @@ fn keep_goal(server: &mut Harness, cow: i32, goal: Goal) {
 
 fn cow_goal(server: &mut Harness, cow: i32) -> Goal {
     let entity = server.region().entities.get(cow).expect("牛还在表里");
-    entity
-        .kind
-        .mob()
-        .expect("牛是生物")
-        .goals
-        .goals[0]
+    entity.kind.mob().expect("牛是生物").goals.goals[0]
         .goal
         .clone()
 }
@@ -243,4 +238,3 @@ fn a_spectator_does_not_attract_an_experience_orb() {
     };
     assert_eq!(state.following, None, "旁观者不该被跟随");
 }
-
