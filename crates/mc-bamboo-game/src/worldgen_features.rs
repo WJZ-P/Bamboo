@@ -1342,9 +1342,11 @@ mod tests {
     }
 
     /// 同一格多次写按来源中心的固定先后、先写的赢：中心自己最先，邻居按
-    /// `(dz,dx)`；追加顺序不同、同组内先后不同都不改变最终方块。
+    /// `(dz,dx)`；追加顺序不同不改变最终方块；同一来源对同一格写两次时以它
+    /// 最后写下的那条为该中心的最终状态。
     /// First-writer-wins by source order: the center first, then neighbors in
-    /// `(dz,dx)`; append order and group order do not change the final blocks.
+    /// `(dz,dx)`; append order does not change the final blocks, and repeated
+    /// writes from one source resolve to its last write.
     #[test]
     fn assemble_resolves_conflicts_by_first_writer() {
         let config = normal(7);
@@ -1431,9 +1433,10 @@ mod tests {
     }
 
     /// 合并规则和「按来源先后逐条写、同格只在第一次写时落下」等价，
-    /// 且对分组顺序、缓存命中与否都不敏感。
+    /// 且对分组顺序、缓存命中与否都不敏感（真实数据每个来源每格只有一条写）。
     /// The merge equals a literal sequential first-writer-wins pass and is
-    /// insensitive to group order and cache hits.
+    /// insensitive to group order and cache hits (real data has one write per
+    /// source per cell).
     #[test]
     fn merge_feature_writes_matches_a_sequential_first_pass() {
         let config = normal(0x0fea_7c0f);
