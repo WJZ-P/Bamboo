@@ -1,12 +1,14 @@
 //! `/data` 和 `/execute store/if data` 共用的 NBT 数据源。
 //!
 //! 实体读写走 `mc-bamboo-blocks::archive::entity`（`Entity.saveWithoutId` / `load`），
-//! 方块实体走同一层的容器 / 组件表（`chunk_content` 的存档字段），storage 是全服一份
-//! 的 `CommandStorage`（只放在 `Global`，不写存档，和现有计分板一致）。
+//! 方块实体走同一层的容器 / 组件表和 `archive::create_block_entity` 工厂，
+//! storage 是全服一份的 `CommandStorage`：权威副本在 `Global`，按命名空间写进
+//! `data/<ns>/command_storage.dat`，开服读回（见 `SaveSession`）。
 //!
 //! NBT sources shared by `/data` and `/execute store/if data`. Entities use the
-//! archive codec, block entities use the same game tables that archive writes,
-//! and command storage is one global map like the scoreboard.
+//! archive codec, block entities use the same game tables and factory that
+//! archive writes, and command storage lives in `Global` and is persisted per
+//! namespace by `SaveSession`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -228,7 +230,7 @@ fn block_entity_exists(region: &Region, pos: BlockPos) -> bool {
 
 /// 官方 `BlockEntity.saveWithoutMetadata` 的字段：方块层 `saveAdditional` + 游戏层四张表。
 /// 这里不另写一套 codec，键名和 `chunk_content::write_game_fields` 一致。
-fn block_entity_tag(region: &Region, pos: BlockPos) -> Tag {
+pub(crate) fn block_entity_tag(region: &Region, pos: BlockPos) -> Tag {
     let mut entries: Vec<(String, Tag)> = Vec::new();
     let state = mc_bamboo_blocks::state::BlockState(region.chunks.block(pos).unwrap_or(0));
     if let Some(id) = state.block().block_entity_type
@@ -300,6 +302,15 @@ fn block_entity_tag(region: &Region, pos: BlockPos) -> Tag {
             "is_waxed".to_owned(),
             Tag::Byte(i8::from(sign.waxed)),
         );
+    }
+    // 活方块实体（熔炉、酿造台、漏斗、营火、活塞等）的 `saveAdditional` 键
+    // 由存档层的 `write_additional` 提供，直接并入可读标签，不另写一套 codec。
+    if let Some(entity) = region.block_entities.find_dyn(pos)
+        && let Ok(additional) = write_block_entity_additional(entity)
+    {
+        for (key, value) in additional {
+            put(&mut entries, key, value);
+        }
     }
     if let Some(book) = region.lecterns.books.get(&pos) {
         let (stack, page) = book.archive();

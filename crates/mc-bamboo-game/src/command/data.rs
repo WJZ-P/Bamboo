@@ -649,7 +649,7 @@ mod block_entity_tests {
     use mc_bamboo_protocol::item::ItemStack;
 
     use crate::{
-        command::{on_command, tests::world_with},
+        command::{data_source, on_command, tests::world_with},
         global::Global,
         inbound::PlayerId,
         region::Region,
@@ -749,6 +749,11 @@ mod block_entity_tests {
             assert!(
                 region.block_entities.find_dyn(at).is_some(),
                 "熔炉类走存档工厂回写"
+            );
+            let rebuilt = data_source::block_entity_tag(&region, at);
+            assert!(
+                rebuilt.to_pretty_snbt().contains("cooking_time_spent"),
+                "活方块实体的 saveAdditional 键应该能读出来"
             );
         }
     }

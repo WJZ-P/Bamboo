@@ -256,6 +256,21 @@ fn run_cases(
         answer.canonical.as_ref() == Some(&canonical_tag(&command_storage)),
         "official CommandStorage canonical JSON differs",
     );
+    // 官方写出的 `data/<ns>/command_storage.dat` 字节，Bamboo 侧能读回 contents。
+    let official_bytes = decode_b64(answer.gzip.as_deref().unwrap_or_default())?;
+    let (_name, entries) = mc_bamboo_nbt::read_compressed(
+        &official_bytes,
+        mc_bamboo_nbt::Compression::Gzip,
+        mc_bamboo_nbt::Accounter::uncompressed_quota(),
+    )
+    .map_err(|error| error.to_string())?;
+    let envelope = Tag::Compound(entries);
+    let data = mc_bamboo_storage::chunk_nbt::field(&envelope, "data")
+        .ok_or("official command storage file has no data")?;
+    report.check(
+        canonical_tag(data) == canonical_tag(&command_storage),
+        "official-written command_storage.dat does not decode to the same contents",
+    );
 
     // 2. Bamboo 写出的区块 NBT，官方 `SerializableChunkData.parse` 能读，
     //    `write()` 回来后按键比较内容。

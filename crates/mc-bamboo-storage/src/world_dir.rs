@@ -571,9 +571,9 @@ pub fn read_saved_data_at(path: &Path) -> Option<Tag> {
 /// missing, so not writing is safe; an empty `{}` could be read as corrupt by
 /// an official codec. Existing such files are left untouched.
 ///
-/// Only `level.dat`, `game_rules.dat`, `world_border.dat`, `world_clocks.dat`,
-/// `world_gen_settings.dat` and `chunk_tickets.dat` are written, all via
-/// `SaveSession::encode_saves`.
+/// Written files are `level.dat`, `game_rules.dat`, `world_border.dat`,
+/// `world_clocks.dat`, `world_gen_settings.dat`, `chunk_tickets.dat` and one
+/// `command_storage.dat` per namespace, all via `SaveSession::encode_saves`.
 #[cfg(test)]
 mod tests {
     use super::*;

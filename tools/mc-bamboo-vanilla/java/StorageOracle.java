@@ -263,6 +263,9 @@ public final class StorageOracle {
                         }
                     }
                     response.add("canonical", canonical(data));
+                    // 官方再写出的 gzip 字节，Bamboo 侧要能按 `contents` 读回。
+                    response.addProperty("gzip", Base64.getEncoder().encodeToString(
+                            Files.readAllBytes(file)));
                 }
                 case "nbt-io" -> {
                     // NbtIo.writeCompressed 写出的 gzip 文件，Bamboo 要能读。
@@ -561,11 +564,28 @@ public final class StorageOracle {
                     DataResult<TicketStorage> tickets = TicketStorage.CODEC.parse(NbtOps.INSTANCE, data);
                     tickets.getOrThrow();
                     return "TicketStorage.CODEC";
-                case "command_storage.dat":
-                    if (!(data instanceof CompoundTag compound) || !compound.contains("contents")) {
-                        throw new IllegalStateException("command_storage.dat lacks contents");
+                case "command_storage.dat": {
+                    // 官方 `CommandStorage.Container.CODEC` 是包私有的；
+                    // 用 `SavedDataStorage.get(Container.type(ns))` 走同一份 codec
+                    // 读回来，逐键比较 `contents`。
+                    String ns = path.getParent().getFileName().toString();
+                    var fixer = (com.mojang.datafixers.DataFixer) java.lang.reflect.Proxy.newProxyInstance(
+                            StorageOracle.class.getClassLoader(),
+                            new Class<?>[] {com.mojang.datafixers.DataFixer.class},
+                            (proxy, method, params) -> method.getName().equals("update") ? params[1] : null);
+                    try (var store = new net.minecraft.world.level.storage.SavedDataStorage(
+                            path.getParent().getParent(), fixer, registries)) {
+                        var cs = new net.minecraft.world.level.storage.CommandStorage(store);
+                        var expected = ((CompoundTag) data).getCompoundOrEmpty("contents");
+                        for (String key : expected.keySet()) {
+                            var id = net.minecraft.resources.Identifier.fromNamespaceAndPath(ns, key);
+                            if (!cs.get(id).equals(expected.getCompoundOrEmpty(key))) {
+                                throw new IllegalStateException("command storage key changed: " + key);
+                            }
+                        }
                     }
                     return "CommandStorage.Container.CODEC";
+                }
                 default:
                     // 未建模的 saved data：只确认是合法 NBT 复合标签，不用 codec 强解。
                     if (!(data instanceof CompoundTag)) {

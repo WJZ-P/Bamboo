@@ -280,10 +280,14 @@ impl SaveSession {
             bytes: Self::chunk_tickets_bytes()?,
         });
         // 官方 `CommandStorage.Container.CODEC`：每个命名空间一份
-        // `data/<ns>/command_storage.dat`，`set()` 标脏后由 `scheduleSave` 写。
-        // Bamboo 在每次保存时写所有已知命名空间（含空 contents），保证重启不丢数据。
-        // Official `CommandStorage.Container.CODEC`: one saved-data file per
-        // namespace; `set()` marks it dirty before `scheduleSave` writes it.
+        // `data/<ns>/command_storage.dat`，`set()` 标脏，官方只在
+        // `SavedDataStorage.saveAndJoin` 写脏的命名空间。Bamboo 的 `save-all`
+        // 是一条显式的「全量写」请求（不是每刻的增量调度），所以把全部已知
+        // 命名空间（含空 contents）都写一遍，保证重启不丢数据。
+        // Official `CommandStorage.Container.CODEC`: one file per namespace,
+        // dirtied by `set()` and written by `SavedDataStorage.saveAndJoin`.
+        // Bamboo's `save-all` is an explicit full save, so every known
+        // namespace is written (empty `contents` included).
         for namespace in global.command_storage.namespaces() {
             files.push(EncodedFile {
                 path: self.command_storage_path(&namespace),
