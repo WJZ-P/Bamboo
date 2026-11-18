@@ -50,14 +50,15 @@ pub struct TestServer {
 }
 
 impl TestServer {
-    /// 端到端测试的期望值来自官方规格、逐位比较，所以显式选齐步驱动，
+    /// 端到端测试的期望值来自官方规格、逐位比较，所以显式选精确模式（齐步驱动、一个岛），
     /// 不靠缺省值（岛的实施计划第 9 节第 7 条）。
     ///
     /// End-to-end expectations come from the official spec and are compared bit
-    /// for bit, so the lockstep drive is chosen explicitly, not by default
-    /// (island plan, section 9, item 7).
+    /// for bit, so exact mode (lockstep drive, one island) is chosen
+    /// explicitly, not by default (island plan, section 9, item 7).
     pub async fn start(mut config: ServerConfig) -> Self {
         config.island_threads = 0;
+        config.islands = false;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = Server::new(listener, config).unwrap();

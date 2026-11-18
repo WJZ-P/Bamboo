@@ -49,6 +49,12 @@ MARKER_Z="${MARKER_Z:-5}"
 MARKER_BLOCK="${MARKER_BLOCK:-minecraft:diamond_block}"
 LOG_DIR="${LOG_DIR:-$WT/target/crash-test-logs}"
 mkdir -p "$LOG_DIR"
+# 探针按精确模式校准（和 tools/probe.sh 相同）：缺省显式选齐步、一个岛，不随服务端的
+# 缺省配置变；调用方已经设了这两个环境变量就照设的值。
+# The probe is calibrated for exact mode (as in tools/probe.sh): lockstep and
+# one island unless the caller already set these variables.
+export BAMBOO_ISLANDS="${BAMBOO_ISLANDS-0}"
+export BAMBOO_ISLAND_THREADS="${BAMBOO_ISLAND_THREADS-0}"
 
 pids=()
 cleanup() {

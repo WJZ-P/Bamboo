@@ -223,6 +223,23 @@ impl Harness {
         Self::build(view_distance, loaded)
     }
 
+    /// 同 [`Self::new`]，但显式只要一个岛（`islands = false`）；线程数照缺省（环境变量
+    /// 优先）。给断言一个岛时的内部布局（例如打报告的剖析器跟着家岛）的测试用。
+    ///
+    /// Like [`Self::new`] but with one island explicitly (`islands = false`);
+    /// the thread count follows the default (environment first). For tests
+    /// asserting the one-island layout, e.g. the reporting profiler living
+    /// on the home island.
+    pub(crate) fn new_one_island(view_distance: i32) -> Self {
+        let loaded = std::env::var("BAMBOO_TEST_LOADED").is_ok_and(|value| value == "1");
+        Self::build_with(
+            view_distance,
+            loaded,
+            crate::island::default_island_threads(),
+            false,
+        )
+    }
+
     /// 显式指定岛的 tick 线程数（0 = 齐步），不看环境变量。
     /// An explicit island thread count (0 = lockstep), regardless of the environment.
     pub(crate) fn new_with_island_threads(
@@ -553,18 +570,26 @@ impl Harness {
     /// because the test wants them already there. A player who has not joined or was kicked
     /// still gets a queued move packet.
     pub(crate) fn move_to_position(&mut self, client: &Client, position: Vec3) {
+        // 多岛时玩家不一定在家岛上：在他所在的岛上放置。
+        // With several islands the player may be off the home island: place
+        // them on theirs.
+        let island = self
+            .world
+            .islands
+            .island_of_player(client.id)
+            .unwrap_or(mc_bamboo_world::director::HOME_REGION);
         let here = self
             .world
             .islands
-            .region
-            .players
-            .get(&client.id)
+            .get(island)
+            .and_then(|island| island.region.players.get(&client.id))
             .map(|player| player.position());
         if let Some(here) = here
             && !client.is_closed()
             && position.subtract(here).length_sqr() > 100.0
         {
-            crate::player_move::place_player(&mut self.world.islands.region, client.id, position);
+            let region = &mut self.world.islands.get_mut(island).expect("停放着").region;
+            crate::player_move::place_player(region, client.id, position);
             return;
         }
         self.load_player(client);
@@ -640,11 +665,15 @@ impl Harness {
                 forced: true,
             });
         }
-        // 交付每刻有个数上限，脚下 3×3 豁免；这里循环到全部到位为止。
+        // 交付每刻有个数上限，脚下 3×3 豁免；这里循环到全部到位为止。多岛时远处的区块交付
+        // 给它自己的岛，不一定是家岛，所以按任意一个岛已加载算。
+        // Deliveries are capped per tick (the 3×3 footprint is exempt), so
+        // loop until all are in. With several islands a far chunk goes to its
+        // own island, not necessarily home, so any island counts.
         for _ in 0..64 {
             if positions
                 .iter()
-                .all(|&pos| self.world.islands.region.chunks.is_loaded(pos))
+                .all(|&pos| self.world.islands.island_of_chunk(pos).is_some())
             {
                 return;
             }
@@ -721,6 +750,46 @@ impl Harness {
     /// 只读 region（测试断言用）。
     pub(crate) fn world_region(&self) -> &Region {
         &self.world.islands.region
+    }
+
+    /// 玩家所在的岛的 `Region`（只有一个岛时就是家岛）。
+    ///
+    /// The `Region` of the island the player is on (home with one island).
+    pub(crate) fn player_region(&mut self, client: &Client) -> &mut Region {
+        let island = self
+            .world
+            .islands
+            .island_of_player(client.id)
+            .unwrap_or(mc_bamboo_world::director::HOME_REGION);
+        &mut self.world.islands.get_mut(island).expect("停放着").region
+    }
+
+    /// 回到原处以后再跑最多 `ticks` 刻，收下这期间的全部帧，直到 `pos` 的区块发来为止。
+    /// 一个岛时当刻就到；多岛时走远又回来是跨岛传送，晚一刻（总设计稿第 13 节第 11 条）。
+    ///
+    /// After coming back, run up to `ticks` ticks collecting every frame until
+    /// the chunk at `pos` arrives. With one island it comes the same tick;
+    /// with several, walking far and back crosses islands and lands a tick
+    /// later (design section 13, item 11).
+    pub(crate) fn tick_until_chunk(
+        &mut self,
+        client: &Client,
+        pos: ChunkPos,
+        ticks: usize,
+    ) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        for _ in 0..ticks {
+            self.acknowledge_batch(client, 64.0);
+            self.tick();
+            frames.extend(client.take_frames());
+            if frames_with_id(&frames, clientbound::LEVEL_CHUNK_WITH_LIGHT)
+                .iter()
+                .any(|frame| chunk_position(frame) == pos)
+            {
+                break;
+            }
+        }
+        frames
     }
 
     pub(crate) fn region(&mut self) -> &mut Region {
@@ -866,12 +935,14 @@ impl Harness {
         self.world.islands.region.chunks.set_block(pos, state);
     }
 
+    /// 玩家本人。多岛时在他所在的岛上找（只有一个岛时就是家岛）。
+    ///
+    /// The player; with several islands, on whichever island they are.
     pub(crate) fn player(&self, client: &Client) -> &crate::player::Player {
         self.world
             .islands
-            .region
-            .players
-            .get(&client.id)
+            .iter()
+            .find_map(|island| island.region.players.get(&client.id))
             .expect("玩家应该在世界里")
     }
 }
@@ -2173,10 +2244,7 @@ fn edited_chunk_is_resent_with_the_edit() {
     client.take_frames();
 
     server.move_to(&client, SPAWN_X, SPAWN_Z);
-    server.acknowledge_batch(&client, 64.0);
-    server.tick();
-
-    let frames = client.take_frames();
+    let frames = server.tick_until_chunk(&client, edited, 3);
     let chunks = frames_with_id(&frames, clientbound::LEVEL_CHUNK_WITH_LIGHT);
     let resent = chunks
         .iter()
@@ -2409,7 +2477,11 @@ fn run_returns_after_shutdown() {
 
 #[test]
 fn profiler_charges_every_phase_once_per_tick() {
-    let mut server = Harness::new(2);
+    // 断言的是一个岛时的布局：打报告的剖析器跟着家岛。多岛（混合驱动）时主控的各段记在
+    // 主控自己的剖析器里，见 `island_hybrid_tests::profiling_covers_every_master_tick_and_every_island_tick`。
+    // Asserts the one-island layout (the reporting profiler is the home
+    // island's); the hybrid drive is covered by a test of its own.
+    let mut server = Harness::new_one_island(2);
     server.tick();
 
     for phase in [
@@ -2495,7 +2567,11 @@ fn profiler_charges_every_phase_once_per_tick() {
 
 #[test]
 fn early_return_from_inbox_still_finishes_the_tick_timing() {
-    let mut server = Harness::new(2);
+    // 断言的是一个岛时的布局：打报告的剖析器跟着家岛。多岛（混合驱动）时主控的各段记在
+    // 主控自己的剖析器里，见 `island_hybrid_tests::profiling_covers_every_master_tick_and_every_island_tick`。
+    // Asserts the one-island layout (the reporting profiler is the home
+    // island's); the hybrid drive is covered by a test of its own.
+    let mut server = Harness::new_one_island(2);
     server.tick();
     server.world.islands.region.profiler.reset_samples();
 

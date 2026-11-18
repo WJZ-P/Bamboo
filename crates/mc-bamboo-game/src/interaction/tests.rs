@@ -1863,10 +1863,7 @@ fn walk_away_and_back(server: &mut Harness, client: &Client, pos: ChunkPos) -> V
     client.take_frames();
 
     server.move_to(client, SPAWN_X, SPAWN_Z);
-    server.acknowledge_batch(client, 64.0);
-    server.tick();
-
-    let frames = client.take_frames();
+    let frames = server.tick_until_chunk(client, pos, 3);
     let chunks = frames_with_id(&frames, clientbound::LEVEL_CHUNK_WITH_LIGHT);
     let resent = chunks
         .iter()
