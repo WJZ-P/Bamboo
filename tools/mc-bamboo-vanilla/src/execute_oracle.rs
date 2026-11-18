@@ -73,8 +73,18 @@ const SCENARIOS: &[&str] = &[
     "execute store success score #total result run setblock 4 -60 6 stone",
     "execute as @e[type=cow] at @s store success score #total result run setblock ~ ~ ~ stone",
     "execute as @e[type=cow] at @s store result score #total result run setblock ~ ~ ~ stone",
+    "execute if score #total result matches 0 run setblock 4 -60 6 stone",
+    "execute unless score #total result matches 0 run setblock 4 -60 6 stone",
+    "execute if score #total result = #total result run setblock 4 -60 6 stone",
     "execute if block 4 -60 6 stone store success score #total result run setblock 4 -60 6 stone",
     "execute unless block 4 -60 6 stone store result score #total result run setblock 4 -60 6 stone",
+    "data merge storage minecraft:test {Value:7}",
+    "data get storage minecraft:test Value",
+    "data remove storage minecraft:test Value",
+    "data modify storage minecraft:test Other set value 3",
+    "execute if data storage minecraft:test Value run setblock 4 -60 6 stone",
+    "execute unless data storage minecraft:test Missing run setblock 4 -60 6 stone",
+    "execute store result storage minecraft:test Value int 1 run setblock 4 -60 6 stone",
 ];
 
 #[derive(Debug)]

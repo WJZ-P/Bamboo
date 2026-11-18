@@ -555,11 +555,12 @@ pub mod tests {
     fn argument_properties(kind: &ArgumentType) -> Option<serde_json::Value> {
         Some(match *kind {
             ArgumentType::Integer { min, max } => {
-                // 官方报告省略 IntegerArgumentType 默认的最大值。
-                if max == i32::MAX {
-                    serde_json::json!({ "min": min })
-                } else {
-                    serde_json::json!({ "min": min, "max": max })
+                // 官方报告省略 IntegerArgumentType 的默认值（min = i32::MIN，max = i32::MAX）。
+                match (min, max) {
+                    (i32::MIN, i32::MAX) => return None,
+                    (_, i32::MAX) => serde_json::json!({ "min": min }),
+                    (i32::MIN, _) => serde_json::json!({ "max": max }),
+                    _ => serde_json::json!({ "min": min, "max": max }),
                 }
             }
             ArgumentType::String(StringKind::SingleWord) => {

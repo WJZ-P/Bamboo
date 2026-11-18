@@ -237,6 +237,10 @@ pub(crate) struct Global {
     pub(crate) save_requests: Vec<crate::save_session::SaveCommand>,
     /// 自动保存开关的权威镜像（命令改它，`World` 同步到存档会话）。
     pub(crate) save_auto: bool,
+    /// 官方 `CommandStorage`：`/data storage` 的全服 NBT。不写存档。
+    ///
+    /// Official `CommandStorage`: the global `/data storage` NBT. Not saved.
+    pub(crate) command_storage: crate::command::data_source::CommandStorage,
     /// `/random` 和 `/loot` 的按名随机序列（官方 `ServerLevel.getRandomSequences()`，全世界
     /// 一份）。按世界种子建，不存档。岛的实施计划 3.3「岛的随机源」第 2 条：放在主控上，
     /// 用它的命令归全局类，所以多岛时同名序列也只有一条。
@@ -274,6 +278,7 @@ impl Default for Global {
             admin_messages: None,
             save_requests: Vec::new(),
             save_auto: true,
+            command_storage: crate::command::data_source::CommandStorage::default(),
             random_sequences: mc_bamboo_loot::RandomSequences::new(crate::world_state::WORLD_SEED),
             weather_random: None,
         }
@@ -407,6 +412,7 @@ impl Global {
             difficulty: self.state.difficulty,
             difficulty_locked: self.state.difficulty_locked,
             spawn: self.state.spawn,
+            command_storage: self.command_storage.clone(),
             default_game_mode: self.state.default_game_mode,
             seed: self.state.seed,
             idle_timeout_minutes: self.admin.idle_timeout_minutes,
@@ -655,6 +661,8 @@ pub(crate) struct GlobalView {
     pub(crate) difficulty: Difficulty,
     pub(crate) difficulty_locked: bool,
     pub(crate) spawn: RespawnData,
+    /// 官方 `CommandStorage` 的只读快照；权威副本在 `Global`。
+    pub(crate) command_storage: crate::command::data_source::CommandStorage,
     pub(crate) default_game_mode: GameMode,
     /// 世界种子。哈希要算 SHA-256，只在进服时用到，所以发布时不算。
     pub(crate) seed: i64,

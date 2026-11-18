@@ -64,6 +64,8 @@ mod catalog;
 mod class;
 mod clone;
 pub(crate) mod console;
+pub(crate) mod data;
+pub(crate) mod data_source;
 mod effects;
 mod enchant;
 pub(crate) mod execute;
@@ -353,7 +355,7 @@ pub fn decompose_component(content: &mc_bamboo_protocol::text::Component) -> Str
                             out.push('{');
                             match arg {
                                 mc_bamboo_nbt::Tag::String(text) => {
-                                    out.push_str("S[");
+                                    out.push_str("L[");
                                     out.push_str(text);
                                     out.push(']');
                                 }
@@ -637,7 +639,11 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::SlotSource
         | ArgumentType::LootPredicate
         | ArgumentType::FloatRange
-        | ArgumentType::Function => ArgumentProperties::None,
+        | ArgumentType::Function
+        | ArgumentType::NbtTag
+        | ArgumentType::ContextIntProvider
+        | ArgumentType::ContextFloatProvider
+        | ArgumentType::ItemSlots => ArgumentProperties::None,
         ArgumentType::ResourceOrTag { registry } => ArgumentProperties::Registry(registry),
     }
 }
@@ -1494,6 +1500,7 @@ mod official_tree {
     /// (node kind, parser, properties, executable and permissions). The seven other
     /// roots are checked by the path/parser tests above.
     const ADMIN_ROOTS: &[&str] = &[
+        "data",
         "kill",
         "summon",
         "op",
@@ -1509,6 +1516,34 @@ mod official_tree {
         "transfer",
         "version",
     ];
+
+    /// `/data` 整棵树（751 个节点）逐节点和官方报告一致。
+    #[test]
+    fn data_tree_matches_the_official_node_count() {
+        let commands = commands();
+        let graph = &commands.graph;
+        let root = graph
+            .node(graph.root())
+            .children
+            .iter()
+            .copied()
+            .find(
+                |&node| matches!(&graph.node(node).kind, NodeKind::Literal(name) if name == "data"),
+            )
+            .expect("data 根存在");
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stack = vec![root];
+        let mut nodes = 0usize;
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            nodes += 1;
+            stack.extend(graph.node(node).children.iter().copied());
+            stack.extend(graph.node(node).redirect);
+        }
+        assert_eq!(nodes, 752, "官方 `/data` 根 + 751 个子节点");
+    }
 
     #[test]
     fn new_roots_match_the_official_report_node_by_node() {

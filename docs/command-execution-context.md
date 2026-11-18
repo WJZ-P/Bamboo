@@ -66,13 +66,13 @@ Context {
 
 - `if/unless block`：按当前 `Context` 解 `BlockPos`，读 `region.chunks`；
   `blocks` 比较两个长方体（`all` / `masked`），超过 `MAX_TEST_AREA` 报错。
-- `if/unless entity`：用 `select::targets` 按当前上下文（执行位置、执行者）解析，
-  `if` 时每个命中实体分叉一个 `Context`（官方 `expect(..., true, ...)`），
-  `unless` 只在零命中时继续。
+- `if/unless entity`：用 `select::targets` 按当前上下文（执行位置、执行者）解析；
+  官方 `expect(...)` 只按「有没有命中」保留原上下文一次，不按命中实体数分叉。
 - `if/unless score`：查权威计分板（`GlobalPort::Direct` 里的 `Global` 或岛上的
   全局快照），`matches` 和两种目标的比较都按官方字节码。
-- `if/unless predicate`：调用 `mc-bamboo-loot` 的谓词求值；依赖缺失的数据源明确报错，
-  不静默判假。
+- `if/unless data`：按当前上下文解析 `block` / `entity` / `storage` 三种数据源，
+  用 `NbtPath::get` 判路径有没有命中；和 `/data` 共用一套数据源。
+- `if/unless predicate`：还没接上，执行时明确报错，不静默判假。
 - 条件失败时官方发 `command.execute.conditions.not_met*` 反馈；Bamboo 同样按
   分支数发，且不执行链尾命令。
 - `store result|success`：`result` 是链尾命令的返回值，`success` 是
@@ -80,8 +80,8 @@ Context {
   `Result<(), CommandFail>`，所以 `success` = 成功的分支数，`result` 先固定为
   该次数（官方很多命令的返回值就是成功次数）。`store score` 在链尾命令**全部
   分支跑完**以后一次性写回目标分数；`store bossbar` 写 value/max；
-  `store block|entity|storage` 需要 NBT 路径，第三期接 `/data` 时复用同一套，
-  本期的 NBT 目标明确报不支持。
+  `store block|entity|storage` 按 `NbtPath::get_mut` 把 `int` 结果写进路径，
+  和 `/data` 复用同一套数据源。
 - `run` 的结果回传：链尾每个分支的动作照常发自己的成功/失败反馈，
   执行器把它折算成 `(result, success)` 交给最近一层 `store`；没有 `store` 时丢弃。
   链上没有 `run` 时整条命令不执行（`command.unknown.command`）。
@@ -115,4 +115,8 @@ Rust 侧在同一串命令上重放并逐项比较；`--break-self-test` 改坏�
   `if biome|data|items|slots|stopwatch|function|dimension|loaded|predicate` 的
   完整实现：命令树注册但执行时明确报错。
 - `facing` / `anchored` 用脚底或眼高的近似眼高，属性表没有逐实体眼高。
-- `store ... block|entity|storage` 的 NBT 路径等第三期 `/data` 接上。
+- `/data` 的 `modify ... string|compute` 和 int/float provider 变体：命令树完整注册，
+  执行时明确报 `command.exception`（官方没有「暂不支持」的统一翻译键）。
+- `if predicate` 需要战利品表谓词管理器，`in` 需要多维度；两者解析照常、执行时明确报错。
+- 方块实体「活实例自己的 `saveAdditional` 键」没有统一的 `read_additional` 入口，
+  `/data merge block` 回写这类键时报 `command.failed`，不静默丢掉。

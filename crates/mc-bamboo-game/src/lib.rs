@@ -590,6 +590,13 @@ pub fn replay_execute(line: &str) -> [i32; 6] {
         id,
         "scoreboard objectives add result dummy",
     );
+    command::on_command_public(
+        &mut global,
+        &mut region,
+        id,
+        "scoreboard players set #total result 0",
+    );
+    global.publish(&mut region);
     region.links.flush();
     let mut feedback = Vec::new();
     command::on_command_public_feedback(&mut global, &mut region, id, line, &mut feedback);

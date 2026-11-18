@@ -5,8 +5,10 @@
 
 mod decode;
 mod file;
+pub mod path;
 pub mod snbt;
 
+pub use self::path::NbtPath;
 pub use decode::{Accounter, DEFAULT_QUOTA, DecodeError, MAX_DEPTH, Reader};
 pub use file::{
     Compression, FileError, MAX_DECOMPRESSED_BYTES, UNCOMPRESSED_QUOTA, decompress,

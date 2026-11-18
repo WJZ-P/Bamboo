@@ -1017,8 +1017,15 @@ WebView2 的渲染进程不算在内。
   跑 32 条整命令（含 `as @e[type=cow]` 分叉），逐条比较方块、计分板、是否跑到 `run` 和
   翻译键/参数递归展开后的反馈；`--break-self-test` 和按类别的 `--break-group` 确认能抓到改坏。
   已知差异：只有主世界，`in` 其它维度明确失败；`on`、`summon`、`positioned over`、
-  `if biome|data|items|slots|stopwatch|function|dimension|loaded` 和 `store ... block|entity|storage`
-  的 NBT 路径还没接上，执行时明确报错；`facing` / `anchored` 用近似眼高。
+  `if biome|items|slots|stopwatch|function|dimension|loaded` 和 `if predicate` 还没接上；
+  `facing` / `anchored` 用近似眼高。`if/unless data` 和 `store ... block|entity|storage` 已接上。
+  `/data` 的完整命令树（官方 751 个子节点）逐节点一致；`get` / `merge` / `remove` 和
+  `modify set|merge|append|prepend|insert` 配 `value` / `from` 可执行，三种数据源是
+  `block`（游戏层方块实体表）、`entity`（`archive::write_entity` / `read_entity`）和 `storage`
+  （`Global` 里全服一份的 `CommandStorage`）。`/data merge entity` 对玩家按官方报
+  `commands.data.entity.invalid`。`modify ... string|compute` 和 int/float provider 变体解析照常，
+  执行时明确报 `command.exception`；`/execute store ... block|entity|storage`、
+  `if/unless data` 和 `if score` 都有整条命令对拍（共 42 条）。见 `docs/command-execution-context.md`。
   `/kill` 按官方 `KillCommand`：权限 2、无参杀 `@s`、带选择器杀选中的玩家和非玩家实体；牛走已有的
   `LivingEntity.kill` → 掉落、经验球、死亡动画，其它非玩家实体直接 `remove(KILLED)`。玩家目标目前
   明确报 `command.failed`（Bamboo 还没有玩家死亡/重生流程，这是已知限制）。实体选择器 `@e` / `@n` / `@s` 现在同时

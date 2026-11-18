@@ -48,6 +48,11 @@ impl CommandBlockData {
         }
     }
 
+    /// `/data` 写 `SuccessCount`。
+    pub(crate) fn set_success_count(&mut self, count: i32) {
+        self.success_count = count;
+    }
+
     /// 存档编码用：全部字段的只读快照。
     pub fn archive(&self) -> ArchiveCommandBlock {
         ArchiveCommandBlock {

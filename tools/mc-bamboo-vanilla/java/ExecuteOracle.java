@@ -113,8 +113,19 @@ public final class ExecuteOracle {
         "execute as @e[type=cow] at @s store success score #total result run setblock ~ ~ ~ stone",
         "execute as @e[type=cow] at @s store result score #total result run setblock ~ ~ ~ stone",
         // 条件失败时的返回值
+        "execute if score #total result matches 0 run setblock 4 -60 6 stone",
+        "execute unless score #total result matches 0 run setblock 4 -60 6 stone",
+        "execute if score #total result = #total result run setblock 4 -60 6 stone",
         "execute if block 4 -60 6 stone store success score #total result run setblock 4 -60 6 stone",
         "execute unless block 4 -60 6 stone store result score #total result run setblock 4 -60 6 stone",
+        // /data 整条命令与 /execute 的 NBT 数据源
+        "data merge storage minecraft:test {Value:7}",
+        "data get storage minecraft:test Value",
+        "data remove storage minecraft:test Value",
+        "data modify storage minecraft:test Other set value 3",
+        "execute if data storage minecraft:test Value run setblock 4 -60 6 stone",
+        "execute unless data storage minecraft:test Missing run setblock 4 -60 6 stone",
+        "execute store result storage minecraft:test Value int 1 run setblock 4 -60 6 stone",
     };
 
     private ExecuteOracle() {
@@ -201,11 +212,16 @@ public final class ExecuteOracle {
     private static void decomposeInto(Component component, StringBuilder out) {
         var contents = component.getContents();
         if (contents instanceof net.minecraft.network.chat.contents.TranslatableContents translated) {
-            out.append("T[").append(translated.getKey()).append(']');
+            String key = translated.getKey();
+            out.append("T[").append(key).append(']');
             for (Object arg : translated.getArgs()) {
                 out.append('{');
                 if (arg instanceof Component nested) {
                     decomposeInto(nested, out);
+                } else if (arg instanceof net.minecraft.network.chat.contents.PlainTextContents plain) {
+                    out.append("L[").append(plain.text()).append(']');
+                } else if (key.equals("arguments.nbtpath.nothing_found")) {
+                    out.append("L[").append(String.valueOf(arg)).append(']');
                 } else {
                     out.append("S[").append(String.valueOf(arg)).append(']');
                 }
@@ -267,6 +283,16 @@ public final class ExecuteOracle {
             board = new ServerScoreboard(official.server);
             official.server.sharedScoreboard = board;
             official.server.currentLevel = level;
+            var saved = UNSAFE.allocateInstance(net.minecraft.world.level.storage.SavedDataStorage.class);
+            set(net.minecraft.world.level.storage.SavedDataStorage.class, saved, "cache",
+                    new java.util.HashMap<>());
+            official.server.commandStorage =
+                    new net.minecraft.world.level.storage.CommandStorage(
+                            (net.minecraft.world.level.storage.SavedDataStorage) saved);
+            board.addObjective("result", ObjectiveCriteria.DUMMY, Component.literal("result"),
+                    ObjectiveCriteria.RenderType.INTEGER, false, null);
+            board.getOrCreatePlayerScore(ScoreHolder.forNameOnly("#total"),
+                    board.getObjective("result")).set(0);
             fake.board = board;
             var chunkMap = allocate(net.minecraft.server.level.ChunkMap.class);
             set(net.minecraft.server.level.ChunkMap.class, chunkMap, "entityMap",
@@ -274,8 +300,6 @@ public final class ExecuteOracle {
             fake.chunkSource = allocate(net.minecraft.server.level.ServerChunkCache.class);
             set(net.minecraft.server.level.ServerChunkCache.class, fake.chunkSource, "chunkMap", chunkMap);
             set(ServerLevel.class, level, "chunkSource", fake.chunkSource);
-            board.addObjective("result", ObjectiveCriteria.DUMMY, Component.literal("result"),
-                    ObjectiveCriteria.RenderType.INTEGER, false, null);
 
             ServerPlayer player = allocate(ServerPlayer.class);
             set(Entity.class, player, "id", 1);
@@ -373,6 +397,7 @@ public final class ExecuteOracle {
         GameRules rules;
         ServerScoreboard sharedScoreboard;
         ServerLevel currentLevel;
+        net.minecraft.world.level.storage.CommandStorage commandStorage;
         net.minecraft.world.level.storage.WorldData worldData;
 
         private FakeServer() {
@@ -402,6 +427,11 @@ public final class ExecuteOracle {
         @Override
         public net.minecraft.core.RegistryAccess.Frozen registryAccess() {
             return (net.minecraft.core.RegistryAccess.Frozen) managers.fullRegistries().lookup();
+        }
+
+        @Override
+        public net.minecraft.world.level.storage.CommandStorage getCommandStorage() {
+            return commandStorage;
         }
 
         @Override

@@ -7,7 +7,7 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, enchant, execute,
+    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, data, enchant, execute,
     experience, gamerule, items, kill, loot, particle, players, playsound, random, save,
     scoreboard, stopsound, summon, team, teleport, text, time, title, weather, world_border,
     world_settings,
@@ -132,6 +132,7 @@ pub(crate) fn build() -> Commands {
     register_random(&mut builder, root);
     register_enchant(&mut builder, root);
     register_execute(&mut builder, root);
+    register_data(&mut builder, root);
     register_experience(&mut builder, root);
     register_loot(&mut builder, root);
     register_weather(&mut builder, root);
@@ -1191,6 +1192,26 @@ fn register_execute(builder: &mut Builder, root: usize) {
             back(builder, source_objective);
         }
 
+        let data = builder.literal(branch, "data", 0);
+        for data_kind in ["block", "entity", "storage"] {
+            let node = builder.literal(data, data_kind, 0);
+            let source = builder.argument(
+                node,
+                "source",
+                if data_kind == "block" {
+                    ArgumentType::BlockPos
+                } else if data_kind == "entity" {
+                    entity_argument()
+                } else {
+                    ArgumentType::ResourceLocation
+                },
+                0,
+            );
+            let path = builder.argument(source, "path", ArgumentType::NbtPath, 0);
+            builder.run(path, execute::execute_global);
+            back(builder, path);
+        }
+
         let predicate = builder.literal(branch, "predicate", 0);
         let id = builder.argument(predicate, "predicate", ArgumentType::LootPredicate, 0);
         builder.run(id, execute::execute_global);
@@ -1283,6 +1304,159 @@ fn register_enchant(builder: &mut Builder, root: usize) {
 /// Official `ExperienceCommand.register`: `experience` is the main name, `xp`
 /// redirects to it. The `amount` node of `add` / `set` is executable by itself
 /// (defaulting to `points`); `query` requires a suffix.
+/// `DataCommands.register`：官方树 751 个节点，按每个数据源一套模板展开。
+/// 所有可执行节点都绑到同一个动作，执行器从 `ParsedCommand.nodes` 认出分支。
+///
+/// `DataCommands.register`: 751 official nodes, built from one template per
+/// target kind. Every executable node binds the one action; the runner reads
+/// the branch names from `ParsedCommand.nodes`.
+fn register_data(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "data", permission::GAMEMASTERS);
+    for kind in ["block", "entity", "storage"] {
+        let target_kind = |builder: &mut Builder, parent: usize, name: &str| -> usize {
+            match kind {
+                "block" => builder.argument(parent, name, ArgumentType::BlockPos, 0),
+                "entity" => builder.argument(parent, name, entity_argument(), 0),
+                _ => builder.argument(parent, name, ArgumentType::ResourceLocation, 0),
+            }
+        };
+
+        let get = builder.literal(command, "get", 0);
+        let get_kind = builder.literal(get, kind, 0);
+        let target = target_kind(builder, get_kind, "target");
+        bind(builder, target);
+        let path = builder.argument(target, "path", ArgumentType::NbtPath, 0);
+        bind(builder, path);
+        let scale = builder.argument(
+            path,
+            "scale",
+            ArgumentType::Double {
+                min: f64::MIN,
+                max: f64::MAX,
+            },
+            0,
+        );
+        bind(builder, scale);
+
+        let merge = builder.literal(command, "merge", 0);
+        let merge_kind = builder.literal(merge, kind, 0);
+        let target = target_kind(builder, merge_kind, "target");
+        let nbt = builder.argument(target, "nbt", ArgumentType::CompoundTag, 0);
+        bind(builder, nbt);
+
+        let remove = builder.literal(command, "remove", 0);
+        let remove_kind = builder.literal(remove, kind, 0);
+        let target = target_kind(builder, remove_kind, "target");
+        let path = builder.argument(target, "path", ArgumentType::NbtPath, 0);
+        bind(builder, path);
+
+        let modify = builder.literal(command, "modify", 0);
+        let modify_kind = builder.literal(modify, kind, 0);
+        let target = target_kind(builder, modify_kind, "target");
+        let target_path = builder.argument(target, "targetPath", ArgumentType::NbtPath, 0);
+        for op in ["append", "merge", "prepend", "set"] {
+            let branch = builder.literal(target_path, op, 0);
+            add_data_sources(builder, branch);
+        }
+        let insert = builder.literal(target_path, "insert", 0);
+        let index = builder.argument(
+            insert,
+            "index",
+            ArgumentType::Integer {
+                min: i32::MIN,
+                max: i32::MAX,
+            },
+            0,
+        );
+        add_data_sources(builder, index);
+    }
+}
+
+/// `/data modify` 的四种来源后缀：`from`、`value`、`string`、`compute`。
+/// 三种目标共用一个模板；每个可执行节点都绑同一个动作。
+fn add_data_sources(builder: &mut Builder, parent: usize) {
+    let source_kind = |builder: &mut Builder, parent: usize, kind: &str, name: &str| -> usize {
+        match kind {
+            "block" => builder.argument(parent, name, ArgumentType::BlockPos, 0),
+            "entity" => builder.argument(parent, name, entity_argument(), 0),
+            _ => builder.argument(parent, name, ArgumentType::ResourceLocation, 0),
+        }
+    };
+    let integer = || ArgumentType::Integer {
+        min: i32::MIN,
+        max: i32::MAX,
+    };
+
+    let value = builder.literal(parent, "value", 0);
+    let tag = builder.argument(value, "value", ArgumentType::NbtTag, 0);
+    bind(builder, tag);
+
+    let from = builder.literal(parent, "from", 0);
+    let string = builder.literal(parent, "string", 0);
+    let compute = builder.literal(parent, "compute", 0);
+    for kind in ["block", "entity", "storage"] {
+        let from_kind = builder.literal(from, kind, 0);
+        let source = source_kind(builder, from_kind, kind, "source");
+        bind(builder, source);
+        let source_path = builder.argument(source, "sourcePath", ArgumentType::NbtPath, 0);
+        bind(builder, source_path);
+
+        let string_kind = builder.literal(string, kind, 0);
+        let source = source_kind(builder, string_kind, kind, "source");
+        bind(builder, source);
+        let source_path = builder.argument(source, "sourcePath", ArgumentType::NbtPath, 0);
+        bind(builder, source_path);
+        let start = builder.argument(source_path, "start", integer(), 0);
+        bind(builder, start);
+        let end = builder.argument(start, "end", integer(), 0);
+        bind(builder, end);
+
+        if kind == "storage" {
+            // 官方 `compute` 只有 block / default / entity 三种来源。
+            continue;
+        }
+        let compute_kind = builder.literal(compute, kind, 0);
+        let provider_parent = if kind == "block" {
+            builder.argument(compute_kind, "computePos", ArgumentType::BlockPos, 0)
+        } else {
+            builder.argument(compute_kind, "computeTarget", entity_argument(), 0)
+        };
+        for ty in ["float", "integer"] {
+            let branch = builder.literal(provider_parent, ty, 0);
+            let provider = builder.argument(
+                branch,
+                "provider",
+                if ty == "float" {
+                    ArgumentType::ContextFloatProvider
+                } else {
+                    ArgumentType::ContextIntProvider
+                },
+                0,
+            );
+            bind(builder, provider);
+        }
+    }
+    let default = builder.literal(compute, "default", 0);
+    for ty in ["float", "integer"] {
+        let branch = builder.literal(default, ty, 0);
+        let provider = builder.argument(
+            branch,
+            "provider",
+            if ty == "float" {
+                ArgumentType::ContextFloatProvider
+            } else {
+                ArgumentType::ContextIntProvider
+            },
+            0,
+        );
+        bind(builder, provider);
+    }
+}
+
+fn bind(builder: &mut Builder, node: usize) {
+    builder.run(node, data::data);
+}
+
 fn register_experience(builder: &mut Builder, root: usize) {
     let command = builder.literal(root, "experience", permission::GAMEMASTERS);
 

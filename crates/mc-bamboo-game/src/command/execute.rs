@@ -5,10 +5,12 @@
 
 use mc_bamboo_command::{ChainStep, EntityAnchor, ParsedCommand, Value, wrap_degrees};
 use mc_bamboo_core::{BlockPos, Vec3};
+use mc_bamboo_nbt::{NbtPath, Tag};
 
 use crate::{
     command::{
         commands,
+        data_source::{self, Kind, Source},
         feedback::{self, CommandFail, fail},
         select::{self, Target},
         source,
@@ -81,8 +83,22 @@ fn execute(
         }
         if matches!(
             step.kind.as_str(),
-            "store" | "result" | "success" | "score" | "bossbar" | "block" | "entity" | "storage"
-        ) {
+            "store"
+                | "result"
+                | "success"
+                | "score"
+                | "bossbar"
+                | "matches"
+                | "="
+                | "<"
+                | "<="
+                | ">"
+                | ">="
+        ) || (matches!(
+            step.kind.as_str(),
+            "block" | "entity" | "storage" | "int" | "short" | "long" | "float" | "double" | "byte"
+        ) && !stores.is_empty())
+        {
             continue;
         }
         let mut next = Vec::new();
@@ -124,7 +140,7 @@ fn execute(
         }
     }
     for store in stores {
-        apply_store(port, region, parsed, store, outcome)?;
+        apply_store(port, region, source_id, parsed, store, outcome)?;
     }
     Ok(())
 }
@@ -306,6 +322,9 @@ fn apply_step(
             Ok(Some(vec![context]))
         }
         "if" | "unless" => conditional(region, parsed, step, context),
+        "data" | "block" | "entity" | "storage" if is_data_or_store_target(parsed, step.level) => {
+            Ok(Some(vec![context]))
+        }
         other => Err(fail_with_text(other)),
     }
 }
@@ -360,7 +379,9 @@ fn conditional(
     } else if let Some(selector) = value("entities").and_then(Value::as_entity) {
         let targets = selection(region, context, selector)?;
         !targets.is_empty()
-    } else if let Some(holder) = value("target").and_then(Value::as_score_holder) {
+    } else if !has_literal(parsed, "data", step.level)
+        && let Some(holder) = value("target").and_then(Value::as_score_holder)
+    {
         let objective = value("targetObjective")
             .and_then(Value::as_str)
             .ok_or_else(|| fail("command.failed"))?;
@@ -389,11 +410,12 @@ fn conditional(
                     return Err(fail("command.failed"));
                 }
             };
-            let op = step
-                .arguments
+            let op = parsed
+                .chain
                 .iter()
-                .find(|(name, _)| matches!(name.as_str(), "<" | "<=" | "=" | ">=" | ">"))
-                .map(|(name, _)| name.as_str());
+                .filter(|link| link.level == step.level)
+                .map(|link| link.kind.as_str())
+                .find(|name| matches!(*name, "<" | "<=" | "=" | ">=" | ">"));
             match op {
                 Some("<") => score < other_score,
                 Some("<=") => score <= other_score,
@@ -404,6 +426,14 @@ fn conditional(
         } else {
             return Err(fail("command.failed"));
         }
+    } else if value("source").is_some() && has_literal(parsed, "data", step.level) {
+        let source = nbt_source(region, parsed, step, context)?;
+        let root = data_source::read_view(&region.global, region, &source).map_err(fail)?;
+        let path_text = value("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("command.failed"))?;
+        let path = NbtPath::parse(path_text).map_err(|_| fail("command.failed"))?;
+        !path.get(&root).is_empty()
     } else {
         // `predicate` 的求值依赖战利品表数据源；本期明确报错，不静默判假。
         return Err(fail("command.failed"));
@@ -420,6 +450,7 @@ fn conditional(
 fn apply_store(
     port: &mut GlobalPort<'_>,
     region: &mut Region,
+    source_id: PlayerId,
     parsed: &ParsedCommand,
     store: &ChainStep,
     outcome: Outcome,
@@ -488,8 +519,135 @@ fn apply_store(
         let _ = id;
         return Ok(());
     }
-    // `store ... block|entity|storage` 要 NBT 路径；第三期接 `/data` 时复用。
-    Err(fail("command.failed"))
+    let GlobalPort::Direct(global) = port else {
+        return Err(fail("command.failed"));
+    };
+    let layer = parsed
+        .chain
+        .iter()
+        .find(|step| matches!(step.kind.as_str(), "block" | "entity" | "storage"))
+        .ok_or_else(|| fail("command.failed"))?;
+    let path_text = layer
+        .arguments
+        .iter()
+        .find(|(name, _)| name == "path")
+        .and_then(|(_, value)| Value::as_str(value))
+        .ok_or_else(|| fail("command.failed"))?;
+    let path = NbtPath::parse(path_text).map_err(|_| fail("command.failed"))?;
+    let target = store_nbt_source(
+        region,
+        parsed,
+        layer,
+        Context {
+            source: source_id,
+            position: Vec3::default(),
+            yaw: 0.0,
+            pitch: 0.0,
+            anchor: EntityAnchor::Feet,
+            entity: None,
+            permission: 0,
+        },
+    )?;
+    let mut root = data_source::read(global, region, &target).map_err(fail)?;
+    let number = Tag::Int(value);
+    for leaf in path.get_mut(&mut root) {
+        *leaf = number.clone();
+    }
+    data_source::write(global, region, &target, &root).map_err(fail)?;
+    Ok(())
+}
+
+/// `store ... block|entity|storage` 的参数名是 `target`（官方 `ArgProvider.wrap`）。
+fn store_nbt_source(
+    region: &Region,
+    parsed: &ParsedCommand,
+    step: &ChainStep,
+    context: Context,
+) -> Result<Source, CommandFail> {
+    let value = |name: &str| parsed.step_value(step, name);
+    let target = value("target").ok_or_else(|| fail("command.failed"))?;
+    let mut out = Source {
+        kind: Kind::Storage,
+        block: None,
+        entity: None,
+        storage: None,
+    };
+    if let Some(coords) = Value::as_block_pos(target) {
+        out.kind = Kind::Block;
+        out.block = Some(BlockPos::containing(source::position(
+            coords,
+            base_source(context),
+        )));
+    } else if let Some(selector) = Value::as_entity(target) {
+        out.kind = Kind::Entity;
+        out.entity = Some(
+            select::targets_with(region, base_source(context), 4, selector)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| fail("argument.entity.notfound.entity"))?,
+        );
+    } else if let Some(id) = Value::as_str(target) {
+        out.kind = Kind::Storage;
+        out.storage = Some(id.to_owned());
+    } else {
+        return Err(fail("command.failed"));
+    }
+    Ok(out)
+}
+
+/// 官方 `if/unless data` 与 `store ... block|entity|storage` 的数据源解析。
+fn nbt_source(
+    region: &Region,
+    parsed: &ParsedCommand,
+    step: &ChainStep,
+    context: Context,
+) -> Result<Source, CommandFail> {
+    let value = |name: &str| parsed.step_value(step, name);
+    let mut out = Source {
+        kind: Kind::Storage,
+        block: None,
+        entity: None,
+        storage: None,
+    };
+    if let Some(coords) = value("source").and_then(Value::as_block_pos) {
+        out.kind = Kind::Block;
+        out.block = Some(BlockPos::containing(source::position(
+            coords,
+            base_source(context),
+        )));
+    } else if let Some(selector) = value("source").and_then(Value::as_entity) {
+        out.kind = Kind::Entity;
+        out.entity = Some(
+            select::targets_with(region, base_source(context), 4, selector)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| fail("argument.entity.notfound.entity"))?,
+        );
+    } else if let Some(id) = value("source").and_then(Value::as_str) {
+        out.kind = Kind::Storage;
+        out.storage = Some(id.to_owned());
+    } else {
+        return Err(fail("command.failed"));
+    }
+    Ok(out)
+}
+
+/// `store ... block|entity|storage` 的层里那几个字面量只是参数前缀，不是执行步骤。
+fn is_data_or_store_target(parsed: &ParsedCommand, level: usize) -> bool {
+    parsed.chain.iter().any(|step| {
+        step.level == level
+            && matches!(
+                step.kind.as_str(),
+                "data" | "store" | "result" | "success" | "block" | "entity" | "storage"
+            )
+    })
+}
+
+fn has_literal(parsed: &ParsedCommand, name: &str, level: usize) -> bool {
+    parsed
+        .chain
+        .iter()
+        .any(|step| step.level == level && step.kind == name)
 }
 
 fn fail_with_text(_text: &str) -> CommandFail {
@@ -696,6 +854,70 @@ mod tests {
             global.scoreboard().score_value("#total", "result"),
             Some(1),
             "官方每个分叉各自回调一次成功数 1，最后一次写入 1"
+        );
+    }
+
+    #[test]
+    fn store_result_storage_writes_the_command_result() {
+        let (mut global, mut region, id) = world_with("Kitten", 2);
+        on_command(
+            &mut global,
+            &mut region,
+            id,
+            "execute store result storage minecraft:test Value int 1 run setblock 4 -60 6 stone",
+            None,
+        );
+        assert!(
+            global
+                .command_storage
+                .get("minecraft:test")
+                .to_pretty_snbt()
+                .contains("1"),
+            "store result 写回 NBT"
+        );
+    }
+
+    #[test]
+    fn if_data_checks_the_storage_path() {
+        let (mut global, mut region, id) = world_with("Kitten", 2);
+        on_command(
+            &mut global,
+            &mut region,
+            id,
+            "data merge storage minecraft:test {Value:1}",
+            None,
+        );
+        global.publish(&mut region);
+        on_command(
+            &mut global,
+            &mut region,
+            id,
+            "execute if data storage minecraft:test Value run setblock 4 -60 6 stone",
+            None,
+        );
+        assert_eq!(
+            region
+                .chunks
+                .block(mc_bamboo_core::BlockPos::new(4, -60, 6)),
+            Some(mc_bamboo_data::blocks::STONE)
+        );
+    }
+
+    #[test]
+    fn unless_data_with_a_missing_path_still_runs() {
+        let (mut global, mut region, id) = world_with("Kitten", 2);
+        on_command(
+            &mut global,
+            &mut region,
+            id,
+            "execute unless data storage minecraft:test Missing run setblock 4 -60 6 stone",
+            None,
+        );
+        assert_eq!(
+            region
+                .chunks
+                .block(mc_bamboo_core::BlockPos::new(4, -60, 6)),
+            Some(mc_bamboo_data::blocks::STONE)
         );
     }
 

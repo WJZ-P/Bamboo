@@ -162,6 +162,13 @@ pub enum ArgumentType {
     FloatRange,
     /// 官方 `FunctionArgument`：只解析函数名。
     Function,
+    /// 官方 `NbtTagArgument`：任意 SNBT 值。
+    NbtTag,
+    /// 官方 `ContextIntProvider` / `ContextFloatProvider`：本树只保留文本。
+    ContextIntProvider,
+    ContextFloatProvider,
+    /// 官方 `ItemSlotsArgument`（`/data modify` 的 compute 用不到，树里预留）。
+    ItemSlots,
 }
 
 impl ArgumentType {
@@ -213,6 +220,10 @@ impl ArgumentType {
             Self::LootPredicate => "minecraft:loot_predicate",
             Self::FloatRange => "minecraft:float_range",
             Self::Function => "minecraft:function",
+            Self::NbtTag => "minecraft:nbt_tag",
+            Self::ContextIntProvider => "minecraft:context_int_provider",
+            Self::ContextFloatProvider => "minecraft:context_float_provider",
+            Self::ItemSlots => "minecraft:item_slots",
         }
     }
 
@@ -265,6 +276,10 @@ impl ArgumentType {
             Self::LootPredicate => registry::LOOT_PREDICATE,
             Self::FloatRange => registry::FLOAT_RANGE,
             Self::Function => registry::FUNCTION,
+            Self::NbtTag => registry::NBT_TAG,
+            Self::ContextIntProvider => registry::CONTEXT_INT_PROVIDER,
+            Self::ContextFloatProvider => registry::CONTEXT_FLOAT_PROVIDER,
+            Self::ItemSlots => registry::ITEM_SLOTS,
         }
     }
 
@@ -348,6 +363,11 @@ impl ArgumentType {
             Self::LootPredicate => parse_resource_location(reader),
             Self::FloatRange => Ok(Value::String(reader.read_unquoted_string())),
             Self::Function => parse_resource_location(reader),
+            Self::NbtTag => parse_nbt_tag(reader),
+            Self::ContextIntProvider | Self::ContextFloatProvider => {
+                Ok(Value::String(reader.read_unquoted_string()))
+            }
+            Self::ItemSlots => Ok(Value::String(reader.read_unquoted_string())),
         }
     }
 
@@ -454,6 +474,16 @@ fn parse_swizzle(reader: &mut StringReader) -> Result<Value, ParseError> {
 }
 
 /// 官方 `ResourceOrTagArgument`：`#` 前缀是标签，本命令树只把它当文本解析。
+/// 官方 `NbtTagArgument`：任意 SNBT 值，存成 `Value::Nbt`。
+fn parse_nbt_tag(reader: &mut StringReader) -> Result<Value, ParseError> {
+    let start = reader.cursor();
+    let rest = reader.remaining();
+    let (tag, used) = mc_bamboo_nbt::parse_snbt_argument(&rest)
+        .map_err(|error| ParseError::text("argument.nbt.invalid", error.message))?;
+    reader.set_cursor(start + used);
+    Ok(Value::Nbt(tag))
+}
+
 fn parse_resource_or_tag(reader: &mut StringReader, _registry: &str) -> Result<Value, ParseError> {
     if reader.can_read() && reader.peek() == '#' {
         reader.skip();

@@ -17,7 +17,7 @@
 //! mc-bamboo-vanilla command-oracle <java 路径> [--show N] [--break-self-test]
 //!     把实体选择器的解析、过滤和排序交给官方 `EntitySelectorParser` 对拍
 //! mc-bamboo-vanilla execute-oracle <java 路径> [--show N] [--break-self-test]
-//!     用官方 `Commands` 跑整条 `/execute`，比较方块、分数和反馈
+//!     用官方 `Commands` 跑 42 条整命令（/execute 与 /data），比较方块、分数、NBT 和反馈
 //! mc-bamboo-vanilla components <java 路径> [--show N]
 //!     让官方代码编码一大批物品组件，用 mc-bamboo-protocol 解码再编码，逐字节比较
 //! mc-bamboo-vanilla predicate-oracle <java 路径> [--cases N] [--seed S] [--show N]
