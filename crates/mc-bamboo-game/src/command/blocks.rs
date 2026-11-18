@@ -15,7 +15,10 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_protocol::text::TranslateArg;
 
 use crate::{
-    command::feedback::{self, CommandFail, fail, fail_with},
+    command::{
+        feedback::{self, CommandFail, fail, fail_with},
+        source,
+    },
     global_port::GlobalPort,
     inbound::PlayerId,
     interaction,
@@ -146,8 +149,8 @@ fn set_block(
     strict: bool,
 ) -> Result<(), CommandFail> {
     let (pos, input) = {
-        let player = source_player(region, id)?;
-        let pos = block_position(required_block_pos(parsed, "pos")?, player);
+        let source = source::of(region, id);
+        let pos = block_position(required_block_pos(parsed, "pos")?, source);
         let input = required_state(parsed, "block")?.clone();
         (pos, input)
     };
@@ -212,9 +215,9 @@ fn fill(
     keep: bool,
 ) -> Result<(), CommandFail> {
     let (from, to, input, filter) = {
-        let player = source_player(region, id)?;
-        let from = block_position(required_block_pos(parsed, "from")?, player);
-        let to = block_position(required_block_pos(parsed, "to")?, player);
+        let source = source::of(region, id);
+        let from = block_position(required_block_pos(parsed, "from")?, source);
+        let to = block_position(required_block_pos(parsed, "to")?, source);
         let input = required_state(parsed, "block")?.clone();
         let filter = parsed
             .get("filter")
@@ -388,13 +391,6 @@ pub(crate) fn loaded(world: &World, pos: BlockPos) -> Result<(), CommandFail> {
     Ok(())
 }
 
-fn source_player(region: &Region, id: PlayerId) -> Result<&crate::player::Player, CommandFail> {
-    region
-        .players
-        .get(&id)
-        .ok_or_else(|| fail("permissions.requires.player"))
-}
-
 pub(crate) fn required_block_pos(
     parsed: &ParsedCommand,
     name: &str,
@@ -415,6 +411,6 @@ fn required_state<'a>(
         .ok_or_else(|| fail("command.failed"))
 }
 
-pub(crate) fn block_position(coords: Coordinates, player: &crate::player::Player) -> BlockPos {
-    BlockPos::containing(coords.position(player.position(), player.yaw, player.pitch))
+pub(crate) fn block_position(coords: Coordinates, source: source::Source) -> BlockPos {
+    BlockPos::containing(source::position(coords, source))
 }

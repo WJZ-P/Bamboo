@@ -24,7 +24,7 @@ use crate::{
     command::{
         blocks::block_position,
         feedback::{self, CommandFail, fail, fail_with},
-        players, select,
+        players, select, source,
     },
     container::kind_of,
     global::Global,
@@ -128,24 +128,20 @@ fn loot_command(
     request: Request,
 ) -> Result<(), CommandFail> {
     need_entity(&request, parsed)?;
-    let player = region
-        .players
-        .get(&id)
-        .ok_or_else(|| fail("permissions.requires.player"))?;
+    let command_source = source::of(region, id);
     let source_position = parsed
         .get("pos")
         .and_then(Value::as_block_pos)
-        .map(|coords| block_position(coords, player))
-        .unwrap_or(BlockPos::containing(player.position()));
+        .map(|coords| block_position(coords, command_source))
+        .unwrap_or(BlockPos::containing(command_source.position));
     let target_position = parsed
         .get("targetPos")
         .and_then(Value::as_block_pos)
-        .map(|coords| block_position(coords, player));
-    let drop_position = parsed
-        .get("targetPos")
-        .and_then(Value::as_vec3)
-        .map(|coords| coords.position(player.position(), player.yaw, player.pitch))
-        .unwrap_or(player.position());
+        .map(|coords| block_position(coords, command_source));
+    let drop_position = match parsed.get("targetPos").and_then(Value::as_vec3) {
+        Some(coords) => source::position(coords, command_source),
+        None => command_source.position,
+    };
     let stacks = evaluate(
         region,
         &global.random_sequences,
@@ -190,9 +186,15 @@ fn loot_command(
                 .get("entities")
                 .and_then(Value::as_entity)
                 .ok_or_else(|| fail("command.failed"))?;
-            let targets = select::entities(region, id, players::level_of(region, id), selector)?;
+            let targets = select::targets(region, id, players::level_of(region, id), selector)?;
             let slot = slot_index(parsed)?;
             for target in targets {
+                let select::Target::Player(target) = target else {
+                    // 官方 `replace entity` 也认非玩家实体的物品栏；Bamboo 只有玩家有。
+                    // Official `replace entity` accepts non-player inventories too;
+                    // Bamboo only models the player's.
+                    continue;
+                };
                 if let Some(player) = region.players.get_mut(&target) {
                     for (offset, stack) in stacks.iter().enumerate() {
                         if let Some(item) = player

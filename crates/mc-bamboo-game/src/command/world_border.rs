@@ -13,7 +13,6 @@
 
 use mc_bamboo_blocks::{BorderEvent, MAX_CENTER_COORDINATE, MAX_SIZE};
 use mc_bamboo_command::{ParsedCommand, Value};
-use mc_bamboo_core::Vec3;
 use mc_bamboo_protocol::{
     packet::play::{
         SetBorderCenter, SetBorderLerpSize, SetBorderSize, SetBorderWarningDelay,
@@ -23,7 +22,10 @@ use mc_bamboo_protocol::{
 };
 
 use crate::{
-    command::feedback::{self, CommandFail, fail, fail_with},
+    command::{
+        feedback::{self, CommandFail, fail, fail_with},
+        source,
+    },
     global::Global,
     inbound::PlayerId,
     links::encode_frames,
@@ -142,7 +144,7 @@ pub(crate) fn center(
     let Some([x, z]) = parsed.get("pos").and_then(Value::as_vec2) else {
         return Err(fail("command.failed"));
     };
-    let source = source_position(region, id)?;
+    let source = source::position_of(region, id);
     // 官方 `Vec2Argument.getVec2` 把两个 double 收成 float，再当 double 用。
     //
     // Vanilla `Vec2Argument.getVec2` narrows both doubles to floats, then widens them.
@@ -383,17 +385,6 @@ fn apply(global: &mut Global, region: &mut Region, event: BorderEvent) {
     region.links.broadcast(&frames);
 }
 
-/// 执行者的脚底，`Vec2Argument.getVec2` 解相对坐标时要它。
-///
-/// The caller's feet, used by `Vec2Argument.getVec2` to resolve relative coordinates.
-fn source_position(region: &Region, id: PlayerId) -> Result<Vec3, CommandFail> {
-    region
-        .players
-        .get(&id)
-        .map(|player| player.position())
-        .ok_or_else(|| fail("permissions.requires.player"))
-}
-
 fn double_arg(parsed: &ParsedCommand, name: &str) -> Result<f64, CommandFail> {
     parsed
         .get(name)
@@ -424,6 +415,7 @@ fn time_arg(parsed: &ParsedCommand, name: &str) -> Result<i32, CommandFail> {
 
 #[cfg(test)]
 mod tests {
+    use mc_bamboo_core::Vec3;
     use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
     use uuid::Uuid;
 

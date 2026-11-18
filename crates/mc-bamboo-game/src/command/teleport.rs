@@ -13,7 +13,8 @@ use mc_bamboo_protocol::{
 use crate::{
     command::{
         feedback::{self, CommandFail, fail},
-        select,
+        select::{self, Target},
+        source,
     },
     global_port::GlobalPort,
     inbound::PlayerId,
@@ -33,24 +34,25 @@ pub(crate) fn teleport(
 ) -> Result<(), CommandFail> {
     let _ = port;
     let level = level_of(region, id);
-    let (source_pos, source_yaw, source_pitch) = source_pose(region, id)?;
+    let command_source = source::of(region, id);
+    let self_target = source::entity_or_exception(command_source)?;
     let targets = if let Some(selector) = entity_arg(parsed, "targets") {
-        select::entities(region, id, level, selector)?
+        select::targets(region, id, level, selector)?
     } else {
-        vec![id]
+        vec![self_target]
     };
     if let Some(selector) = entity_arg(parsed, "destination") {
-        let destination = select::one_entity(region, id, level, selector)?;
+        let destination = select::one_target(region, id, level, selector)?;
         teleport_to_entity(region, id, &targets, destination)
     } else {
         let location = parsed
             .get("location")
             .and_then(|value| value.as_vec3())
             .ok_or_else(|| fail("command.failed"))?;
-        let absolute = location.position(source_pos, source_yaw, source_pitch);
+        let absolute = source::position(location, command_source);
         let rotation = parsed.get("rotation").and_then(|value| value.as_rotation());
         let facing_entity = entity_arg(parsed, "facingEntity")
-            .map(|selector| select::one_entity(region, id, level, selector))
+            .map(|selector| select::one_target(region, id, level, selector))
             .transpose()?;
         let facing_anchor = parsed
             .get("facingAnchor")
@@ -59,7 +61,7 @@ pub(crate) fn teleport(
         let facing_pos = parsed
             .get("facingLocation")
             .and_then(|value| value.as_vec3())
-            .map(|coords| coords.position(source_pos, source_yaw, source_pitch));
+            .map(|coords| source::position(coords, command_source));
         teleport_to_location(
             region,
             id,
@@ -79,24 +81,38 @@ pub(crate) fn teleport(
 fn teleport_to_entity(
     region: &mut Region,
     source: PlayerId,
-    targets: &[PlayerId],
-    destination: PlayerId,
+    targets: &[Target],
+    destination: Target,
 ) -> Result<(), CommandFail> {
-    let (position, yaw, pitch, name) = {
-        let player = region
-            .players
-            .get(&destination)
-            .ok_or_else(|| fail("argument.entity.notfound.entity"))?;
-        (
-            player.position(),
-            player.yaw,
-            player.pitch,
-            player.name.clone(),
-        )
+    let (position, yaw, pitch, name) = match destination {
+        Target::Player(id) => {
+            let player = region
+                .players
+                .get(&id)
+                .ok_or_else(|| fail("argument.entity.notfound.entity"))?;
+            (
+                player.position(),
+                player.yaw,
+                player.pitch,
+                player.name.clone(),
+            )
+        }
+        Target::World(uid) => {
+            let public = region
+                .entities
+                .public_at(uid)
+                .ok_or_else(|| fail("argument.entity.notfound.entity"))?;
+            let name = source::entity_name(region, destination).unwrap_or_default();
+            let (yaw, pitch) = match &public.kind {
+                mc_bamboo_blocks::entity::KindPublic::Mob(mob) => (public.yaw, mob.x_rot),
+                _ => (public.yaw, 0.0),
+            };
+            (public.position, yaw, pitch, name)
+        }
     };
     ensure_spawnable(position)?;
     for target in targets {
-        move_player(
+        move_target(
             region,
             *target,
             position,
@@ -107,7 +123,7 @@ fn teleport_to_entity(
         Component::translate(
             "commands.teleport.success.entity.single",
             [
-                Component::text(player_name(region, targets[0])).into(),
+                Component::text(target_name(region, targets[0])).into(),
                 Component::text(name).into(),
             ],
         )
@@ -125,7 +141,7 @@ fn teleport_to_entity(
 }
 
 struct Facing {
-    entity: Option<PlayerId>,
+    entity: Option<Target>,
     anchor: EntityAnchor,
     position: Option<Vec3>,
 }
@@ -133,19 +149,16 @@ struct Facing {
 fn teleport_to_location(
     region: &mut Region,
     source: PlayerId,
-    targets: &[PlayerId],
+    targets: &[Target],
     location: Coordinates,
     absolute: Vec3,
     rotation: Option<Rotation>,
     facing: Facing,
 ) -> Result<(), CommandFail> {
     ensure_spawnable(absolute)?;
+    let command_source = source::of(region, source);
     let specified = rotation.map(|rotation| {
-        let (yaw, pitch) = region
-            .players
-            .get(&source)
-            .map(|player| rotation.resolve(player.yaw, player.pitch))
-            .unwrap_or((0.0, 0.0));
+        let (yaw, pitch) = rotation.resolve(command_source.yaw, command_source.pitch);
         (yaw, pitch, rotation.yaw.relative, rotation.pitch.relative)
     });
     for target in targets {
@@ -175,14 +188,14 @@ fn teleport_to_location(
                 position_bits: relative_bits(location),
             }
         };
-        move_player(region, *target, absolute, plan);
+        move_target(region, *target, absolute, plan);
     }
     let position = format_position(absolute);
     let message = if targets.len() == 1 {
         Component::translate(
             "commands.teleport.success.location.single",
             [
-                Component::text(player_name(region, targets[0])).into(),
+                Component::text(target_name(region, targets[0])).into(),
                 position[0].clone().into(),
                 position[1].clone().into(),
                 position[2].clone().into(),
@@ -212,27 +225,24 @@ fn teleport_to_location(
 fn facing_after_move(
     region: &Region,
     absolute: Vec3,
-    target: PlayerId,
-    facing_entity: Option<PlayerId>,
+    target: Target,
+    facing_entity: Option<Target>,
     facing_anchor: EntityAnchor,
     facing_pos: Option<Vec3>,
 ) -> Option<(f32, f32)> {
     let to = if let Some(entity) = facing_entity {
-        // 被看的人就是这次要传的目标时，官方先传送再 `lookAt`，眼睛和脚底都在落点上。
+        // 被看的实体就是这次要传的目标时，官方先传送再 `lookAt`，眼睛和脚底都在落点上。
         //
-        // When the looked-at player is the target, official teleports first and then
+        // When the looked-at entity is the target, official teleports first and then
         // `lookAt`, so both anchors sit at the destination.
         if entity == target {
             Some(anchor_at(
                 absolute,
-                eye_height(region, entity),
+                eye_height(region, entity, target),
                 facing_anchor,
             ))
         } else {
-            region
-                .players
-                .get(&entity)
-                .map(|player| anchor_point(player, facing_anchor))
+            anchor_point(region, entity, facing_anchor)
         }
     } else {
         facing_pos
@@ -263,6 +273,43 @@ enum RotationPlan {
         yaw: f32,
         pitch: f32,
     },
+}
+
+fn move_target(region: &mut Region, target: Target, absolute: Vec3, plan: RotationPlan) {
+    match target {
+        Target::Player(id) => move_player(region, id, absolute, plan),
+        Target::World(uid) => move_entity(region, uid, absolute, plan),
+    }
+}
+
+/// 官方 `Entity.teleportTo`：非玩家实体没有传送确认包，位置直接写进实体表，
+/// 下一刻的 `entity_tracking::sync` 按新位置发同步包。
+///
+/// Official `Entity.teleportTo`: a non-player entity has no teleport-confirmation
+/// packet; its position is written into the store and the next
+/// `entity_tracking::sync` sends the update.
+fn move_entity(region: &mut Region, uid: i32, absolute: Vec3, plan: RotationPlan) {
+    let (yaw, pitch) = match plan {
+        RotationPlan::Keep { .. } => (None, None),
+        RotationPlan::Specified { yaw, pitch, .. }
+        | RotationPlan::Look { yaw, pitch, .. }
+        | RotationPlan::Absolute { yaw, pitch } => (Some(yaw), Some(pitch)),
+    };
+    region.entities.with_mut(uid, |entity| {
+        entity.position = absolute;
+        entity.old_position = absolute;
+        entity.delta = Vec3::default();
+        entity.on_ground = false;
+        if let Some(yaw) = yaw {
+            entity.y_rot = yaw;
+        }
+        if let Some(pitch) = pitch
+            && let Some(mob) = entity.kind.mob_mut()
+        {
+            mob.x_rot = pitch;
+            mob.y_head_rot = yaw.unwrap_or(mob.y_head_rot);
+        }
+    });
 }
 
 fn move_player(region: &mut Region, id: PlayerId, absolute: Vec3, plan: RotationPlan) {
@@ -406,8 +453,18 @@ fn look_angles(from: Vec3, to: Vec3) -> (f32, f32) {
     (yaw, pitch)
 }
 
-fn anchor_point(player: &Player, anchor: EntityAnchor) -> Vec3 {
-    anchor_at(player.position(), player.eye_height(), anchor)
+fn anchor_point(region: &Region, target: Target, anchor: EntityAnchor) -> Option<Vec3> {
+    match target {
+        Target::Player(id) => {
+            let player = region.players.get(&id)?;
+            Some(anchor_at(player.position(), player.eye_height(), anchor))
+        }
+        Target::World(uid) => {
+            let public = region.entities.public_at(uid)?;
+            let height = f64::from(public.kind.dimensions().1);
+            Some(anchor_at(public.position, height * 0.85, anchor))
+        }
+    }
 }
 
 fn anchor_at(feet: Vec3, eye_height: f64, anchor: EntityAnchor) -> Vec3 {
@@ -417,12 +474,22 @@ fn anchor_at(feet: Vec3, eye_height: f64, anchor: EntityAnchor) -> Vec3 {
     }
 }
 
-fn eye_height(region: &Region, id: PlayerId) -> f64 {
-    region
-        .players
-        .get(&id)
-        .map(|player| player.eye_height())
-        .unwrap_or(1.62)
+fn eye_height(region: &Region, entity: Target, target: Target) -> f64 {
+    // 目标是被看的实体时，锚点按它自己算；其余按目标此刻的身高。
+    // When the target is the looked-at entity, use its own eye height.
+    let _ = target;
+    match entity {
+        Target::Player(id) => region
+            .players
+            .get(&id)
+            .map(|player| player.eye_height())
+            .unwrap_or(1.62),
+        Target::World(uid) => region
+            .entities
+            .public_at(uid)
+            .map(|public| f64::from(public.kind.dimensions().1) * 0.85)
+            .unwrap_or(1.62),
+    }
 }
 
 fn ensure_spawnable(position: Vec3) -> Result<(), CommandFail> {
@@ -459,14 +526,6 @@ fn entity_arg<'a>(
     parsed.get(name).and_then(Value::as_entity)
 }
 
-fn source_pose(region: &Region, id: PlayerId) -> Result<(Vec3, f32, f32), CommandFail> {
-    region
-        .players
-        .get(&id)
-        .map(|player| (player.position(), player.yaw, player.pitch))
-        .ok_or_else(|| fail("permissions.requires.player"))
-}
-
 fn level_of(region: &Region, id: PlayerId) -> u8 {
     region
         .players
@@ -475,10 +534,6 @@ fn level_of(region: &Region, id: PlayerId) -> u8 {
         .unwrap_or(0)
 }
 
-fn player_name(region: &Region, id: PlayerId) -> String {
-    region
-        .players
-        .get(&id)
-        .map(|player| player.name.clone())
-        .unwrap_or_default()
+fn target_name(region: &Region, target: Target) -> String {
+    source::entity_name(region, target).unwrap_or_default()
 }

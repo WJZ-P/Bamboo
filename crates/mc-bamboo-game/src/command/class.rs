@@ -32,11 +32,11 @@ pub(crate) enum CommandClass {
     CrossIsland,
 }
 
-/// 4.4 的表：51 个顶层字面量各属哪一类（别名单列），加上后来接入的 `/summon`。
-/// `/summon` 只动本岛的实体表，归本岛类。
+/// 4.4 的表：51 个顶层字面量各属哪一类（别名单列），加上 `/summon` 和 `/kill`。
+/// 后两条只动岛上的实体表，归本岛类。
 ///
 /// The 4.4 table: the class of each of the 51 root literals (aliases listed),
-/// plus `/summon`, which only touches the island's own entity table.
+/// plus `/summon` and `/kill`, which only touch the island's own entity table.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("setblock", CommandClass::Island),
@@ -80,6 +80,7 @@ pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     // The named random sequences are one per world, on the master (plan 3.3).
     ("loot", CommandClass::Global),
     ("random", CommandClass::Global),
+    ("kill", CommandClass::Island),
     ("teleport", CommandClass::CrossIsland),
     ("tp", CommandClass::CrossIsland),
     ("give", CommandClass::CrossIsland),
@@ -136,7 +137,7 @@ pub(crate) const SCOPES: &[(&str, CommandScope)] = &[
     ("defaultgamemode", CommandScope::World),
     ("particle", CommandScope::Players),
     ("playsound", CommandScope::Players),
-    ("enchant", CommandScope::Players),
+    ("enchant", CommandScope::World),
     ("stopsound", CommandScope::Players),
     ("spawnpoint", CommandScope::Players),
     ("transfer", CommandScope::Players),
@@ -167,8 +168,9 @@ pub(crate) const SCOPES: &[(&str, CommandScope)] = &[
     ("team", CommandScope::Players),
     ("bossbar", CommandScope::Players),
     ("random", CommandScope::Players),
-    ("teleport", CommandScope::Players),
-    ("tp", CommandScope::Players),
+    ("kill", CommandScope::World),
+    ("teleport", CommandScope::World),
+    ("tp", CommandScope::World),
     ("give", CommandScope::Players),
     ("clear", CommandScope::Players),
     ("kick", CommandScope::Players),
@@ -236,10 +238,10 @@ mod tests {
             };
             roots.push((name.clone(), child));
         }
-        // 4.4 的 51 个加上 `/summon`。
-        // The 51 of 4.4 plus `/summon`.
-        assert_eq!(roots.len(), 52);
-        assert_eq!(CLASSES.len(), 52);
+        // 4.4 的 51 个加上 `/summon`、`/kill`。
+        // The 51 of 4.4 plus `/summon` and `/kill`.
+        assert_eq!(roots.len(), 53);
+        assert_eq!(CLASSES.len(), 53);
         // 每个顶层字面量都定了范围（计划 4.5），不多不少。
         // Every root literal has a scope (plan 4.5), no more and no fewer.
         let scoped: BTreeSet<&str> = SCOPES.iter().map(|(name, _)| *name).collect();

@@ -1006,9 +1006,16 @@ WebView2 的渲染进程不算在内。
   `/particle` 能解析注册表里全部 128 种粒子名；带选项的 19 种按官方 `ParticleTypes.STREAM_CODEC` 编码
   （`dust` 的颜色和缩放、`block` 的方块状态、`item` 的物品堆、颜色类、geyser、trail、vibration 等）。
   `item` 选项只支持 `id` 和 `count`，不支持数据组件；`vibration` 只支持 `block` 位置来源（官方也拒绝 entity 来源）。
-  两个命令的世界坐标都取执行者脚底，没有命令方块或 `/execute` 的来源偏移。
+  两个命令的世界坐标都取执行来源的位置（玩家脚底、控制台出生点），没有命令方块或 `/execute` 的来源偏移。
   难度默认 `easy`（和官方专用服务器一致；`difficulty` 已能在 `server.properties` 里读到，但 Bamboo 还没实现这个键），`/difficulty` 改完广播给所有人，进服时同步。默认游戏模式是创造模式（官方专用服务器默认是生存；`gamemode` 已能在 `server.properties` 里读到，但 Bamboo 还没实现这个键）；`force-gamemode` 按官方默认关闭，`/defaultgamemode` 不改在线玩家的模式。`level-seed` 还没有实现，世界种子固定为 0，`/seed` 报的就是它，`login` 里的哈希种子按官方 `BiomeManager.obfuscateSeed` 算。
   `/clone` 复制方块和方块实体数据，上限读 `max_block_modifications`；`/random` 按官方的种子规则共用 `mc-bamboo-loot` 的随机序列；`/enchant` 给主手物品写附魔组件；`/stopsound` 只给选中的玩家发包。`/loot` 的 `give`、`insert`、`replace`、`spawn` 和来源 `loot`、`mine` 可用；`spawn` 按官方 `dropInWorld` 生成带默认拾取延迟的物品实体，`kill`、`fish` 已在命令树里注册但执行时返回失败（还没有实体死亡和钓鱼系统）。
+  `/kill` 按官方 `KillCommand`：权限 2、无参杀 `@s`、带选择器杀选中的玩家和非玩家实体；牛走已有的
+  `LivingEntity.kill` → 掉落、经验球、死亡动画，其它非玩家实体直接 `remove(KILLED)`。玩家目标目前
+  明确报 `command.failed`（Bamboo 还没有玩家死亡/重生流程）。实体选择器 `@e` / `@n` / `@s` 现在同时
+  遍历玩家和非玩家实体，按官方 `EntitySelector` 的 `type`（含 `!` 与 `#` 标签）、`distance`、
+  `x/y/z/dx/dy/dz`、`sort`、`limit`、`name`、`tag`、`gamemode`、`team`、`scores` 过滤和排序；
+  `nbt`、`advancements`、`predicate` 在解析时明确报错。`tools/mc-bamboo-vanilla command-oracle` 把
+  24 个选择器交给官方 26.3 的 `EntitySelectorParser` 逐项对拍，`--break-self-test` 故意改坏一处。
 - 战利品表（`mc-bamboo-loot`）按官方 `LootTable` 算出方块掉落、实体死亡和箱子填充，随机源的取数次数和顺序跟官方对齐。生存和冒险挖方块、TNT 爆炸和 `/loot` 已经调用；实体死亡还没接。容器上的 `LootTable` / `LootTableSeed`（或物品上的 `container_loot` 组件放下后的方块实体）在官方 `unpackLootTable` 的调用点解包：玩家打开菜单、漏斗和投掷器读写、发射器取槽、饰纹陶罐读写、比较器读信号、破坏掉内容之前。填完就清表，旁观者打开不解包。随机源按 `LootContext.Builder.create` 选：种子非 0 用 `LegacyRandomSource(seed)`，种子为 0 且表有 `random_sequence` 用世界共用的序列缓存，都没有才用 `level.random`；结构生成时 `setBlockEntityLootTable` 的 `nextLong` 还没接。未解包的表会原样写回中键物品的 `container_loot`。`/setblock` 的方块 NBT 后缀和 `/give` 的物品组件后缀目前会明确报不支持，所以暂时不能用命令造出带战利品表的箱子；方块实体数据里的 `LootTable` / `LootTableSeed` 和 `container_loot` 组件能直接由物品或 `/clone` 带进游戏。解包不走 `THIS_ENTITY` 参数，玩家幸运值按默认的 0；依赖 `this_entity` 的自定义表会报不支持并清表。`loot-oracle` 的箱子题逐项比较 `fill`，另加了一道带 `BLOCK_ENTITY` 的潜影盒掉落题逐项比组件；`menu` oracle 加了一道「打开带战利品表的箱子」。序列缓存在世界里，种子是平坦世界的 0，不存档。
 - 计分板、队伍和 Boss 栏按官方 26.3 的命令树和权限等级 2 实现，全服一份，放在世界线程的全局状态里，**不写存档**：重启后目标、分数、队伍和 Boss 栏全部回到空。
   `/scoreboard objectives` 支持 `list|add|remove|setdisplay|modify`（`displayname`、`rendertype`、`displayautoupdate`、`numberformat` 的 `blank`/`styled`/`fixed`）；
@@ -1037,8 +1044,10 @@ WebView2 的渲染进程不算在内。
   决定反馈要不要广播给在线 OP，反馈打进日志（官方 `MinecraftServer.sendSystemMessage`）。
   `/stop` 走同一条关服流程，所以控制台 `stop` 和客户端 `/stop` 都能正常关服并存盘。
   已知限制：Bamboo 没有语言文件，日志里保留翻译键（如 `commands.stop.stopping`）加参数，
-  不解析成英文；控制台来源没有实体和出生点位置，带 `@s` 或相对坐标的选择器/命令按「没有
-  来源实体」处理，和官方从世界出生点续算不完全一致；桌面端是 GUI，不起读 stdin 的线程；
+  不解析成英文；控制台来源不是世界里的实体，无参 `/kill`、只收玩家的 `@s` 等按官方报
+  `permissions.requires.player`；坐标类命令以世界出生点方块的左下角为执行位置（官方
+  `MinecraftServer.createCommandSourceStack`），绝对坐标照用、`~` / `^` 也从这个位置算；
+  桌面端是 GUI，不起读 stdin 的线程；
   Windows 后台起的原生进程没有可用 stdin，控制台线程读到 EOF 就退出，`tools/probe.sh`
   因此用客户端 `/stop`，有真实控制台/管道时往 stdin 写 `stop` 一样能关服。
   会改组件的函数只记下「要设置什么」的 JSON，不写真正的组件字节。

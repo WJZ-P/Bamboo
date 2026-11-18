@@ -12,7 +12,10 @@ use mc_bamboo_command::ParsedCommand;
 use mc_bamboo_protocol::text::{Component, TranslateArg};
 
 use crate::{
-    command::feedback::{self, CommandFail, fail},
+    command::{
+        feedback::{self, CommandFail, fail},
+        source,
+    },
     global_port::GlobalPort,
     inbound::PlayerId,
     interaction,
@@ -78,18 +81,12 @@ fn summon(
         .and_then(|value| value.as_str())
         .ok_or_else(|| fail("command.failed"))?
         .to_owned();
-    let position = {
-        let player = region
-            .players
-            .get(&id)
-            .ok_or_else(|| fail("permissions.requires.player"))?;
-        match parsed.get("pos").and_then(|value| value.as_vec3()) {
-            Some(coords) if with_pos => {
-                coords.position(player.position(), player.yaw, player.pitch)
-            }
-            _ => player.position(),
-        }
-    };
+    let command_source = source::of(region, id);
+    // 不带 `<pos>` 时用执行者自己的位置；`with_pos` 只区分这两棵命令树节点。
+    // Without `<pos>`, use the executor's own position; `with_pos` only tells
+    // the two command-tree nodes apart.
+    let _ = with_pos;
+    let position = source::coordinates(parsed, "pos", command_source, command_source.position)?;
     let nbt = if with_nbt {
         Some(
             parsed

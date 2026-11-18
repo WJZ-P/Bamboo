@@ -10,19 +10,16 @@ use mc_bamboo_protocol::text::Component;
 use crate::{
     command::{
         feedback::{self, CommandFail, fail},
+        source,
         text::level_of,
     },
     inbound::PlayerId,
     region::Region,
 };
 
-/// 官方 `CommandSourceStack.getPosition`：执行者脚底的位置。
+/// 官方 `CommandSourceStack.getPosition`：执行者脚底的位置，控制台是出生点。
 pub(crate) fn source_position(region: &Region, id: PlayerId) -> Vec3 {
-    region
-        .players
-        .get(&id)
-        .map(|player| player.position())
-        .unwrap_or(Vec3::new(0.0, 0.0, 0.0))
+    source::position_of(region, id)
 }
 
 /// 把参数节点里的坐标按执行者位置和朝向算成世界坐标。
@@ -37,12 +34,7 @@ pub(crate) fn coordinates(
         return Ok(default);
     };
     let coords = value.as_vec3().ok_or_else(|| fail("command.failed"))?;
-    let (yaw, pitch) = region
-        .players
-        .get(&id)
-        .map(|player| (player.yaw, player.pitch))
-        .unwrap_or((0.0, 0.0));
-    Ok(coords.position(source_position(region, id), yaw, pitch))
+    Ok(source::position(coords, source::of(region, id)))
 }
 
 /// `EntityArgument.getPlayers` 的空结果在 `select::players` 里已经报错。

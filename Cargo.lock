@@ -2088,6 +2088,7 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "mc-bamboo-blocks",
+ "mc-bamboo-command",
  "mc-bamboo-core",
  "mc-bamboo-data",
  "mc-bamboo-game",

@@ -248,6 +248,10 @@ fn run_cross_island(seed: u64, lend_nothing: bool) {
             21,
             Act::Command(1, "loot give @a loot minecraft:blocks/diamond_ore"),
         ),
+        // `@e` 现在也看非玩家实体；`/tp` 与 `/kill` 的范围要按 `SCOPES` 拼整个世界。
+        // 没有非玩家实体时选择器照样走同一条路径，反馈在两个世界里逐位相同。
+        (22, Act::Command(0, "kill @e[type=minecraft:item]")),
+        (23, Act::Console("setblock 8 -60 8 minecraft:stone")),
     ];
     let mut multi = set_up(seed, Harness::new_islands(2, 0));
     let mut control = set_up(
@@ -273,7 +277,7 @@ fn run_cross_island(seed: u64, lend_nothing: bool) {
             island.region.clock_millis = Some(1_700_000_000_000);
         }
     }
-    for tick in 0..26_u64 {
+    for tick in 0..30_u64 {
         for (_, step) in script.iter().filter(|(at, _)| *at == tick) {
             act(&mut multi, step);
             act(&mut control, step);

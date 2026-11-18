@@ -33,7 +33,7 @@ pub(crate) fn enchant(
         .get("targets")
         .and_then(Value::as_entity)
         .ok_or_else(|| fail("command.failed"))?;
-    let targets = select::entities(region, id, players::level_of(region, id), selector)?;
+    let targets = select::targets(region, id, players::level_of(region, id), selector)?;
     let name = parsed
         .get("enchantment")
         .and_then(Value::as_str)
@@ -56,6 +56,23 @@ pub(crate) fn enchant(
     let mut single_name = String::new();
     let single = targets.len() == 1;
     for target in targets {
+        let select::Target::Player(target) = target else {
+            // 官方 `EnchantCommand`：非玩家（非 LivingEntity）单目标报 `.entity`，
+            // 多目标跳过。Bamboo 只有玩家能拿主手物品。
+            //
+            // Official `EnchantCommand`: a non-living single target fails with
+            // `.entity`; with several targets it is skipped. Only players have
+            // a held item in Bamboo.
+            if single {
+                return Err(fail_with(
+                    "commands.enchant.failed.entity",
+                    [crate::command::source::entity_name(region, target)
+                        .unwrap_or_default()
+                        .into()],
+                ));
+            }
+            continue;
+        };
         let Some(player) = region.players.get_mut(&target) else {
             continue;
         };
