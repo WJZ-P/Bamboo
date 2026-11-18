@@ -243,14 +243,6 @@ pub(crate) struct Region {
     ///
     /// Loot `random_sequence`s. The flat world seed is 0, the same value as `hashed_seed` in `login`.
     pub(crate) loot_sequences: mc_bamboo_loot::RandomSequences,
-    /// 按世界种子建的随机序列，`/random` 和 `/loot` 共用（官方 `ServerLevel.getRandomSequences`）。
-    /// 随机源归岛（岛的实施计划第 2 节第 15 行），第 5b 步从 `WorldState` 搬过来。
-    ///
-    /// Random sequences seeded from the world seed, shared by `/random` and
-    /// `/loot` (official `ServerLevel.getRandomSequences`). Random sources belong
-    /// to the island (island plan, section 2, row 15); step 5b moved this from
-    /// `WorldState`.
-    pub(crate) random_sequences: mc_bamboo_loot::RandomSequences,
     /// 音效包的随机种子，官方的 `Level.soundSeedGenerator`。和世界随机分开，只影响客户端挑哪个变体。
     ///
     /// Seed for sound packets, vanilla `Level.soundSeedGenerator`. Separate from the world
@@ -425,7 +417,6 @@ impl Region {
                 mc_bamboo_blocks::cache::CacheConfig::default(),
             ),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
-            random_sequences: mc_bamboo_loot::RandomSequences::new(crate::world_state::WORLD_SEED),
             sound_seed_generator: LevelRandom::new(unique_seed()),
             entities: Entities::default(),
             entity_tracking: EntityTracking::default(),

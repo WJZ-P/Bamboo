@@ -42,8 +42,6 @@ pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("clone", CommandClass::Island),
     ("particle", CommandClass::Island),
     ("playsound", CommandClass::Island),
-    ("loot", CommandClass::Island),
-    ("random", CommandClass::Island),
     ("enchant", CommandClass::Island),
     ("stopsound", CommandClass::Island),
     ("spawnpoint", CommandClass::Island),
@@ -75,6 +73,10 @@ pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("scoreboard", CommandClass::Global),
     ("team", CommandClass::Global),
     ("bossbar", CommandClass::Global),
+    // 按名随机序列全世界一份、在主控上（计划 3.3「岛的随机源」第 2 条）。
+    // The named random sequences are one per world, on the master (plan 3.3).
+    ("loot", CommandClass::Global),
+    ("random", CommandClass::Global),
     ("teleport", CommandClass::CrossIsland),
     ("tp", CommandClass::CrossIsland),
     ("give", CommandClass::CrossIsland),

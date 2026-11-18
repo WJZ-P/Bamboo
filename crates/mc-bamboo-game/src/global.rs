@@ -237,6 +237,16 @@ pub(crate) struct Global {
     pub(crate) save_requests: Vec<crate::save_session::SaveCommand>,
     /// 自动保存开关的权威镜像（命令改它，`World` 同步到存档会话）。
     pub(crate) save_auto: bool,
+    /// `/random` 和 `/loot` 的按名随机序列（官方 `ServerLevel.getRandomSequences()`，全世界
+    /// 一份）。按世界种子建，不存档。岛的实施计划 3.3「岛的随机源」第 2 条：放在主控上，
+    /// 用它的命令归全局类，所以多岛时同名序列也只有一条。
+    ///
+    /// The named random sequences of `/random` and `/loot` (vanilla
+    /// `ServerLevel.getRandomSequences()`, one per world), built from the world
+    /// seed and not saved. Island plan 3.3 item 2: they live on the master and
+    /// the commands using them are global, so a name has one sequence even with
+    /// several islands.
+    pub(crate) random_sequences: mc_bamboo_loot::RandomSequences,
 }
 
 impl Default for Global {
@@ -256,6 +266,7 @@ impl Default for Global {
             admin_messages: None,
             save_requests: Vec::new(),
             save_auto: true,
+            random_sequences: mc_bamboo_loot::RandomSequences::new(crate::world_state::WORLD_SEED),
         }
     }
 }

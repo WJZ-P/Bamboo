@@ -234,6 +234,20 @@ fn run_cross_island(seed: u64, lend_nothing: bool) {
         (15, Act::Leave(2)),
         (16, Act::Chat(0, "bye")),
         (18, Act::Command(0, "list")),
+        // 按名随机序列全世界一份（在主控上）：两个岛上先后取同一条序列，接着往下走。
+        // One named sequence per world (on the master): two islands draw from it in turn.
+        (
+            19,
+            Act::Command(1, "random value 1..1000000 minecraft:shared"),
+        ),
+        (
+            20,
+            Act::Command(0, "random value 1..1000000 minecraft:shared"),
+        ),
+        (
+            21,
+            Act::Command(1, "loot give @a loot minecraft:blocks/diamond_ore"),
+        ),
     ];
     let mut multi = set_up(seed, Harness::new_islands(2, 0));
     let mut control = set_up(
@@ -242,6 +256,11 @@ fn run_cross_island(seed: u64, lend_nothing: bool) {
     );
     align(&mut multi, &mut control);
     multi.server.world.islands.lend_nothing = lend_nothing;
+    // 对照是精确模式：全局改动当场应用，不看 `BAMBOO_TEST_GLOBAL_PORT`（多岛时主控借玩家
+    // 当场执行，本来就不排队）。
+    // The control is exact mode: global changes apply at once regardless of
+    // `BAMBOO_TEST_GLOBAL_PORT` (multi-island borrowing runs at once anyway).
+    control.server.world.master.port_mode = crate::global_port::PortMode::Direct;
     assert_eq!(multi.server.world.islands.len(), multi.centers.len());
     for scene in [&mut multi, &mut control] {
         for group in 0..scene.centers.len() {
@@ -254,7 +273,7 @@ fn run_cross_island(seed: u64, lend_nothing: bool) {
             island.region.clock_millis = Some(1_700_000_000_000);
         }
     }
-    for tick in 0..24_u64 {
+    for tick in 0..26_u64 {
         for (_, step) in script.iter().filter(|(at, _)| *at == tick) {
             act(&mut multi, step);
             act(&mut control, step);

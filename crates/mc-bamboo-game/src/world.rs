@@ -428,13 +428,15 @@ impl World {
         if let Some(save) = save.as_mut() {
             save.set_world_gen(world_gen.clone());
         }
-        // 种子进 `WorldState`（`hashed_seed` 进 login 包、天气），随机序列在岛上。
-        // `level.dat` 里没有建模的 seed 字段，`apply_level_data` 不动它。
+        // 种子进 `WorldState`（`hashed_seed` 进 login 包、天气），按名随机序列在主控上
+        // （岛的实施计划 3.3「岛的随机源」第 2 条）。`level.dat` 里没有建模的 seed 字段，
+        // `apply_level_data` 不动它。
         // Put the seed into `WorldState` (hashed_seed for the login packet,
-        // weather); the random sequences live on the island. `level.dat` has no
-        // modelled seed field, so `apply_level_data` leaves it alone.
+        // weather); the named random sequences live on the master (island plan
+        // 3.3). `level.dat` has no modelled seed field, so `apply_level_data`
+        // leaves it alone.
         global.state_mut().seed = world_gen.seed;
-        region.random_sequences = mc_bamboo_loot::RandomSequences::new(world_gen.seed);
+        global.random_sequences = mc_bamboo_loot::RandomSequences::new(world_gen.seed);
         // 全新世界（没有 level.dat）按官方 `MinecraftServer.setInitialSpawn` 选出生点；
         // 读档时用存档里的出生点（已由 `apply_level_data` 套回）。超平坦保持不变。
         // A fresh world (no level.dat) picks a spawn like `setInitialSpawn`;
