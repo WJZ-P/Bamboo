@@ -7,8 +7,8 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, data, enchant, execute,
-    experience, gamerule, items, kill, loot, particle, players, playsound, random, save,
+    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, damage, data, enchant,
+    execute, experience, gamerule, items, kill, loot, particle, players, playsound, random, save,
     scoreboard, stopsound, summon, team, teleport, text, time, title, weather, world_border,
     world_settings,
 };
@@ -128,6 +128,7 @@ pub(crate) fn build() -> Commands {
     register_seed(&mut builder, root);
     register_spawns(&mut builder, root);
     register_clone(&mut builder, root);
+    register_damage(&mut builder, root);
     register_stopsound(&mut builder, root);
     register_random(&mut builder, root);
     register_enchant(&mut builder, root);
@@ -357,6 +358,39 @@ fn register_kill(builder: &mut Builder, root: usize) {
     builder.run_island(command, kill::kill);
     let targets = builder.argument(command, "targets", entities_argument(), 0);
     builder.run_island(targets, kill::kill);
+}
+/// `DamageCommand.register`: `<target> <amount> [damageType] [at location | by entity [from cause]]`。
+fn register_damage(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "damage", permission::GAMEMASTERS);
+    let target = builder.argument(command, "target", entity_argument(), 0);
+    let amount = builder.argument(
+        target,
+        "amount",
+        ArgumentType::Float {
+            min: 0.0,
+            max: f32::MAX,
+        },
+        0,
+    );
+    builder.run_island(amount, damage::damage);
+    let kind = builder.argument(
+        amount,
+        "damageType",
+        ArgumentType::Resource {
+            registry: "minecraft:damage_type",
+        },
+        0,
+    );
+    builder.run_island(kind, damage::damage);
+    let at = builder.literal(kind, "at", 0);
+    let location = builder.argument(at, "location", ArgumentType::Vec3, 0);
+    builder.run_island(location, damage::damage);
+    let by = builder.literal(kind, "by", 0);
+    let entity = builder.argument(by, "entity", entity_argument(), 0);
+    builder.run_island(entity, damage::damage);
+    let from = builder.literal(entity, "from", 0);
+    let cause = builder.argument(from, "cause", entity_argument(), 0);
+    builder.run_island(cause, damage::damage);
 }
 
 fn register_kick(builder: &mut Builder, root: usize) {

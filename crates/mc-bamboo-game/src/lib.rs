@@ -77,6 +77,8 @@ mod pacing;
 mod partition_stats;
 mod player;
 mod player_grid;
+pub(crate) mod player_health;
+pub(crate) mod player_hurt;
 mod player_move;
 mod player_save;
 mod profiler;

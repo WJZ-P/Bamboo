@@ -139,6 +139,48 @@ impl ClientboundPacket for SetExperience {
     }
 }
 
+/// 同步玩家自己的血量、饥饿和饱和度，官方 `ClientboundSetHealthPacket`。
+/// 只发给这名玩家；别的玩家看到的血量走 `set_entity_data` 的 `Health` 项。
+///
+/// Vanilla `ClientboundSetHealthPacket`. Only the player receives it; other
+/// players see health through the `Health` item of `set_entity_data`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetHealth {
+    pub health: f32,
+    pub food: i32,
+    pub saturation: f32,
+}
+
+impl ClientboundPacket for SetHealth {
+    const ID: i32 = clientbound::SET_HEALTH;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_f32(out, self.health);
+        write_varint(out, self.food);
+        write_f32(out, self.saturation);
+    }
+}
+
+/// 玩家受伤动画，官方 `ClientboundHurtAnimationPacket`。
+/// 发给正在跟踪这名玩家的人（包括自己），`yaw` 是相对玩家朝向的伤害方向。
+///
+/// Vanilla `ClientboundHurtAnimationPacket`. Sent to the trackers including
+/// the player; `yaw` is the incoming direction relative to the player's yaw.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HurtAnimation {
+    pub entity_id: i32,
+    pub yaw: f32,
+}
+
+impl ClientboundPacket for HurtAnimation {
+    const ID: i32 = clientbound::HURT_ANIMATION;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.entity_id);
+        write_f32(out, self.yaw);
+    }
+}
+
 /// 同步世界难度，官方 `ClientboundChangeDifficultyPacket`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeDifficulty {
@@ -516,7 +558,9 @@ mod tests {
             (SetEntityData::ID, 101),
             (SetEquipment::ID, 104),
             (SetExperience::ID, 105),
+            (SetHealth::ID, 106),
             (SetHeldSlot::ID, 107),
+            (HurtAnimation::ID, 43),
             (SwingAnimation::ID, 123),
             (SystemChat::ID, 124),
             (UpdateAttributes::ID, 134),
@@ -524,6 +568,25 @@ mod tests {
         for (actual, expected) in ids {
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn health_packets_match_the_official_layout() {
+        assert_eq!(
+            body(&SetHealth {
+                health: 17.5,
+                food: 20,
+                saturation: 5.0,
+            }),
+            hex("41 8c 00 00 14 40 a0 00 00")
+        );
+        assert_eq!(
+            body(&HurtAnimation {
+                entity_id: 7,
+                yaw: 90.0,
+            }),
+            hex("07 42 b4 00 00")
+        );
     }
 
     #[test]

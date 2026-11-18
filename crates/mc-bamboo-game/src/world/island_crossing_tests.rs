@@ -251,7 +251,9 @@ fn run_cross_island(seed: u64, lend_nothing: bool) {
         // `@e` 现在也看非玩家实体；`/tp` 与 `/kill` 的范围要按 `SCOPES` 拼整个世界。
         // 没有非玩家实体时选择器照样走同一条路径，反馈在两个世界里逐位相同。
         (22, Act::Command(0, "kill @e[type=minecraft:item]")),
-        (23, Act::Console("setblock 8 -60 8 minecraft:stone")),
+        // `/damage` 能选中非玩家实体，范围按 `SCOPES` 和 `/kill` 一样拼整个世界。
+        (23, Act::Command(1, "damage @e[type=minecraft:item] 1")),
+        (24, Act::Console("setblock 8 -60 8 minecraft:stone")),
     ];
     let mut multi = set_up(seed, Harness::new_islands(2, 0));
     let mut control = set_up(
