@@ -697,11 +697,16 @@ impl IslandPartition {
         if let Some(group) = self.islands.get_mut(&target) {
             group.insert(section);
         }
-        // 新 section 可能把两块原本分开的「远距离」裂片重新连上；
-        // 连通性检查会在下一次检查周期里判这种情况。
-        if self.split_since.remove(&target).is_some() {
-            result.cancelled_splits += 1;
-        }
+        // 新 section 可能把两块原本分开的「远距离」裂片重新连上，也可能离裂口很远（岛里别处
+        // 有人在走）：这里不取消待拆分，由下一次连通性检查按当时的连通块判（连上了才取消，
+        // 拆的时候也按当时的连通块拆）。以前这里一律取消，长时间压测里人多的大岛每刻都有新
+        // section，计时一直被清零，一次都拆不开（`docs/profiling.md` 第 17 节）。
+        // A new section may reconnect two far parts, or lie far from the gap
+        // (someone walking elsewhere in the island): the pending split stays,
+        // and the next connectivity check decides from the components at that
+        // time (cancelling only if reconnected; a split also uses the
+        // components of that time). Cancelling here unconditionally kept a
+        // busy island's timer at zero in the long run, so it never split.
     }
 
     /// 把 `sources` 里除 `target` 以外的岛整个倒进 target，记一次合并。
@@ -736,9 +741,9 @@ impl IslandPartition {
                 into.extend(group);
             }
         }
-        if self.split_since.remove(&target).is_some() {
-            result.cancelled_splits += 1;
-        }
+        // 吸收方自己的待拆分不取消：理由同 `add_section`，由下一次连通性检查判。
+        // The absorber's own pending split stays, as in `add_section`; the
+        // next connectivity check decides.
     }
 
     /// section 变空：从它的岛里移除，岛空了就删掉。
@@ -756,8 +761,9 @@ impl IslandPartition {
         let _ = result;
     }
 
-    /// 每 20 刻看一次连通性；两块相距 ≥4 持续 200 刻才拆。
-    /// 距离 <4 或者岛重新连上就取消登记（记 `cancelled_splits`）。
+    /// 每 20 刻看一次连通性；每次检查都分成相距 ≥4 的几块、持续 200 刻才拆，按拆的那一刻的
+    /// 连通块拆。哪一次检查时连上了（距离 <4）就取消登记（记 `cancelled_splits`）；期间岛里
+    /// 新添 section、并进别的岛都不取消。
     /// `pending_splits` 是这一刻实际登记的待拆分次数（含到点执行的那次）。
     fn finish_tick(&mut self, now: u64, result: &mut TickResult) {
         if !now.is_multiple_of(CONNECTIVITY_INTERVAL_TICKS) {
@@ -1175,6 +1181,51 @@ mod tests {
         }
         let at = split.expect("持续 200 刻之后必须拆");
         assert!(at >= SPLIT_DELAY_TICKS, "拆分不得早于 200 刻：{at}");
+        assert_eq!(partition.len(), 2);
+        assert!(partition.invariants_hold());
+    }
+
+    /// 岛里别处一直有新 section（有人在走）不打断待拆分：两端断开以后照样 200 刻后拆开。
+    /// 改坏确认：按以前的做法新 section 一律取消待拆分，这个岛就永远拆不开。
+    ///
+    /// New sections elsewhere in the island (someone walking) do not reset a
+    /// pending split: the far ends still split 200 ticks after the gap opens.
+    #[test]
+    fn walking_elsewhere_in_an_island_does_not_postpone_its_split() {
+        let mut partition = IslandPartition::new();
+        let bridge: BTreeSet<ChunkPos> = (0..=32).map(|x| c(x * SECTION_SIZE, 0)).collect();
+        for tick in 1..=3 {
+            partition.tick(tick, &deltas_for(&partition, &bridge));
+        }
+        let ends: BTreeSet<ChunkPos> = bridge
+            .iter()
+            .copied()
+            .filter(|pos| pos.x <= SECTION_SIZE || pos.x >= 28 * SECTION_SIZE)
+            .collect();
+        partition.tick(CONNECTIVITY_INTERVAL_TICKS, &deltas_for(&partition, &ends));
+        assert_eq!(partition.pending_splits(), 1);
+        // 左端旁边有人来回走：每刻交替多出、少掉一个紧挨着的 section。
+        // Someone paces next to the left end: a neighbouring section appears
+        // and disappears every other tick.
+        let pacer = c(-SECTION_SIZE, 0);
+        let mut split = None;
+        for tick in CONNECTIVITY_INTERVAL_TICKS + 1..=SPLIT_DELAY_TICKS * 2 {
+            let mut now = ends.clone();
+            if tick % 2 == 0 {
+                now.insert(pacer);
+            }
+            let result = partition.tick(tick, &deltas_for(&partition, &now));
+            assert_eq!(result.cancelled_splits, 0, "第 {tick} 刻不该取消");
+            if result.splits > 0 {
+                split = Some(tick);
+                break;
+            }
+        }
+        let at = split.expect("两端一直断开，必须拆开");
+        assert!(
+            (SPLIT_DELAY_TICKS..=SPLIT_DELAY_TICKS + 2 * CONNECTIVITY_INTERVAL_TICKS).contains(&at),
+            "按时拆开：{at}"
+        );
         assert_eq!(partition.len(), 2);
         assert!(partition.invariants_hold());
     }
