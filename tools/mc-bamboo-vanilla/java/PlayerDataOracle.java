@@ -210,6 +210,7 @@ public final class PlayerDataOracle {
                 case "level-write" -> levelWrite(request, response);
                 case "xp-arithmetic" -> xpArithmetic(request, response);
                 case "xp-seed-load" -> xpSeedLoad(request, response);
+                case "xp-criteria" -> xpCriteria(request, response);
                 default -> response.addProperty("error", "unknown command " + command);
             }
         }
@@ -324,6 +325,25 @@ public final class PlayerDataOracle {
             root.put("Data", data);
             response.addProperty("gzip", gzip(root));
             response.add("canonical", canonical(root));
+        }
+
+        /**
+         * 官方 {@code ServerPlayer.doTick} 对 `xp` / `level` 只读准则取的是
+         * {@code Mth.ceil((float) totalExperience)} 和
+         * {@code Mth.ceil((float) experienceLevel)}。
+         */
+        private void xpCriteria(JsonObject request, JsonObject response) {
+            JsonArray results = new JsonArray();
+            for (var element : request.getAsJsonArray("cases")) {
+                JsonObject spec = element.getAsJsonObject();
+                int total = spec.get("total").getAsInt();
+                int level = spec.get("level").getAsInt();
+                JsonArray row = new JsonArray();
+                row.add(net.minecraft.util.Mth.ceil((float) total));
+                row.add(net.minecraft.util.Mth.ceil((float) level));
+                results.add(row);
+            }
+            response.add("results", results);
         }
 
         /**

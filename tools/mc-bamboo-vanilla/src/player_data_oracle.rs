@@ -332,6 +332,7 @@ fn run_cases(
     // 3b. 玩家经验：官方 Player / ServerPlayer 的公式、存档往返，逐位比较。
     run_xp_cases(stdin, lines, report)?;
     run_xp_seed_cases(stdin, lines, report)?;
+    run_criteria_cases(stdin, lines, report)?;
 
     // 4. level.dat：双向，逐字段用官方 PrimaryLevelData.parse 核对。
     for (name, level) in &level_cases() {
@@ -659,6 +660,66 @@ fn run_xp_seed_cases(
                 got.as_i64() == Some(i64::from(*want)),
                 format!(
                     "xp seed case {index} (saved={saved:?} seed={seed}) field: official {got}, bamboo {want}"
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `ServerPlayer.doTick` 的 xp / level 只读准则，官方用 `Mth.ceil(float)`。
+///
+/// The xp / level read-only criteria of `ServerPlayer.doTick`, using
+/// official `Mth.ceil(float)`.
+fn run_criteria_cases(
+    stdin: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, std::io::Error>>,
+    report: &mut Report,
+) -> Result<(), String> {
+    let cases: [(i32, i32); 10] = [
+        (0, 0),
+        (1, 1),
+        (7, 1),
+        (i32::MAX, 30),
+        (i32::MIN, -1),
+        (12345, 45),
+        (-99, 0),
+        (1000, 100),
+        (2_147_483_646, 2_147_483_646),
+        (0, i32::MAX),
+    ];
+    let specs: Vec<Value> = cases
+        .iter()
+        .map(|&(total, level)| json!({"total": total, "level": level}))
+        .collect();
+    let answer = ask(
+        stdin,
+        lines,
+        json!({"command": "xp-criteria", "cases": specs}),
+    )?;
+    let results = answer
+        .results
+        .as_ref()
+        .ok_or("xp-criteria has no results")?;
+    report.check(
+        results.len() == cases.len(),
+        format!(
+            "criteria: official returned {} results, expected {}",
+            results.len(),
+            cases.len()
+        ),
+    );
+    for (index, (row, &(total, level))) in results.iter().zip(&cases).enumerate() {
+        let official = row
+            .as_array()
+            .ok_or_else(|| format!("criteria case {index}: result is not an array"))?;
+        let ours = mc_bamboo_game::replay_criteria_values(total, level);
+        report.cases += 1;
+        for (value, got) in [ours[4], ours[5]].iter().zip(official) {
+            report.check(
+                got.as_i64() == Some(i64::from(*value)),
+                format!(
+                    "criteria case {index} (total={total} level={level}): official {got}, bamboo {value}"
                 ),
             );
         }
