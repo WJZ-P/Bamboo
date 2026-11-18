@@ -286,12 +286,6 @@ pub(crate) struct Master {
     ///
     /// Multi-island mode is on (`WorldConfig::islands`, and not infinite flat).
     islands_mode: bool,
-    /// 多岛时天气用主控自己的随机源（计划 3.3「岛的随机源」第 4 条、8.2 第 6 条）；
-    /// 单岛时天气照旧用唯一那个岛的 `Level.random`。
-    ///
-    /// The weather's own random source in multi-island mode (plan 3.3 and 8.2
-    /// item 6); with one island the weather keeps the island's `Level.random`.
-    pub(crate) weather_random: mc_bamboo_blocks::random::LevelRandom,
     /// 正在跨岛的玩家：已经站到别的岛的区块上、原来的岛还没把他的视野和配对清干净，
     /// 记着从哪一刻（`director_tick`）开始等（[`World::relocate_players`]）。
     ///
@@ -485,9 +479,6 @@ impl World {
                 deferred_save_all: Vec::new(),
                 posted_scratch: Vec::new(),
                 islands_mode: config.islands && !infinite_flat,
-                weather_random: mc_bamboo_blocks::random::LevelRandom::new(
-                    crate::region::unique_seed(),
-                ),
                 transit: std::collections::BTreeMap::new(),
                 #[cfg(test)]
                 split_skip: None,
@@ -592,6 +583,13 @@ impl World {
         if world.master.islands_mode {
             let verify = world.islands.region.profiler.islands_verify();
             world.master.host.enable_live_islands(verify);
+            // 多岛时天气（自然推进和 `/weather` 的时长）用主控自己的随机源（计划 3.3
+            // 「岛的随机源」第 4 条、8.2 第 6 条），不碰任何岛的。
+            // With several islands the weather (its cycle and `/weather`
+            // durations) uses the master's own random source (plan 3.3, 8.2 item 6).
+            world.master.global.weather_random = Some(mc_bamboo_blocks::random::LevelRandom::new(
+                crate::region::unique_seed(),
+            ));
         }
         if world.islands.region.profiler.partition_enabled() {
             let verify = world.islands.region.profiler.partition_verify();
@@ -1123,10 +1121,13 @@ impl World {
         // 多岛时天气用主控自己的随机源，不碰任何岛的（计划 3.3「岛的随机源」第 4 条）。
         // Vanilla's weather phase precedes `tickTime`. With several islands
         // the weather uses the master's own random source (plan 3.3).
-        let weather = if self.master.islands_mode {
-            weather::advance(&mut self.master.global, &self.master.weather_random)
-        } else {
-            weather::advance(&mut self.master.global, &self.islands.region.random)
+        let weather = match self.master.global.weather_random.take() {
+            Some(random) => {
+                let frames = weather::advance(&mut self.master.global, &random);
+                self.master.global.weather_random = Some(random);
+                frames
+            }
+            None => weather::advance(&mut self.master.global, &self.islands.region.random),
         };
         if !weather.is_empty() {
             self.broadcast_all(&weather);

@@ -57,7 +57,10 @@ pub(crate) fn weather(
             Kind::Rain => RAIN_DURATION,
             Kind::Thunder => THUNDER_DURATION,
         };
-        RandomSource::next_int_between_inclusive(region.random.source(), min, max)
+        // 多岛时取主控的天气随机源，单岛时取岛的 `Level.random`（同官方）。
+        // The master's weather source with several islands, else the island's.
+        let random = global.weather_random.as_ref().unwrap_or(&region.random);
+        RandomSource::next_int_between_inclusive(random.source(), min, max)
     } else {
         duration
     };

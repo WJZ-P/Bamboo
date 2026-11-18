@@ -582,3 +582,32 @@ fn entities_a_command_puts_on_another_island_move_there() {
         }
     });
 }
+
+/// 多岛时天气用主控自己的随机源（计划 3.3「岛的随机源」第 4 条）：不带时长的 `/weather`
+/// 从它取时长，不碰发令人所在的岛（也不碰别的岛）的随机源。
+///
+/// With several islands the weather uses the master's own random source
+/// (plan 3.3 item 4): `/weather` without a duration draws from it and leaves
+/// every island's sources, the sender's included, untouched.
+#[test]
+fn weather_commands_draw_from_the_masters_source_with_several_islands() {
+    use super::island_runtime_tests::{assert_no_draws, random_states};
+    with_stack(|| {
+        let mut scene = set_up(26, Harness::new_islands(2, 0));
+        let a = first_of(&scene, 1);
+        make_op(&mut scene, &a);
+        let before = random_states(&scene);
+        let master = format!("{:?}", scene.server.world.master.global.weather_random);
+        scene
+            .server
+            .request(&a, PlayRequest::unsigned_command("weather rain"));
+        scene.server.tick();
+        assert_no_draws(&before, &random_states(&scene), "/weather rain");
+        assert_ne!(
+            master,
+            format!("{:?}", scene.server.world.master.global.weather_random),
+            "时长从主控的天气随机源取"
+        );
+        assert!(scene.server.world.master.global.state().weather.raining);
+    });
+}
