@@ -791,19 +791,6 @@ fn compute_feature_run(
     Ok(Arc::new(FeatureRun { deltas }))
 }
 
-/// 给 `feature-merge` 的 `isolated` 比法用的干净 CARVERS 地形：和 Director 的
-/// `terrain` 阶段、[`build_view`] 用的是同一个缓存入口。
-///
-/// Clean CARVERS terrain for the `feature-merge` `isolated` comparison: the same
-/// cache entry the Director's `terrain` stage and [`build_view`] use.
-pub fn clean_feature_terrain(
-    config: &WorldGenConfig,
-    cx: i32,
-    cz: i32,
-) -> Result<GeneratedChunk, String> {
-    cached_generate_chunk_with_structures(config, cx, cz).map(|arc| (*arc).clone())
-}
-
 /// 测试用：只用纯函数（`build_view` 的 3×3 + 8 个邻居中心的溢出）算出一个区块
 /// 完工后的方块，和 Director 交付的盒子逐格比。
 /// Test-only: a chunk's finished blocks from pure functions alone, to compare

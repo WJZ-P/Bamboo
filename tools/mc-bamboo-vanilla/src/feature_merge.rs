@@ -40,8 +40,9 @@ use mc_bamboo_core::ChunkPos;
 use mc_bamboo_game::{
     MailBudget, World, WorldConfig,
     world_options::{LevelType, WorldGenConfig},
+    worldgen::GeneratedChunk,
     worldgen_features::{
-        FeatureWrites, clean_feature_terrain, merge_feature_writes,
+        FeatureWrites, merge_feature_writes,
         oracle_merge::{MergeBreak, feature_writes_into, set_merge_break},
     },
 };
@@ -440,14 +441,19 @@ impl Report<'_> {
         }
         // 官方整块线给的是干净 CARVERS 方块（9 个中心跑完还原后的目标区块），
         // 逐格用它当地形，再调游戏同一份合并函数写进 9 个中心的写。
+        // `merge_feature_writes` 只读写 `blocks`，群系 / 高度图留空即可。
         // The oracle's `blocks` array is the restored clean CARVERS target; use
         // it as the terrain and apply the 9 centers' writes with the game's own
-        // merge function.
-        let mut merged = clean_feature_terrain(&config(seed, self.options.structures), x, z)?;
-        merged.blocks = baseline
-            .chunks(256)
-            .map(<[u32]>::to_vec)
-            .collect::<Vec<Vec<u32>>>();
+        // merge function. Only `blocks` is read/written, so biomes and
+        // heightmaps can stay empty.
+        let mut merged = GeneratedChunk {
+            blocks: baseline
+                .chunks(256)
+                .map(<[u32]>::to_vec)
+                .collect::<Vec<Vec<u32>>>(),
+            biomes: Vec::new(),
+            heightmaps: Default::default(),
+        };
         merge_feature_writes(&mut merged, groups);
         let merged = merged.blocks.into_iter().flatten().collect::<Vec<u32>>();
         let note = if source_diffs.is_empty() {
