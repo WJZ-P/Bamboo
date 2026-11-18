@@ -81,7 +81,31 @@ struct Case {
     #[serde(default = "first_entity_id")]
     first_entity_id: i32,
     blocks: Vec<[i32; 4]>,
+    #[serde(default)]
     steps: Vec<Step>,
+    /// `ExperienceOrb.playerTouch` 的题目；普通实体题不写这些字段。
+    ///
+    /// `ExperienceOrb.playerTouch` cases; regular entity cases omit them.
+    #[serde(default)]
+    orb_value: i32,
+    #[serde(default)]
+    orb_count: i32,
+    #[serde(default)]
+    orb_delay: i32,
+    #[serde(default)]
+    orb_damage: i32,
+    #[serde(default)]
+    orb_mending: bool,
+    #[serde(default)]
+    orb_level: i32,
+    #[serde(default)]
+    orb_progress: i32,
+    #[serde(default)]
+    orb_total: i32,
+    #[serde(default)]
+    orb_seed: i64,
+    #[serde(default)]
+    orb_steps: Vec<[i32; 9]>,
     /// 物品场景才有。下落方块和 TNT 的题不写这些字段。
     ///
     /// Present on item scenes. Falling-block and TNT cases omit them.
@@ -462,6 +486,10 @@ impl Report {
 
     fn replay(&mut self, case: &Case) {
         self.cases += 1;
+        if case.kind == "orb_pickup" {
+            self.replay_orb(case);
+            return;
+        }
         let mut level = PhysicsLevel::new(case.level_seed);
         level.rules.entity_drops = case.entity_drops;
         level.entities = Entities::with_next_id(case.first_entity_id);
@@ -785,6 +813,44 @@ impl Report {
                         ));
                     }
                 }
+            }
+        }
+    }
+
+    /// 官方 `ExperienceOrb.playerTouch` 与游戏层拾取逻辑逐刻逐字段比较。
+    ///
+    /// Compares official `ExperienceOrb.playerTouch` with the game-layer pickup
+    /// logic field by field, tick by tick.
+    fn replay_orb(&mut self, case: &Case) {
+        let ticks = case.orb_steps.len().saturating_sub(1) as i32;
+        let ours = mc_bamboo_game::replay_orb_pickup(
+            case.orb_value,
+            case.orb_count,
+            case.orb_delay,
+            case.orb_damage,
+            case.orb_mending,
+            case.orb_level,
+            case.orb_progress as u32,
+            case.orb_total,
+            case.orb_seed,
+            ticks,
+        );
+        if ours.len() != case.orb_steps.len() {
+            self.mismatch(format!(
+                "{}: official {} steps, bamboo {}",
+                case.name,
+                case.orb_steps.len(),
+                ours.len()
+            ));
+            return;
+        }
+        for (index, (want, got)) in case.orb_steps.iter().zip(&ours).enumerate() {
+            self.steps += 1;
+            if want != got {
+                self.mismatch(format!(
+                    "{} step {index}: official {want:?}, bamboo {got:?}",
+                    case.name
+                ));
             }
         }
     }

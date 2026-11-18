@@ -23,6 +23,7 @@ import net.minecraft.core.Holder;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.RegistryDataLoader;
@@ -52,6 +53,7 @@ import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageSources;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.ExperienceOrb;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.entity.item.FallingBlockEntity;
 import net.minecraft.world.entity.item.ItemEntity;
@@ -62,6 +64,8 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.player.PlayerEquipment;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.world.item.enchantment.ItemEnchantments;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraft.world.item.Items;
@@ -163,6 +167,7 @@ public final class EntityOracle {
             cases += itemPickupSpectator(official, out);
             cases += itemPickupDelay(official, out);
             cases += itemPickupInfinite(official, out);
+            cases += orbPickup(official, out);
             cases += movingPistonCollision(official, out);
             cases += dynamicShapeCollision(official, out);
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
@@ -802,6 +807,130 @@ public final class EntityOracle {
         out.write("}\n");
     }
 
+    /**
+     * 官方 `ExperienceOrb.playerTouch` 的逐刻对拍：经验球放在玩家脚边，主手放一把
+     * 带（或不带）经验修补的损坏剑。每刻先递减 `takeXpDelay`，再按 `Player.aiStep`
+     * 从唯一的球里抽一颗碰。记录玩家经验三字段、score、冷却、球的 count / 是否消失、
+     * `take` 次数和剑的 damage。
+     */
+    private static int orbPickup(Official official, Writer out) throws Exception {
+        int cases = 0;
+        Object[][] specs = {
+            // value, count, delay, damage, mending, xpLevel, progress, xpTotal, seed, ticks
+            {7, 1, 0, 0, false, 0, 0.0f, 0, 0x1234_5678L, 3},
+            {17, 3, 0, 0, false, 0, 0.0f, 0, 0x1234_5678L, 6},
+            {7, 1, 2, 0, false, 0, 0.0f, 0, 0x1234_5678L, 5},
+            {7, 1, 0, 100, true, 0, 0.0f, 0, 0x1234_5678L, 2},
+            {25, 1, 0, 3, true, 5, 0.5f, 37, 0x1234_5678L, 2},
+            {1, 1, 0, 10, true, 30, 0.25f, 2000, 0x5eed_1234L, 2},
+            {2477, 2, 0, 500, true, 0, 0.0f, 0, 0x1234_5678L, 4},
+        };
+        for (int index = 0; index < specs.length; index++) {
+            Object[] spec = specs[index];
+            int value = (int) spec[0];
+            int count = (int) spec[1];
+            int delay = (int) spec[2];
+            int damage = (int) spec[3];
+            boolean mending = (boolean) spec[4];
+            int xpLevel = (int) spec[5];
+            float progress = (float) spec[6];
+            int xpTotal = (int) spec[7];
+            long seed = (long) spec[8];
+            int ticks = (int) spec[9];
+
+            Long2ObjectOpenHashMap<BlockState> blocks = new Long2ObjectOpenHashMap<>();
+            blocks.put(BlockPos.asLong(0, 63, 0), Blocks.STONE.defaultBlockState());
+            Scene scene = Scene.items(official, blocks, false);
+            TouchPlayer player = orbPlayer(scene.level, seed, xpLevel, progress, xpTotal, delay);
+            ItemStack sword = new ItemStack(Items.DIAMOND_SWORD);
+            if (damage > 0) {
+                sword.set(DataComponents.DAMAGE, damage);
+            }
+            if (mending) {
+                ItemEnchantments.Mutable enchants = new ItemEnchantments.Mutable(ItemEnchantments.EMPTY);
+                enchants.set(official.registries.lookupOrThrow(Registries.ENCHANTMENT)
+                        .getOrThrow(Enchantments.MENDING), 1);
+                sword.set(DataComponents.ENCHANTMENTS, enchants.toImmutable());
+            }
+            player.getInventory().setItem(0, sword);
+            ExperienceOrb orb = new ExperienceOrb(scene.level, 0.5, 64.5, 0.5, value);
+            scene.level.addFreshEntity(orb);
+            set(ExperienceOrb.class, orb, "count", count);
+
+            StringBuilder steps = new StringBuilder("[");
+            writeOrbStep(steps, player, orb);
+            for (int tick = 0; tick < ticks; tick++) {
+                // `Player.tick` 每刻先减冷却；`Player.aiStep` 再从附近球里抽一颗。
+                if (player.takeXpDelay > 0) {
+                    player.takeXpDelay -= 1;
+                }
+                if (!orb.isRemoved()) {
+                    // 只有一颗球，`Util.getRandom` 仍会取一次 `nextInt(1)`。
+                    player.getRandom().nextInt(1);
+                    orb.playerTouch(player);
+                }
+                steps.append(',');
+                writeOrbStep(steps, player, orb);
+            }
+            steps.append(']');
+            java.io.StringWriter blockText = new java.io.StringWriter();
+            writeBlocks(blockText, blocks);
+            StringBuilder tail = new StringBuilder();
+            tail.append(",\"orbValue\":").append(value);
+            tail.append(",\"orbCount\":").append(count);
+            tail.append(",\"orbDelay\":").append(delay);
+            tail.append(",\"orbDamage\":").append(damage);
+            tail.append(",\"orbMending\":").append(mending);
+            tail.append(",\"orbLevel\":").append(xpLevel);
+            tail.append(",\"orbProgress\":").append(Float.floatToRawIntBits(progress));
+            tail.append(",\"orbTotal\":").append(xpTotal);
+            tail.append(",\"orbSeed\":").append(seed);
+            tail.append(",\"orbSteps\":").append(steps).append("}\n");
+            out.write("{\"type\":\"case\",\"name\":\"orb_pickup_" + index + "\",\"kind\":\"orb_pickup\"");
+            out.write(",\"state\":0,\"x\":0,\"y\":0,\"z\":0,\"levelSeed\":1,\"entitySeed\":1");
+            out.write(",\"hurts\":null,\"fuse\":null,\"blocks\":");
+            out.write(blockText.toString());
+            out.write(tail.toString());
+            cases += 1;
+        }
+        return cases;
+    }
+
+    private static void writeOrbStep(StringBuilder out, TouchPlayer player, ExperienceOrb orb)
+            throws Exception {
+        out.append('[').append(player.experienceLevel);
+        out.append(',').append(Float.floatToRawIntBits(player.experienceProgress));
+        out.append(',').append(player.totalExperience);
+        out.append(',').append(player.xpScore);
+        out.append(',').append(player.takeXpDelay);
+        out.append(',').append((int) getField(ExperienceOrb.class, orb, "count"));
+        out.append(',').append(orb.isRemoved() ? 1 : 0);
+        out.append(',').append(player.takeCount);
+        out.append(',').append(player.getInventory().getItem(0).getDamageValue());
+        out.append(']');
+    }
+
+    private static Object getField(Class<?> owner, Object target, String name) throws Exception {
+        Field field = owner.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
+    }
+
+    /** 经验球场景的假玩家：覆盖 `increaseScore` / `take`，避开没初始化的实体数据。 */
+    private static TouchPlayer orbPlayer(FakeLevel level, long seed, int xpLevel, float progress,
+            int xpTotal, int delay) {
+        TouchPlayer player = touchPlayer(false);
+        set(net.minecraft.world.entity.Entity.class, player, "level", level);
+        set(net.minecraft.world.entity.Entity.class, player, "random", RandomSource.create(seed));
+        set(net.minecraft.world.entity.LivingEntity.class, player, "equipment",
+                new PlayerEquipment(player));
+        set(Player.class, player, "experienceLevel", xpLevel);
+        set(Player.class, player, "experienceProgress", progress);
+        set(Player.class, player, "totalExperience", xpTotal);
+        player.takeXpDelay = delay;
+        return player;
+    }
+
     /** 不跑构造函数。`take`、`awardStat`、`onItemPickup` 都是空的，避免假玩家碰到空的统计和区块。 */
     private static TouchPlayer touchPlayer(boolean creative) {
         TouchPlayer player = allocate(TouchPlayer.class);
@@ -1328,12 +1457,23 @@ public final class EntityOracle {
     }
 
     private static final class TouchPlayer extends ServerPlayer {
+        /** `ExperienceOrb` 场景记下的 score 和 `take` 次数。 */
+        int xpScore;
+        int takeCount;
+
         private TouchPlayer() {
             super(null, null, null, null);
         }
 
         @Override
-        public void take(Entity entity, int orgCount) {}
+        public void take(Entity entity, int orgCount) {
+            takeCount += 1;
+        }
+
+        @Override
+        public void increaseScore(int amount) {
+            xpScore += amount;
+        }
 
         @Override
         public void awardStat(Stat<?> stat, int count) {}

@@ -204,9 +204,9 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   拆成经验球。掉落物和经验球都进实体表、发配对包、能存盘。
 - 经验球是新的实体类别：重力 / 阻力、朝最近玩家的吸引、岩浆里的随机位移、
   每 20 刻同值合并、6000 刻消失、官方 NBT（`Health` / `Age` / `Value` / `Count`）。
-  玩家拾取这一支留了 `entity::pick_up` 入口，等玩家经验系统（等级 / 进度条 /
-  `set_experience` 包）单独做；**已知差异**：游戏里经验球被玩家碰到不会消失，
-  直到 6000 刻寿命结束。熔炉 / 砂轮那些「只取随机数不生成球」的地方本轮未动。
+  玩家拾取已经接上：`Player.aiStep` 每刻只碰一颗附近的球，按 `takeXpDelay`、
+  `count`、经验修补和 `take_item_entity` 包走官方顺序（见 5.6）。
+  熔炉 / 砂轮那些「只取随机数不生成球」的地方本轮未动。
 - 存档：`minecraft:cow` 和 `minecraft:experience_orb` 都进建模实体清单，读盘后
   放进实体表继续 tick。`archive::tests::a_loaded_cow_keeps_running_from_its_saved_state`
   验证读盘后的成年牛继续减求爱计时、幼年牛继续长大、位置被 AI 推动。
@@ -226,7 +226,7 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   都能被对拍或单测抓到。
 - `chunk-content` 439 项、`entity-oracle` 31 例 709 步、`move-oracle` 55 例、
   探针 728/728 全过。
-- 未做：拴绳、命名牌、玩家经验系统与经验球拾取、并行模式逐位一致性。
+- 未做：拴绳、命名牌、并行模式逐位一致性；玩家经验系统与经验球拾取已在 5.6 接上。
 
 #### 岛的拆合（新增的按实体状态）
 
@@ -260,3 +260,24 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   注视目标被选中、经验球朝玩家加速、旁观者不吸引经验球、并行算阶段结果相同。
   把 `RegionLevel::for_each_player` 退回空实现后，前三个正向断言全部失败，
   恢复后 `6/6` 通过。`mob-oracle` 用自己的上下文，不受影响。
+
+
+### 5.6 经验球拾取（2026-11-20）
+
+- `entity::pick_up` 现在是 `ExperienceOrb.playerTouch` 的实体侧：减 `count`，归零
+  时 `discard`。游戏层 `experience_pickup.rs` 负责 `takeXpDelay`、
+  `LivingEntity.take` 的 `take_item_entity` 包、`repairPlayerItems` 和
+  `giveExperiencePoints`；`set_experience` 由下一刻 `ServerPlayer.doTick` 补发。
+- `Player.aiStep` 的形状照字节码：附近实体先逐个碰（掉落物），经验球单独收集，
+  最后用 `Util.getRandom(list, this.random)` 抽一颗碰。名单非空就取一次
+  `nextInt(size)`，即使 `takeXpDelay` 没过也会取；`playerTouch` 自己判冷却。
+  冷却设为 2 刻，每刻 `Player.tick` 先减 1。
+- `repairPlayerItems` 按 `EquipmentSlot.VALUES` 扫主手 / 副手 / 四件盔甲，
+  挑有 `minecraft:repair_with_xp` 且损坏的装备（每个附魔条目各算一个候选），
+  用玩家随机源抽一件。`modifyDurabilityToRepairFromXp` 从数据包的
+  `multiply` 因子算修复量（mending 是 2.0），`repair = min(repairAmount, damage)`，
+  剩余经验按 `amount - repair * amount / repairAmount` 递归给下一件；
+  没有装备可修时全部经验给玩家。改过的物品栏槽发 `container_set_slot`。
+- 拾取音效不另发 `sound` 包：官方 `ExperienceOrb.playerTouch` 和
+  `LivingEntity.take` 都只发 `take_item_entity`，客户端收到后本地播
+  `entity.experience_orb.pickup`（字幕键 `subtitles.entity.experience_orb.pickup`）。

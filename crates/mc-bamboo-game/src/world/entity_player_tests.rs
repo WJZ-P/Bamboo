@@ -238,3 +238,108 @@ fn a_spectator_does_not_attract_an_experience_orb() {
     };
     assert_eq!(state.following, None, "旁观者不该被跟随");
 }
+
+#[test]
+fn an_orb_on_the_player_grants_experience_and_disappears() {
+    let mut server = Harness::new(2);
+    let client = server.join("Collector");
+    server.tick();
+    let _ = client.take_frames();
+    let at = Vec3::new(12.5, SPAWN_Y, 8.5);
+    place_player(&mut server, client.id, at, 0);
+
+    let orb = server.spawn_entity(Entity::experience_orb(at, 7));
+    crate::drops::pickup_before_entities(server.region());
+    let player = server.player(&client);
+    assert_eq!(player.experience.level, 1);
+    assert_eq!(player.experience.total, 7);
+    assert_eq!(player.take_xp_delay, 2);
+    let entity = server.region().entities.get(orb).expect("这一刻还在表里");
+    assert!(entity.removed, "count 归零的球被打上消失标记");
+    server.region().links.flush();
+    let frames = client.take_frames();
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.id == mc_bamboo_data::packets::play::clientbound::TAKE_ITEM_ENTITY),
+        "拾取要发配对包"
+    );
+}
+
+#[test]
+fn the_pickup_cooldown_blocks_a_second_orb_until_it_expires() {
+    let mut server = Harness::new(2);
+    let client = server.join("Collector");
+    server.tick();
+    let _ = client.take_frames();
+    let at = Vec3::new(12.5, SPAWN_Y, 8.5);
+    place_player(&mut server, client.id, at, 0);
+
+    let first = server.spawn_entity(Entity::experience_orb(at, 7));
+    crate::drops::pickup_before_entities(server.region());
+    assert!(server.region().entities.get(first).unwrap().removed);
+    let _ = client.take_frames();
+
+    let second = server.spawn_entity(Entity::experience_orb(at, 3));
+    crate::drops::pickup_before_entities(server.region());
+    assert_eq!(
+        server.player(&client).experience.total,
+        7,
+        "冷却中不该加经验"
+    );
+    assert!(!server.region().entities.get(second).unwrap().removed);
+    crate::drops::pickup_before_entities(server.region());
+    assert_eq!(
+        server.player(&client).experience.total,
+        10,
+        "第二刻冷却归零"
+    );
+    assert!(server.region().entities.get(second).unwrap().removed);
+}
+
+#[test]
+fn a_damaged_mending_item_uses_the_orb_before_experience() {
+    use mc_bamboo_data::{items, registries::data_component_type as kinds};
+    use mc_bamboo_loot::enchantment_id;
+    use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+    let mut server = Harness::new(2);
+    let client = server.join("Mender");
+    server.tick();
+    let _ = client.take_frames();
+    let at = Vec3::new(12.5, SPAWN_Y, 8.5);
+    place_player(&mut server, client.id, at, 0);
+    {
+        let region = server.region();
+        let player = region.players.get_mut(&client.id).unwrap();
+        let slot = player.inventory.hand_slot(Hand::Main);
+        let mut patch = ComponentPatch::new();
+        patch.put(kinds::DAMAGE, PatchEntry::Set(ComponentValue::Damage(100)));
+        patch.put(
+            kinds::ENCHANTMENTS,
+            PatchEntry::Set(ComponentValue::Enchantments(vec![(
+                enchantment_id("minecraft:mending").unwrap(),
+                1,
+            )])),
+        );
+        let (added, removed) = patch.to_opaque();
+        player.inventory.slots[slot] = ItemStack {
+            item: items::DIAMOND_SWORD,
+            count: 1,
+            added,
+            removed,
+        };
+    }
+
+    let orb = server.spawn_entity(Entity::experience_orb(at, 7));
+    crate::drops::pickup_before_entities(server.region());
+    assert_eq!(server.player(&client).experience.total, 0, "经验全用来修补");
+    assert!(server.region().entities.get(orb).unwrap().removed);
+    let player = server.player(&client);
+    let slot = player.inventory.hand_slot(Hand::Main);
+    let patch = player.inventory.slots[slot].patch();
+    match patch.get(kinds::DAMAGE) {
+        Some(ComponentValue::Damage(value)) => assert_eq!(*value, 86, "7 点经验 ×2 修 14 点"),
+        other => panic!("修补后 damage 组件不对：{other:?}"),
+    }
+}

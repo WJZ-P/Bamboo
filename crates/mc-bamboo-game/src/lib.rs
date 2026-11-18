@@ -54,6 +54,7 @@ mod entity_sync;
 pub mod entity_tracking;
 mod entity_view;
 mod experience;
+mod experience_pickup;
 mod gamerules;
 mod global;
 mod global_port;
@@ -244,6 +245,129 @@ pub fn replay_experience_save(
         restored.enchantment_seed,
         restored.score,
     ]
+}
+
+/// 供 `mc-bamboo-vanilla entity-oracle` 对拍 `ExperienceOrb.playerTouch`：
+/// 输入经验球的值、count、冷却、主手剑的 damage、有没有经验修补，以及玩家经验三字段；
+/// 返回逐刻的 `[level, progress 原始位, total, score, delay, count, removed, take, damage]`。
+/// 只在 `oracle-samples` feature 下编进库里。
+///
+/// Replays `ExperienceOrb.playerTouch` for `mc-bamboo-vanilla entity-oracle`.
+/// Returns per-tick `[level, raw progress bits, total, score, delay, count,
+/// removed, take, damage]`. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+#[allow(clippy::too_many_arguments, reason = "oracle case spec is a flat JSON row")]
+pub fn replay_orb_pickup(
+    value: i32,
+    count: i32,
+    delay: i32,
+    damage: i32,
+    mending: bool,
+    xp_level: i32,
+    progress_bits: u32,
+    xp_total: i32,
+    seed: i64,
+    ticks: i32,
+) -> Vec<[i32; 9]> {
+    use mc_bamboo_blocks::entity::{Entity, EntityKind, JavaRandom, pick_up as take_orb};
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::{items, registries::data_component_type as kinds};
+    use mc_bamboo_loot::enchantment_id;
+    use mc_bamboo_protocol::{
+        components::{ComponentPatch, ComponentValue, PatchEntry, defaults},
+        item::ItemStack,
+        packet::play::{ClientInformation, GameMode},
+    };
+
+    let mut player = player::Player::new(
+        inbound::PlayerId(1),
+        uuid::Uuid::nil(),
+        String::new(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::default(),
+    );
+    player.random = JavaRandom::new(seed);
+    player.take_xp_delay = delay;
+    player.experience = experience::Experience {
+        level: xp_level,
+        total: xp_total,
+        progress: f32::from_bits(progress_bits),
+    };
+    let mut patch = ComponentPatch::new();
+    if damage > 0 {
+        patch.put(
+            kinds::DAMAGE,
+            PatchEntry::Set(ComponentValue::Damage(damage)),
+        );
+    }
+    if mending {
+        let id = enchantment_id("minecraft:mending").expect("mending is in the registry");
+        patch.put(
+            kinds::ENCHANTMENTS,
+            PatchEntry::Set(ComponentValue::Enchantments(vec![(id, 1)])),
+        );
+    }
+    let (added, removed) = patch.to_opaque();
+    let held = player.inventory.hand_slot(mc_bamboo_core::Hand::Main);
+    player.inventory.slots[held] = ItemStack {
+        item: items::DIAMOND_SWORD,
+        count: 1,
+        added,
+        removed,
+    };
+    let mut orb = Entity::experience_orb(Vec3::default(), value);
+    if let EntityKind::ExperienceOrb(state) = &mut orb.kind {
+        state.count = count;
+    }
+    let mut take_count = 0;
+    let row = |player: &player::Player, orb: &Entity, take_count: i32| -> [i32; 9] {
+        let (count, gone) = match &orb.kind {
+            EntityKind::ExperienceOrb(state) => (state.count, i32::from(orb.removed)),
+            _ => (0, 1),
+        };
+        let held = &player.inventory.slots[player.inventory.hand_slot(mc_bamboo_core::Hand::Main)];
+        let patch = held.patch();
+        let damage = match defaults::resolve(held.item, &patch, kinds::DAMAGE) {
+            Some(ComponentValue::Damage(value)) => *value,
+            _ => 0,
+        };
+        [
+            player.experience.level,
+            player.experience.progress.to_bits() as i32,
+            player.experience.total,
+            player.score,
+            player.take_xp_delay,
+            count,
+            gone,
+            take_count,
+            damage,
+        ]
+    };
+    let mut steps = vec![row(&player, &orb, take_count)];
+    for _ in 0..ticks {
+        if player.take_xp_delay > 0 {
+            player.take_xp_delay -= 1;
+        }
+        if !orb.removed {
+            // `Player.aiStep` 的单球选择仍会取一次 `nextInt(1)`。
+            // `Player.aiStep` still draws one `nextInt(1)` for a single orb.
+            let _ = player.random.next_int_bounded(1);
+            if player.take_xp_delay == 0 {
+                player.take_xp_delay = 2;
+                take_count += 1;
+                let mut changed = Vec::new();
+                let points =
+                    experience_pickup::repair_player_items(&mut player, value, &mut changed);
+                if points > 0 {
+                    player.give_experience_points(points);
+                }
+                let _ = take_orb(&mut orb);
+            }
+        }
+        steps.push(row(&player, &orb, take_count));
+    }
+    steps
 }
 
 /// 供 `mc-bamboo-vanilla saved-data` 和官方 codec 对拍：返回 Bamboo 编码器写出的
