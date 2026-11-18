@@ -743,6 +743,17 @@ impl Islands {
             .map(|(&id, _)| id)
     }
 
+    /// 岛 `id` 停放着，并且它收信产生的回执都已经交给主控（可以拆合）。
+    ///
+    /// Island `id` is parked and every ack from its mail has gone to the
+    /// master (it may be split or merged).
+    pub(crate) fn acks_handed_back(&self, id: RegionId) -> bool {
+        self.slots
+            .get(&id)
+            .and_then(IslandSlot::parked)
+            .is_some_and(|island| island.replies.is_empty())
+    }
+
     /// 岛 `id` 在表里并且停放着。
     ///
     /// Island `id` exists and is parked.

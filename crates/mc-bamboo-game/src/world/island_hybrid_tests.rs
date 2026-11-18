@@ -2412,3 +2412,87 @@ fn profiling_covers_every_master_tick_and_every_island_tick() {
         );
     });
 }
+
+/// 混合驱动下岛在一刻开头收了信、回执还没交回，同一刻收包阶段里（进服挂票）照做一条
+/// 卷进它的拆分：拆分要等交回以后（这一刻收尾）再做，不能拆一个回执还没交出去的岛
+/// （压测里 `islands-8` 进人时世界线程曾因此 panic：「交回还没处理完就拆岛」）。合并
+/// 不会碰上：待合并的岛的信由 Director 扣着，不投。
+///
+/// Under the hybrid drive an island took mail at the start of a tick and
+/// its acks are not handed back yet when, in the same tick's inbound phase
+/// (a join placing a ticket), a split of it becomes due: the split must
+/// wait for the hand-back at the end of the tick instead of splitting an
+/// island whose acks are still out (the world thread once panicked on this
+/// in the `islands-8` load test while bots joined). Merges cannot hit it:
+/// the Director holds mail for islands about to merge.
+#[test]
+fn a_split_waits_for_acks_taken_at_the_start_of_the_tick() {
+    bounded(|| {
+        let mut scene = scene(54, 4);
+        for _ in 0..3 {
+            scene.server.tick();
+        }
+        // 先把第 0、1 组并成一个岛（两块相距很远，之后一拆就是两块）。
+        // First merge groups 0 and 1 into one island (far apart, so a split
+        // later yields two parts).
+        let first = island_of_group(&mut scene, 0);
+        let second = island_of_group(&mut scene, 1);
+        let (into, from) = (first.min(second), first.max(second));
+        let world = &mut scene.server.world;
+        let partition = world.master.host.partition_mut().expect("多岛开着");
+        assert!(partition.force_merge(into, from));
+        world.master.host.take_partition_ops();
+        world.settle_islands();
+        assert!(!world.islands.contains(from), "并成了一个岛");
+        scene.server.tick();
+        // 这个岛每刻只交付一个区块，旁边挂几张强加载票：信下一刻开头收进信箱，交付一个，
+        // 剩下的留在信箱里，之后每刻开头接着交付（回执在交回之前一直在岛上）。
+        // This island delivers one chunk per tick, and a few forced tickets
+        // go beside it: the letters land in its mailbox at the next tick
+        // start, one is delivered and the rest wait there, delivered at later
+        // tick starts (the acks stay on the island until the hand-back).
+        scene
+            .server
+            .world
+            .islands
+            .get_mut(into)
+            .expect("停放着")
+            .mailbox
+            .set_budget(crate::director_host::MailBudget {
+                deliveries: 1,
+                reclaims: 0,
+            });
+        let mut pos = scene.centers[1];
+        while scene.server.world.islands.island_of_chunk(pos).is_some() {
+            pos = ChunkPos::new(pos.x + 1, pos.z);
+        }
+        for dz in 0..4 {
+            scene.server.apply_ticket_for_test(TicketOp::Forced {
+                pos: ChunkPos::new(pos.x, pos.z + dz),
+                forced: true,
+            });
+        }
+        scene.server.tick();
+        let world = &mut scene.server.world;
+        assert!(
+            world.islands.get(into).expect("停放着").mailbox.backlog().0 > 0,
+            "信箱里还有没交付的盒子"
+        );
+        let partition = world.master.host.partition_mut().expect("多岛开着");
+        let made = partition.force_split(into);
+        assert_eq!(made.len(), 1, "拆成两块");
+        world.master.host.take_partition_ops();
+        // 进服在收包阶段挂票，触发一次照做拆合；这时要拆的岛刚收完信、回执还在手里。
+        // The join places a ticket in the inbound phase and triggers a
+        // replay of changes while the island to split holds fresh acks.
+        let _late = scene.server.join("Latecomer");
+        scene.server.tick();
+        let world = &mut scene.server.world;
+        assert!(world.islands.contains(made[0]), "这一刻收尾时拆开了");
+        world.assert_island_invariants();
+        for _ in 0..5 {
+            scene.server.tick();
+        }
+        scene.server.world.assert_island_invariants();
+    });
+}
