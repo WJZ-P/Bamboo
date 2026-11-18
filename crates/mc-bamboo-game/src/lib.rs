@@ -107,10 +107,11 @@ pub use inbound::{
 };
 pub use inventory::receive_like_player;
 pub use island::{
-    DEFAULT_ISLAND_DEAD_SECONDS, DEFAULT_ISLAND_THREADS, DEFAULT_ISLANDS, ISLAND_DEAD_SECONDS_ENV,
-    ISLAND_THREADS_ENV, ISLANDS_ENV, MAX_ISLAND_DEAD_SECONDS, MIN_ISLAND_DEAD_SECONDS,
-    default_island_dead_timeout, default_island_threads, default_islands,
+    DEFAULT_ISLAND_DEAD_SECONDS, DEFAULT_ISLANDS, ISLAND_DEAD_SECONDS_ENV, ISLAND_THREADS_ENV,
+    ISLANDS_ENV, MAX_DEFAULT_ISLAND_THREADS, MAX_ISLAND_DEAD_SECONDS, MIN_DEFAULT_ISLAND_THREADS,
+    MIN_ISLAND_DEAD_SECONDS, default_island_dead_timeout, default_island_threads, default_islands,
     island_dead_seconds_from_env, island_threads_from_env, islands_from_env,
+    recommended_island_threads,
 };
 pub use island_pool::MAX_ISLAND_THREADS;
 pub use lectern::{LecternReplay, LecternSnapshot};

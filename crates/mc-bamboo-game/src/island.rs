@@ -56,10 +56,39 @@ pub(crate) const RECLAIM_DRAIN_TICKS: usize = 20;
 /// 排队用的 rank：`(玩家优先级, x, z)`，小的先出。
 pub(crate) type DemandRank = (i64, i32, i32);
 
-/// `island_threads` 没有显式给出时的值（岛的实施计划第 6 节第 7 步按测量定）。
+/// `island_threads` 缺省值的下限。多岛缺省打开，一条线程时卡住的慢岛占着它，别的岛都得
+/// 排在它后面（慢岛只拖慢自己的前提不成立），所以缺省至少 2 条（岛的实施计划第 10 步
+/// d 段的测量：`islands-heavy-4` 一条线程时四个岛一起掉到重岛的 TPS，两条起只有重岛掉）。
 ///
-/// The `island_threads` value when none is given (island plan, step 7, by measurement).
-pub const DEFAULT_ISLAND_THREADS: usize = 1;
+/// The lower bound of the `island_threads` default. Multi-island mode is on
+/// by default, and with one thread a slow island holds it while every other
+/// island queues behind (so a slow island no longer only slows itself);
+/// hence at least 2 (island plan, step 10 part d: in `islands-heavy-4` one
+/// thread drags all four islands down to the heavy one's TPS, from two
+/// threads up only the heavy island drops).
+pub const MIN_DEFAULT_ISLAND_THREADS: usize = 2;
+
+/// `island_threads` 缺省值的上限：岛再多也只按这么多条线程并行，多出来的岛进公共队列
+/// 轮流跑；线程栈是保留的地址空间，空着的线程不占 CPU。
+///
+/// The upper bound of the `island_threads` default: past this many islands
+/// run in turns from the shared queue; idle threads cost no CPU and their
+/// stacks are only reserved address space.
+pub const MAX_DEFAULT_ISLAND_THREADS: usize = 8;
+
+/// 没有显式给出时的 `island_threads`：逻辑核数的一半，夹在
+/// [`MIN_DEFAULT_ISLAND_THREADS`] 和 [`MAX_DEFAULT_ISLAND_THREADS`] 之间。另一半留给主控
+/// 线程、连接层的运行时、区块计算池和 IO 线程；拿不到核数时按 2。
+///
+/// The `island_threads` used when none is given: half the logical cores,
+/// clamped between [`MIN_DEFAULT_ISLAND_THREADS`] and
+/// [`MAX_DEFAULT_ISLAND_THREADS`]. The other half is left to the master
+/// thread, the connection runtime, the chunk compute pool and the IO thread;
+/// 2 when the core count is unknown.
+pub fn recommended_island_threads() -> usize {
+    let cores = std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get);
+    (cores / 2).clamp(MIN_DEFAULT_ISLAND_THREADS, MAX_DEFAULT_ISLAND_THREADS)
+}
 
 /// 改 `island_threads` 缺省值的环境变量：对拍、探针和测试用它整进程切到精确模式（`0`）。
 ///
@@ -82,20 +111,23 @@ pub fn island_threads_from_env() -> Option<usize> {
     }
 }
 
-/// 没有显式选择时的 `island_threads`：环境变量优先，没有就是 [`DEFAULT_ISLAND_THREADS`]。
+/// 没有显式选择时的 `island_threads`：环境变量优先，没有就是 [`recommended_island_threads`]。
 /// 要求逐位一致的测试、对拍和探针都显式给 0，不靠这个缺省值。
 ///
 /// The `island_threads` used when nothing is chosen explicitly: the
-/// environment wins, otherwise [`DEFAULT_ISLAND_THREADS`]. Bit-exact tests,
+/// environment wins, otherwise [`recommended_island_threads`]. Bit-exact tests,
 /// oracles and probes give 0 explicitly instead of relying on it.
 pub fn default_island_threads() -> usize {
-    island_threads_from_env().unwrap_or(DEFAULT_ISLAND_THREADS)
+    island_threads_from_env().unwrap_or_else(recommended_island_threads)
 }
 
-/// `islands` 没有显式给出时的值（岛的实施计划第 6 节第 10 步：验收通过之前保持关）。
+/// `islands` 没有显式给出时的值：开（岛的实施计划第 6 节第 10 步验收后打开，第 9 节第 7 条）。
+/// 要求逐位一致的对拍、探针和测试显式给 `false`。
 ///
-/// The `islands` value when none is given (island plan, step 10: off until accepted).
-pub const DEFAULT_ISLANDS: bool = false;
+/// The `islands` value when none is given: on (island plan, step 10,
+/// turned on once accepted; section 9, item 7). Bit-exact oracles, probes
+/// and tests give `false` explicitly.
+pub const DEFAULT_ISLANDS: bool = true;
 
 /// 改 `islands` 缺省值的环境变量（`0` / `1`、`false` / `true`）：对拍、探针和测试用它
 /// 整进程切换。
