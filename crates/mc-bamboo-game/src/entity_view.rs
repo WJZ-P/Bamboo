@@ -12,7 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mc_bamboo_blocks::{
     BlockState, PistonMoving, ShulkerBoxEntity, WorldBorder,
-    entity::view::{BlockSource, SourceView, ViewFacts},
+    entity::{
+        ctx::PlayerView,
+        view::{BlockSource, SourceView, ViewFacts},
+    },
     shape::Aabb,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
@@ -41,6 +44,11 @@ pub(crate) struct ReadOnlyWorld<'a> {
     ///
     /// This dimension's world-border snapshot; entity collisions read it.
     pub(crate) world_border: WorldBorder,
+    /// 算阶段开始时按进服顺序拷下来的本岛玩家。
+    ///
+    /// This island's players, copied in join order at the start of the
+    /// compute phase.
+    pub(crate) players: Vec<PlayerView>,
 }
 
 impl BlockSource for ReadOnlyWorld<'_> {
@@ -79,6 +87,12 @@ impl BlockSource for ReadOnlyWorld<'_> {
 
     fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
         self.tick_levels.chunk_ticks_entities(chunk)
+    }
+
+    fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
+        for player in &self.players {
+            visit(player);
+        }
     }
 
     fn world_border(&self) -> WorldBorder {

@@ -188,7 +188,7 @@ pub(crate) fn run_entity_ticks(entity_threads: usize, region: &mut Region) {
 ///
 /// 每刻起线程的 [`ScopedThreads`] 开销大，只用于实验；常驻线程池留给任务系统
 /// （设计稿第 12 节）。
-fn parallel_entity_ticks(threads: usize, region: &mut Region) {
+pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
     use mc_bamboo_blocks::entity::{
         parallel::{ScopedThreads, commit, compute},
         view::ViewFacts,
@@ -202,8 +202,10 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             global,
             tick_levels,
             profiler,
+            players,
             ..
         } = &mut *region;
+        let player_views = crate::player::player_views(&*players);
         let block_entity_shapes = crate::entity_view::block_entity_shapes(chunks, block_entities);
         // `pickup_before_entities` 已经跑过；把实体表切进「这一刻正在 tick」的状态。
         // 这里只用实体表，不需要完整的 `RegionLevel`：区块表接下来要借给只读视图。
@@ -224,6 +226,7 @@ fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             shulker_box_shapes: block_entity_shapes.shulker_box_shapes,
             hopper_positions,
             world_border: global.world_border.clone(),
+            players: player_views,
         });
         let executor = ScopedThreads { threads };
         let computed = compute(&view, entities, &executor);

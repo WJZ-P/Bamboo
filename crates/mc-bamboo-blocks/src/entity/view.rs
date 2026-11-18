@@ -14,7 +14,7 @@ use crate::{
     world::{CollisionBlocks, collect_block_collisions_with_sections, traverse_blocks},
 };
 
-use super::ctx::BlockView;
+use super::ctx::{BlockView, PlayerView};
 
 /// 算阶段要用的只读事实。所有字段按值传入，视图不借用世界。
 #[derive(Debug, Clone, Copy)]
@@ -94,6 +94,14 @@ pub trait BlockSource: Sync {
     fn chunk_ticks_entities(&self, _chunk: ChunkPos) -> bool {
         true
     }
+
+    /// 本岛的玩家，按官方 `ServerLevel.players()` 的顺序。默认没有玩家；
+    /// 游戏层的只读视图覆盖它，让两种驱动看到同一份名单。
+    ///
+    /// This island's players, in `ServerLevel.players()` order. Empty by
+    /// default; the game layer's read-only view overrides it so both drives
+    /// see the same list.
+    fn for_each_player(&self, _visit: &mut dyn FnMut(&super::ctx::PlayerView)) {}
 
     /// 这片格子里有没有漏斗。默认按格读方块表；游戏层用预先拷出的位置集合覆盖它。
     /// 判定和 `World` 完全一致，所以两种视图、两种驱动发出的命令完全相同。
@@ -355,6 +363,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn chunk_ticks_entities(&self, chunk: ChunkPos) -> bool {
         self.0.chunk_ticks_entities(chunk)
+    }
+
+    fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
+        self.0.for_each_player(visit);
     }
 
     fn world_border(&self) -> WorldBorder {

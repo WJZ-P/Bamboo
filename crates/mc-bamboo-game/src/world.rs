@@ -3082,6 +3082,9 @@ mod island_runtime;
 #[path = "world/island_runtime_tests.rs"]
 mod island_runtime_tests;
 #[cfg(test)]
+#[path = "world/entity_player_tests.rs"]
+mod entity_player_tests;
+#[cfg(test)]
 #[path = "world/island_scale_tests.rs"]
 mod island_scale_tests;
 #[cfg(test)]

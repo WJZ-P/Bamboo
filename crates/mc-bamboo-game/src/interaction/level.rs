@@ -136,6 +136,17 @@ impl Level for RegionLevel<'_> {
         self.tick_levels.chunk_ticks_entities(chunk)
     }
 
+    /// 本岛的玩家。官方 `ServerLevel.players()` 不过滤旁观者和死亡状态，
+    /// 具体调用方各自用 `NO_SPECTATORS` / `TargetingConditions` 过滤。
+    ///
+    /// This island's players. `ServerLevel.players()` does not filter
+    /// spectators or dead players; each caller applies its own predicates.
+    fn for_each_player(&self, visit: &mut dyn FnMut(&mc_bamboo_blocks::entity::ctx::PlayerView)) {
+        for (id, player) in self.players.iter() {
+            visit(&player.view(*id));
+        }
+    }
+
     fn block_state(&self, pos: BlockPos) -> BlockState {
         BlockState(self.chunks.block(pos).unwrap_or(blocks::VOID_AIR))
     }

@@ -236,3 +236,27 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 - `Mob.pending_breed`（同一刻内消费，不跨刻，不带绝对时刻）和
   `ExperienceOrb` 的字段（年龄、健康、值、数量、跟随的玩家 uid）全在实体行上，
   整行搬走即可，不需要改 `IslandPart` 清单；`region/island_split.rs` 本轮未改。
+
+
+### 5.5 实体逻辑看得见游戏里的玩家（2026-11-20）
+
+- `mc-bamboo-blocks` 的 `Level::for_each_player` 原来在正式世界是空实现，只有
+  `testing.rs` 和几个对拍上下文给了玩家。于是 `LookAtPlayerGoal` / `TemptGoal`
+  看不见人、经验球不会朝玩家飞；`mob-oracle` 用自己的假世界上下文，所以没暴露。
+  现在 `RegionLevel`（精确驱动）和 `ReadOnlyWorld` / `SourceView`（并行算阶段）
+  都把本岛 `Region.players` 按 `PlayerId` 升序映射成 `PlayerView`。
+  顺序对应官方 `ServerLevel.players()` 的进服顺序（实体 ID 单调递增）；
+  旁观者、死亡状态和隐身等不在这一层过滤，由 `NO_SPECTATORS` /
+  `TargetingConditions` / `ExperienceOrb.followNearbyPlayer` 各自按官方条件处理。
+- **为什么只看本岛够用**：`island_partition.rs` 把「票想加载的区块」（等级 ≤ 33）
+  按 4×4 区块一个 section 计数，切比雪夫距离 ≤ 2 的非空 section 连成一个岛，
+  岛间至少隔 3 个 section（≥ 8 个区块 = 128 格）；`docs/island-implementation-plan.md`
+  4.2 由此推出「玩家的视野不跨两个岛」。牛的注视 6 格、诱惑 10 格、经验球跟随
+  8 格都远小于这个间隔：能和实体发生这些交互的玩家，其加载票覆盖的区块和实体
+  所在区块连通，必在同一个岛。`check_despawn` 用的是 32 格，也仍在间隔内；
+  更大的跨岛目标（例如将来加入 `FOLLOW_RANGE` 很大的生物）需要跨岛查询，
+  当前没有这类实体，这是已知的边界，不改分区器。
+- 测试在真实 `World`（`Harness`）上：拿小麦的玩家让牛转头并走过去、空手不动、
+  注视目标被选中、经验球朝玩家加速、旁观者不吸引经验球、并行算阶段结果相同。
+  把 `RegionLevel::for_each_player` 退回空实现后，前三个正向断言全部失败，
+  恢复后 `6/6` 通过。`mob-oracle` 用自己的上下文，不受影响。

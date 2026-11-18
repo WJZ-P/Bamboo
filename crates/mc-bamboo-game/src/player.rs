@@ -2,8 +2,8 @@
 //!
 //! 每个领域的状态放在各自模块的类型里，这里只把它们组合起来。
 
-use mc_bamboo_blocks::entity::JavaRandom;
-use mc_bamboo_core::{Aabb, ChunkPos, Vec3};
+use mc_bamboo_blocks::entity::{JavaRandom, ctx::PlayerView};
+use mc_bamboo_core::{Aabb, ChunkPos, Hand, Vec3};
 use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode, MODEL_PART_HAT};
 use uuid::Uuid;
 
@@ -229,6 +229,7 @@ impl Player {
     ///
     /// Official `Player.onEnchantmentPerformed`: subtracts levels and draws
     /// a new seed from the player's random source.
+    #[cfg_attr(not(feature = "oracle-samples"), allow(dead_code))]
     pub(crate) fn on_enchantment_performed(&mut self, levels: i32) {
         self.experience.level = self.experience.level.wrapping_sub(levels);
         if self.experience.level < 0 {
@@ -272,6 +273,34 @@ impl Player {
         }
     }
 
+    /// 实体逻辑看到的玩家视图，对应官方 `Level.players()` 里的一个 `Player`。
+    /// 这里不筛选旁观者或死亡状态：`getNearestPlayer` 的谓词、
+    /// `TargetingConditions` 和 `ExperienceOrb.followNearbyPlayer` 各自按官方条件过滤。
+    ///
+    /// The player view seen by entity logic, one entry of `Level.players()`.
+    /// Spectators and dead players are not filtered here: `getNearestPlayer`'s
+    /// predicate, `TargetingConditions` and `ExperienceOrb.followNearbyPlayer`
+    /// each apply the official conditions themselves.
+    pub(crate) fn view(&self, id: PlayerId) -> PlayerView {
+        let main = self.inventory.held(Hand::Main);
+        let off = self.inventory.held(Hand::Off);
+        PlayerView {
+            uid: id.0,
+            position: self.position,
+            eye_height: self.eye_height() as f32,
+            // Bamboo 还没有玩家生命和药水效果。
+            // Bamboo has no player health or potion effects yet.
+            alive: true,
+            spectator: self.game_mode == GameMode::Spectator,
+            creative: self.game_mode == GameMode::Creative,
+            sneaking: self.sync.is_crouching(),
+            invisible: false,
+            armor_cover: 0.0,
+            main_hand: if main.is_empty() { 0 } else { main.item },
+            off_hand: if off.is_empty() { 0 } else { off.item },
+        }
+    }
+
     /// 碰撞盒，世界坐标。
     pub(crate) fn bounding_box(&self) -> Aabb {
         let height = if self.sync.is_crouching() {
@@ -289,6 +318,18 @@ impl Player {
             z + HALF_WIDTH,
         )
     }
+}
+
+/// 按 `PlayerId` 升序列出本岛的玩家，和官方 `ServerLevel.players()` 的进服顺序一致：
+/// 实体 ID 单调递增，进服时追加到表尾，离开时删掉。
+///
+/// Lists this island's players by ascending `PlayerId`, matching the join order
+/// of `ServerLevel.players()`: entity ids grow monotonically, joins append and
+/// leaves remove.
+pub(crate) fn player_views(
+    players: &std::collections::BTreeMap<PlayerId, Player>,
+) -> Vec<PlayerView> {
+    players.iter().map(|(id, player)| player.view(*id)).collect()
 }
 
 /// 客户端设置里帽子层是不是打开的。
