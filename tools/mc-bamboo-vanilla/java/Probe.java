@@ -395,6 +395,10 @@ public final class Probe {
     /** M2 会发的全部包。收到别的说明服务端走了规格之外的路径。 */
     private static final Set<String> M2_PACKETS = Set.of(
             "handleAddEntity",
+            "handleAddObjective",
+            "handleSetDisplayObjective",
+            "handleSetObjective",
+            "handleSetScore",
             "handleAwardStats",
             "handleBlockChangedAck",
             "handleBlockDestruction",
@@ -2814,6 +2818,28 @@ public final class Probe {
             actor.send(new ServerboundChatCommandPacket("xp set @s 20 points"));
             await("experience: set points above the level maximum is refused",
                     () -> containsText(actor, "Cannot set experience points above the maximum"));
+            check("experience: scoreboard criteria parse",
+                    actor.commandParses("scoreboard objectives add bamboo_xp xp")
+                            && actor.commandParses("scoreboard objectives add bamboo_level level"));
+            actor.send(new ServerboundChatCommandPacket("scoreboard objectives add bamboo_xp xp"));
+            actor.send(new ServerboundChatCommandPacket("scoreboard objectives add bamboo_level level"));
+            // 只有显示中的目标才发 `set_score`（官方 ServerScoreboard 的 tracked 集合）。
+            // Only displayed objectives emit `set_score` (official tracked set).
+            actor.send(new ServerboundChatCommandPacket("scoreboard objectives setdisplay sidebar bamboo_xp"));
+            actor.send(new ServerboundChatCommandPacket("scoreboard objectives setdisplay list bamboo_level"));
+            actor.send(new ServerboundChatCommandPacket("xp set @s 5 levels"));
+            await("experience: set levels updates the client", () -> actor.experienceLevel == 5);
+            actor.send(new ServerboundChatCommandPacket("xp add @s 3 points"));
+            await("experience: added points reach total 20",
+                    () -> actor.totalExperience == 20 && actor.experienceLevel == 5);
+            await("scoreboard: xp criterion follows total experience",
+                    () -> Integer.valueOf(20).equals(actor.scores.getOrDefault("bamboo_xp", Map.of())
+                            .get(actor.player)));
+            await("scoreboard: level criterion follows experience level",
+                    () -> Integer.valueOf(5).equals(actor.scores.getOrDefault("bamboo_level", Map.of())
+                            .get(actor.player)));
+            check("experience: set_experience is resent after a total change",
+                    actor.experiencePackets > 1);
         }
 
         /** 没有权限的客户端：界面要不到规则，F3+F4 和 `/gamerule` 都被拒绝，值不变。 */
@@ -3115,6 +3141,8 @@ public final class Probe {
         final Map<UUID, String> tab = new HashMap<>();
         final Map<UUID, Boolean> hats = new HashMap<>();
         final Map<Integer, Remote> remotes = new HashMap<>();
+        /** `set_score` 的最新值，按目标、玩家名。经验准则对拍用。 */
+        final Map<String, Map<String, Integer>> scores = new HashMap<>();
         final Map<Integer, Map<Integer, Object>> metadata = new HashMap<>();
         final Map<BlockPos, BlockState> blocks = new HashMap<>();
         final Map<BlockPos, BlockEntityType<?>> blockEntities = new HashMap<>();
@@ -3640,8 +3668,7 @@ public final class Probe {
             // The official decoder never reaches these handlers if a packet fails to decode.
             handlers.put("handleAddObjective",
                     value -> check("scoreboard: set_objective decoded", value instanceof ClientboundSetObjectivePacket));
-            handlers.put("handleSetScore",
-                    value -> check("scoreboard: set_score decoded", value instanceof ClientboundSetScorePacket));
+            handlers.put("handleSetScore", value -> onSetScore((ClientboundSetScorePacket) value));
             handlers.put("handleResetScore",
                     value -> check("scoreboard: reset_score decoded", value instanceof ClientboundResetScorePacket));
             handlers.put("handleSetDisplayObjective",
@@ -3734,6 +3761,13 @@ public final class Probe {
                 abilitiesChecked = true;
                 check("play: creative abilities", packet.canFly() && packet.canInstabuild() && packet.isInvulnerable());
             }
+        }
+
+        private void onSetScore(ClientboundSetScorePacket packet) {
+            check("scoreboard: set_score decoded", true);
+            scores
+                    .computeIfAbsent(packet.objectiveName(), key -> new HashMap<>())
+                    .put(packet.owner(), packet.score());
         }
 
         private void onExperience(ClientboundSetExperiencePacket packet) {
