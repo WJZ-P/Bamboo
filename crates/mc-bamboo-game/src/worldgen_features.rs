@@ -853,11 +853,12 @@ pub fn feature_writes_into(
 /// 中心「自己的地物」写增量：`blocks[CENTER]` 相对 CARVERS 地形变了的格子。
 ///
 /// 官方 `applyBiomeDecoration` 把中心自己的地物写进中心 ProtoChunk；把它表示成
-/// 增量，好和邻居溢出的增量一起按 `TaskId` 顺序合并（设计稿 5.3.1）。
+/// 增量，好和邻居溢出的增量一起按来源中心的固定先后合并（设计稿 5.3.1、
+/// `performance-optimizations.md` 18.10）。
 ///
 /// The center's own feature writes: cells where `blocks[CENTER]` differs from
 /// the clean CARVERS terrain. Expressed as deltas so they merge with neighbor
-/// overflow in `TaskId` order (design 5.3.1).
+/// overflow in fixed source-center order (design 5.3.1, section 18.10).
 fn center_writes(
     cx: i32,
     cz: i32,
