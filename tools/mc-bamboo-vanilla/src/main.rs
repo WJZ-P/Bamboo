@@ -16,6 +16,8 @@
 //!     让官方容器菜单跑随机点击，用 mc-bamboo-game 重放，逐槽、逐个 state_id 比较
 //! mc-bamboo-vanilla command-oracle <java 路径> [--show N] [--break-self-test]
 //!     把实体选择器的解析、过滤和排序交给官方 `EntitySelectorParser` 对拍
+//! mc-bamboo-vanilla execute-oracle <java 路径> [--show N] [--break-self-test]
+//!     用官方 `Commands` 跑整条 `/execute`，比较方块、分数和反馈
 //! mc-bamboo-vanilla components <java 路径> [--show N]
 //!     让官方代码编码一大批物品组件，用 mc-bamboo-protocol 解码再编码，逐字节比较
 //! mc-bamboo-vanilla predicate-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -142,6 +144,8 @@ mod command_oracle;
 mod components;
 #[cfg(feature = "oracle")]
 mod entity_oracle;
+#[cfg(feature = "oracle")]
+mod execute_oracle;
 mod extract;
 #[cfg(feature = "oracle")]
 mod feature_merge;
@@ -262,6 +266,8 @@ const MENU_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MenuOracle.java";
 #[cfg(feature = "oracle")]
 const COMMAND_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/CommandOracle.java";
 #[cfg(feature = "oracle")]
+const EXECUTE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ExecuteOracle.java";
+#[cfg(feature = "oracle")]
 const COMPONENTS_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ComponentOracle.java";
 #[cfg(feature = "oracle")]
 const PREDICATE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/PredicateOracle.java";
@@ -354,6 +360,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla menu <java 路径> [--cases N] [--seed S] [--case I] [--show N]
       mc-bamboo-vanilla components <java 路径> [--show N]
       mc-bamboo-vanilla command-oracle <java 路径> [--show N] [--break-self-test]
+      mc-bamboo-vanilla execute-oracle <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla predicate-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla recipe-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla loot-oracle <java 路径> [--cases N] [--seed S] [--show N]
@@ -432,6 +439,7 @@ fn run() -> Result<(), String> {
         ["machine", java] => machine(java),
         ["components", java, ref options @ ..] => components(java, options),
         ["command-oracle", java, ref options @ ..] => command_oracle_cli(java, options),
+        ["execute-oracle", java, ref options @ ..] => execute_oracle_cli(java, options),
         ["predicate-oracle", java, ref options @ ..] => predicate_oracle(java, options),
         ["recipe-oracle", java, ref options @ ..] => recipe_oracle(java, options),
         ["loot-oracle", java, ref options @ ..] => loot_oracle(java, options),
@@ -654,6 +662,16 @@ fn menu(java: &str, options: &[&str]) -> Result<(), String> {
 #[cfg(feature = "oracle")]
 fn machine(java: &str) -> Result<(), String> {
     machine::run(official_program(java, MACHINE_SOURCE)?)
+}
+
+#[cfg(feature = "oracle")]
+fn execute_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    execute_oracle::run(official_program(java, EXECUTE_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn execute_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
 #[cfg(feature = "oracle")]

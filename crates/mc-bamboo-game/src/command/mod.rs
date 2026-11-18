@@ -66,6 +66,7 @@ mod clone;
 pub(crate) mod console;
 mod effects;
 mod enchant;
+pub(crate) mod execute;
 mod experience;
 pub(crate) mod feedback;
 mod gamerule;
@@ -325,6 +326,111 @@ pub(crate) fn run(
     }
 }
 
+/// 对拍用：把 `Component` 递归展开成「翻译键 + 参数 + 子组件」，不查语言表。
+/// 格式和 `ExecuteOracle.java::decompose` 一致。
+///
+/// For oracles: recursively expand `Component` into translation keys, args and
+/// siblings without a language file; matches `ExecuteOracle.java::decompose`.
+#[cfg(feature = "oracle-samples")]
+pub fn decompose_component(content: &mc_bamboo_protocol::text::Component) -> String {
+    fn walk(tag: &mc_bamboo_nbt::Tag, out: &mut String) {
+        match tag {
+            mc_bamboo_nbt::Tag::String(text) => {
+                out.push_str("L[");
+                out.push_str(text);
+                out.push(']');
+            }
+            mc_bamboo_nbt::Tag::Compound(entries) => {
+                let translate = entries.iter().find(|(key, _)| key == "translate");
+                if let Some((_, mc_bamboo_nbt::Tag::String(key))) = translate {
+                    out.push_str("T[");
+                    out.push_str(key);
+                    out.push(']');
+                    if let Some((_, mc_bamboo_nbt::Tag::List(args))) =
+                        entries.iter().find(|(key, _)| key == "with")
+                    {
+                        for arg in args {
+                            out.push('{');
+                            match arg {
+                                mc_bamboo_nbt::Tag::String(text) => {
+                                    out.push_str("S[");
+                                    out.push_str(text);
+                                    out.push(']');
+                                }
+                                other => walk(other, out),
+                            }
+                            out.push('}');
+                        }
+                    }
+                } else if let Some((_, mc_bamboo_nbt::Tag::String(text))) =
+                    entries.iter().find(|(key, _)| key == "text")
+                {
+                    out.push_str("L[");
+                    out.push_str(text);
+                    out.push(']');
+                } else {
+                    out.push_str("C[compound]");
+                }
+                if let Some((_, mc_bamboo_nbt::Tag::List(extra))) =
+                    entries.iter().find(|(key, _)| key == "extra")
+                {
+                    for child in extra {
+                        out.push('+');
+                        walk(child, out);
+                    }
+                }
+            }
+            mc_bamboo_nbt::Tag::List(items) => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            mc_bamboo_nbt::Tag::Byte(value) => out.push_str(&format!("S[{value}]")),
+            mc_bamboo_nbt::Tag::Short(value) => out.push_str(&format!("S[{value}]")),
+            mc_bamboo_nbt::Tag::Int(value) => out.push_str(&format!("S[{value}]")),
+            mc_bamboo_nbt::Tag::Long(value) => out.push_str(&format!("S[{value}]")),
+            mc_bamboo_nbt::Tag::Float(value) => out.push_str(&format!("S[{value}]")),
+            mc_bamboo_nbt::Tag::Double(value) => out.push_str(&format!("S[{value}]")),
+            other => {
+                out.push_str("S[");
+                out.push_str(&format!("{other:?}"));
+                out.push(']');
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(content.tag(), &mut out);
+    out
+}
+
+/// 对拍用：和 [`on_command`] 一样，但不带 `cfg(test)`，供 `mc-bamboo-vanilla` 调用。
+/// 对拍用：和 [`on_command_public`] 一样，另外收集每条反馈的组件展开文本。
+#[cfg(feature = "oracle-samples")]
+pub(crate) fn on_command_public_feedback(
+    global: &mut Global,
+    region: &mut Region,
+    id: PlayerId,
+    command: &str,
+    out: &mut Vec<String>,
+) {
+    let before = crate::chat::oracle_feedback::len();
+    on_player_command(&mut GlobalPort::Direct(global), region, id, command, None);
+    *out = crate::chat::oracle_feedback::from(before)
+        .iter()
+        .map(decompose_component)
+        .collect();
+}
+
+#[cfg(feature = "oracle-samples")]
+pub(crate) fn on_command_public(
+    global: &mut Global,
+    region: &mut Region,
+    id: PlayerId,
+    command: &str,
+) {
+    on_player_command(&mut GlobalPort::Direct(global), region, id, command, None);
+}
+
 /// 单元测试用：按 `BAMBOO_TEST_GLOBAL_PORT` 选直接或排队实现执行一条玩家命令；
 /// 排队时命令执行完立刻按顺序应用攒下的改动（相当于岛马上交回）。
 ///
@@ -524,7 +630,15 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::DisplaySlot
         | ArgumentType::Style
         | ArgumentType::TeamColor
-        | ArgumentType::CompoundTag => ArgumentProperties::None,
+        | ArgumentType::CompoundTag
+        | ArgumentType::Swizzle
+        | ArgumentType::NbtPath
+        | ArgumentType::Heightmap
+        | ArgumentType::SlotSource
+        | ArgumentType::LootPredicate
+        | ArgumentType::FloatRange
+        | ArgumentType::Function => ArgumentProperties::None,
+        ArgumentType::ResourceOrTag { registry } => ArgumentProperties::Registry(registry),
     }
 }
 

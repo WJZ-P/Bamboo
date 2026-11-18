@@ -9,6 +9,8 @@
 //! itself; the server source uses the lower corner of the spawn block, a zero
 //! rotation and no entity. Bamboo has only the overworld.
 
+use std::cell::RefCell;
+
 use mc_bamboo_command::{Coordinates, wrap_degrees};
 use mc_bamboo_core::Vec3;
 
@@ -59,11 +61,37 @@ pub(crate) fn level(region: &Region, id: PlayerId) -> u8 {
     }
 }
 
+thread_local! {
+    /// `/execute` 每个分支临时替换的来源；动作查 `of` 时先读它。
+    /// One temporary `/execute` context per source; `of` checks it first.
+    static OVERRIDES: RefCell<Vec<(PlayerId, Source)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 在一次回调期间把来源换成新的位置/朝向/执行者。可嵌套。
+pub(crate) fn with_override<T>(id: PlayerId, source: Source, f: impl FnOnce() -> T) -> T {
+    OVERRIDES.with(|stack| stack.borrow_mut().push((id, source)));
+    let result = f();
+    OVERRIDES.with(|stack| {
+        stack.borrow_mut().pop();
+    });
+    result
+}
+
 /// 按 ID 造一个来源。控制台的位置取岛上的全局出生点快照。
 ///
 /// Build a source from its id. The console position comes from the island's
 /// global spawn snapshot.
 pub(crate) fn of(region: &Region, id: PlayerId) -> Source {
+    if let Some(overridden) = OVERRIDES.with(|stack| {
+        stack
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(key, _)| *key == id)
+            .map(|(_, source)| *source)
+    }) {
+        return overridden;
+    }
     if console::is_console(id) {
         let pos = region.global.spawn.pos;
         Source {

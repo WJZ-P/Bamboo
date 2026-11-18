@@ -140,6 +140,28 @@ pub enum ArgumentType {
     ///
     /// Official `CompoundTagArgument`: one SNBT compound.
     CompoundTag,
+    /// 官方 `SwizzleArgument`：`/execute align` 的轴集合（只解析）。
+    ///
+    /// Official `SwizzleArgument`: the axis set of `/execute align` (parse only).
+    Swizzle,
+    /// 官方 `NbtPathArgument`：只解析路径文本，执行期再求值。
+    ///
+    /// Official `NbtPathArgument`: parses the path text; evaluated at run time.
+    NbtPath,
+    /// 官方 `ResourceOrTagArgument`（本命令树里只用于生物群系）。
+    ResourceOrTag {
+        registry: &'static str,
+    },
+    /// 官方 `HeightmapTypeArgument`：只解析名字。
+    Heightmap,
+    /// 官方 `SlotSourceArgument`：只解析槽位来源文本。
+    SlotSource,
+    /// 官方 `LootPredicateArgument`：只解析谓词 ID。
+    LootPredicate,
+    /// 官方 `FloatRangeArgument`：只解析范围文本。
+    FloatRange,
+    /// 官方 `FunctionArgument`：只解析函数名。
+    Function,
 }
 
 impl ArgumentType {
@@ -183,6 +205,14 @@ impl ArgumentType {
             Self::Style => "minecraft:style",
             Self::TeamColor => "minecraft:team_color",
             Self::CompoundTag => "minecraft:nbt_compound_tag",
+            Self::Swizzle => "minecraft:swizzle",
+            Self::NbtPath => "minecraft:nbt_path",
+            Self::ResourceOrTag { .. } => "minecraft:resource_or_tag",
+            Self::Heightmap => "minecraft:heightmap",
+            Self::SlotSource => "minecraft:slot_source",
+            Self::LootPredicate => "minecraft:loot_predicate",
+            Self::FloatRange => "minecraft:float_range",
+            Self::Function => "minecraft:function",
         }
     }
 
@@ -227,6 +257,14 @@ impl ArgumentType {
             Self::Style => registry::STYLE,
             Self::TeamColor => registry::TEAM_COLOR,
             Self::CompoundTag => registry::NBT_COMPOUND_TAG,
+            Self::Swizzle => registry::SWIZZLE,
+            Self::NbtPath => registry::NBT_PATH,
+            Self::ResourceOrTag { .. } => registry::RESOURCE_OR_TAG,
+            Self::Heightmap => registry::HEIGHTMAP,
+            Self::SlotSource => registry::SLOT_SOURCE,
+            Self::LootPredicate => registry::LOOT_PREDICATE,
+            Self::FloatRange => registry::FLOAT_RANGE,
+            Self::Function => registry::FUNCTION,
         }
     }
 
@@ -302,6 +340,14 @@ impl ArgumentType {
             Self::Style => scoreboard::parse_style(reader),
             Self::TeamColor => scoreboard::parse_team_color(reader),
             Self::CompoundTag => parse_compound_tag(reader),
+            Self::Swizzle => parse_swizzle(reader),
+            Self::NbtPath => Ok(Value::String(reader.read_unquoted_string())),
+            Self::ResourceOrTag { registry } => parse_resource_or_tag(reader, registry),
+            Self::Heightmap => Ok(Value::String(reader.read_unquoted_string())),
+            Self::SlotSource => Ok(Value::String(reader.read_unquoted_string())),
+            Self::LootPredicate => parse_resource_location(reader),
+            Self::FloatRange => Ok(Value::String(reader.read_unquoted_string())),
+            Self::Function => parse_resource_location(reader),
         }
     }
 
@@ -389,6 +435,32 @@ fn parse_compound_tag(reader: &mut StringReader) -> Result<Value, ParseError> {
 /// 官方 `ResourceArgument.parse`：读一个标识符，不在注册表里就报 `argument.resource.not_found`。
 ///
 /// Official `ResourceArgument.parse`: read an identifier, or `argument.resource.not_found`.
+/// 官方 `SwizzleArgument`：字母 x/y/z 各最多一次，至少一个。
+fn parse_swizzle(reader: &mut StringReader) -> Result<Value, ParseError> {
+    let start = reader.cursor();
+    while reader.can_read() && matches!(reader.peek(), 'x' | 'y' | 'z') {
+        reader.skip();
+    }
+    if reader.cursor() == start {
+        return Err(ParseError::new("argument.swizzle.invalid"));
+    }
+    let text = reader.slice(start, reader.cursor()).to_owned();
+    for axis in ['x', 'y', 'z'] {
+        if text.chars().filter(|c| *c == axis).count() > 1 {
+            return Err(ParseError::new("argument.swizzle.duplicate"));
+        }
+    }
+    Ok(Value::String(text))
+}
+
+/// 官方 `ResourceOrTagArgument`：`#` 前缀是标签，本命令树只把它当文本解析。
+fn parse_resource_or_tag(reader: &mut StringReader, _registry: &str) -> Result<Value, ParseError> {
+    if reader.can_read() && reader.peek() == '#' {
+        reader.skip();
+    }
+    parse_resource_location(reader)
+}
+
 fn parse_resource(reader: &mut StringReader, registry: &str) -> Result<Value, ParseError> {
     let name = Identifier::read(reader)?.to_registry_name();
     let found = registry_entries(registry).is_some_and(|entries| entries.contains(&name.as_str()));

@@ -229,6 +229,27 @@ fn accepts_system_messages(visibility: ChatVisibility, overlay: bool) -> bool {
 /// Official `ServerPlayer.sendSystemMessage(Component, boolean overlay)`: check visibility
 /// before sending. Command feedback, the `chat.type.admin` broadcast to ops, and secure-chat
 /// failures all come through here.
+#[cfg(feature = "oracle-samples")]
+pub(crate) mod oracle_feedback {
+    std::thread_local! {
+    /// 对拍用：按发生顺序记下发给玩家的系统消息组件。
+    static ORACLE_FEEDBACK: std::cell::RefCell<Vec<mc_bamboo_protocol::text::Component>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    pub fn len() -> usize {
+        ORACLE_FEEDBACK.with(|list| list.borrow().len())
+    }
+
+    pub fn from(start: usize) -> Vec<mc_bamboo_protocol::text::Component> {
+        ORACLE_FEEDBACK.with(|list| list.borrow()[start..].to_vec())
+    }
+
+    pub fn push(content: &mc_bamboo_protocol::text::Component) {
+        ORACLE_FEEDBACK.with(|list| list.borrow_mut().push(content.clone()));
+    }
+}
+
 pub(crate) fn send_system_message(
     region: &mut Region,
     id: PlayerId,
@@ -240,6 +261,8 @@ pub(crate) fn send_system_message(
         .get(&id)
         .is_some_and(|player| accepts_system_messages(player.client.chat_visibility, overlay));
     if accepts {
+        #[cfg(feature = "oracle-samples")]
+        oracle_feedback::push(content);
         region.links.send(id, &SystemChat { content, overlay });
     }
 }

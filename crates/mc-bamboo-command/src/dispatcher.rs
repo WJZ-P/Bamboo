@@ -19,11 +19,54 @@ pub struct ParsedCommand {
     pub arguments: Vec<(String, Value)>,
     /// 已读到的字符位置。
     pub cursor: usize,
+    /// `/execute` 链的每一层（从外到内）；其它命令是空表。
+    ///
+    /// Each `/execute` chain layer, outermost first; empty for other commands.
+    pub chain: Vec<ChainStep>,
+    /// 整条命令的原文（不带开头的 `/`）。`/execute run` 要按层号切出链尾。
+    ///
+    /// The full command text (without a leading `/`). `/execute run` slices
+    /// the tail by chain layer.
+    pub input: String,
+    /// `run` 后面的原文；没有 `run` 时是 `None`。
+    ///
+    /// The text after `run`; `None` when there is no `run`.
+    pub run_command: Option<String>,
+}
+
+/// `/execute` 链上的一层：`level` 是它在 `Context::layers()` 里的下标，
+/// `kind` 是这一层的第一个字面量分支名。参数用 [`ParsedCommand::step_value`]
+/// 按层号取。
+///
+/// One `/execute` chain layer: `level` is its index in `Context::layers()` and
+/// `kind` is the first literal branch name. Arguments are read with
+/// [`ParsedCommand::step_value`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainStep {
+    pub level: usize,
+    pub kind: String,
+    /// 这一层的参数（按出现顺序；同名参数按层区分）。
+    pub arguments: Vec<(String, Value)>,
+    /// 这一层开始解析下一个词的字符位置，用来切 `run` 后面的原文。
+    pub start: usize,
+    /// `run` 之后、链尾命令开始的位置。
+    pub run_cursor: Option<usize>,
 }
 
 impl ParsedCommand {
     pub fn get(&self, name: &str) -> Option<&Value> {
         self.arguments
+            .iter()
+            .find(|(argument, _)| argument == name)
+            .map(|(_, value)| value)
+    }
+
+    /// 取 `/execute` 链某一层的参数；不在这条链上就退回整条命令的 `get`。
+    ///
+    /// Read one `/execute` chain layer's argument, falling back to the whole
+    /// command's `get` when this is not an execute chain.
+    pub fn step_value<'a>(&self, step: &'a ChainStep, name: &str) -> Option<&'a Value> {
+        step.arguments
             .iter()
             .find(|(argument, _)| argument == name)
             .map(|(_, value)| value)
@@ -100,6 +143,19 @@ impl Context {
         }
         current
     }
+
+    /// 从外到内列出重定向产生的每一层上下文。
+    fn layers(&self) -> Vec<&Self> {
+        let mut out = Vec::new();
+        let mut current = self;
+        loop {
+            out.push(current);
+            match &current.child {
+                Some(child) => current = child,
+                None => return out,
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +188,59 @@ impl ParseResults {
     }
 }
 
+/// 按 `run` 那一层的重定向起点切出链尾命令原文，并去掉紧跟的一个空格。
+///
+/// Slice the command text after the `run` layer and trim one separator space.
+fn run_tail(input: &str, chain: &[ChainStep]) -> Option<String> {
+    let step = chain.iter().find(|step| step.kind == "run")?;
+    let slice = &input[step.run_cursor?..];
+    Some(slice.strip_prefix(' ').unwrap_or(slice).to_owned())
+}
+
+/// 把 `/execute` 的每一层重定向上下文记成 `(层号, 分支名)`。
+/// 层号是这一层在 `Context::layers()` 里的下标；分支名是该层的第一个字面量
+/// （`as` / `at` / `if` / `store` / `run` ...）。只有整行第一个字面量是
+/// `execute` 时才收集，其它命令的 `chain` 恒为空。
+///
+/// Record each `/execute` redirect context as `(layer, branch)`. The layer is
+/// its index in `Context::layers()` and the branch is the layer's first literal.
+/// Other commands always get an empty chain.
+fn collect_execute_chain(graph: &CommandGraph, context: &Context) -> Vec<ChainStep> {
+    // `run` 重定向到根以后，最深一层只带着链尾命令；这一层已经是动作节点。
+    // 链上真正的步骤是前面的各层，参数要按层号重新找回去。
+    let layers = context.layers();
+    let is_execute = layers.first().is_some_and(|layer| {
+        layer.nodes.iter().any(|node| {
+            matches!(&graph.node(node.node).kind, NodeKind::Literal(name) if name == "execute")
+        })
+    });
+    if !is_execute {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (level, layer) in layers.iter().enumerate() {
+        let mut branches = Vec::new();
+        for node in &layer.nodes {
+            if let NodeKind::Literal(name) = &graph.node(node.node).kind
+                && name != "execute"
+            {
+                branches.push((name.clone(), node.end));
+            }
+        }
+        for (kind, end) in branches {
+            let run_cursor = if kind == "run" { Some(end + 1) } else { None };
+            out.push(ChainStep {
+                level,
+                kind,
+                arguments: layer.arguments.clone(),
+                start: layer.range.0,
+                run_cursor,
+            });
+        }
+    }
+    out
+}
+
 impl CommandGraph {
     /// 解析一条命令（不带开头的 `/`）。
     pub fn parse(&self, input: &str, permission_level: u8) -> Result<ParsedCommand, ParseFailure> {
@@ -156,7 +265,25 @@ impl CommandGraph {
         }
 
         let deepest = raw.context.deepest();
-        let Some(action) = deepest.command else {
+        let chain = collect_execute_chain(self, &raw.context);
+        let run_command = run_tail(input, &chain);
+        let is_execute = chain.first().is_some_and(|step| step.level == 0);
+        let action = if is_execute {
+            // `/execute run` 重定向到整棵树，最深一层是链尾命令；整行仍由
+            // `/execute` 的动作处理，链尾命令在执行期单独解析。
+            // `/execute run` redirects to the whole tree, so the deepest layer
+            // is the tail command; the whole line is still `/execute`'s action.
+            self.node(self.root())
+                .children
+                .iter()
+                .copied()
+                .find(|&child| {
+                    matches!(&self.node(child).kind, NodeKind::Literal(name) if name == "execute")
+                })
+        } else {
+            deepest.command
+        };
+        let Some(action) = action else {
             return Err(ParseFailure {
                 error: ParseError::new("command.unknown.command"),
                 cursor: raw.cursor,
@@ -167,6 +294,9 @@ impl CommandGraph {
             nodes: deepest.nodes.iter().map(|node| node.node).collect(),
             arguments: deepest.arguments.clone(),
             cursor: raw.cursor,
+            chain,
+            input: input.to_owned(),
+            run_command,
         })
     }
 

@@ -33,10 +33,10 @@ pub(crate) enum CommandClass {
 }
 
 /// 4.4 的表：51 个顶层字面量各属哪一类（别名单列），加上后来接入的
-/// `/summon`、`/kill`、`/experience` 和 `/xp`；四个都只动本岛。
+/// `/summon`、`/kill`、`/execute`、`/experience` 和 `/xp`；都只动本岛。
 ///
 /// The 4.4 table: the class of each of the 51 root literals (aliases listed),
-/// plus `/summon`, `/kill`, `/experience` and `/xp`, all island-local.
+/// plus `/summon`, `/kill`, `/execute`, `/experience` and `/xp`, all island-local.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("setblock", CommandClass::Island),
@@ -46,6 +46,7 @@ pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("particle", CommandClass::Island),
     ("playsound", CommandClass::Island),
     ("enchant", CommandClass::Island),
+    ("execute", CommandClass::CrossIsland),
     ("experience", CommandClass::Island),
     ("xp", CommandClass::Island),
     ("stopsound", CommandClass::Island),
@@ -140,6 +141,7 @@ pub(crate) const SCOPES: &[(&str, CommandScope)] = &[
     ("particle", CommandScope::Players),
     ("playsound", CommandScope::Players),
     ("enchant", CommandScope::World),
+    ("execute", CommandScope::World),
     ("experience", CommandScope::Players),
     ("xp", CommandScope::Players),
     ("stopsound", CommandScope::Players),
@@ -242,10 +244,10 @@ mod tests {
             };
             roots.push((name.clone(), child));
         }
-        // 4.4 的 51 个加上 `/summon`、`/kill`、`/experience`、`/xp`。
-        // The 51 of 4.4 plus `/summon`, `/kill`, `/experience` and `/xp`.
-        assert_eq!(roots.len(), 55);
-        assert_eq!(CLASSES.len(), 55);
+        // 4.4 的 51 个加上 `/summon`、`/kill`、`/execute`、`/experience`、`/xp`。
+        // The 51 of 4.4 plus `/summon`, `/kill`, `/execute`, `/experience`, `/xp`.
+        assert_eq!(roots.len(), 56);
+        assert_eq!(CLASSES.len(), 56);
         // 每个顶层字面量都定了范围（计划 4.5），不多不少。
         // Every root literal has a scope (plan 4.5), no more and no fewer.
         let scoped: BTreeSet<&str> = SCOPES.iter().map(|(name, _)| *name).collect();
@@ -261,7 +263,15 @@ mod tests {
                 .map(|(_, class)| *class)
                 .unwrap_or_else(|| panic!("{name} 没有分类"));
             let kinds = action_kinds(root);
-            let expected = BTreeSet::from([class == CommandClass::Global]);
+            let expected = if name == "execute" {
+                // `/execute run` 重定向到整棵树，动作表里自然同时有全局和岛上两类；
+                // 这个根本身按 4.4 归可能跨岛类。
+                // `/execute run` redirects to the whole tree, so both global and
+                // island actions are reachable; the root itself is cross-island.
+                BTreeSet::from([false, true])
+            } else {
+                BTreeSet::from([class == CommandClass::Global])
+            };
             assert_eq!(
                 kinds, expected,
                 "{name} 的动作和 4.4 的类别 {class:?} 不一致"
