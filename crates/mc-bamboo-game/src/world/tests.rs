@@ -764,19 +764,24 @@ impl Harness {
         &mut self.world.islands.get_mut(island).expect("停放着").region
     }
 
-    /// 回到原处以后再跑最多 `ticks` 刻，收下这期间的全部帧，直到 `pos` 的区块发来为止。
-    /// 一个岛时当刻就到；多岛时走远又回来是跨岛传送，晚一刻（总设计稿第 13 节第 11 条）。
+    /// 回到原处以后跑到 `pos` 的区块发来为止，收下这期间的全部帧。这一步不跨岛时（一个岛，
+    /// 或者多岛但玩家还在新位置所在的岛上）只给一刻，当刻就要到；跨岛时（玩家现在的岛不是
+    /// 新位置所在的岛）离境和到达晚一刻（总设计稿第 13 节第 11 条第 ② 项），给两刻。超过
+    /// 就不再跑，调用方找不到这个区块就失败。
     ///
-    /// After coming back, run up to `ticks` ticks collecting every frame until
-    /// the chunk at `pos` arrives. With one island it comes the same tick;
-    /// with several, walking far and back crosses islands and lands a tick
-    /// later (design section 13, item 11).
-    pub(crate) fn tick_until_chunk(
-        &mut self,
-        client: &Client,
-        pos: ChunkPos,
-        ticks: usize,
-    ) -> Vec<Frame> {
+    /// After coming back, run until the chunk at `pos` arrives, collecting
+    /// every frame. A step that stays on one island (one island, or several
+    /// with the player already on the island of the new spot) gets one tick
+    /// and must deliver that tick; a step that crosses islands (the player's
+    /// island is not the new spot's) departs and arrives a tick late (design
+    /// section 13, item 11 ②) and gets two. No more ticks are run, so the
+    /// caller fails if the chunk is not there.
+    pub(crate) fn tick_until_chunk(&mut self, client: &Client, pos: ChunkPos) -> Vec<Frame> {
+        let here = self.player(client).chunk_pos();
+        let island = self.world.islands.island_of_player(client.id);
+        let target = self.world.master.host.island_of(here);
+        let crossing = island.is_some() && target.is_some() && island != target;
+        let ticks = if crossing { 2 } else { 1 };
         let mut frames = Vec::new();
         for _ in 0..ticks {
             self.acknowledge_batch(client, 64.0);
@@ -2250,7 +2255,7 @@ fn edited_chunk_is_resent_with_the_edit() {
     client.take_frames();
 
     server.move_to(&client, SPAWN_X, SPAWN_Z);
-    let frames = server.tick_until_chunk(&client, edited, 3);
+    let frames = server.tick_until_chunk(&client, edited);
     let chunks = frames_with_id(&frames, clientbound::LEVEL_CHUNK_WITH_LIGHT);
     let resent = chunks
         .iter()
