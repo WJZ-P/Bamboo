@@ -85,7 +85,31 @@ pub enum ScenarioKind {
     /// measure whether one overloaded island only slows itself.
     IslandsHeavy4,
     IslandsHeavy8,
+    /// 拆合：8 名站着的假玩家排成一列（相邻两人隔 30 个区块，已加载区域相接，并成一个岛）；每
+    /// [`SHUTTLE_PERIOD`] 刻单数号的人被送到很远的地方、再送回来。他们一走，这一列断成
+    /// 几段，迟滞过后拆开；他们一回来，各段又并起来。量拆合的次数和每次耗时。
+    ///
+    /// Splits and merges: 8 standing bots in a row (30 chunks apart, loaded
+    /// areas nearly touching, one island); every [`SHUTTLE_PERIOD`] ticks the odd-numbered
+    /// bots are sent far away and then back. When they leave the row breaks
+    /// into pieces that split after the hysteresis; when they return the
+    /// pieces merge again. Measures how often and how long these take.
+    IslandsShuttle,
 }
+
+/// 拆合场景里单数号的人每隔这么多刻换一次位置（走 / 回）。拆分有 200 刻迟滞，这里给足。
+///
+/// Every this many ticks the odd-numbered bots of the shuttle scene switch
+/// place (away / back); splits wait 200 ticks, so this leaves room.
+pub const SHUTTLE_PERIOD: i64 = 400;
+/// 拆合场景的人数。
+const SHUTTLE_BOTS: usize = 8;
+/// 拆合场景一列里相邻两人隔几个区块。视距 8 时一名玩家加载的范围约 27 个区块宽：隔 30 个
+/// 区块时相邻两人的已加载区域只空 3 个区块，并成一个岛；单数号的人走开以后剩下的人隔
+/// 60 个区块，空出 30 多个区块，够拆分的距离。
+const SHUTTLE_STRIDE_CHUNKS: i32 = 30;
+/// 拆合场景里走开的人去的地方离那一列多远（区块）。
+const SHUTTLE_AWAY_CHUNKS: i32 = 200;
 
 /// 重的那一组额外的掉落物个数（缺省）。
 ///
@@ -123,6 +147,7 @@ impl ScenarioKind {
             "islands-16" => Self::Islands16,
             "islands-heavy-4" => Self::IslandsHeavy4,
             "islands-heavy-8" => Self::IslandsHeavy8,
+            "islands-shuttle" => Self::IslandsShuttle,
             _ => return None,
         })
     }
@@ -146,6 +171,7 @@ impl ScenarioKind {
             Self::Islands16 => "islands-16",
             Self::IslandsHeavy4 => "islands-heavy-4",
             Self::IslandsHeavy8 => "islands-heavy-8",
+            Self::IslandsShuttle => "islands-shuttle",
         }
     }
 
@@ -171,6 +197,7 @@ impl ScenarioKind {
             | Self::Islands16
             | Self::IslandsHeavy4
             | Self::IslandsHeavy8 => (GROUP_BOTS * self.groups(), "wander", "cluster", 60),
+            Self::IslandsShuttle => (SHUTTLE_BOTS, "stand", "cluster", 90),
         }
     }
 
@@ -259,6 +286,8 @@ struct Plan {
     groups: usize,
     /// 第 0 组额外的掉落物个数（重场景）。
     heavy_items: usize,
+    /// 拆合场景：每名假玩家上次被送到的是「在列里」还是「走开」。
+    shuttle: Option<std::collections::BTreeMap<String, bool>>,
     /// 每隔几刻发一条要整个世界的命令，0 = 不发。
     world_command_every: i64,
     /// 已经送到自己那一组的假玩家。
@@ -281,7 +310,9 @@ pub fn configure(kind: ScenarioKind) -> BenchHooks {
         })
         .collect();
     let groups = kind.groups();
-    let chunks = if groups > 0 {
+    let chunks = if kind == ScenarioKind::IslandsShuttle {
+        Vec::new()
+    } else if groups > 0 {
         group_chunks(groups)
     } else {
         forced_chunks(&placements)
@@ -306,6 +337,7 @@ pub fn configure(kind: ScenarioKind) -> BenchHooks {
         actions,
         groups,
         heavy_items: kind.heavy_items(),
+        shuttle: (kind == ScenarioKind::IslandsShuttle).then(std::collections::BTreeMap::new),
         world_command_every: std::env::var(WORLD_COMMAND_ENV)
             .ok()
             .and_then(|value| value.trim().parse().ok())
@@ -591,6 +623,7 @@ fn tick_scene(world: &mut BenchWorld<'_>) {
         let mut guard = PLAN.lock().expect("scenario plan lock");
         if let Some(plan) = guard.as_mut() {
             place_new_bots(world, plan);
+            shuttle_bots(world, plan);
         }
         guard
             .as_ref()
@@ -632,6 +665,37 @@ fn tick_scene(world: &mut BenchWorld<'_>) {
                 world.refill(pos, stack);
             }
             _ => {}
+        }
+    }
+}
+
+/// 拆合场景：按家岛的时钟，前半个周期全部在列里，后半个周期单数号的人走开；每名假玩家
+/// 位置变了才送一次，送不成（他的岛不在手里）下一刻再试。
+///
+/// The shuttle scene: by the home clock, everyone is in the row for the
+/// first half of each period and the odd-numbered bots are away for the
+/// second half; a bot is sent only when its place changes, retried next tick
+/// while its island is away.
+fn shuttle_bots(world: &mut BenchWorld<'_>, plan: &mut Plan) {
+    let Some(sent) = plan.shuttle.as_mut() else {
+        return;
+    };
+    let away_phase = world.game_time().div_euclid(SHUTTLE_PERIOD) % 2 == 1;
+    for name in world.player_names() {
+        let index = bot_index(&name).unwrap_or(0);
+        let away = away_phase && index % 2 == 1;
+        if sent.get(&name) == Some(&away) {
+            continue;
+        }
+        let x = index as i32 * SHUTTLE_STRIDE_CHUNKS * 16 + 8;
+        let z = if away {
+            SHUTTLE_AWAY_CHUNKS * 16 + 8
+        } else {
+            8
+        };
+        let at = Vec3::new(f64::from(x) + 0.5, FLAT_SURFACE_Y, f64::from(z) + 0.5);
+        if world.teleport_player(&name, at) {
+            sent.insert(name, away);
         }
     }
 }

@@ -5,7 +5,7 @@
 #   缺省场景 islands-1 islands-4 islands-8 islands-16 islands-heavy-4。
 #   CONFIGS（默认 "off:0:1 on:1:1 on:1:2 on:1:4 on:1:8"）：每项「名字:BAMBOO_ISLANDS:BAMBOO_ISLAND_THREADS」，
 #     名字只用来起目录名（目录是 <名字>-t<线程数>）。
-#   ROUNDS（默认 2）、DURATION（默认 30 秒）、PROFILE_SECS（默认 5）、PORT（默认 25996）、
+#   ROUNDS（默认 2）、ROUND_START（默认 1，往同一个结果目录续跑时从这一轮编号起）、DURATION（默认 30 秒）、PROFILE_SECS（默认 5）、PORT（默认 25996）、
 #   OUT（默认 /tmp/bamboo-islands）、WORLD_COMMAND_EVERY（默认 0，>0 时每隔这么多刻从控制台发一条
 #   要整个世界的命令）、HEAVY_ITEMS（重场景第 0 组的额外掉落物个数，缺省用场景自己的）。
 #
@@ -26,6 +26,7 @@ SCENES=("$@")
 [ "${#SCENES[@]}" -eq 0 ] && SCENES=(islands-1 islands-4 islands-8 islands-16 islands-heavy-4)
 read -r -a CONFIG_LIST <<< "${CONFIGS:-off:0:1 on:1:1 on:1:2 on:1:4 on:1:8}"
 ROUNDS=${ROUNDS:-2}
+ROUND_START=${ROUND_START:-1}
 DURATION=${DURATION:-30}
 PROFILE_SECS=${PROFILE_SECS:-5}
 PORT=${PORT:-25996}
@@ -103,7 +104,7 @@ run_one() {
     SERVER=""
 }
 
-for round in $(seq 1 "$ROUNDS"); do
+for round in $(seq "$ROUND_START" $((ROUND_START + ROUNDS - 1))); do
     order=("${CONFIG_LIST[@]}")
     if [ $((round % 2)) -eq 0 ]; then
         order=()
