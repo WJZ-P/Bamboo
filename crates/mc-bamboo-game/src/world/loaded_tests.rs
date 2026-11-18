@@ -1567,7 +1567,7 @@ fn block_entities_outside_the_world_border_pause_and_resume() {
     // 渐变扩大，第 k 刻把 x = 12 盖进来：之后从原进度接着烧，每刻 +1。
     {
         let global = &mut server.world.master.global;
-        let game_time = server.world.island.region.tick.game_time();
+        let game_time = server.world.islands.region.tick.game_time();
         let _ = global
             .world_border_mut()
             .lerp_size_between(10.0, 30.0, 20, game_time);

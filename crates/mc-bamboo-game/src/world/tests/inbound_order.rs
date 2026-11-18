@@ -51,7 +51,7 @@ fn run_interleaved(single_channel: bool) -> (Vec<Frame>, Vec<Vec<Frame>>) {
     let mut server = Harness::new(2);
     // 聊天包里有墙上时钟，两遍要比字节就固定住。
     // Chat packets carry the wall clock; pin it so the two runs compare byte for byte.
-    server.world.island.region.clock_millis = Some(1_700_000_000_000);
+    server.world.islands.region.clock_millis = Some(1_700_000_000_000);
     if single_channel {
         server.use_single_channel();
     }

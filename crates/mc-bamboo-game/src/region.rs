@@ -321,7 +321,7 @@ pub(crate) struct Region {
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
-fn unique_seed() -> i64 {
+pub(crate) fn unique_seed() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos() as i64)

@@ -306,6 +306,11 @@ impl ChunkTracker {
         self.view = Some(next);
     }
 
+    /// 现在的视图中心；还没有视图时是 `None`。
+    pub(crate) fn view_center(&self) -> Option<ChunkPos> {
+        self.view.map(|view| view.center)
+    }
+
     /// 这个区块在跟踪范围里，而且已经发给客户端了。
     ///
     /// 方块更新和实体都只发给满足这个条件的玩家。还在 `pending` 的区块发送时就是最新内容。

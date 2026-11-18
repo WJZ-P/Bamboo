@@ -59,7 +59,7 @@ fn staged_pipeline_delivers_generated_terrain_through_the_pool() {
     let deadline = Instant::now() + Duration::from_secs(600);
     loop {
         let _ = world.tick();
-        if world.island.region.chunks.is_loaded(origin) {
+        if world.islands.region.chunks.is_loaded(origin) {
             break;
         }
         assert!(
@@ -71,13 +71,13 @@ fn staged_pipeline_delivers_generated_terrain_through_the_pool() {
     // 生成的盒子 `untouched=false`，超平坦模板是 `true`：确认交付的不是模板。
     // Generated boxes are `untouched=false`; the superflat template is `true`.
     assert!(
-        !world.island.region.chunks.is_pristine(origin),
+        !world.islands.region.chunks.is_pristine(origin),
         "delivered chunk is still the pristine superflat template"
     );
     // y=-60 在超平坦里是草方块上方的空气，在噪声地形里是地下的实心方块。
     // y=-60 is air above grass in superflat, but solid underground in noise terrain.
     let deep = world
-        .island
+        .islands
         .region
         .chunks
         .block(BlockPos::new(0, -60, 0))
@@ -139,7 +139,7 @@ fn generated_cells_with_seed(
         let _ = world.tick();
         let all_loaded = positions
             .iter()
-            .all(|pos| world.island.region.chunks.is_loaded(*pos));
+            .all(|pos| world.islands.region.chunks.is_loaded(*pos));
         let idle = world.master.host.compute_in_flight() == 0;
         if all_loaded && idle {
             quiet += 1;
@@ -162,7 +162,7 @@ fn generated_cells_with_seed(
     let mut out = BTreeMap::new();
     for &pos in positions {
         let light_on = world
-            .island
+            .islands
             .region
             .chunks
             .column_clone(pos)
@@ -180,13 +180,13 @@ fn generated_cells_with_seed(
                     let at = BlockPos::new(pos.x * 16 + x, y, pos.z * 16 + z);
                     cells
                         .blocks
-                        .push(world.island.region.chunks.block(at).unwrap_or(blocks::AIR));
+                        .push(world.islands.region.chunks.block(at).unwrap_or(blocks::AIR));
                     cells
                         .sky
-                        .push(world.island.region.chunks.light_value(LightLayer::Sky, at));
+                        .push(world.islands.region.chunks.light_value(LightLayer::Sky, at));
                     cells.block.push(
                         world
-                            .island
+                            .islands
                             .region
                             .chunks
                             .light_value(LightLayer::Block, at),
@@ -375,7 +375,7 @@ fn chunks_cancelled_before_assembly_leave_no_generation_state() {
         let [_, deltas, light, _] = world.master.host.generation_leftovers();
         let delivered = positions
             .iter()
-            .filter(|pos| world.island.region.chunks.is_loaded(**pos))
+            .filter(|pos| world.islands.region.chunks.is_loaded(**pos))
             .count();
         if (!deltas.is_empty() || !light.is_empty()) && delivered < positions.len() {
             break;
@@ -433,5 +433,5 @@ fn disable_random_ticks(world: &mut World) {
         .global
         .rules_mut()
         .assign(mc_bamboo_data::gamerules::RANDOM_TICK_SPEED, "0");
-    world.master.global.publish(&mut world.island.region);
+    world.master.global.publish(&mut world.islands.region);
 }

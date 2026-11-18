@@ -234,13 +234,6 @@ impl Region {
     /// 用这个岛的两个按名序列的世界种子，按 [`IslandRandom::derive`] 派生新岛的随机源。
     ///
     /// Derive a new island's random sources with this island's sequence seeds.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "第 10 步由分区器在运行时驱动拆合 / step 10 drives splits and merges at run time"
-        )
-    )]
     pub(crate) fn derive_island_random(&self, base: i64, origin: SectionPos) -> IslandRandom {
         IslandRandom::derive(
             base,

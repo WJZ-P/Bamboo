@@ -88,11 +88,11 @@ fn autosaving_every_tick_is_invisible_to_the_running_world() {
             .world
             .master
             .host
-            .save_loaded_dirty(&mut saved.world.island, tick as u64 + 1, true);
+            .save_loaded_dirty(&mut saved.world.islands.all_mut(), tick as u64 + 1, true);
         saved.tick();
         control.tick();
-        let a = fingerprint(&saved.world.island.region, &saved_client);
-        let b = fingerprint(&control.world.island.region, &control_client);
+        let a = fingerprint(&saved.world.islands.region, &saved_client);
+        let b = fingerprint(&control.world.islands.region, &control_client);
         assert_eq!(a, b, "第 {tick} 刻自动保存改变了世界状态或发出的包");
     }
 }

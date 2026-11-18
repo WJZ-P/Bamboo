@@ -6,7 +6,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -23,6 +23,7 @@ use mc_bamboo_world::{
     },
     light::generate::GeneratedLight,
     store::ChunkRevision,
+    ticket::LevelChange,
 };
 
 use crate::{
@@ -35,7 +36,7 @@ use crate::{
         DemandRank, Encoded, Island, IslandAccess, MailOrder, MailReport, Posted, SaveChanges,
         SavePlan, SaveReport, distance_to_players,
     },
-    island_partition::{ChunkDelta, IslandPartition},
+    island_partition::{ChunkDelta, IslandPartition, SectionPos, TopologyOp},
     profiler::{Profiler, SubPhase},
     region::{RegionColumn, parking::Parking},
     worldgen::GeneratedChunk,
@@ -318,6 +319,17 @@ pub(crate) struct DirectorHost {
     islands_verify_flag: bool,
     /// 本刻 pump 里增量记账的耗时（纳秒），和分区器自己那一段分开报。
     island_bookkeeping_nanos: u64,
+    /// 第 10 步：分区器驱动运行时的拆合（`islands = true`）。信件按区块所在的岛投，
+    /// 交付前先让分区器知道新区块归谁。
+    ///
+    /// Step 10: the partitioner drives real splits and merges (`islands = true`).
+    /// Letters go to the island that owns each chunk, and the partitioner learns
+    /// a new chunk's island before its delivery is posted.
+    live_islands: bool,
+    /// 分区器已经定了、运行时还没照做的拆合，按先后排。
+    topology: VecDeque<(TopologyOp, u64)>,
+    /// 卷进还没照做的拆合的岛：照做之前不收信（计划 3.1「交付前检查」）。
+    held_islands: BTreeSet<RegionId>,
     /// 关服中：F6 背压必须让路，保证所有区块都被收回并保存。
     /// Shutting down: F6 backpressure must stand aside so every chunk is saved.
     shutting_down: bool,
@@ -384,6 +396,9 @@ impl DirectorHost {
             island_last_tick: 0,
             islands_verify_flag: false,
             island_bookkeeping_nanos: 0,
+            live_islands: false,
+            topology: VecDeque::new(),
+            held_islands: BTreeSet::new(),
             shutting_down: false,
             saves_enabled: true,
         }
@@ -730,8 +745,225 @@ impl DirectorHost {
         self.islands.is_some()
     }
 
-    /// 测试专用：直接拿到分区器，逐刻断言不变量和全量对照。
+    /// 打开多岛（第 10 步）：分区器一直在，而且驱动运行时的拆合。无限超平坦不派任务，
+    /// 也就没有岛可分，这时什么都不做。
+    ///
+    /// Turn on multi-island mode (step 10): the partitioner always runs and
+    /// drives real splits and merges. Infinite flat dispatches nothing, so it
+    /// stays off there.
+    pub(crate) fn enable_live_islands(&mut self, verify: bool) {
+        if self.infinite_flat {
+            return;
+        }
+        let partition = self.islands.get_or_insert_with(|| {
+            let mut partition = IslandPartition::new();
+            partition.set_verify(verify);
+            partition
+        });
+        if verify {
+            partition.set_verify(true);
+            self.islands_verify_flag = true;
+        }
+        partition.record_ops();
+        self.live_islands = true;
+    }
+
+    /// 把攒着的区块依据变化先喂给分区器，取走它定下的拆合。投信之前调：新区块要先
+    /// 有岛，合并要先登记。
+    ///
+    /// Feed the pending membership deltas to the partitioner now and take the
+    /// structural changes it decided. Called before posting: a new chunk must
+    /// have an island and a merge must be registered first.
+    fn flush_island_deltas(&mut self) {
+        if !self.live_islands || self.island_deltas.is_empty() {
+            return;
+        }
+        let start = Instant::now();
+        let deltas: Vec<ChunkDelta> = std::mem::take(&mut self.island_deltas)
+            .into_values()
+            .collect();
+        if let Some(partition) = &mut self.islands {
+            partition.apply_now(&deltas);
+            let ops = partition.take_ops();
+            self.queue_topology(ops);
+        }
+        self.island_bookkeeping_nanos = self
+            .island_bookkeeping_nanos
+            .saturating_add(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+    }
+
+    /// 登记一批拆合，卷进去的岛先不收信。
+    fn queue_topology(&mut self, ops: Vec<TopologyOp>) {
+        for op in ops {
+            match &op {
+                TopologyOp::Merge { into, from } => {
+                    self.held_islands.insert(*into);
+                    self.held_islands.insert(*from);
+                }
+                TopologyOp::Split { from, to, .. } => {
+                    self.held_islands.insert(*from);
+                    self.held_islands.insert(*to);
+                }
+            }
+            self.topology.push_back((op, self.last_tick));
+        }
+    }
+
+    /// 区块现在归哪个岛（按分区器）。只在多岛时有意义；单岛时恒为家岛。
+    ///
+    /// The island that owns `pos` now (per the partitioner). Always home in
+    /// single-island mode.
+    pub(crate) fn island_of(&mut self, pos: ChunkPos) -> Option<RegionId> {
+        if !self.live_islands {
+            return Some(mc_bamboo_world::director::HOME_REGION);
+        }
+        self.flush_island_deltas();
+        self.islands
+            .as_ref()
+            .and_then(|partition| partition.island_of_chunk(pos))
+    }
+
+    /// 一个岛按（x，z）最小的 section；分区器里没有它时取 `fallback` 所在的 section。
+    pub(crate) fn island_origin(&self, id: RegionId, fallback: ChunkPos) -> SectionPos {
+        self.islands
+            .as_ref()
+            .and_then(|partition| partition.origin_of(id))
+            .unwrap_or_else(|| SectionPos::of(fallback))
+    }
+
+    /// 还有没照做的拆合。
+    pub(crate) fn has_topology(&self) -> bool {
+        !self.topology.is_empty()
+    }
+
+    /// 看下一条要照做的拆合（不取走）。
+    pub(crate) fn peek_topology(&self) -> Option<&TopologyOp> {
+        self.topology.front().map(|(op, _)| op)
+    }
+
+    /// 取走下一条照做完的拆合和它等了几刻；剩下的拆合卷进去的岛仍然扣着。
+    pub(crate) fn pop_topology(&mut self) -> Option<(TopologyOp, u64)> {
+        let (op, since) = self.topology.pop_front()?;
+        let pending: Vec<(TopologyOp, u64)> = self.topology.drain(..).collect();
+        self.held_islands.clear();
+        for (op, since) in pending {
+            self.queue_topology(vec![op]);
+            if let Some(last) = self.topology.back_mut() {
+                last.1 = since;
+            }
+        }
+        Some((op, self.last_tick.saturating_sub(since)))
+    }
+
+    /// 合并 `from` 进 `into` 时邮筒跟着并：`from` 的信都比 `into` 里关于 `from` 那些
+    /// 区块的信早（分区器合并之后才按新编号投），所以接在前面；Director 里 `from` 的
+    /// 已交付区块改记到 `into` 名下。
+    ///
+    /// On merging `from` into `into` the postboxes merge too: every letter in
+    /// `from` predates the letters in `into` about `from`'s chunks (those were
+    /// posted under the new id after the partitioner merged), so they go first;
+    /// the Director's delivered chunks of `from` are re-owned by `into`.
+    pub(crate) fn merge_posts(&mut self, into: RegionId, from: RegionId, moved: &[ChunkPos]) {
+        if let Some(mut earlier) = self.posts.remove(&from) {
+            let later = self.posts.entry(into).or_default();
+            earlier.append(later);
+            *later = earlier;
+        }
+        for &pos in moved {
+            self.director.reassign_region(pos, into);
+        }
+    }
+
+    /// 拆出 `to` 时邮筒跟着拆：`from` 里关于 `moved_section` 那些区块的信按原来的先后挪到
+    /// `to` 的前面；搬走的已交付区块在 Director 里改记到 `to` 名下。
+    ///
+    /// On splitting `to` off `from` the postbox splits too: `from`'s letters
+    /// about chunks in the moved sections go, in order, in front of `to`'s;
+    /// moved delivered chunks are re-owned by `to` in the Director.
+    pub(crate) fn split_posts(
+        &mut self,
+        from: RegionId,
+        to: RegionId,
+        sections: &BTreeSet<SectionPos>,
+        moved: &[ChunkPos],
+    ) {
+        let inside = |pos: &ChunkPos| sections.contains(&SectionPos::of(*pos));
+        let mut kept = Vec::new();
+        let mut moving = Vec::new();
+        for letter in self.posts.remove(&from).unwrap_or_default() {
+            match letter {
+                Posted::Deliver { pos, .. } if inside(&pos) => moving.push(letter),
+                Posted::Deliver { .. } => kept.push(letter),
+                Posted::Reclaim(positions) => {
+                    let (out, stay): (Vec<_>, Vec<_>) =
+                        positions.into_iter().partition(|(pos, _)| inside(pos));
+                    if !out.is_empty() {
+                        moving.push(Posted::Reclaim(out));
+                    }
+                    if !stay.is_empty() {
+                        kept.push(Posted::Reclaim(stay));
+                    }
+                }
+                Posted::Levels(changes) => {
+                    let (out, stay): (Vec<_>, Vec<_>) =
+                        changes.into_iter().partition(|change| inside(&change.pos));
+                    if !out.is_empty() {
+                        moving.push(Posted::Levels(out));
+                    }
+                    if !stay.is_empty() {
+                        kept.push(Posted::Levels(stay));
+                    }
+                }
+            }
+        }
+        if !kept.is_empty() {
+            self.posts.insert(from, kept);
+        }
+        if !moving.is_empty() {
+            let later = self.posts.entry(to).or_default();
+            moving.append(later);
+            *later = moving;
+        }
+        for &pos in moved {
+            self.director.reassign_region(pos, to);
+        }
+    }
+
+    /// 拆合照做完以后把扣着的信放出去（齐步：岛借给这次调用，当场收；分离：留给岛
+    /// 下一刻开头）。
+    ///
+    /// Release the held mail after the structural changes (lockstep: the
+    /// islands are lent and take it now; detached: at their next tick start).
+    pub(crate) fn release_mail(&mut self, island: &mut IslandAccess<'_>) {
+        if self.infinite_flat {
+            return;
+        }
+        let events = std::mem::take(&mut self.initial_scratch);
+        self.pump(island, events);
+    }
+
+    /// 邮筒里投给 `id` 的信件数（测试用）。
     #[cfg(test)]
+    pub(crate) fn posted_to(&self, id: RegionId) -> usize {
+        self.posts.get(&id).map_or(0, Vec::len)
+    }
+
+    /// 测试专用：直接拿到分区器。
+    #[cfg(test)]
+    pub(crate) fn partition_mut(&mut self) -> Option<&mut IslandPartition> {
+        self.islands.as_mut()
+    }
+
+    /// 测试专用：分区器刚定的拆合排进队列。
+    #[cfg(test)]
+    pub(crate) fn take_partition_ops(&mut self) {
+        if let Some(partition) = &mut self.islands {
+            let ops = partition.take_ops();
+            self.queue_topology(ops);
+        }
+    }
+
+    /// 直接看分区器（不变量检查、测试逐刻断言和全量对照用）。
     pub(crate) fn islands(&self) -> Option<&IslandPartition> {
         self.islands.as_ref()
     }
@@ -768,6 +1000,12 @@ impl DirectorHost {
             Some(partition) => partition.tick(now_tick, &deltas),
             None => return,
         };
+        if self.live_islands
+            && let Some(partition) = &mut self.islands
+        {
+            let ops = partition.take_ops();
+            self.queue_topology(ops);
+        }
         let bookkeeping = std::mem::take(&mut self.island_bookkeeping_nanos);
         if let Some(stats) = report.island_stats_mut()
             && let Some(partition) = &self.islands
@@ -1122,15 +1360,20 @@ impl DirectorHost {
     /// chunks to the IO thread with a per-chunk 10s cooldown; fully disabled
     /// during save-off. The master picks the list and the island encodes it
     /// (lockstep: the island is lent and it all happens on the spot).
-    pub(crate) fn save_loaded_dirty(&mut self, island: &mut Island, now_tick: u64, enabled: bool) {
+    pub(crate) fn save_loaded_dirty(
+        &mut self,
+        islands: &mut [&mut Island],
+        now_tick: u64,
+        enabled: bool,
+    ) {
         if !enabled || self.io.is_none() {
             return;
         }
         self.prune_saved();
-        let changes = island.drain_save_changes();
+        let changes = drain_all_save_changes(islands);
         let judged = self.judge_dirty(changes, false);
         let (eligible, candidates) = self.choose_snapshots(judged.dirty, now_tick);
-        let encoded = island.follow_save_plan(SavePlan {
+        let encoded = follow_all(islands, SavePlan {
             remark: judged.remark,
             metrics: Some((candidates, eligible.len() as u64)),
             encode: eligible,
@@ -1188,27 +1431,29 @@ impl DirectorHost {
     /// `/save-all`: snapshot every loaded dirty chunk to the IO thread at once,
     /// ignoring the pacing and cooldown. A barrier: the island is parked and
     /// lent; under the detached drive the pending list is folded in too.
-    pub(crate) fn snapshot_all_dirty(&mut self, island: &mut Island, now_tick: u64) {
+    pub(crate) fn snapshot_all_dirty(&mut self, islands: &mut [&mut Island], now_tick: u64) {
         if self.io.is_none() {
             return;
         }
         // 分离驱动下还没编码的名单：放回该放的，要拍的并进这次。齐步下它是空的。
         // A pending detached list: put back what it puts back, fold its chunks in.
-        let pending = std::mem::take(&mut island.save_plan);
-        let drain = pending.drain;
-        self.dirty_pending.extend(pending.encode.iter().copied());
-        let _ = island.follow_save_plan(SavePlan {
-            remark: pending.remark,
-            drain,
-            ..SavePlan::default()
-        });
-        island.save_plan.drain = drain;
+        for island in islands.iter_mut() {
+            let pending = std::mem::take(&mut island.save_plan);
+            let drain = pending.drain;
+            self.dirty_pending.extend(pending.encode.iter().copied());
+            let _ = island.follow_save_plan(SavePlan {
+                remark: pending.remark,
+                drain,
+                ..SavePlan::default()
+            });
+            island.save_plan.drain = drain;
+        }
         // `/save-all` 是显式的强制重试：清掉退避，把内存里还在的快照再提交一次。
         // 后续失败会重新按连续次数退避，但绝不永久暂停。
         // `save-all` is an explicit forced retry: clear the backoff and submit
         // everything still in memory. Later failures back off again, never pause forever.
         self.save_retry_after = 0;
-        let changes = island.drain_save_changes();
+        let changes = drain_all_save_changes(islands);
         let judged = self.judge_dirty(changes, true);
         let mut dirty = judged.dirty;
         // 冷却期 / 匀速没轮到而留到下一刻的脏区块，强制保存也要一起写。
@@ -1221,7 +1466,7 @@ impl DirectorHost {
         dirty.dedup();
         // 强制保存不看单区块冷却。
         self.loaded_save_tick.clear();
-        let encoded = island.follow_save_plan(SavePlan {
+        let encoded = follow_all(islands, SavePlan {
             remark: judged.remark,
             encode: dirty,
             metrics: None,
@@ -1303,15 +1548,19 @@ impl DirectorHost {
     /// 关服是栅栏：岛一定停放着、借给这次调用，两种驱动都当场收信。
     /// Shutdown is a barrier: the island is parked and lent, so both drives
     /// take the mail on the spot.
-    pub(crate) fn shutdown(&mut self, island: &mut Island) {
+    pub(crate) fn shutdown(&mut self, islands: &mut crate::island::Islands) {
         if self.infinite_flat {
             return;
         }
-        island.mailbox.lift_budget();
-        // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
-        island.region.chunks.finish_light_updates();
-        self.shutdown_with(&mut IslandAccess::Lent(&mut *island));
-        island.mailbox.clear();
+        for island in islands.iter_mut() {
+            island.mailbox.lift_budget();
+            // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
+            island.region.chunks.finish_light_updates();
+        }
+        self.shutdown_with(&mut IslandAccess::All(&mut *islands));
+        for island in islands.iter_mut() {
+            island.mailbox.clear();
+        }
     }
 
     /// 关服时岛卡在 tick 线程上回不来（岛的实施计划第 6 节第 7 步）：照常推完关服事件，
@@ -2181,6 +2430,10 @@ impl DirectorHost {
     /// go to the target island's postbox without touching the `Region`;
     /// `Ready` / `Forgot` only touch the master's own bookkeeping.
     fn region_message(&mut self, message: RegionMessage<Box<RegionColumn>>) {
+        if self.live_islands {
+            self.route_message(message);
+            return;
+        }
         let (region, letter) = match message {
             RegionMessage::Deliver {
                 region,
@@ -2224,11 +2477,98 @@ impl DirectorHost {
         self.profiler.end_sub();
     }
 
+    /// 多岛时投信（第 10 步）：交付按分区器给的岛；收回和换档按区块所在的岛分组。
+    /// Director 给的编号（恒为家岛）不用。
+    ///
+    /// Posting with several islands (step 10): a delivery goes to the
+    /// partitioner's island for it; reclaims and level changes are grouped by
+    /// each chunk's island. The Director's id (always home) is ignored.
+    fn route_message(&mut self, message: RegionMessage<Box<RegionColumn>>) {
+        self.flush_island_deltas();
+        let island_of = |host: &Self, pos: ChunkPos| {
+            host.islands
+                .as_ref()
+                .and_then(|partition| partition.island_of_chunk(pos))
+        };
+        // 交付和收回的区块一定在某个岛的 section 里（「票想要」或「还没收回」）。
+        // A delivered or reclaimed chunk is always in some island's section.
+        let route = |host: &Self, pos: ChunkPos| -> RegionId {
+            island_of(host, pos).unwrap_or_else(|| {
+                debug_assert!(false, "{pos:?} 的 section 不在任何岛里");
+                tracing::warn!(?pos, "a chunk letter has no island; sending it home");
+                mc_bamboo_world::director::HOME_REGION
+            })
+        };
+        self.profiler.start_sub(SubPhase::DirectorEvents);
+        match message {
+            RegionMessage::Deliver {
+                pos,
+                generation,
+                column,
+                desired,
+                ..
+            } => {
+                let id = route(self, pos);
+                self.posts.entry(id).or_default().push(Posted::Deliver {
+                    pos,
+                    generation,
+                    desired,
+                    column,
+                });
+            }
+            RegionMessage::Reclaim { positions, .. } => {
+                let mut by_island: BTreeMap<RegionId, Vec<(ChunkPos, u64)>> = BTreeMap::new();
+                for (pos, generation) in positions {
+                    by_island
+                        .entry(route(self, pos))
+                        .or_default()
+                        .push((pos, generation));
+                }
+                for (id, positions) in by_island {
+                    self.posts
+                        .entry(id)
+                        .or_default()
+                        .push(Posted::Reclaim(positions));
+                }
+            }
+            RegionMessage::LevelChanged { changes, .. } => {
+                // 换档也会说到还在流水线里的区块（没有哪个岛拿着它，没人要听），跳过。
+                // Level changes may name chunks still in the pipeline (no island
+                // holds them, nobody needs to hear); skip those.
+                let mut by_island: BTreeMap<RegionId, Vec<LevelChange>> = BTreeMap::new();
+                for change in changes {
+                    if let Some(id) = island_of(self, change.pos) {
+                        by_island.entry(id).or_default().push(change);
+                    }
+                }
+                for (id, changes) in by_island {
+                    self.posts
+                        .entry(id)
+                        .or_default()
+                        .push(Posted::Levels(changes));
+                }
+            }
+            message @ (RegionMessage::Ready { .. } | RegionMessage::Forgot { .. }) => {
+                self.profiler.end_sub();
+                // 和单岛一样只动主控自己的记账。
+                // Bookkeeping only, as with one island.
+                let live = std::mem::replace(&mut self.live_islands, false);
+                self.region_message(message);
+                self.live_islands = live;
+                return;
+            }
+        }
+        self.profiler.end_sub();
+    }
+
     /// 取走投给 `island` 的信，给分离驱动的岛在自己一刻开头收取。
     ///
     /// Take the letters posted to `island`, for a detached island to take at
     /// the start of its own tick.
     pub(crate) fn take_posted(&mut self, island: RegionId, into: &mut Vec<Posted>) {
+        if self.held_islands.contains(&island) {
+            return;
+        }
         if let Some(posted) = self.posts.get_mut(&island) {
             into.append(posted);
         }
@@ -2256,15 +2596,45 @@ impl DirectorHost {
         events: &mut Vec<Event<Box<RegionColumn>>>,
     ) {
         events.clear();
-        let IslandAccess::Lent(island) = island else {
-            return;
-        };
-        let order = self.mail_order();
-        let mut report = std::mem::take(&mut self.mail_report);
-        let posted = self.posts.entry(island.id).or_default();
-        island.take_mail(posted, &order, &mut report);
-        self.note_report(&mut report, events);
-        self.mail_report = report;
+        match island {
+            IslandAccess::Away => {}
+            #[cfg(test)]
+            IslandAccess::Lent(island) => {
+                let order = self.mail_order();
+                let mut report = std::mem::take(&mut self.mail_report);
+                let posted = self.posts.entry(island.id).or_default();
+                island.take_mail(posted, &order, &mut report);
+                self.note_report(&mut report, events);
+                self.mail_report = report;
+            }
+            IslandAccess::All(islands) => {
+                // 按编号升序，每个岛都收（信箱里可能还有上次按预算留下的盒子）；邮筒里投给
+                // 还不存在的岛的信先建一个空岛。卷进还没照做的拆合的岛先不收。
+                // Ascending id, every island takes (its mailbox may hold boxes
+                // left by the budget); letters to a missing island create an
+                // empty one first. Islands in a pending change wait.
+                let order = self.mail_order();
+                let mut report = std::mem::take(&mut self.mail_report);
+                let mut ids: BTreeSet<RegionId> = islands.ids().into_iter().collect();
+                ids.extend(
+                    self.posts
+                        .iter()
+                        .filter(|(_, letters)| !letters.is_empty())
+                        .map(|(&id, _)| id),
+                );
+                for id in ids {
+                    if self.held_islands.contains(&id) {
+                        continue;
+                    }
+                    let origin = self.island_origin(id, ChunkPos::new(0, 0));
+                    let island = islands.ensure(id, origin);
+                    let posted = self.posts.entry(id).or_default();
+                    island.take_mail(posted, &order, &mut report);
+                    self.note_report(&mut report, events);
+                }
+                self.mail_report = report;
+            }
+        }
     }
 
     /// 岛交回：把分离驱动下岛自己收信产生的回执喂给 Director。
@@ -2290,6 +2660,79 @@ impl DirectorHost {
         self.flush_mail(&mut IslandAccess::Lent(island), &mut events);
         events
     }
+}
+
+/// 把每个岛上次存盘以后的改动按编号顺序接成一份，交给主控统一判脏。
+///
+/// Concatenate every island's changes since the last save pass, by id, for
+/// one dirty check on the master.
+fn drain_all_save_changes(islands: &mut [&mut Island]) -> SaveChanges {
+    let mut changes = SaveChanges::default();
+    for island in islands.iter_mut() {
+        let mut mine = island.drain_save_changes();
+        changes.changed.append(&mut mine.changed);
+        changes.content.append(&mut mine.content);
+    }
+    changes
+}
+
+/// 照一份存盘名单做：位置交给已加载它的岛编码；哪个岛都没加载的交给第一个岛（编出来
+/// 是 `None`，下次重试）。指标只记一次。只有一个岛时就是 `follow_save_plan`。
+///
+/// Follow one save list: each position goes to the island that has it
+/// loaded; positions no island has go to the first (they encode to `None`
+/// and are retried). Metrics are recorded once. With one island this is
+/// just `follow_save_plan`.
+pub(crate) fn follow_all(islands: &mut [&mut Island], plan: SavePlan) -> Vec<Encoded> {
+    if let [island] = islands {
+        return island.follow_save_plan(plan);
+    }
+    let mut plans = split_plan(islands, plan);
+    let mut encoded = Vec::new();
+    for (island, plan) in islands.iter_mut().zip(plans.drain(..)) {
+        encoded.extend(island.follow_save_plan(plan));
+    }
+    encoded
+}
+
+/// 一份存盘名单按岛分开（见 [`follow_all`]）。
+pub(crate) fn split_plan(islands: &[&mut Island], plan: SavePlan) -> Vec<SavePlan> {
+    let mut plans: Vec<SavePlan> = islands
+        .iter()
+        .map(|_| SavePlan {
+            drain: plan.drain,
+            ..SavePlan::default()
+        })
+        .collect();
+    if plans.is_empty() {
+        return plans;
+    }
+    let owner = |pos: ChunkPos| {
+        islands
+            .iter()
+            .position(|island| island.region.chunks.is_loaded(pos))
+            .unwrap_or(0)
+    };
+    let SavePlan {
+        remark,
+        encode,
+        metrics,
+        #[cfg(test)]
+        verify,
+        ..
+    } = plan;
+    for pos in remark {
+        plans[owner(pos)].remark.push(pos);
+    }
+    for pos in encode {
+        plans[owner(pos)].encode.push(pos);
+    }
+    plans[0].metrics = metrics;
+    #[cfg(test)]
+    for (pos, revision) in verify {
+        plans[owner(pos)].verify.push((pos, revision));
+    }
+    plans
 }
 
 #[cfg(test)]
@@ -2741,7 +3184,7 @@ mod tests {
             "once the backoff expires normal saving retries"
         );
         // `/save-all` 是显式强制重试：清掉剩余的退避。
-        host.snapshot_all_dirty(&mut island, 60);
+        host.snapshot_all_dirty(&mut [&mut island], 60);
         assert_eq!(
             host.save_retry_after, 0,
             "save-all forces an immediate retry"

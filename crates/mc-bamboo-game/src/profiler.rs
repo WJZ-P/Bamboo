@@ -376,12 +376,22 @@ pub(crate) enum Metric {
     IslandBusy,
     /// 分离驱动：交接本身的耗时（派出到线程开跑，加上岛跑完到主控接着干活）。
     IslandHandoff,
+    /// 多岛（第 10 步）：这一刻结束时的岛数（含空的家岛）。
+    IslandCount,
+    /// 多岛：一次合并的耗时（每次一条样本）。
+    IslandMerge,
+    /// 多岛：一次拆分的耗时（每次一条样本）。
+    IslandSplit,
+    /// 多岛：一次拆合从分区器定下到运行时照做等了几刻（每次一条样本）。
+    IslandTopologyWait,
+    /// 多岛：这一刻跨岛搬过去的玩家数。
+    IslandCrossings,
     /// 因为落后太多而放弃追赶的次数，只有累计值，没有直方图。
     SkippedCatchUps,
 }
 
 impl Metric {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 26] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -403,6 +413,11 @@ impl Metric {
         Self::MasterBusy,
         Self::IslandBusy,
         Self::IslandHandoff,
+        Self::IslandCount,
+        Self::IslandMerge,
+        Self::IslandSplit,
+        Self::IslandTopologyWait,
+        Self::IslandCrossings,
     ];
 
     fn name(self) -> &'static str {
@@ -428,6 +443,11 @@ impl Metric {
             Self::MasterBusy => "master_busy",
             Self::IslandBusy => "island_busy",
             Self::IslandHandoff => "island_handoff",
+            Self::IslandCount => "island_count",
+            Self::IslandMerge => "island_merge",
+            Self::IslandSplit => "island_split",
+            Self::IslandTopologyWait => "island_topology_wait",
+            Self::IslandCrossings => "island_crossings",
             Self::SkippedCatchUps => "skipped_catch_ups",
         }
     }
@@ -450,13 +470,18 @@ impl Metric {
             | Self::StorageSnapshots => "chunks",
             Self::ChunkLatencyUs => "us",
             Self::FlushBytes => "bytes",
+            Self::IslandCount => "islands",
+            Self::IslandTopologyWait => "ticks",
+            Self::IslandCrossings => "players",
             Self::SkippedCatchUps => "times",
             Self::TickTotal
             | Self::TickStartLateness
             | Self::TickIntervalDeviation
             | Self::MasterBusy
             | Self::IslandBusy
-            | Self::IslandHandoff => "ms",
+            | Self::IslandHandoff
+            | Self::IslandMerge
+            | Self::IslandSplit => "ms",
         }
     }
 
@@ -469,6 +494,8 @@ impl Metric {
                 | Self::MasterBusy
                 | Self::IslandBusy
                 | Self::IslandHandoff
+                | Self::IslandMerge
+                | Self::IslandSplit
         )
     }
 }

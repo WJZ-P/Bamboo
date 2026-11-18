@@ -149,8 +149,8 @@ fn a_failed_write_is_retried_by_autosave_after_the_disk_recovers() {
     let pos = ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
-    server.world.island.region.touch(BlockPos::new(3, -60, 3));
-    server.world.island.region.chunks.finish_light_updates();
+    server.world.islands.region.touch(BlockPos::new(3, -60, 3));
+    server.world.islands.region.chunks.finish_light_updates();
 
     break_disk(&dir);
     server
@@ -187,8 +187,8 @@ fn repeated_save_all_after_a_failed_write_recovers_the_chunk() {
     let pos = ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
-    server.world.island.region.touch(BlockPos::new(3, -60, 3));
-    server.world.island.region.chunks.finish_light_updates();
+    server.world.islands.region.touch(BlockPos::new(3, -60, 3));
+    server.world.islands.region.chunks.finish_light_updates();
 
     break_disk(&dir);
     server
@@ -234,8 +234,8 @@ fn a_failed_in_flight_write_with_no_queue_residue_is_retried() {
     let pos = ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
-    server.world.island.region.touch(BlockPos::new(3, -60, 3));
-    server.world.island.region.chunks.finish_light_updates();
+    server.world.islands.region.touch(BlockPos::new(3, -60, 3));
+    server.world.islands.region.chunks.finish_light_updates();
 
     break_disk(&dir);
     server
@@ -287,13 +287,13 @@ fn shutdown_retries_a_failed_write_parked_before_shutdown() {
     let pos = ChunkPos::new(40, 40);
     server.apply_ticket_for_test(mc_bamboo_world::director::TicketOp::Forced { pos, forced: true });
     for _ in 0..64 {
-        if server.world.island.region.chunks.is_loaded(pos) {
+        if server.world.islands.region.chunks.is_loaded(pos) {
             break;
         }
         server.tick();
     }
-    assert!(server.world.island.region.chunks.is_loaded(pos));
-    server.world.island.region.chunks.set_block(
+    assert!(server.world.islands.region.chunks.is_loaded(pos));
+    server.world.islands.region.chunks.set_block(
         BlockPos::new(pos.x * 16 + 3, -60, pos.z * 16 + 3),
         blocks::GLOWSTONE,
     );
@@ -302,7 +302,7 @@ fn shutdown_retries_a_failed_write_parked_before_shutdown() {
     break_disk(&dir);
     for _ in 0..400 {
         server.tick();
-        if !server.world.island.region.chunks.is_loaded(pos)
+        if !server.world.islands.region.chunks.is_loaded(pos)
             && server.world.master.host.parked_count() > 0
         {
             break;
@@ -328,13 +328,13 @@ fn save_off_keeps_chunks_loaded_like_official_no_save() {
     let pos = ChunkPos::new(40, 40);
     server.apply_ticket_for_test(mc_bamboo_world::director::TicketOp::Forced { pos, forced: true });
     for _ in 0..64 {
-        if server.world.island.region.chunks.is_loaded(pos) {
+        if server.world.islands.region.chunks.is_loaded(pos) {
             break;
         }
         server.tick();
     }
-    assert!(server.world.island.region.chunks.is_loaded(pos));
-    server.world.island.region.chunks.set_block(
+    assert!(server.world.islands.region.chunks.is_loaded(pos));
+    server.world.islands.region.chunks.set_block(
         BlockPos::new(pos.x * 16 + 3, -60, pos.z * 16 + 3),
         blocks::GLOWSTONE,
     );
@@ -354,11 +354,11 @@ fn save_off_keeps_chunks_loaded_like_official_no_save() {
     server.tick();
     println!(
         "SAVE_OFF_UNLOAD loaded={} disk_has={}",
-        server.world.island.region.chunks.is_loaded(pos),
+        server.world.islands.region.chunks.is_loaded(pos),
         disk_has(&dir, pos)
     );
     assert!(
-        server.world.island.region.chunks.is_loaded(pos),
+        server.world.islands.region.chunks.is_loaded(pos),
         "save-off 照官方不收回区块"
     );
     server
