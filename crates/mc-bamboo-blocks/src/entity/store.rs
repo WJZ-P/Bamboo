@@ -931,6 +931,23 @@ impl EntityStore {
         (public.bounding_box(), stack)
     }
 
+    /// 岛合并时把各实体记着的绝对时刻平移 `delta`。现在只有生物有：
+    /// 受伤时刻、导航的卡住检查和重算时刻。tick 中被拿走的行不在表里，
+    /// 合并只在两刻之间发生，所以不会漏。
+    ///
+    /// Shift every absolute time stamp held by entities by `delta` on an island
+    /// merge. Only mobs have any: the damage stamp and the navigation stuck-check
+    /// and recompute times. Rows taken out mid-tick are absent, but merges only
+    /// happen between ticks.
+    pub fn rebase(&mut self, delta: i64) {
+        let rows = self.slots.iter_mut().flatten().chain(&mut self.pending);
+        for row in rows {
+            if let KindState::Mob(mob) = &mut row.state.kind {
+                mob.rebase(delta);
+            }
+        }
+    }
+
     pub fn begin_tick(&mut self) {
         self.ticking = true;
     }
