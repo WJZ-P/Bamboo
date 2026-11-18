@@ -1006,6 +1006,27 @@ impl EntityStore {
         std::mem::take(&mut self.wake_events)
     }
 
+    /// 取走这一刻生物的实体事件（受伤、死亡、音效），按 uid 升序、实体内按发生顺序。
+    /// 发包方每刻调用一次，事件不会跨刻累积。
+    ///
+    /// Take this tick's mob events (damage, death, sound) in uid order and event
+    /// order within each entity. The sender calls this once per tick.
+    pub fn take_mob_events(&mut self) -> Vec<(EntityUid, Vec<super::mob::MobEvent>)> {
+        let mut out = Vec::new();
+        for &row in self.index.values() {
+            let Some(entry) = self.slots[row].as_mut() else {
+                continue;
+            };
+            let super::KindState::Mob(mob) = &mut entry.state.kind else {
+                continue;
+            };
+            if !mob.events.is_empty() {
+                out.push((entry.public.uid, std::mem::take(&mut mob.events)));
+            }
+        }
+        out
+    }
+
     /// 这个包围盒摸到的段里有没有人关注；顺带把「变化」记进事件表。
     /// 没有关注时直接返回，实体移动的热路径不受影响。
     fn note_entity_change(&mut self, area: Aabb) {

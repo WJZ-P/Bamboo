@@ -23,7 +23,12 @@ use mc_bamboo_blocks::{
     },
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
-use mc_bamboo_data::version;
+use mc_bamboo_data::{sounds, version};
+use mc_bamboo_game::entity_tracking::{EntityTracking, Snapshot};
+use mc_bamboo_protocol::{
+    frame::packet_body,
+    packet::play::{EntityEvent, Sound},
+};
 use serde::Deserialize;
 
 use crate::oracle::collect_log;
@@ -31,6 +36,33 @@ use crate::oracle::collect_log;
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
 const USAGE: &str = "usage: mob-oracle <java> [--only PREFIX] [--show N]";
+
+/// 自带的 base64 解码，避免为这个开发工具再引入一个依赖。
+mod base64_stub {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub fn decode(input: &str) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        let mut buffer = 0_u32;
+        let mut bits = 0;
+        for byte in input.bytes() {
+            if byte == b'=' {
+                break;
+            }
+            let value = ALPHABET
+                .iter()
+                .position(|&candidate| candidate == byte)
+                .ok_or_else(|| format!("bad base64 byte {byte}"))? as u32;
+            buffer = buffer << 6 | value;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((buffer >> bits) as u8);
+            }
+        }
+        Ok(out)
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -65,6 +97,15 @@ struct Case {
     #[serde(default)]
     eggs: Vec<[i32; 5]>,
     steps: Vec<Vec<CowStep>>,
+    /// 每刻每头牛的全部出站包字节（base64，ID + 包体，不含帧长）。
+    ///
+    /// Per-tick outbound packet bytes for each cow, base64 of "id + body".
+    #[serde(default)]
+    packets: Option<Vec<Vec<String>>>,
+    /// 每刻每头牛的同步标志位：`needsSync`、`syncPosition`、`syncVelocity`、
+    /// `requiresPrecisePosition`、`isFallFlying`。
+    #[serde(default)]
+    sync_flags: Option<Vec<Vec<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -474,6 +515,35 @@ impl Report {
         };
         let ours = snapshot(&level, &ids);
         self.compare(&case.name, 0, &ours, first);
+        // 出站包逐刻比字节：官方一侧每头牛一个 `ServerEntity`，这里用游戏层
+        // 同一份 `TrackedEntity` 逻辑，绝不在对拍里另写一份发包。
+        let mut tracking = EntityTracking::default();
+        let mut sound_source = mc_bamboo_blocks::LegacyRandom::new(12345);
+        if let Some(packets) = &case.packets {
+            let flags = case.sync_flags.as_ref().expect("有包就有标志位");
+            let tick0 = flags.first().expect("第 0 刻的标志位");
+            let mut ours_packets = Vec::new();
+            for (cow, &id) in ids.iter().enumerate() {
+                let Some(public) = level.entities.public_at(id) else {
+                    continue;
+                };
+                let mut snapshot = Snapshot::of(public);
+                apply_flags(
+                    &mut snapshot,
+                    tick0.get(cow).map(String::as_str).unwrap_or("00000"),
+                );
+                let tracked = tracking.tracked_for_oracle(&snapshot);
+                ours_packets.extend(tracked.pairing_packets(&snapshot));
+            }
+            compare_packet_list(
+                &mut self.mismatches,
+                &self.show,
+                &case.name,
+                0,
+                &ours_packets,
+                &packets[0],
+            );
+        }
         for (index, expected) in case.steps.iter().enumerate().skip(1) {
             ticks.set_time(case.start_time + index as i64);
             {
@@ -527,6 +597,36 @@ impl Report {
             self.steps += 1;
             let ours = snapshot(&level, &ids);
             self.compare(&case.name, index, &ours, expected);
+            if let Some(packets) = &case.packets {
+                let flags = case.sync_flags.as_ref().expect("有包就有标志位");
+                let tick = &flags[index];
+                // 事件包（受伤、死亡、音效）由 tick 里的 `MobEvent` 转成包。
+                let events = level.entities.take_mob_events();
+                let mut ours_packets = event_bodies(&mut sound_source, &events);
+                for (cow, &id) in ids.iter().enumerate() {
+                    let Some(public) = level.entities.public_at(id) else {
+                        continue;
+                    };
+                    let mut snapshot = Snapshot::of(public);
+                    let bits = tick.get(cow).map(String::as_str).unwrap_or("00000");
+                    let (needs_sync, _sync_position, sync_velocity) =
+                        apply_flags(&mut snapshot, bits);
+                    let is_new = !tracking.has_tracked_for_oracle(id);
+                    let tracked = tracking.tracked_for_oracle(&snapshot);
+                    if is_new {
+                        ours_packets.extend(tracked.pairing_packets(&snapshot));
+                    }
+                    ours_packets.extend(tracked.step(&snapshot, needs_sync, sync_velocity));
+                }
+                compare_packet_list(
+                    &mut self.mismatches,
+                    &self.show,
+                    &case.name,
+                    index,
+                    &ours_packets,
+                    &packets[index],
+                );
+            }
             if self.mismatches.len() >= self.show {
                 return;
             }
@@ -645,6 +745,138 @@ impl Report {
         );
         Ok(())
     }
+}
+
+/// 把官方一侧的五个标志位填进快照，返回 `step` 要用的三个布尔。
+fn apply_flags(snapshot: &mut Snapshot, bits: &str) -> (bool, bool, bool) {
+    let bytes = bits.as_bytes();
+    let flag = |index: usize| bytes.get(index) == Some(&b'1');
+    snapshot.sync_position = flag(1);
+    snapshot.fall_flying = flag(4);
+    if flag(3) {
+        // `getRequiresPrecisePosition()` 为真时官方发全量同步。
+        snapshot.precise = true;
+    }
+    (flag(0), flag(1), flag(2))
+}
+
+/// 把这一刻每头牛的 `MobEvent` 按发生顺序换成官方的实体事件/音效包。
+/// 音效种子取自官方 `soundSeedGenerator` 的 `LegacyRandom` 序列（固定种子 12345）。
+fn event_bodies(
+    sound_source: &mut mc_bamboo_blocks::LegacyRandom,
+    events: &[(i32, Vec<mc_bamboo_blocks::entity::mob::MobEvent>)],
+) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for (id, mob_events) in events {
+        for event in mob_events {
+            match event {
+                mc_bamboo_blocks::entity::mob::MobEvent::Death => {
+                    out.push(packet_body(&EntityEvent {
+                        entity_id: *id,
+                        event: 3,
+                    }));
+                }
+                mc_bamboo_blocks::entity::mob::MobEvent::Poof => {
+                    out.push(packet_body(&EntityEvent {
+                        entity_id: *id,
+                        event: 60,
+                    }));
+                }
+                mc_bamboo_blocks::entity::mob::MobEvent::Sound {
+                    sound,
+                    volume,
+                    pitch,
+                    position,
+                } => {
+                    out.push(packet_body(&Sound {
+                        sound: i32::from(sounds::sound_event(sound)),
+                        inline: None,
+                        source: sounds::NEUTRAL,
+                        x: position.x,
+                        y: position.y,
+                        z: position.z,
+                        volume: *volume,
+                        pitch: *pitch,
+                        seed: sound_source.next_long(),
+                    }));
+                }
+                mc_bamboo_blocks::entity::mob::MobEvent::Damage { .. } => {
+                    // `damage_event` 的包体按来源补齐。
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 逐刻比字节：每个包单独比，长度不同或任意字节不同都记一条不一致。
+fn compare_packet_list(
+    mismatches: &mut Vec<String>,
+    show: &usize,
+    name: &str,
+    tick: usize,
+    ours: &[Vec<u8>],
+    official_b64: &[String],
+) {
+    if mismatches.len() >= *show {
+        return;
+    }
+    let place = format!("{name} tick {tick} packets");
+    if ours.len() != official_b64.len() {
+        mismatches.push(format!(
+            "{place}: official {} packets, bamboo {} packets",
+            official_b64.len(),
+            ours.len()
+        ));
+        if std::env::var_os("MOB_ORACLE_PACKET_DUMP").is_some() {
+            for (i, body) in ours.iter().enumerate() {
+                eprintln!("{place} bamboo[{i}] {}", hex(body));
+            }
+            for (i, text) in official_b64.iter().enumerate() {
+                eprintln!(
+                    "{place} official[{i}] {}",
+                    hex(&base64_stub::decode(text).unwrap_or_default())
+                );
+            }
+        }
+        return;
+    }
+    for (index, (ours, text)) in ours.iter().zip(official_b64).enumerate() {
+        let Ok(expected) = base64_stub::decode(text) else {
+            mismatches.push(format!(
+                "{place}[{index}]: bad base64 from the official side"
+            ));
+            return;
+        };
+        if ours != &expected {
+            let first = ours
+                .iter()
+                .zip(&expected)
+                .position(|(a, b)| a != b)
+                .unwrap_or(ours.len().min(expected.len()));
+            mismatches.push(format!(
+                "{place}[{index}]: official {} bytes, bamboo {} bytes, first difference at {}: official {}, bamboo {}",
+                expected.len(),
+                ours.len(),
+                first,
+                hex(&expected[first..expected.len().min(first + 12)]),
+                hex(&ours[first..ours.len().min(first + 12)]),
+            ));
+            if std::env::var_os("MOB_ORACLE_PACKET_DUMP").is_some() {
+                eprintln!("{place} official {}", hex(&expected));
+                eprintln!("{place} bamboo   {}", hex(ours));
+            }
+            return;
+        }
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// 两张查表的 FNV-1a 哈希，和 `MobOracle.tableHashes` 同一个算法。

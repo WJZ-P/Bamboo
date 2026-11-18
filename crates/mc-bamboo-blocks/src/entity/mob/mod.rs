@@ -580,8 +580,14 @@ impl Mob {
 pub struct MobPublic {
     pub mob_type: MobType,
     pub uuid: [u8; 16],
+    /// 同步 `update_attributes` 用的属性表（只含已经实例化的条目）。
+    ///
+    /// The attribute table for `update_attributes` (instantiated entries only).
+    pub attributes: Attributes,
     pub health: f32,
     pub baby: bool,
+    /// `AgeableMob.AGE_LOCKED` 元数据。
+    pub age_locked: bool,
     pub x_rot: f32,
     pub y_head_rot: f32,
     pub y_body_rot: f32,
@@ -608,8 +614,10 @@ impl MobPublic {
         Self {
             mob_type: mob.mob_type,
             uuid: mob.uuid,
+            attributes: mob.attributes.clone(),
             health: mob.health,
             baby: mob.is_baby(),
+            age_locked: mob.age_locked,
             x_rot: mob.x_rot,
             y_head_rot: mob.y_head_rot,
             y_body_rot: mob.y_body_rot,

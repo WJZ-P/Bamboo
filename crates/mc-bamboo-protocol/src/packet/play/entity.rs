@@ -2,12 +2,14 @@
 
 use mc_bamboo_core::{BlockPos, Hand, Vec3};
 use mc_bamboo_data::packets::play::clientbound;
+use mc_bamboo_nbt::Tag;
 use uuid::Uuid;
 
 use super::{HumanoidArm, write_lp_vec3};
 use crate::{
     codec::{
-        write_block_pos, write_f32, write_f64, write_string, write_uuid, write_varint, write_vec3,
+        write_block_pos, write_bool, write_f32, write_f64, write_string, write_uuid, write_varint,
+        write_vec3,
     },
     item::ItemStack,
     packet::ClientboundPacket,
@@ -17,13 +19,23 @@ use crate::{
 const SERIALIZER_BYTE: i32 = 0;
 const SERIALIZER_INT: i32 = 1;
 const SERIALIZER_FLOAT: i32 = 3;
+/// `EntityDataSerializers.OPTIONAL_COMPONENT`，注册顺序里的第 7 个。
+///
+/// `EntityDataSerializers.OPTIONAL_COMPONENT`, the seventh `registerSerializer` call.
+const SERIALIZER_OPTIONAL_COMPONENT: i32 = 6;
 /// `EntityDataSerializers.ITEM_STACK`，注册顺序里的第 8 个。
 ///
 /// `EntityDataSerializers.ITEM_STACK`, the eighth `registerSerializer` call.
 const SERIALIZER_ITEM_STACK: i32 = 7;
+const SERIALIZER_BOOLEAN: i32 = 8;
 const SERIALIZER_BLOCK_POS: i32 = 10;
 const SERIALIZER_BLOCK_STATE: i32 = 14;
 const SERIALIZER_POSE: i32 = 20;
+/// `EntityDataSerializers.COW_VARIANT`，注册顺序里的第 24 个。
+///
+/// `EntityDataSerializers.COW_VARIANT`, the 24th `registerSerializer` call.
+const SERIALIZER_COW_VARIANT: i32 = 23;
+const SERIALIZER_COW_SOUND_VARIANT: i32 = 24;
 const SERIALIZER_HUMANOID_ARM: i32 = 42;
 
 /// `set_entity_data` 的结束标记。
@@ -124,6 +136,36 @@ pub enum EntityData {
     MainHand(HumanoidArm),
     /// index 16，BYTE。皮肤外层的掩码。
     ModelCustomisation(u8),
+    /// index 1，INT。`DATA_AIR_SUPPLY_ID`。
+    AirSupply(i32),
+    /// index 2，OPTIONAL_COMPONENT。`DATA_CUSTOM_NAME`。
+    ///
+    /// index 2, OPTIONAL_COMPONENT. `DATA_CUSTOM_NAME`.
+    CustomName(Tag),
+    /// index 3，BOOLEAN。`DATA_CUSTOM_NAME_VISIBLE`。
+    CustomNameVisible(bool),
+    /// index 4，BOOLEAN。`DATA_SILENT`。
+    Silent(bool),
+    /// index 5，BOOLEAN。`DATA_NO_GRAVITY`。
+    NoGravity(bool),
+    /// index 7，INT。`DATA_TICKS_FROZEN`。
+    TicksFrozen(i32),
+    /// index 8，BYTE。`LivingEntity.DATA_LIVING_ENTITY_FLAGS`。
+    LivingFlags(u8),
+    /// index 15，BYTE。`Mob.DATA_MOB_FLAGS_ID`：无 AI、左撇子、攻击性。
+    ///
+    /// index 15, BYTE. `Mob.DATA_MOB_FLAGS_ID`: no AI, left-handed, aggressive.
+    MobFlags(u8),
+    /// index 16，BOOLEAN。`AgeableMob.DATA_BABY_ID`。
+    Baby(bool),
+    /// index 17，BOOLEAN。`AgeableMob.AGE_LOCKED`。
+    AgeLocked(bool),
+    /// index 18，COW_VARIANT。`Cow.DATA_VARIANT_ID`，值是注册表 ID 的 VarInt。
+    ///
+    /// index 18, COW_VARIANT. `Cow.DATA_VARIANT_ID`, a VarInt registry id.
+    CowVariant(i32),
+    /// index 19，COW_SOUND_VARIANT。`Cow.DATA_SOUND_VARIANT_ID`。
+    CowSoundVariant(i32),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -134,6 +176,32 @@ pub const ENTITY_FLAG_SPRINTING: u8 = 0x08;
 pub const ENTITY_FLAG_FALL_FLYING: u8 = 0x80;
 
 impl EntityData {
+    /// 元数据的 index；比较是不是同一项时用它，配对时按它升序。
+    ///
+    /// The metadata index; used to compare entries and to keep pairing order.
+    pub const fn index(&self) -> u8 {
+        match self {
+            Self::SharedFlags(_) => 0,
+            Self::AirSupply(_) => 1,
+            Self::CustomName(_) => 2,
+            Self::CustomNameVisible(_) => 3,
+            Self::Silent(_) => 4,
+            Self::NoGravity(_) => 5,
+            Self::Pose(_) => 6,
+            Self::TicksFrozen(_) => 7,
+            Self::Item(_)
+            | Self::FallingBlockStart(_)
+            | Self::TntFuse(_)
+            | Self::LivingFlags(_) => 8,
+            Self::TntBlockState(_) | Self::Health(_) => 9,
+            Self::MobFlags(_) => 15,
+            Self::MainHand(_) | Self::Baby(_) => 16,
+            Self::ModelCustomisation(_) | Self::AgeLocked(_) => 17,
+            Self::CowVariant(_) => 18,
+            Self::CowSoundVariant(_) => 19,
+        }
+    }
+
     fn write(&self, out: &mut Vec<u8>) {
         match self {
             Self::Item(stack) => {
@@ -173,6 +241,55 @@ impl EntityData {
             Self::ModelCustomisation(parts) => {
                 write_data_header(out, 16, SERIALIZER_BYTE);
                 out.push(*parts);
+            }
+            Self::AirSupply(air) => {
+                write_data_header(out, 1, SERIALIZER_INT);
+                write_varint(out, *air);
+            }
+            Self::CustomName(name) => {
+                write_data_header(out, 2, SERIALIZER_OPTIONAL_COMPONENT);
+                write_bool(out, true);
+                name.write_network(out);
+            }
+            Self::CustomNameVisible(visible) => {
+                write_data_header(out, 3, SERIALIZER_BOOLEAN);
+                write_bool(out, *visible);
+            }
+            Self::Silent(silent) => {
+                write_data_header(out, 4, SERIALIZER_BOOLEAN);
+                write_bool(out, *silent);
+            }
+            Self::NoGravity(no_gravity) => {
+                write_data_header(out, 5, SERIALIZER_BOOLEAN);
+                write_bool(out, *no_gravity);
+            }
+            Self::TicksFrozen(ticks) => {
+                write_data_header(out, 7, SERIALIZER_INT);
+                write_varint(out, *ticks);
+            }
+            Self::LivingFlags(flags) => {
+                write_data_header(out, 8, SERIALIZER_BYTE);
+                out.push(*flags);
+            }
+            Self::MobFlags(flags) => {
+                write_data_header(out, 15, SERIALIZER_BYTE);
+                out.push(*flags);
+            }
+            Self::Baby(baby) => {
+                write_data_header(out, 16, SERIALIZER_BOOLEAN);
+                write_bool(out, *baby);
+            }
+            Self::AgeLocked(locked) => {
+                write_data_header(out, 17, SERIALIZER_BOOLEAN);
+                write_bool(out, *locked);
+            }
+            Self::CowVariant(variant) => {
+                write_data_header(out, 18, SERIALIZER_COW_VARIANT);
+                write_varint(out, *variant);
+            }
+            Self::CowSoundVariant(variant) => {
+                write_data_header(out, 19, SERIALIZER_COW_SOUND_VARIANT);
+                write_varint(out, *variant);
             }
         }
     }

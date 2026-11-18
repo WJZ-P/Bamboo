@@ -1,11 +1,17 @@
-//! 世界实体（下落的方块、点燃的 TNT）和玩家之间的同步。
+//! 世界实体和玩家之间的同步。
 //!
 //! 对应官方的 `ChunkMap.TrackedEntity` 和 `ServerEntity`：按实体的跟踪范围配对，
 //! 配对时发 `add_entity` 和元数据，之后按实体类型的更新间隔发位移、速度和元数据，
 //! 实体没了就发 `remove_entities`。
 //!
-//! 这两种实体都没有朝向、乘客、属性、装备和拴绳，所以配对包只有 `add_entity`
-//! 和 `set_entity_data` 两项。
+//! 生物走同一套流程：[`TrackedEntity::pairing_packets`] 和 [`TrackedEntity::step`]
+//! 是官方 `ServerEntity.sendPairingData` / `sendChanges` 的发包部分。两个函数只产出
+//! 「包 ID 的 VarInt + 包体」字节序列，游戏路径和逐刻对拍都调用它们，不另写一份。
+//!
+//! World entities and their viewers. [`TrackedEntity::pairing_packets`] and
+//! [`TrackedEntity::step`] emit the same "VarInt packet id + body" bytes that
+//! vanilla's `ServerEntity` does; the live path and the tick-by-tick oracle
+//! both call these and no second implementation exists.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -14,13 +20,15 @@ use mc_bamboo_blocks::{
     state::BlockState,
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
-use mc_bamboo_data::entity_types;
+use mc_bamboo_data::{entity_types, is_client_syncable_attribute};
 use mc_bamboo_protocol::{
+    frame::packet_body,
     item::ItemStack,
     packet::play::{
-        AddEntity, BundleDelimiter, EntityData, EntityPositionSync, MoveEntityPos, PositionDelta,
-        PositionPath, RemoveEntities, SetEntityData, SetEntityMotion, TakeItemEntity, VecDelta,
-        pack_degrees,
+        AddEntity, AttributeModifier, AttributeOperation, AttributeSnapshot, BundleDelimiter,
+        EntityData, EntityPositionSync, MoveEntityPos, MoveEntityPosRot, MoveEntityRot,
+        PositionDelta, PositionPath, RemoveEntities, RotateHead, SetEntityData, SetEntityMotion,
+        TakeItemEntity, UpdateAttributes, VecDelta, pack_degrees,
     },
 };
 use uuid::Uuid;
@@ -43,9 +51,12 @@ const FORCED_TELEPORT_PERIOD: u32 = 400;
 /// 跟踪范围按区块算，一格区块 16 格。
 const BLOCKS_PER_CHUNK: i32 = 16;
 
+/// `update_attributes` 上一次发过的属性状态（ID、基础值、永久修饰符）。
+type AttributeState = (i32, f64, Vec<(String, f64, i32)>);
+
 /// 一个世界里全部被跟踪的实体。
 #[derive(Debug, Default)]
-pub(crate) struct EntityTracking {
+pub struct EntityTracking {
     tracked: BTreeMap<i32, TrackedEntity>,
 }
 
@@ -104,18 +115,52 @@ impl EntityTracking {
             .map(|(&id, entry)| (id, entry.seen_by.iter().copied().collect()))
             .collect()
     }
+
+    /// 逐刻对拍用：这个实体是不是已经有过同步状态。
+    pub fn has_tracked_for_oracle(&self, id: i32) -> bool {
+        self.tracked.contains_key(&id)
+    }
+
+    /// 逐刻对拍用：一头牛的同步状态。没有时按当时实体样子新建一个。
+    ///
+    /// The sync state of one entity for the tick-by-tick oracle. A fresh one is
+    /// created from the entity's current appearance when absent.
+    pub fn tracked_for_oracle(&mut self, snapshot: &Snapshot) -> &mut TrackedEntity {
+        self.tracked
+            .entry(snapshot.id)
+            .or_insert_with(|| TrackedEntity::new(snapshot))
+    }
 }
 
-/// 官方 `ServerEntity` 里和这两种实体有关的字段。
+/// 官方 `ServerEntity` 里同步要用的字段。
+///
+/// The fields of vanilla `ServerEntity` that matter for sync.
 #[derive(Debug)]
-struct TrackedEntity {
+pub struct TrackedEntity {
     /// `positionCodec` 的基准点，上次发给客户端的位置。
     base: Vec3,
     /// 上次发出去的速度。
     last_movement: Vec3,
+    /// 上次发出去的打包角度（`yRot`、`xRot`、`yHeadRot`）。
+    last_yaw: u8,
+    last_pitch: u8,
+    last_head: u8,
+    /// 上次发出去的全部非默认元数据，配对时按原样再发一遍。
+    last_data: Vec<EntityData>,
+    /// `SynchedEntityData` 里还没发过的脏项。官方构造实体时就设过的字段
+    /// （例如血量）是脏的，配对包发了全部非默认值，但第一次 `sendChanges`
+    /// 仍会重发一遍脏项。
+    ///
+    /// Dirty metadata not yet sent. Vanilla sets some fields in the constructor
+    /// (health), so the first `sendChanges` repeats them.
+    pending_dirty: Vec<EntityData>,
+    /// 上一次发过的可同步属性的状态；新实例化或改过的要发 `update_attributes`。
+    last_attributes: Vec<AttributeState>,
     /// 距上次全量同步的周期数。
     teleport_delay: u32,
-    /// 距上次发位置过了多少个周期。
+    /// `SteppedInterpolationTracker.ticksSinceLastStep`：每隔多少刻记一步。
+    ticks_since_step: i32,
+    /// `ServerEntity.tickCount`，每刻加一，周期判定和强制位置同步都用。
     tick_count: i32,
     was_on_ground: bool,
     /// 上次发出去的引信，TNT 每 tick 都变。
@@ -134,7 +179,14 @@ impl TrackedEntity {
         Self {
             base: snapshot.position,
             last_movement: snapshot.delta,
+            last_yaw: pack_degrees(snapshot.yaw),
+            last_pitch: snapshot.data.mob_x_rot().map_or(0, pack_degrees),
+            last_head: snapshot.data.mob_head_rot().map_or(0, pack_degrees),
+            last_data: snapshot.data.pairing_values(),
+            pending_dirty: snapshot.data.pairing_values(),
+            last_attributes: Vec::new(),
             teleport_delay: 0,
+            ticks_since_step: -1,
             tick_count: 0,
             was_on_ground: snapshot.on_ground,
             last_fuse: snapshot.data.fuse().unwrap_or(0),
@@ -152,28 +204,415 @@ impl TrackedEntity {
             links.send_frames(viewer, frames);
         }
     }
+
+    /// 官方 `ServerEntity.sendPairingData` 的包序列，按 bundle 里的顺序。
+    /// 返回的是每个包「ID + 包体」的字节，不含帧长和 bundle 分隔符。
+    ///
+    /// The packet sequence of vanilla `ServerEntity.sendPairingData`, in bundle
+    /// order. Each item is one packet's "id + body" bytes, without the frame
+    /// length prefix or the bundle delimiters.
+    pub fn pairing_packets(&self, snapshot: &Snapshot) -> Vec<Vec<u8>> {
+        let mut out = vec![packet_body(&AddEntity {
+            entity_id: snapshot.id,
+            uuid: snapshot
+                .data
+                .mob_uuid()
+                .map_or_else(|| entity_uuid(snapshot.id), Uuid::from_bytes),
+            entity_type: snapshot.entity_type,
+            position: self.base,
+            movement: self.last_movement,
+            pitch: self.last_pitch,
+            yaw: self.last_yaw,
+            head_yaw: self.last_head,
+            data: snapshot.add_data(),
+        })];
+        // 官方 `trackedDataValues` 在构造时总是非 null（哪怕空表），所以配对时
+        // 总有一个 `set_entity_data`，空表时只有一个结束标记。
+        // Vanilla's `trackedDataValues` is never null, so pairing always sends
+        // one `set_entity_data`; an empty list only carries the end marker.
+        out.push(packet_body(&SetEntityData {
+            entity_id: snapshot.id,
+            items: &self.last_data,
+        }));
+        // `LivingEntity` 的可同步属性，属性表里哪些是同步的由数据层给出。
+        // Syncable `LivingEntity` attributes; the data layer says which ones.
+        if let KindData::Mob(mob) = &snapshot.data {
+            let mut snapshots = Vec::new();
+            let mut modifiers: Vec<Vec<AttributeModifier<'_>>> = Vec::new();
+            for entry in &mob.attributes.entries {
+                if !entry.instantiated || !is_client_syncable_attribute(entry.id) {
+                    continue;
+                }
+                modifiers.push(
+                    entry
+                        .modifiers
+                        .iter()
+                        .filter(|modifier| modifier.permanent)
+                        .map(|modifier| AttributeModifier {
+                            id: &modifier.id,
+                            amount: modifier.amount,
+                            operation: match modifier.operation {
+                                mc_bamboo_blocks::entity::mob::attributes::Operation::AddValue => {
+                                    AttributeOperation::AddValue
+                                }
+                                mc_bamboo_blocks::entity::mob::attributes::Operation::AddMultipliedBase => {
+                                    AttributeOperation::AddMultipliedBase
+                                }
+                                mc_bamboo_blocks::entity::mob::attributes::Operation::AddMultipliedTotal => {
+                                    AttributeOperation::AddMultipliedTotal
+                                }
+                            },
+                        })
+                        .collect(),
+                );
+                snapshots.push((entry.id, entry.base));
+            }
+            let attributes: Vec<AttributeSnapshot<'_>> = snapshots
+                .iter()
+                .zip(&modifiers)
+                .map(|(&(id, base), list)| AttributeSnapshot {
+                    attribute: id,
+                    base,
+                    modifiers: list,
+                })
+                .collect();
+            if !attributes.is_empty() {
+                out.push(packet_body(&UpdateAttributes {
+                    entity_id: snapshot.id,
+                    attributes: &attributes,
+                }));
+            }
+        }
+        out
+    }
+
+    /// 官方 `ServerEntity.sendChanges` 这一刻的全部包，按发出顺序。
+    /// 返回每个包「ID + 包体」的字节。`needs_sync` 是 `Entity.needsSync`，
+    /// `sync_velocity` 是 `Entity.syncVelocity`（`hurtMarked`）。
+    ///
+    /// All packets of vanilla `ServerEntity.sendChanges` for one tick, in send
+    /// order, as "id + body" bytes. `needs_sync` is `Entity.needsSync` and
+    /// `sync_velocity` is `Entity.syncVelocity` (`hurtMarked`).
+    pub fn step(
+        &mut self,
+        snapshot: &Snapshot,
+        needs_sync: bool,
+        sync_velocity: bool,
+    ) -> Vec<Vec<u8>> {
+        let mut packets = Vec::new();
+        // `SteppedInterpolationTracker.updateTracking` 每刻都加一，`getPositionPath`
+        // 在发位置包时把攒下的刻数记成一步，然后清空。
+        self.ticks_since_step += 1;
+        if snapshot.sync_position {
+            self.ticks_since_step = 0;
+        }
+        let interval = update_interval(snapshot.entity_type);
+        // `syncPosition` 时先把 tickCount 对齐到下一个周期，官方在周期判定之前做。
+        // Vanilla aligns tickCount to the next interval before testing it.
+        if let (true, Some(period)) = (snapshot.sync_position, interval) {
+            self.tick_count = self.tick_count / period * period + period;
+        }
+        let due = interval.is_some_and(|period| self.tick_count % period == 0);
+        let data = snapshot.data.pairing_values();
+        let dirty = data != self.last_data;
+        let mut head_packet = None;
+        if needs_sync || due || dirty {
+            let yaw = pack_degrees(snapshot.yaw);
+            let pitch = snapshot.data.mob_x_rot().map_or(0, pack_degrees);
+            let rotation_changed = yaw != self.last_yaw || pitch != self.last_pitch;
+            self.teleport_delay += 1;
+            let movement = self.choose_movement(snapshot, rotation_changed);
+            // `trackDelta` 为真、或者生物在滑翔、或者 needsSync 时都查速度。
+            // Vanilla checks velocity for trackDelta, fall-flying mobs, or needsSync.
+            // 官方：`!needsSync && !trackDelta && !fallFlying` 时才跳过速度检查。
+            // Vanilla skips the velocity check only for `!needsSync && !trackDelta && !fallFlying`.
+            if needs_sync || snapshot.track_deltas() || snapshot.fall_flying {
+                let diff = snapshot.delta.distance_to_sqr(self.last_movement);
+                if diff > MOTION_TOLERANCE || (diff > 0.0 && snapshot.delta.length_sqr() == 0.0) {
+                    self.last_movement = snapshot.delta;
+                    packets.push(packet_body(&SetEntityMotion {
+                        entity_id: snapshot.id,
+                        movement: snapshot.delta,
+                    }));
+                }
+            }
+            if let Some(movement) = movement {
+                packets.push(self.movement_body(snapshot, movement, yaw, pitch));
+                if movement.has_position() {
+                    self.base = snapshot.position;
+                }
+                if movement.has_rotation() {
+                    self.last_yaw = yaw;
+                    self.last_pitch = pitch;
+                }
+            }
+            // `sendDirtyEntityData` 排在移动包后面；没有移动包时也照样发。
+            // `sendDirtyEntityData` follows the movement packet, or stands alone.
+            let mut items = if dirty {
+                self.dirty_items(snapshot)
+            } else {
+                Vec::new()
+            };
+            for item in std::mem::take(&mut self.pending_dirty) {
+                if !items
+                    .iter()
+                    .any(|other| EntityData::index(other) == EntityData::index(&item))
+                {
+                    items.push(item);
+                }
+            }
+            self.last_data = data;
+            if !items.is_empty() {
+                packets.push(packet_body(&SetEntityData {
+                    entity_id: snapshot.id,
+                    items: &items,
+                }));
+            }
+            // `sendDirtyEntityData` 里紧接着发 `update_attributes`。
+            packets.extend(self.attribute_packets(snapshot));
+            // 官方每个周期都 `interpolationTracker.clear()`，把攒下的刻数清零。
+            self.ticks_since_step = 0;
+        }
+        // 官方只在周期分支里查头部朝向；`Math.abs(byte差)` 等于打包字节不等。
+        // Vanilla checks head rotation only inside the cycle branch.
+        let head = snapshot.data.mob_head_rot().map_or(0, pack_degrees);
+        if (needs_sync || due || dirty) && head != self.last_head {
+            self.last_head = head;
+            head_packet = Some(packet_body(&RotateHead {
+                entity_id: snapshot.id,
+                head_yaw: head,
+            }));
+        }
+        if let Some(packet) = head_packet {
+            packets.push(packet);
+        }
+        self.tick_count += 1;
+        if sync_velocity {
+            self.last_movement = snapshot.delta;
+            packets.push(packet_body(&SetEntityMotion {
+                entity_id: snapshot.id,
+                movement: snapshot.delta,
+            }));
+        }
+        packets
+    }
+
+    /// 只发变了的元数据；`last_data` 已经是上一刻的值。
+    /// 官方 `SynchedEntityData.packDirty`：只发值变了的那几项。
+    fn dirty_items(&self, snapshot: &Snapshot) -> Vec<EntityData> {
+        let mut out = Vec::new();
+        for item in snapshot.data.pairing_values() {
+            let changed = self
+                .last_data
+                .iter()
+                .find(|old| EntityData::index(old) == EntityData::index(&item))
+                .is_none_or(|old| old != &item);
+            if changed {
+                out.push(item);
+            }
+        }
+        out
+    }
+
+    fn movement_body(
+        &mut self,
+        snapshot: &Snapshot,
+        movement: Movement,
+        yaw: u8,
+        pitch: u8,
+    ) -> Vec<u8> {
+        match movement {
+            Movement::Sync => packet_body(&EntityPositionSync {
+                entity_id: snapshot.id,
+                path: self.position_path(snapshot.position),
+                yaw: snapshot.yaw,
+                pitch: snapshot.data.mob_x_rot().unwrap_or(0.0),
+                on_ground: snapshot.on_ground,
+            }),
+            Movement::Position(delta) => packet_body(&MoveEntityPos {
+                entity_id: snapshot.id,
+                delta: self.vec_delta(delta),
+                on_ground: snapshot.on_ground,
+            }),
+            Movement::PositionRotation(delta) => packet_body(&MoveEntityPosRot {
+                entity_id: snapshot.id,
+                delta: self.vec_delta(delta),
+                yaw,
+                pitch,
+                on_ground: snapshot.on_ground,
+            }),
+            Movement::Rotation => packet_body(&MoveEntityRot {
+                entity_id: snapshot.id,
+                yaw,
+                pitch,
+                on_ground: snapshot.on_ground,
+            }),
+        }
+    }
+
+    /// `SteppedInterpolationTracker` 的一步：`ticks` 是攒下来的刻数。
+    /// 没有攒够一步时是 `Linear`（stepCount 0）。
+    /// `sendDirtyEntityData` 里的 `getAttributesToSync`：把变了的可同步属性
+    /// 合成一个 `update_attributes` 包。
+    fn attribute_packets(&mut self, snapshot: &Snapshot) -> Vec<Vec<u8>> {
+        let KindData::Mob(mob) = &snapshot.data else {
+            return Vec::new();
+        };
+        let mut current = Vec::new();
+        for entry in &mob.attributes.entries {
+            if !entry.instantiated || !is_client_syncable_attribute(entry.id) {
+                continue;
+            }
+            let modifiers = entry
+                .modifiers
+                .iter()
+                .filter(|modifier| modifier.permanent)
+                .map(|modifier| {
+                    let operation = match modifier.operation {
+                        mc_bamboo_blocks::entity::mob::attributes::Operation::AddValue => 0,
+                        mc_bamboo_blocks::entity::mob::attributes::Operation::AddMultipliedBase => 1,
+                        mc_bamboo_blocks::entity::mob::attributes::Operation::AddMultipliedTotal => 2,
+                    };
+                    (modifier.id.clone(), modifier.amount, operation)
+                })
+                .collect();
+            current.push((entry.id, entry.base, modifiers));
+        }
+        if current == self.last_attributes {
+            return Vec::new();
+        }
+        let changed: Vec<i32> = current
+            .iter()
+            .filter(|entry| {
+                !self.last_attributes.iter().any(|previous| {
+                    previous.0 == entry.0 && previous.1 == entry.1 && previous.2 == entry.2
+                })
+            })
+            .map(|entry| entry.0)
+            .collect();
+        self.last_attributes = current.clone();
+        if changed.is_empty() {
+            return Vec::new();
+        }
+        let mut snapshots = Vec::new();
+        let mut modifiers: Vec<Vec<AttributeModifier<'_>>> = Vec::new();
+        for (id, base, list) in &current {
+            if !changed.contains(id) {
+                continue;
+            }
+            modifiers.push(
+                list.iter()
+                    .map(|(id, amount, operation)| AttributeModifier {
+                        id,
+                        amount: *amount,
+                        operation: match operation {
+                            0 => AttributeOperation::AddValue,
+                            1 => AttributeOperation::AddMultipliedBase,
+                            _ => AttributeOperation::AddMultipliedTotal,
+                        },
+                    })
+                    .collect(),
+            );
+            snapshots.push((*id, *base));
+        }
+        let attributes: Vec<AttributeSnapshot<'_>> = snapshots
+            .iter()
+            .zip(&modifiers)
+            .map(|(&(id, base), list)| AttributeSnapshot {
+                attribute: id,
+                base,
+                modifiers: list,
+            })
+            .collect();
+        vec![packet_body(&UpdateAttributes {
+            entity_id: snapshot.id,
+            attributes: &attributes,
+        })]
+    }
+
+    fn vec_delta(&self, delta: PositionDelta) -> VecDelta {
+        if self.ticks_since_step > 0 {
+            VecDelta::Stepped {
+                ticks: self.ticks_since_step,
+                delta,
+            }
+        } else {
+            VecDelta::Linear(delta)
+        }
+    }
+
+    fn position_path(&self, position: Vec3) -> PositionPath {
+        if self.ticks_since_step > 0 {
+            PositionPath::Stepped {
+                position,
+                ticks: self.ticks_since_step,
+            }
+        } else {
+            PositionPath::Linear(position)
+        }
+    }
+
+    /// `ServerEntity.createMovePacket`。
+    fn choose_movement(&mut self, snapshot: &Snapshot, rotation_changed: bool) -> Option<Movement> {
+        if snapshot.precise
+            || self.teleport_delay > FORCED_TELEPORT_PERIOD
+            || self.was_on_ground != snapshot.on_ground
+        {
+            self.was_on_ground = snapshot.on_ground;
+            self.teleport_delay = 0;
+            return Some(Movement::Sync);
+        }
+        let send_position = has_moved(self.base, snapshot.position)
+            || self.tick_count % FORCED_POS_UPDATE_PERIOD == 0;
+        if !send_position {
+            return rotation_changed.then_some(Movement::Rotation);
+        }
+        Some(match PositionDelta::between(self.base, snapshot.position) {
+            Some(delta) if rotation_changed => Movement::PositionRotation(delta),
+            Some(delta) => Movement::Position(delta),
+            None => Movement::Sync,
+        })
+    }
 }
 
 /// 这一 tick 里实体的样子。借用检查器不允许一边读实体一边写链路，先抄出来。
+/// 逐刻对拍也用它来喂 [`TrackedEntity::step`]。
+///
+/// One tick's view of an entity. The oracle feeds the same snapshot to
+/// [`TrackedEntity::step`].
 #[derive(Debug, Clone)]
-struct Snapshot {
+pub struct Snapshot {
     id: i32,
     entity_type: i32,
     position: Vec3,
     delta: Vec3,
     on_ground: bool,
-    precise: bool,
+    /// `Entity.getRequiresPrecisePosition()`：撞到过东西，这一刻必须发全量同步。
+    pub precise: bool,
     /// `yRot`。物品构造时取一次，下落方块和 TNT 一直是 0。
     ///
     /// `yRot`. An item draws it once. Falling blocks and TNT stay at 0.
     yaw: f32,
     chunk: ChunkPos,
     data: KindData,
+    /// `Entity.needsSync`：这一刻被推过或传送过。逐刻对拍从官方一侧传进来。
+    ///
+    /// `Entity.needsSync`: pushed or teleported this tick. The oracle passes the
+    /// official value in.
+    pub needs_sync: bool,
+    /// `Entity.syncVelocity`（`markHurt`）：速度包要发给观察者加自己。
+    ///
+    /// `Entity.syncVelocity` (`markHurt`): a velocity packet to viewers and self.
+    pub sync_velocity: bool,
+    /// `Entity.syncPosition`：这一刻周期对齐过。
+    pub sync_position: bool,
+    /// `LivingEntity.isFallFlying()`：为真时即使 `trackDelta` 为假也查速度。
+    pub fall_flying: bool,
 }
 
 /// 配对和同步时要发的、按实体类型不同的元数据。
 #[derive(Debug, Clone, PartialEq)]
-enum KindData {
+pub enum KindData {
     FallingBlock { state: BlockState, start: BlockPos },
     Tnt { fuse: i32 },
     Item(ItemStack),
@@ -183,7 +622,7 @@ enum KindData {
 impl Snapshot {
     /// 从公开数据抄一份。字段和 [`Entity::split`](mc_bamboo_blocks::entity::Entity::split)
     /// 的 public 半边一一对应，不克隆私有状态、随机数、移动记录和物品堆以外的东西。
-    fn of(public: &EntityPublic) -> Self {
+    pub fn of(public: &EntityPublic) -> Self {
         Self {
             id: public.uid,
             entity_type: public.kind.entity_type(),
@@ -194,6 +633,10 @@ impl Snapshot {
             yaw: public.yaw,
             chunk: public.chunk_position(),
             data: KindData::of(&public.kind),
+            needs_sync: false,
+            sync_velocity: false,
+            sync_position: false,
+            fall_flying: false,
         }
     }
 
@@ -238,6 +681,30 @@ impl KindData {
         }
     }
 
+    /// 生物自己的 UUID；其它三类按网络 ID 派生。
+    fn mob_uuid(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Mob(mob) => Some(mob.uuid),
+            _ => None,
+        }
+    }
+
+    /// `getXRot()`。只有生物有俯仰角。
+    fn mob_x_rot(&self) -> Option<f32> {
+        match self {
+            Self::Mob(mob) => Some(mob.x_rot),
+            _ => None,
+        }
+    }
+
+    /// `getYHeadRot()`。只有生物有独立的头部朝向。
+    fn mob_head_rot(&self) -> Option<f32> {
+        match self {
+            Self::Mob(mob) => Some(mob.y_head_rot),
+            _ => None,
+        }
+    }
+
     /// 配对时发全部非默认值。下落的方块的起点永远不是默认值；TNT 的引信只在
     /// 被缩短过时不是。物品堆不是空的就要发。
     ///
@@ -250,21 +717,85 @@ impl KindData {
             }
             Self::Tnt { .. } => Vec::new(),
             Self::Item(stack) if !stack.is_empty() => vec![EntityData::Item(stack.clone())],
-            Self::Item(_) | Self::Mob(_) => Vec::new(),
+            Self::Item(_) => Vec::new(),
+            Self::Mob(mob) => mob_non_default_data(mob),
         }
     }
+}
 
-    /// 这一周期要发的元数据；和上次发的一样时是空的。
-    fn changes_since(&self, last_fuse: i32, last_stack: &ItemStack) -> Vec<EntityData> {
-        match self {
-            // 起点生成以后就不再变。
-            Self::FallingBlock { .. } => Vec::new(),
-            Self::Tnt { fuse } if *fuse != last_fuse => vec![EntityData::TntFuse(*fuse)],
-            Self::Tnt { .. } => Vec::new(),
-            Self::Item(stack) if stack != last_stack => vec![EntityData::Item(stack.clone())],
-            Self::Item(_) | Self::Mob(_) => Vec::new(),
-        }
+/// 牛的全部非默认元数据，按 index 升序。官方 `SynchedEntityData.getNonDefaultValues`
+/// 就是这个顺序；index 0 的标志字节、血量、幼年、花色、叫声都在里面。
+///
+/// Every non-default metadata item of a cow, in ascending index order. This is
+/// vanilla `SynchedEntityData.getNonDefaultValues`, including shared flags,
+/// health, the baby flag, variant and sound variant.
+fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+    use mc_bamboo_protocol::packet::play::{
+        ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING,
+    };
+    let mut flags = 0u8;
+    // `FLAG_ONFIRE` = 1<<0，`FLAG_GLOWING` = 1<<6，滑翔位在生物上是 1<<7。
+    // `FLAG_ONFIRE` is 1<<0, `FLAG_GLOWING` is 1<<6, fall flying is 1<<7.
+    if mob.on_fire {
+        flags |= 1;
     }
+    if mob.glowing {
+        flags |= 1 << 6;
+    }
+    if mob.dying {
+        flags |= ENTITY_FLAG_FALL_FLYING;
+    }
+    let _ = (ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING);
+    let mut out = Vec::new();
+    if flags != 0 {
+        out.push(EntityData::SharedFlags(flags));
+    }
+    if mob.air_supply != 300 {
+        out.push(EntityData::AirSupply(mob.air_supply));
+    }
+    if let Some(name) = &mob.custom_name {
+        out.push(EntityData::CustomName(name.clone()));
+    }
+    if mob.custom_name_visible {
+        out.push(EntityData::CustomNameVisible(true));
+    }
+    if mob.silent {
+        out.push(EntityData::Silent(true));
+    }
+    if mob.no_gravity {
+        out.push(EntityData::NoGravity(true));
+    }
+    if mob.ticks_frozen != 0 {
+        out.push(EntityData::TicksFrozen(mob.ticks_frozen));
+    }
+    // `LivingEntity` 的 `DATA_LIVING_ENTITY_FLAGS` 恒为 0，`DATA_HEALTH_ID` 默认 1。
+    // The living flags are always 0 and health defaults to 1.
+    out.push(EntityData::Health(mob.health));
+    let mut mob_flags = 0u8;
+    if mob.no_ai {
+        mob_flags |= 1;
+    }
+    if mob.left_handed {
+        mob_flags |= 2;
+    }
+    if mob_flags != 0 {
+        out.push(EntityData::MobFlags(mob_flags));
+    }
+    if mob.baby {
+        out.push(EntityData::Baby(true));
+    }
+    if mob.age_locked {
+        out.push(EntityData::AgeLocked(true));
+    }
+    // 注册表默认的是 temperate / classic。
+    // The registry defaults are temperate / classic.
+    if mob.variant.registry_id() != 1 {
+        out.push(EntityData::CowVariant(mob.variant.registry_id()));
+    }
+    if mob.sound_variant.registry_id() != 0 {
+        out.push(EntityData::CowSoundVariant(mob.sound_variant.registry_id()));
+    }
+    out
 }
 
 /// tick 第 6 阶段：世界实体的配对、同步和移除。对应 `ChunkMap.tick`。
@@ -452,27 +983,22 @@ fn entity_tracking_range(entity_type: i32) -> i32 {
 /// 下一个包才接得上。
 fn pairing_frames(snapshot: &Snapshot, tracked: &TrackedEntity) -> Vec<u8> {
     let mut frames = encode_frames(&BundleDelimiter);
-    frames.extend(encode_frames(&AddEntity {
-        entity_id: snapshot.id,
-        uuid: entity_uuid(snapshot.id),
-        entity_type: snapshot.entity_type,
-        position: tracked.base,
-        movement: tracked.last_movement,
-        // 物品的 `yRot` 在构造时取过。下落方块和 TNT 一直是 0。头上的角度不跟着走。
-        // An item's `yRot` was drawn in the constructor. Falling blocks and TNT stay at 0.
-        pitch: 0,
-        yaw: pack_degrees(snapshot.yaw),
-        head_yaw: 0,
-        data: snapshot.add_data(),
-    }));
-    let items = snapshot.data.pairing_values();
-    if !items.is_empty() {
-        frames.extend(encode_frames(&SetEntityData {
-            entity_id: snapshot.id,
-            items: &items,
-        }));
+    for body in tracked.pairing_packets(snapshot) {
+        frames.extend(frame_from_body(&body));
     }
     frames.extend(encode_frames(&BundleDelimiter));
+    frames
+}
+
+/// 把「ID + 包体」加上帧长前缀；对拍比的是前者，线上帧是后者。
+///
+/// Add the frame length prefix to an "id + body" sequence; the oracle compares
+/// the former, the wire carries the latter.
+fn frame_from_body(body: &[u8]) -> Vec<u8> {
+    let mut frames = Vec::with_capacity(body.len() + 3);
+    let header = mc_bamboo_protocol::codec::encode_varint(body.len() as i32);
+    frames.extend_from_slice(&header.0[..header.1]);
+    frames.extend_from_slice(body);
     frames
 }
 
@@ -482,88 +1008,36 @@ fn entity_uuid(id: i32) -> Uuid {
     Uuid::from_u128(mc_bamboo_blocks::archive::entity_uuid(id))
 }
 
-/// 每 tick 调用一次。对应 `ServerEntity.sendChanges`。
+/// 每 tick 调用一次。对应 `ServerEntity.sendChanges`：核心逻辑全在
+/// [`TrackedEntity::step`]，这里只把产出的包加上帧长、发给观察者。
+///
+/// Once per tick, vanilla `ServerEntity.sendChanges`. All decisions live in
+/// [`TrackedEntity::step`]; this wrapper only frames the packets and sends them.
 fn send_changes(snapshot: &Snapshot, tracked: &mut TrackedEntity, links: &mut Links) {
-    let interval = update_interval(snapshot.entity_type);
-    let data_dirty = !snapshot
-        .data
-        .changes_since(tracked.last_fuse, &tracked.last_stack)
-        .is_empty();
-    let due = interval.is_some_and(|period| tracked.tick_count % period == 0);
-    if !(due || data_dirty) {
-        tracked.tick_count += 1;
-        return;
+    let needs_sync = snapshot.needs_sync;
+    let sync_velocity = snapshot.sync_velocity;
+    let mut frames = Vec::new();
+    for body in tracked.step(snapshot, needs_sync, sync_velocity) {
+        frames.extend(frame_from_body(&body));
     }
-
-    // `trackDeltas` 为真的实体每周期都可能发一次速度，和位置包独立。
-    if snapshot.track_deltas() {
-        let diff = snapshot.delta.distance_to_sqr(tracked.last_movement);
-        if diff > MOTION_TOLERANCE || (diff > 0.0 && snapshot.delta.length_sqr() == 0.0) {
-            tracked.last_movement = snapshot.delta;
-            let frames = encode_frames(&SetEntityMotion {
-                entity_id: snapshot.id,
-                movement: snapshot.delta,
-            });
-            tracked.send_to_viewers(links, &frames);
-        }
-    }
-
-    tracked.teleport_delay += 1;
-    if let Some(packet) = choose_movement(snapshot, tracked) {
-        let frames = packet.frames(snapshot.id, snapshot);
+    if !frames.is_empty() {
         tracked.send_to_viewers(links, &frames);
-        // 这两种包都带位置，所以基准点跟着走。
-        tracked.base = snapshot.position;
     }
-
-    // `sendDirtyEntityData` 排在移动包后面。
-    let items = snapshot
-        .data
-        .changes_since(tracked.last_fuse, &tracked.last_stack);
-    if !items.is_empty() {
+    let data = snapshot.data.pairing_values();
+    if data != tracked.last_data {
         if let Some(fuse) = snapshot.data.fuse() {
             tracked.last_fuse = fuse;
         }
         if let Some(stack) = snapshot.data.stack() {
             tracked.last_stack = stack.clone();
         }
-        let frames = encode_frames(&SetEntityData {
-            entity_id: snapshot.id,
-            items: &items,
-        });
-        tracked.send_to_viewers(links, &frames);
     }
-
-    tracked.tick_count += 1;
 }
 
 /// `UpdateInterval.periodic`。`update_interval` 是 -1 时表示 `NEVER`。
 fn update_interval(entity_type: i32) -> Option<i32> {
     let interval = entity_types::FACTS[entity_type as usize].update_interval;
     (interval > 0).then_some(interval)
-}
-
-/// `ServerEntity.createMovePacket`。这两种实体不转向，所以旋转那一半总是空的。
-fn choose_movement(snapshot: &Snapshot, tracked: &mut TrackedEntity) -> Option<Movement> {
-    if snapshot.precise
-        || tracked.teleport_delay > FORCED_TELEPORT_PERIOD
-        || tracked.was_on_ground != snapshot.on_ground
-    {
-        tracked.was_on_ground = snapshot.on_ground;
-        tracked.teleport_delay = 0;
-        return Some(Movement::Sync);
-    }
-    let should_send_position = has_moved(tracked.base, snapshot.position)
-        || tracked.tick_count % FORCED_POS_UPDATE_PERIOD == 0;
-    if !should_send_position {
-        return None;
-    }
-    Some(
-        match PositionDelta::between(tracked.base, snapshot.position) {
-            Some(delta) => Movement::Position(delta),
-            None => Movement::Sync,
-        },
-    )
 }
 
 /// `positionCodec.delta(position).lengthSqr() >= 7.6293945E-6F`。
@@ -573,31 +1047,24 @@ fn has_moved(base: Vec3, position: Vec3) -> bool {
 
 /// 这一周期要发的移动包。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Movement {
+pub enum Movement {
     /// `entity_position_sync`。
     Sync,
     /// `move_entity_pos`。
     Position(PositionDelta),
+    /// `move_entity_pos_rot`。
+    PositionRotation(PositionDelta),
+    /// `move_entity_rot`。
+    Rotation,
 }
 
 impl Movement {
-    fn frames(self, entity_id: i32, snapshot: &Snapshot) -> Vec<u8> {
-        match self {
-            Self::Sync => encode_frames(&EntityPositionSync {
-                entity_id,
-                // 这两种实体没有插值，官方的 `InterpolationTracker.NO_OP` 总是返回 Linear。
-                path: PositionPath::Linear(snapshot.position),
-                yaw: snapshot.yaw,
-                pitch: 0.0,
-                on_ground: snapshot.on_ground,
-            }),
-            Self::Position(delta) => encode_frames(&MoveEntityPos {
-                entity_id,
-                // 没有插值时官方发的是 `VecDelta.Linear`，客户端按两步算。
-                delta: VecDelta::Linear(delta),
-                on_ground: snapshot.on_ground,
-            }),
-        }
+    fn has_position(self) -> bool {
+        !matches!(self, Self::Rotation)
+    }
+
+    fn has_rotation(self) -> bool {
+        !matches!(self, Self::Position(_))
     }
 }
 

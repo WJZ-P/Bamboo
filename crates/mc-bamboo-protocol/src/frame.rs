@@ -10,6 +10,22 @@ pub const MAX_FRAME_LEN: usize = (1 << 21) - 1;
 
 const MAX_HEADER_LEN: usize = 3;
 
+/// 把 `packet` 写成「包 ID 的 VarInt + 包体」，不带帧长前缀。
+///
+/// 官方 `StreamCodec.encode` 写进 `FriendlyByteBuf` 的就是这一段；对拍逐刻比它，
+/// 线上真正发出去的帧则另有长度前缀。
+///
+/// Writes the packet as the "VarInt packet id + body" form without the frame
+/// length prefix. This is what vanilla's `StreamCodec.encode` puts into a
+/// `FriendlyByteBuf`; the oracle compares these bytes tick by tick, while the
+/// wire frames carry an additional length prefix.
+pub fn packet_body<P: ClientboundPacket>(packet: &P) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_varint(&mut out, P::ID);
+    packet.write_body(&mut out);
+    out
+}
+
 /// 字节流不是合法帧序列的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum FrameError {

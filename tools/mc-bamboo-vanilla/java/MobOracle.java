@@ -28,7 +28,15 @@ import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
+import io.netty.buffer.Unpooled;
+import java.util.Base64;
 import net.minecraft.network.PacketProcessor;
+import net.minecraft.network.ProtocolInfo;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.game.ClientGamePacketListener;
+import net.minecraft.network.protocol.game.GameProtocols;
+import net.minecraft.server.level.ServerEntity;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.Bootstrap;
@@ -234,6 +242,8 @@ public final class MobOracle {
         final List<int[]> eggs = new ArrayList<>();
         int ticks = 600;
         boolean baby;
+        /** 逐刻比出站包序列；一个观察者一直在范围内。 */
+        boolean packets;
 
         Scene(String name) {
             this.name = name;
@@ -280,6 +290,79 @@ public final class MobOracle {
         Scene egg(int tick, int x, int y, int z, boolean offsetMore) {
             eggs.add(new int[] {tick, x, y, z, offsetMore ? 1 : 0});
             return this;
+        }
+
+        /** 这个场景逐刻比出站包序列，一个观察者始终在范围内。 */
+        Scene packets() {
+            packets = true;
+            return this;
+        }
+    }
+
+    /** 每头牛的官方 `ServerEntity` 和一个记下包字节的假 Synchronizer。 */
+    private static final class Sync {
+        final ServerEntity entity;
+        final Bytes bytes;
+
+        Sync(FakeLevel level, Cow cow, RegistryAccess registries) {
+            bytes = new Bytes(registries);
+            entity = new ServerEntity(level, cow,
+                    cow.getType().hasUpdateInterval()
+                            ? net.minecraft.world.entity.UpdateInterval.periodic(cow.getType().updateInterval())
+                            : net.minecraft.world.entity.UpdateInterval.NEVER,
+                    cow.getType().trackDeltas(), bytes);
+        }
+
+        List<String> take() {
+            return bytes.take();
+        }
+    }
+
+    /** 把官方包按 `StreamCodec` 写成「包 ID 的 VarInt + 包体」。 */
+    private static final class Bytes implements ServerEntity.Synchronizer {
+        private final ProtocolInfo<ClientGamePacketListener> protocol;
+        private final RegistryAccess registries;
+        private final List<byte[]> collected = new ArrayList<>();
+
+        Bytes(RegistryAccess registries) {
+            this.registries = registries;
+            this.protocol = GameProtocols.CLIENTBOUND_TEMPLATE.bind(
+                    RegistryFriendlyByteBuf.decorator(registries));
+        }
+
+        @SuppressWarnings("unchecked")
+        private void add(Packet<? super ClientGamePacketListener> packet) {
+            RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), registries);
+            protocol.codec().encode(buffer, packet);
+            byte[] body = new byte[buffer.readableBytes()];
+            buffer.readBytes(body);
+            collected.add(body);
+        }
+
+        /** 取走这一刻的全部包，每个包单独一个 base64 串。 */
+        List<String> take() {
+            List<String> out = new ArrayList<>();
+            for (byte[] body : collected) {
+                out.add(Base64.getEncoder().encodeToString(body));
+            }
+            collected.clear();
+            return out;
+        }
+
+        @Override
+        public void sendToTrackingPlayers(Packet<? super ClientGamePacketListener> packet) {
+            add(packet);
+        }
+
+        @Override
+        public void sendToTrackingPlayersAndSelf(Packet<? super ClientGamePacketListener> packet) {
+            add(packet);
+        }
+
+        @Override
+        public void sendToTrackingPlayersFiltered(Packet<? super ClientGamePacketListener> packet,
+                java.util.function.Predicate<ServerPlayer> filter) {
+            add(packet);
         }
     }
 
@@ -525,6 +608,32 @@ public final class MobOracle {
                 herd.cow(0.9, 64.0, 0.7, 90.0F, 34L);
                 scenes.add(herd);
             }
+            {
+                // 出站包逐刻比字节：闲逛、挨打（速度包和实体事件）、幼年和富字段的元数据、
+                // /summon 和刷怪蛋生成时的配对包。一个观察者始终在范围内。
+                Scene idle = new Scene("packets_idle").ticks(400).packets();
+                ground(idle, 8);
+                idle.cow(0.5, 64.0, 0.5, 0.0F, 41L);
+                idle.player(4.5, 64.0, 0.5, Items.AIR);
+                scenes.add(idle);
+                Scene hurt = new Scene("packets_hurt").ticks(400).packets();
+                ground(hurt, 8);
+                hurt.cow(0.5, 64.0, 0.5, 0.0F, 42L);
+                hurt.player(2.5, 64.0, 0.5, Items.AIR);
+                hurt.hurts.add(new double[] {60, 0, 3.0, 0});
+                scenes.add(hurt);
+                Scene tagged = new Scene("packets_nbt").ticks(400).packets();
+                ground(tagged, 8);
+                tagged.summon(1, 0.5, 64.0, 0.5,
+                        "{Age:-300,Rotation:[45.0f,10.0f],Health:5.5f,variant:\"minecraft:warm\",sound_variant:\"minecraft:moody\",UUID:[I;1,2,3,4],Silent:1b}");
+                tagged.player(4.5, 64.0, 0.5, Items.AIR);
+                scenes.add(tagged);
+                Scene eggs = new Scene("packets_egg").ticks(400).packets();
+                ground(eggs, 8);
+                eggs.egg(1, 0, 64, 0, true);
+                eggs.player(4.5, 64.0, 0.5, Items.AIR);
+                scenes.add(eggs);
+            }
             return scenes;
         }
     }
@@ -532,7 +641,17 @@ public final class MobOracle {
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
+        // 每个包场景一份共用收集器：实体事件、音效和同步包按发生顺序进同一串字节。
+        Bytes events = scene.packets ? new Bytes(official.registries) : null;
+        StubList list = (StubList) official.server.getPlayerList();
+        if (events != null) {
+            list.sounds = events::add;
+        }
         FakeLevel level = FakeLevel.create(official);
+        if (events != null) {
+            level.chunkSource.events = events::add;
+            level.packets = events::add;
+        }
         level.blocks.putAll(scene.blocks);
         level.nextId = FIRST_ID;
         List<ServerPlayer> players = new ArrayList<>();
@@ -547,6 +666,21 @@ public final class MobOracle {
         level.playersList().addAll(players);
         List<Cow> cows = new ArrayList<>();
         int playerIds = level.nextId;
+        /** 逐刻的出站包字节；外层数组是刻，内层是那一刻这一头牛的全部包。 */
+        List<List<String>> packets = null;
+        /** 逐刻的同步标志位，Rust 侧喂给 `TrackedEntity::step`。 */
+        List<List<String>> syncFlags = null;
+        /** 每头牛一个官方 `ServerEntity`，按 `cows` 的下标对齐。 */
+        List<Sync> syncs = null;
+        if (scene.packets) {
+            packets = new ArrayList<>();
+            syncFlags = new ArrayList<>();
+            syncs = new ArrayList<>();
+            for (int tick = 0; tick <= scene.ticks; tick++) {
+                packets.add(new ArrayList<>());
+                syncFlags.add(new ArrayList<>());
+            }
+        }
         for (int i = 0; i < scene.cows.size(); i++) {
             Cow cow = EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
             double[] at = scene.cows.get(i);
@@ -561,6 +695,17 @@ public final class MobOracle {
             cow.setYBodyRot(scene.yaws.get(i)[0]);
             cows.add(cow);
             level.tracked.add(cow);
+        }
+        if (scene.packets) {
+            // 先给每头牛建 ServerEntity；配对包在 tick 0 由 `sendPairingData` 发出。
+            // Create a ServerEntity per cow; sendPairingData emits the tick-0 packets.
+            for (Cow cow : cows) {
+                Sync sync = new Sync(level, cow, official.registries);
+                syncs.add(sync);
+                sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
+                packets.get(0).addAll(sync.take());
+                syncFlags.get(0).add(flags(cow));
+            }
         }
         StringBuilder line = new StringBuilder(1 << 20);
         line.append("{\"type\":\"case\",\"name\":\"").append(scene.name).append('"');
@@ -633,6 +778,9 @@ public final class MobOracle {
                 Cow cow = summon(level, official, new Vec3(summon[1], summon[2], summon[3]), scene.summonNbt.get(i));
                 if (cow != null) {
                     cows.add(cow);
+                    if (scene.packets) {
+                        addSync(level, official, cow, syncs, packets, syncFlags, tick);
+                    }
                 }
             }
             for (int[] egg : scene.eggs) {
@@ -646,6 +794,9 @@ public final class MobOracle {
                 reseed(level, cow, 2);
                 level.tracked.add(cow);
                 cows.add(cow);
+                if (scene.packets) {
+                    addSync(level, official, cow, syncs, packets, syncFlags, tick);
+                }
             }
             for (Cow cow : new ArrayList<>(cows)) {
                 if (cow.isRemoved()) {
@@ -657,8 +808,27 @@ public final class MobOracle {
             }
             level.tracked.removeIf(Entity::isRemoved);
             line.append(',').append(stepJson(cows));
+            if (scene.packets) {
+                // 这一刻的顺序：中途生成的配对包、实体 tick 里的事件/音效、
+                // 然后每头牛按 uid 顺序的同步包。
+                // Order: mid-tick pairings, events during entity ticks, then each
+                // cow's sync packets in id order.
+                List<String> step = packets.get(tick);
+                step.addAll(events.take());
+                for (int i = 0; i < cows.size(); i++) {
+                    Cow cow = cows.get(i);
+                    Sync sync = syncs.get(i);
+                    syncFlags.get(tick).add(flags(cow));
+                    sync.entity.sendChanges();
+                    step.addAll(sync.take());
+                }
+            }
         }
-        line.append("]}\n");
+        line.append("],\"packets\":");
+        appendPackets(line, packets);
+        line.append(",\"syncFlags\":");
+        appendPackets(line, syncFlags);
+        line.append("}\n");
         out.write(line.toString());
         out.flush();
     }
@@ -705,6 +875,47 @@ public final class MobOracle {
         for (int i = 0; i < extraFloats; i++) {
             random.nextFloat();
         }
+    }
+
+    /** 某一刻的全部出站包，每个包一个 base64 串。 */
+    private static void appendPackets(StringBuilder line, List<List<String>> packets) {
+        if (packets == null) {
+            line.append("null");
+            return;
+        }
+        line.append('[');
+        for (int tick = 0; tick < packets.size(); tick++) {
+            if (tick > 0) line.append(',');
+            line.append('[');
+            List<String> step = packets.get(tick);
+            for (int i = 0; i < step.size(); i++) {
+                if (i > 0) line.append(',');
+                line.append(jsonString(step.get(i)));
+            }
+            line.append(']');
+        }
+        line.append(']');
+    }
+
+    /** `Entity` 上影响 `ServerEntity.sendChanges` 的标志位。 */
+    private static String flags(Entity entity) {
+        StringBuilder out = new StringBuilder();
+        out.append(entity.needsSync ? '1' : '0');
+        out.append(entity.syncPosition ? '1' : '0');
+        out.append(entity.syncVelocity ? '1' : '0');
+        out.append(entity.getRequiresPrecisePosition() ? '1' : '0');
+        out.append(entity instanceof LivingEntity living && living.isFallFlying() ? '1' : '0');
+        return out.toString();
+    }
+
+    /** 生成后中途出现的牛：这一刻发一次配对包。 */
+    private static void addSync(FakeLevel level, Official official, Cow cow, List<Sync> syncs,
+            List<List<String>> packets, List<List<String>> syncFlags, int tick) {
+        Sync sync = new Sync(level, cow, official.registries);
+        syncs.add(sync);
+        sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
+        packets.get(tick).addAll(sync.take());
+        syncFlags.get(tick).add(flags(cow));
     }
 
     private static String jsonString(String text) {
@@ -872,6 +1083,20 @@ public final class MobOracle {
         public PlayerAdvancements getPlayerAdvancements(ServerPlayer player) {
             return advancements;
         }
+
+        /** 环境音：把官方的音效包也记进同一刻的字节流。 */
+        java.util.function.Consumer<Packet<? super ClientGamePacketListener>> sounds;
+
+        @Override
+        public void broadcast(Player except, double x, double y, double z, double range,
+                net.minecraft.resources.ResourceKey<Level> dimension, Packet<?> packet) {
+            if (sounds != null) {
+                @SuppressWarnings("unchecked")
+                Packet<? super ClientGamePacketListener> cast =
+                        (Packet<? super ClientGamePacketListener>) packet;
+                sounds.accept(cast);
+            }
+        }
     }
 
     private static final class Official {
@@ -1025,6 +1250,8 @@ public final class MobOracle {
     /** 区块缓存：寻路和地面搜索走 {@code getChunkNow}，交给假世界的区块表。 */
     private static final class Chunks extends ServerChunkCache {
         FakeLevel level;
+        /** 实体事件和音效走这里，和同步包一起记进同一刻的字节流。 */
+        java.util.function.Consumer<Packet<? super ClientGamePacketListener>> events;
 
         private Chunks() {
             super(null, null, null, null, null, null, 0, 0, false, null);
@@ -1037,6 +1264,22 @@ public final class MobOracle {
 
         @Override
         public void move(ServerPlayer player) {}
+
+        @Override
+        public void sendToTrackingPlayersAndSelf(Entity entity,
+                Packet<? super ClientGamePacketListener> packet) {
+            if (events != null) {
+                events.accept(packet);
+            }
+        }
+
+        @Override
+        public void sendToTrackingPlayers(Entity entity,
+                Packet<? super ClientGamePacketListener> packet) {
+            if (events != null) {
+                events.accept(packet);
+            }
+        }
     }
 
     private static final class FakeLevel extends ServerLevel {
@@ -1072,7 +1315,7 @@ public final class MobOracle {
             put(ServerChunkCache.class, level.chunkSource, "chunkMap", map);
             put(Level.class, level, "neighborUpdater", new net.minecraft.world.level.redstone.CollectingNeighborUpdater(level, 1_000_000));
             put(Level.class, level, "random", RandomSource.create(1L));
-            put(Level.class, level, "soundSeedGenerator", RandomSource.createThreadSafe());
+            put(Level.class, level, "soundSeedGenerator", RandomSource.create(12345L));
             put(Level.class, level, "dimensionTypeRegistration", official.overworld);
             put(Level.class, level, "dimension", Level.OVERWORLD);
             put(Level.class, level, "registryAccess", official.registries);
@@ -1316,15 +1559,26 @@ public final class MobOracle {
         public void levelEvent(Entity source, int type, BlockPos pos, int data) {}
 
         @Override
-        public void broadcastEntityEvent(Entity entity, byte event) {}
-
-        @Override
-        public void broadcastDamageEvent(Entity entity, net.minecraft.world.damagesource.DamageSource source) {}
-
-        @Override
         public <T extends net.minecraft.core.particles.ParticleOptions> int sendParticles(
                 T particle, double x, double y, double z, int count, double xd, double yd, double zd, double speed) {
             return 0;
+        }
+
+        /** 实体事件、伤害事件和音效都记进同一刻的包序列。 */
+        java.util.function.Consumer<Packet<? super ClientGamePacketListener>> packets;
+
+        @Override
+        public void broadcastEntityEvent(Entity entity, byte event) {
+            if (packets != null) {
+                packets.accept(new net.minecraft.network.protocol.game.ClientboundEntityEventPacket(entity, event));
+            }
+        }
+
+        @Override
+        public void broadcastDamageEvent(Entity entity, net.minecraft.world.damagesource.DamageSource source) {
+            if (packets != null) {
+                packets.accept(new net.minecraft.network.protocol.game.ClientboundDamageEventPacket(entity, source));
+            }
         }
 
         @Override
@@ -1337,7 +1591,12 @@ public final class MobOracle {
                 net.minecraft.sounds.SoundSource source,
                 float volume,
                 float pitch,
-                long seed) {}
+                long seed) {
+            if (packets != null) {
+                packets.accept(new net.minecraft.network.protocol.game.ClientboundSoundPacket(
+                        sound, source, x, y, z, volume, pitch, seed));
+            }
+        }
 
         @Override
         public void playSeededSound(
@@ -1347,7 +1606,10 @@ public final class MobOracle {
                 net.minecraft.sounds.SoundSource source,
                 float volume,
                 float pitch,
-                long seed) {}
+                long seed) {
+            playSeededSound(except, sourceEntity.getX(), sourceEntity.getY(), sourceEntity.getZ(),
+                    sound, source, volume, pitch, seed);
+        }
 
         @Override
         public Collection<EnderDragonPart> dragonParts() {

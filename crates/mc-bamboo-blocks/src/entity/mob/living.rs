@@ -341,10 +341,19 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         if roll < time {
             mob.ambient_sound_time = -120;
             let pitch = voice_pitch(me, mob);
-            play_sound(me, mob, mob.sound_variant.ambient(), 1.0, pitch);
+            play_sound(
+                me,
+                mob,
+                mob.sound_variant.ambient(),
+                COW_SOUND_VOLUME,
+                pitch,
+            );
         }
     }
 }
+
+/// `AbstractCow.getSoundVolume()`：叫声、受伤和死亡都用这个音量。
+const COW_SOUND_VOLUME: f32 = 0.4;
 
 /// `Entity.playSound`：静音的生物不出声（音高这些参数调用方已经取过）。
 ///
@@ -364,7 +373,13 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
 /// `Mob.playAmbientSound`：`makeSound(getAmbientSound())`。
 pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
     let pitch = voice_pitch(me, mob);
-    play_sound(me, mob, mob.sound_variant.ambient(), 1.0, pitch);
+    play_sound(
+        me,
+        mob,
+        mob.sound_variant.ambient(),
+        COW_SOUND_VOLUME,
+        pitch,
+    );
 }
 
 /// `getVoicePitch()`：两个 `nextFloat`，牛的叫声从不为空，静音时也照取。
@@ -1117,14 +1132,14 @@ pub(crate) fn hurt_server(
     if mob.is_dead_or_dying() {
         if full_hit {
             let pitch = voice_pitch(me, mob);
-            play_sound(me, mob, mob.sound_variant.death(), 1.0, pitch);
+            play_sound(me, mob, mob.sound_variant.death(), COW_SOUND_VOLUME, pitch);
         }
         die(me, mob, ctx, source);
     } else if full_hit {
         // `Mob.playHurtSound`：先重置叫声计时，再取音高。
         mob.ambient_sound_time = -120;
         let pitch = voice_pitch(me, mob);
-        play_sound(me, mob, mob.sound_variant.hurt(), 1.0, pitch);
+        play_sound(me, mob, mob.sound_variant.hurt(), COW_SOUND_VOLUME, pitch);
     }
     mob.last_damage_source = Some(source);
     mob.last_damage_stamp = ctx.blocks().game_time();

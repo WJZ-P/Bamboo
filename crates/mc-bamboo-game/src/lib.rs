@@ -50,7 +50,8 @@ mod director_host;
 mod drops;
 mod durability;
 mod entity_sync;
-mod entity_tracking;
+#[doc(hidden)]
+pub mod entity_tracking;
 mod entity_view;
 mod gamerules;
 mod global;
