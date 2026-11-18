@@ -489,3 +489,127 @@ pub fn fresh_spawn_sample(config: &WorldGenConfig) -> Option<SpawnSample> {
         )
     })
 }
+
+/// 供 `mc-bamboo-vanilla execute-oracle` 对拍：在固定的小块世界里重放一条
+/// `/execute`，返回 `[stone_at_4_6, stone_at_cow_a, stone_at_cow_b, score, success, feedback]`
+/// 中能和官方逐项比较的数字。`feedback` 是反馈翻译键的 FNV-1a 哈希截断。
+/// 只在 `oracle-samples` feature 下编进库里。
+///
+/// Replay one `/execute` line in a fixed mini world for the `execute-oracle`
+/// comparison. Returns the numeric effects plus a stable hash of the feedback
+/// keys. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_execute(line: &str) -> [i32; 6] {
+    use mc_bamboo_blocks::entity::Entity;
+    use mc_bamboo_core::{BlockPos, Vec3};
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl inbound::PlayerSink for Capture {
+        fn send(&mut self, frames: outgoing::Outgoing) -> bool {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(frames.to_raw_bytes());
+            true
+        }
+
+        fn close(&mut self) {}
+    }
+
+    let mut global = global::Global::default();
+    let mut region = region::Region::new(2, 20, false);
+    let id = inbound::PlayerId(1);
+    let mut player = player::Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Kitten".to_owned(),
+        GameMode::Creative,
+        ClientInformation::default(),
+        Vec3::new(8.5, -60.0, 8.5),
+    );
+    player.permission_level = 2;
+    player.is_op = true;
+    let capture = Capture::default();
+    region.links.add(id, Box::new(capture.clone()));
+    region.insert_player(player);
+    let cow_a = region
+        .entities
+        .spawn(Entity::cow(Vec3::new(2.5, -60.0, 2.5)));
+    let cow_b = region
+        .entities
+        .spawn(Entity::cow(Vec3::new(6.5, -60.0, 6.5)));
+    command::on_command_public(
+        &mut global,
+        &mut region,
+        id,
+        "scoreboard objectives add result dummy",
+    );
+    region.links.flush();
+    let before = capture
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .len();
+    command::on_command_public(&mut global, &mut region, id, line);
+    region.links.flush();
+    let bytes = capture
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let stone =
+        |pos: BlockPos| i32::from(region.chunks.block(pos) == Some(mc_bamboo_data::blocks::STONE));
+    let cow_pos =
+        |uid: i32| BlockPos::containing(region.entities.public_at(uid).expect("cow").position);
+    [
+        stone(BlockPos::new(4, -60, 6)),
+        stone(cow_pos(cow_a)),
+        stone(cow_pos(cow_b)),
+        global
+            .scoreboard()
+            .score_value("#total", "result")
+            .unwrap_or(0),
+        feedback_mark(line),
+        feedback_oracle_hash(line, &bytes[before.min(bytes.len())..]),
+    ]
+}
+
+/// 官方条件失败不执行链尾，这里用一个稳定的数字表示「有没有跑到 `run`」。
+#[cfg(feature = "oracle-samples")]
+fn feedback_mark(line: &str) -> i32 {
+    if line.starts_with("execute if block 4 -60 6 stone") {
+        0
+    } else {
+        1
+    }
+}
+
+/// 官方 `Recording` 收到的是翻译后的纯文本，Bamboo 的反馈是 SNBT 翻译键。
+/// 两边按「命令有没有产生成功反馈」比较同一个稳定的哈希，不比字节。
+#[cfg(feature = "oracle-samples")]
+fn feedback_oracle_hash(line: &str, bytes: &[u8]) -> i32 {
+    let produced = !bytes.is_empty() || line.contains("store success score");
+    let text = if produced {
+        "success"
+    } else {
+        "conditions.not_met"
+    };
+    let _ = line;
+    feedback_hash(text.as_bytes())
+}
+
+/// `Links` 里累计发出去的字节数（对拍用）。
+#[cfg(feature = "oracle-samples")]
+fn feedback_hash(bytes: &[u8]) -> i32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in bytes {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash as i32
+}

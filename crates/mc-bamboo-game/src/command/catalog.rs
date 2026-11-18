@@ -7,9 +7,10 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, enchant, experience,
-    gamerule, items, kill, loot, particle, players, playsound, random, save, scoreboard, stopsound,
-    summon, team, teleport, text, time, title, weather, world_border, world_settings,
+    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, enchant, execute,
+    experience, gamerule, items, kill, loot, particle, players, playsound, random, save,
+    scoreboard, stopsound, summon, team, teleport, text, time, title, weather, world_border,
+    world_settings,
 };
 
 struct Builder {
@@ -130,6 +131,7 @@ pub(crate) fn build() -> Commands {
     register_stopsound(&mut builder, root);
     register_random(&mut builder, root);
     register_enchant(&mut builder, root);
+    register_execute(&mut builder, root);
     register_experience(&mut builder, root);
     register_loot(&mut builder, root);
     register_weather(&mut builder, root);
@@ -1084,6 +1086,171 @@ fn add_reset_seed(builder: &mut Builder, parent: usize) {
     builder.run(world, random::reset);
     let sequence_id = builder.argument(world, "includeSequenceId", ArgumentType::Bool, 0);
     builder.run(sequence_id, random::reset);
+}
+
+/// `ExecuteCommand.register`：权限 2。链上每一步都重定向回 `execute` 根，
+/// `run` 重定向到整棵命令树的根；只有 `run` 后面的命令真正执行。
+///
+/// `ExecuteCommand.register`: level 2. Every modifier redirects to the
+/// `execute` root; `run` redirects to the command-tree root.
+fn register_execute(builder: &mut Builder, root: usize) {
+    let execute = builder.literal(root, "execute", permission::GAMEMASTERS);
+    let back = |builder: &mut Builder, node: usize| builder.graph.redirect(node, execute);
+
+    let run = builder.literal(execute, "run", 0);
+    builder.graph.redirect(run, root);
+    builder.run(run, execute::execute_global);
+
+    for name in ["as", "at"] {
+        let branch = builder.literal(execute, name, 0);
+        let targets = builder.argument(branch, "targets", entities_argument(), 0);
+        back(builder, targets);
+    }
+
+    let positioned = builder.literal(execute, "positioned", 0);
+    let pos = builder.argument(positioned, "pos", ArgumentType::Vec3, 0);
+    back(builder, pos);
+    let as_branch = builder.literal(positioned, "as", 0);
+    let targets = builder.argument(as_branch, "targets", entities_argument(), 0);
+    back(builder, targets);
+    let over = builder.literal(positioned, "over", 0);
+    let heightmap = builder.argument(over, "heightmap", ArgumentType::Heightmap, 0);
+    back(builder, heightmap);
+
+    let rotated = builder.literal(execute, "rotated", 0);
+    let rot = builder.argument(rotated, "rot", ArgumentType::Rotation, 0);
+    back(builder, rot);
+    let as_branch = builder.literal(rotated, "as", 0);
+    let targets = builder.argument(as_branch, "targets", entities_argument(), 0);
+    back(builder, targets);
+
+    let facing = builder.literal(execute, "facing", 0);
+    let pos = builder.argument(facing, "pos", ArgumentType::Vec3, 0);
+    back(builder, pos);
+    let entity = builder.literal(facing, "entity", 0);
+    let targets = builder.argument(entity, "targets", entities_argument(), 0);
+    let anchor = builder.argument(targets, "anchor", ArgumentType::EntityAnchor, 0);
+    back(builder, anchor);
+
+    let align = builder.literal(execute, "align", 0);
+    let axes = builder.argument(align, "axes", ArgumentType::Swizzle, 0);
+    back(builder, axes);
+    let anchored = builder.literal(execute, "anchored", 0);
+    let anchor = builder.argument(anchored, "anchor", ArgumentType::EntityAnchor, 0);
+    back(builder, anchor);
+    let in_branch = builder.literal(execute, "in", 0);
+    let dimension = builder.argument(in_branch, "dimension", ArgumentType::Dimension, 0);
+    back(builder, dimension);
+
+    for name in ["if", "unless"] {
+        let branch = builder.literal(execute, name, 0);
+        let block = builder.literal(branch, "block", 0);
+        let pos = builder.argument(block, "pos", ArgumentType::BlockPos, 0);
+        let predicate = builder.argument(pos, "block", ArgumentType::BlockPredicate, 0);
+        builder.run(predicate, execute::execute_global);
+        back(builder, predicate);
+
+        let blocks = builder.literal(branch, "blocks", 0);
+        let start = builder.argument(blocks, "start", ArgumentType::BlockPos, 0);
+        let end = builder.argument(start, "end", ArgumentType::BlockPos, 0);
+        let destination = builder.argument(end, "destination", ArgumentType::BlockPos, 0);
+        for mode in ["all", "masked"] {
+            let node = builder.literal(destination, mode, 0);
+            builder.run(node, execute::execute_global);
+            back(builder, node);
+        }
+
+        let entity = builder.literal(branch, "entity", 0);
+        let entities = builder.argument(entity, "entities", entities_argument(), 0);
+        builder.run(entities, execute::execute_global);
+        back(builder, entities);
+
+        let score = builder.literal(branch, "score", 0);
+        let target = builder.argument(
+            score,
+            "target",
+            ArgumentType::ScoreHolder { multiple: false },
+            0,
+        );
+        let objective = builder.argument(target, "targetObjective", ArgumentType::Objective, 0);
+        let matches = builder.literal(objective, "matches", 0);
+        let range = builder.argument(matches, "range", ArgumentType::IntRange, 0);
+        builder.run(range, execute::execute_global);
+        back(builder, range);
+        for op in ["<", "<=", "=", ">=", ">"] {
+            let cmp = builder.literal(objective, op, 0);
+            let source = builder.argument(
+                cmp,
+                "source",
+                ArgumentType::ScoreHolder { multiple: false },
+                0,
+            );
+            let source_objective =
+                builder.argument(source, "sourceObjective", ArgumentType::Objective, 0);
+            builder.run(source_objective, execute::execute_global);
+            back(builder, source_objective);
+        }
+
+        let predicate = builder.literal(branch, "predicate", 0);
+        let id = builder.argument(predicate, "predicate", ArgumentType::LootPredicate, 0);
+        builder.run(id, execute::execute_global);
+        back(builder, id);
+    }
+
+    for name in ["result", "success"] {
+        let store = builder.literal(execute, "store", 0);
+        let kind = builder.literal(store, name, 0);
+        let score = builder.literal(kind, "score", 0);
+        let targets = builder.argument(
+            score,
+            "targets",
+            ArgumentType::ScoreHolder { multiple: true },
+            0,
+        );
+        let objective = builder.argument(targets, "objective", ArgumentType::Objective, 0);
+        back(builder, objective);
+        let bossbar = builder.literal(kind, "bossbar", 0);
+        let id = builder.argument(bossbar, "id", ArgumentType::ResourceLocation, 0);
+        for field in ["value", "max"] {
+            let node = builder.literal(id, field, 0);
+            back(builder, node);
+        }
+        for target in ["block", "entity", "storage"] {
+            let kind_node = builder.literal(kind, target, 0);
+            let source = builder.argument(
+                kind_node,
+                "target",
+                if target == "block" {
+                    ArgumentType::BlockPos
+                } else if target == "entity" {
+                    ArgumentType::Entity {
+                        single: true,
+                        players_only: false,
+                    }
+                } else {
+                    ArgumentType::ResourceLocation
+                },
+                0,
+            );
+            let path = builder.argument(source, "path", ArgumentType::NbtPath, 0);
+            for ty in ["byte", "short", "int", "long", "float", "double"] {
+                let node = builder.literal(path, ty, 0);
+                let scale = builder.argument(
+                    node,
+                    "scale",
+                    ArgumentType::Double {
+                        min: f64::MIN,
+                        max: f64::MAX,
+                    },
+                    0,
+                );
+                back(builder, scale);
+            }
+        }
+    }
+    // 整棵 `/execute` 的动作都绑在这一个入口：执行器从 `ParsedCommand.chain` 读链。
+    // Every `/execute` node binds this one entry; the runner reads `chain`.
+    builder.run(execute, execute::execute_global);
 }
 
 fn register_enchant(builder: &mut Builder, root: usize) {

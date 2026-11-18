@@ -66,6 +66,7 @@ mod clone;
 pub(crate) mod console;
 mod effects;
 mod enchant;
+pub(crate) mod execute;
 mod experience;
 pub(crate) mod feedback;
 mod gamerule;
@@ -323,6 +324,17 @@ pub(crate) fn run(
     }
 }
 
+/// 对拍用：和 [`on_command`] 一样，但不带 `cfg(test)`，供 `mc-bamboo-vanilla` 调用。
+#[cfg(feature = "oracle-samples")]
+pub(crate) fn on_command_public(
+    global: &mut Global,
+    region: &mut Region,
+    id: PlayerId,
+    command: &str,
+) {
+    on_player_command(&mut GlobalPort::Direct(global), region, id, command, None);
+}
+
 /// 单元测试用：按 `BAMBOO_TEST_GLOBAL_PORT` 选直接或排队实现执行一条玩家命令；
 /// 排队时命令执行完立刻按顺序应用攒下的改动（相当于岛马上交回）。
 ///
@@ -522,7 +534,15 @@ fn argument_properties(kind: &ArgumentType) -> ArgumentProperties {
         | ArgumentType::DisplaySlot
         | ArgumentType::Style
         | ArgumentType::TeamColor
-        | ArgumentType::CompoundTag => ArgumentProperties::None,
+        | ArgumentType::CompoundTag
+        | ArgumentType::Swizzle
+        | ArgumentType::NbtPath
+        | ArgumentType::Heightmap
+        | ArgumentType::SlotSource
+        | ArgumentType::LootPredicate
+        | ArgumentType::FloatRange
+        | ArgumentType::Function => ArgumentProperties::None,
+        ArgumentType::ResourceOrTag { registry } => ArgumentProperties::Registry(registry),
     }
 }
 

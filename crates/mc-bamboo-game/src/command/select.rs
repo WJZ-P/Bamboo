@@ -155,10 +155,37 @@ fn find(
     level: u8,
     selector: &EntitySelector,
 ) -> Result<Vec<Target>, CommandFail> {
+    let source = source::of(region, id);
+    find_with_source(region, board, source, level, selector)
+}
+
+/// 给 `/execute` 用：从已经改过的执行上下文（位置/朝向/执行者）出发选实体。
+///
+/// For `/execute`: select entities from an already modified context.
+pub(crate) fn targets_with(
+    region: &Region,
+    source: source::Source,
+    level: u8,
+    selector: &EntitySelector,
+) -> Result<Vec<Target>, CommandFail> {
+    let found = find_with_source(region, None, source, level, selector)?;
+    if found.is_empty() {
+        Err(fail("argument.entity.notfound.entity"))
+    } else {
+        Ok(found)
+    }
+}
+
+fn find_with_source(
+    region: &Region,
+    board: Option<&crate::scoreboard::Scoreboard>,
+    source: source::Source,
+    level: u8,
+    selector: &EntitySelector,
+) -> Result<Vec<Target>, CommandFail> {
     if selector.uses_selectors && level < permission::GAMEMASTERS {
         return Err(fail("argument.entity.selector.not_allowed"));
     }
-    let source = source::of(region, id);
     let origin = selector.position(source.position);
     let volume = volume_box(origin, selector);
     if let Some(name) = &selector.player_name {

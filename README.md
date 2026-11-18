@@ -1009,6 +1009,15 @@ WebView2 的渲染进程不算在内。
   两个命令的世界坐标都取执行来源的位置（玩家脚底、控制台出生点），没有命令方块或 `/execute` 的来源偏移。
   难度默认 `easy`（和官方专用服务器一致；`difficulty` 已能在 `server.properties` 里读到，但 Bamboo 还没实现这个键），`/difficulty` 改完广播给所有人，进服时同步。默认游戏模式是创造模式（官方专用服务器默认是生存；`gamemode` 已能在 `server.properties` 里读到，但 Bamboo 还没实现这个键）；`force-gamemode` 按官方默认关闭，`/defaultgamemode` 不改在线玩家的模式。`level-seed` 还没有实现，世界种子固定为 0，`/seed` 报的就是它，`login` 里的哈希种子按官方 `BiomeManager.obfuscateSeed` 算。
   `/clone` 复制方块和方块实体数据，上限读 `max_block_modifications`；`/random` 按官方的种子规则共用 `mc-bamboo-loot` 的随机序列；`/enchant` 给主手物品写附魔组件；`/stopsound` 只给选中的玩家发包。`/loot` 的 `give`、`insert`、`replace`、`spawn` 和来源 `loot`、`mine` 可用；`spawn` 按官方 `dropInWorld` 生成带默认拾取延迟的物品实体，`kill`、`fish` 已在命令树里注册但执行时返回失败（还没有实体死亡和钓鱼系统）。
+  `/execute` 按官方 `ExecuteCommand` 注册：`as`、`at`、`positioned`、`rotated`、`facing`、
+  `align`、`anchored`、`in`、`if/unless block|blocks|entity|score|predicate`、`store result|success`、
+  `run`；链上每层用 `CommandGraph` 的重定向上下文保存参数，执行来源按 `source::with_override`
+  临时替换，`as` 分叉出的每个分支当场顺序执行，`store score` 在所有分支结束后写回。
+  设计见 `docs/command-execution-context.md`；`execute-oracle` 用官方假世界逐条比较整条命令的
+  方块、计分板、是否跑到 `run` 和反馈，并有 `--break-self-test`。
+  已知差异：只有主世界，`in` 其它维度明确失败；`on`、`summon`、`positioned over`、
+  `if biome|data|items|slots|stopwatch|function|dimension|loaded` 和 `store ... block|entity|storage`
+  的 NBT 路径还没接上，执行时明确报错；`facing` / `anchored` 用近似眼高。
   `/kill` 按官方 `KillCommand`：权限 2、无参杀 `@s`、带选择器杀选中的玩家和非玩家实体；牛走已有的
   `LivingEntity.kill` → 掉落、经验球、死亡动画，其它非玩家实体直接 `remove(KILLED)`。玩家目标目前
   明确报 `command.failed`（Bamboo 还没有玩家死亡/重生流程，这是已知限制）。实体选择器 `@e` / `@n` / `@s` 现在同时

@@ -16,7 +16,7 @@ pub mod reader;
 pub mod value;
 
 pub use argument::{ArgumentType, StringKind};
-pub use dispatcher::{ParseFailure, ParsedCommand, SuggestionList};
+pub use dispatcher::{ChainStep, ParseFailure, ParsedCommand, SuggestionList};
 pub use error::{ErrorArg, ParseError};
 pub use graph::{CommandGraph, Node, NodeKind};
 pub use identifier::Identifier;
