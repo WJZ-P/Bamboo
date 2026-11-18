@@ -2,7 +2,19 @@
 
 use std::f64::consts::TAU;
 
-use crate::wire::{SPAWN, WANDER_RADIUS};
+use crate::{
+    scenario::{ROAM_CAMPS, roam_camp_spot},
+    wire::{SPAWN, WANDER_RADIUS},
+};
+
+/// `roam` 在营地里游走的半径（格）。
+const ROAM_LINGER_RADIUS: f64 = 24.0;
+/// `roam` 赶路的速度（格/秒），和 `fly` 的缺省一样。
+const ROAM_FLY_SPEED: f64 = 33.0;
+/// `roam` 赶路时的高度：比地面高 8 格，起落一步就到。
+const ROAM_FLY_HEIGHT: f64 = 8.0;
+/// `roam` 选下一个去处时去野外（而不是营地）的概率。
+const ROAM_WILD_CHANCE: f64 = 0.3;
 
 /// 移动方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +23,13 @@ pub enum Pattern {
     Walk,
     Fly,
     Wander,
+    /// 长时间压力：在营地里游走一阵，再飞到别的营地或者野外，被服务端送走就从那里接着来
+    /// （`islands-roam`）。
+    ///
+    /// Long-run stress: wander in a camp for a while, then fly to another camp
+    /// or into the wild; after a server teleport carry on from there
+    /// (`islands-roam`).
+    Roam,
 }
 
 impl Pattern {
@@ -20,8 +39,9 @@ impl Pattern {
             "walk" => Ok(Self::Walk),
             "fly" => Ok(Self::Fly),
             "wander" => Ok(Self::Wander),
+            "roam" => Ok(Self::Roam),
             other => Err(format!(
-                "unknown pattern '{other}', expected stand|walk|fly|wander"
+                "unknown pattern '{other}', expected stand|walk|fly|wander|roam"
             )),
         }
     }
@@ -32,6 +52,7 @@ impl Pattern {
             Self::Walk => "walk",
             Self::Fly => "fly",
             Self::Wander => "wander",
+            Self::Roam => "roam",
         }
     }
 
@@ -39,7 +60,7 @@ impl Pattern {
     pub const fn default_speed(self) -> f64 {
         match self {
             Self::Stand => 0.0,
-            Self::Walk | Self::Wander => 4.3,
+            Self::Walk | Self::Wander | Self::Roam => 4.3,
             Self::Fly => 33.0,
         }
     }
@@ -74,6 +95,15 @@ impl Layout {
     }
 }
 
+/// `roam` 现在在做什么。
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Roam {
+    /// 在 `center` 周围游走，还剩 `ticks` 刻。
+    Linger { center: (f64, f64), ticks: u32 },
+    /// 飞向 `target`。
+    Travel { target: (f64, f64) },
+}
+
 /// 一名假玩家的位置序列。
 #[derive(Debug, Clone)]
 pub struct Motion {
@@ -86,6 +116,7 @@ pub struct Motion {
     position: (f64, f64, f64),
     wander_angle: f64,
     rng: u64,
+    roam: Roam,
 }
 
 impl Motion {
@@ -98,7 +129,7 @@ impl Motion {
             // spread：起点在出生点，方向彼此不同，越走越远。
             Layout::Spread => (SPAWN.0, SPAWN.2),
         };
-        Self {
+        let mut motion = Self {
             pattern,
             speed,
             direction,
@@ -106,6 +137,41 @@ impl Motion {
             position: SPAWN,
             wander_angle: angle,
             rng: 0x9e37_79b9_7f4a_7c15_u64 ^ (index as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9),
+            roam: Roam::Linger {
+                center: (SPAWN.0, SPAWN.2),
+                ticks: 0,
+            },
+        };
+        // 出发的时刻错开：进服后 5–30 秒才第一次动身。
+        // Stagger the first departure: 5–30 s after joining.
+        let ticks = motion.ticks_between(100, 600);
+        motion.roam = Roam::Linger {
+            center: (SPAWN.0, SPAWN.2),
+            ticks,
+        };
+        motion
+    }
+
+    /// 换一个随机种子（`roam` 每次重连走不同的路），并重新错开第一次动身的时刻。
+    ///
+    /// Reseed (a reconnecting `roam` bot takes a different route) and
+    /// re-stagger the first departure.
+    pub fn reseed(&mut self, salt: u64) {
+        self.rng ^= salt.wrapping_mul(0xd6e8_feb8_6659_fd93) | 1;
+        if let Roam::Linger { center, .. } = self.roam {
+            let ticks = self.ticks_between(100, 600);
+            self.roam = Roam::Linger { center, ticks };
+        }
+    }
+
+    /// `roam` 正在赶路（飞着，不着地）。别的移动方式按 [`Pattern::needs_flying`]。
+    ///
+    /// Whether a `roam` bot is travelling (flying, off the ground); other
+    /// patterns follow [`Pattern::needs_flying`].
+    pub fn flying(&self) -> bool {
+        match self.pattern {
+            Pattern::Roam => matches!(self.roam, Roam::Travel { .. }),
+            pattern => pattern.needs_flying(),
         }
     }
 
@@ -126,6 +192,15 @@ impl Motion {
     pub fn snap_to(&mut self, position: (f64, f64, f64)) {
         self.position = position;
         self.center = (position.0, position.2);
+        if self.pattern == Pattern::Roam {
+            // 被送走（`/tp`、场景直接放置）：在落脚处待 10–60 秒再动身。
+            // Sent away (`/tp`, a placement): stay 10–60 s before moving on.
+            let ticks = self.ticks_between(200, 1200);
+            self.roam = Roam::Linger {
+                center: (position.0, position.2),
+                ticks,
+            };
+        }
     }
 
     /// 前进一个客户端 tick（50 ms），返回新位置。
@@ -154,8 +229,84 @@ impl Motion {
                 self.position.0 += self.wander_angle.cos() * distance;
                 self.position.2 += self.wander_angle.sin() * distance;
             }
+            Pattern::Roam => self.roam_step(dt),
         }
         self.position
+    }
+
+    /// `roam` 的一步：游走时到点就挑下一个去处（多半是营地，有时是野外），赶路时直线飞过去，
+    /// 到了落地再游走 15–90 秒。
+    ///
+    /// One `roam` step: when lingering runs out pick the next place (mostly a
+    /// camp, sometimes the wild); travel there in a straight line, land and
+    /// linger 15–90 s.
+    fn roam_step(&mut self, dt: f64) {
+        match self.roam {
+            Roam::Linger { center, ticks } => {
+                if ticks == 0 {
+                    let target = self.next_destination();
+                    self.roam = Roam::Travel { target };
+                    self.position.1 = SPAWN.1 + ROAM_FLY_HEIGHT;
+                    return;
+                }
+                self.roam = Roam::Linger {
+                    center,
+                    ticks: ticks - 1,
+                };
+                self.wander_angle += (self.next_f64() - 0.5) * 0.5;
+                let dx = self.position.0 - center.0;
+                let dz = self.position.2 - center.1;
+                if dx.hypot(dz) > ROAM_LINGER_RADIUS {
+                    self.wander_angle = (-dz).atan2(-dx) + (self.next_f64() - 0.5) * 0.5;
+                }
+                let distance = self.speed * dt;
+                self.position.0 += self.wander_angle.cos() * distance;
+                self.position.1 = SPAWN.1;
+                self.position.2 += self.wander_angle.sin() * distance;
+            }
+            Roam::Travel { target } => {
+                let dx = target.0 - self.position.0;
+                let dz = target.1 - self.position.2;
+                let left = dx.hypot(dz);
+                let step = ROAM_FLY_SPEED * dt;
+                if left <= step {
+                    self.position = (target.0, SPAWN.1, target.1);
+                    let ticks = self.ticks_between(300, 1800);
+                    self.roam = Roam::Linger {
+                        center: target,
+                        ticks,
+                    };
+                    return;
+                }
+                self.direction = (dx / left, dz / left);
+                self.position.0 += self.direction.0 * step;
+                self.position.1 = SPAWN.1 + ROAM_FLY_HEIGHT;
+                self.position.2 += self.direction.1 * step;
+            }
+        }
+    }
+
+    /// 下一个去处：一个营地里离中心不远的地方，或者某个营地外 24–40 个区块的野外。
+    ///
+    /// The next place: near the centre of a camp, or 24–40 chunks out from
+    /// some camp into the wild.
+    fn next_destination(&mut self) -> (f64, f64) {
+        let camp = (self.next_f64() * ROAM_CAMPS as f64) as usize % ROAM_CAMPS;
+        let (x, z) = roam_camp_spot(camp);
+        if self.next_f64() < ROAM_WILD_CHANCE {
+            let angle = self.next_f64() * TAU;
+            let distance = (24.0 + self.next_f64() * 16.0) * 16.0;
+            return (x + angle.cos() * distance, z + angle.sin() * distance);
+        }
+        (
+            x + (self.next_f64() - 0.5) * 32.0,
+            z + (self.next_f64() - 0.5) * 32.0,
+        )
+    }
+
+    /// `low..high` 之间的一个刻数。
+    fn ticks_between(&mut self, low: u32, high: u32) -> u32 {
+        low + (self.next_f64() * f64::from(high - low)) as u32
     }
 
     /// 一个不需要额外依赖的确定性伪随机数，只用来挑游走方向。
@@ -219,6 +370,44 @@ mod tests {
             let position = motion.step(0.05);
             let distance = (position.0 - SPAWN.0).hypot(position.2 - SPAWN.2);
             assert!(distance < WANDER_RADIUS + 1.0, "wandered {distance}");
+        }
+    }
+
+    #[test]
+    fn roam_moves_within_the_speed_check_and_lands_at_camps() {
+        let mut motion = Motion::new(Pattern::Roam, Layout::Cluster, 3, 40, 4.3);
+        let mut flights = 0;
+        let mut was_flying = false;
+        for _ in 0..40_000 {
+            let before = motion.position();
+            let after = motion.step(0.05);
+            let (dx, dy, dz) = (after.0 - before.0, after.1 - before.1, after.2 - before.2);
+            assert!(
+                dx * dx + dy * dy + dz * dz < 100.0,
+                "a step under 10 blocks"
+            );
+            let flying = motion.flying();
+            if flying {
+                assert_eq!(after.1, SPAWN.1 + ROAM_FLY_HEIGHT);
+            } else {
+                assert_eq!(after.1, SPAWN.1);
+            }
+            if was_flying && !flying {
+                flights += 1;
+            }
+            was_flying = flying;
+        }
+        assert!(flights >= 5, "flew and landed {flights} times");
+    }
+
+    #[test]
+    fn roam_lingers_where_the_server_put_it() {
+        let mut motion = Motion::new(Pattern::Roam, Layout::Cluster, 0, 1, 4.3);
+        motion.snap_to((5000.5, -60.0, 300.5));
+        for _ in 0..200 {
+            let position = motion.step(0.05);
+            assert!(!motion.flying());
+            assert!((position.0 - 5000.5).hypot(position.2 - 300.5) < ROAM_LINGER_RADIUS + 1.0);
         }
     }
 

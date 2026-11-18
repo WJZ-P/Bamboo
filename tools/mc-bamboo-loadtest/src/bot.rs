@@ -65,12 +65,73 @@ pub enum Outcome {
     Dropped(String),
 }
 
-/// 一名假玩家跑完，返回它的结果。
+/// `roam` 一次在线多久（秒）、断开以后隔多久再连（秒）。
+const ROAM_SESSION_SECS: (u64, u64) = (180, 480);
+const ROAM_REJOIN_SECS: (u64, u64) = (3, 15);
+/// `roam` 隔多久聊一句、发一条命令（秒）。
+const ROAM_CHAT_SECS: (u64, u64) = (20, 60);
+const ROAM_COMMAND_SECS: (u64, u64) = (60, 180);
+
+/// 一名假玩家跑完，返回它的结果。`roam` 一直跑到时长用完：每次在线一段随机的时间就断开、
+/// 过几秒用同一个名字再连（进服失败或者中途掉线都记进统计，然后照样再连）。
+///
+/// Run one bot and return its outcome. A `roam` bot keeps going until the
+/// run ends: after a random time online it disconnects and comes back a few
+/// seconds later under the same name (failed joins and drops are counted and
+/// it reconnects anyway).
 pub async fn run(config: BotConfig) -> Outcome {
-    run_inner(&config).await.unwrap_or_else(|outcome| outcome)
+    if config.pattern != Pattern::Roam {
+        return run_inner(&config, config.stop)
+            .await
+            .unwrap_or_else(|outcome| outcome);
+    }
+    let mut rng = Lcg::new(config.index as u64 ^ 0x5eed);
+    loop {
+        let now = Instant::now();
+        if now >= config.stop {
+            return Outcome::Completed;
+        }
+        let session = Duration::from_secs(rng.between(ROAM_SESSION_SECS));
+        let until = (now + session).min(config.stop);
+        match run_inner(&config, until).await {
+            Ok(_) => {}
+            Err(Outcome::JoinFailed(reason)) => config.stats.login_failure(reason),
+            Err(Outcome::Dropped(reason)) => {
+                config
+                    .stats
+                    .dropped(config.index, config.start.elapsed(), reason)
+            }
+            Err(Outcome::Completed) => {}
+        }
+        let pause = Duration::from_secs(rng.between(ROAM_REJOIN_SECS));
+        let resume = (Instant::now() + pause).min(config.stop);
+        tokio::time::sleep_until(resume.into()).await;
+    }
 }
 
-async fn run_inner(config: &BotConfig) -> Result<Outcome, Outcome> {
+/// 一个不需要额外依赖的确定性伪随机数，只用来挑时长和聊天对象。
+struct Lcg(u64);
+
+impl Lcg {
+    fn new(seed: u64) -> Self {
+        Self(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1)
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+
+    /// `low..=high` 之间。
+    fn between(&mut self, (low, high): (u64, u64)) -> u64 {
+        low + self.next() % (high - low + 1)
+    }
+}
+
+async fn run_inner(config: &BotConfig, until: Instant) -> Result<Outcome, Outcome> {
     let BotConfig {
         addr,
         index,
@@ -99,7 +160,8 @@ async fn run_inner(config: &BotConfig) -> Result<Outcome, Outcome> {
     stats.connected(start.elapsed(), joined);
 
     let mut motion = Motion::new(*pattern, *layout, *index, *bots, *speed);
-    play(config, &mut connection, &mut motion)
+    motion.reseed(start.elapsed().as_millis() as u64);
+    play(config, &mut connection, &mut motion, until)
         .await
         .map(|()| Outcome::Completed)
         .map_err(Outcome::Dropped)
@@ -239,19 +301,31 @@ async fn play(
     config: &BotConfig,
     connection: &mut Connection,
     motion: &mut Motion,
+    stop: Instant,
 ) -> Result<(), String> {
     let BotConfig {
         pattern,
-        stop,
         stats,
         index,
         chunk_trace,
         view_distance,
+        bots,
+        name_prefix,
+        start,
         ..
     } = config;
+    let stop = &stop;
     let tracing = chunk_trace.as_deref();
     let mut second = Second::default();
-    let mut second_index = 0_u64;
+    // 秒桶按整次运行的起点算，`roam` 重连以后接着原来的编号。
+    // Second buckets count from the start of the whole run, so a `roam`
+    // reconnect continues the numbering.
+    let mut second_index = start.elapsed().as_secs();
+    let roam = *pattern == Pattern::Roam;
+    let mut rng = Lcg::new((*index as u64) << 20 ^ second_index);
+    let mut next_chat = Instant::now() + Duration::from_secs(rng.between(ROAM_CHAT_SECS));
+    let mut next_command = Instant::now() + Duration::from_secs(rng.between(ROAM_COMMAND_SECS));
+    let mut chats = 0_u64;
     // 客户端主动发的 ping 用负数 id，不会和服务端心跳的 id 撞上。
     let mut ping_id = -1_i64;
     let mut pending: HashMap<i64, Instant> = HashMap::new();
@@ -333,7 +407,7 @@ async fn play(
             if let Some(trace) = tracing {
                 trace.tick(*index, now, position, motion.direction(), *view_distance);
             }
-            let on_ground = !pattern.needs_flying();
+            let on_ground = !motion.flying();
             let batch = [
                 wire::move_player_pos_frame(position, on_ground),
                 wire::client_tick_end_frame(),
@@ -342,7 +416,40 @@ async fn play(
             let bytes = connection.write(&batch).await?;
             second.bytes_out += bytes;
             second.packets_out += 2;
-            if !flying && pattern.needs_flying() && ticks_sent >= 2 {
+            if roam {
+                // 起飞、落地时报一次飞行状态；聊天和命令按各自的随机间隔。
+                // Report flying on take-off and landing; chat and commands
+                // on their own random intervals.
+                if motion.flying() != flying {
+                    flying = motion.flying();
+                    let flags = if flying { ABILITY_FLYING } else { 0 };
+                    second.bytes_out += connection
+                        .write(&wire::player_abilities_frame(flags))
+                        .await?;
+                    second.packets_out += 1;
+                }
+                if now >= next_chat {
+                    chats += 1;
+                    second.bytes_out += connection
+                        .write(&wire::chat_frame(&format!("roaming {index} #{chats}")))
+                        .await?;
+                    second.packets_out += 1;
+                    next_chat = now + Duration::from_secs(rng.between(ROAM_CHAT_SECS));
+                }
+                if now >= next_command {
+                    let other = rng.between((0, (*bots).max(1) as u64 - 1));
+                    let command = match rng.between((0, 2)) {
+                        0 => format!("msg {name_prefix}{other:04} hello from {index}"),
+                        1 => "list".to_owned(),
+                        _ => "me waves".to_owned(),
+                    };
+                    second.bytes_out += connection
+                        .write(&wire::chat_command_frame(&command))
+                        .await?;
+                    second.packets_out += 1;
+                    next_command = now + Duration::from_secs(rng.between(ROAM_COMMAND_SECS));
+                }
+            } else if !flying && pattern.needs_flying() && ticks_sent >= 2 {
                 // 服务端按创造模式允许飞行；先上报正在飞，避免飞行踢。
                 let bytes = connection
                     .write(&wire::player_abilities_frame(ABILITY_FLYING))
