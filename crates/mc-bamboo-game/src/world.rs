@@ -2192,7 +2192,7 @@ impl World {
                 // Commands touching blocks, containers or entities, or reading
                 // the block under a target, need the whole world; the rest only
                 // borrow players (plan 4.5).
-                let borrow = command::borrow_for(&command);
+                let borrow = command::borrow_for_player(self.region_of(island), player, &command);
                 self.with_players(island, borrow, |port, region| {
                     command::on_player_command(port, region, player, &command, signed.as_ref());
                 });

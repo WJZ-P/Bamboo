@@ -476,6 +476,15 @@ fn run_on_time(seed: u64, lend_nothing: bool) {
                     20,
                     Act::Command(0, "random value 1..1000000 minecraft:shared"),
                 ),
+                // 命令生成的实体落在别的岛上（取发起人岛的实体种子源，两边对齐过）。
+                // Entities spawned by commands onto other islands (from the
+                // sender island's seed source, aligned on both sides).
+                (21, Act::Command(0, "summon minecraft:cow {c1}")),
+                (
+                    22,
+                    Act::Command(0, "loot spawn {c2} loot minecraft:blocks/diamond_ore"),
+                ),
+                (23, Act::Console("gamemode survival @a")),
             ];
             let (mut lockstep, mut hybrid) =
                 set_up_pair(seed, Harness::new_islands(2, 0), Harness::new_islands(2, 4));
@@ -548,6 +557,31 @@ fn run_on_time(seed: u64, lend_nothing: bool) {
                         .collect::<Vec<_>>()
                 );
                 hybrid.server.world.assert_island_invariants();
+            }
+            // 命令生成的实体真的落在了别的岛上：牛在第 1 组的岛上，掉落物在第 2 组的岛上。
+            // The spawned entities really landed on other islands.
+            let kinds = |scene: &mut Scene, group: usize| -> (usize, usize) {
+                let id = island_of_group(scene, group);
+                let island = scene.server.world.islands.get(id).expect("停放着");
+                island
+                    .region
+                    .entities
+                    .iter_public()
+                    .fold((0, 0), |(mobs, items), public| match public.kind {
+                        mc_bamboo_blocks::entity::KindPublic::Mob(_) => (mobs + 1, items),
+                        mc_bamboo_blocks::entity::KindPublic::Item { .. } => (mobs, items + 1),
+                        _ => (mobs, items),
+                    })
+            };
+            if !lend_nothing {
+                assert!(
+                    kinds(&mut hybrid, 1).0 >= 1,
+                    "seed {seed}：牛在第 1 组的岛上"
+                );
+                assert!(
+                    kinds(&mut hybrid, 2).1 >= 1,
+                    "seed {seed}：掉落物在第 2 组的岛上"
+                );
             }
         }
     }

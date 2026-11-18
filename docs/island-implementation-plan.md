@@ -315,7 +315,7 @@
 | 整个世界 `World` | `setblock`、`fill`、`clone`、`summon`、`loot`、`gamemode`、`defaultgamemode` | 拼 → 做 → 拆 |
 | 只碰玩家和全局状态 `Players` | 其余 45 个 | 照旧只借玩家（逐个文件核过：只读写 `players` / `links` / `global` / 管理名单 / 发起人岛的随机源，见下） |
 
-`Players` 这一栏是按代码核的：`command/*.rs` 里只有 `blocks.rs`、`clone.rs`、`summon.rs`、`loot.rs` 用 `block_level`、`containers`、`entities`、`block_items`、`command_blocks`，`players.rs` 的 `apply_mode`（`/gamemode`、`/defaultgamemode` 和改模式包）读 `chunks`。改模式包只改发起人自己，他在自己的岛上，不用拼。新加的命令不在表里时测试失败；拿不准的归 `World`。解析失败的命令只发反馈，不拼。
+`Players` 这一栏是按代码核的：`command/*.rs` 里只有 `blocks.rs`、`clone.rs`、`summon.rs`、`loot.rs` 用 `block_level`、`containers`、`entities`、`block_items`、`command_blocks`，`players.rs` 的 `apply_mode`（`/gamemode`、`/defaultgamemode` 和改模式包）读 `chunks`。改模式包只改发起人自己，他在自己的岛上，不用拼。新加的命令不在表里时测试失败；拿不准的归 `World`。范围只看第一个词，所以另加一道：发起人的权限等级不够用这个顶层字面量时（解析一定失败、只发一条和方块无关的反馈）不拼，只借玩家（`command::borrow_for`），没有权限的玩家打 `/setblock` 不能让全服顿一下。有权限、但后面写错了的命令照样拼一次（只有 OP 能触发）。
 
 **为什么不是每条命令都拼**：拼和拆各扫一遍全部岛的表（第 9 步微基准：1000 个区块合 1.7–1.9 ms、拆 3.7–4.2 ms），`/msg`、`/me`、`/list` 是没有权限的玩家也能发的，每条都拼等于让任何人随手让全服顿一下。
 
@@ -340,9 +340,12 @@
 | 只碰玩家的命令不拼；拼完每个岛还是原来那个 | `joining_for_a_command_leaves_every_island_as_it_was`：`/msg`、`/list`、`/give`、`/time` 之后拼的次数是 0；两条 `/setblock` 之后是 2，每个岛的编号、区块、玩家、四个随机源的状态、信箱里的位置都和之前相同 | — |
 | 52 个顶层字面量都定了范围 | `command::class::tests::every_root_literal_is_classified_and_registers_matching_actions`（范围表和注册的顶层字面量逐个对上）、`the_scope_of_a_line_follows_its_first_word` | — |
 | 光照任务跟着区块拆合 | `mc-bamboo-world` 的 `queued_light_tasks_travel_with_their_chunks`（不到一轮、超过一轮两种：改完不算就拆、各自算，结果和「变过的段」与不拆直接算相同；两边各自排着任务并起来再算也相同）、`an_island_split_waits_for_a_running_light_round` | 拆分时丢掉排着的任务：失败在「两边都还有没算的光照」 |
-| 混合驱动「都按时 = 齐步」 | `hybrid_with_every_island_on_time_matches_lockstep` 的脚本里加了 `/setblock` 到别的岛、别的岛上的 `/fill`、跨岛 `/clone`、`/gamemode adventure @a`、控制台 `/gamemode` | 原有的 `the_on_time_comparison_catches_a_broken_borrow` |
+| 混合驱动「都按时 = 齐步」 | `hybrid_with_every_island_on_time_matches_lockstep` 的脚本里加了 `/setblock` 到别的岛、别的岛上的 `/fill`、跨岛 `/clone`、`/gamemode adventure @a`、控制台 `/gamemode`，以及（第 10 步 c 段前提复查时补）`/summon` 牛到别的岛、`/loot spawn` 到别的岛、控制台 `/gamemode survival @a`；收尾断言牛和掉落物真的落在了对应的岛上 | 原有的 `the_on_time_comparison_catches_a_broken_borrow` |
+| 没有权限用这条命令的玩家不拼 | `command::class::tests::a_command_the_sender_may_not_use_borrows_only_players`；`joining_for_a_command_leaves_every_island_as_it_was` 里权限等级 0 的玩家发 `/setblock` 以后拼的次数仍是 0 | — |
 
 **控制台**：Bamboo 的控制台来源没有位置，`/setblock`、`/fill`、`/clone`、`/summon`、`/loot` 从控制台发现在报 `permissions.requires.player`（和岛无关，单岛也一样；官方控制台可以用绝对坐标）。所以控制台发起的同类命令里真正执行到的只有 `/gamemode` 和 `/defaultgamemode`；方块类的那几条在对照里验证的是「两边报同样的错」。给控制台补上绝对坐标是命令系统的事，不在这一轮。
+
+**拼和拆的代价（量级，没有另做测量）**：第 9 步的微基准是 1000 个区块合 1.7–1.9 ms、拆 3.7–4.2 ms。拼是每个别的岛并一次，总量和全部已加载区块数成正比；拆是从拼好的 `Region` 里一个一个岛拆出去，按区块分的表只动被拆走的那部分，但有几张表（实体主表、方块实体、计划刻等）每拆一个岛都要扫一遍剩下的全部，岛多时最坏是「岛数 × 区块数」。所以一条 `World` 范围的命令大约是每 1000 个已加载区块 6 ms 起，几万个区块、十几个岛时可以到一两百毫秒，也就是让全服顿几刻。只有 7 个顶层命令（`setblock`、`fill`、`clone`、`summon`、`loot`、`gamemode`、`defaultgamemode`）这样做，而且都要权限等级 2 以上；别的 45 个只借玩家，和以前一样。
 
 **没有的命令**：`/kill`、`/execute`、`/data` 和能选中非玩家实体的 `@e` 现在都不存在（见本节开头），任务书里点名的 `/kill @e`、带 `sort=nearest,limit=` 的 `@e`、`/tp @e`、`/execute as @e at @s run …`、`/execute if block`、`/data get block|entity` 没法测，也没有「悄悄只作用于一部分」的问题（单岛同样选不到）。选择器只选玩家的部分（`@a`、`@p`、带排序和数量上限）照旧借全部玩家，由原有的 `cross_island_commands_and_chat_match_one_island` 覆盖。
 

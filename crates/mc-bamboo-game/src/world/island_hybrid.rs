@@ -462,7 +462,7 @@ impl World {
                 if !self.islands.all_parked() {
                     return wait(Inbound::ConsoleCommand(line));
                 }
-                let borrow = crate::command::borrow_for(&line);
+                let borrow = crate::command::borrow_for_console(&line);
                 self.on_master(HOME_REGION, borrow, |global, region| {
                     crate::command::console::on_console_command(global, region, &line);
                 });

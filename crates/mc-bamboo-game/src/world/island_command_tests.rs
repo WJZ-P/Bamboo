@@ -482,6 +482,30 @@ fn joining_for_a_command_leaves_every_island_as_it_was() {
         scene.server.tick();
         assert_eq!(scene.server.world.islands.unified, 0, "只碰玩家的命令不拼");
         let target = spot(&scene.centers, 2, 4, 1, 4);
+        // 没有权限的玩家发要整个世界的命令：解析一定失败，不拼。
+        // A player without permission sending a whole-world command: it cannot
+        // parse, so nothing is joined.
+        let level = |scene: &mut Scene, value: Option<u8>| -> u8 {
+            let region =
+                super::island_split_tests::region_of_player(&mut scene.server.world, sender.id);
+            let player = region.players.get_mut(&sender.id).expect("在线");
+            let old = player.permission_level;
+            if let Some(value) = value {
+                player.permission_level = value;
+            }
+            old
+        };
+        let op_level = level(&mut scene, Some(mc_bamboo_command::permission::ALL));
+        scene.server.request(
+            &sender,
+            PlayRequest::unsigned_command(format!("setblock {target} minecraft:gold_block")),
+        );
+        scene.server.tick();
+        assert_eq!(
+            scene.server.world.islands.unified, 0,
+            "没有权限的玩家发 /setblock 不拼"
+        );
+        level(&mut scene, Some(op_level));
         scene.server.request(
             &sender,
             PlayRequest::unsigned_command(format!("setblock {target} minecraft:stone")),

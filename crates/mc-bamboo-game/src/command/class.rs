@@ -272,4 +272,37 @@ mod tests {
         assert_eq!(scope_of("  "), CommandScope::Players);
         assert_eq!(scope_of("nosuchcommand 1"), CommandScope::Players);
     }
+
+    /// 要整个世界的命令只在发起人的权限够用它时才借整个世界：不够的解析一定失败，不拼。
+    ///
+    /// A whole-world command borrows the whole world only when the sender may
+    /// use it; otherwise it cannot parse and nothing is joined.
+    #[test]
+    fn a_command_the_sender_may_not_use_borrows_only_players() {
+        use crate::{
+            command::{borrow_for, borrow_for_console},
+            island::Borrow,
+        };
+        use mc_bamboo_command::permission;
+        assert!(matches!(
+            borrow_for("setblock 1 2 3 stone", permission::GAMEMASTERS),
+            Borrow::World
+        ));
+        assert!(matches!(
+            borrow_for("setblock 1 2 3 stone", permission::ALL),
+            Borrow::All
+        ));
+        assert!(matches!(
+            borrow_for("/gamemode creative", permission::ALL),
+            Borrow::All
+        ));
+        assert!(matches!(
+            borrow_for("msg a hi", permission::OWNERS),
+            Borrow::All
+        ));
+        assert!(matches!(
+            borrow_for_console("fill 0 0 0 1 1 1 stone"),
+            Borrow::World
+        ));
+    }
 }
