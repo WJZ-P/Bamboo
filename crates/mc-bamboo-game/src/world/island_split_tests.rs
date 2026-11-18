@@ -757,6 +757,13 @@ pub(super) fn misplaced(
             .any(|public| wrong_chunk(public.chunk_position())),
     );
     check(
+        "SpawnSnapshots",
+        region
+            .entities
+            .spawn_snapshot_positions()
+            .any(|(_, chunk)| wrong_chunk(chunk)),
+    );
+    check(
         "EntityTracking",
         region
             .entity_tracking
@@ -1120,6 +1127,19 @@ fn leaving_any_class_behind_on_a_split_is_reported() {
                 content: vec![inside],
             });
             island.mailbox.queue_reclaim(inside, 1);
+            // 这一刻同步之后才生成的实体：生成快照还没交给同步层。
+            // An entity spawned after this tick's sync: its spawn snapshot is pending.
+            island
+                .region
+                .entities
+                .spawn(mc_bamboo_blocks::entity::Entity::ground_item(
+                    mc_bamboo_core::Vec3::new(
+                        f64::from(inside.x * 16) + 4.5,
+                        f64::from(Y + 1),
+                        f64::from(inside.z * 16) + 4.5,
+                    ),
+                    mc_bamboo_protocol::item::ItemStack::new(1, 1),
+                ));
 
             island
                 .region

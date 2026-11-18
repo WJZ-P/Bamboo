@@ -441,10 +441,10 @@ fn runtime_splits_and_merges_keep_every_group_as_on_one_island() {
     });
 }
 
-/// 改坏确认：运行时拆岛漏搬任何一类（23 类），按组拼指纹时都要报出来（那一组的东西
+/// 改坏确认：运行时拆岛漏搬任何一类（24 类），按组拼指纹时都要报出来（那一组的东西
 /// 留在了别的岛上），或者之后某一刻的内容对不上。
 ///
-/// Break-it check: leaving any of the 23 classes behind on a run-time split
+/// Break-it check: leaving any of the 24 classes behind on a run-time split
 /// must be caught (that group's content stays on another island) or show
 /// up as a content difference later.
 #[test]

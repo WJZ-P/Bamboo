@@ -126,6 +126,9 @@ pub(crate) enum IslandPart {
     Books,
     /// 实体表。
     Entities,
+    /// 实体表里还没交给同步层的生成快照（这一刻同步之后才生成的实体，下一刻按它建
+    /// 跟踪状态）。跟着实体走。
+    SpawnSnapshots,
     /// 实体和玩家的配对。
     EntityTracking,
     /// 上层内容的待存标记。
@@ -155,7 +158,7 @@ pub(crate) enum IslandPart {
 impl IslandPart {
     /// 全部类别，测试逐类改坏用。
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 23] = [
+    pub(crate) const ALL: [Self; 24] = [
         Self::Chunks,
         Self::TickLevels,
         Self::BlockTicks,
@@ -167,6 +170,7 @@ impl IslandPart {
         Self::CommandBlocks,
         Self::Books,
         Self::Entities,
+        Self::SpawnSnapshots,
         Self::EntityTracking,
         Self::Dirty,
         Self::LightChanges,
@@ -361,13 +365,16 @@ impl Region {
         } else {
             BTreeMap::new()
         };
-        let entities = if moves(IslandPart::Entities) {
+        let mut entities = if moves(IslandPart::Entities) {
             self.entities
                 .split_off(chunks)
                 .unwrap_or_else(|_| unreachable!("前提已经检查过"))
         } else {
             Entities::with_ids(self.entities.ids_handle().clone())
         };
+        if !moves(IslandPart::SpawnSnapshots) {
+            self.entities.reclaim_spawn_snapshots(&mut entities);
+        }
         let moved_entities: BTreeSet<i32> = entities.ids().into_iter().collect();
         let entity_tracking = if moves(IslandPart::EntityTracking) {
             self.entity_tracking.split_off(&moved_entities, players)

@@ -1262,6 +1262,24 @@ impl EntityStore {
             watched_sections: self.watched_sections.clone(),
             ..Self::default()
         };
+        // 还没交给同步层的生成快照跟着实体走：同步层在实体所在的岛上按它建跟踪状态。
+        // 实体已经不在表里的快照按快照里的位置分。
+        // Spawn snapshots not yet handed to the sync layer follow their entity,
+        // whose island builds the tracking state from them; snapshots of
+        // entities no longer in the table split by their own position.
+        let snapshots = std::mem::take(&mut self.spawn_snapshots);
+        for (uid, public) in snapshots {
+            let goes = if self.index.contains_key(&uid) {
+                moved.binary_search(&uid).is_ok()
+            } else {
+                chunks.contains(&public.chunk_position())
+            };
+            if goes {
+                out.spawn_snapshots.insert(uid, public);
+            } else {
+                self.spawn_snapshots.insert(uid, public);
+            }
+        }
         for uid in moved {
             self.unindex_sub(uid);
             let row = self.index.remove(&uid).expect("just indexed");
@@ -1309,6 +1327,30 @@ impl EntityStore {
         self.preserved.append(&mut other.preserved);
         self.watched_sections.extend(other.watched_sections);
         self.wake_events.append(&mut other.wake_events);
+        for (uid, public) in std::mem::take(&mut other.spawn_snapshots) {
+            let previous = self.spawn_snapshots.insert(uid, public);
+            debug_assert!(previous.is_none(), "生成快照的实体 ID 重复");
+        }
+    }
+
+    /// 还没交给同步层的生成快照：实体 ID 和快照所在的区块，uid 升序。拆合核对用。
+    ///
+    /// Spawn snapshots not yet handed to the sync layer, as uid and the
+    /// snapshot's chunk in ascending uid order; for split checks.
+    pub fn spawn_snapshot_positions(&self) -> impl Iterator<Item = (EntityUid, ChunkPos)> + '_ {
+        self.spawn_snapshots
+            .iter()
+            .map(|(&uid, public)| (uid, public.chunk_position()))
+    }
+
+    /// 改坏确认专用：把 `other` 的生成快照全部挪回自己（模拟拆分时漏搬这一类）。
+    ///
+    /// Break-it checks only: move all of `other`'s spawn snapshots back here,
+    /// simulating a split that leaves this class behind.
+    #[doc(hidden)]
+    pub fn reclaim_spawn_snapshots(&mut self, other: &mut Self) {
+        self.spawn_snapshots
+            .append(&mut std::mem::take(&mut other.spawn_snapshots));
     }
 
     /// 把盒子里的实体放回表里。调用方保证表里已经没有这个区块的实体。
