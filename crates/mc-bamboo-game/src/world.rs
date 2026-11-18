@@ -293,6 +293,18 @@ pub(crate) struct Master {
     /// waiting for the old island to clear their view and pairings, with the
     /// tick (`director_tick`) the wait began.
     transit: std::collections::BTreeMap<PlayerId, u64>,
+    /// 混合驱动的状态（计划 5.5）：每个不在手里的岛的出站队列、排着队的事、正在进服的
+    /// 玩家、留给不在的岛的存盘名单等。别的驱动下一直是空的。
+    ///
+    /// The hybrid drive's state (plan 5.5): the outbound queue of every island
+    /// that is away, held work, players still joining, save lists kept for
+    /// absent islands, and so on. Always empty under the other drives.
+    pub(crate) hybrid: island_hybrid::HybridState,
+    /// 家岛不在主控手里时，主控这一段的剖析记到这里（不进报告）；打报告的那份跟着家岛。
+    ///
+    /// Where the master's profiling goes while the home island is away (not
+    /// reported); the reporting profiler travels with the home island.
+    spare_profiler: Box<crate::profiler::Profiler>,
     /// 测试专用：运行时拆岛时故意漏搬这一类（改坏确认）。
     #[cfg(test)]
     pub(crate) split_skip: Option<crate::region::IslandPart>,
@@ -480,6 +492,8 @@ impl World {
                 posted_scratch: Vec::new(),
                 islands_mode: config.islands && !infinite_flat,
                 transit: std::collections::BTreeMap::new(),
+                hybrid: island_hybrid::HybridState::default(),
+                spare_profiler: Box::default(),
                 #[cfg(test)]
                 split_skip: None,
                 #[cfg(test)]
@@ -574,6 +588,7 @@ impl World {
         // all startup data is applied so the restored game time is picked up.
         let time = world.master.global.time();
         world.islands.region.start_clock(time);
+        world.master.hybrid.max_players = world.islands.region.max_players();
         world.master.global.publish(&mut world.islands.region);
         world.islands.region.profiler.on_world_start();
         world
@@ -609,6 +624,11 @@ impl World {
     /// 集成测试和 oracle 用；不要在生产代码里调用。
     pub fn new_infinite_flat_for_tests(config: WorldConfig, inbox: InboundReceiver) -> Self {
         Self::build(config, inbox, secure_chat::empty_keys(), None, true)
+    }
+
+    /// 打报告的剖析器（见 [`report_profiler`]）。
+    fn profiler(&mut self) -> &mut crate::profiler::Profiler {
+        report_profiler(&mut self.islands, &mut self.master.spare_profiler)
     }
 
     /// 票表的只读视图，给测试核对玩家票和等级用。
@@ -658,9 +678,12 @@ impl World {
         let mut changed = false;
         // 所有岛上的玩家按编号排（只有一个岛时就是那个岛的玩家表的顺序）。
         // Every island's players by id (one island: its own table order).
+        // 混合驱动下只看停放着的岛；不在主控手里的岛上的玩家这一刻不动票。
+        // Under the hybrid drive only parked islands are read; players on
+        // islands that are away keep their tickets this tick.
         let mut players: Vec<(PlayerId, ChunkPos)> = self
             .islands
-            .iter()
+            .parked()
             .flat_map(|island| {
                 island
                     .region
@@ -686,12 +709,15 @@ impl World {
                 to: Some(at),
             });
         }
+        // 票还在、人不在了的才算离开：不在主控手里的岛上的玩家和正在进服（票已经挂上、
+        // 目标岛还没停放）的玩家都还在（计划 5.5.2）。
+        // Only players who are really gone count as left: players on islands
+        // that are away and players still joining (ticket placed, target
+        // island not parked yet) are present (plan 5.5.2).
+        let online = self.islands.player_ids();
         let mut left = Vec::new();
         for &id in self.master.ticket_centers.keys() {
-            if players
-                .binary_search_by_key(&id, |&(player, _)| player)
-                .is_err()
-            {
+            if online.binary_search(&id).is_err() && !self.master.hybrid.joining.contains(&id) {
                 left.push(id);
             }
         }
@@ -750,9 +776,10 @@ impl World {
     /// 分区器这一刻收尾，统计写进岛的剖析器（打报告的那份）。
     fn finish_partition_tick(&mut self) {
         if self.master.host.islands_enabled() {
-            self.master
-                .host
-                .finish_island_tick(&mut self.islands.region.profiler, self.master.director_tick);
+            self.master.host.finish_island_tick(
+                report_profiler(&mut self.islands, &mut self.master.spare_profiler),
+                self.master.director_tick,
+            );
         }
     }
 
@@ -771,20 +798,29 @@ impl World {
             return;
         }
         let mut timing = WallTiming;
-        let mut schedule = Schedule::starting_at(self.islands.region.profiler.now());
+        let mut schedule = Schedule::starting_at(self.profiler().now());
+        // 混合驱动（计划 5.5）：每刻只等岛到这一刻按计划的开始时刻 + 50 ms；主控自己
+        // 落后了不连续补刻。
+        // The hybrid drive (plan 5.5): each tick waits for islands only until
+        // its scheduled start + 50 ms, and the master does not catch up.
+        let hybrid = self.hybrid();
         loop {
             let expected = schedule.expected_start();
-            let actual = self.islands.region.profiler.now();
+            self.master.hybrid.deadline = hybrid.then(|| expected + TICK);
+            let actual = self.profiler().now();
             let skipped = schedule.skipped_catch_up();
             let catch_up = schedule.catching_up();
-            self.islands
-                .region
-                .profiler
+            self.profiler()
                 .begin_scheduled_tick(expected, actual, skipped, catch_up);
             if self.tick().is_break() {
                 break;
             }
-            schedule.after_tick(self.islands.region.profiler.now());
+            let now = self.profiler().now();
+            if hybrid {
+                schedule.after_tick_without_catch_up(now);
+            } else {
+                schedule.after_tick(now);
+            }
             self.master
                 .pacer
                 .wait_until(schedule.deadline(), &mut timing);
@@ -800,7 +836,7 @@ impl World {
     pub fn tick_unpaced(&mut self) -> usize {
         let _ = self.tick();
         self.islands
-            .iter()
+            .parked()
             .map(|island| island.mailbox.counters_this_tick().0)
             .sum()
     }
@@ -863,21 +899,23 @@ impl World {
     /// forget 后面，每个区块的光照变化紧挨在它的方块变化前面，方块变化排在 ack 前面，
     /// 区块批次放在最后，这样发出去的内容是这一 tick 结束时的世界。
     fn tick(&mut self) -> ControlFlow<()> {
-        self.islands.region.profiler.begin_tick();
+        self.profiler().begin_tick();
         self.master.island_wait = Duration::ZERO;
         self.record_tick_counts();
         let flow = self.tick_phases();
-        // 关服时没等到卡住的岛：剖析器跟着岛走了，这一刻不再收尾。
-        // Shut down without a stuck island: its profiler went with it.
-        if !self.islands.all_parked() {
+        // 家岛不在主控手里（关服时没等到卡住的岛，或者混合驱动下它落后了）：剖析器跟着岛
+        // 走了，这一刻不再收尾。
+        // The home island is away (stuck at shutdown, or lagging under the
+        // hybrid drive): its profiler went with it.
+        if !self.islands.is_home() {
             return flow;
         }
         // 三阶段这一刻的耗时由 `lap` 顺手记下，划分统计拿它当尾段占比的分母。
         // 开关关着时这里只判一次布尔值。
-        if self.islands.region.profiler.partition_enabled() {
-            let three = self.islands.region.profiler.three_phase_nanos_this_tick();
-            let total = self.islands.region.profiler.all_phase_nanos_this_tick();
-            if let Some(stats) = self.islands.region.profiler.partition_stats_mut() {
+        if self.profiler().partition_enabled() {
+            let three = self.profiler().three_phase_nanos_this_tick();
+            let total = self.profiler().all_phase_nanos_this_tick();
+            if let Some(stats) = self.profiler().partition_stats_mut() {
                 stats.finish_tick(three, total);
             }
         }
@@ -898,7 +936,7 @@ impl World {
                 .saturating_sub(self.master.island_wait);
             profiler.record_duration(Metric::MasterBusy, busy);
         }
-        self.islands.region.profiler.end_tick();
+        self.profiler().end_tick();
         flow
     }
 
@@ -909,7 +947,7 @@ impl World {
         // 多岛时是全部岛的合计。
         // The sum over every island with several.
         let (mut players, mut entities, mut due, mut loaded) = (0, 0, 0, 0);
-        for island in self.islands.iter() {
+        for island in self.islands.parked() {
             let region = &island.region;
             let next_time = region.tick.game_time() + 1;
             due += region
@@ -926,7 +964,7 @@ impl World {
             entities += region.entities.len();
             loaded += region.chunks.loaded_count().unwrap_or(0);
         }
-        let profiler = &mut self.islands.region.profiler;
+        let profiler = self.profiler();
         profiler.record(Metric::OnlinePlayers, players as u64);
         profiler.record(Metric::Entities, entities as u64);
         profiler.record(Metric::DueScheduledTicks, due as u64);
@@ -938,6 +976,11 @@ impl World {
         let Some(hooks) = self.master.bench_hooks else {
             return;
         };
+        // 压测回调直接改家岛；它不在主控手里的这一刻跳过。
+        // The hooks edit the home island directly; skip while it is away.
+        if !self.islands.is_home() {
+            return;
+        }
         let ready = self.master.bench_ready;
         let finished = {
             let mut bench = crate::bench::BenchWorld::new(self);
@@ -983,8 +1026,14 @@ impl World {
     /// written only while the island is parked, so they never race the
     /// island's, and part 3's frames go out in the same flush (plan 4.3).
     fn tick_phases(&mut self) -> ControlFlow<()> {
+        let hybrid = self.hybrid();
+        if hybrid {
+            // 混合驱动第 ⓪ 段：收下已经交回的岛（计划 5.5.1）。
+            // Hybrid part 0: take in the islands that are back (plan 5.5.1).
+            self.begin_hybrid_tick()?;
+        }
         self.master.host.begin_tick();
-        for island in self.islands.iter_mut() {
+        for island in self.islands.parked_mut() {
             island.mailbox.begin_tick();
         }
         let detached = self.master.drive == IslandDrive::Detached;
@@ -992,23 +1041,31 @@ impl World {
             self.start_island_ticks();
         }
         self.inbound_phase()?;
-        if detached {
+        if hybrid {
             self.advance_world_clock();
-            self.islands.region.profiler.lap(Phase::WeatherAndTime);
+            self.profiler().lap(Phase::WeatherAndTime);
+            self.run_hybrid_round()?;
+            self.finish_tick()?;
+            // 第 ④ 段：还欠刻的岛在剩下的时间里追赶。
+            // Part 4: islands that owe ticks catch up in the time left.
+            return self.catch_up();
+        } else if detached {
+            self.advance_world_clock();
+            self.profiler().lap(Phase::WeatherAndTime);
             self.run_detached_tick()?;
         } else {
             self.tick_ticket_timeouts();
             self.record_delivery_metrics();
-            self.islands.region.profiler.lap(Phase::Delivery);
+            self.profiler().lap(Phase::Delivery);
             for island in self.islands.iter_mut() {
                 light_updates::run_light_updates(&mut island.region);
             }
-            self.islands.region.profiler.lap(Phase::LightUpdates);
+            self.profiler().lap(Phase::LightUpdates);
             self.advance_world_clock();
             for island in self.islands.iter_mut() {
                 island.region.advance_tick();
             }
-            self.islands.region.profiler.lap(Phase::WeatherAndTime);
+            self.profiler().lap(Phase::WeatherAndTime);
             if self.islands.several() {
                 // 齐步多岛：按编号一个接一个跑完各岛的一刻（单线程，确定的先后）。主控的
                 // 全局改动和延迟广播交回时再做，扇出给所有岛。
@@ -1081,7 +1138,7 @@ impl World {
         self.run_bench_hooks();
         self.consume_save_commands();
         self.sync_player_tickets();
-        self.islands.region.profiler.lap(Phase::Inbox);
+        self.profiler().lap(Phase::Inbox);
         ControlFlow::Continue(())
     }
 
@@ -1089,21 +1146,18 @@ impl World {
     fn record_delivery_metrics(&mut self) {
         let (delivered, reclaimed) = self
             .islands
-            .iter()
+            .parked()
             .map(|island| island.mailbox.counters_this_tick())
             .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
-        let profiler = &mut self.islands.region.profiler;
+        let parked = self.master.host.parked_count() as u64;
+        let in_pool = self.master.host.compute_in_pool() as u64;
+        let backlog = self.master.host.compute_backlog() as u64;
+        let profiler = self.profiler();
         profiler.record(Metric::ChunksDelivered, delivered as u64);
         profiler.record(Metric::ChunksReclaimed, reclaimed as u64);
-        profiler.record(Metric::ParkedChunks, self.master.host.parked_count() as u64);
-        profiler.record(
-            Metric::ComputeInFlight,
-            self.master.host.compute_in_pool() as u64,
-        );
-        profiler.record(
-            Metric::ComputeBacklog,
-            self.master.host.compute_backlog() as u64,
-        );
+        profiler.record(Metric::ParkedChunks, parked);
+        profiler.record(Metric::ComputeInFlight, in_pool);
+        profiler.record(Metric::ComputeBacklog, backlog);
     }
 
     /// 世界边界、天气和时间推进一刻，前后各发布一次快照。
@@ -1142,7 +1196,10 @@ impl World {
     ///
     /// Publish the global snapshot to every island (once with one island).
     fn publish_global(&mut self) {
-        for island in self.islands.iter_mut() {
+        // 混合驱动下只发给停放着的岛；岛每次派出之前都会再发一次（计划 5.5.5）。
+        // Under the hybrid drive only parked islands get it; every island is
+        // published to again right before it is dispatched (plan 5.5.5).
+        for island in self.islands.parked_mut() {
             self.master.global.publish(&mut island.region);
         }
     }
@@ -1152,8 +1209,14 @@ impl World {
     /// Broadcast a master frame to every player on every island (the islands
     /// are parked, so this equals each island taking the outbound letter).
     fn broadcast_all(&mut self, frames: &[u8]) {
-        for island in self.islands.iter_mut() {
+        for island in self.islands.parked_mut() {
             island.region.links.broadcast(frames);
+        }
+        // 不在主控手里的岛：进它的出站队列，落地时发（计划 5.5.5）。
+        // Islands that are away: queued, sent when they land (plan 5.5.5).
+        let away = self.islands.away_ids();
+        if !away.is_empty() {
+            self.post_fan_out(&away, vec![crate::links::FanOut::All(frames.into())]);
         }
     }
 
@@ -1191,12 +1254,36 @@ impl World {
             let region = &mut self.islands.get_mut(into).expect("岛在表里").region;
             return work(&mut self.master.global, region);
         }
+        // 混合驱动下有的岛可能不在主控手里（计划 5.5.2）：只借停放着的岛，给不在的岛的那
+        // 一份（给所有人的帧、要逐个接收者判断的投递）按先后收集下来，做完进它们的出站
+        // 队列。必须看得见全部玩家的事（命令、改规则包、控制台）由调用方先等全部岛停放
+        // （[`Self::try_held`]），到这里时没有不在的岛。
+        // Under the hybrid drive some islands may be away (plan 5.5.2): only
+        // parked islands lend their players, and the share of the absent ones
+        // (frames for everyone, deliveries decided per receiver) is collected
+        // in order and queued for them afterwards. Work that must see every
+        // player (commands, game-rule packets, the console) waits for every
+        // island before coming here ([`Self::try_held`]).
+        let away = match borrow {
+            Borrow::All => self.islands.away_ids(),
+            Borrow::PlayersOf(_) => Vec::new(),
+        };
         let gathered = self.islands.gather(into, &borrow);
+        let absent = self.islands.away_players();
         let region = &mut self.islands.get_mut(into).expect("岛在表里").region;
+        if !away.is_empty() {
+            region.links.begin_fan_out(absent);
+        }
         let out = work(&mut self.master.global, region);
+        let fan_out = if away.is_empty() {
+            Vec::new()
+        } else {
+            region.links.end_fan_out()
+        };
         self.islands.scatter(into, gathered);
         self.publish_global();
         self.move_stray_entities(into);
+        self.post_fan_out(&away, fan_out);
         out
     }
 
@@ -1289,7 +1376,7 @@ impl World {
             std::panic::resume_unwind(payload);
         }
         self.master.island_wait = resumed.saturating_duration_since(master_done);
-        let profiler = &mut self.islands.region.profiler;
+        let profiler = &mut self.profiler();
         profiler.restart_lap();
         let director = master_done.saturating_duration_since(master_started);
         profiler.record_phase(
@@ -1361,6 +1448,10 @@ impl World {
         // Lockstep with one island already sent the latency update in place.
         let latency_here = detached || self.islands.several();
         self.hand_back();
+        // 混合驱动：这一轮的岛落地以后，排着队的事能做的先做（都按时的时候队列是空的）。
+        // Hybrid: once this round's islands have landed, run what was held
+        // (nothing is held when every island is on time).
+        self.drain_held();
         if latency_here {
             // 延迟广播是主控的帧：齐步时在岛的同步阶段里原位发；分离时岛交回之后发，
             // 和这一刻岛写的帧同一次刷出。多岛时发给所有岛。
@@ -1373,14 +1464,11 @@ impl World {
         }
         let flush_bytes: u64 = self
             .islands
-            .iter_mut()
+            .parked_mut()
             .map(|island| island.region.links.flush())
             .sum();
-        self.islands
-            .region
-            .profiler
-            .record(Metric::FlushBytes, flush_bytes);
-        self.islands.region.profiler.lap(Phase::Flush);
+        self.profiler().record(Metric::FlushBytes, flush_bytes);
+        self.profiler().lap(Phase::Flush);
         // 运行中每 6000 tick 自动保存一次（官方 `autoSave`，`save-on` 控制开关）。
         // Run-time autosave every 6000 ticks (official `autoSave`, gated by save-on).
         if self.master.director_tick > 0
@@ -1391,19 +1479,9 @@ impl World {
                 .as_ref()
                 .is_some_and(|save| save.auto_save())
         {
-            // 自动保存照官方 autoSave：只入队，不 join、不排阻塞栅栏（R5 / F3）。
-            // Autosave like official autoSave: enqueue only, never join or block.
-            self.save_all_players();
-            let files = self
-                .master
-                .save
-                .as_mut()
-                .map(|save| save.encode_saves(&self.master.global, crate::admin::now_millis()));
-            match files {
-                Some(Ok(files)) => self.master.host.submit_file_writes(files),
-                Some(Err(error)) => warn!(%error, "could not encode level data for autosave"),
-                None => {}
-            }
+            // 混合驱动下有岛不在主控手里时，等全部岛停放再存（计划 5.5.5）。
+            // Under the hybrid drive, wait for every island when some are away (plan 5.5.5).
+            self.run_or_hold(Box::new(Self::autosave));
         }
         // 运行中匀速给仍加载的脏区块拍快照写盘（D6），`save-off` 时停。
         // 区块平时由这条平摊的 IO 保存，不再等 6000 刻集中刷，世界线程也不等待。
@@ -1428,32 +1506,35 @@ impl World {
                 // the last hand-back and took the new changes; the master takes
                 // the snapshots, judges, and gives the next list (with several
                 // islands the reports are joined and the list split by island).
-                let mut report = crate::island::SaveReport::default();
-                for island in self.islands.iter_mut() {
+                // 混合驱动下：落后的岛落地时交出来、存在主控手里的报告先接上；名单里归属
+                // 的岛不在主控手里的那部分留着，等它落地（计划 5.5.5）。
+                // Under the hybrid drive the reports stashed when lagging islands
+                // landed come first, and the part of the list owned by islands
+                // that are away is kept until they land (plan 5.5.5).
+                let mut report = std::mem::take(&mut self.master.hybrid.reports);
+                for island in self.islands.parked_mut() {
                     report.absorb(std::mem::take(&mut island.save_report));
                 }
                 let plan =
                     self.master
                         .host
                         .plan_saves(report, self.master.director_tick, save_enabled);
-                let mut islands = self.islands.all_mut();
-                let plans = crate::director_host::split_plan(&islands, plan);
-                for (island, plan) in islands.iter_mut().zip(plans) {
-                    island.save_plan = plan;
-                }
+                self.assign_save_plan(plan);
                 for (flush, source) in std::mem::take(&mut self.master.deferred_save_all) {
-                    self.save_all(flush, source);
+                    self.run_or_hold(Box::new(move |world: &mut Self| {
+                        world.save_all(flush, source);
+                    }));
                 }
             }
         }
         if self.master.global.admin.stop_requested {
             let flow = self.shut_down();
-            self.islands.region.profiler.lap(Phase::TickTail);
+            self.profiler().lap(Phase::TickTail);
             return flow;
         }
         // 名单变更在这一 tick 末尾统一发布：一条命令改多个目标只写一次盘。
-        let mut changes = crate::admin::AdminChanges::default();
-        for island in self.islands.iter_mut() {
+        let mut changes = std::mem::take(&mut self.master.hybrid.admin);
+        for island in self.islands.parked_mut() {
             changes.merge(crate::command::admin::take_changes(&mut island.region));
         }
         if changes.any() {
@@ -1463,7 +1544,7 @@ impl World {
         // This tick's structural changes and island crossings, once every
         // island is parked and handed back (the only point under the detached drive).
         self.settle_islands();
-        self.islands.region.profiler.lap(Phase::TickTail);
+        self.profiler().lap(Phase::TickTail);
         ControlFlow::Continue(())
     }
 
@@ -1509,7 +1590,11 @@ impl World {
                 request.inbox.drain_into(&mut players);
             }
         }
-        for island in self.islands.iter() {
+        // 只取停放着的岛上的玩家队列：不在主控手里的岛上的玩家的消息留在队列里，岛落地
+        // 以后再取（计划 5.5.2）。
+        // Only queues of players on parked islands are drained; messages of
+        // players on islands that are away wait in their queues (plan 5.5.2).
+        for island in self.islands.parked() {
             for player in island.region.players.values() {
                 player.inbox.drain_into(&mut players);
             }
@@ -1527,45 +1612,24 @@ impl World {
         // 先全部取出再处理：配额要处理完才归还，连接任务补不进新消息，所以这一步一定会结束。
         let (messages, disconnected) = self.collect_inbound();
 
-        self.islands
-            .region
-            .profiler
+        self.profiler()
             .record(Metric::InboundMessages, messages.len() as u64);
         for Sequenced { message, .. } in messages {
-            match message {
-                Inbound::Join(request) => self.on_join(*request),
-                Inbound::Request {
-                    player,
-                    request,
-                    in_flight,
-                } => {
-                    self.on_request(player, request);
-                    drop(in_flight);
-                    // 玩家请求只经端口写全局状态，端口应用时自己重发快照。
-                    // Player requests write global state only through the port,
-                    // which republishes the snapshot itself when applying.
-                    continue;
-                }
-                Inbound::Latency { player, millis } => {
-                    self.master.global.set_latency(player, millis)
-                }
-                Inbound::Leave { player } => self.on_leave(player),
-                Inbound::WhitelistReload(reload) => {
-                    self.master.global.admin.whitelist = reload.entries;
-                    self.on_master(HOME_REGION, Borrow::All, |global, region| {
-                        crate::command::admin::after_reload(global, region);
-                    });
-                }
-                // 连接层的控制台线程读到的命令，在世界线程里用服务器控制台来源执行。
-                // 控制台没有岛，在主控上执行，别的岛上的玩家借到家岛上（计划 4.4）。
-                // A console line read by the connection layer runs here with the
-                // server-console source, on the master with every player borrowed (plan 4.4).
-                Inbound::ConsoleCommand(line) => {
-                    self.on_master(HOME_REGION, Borrow::All, |global, region| {
-                        crate::command::console::on_console_command(global, region, &line);
-                    });
-                }
-                Inbound::Shutdown => return self.shut_down(),
+            if matches!(message, Inbound::Shutdown) {
+                return self.shut_down();
+            }
+            // 每条消息现在能做就做；它要的岛没停放时排进来源自己的队列（混合驱动，
+            // 计划 5.5.2）。别的驱动下全部岛都停放着，永远当场做。
+            // Each message runs now if it can; when an island it needs is not
+            // parked it queues behind its source (hybrid drive, plan 5.5.2).
+            // Under the other drives every island is parked and it always runs.
+            let request = matches!(message, Inbound::Request { .. });
+            self.accept_message(message);
+            if request {
+                // 玩家请求只经端口写全局状态，端口应用时自己重发快照。
+                // Player requests write global state only through the port,
+                // which republishes the snapshot itself when applying.
+                continue;
             }
             // 主控队列的消息（进服、延迟、名单重载、控制台命令）直接改 `Global`：
             // 每条处理完重发快照，下一条读到的和直接读 `Global` 一样。
@@ -1580,32 +1644,56 @@ impl World {
         ControlFlow::Continue(())
     }
 
-    /// 把进服的 10 步串起来，全部写进这名玩家的同一条出站缓冲。`coverage.md` 4.1。
-    fn on_join(&mut self, mut request: JoinRequest) {
+    /// 进服的前一半（只碰主控）：重复编号、名单复查、权限、读玩家存档，然后按出生点
+    /// 挂上玩家票。返回 `None` 表示进服到此为止（重复或者被拒）。后一半见
+    /// [`Self::finish_join`]；两半之间目标岛可能还没停放（混合驱动，计划 5.5.2），
+    /// 这名玩家记在「正在进服」里，票不会被当成离开撤掉。
+    ///
+    /// The first half of a join (master only): duplicate id, list re-check,
+    /// permissions, the player save, then the player ticket at the spawn.
+    /// `None` means the join ends here (duplicate or refused). The second
+    /// half is [`Self::finish_join`]; in between the target island may not be
+    /// parked yet (hybrid drive, plan 5.5.2), and the player is recorded as
+    /// joining so the ticket is not dropped as a leave.
+    fn begin_join(&mut self, mut request: JoinRequest) -> Option<Box<island_hybrid::PendingJoin>> {
         let id = request.id;
-        if self.islands.island_of_player(id).is_some() {
+        if self.islands.island_of_player(id).is_some() || self.master.hybrid.joining.contains(&id) {
             warn!(player = id.0, "ignoring a second join with the same id");
-            return;
+            return None;
         }
+        // 进服序列里读的世界设置都来自全局快照（岛的实施计划 4.1：进服由岛做）；每条主控
+        // 消息处理完都重发过，所以这里现取的一份和岛上那份相同。
+        // The join sequence reads world settings from the global snapshot
+        // (plan 4.1); it is republished after every master message, so a
+        // fresh view equals the islands' copy.
+        let view = self.master.global.view();
         // 连接层检查过一次，但封禁命令可能在两次检查之间改了名单。
         // 世界线程按自己的权威副本复查，理由和登录阶段完全一样。
         let refusal = if self.master.authoritative_admin {
             self.master.global.admin.login_refusal(
                 request.uuid,
                 &request.peer_ip,
-                self.islands.region.now_millis(),
+                self.clock_millis(),
                 request.online_at_login,
-                self.islands.region.max_players() as u32,
+                self.max_players() as u32,
             )
         } else {
             None
         };
         if let Some(refusal) = refusal {
             let reason = crate::command::admin::refusal_message(&refusal);
-            self.islands.region.links.add(id, request.sink);
-            self.islands.region.links.kick(id, &reason);
+            if self.islands.is_home() {
+                self.islands.region.links.add(id, request.sink);
+                self.islands.region.links.kick(id, &reason);
+            } else {
+                // 家岛不在主控手里：用一份临时的链路发完拒绝原因就关。
+                // The home island is away: a temporary link sends the reason and closes.
+                let mut links = crate::links::Links::default();
+                links.add(id, request.sink);
+                links.kick(id, &reason);
+            }
             self.master.refused_inboxes.push((id, request.inbox));
-            return;
+            return None;
         }
         let (permission_level, is_op) = if self.master.authoritative_admin {
             let op = self.master.global.admin.op(request.uuid);
@@ -1648,7 +1736,7 @@ impl World {
         let game_mode = restored
             .as_ref()
             .map(|data| game_mode_from_id(data.game_type))
-            .unwrap_or(self.islands.region.global.default_game_mode);
+            .unwrap_or(view.default_game_mode);
         let join_spawn = match &restored {
             Some(data) => RespawnData::of(
                 BlockPos::new(
@@ -1659,8 +1747,65 @@ impl World {
                 data.rotation[0],
                 data.rotation[1],
             ),
-            None => self.islands.region.global.spawn,
+            None => view.spawn,
         };
+        let difficulty_frames = view.difficulty_frames();
+        let spawn = join_spawn.pos;
+        let spawn_chunk = ChunkPos::new(spawn.x >> 4, spawn.z >> 4);
+        self.master.hybrid.joining.insert(id);
+        self.apply_ticket_ops([TicketOp::PlayerMoved {
+            id: u64::from(id.0 as u32),
+            to: Some(spawn_chunk),
+        }]);
+        Some(Box::new(island_hybrid::PendingJoin {
+            request,
+            permission_level,
+            is_op,
+            restored,
+            game_mode,
+            join_spawn,
+            difficulty_frames,
+            spawn_chunk,
+        }))
+    }
+
+    /// 进服的后一半：把进服的 10 步串起来，全部写进这名玩家的同一条出站缓冲
+    /// （`coverage.md` 4.1）。目标岛不在主控手里、或者要新建却没有停放着的岛可以照抄时
+    /// 原样退回，等它停放再做（混合驱动，计划 5.5.2）。
+    ///
+    /// The second half of a join: the ten join steps, all written into this
+    /// player's one outbound buffer. If the target island is away, or must be
+    /// created with no parked island to copy, the join is handed back to wait
+    /// (hybrid drive, plan 5.5.2).
+    fn finish_join(
+        &mut self,
+        pending: Box<island_hybrid::PendingJoin>,
+    ) -> Result<(), Box<island_hybrid::PendingJoin>> {
+        // 多岛时进服就是到达（计划 4.1）：玩家的票已经挂上，分区器给出出生点所在的岛
+        // （可能刚建的空岛），玩家直接放进那个岛。单岛时就是家岛。
+        // With several islands a join is an arrival (plan 4.1): the ticket is
+        // placed, the partitioner names the spawn's island (maybe a new empty
+        // one) and the player goes straight there. Home with one island.
+        let target = self
+            .master
+            .host
+            .island_of(pending.spawn_chunk)
+            .unwrap_or(HOME_REGION);
+        if !self.islands.can_ensure(target) {
+            return Err(pending);
+        }
+        let island_hybrid::PendingJoin {
+            mut request,
+            permission_level,
+            is_op,
+            restored,
+            game_mode,
+            join_spawn,
+            difficulty_frames,
+            spawn_chunk,
+        } = *pending;
+        let id = request.id;
+        self.master.hybrid.joining.remove(&id);
         let uuid = request.uuid;
         let entry = RosterEntry {
             uuid,
@@ -1672,26 +1817,6 @@ impl World {
             show_hat: shows_hat(&request.client),
             chat_session: None,
         };
-
-        // 进服序列里读的世界设置都来自岛上的快照（岛的实施计划 4.1：进服由岛做）。
-        // The join sequence reads world settings from the island's snapshot (plan 4.1).
-        let difficulty_frames = self.islands.region.global.difficulty_frames();
-        let spawn = join_spawn.pos;
-        let spawn_chunk = ChunkPos::new(spawn.x >> 4, spawn.z >> 4);
-        self.apply_ticket_ops([TicketOp::PlayerMoved {
-            id: u64::from(id.0 as u32),
-            to: Some(spawn_chunk),
-        }]);
-        // 多岛时进服就是到达（计划 4.1）：玩家的票已经挂上，分区器给出出生点所在的岛
-        // （可能刚建的空岛），玩家直接放进那个岛。单岛时就是家岛。
-        // With several islands a join is an arrival (plan 4.1): the ticket is
-        // placed, the partitioner names the spawn's island (maybe a new empty
-        // one) and the player goes straight there. Home with one island.
-        let target = self
-            .master
-            .host
-            .island_of(spawn_chunk)
-            .unwrap_or(HOME_REGION);
         let origin = self.master.host.island_origin(target, spawn_chunk);
         let region = &mut self.islands.ensure(target, origin).region;
         let hashed_seed = region.global.hashed_seed();
@@ -1711,10 +1836,13 @@ impl World {
 
         // Tab 名单、进服消息、计分板和 Boss 栏是主控的帧：别的岛上的玩家借过来一起收。
         // 当场执行：这些帧和后面的 `start_loading_chunks` 写同一条缓冲，先后是进服序列的一部分。
+        // 混合驱动下不在主控手里的岛上的玩家晚一点收到名单和进服消息（延后投递）。
         // The tab list, join message, scoreboard and boss bars are master
         // frames: players on other islands are borrowed to receive them too.
         // Runs at once: these frames and `start_loading_chunks` below share one
-        // buffer, and their order is part of the join sequence.
+        // buffer, and their order is part of the join sequence. Under the
+        // hybrid drive players on islands that are away get the list entry and
+        // the join message later (deferred delivery).
         self.on_master(target, Borrow::All, |global, region| {
             if let Some(frames) = global.tab_list() {
                 region.links.send_frames(id, &frames);
@@ -1756,6 +1884,7 @@ impl World {
         {
             restore_inventory(player, data);
         }
+        Ok(())
     }
 
     /// 消费 `save-all` / `save-on` / `save-off` 压进来的请求（命令动作不碰 IO）。
@@ -1838,15 +1967,20 @@ impl World {
     /// 发 `commands.save.success`（广播给 OP），和命令侧原来的一致。
     /// Send `commands.save.success` (broadcast to ops), as the command did.
     fn send_save_success(&mut self, source: PlayerId) {
-        let island = self.islands.island_of_player(source).unwrap_or(HOME_REGION);
-        self.on_master(island, Borrow::All, |_, region| {
-            crate::command::feedback::success(
-                region,
-                source,
-                Component::translate("commands.save.success", []),
-                true,
-            );
-        });
+        // 发起人和别的岛上的 OP 都要看得见：等全部岛停放（计划 5.5.2）。
+        // The sender and ops on other islands must all be visible: wait for
+        // every island (plan 5.5.2).
+        self.run_or_hold(Box::new(move |world: &mut Self| {
+            let island = world.island_for_feedback(source);
+            world.on_master(island, Borrow::All, |_, region| {
+                crate::command::feedback::success(
+                    region,
+                    source,
+                    Component::translate("commands.save.success", []),
+                    true,
+                );
+            });
+        }));
     }
 
     /// 收回已到达的 IO 栅栏回执，按回执的 `ok` 发等在上面的 `save-all` 消息：
@@ -1880,18 +2014,20 @@ impl World {
     /// Send `commands.save.failed` (red system message) like official
     /// `SaveAllCommand` when `saveEverything` returns false.
     fn send_save_failure(&mut self, source: PlayerId) {
-        let failure = crate::command::feedback::fail("commands.save.failed");
-        let island = self.islands.island_of_player(source).unwrap_or(HOME_REGION);
-        self.on_master(island, Borrow::All, |_, region| {
-            crate::command::feedback::report(region, source, "save-all", &failure);
-        });
+        self.run_or_hold(Box::new(move |world: &mut Self| {
+            let failure = crate::command::feedback::fail("commands.save.failed");
+            let island = world.island_for_feedback(source);
+            world.on_master(island, Borrow::All, |_, region| {
+                crate::command::feedback::report(region, source, "save-all", &failure);
+            });
+        }));
     }
 
     /// 存档一名在线玩家。文件写交给 IO 线程，世界线程不等待。
     fn save_one_player(&mut self, id: PlayerId) {
         let encoded = self
             .islands
-            .iter()
+            .parked()
             .find_map(|island| island.region.players.get(&id))
             .and_then(encode_player_save);
         if let Some((uuid, bytes)) = encoded {
@@ -1908,7 +2044,7 @@ impl World {
         // Every island's players by id, the same order as with one island.
         let mut players: Vec<&crate::player::Player> = self
             .islands
-            .iter()
+            .parked()
             .flat_map(|island| island.region.players.values())
             .collect();
         players.sort_unstable_by_key(|player| player.id);
@@ -1967,7 +2103,9 @@ impl World {
         let island = if self.islands.contains(island) {
             island
         } else {
-            HOME_REGION
+            // 合并只发生在停放着的岛之间，吸收方一定停放着；家岛停放着就是它。
+            // Merges only join parked islands, so the absorber is parked; home if it is.
+            self.islands.template().unwrap_or(HOME_REGION)
         };
         self.with_players(island, Borrow::All, |port, region| {
             port.submit(region, GlobalEffect::Left { player: id });
@@ -2354,8 +2492,14 @@ impl World {
     /// (command feedback, the tab list) go out in the same tick as the island's.
     /// Under the direct port the queue is empty and this does nothing.
     fn hand_back(&mut self) {
-        for id in self.islands.ids() {
-            self.hand_back_island(id);
+        // 混合驱动下只有停放着的岛，每个先做完落地的前几步（它不在期间排给它的出站投递、
+        // 留给它的存盘名单），再交回（计划 5.5.1）；别的驱动下这两样一直是空的。
+        // Under the hybrid drive only parked islands, each first finishing
+        // its landing (the outbound deliveries queued while it was away, the
+        // save list kept for it) and then handing back (plan 5.5.1); both are
+        // always empty under the other drives.
+        for id in self.islands.parked_ids() {
+            self.land_island(id);
         }
     }
 
@@ -2367,7 +2511,9 @@ impl World {
         // 分离驱动下岛这一刻开头收信产生的回执交给 Director；齐步下回执当场就给了。
         // Under the detached drive, feed the acks from this tick's mail to the
         // Director; in lockstep they were handed over on the spot.
-        let island = self.islands.get_mut(id).expect("在表里");
+        let Some(island) = self.islands.get_mut(id) else {
+            return;
+        };
         if !island.replies.is_empty() {
             let mut replies = std::mem::take(&mut island.replies);
             self.master.host.accept_replies(
@@ -2397,14 +2543,48 @@ impl World {
     /// last tick, deliver and reclaim, and keep the acks for the hand-back. The
     /// island is still parked; mail is taken before the inbound messages, as in step 6.
     fn start_island_ticks(&mut self) {
+        // 停放着的岛都收；邮筒里投给还不存在的岛编号的信（只有强加载票、没有玩家的新岛）
+        // 先建一个空岛再收，和齐步驱动借岛收信时一样（计划 5.5.5）。不在主控手里的岛的信
+        // 留在邮筒里。
+        // Every parked island takes its mail; letters posted to an island id
+        // that does not exist yet (a new island with only a forced ticket and
+        // no player) create an empty island first, as lockstep does when it
+        // lends the islands (plan 5.5.5). Mail of islands that are away stays posted.
+        let mut ids: std::collections::BTreeSet<mc_bamboo_world::director::RegionId> =
+            self.islands.parked_ids().into_iter().collect();
+        if self.master.islands_mode {
+            #[cfg(test)]
+            let create = !self.master.hybrid.breaks.no_islands_for_mail;
+            #[cfg(not(test))]
+            let create = true;
+            if create {
+                ids.extend(
+                    self.master
+                        .host
+                        .posted_islands()
+                        .into_iter()
+                        .filter(|&id| !self.islands.contains(id) && self.islands.can_ensure(id)),
+                );
+            }
+        }
+        for id in ids {
+            self.take_island_mail(id);
+        }
+    }
+
+    /// 一个停放着的岛（不存在就先建空岛）收下邮筒里投给它的信，回执留到交回。
+    ///
+    /// One parked island (created empty if missing) takes the letters posted
+    /// to it; the acks wait for the hand-back.
+    fn take_island_mail(&mut self, id: mc_bamboo_world::director::RegionId) {
         let mut posted = std::mem::take(&mut self.master.posted_scratch);
         let order = self.master.host.mail_order();
-        for island in self.islands.iter_mut() {
-            self.master.host.take_posted(island.id, &mut posted);
-            let mut replies = std::mem::take(&mut island.replies);
-            island.take_mail(&mut posted, &order, &mut replies);
-            island.replies = replies;
-        }
+        let origin = self.master.host.island_origin(id, ChunkPos::new(0, 0));
+        let island = self.islands.ensure(id, origin);
+        self.master.host.take_posted(island.id, &mut posted);
+        let mut replies = std::mem::take(&mut island.replies);
+        island.take_mail(&mut posted, &order, &mut replies);
+        island.replies = replies;
         self.master.posted_scratch = posted;
     }
 
@@ -2420,10 +2600,19 @@ impl World {
         // 关服是栅栏：岛停下来交回。还没交回的回执和全局改动先应用，存盘看到的是最新的。
         // Shutdown is a barrier: the island stops and hands back. Apply acks and
         // global changes not yet handed back so the save sees them.
-        for island in self.islands.iter_mut() {
+        // 混合驱动：先把不在主控手里的岛收回来，总共最多等 `island_stop_timeout`；到点还
+        // 没回来的不等了，停放着的岛照常存（计划 5.5.5）。
+        // Hybrid drive: recall the islands that are away first, waiting at
+        // most `island_stop_timeout` in total; those still out are left behind
+        // and the parked ones are saved as usual (plan 5.5.5).
+        if self.hybrid() {
+            self.recall_for_shutdown();
+        }
+        for island in self.islands.parked_mut() {
             island.park();
         }
         self.hand_back();
+        self.drain_held();
         // 还没照做的拆合先做完，关服的收回信件才能投到对的岛（「关服时有岛在拆合」）。
         // Finish pending structural changes first so the shutdown reclaims
         // reach the right islands (shutdown during a split or merge).
@@ -2467,7 +2656,7 @@ impl World {
             "chunk codec time and IO failures on this run"
         );
         let reason = Component::translate(SERVER_SHUTDOWN, []);
-        for island in self.islands.iter_mut() {
+        for island in self.islands.parked_mut() {
             island.region.links.kick_all(&reason);
         }
         ControlFlow::Break(())
@@ -2511,6 +2700,22 @@ impl World {
             save.close();
         }
         ControlFlow::Break(())
+    }
+}
+
+/// 打报告的剖析器：跟着家岛；家岛不在主控手里时给一份不进报告的备用的（混合驱动下家岛
+/// 也可能落后）。
+///
+/// The reporting profiler travels with the home island; while home is away
+/// (it too may lag under the hybrid drive) a spare that is never reported.
+fn report_profiler<'a>(
+    islands: &'a mut Islands,
+    spare: &'a mut crate::profiler::Profiler,
+) -> &'a mut crate::profiler::Profiler {
+    if islands.is_home() {
+        &mut islands.region.profiler
+    } else {
+        spare
     }
 }
 
@@ -2785,8 +2990,21 @@ impl Schedule {
 
     /// 一 tick 结束时调用，返回到下一 tick 开始还要等多久。已经落后时返回 0，连续跑 tick 追上。
     fn after_tick(&mut self, now: Instant) -> Duration {
+        self.advance(now, MAX_CATCH_UP)
+    }
+
+    /// 同 [`Self::after_tick`]，但不连续补刻（混合驱动的主控，计划 5.5.1）：落后超过一刻
+    /// 就从现在重新计时。
+    ///
+    /// Like [`Self::after_tick`] without making ticks up (the hybrid drive's
+    /// master, plan 5.5.1): more than one tick behind restarts from now.
+    fn after_tick_without_catch_up(&mut self, now: Instant) -> Duration {
+        self.advance(now, TICK)
+    }
+
+    fn advance(&mut self, now: Instant, limit: Duration) -> Duration {
         let behind = now.saturating_duration_since(self.next_tick);
-        self.skipped_catch_up = behind > MAX_CATCH_UP;
+        self.skipped_catch_up = behind > limit;
         if self.skipped_catch_up {
             warn!(
                 "Can't keep up! Running {}ms behind, skipping {} ticks",
@@ -2815,6 +3033,11 @@ mod island_crossing_tests;
 #[cfg(test)]
 #[path = "world/tests/island_drive_tests.rs"]
 mod island_drive_tests;
+#[path = "world/island_hybrid.rs"]
+mod island_hybrid;
+#[cfg(test)]
+#[path = "world/island_hybrid_tests.rs"]
+mod island_hybrid_tests;
 #[cfg(test)]
 #[path = "world/island_partition_tests.rs"]
 mod island_partition_tests;

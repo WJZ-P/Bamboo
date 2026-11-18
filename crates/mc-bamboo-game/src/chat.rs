@@ -268,6 +268,15 @@ pub(crate) fn broadcast_system_message(
     for id in ids {
         region.links.send_frames(id, frames);
     }
+    // 不在主控手里的岛上的接收者：那个岛落地时照同样的条件自己发（计划 5.5.3）。
+    // Receivers on islands that are away: the island sends under the same
+    // rule when it lands (plan 5.5.3).
+    region.links.fan_out(|| {
+        let frames: std::sync::Arc<[u8]> = frames.into();
+        std::sync::Arc::new(move |region: &mut Region| {
+            broadcast_system_message(region, &frames, except);
+        })
+    });
 }
 
 #[cfg(test)]

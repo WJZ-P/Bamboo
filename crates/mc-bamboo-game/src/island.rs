@@ -246,6 +246,8 @@ pub(crate) enum IslandTestHook {
     RecordThread(std::sync::Arc<std::sync::Mutex<Option<String>>>),
     /// 卡住，直到这个标志被置上。
     Stall(std::sync::Arc<std::sync::atomic::AtomicBool>),
+    /// 每一刻开头都睡这么久（真的慢岛，给烟雾测试用），一直留着。
+    Lag(std::time::Duration),
     Panic,
 }
 
@@ -264,27 +266,77 @@ const _: fn() = || {
 /// so handing it to a tick thread moves one pointer); while it runs it is taken
 /// out whole and the master only holds its own state. A parked island is used
 /// like an `Island` through `Deref`.
-pub(crate) struct IslandSlot(Option<Box<Island>>);
+pub(crate) struct IslandSlot {
+    island: Option<Box<Island>>,
+    /// 岛不在主控手里时它的玩家编号（升序）。岛不在时没人能进出它（进服、离开、搬玩家都
+    /// 要它停放着），所以这份名单在它回来之前一直是对的；主控靠它知道「这名玩家在一个
+    /// 没停放的岛上」（计划 5.5.1）。停放时是空的。
+    ///
+    /// The island's player ids (ascending) while it is out of the master's
+    /// hands. Nobody can enter or leave an island that is away (joins, leaves
+    /// and moves need it parked), so the list stays right until it is back;
+    /// the master uses it to know that a player is on an island that is not
+    /// parked (plan 5.5.1). Empty while parked.
+    away_players: Vec<crate::inbound::PlayerId>,
+    /// 这个岛欠几刻：主控每次派出时它不在就加一，追赶时每多跑一刻减一（计划 5.5.1）。
+    /// 只有混合驱动用；别的驱动下一直是 0。
+    ///
+    /// Ticks this island owes: one more each time the master dispatches while
+    /// it is away, one less per catch-up tick (plan 5.5.1). Only the hybrid
+    /// drive uses it; always 0 otherwise.
+    pub(crate) debt: u32,
+}
 
 impl IslandSlot {
     pub(crate) fn new(island: Box<Island>) -> Self {
-        Self(Some(island))
+        Self {
+            island: Some(island),
+            away_players: Vec::new(),
+            debt: 0,
+        }
     }
 
     /// 岛在不在主控手里。
     pub(crate) fn is_home(&self) -> bool {
-        self.0.is_some()
+        self.island.is_some()
     }
 
-    /// 拿走岛，交给 tick 线程。
+    /// 拿走岛，交给 tick 线程。记下它的玩家编号。
+    ///
+    /// Take the island for a tick thread, remembering its player ids.
     pub(crate) fn take(&mut self) -> Box<Island> {
-        self.0.take().expect("岛已经交出去了")
+        let island = self.island.take().expect("岛已经交出去了");
+        self.away_players = island.region.players.keys().copied().collect();
+        island
     }
 
     /// 岛交回来了。
     pub(crate) fn put(&mut self, island: Box<Island>) {
-        debug_assert!(self.0.is_none(), "岛已经在主控手里");
-        self.0 = Some(island);
+        debug_assert!(self.island.is_none(), "岛已经在主控手里");
+        self.away_players.clear();
+        self.island = Some(island);
+    }
+
+    /// 停放着的岛；不在主控手里时是 `None`。
+    ///
+    /// The parked island, or `None` while it is away.
+    pub(crate) fn parked(&self) -> Option<&Island> {
+        self.island.as_deref()
+    }
+
+    pub(crate) fn parked_mut(&mut self) -> Option<&mut Island> {
+        self.island.as_deref_mut()
+    }
+
+    /// 这名玩家在这个岛上（岛不在时看派出时记下的名单）。
+    ///
+    /// Whether the player is on this island (by the list taken at dispatch
+    /// while it is away).
+    fn holds_player(&self, player: crate::inbound::PlayerId) -> bool {
+        match &self.island {
+            Some(island) => island.region.players.contains_key(&player),
+            None => self.away_players.binary_search(&player).is_ok(),
+        }
     }
 }
 
@@ -292,7 +344,7 @@ impl std::ops::Deref for IslandSlot {
     type Target = Island;
 
     fn deref(&self) -> &Island {
-        self.0
+        self.island
             .as_deref()
             .expect("岛正在 tick 线程上跑，主控碰不到它")
     }
@@ -300,7 +352,7 @@ impl std::ops::Deref for IslandSlot {
 
 impl std::ops::DerefMut for IslandSlot {
     fn deref_mut(&mut self) -> &mut Island {
-        self.0
+        self.island
             .as_deref_mut()
             .expect("岛正在 tick 线程上跑，主控碰不到它")
     }
@@ -328,6 +380,9 @@ pub(crate) struct Islands {
     /// 测试专用：借玩家时一个都不借（改坏确认）。
     #[cfg(test)]
     pub(crate) lend_nothing: bool,
+    /// 测试专用：借玩家时不按时钟差平移（改坏确认）。
+    #[cfg(test)]
+    pub(crate) lend_unshifted: bool,
 }
 
 impl Islands {
@@ -338,6 +393,8 @@ impl Islands {
             derived: (i64::MIN, Vec::new()),
             #[cfg(test)]
             lend_nothing: false,
+            #[cfg(test)]
+            lend_unshifted: false,
         }
     }
 
@@ -393,20 +450,123 @@ impl Islands {
         self.slots.values().all(IslandSlot::is_home)
     }
 
-    /// 这名玩家在哪个岛上。
+    /// 这名玩家在哪个岛上。岛不在主控手里时按它派出时的玩家名单算。
+    ///
+    /// The island a player is on; an island that is away answers from the
+    /// player list taken when it was dispatched.
     pub(crate) fn island_of_player(&self, player: crate::inbound::PlayerId) -> Option<RegionId> {
         self.slots
             .iter()
-            .find(|(_, slot)| slot.region.players.contains_key(&player))
+            .find(|(_, slot)| slot.holds_player(player))
             .map(|(&id, _)| id)
     }
 
-    /// 已加载 `pos` 的岛。
+    /// 已加载 `pos` 的停放着的岛（不在主控手里的岛看不到）。
+    ///
+    /// The parked island that has `pos` loaded (islands that are away are not seen).
     pub(crate) fn island_of_chunk(&self, pos: ChunkPos) -> Option<RegionId> {
         self.slots
             .iter()
-            .find(|(_, slot)| slot.region.chunks.is_loaded(pos))
+            .find(|(_, slot)| {
+                slot.parked()
+                    .is_some_and(|island| island.region.chunks.is_loaded(pos))
+            })
             .map(|(&id, _)| id)
+    }
+
+    /// 岛 `id` 在表里并且停放着。
+    ///
+    /// Island `id` exists and is parked.
+    pub(crate) fn is_parked(&self, id: RegionId) -> bool {
+        self.slots.get(&id).is_some_and(IslandSlot::is_home)
+    }
+
+    /// 停放着的岛，按编号升序（混合驱动下有的岛可能不在主控手里，计划 5.5）。
+    ///
+    /// The parked islands by ascending id (under the hybrid drive some may be
+    /// away, plan 5.5).
+    pub(crate) fn parked(&self) -> impl Iterator<Item = &Island> {
+        self.slots.values().filter_map(IslandSlot::parked)
+    }
+
+    pub(crate) fn parked_mut(&mut self) -> impl Iterator<Item = &mut Island> {
+        self.slots.values_mut().filter_map(IslandSlot::parked_mut)
+    }
+
+    /// 停放着的岛的编号，升序。
+    pub(crate) fn parked_ids(&self) -> Vec<RegionId> {
+        self.slots
+            .iter()
+            .filter(|(_, slot)| slot.is_home())
+            .map(|(&id, _)| id)
+            .collect()
+    }
+
+    /// 不在主控手里的岛的编号，升序。
+    ///
+    /// Ids of the islands that are away, ascending.
+    pub(crate) fn away_ids(&self) -> Vec<RegionId> {
+        self.slots
+            .iter()
+            .filter(|(_, slot)| !slot.is_home())
+            .map(|(&id, _)| id)
+            .collect()
+    }
+
+    /// 全部在线玩家的编号（含不在主控手里的岛上的），升序。
+    ///
+    /// Every online player's id, players of islands that are away included, ascending.
+    pub(crate) fn player_ids(&self) -> Vec<crate::inbound::PlayerId> {
+        let mut ids: Vec<crate::inbound::PlayerId> = self
+            .slots
+            .values()
+            .flat_map(|slot| match slot.parked() {
+                Some(island) => island.region.players.keys().copied().collect::<Vec<_>>(),
+                None => slot.away_players.clone(),
+            })
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// 不在主控手里的岛上的全部玩家。
+    ///
+    /// Every player on the islands that are away.
+    pub(crate) fn away_players(&self) -> std::collections::BTreeSet<crate::inbound::PlayerId> {
+        self.slots
+            .values()
+            .filter(|slot| !slot.is_home())
+            .flat_map(|slot| slot.away_players.iter().copied())
+            .collect()
+    }
+
+    /// 岛 `id` 欠几刻（计划 5.5.1）。
+    pub(crate) fn debt(&self, id: RegionId) -> u32 {
+        self.slots.get(&id).map_or(0, |slot| slot.debt)
+    }
+
+    /// 建空岛时照着抄的岛：家岛停放着就是它，不然是编号最小的停放着的岛；一个停放的
+    /// 都没有时是 `None`（计划 5.5.1「新岛的模板」）。
+    ///
+    /// The island a new empty island is copied from: home when parked,
+    /// otherwise the lowest parked id, or `None` when nothing is parked
+    /// (plan 5.5.1).
+    pub(crate) fn template(&self) -> Option<RegionId> {
+        if self.is_parked(HOME_REGION) {
+            return Some(HOME_REGION);
+        }
+        self.parked_ids().first().copied()
+    }
+
+    /// 岛 `id` 现在能直接用：已经在并且停放着，或者还不在、但有模板能建出来。
+    ///
+    /// Island `id` is usable now: present and parked, or absent with a
+    /// template to create it from.
+    pub(crate) fn can_ensure(&self, id: RegionId) -> bool {
+        match self.slots.get(&id) {
+            Some(slot) => slot.is_home(),
+            None => self.template().is_some(),
+        }
     }
 
     /// 编号为 `id` 的岛；没有就建一个空的（时钟、配置、全局快照、区块包模板照家岛抄，
@@ -419,7 +579,8 @@ impl Islands {
     /// boundary only, with every island parked.
     pub(crate) fn ensure(&mut self, id: RegionId, origin: SectionPos) -> &mut Island {
         if !self.slots.contains_key(&id) {
-            let home = &mut **self.slots.get_mut(&HOME_REGION).expect("家岛一直在");
+            let template = self.template().expect("建空岛要有一个停放着的岛当模板");
+            let home = &mut **self.slots.get_mut(&template).expect("模板在表里");
             let time = home.region.global.time.0;
             let random = home
                 .region
@@ -477,7 +638,9 @@ impl Islands {
     /// 拿走一个停放着的岛（拆合时）。家岛不能拿走。
     pub(crate) fn remove(&mut self, id: RegionId) -> Option<Box<Island>> {
         debug_assert_ne!(id, HOME_REGION, "家岛不能拿走");
-        self.slots.remove(&id).map(|mut slot| slot.take())
+        self.slots
+            .remove(&id)
+            .map(|slot| slot.island.expect("只能拿走停放着的岛"))
     }
 
     /// 拆掉空了的岛（没有区块、玩家、信件、实体）。家岛留着。
@@ -498,6 +661,7 @@ impl Islands {
     }
 
     /// 家岛（停放着）。
+    #[cfg(test)]
     pub(crate) fn home_mut(&mut self) -> &mut Island {
         self.get_mut(HOME_REGION).expect("家岛一直在")
     }
@@ -513,7 +677,9 @@ impl Islands {
     /// 的 `PlayerTables`）整套借到 `into` 上，事情做完再按原样还回去（[`Self::scatter`]）。
     /// 借过来的玩家和本来就在这里的玩家一起按编号排，所以选择器、给 OP 的广播、每名接收者
     /// 的签名聊天状态都和所有人在一个岛上时一样。这些岛这时都停放着，主控写进借来的链路
-    /// 就等于岛按顺序收下主控的出站信件（计划 4.3）。只有一个岛时什么都不做。
+    /// 就等于岛按顺序收下主控的出站信件（计划 4.3）。只有一个岛时什么都不做。混合驱动下
+    /// 只借停放着的岛（不在主控手里的岛的那一份走延后投递，计划 5.5.2）；两岛时钟不同时
+    /// 玩家身上的绝对时刻按时钟差平移。
     ///
     /// The master does something involving players of other islands while
     /// the islands are parked (through the single entry `World::on_master`:
@@ -538,16 +704,15 @@ impl Islands {
         }
         let others: Vec<RegionId> = match borrow {
             Borrow::All => self
-                .slots
-                .keys()
-                .copied()
+                .parked_ids()
+                .into_iter()
                 .filter(|&id| id != into)
                 .collect(),
             Borrow::PlayersOf(players) => {
                 let mut ids: Vec<RegionId> = players
                     .iter()
                     .filter_map(|&player| self.island_of_player(player))
-                    .filter(|&id| id != into)
+                    .filter(|&id| id != into && self.is_parked(id))
                     .collect();
                 ids.sort_unstable();
                 ids.dedup();
@@ -565,10 +730,11 @@ impl Islands {
                 region.lend_players(&players)
             };
             let ids = lent.ids();
+            let shift = self.lend_shift();
             self.get_mut(into)
                 .expect("在表里")
                 .region
-                .take_players(lent);
+                .take_players(lent, shift);
             gathered.0.push((id, ids));
         }
         gathered
@@ -588,15 +754,25 @@ impl Islands {
                 .expect("在表里")
                 .region
                 .lend_players(&set);
+            let shift = self.lend_shift();
             match self.get_mut(id) {
-                Some(island) => island.region.take_players(lent),
+                Some(island) => island.region.take_players(lent, shift),
                 None => self
                     .get_mut(into)
                     .expect("在表里")
                     .region
-                    .take_players(lent),
+                    .take_players(lent, shift),
             }
         }
+    }
+
+    /// 借玩家时要不要按时钟差平移（正式构建恒为真）。
+    fn lend_shift(&self) -> bool {
+        #[cfg(test)]
+        if self.lend_unshifted {
+            return false;
+        }
+        true
     }
 }
 
@@ -688,6 +864,10 @@ impl Island {
                 while !release.load(std::sync::atomic::Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
+            }
+            Some(IslandTestHook::Lag(time)) => {
+                std::thread::sleep(time);
+                self.test_hook = Some(IslandTestHook::Lag(time));
             }
             Some(IslandTestHook::Panic) => panic!("岛的测试 panic"),
             None => {}

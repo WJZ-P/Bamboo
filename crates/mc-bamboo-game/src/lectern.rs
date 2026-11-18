@@ -114,6 +114,12 @@ impl Tables {
     }
 
     /// 这名玩家开着讲台。
+    /// 测试专用：这名玩家待发格子的到点时刻。
+    #[cfg(test)]
+    pub(crate) fn pending_at_for_test(&self, id: PlayerId) -> Option<RegionTick> {
+        self.pending.get(&id).map(|pending| pending.deliver_at)
+    }
+
     pub(crate) fn has_view(&self, player: PlayerId) -> bool {
         self.views.contains_key(&player)
     }

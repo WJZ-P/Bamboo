@@ -66,19 +66,54 @@ pub(crate) enum FreshEntityBreak {
 
 impl World {
     /// 照做分区器定下的拆合、搬跨岛的玩家、拆掉空岛、放出扣着的信（见模块说明）。
-    /// 只在多岛开着、全部岛都停放时做；别的时候什么都不做。
+    /// 只在多岛开着时做。齐步和「每刻等齐」时全部岛都停放着；混合驱动下有的岛可能不在
+    /// 主控手里（计划 5.5.4）：卷进这种岛的拆合留着，它卷进去的岛记成「挡住」，后面碰到
+    /// 这些岛的拆合也跟着留，同一批岛上的先后不变；别的拆合照常做。
     ///
     /// Replay the partitioner's splits and merges, move crossing players, drop
     /// empty islands and release held mail (see the module docs). Only with
-    /// multi-island mode on and every island parked.
+    /// multi-island mode on. Lockstep and the wait-for-all case have every
+    /// island parked; under the hybrid drive some may be away (plan 5.5.4): a
+    /// change involving such an island stays queued and blocks the islands it
+    /// names, so later changes touching them stay too and keep their order,
+    /// while unrelated changes go ahead.
     pub(crate) fn settle_islands(&mut self) {
-        if !self.master.islands_mode || !self.islands.all_parked() {
+        if !self.master.islands_mode {
+            return;
+        }
+        if !self.hybrid() && !self.islands.all_parked() {
             return;
         }
         let mut crossings = 0;
         for _ in 0..SETTLE_ROUNDS {
             let mut changed = false;
-            while let Some(op) = self.master.host.peek_topology().cloned() {
+            let mut blocked: BTreeSet<RegionId> = BTreeSet::new();
+            let mut index = 0;
+            while let Some(op) = self.master.host.topology_at(index).cloned() {
+                let ids = match &op {
+                    TopologyOp::Merge { into, from } => [*into, *from],
+                    TopologyOp::Split { from, to, .. } => [*from, *to],
+                };
+                // 能做：两个岛都没被前面留着的拆合挡住，并且各自要么停放着、要么还不存在
+                // （不存在的要有停放着的岛可以照抄）。
+                // Ready: neither island is blocked by an earlier pending
+                // change, and each is parked or absent (an absent one needs a
+                // parked island to copy).
+                let ready = ids.iter().all(|id| {
+                    !blocked.contains(id)
+                        && (self.islands.is_parked(*id)
+                            || (!self.islands.contains(*id) && self.islands.template().is_some()))
+                });
+                if !ready {
+                    blocked.extend(ids);
+                    #[cfg(test)]
+                    if self.master.hybrid.breaks.forget_blocked_topology {
+                        let _ = self.master.host.take_topology(index);
+                        continue;
+                    }
+                    index += 1;
+                    continue;
+                }
                 let started = std::time::Instant::now();
                 let (done, metric) = match &op {
                     TopologyOp::Merge { into, from } => {
@@ -92,8 +127,8 @@ impl World {
                 if !done {
                     break;
                 }
-                let (_, waited) = self.master.host.pop_topology().expect("刚看过");
-                let profiler = &mut self.islands.home_mut().region.profiler;
+                let (_, waited) = self.master.host.take_topology(index).expect("刚看过");
+                let profiler = self.profiler();
                 profiler.record_duration(metric, started.elapsed());
                 profiler.record(Metric::IslandTopologyWait, waited);
                 changed = true;
@@ -116,11 +151,13 @@ impl World {
             }
         }
         let count = self.islands.len() as u64;
-        let profiler = &mut self.islands.home_mut().region.profiler;
+        let profiler = self.profiler();
         profiler.record(Metric::IslandCount, count);
         profiler.record(Metric::IslandCrossings, crossings as u64);
         #[cfg(debug_assertions)]
-        self.assert_island_invariants();
+        if self.islands.all_parked() {
+            self.assert_island_invariants();
+        }
     }
 
     /// 改坏确认：拆合之后丢掉一个新生成的下落方块实体、清掉它的追踪配对，或者整条丢掉
@@ -148,7 +185,7 @@ impl World {
         };
         let fresh: Vec<(RegionId, i32)> = self
             .islands
-            .iter()
+            .parked()
             .flat_map(|island| {
                 island
                     .region
@@ -285,7 +322,13 @@ impl World {
             let delta = target.region.tick.game_time() - child.region.tick.game_time();
             target.absorb_island_boxed(child, delta);
         } else {
+            // 新岛的时钟照抄原岛，欠的刻也一样（计划 5.5.1）。
+            // The new island copies the clock, and so the ticks owed (plan 5.5.1).
+            let debt = self.islands.debt(from);
             self.islands.insert(child);
+            if let Some(slot) = self.islands.slot_mut(to) {
+                slot.debt = debt;
+            }
         }
         self.master.host.split_posts(from, to, sections, &moved);
         true
@@ -298,7 +341,7 @@ impl World {
     /// has cleared them (or they waited too long). Returns how many moved.
     fn relocate_players(&mut self) -> usize {
         let mut crossing: Vec<(RegionId, PlayerId, ChunkPos)> = Vec::new();
-        for island in self.islands.iter() {
+        for island in self.islands.parked() {
             for player in island.region.players.values() {
                 crossing.push((island.id, player.id, player.chunk_pos()));
             }
@@ -310,6 +353,11 @@ impl World {
             };
             if to == from {
                 self.master.transit.remove(&id);
+                continue;
+            }
+            // 目的地的岛不在主控手里（混合驱动）：等它停放再搬。
+            // The destination island is away (hybrid drive): move once it parks.
+            if !self.islands.can_ensure(to) {
                 continue;
             }
             let now = self.master.director_tick;

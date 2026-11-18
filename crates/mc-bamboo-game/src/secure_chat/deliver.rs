@@ -39,6 +39,29 @@ pub(crate) fn broadcast_signed(
     for id in ids {
         send_one(region, id, message, chat_type, name, target_name, unsigned);
     }
+    // 不在主控手里的岛上的接收者：消息按主控接受它们的先后进那个岛的出站队列，岛落地时
+    // 照样逐个接收者打包，每名接收者的索引、签名缓存和待确认名单只由他自己的岛在投递时改
+    // （计划 5.5.3）。
+    // Receivers on islands that are away: the message joins that island's
+    // outbound queue in the order the master accepted it and is packed per
+    // receiver when the island lands; each receiver's index, signature cache
+    // and pending list change only on their own island at delivery (plan 5.5.3).
+    region.links.fan_out(|| {
+        let message = message.clone();
+        let name = name.clone();
+        let target_name = target_name.cloned();
+        let unsigned = unsigned.cloned();
+        std::sync::Arc::new(move |region: &mut Region| {
+            broadcast_signed(
+                region,
+                &message,
+                chat_type,
+                &name,
+                target_name.as_ref(),
+                unsigned.as_ref(),
+            );
+        })
+    });
 }
 
 /// 只发给一个人。对方把聊天关成“仅系统”或“隐藏”、或者链路已关时都不发。

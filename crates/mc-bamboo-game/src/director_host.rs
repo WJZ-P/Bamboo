@@ -836,14 +836,22 @@ impl DirectorHost {
         !self.topology.is_empty()
     }
 
-    /// 看下一条要照做的拆合（不取走）。
-    pub(crate) fn peek_topology(&self) -> Option<&TopologyOp> {
-        self.topology.front().map(|(op, _)| op)
+    /// 看第 `index` 条还没照做的拆合（不取走）。混合驱动下卷进不在主控手里的岛的拆合要
+    /// 跳过去看后面的（计划 5.5.4）。
+    ///
+    /// Peek at the `index`-th pending structural change. Under the hybrid
+    /// drive, changes involving an island that is away are skipped over
+    /// (plan 5.5.4).
+    pub(crate) fn topology_at(&self, index: usize) -> Option<&TopologyOp> {
+        self.topology.get(index).map(|(op, _)| op)
     }
 
-    /// 取走下一条照做完的拆合和它等了几刻；剩下的拆合卷进去的岛仍然扣着。
-    pub(crate) fn pop_topology(&mut self) -> Option<(TopologyOp, u64)> {
-        let (op, since) = self.topology.pop_front()?;
+    /// 取走第 `index` 条照做完的拆合和它等了几刻；剩下的拆合卷进去的岛仍然扣着。
+    ///
+    /// Take the `index`-th change once applied, with the ticks it waited;
+    /// islands in the remaining changes stay held.
+    pub(crate) fn take_topology(&mut self, index: usize) -> Option<(TopologyOp, u64)> {
+        let (op, since) = self.topology.remove(index)?;
         let pending: Vec<(TopologyOp, u64)> = self.topology.drain(..).collect();
         self.held_islands.clear();
         for (op, since) in pending {
@@ -940,6 +948,20 @@ impl DirectorHost {
         }
         let events = std::mem::take(&mut self.initial_scratch);
         self.pump(island, events);
+    }
+
+    /// 邮筒里有信、又没被拆合扣着的岛编号（升序）。分离驱动下岛开头收信时，用它给还不
+    /// 存在的岛编号先建空岛（计划 5.5.5）。
+    ///
+    /// Island ids with posted letters that are not held by a pending change,
+    /// ascending. The detached drive uses it at the start of a tick to create
+    /// islands that do not exist yet (plan 5.5.5).
+    pub(crate) fn posted_islands(&self) -> Vec<RegionId> {
+        self.posts
+            .iter()
+            .filter(|(id, letters)| !letters.is_empty() && !self.held_islands.contains(id))
+            .map(|(&id, _)| id)
+            .collect()
     }
 
     /// 邮筒里投给 `id` 的信件数（测试用）。
@@ -1558,13 +1580,38 @@ impl DirectorHost {
         if self.infinite_flat {
             return;
         }
-        for island in islands.iter_mut() {
+        // 混合驱动下关服时可能有岛没回来（计划 5.5.5）：它们的区块存不下来，列进日志；
+        // 停放着的岛照常收回、写出。
+        // Under the hybrid drive some islands may not be back at shutdown
+        // (plan 5.5.5): their chunks cannot be saved and are logged; the
+        // parked ones are reclaimed and written as usual.
+        let away = islands.away_ids();
+        if !away.is_empty() {
+            let mut lost: Vec<ChunkPos> = self
+                .director
+                .owner_records()
+                .into_iter()
+                .filter(|record| {
+                    matches!(record.owner,
+                        mc_bamboo_world::director::Owner::Region(id) if away.contains(&id))
+                })
+                .map(|record| record.pos)
+                .collect();
+            lost.sort_unstable();
+            tracing::error!(
+                islands = ?away,
+                ?lost,
+                "these islands did not hand back before shutdown; changes to their chunks \
+                 after the last save are lost"
+            );
+        }
+        for island in islands.parked_mut() {
             island.mailbox.lift_budget();
             // 收回要求光照算完、各表都不在 tick 中途；关服在 tick 边界调用。
             island.region.chunks.finish_light_updates();
         }
         self.shutdown_with(&mut IslandAccess::All(&mut *islands));
-        for island in islands.iter_mut() {
+        for island in islands.parked_mut() {
             island.mailbox.clear();
         }
     }
@@ -2629,7 +2676,10 @@ impl DirectorHost {
                         .map(|(&id, _)| id),
                 );
                 for id in ids {
-                    if self.held_islands.contains(&id) {
+                    // 不在主控手里的岛（混合驱动下关服时没回来的）收不了信，信留在邮筒里。
+                    // An island that is away (not back at a hybrid shutdown)
+                    // cannot take mail; its letters stay posted.
+                    if self.held_islands.contains(&id) || !islands.can_ensure(id) {
                         continue;
                     }
                     let origin = self.island_origin(id, ChunkPos::new(0, 0));

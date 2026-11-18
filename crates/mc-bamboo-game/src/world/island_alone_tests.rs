@@ -79,7 +79,7 @@ fn holds(scene: &Scene, group: usize) -> bool {
 /// Merge every island into home, optionally reset home's four random sources
 /// to one fixed set, then split by group. Returns the global game time of
 /// the split (the new islands' derivation time).
-fn regroup(scene: &mut Scene, reset: bool) -> i64 {
+pub(super) fn regroup(scene: &mut Scene, reset: bool) -> i64 {
     let world = &mut scene.server.world;
     let partition = world.master.host.partition_mut().expect("多岛开着");
     let ids = partition.island_ids();

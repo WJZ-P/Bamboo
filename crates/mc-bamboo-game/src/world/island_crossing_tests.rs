@@ -18,14 +18,14 @@ use super::{
 };
 
 /// 名单里这名玩家的名字。
-fn name_of(scene: &mut Scene, client: &Client) -> String {
+pub(super) fn name_of(scene: &mut Scene, client: &Client) -> String {
     region_of_player(&mut scene.server.world, client.id).players[&client.id]
         .name
         .clone()
 }
 
 /// 让这名玩家成为 OP（权限等级 4）。
-fn make_op(scene: &mut Scene, client: &Client) {
+pub(super) fn make_op(scene: &mut Scene, client: &Client) {
     region_of_player(&mut scene.server.world, client.id)
         .players
         .get_mut(&client.id)
@@ -43,7 +43,7 @@ fn island_of(scene: &Scene, client: &Client) -> RegionId {
 }
 
 /// 第 `group` 组的第一名玩家。
-fn first_of(scene: &Scene, group: usize) -> Client {
+pub(super) fn first_of(scene: &Scene, group: usize) -> Client {
     scene
         .clients
         .iter()
@@ -111,7 +111,7 @@ fn a_teleport_command_leaves_no_ghost_in_the_senders_player_grid() {
 }
 
 /// 比较窗口里的一步：谁在第几刻做什么。
-enum Act {
+pub(super) enum Act {
     /// 第几组的第一名玩家发一条命令（不带斜杠）。
     Command(usize, &'static str),
     /// 第几组的第一名玩家发一条聊天。
@@ -125,7 +125,7 @@ enum Act {
 }
 
 /// 做一步。`{gN}` 换成第 N 组第一名玩家的名字，`{cN}` 换成第 N 组中心旁边一格的坐标。
-fn act(scene: &mut Scene, step: &Act) {
+pub(super) fn act(scene: &mut Scene, step: &Act) {
     let expand = |scene: &mut Scene, text: &str| {
         let mut out = text.to_owned();
         for group in 0..scene.centers.len() {

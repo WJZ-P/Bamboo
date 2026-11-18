@@ -653,11 +653,12 @@ pub(crate) struct PlayerTables {
     peer_ips: BTreeMap<PlayerId, String>,
     last_action_millis: BTreeMap<PlayerId, i64>,
     /// 借出时岛的时钟。玩家身上有按岛时钟记的绝对时刻（传送确认的 `sent_at`、讲台待发
-    /// 格子的 `deliver_at`），只能借给时钟相同的岛。
+    /// 格子的 `deliver_at`），放进另一个岛时按两岛时钟差平移（计划 5.5.2）。
     ///
     /// The lending island's clock. Players carry absolute instants on the
     /// island clock (`sent_at` of an unconfirmed teleport, `deliver_at` of a
-    /// pending lectern slot), so they may only go to an island with the same clock.
+    /// pending lectern slot); they are rebased by the clock difference when
+    /// the tables enter another island (plan 5.5.2).
     clock: i64,
 }
 
@@ -686,26 +687,37 @@ impl Region {
         }
     }
 
-    /// 收下借来（或还回来）的玩家表。两个岛的时钟必须相同（见 [`PlayerTables::clock`]）。
+    /// 收下借来（或还回来）的玩家表。两个岛的时钟不同时（混合驱动下慢岛落后，计划 5.5），
+    /// 玩家身上按岛时钟记的两样绝对时刻按时钟差平移到这个岛的时钟（见
+    /// [`PlayerTables::clock`]）；还回去时再平移回来，一来一回分毫不差。
     ///
-    /// Take borrowed (or returned) player tables. Both clocks must agree (see
-    /// [`PlayerTables::clock`]).
-    pub(crate) fn take_players(&mut self, tables: PlayerTables) {
+    /// Take borrowed (or returned) player tables. When the clocks differ (a
+    /// slow island lags under the hybrid drive, plan 5.5), the two absolute
+    /// instants players carry are rebased onto this island's clock (see
+    /// [`PlayerTables::clock`]); returning them rebases back exactly.
+    ///
+    /// `shift` 为假时故意不平移（只给改坏确认用，正式路径恒为真）。
+    ///
+    /// `shift = false` skips the rebase on purpose (break-it checks only;
+    /// always true on production paths).
+    pub(crate) fn take_players(&mut self, tables: PlayerTables, shift: bool) {
         let PlayerTables {
-            players,
+            mut players,
             player_grid,
             links,
             menus,
-            lecterns,
+            mut lecterns,
             peer_ips,
             last_action_millis,
             clock,
         } = tables;
-        assert_eq!(
-            clock,
-            self.tick.game_time(),
-            "只能把玩家借给时钟相同的岛（玩家身上有按岛时钟记的绝对时刻）"
-        );
+        let delta = self.tick.game_time() - clock;
+        if delta != 0 && shift {
+            lecterns.rebase(delta);
+            for player in players.values_mut() {
+                player.teleport.sent_at = player.teleport.sent_at.rebased(delta);
+            }
+        }
         for (id, player) in players {
             let previous = self.players.insert(id, player);
             assert!(previous.is_none(), "玩家 {id:?} 在两个岛上");

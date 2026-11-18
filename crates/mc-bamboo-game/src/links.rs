@@ -71,9 +71,49 @@ enum FrameMail {
     Kick(PlayerId, Component),
 }
 
+/// 在一个岛上执行的一小段投递（系统消息逐个看接收者的聊天可见性、命令反馈逐个看是不是
+/// OP、签名聊天逐个接收者打包）。主控当场做一件事时，不在主控手里的岛的那一份记成它，
+/// 岛落地时在自己身上执行（计划 5.5.3）。
+///
+/// A small delivery run on one island (a system message checking each
+/// receiver's chat visibility, command feedback checking for ops, signed chat
+/// packed per receiver). When the master does something at once, the share of
+/// an island that is away is recorded as one of these and runs on that island
+/// when it lands (plan 5.5.3).
+pub(crate) type IslandTask = Arc<dyn Fn(&mut crate::region::Region) + Send + Sync>;
+
+/// 主控延后投给一个不在手里的岛的一条出站投递（计划 5.5.3），岛落地时按顺序执行。
+///
+/// One outbound delivery the master defers for an island that is away (plan
+/// 5.5.3); the island applies them in order when it lands.
+#[derive(Clone)]
+pub(crate) enum FanOut {
+    /// 给这个岛上所有人的帧。
+    All(Arc<[u8]>),
+    /// 给这个岛上某一名玩家的帧（不在这个岛上就丢掉）。
+    To(PlayerId, Arc<[u8]>),
+    /// 踢掉这个岛上的某一名玩家。
+    Kick(PlayerId, Component),
+    /// 在这个岛上执行的一小段投递。
+    Run(IslandTask),
+}
+
+/// 主控当场做一件事时对「不在主控手里的岛」的收集（计划 5.5.3）。
+struct Absent {
+    /// 那些岛上的玩家。
+    ids: std::collections::BTreeSet<PlayerId>,
+    /// 按发生的先后记下的投递。
+    out: Vec<FanOut>,
+}
+
 /// 所有玩家的出站链路。
 #[derive(Default)]
 pub(crate) struct Links {
+    /// 打开时，写不到的部分（给所有人的帧、给不在场玩家的帧）按先后记在这里。
+    ///
+    /// While set, what cannot be written here (frames for everyone, frames for
+    /// players who are away) is recorded in order.
+    absent: Option<Absent>,
     links: BTreeMap<PlayerId, Link>,
     /// 岛的出站信箱：主控执行时打开，写给玩家的包先按顺序投进这里，主控做完这件事
     /// 岛再按原顺序写进各名玩家的缓冲。`depth` 是嵌套层数，回到 0 才应用。
@@ -121,6 +161,58 @@ impl Links {
 
     fn posting(&self) -> bool {
         self.depth > 0
+    }
+
+    /// 开始收集给不在主控手里的岛的投递；`ids` 是那些岛上的玩家（计划 5.5.3）。
+    ///
+    /// Start collecting deliveries for islands that are away; `ids` are the
+    /// players on them (plan 5.5.3).
+    pub(crate) fn begin_fan_out(&mut self, ids: std::collections::BTreeSet<PlayerId>) {
+        debug_assert!(self.absent.is_none(), "收集已经开着");
+        self.absent = Some(Absent {
+            ids,
+            out: Vec::new(),
+        });
+    }
+
+    /// 结束收集，取走记下的投递（按发生的先后）。
+    ///
+    /// Stop collecting and take the recorded deliveries, in order.
+    pub(crate) fn end_fan_out(&mut self) -> Vec<FanOut> {
+        debug_assert!(!self.posting(), "出站信箱还开着就结束收集");
+        self.absent
+            .take()
+            .map(|absent| absent.out)
+            .unwrap_or_default()
+    }
+
+    /// 正在收集时记下一小段要在不在场的岛上执行的投递；没在收集时什么都不做。
+    ///
+    /// Record a delivery to run on the islands that are away, if collecting.
+    pub(crate) fn fan_out(&mut self, task: impl FnOnce() -> IslandTask) {
+        if let Some(absent) = &mut self.absent {
+            absent.out.push(FanOut::Run(task()));
+        }
+    }
+
+    /// 正在收集并且这名玩家在不在场的岛上。
+    fn is_absent(&self, id: PlayerId) -> bool {
+        self.absent
+            .as_ref()
+            .is_some_and(|absent| absent.ids.contains(&id))
+    }
+
+    /// 岛落地时照着做一条延后的投递（[`FanOut::Run`] 由调用方在整个岛上执行）。
+    ///
+    /// Apply one deferred delivery when the island lands ([`FanOut::Run`] is
+    /// run by the caller on the whole island).
+    pub(crate) fn apply_fan_out(&mut self, item: &FanOut) {
+        match item {
+            FanOut::All(frames) => self.broadcast(frames),
+            FanOut::To(to, frames) => self.send_frames(*to, frames),
+            FanOut::Kick(to, reason) => self.kick(*to, reason),
+            FanOut::Run(_) => {}
+        }
     }
 
     /// 岛拆分：`players` 的链路（连同还没刷出去的缓冲）搬进一份新的。只在岛停放时调用，
@@ -196,6 +288,20 @@ impl Links {
             }
             return;
         }
+        if self.is_absent(to) {
+            let mut frames = Vec::new();
+            let item = match append_frame(&mut frames, packet) {
+                Ok(()) => FanOut::To(to, frames.into()),
+                Err(error) => {
+                    warn!(%error, player = to.0, "kicking a player whose packet cannot be encoded");
+                    FanOut::Kick(to, Component::translate(PACKET_ERROR, []))
+                }
+            };
+            if let Some(absent) = &mut self.absent {
+                absent.out.push(item);
+            }
+            return;
+        }
         let Some(link) = self.open_link(to) else {
             return;
         };
@@ -209,6 +315,12 @@ impl Links {
     pub(crate) fn send_frames(&mut self, to: PlayerId, frames: &[u8]) {
         if self.posting() {
             self.mail.push(FrameMail::To(to, frames.to_vec()));
+            return;
+        }
+        if self.is_absent(to) {
+            if let Some(absent) = &mut self.absent {
+                absent.out.push(FanOut::To(to, frames.into()));
+            }
             return;
         }
         if let Some(link) = self.open_link(to) {
@@ -235,6 +347,9 @@ impl Links {
         }
         for link in self.links.values_mut().filter(|link| link.open) {
             link.buffer.push_raw(frames);
+        }
+        if let Some(absent) = &mut self.absent {
+            absent.out.push(FanOut::All(frames.into()));
         }
     }
 
@@ -266,6 +381,12 @@ impl Links {
     pub(crate) fn kick(&mut self, to: PlayerId, reason: &Component) {
         if self.posting() {
             self.mail.push(FrameMail::Kick(to, reason.clone()));
+            return;
+        }
+        if self.is_absent(to) {
+            if let Some(absent) = &mut self.absent {
+                absent.out.push(FanOut::Kick(to, reason.clone()));
+            }
             return;
         }
         let Some(link) = self.open_link(to) else {

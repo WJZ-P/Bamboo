@@ -217,4 +217,20 @@ pub(crate) fn success(region: &mut Region, source: PlayerId, message: Component,
     for id in ops {
         crate::chat::send_system_message(region, id, &admin, false);
     }
+    // 不在主控手里的岛上的 OP：那个岛落地时照同样的条件自己发（计划 5.5.3）。
+    // Ops on islands that are away: the island sends under the same rule
+    // when it lands (plan 5.5.3).
+    region.links.fan_out(|| {
+        std::sync::Arc::new(move |region: &mut Region| {
+            let ops: Vec<PlayerId> = region
+                .players
+                .iter()
+                .filter(|(id, player)| **id != source && player.is_op)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in ops {
+                crate::chat::send_system_message(region, id, &admin, false);
+            }
+        })
+    });
 }
