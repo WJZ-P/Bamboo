@@ -150,9 +150,11 @@ async fn prepare() -> Result<(Server, SocketAddr, String), String> {
     let config = ServerConfig {
         online_mode: true,
         session_server_url: format!("http://{session_address}/session/minecraft/hasJoined"),
-        // 对拍：显式选齐步驱动（`island_threads = 0`），不靠缺省值（岛的实施计划第 9 节第 7 条）。
-        // Oracle: choose the lockstep drive explicitly, not by default.
+        // 对拍：显式选齐步驱动和一个岛（`island_threads = 0`、`islands = false`），
+        // 不靠缺省值（岛的实施计划第 9 节第 7 条）。
+        // Oracle: choose the lockstep drive and one island explicitly, not by default.
         island_threads: 0,
+        islands: false,
         ..ServerConfig::default()
     };
     let server = Server::new(listener, config)

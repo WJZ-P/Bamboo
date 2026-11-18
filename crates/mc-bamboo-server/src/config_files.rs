@@ -16,9 +16,9 @@ use std::{
 };
 
 use mc_bamboo_game::{
-    DEFAULT_ISLAND_THREADS, ISLAND_THREADS_ENV, MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS,
-    MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MailBudget, island_threads_from_env,
-    world_options::WorldGenConfig,
+    DEFAULT_ISLAND_THREADS, DEFAULT_ISLANDS, ISLAND_THREADS_ENV, ISLANDS_ENV,
+    MAX_CHUNK_WORKER_THREADS, MAX_ENTITY_THREADS, MAX_ISLAND_THREADS, MAX_MAIL_BUDGET, MailBudget,
+    island_threads_from_env, islands_from_env, world_options::WorldGenConfig,
 };
 use toml::{Table, Value};
 use tracing::{info, warn};
@@ -139,6 +139,7 @@ const BAMBOO_KEYS: &[&str] = &[
     "deliveries_per_tick",
     "reclaims_per_tick",
     "island_threads",
+    "islands",
 ];
 
 /// Bamboo 自己的配置项。每一项都对应 [`ServerConfig`] 里的一个字段。
@@ -175,6 +176,14 @@ pub struct BambooConfig {
     /// detached, parallel to the master (default 1). `BAMBOO_ISLAND_THREADS`
     /// overrides it at run time but is never written back to the file.
     pub island_threads: usize,
+    /// 多岛：`false` = 整个世界一个岛（精确模式，默认）；`true` = 分区器把相距很远的
+    /// 玩家群拆成各自的岛。环境变量 `BAMBOO_ISLANDS` 在运行时盖过它，不写回文件。
+    ///
+    /// Multi-island mode: `false` keeps the whole world one island (exact mode,
+    /// the default); `true` lets the partitioner split distant groups onto
+    /// their own islands. `BAMBOO_ISLANDS` overrides it at run time and is
+    /// never written back to the file.
+    pub islands: bool,
 }
 
 impl Default for BambooConfig {
@@ -197,6 +206,9 @@ impl Default for BambooConfig {
             // The file default ignores the environment: the variable only
             // overrides at run time and must never be written back.
             island_threads: DEFAULT_ISLAND_THREADS,
+            // 文件里的缺省也不跟环境变量走，理由同上。
+            // The file default ignores the environment for the same reason.
+            islands: DEFAULT_ISLANDS,
         }
     }
 }
@@ -255,6 +267,10 @@ impl BambooConfig {
                 "# 岛的 tick 线程数：0 = 精确模式（岛在世界线程上跑，和官方逐位一致）；\n",
                 "# >= 1 = 岛在这么多条线程上和主控并行跑（默认 1），区块交付晚一刻。\n",
                 "island_threads = {}\n",
+                "\n",
+                "# 多岛：false = 整个世界一个岛（精确模式，默认）；true = 相距很远的玩家群\n",
+                "# 各自一个岛。要求逐位一致的对拍和探针显式选 false。\n",
+                "islands = {}\n",
             ),
             self.pre_play_timeout.as_secs(),
             self.max_pre_play_connections,
@@ -269,6 +285,7 @@ impl BambooConfig {
             self.deliveries_per_tick,
             self.reclaims_per_tick,
             self.island_threads,
+            self.islands,
         )
     }
 
@@ -347,6 +364,7 @@ impl BambooConfig {
                 0,
                 MAX_ISLAND_THREADS,
             ),
+            islands: boolean(table, "islands", file, defaults.islands),
         }
     }
 }
@@ -733,6 +751,7 @@ impl ConfigFiles {
             // `BAMBOO_ISLAND_THREADS`, when set, overrides the file (oracles and
             // probes use it to put a whole process in exact mode).
             island_threads: island_threads_from_env().unwrap_or(self.bamboo.island_threads),
+            islands: islands_from_env().unwrap_or(self.bamboo.islands),
             world_gen,
             broadcast_console_to_ops: self.official.broadcast_console_to_ops,
             // 从真实 server.properties 建起来的命令行版才读进程 stdin；嵌入用法不读。
@@ -769,6 +788,9 @@ impl ConfigFiles {
         // Under the environment override the value came from the variable; keep the file's.
         if island_threads_from_env().is_none() {
             bamboo.island_threads = config.island_threads;
+        }
+        if islands_from_env().is_none() {
+            bamboo.islands = config.islands;
         }
         Self { official, bamboo }
     }
@@ -915,6 +937,11 @@ impl ConfigFiles {
                 self.bamboo.island_threads as u64,
                 defaults.bamboo.island_threads as u64,
             ),
+            (
+                "islands",
+                u64::from(self.bamboo.islands),
+                u64::from(defaults.bamboo.islands),
+            ),
         ];
         for (key, value, default) in bamboo {
             if value != default {
@@ -1045,6 +1072,16 @@ pub fn log_startup(directory: &Path, files: &ConfigFiles) {
             "island_threads comes from the environment, not bamboo.toml"
         );
     }
+    if let Some(islands) = islands_from_env()
+        && islands != files.bamboo.islands
+    {
+        info!(
+            env = ISLANDS_ENV,
+            islands,
+            file = files.bamboo.islands,
+            "islands comes from the environment, not bamboo.toml"
+        );
+    }
     let unsupported = files.unsupported_keys();
     if !unsupported.is_empty() {
         warn!(keys = %unsupported.join(", "), "these server.properties keys are not implemented by Bamboo yet and currently have no effect");
@@ -1130,6 +1167,9 @@ mod tests {
         assert_eq!(defaults.bamboo.deliveries_per_tick, 64);
         assert_eq!(defaults.bamboo.reclaims_per_tick, 64);
         assert_eq!(defaults.bamboo.island_threads, 1);
+        // 多岛在这一步验收之前保持关（岛的实施计划第 6 节第 10 步）。
+        // Multi-island stays off until step 10 is accepted (island plan, 6).
+        assert!(!defaults.bamboo.islands);
         assert_eq!(defaults.bamboo.forwarding, ForwardingMode::Off);
     }
 
@@ -1224,7 +1264,7 @@ mod tests {
         let dir = Temp::new();
         fs::write(
             dir.path().join(BAMBOO_FILE),
-            "entity_threads = -1\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\n",
+            "entity_threads = -1\ndeliveries_per_tick = \"many\"\nkeep_alive_seconds = 99\nforwarding = \"other\"\nreclaims_per_tick = 16\nisland_threads = -2\nislands = \"true\"\n",
         )
         .unwrap();
         let loaded = read(dir.path()).unwrap();
@@ -1234,6 +1274,29 @@ mod tests {
         assert_eq!(loaded.bamboo.forwarding, ForwardingMode::Off);
         assert_eq!(loaded.bamboo.reclaims_per_tick, 16);
         assert_eq!(loaded.bamboo.island_threads, 1);
+        assert!(!loaded.bamboo.islands, "坏的多岛值回落到关");
+    }
+
+    /// `islands` 写进文件、读回来、到达 `ServerConfig`，`true` 和 `false` 都不丢。
+    ///
+    /// `islands` survives a file round trip and reaches `ServerConfig`, both
+    /// when on and when off.
+    #[test]
+    fn islands_round_trip_and_reach_server_config() {
+        let dir = Temp::new();
+        for value in [true, false] {
+            let mut files = ConfigFiles::default();
+            files.bamboo.islands = value;
+            write(dir.path(), &files).unwrap();
+            assert_eq!(read(dir.path()).unwrap().bamboo.islands, value);
+            assert_eq!(
+                read(dir.path())
+                    .unwrap()
+                    .to_server_config(dir.path())
+                    .islands,
+                islands_from_env().unwrap_or(value)
+            );
+        }
     }
 
     #[test]

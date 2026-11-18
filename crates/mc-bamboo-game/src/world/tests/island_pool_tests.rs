@@ -77,13 +77,13 @@ fn the_detached_island_ticks_on_its_own_thread() {
         let _client = server.join("Kitten");
         assert_eq!(server.world.master.pool.as_ref().unwrap().threads(), 1);
         let seen = Arc::new(Mutex::new(None));
-        server.world.island.test_hook = Some(IslandTestHook::RecordThread(Arc::clone(&seen)));
+        server.world.islands.test_hook = Some(IslandTestHook::RecordThread(Arc::clone(&seen)));
         for _ in 0..5 {
             server.tick();
         }
         assert_eq!(seen.lock().unwrap().as_deref(), Some("bamboo-island-0"));
         assert_ne!(thread::current().name(), Some("bamboo-island-0"));
-        let profiler = &server.world.island.region.profiler;
+        let profiler = &server.world.islands.region.profiler;
         for metric in [
             Metric::MasterBusy,
             Metric::IslandBusy,
@@ -95,10 +95,10 @@ fn the_detached_island_ticks_on_its_own_thread() {
         let mut server = Harness::new_loaded_with_drive(2, IslandDrive::Lockstep);
         assert!(server.world.master.pool.is_none());
         let seen = Arc::new(Mutex::new(None));
-        server.world.island.test_hook = Some(IslandTestHook::RecordThread(Arc::clone(&seen)));
+        server.world.islands.test_hook = Some(IslandTestHook::RecordThread(Arc::clone(&seen)));
         server.tick();
         assert_eq!(*seen.lock().unwrap(), None, "齐步不走 tick 线程的入口");
-        let profiler = &server.world.island.region.profiler;
+        let profiler = &server.world.islands.region.profiler;
         assert_eq!(
             profiler
                 .histogram(Series::Metric(Metric::IslandHandoff))
@@ -183,10 +183,10 @@ fn an_island_panic_reaches_the_world_thread() {
     let (message, home) = with_timeout(|| {
         let mut server = Harness::new_loaded_with_drive(2, IslandDrive::Detached);
         server.tick();
-        server.world.island.test_hook = Some(IslandTestHook::Panic);
+        server.world.islands.test_hook = Some(IslandTestHook::Panic);
         let outcome = catch_unwind(AssertUnwindSafe(|| server.world.tick()));
         let message = outcome.err().map(|payload| panic_text(payload.as_ref()));
-        (message, server.world.island.is_home())
+        (message, server.world.islands.is_home())
     });
     assert_eq!(message.as_deref(), Some("岛的测试 panic"));
     assert!(home);
@@ -213,7 +213,7 @@ fn shutdown_gives_up_on_a_stuck_island_but_still_saves_global_state() {
         }
         server.world.master.island_stop_timeout = Duration::from_millis(300);
         let release = Arc::new(AtomicBool::new(false));
-        server.world.island.test_hook = Some(IslandTestHook::Stall(Arc::clone(&release)));
+        server.world.islands.test_hook = Some(IslandTestHook::Stall(Arc::clone(&release)));
         let sender = server.inbox_sender();
         let (done, result) = mpsc::channel();
         let ticker = thread::Builder::new()
@@ -237,7 +237,7 @@ fn shutdown_gives_up_on_a_stuck_island_but_still_saves_global_state() {
         let server = ticker.join().unwrap();
         assert!(broke, "关服结束世界循环");
         assert!(waited >= Duration::from_millis(300), "先等够 {waited:?}");
-        assert!(!server.world.island.is_home(), "岛还卡在线程上");
+        assert!(!server.world.islands.is_home(), "岛还卡在线程上");
         let time = server.world.master.global.time().0;
         drop(server);
         // 让卡住的线程走完、自己退出；交回的通道已经没人收了。
@@ -270,7 +270,7 @@ fn arm_a_falling_sand(server: &mut Harness) -> (BlockPos, BlockPos) {
     let marker = BlockPos::new(5, -60, 5);
     server.set_block(marker, blocks::GLOWSTONE);
     server.set_block(sand, blocks::SAND);
-    server.world.island.region.block_ticks.schedule(
+    server.world.islands.region.block_ticks.schedule(
         sand,
         mc_bamboo_data::block_id_of_state(blocks::SAND).expect("沙子是方块"),
         1,
@@ -410,14 +410,14 @@ fn handoff_cost() {
             server.world.tick_unpaced();
         }
         client.take_frames();
-        server.world.island.region.profiler.reset_samples();
+        server.world.islands.region.profiler.reset_samples();
         let started = Instant::now();
         for _ in 0..TICKS {
             server.world.tick_unpaced();
         }
         let per_tick = started.elapsed().as_secs_f64() * 1e6 / TICKS as f64;
         client.take_frames();
-        let profiler = &server.world.island.region.profiler;
+        let profiler = &server.world.islands.region.profiler;
         let handoff = profiler.histogram(Series::Metric(Metric::IslandHandoff));
         let mean = |h: &crate::profiler::Histogram| {
             if h.count() == 0 {

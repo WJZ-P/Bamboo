@@ -34,12 +34,16 @@ pub type SaveSeq = u64;
 /// region 的编号。现在只有一个 region（0），类型上留着给分区器。
 pub type RegionId = u32;
 
-/// 现在唯一的岛。交付、收回、换档都发给它；第 10 步起交付的目标岛由分区器给出，
-/// 收回和换档按区块所在的岛分组。
+/// 家岛：单岛时唯一的岛，Director 发出的交付、收回、换档都带这个编号。多岛时（第 10 步）
+/// 宿主不看这个编号，交付按分区器给的岛投，收回和换档按区块所在的岛分组；
+/// `Delivered` 回执带回真正收下的岛，`Owner::Region` 记的就是它，拆合时宿主改记。
 ///
-/// The only island for now. Deliveries, reclaims and level changes all go to
-/// it; from step 10 the partitioner picks a delivery's target island and
-/// reclaims / level changes are grouped by the island that holds each chunk.
+/// The home island: the only one with a single island, and the id on every
+/// delivery, reclaim and level change the Director sends. With several
+/// islands (step 10) the host ignores it: deliveries go to the partitioner's
+/// island, reclaims and level changes are grouped by each chunk's island, the
+/// `Delivered` ack carries the island that really took the chunk (what
+/// `Owner::Region` records), and the host re-owns chunks on splits and merges.
 pub const HOME_REGION: RegionId = 0;
 
 /// 区块现在归谁。任何时刻一份盒子恰好在一个地方。
@@ -649,6 +653,22 @@ impl<C: ChunkBundle> Director<C> {
                 owner: record.owner,
             })
             .collect()
+    }
+
+    /// 岛拆合以后，已交付区块改记到新的岛名下（岛的实施计划第 10 步）。只改
+    /// `Owner::Region` 的编号，别的状态都不动；不是 `Region` 的记录不变。返回改了没有。
+    ///
+    /// After an island split or merge, re-own a delivered chunk by its new
+    /// island (island plan, step 10). Only the id of `Owner::Region` changes;
+    /// records in any other state are left alone. Returns whether it changed.
+    pub fn reassign_region(&mut self, pos: ChunkPos, region: RegionId) -> bool {
+        match self.chunks.get_mut(&pos) {
+            Some(record) if matches!(record.owner, Owner::Region(_)) => {
+                record.owner = Owner::Region(region);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// 从和卸载存档同一个计数器里领一个写盘序号。运行中给「仍加载的脏区块」

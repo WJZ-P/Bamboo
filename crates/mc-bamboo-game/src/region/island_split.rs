@@ -42,16 +42,16 @@ use crate::{
 /// entity ticking looks at radius 2, so no neighbourhood may span both parts.
 pub(crate) const ISLAND_GAP: i32 = 3;
 
-/// 新岛的四个随机源（岛的实施计划第 2 节第 15 行、6.2）。拆的时候由调用方给出——
-/// 怎么派生是第 10 步之前要定的事（见计划 3.3「岛的随机源」），拆合本身不替它选；
-/// [`IslandRandom::derive`] 是「只由岛自己的起源 section 派生」的一种具体做法。
-/// 合并时吸收方留自己的，被吸收方的丢掉（总设计稿 6.4「随机源留大的那个」）。
+/// 新岛的三个随机源（岛的实施计划第 2 节第 15 行、6.2）。拆的时候由调用方给出，运行时
+/// 用 [`IslandRandom::derive`]：只由世界种子和岛自己的起源 section 派生（计划 3.3「岛的
+/// 随机源」第 1 条）。合并时吸收方留自己的，被吸收方的丢掉。`/random` 和 `/loot` 的按名
+/// 序列不在岛上，在主控（同一节第 2 条）。
 ///
-/// The new island's four random sources (plan section 2 row 15, 6.2). The
-/// caller supplies them on a split; how they are derived is still to be
-/// decided (plan 3.3), so the split does not choose. [`IslandRandom::derive`]
-/// is one concrete "from the island's own origin section only" scheme. A
-/// merge keeps the absorber's and drops the absorbed island's.
+/// The new island's three random sources (plan section 2 row 15, 6.2). The
+/// caller supplies them on a split; at run time [`IslandRandom::derive`] takes
+/// them from the world seed and the island's own origin section only (plan
+/// 3.3 item 1). A merge keeps the absorber's and drops the absorbed island's.
+/// The named sequences of `/random` and `/loot` live on the master (item 2).
 pub(crate) struct IslandRandom {
     /// 官方 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
@@ -59,25 +59,18 @@ pub(crate) struct IslandRandom {
     pub(crate) sound_seed_generator: LevelRandom,
     /// 战利品表的 `random_sequence`。
     pub(crate) loot_sequences: RandomSequences,
-    /// `/random` 和 `/loot` 的按名序列。
-    pub(crate) random_sequences: RandomSequences,
 }
 
 impl IslandRandom {
     /// 只由（`base`，岛的起源 section）派生，和拆分的先后、原岛的随机状态都无关：同一个
-    /// `base` 下，起源 section 相同的岛总拿到同样的四个随机源。两个按名序列沿用原来的
+    /// `base` 下，起源 section 相同的岛总拿到同样的三个随机源。战利品的按名序列沿用原来的
     /// 世界种子，`salt` 换成按起源 section 派生的值（总设计稿 6.6「按世界种子、序列名、
     /// region 起源 section 派生」）。
     ///
     /// Derived from (`base`, origin section) only, independent of the split
-    /// history and of the parent's random state. The named sequences keep their
+    /// history and of the parent's random state. The loot sequences keep their
     /// world seed with a `salt` derived from the origin section.
-    pub(crate) fn derive(
-        base: i64,
-        origin: SectionPos,
-        loot_world_seed: i64,
-        sequence_world_seed: i64,
-    ) -> Self {
+    pub(crate) fn derive(base: i64, origin: SectionPos, loot_world_seed: i64) -> Self {
         let stream = |index: u64| -> i64 {
             let key = (u64::from(origin.x as u32) << 32) | u64::from(origin.z as u32);
             splitmix(splitmix(base as u64 ^ index.wrapping_mul(0xA24B_AED4_963E_E407)) ^ key) as i64
@@ -91,7 +84,6 @@ impl IslandRandom {
             random: LevelRandom::new(stream(1)),
             sound_seed_generator: LevelRandom::new(stream(2)),
             loot_sequences: sequences(loot_world_seed, 3),
-            random_sequences: sequences(sequence_world_seed, 4),
         }
     }
 }
@@ -234,20 +226,25 @@ impl Region {
     /// 用这个岛的两个按名序列的世界种子，按 [`IslandRandom::derive`] 派生新岛的随机源。
     ///
     /// Derive a new island's random sources with this island's sequence seeds.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "第 10 步由分区器在运行时驱动拆合 / step 10 drives splits and merges at run time"
-        )
-    )]
     pub(crate) fn derive_island_random(&self, base: i64, origin: SectionPos) -> IslandRandom {
-        IslandRandom::derive(
-            base,
-            origin,
-            self.loot_sequences.world_seed(),
-            self.random_sequences.world_seed(),
-        )
+        IslandRandom::derive(base, origin, self.loot_sequences.world_seed())
+    }
+
+    /// 换上一份新的三个随机源（空着的岛被当作新岛接手一块时，计划 3.3「岛的随机源」
+    /// 第 1 条：新岛的随机源只由世界种子和它的起源 section 派生）。
+    ///
+    /// Install a fresh set of the three random sources (an empty island taking
+    /// over a part as a new island, plan 3.3 item 1: a new island's sources come
+    /// from the world seed and its origin section only).
+    pub(crate) fn replace_random(&mut self, random: IslandRandom) {
+        let IslandRandom {
+            random,
+            sound_seed_generator,
+            loot_sequences,
+        } = random;
+        self.random = random;
+        self.sound_seed_generator = sound_seed_generator;
+        self.loot_sequences = loot_sequences;
     }
 
     /// 岛拆分：把位置落在 `chunks` 里的一切和 `players` 的一切整批拆出去，造出新岛的
@@ -424,7 +421,6 @@ impl Region {
             random,
             sound_seed_generator,
             loot_sequences,
-            random_sequences,
         } = random;
         Ok(Region {
             players: new_players,
@@ -448,7 +444,6 @@ impl Region {
                 *self.redstone_cache.config(),
             ),
             loot_sequences,
-            random_sequences,
             sound_seed_generator,
             entities,
             entity_tracking,
@@ -545,7 +540,6 @@ impl Region {
             random: _,
             redstone_cache: _,
             loot_sequences: _,
-            random_sequences: _,
             sound_seed_generator: _,
             entities,
             entity_tracking,
@@ -595,5 +589,92 @@ impl Region {
         self.last_action_millis.extend(last_action_millis);
         self.admin_changes.merge(admin_changes);
         self.partitioning = self.partitioning.fresh_like();
+    }
+}
+
+/// 一批玩家在一个岛上的全部「跟着玩家走」的表（计划 3.3 表里按玩家分的七类：玩家、
+/// 玩家网格、出站链路、菜单、讲台视图和待发格子、对端 IP、最后操作时刻）。主控借玩家
+/// （[`Region::lend_players`]）时整套借出、整套还回，和拆合时搬的是同一套，少一类都会
+/// 让借来的玩家在发起人的岛上留下东西（比如 `/tp` 写进网格的登记）。
+///
+/// Every player-following table of a batch of players on one island (the
+/// seven per-player classes of plan 3.3: players, player grid, outbound
+/// links, menus, lectern views and pending slots, peer IPs, last action).
+/// The master's borrowing ([`Region::lend_players`]) moves the whole set out
+/// and back, the same set a split moves; missing one would leave something of
+/// a borrowed player on the sender's island (such as a grid entry written by
+/// `/tp`).
+pub(crate) struct PlayerTables {
+    players: BTreeMap<PlayerId, crate::player::Player>,
+    player_grid: crate::player_grid::PlayerGrid,
+    links: crate::links::Links,
+    menus: BTreeMap<PlayerId, crate::menu::Menu>,
+    lecterns: crate::lectern::Tables,
+    peer_ips: BTreeMap<PlayerId, String>,
+    last_action_millis: BTreeMap<PlayerId, i64>,
+    /// 借出时岛的时钟。玩家身上有按岛时钟记的绝对时刻（传送确认的 `sent_at`、讲台待发
+    /// 格子的 `deliver_at`），只能借给时钟相同的岛。
+    ///
+    /// The lending island's clock. Players carry absolute instants on the
+    /// island clock (`sent_at` of an unconfirmed teleport, `deliver_at` of a
+    /// pending lectern slot), so they may only go to an island with the same clock.
+    clock: i64,
+}
+
+impl PlayerTables {
+    /// 借出来的玩家，按编号升序。
+    pub(crate) fn ids(&self) -> Vec<PlayerId> {
+        self.players.keys().copied().collect()
+    }
+}
+
+impl Region {
+    /// 把 `players` 的七类表整套借出去（见 [`PlayerTables`]）。不在这个岛上的编号跳过。
+    ///
+    /// Lend the seven tables of `players` (see [`PlayerTables`]); ids not on
+    /// this island are skipped.
+    pub(crate) fn lend_players(&mut self, players: &BTreeSet<PlayerId>) -> PlayerTables {
+        PlayerTables {
+            players: split_players(&mut self.players, players),
+            player_grid: self.player_grid.split_off(players),
+            links: self.links.split_off(players),
+            menus: split_players(&mut self.menus, players),
+            lecterns: self.lecterns.split_off(&BTreeSet::new(), players),
+            peer_ips: split_players(&mut self.peer_ips, players),
+            last_action_millis: split_players(&mut self.last_action_millis, players),
+            clock: self.tick.game_time(),
+        }
+    }
+
+    /// 收下借来（或还回来）的玩家表。两个岛的时钟必须相同（见 [`PlayerTables::clock`]）。
+    ///
+    /// Take borrowed (or returned) player tables. Both clocks must agree (see
+    /// [`PlayerTables::clock`]).
+    pub(crate) fn take_players(&mut self, tables: PlayerTables) {
+        let PlayerTables {
+            players,
+            player_grid,
+            links,
+            menus,
+            lecterns,
+            peer_ips,
+            last_action_millis,
+            clock,
+        } = tables;
+        assert_eq!(
+            clock,
+            self.tick.game_time(),
+            "只能把玩家借给时钟相同的岛（玩家身上有按岛时钟记的绝对时刻）"
+        );
+        for (id, player) in players {
+            let previous = self.players.insert(id, player);
+            assert!(previous.is_none(), "玩家 {id:?} 在两个岛上");
+        }
+        self.player_grid.absorb(player_grid);
+        self.links.absorb(links);
+        self.menus.extend(menus);
+        self.lecterns.absorb(lecterns);
+        self.peer_ips.extend(peer_ips);
+        self.last_action_millis.extend(last_action_millis);
     }
 }

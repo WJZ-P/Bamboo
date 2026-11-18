@@ -36,6 +36,8 @@ pub(crate) const SPLIT_DELAY_TICKS: u64 = 200;
 pub(crate) const CONNECTIVITY_INTERVAL_TICKS: u64 = 20;
 /// 加载等级 ≤ 33 就是「票想要加载」。
 pub(crate) const DESIRED_LEVEL: i32 = 33;
+/// 家岛的编号，和 `HOME_REGION` 一致（运行时一直在）。
+const HOME_ISLAND: u32 = mc_bamboo_world::director::HOME_REGION;
 
 /// 一个 section 的坐标（按区块除以 `SECTION_SIZE`，向负无穷取整）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -149,6 +151,24 @@ pub(crate) struct TopologyEvent {
     pub(crate) sections: Vec<SectionPos>,
 }
 
+/// 运行时要照着做的一次拆合（第 10 步）。按发生的先后排，主控在全部岛停放时逐条照做。
+/// 新建的岛不需要一条：主控第一次往一个还不存在的岛投信或放人时建一个空岛。
+///
+/// One structural change the runtime must replay (step 10), in order; the
+/// master applies them while every island is parked. A new island needs no
+/// entry: the master creates an empty one the first time it posts to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TopologyOp {
+    /// `from` 整个倒进 `into`。
+    Merge { into: u32, from: u32 },
+    /// `from` 里属于 `sections` 的部分拆成新岛 `to`。
+    Split {
+        from: u32,
+        to: u32,
+        sections: BTreeSet<SectionPos>,
+    },
+}
+
 /// 一个区块这一刻的依据变化。`None` 表示这一项没变；两个 `Some` 可以同一格。
 ///
 /// A chunk's membership delta for this tick. `None` means unchanged.
@@ -202,6 +222,11 @@ pub(crate) struct IslandPartition {
     verify: bool,
     pub(crate) now: u64,
     pub(crate) events: Vec<TopologyEvent>,
+    /// 运行时要照做的拆合（第 10 步）。只在 `record_ops` 打开时攒。
+    ops: Vec<TopologyOp>,
+    record_ops: bool,
+    /// 这一刻在 `tick` 之前已经提前应用过的增量带来的计数，`tick` 时并进结果。
+    carried: TickResult,
     /// 改坏确认：故意漏掉一次相邻岛的合并。
     #[cfg(test)]
     pub(crate) skip_merge_once: bool,
@@ -230,6 +255,9 @@ impl IslandPartition {
             verify: false,
             now: 0,
             events: Vec::new(),
+            ops: Vec::new(),
+            record_ops: false,
+            carried: TickResult::default(),
             #[cfg(test)]
             skip_merge_once: false,
             #[cfg(test)]
@@ -241,9 +269,85 @@ impl IslandPartition {
         self.verify = on;
     }
 
+    /// 运行时照着拆合（第 10 步的 `islands = true`）：之后的合并和拆分都记成 [`TopologyOp`]。
+    ///
+    /// Drive the runtime (step 10's `islands = true`): record merges and splits as ops.
+    pub(crate) fn record_ops(&mut self) {
+        self.record_ops = true;
+    }
+
+    /// 取走攒着的拆合。
+    pub(crate) fn take_ops(&mut self) -> Vec<TopologyOp> {
+        std::mem::take(&mut self.ops)
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.islands.len()
+    }
+
+    /// 全部岛的编号，升序。
+    #[cfg(test)]
+    pub(crate) fn island_ids(&self) -> Vec<u32> {
+        self.islands.keys().copied().collect()
+    }
+
+    /// 一个岛按（x，z）最小的 section：新岛的随机源由它派生（计划 3.3「岛的随机源」第 1 条）。
+    pub(crate) fn origin_of(&self, id: u32) -> Option<SectionPos> {
+        self.islands
+            .get(&id)
+            .and_then(|sections| sections.iter().next().copied())
+    }
+
+    /// 区块所在 section 归哪个岛；section 是空的时为 `None`。
+    pub(crate) fn island_of_chunk(&self, chunk: ChunkPos) -> Option<u32> {
+        self.owner
+            .get(&SectionPos::of(chunk))
+            .copied()
+            .filter(|&id| id != u32::MAX)
+    }
+
+    /// 在 `tick` 之前先应用一批增量（第 10 步：投信之前分区器要先知道新区块归哪个岛）。
+    /// 合并当场发生；拆分迟滞仍只在 `tick` 里推进。计数留到 `tick` 时并进结果。
+    ///
+    /// Apply a batch of deltas before `tick` (step 10: the partitioner must
+    /// know a new chunk's island before mail is posted). Merges happen now;
+    /// split hysteresis still only advances in `tick`. Counts are carried
+    /// into `tick`'s result.
+    pub(crate) fn apply_now(&mut self, deltas: &[ChunkDelta]) {
+        if deltas.is_empty() {
+            return;
+        }
+        let mut result = std::mem::take(&mut self.carried);
+        self.apply_deltas(deltas, &mut result);
+        self.carried = result;
+    }
+
+    /// 测试专用：不管距离把 `from` 并进 `into`（并起来永远安全），照常记一条拆合。
+    ///
+    /// Test only: merge `from` into `into` regardless of distance (a merge is
+    /// always safe), recorded as usual.
+    #[cfg(test)]
+    pub(crate) fn force_merge(&mut self, into: u32, from: u32) -> bool {
+        if into == from || !self.islands.contains_key(&into) || !self.islands.contains_key(&from) {
+            return false;
+        }
+        let mut result = std::mem::take(&mut self.carried);
+        self.absorb_islands(into, &BTreeSet::from([into, from]), &mut result);
+        self.carried = result;
+        true
+    }
+
+    /// 测试专用：岛里有相距 ≥ 拆分距离的几块时不等迟滞当场拆开，返回拆出来的新岛。
+    ///
+    /// Test only: split an island whose parts are already far enough apart,
+    /// without waiting for the hysteresis; returns the new islands.
+    #[cfg(test)]
+    pub(crate) fn force_split(&mut self, id: u32) -> Vec<u32> {
+        let mut result = std::mem::take(&mut self.carried);
+        let made = self.split_now(id, &mut result);
+        self.carried = result;
+        made
     }
 
     pub(crate) fn desired_len(&self) -> usize {
@@ -327,7 +431,7 @@ impl IslandPartition {
     pub(crate) fn tick(&mut self, now: u64, deltas: &[ChunkDelta]) -> TickResult {
         let start = Instant::now();
         self.now = now;
-        let mut result = TickResult::default();
+        let mut result = std::mem::take(&mut self.carried);
         self.apply_deltas(deltas, &mut result);
         self.finish_tick(now, &mut result);
         result.nanos = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
@@ -514,8 +618,7 @@ impl IslandPartition {
             }
             smallest
         } else {
-            let id = self.next_id;
-            self.next_id = self.next_id.saturating_add(1);
+            let id = self.fresh_id();
             self.islands.insert(id, BTreeSet::new());
             id
         };
@@ -540,6 +643,12 @@ impl IslandPartition {
                 continue;
             };
             result.merges += 1;
+            if self.record_ops {
+                self.ops.push(TopologyOp::Merge {
+                    into: target,
+                    from: id,
+                });
+            }
             for section in &group {
                 self.owner.insert(*section, target);
             }
@@ -618,35 +727,81 @@ impl IslandPartition {
                 continue;
             }
             self.split_since.remove(&id);
-            // 保留编号最小的那块，其余各建一个新岛。
-            let mut parts = components;
-            parts.sort_by(|a, b| a.iter().next().cmp(&b.iter().next()));
-            let keep = parts.remove(0);
-            if let Some(group) = self.islands.get_mut(&id) {
-                *group = keep.clone();
-            }
-            for section in &keep {
-                self.owner.insert(*section, id);
-            }
-            for part in parts {
-                let new_id = self.next_id;
-                self.next_id = self.next_id.saturating_add(1);
-                for &section in &part {
-                    self.owner.insert(section, new_id);
-                }
-                self.islands.insert(new_id, part.clone());
-                result.splits += 1;
-                self.events.push(TopologyEvent {
-                    at_tick: now,
-                    merge: false,
-                    islands: vec![id, new_id],
-                    sections: part.iter().copied().collect(),
-                });
-            }
+            self.split_components(id, components, result);
         }
         // 登记在册的岛如果已经不存在，清掉记录。
         self.split_since
             .retain(|id, _| self.islands.contains_key(id));
+    }
+
+    /// 一个岛的 section 分成几块：保留编号最小的那块，其余各建一个新岛，返回新岛的编号。
+    fn split_components(
+        &mut self,
+        id: u32,
+        components: Vec<BTreeSet<SectionPos>>,
+        result: &mut TickResult,
+    ) -> Vec<u32> {
+        let mut parts = components;
+        parts.sort_by(|a, b| a.iter().next().cmp(&b.iter().next()));
+        let keep = parts.remove(0);
+        if let Some(group) = self.islands.get_mut(&id) {
+            *group = keep.clone();
+        }
+        for section in &keep {
+            self.owner.insert(*section, id);
+        }
+        let mut made = Vec::new();
+        for part in parts {
+            let new_id = self.fresh_id();
+            for &section in &part {
+                self.owner.insert(section, new_id);
+            }
+            self.islands.insert(new_id, part.clone());
+            result.splits += 1;
+            if self.record_ops {
+                self.ops.push(TopologyOp::Split {
+                    from: id,
+                    to: new_id,
+                    sections: part.clone(),
+                });
+            }
+            self.events.push(TopologyEvent {
+                at_tick: self.now,
+                merge: false,
+                islands: vec![id, new_id],
+                sections: part.iter().copied().collect(),
+            });
+            made.push(new_id);
+        }
+        made
+    }
+
+    /// 测试专用：不等迟滞，按拆分距离当场拆一个岛。
+    #[cfg(test)]
+    fn split_now(&mut self, id: u32, result: &mut TickResult) -> Vec<u32> {
+        let Some(group) = self.islands.get(&id).cloned() else {
+            return Vec::new();
+        };
+        let components = split_group(group, SPLIT_DISTANCE);
+        if components.len() <= 1 {
+            return Vec::new();
+        }
+        self.split_since.remove(&id);
+        self.split_components(id, components, result)
+    }
+
+    /// 新岛的编号：家岛（0）空着就复用它，否则取下一个没用过的。家岛的编号复用让
+    /// 「只有一群人」时那个岛总是家岛（运行时一直有它）。
+    ///
+    /// A new island id: reuse home (0) when it is free, otherwise the next
+    /// unused id, so a lone group always lives on the home island.
+    fn fresh_id(&mut self) -> u32 {
+        if !self.islands.contains_key(&HOME_ISLAND) {
+            return HOME_ISLAND;
+        }
+        let id = self.next_id.max(HOME_ISLAND + 1);
+        self.next_id = id.saturating_add(1);
+        id
     }
 
     /// 当前增量划分的快照，按最小 section 排序。

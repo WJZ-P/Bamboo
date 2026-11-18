@@ -1012,25 +1012,25 @@ fn add_sound_name(builder: &mut Builder, parent: usize) {
 
 fn register_random(builder: &mut Builder, root: usize) {
     let command = builder.literal(root, "random", 0);
-    let actions: [(&str, IslandFn); 2] = [("value", random::value), ("roll", random::roll)];
+    let actions: [(&str, CommandFn); 2] = [("value", random::value), ("roll", random::roll)];
     for (name, action) in actions {
         let branch = builder.literal(command, name, 0);
         let range = builder.argument(branch, "range", ArgumentType::IntRange, 0);
-        builder.run_island(range, action);
+        builder.run(range, action);
         let sequence = builder.argument(
             range,
             "sequence",
             ArgumentType::ResourceLocation,
             permission::GAMEMASTERS,
         );
-        builder.run_island(sequence, action);
+        builder.run(sequence, action);
     }
     let reset = builder.literal(command, "reset", permission::GAMEMASTERS);
     let all = builder.literal(reset, "*", 0);
-    builder.run_island(all, random::reset);
+    builder.run(all, random::reset);
     add_reset_seed(builder, all);
     let sequence = builder.argument(reset, "sequence", ArgumentType::ResourceLocation, 0);
-    builder.run_island(sequence, random::reset);
+    builder.run(sequence, random::reset);
     add_reset_seed(builder, sequence);
 }
 
@@ -1044,11 +1044,11 @@ fn add_reset_seed(builder: &mut Builder, parent: usize) {
         },
         0,
     );
-    builder.run_island(seed, random::reset);
+    builder.run(seed, random::reset);
     let world = builder.argument(seed, "includeWorldSeed", ArgumentType::Bool, 0);
-    builder.run_island(world, random::reset);
+    builder.run(world, random::reset);
     let sequence_id = builder.argument(world, "includeSequenceId", ArgumentType::Bool, 0);
-    builder.run_island(sequence_id, random::reset);
+    builder.run(sequence_id, random::reset);
 }
 
 fn register_enchant(builder: &mut Builder, root: usize) {
@@ -1148,10 +1148,10 @@ fn add_loot_sources(builder: &mut Builder, parent: usize, target: LootTarget) {
 }
 
 fn add_tool_suffixes(builder: &mut Builder, parent: usize, target: LootTarget, source: LootSource) {
-    builder.bind_island(parent, "mainhand", loot_action(target, source));
-    builder.bind_island(parent, "offhand", loot_action(target, source));
+    builder.bind_literal(parent, "mainhand", loot_action(target, source));
+    builder.bind_literal(parent, "offhand", loot_action(target, source));
     let tool = builder.argument(parent, "tool", ArgumentType::Item, 0);
-    builder.run_island(tool, loot_action(target, source));
+    builder.run(tool, loot_action(target, source));
 }
 
 #[derive(Clone, Copy)]
@@ -1162,7 +1162,7 @@ enum LootSource {
     Fish,
 }
 
-fn loot_action(target: LootTarget, source: LootSource) -> IslandFn {
+fn loot_action(target: LootTarget, source: LootSource) -> CommandFn {
     match (target, source) {
         (LootTarget::Give, LootSource::Loot) => loot::give_loot,
         (LootTarget::Give, LootSource::Mine) => loot::give_mine,
@@ -1188,7 +1188,7 @@ fn loot_action(target: LootTarget, source: LootSource) -> IslandFn {
 }
 
 fn bind_loot(builder: &mut Builder, parent: usize, target: LootTarget, source: LootSource) {
-    builder.run_island(parent, loot_action(target, source));
+    builder.run(parent, loot_action(target, source));
 }
 
 /// `WorldBorderCommand.register`：整棵树要等级 2。距离是 `doubleArg(-MAX, MAX)`，

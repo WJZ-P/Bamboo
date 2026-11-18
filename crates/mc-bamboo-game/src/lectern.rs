@@ -113,6 +113,11 @@ impl Tables {
         );
     }
 
+    /// 这名玩家开着讲台。
+    pub(crate) fn has_view(&self, player: PlayerId) -> bool {
+        self.views.contains_key(&player)
+    }
+
     /// 测试核对拆合用：看讲台的玩家和有待发格子的玩家。
     #[cfg(test)]
     pub(crate) fn player_keys(&self) -> (Vec<PlayerId>, Vec<PlayerId>) {

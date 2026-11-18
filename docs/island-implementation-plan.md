@@ -258,8 +258,8 @@
 
 | 类 | 命令 | 多岛时 |
 |---|---|---|
-| 只动本岛 | `setblock`、`fill`、`clone`、`particle`、`playsound`、`loot`、`random`、`enchant`、`clear` / `give` / `gamemode` / `stopsound` / `spawnpoint` / `title` / `tellraw` / `kick` / `transfer`（目标都在本岛时） | 当场执行，同现在 |
-| 只动全局 | `time`、`weather`、`gamerule`、`difficulty`、`worldborder`、`seed`、`setworldspawn`、`defaultgamemode`、`op` / `deop` / `ban` / `ban-ip` / `banlist` / `pardon` / `pardon-ip` / `whitelist`、`save-all` / `save-on` / `save-off`、`stop`、`setidletimeout`、`version`、`help`、`list`、`scoreboard`、`team`、`bossbar` | 岛把（来源、命令行）作为效果交回，主控执行，反馈和帧经信箱回来 |
+| 只动本岛 | `setblock`、`fill`、`clone`、`particle`、`playsound`、`enchant`、`clear` / `give` / `gamemode` / `stopsound` / `spawnpoint` / `title` / `tellraw` / `kick` / `transfer`（目标都在本岛时） | 当场执行，同现在 |
+| 只动全局 | `time`、`weather`、`gamerule`、`difficulty`、`worldborder`、`seed`、`setworldspawn`、`defaultgamemode`、`op` / `deop` / `ban` / `ban-ip` / `banlist` / `pardon` / `pardon-ip` / `whitelist`、`save-all` / `save-on` / `save-off`、`stop`、`setidletimeout`、`version`、`help`、`list`、`scoreboard`、`team`、`bossbar`、`loot`、`random`（第 10 步改：按名随机序列全世界一份、挪到主控，见 3.3「岛的随机源」第 2 条） | 岛把（来源、命令行）作为效果交回，主控执行，反馈和帧经信箱回来 |
 | 可能跨岛 | 带 `@a` / `@p` / 玩家名的 `tp`、`give`、`clear`、`gamemode`、`kick`、`title`、`tellraw`、`msg` / `tell` / `w`、`me`、`say` | 选择器先在本岛解析；有本岛以外的目标时交给主控按岛拆成子命令下发，各岛下一刻执行并回报，主控汇总反馈（6.6「最多晚两刻」） |
 
 只有一个岛时（第 1–7 步、精确模式）三类都当场执行，和现在逐位相同。

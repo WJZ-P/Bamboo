@@ -2,7 +2,14 @@
 //!
 //! 随机流复用 `mc-bamboo-loot` 的 `RandomSequences`，种子规则按官方
 //! `RandomSequences.createSequence`。`/random value|roll <range>` 不带序列名时
-//! 用世界的 `Level.random`（Bamboo 的 `Region.random`）。
+//! 用世界的 `Level.random`（Bamboo 的 `Region.random`，发令人所在的岛）。按名序列全世界
+//! 一份、放在主控上（`Global.random_sequences`，岛的实施计划 3.3「岛的随机源」第 2 条），
+//! 所以 `/random` 是全局类命令（4.4），在主控上执行。
+//!
+//! Named sequences are one per world on the master (`Global.random_sequences`,
+//! island plan 3.3 item 2), so `/random` is a global command (4.4) that runs
+//! on the master; without a sequence it draws from the sender's island
+//! `Level.random`.
 
 use mc_bamboo_blocks::random::RandomSource;
 use mc_bamboo_command::{ParsedCommand, Value};
@@ -13,7 +20,7 @@ use mc_bamboo_protocol::{
 
 use crate::{
     command::feedback::{self, CommandFail, fail},
-    global_port::GlobalPort,
+    global::Global,
     inbound::PlayerId,
     links::encode_frames,
     region::Region,
@@ -22,7 +29,7 @@ use crate::{
 /// 官方 `randomSample`：不带序列名时从 `Level.random` 取数，带序列名时从
 /// 服务器的 `RandomSequences` 取。范围按 `MinMaxBounds.Ints` 解析。
 pub(crate) fn sample(
-    _port: &mut GlobalPort<'_>,
+    global: &mut Global,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
@@ -43,7 +50,7 @@ pub(crate) fn sample(
     }
     let value = match parsed.get("sequence").and_then(Value::as_str) {
         Some(name) => {
-            let source = region.random_sequences.get(name);
+            let source = global.random_sequences.get(name);
             source.next_int(max - min + 1) + min
         }
         None => RandomSource::next_int_between_inclusive(region.random.source(), min, max),
@@ -81,31 +88,31 @@ pub(crate) fn sample(
 }
 
 pub(crate) fn value(
-    port: &mut GlobalPort<'_>,
+    global: &mut Global,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    sample(port, region, id, parsed, false)
+    sample(global, region, id, parsed, false)
 }
 
 pub(crate) fn roll(
-    port: &mut GlobalPort<'_>,
+    global: &mut Global,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    sample(port, region, id, parsed, true)
+    sample(global, region, id, parsed, true)
 }
 
 /// 官方 `resetSequence` / `resetAllSequences` / `resetAllSequencesAndSetNewDefaults`。
 pub(crate) fn reset(
-    _port: &mut GlobalPort<'_>,
+    global: &mut Global,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
 ) -> Result<(), CommandFail> {
-    let sequences = &mut region.random_sequences;
+    let sequences = &mut global.random_sequences;
     let sequence_name = parsed.get("sequence").and_then(Value::as_str);
     let count = if let Some(salt) = parsed.get("seed").and_then(Value::as_integer) {
         // 官方的两条 reset 分支：`*` 改全局默认后清空；带名字的只替换这一条。
@@ -188,13 +195,13 @@ mod tests {
     fn named_sequences_share_a_stream_and_reset_returns_to_the_first_value() {
         let (mut global, mut region, id) = world();
         let expected = {
-            let source = region.random_sequences.get("minecraft:test");
+            let source = global.random_sequences.get("minecraft:test");
             let first = source.next_int(10);
             let second = source.next_int(10);
             (first, second)
         };
-        region.random_sequences.reset("minecraft:test");
-        let source = region.random_sequences.get("minecraft:test");
+        global.random_sequences.reset("minecraft:test");
+        let source = global.random_sequences.get("minecraft:test");
         assert_eq!(source.next_int(10), expected.0);
         // 命令树里带名字的 value 也能解析。
         assert!(
@@ -210,7 +217,7 @@ mod tests {
             "random value 1..10 minecraft:test",
             None,
         );
-        assert_eq!(region.random_sequences.len(), 1);
+        assert_eq!(global.random_sequences.len(), 1);
     }
 
     #[test]

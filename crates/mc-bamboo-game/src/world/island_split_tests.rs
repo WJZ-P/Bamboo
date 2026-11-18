@@ -47,16 +47,16 @@ use crate::{
 };
 
 /// 远期计划刻的延迟：比任何一次测试跑的刻数都长，一直排着。
-const PARKED_DELAY: i32 = 400;
+pub(super) const PARKED_DELAY: i32 = 400;
 /// 两半分开跑到第几刻时各自做一次「中途的事」（见 [`mid_run`]）。
 const MID_RUN_STEP: u64 = 2;
 
 /// 地面上一格。
-const Y: i32 = -60;
+pub(super) const Y: i32 = -60;
 /// 两组之间的基本间隔（区块）。
 const GROUP_GAP: i32 = 24;
 
-fn rng(seed: u64) -> impl FnMut() -> u64 {
+pub(super) fn rng(seed: u64) -> impl FnMut() -> u64 {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     move || {
         state ^= state << 13;
@@ -67,7 +67,7 @@ fn rng(seed: u64) -> impl FnMut() -> u64 {
 }
 
 /// 测试线程的栈给足：`World` 很大，调试构建按值搬它时栈余量很薄。
-fn with_stack(test: impl FnOnce() + Send + 'static) {
+pub(super) fn with_stack(test: impl FnOnce() + Send + 'static) {
     let handle = std::thread::Builder::new()
         .stack_size(256 << 20)
         .spawn(test)
@@ -78,40 +78,40 @@ fn with_stack(test: impl FnOnce() + Send + 'static) {
 }
 
 /// 一个世界里算过的区块内容哈希，按（位置，版本号）记。
-type ChunkHashes =
+pub(super) type ChunkHashes =
     std::collections::HashMap<(ChunkPos, mc_bamboo_world::store::ChunkRevision), u64>;
 
-struct Scene {
-    server: Harness,
-    centers: Vec<ChunkPos>,
+pub(super) struct Scene {
+    pub(super) server: Harness,
+    pub(super) centers: Vec<ChunkPos>,
     /// （组号，客户端）。
-    clients: Vec<(usize, Client)>,
-    hashes: ChunkHashes,
+    pub(super) clients: Vec<(usize, Client)>,
+    pub(super) hashes: ChunkHashes,
 }
 
 /// 这个世界的岛现在的指纹。
-fn print(scene: &mut Scene, strict: bool) -> Vec<String> {
+pub(super) fn print(scene: &mut Scene, strict: bool) -> Vec<String> {
     let Scene {
         server,
         centers,
         hashes,
         ..
     } = scene;
-    fingerprint(&server.world.island.region, centers, strict, hashes)
+    fingerprint(&server.world.islands.region, centers, strict, hashes)
 }
 
-fn chebyshev(a: ChunkPos, b: ChunkPos) -> i32 {
+pub(super) fn chebyshev(a: ChunkPos, b: ChunkPos) -> i32 {
     (a.x - b.x).abs().max((a.z - b.z).abs())
 }
 
-fn group_of(centers: &[ChunkPos], chunk: ChunkPos) -> usize {
+pub(super) fn group_of(centers: &[ChunkPos], chunk: ChunkPos) -> usize {
     (0..centers.len())
         .min_by_key(|&index| chebyshev(centers[index], chunk))
         .expect("至少一组")
 }
 
 /// 三组的中心：出生点那组，加上按种子挑的两个方向。
-fn centers_for(seed: u64) -> Vec<ChunkPos> {
+pub(super) fn centers_for(seed: u64) -> Vec<ChunkPos> {
     let mut next = rng(seed);
     let directions = [(1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, 1), (1, -1)];
     let first = (next() % directions.len() as u64) as usize;
@@ -131,23 +131,33 @@ fn centers_for(seed: u64) -> Vec<ChunkPos> {
     out
 }
 
-fn at(center: ChunkPos, x: i32, y: i32, z: i32) -> BlockPos {
+pub(super) fn at(center: ChunkPos, x: i32, y: i32, z: i32) -> BlockPos {
     BlockPos::new(center.x * 16 + x, y, center.z * 16 + z)
 }
 
 fn build(seed: u64) -> Scene {
-    let mut server = Harness::new_loaded_with_drive(2, IslandDrive::Lockstep);
+    let mut scene = set_up(
+        seed,
+        Harness::new_loaded_with_drive(2, IslandDrive::Lockstep),
+    );
+    furnish_scene(&mut scene);
+    scene
+}
+
+/// 搭好玩家：每组一到两名玩家，进服后放到组的中心，收完区块。还没有放机器。
+/// 多岛世界里玩家先进家岛，放过去以后由主控搬到那一组的岛上。
+///
+/// Place the players (one or two per group at the group centre, all chunks
+/// received) without the machines. In a multi-island world they join home
+/// and the master moves them to their group's island.
+pub(super) fn set_up(seed: u64, mut server: Harness) -> Scene {
     server
         .world
         .master
         .global
         .rules_mut()
         .assign(mc_bamboo_data::gamerules::RANDOM_TICK_SPEED, "0");
-    server
-        .world
-        .master
-        .global
-        .publish(&mut server.world.island.region);
+    server.world.publish_global();
     let centers = centers_for(seed);
     let mut next = rng(seed ^ 0x5555);
     let mut clients = Vec::new();
@@ -166,21 +176,65 @@ fn build(seed: u64) -> Scene {
     for (_, client) in &clients {
         server.receive_all_chunks(client);
     }
-    let now = server.world.island.region.tick;
+    Scene {
+        server,
+        centers,
+        clients,
+        hashes: ChunkHashes::new(),
+    }
+}
+
+/// 拿着 `chunk` 的岛的 `Region`；哪个岛都没有时是家岛。
+pub(super) fn region_at(world: &mut super::World, chunk: ChunkPos) -> &mut Region {
+    let id = world
+        .islands
+        .island_of_chunk(chunk)
+        .unwrap_or(mc_bamboo_world::director::HOME_REGION);
+    &mut world.islands.get_mut(id).expect("在表里").region
+}
+
+/// 这名玩家所在的岛的 `Region`。
+pub(super) fn region_of_player(world: &mut super::World, id: PlayerId) -> &mut Region {
+    let island = world.islands.island_of_player(id).expect("玩家在世界里");
+    &mut world.islands.get_mut(island).expect("在表里").region
+}
+
+/// 每组放上机器、打开菜单、排好待发的讲台格子和一条方块事件（见 [`furnish`]）。
+pub(super) fn furnish_scene(scene: &mut Scene) {
+    furnish_scene_with_sand(scene, 2)
+}
+
+/// 同 [`Self::furnish_scene`]，`sand_delay` 给出悬空沙子变成实体的计划刻延迟。严格逐字节
+/// 对照（岛的实施计划 6.2 第 2 条）把这次新生成推到比较窗口之后：实体网络 ID 是全进程
+/// 共享的原子分配器给的，多岛按岛编号轮流驱动时，同一批新实体领号的顺序本来就可能和
+/// 一个岛时不同；计划 6.2 第 1 条也明确「实体网络 ID 不进指纹」。沙子方块和计划刻仍留在
+/// 场景里参与拆合和指纹。
+///
+/// Like [`Self::furnish_scene`], with `sand_delay` as the delay of the sand's
+/// scheduled tick that spawns a falling-block entity. The strict byte-for-byte
+/// comparison (plan 6.2 item 2) pushes that spawn past its window: entity
+/// network ids come from a process-wide shared allocator, so several islands
+/// driven in id order may take them in a different order than one island;
+/// plan 6.2 item 1 also says network ids are not part of the fingerprint. The
+/// sand block and its scheduled tick still take part in splits and in the print.
+pub(super) fn furnish_scene_with_sand(scene: &mut Scene, sand_delay: i32) {
+    let Scene {
+        server,
+        centers,
+        clients,
+        ..
+    } = scene;
+    let now = server.world.islands.region.tick;
     for (group, &center) in centers.iter().enumerate() {
+        let region = region_at(&mut server.world, center);
         assert!(
-            server
-                .world
-                .island
-                .region
-                .tick_levels
-                .chunk_ticks_entities(center),
+            region.tick_levels.chunk_ticks_entities(center),
             "第 {group} 组的中心区块要能跑实体"
         );
-        furnish(&mut server.world.island.region, center, group as i32, now);
+        furnish_with_sand(region, center, group as i32, now, sand_delay);
     }
-    for (group, client) in &clients {
-        let region = &mut server.world.island.region;
+    for (group, client) in clients.iter() {
+        let region = region_of_player(&mut server.world, client.id);
         let center = centers[*group];
         assert!(
             crate::menu::open_block(region, client.id, at(center, 2, Y, 2)),
@@ -192,8 +246,8 @@ fn build(seed: u64) -> Scene {
     }
     // 方块事件和还没广播的方块 / 光照变化平时在边界上是空的，这里各排一条，好让
     // 「漏搬一类」的核对每一类都有东西可查。
-    for &center in &centers {
-        let region = &mut server.world.island.region;
+    for &center in centers.iter() {
+        let region = region_at(&mut server.world, center);
         region.push_block_event_for_test(mc_bamboo_blocks::BlockEvent {
             pos: at(center, 15, Y, 15),
             block: block_id_of_state(blocks::STONE).expect("石头"),
@@ -201,16 +255,21 @@ fn build(seed: u64) -> Scene {
             param_b: 0,
         });
     }
-    Scene {
-        server,
-        centers,
-        clients,
-        hashes: ChunkHashes::new(),
-    }
 }
 
-/// 一组的机器和各张带位置的表。`salt` 让各组略有不同。
-fn furnish(region: &mut Region, center: ChunkPos, salt: i32, now: RegionTick) {
+/// 一组的机器和各张带位置的表。`salt` 让各组略有不同，`sand_delay` 是悬空沙子的计划刻
+/// 延迟（见 [`Self::furnish_scene_with_sand`]）。
+///
+/// One group's machines and positioned tables. `salt` makes groups differ;
+/// `sand_delay` is the sand's scheduled tick delay (see
+/// [`Self::furnish_scene_with_sand`]).
+pub(super) fn furnish_with_sand(
+    region: &mut Region,
+    center: ChunkPos,
+    salt: i32,
+    now: RegionTick,
+    sand_delay: i32,
+) {
     let hopper_down = BlockState(blocks::HOPPER)
         .with(FACING_HOPPER, Direction::Down)
         .0;
@@ -325,7 +384,7 @@ fn furnish(region: &mut Region, center: ChunkPos, salt: i32, now: RegionTick) {
     region.block_ticks.schedule(
         sand,
         block_id_of_state(blocks::SAND).expect("沙子"),
-        2,
+        sand_delay,
         TickPriority::Normal,
     );
 
@@ -367,7 +426,12 @@ fn furnish(region: &mut Region, center: ChunkPos, salt: i32, now: RegionTick) {
 /// 新放一个漏斗（方块实体两边都新登记，ordinal 会撞，合并时要重排），再在拆分前那三条
 /// 远期刻的同一个（时刻，优先级）上排三条（顺序号两边各自往上数，合并后每组自己的先后
 /// 要不变）。`elapsed` 是从搭好场景起跑了几刻，`here` 说哪几组在这个岛上。
-fn mid_run(region: &mut Region, centers: &[ChunkPos], here: &BTreeSet<usize>, elapsed: i32) {
+pub(super) fn mid_run(
+    region: &mut Region,
+    centers: &[ChunkPos],
+    here: &BTreeSet<usize>,
+    elapsed: i32,
+) {
     let hopper_down = BlockState(blocks::HOPPER)
         .with(FACING_HOPPER, Direction::Down)
         .0;
@@ -399,13 +463,13 @@ fn mid_run(region: &mut Region, centers: &[ChunkPos], here: &BTreeSet<usize>, el
 
 /// 一刻：和分离驱动在 tick 线程上跑的同一段，再把出站缓冲刷给假客户端。排队的全局
 /// 改动（计分板准则）这里没有主控来应用，丢掉。
-fn step(island: &mut Island) {
+pub(super) fn step(island: &mut Island) {
     run_detached_island(island);
     island.region.links.flush();
     island.effects.clear();
 }
 
-fn hash_of(value: &impl Hash) -> u64 {
+pub(super) fn hash_of(value: &impl Hash) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
@@ -418,7 +482,7 @@ fn hash_of(value: &impl Hash) -> u64 {
 ///
 /// `strict` 为真时连网络 ID、版本号和跨组的先后都比：拆了马上合必须逐位相同。
 /// 为假时只比每组自己的先后：两组各自单独跑时互不影响，跨组的先后没有意义。
-fn fingerprint(
+pub(super) fn fingerprint(
     region: &Region,
     centers: &[ChunkPos],
     strict: bool,
@@ -568,8 +632,8 @@ fn fingerprint(
     out
 }
 
-fn island(scene: &mut Scene) -> &mut Island {
-    &mut scene.server.world.island
+pub(super) fn island(scene: &mut Scene) -> &mut Island {
+    &mut scene.server.world.islands
 }
 
 /// 按组号挑出要拆走的区块和玩家。
@@ -577,7 +641,7 @@ fn parts_of(scene: &Scene, groups: &BTreeSet<usize>) -> (BTreeSet<ChunkPos>, BTr
     let chunks = scene
         .server
         .world
-        .island
+        .islands
         .region
         .chunks
         .loaded_positions()
@@ -616,7 +680,7 @@ fn split(scene: &mut Scene, groups: &BTreeSet<usize>) -> Island {
 /// 一个岛上放错了地方的类别：`inside` 为真时它只该有 `chunks` / `players` 的东西，为假时
 /// 一样都不该有。每一类都查：按位置的看位置所在区块，按玩家的看玩家，岛这一层的信箱
 /// 和存盘名单也看位置。
-fn misplaced(
+pub(super) fn misplaced(
     island: &Island,
     chunks: &BTreeSet<ChunkPos>,
     players: &BTreeSet<PlayerId>,
@@ -781,8 +845,8 @@ fn assert_owned(
 
 /// 场景真的在动：每组的侦测器还在互相触发、漏斗把东西运到了下面的箱子、熔炉在烧、
 /// 水流开了、沙子掉到了地上、实体有人看着。拆合测试只有在这些都发生时才有意义。
-fn assert_alive(scene: &Scene) {
-    let region = &scene.server.world.island.region;
+pub(super) fn assert_alive(scene: &Scene) {
+    let region = &scene.server.world.islands.region;
     let observer = block_id_of_state(blocks::OBSERVER).expect("侦测器");
     for (group, &center) in scene.centers.iter().enumerate() {
         assert!(
@@ -895,7 +959,7 @@ fn apart_then_merged(seed: u64, delta: i64, clock: ClockParts) -> Vec<Vec<String
         if index == MID_RUN_STEP {
             let elapsed = (warm + index) as i32;
             mid_run(
-                &mut scene.server.world.island.region,
+                &mut scene.server.world.islands.region,
                 &scene.centers,
                 &rest,
                 elapsed,
@@ -905,7 +969,7 @@ fn apart_then_merged(seed: u64, delta: i64, clock: ClockParts) -> Vec<Vec<String
         step(island(&mut scene));
         step(&mut child);
     }
-    let gap = scene.server.world.island.region.tick.game_time() - child.region.tick.game_time();
+    let gap = scene.server.world.islands.region.tick.game_time() - child.region.tick.game_time();
     assert_eq!(gap, delta);
     let parent = island(&mut scene);
     parent.region.chunks.finish_light_updates();
@@ -934,7 +998,7 @@ fn never_split(seed: u64) -> Vec<Vec<String>> {
         if index == MID_RUN_STEP {
             let elapsed = (warm + index) as i32;
             mid_run(
-                &mut scene.server.world.island.region,
+                &mut scene.server.world.islands.region,
                 &scene.centers,
                 &all,
                 elapsed,
@@ -945,7 +1009,7 @@ fn never_split(seed: u64) -> Vec<Vec<String>> {
     scene
         .server
         .world
-        .island
+        .islands
         .region
         .chunks
         .finish_light_updates();

@@ -59,6 +59,7 @@
 #   PORT2       --loaded 第二遍的端口（默认 <端口>+1）
 #   SEED_RADIUS seed-world 的半径（默认 8，覆盖视距 8 的跟踪范围）
 #   PROBE_ISLAND_THREADS  岛的 tick 线程数（默认 0 = 精确模式）；default = 用服务端缺省
+#   PROBE_ISLANDS         多岛：默认 0（精确模式），1 打开；default = 用服务端缺省
 
 set -u
 
@@ -90,17 +91,25 @@ export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_TEST_DEBUG=line-ta
 # still hits a running server.
 export BAMBOO_PROBE_STOP=1
 # 探针按精确模式校准：缺省显式选齐步（island_threads = 0），不靠缺省值（岛的实施计划
-# 第 9 节第 7 条）。PROBE_ISLAND_THREADS=<n> 换成别的线程数；=default 不设，走服务端的
-# 缺省配置，用来验「缺省配置下探针也全过」。
-# The probe is calibrated for exact mode: lockstep (island_threads = 0) is chosen
-# explicitly, not by default (island plan, section 9, item 7).
-# PROBE_ISLAND_THREADS=<n> picks another count; =default leaves it unset so the
-# server runs its default configuration.
+# 第 9 节第 7 条）；多岛也显式关掉（BAMBOO_ISLANDS=0）。PROBE_ISLAND_THREADS=<n>
+# 换成别的线程数；PROBE_ISLANDS=1 打开多岛；=default 不设，走服务端的缺省配置，
+# 用来验「缺省配置下探针也全过」。
+# The probe is calibrated for exact mode: lockstep (island_threads = 0) and one
+# island (islands = false) are chosen explicitly, not by default (island plan,
+# section 9, item 7). PROBE_ISLAND_THREADS=<n> picks another thread count;
+# PROBE_ISLANDS=1 turns multi-island mode on; =default leaves either unset so
+# the server runs its default configuration.
 PROBE_ISLAND_THREADS=${PROBE_ISLAND_THREADS:-0}
 if [ "$PROBE_ISLAND_THREADS" = "default" ]; then
     unset BAMBOO_ISLAND_THREADS
 else
     export BAMBOO_ISLAND_THREADS="$PROBE_ISLAND_THREADS"
+fi
+PROBE_ISLANDS=${PROBE_ISLANDS:-0}
+if [ "$PROBE_ISLANDS" = "default" ]; then
+    unset BAMBOO_ISLANDS
+else
+    export BAMBOO_ISLANDS="$PROBE_ISLANDS"
 fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/bamboo-probe.XXXXXX")

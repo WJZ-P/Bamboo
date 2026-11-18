@@ -70,7 +70,8 @@ pub(crate) struct Frame {
     pub(crate) body: Vec<u8>,
 }
 
-/// 假客户端。收到的字节按帧拆开，不解释内容。
+/// 假客户端。收到的字节按帧拆开，不解释内容。克隆出来的是同一个连接的另一个把手。
+#[derive(Clone)]
 pub(crate) struct Client {
     pub(crate) id: PlayerId,
     pub(crate) uuid: Uuid,
@@ -225,7 +226,13 @@ impl Harness {
         loaded: bool,
         threads: usize,
     ) -> Self {
-        Self::build_with(view_distance, loaded, threads)
+        Self::build_with(view_distance, loaded, threads, false)
+    }
+
+    /// 多岛（第 10 步），已加载模式，显式给岛的 tick 线程数（0 = 齐步），不看环境变量。
+    /// Multi-island, loaded mode, with an explicit tick-thread count (0 = lockstep).
+    pub(crate) fn new_islands(view_distance: i32, threads: usize) -> Self {
+        Self::build_with(view_distance, true, threads, true)
     }
 
     /// 主控队列的发端，给要在别的线程上发关服的测试用。
@@ -244,7 +251,7 @@ impl Harness {
         view_distance: i32,
         island_drive: crate::island::IslandDrive,
     ) -> Self {
-        Self::build_with(view_distance, true, threads_for(island_drive))
+        Self::build_with(view_distance, true, threads_for(island_drive), false)
     }
 
     /// 已加载模式 + 区块计算池（不接存档）。
@@ -278,12 +285,23 @@ impl Harness {
         root: &std::path::Path,
         chunk_worker_threads: usize,
     ) -> Self {
-        Self::new_loaded_with_save_threads_and_drive(
+        Self::with_save(
             view_distance,
             root,
             chunk_worker_threads,
-            crate::island::IslandDrive::from_threads(crate::island::default_island_threads()),
+            crate::island::default_island_threads(),
+            crate::island::default_islands(),
         )
+    }
+
+    /// 带存档的多岛世界，显式给岛的 tick 线程数（0 = 齐步）。
+    /// A multi-island world with saving and an explicit tick-thread count.
+    pub(crate) fn new_islands_with_save(
+        view_distance: i32,
+        root: &std::path::Path,
+        threads: usize,
+    ) -> Self {
+        Self::with_save(view_distance, root, 0, threads, true)
     }
 
     /// 同上，另外显式指定驱动（齐步 / 分离），不看环境变量。
@@ -294,17 +312,34 @@ impl Harness {
         chunk_worker_threads: usize,
         island_drive: crate::island::IslandDrive,
     ) -> Self {
+        Self::with_save(
+            view_distance,
+            root,
+            chunk_worker_threads,
+            threads_for(island_drive),
+            false,
+        )
+    }
+
+    fn with_save(
+        view_distance: i32,
+        root: &std::path::Path,
+        chunk_worker_threads: usize,
+        island_threads: usize,
+        islands: bool,
+    ) -> Self {
         let (inbox, receiver) = crate::inbound::channel();
         let config = WorldConfig {
             view_distance,
             world_dir: Some(root.to_path_buf()),
             chunk_worker_threads,
-            island_threads: threads_for(island_drive),
+            island_threads,
+            islands,
             ..Default::default()
         };
         let mut world = World::new(config, receiver);
-        world.island.region.random = LevelRandom::new(0);
-        world.island.region.sound_seed_generator = LevelRandom::new(0);
+        world.islands.region.random = LevelRandom::new(0);
+        world.islands.region.sound_seed_generator = LevelRandom::new(0);
         Self {
             world,
             inbox,
@@ -319,10 +354,11 @@ impl Harness {
             view_distance,
             loaded,
             crate::island::default_island_threads(),
+            crate::island::default_islands(),
         )
     }
 
-    fn build_with(view_distance: i32, loaded: bool, island_threads: usize) -> Self {
+    fn build_with(view_distance: i32, loaded: bool, island_threads: usize, islands: bool) -> Self {
         let (inbox, receiver) = crate::inbound::channel();
         let config = WorldConfig {
             view_distance,
@@ -331,6 +367,7 @@ impl Harness {
             enforce_secure_profile: false,
             admin: Default::default(),
             island_threads,
+            islands,
             ..Default::default()
         };
         let mut world = if loaded {
@@ -339,8 +376,8 @@ impl Harness {
             World::new_infinite_flat_for_tests(config, receiver)
         };
         // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。音效种子会进包，也一样固定。
-        world.island.region.random = LevelRandom::new(0);
-        world.island.region.sound_seed_generator = LevelRandom::new(0);
+        world.islands.region.random = LevelRandom::new(0);
+        world.islands.region.sound_seed_generator = LevelRandom::new(0);
         Self {
             world,
             inbox,
@@ -514,7 +551,7 @@ impl Harness {
     pub(crate) fn move_to_position(&mut self, client: &Client, position: Vec3) {
         let here = self
             .world
-            .island
+            .islands
             .region
             .players
             .get(&client.id)
@@ -523,7 +560,7 @@ impl Harness {
             && !client.is_closed()
             && position.subtract(here).length_sqr() > 100.0
         {
-            crate::player_move::place_player(&mut self.world.island.region, client.id, position);
+            crate::player_move::place_player(&mut self.world.islands.region, client.id, position);
             return;
         }
         self.load_player(client);
@@ -590,7 +627,7 @@ impl Harness {
     /// 无限超平坦模式下每个位置本来就存在，直接返回；已加载模式下用 `Forced`
     /// 票（不过期）保持区块，再按需要推进几刻等交付预算把它们发到 region。
     pub(crate) fn ensure_loaded(&mut self, positions: &[ChunkPos]) {
-        if !self.world.island.region.chunks.is_loaded_mode() {
+        if !self.world.islands.region.chunks.is_loaded_mode() {
             return;
         }
         for &pos in positions {
@@ -603,7 +640,7 @@ impl Harness {
         for _ in 0..64 {
             if positions
                 .iter()
-                .all(|&pos| self.world.island.region.chunks.is_loaded(pos))
+                .all(|&pos| self.world.islands.region.chunks.is_loaded(pos))
             {
                 return;
             }
@@ -630,7 +667,7 @@ impl Harness {
     /// 测量用：清零剖析器样本（只重置样本，不动报告间隔）。
     #[cfg(test)]
     pub(crate) fn clear_profile_samples(&mut self) {
-        self.world.island.region.profiler.reset_samples();
+        self.world.islands.region.profiler.reset_samples();
     }
 
     /// 测量用：取剖析器某个阶段/指标的样本。
@@ -646,7 +683,7 @@ impl Harness {
             ("chunk_sending", Series::Phase(Phase::ChunkSending)),
             ("chunks_delivered", Series::Metric(Metric::ChunksDelivered)),
         ] {
-            let h = self.world.island.region.profiler.histogram(series);
+            let h = self.world.islands.region.profiler.histogram(series);
             out.insert(name, (h.count(), h.sum(), h.p50(), h.p99(), h.max()));
         }
         out
@@ -660,45 +697,45 @@ impl Harness {
     /// 区块帧缓存里的共享帧，按坐标取。版本号变了就返回 `None`。
     pub(crate) fn shared_chunk_frame(&self, pos: ChunkPos) -> Option<Arc<crate::SharedFrames>> {
         self.world
-            .island
+            .islands
             .region
             .chunk_cache
-            .frame(&self.world.island.region.chunks, pos)
+            .frame(&self.world.islands.region.chunks, pos)
     }
 
     /// 缓存里的区块帧条目数。
     pub(crate) fn cached_frame_count(&self) -> usize {
-        self.world.island.region.chunk_cache.frame_count()
+        self.world.islands.region.chunk_cache.frame_count()
     }
 
     /// 缓存里有没有空帧。
     pub(crate) fn has_empty_cached_frame(&self) -> bool {
-        self.world.island.region.chunk_cache.has_empty_frame()
+        self.world.islands.region.chunk_cache.has_empty_frame()
     }
 
     /// 给其他模块的测试直接看世界的状态。
     /// 只读 region（测试断言用）。
     pub(crate) fn world_region(&self) -> &Region {
-        &self.world.island.region
+        &self.world.islands.region
     }
 
     pub(crate) fn region(&mut self) -> &mut Region {
-        &mut self.world.island.region
+        &mut self.world.islands.region
     }
 
     pub(crate) fn island(&mut self) -> &mut crate::island::Island {
-        &mut self.world.island
+        &mut self.world.islands
     }
 
     /// 测试并行驱动时直接设线程数，不碰进程级环境变量（同一进程里测试并行跑）。
     pub(crate) fn set_entity_threads(&mut self, threads: usize) {
-        self.world.island.entity_threads = threads;
+        self.world.islands.entity_threads = threads;
     }
 
     /// 已加载模式的测试专用：本刻交付/收回的个数、信箱里还欠着的个数（含邮筒里
     /// 还没被岛收取的；齐步下每刻结束时邮筒是空的）。
     pub(crate) fn director_mail(&self) -> (usize, usize, (usize, usize)) {
-        let mailbox = &self.world.island.mailbox;
+        let mailbox = &self.world.islands.mailbox;
         let (delivered, reclaimed) = mailbox.counters_this_tick();
         let (queued_deliveries, queued_reclaims) = mailbox.backlog();
         let (posted_deliveries, posted_reclaims) = self.world.master.host.posted_counts();
@@ -741,14 +778,14 @@ impl Harness {
     /// position. In lockstep the player is already here when mail is taken, so
     /// this is just "delivered".
     pub(crate) fn footprint_ready(&self, pos: ChunkPos) -> bool {
-        self.world.island.region.chunks.is_loaded(pos)
+        self.world.islands.region.chunks.is_loaded(pos)
             || self.world.master.host.has_posted_delivery(pos)
-            || (self.detached() && self.world.island.mailbox.has_delivery(pos))
+            || (self.detached() && self.world.islands.mailbox.has_delivery(pos))
     }
 
     /// 这一刻从 region 取回的区块数（不含直接从信箱退回的盒子）。
     pub(crate) fn region_reclaims_this_tick(&self) -> usize {
-        self.world.island.mailbox.region_reclaims_this_tick()
+        self.world.islands.mailbox.region_reclaims_this_tick()
     }
 
     /// 测试专用：把每名玩家的加载/生成在途上限改小，模拟慢生成时的积压。
@@ -764,7 +801,7 @@ impl Harness {
 
     /// 测试专用：改这一刻之后的交付/收回上限（不碰进程级环境变量）。
     pub(crate) fn set_mail_budget(&mut self, budget: crate::director_host::MailBudget) {
-        self.world.island.mailbox.set_budget(budget);
+        self.world.islands.mailbox.set_budget(budget);
     }
 
     /// 测试专用：Director 里已交付/在途的区块数。
@@ -783,12 +820,12 @@ impl Harness {
     #[cfg(test)]
     pub(crate) fn loaded_positions(&self) -> Vec<mc_bamboo_core::ChunkPos> {
         self.world
-            .island
+            .islands
             .region
             .chunks
             .edited_chunks()
             .map(|(pos, _)| pos)
-            .filter(|&pos| self.world.island.region.chunks.is_loaded(pos))
+            .filter(|&pos| self.world.islands.region.chunks.is_loaded(pos))
             .collect()
     }
 
@@ -815,19 +852,19 @@ impl Harness {
 
     /// 给世界里直接塞一个实体，绕过玩家动作。
     pub(crate) fn spawn_entity(&mut self, entity: mc_bamboo_blocks::entity::Entity) -> i32 {
-        let (mut level, ticks) = self.world.island.region.block_level();
+        let (mut level, ticks) = self.world.islands.region.block_level();
         let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
         world.spawn_entity(entity)
     }
 
     /// 给世界里直接写一个方块状态，绕过玩家动作。
     pub(crate) fn set_block(&mut self, pos: BlockPos, state: u32) {
-        self.world.island.region.chunks.set_block(pos, state);
+        self.world.islands.region.chunks.set_block(pos, state);
     }
 
     pub(crate) fn player(&self, client: &Client) -> &crate::player::Player {
         self.world
-            .island
+            .islands
             .region
             .players
             .get(&client.id)
@@ -1218,7 +1255,7 @@ fn stale_leave_is_ignored() {
     server.tick();
 
     assert!(client.take_frames().is_empty());
-    assert_eq!(server.world.island.region.players.len(), 1);
+    assert_eq!(server.world.islands.region.players.len(), 1);
     assert!(!client.is_closed());
 }
 
@@ -1269,7 +1306,7 @@ fn leave_tells_the_others_in_order() {
     assert_eq!(frames[0].body, body_of(expected));
     assert_eq!(frames[2].body[0], 1);
     assert_eq!(frames[2].body[1..], *leaving.uuid.as_bytes());
-    assert_eq!(server.world.island.region.players.len(), 1);
+    assert_eq!(server.world.islands.region.players.len(), 1);
 }
 
 #[test]
@@ -1300,7 +1337,7 @@ fn join_and_leave_in_the_same_tick_leaves_no_ghost() {
     server.leave(&ghost);
     server.tick();
 
-    assert_eq!(server.world.island.region.players.len(), 1);
+    assert_eq!(server.world.islands.region.players.len(), 1);
     assert!(server.world.master.global.left_message(ghost.id).is_none());
     let frames = staying.take_frames();
     let ids: Vec<i32> = frames.iter().map(|frame| frame.id).collect();
@@ -1340,7 +1377,14 @@ fn reconnecting_with_the_same_uuid_in_one_tick_keeps_the_new_player() {
     server.inbox.send(Inbound::Join(Box::new(request))).unwrap();
     server.tick();
 
-    let ids: Vec<PlayerId> = server.world.island.region.players.keys().copied().collect();
+    let ids: Vec<PlayerId> = server
+        .world
+        .islands
+        .region
+        .players
+        .keys()
+        .copied()
+        .collect();
     assert_eq!(ids, [new_id]);
 }
 
@@ -1428,7 +1472,7 @@ fn rejoin_uses_in_flight_player_save_over_stale_disk() {
     server.tick();
 
     // 重进拿到的是离开时的旁观模式（待写内存副本），不是盘上的生存模式旧档。
-    let rejoined = server.world.island.region.players.get(&new_id).unwrap();
+    let rejoined = server.world.islands.region.players.get(&new_id).unwrap();
     assert_eq!(
         rejoined.game_mode,
         GameMode::Spectator,
@@ -1512,13 +1556,13 @@ fn d6_saves_a_loaded_dirty_chunk_and_keeps_it_loaded() {
         .host
         .set_io(ChunkIo::open(&dir).unwrap());
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
-    server.world.island.region.touch(BlockPos::new(3, -60, 3));
+    server.world.islands.region.touch(BlockPos::new(3, -60, 3));
     // 只读快照照复查「中 6」会推迟有待算光照的区块，先让光照算完。
-    server.world.island.region.chunks.finish_light_updates();
+    server.world.islands.region.chunks.finish_light_updates();
     // 和正式路径一样走写路径的改动标记；测试直接改 ChunkStore 时补一下。
     server
         .world
-        .island
+        .islands
         .region
         .touch(mc_bamboo_core::BlockPos::new(3, -60, 3));
 
@@ -1528,12 +1572,12 @@ fn d6_saves_a_loaded_dirty_chunk_and_keeps_it_loaded() {
             .world
             .master
             .host
-            .save_loaded_dirty(&mut server.world.island, t, true);
+            .save_loaded_dirty(&mut server.world.islands.all_mut(), t, true);
     }
     server.world.master.host.flush_io();
 
     assert!(
-        server.world.island.region.chunks.is_loaded(pos),
+        server.world.islands.region.chunks.is_loaded(pos),
         "snapshot must not unload the chunk"
     );
     assert!(
@@ -1552,7 +1596,7 @@ fn d6_saves_a_loaded_dirty_chunk_and_keeps_it_loaded() {
             .world
             .master
             .host
-            .save_loaded_dirty(&mut server.world.island, t, true);
+            .save_loaded_dirty(&mut server.world.islands.all_mut(), t, true);
         server.world.master.host.flush_io();
         assert!(
             !written_chunks(&server.world.master.host).contains(&pos),
@@ -1579,13 +1623,13 @@ fn d6_stops_when_auto_save_is_off() {
         .host
         .set_io(ChunkIo::open(&dir).unwrap());
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
-    server.world.island.region.touch(BlockPos::new(3, -60, 3));
+    server.world.islands.region.touch(BlockPos::new(3, -60, 3));
 
     server
         .world
         .master
         .host
-        .save_loaded_dirty(&mut server.world.island, 1, false);
+        .save_loaded_dirty(&mut server.world.islands.all_mut(), 1, false);
     server.world.master.host.flush_io();
     assert!(
         written_chunks(&server.world.master.host).is_empty(),
@@ -1612,26 +1656,26 @@ fn save_all_snapshots_every_dirty_loaded_chunk() {
         .host
         .set_io(ChunkIo::open(&dir).unwrap());
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
-    server.world.island.region.touch(BlockPos::new(3, -60, 3));
+    server.world.islands.region.touch(BlockPos::new(3, -60, 3));
     server.set_block(mc_bamboo_core::BlockPos::new(19, -60, 3), blocks::GLOWSTONE);
-    server.world.island.region.touch(BlockPos::new(19, -60, 3));
+    server.world.islands.region.touch(BlockPos::new(19, -60, 3));
     server
         .world
-        .island
+        .islands
         .region
         .touch(mc_bamboo_core::BlockPos::new(3, -60, 3));
     server
         .world
-        .island
+        .islands
         .region
         .touch(mc_bamboo_core::BlockPos::new(19, -60, 3));
-    server.world.island.region.chunks.finish_light_updates();
+    server.world.islands.region.chunks.finish_light_updates();
 
     server
         .world
         .master
         .host
-        .snapshot_all_dirty(&mut server.world.island, 1);
+        .snapshot_all_dirty(&mut server.world.islands.all_mut(), 1);
     server.world.master.host.flush_io();
     let written = written_chunks(&server.world.master.host);
     assert!(
@@ -1661,7 +1705,7 @@ fn save_all_is_a_force_even_during_save_off() {
     let pos = mc_bamboo_core::ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
-    server.world.island.region.touch(BlockPos::new(3, -60, 3));
+    server.world.islands.region.touch(BlockPos::new(3, -60, 3));
 
     server
         .world
@@ -1752,8 +1796,8 @@ fn d6_saves_a_chunk_with_only_a_container_edit() {
     // 只往容器表放一个条目，不改任何方块：ChunkStore 的版本号不会变，
     // 写路径的改动标记要让它照样被 D6 写下去。
     let chest = mc_bamboo_core::BlockPos::new(3, -60, 3);
-    server.world.island.region.touch(chest);
-    server.world.island.region.containers.insert(
+    server.world.islands.region.touch(chest);
+    server.world.islands.region.containers.insert(
         chest,
         crate::container::ContainerEntry::new(crate::container::ContainerKind::Chest),
     );
@@ -1762,7 +1806,7 @@ fn d6_saves_a_chunk_with_only_a_container_edit() {
         .world
         .master
         .host
-        .save_loaded_dirty(&mut server.world.island, 1, true);
+        .save_loaded_dirty(&mut server.world.islands.all_mut(), 1, true);
     server.world.master.host.flush_io();
     assert!(
         written_chunks(&server.world.master.host).contains(&pos),
@@ -1774,7 +1818,7 @@ fn d6_saves_a_chunk_with_only_a_container_edit() {
 #[test]
 fn save_all_sends_success_after_handoff() {
     let mut server = Harness::new_loaded(2);
-    server.world.island.region.global.send_command_feedback = true;
+    server.world.islands.region.global.send_command_feedback = true;
     let client = server.join("Admin");
     server.tick();
     client.take_frames();
@@ -1813,7 +1857,7 @@ fn save_all_flush_success_waits_for_the_io_barrier() {
     let dir = WorldDir::new(&tmp.0);
     dir.create_layout().unwrap();
     let mut server = Harness::new_loaded(2);
-    server.world.island.region.global.send_command_feedback = true;
+    server.world.islands.region.global.send_command_feedback = true;
     let client = server.join("Admin");
     server.tick();
     client.take_frames();
@@ -1861,7 +1905,7 @@ fn non_flush_save_all_with_io_waits_for_the_mailbox_barrier() {
     let dir = WorldDir::new(&tmp.0);
     dir.create_layout().unwrap();
     let mut server = Harness::new_loaded(2);
-    server.world.island.region.global.send_command_feedback = true;
+    server.world.islands.region.global.send_command_feedback = true;
     let client = server.join("Admin");
     server.tick();
     client.take_frames();
@@ -1914,14 +1958,14 @@ fn save_all_reports_failed_when_the_io_write_fails() {
     }
 
     let mut server = Harness::new_loaded(2);
-    server.world.island.region.global.send_command_feedback = true;
+    server.world.islands.region.global.send_command_feedback = true;
     let client = server.join("Admin");
     server.tick();
     client.take_frames();
     let pos = mc_bamboo_core::ChunkPos::new(0, 0);
     server.ensure_loaded(&[pos]);
     server.set_block(mc_bamboo_core::BlockPos::new(3, -60, 3), blocks::GLOWSTONE);
-    server.world.island.region.touch(BlockPos::new(3, -60, 3));
+    server.world.islands.region.touch(BlockPos::new(3, -60, 3));
     server.world.master.host.set_io(io);
 
     server
@@ -2003,14 +2047,14 @@ fn refused_sink_is_closed_and_the_player_waits_for_its_leave() {
     server.tick();
 
     assert!(refusing.is_closed());
-    assert!(!server.world.island.region.links.is_open(refusing.id));
-    assert_eq!(server.world.island.region.players.len(), 2);
+    assert!(!server.world.islands.region.links.is_open(refusing.id));
+    assert_eq!(server.world.islands.region.players.len(), 2);
     // Bob 走出了 Alice 的视距。
     assert_eq!(staying.take_ids(), [clientbound::REMOVE_ENTITIES]);
 
     server.leave(&refusing);
     server.tick();
-    assert_eq!(server.world.island.region.players.len(), 1);
+    assert_eq!(server.world.islands.region.players.len(), 1);
     assert!(!staying.is_closed());
     assert_eq!(
         frames_with_id(&staying.take_frames(), clientbound::SYSTEM_CHAT).len(),
@@ -2056,7 +2100,7 @@ fn nan_position_kicks_and_later_requests_are_ignored() {
 
     server.leave(&client);
     server.tick();
-    assert!(server.world.island.region.players.is_empty());
+    assert!(server.world.islands.region.players.is_empty());
 }
 
 #[test]
@@ -2090,7 +2134,7 @@ fn requests_from_players_that_left_are_dropped_with_their_quota() {
     server.tick();
 
     assert_eq!(server.in_flight.load(Ordering::Relaxed), 0);
-    assert!(server.world.island.region.players.is_empty());
+    assert!(server.world.islands.region.players.is_empty());
 }
 
 #[test]
@@ -2099,13 +2143,13 @@ fn edited_chunk_is_resent_with_the_edit() {
     let client = server.join_and_settle("Kitten");
     client.take_frames();
     let edited = ChunkPos::new(0, 0);
-    let flat = server.world.island.region.template_body.clone();
+    let flat = server.world.islands.region.template_body.clone();
 
     let pos = BlockPos::new(1, -60, 1);
     assert!(
         server
             .world
-            .island
+            .islands
             .region
             .chunks
             .set_block(pos, blocks::CHEST)
@@ -2134,7 +2178,7 @@ fn edited_chunk_is_resent_with_the_edit() {
         .iter()
         .find(|frame| chunk_position(frame) == edited)
         .expect("这个区块又进入了视图");
-    let store = &server.world.island.region.chunks;
+    let store = &server.world.islands.region.chunks;
     assert!(store.edited(edited).is_some(), "这个区块改过了");
     let current = encode_chunk(store, edited);
     assert_eq!(chunk_body(resent), current);
@@ -2155,7 +2199,7 @@ fn new_player_receives_chunks_edited_before_it_joined() {
     server.ensure_loaded(&[edited]);
     server
         .world
-        .island
+        .islands
         .region
         .chunks
         .set_block(pos, blocks::STONE);
@@ -2169,7 +2213,7 @@ fn new_player_receives_chunks_edited_before_it_joined() {
         .iter()
         .find(|frame| chunk_position(frame) == edited)
         .expect("3×3 里有这个区块");
-    assert_ne!(chunk_body(chunk), server.world.island.region.template_body);
+    assert_ne!(chunk_body(chunk), server.world.islands.region.template_body);
 }
 
 #[test]
@@ -2384,7 +2428,7 @@ fn profiler_charges_every_phase_once_per_tick() {
         assert_eq!(
             server
                 .world
-                .island
+                .islands
                 .region
                 .profiler
                 .histogram(Series::Phase(phase))
@@ -2396,7 +2440,7 @@ fn profiler_charges_every_phase_once_per_tick() {
     assert_eq!(
         server
             .world
-            .island
+            .islands
             .region
             .profiler
             .histogram(Series::Metric(Metric::TickTotal))
@@ -2413,7 +2457,7 @@ fn profiler_charges_every_phase_once_per_tick() {
         assert_eq!(
             server
                 .world
-                .island
+                .islands
                 .region
                 .profiler
                 .histogram(Series::Metric(metric))
@@ -2422,7 +2466,7 @@ fn profiler_charges_every_phase_once_per_tick() {
             "{metric:?}"
         );
     }
-    let report = server.world.island.region.profiler.report();
+    let report = server.world.islands.region.profiler.report();
     assert!(report.contains("phases (by mean):"));
     for phase in [
         "inbox",
@@ -2449,7 +2493,7 @@ fn profiler_charges_every_phase_once_per_tick() {
 fn early_return_from_inbox_still_finishes_the_tick_timing() {
     let mut server = Harness::new(2);
     server.tick();
-    server.world.island.region.profiler.reset_samples();
+    server.world.islands.region.profiler.reset_samples();
 
     server.inbox.send(Inbound::Shutdown).unwrap();
     assert!(server.world.tick().is_break());
@@ -2457,7 +2501,7 @@ fn early_return_from_inbox_still_finishes_the_tick_timing() {
     assert_eq!(
         server
             .world
-            .island
+            .islands
             .region
             .profiler
             .histogram(Series::Phase(Phase::Inbox))
@@ -2467,7 +2511,7 @@ fn early_return_from_inbox_still_finishes_the_tick_timing() {
     assert_eq!(
         server
             .world
-            .island
+            .islands
             .region
             .profiler
             .histogram(Series::Metric(Metric::TickTotal))
@@ -2477,7 +2521,7 @@ fn early_return_from_inbox_still_finishes_the_tick_timing() {
     assert_eq!(
         server
             .world
-            .island
+            .islands
             .region
             .profiler
             .histogram(Series::Metric(Metric::InboundMessages))
@@ -2493,7 +2537,7 @@ fn chunk_latency_counts_wall_time_between_entering_pending_and_sending() {
     // 第一刻：区块进入 pending，并发出最近的 9 个。
     server.tick();
     client.take_frames();
-    server.world.island.region.profiler.reset_samples();
+    server.world.islands.region.profiler.reset_samples();
 
     // 确认上一批，下一刻继续发，延迟按「进入 pending 到写出」的刻数记。
     server.acknowledge_batch(&client, 10.0);
@@ -2501,14 +2545,14 @@ fn chunk_latency_counts_wall_time_between_entering_pending_and_sending() {
 
     let latency = server
         .world
-        .island
+        .islands
         .region
         .profiler
         .histogram(Series::Metric(Metric::ChunkLatencyUs));
     assert!(latency.count() > 0);
     let chunks_sent = server
         .world
-        .island
+        .islands
         .region
         .profiler
         .histogram(Series::Metric(Metric::ChunksSent));
@@ -2525,8 +2569,11 @@ fn world_time_advances_once_per_tick() {
     }
 
     assert_eq!(server.world.master.global.time().0, 5);
-    assert_eq!(server.world.island.region.block_ticks.now(), 5);
-    assert_eq!(server.world.island.region.tick.since(Default::default()), 5);
+    assert_eq!(server.world.islands.region.block_ticks.now(), 5);
+    assert_eq!(
+        server.world.islands.region.tick.since(Default::default()),
+        5
+    );
 }
 
 /// 存盘 → 重开：官方 `PrimaryLevelData.parse` 从 `level.dat` 的 `Time` 接着走，
@@ -2569,16 +2616,16 @@ fn save_and_reopen_resumes_game_time_day_time_and_scheduled_ticks() {
             server.tick();
         }
         // 排一个计划刻，记录到点时刻相对当前游戏时间的差。
-        server.world.island.region.block_ticks.schedule(
+        server.world.islands.region.block_ticks.schedule(
             pos,
             mc_bamboo_data::blocks::STONE as usize,
             TICK_DELAY,
             mc_bamboo_blocks::ticks::TickPriority::Normal,
         );
-        let saved_now = server.world.island.region.block_ticks.now();
+        let saved_now = server.world.islands.region.block_ticks.now();
         let before: Vec<i64> = server
             .world
-            .island
+            .islands
             .region
             .block_ticks
             .pending()
@@ -2607,12 +2654,12 @@ fn save_and_reopen_resumes_game_time_day_time_and_scheduled_ticks() {
         "游戏时间要从 level.dat 的 Time 恢复"
     );
     assert_eq!(
-        reopened.world.island.region.block_ticks.now(),
+        reopened.world.islands.region.block_ticks.now(),
         saved_time,
         "岛的时钟从恢复的游戏时间起算"
     );
     assert_eq!(
-        reopened.world.island.region.tick.game_time(),
+        reopened.world.islands.region.tick.game_time(),
         saved_time,
         "岛的模拟时钟也从恢复的游戏时间起算"
     );
@@ -2642,7 +2689,7 @@ fn save_and_reopen_resumes_game_time_day_time_and_scheduled_ticks() {
     let delivered_at = saved_time + i64::from(reopened.detached());
     let after: Vec<i64> = reopened
         .world
-        .island
+        .islands
         .region
         .block_ticks
         .pending()
@@ -2654,7 +2701,7 @@ fn save_and_reopen_resumes_game_time_day_time_and_scheduled_ticks() {
         reopened.tick();
         assert_eq!(reopened.world.master.global.time().0, resume_at + step);
         assert_eq!(
-            reopened.world.island.region.block_ticks.now(),
+            reopened.world.islands.region.block_ticks.now(),
             resume_at + step
         );
     }
@@ -2749,7 +2796,7 @@ fn start_fall_flying_is_refused_with_the_current_flags() {
 
     server
         .world
-        .island
+        .islands
         .region
         .players
         .get_mut(&client.id)
@@ -3225,7 +3272,7 @@ fn setblock_then_save_all_flush_persists_the_block() {
     server.ensure_loaded(&[chunk]);
     server
         .world
-        .island
+        .islands
         .region
         .players
         .get_mut(&client.id)
@@ -3238,7 +3285,7 @@ fn setblock_then_save_all_flush_persists_the_block() {
     );
     server.tick();
     assert_eq!(
-        server.world.island.region.chunks.block(pos),
+        server.world.islands.region.chunks.block(pos),
         Some(blocks::DIAMOND_BLOCK)
     );
     server
@@ -3285,10 +3332,10 @@ fn each_world_has_its_own_entity_id_allocator() {
             mc_bamboo_protocol::item::ItemStack::new(1, 1),
         )
     };
-    let entities = &mut first.world.island.region.entities;
+    let entities = &mut first.world.islands.region.entities;
     assert_eq!(entities.spawn(item()), FIRST_ENTITY_ID);
     assert_eq!(entities.spawn(item()), FIRST_ENTITY_ID + 1);
-    let other = &second.world.island.region.entities;
+    let other = &second.world.islands.region.entities;
     assert_eq!(other.ids_handle().peek(), FIRST_ENTITY_ID);
     assert!(!other.ids_handle().same_counter(entities.ids_handle()));
 }
@@ -3303,15 +3350,15 @@ fn the_island_clock_drives_scheduled_ticks() {
     let mut server = Harness::new(8);
     for _ in 0..5 {
         server.tick();
-        let region = &server.world.island.region;
+        let region = &server.world.islands.region;
         let time = server.world.master.global.time().0;
         assert_eq!(region.tick.game_time(), time);
         assert_eq!(region.block_ticks.now(), time);
     }
-    server.world.island.region.rebase_clock(1_000);
+    server.world.islands.region.rebase_clock(1_000);
     server.tick();
     let time = server.world.master.global.time().0;
-    let region = &server.world.island.region;
+    let region = &server.world.islands.region;
     assert_eq!(time, 6);
     assert_eq!(region.tick.game_time(), 1_006);
     assert_eq!(region.block_ticks.now(), 1_006);

@@ -7,7 +7,7 @@ use mc_bamboo_blocks::random::RandomSource;
 use mc_bamboo_data::gamerules;
 use mc_bamboo_protocol::packet::play::GameEvent;
 
-use crate::{global::Global, links::encode_frames, region::Region};
+use crate::{global::Global, links::encode_frames};
 
 /// `ServerLevel` 的四个 `IntProvider`（`UniformInt.sample`）。
 const RAIN_DELAY: (i32, i32) = (12_000, 180_000);
@@ -20,12 +20,19 @@ const LEVEL_STEP: f32 = 0.01;
 /// `ServerLevel.tick` 的天气阶段：在 `tickTime` 之前，只在 `advance_weather` 为真时推进倒计时。
 ///
 /// 广播顺序照 `advanceWeatherCycle`：先两个强度变化，再开始/停止下雨（变化时无条件再发两个强度包）。
-/// 返回要广播的帧，由世界线程统一发出去。
-pub(crate) fn advance(global: &mut Global, region: &Region) -> Vec<u8> {
+/// 返回要广播的帧，由世界线程统一发出去。`random` 是官方的 `this.random`：单岛时是唯一
+/// 那个岛的 `Level.random`，多岛时是主控自己的（岛的实施计划 3.3「岛的随机源」第 4 条）。
+///
+/// Returns the frames to broadcast. `random` is vanilla's `this.random`: the
+/// only island's `Level.random` with one island, the master's own with several.
+pub(crate) fn advance(
+    global: &mut Global,
+    random: &mc_bamboo_blocks::random::LevelRandom,
+) -> Vec<u8> {
     let was_raining = global.state().weather.is_raining();
     let advance = global.rules().bool(gamerules::ADVANCE_WEATHER);
     if advance {
-        let random = region.random.source();
+        let random = random.source();
         let mut state = global.state().weather;
         if state.clear_time > 0 {
             state.clear_time -= 1;
@@ -134,7 +141,7 @@ mod tests {
             },
             receiver,
         );
-        world.island.region.random = LevelRandom::new(0);
+        world.islands.region.random = LevelRandom::new(0);
         world
     }
 
@@ -149,23 +156,23 @@ mod tests {
         state.o_rain_level = 1.0;
         state.thunder_level = 0.0;
         state.o_thunder_level = 0.0;
-        world.master.global.publish(&mut world.island.region);
+        world.master.global.publish(&mut world.islands.region);
 
         // 饱和的雨强在 `clear_time` 的分支里保持不变，但每一刻仍可能因为
         // `o_rain_level != rain_level` 发强度包；这里只关心状态倒计时。
         for _ in 0..2 {
-            let _ = advance(&mut world.master.global, &world.island.region);
-            world.master.global.publish(&mut world.island.region);
+            let _ = advance(&mut world.master.global, &world.islands.region.random);
+            world.master.global.publish(&mut world.islands.region);
         }
         assert_eq!(world.master.global.state().weather.rain_time, 0);
         assert!(!world.master.global.state().weather.raining);
         // 官方在 WeatherData 翻转后仍要 80 刻渐变才发 STOP_RAINING。
         for _ in 0..20 {
-            let _ = advance(&mut world.master.global, &world.island.region);
+            let _ = advance(&mut world.master.global, &world.islands.region.random);
         }
         assert!(world.master.global.state().weather.is_raining());
         for _ in 0..60 {
-            let _ = advance(&mut world.master.global, &world.island.region);
+            let _ = advance(&mut world.master.global, &world.islands.region.random);
         }
         assert!(!world.master.global.state().weather.is_raining());
         assert!(world.master.global.state().weather.rain_level <= 0.2);
@@ -181,7 +188,7 @@ mod tests {
             .assign(gamerules::ADVANCE_WEATHER, "false");
         let state = world.master.global.state().weather;
         for _ in 0..10 {
-            let _ = advance(&mut world.master.global, &world.island.region);
+            let _ = advance(&mut world.master.global, &world.islands.region.random);
         }
         assert_eq!(world.master.global.state().weather, state);
     }
@@ -189,7 +196,7 @@ mod tests {
     #[test]
     fn a_fresh_world_starts_a_clear_delay() {
         let mut world = world();
-        let _ = advance(&mut world.master.global, &world.island.region);
+        let _ = advance(&mut world.master.global, &world.islands.region.random);
         let state = world.master.global.state().weather;
         assert!(!state.raining);
         assert!(!state.thundering);

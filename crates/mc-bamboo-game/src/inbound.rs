@@ -260,7 +260,9 @@ impl InboundReceiver {
 /// [`Request`](Inbound::Request) 和 [`Leave`](Inbound::Leave)。
 ///
 /// The sender of one player's own queue, held by the connection task. It only
-/// carries that player's `Request` and `Leave`.
+/// carries that player's `Request` and `Leave`. Cloning gives another handle
+/// to the same queue; the shared stamp keeps their sequence numbers ordered.
+#[derive(Clone)]
 pub struct PlayerSender {
     stamp: Stamp,
     sender: Sender<Sequenced>,

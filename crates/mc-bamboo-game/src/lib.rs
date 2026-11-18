@@ -106,7 +106,8 @@ pub use inbound::{
 };
 pub use inventory::receive_like_player;
 pub use island::{
-    DEFAULT_ISLAND_THREADS, ISLAND_THREADS_ENV, default_island_threads, island_threads_from_env,
+    DEFAULT_ISLAND_THREADS, DEFAULT_ISLANDS, ISLAND_THREADS_ENV, ISLANDS_ENV,
+    default_island_threads, default_islands, island_threads_from_env, islands_from_env,
 };
 pub use island_pool::MAX_ISLAND_THREADS;
 pub use lectern::{LecternReplay, LecternSnapshot};

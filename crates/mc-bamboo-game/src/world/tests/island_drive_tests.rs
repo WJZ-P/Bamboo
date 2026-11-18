@@ -25,7 +25,7 @@ fn detached_mail_waits_for_the_islands_next_tick() {
         let mut server = Harness::new_loaded_with_drive(2, drive);
         let client = server.join("Kitten");
         server.tick();
-        assert_eq!(server.world.island.state, IslandState::Parked);
+        assert_eq!(server.world.islands.state, IslandState::Parked);
         let first = received_chunks(&client.take_frames());
         match drive {
             IslandDrive::Lockstep => {
@@ -96,8 +96,8 @@ fn detached_saves_encode_the_masters_list_one_tick_later() {
     let _ = written_chunks(&server.world.master.host);
     let edit = BlockPos::new(3, -60, 3);
     server.set_block(edit, blocks::GLOWSTONE);
-    server.world.island.region.touch(edit);
-    server.world.island.region.chunks.finish_light_updates();
+    server.world.islands.region.touch(edit);
+    server.world.islands.region.chunks.finish_light_updates();
 
     server.tick();
     server.world.master.host.flush_io();
@@ -106,7 +106,7 @@ fn detached_saves_encode_the_masters_list_one_tick_later() {
         "这一刻岛只交回改动，主控判脏、出名单"
     );
     assert!(
-        server.world.island.save_plan.encode.contains(&SPAWN),
+        server.world.islands.save_plan.encode.contains(&SPAWN),
         "名单随交回给了岛"
     );
     server.tick();
@@ -133,11 +133,11 @@ fn detached_save_all_folds_in_the_pending_list() {
     }
     let edit = BlockPos::new(5, -60, 5);
     server.set_block(edit, blocks::GLOWSTONE);
-    server.world.island.region.touch(edit);
-    server.world.island.region.chunks.finish_light_updates();
+    server.world.islands.region.touch(edit);
+    server.world.islands.region.chunks.finish_light_updates();
     // 这一刻判脏、出名单，还没编码。
     server.tick();
-    assert!(server.world.island.save_plan.encode.contains(&SPAWN));
+    assert!(server.world.islands.save_plan.encode.contains(&SPAWN));
     server.world.master.host.flush_io();
     let _ = written_chunks(&server.world.master.host);
 
@@ -157,7 +157,7 @@ fn detached_save_all_folds_in_the_pending_list() {
         "save-all 要把名单里还没编码的区块也写下"
     );
     assert!(
-        server.world.island.save_plan.encode.is_empty(),
+        server.world.islands.save_plan.encode.is_empty(),
         "名单已经并进 save-all"
     );
 }

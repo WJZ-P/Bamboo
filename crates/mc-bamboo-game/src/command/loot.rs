@@ -2,6 +2,13 @@
 //!
 //! 目标 `give`、`insert`、`replace`、`spawn` 已接上；来源 `kill` 和 `fish` 要
 //! 别的实体系统，命令树照官方注册，执行时返回合理的失败。
+//!
+//! 战利品表求值读写全世界一份的按名随机序列（`Global.random_sequences`），所以 `/loot`
+//! 是全局类命令（岛的实施计划 3.3「岛的随机源」第 2 条、4.4），在主控上执行。
+//!
+//! Loot tables read and advance the world's one set of named random
+//! sequences (`Global.random_sequences`), so `/loot` is a global command
+//! (island plan 3.3 item 2, 4.4) that runs on the master.
 
 use mc_bamboo_blocks::{
     BlockState, World,
@@ -20,7 +27,7 @@ use crate::{
         players, select,
     },
     container::kind_of,
-    global_port::GlobalPort,
+    global::Global,
     inbound::PlayerId,
     region::Region,
 };
@@ -53,12 +60,12 @@ struct Request {
 macro_rules! variants {
     ($($name:ident : $source:ident, $target:ident;)*) => {
         $(pub(crate) fn $name(
-            port: &mut GlobalPort<'_>,
+            global: &mut Global,
             region: &mut Region,
             id: PlayerId,
             parsed: &ParsedCommand,
         ) -> Result<(), CommandFail> {
-            loot_command(port, region, id, parsed, Request {
+            loot_command(global, region, id, parsed, Request {
                 source: Source::$source,
                 target: Target::$target,
             })
@@ -114,7 +121,7 @@ fn need_entity(request: &Request, parsed: &ParsedCommand) -> Result<(), CommandF
 }
 
 fn loot_command(
-    _port: &mut GlobalPort<'_>,
+    global: &mut Global,
     region: &mut Region,
     id: PlayerId,
     parsed: &ParsedCommand,
@@ -139,7 +146,13 @@ fn loot_command(
         .and_then(Value::as_vec3)
         .map(|coords| coords.position(player.position(), player.yaw, player.pitch))
         .unwrap_or(player.position());
-    let stacks = evaluate(region, parsed, &request, source_position)?;
+    let stacks = evaluate(
+        region,
+        &global.random_sequences,
+        parsed,
+        &request,
+        source_position,
+    )?;
     let count: i32 = stacks.iter().map(|stack| stack.count).sum();
     match request.target {
         Target::Give => {
@@ -301,12 +314,12 @@ fn slot_index(parsed: &ParsedCommand) -> Result<i32, CommandFail> {
 
 fn evaluate(
     region: &Region,
+    sequences: &mc_bamboo_loot::RandomSequences,
     parsed: &ParsedCommand,
     request: &Request,
     pos: BlockPos,
 ) -> Result<Vec<LootStack>, CommandFail> {
     let fallback = region.random.source();
-    let sequences = &region.random_sequences;
     match request.source {
         Source::Loot => {
             let name = parsed

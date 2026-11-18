@@ -74,11 +74,11 @@ fn force(server: &mut Harness, positions: &[ChunkPos], forced: bool) {
 
 fn edit(server: &mut Harness, pos: BlockPos, state: u32) {
     assert!(
-        server.world.island.region.chunks.is_loaded(pos.chunk()),
+        server.world.islands.region.chunks.is_loaded(pos.chunk()),
         "改方块之前区块要已经交付：{pos:?}"
     );
     server.set_block(pos, state);
-    server.world.island.region.touch(pos);
+    server.world.islands.region.touch(pos);
 }
 
 /// 盘上每个区块的两份 NBT（解压后的字节），按 (目录, 位置) 排好。
@@ -141,7 +141,7 @@ fn run_scenario(threads: usize, drive: IslandDrive) -> BTreeMap<(String, i32, i3
             edit(&mut server, block, blocks::GLOWSTONE);
         }
     }
-    server.world.island.region.chunks.finish_light_updates();
+    server.world.islands.region.chunks.finish_light_updates();
     settle(&mut server);
 
     // 2. 卸载左边那块：序列化在池子里做，改过的写盘、原样的丢掉。
@@ -151,7 +151,7 @@ fn run_scenario(threads: usize, drive: IslandDrive) -> BTreeMap<(String, i32, i3
     settle(&mut server);
     for pos in &gone {
         assert!(
-            !server.world.island.region.chunks.is_loaded(*pos),
+            !server.world.islands.region.chunks.is_loaded(*pos),
             "没票的区块要被收回：{pos:?}"
         );
     }
@@ -167,7 +167,7 @@ fn run_scenario(threads: usize, drive: IslandDrive) -> BTreeMap<(String, i32, i3
         let block = BlockPos::new(pos.x * 16 + 1, -59, pos.z * 16 + 1);
         edit(&mut server, block, blocks::GOLD_BLOCK);
     }
-    server.world.island.region.chunks.finish_light_updates();
+    server.world.islands.region.chunks.finish_light_updates();
     settle(&mut server);
 
     // 4. 关服：等池子清空，全部写盘。
@@ -250,7 +250,7 @@ fn a_slow_generator_runs_off_the_world_thread() {
         settle(&mut server);
         for pos in &positions {
             assert!(
-                server.world.island.region.chunks.is_loaded(*pos),
+                server.world.islands.region.chunks.is_loaded(*pos),
                 "线程数 {threads}：区块最终都要交付"
             );
         }
