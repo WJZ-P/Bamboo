@@ -808,6 +808,10 @@ impl World {
         #[cfg(test)]
         self.release_stalls();
         self.take_in_returned();
+        // 这一刻没有岛刚回来时也试一遍：全部岛可能在上一刻的末尾就都停放了。
+        // Try even when no island just came back: they may all have parked at
+        // the end of the last tick.
+        self.drain_held();
         ControlFlow::Continue(())
     }
 

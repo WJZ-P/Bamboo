@@ -2102,3 +2102,112 @@ fn paced_saves_do_not_wait_for_a_slow_island() {
 fn save_all_waits_for_a_slow_island_and_then_saves_everything() {
     bounded(|| run_saves(true));
 }
+
+/// tick 线程比岛少（三个岛、两条线程）、一个岛卡死：健康的岛不能排到卡死的岛那条线程
+/// 后面去。`ticks` 刻以后两个健康的岛的时钟各前进了几刻。`deadline` 给出时每刻带这个
+/// 截止时间跑（卡死用岛自己的测试钩子）；不给时用 `stall_island`、主控等全部没卡的岛。
+///
+/// Fewer tick threads than islands (three islands, two threads) with one
+/// island stuck: a healthy island must not queue behind the stuck island's
+/// thread. Returns how far the two healthy islands' clocks advanced in
+/// `ticks` ticks. With `deadline` every tick runs under that deadline (the
+/// stall is the island's own test hook); without, `stall_island` is used and
+/// the master waits for every island that is not stalled.
+fn healthy_progress_beside_a_stuck_island(
+    ticks: u64,
+    deadline: Option<Duration>,
+    no_shared_queue: bool,
+) -> Vec<i64> {
+    let mut scene = scene(151, 2);
+    for _ in 0..3 {
+        scene.server.tick();
+    }
+    scene
+        .server
+        .world
+        .master
+        .pool
+        .as_mut()
+        .expect("分离驱动")
+        .no_shared_queue = no_shared_queue;
+    let victim = island_of_group(&mut scene, 0);
+    let healthy = [
+        island_of_group(&mut scene, 1),
+        island_of_group(&mut scene, 2),
+    ];
+    let release = Arc::new(AtomicBool::new(false));
+    match deadline {
+        Some(_) => {
+            scene
+                .server
+                .world
+                .islands
+                .get_mut(victim)
+                .expect("停放着")
+                .test_hook = Some(IslandTestHook::Stall(Arc::clone(&release)));
+        }
+        None => scene.server.world.stall_island(victim, 1, ticks),
+    }
+    let clock = |scene: &Scene, id: RegionId| {
+        scene
+            .server
+            .world
+            .islands
+            .parked()
+            .find(|island| island.id == id)
+            .map(|island| island.region.tick.game_time())
+    };
+    let before: Vec<i64> = healthy
+        .iter()
+        .map(|&id| clock(&scene, id).expect("停放着"))
+        .collect();
+    for _ in 0..ticks {
+        match deadline {
+            Some(window) => {
+                assert!(tick_within(&mut scene.server, window).is_continue());
+            }
+            None => scene.server.tick(),
+        }
+    }
+    // 带截止时间的那种：再给按时的岛一点时间回来（不派新的）。
+    // With a deadline: give the on-time islands a moment to return.
+    if deadline.is_some() {
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = scene.server.world.begin_hybrid_tick();
+    }
+    let progress = healthy
+        .iter()
+        .zip(&before)
+        .map(|(&id, start)| clock(&scene, id).map_or(-1, |now| now - start))
+        .collect();
+    release.store(true, std::sync::atomic::Ordering::Release);
+    progress
+}
+
+/// 见 [`healthy_progress_beside_a_stuck_island`]：两条线程、三个岛、一个卡死，另外两个岛
+/// 每刻都照常跑（线程都忙着时岛进公共队列，哪条线程先空出来哪条跑）。改坏确认：改回
+/// 「排到手里岛最少的那条线程后面」，就有一个健康的岛排在卡死的岛后面再也回不来。
+///
+/// See [`healthy_progress_beside_a_stuck_island`]: two threads, three
+/// islands, one stuck, and the other two run every tick (with every thread
+/// busy an island joins the shared queue for whichever frees up first).
+/// Break-it check: queueing behind the least loaded thread again traps a
+/// healthy island behind the stuck one for good.
+#[test]
+fn a_healthy_island_never_queues_behind_a_stuck_one() {
+    bounded(|| {
+        let progress = healthy_progress_beside_a_stuck_island(8, None, false);
+        assert_eq!(progress, vec![8, 8], "两个健康的岛每刻都跑了");
+        let window = Some(Duration::from_millis(150));
+        let progress = healthy_progress_beside_a_stuck_island(6, window, false);
+        assert!(
+            progress.iter().all(|&ticks| ticks >= 1),
+            "带截止时间时两个健康的岛也都在跑：{progress:?}"
+        );
+        let broken = healthy_progress_beside_a_stuck_island(6, window, true);
+        assert!(
+            broken.contains(&-1),
+            "改坏确认：有一个健康的岛排在卡死的岛后面回不来：{broken:?}"
+        );
+    });
+}

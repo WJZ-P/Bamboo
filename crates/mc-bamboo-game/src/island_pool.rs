@@ -5,7 +5,10 @@
 //! 只做自己的事（Director 推进），做完在交回通道上等。
 //!
 //! - 线程常驻，每条显式给 [`ISLAND_THREAD_STACK`] 的栈（调试构建里一刻的调用很深）。
-//! - 岛尽量回到上次跑它的那条线程（[`IslandPool::dispatch`] 的 `hint`）。
+//! - 岛尽量回到上次跑它的那条线程（[`IslandPool::dispatch`] 的 `hint`）；它忙着就给一条
+//!   空着的线程；全都忙着时进公共队列，哪条线程先空出来哪条跑。岛从不排在某一条特定的
+//!   忙线程后面：混合驱动下（岛的实施计划 5.5）那条线程上可能正跑着一个很慢或者卡死的
+//!   岛，排在它后面的健康的岛就被它拖住了。
 //! - 岛的一刻里 panic 不会让线程悄悄死掉：线程接住它，连同岛一起交回，由主控在
 //!   自己的线程上重新抛出，走世界线程原来的崩溃处理（`docs/world-model-design.md` 第 14 节）。
 //! - 线程本身没了（交回通道断开）主控也能发现，同样当成崩溃。
@@ -19,12 +22,20 @@
 //! and handed back with the island so the master re-raises it on its own
 //! thread (the world thread's existing crash path), a vanished thread shows up
 //! as a disconnected hand-back channel, and dropping the pool never waits for
-//! an island that has not come back.
+//! an island that has not come back. When the hinted thread is busy an idle
+//! one is used, and when all are busy the island joins a shared queue served
+//! by whichever thread frees up first: an island never queues behind one
+//! particular busy thread, which under the hybrid drive (island plan 5.5) may
+//! be running a very slow or stuck island.
 
 use std::{
     any::Any,
+    collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    sync::{
+        Arc, Condvar, Mutex, PoisonError,
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -72,19 +83,53 @@ pub(crate) enum Wait {
     Lost,
 }
 
-struct Worker {
-    jobs: Option<Sender<Box<Island>>>,
-    handle: Option<JoinHandle<()>>,
-    /// 交给它、还没交回的岛数。
-    outstanding: usize,
+/// 主控和 tick 线程共用的派发状态，一把锁守着。只在派岛和线程取岛的那一下拿锁，岛跑
+/// 的时候不拿。
+///
+/// The dispatch state shared by the master and the tick threads behind one
+/// lock, held only while handing an island over or taking one, never while an
+/// island runs.
+#[derive(Default)]
+struct Queues {
+    /// 每条线程自己的队列（指名给它的岛）。
+    own: Vec<VecDeque<Box<Island>>>,
+    /// 公共队列：全部线程都忙着时派出的岛，谁先空出来谁跑。
+    shared: VecDeque<Box<Island>>,
+    /// 每条线程手里的岛数：排在它自己队列里的加上正在跑的。
+    busy: Vec<usize>,
+    /// 还活着的线程数。
+    alive: usize,
+    /// 池子关了，线程把手里的跑完就退出。
+    closed: bool,
+}
+
+struct Dispatch {
+    queues: Mutex<Queues>,
+    wake: Condvar,
+}
+
+impl Dispatch {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Queues> {
+        // 线程在 `catch_unwind` 外面 panic 才会毒化；状态只是几条队列，照常用。
+        // Poisoned only if a thread panics outside `catch_unwind`; the state
+        // is a few queues and stays usable.
+        self.queues.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// 岛的 tick 线程池。只有主控用它。
 ///
 /// The island tick-thread pool, used only by the master.
 pub(crate) struct IslandPool {
-    workers: Vec<Worker>,
+    dispatch: Arc<Dispatch>,
+    handles: Vec<Option<JoinHandle<()>>>,
     replies: Receiver<HandBack>,
+    /// 测试专用：全部线程都忙着时不进公共队列，排到手里岛最少的那条线程后面（改坏确认）。
+    ///
+    /// Test only: with every thread busy, queue behind the least loaded one
+    /// instead of using the shared queue (break-it check).
+    #[cfg(test)]
+    pub(crate) no_shared_queue: bool,
 }
 
 impl IslandPool {
@@ -95,59 +140,83 @@ impl IslandPool {
     pub(crate) fn new(threads: usize, body: IslandBody) -> std::io::Result<Self> {
         let threads = threads.clamp(1, MAX_ISLAND_THREADS);
         let (reply_sender, replies) = mpsc::channel();
-        let mut workers = Vec::with_capacity(threads);
+        let dispatch = Arc::new(Dispatch {
+            queues: Mutex::new(Queues {
+                own: (0..threads).map(|_| VecDeque::new()).collect(),
+                shared: VecDeque::new(),
+                busy: vec![0; threads],
+                alive: threads,
+                closed: false,
+            }),
+            wake: Condvar::new(),
+        });
+        let mut handles = Vec::with_capacity(threads);
         for index in 0..threads {
-            let (jobs, inbox) = mpsc::channel::<Box<Island>>();
             let replies = reply_sender.clone();
-            let handle = thread::Builder::new()
+            let shared = Arc::clone(&dispatch);
+            let spawned = thread::Builder::new()
                 .name(format!("bamboo-island-{index}"))
                 .stack_size(ISLAND_THREAD_STACK)
-                .spawn(move || run_worker(index, &inbox, &replies, body))?;
-            workers.push(Worker {
-                jobs: Some(jobs),
-                handle: Some(handle),
-                outstanding: 0,
-            });
+                .spawn(move || run_worker(index, &shared, &replies, body));
+            match spawned {
+                Ok(handle) => handles.push(Some(handle)),
+                Err(error) => {
+                    // 起不来：让已经起来的线程退出。
+                    // Could not start: let the threads already running exit.
+                    dispatch.lock().closed = true;
+                    dispatch.wake.notify_all();
+                    return Err(error);
+                }
+            }
         }
-        Ok(Self { workers, replies })
+        Ok(Self {
+            dispatch,
+            handles,
+            replies,
+            #[cfg(test)]
+            no_shared_queue: false,
+        })
     }
 
     /// 线程数。
     #[cfg(test)]
     pub(crate) fn threads(&self) -> usize {
-        self.workers.len()
+        self.handles.len()
     }
 
-    /// 把岛交给一条线程。`hint` 是上次跑它的线程：它空着就还用它，不然挑最闲的。
-    /// 返回实际交给的线程。线程已经没了时把岛原样退回。
+    /// 把岛交给一条线程。`hint` 是上次跑它的线程：它空着就还用它，不然用一条空着的线程；
+    /// 全都忙着时进公共队列，哪条先空出来哪条跑。线程已经全没了时把岛原样退回。
     ///
     /// Hand an island to a thread: the `hint` thread (the one that ran it
-    /// last) if it is idle, otherwise the least loaded one. Returns the chosen
-    /// thread, or the island itself if that thread is gone.
-    pub(crate) fn dispatch(
-        &mut self,
-        hint: usize,
-        island: Box<Island>,
-    ) -> Result<usize, Box<Island>> {
-        let hint = hint.min(self.workers.len() - 1);
-        let index = if self.workers[hint].outstanding == 0 {
-            hint
-        } else {
-            (0..self.workers.len())
-                .min_by_key(|&index| (self.workers[index].outstanding, index))
-                .unwrap_or(hint)
-        };
-        let worker = &mut self.workers[index];
-        let Some(jobs) = &worker.jobs else {
+    /// last) if it is idle, otherwise an idle one; when all are busy it joins
+    /// the shared queue for whichever frees up first. If every thread is gone
+    /// the island is handed back.
+    pub(crate) fn dispatch(&mut self, hint: usize, island: Box<Island>) -> Result<(), Box<Island>> {
+        let mut queues = self.dispatch.lock();
+        if queues.alive == 0 {
             return Err(island);
-        };
-        match jobs.send(island) {
-            Ok(()) => {
-                worker.outstanding += 1;
-                Ok(index)
-            }
-            Err(mpsc::SendError(island)) => Err(island),
         }
+        let hint = hint.min(queues.busy.len() - 1);
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut idle = if queues.busy[hint] == 0 {
+            Some(hint)
+        } else {
+            (0..queues.busy.len()).find(|&index| queues.busy[index] == 0)
+        };
+        #[cfg(test)]
+        if idle.is_none() && self.no_shared_queue {
+            idle = (0..queues.busy.len()).min_by_key(|&index| (queues.busy[index], index));
+        }
+        match idle {
+            Some(index) => {
+                queues.busy[index] += 1;
+                queues.own[index].push_back(island);
+            }
+            None => queues.shared.push_back(island),
+        }
+        drop(queues);
+        self.dispatch.wake.notify_all();
+        Ok(())
     }
 
     /// 等一个岛交回，最多等 `timeout`。
@@ -155,12 +224,7 @@ impl IslandPool {
     /// Wait up to `timeout` for an island to come back.
     pub(crate) fn wait(&mut self, timeout: Duration) -> Wait {
         match self.replies.recv_timeout(timeout) {
-            Ok(back) => {
-                if let Some(worker) = self.workers.get_mut(back.worker) {
-                    worker.outstanding = worker.outstanding.saturating_sub(1);
-                }
-                Wait::Back(Box::new(back))
-            }
+            Ok(back) => Wait::Back(Box::new(back)),
             Err(RecvTimeoutError::Timeout) => Wait::Pending,
             Err(RecvTimeoutError::Disconnected) => Wait::Lost,
         }
@@ -168,19 +232,22 @@ impl IslandPool {
 }
 
 impl Drop for IslandPool {
-    /// 关掉每条线程的任务通道；空着的线程等它退出，还拿着岛的线程（卡住了）不等。
+    /// 关掉派发；空着的线程等它退出，还拿着岛的线程（卡住了）不等。
     ///
-    /// Close every job channel; wait for idle threads, but never for one that
+    /// Close the dispatch; wait for idle threads, but never for one that
     /// still holds an island (it may be stuck).
     fn drop(&mut self) {
-        for worker in &mut self.workers {
-            worker.jobs = None;
-        }
-        for (index, worker) in self.workers.iter_mut().enumerate() {
-            let Some(handle) = worker.handle.take() else {
+        let busy = {
+            let mut queues = self.dispatch.lock();
+            queues.closed = true;
+            queues.busy.clone()
+        };
+        self.dispatch.wake.notify_all();
+        for (index, handle) in self.handles.iter_mut().enumerate() {
+            let Some(handle) = handle.take() else {
                 continue;
             };
-            if worker.outstanding > 0 {
+            if busy.get(index).copied().unwrap_or(0) > 0 {
                 error!(
                     thread = index,
                     "an island tick thread still holds its island; leaving it behind"
@@ -192,14 +259,43 @@ impl Drop for IslandPool {
     }
 }
 
-/// 一条 tick 线程：收一个岛、跑一刻、交回，直到任务通道关掉或者没人收交回。
-fn run_worker(
-    index: usize,
-    inbox: &Receiver<Box<Island>>,
-    replies: &Sender<HandBack>,
-    body: IslandBody,
-) {
-    while let Ok(mut island) = inbox.recv() {
+/// 线程退出时（包括意外 panic）把自己从活着的线程里减掉。
+struct Alive<'a>(&'a Dispatch);
+
+impl Drop for Alive<'_> {
+    fn drop(&mut self) {
+        self.0.lock().alive -= 1;
+    }
+}
+
+/// 一条 tick 线程：取一个岛（先取指名给自己的，再取公共队列的）、跑一刻、交回，直到
+/// 池子关掉或者没人收交回。
+///
+/// One tick thread: take an island (its own queue first, then the shared
+/// one), run its tick and hand it back, until the pool closes or nobody takes
+/// the hand-backs.
+fn run_worker(index: usize, dispatch: &Dispatch, replies: &Sender<HandBack>, body: IslandBody) {
+    let _alive = Alive(dispatch);
+    loop {
+        let mut island = {
+            let mut queues = dispatch.lock();
+            loop {
+                if let Some(island) = queues.own[index].pop_front() {
+                    break island;
+                }
+                if let Some(island) = queues.shared.pop_front() {
+                    queues.busy[index] += 1;
+                    break island;
+                }
+                if queues.closed {
+                    return;
+                }
+                queues = dispatch
+                    .wake
+                    .wait(queues)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+        };
         let started = Instant::now();
         // 岛的状态在 panic 之后可能不一致，但主控拿回它只是为了照原来的崩溃路径
         // 重新抛出、不再跑它，所以这里断言可以安全地跨过 unwind。
@@ -207,6 +303,10 @@ fn run_worker(
         // it back to re-raise on the existing crash path and never runs it again.
         let outcome = catch_unwind(AssertUnwindSafe(|| body(&mut island)));
         let finished = Instant::now();
+        {
+            let mut queues = dispatch.lock();
+            queues.busy[index] = queues.busy[index].saturating_sub(1);
+        }
         let back = HandBack {
             island,
             worker: index,
