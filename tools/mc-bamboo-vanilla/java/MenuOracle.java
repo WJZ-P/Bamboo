@@ -341,6 +341,8 @@ public final class MenuOracle {
                     write(stationCase(written, index, options.seed()));
                     written++;
                 }
+                write(enchantSeedCase(written));
+                written++;
             }
 
             JsonObject end = new JsonObject();
@@ -600,6 +602,71 @@ public final class MenuOracle {
             return line;
         }
 
+        /**
+         * 两次连续成功的附魔：官方每次 `onEnchantmentPerformed` 都换
+         * `enchantmentSeed`，重开菜单的选项必须跟着新种子。断点放在
+         * `data[SEED_SLOT]` 上，不换种子就会被对拍抓到。
+         *
+         * Two successful enchants in a row: each `onEnchantmentPerformed`
+         * changes `enchantmentSeed`, so the next menu's options follow the
+         * new seed. Reusing the old seed is caught by the data-slot compare.
+         */
+        private static JsonObject enchantSeedCase(int id) {
+            int seed = 991;
+            int xpLevel = 40;
+            int bookshelves = 15;
+            FakePlayer player = FakePlayer.create(seed, false);
+            set(Player.class, player, "experienceLevel", xpLevel);
+            Inventory inventory = player.getInventory();
+            ItemStack[] grid = {new ItemStack(Items.DIAMOND_SWORD), new ItemStack(Items.LAPIS_LAZULI, 8)};
+            MapId mapId = new MapId(id + 1);
+            FakeLevel level = FakeLevel.create(seed, bookshelves, mapId, (byte) 0, false);
+            set(Entity.class, player, "level", level);
+            EnchantmentMenu menu = new EnchantmentMenu(
+                    CONTAINER_ID, inventory, ContainerLevelAccess.create(level, BlockPos.ZERO));
+            placeGrid(menu, Shape.ENCHANTMENT, grid);
+            menu.setSynchronizer(new Sync());
+
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "case");
+            line.addProperty("id", id);
+            line.addProperty("shape", Shape.ENCHANTMENT.id);
+            line.addProperty("creative", false);
+            line.addProperty("seed", seed);
+            line.addProperty("fixedWorld", true);
+            line.addProperty("mapScale", 0);
+            line.addProperty("mapLocked", false);
+            line.addProperty("bookshelves", bookshelves);
+            line.addProperty("xpLevel", xpLevel);
+            net.minecraft.util.RandomSource playerRandom =
+                    net.minecraft.util.RandomSource.create(seed);
+            JsonArray seeds = new JsonArray();
+            for (int i = 0; i < 8; i++) {
+                seeds.add(playerRandom.nextInt());
+            }
+            line.addProperty("nextSeed", seeds.get(0).getAsInt());
+            line.add("nextSeeds", seeds);
+            line.add("container", stacks(grid));
+            line.add("inventory", inventoryItems(inventory));
+            line.add("data", dataSlots(menu));
+            line.add("open", outcome(menu));
+
+            JsonArray steps = new JsonArray();
+            for (int button : new int[] {0, 1}) {
+                menu.clickMenuButton(player, button);
+                menu.broadcastChanges();
+                JsonObject step = new JsonObject();
+                step.addProperty("slot", 0);
+                step.addProperty("button", button);
+                step.addProperty("input", 0);
+                step.addProperty("menuButton", true);
+                step.add("outcome", outcome(menu));
+                steps.add(step);
+            }
+            line.add("steps", steps);
+            return line;
+        }
+
         private static String anvilName(int variant) {
             return switch (variant % 4) {
                 case 0 -> "Blade";
@@ -609,6 +676,7 @@ public final class MenuOracle {
             };
         }
 
+        /** 后面的铁砧题把 repair_cost 抬到 40 以上，覆盖「过于昂贵」和创造模式放行。 */
         private static ItemStack anvilInput(int variant) {
             ItemStack stack = switch (variant % 4) {
                 case 0 -> new ItemStack(Items.DIAMOND_SWORD, 1);
@@ -625,6 +693,9 @@ public final class MenuOracle {
                         REGISTRIES.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.SHARPNESS),
                         1 + variant % 3);
                 stack.set(DataComponents.ENCHANTMENTS, mutable.toImmutable());
+            }
+            if (variant >= 12) {
+                stack.set(DataComponents.REPAIR_COST, 45 + variant % 5);
             }
             return stack;
         }
