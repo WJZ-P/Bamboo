@@ -751,7 +751,7 @@ fn islands_run_together_equal_each_group_run_alone() {
 
 /// 只有一组的世界：玩家照样从出生点进服、放到这一组的中心；别的组不放玩家，中心区块
 /// 用强加载票留着（让「每组中心都加载着」的指纹照样能拼），机器只放这一组。
-fn set_up_alone(seed: u64, group: usize) -> Scene {
+pub(super) fn set_up_alone(seed: u64, group: usize) -> Scene {
     let mut scene = set_up(seed, Harness::new_islands(2, 0));
     let centers = scene.centers.clone();
     let others: Vec<Client> = scene

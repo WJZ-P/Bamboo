@@ -56,6 +56,12 @@ pub(crate) enum FreshEntityBreak {
     LoseEntity,
     /// 拆出来的岛里清掉一个新实体的追踪配对。
     LoseTracking,
+    /// 整条丢掉一个生物的跟踪状态（同步计数、上次发过的位置和数据、配对），模拟拆合时
+    /// 漏搬了它。
+    LoseMobTracking,
+    /// 新岛的实体种子源掺进原岛种子源当时的状态（拆合以前的做法），派生不再只取决于
+    /// （世界种子，起源 section，建岛时刻）。
+    MixParentSeeds,
 }
 
 impl World {
@@ -117,16 +123,29 @@ impl World {
         self.assert_island_invariants();
     }
 
-    /// 改坏确认：拆合之后在刚变化的岛上丢掉一个新生成的下落方块实体，或者清掉它的追踪
-    /// 配对，用来确认「含新实体」的对照会抓到。正式构建里不存在。
+    /// 改坏确认：拆合之后丢掉一个新生成的下落方块实体、清掉它的追踪配对，或者整条丢掉
+    /// 一个生物的跟踪状态，用来确认「含新实体」和「分开跑 = 一起跑」的对照会抓到。
+    /// 正式构建里不存在。
     ///
     /// Break-it check: after a structural change, drop one fresh falling-block
-    /// entity or clear its tracking entry on the changed island, to confirm
-    /// the fresh-entity comparison catches it. Absent in production builds.
+    /// entity, clear its tracking entry, or drop a mob's whole tracking state,
+    /// to confirm the comparisons catch it. Absent in production builds.
     #[cfg(test)]
     fn apply_fresh_entity_break(&mut self, kind: FreshEntityBreak) {
         use mc_bamboo_blocks::entity::KindPublic;
 
+        // 掺种子的改坏在派生时做，这里没事可做；丢生物跟踪状态找生物，别的找下落方块。
+        // Seed mixing happens at derivation; the mob break targets a mob, the
+        // others a falling block.
+        if matches!(kind, FreshEntityBreak::MixParentSeeds) {
+            return;
+        }
+        let mob = matches!(kind, FreshEntityBreak::LoseMobTracking);
+        let wanted = |kind: &KindPublic| match kind {
+            KindPublic::Mob(_) => mob,
+            KindPublic::FallingBlock { .. } => !mob,
+            _ => false,
+        };
         let fresh: Vec<(RegionId, i32)> = self
             .islands
             .iter()
@@ -135,7 +154,7 @@ impl World {
                     .region
                     .entities
                     .iter_public()
-                    .filter(|public| matches!(public.kind, KindPublic::FallingBlock { .. }))
+                    .filter(|public| wanted(&public.kind))
                     .map(|public| (island.id, public.uid))
                     .collect::<Vec<_>>()
             })
@@ -152,6 +171,10 @@ impl World {
                 // from the control world's.
                 island.region.entity_tracking.forget_watchers(uid);
             }
+            FreshEntityBreak::LoseMobTracking => {
+                island.region.entity_tracking.forget_entity(uid);
+            }
+            FreshEntityBreak::MixParentSeeds => {}
         }
     }
 
@@ -228,9 +251,15 @@ impl World {
             return false;
         }
         let origin = *sections.first().expect("拆出来的部分不为空");
-        let random = island
+        let time = island.region.global.time.0;
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut random = island
             .region
             .derive_island_random(island.region.global.seed, origin);
+        #[cfg(test)]
+        if self.master.split_break == Some(FreshEntityBreak::MixParentSeeds) {
+            random.entity_seeds ^= island.region.entities.entity_seed_state();
+        }
         #[cfg(test)]
         let skip = self.master.split_skip;
         #[cfg(not(test))]
@@ -240,6 +269,7 @@ impl World {
             return false;
         };
         let moved = child.region.chunks.loaded_positions();
+        self.islands.note_derivation(origin, time);
         if let Some(target) = self.islands.get_mut(to) {
             // 空着的岛（一直在的家岛）接手这一块就是新岛：随机源换成按起源派生的那份，
             // 和新建一个岛时一样，不沿用它以前的状态（计划 3.3「岛的随机源」第 1 条）。

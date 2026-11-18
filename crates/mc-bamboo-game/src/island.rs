@@ -319,6 +319,12 @@ impl std::ops::DerefMut for IslandSlot {
 /// empty. Iteration is by ascending id, so the lockstep order is fixed.
 pub(crate) struct Islands {
     slots: BTreeMap<RegionId, IslandSlot>,
+    /// 这一刻（全局游戏时间）已经为哪些起源 section 派生过新岛的随机源
+    /// （[`Self::note_derivation`]）。
+    ///
+    /// Origin sections that already had a new island's random sources derived
+    /// at this game time ([`Self::note_derivation`]).
+    derived: (i64, Vec<SectionPos>),
     /// 测试专用：借玩家时一个都不借（改坏确认）。
     #[cfg(test)]
     pub(crate) lend_nothing: bool,
@@ -329,6 +335,7 @@ impl Islands {
         debug_assert_eq!(home.id, HOME_REGION);
         Self {
             slots: BTreeMap::from([(HOME_REGION, IslandSlot::new(home))]),
+            derived: (i64::MIN, Vec::new()),
             #[cfg(test)]
             lend_nothing: false,
         }
@@ -413,6 +420,7 @@ impl Islands {
     pub(crate) fn ensure(&mut self, id: RegionId, origin: SectionPos) -> &mut Island {
         if !self.slots.contains_key(&id) {
             let home = &mut **self.slots.get_mut(&HOME_REGION).expect("家岛一直在");
+            let time = home.region.global.time.0;
             let random = home
                 .region
                 .derive_island_random(home.region.global.seed, origin);
@@ -427,6 +435,7 @@ impl Islands {
             let mut island = Box::new(Self::fresh(id, region, home));
             island.state = IslandState::Parked;
             self.slots.insert(id, IslandSlot::new(island));
+            self.note_derivation(origin, time);
         }
         self.get_mut(id).expect("刚建好")
     }
@@ -437,6 +446,27 @@ impl Islands {
         island.entity_threads = like.entity_threads;
         island.last_worker = like.last_worker;
         island
+    }
+
+    /// 记下这一刻为 `origin` 派生了一个新岛的随机源。派生的输入是（世界种子，起源
+    /// section，建岛时的全局游戏时间），同一刻同一起源再派生一次会拿到完全相同的随机源，
+    /// 两个岛的实体种子、牛的 UUID 就会重复（计划 3.3「岛的随机源」第 1 条）。分区器有
+    /// 拆分迟滞，正常运行碰不到；测试和调试构建里断言，正式构建不 panic。
+    ///
+    /// Record that a new island's random sources were derived for `origin` at
+    /// game time `time`. Deriving again for the same origin in the same tick
+    /// would yield identical sources (repeated entity seeds and cow UUIDs; plan
+    /// 3.3). The partitioner's split delay keeps this from happening; tests and
+    /// debug builds assert it, release builds do not panic.
+    pub(crate) fn note_derivation(&mut self, origin: SectionPos, time: i64) {
+        if self.derived.0 != time {
+            self.derived = (time, Vec::new());
+        }
+        debug_assert!(
+            !self.derived.1.contains(&origin),
+            "同一刻（游戏时间 {time}）为起源 {origin:?} 派生了两次新岛的随机源"
+        );
+        self.derived.1.push(origin);
     }
 
     pub(crate) fn insert(&mut self, island: Box<Island>) {

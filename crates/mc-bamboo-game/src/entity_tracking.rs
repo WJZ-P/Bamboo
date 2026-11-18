@@ -148,6 +148,15 @@ impl EntityTracking {
         }
     }
 
+    /// 只给改坏确认用：整条丢掉一个实体的跟踪状态，模拟拆合时漏搬了它。
+    ///
+    /// Break-it checks only: drop an entity's whole tracking state, simulating
+    /// a split that left it behind.
+    #[cfg(test)]
+    pub(crate) fn forget_entity(&mut self, entity: i32) -> bool {
+        self.tracked.remove(&entity).is_some()
+    }
+
     /// 测试核对拆合用：每个被跟踪的实体和看得见它的玩家。
     #[cfg(test)]
     pub(crate) fn pairs(&self) -> Vec<(i32, Vec<PlayerId>)> {

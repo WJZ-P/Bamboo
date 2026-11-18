@@ -2807,6 +2807,9 @@ impl Schedule {
 #[path = "world/tests/compute_pool_tests.rs"]
 mod compute_pool_tests;
 #[cfg(test)]
+#[path = "world/island_alone_tests.rs"]
+mod island_alone_tests;
+#[cfg(test)]
 #[path = "world/island_crossing_tests.rs"]
 mod island_crossing_tests;
 #[cfg(test)]

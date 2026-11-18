@@ -1232,7 +1232,7 @@ impl EntityStore {
     /// Preserved entries split by `Pos`; watched sections are copied to both
     /// sides (a superset only reports extra events that the block-entity table
     /// filters); undelivered wake events split by chunk. Tick boundary only.
-    pub fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Result<Self, Busy> {
+    pub fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>, seeds: i64) -> Result<Self, Busy> {
         if !self.ready_to_move_chunks() {
             return Err(Busy);
         }
@@ -1247,15 +1247,13 @@ impl EntityStore {
             })
             .map(|(&uid, _)| uid)
             .collect();
-        // 新岛的种子源由原岛种子源现在的状态和搬走的最小区块搅出来：确定、和网络 ID
-        // 无关，原岛的种子源不动（拆了马上合回来逐位相同）。拆分的先后仍会影响它，
-        // 和岛的其余随机源一样等第 10 步定（计划 3.3「岛的随机源」）。
-        // The new island's seed source mixes the old source's state with the
-        // smallest moved chunk: deterministic, independent of network ids, and
-        // the old source is untouched, so split-then-merge stays bit-identical.
-        let origin = chunks.first().copied().unwrap_or(ChunkPos::new(0, 0));
-        let key = (u64::from(origin.x as u32) << 32) | u64::from(origin.z as u32);
-        let seeds = JavaRandom::new(splitmix(self.seeds.state() as u64 ^ splitmix(key)) as i64);
+        // 新岛的种子源由调用方给（岛这一层按世界种子、起源 section 和建岛时刻派生，
+        // 计划 3.3「岛的随机源」），不掺原岛种子源的状态；原岛的不动（拆了马上合回来
+        // 逐位相同）。
+        // The caller supplies the new island's seed source (derived by the island
+        // layer from the world seed, origin section and creation time, plan 3.3),
+        // without the old source's state; the old source is untouched.
+        let seeds = JavaRandom::new(seeds);
         let mut out = Self {
             ids: self.ids.clone(),
             seeds,
@@ -1383,14 +1381,6 @@ impl EntityStore {
         self.preserved = kept;
         taken
     }
-}
-
-/// SplitMix64 的一步，把相近的输入搅开。
-fn splitmix(mut z: u64) -> u64 {
-    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
 }
 
 /// 保留条目所在的区块，按它的 `Pos`；缺失时按原点算，和 [`EntityStore::take_chunk`] 一致。
@@ -1820,10 +1810,10 @@ mod tests {
         let before: Vec<Entity> = store.iter().collect();
         let wanted: BTreeSet<ChunkPos> = [ChunkPos::new(2, 0)].into_iter().collect();
         let seed_state = store.entity_seed_state();
-        let mut island = store.split_off(&wanted).unwrap();
-        // 拆分不动原岛的种子源；新岛的种子源是另一条。
+        let mut island = store.split_off(&wanted, 0x1234).unwrap();
+        // 拆分不动原岛的种子源；新岛的种子源就是调用方给的那一条，不掺原岛的状态。
         assert_eq!(store.entity_seed_state(), seed_state);
-        assert_ne!(island.entity_seed_state(), seed_state);
+        assert_eq!(island.entity_seed_state(), JavaRandom::new(0x1234).state());
         assert!(store.sub_index_matches() && island.sub_index_matches());
         let rest: Vec<i32> = store.ids();
         let moved: Vec<i32> = island.ids();

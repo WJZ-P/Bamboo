@@ -42,16 +42,17 @@ use crate::{
 /// entity ticking looks at radius 2, so no neighbourhood may span both parts.
 pub(crate) const ISLAND_GAP: i32 = 3;
 
-/// 新岛的三个随机源（岛的实施计划第 2 节第 15 行、6.2）。拆的时候由调用方给出，运行时
-/// 用 [`IslandRandom::derive`]：只由世界种子和岛自己的起源 section 派生（计划 3.3「岛的
-/// 随机源」第 1 条）。合并时吸收方留自己的，被吸收方的丢掉。`/random` 和 `/loot` 的按名
-/// 序列不在岛上，在主控（同一节第 2 条）。
+/// 新岛的四个随机源（岛的实施计划第 2 节第 15 行、6.2）。拆的时候由调用方给出，运行时
+/// 用 [`IslandRandom::derive`]：只由（世界种子，岛的起源 section，建岛时的全局游戏时间）
+/// 派生（计划 3.3「岛的随机源」第 1 条）。合并时吸收方留自己的，被吸收方的丢掉。
+/// `/random` 和 `/loot` 的按名序列不在岛上，在主控（同一节第 2 条）。
 ///
-/// The new island's three random sources (plan section 2 row 15, 6.2). The
+/// The new island's four random sources (plan section 2 row 15, 6.2). The
 /// caller supplies them on a split; at run time [`IslandRandom::derive`] takes
-/// them from the world seed and the island's own origin section only (plan
-/// 3.3 item 1). A merge keeps the absorber's and drops the absorbed island's.
-/// The named sequences of `/random` and `/loot` live on the master (item 2).
+/// them from (world seed, the island's origin section, the global game time
+/// at creation) only (plan 3.3 item 1). A merge keeps the absorber's and
+/// drops the absorbed island's. The named sequences of `/random` and `/loot`
+/// live on the master (item 2).
 pub(crate) struct IslandRandom {
     /// 官方 `Level.random` 和 `randValue`。
     pub(crate) random: LevelRandom,
@@ -59,21 +60,39 @@ pub(crate) struct IslandRandom {
     pub(crate) sound_seed_generator: LevelRandom,
     /// 战利品表的 `random_sequence`。
     pub(crate) loot_sequences: RandomSequences,
+    /// 实体种子源的种子：这个岛上生成的实体从 `JavaRandom::new(这个数)` 依次取种子
+    /// （`EntityStore::set_entity_seeds`）。
+    ///
+    /// The seed of the entity seed source: entities spawned on this island draw
+    /// their seeds from `JavaRandom::new(this)` in turn.
+    pub(crate) entity_seeds: i64,
 }
 
 impl IslandRandom {
-    /// 只由（`base`，岛的起源 section）派生，和拆分的先后、原岛的随机状态都无关：同一个
-    /// `base` 下，起源 section 相同的岛总拿到同样的三个随机源。战利品的按名序列沿用原来的
-    /// 世界种子，`salt` 换成按起源 section 派生的值（总设计稿 6.6「按世界种子、序列名、
-    /// region 起源 section 派生」）。
+    /// 只由（`base`，岛的起源 section，建岛时的全局游戏时间 `time`）派生，和拆合的先后、
+    /// 原岛的随机状态都无关。加上建岛时刻是因为同一块地方拆出来、合回去、再拆出来时
+    /// 起源 section 相同：只看起源的话新岛会把上一次那串随机数从头重放一遍，实体的种子
+    /// 重复，牛的 UUID（取自实体自己的随机源）就和上一次那头撞上，`/summon` 和刷怪蛋失败。
+    /// 同一刻同一起源只派生一次（`Islands::note_derivation` 断言）。战利品的按名序列沿用
+    /// 原来的世界种子，`salt` 换成派生值（总设计稿 6.6「按世界种子、序列名、region 起源
+    /// section 派生」）。
     ///
-    /// Derived from (`base`, origin section) only, independent of the split
-    /// history and of the parent's random state. The loot sequences keep their
-    /// world seed with a `salt` derived from the origin section.
-    pub(crate) fn derive(base: i64, origin: SectionPos, loot_world_seed: i64) -> Self {
+    /// Derived from (`base`, origin section, global game time `time` at
+    /// creation) only, independent of the split and merge history and of the
+    /// parent's random state. The creation time is included because the same
+    /// area split off, merged back and split off again has the same origin:
+    /// without it the new island would replay the previous run of numbers,
+    /// repeating entity seeds and so cow UUIDs (taken from the entity's own
+    /// random), making `/summon` and spawn eggs fail. One derivation per
+    /// origin per tick (asserted by `Islands::note_derivation`).
+    pub(crate) fn derive(base: i64, origin: SectionPos, time: i64, loot_world_seed: i64) -> Self {
         let stream = |index: u64| -> i64 {
             let key = (u64::from(origin.x as u32) << 32) | u64::from(origin.z as u32);
-            splitmix(splitmix(base as u64 ^ index.wrapping_mul(0xA24B_AED4_963E_E407)) ^ key) as i64
+            splitmix(
+                splitmix(base as u64 ^ index.wrapping_mul(0xA24B_AED4_963E_E407))
+                    ^ key
+                    ^ splitmix(time as u64),
+            ) as i64
         };
         let sequences = |world_seed: i64, index: u64| {
             let mut sequences = RandomSequences::new(world_seed);
@@ -84,6 +103,7 @@ impl IslandRandom {
             random: LevelRandom::new(stream(1)),
             sound_seed_generator: LevelRandom::new(stream(2)),
             loot_sequences: sequences(loot_world_seed, 3),
+            entity_seeds: stream(4),
         }
     }
 }
@@ -227,17 +247,25 @@ fn assert_gap(
 }
 
 impl Region {
-    /// 用这个岛的两个按名序列的世界种子，按 [`IslandRandom::derive`] 派生新岛的随机源。
+    /// 按 [`IslandRandom::derive`] 派生新岛的随机源：建岛时刻取这个岛的全局快照里的
+    /// 游戏时间（主控每刻发布，所有岛相同），战利品序列沿用这个岛的世界种子。
     ///
-    /// Derive a new island's random sources with this island's sequence seeds.
+    /// Derive a new island's random sources: the creation time is the game time
+    /// in this island's global snapshot (published by the master every tick,
+    /// the same on every island); the loot sequences keep this island's world seed.
     pub(crate) fn derive_island_random(&self, base: i64, origin: SectionPos) -> IslandRandom {
-        IslandRandom::derive(base, origin, self.loot_sequences.world_seed())
+        IslandRandom::derive(
+            base,
+            origin,
+            self.global.time.0,
+            self.loot_sequences.world_seed(),
+        )
     }
 
-    /// 换上一份新的三个随机源（空着的岛被当作新岛接手一块时，计划 3.3「岛的随机源」
+    /// 换上一份新的四个随机源（空着的岛被当作新岛接手一块时，计划 3.3「岛的随机源」
     /// 第 1 条：新岛的随机源只由世界种子和它的起源 section 派生）。
     ///
-    /// Install a fresh set of the three random sources (an empty island taking
+    /// Install a fresh set of the four random sources (an empty island taking
     /// over a part as a new island, plan 3.3 item 1: a new island's sources come
     /// from the world seed and its origin section only).
     pub(crate) fn replace_random(&mut self, random: IslandRandom) {
@@ -245,10 +273,12 @@ impl Region {
             random,
             sound_seed_generator,
             loot_sequences,
+            entity_seeds,
         } = random;
         self.random = random;
         self.sound_seed_generator = sound_seed_generator;
         self.loot_sequences = loot_sequences;
+        self.entities.set_entity_seeds(entity_seeds);
     }
 
     /// 岛拆分：把位置落在 `chunks` 里的一切和 `players` 的一切整批拆出去，造出新岛的
@@ -367,10 +397,12 @@ impl Region {
         };
         let mut entities = if moves(IslandPart::Entities) {
             self.entities
-                .split_off(chunks)
+                .split_off(chunks, random.entity_seeds)
                 .unwrap_or_else(|_| unreachable!("前提已经检查过"))
         } else {
-            Entities::with_ids(self.entities.ids_handle().clone())
+            let mut empty = Entities::with_ids(self.entities.ids_handle().clone());
+            empty.set_entity_seeds(random.entity_seeds);
+            empty
         };
         if !moves(IslandPart::SpawnSnapshots) {
             self.entities.reclaim_spawn_snapshots(&mut entities);
@@ -428,6 +460,7 @@ impl Region {
             random,
             sound_seed_generator,
             loot_sequences,
+            entity_seeds: _,
         } = random;
         Ok(Region {
             players: new_players,
