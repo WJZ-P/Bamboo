@@ -14,7 +14,7 @@
 //! the end use a real deadline and really slow islands.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     ops::ControlFlow,
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
@@ -1488,73 +1488,80 @@ fn an_island_panic_is_raised_even_with_another_island_stuck() {
     });
 }
 
-/// 烟雾测试的一次运行：随机进出服、走动、跨岛传送、聊天、玩家命令和控制台命令，带真的
-/// 截止时间（每刻只等 8 ms）和真的慢岛（有的岛每一刻睡 5–25 ms，一定会迟到）。跑完去掉
-/// 慢岛的延迟、不带截止时间地跑到所有岛都停放、欠刻还清、排着的事做完，再断言全部不变量：
-/// 每名在线玩家恰好在一个岛上，谁都没丢。
+/// 烟雾测试的一次运行：三组各自一个岛搭好以后，带真的截止时间（每刻只等 8 ms）和真的
+/// 慢岛（两个岛每一刻睡 12–30 ms，一定会迟到；其中一个是家岛）跑一阵随机的聊天、玩家
+/// 命令（含 `@a` 和跨岛传送）、控制台命令、走动、进服和离开。跑完去掉延迟、不带截止时间
+/// 地跑到所有岛都停放、欠刻还清、排着的事做完，再断言全部不变量：每名在线玩家恰好在
+/// 一个岛上，谁都没丢，出站队列发完了。
 ///
-/// One smoke run: random joins, leaves, walks, cross-island teleports, chat,
-/// player and console commands under a real deadline (8 ms per tick) with
-/// really slow islands (some sleep 5 to 25 ms every tick and are always
-/// late). Afterwards the delays are lifted and ticks without a deadline run
-/// until every island is parked, owes nothing and no work is held; then every
-/// invariant holds, each online player is on exactly one island and none is lost.
+/// One smoke run: with one island per group set up, a real deadline (8 ms
+/// per tick) and really slow islands (two islands, home among them, sleep 12
+/// to 30 ms every tick and are always late) run random chat, player commands
+/// (`@a` and cross-island teleports included), console commands, walking,
+/// joins and leaves. Afterwards the delays are lifted and ticks without a
+/// deadline run until every island is parked, owes nothing and no work is
+/// held; then every invariant holds, each online player is on exactly one
+/// island, none is lost and the outbound queues are empty.
 fn smoke(seed: u64, threads: usize, ticks: u64) {
-    let mut server = Harness::new_islands(2, threads);
+    let mut scene = scene(seed, threads);
+    for _ in 0..3 {
+        scene.server.tick();
+    }
+    prepare(&mut scene);
+    let centers = scene.centers.clone();
     let mut next = rng(seed);
-    let mut online: BTreeMap<usize, Client> = BTreeMap::new();
-    let mut counter = 0;
-    let spots: Vec<(f64, f64)> = vec![(8.5, 8.5), (400.5, 8.5), (8.5, -420.5), (-380.5, 390.5)];
-    let mut lagged: BTreeSet<RegionId> = BTreeSet::new();
+    let mut online: Vec<Client> = scene.clients.iter().map(|(_, c)| c.clone()).collect();
+    let mut joined = 0;
+    for (group, base) in [(0_usize, 12_u64), (1 + (seed as usize % 2), 18)] {
+        let id = island_of_group(&mut scene, group);
+        let lag = Duration::from_millis(base + next() % 13);
+        scene
+            .server
+            .world
+            .islands
+            .get_mut(id)
+            .expect("停放着")
+            .test_hook = Some(IslandTestHook::Lag(lag));
+    }
+    let server = &mut scene.server;
+    // 这次运行真的碰到了什么：有岛没按时回来的刻数、同时存在的岛数、排过队的事、
+    // 延后投递过的岛。
+    // What this run really hit: ticks with an island late, islands alive at
+    // once, work that was held and islands that had deliveries deferred.
+    let (mut late_ticks, mut fewest_islands, mut most_held, mut most_deferred) =
+        (0, usize::MAX, 0, 0);
     for tick in 0..ticks {
-        // 每隔一阵让一个停放着的岛变慢（它被并掉或者拆开以后延迟跟着原来那个岛）。
-        // Now and then make a parked island slow.
-        let parked = server.world.islands.parked_ids();
-        if tick % 20 == 5 && !parked.is_empty() {
-            let id = parked[next() as usize % parked.len()];
-            let lag = Duration::from_millis(5 + next() % 21);
-            server.world.islands.get_mut(id).expect("停放着").test_hook =
-                Some(IslandTestHook::Lag(lag));
-            lagged.insert(id);
-        }
+        let pick = |next: &mut dyn FnMut() -> u64, online: &Vec<Client>| {
+            online[next() as usize % online.len()].clone()
+        };
         match next() % 12 {
-            0 | 1 if online.len() < 6 => {
-                counter += 1;
-                let client = server.join(&format!("h{counter}"));
-                online.insert(counter, client);
+            0 if online.len() < 8 => {
+                joined += 1;
+                online.push(server.join(&format!("h{joined}")));
             }
-            2 if !online.is_empty() => {
-                let key = *online
-                    .keys()
-                    .nth(next() as usize % online.len())
-                    .expect("有人");
-                let client = online.remove(&key).expect("在表里");
+            1 if online.len() > 3 => {
+                let index = next() as usize % online.len();
+                let client = online.remove(index);
                 server.leave(&client);
             }
-            3 | 4 if !online.is_empty() => {
+            2 | 3 => {
                 // 跨岛传送：用命令（玩家的岛可能不在主控手里，测试不直接改它）。
                 // A cross-island teleport by command (the player's island may be away).
-                let key = *online
-                    .keys()
-                    .nth(next() as usize % online.len())
-                    .expect("有人");
-                let (x, z) = spots[next() as usize % spots.len()];
-                let jitter = (next() % 24) as f64;
+                let client = pick(&mut next, &online);
+                let center = centers[next() as usize % centers.len()];
+                let jitter = (next() % 5) as i32;
                 server.request(
-                    &online[&key],
+                    &client,
                     PlayRequest::unsigned_command(format!(
                         "tp @s {} -59 {}",
-                        x + jitter,
-                        z - jitter
+                        center.x * 16 + 4 + jitter,
+                        center.z * 16 + 4 + jitter
                     )),
                 );
             }
-            5 if !online.is_empty() => {
-                let key = *online
-                    .keys()
-                    .nth(next() as usize % online.len())
-                    .expect("有人");
-                server.request(&online[&key], PlayRequest::unsigned_chat("smoke"));
+            4 | 5 => {
+                let client = pick(&mut next, &online);
+                server.request(&client, PlayRequest::unsigned_chat("smoke"));
             }
             6 => {
                 server
@@ -1562,29 +1569,35 @@ fn smoke(seed: u64, threads: usize, ticks: u64) {
                     .send(Inbound::ConsoleCommand("say tick".to_owned()))
                     .unwrap();
             }
-            7 if !online.is_empty() => {
-                let key = *online
-                    .keys()
-                    .nth(next() as usize % online.len())
-                    .expect("有人");
+            7 => {
+                let client = pick(&mut next, &online);
                 server.request(
-                    &online[&key],
+                    &client,
                     PlayRequest::unsigned_command("gamemode creative @a"),
+                );
+            }
+            8 => {
+                let client = pick(&mut next, &online);
+                server.request(
+                    &client,
+                    PlayRequest::ChangeGameMode {
+                        mode: mc_bamboo_protocol::packet::play::GameMode::Survival,
+                    },
                 );
             }
             _ => {}
         }
         // 确认传送、回区块批次：客户端该做的照做，玩家才会真的换岛、收区块。
         // Confirm teleports and chunk batches as a client would.
-        for client in online.values() {
+        for client in &online {
             server.confirm_teleport(client);
             server.load_player(client);
         }
         assert!(
-            tick_within(&mut server, Duration::from_millis(8)).is_continue(),
+            tick_within(server, Duration::from_millis(8)).is_continue(),
             "seed {seed} threads {threads} tick {tick}"
         );
-        for client in online.values() {
+        for client in &online {
             for _ in 0..crate::world::tests::frames_with_id(
                 &client.take_frames(),
                 clientbound::CHUNK_BATCH_FINISHED,
@@ -1596,18 +1609,28 @@ fn smoke(seed: u64, threads: usize, ticks: u64) {
         }
         if server.world.islands.all_parked() {
             server.world.assert_island_invariants();
+        } else {
+            late_ticks += 1;
         }
+        fewest_islands = fewest_islands.min(server.world.islands.len());
+        most_held = most_held.max(server.world.master.hybrid.held_len());
+        most_deferred = most_deferred.max(server.world.master.hybrid.fan_out.len());
     }
+    assert!(
+        late_ticks >= 10 && most_held >= 1 && most_deferred >= 1,
+        "seed {seed} threads {threads}：这次运行没有真的碰到慢岛（{late_ticks} 刻有岛迟到，\
+         最多排着 {most_held} 件事，最多 {most_deferred} 个岛有延后的投递，最少 {fewest_islands} 个岛）"
+    );
     // 收尾：不带截止时间跑到稳定。停放着的岛去掉延迟；还带着延迟的岛回来以后再去掉。
     // Wind down without a deadline until stable, lifting the delays as
     // islands are seen parked.
     let mut quiet = 0;
-    for round in 0..400 {
+    for round in 0..600 {
         for island in server.world.islands.parked_mut() {
             island.test_hook = None;
         }
         server.tick();
-        for client in online.values() {
+        for client in &online {
             server.confirm_teleport(client);
             server.load_player(client);
             for _ in 0..crate::world::tests::frames_with_id(
@@ -1622,6 +1645,7 @@ fn smoke(seed: u64, threads: usize, ticks: u64) {
         let world = &server.world;
         let settled = world.islands.all_parked()
             && world.master.hybrid.held_len() == 0
+            && world.master.hybrid.joining.is_empty()
             && world
                 .islands
                 .ids()
@@ -1631,12 +1655,12 @@ fn smoke(seed: u64, threads: usize, ticks: u64) {
         if quiet >= 6 {
             break;
         }
-        assert!(round < 399, "seed {seed} threads {threads}：收不了尾");
+        assert!(round < 599, "seed {seed} threads {threads}：收不了尾");
     }
     let world = &mut server.world;
     world.assert_island_invariants();
     assert!(world.master.hybrid.fan_out.is_empty(), "出站队列都发完了");
-    for client in online.values() {
+    for client in &online {
         let holders = world
             .islands
             .iter()
@@ -1658,7 +1682,423 @@ fn smoke(seed: u64, threads: usize, ticks: u64) {
 fn slow_islands_under_a_real_deadline_keep_every_invariant() {
     bounded(|| {
         for (seed, threads) in [(21_u64, 1), (22, 4), (23, 8)] {
-            smoke(seed, threads, 150);
+            smoke(seed, threads, 200);
         }
     });
+}
+
+const JOINED: &str = "multiplayer.player.joined";
+const LEFT: &str = "multiplayer.player.left";
+
+/// 进服的目标岛（出生点所在的岛）不在主控手里：进服等它停放，期间这名玩家算「正在
+/// 进服」、票挂着不会被当成离开撤掉，别人收不到他的进服消息；岛回来以后进服照做，他
+/// 等待期间发的包排在进服后面处理，所有人（含慢岛上的）各收到一次进服消息。
+///
+/// The join's target island (the spawn's) is away: the join waits for it,
+/// the player counts as joining with the ticket kept, and nobody gets the
+/// join message; once the island is back the join runs, what the player sent
+/// meanwhile is handled after it, and everyone (the slow island's players
+/// included) gets the join message once.
+#[test]
+fn a_join_waits_for_its_island_and_keeps_its_ticket() {
+    bounded(|| {
+        let mut scene = scene(121, 4);
+        for _ in 0..3 {
+            scene.server.tick();
+        }
+        prepare(&mut scene);
+        let victim = island_of_group(&mut scene, 0);
+        scene.server.world.stall_island(victim, 2, 7);
+        let mut late: Option<Client> = None;
+        let mut frames: Vec<Vec<Frame>> = vec![Vec::new(); scene.clients.len()];
+        for tick in 1..=11_u64 {
+            if tick == 3 {
+                let client = scene.server.join("late");
+                // 他在等的时候就发了一条聊天：要排在进服后面。
+                // A chat sent while still waiting: it queues behind the join.
+                scene
+                    .server
+                    .request(&client, PlayRequest::unsigned_chat("MARK-LATE"));
+                late = Some(client);
+            }
+            scene.server.tick();
+            for (index, (_, client)) in scene.clients.iter().enumerate() {
+                frames[index].extend(client.take_frames());
+            }
+            if let (Some(client), 3..=7) = (&late, tick) {
+                let world = &scene.server.world;
+                assert!(
+                    world.master.hybrid.joining.contains(&client.id),
+                    "tick {tick}：正在进服"
+                );
+                assert!(
+                    world.master.ticket_centers.contains_key(&client.id),
+                    "tick {tick}：票挂着，没有被当成离开撤掉"
+                );
+                assert!(world.islands.island_of_player(client.id).is_none());
+                for got in &frames {
+                    assert_eq!(count_marker(got, JOINED), 0, "tick {tick}：还没进服");
+                }
+            }
+        }
+        let late = late.expect("进过服");
+        let world = &scene.server.world;
+        assert!(world.islands.all_parked() && world.master.hybrid.held_len() == 0);
+        assert!(world.master.hybrid.joining.is_empty());
+        assert!(
+            world.islands.island_of_player(late.id).is_some(),
+            "岛回来以后进服照做"
+        );
+        let own = late.take_frames();
+        assert!(
+            !super::tests::frames_with_id(&own, clientbound::LOGIN).is_empty(),
+            "他收到了进服序列"
+        );
+        assert_eq!(count_marker(&own, "MARK-LATE"), 1, "他等的时候发的聊天做了");
+        for (index, got) in frames.iter().enumerate() {
+            assert_eq!(
+                count_marker(got, JOINED),
+                1,
+                "第 {index} 名玩家收到一次进服消息"
+            );
+            assert_eq!(count_marker(got, "MARK-LATE"), 1, "第 {index} 名玩家");
+            assert_eq!(
+                marker_order(got, &[JOINED, "MARK-LATE"]),
+                vec![JOINED.to_owned(), "MARK-LATE".to_owned()],
+                "第 {index} 名玩家：聊天在进服之后"
+            );
+        }
+        scene.server.world.assert_island_invariants();
+    });
+}
+
+/// 进服还在等目标岛、玩家就断开了：离开经他自己的队列到达，等着的进服作废、票撤掉，
+/// 岛回来以后他不在任何岛上，谁也没收到过他的进服消息。
+///
+/// The player disconnects while the join still waits for its island: the
+/// leave arrives through their own queue, the waiting join is dropped with
+/// its ticket, and once the island is back they are on no island and nobody
+/// ever got a join message.
+#[test]
+fn leaving_while_the_join_still_waits_cancels_it() {
+    bounded(|| {
+        let mut scene = scene(122, 4);
+        for _ in 0..3 {
+            scene.server.tick();
+        }
+        prepare(&mut scene);
+        let victim = island_of_group(&mut scene, 0);
+        scene.server.world.stall_island(victim, 2, 7);
+        let mut ghost: Option<Client> = None;
+        let mut frames: Vec<Frame> = Vec::new();
+        for tick in 1..=11_u64 {
+            if tick == 3 {
+                ghost = Some(scene.server.join("ghost"));
+            }
+            if tick == 5 {
+                scene.server.leave(ghost.as_ref().expect("进过服"));
+            }
+            scene.server.tick();
+            for (_, client) in &scene.clients {
+                frames.extend(client.take_frames());
+            }
+            if let Some(client) = &ghost {
+                let world = &scene.server.world;
+                let waiting = (3..5).contains(&tick);
+                assert_eq!(
+                    world.master.hybrid.joining.contains(&client.id),
+                    waiting,
+                    "tick {tick}：是不是还在等进服"
+                );
+                assert_eq!(
+                    world.master.ticket_centers.contains_key(&client.id),
+                    waiting,
+                    "tick {tick}：票在不在"
+                );
+            }
+        }
+        let ghost = ghost.expect("进过服");
+        let world = &scene.server.world;
+        assert!(world.islands.all_parked() && world.master.hybrid.held_len() == 0);
+        assert!(world.islands.island_of_player(ghost.id).is_none());
+        assert_eq!(count_marker(&frames, JOINED), 0, "没人收到过他的进服消息");
+        assert_eq!(count_marker(&frames, LEFT), 0);
+        scene.server.world.assert_island_invariants();
+    });
+}
+
+/// 别的岛慢的时候有人进服、有人离开：健康岛上的人当场收到进服和离开消息，慢岛上的人在
+/// 它回来的那一刻按同样的先后各收到一次。
+///
+/// Someone joins and someone leaves while another island is slow: players on
+/// healthy islands get both messages at once, and the slow island's players
+/// get each once, in the same order, the tick it returns.
+#[test]
+fn joins_and_leaves_reach_a_slow_island_later_in_order() {
+    bounded(|| {
+        let mut scene = scene(123, 4);
+        for _ in 0..3 {
+            scene.server.tick();
+        }
+        prepare(&mut scene);
+        let victim = island_of_group(&mut scene, 1);
+        scene.server.world.stall_island(victim, 2, 7);
+        let leaver = first_of(&scene, 2);
+        let watcher = first_of(&scene, 0);
+        let slow = clients_of(&scene, 1);
+        let mut healthy: Vec<Frame> = Vec::new();
+        let mut late: Vec<Vec<Frame>> = vec![Vec::new(); slow.len()];
+        for tick in 1..=10_u64 {
+            if tick == 3 {
+                let _ = scene.server.join("late");
+            }
+            if tick == 5 {
+                scene.server.leave(&leaver);
+            }
+            scene.server.tick();
+            healthy.extend(watcher.take_frames());
+            for (index, client) in slow.iter().enumerate() {
+                let got = client.take_frames();
+                if (2..=7).contains(&tick) {
+                    assert!(got.is_empty(), "tick {tick}：慢岛上的人还收不到");
+                }
+                late[index].extend(got);
+            }
+            match tick {
+                3 | 4 => assert_eq!(
+                    (count_marker(&healthy, JOINED), count_marker(&healthy, LEFT)),
+                    (1, 0),
+                    "tick {tick}：健康岛上的人当场收到进服消息"
+                ),
+                5..=7 => assert_eq!(
+                    (count_marker(&healthy, JOINED), count_marker(&healthy, LEFT)),
+                    (1, 1),
+                    "tick {tick}：健康岛上的人当场收到离开消息"
+                ),
+                _ => {}
+            }
+        }
+        for got in &late {
+            assert_eq!(
+                (count_marker(got, JOINED), count_marker(got, LEFT)),
+                (1, 1),
+                "慢岛上的人各收到一次"
+            );
+            assert_eq!(
+                marker_order(got, &[JOINED, LEFT]),
+                vec![JOINED.to_owned(), LEFT.to_owned()],
+                "先进服、后离开"
+            );
+        }
+        assert!(scene.server.world.islands.all_parked());
+        scene.server.world.assert_island_invariants();
+    });
+}
+
+/// 主控给全服的帧（天气、延迟广播走的 `broadcast_all`）：健康岛上的人当场收到，慢岛上的
+/// 人在它回来的那一刻收到，各一次。
+///
+/// A master frame for everyone (`broadcast_all`, used by weather and the
+/// latency update): players on healthy islands get it at once, the slow
+/// island's players the tick it returns, once each.
+#[test]
+fn master_broadcasts_reach_a_slow_island_when_it_lands() {
+    bounded(|| {
+        let mut scene = scene(131, 4);
+        for _ in 0..3 {
+            scene.server.tick();
+        }
+        prepare(&mut scene);
+        let victim = island_of_group(&mut scene, 1);
+        scene.server.world.stall_island(victim, 1, 4);
+        let frame = crate::links::encode_frames(&mc_bamboo_protocol::packet::play::SystemChat {
+            content: &mc_bamboo_protocol::text::Component::text("MARK-ALL"),
+            overlay: false,
+        });
+        let slow = clients_of(&scene, 1);
+        let healthy = first_of(&scene, 0);
+        let (mut early, mut late) = (Vec::new(), Vec::new());
+        for tick in 1..=6_u64 {
+            if tick == 2 {
+                assert!(!scene.server.world.islands.is_parked(victim));
+                scene.server.world.broadcast_all(&frame);
+            }
+            scene.server.tick();
+            early.extend(healthy.take_frames());
+            for client in &slow {
+                late.extend(client.take_frames());
+            }
+            if tick == 2 {
+                assert_eq!(count_marker(&early, "MARK-ALL"), 1, "健康岛当场收到");
+            }
+            if tick <= 4 {
+                assert_eq!(count_marker(&late, "MARK-ALL"), 0, "慢岛还没回来");
+            }
+        }
+        assert_eq!(count_marker(&early, "MARK-ALL"), 1);
+        assert_eq!(
+            count_marker(&late, "MARK-ALL"),
+            slow.len(),
+            "慢岛上每人一次"
+        );
+    });
+}
+
+/// 直接从区域文件读一格方块（不起世界）；区块没存过时是 `None`。
+///
+/// Read one block straight from the region file without starting a world;
+/// `None` if the chunk was never saved.
+fn block_on_disk(root: &std::path::Path, pos: mc_bamboo_core::BlockPos) -> Option<u32> {
+    use mc_bamboo_storage::{
+        anvil::{RegionCompression, RegionPos, open_region},
+        chunk_nbt,
+        world_dir::WorldDir,
+    };
+    let chunk = pos.chunk();
+    let mut region = open_region(
+        WorldDir::new(root).region_dir(),
+        RegionPos::of(chunk),
+        RegionCompression::Zlib,
+    )
+    .ok()?;
+    let bytes = region.read(chunk, 64 << 20).ok()??;
+    let decoded = chunk_nbt::decode_bytes(&bytes).ok()?;
+    Some(
+        decoded
+            .column
+            .chunk()
+            .block((pos.x & 15) as usize, pos.y, (pos.z & 15) as usize),
+    )
+}
+
+/// 慢岛和存盘。三组各改一格方块，第 1 组的岛慢 8 刻。
+///
+/// - `save_all` 为假：匀速存盘不等慢岛。健康岛上改过的区块在慢岛不在的时候照常写盘，
+///   慢岛上改过的在它回来以后写盘（留给它的存盘名单没丢）。
+/// - `save_all` 为真：慢岛不在时发的 `/save-all` 等全部岛停放再存（每个岛上改过的区块
+///   都要拍到）。慢岛回来之前成功消息不发、它的区块不在盘上；回来以后成功消息发一次，
+///   这时盘上三组的改动都在。
+///
+/// A slow island and saving. Each group edits one block and group 1's island
+/// is slow for 8 ticks. Without `save_all`, paced saves do not wait: chunks
+/// edited on healthy islands are written while the slow one is away and the
+/// slow island's chunk once it is back (the save list kept for it is not
+/// lost). With `save_all`, a `/save-all` sent meanwhile waits for every
+/// island: no success message and no chunk of the slow island on disk before
+/// it is back, one success message afterwards with all three edits on disk.
+fn run_saves(save_all: bool) {
+    const SUCCESS: &str = "commands.save.success";
+    let root = std::env::temp_dir().join(format!(
+        "bamboo-island-hybrid-save-{}-{save_all}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    {
+        let mut scene = set_up(141, Harness::new_islands_with_save(2, &root, 4));
+        for _ in 0..3 {
+            scene.server.tick();
+        }
+        let op = first_of(&scene, 0);
+        make_op(&mut scene, &op);
+        scene.server.world.master.host.flush_io();
+        let _ = super::tests::written_chunks(&scene.server.world.master.host);
+        let victim = island_of_group(&mut scene, 1);
+        let centers = scene.centers.clone();
+        let edits: Vec<mc_bamboo_core::BlockPos> = centers
+            .iter()
+            .map(|&center| super::island_split_tests::at(center, 4, -60, 4))
+            .collect();
+        for (&center, &pos) in centers.iter().zip(&edits) {
+            let island = scene
+                .server
+                .world
+                .islands
+                .island_of_chunk(center)
+                .expect("有岛");
+            let region = &mut scene
+                .server
+                .world
+                .islands
+                .get_mut(island)
+                .expect("在表里")
+                .region;
+            region
+                .chunks
+                .set_block(pos, mc_bamboo_data::blocks::GOLD_BLOCK);
+            region.touch(pos);
+            region.chunks.finish_light_updates();
+        }
+        scene.server.world.stall_island(victim, 1, 8);
+        let gold = Some(mc_bamboo_data::blocks::GOLD_BLOCK);
+        let mut written = Vec::new();
+        let mut feedback = Vec::new();
+        for tick in 1..=16_u64 {
+            if save_all && tick == 3 {
+                command(&scene, 0, "save-all");
+            }
+            scene.server.tick();
+            scene.server.world.master.host.flush_io();
+            if !save_all {
+                // 取走写盘回执看写了哪些区块（会把栅栏回执也取走，所以只在不发
+                // `/save-all` 的那一遍用）。
+                // Take the write acks to see what was written (this also takes
+                // barrier acks, so only in the run without `/save-all`).
+                written.extend(super::tests::written_chunks(
+                    &scene.server.world.master.host,
+                ));
+            }
+            feedback.extend(op.take_frames());
+            if tick == 8 {
+                assert!(!scene.server.world.islands.is_parked(victim));
+                if save_all {
+                    assert_eq!(
+                        count_marker(&feedback, SUCCESS),
+                        0,
+                        "`/save-all` 还在等慢岛"
+                    );
+                    assert!(scene.server.world.master.hybrid.held_len() >= 1);
+                } else {
+                    assert!(
+                        written.contains(&centers[0]) && written.contains(&centers[2]),
+                        "慢岛不在时健康岛上改过的区块照常写盘：{written:?}"
+                    );
+                    assert!(!written.contains(&centers[1]));
+                }
+                assert_ne!(
+                    block_on_disk(&root, edits[1]),
+                    gold,
+                    "慢岛上的改动它不在时存不了"
+                );
+            }
+        }
+        if save_all {
+            assert_eq!(
+                count_marker(&feedback, SUCCESS),
+                1,
+                "慢岛回来以后 `/save-all` 做了一次"
+            );
+        } else {
+            assert!(
+                written.contains(&centers[1]),
+                "慢岛回来以后它改过的区块写盘了：{written:?}"
+            );
+        }
+        for (group, &pos) in edits.iter().enumerate() {
+            assert_eq!(block_on_disk(&root, pos), gold, "第 {group} 组的改动在盘上");
+        }
+        assert_eq!(scene.server.world.master.hybrid.held_len(), 0);
+        assert!(scene.server.world.master.hybrid.plans.is_empty());
+        scene.server.shut_down();
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn paced_saves_do_not_wait_for_a_slow_island() {
+    bounded(|| run_saves(false));
+}
+
+#[test]
+fn save_all_waits_for_a_slow_island_and_then_saves_everything() {
+    bounded(|| run_saves(true));
 }

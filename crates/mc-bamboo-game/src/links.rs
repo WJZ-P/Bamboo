@@ -275,7 +275,12 @@ impl Links {
     /// 发一个包。包太大编码不出来时踢掉这名玩家，别的玩家不受影响。
     pub(crate) fn send<P: ClientboundPacket>(&mut self, to: PlayerId, packet: &P) {
         if self.posting() {
-            if !self.is_open(to) {
+            // 不在场的玩家（混合驱动下他的岛不在主控手里）照样投：信箱应用时会记成给他
+            // 那个岛的延后投递。
+            // A player who is away (their island is, under the hybrid drive)
+            // is still posted to: applying the mailbox records a deferred
+            // delivery for their island.
+            if !self.is_open(to) && !self.is_absent(to) {
                 return;
             }
             let mut frames = Vec::new();

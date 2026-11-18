@@ -1602,6 +1602,7 @@ impl World {
         for (_, inbox) in &self.master.refused_inboxes {
             inbox.drain_into(&mut players);
         }
+        self.master.hybrid.drain_joining(&mut players);
         batch.append(&mut players);
         crate::inbound::merge(&mut batch);
         (batch, disconnected)

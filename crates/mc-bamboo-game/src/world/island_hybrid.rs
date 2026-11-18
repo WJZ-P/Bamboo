@@ -163,6 +163,22 @@ pub(crate) struct HybridState {
 }
 
 impl HybridState {
+    /// 取出正在进服（票已经挂上、还在等目标岛）的玩家的队列里已经到达的消息。他们的队列
+    /// 还没挂到任何岛上，不取的话他的离开永远到不了，等着的进服也就撤不掉。
+    ///
+    /// Drain the queues of players still joining (ticket placed, waiting for
+    /// the target island). Their queues hang on no island yet; without this a
+    /// leave would never arrive and the waiting join could not be cancelled.
+    pub(super) fn drain_joining(&self, out: &mut Vec<Sequenced>) {
+        for queue in self.held.values() {
+            for (_, held) in queue {
+                if let Held::Join(pending) = held {
+                    pending.request.inbox.drain_into(out);
+                }
+            }
+        }
+    }
+
     /// 排着队的事的件数。
     #[cfg(test)]
     pub(crate) fn held_len(&self) -> usize {
