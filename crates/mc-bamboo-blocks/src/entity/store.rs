@@ -1317,7 +1317,19 @@ impl EntityStore {
                 self.spawn_snapshots.insert(uid, public);
             }
         }
-        for uid in moved {
+        // 被丢弃生物留下的事件也跟着实体走：键按 uid，搬走的 uid 交给新岛。
+        // Events left by discarded mobs follow their entity by uid.
+        let departed = std::mem::take(&mut self.departed_mob_events);
+        let moved_ids: BTreeSet<EntityUid> = moved.iter().copied().collect();
+        for (uid, events) in departed {
+            if moved_ids.contains(&uid) {
+                out.departed_mob_events.insert(uid, events);
+            } else {
+                self.departed_mob_events.insert(uid, events);
+            }
+        }
+        let moved_iter = moved_ids.iter().copied();
+        for uid in moved_iter {
             self.unindex_sub(uid);
             let row = self.index.remove(&uid).expect("just indexed");
             let entry = self.slots[row].take().expect("indexed row is live");
@@ -1364,6 +1376,8 @@ impl EntityStore {
         self.preserved.append(&mut other.preserved);
         self.watched_sections.extend(other.watched_sections);
         self.wake_events.append(&mut other.wake_events);
+        self.departed_mob_events
+            .append(&mut other.departed_mob_events);
         for (uid, public) in std::mem::take(&mut other.spawn_snapshots) {
             let previous = self.spawn_snapshots.insert(uid, public);
             debug_assert!(previous.is_none(), "生成快照的实体 ID 重复");

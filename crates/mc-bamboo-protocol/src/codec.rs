@@ -239,6 +239,38 @@ impl<'a> Reader<'a> {
         Ok(BlockPos::unpack(self.i64()?))
     }
 
+    /// 官方 `LpVec3.read`：一个标记字节、一个中间字节、一个大端 u32，
+    /// 缩放放不下 2 位时后面再跟一个 VarInt。
+    ///
+    /// Vanilla `LpVec3.read`: a marker byte, one middle byte, a big-endian u32
+    /// and an optional VarInt when the scale needs more than two bits.
+    pub fn lp_vec3(&mut self) -> Result<Vec3, DecodeError> {
+        let first = i64::from(self.u8()?);
+        if first == 0 {
+            return Ok(Vec3::default());
+        }
+        let second = self.u8()?;
+        let rest = u64::from(self.u32()?);
+        let buffer = (rest << 16) | (u64::from(second) << 8) | first as u64;
+        let mut scale = i64::from((first & 3) as u8);
+        if first & 4 != 0 {
+            scale |= (i64::from(self.varint()?) & 0xffff_ffff) << 2;
+        }
+        let unpack = |bits: u64| {
+            let raw = (bits & 32767) as f64;
+            raw.min(32766.0) * 2.0 / 32766.0 - 1.0
+        };
+        Ok(Vec3::new(
+            unpack(buffer >> 3) * scale as f64,
+            unpack(buffer >> 18) * scale as f64,
+            unpack(buffer >> 33) * scale as f64,
+        ))
+    }
+
+    pub fn u32(&mut self) -> Result<u32, DecodeError> {
+        Ok(u32::from_be_bytes(self.array()?))
+    }
+
     /// 取走接下来的 `len` 个字节。
     pub fn bytes(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
         let (bytes, rest) = self

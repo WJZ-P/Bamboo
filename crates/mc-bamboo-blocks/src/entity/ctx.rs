@@ -373,6 +373,12 @@ pub enum Command {
     },
     /// `ExperienceOrb.scanForMerges`：周围同值的球合并到自己身上。
     MergeExperienceOrbs { others: Vec<EntityUid>, value: i32 },
+    /// `BreedGoal.breed` → `Animal.spawnChildFromBreeding`：给伴侣设冷却、生小牛和经验球。
+    /// 父亲自己那一份状态已经在 `serverAiStep` 里改好（年龄递减还在后面）。
+    BreedCows {
+        partner: EntityUid,
+        position: mc_bamboo_core::Vec3,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -409,6 +415,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         } => super::mob::living::apply_death_drops(me, table, on_fire, killer, experience, world),
         Command::MergeExperienceOrbs { others, value } => {
             super::orb::apply_merge(me, &others, value, world)
+        }
+        Command::BreedCows { partner, position } => {
+            super::mob::living::apply_breed(me, partner, position, world)
         }
     }
 }

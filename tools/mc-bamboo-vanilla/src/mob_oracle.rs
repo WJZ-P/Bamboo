@@ -111,6 +111,19 @@ struct Case {
     /// 场景开始时给每头牛设的着火刻数。
     #[serde(default)]
     fire_ticks: i32,
+    /// 逐刻右键交互的结果（JSON 对象数组，直接序列化成 [`Interaction`]）。
+    #[serde(default)]
+    interactions: Option<Vec<Vec<Interaction>>>,
+    /// 每项是（刻、牛下标、玩家下标、物品 ID、创造模式）。
+    #[serde(default)]
+    interact_actions: Vec<[i32; 5]>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct Interaction {
+    result: String,
+    item: i32,
+    count: i32,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -126,6 +139,13 @@ struct Spawn {
     count: i32,
     #[serde(default)]
     value: i32,
+    /// 幼崽的构造随机数、头部朝向和 UUID，作为场景起点原样交给 Bamboo。
+    #[serde(default)]
+    seed: Option<i64>,
+    #[serde(default)]
+    hr: Option<i32>,
+    #[serde(default)]
+    uuid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +164,8 @@ struct CowSetup {
     z: i64,
     yaw: i32,
     seed: i64,
+    #[serde(default)]
+    age: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,6 +204,7 @@ struct CowStep {
     air: i32,
     seed: i64,
     age: i32,
+    love: i32,
     lh: bool,
     fr: i64,
     var: String,
@@ -600,6 +623,16 @@ impl Report {
                         mob.y_body_rot = yaw;
                     }
                     entity.remaining_fire_ticks = case.fire_ticks;
+                    if cow.age != 0 {
+                        let baby = cow.age < 0;
+                        let (width, height, eye) =
+                            mc_bamboo_blocks::entity::mob::MobType::Cow.dimensions(baby);
+                        entity.dimensions = (width, height);
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            mob.age = cow.age;
+                            mob.eye_height = eye;
+                        }
+                    }
                 });
                 ids.push(id);
             }
@@ -610,6 +643,9 @@ impl Report {
         };
         let ours = snapshot(&level, &ids);
         self.compare(&case.name, 0, &ours, first);
+        // 场景开始时的牛也算「刚生成」，但它们在 tick 0 已经建过同步状态，
+        // 不该出现在后面逐刻的新实体比对里。
+        let _ = level.entities.take_spawn_snapshots();
         // 已经发过 `remove_entities` 的牛，按 `ids` 下标。
         let mut removed_ids = std::collections::HashSet::new();
         // 出站包逐刻比字节：官方一侧每头牛一个 `ServerEntity`，这里用游戏层
@@ -641,8 +677,54 @@ impl Report {
         }
         for (index, expected) in case.steps.iter().enumerate().skip(1) {
             ticks.set_time(case.start_time + index as i64);
+            let mut ours_interactions = Vec::new();
             {
                 let mut world = World::new(&mut level, &mut ticks);
+                for &[tick, cow, player_index, item, creative] in &case.interact_actions {
+                    if tick != index as i32 {
+                        continue;
+                    }
+                    let player = &case.players[player_index as usize];
+                    let mut uuid = [0u8; 16];
+                    uuid[..8].copy_from_slice(&1_u64.to_be_bytes());
+                    uuid[8..].copy_from_slice(&(2_u64 + player_index as u64).to_be_bytes());
+                    let held = mc_bamboo_protocol::item::ItemStack::new(item, 1);
+                    let request = mc_bamboo_blocks::entity::mob::interact::MobInteractRequest {
+                        player_uid: player.id,
+                        player_uuid: uuid,
+                        hand: mc_bamboo_core::Hand::Main,
+                        held: held.clone(),
+                        creative: creative != 0,
+                        position: Vec3::new(
+                            f64::from_bits(player.x as u64),
+                            f64::from_bits(player.y as u64),
+                            f64::from_bits(player.z as u64),
+                        ),
+                    };
+                    let outcome = world.interact_mob(ids[cow as usize], &request);
+                    let result = if outcome.result.consumes_action() {
+                        "Success"
+                    } else {
+                        "Pass"
+                    };
+                    // 官方 `usePlayerItem` / `ItemUtils.createFilledResult` 之后手里剩什么。
+                    let after = if let Some(replacement) = &outcome.replacement {
+                        if creative != 0 {
+                            held.clone()
+                        } else {
+                            replacement.clone()
+                        }
+                    } else if outcome.shrink_held {
+                        mc_bamboo_protocol::item::ItemStack::empty()
+                    } else {
+                        held.clone()
+                    };
+                    ours_interactions.push(Interaction {
+                        result: result.to_owned(),
+                        item: if after.is_empty() { 0 } else { after.item },
+                        count: after.count,
+                    });
+                }
                 for &[tick, cow, amount, attacker] in &case.hurts {
                     if tick as usize != index {
                         continue;
@@ -704,6 +786,48 @@ impl Report {
             // Newly spawned entities: the snapshot is taken at `addFreshEntity`,
             // exactly when vanilla's `ChunkMap.addEntity` builds `ServerEntity`.
             let mut spawn_public = level.entities.take_spawn_snapshots();
+            // 繁殖生成的幼崽也是牛：加进 `ids`，并把官方给的构造随机数、朝向和
+            // UUID 作为场景起点写进实体，后面每刻比对它自己的行为。
+            for public in &spawn_public {
+                if !matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_)) {
+                    continue;
+                }
+                if !ids.contains(&public.uid) {
+                    ids.push(public.uid);
+                }
+                let setup = case
+                    .spawns
+                    .as_ref()
+                    .and_then(|spawns| spawns.get(index))
+                    .and_then(|step| step.iter().find(|spawn| spawn.kind == "cow"));
+                let Some(setup) = setup else {
+                    continue;
+                };
+                let seed = setup.seed.unwrap_or(0);
+                let hr = setup
+                    .hr
+                    .map(|bits| f32::from_bits(bits as u32))
+                    .unwrap_or(0.0);
+                let uuid = setup
+                    .uuid
+                    .as_deref()
+                    .and_then(parse_uuid)
+                    .unwrap_or([0; 16]);
+                let uid = public.uid;
+                {
+                    let mut world = World::new(&mut level, &mut ticks);
+                    world.with_entity_mut(uid, &mut |entity| {
+                        entity.random = JavaRandom::from_state(seed);
+                        entity.y_rot = 0.0;
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            mob.uuid = uuid;
+                            mob.y_head_rot = hr;
+                            mob.y_head_rot_o = hr;
+                            mob.y_rot_o = 0.0;
+                        }
+                    });
+                }
+            }
             // 场景开始时就存在的牛在 tick 0 已经建过同步状态，这里只处理
             // 这一刻真正新生成的实体。
             // Cows present at scene start already got their tracking state at
@@ -714,6 +838,16 @@ impl Report {
                 let snapshot = Snapshot::of(public);
                 let tracked = tracking.tracked_for_oracle(&snapshot);
                 spawn_pairings.extend(tracked.pairing_packets(&snapshot));
+            }
+            if let Some(expected_interactions) = &case.interactions {
+                compare_interactions(
+                    &mut self.mismatches,
+                    &self.show,
+                    &case.name,
+                    index,
+                    &ours_interactions,
+                    &expected_interactions[index],
+                );
             }
             // 死亡场景：逐刻比新生成的掉落物和经验球（种类、数量、位置）。
             if let Some(expected_spawns) = &case.spawns {
@@ -857,6 +991,7 @@ impl Report {
             plain!(air);
             plain!(seed);
             plain!(age);
+            plain!(love);
             plain!(lh);
             bits64!(fr);
             plain!(var);
@@ -919,6 +1054,7 @@ fn spawn_snapshot(
             let (kind, item, count, value) = match &public.kind {
                 KindPublic::Item { stack, .. } => ("item".to_owned(), stack.item, stack.count, 0),
                 KindPublic::ExperienceOrb { value } => ("orb".to_owned(), 0, 0, *value),
+                KindPublic::Mob(mob) => ("cow".to_owned(), 0, 0, mob.age),
                 _ => return None,
             };
             Some(Spawn {
@@ -930,9 +1066,43 @@ fn spawn_snapshot(
                 item,
                 count,
                 value,
+                seed: None,
+                hr: None,
+                uuid: None,
             })
         })
         .collect()
+}
+
+/// 右键交互逐刻比对：结果类别和交回玩家手里的物品。
+fn compare_interactions(
+    mismatches: &mut Vec<String>,
+    show: &usize,
+    name: &str,
+    tick: usize,
+    ours: &[Interaction],
+    official: &[Interaction],
+) {
+    if mismatches.len() >= *show {
+        return;
+    }
+    let place = format!("{name} tick {tick} interactions");
+    if ours.len() != official.len() {
+        mismatches.push(format!(
+            "{place}: official {} results, bamboo {} results",
+            official.len(),
+            ours.len()
+        ));
+        return;
+    }
+    for (index, (ours, expected)) in ours.iter().zip(official).enumerate() {
+        if ours != expected {
+            mismatches.push(format!(
+                "{place}[{index}]: official {expected:?}, bamboo {ours:?}"
+            ));
+            return;
+        }
+    }
 }
 
 /// 死亡掉落逐刻比对：顺序、种类、物品数量、经验值和位置都按位比。
@@ -959,7 +1129,18 @@ fn compare_spawns(
         return;
     }
     for (index, (ours, expected)) in ours.iter().zip(official).enumerate() {
-        if ours == expected {
+        // 幼崽的构造随机数 / 朝向 / UUID 是场景起点，不作为行为结果比对。
+        let same = if expected.kind == "cow" {
+            ours.id == expected.id
+                && ours.kind == expected.kind
+                && ours.value == expected.value
+                && ours.x == expected.x
+                && ours.y == expected.y
+                && ours.z == expected.z
+        } else {
+            ours == expected
+        };
+        if same {
             continue;
         }
         mismatches.push(format!(
@@ -1073,6 +1254,22 @@ fn step_of(entity: &Entity, lr: i64) -> Option<CowStep> {
     Some(step_of_mob(entity, mob, lr))
 }
 
+/// 解析 Java `UUID.toString()` 的 8-4-4-4-12 位十六进制。
+fn parse_uuid(text: &str) -> Option<[u8; 16]> {
+    let mut hex = String::with_capacity(32);
+    for part in text.split('-') {
+        hex.push_str(part);
+    }
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 /// Java `UUID.toString()`：8-4-4-4-12 位小写十六进制。
 fn uuid_text(bytes: &[u8; 16]) -> String {
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -1117,6 +1314,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         air: mob.air_supply,
         seed: entity.random.state(),
         age: mob.age,
+        love: mob.in_love,
         lh: mob.left_handed,
         fr: mob
             .attributes

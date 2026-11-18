@@ -750,10 +750,7 @@ fn a_loaded_cow_keeps_running_from_its_saved_state() {
                 "Pos".to_owned(),
                 Tag::List(vec![Tag::Double(x), Tag::Double(64.0), Tag::Double(-2.25)]),
             ),
-            (
-                "UUID".to_owned(),
-                Tag::IntArray(vec![1, 2, 3, age as i32 + 9]),
-            ),
+            ("UUID".to_owned(), Tag::IntArray(vec![1, 2, 3, age + 9])),
             ("Age".to_owned(), Tag::Int(age)),
             ("InLove".to_owned(), Tag::Int(love)),
             (

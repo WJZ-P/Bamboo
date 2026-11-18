@@ -131,6 +131,8 @@ public final class MobOracle {
     /** Bamboo 的 `ENTITY_RANDOM_SEED`：岛的实体种子源的初始种子。 */
     private static final long ENTITY_RANDOM_SEED = 0x0DDB1A5E5BAD5EEDL;
     private static final Unsafe UNSAFE = loadUnsafe();
+    /** 新实体从岛种子源取到的初始种子，按实体 ID 记下给对拍用。 */
+    private static final java.util.Map<Integer, Long> BORN_SEEDS = new java.util.HashMap<>();
     private static ServerStatsCounter stats;
     private static PlayerAdvancements advancements;
 
@@ -233,6 +235,8 @@ public final class MobOracle {
         final List<double[]> cows = new ArrayList<>();
         final List<Long> seeds = new ArrayList<>();
         final List<float[]> yaws = new ArrayList<>();
+        /** 每头牛的初始 `Age`，默认 0（成年）。 */
+        final List<Integer> cowAges = new ArrayList<>();
         final List<double[]> players = new ArrayList<>();
         final List<Item> playerItems = new ArrayList<>();
         /** 玩家主手物品的抢夺等级，0 表示没有。 */
@@ -254,6 +258,8 @@ public final class MobOracle {
         int deathKind;
         /** 场景开始时给每头牛设的着火刻数。 */
         int fireTicks;
+        /** 每项是（刻、牛下标、玩家下标、主手物品 ID、创造模式 1/0）。 */
+        final List<int[]> interactions = new ArrayList<>();
 
         Scene(String name) {
             this.name = name;
@@ -274,9 +280,14 @@ public final class MobOracle {
         }
 
         Scene cow(double x, double y, double z, float yaw, long seed) {
+            return cow(x, y, z, yaw, seed, 0);
+        }
+
+        Scene cow(double x, double y, double z, float yaw, long seed, int age) {
             cows.add(new double[] {x, y, z});
             yaws.add(new float[] {yaw});
             seeds.add(seed);
+            cowAges.add(age);
             return this;
         }
 
@@ -328,6 +339,12 @@ public final class MobOracle {
         /** 给每头牛设着火刻数，检验熟牛肉掉落。 */
         Scene fire(int ticks) {
             fireTicks = ticks;
+            return this;
+        }
+
+        /** 某一刻玩家右键一头牛；`item` 是主手物品注册表 ID，`creative` 是模式。 */
+        Scene interact(int tick, int cow, int player, int item, int creative) {
+            interactions.add(new int[] {tick, cow, player, item, creative});
             return this;
         }
     }
@@ -695,6 +712,42 @@ public final class MobOracle {
                 looting.hurts.add(new double[] {2, 0, 20.0, 0});
                 scenes.add(looting);
             }
+            {
+                // 喂食、繁殖、成长、挤奶。逐刻比 `inLove`、`Age`、新生成的幼崽 / 经验球，
+                // 以及玩家手里交回来的物品。
+                Scene feed = new Scene("interact_feed").ticks(80).drops();
+                ground(feed, 6);
+                feed.cow(0.5, 64.0, 0.5, 0.0F, 61L);
+                feed.player(1.5, 64.0, 0.5, Items.AIR);
+                feed.interact(2, 0, 0, BuiltInRegistries.ITEM.getId(Items.WHEAT), 0);
+                scenes.add(feed);
+                Scene baby = new Scene("interact_baby").ticks(80).drops();
+                ground(baby, 6);
+                baby.cow(0.5, 64.0, 0.5, 0.0F, 62L, -24000);
+                baby.player(1.5, 64.0, 0.5, Items.AIR);
+                baby.interact(2, 0, 0, BuiltInRegistries.ITEM.getId(Items.WHEAT), 0);
+                scenes.add(baby);
+                Scene breed = new Scene("interact_breed").ticks(160).drops();
+                ground(breed, 6);
+                breed.cow(0.5, 64.0, 0.5, 0.0F, 63L);
+                breed.cow(1.1, 64.0, 0.5, 0.0F, 64L);
+                breed.player(3.5, 64.0, 0.5, Items.AIR);
+                breed.interact(2, 0, 0, BuiltInRegistries.ITEM.getId(Items.WHEAT), 0);
+                breed.interact(2, 1, 0, BuiltInRegistries.ITEM.getId(Items.WHEAT), 0);
+                scenes.add(breed);
+                Scene milk = new Scene("interact_milk").ticks(40).drops().packets();
+                ground(milk, 6);
+                milk.cow(0.5, 64.0, 0.5, 0.0F, 65L);
+                milk.player(1.5, 64.0, 0.5, Items.AIR);
+                milk.interact(2, 0, 0, BuiltInRegistries.ITEM.getId(Items.BUCKET), 0);
+                scenes.add(milk);
+                Scene creativeMilk = new Scene("interact_milk_creative").ticks(40).drops();
+                ground(creativeMilk, 6);
+                creativeMilk.cow(0.5, 64.0, 0.5, 0.0F, 66L);
+                creativeMilk.player(1.5, 64.0, 0.5, Items.AIR);
+                creativeMilk.interact(2, 0, 0, BuiltInRegistries.ITEM.getId(Items.BUCKET), 1);
+                scenes.add(creativeMilk);
+            }
             return scenes;
         }
     }
@@ -743,8 +796,10 @@ public final class MobOracle {
         List<List<String>> syncFlags = null;
         /** 每头牛一个官方 `ServerEntity`，按 `cows` 的下标对齐。 */
         List<Sync> syncs = null;
-        /** 逐刻新生成的实体（掉落物、经验球），按生成顺序。 */
+        /** 逐刻新生成的实体（掉落物、经验球、幼崽），按生成顺序。 */
         List<List<String>> spawns = scene.drops ? new ArrayList<>() : null;
+        /** 逐刻右键交互的结果与交回来的主手物品。 */
+        List<List<String>> interactions = scene.interactions.isEmpty() ? null : new ArrayList<>();
         if (scene.packets) {
             packets = new ArrayList<>();
             syncFlags = new ArrayList<>();
@@ -757,6 +812,11 @@ public final class MobOracle {
         if (scene.drops) {
             for (int tick = 0; tick <= scene.ticks; tick++) {
                 spawns.add(new ArrayList<>());
+            }
+        }
+        if (interactions != null) {
+            for (int tick = 0; tick <= scene.ticks; tick++) {
+                interactions.add(new ArrayList<>());
             }
         }
         for (int i = 0; i < scene.cows.size(); i++) {
@@ -773,6 +833,10 @@ public final class MobOracle {
             cow.setYBodyRot(scene.yaws.get(i)[0]);
             if (scene.fireTicks > 0) {
                 cow.setRemainingFireTicks(scene.fireTicks);
+            }
+            int age = scene.cowAges.get(i);
+            if (age != 0) {
+                cow.setAge(age);
             }
             cows.add(cow);
             level.tracked.add(cow);
@@ -802,7 +866,8 @@ public final class MobOracle {
             line.append(",\"y\":").append(Double.doubleToRawLongBits(at[1]));
             line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
-            line.append(",\"seed\":").append(scene.seeds.get(i)).append('}');
+            line.append(",\"seed\":").append(scene.seeds.get(i));
+            line.append(",\"age\":").append(scene.cowAges.get(i)).append('}');
         }
         line.append("],\"players\":[");
         for (int i = 0; i < players.size(); i++) {
@@ -847,6 +912,28 @@ public final class MobOracle {
         java.util.Set<Integer> removed = new java.util.HashSet<>();
         for (int tick = 1; tick <= scene.ticks; tick++) {
             level.gameTime++;
+            for (int[] action : scene.interactions) {
+                if (action[0] != tick) {
+                    continue;
+                }
+                Cow target = cows.get(action[1]);
+                ServerPlayer actor = players.get(action[2]);
+                // 只改 `Abilities.instabuild`：`setGameMode` 会给不存在的连接发包。
+                putBoolean(net.minecraft.world.entity.player.Abilities.class, actor.getAbilities(),
+                        "instabuild", action[4] != 0);
+                actor.setItemInHand(InteractionHand.MAIN_HAND,
+                        new ItemStack(net.minecraft.world.item.Item.byId(action[3])));
+                // 官方 `Player.interactOn` 是这条链的入口；牛只看手里这一堆。
+                net.minecraft.world.InteractionResult result = target.mobInteract(actor, InteractionHand.MAIN_HAND);
+                ItemStack held = actor.getItemInHand(InteractionHand.MAIN_HAND);
+                StringBuilder one = new StringBuilder("{\"result\":\"");
+                one.append(result.getClass().getSimpleName()).append('"');
+                one.append(",\"item\":").append(BuiltInRegistries.ITEM.getId(held.getItem()));
+                one.append(",\"count\":").append(held.getCount()).append('}');
+                interactions.get(tick).add(one.toString());
+                putBoolean(net.minecraft.world.entity.player.Abilities.class, actor.getAbilities(),
+                        "instabuild", false);
+            }
             for (double[] hurt : scene.hurts) {
                 if ((int) hurt[0] == tick) {
                     Cow target = cows.get((int) hurt[1]);
@@ -858,17 +945,6 @@ public final class MobOracle {
                     };
                     target.hurtServer(level, source, (float) hurt[2]);
                 }
-            }
-            if (scene.drops) {
-                for (Entity born : level.spawned) {
-                    spawns.get(tick).add(spawnJson(born));
-                    if (scene.packets) {
-                        Sync sync = new Sync(level, born, official.registries);
-                        sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
-                        packets.get(tick).addAll(sync.take());
-                    }
-                }
-                level.spawned.clear();
             }
             for (int i = 0; i < scene.summons.size(); i++) {
                 double[] summon = scene.summons.get(i);
@@ -910,6 +986,30 @@ public final class MobOracle {
                 cow.tick();
             }
             level.tracked.removeIf(Entity::isRemoved);
+            // 实体 tick 里也会生成实体（繁殖的幼崽和经验球），在这一刻收齐。
+            // Entity ticks also spawn things (calves, orbs); collect them after the ticks.
+            if (scene.drops) {
+                // 官方先构造幼崽再构造经验球，所以按实体 ID 排序后就是构造顺序；
+                // Bamboo 也按这个顺序分配 ID 和种子。
+                level.spawned.sort(java.util.Comparator.comparingInt(Entity::getId));
+                for (Entity born : level.spawned) {
+                    level.reseedBorn(born);
+                    spawns.get(tick).add(spawnJson(born));
+                    if (born instanceof Cow) {
+                        cows.add((Cow) born);
+                        level.tracked.add(born);
+                    }
+                    if (scene.packets) {
+                        Sync sync = new Sync(level, born, official.registries);
+                        syncs.add(sync);
+                        sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
+                        packets.get(tick).addAll(sync.take());
+                    }
+                }
+                level.spawned.clear();
+                level.newbornCows.clear();
+            }
+            level.tracked.removeIf(Entity::isRemoved);
             line.append(',').append(stepJson(cows));
             if (scene.packets) {
                 // 官方 `ChunkMap.removeEntity` 在实体被丢弃时发给所有观察者。
@@ -945,6 +1045,16 @@ public final class MobOracle {
         appendSpawns(line, spawns);
         line.append(",\"deathKind\":").append(scene.deathKind);
         line.append(",\"fireTicks\":").append(scene.fireTicks);
+        line.append(",\"interactActions\":[");
+        for (int i = 0; i < scene.interactions.size(); i++) {
+            if (i > 0) line.append(',');
+            int[] action = scene.interactions.get(i);
+            line.append('[').append(action[0]).append(',').append(action[1]).append(',')
+                    .append(action[2]).append(',').append(action[3]).append(',')
+                    .append(action[4]).append(']');
+        }
+        line.append("],\"interactions\":");
+        appendSpawns(line, interactions);
         line.append("}\n");
         out.write(line.toString());
         out.flush();
@@ -1055,7 +1165,7 @@ public final class MobOracle {
     }
 
     /** 一个新生成的实体：种类、物品或经验值、位置。速度用实体自己的随机源，不比。 */
-    private static String spawnJson(Entity entity) {
+    private static String spawnJson(Entity entity) throws Exception {
         StringBuilder out = new StringBuilder("{\"id\":").append(entity.getId());
         Vec3 pos = entity.position();
         out.append(",\"x\":").append(Double.doubleToRawLongBits(pos.x));
@@ -1067,6 +1177,12 @@ public final class MobOracle {
             out.append(",\"count\":").append(item.getItem().getCount());
         } else if (entity instanceof net.minecraft.world.entity.ExperienceOrb orb) {
             out.append(",\"kind\":\"orb\",\"value\":").append(orb.getValue());
+        } else if (entity instanceof Cow calf) {
+            // 幼崽的构造随机数和朝向在生成时定下，作为场景起点交给 Bamboo。
+            out.append(",\"kind\":\"cow\",\"value\":").append(calf.getAge());
+            out.append(",\"seed\":").append(randomSeed(calf));
+            out.append(",\"hr\":").append(Float.floatToRawIntBits(calf.getYHeadRot()));
+            out.append(",\"uuid\":\"").append(calf.getUUID()).append('"');
         } else {
             out.append(",\"kind\":\"other\"");
         }
@@ -1112,6 +1228,7 @@ public final class MobOracle {
             out.append(",\"air\":").append(cow.getAirSupply());
             out.append(",\"seed\":").append(randomSeed(cow));
             out.append(",\"age\":").append(cow.getAge());
+            out.append(",\"love\":").append(cow.getInLoveTime());
             out.append(",\"lh\":").append(cow.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     cow.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
@@ -1210,6 +1327,15 @@ public final class MobOracle {
             Field field = Unsafe.class.getDeclaredField("theUnsafe");
             field.setAccessible(true);
             return (Unsafe) field.get(null);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static void putBoolean(Class<?> owner, Object target, String name, boolean value) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            UNSAFE.putBoolean(target, UNSAFE.objectFieldOffset(field), value);
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
         }
@@ -1487,6 +1613,7 @@ public final class MobOracle {
             level.tickRate = new TickRateManager();
             level.tracked = new ArrayList<>();
             level.spawned = new ArrayList<>();
+            level.newbornCows = new ArrayList<>();
             level.gameTime = START_TIME;
             level.levelData = new TickingLevelData(level);
             level.nextId = 1;
@@ -1622,17 +1749,33 @@ public final class MobOracle {
                 random.nextFloat();
                 eggSeed = null;
             }
-            if (dropUuids && (entity instanceof net.minecraft.world.entity.item.ItemEntity
-                    || entity instanceof net.minecraft.world.entity.ExperienceOrb)) {
-                // Bamboo 的非生物实体 UUID 由网络 ID 确定性派生，配对包要比它。
-                // Bamboo derives non-mob entity UUIDs from their network id.
+            if (entity instanceof Cow calf && dropUuids) {
+                newbornCows.add(calf);
+            }
+            spawned.add(entity);
+            return true;
+        }
+
+        /** 按幼崽 / 掉落物的构造顺序给新实体换上岛的种子源，并重放构造取数。 */
+        void reseedBorn(Entity entity) {
+            if (!dropUuids) {
+                return;
+            }
+            if (entity instanceof Cow calf) {
+                long seed = entitySeeds.nextLong();
+                BORN_SEEDS.put(calf.getId(), seed);
+                setRandom(calf, seed);
+                RandomSource random = calf.getRandom();
+                calf.setUUID(Mth.createInsecureUUID(random));
+                random.nextFloat();
+                return;
+            }
+            if (entity instanceof net.minecraft.world.entity.item.ItemEntity
+                    || entity instanceof net.minecraft.world.entity.ExperienceOrb) {
                 entity.setUUID(new UUID(0x0000BAAB00000000L, entity.getId()));
-                // 实体随机源换成岛的种子源，并重放构造函数里「base Entity 之后」的
-                // 那几次取数：物品的 bobOffs / yRot / 两个速度 double，球的 yRot /
-                // 三个速度 double。Bamboo 的 `EntityStore.prepare` 按同样顺序取。
-                // Reseed from the island's seed source and replay the constructor
-                // draws after the base Entity UUID, matching `EntityStore.prepare`.
-                setRandom(entity, entitySeeds.nextLong());
+                long seed = entitySeeds.nextLong();
+                BORN_SEEDS.put(entity.getId(), seed);
+                setRandom(entity, seed);
                 RandomSource random = entity.getRandom();
                 if (entity instanceof net.minecraft.world.entity.item.ItemEntity) {
                     random.nextFloat();
@@ -1648,8 +1791,6 @@ public final class MobOracle {
                     entity.setDeltaMovement(dx, dy, dz);
                 }
             }
-            spawned.add(entity);
-            return true;
         }
 
         /** UUID 和已有实体重复时放不进去，其余放进实体名单。 */
@@ -1670,6 +1811,8 @@ public final class MobOracle {
         List<Entity> spawned;
         /** 死亡场景给掉落物和球用确定性 UUID。 */
         boolean dropUuids;
+        /** 交互/繁殖场景新生成的幼崽，由 `play` 收进牛名单继续 tick。 */
+        List<Cow> newbornCows;
 
         @Override
         public net.minecraft.world.DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {

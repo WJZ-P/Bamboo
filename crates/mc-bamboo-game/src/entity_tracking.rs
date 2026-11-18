@@ -988,6 +988,23 @@ fn event_packet(
             entity_id: id,
             event: 60,
         })),
+        MobEvent::Hearts => EventPacket::Tracking(packet_body(&EntityEvent {
+            entity_id: id,
+            event: 18,
+        })),
+        MobEvent::MilkSound { position } => EventPacket::Sound(Sound {
+            sound: i32::from(mc_bamboo_data::sounds::sound_event(
+                "minecraft:entity.cow.milk",
+            )),
+            inline: None,
+            source: mc_bamboo_data::sounds::PLAYERS,
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            volume: 1.0,
+            pitch: 1.0,
+            seed: sound_seed(),
+        }),
         MobEvent::Damage { kind, attacker } => {
             let damage_type = mc_bamboo_data::damage_type_id(kind.name()).unwrap_or(0);
             EventPacket::Tracking(packet_body(&DamageEvent {

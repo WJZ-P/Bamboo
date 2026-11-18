@@ -13,6 +13,7 @@
 pub mod attributes;
 pub mod control;
 pub mod goals;
+pub mod interact;
 pub mod living;
 pub mod motion;
 pub mod navigation;
@@ -424,6 +425,8 @@ pub struct Mob {
     pub events: Vec<MobEvent>,
     /// `hurtMarked`：速度要强制同步一次。
     pub hurt_marked: bool,
+    /// 这一刻 `BreedGoal` 决定生小牛；`living::tick` 在把 `kind` 放回实体之后落地。
+    pub pending_breed: Option<EntityUid>,
 }
 
 /// 要发给客户端的一次生物事件。
@@ -438,6 +441,10 @@ pub enum MobEvent {
     Death,
     /// `broadcastEntityEvent(this, 60)`：死亡动画结束，冒烟。
     Poof,
+    /// `broadcastEntityEvent(this, 18)`：开始求爱 / 繁殖时的爱心。
+    Hearts,
+    /// `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，不是中立生物。
+    MilkSound { position: Vec3 },
     /// `Entity.playSound`：在实体当时的位置放一个音效（已经排除了静音的情况）。
     ///
     /// `Entity.playSound` at the entity's position at the time (silent mobs excluded).
@@ -545,6 +552,7 @@ impl Mob {
             sound_variant: CowSoundVariant::Classic,
             events: Vec::new(),
             hurt_marked: false,
+            pending_breed: None,
         }
     }
 
