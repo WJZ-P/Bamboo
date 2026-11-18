@@ -398,6 +398,7 @@ public final class ChunkContentOracle {
                     case "block-entities-load" -> response.add("cases", blockEntitiesLoad(request));
                     case "ticks" -> response.add("cases", ticks());
                     case "entities" -> response.add("cases", entities(request));
+                    case "fresh-cow" -> response.add("written", freshCow(request));
                     case "official-chunk" -> {
                         // 官方 parse -> write 一份区块 NBT，输出规范 JSON。
                         byte[] bytes = Base64.getDecoder().decode(request.get("nbt").getAsString());
@@ -613,6 +614,30 @@ public final class ChunkContentOracle {
                 cases.add(one);
             }
             return cases;
+        }
+
+        /**
+         * 刚构造的牛（{@code EntityType.COW.create} 再 {@code snapTo}）直接存盘：哪些属性实例
+         * 在构造时就被懒创建、各个键的缺省值。UUID 换成请求给的，方便和 Bamboo 比。
+         *
+         * <p>A freshly built cow saved right away, with the requested UUID.
+         */
+        private JsonObject freshCow(JsonObject request) {
+            FakeLevel level = FakeLevel.create(official, 1L);
+            Entity cow = net.minecraft.world.entity.EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
+            cow.snapTo(
+                    request.get("x").getAsDouble(),
+                    request.get("y").getAsDouble(),
+                    request.get("z").getAsDouble(),
+                    request.get("yaw").getAsFloat(),
+                    0.0F);
+            JsonArray words = request.getAsJsonArray("uuid");
+            cow.setUUID(net.minecraft.core.UUIDUtil.uuidFromIntArray(new int[] {
+                words.get(0).getAsInt(), words.get(1).getAsInt(), words.get(2).getAsInt(), words.get(3).getAsInt()
+            }));
+            TagValueOutput output = TagValueOutput.createWithContext(ProblemReporter.DISCARDING, official.registries);
+            cow.save(output);
+            return canonical(output.buildResult());
         }
 
         private static String encodeNbt(CompoundTag tag) {

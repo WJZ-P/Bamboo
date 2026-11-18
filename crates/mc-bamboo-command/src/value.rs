@@ -579,6 +579,8 @@ pub enum Value {
     /// A style tag that has already been checked.
     Style(mc_bamboo_nbt::Tag),
     TeamColor(TeamColorId),
+    /// 官方 `CompoundTagArgument` 读到的复合标签。
+    Nbt(mc_bamboo_nbt::Tag),
 }
 
 impl Value {
@@ -773,6 +775,13 @@ impl Value {
 
     pub fn as_component_tag(&self) -> Option<&Tag> {
         self.as_component()
+    }
+
+    pub fn as_nbt(&self) -> Option<&mc_bamboo_nbt::Tag> {
+        match self {
+            Self::Nbt(value) => Some(value),
+            _ => None,
+        }
     }
 
     pub fn as_style_tag(&self) -> Option<&mc_bamboo_nbt::Tag> {

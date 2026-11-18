@@ -559,6 +559,73 @@ fn run_cases(
         "entity split lost modeled entities",
     );
 
+    // 5b. 牛的重存（照方块实体那套）：同一份条目，官方 `loadEntityRecursive -> save`
+    //     和 Bamboo `read_entity -> write_entity` 逐键逐值比较；属性列表官方按身份哈希序
+    //     遍历，每次开服都可能不同，按 `id` 排好再比。另加「刚生成的」：官方新造一头牛
+    //     直接存盘，和 Bamboo 新造的一头逐键比较。
+    // Cow resave: the same entries through vanilla load -> save and Bamboo read ->
+    // write, key by key. Attribute lists are compared sorted by id.
+    let cows = cow_resave_cases();
+    let request = json!({"command": "entities", "entities": cows.iter().map(|(_, tag)| canonical_tag(tag)).collect::<Vec<_>>()});
+    let answer = ask(stdin, lines, request)?;
+    report.check(
+        answer.cases.len() == cows.len(),
+        "official sent the wrong number of cow cases",
+    );
+    for ((name, input), case) in cows.iter().zip(&answer.cases) {
+        report.check(
+            case.error.is_none(),
+            format!("cow {name}: {}", case.error.as_deref().unwrap_or("")),
+        );
+        let Some(written) = &case.written else {
+            continue;
+        };
+        let ours = read_entity(input, 99)
+            .map_err(|error| error.to_string())?
+            .map(|row| write_entity(&row));
+        let Some(Ok(ours)) = ours else {
+            report.check(false, format!("cow {name}: Bamboo cannot read or write it"));
+            continue;
+        };
+        let official = sorted_attributes(written.clone());
+        let bamboo = sorted_attributes(canonical_tag(&ours));
+        report.check(
+            official == bamboo,
+            format!(
+                "cow {name}: Bamboo read -> write differs from the official resave: {}",
+                first_difference(&official, &bamboo)
+            ),
+        );
+    }
+    {
+        let mut store = mc_bamboo_blocks::EntityStore::new();
+        let uid = store.spawn(Entity::cow(Vec3::new(0.5, 64.0, -3.5)));
+        store.with_mut(uid, |entity| {
+            entity.y_rot = 33.5;
+            entity.with_mob(|me, mob| {
+                mob.y_head_rot = me.y_rot;
+                mob.y_body_rot = me.y_rot;
+            });
+        });
+        let row = store.get(uid).expect("刚生成").split();
+        let ours = write_entity(&row).map_err(|error| error.to_string())?;
+        let uuid = mc_bamboo_blocks::archive::tag::int_array(&ours, "UUID");
+        let answer = ask(
+            stdin,
+            lines,
+            json!({"command": "fresh-cow", "x": 0.5, "y": 64.0, "z": -3.5, "yaw": 33.5, "uuid": uuid}),
+        )?;
+        let official = sorted_attributes(answer.written.clone().unwrap_or(Value::Null));
+        let bamboo = sorted_attributes(canonical_tag(&ours));
+        report.check(
+            official == bamboo,
+            format!(
+                "fresh cow: Bamboo save differs from the official one: {}",
+                first_difference(&official, &bamboo)
+            ),
+        );
+    }
+
     // 6. 整块对拍：官方生成（parse -> write）一份区块 NBT，Bamboo 用组装函数
     //    读成 RegionColumn 再写出，和官方对同一份内容读进去再写出来的结果按键比较。
     let whole = sample_chunk_nbt();
@@ -1362,6 +1429,148 @@ fn entity_cases() -> Vec<Tag> {
 }
 
 /// 一段最小合法的区块 NBT，只为检查 `block_entities` 的键能原样通过官方 parse/write。
+/// 牛的重存题：裸条目、带富字段、Bamboo 刚生成又写出的。
+///
+/// Cow resave cases: bare, rich, and one Bamboo just spawned and wrote.
+fn cow_resave_cases() -> Vec<(String, Tag)> {
+    let compound = |entries: Vec<(&str, Tag)>| {
+        Tag::Compound(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect(),
+        )
+    };
+    let uuid = Tag::IntArray(vec![0x1234_5678, -0x1234_5679, 0x0bad_cafe, 0x7357_1001]);
+    let doubles = |values: [f64; 3]| Tag::List(values.into_iter().map(Tag::Double).collect());
+    let mut out = vec![(
+        "bare".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:cow".to_owned())),
+            ("Pos", doubles([3.5, 64.0, -7.25])),
+            ("UUID", uuid.clone()),
+        ]),
+    )];
+    out.push((
+        "rich".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:cow".to_owned())),
+            ("Pos", doubles([-12.75, 70.5, 300.125])),
+            ("Motion", doubles([0.05, -0.0784000015258789, 11.0])),
+            (
+                "Rotation",
+                Tag::List(vec![Tag::Float(-123.5), Tag::Float(12.25)]),
+            ),
+            ("UUID", uuid.clone()),
+            ("fall_distance", Tag::Double(2.5)),
+            ("Fire", Tag::Short(37)),
+            ("Air", Tag::Short(120)),
+            ("OnGround", Tag::Byte(1)),
+            ("Invulnerable", Tag::Byte(1)),
+            ("PortalCooldown", Tag::Int(9)),
+            ("invulnerable_time", Tag::Int(4)),
+            ("CustomName", Tag::String("Bessie".to_owned())),
+            ("CustomNameVisible", Tag::Byte(1)),
+            ("Silent", Tag::Byte(1)),
+            ("NoGravity", Tag::Byte(1)),
+            ("Glowing", Tag::Byte(1)),
+            ("TicksFrozen", Tag::Int(55)),
+            (
+                "Tags",
+                Tag::List(vec![Tag::String("milked".to_owned())]),
+            ),
+            ("Health", Tag::Float(7.5)),
+            ("HurtTime", Tag::Short(3)),
+            ("DeathTime", Tag::Short(0)),
+            ("AbsorptionAmount", Tag::Float(1.5)),
+            (
+                "attributes",
+                Tag::List(vec![
+                    compound(vec![
+                        ("id", Tag::String("minecraft:movement_speed".to_owned())),
+                        ("base", Tag::Double(0.25)),
+                    ]),
+                    compound(vec![
+                        ("id", Tag::String("minecraft:follow_range".to_owned())),
+                        ("base", Tag::Double(16.0)),
+                        (
+                            "modifiers",
+                            Tag::List(vec![compound(vec![
+                                ("id", Tag::String("minecraft:random_spawn_bonus".to_owned())),
+                                ("amount", Tag::Double(0.0412)),
+                                ("operation", Tag::String("add_multiplied_base".to_owned())),
+                            ])]),
+                        ),
+                    ]),
+                ]),
+            ),
+            ("FallFlying", Tag::Byte(0)),
+            (
+                "last_hurt_by_player",
+                Tag::IntArray(vec![1, 2, 3, 4]),
+            ),
+            ("last_hurt_by_player_memory_time", Tag::Int(60)),
+            ("last_hurt_by_mob", Tag::IntArray(vec![1, 2, 3, 4])),
+            ("ticks_since_last_hurt_by_mob", Tag::Int(40)),
+            ("CanPickUpLoot", Tag::Byte(0)),
+            ("PersistenceRequired", Tag::Byte(1)),
+            ("home_radius", Tag::Int(6)),
+            ("home_pos", Tag::IntArray(vec![10, 64, -10])),
+            ("LeftHanded", Tag::Byte(1)),
+            ("DeathLootTableSeed", Tag::Long(-77)),
+            ("NoAI", Tag::Byte(1)),
+            ("Age", Tag::Int(-1200)),
+            ("ForcedAge", Tag::Int(0)),
+            ("AgeLocked", Tag::Byte(1)),
+            ("InLove", Tag::Int(0)),
+            ("LoveCause", Tag::IntArray(vec![9, 8, 7, 6])),
+            ("variant", Tag::String("minecraft:warm".to_owned())),
+            ("sound_variant", Tag::String("minecraft:moody".to_owned())),
+            (
+                "data",
+                compound(vec![("owner", Tag::String("bamboo".to_owned()))]),
+            ),
+            ("Unknown", Tag::Int(5)),
+        ]),
+    ));
+    out.push((
+        "in_love_adult".to_owned(),
+        compound(vec![
+            ("id", Tag::String("minecraft:cow".to_owned())),
+            ("Pos", doubles([0.5, 64.0, 0.5])),
+            ("UUID", uuid),
+            ("InLove", Tag::Int(512)),
+            ("Age", Tag::Int(4000)),
+            ("variant", Tag::String("minecraft:cold".to_owned())),
+        ]),
+    ));
+    let mut store = mc_bamboo_blocks::EntityStore::new();
+    let uid = store.spawn(Entity::cow(Vec3::new(8.5, 65.0, 8.5)));
+    let row = store.get(uid).expect("刚生成").split();
+    out.push((
+        "spawned".to_owned(),
+        write_entity(&row).expect("牛能写出"),
+    ));
+    out
+}
+
+/// 把规范 JSON 里 `attributes` 列表按 `id` 排序。
+fn sorted_attributes(mut value: Value) -> Value {
+    if let Some(Value::Array(list)) = value
+        .get_mut("values")
+        .and_then(|values| values.get_mut("attributes"))
+        .and_then(|attributes| attributes.get_mut("values"))
+    {
+        list.sort_by_key(|entry| {
+            entry["values"]["id"]["value"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned()
+        });
+    }
+    value
+}
+
 fn sample_chunk_nbt() -> Vec<u8> {
     let bytes = std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),

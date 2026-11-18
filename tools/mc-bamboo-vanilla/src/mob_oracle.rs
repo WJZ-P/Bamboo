@@ -19,7 +19,7 @@ use mc_bamboo_blocks::{
     entity::{
         Entities, Entity, EntityKind, JavaRandom,
         ctx::PlayerView,
-        mob::{DamageSource, Mob},
+        mob::{DamageSource, Mob, spawn},
     },
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
@@ -59,7 +59,21 @@ struct Case {
     cows: Vec<CowSetup>,
     players: Vec<PlayerSetup>,
     hurts: Vec<[i32; 4]>,
+    #[serde(default)]
+    summons: Vec<SummonSetup>,
+    /// 刷怪蛋：（刻、生成格 x、y、z、`shouldOffsetYMore`）。
+    #[serde(default)]
+    eggs: Vec<[i32; 5]>,
     steps: Vec<Vec<CowStep>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SummonSetup {
+    tick: usize,
+    x: i64,
+    y: i64,
+    z: i64,
+    nbt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +118,13 @@ struct CowStep {
     fire: i32,
     air: i32,
     seed: i64,
+    age: i32,
+    lh: bool,
+    fr: i64,
+    var: String,
+    snd: String,
+    uuid: String,
+    lr: i64,
     goals: String,
     path: Option<Vec<i32>>,
 }
@@ -422,7 +443,7 @@ impl Report {
         let mut ids = Vec::new();
         {
             let mut world = World::new(&mut level, &mut ticks);
-            for cow in &case.cows {
+            for (index, cow) in case.cows.iter().enumerate() {
                 let position = Vec3::new(
                     f64::from_bits(cow.x as u64),
                     f64::from_bits(cow.y as u64),
@@ -435,6 +456,8 @@ impl Report {
                     entity.y_rot = yaw;
                     entity.old_position = position;
                     if let Some(mob) = entity.kind.mob_mut() {
+                        // 和官方一侧一样，场景里的牛 UUID 是 (0, 下标 + 1)。
+                        mob.uuid = (index as u128 + 1).to_be_bytes();
                         mob.x_rot = 0.0;
                         mob.y_rot_o = yaw;
                         mob.x_rot_o = 0.0;
@@ -470,6 +493,33 @@ impl Report {
                         DamageSource::player(player.id, position, false),
                         f32::from_bits(amount as u32),
                     );
+                }
+                for summon in &case.summons {
+                    if summon.tick != index {
+                        continue;
+                    }
+                    let position = Vec3::new(
+                        f64::from_bits(summon.x as u64),
+                        f64::from_bits(summon.y as u64),
+                        f64::from_bits(summon.z as u64),
+                    );
+                    let nbt = summon.nbt.as_deref().map(|text| {
+                        mc_bamboo_nbt::parse_snbt(text).expect("scene SNBT parses")
+                    });
+                    if let Ok(id) = spawn::summon_cow(&mut world, position, nbt.as_ref()) {
+                        ids.push(id);
+                    }
+                }
+                for &[tick, x, y, z, more] in &case.eggs {
+                    if tick as usize != index {
+                        continue;
+                    }
+                    ids.push(spawn::spawn_cow_from_egg(
+                        &mut world,
+                        BlockPos::new(x, y, z),
+                        more != 0,
+                        None,
+                    ));
                 }
                 world.tick_entities();
             }
@@ -558,6 +608,13 @@ impl Report {
             plain!(fire);
             plain!(air);
             plain!(seed);
+            plain!(age);
+            plain!(lh);
+            bits64!(fr);
+            plain!(var);
+            plain!(snd);
+            plain!(uuid);
+            plain!(lr);
             plain!(goals);
             plain!(path);
             self.mismatch(format!("{place}: {}", diffs.join("; ")));
@@ -605,19 +662,38 @@ fn table_hashes() -> [i64; 2] {
 }
 
 fn snapshot(level: &MobLevel, ids: &[i32]) -> Vec<Option<CowStep>> {
+    let lr = level.random.source().seed();
     ids.iter()
-        .map(|&id| level.entities.get(id).and_then(|entity| step_of(&entity)))
+        .map(|&id| {
+            level
+                .entities
+                .get(id)
+                .and_then(|entity| step_of(&entity, lr))
+        })
         .collect()
 }
 
-fn step_of(entity: &Entity) -> Option<CowStep> {
+fn step_of(entity: &Entity, lr: i64) -> Option<CowStep> {
     let EntityKind::Mob(mob) = &entity.kind else {
         return None;
     };
-    Some(step_of_mob(entity, mob))
+    Some(step_of_mob(entity, mob, lr))
 }
 
-fn step_of_mob(entity: &Entity, mob: &Mob) -> CowStep {
+/// Java `UUID.toString()`：8-4-4-4-12 位小写十六进制。
+fn uuid_text(bytes: &[u8; 16]) -> String {
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
     let path = mob.navigation.path.as_ref().map(|path| {
         let mut values = vec![path.next_node_index as i32];
         for node in &path.nodes {
@@ -647,6 +723,16 @@ fn step_of_mob(entity: &Entity, mob: &Mob) -> CowStep {
         fire: entity.remaining_fire_ticks,
         air: mob.air_supply,
         seed: entity.random.state(),
+        age: mob.age,
+        lh: mob.left_handed,
+        fr: mob
+            .attributes
+            .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE)
+            .to_bits() as i64,
+        var: mob.variant.name().to_owned(),
+        snd: mob.sound_variant.name().to_owned(),
+        uuid: uuid_text(&mob.uuid),
+        lr,
         goals: mob.goals.running_names().join(" "),
         path,
     }

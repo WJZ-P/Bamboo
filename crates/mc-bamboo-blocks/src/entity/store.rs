@@ -760,12 +760,31 @@ impl EntityStore {
     }
 
     /// `addFreshEntity`：分配 ID 放进世界。tick 期间生成的实体下一 tick 才动。
-    pub fn spawn(&mut self, mut entity: Entity) -> EntityUid {
+    pub fn spawn(&mut self, entity: Entity) -> EntityUid {
+        let entity = self.prepare(entity);
+        self.add(entity)
+    }
+
+    /// 官方实体构造函数里的那一半：分配 ID、从种子源取种子、取构造时的随机数（物品的
+    /// 朝向和初速度、生物的 UUID 和朝向）。还不放进表；`/summon` 之类要在构造和
+    /// `addFreshEntity` 之间读 NBT、`finalizeSpawn`，或者放不进去（UUID 重复）。
+    ///
+    /// The constructor half: allocate the id, draw the seed and the constructor
+    /// draws. The entity is not in the table yet; `/summon` loads NBT and runs
+    /// `finalizeSpawn` in between, and may fail to add it.
+    pub fn prepare(&mut self, mut entity: Entity) -> Entity {
         entity.id = self.ids.allocate();
         entity.random = JavaRandom::new(self.next_entity_seed());
         // 物品的朝向和初速度用刚设好的实体随机源，不能用 `level.random`。
         entity.finish_item_random();
         entity.finish_mob_random();
+        entity
+    }
+
+    /// `addFreshEntity` 的另一半：把 [`Self::prepare`] 过的实体放进表。
+    ///
+    /// The other half of `addFreshEntity`: put a prepared entity in the table.
+    pub fn add(&mut self, entity: Entity) -> EntityUid {
         let uid = entity.id;
         let row = entity.split();
         if self.ticking {
@@ -774,6 +793,14 @@ impl EntityStore {
             self.insert_row(row);
         }
         uid
+    }
+
+    /// 表里（含这一拍刚生成的）有没有这个 UUID 的生物，`tryAddFreshEntityWithPassengers` 用。
+    ///
+    /// Whether a mob with this UUID is in the table, pending ones included.
+    pub fn has_mob_uuid(&self, uuid: &[u8; 16]) -> bool {
+        let matches = |row: &EntityRow| matches!(&row.public.kind, KindPublic::Mob(mob) if &mob.uuid == uuid);
+        self.slots.iter().flatten().any(matches) || self.pending.iter().any(matches)
     }
 
     /// 从 [`EntityRow`] 直接生成，给命令落地时串行分配 ID 用。

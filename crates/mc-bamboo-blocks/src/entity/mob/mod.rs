@@ -18,6 +18,7 @@ pub mod motion;
 pub mod navigation;
 pub mod nbt;
 pub mod path;
+pub mod spawn;
 pub(crate) mod timing;
 
 use mc_bamboo_core::{BlockPos, Vec3};
@@ -78,6 +79,15 @@ impl CowVariant {
             .into_iter()
             .find(|variant| variant.name() == name)
     }
+
+    /// 注册表里的下标（`cow_variant` 按名字排序：cold、temperate、warm），同步元数据用。
+    pub const fn registry_id(self) -> i32 {
+        match self {
+            Self::Cold => 0,
+            Self::Temperate => 1,
+            Self::Warm => 2,
+        }
+    }
 }
 
 /// 牛的叫声，`cow_sound_variant` 注册表。
@@ -100,6 +110,46 @@ impl CowSoundVariant {
         [Self::Classic, Self::Moody]
             .into_iter()
             .find(|variant| variant.name() == name)
+    }
+
+    /// 注册表里的下标（`cow_sound_variant` 按名字排序），同步元数据用。
+    pub const fn registry_id(self) -> i32 {
+        match self {
+            Self::Classic => 0,
+            Self::Moody => 1,
+        }
+    }
+
+    /// `CowSoundVariant.ambientSound`。
+    pub const fn ambient(self) -> &'static str {
+        match self {
+            Self::Classic => "minecraft:entity.cow.ambient",
+            Self::Moody => "minecraft:entity.cow_moody.ambient",
+        }
+    }
+
+    /// `CowSoundVariant.hurtSound`。
+    pub const fn hurt(self) -> &'static str {
+        match self {
+            Self::Classic => "minecraft:entity.cow.hurt",
+            Self::Moody => "minecraft:entity.cow_moody.hurt",
+        }
+    }
+
+    /// `CowSoundVariant.deathSound`。
+    pub const fn death(self) -> &'static str {
+        match self {
+            Self::Classic => "minecraft:entity.cow.death",
+            Self::Moody => "minecraft:entity.cow_moody.death",
+        }
+    }
+
+    /// `CowSoundVariant.stepSound`。
+    pub const fn step(self) -> &'static str {
+        match self {
+            Self::Classic => "minecraft:entity.cow.step",
+            Self::Moody => "minecraft:entity.cow_moody.step",
+        }
     }
 }
 
@@ -225,6 +275,8 @@ pub struct DamageSource {
     pub position: Option<Vec3>,
     /// 冲刺攻击时玩家的朝向，`causeExtraKnockback` 的方向用它。
     pub sprint_yaw: Option<f32>,
+    /// 攻击者的 UUID，存进 `last_hurt_by_*`。
+    pub attacker_uuid: Option<[u8; 16]>,
 }
 
 impl DamageSource {
@@ -237,7 +289,14 @@ impl DamageSource {
             creative_player: false,
             position: None,
             sprint_yaw: None,
+            attacker_uuid: None,
         }
+    }
+
+    /// 带上攻击者的 UUID。
+    pub const fn with_attacker_uuid(mut self, uuid: [u8; 16]) -> Self {
+        self.attacker_uuid = Some(uuid);
+        self
     }
 
     /// `damageSources().playerAttack(player)`。
@@ -249,6 +308,7 @@ impl DamageSource {
             creative_player: creative,
             position: Some(position),
             sprint_yaw: None,
+            attacker_uuid: None,
         }
     }
 }
@@ -280,11 +340,19 @@ pub struct Mob {
     pub silent: bool,
     pub no_gravity: bool,
     pub invulnerable: bool,
-    pub custom_name: Option<String>,
+    /// `CustomName`：文本组件的 NBT 形式（字符串或复合标签），同步时原样转成组件。
+    ///
+    /// `CustomName` in its NBT form (a string or a compound), sent as is.
+    pub custom_name: Option<mc_bamboo_nbt::Tag>,
     pub custom_name_visible: bool,
     pub glowing: bool,
     pub portal_cooldown: i32,
     pub tags: Vec<String>,
+    /// 存档里官方有、这里不建模的键（效果、装备、拴绳、`data` 等），读进来原样写回。
+    ///
+    /// Vanilla keys that are not modelled here (effects, equipment, leash, `data`),
+    /// kept verbatim from disk and written back.
+    pub passthrough: Vec<(String, mc_bamboo_nbt::Tag)>,
     // ---- LivingEntity ----
     pub attributes: Attributes,
     pub health: f32,
@@ -299,9 +367,17 @@ pub struct Mob {
     /// 绝对时刻（岛的时钟），合并时要平移。
     pub last_damage_stamp: i64,
     pub last_hurt_by_mob: Option<EntityUid>,
+    /// `lastHurtByMob` 的 UUID（`EntityReference`），存档用。读盘后只有 UUID、没有 uid。
+    ///
+    /// The UUID of `lastHurtByMob`, for saving. After a load only the UUID is known.
+    pub last_hurt_by_mob_ref: Option<[u8; 16]>,
     pub last_hurt_by_mob_timestamp: i32,
     pub last_hurt_by_player: Option<EntityUid>,
+    /// `lastHurtByPlayer` 的 UUID，存档用。
+    pub last_hurt_by_player_ref: Option<[u8; 16]>,
     pub last_hurt_by_player_memory_time: i32,
+    /// `currentImpulseContextResetGraceTime`。牛不会被风弹推，只为存档往返。
+    pub impulse_grace_time: i32,
     pub no_action_time: i32,
     pub speed: f32,
     pub xxa: f32,
@@ -362,6 +438,15 @@ pub enum MobEvent {
     Death,
     /// `broadcastEntityEvent(this, 60)`：死亡动画结束，冒烟。
     Poof,
+    /// `Entity.playSound`：在实体当时的位置放一个音效（已经排除了静音的情况）。
+    ///
+    /// `Entity.playSound` at the entity's position at the time (silent mobs excluded).
+    Sound {
+        sound: &'static str,
+        volume: f32,
+        pitch: f32,
+        position: Vec3,
+    },
 }
 
 impl Mob {
@@ -401,6 +486,7 @@ impl Mob {
             glowing: false,
             portal_cooldown: 0,
             tags: Vec::new(),
+            passthrough: Vec::new(),
             attributes,
             health,
             dead: false,
@@ -412,9 +498,12 @@ impl Mob {
             last_damage_source: None,
             last_damage_stamp: 0,
             last_hurt_by_mob: None,
+            last_hurt_by_mob_ref: None,
             last_hurt_by_mob_timestamp: 0,
             last_hurt_by_player: None,
+            last_hurt_by_player_ref: None,
             last_hurt_by_player_memory_time: 0,
+            impulse_grace_time: 0,
             no_action_time: 0,
             speed: 0.0,
             xxa: 0.0,
@@ -507,7 +596,7 @@ pub struct MobPublic {
     pub on_fire: bool,
     pub ticks_frozen: i32,
     pub air_supply: i32,
-    pub custom_name: Option<String>,
+    pub custom_name: Option<mc_bamboo_nbt::Tag>,
     pub custom_name_visible: bool,
     pub glowing: bool,
     pub left_handed: bool,

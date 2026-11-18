@@ -2869,6 +2869,26 @@ impl<'a> World<'a> {
         self.level.spawn_entity(entity)
     }
 
+    /// 构造一个实体但先不放进世界，见 [`crate::EntityStore::prepare`]。
+    pub fn prepare_entity(&mut self, entity: Entity) -> Entity {
+        self.level.prepare_entity(entity)
+    }
+
+    /// 放进一个 [`Self::prepare_entity`] 过的实体。
+    pub fn add_prepared_entity(&mut self, entity: Entity) -> i32 {
+        self.level.add_prepared_entity(entity)
+    }
+
+    /// 世界里有没有这个 UUID 的生物。
+    pub fn has_mob_uuid(&self, uuid: &[u8; 16]) -> bool {
+        self.level.has_mob_uuid(uuid)
+    }
+
+    /// `level.getBiome(pos)` 的注册表 ID。
+    pub fn biome_id(&self, pos: BlockPos) -> i32 {
+        self.level.biome_id(pos)
+    }
+
     /// `FallingBlockEntity.fall`：这一格只剩流体，方块本身变成实体从这一格的中心开始掉。
     ///
     /// 生成时 `WATERLOGGED` 要清掉，落地时再按那一格的水重新设。

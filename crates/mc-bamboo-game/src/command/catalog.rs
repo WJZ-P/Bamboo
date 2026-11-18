@@ -8,8 +8,8 @@ use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
     Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, enchant, gamerule, items,
-    loot, particle, players, playsound, random, save, scoreboard, stopsound, team, teleport, text,
-    time, title, weather, world_border, world_settings,
+    loot, particle, players, playsound, random, save, scoreboard, stopsound, summon, team,
+    teleport, text, time, title, weather, world_border, world_settings,
 };
 
 struct Builder {
@@ -115,6 +115,7 @@ pub(crate) fn build() -> Commands {
     register_say(&mut builder, root);
     register_scoreboard(&mut builder, root);
     register_setblock(&mut builder, root);
+    register_summon(&mut builder, root);
     register_tellraw(&mut builder, root);
     register_team(&mut builder, root);
     register_teleport(&mut builder, root);
@@ -467,6 +468,28 @@ fn register_setblock(builder: &mut Builder, root: usize) {
     builder.bind_island(block, "keep", blocks::setblock_keep);
     builder.bind_island(block, "replace", blocks::setblock_replace);
     builder.bind_island(block, "strict", blocks::setblock_strict);
+}
+
+/// `SummonCommand.register`：权限 2；`<entity>`、`<entity> <pos>` 跑 `finalizeSpawn`，
+/// 带 `<nbt>` 的不跑。
+fn register_summon(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "summon", permission::GAMEMASTERS);
+    let entity = builder.argument(
+        command,
+        "entity",
+        ArgumentType::Resource {
+            registry: "minecraft:entity_type",
+        },
+        0,
+    );
+    builder
+        .graph
+        .suggest_with(entity, summon::SUGGESTION, summon::suggest_entities);
+    builder.run_island(entity, summon::summon_here);
+    let pos = builder.argument(entity, "pos", ArgumentType::Vec3, 0);
+    builder.run_island(pos, summon::summon_at);
+    let nbt = builder.argument(pos, "nbt", ArgumentType::CompoundTag, 0);
+    builder.run_island(nbt, summon::summon_with_nbt);
 }
 
 /// `TellRawCommand.register`：权限 2，只给每个目标发系统消息，没有成功反馈。

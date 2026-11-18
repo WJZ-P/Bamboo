@@ -578,6 +578,7 @@ pub mod tests {
                 "type": if players_only { "players" } else { "entities" },
                 "amount": if single { "single" } else { "multiple" },
             }),
+            ArgumentType::Resource { registry } => serde_json::json!({ "registry": registry }),
             _ => return None,
         })
     }
