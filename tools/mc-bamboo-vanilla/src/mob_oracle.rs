@@ -542,7 +542,6 @@ impl Report {
         }
         for (index, expected) in case.steps.iter().enumerate().skip(1) {
             ticks.set_time(case.start_time + index as i64);
-            let mut spawn_public: Vec<mc_bamboo_blocks::entity::EntityPublic> = Vec::new();
             {
                 let mut world = World::new(&mut level, &mut ticks);
                 for &[tick, cow, amount, attacker] in &case.hurts {
@@ -593,23 +592,19 @@ impl Report {
                         None,
                     );
                     ids.push(id);
-                    if case.packets.is_some()
-                        && let Some(public) = world.level().entity_public(id)
-                    {
-                        spawn_public.push(public);
-                    }
-                }
-                for summon in &case.summons {
-                    if summon.tick == index
-                        && case.packets.is_some()
-                        && let Some(&id) = ids.last()
-                        && let Some(public) = world.level().entity_public(id)
-                    {
-                        spawn_public.push(public);
-                    }
                 }
                 world.tick_entities();
             }
+            // 这一刻新生成的实体：快照是在 `addFreshEntity` 时记下的，官方
+            // `ChunkMap.addEntity` 也在同一时刻建 `ServerEntity`。
+            // Newly spawned entities: the snapshot is taken at `addFreshEntity`,
+            // exactly when vanilla's `ChunkMap.addEntity` builds `ServerEntity`.
+            let mut spawn_public = level.entities.take_spawn_snapshots();
+            // 场景开始时就存在的牛在 tick 0 已经建过同步状态，这里只处理
+            // 这一刻真正新生成的实体。
+            // Cows present at scene start already got their tracking state at
+            // tick 0; only genuinely new entities belong here.
+            spawn_public.retain(|public| !tracking.has_tracked_for_oracle(public.uid));
             let mut spawn_pairings = Vec::new();
             for public in &spawn_public {
                 let snapshot = Snapshot::of(public);

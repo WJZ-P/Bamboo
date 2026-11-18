@@ -594,19 +594,10 @@ impl EntityStore {
         Some(self.slots[row].as_ref()?.clone().into_entity())
     }
 
-    /// 只读公开数据，包括这一拍刚生成、还没并进 tick 列表的实体。
-    /// 正在 tick 的那一个读不到。
-    ///
-    /// Read-only public data, including entities spawned this tick that have
-    /// not joined the tick list yet. The one currently ticking is not visible.
+    /// 只读公开数据。正在 tick 的那一个读不到。
     pub fn public_at(&self, uid: EntityUid) -> Option<&EntityPublic> {
-        if let Some(&row) = self.index.get(&uid) {
-            return Some(&self.slots[row].as_ref()?.public);
-        }
-        self.pending
-            .iter()
-            .find(|row| row.public.uid == uid)
-            .map(|row| &row.public)
+        let row = *self.index.get(&uid)?;
+        Some(&self.slots[row].as_ref()?.public)
     }
 
     /// 改一行：拼成完整快照交给回调，再拆回两半。这样 public / state / 索引总是一致。

@@ -920,6 +920,35 @@ fn broadcast_bodies(region: &mut Region, bodies: &[Vec<u8>]) {
     }
 }
 
+/// 每刻同步前的公共准备：生物事件、消失的实体、新实体的跟踪状态。
+/// `sync` 和测试里的全表扫描参照实现都调它，两边字节才一致。
+///
+/// Common pre-sync work: mob events, departed entities and spawn-time
+/// tracking state. Both `sync` and the full-scan test oracle call this.
+fn prepare_sync(region: &mut Region) {
+    // 生物事件（受伤、死亡、音效）先发，再发这一刻的配对和同步包。
+    // Mob events go out before this tick's pairing and sync packets.
+    let events = region.entities.take_mob_events();
+    let bodies = event_packets(&events, || region.sound_seed_generator.source().next_long());
+    broadcast_bodies(region, &bodies);
+    let live: BTreeSet<i32> = region
+        .entities
+        .iter_public()
+        .map(|public| public.uid)
+        .collect();
+    remove_missing(region, &live);
+    // 新实体的 `TrackedEntity` 用生成那一刻的样子建，配对包的速度才和官方一致。
+    // New entities get their `TrackedEntity` from the spawn-time snapshot, so
+    // the pairing packet's velocity matches vanilla.
+    for public in region.entities.take_spawn_snapshots() {
+        let tracked = &mut region.entity_tracking.tracked;
+        if let std::collections::btree_map::Entry::Vacant(entry) = tracked.entry(public.uid) {
+            let snapshot = Snapshot::of(&public);
+            entry.insert(TrackedEntity::new(&snapshot));
+        }
+    }
+}
+
 /// tick 第 6 阶段：世界实体的配对、同步和移除。对应 `ChunkMap.tick`。
 pub(crate) fn sync(region: &mut Region) {
     // 外层仍是全表按 uid 升序：每个实体都要发同步包，消失的也要发移除包。
@@ -928,26 +957,8 @@ pub(crate) fn sync(region: &mut Region) {
     // The outer loop still walks the whole table in uid order: every entity sends
     // sync packets and departed ones send removals. Only public data is read, and
     // pairing uses a coarse grid of players built once per tick.
-    // 生物事件（受伤、死亡、音效）先发，再发这一刻的配对和同步包。
-    // Mob events go out before this tick's pairing and sync packets.
-    let events = region.entities.take_mob_events();
-    let bodies = event_packets(&events, || region.sound_seed_generator.source().next_long());
-    broadcast_bodies(region, &bodies);
+    prepare_sync(region);
     let snapshots: Vec<Snapshot> = region.entities.iter_public().map(Snapshot::of).collect();
-    let live: BTreeSet<i32> = snapshots.iter().map(|snapshot| snapshot.id).collect();
-    remove_missing(region, &live);
-    // 新实体的 `TrackedEntity` 用生成那一刻的样子建，配对包的速度才和官方一致。
-    // New entities get their `TrackedEntity` from the spawn-time snapshot, so
-    // the pairing packet's velocity matches vanilla.
-    for public in region.entities.take_spawn_snapshots() {
-        if !region.entity_tracking.tracked.contains_key(&public.uid) {
-            let snapshot = Snapshot::of(&public);
-            region
-                .entity_tracking
-                .tracked
-                .insert(public.uid, TrackedEntity::new(&snapshot));
-        }
-    }
 
     let view_distance = region.view_distance;
     let cells = PlayerCells::build(&region.players, view_distance);

@@ -52,14 +52,12 @@ fn entity_uuids_are_unique() {
 /// player for every entity. Both implementations share the packet builders, so
 /// the only difference is the candidate set.
 fn sync_full_scan(region: &mut Region) {
+    prepare_sync(region);
     let snapshots: Vec<Snapshot> = region
         .entities
         .iter()
         .map(|entity| Snapshot::of(&entity.split().public))
         .collect();
-    let live: BTreeSet<i32> = snapshots.iter().map(|snapshot| snapshot.id).collect();
-    remove_missing(region, &live);
-
     let view_distance = region.view_distance;
     for snapshot in snapshots {
         let tracked = &mut region.entity_tracking.tracked;
