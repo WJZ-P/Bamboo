@@ -138,6 +138,16 @@ pub struct WorldConfig {
     /// world one island (exact mode, oracles, bit-exact tests). See
     /// [`crate::default_islands`] for the default; bit-exact callers give `false`.
     pub islands: bool,
+    /// 多岛的混合驱动下，一个岛的同一刻在 tick 线程上连续跑超过这么久就判为死岛
+    /// （`docs/island-implementation-plan.md` 5.6）：它的玩家被断开，它的区块从上次存盘
+    /// 重新加载，世界接着跑。缺省见 [`crate::default_island_dead_timeout`]（30 秒）。
+    ///
+    /// Under the multi-island hybrid drive, an island whose tick keeps
+    /// running on its thread for longer than this is declared dead
+    /// (`docs/island-implementation-plan.md` 5.6): its players are
+    /// disconnected, its chunks reload from the last save and the world goes
+    /// on. See [`crate::default_island_dead_timeout`] for the default (30 s).
+    pub island_dead_timeout: Duration,
     /// 世界目录。`None` 表示不存档（测试、oracle、压测都走这条路）。
     ///
     /// The world directory. `None` disables saving (tests, oracle, load tests).
@@ -176,6 +186,7 @@ impl Default for WorldConfig {
             mail_budget: MailBudget::default(),
             island_threads: crate::island::default_island_threads(),
             islands: crate::island::default_islands(),
+            island_dead_timeout: crate::island::default_island_dead_timeout(),
             world_dir: None,
             world_gen: crate::world_options::WorldGenConfig::default(),
             broadcast_console_to_ops: true,
@@ -272,7 +283,13 @@ pub(crate) struct Master {
     ///
     /// How long to keep waiting for the island after a shutdown request; past
     /// that the master stops without it, saving what it can and reporting.
-    island_stop_timeout: Duration,
+    pub(crate) island_stop_timeout: Duration,
+    /// 一个岛的同一刻在 tick 线程上连续跑超过这么久就判死（混合驱动，岛的实施计划
+    /// 5.6.1）。
+    ///
+    /// An island whose tick runs on its thread for longer than this is
+    /// declared dead (hybrid drive, island plan 5.6.1).
+    pub(crate) island_dead_timeout: Duration,
     /// 这一刻主控等岛交回、什么也没干的时间。
     island_wait: Duration,
     /// 分离驱动下岛还在跑时收到的 `/save-all`：等岛交回、停放之后再过栅栏。
@@ -487,6 +504,7 @@ impl World {
                 pool: None,
                 held_inbound: Vec::new(),
                 island_stop_timeout: ISLAND_STOP_TIMEOUT,
+                island_dead_timeout: config.island_dead_timeout,
                 island_wait: Duration::ZERO,
                 deferred_save_all: Vec::new(),
                 posted_scratch: Vec::new(),
@@ -605,6 +623,12 @@ impl World {
             world.master.global.weather_random = Some(mc_bamboo_blocks::random::LevelRandom::new(
                 crate::region::unique_seed(),
             ));
+        }
+        if world.hybrid() {
+            // 混合驱动留一份空白岛：家岛被判死时拿它换一个空的家岛（计划 5.6.2）。
+            // The hybrid drive keeps a blank island to replace a dead home
+            // with an empty one (plan 5.6.2).
+            world.islands.keep_blueprint();
         }
         if world.islands.region.profiler.partition_enabled() {
             let verify = world.islands.region.profiler.partition_verify();
@@ -1322,11 +1346,13 @@ impl World {
         let pool = self.master.pool.as_mut().expect("分离驱动一定有线程池");
         let dispatched = Instant::now();
         let mut away = 0;
-        for slot in self.islands.slots_mut() {
-            let mut island = slot.take();
+        for id in self.islands.ids() {
+            let ticket = self.islands.next_ticket();
+            let slot = self.islands.slot_mut(id).expect("岛在表里");
+            let mut island = slot.take(ticket);
             island.dispatch();
             let hint = island.last_worker;
-            if let Err(mut island) = pool.dispatch(hint, island) {
+            if let Err(mut island) = pool.dispatch(hint, island, ticket) {
                 island.park();
                 slot.put(island);
                 panic!("the island tick threads are gone");
@@ -1364,6 +1390,7 @@ impl World {
         for back in backs {
             let crate::island_pool::HandBack {
                 mut island,
+                ticket: _,
                 worker,
                 started,
                 finished,
@@ -1838,6 +1865,16 @@ impl World {
             show_hat: shows_hat(&request.client),
             chat_session: None,
         };
+        // 混合驱动下留一个第二出口：这名玩家所在的岛要是卡死被判死，主控靠它把他断开
+        // （计划 5.6.2）。
+        // Under the hybrid drive keep a second exit: if this player's island
+        // gets stuck and is declared dead, the master disconnects them through
+        // it (plan 5.6.2).
+        if self.hybrid()
+            && let Some(exit) = request.sink.second_handle()
+        {
+            self.master.hybrid.death.exits.insert(id, exit);
+        }
         let origin = self.master.host.island_origin(target, spawn_chunk);
         let region = &mut self.islands.ensure(target, origin).region;
         let hashed_seed = region.global.hashed_seed();
@@ -2083,6 +2120,7 @@ impl World {
             .refused_inboxes
             .retain(|(refused, _)| *refused != id);
         self.master.transit.remove(&id);
+        self.master.hybrid.death.exits.remove(&id);
         let Some(island) = self.islands.island_of_player(id) else {
             return;
         };
@@ -3075,6 +3113,11 @@ mod island_crossing_tests;
 #[cfg(test)]
 #[path = "world/tests/island_drive_tests.rs"]
 mod island_drive_tests;
+#[path = "world/island_death.rs"]
+mod island_death;
+#[cfg(test)]
+#[path = "world/island_death_tests.rs"]
+mod island_death_tests;
 #[path = "world/island_hybrid.rs"]
 mod island_hybrid;
 #[cfg(test)]

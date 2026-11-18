@@ -119,6 +119,54 @@ pub fn islands_from_env() -> Option<bool> {
     }
 }
 
+/// `island_dead_seconds` 没有显式给出时的值：一个岛的同一刻在 tick 线程上连续跑超过
+/// 这么多秒就判为死岛（岛的实施计划 5.6.1）。正常的慢以 2 秒为界（落后 2 秒以内追赶），
+/// 30 秒是它的 15 倍；又比官方看门狗的 60 秒和连接层在途配额用完的两三分钟短。
+///
+/// The `island_dead_seconds` value when none is given: an island whose tick
+/// keeps running on its thread for more than this many seconds is declared
+/// dead (island plan 5.6.1). Ordinary slowness ends at 2 seconds (the
+/// catch-up window); 30 is fifteen times that, and shorter than the vanilla
+/// watchdog's 60 seconds and the few minutes a connection's in-flight quota lasts.
+pub const DEFAULT_ISLAND_DEAD_SECONDS: u64 = 30;
+
+/// `island_dead_seconds` 的下限：再短就会把一次很重的 tick 当成卡死。
+///
+/// The lower bound of `island_dead_seconds`; anything shorter would take one
+/// heavy tick for a stuck island.
+pub const MIN_ISLAND_DEAD_SECONDS: u64 = 5;
+
+/// 改 `island_dead_seconds` 缺省值的环境变量（秒，不小于 [`MIN_ISLAND_DEAD_SECONDS`]）。
+///
+/// The environment variable that overrides the `island_dead_seconds` default
+/// (seconds, at least [`MIN_ISLAND_DEAD_SECONDS`]).
+pub const ISLAND_DEAD_SECONDS_ENV: &str = "BAMBOO_ISLAND_DEAD_SECONDS";
+
+/// 环境变量给的 `island_dead_seconds`。没设或者不是不小于下限的整数时是 `None`。
+///
+/// The `island_dead_seconds` given by the environment, or `None` when unset
+/// or not an integer at or above the lower bound.
+pub fn island_dead_seconds_from_env() -> Option<u64> {
+    let value = std::env::var(ISLAND_DEAD_SECONDS_ENV).ok()?;
+    match value.trim().parse::<u64>() {
+        Ok(seconds) if seconds >= MIN_ISLAND_DEAD_SECONDS => Some(seconds),
+        _ => {
+            tracing::warn!(%value, "ignoring an invalid {ISLAND_DEAD_SECONDS_ENV}");
+            None
+        }
+    }
+}
+
+/// 没有显式选择时的判死时限：环境变量优先，没有就是 [`DEFAULT_ISLAND_DEAD_SECONDS`]。
+///
+/// The dead-island timeout used when nothing is chosen explicitly: the
+/// environment wins, otherwise [`DEFAULT_ISLAND_DEAD_SECONDS`].
+pub fn default_island_dead_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(
+        island_dead_seconds_from_env().unwrap_or(DEFAULT_ISLAND_DEAD_SECONDS),
+    )
+}
+
 /// 没有显式选择时的 `islands`：环境变量优先，没有就是 [`DEFAULT_ISLANDS`]。
 ///
 /// The `islands` used when nothing is chosen explicitly: the environment
@@ -278,6 +326,11 @@ pub(crate) struct IslandSlot {
     /// the master uses it to know that a player is on an island that is not
     /// parked (plan 5.5.1). Empty while parked.
     away_players: Vec<crate::inbound::PlayerId>,
+    /// 岛不在主控手里时这一次派出的情况（见 [`Away`]）。停放时是 `None`。
+    ///
+    /// This dispatch's details while the island is away (see [`Away`]);
+    /// `None` while parked.
+    away: Option<Away>,
     /// 这个岛欠几刻：主控每次派出时它不在就加一，追赶时每多跑一刻减一（计划 5.5.1）。
     /// 只有混合驱动用；别的驱动下一直是 0。
     ///
@@ -287,13 +340,58 @@ pub(crate) struct IslandSlot {
     pub(crate) debt: u32,
 }
 
+/// 一次派出时主控记下的东西（岛的实施计划 5.6）。岛要是再也不回来，主控靠它知道丢了
+/// 什么。
+///
+/// What the master notes at a dispatch (island plan 5.6); if the island
+/// never returns, this is how the master knows what was lost.
+pub(crate) struct Away {
+    /// 派出号：只增不减，岛回来时拿它对槽位。岛的编号会被复用，不能拿来认岛。
+    ///
+    /// The dispatch ticket: ever increasing, matched against the slot when
+    /// the island returns. Island ids are reused and cannot identify one.
+    pub(crate) ticket: u64,
+    /// 派出时岛的时钟。
+    pub(crate) clock: i64,
+    /// 派出时 Director 还不知道在这个岛手里的位置：信箱里没交付的盒子和没收回的位置，
+    /// 以及这一刻开头收信产生、还没交给 Director 的回执（刚交付的、刚收回的盒子）。
+    /// 已经确认交付的区块 Director 自己记着（`Owner::Region(这个岛)`），不用抄。
+    ///
+    /// Positions the Director does not yet know to be in this island's hands
+    /// at dispatch: undelivered boxes and unreclaimed positions in its
+    /// mailbox, and the acks from this tick's mail not yet handed to the
+    /// Director (boxes just delivered or just reclaimed). Chunks already
+    /// acknowledged are on the Director's own record (`Owner::Region(this)`).
+    pub(crate) unacked: Vec<ChunkPos>,
+}
+
+/// 被判死的岛留给主控的东西（[`Islands::bury`]）。
+///
+/// What a dead island leaves the master ([`Islands::bury`]).
+pub(crate) struct Buried {
+    /// 它上面的玩家。
+    pub(crate) players: Vec<crate::inbound::PlayerId>,
+    /// 派出时记下的情况。
+    pub(crate) away: Away,
+    /// 它欠的刻数。
+    pub(crate) debt: u32,
+}
+
 impl IslandSlot {
     pub(crate) fn new(island: Box<Island>) -> Self {
         Self {
             island: Some(island),
             away_players: Vec::new(),
+            away: None,
             debt: 0,
         }
+    }
+
+    /// 岛不在主控手里时这一次派出的派出号。
+    ///
+    /// The ticket of the current dispatch while the island is away.
+    pub(crate) fn away_ticket(&self) -> Option<u64> {
+        self.away.as_ref().map(|away| away.ticket)
     }
 
     /// 岛在不在主控手里。
@@ -301,12 +399,23 @@ impl IslandSlot {
         self.island.is_some()
     }
 
-    /// 拿走岛，交给 tick 线程。记下它的玩家编号。
+    /// 拿走岛，交给 tick 线程。记下它的玩家编号和这次派出的情况（[`Away`]）。
     ///
-    /// Take the island for a tick thread, remembering its player ids.
-    pub(crate) fn take(&mut self) -> Box<Island> {
+    /// Take the island for a tick thread, remembering its player ids and this
+    /// dispatch's details ([`Away`]).
+    pub(crate) fn take(&mut self, ticket: u64) -> Box<Island> {
         let island = self.island.take().expect("岛已经交出去了");
         self.away_players = island.region.players.keys().copied().collect();
+        let mut unacked = island.mailbox.positions();
+        unacked.extend(island.replies.events.iter().filter_map(|event| match event {
+            Event::Delivered { pos, .. } | Event::Returned { pos, .. } => Some(*pos),
+            _ => None,
+        }));
+        self.away = Some(Away {
+            ticket,
+            clock: island.region.tick.game_time(),
+            unacked,
+        });
         island
     }
 
@@ -325,6 +434,7 @@ impl IslandSlot {
     pub(crate) fn put(&mut self, island: Box<Island>) {
         debug_assert!(self.island.is_none(), "岛已经在主控手里");
         self.away_players.clear();
+        self.away = None;
         self.island = Some(island);
     }
 
@@ -388,6 +498,16 @@ pub(crate) struct Islands {
     /// Origin sections that already had a new island's random sources derived
     /// at this game time ([`Self::note_derivation`]).
     derived: (i64, Vec<SectionPos>),
+    /// 下一个派出号（[`Away::ticket`]）。
+    next_ticket: u64,
+    /// 空白岛：开服时从家岛拆出来的空 `Region`，从不派出、不进岛表，只在家岛被判死时
+    /// 当模板，换一个空的家岛进槽位（岛的实施计划 5.6.2「家岛」）。只有混合驱动留它。
+    ///
+    /// The blank island: an empty `Region` split off home at start-up, never
+    /// dispatched and not in the table, used only as the template for a fresh
+    /// empty home when home is declared dead (island plan 5.6.2). Kept under
+    /// the hybrid drive only.
+    blueprint: Option<Box<Island>>,
     /// 测试专用：借玩家时一个都不借（改坏确认）。
     #[cfg(test)]
     pub(crate) lend_nothing: bool,
@@ -408,6 +528,8 @@ impl Islands {
         Self {
             slots: BTreeMap::from([(HOME_REGION, IslandSlot::new(home))]),
             derived: (i64::MIN, Vec::new()),
+            next_ticket: 1,
+            blueprint: None,
             #[cfg(test)]
             lend_nothing: false,
             #[cfg(test)]
@@ -417,6 +539,115 @@ impl Islands {
             #[cfg(test)]
             unified: 0,
         }
+    }
+
+    /// 领一个派出号。
+    ///
+    /// Allocate a dispatch ticket.
+    pub(crate) fn next_ticket(&mut self) -> u64 {
+        let ticket = self.next_ticket;
+        self.next_ticket += 1;
+        ticket
+    }
+
+    /// 留一份空白岛（见 [`Self::blueprint`] 字段）。家岛停放着、在 tick 边界时调用一次。
+    ///
+    /// Keep a blank island (see the `blueprint` field); called once with
+    /// home parked at a tick boundary.
+    pub(crate) fn keep_blueprint(&mut self) {
+        let home = &mut **self.slots.get_mut(&HOME_REGION).expect("家岛一直在");
+        let random = home.region.derive_island_random(
+            home.region.global.seed,
+            SectionPos::of(ChunkPos::new(0, 0)),
+        );
+        let Ok(region) = home.region.split_off_island(
+            &std::collections::BTreeSet::new(),
+            &std::collections::BTreeSet::new(),
+            random,
+        ) else {
+            tracing::warn!("could not keep a blank island; a dead home island cannot be replaced");
+            return;
+        };
+        self.blueprint = Some(Box::new(Self::fresh(HOME_REGION, region, home)));
+    }
+
+    /// 空白岛的 `Region`（主控换家岛之前给它重发全局快照）。
+    pub(crate) fn blueprint_region_mut(&mut self) -> Option<&mut Region> {
+        self.blueprint.as_deref_mut().map(|island| &mut island.region)
+    }
+
+    /// 拿着派出号 `ticket` 的岛（它不在主控手里）。
+    ///
+    /// The island that is away on dispatch `ticket`.
+    pub(crate) fn island_of_ticket(&self, ticket: u64) -> Option<RegionId> {
+        self.slots
+            .iter()
+            .find(|(_, slot)| slot.away_ticket() == Some(ticket))
+            .map(|(&id, _)| id)
+    }
+
+    /// 岛 `id` 不在主控手里时这一次派出的派出号。
+    pub(crate) fn away_ticket(&self, id: RegionId) -> Option<u64> {
+        self.slots.get(&id).and_then(IslandSlot::away_ticket)
+    }
+
+    /// 不在主控手里的岛 `id` 上有几名玩家。
+    pub(crate) fn away_player_count(&self, id: RegionId) -> usize {
+        self.slots
+            .get(&id)
+            .map_or(0, |slot| slot.away_players.len())
+    }
+
+    /// 把不在主控手里的岛 `id` 判死（岛的实施计划 5.6.2）：拿掉它的槽位，返回派出时记下的
+    /// 东西。之后「全部岛停放」不再算它；它哪天回来了，派出号对不上任何槽位，主控丢弃。
+    /// 家岛不能没有：从空白岛拆一份空的换进槽位，时钟设成它没卡住的话现在该有的时钟
+    /// （派出时的时钟 + 1 + 欠的刻数），随机源按世界种子、原点 section 和现在的全局游戏
+    /// 时间派生。岛停放着、或者不存在时返回 `None`。
+    ///
+    /// Declare island `id`, which is away, dead (island plan 5.6.2): drop its
+    /// slot and return what was noted at dispatch. It no longer counts for
+    /// "every island parked", and if it ever returns its ticket matches no
+    /// slot and the master discards it. Home must exist: a fresh empty one is
+    /// split off the blank island with the clock home would have had if it
+    /// had not stuck (clock at dispatch + 1 + ticks owed) and random sources
+    /// derived from the world seed, the origin section and the current game
+    /// time. `None` if the island is parked or missing.
+    pub(crate) fn bury(&mut self, id: RegionId) -> Option<Buried> {
+        if self.slots.get(&id).is_none_or(IslandSlot::is_home) {
+            return None;
+        }
+        let slot = self.slots.remove(&id).expect("刚看过");
+        let buried = Buried {
+            players: slot.away_players,
+            away: slot.away.expect("不在主控手里的岛记着这次派出"),
+            debt: slot.debt,
+        };
+        if id == HOME_REGION {
+            let blueprint = self
+                .blueprint
+                .as_deref_mut()
+                .expect("混合驱动留着空白岛，家岛判死时拿它换一个空的");
+            let clock = buried.away.clock + 1 + i64::from(buried.debt);
+            let delta = clock - blueprint.region.tick.game_time();
+            if delta != 0 {
+                blueprint.region.rebase_clock(delta);
+            }
+            let random = blueprint.region.derive_island_random(
+                blueprint.region.global.seed,
+                SectionPos::of(ChunkPos::new(0, 0)),
+            );
+            let region = blueprint
+                .region
+                .split_off_island(
+                    &std::collections::BTreeSet::new(),
+                    &std::collections::BTreeSet::new(),
+                    random,
+                )
+                .unwrap_or_else(|_| panic!("空白岛上拆不出空的家岛"));
+            let island = Box::new(Self::fresh(HOME_REGION, region, blueprint));
+            self.slots.insert(HOME_REGION, IslandSlot::new(island));
+        }
+        Some(buried)
     }
 
     /// 岛的个数（含空的家岛）。

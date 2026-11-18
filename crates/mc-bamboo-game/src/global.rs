@@ -551,6 +551,13 @@ impl Global {
         }))
     }
 
+    /// 名单里这名玩家的名字。
+    ///
+    /// This player's name in the roster.
+    pub(crate) fn roster_name(&self, id: PlayerId) -> Option<&str> {
+        self.roster.get(&id).map(|entry| entry.name.as_str())
+    }
+
     /// 这名玩家的加入消息。
     pub(crate) fn joined_message(&self, id: PlayerId) -> Option<Vec<u8>> {
         self.player_message(id, "multiplayer.player.joined")

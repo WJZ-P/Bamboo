@@ -795,8 +795,7 @@ fn apply(command: Command, me: &mut Entity, world: &mut World)
    多岛时玩家命令和控制台命令里碰方块、容器、实体或者读方块的那几条（`setblock`、`fill`、
    `clone`、`summon`、`loot`、`gamemode`、`defaultgamemode`）在全部岛临时拼成的一个世界上
    执行，结果和整个世界一个岛时相同；取随机数用发起人所在岛的随机源（控制台用家岛的）。
-   命令方块里的命令在它所在的岛自己的一刻里执行，只看得见本岛的方块和玩家（岛的实施
-   计划 4.5）。
+   命令方块现在不执行命令；以后接上时要经主控按同一张范围表执行（岛的实施计划 4.5）。
 5. 实体看到的别的实体是这一刻实体阶段开始时的样子。这一条在现有三种实体上
    具体表现为下面三类，每一类都有回归测试钉住（`crates/mc-bamboo-blocks/src/entity/parallel/tests.rs`）：
 

@@ -13,6 +13,10 @@
 //!   自己的线程上重新抛出，走世界线程原来的崩溃处理（`docs/world-model-design.md` 第 14 节）。
 //! - 线程本身没了（交回通道断开）主控也能发现，同样当成崩溃。
 //! - 池子关掉时不等还没交回的岛：卡住的岛不能把关服拖死。
+//! - 每次派出带一个派出号，池子记着每条线程手里那一刻是哪个派出号、什么时候开跑的。
+//!   主控判一个岛死了（岛的实施计划 5.6）就放弃那条线程（[`IslandPool::abandon`]）：
+//!   不再给它派岛、不再算进活着的线程数，同时补一条新线程，最多补
+//!   [`MAX_ABANDONED_THREADS`] 条。
 //!
 //! The island tick-thread pool (island plan, section 6, step 7). The master
 //! hands a parked island whole (`Box<Island>`, one pointer) to a pool thread,
@@ -57,6 +61,16 @@ pub(crate) const ISLAND_THREAD_STACK: usize = 64 * 1024 * 1024;
 /// Upper bound on the pool size, against huge values in the config file.
 pub const MAX_ISLAND_THREADS: usize = 64;
 
+/// 线程池最多为被放弃的线程补几条新线程（岛的实施计划 5.6.4）。每放弃一条，在它回来
+/// 之前泄漏一条线程和它手里那个岛的内存；补到这个数以后不再补，活着的线程数从此只减
+/// 不增，减到 0 时派岛失败、走崩溃路径。
+///
+/// How many replacement threads the pool starts for abandoned ones (island
+/// plan 5.6.4). Each abandoned thread leaks itself and its island's memory
+/// until it returns; past this number no replacement is started, the live
+/// thread count only goes down, and at 0 dispatching fails into the crash path.
+pub(crate) const MAX_ABANDONED_THREADS: usize = 8;
+
 /// 在 tick 线程上跑岛的一刻的函数。
 pub(crate) type IslandBody = fn(&mut Island);
 
@@ -65,6 +79,13 @@ pub(crate) type IslandBody = fn(&mut Island);
 /// What an island hands back after its tick.
 pub(crate) struct HandBack {
     pub(crate) island: Box<Island>,
+    /// 这次派出的派出号（[`IslandPool::dispatch`] 的参数）。主控拿它认岛：岛的编号会被
+    /// 复用，判死以后同一个编号可能已经是另一个岛。
+    ///
+    /// The ticket of this dispatch (given to [`IslandPool::dispatch`]). The
+    /// master identifies the island by it: island ids are reused, and after
+    /// a death the same id may be a different island.
+    pub(crate) ticket: u64,
     /// 跑它的线程。
     pub(crate) worker: usize,
     /// 这一刻在 tick 线程上开始 / 结束的时刻。
@@ -92,15 +113,37 @@ pub(crate) enum Wait {
 #[derive(Default)]
 struct Queues {
     /// 每条线程自己的队列（指名给它的岛）。
-    own: Vec<VecDeque<Box<Island>>>,
+    own: Vec<VecDeque<Job>>,
     /// 公共队列：全部线程都忙着时派出的岛，谁先空出来谁跑。
-    shared: VecDeque<Box<Island>>,
+    shared: VecDeque<Job>,
     /// 每条线程手里的岛数：排在它自己队列里的加上正在跑的。
     busy: Vec<usize>,
-    /// 还活着的线程数。
+    /// 每条线程正在跑的那一刻：派出号和开跑的时刻。空着时是 `None`。
+    ///
+    /// What each thread is running: the dispatch ticket and when it started;
+    /// `None` while idle.
+    running: Vec<Option<Running>>,
+    /// 被放弃的线程（它手里的岛被判死了）：不再派岛给它，它跑完手里的就退出。
+    ///
+    /// Abandoned threads (their island was declared dead): nothing more is
+    /// dispatched to them and they exit once their island's tick ends.
+    retired: Vec<bool>,
+    /// 还活着的线程数（不含被放弃的）。
     alive: usize,
     /// 池子关了，线程把手里的跑完就退出。
     closed: bool,
+}
+
+/// 排着等线程的一次派出。
+struct Job {
+    island: Box<Island>,
+    ticket: u64,
+}
+
+#[derive(Clone, Copy)]
+struct Running {
+    ticket: u64,
+    started: Instant,
 }
 
 struct Dispatch {
@@ -124,6 +167,16 @@ pub(crate) struct IslandPool {
     dispatch: Arc<Dispatch>,
     handles: Vec<Option<JoinHandle<()>>>,
     replies: Receiver<HandBack>,
+    /// 交回通道的发端，补新线程时给它一份。池子自己留着一份，所以线程全没了时通道不会
+    /// 断开，[`Self::wait`] 改看活着的线程数。
+    ///
+    /// The hand-back sender, cloned for replacement threads. The pool keeps
+    /// one, so the channel never disconnects when every thread is gone;
+    /// [`Self::wait`] looks at the live thread count instead.
+    reply_sender: Sender<HandBack>,
+    body: IslandBody,
+    /// 已经放弃了几条线程。
+    abandoned: usize,
     /// 测试专用：全部线程都忙着时不进公共队列，排到手里岛最少的那条线程后面（改坏确认）。
     ///
     /// Test only: with every thread busy, queue behind the least loaded one
@@ -145,6 +198,8 @@ impl IslandPool {
                 own: (0..threads).map(|_| VecDeque::new()).collect(),
                 shared: VecDeque::new(),
                 busy: vec![0; threads],
+                running: vec![None; threads],
+                retired: vec![false; threads],
                 alive: threads,
                 closed: false,
             }),
@@ -152,12 +207,7 @@ impl IslandPool {
         });
         let mut handles = Vec::with_capacity(threads);
         for index in 0..threads {
-            let replies = reply_sender.clone();
-            let shared = Arc::clone(&dispatch);
-            let spawned = thread::Builder::new()
-                .name(format!("bamboo-island-{index}"))
-                .stack_size(ISLAND_THREAD_STACK)
-                .spawn(move || run_worker(index, &shared, &replies, body));
+            let spawned = spawn_worker(index, &dispatch, &reply_sender, body);
             match spawned {
                 Ok(handle) => handles.push(Some(handle)),
                 Err(error) => {
@@ -173,15 +223,164 @@ impl IslandPool {
             dispatch,
             handles,
             replies,
+            reply_sender,
+            body,
+            abandoned: 0,
             #[cfg(test)]
             no_shared_queue: false,
         })
     }
 
-    /// 线程数。
+    /// 线程数（含被放弃的和补上的）。
     #[cfg(test)]
     pub(crate) fn threads(&self) -> usize {
         self.handles.len()
+    }
+
+    /// 还活着的线程数（不含被放弃的）。
+    #[cfg(test)]
+    pub(crate) fn live_threads(&self) -> usize {
+        self.dispatch.lock().alive
+    }
+
+    /// 在线程上开跑以后已经过了 `limit` 的派出号（岛的实施计划 5.6.1）。还排在队列里等
+    /// 线程的不算：它们没有卡住，只是没轮到。
+    ///
+    /// Tickets whose tick has been running on a thread for at least `limit`
+    /// (island plan 5.6.1). Dispatches still queued for a thread do not
+    /// count: they are waiting, not stuck.
+    pub(crate) fn overdue(&self, limit: Duration) -> Vec<u64> {
+        let queues = self.dispatch.lock();
+        queues
+            .running
+            .iter()
+            .zip(&queues.retired)
+            .filter(|(_, retired)| !**retired)
+            .filter_map(|(running, _)| *running)
+            .filter(|running| running.started.elapsed() >= limit)
+            .map(|running| running.ticket)
+            .collect()
+    }
+
+    /// 派出号 `ticket` 这一刻在线程上已经跑了多久；没在跑时是 `None`。
+    ///
+    /// How long dispatch `ticket` has been running on a thread; `None` if it
+    /// is not running.
+    pub(crate) fn running_for(&self, ticket: u64) -> Option<Duration> {
+        let queues = self.dispatch.lock();
+        queues
+            .running
+            .iter()
+            .flatten()
+            .find(|running| running.ticket == ticket)
+            .map(|running| running.started.elapsed())
+    }
+
+    /// 把还排在队列里、没开跑的派出号 `ticket` 拿回来。已经开跑或者跑完了时是 `None`。
+    ///
+    /// Take back dispatch `ticket` if it is still queued and has not started;
+    /// `None` once it started or finished.
+    pub(crate) fn withdraw(&mut self, ticket: u64) -> Option<Box<Island>> {
+        let mut queues = self.dispatch.lock();
+        if let Some(at) = queues.shared.iter().position(|job| job.ticket == ticket) {
+            return queues.shared.remove(at).map(|job| job.island);
+        }
+        for index in 0..queues.own.len() {
+            if let Some(at) = queues.own[index].iter().position(|job| job.ticket == ticket) {
+                queues.busy[index] = queues.busy[index].saturating_sub(1);
+                return queues.own[index].remove(at).map(|job| job.island);
+            }
+        }
+        None
+    }
+
+    /// 派出号 `ticket` 是不是已经在某条线程上开跑、还没跑完。
+    ///
+    /// Whether dispatch `ticket` has started on a thread and not finished.
+    pub(crate) fn is_running(&self, ticket: u64) -> bool {
+        let queues = self.dispatch.lock();
+        queues
+            .running
+            .iter()
+            .flatten()
+            .any(|running| running.ticket == ticket)
+    }
+
+    /// 放弃正在跑派出号 `ticket` 的那条线程（岛的实施计划 5.6.4）：不再给它派岛、不再把它
+    /// 算进活着的线程数，指名排在它后面的岛改进公共队列；还没补满
+    /// [`MAX_ABANDONED_THREADS`] 条时补一条新线程。它哪天跑完了照常交回（主控按派出号
+    /// 认出来丢弃），然后退出。那一刻已经跑完、或者还没开跑时什么都不做，返回 `false`。
+    ///
+    /// Abandon the thread running dispatch `ticket` (island plan 5.6.4):
+    /// nothing more is dispatched to it, it no longer counts as alive, the
+    /// islands queued behind it move to the shared queue, and a replacement
+    /// starts unless [`MAX_ABANDONED_THREADS`] were already replaced. If it
+    /// ever finishes it hands back as usual (the master discards by ticket)
+    /// and exits. Returns `false`, doing nothing, if that tick already
+    /// finished or has not started.
+    pub(crate) fn abandon(&mut self, ticket: u64) -> bool {
+        let replace = {
+            let mut queues = self.dispatch.lock();
+            let Some(index) = queues.running.iter().position(|running| {
+                running.is_some_and(|running| running.ticket == ticket)
+            }) else {
+                return false;
+            };
+            if queues.retired[index] {
+                return false;
+            }
+            queues.retired[index] = true;
+            queues.alive = queues.alive.saturating_sub(1);
+            let waiting: Vec<Job> = queues.own[index].drain(..).collect();
+            queues.busy[index] = queues.busy[index].saturating_sub(waiting.len());
+            queues.shared.extend(waiting);
+            self.abandoned += 1;
+            self.abandoned <= MAX_ABANDONED_THREADS
+        };
+        if replace {
+            let index = {
+                let mut queues = self.dispatch.lock();
+                queues.own.push(VecDeque::new());
+                queues.busy.push(0);
+                queues.running.push(None);
+                queues.retired.push(false);
+                queues.alive += 1;
+                queues.own.len() - 1
+            };
+            match spawn_worker(index, &self.dispatch, &self.reply_sender, self.body) {
+                Ok(handle) => self.handles.push(Some(handle)),
+                Err(error) => {
+                    error!(%error, "could not start a replacement island tick thread");
+                    let mut queues = self.dispatch.lock();
+                    queues.retired[index] = true;
+                    queues.alive = queues.alive.saturating_sub(1);
+                    self.handles.push(None);
+                }
+            }
+        } else {
+            error!(
+                abandoned = self.abandoned,
+                "too many island tick threads were abandoned; not starting another"
+            );
+        }
+        self.dispatch.wake.notify_all();
+        true
+    }
+
+    /// 测试专用：把派出号 `ticket` 的开跑时刻往前拨 `by`（让它看起来已经跑了这么久）。
+    ///
+    /// Test only: move the start of dispatch `ticket` back by `by`, as if it
+    /// had been running that long.
+    #[cfg(test)]
+    pub(crate) fn backdate(&self, ticket: u64, by: Duration) -> bool {
+        let mut queues = self.dispatch.lock();
+        for running in queues.running.iter_mut().flatten() {
+            if running.ticket == ticket {
+                running.started = running.started.checked_sub(by).unwrap_or(running.started);
+                return true;
+            }
+        }
+        false
     }
 
     /// 把岛交给一条线程。`hint` 是上次跑它的线程：它空着就还用它，不然用一条空着的线程；
@@ -191,28 +390,37 @@ impl IslandPool {
     /// last) if it is idle, otherwise an idle one; when all are busy it joins
     /// the shared queue for whichever frees up first. If every thread is gone
     /// the island is handed back.
-    pub(crate) fn dispatch(&mut self, hint: usize, island: Box<Island>) -> Result<(), Box<Island>> {
+    pub(crate) fn dispatch(
+        &mut self,
+        hint: usize,
+        island: Box<Island>,
+        ticket: u64,
+    ) -> Result<(), Box<Island>> {
         let mut queues = self.dispatch.lock();
         if queues.alive == 0 {
             return Err(island);
         }
         let hint = hint.min(queues.busy.len() - 1);
+        let free = |queues: &Queues, index: usize| queues.busy[index] == 0 && !queues.retired[index];
         #[cfg_attr(not(test), allow(unused_mut))]
-        let mut idle = if queues.busy[hint] == 0 {
+        let mut idle = if free(&queues, hint) {
             Some(hint)
         } else {
-            (0..queues.busy.len()).find(|&index| queues.busy[index] == 0)
+            (0..queues.busy.len()).find(|&index| free(&queues, index))
         };
         #[cfg(test)]
         if idle.is_none() && self.no_shared_queue {
-            idle = (0..queues.busy.len()).min_by_key(|&index| (queues.busy[index], index));
+            idle = (0..queues.busy.len())
+                .filter(|&index| !queues.retired[index])
+                .min_by_key(|&index| (queues.busy[index], index));
         }
+        let job = Job { island, ticket };
         match idle {
             Some(index) => {
                 queues.busy[index] += 1;
-                queues.own[index].push_back(island);
+                queues.own[index].push_back(job);
             }
-            None => queues.shared.push_back(island),
+            None => queues.shared.push_back(job),
         }
         drop(queues);
         self.dispatch.wake.notify_all();
@@ -225,6 +433,10 @@ impl IslandPool {
     pub(crate) fn wait(&mut self, timeout: Duration) -> Wait {
         match self.replies.recv_timeout(timeout) {
             Ok(back) => Wait::Back(Box::new(back)),
+            // 池子自己留着一个发端，通道不会断：线程全没了看活着的线程数。
+            // The pool keeps a sender, so the channel never disconnects; a
+            // pool with no thread left shows in the live count.
+            Err(RecvTimeoutError::Timeout) if self.dispatch.lock().alive == 0 => Wait::Lost,
             Err(RecvTimeoutError::Timeout) => Wait::Pending,
             Err(RecvTimeoutError::Disconnected) => Wait::Lost,
         }
@@ -237,17 +449,19 @@ impl Drop for IslandPool {
     /// Close the dispatch; wait for idle threads, but never for one that
     /// still holds an island (it may be stuck).
     fn drop(&mut self) {
-        let busy = {
+        let (busy, retired) = {
             let mut queues = self.dispatch.lock();
             queues.closed = true;
-            queues.busy.clone()
+            (queues.busy.clone(), queues.retired.clone())
         };
         self.dispatch.wake.notify_all();
         for (index, handle) in self.handles.iter_mut().enumerate() {
             let Some(handle) = handle.take() else {
                 continue;
             };
-            if busy.get(index).copied().unwrap_or(0) > 0 {
+            if busy.get(index).copied().unwrap_or(0) > 0
+                || retired.get(index).copied().unwrap_or(false)
+            {
                 error!(
                     thread = index,
                     "an island tick thread still holds its island; leaving it behind"
@@ -259,12 +473,38 @@ impl Drop for IslandPool {
     }
 }
 
-/// 线程退出时（包括意外 panic）把自己从活着的线程里减掉。
-struct Alive<'a>(&'a Dispatch);
+/// 起一条 tick 线程。
+fn spawn_worker(
+    index: usize,
+    dispatch: &Arc<Dispatch>,
+    replies: &Sender<HandBack>,
+    body: IslandBody,
+) -> std::io::Result<JoinHandle<()>> {
+    let replies = replies.clone();
+    let shared = Arc::clone(dispatch);
+    thread::Builder::new()
+        .name(format!("bamboo-island-{index}"))
+        .stack_size(ISLAND_THREAD_STACK)
+        .spawn(move || run_worker(index, &shared, &replies, body))
+}
+
+/// 线程退出时（包括意外 panic）把自己从活着的线程里减掉。被放弃的线程在放弃的那一刻
+/// 已经减过了。
+struct Alive<'a>(&'a Dispatch, usize);
 
 impl Drop for Alive<'_> {
     fn drop(&mut self) {
-        self.0.lock().alive -= 1;
+        let mut queues = self.0.lock();
+        if !queues.retired[self.1] {
+            queues.alive = queues.alive.saturating_sub(1);
+            // 意外退出的线程不再接活：指名排给它的岛改进公共队列。
+            // A thread that exits unexpectedly takes no more work; islands
+            // queued for it move to the shared queue.
+            queues.retired[self.1] = true;
+            let waiting: Vec<Job> = queues.own[self.1].drain(..).collect();
+            queues.busy[self.1] = queues.busy[self.1].saturating_sub(waiting.len());
+            queues.shared.extend(waiting);
+        }
     }
 }
 
@@ -275,17 +515,20 @@ impl Drop for Alive<'_> {
 /// one), run its tick and hand it back, until the pool closes or nobody takes
 /// the hand-backs.
 fn run_worker(index: usize, dispatch: &Dispatch, replies: &Sender<HandBack>, body: IslandBody) {
-    let _alive = Alive(dispatch);
+    let _alive = Alive(dispatch, index);
     loop {
-        let mut island = {
+        let Job { mut island, ticket } = {
             let mut queues = dispatch.lock();
-            loop {
-                if let Some(island) = queues.own[index].pop_front() {
-                    break island;
+            let job = loop {
+                if queues.retired[index] {
+                    return;
                 }
-                if let Some(island) = queues.shared.pop_front() {
+                if let Some(job) = queues.own[index].pop_front() {
+                    break job;
+                }
+                if let Some(job) = queues.shared.pop_front() {
                     queues.busy[index] += 1;
-                    break island;
+                    break job;
                 }
                 if queues.closed {
                     return;
@@ -294,7 +537,12 @@ fn run_worker(index: usize, dispatch: &Dispatch, replies: &Sender<HandBack>, bod
                     .wake
                     .wait(queues)
                     .unwrap_or_else(PoisonError::into_inner);
-            }
+            };
+            queues.running[index] = Some(Running {
+                ticket: job.ticket,
+                started: Instant::now(),
+            });
+            job
         };
         let started = Instant::now();
         // 岛的状态在 panic 之后可能不一致，但主控拿回它只是为了照原来的崩溃路径
@@ -306,9 +554,11 @@ fn run_worker(index: usize, dispatch: &Dispatch, replies: &Sender<HandBack>, bod
         {
             let mut queues = dispatch.lock();
             queues.busy[index] = queues.busy[index].saturating_sub(1);
+            queues.running[index] = None;
         }
         let back = HandBack {
             island,
+            ticket,
             worker: index,
             started,
             finished,
