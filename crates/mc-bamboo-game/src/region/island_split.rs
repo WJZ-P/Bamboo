@@ -108,6 +108,27 @@ impl IslandRandom {
     }
 }
 
+/// 一个岛「只属于它自己」、不跟着区块或玩家走的东西：四个随机源现在的状态和它的剖析器。
+/// 平常的合并留吸收方的、丢被吸收方的；主控把全部岛临时拼成一个执行命令时（计划 4.5）
+/// 把每个被并进来的岛的这一份存着，拆回去时原样换上，别的岛的命令不会推进它的随机源。
+/// 红石缓存和区块包缓存不在这里：拼着的时候它们收不到失效通知，只能清空。
+///
+/// What belongs to one island alone and follows neither chunks nor players:
+/// the state of its four random sources and its profiler. A normal merge
+/// keeps the absorber's and drops the absorbed island's; when the master
+/// temporarily joins every island into one to run a command (plan 4.5) it
+/// keeps each absorbed island's and puts it back on the split, so another
+/// island's command never advances its random sources. The redstone cache
+/// and the chunk packet cache are not here: they would miss invalidations
+/// while joined and can only be cleared.
+pub(crate) struct IslandIdentity {
+    random: LevelRandom,
+    sound_seed_generator: LevelRandom,
+    loot_sequences: RandomSequences,
+    entity_seeds: mc_bamboo_blocks::entity::JavaRandom,
+    profiler: crate::profiler::Profiler,
+}
+
 /// SplitMix64 的一步，把相近的输入搅开。
 fn splitmix(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -322,7 +343,7 @@ impl Region {
         skip: Option<IslandPart>,
     ) -> Result<Region, NotReady> {
         assert!(self.chunks.is_loaded_mode(), "只有已加载模式能拆岛");
-        if !self.ready_to_move_columns() {
+        if !self.ready_to_split_island() {
             return Err(NotReady);
         }
         let store = &self.chunks;
@@ -525,10 +546,64 @@ impl Region {
     /// by class. The absorber keeps its clock, random sources, global snapshot
     /// and profiler; the absorbed redstone cache, chunk cache and profiler are
     /// dropped; unit partitioning is rebuilt. Both at a tick boundary.
-    pub(crate) fn absorb_island(&mut self, mut other: Region, delta: i64) {
+    pub(crate) fn absorb_island(&mut self, other: Region, delta: i64) {
+        let _ = self.absorb_island_keeping(other, delta);
+    }
+
+    /// 同 [`Self::absorb_island`]，但把被吸收方「只属于它自己」的东西交还给调用方，而不是
+    /// 丢掉（见 [`IslandIdentity`]）。主控把全部岛临时拼成一个执行命令时用：做完按原样
+    /// 拆回去，再用 [`Self::restore_identity`] 换上（计划 4.5）。
+    ///
+    /// Like [`Self::absorb_island`], but hands back what belongs to the
+    /// absorbed island alone instead of dropping it (see [`IslandIdentity`]).
+    /// Used when the master temporarily joins every island into one to run a
+    /// command; afterwards the islands are split back and get theirs again
+    /// through [`Self::restore_identity`] (plan 4.5).
+    pub(crate) fn absorb_island_keeping(
+        &mut self,
+        mut other: Region,
+        delta: i64,
+    ) -> IslandIdentity {
         self.assert_mergeable(&other);
         other.rebase_clock(delta);
-        self.merge_rebased(other);
+        self.merge_rebased(other)
+    }
+
+    /// [`Self::absorb_island_keeping`] 的逆操作：把 `chunks` 和 `players` 拆出去，新岛
+    /// 换上存下来的随机源状态和剖析器，而不是派生一份新的。
+    ///
+    /// The inverse of [`Self::absorb_island_keeping`]: split `chunks` and
+    /// `players` off and give the new island its saved random-source state and
+    /// profiler instead of freshly derived ones.
+    pub(crate) fn split_off_island_restoring(
+        &mut self,
+        chunks: &BTreeSet<ChunkPos>,
+        players: &BTreeSet<PlayerId>,
+        identity: IslandIdentity,
+    ) -> Result<Region, NotReady> {
+        if !self.ready_to_split_island() {
+            return Err(NotReady);
+        }
+        let IslandIdentity {
+            random,
+            sound_seed_generator,
+            loot_sequences,
+            entity_seeds,
+            profiler,
+        } = identity;
+        let mut region = self.split_off_island(
+            chunks,
+            players,
+            IslandRandom {
+                random,
+                sound_seed_generator,
+                loot_sequences,
+                entity_seeds: 0,
+            },
+        )?;
+        region.entities.set_entity_seed_source(entity_seeds);
+        region.profiler = profiler;
+        Ok(region)
     }
 
     /// 同 [`Self::absorb_island`]，平移只做 `clock` 选中的几类（只给改坏确认用）。
@@ -539,7 +614,7 @@ impl Region {
     pub(crate) fn absorb_island_parts(&mut self, mut other: Region, delta: i64, clock: ClockParts) {
         self.assert_mergeable(&other);
         other.rebase_clock_parts(delta, clock);
-        self.merge_rebased(other);
+        let _ = self.merge_rebased(other);
     }
 
     fn assert_mergeable(&self, other: &Region) {
@@ -548,13 +623,14 @@ impl Region {
             "只有已加载模式能合岛"
         );
         assert!(
-            self.ready_to_move_columns() && other.ready_to_move_columns(),
+            self.ready_to_split_island() && other.ready_to_split_island(),
             "只能在 tick 边界合岛"
         );
     }
 
-    /// 被吸收方已经平移到吸收方的时钟，逐类并进来。
-    fn merge_rebased(&mut self, other: Region) {
+    /// 被吸收方已经平移到吸收方的时钟，逐类并进来。返回被吸收方自己的随机源和剖析器
+    /// （平常的合并把它们丢掉）。
+    fn merge_rebased(&mut self, other: Region) -> IslandIdentity {
         debug_assert_eq!(other.tick, self.tick, "平移之后两边的时钟要相同");
         debug_assert_eq!(
             other.block_ticks.now(),
@@ -584,10 +660,10 @@ impl Region {
             lecterns,
             block_entities,
             block_events,
-            random: _,
+            random,
             redstone_cache: _,
-            loot_sequences: _,
-            sound_seed_generator: _,
+            loot_sequences,
+            sound_seed_generator,
             entities,
             entity_tracking,
             redstone,
@@ -604,10 +680,17 @@ impl Region {
             admin_changes,
             last_action_millis,
             peer_ips,
-            profiler: _,
+            profiler,
             partitioning: _,
             dirty,
         } = other;
+        let identity = IslandIdentity {
+            random,
+            sound_seed_generator,
+            loot_sequences,
+            entity_seeds: entities.entity_seed_source(),
+            profiler,
+        };
         self.chunks
             .absorb(chunks)
             .unwrap_or_else(|_| unreachable!("前提已经检查过"));
@@ -636,6 +719,7 @@ impl Region {
         self.last_action_millis.extend(last_action_millis);
         self.admin_changes.merge(admin_changes);
         self.partitioning = self.partitioning.fresh_like();
+        identity
     }
 }
 

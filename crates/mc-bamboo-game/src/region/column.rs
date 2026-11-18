@@ -415,6 +415,21 @@ impl Region {
             && self.entities.ready_to_move_chunks()
     }
 
+    /// 能不能做岛的整批拆合：和 [`Self::ready_to_move_columns`] 一样要各表都不在 tick
+    /// 中途，但光照只要求没有算到一半的轮次——排着还没开始算的光照任务跟着区块走
+    /// （计划 4.5「光照」）。
+    ///
+    /// Whether an island split or merge may happen: every table outside a
+    /// tick like [`Self::ready_to_move_columns`], but light only needs no
+    /// round running; light tasks queued but not started travel with their
+    /// chunks (plan 4.5).
+    pub(crate) fn ready_to_split_island(&self) -> bool {
+        self.chunks.ready_to_split()
+            && self.block_ticks.ready_to_move_chunks()
+            && self.block_entities.ready_to_move_chunks()
+            && self.entities.ready_to_move_chunks()
+    }
+
     /// 一次取出一批区块。任何一个前提不满足时整批都不动。
     ///
     /// 四张按方块位置索引的表（`containers`、`block_items`、`command_blocks`、讲台上的书）

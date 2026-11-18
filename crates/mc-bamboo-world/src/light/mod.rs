@@ -280,6 +280,19 @@ impl LevelLight {
             && !self.engines.block.has_light_work()
     }
 
+    /// 可以整批拆合了（岛的拆合）：没有算到一半的轮次，引擎里也没有剩下的工作。排着
+    /// 还没开始算的任务不碍事，它们跟着区块走（[`TaskQueue::split_off`]）。
+    ///
+    /// Ready for a batch split or merge (islands): no round is running and the
+    /// engines hold no leftover work. Tasks queued but not started are fine;
+    /// they travel with their chunks ([`TaskQueue::split_off`]).
+    pub fn ready_to_split(&self) -> bool {
+        !self.queue.is_running()
+            && !self.engines.in_round()
+            && !self.engines.sky.has_light_work()
+            && !self.engines.block.has_light_work()
+    }
+
     /// 把 `pos` 这一列的天空光和方块光整个拿走，这个位置回到模板柱。
     pub(crate) fn take_column(&mut self, pos: ChunkPos) -> [LightColumn; 2] {
         debug_assert!(self.ready_to_move_columns(), "只在光照全部算完时搬区块柱");
@@ -310,28 +323,32 @@ impl LevelLight {
     }
 
     /// 岛拆分：把 `chunks` 的光照整批搬进一份新的光照（两层、引擎和给别人读的两份、
-    /// 待发的变化）。只在光照全部算完时调用；不重算邻居段状态，调用方保证两部分不相邻。
+    /// 待发的变化、排着还没开始算的任务）。只在没有算到一半的轮次时调用
+    /// （[`Self::ready_to_split`]）；不重算邻居段状态，调用方保证两部分不相邻。
     ///
     /// Island split: move the light of `chunks` (both layers, the engine and the
-    /// published copy, pending changes) into a new light in one batch. Only once
-    /// light has settled; neighbour section states are not recomputed, the
-    /// caller guarantees the two parts are not adjacent.
+    /// published copy, pending changes, tasks queued but not started) into a
+    /// new light in one batch. Only while no round is running
+    /// ([`Self::ready_to_split`]); neighbour section states are not
+    /// recomputed, the caller guarantees the two parts are not adjacent.
     pub(crate) fn split_off(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Self {
-        debug_assert!(self.ready_to_move_columns(), "只在光照全部算完时拆");
+        debug_assert!(self.ready_to_split(), "有算到一半的光照轮次时不能拆");
         Self {
             engines: self.engines.split_off(chunks),
             visible: self.visible.split_off(chunks),
-            queue: TaskQueue::default(),
+            queue: self.queue.split_off(chunks),
         }
     }
 
-    /// 岛合并：[`Self::split_off`] 的逆操作。两边都要已经算完。
+    /// 岛合并：[`Self::split_off`] 的逆操作。两边都没有算到一半的轮次。
     ///
-    /// Island merge: the inverse of [`Self::split_off`]; both sides settled.
+    /// Island merge: the inverse of [`Self::split_off`]; no round is running
+    /// on either side.
     pub(crate) fn absorb(&mut self, other: Self) {
-        debug_assert!(self.ready_to_move_columns() && other.ready_to_move_columns());
+        debug_assert!(self.ready_to_split() && other.ready_to_split());
         self.engines.absorb(other.engines);
         self.visible.absorb(other.visible);
+        self.queue.absorb(other.queue);
     }
 
     /// 区块束搬进或搬出这个位置之后调用：按 `chunks` 此刻的方块重算这一柱和

@@ -1264,9 +1264,29 @@ impl World {
         // in order and queued for them afterwards. Work that must see every
         // player (commands, game-rule packets, the console) waits for every
         // island before coming here ([`Self::try_held`]).
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut borrow = borrow;
+        #[cfg(test)]
+        if self.islands.world_view_off && matches!(borrow, Borrow::World) {
+            borrow = Borrow::All;
+        }
+        if matches!(borrow, Borrow::World) {
+            // 要整个世界的命令（计划 4.5）：全部岛的 `Region` 临时拼成一个，在它上面执行，
+            // 做完按原样拆回去。命令本来就等全部岛停放才做（计划 5.5.2）。
+            // A command that needs the whole world (plan 4.5): every island's
+            // `Region` is temporarily joined, the command runs on it, and the
+            // islands are split back as they were. Commands already wait for
+            // every island to be parked (plan 5.5.2).
+            let unified = self.islands.unify(into);
+            let region = &mut self.islands.get_mut(into).expect("岛在表里").region;
+            let out = work(&mut self.master.global, region);
+            self.islands.divide(into, unified);
+            self.publish_global();
+            return out;
+        }
         let away = match borrow {
             Borrow::All => self.islands.away_ids(),
-            Borrow::PlayersOf(_) => Vec::new(),
+            Borrow::PlayersOf(_) | Borrow::World => Vec::new(),
         };
         let gathered = self.islands.gather(into, &borrow);
         let absent = self.islands.away_players();
@@ -2129,7 +2149,13 @@ impl World {
                 // 当场执行：命令的结果（传送、改模式、物品）要排在这名玩家后面的包之前。
                 // Runs at once: the outcome (teleport, mode, items) must precede
                 // this player's later packets.
-                self.with_players(island, Borrow::All, |port, region| {
+                // 碰方块、容器、实体或者读目标脚下方块的命令要整个世界，别的只借玩家
+                // （计划 4.5）。
+                // Commands touching blocks, containers or entities, or reading
+                // the block under a target, need the whole world; the rest only
+                // borrow players (plan 4.5).
+                let borrow = command::borrow_for(&command);
+                self.with_players(island, borrow, |port, region| {
                     command::on_player_command(port, region, player, &command, signed.as_ref());
                 });
                 return;
@@ -3040,6 +3066,9 @@ mod compute_pool_tests;
 #[cfg(test)]
 #[path = "world/island_alone_tests.rs"]
 mod island_alone_tests;
+#[cfg(test)]
+#[path = "world/island_command_tests.rs"]
+mod island_command_tests;
 #[cfg(test)]
 #[path = "world/island_crossing_tests.rs"]
 mod island_crossing_tests;

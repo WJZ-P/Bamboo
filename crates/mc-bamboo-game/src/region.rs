@@ -60,7 +60,7 @@ pub use crate::container::ContainerKind;
 #[allow(unused_imports)]
 pub use column::{NotReady, PackedContainer, RegionColumn, RegionColumnParts, RegionColumnView};
 pub(crate) use island_split::IslandPart;
-pub(crate) use island_split::IslandRandom;
+pub(crate) use island_split::{IslandIdentity, IslandRandom};
 
 pub(crate) const DIMENSION: &str = "minecraft:overworld";
 /// 默认世界出生点在 `world_state`。进服位置只取它的水平坐标，y 仍按超平坦地表算：

@@ -554,6 +554,23 @@ impl EntityStore {
         self.seeds = JavaRandom::new(seed);
     }
 
+    /// 种子源现在的样子（连同内部状态）。主控把全部岛临时拼成一个时存下每个岛的种子源，
+    /// 拆回去时原样换上（[`Self::set_entity_seed_source`]）。
+    ///
+    /// The seed source as it is now, state included. When the master
+    /// temporarily joins every island into one it keeps each island's source
+    /// and puts it back unchanged afterwards ([`Self::set_entity_seed_source`]).
+    pub const fn entity_seed_source(&self) -> JavaRandom {
+        self.seeds
+    }
+
+    /// 换上一个存下来的种子源（接着它原来的状态往下取）。
+    ///
+    /// Install a saved seed source, continuing from its state.
+    pub fn set_entity_seed_source(&mut self, source: JavaRandom) {
+        self.seeds = source;
+    }
+
     /// 取下一个实体种子：新实体的随机源是 `JavaRandom::new(这个数)`。
     ///
     /// The next entity seed: a new entity's random is `JavaRandom::new(seed)`.

@@ -456,8 +456,17 @@ fn run_on_time(seed: u64, lend_nothing: bool) {
                 (8, Act::Command(2, "gamemode survival {g0}")),
                 (9, Act::Command(0, "time set 1000")),
                 (10, Act::Console("give {g2} minecraft:dirt 2")),
+                // 要整个世界的命令（计划 4.5）：目标在别的岛的方块、跨岛的复制、读别的岛上
+                // 玩家脚下的方块。
+                // Whole-world commands (plan 4.5): blocks on another island, a
+                // cross-island clone, reading the block under a player elsewhere.
+                (11, Act::Command(0, "setblock {c2} minecraft:glowstone")),
+                (12, Act::Command(1, "fill {c0} {c0} minecraft:stone")),
                 (13, Act::Command(1, "clear @a minecraft:stone")),
+                (14, Act::Command(2, "clone {c2} {c2} {c1}")),
+                (15, Act::Command(0, "gamemode adventure @a")),
                 (16, Act::Chat(0, "bye")),
+                (17, Act::Console("gamemode creative {g1}")),
                 (18, Act::Command(0, "list")),
                 (
                     19,

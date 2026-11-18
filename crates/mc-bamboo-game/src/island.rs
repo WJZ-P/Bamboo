@@ -310,6 +310,17 @@ impl IslandSlot {
         island
     }
 
+    /// 拿走停放着的岛，但它的玩家不记进「不在时的名单」：主控把全部岛临时拼成一个时
+    /// （[`Islands::unify`]），这个岛的玩家跟着 `Region` 并进了发起人的岛，在那边找得到。
+    ///
+    /// Take the parked island without recording its players as away: while
+    /// the master temporarily joins every island into one
+    /// ([`Islands::unify`]) its players are on the sender's island with the
+    /// `Region` and are found there.
+    fn lift(&mut self) -> Box<Island> {
+        self.island.take().expect("只能拼停放着的岛")
+    }
+
     /// 岛交回来了。
     pub(crate) fn put(&mut self, island: Box<Island>) {
         debug_assert!(self.island.is_none(), "岛已经在主控手里");
@@ -383,6 +394,12 @@ pub(crate) struct Islands {
     /// 测试专用：借玩家时不按时钟差平移（改坏确认）。
     #[cfg(test)]
     pub(crate) lend_unshifted: bool,
+    /// 测试专用：要整个世界的命令退回只借玩家（只看得见发起人的岛的方块，改坏确认）。
+    #[cfg(test)]
+    pub(crate) world_view_off: bool,
+    /// 测试专用：拼了几次（确认命令真的走了这条路）。
+    #[cfg(test)]
+    pub(crate) unified: usize,
 }
 
 impl Islands {
@@ -395,6 +412,10 @@ impl Islands {
             lend_nothing: false,
             #[cfg(test)]
             lend_unshifted: false,
+            #[cfg(test)]
+            world_view_off: false,
+            #[cfg(test)]
+            unified: 0,
         }
     }
 
@@ -703,7 +724,7 @@ impl Islands {
             return gathered;
         }
         let others: Vec<RegionId> = match borrow {
-            Borrow::All => self
+            Borrow::All | Borrow::World => self
                 .parked_ids()
                 .into_iter()
                 .filter(|&id| id != into)
@@ -766,6 +787,108 @@ impl Islands {
         }
     }
 
+    /// 主控要在整个世界上执行一条命令（计划 4.5）：把 `into` 以外的每个岛的 `Region`
+    /// 整个并进 `into`，命令在拼好的 `Region` 上执行，看到的方块、方块实体、容器、实体和
+    /// 玩家都和整个世界一个岛时一样；做完用 [`Self::divide`] 按原样拆回去。每个被并进来
+    /// 的岛记下它的区块集合、玩家集合、四个随机源的状态和剖析器、和 `into` 的时钟差；
+    /// 岛这一层的东西（区块信箱、存盘名单和报告、排队的全局改动、回执、欠刻）留在
+    /// 槽位里不动。全部岛都要停放着（断言）。只有一个岛时什么都不做。
+    ///
+    /// 什么都没有的岛（没有区块也没有玩家，比如空着的家岛）不并：拆的时候按区块和玩家
+    /// 分，它没有这两样，并进来的东西就回不去了。
+    ///
+    /// 光照：排着还没开始算的任务跟着区块走，不用先算完；哪个岛正好有算到一半的轮次
+    /// 就先把它算完（见计划 4.5「光照」）。
+    ///
+    /// The master runs a command on the whole world (plan 4.5): every other
+    /// island's `Region` is poured into `into`, the command runs on the joined
+    /// `Region` and sees the blocks, block entities, containers, entities and
+    /// players exactly as on a single island, and [`Self::divide`] splits them
+    /// back afterwards. For each absorbed island its chunk set, player set,
+    /// random-source state, profiler and clock difference are kept; its
+    /// island-level state (chunk mailbox, save lists, queued global changes,
+    /// acks, ticks owed) stays untouched in its slot. Every island must be
+    /// parked (asserted). A no-op with one island. Islands with neither
+    /// chunks nor players (an empty home) are left alone, since the split
+    /// back goes by chunks and players. Light tasks queued but not started
+    /// travel with their chunks; a round that is half done is finished first.
+    pub(crate) fn unify(&mut self, into: RegionId) -> Unified {
+        let mut unified = Unified(Vec::new());
+        if self.slots.len() <= 1 {
+            return unified;
+        }
+        assert!(self.all_parked(), "要整个世界的命令等全部岛停放");
+        #[cfg(test)]
+        {
+            self.unified += 1;
+        }
+        let others: Vec<RegionId> = self.ids().into_iter().filter(|&id| id != into).collect();
+        for id in others {
+            let region = &mut self.get_mut(id).expect("在表里").region;
+            let chunks: std::collections::BTreeSet<ChunkPos> =
+                region.chunks.loaded_positions().into_iter().collect();
+            let players: std::collections::BTreeSet<_> = region.players.keys().copied().collect();
+            if chunks.is_empty() && players.is_empty() {
+                continue;
+            }
+            if !region.chunks.ready_to_split() {
+                region.chunks.finish_light_updates();
+            }
+            let island = self.slots.get_mut(&id).expect("在表里").lift();
+            let (shell, region) = island.into_shell();
+            let target = &mut self.get_mut(into).expect("发起人的岛在表里").region;
+            if !target.chunks.ready_to_split() {
+                target.chunks.finish_light_updates();
+            }
+            let delta = target.tick.game_time() - region.tick.game_time();
+            let identity = target.absorb_island_keeping(region, delta);
+            unified.0.push(UnifiedIsland {
+                shell,
+                chunks,
+                players,
+                identity,
+                delta,
+            });
+        }
+        unified
+    }
+
+    /// [`Self::unify`] 的逆操作：把每个并进来的岛按记下的区块和玩家拆回去，换上它自己的
+    /// 随机源状态和剖析器，时钟平移回去，放回槽位。命令期间新出现的东西按位置（方块、
+    /// 计划刻、方块实体、容器、实体、待广播的变化）或者按玩家（缓冲里写好的包、菜单）
+    /// 各回各的岛；被命令送到别的岛的位置上的玩家回他原来的岛，之后由
+    /// `World::relocate_players` 搬。拆不回去说明不在 tick 边界，panic。
+    ///
+    /// The inverse of [`Self::unify`]: split every absorbed island back by its
+    /// recorded chunks and players, give it its own random-source state and
+    /// profiler, rebase its clock back and seat it. What the command created
+    /// goes by position or by player to the island that owns it; a player the
+    /// command sent onto another island's ground returns to their old island
+    /// and is moved later by `World::relocate_players`. Failing to split
+    /// means this is not a tick boundary and panics.
+    pub(crate) fn divide(&mut self, into: RegionId, unified: Unified) {
+        for part in unified.0 {
+            let UnifiedIsland {
+                shell,
+                chunks,
+                mut players,
+                identity,
+                delta,
+            } = part;
+            let id = shell.id;
+            let joined = &mut self.get_mut(into).expect("发起人的岛在表里").region;
+            players.retain(|player| joined.players.contains_key(player));
+            let mut region = joined
+                .split_off_island_restoring(&chunks, &players, identity)
+                .unwrap_or_else(|_| panic!("命令执行完以后拆不回岛 {id}（不在 tick 边界）"));
+            if delta != 0 {
+                region.rebase_clock(-delta);
+            }
+            let island = Box::new(Island::from_shell(shell, region));
+            self.slots.get_mut(&id).expect("槽位留着").put(island);
+        }
+    }
+
     /// 借玩家时要不要按时钟差平移（正式构建恒为真）。
     fn lend_shift(&self) -> bool {
         #[cfg(test)]
@@ -788,6 +911,14 @@ pub(crate) enum Borrow {
     ///
     /// Every island's players: selectors, server-wide broadcasts, feedback to ops.
     All,
+    /// 整个世界：全部岛的 `Region` 临时拼成一个（[`Islands::unify`]），命令里的方块坐标、
+    /// 容器、实体和读方块的玩家命令都和整个世界一个岛时一样（计划 4.5）。要全部岛停放。
+    ///
+    /// The whole world: every island's `Region` is temporarily joined
+    /// ([`Islands::unify`]) so block positions, containers, entities and
+    /// player commands that read blocks behave as on a single island (plan
+    /// 4.5). Needs every island parked.
+    World,
     /// 只要这几名玩家所在的岛。
     ///
     /// Only the islands these players are on.
@@ -799,6 +930,43 @@ pub(crate) enum Borrow {
         )
     )]
     PlayersOf(Vec<crate::inbound::PlayerId>),
+}
+
+/// [`Islands::unify`] 并进发起人的岛的全部岛，等着 [`Islands::divide`] 拆回去。
+///
+/// Every island [`Islands::unify`] poured into the sender's, waiting for
+/// [`Islands::divide`].
+pub(crate) struct Unified(Vec<UnifiedIsland>);
+
+/// 一个并进去的岛留在外面的部分。
+struct UnifiedIsland {
+    /// 岛这一层的东西（不跟着 `Region` 并进去）。
+    shell: IslandShell,
+    /// 拼之前它已加载的区块。
+    chunks: std::collections::BTreeSet<ChunkPos>,
+    /// 拼之前它的玩家。
+    players: std::collections::BTreeSet<crate::inbound::PlayerId>,
+    /// 它自己的随机源状态和剖析器。
+    identity: crate::region::IslandIdentity,
+    /// 发起人的岛的时钟减它的时钟（并进去时平移了这么多，拆回来时平移回去）。
+    delta: i64,
+}
+
+/// 一个岛除了 `Region` 以外的全部字段（见 [`Island::into_shell`]）。
+///
+/// Every field of an island except its `Region` (see [`Island::into_shell`]).
+struct IslandShell {
+    id: RegionId,
+    entity_threads: usize,
+    effects: Vec<GlobalEffect>,
+    mailbox: ChunkMailbox,
+    replies: MailReport,
+    save_plan: SavePlan,
+    save_report: SaveReport,
+    last_worker: usize,
+    state: IslandState,
+    #[cfg(test)]
+    test_hook: Option<IslandTestHook>,
 }
 
 /// [`Islands::gather`] 借走的玩家：岛编号和那个岛的玩家编号。
@@ -834,6 +1002,76 @@ impl Island {
             && self.save_plan.remark.is_empty()
             && self.save_report.encoded.is_empty()
             && self.save_report.changes.is_none()
+    }
+
+    /// 把岛拆成 `Region` 和其余的字段。逐个字段解构：以后给 `Island` 加字段而没决定它在
+    /// 「拼成一个」时留在哪边，编译就不过。
+    ///
+    /// Take the island apart into its `Region` and everything else, field by
+    /// field, so a new `Island` field without a decision for the joined view
+    /// does not compile.
+    fn into_shell(self: Box<Self>) -> (IslandShell, Region) {
+        let Self {
+            id,
+            region,
+            entity_threads,
+            effects,
+            mailbox,
+            replies,
+            save_plan,
+            save_report,
+            last_worker,
+            state,
+            #[cfg(test)]
+            test_hook,
+        } = *self;
+        (
+            IslandShell {
+                id,
+                entity_threads,
+                effects,
+                mailbox,
+                replies,
+                save_plan,
+                save_report,
+                last_worker,
+                state,
+                #[cfg(test)]
+                test_hook,
+            },
+            region,
+        )
+    }
+
+    /// [`Self::into_shell`] 的逆操作。
+    fn from_shell(shell: IslandShell, region: Region) -> Self {
+        let IslandShell {
+            id,
+            entity_threads,
+            effects,
+            mailbox,
+            replies,
+            save_plan,
+            save_report,
+            last_worker,
+            state,
+            #[cfg(test)]
+            test_hook,
+        } = shell;
+        Self {
+            id,
+            region,
+            entity_threads,
+            effects,
+            mailbox,
+            replies,
+            save_plan,
+            save_report,
+            last_worker,
+            state,
+            #[cfg(test)]
+            test_hook,
+        }
     }
 
     pub(crate) fn new(id: RegionId, region: Region, budget: MailBudget) -> Self {

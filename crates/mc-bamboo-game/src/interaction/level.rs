@@ -141,6 +141,16 @@ impl Level for RegionLevel<'_> {
     }
 
     fn write_block(&mut self, pos: BlockPos, state: BlockState, flags: u32) -> bool {
+        // 没加载的位置写不进去（`/fill` 的范围可以穿过没加载的区块）：不留待存标记、不叫醒
+        // 关注者。那里的标记本来就是无效的（取走时按「已加载」滤掉），多岛时它还不属于
+        // 任何一个岛，拆岛时没处放。
+        // An unloaded position cannot be written (a `/fill` range may pass
+        // through unloaded chunks): leave no save mark and wake nobody. Such
+        // a mark is void anyway (dropped by the loaded filter when taken) and,
+        // with several islands, would belong to no island on a split.
+        if !self.chunks.is_loaded(pos.chunk()) {
+            return false;
+        }
         self.dirty.mark(pos.chunk());
         self.block_entities.notify_cell(pos);
         let previous = self.chunks.block(pos).map(BlockState);

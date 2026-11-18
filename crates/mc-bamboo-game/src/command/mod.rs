@@ -10,6 +10,19 @@
 
 pub(crate) use players::change_own_mode;
 
+/// 多岛时主控执行这一行命令要借多少（岛的实施计划 4.5）：要整个世界的借整个世界，
+/// 其余只借玩家。
+///
+/// How much the master borrows to run this command line with several
+/// islands (island plan 4.5): the whole world when the command needs it,
+/// otherwise only the players.
+pub(crate) fn borrow_for(line: &str) -> crate::island::Borrow {
+    match class::scope_of(line) {
+        class::CommandScope::World => crate::island::Borrow::World,
+        class::CommandScope::Players => crate::island::Borrow::All,
+    }
+}
+
 pub(crate) mod admin;
 mod blocks;
 mod bossbar;

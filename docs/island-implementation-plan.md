@@ -278,6 +278,8 @@
 | 只动全局 | `time`、`weather`、`gamerule`、`difficulty`、`worldborder`、`seed`、`setworldspawn`、`defaultgamemode`、`op` / `deop` / `ban` / `ban-ip` / `banlist` / `pardon` / `pardon-ip` / `whitelist`、`save-all` / `save-on` / `save-off`、`stop`、`setidletimeout`、`version`、`help`、`list`、`scoreboard`、`team`、`bossbar`、`loot`、`random`（第 10 步改：按名随机序列全世界一份、挪到主控，见 3.3「岛的随机源」第 2 条） | 岛把（来源、命令行）作为效果交回，主控执行，反馈和帧经信箱回来 |
 | 可能跨岛 | 带 `@a` / `@p` / 玩家名的 `tp`、`give`、`clear`、`gamemode`、`kick`、`title`、`tellraw`、`msg` / `tell` / `w`、`me`、`say` | 选择器先在本岛解析；有本岛以外的目标时交给主控按岛拆成子命令下发，各岛下一刻执行并回报，主控汇总反馈（6.6「最多晚两刻」） |
 
+（2026-11-18 补）上表是按「在哪执行、怎么排队」分的；多岛时主控执行一条命令要把多大的世界借到一起，另按 4.5 的范围表（`World` / `Players`）定：`setblock`、`fill`、`clone`、`summon`、`loot`、`gamemode`、`defaultgamemode` 要整个世界。
+
 只有一个岛时（第 1–7 步、精确模式）三类都当场执行，和现在逐位相同。
 
 ### 4.5 命令看到的世界（第 10 步 c 段的前提二，2026-11-18）
@@ -325,7 +327,24 @@
 - 命令方块里的命令在岛自己的一刻里跑，只看得见本岛（玩家也是）；它不在这一轮的范围里，见第 13 节差异清单的多岛条目。
 - 取随机数的命令（`/summon` 的牛、不带序列的 `/random`、`/playsound` 的种子、`/weather` 的时长）用发起人岛的随机源，和单岛世界的数不同（3.3「岛的随机源」已有的差异）。
 
-**测试**（`world/island_command_tests.rs`，齐步，多岛对单岛逐刻比每组内容指纹、岛时钟、每名玩家收到的全部字节；混合驱动「都按时」的对照里也加几条）见 4.5 的实现记录（做完后补在本节末尾）。
+#### 4.5 的实现和测试（2026-11-18）
+
+代码：`island.rs`（`Islands::unify` / `divide`、`IslandShell`、`Borrow::World`）、`world.rs`（`on_master` 的整个世界分支、玩家命令按范围借）、`world/island_hybrid.rs`（控制台命令按范围借）、`command/class.rs`（`CommandScope`、`SCOPES`、`scope_of`）、`region/island_split.rs`（`IslandIdentity`、`absorb_island_keeping` / `split_off_island_restoring`，拆合的前提改用 `ready_to_split_island`）、`mc-bamboo-world` 的 `light/queue.rs`（光照任务队列的 `split_off` / `absorb`）、`light/mod.rs`、`store.rs`（`ready_to_split`）、`mc-bamboo-blocks` 的 `entity/store.rs`（实体种子源的存取）。没有 `unsafe`。
+
+顺带修的一处：`interaction/level.rs` 的 `write_block` 原来对没加载的位置也打待存标记、叫醒关注者（写不进去，标记取走时按「已加载」滤掉，是无效的）。`/fill` 的范围穿过没加载的区块时这些标记留在发起人的岛上、不属于任何岛的区块，拆岛时没处放，改成没加载的位置直接返回。单岛下只少了这些无效标记。
+
+| 要求 | 测试 | 改坏确认 |
+|---|---|---|
+| 多岛 = 单岛，逐字节（每组内容指纹、岛时钟、每名玩家收到的全部字节，每刻比；多岛那份每刻另查「每个岛上的每一类东西都属于它」和 6.2 第 3 条的不变量） | `commands_reaching_other_islands_match_one_island`：两个种子（挑有一对组在同一条轴线上的），19 步、30 刻。`/setblock` 到别的岛（玩家发）；同一刻里两个岛上的玩家先后放、拆同一处光源；别的岛上放箱子、`/loot insert` 往里装；`/clone` 源在岛 1、目标在岛 2、发起人在岛 0；再由岛 1 上的人 `clone … replace move` 从岛 2 搬到岛 0（带箱子里的东西，三个岛各不相同）；`/fill` 两头各在一个岛上、中间穿过没加载的区块；`/loot spawn` 和 `/summon minecraft:cow` 到别的岛；`/tp` 以后 `/gamemode`（`@a` 和点名）、控制台 `/defaultgamemode`、控制台 `/gamemode`（读别的岛上玩家脚下的方块）；哪个岛都没加载的位置（两边报同样的错）；别的岛上 `fill … hollow`；`/loot replace block`；换一个发起人再改同一处；控制台发的 `/setblock`（见下「控制台」）。收尾断言跨岛的 fill 两头都填上了、牛在岛 1、掉落物在岛 2、搬到岛 0 的箱子带着东西、要整个世界的命令都拼过 | `seeing_only_the_senders_island_is_caught`：把「整个世界」退回只借玩家，同一个种子在第一条跨岛命令那一刻（第 1 刻）就失败 |
+| 取随机数用发起人岛的、别的岛的不被推进 | 同一条测试每刻断言：发起人以外的岛的 `Level.random`、音效种子源、实体种子源的状态前后相同。取实体种子的命令都由同一个发起人发，他的岛和对照那一个岛对齐成同样的状态，所以生成的牛和掉落物逐字节相同 | — |
+| 只碰玩家的命令不拼；拼完每个岛还是原来那个 | `joining_for_a_command_leaves_every_island_as_it_was`：`/msg`、`/list`、`/give`、`/time` 之后拼的次数是 0；两条 `/setblock` 之后是 2，每个岛的编号、区块、玩家、四个随机源的状态、信箱里的位置都和之前相同 | — |
+| 52 个顶层字面量都定了范围 | `command::class::tests::every_root_literal_is_classified_and_registers_matching_actions`（范围表和注册的顶层字面量逐个对上）、`the_scope_of_a_line_follows_its_first_word` | — |
+| 光照任务跟着区块拆合 | `mc-bamboo-world` 的 `queued_light_tasks_travel_with_their_chunks`（不到一轮、超过一轮两种：改完不算就拆、各自算，结果和「变过的段」与不拆直接算相同；两边各自排着任务并起来再算也相同）、`an_island_split_waits_for_a_running_light_round` | 拆分时丢掉排着的任务：失败在「两边都还有没算的光照」 |
+| 混合驱动「都按时 = 齐步」 | `hybrid_with_every_island_on_time_matches_lockstep` 的脚本里加了 `/setblock` 到别的岛、别的岛上的 `/fill`、跨岛 `/clone`、`/gamemode adventure @a`、控制台 `/gamemode` | 原有的 `the_on_time_comparison_catches_a_broken_borrow` |
+
+**控制台**：Bamboo 的控制台来源没有位置，`/setblock`、`/fill`、`/clone`、`/summon`、`/loot` 从控制台发现在报 `permissions.requires.player`（和岛无关，单岛也一样；官方控制台可以用绝对坐标）。所以控制台发起的同类命令里真正执行到的只有 `/gamemode` 和 `/defaultgamemode`；方块类的那几条在对照里验证的是「两边报同样的错」。给控制台补上绝对坐标是命令系统的事，不在这一轮。
+
+**没有的命令**：`/kill`、`/execute`、`/data` 和能选中非玩家实体的 `@e` 现在都不存在（见本节开头），任务书里点名的 `/kill @e`、带 `sort=nearest,limit=` 的 `@e`、`/tp @e`、`/execute as @e at @s run …`、`/execute if block`、`/data get block|entity` 没法测，也没有「悄悄只作用于一部分」的问题（单岛同样选不到）。选择器只选玩家的部分（`@a`、`@p`、带排序和数量上限）照旧借全部玩家，由原有的 `cross_island_commands_and_chat_match_one_island` 覆盖。
 
 ---
 

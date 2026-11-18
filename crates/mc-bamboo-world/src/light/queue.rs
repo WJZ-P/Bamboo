@@ -13,7 +13,7 @@
 
 use std::{collections::VecDeque, mem};
 
-use mc_bamboo_core::BlockPos;
+use mc_bamboo_core::{BlockPos, ChunkPos};
 
 use super::{Chunks, SectionPos, TASKS_PER_BATCH, write_block};
 use crate::chunk::Chunk;
@@ -25,6 +25,16 @@ pub(super) enum Task {
     CheckBlock(BlockPos),
     /// `updateSectionStatus`：这个区块段变空了（`true`），或者从空的变得有方块了。
     SectionStatus(SectionPos, bool),
+}
+
+impl Task {
+    /// 这个任务说的是哪个区块。
+    fn chunk(self) -> ChunkPos {
+        match self {
+            Self::CheckBlock(pos) => pos.chunk(),
+            Self::SectionStatus(section, _) => ChunkPos::new(section.x, section.z),
+        }
+    }
 }
 
 /// 排好的一轮，官方 `runUpdate` 一次拿走的任务。
@@ -106,6 +116,95 @@ impl TaskQueue {
     /// 正在算的这一轮该读的世界。
     pub(super) fn view<'a>(&'a self, chunks: Chunks<'a>) -> Chunks<'a> {
         chunks.with_past(&self.past)
+    }
+
+    /// 有一轮开始算了还没算完。这时队列不能拆合。
+    pub(super) fn is_running(&self) -> bool {
+        self.running
+    }
+
+    /// 岛拆分：说到 `chunks` 里的区块的任务、方块改动和留着的区块副本搬进一份新队列。
+    /// 每一轮各自按区块分，轮次的先后和每一轮里任务的先后都不变；一边没有东西的轮次
+    /// 不留。只在没有算到一半的轮次时调用。
+    ///
+    /// 两个岛的区块不相邻，一个任务只碰它自己的区块和紧邻的区块，所以分开以后各算
+    /// 各的，结果和没分时相同。
+    ///
+    /// Island split: tasks, block changes and kept chunk copies about chunks
+    /// in `chunks` move to a new queue. Each round is split by chunk; the
+    /// order of rounds and of tasks within a round is kept, and a round with
+    /// nothing on one side is dropped there. Only while no round is running.
+    /// The islands' chunks are not adjacent and a task touches only its own
+    /// chunk and its neighbours, so each side computes the same light alone.
+    pub(super) fn split_off(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Self {
+        debug_assert!(!self.running, "有算到一半的轮次时不能拆光照队列");
+        let split = |round: &mut Round| -> Round {
+            let (moved_tasks, kept_tasks) = mem::take(&mut round.tasks)
+                .into_iter()
+                .partition(|task| chunks.contains(&task.chunk()));
+            round.tasks = kept_tasks;
+            let (moved_blocks, kept_blocks) = mem::take(&mut round.blocks)
+                .into_iter()
+                .partition(|(pos, _)| chunks.contains(&pos.chunk()));
+            round.blocks = kept_blocks;
+            Round {
+                blocks: moved_blocks,
+                tasks: moved_tasks,
+            }
+        };
+        let empty = |round: &Round| round.tasks.is_empty() && round.blocks.is_empty();
+        let mut out = Self::default();
+        for mut round in mem::take(&mut self.rounds) {
+            let moved = split(&mut round);
+            if !empty(&moved) {
+                out.rounds.push_back(moved);
+            }
+            if !empty(&round) {
+                self.rounds.push_back(round);
+            }
+        }
+        out.forming = split(&mut self.forming);
+        for &pos in chunks {
+            if let Some(chunk) = self.past.remove(&pos) {
+                out.past.insert(pos, chunk);
+            }
+        }
+        out
+    }
+
+    /// 岛合并：[`Self::split_off`] 的逆操作。排好的轮次按先后一一对上（第 k 轮并第 k
+    /// 轮，多出来的接在后面），正在攒的一轮并在一起。两边都没有算到一半的轮次。
+    ///
+    /// Island merge, the inverse of [`Self::split_off`]: queued rounds pair up
+    /// in order (round k with round k, extra ones appended) and the forming
+    /// rounds join. Neither side has a round running.
+    pub(super) fn absorb(&mut self, other: Self) {
+        debug_assert!(
+            !self.running && !other.running,
+            "有算到一半的轮次时不能并光照队列"
+        );
+        let Self {
+            rounds,
+            running: _,
+            forming,
+            past,
+        } = other;
+        for (index, mut round) in rounds.into_iter().enumerate() {
+            match self.rounds.get_mut(index) {
+                Some(mine) => {
+                    mine.tasks.append(&mut round.tasks);
+                    mine.blocks.append(&mut round.blocks);
+                }
+                None => self.rounds.push_back(round),
+            }
+        }
+        let Round {
+            mut blocks,
+            mut tasks,
+        } = forming;
+        self.forming.tasks.append(&mut tasks);
+        self.forming.blocks.append(&mut blocks);
+        self.past.extend(past);
     }
 
     /// 正在算的这一轮算完了。
