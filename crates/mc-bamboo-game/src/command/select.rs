@@ -3,9 +3,9 @@
 //! Entity-selector execution. Players and non-player entities are all candidates;
 //! filtering and ordering follow official `EntitySelector`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
-use mc_bamboo_blocks::entity::EntityPublic;
+use mc_bamboo_blocks::entity::{EntityPublic, JavaRandom};
 use mc_bamboo_command::{
     EntitySelector, GameMode as CommandGameMode, NumberBounds, SortOrder, permission, wrap_degrees,
 };
@@ -651,14 +651,21 @@ fn distance_sqr(region: &Region, target: &Target, origin: Vec3) -> f64 {
     }
 }
 
+/// 官方 `EntitySelectorParser.ORDER_RANDOM` 是 `Collections.shuffle(list)`：
+/// 它用 `java.util.Collections` 里进程共用的那个不带种子的 `java.util.Random`，
+/// 和 `level.random` / 实体自己的随机源都无关，所以它不推进世界的随机源。
+/// Bamboo 同样用一份进程级的 `JavaRandom`（等价于 `java.util.Random`），
+/// `nextInt(bound)` 的次数、顺序和 `Collections.shuffle` 一致。
+///
+/// Official `EntitySelectorParser.ORDER_RANDOM` is `Collections.shuffle(list)`,
+/// which uses the process-wide unseeded `java.util.Random` held inside
+/// `java.util.Collections`, not `level.random` or any entity random. Bamboo
+/// keeps one process-wide `JavaRandom` with the same `nextInt(bound)` draws.
 fn shuffle(ids: &mut [Target]) {
-    static STATE: AtomicU64 = AtomicU64::new(0x6a09_e667_f3bc_c909);
-    let mut state = STATE.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
-    for index in (1..ids.len()).rev() {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1);
-        let choice = (state >> 33) as usize % (index + 1);
-        ids.swap(index, choice);
-    }
+    static RANDOM: OnceLock<Mutex<JavaRandom>> = OnceLock::new();
+    let random = RANDOM.get_or_init(|| Mutex::new(JavaRandom::new(0x6a09_e667_f3bc_c909)));
+    let mut random = random
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    random.shuffle(ids);
 }
