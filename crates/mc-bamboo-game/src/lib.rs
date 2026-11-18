@@ -590,18 +590,9 @@ pub fn replay_execute(line: &str) -> [i32; 6] {
         "scoreboard objectives add result dummy",
     );
     region.links.flush();
-    let before = capture
-        .0
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .len();
-    command::on_command_public(&mut global, &mut region, id, line);
+    let mut feedback = Vec::new();
+    command::on_command_public_feedback(&mut global, &mut region, id, line, &mut feedback);
     region.links.flush();
-    let bytes = capture
-        .0
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
     let stone =
         |pos: BlockPos| i32::from(region.chunks.block(pos) == Some(mc_bamboo_data::blocks::STONE));
     let cow_pos =
@@ -614,33 +605,31 @@ pub fn replay_execute(line: &str) -> [i32; 6] {
             .scoreboard()
             .score_value("#total", "result")
             .unwrap_or(0),
-        feedback_mark(line),
-        feedback_oracle_hash(line, &bytes[before.min(bytes.len())..]),
+        feedback_mark(line, &feedback),
+        feedback_oracle_hash(&feedback),
     ]
 }
 
 /// 官方条件失败不执行链尾，这里用一个稳定的数字表示「有没有跑到 `run`」。
 #[cfg(feature = "oracle-samples")]
-fn feedback_mark(line: &str) -> i32 {
-    if line.starts_with("execute if block 4 -60 6 stone") {
-        0
-    } else {
-        1
-    }
+fn feedback_mark(line: &str, feedback: &[String]) -> i32 {
+    let _ = line;
+    i32::from(
+        feedback
+            .iter()
+            .any(|text| text.contains("commands.setblock.success")),
+    )
 }
 
-/// 官方 `Recording` 收到的是翻译后的纯文本，Bamboo 的反馈是 SNBT 翻译键。
-/// 两边按「命令有没有产生成功反馈」比较同一个稳定的哈希，不比字节。
+/// 两边都按 `decompose_component` 的「翻译键 + 参数 + 子组件」展开逐条比较。
 #[cfg(feature = "oracle-samples")]
-fn feedback_oracle_hash(line: &str, bytes: &[u8]) -> i32 {
-    let produced = !bytes.is_empty() || line.contains("store success score");
-    let text = if produced {
-        "success"
-    } else {
-        "conditions.not_met"
-    };
-    let _ = line;
-    feedback_hash(text.as_bytes())
+fn feedback_oracle_hash(feedback: &[String]) -> i32 {
+    let mut all = String::new();
+    for entry in feedback {
+        all.push_str(entry);
+        all.push('\n');
+    }
+    feedback_hash(all.as_bytes())
 }
 
 /// `Links` 里累计发出去的字节数（对拍用）。

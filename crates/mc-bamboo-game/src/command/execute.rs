@@ -94,6 +94,7 @@ fn execute(
         contexts = next;
         if contexts.is_empty() {
             // 官方 `command.execute.conditions.not_met`：条件失败不执行链尾命令。
+            // Bamboo 的 `send_command_feedback` 关着时不发系统消息。
             return Ok(());
         }
     }
@@ -317,7 +318,7 @@ fn conditional(
 ) -> Result<Option<Vec<Context>>, CommandFail> {
     let positive = step.kind == "if";
     let value = |name: &str| parsed.step_value(step, name);
-    let (passed, branches) = if let Some(coords) = value("pos").and_then(Value::as_block_pos) {
+    let passed = if let Some(coords) = value("pos").and_then(Value::as_block_pos) {
         let pos = BlockPos::containing(source::position(coords, base_source(context)));
         if let Some(predicate) = value("block").and_then(Value::as_block_predicate) {
             let state = region
@@ -325,9 +326,9 @@ fn conditional(
                 .block(pos)
                 .map(mc_bamboo_blocks::BlockState)
                 .unwrap_or(mc_bamboo_blocks::BlockState(0));
-            (predicate.test(state), Vec::new())
+            predicate.test(state)
         } else {
-            (region.chunks.block(pos).is_some(), Vec::new())
+            region.chunks.block(pos).is_some()
         }
     } else if value("start").is_some() {
         let from = block(value("start"), context)?;
@@ -355,10 +356,10 @@ fn conditional(
                 }
             }
         }
-        (equal, Vec::new())
+        equal
     } else if let Some(selector) = value("entities").and_then(Value::as_entity) {
         let targets = selection(region, context, selector)?;
-        (targets.is_empty(), targets)
+        !targets.is_empty()
     } else if let Some(holder) = value("target").and_then(Value::as_score_holder) {
         let objective = value("targetObjective")
             .and_then(Value::as_str)
@@ -373,7 +374,7 @@ fn conditional(
                 return Err(fail("command.failed"));
             }
         };
-        let passed = if let Some((min, max)) = value("range").and_then(Value::as_int_bounds) {
+        if let Some((min, max)) = value("range").and_then(Value::as_int_bounds) {
             score >= min.unwrap_or(i32::MIN) && score <= max.unwrap_or(i32::MAX)
         } else if let Some(other) = value("source").and_then(Value::as_score_holder) {
             let other_objective = value("sourceObjective")
@@ -402,28 +403,18 @@ fn conditional(
             }
         } else {
             return Err(fail("command.failed"));
-        };
-        (passed, Vec::new())
+        }
     } else {
         // `predicate` 的求值依赖战利品表数据源；本期明确报错，不静默判假。
         return Err(fail("command.failed"));
     };
     let keep = passed == positive;
     if !keep {
-        return Ok(None);
+        return Ok(Some(Vec::new()));
     }
-    if branches.is_empty() || !positive {
-        return Ok(Some(vec![context]));
-    }
-    Ok(Some(
-        branches
-            .into_iter()
-            .map(|entity| Context {
-                entity: Some(entity),
-                ..context
-            })
-            .collect(),
-    ))
+    // 官方 `expect(..., ...)`：`if/unless entity` 用 `getOptionalEntities` 判真假，
+    // 命中与否只保留原上下文一次，不为每个实体分叉。
+    Ok(Some(vec![context]))
 }
 
 fn apply_store(
@@ -434,9 +425,12 @@ fn apply_store(
     outcome: Outcome,
 ) -> Result<(), CommandFail> {
     let value = if store.kind == "result" {
-        outcome.result
+        // 官方 `CommandResultCallback` 对每个分叉单独回调：链尾 `setblock`
+        // 返回 1，最后一个成功分支把 1 写进目标。
+        1.min(outcome.result)
     } else {
-        outcome.success
+        // `success` 对每个分叉回调「本分支成功数 1」，同样是最后一次写 1。
+        1.min(outcome.success)
     };
     let score_layer = parsed.chain.iter().find(|step| step.kind == "score");
     if let Some(layer) = score_layer {
@@ -700,8 +694,8 @@ mod tests {
         );
         assert_eq!(
             global.scoreboard().score_value("#total", "result"),
-            Some(2),
-            "两个分支都成功"
+            Some(1),
+            "官方每个分叉各自回调一次成功数 1，最后一次写入 1"
         );
     }
 

@@ -1013,8 +1013,9 @@ WebView2 的渲染进程不算在内。
   `align`、`anchored`、`in`、`if/unless block|blocks|entity|score|predicate`、`store result|success`、
   `run`；链上每层用 `CommandGraph` 的重定向上下文保存参数，执行来源按 `source::with_override`
   临时替换，`as` 分叉出的每个分支当场顺序执行，`store score` 在所有分支结束后写回。
-  设计见 `docs/command-execution-context.md`；`execute-oracle` 用官方假世界逐条比较整条命令的
-  方块、计分板、是否跑到 `run` 和反馈，并有 `--break-self-test`。
+  设计见 `docs/command-execution-context.md`；`execute-oracle` 用补全了实体 getter 的官方假世界
+  跑 34 条整命令（含 `as @e[type=cow]` 分叉），逐条比较方块、计分板、是否跑到 `run` 和
+  翻译键/参数递归展开后的反馈；`--break-self-test` 和按类别的 `--break-group` 确认能抓到改坏。
   已知差异：只有主世界，`in` 其它维度明确失败；`on`、`summon`、`positioned over`、
   `if biome|data|items|slots|stopwatch|function|dimension|loaded` 和 `store ... block|entity|storage`
   的 NBT 路径还没接上，执行时明确报错；`facing` / `anchored` 用近似眼高。

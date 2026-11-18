@@ -168,12 +168,7 @@ pub(crate) fn targets_with(
     level: u8,
     selector: &EntitySelector,
 ) -> Result<Vec<Target>, CommandFail> {
-    let found = find_with_source(region, None, source, level, selector)?;
-    if found.is_empty() {
-        Err(fail("argument.entity.notfound.entity"))
-    } else {
-        Ok(found)
-    }
+    find_with_source(region, None, source, level, selector)
 }
 
 fn find_with_source(

@@ -97,14 +97,17 @@ Context {
 ## 6. 对拍
 
 `tools/mc-bamboo-vanilla execute-oracle` 用官方 `Commands.performCommand`
-在假世界里跑一整串 `/execute` 命令，记录：
+在假世界里跑 34 条 `/execute` 命令；假世界补全了 `ServerLevel` 的实体 getter、
+`ChunkMap` 和真正的牛实体，所以 `as @e[type=cow]`、`at @e`、`if entity @e[...]`
+真的会选出牛并分叉。记录：
 
-- 每条命令的成功/失败反馈文本；
-- 方块表、实体表、玩家位置、计分板分数这些**副作用**；
-- `as @s ... run ...` 的分叉次数和顺序（假世界的实体 getter 只支持来源实体本身）。
+- 每条反馈的 `TranslatableContents` 翻译键和参数，递归展开子组件；
+- 方块表、玩家位置、计分板分数这些**副作用**；
+- `as @e`/`at @e` 的分叉次数和顺序。
 
-Rust 侧在同一串命令上重放并逐项比较；`--break-self-test` 故意改坏一处副作用
-或反馈，确认对拍会失败。不能用「只比选择器结果」代替。
+Rust 侧在同一串命令上重放并逐项比较；`--break-self-test` 改坏一处副作用，
+`--break-group run|conditions|as|at|positioned|rotated|facing|align|anchored|blocks|store`
+按类别改坏一个字段，确认每类都能被抓到。
 
 ## 7. 已知差异
 

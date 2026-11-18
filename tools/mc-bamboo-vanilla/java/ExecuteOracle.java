@@ -74,11 +74,47 @@ public final class ExecuteOracle {
     private static final Unsafe UNSAFE = loadUnsafe();
     private static final BlockPos TEST_POS = new BlockPos(4, -60, 6);
     private static final String[] SCENARIOS = {
+        // 基础 run / 条件反馈
         "execute positioned 4 -60 6 run setblock 4 -60 6 stone",
-        "execute if block 4 -60 6 stone run say yes",
+        "execute if block 4 -60 6 stone run setblock 4 -60 6 stone",
         "execute unless block 4 -60 6 stone run setblock 4 -60 6 stone",
+        "execute if block 2 -60 2 stone run setblock 4 -60 6 stone",
+        "execute unless block 2 -60 2 stone run setblock 4 -60 6 stone",
+        "execute if entity @e[type=cow] run setblock 4 -60 6 stone",
+        "execute unless entity @e[type=cow] run setblock 4 -60 6 stone",
+        "execute unless entity @e[type=slime] run setblock 4 -60 6 stone",
+        // as / at 分叉与顺序
+        "execute as @e[type=cow] at @s run setblock ~ ~ ~ stone",
+        "execute at @e[type=cow] run setblock ~ ~ ~ stone",
+        "execute as @e[type=cow,sort=nearest,limit=2] at @s run setblock ~ ~ ~ stone",
+        "execute as @e[type=cow,sort=nearest,limit=1] at @s run setblock 4 -60 6 stone",
+        "execute as @e[type=cow,sort=furthest,limit=1] at @s run setblock 4 -60 6 stone",
         "execute as @s at @s run setblock 4 -60 6 stone",
+        // positioned / rotated / facing / align / anchored / in
+        "execute positioned 2 -60 2 run setblock ~ ~ ~ stone",
+        "execute positioned as @e[type=cow,limit=1,sort=nearest] run setblock 4 -60 6 stone",
+        "execute rotated 90 0 run setblock 4 -60 6 stone",
+        "execute rotated as @s run setblock 4 -60 6 stone",
+        "execute facing 4 -60 6 run setblock 4 -60 6 stone",
+        "execute facing entity @e[type=cow,limit=1,sort=nearest] eyes run setblock 4 -60 6 stone",
+        "execute facing entity @e[type=cow,limit=1,sort=nearest] feet run setblock 4 -60 6 stone",
+        "execute align xyz run setblock 4 -60 6 stone",
+        "execute anchored eyes run setblock 4 -60 6 stone",
+        "execute anchored feet run setblock 4 -60 6 stone",
+        // blocks all / masked
+        "execute if blocks 2 -60 2 2 -60 2 6 -60 6 all run setblock 4 -60 6 stone",
+        "execute unless blocks 2 -60 2 2 -60 2 6 -60 6 masked run setblock 4 -60 6 stone",
+        // score 条件
+        // store 写回次数与值
+        "execute store result score #total result run setblock 4 -60 6 stone",
         "execute store success score #total result run setblock 4 -60 6 stone",
+        "execute as @e[type=cow] at @s store success score #total result run setblock ~ ~ ~ stone",
+        "execute as @e[type=cow] at @s store result score #total result run setblock ~ ~ ~ stone",
+        // 条件失败时的返回值
+        "execute store result bossbar minecraft:test value run setblock 4 -60 6 stone",
+        "execute store success bossbar minecraft:test max run setblock 4 -60 6 stone",
+        "execute if block 4 -60 6 stone store success score #total result run setblock 4 -60 6 stone",
+        "execute unless block 4 -60 6 stone store result score #total result run setblock 4 -60 6 stone",
     };
 
     private ExecuteOracle() {
@@ -126,7 +162,7 @@ public final class ExecuteOracle {
         Scene scene = new Scene(official);
         List<String> feedback = new ArrayList<>();
         CommandSourceStack source = scene.source.withSource(new Recording(feedback));
-        int ran = 1;
+        int ran = 0;
         try {
             official.commands.performCommand(
                     official.commands.getDispatcher().parse(line, source), line);
@@ -136,6 +172,7 @@ public final class ExecuteOracle {
         if (feedback.isEmpty()) {
             ran = 0;
         }
+        ran = feedback.stream().anyMatch(text -> text.contains("commands.setblock.success")) ? 1 : 0;
         var info = scene.board.getPlayerScoreInfo(ScoreHolder.forNameOnly("#total"),
                 scene.board.getObjective("result"));
         int score = info == null ? 0 : info.value();
@@ -154,13 +191,46 @@ public final class ExecuteOracle {
         return state != null && state.is(Blocks.STONE) ? 1 : 0;
     }
 
+    /** 递归展开 `Component`：翻译键 + 参数，字面文本，子组件；不查语言表。 */
+    private static String decompose(Component component) {
+        StringBuilder out = new StringBuilder();
+        decomposeInto(component, out);
+        return out.toString();
+    }
+
+    private static void decomposeInto(Component component, StringBuilder out) {
+        var contents = component.getContents();
+        if (contents instanceof net.minecraft.network.chat.contents.TranslatableContents translated) {
+            out.append("T[").append(translated.getKey()).append(']');
+            for (Object arg : translated.getArgs()) {
+                out.append('{');
+                if (arg instanceof Component nested) {
+                    decomposeInto(nested, out);
+                } else {
+                    out.append("S[").append(String.valueOf(arg)).append(']');
+                }
+                out.append('}');
+            }
+        } else if (contents instanceof net.minecraft.network.chat.contents.PlainTextContents literal) {
+            out.append("L[").append(literal.text()).append(']');
+        } else {
+            out.append("C[").append(contents.getClass().getSimpleName()).append(']');
+        }
+        for (Component sibling : component.getSiblings()) {
+            out.append('+');
+            decomposeInto(sibling, out);
+        }
+    }
+
     private static int hash(List<String> lines) {
-        // 和 Rust 侧 `feedback_oracle_hash` 一样只比「有没有成功反馈」：
-        // 官方是翻译后的英文，Bamboo 是翻译键，字面量并不相同。
-        String text = lines.isEmpty() ? "conditions.not_met" : "success";
+        // 输入是逐条反馈的「翻译键 + 参数 + 子组件」展开，Rust 侧按同样格式展开。
         int hash = 0x811c9dc5;
-        for (byte b : text.getBytes(StandardCharsets.UTF_8)) {
-            hash ^= b & 0xff;
+        for (String line : lines) {
+            for (byte b : line.getBytes(StandardCharsets.UTF_8)) {
+                hash ^= b & 0xff;
+                hash *= 0x01000193;
+            }
+            hash ^= '\n';
             hash *= 0x01000193;
         }
         return hash;
@@ -190,11 +260,20 @@ public final class ExecuteOracle {
             set(Level.class, level, "soundSeedGenerator", net.minecraft.util.RandomSource.create(1L));
             set(Level.class, level, "neighborUpdater",
                     new net.minecraft.world.level.redstone.CollectingNeighborUpdater(level, 1_000_000));
+            // 官方 `SetBlockCommand` 在非 strict 模式还会更新邻居；这里只保留方块写入，
+            // 不跑邻居更新（假世界没有邻域方块表）。
             set(ServerLevel.class, level, "server", official.server);
             set(ServerLevel.class, level, "players", new ArrayList<ServerPlayer>());
             board = new ServerScoreboard(official.server);
             official.server.sharedScoreboard = board;
+            official.server.currentLevel = level;
             fake.board = board;
+            var chunkMap = allocate(net.minecraft.server.level.ChunkMap.class);
+            set(net.minecraft.server.level.ChunkMap.class, chunkMap, "entityMap",
+                    new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>());
+            fake.chunkSource = allocate(net.minecraft.server.level.ServerChunkCache.class);
+            set(net.minecraft.server.level.ServerChunkCache.class, fake.chunkSource, "chunkMap", chunkMap);
+            set(ServerLevel.class, level, "chunkSource", fake.chunkSource);
             board.addObjective("result", ObjectiveCriteria.DUMMY, Component.literal("result"),
                     ObjectiveCriteria.RenderType.INTEGER, false, null);
 
@@ -206,11 +285,9 @@ public final class ExecuteOracle {
             level.players().add(player);
             tracked.add(player);
             for (int i = 0; i < 2; i++) {
-                Cow cow = allocate(Cow.class);
-                set(Entity.class, cow, "id", (1 << 24) + i);
-                set(Entity.class, cow, "level", level);
-                set(Entity.class, cow, "position",
-                        i == 0 ? new Vec3(2.5, -60.0, 2.5) : new Vec3(6.5, -60.0, 6.5));
+                Cow cow = new Cow(EntityTypes.COW, level);
+                cow.setId((1 << 24) + i);
+                cow.setPos(i == 0 ? 2.5 : 6.5, -60.0, i == 0 ? 2.5 : 6.5);
                 tracked.add(cow);
             }
             source = new CommandSourceStack(
@@ -233,7 +310,7 @@ public final class ExecuteOracle {
 
         @Override
         public void sendSystemMessage(Component message) {
-            lines.add(message.getString());
+            lines.add(decompose(message));
         }
 
         @Override
@@ -295,6 +372,7 @@ public final class ExecuteOracle {
         ReloadableServerResources managers;
         GameRules rules;
         ServerScoreboard sharedScoreboard;
+        ServerLevel currentLevel;
         net.minecraft.world.level.storage.WorldData worldData;
 
         private FakeServer() {
@@ -318,7 +396,7 @@ public final class ExecuteOracle {
 
         @Override
         public Iterable<ServerLevel> getAllLevels() {
-            return List.of();
+            return List.of(currentLevel);
         }
 
         @Override
@@ -340,6 +418,7 @@ public final class ExecuteOracle {
         Long2ObjectOpenHashMap<BlockState> blocks;
         List<Entity> tracked;
         ServerScoreboard board;
+        net.minecraft.server.level.ServerChunkCache chunkSource;
         final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<
                 net.minecraft.world.level.chunk.ChunkAccess> chunkCache =
                 new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
@@ -364,19 +443,6 @@ public final class ExecuteOracle {
         @Override
         protected LevelEntityGetter<Entity> getEntities() {
             return new Tracked(tracked);
-        }
-
-        @Override
-        public <T extends Entity> void getEntities(
-                net.minecraft.world.level.entity.EntityTypeTest<Entity, T> test,
-                java.util.function.Predicate<? super T> filter,
-                java.util.List<? super T> out, int limit) {
-            for (Entity entity : tracked) {
-                T cast = test.tryCast(entity);
-                if (cast != null && filter.test(cast) && out.size() < limit) {
-                    out.add(cast);
-                }
-            }
         }
 
         @Override
