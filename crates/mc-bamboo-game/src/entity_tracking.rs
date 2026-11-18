@@ -141,6 +141,13 @@ pub struct TrackedEntity {
     base: Vec3,
     /// 上次发出去的速度。
     last_movement: Vec3,
+    /// 配对包里的速度：`ServerEntity` 在实体刚进世界时把 `getDeltaMovement()`
+    /// 记进 `lastSentMovement`，之后不再跟着实体变。
+    ///
+    /// Velocity for the pairing packet: vanilla's `ServerEntity` snapshots
+    /// `getDeltaMovement()` when the entity joins the world and never follows
+    /// later changes.
+    pairing_movement: Vec3,
     /// 上次发出去的打包角度（`yRot`、`xRot`、`yHeadRot`）。
     last_yaw: u8,
     last_pitch: u8,
@@ -179,6 +186,7 @@ impl TrackedEntity {
         Self {
             base: snapshot.position,
             last_movement: snapshot.delta,
+            pairing_movement: snapshot.delta,
             last_yaw: pack_degrees(snapshot.yaw),
             last_pitch: snapshot.data.mob_x_rot().map_or(0, pack_degrees),
             last_head: snapshot.data.mob_head_rot().map_or(0, pack_degrees),
@@ -220,7 +228,7 @@ impl TrackedEntity {
                 .map_or_else(|| entity_uuid(snapshot.id), Uuid::from_bytes),
             entity_type: snapshot.entity_type,
             position: self.base,
-            movement: self.last_movement,
+            movement: self.pairing_movement,
             pitch: self.last_pitch,
             yaw: self.last_yaw,
             head_yaw: self.last_head,
@@ -397,23 +405,41 @@ impl TrackedEntity {
         packets
     }
 
-    /// 只发变了的元数据；`last_data` 已经是上一刻的值。
-    /// 官方 `SynchedEntityData.packDirty`：只发值变了的那几项。
+    /// 只发变了的元数据；`last_data` 是上一刻发出去的非默认值。
+    /// 官方 `packDirty` 的关键是：从「非默认」变回「默认」也要发一条默认值
+    /// （例如小牛长大时 index 16 发 `false`），所以按 index 做并集比较。
+    ///
+    /// Only changed metadata is sent. Crucially, vanilla's `packDirty` also
+    /// sends the default value when an item goes from non-default back to
+    /// default (e.g. a baby growing up sends `false` at index 16), so this is
+    /// an index-based union diff rather than a diff of non-default lists.
     fn dirty_items(&self, snapshot: &Snapshot) -> Vec<EntityData> {
+        let current = snapshot.data.pairing_values();
+        let mut indices: Vec<u8> = current
+            .iter()
+            .chain(&self.last_data)
+            .map(EntityData::index)
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
         let mut out = Vec::new();
-        for item in snapshot.data.pairing_values() {
-            let changed = self
+        for index in indices {
+            let now = current.iter().find(|item| EntityData::index(item) == index);
+            let before = self
                 .last_data
                 .iter()
-                .find(|old| EntityData::index(old) == EntityData::index(&item))
-                .is_none_or(|old| old != &item);
-            if changed {
-                out.push(item);
-            }
+                .find(|item| EntityData::index(item) == index);
+            let item = match now {
+                Some(item) if Some(item) != before => item.clone(),
+                None if before.is_some() => default_data(index),
+                _ => continue,
+            };
+            out.push(item);
         }
         out
     }
 
+    /// 把选中的移动包写成「ID + 包体」字节。
     fn movement_body(
         &mut self,
         snapshot: &Snapshot,
@@ -723,6 +749,32 @@ impl KindData {
     }
 }
 
+/// 某个元数据 index 的默认值，用于「从非默认变回默认」时发一条。
+/// 牛能变成非默认的只有这些项，其余 index 官方不会走到这里。
+///
+/// The default value of a metadata index, sent when an item returns to its
+/// default. Only these cow indices can become non-default.
+fn default_data(index: u8) -> EntityData {
+    match index {
+        0 => EntityData::SharedFlags(0),
+        1 => EntityData::AirSupply(300),
+        3 => EntityData::CustomNameVisible(false),
+        4 => EntityData::Silent(false),
+        5 => EntityData::NoGravity(false),
+        7 => EntityData::TicksFrozen(0),
+        9 => EntityData::Health(1.0),
+        15 => EntityData::MobFlags(0),
+        16 => EntityData::Baby(false),
+        17 => EntityData::AgeLocked(false),
+        18 => EntityData::CowVariant(1),
+        19 => EntityData::CowSoundVariant(0),
+        // `CustomName` 是 optional component，空时写 boolean false。
+        // `CustomName` is an optional component; absent is a false boolean.
+        2 => EntityData::NoCustomName,
+        _ => EntityData::SharedFlags(0),
+    }
+}
+
 /// 牛的全部非默认元数据，按 index 升序。官方 `SynchedEntityData.getNonDefaultValues`
 /// 就是这个顺序；index 0 的标志字节、血量、幼年、花色、叫声都在里面。
 ///
@@ -798,6 +850,75 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     out
 }
 
+/// 把这一刻的生物事件换成「包 ID + 包体」字节，按事件发生顺序。
+/// 游戏路径直接把结果交给 `Links`，逐刻对拍也调这个函数，不另写一份。
+/// 音效的种子由 `sound_seed` 回调给出（游戏里是 `Region.sound_seed_generator`）。
+///
+/// Turn this tick's mob events into "id + body" bytes in event order. The live
+/// path hands these straight to `Links`; the tick oracle calls the same function.
+/// `sound_seed` supplies the seed (the region's generator in the live game).
+pub fn event_packets(
+    events: &[(i32, Vec<mc_bamboo_blocks::entity::mob::MobEvent>)],
+    mut sound_seed: impl FnMut() -> i64,
+) -> Vec<Vec<u8>> {
+    use mc_bamboo_blocks::entity::mob::MobEvent;
+    use mc_bamboo_protocol::packet::play::{DamageEvent, EntityEvent, Sound};
+
+    let mut out = Vec::new();
+    for (id, mob_events) in events {
+        for event in mob_events {
+            match event {
+                MobEvent::Death => out.push(packet_body(&EntityEvent {
+                    entity_id: *id,
+                    event: 3,
+                })),
+                MobEvent::Poof => out.push(packet_body(&EntityEvent {
+                    entity_id: *id,
+                    event: 60,
+                })),
+                MobEvent::Damage { kind, attacker } => {
+                    let damage_type = mc_bamboo_data::damage_type_id(kind.name()).unwrap_or(0);
+                    out.push(packet_body(&DamageEvent {
+                        entity_id: *id,
+                        damage_type,
+                        source_cause: *attacker,
+                        source_direct: *attacker,
+                        position: None,
+                    }));
+                }
+                MobEvent::Sound {
+                    sound,
+                    volume,
+                    pitch,
+                    position,
+                } => out.push(packet_body(&Sound {
+                    sound: i32::from(mc_bamboo_data::sounds::sound_event(sound)),
+                    inline: None,
+                    source: mc_bamboo_data::sounds::NEUTRAL,
+                    x: position.x,
+                    y: position.y,
+                    z: position.z,
+                    volume: *volume,
+                    pitch: *pitch,
+                    seed: sound_seed(),
+                })),
+            }
+        }
+    }
+    out
+}
+
+/// 把「ID + 包体」字节加上帧长前缀，成批发给所有玩家。
+fn broadcast_bodies(region: &mut Region, bodies: &[Vec<u8>]) {
+    let mut frames = Vec::new();
+    for body in bodies {
+        frames.extend(frame_from_body(body));
+    }
+    if !frames.is_empty() {
+        region.links.broadcast(&frames);
+    }
+}
+
 /// tick 第 6 阶段：世界实体的配对、同步和移除。对应 `ChunkMap.tick`。
 pub(crate) fn sync(region: &mut Region) {
     // 外层仍是全表按 uid 升序：每个实体都要发同步包，消失的也要发移除包。
@@ -806,6 +927,11 @@ pub(crate) fn sync(region: &mut Region) {
     // The outer loop still walks the whole table in uid order: every entity sends
     // sync packets and departed ones send removals. Only public data is read, and
     // pairing uses a coarse grid of players built once per tick.
+    // 生物事件（受伤、死亡、音效）先发，再发这一刻的配对和同步包。
+    // Mob events go out before this tick's pairing and sync packets.
+    let events = region.entities.take_mob_events();
+    let bodies = event_packets(&events, || region.sound_seed_generator.source().next_long());
+    broadcast_bodies(region, &bodies);
     let snapshots: Vec<Snapshot> = region.entities.iter_public().map(Snapshot::of).collect();
     let live: BTreeSet<i32> = snapshots.iter().map(|snapshot| snapshot.id).collect();
     remove_missing(region, &live);

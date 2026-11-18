@@ -4,10 +4,11 @@
 //! 根节点的下标单独写在最后，子节点和重定向都用下标引用。这里只负责写字节，
 //! 树的结构和权限过滤由 `mc-bamboo-game` 决定。
 
+use mc_bamboo_core::Vec3;
 use mc_bamboo_data::packets::play::clientbound;
 
 use crate::{
-    codec::{write_i32, write_string, write_varint},
+    codec::{write_bool, write_i32, write_string, write_varint, write_vec3},
     packet::ClientboundPacket,
     text::Component,
 };
@@ -316,10 +317,68 @@ impl ClientboundPacket for EntityEvent {
     }
 }
 
+/// `ClientboundDamageEventPacket`：官方 `ClientboundDamageEventPacket.write`。
+///
+/// `damage_type` 是注册表 Holder，直接写注册表 ID；攻击者实体 ID 用
+/// `writeOptionalEntityId`（值加一，没有时写 0）；最后是可选的来源位置。
+///
+/// Vanilla `ClientboundDamageEventPacket`: damage type is a registry Holder
+/// (raw id), attacker ids use `writeOptionalEntityId` (id + 1, 0 when absent),
+/// then an optional source position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DamageEvent {
+    pub entity_id: i32,
+    /// `minecraft:damage_type` 注册表 ID。
+    pub damage_type: i32,
+    pub source_cause: Option<i32>,
+    pub source_direct: Option<i32>,
+    pub position: Option<Vec3>,
+}
+
+impl ClientboundPacket for DamageEvent {
+    const ID: i32 = clientbound::DAMAGE_EVENT;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.entity_id);
+        write_varint(out, self.damage_type);
+        write_varint(out, self.source_cause.map_or(0, |id| id + 1));
+        write_varint(out, self.source_direct.map_or(0, |id| id + 1));
+        write_bool(out, self.position.is_some());
+        if let Some(position) = self.position {
+            write_vec3(out, position);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::packet::test_util::{body, hex};
+
+    #[test]
+    fn damage_event_matches_the_official_layout() {
+        let packet = DamageEvent {
+            entity_id: 7,
+            damage_type: 33,
+            source_cause: Some(2),
+            source_direct: None,
+            position: Some(Vec3::new(1.0, 2.0, 3.0)),
+        };
+        assert_eq!(
+            body(&packet),
+            hex(
+                "07 21 03 00 01 3f f0 00 00 00 00 00 00 40 00 00 00 00 00 00 00 40 08 00 00 00 00 00 00"
+            )
+        );
+        let none = DamageEvent {
+            entity_id: 7,
+            damage_type: 33,
+            source_cause: None,
+            source_direct: None,
+            position: None,
+        };
+        assert_eq!(body(&none), hex("07 21 00 00 00"));
+    }
 
     #[test]
     fn a_small_tree_matches_the_official_layout() {

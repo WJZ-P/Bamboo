@@ -23,12 +23,8 @@ use mc_bamboo_blocks::{
     },
 };
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
-use mc_bamboo_data::{sounds, version};
-use mc_bamboo_game::entity_tracking::{EntityTracking, Snapshot};
-use mc_bamboo_protocol::{
-    frame::packet_body,
-    packet::play::{EntityEvent, Sound},
-};
+use mc_bamboo_data::version;
+use mc_bamboo_game::entity_tracking::{EntityTracking, Snapshot, event_packets};
 use serde::Deserialize;
 
 use crate::oracle::collect_log;
@@ -482,6 +478,8 @@ impl Report {
         let mut ticks = BlockTicks::new();
         ticks.set_time(case.start_time);
         let mut ids = Vec::new();
+        let mut tracking = EntityTracking::default();
+        let sound_source = mc_bamboo_blocks::LegacyRandom::new(12345);
         {
             let mut world = World::new(&mut level, &mut ticks);
             for (index, cow) in case.cows.iter().enumerate() {
@@ -517,8 +515,6 @@ impl Report {
         self.compare(&case.name, 0, &ours, first);
         // 出站包逐刻比字节：官方一侧每头牛一个 `ServerEntity`，这里用游戏层
         // 同一份 `TrackedEntity` 逻辑，绝不在对拍里另写一份发包。
-        let mut tracking = EntityTracking::default();
-        let mut sound_source = mc_bamboo_blocks::LegacyRandom::new(12345);
         if let Some(packets) = &case.packets {
             let flags = case.sync_flags.as_ref().expect("有包就有标志位");
             let tick0 = flags.first().expect("第 0 刻的标志位");
@@ -546,6 +542,7 @@ impl Report {
         }
         for (index, expected) in case.steps.iter().enumerate().skip(1) {
             ticks.set_time(case.start_time + index as i64);
+            let mut spawn_public: Vec<mc_bamboo_blocks::entity::EntityPublic> = Vec::new();
             {
                 let mut world = World::new(&mut level, &mut ticks);
                 for &[tick, cow, amount, attacker] in &case.hurts {
@@ -581,18 +578,43 @@ impl Report {
                         ids.push(id);
                     }
                 }
+                // 官方 `ChunkMap.addEntity` 在实体刚进世界时建 `ServerEntity`：
+                // 配对包的速度取生成那一刻的速度，不是这一刻 tick 之后的速度。
+                // Vanilla's `ChunkMap.addEntity` creates `ServerEntity` as the
+                // entity joins the world, before this tick's entity logic.
                 for &[tick, x, y, z, more] in &case.eggs {
                     if tick as usize != index {
                         continue;
                     }
-                    ids.push(spawn::spawn_cow_from_egg(
+                    let id = spawn::spawn_cow_from_egg(
                         &mut world,
                         BlockPos::new(x, y, z),
                         more != 0,
                         None,
-                    ));
+                    );
+                    ids.push(id);
+                    if case.packets.is_some()
+                        && let Some(public) = world.level().entity_public(id)
+                    {
+                        spawn_public.push(public);
+                    }
+                }
+                for summon in &case.summons {
+                    if summon.tick == index
+                        && case.packets.is_some()
+                        && let Some(&id) = ids.last()
+                        && let Some(public) = world.level().entity_public(id)
+                    {
+                        spawn_public.push(public);
+                    }
                 }
                 world.tick_entities();
+            }
+            let mut spawn_pairings = Vec::new();
+            for public in &spawn_public {
+                let snapshot = Snapshot::of(public);
+                let tracked = tracking.tracked_for_oracle(&snapshot);
+                spawn_pairings.extend(tracked.pairing_packets(&snapshot));
             }
             self.steps += 1;
             let ours = snapshot(&level, &ids);
@@ -600,9 +622,12 @@ impl Report {
             if let Some(packets) = &case.packets {
                 let flags = case.sync_flags.as_ref().expect("有包就有标志位");
                 let tick = &flags[index];
-                // 事件包（受伤、死亡、音效）由 tick 里的 `MobEvent` 转成包。
-                let events = level.entities.take_mob_events();
-                let mut ours_packets = event_bodies(&mut sound_source, &events);
+                // 官方的顺序：中途生成的配对包 → 实体 tick 里的事件（音效等）→
+                // 每头牛按 uid 顺序的同步包。
+                // Official order: mid-tick pairings, events from entity ticks,
+                // then each cow's sync packets in id order.
+                let mut ours_packets = spawn_pairings;
+                let mut sync_packets = Vec::new();
                 for (cow, &id) in ids.iter().enumerate() {
                     let Some(public) = level.entities.public_at(id) else {
                         continue;
@@ -611,13 +636,12 @@ impl Report {
                     let bits = tick.get(cow).map(String::as_str).unwrap_or("00000");
                     let (needs_sync, _sync_position, sync_velocity) =
                         apply_flags(&mut snapshot, bits);
-                    let is_new = !tracking.has_tracked_for_oracle(id);
                     let tracked = tracking.tracked_for_oracle(&snapshot);
-                    if is_new {
-                        ours_packets.extend(tracked.pairing_packets(&snapshot));
-                    }
-                    ours_packets.extend(tracked.step(&snapshot, needs_sync, sync_velocity));
+                    sync_packets.extend(tracked.step(&snapshot, needs_sync, sync_velocity));
                 }
+                let events = level.entities.take_mob_events();
+                ours_packets.extend(event_packets(&events, || sound_source.next_long()));
+                ours_packets.extend(sync_packets);
                 compare_packet_list(
                     &mut self.mismatches,
                     &self.show,
@@ -758,55 +782,6 @@ fn apply_flags(snapshot: &mut Snapshot, bits: &str) -> (bool, bool, bool) {
         snapshot.precise = true;
     }
     (flag(0), flag(1), flag(2))
-}
-
-/// 把这一刻每头牛的 `MobEvent` 按发生顺序换成官方的实体事件/音效包。
-/// 音效种子取自官方 `soundSeedGenerator` 的 `LegacyRandom` 序列（固定种子 12345）。
-fn event_bodies(
-    sound_source: &mut mc_bamboo_blocks::LegacyRandom,
-    events: &[(i32, Vec<mc_bamboo_blocks::entity::mob::MobEvent>)],
-) -> Vec<Vec<u8>> {
-    let mut out = Vec::new();
-    for (id, mob_events) in events {
-        for event in mob_events {
-            match event {
-                mc_bamboo_blocks::entity::mob::MobEvent::Death => {
-                    out.push(packet_body(&EntityEvent {
-                        entity_id: *id,
-                        event: 3,
-                    }));
-                }
-                mc_bamboo_blocks::entity::mob::MobEvent::Poof => {
-                    out.push(packet_body(&EntityEvent {
-                        entity_id: *id,
-                        event: 60,
-                    }));
-                }
-                mc_bamboo_blocks::entity::mob::MobEvent::Sound {
-                    sound,
-                    volume,
-                    pitch,
-                    position,
-                } => {
-                    out.push(packet_body(&Sound {
-                        sound: i32::from(sounds::sound_event(sound)),
-                        inline: None,
-                        source: sounds::NEUTRAL,
-                        x: position.x,
-                        y: position.y,
-                        z: position.z,
-                        volume: *volume,
-                        pitch: *pitch,
-                        seed: sound_source.next_long(),
-                    }));
-                }
-                mc_bamboo_blocks::entity::mob::MobEvent::Damage { .. } => {
-                    // `damage_event` 的包体按来源补齐。
-                }
-            }
-        }
-    }
-    out
 }
 
 /// 逐刻比字节：每个包单独比，长度不同或任意字节不同都记一条不一致。

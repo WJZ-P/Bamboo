@@ -142,6 +142,10 @@ pub enum EntityData {
     ///
     /// index 2, OPTIONAL_COMPONENT. `DATA_CUSTOM_NAME`.
     CustomName(Tag),
+    /// index 2，OPTIONAL_COMPONENT 为空：`CustomName` 被清掉时发这条。
+    ///
+    /// index 2, an empty OPTIONAL_COMPONENT: sent when `CustomName` is cleared.
+    NoCustomName,
     /// index 3，BOOLEAN。`DATA_CUSTOM_NAME_VISIBLE`。
     CustomNameVisible(bool),
     /// index 4，BOOLEAN。`DATA_SILENT`。
@@ -183,7 +187,7 @@ impl EntityData {
         match self {
             Self::SharedFlags(_) => 0,
             Self::AirSupply(_) => 1,
-            Self::CustomName(_) => 2,
+            Self::CustomName(_) | Self::NoCustomName => 2,
             Self::CustomNameVisible(_) => 3,
             Self::Silent(_) => 4,
             Self::NoGravity(_) => 5,
@@ -250,6 +254,10 @@ impl EntityData {
                 write_data_header(out, 2, SERIALIZER_OPTIONAL_COMPONENT);
                 write_bool(out, true);
                 name.write_network(out);
+            }
+            Self::NoCustomName => {
+                write_data_header(out, 2, SERIALIZER_OPTIONAL_COMPONENT);
+                write_bool(out, false);
             }
             Self::CustomNameVisible(visible) => {
                 write_data_header(out, 3, SERIALIZER_BOOLEAN);

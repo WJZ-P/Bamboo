@@ -758,6 +758,19 @@ const CLIENT_SYNCABLE_ATTRIBUTES: &[&str] = &[
     "minecraft:water_movement_efficiency",
 ];
 
+/// `minecraft:damage_type` 注册表 ID；顺序和配置阶段同步给客户端的表一致。
+///
+/// The `minecraft:damage_type` registry id, in the order sent to the client.
+pub fn damage_type_id(name: &str) -> Option<i32> {
+    registries::SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:damage_type")?
+        .entries
+        .iter()
+        .position(|entry| *entry == name)
+        .and_then(|id| i32::try_from(id).ok())
+}
+
 /// 这个属性 ID 要不要同步给客户端（`Attribute.isClientSyncable`）。
 ///
 /// Whether this attribute id is synced to the client.

@@ -587,10 +587,19 @@ impl EntityStore {
         Some(self.slots[row].as_ref()?.clone().into_entity())
     }
 
-    /// 只读公开数据。正在 tick 的那一个读不到。
+    /// 只读公开数据，包括这一拍刚生成、还没并进 tick 列表的实体。
+    /// 正在 tick 的那一个读不到。
+    ///
+    /// Read-only public data, including entities spawned this tick that have
+    /// not joined the tick list yet. The one currently ticking is not visible.
     pub fn public_at(&self, uid: EntityUid) -> Option<&EntityPublic> {
-        let row = *self.index.get(&uid)?;
-        Some(&self.slots[row].as_ref()?.public)
+        if let Some(&row) = self.index.get(&uid) {
+            return Some(&self.slots[row].as_ref()?.public);
+        }
+        self.pending
+            .iter()
+            .find(|row| row.public.uid == uid)
+            .map(|row| &row.public)
     }
 
     /// 改一行：拼成完整快照交给回调，再拆回两半。这样 public / state / 索引总是一致。
@@ -1013,15 +1022,23 @@ impl EntityStore {
     /// order within each entity. The sender calls this once per tick.
     pub fn take_mob_events(&mut self) -> Vec<(EntityUid, Vec<super::mob::MobEvent>)> {
         let mut out = Vec::new();
+        let take = |row: &mut EntityRow| -> Option<(EntityUid, Vec<super::mob::MobEvent>)> {
+            let super::KindState::Mob(mob) = &mut row.state.kind else {
+                return None;
+            };
+            (!mob.events.is_empty()).then(|| (row.public.uid, std::mem::take(&mut mob.events)))
+        };
         for &row in self.index.values() {
-            let Some(entry) = self.slots[row].as_mut() else {
-                continue;
-            };
-            let super::KindState::Mob(mob) = &mut entry.state.kind else {
-                continue;
-            };
-            if !mob.events.is_empty() {
-                out.push((entry.public.uid, std::mem::take(&mut mob.events)));
+            if let Some(entry) = self.slots[row].as_mut()
+                && let Some(events) = take(entry)
+            {
+                out.push(events);
+            }
+        }
+        // tick 期间新生成的实体也在这一刻发事件，按 uid 排在表里的实体之后。
+        for row in &mut self.pending {
+            if let Some(events) = take(row) {
+                out.push(events);
             }
         }
         out

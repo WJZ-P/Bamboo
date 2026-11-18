@@ -779,7 +779,7 @@ public final class MobOracle {
                 if (cow != null) {
                     cows.add(cow);
                     if (scene.packets) {
-                        addSync(level, official, cow, syncs, packets, syncFlags, tick);
+                        addSync(level, official, cow, syncs, packets, tick);
                     }
                 }
             }
@@ -787,15 +787,18 @@ public final class MobOracle {
                 if (egg[0] != tick) {
                     continue;
                 }
+                if (scene.packets) {
+                    level.eggSeed = level.entitySeeds.nextLong();
+                }
                 Cow cow = EntityTypes.COW.spawn(level, new ItemStack(Items.COW_SPAWN_EGG), null,
                         new BlockPos(egg[1], egg[2], egg[3]), EntitySpawnReason.SPAWN_ITEM_USE, true, egg[4] != 0);
-                // 构造和叫声的随机数（UUID、朝向、两次音高）换成 Bamboo 的种子重放一遍。
-                // Replay the constructor and ambient-sound draws on Bamboo's seed.
-                reseed(level, cow, 2);
+                if (!scene.packets) {
+                    reseed(level, cow, 2);
+                }
                 level.tracked.add(cow);
                 cows.add(cow);
                 if (scene.packets) {
-                    addSync(level, official, cow, syncs, packets, syncFlags, tick);
+                    addSync(level, official, cow, syncs, packets, tick);
                 }
             }
             for (Cow cow : new ArrayList<>(cows)) {
@@ -910,12 +913,11 @@ public final class MobOracle {
 
     /** 生成后中途出现的牛：这一刻发一次配对包。 */
     private static void addSync(FakeLevel level, Official official, Cow cow, List<Sync> syncs,
-            List<List<String>> packets, List<List<String>> syncFlags, int tick) {
+            List<List<String>> packets, int tick) {
         Sync sync = new Sync(level, cow, official.registries);
         syncs.add(sync);
         sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
         packets.get(tick).addAll(sync.take());
-        syncFlags.get(tick).add(flags(cow));
     }
 
     private static String jsonString(String text) {
@@ -1454,6 +1456,19 @@ public final class MobOracle {
 
         @Override
         public boolean addFreshEntity(Entity entity) {
+            // `EntityType.spawn` 在加入世界之后才叫 `playAmbientSound`。官方实体的
+            // 随机源不带种子，这里换成 Bamboo 的种子源并只重放构造时的三个数，
+            // 这样那一声的音高也是确定的（其余场景的牛仍由场景显式给种子）。
+            // `EntityType.spawn` plays the ambient sound after adding the entity.
+            // Vanilla's entity random is unseeded; replace it with Bamboo's seed
+            // source and replay only the constructor draws so the pitch is fixed.
+            if (eggSeed != null) {
+                setRandom(entity, eggSeed);
+                RandomSource random = entity.getRandom();
+                entity.setUUID(Mth.createInsecureUUID(random));
+                random.nextFloat();
+                eggSeed = null;
+            }
             return true;
         }
 
@@ -1468,6 +1483,9 @@ public final class MobOracle {
             tracked.add(entity);
             return true;
         }
+
+        /** 下一次 `addFreshEntity` 要用的种子（只在刷怪蛋场景里设）。 */
+        Long eggSeed;
 
         @Override
         public net.minecraft.world.DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {
