@@ -449,26 +449,6 @@ pub fn repair_with_xp_factor(enchantment: i32, level: i32) -> f32 {
     result
 }
 
-#[cfg(test)]
-mod repair_tests {
-    use super::*;
-
-    #[test]
-    fn silk_touch_zeroes_block_experience_but_fortune_does_not() {
-        let silk = enchantment_id("minecraft:silk_touch").unwrap();
-        let fortune = enchantment_id("minecraft:fortune").unwrap();
-        assert_eq!(block_experience_set(silk), Some(0.0));
-        assert_eq!(block_experience_set(fortune), None);
-    }
-
-    #[test]
-    fn mending_has_repair_with_xp() {
-        let id = enchantment_id("minecraft:mending").unwrap();
-        assert!(has_repair_with_xp(id), "{}", enchantment_name(id).unwrap());
-        assert_eq!(repair_with_xp_factor(id, 1), 2.0);
-    }
-}
-
 /// `Enchantment.effects["minecraft:block_experience"]` 里的 `minecraft:set` 值。
 /// 26.3 的数据包里只有精准采集写了 `0.0`（挖矿不掉经验）；时运没有这一项，
 /// `EnchantmentHelper.processBlockExperience` 保持原值。
@@ -515,4 +495,24 @@ pub fn block_experience_set(enchantment: i32) -> Option<f32> {
         .and_then(|index| values.get(index))
         .copied()
         .flatten()
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+
+    #[test]
+    fn silk_touch_zeroes_block_experience_but_fortune_does_not() {
+        let silk = enchantment_id("minecraft:silk_touch").unwrap();
+        let fortune = enchantment_id("minecraft:fortune").unwrap();
+        assert_eq!(block_experience_set(silk), Some(0.0));
+        assert_eq!(block_experience_set(fortune), None);
+    }
+
+    #[test]
+    fn mending_has_repair_with_xp() {
+        let id = enchantment_id("minecraft:mending").unwrap();
+        assert!(has_repair_with_xp(id), "{}", enchantment_name(id).unwrap());
+        assert_eq!(repair_with_xp_factor(id, 1), 2.0);
+    }
 }

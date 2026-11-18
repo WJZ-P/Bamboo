@@ -1046,16 +1046,24 @@ fn touch_player(world: &mut World, slots: &mut [ItemStack], creative: bool) {
     }
 }
 
-/// 生存挖掘：工具对了才 `getDrops` 再 `popResource`。返回掉落和之后的 `level.random` 种子。
+/// 生存挖掘的对照结果：掉落、经验球的值、之后的 `level.random` 种子。
 ///
-/// Survival mining: `getDrops` then `popResource` only with the right tool. Returns the drops and
-/// the `level.random` seed afterwards.
+/// The mining comparison result: drops, orb values, and the resulting
+/// `level.random` seed.
+pub(crate) type MinedOutcome = (Vec<(i32, i32)>, Vec<i32>, i64);
+
+/// 生存挖掘：工具对了才 `getDrops` 再 `popResource`；再按 `spawnAfterBreak`
+/// 采样矿石经验、应用工具附魔并拆成经验球。
+///
+/// Survival mining: `getDrops` then `popResource` only with the right tool,
+/// then `spawnAfterBreak` samples ore experience, applies tool enchantments
+/// and splits it into orbs.
 pub(crate) fn mined_outcome(
     seed: i64,
     state: u32,
     tool: i32,
     tool_enchantments: &[(String, i32)],
-) -> Result<(Vec<(i32, i32)>, Vec<i32>, i64), String> {
+) -> Result<MinedOutcome, String> {
     let pos = BlockPos::new(0, 64, 0);
     let mut level = PhysicsLevel::new(seed);
     level.blocks.insert(pos, BlockState(state));
