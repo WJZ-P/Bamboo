@@ -466,7 +466,7 @@ impl World {
     /// 停放着的岛没有被派出去。
     ///
     /// The invariants of plan 6.2 item 3 (debug builds, after each settle).
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn assert_island_invariants(&mut self) {
         let mut owner: std::collections::HashMap<ChunkPos, RegionId> =
             std::collections::HashMap::new();
