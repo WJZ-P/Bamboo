@@ -506,12 +506,15 @@ pub struct EntityStore {
     /// can create its tracking state at vanilla `ChunkMap.addEntity` timing.
     spawn_snapshots: BTreeMap<EntityUid, EntityPublic>,
     /// 这一刻被丢弃的生物身上还没发出去的事件（例如死亡动画结束的 `Poof`）。
-    /// 实体行已经离表，`take_mob_events` 从这里补上，顺序按 uid。
+    /// 实体行已经离表，`take_mob_events` 从这里补上，顺序按 uid。每条记着生物离场时
+    /// 所在的区块：行已经不在了，岛拆分时只能靠它知道这条事件该跟哪一边走。
     ///
     /// Events left on mobs discarded this tick (e.g. the `Poof` at the end of
     /// the death animation). Their rows are gone; `take_mob_events` appends
-    /// these in uid order.
-    departed_mob_events: BTreeMap<EntityUid, Vec<super::mob::MobEvent>>,
+    /// these in uid order. Each entry keeps the chunk the mob was in when it
+    /// left: with the row gone, an island split has nothing else to tell
+    /// which side the events belong to.
+    departed_mob_events: BTreeMap<EntityUid, (ChunkPos, Vec<super::mob::MobEvent>)>,
 }
 
 impl Default for EntityStore {
@@ -1074,7 +1077,11 @@ impl EntityStore {
                 out.push(events);
             }
         }
-        out.extend(std::mem::take(&mut self.departed_mob_events));
+        out.extend(
+            std::mem::take(&mut self.departed_mob_events)
+                .into_iter()
+                .map(|(uid, (_, events))| (uid, events)),
+        );
         out
     }
 
@@ -1085,8 +1092,13 @@ impl EntityStore {
         if let Some(mob) = entity.kind.mob()
             && !mob.events.is_empty()
         {
-            self.departed_mob_events
-                .insert(entity.id, mob.events.clone());
+            self.departed_mob_events.insert(
+                entity.id,
+                (
+                    ChunkPos::containing(entity.position.x, entity.position.z),
+                    mob.events.clone(),
+                ),
+            );
         }
     }
 
@@ -1315,17 +1327,23 @@ impl EntityStore {
                 self.spawn_snapshots.insert(uid, public);
             }
         }
-        // 被丢弃生物留下的事件也跟着实体走：键按 uid，搬走的 uid 交给新岛。
-        // Events left by discarded mobs follow their entity by uid.
+        // 被丢弃生物留下的事件按生物离场时所在的区块分：它的行已经离表，`moved` 里
+        // 不会有它的 uid（原来按 uid 分，结果是永远留在原岛）。看着它的玩家和那个区块在
+        // 同一边（视野不跨岛），同步层在那一边把事件发给他们。
+        // Events left by discarded mobs split by the chunk the mob was in when
+        // it left: its row is gone, so its uid is never among `moved` (splitting
+        // by uid left the events behind every time). The players watching it
+        // are on the same side as that chunk (no view spans islands), and that
+        // side's sync layer sends the events to them.
         let departed = std::mem::take(&mut self.departed_mob_events);
-        let moved_ids: BTreeSet<EntityUid> = moved.iter().copied().collect();
-        for (uid, events) in departed {
-            if moved_ids.contains(&uid) {
-                out.departed_mob_events.insert(uid, events);
+        for (uid, (chunk, events)) in departed {
+            if chunks.contains(&chunk) {
+                out.departed_mob_events.insert(uid, (chunk, events));
             } else {
-                self.departed_mob_events.insert(uid, events);
+                self.departed_mob_events.insert(uid, (chunk, events));
             }
         }
+        let moved_ids: BTreeSet<EntityUid> = moved.iter().copied().collect();
         let moved_iter = moved_ids.iter().copied();
         for uid in moved_iter {
             self.unindex_sub(uid);
@@ -1374,8 +1392,10 @@ impl EntityStore {
         self.preserved.append(&mut other.preserved);
         self.watched_sections.extend(other.watched_sections);
         self.wake_events.append(&mut other.wake_events);
-        self.departed_mob_events
-            .append(&mut other.departed_mob_events);
+        for (uid, entry) in std::mem::take(&mut other.departed_mob_events) {
+            let previous = self.departed_mob_events.insert(uid, entry);
+            debug_assert!(previous.is_none(), "离场生物事件的实体 ID 重复");
+        }
         for (uid, public) in std::mem::take(&mut other.spawn_snapshots) {
             let previous = self.spawn_snapshots.insert(uid, public);
             debug_assert!(previous.is_none(), "生成快照的实体 ID 重复");
@@ -1390,6 +1410,44 @@ impl EntityStore {
         self.spawn_snapshots
             .iter()
             .map(|(&uid, public)| (uid, public.chunk_position()))
+    }
+
+    /// 离场生物留下、还没交给同步层的事件：实体 ID 和生物离场时所在的区块，uid 升序。
+    /// 拆合核对用。
+    ///
+    /// Events left by departed mobs and not yet handed to the sync layer, as
+    /// uid and the chunk the mob left from, in ascending uid order; for split
+    /// checks.
+    pub fn departed_event_positions(&self) -> impl Iterator<Item = (EntityUid, ChunkPos)> + '_ {
+        self.departed_mob_events
+            .iter()
+            .map(|(&uid, (chunk, _))| (uid, *chunk))
+    }
+
+    /// 改坏确认专用：把 `other` 的离场生物事件全部挪回自己（模拟拆分时漏搬这一类）。
+    ///
+    /// Break-it checks only: move all of `other`'s departed-mob events back
+    /// here, simulating a split that leaves this class behind.
+    #[doc(hidden)]
+    pub fn reclaim_departed_events(&mut self, other: &mut Self) {
+        self.departed_mob_events
+            .append(&mut std::mem::take(&mut other.departed_mob_events));
+    }
+
+    /// 测试专用：直接放一条离场生物的事件（平时这张表只在实体阶段到同步阶段之间有
+    /// 东西，tick 边界上是空的；拆合的测试要它在拆分那一刻不空）。
+    ///
+    /// Test only: add one departed-mob entry directly (the table normally
+    /// holds entries only between the entity phase and the sync phase and is
+    /// empty at a tick boundary; split tests need it non-empty at the split).
+    #[doc(hidden)]
+    pub fn keep_departed_events_at(
+        &mut self,
+        uid: EntityUid,
+        chunk: ChunkPos,
+        events: Vec<super::mob::MobEvent>,
+    ) {
+        self.departed_mob_events.insert(uid, (chunk, events));
     }
 
     /// 改坏确认专用：把 `other` 的生成快照全部挪回自己（模拟拆分时漏搬这一类）。
@@ -1641,6 +1699,40 @@ mod tests {
         store.begin_tick();
         assert!(store.take_chunk(ChunkPos::new(0, 0)).is_err());
         store.end_tick();
+    }
+
+    /// 离场生物留下的事件在岛拆分时按生物离场的区块分，合并时并回来；取走时仍按 uid
+    /// 升序。它的行已经不在表里，按「搬走的 uid」分的话永远留在原岛。
+    ///
+    /// Events left by departed mobs split by the chunk the mob left from and
+    /// merge back; they still come out in uid order. The row is gone, so
+    /// splitting by moved uids would always leave them behind.
+    #[test]
+    fn departed_mob_events_split_by_the_chunk_the_mob_left_from() {
+        use crate::entity::mob::MobEvent;
+
+        let mut store = EntityStore::default();
+        let (here, there) = (ChunkPos::new(0, 0), ChunkPos::new(40, 0));
+        store.keep_departed_events_at(9, here, vec![MobEvent::Death]);
+        store.keep_departed_events_at(5, there, vec![MobEvent::Poof]);
+        store.keep_departed_events_at(7, there, vec![MobEvent::Hearts]);
+        let mut far = store
+            .split_off(&BTreeSet::from([there]), 1)
+            .expect("tick 边界上可以拆");
+        let positions = |store: &EntityStore| -> Vec<(EntityUid, ChunkPos)> {
+            store.departed_event_positions().collect()
+        };
+        assert_eq!(positions(&store), [(9, here)]);
+        assert_eq!(positions(&far), [(5, there), (7, there)]);
+        let taken: Vec<EntityUid> = far
+            .take_mob_events()
+            .into_iter()
+            .map(|(uid, _)| uid)
+            .collect();
+        assert_eq!(taken, [5, 7]);
+        far.keep_departed_events_at(5, there, vec![MobEvent::Poof]);
+        store.absorb(far);
+        assert_eq!(positions(&store), [(5, there), (9, here)]);
     }
 
     /// 参照 `BlockEntities::take_chunk`：盒子能跨线程搬，实体按 uid 排序，

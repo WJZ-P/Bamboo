@@ -149,6 +149,9 @@ pub(crate) enum IslandPart {
     /// 实体表里还没交给同步层的生成快照（这一刻同步之后才生成的实体，下一刻按它建
     /// 跟踪状态）。跟着实体走。
     SpawnSnapshots,
+    /// 实体表里离场生物留下、还没交给同步层的事件（实体行已经离表）。按生物离场时
+    /// 所在的区块走。
+    DepartedMobEvents,
     /// 实体和玩家的配对。
     EntityTracking,
     /// 上层内容的待存标记。
@@ -178,7 +181,7 @@ pub(crate) enum IslandPart {
 impl IslandPart {
     /// 全部类别，测试逐类改坏用。
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 24] = [
+    pub(crate) const ALL: [Self; 25] = [
         Self::Chunks,
         Self::TickLevels,
         Self::BlockTicks,
@@ -191,6 +194,7 @@ impl IslandPart {
         Self::Books,
         Self::Entities,
         Self::SpawnSnapshots,
+        Self::DepartedMobEvents,
         Self::EntityTracking,
         Self::Dirty,
         Self::LightChanges,
@@ -406,6 +410,9 @@ impl Region {
         };
         if !moves(IslandPart::SpawnSnapshots) {
             self.entities.reclaim_spawn_snapshots(&mut entities);
+        }
+        if !moves(IslandPart::DepartedMobEvents) {
+            self.entities.reclaim_departed_events(&mut entities);
         }
         let moved_entities: BTreeSet<i32> = entities.ids().into_iter().collect();
         let entity_tracking = if moves(IslandPart::EntityTracking) {

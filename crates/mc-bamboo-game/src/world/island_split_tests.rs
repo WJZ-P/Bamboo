@@ -764,6 +764,13 @@ pub(super) fn misplaced(
             .any(|(_, chunk)| wrong_chunk(chunk)),
     );
     check(
+        "DepartedMobEvents",
+        region
+            .entities
+            .departed_event_positions()
+            .any(|(_, chunk)| wrong_chunk(chunk)),
+    );
+    check(
         "EntityTracking",
         region
             .entity_tracking
@@ -1140,6 +1147,17 @@ fn leaving_any_class_behind_on_a_split_is_reported() {
                     ),
                     mc_bamboo_protocol::item::ItemStack::new(1, 1),
                 ));
+
+            // 这一刻实体阶段丢弃的生物留下的事件：行已经离表，同步层还没取走。平时 tick
+            // 边界上这张表是空的，这里直接放一条。
+            // Events left by a mob discarded in this tick's entity phase: the
+            // row is gone and the sync layer has not taken them yet. The table
+            // is normally empty at a tick boundary, so add one directly.
+            island.region.entities.keep_departed_events_at(
+                i32::MAX - 7,
+                inside,
+                vec![mc_bamboo_blocks::entity::mob::MobEvent::Poof],
+            );
 
             island
                 .region

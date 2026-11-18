@@ -279,6 +279,22 @@ fn prepare_pair(multi: &mut Scene, control: &mut Scene, sand_delay: i32) {
                 .or_insert(mc_bamboo_world::light::LightChanges { sky: 1, block: 0 });
             region.block_changes.changed.push(at(center, 0, Y, 0));
         }
+        // 离场生物留下的事件平时在 tick 边界上也是空的（实体阶段放进去、同一刻的同步阶段
+        // 取走）：每组放一条，记在这一组的中心区块上。实体号用不到的大数，没有人看着它，
+        // 下一刻同步层取走时什么都不发。
+        // Departed-mob events are empty at a tick boundary too (kept in the
+        // entity phase, taken by the same tick's sync phase): one per group,
+        // recorded on the group's centre chunk. The ids are large unused
+        // numbers nobody watches, so the next sync takes them and sends nothing.
+        for (group, &center) in scene.centers.clone().iter().enumerate() {
+            region_at(&mut scene.server.world, center)
+                .entities
+                .keep_departed_events_at(
+                    i32::MAX - 16 - group as i32,
+                    center,
+                    vec![mc_bamboo_blocks::entity::mob::MobEvent::Poof],
+                );
+        }
     }
     let world = &mut multi.server.world;
     let partition = world.master.host.partition_mut().expect("多岛开着");
@@ -441,10 +457,10 @@ fn runtime_splits_and_merges_keep_every_group_as_on_one_island() {
     });
 }
 
-/// 改坏确认：运行时拆岛漏搬任何一类（24 类），按组拼指纹时都要报出来（那一组的东西
+/// 改坏确认：运行时拆岛漏搬任何一类（25 类），按组拼指纹时都要报出来（那一组的东西
 /// 留在了别的岛上），或者之后某一刻的内容对不上。
 ///
-/// Break-it check: leaving any of the 24 classes behind on a run-time split
+/// Break-it check: leaving any of the 25 classes behind on a run-time split
 /// must be caught (that group's content stays on another island) or show
 /// up as a content difference later.
 #[test]
