@@ -733,10 +733,16 @@ Rust 不能安全地杀线程，也不用 `unsafe`。判死时线程池把那条
 - **建议（不做）**：某些要整个世界的命令其实只涉及两三个岛，可以在命令解析阶段按范围
   缩到涉及的岛；但 4.5 的表是已定的范围语义，这一步不改。
 - **验收**：`fmt --check`、`clippy --workspace --all-targets` 0 警告；
-  `cargo test -p mc-bamboo-game` 缺省和 `BAMBOO_TEST_LOADED=1` 各一遍；
-  `cargo test -p mc-bamboo-server`；`cargo test -p mc-bamboo-blocks`；hy4 探针两种配置
-  （端口 26500 以上）各一次；齐步 / 精确模式逐位一致照旧（`world/island_split_tests.rs`
-  的拆合不改内容对照、全量对照、23 类改坏确认全部保留，一条没删、没放宽比较）。
+  `cargo test -p mc-bamboo-game` 缺省、`BAMBOO_TEST_LOADED=1`、显式精确模式各一遍
+  （各 1138 个 0 失败）；`cargo test -p mc-bamboo-server`（全过）；hy4 探针两种配置
+  （端口 26510 / 26520）各 760/760、正常关服、`world-dir` 通过；齐步 / 精确模式逐位
+  一致照旧（`world/island_split_tests.rs` 的拆合不改内容对照、全量对照、23 类改坏确认
+  全部保留，一条没删、没放宽比较）。
+- **10 分钟 `islands-roam`**（02:46–02:56，40 人、全量对照和不变量断言、负载 4.3–15.4）：
+  0 崩溃 / 0 死锁 / 0 不变量失败 / 0 判死 / 0 丢刻；拆分 11 次 max **17.28 ms**
+  （第 11 步一小时 162 ms）、整个世界命令 11 次拼 max 5.97 / 拆 max 13.32 ms
+  （原 125 / 248 ms）、命令本身 max 0.092 ms；`island_split_deferrals` 全部 19 份报告
+  都是 0，新增的推迟没让忙岛一直拆不开。数字与口径见 `docs/profiling.md` 18.2。
 
 ### 6.1 单岛阶段（第 0–7 步）怎么验
 

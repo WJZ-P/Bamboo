@@ -2137,6 +2137,15 @@ cargo test -p mc-bamboo-game --release --lib island_split_bench -- \
 - **拆回去不是重新算连通性**：`Islands::unify` 记下每个岛的区块集合、玩家集合、四个
   随机源和时钟差，`divide` 原样按这些名单拆回去（`split_off_island_restoring`），分区器
   不参与。分段计时里没有连通性那一段，耗时全在各类数据按位置 / 按玩家的整批取放。
+- **10 分钟 `islands-roam` 端到端复核**（第 12 步收尾，02:46–02:56，40 名假玩家、
+  缺省配置、`BAMBOO_PROFILE_ISLANDS=2` 全程全量对照和不变量断言、负载 4.3–15.4）：
+  19 份报告、11407 刻、0 崩溃 / 0 死锁 / 0 不变量失败 / 0 判死 / 0 丢刻；
+  合并 15 次（mean 3.11、max 11.39 ms）、拆分 11 次（mean 4.88、max **17.28 ms**，
+  第 11 步一小时里最大 162 ms）、整个世界的命令 11 次（拼 mean 1.15 / max 5.97，
+  命令本身 mean 0.049 / max 0.092，拆 mean 2.15 / max **13.32 ms**，第 11 步一小时里
+  125 / 248 ms）；`island_split_deferrals` 19 份报告全是 0，说明新增的推迟没有让忙岛
+  一直拆不开（第 11 步那个坑）。已加载区块中位数 21480。汇总见
+  `.measure/roam/roam-10min/summary.txt`（工作树内的测量产物，git 忽略）。
 
 ### 18.3 拆回去那几十毫秒花在哪
 
