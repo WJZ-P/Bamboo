@@ -150,6 +150,9 @@ impl Goal {
 
     /// `requiresUpdateEveryTick`。
     pub const fn every_tick(&self) -> bool {
+        // 字节码逐个核过 `Goal.requiresUpdateEveryTick`：
+        // Float/RandomLookAround/MeleeAttack/MoveToBlock/DoorInteract 为真，
+        // LookAtPlayer/RandomStroll/LookAround 的其它目标为假。
         matches!(
             self,
             Self::Float | Self::RandomLookAround { .. } | Self::MeleeAttack { .. }
@@ -274,60 +277,70 @@ impl GoalSelector {
         }
     }
 
-    /// `Zombie.registerGoals` + `addBehaviourGoals`。官方优先级按字节码：
-    /// 2 长矛（无 `KINETIC_WEAPON` 时恒不启动）、3 近战、4 海龟蛋、
-    /// 6 穿村（无 POI 时恒不启动）、7 避水漫游、8 看玩家/随便看。
-    /// `BreakDoorGoal(1)` 只在 `setCanBreakDoors(true)` 时插入，见 `Mob::set_can_break_doors`。
+    /// `Zombie.registerGoals` + `addBehaviourGoals`。
+    /// `GoalSelector.availableGoals` 是 `ObjectLinkedOpenHashSet`：按 `addGoal`
+    /// 的调用顺序迭代，不按优先级排。官方字节码里 `registerGoals` 先注册
+    /// `(4, ZombieAttackTurtleEggGoal)`、`(8, LookAtPlayerGoal)`、
+    /// `(8, RandomLookAroundGoal)`，随后 `addBehaviourGoals` 依次注册
+    /// `(2, SpearUseGoal)`、`(3, ZombieAttackGoal)`、
+    /// `(6, MoveThroughVillageGoal)`、`(7, WaterAvoidingRandomStrollGoal)`。
+    /// 近战第一次启动前，LOOK 还没被锁住，两个看的目标先各取一次 `nextFloat`；
+    /// 按优先级排序会让近战先锁 LOOK，随机源少两次取数。
+    /// `BreakDoorGoal(1)` 只在 `setCanBreakDoors(true)` 时追加到末尾。
     pub fn zombie(_navigation: &mut Navigation) -> Self {
         let wrap = |priority, goal| WrappedGoal {
             priority,
             running: false,
             goal,
         };
+        let turtle_egg = wrap(4, Goal::TurtleEgg { speed: 1.0 });
+        let look = wrap(
+            8,
+            Goal::LookAtPlayer {
+                look_distance: 8.0,
+                probability: 0.02,
+                look_at: None,
+                look_time: 0,
+            },
+        );
+        let look_around = wrap(
+            8,
+            Goal::RandomLookAround {
+                rel_x: 0.0,
+                rel_z: 0.0,
+                look_time: 0,
+            },
+        );
+        let goals = vec![
+            turtle_egg,
+            look,
+            look_around,
+            wrap(2, Goal::Unavailable("SpearUseGoal")),
+            wrap(
+                3,
+                Goal::MeleeAttack {
+                    speed: 1.0,
+                    ticks_until_next_attack: 0,
+                    ticks_until_path_recalc: 0,
+                    pathed_target: Vec3::default(),
+                    raise_arm_ticks: 0,
+                    last_can_use_check: 0,
+                },
+            ),
+            wrap(6, Goal::Unavailable("MoveThroughVillageGoal")),
+            wrap(
+                7,
+                Goal::Stroll {
+                    speed: 1.0,
+                    interval: 120,
+                    probability: 0.001,
+                    wanted: Vec3::default(),
+                    force_trigger: false,
+                },
+            ),
+        ];
         Self {
-            goals: vec![
-                wrap(2, Goal::Unavailable("SpearUseGoal")),
-                wrap(
-                    3,
-                    Goal::MeleeAttack {
-                        speed: 1.0,
-                        ticks_until_next_attack: 0,
-                        ticks_until_path_recalc: 0,
-                        pathed_target: Vec3::default(),
-                        raise_arm_ticks: 0,
-                        last_can_use_check: -1_000_000,
-                    },
-                ),
-                wrap(4, Goal::TurtleEgg { speed: 1.0 }),
-                wrap(6, Goal::Unavailable("MoveThroughVillageGoal")),
-                wrap(
-                    7,
-                    Goal::Stroll {
-                        speed: 1.0,
-                        interval: 120,
-                        probability: 0.001,
-                        wanted: Vec3::default(),
-                        force_trigger: false,
-                    },
-                ),
-                wrap(
-                    8,
-                    Goal::LookAtPlayer {
-                        look_distance: 8.0,
-                        probability: 0.02,
-                        look_at: None,
-                        look_time: 0,
-                    },
-                ),
-                wrap(
-                    8,
-                    Goal::RandomLookAround {
-                        rel_x: 0.0,
-                        rel_z: 0.0,
-                        look_time: 0,
-                    },
-                ),
-            ],
+            goals,
             locked: [None; 4],
             disabled: [false; 4],
         }
@@ -386,7 +399,8 @@ impl GoalSelector {
         }
     }
 
-    /// `setCanBreakDoors(true)` 时官方在优先级 1 插入 `BreakDoorGoal`。
+    /// `setCanBreakDoors(true)` 时官方在优先级 1 追加 `BreakDoorGoal`。
+    /// `ObjectLinkedOpenHashSet` 的新元素排在末尾，移除后再加仍排在末尾。
     pub fn insert_break_door(&mut self) {
         if self
             .goals
@@ -400,6 +414,17 @@ impl GoalSelector {
             running: false,
             goal: Goal::BreakDoor,
         });
+    }
+
+    /// `setCanBreakDoors(false)` 时官方 `removeGoal(BreakDoorGoal)`。
+    pub fn remove_break_door(&mut self) {
+        self.goals
+            .retain(|wrapped| !matches!(wrapped.goal, Goal::BreakDoor));
+    }
+
+    /// 对拍的改坏确认用：把目标按优先级排序（官方按注册顺序）。
+    pub fn sort_by_priority_for_oracle(&mut self) {
+        self.goals.sort_by_key(|wrapped| wrapped.priority);
     }
 
     /// `setControlFlag`。
@@ -582,6 +607,8 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 if mob.no_action_time >= 100 {
                     return false;
                 }
+                // 官方 `RandomStrollGoal.canUse` 用 `nextInt(reducedTickDelay(interval))`；
+                // 牛和僵尸都用 120，所以是 `nextInt(60)`。
                 if me.random.next_int_bounded(reduced_tick_delay(*interval)) != 0 {
                     return false;
                 }
@@ -618,15 +645,20 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::MeleeAttack {
             last_can_use_check, ..
         } => {
-            // 官方 canUse 的 20 刻冷却；到点才查目标、算一次路径。
+            // 官方 `lastCanUseCheck` 初值是 0：第一个满刻（1001）就允许，
+            // 之后每 20 刻一次。Bamboo 之前给了一个很大的负数，语义等价，
+            // 但 `gameTime - last` 用 long 减法，这里按官方改成初值 0。
             let now = ctx.blocks().game_time();
-            if now.wrapping_sub(*last_can_use_check) < 20 {
+            if now - *last_can_use_check < 20 {
                 return false;
             }
             *last_can_use_check = now;
             let Some(target) = target_player(mob, ctx) else {
                 return false;
             };
+            if !target.alive {
+                return false;
+            }
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation
                 .create_path(ctx.blocks(), &nav, BlockPos::containing(target.position), 0)
@@ -795,11 +827,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             *ticks_until_next_attack = 0;
             *ticks_until_path_recalc = 0;
             *raise_arm_ticks = 0;
-            if let Some(target) = target_player(mob, ctx) {
-                let nav = living::nav_mob(me, mob, ctx.blocks());
-                mob.navigation
-                    .move_to_entity(ctx.blocks(), &nav, target.position, 1.0, 0);
-            }
+            mob.aggressive = true;
         }
         Goal::HurtByTarget { timestamp } => {
             *timestamp = mob.last_hurt_by_mob_timestamp;
@@ -1005,6 +1033,8 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 30.0,
             );
             *ticks_until_path_recalc = (*ticks_until_path_recalc - 1).max(0);
+            // 官方 `MeleeAttackGoal.tick`：三个短路串行，
+            // `nextFloat` 只在「pathed 非零且目标离它 < 1」时被求值。
             if *ticks_until_path_recalc == 0
                 && (*pathed_target == Vec3::default()
                     || target.position.distance_to_sqr(*pathed_target) >= 1.0
@@ -1449,6 +1479,8 @@ pub(crate) fn land_random_pos(
 
 /// `Mob.getTarget()` 在 Bamboo 里只可能是本岛玩家（别的生物还没做目标实体）。
 fn target_player(mob: &Mob, ctx: &dyn EntityCtx) -> Option<PlayerView> {
+    // 官方 `TargetingConditions.forCombat().test` 的视线要求由
+    // `NearestAttackableTargetGoal` 在选择目标时已判；近战目标只看活着、非旁观/创造。
     mob.target
         .and_then(|uid| player_by_uid(ctx.blocks(), uid))
         .filter(|player| player.alive && !player.spectator && !player.creative)
@@ -1493,14 +1525,30 @@ fn nearest_attackable(
 }
 
 /// `PathfinderMob.isWithinMeleeAttackRange`：用实体交互范围算的方形距离。
-fn within_melee_range(me: &Entity, mob: &Mob, player: PlayerView) -> bool {
-    let reach = mob
-        .attributes
-        .value(mc_bamboo_data::registries::attribute::ENTITY_INTERACTION_RANGE)
-        + 1.0;
-    let dx = (me.position.x - player.position.x).abs();
-    let dz = (me.position.z - player.position.z).abs();
-    dx < reach && dz < reach && (me.position.y - player.position.y).abs() < 2.0
+fn within_melee_range(me: &Entity, _mob: &Mob, player: PlayerView) -> bool {
+    // `Mob.DEFAULT_ATTACK_REACH = sqrt(2.04f) - 0.6f`（26.3 字节码）。
+    // 官方用 `getAttackBoundingBox(reach).intersects(target.getHitbox())`，
+    // 这里按双方 Aabb 膨胀后的相交判定，而不是旧的「交互范围 + 1」方格。
+    let reach = 2.039_999_961_853_027_3_f64.sqrt() - f64::from(0.6_f32);
+    let (width, height) = _mob.dimensions();
+    let half = f64::from(width) / 2.0;
+    let ours = crate::shape::Aabb::new(
+        me.position.x - half - reach,
+        me.position.y - reach,
+        me.position.z - half - reach,
+        me.position.x + half + reach,
+        me.position.y + f64::from(height) + reach,
+        me.position.z + half + reach,
+    );
+    let theirs = crate::shape::Aabb::new(
+        player.position.x - 0.3,
+        player.position.y,
+        player.position.z - 0.3,
+        player.position.x + 0.3,
+        player.position.y + 1.8,
+        player.position.z + 0.3,
+    );
+    ours.intersects(theirs)
 }
 
 /// `FleeSunGoal.getHidePos`：10 次随机采样，找看不见天且路径代价小于 0 的格子。

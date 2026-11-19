@@ -358,8 +358,6 @@ public final class MobOracle {
         boolean raining;
         boolean brightOutside = true;
         boolean monstersBurn = true;
-        /** 场景里的实体是否跑 `finalizeSpawn`（随机装备等取数）。 */
-        boolean finalizeSpawn;
         /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
         boolean noOtherEntities = true;
 
@@ -1755,30 +1753,6 @@ public final class MobOracle {
                 cow.tick();
             }
             level.tracked.removeIf(Entity::isRemoved);
-            // 实体 tick 里也会生成实体（繁殖的幼崽和经验球），在这一刻收齐。
-            // Entity ticks also spawn things (calves, orbs); collect them after the ticks.
-            if (scene.drops) {
-                // 官方先构造幼崽再构造经验球，所以按实体 ID 排序后就是构造顺序；
-                // Bamboo 也按这个顺序分配 ID 和种子。
-                level.spawned.sort(java.util.Comparator.comparingInt(Entity::getId));
-                for (Entity born : level.spawned) {
-                    level.reseedBorn(born);
-                    spawns.get(tick).add(spawnJson(born));
-                    if (born instanceof Cow) {
-                        cows.add((Cow) born);
-                        level.tracked.add(born);
-                    }
-                    if (scene.packets) {
-                        Sync sync = new Sync(level, born, official.registries);
-                        syncs.add(sync);
-                        sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
-                        packets.get(tick).addAll(sync.take());
-                    }
-                }
-                level.spawned.clear();
-                level.newbornCows.clear();
-            }
-            level.tracked.removeIf(Entity::isRemoved);
             line.append(',').append(stepJson(cows));
             if (scene.packets) {
                 // 官方 `ChunkMap.removeEntity` 在实体被丢弃时发给所有观察者。
@@ -2038,10 +2012,6 @@ public final class MobOracle {
             }
             // `Mob.finalizeSpawn` 的取数顺序按官方；场景关掉时和 Bamboo 的
             // 显式构造（不跑 finalize）一致。
-            if (scene.finalizeSpawn) {
-                mob.finalizeSpawn(level, level.getCurrentDifficultyAt(mob.blockPosition()),
-                        EntitySpawnReason.COMMAND, null);
-            }
             mobs.add(mob);
             level.tracked.add(mob);
         }

@@ -913,6 +913,10 @@ impl Report {
                     let id = ids.last().copied().unwrap_or(0);
                     world.with_entity_mut(id, &mut |entity| {
                         if let Some(mob) = entity.kind.mob_mut() {
+                            if matches!(break_test, Some("zombie_goal_order")) {
+                                // 改坏确认：按优先级排序会打乱官方注册顺序。
+                                mob.goals.sort_by_priority_for_oracle();
+                            }
                             match break_test {
                                 Some("zombie_speed") => {
                                     mob.attributes.set_base_for_oracle(

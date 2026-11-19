@@ -642,10 +642,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     {
         timing::span!(Goals);
         // 官方 `Mob.serverAiStep`：两个选择器共用同一个隔刻判断，先 target 后 goal。
+        // `tickCount` 是实体自己的 tick 数；`id` 用网络实体 ID。
         let mut goals = std::mem::take(&mut mob.goals);
         let mut targets = std::mem::take(&mut mob.target_goals);
-        // 官方 `(tickCount + id) % 2 == 0 || tickCount <= 1` 才跑完整选择器；
-        // `id` 用 `getId()`，Bamboo 的 `Entity.id` 和它一致。
         let phase = me.tick_count.wrapping_add(me.id);
         if phase % 2 != 0 && me.tick_count > 1 {
             targets.tick_running(false, me, mob, ctx);
