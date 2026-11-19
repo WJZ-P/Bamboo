@@ -199,10 +199,13 @@ pub(crate) fn log_player_broadcast(trusted: bool, chat_type_id: i32, name: &str,
 
 /// `client_command`：`RequestStats` 回 `award_stats`；`PerformRespawn` 走官方
 /// `ServerGamePacketListenerImpl.handleClientCommand` 的死亡重生入口
-/// （血量大于 0 时直接忽略）。其他动作忽略。`chat-join.md` 第 4 节。
+/// （血量大于 0 时直接忽略，所以已经重生后再发一次不会重生第二次）。
+/// 其他动作忽略。`chat-join.md` 第 4 节。
 ///
 /// `client_command`: `RequestStats` answers with `award_stats`; a
-/// `PerformRespawn` while dead runs the official respawn path. Others are ignored.
+/// `PerformRespawn` while dead runs the official respawn path (health > 0
+/// ignores it, so a repeat after respawning cannot respawn twice). Others are
+/// ignored.
 pub(crate) fn on_client_command(region: &mut Region, id: PlayerId, action: ClientCommandKind) {
     if action == ClientCommandKind::RequestStats {
         region.links.send(id, &AwardStats);

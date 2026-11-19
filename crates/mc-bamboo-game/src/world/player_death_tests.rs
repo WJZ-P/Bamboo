@@ -7,7 +7,7 @@ use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{gamerules, items, packets::play::clientbound};
 use mc_bamboo_protocol::{
     item::ItemStack,
-    packet::play::{ClientCommandKind, GameMode, PlayRequest},
+    packet::play::{ClientCommandKind, GameEvent, GameMode, PlayRequest},
 };
 
 use super::{
@@ -91,8 +91,58 @@ fn a_player_death_drops_inventory_experience_and_shows_the_death_screen() {
     assert!(orbs > 0, "等级 9 掉 63 点经验，拆成球");
 }
 
+/// 官方 `MinecraftServer.onGameRuleChanged`：`/gamerule immediate_respawn` 改动时
+/// 给全部玩家发一个 `game_event(IMMEDIATE_RESPAWN, 1)`，进服时规则值进 login 包的
+/// `showDeathScreen`；规则本身不让服务端自己重生。
+///
+/// Vanilla `MinecraftServer.onGameRuleChanged`: changing
+/// `/gamerule immediate_respawn` broadcasts `game_event(IMMEDIATE_RESPAWN, 1)`
+/// to everyone, and the login packet carries the value as `showDeathScreen`.
+/// The rule itself never makes the server respawn on its own.
 #[test]
-fn keep_inventory_and_immediate_respawn_keep_everything() {
+fn the_immediate_respawn_rule_is_a_client_notification() {
+    let mut server = Harness::new(2);
+    let client = server.join_and_settle("Kitten");
+    server
+        .region()
+        .players
+        .get_mut(&client.id)
+        .expect("玩家")
+        .permission_level = 4;
+    server.tick();
+    let _ = client.take_frames();
+    server.request(
+        &client,
+        PlayRequest::unsigned_command("gamerule immediate_respawn true".to_owned()),
+    );
+    server.tick();
+    let frames = client.take_frames();
+    let events = frames_with_id(&frames, clientbound::GAME_EVENT);
+    let changed: Vec<_> = events
+        .iter()
+        .filter(|frame| {
+            frame.body.first() == Some(&GameEvent::IMMEDIATE_RESPAWN)
+                && frame.body.get(1..5) == Some(&1.0f32.to_be_bytes())
+        })
+        .collect();
+    assert_eq!(changed.len(), 1, "规则改动通知了一次客户端");
+    assert!(
+        frames_with_id(&frames, clientbound::RESPAWN).is_empty(),
+        "改规则没有让人重生"
+    );
+}
+
+/// 规则开着、客户端不发 PERFORM_RESPAWN：玩家保持死亡（官方客户端收到
+/// `player_combat_kill` 才会自己发这个包，服务端不主动重生）。
+/// 收到一次 PERFORM_RESPAWN 后正常重生；再发一次被忽略（血量 > 0）。
+/// `keepInventory` 打开时物品栏、经验都原样留下。
+///
+/// With the rule on and no client PERFORM_RESPAWN, the player stays dead
+/// (the official client sends that packet on `player_combat_kill`; the server
+/// never respawns on its own). One PERFORM_RESPAWN respawns normally; a
+/// second is ignored (health > 0). `keepInventory` keeps the inventory and XP.
+#[test]
+fn keep_inventory_and_immediate_respawn_wait_for_the_client_packet() {
     let mut server = Harness::new(2);
     rule(&mut server, gamerules::KEEP_INVENTORY, "true");
     rule(&mut server, gamerules::IMMEDIATE_RESPAWN, "true");
@@ -114,31 +164,69 @@ fn keep_inventory_and_immediate_respawn_keep_everything() {
     }
     server.request(&client, PlayRequest::unsigned_command("kill @s".to_owned()));
     server.tick();
-    let frames = client.take_frames();
+    let dead_frames = client.take_frames();
     assert_eq!(
-        frames_with_id(&frames, clientbound::RESPAWN).len(),
+        frames_with_id(&dead_frames, clientbound::PLAYER_COMBAT_KILL).len(),
         1,
-        "immediate_respawn 当场重生"
+        "死亡界面包"
     );
-    let region = server.region();
-    let player = &region.players[&client.id];
-    assert!(!player.dead, "已经重生");
-    assert!(!player.awaiting_respawn);
-    assert_eq!(player.health.health, 20.0);
-    assert_eq!(player.experience.level, 5);
-    assert_eq!(player.inventory.slots[36].item, items::STONE);
+    assert!(
+        frames_with_id(&dead_frames, clientbound::RESPAWN).is_empty(),
+        "规则开着也不能自己重生"
+    );
+    // 客户端不发就一直是死的：再多跑几刻也不会重生。
+    for _ in 0..3 {
+        server.tick();
+        assert!(
+            frames_with_id(&client.take_frames(), clientbound::RESPAWN).is_empty(),
+            "没有 PERFORM_RESPAWN 就没有重生"
+        );
+    }
+    let dead = &server.region().players[&client.id];
+    assert!(dead.dead, "仍然死亡");
+    assert!(dead.awaiting_respawn, "仍在等客户端的包");
+    assert_eq!(dead.health.health, 0.0);
+
+    let perform = || PlayRequest::ClientCommand {
+        action: ClientCommandKind::PerformRespawn,
+    };
+    server.request(&client, perform());
+    server.tick();
+    let respawned = client.take_frames();
     assert_eq!(
-        region
-            .entities
-            .iter_public()
-            .filter(|public| matches!(
-                public.kind,
-                mc_bamboo_blocks::entity::KindPublic::Item { .. }
-            ))
-            .count(),
-        0,
-        "keepInventory 不掉落"
+        frames_with_id(&respawned, clientbound::RESPAWN).len(),
+        1,
+        "PERFORM_RESPAWN 触发一次重生"
     );
+    {
+        let region = server.region();
+        let player = &region.players[&client.id];
+        assert!(!player.dead, "已经重生");
+        assert!(!player.awaiting_respawn);
+        assert_eq!(player.health.health, 20.0);
+        assert_eq!(player.experience.level, 5);
+        assert_eq!(player.inventory.slots[36].item, items::STONE);
+        assert_eq!(
+            region
+                .entities
+                .iter_public()
+                .filter(|public| matches!(
+                    public.kind,
+                    mc_bamboo_blocks::entity::KindPublic::Item { .. }
+                ))
+                .count(),
+            0,
+            "keepInventory 不掉落"
+        );
+    }
+    // 已经重生后再发一次：官方 `handleClientCommand` 在血量 > 0 时直接忽略。
+    server.request(&client, perform());
+    server.tick();
+    assert!(
+        frames_with_id(&client.take_frames(), clientbound::RESPAWN).is_empty(),
+        "血量大于 0 时 PERFORM_RESPAWN 被忽略"
+    );
+    assert!(!server.region().players[&client.id].dead, "还在存活状态");
 }
 
 #[test]
