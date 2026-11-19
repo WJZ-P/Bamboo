@@ -65,7 +65,9 @@ pub(crate) fn tick(region: &mut Region) {
         // `LivingEntity.baseTick` 也递减 hurtTime；只有 `isAlive()` 为真才
         // 跑 `tickRegeneration` / `FoodData.tick`。
         player.health.tick_cooldowns();
-        if player.dead {
+        // 等出生点区块就绪时不跑玩家 tick、回血和饥饿。
+        // No player tick, regeneration or food while spawn chunks are pending.
+        if player.dead || player.spawn_pending.is_some() {
             continue;
         }
         if difficulty == 0 && natural_regen {

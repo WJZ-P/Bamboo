@@ -61,6 +61,10 @@ impl TestServer {
     pub async fn start(config: ServerConfig) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let config = ServerConfig {
+            spawn_radius: Some(0),
+            ..config
+        };
         let server = Server::new(listener, config).unwrap();
         let handle = server.handle();
         let (stop, stopped) = oneshot::channel();

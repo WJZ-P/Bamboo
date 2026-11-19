@@ -154,6 +154,12 @@ pub struct WorldConfig {
     ///
     /// The world directory. `None` disables saving (tests, oracle, load tests).
     pub world_dir: Option<PathBuf>,
+    /// 启动时给世界规则表里的一条整数规则定值（只用 `respawn_radius`）。
+    /// `None` 用官方缺省；需要固定出生点的嵌入式测试显式设成 0。
+    /// An optional initial integer game rule value for the world (only
+    /// `respawn_radius` is used). `None` keeps the official default; embedded
+    /// tests that need a fixed spawn explicitly set 0.
+    pub spawn_radius: Option<i32>,
     /// 世界生成参数（种子、世界类型、flat 预设、是否生成结构）。
     /// 默认超平坦、种子 0，保持嵌入式测试的现有行为。
     ///
@@ -191,6 +197,7 @@ impl Default for WorldConfig {
             island_dead_timeout: crate::island::default_island_dead_timeout(),
             world_dir: None,
             world_gen: crate::world_options::WorldGenConfig::default(),
+            spawn_radius: None,
             broadcast_console_to_ops: true,
             bench: None,
         }
@@ -484,7 +491,18 @@ impl World {
         // 3.3). `level.dat` has no modelled seed field, so `apply_level_data`
         // leaves it alone.
         global.state_mut().seed = world_gen.seed;
+        if let Some(radius) = config.spawn_radius {
+            let _ = global.rules_mut().assign(
+                mc_bamboo_data::gamerules::RESPAWN_RADIUS,
+                &radius.to_string(),
+            );
+        }
         global.random_sequences = mc_bamboo_loot::RandomSequences::new(world_gen.seed);
+        // `ServerLevel.isFlat()` / `ChunkGenerator.getSeaLevel()` 和落脚点搜索
+        // 都从发布的全局快照读这份参数（存档优先，见上面的 world_gen）。
+        // `ServerLevel.isFlat()`, `ChunkGenerator.getSeaLevel()` and the landing
+        // search all read this from the published snapshot (a save wins).
+        global.world_gen = world_gen.clone();
         // 全新世界（没有 level.dat）按官方 `MinecraftServer.setInitialSpawn` 选出生点；
         // 读档时用存档里的出生点（已由 `apply_level_data` 套回）。超平坦保持不变。
         // A fresh world (no level.dat) picks a spawn like `setInitialSpawn`;
@@ -1270,6 +1288,14 @@ impl World {
         self.run_bench_hooks();
         self.consume_save_commands();
         self.sync_player_tickets();
+        // 这一刻玩家票刚挂上；区块在下一段的 Director 步进里交付。
+        // 已交付 / 新交付的候选区块就绪后，`Region::advance_tick` 与邮筒
+        // 收信处完成落位（见那里）。
+        for island in self.islands.parked_mut() {
+            crate::spawn_landing::finish_pending(&mut island.region);
+        }
+        // 区块就绪后由 `Region::advance_tick` 完成落位（见那里）。
+        // `Region::advance_tick` finishes the landing once chunks are ready.
         self.profiler().lap(Phase::Inbox);
         ControlFlow::Continue(())
     }
@@ -2021,6 +2047,7 @@ impl World {
                 permission_level,
                 is_op,
                 experience: join_experience,
+                new_player: restored.is_none(),
             },
         );
         let now = region.now_millis();
@@ -2807,6 +2834,11 @@ impl World {
         self.master.host.take_posted(island.id, &mut posted);
         let mut replies = std::mem::take(&mut island.replies);
         island.take_mail(&mut posted, &order, &mut replies);
+        // 区块刚交付进 region：照官方 `PrepareSpawnTask.tick` 当场完成
+        // 挂着没落位的进服 / 重生，位置包排在客户端确认包之前。
+        // Chunks just landed: like vanilla `PrepareSpawnTask.tick`, finish
+        // pending landings so the position packet precedes the confirmation.
+        crate::spawn_landing::finish_pending(&mut island.region);
         island.replies = replies;
         self.master.posted_scratch = posted;
     }

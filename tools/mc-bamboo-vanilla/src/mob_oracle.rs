@@ -142,6 +142,29 @@ struct Case {
     /// 1b：重生序列里逐字节对照的关键包。
     #[serde(default)]
     key_packets: Option<Vec<Vec<String>>>,
+    /// 1c：官方 `PlayerSpawnFinder.findSpawn` 的落位结果。
+    #[serde(default)]
+    spawn_result: Option<SpawnResult>,
+}
+
+/// 1c 落脚点对拍的官方答案：坐标按 f64 原始位传，随机源末态逐位比。
+/// Official answer of one landing case: positions as raw f64 bits and the
+/// final random state.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpawnResult {
+    x: i64,
+    y: i64,
+    z: i64,
+    radius: i32,
+    seed: i64,
+    #[serde(default)]
+    offset: i32,
+    random_state: i64,
+    game_type: i32,
+    personal: Option<[i32; 3]>,
+    missing: bool,
+    spawn_at: [i32; 3],
 }
 
 /// Java 一侧 `playLife` 的场景描述。
@@ -699,6 +722,10 @@ impl Report {
 
     fn replay(&mut self, case: &Case) {
         self.cases += 1;
+        if case.spawn_result.is_some() {
+            self.replay_spawn_landing(case);
+            return;
+        }
         if case.life.is_some() {
             self.replay_player_life(case);
             return;
@@ -1151,6 +1178,65 @@ impl Report {
             plain!(goals);
             plain!(path);
             self.mismatch(format!("{place}: {}", diffs.join("; ")));
+        }
+    }
+
+    /// 1c：用生产代码的落脚点搜索重放官方场景，逐位比坐标、半径和随机源末态。
+    fn replay_spawn_landing(&mut self, case: &Case) {
+        use mc_bamboo_game::{ReplaySpawnLanding, spawn_landing_sample};
+
+        let Some(expected) = &case.spawn_result else {
+            return;
+        };
+        let scene = ReplaySpawnLanding {
+            blocks: case.blocks.clone(),
+            spawn: expected.spawn_at,
+            radius: expected.radius,
+            thread_seed: expected.seed,
+            game_type: expected.game_type,
+            personal: expected.personal,
+            break_radius: matches!(self.break_test.as_deref(), Some("spawn_radius")),
+            break_safety: matches!(self.break_test.as_deref(), Some("spawn_safety")),
+            break_fallback: matches!(self.break_test.as_deref(), Some("spawn_fallback")),
+        };
+        let ours = spawn_landing_sample(&scene);
+        self.steps += 1;
+        let bit = |value: f64| value.to_bits() as i64;
+        if bit(ours.x) != expected.x || bit(ours.y) != expected.y || bit(ours.z) != expected.z {
+            self.mismatch(format!(
+                "{} landing: official {:?}, bamboo {:?}",
+                case.name,
+                (
+                    f64::from_bits(expected.x as u64),
+                    f64::from_bits(expected.y as u64),
+                    f64::from_bits(expected.z as u64),
+                ),
+                (ours.x, ours.y, ours.z)
+            ));
+        }
+        if ours.offset != expected.offset {
+            self.mismatch(format!(
+                "{} candidate offset: official {}, bamboo {}",
+                case.name, expected.offset, ours.offset
+            ));
+        }
+        if ours.radius != expected.radius {
+            self.mismatch(format!(
+                "{} radius: official {}, bamboo {}",
+                case.name, expected.radius, ours.radius
+            ));
+        }
+        if ours.random_state != expected.random_state && expected.personal.is_none() {
+            self.mismatch(format!(
+                "{} random state: official {}, bamboo {}",
+                case.name, expected.random_state, ours.random_state
+            ));
+        }
+        if ours.missing != expected.missing {
+            self.mismatch(format!(
+                "{} personal missing: official {}, bamboo {}",
+                case.name, expected.missing, ours.missing
+            ));
         }
     }
 

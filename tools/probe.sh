@@ -246,6 +246,10 @@ reset_to_pristine_saved_world() {
     rm -f "$WORLD/level.dat" "$WORLD/level.dat_old"
     mkdir -p "$REGION"
     cp -R "$PRISTINE"/. "$REGION"/
+    # seed-world 写的 data/minecraft/game_rules.dat 也要复位。
+    # Restore the game_rules.dat written by seed-world.
+    (cd "$TREE" && cargo run -q -p mc-bamboo-vanilla -- \
+        seed-world "$WORLD" 0 >/dev/null) || return 1
 }
 
 status=0
@@ -272,6 +276,11 @@ if [ "$MODE" = "--loaded" ]; then
     check_world_dir loaded || status=1
     order_checks loaded
 else
+    # 同上：全新世界也带一份官方格式的 game_rules.dat（探针按固定出生点校准）。
+    # Same for a fresh world: an official-format game_rules.dat keeps the
+    # probe's fixed-spawn calibration.
+    (cd "$TREE" && cargo run -q -p mc-bamboo-vanilla -- \
+        seed-world "$WORLD" 0 >/dev/null) || exit 1
     start_server "$PORT" fresh
     probe_once fresh "$PORT" || status=1
     stop_server "$SERVER_PID" fresh || status=1

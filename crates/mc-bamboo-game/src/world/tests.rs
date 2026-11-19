@@ -359,6 +359,15 @@ impl Harness {
             ..Default::default()
         };
         let mut world = World::new(config, receiver);
+        // 和别的 Harness 一样：这些测试断言固定出生位置，按官方规则设半径 0。
+        // Like the other Harnesses: these tests assert a fixed spawn position,
+        // so set the official rule to radius 0.
+        let _ = world
+            .master
+            .global
+            .rules_mut()
+            .assign(mc_bamboo_data::gamerules::RESPAWN_RADIUS, "0");
+        world.publish_global();
         world.islands.region.random = LevelRandom::new(0);
         world.islands.region.sound_seed_generator = LevelRandom::new(0);
         Self {
@@ -396,6 +405,24 @@ impl Harness {
         } else {
             World::new_infinite_flat_for_tests(config, receiver)
         };
+        // 已加载模式的测试自己搭场景：把出生点所在区块先交付，和官方
+        // `PrepareSpawnTask` 一样在进服前就有落脚点可读。半径已被设成 0，
+        // 这里只需一个区块。
+        // Loaded-mode tests build their own scene: deliver the spawn chunk
+        // before joining, like vanilla `PrepareSpawnTask`. Radius is 0, so
+        // one chunk suffices.
+        // 官方缺省 `respawn_radius = 10` 会让新玩家随机落在出生点附近；这些
+        // 测试断言的是固定出生位置，所以按官方规则显式把半径设成 0（不是
+        // 在生产代码里给测试开后门）。散布本身另有专门的单测 / 对拍。
+        // Vanilla defaults `respawn_radius` to 10 and scatters new players;
+        // these tests assert a fixed position, so set the official rule to 0.
+        // Scatter itself has dedicated unit tests / oracle cases.
+        let _ = world
+            .master
+            .global
+            .rules_mut()
+            .assign(mc_bamboo_data::gamerules::RESPAWN_RADIUS, "0");
+        world.publish_global();
         // 正式启动的随机种子来自时钟，测试要可重复，固定成 0。音效种子会进包，也一样固定。
         world.islands.region.random = LevelRandom::new(0);
         world.islands.region.sound_seed_generator = LevelRandom::new(0);
