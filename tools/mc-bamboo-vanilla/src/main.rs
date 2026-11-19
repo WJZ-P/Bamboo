@@ -454,7 +454,7 @@ fn run() -> Result<(), String> {
         ["gen-world", java, ref options @ ..] => gen_world_cli(java, options),
         ["long-set", java, ref options @ ..] => long_set_cli(java, options),
         ["structure-e2e", java, ref options @ ..] => structure_e2e_cli(java, options),
-        ["resume-world", java, ref options @ ..] => resume_world::run(options, java),
+        ["resume-world", java, ref options @ ..] => resume_world_cli(java, options),
         ["feature-merge", java, ref options @ ..] => feature_merge_cli(java, options),
         ["structure-rings", java, ref options @ ..] => structure_rings_cli(java, options),
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),
@@ -748,6 +748,11 @@ fn feature_merge_cli(java: &str, options: &[&str]) -> Result<(), String> {
         &queries_path,
         options,
     )
+}
+
+#[cfg(feature = "oracle")]
+fn resume_world_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    resume_world::run(options, java)
 }
 
 #[cfg(feature = "oracle")]
@@ -1205,6 +1210,11 @@ fn long_set_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn feature_merge_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn resume_world_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
