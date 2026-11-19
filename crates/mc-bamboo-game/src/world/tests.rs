@@ -1225,6 +1225,40 @@ fn first_batch_is_exactly_the_three_by_three_around_the_spawn() {
     assert_eq!(finished[0].body, [9]);
 }
 
+/// 多岛时每个岛读的都是同一份全局时间和天气算出的天色。
+#[test]
+fn every_island_reads_the_same_sky_darken() {
+    use crate::island_partition::SectionPos;
+
+    let mut server = Harness::new_loaded(8);
+    let origin = SectionPos::new(64, 64);
+    server.world.islands.ensure(1, origin);
+    server
+        .world
+        .master
+        .global
+        .clock_named_mut("minecraft:overworld")
+        .unwrap()
+        .total_ticks = 18_000;
+    let weather = &mut server.world.master.global.state_mut().weather;
+    weather.o_rain_level = 1.0;
+    weather.rain_level = 1.0;
+    weather.o_thunder_level = 1.0;
+    weather.thunder_level = 1.0;
+    server.world.publish_global();
+    let expected = server.world.master.global.sky_darken();
+    assert!(expected > 0, "夜晚雷暴要变暗");
+    for island in server.world.islands.iter_mut() {
+        assert_eq!(island.region.global.sky_darken, expected);
+        let (level, _) = island.region.block_level();
+        assert_eq!(
+            mc_bamboo_blocks::Level::sky_darken(&level),
+            expected,
+            "精确模式的方块世界读同一份值"
+        );
+    }
+}
+
 #[test]
 fn no_more_chunks_without_an_acknowledgement() {
     let mut server = Harness::new(8);

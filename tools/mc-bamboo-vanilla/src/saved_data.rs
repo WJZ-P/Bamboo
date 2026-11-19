@@ -217,7 +217,10 @@ pub fn run(java: &str) -> Result<(), String> {
     // 两份世界时钟的四个字段都要和 Bamboo 编码器写出的值一致。
     // All four fields of both world clocks must match Bamboo's encoder.
     let expected_clocks = [
-        ("minecraft:overworld", 12_345_i64, 0.0_f32, 2.5_f32, true),
+        // 官方 `ServerClockInstance` 的缺省是 running；旧的正午暂停特例已去掉。
+        // Official `ServerClockInstance` defaults to running; the old noon-paused
+        // special case is gone.
+        ("minecraft:overworld", 12_345_i64, 0.0_f32, 2.5_f32, false),
         ("minecraft:the_end", 678, 0.0, 1.0, false),
     ];
     if report.world_clocks.len() != expected_clocks.len() {

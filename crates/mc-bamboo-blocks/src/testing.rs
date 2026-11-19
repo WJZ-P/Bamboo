@@ -58,6 +58,8 @@ pub(crate) struct TestLevel {
     pub(crate) border: crate::WorldBorder,
     /// 生物能看见的玩家。默认没有。
     pub(crate) players: Vec<crate::entity::ctx::PlayerView>,
+    /// `Level.getSkyDarken()`。默认是开阔的白天（0）。
+    pub(crate) sky_darken: i32,
 }
 
 impl TestLevel {
@@ -82,6 +84,7 @@ impl TestLevel {
             drop_order: Vec::new(),
             border: crate::WorldBorder::default(),
             players: Vec::new(),
+            sky_darken: 0,
         }
     }
 
@@ -196,6 +199,10 @@ impl EntityTables for TestLevel {
 }
 
 impl Level for TestLevel {
+    fn sky_darken(&self) -> i32 {
+        self.sky_darken
+    }
+
     fn for_each_player(&self, visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {
         for player in &self.players {
             visit(player);
