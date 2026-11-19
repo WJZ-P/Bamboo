@@ -138,10 +138,12 @@ pub(crate) fn on_sleep_in_bed(
         .global
         .rules
         .int(gamerules::PLAYERS_SLEEPING_PERCENTAGE);
-    let mut messages: Vec<Component> = Vec::new();
+    // (消息, 是不是快捷栏提示)。`BedSleepingProblem` / `sleep.not_possible`
+    // 走 `sendOverlayMessage`，`set_spawn` 是普通系统消息。
+    let mut messages: Vec<(Component, bool)> = Vec::new();
     if let Some(problem) = problem {
         // `BedRule.asProblem` 的快捷栏提示，和 `Either.ifLeft` 的顺序一致。
-        messages.push(Component::translate(problem.message(), []));
+        messages.push((Component::translate(problem.message(), []), true));
     } else {
         // `canSetSpawn` 为真时 `setRespawnPosition(RespawnConfig, true)`：
         // 位置变了发一条 `block.minecraft.set_spawn`。
@@ -149,7 +151,7 @@ pub(crate) fn on_sleep_in_bed(
             let spawn = RespawnData::of(pos, player.yaw, player.pitch);
             let changed = player.respawn != Some(spawn);
             if changed {
-                messages.push(Component::translate("block.minecraft.set_spawn", []));
+                messages.push((Component::translate("block.minecraft.set_spawn", []), false));
             }
             region.players.get_mut(&id).expect("玩家还在").respawn = Some(spawn);
         }
@@ -186,15 +188,10 @@ pub(crate) fn on_sleep_in_bed(
     }
     if percentage > 100 {
         // `ServerLevel.canSleepThroughNights()` 为假时官方无条件发这条提示。
-        messages.push(Component::translate("sleep.not_possible", []));
+        messages.push((Component::translate("sleep.not_possible", []), true));
     }
-    for message in &messages {
-        crate::chat::send_system_message(
-            region,
-            id,
-            message,
-            problem.is_some() || percentage <= 100,
-        );
+    for (message, overlay) in &messages {
+        crate::chat::send_system_message(region, id, message, *overlay);
     }
     // `ServerLevel.updateSleepingPlayerList()` 在 `startSleepInBed` 末尾。
     update_sleeping_player_list(region);
