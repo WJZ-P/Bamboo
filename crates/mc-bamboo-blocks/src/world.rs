@@ -3623,7 +3623,8 @@ mod tests {
                 | Effect::DispenserEquipped { .. }
                 | Effect::CampfireChanged { .. }
                 | Effect::Overlay { .. }
-                | Effect::OpenCommandBlock { .. } => None,
+                | Effect::OpenCommandBlock { .. }
+                | Effect::HurtPlayer { .. } => None,
             })
             .collect()
     }

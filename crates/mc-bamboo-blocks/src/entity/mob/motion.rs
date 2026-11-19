@@ -548,6 +548,14 @@ fn run_action(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, action: A
     }
 }
 
+/// `Entity.igniteForSeconds(8)` 走 `LivingEntity.igniteForTicks`，再把
+/// 燃烧时间属性乘进去。白天燃烧和僵尸着火传染共用这一层。
+///
+/// `Entity.igniteForSeconds(8)` via `LivingEntity.igniteForTicks`.
+pub(crate) fn ignite_for_seconds(me: &mut Entity, mob: &mut Mob, seconds: f32) {
+    ignite_for_ticks(me, mob, mth::floor_f32(seconds * 20.0));
+}
+
 /// `LivingEntity.igniteForTicks` → `Entity.igniteForTicks`：燃烧时间属性是 1。
 fn ignite_for_ticks(me: &mut Entity, mob: &mut Mob, ticks: i32) {
     let burning = mob

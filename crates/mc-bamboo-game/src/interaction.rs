@@ -644,6 +644,21 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     crate::command_block::open(region, id, pos);
                 }
             }
+            Effect::HurtPlayer {
+                target,
+                source,
+                amount,
+            } => {
+                // 官方 `Mob.doHurtTarget` 当场调 `Player.hurtServer`。Bamboo 把同一刻
+                // 的意图按实体顺序收进 effects，这里逐个走正式入口：第二只僵尸看到
+                // 的是第一只已经改过的血量和无敌帧，和官方逐实体 tick 等价。
+                let id = crate::inbound::PlayerId(target);
+                let mut random = region.players.get(&id).map(|player| player.random);
+                let hurt = crate::player_hurt::hurt_player(region, id, source, amount, &mut random);
+                if hurt && let (Some(state), Some(player)) = (random, region.players.get_mut(&id)) {
+                    player.random = state;
+                }
+            }
         }
     }
 }

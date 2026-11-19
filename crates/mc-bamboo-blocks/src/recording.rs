@@ -759,6 +759,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::CampfireChanged { .. } => 16,
         Effect::Overlay { .. } => 17,
         Effect::OpenCommandBlock { .. } => 18,
+        Effect::HurtPlayer { .. } => 19,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -855,6 +856,15 @@ fn hash_effect(effect: &Effect) -> u64 {
         } => {
             entity_id.hash(&mut hasher);
             menu_slot.hash(&mut hasher);
+        }
+        Effect::HurtPlayer {
+            target,
+            source,
+            amount,
+        } => {
+            target.hash(&mut hasher);
+            std::hash::Hash::hash(&source.kind, &mut hasher);
+            amount.to_bits().hash(&mut hasher);
         }
         Effect::Overlay { key, first, second } => {
             key.hash(&mut hasher);

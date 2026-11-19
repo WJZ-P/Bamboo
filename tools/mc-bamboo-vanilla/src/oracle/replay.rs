@@ -1115,7 +1115,9 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             //
             // Action-bar text and the command-block editor are not part of a block case.
             | Effect::Overlay { .. }
-            | Effect::OpenCommandBlock { .. } => None,
+            | Effect::OpenCommandBlock { .. }
+            // 生物对玩家的伤害意图不属于方块题，游戏层单独处理。
+            | Effect::HurtPlayer { .. } => None,
         })
         .collect()
 }
@@ -1227,7 +1229,8 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             // The campfire food block-entity packet is not compared. The game layer still sends it.
             | Effect::CampfireChanged { .. }
             | Effect::Overlay { .. }
-            | Effect::OpenCommandBlock { .. } => {}
+            | Effect::OpenCommandBlock { .. }
+            | Effect::HurtPlayer { .. } => {}
         }
     }
     (events, sounds)

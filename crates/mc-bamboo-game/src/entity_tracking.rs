@@ -488,7 +488,13 @@ impl TrackedEntity {
                 .find(|item| EntityData::index(item) == index);
             let item = match now {
                 Some(item) if Some(item) != before => item.clone(),
-                None if before.is_some() => default_data(index),
+                None if before.is_some() => default_data_for_type(
+                    index,
+                    match &snapshot.data {
+                        KindData::Mob(mob) => mob.mob_type,
+                        _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
+                    },
+                ),
                 _ => continue,
             };
             out.push(item);
@@ -824,7 +830,13 @@ impl KindData {
                 vec![EntityData::ExperienceValue(*value)]
             }
             Self::ExperienceOrb { .. } => Vec::new(),
-            Self::Mob(mob) => mob_non_default_data(mob),
+            Self::Mob(mob) => {
+                if mob.mob_type.is_monster() {
+                    zombie_non_default_data(mob)
+                } else {
+                    mob_non_default_data(mob)
+                }
+            }
         }
     }
 }
@@ -834,25 +846,30 @@ impl KindData {
 ///
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
-fn default_data(index: u8) -> EntityData {
-    match index {
-        0 => EntityData::SharedFlags(0),
-        1 => EntityData::AirSupply(300),
-        3 => EntityData::CustomNameVisible(false),
-        4 => EntityData::Silent(false),
-        5 => EntityData::NoGravity(false),
-        6 => EntityData::Pose(mc_bamboo_protocol::packet::play::Pose::Standing),
-        7 => EntityData::TicksFrozen(0),
-        9 => EntityData::Health(1.0),
-        15 => EntityData::MobFlags(0),
-        16 => EntityData::Baby(false),
-        17 => EntityData::AgeLocked(false),
-        18 => EntityData::CowVariant(1),
-        19 => EntityData::CowSoundVariant(0),
-        // `CustomName` 是 optional component，空时写 boolean false。
-        // `CustomName` is an optional component; absent is a false boolean.
-        2 => EntityData::NoCustomName,
-        _ => EntityData::SharedFlags(0),
+fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
+    match (index, kind.is_monster()) {
+        (16, true) => EntityData::Baby(false),
+        (17, true) => EntityData::SpecialType(0),
+        (18, true) => EntityData::DrownedConverting(false),
+        _ => match index {
+            0 => EntityData::SharedFlags(0),
+            1 => EntityData::AirSupply(300),
+            3 => EntityData::CustomNameVisible(false),
+            4 => EntityData::Silent(false),
+            5 => EntityData::NoGravity(false),
+            6 => EntityData::Pose(mc_bamboo_protocol::packet::play::Pose::Standing),
+            7 => EntityData::TicksFrozen(0),
+            9 => EntityData::Health(1.0),
+            15 => EntityData::MobFlags(0),
+            16 => EntityData::Baby(false),
+            17 => EntityData::AgeLocked(false),
+            18 => EntityData::CowVariant(1),
+            19 => EntityData::CowSoundVariant(0),
+            // `CustomName` 是 optional component，空时写 boolean false。
+            // `CustomName` is an optional component; absent is a false boolean.
+            2 => EntityData::NoCustomName,
+            _ => EntityData::SharedFlags(0),
+        },
     }
 }
 
@@ -862,6 +879,69 @@ fn default_data(index: u8) -> EntityData {
 /// Every non-default metadata item of a cow, in ascending index order. This is
 /// vanilla `SynchedEntityData.getNonDefaultValues`, including shared flags,
 /// health, the baby flag, variant and sound variant.
+/// 僵尸/尸壳的元数据。官方 `ClassTreeIdRegistry` 按类树导出：
+/// 16 `ZombieBaby`(BOOL)、17 `SpecialType`(INT)、18 `DrownedConverting`(BOOL)，
+/// 和牛的 `AgeableMob.Baby`(16) 不是同一个字段。
+fn zombie_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+    use mc_bamboo_protocol::packet::play::Pose;
+    let mut flags = 0u8;
+    if mob.on_fire {
+        flags |= 1;
+    }
+    if mob.glowing {
+        flags |= 1 << 6;
+    }
+    let mut out = Vec::new();
+    if flags != 0 {
+        out.push(EntityData::SharedFlags(flags));
+    }
+    if mob.dying {
+        out.push(EntityData::Pose(Pose::Dying));
+    }
+    if mob.air_supply != 300 {
+        out.push(EntityData::AirSupply(mob.air_supply));
+    }
+    if let Some(name) = &mob.custom_name {
+        out.push(EntityData::CustomName(name.clone()));
+    }
+    if mob.custom_name_visible {
+        out.push(EntityData::CustomNameVisible(true));
+    }
+    if mob.silent {
+        out.push(EntityData::Silent(true));
+    }
+    if mob.no_gravity {
+        out.push(EntityData::NoGravity(true));
+    }
+    if mob.ticks_frozen != 0 {
+        out.push(EntityData::TicksFrozen(mob.ticks_frozen));
+    }
+    out.push(EntityData::Health(mob.health));
+    let mut mob_flags = 0u8;
+    if mob.no_ai {
+        mob_flags |= 1;
+    }
+    if mob.left_handed {
+        mob_flags |= 2;
+    }
+    if mob.aggressive {
+        mob_flags |= 4;
+    }
+    if mob_flags != 0 {
+        out.push(EntityData::MobFlags(mob_flags));
+    }
+    if mob.zombie_baby {
+        out.push(EntityData::Baby(true));
+    }
+    if mob.zombie_special_type != 0 {
+        out.push(EntityData::SpecialType(mob.zombie_special_type));
+    }
+    if mob.drowned_converting {
+        out.push(EntityData::DrownedConverting(true));
+    }
+    out
+}
+
 fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::{
         ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SHIFT_KEY_DOWN, ENTITY_FLAG_SPRINTING,
@@ -1036,10 +1116,15 @@ fn event_packet(
             volume,
             pitch,
             position,
+            hostile,
         } => EventPacket::Sound(Sound {
             sound: i32::from(mc_bamboo_data::sounds::sound_event(sound)),
             inline: None,
-            source: mc_bamboo_data::sounds::NEUTRAL,
+            source: if *hostile {
+                mc_bamboo_data::sounds::HOSTILE
+            } else {
+                mc_bamboo_data::sounds::NEUTRAL
+            },
             x: position.x,
             y: position.y,
             z: position.z,

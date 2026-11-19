@@ -797,6 +797,7 @@ fn mob_events_reach_trackers_and_sounds_reach_listeners_in_range() {
                 volume: 1.0,
                 pitch: 1.0,
                 position: Vec3::new(0.5, -60.0, 0.5),
+                hostile: false,
             },
             MobEvent::Death,
         ],

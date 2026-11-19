@@ -430,6 +430,28 @@ pub enum Command {
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
     },
+    /// `Mob.doHurtTarget` 打到玩家：本刻实体循环内按玩家 `hurtServer` 的正式入口落地。
+    HurtPlayer {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+    },
+    /// `Zombie.doHurtTarget` 的着火传染（打到玩家）。
+    IgnitePlayer { target: EntityUid, seconds: f32 },
+    /// `Mob.doHurtTarget` 打到另一头生物。
+    HurtMob {
+        target: EntityUid,
+        source: super::mob::DamageSource,
+        amount: f32,
+    },
+    /// `BreakDoorGoal` / `RemoveBlockGoal` 的 `levelEvent(event, pos, data)`。
+    MobLevelEvent {
+        event: i32,
+        pos: mc_bamboo_core::BlockPos,
+        data: i32,
+    },
+    /// `BreakDoorGoal.tick` 的 `removeBlock` 或 `RemoveBlockGoal` 踩碎海龟蛋。
+    RemoveMobBlock { pos: mc_bamboo_core::BlockPos },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -469,6 +491,40 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::BreedCows { partner, position } => {
             super::mob::living::apply_breed(me, partner, position, world)
+        }
+        Command::HurtPlayer {
+            target,
+            source,
+            amount,
+        } => {
+            super::mob::living::apply_hurt_player(world, target, source, amount);
+        }
+        Command::IgnitePlayer { target, seconds } => {
+            let _ = (target, seconds);
+        }
+        Command::HurtMob {
+            target,
+            source,
+            amount,
+        } => {
+            let _ = world.hurt_mob(target, source, amount);
+        }
+        Command::MobLevelEvent { event, pos, data } => {
+            world.push_effect(crate::Effect::LevelEvent {
+                event,
+                pos,
+                data,
+                except_initiator: false,
+            });
+        }
+        Command::RemoveMobBlock { pos } => {
+            let state = world.block_state(pos);
+            let _ = world.remove_block(pos);
+            world.push_effect(crate::Effect::Destroyed {
+                pos,
+                state,
+                except_initiator: false,
+            });
         }
     }
 }

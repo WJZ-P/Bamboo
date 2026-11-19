@@ -16,7 +16,7 @@ use mc_bamboo_data::registries::attribute;
 use mc_bamboo_nbt::Tag;
 
 use super::{
-    CowSoundVariant, CowVariant, Mob,
+    CowSoundVariant, CowVariant, Mob, MobType,
     attributes::{Attribute, Modifier, Operation},
     living,
 };
@@ -54,7 +54,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         return Err(Error::new("mismatched mob entity halves"));
     };
     let mut out = Vec::new();
-    put(&mut out, "id", Tag::String("minecraft:cow".to_owned()));
+    put(&mut out, "id", Tag::String(mob.mob_type.name().to_owned()));
     // ---- Entity.saveWithoutId ----
     put(&mut out, "Pos", vec3_tag(public.position));
     put(&mut out, "Motion", vec3_tag(public.delta));
@@ -169,25 +169,35 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
     if mob.no_ai {
         put(&mut out, "NoAI", Tag::Byte(1));
     }
-    // ---- AgeableMob / Animal ----
-    put(&mut out, "Age", Tag::Int(mob.age));
-    put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
-    put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
-    put(&mut out, "InLove", Tag::Int(mob.in_love));
-    if let Some(uuid) = &mob.love_cause {
-        put(&mut out, "LoveCause", uuid_tag(uuid));
+    // ---- AgeableMob / Animal / Cow ----
+    if mob.mob_type == MobType::Cow {
+        put(&mut out, "Age", Tag::Int(mob.age));
+        put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
+        put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
+        put(&mut out, "InLove", Tag::Int(mob.in_love));
+        if let Some(uuid) = &mob.love_cause {
+            put(&mut out, "LoveCause", uuid_tag(uuid));
+        }
+        put(
+            &mut out,
+            "variant",
+            Tag::String(mob.variant.name().to_owned()),
+        );
+        put(
+            &mut out,
+            "sound_variant",
+            Tag::String(mob.sound_variant.name().to_owned()),
+        );
     }
-    // ---- Cow ----
-    put(
-        &mut out,
-        "variant",
-        Tag::String(mob.variant.name().to_owned()),
-    );
-    put(
-        &mut out,
-        "sound_variant",
-        Tag::String(mob.sound_variant.name().to_owned()),
-    );
+    // ---- Zombie ----
+    if mob.mob_type.is_monster() {
+        put(&mut out, "IsBaby", Tag::Byte(i8::from(mob.zombie_baby)));
+        put(
+            &mut out,
+            "CanBreakDoors",
+            Tag::Byte(i8::from(mob.can_break_doors)),
+        );
+    }
     for (key, value) in &mob.passthrough {
         out.retain(|(existing, _)| existing != key);
         out.push((key.clone(), value.clone()));
@@ -197,10 +207,10 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
 
 /// 读一个生物；不是这一轮支持的生物时返回 `None`，交回调用方照旧处理。
 pub fn read_mob(tag: &Tag, id: &str, uid: i32) -> Result<Option<EntityRow>> {
-    if id != "minecraft:cow" {
+    let Some(kind) = MobType::by_name(id) else {
         return Ok(None);
-    }
-    let mut entity = Entity::cow(Vec3::default());
+    };
+    let mut entity = Entity::by_mob_type(kind, Vec3::default());
     entity.id = uid;
     // 读盘的实体不是新建的：构造时的随机数（UUID、朝向）不取，缺 `UUID` 时全零。
     // A loaded entity is not freshly built: the constructor draws are skipped.
@@ -303,20 +313,34 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.left_handed = tag::bool_or(tag, "LeftHanded", false);
         mob.loot_table_seed = tag::long_or(tag, "DeathLootTableSeed", 0);
         mob.no_ai = tag::bool_or(tag, "NoAI", false);
-        // ---- AgeableMob / Animal ----
-        living::set_age(me, mob, tag::int_or(tag, "Age", 0));
-        mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
-        mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
-        mob.in_love = tag::int_or(tag, "InLove", 0);
-        mob.love_cause = uuid_field(tag, "LoveCause");
-        // ---- Cow ----
-        if let Some(variant) = tag::string_or(tag, "variant").and_then(CowVariant::from_name) {
-            mob.variant = variant;
+        // ---- AgeableMob / Animal / Cow ----
+        if mob.mob_type == MobType::Cow {
+            living::set_age(me, mob, tag::int_or(tag, "Age", 0));
+            mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
+            mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
+            mob.in_love = tag::int_or(tag, "InLove", 0);
+            mob.love_cause = uuid_field(tag, "LoveCause");
+            if let Some(variant) = tag::string_or(tag, "variant").and_then(CowVariant::from_name) {
+                mob.variant = variant;
+            }
+            if let Some(variant) =
+                tag::string_or(tag, "sound_variant").and_then(CowSoundVariant::from_name)
+            {
+                mob.sound_variant = variant;
+            }
         }
-        if let Some(variant) =
-            tag::string_or(tag, "sound_variant").and_then(CowSoundVariant::from_name)
-        {
-            mob.sound_variant = variant;
+        // ---- Zombie ----
+        if mob.mob_type.is_monster() {
+            let baby = tag::bool_or(tag, "IsBaby", false);
+            mob.set_zombie_baby(baby);
+            let (width, height, eye) = mob.mob_type.dimensions(baby);
+            me.dimensions = (width, height);
+            mob.eye_height = eye;
+            mob.can_break_doors = tag::bool_or(tag, "CanBreakDoors", false);
+            if mob.can_break_doors {
+                mob.navigation.flags.can_open_doors = true;
+                mob.goals.insert_break_door();
+            }
         }
         mob.passthrough = match tag {
             Tag::Compound(entries) => entries

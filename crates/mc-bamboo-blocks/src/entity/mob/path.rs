@@ -49,6 +49,11 @@ impl Malus {
         malus
     }
 
+    /// `Monster` 继承 `PathfinderMob`，没有 `Animal` 那两项覆盖。
+    pub fn monster() -> Self {
+        Self::default()
+    }
+
     pub fn set(&mut self, path_type: PathType, value: f32) {
         self.overrides[path_type as usize] = Some(value);
     }

@@ -174,6 +174,10 @@ pub enum EntityData {
     ///
     /// index 8, INT. `ExperienceOrb.DATA_VALUE`, this orb's experience value.
     ExperienceValue(i32),
+    /// index 17，INT。`Zombie.DATA_SPECIAL_TYPE_ID`。
+    SpecialType(i32),
+    /// index 18，BOOLEAN。`Zombie.DATA_DROWNED_CONVERSION_ID`。
+    DrownedConverting(bool),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -205,8 +209,8 @@ impl EntityData {
             Self::TntBlockState(_) | Self::Health(_) => 9,
             Self::MobFlags(_) => 15,
             Self::MainHand(_) | Self::Baby(_) => 16,
-            Self::ModelCustomisation(_) | Self::AgeLocked(_) => 17,
-            Self::CowVariant(_) => 18,
+            Self::ModelCustomisation(_) | Self::AgeLocked(_) | Self::SpecialType(_) => 17,
+            Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
             Self::CowSoundVariant(_) => 19,
         }
     }
@@ -307,6 +311,14 @@ impl EntityData {
             Self::CowSoundVariant(variant) => {
                 write_data_header(out, 19, SERIALIZER_COW_SOUND_VARIANT);
                 write_varint(out, *variant);
+            }
+            Self::SpecialType(kind) => {
+                write_data_header(out, 17, SERIALIZER_INT);
+                write_varint(out, *kind);
+            }
+            Self::DrownedConverting(converting) => {
+                write_data_header(out, 18, SERIALIZER_BOOLEAN);
+                write_bool(out, *converting);
             }
         }
     }

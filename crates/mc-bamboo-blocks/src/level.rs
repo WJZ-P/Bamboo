@@ -15,7 +15,7 @@ use mc_bamboo_protocol::item::ItemStack;
 use crate::{
     block_entity::{BlockEntities, BlockEntity, BlockEvent, BlockEvents},
     container::Container,
-    entity::{Entity, EntityPublic, EntityStore, EntityUid},
+    entity::{Entity, EntityPublic, EntityStore, EntityUid, mob::DamageSource},
     gamerules::BlockGameRules,
     hopper::HopperEntity,
     random::LevelRandom,
@@ -1932,6 +1932,13 @@ pub enum Effect {
     /// A permitted player used a command block. The client opens the editor; the server sends
     /// the block-entity data.
     OpenCommandBlock { pos: BlockPos },
+    /// 一次生物对玩家的近战伤害。算阶段记意图，同一刻的实体循环里按实体顺序
+    /// 调玩家的 `hurtServer`（游戏层接正式入口）。
+    HurtPlayer {
+        target: EntityUid,
+        source: DamageSource,
+        amount: f32,
+    },
 }
 
 /// 自定义音效的名字。`Effect` 要能按值拷贝，名字放在这里，效果里只留下标。

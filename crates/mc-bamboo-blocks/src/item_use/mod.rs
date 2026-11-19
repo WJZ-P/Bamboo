@@ -57,6 +57,12 @@ pub(crate) fn use_on(world: &mut World, item: &Item, ctx: &UseContext) -> Intera
         // `SpawnEggItem.useOn`: spawn on the clicked block (not the adjacent
         // one), never in a fluid block. `shouldOffsetYMore` is false there.
         _ if ctx.item == items::COW_SPAWN_EGG => spawn_egg::cow(world, ctx),
+        _ if ctx.item == items::ZOMBIE_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Zombie)
+        }
+        _ if ctx.item == items::HUSK_SPAWN_EGG => {
+            spawn_egg::monster(world, ctx, crate::entity::mob::MobType::Husk)
+        }
         _ => default_use_on(world, item, ctx),
     }
 }
