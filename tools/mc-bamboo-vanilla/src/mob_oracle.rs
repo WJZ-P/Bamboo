@@ -117,6 +117,9 @@ struct Case {
     /// 每项是（刻、牛下标、玩家下标、物品 ID、创造模式）。
     #[serde(default)]
     interact_actions: Vec<[i32; 5]>,
+    /// 牛的效果动作：（刻、牛下标、0=add/1=clear-all、效果 ID、时长、等级）。
+    #[serde(default)]
+    cow_effect_actions: Vec<[i32; 6]>,
     /// 玩家受伤场景：难度、起始血量 / 吸收 / 消耗、装备和动作。
     #[serde(default)]
     difficulty: i32,
@@ -878,6 +881,33 @@ impl Report {
             let mut ours_interactions = Vec::new();
             {
                 let mut world = World::new(&mut level, &mut ticks);
+                for &[tick, cow, kind, effect, duration, amplifier] in &case.cow_effect_actions {
+                    if tick != index as i32 || cow as usize >= ids.len() {
+                        continue;
+                    }
+                    let uid = ids[cow as usize];
+                    // 改坏确认：故意改掉效果的时长 / 等级 / 种类，逐刻位置和速度会不同。
+                    let (effect, duration, amplifier) = match self.break_test.as_deref() {
+                        Some("cow_effect_duration") => {
+                            (effect, duration.saturating_add(20), amplifier)
+                        }
+                        Some("cow_effect_amplifier") => {
+                            (effect, duration, amplifier.saturating_add(1))
+                        }
+                        Some("cow_effect_kind") => (0, duration, amplifier),
+                        _ => (effect, duration, amplifier),
+                    };
+                    if kind == 0 {
+                        world.add_mob_effect(
+                            uid,
+                            mc_bamboo_blocks::entity::mob::effects::EffectInstance::with_amplifier(
+                                effect, duration, amplifier,
+                            ),
+                        );
+                    } else {
+                        world.clear_mob_effects(uid, None);
+                    }
+                }
                 for &[tick, cow, player_index, item, creative] in &case.interact_actions {
                     if tick != index as i32 {
                         continue;

@@ -166,9 +166,10 @@ Bamboo 重放侧的局部常量 / 分支，不改官方一侧、不删用例、�
 
 ## 实施进度与已知差异（2026-11-20）
 
-S1–S6 已落地。逐刻对拍：`mob-oracle` 148 例 55038 刻 0 不一致（原有 117 例
-52844 刻全保持），`move-oracle` 59 例 0，`player-data` 3098 检查 500 例，
-`entity-oracle` 40 例 748 步。每个子期各有 3 处故意改坏确认。
+S1–S6 已落地，补拍两项后：`mob-oracle` 154 例 55878 刻 0 不一致（原有 117 例
+52844 刻全保持），`execute-oracle` 55 条命令的副作用与反馈全匹配，`move-oracle`
+59 例 0，`player-data` 3098 检查 500 例，`entity-oracle` 40 例 748 步。
+每个子期各有 3 处故意改坏确认。
 
 ### 火焰方块与 `applyEffectsFromBlocks` 的对拍边界
 
@@ -186,12 +187,32 @@ S1–S6 已落地。逐刻对拍：`mob-oracle` 148 例 55038 刻 0 不一致（
   吃 / 喝音效与粒子、`startUsingItem` 的装备 / 元数据动画包、物品栏容器同步包
   两侧都不比（假世界只有一名玩家、没有容器桩），由 Rust 单测覆盖组件与状态。
 
+### 补拍（第二次交回）
+
+- **`/effect` 命令反馈逐字节对拍**：沿用 `execute-oracle` 的「副作用 + 反馈哈希」
+  框架，新增 13 条场景（单目标 / 多目标非玩家 / 非生物目标 / `infinite` /
+  `hideParticles` / 强度 255 / 时长 1000000 / 清除指定效果 / 清除全部 /
+  无可清效果 / 无此效果 / 瞬间效果）。Java 侧把假世界玩家补齐
+  `activeEffects` / 属性表 / 进度准则 / 连接桩，官方 `Commands.performCommand`
+  真的跑 `/effect`；反馈按 `decompose` 展开逐字节比，效果表状态单独哈希。
+  三个改坏组 `effect_feedback` / `effect_state` / `effect_clear_state` 都能抓到。
+  顺带修了 `mob_effect` 资源参数解析、反馈参数顺序和 `showIcon` 缺省。
+- **牛挂效果后的运动逐刻对拍**：`mob-oracle` 新增 6 个 `cow_effect_*` 场景
+  （漂浮 I 到期落地、速度 III、缓慢 III、跳跃提升 III、缓降 60 刻转普通下落、
+  同高度无效果对照），840 刻逐刻比位置 / 速度 / 血量 / 摔落距离 / 随机源。
+  按官方 `LivingEntity.aiStep` 把「缓降 / 漂浮清 fallDistance」移到 `travel`
+  之前、漂浮替换 `travel_in_air` 的重力项。三个改坏组
+  `cow_effect_duration` / `cow_effect_amplifier` / `cow_effect_kind` 都能抓到。
+- **水里 / 攀爬的饥饿消耗**：Bamboo 的 `PlayerBlocks` 能读玩家脚下和眼睛那格的
+  `BlockState`，`BlockState::fluid().is_tagged(WATER)` 和
+  `is_tagged(CLIMBABLE)` 都在，所以把 `checkMovementStatistics` 的游泳 / 水中 /
+  攀爬 / 滑翔分支接进 `on_move_player`，单测用真的水 / 梯子方块验证了
+  0.01、0（梯子只发统计）和创造模式跳过。
+
 ### 仍待做
 
-- `/effect` 命令反馈的逐字节对拍（command-oracle 现在只比选择器）。
-- 牛挂效果后的运动逐刻对拍（漂浮 / 缓降 / 速度）：`living::travel` 已按
-  `getEffectiveGravity` / `getJumpBoostPower` 接上，缺少对应的 Java 场景。
 - 喷溅 / 滞留药水、药箭、信标、潮涌、怪附带效果、紫颂果随机传送、
   `RemoveEffects` / `PlaySound` 两种 `ConsumeEffect`、效果引起的完整移动物理改写。
-- 游泳 / 水中 / 攀爬 / 滑翔的移动消耗分支：纯函数已按官方系数实现，
-  游戏路径目前只接地面（疾跑 / 走路）分支。
+- 游泳 / 攀爬消耗目前只有 Rust 单测（用 `replay_movement` 走真的方块表），
+  没有官方 `checkMovementStatistics` 的逐刻字节对拍：官方假世界不跑
+  `ServerPlayer.tickPlayer`，`movement-oracle` 也不比饥饿字段。

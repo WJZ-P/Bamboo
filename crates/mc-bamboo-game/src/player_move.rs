@@ -27,7 +27,10 @@ use mc_bamboo_protocol::{
     item::ItemStack,
     packet::{
         ClientboundPacket,
-        play::{ClientInformation, ENTITY_FLAG_SPRINTING, EquipmentSlot, GameMode, PlayerPosition},
+        play::{
+            ClientInformation, ENTITY_FLAG_FALL_FLYING, ENTITY_FLAG_SPRINTING, EquipmentSlot,
+            GameMode, PlayerPosition,
+        },
     },
 };
 use mc_bamboo_world::store::ChunkStore;
@@ -581,18 +584,39 @@ fn apply_change(
     player.motion.client_horizontal_collision = change.horizontal_collision;
     let client_delta = change.target.subtract(start);
     // `ServerPlayer.checkMovementStatistics`：按客户端报告的位移算消耗的厘米数。
+    // 水 / 梯子 / 游泳的判定直接从玩家当前所在格和脚下格读方块状态，
+    // 和官方 `isEyeInFluid` / `isInWater` / `onClimbable` 的方块查询一致。
     let sprinting = player.sync.shared_flags & ENTITY_FLAG_SPRINTING != 0;
+    let feet = BlockPos::containing(change.target);
+    let eye = BlockPos::containing(Vec3::new(
+        change.target.x,
+        change.target.y + player.eye_height(),
+        change.target.z,
+    ));
+    let eye_state = change.blocks.state(eye);
+    let feet_state = change.blocks.state(feet);
+    let eye_in_water = eye_state
+        .fluid()
+        .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER);
+    let in_water = feet_state
+        .fluid()
+        .is_tagged(mc_bamboo_data::tags::fluid_tags::WATER);
+    let on_climbable = feet_state.is_tagged(mc_bamboo_data::tags::block_tags::CLIMBABLE);
+    let swimming = player.sync.shared_flags & ENTITY_FLAG_FALL_FLYING == 0
+        && player.motion.body_height == SWIMMING_BODY
+        && !player.on_ground;
+    let fall_flying = player.sync.shared_flags & ENTITY_FLAG_FALL_FLYING != 0;
     if let Some(amount) = crate::player_exhaustion::movement(
         client_delta.x,
         client_delta.y,
         client_delta.z,
-        false, // 游泳 / 水中判定由方块层提供，当前简化为地面分支
-        false,
-        false,
-        false,
+        swimming,
+        eye_in_water,
+        in_water,
+        on_climbable,
         player.on_ground,
         sprinting,
-        false,
+        fall_flying,
     ) {
         crate::player_exhaustion::add(player, amount);
     }
@@ -1074,6 +1098,8 @@ pub struct MoveReplayReport {
     pub kicked: bool,
     pub teleports: u32,
     pub fall_distance: f64,
+    /// 这一串包累计的饥饿消耗（`causeFoodExhaustion`，创造模式为 0）。
+    pub exhaustion: f32,
 }
 
 /// 按官方的顺序重放一串移动包：先处理包，服务端 tick 再收尾。
@@ -1166,6 +1192,7 @@ pub fn replay_movement(sample: &MoveReplay) -> MoveReplayReport {
         kicked,
         teleports,
         fall_distance: player.motion.fall_distance,
+        exhaustion: player.pending_exhaustion,
     }
 }
 
@@ -1204,5 +1231,59 @@ impl ReplaySink {
             rest = &rest[end..];
         }
         count
+    }
+}
+
+#[cfg(test)]
+mod exhaustion_tests {
+    use super::*;
+    use mc_bamboo_data::blocks;
+
+    /// 用 `replay_movement` 走一段位移，方块表只放脚下 / 眼睛那一格。
+    fn exhaust(state: u32, at: BlockPos, sprint: bool, creative: bool) -> f32 {
+        let sample = MoveReplay {
+            mode: if creative {
+                GameMode::Creative
+            } else {
+                GameMode::Survival
+            },
+            shift: false,
+            sprint,
+            flying: false,
+            loaded: true,
+            blocks: vec![(at, state)],
+            start: Vec3::new(0.5, 80.0, 0.5),
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: false,
+            boots: false,
+            effects: Vec::new(),
+            packets: vec![MoveReplayPacket::Move {
+                position: Some(Vec3::new(1.5, 80.0, 0.5)),
+                rotation: None,
+                on_ground: false,
+                horizontal_collision: false,
+            }],
+        };
+        replay_movement(&sample).exhaustion
+    }
+
+    #[test]
+    fn water_and_climbable_movements_use_the_official_coefficients() {
+        let feet = BlockPos::new(1, 80, 0);
+        // 眼睛在水里：1 格 = 100 cm -> 0.01 * 100 * 0.01 = 0.01。
+        let eye = BlockPos::new(1, 81, 0);
+        let wet = exhaust(blocks::WATER, eye, false, false);
+        assert!((wet - 0.01).abs() < 1.0e-6, "eye in water: {wet}");
+        // 身体在水里同样按水平位移算。
+        let body = exhaust(blocks::WATER, feet, false, false);
+        assert!((body - 0.01).abs() < 1.0e-6, "in water: {body}");
+        // 梯子上只发统计、不加饥饿消耗。
+        let ladder = exhaust(blocks::LADDER, feet, false, false);
+        assert_eq!(ladder, 0.0);
+        // 创造模式整段跳过。
+        assert_eq!(exhaust(blocks::WATER, eye, false, true), 0.0);
+        // 改坏确认：眼睛在水里时按普通地面疾跑算会变成 0.1。
+        assert_ne!(exhaust(blocks::WATER, eye, true, false), 0.1);
     }
 }
