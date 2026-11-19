@@ -52,7 +52,7 @@ const LOG_TAIL: usize = 60;
 /// `--show` 的默认值。
 const DEFAULT_SHOW: usize = 3;
 
-const USAGE: &str = "usage: oracle <java> [--cases N] [--seed S] [--only <block or class>] [--pure] [--case I] [--show N] [--show-blocked] [--rule name=value] [--weather clear|rain|thunder] [--redstone-cache]";
+const USAGE: &str = "usage: oracle <java> [--cases N] [--seed S] [--only <block or class>] [--pure] [--case I] [--show N] [--show-blocked] [--rule name=value] [--weather clear|rain|thunder] [--clock-ticks N] [--redstone-cache]";
 
 /// 不比较的内容。每一条都有原因，第 4 章要求排除的内容进最后的报告。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -325,7 +325,7 @@ impl Options {
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
-                "--cases" | "--seed" | "--only" | "--case" | "--weather" => {
+                "--cases" | "--seed" | "--only" | "--case" | "--weather" | "--clock-ticks" => {
                     let value = args.next().ok_or(USAGE)?;
                     options
                         .forwarded
@@ -372,7 +372,7 @@ impl Options {
     fn rerun_args(&self) -> String {
         let mut args = Vec::new();
         for pair in self.forwarded.chunks(2) {
-            if pair[0] == "--only" || pair[0] == "--weather" {
+            if pair[0] == "--only" || pair[0] == "--weather" || pair[0] == "--clock-ticks" {
                 args.extend_from_slice(pair);
             }
         }
@@ -469,19 +469,30 @@ pub fn run(command: Command, args: &[&str]) -> Result<(), String> {
     if options.pure {
         println!("--pure: scenes only hold ported classes and water");
     }
-    // 没有 --weather 时依次跑晴天、下雨、打雷三批，晴天题和以前完全一样。
-    // 显式给了 --weather 就只跑那一批。
+    // 没有 --weather / --clock-ticks 时依次跑晴天、下雨、打雷、夜晚四批，
+    // 晴天题和以前完全一样。显式给了其中任一项就只跑用户指定的那一批。
+    //
+    // With neither --weather nor --clock-ticks, run clear, rain, thunder and
+    // night batches; the clear batch is unchanged. Any explicit weather or
+    // clock option selects just that one batch.
     let weather_batches: Vec<Vec<String>> = if options
         .forwarded
         .chunks(2)
-        .any(|pair| pair[0] == "--weather")
+        .any(|pair| pair[0] == "--weather" || pair[0] == "--clock-ticks")
     {
         Vec::new()
     } else {
-        ["rain", "thunder"]
-            .iter()
-            .map(|&weather| vec!["--weather".to_owned(), weather.to_owned()])
-            .collect()
+        vec![
+            vec!["--weather".to_owned(), "rain".to_owned()],
+            vec!["--weather".to_owned(), "thunder".to_owned()],
+            vec!["--clock-ticks".to_owned(), "18000".to_owned()],
+            vec![
+                "--clock-ticks".to_owned(),
+                "18000".to_owned(),
+                "--weather".to_owned(),
+                "thunder".to_owned(),
+            ],
+        ]
     };
     run_batch(&command, &options, Vec::new())?;
     for batch in weather_batches {

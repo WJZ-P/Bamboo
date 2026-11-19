@@ -275,7 +275,7 @@ tick 循环：20 tick 每秒，按绝对时间排下一次，不要在工作完�
 
 | 谁 | 机制 | 值 | 触发后 | 来源 | 对 Bamboo 的要求 |
 |---|---|---|---|---|---|
-| 客户端 | `ReadTimeoutHandler` | 30 秒没收到任何字节 | `disconnect.timeout` | `Connection.connect`、`exceptionCaught` | 没有其他玩家时，世界里唯一的流量就是心跳（M1 的时钟静止，也不发周期 `set_time`）。心跳间隔必须小于 30 秒，余量是 15 秒 |
+| 客户端 | `ReadTimeoutHandler` | 30 秒没收到任何字节 | `disconnect.timeout` | `Connection.connect`、`exceptionCaught` | 没有其他玩家时，客户端每秒至少发 20 个 `client_tick_end`；服务端每 20 刻还会发一次空的 `set_time`。心跳间隔必须小于 30 秒，余量是 15 秒 |
 | 客户端 | 对端关闭 | | `disconnect.endOfStream` | `Connection.channelInactive` | 断开前先发 `disconnect`，否则玩家只看到这个原因 |
 | 客户端 | 心跳回应延后 | 主线程卡在事件轮询超过 200 ms 时不回，留到恢复，最多 1 分钟 | 恢复后补发，过期丢弃 | `handleKeepAlive`、`sendDeferredPackets`，`RenderSystem.isFrozenAtPollEvents` | 超过服务端期限时会被踢，这和官方相同 |
 | 客户端 | 加载画面 | 30 秒 | 放行玩家 | `LevelLoadTracker` | 2.1 第 5 项 |
@@ -301,7 +301,7 @@ tick 循环：20 tick 每秒，按绝对时间排下一次，不要在工作完�
 
 ### 5.3 长时间运行不会出问题的部分
 
-已经看过，不需要处理：`sequence` 和 `state_id` 增长很慢。`chat` 不累积任何窗口（`lastSeen` 恒为空）。`pending` 受 `T` 限制。`T` 的坐标在 clamp 后都在 `i32` 内。客户端自己累加 `gameTime`，不收周期 `set_time` 也没有影响（Bamboo 的时钟 `rate=0`）。
+已经看过，不需要处理：`sequence` 和 `state_id` 增长很慢。`chat` 不累积任何窗口（`lastSeen` 恒为空）。`pending` 受 `T` 限制。`T` 的坐标在 clamp 后都在 `i32` 内。客户端自己累加 `gameTime`；服务端每 20 刻发一次只带 `gameTime` 的 `set_time`，时钟表为空，不会覆盖进服时收到的两份时钟状态。
 
 ---
 

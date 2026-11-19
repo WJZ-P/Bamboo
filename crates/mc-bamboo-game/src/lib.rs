@@ -98,6 +98,7 @@ pub mod save_session;
 mod scoreboard;
 mod secure_chat;
 mod sign;
+mod sleep;
 pub(crate) mod spawn_landing;
 mod tick_levels;
 mod weather;
@@ -1684,6 +1685,106 @@ fn feedback_hash(bytes: &[u8]) -> i32 {
         hash = hash.wrapping_mul(0x0100_0193);
     }
     hash as i32
+}
+
+/// `clock-oracle` 用：把官方逐刻给出的时钟初值和天气 / 时间推进参数在
+/// Bamboo 的同一份实现里重放，返回每个时刻的两份时钟状态和 `sky_darken`。
+/// 只在 `oracle-samples` feature 下编进库里。
+///
+/// For `clock-oracle`: replay the vanilla per-tick clock, weather and game-rule
+/// inputs through Bamboo's own implementation and return both clock states and
+/// `sky_darken` at every tick. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_clock_scene(scene: &ClockReplayScene) -> Vec<ClockReplayStep> {
+    global::replay_clock_scene(scene)
+}
+
+/// 官方 `clock-oracle` 的一道场景。
+/// One scene from the official `clock-oracle`.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ClockReplayScene {
+    pub name: String,
+    pub ticks: i64,
+    pub start_ticks: i64,
+    pub rate: f32,
+    pub paused: bool,
+    pub advance_time: bool,
+    pub o_rain: f32,
+    pub rain: f32,
+    pub o_thunder: f32,
+    pub thunder: f32,
+    pub rising_rain: bool,
+    /// 与 `tick` 对应的 `/time set` 跳变。
+    /// `/time set` jumps keyed by tick.
+    pub jumps: Vec<i32>,
+}
+
+/// `clock-oracle` 逐刻重放的一项结果。
+/// One per-tick result of the `clock-oracle` replay.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClockReplayStep {
+    pub tick: i64,
+    pub overworld_ticks: i64,
+    pub overworld_partial: f32,
+    pub overworld_rate: f32,
+    pub overworld_paused: bool,
+    pub end_ticks: i64,
+    pub end_partial: f32,
+    pub end_rate: f32,
+    pub end_paused: bool,
+    pub sky_darken: i32,
+}
+
+/// `sleep-oracle` 用：从产品代码里取出睡眠判定和跳早数学的答案。
+/// 只在 `oracle-samples` feature 下编进库里。
+///
+/// For `sleep-oracle`: read the sleep decisions and morning-skip maths from
+/// the production code. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_sleep_facts(scene: &SleepReplayFacts) -> SleepReplayAnswer {
+    let status = sleep::SleepStatus::of_counts(scene.active, scene.sleeping);
+    // 和正式游戏同一份 `sky` 公式：主世界时间线 + 雨 / 雷暴层。
+    let sky_darken =
+        mc_bamboo_blocks::sky::sky_darken(scene.clock_ticks, scene.rain, scene.thunder);
+    SleepReplayAnswer {
+        sky_darken,
+        dark_outside: sky_darken >= 4,
+        needed: status.sleepers_needed(scene.percentage),
+        enough: status.enough_sleeping(scene.percentage),
+        can_sleep_through_night: scene.percentage <= 100,
+        wake_up_ticks: sleep::wake_up_ticks(scene.total_ticks),
+        occurs_at: scene.total_ticks.rem_euclid(24_000) == 0,
+    }
+}
+
+/// `sleep-oracle` 的一道题。
+/// One case of the `sleep-oracle`.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SleepReplayFacts {
+    pub clock_ticks: i64,
+    pub rain: f32,
+    pub thunder: f32,
+    pub percentage: i32,
+    pub active: i32,
+    pub sleeping: i32,
+    pub total_ticks: i64,
+}
+
+/// `sleep-oracle` 的一道题的产品答案。
+/// The production answer to one `sleep-oracle` case.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SleepReplayAnswer {
+    pub sky_darken: i32,
+    pub dark_outside: bool,
+    pub needed: i32,
+    pub enough: bool,
+    pub can_sleep_through_night: bool,
+    pub wake_up_ticks: i64,
+    pub occurs_at: bool,
 }
 
 /// S2 玩家效果对拍场景：`actions` 每项为

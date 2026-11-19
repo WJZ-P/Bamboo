@@ -378,8 +378,9 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   未做，`playSecondaryHurtSound` 只覆盖 `thorns`。
 - **实体事件**：1a 不发 `entity_event`（官方玩家受伤时 `markHurt` 只置
   `syncVelocity`，不广播 2 号事件）；`set_entity_motion` 的速度同步包未单独对拍。
-- **天色 / 时钟**：这一期不碰，`sky_darken` 仍恒 0（时钟停在正午），
-  `ViewFacts::sky_darken` 由调用方填 0；`SourceView` 和 `World` 的读数一致。
+- **天色 / 时钟**：新世界时钟按官方从 0 刻走起来，`sky_darken` 由 `GlobalView`
+  每刻按官方 `Level.updateSkyBrightness` 算好；`ViewFacts::sky_darken` 由调用方填这份值，
+  `SourceView` 和 `World` 的读数一致。
 - **服务器连接层**：`serverbound::ATTACK` 的畸形包按官方会断开，Bamboo 目前
   只在解码层报 `TrailingBytes`，连接层是否断开由通用解码路径决定。
 

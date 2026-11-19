@@ -113,6 +113,10 @@ pub(crate) struct Player {
     ///
     /// Public key, message chain, and the seen-message window. Without a session, chat stays unsigned.
     pub(crate) chat: PlayerChat,
+    /// 官方 `Player.sleepCounter` / `SLEEPING_POS_ID`：睡在床上时非空。
+    ///
+    /// Official `Player.sleepCounter` / `SLEEPING_POS_ID`: set while in bed.
+    pub(crate) sleep: Option<crate::sleep::Sleeping>,
     /// 官方 `ServerPlayer.respawnConfig`：`/spawnpoint` 设的玩家重生点。
     ///
     /// Official `ServerPlayer.respawnConfig`: the player's spawn set by `/spawnpoint`.
@@ -260,6 +264,7 @@ impl Player {
             last_sent_exp: -99_999_999,
             drop_spam: 0,
             chat: PlayerChat::default(),
+            sleep: None,
             respawn: None,
             spawn_pending: None,
             inbox: crate::inbound::PlayerInbox::default(),

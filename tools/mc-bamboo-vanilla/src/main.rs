@@ -139,6 +139,8 @@ mod chunk_content_oracle;
 #[cfg(feature = "oracle")]
 mod chunkgen;
 #[cfg(feature = "oracle")]
+mod clock_oracle;
+#[cfg(feature = "oracle")]
 mod command_oracle;
 #[cfg(feature = "oracle")]
 mod components;
@@ -195,6 +197,8 @@ mod resume_world;
 mod saved_data;
 #[cfg(feature = "oracle")]
 mod seed_world;
+#[cfg(feature = "oracle")]
+mod sleep_oracle;
 #[cfg(feature = "oracle")]
 mod spawn;
 #[cfg(feature = "oracle")]
@@ -358,6 +362,10 @@ const WORLD_BORDER_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/WorldBord
 const SPAWN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/SpawnOracle.java";
 #[cfg(feature = "oracle")]
 const FLAT_WORLD_SOURCE: &str = "tools/mc-bamboo-vanilla/java/FlatWorldOracle.java";
+#[cfg(feature = "oracle")]
+const CLOCK_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ClockOracle.java";
+#[cfg(feature = "oracle")]
+const SLEEP_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/SleepOracle.java";
 const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路径]\n      mc-bamboo-vanilla extract [java 路径]\n      mc-bamboo-vanilla gamerules <java 路径>\n      mc-bamboo-vanilla probe <地址> <端口> [java 路径]
       mc-bamboo-vanilla oracle <java 路径> [--cases N] [--seed S] [--only <方块或类名>] [--pure] [--case I] [--show N] [--show-blocked] [--rule 名字=值] [--weather clear|rain|thunder]
       mc-bamboo-vanilla light <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
@@ -409,6 +417,8 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla chunk-content <java 路径> [--show N]
       mc-bamboo-vanilla ticket-oracle <java 路径> [--scenes N] [--seed S] [--scene I] [--detail] [--show N]
       mc-bamboo-vanilla border-oracle <java 路径> [--cases N] [--seed S] [--show N]
+      mc-bamboo-vanilla clock-oracle <java 路径> [--break-self-test] [--show N]
+      mc-bamboo-vanilla sleep-oracle <java 路径> [--break-self-test] [--show N]
       mc-bamboo-vanilla world-dir <目录> <java 路径>
       mc-bamboo-vanilla world-block <目录> <x> <y> <z> <方块名> <java 路径>
       mc-bamboo-vanilla seed-world <目录> [半径]";
@@ -498,6 +508,8 @@ fn run() -> Result<(), String> {
         ["chunk-content", java, ref options @ ..] => chunk_content_oracle(java, options),
         ["ticket-oracle", java, ref options @ ..] => ticket_oracle(java, options),
         ["border-oracle", java, ref options @ ..] => world_border_oracle(java, options),
+        ["clock-oracle", java, ref options @ ..] => clock_oracle_cli(java, options),
+        ["sleep-oracle", java, ref options @ ..] => sleep_oracle_cli(java, options),
         ["world-dir", dir, java] => world_dir_cli(dir, java),
         ["world-block", dir, x, y, z, block, java] => world_block_cli(dir, x, y, z, block, java),
         ["chunk-dump", dir, x, z, java] => chunk_dump_cli(dir, x, z, java),
@@ -1055,6 +1067,26 @@ fn world_border_oracle(java: &str, options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn world_border_oracle(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(feature = "oracle")]
+fn clock_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    clock_oracle::run(official_program(java, CLOCK_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn clock_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(feature = "oracle")]
+fn sleep_oracle_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    sleep_oracle::run(official_program(java, SLEEP_ORACLE_SOURCE)?, options)
+}
+
+#[cfg(not(feature = "oracle"))]
+fn sleep_oracle_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 

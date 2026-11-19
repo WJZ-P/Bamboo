@@ -217,7 +217,7 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
             rules: global.block_rules,
             difficulty: global.difficulty as i32,
-            sky_darken: 0,
+            sky_darken: global.sky_darken,
             game_time,
             ..ViewFacts::default()
         };
@@ -641,6 +641,15 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
             Effect::OpenCommandBlock { pos } => {
                 if let Some(id) = initiator {
                     crate::command_block::open(region, id, pos);
+                }
+            }
+            Effect::SleepInBed {
+                pos,
+                set_spawn,
+                problem,
+            } => {
+                if let Some(id) = initiator {
+                    crate::sleep::on_sleep_in_bed(region, id, pos, set_spawn, problem);
                 }
             }
         }
