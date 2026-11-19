@@ -76,9 +76,11 @@ mod outgoing;
 mod pacing;
 mod partition_stats;
 mod player;
+pub mod player_consume;
 pub mod player_death;
 pub mod player_effects;
 pub mod player_environment;
+pub mod player_exhaustion;
 mod player_grid;
 pub mod player_health;
 pub mod player_hurt;
@@ -2189,6 +2191,192 @@ pub fn replay_player_env(scene: &ReplayPlayerEnv) -> (Vec<PlayerEnvStep>, Vec<Ve
             }
         }
         packets.push(step);
+    }
+    (steps, packets)
+}
+
+/// S4 吃东西对拍场景。
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ReplayPlayerConsume {
+    pub ticks: usize,
+    pub item: i32,
+    pub start_food: i32,
+    pub break_duration: bool,
+    pub break_food: bool,
+    pub break_remainder: bool,
+}
+
+/// S4 逐刻状态。
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerConsumeStep {
+    pub hp: i32,
+    pub food: i32,
+    pub sat: i32,
+    pub exh: i32,
+    pub item: i32,
+    pub count: i32,
+    pub using: i32,
+    pub effects: Vec<[i32; 3]>,
+}
+
+/// S4 吃东西场景的正式重放。
+#[cfg(feature = "oracle-samples")]
+pub fn replay_player_consume(
+    scene: &ReplayPlayerConsume,
+) -> (Vec<PlayerConsumeStep>, Vec<Vec<Vec<u8>>>) {
+    use mc_bamboo_core::{Hand, Vec3};
+    use mc_bamboo_protocol::{
+        item::ItemStack,
+        packet::play::{ClientInformation, GameMode, SetHealth},
+    };
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl inbound::PlayerSink for Capture {
+        fn send(&mut self, frames: outgoing::Outgoing) -> bool {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(frames.to_raw_bytes());
+            true
+        }
+        fn close(&mut self) {}
+    }
+    let take = |capture: &Capture| -> Vec<Vec<u8>> {
+        let bytes = std::mem::take(&mut *capture.0.lock().unwrap());
+        let mut rest = bytes.as_slice();
+        let mut out = Vec::new();
+        while !rest.is_empty() {
+            let Some(bounds) = mc_bamboo_protocol::frame::find_frame(
+                rest,
+                mc_bamboo_protocol::frame::MAX_FRAME_LEN,
+            )
+            .ok()
+            .flatten() else {
+                break;
+            };
+            let end = bounds.header_len + bounds.payload_len;
+            out.push(rest[bounds.header_len..end].to_vec());
+            rest = &rest[end..];
+        }
+        out
+    };
+    let mut region = region::Region::new(2, 20, false);
+    let id = inbound::PlayerId(1 << 24);
+    let mut player = player::Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Oracle0".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    player.health.food.food_level = scene.start_food;
+    player.random =
+        mc_bamboo_blocks::entity::JavaRandom::new(mc_bamboo_blocks::entity::ENTITY_RANDOM_SEED);
+    let slot = player.inventory.hand_slot(Hand::Main);
+    player.inventory.slots[slot] = ItemStack::new(scene.item, 1);
+    let capture = Capture::default();
+    region.links.add(id, Box::new(capture.clone()));
+    region.insert_player(player);
+    region.links.send(
+        id,
+        &SetHealth {
+            health: 20.0,
+            food: scene.start_food,
+            saturation: 5.0,
+        },
+    );
+    region.links.flush();
+    let _ = take(&capture);
+    if let Some(p) = region.players.get_mut(&id) {
+        p.health_sync = player_hurt::HealthSync::of(p);
+    }
+    let step_of = |p: &player::Player| -> PlayerConsumeStep {
+        let held = p.inventory.held(Hand::Main);
+        PlayerConsumeStep {
+            hp: p.health.health.to_bits() as i32,
+            food: p.health.food.food_level,
+            sat: p.health.food.saturation.to_bits() as i32,
+            exh: p.health.food.exhaustion.to_bits() as i32,
+            item: held.item,
+            count: held.count,
+            using: p.use_item.as_ref().map_or(0, |u| u.remaining),
+            effects: p
+                .effects
+                .entries()
+                .iter()
+                .map(|e| [e.effect, e.duration, e.amplifier])
+                .collect(),
+        }
+    };
+    let mut steps = vec![step_of(&region.players[&id])];
+    let mut packets: Vec<Vec<Vec<u8>>> = vec![Vec::new()];
+    // `startUsingItem` 在 tick 1 开始（官方 `handleUseItem` 之后）。
+    player_consume::start(&mut region, id, Hand::Main);
+    if scene.break_remainder {
+        // 改坏确认：把 `use_remainder` 换成一个错误的物品 ID。
+        region.players.get_mut(&id).expect("player").inventory.slots[slot].count = 2;
+    }
+    if scene.break_duration
+        && let Some(p) = region.players.get_mut(&id)
+        && let Some(using) = p.use_item.as_mut()
+    {
+        using.remaining += 1;
+    }
+    let mut last_sent = 20.0_f32;
+    for _ in 1..=scene.ticks {
+        let sync_before = region.players.get(&id).map(|p| p.health_sync);
+        // 假世界的 `playConsume` 不跑 `LivingEntity.baseTick`，所以这里也
+        // 不推进效果表；只跑吃东西的剩余刻数。
+        player_consume::tick(&mut region);
+        if scene.break_food {
+            region
+                .players
+                .get_mut(&id)
+                .expect("player")
+                .health
+                .food
+                .food_level = 0;
+        }
+        let p = &region.players[&id];
+        let hp = p.health.health;
+        let already = sync_before.is_some_and(|before| before != p.health_sync);
+        let changed = hp.to_bits() != last_sent.to_bits();
+        if changed && !already {
+            region.links.send(
+                id,
+                &SetHealth {
+                    health: hp,
+                    food: p.health.food.food_level,
+                    saturation: p.health.food.saturation,
+                },
+            );
+            region.players.get_mut(&id).expect("player").health_sync = player_hurt::HealthSync {
+                health: hp,
+                food: p.health.food.food_level,
+                saturation_zero: p.health.food.saturation == 0.0,
+            };
+        }
+        if changed || already {
+            last_sent = hp;
+        }
+        steps.push(step_of(&region.players[&id]));
+        region.links.flush();
+        // 假世界没有物品栏容器桩，`container_set_slot` 两边都不比。
+        let filtered: Vec<Vec<u8>> = take(&capture)
+            .into_iter()
+            .filter(|body| {
+                mc_bamboo_protocol::codec::decode_varint(body).is_ok_and(|(packet, _)| {
+                    packet != mc_bamboo_data::packets::play::clientbound::CONTAINER_SET_SLOT
+                })
+            })
+            .collect();
+        packets.push(filtered);
     }
     (steps, packets)
 }

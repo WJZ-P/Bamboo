@@ -154,6 +154,10 @@ pub(crate) struct Player {
     ///
     /// `Entity` environment state: fire, air, powder-snow freeze. All relative counters.
     pub(crate) environment: crate::player_environment::Environment,
+    /// `LivingEntity.useItem` / `useItemRemaining`：正在吃东西 / 喝东西。
+    pub(crate) use_item: Option<crate::player_consume::UsingItem>,
+    /// 这一刻累计的饥饿消耗，`player_exhaustion::flush` 在 tick 末尾写入。
+    pub(crate) pending_exhaustion: f32,
     /// `ServerPlayer.lastSentHealth` / `lastSentFood` / `lastFoodSaturationZero` 的合并快照。
     /// 官方构造时是 -1e8 / -99999999 / true，进服第一刻必发一包 `set_health`。
     ///
@@ -263,6 +267,8 @@ impl Player {
             health: PlayerHealth::default(),
             effects: EffectMap::new(),
             environment: crate::player_environment::Environment::default(),
+            use_item: None,
+            pending_exhaustion: 0.0,
             health_sync: crate::player_hurt::HealthSync::INITIAL,
             in_combat: false,
             combat_entries: Vec::new(),

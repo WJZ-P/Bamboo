@@ -3100,6 +3100,10 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     // `Entity.baseTick` / `LivingEntity.baseTick` 的环境伤害：着火、溺水、
     // 卡墙、虚空、仙人掌 / 甜浆果 / 岩浆块、细雪冻伤。
     crate::player_environment::tick_environment(region);
+    // `LivingEntity.updateUsingItem`：吃东西的剩余刻数和完成结算。
+    crate::player_consume::tick(region);
+    // 移动 / 跳跃 / 攻击 / 挖掘累计的饥饿消耗在 tick 末尾落到 FoodData。
+    crate::player_exhaustion::flush(region);
     // 官方 `ServerPlayer.doTick`：总经验变了就给这名玩家补一包 `set_experience`。
     //
     // Official `ServerPlayer.doTick`: a changed total sends one `set_experience`.

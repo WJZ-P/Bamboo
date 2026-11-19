@@ -215,8 +215,10 @@ impl EntitySync {
 }
 
 /// tick 第 3 阶段：`head_yaw`、姿势、元数据脏标记。`entities.md` 第 13 节。
-/// `Entity.ENTITY_FLAG_ON_FIRE`（共享标志位第 0 位）。
+/// `Entity` 的共享标志位：着火 0、潜行 1、隐身 2、发光 6。
 const ENTITY_FLAG_ON_FIRE: u8 = 0x01;
+const ENTITY_FLAG_INVISIBLE: u8 = 0x04;
+const ENTITY_FLAG_GLOWING: u8 = 0x40;
 
 pub(crate) fn update_derived_state(region: &mut Region) {
     for player in region.players.values_mut() {
@@ -226,6 +228,24 @@ pub(crate) fn update_derived_state(region: &mut Region) {
             player.sync.shared_flags |= ENTITY_FLAG_ON_FIRE;
         } else {
             player.sync.shared_flags &= !ENTITY_FLAG_ON_FIRE;
+        }
+        // `LivingEntity.updateInvisibilityStatus` / `updateGlowingStatus`：
+        // 效果表有隐身 / 发光时置位，效果消失时清位。
+        for (flag, effect) in [
+            (
+                ENTITY_FLAG_INVISIBLE,
+                mc_bamboo_data::registries::mob_effect::INVISIBILITY,
+            ),
+            (
+                ENTITY_FLAG_GLOWING,
+                mc_bamboo_data::registries::mob_effect::GLOWING,
+            ),
+        ] {
+            if player.effects.has(effect) {
+                player.sync.shared_flags |= flag;
+            } else {
+                player.sync.shared_flags &= !flag;
+            }
         }
         player.sync.metadata_dirty |= Metadata::of(player) != player.sync.sent_metadata;
     }

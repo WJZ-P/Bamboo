@@ -250,16 +250,30 @@ fn apply_action(region: &mut Region, id: PlayerId, effect: i32, action: EffectAc
     }
 }
 
-/// `FoodData.eat(nutrition, saturation)`：`food = min(food + n, 20)`，
-/// `saturation = min(saturation + n * s * 2, food_level)`。
-///
-/// Vanilla `FoodData.eat`: food and saturation are both clamped.
+/// `FoodData.eat(int, float)`（饱和效果走这条）：
+/// `food = min(food + n, 20)`，`saturation = min(saturation + n * s * 2, food_level)`。
 pub(crate) fn eat(region: &mut Region, id: PlayerId, nutrition: i32, saturation: f32) {
+    add_food(
+        region,
+        id,
+        nutrition,
+        nutrition.max(0) as f32 * saturation * 2.0,
+    );
+}
+
+/// `FoodData.eat(FoodProperties)`：物品组件的 `saturation` 已经是
+/// `nutrition * modifier * 2`，直接传给 `add`，不要再乘。
+///
+/// The item component's saturation is already `nutrition * modifier * 2`.
+pub(crate) fn eat_food(region: &mut Region, id: PlayerId, nutrition: i32, saturation: f32) {
+    add_food(region, id, nutrition, saturation);
+}
+
+fn add_food(region: &mut Region, id: PlayerId, nutrition: i32, saturation: f32) {
     if let Some(player) = region.players.get_mut(&id) {
         let food = &mut player.health.food;
-        food.food_level = (food.food_level + nutrition.max(0)).min(20);
-        food.saturation = (food.saturation + nutrition.max(0) as f32 * saturation * 2.0)
-            .min(food.food_level as f32);
+        food.food_level = (food.food_level + nutrition.max(0)).clamp(0, 20);
+        food.saturation = (food.saturation + saturation).clamp(0.0, food.food_level as f32);
     }
 }
 

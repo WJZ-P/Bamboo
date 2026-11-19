@@ -163,3 +163,35 @@ Bamboo 重放侧的局部常量 / 分支，不改官方一侧、不删用例、�
   在报告里明说。
 - 客户端传来的物品组件补丁格式非法时按 `defaults::resolve` 已有行为返回 `None`，
   不 panic；命令参数越界由命令图解析器拒绝。
+
+## 实施进度与已知差异（2026-11-20）
+
+S1–S6 已落地。逐刻对拍：`mob-oracle` 148 例 55038 刻 0 不一致（原有 117 例
+52844 刻全保持），`move-oracle` 59 例 0，`player-data` 3098 检查 500 例，
+`entity-oracle` 40 例 748 步。每个子期各有 3 处故意改坏确认。
+
+### 火焰方块与 `applyEffectsFromBlocks` 的对拍边界
+
+`env_*` / `consume_*` 场景族按官方字节码**拆成独立入口**调用，不跑完整的
+`ServerPlayer.tick()`（假世界缺连接层、区块票和推进系统）。比较的字段只由这几段
+决定：
+
+- `env_*`：官方 `LivingEntity.baseTick`（反射） + `Entity.applyEffectsFromBlocks(
+  position, position)`（公开的官方入口，只走灭火后的 `-getFireImmuneTicks()` 分支），
+  加 `LivingEntity.causeFallDamage` 的摔落场景。火焰 / 岩浆 / 仙人掌 / 甜浆果 /
+  岩浆块 / 细雪的方块内效果由牛的 `mob-oracle` 场景（`motion.rs` 同一套纯判定）和
+  Rust 单测覆盖，没有放进这个场景族。**未跑的段**：`Entity.move` 的完整物理、
+  `ServerPlayer.doTick` 的其它阶段；它们不影响这里比较的字段。
+- `consume_*`：官方 `ServerPlayer.startUsingItem` + 反射 `updateUsingItem(ItemStack)`；
+  吃 / 喝音效与粒子、`startUsingItem` 的装备 / 元数据动画包、物品栏容器同步包
+  两侧都不比（假世界只有一名玩家、没有容器桩），由 Rust 单测覆盖组件与状态。
+
+### 仍待做
+
+- `/effect` 命令反馈的逐字节对拍（command-oracle 现在只比选择器）。
+- 牛挂效果后的运动逐刻对拍（漂浮 / 缓降 / 速度）：`living::travel` 已按
+  `getEffectiveGravity` / `getJumpBoostPower` 接上，缺少对应的 Java 场景。
+- 喷溅 / 滞留药水、药箭、信标、潮涌、怪附带效果、紫颂果随机传送、
+  `RemoveEffects` / `PlaySound` 两种 `ConsumeEffect`、效果引起的完整移动物理改写。
+- 游泳 / 水中 / 攀爬 / 滑翔的移动消耗分支：纯函数已按官方系数实现，
+  游戏路径目前只接地面（疾跑 / 走路）分支。

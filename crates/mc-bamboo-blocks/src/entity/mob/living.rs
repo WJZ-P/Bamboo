@@ -10,7 +10,7 @@
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{
     FluidTag,
-    registries::attribute,
+    registries::{attribute, mob_effect},
     tags::{block_tags, fluid_tags},
 };
 
@@ -854,7 +854,12 @@ fn block_jump_factor(me: &Entity, view: &dyn BlockView) -> f32 {
 /// `jumpFromGround`。
 fn jump_from_ground(me: &mut Entity, mob: &Mob, view: &dyn BlockView) {
     let strength = mob.attributes.value(attribute::JUMP_STRENGTH) as f32;
-    let power = strength * 1.0 * block_jump_factor(me, view) + 0.0;
+    // `LivingEntity.getJumpBoostPower()`：每级 +0.1。
+    let boost = mob
+        .effects
+        .amplifier(mob_effect::JUMP_BOOST)
+        .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0));
+    let power = strength * 1.0 * block_jump_factor(me, view) + boost;
     if power <= 1.0e-5 {
         return;
     }
@@ -875,6 +880,20 @@ fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) 
     } else {
         travel_in_air(me, mob, ctx, input);
     }
+    // `LivingEntity.travel` 的漂浮分支：
+    // `y += 0.05*(amplifier+1) + 0.2*(y_after_friction - y_before)`。
+    if let Some(amplifier) = mob.effects.amplifier(mob_effect::LEVITATION) {
+        let before = me.old_position.y;
+        let _ = before;
+        let target = 0.05 * f64::from(amplifier.max(0) + 1);
+        let delta = me.delta;
+        let lift = target + (delta.y - target) * 0.2;
+        me.delta = Vec3::new(delta.x, lift, delta.z);
+    }
+    // `LivingEntity.aiStep`：缓降 / 漂浮每刻清 `fallDistance`。
+    if mob.effects.has(mob_effect::SLOW_FALLING) || mob.effects.has(mob_effect::LEVITATION) {
+        me.fall_distance = 0.0;
+    }
 }
 
 /// `computeModifiedFriction`。
@@ -883,11 +902,16 @@ fn modified_friction(friction: f32, modifier: f32) -> f32 {
 }
 
 /// `getEffectiveGravity`：读调用时的速度。
-fn effective_gravity(_me: &Entity, mob: &Mob) -> f64 {
+fn effective_gravity(me: &Entity, mob: &Mob) -> f64 {
     if mob.no_gravity {
-        0.0
+        return 0.0;
+    }
+    let gravity = mob.attributes.value(attribute::GRAVITY);
+    // `LivingEntity.getEffectiveGravity`：下落时缓降把重力压到 0.01。
+    if me.delta.y <= 0.0 && mob.effects.has(mob_effect::SLOW_FALLING) {
+        gravity.min(0.01)
     } else {
-        mob.attributes.value(attribute::GRAVITY)
+        gravity
     }
 }
 

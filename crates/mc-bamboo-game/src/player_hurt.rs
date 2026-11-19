@@ -447,6 +447,8 @@ pub(crate) fn on_attack(region: &mut Region, id: PlayerId, entity_id: i32) {
         return;
     }
     let held = player.inventory.held(Hand::Main).clone();
+    // `Player.attack` 命中实体：0.1 点饥饿消耗。
+    crate::player_exhaustion::add_in(region, id, crate::player_exhaustion::ATTACK);
     let amount = crate::player_health::PlayerHealth::attack_damage(&held);
     let mut source = DamageSource::player(id.0, position, false);
     if !held.is_empty()

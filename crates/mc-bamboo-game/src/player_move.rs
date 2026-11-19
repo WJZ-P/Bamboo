@@ -580,6 +580,22 @@ fn apply_change(
     player.on_ground = change.on_ground;
     player.motion.client_horizontal_collision = change.horizontal_collision;
     let client_delta = change.target.subtract(start);
+    // `ServerPlayer.checkMovementStatistics`：按客户端报告的位移算消耗的厘米数。
+    let sprinting = player.sync.shared_flags & ENTITY_FLAG_SPRINTING != 0;
+    if let Some(amount) = crate::player_exhaustion::movement(
+        client_delta.x,
+        client_delta.y,
+        client_delta.z,
+        false, // 游泳 / 水中判定由方块层提供，当前简化为地面分支
+        false,
+        false,
+        false,
+        player.on_ground,
+        sprinting,
+        false,
+    ) {
+        crate::player_exhaustion::add(player, amount);
+    }
     let was_airborne = player.motion.fall_distance > 0.0;
     record_fall(
         &mut player.motion.fall_distance,
@@ -739,6 +755,9 @@ fn jump_from_ground(player: &mut Player) {
     if power <= 1.0e-5 {
         return;
     }
+    // `ServerPlayer.jumpFromGround`：疾跑 0.2 / 走路 0.05 点饥饿消耗。
+    let sprinting = player.sync.shared_flags & ENTITY_FLAG_SPRINTING != 0;
+    crate::player_exhaustion::add(player, crate::player_exhaustion::jump(sprinting));
     let mut delta = player.motion.delta;
     delta.y = f64::from(power).max(delta.y);
     if player.sync.shared_flags & ENTITY_FLAG_SPRINTING != 0 {
