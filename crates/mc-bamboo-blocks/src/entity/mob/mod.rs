@@ -13,6 +13,7 @@
 pub mod attributes;
 pub mod control;
 pub mod damage;
+pub mod effects;
 pub mod goals;
 pub mod interact;
 pub mod living;
@@ -28,6 +29,7 @@ use mc_bamboo_core::{BlockPos, Vec3};
 use self::{
     attributes::Attributes,
     control::{BodyRotationControl, JumpControl, LookControl, MoveControl},
+    effects::EffectMap,
     goals::GoalSelector,
     navigation::Navigation,
     path::Malus,
@@ -558,6 +560,10 @@ pub struct Mob {
     /// kept verbatim from disk and written back.
     pub passthrough: Vec<(String, mc_bamboo_nbt::Tag)>,
     // ---- LivingEntity ----
+    /// `activeEffects`。只存相对剩余刻数，整行随实体搬，不需要时钟平移。
+    ///
+    /// `activeEffects`. Relative countdowns only; moved with the entity row.
+    pub effects: EffectMap,
     pub attributes: Attributes,
     pub health: f32,
     pub dead: bool,
@@ -697,6 +703,7 @@ impl Mob {
             portal_cooldown: 0,
             tags: Vec::new(),
             passthrough: Vec::new(),
+            effects: EffectMap::new(),
             attributes,
             health,
             dead: false,

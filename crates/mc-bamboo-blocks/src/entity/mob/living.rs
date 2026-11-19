@@ -20,6 +20,7 @@ use super::{
         self, MAX_HEAD_Y_ROT, Operation, clamp_x_rot, look_x_rot, look_y_rot, move_rotlerp,
         rotate_towards,
     },
+    effects::EffectAction,
     goals::Flag,
     motion,
     navigation::NavMob,
@@ -333,6 +334,7 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     mob.y_head_rot_o = mob.y_head_rot;
     mob.y_body_rot_o = mob.y_body_rot;
+    tick_effects(me, mob, ctx);
     // `Mob.baseTick`：先取随机数，再拿自增前的值比较。
     if is_alive(me, mob) {
         let roll = me.random.next_int_bounded(1000);
@@ -350,6 +352,84 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             );
         }
     }
+}
+
+/// `LivingEntity.tickEffects` → `MobEffectInstance.tickServer`。
+/// 动作里真正要 `hurtServer` 的中毒 / 凋零走生物自己的受伤入口，其余直接改状态。
+///
+/// `LivingEntity.tickEffects` → `MobEffectInstance.tickServer`. Poison and
+/// wither damage go through the mob's own hurt path; the rest change state here.
+fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let events = mob.effects.tick(me.tick_count);
+    if events.attributes_changed {
+        mob.effects.rebuild_attributes(&mut mob.attributes);
+        let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
+        if mob.health > max {
+            mob.health = max;
+        }
+    }
+    let mut hurts = Vec::new();
+    for tick in events.actions {
+        match tick.action {
+            EffectAction::Heal(amount) | EffectAction::InstantHeal(amount) => {
+                if mob.health < mob.attributes.value(attribute::MAX_HEALTH) as f32 {
+                    let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
+                    mob.health = (mob.health + amount).min(max);
+                }
+            }
+            EffectAction::MagicDamage(amount) => {
+                // `PoisonMobEffect`：血量高于 1 才真的打一次。
+                if mob.health > 1.0 {
+                    hurts.push((DamageKind::Magic, amount));
+                }
+            }
+            EffectAction::WitherDamage(amount) => hurts.push((DamageKind::Magic, amount)),
+            EffectAction::InstantDamage(amount) => hurts.push((DamageKind::Magic, amount)),
+            EffectAction::Exhaustion(_) | EffectAction::Eat { .. } => {
+                // 牛没有 `FoodData`，官方的 `HungerMobEffect` 和
+                // `SaturationMobEffect` 也只在目标是 `Player` 时做事。
+                // A cow has no `FoodData`; these effects only act on players.
+            }
+            EffectAction::Absorption(amount) => {
+                mob.absorption = mob.absorption.max(amount);
+            }
+            EffectAction::AbsorptionEnded => {
+                mob.effects.remove(tick.effect);
+            }
+        }
+    }
+    for (kind, amount) in hurts {
+        hurt_server(me, mob, ctx, DamageSource::environment(kind), amount);
+    }
+}
+
+/// `LivingEntity.addEffect`：给一头生物挂一个效果，刷新属性。
+///
+/// `LivingEntity.addEffect`: adds an effect to a mob and refreshes attributes.
+pub fn add_effect(mob: &mut Mob, instance: super::effects::EffectInstance) -> bool {
+    let events = mob.effects.add(instance);
+    if events.attributes_changed {
+        mob.effects.rebuild_attributes(&mut mob.attributes);
+    }
+    !events.changes.is_empty()
+}
+
+/// `LivingEntity.removeAllEffects`。
+pub fn clear_effects(mob: &mut Mob) -> bool {
+    let events = mob.effects.remove_all();
+    if events.attributes_changed {
+        mob.effects.rebuild_attributes(&mut mob.attributes);
+    }
+    !events.changes.is_empty()
+}
+
+/// `LivingEntity.removeEffect`。
+pub fn remove_effect(mob: &mut Mob, effect: i32) -> bool {
+    let events = mob.effects.remove(effect);
+    if events.attributes_changed {
+        mob.effects.rebuild_attributes(&mut mob.attributes);
+    }
+    !events.changes.is_empty()
 }
 
 /// `AbstractCow.getSoundVolume()`：叫声、受伤和死亡都用这个音量。
