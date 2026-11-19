@@ -634,6 +634,7 @@ Rust 不能安全地杀线程，也不用 `unsafe`。判死时线程池把那条
 | 9 | ✅ **已完成（2026-11-17）**：新 `region/island_split.rs`（`Region::split_off_island(chunks, players, random)` / `absorb_island(other, delta)`、`IslandPart`、`IslandRandom`），`Island::split_off_island` / `absorb_island` 再分区块信箱、存盘名单和报告；每一类怎么拆、怎么并、要不要平移见 3.3「第 9 步做完以后」，随机源的待定事项见 3.3「岛的随机源」；`rebase_clock` 有了正式调用者，去掉 `expect(dead_code)`。实测见表下「第 9 步的实测」。**岛的拆合（离线）**：`Region::split_off_island(chunks, players)` / `absorb_island(other, delta)`，补齐 3.3 表里缺的零件；还不在运行时调用 | 实际：`region/island_split.rs`（新）、`region.rs`、`island.rs`、`mc-bamboo-world` 的 `store.rs` / `light/{mod,level,storage}.rs`、`mc-bamboo-blocks` 的 `entity/store.rs` / `ticks.rs` / `block_entity.rs` / `block_entity/watch.rs` / `level.rs`、`tick_levels.rs`、`entity_tracking.rs`、`entity_sync.rs`、`player_grid.rs`、`links.rs`、`lectern.rs`、`chunk_encoding/cache.rs`、`region/dirty.rs`、`region/partition.rs`、`profiler.rs`、新测试 `world/island_split_tests.rs`；没动 `region/unit.rs`（单元拆合原样保留，岛的拆合另起一套入口） | 不变（运行时不调） | 拆了再合的内容指纹（方块、方块实体、计划刻含顺序、实体去掉网络 ID、容器、追踪配对）逐位相同；平移和不平移的对照；微基准：1000 个区块的拆 / 合耗时（目标 < 5 ms） | 大（实际 ~3400，含测试） | 否 |
 | 10 | ✅ **已完成（2026-11-18）**：a、b、c 段（混合驱动 5.5、判死 5.6、整个世界的命令 4.5）和 d 段（测量、**缺省打开**：`islands = true`，`island_threads` 缺省改成逻辑核数的一半、夹在 2 到 8 之间）。实测见表下「第 10 步的实测」和 `docs/profiling.md` 第 16 节。 **多岛上线（验收后缺省开）**：分区器驱动真实的拆合；交付按岛路由、合并后再交付；进服 / 离开 / 跨岛 `/tp` 走离境和到达；聊天、全局帧、跨岛命令扇出；`bamboo.toml` 加 `islands`，**这一步验收通过后缺省改成 `true`**，`islands = false` 保留给对拍和测试 | `world.rs`、`director_host.rs`、`island_partition.rs`、`island_pool.rs`、`command/teleport.rs`、`secure_chat/deliver.rs`、`chat.rs`、`command/*`、`docs/configuration.md` | 打开时：第 13 节差异清单新增的几条 | 第 6.2 节的多岛测试；**缺省配置（多岛开）下全套测试和探针都过**，显式精确模式下逐位一致照旧；`islands-K` 和第 14 节基线对比 | 大（~1500） | **是**（`Deliver` 的目标岛） |
 | 11 | ✅ **已完成（2026-11-18）**：端到端服务端测试跟着进程选的配置跑（缺省多岛、`BAMBOO_ISLANDS=0 BAMBOO_ISLAND_THREADS=0` 精确），新增相距很远的玩家的端到端测试；上一段为多岛放宽的两条测试收紧到「只有真的跨岛的那一步多给一刻」；新场景 `islands-roam`（6 个营地、40 名飞来飞去、断线重连、聊天、发命令的假玩家，控制台定时 `/tp`、`/setblock` 等）和 `run-long.sh` / `summarize-long.py` / `compare-roam.sh`；release 构建在 `BAMBOO_PROFILE_ISLANDS=2` 时也断言多岛不变量；修了长时间压测撞出的两个问题（人多的大岛永远拆不开；跨岛搬人 / 搬实体不等回执交回导致 panic）；`islands-1` 的慢态查清和多岛无关；迟滞参数和 `island_threads` 的缺省按数据不改。实测见表下「第 11 步的实测」和 `docs/profiling.md` 第 17 节。**长时间压力验收和调参**：长时间压力、合并拆分频率和等待时间（总设计稿 17.2）、分区器迟滞参数和 `island_threads` 的缺省值按测量调整、把差异写进第 13 节。缺省值已在第 7、10 步改过，这一步不再改开关 | 实际：`island_partition.rs`（取消规则、调参用的环境变量）、`world/island_runtime.rs`（搬人 / 搬实体等回执、release 下的不变量断言）、`world.rs`、`director_host.rs`、`chunk_tracking.rs`、`command/teleport.rs`（注释）、测试（`island_partition.rs`、`world/island_hybrid_tests.rs`、`world/tests.rs`、`interaction/tests.rs`、`chunk_encoding/cache/tests.rs`、`mc-bamboo-server/tests/`）、`tools/mc-bamboo-loadtest`、文档 | 打开时：第 13 节第 11 条第 ⑪ 项 | 见 6.2；本步验收见表下 | 中 | 否 |
+| 12 | ✅ **已完成（2026-11-19）**：可重复的规模基准 + 分段计时（`world/island_split_bench.rs`）；`pos_map.rs` 按区块索引、实体 / 方块实体 / 红石的 `by_chunk`、`split_parts` 按 section 枚举、高度图 / 光照柱装箱与便宜哈希、`TickLevels` 批量集合拆合、去掉只测试读的有序副本；`island_world_command` 指标；`TickQueue` 批量重建；修掉「玩家跟踪着别的岛的区块」；主控区块交付只调研（`docs/profiling.md` 第 18 节）。实测见本节「第 12 步的实测」 | `pos_map.rs`、`region/island_split.rs`、`world/island_runtime.rs`、`world/island_split_bench.rs`、`world/island_runtime_tests.rs`、`island.rs`、`profiler.rs`、`tick_levels.rs`、`mc-bamboo-blocks` 的 `ticks.rs` / `block_entity.rs` / `entity/store.rs` / `level.rs`、`mc-bamboo-world` 的 `chunk.rs` / `light/storage.rs` / `store.rs`、`summarize-long.py`、文档 | 齐步 / 精确逐位一致；多岛下修了拆分分人口径（按视野中心而非瞬时位置） | 见本节「第 12 步的实测」；改坏确认：7 类索引各漏一项、23 类 `IslandPart` 漏搬、计划刻队列两条路径逐条对照 + 成员判定恒假、3 条不变量回归测试各带改坏钩子 | 中 | 否 |
 
 **第 1–3 步的实测（2026-11-17）**：6.1 的验收全过（`cargo test --workspace` + `BAMBOO_TEST_LOADED=1` 共 4313 个测试 0 失败，11 个对拍 0 不一致，`oracle java` 两种配置 10114 / 0 fail，hy4 探针和 `--loaded` 两遍共 5 次 719/719）。性能同轮 A-B-A（第 0 步合并点对第 3 步末），每场景 5 轮、每次 20 秒，逐轮 `tick_total` 均值比的中位数：`islands-1` 0.904、`spread-16` 1.018、`normal-20-walk` 1.022；同机 A/A 对照（`islands-1`）0.956，单轮范围 0.84–1.07，三个场景都在噪声内。微基准 7 轮 A-B 交替：`cache_bench`（关缓存）0.994；`ticks_bench` 总中位数 1.010（rolling 1.006 / 1.018 / 1.034），只改了计划刻热路径上「最近排刻时刻」的编码，单独对照这一处是中性的，剩下的差别只出现在测试二进制里（第 3 步往同一个测试二进制加了不少测试代码），正式二进制的 `cache_bench` 没有。
 
@@ -669,14 +670,14 @@ Rust 不能安全地杀线程，也不用 `unsafe`。判死时线程池把那条
 2. ~~`/kill`、`/execute`~~、`/data` 还没有；~~`@e` 只选得到玩家~~；命令方块不执行命令。`/kill`、`/execute` 和选中非玩家实体的 `@e` 已经在 `main` 上，按 4.5 的范围表走主控；还没有的是 `/data` 和命令方块执行命令。
 3. 只有主世界一个维度。
 4. 一个岛落后时，所有玩家命令、控制台命令、改规则包、`/save-all` 都等它回来才执行（5.5），别处发的命令跟着晚。
-5. 要整个世界的命令（4.5 的范围表里的 `World`：`setblock`、`fill`、`clone`、`summon`、`loot`、`gamemode`、`defaultgamemode`、`enchant`、`execute`、`kill`、`teleport`、`tp`，`main` 上从 7 条变成了 12 条）在有不止一个岛时每次让那一刻多花「每 1000 个已加载区块约 6.5 ms」；长时间压测里两万多个已加载区块时拼 / 拆最长 125 / 248 ms（`docs/profiling.md` 17.3）。
+5. ~~要整个世界的命令…每 1000 个已加载区块约 6.5 ms / 最长 125 / 248 ms~~。第 12 步把代价压到「只和搬动的内容成正比」（微基准 `docs/profiling.md` 18.2：4 岛 × 4900 dense 拼 / 拆 39 / 90 → 21 / 49 ms，sparse 24 / 46 → 6.8 / 13.2 ms；真实 3 分钟压测拼 / 拆 mean 1.37 / 1.39 ms）。**仍然是限制**：4.5 的范围语义没改，一次命令仍要把全部岛的 `Region` 搬两遍，dense 上界仍 ≈ 70 ms（目标 20 ms），再往下要改成只读视图或缩小命令范围（18.4）。
 6. 判死丢掉那一片上次存盘之后的改动（5.6）；正常负载下没有触发过，第 11 步一小时的长时间压力里也是 0 次。
 7. ~~分区器的迟滞参数（4×4 网格、2 / 4 / 200 刻）只在 `islands-shuttle` 这种规则的进出上量过，没在长时间的真实轨迹上验证（第 11 步）~~。第 11 步在 `islands-roam` 的真实聚散轨迹上量过，修了一个让人多的大岛永远拆不开的问题，参数的结论见下面「第 11 步的实测」。
 8. `island_threads` 的缺省值第一次启动时写进 `bamboo.toml`，把服务器目录搬到核数不同的机器上不会重算；桌面端设置页没有 `island_dead_seconds`。
 9. `docs/profiling.md` 第 14 节的岛基线和 `docs/performance-optimizations.md` 第 22 节的 `islands-8` 数字是在「假玩家全部留在第 0 组」的场景下量的（见 `docs/profiling.md` 16.1），机器和掉落物照样分在各组，但玩家没有分开。
 10. （第 11 步新增）很多人在相距很远的几处之间来回跑时，路上的人和他们身后还没收回的区块不断把几处连起来，大多数时候只有一个岛，并行的收益有限（`docs/profiling.md` 17.3）；多岛的收益在玩家各自长时间待在远处时最大。
-11. （第 11 步新增）大岛的拆分单次耗时和岛的总大小成正比：两万个区块的岛拆一块要几十到上百毫秒（最大 162 ms，负载高时），那一刻相应变长。
-12. （第 11 步新增）一次没查清的不变量失败：修跨岛搬人的问题之前的一次 4 分钟试跑里，断言报「玩家跟踪着别的岛的区块」；之后 20 分钟和一小时两轮（全程断言）都没再出现，断言消息已补上定位用的信息（`docs/profiling.md` 17.7）。
+11. ~~（第 11 步新增）大岛的拆分单次耗时和岛的总大小成正比…最大 162 ms~~。第 12 步改成按区块索引、只遍历要搬的键：2 万个区块拆 400 块 dense 10.20 → 1.77 ms、sparse 1.44 → 0.37 ms，对半拆 dense 56.67 → 31.87 ms（`docs/profiling.md` 18.2）。对半拆仍和「被搬走的一半」成正比，这是下界。
+12. ~~（第 11 步新增）一次没查清的不变量失败…没再出现~~。第 12 步写了确定性测试，在正常路径上复现了原文，查清根因是「拆分按瞬时位置分人、视野要到下一刻才跟上」，已修并加 3 条回归测试 + 改坏确认（`docs/profiling.md` 18.5、17.7 保留历史记录）。
 
 **第 11 步的实测（2026-11-18）**：数字和口径在 `docs/profiling.md` 第 17 节，这里只记结论和验收。
 
@@ -687,6 +688,55 @@ Rust 不能安全地杀线程，也不用 `unsafe`。判死时线程池把那条
 - **调参**：迟滞 200 → 60 刻、拆分距离 4 → 3 和缺省交替比较，岛数、拆合次数、每刻耗时都在噪声内，限制岛数的是一直有人把几处连着，不是参数，**三个参数都不改**；合并拆分没有显式的频率上限，实测频率和等待（每小时各 50–150 次、最多等 3 刻）不需要加；`island_threads` 在低负载时复测，4 条以后收益很小、8 条和 7 条差 3%，**缺省公式不改**（17.5、17.6）。
 - **压测钩子的放人**（`command::place_player`）：控制台的 `/tp` 已经能带坐标，但它是要等全部岛停放的主控命令（而且现在在要整个世界的表里），进服时成批分组送人会一再卡住，钩子继续用直接放置；`islands-roam` 另外照常从控制台发 `/tp`。
 - **验收**：`fmt --check`、`clippy --workspace --all-targets` 0 警告；`cargo test -p mc-bamboo-game -p mc-bamboo-world -p mc-bamboo-server -p mc-bamboo-blocks` 缺省配置和显式精确模式各一遍；`BAMBOO_TEST_LOADED=1` 的 game 两种配置各一遍；hy4 探针缺省配置和精确模式各一次（结果见第 11 步的交回报告）。
+
+**第 12 步的实测（2026-11-18/19）**：完整数字、分段耗时、口径和主控交付调研在
+`docs/profiling.md` 第 18 节，这里只记结论和取舍。
+
+- **测量**：`world/island_split_bench.rs` 两个 `#[ignore]` release 基准，负载 dense（每区块
+  一套内容，上界）/ sparse（每 4 × 4 一套，更接近真实世界）；改前 / 改后两个二进制共用同一份
+  基准和分段计时，只差算法，同一时段 A-B 交替 5 轮、每轮 9 次取中位数（20:05–20:06，
+  负载 9.5–20）。分段计时 `lap` 只在 `cfg(test)` 生效，正式构建是空函数。
+- **第 1 项达标**：2 万区块的岛拆出 400 块 dense 10.20 → **1.77 ms**（目标 < 10 ms）、
+  sparse 1.44 → 0.37 ms；中间挖一块 13.77 → 2.75 ms；对半拆 dense 56.67 → 31.87 ms、
+  sparse 31.59 → 9.29 ms。改动：`pos_map.rs` 的按区块索引（容器 / 方块组件 / 命令方块 /
+  讲台书）、实体表和方块实体的 `by_chunk`、`split_parts` 按 section 枚举 4 × 4 个区块、
+  `Chunk` 高度图 / 天空光源和光照柱装箱 + 便宜哈希、`TickLevels` 批量集合拆合并去掉只测试
+  读的有序副本。改坏确认：7 类索引各漏一项都被 `an_entry_missing_from_a_chunk_index_is_caught`
+  抓到，23 类 `IslandPart` 漏搬的离线 / 运行时对照照旧全过。
+- **第 2 项没达标**：命令本身 0.04 ms（新指标 `island_world_command`），拼和拆才是全部代价；
+  4 岛 × 4900 dense 39 / 90 → 21 / 49 ms（合计 ≈ 69），sparse 24 / 46 → 6.8 / 13.2 ms
+  （合计 ≈ 20），3 岛大发起岛 17.6 / 45.2 → 9.7 / 22.2 ms。**拆回去不重新算连通性**：
+  `unify` 记下每个岛的区块 / 玩家 / 随机源 / 时钟差，`divide` 原样按名单拆回。又给
+  `TickQueue::split_off` 加了「搬走的多时整批重建两棵有序队列」，dense 对半拆再降 12%、
+  4 岛拼 / 拆再降约 9% / 14%，sparse 基本不变；收益明显变小就停了。
+  **没改 4.5 的范围语义**：12 条要整个世界的命令一条没动。剩下的瓶颈是「把全部岛的
+  `Region` 搬两遍」这个结构本身，下界 O(已加载区块数)；要进 20 ms 得做只读视图或缩小
+  命令范围，后者改语义，按任务书不做、列为建议（18.4）。
+- **第 3 项：那次不变量失败查清并修了**。确定性测试（拆分决定与照做之间直接放人）在
+  **正常路径上就复现了 17.7 的原文**；根因不是名单过期，而是 `split_parts` 按瞬时位置分人、
+  `split_ready` 只查视野中心。直接放人（死亡重生的 `place_player_at_respawn`、压测钩子、
+  `/tp`）先改位置，视野要到岛下一次 tick 才跟上，这中间照做拆分会把玩家连同旧岛的跟踪
+  区块搬进新岛，那片之后的方块更新只发给新岛自己的玩家，他永久漏包——不能靠放宽断言遮。
+  修法：按**视野中心**（正在跟踪的区块）分人，跟踪范围跨切口就推迟拆分并记
+  `island_split_deferrals`，推迟有界（测试断言 6 刻内消失），「跟踪区块属于本岛」的断言
+  保持严格。3 条回归测试（直接放人、重生放置路径、视野钉在切口上）各带改坏确认
+  （`Master::split_by_position` 改回瞬时位置：前两条报出历史原文，第三条当场拆、推迟 0 次）。
+  **第二种猜测**（和 17.2 第二行「搬人没等回执」同源）不由这次修复覆盖：那次管的是
+  「回执交回前不能拆岛」的时机，这次管的是「玩家分到哪一边」的归属，两条互不替代。
+- **第 4 项只调研**：主控「每刻约 5 ms」拆成收包 / 刷出 / 收尾（`inbox` 7.3、`flush` 6.1、
+  `tick_tail` 4.3 ms，含全量对照）、票表等级传播 0.62、Director 推进 0.94、
+  交付 / 收回子段合计约 1.0、编码 / 拼帧 0.25 ms；压缩 0.97 ms 在连接任务里、不进
+  `tick_total`。列了 5 种办法（把编码 / 交付挪到岛或单独线程、按岛分片票表、并行串行
+  父阶段、调大交付批次、先补子段计时），结论是**不建议这一轮动结构**：编码和压缩已经在
+  别的线程，挪动最多省 0.25 ms/刻却要改共享帧和 `ChunkStore` 的所有权；先给
+  `inbox` / `flush` / `tick_tail` 补子段计时再说（18.6）。
+- **建议（不做）**：某些要整个世界的命令其实只涉及两三个岛，可以在命令解析阶段按范围
+  缩到涉及的岛；但 4.5 的表是已定的范围语义，这一步不改。
+- **验收**：`fmt --check`、`clippy --workspace --all-targets` 0 警告；
+  `cargo test -p mc-bamboo-game` 缺省和 `BAMBOO_TEST_LOADED=1` 各一遍；
+  `cargo test -p mc-bamboo-server`；`cargo test -p mc-bamboo-blocks`；hy4 探针两种配置
+  （端口 26500 以上）各一次；齐步 / 精确模式逐位一致照旧（`world/island_split_tests.rs`
+  的拆合不改内容对照、全量对照、23 类改坏确认全部保留，一条没删、没放宽比较）。
 
 ### 6.1 单岛阶段（第 0–7 步）怎么验
 
