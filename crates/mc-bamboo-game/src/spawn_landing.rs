@@ -603,6 +603,7 @@ pub(crate) fn landing(
 
 /// 供对拍用：直接在一份 `Search` 上跑共用的落位逻辑（不需要完整 `Region`）。
 /// For the oracle: run the shared landing logic on a bare `Search`.
+#[cfg(any(test, feature = "oracle-samples"))]
 pub(crate) fn landing_from_search(
     search: &Search<'_>,
     personal: Option<RespawnData>,
@@ -634,6 +635,7 @@ pub(crate) fn landing_from_search(
 
 /// 个人点的两格能不能重生（官方 `isPossibleToRespawnInThis`）。
 /// Whether a personal spawn's two blocks allow respawning.
+#[cfg(any(test, feature = "oracle-samples"))]
 pub(crate) fn personal_spawn_ready(search: &Search<'_>, spawn: RespawnData) -> bool {
     let feet = state_at(search, spawn.pos, false).unwrap_or(blocks::STONE);
     let head = state_at(search, spawn.pos.offset(0, 1, 0), false).unwrap_or(blocks::STONE);
