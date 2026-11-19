@@ -136,11 +136,12 @@ WebView2 的渲染进程不算在内。
   天气、计划事件、流浪商人、自定义 Boss 栏、末影龙战斗这些没建模的
   saved data 不写文件（官方 `computeIfAbsent` 会自己造默认值）；`/weather` 不写存档。
   `chunk_tickets.dat` 写空 `tickets` 列表（无 `/forceload`）。
-- 盘上 `Status` 不是 `minecraft:full` 的区块当成 ProtoChunk 读回：顶层附加信息、
-  方块实体、计划刻和实体原样保留，方块层和两层光照用超平坦模板补齐、高度图重算，
-  下次写盘时 `Status` 是 `minecraft:full`；官方会从原阶段续跑生成流水线，Bamboo 不会。
+- 盘上 `Status` 不是 `minecraft:full` 的区块当成 ProtoChunk 读回：方块层、quart 群系、
+  高度图、两层光照、`isLightOn`、结构起点 / 引用、PostProcessing、方块实体、计划刻和
+  实体按盘上的内容恢复；Director 把盘上阶段记进记录，只跑它之后的阶段到 `Full`。
+  下次写盘写真实阶段（官方 `getPersistedStatus()`），只有完工才写 `minecraft:full`。
   `.mcc` 外置大区块能扫到也能读回，丢了就按读坏处理。读坏的区域文件仍是 warn + 模板，
-  不另存区块备份。
+  不另存区块备份。官方 codec 的多阶段往返对拍见 `mc-bamboo-vanilla resume-world`。
 - 玩家文件名照官方 `getStringUUID()` 用带连字符 UUID；坏玩家文件另存
   `<uuid>_corrupted_<yyyy-MM-dd_HH-mm-ss>.dat`（官方 `FileNameDateFormatter`，Bamboo
   按 UTC 算，官方按本地时区）。`/save-all` 的成功消息不带 `flush` 时在快照都交给 IO
