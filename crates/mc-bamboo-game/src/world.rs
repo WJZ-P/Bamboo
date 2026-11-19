@@ -342,6 +342,14 @@ pub(crate) struct Master {
     /// 测试专用：运行时拆岛时故意漏搬这一类（改坏确认）。
     #[cfg(test)]
     pub(crate) split_skip: Option<crate::region::IslandPart>,
+    /// 测试专用：照做拆分时故意按「瞬时位置」而不是跟踪的视野中心给玩家分边
+    /// （改坏确认，模拟用做决定那一刻的名单）。正式构建里不存在。
+    ///
+    /// Test only: assign players to a split by instantaneous position instead
+    /// of by their tracked view centre (break-it check, modelling the
+    /// decision-time roster). Absent in production builds.
+    #[cfg(test)]
+    pub(crate) split_by_position: bool,
     /// 测试专用：拆合之后故意弄坏新生成实体的状态（改坏确认，见
     /// `world/island_runtime_tests.rs`）。`LoseEntity` 丢掉一个实体，`LoseTracking`
     /// 清掉一个新实体的追踪配对。
@@ -532,6 +540,8 @@ impl World {
                 profiler: Box::default(),
                 #[cfg(test)]
                 split_skip: None,
+                #[cfg(test)]
+                split_by_position: false,
                 #[cfg(test)]
                 split_break: None,
             },

@@ -32,7 +32,7 @@ use super::{
     },
     tests::{Client, Frame, Harness},
 };
-use crate::{island::IslandDrive, region::IslandPart};
+use crate::{island::IslandDrive, profiler::Metric, region::IslandPart};
 
 /// 一个多岛世界按组拼起来的指纹（见模块说明），外加每个岛的时钟。别的岛上出现了某一组的
 /// 东西就 panic，报出是哪一类。
@@ -1386,4 +1386,423 @@ fn an_orb_beside_a_player_matches_one_island_through_borrowing_and_splits() {
         assert!(absorbed_at.is_some(), "窗口里球应该被玩家吸收");
         assert!(split_back, "第 1 组又拆成了自己的岛");
     });
+}
+
+/// 第 11 步长时间压测里那次没复现的不变量失败（计划 17.7）的第一种猜测：拆分用的是
+/// 「做决定那一刻」的名单，照做之前有人移动了。这里确定性地复现那个窗口：分区器当场定下
+/// 一条拆分，先不照做；把一名本来会留在岛上的玩家直接放到即将拆出去的那一半的区块上
+/// （视野还留在原来的位置），然后照做。
+///
+/// **修之前这条测试在正常路径上就报出 17.7 的原文**：`玩家跟踪着别的岛的区块`。真正的原因
+/// 不是「名单过期」，而是 `split_parts` 按**瞬时位置**分人、`split_ready` 只查视野中心：
+/// 直接放人（重生、压测钩子、`/tp`）先改位置，视野要到岛下一次 tick 才跟上；这中间照做拆分
+/// 时位置与视野中心分在切口两边，玩家被算进拆出去的一边，随后 `relocate_players` 把他
+/// 连同旧岛的跟踪区块搬进新岛。那片区块之后的方块更新只发给新岛自己的玩家，他永久漏包，
+/// 所以不能靠放宽不变量断言来遮。
+///
+/// 修法：`split_parts` 按**视野中心**（正在跟踪的区块）分人，`split_ready` 还要求每名玩家
+/// 跟踪范围里没有任何一格落在另一边，否则推迟拆分、记一条 `island_split_deferrals`；视野
+/// 跟上之后下一次照做才拆。跟踪区块属于本岛的断言保持严格。
+///
+/// The first guess behind the unreproduced invariant failure in the step 11
+/// long run (plan 17.7): a split used the roster from decision time and
+/// someone moved before it was replayed. This reproduces that window
+/// deterministically: the partitioner records a split, it is not replayed yet;
+/// a player who would stay is placed directly on a chunk that will split off
+/// while their view is still at the old place, then the split is replayed.
+///
+/// **Before the fix this test reported the exact step 17.7 message on the
+/// normal path**. The cause was not an outdated roster: `split_parts` used the
+/// instantaneous position while `split_ready` only checked the view centre.
+/// Placing a player directly (respawn, load-test hooks, `/tp`) moves them
+/// first, and their view follows only on the island's next tick; replaying a
+/// split in between put them on the outgoing side and `relocate_players` then
+/// carried them, with the old island's tracked chunks, to the new island.
+/// Block updates there go only to that island's own players, so loosening the
+/// invariant would hide a permanent client desync.
+///
+/// Fix: `split_parts` assigns players by **view centre** (the chunks they
+/// track); `split_ready` also requires that no tracked chunk of any player
+/// lies on the other side, postponing the split and recording an
+/// `island_split_deferrals` sample otherwise. The "tracked chunks belong to
+/// this island" assertion stays strict.
+#[test]
+fn a_split_decided_before_a_player_moves_uses_the_live_roster() {
+    with_stack(|| {
+        // 直接放人（压测钩子 / `/tp` 走的就是这条路径）。
+        // Direct placement (the load-test hook and `/tp` use this path).
+        run_split_window(false, |scene, traveller, position| {
+            scene.server.move_to_position(traveller, position);
+        });
+        // 改坏确认：按瞬时位置分人，同一个场景必须在不变量断言上失败。
+        // Break-it check: splitting players by instantaneous position must
+        // fail an invariant assertion in the same scene.
+        let broken = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_split_window(true, |scene, traveller, position| {
+                scene.server.move_to_position(traveller, position);
+            });
+        }));
+        assert!(
+            broken.is_err(),
+            "按瞬时位置分人却没有被不变量断言抓到：那次失败复现不出来"
+        );
+    });
+}
+
+/// 重生落在「已定拆分、还没照做」的那一半：和直接放人是同一条路径
+/// （重生在岛的这一刻里调 `command::place_player_at_respawn`，先改位置、视野后跟）。
+/// 走一遍重生用的放置入口，确认修法也盖住这条路径；改坏确认同上一个测试。
+///
+/// A respawn landing on the half whose split is already decided but not
+/// replayed: the same path as direct placement (respawn calls
+/// `command::place_player_at_respawn` inside the island's tick, moving first
+/// with the view following later). Exercise the respawn placement entry to
+/// confirm the fix covers it too; the break-it check is the one above.
+#[test]
+fn a_respawn_into_a_pending_split_keeps_the_view_on_one_island() {
+    with_stack(|| {
+        run_split_window(false, |scene, traveller, position| {
+            // 重生路径只改位置 / 朝向 / player_grid，不发第二个传送包，也不动视野。
+            // The respawn path only changes position, rotation and the player
+            // grid: no second teleport packet, no view change yet.
+            let world = &mut scene.server.world;
+            let island = world
+                .islands
+                .island_of_player(traveller.id)
+                .expect("玩家在岛上");
+            let region = &mut world.islands.get_mut(island).expect("在表里").region;
+            crate::player_move::place_player(region, traveller.id, position);
+        });
+        let broken = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_split_window(true, |scene, traveller, position| {
+                let world = &mut scene.server.world;
+                let island = world
+                    .islands
+                    .island_of_player(traveller.id)
+                    .expect("玩家在岛上");
+                let region = &mut world.islands.get_mut(island).expect("在表里").region;
+                crate::player_move::place_player(region, traveller.id, position);
+            });
+        }));
+        assert!(broken.is_err(), "重生路径上按瞬时位置分人却没被抓到");
+    });
+}
+
+/// 跟踪范围真的跨了切口时拆分必须推迟，并且推迟有界：视野跟上（不再跨切口）之后
+/// 下一次照做就拆。改坏确认：把 `split_ready` 的跨切口检查拿掉（按瞬时位置分人），
+/// 这次拆分当场照做、推迟计数为 0；`a_split_decided_before_a_player_moves_uses_the_live_roster`
+/// 里同一处改坏还会报出不变量失败的原文。
+///
+/// A tracked range that really straddles the cut postpones the split, and the
+/// postponement is bounded: once the view follows (no longer straddling) the
+/// next replay applies it. Break-it check: without the straddle check
+/// (splitting by instantaneous position) the split applies at once with no
+/// deferral; the same break in the test above also reproduces the historical
+/// invariant failure verbatim.
+#[test]
+fn a_straddling_view_postpones_a_split_only_until_it_follows() {
+    with_stack(|| {
+        // 正常路径：推迟一次、记一条样本，随后视野跟上来就拆。
+        // Normal path: exactly one deferral, then the view follows and it
+        // splits.
+        let (deferrals, split_at) = run_straddling_view(false);
+        assert_eq!(deferrals, 1, "推迟一次并记一条样本");
+        assert!(split_at.is_some(), "推迟有界：视野跟上之后 6 刻内拆完");
+        // 改坏确认：按瞬时位置分人、跳过视野检查，拆分当场照做（不再推迟）。
+        // 同样的场景在 `a_split_decided_before_a_player_moves_uses_the_live_roster`
+        // 里还会报出不变量失败的原文。
+        // Break-it check: splitting by instantaneous position with the view
+        // checks skipped applies the split at once (no deferral). The same
+        // break in the test above also reproduces the historical invariant
+        // failure verbatim.
+        let broken = run_straddling_view(true);
+        assert_eq!(broken.0, 0, "按瞬时位置分人时不再推迟");
+        assert_eq!(broken.1, Some(0), "按瞬时位置分人时当场就拆");
+    });
+}
+
+/// 造一个「视野中心在拆出去的那半、但跟踪范围里还有留下的那半的区块」的玩家：
+/// 把他的位置放到中心附近（未加载的一格），视野钉在切口边界上，然后照做拆分。
+/// 返回（`island_split_deferrals` 的增量，拆分在第几刻照做）。
+///
+/// Make a player whose view centre is on the outgoing half but whose tracked
+/// range still contains chunks of the half that stays: place them near the
+/// centre (an unloaded chunk), pin the view to the cut boundary, then replay
+/// the split. Returns (increase in `island_split_deferrals`, the tick the
+/// split was applied).
+fn run_straddling_view(break_view: bool) -> (u64, Option<u64>) {
+    let mut scene = set_up(91, Harness::new_islands(2, 0));
+    scene.server.world.master.split_by_position = break_view;
+    let first = scene
+        .server
+        .world
+        .master
+        .host
+        .island_of(scene.centers[0])
+        .expect("中心归某个岛");
+    let second = scene
+        .server
+        .world
+        .master
+        .host
+        .island_of(scene.centers[1])
+        .expect("中心归某个岛");
+    let (into, from) = (first.min(second), first.max(second));
+    {
+        let world = &mut scene.server.world;
+        let partition = world.master.host.partition_mut().expect("多岛开着");
+        assert!(partition.force_merge(into, from));
+        world.master.host.take_partition_ops();
+        world.settle_islands();
+    }
+    scene.server.tick();
+    let ops = {
+        let world = &mut scene.server.world;
+        let partition = world.master.host.partition_mut().expect("多岛开着");
+        let made = partition.force_split(into);
+        assert_eq!(made.len(), 1, "合起来的岛拆成两块");
+        let ops = partition.take_ops();
+        assert_eq!(ops.len(), 1, "只有一条拆分");
+        ops
+    };
+    // 切口附近的 section：拆出去的 section 里取最小 x，留下的那边取 x-1。
+    // Find the cut: the smallest x of the outgoing sections; x-1 stays.
+    let crate::island_partition::TopologyOp::Split { sections, .. } = &ops[0] else {
+        panic!("定下的是拆分");
+    };
+    let size = crate::island_partition::SECTION_SIZE;
+    let edge_x = sections
+        .iter()
+        .map(|section| section.x)
+        .min()
+        .expect("拆出去的部分不为空");
+    let edge_z = sections
+        .iter()
+        .filter(|section| section.x == edge_x)
+        .map(|section| section.z)
+        .min()
+        .expect("有一行 section");
+    let boundary = ChunkPos::new(edge_x * size, edge_z * size);
+    let traveller = scene
+        .clients
+        .iter()
+        .find(|(group, _)| scene.centers[*group] == scene.centers[0])
+        .map(|(_, client)| client.clone())
+        .expect("第 0 组有人");
+    {
+        let world = &mut scene.server.world;
+        let island = world
+            .islands
+            .island_of_player(traveller.id)
+            .expect("玩家在岛上");
+        let region = &mut world.islands.get_mut(island).expect("在表里").region;
+        // 位置放在切口内侧一格（拆出去的那半），视野中心钉在切口外一格：
+        // 视距 2 的跟踪范围同时盖住两边。
+        // Position one chunk inside the cut, view centre one chunk outside:
+        // a view distance of 2 covers both sides.
+        crate::player_move::place_player(
+            region,
+            traveller.id,
+            Vec3::new(
+                f64::from((boundary.x + 1) * 16) + 8.5,
+                f64::from(Y),
+                f64::from((boundary.z + 1) * 16) + 8.5,
+            ),
+        );
+        let player = region.players.get_mut(&traveller.id).expect("玩家");
+        player
+            .chunks
+            .set_view_for_test(ChunkPos::new(boundary.x - 1, boundary.z), 2);
+    }
+    let world = &mut scene.server.world;
+    world.master.host.queue_topology_for_test(ops);
+    let before = world.profiler().count_of(Metric::IslandSplitDeferrals);
+    world.settle_islands();
+    world.assert_island_invariants();
+    let deferrals = world.profiler().count_of(Metric::IslandSplitDeferrals) - before;
+    // 把视野跟到新位置（岛下一次 tick 会做这件事），让拆分能照做。
+    // Let the view follow the new position (the island's next tick does this),
+    // so the split can be applied.
+    {
+        let island = world
+            .islands
+            .island_of_player(traveller.id)
+            .expect("玩家在岛上");
+        let region = &mut world.islands.get_mut(island).expect("在表里").region;
+        let view_distance = region.view_distance;
+        if let Some(player) = region.players.get_mut(&traveller.id) {
+            crate::chunk_tracking::update_player_view(player, &mut region.links, view_distance);
+        }
+    }
+    let mut split_at = None;
+    for tick in 0..6 {
+        scene.server.tick();
+        scene.server.world.assert_island_invariants();
+        if !scene.server.world.master.host.has_topology() && split_at.is_none() {
+            split_at = Some(tick);
+        }
+    }
+    (deferrals, split_at)
+}
+
+/// `place` 把玩家直接放到 `position`（两种入口见两条测试）。`break_view` 打开时
+/// `apply_split` 改回按瞬时位置分人（改坏确认）。
+///
+/// `place` puts the player directly at `position` (the two entries are in the
+/// tests above). With `break_view`, `apply_split` goes back to splitting
+/// players by instantaneous position (break-it check).
+fn run_split_window(break_view: bool, place: impl Fn(&mut Scene, &Client, Vec3)) {
+    let mut scene = set_up(77, Harness::new_islands(2, 0));
+    assert_eq!(scene.server.world.islands.len(), 3, "三组各成一个岛");
+    scene.server.world.master.split_by_position = break_view;
+    // 把第 1、2 组并进第 0 组：`force_split` 定下一条拆分。
+    // Merge groups 1 and 2 into group 0: `force_split` records one split.
+    let first = scene
+        .server
+        .world
+        .master
+        .host
+        .island_of(scene.centers[0])
+        .expect("中心归某个岛");
+    let second = scene
+        .server
+        .world
+        .master
+        .host
+        .island_of(scene.centers[1])
+        .expect("中心归某个岛");
+    let (into, from) = (first.min(second), first.max(second));
+    {
+        let world = &mut scene.server.world;
+        let partition = world.master.host.partition_mut().expect("多岛开着");
+        assert!(partition.force_merge(into, from));
+        world.master.host.take_partition_ops();
+        world.settle_islands();
+    }
+    scene.server.tick();
+    // 拆出去的 section 里挑一个组的中心当目的地，另一边挑一名玩家当移动的人。
+    // Pick a group centre inside the split-off sections as the destination,
+    // and a player on the other side as the one who moves.
+    let (target, stayed) = {
+        let world = &mut scene.server.world;
+        let partition = world.master.host.partition_mut().expect("多岛开着");
+        let made = partition.force_split(into);
+        assert_eq!(made.len(), 1, "合起来的岛拆成两块");
+        let ops = partition.take_ops();
+        assert_eq!(ops.len(), 1, "只有一条拆分");
+        let crate::island_partition::TopologyOp::Split { sections, .. } = &ops[0] else {
+            panic!("定下的是拆分");
+        };
+        let inside =
+            |center: ChunkPos| sections.contains(&crate::island_partition::SectionPos::of(center));
+        let target = scene
+            .centers
+            .iter()
+            .copied()
+            .find(|&center| inside(center))
+            .expect("拆出去的部分里有一组的中心");
+        let stayed = scene
+            .centers
+            .iter()
+            .copied()
+            .find(|&center| !inside(center))
+            .expect("另一边也有一组的中心");
+        world.master.host.queue_topology_for_test(ops);
+        (target, stayed)
+    };
+    // 这名玩家本来会留在岛上；直接放到拆出去的那一半的区块上，视野还留在原来的位置。
+    // This player would have stayed; put them directly on a chunk of the
+    // split-off half while their view is still at the old place.
+    let traveller = scene
+        .clients
+        .iter()
+        .find(|(group, _)| scene.centers[*group] == stayed)
+        .map(|(_, client)| client.clone())
+        .expect("留下的那组有人");
+    let old_center = scene
+        .server
+        .world
+        .islands
+        .iter()
+        .flat_map(|island| island.region.players.values())
+        .find(|player| player.id == traveller.id)
+        .and_then(|player| player.chunks.view_center())
+        .expect("玩家已经有视野");
+    let position = Vec3::new(
+        f64::from(target.x * 16) + 8.5,
+        f64::from(Y),
+        f64::from(target.z * 16) + 8.5,
+    );
+    place(&mut scene, &traveller, position);
+    assert_ne!(old_center, target, "视野和新位置不在同一边");
+    assert_eq!(
+        scene
+            .server
+            .world
+            .islands
+            .iter()
+            .flat_map(|island| island.region.players.values())
+            .find(|player| player.id == traveller.id)
+            .and_then(|player| player.chunks.view_center()),
+        Some(old_center),
+        "视野还留在原来的位置"
+    );
+    // 修法：玩家按视野中心留在原来的岛，拆分可以当场照做，也可以因为别的玩家的
+    // 跟踪范围跨切口而推迟；两种情况下不变量都必须成立，推迟的话记一条
+    // `island_split_deferrals`，并且是有界的（6 刻内拆完）。
+    // The fix: the player stays on the old island by view centre. The split
+    // may apply now or be postponed because another player's tracked range
+    // straddles the cut; either way invariants hold, a postponement is
+    // recorded as `island_split_deferrals` and is bounded (done in 6 ticks).
+    let before = scene
+        .server
+        .world
+        .profiler()
+        .count_of(Metric::IslandSplitDeferrals);
+    scene.server.world.settle_islands();
+    scene.server.world.assert_island_invariants();
+    let deferred = scene.server.world.master.host.has_topology();
+    if deferred {
+        assert_eq!(
+            scene
+                .server
+                .world
+                .profiler()
+                .count_of(Metric::IslandSplitDeferrals),
+            before + 1,
+            "推迟记了一条样本"
+        );
+    }
+    let mut split_at = None;
+    for tick in 0..6 {
+        scene.server.tick();
+        scene.server.world.assert_island_invariants();
+        if !scene.server.world.master.host.has_topology() && split_at.is_none() {
+            split_at = Some(tick);
+        }
+    }
+    assert!(split_at.is_some(), "6 刻内拆分照做了");
+    // 玩家最终只在一个岛上、那个岛就是他脚下区块的岛。
+    // The player ends up on exactly one island: the one holding the chunk
+    // underfoot.
+    let world = &mut scene.server.world;
+    assert_eq!(world.islands.len(), 3, "拆分照做了");
+    let holder = world
+        .islands
+        .island_of_player(traveller.id)
+        .expect("玩家还在世界里");
+    assert_eq!(
+        Some(holder),
+        world.islands.island_of_chunk(target),
+        "玩家搬到了脚下区块的岛"
+    );
+    assert_eq!(
+        world
+            .islands
+            .iter()
+            .filter(|island| island.region.players.contains_key(&traveller.id))
+            .count(),
+        1,
+        "玩家只在一个岛上"
+    );
 }

@@ -282,8 +282,34 @@ impl World {
             return true;
         };
         let (chunks, players) = split_parts(island, sections);
+        // 改坏确认：改回按瞬时位置分人（正式构建里没有这个开关）。
+        // Break-it check: go back to splitting players by instantaneous
+        // position (the switch does not exist in production builds).
+        #[cfg(test)]
+        let players = if self.master.split_by_position {
+            island
+                .region
+                .players
+                .values()
+                .filter(|player| inside(player.chunk_pos()))
+                .map(|player| player.id)
+                .collect()
+        } else {
+            players
+        };
         crate::region::island_split::lap("collect");
-        if !split_ready(&island.region, &players, &inside) {
+        // 改坏确认：`split_by_position` 同时跳过视野检查，模拟修之前的整套口径。
+        // Break-it check: `split_by_position` also skips the view checks,
+        // modelling the whole pre-fix behaviour.
+        #[cfg(test)]
+        let check_tracked = !self.master.split_by_position;
+        #[cfg(not(test))]
+        let check_tracked = true;
+        if !split_ready(&island.region, &players, &inside, check_tracked) {
+            // 推迟要有数：长压测里看有没有忙岛因此永远拆不开（第 11 步的坑）。
+            // Count postponements: the long run must show no busy island is
+            // kept unsplittable forever by them (the step 11 pitfall).
+            self.profiler().record(Metric::IslandSplitDeferrals, 1);
             return false;
         }
         crate::region::island_split::lap("ready");
@@ -597,11 +623,20 @@ impl World {
     }
 }
 
-/// 拆分要搬走的东西：岛 `island` 上落在 `sections` 里的区块（已加载的和信箱里的），和站在
-/// 那里的玩家。
+/// 拆分要搬走的东西：岛 `island` 上落在 `sections` 里的区块（已加载的和信箱里的），和
+/// **正在跟踪这些区块**的玩家（视野中心落在这些 section 里）。按视野中心而不是瞬时位置分人：
+/// 直接放人（重生、压测钩子、`/tp`）会先改位置，视野要到岛下一次 tick 才跟上，这中间照做
+/// 拆分时若按位置分人，玩家会带着旧岛的跟踪区块被搬到新岛，之后那片区块的方块更新只发给
+/// 新岛自己的玩家，他就永久漏包（第 11 步那次没复现的不变量失败）。
 ///
 /// What a split moves off `island`: its chunks in `sections` (loaded and in
-/// the mailbox) and the players standing there.
+/// the mailbox) and the players **tracking those chunks** (whose view centre
+/// lies in these sections). Players are split by view centre, not by
+/// instantaneous position: placing a player directly (respawn, load-test
+/// hooks, `/tp`) moves them first, while their view follows only on the
+/// island's next tick; splitting by position in between would carry them to
+/// the new island still tracking the old island's chunks, and block updates
+/// there would thereafter go only to that island's own players.
 pub(crate) fn split_parts(
     island: &crate::island::Island,
     sections: &BTreeSet<SectionPos>,
@@ -631,35 +666,59 @@ pub(crate) fn split_parts(
             .into_iter()
             .filter(|&pos| inside(pos)),
     );
+    // 还没有视野的玩家（刚进服）按位置分；有视野的按视野中心分。
+    // A player with no view yet (just joined) goes by position; everyone
+    // else by their view centre.
     let players: BTreeSet<PlayerId> = island
         .region
         .players
         .values()
-        .filter(|player| inside(player.chunk_pos()))
+        .filter(|player| inside(player.chunks.view_center().unwrap_or(player.chunk_pos())))
         .map(|player| player.id)
         .collect();
     (chunks, players)
 }
 
-/// 拆分前两边分得开：每名玩家的视野中心、看得见他的人、他看得见的人都在他自己那一边，
-/// 没有实体同时被两边的人看着。
+/// 拆分前两边分得开：每名玩家**跟踪的全部区块**、看得见他的人、他看得见的人都在他自己
+/// 那一边，没有实体同时被两边的人看着。跟踪范围跨了切口时推迟拆分：直接放人会让位置和
+/// 视野中心短暂分在两边，这时照做就会把玩家连同旧岛的跟踪区块一起搬走。
 ///
-/// Before a split the two sides are apart: every player's view centre, the
-/// players who see them and the players they see are on their own side, and
-/// no entity is watched from both sides.
+/// Before a split the two sides are apart: every chunk a player **tracks**,
+/// the players who see them and the players they see are on their own side,
+/// and no entity is watched from both sides. A tracked range straddling the
+/// cut postpones the split: placing a player directly can briefly put their
+/// position and view centre on opposite sides, and replaying then would carry
+/// them, with the old island's tracked chunks, to the new island.
 fn split_ready(
     region: &crate::region::Region,
     players: &BTreeSet<PlayerId>,
     inside: &impl Fn(ChunkPos) -> bool,
+    check_tracked: bool,
 ) -> bool {
     for player in region.players.values() {
         let side = players.contains(&player.id);
-        if player
-            .chunks
-            .view_center()
-            .is_some_and(|center| inside(center) != side)
+        if check_tracked
+            && player
+                .chunks
+                .view_center()
+                .is_some_and(|center| inside(center) != side)
         {
             return false;
+        }
+        // 跟踪范围里任何一格落在另一边都推迟：这些格子的方块更新只发给它们所在岛
+        // 的玩家，跨过去的人会永久漏包。
+        // Postpone if any tracked chunk lies on the other side: block updates
+        // there go only to that island's players, so the player would miss
+        // them permanently.
+        if check_tracked && let Some((center, reach)) = player.chunks.tracked_bounds() {
+            for dx in -reach..=reach {
+                for dz in -reach..=reach {
+                    let pos = ChunkPos::new(center.x + dx, center.z + dz);
+                    if player.chunks.is_chunk_tracked(pos) && inside(pos) != side {
+                        return false;
+                    }
+                }
+            }
         }
         if player
             .sync
