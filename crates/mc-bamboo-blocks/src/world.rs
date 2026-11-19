@@ -93,8 +93,6 @@ pub const MAX_CHAINED_NEIGHBOR_UPDATES: u32 = 1_000_000;
 const WORLD_BOUND: i32 = 30_000_000;
 /// `ChunkPos.isValid` 的边界，单位是区块。
 const VALID_CHUNK_BOUND: i32 = 2_097_061;
-/// `getSkyDarken`。世界时钟停在正午，天空一点也不暗。
-const SKY_DARKEN: i32 = 0;
 
 /// 官方 `Level.playSound(null, pos, ...)` 用的坐标：方块的中心。
 pub fn block_center_public(pos: BlockPos) -> Vec3 {
@@ -1765,10 +1763,10 @@ impl<'a> World<'a> {
         item.run(self);
     }
 
-    /// `getMaxLocalRawBrightness`：带上天空变暗的原始亮度。时间停在正午，天总是晴的，天空不变暗。
+    /// `getMaxLocalRawBrightness`：带上天空变暗的原始亮度。
     pub fn max_local_raw_brightness(&self, pos: BlockPos) -> i32 {
         self.brightness(LightLayer::Block, pos)
-            .max(self.brightness(LightLayer::Sky, pos) - SKY_DARKEN)
+            .max(self.brightness(LightLayer::Sky, pos) - self.level.sky_darken())
     }
 
     /// `getBrightness(LightLayer.BLOCK, pos)`：方块光。
@@ -1903,7 +1901,12 @@ impl<'a> World<'a> {
 
     /// `getEffectiveSkyBrightness`：天空光减去天色变暗的部分。
     pub fn effective_sky_brightness(&self, pos: BlockPos) -> i32 {
-        (self.brightness(LightLayer::Sky, pos) - SKY_DARKEN).max(0)
+        (self.brightness(LightLayer::Sky, pos) - self.level.sky_darken()).max(0)
+    }
+
+    /// `Level.getSkyDarken()`：这一刻由世界线程按官方 `updateSkyBrightness` 算好。
+    pub fn sky_darken(&self) -> i32 {
+        self.level.sky_darken()
     }
 
     /// `getSignal`：`pos` 这一格朝 `direction` 输出多强的信号。

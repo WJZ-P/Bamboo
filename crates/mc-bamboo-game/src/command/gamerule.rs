@@ -63,6 +63,18 @@ pub(crate) fn set(
             //
             // Publish first. `sendSuccess` must see the `send_command_feedback` just written.
             global.publish(region);
+            // 官方 `MinecraftServer.onGameRuleChanged`：`advance_time` 改变时发整表时钟同步
+            // （`packNetworkState` 的流速跟着规则变成 0 或恢复）。
+            //
+            // Official `MinecraftServer.onGameRuleChanged`: broadcast a full clock
+            // sync when `advance_time` changes (`packNetworkState` zeroes or
+            // restores the rate accordingly).
+            if index == mc_bamboo_data::gamerules::ADVANCE_TIME {
+                let time = global.time();
+                let clocks = global.clocks();
+                let advance = global.rules().bool(mc_bamboo_data::gamerules::ADVANCE_TIME);
+                region.broadcast_all_clocks(time, &clocks, advance);
+            }
             feedback::success(
                 region,
                 id,

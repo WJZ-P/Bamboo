@@ -99,6 +99,7 @@ import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.util.AbortableIterationConsumer;
 import net.minecraft.util.RandomSource;
+import net.minecraft.util.Mth;
 import net.minecraft.util.debug.ServerDebugSubscribers;
 import net.minecraft.util.random.WeightedList;
 import net.minecraft.world.Container;
@@ -109,6 +110,9 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.MenuProvider;
 import net.minecraft.world.attribute.EnvironmentAttributeSystem;
+import net.minecraft.world.attribute.EnvironmentAttributes;
+import net.minecraft.world.clock.ClockInstance;
+import net.minecraft.world.clock.ClockManager;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.damagesource.DamageSources;
 import net.minecraft.world.entity.Entity;
@@ -259,7 +263,7 @@ import sun.misc.Unsafe;
  * 运行（工作目录和 classpath 与 Probe.java 相同，Java 25 或更新）：
  *
  *     java -cp <target/vanilla 下全部 jar> BlockOracle.java [--seed S] [--cases N] [--only X] [--avoid A,B] [--untick A,B] [--case I]
- *                 [--explain] [--weather clear|rain|thunder]
+ *                 [--explain] [--weather clear|rain|thunder] [--clock-ticks N]
  *
  *     --seed S    默认 1。参数相同时两次运行的输出逐字节相同。
  *     --cases N   题目总数，默认 10000。题目在 place、use、destroy、tick、flow、item 之间按 3:3:1:1:1:1 轮转，方块和物品也是
@@ -281,6 +285,9 @@ import sun.misc.Unsafe;
  *     --explain   每个 case 行多一个 text 字段，把场景和变化写成人能读的文字。它不属于格式，读取时忽略。
  *     --weather   假世界的天气，默认 clear。rain 把 rainLevel 设成 1，thunder 再把 thunderLevel 设成 1。
  *                 header 多一个 weather 字段，Rust 那边用同样的强度重放；晴天题目不变。
+ *     --clock-ticks 主世界时钟的整数刻；假世界用官方 `Level.updateSkyBrightness` 在此时刻
+ *                 算出 getSkyDarken()，并让亮度相关的随机刻 / 阳光探测器读到它。header 多一个
+ *                 clockTicks 字段，Rust 侧从同一份公式重放。默认 6000（正午，天色不暗）。
  *
  * JDK 26 启动时会警告修改了 final 字段，这是给假世界补字段造成的，没有影响。加 --enable-final-field-mutation=ALL-UNNAMED 能消除，
  * 这个选项 Java 25 不认识，所以启动命令里没有加。
@@ -400,7 +407,8 @@ import sun.misc.Unsafe;
  *
  *     玩家      创造模式，没有任何权限，canUseGameMasterBlocks 是假，所以 GameMaster 方块放不了也破坏不了。没有在飞。
  *               交互距离是创造模式的 5 格。物品栏里只有两只手上的物品。
- *     世界      主世界，平原，白天，普通难度，默认游戏规则，世界边界是默认值。天气由 --weather 决定，
+ *     世界      主世界，平原，普通难度，默认游戏规则，世界边界是默认值。天气由 --weather 决定，
+ *                 天色由 --clock-ticks 决定（缺省正午），
  *               强度是稳定值（不跑 advanceWeatherCycle）。游戏时间从 header 的 gameTime 开始，
  *               settle 每走一刻加一，flow 题每往后跑一步也加一。
  *               MOTION_BLOCKING 高度图由 FakeChunk 从最高层往下扫场景里的方块得出，群系恒为平原。
@@ -455,6 +463,8 @@ import sun.misc.Unsafe;
 public final class BlockOracle {
     /** 假世界开始时的游戏时间，写在 header 里。settle 每走一刻加一。 */
     private static final long GAME_TIME = 100_000L;
+    /** 缺省的正午主世界时钟；`--clock-ticks` 可以改成夜里。 */
+    private static final int NOON_TICKS = 6_000;
     /** 官方 server.properties 的默认值。 */
     private static final int MAX_CHAINED_UPDATES = 1_000_000;
     private static final int FULL_BRIGHTNESS = 15;
@@ -469,6 +479,7 @@ public final class BlockOracle {
 
     private static final Unsafe UNSAFE = loadUnsafe();
     private static final Map<String, Field> FIELDS = new HashMap<>();
+
 
     public static void main(String[] args) {
         PrintStream log = System.err;
@@ -498,6 +509,10 @@ public final class BlockOracle {
                 Writer out = new BufferedWriter(new OutputStreamWriter(stdout, StandardCharsets.UTF_8), OUTPUT_BUFFER)) {
             Official official = Official.load(resources);
             official.weather = options.weather;
+            official.clockTicks = options.clockTicks;
+            official.skyDarkenValue = official.skyDarken(
+                    options.weather.equals("clear") ? 0.0F : 1.0F,
+                    options.weather.equals("thunder") ? 1.0F : 0.0F);
             official.applyRules(options.rules);
             new Oracle(official, options, out, log).run();
         }
@@ -619,10 +634,10 @@ public final class BlockOracle {
     }
 
     private record Options(long seed, int cases, String only, Set<String> avoid, Set<String> untick, Set<String> unrandom, int single,
-            boolean explain, Map<String, String> rules, String weather) {
+            boolean explain, Map<String, String> rules, String weather, int clockTicks) {
         private static final String USAGE = "usage: BlockOracle [--seed S] [--cases N] [--only <block id, item id or class>] [--avoid <classes>]"
                 + " [--untick <classes>] [--unrandom <classes>] [--case I] [--explain] [--rule name=value]"
-                + " [--weather clear|rain|thunder]";
+                + " [--weather clear|rain|thunder] [--clock-ticks N]";
 
         static Options parse(String[] args) {
             long seed = 1;
@@ -635,6 +650,7 @@ public final class BlockOracle {
             boolean explain = false;
             Map<String, String> rules = new LinkedHashMap<>();
             String weather = "clear";
+            int clockTicks = NOON_TICKS;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seed" -> seed = Long.parseLong(value(args, ++i));
@@ -646,6 +662,7 @@ public final class BlockOracle {
                     case "--case" -> single = Integer.parseInt(value(args, ++i));
                     case "--explain" -> explain = true;
                     case "--weather" -> weather = value(args, ++i);
+                    case "--clock-ticks" -> clockTicks = Integer.parseInt(value(args, ++i));
                     case "--rule" -> {
                         String pair = value(args, ++i);
                         int split = pair.indexOf('=');
@@ -660,7 +677,7 @@ public final class BlockOracle {
             if (!List.of("clear", "rain", "thunder").contains(weather)) {
                 throw new IllegalArgumentException(USAGE);
             }
-            return new Options(seed, cases, only, avoid, untick, unrandom, single, explain, rules, weather);
+            return new Options(seed, cases, only, avoid, untick, unrandom, single, explain, rules, weather, clockTicks);
         }
 
         private static String value(String[] args, int index) {
@@ -694,6 +711,10 @@ public final class BlockOracle {
         Integer fixedChunkSpeed;
         /** 假世界的天气：clear、rain、thunder。 */
         String weather = "clear";
+        /** 主世界时钟的整数刻，决定 `getSkyDarken()`。 */
+        int clockTicks = NOON_TICKS;
+        /** 按题面时钟和天气算出的 `getSkyDarken()`，在出题前填好。 */
+        int skyDarkenValue;
         final WorldBorder border = new WorldBorder();
         final RandomSource soundSeeds = RandomSource.create(0);
         final GameProfile profile = new GameProfile(new UUID(0, 1), "Oracle");
@@ -703,6 +724,32 @@ public final class BlockOracle {
         final StructureManager structures = allocate(NoStructures.class);
         final ServerScoreboard scoreboard;
         EnvironmentAttributeSystem attributes;
+        /** 按官方环境属性系统在给定时钟刻算出的 `getSkyDarken()`。 */
+        int skyDarken(float rain, float thunder) {
+            EnvironmentAttributeSystem.Builder builder = EnvironmentAttributeSystem.builder()
+                    .addConstantLayer(overworld.value().attributes());
+            ClockManager clocks = clock -> new ClockInstance() {
+                public long totalTicks() { return clockTicks; }
+                public float partialTick() { return 0.0F; }
+                public float rate() { return 1.0F; }
+                public boolean isPaused() { return false; }
+            };
+            for (Holder<net.minecraft.world.timeline.Timeline> timeline : overworld.value().timelines()) {
+                builder.addTimelineLayer(timeline, clocks);
+            }
+            // 天气层只在有天气的维度加；题目里的 rain / thunder 是稳定值。
+            EnvironmentAttributeSystem built = builder.build();
+            float level = built.getDimensionValue(EnvironmentAttributes.SKY_LIGHT_LEVEL);
+            float t = thunder * rain;
+            float r = rain - t;
+            if (r > 0.0F) {
+                level = Mth.lerp(r, level, Mth.lerp(0.3125F, level, 4.0F));
+            }
+            if (t > 0.0F) {
+                level = Mth.lerp(t, level, Mth.lerp(0.52734375F, level, 4.0F));
+            }
+            return (int) (15.0F - Mth.clamp(level, 0.0F, 15.0F));
+        }
 
         private Official(ReloadableServerResources managers) {
             this.registries = (RegistryAccess) managers.fullRegistries().lookup();
@@ -1397,6 +1444,10 @@ public final class BlockOracle {
             set(Level.class, level, "oRainLevel", rain);
             set(Level.class, level, "thunderLevel", thunder);
             set(Level.class, level, "oThunderLevel", thunder);
+            // `Level.skyDarken` 不是 public，但没有 setter：直接按官方
+            // `updateSkyBrightness` 在给定主世界时钟下的结果写进去，等价于
+            // 那一时刻 ServerLevel.tick 开头算出的值。
+            set(Level.class, level, "skyDarken", official.skyDarken(rain, thunder));
             return level;
         }
 
@@ -2115,7 +2166,16 @@ public final class BlockOracle {
 
         @Override
         public int getRawBrightness(BlockPos pos, int darkening) {
-            return FULL_BRIGHTNESS;
+            // 官方 `LevelReader.getMaxLocalRawBrightness(pos, skyDarken)` 会走到这里；
+            // 天色变暗只通过 `getSkyDarken()` 传进来，这一层的 15 减去它。
+            return Math.max(FULL_BRIGHTNESS - darkening, 0);
+        }
+
+        @Override
+        public int getSkyDarken() {
+            // `Level.getSkyDarken()` 不是 final；覆盖它让所有官方亮度路径读到
+            // 假世界的天色，而不是 Unsafe 分配出来的 0。
+            return official.skyDarkenValue;
         }
 
         @Override
@@ -5039,6 +5099,8 @@ public final class BlockOracle {
             line.append(",\"gameTime\":").append(GAME_TIME);
             line.append(",\"minY\":").append(generator.height.min).append(",\"maxY\":").append(generator.height.max);
             line.append(",\"weather\":\"").append(options.weather).append('"');
+            line.append(",\"clockTicks\":").append(options.clockTicks);
+            line.append(",\"skyDarken\":").append(official.skyDarkenValue);
             if (!options.rules.isEmpty()) {
                 line.append(",\"rules\":{");
                 boolean firstRule = true;

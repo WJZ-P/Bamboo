@@ -1239,7 +1239,14 @@ fn no_more_chunks_without_an_acknowledgement() {
         server.tick();
     }
 
-    assert!(client.take_frames().is_empty());
+    // 官方每 20 刻发一次空的 `set_time`，这里只该有周期性时间同步。
+    // Vanilla sends an empty `set_time` every 20 ticks; only those periodic
+    // time syncs may remain.
+    let frames = client.take_frames();
+    assert!(
+        frames.iter().all(|frame| frame.id == clientbound::SET_TIME),
+        "只有周期时间包: {frames:?}"
+    );
 }
 
 #[test]
@@ -2439,11 +2446,21 @@ fn latency_reaches_the_tab_list_on_the_periodic_broadcast() {
         .unwrap();
     for _ in ticks_so_far..600 {
         server.tick();
-        assert!(client.take_frames().is_empty());
+        // 每 20 刻的官方时间同步包不算延迟广播。
+        // The official 20-tick time sync is not a latency broadcast.
+        let frames = client.take_frames();
+        assert!(
+            frames.iter().all(|frame| frame.id == clientbound::SET_TIME),
+            "只有周期时间包: {frames:?}"
+        );
     }
     server.tick();
 
-    let frames = client.take_frames();
+    let frames: Vec<_> = client
+        .take_frames()
+        .into_iter()
+        .filter(|frame| frame.id != clientbound::SET_TIME)
+        .collect();
     assert_eq!(frames.len(), 1);
     let mut expected = vec![0x10, 0x01];
     expected.extend_from_slice(client.uuid.as_bytes());
@@ -2762,10 +2779,7 @@ fn save_and_reopen_resumes_game_time_day_time_and_scheduled_ticks() {
         state
     };
     assert!(saved_time > 0, "第一局确实推进过游戏时间");
-    assert!(
-        saved_day_time > crate::global::NOON_TICKS,
-        "第一局确实推进过昼夜时间"
-    );
+    assert!(saved_day_time > 0, "第一局确实推进过昼夜时间");
 
     let mut reopened = Harness::new_loaded_with_save(2, &tmp.0);
     assert_eq!(

@@ -746,6 +746,15 @@ mod tests {
             .clock_named_mut("minecraft:overworld")
             .expect("overworld clock")
             .partial_tick = 0.5;
+        // 官方新时钟从 0 刻起；显式设到 6000 才能复现「已经在这个时刻」的分支。
+        //
+        // Official fresh clocks start at tick 0; explicitly set 6000 to reach
+        // the "already at time" branch.
+        on_command(&mut global, &mut region, id, "time set 6000", None);
+        global
+            .clock_named_mut("minecraft:overworld")
+            .expect("overworld clock")
+            .partial_tick = 0.5;
         on_command(&mut global, &mut region, id, "time set 6000", None);
         assert_eq!(global.clock().total_ticks, 6000);
         assert_eq!(global.clock().partial_tick, 0.5);

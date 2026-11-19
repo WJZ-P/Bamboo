@@ -413,30 +413,39 @@ impl ClientboundPacket for PlayerPosition {
     }
 }
 
-/// 同步时间。26.x 起每个世界时钟单独同步。
+/// `ClockNetworkState` 的一项：注册名对应的 `totalTicks` / `partialTick` / `rate`。
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SetTime {
-    pub game_time: i64,
+pub struct ClockState {
     pub clock: i32,
-    pub clock_ticks: i64,
-    /// 时钟不足一整刻的部分，官方 `ClockNetworkState.partialTick`。
-    ///
-    /// The fraction of a tick, official `ClockNetworkState.partialTick`.
-    pub clock_partial: f32,
-    /// 时钟的流速，0 表示时间静止。
-    pub clock_rate: f32,
+    pub ticks: i64,
+    pub partial: f32,
+    pub rate: f32,
 }
 
-impl ClientboundPacket for SetTime {
+/// 同步时间。26.x 起包里带一张「时钟 → 状态」的表；官方登录时发全部时钟，
+/// `/time` 只发被改的那一个，每 20 刻的周期同步发空表（只带 `gameTime`）。
+///
+/// Syncs time. Since 26.x the packet carries a map of clock states: login
+/// sends all clocks, `/time` sends only the changed one, and the 20-tick
+/// periodic sync sends an empty map with only `gameTime`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetTime<'a> {
+    pub game_time: i64,
+    pub clocks: &'a [ClockState],
+}
+
+impl ClientboundPacket for SetTime<'_> {
     const ID: i32 = clientbound::SET_TIME;
 
     fn write_body(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.game_time.to_be_bytes());
-        write_varint(out, 1);
-        write_varint(out, self.clock);
-        write_varlong(out, self.clock_ticks);
-        out.extend_from_slice(&self.clock_partial.to_be_bytes());
-        out.extend_from_slice(&self.clock_rate.to_be_bytes());
+        write_varint(out, self.clocks.len() as i32);
+        for clock in self.clocks {
+            write_varint(out, clock.clock);
+            write_varlong(out, clock.ticks);
+            out.extend_from_slice(&clock.partial.to_be_bytes());
+            out.extend_from_slice(&clock.rate.to_be_bytes());
+        }
     }
 }
 

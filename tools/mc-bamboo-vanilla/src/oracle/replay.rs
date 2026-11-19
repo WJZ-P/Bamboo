@@ -123,6 +123,8 @@ struct OracleLevel {
     block_rules: BlockGameRules,
     /// 题面里的天气快照。
     block_weather: mc_bamboo_blocks::BlockWeather,
+    /// 题面主世界时钟算出的 `getSkyDarken()`。
+    sky_darken: i32,
     /// 假世界的降水条件：平原、海平面 63、按位置算真实官方温度。
     precipitation: mc_bamboo_worldgen::biome_temperature::BiomeClimate,
 }
@@ -237,6 +239,28 @@ fn weather_of(header: &Header) -> Result<mc_bamboo_blocks::BlockWeather, String>
     })
 }
 
+/// 官方 `Level.updateSkyBrightness` 在题面时钟 / 天气下的整数结果。
+///
+/// The integer result of official `Level.updateSkyBrightness` for the
+/// batch's clock and weather.
+fn sky_darken_of(header: &Header) -> Result<i32, String> {
+    let weather = weather_of(header)?;
+    let (rain, thunder) = mc_bamboo_blocks::sky::weather_levels(
+        weather.rain_level,
+        weather.rain_level,
+        weather.thunder_level,
+        weather.thunder_level,
+    );
+    let darken = mc_bamboo_blocks::sky::sky_darken(header.clock_ticks, rain, thunder);
+    if darken != header.sky_darken {
+        return Err(format!(
+            "header skyDarken {} != Bamboo {} (clock {}, weather {:?})",
+            header.sky_darken, darken, header.clock_ticks, weather
+        ));
+    }
+    Ok(darken)
+}
+
 impl OracleLevel {
     /// 按场景建世界，再填容器内容。容器和漏斗方块实体的建立顺序和官方一样：
     /// 场景按 `BlockPos.asLong` 排（x、z、y），先建全部方块实体，再填内容。
@@ -297,6 +321,7 @@ impl OracleLevel {
             living: equip_targets(&case.action, names)?,
             block_rules: block_rules_of(header)?,
             block_weather: weather_of(header)?,
+            sky_darken: sky_darken_of(header)?,
             precipitation: mc_bamboo_worldgen::biome_temperature::BiomeClimate::of(
                 mc_bamboo_data::registries::biome::PLAINS,
             ),
@@ -507,7 +532,7 @@ impl Level for OracleLevel {
         self.max_y
     }
 
-    /// 假世界里 `getBrightness` 恒为 15，`getSkyDarken` 是 0。
+    /// 假世界里 `getBrightness` 恒为 15。
     fn brightness(&self, _layer: LightLayer, _pos: BlockPos) -> i32 {
         FULL_BRIGHTNESS
     }
@@ -538,6 +563,11 @@ impl Level for OracleLevel {
 
     fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
         self.block_weather
+    }
+
+    /// `Level.getSkyDarken()`：题面给定的主世界时钟和天气按官方公式算出。
+    fn sky_darken(&self) -> i32 {
+        self.sky_darken
     }
 
     /// `FakeChunk.getHeight(MOTION_BLOCKING, x, z)`：从最高层往下扫到第一个
@@ -1290,6 +1320,7 @@ mod tests {
             living: Vec::new(),
             block_rules: BlockGameRules::vanilla(),
             block_weather: mc_bamboo_blocks::BlockWeather::CLEAR,
+            sky_darken: 0,
             precipitation: mc_bamboo_worldgen::biome_temperature::BiomeClimate::of(
                 mc_bamboo_data::registries::biome::PLAINS,
             ),

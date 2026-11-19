@@ -633,6 +633,7 @@ impl Region {
             loot_sequences: &self.loot_sequences,
             block_rules: self.global.block_rules,
             block_weather: self.global.block_weather,
+            sky_darken: self.global.sky_darken,
             difficulty: self.global.difficulty,
             world_border: self.global.world_border.clone(),
             command_blocks: &mut self.command_blocks,
@@ -671,6 +672,7 @@ impl Region {
             loot_sequences: &self.loot_sequences,
             block_rules: self.global.block_rules,
             block_weather: self.global.block_weather,
+            sky_darken: self.global.sky_darken,
             difficulty: self.global.difficulty,
             world_border: self.global.world_border.clone(),
             command_blocks: &mut self.command_blocks,
@@ -832,12 +834,9 @@ impl Region {
     /// 时间、时钟、出生点、天气和边界都读岛上的全局快照。
     /// Time, clock, spawn, weather and the border come from the island's global snapshot.
     pub(crate) fn start_loading_chunks(&mut self, id: PlayerId) {
-        let (time, clock, world_spawn, weather) = (
-            self.global.time,
-            self.global.clock,
-            self.global.spawn,
-            self.global.weather,
-        );
+        let (time, world_spawn, weather) =
+            (self.global.time, self.global.spawn, self.global.weather);
+        let clocks = self.global.clocks();
         let border = &self.global.world_border;
         self.links.send(
             id,
@@ -852,7 +851,7 @@ impl Region {
                 warning_time: border.warning_time(),
             },
         );
-        self.send_time(id, time, clock);
+        self.send_time(id, time, &clocks);
         self.links.send(
             id,
             &SetDefaultSpawnPosition {
@@ -905,27 +904,86 @@ impl Region {
     /// 把主世界时钟的当前状态发给所有人。`/time` 改了主世界之后调用。
     ///
     /// Broadcasts the overworld clock. Called after `/time` changes it.
-    pub(crate) fn broadcast_time(&mut self, time: GameTime, clock: Clock) {
-        self.broadcast_clock(time, world_clock::OVERWORLD, clock);
+    pub(crate) fn broadcast_time(&mut self, time: GameTime, clock: Clock, advance_time: bool) {
+        self.broadcast_clock(time, world_clock::OVERWORLD, clock, advance_time);
     }
 
-    /// 把指定注册表 ID 的时钟发给所有人。末地时钟不进登录时的那一包，改了才发。
+    /// 把指定注册表 ID 的时钟发给所有人：官方 `ServerClockManager.modifyClock`
+    /// 只带被改的那一个时钟。
     ///
-    /// Broadcasts one clock by registry id. The End clock is absent from the login packet
-    /// and is sent only after a command changes it.
-    pub(crate) fn broadcast_clock(&mut self, time: GameTime, clock_id: i32, clock: Clock) {
-        let packet = SetTime {
+    /// Broadcasts one clock by registry id: official `ServerClockManager.modifyClock`
+    /// sends only the clock that changed.
+    pub(crate) fn broadcast_clock(
+        &mut self,
+        time: GameTime,
+        clock_id: i32,
+        clock: Clock,
+        advance_time: bool,
+    ) {
+        let state = clock_state(clock_id, clock, advance_time);
+        self.links.broadcast(&crate::links::encode_frames(&SetTime {
             game_time: time.0,
-            clock: clock_id,
-            clock_ticks: clock.total_ticks,
-            clock_partial: clock.partial_tick,
-            clock_rate: clock.network_rate(),
-        };
-        self.links.broadcast(&crate::links::encode_frames(&packet));
+            clocks: &[state],
+        }));
     }
 
-    fn send_time(&mut self, id: PlayerId, time: GameTime, clock: Clock) {
-        self.links.send(id, &time_packet(time, clock));
+    /// 官方 `ServerClockManager.createFullSyncPacket`：进服和 `advance_time` 改变时
+    /// 发全部时钟。
+    ///
+    /// Official `ServerClockManager.createFullSyncPacket`: send every clock on
+    /// join and whenever `advance_time` changes.
+    pub(crate) fn broadcast_all_clocks(
+        &mut self,
+        time: GameTime,
+        clocks: &[(&'static str, Clock)],
+        advance_time: bool,
+    ) {
+        let states: Vec<_> = clocks
+            .iter()
+            .map(|(name, clock)| {
+                let id = match *name {
+                    "minecraft:the_end" => world_clock::THE_END,
+                    _ => world_clock::OVERWORLD,
+                };
+                clock_state(id, *clock, advance_time)
+            })
+            .collect();
+        self.links.broadcast(&crate::links::encode_frames(&SetTime {
+            game_time: time.0,
+            clocks: &states,
+        }));
+    }
+
+    /// 官方 `forceGameTimeSynchronization`：每 20 刻只发游戏时间，时钟表为空。
+    ///
+    /// Official `forceGameTimeSynchronization`: every 20 ticks, send only the
+    /// game time with an empty clock map.
+    pub(crate) fn broadcast_game_time(&mut self, time: GameTime) {
+        self.links.broadcast(&crate::links::encode_frames(&SetTime {
+            game_time: time.0,
+            clocks: &[],
+        }));
+    }
+
+    fn send_time(&mut self, id: PlayerId, time: GameTime, clocks: &[(&'static str, Clock)]) {
+        let advance_time = self.global.time_advances();
+        let states: Vec<_> = clocks
+            .iter()
+            .map(|(name, clock)| {
+                let id = match *name {
+                    "minecraft:the_end" => world_clock::THE_END,
+                    _ => world_clock::OVERWORLD,
+                };
+                clock_state(id, *clock, advance_time)
+            })
+            .collect();
+        self.links.send(
+            id,
+            &SetTime {
+                game_time: time.0,
+                clocks: &states,
+            },
+        );
     }
 
     /// 连接层报来的对端 IP。
@@ -941,16 +999,19 @@ impl Region {
     }
 }
 
-/// 主世界时钟的 `set_time` 包。登录时只带这一项。
+/// 官方 `ClockInstance.packNetworkState` 的一项。
 ///
-/// The overworld `set_time` packet. Login sends only this clock.
-fn time_packet(time: GameTime, clock: Clock) -> SetTime {
-    SetTime {
-        game_time: time.0,
-        clock: world_clock::OVERWORLD,
-        clock_ticks: clock.total_ticks,
-        clock_partial: clock.partial_tick,
-        clock_rate: clock.network_rate(),
+/// One entry of official `ClockInstance.packNetworkState`.
+fn clock_state(
+    clock_id: i32,
+    clock: Clock,
+    advance_time: bool,
+) -> mc_bamboo_protocol::packet::play::ClockState {
+    mc_bamboo_protocol::packet::play::ClockState {
+        clock: clock_id,
+        ticks: clock.total_ticks,
+        partial: clock.partial_tick,
+        rate: clock.network_rate(advance_time),
     }
 }
 

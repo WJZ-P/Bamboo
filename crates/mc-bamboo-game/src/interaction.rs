@@ -217,7 +217,7 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
             rules: global.block_rules,
             difficulty: global.difficulty as i32,
-            sky_darken: 0,
+            sky_darken: global.sky_darken,
             game_time,
             ..ViewFacts::default()
         };

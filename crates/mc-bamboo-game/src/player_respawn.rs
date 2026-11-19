@@ -16,9 +16,9 @@ use mc_bamboo_data::{gamerules, registries::dimension_type};
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{
-        ChangeDifficulty, CommonPlayerSpawnInfo, ContainerSetContent, GameEvent, GameMode,
-        InitializeBorder, PlayerPosition, Respawn, SetDefaultSpawnPosition, SetEntityData,
-        SetEquipment, SetExperience, SetHeldSlot, SetTime, UpdateAttributes,
+        ChangeDifficulty, ClockState, CommonPlayerSpawnInfo, ContainerSetContent, GameEvent,
+        GameMode, InitializeBorder, PlayerPosition, Respawn, SetDefaultSpawnPosition,
+        SetEntityData, SetEquipment, SetExperience, SetHeldSlot, SetTime, UpdateAttributes,
     },
 };
 
@@ -132,7 +132,8 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
     let border = region.global.world_border.clone();
     let weather = region.global.weather;
     let time = region.global.time;
-    let clock = region.global.clock;
+    let clocks = region.global.clocks();
+    let advance_time = region.global.time_advances();
     let world_spawn = region.global.spawn;
     let (is_flat, sea_level) = crate::spawn_landing::search_from(region).level_flags();
     // 官方 `findRespawnAndUseSpawnBlock`：强制个人点的两格不能重生就回退到
@@ -273,14 +274,28 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
             warning_time: border.warning_time(),
         },
     );
+    // `PlayerList.sendLevelInfo` 发的是整表：主世界和末地两份时钟。
+    let states: Vec<_> = clocks
+        .iter()
+        .map(|(name, clock)| {
+            let id = if *name == "minecraft:the_end" {
+                mc_bamboo_data::registries::world_clock::THE_END
+            } else {
+                mc_bamboo_data::registries::world_clock::OVERWORLD
+            };
+            ClockState {
+                clock: id,
+                ticks: clock.total_ticks,
+                partial: clock.partial_tick,
+                rate: clock.network_rate(advance_time),
+            }
+        })
+        .collect();
     region.links.send(
         id,
         &SetTime {
             game_time: time.0,
-            clock: mc_bamboo_data::registries::world_clock::OVERWORLD,
-            clock_ticks: clock.total_ticks,
-            clock_partial: clock.partial_tick,
-            clock_rate: clock.network_rate(),
+            clocks: &states,
         },
     );
     region.links.send(id, &spawn_packet);
