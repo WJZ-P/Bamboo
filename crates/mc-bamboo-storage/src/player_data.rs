@@ -102,6 +102,11 @@ pub struct PlayerData {
     pub food_tick_timer: i32,
     pub food_saturation: f32,
     pub food_exhaustion: f32,
+    /// `LivingEntity.active_effects` 的官方 NBT 列表。空表时官方不写这个键；
+    /// `None` 表示不写，`Some(list)` 按 `MobEffectInstance.CODEC` 原样写回。
+    ///
+    /// Vanilla `LivingEntity.active_effects`: the list is omitted when empty.
+    pub active_effects: Option<Tag>,
     pub abilities: Abilities,
     pub seen_credits: bool,
     pub spawn_extra_particles_on_fall: bool,
@@ -193,6 +198,7 @@ impl Default for PlayerData {
             food_tick_timer: 0,
             food_saturation: 5.0,
             food_exhaustion: 0.0,
+            active_effects: None,
             abilities: Abilities::default(),
             seen_credits: false,
             spawn_extra_particles_on_fall: false,
@@ -236,6 +242,7 @@ const KNOWN_KEYS: &[&str] = &[
     "foodTickTimer",
     "foodSaturationLevel",
     "foodExhaustionLevel",
+    "active_effects",
     "abilities",
     "EnderItems",
     "Dimension",
@@ -366,6 +373,9 @@ impl PlayerData {
             "foodExhaustionLevel",
             zero_float(self.food_exhaustion),
         );
+        if let Some(list) = &self.active_effects {
+            push(&mut root, "active_effects", list.clone());
+        }
         push(&mut root, "abilities", self.abilities_tag());
         if let Ok(items) = slots::encode_list(&self.ender_items) {
             push(&mut root, "EnderItems", items);
@@ -429,6 +439,7 @@ impl PlayerData {
         data.food_tick_timer = opt_int(entries, "foodTickTimer", 0)?;
         data.food_saturation = opt_f32(entries, "foodSaturationLevel", 5.0)?;
         data.food_exhaustion = opt_f32(entries, "foodExhaustionLevel", 0.0)?;
+        data.active_effects = field_of(entries, "active_effects").cloned();
         data.dimension = opt_string(entries, "Dimension", OVERWORLD)?;
         data.game_type = opt_int(entries, "playerGameType", DEFAULT_GAME_TYPE)?;
         data.previous_game_type = match field_of(entries, "previousPlayerGameType") {

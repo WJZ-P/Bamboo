@@ -85,6 +85,10 @@ pub(crate) fn reset_after_respawn(region: &mut Region, id: PlayerId, keep_invent
         food: FoodData::default(),
         ..PlayerHealth::default()
     };
+    // 官方重建 `ServerPlayer` 再 `restoreFrom`：效果表是空的，
+    // 重生序列里 `sendActivePlayerEffects` 因此不发效果包。
+    // Vanilla rebuilds `ServerPlayer` before `restoreFrom`, so effects are empty.
+    player.effects = mc_bamboo_blocks::entity::mob::effects::EffectMap::new();
     player.dead = false;
     player.awaiting_respawn = false;
     player.in_combat = false;
@@ -176,7 +180,7 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
     // 4) set_default_spawn_position
     // 5) change_difficulty
     // 6) set_experience
-    // 7) sendActivePlayerEffects（没有药水效果，空）
+    // 7) sendActivePlayerEffects：重生后效果表已清空，正常不发包。
     // 8) sendLevelInfo：initialize_border / set_time /
     //    set_default_spawn_position / 雨三个 game_event / game_event 13
     // 9) sendPlayerPermissionLevel（entity_event 权限 + 命令树）
@@ -258,6 +262,9 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
             total_experience: experience.total,
         },
     );
+    // `PlayerList.sendActivePlayerEffects`（第 7 步）。重生后为空，
+    // 但保留调用点：改成功效保留规则时这里会按官方补发。
+    crate::player_effects::send_active(region, id);
 
     // `PlayerList.sendLevelInfo`。
     region.links.send(

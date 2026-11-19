@@ -17,7 +17,10 @@ use mc_bamboo_blocks::{
     ShulkerBoxEntity, world::CollisionBlocks,
 };
 use mc_bamboo_core::{BlockPos, Vec3, mth};
-use mc_bamboo_data::{blocks, items, registries::attribute_defaults};
+use mc_bamboo_data::{
+    blocks, items,
+    registries::{attribute_defaults, mob_effect},
+};
 use mc_bamboo_protocol::{
     codec::Reader,
     frame::{MAX_FRAME_LEN, find_frame},
@@ -378,6 +381,13 @@ fn finish_player(region: &mut Region, id: PlayerId) {
         player.motion.client_loaded_timeout -= 1;
     }
     player.motion.no_physics = player.game_mode == GameMode::Spectator;
+    // `LivingEntity.aiStep`：缓降 / 漂浮时每刻把 `fallDistance` 清零。
+    // 官方的服务端 tick 收尾在 `Entity.move` 之后做这件事，所以放在这里。
+    // `LivingEntity.aiStep` resets fall distance while slow falling or
+    // levitating; vanilla does this at the end of the server tick.
+    if player.effects.has(mob_effect::SLOW_FALLING) || player.effects.has(mob_effect::LEVITATION) {
+        player.motion.fall_distance = 0.0;
+    }
     let here = player.position();
     player.motion.sync_goods(here);
     player.motion.tick_count = player.motion.tick_count.wrapping_add(1);
@@ -695,11 +705,24 @@ fn floating_now(
         && player.game_mode != GameMode::Spectator
         && !ALLOW_FLIGHT
         && !may_fly(player.game_mode)
+        // `ServerGamePacketListenerImpl.handleMovePlayer`：漂浮效果期间
+        // 不把悬空记成飞行，80 刻的飞行踢出因此不会误伤。
+        // `handleMovePlayer`: levitation exempts the player from the
+        // floating check, so the 80-tick flying kick cannot fire.
+        && !player.effects.has(mob_effect::LEVITATION)
         && enclosed_in_air(movement_box(player), &mut |pos| blocks.state(pos))
 }
 
 fn jump_from_ground(player: &mut Player) {
-    let power = attribute_defaults::JUMP_STRENGTH as f32;
+    // `LivingEntity.getJumpPower` = JUMP_STRENGTH * block factor + getJumpBoostPower()。
+    // 跳跃提升每级 +0.1；移动校验要用同一份高度，否则跳跃时会被判成悬空。
+    // `getJumpPower`: JUMP_STRENGTH times the block factor plus the jump-boost
+    // power (0.1 per level). The movement check must use the same height.
+    let boost = player
+        .effects
+        .amplifier(mob_effect::JUMP_BOOST)
+        .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0));
+    let power = attribute_defaults::JUMP_STRENGTH as f32 + boost;
     if power <= 1.0e-5 {
         return;
     }
@@ -987,6 +1010,12 @@ pub struct MoveReplay {
     pub on_ground: bool,
     /// 脚上穿着皮革靴，细雪的碰撞形状要用。
     pub boots: bool,
+    /// 场景开始时挂着的 (效果注册表 ID, 等级)；移动校验的漂浮 / 摔落 /
+    /// 跳跃判定按官方读这些效果。
+    ///
+    /// The (effect id, amplifier) pairs active at the start. The movement
+    /// check reads these for levitation, slow falling and jump boost.
+    pub effects: Vec<(i32, i32)>,
     pub packets: Vec<MoveReplayPacket>,
 }
 
@@ -1041,6 +1070,15 @@ pub fn replay_movement(sample: &MoveReplay) -> MoveReplayReport {
     player.sync.flying = sample.flying;
     if sample.sprint {
         player.sync.shared_flags |= ENTITY_FLAG_SPRINTING;
+    }
+    for &(effect, amplifier) in &sample.effects {
+        player.effects.add(
+            mc_bamboo_blocks::entity::mob::effects::EffectInstance::with_amplifier(
+                effect,
+                i32::MAX / 2,
+                amplifier,
+            ),
+        );
     }
     region.insert_player(player);
     for (pos, state) in &sample.blocks {

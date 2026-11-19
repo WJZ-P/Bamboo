@@ -360,7 +360,12 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
 /// `LivingEntity.tickEffects` → `MobEffectInstance.tickServer`. Poison and
 /// wither damage go through the mob's own hurt path; the rest change state here.
 fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
-    let events = mob.effects.tick(me.tick_count);
+    let state = super::effects::EffectState {
+        health: mob.health,
+        max_health: mob.attributes.value(attribute::MAX_HEALTH) as f32,
+        absorption: mob.absorption,
+    };
+    let events = mob.effects.tick(me.tick_count, state);
     if events.attributes_changed {
         mob.effects.rebuild_attributes(&mut mob.attributes);
         let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;

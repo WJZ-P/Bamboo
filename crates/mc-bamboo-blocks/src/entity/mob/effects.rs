@@ -27,6 +27,31 @@ pub const INFINITE: i32 = -1;
 /// The 600-tick re-sync interval in `tickEffects`.
 pub const RESYNC_INTERVAL: i32 = 600;
 
+/// `MobEffectInstance.tickServer` 的一刻结果。`Ended` 表示
+/// `applyEffectTick` 返回 false（目前只有吸收血量用完）：官方在那一刻直接
+/// 返回 false，既不减时长也不降级，`tickEffects` 立刻移除这一项。
+/// 吸收血量由调用方通过 `state` 传入。
+///
+/// One `MobEffectInstance.tickServer` result. `Ended` means `applyEffectTick`
+/// returned false (only absorption running out): vanilla returns immediately
+/// without ticking the duration down, and `tickEffects` removes the entry.
+/// The caller supplies its current absorption in `state`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EffectTickOutcome {
+    Continues(Vec<EffectAction>),
+    Ended,
+}
+
+/// `tickServer` 要读的实体状态。纯函数不直接碰实体。
+///
+/// Entity state `tickServer` reads; pure functions never touch the entity.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EffectState {
+    pub health: f32,
+    pub max_health: f32,
+    pub absorption: f32,
+}
+
 /// 官方 `MobEffectInstance` 的六个字段加隐藏效果。`effect` 是注册表 ID。
 ///
 /// The six fields of vanilla `MobEffectInstance` plus its hidden effect.
@@ -175,27 +200,35 @@ impl EffectInstance {
     /// 官方 `MobEffectInstance.tickServer` 的一刻。
     /// `entity_tick_count` 是无限时长效果用的 `LivingEntity.tickCount`；
     /// 有限效果不读它，所以拆岛平移不会改变行为。
-    /// 返回 false 表示这一刻效果到期，调用方要移除它。
+    /// `Ended` 表示 `applyEffectTick` 返回 false，时长没有减。
     ///
     /// One tick of vanilla `MobEffectInstance.tickServer`. `entity_tick_count`
     /// is `LivingEntity.tickCount`, used only by infinite effects; finite ones
     /// never read it, so island clock rebasing cannot change their behaviour.
-    pub fn tick_server(&mut self, entity_tick_count: i32) -> Vec<EffectAction> {
+    /// `Ended` means `applyEffectTick` returned false and the duration did not tick.
+    pub fn tick_server(&mut self, entity_tick_count: i32, state: EffectState) -> EffectTickOutcome {
         if !self.has_remaining_duration() {
-            return Vec::new();
+            return EffectTickOutcome::Ended;
         }
         let duration = if self.is_infinite() {
             entity_tick_count
         } else {
             self.duration
         };
+        // `PoisonMobEffect` 只在血量高于 1 时调 `hurtServer`，但仍然返回 true；
+        // 条件放在动作里，由调用方施加。
         let mut actions = Vec::new();
         if should_apply_this_tick(self.effect, duration, self.amplifier) {
+            if self.effect == mob_effect::ABSORPTION && state.absorption <= 0.0 {
+                return EffectTickOutcome::Ended;
+            }
             actions = effect_tick_actions(self.effect, self.amplifier);
         }
         self.tick_down_duration();
-        self.downgrade_to_hidden();
-        actions
+        if self.downgrade_to_hidden() {
+            // 隐藏效果提上来时等级可能变了，属性由 `tick` 的返回值处理。
+        }
+        EffectTickOutcome::Continues(actions)
     }
 
     /// 存档 codec 的 `show_icon` 缺省值由调用方决定；这里只提供字段。
@@ -645,11 +678,12 @@ impl EffectMap {
         events
     }
 
-    /// `LivingEntity.tickEffects` 的一刻。`entity_tick_count` 只给无限时长效果用。
+    /// `LivingEntity.tickEffects` 的一刻。`entity_tick_count` 只给无限时长效果用，
+    /// `state` 给 `applyEffectTick` 读血量 / 吸收。
     ///
     /// One `LivingEntity.tickEffects` tick. `entity_tick_count` is used only
-    /// by infinite effects.
-    pub fn tick(&mut self, entity_tick_count: i32) -> EffectEvents {
+    /// by infinite effects; `state` supplies health and absorption.
+    pub fn tick(&mut self, entity_tick_count: i32, state: EffectState) -> EffectEvents {
         let mut events = EffectEvents::default();
         let ids: Vec<i32> = self.entries.keys().copied().collect();
         for id in ids {
@@ -657,17 +691,22 @@ impl EffectMap {
                 continue;
             };
             let before = instance.amplifier;
+            let outcome = instance.tick_server(entity_tick_count, state);
+            let EffectTickOutcome::Continues(actions) = outcome else {
+                // `applyEffectTick` 返回 false：官方不减时长，直接移除并走
+                // `onEffectsRemoved`（属性 / 元数据脏、发移除包）。
+                self.entries.remove(&id);
+                events.changes.push(EffectChange::Removed(id));
+                events.attributes_changed = true;
+                events.metadata_dirty = true;
+                continue;
+            };
             // 官方 `tickServer` 在减时长之前先跑 `applyEffectTick`；到期那一刻
             // 的动作照样生效，之后 `tickEffects` 才移除这一项。
-            // `tickServer` applies the effect before ticking the duration down:
-            // the action on the expiring tick still happens, then `tickEffects`
-            // removes the entry.
-            let actions = instance.tick_server(entity_tick_count);
-            let alive = instance.has_remaining();
             for action in actions {
                 events.actions.push(EffectTick { effect: id, action });
             }
-            if !alive {
+            if !instance.has_remaining() {
                 self.entries.remove(&id);
                 events.changes.push(EffectChange::Removed(id));
                 events.attributes_changed = true;
@@ -675,7 +714,6 @@ impl EffectMap {
                 continue;
             }
             // `downgradeToHiddenEffect` 会改等级，属性要重刷并发一次更新包。
-            // A hidden-effect downgrade changes the amplifier: refresh and re-send.
             let downgraded = instance.amplifier != before;
             if downgraded {
                 events.attributes_changed = true;
@@ -684,7 +722,6 @@ impl EffectMap {
             } else if instance.duration > 0 && instance.duration % RESYNC_INTERVAL == 0 {
                 // 官方每 600 刻补一次 `onEffectUpdated(false, null)`；属性不变，
                 // 但仍要发一包 `update_mob_effect`。
-                // Vanilla re-sends every 600 ticks without changing attributes.
                 events.changes.push(EffectChange::Updated(id));
             }
         }
@@ -801,7 +838,7 @@ mod tests {
         let _ = give(&mut map, mob_effect::SPEED, 20, 0);
         let _ = give(&mut map, mob_effect::SPEED, 2, 1);
         for _ in 0..2 {
-            let _ = map.tick(0);
+            let _ = map.tick(0, EffectState::default());
         }
         let instance = map.get(mob_effect::SPEED).unwrap();
         assert_eq!(instance.amplifier, 0);
@@ -826,8 +863,8 @@ mod tests {
     fn expiry_removes_the_effect_and_raises_the_removal_event() {
         let mut map = EffectMap::new();
         let _ = give(&mut map, mob_effect::BLINDNESS, 2, 0);
-        assert!(map.tick(0).changes.is_empty());
-        let events = map.tick(0);
+        assert!(map.tick(0, EffectState::default()).changes.is_empty());
+        let events = map.tick(0, EffectState::default());
         assert_eq!(
             events.changes,
             vec![EffectChange::Removed(mob_effect::BLINDNESS)]
@@ -841,7 +878,10 @@ mod tests {
         let mut map = EffectMap::new();
         let _ = give(&mut map, mob_effect::SPEED, INFINITE, 0);
         for tick in 0..1200 {
-            assert!(map.tick(tick).changes.is_empty(), "无限时长不补发包");
+            assert!(
+                map.tick(tick, EffectState::default()).changes.is_empty(),
+                "无限时长不补发包"
+            );
             assert!(map.has(mob_effect::SPEED), "tick {tick}");
         }
         assert_eq!(map.get(mob_effect::SPEED).unwrap().duration, INFINITE);
@@ -851,7 +891,7 @@ mod tests {
         let mut resync = 0;
         for tick in 1..=1300 {
             if finite
-                .tick(tick)
+                .tick(tick, EffectState::default())
                 .changes
                 .contains(&EffectChange::Updated(mob_effect::SPEED))
             {
@@ -881,7 +921,7 @@ mod tests {
             vec![EffectChange::Added(mob_effect::INSTANT_DAMAGE)]
         );
         assert!(command.has(mob_effect::INSTANT_DAMAGE));
-        let tick = command.tick(1);
+        let tick = command.tick(1, EffectState::default());
         assert_eq!(
             tick.actions,
             vec![EffectTick {
@@ -907,6 +947,38 @@ mod tests {
                 action: EffectAction::Absorption(8.0),
             }]
         );
+    }
+
+    #[test]
+    fn absorption_ends_without_ticking_when_the_pool_is_empty() {
+        let mut map = EffectMap::new();
+        let _ = give(&mut map, mob_effect::ABSORPTION, 100, 1);
+        let events = map.tick(
+            1,
+            EffectState {
+                health: 10.0,
+                max_health: 20.0,
+                absorption: 0.0,
+            },
+        );
+        assert_eq!(
+            events.changes,
+            vec![EffectChange::Removed(mob_effect::ABSORPTION)]
+        );
+        assert!(map.is_empty());
+        // 改坏确认：吸收还有剩时效果继续，时长减 1。
+        let mut alive = EffectMap::new();
+        let _ = give(&mut alive, mob_effect::ABSORPTION, 100, 1);
+        let events = alive.tick(
+            1,
+            EffectState {
+                health: 10.0,
+                max_health: 20.0,
+                absorption: 8.0,
+            },
+        );
+        assert!(events.changes.is_empty());
+        assert_eq!(alive.get(mob_effect::ABSORPTION).unwrap().duration, 99);
     }
 
     #[test]

@@ -366,6 +366,11 @@ impl DamageKind {
         matches!(self, Self::Drown)
     }
 
+    /// `#bypasses_resistance`：26.3 里只有 `out_of_world` / `generic_kill`。
+    pub const fn bypasses_resistance(self) -> bool {
+        matches!(self, Self::OutOfWorld | Self::GenericKill)
+    }
+
     /// `#bypasses_invulnerability`。
     pub const fn bypasses_invulnerability(self) -> bool {
         matches!(self, Self::OutOfWorld | Self::GenericKill)

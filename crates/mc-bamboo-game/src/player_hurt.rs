@@ -141,11 +141,24 @@ pub(crate) fn hurt_player(
     {
         return false;
     }
+    // `LivingEntity.hurtServer`：`#is_fire` 的伤害被抗火效果完全挡下。
+    // `LivingEntity.hurtServer`: fire resistance blocks all `#is_fire` damage.
+    if source.kind.is_fire()
+        && player
+            .effects
+            .has(mc_bamboo_data::registries::mob_effect::FIRE_RESISTANCE)
+    {
+        return false;
+    }
     let position = player.position();
     let armor = {
         let empty = mc_bamboo_protocol::item::ItemStack::empty();
         let equipment = player.equipment_stacks(&empty);
-        crate::player_health::PlayerHealth::armor_values(&equipment)
+        let mut armor = crate::player_health::PlayerHealth::armor_values(&equipment);
+        armor.resistance = player
+            .effects
+            .amplifier(mc_bamboo_data::registries::mob_effect::RESISTANCE);
+        armor
     };
     let (outcome, hurt_yaw, sync, saturation) = {
         let outcome = player

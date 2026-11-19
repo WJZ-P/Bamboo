@@ -67,6 +67,7 @@ pub(crate) mod console;
 mod damage;
 pub(crate) mod data;
 pub(crate) mod data_source;
+mod effect;
 mod effects;
 mod enchant;
 pub(crate) mod execute;

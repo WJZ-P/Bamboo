@@ -93,6 +93,8 @@ struct Case {
     on_ground: bool,
     #[serde(default)]
     boots: bool,
+    #[serde(default)]
+    effects: Vec<[i32; 2]>,
     sx: i64,
     sy: i64,
     sz: i64,
@@ -226,6 +228,7 @@ impl Report {
             pitch: 0.0,
             on_ground: case.on_ground,
             boots: case.boots,
+            effects: case.effects.iter().map(|pair| (pair[0], pair[1])).collect(),
             packets: case
                 .packets
                 .iter()

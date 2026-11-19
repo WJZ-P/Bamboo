@@ -48,13 +48,14 @@ fn empty_brain() -> Tag {
 }
 
 /// `MobEffectInstance.CODEC` 的一项：`id` 加 `Details` 的六个字段（可递归的
-/// `hidden_effect`）。缺省值按官方：`amplifier` 0、`duration` 0、`ambient` false、
-/// `show_particles` true、`show_icon` 缺省等于 `show_particles`。
-/// 官方 codec 的 `optionalFieldOf` 会写全部缺省值，这里照写，不省键。
+/// `hidden_effect`）。官方 `optionalFieldOf` 在等于缺省值时省键：
+/// `amplifier` 用 UNSIGNED_BYTE 编（BYTE 标签）、`duration` 用 INT、
+/// `ambient` 缺省 false、`show_particles` 缺省 true；`show_icon` 是
+/// `Optional<Boolean>` 但 getter 永远返回 `Optional.of(...)`，所以总写。
+/// 读档时缺省值由 `Details.create` 补齐（`show_icon` 缺省等于 `show_particles`）。
 ///
-/// One entry of `MobEffectInstance.CODEC`: `id` plus the six `Details` fields
-/// (including the recursive `hidden_effect`). Vanilla's `optionalFieldOf`
-/// writes every default, so all keys are written here too.
+/// One entry of `MobEffectInstance.CODEC`. Vanilla's `optionalFieldOf`
+/// omits default values; `show_icon` is always written.
 pub fn effect_tag(instance: &EffectInstance) -> Tag {
     let mut out = vec![(
         "id".to_owned(),
@@ -64,44 +65,39 @@ pub fn effect_tag(instance: &EffectInstance) -> Tag {
                 .to_owned(),
         ),
     )];
-    put(&mut out, "amplifier", Tag::Int(instance.amplifier));
-    put(&mut out, "duration", Tag::Int(instance.duration));
-    put(&mut out, "ambient", Tag::Byte(i8::from(instance.ambient)));
-    put(
-        &mut out,
-        "show_particles",
-        Tag::Byte(i8::from(instance.visible)),
-    );
-    put(
-        &mut out,
-        "show_icon",
-        Tag::Byte(i8::from(instance.show_icon)),
-    );
-    if let Some(hidden) = &instance.hidden {
-        put(&mut out, "hidden_effect", effect_details_tag(hidden));
-    }
+    put_details(&mut out, instance);
     Tag::Compound(out)
 }
 
-/// `hidden_effect` 只有 `Details` 的字段，没有 `id`（和官方的递归 codec 一致）。
+/// `Details.MAP_CODEC` 的字段（递归的 `hidden_effect` 没有 `id`）。
 fn effect_details_tag(instance: &EffectInstance) -> Tag {
-    let mut out = vec![("amplifier".to_owned(), Tag::Int(instance.amplifier))];
-    put(&mut out, "duration", Tag::Int(instance.duration));
-    put(&mut out, "ambient", Tag::Byte(i8::from(instance.ambient)));
-    put(
-        &mut out,
-        "show_particles",
-        Tag::Byte(i8::from(instance.visible)),
-    );
-    put(
-        &mut out,
-        "show_icon",
-        Tag::Byte(i8::from(instance.show_icon)),
-    );
-    if let Some(hidden) = &instance.hidden {
-        put(&mut out, "hidden_effect", effect_details_tag(hidden));
-    }
+    let mut out = Vec::new();
+    put_details(&mut out, instance);
     Tag::Compound(out)
+}
+
+fn put_details(out: &mut Vec<(String, Tag)>, instance: &EffectInstance) {
+    // `ExtraCodecs.UNSIGNED_BYTE` 在 NBT 里是 ByteTag。
+    if instance.amplifier != 0 {
+        put(
+            out,
+            "amplifier",
+            Tag::Byte(instance.amplifier.min(255) as i8),
+        );
+    }
+    if instance.duration != 0 {
+        put(out, "duration", Tag::Int(instance.duration));
+    }
+    if instance.ambient {
+        put(out, "ambient", Tag::Byte(1));
+    }
+    if !instance.visible {
+        put(out, "show_particles", Tag::Byte(0));
+    }
+    put(out, "show_icon", Tag::Byte(i8::from(instance.show_icon)));
+    if let Some(hidden) = &instance.hidden {
+        put(out, "hidden_effect", effect_details_tag(hidden));
+    }
 }
 
 /// `active_effects` 列表，按效果 ID 升序（官方按 HashMap 序，这里取确定顺序）。
@@ -119,7 +115,7 @@ pub fn read_effect(tag: &Tag) -> Option<EffectInstance> {
     let mut instance = EffectInstance {
         effect: id,
         duration: tag::int_or(tag, "duration", 0),
-        amplifier: tag::int_or(tag, "amplifier", 0).clamp(0, 255),
+        amplifier: amplifier_field(tag),
         ambient: tag::bool_or(tag, "ambient", false),
         visible: tag::bool_or(tag, "show_particles", true),
         show_icon: match tag::field(tag, "show_icon") {
@@ -134,9 +130,22 @@ pub fn read_effect(tag: &Tag) -> Option<EffectInstance> {
     Some(instance)
 }
 
+/// `ExtraCodecs.UNSIGNED_BYTE` 把 0..255 存成 Java 的 byte（-128..127），
+/// 读回来要按无符号还原。官方写 `255` 时 NBT 里是 `Byte(-1)`。
+///
+/// `ExtraCodecs.UNSIGNED_BYTE` stores 0..255 in a Java byte; read it back
+/// as unsigned (255 is written as `Byte(-1)`).
+fn amplifier_field(tag: &Tag) -> i32 {
+    match tag::field(tag, "amplifier") {
+        Some(Tag::Byte(value)) => i32::from(*value as u8),
+        Some(value) => tag::java_i32(value).unwrap_or(0).clamp(0, 255),
+        None => 0,
+    }
+}
+
 fn read_hidden_effect(tag: &Tag, effect: i32) -> EffectInstance {
     let mut instance = EffectInstance::new(effect, tag::int_or(tag, "duration", 0));
-    instance.amplifier = tag::int_or(tag, "amplifier", 0).clamp(0, 255);
+    instance.amplifier = amplifier_field(tag);
     instance.ambient = tag::bool_or(tag, "ambient", false);
     instance.visible = tag::bool_or(tag, "show_particles", true);
     instance.show_icon = match tag::field(tag, "show_icon") {
@@ -149,10 +158,19 @@ fn read_hidden_effect(tag: &Tag, effect: i32) -> EffectInstance {
     instance
 }
 
-/// 读 `active_effects` 列表。不是列表时按空表处理。
+/// 读实体存档里的 `active_effects` 字段。不是列表时按空表处理。
 pub fn read_effects(tag: &Tag) -> EffectMap {
+    tag::field(tag, "active_effects")
+        .map(read_effects_tag)
+        .unwrap_or_default()
+}
+
+/// 读一个已经是 `active_effects` 列表的标签（玩家存档层直接持有这个标签）。
+///
+/// Reads a tag that already is the `active_effects` list.
+pub fn read_effects_tag(tag: &Tag) -> EffectMap {
     let mut map = EffectMap::new();
-    if let Some(Tag::List(entries)) = tag::field(tag, "active_effects") {
+    if let Tag::List(entries) = tag {
         let instances: Vec<EffectInstance> = entries.iter().filter_map(read_effect).collect();
         map.load(instances);
     }
@@ -635,24 +653,33 @@ mod tests {
     fn effect_archive_defaults_match_the_vanilla_codec() {
         let tag = effect_tag(&EffectInstance::new(mob_effect::SPEED, 100));
         assert_eq!(tag::string_or(&tag, "id"), Some("minecraft:speed"));
-        assert_eq!(tag::int_or(&tag, "amplifier", -1), 0);
+        // 官方 codec 省掉等于缺省值的键：`amplifier` / `ambient` /
+        // `show_particles` 都不写，`duration` 和 `show_icon` 写。
+        assert!(tag::field(&tag, "amplifier").is_none());
+        assert!(tag::field(&tag, "ambient").is_none());
+        assert!(tag::field(&tag, "show_particles").is_none());
         assert_eq!(tag::int_or(&tag, "duration", -1), 100);
-        assert!(!tag::bool_or(&tag, "ambient", true));
-        assert!(tag::bool_or(&tag, "show_particles", false));
         assert!(tag::bool_or(&tag, "show_icon", false));
-        // 改坏确认：把 show_icon 的缺省写成 false，往返会丢掉图标。
-        // Break check: writing a false default would lose the icon.
-        let broken = Tag::Compound(vec![
-            ("id".to_owned(), Tag::String("minecraft:speed".to_owned())),
-            ("duration".to_owned(), Tag::Int(100)),
-            ("show_icon".to_owned(), Tag::Byte(0)),
-        ]);
-        assert!(!tag::bool_or(&broken, "show_icon", true));
-        assert!(tag::bool_or(
-            &effect_tag(&EffectInstance::new(mob_effect::SPEED, 100)),
-            "show_icon",
-            false
+        // 非缺省值时写 Byte 标签，读回来按任意数值标签取值。
+        let tagged = effect_tag(&EffectInstance::with_flags(
+            mob_effect::REGENERATION,
+            1234,
+            2,
+            true,
+            false,
         ));
+        assert!(matches!(
+            tag::field(&tagged, "amplifier"),
+            Some(Tag::Byte(2))
+        ));
+        assert_eq!(tag::int_or(&tagged, "amplifier", -1), 2);
+        assert!(tag::bool_or(&tagged, "ambient", false));
+        assert!(!tag::bool_or(&tagged, "show_particles", true));
+        // 改坏确认：把 show_icon 写成 false，往返会丢掉图标。
+        let mut broken = EffectInstance::new(mob_effect::SPEED, 100);
+        broken.show_icon = false;
+        assert!(!tag::bool_or(&effect_tag(&broken), "show_icon", true));
+        assert!(tag::bool_or(&tag, "show_icon", false));
     }
 
     #[test]
