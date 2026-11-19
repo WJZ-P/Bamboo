@@ -33,7 +33,8 @@ use serde_json::{Value, json};
 use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: resume-world <java> [--seeds N] [--chunks N] [--salt S] \
-     [--structures] [--break-self-test] [--break-neighbor] [--show N]";
+     [--structures] [--break-self-test] [--break-neighbor] [--show N] \
+     [--seed S] [--chunk X Z]";
 const SOURCE: &str = "tools/mc-bamboo-vanilla/java/ResumeWorldOracle.java";
 const CHUNKGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkgenOracle.java";
 /// 官方 `Heightmap.Types.sendToClient()` 的四张图，也是存档会写出的图。
@@ -58,6 +59,9 @@ struct Options {
     break_self_test: bool,
     break_neighbor: bool,
     show: usize,
+    /// 固定种子 / 固定区块（`--seed S --chunk X Z`），用于结构起点坐标。
+    seed: Option<i64>,
+    chunk: Option<(i32, i32)>,
 }
 
 impl Options {
@@ -70,6 +74,8 @@ impl Options {
             break_self_test: false,
             break_neighbor: false,
             show: 8,
+            seed: None,
+            chunk: None,
         };
         let mut rest = args.iter();
         while let Some(&arg) = rest.next() {
@@ -82,6 +88,12 @@ impl Options {
                 "--structures" => options.structures = true,
                 "--break-self-test" => options.break_self_test = true,
                 "--break-neighbor" => options.break_neighbor = true,
+                "--seed" => options.seed = Some(next()?.parse().map_err(|_| USAGE)?),
+                "--chunk" => {
+                    let x = next()?.parse().map_err(|_| USAGE)?;
+                    let z = next()?.parse().map_err(|_| USAGE)?;
+                    options.chunk = Some((x, z));
+                }
                 _ => return Err(USAGE.to_owned()),
             }
         }
@@ -106,6 +118,8 @@ struct Stats {
     /// 这类单独列出，不能合进总数里藏起来；合并光照修正后必须清零。
     light_input_mismatches: Vec<String>,
     breaks: u64,
+    /// 真正比到非空结构起点 / 引用的用例数。
+    structure_cases: u64,
 }
 
 /// 官方一口气生成到 FULL 的逐格数据（来自 `ChunkgenOracle --through features`）。
@@ -291,11 +305,12 @@ fn finish(stats: Stats, options: &Options, requests: usize) -> Result<(), String
         mismatches,
         light_input_mismatches,
         breaks,
+        structure_cases,
     } = stats;
     println!(
         "resume-world: {requests} requests, {cases} resumed cases, {blocks} blocks, \
          {biomes} quart cells, {heightmaps} heightmap columns, {light_cells} light cells, \
-         {block_entities} block entities, {} mismatches, \
+         {block_entities} block entities, {structure_cases} structured cases, {} mismatches, \
          {} known LIGHT-input mismatches, {breaks} break checks",
         mismatches.len(),
         light_input_mismatches.len(),
@@ -397,6 +412,16 @@ fn finish(stats: Stats, options: &Options, requests: usize) -> Result<(), String
     Ok(())
 }
 
+/// 把 `--seed` / `--chunk` 追加给官方出题器（固定结构起点坐标用）。
+fn forwarded(options: &Options, args: &mut Vec<String>) {
+    if let Some(seed) = options.seed {
+        args.extend(["--seed".to_owned(), seed.to_string()]);
+    }
+    if let Some((x, z)) = options.chunk {
+        args.extend(["--chunk".to_owned(), x.to_string(), z.to_string()]);
+    }
+}
+
 /// `(种子, x, z) → 逐格方块状态`（官方一口气生成到 FULL 的结果）。
 type BlockBaselines = BTreeMap<(i64, i32, i32), Vec<u32>>;
 
@@ -412,14 +437,16 @@ fn official_merged_blocks(java: &str, options: &Options) -> Result<BlockBaseline
         .collect::<String>();
     std::fs::write(&queries, text).map_err(|e| format!("write queries: {e}"))?;
     let mut command = crate::official_program(java, CHUNKGEN_SOURCE)?;
-    command.args([
-        "--through",
-        "features",
-        "--merge-neighbors",
-        "isolated",
-        "--chunks-file",
-    ]);
-    command.arg(&queries);
+    let mut args = vec![
+        "--through".to_owned(),
+        "features".to_owned(),
+        "--merge-neighbors".to_owned(),
+        "isolated".to_owned(),
+        "--chunks-file".to_owned(),
+        queries.to_string_lossy().into_owned(),
+    ];
+    forwarded(options, &mut args);
+    command.args(&args);
     if options.structures {
         command.arg("--structures");
     }
@@ -526,16 +553,18 @@ fn official_merged_blocks(java: &str, options: &Options) -> Result<BlockBaseline
 /// 官方 `features` 行的 `(seed, x, z)` 键，用来给 merge oracle 写查询文件。
 fn official_full_chunk_keys(java: &str, options: &Options) -> Result<Vec<(i64, i32, i32)>, String> {
     let mut command = crate::official_program(java, CHUNKGEN_SOURCE)?;
-    command.args([
-        "--through",
-        "biomes",
-        "--seeds",
-        &options.seeds.to_string(),
-        "--chunks",
-        &options.chunks.to_string(),
-        "--salt",
-        &options.salt.to_string(),
-    ]);
+    let mut args = vec![
+        "--through".to_owned(),
+        "biomes".to_owned(),
+        "--seeds".to_owned(),
+        options.seeds.to_string(),
+        "--chunks".to_owned(),
+        options.chunks.to_string(),
+        "--salt".to_owned(),
+        options.salt.to_string(),
+    ];
+    forwarded(options, &mut args);
+    command.args(&args);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
@@ -578,17 +607,19 @@ fn official_carvers(
     options: &Options,
 ) -> Result<BTreeMap<(i64, i32, i32), CarversData>, String> {
     let mut command = crate::official_program(java, CHUNKGEN_SOURCE)?;
-    command.args([
-        "--through",
-        "carvers",
-        "--real-path",
-        "--seeds",
-        &options.seeds.to_string(),
-        "--chunks",
-        &options.chunks.to_string(),
-        "--salt",
-        &options.salt.to_string(),
-    ]);
+    let mut args = vec![
+        "--through".to_owned(),
+        "carvers".to_owned(),
+        "--real-path".to_owned(),
+        "--seeds".to_owned(),
+        options.seeds.to_string(),
+        "--chunks".to_owned(),
+        options.chunks.to_string(),
+        "--salt".to_owned(),
+        options.salt.to_string(),
+    ];
+    forwarded(options, &mut args);
+    command.args(&args);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
@@ -689,16 +720,18 @@ fn official_full_chunks(
     carvers: &BTreeMap<(i64, i32, i32), CarversData>,
 ) -> Result<Vec<FullChunk>, String> {
     let mut command = crate::official_program(java, CHUNKGEN_SOURCE)?;
-    command.args([
-        "--through",
-        "features",
-        "--seeds",
-        &options.seeds.to_string(),
-        "--chunks",
-        &options.chunks.to_string(),
-        "--salt",
-        &options.salt.to_string(),
-    ]);
+    let mut args = vec![
+        "--through".to_owned(),
+        "features".to_owned(),
+        "--seeds".to_owned(),
+        options.seeds.to_string(),
+        "--chunks".to_owned(),
+        options.chunks.to_string(),
+        "--salt".to_owned(),
+        options.salt.to_string(),
+    ];
+    forwarded(options, &mut args);
+    command.args(&args);
     if options.structures {
         command.arg("--structures");
     }
@@ -1017,7 +1050,26 @@ fn compare_case(
     );
     compare_biomes(stats, &label, &full.biomes, &clean);
     compare_heightmaps(stats, &label, &full.heightmaps, &clean);
-    compare_block_entities(stats, &label, &full.block_entities, &clean);
+    // 生成期方块实体由 `game_features_with_mask_skipping`（同一份 run_features）
+    // 交回，和 `gen-world` / `structure-e2e` 的方块实体比较器用同一个来源；
+    // 交付列里的读盘条目是另一条路径，不参与这项比较。
+    // Feature-phase block entities come from the same pure feature run as
+    // `gen-world`/`structure-e2e`; decoded disk entries are a separate path.
+    let feature_result = mc_bamboo_game::worldgen_features::game_features_with_mask_skipping(
+        &config,
+        x,
+        z,
+        None,
+        (1 << 11) - 1,
+        None,
+    )
+    .map_err(|error| format!("{label}: game features for block entities: {error}"))?;
+    compare_block_entities(
+        stats,
+        &label,
+        &full.block_entities,
+        &feature_result.block_entities,
+    );
     compare_structures(stats, &label, &full_nbt, &clean);
     if clean.saved_status != ChunkStatus::Full {
         stats.mismatches.push(format!(
@@ -1171,24 +1223,44 @@ fn compare_block_entities(
     stats: &mut Stats,
     label: &str,
     expected: &[(i32, i32, i32, String)],
-    clean: &mc_bamboo_game::resume_replay::ResumedChunk,
+    game: &[((i32, i32, i32), mc_bamboo_nbt::Tag)],
 ) {
-    let mut official: Vec<String> = expected
+    // 官方 SNBT 里有 `id/x/y/z` 与构造器默认值；按 `gen-world` 的办法
+    // 剥掉元数据键和「双方都有的默认值」再逐项比。
+    let custom = |tag: &mc_bamboo_nbt::Tag| -> Vec<(String, String)> {
+        let mc_bamboo_nbt::Tag::Compound(entries) = tag else {
+            return vec![("#tag".to_owned(), tag.to_snbt())];
+        };
+        let mut out: Vec<(String, String)> = entries
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "id" | "x" | "y" | "z"))
+            .filter(|(key, value)| {
+                *key != "components"
+                    || !matches!(value, mc_bamboo_nbt::Tag::Compound(items) if items.is_empty())
+            })
+            .map(|(key, value)| (key.clone(), value.to_snbt()))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    };
+    let mut official: Vec<(String, Vec<(String, String)>)> = expected
         .iter()
-        .map(|(x, y, z, snbt)| format!("{x},{y},{z},{snbt}"))
+        .filter_map(|(x, y, z, snbt)| {
+            let tag = mc_bamboo_nbt::parse_snbt(snbt).ok()?;
+            Some((format!("{x},{y},{z}"), custom(&tag)))
+        })
         .collect();
     official.sort();
-    let mut game: Vec<String> = clean
-        .block_entities
+    let mut ours: Vec<(String, Vec<(String, String)>)> = game
         .iter()
-        .map(|(label, snbt)| format!("{label},{snbt}"))
+        .map(|((x, y, z), tag)| (format!("{x},{y},{z}"), custom(tag)))
         .collect();
-    game.sort();
+    ours.sort();
     stats.block_entities += official.len() as u64;
-    if official != game {
+    if official != ours {
         stats.mismatches.push(format!(
-            "{label}: block entities official {:?}, game {:?}",
-            official, game
+            "{label}: block entities official {official:?}, game {ours:?}"
         ));
     }
 }
@@ -1211,6 +1283,10 @@ fn compare_structures(
             "{label}: structures official {official}, game {}",
             clean.structures
         ));
+    }
+    // 带结构一组必须真的比到非空 starts / References，避免「结构没生成」的假绿。
+    if official.contains("minecraft:") || clean.structures.contains("minecraft:") {
+        stats.structure_cases += 1;
     }
 }
 

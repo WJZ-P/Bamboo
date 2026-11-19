@@ -13,7 +13,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer};
+use mc_bamboo_core::{ChunkPos, LightLayer};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_storage::chunk_nbt::{self, ChunkEncodeExtra};
 use mc_bamboo_world::{
@@ -232,7 +232,7 @@ pub fn resume_chunk(
         &encode_extra_from_disk(case.pos, &decoded),
     )
     .map_err(|error| format!("encode {:?}: {error}", case.pos))?;
-    Ok(snapshot_resumed(&column, &saved_nbt))
+    Ok(snapshot_resumed(case.pos, &column, &saved_nbt))
 }
 
 /// 把一个阶段的产物合并进世界线程的每区块记账（和 `DirectorHost::merge_generated` 同形）。
@@ -383,7 +383,7 @@ fn generated_from_column(column: &RegionColumn) -> GeneratedChunk {
 }
 
 /// 读出完工区块里要对拍的全部字段。
-fn snapshot_resumed(column: &RegionColumn, saved_nbt: &[u8]) -> ResumedChunk {
+fn snapshot_resumed(pos: ChunkPos, column: &RegionColumn, saved_nbt: &[u8]) -> ResumedChunk {
     let chunk = column.chunk_column().chunk();
     let mut blocks = Vec::with_capacity(usize::try_from(WORLD_HEIGHT).unwrap_or(384));
     for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
@@ -432,17 +432,19 @@ fn snapshot_resumed(column: &RegionColumn, saved_nbt: &[u8]) -> ResumedChunk {
             })
             .collect::<Vec<_>>()
     };
+    // 官方 `getBlockEntityNbtForSaving` 的世界坐标 + SNBT：和 `gen-world`
+    // 的方块实体比较器用同一种输出，逐项对账内容和位置。
+    // World coordinates + SNBT like vanilla `getBlockEntityNbtForSaving`,
+    // matching the `gen-world` block-entity comparator.
     let mut block_entities = Vec::new();
     for entity in chunk.block_entities() {
-        let position = BlockPos::new(entity.x as i32, entity.y, entity.z as i32);
-        let label = format!("{position:?}");
-        // 内容和类型由上层读盘内容携带；这里用位置 + 类型做稳定标识，
-        // 比较器拿它和官方方块实体列表逐项对账。
+        let world_x = pos.x * 16 + entity.x as i32;
+        let world_z = pos.z * 16 + entity.z as i32;
         let tag = chunk
             .preserved_block_entity(entity.x, entity.y, entity.z)
             .map(Tag::to_snbt)
             .unwrap_or_default();
-        block_entities.push((label, tag));
+        block_entities.push((format!("{world_x},{},{world_z}", entity.y), tag));
     }
     block_entities.sort();
     let structures = chunk
