@@ -1716,8 +1716,6 @@ pub fn replay_sleep_facts(scene: &SleepReplayFacts) -> SleepReplayAnswer {
 #[cfg(feature = "oracle-samples")]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SleepReplayFacts {
-    /// 官方 `Level.getSkyDarken()`；只用于纯亮度的旧题面。
-    pub sky_darken: i32,
     pub clock_ticks: i64,
     pub rain: f32,
     pub thunder: f32,

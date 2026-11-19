@@ -994,14 +994,16 @@ WebView2 的渲染进程不算在内。
   语法、权限和提示按官方 Brigadier。启动时从服务器目录读 `ops.json`（命令行版的工作目录或 `--server-dir` 指定的目录，桌面版是 APP 数据目录的 `server/`），名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。`/op`、`/deop` 可以在运行中改这份名单。
   26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照，并按官方 `GameRuleMap.CODEC` 写进 `data/minecraft/game_rules.dat`，启动时读回。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`entity_drops` 会挡住下落方块 `spawnAtLocation`，`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius`（缺省 10）按官方 `PlayerSpawnFinder.findSpawn` 用：新玩家进服和无床 / 锚重生都在世界出生点周围散布、找能站的列；冒险模式直接走 `fixupSpawnHeight`，超平坦世界也散布。`/spawnpoint` 设的强制个人点在两格都能重生时直接落在 `pos + (0.5, 0.1, 0.5)`，否则回退到世界出生点并发 `NO_RESPAWN_BLOCK_AVAILABLE`。世界出生点由 `/setworldspawn` 改；老玩家进服照官方 `SavedPosition` 用存档里的位置。床和重生锚的 `findStandUpPosition` / 充能扣减还没做。`/weather` 只写天气状态和回成功提示。世界每 tick 按官方 `ServerLevel.advanceWeatherCycle` 倒计时、自然开始/结束下雨和打雷（`advance_weather` 规则为假时冻结）、每刻把雨和雷暴强度渐变 0.01，并在强度变化、`isRaining()` 翻转时广播 `RAIN_LEVEL_CHANGE` / `THUNDER_LEVEL_CHANGE` / `START_RAINING` / `STOP_RAINING`；进服时按 `PlayerList.sendLevelInfo` 补发当前的渐变强度。战利品表的 `weather_check` 条件也读这份天气。夜里或雷暴天右键完整的床会按官方 `ServerPlayer.startSleepInBed` 检查天色、距离、遮挡和
   附近怪物，成功后置 `occupied`、设重生点、换成睡姿并发位置 / 元数据包；失败发对应的快捷栏提示。
-  `ServerLevel` 的 `SleepStatus` 按 `players_sleeping_percentage` 统计熟睡人数，够了就跳到
-  `minecraft:wake_up_from_sleep` 时间标记、清掉雨和雷、叫醒所有人；`StopSleeping` 也会起床。
+  `ServerLevel` 的 `SleepStatus` 按 `players_sleeping_percentage` 统计熟睡人数；主控在每刻开头、
+  天气之后、岛开跑之前用上一刻全部岛交回的计数决定跳到 `minecraft:wake_up_from_sleep` 时间标记、
+  清掉雨和雷、叫醒所有人，和官方 `ServerLevel.tick` 同一刻。躺下和醒来都走和 `/tp` / 进服
+  同一条传送路径（递增的 teleport id 和等待客户端确认），`StopSleeping` 也会起床。
   天色按官方 `Level.updateSkyBrightness` 算：主世界时钟的 `minecraft:day` 时间线、
   `SKY_LIGHT_LEVEL` 关键帧和雨 / 雷暴的 `WeatherAttributes` 层合成 `getSkyDarken()`，
   在 `ServerLevel.tick` 的天气阶段之后、方块刻之前的同一刻发布给每个岛；精确模式的
   `World`、并行的实体只读视图、随机刻里读亮度的作物 / 草和菌丝蔓延 / 冰雪融化 /
   阳光探测器都读这一份值。还没接的差异：雷击生成的实体、闪电对避雷针/实体/方块的作用和
-  苦力怕充能，以及天空、雾和云的颜色变化（客户端自己算颜色）。刷怪、伤害、睡眠、合成限制这些规则还没接到对应系统。
+  苦力怕充能，以及天空、雾和云的颜色变化（客户端自己算颜色）。刷怪、伤害和合成限制这些规则还没接到对应系统。
   生存和冒险会改模式和能力。挖掘和工具右键会扣耐久；盔甲、武器、弓、钓竿、鞘翅和盾牌不扣。没有饥饿。`/give` 多出来的物品会消失（没有捡起音效）。`/clear` 不清创造模式光标。`/time` 能改主世界和末地的钟；进服 / 重生按官方 `sendLevelInfo` 发两份时钟的整表同步，`/time` 和 `/gamerule advance_time` 各发单独 / 整表更新，每 20 刻再发一次只带 `gameTime` 的空表同步。发给客户端的流速在时钟暂停或 `advance_time` 为假时是 0，客户端不会自己把时间往前推。
   按 Q、在菜单里丢出、以及背包放不下时，会生成物品实体。创造模式把物品拖出界面有官方的丢弃限流。旁观模式不丢也不捡。玩家没有生命值，官方血量不大于 0 时不捡，这里只要不是旁观就捡。捡起会发 `take_item_entity`。鞘翅不能用，攻击其他玩家没有效果。物品在地上 5 分钟（6000 刻）后消失，能合并、能被火、岩浆、仙人掌和爆炸毁掉，能被漏斗吸走。玩家不在实体名单里，捡起发生在这一拍所有非玩家实体 tick 之前，看到的是物品移动前的位置。
   `/tellraw` 和 `/title` 的文本组件按官方 26.3 的 SNBT 语法读（`{text:"hi",color:"red"}`、`["a","b"]`），
@@ -1253,9 +1255,11 @@ cargo run --release -p mc-bamboo-vanilla -- oracle <java 路径> [--cases N] [--
 cargo run -p mc-bamboo-vanilla -- clock-oracle <java 路径> [--break-self-test] [--show N]
 ```
 
-睡眠判定和跳早数学另用官方 `BedRule` / `SleepStatus` / `ClockTimeMarker` / `GameRules`
-逐项对拍（`sleep-oracle`），三种改坏确认覆盖天色阈值、熟睡人数公式和跳早目标：
-一天 24 000 刻、`players_sleeping_percentage` 多档、正负时间刻都逐项比较。
+睡眠判定和跳早数学另用官方 `BedRule.canSleep(Level)` / `Level.isDarkOutside` /
+`SleepStatus` / `ClockTimeMarker` / `GameRules` 逐项对拍（`sleep-oracle`）：构造官方
+`Level`，用官方时钟、时间线和天气层算出 `updateSkyBrightness()`，再真的调
+`BedRule.canSleep`，覆盖多个时刻 × 晴 / 雨 / 雷、`players_sleeping_percentage` 多档和
+正负时间刻；三种改坏确认覆盖天气对变暗的贡献、熟睡人数公式和跳早目标。
 方块 oracle 的 `--clock-ticks 18000` 夜晚批让假世界的方块光为 0、天空光为 15，
 于是 `getRawBrightness(pos, skyDarken) = max(block, sky - darken)` 真的随天色变暗，
 作物 / 树苗 / 草和菌丝蔓延 / 霜冰 / 阳光探测器 / 床都在夜里重新对拍。

@@ -1493,6 +1493,45 @@ fn sleep_skip_happens_at_the_official_tick() {
     );
 }
 
+/// 官方 `ServerLevel.tick` 的两个独立规则：`advance_time` 为假时不跳时间，
+/// `advance_weather` 为假时不清天气，但 `wakeUpAllPlayers` 无条件发生。
+#[test]
+fn sleep_skip_rules_are_independent() {
+    let (mut server, _client, _foot, _head) = sleep_scene();
+    let _ = server
+        .world
+        .master
+        .global
+        .rules_mut()
+        .assign(mc_bamboo_data::gamerules::ADVANCE_TIME, "false");
+    let _ = server
+        .world
+        .master
+        .global
+        .rules_mut()
+        .assign(mc_bamboo_data::gamerules::ADVANCE_WEATHER, "false");
+    server.world.publish_global();
+    for _ in 0..105 {
+        server.tick();
+    }
+    let global = &server.world.master.global;
+    assert_eq!(
+        global.clocks()[0].1.total_ticks,
+        18_000,
+        "advance_time 为假时时钟不动"
+    );
+    assert!(
+        global.state().weather.raining,
+        "advance_weather 为假时天气不清"
+    );
+    assert!(
+        server.world.islands.region.players[&PlayerId(1)]
+            .sleep
+            .is_none(),
+        "wakeUpAllPlayers 无条件发生"
+    );
+}
+
 /// 官方周期同步：每 20 刻一个空时钟表、只带 `gameTime` 的 `set_time`，
 /// 包里的游戏时间是这一刻 `tickTime` 加一之前的值。
 #[test]

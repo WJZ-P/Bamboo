@@ -391,24 +391,24 @@ pub(crate) fn skip_night(
     // `wakeUpAllPlayers` 无条件发生：主控发布这一刻的 `sleep_skip` 标志，
     // 每个岛在自己一刻开头叫醒玩家（见 `wake_from_skip`）。
     global.sleep_skip = true;
+    // `ServerLevel.resetWeatherCycle`：`advance_weather` 为真且 `isRaining()`，
+    // 和 `advance_time` 无关（字节码里是两个独立的条件）。
+    if advance_weather && global.state().weather.is_raining() {
+        let weather = &mut global.state_mut().weather;
+        weather.rain_time = 0;
+        weather.raining = false;
+        weather.thunder_time = 0;
+        weather.thundering = false;
+    }
     // `ServerClockManager.moveToTimeMarker` 只在 `advance_time` 为真时执行；
     // 官方 `ServerLevel.tick` 在同一步之后才 `tickTime`（游戏时间 +1）。
-    if advance_time {
-        let next = wake_up_ticks(global.clocks()[0].1.total_ticks);
-        global
-            .clock_named_mut("minecraft:overworld")
-            .expect("overworld clock")
-            .set_total_ticks(next);
-        // `ServerLevel.resetWeatherCycle`：`advance_weather` 为真且 `isRaining()`。
-        if advance_weather && global.state().weather.is_raining() {
-            let weather = &mut global.state_mut().weather;
-            weather.rain_time = 0;
-            weather.raining = false;
-            weather.thunder_time = 0;
-            weather.thundering = false;
-        }
-        true
-    } else {
-        false
+    if !advance_time {
+        return false;
     }
+    let next = wake_up_ticks(global.clocks()[0].1.total_ticks);
+    global
+        .clock_named_mut("minecraft:overworld")
+        .expect("overworld clock")
+        .set_total_ticks(next);
+    true
 }

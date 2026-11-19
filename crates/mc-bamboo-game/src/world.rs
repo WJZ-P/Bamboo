@@ -1765,6 +1765,18 @@ impl World {
         }
     }
 
+    /// 汇总全部已停放岛的睡眠计数，供主控在下一刻开头决定跳早。
+    ///
+    /// Sum the sleep counts of every parked island for the master's decision
+    /// at the start of the next tick.
+    pub(super) fn aggregate_sleep(&mut self) {
+        let mut sleep = crate::sleep::SleepCounts::default();
+        for island in self.islands.parked() {
+            sleep.add(crate::sleep::counts_of(&island.region));
+        }
+        self.master.sleep = sleep;
+    }
+
     /// 第 3 段（两种驱动共用）：交回、刷出站缓冲、自动保存和匀速存盘、`/save-all`、
     /// 关服检查和名单变更。
     ///
@@ -1782,11 +1794,7 @@ impl World {
         // Official `ServerLevel.tick` reads the previous tick's `SleepStatus`
         // and `sleepCounter`; sum the counts from all handed-back islands for
         // the start of the next tick.
-        let mut sleep = crate::sleep::SleepCounts::default();
-        for island in self.islands.parked() {
-            sleep.add(crate::sleep::counts_of(&island.region));
-        }
-        self.master.sleep = sleep;
+        self.aggregate_sleep();
         // 混合驱动：这一轮的岛落地以后，排着队的事能做的先做（都按时的时候队列是空的）。
         // Hybrid: once this round's islands have landed, run what was held
         // (nothing is held when every island is on time).

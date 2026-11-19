@@ -1119,6 +1119,8 @@ impl World {
                 }
             }
             if !self.awaited() || deadline.is_some_and(|at| Instant::now() >= at) {
+                // 追赶的这些岛也跑完了一刻，睡眠计数按最新状态汇总。
+                self.aggregate_sleep();
                 return ControlFlow::Continue(());
             }
             // 追赶时等岛的时间也不算主控干活（`master_busy`）。
