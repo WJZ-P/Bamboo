@@ -55,13 +55,17 @@ const EQUIPMENT_SLOTS: [EquipmentSlot; 6] = [
 const NO_EQUIPMENT: ItemStack = ItemStack::empty();
 
 /// 玩家元数据里服务端维护的部分。其余 index 一直是默认值，不用发。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Metadata {
     shared_flags: u8,
     pose: Pose,
     health: f32,
     main_hand: HumanoidArm,
     model_customisation: u8,
+    /// `LivingEntity.DATA_EFFECT_PARTICLES` 的颜色列表。
+    effect_particles: Vec<i32>,
+    /// `LivingEntity.DATA_EFFECT_AMBIENCE_ID`。
+    effect_ambience: bool,
 }
 
 impl Metadata {
@@ -72,6 +76,8 @@ impl Metadata {
         health: 1.0,
         main_hand: HumanoidArm::Right,
         model_customisation: 0,
+        effect_particles: Vec::new(),
+        effect_ambience: false,
     };
 
     fn of(player: &Player) -> Self {
@@ -81,22 +87,28 @@ impl Metadata {
             health: player.health.health,
             main_hand: player.client.main_hand,
             model_customisation: player.client.model_customisation,
+            effect_particles: player.effects.particle_colors(),
+            effect_ambience: player.effects.all_ambient(),
         }
     }
 
     /// 和 `previous` 不同的项，index 升序。
-    fn changes_since(self, previous: Self) -> Vec<EntityData> {
+    fn changes_since(&self, previous: &Self) -> Vec<EntityData> {
         let flags = self.shared_flags != previous.shared_flags;
         let pose = self.pose != previous.pose;
         let health = self.health != previous.health;
         let main_hand = self.main_hand != previous.main_hand;
         let model = self.model_customisation != previous.model_customisation;
+        let particles = self.effect_particles != previous.effect_particles;
+        let ambience = self.effect_ambience != previous.effect_ambience;
         [
             flags.then_some(EntityData::SharedFlags(self.shared_flags)),
             pose.then_some(EntityData::Pose(self.pose)),
             health.then_some(EntityData::Health(self.health)),
             main_hand.then_some(EntityData::MainHand(self.main_hand)),
             model.then_some(EntityData::ModelCustomisation(self.model_customisation)),
+            particles.then_some(EntityData::EffectParticles(self.effect_particles.clone())),
+            ambience.then_some(EntityData::EffectAmbience(self.effect_ambience)),
         ]
         .into_iter()
         .flatten()
@@ -203,9 +215,38 @@ impl EntitySync {
 }
 
 /// tick 第 3 阶段：`head_yaw`、姿势、元数据脏标记。`entities.md` 第 13 节。
+/// `Entity` 的共享标志位：着火 0、潜行 1、隐身 2、发光 6。
+const ENTITY_FLAG_ON_FIRE: u8 = 0x01;
+const ENTITY_FLAG_INVISIBLE: u8 = 0x04;
+const ENTITY_FLAG_GLOWING: u8 = 0x40;
+
 pub(crate) fn update_derived_state(region: &mut Region) {
     for player in region.players.values_mut() {
         player.head_yaw = player.yaw;
+        // `Entity.setSharedFlag(0, isOnFire())`。
+        if crate::player_environment::is_on_fire(player) {
+            player.sync.shared_flags |= ENTITY_FLAG_ON_FIRE;
+        } else {
+            player.sync.shared_flags &= !ENTITY_FLAG_ON_FIRE;
+        }
+        // `LivingEntity.updateInvisibilityStatus` / `updateGlowingStatus`：
+        // 效果表有隐身 / 发光时置位，效果消失时清位。
+        for (flag, effect) in [
+            (
+                ENTITY_FLAG_INVISIBLE,
+                mc_bamboo_data::registries::mob_effect::INVISIBILITY,
+            ),
+            (
+                ENTITY_FLAG_GLOWING,
+                mc_bamboo_data::registries::mob_effect::GLOWING,
+            ),
+        ] {
+            if player.effects.has(effect) {
+                player.sync.shared_flags |= flag;
+            } else {
+                player.sync.shared_flags &= !flag;
+            }
+        }
         player.sync.metadata_dirty |= Metadata::of(player) != player.sync.sent_metadata;
     }
 }
@@ -318,7 +359,7 @@ fn pairing_frames(player: &Player) -> Vec<u8> {
     }));
     frames.extend(encode_frames(&SetEntityData {
         entity_id: player.id.0,
-        items: &sync.sent_metadata.changes_since(Metadata::DEFAULT),
+        items: &sync.sent_metadata.changes_since(&Metadata::DEFAULT),
     }));
     let equipment = worn_equipment(player);
     if let Some(packet) = SetEquipment::new(player.id.0, &equipment) {
@@ -493,7 +534,7 @@ fn take_metadata_frames(player: &mut Player) -> Vec<u8> {
         return Vec::new();
     }
     let current = Metadata::of(player);
-    let items = current.changes_since(player.sync.sent_metadata);
+    let items = current.changes_since(&player.sync.sent_metadata);
     player.sync.sent_metadata = current;
     if items.is_empty() {
         return Vec::new();

@@ -13,6 +13,7 @@
 pub mod attributes;
 pub mod control;
 pub mod damage;
+pub mod effects;
 pub mod goals;
 pub mod interact;
 pub mod living;
@@ -28,6 +29,7 @@ use mc_bamboo_core::{BlockPos, Vec3};
 use self::{
     attributes::Attributes,
     control::{BodyRotationControl, JumpControl, LookControl, MoveControl},
+    effects::EffectMap,
     goals::GoalSelector,
     navigation::Navigation,
     path::Malus,
@@ -200,6 +202,7 @@ pub enum DamageKind {
     Starve,
     Thorns,
     Magic,
+    Wither,
     Explosion,
 }
 
@@ -228,6 +231,7 @@ impl DamageKind {
             Self::Starve => "minecraft:starve",
             Self::Thorns => "minecraft:thorns",
             Self::Magic => "minecraft:magic",
+            Self::Wither => "minecraft:wither",
             Self::Explosion => "minecraft:explosion",
         }
     }
@@ -277,6 +281,7 @@ impl DamageKind {
             Self::Starve => "starve",
             Self::Thorns => "thorns",
             Self::Magic => "magic",
+            Self::Wither => "wither",
             Self::Explosion => "explosion",
         }
     }
@@ -285,7 +290,7 @@ impl DamageKind {
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.
     pub fn by_name(name: &str) -> Option<Self> {
-        let all: [DamageKind; 22] = [
+        let all: [DamageKind; 23] = [
             Self::Generic,
             Self::GenericKill,
             Self::InWall,
@@ -307,6 +312,7 @@ impl DamageKind {
             Self::Starve,
             Self::Thorns,
             Self::Magic,
+            Self::Wither,
             Self::Explosion,
         ];
         all.into_iter()
@@ -322,7 +328,7 @@ impl DamageKind {
                 | Self::MobAttackNoAggro
                 | Self::Arrow
                 | Self::Thorns
-        )
+        ) || matches!(self, Self::Wither)
     }
 
     /// `#bypasses_armor`。
@@ -338,6 +344,7 @@ impl DamageKind {
                 | Self::Freeze
                 | Self::OutOfWorld
                 | Self::GenericKill
+                | Self::Wither
         )
     }
 
@@ -362,6 +369,11 @@ impl DamageKind {
     /// `#no_impact`。
     pub const fn no_impact(self) -> bool {
         matches!(self, Self::Drown)
+    }
+
+    /// `#bypasses_resistance`：26.3 里只有 `out_of_world` / `generic_kill`。
+    pub const fn bypasses_resistance(self) -> bool {
+        matches!(self, Self::OutOfWorld | Self::GenericKill)
     }
 
     /// `#bypasses_invulnerability`。
@@ -558,6 +570,10 @@ pub struct Mob {
     /// kept verbatim from disk and written back.
     pub passthrough: Vec<(String, mc_bamboo_nbt::Tag)>,
     // ---- LivingEntity ----
+    /// `activeEffects`。只存相对剩余刻数，整行随实体搬，不需要时钟平移。
+    ///
+    /// `activeEffects`. Relative countdowns only; moved with the entity row.
+    pub effects: EffectMap,
     pub attributes: Attributes,
     pub health: f32,
     pub dead: bool,
@@ -697,6 +713,7 @@ impl Mob {
             portal_cooldown: 0,
             tags: Vec::new(),
             passthrough: Vec::new(),
+            effects: EffectMap::new(),
             attributes,
             health,
             dead: false,

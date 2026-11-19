@@ -86,6 +86,7 @@ pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("random", CommandClass::Global),
     ("kill", CommandClass::Island),
     ("damage", CommandClass::Island),
+    ("effect", CommandClass::Island),
     ("teleport", CommandClass::CrossIsland),
     ("tp", CommandClass::CrossIsland),
     ("give", CommandClass::CrossIsland),
@@ -179,6 +180,7 @@ pub(crate) const SCOPES: &[(&str, CommandScope)] = &[
     ("random", CommandScope::Players),
     ("kill", CommandScope::World),
     ("damage", CommandScope::World),
+    ("effect", CommandScope::World),
     ("teleport", CommandScope::World),
     ("tp", CommandScope::World),
     ("give", CommandScope::Players),
@@ -248,12 +250,12 @@ mod tests {
             };
             roots.push((name.clone(), child));
         }
-        // 4.4 的 51 个加上 `/summon`、`/kill`、`/damage`、`/execute`、`/data`、
-        // `/experience`、`/xp`。
-        // The 51 of 4.4 plus `/summon`, `/kill`, `/damage`, `/execute`, `/data`,
-        // `/experience`, `/xp`.
-        assert_eq!(roots.len(), 58);
-        assert_eq!(CLASSES.len(), 58);
+        // 4.4 的 51 个加上 `/summon`、`/kill`、`/damage`、`/effect`、`/execute`、
+        // `/data`、`/experience`、`/xp`。
+        // The 51 of 4.4 plus `/summon`, `/kill`, `/damage`, `/effect`,
+        // `/execute`, `/data`, `/experience`, `/xp`.
+        assert_eq!(roots.len(), 59);
+        assert_eq!(CLASSES.len(), 59);
         // 每个顶层字面量都定了范围（计划 4.5），不多不少。
         // Every root literal has a scope (plan 4.5), no more and no fewer.
         let scoped: BTreeSet<&str> = SCOPES.iter().map(|(name, _)| *name).collect();

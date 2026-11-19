@@ -145,6 +145,15 @@ struct Case {
     /// 1c：官方 `PlayerSpawnFinder.findSpawn` 的落位结果。
     #[serde(default)]
     spawn_result: Option<SpawnResult>,
+    /// S2 玩家效果场景的规则与动作。
+    #[serde(default)]
+    effect_scene: Option<EffectScene>,
+    /// S3 环境伤害场景的方块与起始状态。
+    #[serde(default)]
+    env_scene: Option<EnvScene>,
+    /// S4 吃东西场景。
+    #[serde(default)]
+    consume_scene: Option<ConsumeScene>,
 }
 
 /// 1c 落脚点对拍的官方答案：坐标按 f64 原始位传，随机源末态逐位比。
@@ -728,6 +737,18 @@ impl Report {
         }
         if case.life.is_some() {
             self.replay_player_life(case);
+            return;
+        }
+        if case.effect_scene.is_some() {
+            self.replay_player_effects(case);
+            return;
+        }
+        if case.env_scene.is_some() {
+            self.replay_player_env(case);
+            return;
+        }
+        if case.consume_scene.is_some() {
+            self.replay_player_consume(case);
             return;
         }
         if case.player_steps.is_some() {
@@ -1414,6 +1435,206 @@ impl Report {
     }
 
     /// 1b 场景：正式 `Region` 重放，逐刻比状态和筛选后的包字节。
+    /// S4：吃东西场景逐刻比状态原始位和出站包字节。
+    fn replay_player_consume(&mut self, case: &Case) {
+        use mc_bamboo_game::{ReplayPlayerConsume, replay_player_consume};
+
+        let Some(setup) = &case.consume_scene else {
+            return;
+        };
+        let Some(expected_steps) = &case.player_steps else {
+            return;
+        };
+        let scene = ReplayPlayerConsume {
+            ticks: expected_steps.len() - 1,
+            item: setup.item,
+            start_food: setup.food,
+            break_duration: matches!(self.break_test.as_deref(), Some("consume_duration")),
+            break_food: matches!(self.break_test.as_deref(), Some("consume_food")),
+            break_remainder: matches!(self.break_test.as_deref(), Some("consume_remainder")),
+        };
+        let (steps, packets) = replay_player_consume(&scene);
+        for (tick, expected) in expected_steps.iter().enumerate() {
+            self.steps += 1;
+            let Some(ours) = steps.get(tick) else {
+                self.mismatch(format!("{} tick {tick}: no Bamboo consume step", case.name));
+                continue;
+            };
+            let Some(text) = expected.first() else {
+                self.mismatch(format!(
+                    "{} tick {tick}: no official consume step",
+                    case.name
+                ));
+                continue;
+            };
+            let Ok(official) = serde_json::from_str::<PlayerConsumeStepJson>(text) else {
+                self.mismatch(format!(
+                    "{} tick {tick}: bad official consume JSON: {text}",
+                    case.name
+                ));
+                continue;
+            };
+            if official != *ours {
+                self.mismatch(format!(
+                    "{} tick {tick} consume state: official {official:?}, bamboo {ours:?}",
+                    case.name
+                ));
+            }
+            if tick > 0 {
+                let expected_packets = case.packets.as_ref().and_then(|p| p.get(tick));
+                let Some(expected_packets) = expected_packets else {
+                    self.mismatch(format!("{} tick {tick}: no official packets", case.name));
+                    continue;
+                };
+                compare_packet_list(
+                    &mut self.mismatches,
+                    &self.show,
+                    &case.name,
+                    tick,
+                    &packets[tick],
+                    expected_packets,
+                );
+            }
+            if self.mismatches.len() >= self.show {
+                return;
+            }
+        }
+    }
+
+    /// S3：环境伤害场景逐刻比状态原始位和出站包字节。
+    fn replay_player_env(&mut self, case: &Case) {
+        use mc_bamboo_game::{ReplayPlayerEnv, replay_player_env};
+
+        let Some(setup) = &case.env_scene else {
+            return;
+        };
+        let Some(expected_steps) = &case.player_steps else {
+            return;
+        };
+        let scene = ReplayPlayerEnv {
+            ticks: expected_steps.len() - 1,
+            start_health: f32::from_bits(setup.start_health as u32),
+            start_absorption: f32::from_bits(case.player_absorption as u32),
+            block: setup.block,
+            fire: setup.fire,
+            air: setup.air,
+            frozen: setup.frozen,
+            fall: setup.fall,
+            y: f64::from_bits(setup.y as u64),
+            difficulty: setup.difficulty,
+            break_fire: matches!(self.break_test.as_deref(), Some("env_fire")),
+            break_air: matches!(self.break_test.as_deref(), Some("env_air")),
+            break_fall: matches!(self.break_test.as_deref(), Some("env_fall")),
+        };
+        let (steps, packets) = replay_player_env(&scene);
+        for (tick, expected) in expected_steps.iter().enumerate() {
+            self.steps += 1;
+            let Some(ours) = steps.get(tick) else {
+                self.mismatch(format!("{} tick {tick}: no Bamboo env step", case.name));
+                continue;
+            };
+            let Some(text) = expected.first() else {
+                self.mismatch(format!("{} tick {tick}: no official env step", case.name));
+                continue;
+            };
+            let Ok(official) = serde_json::from_str::<PlayerEnvStepJson>(text) else {
+                self.mismatch(format!("{} tick {tick}: bad official env JSON", case.name));
+                continue;
+            };
+            if official != *ours {
+                self.mismatch(format!(
+                    "{} tick {tick} env state: official {official:?}, bamboo {ours:?}",
+                    case.name
+                ));
+            }
+            if tick > 0 {
+                let expected_packets = case.packets.as_ref().and_then(|p| p.get(tick));
+                let Some(expected_packets) = expected_packets else {
+                    self.mismatch(format!("{} tick {tick}: no official packets", case.name));
+                    continue;
+                };
+                compare_packet_list(
+                    &mut self.mismatches,
+                    &self.show,
+                    &case.name,
+                    tick,
+                    &packets[tick],
+                    expected_packets,
+                );
+            }
+            if self.mismatches.len() >= self.show {
+                return;
+            }
+        }
+    }
+
+    /// S2：玩家效果场景逐刻比状态原始位和出站包字节。
+    fn replay_player_effects(&mut self, case: &Case) {
+        use mc_bamboo_game::{ReplayPlayerEffects, replay_player_effects};
+
+        let Some(setup) = &case.effect_scene else {
+            return;
+        };
+        let Some(expected_steps) = &case.player_steps else {
+            return;
+        };
+        let scene = ReplayPlayerEffects {
+            ticks: expected_steps.len() - 1,
+            start_health: f32::from_bits(setup.start_health as u32),
+            start_absorption: f32::from_bits(case.player_absorption as u32),
+            actions: setup.actions.clone(),
+            break_duration: matches!(self.break_test.as_deref(), Some("effect_duration")),
+            break_flags: matches!(self.break_test.as_deref(), Some("effect_flags")),
+            break_clear: matches!(self.break_test.as_deref(), Some("effect_clear")),
+        };
+        let (steps, packets) = replay_player_effects(&scene);
+        for (tick, expected) in expected_steps.iter().enumerate() {
+            self.steps += 1;
+            let Some(ours) = steps.get(tick) else {
+                self.mismatch(format!("{} tick {tick}: no Bamboo effect step", case.name));
+                continue;
+            };
+            let Some(text) = expected.first() else {
+                self.mismatch(format!(
+                    "{} tick {tick}: no official effect step",
+                    case.name
+                ));
+                continue;
+            };
+            let Ok(official) = serde_json::from_str::<PlayerEffectStepJson>(text) else {
+                self.mismatch(format!(
+                    "{} tick {tick}: bad official effect JSON",
+                    case.name
+                ));
+                continue;
+            };
+            if official != *ours {
+                self.mismatch(format!(
+                    "{} tick {tick} effect state: official {official:?}, bamboo {ours:?}",
+                    case.name
+                ));
+            }
+            if tick > 0 {
+                let expected_packets = case.packets.as_ref().and_then(|packets| packets.get(tick));
+                let Some(expected_packets) = expected_packets else {
+                    self.mismatch(format!("{} tick {tick}: no official packets", case.name));
+                    continue;
+                };
+                compare_packet_list(
+                    &mut self.mismatches,
+                    &self.show,
+                    &case.name,
+                    tick,
+                    &packets[tick],
+                    expected_packets,
+                );
+            }
+            if self.mismatches.len() >= self.show {
+                return;
+            }
+        }
+    }
+
     fn replay_player_life(&mut self, case: &Case) {
         use mc_bamboo_game::{ReplayPlayerLife, replay_player_life};
 
@@ -1587,6 +1808,136 @@ impl Report {
             self.cases, self.steps
         );
         Ok(())
+    }
+}
+
+/// S4 吃东西场景。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConsumeScene {
+    item: i32,
+    food: i32,
+}
+
+/// Java 一侧 `consumeStepJson` 的逐刻状态。
+#[derive(Debug, Deserialize, PartialEq)]
+struct PlayerConsumeStepJson {
+    hp: i32,
+    food: i32,
+    sat: i32,
+    exh: i32,
+    item: i32,
+    count: i32,
+    #[serde(rename = "use")]
+    using: i32,
+    effects: Vec<[i32; 3]>,
+}
+
+impl PartialEq<mc_bamboo_game::PlayerConsumeStep> for PlayerConsumeStepJson {
+    fn eq(&self, other: &mc_bamboo_game::PlayerConsumeStep) -> bool {
+        self.hp == other.hp
+            && self.food == other.food
+            && self.sat == other.sat
+            && self.exh == other.exh
+            && self.item == other.item
+            && self.count == other.count
+            && self.using == other.using
+            && self.effects == other.effects
+    }
+}
+
+/// S3 环境场景的方块与起始状态。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvScene {
+    start_health: i32,
+    block: i32,
+    fire: i32,
+    air: i32,
+    frozen: i32,
+    fall: i32,
+    difficulty: i32,
+    y: i64,
+}
+
+/// Java 一侧 `envStepJson` 的逐刻状态。
+#[derive(Debug, Deserialize, PartialEq)]
+struct PlayerEnvStepJson {
+    hp: i32,
+    abs: i32,
+    ht: i32,
+    hd: i32,
+    cd: i32,
+    lh: i32,
+    food: i32,
+    sat: i32,
+    exh: i32,
+    fire: i32,
+    air: i32,
+    frozen: i32,
+    fall: i64,
+    seed: i64,
+}
+
+impl PartialEq<mc_bamboo_game::PlayerEnvStep> for PlayerEnvStepJson {
+    fn eq(&self, other: &mc_bamboo_game::PlayerEnvStep) -> bool {
+        self.hp == other.hp
+            && self.abs == other.abs
+            && self.ht == other.ht
+            && self.hd == other.hd
+            && self.cd == other.cd
+            && self.lh == other.lh
+            && self.food == other.food
+            && self.sat == other.sat
+            && self.exh == other.exh
+            && self.fire == other.fire
+            && self.air == other.air
+            && self.frozen == other.frozen
+            && self.fall == other.fall
+            && self.seed == other.seed
+    }
+}
+
+/// S2 效果场景的动作与起始血量。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EffectScene {
+    start_health: i32,
+    #[serde(default)]
+    actions: Vec<[i32; 5]>,
+}
+
+/// Java 一侧 `effectStepJson` 的逐刻状态。
+#[derive(Debug, Deserialize, PartialEq)]
+struct PlayerEffectStepJson {
+    hp: i32,
+    abs: i32,
+    ht: i32,
+    hd: i32,
+    cd: i32,
+    lh: i32,
+    food: i32,
+    sat: i32,
+    exh: i32,
+    timer: i32,
+    seed: i64,
+    effects: Vec<[i32; 6]>,
+}
+
+impl PartialEq<mc_bamboo_game::PlayerEffectStep> for PlayerEffectStepJson {
+    fn eq(&self, other: &mc_bamboo_game::PlayerEffectStep) -> bool {
+        self.hp == other.hp
+            && self.abs == other.abs
+            && self.ht == other.ht
+            && self.hd == other.hd
+            && self.cd == other.cd
+            && self.lh == other.lh
+            && self.food == other.food
+            && self.sat == other.sat
+            && self.exh == other.exh
+            && self.timer == other.timer
+            && self.seed == other.seed
+            && self.effects == other.effects
     }
 }
 

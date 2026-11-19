@@ -84,6 +84,8 @@ import net.minecraft.network.protocol.game.ClientboundChangeDifficultyPacket;
 import net.minecraft.network.protocol.game.ClientboundSetExperiencePacket;
 import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
 import net.minecraft.world.food.FoodData;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.core.GlobalPos;
 import net.minecraft.world.level.Level;
@@ -316,6 +318,21 @@ public final class MobOracle {
         boolean playerLife;
         /** 1c 落脚点场景：官方 `PlayerSpawnFinder.findSpawn` / 个人出生点。 */
         boolean spawnScene;
+        /** S2 玩家效果场景：`playEffects` 用独立的官方入口链。 */
+        boolean effectScene;
+        /** S3 环境伤害场景：`playEnv` 用官方 `Entity.baseTick` / `hurtServer`。 */
+        boolean envScene;
+        /** 环境场景：{起烟火刻数, 起始氧气, 起始冻结, 摔落距离, 难度}。 */
+        int[] envSetup = new int[5];
+        /** 场景里每格方块的种类：0 空 / 1 火 / 2 岩浆 / 3 水 / 4 仙人掌 /
+         *  5 甜浆果 / 6 岩浆块 / 7 细雪 / 8 石头（卡墙）/ 9 气泡柱。 */
+        int envBlock;
+        /** S4 吃东西场景：`playConsume` 用官方 `startUsingItem` /
+         * `updateUsingItem` / `finishUsingItem`。主手物品 ID。 */
+        boolean consumeScene;
+        int consumeItem;
+        /** 效果动作：{刻, 0=add 1=clear-one 2=clear-all, 效果 ID, 时长, 等级}。 */
+        final List<int[]> effectActions = new ArrayList<>();
         /** 落脚点场景：出生点、规则半径、随机源种子、默认游戏模式、个人出生点。 */
         int[] spawnAt = {8, 0, 8};
         int spawnRadius = 10;
@@ -535,6 +552,58 @@ public final class MobOracle {
         Scene equipment(int[] items, int[] protection) {
             playerEquipment.add(items);
             playerEnchants.add(protection);
+            return this;
+        }
+
+        /** S4：吃东西场景。 */
+        Scene consume(int ticks, int item, int food) {
+            consumeScene = true;
+            playerPackets = true;
+            this.ticks = ticks;
+            consumeItem = item;
+            startFood = food;
+            return this;
+        }
+
+        /** 虚空场景把玩家放到 `minY - 64` 以下。 */
+        Scene envVoid() {
+            players.clear();
+            playerItems.clear();
+            lootingLevels.clear();
+            player(0.5, -200.0, 0.5, Items.AIR);
+            return this;
+        }
+
+        /** S3：环境伤害场景。 */
+        Scene env(int ticks, int block, int fire, int air, int frozen, int fall, int difficulty) {
+            envScene = true;
+            playerPackets = true;
+            this.ticks = ticks;
+            envBlock = block;
+            envSetup = new int[] {fire, air, frozen, fall, difficulty};
+            this.difficulty = difficulty;
+            return this;
+        }
+
+        /** S2：效果场景用独立的 playEffects 重放。 */
+        Scene effects() {
+            effectScene = true;
+            playerPackets = true;
+            return this;
+        }
+
+        Scene effectGive(int tick, int effect, int duration, int amplifier) {
+            effectActions.add(new int[] {tick, 0, effect, duration, amplifier});
+            return this;
+        }
+
+        Scene effectClear(int tick, int effect) {
+            effectActions.add(new int[] {tick, 1, effect, 0, 0});
+            return this;
+        }
+
+        Scene effectClearAll(int tick) {
+            effectActions.add(new int[] {tick, 2, 0, 0, 0});
             return this;
         }
 
@@ -1020,7 +1089,8 @@ public final class MobOracle {
             for (String kind : new String[] {"generic", "player_attack", "mob_attack",
                     "mob_attack_no_aggro", "magic", "on_fire", "in_fire", "lava", "hot_floor",
                     "cactus", "fall", "freeze", "starve", "arrow", "thorns", "explosion",
-                    "cramming", "drown", "in_wall", "sweet_berry_bush", "out_of_world"}) {
+                    "cramming", "drown", "in_wall", "sweet_berry_bush", "out_of_world",
+                    "wither"}) {
                 Scene one = new Scene("player_hurt_type_" + kind).ticks(20)
                         .difficulty(2).playerPackets().packets();
                 ground(one, 4);
@@ -1206,7 +1276,71 @@ public final class MobOracle {
             scenes.add(spawnPersonalOk());
             scenes.add(spawnPersonalBlocked());
             scenes.add(spawnAdventure());
+            // ---- S2：玩家药水效果的状态和出站包 ----
+            scenes.add(effectBase("effect_give_600", 60)
+                    .effectGive(1, 9, 600, 1));
+            scenes.add(effectBase("effect_give_expire", 8)
+                    .effectGive(1, 0, 3, 0));
+            scenes.add(effectBase("effect_give_stack", 12)
+                    .effectGive(1, 0, 40, 0).effectGive(3, 0, 5, 2));
+            scenes.add(effectBase("effect_give_clear", 10)
+                    .effectGive(1, 18, 100, 1).effectClear(4, 18));
+            scenes.add(effectBase("effect_give_clear_all", 10)
+                    .effectGive(1, 0, 100, 0).effectGive(1, 10, 100, 2)
+                    .effectClearAll(5));
+            scenes.add(effectBase("effect_regen_heal", 55)
+                    .effectGive(1, 9, 100, 0));
+            scenes.add(effectBase("effect_poison_hurt", 30)
+                    .effectGive(1, 18, 100, 0));
+            scenes.add(effectBase("effect_wither_hurt", 45)
+                    .effectGive(1, 19, 100, 0));
+            scenes.add(effectBase("effect_instant_health", 4)
+                    .effectGive(1, 5, 1, 1));
+            scenes.add(effectBase("effect_absorption", 12)
+                    .effectGive(1, 21, 20, 1));
+            scenes.add(effectBase("effect_infinite", 620)
+                    .effectGive(1, 0, -1, 0));
+            scenes.add(effectBase("effect_resync_600", 610)
+                    .effectGive(1, 0, 1200, 0));
+            // ---- S3：环境伤害来源 ----
+            scenes.add(envBase("env_on_fire", 45, 0, 40, 300, 0, 0, 2));
+            scenes.add(envBase("env_drown", 340, 3, 0, 300, 0, 0, 2));
+            scenes.add(envBase("env_drown_short", 30, 3, 0, -19, 0, 0, 2));
+            scenes.add(envBase("env_in_wall", 20, 8, 0, 300, 0, 0, 2));
+            scenes.add(envBase("env_void", 20, 0, 0, 300, 0, 0, 2).envVoid());
+            scenes.add(envBase("env_fall_4", 12, 0, 0, 300, 0, 4, 2));
+            // ---- S4：吃东西 / 喝东西 ----
+            scenes.add(consumeBase("consume_bread", 40, itemId(Items.BREAD), 10));
+            scenes.add(consumeBase("consume_milk", 40, itemId(Items.MILK_BUCKET), 20));
+            scenes.add(consumeBase("consume_golden_apple", 40, itemId(Items.GOLDEN_APPLE), 20));
+            scenes.add(consumeBase("consume_enchanted_apple", 40,
+                    itemId(Items.ENCHANTED_GOLDEN_APPLE), 20));
+            scenes.add(consumeBase("consume_stew", 40, itemId(Items.SUSPICIOUS_STEW), 10));
             return scenes;
+        }
+
+        private static int itemId(Item item) {
+            return BuiltInRegistries.ITEM.getId(item);
+        }
+
+        private static Scene consumeBase(String name, int ticks, int item, int food) {
+            Scene scene = new Scene(name).consume(ticks, item, food);
+            scene.player(0.5, 64.0, 0.5, Items.AIR);
+            return scene;
+        }
+
+        private static Scene envBase(String name, int ticks, int block, int fire, int air,
+                int frozen, int fall, int difficulty) {
+            Scene scene = new Scene(name).env(ticks, block, fire, air, frozen, fall, difficulty);
+            scene.player(0.5, 64.0, 0.5, Items.AIR);
+            return scene;
+        }
+
+        private static Scene effectBase(String name, int ticks) {
+            Scene scene = new Scene(name).ticks(ticks).effects().difficulty(2);
+            ground(scene, 2);
+            scene.player(0.5, 64.0, 0.5, Items.AIR);
+            return scene;
         }
 
         /** 普通地表的缺省半径 10。半径 0 时覆盖同一个出生点（对拍全程同一套方块）。 */
@@ -1274,6 +1408,18 @@ public final class MobOracle {
         }
         if (scene.playerLife) {
             playLife(official, out, scene);
+            return;
+        }
+        if (scene.effectScene) {
+            playEffects(official, out, scene);
+            return;
+        }
+        if (scene.envScene) {
+            playEnv(official, out, scene);
+            return;
+        }
+        if (scene.consumeScene) {
+            playConsume(official, out, scene);
             return;
         }
         // 每个包场景一份共用收集器：实体事件、音效和同步包按发生顺序进同一串字节。
@@ -2011,6 +2157,541 @@ public final class MobOracle {
      * `ServerLevel.addRespawnedPlayer` 和 `connection.teleport` 都由
      * {@code FakeServer} / {@code FakeLevel} / {@code RecordingListener} 的桩接管。
      */
+    /**
+     * S2 玩家效果场景：在假世界里对官方 `ServerPlayer` 直接调
+     * `LivingEntity.addEffect` / `removeEffect` / `removeAllEffects`，每刻用
+     * `MobEffectInstance.tickServer` 的等价入口推进（反射调 `LivingEntity.tickEffects`），
+     * 逐刻记下 `activeEffects` 全字段、血量 / 吸收 / 饥饿 / 随机源和
+     * `connection.send` 抓到的包字节。
+     *
+     * <p>不跑完整的 `ServerPlayer.tick()`：假世界缺连接层 / 区块票 / 推进系统，
+     * 而 `tickEffects`、伤害入口和 `onEffect*` 的包链路都是独立的。本场景比较的
+     * 字段只由这几段决定，不跑的部分不影响它们。
+     */
+    /** 取 `remove_mob_effect` 包里的效果 ID（VarInt 79 / 实体 ID / 效果 ID）。 */
+    private static int effectPacketId(byte[] body) {
+        int at = 0;
+        while (at < body.length && (body[at] & 0x80) != 0) at++;
+        at++;
+        while (at < body.length && (body[at] & 0x80) != 0) at++;
+        at++;
+        int value = 0;
+        int shift = 0;
+        while (at < body.length) {
+            value |= (body[at] & 0x7f) << shift;
+            if ((body[at] & 0x80) == 0) break;
+            shift += 7;
+            at++;
+        }
+        return value;
+    }
+
+    /**
+     * S3 环境伤害场景：在假世界里直接跑官方 `Entity.baseTick` /
+     * `LivingEntity.baseTick`（反射 `baseTick`，它是 public）。假世界不跑
+     * `ServerPlayer.tick()` 的其余部分（连接层、区块票、推进系统），但
+     * `baseTick` 本身需要的 `level()`、`damageSources()`、`isInWall()`、
+     * `Entity.checkInsideBlocks` 都由桩提供；本场景比较的字段只由它决定。
+     * 逐刻记下血量 / 吸收 / 冷却 / 饥饿 / 着火 / 氧气 / 冻结 / 随机源，以及
+     * `connection.send` 和假世界广播抓到的包字节。
+     */
+    private static void playEnv(Official official, Writer out, Scene scene) throws Exception {
+        Bytes all = new Bytes(official.registries);
+        StubList list = (StubList) official.server.getPlayerList();
+        official.server.sequences = new RandomSequences();
+        FakeLevel level = FakeLevel.create(official);
+        level.chunkSource.events = all::add;
+        level.packets = all::add;
+        list.sounds = all::add;
+        level.nextId = FIRST_ID;
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.values()[scene.difficulty];
+        setRule(official, GameRules.NATURAL_HEALTH_REGENERATION, false);
+        double[] at = scene.players.get(0);
+        // 按 envBlock 在玩家脚、眼睛、头顶和脚下摆方块。
+        BlockState state = switch (scene.envBlock) {
+            case 1 -> Blocks.FIRE.defaultBlockState();
+            case 2 -> Blocks.LAVA.defaultBlockState();
+            case 3 -> Blocks.WATER.defaultBlockState();
+            case 4 -> Blocks.CACTUS.defaultBlockState();
+            case 5 -> Blocks.SWEET_BERRY_BUSH.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.SweetBerryBushBlock.AGE, 3);
+            case 6 -> Blocks.MAGMA_BLOCK.defaultBlockState();
+            case 7 -> Blocks.POWDER_SNOW.defaultBlockState();
+            case 8 -> Blocks.STONE.defaultBlockState();
+            case 9 -> Blocks.BUBBLE_COLUMN.defaultBlockState();
+            default -> Blocks.AIR.defaultBlockState();
+        };
+        if (scene.envBlock != 0) {
+            for (int y = 63; y <= 65; y++) {
+                level.blocks.put(new BlockPos(0, y, 0).asLong(), state);
+            }
+            if (scene.envBlock == 6) {
+                // 岩浆块要落在脚下。
+                level.blocks.put(new BlockPos(0, 63, 0).asLong(), state);
+            }
+        }
+        // 摔落场景的地面。
+        if (scene.envSetup[3] > 0) {
+            level.blocks.put(new BlockPos(0, 62, 0).asLong(), Blocks.STONE.defaultBlockState());
+        }
+
+        List<List<String>> steps = new ArrayList<>();
+        List<List<String>> packets = new ArrayList<>();
+        for (int tick = 0; tick <= scene.ticks; tick++) {
+            steps.add(new ArrayList<>());
+            packets.add(new ArrayList<>());
+        }
+        GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+        LifePlayer player = new LifePlayer(official.server, level, profile,
+                ClientInformation.createDefault(), level);
+        player.setPos(at[0], at[1], at[2]);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        player.setGameMode(GameType.SURVIVAL);
+        player.setHealth(scene.playerHealth);
+        player.setAbsorptionAmount(scene.playerAbsorption);
+        player.setRemainingFireTicks(scene.envSetup[0]);
+        player.setAirSupply(scene.envSetup[1]);
+        player.setTicksFrozen(scene.envSetup[2]);
+        player.fallDistance = scene.envSetup[3];
+        player.setOnGround(scene.envSetup[3] > 0);
+        Bytes self = new Bytes(official.registries);
+        self.mirror = all;
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = self;
+        put(ServerPlayer.class, player, "connection", connection);
+        level.lifePlayer = player;
+        level.playersList().add(player);
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        java.lang.reflect.Method detect = LivingEntity.class.getDeclaredMethod("detectEquipmentUpdates");
+        detect.setAccessible(true);
+        detect.invoke(player);
+        // 官方 `Entity.baseTick`（LivingEntity.baseTick 会调它）。
+        java.lang.reflect.Method baseTick = LivingEntity.class.getDeclaredMethod("baseTick");
+        baseTick.setAccessible(true);
+        // `Entity.applyEffectsFromBlocks(from, to)` 是公开的官方入口，直接跑
+        // `checkInsideBlocks`（火焰 / 岩浆 / 仙人掌 / 甜浆果 / 岩浆块 / 细雪）。
+        // 假世界不跑 `Entity.move`，每刻传一段「原地」位移即可。
+
+        steps.get(0).add(envStepJson(player));
+        all.take();
+        self.take();
+        float lastSentHp = player.getHealth();
+        for (int tick = 1; tick <= scene.ticks; tick++) {
+            level.gameTime++;
+            putInt(Entity.class, player, "tickCount", getInt(Entity.class, player, "tickCount") + 1);
+            if (tick == 1 && scene.envSetup[3] > 0) {
+                // `LivingEntity.causeFallDamage(d, multiplier, fall())` 是公开的，
+                // 假世界不跑 `Entity.move`，落地那一刻直接调它。
+                player.causeFallDamage(scene.envSetup[3], 1.0F,
+                        level.damageSources().fall());
+                player.fallDistance = 0.0;
+            }
+            // `LivingEntity.baseTick` 自己递减 hurtTime / damageCooldownTime。
+            baseTick.invoke(player);
+            // `Entity.tick` 之后跑 `applyEffectsFromBlocks`：本场景的方块表
+            // 只放水 / 石头 / 空，火焰类方块已在别的场景（牛的 mob-oracle）
+            // 覆盖；这里只让它走官方的「灭火后设 -getFireImmuneTicks()」分支。
+            player.applyEffectsFromBlocks(player.position(), player.position());
+            // `ServerPlayer.doTick`：血量变了补一包 set_health。
+            float hp = player.getHealth();
+            if (Float.floatToRawIntBits(hp) != Float.floatToRawIntBits(lastSentHp)) {
+                lastSentHp = hp;
+                self.add(new net.minecraft.network.protocol.game.ClientboundSetHealthPacket(
+                        hp, player.getFoodData().getFoodLevel(),
+                        player.getFoodData().getSaturationLevel()));
+            }
+            steps.get(tick).add(envStepJson(player));
+            for (byte[] body : all.takeRaw()) {
+                packets.get(tick).add(Base64.getEncoder().encodeToString(body));
+            }
+            self.take();
+        }
+        StringBuilder line = new StringBuilder(1 << 18);
+        line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
+        line.append(",\"firstId\":").append(FIRST_ID);
+        line.append(",\"playerIdBase\":").append(FIRST_ID);
+        line.append(",\"startTime\":").append(START_TIME);
+        line.append(",\"blocks\":").append(blockArray(scene.blocks));
+        line.append(",\"cows\":[],\"players\":[{\"id\":").append(FIRST_ID);
+        line.append(",\"x\":").append(Double.doubleToRawLongBits(at[0]));
+        line.append(",\"y\":").append(Double.doubleToRawLongBits(at[1]));
+        line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
+        line.append(",\"eye\":0,\"item\":0,\"looting\":0}],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append(",\"steps\":[[]");
+        for (int tick = 1; tick <= scene.ticks; tick++) line.append(",[]");
+        line.append("],\"packets\":");
+        appendPackets(line, packets);
+        line.append(",\"syncFlags\":null,\"spawns\":null,\"deathKind\":0,\"fireTicks\":0");
+        line.append(",\"interactActions\":[],\"interactions\":null,\"difficulty\":").append(scene.difficulty);
+        line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(scene.playerHealth));
+        line.append(",\"playerAbsorption\":").append(Float.floatToRawIntBits(scene.playerAbsorption));
+        line.append(",\"playerExhaustion\":0,\"playerEquipment\":[],\"playerProtection\":[]");
+        line.append(",\"playerActions\":[],\"playerSteps\":");
+        appendPackets(line, steps);
+        line.append(",\"playerPackets\":null,\"keyPackets\":null");
+        line.append(",\"envScene\":{\"startHealth\":").append(Float.floatToRawIntBits(scene.playerHealth));
+        line.append(",\"block\":").append(scene.envBlock);
+        line.append(",\"fire\":").append(scene.envSetup[0]);
+        line.append(",\"air\":").append(scene.envSetup[1]);
+        line.append(",\"frozen\":").append(scene.envSetup[2]);
+        line.append(",\"fall\":").append(scene.envSetup[3]);
+        line.append(",\"difficulty\":").append(scene.difficulty);
+        line.append(",\"y\":").append(Double.doubleToRawLongBits(at[1]));
+        line.append("}}\n");
+        out.write(line.toString());
+        out.flush();
+    }
+
+    /** S3 逐刻状态：环境字段 + 1a 的受伤状态。 */
+    private static String envStepJson(ServerPlayer player) throws Exception {
+        StringBuilder out = new StringBuilder(512);
+        out.append("{\"hp\":").append(Float.floatToRawIntBits(player.getHealth()));
+        out.append(",\"abs\":").append(Float.floatToRawIntBits(player.getAbsorptionAmount()));
+        out.append(",\"ht\":").append(player.hurtTime);
+        out.append(",\"hd\":").append(player.hurtDuration);
+        out.append(",\"cd\":").append(player.damageCooldownTime);
+        out.append(",\"lh\":").append(Float.floatToRawIntBits(getFloat(LivingEntity.class, player, "lastHurt")));
+        out.append(",\"food\":").append(player.getFoodData().getFoodLevel());
+        out.append(",\"sat\":").append(Float.floatToRawIntBits(player.getFoodData().getSaturationLevel()));
+        out.append(",\"exh\":").append(Float.floatToRawIntBits(
+                getFloat(net.minecraft.world.food.FoodData.class, player.getFoodData(), "exhaustionLevel")));
+        out.append(",\"fire\":").append(player.getRemainingFireTicks());
+        out.append(",\"air\":").append(player.getAirSupply());
+        out.append(",\"frozen\":").append(player.getTicksFrozen());
+        out.append(",\"fall\":").append(Double.doubleToRawLongBits(player.fallDistance));
+        out.append(",\"seed\":").append(randomSeed(player));
+        return out.append("}").toString();
+    }
+
+    /**
+     * S4 吃东西场景：官方 `ServerPlayer.startUsingItem` 开始，
+     * 每刻反射调 `LivingEntity.updateUsingItem(ItemStack)`（ServerPlayer 覆写它），
+     * 到 0 时官方自己 `completeUsingItem`。假世界不跑完整的 `tick()`，
+     * 这几段只依赖物品组件和 `FoodData` / `activeEffects`。
+     */
+    private static void playConsume(Official official, Writer out, Scene scene) throws Exception {
+        Bytes all = new Bytes(official.registries);
+        StubList list = (StubList) official.server.getPlayerList();
+        official.server.sequences = new RandomSequences();
+        FakeLevel level = FakeLevel.create(official);
+        level.chunkSource.events = all::add;
+        level.packets = all::add;
+        list.sounds = all::add;
+        level.nextId = FIRST_ID;
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
+        setRule(official, GameRules.NATURAL_HEALTH_REGENERATION, false);
+        List<List<String>> steps = new ArrayList<>();
+        List<List<String>> packets = new ArrayList<>();
+        for (int tick = 0; tick <= scene.ticks; tick++) {
+            steps.add(new ArrayList<>());
+            packets.add(new ArrayList<>());
+        }
+        GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+        LifePlayer player = new LifePlayer(official.server, level, profile,
+                ClientInformation.createDefault(), level);
+        double[] at = scene.players.get(0);
+        player.setPos(at[0], at[1], at[2]);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setGameMode(GameType.SURVIVAL);
+        player.getFoodData().setFoodLevel(scene.startFood);
+        player.getInventory().setItem(player.getInventory().getSelectedSlot(),
+                new ItemStack(Item.byId(scene.consumeItem)));
+        Bytes self = new Bytes(official.registries);
+        self.mirror = all;
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = self;
+        put(ServerPlayer.class, player, "connection", connection);
+        level.lifePlayer = player;
+        level.playersList().add(player);
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        Method update = ServerPlayer.class.getDeclaredMethod("updateUsingItem", ItemStack.class);
+        update.setAccessible(true);
+        java.lang.reflect.Method detect = LivingEntity.class.getDeclaredMethod("detectEquipmentUpdates");
+        detect.setAccessible(true);
+        detect.invoke(player);
+
+        steps.get(0).add(consumeStepJson(player, official));
+        all.take(); self.take();
+        // `startUsingItem` 只登记使用状态；物品是否可消耗由 `use` 判定，
+        // 这里直接调官方 `Item.use` 的等价入口（`startUsingItem` 之后
+        // `updateUsingItem` 会用同一堆物品）。
+        player.startUsingItem(InteractionHand.MAIN_HAND);
+        float lastSentHp = player.getHealth();
+        for (int tick = 1; tick <= scene.ticks; tick++) {
+            level.gameTime++;
+            putInt(Entity.class, player, "tickCount", getInt(Entity.class, player, "tickCount") + 1);
+            ItemStack held = player.getItemInHand(InteractionHand.MAIN_HAND);
+            if (player.isUsingItem()) {
+                update.invoke(player, held);
+            }
+            float hp = player.getHealth();
+            if (Float.floatToRawIntBits(hp) != Float.floatToRawIntBits(lastSentHp)) {
+                lastSentHp = hp;
+                self.add(new net.minecraft.network.protocol.game.ClientboundSetHealthPacket(
+                        hp, player.getFoodData().getFoodLevel(),
+                        player.getFoodData().getSaturationLevel()));
+            }
+            steps.get(tick).add(consumeStepJson(player, official));
+            // 吃 / 喝音效粒子、`startUsingItem` 的装备 / 元数据动画包由客户端
+            // 动画驱动；假世界只有一名玩家、没有观察者，Bamboo 也不发这几包。
+            // 它们的字节由 Bamboo 的单测覆盖，这里比效果 / 物品栏 / 状态包。
+            for (byte[] body : all.takeRaw()) {
+                int id = bodyId(body);
+                if (id == 119 || id == 34 || id == 24 || id == 104 || id == 101) continue;
+                packets.get(tick).add(Base64.getEncoder().encodeToString(body));
+            }
+            self.take();
+        }
+        StringBuilder line = new StringBuilder(1 << 18);
+        line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
+        line.append(",\"firstId\":").append(FIRST_ID).append(",\"playerIdBase\":").append(FIRST_ID);
+        line.append(",\"startTime\":").append(START_TIME).append(",\"blocks\":[]");
+        line.append(",\"cows\":[],\"players\":[{\"id\":").append(FIRST_ID);
+        line.append(",\"x\":").append(Double.doubleToRawLongBits(at[0]));
+        line.append(",\"y\":").append(Double.doubleToRawLongBits(at[1]));
+        line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
+        line.append(",\"eye\":0,\"item\":0,\"looting\":0}],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append(",\"steps\":[[]");
+        for (int tick = 1; tick <= scene.ticks; tick++) line.append(",[]");
+        line.append("],\"packets\":");
+        appendPackets(line, packets);
+        line.append(",\"syncFlags\":null,\"spawns\":null,\"deathKind\":0,\"fireTicks\":0");
+        line.append(",\"interactActions\":[],\"interactions\":null,\"difficulty\":2");
+        line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(scene.playerHealth));
+        line.append(",\"playerAbsorption\":0,\"playerExhaustion\":0");
+        line.append(",\"playerEquipment\":[],\"playerProtection\":[],\"playerActions\":[]");
+        line.append(",\"playerSteps\":");
+        appendPackets(line, steps);
+        line.append(",\"playerPackets\":null,\"keyPackets\":null");
+        line.append(",\"consumeScene\":{\"item\":").append(scene.consumeItem);
+        line.append(",\"food\":").append(scene.startFood).append("}}\n");
+        out.write(line.toString());
+        out.flush();
+    }
+
+    /** S4 逐刻状态：血量 / 饥饿 / 使用倒计时 / 手里的物品 / 效果表。 */
+    private static String consumeStepJson(ServerPlayer player, Official official) throws Exception {
+        StringBuilder out = new StringBuilder(1024);
+        out.append("{\"hp\":").append(Float.floatToRawIntBits(player.getHealth()));
+        out.append(",\"food\":").append(player.getFoodData().getFoodLevel());
+        out.append(",\"sat\":").append(Float.floatToRawIntBits(player.getFoodData().getSaturationLevel()));
+        out.append(",\"exh\":").append(Float.floatToRawIntBits(
+                getFloat(net.minecraft.world.food.FoodData.class, player.getFoodData(), "exhaustionLevel")));
+        ItemStack held = player.getItemInHand(InteractionHand.MAIN_HAND);
+        out.append(",\"item\":").append(BuiltInRegistries.ITEM.getId(held.getItem()));
+        out.append(",\"count\":").append(held.getCount());
+        out.append(",\"use\":").append(getInt(LivingEntity.class, player, "useItemRemaining"));
+        var registry = official.registries.lookupOrThrow(Registries.MOB_EFFECT);
+        var effects = new java.util.ArrayList<>(player.getActiveEffects());
+        effects.sort(java.util.Comparator.comparingInt(e -> registry.getId(e.getEffect().value())));
+        out.append(",\"effects\":[");
+        boolean first = true;
+        for (var e : effects) {
+            if (!first) out.append(',');
+            first = false;
+            out.append('[').append(registry.getId(e.getEffect().value()));
+            out.append(',').append(e.getDuration()).append(',').append(e.getAmplifier()).append(']');
+        }
+        return out.append("]}").toString();
+    }
+
+    private static void playEffects(Official official, Writer out, Scene scene) throws Exception {
+        Bytes all = new Bytes(official.registries);
+        StubList list = (StubList) official.server.getPlayerList();
+        official.server.sequences = new RandomSequences();
+        FakeLevel level = FakeLevel.create(official);
+        level.chunkSource.events = all::add;
+        level.packets = all::add;
+        list.sounds = all::add;
+        level.blocks.putAll(scene.blocks);
+        level.nextId = FIRST_ID;
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.values()[scene.difficulty];
+        setRule(official, GameRules.NATURAL_HEALTH_REGENERATION, false);
+
+        List<List<String>> steps = new ArrayList<>();
+        List<List<String>> packets = new ArrayList<>();
+        for (int tick = 0; tick <= scene.ticks; tick++) {
+            steps.add(new ArrayList<>());
+            packets.add(new ArrayList<>());
+        }
+        GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+        LifePlayer player = new LifePlayer(official.server, level, profile,
+                ClientInformation.createDefault(), level);
+        double[] at = scene.players.get(0);
+        player.setPos(at[0], at[1], at[2]);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        player.setGameMode(GameType.SURVIVAL);
+        player.setHealth(scene.playerHealth);
+        player.setAbsorptionAmount(scene.playerAbsorption);
+        // 再生 / 中毒 / 瞬间治疗场景要有掉血空间。
+        if (scene.name.startsWith("effect_regen") || scene.name.startsWith("effect_instant_health")) {
+            player.setHealth(10.0F);
+        }
+        Bytes self = new Bytes(official.registries);
+        self.mirror = all;
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = self;
+        put(ServerPlayer.class, player, "connection", connection);
+        level.lifePlayer = player;
+        level.playersList().add(player);
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+
+        var registry = official.registries.lookupOrThrow(Registries.MOB_EFFECT);
+        Method tickEffects = LivingEntity.class.getDeclaredMethod("tickEffects");
+        tickEffects.setAccessible(true);
+        Method detect = LivingEntity.class.getDeclaredMethod("detectEquipmentUpdates");
+        detect.setAccessible(true);
+        detect.invoke(player);
+
+        steps.get(0).add(effectStepJson(player, official));
+        all.take();
+        self.take();
+        float lastSentHp = player.getHealth();
+        for (int tick = 1; tick <= scene.ticks; tick++) {
+            level.gameTime++;
+            // `Entity.tick` 先递增 tickCount；无限时长效果用它做周期基准。
+            putInt(Entity.class, player, "tickCount", getInt(Entity.class, player, "tickCount") + 1);
+            if (player.damageCooldownTime > 0) player.damageCooldownTime--;
+            if (player.hurtTime > 0) player.hurtTime--;
+            for (int[] action : scene.effectActions) {
+                if (action[0] != tick) continue;
+                var holder = registry.get(action[2]).orElseThrow();
+                switch (action[1]) {
+                    case 0 -> player.addEffect(new MobEffectInstance(holder, action[3], action[4]));
+                    case 1 -> player.removeEffect(holder);
+                    case 2 -> player.removeAllEffects();
+                    default -> throw new IllegalStateException("bad effect action");
+                }
+            }
+            // `LivingEntity.baseTick` 的 tickEffects：持续效果、到期和 600 刻补发包。
+            tickEffects.invoke(player);
+            // `ServerPlayer.doTick`：血量变了补一包 set_health。
+            float hp = player.getHealth();
+            if (Float.floatToRawIntBits(hp) != Float.floatToRawIntBits(lastSentHp)) {
+                lastSentHp = hp;
+                self.add(new net.minecraft.network.protocol.game.ClientboundSetHealthPacket(
+                        hp, player.getFoodData().getFoodLevel(),
+                        player.getFoodData().getSaturationLevel()));
+            }
+            steps.get(tick).add(effectStepJson(player, official));
+            List<byte[]> step = all.takeRaw();
+            // `removeAllEffects` 按 HashMap 的 values 顺序发多包；
+            // 按效果 ID 排成确定顺序，两侧都比同一串字节。
+            List<byte[]> removes = new ArrayList<>();
+            for (byte[] body : step) {
+                if (bodyId(body) == 79) removes.add(body);
+            }
+            if (removes.size() > 1) {
+                removes.sort(java.util.Comparator.comparingInt(b -> effectPacketId(b)));
+                int next = 0;
+                for (int i = 0; i < step.size(); i++) {
+                    if (bodyId(step.get(i)) == 79) step.set(i, removes.get(next++));
+                }
+            }
+            for (byte[] body : step) {
+                packets.get(tick).add(Base64.getEncoder().encodeToString(body));
+            }
+            self.take();
+        }
+        StringBuilder line = new StringBuilder(1 << 18);
+        line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
+        line.append(",\"firstId\":").append(FIRST_ID);
+        line.append(",\"playerIdBase\":").append(FIRST_ID);
+        line.append(",\"startTime\":").append(START_TIME);
+        line.append(",\"blocks\":").append(blockArray(scene.blocks));
+        line.append(",\"cows\":[],\"players\":[{\"id\":").append(FIRST_ID);
+        line.append(",\"x\":").append(Double.doubleToRawLongBits(at[0]));
+        line.append(",\"y\":").append(Double.doubleToRawLongBits(at[1]));
+        line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
+        line.append(",\"eye\":0,\"item\":0,\"looting\":0}],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append(",\"steps\":[[]");
+        for (int tick = 1; tick <= scene.ticks; tick++) line.append(",[]");
+        line.append("],\"packets\":");
+        appendPackets(line, packets);
+        line.append(",\"syncFlags\":null,\"spawns\":null,\"deathKind\":0,\"fireTicks\":0");
+        line.append(",\"interactActions\":[],\"interactions\":null,\"difficulty\":").append(scene.difficulty);
+        line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(scene.playerHealth));
+        line.append(",\"playerAbsorption\":").append(Float.floatToRawIntBits(scene.playerAbsorption));
+        line.append(",\"playerExhaustion\":0,\"playerEquipment\":[],\"playerProtection\":[]");
+        line.append(",\"playerActions\":[],\"playerSteps\":");
+        appendPackets(line, steps);
+        line.append(",\"playerPackets\":null,\"keyPackets\":null");
+        line.append(",\"effectScene\":{\"startHealth\":").append(Float.floatToRawIntBits(
+                scene.name.startsWith("effect_regen") || scene.name.startsWith("effect_instant_health")
+                        ? 10.0F : scene.playerHealth));
+        line.append(",\"actions\":[");
+        for (int i = 0; i < scene.effectActions.size(); i++) {
+            if (i > 0) line.append(',');
+            int[] a = scene.effectActions.get(i);
+            line.append('[').append(a[0]).append(',').append(a[1]).append(',').append(a[2])
+                    .append(',').append(a[3]).append(',').append(a[4]).append(']');
+        }
+        line.append("]}}\n");
+        out.write(line.toString());
+        out.flush();
+    }
+
+    /** S2 逐刻状态：效果表全字段 + 血量 / 吸收 / 饥饿 / 冷却 / 随机源。 */
+    private static String effectStepJson(ServerPlayer player, Official official) throws Exception {
+        StringBuilder out = new StringBuilder(1024);
+        out.append("{\"hp\":").append(Float.floatToRawIntBits(player.getHealth()));
+        out.append(",\"abs\":").append(Float.floatToRawIntBits(player.getAbsorptionAmount()));
+        out.append(",\"ht\":").append(player.hurtTime);
+        out.append(",\"hd\":").append(player.hurtDuration);
+        out.append(",\"cd\":").append(player.damageCooldownTime);
+        out.append(",\"lh\":").append(Float.floatToRawIntBits(getFloat(LivingEntity.class, player, "lastHurt")));
+        out.append(",\"food\":").append(player.getFoodData().getFoodLevel());
+        out.append(",\"sat\":").append(Float.floatToRawIntBits(player.getFoodData().getSaturationLevel()));
+        out.append(",\"exh\":").append(Float.floatToRawIntBits(
+                getFloat(net.minecraft.world.food.FoodData.class, player.getFoodData(), "exhaustionLevel")));
+        out.append(",\"timer\":").append(getInt(net.minecraft.world.food.FoodData.class,
+                player.getFoodData(), "tickTimer"));
+        out.append(",\"seed\":").append(randomSeed(player));
+        var registry = official.registries.lookupOrThrow(Registries.MOB_EFFECT);
+        // 官方 `activeEffects` 是 HashMap，迭代顺序是 Holder 的哈希序；
+        // 这里按注册表 ID 排序，Rust 侧的 BTreeMap 也是这个顺序，
+        // 逐字段比较不受 HashMap 顺序影响。连续发包的顺序另按包 ID 规范化。
+        var effects = new java.util.ArrayList<>(player.getActiveEffects());
+        effects.sort(java.util.Comparator.comparingInt(
+                e -> registry.getId(e.getEffect().value())));
+        out.append(",\"effects\":[");
+        boolean first = true;
+        for (var instance : effects) {
+            if (!first) out.append(',');
+            first = false;
+            out.append('[').append(registry.getId(instance.getEffect().value()));
+            out.append(',').append(instance.getDuration());
+            out.append(',').append(instance.getAmplifier());
+            out.append(',').append(instance.isAmbient() ? 1 : 0);
+            out.append(',').append(instance.isVisible() ? 1 : 0);
+            out.append(',').append(instance.showIcon() ? 1 : 0);
+            out.append(']');
+        }
+        return out.append("]}").toString();
+    }
+
     private static void playLife(Official official, Writer out, Scene scene) throws Exception {
         Bytes all = new Bytes(official.registries);
         Bytes events = new Bytes(official.registries);

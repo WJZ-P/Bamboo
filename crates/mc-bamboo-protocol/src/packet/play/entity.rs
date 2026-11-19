@@ -30,6 +30,8 @@ const SERIALIZER_ITEM_STACK: i32 = 7;
 const SERIALIZER_BOOLEAN: i32 = 8;
 const SERIALIZER_BLOCK_POS: i32 = 10;
 const SERIALIZER_BLOCK_STATE: i32 = 14;
+/// `EntityDataSerializers.PARTICLES`：注册顺序里的第 18 个。
+const SERIALIZER_PARTICLES: i32 = 17;
 const SERIALIZER_POSE: i32 = 20;
 /// `EntityDataSerializers.COW_VARIANT`，注册顺序里的第 24 个。
 ///
@@ -132,6 +134,13 @@ pub enum EntityData {
     Pose(Pose),
     /// index 9，FLOAT。
     Health(f32),
+    /// index 10，PARTICLES。`LivingEntity.DATA_EFFECT_PARTICLES`：
+    /// 可见效果的颜色列表（`entity_effect` 粒子，VarInt 数量 + 每项 VarInt 粒子 ID + int ARGB）。
+    ///
+    /// index 10, PARTICLES: `DATA_EFFECT_PARTICLES`, the colours of visible effects.
+    EffectParticles(Vec<i32>),
+    /// index 11，BOOLEAN。`LivingEntity.DATA_EFFECT_AMBIENCE_ID`。
+    EffectAmbience(bool),
     /// index 15，HUMANOID_ARM。
     MainHand(HumanoidArm),
     /// index 16，BYTE。皮肤外层的掩码。
@@ -203,6 +212,8 @@ impl EntityData {
             | Self::LivingFlags(_)
             | Self::ExperienceValue(_) => 8,
             Self::TntBlockState(_) | Self::Health(_) => 9,
+            Self::EffectParticles(_) => 10,
+            Self::EffectAmbience(_) => 11,
             Self::MobFlags(_) => 15,
             Self::MainHand(_) | Self::Baby(_) => 16,
             Self::ModelCustomisation(_) | Self::AgeLocked(_) => 17,
@@ -246,6 +257,21 @@ impl EntityData {
             Self::Health(health) => {
                 write_data_header(out, 9, SERIALIZER_FLOAT);
                 write_f32(out, *health);
+            }
+            Self::EffectParticles(colors) => {
+                write_data_header(out, 10, SERIALIZER_PARTICLES);
+                write_varint(out, colors.len() as i32);
+                for &color in colors {
+                    write_varint(
+                        out,
+                        mc_bamboo_data::registries::particle_type::ENTITY_EFFECT,
+                    );
+                    out.extend_from_slice(&color.to_be_bytes());
+                }
+            }
+            Self::EffectAmbience(ambient) => {
+                write_data_header(out, 11, SERIALIZER_BOOLEAN);
+                write_bool(out, *ambient);
             }
             Self::MainHand(arm) => {
                 write_data_header(out, 15, SERIALIZER_HUMANOID_ARM);
@@ -495,6 +521,67 @@ impl ClientboundPacket for SwingAnimation {
     }
 }
 
+/// 官方 `ClientboundUpdateMobEffectPacket`：VarInt 实体 ID、效果 Holder(VarInt)、
+/// VarInt 等级、VarInt 剩余刻数、一个字节的标志位
+/// （ambient 1 / visible 2 / showIcon 4 / blend 8）。
+///
+/// Vanilla `ClientboundUpdateMobEffectPacket`: entity id, effect holder,
+/// amplifier, remaining duration and one byte of flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateMobEffect {
+    pub entity_id: i32,
+    pub effect: i32,
+    pub amplifier: i32,
+    pub duration: i32,
+    pub ambient: bool,
+    pub visible: bool,
+    pub show_icon: bool,
+    pub blend: bool,
+}
+
+impl ClientboundPacket for UpdateMobEffect {
+    const ID: i32 = clientbound::UPDATE_MOB_EFFECT;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.entity_id);
+        write_varint(out, self.effect);
+        write_varint(out, self.amplifier);
+        write_varint(out, self.duration);
+        let mut flags = 0_u8;
+        if self.ambient {
+            flags |= 1;
+        }
+        if self.visible {
+            flags |= 2;
+        }
+        if self.show_icon {
+            flags |= 4;
+        }
+        if self.blend {
+            flags |= 8;
+        }
+        out.push(flags);
+    }
+}
+
+/// 官方 `ClientboundRemoveMobEffectPacket`：实体 ID + 效果 Holder。
+///
+/// Vanilla `ClientboundRemoveMobEffectPacket`: entity id plus effect holder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoveMobEffect {
+    pub entity_id: i32,
+    pub effect: i32,
+}
+
+impl ClientboundPacket for RemoveMobEffect {
+    const ID: i32 = clientbound::REMOVE_MOB_EFFECT;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.entity_id);
+        write_varint(out, self.effect);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +827,63 @@ mod tests {
         assert_eq!(
             body(&SwingAnimation::default_swing(5, Hand::Main)),
             hex("05 00 01 06")
+        );
+    }
+
+    #[test]
+    fn effect_packets_match_the_official_layout() {
+        // `ClientboundUpdateMobEffectPacket.write`: VarInt 实体 ID / 效果 /
+        // 等级 / 时长 / flags。flags = ambient|visible|showIcon|blend = 1|2|4|8。
+        let added = UpdateMobEffect {
+            entity_id: 7,
+            effect: 9,
+            amplifier: 2,
+            duration: 600,
+            ambient: true,
+            visible: true,
+            show_icon: true,
+            blend: true,
+        };
+        assert_eq!(frame(&added), hex("08 87 01 07 09 02 d8 04 0f"));
+        let updated = UpdateMobEffect {
+            blend: false,
+            ambient: false,
+            visible: false,
+            show_icon: false,
+            ..added
+        };
+        assert_eq!(body(&updated), hex("07 09 02 d8 04 00"));
+        let removed = RemoveMobEffect {
+            entity_id: 7,
+            effect: 9,
+        };
+        assert_eq!(frame(&removed), hex("03 4f 07 09"));
+    }
+
+    #[test]
+    fn effect_metadata_uses_the_particles_and_boolean_serializers() {
+        let particles = EntityData::EffectParticles(vec![3_402_751, 9_154_528]);
+        assert_eq!(particles.index(), 10);
+        let mut expected = hex("07 0a 11 02 1c");
+        expected.extend_from_slice(&3_402_751_i32.to_be_bytes());
+        expected.push(28);
+        expected.extend_from_slice(&9_154_528_i32.to_be_bytes());
+        expected.push(0xff);
+        assert_eq!(
+            body(&SetEntityData {
+                entity_id: ENTITY,
+                items: &[particles],
+            }),
+            expected
+        );
+        let ambient = EntityData::EffectAmbience(true);
+        assert_eq!(ambient.index(), 11);
+        assert_eq!(
+            body(&SetEntityData {
+                entity_id: ENTITY,
+                items: &[ambient],
+            }),
+            hex("07 0b 08 01 ff")
         );
     }
 }

@@ -70,6 +70,7 @@ import net.minecraft.world.level.storage.LevelData;
 import net.minecraft.world.level.storage.PrimaryLevelData;
 import net.minecraft.world.level.storage.TagValueInput;
 import net.minecraft.world.level.storage.ValueInput;
+import net.minecraft.world.effect.MobEffectInstance;
 
 /**
  * 用官方 26.3 的类检查 Bamboo 写出的带槽位物品、玩家数据和 level.dat。
@@ -501,6 +502,7 @@ public final class PlayerDataOracle {
             fields.addProperty("fall_distance", input.getDoubleOr("fall_distance", 0.0));
             fields.addProperty("fire", input.getShortOr("Fire", (short) 0));
             fields.addProperty("air", input.getShortOr("Air", (short) 300));
+            fields.addProperty("ticks_frozen", input.getIntOr("TicksFrozen", 0));
             fields.addProperty("on_ground", input.getBooleanOr("OnGround", false));
             fields.addProperty("invulnerable", input.getBooleanOr("Invulnerable", false));
             fields.addProperty("portal_cooldown", input.getIntOr("PortalCooldown", 0));
@@ -524,6 +526,9 @@ public final class PlayerDataOracle {
             fields.addProperty("food_tick_timer", input.getIntOr("foodTickTimer", 0));
             fields.addProperty("food_saturation", input.getFloatOr("foodSaturationLevel", 5.0F));
             fields.addProperty("food_exhaustion", input.getFloatOr("foodExhaustionLevel", 0.0F));
+            fields.add("active_effects", canonical(tagList(input.listOrEmpty("active_effects",
+                    MobEffectInstance.CODEC).stream()
+                    .map(one -> MobEffectInstance.CODEC.encodeStart(ops(), one).getOrThrow()))));
             fields.add("abilities", canonical(input.read("abilities", Abilities.Packed.CODEC)
                     .map(value -> Abilities.Packed.CODEC.encodeStart(ops(), value).getOrThrow())
                     .orElse(new CompoundTag())));
@@ -553,6 +558,8 @@ public final class PlayerDataOracle {
             tag.putDouble("fall_distance", input.getDoubleOr("fall_distance", 0.0));
             tag.putShort("Fire", (short) input.getShortOr("Fire", (short) 0));
             tag.putShort("Air", (short) input.getShortOr("Air", (short) 300));
+            int frozen = input.getIntOr("TicksFrozen", 0);
+            if (frozen > 0) tag.putInt("TicksFrozen", frozen);
             tag.putBoolean("OnGround", input.getBooleanOr("OnGround", false));
             tag.putBoolean("Invulnerable", input.getBooleanOr("Invulnerable", false));
             tag.putInt("PortalCooldown", input.getIntOr("PortalCooldown", 0));
@@ -578,6 +585,12 @@ public final class PlayerDataOracle {
             tag.putInt("foodTickTimer", input.getIntOr("foodTickTimer", 0));
             tag.putFloat("foodSaturationLevel", input.getFloatOr("foodSaturationLevel", 5.0F));
             tag.putFloat("foodExhaustionLevel", input.getFloatOr("foodExhaustionLevel", 0.0F));
+            // `LivingEntity.addAdditionalSaveData`：空表不写键。
+            var effects = input.listOrEmpty("active_effects", MobEffectInstance.CODEC)
+                    .stream().toList();
+            if (!effects.isEmpty()) {
+                putCodec(tag, "active_effects", MobEffectInstance.CODEC.listOf(), effects);
+            }
             putCodec(tag, "abilities", Abilities.Packed.CODEC, input.read("abilities", Abilities.Packed.CODEC)
                     .orElse(new Abilities.Packed(false, false, false, false, true, 0.05F, 0.1F)));
             putCodec(tag, "EnderItems", ItemStackWithSlot.CODEC.listOf(), inventoryOf(input, "EnderItems"));
@@ -612,6 +625,9 @@ public final class PlayerDataOracle {
             tag.putDouble("fall_distance", spec.get("fall_distance").getAsDouble());
             tag.putShort("Fire", (short) spec.get("fire").getAsInt());
             tag.putShort("Air", (short) spec.get("air").getAsInt());
+            if (spec.has("ticks_frozen") && spec.get("ticks_frozen").getAsInt() > 0) {
+                tag.putInt("TicksFrozen", spec.get("ticks_frozen").getAsInt());
+            }
             tag.putBoolean("OnGround", spec.get("on_ground").getAsBoolean());
             tag.putBoolean("Invulnerable", spec.get("invulnerable").getAsBoolean());
             tag.putInt("PortalCooldown", spec.get("portal_cooldown").getAsInt());
@@ -649,6 +665,39 @@ public final class PlayerDataOracle {
             tag.putInt("foodTickTimer", spec.get("food_tick_timer").getAsInt());
             tag.putFloat("foodSaturationLevel", spec.get("food_saturation").getAsFloat());
             tag.putFloat("foodExhaustionLevel", spec.get("food_exhaustion").getAsFloat());
+            if (spec.has("active_effects")) {
+                ListTag effects = new ListTag();
+                for (var element : spec.getAsJsonArray("active_effects")) {
+                    JsonObject e = element.getAsJsonObject();
+                    var holder = registries.lookupOrThrow(net.minecraft.core.registries.Registries.MOB_EFFECT)
+                            .getOrThrow(net.minecraft.resources.ResourceKey.create(
+                                    net.minecraft.core.registries.Registries.MOB_EFFECT,
+                                    net.minecraft.resources.Identifier.parse(e.get("id").getAsString())));
+                    // 用官方 codec 解码，确保键名和缺省值都按 26.3。
+                    CompoundTag one = new CompoundTag();
+                    one.putString("id", e.get("id").getAsString());
+                    one.putInt("amplifier", e.get("amplifier").getAsInt());
+                    one.putInt("duration", e.get("duration").getAsInt());
+                    one.putBoolean("ambient", e.get("ambient").getAsBoolean());
+                    one.putBoolean("show_particles", e.get("show_particles").getAsBoolean());
+                    if (e.has("show_icon")) {
+                        one.putBoolean("show_icon", e.get("show_icon").getAsBoolean());
+                    }
+                    if (e.has("hidden_effect")) {
+                        JsonObject h = e.getAsJsonObject("hidden_effect");
+                        CompoundTag hidden = new CompoundTag();
+                        hidden.putInt("amplifier", h.get("amplifier").getAsInt());
+                        hidden.putInt("duration", h.get("duration").getAsInt());
+                        hidden.putBoolean("ambient", h.get("ambient").getAsBoolean());
+                        hidden.putBoolean("show_particles", h.get("show_particles").getAsBoolean());
+                        hidden.putBoolean("show_icon", h.get("show_particles").getAsBoolean());
+                        one.put("hidden_effect", hidden);
+                    }
+                    var instance = MobEffectInstance.CODEC.parse(ops(), one).getOrThrow();
+                    effects.add(MobEffectInstance.CODEC.encodeStart(ops(), instance).getOrThrow());
+                }
+                tag.put("active_effects", effects);
+            }
             JsonObject a = spec.getAsJsonObject("abilities");
             putCodec(tag, "abilities", Abilities.Packed.CODEC, new Abilities.Packed(
                     a.get("invulnerable").getAsBoolean(), a.get("flying").getAsBoolean(),

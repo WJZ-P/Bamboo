@@ -2155,6 +2155,7 @@ impl World {
             && let Some(player) = region.players.get_mut(&id)
         {
             restore_inventory(player, data);
+            crate::player_effects::send_active(region, id);
         }
         Ok(())
     }
@@ -3137,6 +3138,16 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     // In `ServerPlayer.doTick` `set_health` comes before `set_experience`:
     // tick the hurt cooldowns and send health if the snapshot moved.
     crate::player_hurt::tick(region);
+    // `LivingEntity.baseTick` 的 `tickEffects`：在受伤冷却之后跑持续效果，
+    // 治疗和伤害走同一个 `hurt_player` 入口。
+    crate::player_effects::tick(region);
+    // `Entity.baseTick` / `LivingEntity.baseTick` 的环境伤害：着火、溺水、
+    // 卡墙、虚空、仙人掌 / 甜浆果 / 岩浆块、细雪冻伤。
+    crate::player_environment::tick_environment(region);
+    // `LivingEntity.updateUsingItem`：吃东西的剩余刻数和完成结算。
+    crate::player_consume::tick(region);
+    // 移动 / 跳跃 / 攻击 / 挖掘累计的饥饿消耗在 tick 末尾落到 FoodData。
+    crate::player_exhaustion::flush(region);
     // 官方 `ServerPlayer.doTick`：总经验变了就给这名玩家补一包 `set_experience`。
     //
     // Official `ServerPlayer.doTick`: a changed total sends one `set_experience`.

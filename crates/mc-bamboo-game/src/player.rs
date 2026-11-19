@@ -2,7 +2,7 @@
 //!
 //! 每个领域的状态放在各自模块的类型里，这里只把它们组合起来。
 
-use mc_bamboo_blocks::entity::{JavaRandom, ctx::PlayerView};
+use mc_bamboo_blocks::entity::{JavaRandom, ctx::PlayerView, mob::effects::EffectMap};
 use mc_bamboo_core::{Aabb, BlockPos, ChunkPos, Hand, Vec3};
 use mc_bamboo_protocol::{
     item::ItemStack,
@@ -145,6 +145,19 @@ pub(crate) struct Player {
     /// Health, hurt cooldowns and hunger. All relative countdowns, moved with
     /// the whole player row and needing no clock rebasing.
     pub(crate) health: PlayerHealth,
+    /// `LivingEntity.activeEffects`：和生物层共用同一份表，只存相对剩余刻数。
+    ///
+    /// `LivingEntity.activeEffects`: the same shared map as mobs, with
+    /// relative countdowns only.
+    pub(crate) effects: EffectMap,
+    /// `Entity` 的环境状态：着火、氧气、细雪冻结。全是相对倒计时。
+    ///
+    /// `Entity` environment state: fire, air, powder-snow freeze. All relative counters.
+    pub(crate) environment: crate::player_environment::Environment,
+    /// `LivingEntity.useItem` / `useItemRemaining`：正在吃东西 / 喝东西。
+    pub(crate) use_item: Option<crate::player_consume::UsingItem>,
+    /// 这一刻累计的饥饿消耗，`player_exhaustion::flush` 在 tick 末尾写入。
+    pub(crate) pending_exhaustion: f32,
     /// `ServerPlayer.lastSentHealth` / `lastSentFood` / `lastFoodSaturationZero` 的合并快照。
     /// 官方构造时是 -1e8 / -99999999 / true，进服第一刻必发一包 `set_health`。
     ///
@@ -252,6 +265,10 @@ impl Player {
             inbox: crate::inbound::PlayerInbox::default(),
             recorded_criteria: crate::scoreboard::UNRECORDED_CRITERIA,
             health: PlayerHealth::default(),
+            effects: EffectMap::new(),
+            environment: crate::player_environment::Environment::default(),
+            use_item: None,
+            pending_exhaustion: 0.0,
             health_sync: crate::player_hurt::HealthSync::INITIAL,
             in_combat: false,
             combat_entries: Vec::new(),

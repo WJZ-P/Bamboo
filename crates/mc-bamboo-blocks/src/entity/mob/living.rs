@@ -10,7 +10,7 @@
 use mc_bamboo_core::{BlockPos, Vec3, mth};
 use mc_bamboo_data::{
     FluidTag,
-    registries::attribute,
+    registries::{attribute, mob_effect},
     tags::{block_tags, fluid_tags},
 };
 
@@ -20,6 +20,7 @@ use super::{
         self, MAX_HEAD_Y_ROT, Operation, clamp_x_rot, look_x_rot, look_y_rot, move_rotlerp,
         rotate_towards,
     },
+    effects::EffectAction,
     goals::Flag,
     motion,
     navigation::NavMob,
@@ -333,6 +334,7 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     mob.y_head_rot_o = mob.y_head_rot;
     mob.y_body_rot_o = mob.y_body_rot;
+    tick_effects(me, mob, ctx);
     // `Mob.baseTick`：先取随机数，再拿自增前的值比较。
     if is_alive(me, mob) {
         let roll = me.random.next_int_bounded(1000);
@@ -350,6 +352,89 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             );
         }
     }
+}
+
+/// `LivingEntity.tickEffects` → `MobEffectInstance.tickServer`。
+/// 动作里真正要 `hurtServer` 的中毒 / 凋零走生物自己的受伤入口，其余直接改状态。
+///
+/// `LivingEntity.tickEffects` → `MobEffectInstance.tickServer`. Poison and
+/// wither damage go through the mob's own hurt path; the rest change state here.
+fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    let state = super::effects::EffectState {
+        health: mob.health,
+        max_health: mob.attributes.value(attribute::MAX_HEALTH) as f32,
+        absorption: mob.absorption,
+    };
+    let events = mob.effects.tick(me.tick_count, state);
+    if events.attributes_changed {
+        mob.effects.rebuild_attributes(&mut mob.attributes);
+        let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
+        if mob.health > max {
+            mob.health = max;
+        }
+    }
+    let mut hurts = Vec::new();
+    for tick in events.actions {
+        match tick.action {
+            EffectAction::Heal(amount) | EffectAction::InstantHeal(amount) => {
+                if mob.health < mob.attributes.value(attribute::MAX_HEALTH) as f32 {
+                    let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
+                    mob.health = (mob.health + amount).min(max);
+                }
+            }
+            EffectAction::MagicDamage(amount) => {
+                // `PoisonMobEffect`：血量高于 1 才真的打一次。
+                if mob.health > 1.0 {
+                    hurts.push((DamageKind::Magic, amount));
+                }
+            }
+            EffectAction::WitherDamage(amount) => hurts.push((DamageKind::Wither, amount)),
+            EffectAction::InstantDamage(amount) => hurts.push((DamageKind::Magic, amount)),
+            EffectAction::Exhaustion(_) | EffectAction::Eat { .. } => {
+                // 牛没有 `FoodData`，官方的 `HungerMobEffect` 和
+                // `SaturationMobEffect` 也只在目标是 `Player` 时做事。
+                // A cow has no `FoodData`; these effects only act on players.
+            }
+            EffectAction::Absorption(amount) => {
+                mob.absorption = mob.absorption.max(amount);
+            }
+            EffectAction::AbsorptionEnded => {
+                mob.effects.remove(tick.effect);
+            }
+        }
+    }
+    for (kind, amount) in hurts {
+        hurt_server(me, mob, ctx, DamageSource::environment(kind), amount);
+    }
+}
+
+/// `LivingEntity.addEffect`：给一头生物挂一个效果，刷新属性。
+///
+/// `LivingEntity.addEffect`: adds an effect to a mob and refreshes attributes.
+pub fn add_effect(mob: &mut Mob, instance: super::effects::EffectInstance) -> bool {
+    let events = mob.effects.add(instance);
+    if events.attributes_changed {
+        mob.effects.rebuild_attributes(&mut mob.attributes);
+    }
+    !events.changes.is_empty()
+}
+
+/// `LivingEntity.removeAllEffects`。
+pub fn clear_effects(mob: &mut Mob) -> bool {
+    let events = mob.effects.remove_all();
+    if events.attributes_changed {
+        mob.effects.rebuild_attributes(&mut mob.attributes);
+    }
+    !events.changes.is_empty()
+}
+
+/// `LivingEntity.removeEffect`。
+pub fn remove_effect(mob: &mut Mob, effect: i32) -> bool {
+    let events = mob.effects.remove(effect);
+    if events.attributes_changed {
+        mob.effects.rebuild_attributes(&mut mob.attributes);
+    }
+    !events.changes.is_empty()
 }
 
 /// `AbstractCow.getSoundVolume()`：叫声、受伤和死亡都用这个音量。
@@ -769,7 +854,12 @@ fn block_jump_factor(me: &Entity, view: &dyn BlockView) -> f32 {
 /// `jumpFromGround`。
 fn jump_from_ground(me: &mut Entity, mob: &Mob, view: &dyn BlockView) {
     let strength = mob.attributes.value(attribute::JUMP_STRENGTH) as f32;
-    let power = strength * 1.0 * block_jump_factor(me, view) + 0.0;
+    // `LivingEntity.getJumpBoostPower()`：每级 +0.1。
+    let boost = mob
+        .effects
+        .amplifier(mob_effect::JUMP_BOOST)
+        .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0));
+    let power = strength * 1.0 * block_jump_factor(me, view) + boost;
     if power <= 1.0e-5 {
         return;
     }
@@ -790,6 +880,20 @@ fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) 
     } else {
         travel_in_air(me, mob, ctx, input);
     }
+    // `LivingEntity.travel` 的漂浮分支：
+    // `y += 0.05*(amplifier+1) + 0.2*(y_after_friction - y_before)`。
+    if let Some(amplifier) = mob.effects.amplifier(mob_effect::LEVITATION) {
+        let before = me.old_position.y;
+        let _ = before;
+        let target = 0.05 * f64::from(amplifier.max(0) + 1);
+        let delta = me.delta;
+        let lift = target + (delta.y - target) * 0.2;
+        me.delta = Vec3::new(delta.x, lift, delta.z);
+    }
+    // `LivingEntity.aiStep`：缓降 / 漂浮每刻清 `fallDistance`。
+    if mob.effects.has(mob_effect::SLOW_FALLING) || mob.effects.has(mob_effect::LEVITATION) {
+        me.fall_distance = 0.0;
+    }
 }
 
 /// `computeModifiedFriction`。
@@ -798,11 +902,16 @@ fn modified_friction(friction: f32, modifier: f32) -> f32 {
 }
 
 /// `getEffectiveGravity`：读调用时的速度。
-fn effective_gravity(_me: &Entity, mob: &Mob) -> f64 {
+fn effective_gravity(me: &Entity, mob: &Mob) -> f64 {
     if mob.no_gravity {
-        0.0
+        return 0.0;
+    }
+    let gravity = mob.attributes.value(attribute::GRAVITY);
+    // `LivingEntity.getEffectiveGravity`：下落时缓降把重力压到 0.01。
+    if me.delta.y <= 0.0 && mob.effects.has(mob_effect::SLOW_FALLING) {
+        gravity.min(0.01)
     } else {
-        mob.attributes.value(attribute::GRAVITY)
+        gravity
     }
 }
 
