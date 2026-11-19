@@ -1953,6 +1953,27 @@ public final class MobOracle {
                 cow.tick();
             }
             level.tracked.removeIf(Entity::isRemoved);
+            // 实体 tick 里也会生成实体（繁殖的幼崽、死亡掉落物和经验球），在这一刻收齐。
+            if (scene.drops) {
+                level.spawned.sort(java.util.Comparator.comparingInt(Entity::getId));
+                for (Entity born : level.spawned) {
+                    level.reseedBorn(born);
+                    spawns.get(tick).add(spawnJson(born));
+                    if (born instanceof Cow calf) {
+                        cows.add(calf);
+                        level.tracked.add(born);
+                    }
+                    if (scene.packets) {
+                        Sync sync = new Sync(level, born, official.registries);
+                        syncs.add(sync);
+                        sync.entity.sendPairingData(null, packet -> sync.bytes.add(packet));
+                        packets.get(tick).addAll(sync.take());
+                    }
+                }
+                level.spawned.clear();
+                level.newbornCows.clear();
+            }
+            level.tracked.removeIf(Entity::isRemoved);
             line.append(',').append(stepJson(cows));
             if (scene.packets) {
                 // 官方 `ChunkMap.removeEntity` 在实体被丢弃时发给所有观察者。
