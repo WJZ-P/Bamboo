@@ -1044,7 +1044,7 @@ fn assert_tick_sets_on(server: &Harness, region: &Region) {
                 .map(move |dz| ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz)))
         })
     };
-    for &pos in levels.block_chunks() {
+    for pos in levels.block_chunks() {
         for neighbor in neighborhood(pos, 1) {
             assert!(
                 region.chunks.is_loaded(neighbor),
@@ -1052,7 +1052,7 @@ fn assert_tick_sets_on(server: &Harness, region: &Region) {
             );
         }
     }
-    for &pos in levels.entity_chunks() {
+    for pos in levels.entity_chunks() {
         for neighbor in neighborhood(pos, 2) {
             assert!(
                 region.chunks.is_loaded(neighbor),
@@ -1069,8 +1069,8 @@ fn assert_tick_sets_on(server: &Harness, region: &Region) {
         return;
     }
     let (blocks, entities, random) = expected_sets_on(server, region);
-    assert_eq!(levels.block_chunks(), &blocks, "方块集合与定义不一致");
-    assert_eq!(levels.entity_chunks(), &entities, "实体集合与定义不一致");
+    assert_eq!(levels.block_chunks(), blocks, "方块集合与定义不一致");
+    assert_eq!(levels.entity_chunks(), entities, "实体集合与定义不一致");
     assert_eq!(
         levels.random_chunks(),
         &random,
@@ -1449,7 +1449,7 @@ fn slow_delivery_keeps_tick_sets_consistent_with_the_region() {
         // 每刻：能跑方块逻辑的区块，它和周围 8 个区块都已在 region 里。
         let region = limited.world_region();
         region.tick_levels.assert_invariants();
-        for &pos in region.tick_levels.block_chunks() {
+        for pos in region.tick_levels.block_chunks() {
             for dx in -1..=1 {
                 for dz in -1..=1 {
                     let neighbor = ChunkPos::new(pos.x + dx, pos.z + dz);
@@ -1462,8 +1462,8 @@ fn slow_delivery_keeps_tick_sets_consistent_with_the_region() {
         }
         // 同一刻的档位集合必须和「从票表 + 已加载集合」从头算出来的一致。
         let (blocks, entities, random) = expected_sets(&limited);
-        assert_eq!(region.tick_levels.block_chunks(), &blocks);
-        assert_eq!(region.tick_levels.entity_chunks(), &entities);
+        assert_eq!(region.tick_levels.block_chunks(), blocks);
+        assert_eq!(region.tick_levels.entity_chunks(), entities);
         assert_eq!(region.tick_levels.random_chunks(), &random);
         saw_partial |= !region.chunks.is_loaded(ChunkPos::new(0, 3))
             && region.chunks.loaded_count() != Some(0);
@@ -1485,13 +1485,13 @@ fn slow_delivery_keeps_tick_sets_consistent_with_the_region() {
     );
     assert_eq!(
         (
-            settled.tick_levels.block_chunks().clone(),
-            settled.tick_levels.entity_chunks().clone(),
+            settled.tick_levels.block_chunks(),
+            settled.tick_levels.entity_chunks(),
             settled.tick_levels.random_chunks().clone()
         ),
         (
-            reference.tick_levels.block_chunks().clone(),
-            reference.tick_levels.entity_chunks().clone(),
+            reference.tick_levels.block_chunks(),
+            reference.tick_levels.entity_chunks(),
             reference.tick_levels.random_chunks().clone()
         ),
         "全部到齐时三个集合和上限不设时相同"

@@ -122,13 +122,15 @@ const ENTITY_RADIUS: i32 = 2;
 pub(crate) struct TickLevels {
     /// 已交付区块的档位。`tiers` 里的键就是「已交付」这一事实。
     tiers: TierMap,
-    /// 能跑方块逻辑的区块。哈希集合供成员查询，有序集合供遍历/测试，
-    /// 两份一起增量维护，内容始终相同。
+    /// 能跑方块逻辑的区块，供成员查询。（以前另有一份有序的同样内容，只有测试读，
+    /// 岛拆合时却每个区块都要搬；测试现在按需从这一份排出有序的。）
+    ///
+    /// Chunks that run block logic, for membership queries. (An ordered copy
+    /// used to be kept as well, read only by tests yet moved chunk by chunk
+    /// on every island split and merge; tests now sort this one on demand.)
     blocks: ChunkSet,
-    blocks_ordered: BTreeSet<ChunkPos>,
-    /// 能跑实体的区块，同上两份。
+    /// 能跑实体的区块，同上。
     entities: ChunkSet,
-    entities_ordered: BTreeSet<ChunkPos>,
     /// 逐区块 tick 的区块：属于 `blocks`，且模拟等级 ≤31。
     random: BTreeSet<ChunkPos>,
     /// 已加载模式才启用；无限超平坦模式的查询恒为真。
@@ -156,9 +158,7 @@ impl TickLevels {
         self.enabled = false;
         self.tiers.clear();
         self.blocks.clear();
-        self.blocks_ordered.clear();
         self.entities.clear();
-        self.entities_ordered.clear();
         self.random.clear();
     }
 
@@ -182,13 +182,13 @@ impl TickLevels {
 
     /// 测试用的只读视图（按坐标有序，口径不变）。
     #[cfg(test)]
-    pub(crate) fn block_chunks(&self) -> &BTreeSet<ChunkPos> {
-        &self.blocks_ordered
+    pub(crate) fn block_chunks(&self) -> BTreeSet<ChunkPos> {
+        self.blocks.iter().copied().collect()
     }
 
     #[cfg(test)]
-    pub(crate) fn entity_chunks(&self) -> &BTreeSet<ChunkPos> {
-        &self.entities_ordered
+    pub(crate) fn entity_chunks(&self) -> BTreeSet<ChunkPos> {
+        self.entities.iter().copied().collect()
     }
 
     #[cfg(test)]
@@ -264,8 +264,6 @@ impl TickLevels {
                 }
             }
         }
-        out.blocks_ordered = split_ordered(&mut self.blocks_ordered, chunks);
-        out.entities_ordered = split_ordered(&mut self.entities_ordered, chunks);
         out.random = split_ordered(&mut self.random, chunks);
         let (moved, kept) = std::mem::take(&mut self.block_tick_changes)
             .into_iter()
@@ -282,9 +280,7 @@ impl TickLevels {
         debug_assert_eq!(self.enabled, other.enabled);
         self.tiers.extend(other.tiers);
         self.blocks.extend(other.blocks);
-        absorb_ordered(&mut self.blocks_ordered, other.blocks_ordered);
         self.entities.extend(other.entities);
-        absorb_ordered(&mut self.entities_ordered, other.entities_ordered);
         absorb_ordered(&mut self.random, other.random);
         self.block_tick_changes.extend(other.block_tick_changes);
     }
@@ -320,17 +316,12 @@ impl TickLevels {
             if was != eligible {
                 self.block_tick_changes.push((center, eligible));
             }
-            set_member(&mut self.blocks, &mut self.blocks_ordered, center, eligible);
+            set_member(&mut self.blocks, center, eligible);
             set_member_ordered(&mut self.random, center, random);
         }
         for center in entity_centers {
             let eligible = self.entities_eligible(center);
-            set_member(
-                &mut self.entities,
-                &mut self.entities_ordered,
-                center,
-                eligible,
-            );
+            set_member(&mut self.entities, center, eligible);
         }
     }
 
@@ -392,21 +383,17 @@ impl TickLevels {
     #[cfg(test)]
     pub(crate) fn assert_invariants(&self) {
         let (blocks, entities, random) = self.recompute_all();
-        assert_eq!(self.blocks_ordered, blocks, "方块集合和定义不一致");
-        assert_eq!(self.entities_ordered, entities, "实体集合和定义不一致");
+        assert_eq!(self.block_chunks(), blocks, "方块集合和定义不一致");
+        assert_eq!(self.entity_chunks(), entities, "实体集合和定义不一致");
         assert_eq!(self.random, random, "逐区块 tick 集合和定义不一致");
-        assert_eq!(self.blocks.len(), blocks.len(), "哈希成员集合漏了方块");
-        assert_eq!(self.entities.len(), entities.len(), "哈希成员集合漏了实体");
     }
 }
 
-fn set_member(set: &mut ChunkSet, ordered: &mut BTreeSet<ChunkPos>, pos: ChunkPos, member: bool) {
+fn set_member(set: &mut ChunkSet, pos: ChunkPos, member: bool) {
     if member {
         set.insert(pos);
-        ordered.insert(pos);
     } else {
         set.remove(&pos);
-        ordered.remove(&pos);
     }
 }
 
