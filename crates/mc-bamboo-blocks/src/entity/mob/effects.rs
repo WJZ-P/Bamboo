@@ -95,9 +95,10 @@ impl EffectInstance {
         result
     }
 
-    /// 官方五参数构造：`ambient`、`visible`、`showIcon` 都由调用方给。
+    /// 官方五参数构造：`ambient` / `visible` 由调用方给，
+    /// `showIcon` 按官方缺省等于 `visible`。
     ///
-    /// The five-argument vanilla constructor with explicit flags.
+    /// The five-argument vanilla constructor; `showIcon` defaults to `visible`.
     pub fn with_flags(
         effect: i32,
         duration: i32,
@@ -108,6 +109,7 @@ impl EffectInstance {
         let mut result = Self::with_amplifier(effect, duration, amplifier);
         result.ambient = ambient;
         result.visible = visible;
+        result.show_icon = visible;
         result
     }
 

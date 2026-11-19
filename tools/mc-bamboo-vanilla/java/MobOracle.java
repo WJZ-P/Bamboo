@@ -333,6 +333,9 @@ public final class MobOracle {
         int consumeItem;
         /** 效果动作：{刻, 0=add 1=clear-one 2=clear-all, 效果 ID, 时长, 等级}。 */
         final List<int[]> effectActions = new ArrayList<>();
+        /** 牛的效果动作：{刻, 牛下标, 0=add 1=clear-all, 效果 ID, 时长, 等级}。
+         * 逐刻比位置 / 速度 / 血量 / 摔落距离 / 随机源。 */
+        final List<int[]> cowEffectActions = new ArrayList<>();
         /** 落脚点场景：出生点、规则半径、随机源种子、默认游戏模式、个人出生点。 */
         int[] spawnAt = {8, 0, 8};
         int spawnRadius = 10;
@@ -449,6 +452,12 @@ public final class MobOracle {
         }
 
         /** 某一刻玩家右键一头牛；`item` 是主手物品注册表 ID，`creative` 是模式。 */
+        /** 某一刻给一头牛挂效果 / 清效果。 */
+        Scene cowEffect(int tick, int cow, int kind, int effect, int duration, int amplifier) {
+            cowEffectActions.add(new int[] {tick, cow, kind, effect, duration, amplifier});
+            return this;
+        }
+
         Scene interact(int tick, int cow, int player, int item, int creative) {
             interactions.add(new int[] {tick, cow, player, item, creative});
             return this;
@@ -1268,6 +1277,39 @@ public final class MobOracle {
                 naturalOff.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
                 scenes.add(naturalOff);
             }
+            // ---- S2 补充：牛挂效果后的运动 ----
+            // 漂浮：向上飘、到期落地；缓降：从高处慢落、不摔伤；
+            // 速度 / 缓慢：散步速度变化；跳跃提升：AI 跳跃高度。
+            for (int[] row : new int[][] {
+                {40, 24, 0},  // 漂浮 I，40 刻后到期
+                {120, 0, 2},  // 速度 III
+                {120, 1, 2},  // 缓慢 III
+                {120, 7, 2},  // 跳跃提升 III
+            }) {
+                int effect = row[1];
+                Scene scene = new Scene("cow_effect_" + effect + "_" + row[2]).ticks(140);
+                ground(scene, 6);
+                scene.cow(0.5, 64.0, 0.5, 0.0F, 51L);
+                scene.player(3.5, 64.0, 0.5, Items.AIR);
+                scene.cowEffect(1, 0, 0, effect, row[0], row[2]);
+                scenes.add(scene);
+            }
+            {
+                // 缓降：牛从 24 格高落下，效果 60 刻到期后转普通下落，
+                // 逐刻比 fallDistance / 落地血量。
+                Scene slow = new Scene("cow_effect_slow_falling").ticks(140);
+                ground(slow, 6);
+                slow.cow(0.5, 88.0, 0.5, 0.0F, 51L);
+                slow.player(3.5, 64.0, 0.5, Items.AIR);
+                slow.cowEffect(1, 0, 0, 27, 60, 0);
+                scenes.add(slow);
+                // 对照组：同样高度但不挂效果，落地要摔伤。
+                Scene plain = new Scene("cow_effect_plain_fall").ticks(140);
+                ground(plain, 6);
+                plain.cow(0.5, 88.0, 0.5, 0.0F, 51L);
+                plain.player(3.5, 64.0, 0.5, Items.AIR);
+                scenes.add(plain);
+            }
             // ---- 1c：进服 / 重生落脚点，官方 `PlayerSpawnFinder.findSpawn` ----
             scenes.add(spawnSurface());
             scenes.add(spawnWater());
@@ -1794,6 +1836,17 @@ public final class MobOracle {
                     addSync(level, official, cow, syncs, packets, tick);
                 }
             }
+            for (int[] action : scene.cowEffectActions) {
+                if (action[0] != tick || action[1] >= cows.size()) continue;
+                Cow target = cows.get(action[1]);
+                var holder = official.registries.lookupOrThrow(Registries.MOB_EFFECT)
+                        .get(action[3]).orElseThrow();
+                if (action[2] == 0) {
+                    target.addEffect(new MobEffectInstance(holder, action[4], action[5]));
+                } else {
+                    target.removeAllEffects();
+                }
+            }
             for (Cow cow : new ArrayList<>(cows)) {
                 if (cow.isRemoved()) {
                     continue;
@@ -1862,7 +1915,15 @@ public final class MobOracle {
         appendSpawns(line, spawns);
         line.append(",\"deathKind\":").append(scene.deathKind);
         line.append(",\"fireTicks\":").append(scene.fireTicks);
-        line.append(",\"interactActions\":[");
+        line.append(",\"cowEffectActions\":[");
+        for (int i = 0; i < scene.cowEffectActions.size(); i++) {
+            if (i > 0) line.append(',');
+            int[] a = scene.cowEffectActions.get(i);
+            line.append('[').append(a[0]);
+            for (int j = 1; j < a.length; j++) line.append(',').append(a[j]);
+            line.append(']');
+        }
+        line.append("],\"interactActions\":[");
         for (int i = 0; i < scene.interactions.size(); i++) {
             if (i > 0) line.append(',');
             int[] action = scene.interactions.get(i);
