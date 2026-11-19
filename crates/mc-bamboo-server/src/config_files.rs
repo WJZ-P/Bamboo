@@ -787,6 +787,7 @@ impl ConfigFiles {
             island_dead_timeout: island_dead_seconds_from_env()
                 .map_or(self.bamboo.island_dead_timeout, Duration::from_secs),
             world_gen,
+            spawn_radius: None,
             broadcast_console_to_ops: self.official.broadcast_console_to_ops,
             // 从真实 server.properties 建起来的命令行版才读进程 stdin；嵌入用法不读。
             // Only the CLI, built from a real server.properties, reads process stdin.

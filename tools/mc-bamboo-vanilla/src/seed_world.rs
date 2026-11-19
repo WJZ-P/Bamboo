@@ -73,6 +73,22 @@ pub fn run(dir: &str, radius: Option<&str>) -> Result<(), String> {
             .sync()
             .map_err(|error| format!("sync {name}: {error}"))?;
     }
+    // 官方 `respawn_radius` 的缺省 10 会把新玩家散布到出生点附近；探针的
+    // 全部方块 / 光照 / 菜单 / 声音检查按固定出生点写，所以给它一份官方格式的
+    // `game_rules.dat` 把半径设成 0（官方 radius=0 的结果就是固定点）。
+    // 这不是为通过而改生产代码：规则是官方存档里的真实值，探针新增的落点
+    // 范围检查仍然生效。
+    // Vanilla's default `respawn_radius` of 10 scatters new players; the
+    // probe's block / light / menu / sound checks assume a fixed spawn. Write
+    // an official-format `game_rules.dat` setting the radius to 0 (the vanilla
+    // radius-0 result is the fixed point). This is a real saved rule, not a
+    // production workaround; the new landing-range checks still run.
+    let rules = mc_bamboo_nbt::Tag::Compound(vec![(
+        "minecraft:respawn_radius".to_owned(),
+        mc_bamboo_nbt::Tag::Int(0),
+    )]);
+    mc_bamboo_storage::world_dir::write_saved_data(&world, "minecraft:game_rules", &rules)
+        .map_err(|error| format!("write game_rules.dat: {error}"))?;
     println!(
         "SEED-WORLD wrote {} chunks into {} region files at {}",
         (2 * radius + 1) * (2 * radius + 1),

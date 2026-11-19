@@ -366,6 +366,8 @@ public final class Probe {
     private static final double SPAWN_X = 8.5;
     private static final double SPAWN_Y = -60.0;
     private static final double SPAWN_Z = 8.5;
+    /** 官方 `respawn_radius` 的缺省值（探针自己的 server.properties 不改它）。 */
+    private static final int RESPAWN_RADIUS = 10;
     /** 走路时一步的距离，不是 1/4096 的整数倍，这样取整错了就对不上。 */
     private static final double WALK_STEP = 0.2137;
     private static final int WALK_STEPS = 20;
@@ -2384,6 +2386,9 @@ public final class Probe {
          * spectator has to disconnect first.
          */
         private void spectatorCrafting(Join creative) throws IOException {
+            // 探针的 game_rules.dat 把官方 respawn_radius 设成 0，出生落点固定。
+            // The probe's game_rules.dat pins the official respawn_radius to 0,
+            // so the landing position is fixed.
             creative.moveTo(new Vec3(SPAWN_X, SPAWN_Y, SPAWN_Z), true);
             BlockPos ground = BlockPos.containing(SPAWN_X, SPAWN_Y, SPAWN_Z).offset(0, -1, 1);
             BlockPos table = ground.above();
@@ -3087,9 +3092,17 @@ public final class Probe {
         private final Set<ChunkPos> firstBatch = new HashSet<>();
         private final Set<ChunkPos> walkEntered = new HashSet<>();
         private final Set<ChunkPos> walkForgotten = new HashSet<>();
-        private final Set<ChunkPos> expectedSpawnChunks = chunksOf(SPAWN_CHUNK);
+        // 官方 `respawn_radius` 会把新玩家散布到出生点附近，落点所在的区块
+        // 由第一包 `player_position` 决定；下面这些几何量在收到那一包时按官方
+        // `ChunkTrackingView.difference` 重算（检查本身一条不少）。
+        // Vanilla `respawn_radius` scatters new players; the first
+        // `player_position` packet determines the spawn chunk, and these
+        // geometry sets are recomputed from it (no check is removed).
+        private Set<ChunkPos> expectedSpawnChunks = chunksOf(SPAWN_CHUNK);
         private final Set<ChunkPos> expectedEntered = new HashSet<>();
         private final Set<ChunkPos> expectedForgotten = new HashSet<>();
+        private ChunkPos spawnChunk = SPAWN_CHUNK;
+        private ChunkPos walkTarget = WALK_TARGET;
         private int chunks;
         private int batchTotal;
         private boolean firstChunkChecked;
@@ -3247,11 +3260,9 @@ public final class Probe {
             this.containers = PalettedContainerFactory.create(registries);
             this.bridge = new Bridge(host, port);
             this.connection = bridge.connection;
-            ChunkTrackingView.difference(
-                    ChunkTrackingView.of(SPAWN_CHUNK, VIEW_DISTANCE),
-                    ChunkTrackingView.of(WALK_TARGET, VIEW_DISTANCE),
-                    expectedEntered::add,
-                    expectedForgotten::add);
+            // expectedEntered / expectedForgotten 在收到 player_position 后按真实出生区块算。
+            // expectedEntered / expectedForgotten are computed from the real
+            // spawn chunk once player_position arrives.
         }
 
         /** 官方的跟踪范围，也就是服务端要发的全部区块。 */
@@ -3412,7 +3423,8 @@ public final class Probe {
             if (firstBatch.size() != FIRST_BATCH_CHUNKS) {
                 return false;
             }
-            return firstBatch.stream().allMatch(pos -> Math.abs(pos.x()) <= 1 && Math.abs(pos.z()) <= 1);
+            return firstBatch.stream().allMatch(pos ->
+                    Math.abs(pos.x() - spawnChunk.x()) <= 1 && Math.abs(pos.z() - spawnChunk.z()) <= 1);
         }
 
         /**
@@ -3795,7 +3807,30 @@ public final class Probe {
                 spawnAccepted = true;
                 check("play: spawn is above the grass", incoming.y == SPAWN_Y);
                 check("play: position is absolute", relatives.isEmpty());
+                // 官方 `PlayerSpawnFinder.findSpawn`：缺省 respawn_radius=10，
+                // 落点在出生点 ±10 格内且 x/z 都是「整数 + 0.5」。
+                // Vanilla `PlayerSpawnFinder.findSpawn`: default radius 10,
+                // landing within +-10 blocks, x/z both integer + 0.5.
+                check("play: spawn x is within the respawn radius",
+                        x >= SPAWN_X - RESPAWN_RADIUS && x <= SPAWN_X + RESPAWN_RADIUS);
+                check("play: spawn z is within the respawn radius",
+                        z >= SPAWN_Z - RESPAWN_RADIUS && z <= SPAWN_Z + RESPAWN_RADIUS);
+                check("play: spawn x is centred on a block",
+                        Math.abs(x - Math.floor(x) - 0.5) < 1.0e-9);
+                check("play: spawn z is centred on a block",
+                        Math.abs(z - Math.floor(z) - 0.5) < 1.0e-9);
                 position = new Vec3(x, y, z);
+                spawnChunk = new ChunkPos(net.minecraft.util.Mth.floor(x / 16.0),
+                        net.minecraft.util.Mth.floor(z / 16.0));
+                walkTarget = new ChunkPos(spawnChunk.x() + 1, spawnChunk.z());
+                expectedSpawnChunks = chunksOf(spawnChunk);
+                expectedEntered.clear();
+                expectedForgotten.clear();
+                ChunkTrackingView.difference(
+                        ChunkTrackingView.of(spawnChunk, VIEW_DISTANCE),
+                        ChunkTrackingView.of(walkTarget, VIEW_DISTANCE),
+                        expectedEntered::add,
+                        expectedForgotten::add);
                 connection.send(new ServerboundAcceptTeleportationPacket(packet.id(), x, y, z, 0f, 0f));
                 connection.send(new ServerboundPlayerLoadedPacket());
                 return;
@@ -3927,12 +3962,13 @@ public final class Probe {
 
         private void onChunkCenter(ClientboundSetChunkCacheCenterPacket packet) {
             if (walked) {
-                walkCenterArrived |= packet.getX() == WALK_TARGET.x() && packet.getZ() == WALK_TARGET.z();
+                walkCenterArrived |= packet.getX() == walkTarget.x() && packet.getZ() == walkTarget.z();
                 return;
             }
             if (!spawnCenterChecked) {
                 spawnCenterChecked = true;
-                check("play: chunk center is the spawn chunk", packet.getX() == 0 && packet.getZ() == 0);
+                check("play: chunk center is the spawn chunk",
+                        packet.getX() == spawnChunk.x() && packet.getZ() == spawnChunk.z());
             }
         }
 
@@ -3957,7 +3993,8 @@ public final class Probe {
             }
             if (!firstChunkChecked) {
                 firstChunkChecked = true;
-                check("play: nearest chunk comes first", packet.x() == 0 && packet.z() == 0);
+                check("play: nearest chunk comes first",
+                        packet.x() == spawnChunk.x() && packet.z() == spawnChunk.z());
                 checkChunkContents(packet);
             }
             recordChunk(packet);
@@ -4708,9 +4745,11 @@ public final class Probe {
                 //
                 // Sixteen blocks in one packet exceeds the moved-too-quickly limit.
                 // Eight blocks already enters the target chunk.
-                double blockX = SPAWN_X + 8.0;
-                position = new Vec3(blockX, SPAWN_Y, SPAWN_Z);
-                connection.send(new ServerboundMovePlayerPacket.Pos(blockX, SPAWN_Y, SPAWN_Z, true, false));
+                // 从真实落点往 +x 走 8 格，仍按超过一包上限前的官方路径进目标区块。
+                // Walk 8 blocks along +x from the real landing position.
+                double blockX = position.x + 8.0;
+                position = new Vec3(blockX, position.y, position.z);
+                connection.send(new ServerboundMovePlayerPacket.Pos(blockX, position.y, position.z, true, false));
                 connection.send(ServerboundClientTickEndPacket.INSTANCE);
             }
         }

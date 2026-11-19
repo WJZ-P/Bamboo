@@ -143,6 +143,11 @@ pub struct ServerConfig {
     /// Embedded use defaults to superflat / seed 0; a world created from
     /// `server.properties` is switched to the official default `normal`.
     pub world_gen: WorldGenConfig,
+    /// 启动时给官方 `respawn_radius` 定值；`None` 用官方缺省 10。嵌入式测试
+    /// 需要固定出生点时可以显式给 0，等价于官方规则为 0 的结果。
+    /// Optional initial value for the official `respawn_radius`; `None` keeps
+    /// the vanilla default 10. Embedded tests can pin 0 for a fixed spawn.
+    pub spawn_radius: Option<i32>,
     /// 官方 `server.properties` 的 `broadcast-console-to-ops`：控制台命令反馈要不要
     /// 广播给在线 OP。默认 true。
     ///
@@ -186,6 +191,7 @@ impl Default for ServerConfig {
             islands: mc_bamboo_game::default_islands(),
             island_dead_timeout: mc_bamboo_game::default_island_dead_timeout(),
             world_gen: WorldGenConfig::default(),
+            spawn_radius: None,
             broadcast_console_to_ops: true,
             console_enabled: false,
         }

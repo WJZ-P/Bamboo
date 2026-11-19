@@ -154,6 +154,12 @@ pub struct WorldConfig {
     ///
     /// The world directory. `None` disables saving (tests, oracle, load tests).
     pub world_dir: Option<PathBuf>,
+    /// 启动时给世界规则表里的一条整数规则定值（只用 `respawn_radius`）。
+    /// `None` 用官方缺省；需要固定出生点的嵌入式测试显式设成 0。
+    /// An optional initial integer game rule value for the world (only
+    /// `respawn_radius` is used). `None` keeps the official default; embedded
+    /// tests that need a fixed spawn explicitly set 0.
+    pub spawn_radius: Option<i32>,
     /// 世界生成参数（种子、世界类型、flat 预设、是否生成结构）。
     /// 默认超平坦、种子 0，保持嵌入式测试的现有行为。
     ///
@@ -191,6 +197,7 @@ impl Default for WorldConfig {
             island_dead_timeout: crate::island::default_island_dead_timeout(),
             world_dir: None,
             world_gen: crate::world_options::WorldGenConfig::default(),
+            spawn_radius: None,
             broadcast_console_to_ops: true,
             bench: None,
         }
@@ -476,6 +483,12 @@ impl World {
         // 3.3). `level.dat` has no modelled seed field, so `apply_level_data`
         // leaves it alone.
         global.state_mut().seed = world_gen.seed;
+        if let Some(radius) = config.spawn_radius {
+            let _ = global.rules_mut().assign(
+                mc_bamboo_data::gamerules::RESPAWN_RADIUS,
+                &radius.to_string(),
+            );
+        }
         global.random_sequences = mc_bamboo_loot::RandomSequences::new(world_gen.seed);
         // `ServerLevel.isFlat()` / `ChunkGenerator.getSeaLevel()` 和落脚点搜索
         // 都从发布的全局快照读这份参数（存档优先，见上面的 world_gen）。
