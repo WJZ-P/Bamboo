@@ -6,20 +6,21 @@
 //! 在游戏里走 `Staged` 流水线时用的同一份纯函数，外加把结果组装成 `RegionColumn`
 //! 的那一步。两边逐 quart 格、逐方块比较，0 不一致才算过。
 //!
-//! 地物、结构、光照还没移植：Java 侧 `--through carvers` 本来就不跑它们，游戏侧
-//! 的 `features` / `initialize_light` / `light` / `spawn` 阶段本轮也是透传，两边
-//! 用同样的边界（CARVERS 快照）比较，符合 `--through` / `--steps` 的做法。
-//! `--level-type` 把 `normal` / `large_biomes` / `amplified` 三种噪声世界逐个对拍。
+//! `--through features --all-features` 会让 Java 侧跑完 11 个 decoration step，
+//! 游戏侧用同一份 `run_features` 比较 3×3 逐格方块；`--structures` 两边都跑
+//! 结构起点 / 引用 / 结构件。光照、生成期刷怪不在这个对拍里，另见 `gen-light`。
+//! `--level-type` 把 `normal` / `large_biomes` / `amplified` 三种噪声世界逐个对拍，
+//! 每条路径（CARVERS、地物、结构覆盖）都必须用选中的同一份 settings。
 //!
 //! `gen-world`: compare vanilla generation against the SAME code the game runs.
-//! `ChunkgenOracle.java --through carvers` emits quart biomes and blocks for a set
-//! of (seed, chunk) to `terrain` (CARVERS). Bamboo calls
-//! `mc-bamboo-game::worldgen::generate_chunk` — the exact pure function
-//! `OverworldGenerator` uses on the `Staged` pipeline — plus the column assembly.
-//! Features / structures / light are not ported: the Java side stops at CARVERS
-//! and the game's `features` / light / spawn stages are pass-throughs, so both
-//! compare the same CARVERS snapshot (the `--through` convention).
-//! `--level-type` compares each of `normal` / `large_biomes` / `amplified`.
+//! `ChunkgenOracle.java` emits quart biomes and blocks for a set of (seed, chunk)
+//! through CARVERS, or through FEATURES for a 3x3 block-by-block comparison;
+//! Bamboo calls `mc-bamboo-game::worldgen::generate_chunk` and the same
+//! `run_features` used by the `Staged` pipeline, plus column assembly.
+//! `--structures` runs official starts/references/pieces on both sides.
+//! Light and generation-time spawning have their own oracles; see `gen-light`.
+//! `--level-type` compares `normal` / `large_biomes` / `amplified`, and every
+//! path (CARVERS, features, structure coverage) must use the selected settings.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -450,6 +451,19 @@ struct Report {
     official_checks: u64,
 }
 
+/// `--through features`、结构覆盖、结构件覆盖三条路径共用一份生成配置；
+/// `--level-type` 必须和 CARVERS 路径一样传进来。
+///
+/// The `--through features`, structure-coverage and placed-piece paths share one
+/// generation config; `--level-type` must reach them just like the CARVERS path.
+fn game_config_for_features(level_type: LevelType, seed: i64) -> WorldGenConfig {
+    WorldGenConfig {
+        seed,
+        level_type,
+        ..WorldGenConfig::default()
+    }
+}
+
 impl Report {
     fn read_lines(&mut self, source: BufReader<impl Read>) -> Result<(), String> {
         for line in source.lines() {
@@ -687,11 +701,7 @@ impl Report {
             ));
         }
 
-        let mut config = WorldGenConfig {
-            seed,
-            level_type: LevelType::Normal,
-            ..WorldGenConfig::default()
-        };
+        let mut config = game_config_for_features(self.level_type, seed);
         // 默认模式 Java 侧关掉结构分支、terrain 走 `Beardifier.EMPTY`；
         // `--structures` 则两边都跑官方结构起点 / 引用 / 真 Beardifier 与带结构的
         // `applyBiomeDecoration`，游戏侧 `game_features_with_mask` 走同一份
@@ -849,11 +859,7 @@ impl Report {
     /// so a block-only pass cannot hide missing structures.
     fn on_coverage(&mut self, value: &Value) -> Result<(), String> {
         let (seed, x, z) = line_key(value)?;
-        let config = WorldGenConfig {
-            seed,
-            level_type: LevelType::Normal,
-            ..WorldGenConfig::default()
-        };
+        let config = game_config_for_features(self.level_type, seed);
         let data = mc_bamboo_game::worldgen_structures::structure_data(&config, x, z)
             .map_err(|error| format!("game structure_data failed for ({seed},{x},{z}): {error}"))?;
         let mut want_starts: Vec<(String, usize)> = Vec::new();
@@ -1064,11 +1070,7 @@ impl Report {
         z: i32,
         result: &mc_bamboo_worldgen::feature::FeatureResult,
     ) -> Result<(), String> {
-        let config = WorldGenConfig {
-            seed,
-            level_type: LevelType::Normal,
-            ..WorldGenConfig::default()
-        };
+        let config = game_config_for_features(self.level_type, seed);
         let pipeline = mc_bamboo_game::worldgen_features::game_pipeline(&config, x, z)
             .map_err(|error| format!("game_pipeline failed for ({seed},{x},{z}): {error}"))?;
         for (kind, count) in &pipeline.placed_pieces {
@@ -1837,5 +1839,28 @@ mod tests {
         assert_eq!(amplified.level_type, LevelType::Amplified);
         // flat 不是噪声世界，不接受。/ flat is not a noise world, so it is rejected.
         assert!(Options::parse(&["--level-type", "flat"]).is_err());
+    }
+
+    /// `--level-type` 必须影响所有构造 `WorldGenConfig` 的路径，不只是 CARVERS。
+    /// 三种 settings 的地形高度不同，漏改一处整块对拍就会报上百万格不一致。
+    ///
+    /// `--level-type` must reach every `WorldGenConfig` construction, not only
+    /// CARVERS. The three settings have different terrain, so one missed path
+    /// shows up as millions of block mismatches.
+    #[test]
+    fn level_type_reaches_every_game_side_config() {
+        for (name, expected) in [
+            (None, LevelType::Normal),
+            (Some("large_biomes"), LevelType::LargeBiomes),
+            (Some("amplified"), LevelType::Amplified),
+        ] {
+            let args = match name {
+                Some(name) => vec!["--level-type", name, "--through", "features"],
+                None => vec!["--through", "features"],
+            };
+            let options = Options::parse(&args).unwrap();
+            let config = game_config_for_features(options.level_type, 1);
+            assert_eq!(config.level_type, expected);
+        }
     }
 }

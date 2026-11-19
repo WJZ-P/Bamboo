@@ -3013,6 +3013,42 @@ impl<'a> World<'a> {
         outcome
     }
 
+    /// `LivingEntity.addEffect`：给一头生物挂一个效果并刷新属性。
+    /// 返回是否找到目标；效果本身是否变化由 `add_effect` 判定。
+    ///
+    /// `LivingEntity.addEffect` for a non-player mob, with attribute refresh.
+    pub fn add_mob_effect(
+        &mut self,
+        id: i32,
+        instance: crate::entity::mob::effects::EffectInstance,
+    ) -> bool {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return false;
+        };
+        let found = entity
+            .with_mob(|_, mob| crate::entity::mob::living::add_effect(mob, instance))
+            .unwrap_or(false);
+        self.level.put_entity(entity);
+        found
+    }
+
+    /// `LivingEntity.removeEffect` / `removeAllEffects`：`None` 表示清全部。
+    ///
+    /// `LivingEntity.removeEffect` / `removeAllEffects`; `None` clears all.
+    pub fn clear_mob_effects(&mut self, id: i32, effect: Option<i32>) -> bool {
+        let Some(mut entity) = self.level.take_entity(id) else {
+            return false;
+        };
+        let found = entity
+            .with_mob(|_, mob| match effect {
+                Some(effect) => crate::entity::mob::living::remove_effect(mob, effect),
+                None => crate::entity::mob::living::clear_effects(mob),
+            })
+            .unwrap_or(false);
+        self.level.put_entity(entity);
+        found
+    }
+
     /// `addFreshEntity` 之后按 ID 改这个实体。刚生成、还没并进 tick 列表的也找得到。
     pub fn with_entity_mut(&mut self, id: i32, f: &mut dyn FnMut(&mut Entity)) -> bool {
         self.level.with_just_spawned(id, f)

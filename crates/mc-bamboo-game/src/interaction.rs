@@ -428,7 +428,8 @@ pub(crate) fn on_player_action(
         PlayerActionKind::DropAllItems => crate::drops::drop_held(region, id, true),
         PlayerActionKind::DropItem => crate::drops::drop_held(region, id, false),
         PlayerActionKind::SwapItemWithOffhand => inventory::swap_hands(region, id),
-        PlayerActionKind::ReleaseUseItem | PlayerActionKind::Stab => {}
+        PlayerActionKind::ReleaseUseItem => crate::player_consume::release(region, id),
+        PlayerActionKind::Stab => {}
     }
 }
 
@@ -993,7 +994,12 @@ pub(crate) fn on_use_item(
     if player.game_mode == GameMode::Spectator {
         return;
     }
+    // `Item.use` → `Consumable.startConsuming`：可消耗物品先进入「正在使用」，
+    // 不往下走放置 / 方块交互链。先把 `actor` 抄出来，`start` 要独占借 `region`。
     let actor = actor_of(player);
+    if crate::player_consume::start(region, id, hand) {
+        return;
+    }
 
     let (mut level, ticks) = region.block_level();
     let outcome = mc_bamboo_blocks::use_item(&mut level, ticks, &actor, hand);

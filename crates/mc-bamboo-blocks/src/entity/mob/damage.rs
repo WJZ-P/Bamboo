@@ -86,21 +86,33 @@ pub struct ArmorValues {
     pub armor: f32,
     pub toughness: f32,
     pub protection: f32,
+    /// 抗性提升效果的等级；`None` 表示没有。`#bypasses_resistance` 的伤害不吃它。
+    ///
+    /// The resistance amplifier; `None` when absent. `#bypasses_resistance`
+    /// damage ignores it.
+    pub resistance: Option<i32>,
 }
 
 impl ArmorValues {
-    /// 无武器破甲、无抗性效果时扣掉护甲和附魔的那一份伤害。
+    /// 无武器破甲时扣掉护甲、保护附魔和抗性效果的那一份伤害。
+    ///
+    /// `LivingEntity.getDamageAfterMagicAbsorb`: resistance multiplies by
+    /// `max(0, 25 - 5*(amplifier+1)) / 25`.
     pub fn reduce(self, amount: f32, kind: DamageKind) -> f32 {
         let mut amount = amount;
         if !kind.bypasses_armor() {
             amount = damage_after_absorb(amount, self.armor, self.toughness);
         }
-        if !kind.bypasses_effects()
-            && !kind.bypasses_enchantments()
-            && amount > 0.0
-            && self.protection > 0.0
-        {
-            amount = damage_after_magic_absorb(amount, self.protection);
+        if !kind.bypasses_effects() {
+            if !kind.bypasses_enchantments() && amount > 0.0 && self.protection > 0.0 {
+                amount = damage_after_magic_absorb(amount, self.protection);
+            }
+            if let Some(amplifier) = self.resistance
+                && !kind.bypasses_resistance()
+            {
+                let factor = (25 - 5 * (amplifier.clamp(0, 4) + 1)).max(0) as f32 / 25.0;
+                amount *= factor;
+            }
         }
         amount
     }
@@ -324,6 +336,7 @@ mod tests {
             armor: 15.0,
             toughness: 0.0,
             protection: 16.0,
+            resistance: None,
         };
         assert_eq!(values.reduce(20.0, DamageKind::MobAttack), 16.0 * 0.36);
         // 绕过护甲的种类仍吃保护附魔，只有 `bypasses_enchantments` 才跳过。
@@ -332,6 +345,22 @@ mod tests {
             ArmorValues::default().reduce(20.0, DamageKind::Generic),
             20.0
         );
+    }
+
+    #[test]
+    fn resistance_multiplier_follows_the_official_formula() {
+        let resistance = |amplifier| ArmorValues {
+            resistance: Some(amplifier),
+            ..ArmorValues::default()
+        };
+        // `max(0, 25 - 5*(amp+1))/25`：0 级 20/25，1 级 15/25，4 级 0。
+        assert_eq!(resistance(0).reduce(20.0, DamageKind::MobAttack), 16.0);
+        assert_eq!(resistance(1).reduce(20.0, DamageKind::MobAttack), 12.0);
+        assert_eq!(resistance(4).reduce(20.0, DamageKind::MobAttack), 0.0);
+        // 改坏确认：等级 1 不是 20/25 的倍率。
+        assert_ne!(resistance(1).reduce(20.0, DamageKind::MobAttack), 16.0);
+        // 虚空的伤害绕过抗性。
+        assert_eq!(resistance(2).reduce(20.0, DamageKind::OutOfWorld), 20.0);
     }
 
     #[test]

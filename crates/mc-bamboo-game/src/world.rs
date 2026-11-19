@@ -1517,39 +1517,83 @@ impl World {
         #[cfg_attr(not(test), allow(unused_mut))]
         let mut borrow = borrow;
         #[cfg(test)]
-        if self.islands.world_view_off && matches!(borrow, Borrow::World) {
+        if self.islands.world_view_off && matches!(borrow, Borrow::World | Borrow::Islands(_)) {
             borrow = Borrow::All;
         }
-        if matches!(borrow, Borrow::World) {
-            // 要整个世界的命令（计划 4.5）：全部岛的 `Region` 临时拼成一个，在它上面执行，
-            // 做完按原样拆回去。命令本来就等全部岛停放才做（计划 5.5.2）。
-            // A command that needs the whole world (plan 4.5): every island's
-            // `Region` is temporarily joined, the command runs on it, and the
-            // islands are split back as they were. Commands already wait for
-            // every island to be parked (plan 5.5.2).
+        #[cfg(test)]
+        if self.islands.borrow_all_islands && matches!(borrow, Borrow::Islands(_)) {
+            borrow = Borrow::World;
+        }
+        // 按需借（计划 4.5.1）：先取「不在主控手里」的岛名单，再 lift 借进来的岛；
+        // lift 过的槽位看起来也不在，晚取会多投一份 fan-out 帧。
+        // On-demand borrowing (plan 4.5.1): take the away-island list before
+        // lifting the borrowed islands; lifted slots look away too, so taking
+        // it later would post an extra fan-out copy.
+        let away = self.islands.away_ids();
+        let absent = self.islands.away_players();
+        if matches!(borrow, Borrow::World | Borrow::Islands(_)) {
+            // 全拼兜底走原来的三段；按需借只并算出来的那几个岛，其余岛只借玩家。
+            // Full-join fallback keeps the old three stages; on-demand joins
+            // only the planned islands and lends players from the rest.
             let joining = Instant::now();
-            let unified = self.islands.unify(into);
+            let unified = match &borrow {
+                Borrow::World => self.islands.unify(into),
+                Borrow::Islands(ids) => self.islands.unify_subset(into, ids),
+                _ => unreachable!("上面已经筛过"),
+            };
             let joined = joining.elapsed();
+            // `R` 外的岛把玩家（七类表）整套借过来：成功反馈要发给所有 OP，
+            // 音效和等级事件也按全部玩家的距离筛（计划 4.5.1）。
+            // Islands outside `R` lend their whole player tables: success
+            // feedback reaches every op, and effects are filtered against all
+            // players (plan 4.5.1).
+            #[cfg(test)]
+            let gathered = if self.islands.borrow_break == crate::island::BorrowBreak::MissPlayers {
+                self.islands.gather(into, &Borrow::PlayersOf(Vec::new()))
+            } else {
+                self.islands.gather(into, &Borrow::All)
+            };
+            #[cfg(not(test))]
+            let gathered = self.islands.gather(into, &Borrow::All);
             let region = &mut self.islands.get_mut(into).expect("岛在表里").region;
+            if !away.is_empty() {
+                region.links.begin_fan_out(absent);
+            }
             let working = Instant::now();
             let out = work(&mut self.master.global, region);
             let worked = working.elapsed();
+            let fan_out = if away.is_empty() {
+                Vec::new()
+            } else {
+                region.links.end_fan_out()
+            };
+            self.islands.scatter(into, gathered);
             let dividing = Instant::now();
             self.islands.divide(into, unified);
             let divided = dividing.elapsed();
+            let borrowed = match &borrow {
+                Borrow::World => self.islands.ids().len() as u64,
+                Borrow::Islands(ids) => ids.len() as u64,
+                _ => 0,
+            };
             let profiler = self.profiler();
             profiler.record_duration(Metric::IslandUnify, joined);
             profiler.record_duration(Metric::IslandWorldCommand, worked);
             profiler.record_duration(Metric::IslandDivide, divided);
+            profiler.record(Metric::IslandBorrowedIslands, borrowed);
+            if matches!(borrow, Borrow::World) {
+                profiler.record(Metric::IslandWorldCommandFallbacks, 1);
+            }
             self.publish_global();
+            self.post_fan_out(&away, fan_out);
             return out;
         }
         let away = match borrow {
-            Borrow::All => self.islands.away_ids(),
-            Borrow::PlayersOf(_) | Borrow::World => Vec::new(),
+            Borrow::All => away,
+            Borrow::PlayersOf(_) => Vec::new(),
+            Borrow::World | Borrow::Islands(_) => unreachable!("上面已经返回"),
         };
         let gathered = self.islands.gather(into, &borrow);
-        let absent = self.islands.away_players();
         let region = &mut self.islands.get_mut(into).expect("岛在表里").region;
         if !away.is_empty() {
             region.links.begin_fan_out(absent);
@@ -2214,6 +2258,7 @@ impl World {
             && let Some(player) = region.players.get_mut(&id)
         {
             restore_inventory(player, data);
+            crate::player_effects::send_active(region, id);
         }
         Ok(())
     }
@@ -2465,7 +2510,7 @@ impl World {
                 // Commands touching blocks, containers or entities, or reading
                 // the block under a target, need the whole world; the rest only
                 // borrow players (plan 4.5).
-                let borrow = command::borrow_for_player(self.region_of(island), player, &command);
+                let borrow = command::borrow::plan_borrow(&self.islands, island, player, &command);
                 self.with_players(island, borrow, |port, region| {
                     command::on_player_command(port, region, player, &command, signed.as_ref());
                 });
@@ -3204,6 +3249,16 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     // In `ServerPlayer.doTick` `set_health` comes before `set_experience`:
     // tick the hurt cooldowns and send health if the snapshot moved.
     crate::player_hurt::tick(region);
+    // `LivingEntity.baseTick` 的 `tickEffects`：在受伤冷却之后跑持续效果，
+    // 治疗和伤害走同一个 `hurt_player` 入口。
+    crate::player_effects::tick(region);
+    // `Entity.baseTick` / `LivingEntity.baseTick` 的环境伤害：着火、溺水、
+    // 卡墙、虚空、仙人掌 / 甜浆果 / 岩浆块、细雪冻伤。
+    crate::player_environment::tick_environment(region);
+    // `LivingEntity.updateUsingItem`：吃东西的剩余刻数和完成结算。
+    crate::player_consume::tick(region);
+    // 移动 / 跳跃 / 攻击 / 挖掘累计的饥饿消耗在 tick 末尾落到 FoodData。
+    crate::player_exhaustion::flush(region);
     // 官方 `ServerPlayer.doTick`：总经验变了就给这名玩家补一包 `set_experience`。
     //
     // Official `ServerPlayer.doTick`: a changed total sends one `set_experience`.
@@ -3410,6 +3465,9 @@ mod entity_player_tests;
 #[cfg(test)]
 #[path = "world/island_alone_tests.rs"]
 mod island_alone_tests;
+#[cfg(test)]
+#[path = "world/island_borrow_tests.rs"]
+mod island_borrow_tests;
 #[cfg(test)]
 #[path = "world/island_command_tests.rs"]
 mod island_command_tests;

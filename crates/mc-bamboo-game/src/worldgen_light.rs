@@ -1,34 +1,35 @@
 //! `ChunkStatus.INITIALIZE_LIGHT` / `LIGHT`：生成期光照接进流水线。
 //!
-//! 官方 `light` 阶段用一个 `WorldGenRegion`（中心 + 半径 1 的 8 个邻居，都跑完
-//! `FEATURES`）给光引擎登记非空段、点亮光源、跑到底，中心区块柱里就带着天空光和
-//! 方块光，`isLightOn=true`。`mc_bamboo_world::light::generate::generate_light`
-//! 是这段的纯函数（复用运行时那套已和官方逐格对拍过的光引擎），这里负责把流水线
-//! 的邻居只读快照拼成 3×3 视图，经 `generate_light_from_layers` 直接读快照里的
-//! 逐层方块（不先组装完整区块），把结果交回世界线程。
+//! 官方 `GENERATION_PYRAMID` 里 `LIGHT` 的直接依赖是半径 1 的
+//! `INITIALIZE_LIGHT`，而每格的 `INITIALIZE_LIGHT` 又排在 `FEATURES` 之后：
+//! 所以中心与 8 个邻居在算光时都已跑完自己的 `FEATURES`。光引擎通过
+//! `LightChunkGetter` 读到的就是这 3×3 里当时已有的方块，包括邻居中心的地物
+//! 溢出写进来的格子（`ChunkPyramid.<clinit>`、`ChunkStatusTasks.initializeLight`
+//! / `light`、`LevelLightEngine.propagateLightSources`）。
 //!
-//! The stage passes the snapshots' block layers straight to
-//! `generate_light_from_layers` without assembling full chunks first.
+//! 这里照做：把流水线存的不可变 CARVERS 快照拼成 3×3，再用与完工组装同一份
+//! `feature_writes_into` + `merge_feature_writes` 规则，把 9 个来源中心的地物写
+//! 折进每个格子，最后经 `generate_light_from_layers` 直接读逐层方块（不先组装
+//! 完整区块），把中心柱的天空光 + 方块光交回世界线程。树冠、萤石、灯笼、结构
+//! 光源因此都参与生成期光照；运行时不会补算，`isLightOn=true` 交付的区块会一直
+//! 带着这次算出的光。
 //!
-//! 邻居视图里的快照是 CARVERS 地形。当前已移植的地物只有矿石（不透明、不发光，
-//! 替换的是同样不透明的石头），不改光源和遮挡，所以在 `LIGHT` 阶段用地形方块算光
-//! 与官方「FEATURES 之后」的结果逐格相同；等会发光 / 会挡天空光的地物合进来后，
-//! 需要把它们的写增量一并折进这里的光照输入（见 README 已知限制、汇报疑点清单）。
+//! `mc_bamboo_world::light::generate::generate_light` 复用运行时那套已和官方逐格
+//! 对拍过的光引擎；`gen-light` 只证明这批方块喂进引擎后结果一致，整块光照对拍
+//! （`light-pipeline`）另证流水线挑的方块和官方一致。
 //!
-//! Wire `ChunkStatus.LIGHT` into the pipeline. Vanilla's `light` step hands a
-//! `WorldGenRegion` (center + radius-1 neighbors, all past `FEATURES`) to the
-//! light engine: register non-empty sections, propagate sources, and drain the
-//! queue; the center column then carries sky + block light and `isLightOn=true`.
-//! `mc_bamboo_world::light::generate::generate_light` is the pure function
-//! (reusing the runtime engine, already validated cell-by-cell against vanilla);
-//! this module assembles the 3×3 view from the pipeline's immutable
-//! neighbor snapshots and returns the light for the world thread.
-//!
-//! The neighbor snapshots are CARVERS terrain. The only ported features are ores
-//! (opaque, non-emitting, replacing equally opaque stone), which change neither
-//! light sources nor occlusion, so CARVERS light equals vanilla's post-FEATURES
-//! light cell-by-cell. When light-affecting features merge, their writes must be
-//! folded into the light input here (see README known limitations, report doubts).
+//! Wire `ChunkStatus.LIGHT` into the pipeline. In vanilla's `GENERATION_PYRAMID`,
+//! `LIGHT` requires radius-1 `INITIALIZE_LIGHT` and each chunk reaches
+//! `INITIALIZE_LIGHT` after `FEATURES`, so the center and all 8 neighbors have
+//! completed their own features when light runs. The engine reads those very
+//! blocks through `LightChunkGetter`, including the cells a neighbor's features
+//! spilled into. Here the immutable CARVERS snapshots are folded with the same
+//! `feature_writes_into` + `merge_feature_writes` rule used at final assembly,
+//! so canopies, glowstone, lanterns and structure light sources all affect the
+//! baked light. `generate_light_from_layers` then reads the layers directly
+//! without assembling full chunks. `gen-light` validates the engine on a given
+//! set of blocks; `light-pipeline` validates that the pipeline picked the same
+//! blocks as vanilla.
 
 use std::sync::Arc;
 
@@ -38,9 +39,30 @@ use mc_bamboo_world::light::generate::{GeneratedLight, generate_light_from_layer
 use crate::{
     world_options::WorldGenConfig,
     worldgen::GeneratedChunk,
-    worldgen_features::{SnapshotView, cached_generate_chunk_with_structures as terrain_cell},
+    worldgen_features::{
+        SnapshotView, cached_generate_chunk_with_structures as terrain_cell, feature_writes_into,
+        merge_feature_writes,
+    },
     worldgen_profile::{LIGHT_CALLS, LIGHT_NS},
 };
+
+/// 整块光照对拍用的输入开关：默认（和游戏里一样）把 FEATURES 的写折进 3×3；
+/// `Carvers` 故意退回旧行为，证明比较器会抓住树冠 / 光源附近的差异。
+/// 中文注释在上、英文在下；这里是公开项，给 `mc-bamboo-vanilla` 的改坏确认用。
+///
+/// Input switch for the whole-chunk light oracle. The default (and the game) folds
+/// FEATURES writes into the 3x3; `Carvers` deliberately reverts to the old input
+/// so the comparator must report canopy / emitter differences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LightInput {
+    /// FEATURES 后视图，和官方 LIGHT 阶段一致。
+    /// Post-FEATURES view, matching vanilla's LIGHT step.
+    #[default]
+    PostFeatures,
+    /// 旧的 CARVERS 输入，只给改坏确认用。
+    /// The old CARVERS input, only for break confirmation.
+    Carvers,
+}
 
 /// 和 `resolve_view` 一样拼 3×3，但快照只共享 `Arc`、不复制方块；缺快照时现算。
 /// 现算走和 `terrain` 阶段同一个入口（带本格 Beardifier），有没有快照不改变结果。
@@ -86,15 +108,98 @@ fn resolve_shared_view(
     Ok(slots.map(Option::unwrap))
 }
 
-/// `ChunkStatus.LIGHT`：从中心 + 8 个邻居的 CARVERS 视图算中心柱的生成期光照。
+/// 3×3 每个格子都变成「CARVERS + 9 个来源中心的 FEATURES 写」。
+/// 官方 `LIGHT` 阶段读的是各区块跑完自己 `FEATURES` 后的 ProtoChunk，包括邻居
+/// 中心溢出进来的写；这里用和 Director 完工组装完全相同的合并规则还原那批方块。
+///
+/// Turn each 3x3 cell into CARVERS + the 9 source centers' FEATURES writes.
+/// Vanilla's `LIGHT` step reads each chunk's post-FEATURES ProtoChunk, including
+/// neighbor spill; the same merge rule as the Director's final assembly rebuilds
+/// those blocks.
+fn post_features_view(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+    terrain: &[Arc<GeneratedChunk>; 9],
+) -> Result<Vec<Vec<Vec<u32>>>, String> {
+    let mut blocks = Vec::with_capacity(9);
+    for (index, cell) in terrain.iter().enumerate() {
+        let dx = index as i32 % 3 - 1;
+        let dz = index as i32 / 3 - 1;
+        let x = cx + dx;
+        let z = cz + dz;
+        let mut chunk = (**cell).clone();
+        merge_feature_writes(&mut chunk, feature_writes_into(config, x, z)?);
+        blocks.push(chunk.blocks);
+    }
+    Ok(blocks)
+}
+
+/// `ChunkStatus.LIGHT`：从中心 + 8 个邻居的 FEATURES 后视图算中心柱生成期光照。
 ///
 /// 3×3 视图按 `(dz, dx)` 排列，中心在下标 4；光最多走 15 格，小于一个区块宽 16，
 /// 所以这一圈足够把中心柱照全，视图之外读成全空气（天空光 15、方块光 0）。
+/// `input` 只对整块对拍的改坏确认放行 `Carvers`；游戏流水线恒用默认值。
 ///
 /// `ChunkStatus.LIGHT`: compute the center column's light from the center and 8
-/// neighbors' CARVERS view. Light travels at most 15 blocks < one chunk's 16, so
-/// the 3×3 view suffices; outside reads as air (sky 15, block 0). Pure and
-/// deterministic: same config + position always gives the same light.
+/// neighbors' post-FEATURES view. Light travels at most 15 blocks < one chunk's
+/// 16, so the 3×3 view suffices; outside reads as air (sky 15, block 0).
+/// `input` only lets the whole-chunk oracle's break confirmation request
+/// `Carvers`; the game pipeline always uses the default.
+///
+/// 输入来自官方 / 本地配置，`neighbors` 里可以缺快照；所有坐标都由
+/// `resolve_shared_view` 夹到半径 1，不会对客户端数据做下标。
+/// Inputs come from local config or vanilla data; missing snapshots are
+/// regenerated and all positions are clamped to radius 1.
+pub fn generate_light_stage_with_input(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+    center: Option<Arc<GeneratedChunk>>,
+    neighbors: SnapshotView<'_>,
+    input: LightInput,
+) -> Result<GeneratedLight, String> {
+    let _profile_timer = crate::worldgen_profile::timer(&LIGHT_NS);
+    crate::worldgen_profile::count(&LIGHT_CALLS);
+    let view = resolve_shared_view(config, cx, cz, center, neighbors)?;
+    let folded = if input == LightInput::PostFeatures {
+        Some(post_features_view(config, cx, cz, &view)?)
+    } else {
+        None
+    };
+    let columns: Vec<(ChunkPos, &[Vec<u32>])> = (0..9_i32)
+        .map(|index| {
+            let dx = index % 3 - 1;
+            let dz = index / 3 - 1;
+            let layers: &[Vec<u32>] = match &folded {
+                Some(blocks) => &blocks[index as usize],
+                None => view[index as usize].blocks.as_slice(),
+            };
+            (ChunkPos::new(cx + dx, cz + dz), layers)
+        })
+        .collect();
+    generate_light_from_layers(ChunkPos::new(cx, cz), &columns)
+}
+
+/// 整块光照对拍用：取出 `LIGHT` 阶段实际喂给光引擎的 3×3 方块。
+/// 走和游戏流水线完全相同的快照拼装 + 地物写合并路径。
+///
+/// For the whole-chunk light oracle: the exact 3x3 block layers the `LIGHT`
+/// stage hands to the engine, built through the game pipeline's own snapshot
+/// assembly and feature-write merge.
+pub fn post_features_blocks(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+    center: Option<Arc<GeneratedChunk>>,
+    neighbors: SnapshotView<'_>,
+) -> Result<Vec<Vec<Vec<u32>>>, String> {
+    let view = resolve_shared_view(config, cx, cz, center, neighbors)?;
+    post_features_view(config, cx, cz, &view)
+}
+
+/// 游戏流水线入口：恒用 FEATURES 后视图。
+/// Game pipeline entry: always use the post-FEATURES view.
 pub(crate) fn generate_light_stage(
     config: &WorldGenConfig,
     cx: i32,
@@ -102,19 +207,7 @@ pub(crate) fn generate_light_stage(
     center: Option<Arc<GeneratedChunk>>,
     neighbors: SnapshotView<'_>,
 ) -> Result<GeneratedLight, String> {
-    let _profile_timer = crate::worldgen_profile::timer(&LIGHT_NS);
-    crate::worldgen_profile::count(&LIGHT_CALLS);
-    let view = resolve_shared_view(config, cx, cz, center, neighbors)?;
-    let columns: Vec<(ChunkPos, &[Vec<u32>])> = view
-        .iter()
-        .enumerate()
-        .map(|(index, generated)| {
-            let dx = index as i32 % 3 - 1;
-            let dz = index as i32 / 3 - 1;
-            (ChunkPos::new(cx + dx, cz + dz), generated.blocks.as_slice())
-        })
-        .collect();
-    generate_light_from_layers(ChunkPos::new(cx, cz), &columns)
+    generate_light_stage_with_input(config, cx, cz, center, neighbors, LightInput::PostFeatures)
 }
 
 #[cfg(test)]
@@ -157,6 +250,27 @@ mod tests {
         assert_ne!(staged.blocks, plain.blocks);
         let view = resolve_shared_view(&config, cx, cz, None, &[]).unwrap();
         assert_eq!(view[4].blocks, staged.blocks);
+    }
+
+    /// FEATURES 后视图和 CARVERS 输入在有地物的坐标上必须给出不同的光照：
+    /// 整块对拍的改坏确认就靠这个差异。
+    /// The post-FEATURES view must give different light from CARVERS at a chunk
+    /// with features; the whole-chunk oracle's break confirmation relies on it.
+    #[test]
+    fn post_features_light_differs_from_carvers_light() {
+        let config = WorldGenConfig {
+            seed: 2026,
+            level_type: LevelType::Normal,
+            generate_structures: false,
+            ..WorldGenConfig::default()
+        };
+        let post =
+            generate_light_stage_with_input(&config, -2, -2, None, &[], LightInput::PostFeatures)
+                .unwrap();
+        let carvers =
+            generate_light_stage_with_input(&config, -2, -2, None, &[], LightInput::Carvers)
+                .unwrap();
+        assert_ne!(post.sky, carvers.sky);
     }
 
     /// 生成期光照的天空光和方块光都有数据层（不是全 `None`）。

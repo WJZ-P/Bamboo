@@ -7,10 +7,10 @@ use mc_bamboo_command::{ArgumentType, CommandGraph, StringKind, permission};
 use mc_bamboo_data::gamerules::{GameRuleDef, GameRuleKind, RULES};
 
 use crate::command::{
-    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, damage, data, enchant,
-    execute, experience, gamerule, items, kill, loot, particle, players, playsound, random, save,
-    scoreboard, stopsound, summon, team, teleport, text, time, title, weather, world_border,
-    world_settings,
+    Action, CommandFn, Commands, IslandFn, admin, blocks, bossbar, clone, damage, data, effect,
+    enchant, execute, experience, gamerule, items, kill, loot, particle, players, playsound,
+    random, save, scoreboard, stopsound, summon, team, teleport, text, time, title, weather,
+    world_border, world_settings,
 };
 
 struct Builder {
@@ -129,6 +129,7 @@ pub(crate) fn build() -> Commands {
     register_spawns(&mut builder, root);
     register_clone(&mut builder, root);
     register_damage(&mut builder, root);
+    register_effect(&mut builder, root);
     register_stopsound(&mut builder, root);
     register_random(&mut builder, root);
     register_enchant(&mut builder, root);
@@ -391,6 +392,54 @@ fn register_damage(builder: &mut Builder, root: usize) {
     let from = builder.literal(entity, "from", 0);
     let cause = builder.argument(from, "cause", entity_argument(), 0);
     builder.run_island(cause, damage::damage);
+}
+
+/// `EffectCommands.register`：权限 2；`clear [targets] [effect]` 和
+/// `give <targets> <effect> [seconds | infinite] [amplifier] [hideParticles]`。
+/// 秒数的范围、等级上限和 `infinite` 的位置都照官方命令树。
+fn register_effect(builder: &mut Builder, root: usize) {
+    let command = builder.literal(root, "effect", permission::GAMEMASTERS);
+    let effect_argument = || ArgumentType::Resource {
+        registry: "minecraft:mob_effect",
+    };
+    let amplifier = || ArgumentType::Integer { min: 0, max: 255 };
+    // ---- clear ----
+    let clear = builder.literal(command, "clear", 0);
+    builder.run_island(clear, effect::clear);
+    let targets = builder.argument(clear, "targets", entities_argument(), 0);
+    builder.run_island(targets, effect::clear);
+    let only = builder.argument(targets, "effect", effect_argument(), 0);
+    builder.run_island(only, effect::clear);
+    // ---- give ----
+    let give = builder.literal(command, "give", 0);
+    let targets = builder.argument(give, "targets", entities_argument(), 0);
+    let effect = builder.argument(targets, "effect", effect_argument(), 0);
+    builder.run_island(effect, effect::give);
+    let seconds = builder.argument(
+        effect,
+        "seconds",
+        ArgumentType::Integer {
+            min: 1,
+            max: 1_000_000,
+        },
+        0,
+    );
+    builder.run_island(seconds, effect::give);
+    let amplifier_node = builder.argument(seconds, "amplifier", amplifier(), 0);
+    builder.run_island(amplifier_node, effect::give);
+    let hide = builder.argument(amplifier_node, "hideParticles", ArgumentType::Bool, 0);
+    builder.run_island(hide, effect::give);
+    // `infinite` 是和 `seconds` 并列的字面量，后面同样可以接等级和隐藏粒子。
+    let infinite = builder.literal(effect, "infinite", 0);
+    builder.run_island(infinite, effect::give_infinite);
+    let infinite_amplifier = builder.argument(infinite, "amplifier", amplifier(), 0);
+    builder.run_island(infinite_amplifier, effect::give_infinite);
+    let infinite_hide =
+        builder.argument(infinite_amplifier, "hideParticles", ArgumentType::Bool, 0);
+    builder.run_island(infinite_hide, effect::give_infinite);
+    // 官方 `give <effect> infinite` 分支的 `hideParticles` 也可以不带等级。
+    let infinite_only_hide = builder.argument(infinite, "hideParticles", ArgumentType::Bool, 0);
+    builder.run_island(infinite_only_hide, effect::give_infinite);
 }
 
 fn register_kick(builder: &mut Builder, root: usize) {
