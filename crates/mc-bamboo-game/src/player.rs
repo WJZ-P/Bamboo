@@ -146,13 +146,23 @@ pub(crate) struct Player {
     pub(crate) health_sync: crate::player_hurt::HealthSync,
     /// `CombatTracker.inCombat`：第一次被非玩家生物打伤时置真，1b 的死亡消息要用。
     pub(crate) in_combat: bool,
-    /// `CombatTracker.entries` 的最后一条：致死伤害种类和攻击者显示名，死亡消息要用。
-    /// 不存绝对时刻，岛拆合时整行跟着 `Players` 搬。
+    /// `CombatTracker.entries`：`getDeathMessage` 要按它们找最显著的一次摔落。
+    /// 不存绝对时刻；条目的清空时机照官方 `recheckStatus`。
     ///
-    /// The last `CombatTracker` entry: killing blow's kind and attacker display
-    /// name, used for the death message. No absolute instants; moves with the
-    /// whole player row.
-    pub(crate) last_combat: Option<crate::player_death::CombatEntry>,
+    /// `CombatTracker.entries`: `getDeathMessage` picks the most significant
+    /// fall from them. No absolute instants; cleared like `recheckStatus`.
+    pub(crate) combat_entries: Vec<crate::player_death::CombatEntry>,
+    /// 距最后一次 `recordDamage` 的刻数（相对倒计时，官方用 tickCount 差）。
+    pub(crate) combat_idle_ticks: i32,
+    /// 官方 `LivingEntity.lastHurtByPlayer` / `lastHurtByMob`（击杀归属）。
+    /// 显示组件在受伤那一刻就定下来；`memory` / `age` 都是相对倒计时，
+    /// 岛拆合时整行跟着 `Players` 搬，不需要时钟平移。
+    ///
+    /// Vanilla `lastHurtByPlayer` / `lastHurtByMob` (kill credit). The display
+    /// component is captured at hurt time; `memory` / `age` are relative
+    /// countdowns so island splits and merges need no rebasing.
+    pub(crate) hurt_by_player: Option<crate::player_death::KillCredit>,
+    pub(crate) hurt_by_mob: Option<crate::player_death::KillCredit>,
     /// `ServerPlayer.dead`：一次死亡流程正在跑，重生之前不再触发第二次死亡。
     /// 与 `health.health <= 0` 分开存，因为 `restoreFrom` 会把血量设满。
     ///
@@ -233,7 +243,10 @@ impl Player {
             health: PlayerHealth::default(),
             health_sync: crate::player_hurt::HealthSync::INITIAL,
             in_combat: false,
-            last_combat: None,
+            combat_entries: Vec::new(),
+            combat_idle_ticks: 0,
+            hurt_by_player: None,
+            hurt_by_mob: None,
             dead: false,
             last_death_location: None,
             entity_ticks: 0,

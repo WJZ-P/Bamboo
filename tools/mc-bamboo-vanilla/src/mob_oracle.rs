@@ -176,6 +176,10 @@ struct LifeSetup {
     start_exhaustion: f32,
     #[serde(default)]
     start_food_timer: i32,
+    #[serde(default)]
+    credit_hurt_tick: i32,
+    #[serde(default)]
+    death_fall_distance: i32,
     #[allow(dead_code, reason = "noDeath is represented by a negative deathTick")]
     #[serde(default)]
     no_death: bool,
@@ -1353,7 +1357,10 @@ impl Report {
             start_saturation: f32::from_bits(life.start_saturation as u32),
             start_exhaustion: f32::from_bits(case.player_exhaustion as u32),
             start_food_timer: life.start_food_timer,
+            credit_hurt_tick: life.credit_hurt_tick,
+            death_fall_distance: f32::from_bits(life.death_fall_distance as u32),
             client_drives_respawn: true,
+            break_credit_expiry: matches!(self.break_test.as_deref(), Some("credit")),
             break_xp: matches!(self.break_test.as_deref(), Some("xp")),
             break_keep: matches!(self.break_test.as_deref(), Some("keep")),
             break_vanishing: matches!(self.break_test.as_deref(), Some("vanishing")),

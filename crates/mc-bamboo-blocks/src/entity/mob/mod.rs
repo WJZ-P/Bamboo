@@ -167,6 +167,16 @@ pub struct FluidTracker {
 /// 伤害的种类，`minecraft:damage_type` 注册表里的一项。
 ///
 /// A kind of damage: one entry of the `minecraft:damage_type` registry.
+/// 官方 `DeathMessageType`，决定 `CombatTracker.getDeathMessage` 走哪条分支。
+///
+/// Vanilla `DeathMessageType`: which branch `CombatTracker.getDeathMessage` takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeathMessageType {
+    Default,
+    FallVariants,
+    IntentionalGameDesign,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DamageKind {
     Generic,
@@ -220,6 +230,24 @@ impl DamageKind {
             Self::Magic => "minecraft:magic",
             Self::Explosion => "minecraft:explosion",
         }
+    }
+
+    /// 官方 `DamageType.deathMessageType()`：26.3 的数据文件里只有
+    /// `minecraft:fall` / `minecraft:ender_pearl` 是 `FALL_VARIANTS`，
+    /// `minecraft:bad_respawn_point` 是 `INTENTIONAL_GAME_DESIGN`。
+    ///
+    /// Vanilla `DamageType.deathMessageType()`: only fall damage and ender
+    /// pearl use `FALL_VARIANTS`; bad respawn point uses the linked variant.
+    pub const fn death_message_type(self) -> DeathMessageType {
+        match self {
+            Self::Fall => DeathMessageType::FallVariants,
+            _ => DeathMessageType::Default,
+        }
+    }
+
+    /// `DamageTypeTags.IS_FALL` / `ALWAYS_MOST_SIGNIFICANT_FALL`。
+    pub const fn is_fall(self) -> bool {
+        matches!(self, Self::Fall)
     }
 
     /// 官方 `DamageType.msgId()`，数据文件里的 `message_id`：死亡消息

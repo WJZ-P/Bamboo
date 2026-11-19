@@ -405,7 +405,8 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 | 字段 | 重置为 | 保留 |
 |---|---|---|
 | `health`（血量 / 吸收 / 三个受伤倒计时 / 饥饿四字段） | 官方构造默认值 | — |
-| `dead` / `awaiting_respawn` / `in_combat` / `last_combat` / `deathTime` | false / None / 0 | — |
+| `dead` / `awaiting_respawn` / `in_combat` / `deathTime` | false / 0 | — |
+| `combat_entries` / `combat_idle_ticks` / `hurt_by_player` / `hurt_by_mob` | 清空 / 0 / None | — |
 | `health_sync` 三个哨兵 / `last_sent_exp` | `INITIAL` / -1 | — |
 | `inventory` / `experience` / `score` | 非 `keepInventory` 时清空 | `keepInventory` 或旁观者时原样保留 |
 | `enchantment_seed` / `ender_chest` / `respawn` / `last_death_location` | — | 原样保留（官方 `restoreFrom` 也搬） |
@@ -417,14 +418,18 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
 
 新增按玩家字段全部不是绝对时刻，整行随 `IslandPart::Players` 搬；
 **没有改 `region/island_split.rs`，也没有新增 `IslandPart` 类别**。
-`last_damage_stamp` 仍刻意不建：死亡消息只记最后一条 `CombatEntry` 的种类 /
-攻击者显示组件，不存官方的绝对 `tickCount`。
+官方 `LivingEntity` 用实体自己的 `tickCount` 存 `lastHurtByPlayerMemoryTime`
+（每刻减 1，到 0 清空）、`lastHurtByMobTimestamp`（`tickCount - timestamp > 100`
+清空）和 `CombatTracker.lastDamageTime`（战斗中 300 刻 / 否则 100 刻过期）；
+Bamboo 全改成相对倒计时 `memory` / `age` / `combat_idle_ticks`，
+`CombatEntry` 只存种类、显示组件、`damage`、`fall_distance` 和 `fall_location` id，
+不存绝对 `tickCount`。条目在死亡（`recheckStatus`）与重生时清空。
 
 ### 7.2 重生包序列与官方逐包对照结论
 
-`PlayerList.respawn` 的 `connection.send` 顺序（`mob-oracle` 的 22 个
-`player_death_*` / `player_respawn_*` / `player_regen_*` 场景逐字节比对，
-110 cases / 51857 ticks / 0 不一致）：
+`PlayerList.respawn` 的 `connection.send` 顺序（`mob-oracle` 的 29 个
+`player_death_*` / `player_regen_*` 场景逐字节比对，
+全量 117 cases / 52844 ticks / 0 不一致）：
 
 1. `player_abilities`（`restoreFrom` 里 `onUpdateAbilities`）
 2. `respawn`（`CommonPlayerSpawnInfo` + `dataToKeep=0`）
@@ -441,7 +446,8 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
     `container_set_content`（46 格）/ `set_held_slot` / `player_abilities`
 11. 下一刻 `doTick` 补 `set_health` / `set_experience`
 
-对拍的假世界没有命令派发器，**`commands`（16）包不进 ID / 字节比较**；
+假世界用一个空根命令节点给 `commands`（16）包占位，**它的 ID 位置进入
+包序列比较，字节内容不比**（命令树内容由 `command-oracle` 负责）；
 其余关键包（`player_combat_kill` / `system_chat` / `respawn` / `player_position` /
 `set_default_spawn_position` / `change_difficulty` / `set_experience` /
 `player_abilities` / `set_health` / `entity_event` / `damage_event` / `sound`）
@@ -469,18 +475,24 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   和吃东西不做。创造 / 旁观模式下 `FoodData.tick` 仍按官方跑（官方无条件调用），
   但创造模式的能力无敌照旧；原有创造模式测试未变。
 - **摔落伤害**：仍**不做**，只记录 `fall_distance`。下一项单独做。
-- **死亡消息的参数**：`getLocalizedDeathMessage` 的 `.player` 分支里
-  `getKillCredit()`（最近一次打伤自己的玩家）Bamboo 没有记，只有死者一个参数；
-  武器 `custom_name` 的 `.item` 分支已接。队伍可见性
+- **死亡消息**：`getLocalizedDeathMessage` 的 `.player` 分支按
+  `getKillCredit()`（`lastHurtByPlayer` 优先，否则 `lastHurtByMob`）实现；
+  `FALL_VARIANTS` 的 `getMostSignificantFall` / `getFallMessage`
+  （`death.fell.accident.*` / `assist` / `finish` / `killer`）与
+  `INTENTIONAL_GAME_DESIGN` 的带链接分支都按字节码留着。新增 7 个
+  `player_death_credit_*` / `player_death_fall_*` 场景（含 100 刻过期和
+  101/102 刻边界），以及 `--break-self-test credit` 改坏确认。队伍可见性
   （`broadcastSystemToTeam` / `...ExceptTeam`）按全服广播处理。
+  `INTENTIONAL_GAME_DESIGN` 在 26.3 建模的伤害种类里触发不到（只有
+  `minecraft:bad_respawn_point` 用它），其字节未单独对拍。
 - **重生点**：用 `RespawnData`（世界出生点 / `/spawnpoint`）的水平坐标，
   y 取超平坦地表 `flat::surface_y()`（和进服一致）；官方的床 / 重生锚
   `findStandUpPosition`、充能扣减、`NO_RESPAWN_BLOCK_AVAILABLE`、
   出生点周围安全位置搜索未做。
 - **`dataToKeep`**：官方末地传送重生传 `KEEP_ALL_DATA`，Bamboo 恒 0；
   末地 / 维度切换未做。
-- **命令树包**：重生序列里的 `commands` 包由各自命令图生成，假世界没有命令
-  派发器，对拍按 ID 序列排除这一包，其余逐包比字节。
+- **命令树包**：重生序列里的 `commands` 包内容由 `command-oracle` 管，
+  这轮对拍只比它的 ID 位置（假世界发一个空根占位）。
 - **死亡后的 `FoodData.tick`**：官方 `ServerPlayer.doTick` 在死亡界面等待期间
   仍跑 `FoodData.tick`（`FoodData.tick` 自己按 `isHurt()` 分支），Bamboo 的
   `player_hurt::tick` 在 `dead` 为真时跳过食物 / 回血，只递减受伤倒计时；

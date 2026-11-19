@@ -98,6 +98,8 @@ pub(crate) fn tick(region: &mut Region) {
         region.links.send(id, &packet);
     }
     // 饥饿伤害是一次真正的 `hurtServer(starve, 1.0)`，走完整受伤链路。
+    // `LivingEntity.baseTick` 的击杀归属过期 + `CombatTracker.recheckStatus`。
+    crate::player_death::tick_combat(region);
     for id in starve {
         hurt_player(
             region,
@@ -191,6 +193,11 @@ pub(crate) fn hurt_player(
         } else {
             play_hurt_sound(region, id, &source, position);
         }
+    }
+    // 官方 `Player.actuallyHurt` 对完整受击和冷却期内的部分受击都写
+    // `CombatTracker.recordDamage`、设置击杀归属，只要真正扣了血。
+    if outcome.damage > 0.0 {
+        crate::player_death::record_combat(region, id, &source, outcome.damage);
     }
     let dying = region
         .players

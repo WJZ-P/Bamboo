@@ -965,9 +965,15 @@ pub struct ReplayPlayerLife {
     pub start_saturation: f32,
     pub start_exhaustion: f32,
     pub start_food_timer: i32,
+    /// 击杀归属场景：先用一头牛打 1 点的刻（-1 表示没有）。
+    pub credit_hurt_tick: i32,
+    /// 致死那一刻注入的 `Motion.fall_distance`。
+    pub death_fall_distance: f32,
     /// `immediate_respawn` 是对拍里由客户端在同一刻发 PERFORM_RESPAWN，
     /// 所以重放时不让死亡流程自动重生。
     pub client_drives_respawn: bool,
+    /// 故意改坏：击杀归属过期时间（改成一个很大的值）。
+    pub break_credit_expiry: bool,
     /// 故意改坏：经验公式、keepInventory、消失诅咒、重生包顺序、回血间隔。
     pub break_xp: bool,
     pub break_keep: bool,
@@ -1139,6 +1145,12 @@ pub fn replay_player_life(
         .add(observer, Box::new(observer_capture.clone()));
     region.insert_player(watcher);
     region.insert_player(player);
+    // 每次重放先把改坏开关还原，再按场景设置。
+    player_death::set_kill_credit_ticks_for_oracle(player_death::KILL_CREDIT_TICKS);
+    if scene.break_credit_expiry {
+        // 只改重放用的常量：归属永不过期，让「已过期」场景退回 .player。
+        player_death::set_kill_credit_ticks_for_oracle(i32::MAX);
+    }
     let mut global = global::Global::default();
     global.set_difficulty(match scene.difficulty {
         0 => world_state::Difficulty::Peaceful,
@@ -1169,7 +1181,7 @@ pub fn replay_player_life(
     // 攻击者牛：只作伤害来源的实体，不进实体表（和 Java 假世界一致）。
     // Java 假世界里玩家占 FIRST_ID，攻击者牛是 FIRST_ID+1；先生成一头不用的
     // 牛把 ID 推到那一位，再生成真正作伤害来源的牛。
-    let attacker_uid = if scene.death_attacker {
+    let attacker_uid = if scene.death_attacker || scene.credit_hurt_tick >= 0 {
         let _ = region
             .entities
             .spawn(Entity::cow(Vec3::new(20.5, 64.0, 0.5)));
@@ -1216,13 +1228,37 @@ pub fn replay_player_life(
     packets.push(first);
 
     for tick in 1..=scene.ticks {
+        if scene.credit_hurt_tick == tick as i32 {
+            let mut source = mc_bamboo_blocks::entity::mob::DamageSource::environment(
+                mc_bamboo_blocks::entity::mob::DamageKind::MobAttack,
+            );
+            if let Some(uid) = attacker_uid {
+                source.attacker = Some(uid);
+                source.direct = Some(uid);
+                source.scale_when_non_player = true;
+                source.position = Some(Vec3::new(2.5, 64.0, 0.5));
+            }
+            let mut random = Some(region.players[&id].random);
+            player_hurt::hurt_player(&mut region, id, source, 1.0, &mut random);
+            if let Some(state) = random {
+                region.players.get_mut(&id).expect("玩家").random = state;
+            }
+        }
         if scene.death_tick == tick as i32 {
+            region
+                .players
+                .get_mut(&id)
+                .expect("玩家")
+                .motion
+                .fall_distance = f64::from(scene.death_fall_distance);
             let kind = mc_bamboo_blocks::entity::mob::DamageKind::by_name(
                 scene.death_kind.trim_start_matches("minecraft:"),
             )
             .unwrap_or(mc_bamboo_blocks::entity::mob::DamageKind::GenericKill);
             let mut source = DamageSource::environment(kind);
-            if let Some(uid) = attacker_uid {
+            if scene.death_attacker
+                && let Some(uid) = attacker_uid
+            {
                 source.attacker = Some(uid);
                 source.direct = Some(uid);
                 source.scale_when_non_player = true;

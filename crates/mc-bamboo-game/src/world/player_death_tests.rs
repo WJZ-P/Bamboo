@@ -396,3 +396,71 @@ fn a_death_on_island_a_with_a_spawn_on_island_b_relocates_the_player() {
         scene.server.world.assert_island_invariants();
     });
 }
+
+/// 击杀归属：先被牛打一下，再 `/kill`，死亡消息走 `.player` 两个参数；
+/// 归属过期后退回单参数。逐字节对拍在 `mob-oracle` 的
+/// `player_death_credit_*` 场景，这里核对运行时状态。
+#[test]
+fn kill_credit_expires_after_one_hundred_ticks() {
+    let mut server = Harness::new(2);
+    let client = server.join_and_settle("Kitten");
+    {
+        let player = server.region().players.get_mut(&client.id).expect("玩家");
+        player.permission_level = 4;
+        player.game_mode = GameMode::Survival;
+    }
+    server.tick();
+    let _ = client.take_frames();
+
+    // 用正式受伤链路打 1 点（非玩家生物作造成者）。
+    let cow = server
+        .region()
+        .entities
+        .spawn(mc_bamboo_blocks::entity::Entity::cow(
+            mc_bamboo_core::Vec3::new(2.5, 64.0, 0.5),
+        ));
+    let mut source = mc_bamboo_blocks::entity::mob::DamageSource::environment(
+        mc_bamboo_blocks::entity::mob::DamageKind::MobAttack,
+    );
+    source.attacker = Some(cow);
+    source.direct = Some(cow);
+    source.position = Some(mc_bamboo_core::Vec3::new(2.5, 64.0, 0.5));
+    let mut random = Some(server.region().players[&client.id].random);
+    crate::player_hurt::hurt_player(server.region(), client.id, source, 1.0, &mut random);
+    assert!(server.region().players[&client.id].hurt_by_mob.is_some());
+    assert_eq!(server.region().players[&client.id].combat_entries.len(), 1);
+
+    // 101 刻后 `lastHurtByMob` 过期；战斗中 `CombatTracker` 的空闲阈值
+    // 是 300 刻（`in_combat` 为真），所以一起跑到 302 刻。
+    for _ in 0..302 {
+        crate::player_hurt::tick(server.region());
+    }
+    assert!(server.region().players[&client.id].hurt_by_mob.is_none());
+    assert!(
+        server.region().players[&client.id]
+            .combat_entries
+            .is_empty()
+    );
+}
+
+/// `FALL_VARIANTS`：`fallDistance > 5` 且没有击杀归属时走
+/// `death.fell.accident.generic`，否则退回 `death.attack.fall`。
+#[test]
+fn fall_death_message_follows_the_fall_variants_branch() {
+    use mc_bamboo_protocol::text::Component;
+    let victim = Component::text("Kitten");
+    let uuid = [0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0];
+    let fall = |distance| crate::player_death::CombatEntry {
+        kind: mc_bamboo_blocks::entity::mob::DamageKind::Fall,
+        attacker: None,
+        weapon: None,
+        damage: 100.0,
+        fall_distance: distance,
+        fall_location: None,
+    };
+    let long = crate::player_death::death_message(&[fall(8.0)], "Kitten", uuid, None);
+    assert!(format!("{long:?}").contains("death.fell.accident.generic"));
+    let short = crate::player_death::death_message(&[fall(2.0)], "Kitten", uuid, None);
+    assert!(format!("{short:?}").contains("death.attack.fall"));
+    let _ = victim;
+}

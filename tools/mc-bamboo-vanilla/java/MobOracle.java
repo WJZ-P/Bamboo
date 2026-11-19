@@ -324,6 +324,10 @@ public final class MobOracle {
         int respawnTick = -1;
         /** 只跑回血、不注入死亡伤害。 */
         boolean noDeath;
+        /** 击杀归属场景：先在某刻用一头牛打 1 点，再在 `deathTick` /kill。 */
+        int creditHurtTick = -1;
+        /** 致死伤害那一刻注入的 `LivingEntity.fallDistance`。 */
+        float deathFallDistance;
         /** 回血场景的起始 hp / food / saturation / exhaustion / tickTimer。 */
         float startHealth = 20.0F;
         float startSaturation = 5.0F;
@@ -466,6 +470,16 @@ public final class MobOracle {
             lifeDamageKind = kind;
             deathAmount = amount;
             deathAttacker = attacker;
+            return this;
+        }
+
+        Scene creditHurt(int tick) {
+            creditHurtTick = tick;
+            return this;
+        }
+
+        Scene fallDistance(float distance) {
+            deathFallDistance = distance;
             return this;
         }
 
@@ -1079,6 +1093,35 @@ public final class MobOracle {
                 xp.player(0.5, 64.0, 0.5, Items.AIR);
                 xp.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
                 scenes.add(xp);
+            }
+            // 击杀归属：先被牛打 1 点再 /kill；100 刻后归属过期退回单参数。
+            // 摔落致死：fallDistance > 5 走 FALL_VARIANTS，否则走 getLocalizedDeathMessage。
+            {
+                String[] names = {
+                    "player_death_credit_recent", "player_death_credit_expired",
+                    "player_death_fall_credit", "player_death_fall_no_credit",
+                    "player_death_fall_short", "player_death_credit_boundary_keep",
+                    "player_death_credit_boundary_gone",
+                };
+                int[] kills = {3, 105, 3, 3, 3, 101, 102};
+                int[] credits = {1, 1, 1, -1, -1, 1, 1};
+                String[] kinds = {"minecraft:generic_kill", "minecraft:generic_kill",
+                        "minecraft:fall", "minecraft:fall", "minecraft:fall",
+                        "minecraft:generic_kill", "minecraft:generic_kill"};
+                float[] distances = {0.0F, 0.0F, 8.0F, 8.0F, 2.0F, 0.0F, 0.0F};
+                for (int i = 0; i < names.length; i++) {
+                    Scene scene = new Scene(names[i]).ticks(kills[i] + 2)
+                            .life().difficulty(2).rules(false, true, true, true)
+                            .death(kills[i], kinds[i], 100.0F, -1).respawnAt(kills[i])
+                            .fallDistance(distances[i]);
+                    if (credits[i] >= 0) {
+                        scene.creditHurt(credits[i]);
+                    }
+                    ground(scene, 4);
+                    scene.player(0.5, 64.0, 0.5, Items.AIR);
+                    scene.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                    scenes.add(scene);
+                }
             }
             // 和平回血、满饥饿快速回血、饱和度回血、饥饿掉血。
             {
@@ -1796,13 +1839,16 @@ public final class MobOracle {
         level.playersList().add(player);
         official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
 
-        // 攻击者牛（没有放进 tracked，只作 DamageSource.getEntity）。
-        Cow attacker = scene.deathAttacker >= 0
+        // 攻击者牛：致死伤害带攻击者，或者击杀归属场景要在更早的一刻打 1 点。
+        // 放进 tracked，`LivingEntity.getKillCredit()` 才解得出 EntityReference。
+        boolean needsCow = scene.deathAttacker >= 0 || scene.creditHurtTick >= 0;
+        Cow attacker = needsCow
                 ? EntityTypes.COW.create(level, EntitySpawnReason.COMMAND) : null;
         if (attacker != null) {
             attacker.setId(FIRST_ID + 1);
             attacker.setUUID(new UUID(0x0DDB1A5E5BAD5EEDL, 2L));
             attacker.setPos(2.5, 64.0, 0.5);
+            level.tracked.add(attacker);
         }
 
         // 第一刻的状态：`ServerPlayer.doTick` 的哨兵值使进服时补一包 set_health。
@@ -1827,11 +1873,23 @@ public final class MobOracle {
         boolean lastSatZero = current.getFoodData().getSaturationLevel() == 0.0F;
         for (int tick = 1; tick <= scene.ticks; tick++) {
             level.gameTime++;
+            if (tick == scene.creditHurtTick && attacker != null) {
+                // `/damage @s 1 minecraft:mob_attack by <牛>`：不死，但记下击杀归属。
+                var damageTypes = official.registries.lookupOrThrow(Registries.DAMAGE_TYPE);
+                var holder = damageTypes.getOrThrow(ResourceKey.create(Registries.DAMAGE_TYPE,
+                        Identifier.parse("minecraft:mob_attack")));
+                current.hurtServer(level, new DamageSource(holder, attacker), 1.0F);
+            }
             if (tick == scene.deathTick && !scene.noDeath) {
+                // `CombatTracker.recordDamage` 读当时的 `fallDistance`。
+                current.fallDistance = scene.deathFallDistance;
                 var damageTypes = official.registries.lookupOrThrow(Registries.DAMAGE_TYPE);
                 var holder = damageTypes.getOrThrow(ResourceKey.create(Registries.DAMAGE_TYPE,
                         Identifier.parse(scene.lifeDamageKind)));
-                DamageSource source = new DamageSource(holder, attacker);
+                // `deathAttacker < 0` 时致死伤害没有攻击者实体，
+                // `getLocalizedDeathMessage` 才会走 `getKillCredit()` 分支。
+                Entity deathEntity = scene.deathAttacker >= 0 ? attacker : null;
+                DamageSource source = new DamageSource(holder, deathEntity);
                 current.hurtServer(level, source, scene.deathAmount);
             }
             boolean didRespawn = tick == scene.respawnTick && current.isDeadOrDying();
@@ -1946,6 +2004,9 @@ public final class MobOracle {
         line.append(",\"startFood\":").append(scene.startFood);
         line.append(",\"startSaturation\":").append(Float.floatToRawIntBits(scene.startSaturation));
         line.append(",\"startFoodTimer\":").append(scene.startFoodTimer);
+        line.append(",\"creditHurtTick\":").append(scene.creditHurtTick);
+        line.append(",\"deathFallDistance\":")
+                .append(Float.floatToRawIntBits(scene.deathFallDistance));
         line.append("}}\n");
         out.write(line.toString());
         out.flush();
@@ -1990,6 +2051,18 @@ public final class MobOracle {
         // 的 `send_session` 按自己的权限等级生成；这里只记 entity_event。
         c.send(new net.minecraft.network.protocol.game.ClientboundEntityEventPacket(
                 player, (byte) 26));
+        // `sendPlayerPermissionLevel` 的命令树：假世界用一个空根占位，
+        // 只比对它在包序列里的位置，内容由 command-oracle 负责。
+        c.send(new net.minecraft.network.protocol.game.ClientboundCommandsPacket(
+                new com.mojang.brigadier.tree.RootCommandNode<>(),
+                new net.minecraft.network.protocol.game.ClientboundCommandsPacket.NodeInspector<>() {
+                    @Override public boolean isExecutable(
+                            com.mojang.brigadier.tree.CommandNode<Object> node) { return false; }
+                    @Override public boolean isRestricted(
+                            com.mojang.brigadier.tree.CommandNode<Object> node) { return false; }
+                    @Override public net.minecraft.resources.Identifier suggestionId(
+                            com.mojang.brigadier.tree.ArgumentCommandNode<Object, ?> node) { return null; }
+                }));
         // `addRespawnedPlayer` 的配对包 + `initInventoryMenu`。
         var packed = player.getEntityData().packDirty();
         c.send(new net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket(
@@ -2018,6 +2091,34 @@ public final class MobOracle {
         // `self` 的包已镜像进 `all`，无需再取。
     }
 
+    /** `LivingEntity.baseTick` 的 `lastHurtByPlayer` / `lastHurtByMob` 过期。 */
+    private static void baseTickCredit(ServerPlayer player) throws Exception {
+        Field memory = LivingEntity.class.getDeclaredField("lastHurtByPlayerMemoryTime");
+        Field byPlayer = LivingEntity.class.getDeclaredField("lastHurtByPlayer");
+        Field byMob = LivingEntity.class.getDeclaredField("lastHurtByMob");
+        Field stamp = LivingEntity.class.getDeclaredField("lastHurtByMobTimestamp");
+        memory.setAccessible(true); byPlayer.setAccessible(true);
+        byMob.setAccessible(true); stamp.setAccessible(true);
+        int left = memory.getInt(player);
+        if (left > 0) {
+            memory.setInt(player, left - 1);
+        } else {
+            byPlayer.set(player, null);
+        }
+        Object mob = byMob.get(player);
+        if (mob != null) {
+            boolean alive = true;
+            // 假世界的牛不在实体表里，`EntityReference.getEntity` 解不出；
+            // 只按时间过期，和官方 `tickCount - timestamp > 100` 一致。
+            if (player.tickCount - stamp.getInt(player) > 100) {
+                alive = false;
+            }
+            if (!alive) {
+                byMob.set(player, null);
+            }
+        }
+    }
+
     /** `Player.aiStep` 的和平回血 + `ServerPlayer.doTick` 的 FoodData.tick。 */
     private static void aiStepLife(ServerPlayer player, FakeLevel level, int difficulty,
             Official official) throws Exception {
@@ -2029,6 +2130,8 @@ public final class MobOracle {
         if (player.hurtTime > 0) {
             player.hurtTime--;
         }
+        // `LivingEntity.baseTick` 的击杀归属过期（相对倒计时，无绝对时刻）。
+        baseTickCredit(player);
         // 只在活着时跑；官方 `baseTick` 也按 `isAlive()` 挡住死亡动画之外的一切。
         if (!player.isAlive()) {
             return;

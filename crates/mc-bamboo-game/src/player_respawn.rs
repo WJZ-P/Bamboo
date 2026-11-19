@@ -50,7 +50,7 @@ fn transfer_inventory_xp_and_score(player: &mut Player, keep: bool) {
 /// 官方 `ServerPlayer.<init>` + `restoreFrom(old, keepEverything=false)` 的等价物。
 ///
 /// **重置**：生命 / 吸收 / 三个受伤倒计时 / 饥饿四字段（构造默认值）、
-/// `dead` / `deathTime` / `last_combat` / `in_combat` / `awaiting_respawn`、
+/// `dead` / `deathTime` / `combat_entries` / 击杀归属 / `in_combat` / `awaiting_respawn`、
 /// `lastSent*` 三个同步哨兵、经验 / Score（非 keepInventory）、物品栏（非 keepInventory）、
 /// 菜单光标 / 采矿 / 移动速度 / 传送确认、`takeXpDelay`、`recorded_criteria`、
 /// `entity_ticks` 归零（新实体从 0 开始）。
@@ -89,7 +89,10 @@ pub(crate) fn reset_after_respawn(region: &mut Region, id: PlayerId, keep_invent
     player.dead = false;
     player.awaiting_respawn = false;
     player.in_combat = false;
-    player.last_combat = None;
+    player.combat_entries.clear();
+    player.combat_idle_ticks = 0;
+    player.hurt_by_player = None;
+    player.hurt_by_mob = None;
     player.health_sync = crate::player_hurt::HealthSync::INITIAL;
     player.last_sent_exp = -1;
     player.take_xp_delay = 0;

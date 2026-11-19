@@ -10,13 +10,16 @@
 //! Bamboo does not rebuild the player; the state reset lives in
 //! [`crate::player_respawn`].
 
-use mc_bamboo_blocks::{World, entity::mob::DamageSource};
+use mc_bamboo_blocks::{
+    World,
+    entity::mob::{DamageKind, DamageSource, DeathMessageType},
+};
 use mc_bamboo_core::{BlockPos, Hand, Vec3};
 use mc_bamboo_data::gamerules;
 use mc_bamboo_protocol::{
     components::{ComponentPatch, ComponentValue, defaults},
     item::ItemStack,
-    packet::play::{EntityEvent, GameMode, PlayerCombatKill, SystemChat},
+    packet::play::{EntityEvent, GameMode, PlayerCombatEnd, PlayerCombatKill, SystemChat},
     text::{Component, TranslateArg},
 };
 
@@ -24,65 +27,316 @@ use crate::{inbound::PlayerId, links, region::Region};
 
 /// `minecraft:vanishing_curse` 在附魔注册表里的 ID。
 const VANISHING_CURSE: i32 = 41;
+/// 官方 `setLastHurtByPlayer(..., 100)` 与 `lastHurtByMobTimestamp` 的 100 刻过期。
+pub(crate) const KILL_CREDIT_TICKS: i32 = 100;
+/// 对拍改坏用：只影响 `replay_player_life` 这一次重放。
+#[cfg(feature = "oracle-samples")]
+static KILL_CREDIT_OVERRIDE: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(KILL_CREDIT_TICKS);
 
-/// `CombatTracker` 一条战斗记录里死亡消息用得到的部分。
-/// 官方存的是 `DamageSource` 和 `tickCount`（绝对时刻）；这里只存
-/// 「最后一次致死伤害」的种类和攻击者显示组件，按官方的
-/// `getDeathMessage` 展开翻译键。不存岛时钟的绝对时刻，拆岛 / 并岛不用平移。
-///
-/// The part of one official `CombatEntry` needed by the death message. Vanilla
-/// stores the source and an absolute tick; this holds only the killing blow's
-/// kind and attacker component, with no absolute instant.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CombatEntry {
-    pub kind: mc_bamboo_blocks::entity::mob::DamageKind,
-    pub attacker: Option<Component>,
-    pub weapon: Option<Component>,
+#[cfg(feature = "oracle-samples")]
+pub(crate) fn set_kill_credit_ticks_for_oracle(value: i32) {
+    KILL_CREDIT_OVERRIDE.store(value, std::sync::atomic::Ordering::Relaxed);
 }
 
-impl CombatEntry {
-    /// 官方 `CombatTracker.getDeathMessage` 的最后一段：
-    /// `DamageSource.getLocalizedDeathMessage`。
-    ///
-    /// 有攻击者实体时是 `death.attack.<msgId>` 加参数（武器有 custom_name
-    /// 时改成 `.item` 再加一个参数）；没有攻击者时只有死者一个参数。
-    /// `CombatTracker` 没有记录时是 `death.attack.generic`。
-    ///
-    /// Official `CombatTracker.getDeathMessage`: the final call to
-    /// `DamageSource.getLocalizedDeathMessage`. With an attacker the key is
-    /// `death.attack.<msgId>` (or `.item` for a named weapon). An empty
-    /// tracker uses `death.attack.generic`.
-    pub fn message(&self, victim: &str, uuid: [u8; 16]) -> Component {
-        // 官方 `Player.getDisplayName()` 带 hover/show_entity、click/suggest_command
-        // 和 insertion，死亡消息和 PlayerCombatKill 都用同一个组件。
-        let name = || victim_component(victim, uuid);
-        let msg = self.kind.message_id();
-        let (key, args): (String, Vec<TranslateArg>) = match (&self.attacker, &self.weapon) {
-            (Some(attacker), Some(weapon)) => (
-                format!("death.attack.{msg}.item"),
-                vec![
-                    name().into(),
-                    TranslateArg::from(attacker.clone()),
-                    TranslateArg::from(weapon.clone()),
-                ],
-            ),
-            (Some(attacker), None) => (
-                format!("death.attack.{msg}"),
-                vec![name().into(), TranslateArg::from(attacker.clone())],
-            ),
-            // 官方在没有攻击者实体且 `getKillCredit()` 为空时写
-            // `death.attack.<msgId>` 一个参数。
-            (None, _) => (format!("death.attack.{msg}"), vec![name().into()]),
-        };
-        // 官方 `MutableComponent` 的键序：`with` 在 `translate` 前面。
-        Component::trusted(mc_bamboo_nbt::Tag::Compound(vec![
-            (
-                "with".to_owned(),
-                mc_bamboo_nbt::Tag::List(args.into_iter().map(TranslateArg::into_tag).collect()),
-            ),
-            ("translate".to_owned(), mc_bamboo_nbt::Tag::String(key)),
-        ]))
+/// 本次重放用的归属过期时间。
+pub(crate) fn kill_credit_ticks() -> i32 {
+    #[cfg(feature = "oracle-samples")]
+    {
+        let value = KILL_CREDIT_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+        if value != KILL_CREDIT_TICKS {
+            return value;
+        }
     }
+    KILL_CREDIT_TICKS
+}
+/// 官方 `CombatTracker.recheckStatus` 的空闲阈值（战斗中是 300 刻）。
+pub(crate) const COMBAT_IDLE_IN: i32 = 300;
+pub(crate) const COMBAT_IDLE_OUT: i32 = 100;
+
+/// 官方 `CombatEntry` 里死亡消息用得到的部分。
+/// 官方存 `DamageSource` 和绝对 `tickCount`；这里只存种类、显示组件、
+/// 摔落距离与摔落位置 ID，全部不是绝对时刻，岛拆合时整行跟着 `Players` 搬。
+///
+/// The part of an official `CombatEntry` needed by the death message. Vanilla
+/// stores the source and an absolute tick; this holds the kind, display
+/// components, fall distance and fall-location id, with no absolute instants.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CombatEntry {
+    pub kind: DamageKind,
+    pub attacker: Option<Component>,
+    pub weapon: Option<Component>,
+    /// `CombatEntry.damage()`，用于 `getMostSignificantFall` 的第二判据。
+    pub damage: f32,
+    /// `LivingEntity.fallDistance` 在 `recordDamage` 那一刻的值。
+    pub fall_distance: f32,
+    /// `FallLocation.id()`，没有攀爬物 / 不在水里时是 `None`。
+    pub fall_location: Option<&'static str>,
+}
+
+/// 官方 `LivingEntity.getKillCredit()` 返回的那名实体的显示组件。
+/// `memory` / `age` 是相对倒计时，不存绝对时刻。
+///
+/// The display component of the entity `LivingEntity.getKillCredit()` returns.
+/// `memory` / `age` are relative countdowns, not absolute instants.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum KillCredit {
+    /// `lastHurtByPlayer`，`memory` 每刻减 1，到 0 清空。
+    Player { display: Component, memory: i32 },
+    /// `lastHurtByMob`，`age` 每刻加 1，超过 100 清空。
+    Mob { display: Component, age: i32 },
+}
+
+impl KillCredit {
+    pub(crate) fn display(&self) -> &Component {
+        match self {
+            Self::Player { display, .. } | Self::Mob { display, .. } => display,
+        }
+    }
+
+    /// 官方 `LivingEntity.baseTick`：
+    /// `lastHurtByPlayerMemoryTime > 0` 时减一，否则清空引用；
+    /// `lastHurtByMob` 在 `tickCount - timestamp > 100` 时清空。
+    pub(crate) fn tick(&mut self) -> bool {
+        match self {
+            Self::Player { memory, .. } => {
+                if *memory > 0 {
+                    *memory -= 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            // `age` 是 `tickCount - lastHurtByMobTimestamp` 的相对计数；
+            // 边界（101/102 刻）由对拍场景逐字节核对。
+            Self::Mob { age, .. } => {
+                *age += 1;
+                *age <= kill_credit_ticks()
+            }
+        }
+    }
+}
+
+/// `CombatTracker.getDeathMessage` 的完整分支：
+/// `FALL_VARIANTS` 走 `getMostSignificantFall` / `getFallMessage`，
+/// `INTENTIONAL_GAME_DESIGN` 走带链接的那条，其余 `getLocalizedDeathMessage`。
+pub(crate) fn death_message(
+    entries: &[CombatEntry],
+    victim: &str,
+    uuid: [u8; 16],
+    kill_credit: Option<&Component>,
+) -> Component {
+    let name = || victim_component(victim, uuid);
+    // 官方 `entries.isEmpty()` → `death.attack.generic` 单参数。
+    let Some(last) = entries.last() else {
+        return translation("death.attack.generic", vec![name().into()]);
+    };
+    let msg = last.kind.message_id();
+    match last.kind.death_message_type() {
+        DeathMessageType::FallVariants => {
+            if let Some(fall) = most_significant_fall(entries) {
+                return fall_message(fall, last, victim, uuid);
+            }
+        }
+        DeathMessageType::IntentionalGameDesign => {
+            return intentional_game_design(msg, victim, uuid);
+        }
+        DeathMessageType::Default => {}
+    }
+    localized_death_message(last, msg, victim, uuid, kill_credit)
+}
+
+/// 官方 `DamageSource.getLocalizedDeathMessage`。
+/// 有攻击者实体时用 `death.attack.<msgId>`（命名武器是 `.item`）；
+/// 没有攻击者实体时看 `getKillCredit()`：有归属用
+/// `death.attack.<msgId>.player`，没有就用单参数。
+fn localized_death_message(
+    last: &CombatEntry,
+    msg: &str,
+    victim: &str,
+    uuid: [u8; 16],
+    kill_credit: Option<&Component>,
+) -> Component {
+    let name = || victim_component(victim, uuid);
+    let (key, args): (String, Vec<TranslateArg>) = match (&last.attacker, &last.weapon) {
+        (Some(attacker), Some(weapon)) => (
+            format!("death.attack.{msg}.item"),
+            vec![
+                name().into(),
+                TranslateArg::from(attacker.clone()),
+                TranslateArg::from(weapon.clone()),
+            ],
+        ),
+        (Some(attacker), None) => (
+            format!("death.attack.{msg}"),
+            vec![name().into(), TranslateArg::from(attacker.clone())],
+        ),
+        (None, _) => match kill_credit {
+            Some(credit) => (
+                format!("death.attack.{msg}.player"),
+                vec![name().into(), TranslateArg::from(credit.clone())],
+            ),
+            None => (format!("death.attack.{msg}"), vec![name().into()]),
+        },
+    };
+    translation(&key, args)
+}
+
+/// 官方 `CombatTracker.getMostSignificantFall`：按摔落距离（>5）选最显著的一次，
+/// 否则按 `fallLocation` 非空且 damage 最大的那次（damage 也要 >5）。
+/// `ALWAYS_MOST_SIGNIFICANT_FALL` 是 `Float.MAX`，26.3 的建模种类里没有。
+fn most_significant_fall(entries: &[CombatEntry]) -> Option<&CombatEntry> {
+    let mut by_fall: Option<(&CombatEntry, f32)> = None;
+    let mut by_damage: Option<(&CombatEntry, f32)> = None;
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.kind.is_fall() {
+            let distance = entry.fall_distance;
+            if distance > 0.0 && by_fall.is_none_or(|(_, best)| distance > best) {
+                // 官方用「上一条」；第一条用自己。
+                by_fall = Some((
+                    if index > 0 {
+                        &entries[index - 1]
+                    } else {
+                        entry
+                    },
+                    distance,
+                ));
+            }
+        }
+        if entry.fall_location.is_some() && by_damage.is_none_or(|(_, best)| entry.damage > best) {
+            by_damage = Some((entry, entry.damage));
+        }
+    }
+    if let Some((entry, distance)) = by_fall
+        && distance > 5.0
+    {
+        return Some(entry);
+    }
+    if let Some((entry, damage)) = by_damage
+        && damage > 5.0
+    {
+        return Some(entry);
+    }
+    None
+}
+
+/// 官方 `CombatTracker.getFallMessage`。
+/// `IS_FALL` 的条目走 `FallLocation.languageKey()`（`death.fell.accident.<id>`）；
+/// 否则按 `getDeathMessage` 传入的致死来源实体和条目的攻击者实体拼
+/// `death.fell.assist` / `finish` / `killer`。
+fn fall_message(
+    entry: &CombatEntry,
+    last: &CombatEntry,
+    victim: &str,
+    uuid: [u8; 16],
+) -> Component {
+    let name = || victim_component(victim, uuid);
+    if entry.kind.is_fall() {
+        let id = entry.fall_location.unwrap_or("generic");
+        return translation(&format!("death.fell.accident.{id}"), vec![name().into()]);
+    }
+    // `getDeathMessage` 传的是最后一条 `DamageSource.getEntity()`。
+    let death_display = last.attacker.clone();
+    let entry_display = entry.attacker.clone();
+    let differs = entry_display
+        .as_ref()
+        .is_some_and(|entry| death_display.as_ref() != Some(entry));
+    if differs {
+        // `getMessageForAssistedFall(entry 的攻击者, ...)`。
+        return assisted_fall(
+            entry_display.as_ref().expect("上面判过非空"),
+            entry.weapon.as_ref(),
+            "death.fell.assist.item",
+            "death.fell.assist",
+            victim,
+            uuid,
+        );
+    }
+    if let Some(display) = death_display {
+        return assisted_fall(
+            &display,
+            last.weapon.as_ref(),
+            "death.fell.finish.item",
+            "death.fell.finish",
+            victim,
+            uuid,
+        );
+    }
+    translation("death.fell.killer", vec![name().into()])
+}
+
+/// `getMessageForAssistedFall`：主手物品有 `custom_name` 时用 `.item` 键并多带一个参数。
+fn assisted_fall(
+    display: &Component,
+    weapon: Option<&Component>,
+    item_key: &str,
+    plain_key: &str,
+    victim: &str,
+    uuid: [u8; 16],
+) -> Component {
+    let mut args = vec![
+        victim_component(victim, uuid).into(),
+        TranslateArg::from(display.clone()),
+    ];
+    if let Some(weapon) = weapon {
+        args.push(TranslateArg::from(weapon.clone()));
+        translation(item_key, args)
+    } else {
+        translation(plain_key, args)
+    }
+}
+
+/// 官方 `INTENTIONAL_GAME_DESIGN` 分支：`[<death.attack.<msg>.link>]`
+/// 带 MCPE-28723 链接样式，外层是 `death.attack.<msg>.message`。
+/// 26.3 建模的伤害种类里触发不到，分支按字节码留着。
+fn intentional_game_design(msg: &str, victim: &str, uuid: [u8; 16]) -> Component {
+    use mc_bamboo_nbt::Tag;
+    let link = format!("death.attack.{msg}.link");
+    let bracketed = Component::translate(
+        "chat.square_brackets",
+        [TranslateArg::from(
+            Component::translate(&link, [])
+                .with_entry(
+                    "click_event",
+                    Tag::Compound(vec![
+                        ("action".to_owned(), Tag::String("open_url".to_owned())),
+                        (
+                            "value".to_owned(),
+                            Tag::String("https://bugs.mojang.com/browse/MCPE-28723".to_owned()),
+                        ),
+                    ]),
+                )
+                .with_entry("hover_event", hover_show_text("MCPE-28723"))
+                .with_entry("italic", Tag::Byte(1)),
+        )],
+    );
+    translation(
+        &format!("death.attack.{msg}.message"),
+        vec![
+            victim_component(victim, uuid).into(),
+            TranslateArg::from(bracketed),
+        ],
+    )
+}
+
+fn hover_show_text(text: &str) -> mc_bamboo_nbt::Tag {
+    use mc_bamboo_nbt::Tag;
+    Tag::Compound(vec![
+        ("action".to_owned(), Tag::String("show_text".to_owned())),
+        ("value".to_owned(), Tag::String(text.to_owned())),
+    ])
+}
+
+/// `Component.translatable(key, args)` 的线上键序：`with` 在 `translate` 前。
+fn translation(key: &str, args: Vec<TranslateArg>) -> Component {
+    use mc_bamboo_nbt::Tag;
+    Component::trusted(Tag::Compound(vec![
+        (
+            "with".to_owned(),
+            Tag::List(args.into_iter().map(TranslateArg::into_tag).collect()),
+        ),
+        ("translate".to_owned(), Tag::String(key.to_owned())),
+    ]))
 }
 
 /// 官方 `Entity.getDisplayName()` 对玩家的结果：`Component.translatable`
@@ -90,7 +344,7 @@ impl CombatEntry {
 ///
 /// Vanilla `Entity.getDisplayName()` for a player: the rich-text fields the
 /// death message and `player_combat_kill` carry.
-fn victim_component(name: &str, uuid: [u8; 16]) -> Component {
+pub(crate) fn victim_component(name: &str, uuid: [u8; 16]) -> Component {
     use mc_bamboo_nbt::Tag;
     let ints: Vec<i32> = (0..4)
         .map(|index| {
@@ -125,7 +379,7 @@ fn victim_component(name: &str, uuid: [u8; 16]) -> Component {
 ///
 /// Runs the official death flow once after health reached zero. Called by the
 /// hurt path and by starvation damage.
-pub(crate) fn die(region: &mut Region, id: PlayerId, source: DamageSource) {
+pub(crate) fn die(region: &mut Region, id: PlayerId, _source: DamageSource) {
     let Some(player) = region.players.get(&id) else {
         return;
     };
@@ -140,17 +394,17 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, source: DamageSource) {
     let show_messages = region.global.rules.bool(gamerules::SHOW_DEATH_MESSAGES);
     let spectator = player.game_mode == GameMode::Spectator;
     let level = player.experience.level;
+    // `getKillCredit()`：优先 `lastHurtByPlayer`，否则 `lastHurtByMob`。
+    let kill_credit = player
+        .hurt_by_player
+        .as_ref()
+        .or(player.hurt_by_mob.as_ref())
+        .map(|credit| credit.display().clone());
 
-    // `CombatTracker.recordDamage` 只在 `amount != 0` 的完整受击里写。
-    // 死亡消息取最后一条记录；攻击者显示名按实体表 / 玩家表查。
-    let entry = CombatEntry {
-        kind: source.kind,
-        attacker: attacker_name(region, &source),
-        weapon: named_weapon(region, &source),
-    };
-    // `ServerPlayer.die`：show_death_messages 决定是否构造 / 广播消息。
+    // 死亡消息先用完整的 `CombatTracker.entries` 拼（官方在 `recheckStatus`
+    // 清空之前调 `getDeathMessage`）。
     let death_message = if show_messages {
-        entry.message(&name, uuid)
+        death_message(&player.combat_entries, &name, uuid, kill_credit.as_ref())
     } else {
         Component::text(String::new())
     };
@@ -222,23 +476,19 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, source: DamageSource) {
     let player = region.players.get_mut(&id).expect("玩家刚才还在");
     player.dead = true;
     player.health.death_time = 0;
-    player.last_combat = Some(entry);
     player.last_death_location = Some(BlockPos::containing(position));
     player.in_combat = false;
-    // `Player.dropEquipment` / 重生后的 `transferInventoryXpAndScore` 只在
-    // `keepInventory` 为假时把经验清成 0，官方读盘状态也这样。
+    // `ServerPlayer.die` 末尾 `combatTracker.recheckStatus` 清空 entries。
+    player.combat_entries.clear();
+    player.combat_idle_ticks = 0;
     player.sync.metadata_dirty = true;
 
     // `LivingEntity.die` 的 `broadcastEntityEvent(entity, 3)`：死亡动画给跟踪者。
     broadcast_death_event(region, id);
 
-    // `ServerPlayer.die` 末尾 `combatTracker.recheckStatus` 在死亡时若还在
-    // 战斗里就 `onLeaveCombat`，给死者发 player_combat_end。
+    // `combatTracker.recheckStatus` 在死亡时若还在战斗里就 `onLeaveCombat`。
     if in_combat {
-        region.links.send(
-            id,
-            &mc_bamboo_protocol::packet::play::PlayerCombatEnd { duration: 0 },
-        );
+        region.links.send(id, &PlayerCombatEnd { duration: 0 });
     }
 
     // `immediate_respawn` 为真时在死亡这一刻直接重生；否则等客户端
@@ -248,6 +498,85 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, source: DamageSource) {
     } else {
         let player = region.players.get_mut(&id).expect("玩家刚才还在");
         player.awaiting_respawn = true;
+    }
+}
+
+/// `CombatTracker.recordDamage`：一次 `amount != 0` 的完整受击写一条记录。
+/// `fallDistance` 取玩家当时的 `Motion.fall_distance`（官方 `LivingEntity.fallDistance`），
+/// `fallLocation` 由 `FallLocation.getCurrentFallLocation` 给，Bamboo 这一期
+/// 还没有攀爬物 / 水中判定，恒 `None`。
+pub(crate) fn record_combat(region: &mut Region, id: PlayerId, source: &DamageSource, damage: f32) {
+    // 先只读地把显示组件查出来，再借 `players` 写状态。
+    let attacker = attacker_name(region, source);
+    let weapon = named_weapon(region, source);
+    let fall_distance = region
+        .players
+        .get(&id)
+        .map(|player| player.motion.fall_distance as f32)
+        .unwrap_or(0.0);
+    let uid = source.attacker.or(source.direct);
+    let player_credit = uid
+        .and_then(|uid| region.players.get(&PlayerId(uid)))
+        .map(|other| victim_component(&other.name, *other.uuid.as_bytes()));
+    let mob_credit = uid
+        .and_then(|uid| region.entities.public_at(uid))
+        .and_then(|public| {
+            matches!(public.kind, mc_bamboo_blocks::entity::KindPublic::Mob(_))
+                .then(|| attacker.clone())
+                .flatten()
+        });
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    player.combat_entries.push(CombatEntry {
+        kind: source.kind,
+        attacker,
+        weapon,
+        damage,
+        fall_distance,
+        fall_location: None,
+    });
+    // 相对倒计时，官方 `CombatTracker.lastDamageTime` 的对应量；
+    // 边界（101/102 刻）由 `player_death_credit_boundary_*` 场景逐字节核对。
+    player.combat_idle_ticks = 0;
+    // `LivingEntity.hurtServer` 的 `resolveMobResponsibleForDamage` /
+    // `resolvePlayerResponsibleForDamage`：只在 `getEntity()` 非空时设置归属。
+    if let Some(display) = player_credit {
+        player.hurt_by_player = Some(KillCredit::Player {
+            display,
+            memory: KILL_CREDIT_TICKS,
+        });
+    } else if let Some(display) = mob_credit {
+        player.hurt_by_mob = Some(KillCredit::Mob { display, age: 0 });
+    }
+}
+
+/// `LivingEntity.baseTick` 的归属过期与 `CombatTracker.recheckStatus`。
+/// 全部用相对倒计时，不存绝对时刻。
+pub(crate) fn tick_combat(region: &mut Region) {
+    for player in region.players.values_mut() {
+        if let Some(credit) = player.hurt_by_player.as_mut()
+            && !credit.tick()
+        {
+            player.hurt_by_player = None;
+        }
+        if let Some(credit) = player.hurt_by_mob.as_mut()
+            && !credit.tick()
+        {
+            player.hurt_by_mob = None;
+        }
+        if !player.combat_entries.is_empty() {
+            player.combat_idle_ticks += 1;
+            let threshold = if player.in_combat {
+                COMBAT_IDLE_IN
+            } else {
+                COMBAT_IDLE_OUT
+            };
+            if player.combat_idle_ticks > threshold {
+                player.combat_entries.clear();
+                player.combat_idle_ticks = 0;
+            }
+        }
     }
 }
 
@@ -379,4 +708,40 @@ pub(crate) fn vanishing_stack(item: i32) -> ItemStack {
         bytes,
     ));
     stack
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_credit_is_kept_for_one_hundred_ticks() {
+        let display = Component::text("Cow");
+        let mut player = KillCredit::Player {
+            display: display.clone(),
+            memory: 100,
+        };
+        for _ in 0..100 {
+            assert!(player.tick());
+        }
+        assert!(!player.tick(), "第 101 刻清空");
+        let mut mob = KillCredit::Mob { display, age: 0 };
+        for _ in 0..100 {
+            assert!(mob.tick());
+        }
+        assert!(!mob.tick(), "tickCount - timestamp > 100 时清空");
+    }
+
+    #[test]
+    fn intentional_game_design_branch_stays_encoded() {
+        let component = intentional_game_design(
+            "badRespawnPoint",
+            "Kitten",
+            [0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+        );
+        let text = format!("{:?}", component.tag());
+        assert!(text.contains("death.attack.badRespawnPoint.message"));
+        assert!(text.contains("death.attack.badRespawnPoint.link"));
+        assert!(text.contains("MCPE-28723"));
+    }
 }
