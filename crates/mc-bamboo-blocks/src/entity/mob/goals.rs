@@ -531,6 +531,16 @@ const fn reduced_tick_delay(ticks: i32) -> i32 {
     mth::positive_ceil_div(ticks, 2)
 }
 
+/// `Goal.adjustedTickDelay`：`requiresUpdateEveryTick()` 为真时原样返回，
+/// 为假时才折半。
+const fn adjusted_tick_delay(every_tick: bool, ticks: i32) -> i32 {
+    if every_tick {
+        ticks
+    } else {
+        reduced_tick_delay(ticks)
+    }
+}
+
 fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
         Goal::Float => float_can_use(me, mob),
@@ -827,6 +837,8 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             *ticks_until_next_attack = 0;
             *ticks_until_path_recalc = 0;
             *raise_arm_ticks = 0;
+            // 官方 `MeleeAttackGoal.start()` 显式置真；同一刻的
+            // `ZombieAttackGoal.tick()` 会按抬手计时再覆盖。
             mob.aggressive = true;
         }
         Goal::HurtByTarget { timestamp } => {
@@ -1055,12 +1067,12 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 {
                     *ticks_until_path_recalc += 15;
                 }
-                *ticks_until_path_recalc = reduced_tick_delay(*ticks_until_path_recalc);
+                *ticks_until_path_recalc = adjusted_tick_delay(true, *ticks_until_path_recalc);
             }
             *ticks_until_next_attack = (*ticks_until_next_attack - 1).max(0);
             *raise_arm_ticks += 1;
-            mob.aggressive =
-                *raise_arm_ticks >= 5 && *ticks_until_next_attack < reduced_tick_delay(20) / 2;
+            mob.aggressive = *raise_arm_ticks >= 5
+                && *ticks_until_next_attack < adjusted_tick_delay(true, 20) / 2;
             if *ticks_until_next_attack == 0
                 && within_melee_range(me, mob, target)
                 && living::has_line_of_sight(
@@ -1071,7 +1083,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                     target.eye_position(),
                 )
             {
-                *ticks_until_next_attack = reduced_tick_delay(20);
+                *ticks_until_next_attack = adjusted_tick_delay(true, 20);
                 super::living::do_hurt_target(me, mob, ctx, target.uid);
             }
         }
