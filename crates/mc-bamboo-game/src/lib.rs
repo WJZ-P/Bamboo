@@ -103,7 +103,7 @@ pub mod world_options;
 mod world_state;
 pub mod worldgen;
 pub mod worldgen_features;
-mod worldgen_light;
+pub mod worldgen_light;
 #[doc(hidden)]
 pub mod worldgen_profile;
 mod worldgen_spawn;
@@ -1107,9 +1107,6 @@ pub struct ReplayPlayerLife {
     pub credit_hurt_tick: i32,
     /// 致死那一刻注入的 `Motion.fall_distance`。
     pub death_fall_distance: f32,
-    /// `immediate_respawn` 是对拍里由客户端在同一刻发 PERFORM_RESPAWN，
-    /// 所以重放时不让死亡流程自动重生。
-    pub client_drives_respawn: bool,
     /// 故意改坏：击杀归属过期时间（改成一个很大的值）。
     pub break_credit_expiry: bool,
     /// 故意改坏：经验公式、keepInventory、消失诅咒、重生包顺序、回血间隔。
@@ -1310,10 +1307,12 @@ pub fn replay_player_life(
         gamerules::KEEP_INVENTORY,
         scene.keep_inventory ^ scene.break_keep,
     );
-    set(
-        gamerules::IMMEDIATE_RESPAWN,
-        scene.immediate_respawn && !scene.client_drives_respawn,
-    );
+    // 官方和 Bamboo 用同一个规则值：规则只影响客户端要不要显示死亡界面，
+    // 重生的时刻一律由场景里的 `respawn_tick`（客户端的 PERFORM_RESPAWN）决定。
+    // Both sides use the same rule value: the rule only tells the client
+    // whether to show the death screen; the respawn instant is always the
+    // scene's `respawn_tick` (the client's PERFORM_RESPAWN).
+    set(gamerules::IMMEDIATE_RESPAWN, scene.immediate_respawn);
     set(gamerules::SHOW_DEATH_MESSAGES, scene.show_death_messages);
     set(
         gamerules::NATURAL_HEALTH_REGENERATION,

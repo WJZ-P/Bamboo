@@ -740,6 +740,13 @@ impl Region {
             sea_level,
             online_mode: self.online_mode,
             enforces_secure_chat: crate::secure_chat::enforces(self),
+            // 官方 `PlayerList.placeNewPlayer`：规则开着就不显示死亡界面。
+            // Vanilla `PlayerList.placeNewPlayer`: with the rule on, the
+            // client does not show the death screen.
+            show_death_screen: !self
+                .global
+                .rules
+                .bool(mc_bamboo_data::gamerules::IMMEDIATE_RESPAWN),
         };
         self.links.send(id, &login);
         // 官方在 login 后立刻同步难度；帧已经由 `Global` 编码好，广播时也用它。

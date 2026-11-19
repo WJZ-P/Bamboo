@@ -59,10 +59,30 @@ impl TestServer {
     /// `BAMBOO_ISLAND_THREADS`): unset is the default configuration (islands
     /// on), `0` / `0` is exact mode; acceptance runs both.
     pub async fn start(config: ServerConfig) -> Self {
+        Self::start_with_spawn_radius(Some(0), config).await
+    }
+
+    /// 用官方缺省的出生规则起服（`spawn_radius = None`），其余配置照旧。
+    /// 别的测试都断言固定出生坐标，由 [`start`](Self::start) 显式把半径定成 0；
+    /// 验证散布本身的测试用这一个入口。
+    ///
+    /// Start with the official default spawn rules (`spawn_radius = None`),
+    /// everything else unchanged. Tests asserting fixed spawn coordinates go
+    /// through [`start`](Self::start), which pins the radius to 0; tests of
+    /// the scatter itself use this entry.
+    pub async fn start_with_default_spawn_radius(config: ServerConfig) -> Self {
+        Self::start_with_spawn_radius(None, config).await
+    }
+
+    /// 按给定值覆盖出生半径起服；`None` 表示不改规则，用官方缺省。
+    ///
+    /// Start with the given spawn-radius override; `None` keeps the official
+    /// default instead of overriding the rule.
+    async fn start_with_spawn_radius(spawn_radius: Option<i32>, config: ServerConfig) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let config = ServerConfig {
-            spawn_radius: Some(0),
+            spawn_radius,
             ..config
         };
         let server = Server::new(listener, config).unwrap();
