@@ -141,7 +141,9 @@ WebView2 的渲染进程不算在内。
   实体按盘上的内容恢复；Director 把盘上阶段记进记录，只跑它之后的阶段到 `Full`。
   下次写盘写真实阶段（官方 `getPersistedStatus()`），只有完工才写 `minecraft:full`。
   `.mcc` 外置大区块能扫到也能读回，丢了就按读坏处理。读坏的区域文件仍是 warn + 模板，
-  不另存区块备份。官方 codec 的多阶段往返对拍见 `mc-bamboo-vanilla resume-world`。
+  不另存区块备份。官方 codec 的多阶段往返对拍见 `mc-bamboo-vanilla resume-world`：
+  每个能存盘的阶段 × 四种邻居状态组合，逐格比方块、群系、高度图、方块实体、光照和结构，
+  带结构 / 不带结构各一组，含三种改坏确认，全部 0 不一致。
 - 玩家文件名照官方 `getStringUUID()` 用带连字符 UUID；坏玩家文件另存
   `<uuid>_corrupted_<yyyy-MM-dd_HH-mm-ss>.dat`（官方 `FileNameDateFormatter`，Bamboo
   按 UTC 算，官方按本地时区）。`/save-all` 的成功消息不带 `flush` 时在快照都交给 IO

@@ -116,10 +116,6 @@ struct Stats {
     light_cells: u64,
     block_entities: u64,
     mismatches: Vec<String>,
-    /// 盘上 Status < light 的用例里，因官方 LIGHT 读 FEATURES 后视图、
-    /// 而游戏 `generate_light_stage` 读 CARVERS 快照导致的光照差异。
-    /// 这类单独列出，不能合进总数里藏起来；合并光照修正后必须清零。
-    light_input_mismatches: Vec<String>,
     breaks: u64,
     /// 真正比到非空结构起点 / 引用的用例数。
     structure_cases: u64,
@@ -311,7 +307,6 @@ fn finish(stats: Stats, options: &Options, requests: usize) -> Result<(), String
         light_cells,
         block_entities,
         mismatches,
-        light_input_mismatches,
         breaks,
         structure_cases,
     } = stats;
@@ -319,41 +314,9 @@ fn finish(stats: Stats, options: &Options, requests: usize) -> Result<(), String
         "resume-world: {requests} requests, {cases} resumed cases, {blocks} blocks, \
          {biomes} quart cells, {heightmaps} heightmap columns, {light_cells} light cells, \
          {block_entities} block entities, {structure_cases} structured cases, {} mismatches, \
-         {} known LIGHT-input mismatches, {breaks} break checks",
+         {breaks} break checks",
         mismatches.len(),
-        light_input_mismatches.len(),
     );
-    if !light_input_mismatches.is_empty() {
-        let mut by_stage: BTreeMap<String, usize> = BTreeMap::new();
-        for message in &light_input_mismatches {
-            if let Some(stage) = message
-                .split("stage ")
-                .nth(1)
-                .and_then(|s| s.split_whitespace().next())
-            {
-                *by_stage.entry(stage.to_owned()).or_default() += 1;
-            }
-        }
-        println!("resume-world LIGHT-input gaps by stage: {by_stage:?}");
-        let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
-        for message in &light_input_mismatches {
-            let reason = if message.contains("present") {
-                "data-layer presence".to_owned()
-            } else {
-                "per-cell light value".to_owned()
-            };
-            *reasons.entry(reason).or_default() += 1;
-        }
-        println!("resume-world LIGHT-input gaps by reason: {reasons:?}");
-        println!(
-            "resume-world LIGHT-input gaps (official post-FEATURES vs game CARVERS): {} lines; \
-             first few:",
-            light_input_mismatches.len()
-        );
-        for message in light_input_mismatches.iter().take(options.show) {
-            eprintln!("  LIGHT-INPUT {message}");
-        }
-    }
     if options.break_self_test || options.break_neighbor || options.break_light {
         if breaks == 0 {
             return Err("resume-world break check did not run".to_owned());
@@ -418,12 +381,6 @@ fn finish(stats: Stats, options: &Options, requests: usize) -> Result<(), String
         return Err(format!(
             "resume-world found {} mismatches",
             mismatches.len()
-        ));
-    }
-    if !light_input_mismatches.is_empty() {
-        return Err(format!(
-            "resume-world has {} known LIGHT-input gaps; rerun after the light fix",
-            light_input_mismatches.len()
         ));
     }
     println!("resume-world: 0 mismatches");
@@ -1226,7 +1183,7 @@ fn compare_case(
     // 差异按主代理要求单独分类列出，不放宽、合并不隐藏。
     let expected = mc_bamboo_storage::chunk_nbt::decode_bytes(&full_nbt)
         .map_err(|error| format!("{label}: official full NBT: {error}"))?;
-    compare_light(stats, &label, stage, &expected.column, &clean);
+    compare_light(stats, &label, &expected.column, &clean);
 
     // 改坏确认：把读回状态当 full、丢掉邻居写进中心的增量，两种都必须报不一致。
     if options.break_self_test && stage == ChunkStatus::StructureStarts && mode == "none" {
@@ -1266,8 +1223,8 @@ fn compare_case(
         let official = mc_bamboo_storage::chunk_nbt::decode_bytes(&full_nbt)
             .map_err(|error| format!("{label}: official full NBT: {error}"))?;
         let mut probe = Stats::default();
-        compare_light(&mut probe, &label, stage, &official.column, &broken);
-        if probe.light_input_mismatches.is_empty() && probe.mismatches.is_empty() {
+        compare_light(&mut probe, &label, &official.column, &broken);
+        if probe.mismatches.is_empty() {
             stats
                 .mismatches
                 .push(format!("{label}: break-light was not detected"));
@@ -1540,7 +1497,6 @@ fn compare_structures(
 fn compare_light(
     stats: &mut Stats,
     label: &str,
-    stage: ChunkStatus,
     expected: &mc_bamboo_world::column::ChunkColumn,
     clean: &mc_bamboo_game::resume_replay::ResumedChunk,
 ) {
@@ -1603,12 +1559,8 @@ fn compare_light(
             clean.light_on
         ));
     }
-    // 只对 Status < LIGHT 的「游戏 LIGHT 输入仍是 CARVERS」这一类单独归类。
-    if (stage as usize) < (ChunkStatus::Light as usize) {
-        stats.light_input_mismatches.extend(differences);
-    } else {
-        stats.mismatches.extend(differences);
-    }
+    // 光照修正合入后，所有阶段都必须逐格等于官方；任何差异都是真不一致。
+    stats.mismatches.extend(differences);
 }
 
 fn parse_neighbor_tags(case: &Value) -> Result<BTreeMap<ChunkPos, Tag>, String> {
