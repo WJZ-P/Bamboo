@@ -575,6 +575,11 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     }
     // 走。
     let input = Vec3::new(f64::from(mob.xxa), f64::from(mob.yya), f64::from(mob.zza));
+    // `LivingEntity.aiStep`：缓降 / 漂浮每刻在 travel **之前**清 `fallDistance`，
+    // 这样 `Entity.move` 这一刻累计的位移仍会留到下一刻。
+    if mob.effects.has(mob_effect::SLOW_FALLING) || mob.effects.has(mob_effect::LEVITATION) {
+        me.fall_distance = 0.0;
+    }
     if !mob.no_ai {
         timing::span!(Travel);
         travel(me, mob, ctx, input);
@@ -875,24 +880,19 @@ fn jump_from_ground(me: &mut Entity, mob: &Mob, view: &dyn BlockView) {
 /// `LivingEntity.travel`。
 fn travel(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) {
     let in_liquid = is_in_liquid(me, mob);
+    let levitation = mob.effects.amplifier(mob_effect::LEVITATION);
     if in_liquid {
         travel_in_fluid(me, mob, ctx, input);
     } else {
-        travel_in_air(me, mob, ctx, input);
+        travel_in_air(me, mob, ctx, input, levitation);
     }
-    // `LivingEntity.travel` 的漂浮分支：
-    // `y += 0.05*(amplifier+1) + 0.2*(y_after_friction - y_before)`。
-    if let Some(amplifier) = mob.effects.amplifier(mob_effect::LEVITATION) {
-        let before = me.old_position.y;
-        let _ = before;
+    // 官方漂浮分支在 `travel` 里替换重力项；水里的漂浮效果由
+    // `travel_in_fluid` 的重力分支处理，这里只补一个非水 / 水外的等价调整，
+    // 已经由 `travel_in_air` 的 `levitation` 参数覆盖。
+    if in_liquid && let Some(amplifier) = levitation {
         let target = 0.05 * f64::from(amplifier.max(0) + 1);
         let delta = me.delta;
-        let lift = target + (delta.y - target) * 0.2;
-        me.delta = Vec3::new(delta.x, lift, delta.z);
-    }
-    // `LivingEntity.aiStep`：缓降 / 漂浮每刻清 `fallDistance`。
-    if mob.effects.has(mob_effect::SLOW_FALLING) || mob.effects.has(mob_effect::LEVITATION) {
-        me.fall_distance = 0.0;
+        me.delta = Vec3::new(delta.x, delta.y + (target - delta.y) * 0.2, delta.z);
     }
 }
 
@@ -916,7 +916,13 @@ fn effective_gravity(me: &Entity, mob: &Mob) -> f64 {
 }
 
 /// `travelInAir`。
-fn travel_in_air(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input: Vec3) {
+fn travel_in_air(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    input: Vec3,
+    levitation: Option<i32>,
+) {
     let below = me.on_pos(ctx.blocks(), 0.500_001);
     let block_friction = if me.on_ground {
         modified_friction(
@@ -927,7 +933,14 @@ fn travel_in_air(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, input:
         1.0
     };
     let movement = relative_friction_movement(me, mob, ctx, input, block_friction);
-    let y = movement.y - effective_gravity(me, mob);
+    // `LivingEntity.travel`：漂浮效果替换掉重力项。
+    let y = match levitation {
+        Some(amplifier) => {
+            let target = 0.05 * f64::from(amplifier.max(0) + 1);
+            movement.y + (target - movement.y) * 0.2
+        }
+        None => movement.y - effective_gravity(me, mob),
+    };
     let air_drag = mob.attributes.value(attribute::AIR_DRAG_MODIFIER) as f32;
     let horizontal_air = modified_friction(0.91, air_drag);
     let horizontal = block_friction * horizontal_air;

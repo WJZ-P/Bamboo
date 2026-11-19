@@ -755,7 +755,7 @@ pub fn spawn_landing_sample(scene: &ReplaySpawnLanding) -> SpawnLandingSample {
 /// comparison. Returns the numeric effects plus a stable hash of the feedback
 /// keys. Gated behind the `oracle-samples` feature.
 #[cfg(feature = "oracle-samples")]
-pub fn replay_execute(line: &str) -> [i32; 6] {
+pub fn replay_execute(line: &str) -> [i32; 7] {
     use mc_bamboo_blocks::entity::Entity;
     use mc_bamboo_core::{BlockPos, Vec3};
     use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode};
@@ -829,8 +829,18 @@ pub fn replay_execute(line: &str) -> [i32; 6] {
     );
     global.publish(&mut region);
     region.links.flush();
+    // 场景脚本里的 ` ;; ` 前面是准备命令（效果先给上再测 clear），
+    // 它的反馈不计入比较，和 Java 的 `emit` 一致。
+    let (setup, measured) = match line.split_once(" ;; ") {
+        Some((setup, measured)) => (setup, measured),
+        None => ("", line),
+    };
+    if !setup.is_empty() {
+        command::on_command_public(&mut global, &mut region, id, setup);
+        region.links.flush();
+    }
     let mut feedback = Vec::new();
-    command::on_command_public_feedback(&mut global, &mut region, id, line, &mut feedback);
+    command::on_command_public_feedback(&mut global, &mut region, id, measured, &mut feedback);
     region.links.flush();
     let stone =
         |pos: BlockPos| i32::from(region.chunks.block(pos) == Some(mc_bamboo_data::blocks::STONE));
@@ -844,9 +854,44 @@ pub fn replay_execute(line: &str) -> [i32; 6] {
             .scoreboard()
             .score_value("#total", "result")
             .unwrap_or(0),
-        feedback_mark(line, &feedback),
+        feedback_mark(measured, &feedback),
         feedback_oracle_hash(&feedback),
+        replay_effect_state(&region, id, &[cow_a, cow_b]),
     ]
+}
+
+/// 玩家 + 两头牛的 `activeEffects`，和 Java `ExecuteOracle.effectState` 的
+/// 文本格式逐字节一致（按 tracked 的固定顺序，不用实体 ID）。
+#[cfg(feature = "oracle-samples")]
+fn replay_effect_state(region: &region::Region, id: inbound::PlayerId, cows: &[i32]) -> i32 {
+    use mc_bamboo_blocks::entity::mob::effects::EffectMap;
+    let mut all = String::new();
+    let append = |all: &mut String, index: usize, effects: &EffectMap| {
+        all.push_str(&format!("{index}:"));
+        for instance in effects.entries() {
+            all.push_str(&format!(
+                "{},{},{},{},{},{};",
+                instance.effect,
+                instance.duration,
+                instance.amplifier,
+                i32::from(instance.ambient),
+                i32::from(instance.visible),
+                i32::from(instance.show_icon),
+            ));
+        }
+        all.push('\n');
+    };
+    if let Some(player) = region.players.get(&id) {
+        append(&mut all, 0, &player.effects);
+    }
+    for (index, &uid) in cows.iter().enumerate() {
+        if let Some(entity) = region.entities.get(uid)
+            && let Some(mob) = entity.kind.mob()
+        {
+            append(&mut all, index + 1, &mob.effects);
+        }
+    }
+    feedback_hash(all.as_bytes())
 }
 
 /// 玩家受伤对拍的一次重放：用正式的 `Player` / `Region` / [`player_hurt`]
