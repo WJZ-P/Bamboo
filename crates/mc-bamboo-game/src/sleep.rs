@@ -14,14 +14,11 @@ use mc_bamboo_blocks::BedProblem;
 use mc_bamboo_core::{BlockPos, Vec3};
 use mc_bamboo_data::gamerules;
 use mc_bamboo_protocol::{
-    packet::play::{EntityData, PlayerPosition, Pose as EntityPose, SetEntityData},
+    packet::play::{EntityData, Pose as EntityPose, SetEntityData},
     text::Component,
 };
 
-use crate::{
-    global_port::GlobalEffect, inbound::PlayerId, links::encode_frames, region::Region,
-    world_state::RespawnData,
-};
+use crate::{inbound::PlayerId, links::encode_frames, region::Region, world_state::RespawnData};
 
 /// 官方 `Player.sleepCounter` 到 100 才算「睡够」。
 const DEEP_SLEEP_TICKS: i32 = 100;
@@ -53,7 +50,6 @@ impl SleepStatus {
     /// 对拍用：直接按官方计数构造一份 `SleepStatus`。
     ///
     /// For the oracle: build a `SleepStatus` with the official counters.
-    #[cfg(feature = "oracle-samples")]
     pub(crate) fn of_counts(active: i32, sleeping: i32) -> Self {
         Self {
             active,
@@ -72,17 +68,6 @@ impl SleepStatus {
 
     pub(crate) fn enough_sleeping(&self, percentage: i32) -> bool {
         self.sleeping >= self.sleepers_needed(percentage)
-    }
-
-    /// 正在熟睡（`isSleepingLongEnough`）的人数。
-    pub(crate) fn deep_sleeping(region: &Region, percentage: i32) -> bool {
-        let status = &region.sleep;
-        let deep = region
-            .players
-            .values()
-            .filter(|player| player.sleep.is_some_and(|s| s.counter >= DEEP_SLEEP_TICKS))
-            .count() as i32;
-        deep >= status.sleepers_needed(percentage)
     }
 
     /// `SleepStatus.update(players)`：重数活跃 / 睡觉的人数，返回名单有没有变。
@@ -111,10 +96,51 @@ impl SleepStatus {
             && (self.previous_active != self.active || self.previous_sleeping != self.sleeping)
     }
 
+    pub(crate) fn active(&self) -> i32 {
+        self.active
+    }
+
+    pub(crate) fn sleeping(&self) -> i32 {
+        self.sleeping
+    }
+
     /// `wakeUpAllPlayers` 开头把计数器清零。
     pub(crate) fn clear(&mut self) {
         self.sleeping = 0;
         self.previous_sleeping = 0;
+    }
+}
+
+/// 一个岛在上一刻末尾交给主控的睡眠计数（官方 `SleepStatus` 的
+/// `activePlayers` / `sleepingPlayers` 加上 `isSleepingLongEnough` 的人数）。
+/// 主控把它们加起来，在下一刻开头、天气推进之后决定要不要跳早。
+///
+/// One island's sleep counts handed to the master at the end of the previous
+/// tick (`SleepStatus.activePlayers` / `sleepingPlayers` plus the number of
+/// `isSleepingLongEnough` players). The master sums them at the start of the
+/// next tick, right after the weather step, to decide the morning skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SleepCounts {
+    pub(crate) active: i32,
+    pub(crate) sleeping: i32,
+    pub(crate) deep: i32,
+}
+
+impl SleepCounts {
+    /// 官方 `ServerLevel.tick`：`areEnoughSleeping(percentage)` 和
+    /// `areEnoughDeepSleeping(percentage, players)` 都成立才跳早。
+    ///
+    /// Official `ServerLevel.tick`: skip only when both
+    /// `areEnoughSleeping` and `areEnoughDeepSleeping` hold.
+    pub(crate) fn should_skip(self, percentage: i32) -> bool {
+        let status = SleepStatus::of_counts(self.active, self.sleeping);
+        status.enough_sleeping(percentage) && self.deep >= status.sleepers_needed(percentage)
+    }
+
+    pub(crate) fn add(&mut self, other: Self) {
+        self.active += other.active;
+        self.sleeping += other.sleeping;
+        self.deep += other.deep;
     }
 }
 
@@ -161,22 +187,19 @@ pub(crate) fn on_sleep_in_bed(
             f64::from(pos.y) + BED_SLEEP_HEIGHT,
             f64::from(pos.z) + 0.5,
         );
+        // `ServerPlayer.startSleeping` 的连接层 `teleport`：走正式的
+        // `movement::teleport`，它会递增 teleport id 并记下等待客户端确认的位置。
+        // 官方把玩家位置先交给 `LivingEntity.setPosToBed`，再在这里发传送包。
         let player = region.players.get_mut(&id).expect("玩家还在");
-        player.set_position(&mut region.player_grid, sleep_pos);
         player.sync.sleeping = true;
         player.sleep = Some(Sleeping { pos, counter: 0 });
-        // `ServerPlayer.startSleeping` 的连接层 teleport：给这名玩家发位置包。
-        region.links.send(
-            id,
-            &PlayerPosition {
-                teleport_id: 0,
-                x: sleep_pos.x,
-                y: sleep_pos.y,
-                z: sleep_pos.z,
-                yaw: player.yaw,
-                pitch: player.pitch,
-                relative: 0,
-            },
+        let now = region.tick;
+        crate::movement::teleport(
+            player,
+            &mut region.links,
+            &mut region.player_grid,
+            now,
+            sleep_pos,
         );
         // 睡姿同时发给所有看得到他的人。
         let frames = encode_frames(&SetEntityData {
@@ -234,13 +257,16 @@ fn announce_sleep_status(region: &mut Region) {
     }
 }
 
-/// 官方 `ServerPlayer.doTick` 每刻把 `sleepCounter` 加到 100；`ServerLevel.tick`
-/// 在天气 / 时间之前检查够不够人熟睡，够了就跳早、清天气、叫醒所有人。
+/// 官方 `ServerPlayer.doTick` 每刻把 `sleepCounter` 加到 100，并刷新
+/// `SleepStatus`。岛在这一刻末尾把计数交给主控；跳早的判断在下一刻开头
+/// （`World::advance_world_clock` 的天气之后、时间推进之前）用这份计数做，
+/// 和官方 `ServerLevel.tick` 同一刻。
 ///
-/// Official `ServerPlayer.doTick` increments `sleepCounter`; `ServerLevel.tick`
-/// checks the deep-sleeping count before the weather / time steps and skips
-/// the night when enough players are asleep.
-pub(crate) fn tick_sleep(region: &mut Region) -> Vec<GlobalEffect> {
+/// Official `ServerPlayer.doTick` increments `sleepCounter` and refreshes
+/// `SleepStatus` each tick. The island hands the counts to the master at the
+/// end of the tick; the master decides the skip at the start of the next tick
+/// (after weather, before time), the same point as `ServerLevel.tick`.
+pub(crate) fn tick_sleep_counters(region: &mut Region) {
     // `SleepStatus.update` 由 `updateSleepingPlayerList` 在每次名单变化时调用，
     // 这里每刻也重算一次，人数变了才广播。
     update_sleeping_player_list(region);
@@ -249,32 +275,44 @@ pub(crate) fn tick_sleep(region: &mut Region) -> Vec<GlobalEffect> {
             sleep.counter = (sleep.counter + 1).min(DEEP_SLEEP_TICKS);
         }
     }
-    let percentage = region
-        .global
-        .rules
-        .int(gamerules::PLAYERS_SLEEPING_PERCENTAGE);
-    let enough =
-        region.sleep.enough_sleeping(percentage) && SleepStatus::deep_sleeping(region, percentage);
-    if !enough {
-        return Vec::new();
+}
+
+/// 主控在岛交回、停放之后读它上一刻的睡眠计数（不改状态）。
+///
+/// The master reads an island's sleep counts after hand-back, without
+/// modifying any state.
+pub(crate) fn counts_of(region: &Region) -> SleepCounts {
+    SleepCounts {
+        active: region.sleep.active(),
+        sleeping: region.sleep.sleeping(),
+        deep: region
+            .players
+            .values()
+            .filter(|player| player.sleep.is_some_and(|s| s.counter >= DEEP_SLEEP_TICKS))
+            .count() as i32,
     }
-    wake_all(region);
-    vec![GlobalEffect::SkipNight]
+}
+
+/// 岛在这一刻开头看到主控发布的跳早标志后叫醒自己的玩家。
+///
+/// An island wakes its players at the start of its tick when the master has
+/// published the morning-skip flag.
+pub(crate) fn wake_from_skip(region: &mut Region) {
+    if region.global.sleep_skip {
+        wake_all(region);
+        update_sleeping_player_list(region);
+    }
 }
 
 /// `ServerLevel.wakeUpAllPlayers`：清掉 `occupied`、改回站姿、补发位置包。
 pub(crate) fn wake_all(region: &mut Region) {
     region.sleep.clear();
-    let sleeping: Vec<(PlayerId, BlockPos, Vec3, f32, f32)> = region
+    let sleeping: Vec<(PlayerId, BlockPos, Vec3)> = region
         .players
         .iter()
-        .filter_map(|(&id, player)| {
-            player
-                .sleep
-                .map(|sleep| (id, sleep.pos, player.position(), player.yaw, player.pitch))
-        })
+        .filter_map(|(&id, player)| player.sleep.map(|sleep| (id, sleep.pos, player.position())))
         .collect();
-    for (id, pos, position, yaw, pitch) in sleeping {
+    for (id, pos, position) in sleeping {
         // 只清自己那半床；形状更新会把另一半一起清掉。
         use mc_bamboo_blocks::{BlockState, World, state::OCCUPIED};
         let state = region
@@ -296,17 +334,15 @@ pub(crate) fn wake_all(region: &mut Region) {
         });
         player.sync.send_to_viewers(&mut region.links, &frames);
         region.links.send_frames(id, &frames);
-        region.links.send(
-            id,
-            &PlayerPosition {
-                teleport_id: 0,
-                x: position.x,
-                y: position.y,
-                z: position.z,
-                yaw,
-                pitch,
-                relative: 0,
-            },
+        // `ServerPlayer.stopSleepInBed` 末尾走连接层 `teleport`，和进服 / `/tp`
+        // 共用递增的 teleport id 与等待确认状态。
+        let now = region.tick;
+        crate::movement::teleport(
+            player,
+            &mut region.links,
+            &mut region.player_grid,
+            now,
+            position,
         );
     }
 }
@@ -341,17 +377,38 @@ pub(crate) fn wake_up_ticks(total: i64) -> i64 {
     total + step
 }
 
-/// 供 `GlobalEffect::SkipNight` 使用：跳到早上并清天气。
-pub(crate) fn skip_night(global: &mut crate::global::Global) {
-    let next = wake_up_ticks(global.clocks()[0].1.total_ticks);
-    global
-        .clock_named_mut("minecraft:overworld")
-        .expect("overworld clock")
-        .set_total_ticks(next);
-    // `ServerLevel.resetWeatherCycle`：把雨和雷暴的倒计时与开关都清零。
-    let weather = &mut global.state_mut().weather;
-    weather.rain_time = 0;
-    weather.raining = false;
-    weather.thunder_time = 0;
-    weather.thundering = false;
+/// 主控在 `World::advance_world_clock` 里调用：跳到早上、清天气，并打上
+/// 这一刻的 `sleep_skip` 标志让每个岛叫醒自己的玩家。
+///
+/// Called by the master in `World::advance_world_clock`: advance the clock,
+/// clear the weather and publish this tick's `sleep_skip` flag so every island
+/// wakes its players.
+pub(crate) fn skip_night(
+    global: &mut crate::global::Global,
+    advance_time: bool,
+    advance_weather: bool,
+) -> bool {
+    // `wakeUpAllPlayers` 无条件发生：主控发布这一刻的 `sleep_skip` 标志，
+    // 每个岛在自己一刻开头叫醒玩家（见 `wake_from_skip`）。
+    global.sleep_skip = true;
+    // `ServerClockManager.moveToTimeMarker` 只在 `advance_time` 为真时执行；
+    // 官方 `ServerLevel.tick` 在同一步之后才 `tickTime`（游戏时间 +1）。
+    if advance_time {
+        let next = wake_up_ticks(global.clocks()[0].1.total_ticks);
+        global
+            .clock_named_mut("minecraft:overworld")
+            .expect("overworld clock")
+            .set_total_ticks(next);
+        // `ServerLevel.resetWeatherCycle`：`advance_weather` 为真且 `isRaining()`。
+        if advance_weather && global.state().weather.is_raining() {
+            let weather = &mut global.state_mut().weather;
+            weather.rain_time = 0;
+            weather.raining = false;
+            weather.thunder_time = 0;
+            weather.thundering = false;
+        }
+        true
+    } else {
+        false
+    }
 }

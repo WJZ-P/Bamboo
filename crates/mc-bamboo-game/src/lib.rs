@@ -1693,8 +1693,12 @@ pub struct ClockReplayStep {
 #[cfg(feature = "oracle-samples")]
 pub fn replay_sleep_facts(scene: &SleepReplayFacts) -> SleepReplayAnswer {
     let status = sleep::SleepStatus::of_counts(scene.active, scene.sleeping);
+    // 和正式游戏同一份 `sky` 公式：主世界时间线 + 雨 / 雷暴层。
+    let sky_darken =
+        mc_bamboo_blocks::sky::sky_darken(scene.clock_ticks, scene.rain, scene.thunder);
     SleepReplayAnswer {
-        dark_outside: scene.sky_darken >= 4,
+        sky_darken,
+        dark_outside: sky_darken >= 4,
         needed: status.sleepers_needed(scene.percentage),
         enough: status.enough_sleeping(scene.percentage),
         can_sleep_through_night: scene.percentage <= 100,
@@ -1706,9 +1710,13 @@ pub fn replay_sleep_facts(scene: &SleepReplayFacts) -> SleepReplayAnswer {
 /// `sleep-oracle` 的一道题。
 /// One case of the `sleep-oracle`.
 #[cfg(feature = "oracle-samples")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SleepReplayFacts {
+    /// 官方 `Level.getSkyDarken()`；只用于纯亮度的旧题面。
     pub sky_darken: i32,
+    pub clock_ticks: i64,
+    pub rain: f32,
+    pub thunder: f32,
     pub percentage: i32,
     pub active: i32,
     pub sleeping: i32,
@@ -1720,6 +1728,7 @@ pub struct SleepReplayFacts {
 #[cfg(feature = "oracle-samples")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SleepReplayAnswer {
+    pub sky_darken: i32,
     pub dark_outside: bool,
     pub needed: i32,
     pub enough: bool,

@@ -197,6 +197,13 @@ pub(crate) struct Global {
     /// game mode and spawn are saved to `level.dat` and read back; weather, seed
     /// and random sequences are not saved.
     state: WorldState,
+    /// 这一刻主控决定跳过夜晚；发布给每个岛，让它们在自己一刻开头叫醒玩家。
+    /// 每刻开头重置，只在跳早的那一刻为真。
+    ///
+    /// The master decided to skip the night this tick; published to every
+    /// island so each wakes its players at the start of its own tick. Reset
+    /// at the start of each tick.
+    pub(crate) sleep_skip: bool,
     /// 全服一份的计分板和队伍。不写存档。和 [`GlobalView`] 共享，改的时候才复制一份。
     ///
     /// The one scoreboard and team set for the whole server. Never saved. Shared
@@ -266,6 +273,7 @@ impl Default for Global {
             ticks_since_latency_broadcast: 0,
             rules: Arc::new(GameRuleSet::vanilla()),
             state: WorldState::default(),
+            sleep_skip: false,
             scoreboard: Arc::default(),
             boss_bars: crate::scoreboard::BossBars::default(),
             world_border: WorldBorder::default(),
@@ -406,6 +414,7 @@ impl Global {
             weather: self.state.weather,
             block_weather: self.state.weather.snapshot(),
             sky_darken: self.sky_darken(),
+            sleep_skip: self.sleep_skip,
             world_border: self.world_border.clone(),
             difficulty: self.state.difficulty,
             difficulty_locked: self.state.difficulty_locked,
@@ -530,13 +539,32 @@ impl Global {
     /// Official `MinecraftServer.tickChildren`'s "clocks" phase and
     /// `ServerLevel.tickTime`: the game time always advances; the world clocks
     /// tick only while `advance_time` is true.
-    pub(crate) fn advance_time(&mut self) {
-        self.time.0 += 1;
+    /// 官方 `MinecraftServer.tickChildren` 的 "clocks" 阶段：所有世界时钟在
+    /// `ServerLevel.tick` 之前推进，只在 `advance_time` 为真时走。
+    ///
+    /// Official `MinecraftServer.tickChildren`'s "clocks" phase: all world
+    /// clocks tick before `ServerLevel.tick`, gated by `advance_time`.
+    pub(crate) fn tick_clocks(&mut self) {
         if !self.rules.bool(mc_bamboo_data::gamerules::ADVANCE_TIME) {
             return;
         }
         self.clock.tick();
         self.end_clock.tick();
+    }
+
+    /// 官方 `ServerLevel.tickTime`：游戏时间每刻照常加一。
+    ///
+    /// Official `ServerLevel.tickTime`: the game time always advances.
+    pub(crate) fn increment_game_time(&mut self) {
+        self.time.0 += 1;
+    }
+
+    /// 时钟和游戏时间同一步推进；对拍重放和单元测试用。
+    /// Advance clocks and game time together; used by replay and unit tests.
+    #[cfg(any(test, feature = "oracle-samples"))]
+    pub(crate) fn advance_time(&mut self) {
+        self.tick_clocks();
+        self.increment_game_time();
     }
 
     /// 官方 `MinecraftServer.tickChildren`：`tickCount % 20 == 0` 时给所有人发一次
@@ -548,7 +576,15 @@ impl Global {
     /// The packet goes out before `ServerLevel.tick`, so its game time is one
     /// less than the value `tickTime` will set at the end of this tick.
     pub(crate) fn time_sync_packet_time(&self) -> Option<GameTime> {
-        (self.time.0 % 20 == 0).then_some(GameTime(self.time.0 - 1))
+        // `tickChildren` 里 `forceGameTimeSynchronization` 在 `ServerLevel.tick`
+        // 之前，包里的 `gameTime` 是上一刻 `tickTime` 加一之后的值，也就是这里
+        // 还没有再 +1 的当前值。
+        //
+        // `forceGameTimeSynchronization` runs before `ServerLevel.tick`, so
+        // the packet carries the current game time (not yet incremented).
+        // `tickCount` 比 `gameTime` 大一（clocks 阶段在 tickTime 之前），
+        // 所以 `tickCount % 20 == 0` 等价于 `(gameTime + 1) % 20 == 0`。
+        ((self.time.0 + 1) % 20 == 0).then_some(self.time)
     }
 
     /// 名单上的所有人，发给刚进入的玩家。名单是空的时候返回 `None`。
@@ -702,6 +738,11 @@ pub(crate) struct GlobalView {
     /// every tick. The exact-mode `World`, the parallel entity view and both
     /// drives read this one value.
     pub(crate) sky_darken: i32,
+    /// 主控这一刻决定跳过夜晚；岛在自己一刻开头据此叫醒玩家。
+    ///
+    /// The master decided to skip the night this tick; islands wake their
+    /// players at the start of their tick when this is set.
+    pub(crate) sleep_skip: bool,
     /// 这一维度的世界边界。方块逻辑、移动校验和实体碰撞都读这一份。
     pub(crate) world_border: WorldBorder,
     pub(crate) difficulty: Difficulty,

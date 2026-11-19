@@ -132,20 +132,65 @@ fn read_lines<R: Read>(
     };
     let line = line.map_err(|error| format!("cannot read java output: {error}"))?;
     let json: Value = serde_json::from_str(&line).map_err(|error| format!("bad JSON: {error}"))?;
-    for (darken, entry) in json
+    for (index, entry) in json
         .get("darkness")
         .and_then(Value::as_array)
         .ok_or("no darkness array")?
         .iter()
         .enumerate()
     {
+        let clock_ticks = entry
+            .get("clock_ticks")
+            .and_then(Value::as_i64)
+            .ok_or("darkness without clock_ticks")?;
+        let rain = f32::from(u8::from(
+            entry.get("rain").and_then(Value::as_bool).unwrap_or(false),
+        ));
+        let thunder = f32::from(u8::from(
+            entry
+                .get("thunder")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        ));
         let facts = SleepReplayFacts {
-            sky_darken: darken as i32,
+            clock_ticks,
+            rain,
+            thunder,
             ..SleepReplayFacts::default()
         };
         let answer = replay_sleep_facts(&facts);
-        let what = format!("darkness[{darken}]");
-        check_dark(report, &what, entry, answer.dark_outside, break_self_test);
+        let what = format!("darkness[{index}] tick {clock_ticks} rain {rain} thunder {thunder}");
+        // 官方 `Level.updateSkyBrightness` 得到的整数天色，和 Bamboo 的 `sky` 模块比对。
+        report.compare(
+            &format!("{what}.sky_darken"),
+            entry.get("sky_darken").unwrap_or(&Value::Null),
+            serde_json::json!(answer.sky_darken),
+        );
+        // 官方 `BedRule.canSleep(level)` → `Level.isDarkOutside()`。
+        report.compare(
+            &format!("{what}.can_sleep"),
+            entry.get("can_sleep").unwrap_or(&Value::Null),
+            serde_json::json!(answer.dark_outside),
+        );
+        report.compare(
+            &format!("{what}.dark_outside"),
+            entry.get("dark_outside").unwrap_or(&Value::Null),
+            serde_json::json!(answer.dark_outside),
+        );
+        if break_self_test {
+            // 改坏：把天气对变暗的贡献整个去掉（假装永远晴天）。
+            // 官方 `Level.updateSkyBrightness` 里雨 / 雷暴层会让这些题的天色不同。
+            let clear = replay_sleep_facts(&SleepReplayFacts {
+                rain: 0.0,
+                thunder: 0.0,
+                ..facts
+            });
+            let official_darken = entry.get("sky_darken").and_then(Value::as_i64).unwrap_or(0);
+            if clear.sky_darken as i64 != official_darken {
+                report.break_dark += 1;
+                report.mismatches += 1;
+            }
+        }
     }
     for entry in json
         .get("sleep_status")
@@ -224,31 +269,6 @@ fn read_lines<R: Read>(
         }
     }
     Ok(())
-}
-
-/// 改坏确认之一：把 `isDarkOutside` 的阈值从 4 改成 5，官方答案必须不同。
-fn check_dark(report: &mut Report, what: &str, entry: &Value, actual: bool, break_self_test: bool) {
-    report.compare(
-        &format!("{what}.dark_outside"),
-        entry.get("dark_outside").unwrap_or(&Value::Null),
-        serde_json::json!(actual),
-    );
-    report.compare(
-        &format!("{what}.can_sleep_when_dark"),
-        entry.get("can_sleep_when_dark").unwrap_or(&Value::Null),
-        serde_json::json!(true),
-    );
-    if break_self_test {
-        let official = entry.get("dark_outside").and_then(Value::as_bool);
-        let broken = entry
-            .get("sky_darken")
-            .and_then(Value::as_i64)
-            .is_some_and(|darken| darken >= 5);
-        if official != Some(broken) {
-            report.break_dark += 1;
-            report.mismatches += 1;
-        }
-    }
 }
 
 fn int(entry: &Value, key: &str) -> Result<i32, String> {

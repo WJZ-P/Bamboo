@@ -1263,28 +1263,24 @@ fn first_batch_is_exactly_the_three_by_three_around_the_spawn() {
     assert_eq!(finished[0].body, [9]);
 }
 
-/// 夜里右键床：床被占、玩家睡姿、第二天跳早并清天气。
-#[test]
-fn sleeping_through_the_night_advances_the_clock_and_clears_weather() {
-    use mc_bamboo_blocks::{BlockState, state::OCCUPIED};
+/// 把夜里睡觉的场景搭好：完整的床、站在床尾的玩家、午夜 + 雷暴。
+fn sleep_scene() -> (Harness, Client, BlockPos, BlockPos) {
+    use mc_bamboo_blocks::{BlockState, state::BED_PART, state::BedPart};
     use mc_bamboo_core::Vec3;
 
     let mut server = Harness::new_one_island(8);
     let client = server.join_and_settle("Kitten");
     let foot = BlockPos::new(8, -59, 8);
     let head = foot.south();
-    // 完整的床，玩家站在床尾；把时钟设到午夜、开着雷暴。
     let bed = BlockState(mc_bamboo_data::blocks::RED_BED)
         .with(mc_bamboo_blocks::state::HORIZONTAL_FACING, Direction::South);
     server.world.islands.region.chunks.set_block(foot, bed.0);
-    server.world.islands.region.chunks.set_block(
-        head,
-        bed.with(
-            mc_bamboo_blocks::state::BED_PART,
-            mc_bamboo_blocks::state::BedPart::Head,
-        )
-        .0,
-    );
+    server
+        .world
+        .islands
+        .region
+        .chunks
+        .set_block(head, bed.with(BED_PART, BedPart::Head).0);
     let region = &mut server.world.islands.region;
     if let Some(player) = region.players.get_mut(&client.id) {
         player.set_position(&mut region.player_grid, Vec3::new(8.5, -59.0, 8.5));
@@ -1309,8 +1305,6 @@ fn sleeping_through_the_night_advances_the_clock_and_clears_weather() {
         "夜里天色要够暗"
     );
     client.take_frames();
-
-    // 走正式的方块右键路径。
     crate::interaction::on_use_item_on(
         &mut server.world.islands.region,
         client.id,
@@ -1323,6 +1317,96 @@ fn sleeping_through_the_night_advances_the_clock_and_clears_weather() {
             sequence: 1,
         },
     );
+    assert!(
+        server.world.islands.region.players[&client.id]
+            .sleep
+            .is_some(),
+        "玩家应该睡着了"
+    );
+    client.take_frames();
+    (server, client, foot, head)
+}
+
+/// 逐刻记录跳早的那一刻：时钟跳到多少、哪一刻发醒来包和时钟同步包。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct SleepTrace {
+    /// 时钟从夜里跳到清晨的刻号。
+    clock_jump_tick: Option<i64>,
+    /// 跳到的主世界时钟刻。
+    clock_jump_to: i64,
+    /// 发出站姿 `set_entity_data` 的刻号。
+    wake_pose_tick: Option<i64>,
+    /// 发出带主世界时钟的 `set_time` 的刻号（周期同步是空表，不算）。
+    clock_sync_tick: Option<i64>,
+}
+
+fn sleep_trace(server: &mut Harness, client: &Client, ticks: usize) -> SleepTrace {
+    let mut trace = SleepTrace::default();
+    let mut last_clock = server.world.master.global.clocks()[0].1.total_ticks;
+    let mut was_sleeping = server
+        .world
+        .islands
+        .region
+        .players
+        .get(&client.id)
+        .is_some_and(|player| player.sleep.is_some());
+    for _ in 0..ticks {
+        let before = server.world.master.global.time().0;
+        server.tick();
+        let clock = server.world.master.global.clocks()[0].1.total_ticks;
+        let expected = last_clock + 1;
+        if clock != expected && trace.clock_jump_tick.is_none() {
+            trace.clock_jump_tick = Some(before);
+            trace.clock_jump_to = clock;
+        }
+        let sleeping = server
+            .world
+            .islands
+            .region
+            .players
+            .get(&client.id)
+            .is_some_and(|player| player.sleep.is_some());
+        let woke = was_sleeping && !sleeping;
+        was_sleeping = sleeping;
+        let frames = client.take_frames();
+        if woke && trace.wake_pose_tick.is_none() {
+            trace.wake_pose_tick = Some(before);
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.id == clientbound::SET_ENTITY_DATA),
+                "醒来的这一刻要发站姿元数据: tick {before}"
+            );
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.id == clientbound::PLAYER_POSITION),
+                "醒来的这一刻要发传送包: tick {before}"
+            );
+        }
+        if trace.clock_sync_tick.is_none() {
+            for frame in &frames {
+                if frame.id == clientbound::SET_TIME {
+                    let mut reader = Reader::new(&frame.body);
+                    let _game_time = reader.i64().expect("set_time 的 gameTime");
+                    if reader.varint().unwrap_or(0) > 0 {
+                        trace.clock_sync_tick = Some(before);
+                        break;
+                    }
+                }
+            }
+        }
+        last_clock = clock;
+    }
+    trace
+}
+
+/// 夜里右键床：床被占、玩家睡姿、第二天跳早并清天气。
+#[test]
+fn sleeping_through_the_night_advances_the_clock_and_clears_weather() {
+    use mc_bamboo_blocks::{BlockState, state::OCCUPIED};
+
+    let (mut server, _client, _foot, head) = sleep_scene();
     let region = &server.world.islands.region;
     assert!(
         region
@@ -1330,9 +1414,12 @@ fn sleeping_through_the_night_advances_the_clock_and_clears_weather() {
             .block(head)
             .is_some_and(|s| BlockState(s).get(OCCUPIED))
     );
-    assert!(region.players[&client.id].sleep.is_some(), "玩家应该睡着了");
     assert!(
-        region.players[&client.id].sync.sleeping,
+        region.players[&PlayerId(1)].sleep.is_some(),
+        "玩家应该睡着了"
+    );
+    assert!(
+        region.players[&PlayerId(1)].sync.sleeping,
         "睡姿应该是 SLEEPING"
     );
 
@@ -1350,14 +1437,59 @@ fn sleeping_through_the_night_advances_the_clock_and_clears_weather() {
     assert!(!global.state().weather.raining);
     assert!(!global.state().weather.thundering);
     let region = &server.world.islands.region;
-    assert!(region.players[&client.id].sleep.is_none(), "所有人醒来");
-    assert!(!region.players[&client.id].sync.sleeping);
+    assert!(region.players[&PlayerId(1)].sleep.is_none(), "所有人醒来");
+    assert!(!region.players[&PlayerId(1)].sync.sleeping);
     assert!(
         !region
             .chunks
             .block(head)
             .is_some_and(|s| BlockState(s).get(OCCUPIED)),
         "床的 occupied 清掉"
+    );
+}
+
+/// 跳早在主控每刻开头（天气之后、岛开跑之前）决定：逐刻比跳的时刻、
+/// 跳到的刻数、醒来包和时钟同步包都在同一刻。把决定推迟一刻的改坏必须被抓到。
+#[test]
+fn sleep_skip_happens_at_the_official_tick() {
+    let (mut server, client, _foot, _head) = sleep_scene();
+    let official = sleep_trace(&mut server, &client, 105);
+    assert!(
+        official.clock_jump_tick.is_some(),
+        "熟睡人数够了应该跳早: {official:?}"
+    );
+    assert_eq!(
+        official.clock_jump_tick, official.clock_sync_tick,
+        "时钟同步包必须和跳时间同一刻: {official:?}"
+    );
+    assert_eq!(
+        official.clock_jump_tick, official.wake_pose_tick,
+        "醒来（站姿 / 传送包）必须和跳时间同一刻: {official:?}"
+    );
+    assert_eq!(
+        official.clock_jump_to.rem_euclid(24_000),
+        0,
+        "跳到 wake_up_from_sleep 标记: {official:?}"
+    );
+
+    // 改坏：把第一次跳早决定推迟一刻，逐刻记录应该整体晚一刻。
+    let (mut broken, broken_client, _foot, _head) = sleep_scene();
+    broken.world.master.sleep_break_late = true;
+    let late = sleep_trace(&mut broken, &broken_client, 106);
+    assert_eq!(
+        late.clock_jump_tick,
+        official.clock_jump_tick.map(|tick| tick + 1),
+        "改坏后跳早必须晚一刻: official {official:?}, broken {late:?}"
+    );
+    assert_eq!(
+        late.clock_sync_tick,
+        official.clock_sync_tick.map(|tick| tick + 1),
+        "改坏后时钟同步包也要晚一刻: {late:?}"
+    );
+    assert_eq!(
+        late.wake_pose_tick,
+        official.wake_pose_tick.map(|tick| tick + 1),
+        "改坏后醒来包也要晚一刻: {late:?}"
     );
 }
 
