@@ -121,9 +121,11 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
     }
     let keep_inventory = region.global.rules.bool(gamerules::KEEP_INVENTORY);
     let spawn: RespawnData = player.respawn.unwrap_or(region.global.spawn);
+    // 和进服一样用超平坦地表高度；存档里的 spawn.pos.y 是 `/spawnpoint`
+    // 存下的脚下方块，官方还会再找安全落脚点（已知差异）。
     let position = Vec3::new(
         f64::from(spawn.pos.x) + 0.5,
-        f64::from(spawn.pos.y) + 0.1,
+        f64::from(mc_bamboo_world::flat::surface_y()),
         f64::from(spawn.pos.z) + 0.5,
     );
     let last_death = player.last_death_location;

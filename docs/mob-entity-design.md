@@ -473,9 +473,10 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   `getKillCredit()`（最近一次打伤自己的玩家）Bamboo 没有记，只有死者一个参数；
   武器 `custom_name` 的 `.item` 分支已接。队伍可见性
   （`broadcastSystemToTeam` / `...ExceptTeam`）按全服广播处理。
-- **重生点**：用 `RespawnData`（世界出生点 / `/spawnpoint`）的 `forced` 分支，
-  按 `pos + (0.5, 0.1, 0.5)` 落地；官方的床 / 重生锚 `findStandUpPosition`、
-  充能扣减、`NO_RESPAWN_BLOCK_AVAILABLE`、出生点周围安全位置搜索未做。
+- **重生点**：用 `RespawnData`（世界出生点 / `/spawnpoint`）的水平坐标，
+  y 取超平坦地表 `flat::surface_y()`（和进服一致）；官方的床 / 重生锚
+  `findStandUpPosition`、充能扣减、`NO_RESPAWN_BLOCK_AVAILABLE`、
+  出生点周围安全位置搜索未做。
 - **`dataToKeep`**：官方末地传送重生传 `KEEP_ALL_DATA`，Bamboo 恒 0；
   末地 / 维度切换未做。
 - **命令树包**：重生序列里的 `commands` 包由各自命令图生成，假世界没有命令

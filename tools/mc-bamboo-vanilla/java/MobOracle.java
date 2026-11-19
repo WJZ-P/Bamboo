@@ -2401,7 +2401,8 @@ public final class MobOracle {
             var data = level.getRespawnData();
             var pos = data.pos();
             return new net.minecraft.world.level.portal.TeleportTransition(level,
-                    new Vec3(pos.getX() + 0.5, pos.getY() + 0.1, pos.getZ() + 0.5),
+                    // Bamboo 的超平坦地表：和 `flat::surface_y()` 一致。
+                    new Vec3(pos.getX() + 0.5, -60.0, pos.getZ() + 0.5),
                     Vec3.ZERO, data.yaw(), data.pitch(), post);
         }
     }
