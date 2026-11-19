@@ -221,6 +221,11 @@ impl Attributes {
         table
     }
 
+    /// 对拍的改坏确认用：直接改一个属性的基础值。
+    pub fn set_base_for_oracle(&mut self, id: i32, base: f64) {
+        self.set_base(id, base);
+    }
+
     fn set_base(&mut self, id: i32, base: f64) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
             entry.base = base;

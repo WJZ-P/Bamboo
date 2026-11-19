@@ -1106,3 +1106,80 @@ pub fn insecure_uuid(random: &mut JavaRandom) -> [u8; 16] {
     bytes[8..].copy_from_slice(&least.to_be_bytes());
     bytes
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::Entity;
+    use mc_bamboo_data::registries::attribute;
+
+    /// 官方 `Zombie.createAttributes` 的四个覆盖值和元数据 index 都从字节码导出。
+    #[test]
+    fn zombie_attributes_and_metadata_match_the_official_values() {
+        let zombie = Mob::new(MobType::Zombie);
+        let cow = Mob::new(MobType::Cow);
+        assert_eq!(zombie.attributes.value(attribute::MAX_HEALTH), 20.0);
+        assert_eq!(zombie.attributes.value(attribute::FOLLOW_RANGE), 35.0);
+        assert_eq!(
+            zombie.attributes.value(attribute::MOVEMENT_SPEED),
+            f64::from(0.23_f32)
+        );
+        assert_eq!(zombie.attributes.value(attribute::ATTACK_DAMAGE), 3.0);
+        assert_eq!(zombie.attributes.value(attribute::ARMOR), 2.0);
+        assert_eq!(cow.attributes.value(attribute::MAX_HEALTH), 10.0);
+        assert_eq!(MobType::Zombie.dimensions(false), (0.6, 1.95, 1.74));
+        assert_eq!(MobType::Zombie.dimensions(true), (0.49, 0.98, 0.775));
+        assert_eq!(zombie.target_goals.goals.len(), 5);
+        assert_eq!(zombie.goals.goals.len(), 7);
+        assert_eq!(cow.target_goals.goals.len(), 0);
+        assert!(!MobType::Husk.burns_in_daylight());
+        assert!(MobType::Zombie.burns_in_daylight());
+    }
+
+    /// 幼年僵尸用布尔元数据并换速度修饰符；牛仍按 `age < 0`。
+    #[test]
+    fn baby_metadata_is_type_specific() {
+        let mut zombie = Mob::new(MobType::Zombie);
+        assert!(!zombie.is_baby());
+        zombie.set_zombie_baby(true);
+        assert!(zombie.is_baby());
+        assert_eq!(
+            zombie.attributes.value(attribute::MOVEMENT_SPEED),
+            f64::from(0.23_f32) * 1.5
+        );
+        let mut cow = Mob::new(MobType::Cow);
+        assert!(!cow.is_baby());
+        cow.age = -24000;
+        assert!(cow.is_baby());
+        assert!(MobPublic::of(&cow, 0).baby);
+    }
+
+    /// 存档往返保留僵尸的 `IsBaby` / `CanBreakDoors`，牛的键不串类型。
+    #[test]
+    fn zombie_nbt_round_trip_keeps_monster_fields() {
+        let mut entity = Entity::zombie(Vec3::new(0.5, 64.0, 0.5));
+        entity.with_mob(|_, mob| {
+            mob.set_zombie_baby(true);
+            mob.can_break_doors = true;
+        });
+        let row = entity.split();
+        let tag = nbt::write_mob(&row).expect("write zombie");
+        let mc_bamboo_nbt::Tag::Compound(entries) = &tag else {
+            panic!("mob NBT is a compound");
+        };
+        let has = |key: &str| entries.iter().any(|(name, _)| name == key);
+        assert!(has("IsBaby"));
+        assert!(has("CanBreakDoors"));
+        assert!(!has("Age"));
+        assert!(!has("variant"));
+        let loaded = nbt::read_mob(&tag, "minecraft:zombie", 7)
+            .expect("read zombie")
+            .expect("modelled");
+        let mut rebuilt = loaded.into_entity();
+        rebuilt.with_mob(|_, mob| {
+            assert!(mob.is_baby());
+            assert!(mob.can_break_doors);
+            assert_eq!(mob.mob_type, MobType::Zombie);
+        });
+    }
+}

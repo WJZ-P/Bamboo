@@ -224,22 +224,24 @@ pub(crate) fn nav_mob(me: &Entity, mob: &Mob, view: &dyn BlockView) -> NavMob {
     }
 }
 
-/// `Mob.isSunBurnTick`：`MONSTERS_BURN`、magic > 0.5、随机判定、
-/// 不在水/雨/粉雪里，而且眼睛那格看得见天。
+/// `Mob.isSunBurnTick`：官方 `nextFloat` 在 `magic > 0.5` 之后取，
+/// 且 `MONSTERS_BURN` 为假时在取数之前就短路。
 fn sun_burn_tick(me: &mut Entity, mob: &Mob, ctx: &mut dyn EntityCtx) -> bool {
     let view = ctx.blocks();
+    // 官方 `Mob.isSunBurnTick` 先读 `MONSTERS_BURN`；为假时一个随机数都不取。
     if !view.monsters_burn() {
         return false;
     }
     let eye = BlockPos::containing(Vec3::new(me.position.x, eye_y(me, mob), me.position.z));
     let raw = view.max_local_raw_brightness(eye, view.sky_darken()) as f32 / 15.0;
     let magic = raw / (4.0 - 3.0 * raw);
+    if magic <= 0.5 {
+        return false;
+    }
+    let roll = me.random.next_float() * 30.0 < (magic - 0.4) * 2.0;
     let wet =
         me.is_in_water() || mob.in_powder_snow || mob.was_in_powder_snow || view.is_raining_at(eye);
-    magic > 0.5
-        && me.random.next_float() * 30.0 < (magic - 0.4) * 2.0
-        && !wet
-        && view.can_see_sky(eye)
+    roll && !wet && view.can_see_sky(eye)
 }
 
 /// `LivingEntity.maxUpStep()`。
@@ -279,16 +281,6 @@ fn base_tick(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         );
     }
     me.first_tick = false;
-    // `Mob.aiStep` 的 `BURN_IN_DAYLIGHT` → `burnUndead()`；牛不在标签里。
-    if mob.mob_type.burns_in_daylight() && is_alive(me, mob) && sun_burn_tick(me, mob, ctx) {
-        if let Some(helmet) = mob.helmet {
-            // 可损坏的头盔挡住燃烧，并按官方扣 0 或 1 点耐久（这一期不建模耐久）。
-            let _ = me.random.next_int_bounded(2);
-            let _ = helmet;
-        } else {
-            motion::ignite_for_seconds(me, mob, 8.0);
-        }
-    }
     // `LivingEntity.baseTick` 自己的部分。
     if is_alive(me, mob) {
         if is_in_wall(me, mob, ctx.blocks()) {
@@ -470,6 +462,18 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
+    if mob.mob_type.is_monster() {
+        let eye = me.block_position();
+        let raw = ctx
+            .blocks()
+            .max_local_raw_brightness(eye, ctx.blocks().sky_darken()) as f32
+            / 15.0;
+        let magic = raw / (4.0 - 3.0 * raw);
+        if magic > 0.5 {
+            mob.no_action_time += 2;
+        }
+    }
     if mob.no_jump_delay > 0 {
         mob.no_jump_delay -= 1;
     }
@@ -566,8 +570,18 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         timing::span!(Push);
         push_entities(me, mob, ctx);
     }
-    // `AgeableMob.aiStep`。
-    if mob.forced_age_timer > 0 {
+    // `Mob.aiStep` 在 `LivingEntity.aiStep` 之后跑 `BURN_IN_DAYLIGHT` → `burnUndead()`。
+    // 官方用 `EntityTypeTags.BURN_IN_DAYLIGHT` + `isSunSensitive()`；尸壳不烧。
+    if mob.mob_type.burns_in_daylight() && is_alive(me, mob) && sun_burn_tick(me, mob, ctx) {
+        if mob.helmet.is_some() {
+            // 可损坏的头盔挡住燃烧，按官方扣 0 或 1 点耐久（这一期不建模耐久）。
+            let _ = me.random.next_int_bounded(2);
+        } else {
+            motion::ignite_for_seconds(me, mob, 8.0);
+        }
+    }
+    // `AgeableMob.aiStep`：僵尸不在这一层，年龄/求爱都不动。
+    if !mob.mob_type.is_monster() && mob.forced_age_timer > 0 {
         if mob.forced_age_timer % 4 == 0 {
             for _ in 0..3 {
                 me.random.next_double();
@@ -575,7 +589,7 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         }
         mob.forced_age_timer -= 1;
     }
-    if is_alive(me, mob) {
+    if !mob.mob_type.is_monster() && is_alive(me, mob) {
         if mob.is_baby() && !mob.age_locked {
             set_age(me, mob, mob.age + 1);
         } else if mob.age > 0 {
@@ -630,6 +644,8 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // 官方 `Mob.serverAiStep`：两个选择器共用同一个隔刻判断，先 target 后 goal。
         let mut goals = std::mem::take(&mut mob.goals);
         let mut targets = std::mem::take(&mut mob.target_goals);
+        // 官方 `(tickCount + id) % 2 == 0 || tickCount <= 1` 才跑完整选择器；
+        // `id` 用 `getId()`，Bamboo 的 `Entity.id` 和它一致。
         let phase = me.tick_count.wrapping_add(me.id);
         if phase % 2 != 0 && me.tick_count > 1 {
             targets.tick_running(false, me, mob, ctx);

@@ -99,6 +99,8 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.goal.WrappedGoal;
 import net.minecraft.world.entity.animal.cow.Cow;
+import net.minecraft.world.entity.monster.zombie.Zombie;
+import net.minecraft.world.entity.monster.zombie.Husk;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.flag.FeatureFlags;
@@ -349,6 +351,17 @@ public final class MobOracle {
         float startExhaustion = 0.0F;
         int startFood = 20;
         int startFoodTimer;
+        /** 僵尸场景：实体类型 (0 牛 / 1 僵尸 / 2 尸壳) 和每只的注册顺序。 */
+        final List<int[]> mobKinds = new ArrayList<>();
+        /** 天色、雨、白天/夜晚与 MONSTERS_BURN 的场景注入。 */
+        int skyDarken;
+        boolean raining;
+        boolean brightOutside = true;
+        boolean monstersBurn = true;
+        /** 场景里的实体是否跑 `finalizeSpawn`（随机装备等取数）。 */
+        boolean finalizeSpawn;
+        /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
+        boolean noOtherEntities = true;
 
         Scene(String name) {
             this.name = name;
@@ -373,10 +386,15 @@ public final class MobOracle {
         }
 
         Scene cow(double x, double y, double z, float yaw, long seed, int age) {
+            return mob(0, x, y, z, yaw, seed, age);
+        }
+
+        Scene mob(int kind, double x, double y, double z, float yaw, long seed, int age) {
             cows.add(new double[] {x, y, z});
             yaws.add(new float[] {yaw});
             seeds.add(seed);
             cowAges.add(age);
+            mobKinds.add(new int[] {kind});
             return this;
         }
 
@@ -1206,6 +1224,82 @@ public final class MobOracle {
             scenes.add(spawnPersonalOk());
             scenes.add(spawnPersonalBlocked());
             scenes.add(spawnAdventure());
+            // ---- 期 2：敌对生物与僵尸 ----
+            for (long seed : new long[] {3L, 77L}) {
+                Scene chase = new Scene("zombie_flat_chase_" + seed).ticks(120).difficulty(2);
+                chase.monstersBurn = false;
+                ground(chase, 12);
+                chase.mob(1, 0.5, 64.0, 0.5, 0.0F, seed, 0);
+                chase.player(6.5, 64.0, 0.5, Items.AIR);
+                scenes.add(chase);
+            }
+            {
+                Scene wall = new Scene("zombie_wall_path").ticks(120).difficulty(2);
+                wall.monstersBurn = false;
+                ground(wall, 12);
+                wall.fill(3, 64, -3, 3, 65, 3, STONE);
+                wall.mob(1, 0.5, 64.0, 0.5, 0.0F, 5L, 0);
+                wall.player(8.5, 64.0, 0.5, Items.AIR);
+                scenes.add(wall);
+                Scene burn = new Scene("zombie_burn_day").ticks(40).difficulty(2);
+                ground(burn, 12);
+                burn.skyDarken = 0;
+                burn.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                burn.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(burn);
+                Scene night = new Scene("zombie_burn_night").ticks(40).difficulty(2);
+                ground(night, 12);
+                night.skyDarken = 11;
+                night.brightOutside = false;
+                night.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                night.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(night);
+                Scene peaceful = new Scene("zombie_peaceful_clear").ticks(3).difficulty(0);
+                peaceful.monstersBurn = false;
+                ground(peaceful, 12);
+                peaceful.mob(1, 0.5, 64.0, 0.5, 0.0F, 11L, 0);
+                peaceful.player(3.5, 64.0, 0.5, Items.AIR);
+                scenes.add(peaceful);
+                Scene baby = new Scene("zombie_baby").ticks(60).difficulty(2);
+                baby.monstersBurn = false;
+                ground(baby, 12);
+                baby.mob(1, 0.5, 64.0, 0.5, 0.0F, 13L, 1);
+                baby.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(baby);
+                Scene husk = new Scene("zombie_husk").ticks(40).difficulty(2);
+                ground(husk, 12);
+                husk.skyDarken = 0;
+                husk.mob(2, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                husk.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(husk);
+                Scene rain = new Scene("zombie_burn_rain").ticks(40).difficulty(2);
+                ground(rain, 12);
+                rain.raining = true;
+                rain.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
+                rain.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(rain);
+                Scene far = new Scene("zombie_far_despawn").ticks(40).difficulty(2);
+                far.monstersBurn = false;
+                ground(far, 12);
+                far.mob(1, 0.5, 64.0, 0.5, 0.0F, 17L, 0);
+                far.player(150.5, 64.0, 0.5, Items.AIR);
+                scenes.add(far);
+                Scene egg = new Scene("zombie_turtle_egg").ticks(120).difficulty(2);
+                egg.monstersBurn = false;
+                ground(egg, 12);
+                egg.set(4, 64, 0, Blocks.TURTLE_EGG.defaultBlockState());
+                egg.mob(1, 0.5, 64.0, 0.5, 0.0F, 19L, 0);
+                egg.player(20.5, 64.0, 0.5, Items.AIR);
+                scenes.add(egg);
+                // 两只僵尸同一刻打到同一玩家：第二下必须落在无敌帧里。
+                Scene two = new Scene("zombie_two_hit_same_tick").ticks(60).difficulty(2);
+                two.monstersBurn = false;
+                ground(two, 12);
+                two.mob(1, 0.5, 64.0, 0.5, 0.0F, 23L, 0);
+                two.mob(1, 1.5, 64.0, 0.5, 0.0F, 29L, 0);
+                two.player(2.5, 64.0, 0.5, Items.AIR);
+                scenes.add(two);
+            }
             return scenes;
         }
 
@@ -1268,6 +1362,10 @@ public final class MobOracle {
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
+        if (scene.name.startsWith("zombie_")) {
+            playZombie(official, out, scene);
+            return;
+        }
         if (scene.spawnScene) {
             playSpawn(official, out, scene);
             return;
@@ -1863,6 +1961,228 @@ public final class MobOracle {
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
         }
+    }
+
+
+    /** 僵尸场景：官方 `Mob` 逐刻 tick，输出与 `CowStep` 同形的状态加僵尸专属字段。 */
+    private static void playZombie(Official official, Writer out, Scene scene) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.blocks.putAll(scene.blocks);
+        level.injectedSkyDarken = scene.skyDarken;
+        level.injectedRaining = scene.raining;
+        level.injectedBrightOutside = scene.brightOutside;
+        level.injectedMonstersBurn = scene.monstersBurn;
+        level.injectedCanSeeSky = scene.monstersBurn;
+        // 僵尸场景用一层常量覆写 `MONSTERS_BURN`；`v -> false` 让追逐/寻路
+        // 场景不触发白天燃烧的额外随机取数，燃烧场景仍按官方静态层为真。
+        if (!scene.monstersBurn) {
+            official.attributes = EnvironmentAttributeSystem.builder()
+                    .addStaticLayers(level)
+                    .addConstantLayer(
+                            net.minecraft.world.attribute.EnvironmentAttributes.MONSTERS_BURN,
+                            v -> false)
+                    .build();
+        }
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.values()[scene.difficulty];
+        level.nextId = FIRST_ID;
+        java.util.List<ServerPlayer> players = new java.util.ArrayList<>();
+        for (int i = 0; i < scene.players.size(); i++) {
+            double[] at = scene.players.get(i);
+            ServerPlayer player = new ServerPlayer(official.server, level,
+                    new GameProfile(new UUID(1L, 2L + i), "ZombieOracle" + i),
+                    ClientInformation.createDefault());
+            player.setPos(at[0], at[1], at[2]);
+            setRandom(player, 0x0DDB1A5E5BAD5EEDL + i);
+            player.setYRot(0.0F);
+            player.setYHeadRot(0.0F);
+            player.setYBodyRot(0.0F);
+            player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(scene.playerItems.get(i)));
+            // `ServerPlayer.isInvulnerableTo` 会读 `connection.hasClientLoaded()`；
+            // 僵尸近战必须有一个连接桩，包字节本身在这个场景里不比。
+            Bytes sink = new Bytes(official.registries);
+            ServerGamePacketListenerImpl connection = allocate(RecordingListener.class);
+            put(ServerGamePacketListenerImpl.class, connection, "player", player);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "server", official.server);
+            put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                    connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+            ((RecordingListener) connection).bytes = sink;
+            put(ServerPlayer.class, player, "connection", connection);
+            players.add(player);
+        }
+        level.playersList().addAll(players);
+        java.util.List<Mob> mobs = new java.util.ArrayList<>();
+        for (int i = 0; i < scene.cows.size(); i++) {
+            double[] at = scene.cows.get(i);
+            int[] kind = i < scene.mobKinds.size() ? scene.mobKinds.get(i) : new int[] {1};
+            // `EntityType.create` 在和平难度会拒绝敌对生物；场景要能先生成再
+            // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
+            Mob mob = switch (kind[0]) {
+                case 2 -> new Husk(EntityTypes.HUSK, level);
+                case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
+                default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
+            };
+            level.entitySeeds.nextLong();
+            setRandom(mob, scene.seeds.get(i));
+            // Bamboo 的实体表从 `firstId` 发号；官方这边显式对齐 ID，
+            // `Mob.serverAiStep` 的 `(tickCount + id) % 2` 才能逐刻一致。
+            mob.setId(FIRST_ID + i);
+            mob.setUUID(new UUID(0L, i + 1));
+            mob.snapTo(at[0], at[1], at[2], scene.yaws.get(i)[0], 0.0F);
+            mob.setYHeadRot(scene.yaws.get(i)[0]);
+            mob.setYBodyRot(scene.yaws.get(i)[0]);
+            if (scene.fireTicks > 0) mob.setRemainingFireTicks(scene.fireTicks);
+            if (mob instanceof Zombie zombie) {
+                zombie.setBaby(scene.cowAges.get(i) != 0);
+                zombie.setCanBreakDoors(scene.difficulty == 3);
+            }
+            // `Mob.finalizeSpawn` 的取数顺序按官方；场景关掉时和 Bamboo 的
+            // 显式构造（不跑 finalize）一致。
+            if (scene.finalizeSpawn) {
+                mob.finalizeSpawn(level, level.getCurrentDifficultyAt(mob.blockPosition()),
+                        EntitySpawnReason.COMMAND, null);
+            }
+            mobs.add(mob);
+            level.tracked.add(mob);
+        }
+        StringBuilder line = new StringBuilder(1 << 18);
+        line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
+        line.append(",\"firstId\":").append(FIRST_ID);
+        line.append(",\"startTime\":").append(START_TIME);
+        line.append(",\"blocks\":").append(blockArray(scene.blocks));
+        line.append(",\"cows\":[");
+        for (int i = 0; i < scene.cows.size(); i++) {
+            if (i > 0) line.append(',');
+            double[] at = scene.cows.get(i);
+            int[] kind = i < scene.mobKinds.size() ? scene.mobKinds.get(i) : new int[] {1};
+            line.append("{\"x\":").append(Double.doubleToRawLongBits(at[0]));
+            line.append(",\"y\":").append(Double.doubleToRawLongBits(at[1]));
+            line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
+            line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
+            line.append(",\"seed\":").append(scene.seeds.get(i));
+            line.append(",\"age\":").append(scene.cowAges.get(i));
+            line.append(",\"kind\":").append(kind[0]).append('}');
+        }
+        line.append("],\"players\":[");
+        for (int i = 0; i < players.size(); i++) {
+            if (i > 0) line.append(',');
+            ServerPlayer player = players.get(i);
+            line.append("{\"id\":").append(player.getId());
+            line.append(",\"x\":").append(Double.doubleToRawLongBits(player.getX()));
+            line.append(",\"y\":").append(Double.doubleToRawLongBits(player.getY()));
+            line.append(",\"z\":").append(Double.doubleToRawLongBits(player.getZ()));
+            line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
+            line.append(",\"item\":0,\"looting\":0}");
+        }
+        line.append("],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append(",\"difficulty\":").append(scene.difficulty);
+        line.append(",\"skyDarken\":").append(scene.skyDarken);
+        line.append(",\"raining\":").append(scene.raining);
+        line.append(",\"brightOutside\":").append(scene.brightOutside);
+        line.append(",\"monstersBurn\":").append(scene.monstersBurn);
+        line.append(",\"deathKind\":0,\"fireTicks\":").append(scene.fireTicks);
+        line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(20.0F));
+        line.append(",\"playerAbsorption\":0,\"playerExhaustion\":0");
+        line.append(",\"playerSteps\":null,\"playerPackets\":null,\"keyPackets\":null");
+        line.append(",\"interactActions\":[],\"interactions\":null");
+        line.append(",\"packets\":null,\"syncFlags\":null,\"spawns\":null,\"life\":null,\"spawnResult\":null");
+        line.append(",\"steps\":[");
+        line.append(zombieStepJson(mobs, players, level));
+        for (int tick = 1; tick <= scene.ticks; tick++) {
+            level.gameTime++;
+            for (double[] hurt : scene.hurts) {
+                if ((int) hurt[0] == tick && (int) hurt[1] < mobs.size()) {
+                    Mob target = mobs.get((int) hurt[1]);
+                    ServerPlayer attacker = players.isEmpty() ? null : players.get((int) hurt[3]);
+                    if (attacker != null) {
+                        target.hurtServer(level, level.damageSources().playerAttack(attacker),
+                                (float) hurt[2]);
+                    }
+                }
+            }
+            for (Mob mob : new java.util.ArrayList<>(mobs)) {
+                if (mob.isRemoved()) continue;
+                mob.checkDespawn();
+                mob.commonTick();
+                mob.tick();
+            }
+            level.tracked.removeIf(Entity::isRemoved);
+            line.append(',').append(zombieStepJson(mobs, players, level));
+        }
+        line.append("]}\n");
+        out.write(line.toString());
+    }
+
+    /** 与 `CowStep` 同形；牛专属字段给缺省值，僵尸专属字段逐刻输出。 */
+    private static String zombieStepJson(java.util.List<Mob> mobs,
+            java.util.List<ServerPlayer> players, FakeLevel level) throws Exception {
+        StringBuilder out = new StringBuilder(512);
+        out.append('[');
+        long lr = levelSeed(level);
+        for (int i = 0; i < mobs.size(); i++) {
+            if (i > 0) out.append(',');
+            Mob mob = mobs.get(i);
+            Vec3 pos = mob.position();
+            Vec3 delta = mob.getDeltaMovement();
+            out.append("{\"x\":").append(Double.doubleToRawLongBits(pos.x));
+            out.append(",\"y\":").append(Double.doubleToRawLongBits(pos.y));
+            out.append(",\"z\":").append(Double.doubleToRawLongBits(pos.z));
+            out.append(",\"dx\":").append(Double.doubleToRawLongBits(delta.x));
+            out.append(",\"dy\":").append(Double.doubleToRawLongBits(delta.y));
+            out.append(",\"dz\":").append(Double.doubleToRawLongBits(delta.z));
+            out.append(",\"yr\":").append(Float.floatToRawIntBits(mob.getYRot()));
+            out.append(",\"xr\":").append(Float.floatToRawIntBits(mob.getXRot()));
+            out.append(",\"hr\":").append(Float.floatToRawIntBits(mob.getYHeadRot()));
+            out.append(",\"br\":").append(Float.floatToRawIntBits(mob.yBodyRot));
+            out.append(",\"hp\":").append(Float.floatToRawIntBits(mob.getHealth()));
+            out.append(",\"g\":").append(mob.onGround());
+            out.append(",\"rm\":").append(mob.isRemoved());
+            out.append(",\"w\":").append(mob.isInWater());
+            out.append(",\"fd\":").append(Double.doubleToRawLongBits(mob.fallDistance));
+            out.append(",\"nat\":").append(mob.getNoActionTime());
+            out.append(",\"ht\":").append(mob.hurtTime);
+            out.append(",\"dt\":").append(mob.deathTime);
+            out.append(",\"fire\":").append(mob.getRemainingFireTicks());
+            out.append(",\"air\":").append(mob.getAirSupply());
+            out.append(",\"seed\":").append(randomSeed(mob));
+            out.append(",\"age\":").append(mob instanceof Cow cow ? cow.getAge() : 0);
+            out.append(",\"love\":0,\"lh\":").append(mob.isLeftHanded());
+            out.append(",\"fr\":").append(Double.doubleToRawLongBits(
+                    mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));
+            out.append(",\"var\":\"minecraft:temperate\",\"snd\":\"minecraft:classic\"");
+            out.append(",\"uuid\":\"").append(mob.getUUID()).append('"');
+            out.append(",\"lr\":").append(lr);
+            out.append(",\"target\":").append(mob.getTarget() == null ? -1 : mob.getTarget().getId());
+            out.append(",\"baby\":").append(mob instanceof Zombie z && z.isBaby());
+            out.append(",\"aggr\":").append(mob.isAggressive());
+            out.append(",\"doors\":").append(mob instanceof Zombie z2 && z2.canBreakDoors());
+            out.append(",\"ph\":0");
+            out.append(",\"pht\":0");
+            out.append(",\"pcd\":0");
+            out.append(",\"goals\":\"");
+            boolean first = true;
+            for (WrappedGoal goal : mob.getGoalSelector().getAvailableGoals()) {
+                if (!goal.isRunning()) continue;
+                if (!first) out.append(' ');
+                first = false;
+                out.append(goal.getGoal().getClass().getSimpleName());
+            }
+            out.append('"');
+            net.minecraft.world.level.pathfinder.Path path = mob.getNavigation().getPath();
+            out.append(",\"path\":");
+            if (path == null) {
+                out.append("null");
+            } else {
+                out.append('[').append(path.getNextNodeIndex());
+                for (int n = 0; n < path.getNodeCount(); n++) {
+                    Node node = path.getNode(n);
+                    out.append(',').append(node.x).append(',').append(node.y).append(',').append(node.z);
+                }
+                out.append(']');
+            }
+            out.append('}');
+        }
+        return out.append(']').toString();
     }
 
     /** 1c 落脚点：在假世界里跑官方 `PlayerSpawnFinder.findSpawn`，用固定随机源逐位对拍。 */
@@ -2681,7 +3001,8 @@ public final class MobOracle {
     private static void setRandom(Entity entity, long seed) {
         try {
             Field field = Entity.class.getDeclaredField("random");
-            UNSAFE.putObject(entity, UNSAFE.objectFieldOffset(field), RandomSource.create(seed));
+            field.setAccessible(true);
+            field.set(entity, RandomSource.create(seed));
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
         }
@@ -3182,6 +3503,12 @@ public final class MobOracle {
         private int nextId;
         /** Bamboo 的岛实体种子源，按生成先后取数。 */
         private RandomSource entitySeeds;
+        /** 僵尸场景注入的天色 / 天气 / 环境属性。 */
+        int injectedSkyDarken;
+        boolean injectedRaining;
+        boolean injectedBrightOutside = true;
+        boolean injectedMonstersBurn = true;
+        boolean injectedCanSeeSky;
 
         private FakeLevel() {
             super(null, null, null, null, null, null, false, 0L, null, false);
@@ -3261,6 +3588,63 @@ public final class MobOracle {
         @Override
         public int getMaxLocalRawBrightness(BlockPos pos, int darken) {
             return 15;
+        }
+
+        @Override
+        public int getSkyDarken() {
+            return injectedSkyDarken;
+        }
+
+        @Override
+        public boolean canSeeSky(BlockPos pos) {
+            return injectedCanSeeSky;
+        }
+
+        @Override
+        public boolean isRainingAt(BlockPos pos) {
+            return injectedRaining;
+        }
+
+        @Override
+        public boolean isBrightOutside() {
+            return injectedBrightOutside;
+        }
+
+        /** 假世界没有 POI / 村庄数据；`MoveThroughVillageGoal.canUse` 在这里
+         *  短路，不取随机源，和 Bamboo 的空注册项一致。 */
+        @Override
+        public boolean isCloseToVillage(BlockPos pos, int sections) {
+            return false;
+        }
+
+        @Override
+        public boolean isRaining() {
+            return injectedRaining;
+        }
+
+        /** 破门 / 踩蛋要真的改掉方块表；官方 `Level.removeBlock` 在假世界里
+         *  依赖区块缓存，这里直接写表即可。 */
+        @Override
+        public boolean setBlock(BlockPos pos, BlockState state, int flags, int limit) {
+            blocks.put(pos.asLong(), state);
+            chunkCache.clear();
+            return true;
+        }
+
+        @Override
+        public boolean removeBlock(BlockPos pos, boolean moving) {
+            blocks.remove(pos.asLong());
+            chunkCache.clear();
+            return true;
+        }
+
+        @Override
+        public void destroyBlockProgress(int id, BlockPos pos, int progress) {}
+
+        /** 官方 `MONSTERS_BURN` 由静态环境属性系统给出；僵尸场景按用例开关。 */
+        @Override
+        public EnvironmentAttributeSystem environmentAttributes() {
+            return official.attributes;
         }
 
         private net.minecraft.server.waypoints.ServerWaypointManager waypoints;
@@ -3488,11 +3872,6 @@ public final class MobOracle {
         @Override
         public net.minecraft.world.flag.FeatureFlagSet enabledFeatures() {
             return FeatureFlags.DEFAULT_FLAGS;
-        }
-
-        @Override
-        public EnvironmentAttributeSystem environmentAttributes() {
-            return official.attributes;
         }
 
         @Override

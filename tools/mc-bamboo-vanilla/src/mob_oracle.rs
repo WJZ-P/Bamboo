@@ -145,6 +145,15 @@ struct Case {
     /// 1c：官方 `PlayerSpawnFinder.findSpawn` 的落位结果。
     #[serde(default)]
     spawn_result: Option<SpawnResult>,
+    /// 僵尸场景注入的世界事实。
+    #[serde(default)]
+    sky_darken: i32,
+    #[serde(default)]
+    raining: bool,
+    #[serde(default)]
+    bright_outside: bool,
+    #[serde(default)]
+    monsters_burn: bool,
 }
 
 /// 1c 落脚点对拍的官方答案：坐标按 f64 原始位传，随机源末态逐位比。
@@ -323,6 +332,9 @@ struct CowSetup {
     seed: i64,
     #[serde(default)]
     age: i32,
+    /// 0 牛 / 1 僵尸 / 2 尸壳；缺省按牛（旧场景）。
+    #[serde(default)]
+    kind: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -370,11 +382,39 @@ struct CowStep {
     lr: i64,
     goals: String,
     path: Option<Vec<i32>>,
+    /// 僵尸场景专属；旧牛场景缺省 -1/false/0，比较时按类型跳过。
+    #[serde(default = "minus_one")]
+    target: i32,
+    #[serde(default)]
+    baby: bool,
+    #[serde(default)]
+    aggr: bool,
+    #[serde(default)]
+    doors: bool,
+    #[serde(default)]
+    ph: i32,
+    #[serde(default)]
+    pht: i32,
+    #[serde(default)]
+    pcd: i32,
+}
+
+const fn minus_one() -> i32 {
+    -1
 }
 
 #[derive(Debug, Deserialize)]
 struct End {
     cases: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ZombieFacts {
+    sky_darken: i32,
+    difficulty: i32,
+    bright_outside: bool,
+    monsters_burn: bool,
+    raining: bool,
 }
 
 /// 假世界：方块表、玩家表、世界随机源。和 `entity-oracle` 的那个同一个做法。
@@ -386,6 +426,8 @@ struct MobLevel {
     /// 死亡时攻击者的主手抢夺等级，按玩家下标。
     looting: Vec<i32>,
     rules: mc_bamboo_blocks::BlockGameRules,
+    /// 僵尸场景注入的天色 / 天气 / 环境属性；旧场景恒为缺省。
+    facts: ZombieFacts,
     redstone: mc_bamboo_blocks::RedstoneMemory,
     block_entities: BlockEntities,
     block_events: BlockEvents,
@@ -504,6 +546,33 @@ impl Level for MobLevel {
         for player in &self.players {
             visit(player);
         }
+    }
+
+    fn sky_darken(&self) -> i32 {
+        self.facts.sky_darken
+    }
+
+    fn difficulty_id(&self) -> i32 {
+        self.facts.difficulty
+    }
+
+    fn is_bright_outside(&self) -> bool {
+        self.facts.bright_outside
+    }
+
+    fn monsters_burn(&self) -> bool {
+        self.facts.monsters_burn
+    }
+
+    fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
+        mc_bamboo_blocks::BlockWeather {
+            rain_level: if self.facts.raining { 1.0 } else { 0.0 },
+            thunder_level: 0.0,
+        }
+    }
+
+    fn can_see_sky(&self, _pos: BlockPos) -> bool {
+        self.facts.monsters_burn
     }
 
     /// `LivingEntity.dropFromLootTable`：官方一侧用真的 `minecraft:entities/cow` 表，
@@ -734,12 +803,21 @@ impl Report {
             self.replay_player_hurt(case);
             return;
         }
+        // 改坏确认：故意改一处生产参数，对拍必须报不一致。
+        let break_test = self.break_test.as_deref();
         let mut level = MobLevel {
             blocks: HashMap::new(),
             random: LevelRandom::new(1),
             loot_sequences: mc_bamboo_loot::RandomSequences::new(0),
             looting: case.players.iter().map(|player| player.looting).collect(),
             rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
+            facts: ZombieFacts {
+                sky_darken: case.sky_darken,
+                difficulty: case.difficulty,
+                bright_outside: case.bright_outside || !case.name.starts_with("zombie_"),
+                monsters_burn: case.monsters_burn || !case.name.starts_with("zombie_"),
+                raining: case.raining,
+            },
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
             block_entities: BlockEntities::default(),
             block_events: BlockEvents::default(),
@@ -785,7 +863,12 @@ impl Report {
                     f64::from_bits(cow.z as u64),
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
-                let id = world.spawn_entity(Entity::cow(position));
+                let kind = match cow.kind {
+                    2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
+                    1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
+                    _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
+                };
+                let id = world.spawn_entity(Entity::by_mob_type(kind, position));
                 world.with_entity_mut(id, &mut |entity| {
                     entity.random = JavaRandom::new(cow.seed);
                     entity.y_rot = yaw;
@@ -802,15 +885,62 @@ impl Report {
                     entity.remaining_fire_ticks = case.fire_ticks;
                     if cow.age != 0 {
                         let baby = cow.age < 0;
-                        let (width, height, eye) =
-                            mc_bamboo_blocks::entity::mob::MobType::Cow.dimensions(baby);
+                        let (width, height, eye) = kind.dimensions(baby);
                         entity.dimensions = (width, height);
                         if let Some(mob) = entity.kind.mob_mut() {
-                            mob.age = cow.age;
+                            if kind.is_monster() {
+                                mob.set_zombie_baby(true);
+                                mob.can_break_doors = case.difficulty == 3;
+                                if mob.can_break_doors {
+                                    mob.navigation.flags.can_open_doors = true;
+                                    mob.goals.insert_break_door();
+                                }
+                            } else {
+                                mob.age = cow.age;
+                            }
                             mob.eye_height = eye;
                         }
+                    } else if kind.is_monster()
+                        && case.difficulty == 3
+                        && let Some(mob) = entity.kind.mob_mut()
+                    {
+                        mob.can_break_doors = true;
+                        mob.navigation.flags.can_open_doors = true;
+                        mob.goals.insert_break_door();
                     }
                 });
+                if case.name.starts_with("zombie_") {
+                    let id = ids.last().copied().unwrap_or(0);
+                    world.with_entity_mut(id, &mut |entity| {
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            match break_test {
+                                Some("zombie_speed") => {
+                                    mob.attributes.set_base_for_oracle(
+                                        mc_bamboo_data::registries::attribute::MOVEMENT_SPEED,
+                                        0.2,
+                                    );
+                                }
+                                Some("zombie_attack") => {
+                                    mob.attributes.set_base_for_oracle(
+                                        mc_bamboo_data::registries::attribute::ATTACK_DAMAGE,
+                                        2.0,
+                                    );
+                                }
+                                Some("zombie_burn") => {
+                                    // 燃烧阈值改成永不触发。
+                                    mob.ticks_frozen = 140;
+                                }
+                                Some("zombie_xp") => {
+                                    mob.health = 1.0;
+                                }
+                                Some("zombie_baby") => {
+                                    mob.set_zombie_baby(!mob.zombie_baby);
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                }
                 ids.push(id);
             }
         }
@@ -1171,12 +1301,24 @@ impl Report {
             plain!(love);
             plain!(lh);
             bits64!(fr);
-            plain!(var);
-            plain!(snd);
             plain!(uuid);
             plain!(lr);
-            plain!(goals);
             plain!(path);
+            plain!(var);
+            plain!(snd);
+            plain!(goals);
+            if name.starts_with("zombie_") {
+                plain!(target);
+                plain!(baby);
+                plain!(aggr);
+                plain!(doors);
+                plain!(ph);
+                plain!(pht);
+                plain!(pcd);
+            }
+            if diffs.is_empty() {
+                continue;
+            }
             self.mismatch(format!("{place}: {}", diffs.join("; ")));
         }
     }
@@ -2028,5 +2170,12 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         lr,
         goals: mob.goals.running_names().join(" "),
         path,
+        target: mob.target.unwrap_or(-1),
+        baby: mob.is_baby(),
+        aggr: mob.aggressive,
+        doors: mob.can_break_doors,
+        ph: 0,
+        pht: 0,
+        pcd: 0,
     }
 }

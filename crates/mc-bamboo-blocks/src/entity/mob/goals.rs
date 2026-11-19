@@ -152,12 +152,7 @@ impl Goal {
     pub const fn every_tick(&self) -> bool {
         matches!(
             self,
-            Self::Float
-                | Self::RandomLookAround { .. }
-                | Self::MeleeAttack { .. }
-                | Self::BreakDoor
-                | Self::TurtleEgg { .. }
-                | Self::Unavailable(_)
+            Self::Float | Self::RandomLookAround { .. } | Self::MeleeAttack { .. }
         )
     }
 
@@ -300,7 +295,7 @@ impl GoalSelector {
                         ticks_until_path_recalc: 0,
                         pathed_target: Vec3::default(),
                         raise_arm_ticks: 0,
-                        last_can_use_check: i64::MIN,
+                        last_can_use_check: -1_000_000,
                     },
                 ),
                 wrap(4, Goal::TurtleEgg { speed: 1.0 }),
@@ -649,10 +644,14 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             found,
             ..
         } => {
-            if !kind.available() {
+            // 官方先按 `randomInterval` 取数，再按类型找目标。缺实体的目标
+            // 虽跳过搜索，取数次数必须和官方一致，否则随机源会错开。
+            if *interval > 0 && me.random.next_int_bounded(*interval) != 0 {
                 return false;
             }
-            if *interval > 0 && me.random.next_int_bounded(*interval) != 0 {
+            if !kind.available() {
+                // 官方的缺实体目标也会查世界，但不会取随机数；这里只跳过搜索。
+                *found = None;
                 return false;
             }
             *found = nearest_attackable(me, mob, ctx, *kind);
@@ -685,7 +684,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 mob.turtle_egg_next_start_tick -= 1;
                 return false;
             }
-            if nearest_turtle_egg(me, ctx).is_some() {
+            // 官方 `RemoveBlockGoal.canUse` 命中蛋时倒计时 10，未命中才取
+            // `nextInt(200)` 算 `200 + n`（本场景没有蛋，取数在这里）。
+            let egg = nearest_turtle_egg(me, ctx);
+            mob.turtle_egg_pos = egg;
+            if egg.is_some() {
                 mob.turtle_egg_next_start_tick = reduced_tick_delay(20);
                 true
             } else {
@@ -795,7 +798,7 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             if let Some(target) = target_player(mob, ctx) {
                 let nav = living::nav_mob(me, mob, ctx.blocks());
                 mob.navigation
-                    .move_to_entity(ctx.blocks(), &nav, target.position, 1.0);
+                    .move_to_entity(ctx.blocks(), &nav, target.position, 1.0, 0);
             }
         }
         Goal::HurtByTarget { timestamp } => {
@@ -895,7 +898,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             );
             let nav = living::nav_mob(me, mob, ctx.blocks());
             mob.navigation
-                .move_to_entity(ctx.blocks(), &nav, other.position, *speed);
+                .move_to_entity(ctx.blocks(), &nav, other.position, *speed, 1);
             *love_time += 1;
             // `BreedGoal.tick`：累计 `adjustedTickDelay(60)` 刻且距离小于 3 格时生小牛。
             // 非每刻目标把 60 折成 30，因为整套目标隔刻才跑一次。
@@ -923,7 +926,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             } else {
                 let nav = living::nav_mob(me, mob, ctx.blocks());
                 mob.navigation
-                    .move_to_entity(ctx.blocks(), &nav, player.position, *speed);
+                    .move_to_entity(ctx.blocks(), &nav, player.position, *speed, 1);
             }
         }
         Goal::FollowParent {
@@ -939,7 +942,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             if let Some(other) = parent.and_then(|uid| ctx.other(uid)) {
                 let nav = living::nav_mob(me, mob, ctx.blocks());
                 mob.navigation
-                    .move_to_entity(ctx.blocks(), &nav, other.position, *speed);
+                    .move_to_entity(ctx.blocks(), &nav, other.position, *speed, 1);
             }
         }
         Goal::LookAtPlayer {
@@ -980,6 +983,8 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 *found = None;
             }
             *unseen_ticks += 1;
+            // 官方 `TargetGoal.canContinueToUse` 在 `mustSee` 时按视线刷新
+            // `unseenTicks`；本期的玩家目标恒可攻击，不改随机源。
         }
         Goal::MeleeAttack {
             speed,
@@ -1003,14 +1008,20 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             if *ticks_until_path_recalc == 0
                 && (*pathed_target == Vec3::default()
                     || target.position.distance_to_sqr(*pathed_target) >= 1.0
-                    || me.random.next_float() >= 0.05)
+                    || me.random.next_float() < 0.05)
             {
                 *pathed_target = target.position;
                 *ticks_until_path_recalc = 4 + me.random.next_int_bounded(7);
+                let distance = me.position.distance_to_sqr(target.position);
+                if distance > 1024.0 {
+                    *ticks_until_path_recalc += 10;
+                } else if distance > 256.0 {
+                    *ticks_until_path_recalc += 5;
+                }
                 let nav = living::nav_mob(me, mob, ctx.blocks());
                 if !mob
                     .navigation
-                    .move_to_entity(ctx.blocks(), &nav, target.position, *speed)
+                    .move_to_entity(ctx.blocks(), &nav, target.position, *speed, 0)
                 {
                     *ticks_until_path_recalc += 15;
                 }
@@ -1020,7 +1031,16 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             *raise_arm_ticks += 1;
             mob.aggressive =
                 *raise_arm_ticks >= 5 && *ticks_until_next_attack < reduced_tick_delay(20) / 2;
-            if *ticks_until_next_attack == 0 && within_melee_range(me, mob, target) {
+            if *ticks_until_next_attack == 0
+                && within_melee_range(me, mob, target)
+                && living::has_line_of_sight(
+                    me,
+                    mob,
+                    ctx.blocks(),
+                    target.uid,
+                    target.eye_position(),
+                )
+            {
                 *ticks_until_next_attack = reduced_tick_delay(20);
                 super::living::do_hurt_target(me, mob, ctx, target.uid);
             }
@@ -1324,8 +1344,12 @@ fn has_malus(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> bool {
     mob.malus.get(static_path_type(view, pos)) != 0.0
 }
 
-/// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度。
-fn walk_target_value(view: &dyn BlockView, pos: BlockPos) -> f32 {
+/// `Animal.getWalkTargetValue`：脚下是草方块给 10，否则按亮度；
+/// `Monster.getWalkTargetValue` 取负的光照路径代价。
+fn walk_target_value(mob: &Mob, view: &dyn BlockView, pos: BlockPos) -> f32 {
+    if mob.mob_type.is_monster() {
+        return monster_walk_target_value(view, pos);
+    }
     if view.block_state(pos.below()).is(blocks::GRASS_BLOCK) {
         return 10.0;
     }
@@ -1339,14 +1363,18 @@ fn walk_target_value(view: &dyn BlockView, pos: BlockPos) -> f32 {
 }
 
 /// `RandomPos.generateRandomPos(mob, supplier)`：取 10 次，严格更大才换。
-fn pick_best(view: &dyn BlockView, mut supplier: impl FnMut() -> Option<BlockPos>) -> Option<Vec3> {
+fn pick_best(
+    mob: &Mob,
+    view: &dyn BlockView,
+    mut supplier: impl FnMut() -> Option<BlockPos>,
+) -> Option<Vec3> {
     let mut best = f64::NEG_INFINITY;
     let mut best_pos = None;
     for _ in 0..10 {
         let Some(pos) = supplier() else {
             continue;
         };
-        let weight = f64::from(walk_target_value(view, pos));
+        let weight = f64::from(walk_target_value(mob, view, pos));
         if weight > best {
             best = weight;
             best_pos = Some(pos);
@@ -1370,7 +1398,7 @@ pub(crate) fn default_random_pos(
     vertical: i32,
 ) -> Option<Vec3> {
     let restricted = mob_restricted(me, mob, f64::from(horizontal));
-    pick_best(view, || {
+    pick_best(mob, view, || {
         let direction = random_direction(me, horizontal, vertical);
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
@@ -1393,7 +1421,7 @@ pub(crate) fn land_random_pos(
     vertical: i32,
 ) -> Option<Vec3> {
     let restricted = mob_restricted(me, mob, f64::from(horizontal));
-    pick_best(view, || {
+    pick_best(mob, view, || {
         let direction = random_direction(me, horizontal, vertical);
         let pos = toward_direction(me, mob, f64::from(horizontal), direction);
         if outside_limits(view, pos)
