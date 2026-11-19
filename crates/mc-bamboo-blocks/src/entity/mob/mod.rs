@@ -222,6 +222,37 @@ impl DamageKind {
         }
     }
 
+    /// 官方 `DamageType.msgId()`，数据文件里的 `message_id`：死亡消息
+    /// `death.attack.<msgId>` 的后缀，和注册名不是一回事。
+    ///
+    /// Official `DamageType.msgId()` from the data file: the suffix of
+    /// `death.attack.<msgId>`, which is not the registry name.
+    pub const fn message_id(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::GenericKill => "genericKill",
+            Self::InWall => "inWall",
+            Self::Cramming => "cramming",
+            Self::Drown => "drown",
+            Self::OnFire => "onFire",
+            Self::InFire => "inFire",
+            Self::Lava => "lava",
+            Self::HotFloor => "hotFloor",
+            Self::Cactus => "cactus",
+            Self::SweetBerryBush => "sweetBerryBush",
+            Self::Fall => "fall",
+            Self::Freeze => "freeze",
+            Self::OutOfWorld => "outOfWorld",
+            Self::PlayerAttack => "player",
+            Self::MobAttack | Self::MobAttackNoAggro => "mob",
+            Self::Arrow => "arrow",
+            Self::Starve => "starve",
+            Self::Thorns => "thorns",
+            Self::Magic => "magic",
+            Self::Explosion => "explosion",
+        }
+    }
+
     /// 按官方短名找一种伤害。未知名字返回 `None`，调用方按解析失败处理。
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.

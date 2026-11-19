@@ -78,7 +78,7 @@ fn spawn_position(spawn: RespawnData) -> Vec3 {
     )
 }
 
-const ABILITIES: PlayerAbilities = PlayerAbilities {
+pub(crate) const ABILITIES: PlayerAbilities = PlayerAbilities {
     invulnerable: true,
     flying: false,
     can_fly: true,

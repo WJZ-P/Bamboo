@@ -1,13 +1,12 @@
-//! 玩家受伤的落地：状态、出站包、击退、每刻倒计时。
+//! 玩家受伤的落地：状态、出站包、击退、每刻倒计时、饥饿与回血。
 //!
 //! 官方 `Player.hurtServer` → `LivingEntity.hurtServer` → `Player.actuallyHurt`
 //! 的一次调用。伤害计算是 [`mc_bamboo_blocks::entity::mob::damage`] 里的纯函数，
 //! 这里只负责取全局难度、把改动写进 `Player`、发包和推人。
+//! 血量归零时接 [`crate::player_death::die`]。
 //!
-//! 血量归零不触发死亡：掉落、死亡消息和重生留到 1b。
-//!
-//! Applies one player hurt: state, outbound packets, knockback and per-tick
-//! countdowns. Health reaching zero does not trigger death yet (1b).
+//! Applies one player hurt: state, packets, knockback and the per-tick
+//! food / regeneration countdowns. Health reaching zero runs the death flow.
 
 use mc_bamboo_blocks::entity::{JavaRandom, mob::DamageSource};
 use mc_bamboo_core::{Hand, Vec3};
@@ -44,11 +43,40 @@ impl HealthSync {
     };
 }
 
-/// `ServerPlayer.doTick`：三个倒计时的推进，然后按需补 `set_health`。
+/// `ServerPlayer.tick` / `doTick`：实体 tick 数递增、和平回血、三个倒计时的推进、
+/// `FoodData.tick` 的回血 / 饥饿伤害，最后按需补 `set_health`。
+/// 官方顺序是 `Player.aiStep`（tickRegeneration）→ `Player.tick` →
+/// `ServerPlayer.doTick`（FoodData.tick）→ `set_health`；这些都在同一刻的
+/// 玩家阶段里，包只在最后按快照发一次。
+///
+/// Per-tick player health: entity ticks, peaceful regeneration, hurt
+/// countdowns, `FoodData.tick`, then one `set_health` if the snapshot moved.
 pub(crate) fn tick(region: &mut Region) {
+    let difficulty = region.global.difficulty as i32;
+    let natural_regen = region
+        .global
+        .rules
+        .bool(mc_bamboo_data::gamerules::NATURAL_HEALTH_REGENERATION);
     let mut pending = Vec::new();
+    let mut starve = Vec::new();
     for (id, player) in &mut region.players {
+        player.entity_ticks = player.entity_ticks.wrapping_add(1);
+        if player.dead {
+            continue;
+        }
+        if difficulty == 0 && natural_regen {
+            let _ = player.health.tick_peaceful(player.entity_ticks);
+        }
         player.health.tick_cooldowns();
+        if player.health.death_time > 0 && player.health.death_time < 20 {
+            // `LivingEntity.baseTick` 每刻推一次死亡动画，20 刻后才 discard。
+            player.health.death_time += 1;
+        }
+        match player.health.tick_food(difficulty, natural_regen) {
+            crate::player_health::FoodTick::Heal(amount) => player.health.heal(amount),
+            crate::player_health::FoodTick::Starve => starve.push(*id),
+            crate::player_health::FoodTick::Idle => {}
+        }
         let now = HealthSync::of(player);
         if now != player.health_sync {
             player.health_sync = now;
@@ -64,6 +92,18 @@ pub(crate) fn tick(region: &mut Region) {
     }
     for (id, packet) in pending {
         region.links.send(id, &packet);
+    }
+    // 饥饿伤害是一次真正的 `hurtServer(starve, 1.0)`，走完整受伤链路。
+    for id in starve {
+        hurt_player(
+            region,
+            id,
+            mc_bamboo_blocks::entity::mob::DamageSource::environment(
+                mc_bamboo_blocks::entity::mob::DamageKind::Starve,
+            ),
+            1.0,
+            &mut None,
+        );
     }
 }
 
@@ -147,6 +187,15 @@ pub(crate) fn hurt_player(
                 saturation,
             },
         );
+    }
+    // `LivingEntity.hurtServer` 在 `isDeadOrDying()` 时调 `die`：
+    // 掉落、死亡消息、死亡界面和 `immediate_respawn` 都在这里接上。
+    if region
+        .players
+        .get(&id)
+        .is_some_and(|player| player.health.health <= 0.0 && !player.dead)
+    {
+        crate::player_death::die(region, id, source);
     }
     true
 }

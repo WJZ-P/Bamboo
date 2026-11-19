@@ -3,12 +3,11 @@
 //! 官方 `Player.hurtServer` 的状态都在 `Player` / `LivingEntity` 上。这一期
 //! 只存相对倒计时（`hurt_time`、`damage_cooldown`、`hurt_duration`、
 //! `invulnerable_time`），不存岛时钟的绝对时刻，拆岛 / 并岛时不用平移。
-//!
-//! 血量降到 0 不触发死亡：掉落、死亡消息和重生留到 1b。
+//! 死亡状态由 `player_death` / `player_respawn` 驱动，这里只管数值。
 //!
 //! Player health, hurt cooldowns and hunger state, plus the save-data mapping.
-//! Only relative countdowns are stored; health reaching zero does not trigger
-//! death (drops, messages and respawn belong to 1b).
+//! Only relative countdowns are stored; the death and respawn flow lives in
+//! `player_death` / `player_respawn`.
 
 use mc_bamboo_blocks::entity::mob::damage::{
     self as rules, ArmorValues, DifficultyId, HurtOutcome,
@@ -18,9 +17,9 @@ use mc_bamboo_data::registries::attribute;
 use mc_bamboo_protocol::{components::ComponentValue, item::ItemStack};
 use mc_bamboo_storage::player_data::PlayerData;
 
-/// 官方 `FoodData` 的四个字段。`tick_timer` 这一期不推进，只存读档。
+/// 官方 `FoodData` 的四个字段。`tick_timer` 按 `FoodData.tick` 推进并存读档。
 ///
-/// The four `FoodData` fields. `tick_timer` is persisted but not ticked yet.
+/// The four `FoodData` fields; `tick_timer` follows `FoodData.tick`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FoodData {
     pub food_level: i32,
@@ -55,7 +54,7 @@ pub(crate) struct PlayerHealth {
     pub last_hurt: f32,
     /// `invulnerableTime`：临时的实体无敌，不是受伤冷却。
     pub invulnerable_time: i32,
-    /// `deathTime`：这一期恒为 0，死亡流程留给 1b。
+    /// `deathTime`：死亡动画已经推进的刻数，重生时归零。
     pub death_time: i32,
     pub food: FoodData,
     /// 上次受伤的伤害种类（不含攻击者），`lastDamageSource`。
@@ -82,6 +81,29 @@ impl Default for PlayerHealth {
     }
 }
 
+/// `FoodData.tick` 一刻度后果，调用方按它改血量 / 发包 / 生成饥饿伤害。
+///
+/// One tick of `FoodData.tick`; the caller applies the heal or starve damage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum FoodTick {
+    /// 什么也没发生。
+    Idle,
+    /// 回 `amount` 点血，`FoodData.tick` 里的 `heal()`。
+    Heal(f32),
+    /// 对玩家造成一点饥饿伤害，官方 `damageSources().starve()`。
+    Starve,
+}
+
+/// 官方 `ServerPlayer.tickRegeneration` 在和平难度下的回血 / 回饥饿。
+/// 只在 `natural_health_regeneration` 打开时调用；两处计时都取
+/// `tickCount` 的模，Bamboo 存的是相对倒计时，拆岛不需平移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PeacefulRegen {
+    pub heal: bool,
+    pub saturation_up: bool,
+    pub food_up: bool,
+}
+
 impl PlayerHealth {
     /// 官方 `LivingEntity.isDeadOrDying()`：血量不大于 0 或已经死了。
     pub fn is_dead_or_dying(self) -> bool {
@@ -95,6 +117,85 @@ impl PlayerHealth {
         self.damage_cooldown = cooldown;
         self.hurt_time = hurt;
         self.invulnerable_time = invulnerable;
+    }
+
+    /// 官方 `FoodData.tick(ServerPlayer)` 的完整分支。
+    ///
+    /// `exhaustion > 4` 先消耗 4 点：饱和度够就扣饱和度，否则非和平扣饥饿。
+    /// 之后按 `natural_health_regeneration` 走「满饥饿快速回血 / 半饱慢回血 /
+    /// 饥饿掉血」三段；没落在任何一段里 `tickTimer` 归零。
+    /// `isHurt()` 是 `getHealth() > 0 && getHealth() < getMaxHealth()`。
+    pub fn tick_food(&mut self, difficulty: DifficultyId, natural_regen: bool) -> FoodTick {
+        let food = &mut self.food;
+        if food.exhaustion > 4.0 {
+            food.exhaustion -= 4.0;
+            if food.saturation > 0.0 {
+                food.saturation = (food.saturation - 1.0).max(0.0);
+            } else if difficulty != 0 {
+                food.food_level = (food.food_level - 1).max(0);
+            }
+        }
+        let is_hurt = self.health > 0.0 && self.health < rules::MAX_HEALTH;
+        if natural_regen && food.saturation > 0.0 && is_hurt && food.food_level >= 20 {
+            food.tick_timer += 1;
+            if food.tick_timer >= 10 {
+                let amount = food.saturation.min(6.0);
+                food.tick_timer = 0;
+                food.exhaustion = (food.exhaustion + amount).min(rules::MAX_EXHAUSTION);
+                return FoodTick::Heal(amount / 6.0);
+            }
+        } else if natural_regen && food.food_level >= 18 && is_hurt {
+            food.tick_timer += 1;
+            if food.tick_timer >= 80 {
+                food.tick_timer = 0;
+                food.exhaustion = (food.exhaustion + 6.0).min(rules::MAX_EXHAUSTION);
+                return FoodTick::Heal(1.0);
+            }
+        } else if food.food_level == 0 {
+            food.tick_timer += 1;
+            if food.tick_timer >= 80 {
+                food.tick_timer = 0;
+                // 官方：HARD 或 hp<=10 或 (hp>1 且 NORMAL) 时才真的 hurtServer。
+                if difficulty == 3 || self.health <= 10.0 || (difficulty == 2 && self.health > 1.0)
+                {
+                    return FoodTick::Starve;
+                }
+            }
+        } else {
+            food.tick_timer = 0;
+        }
+        FoodTick::Idle
+    }
+
+    /// 官方 `ServerPlayer.tickRegeneration`：和平 + 自然回血时每 20 刻回 1 血
+    /// 并加 1 饱和度（上限 20），每 10 刻加 1 饥饿（上限 20）。
+    /// `tick` 是玩家的实体 tick 数，调用方存相对计数。
+    pub fn tick_peaceful(&mut self, tick: i32) -> PeacefulRegen {
+        let mut result = PeacefulRegen {
+            heal: false,
+            saturation_up: false,
+            food_up: false,
+        };
+        if tick % 20 == 0 {
+            if self.health > 0.0 && self.health < rules::MAX_HEALTH {
+                self.health = (self.health + 1.0).min(rules::MAX_HEALTH);
+                result.heal = true;
+            }
+            if self.food.saturation < 20.0 {
+                self.food.saturation = (self.food.saturation + 1.0).min(20.0);
+                result.saturation_up = true;
+            }
+        }
+        if tick % 10 == 0 && self.food.food_level < 20 {
+            self.food.food_level += 1;
+            result.food_up = true;
+        }
+        result
+    }
+
+    /// `LivingEntity.heal`：夹到最大血量。
+    pub fn heal(&mut self, amount: f32) {
+        self.health = (self.health + amount).min(rules::MAX_HEALTH);
     }
 
     /// 官方 `Player.getArmorCoverPercentage()`：四格盔甲里非空的比例。

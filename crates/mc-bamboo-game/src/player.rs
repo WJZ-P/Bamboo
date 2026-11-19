@@ -3,7 +3,7 @@
 //! 每个领域的状态放在各自模块的类型里，这里只把它们组合起来。
 
 use mc_bamboo_blocks::entity::{JavaRandom, ctx::PlayerView};
-use mc_bamboo_core::{Aabb, ChunkPos, Hand, Vec3};
+use mc_bamboo_core::{Aabb, BlockPos, ChunkPos, Hand, Vec3};
 use mc_bamboo_protocol::{
     item::ItemStack,
     packet::play::{ClientInformation, EquipmentSlot, GameMode, MODEL_PART_HAT},
@@ -113,9 +113,9 @@ pub(crate) struct Player {
     ///
     /// Public key, message chain, and the seen-message window. Without a session, chat stays unsigned.
     pub(crate) chat: PlayerChat,
-    /// 官方 `ServerPlayer.respawnConfig`。没有死亡重生，只存着。
+    /// 官方 `ServerPlayer.respawnConfig`：`/spawnpoint` 设的玩家重生点。
     ///
-    /// Official `ServerPlayer.respawnConfig`. Stored only; there is no death respawn.
+    /// Official `ServerPlayer.respawnConfig`: the player's spawn set by `/spawnpoint`.
     pub(crate) respawn: Option<RespawnData>,
     /// 这名玩家自己的入站队列（岛的实施计划第 6 节第 4 步）。世界线程每刻取一次，
     /// 和主控队列、别的玩家的队列按序号归并；跟着玩家走。
@@ -146,6 +146,36 @@ pub(crate) struct Player {
     pub(crate) health_sync: crate::player_hurt::HealthSync,
     /// `CombatTracker.inCombat`：第一次被非玩家生物打伤时置真，1b 的死亡消息要用。
     pub(crate) in_combat: bool,
+    /// `CombatTracker.entries` 的最后一条：致死伤害种类和攻击者显示名，死亡消息要用。
+    /// 不存绝对时刻，岛拆合时整行跟着 `Players` 搬。
+    ///
+    /// The last `CombatTracker` entry: killing blow's kind and attacker display
+    /// name, used for the death message. No absolute instants; moves with the
+    /// whole player row.
+    pub(crate) last_combat: Option<crate::player_death::CombatEntry>,
+    /// `ServerPlayer.dead`：一次死亡流程正在跑，重生之前不再触发第二次死亡。
+    /// 与 `health.health <= 0` 分开存，因为 `restoreFrom` 会把血量设满。
+    ///
+    /// `ServerPlayer.dead`: a death is in progress; no second death until
+    /// respawn. Separate from zero health because `restoreFrom` refills it.
+    pub(crate) dead: bool,
+    /// `ServerPlayer.lastDeathLocation`：死亡时写下，`Player.readAdditionalSaveData`
+    /// 和 `restoreFrom` 双向保留；重生包的 `CommonPlayerSpawnInfo` 也读它。
+    ///
+    /// Vanilla `lastDeathLocation`, written at death, saved and restored.
+    pub(crate) last_death_location: Option<BlockPos>,
+    /// 实体 tick 数（`ServerPlayer.tickCount`），官方和平回血用它的模。
+    /// 存相对计数而不是岛时钟的绝对时刻，拆岛 / 并岛无需平移。
+    ///
+    /// Entity tick count, used modulo 20/10 by peaceful regeneration. Relative,
+    /// so island splits and merges need no rebasing.
+    pub(crate) entity_ticks: i32,
+    /// `ServerPlayer.respawnConfig` 之外，死亡时等待客户端发来的
+    /// `PERFORM_RESPAWN`；`immediate_respawn` 打开时不进入这个状态。
+    ///
+    /// Waiting for `PERFORM_RESPAWN` after death; skipped when
+    /// `immediate_respawn` is on.
+    pub(crate) awaiting_respawn: bool,
 }
 
 impl Player {
@@ -203,6 +233,11 @@ impl Player {
             health: PlayerHealth::default(),
             health_sync: crate::player_hurt::HealthSync::INITIAL,
             in_combat: false,
+            last_combat: None,
+            dead: false,
+            last_death_location: None,
+            entity_ticks: 0,
+            awaiting_respawn: false,
         }
     }
 

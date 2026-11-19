@@ -39,6 +39,15 @@ pub fn runtime_player_data(player: &Player) -> PlayerData {
         score: player.score,
     });
     player.health.save(&mut data);
+    // `Player.addAdditionalSaveData`：只有 Optional 非空才写 `LastDeathLocation`。
+    if let Some(pos) = player.last_death_location {
+        data.last_death_location = Some((
+            mc_bamboo_storage::player_data::OVERWORLD.to_owned(),
+            [pos.x, pos.y, pos.z],
+        ));
+    }
+    // `dead` 是运行时标志（官方 `dead` 不存档），重生后由 health 字段推：
+    // 官方读档时 Health<=0 会立刻进入死亡状态，这里按官方存档字段保留。
     data
 }
 
@@ -99,6 +108,13 @@ pub fn restore_inventory(player: &mut Player, data: &PlayerData) {
         progress: data.xp_p,
     };
     player.score = data.score;
+    player.last_death_location = data
+        .last_death_location
+        .as_ref()
+        .filter(|(dimension, _)| dimension == mc_bamboo_storage::player_data::OVERWORLD)
+        .map(|(_, pos)| mc_bamboo_core::BlockPos::new(pos[0], pos[1], pos[2]));
+    player.dead = player.health.health <= 0.0;
+    player.awaiting_respawn = player.dead;
     player.yaw = data.rotation[0];
     player.pitch = data.rotation[1];
     player.head_yaw = data.rotation[0];
