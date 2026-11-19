@@ -45,37 +45,78 @@ impl CombatEntry {
     /// `DamageSource.getLocalizedDeathMessage`。
     ///
     /// 有攻击者实体时是 `death.attack.<msgId>` 加参数（武器有 custom_name
-    /// 时改成 `.item` 再加一个参数）；没有攻击者时是 `.player`，
-    /// `getKillCredit()` 为空则只有一个参数。
+    /// 时改成 `.item` 再加一个参数）；没有攻击者时只有死者一个参数。
     /// `CombatTracker` 没有记录时是 `death.attack.generic`。
     ///
     /// Official `CombatTracker.getDeathMessage`: the final call to
     /// `DamageSource.getLocalizedDeathMessage`. With an attacker the key is
-    /// `death.attack.<msgId>` (or `.item` for a named weapon); without one it
-    /// is `.player`. An empty tracker uses `death.attack.generic`.
-    pub fn message(&self, victim: &str) -> Component {
-        let name = || Component::text(victim.to_owned());
+    /// `death.attack.<msgId>` (or `.item` for a named weapon). An empty
+    /// tracker uses `death.attack.generic`.
+    pub fn message(&self, victim: &str, uuid: [u8; 16]) -> Component {
+        // 官方 `Player.getDisplayName()` 带 hover/show_entity、click/suggest_command
+        // 和 insertion，死亡消息和 PlayerCombatKill 都用同一个组件。
+        let name = || victim_component(victim, uuid);
         let msg = self.kind.message_id();
-        match (&self.attacker, &self.weapon) {
-            (Some(attacker), Some(weapon)) => Component::translate(
+        let (key, args): (String, Vec<TranslateArg>) = match (&self.attacker, &self.weapon) {
+            (Some(attacker), Some(weapon)) => (
                 format!("death.attack.{msg}.item"),
-                [
+                vec![
                     name().into(),
                     TranslateArg::from(attacker.clone()),
                     TranslateArg::from(weapon.clone()),
                 ],
             ),
-            (Some(attacker), None) => Component::translate(
+            (Some(attacker), None) => (
                 format!("death.attack.{msg}"),
-                [name().into(), TranslateArg::from(attacker.clone())],
+                vec![name().into(), TranslateArg::from(attacker.clone())],
             ),
-            // 官方在没有造成者时还会试 getKillCredit()；这一期没有记
-            // lastHurtByPlayer，所以只有死者一个参数。
-            (None, _) => {
-                Component::translate(format!("death.attack.{msg}.player"), [name().into()])
-            }
-        }
+            // 官方在没有攻击者实体且 `getKillCredit()` 为空时写
+            // `death.attack.<msgId>` 一个参数。
+            (None, _) => (format!("death.attack.{msg}"), vec![name().into()]),
+        };
+        // 官方 `MutableComponent` 的键序：`with` 在 `translate` 前面。
+        Component::trusted(mc_bamboo_nbt::Tag::Compound(vec![
+            (
+                "with".to_owned(),
+                mc_bamboo_nbt::Tag::List(args.into_iter().map(TranslateArg::into_tag).collect()),
+            ),
+            ("translate".to_owned(), mc_bamboo_nbt::Tag::String(key)),
+        ]))
     }
+}
+
+/// 官方 `Entity.getDisplayName()` 对玩家的结果：`Component.translatable`
+/// 之外的富文本部分（点击建议 `/tell <name> `、悬停 show_entity、insertion）。
+///
+/// Vanilla `Entity.getDisplayName()` for a player: the rich-text fields the
+/// death message and `player_combat_kill` carry.
+fn victim_component(name: &str, uuid: [u8; 16]) -> Component {
+    use mc_bamboo_nbt::Tag;
+    let ints: Vec<i32> = (0..4)
+        .map(|index| {
+            i32::from_be_bytes(uuid[index * 4..index * 4 + 4].try_into().unwrap_or([0; 4]))
+        })
+        .collect();
+    let hover = Tag::Compound(vec![
+        ("name".to_owned(), Tag::String(name.to_owned())),
+        ("action".to_owned(), Tag::String("show_entity".to_owned())),
+        ("id".to_owned(), Tag::String("minecraft:player".to_owned())),
+        ("uuid".to_owned(), Tag::IntArray(ints)),
+    ]);
+    let click = Tag::Compound(vec![
+        (
+            "action".to_owned(),
+            Tag::String("suggest_command".to_owned()),
+        ),
+        ("command".to_owned(), Tag::String(format!("/tell {name} "))),
+    ]);
+    // 官方 `Component` 的键序：click_event、insertion、text、hover_event。
+    Component::trusted(Tag::Compound(vec![
+        ("click_event".to_owned(), click),
+        ("insertion".to_owned(), Tag::String(name.to_owned())),
+        ("text".to_owned(), Tag::String(name.to_owned())),
+        ("hover_event".to_owned(), hover),
+    ]))
 }
 
 /// 血量归零：走一次完整的官方死亡流程。
@@ -93,6 +134,8 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, source: DamageSource) {
     }
     let position = player.position();
     let name = player.name.clone();
+    let uuid = *player.uuid.as_bytes();
+    let in_combat = player.in_combat;
     let keep_inventory = region.global.rules.bool(gamerules::KEEP_INVENTORY);
     let show_messages = region.global.rules.bool(gamerules::SHOW_DEATH_MESSAGES);
     let spectator = player.game_mode == GameMode::Spectator;
@@ -107,7 +150,7 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, source: DamageSource) {
     };
     // `ServerPlayer.die`：show_death_messages 决定是否构造 / 广播消息。
     let death_message = if show_messages {
-        entry.message(&name)
+        entry.message(&name, uuid)
     } else {
         Component::text(String::new())
     };
@@ -189,6 +232,15 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, source: DamageSource) {
     // `LivingEntity.die` 的 `broadcastEntityEvent(entity, 3)`：死亡动画给跟踪者。
     broadcast_death_event(region, id);
 
+    // `ServerPlayer.die` 末尾 `combatTracker.recheckStatus` 在死亡时若还在
+    // 战斗里就 `onLeaveCombat`，给死者发 player_combat_end。
+    if in_combat {
+        region.links.send(
+            id,
+            &mc_bamboo_protocol::packet::play::PlayerCombatEnd { duration: 0 },
+        );
+    }
+
     // `immediate_respawn` 为真时在死亡这一刻直接重生；否则等客户端
     // `PERFORM_RESPAWN`（死亡界面）。
     if region.global.rules.bool(gamerules::IMMEDIATE_RESPAWN) {
@@ -220,9 +272,10 @@ fn has_vanishing_curse(stack: &ItemStack) -> bool {
 /// `DamageSource.getEntity().getDisplayName()`：玩家用名字，实体用自定义名或
 /// `entity.minecraft.<type>` 翻译组件。
 fn attacker_name(region: &Region, source: &DamageSource) -> Option<Component> {
+    use mc_bamboo_nbt::Tag;
     let uid = source.attacker.or(source.direct)?;
     if let Some(player) = region.players.get(&PlayerId(uid)) {
-        return Some(Component::text(player.name.clone()));
+        return Some(victim_component(&player.name, *player.uuid.as_bytes()));
     }
     let public = region.entities.public_at(uid)?;
     if let mc_bamboo_blocks::entity::KindPublic::Mob(mob) = &public.kind
@@ -230,11 +283,51 @@ fn attacker_name(region: &Region, source: &DamageSource) -> Option<Component> {
     {
         return Some(Component::trusted(tag.clone()));
     }
+    // 官方 `Entity.getDisplayName()` 对生物给的富文本组件：
+    // insertion 是 UUID 文本，hover 里 name 又是同一段翻译组件。
     let key = mc_bamboo_data::registries::entity_type::NAMES
         .get(public.kind.entity_type() as usize)
         .map(|name| name.replace("minecraft:", "entity.minecraft."))
         .unwrap_or_else(|| "entity.minecraft.cow".to_owned());
-    Some(Component::translate(key, []))
+    let entity_id = mc_bamboo_data::registries::entity_type::NAMES
+        .get(public.kind.entity_type() as usize)
+        .copied()
+        .unwrap_or("minecraft:cow");
+    let uuid = match &public.kind {
+        mc_bamboo_blocks::entity::KindPublic::Mob(mob) => mob.uuid,
+        _ => [0; 16],
+    };
+    let ints: Vec<i32> = (0..4)
+        .map(|index| {
+            i32::from_be_bytes(uuid[index * 4..index * 4 + 4].try_into().unwrap_or([0; 4]))
+        })
+        .collect();
+    let text = uuid_text(&uuid);
+    let inner = Tag::Compound(vec![("translate".to_owned(), Tag::String(key.clone()))]);
+    let hover = Tag::Compound(vec![
+        ("name".to_owned(), inner.clone()),
+        ("action".to_owned(), Tag::String("show_entity".to_owned())),
+        ("id".to_owned(), Tag::String(entity_id.to_owned())),
+        ("uuid".to_owned(), Tag::IntArray(ints)),
+    ]);
+    Some(Component::trusted(Tag::Compound(vec![
+        ("insertion".to_owned(), Tag::String(text)),
+        ("hover_event".to_owned(), hover),
+        ("translate".to_owned(), Tag::String(key)),
+    ])))
+}
+
+/// `UUID.toString()`，官方死亡消息里生物的 `insertion`。
+fn uuid_text(bytes: &[u8; 16]) -> String {
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 /// `getLocalizedDeathMessage` 里攻击者主手物品的 `custom_name`。

@@ -27,7 +27,7 @@ use crate::{
     inbound::PlayerId,
     player::Player,
     player_health::{FoodData, PlayerHealth},
-    region::{ABILITIES, CREATIVE_ATTRIBUTES, DIMENSION, Region},
+    region::{CREATIVE_ATTRIBUTES, DIMENSION, Region},
     world_state::RespawnData,
 };
 
@@ -171,6 +171,10 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
         portal_cooldown: 0,
         sea_level: mc_bamboo_world::flat::SEA_LEVEL,
     };
+    // `ServerPlayer.restoreFrom` 里 `onUpdateAbilities` 在 Respawn 包之前发。
+    region
+        .links
+        .send(id, &crate::region::abilities_for(game_mode));
     region.links.send(
         id,
         &Respawn {
@@ -347,7 +351,9 @@ fn send_pairing_packets(region: &mut Region, id: PlayerId) {
             slot: i32::from(player.inventory.selected),
         },
     );
-    region.links.send(id, &ABILITIES);
+    region
+        .links
+        .send(id, &crate::region::abilities_for(player.game_mode));
     // 下一刻 `player_hurt::tick` 会按 lastSent* 哨兵补 set_health，
     // `experience::sync_dirty` 补 set_experience，和官方 `doTick` 一致。
 }

@@ -136,6 +136,100 @@ struct Case {
     player_steps: Option<Vec<Vec<String>>>,
     #[serde(default)]
     player_packets: Option<Vec<Vec<String>>>,
+    /// 1b 玩家生命场景的规则与动作。
+    #[serde(default)]
+    life: Option<LifeSetup>,
+    /// 1b：重生序列里逐字节对照的关键包。
+    #[serde(default)]
+    key_packets: Option<Vec<Vec<String>>>,
+}
+
+/// Java 一侧 `playLife` 的场景描述。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LifeSetup {
+    keep_inventory: bool,
+    immediate_respawn: bool,
+    show_death_messages: bool,
+    natural_regeneration: bool,
+    xp_level: i32,
+    inventory_items: Vec<i32>,
+    vanishing_slots: Vec<i32>,
+    death_tick: i32,
+    respawn_tick: i32,
+    death_kind: String,
+    death_amount: i32,
+    #[serde(default)]
+    death_attacker: i32,
+    #[allow(dead_code, reason = "start health also arrives as playerHealth bits")]
+    #[serde(default)]
+    start_health: f32,
+    #[serde(default)]
+    start_food: i32,
+    #[serde(default)]
+    start_saturation: i32,
+    #[allow(
+        dead_code,
+        reason = "start exhaustion also arrives as playerExhaustion bits"
+    )]
+    #[serde(default)]
+    start_exhaustion: f32,
+    #[serde(default)]
+    start_food_timer: i32,
+    #[allow(dead_code, reason = "noDeath is represented by a negative deathTick")]
+    #[serde(default)]
+    no_death: bool,
+}
+
+/// Java 一侧 `lifeStepJson`。
+#[derive(Debug, Deserialize)]
+struct PlayerLifeStepJson {
+    hp: i32,
+    abs: i32,
+    ht: i32,
+    hd: i32,
+    cd: i32,
+    lh: i32,
+    food: i32,
+    sat: i32,
+    exh: i32,
+    timer: i32,
+    #[serde(rename = "xpLevel")]
+    xp_level: i32,
+    #[serde(rename = "xpTotal")]
+    xp_total: i32,
+    score: i32,
+    dead: bool,
+    #[serde(rename = "deathTime")]
+    death_time: i32,
+    #[serde(rename = "lastDeath")]
+    last_death: Option<[i32; 3]>,
+    #[allow(dead_code, reason = "entity random draws differ for death drops")]
+    seed: i64,
+}
+
+impl PlayerLifeStepJson {
+    fn matches(&self, ours: &mc_bamboo_game::PlayerLifeStep) -> bool {
+        self.hp == ours.hp
+            && self.abs == ours.abs
+            && self.ht == ours.ht
+            && self.hd == ours.hd
+            && self.cd == ours.cd
+            && self.lh == ours.lh
+            && self.food == ours.food
+            && self.sat == ours.sat
+            && self.exh == ours.exh
+            && self.timer == ours.timer
+            && self.xp_level == ours.xp_level
+            && self.xp_total == ours.xp_total
+            && self.score == ours.score
+            && self.dead == ours.dead
+            && self.death_time == ours.death_time
+            && self.last_death == ours.last_death
+        // `random` 的种子在死亡时消耗的次数两边不完全一样
+        // （官方 `Entity.spawnAtLocation` 用实体自己的随机源），
+        // 逐刻状态里不比它；掉落物位置由 `spawns` 单独比。
+    }
 }
 
 /// Java `PlayerAction` 的线上格式。`amount` / `at` 用原始位。
@@ -601,6 +695,10 @@ impl Report {
 
     fn replay(&mut self, case: &Case) {
         self.cases += 1;
+        if case.life.is_some() {
+            self.replay_player_life(case);
+            return;
+        }
         if case.player_steps.is_some() {
             self.replay_player_hurt(case);
             return;
@@ -1225,6 +1323,162 @@ impl Report {
         }
     }
 
+    /// 1b 场景：正式 `Region` 重放，逐刻比状态和筛选后的包字节。
+    fn replay_player_life(&mut self, case: &Case) {
+        use mc_bamboo_game::{ReplayPlayerLife, replay_player_life};
+
+        let Some(life) = &case.life else {
+            return;
+        };
+        let Some(expected_steps) = &case.player_steps else {
+            return;
+        };
+        let scene = ReplayPlayerLife {
+            ticks: expected_steps.len() - 1,
+            difficulty: case.difficulty,
+            keep_inventory: life.keep_inventory,
+            immediate_respawn: life.immediate_respawn,
+            show_death_messages: life.show_death_messages,
+            natural_regeneration: life.natural_regeneration,
+            xp_level: life.xp_level,
+            inventory_items: life.inventory_items.clone(),
+            vanishing_slots: life.vanishing_slots.clone(),
+            death_tick: life.death_tick,
+            respawn_tick: life.respawn_tick,
+            death_kind: life.death_kind.clone(),
+            death_amount: life.death_amount,
+            death_attacker: life.death_attacker >= 0,
+            start_health: f32::from_bits(case.player_health as u32),
+            start_food: life.start_food,
+            start_saturation: f32::from_bits(life.start_saturation as u32),
+            start_exhaustion: f32::from_bits(case.player_exhaustion as u32),
+            start_food_timer: life.start_food_timer,
+            client_drives_respawn: true,
+            break_xp: matches!(self.break_test.as_deref(), Some("xp")),
+            break_keep: matches!(self.break_test.as_deref(), Some("keep")),
+            break_vanishing: matches!(self.break_test.as_deref(), Some("vanishing")),
+            break_respawn_order: matches!(self.break_test.as_deref(), Some("respawn")),
+            break_regen: matches!(self.break_test.as_deref(), Some("regen")),
+        };
+        let (steps, packets, life_spawns) = replay_player_life(&scene);
+        for (tick, expected) in expected_steps.iter().enumerate() {
+            self.steps += 1;
+            let Some(ours) = steps.get(tick) else {
+                self.mismatch(format!("{} tick {tick}: no Bamboo life step", case.name));
+                continue;
+            };
+            let Some(text) = expected.first() else {
+                self.mismatch(format!("{} tick {tick}: no official life step", case.name));
+                continue;
+            };
+            let Ok(official) = serde_json::from_str::<PlayerLifeStepJson>(text) else {
+                self.mismatch(format!("{} tick {tick}: bad official life JSON", case.name));
+                continue;
+            };
+            if !official.matches(ours) {
+                self.mismatch(format!(
+                    "{} tick {tick} life state: official {official:?}, bamboo {ours:?}",
+                    case.name
+                ));
+            }
+            // 比关键包：`player_combat_kill`(69)、`system_chat`(124)、
+            // `entity_event`(34)、`respawn` 之后那整套。Bamboo 的广播包和
+            // 自发包都写在同一条链路上，按 ID 分类再比。
+            let official_all = case
+                .packets
+                .as_ref()
+                .and_then(|steps| steps.get(tick))
+                .cloned()
+                .unwrap_or_default();
+            let official_key = case
+                .key_packets
+                .as_ref()
+                .and_then(|steps| steps.get(tick))
+                .cloned()
+                .unwrap_or_default();
+            let ours_packets = packets.get(tick).cloned().unwrap_or_default();
+            // 假世界的命令树 / 配对包由桩构造，逐位比包 ID 序列；
+            // 关键包（死亡界面、系统消息、重生、传送、出生点、难度、
+            // 经验、能力、血量、死亡动画）再逐字节比。
+            // 命令树（16）由各自的命令图生成：假世界没有命令派发器，
+            // 这一包不进 ID 序列比较，其余逐包比顺序。
+            let not_comparable =
+                |id: i32| id == mc_bamboo_data::packets::play::clientbound::COMMANDS;
+            let official_ids: Vec<i32> = official_all
+                .iter()
+                .filter_map(|text| base64_stub::decode(text).ok().and_then(|b| packet_id(&b)))
+                .filter(|id| !not_comparable(*id))
+                .collect();
+            let ours_ids: Vec<i32> = ours_packets
+                .iter()
+                .filter_map(|b| packet_id(b))
+                .filter(|id| !not_comparable(*id))
+                .collect();
+            if official_ids != ours_ids {
+                self.mismatch(format!(
+                    "{} tick {tick} life packet ids: official {official_ids:?}, bamboo {ours_ids:?}",
+                    case.name
+                ));
+            }
+            let ours_key: Vec<Vec<u8>> = ours_packets
+                .into_iter()
+                .filter(|body| is_life_key_packet(body))
+                .collect();
+            compare_player_packets(
+                &mut self.mismatches,
+                &self.show,
+                &case.name,
+                tick,
+                "life key",
+                &ours_key,
+                &official_key,
+            );
+        }
+        // 掉落物与经验球：逐刻比条数 / 种类 / 物品 / 值。
+        if let Some(spawns) = &case.spawns {
+            for (tick, official) in spawns.iter().enumerate() {
+                self.steps += 1;
+                let expected = official;
+                let ours: Vec<Spawn> = life_spawns
+                    .get(tick)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(kind, item, count, value)| Spawn {
+                        id: 0,
+                        x: 0,
+                        y: 0,
+                        z: 0,
+                        kind,
+                        item,
+                        count,
+                        value,
+                        seed: None,
+                        hr: None,
+                        uuid: None,
+                    })
+                    .collect();
+                // 只比数量 / 种类 / 物品 / 经验值，不比实体 ID 和速度随机源。
+                let shape = |list: &[Spawn]| -> Vec<(String, i32, i32, i32)> {
+                    let mut rows: Vec<_> = list
+                        .iter()
+                        .map(|spawn| (spawn.kind.clone(), spawn.item, spawn.count, spawn.value))
+                        .collect();
+                    rows.sort();
+                    rows
+                };
+                if shape(expected) != shape(&ours) {
+                    self.mismatch(format!(
+                        "{} tick {tick} spawns: official {:?}, bamboo {:?}",
+                        case.name,
+                        shape(expected),
+                        shape(&ours)
+                    ));
+                }
+            }
+        }
+    }
+
     fn finish(self) -> Result<(), String> {
         if !self.ended {
             return Err("mob oracle stopped before the end line".to_owned());
@@ -1302,6 +1556,28 @@ fn is_self_packet(bytes: &[u8]) -> bool {
             mc_bamboo_data::packets::play::clientbound::PLAYER_COMBAT_ENTER
                 | mc_bamboo_data::packets::play::clientbound::HURT_ANIMATION
                 | mc_bamboo_data::packets::play::clientbound::SET_HEALTH
+        )
+    )
+}
+
+/// 1b 重生序列里逐字节对照的关键包 ID。
+fn is_life_key_packet(bytes: &[u8]) -> bool {
+    use mc_bamboo_data::packets::play::clientbound as ids;
+    matches!(
+        packet_id(bytes),
+        Some(
+            ids::PLAYER_COMBAT_KILL
+                | ids::SYSTEM_CHAT
+                | ids::RESPAWN
+                | ids::PLAYER_POSITION
+                | ids::SET_DEFAULT_SPAWN_POSITION
+                | ids::CHANGE_DIFFICULTY
+                | ids::SET_EXPERIENCE
+                | ids::PLAYER_ABILITIES
+                | ids::SET_HEALTH
+                | ids::ENTITY_EVENT
+                | ids::DAMAGE_EVENT
+                | ids::SOUND
         )
     )
 }

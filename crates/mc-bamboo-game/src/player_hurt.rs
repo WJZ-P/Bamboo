@@ -61,16 +61,16 @@ pub(crate) fn tick(region: &mut Region) {
     let mut starve = Vec::new();
     for (id, player) in &mut region.players {
         player.entity_ticks = player.entity_ticks.wrapping_add(1);
-        // 官方 `ServerPlayer.tick` 在死亡后仍推进，但 `baseTick` 只在
-        // `isAlive()` 时跑；`FoodData.tick` 仍在 `doTick` 里跑。Bamboo 的
-        // 死亡界面等待期间跳过回血，避免给死者回血。
+        // 官方 `ServerPlayer.tick` 在死亡后仍递减 damageCooldownTime，
+        // `LivingEntity.baseTick` 也递减 hurtTime；只有 `isAlive()` 为真才
+        // 跑 `tickRegeneration` / `FoodData.tick`。
+        player.health.tick_cooldowns();
         if player.dead {
             continue;
         }
         if difficulty == 0 && natural_regen {
             let _ = player.health.tick_peaceful(player.entity_ticks);
         }
-        player.health.tick_cooldowns();
         if player.health.death_time > 0 && player.health.death_time < 20 {
             // `LivingEntity.baseTick` 每刻推一次死亡动画，20 刻后才 discard。
             player.health.death_time += 1;
@@ -167,41 +167,57 @@ pub(crate) fn hurt_player(
             send_player_combat_enter(region, id, &source);
         }
         broadcast_damage_event(region, id, &source);
-        play_hurt_sound(region, id, &source, position);
+        // 官方 `dealDefaultKnockback` 里 `indicateDamage` 先发 hurt_animation，
+        // 之后才播死亡 / 受伤音效。
+        if outcome.knockback {
+            let player = region.players.get_mut(&id).expect("玩家刚才还在");
+            knockback(player, &source, position, random);
+            region.links.send(
+                id,
+                &HurtAnimation {
+                    entity_id: id.0,
+                    yaw: hurt_yaw,
+                },
+            );
+        }
+        // `LivingEntity.hurtServer` 在 `isDeadOrDying()` 时播 `getDeathSound()`
+        // （玩家的 `entity.player.death`），否则播受伤音效。
+        let dying = region
+            .players
+            .get(&id)
+            .is_some_and(|player| player.health.health <= 0.0);
+        if dying {
+            play_sound(region, id, "minecraft:entity.player.death", position);
+        } else {
+            play_hurt_sound(region, id, &source, position);
+        }
     }
-    if outcome.knockback {
-        let player = region.players.get_mut(&id).expect("玩家刚才还在");
-        knockback(player, &source, position, random);
-        // `ServerPlayer.indicateDamage` 只发给玩家自己。
-        region.links.send(
-            id,
-            &HurtAnimation {
-                entity_id: id.0,
-                yaw: hurt_yaw,
-            },
-        );
-    }
-    let player = region.players.get_mut(&id).expect("玩家刚才还在");
-    if sync != player.health_sync {
-        player.health_sync = sync;
-        region.links.send(
-            id,
-            &SetHealth {
-                health: sync.health,
-                food: sync.food,
-                saturation,
-            },
-        );
-    }
-    // `LivingEntity.hurtServer` 在 `isDeadOrDying()` 时调 `die`：
-    // 掉落、死亡消息、死亡界面和 `immediate_respawn` 都在这里接上。
-    if region
+    let dying = region
         .players
         .get(&id)
-        .is_some_and(|player| player.health.health <= 0.0 && !player.dead)
-    {
+        .is_some_and(|player| player.health.health <= 0.0 && !player.dead);
+    // 官方 `ServerPlayer.doTick` 在 `die` 之后才补 `set_health`；
+    // 死亡流程里的 player_combat_kill / system_chat / entity_event 必须排前面。
+    let send_health = |region: &mut Region| {
+        let player = region.players.get_mut(&id).expect("玩家刚才还在");
+        if sync != player.health_sync {
+            player.health_sync = sync;
+            region.links.send(
+                id,
+                &SetHealth {
+                    health: sync.health,
+                    food: sync.food,
+                    saturation,
+                },
+            );
+        }
+    };
+    // `LivingEntity.hurtServer` 在 `isDeadOrDying()` 时调 `die`：
+    // 掉落、死亡消息、死亡界面和 `immediate_respawn` 都在这里接上。
+    if dying {
         crate::player_death::die(region, id, source);
     }
+    send_health(region);
     true
 }
 
@@ -234,33 +250,8 @@ fn send_player_combat_enter(region: &mut Region, id: PlayerId, source: &DamageSo
 /// `LivingEntity.playHurtSound`：官方 `Level.playSound` 取一次世界随机源当种子，
 /// 广播给范围内除自己以外的玩家。音效由 `DamageType.effects` 决定。
 fn play_hurt_sound(region: &mut Region, id: PlayerId, source: &DamageSource, position: Vec3) {
-    let name = match source.kind {
-        mc_bamboo_blocks::entity::mob::DamageKind::Drown => "minecraft:entity.player.hurt_drown",
-        mc_bamboo_blocks::entity::mob::DamageKind::Freeze => "minecraft:entity.player.hurt_freeze",
-        mc_bamboo_blocks::entity::mob::DamageKind::OnFire
-        | mc_bamboo_blocks::entity::mob::DamageKind::InFire
-        | mc_bamboo_blocks::entity::mob::DamageKind::Lava
-        | mc_bamboo_blocks::entity::mob::DamageKind::HotFloor => {
-            "minecraft:entity.player.hurt_on_fire"
-        }
-        mc_bamboo_blocks::entity::mob::DamageKind::SweetBerryBush => {
-            "minecraft:entity.player.hurt_sweet_berry_bush"
-        }
-        _ => "minecraft:entity.player.hurt",
-    };
-    let seed = region.sound_seed_generator.source().next_long();
-    let sound = Sound {
-        sound: i32::from(sounds::sound_event(name)),
-        inline: None,
-        source: sounds::PLAYERS,
-        x: position.x,
-        y: position.y,
-        z: position.z,
-        volume: 1.0,
-        pitch: 1.0,
-        seed,
-    };
-    crate::interaction::send_sound(region, Some(id), &sound);
+    let name = hurt_sound_name(source);
+    play_sound(region, id, name, position);
     // `LivingEntity.playSecondaryHurtSound`：`thorns` 类型再多一声。
     if source.kind == mc_bamboo_blocks::entity::mob::DamageKind::Thorns {
         let seed = region.sound_seed_generator.source().next_long();
@@ -277,6 +268,40 @@ fn play_hurt_sound(region: &mut Region, id: PlayerId, source: &DamageSource, pos
         };
         crate::interaction::send_sound(region, Some(id), &secondary);
     }
+}
+
+fn hurt_sound_name(source: &DamageSource) -> &'static str {
+    match source.kind {
+        mc_bamboo_blocks::entity::mob::DamageKind::Drown => "minecraft:entity.player.hurt_drown",
+        mc_bamboo_blocks::entity::mob::DamageKind::Freeze => "minecraft:entity.player.hurt_freeze",
+        mc_bamboo_blocks::entity::mob::DamageKind::OnFire
+        | mc_bamboo_blocks::entity::mob::DamageKind::InFire
+        | mc_bamboo_blocks::entity::mob::DamageKind::Lava
+        | mc_bamboo_blocks::entity::mob::DamageKind::HotFloor => {
+            "minecraft:entity.player.hurt_on_fire"
+        }
+        mc_bamboo_blocks::entity::mob::DamageKind::SweetBerryBush => {
+            "minecraft:entity.player.hurt_sweet_berry_bush"
+        }
+        _ => "minecraft:entity.player.hurt",
+    }
+}
+
+/// `Level.playSeededSound` 的玩家音效：种子取一次世界随机源，广播给范围内除自己以外的玩家。
+fn play_sound(region: &mut Region, id: PlayerId, name: &str, position: Vec3) {
+    let seed = region.sound_seed_generator.source().next_long();
+    let sound = Sound {
+        sound: i32::from(sounds::sound_event(name)),
+        inline: None,
+        source: sounds::PLAYERS,
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        volume: 1.0,
+        pitch: 1.0,
+        seed,
+    };
+    crate::interaction::send_sound(region, Some(id), &sound);
 }
 
 /// 把已经编码好的「ID + 包体」加上帧长头。

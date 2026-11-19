@@ -81,6 +81,14 @@ pub(crate) fn teleport(
     links.send(player.id, &packet);
 }
 
+/// 只更新位置和朝向，不发 `player_position`（重生包序列里已经发过一次）。
+///
+/// Updates position and rotation without sending another `player_position`.
+pub(crate) fn teleport_command_state(player: &mut Player, grid: &mut PlayerGrid, absolute: Vec3) {
+    player.set_position(grid, absolute);
+    player.teleport.awaiting_position = Some(absolute);
+}
+
 /// `/tp` 的一次传送。包里相对轴传差值，绝对轴传落点，朝向按算好的值。
 ///
 /// One `/tp`. Relative axes are deltas, absolute axes are the destination, and rotation is

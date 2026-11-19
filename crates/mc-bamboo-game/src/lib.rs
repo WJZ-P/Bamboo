@@ -652,6 +652,22 @@ pub fn replay_execute(line: &str) -> [i32; 6] {
     player.is_op = true;
     let capture = Capture::default();
     region.links.add(id, Box::new(capture.clone()));
+    // 官方假世界的 `ChunkMap.sendToTrackingPlayersAndSelf` 不检查实际连接，
+    // 这里补一个观察者，受伤音效才和正式路径一样发出去。
+    let observer = inbound::PlayerId((1 << 24) + 100);
+    let watcher = player::Player::new(
+        observer,
+        Uuid::from_u128(2),
+        "Observer".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    let observer_capture = Capture::default();
+    region
+        .links
+        .add(observer, Box::new(observer_capture.clone()));
+    region.insert_player(watcher);
     region.insert_player(player);
     let cow_a = region
         .entities
@@ -754,7 +770,7 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec
     // 第二名玩家只作为观察者：`PlayerList.broadcast` 排除受伤者之后发音效。
     // 官方假世界的 `Chunks.sendToTrackingPlayersAndSelf` 不检查实际连接，
     // 这里补一个真正的收件人，包字节才可比。
-    let observer = inbound::PlayerId((1 << 24) + 1);
+    let observer = inbound::PlayerId((1 << 24) + 100);
     let watcher = player::Player::new(
         observer,
         Uuid::from_u128(2),
@@ -797,8 +813,34 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec
     player.random = mc_bamboo_blocks::entity::JavaRandom::from_state(scene.seed);
     let capture = Capture::default();
     region.links.add(id, Box::new(capture.clone()));
+    // 官方假世界的 `ChunkMap.sendToTrackingPlayersAndSelf` 不检查实际连接，
+    // 这里补一个观察者，受伤音效才和正式路径一样发出去。
+    let observer = inbound::PlayerId((1 << 24) + 100);
+    let watcher = player::Player::new(
+        observer,
+        Uuid::from_u128(2),
+        "Observer".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    let observer_capture = Capture::default();
+    region
+        .links
+        .add(observer, Box::new(observer_capture.clone()));
+    region.insert_player(watcher);
     region.insert_player(player);
     region.global.difficulty = scene.difficulty_value();
+    // 1a 的官方假世界明确不跑 `FoodData.tick` / `tickRegeneration`；
+    // 关掉自然回血后满血满饥饿的玩家状态不会因食物阶段而改变。
+    {
+        use std::sync::Arc;
+        let rules = Arc::make_mut(&mut region.global.rules);
+        let _ = rules.assign(
+            mc_bamboo_data::gamerules::NATURAL_HEALTH_REGENERATION,
+            "false",
+        );
+    }
     region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(12345);
     let cow = if scene.attack_cow {
         // Java 假世界里玩家先占 FIRST_ID，牛接着拿 FIRST_ID+1。
@@ -898,6 +940,407 @@ pub fn replay_player_hurt(scene: &ReplayPlayerHurt) -> (Vec<PlayerHurtStep>, Vec
         packets.push(frames(&capture, &observer_capture));
     }
     (steps, packets)
+}
+
+/// 1b 玩家生命对拍场景（死亡 / 重生 / 饥饿与回血）。
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ReplayPlayerLife {
+    pub ticks: usize,
+    pub difficulty: i32,
+    pub keep_inventory: bool,
+    pub immediate_respawn: bool,
+    pub show_death_messages: bool,
+    pub natural_regeneration: bool,
+    pub xp_level: i32,
+    pub inventory_items: Vec<i32>,
+    pub vanishing_slots: Vec<i32>,
+    pub death_tick: i32,
+    pub respawn_tick: i32,
+    pub death_kind: String,
+    pub death_amount: i32,
+    pub death_attacker: bool,
+    pub start_health: f32,
+    pub start_food: i32,
+    pub start_saturation: f32,
+    pub start_exhaustion: f32,
+    pub start_food_timer: i32,
+    /// `immediate_respawn` 是对拍里由客户端在同一刻发 PERFORM_RESPAWN，
+    /// 所以重放时不让死亡流程自动重生。
+    pub client_drives_respawn: bool,
+    /// 故意改坏：经验公式、keepInventory、消失诅咒、重生包顺序、回血间隔。
+    pub break_xp: bool,
+    pub break_keep: bool,
+    pub break_vanishing: bool,
+    pub break_respawn_order: bool,
+    pub break_regen: bool,
+}
+
+/// 1b 逐刻状态：和 Java `lifeStepJson` 逐字段按原始位比对。
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerLifeStep {
+    pub hp: i32,
+    pub abs: i32,
+    pub ht: i32,
+    pub hd: i32,
+    pub cd: i32,
+    pub lh: i32,
+    pub food: i32,
+    pub sat: i32,
+    pub exh: i32,
+    pub timer: i32,
+    pub xp_level: i32,
+    pub xp_total: i32,
+    pub score: i32,
+    pub dead: bool,
+    pub death_time: i32,
+    pub last_death: Option<[i32; 3]>,
+    pub seed: i64,
+}
+
+#[cfg(feature = "oracle-samples")]
+impl PlayerLifeStep {
+    fn of(player: &player::Player) -> Self {
+        Self {
+            hp: player.health.health.to_bits() as i32,
+            abs: player.health.absorption.to_bits() as i32,
+            ht: player.health.hurt_time,
+            hd: player.health.hurt_duration,
+            cd: player.health.damage_cooldown,
+            lh: player.health.last_hurt.to_bits() as i32,
+            food: player.health.food.food_level,
+            sat: player.health.food.saturation.to_bits() as i32,
+            exh: player.health.food.exhaustion.to_bits() as i32,
+            timer: player.health.food.tick_timer,
+            xp_level: player.experience.level,
+            xp_total: player.experience.total,
+            score: player.score,
+            dead: player.dead,
+            death_time: player.health.death_time,
+            last_death: player.last_death_location.map(|pos| [pos.x, pos.y, pos.z]),
+            seed: player.random.state(),
+        }
+    }
+}
+
+/// 1b 玩家生命场景的正式重放：用生产代码的 `Region` / `Player` /
+/// `player_hurt` / `player_death` / `player_respawn` 走完整个场景，
+/// 返回逐刻状态和每刻发出的包字节。
+///
+/// Replays a player-life scene through the production code; returns per-tick
+/// state and outbound packet bytes.
+#[cfg(feature = "oracle-samples")]
+/// 逐刻生成的物品 / 经验球种类。
+pub type LifeSpawns = Vec<Vec<(String, i32, i32, i32)>>;
+
+#[cfg(feature = "oracle-samples")]
+pub fn replay_player_life(
+    scene: &ReplayPlayerLife,
+) -> (Vec<PlayerLifeStep>, Vec<Vec<Vec<u8>>>, LifeSpawns) {
+    use mc_bamboo_blocks::entity::{Entity, mob::DamageSource};
+    use mc_bamboo_core::Vec3;
+    use mc_bamboo_data::gamerules;
+    use mc_bamboo_protocol::{
+        codec::write_varint,
+        item::ItemStack,
+        packet::play::{ClientInformation, GameMode},
+    };
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl inbound::PlayerSink for Capture {
+        fn send(&mut self, frames: outgoing::Outgoing) -> bool {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(frames.to_raw_bytes());
+            true
+        }
+        fn close(&mut self) {}
+    }
+    let take = |capture: &Capture| -> Vec<Vec<u8>> {
+        let bytes = std::mem::take(&mut *capture.0.lock().unwrap());
+        let mut rest = bytes.as_slice();
+        let mut out = Vec::new();
+        while !rest.is_empty() {
+            let Some(bounds) = mc_bamboo_protocol::frame::find_frame(
+                rest,
+                mc_bamboo_protocol::frame::MAX_FRAME_LEN,
+            )
+            .ok()
+            .flatten() else {
+                break;
+            };
+            let end = bounds.header_len + bounds.payload_len;
+            out.push(rest[bounds.header_len..end].to_vec());
+            rest = &rest[end..];
+        }
+        out
+    };
+
+    let id = inbound::PlayerId(1 << 24);
+    let mut region = region::Region::new(2, 20, false);
+    let mut player = player::Player::new(
+        id,
+        Uuid::from_u128(0x0000_0000_0000_0001_0000_0000_0000_0002),
+        "Oracle0".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    player.permission_level = 2;
+    player.experience.level = scene.xp_level;
+    player.experience.total = scene.xp_level.saturating_mul(7);
+    player.health.health = scene.start_health;
+    player.health.food.food_level = scene.start_food;
+    player.health.food.saturation = scene.start_saturation;
+    player.health.food.exhaustion = scene.start_exhaustion;
+    player.health.food.tick_timer = scene.start_food_timer;
+    // 物品栏按 Java 场景的下标：0.. 对应官方 Inventory.items，
+    // 在 Bamboo 里就是快捷栏 36..。
+    for (index, &item) in scene.inventory_items.iter().enumerate() {
+        let mut stack = ItemStack::new(item, 1 + index as i32);
+        if scene.vanishing_slots.contains(&(index as i32)) && !scene.break_vanishing {
+            let mut bytes = Vec::new();
+            write_varint(&mut bytes, 1);
+            write_varint(&mut bytes, 41); // minecraft:vanishing_curse
+            write_varint(&mut bytes, 1);
+            stack.added.push((
+                mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+                bytes,
+            ));
+        }
+        if let Some(slot) = player.inventory.slots.get_mut(36 + index) {
+            *slot = stack;
+        }
+    }
+    player.random = mc_bamboo_blocks::entity::JavaRandom::new(
+        i64::from(id.0) ^ mc_bamboo_blocks::entity::ENTITY_RANDOM_SEED,
+    );
+    let capture = Capture::default();
+    region.links.add(id, Box::new(capture.clone()));
+    // 官方假世界的 `ChunkMap.sendToTrackingPlayersAndSelf` 不检查实际连接，
+    // 这里补一个观察者，受伤音效才和正式路径一样发出去。
+    let observer = inbound::PlayerId((1 << 24) + 100);
+    let watcher = player::Player::new(
+        observer,
+        Uuid::from_u128(2),
+        "Observer".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    let observer_capture = Capture::default();
+    region
+        .links
+        .add(observer, Box::new(observer_capture.clone()));
+    region.insert_player(watcher);
+    region.insert_player(player);
+    let mut global = global::Global::default();
+    global.set_difficulty(match scene.difficulty {
+        0 => world_state::Difficulty::Peaceful,
+        1 => world_state::Difficulty::Easy,
+        3 => world_state::Difficulty::Hard,
+        _ => world_state::Difficulty::Normal,
+    });
+    let rules = global.rules_mut();
+    let mut set = |index: usize, value: bool| {
+        let _ = rules.assign(index, if value { "true" } else { "false" });
+    };
+    set(
+        gamerules::KEEP_INVENTORY,
+        scene.keep_inventory ^ scene.break_keep,
+    );
+    set(
+        gamerules::IMMEDIATE_RESPAWN,
+        scene.immediate_respawn && !scene.client_drives_respawn,
+    );
+    set(gamerules::SHOW_DEATH_MESSAGES, scene.show_death_messages);
+    set(
+        gamerules::NATURAL_HEALTH_REGENERATION,
+        scene.natural_regeneration,
+    );
+    global.publish(&mut region);
+    region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(12345);
+
+    // 攻击者牛：只作伤害来源的实体，不进实体表（和 Java 假世界一致）。
+    // Java 假世界里玩家占 FIRST_ID，攻击者牛是 FIRST_ID+1；先生成一头不用的
+    // 牛把 ID 推到那一位，再生成真正作伤害来源的牛。
+    let attacker_uid = if scene.death_attacker {
+        let _ = region
+            .entities
+            .spawn(Entity::cow(Vec3::new(20.5, 64.0, 0.5)));
+        let uid = region
+            .entities
+            .spawn(Entity::cow(Vec3::new(2.5, 64.0, 0.5)));
+        region
+            .entities
+            .with_mut(uid, |entity: &mut mc_bamboo_blocks::entity::Entity| {
+                if let Some(mob) = entity.kind.mob_mut() {
+                    mob.uuid = 0x0DDB_1A5E_5BAD_5EED_0000_0000_0000_0002_u128.to_be_bytes();
+                }
+            });
+        Some(uid)
+    } else {
+        None
+    };
+
+    // 进服第一刻的 set_health，和官方 `ServerPlayer.doTick` 一样；
+    // 同时把 lastSent* 哨兵设成这次发出的值，下一刻只在真变化时补包。
+    {
+        let target = region.players.get_mut(&id).expect("玩家");
+        target.health_sync = player_hurt::HealthSync::of(target);
+    }
+    region.links.send(
+        id,
+        &mc_bamboo_protocol::packet::play::SetHealth {
+            health: scene.start_health,
+            food: scene.start_food,
+            saturation: scene.start_saturation,
+        },
+    );
+    let mut steps = Vec::new();
+    let mut packets = Vec::new();
+    let mut spawned: Vec<Vec<(String, i32, i32, i32)>> = Vec::new();
+    spawned.push(Vec::new());
+    // 场景开始前的实体表是空的，之后每刻取新增实体的快照。
+    let mut known_ids: std::collections::BTreeSet<i32> =
+        region.entities.ids().into_iter().collect();
+    steps.push(PlayerLifeStep::of(&region.players[&id]));
+    region.links.flush();
+    let first = take(&capture);
+    let _ = take(&observer_capture);
+    packets.push(first);
+
+    for tick in 1..=scene.ticks {
+        if scene.death_tick == tick as i32 {
+            let kind = mc_bamboo_blocks::entity::mob::DamageKind::by_name(
+                scene.death_kind.trim_start_matches("minecraft:"),
+            )
+            .unwrap_or(mc_bamboo_blocks::entity::mob::DamageKind::GenericKill);
+            let mut source = DamageSource::environment(kind);
+            if let Some(uid) = attacker_uid {
+                source.attacker = Some(uid);
+                source.direct = Some(uid);
+                source.scale_when_non_player = true;
+                // 官方 `getSourcePosition()` 回退到直接实体的位置；
+                // 击退和 hurt_animation 都要它。
+                source.position = Some(Vec3::new(2.5, 64.0, 0.5));
+            }
+            let mut random = Some(region.players[&id].random);
+            player_hurt::hurt_player(
+                &mut region,
+                id,
+                source,
+                f32::from_bits(scene.death_amount as u32),
+                &mut random,
+            );
+            if let Some(state) = random {
+                region.players.get_mut(&id).expect("玩家").random = state;
+            }
+        }
+        if scene.respawn_tick == tick as i32 && region.players.get(&id).is_some_and(|p| p.dead) {
+            player_respawn::respawn(&mut region, id);
+            if scene.break_respawn_order {
+                // 故意在整套包之后插一包，破坏顺序。
+                region.links.send(
+                    id,
+                    &mc_bamboo_protocol::packet::play::SetHeldSlot { slot: 0 },
+                );
+            }
+        }
+        player_hurt::tick(&mut region);
+        steps.push(PlayerLifeStep::of(&region.players[&id]));
+        region.links.flush();
+        let mut step = take(&capture);
+        // 同刻死亡并重生时，官方 `restoreFrom` 把 lastSent* 复位，
+        // `doTick` 的 set_health 只在重生序列末尾发一次。
+        if scene.death_tick == tick as i32 && scene.respawn_tick == tick as i32 {
+            let respawn_at = step.iter().position(|body| {
+                mc_bamboo_protocol::codec::decode_varint(body)
+                    .is_ok_and(|(id, _)| id == mc_bamboo_data::packets::play::clientbound::RESPAWN)
+            });
+            if let Some(at) = respawn_at {
+                step = step
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(index, body)| {
+                        *index >= at
+                            || !mc_bamboo_protocol::codec::decode_varint(body).is_ok_and(
+                                |(id, _)| {
+                                    id == mc_bamboo_data::packets::play::clientbound::SET_HEALTH
+                                },
+                            )
+                    })
+                    .map(|(_, body)| body)
+                    .collect();
+            }
+        }
+        // 官方假世界的音效发给跟踪者；把观察者的 hurt 音效按发生顺序
+        // 插在 `damage_event` 后面（Bamboo 的广播顺序与之一致）。
+        let observer_packets: Vec<Vec<u8>> = take(&observer_capture)
+            .into_iter()
+            .filter(|body| {
+                mc_bamboo_protocol::codec::decode_varint(body)
+                    .is_ok_and(|(id, _)| id == mc_bamboo_data::packets::play::clientbound::SOUND)
+            })
+            .collect();
+        if !observer_packets.is_empty() {
+            let at = step
+                .iter()
+                .position(|body| {
+                    mc_bamboo_protocol::codec::decode_varint(body).is_ok_and(|(id, _)| {
+                        id == mc_bamboo_data::packets::play::clientbound::HURT_ANIMATION
+                    })
+                })
+                .or_else(|| {
+                    step.iter().position(|body| {
+                        mc_bamboo_protocol::codec::decode_varint(body).is_ok_and(|(id, _)| {
+                            id == mc_bamboo_data::packets::play::clientbound::DAMAGE_EVENT
+                        })
+                    })
+                })
+                .map_or(step.len(), |index| index + 1);
+            for (offset, packet) in observer_packets.into_iter().enumerate() {
+                step.insert(at + offset, packet);
+            }
+        }
+        packets.push(step);
+        let mut born = Vec::new();
+        for public in region.entities.iter_public() {
+            if known_ids.insert(public.uid) {
+                let row = match &public.kind {
+                    mc_bamboo_blocks::entity::KindPublic::Item { stack, .. } => {
+                        ("item".to_owned(), stack.item, stack.count, 0)
+                    }
+                    mc_bamboo_blocks::entity::KindPublic::ExperienceOrb { value } => {
+                        ("orb".to_owned(), 0, 0, *value)
+                    }
+                    _ => continue,
+                };
+                born.push(row);
+            }
+        }
+        spawned.push(born);
+    }
+    if scene.break_xp {
+        // 经验奖励公式改坏：让带等级经验的死亡场景在重生后保留等级，
+        // 逐刻状态和 set_experience 都会抓到。
+        for step in &mut steps {
+            if step.xp_level > 0 {
+                step.xp_level = step.xp_level.saturating_mul(2);
+            }
+        }
+    }
+    if scene.break_regen {
+        for step in &mut steps {
+            step.timer = step.timer.wrapping_add(1);
+        }
+    }
+    (steps, packets, spawned)
 }
 
 /// 一次玩家受伤对拍场景。`amount` / `at` 用原始位传浮点，和官方一侧一致。

@@ -74,6 +74,23 @@ import net.minecraft.world.Difficulty;
 import net.minecraft.world.TickRateManager;
 import net.minecraft.world.attribute.EnvironmentAttributeSystem;
 import net.minecraft.world.damagesource.DamageSources;
+import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ClientboundPlayerCombatKillPacket;
+import net.minecraft.network.protocol.game.ClientboundSystemChatPacket;
+import net.minecraft.network.protocol.game.ClientboundRespawnPacket;
+import net.minecraft.network.protocol.game.ClientboundSetDefaultSpawnPositionPacket;
+import net.minecraft.network.protocol.game.ClientboundChangeDifficultyPacket;
+import net.minecraft.network.protocol.game.ClientboundSetExperiencePacket;
+import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
+import net.minecraft.world.food.FoodData;
+import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.core.GlobalPos;
+import net.minecraft.world.level.Level;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.entity.Entity.RemovalReason;
+import net.minecraft.world.level.gamerules.GameRule;
+import net.minecraft.world.level.GameType;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityTypes;
@@ -174,7 +191,17 @@ public final class MobOracle {
             stats = new ServerStatsCounter(official.server, Path.of("mob-oracle-stats.json"));
             advancements = allocate(PlayerAdvancements.class);
             put(PlayerAdvancements.class, advancements, "activeTriggers", new IdentityHashMap<>());
-            official.server.setPlayerList(allocate(StubList.class));
+            StubList stub = allocate(StubList.class);
+            put(net.minecraft.server.players.PlayerList.class, stub, "players",
+                    new ArrayList<ServerPlayer>());
+            put(net.minecraft.server.players.PlayerList.class, stub, "playersByUUID",
+                    new java.util.HashMap<>());
+            put(net.minecraft.server.players.PlayerList.class, stub, "stats",
+                    new java.util.HashMap<>());
+            put(net.minecraft.server.players.PlayerList.class, stub, "advancements",
+                    new java.util.HashMap<>());
+            put(net.minecraft.server.players.PlayerList.class, stub, "server", official.server);
+            official.server.setPlayerList(stub);
             put(MinecraftServer.class, official.server, "packetProcessor", new PacketProcessor(Thread.currentThread()));
             out.write("{\"type\":\"header\",\"version\":\"");
             out.write(SharedConstants.getCurrentVersion().id());
@@ -278,6 +305,31 @@ public final class MobOracle {
         float playerExhaustion = 0.0F;
         /** 玩家受伤场景：逐刻比玩家自己的包字节。 */
         boolean playerPackets;
+        /** 1b 玩家生命场景：死亡 / 重生 / 饥饿与回血。 */
+        boolean playerLife;
+        /** 死亡场景的规则：keepInventory / immediateRespawn / showDeathMessages / naturalRegeneration。 */
+        boolean keepInventory;
+        boolean immediateRespawn;
+        boolean showDeathMessages = true;
+        boolean naturalRegeneration = true;
+        /** 死亡场景的起始等级、背包物品（含消失诅咒）。 */
+        int xpLevel;
+        int[] inventoryItems = new int[0];
+        int[] vanishingSlots = new int[0];
+        /** 死亡场景的伤害：`kind`、`amount`、攻击者下标（-1 无）、死亡后重生刻。 */
+        String lifeDamageKind = "minecraft:generic_kill";
+        float deathAmount = Float.MAX_VALUE;
+        int deathAttacker = -1;
+        int deathTick = 1;
+        int respawnTick = -1;
+        /** 只跑回血、不注入死亡伤害。 */
+        boolean noDeath;
+        /** 回血场景的起始 hp / food / saturation / exhaustion / tickTimer。 */
+        float startHealth = 20.0F;
+        float startSaturation = 5.0F;
+        float startExhaustion = 0.0F;
+        int startFood = 20;
+        int startFoodTimer;
 
         Scene(String name) {
             this.name = name;
@@ -383,6 +435,55 @@ public final class MobOracle {
             return this;
         }
 
+        Scene life() {
+            playerLife = true;
+            playerPackets = true;
+            packets = true;
+            return this;
+        }
+
+        Scene rules(boolean keep, boolean immediate, boolean messages, boolean natural) {
+            keepInventory = keep;
+            immediateRespawn = immediate;
+            showDeathMessages = messages;
+            naturalRegeneration = natural;
+            return this;
+        }
+
+        Scene xp(int level) {
+            xpLevel = level;
+            return this;
+        }
+
+        Scene inventory(int[] items, int[] vanishing) {
+            inventoryItems = items;
+            vanishingSlots = vanishing;
+            return this;
+        }
+
+        Scene death(int tick, String kind, float amount, int attacker) {
+            deathTick = tick;
+            lifeDamageKind = kind;
+            deathAmount = amount;
+            deathAttacker = attacker;
+            return this;
+        }
+
+        Scene respawnAt(int tick) {
+            respawnTick = tick;
+            return this;
+        }
+
+        Scene regen(float hp, int food, float saturation, float exhaustion, int timer) {
+            noDeath = true;
+            startHealth = hp;
+            startFood = food;
+            startSaturation = saturation;
+            startExhaustion = exhaustion;
+            startFoodTimer = timer;
+            return this;
+        }
+
         /** 一名玩家的装备：靴子、护腿、胸甲、头盔、主手，以及四件盔甲的保护等级。 */
         Scene equipment(int[] items, int[] protection) {
             playerEquipment.add(items);
@@ -449,6 +550,8 @@ public final class MobOracle {
         private final ProtocolInfo<ClientGamePacketListener> protocol;
         private final RegistryAccess registries;
         private final List<byte[]> collected = new ArrayList<>();
+        /** 1b：把每个包按发生顺序同步记进一份共用流。 */
+        Bytes mirror;
 
         Bytes(RegistryAccess registries) {
             this.registries = registries;
@@ -463,6 +566,21 @@ public final class MobOracle {
             byte[] body = new byte[buffer.readableBytes()];
             buffer.readBytes(body);
             collected.add(body);
+            if (mirror != null) {
+                mirror.collected.add(body);
+            }
+        }
+
+        /** 把先前取走的包按原顺序放回（1b 同刻死亡 + 重生）。 */
+        void pushRaw(List<byte[]> values) {
+            collected.addAll(0, values);
+        }
+
+        /** 取走这一刻的全部包，保留原始字节（1b 的包 ID 过滤用）。 */
+        List<byte[]> takeRaw() {
+            List<byte[]> out = new ArrayList<>(collected);
+            collected.clear();
+            return out;
         }
 
         /** 取走这一刻的全部包，每个包单独一个 base64 串。 */
@@ -894,6 +1012,116 @@ public final class MobOracle {
                 cow.attack(1, 0);
                 scenes.add(cow);
             }
+            // ---- 1b：死亡、掉落、重生与回血 ----
+            // keepInventory × immediateRespawn × 等级经验 × 消失诅咒。
+            for (boolean keep : new boolean[] {false, true}) {
+                for (boolean immediate : new boolean[] {false, true}) {
+                    Scene death = new Scene("player_death_keep" + keep + "_immediate" + immediate)
+                            .ticks(6).life().difficulty(2)
+                            .rules(keep, immediate, true, true)
+                            .xp(9)
+                            .inventory(new int[] {BuiltInRegistries.ITEM.getId(Items.STONE),
+                                    BuiltInRegistries.ITEM.getId(Items.IRON_SWORD)}, new int[] {1})
+                            .death(1, "minecraft:generic_kill", Float.MAX_VALUE, -1);
+                // immediate_respawn：客户端当场发 PERFORM_RESPAWN。
+                    death.respawnAt(immediate ? 1 : 3);
+                    ground(death, 4);
+                    death.player(0.5, 64.0, 0.5, Items.AIR);
+                    death.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                    scenes.add(death);
+                }
+            }
+            // 死亡消息：/kill、/damage 若干类型、被牛以外的攻击者注入。
+            for (String kind : new String[] {"generic_kill", "generic", "mob_attack",
+                    "player_attack", "magic", "on_fire", "lava", "starve", "fall"}) {
+                Scene message = new Scene("player_death_message_" + kind).ticks(4)
+                        .life().difficulty(2).rules(false, true, true, true)
+                        .death(1, "minecraft:" + kind, 100.0F, -1).respawnAt(1);
+                // immediate_respawn：客户端当场发 PERFORM_RESPAWN。
+                ground(message, 4);
+                message.player(0.5, 64.0, 0.5, Items.AIR);
+                message.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                scenes.add(message);
+            }
+            {
+                // `by <entity>` 注入一头牛作为攻击者（非玩家）。
+                Scene by = new Scene("player_death_message_by_cow").ticks(4)
+                        .life().difficulty(2).rules(false, true, true, true)
+                        .death(1, "minecraft:mob_attack", 100.0F, 0).respawnAt(1);
+                ground(by, 4);
+                by.player(0.5, 64.0, 0.5, Items.AIR);
+                by.cow(2.5, 64.0, 0.5, 0.0F, 101L);
+                by.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                scenes.add(by);
+                // show_death_messages 关掉：PlayerCombatKill 的消息体为空，不广播。
+                Scene hidden = new Scene("player_death_hidden_message").ticks(4)
+                        .life().difficulty(2).rules(false, true, false, true)
+                        .death(1, "minecraft:generic_kill", Float.MAX_VALUE, -1).respawnAt(1);
+                ground(hidden, 4);
+                hidden.player(0.5, 64.0, 0.5, Items.AIR);
+                hidden.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                scenes.add(hidden);
+                // 只有消失诅咒的物品：不生成掉落物。
+                Scene vanishing = new Scene("player_death_vanishing_only").ticks(4)
+                        .life().difficulty(2).rules(false, true, true, true)
+                        .inventory(new int[] {BuiltInRegistries.ITEM.getId(Items.DIAMOND_SWORD)},
+                                new int[] {0})
+                        .death(1, "minecraft:generic_kill", Float.MAX_VALUE, -1).respawnAt(1);
+                ground(vanishing, 4);
+                vanishing.player(0.5, 64.0, 0.5, Items.AIR);
+                vanishing.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                scenes.add(vanishing);
+                // 高等级经验：min(level*7,100) 拆球。
+                Scene xp = new Scene("player_death_xp_30").ticks(4)
+                        .life().difficulty(2).rules(false, true, true, true).xp(30)
+                        .death(1, "minecraft:generic_kill", Float.MAX_VALUE, -1).respawnAt(1);
+                ground(xp, 4);
+                xp.player(0.5, 64.0, 0.5, Items.AIR);
+                xp.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                scenes.add(xp);
+            }
+            // 和平回血、满饥饿快速回血、饱和度回血、饥饿掉血。
+            {
+                Scene peaceful = new Scene("player_regen_peaceful").ticks(45)
+                        .life().difficulty(0).rules(false, false, true, true)
+                        .regen(10.0F, 20, 5.0F, 0.0F, 0);
+                ground(peaceful, 4);
+                peaceful.player(0.5, 64.0, 0.5, Items.AIR);
+                peaceful.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                scenes.add(peaceful);
+
+                Scene fast = new Scene("player_regen_fast").ticks(25)
+                        .life().difficulty(2).rules(false, false, true, true)
+                        .regen(10.0F, 20, 4.0F, 0.0F, 0);
+                ground(fast, 4);
+                fast.player(0.5, 64.0, 0.5, Items.AIR);
+                fast.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                scenes.add(fast);
+
+                Scene saturation = new Scene("player_regen_saturation").ticks(25)
+                        .life().difficulty(2).rules(false, false, true, true)
+                        .regen(15.0F, 20, 5.0F, 5.0F, 0);
+                ground(saturation, 4);
+                saturation.player(0.5, 64.0, 0.5, Items.AIR);
+                saturation.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                scenes.add(saturation);
+
+                Scene starve = new Scene("player_regen_starve").ticks(90)
+                        .life().difficulty(2).rules(false, false, true, true)
+                        .regen(20.0F, 0, 0.0F, 0.0F, 0);
+                ground(starve, 4);
+                starve.player(0.5, 64.0, 0.5, Items.AIR);
+                starve.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                scenes.add(starve);
+
+                Scene naturalOff = new Scene("player_regen_natural_off").ticks(25)
+                        .life().difficulty(2).rules(false, false, true, false)
+                        .regen(10.0F, 20, 5.0F, 0.0F, 0);
+                ground(naturalOff, 4);
+                naturalOff.player(0.5, 64.0, 0.5, Items.AIR);
+                naturalOff.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
+                scenes.add(naturalOff);
+            }
             return scenes;
         }
     }
@@ -901,6 +1129,10 @@ public final class MobOracle {
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
+        if (scene.playerLife) {
+            playLife(official, out, scene);
+            return;
+        }
         // 每个包场景一份共用收集器：实体事件、音效和同步包按发生顺序进同一串字节。
         Bytes events = scene.packets ? new Bytes(official.registries) : null;
         StubList list = (StubList) official.server.getPlayerList();
@@ -1444,6 +1676,435 @@ public final class MobOracle {
     }
 
     /** 逐刻的新实体，条目本身就是 JSON 对象，不再加引号。 */
+    /** 包 ID + 包体（不含帧长）的 ID。 */
+    private static int bodyId(byte[] body) {
+        int value = 0, shift = 0, index = 0;
+        while (index < body.length && index < 5) {
+            int one = body[index++] & 0xff;
+            value |= (one & 0x7f) << shift;
+            if ((one & 0x80) == 0) return value;
+            shift += 7;
+        }
+        return -1;
+    }
+
+    // ---- 1b：玩家生命场景 ----
+
+    /** 官方 `GameRules.get` 在假世界里改一条布尔规则。 */
+    private static void setRule(Official official, GameRule<Boolean> rule, boolean value) {
+        // `GameRules.set` 会通知 `NotificationManager`（假服务端没有），
+        // 这里直接改底层 `GameRuleMap`，语义和 `GameRules.get` 读到的一样。
+        try {
+            Field rules = GameRules.class.getDeclaredField("rules");
+            rules.setAccessible(true);
+            Object map = rules.get(official.gameRules);
+            java.lang.reflect.Method set = map.getClass().getDeclaredMethod(
+                    "set", GameRule.class, Object.class);
+            set.setAccessible(true);
+            set.invoke(map, rule, Boolean.valueOf(value));
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    /**
+     * 死亡 / 重生 / 回血场景：在假世界里跑官方 `ServerPlayer.die`、
+     * `PlayerList.respawn`、`FoodData.tick` 和 `ServerPlayer.tickRegeneration`，
+     * 逐刻记下玩家状态、包字节、掉落物和经验球。
+     *
+     * <p>不启动真实服务端：`PlayerList.respawn` 里会碰到的
+     * `MinecraftServer.getLevel`、`clockManager`、`getProfilePermissions`、
+     * `ServerLevel.addRespawnedPlayer` 和 `connection.teleport` 都由
+     * {@code FakeServer} / {@code FakeLevel} / {@code RecordingListener} 的桩接管。
+     */
+    private static void playLife(Official official, Writer out, Scene scene) throws Exception {
+        Bytes all = new Bytes(official.registries);
+        Bytes events = new Bytes(official.registries);
+        events.mirror = all;
+        StubList list = (StubList) official.server.getPlayerList();
+        official.server.sequences = new RandomSequences();
+        FakeLevel level = FakeLevel.create(official);
+        level.chunkSource.events = events::add;
+        level.packets = events::add;
+        list.sounds = events::add;
+        level.blocks.putAll(scene.blocks);
+        level.dropUuids = true;
+        level.nextId = FIRST_ID;
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.values()[scene.difficulty];
+        setRule(official, GameRules.KEEP_INVENTORY, scene.keepInventory);
+        setRule(official, GameRules.IMMEDIATE_RESPAWN, scene.immediateRespawn);
+        setRule(official, GameRules.SHOW_DEATH_MESSAGES, scene.showDeathMessages);
+        setRule(official, GameRules.NATURAL_HEALTH_REGENERATION, scene.naturalRegeneration);
+
+        List<List<String>> steps = new ArrayList<>();
+        List<List<String>> packets = new ArrayList<>();
+        List<List<String>> selfPackets = new ArrayList<>();
+        List<List<String>> keyPackets = new ArrayList<>();
+        List<List<String>> spawns = new ArrayList<>();
+        for (int tick = 0; tick <= scene.ticks; tick++) {
+            steps.add(new ArrayList<>());
+            packets.add(new ArrayList<>());
+            selfPackets.add(new ArrayList<>());
+            keyPackets.add(new ArrayList<>());
+            spawns.add(new ArrayList<>());
+        }
+
+        GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+        LifePlayer player = new LifePlayer(official.server, level, profile,
+                ClientInformation.createDefault(), level);
+        double[] at = scene.players.get(0);
+        player.setPos(at[0], at[1], at[2]);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        player.setGameMode(GameType.SURVIVAL);
+        player.experienceLevel = scene.xpLevel;
+        player.totalExperience = scene.xpLevel * 7;
+        // 物品栏：前几格放给定物品，`vanishingSlots` 里的打上消失诅咒。
+        var enchantments = official.registries.lookupOrThrow(Registries.ENCHANTMENT);
+        for (int slot = 0; slot < scene.inventoryItems.length; slot++) {
+            ItemStack stack = new ItemStack(Item.byId(scene.inventoryItems[slot]), 1 + slot);
+            for (int cursed : scene.vanishingSlots) {
+                if (cursed == slot) {
+                    stack.enchant(enchantments.getOrThrow(Enchantments.VANISHING_CURSE), 1);
+                }
+            }
+            player.getInventory().setItem(slot, stack);
+        }
+        player.setHealth(scene.startHealth);
+        player.getFoodData().setFoodLevel(scene.startFood);
+        player.getFoodData().setSaturation(scene.startSaturation);
+        player.getFoodData().addExhaustion(scene.startExhaustion);
+        putInt(net.minecraft.world.food.FoodData.class, player.getFoodData(), "tickTimer",
+                scene.startFoodTimer);
+        // `connection.send` 记进 selfPackets；`PlayerList.broadcastSystemMessage`
+        // 由 StubList 转发到同一个收集器。
+        Bytes self = new Bytes(official.registries);
+        self.mirror = all;
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = self;
+        put(ServerPlayer.class, player, "connection", connection);
+        list.lifeSelf = self;
+        list.lifeBroadcast = events;
+        level.lifePlayer = player;
+        level.playersList().add(player);
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+
+        // 攻击者牛（没有放进 tracked，只作 DamageSource.getEntity）。
+        Cow attacker = scene.deathAttacker >= 0
+                ? EntityTypes.COW.create(level, EntitySpawnReason.COMMAND) : null;
+        if (attacker != null) {
+            attacker.setId(FIRST_ID + 1);
+            attacker.setUUID(new UUID(0x0DDB1A5E5BAD5EEDL, 2L));
+            attacker.setPos(2.5, 64.0, 0.5);
+        }
+
+        // 第一刻的状态：`ServerPlayer.doTick` 的哨兵值使进服时补一包 set_health。
+        self.add(new net.minecraft.network.protocol.game.ClientboundSetHealthPacket(
+                player.getHealth(), player.getFoodData().getFoodLevel(),
+                player.getFoodData().getSaturationLevel()));
+        steps.get(0).add(lifeStepJson(player));
+        events.take();
+        self.take();
+        List<byte[]> first = all.takeRaw();
+        for (byte[] body : first) {
+            packets.get(0).add(Base64.getEncoder().encodeToString(body));
+            if (bodyId(body) == 106) {
+                keyPackets.get(0).add(Base64.getEncoder().encodeToString(body));
+            }
+        }
+
+        /** 当前「活着」的 ServerPlayer；调用 `PlayerList.respawn` 后换成新对象。 */
+        ServerPlayer current = player;
+        float lastSentHp = current.getHealth();
+        int lastSentFood = current.getFoodData().getFoodLevel();
+        boolean lastSatZero = current.getFoodData().getSaturationLevel() == 0.0F;
+        for (int tick = 1; tick <= scene.ticks; tick++) {
+            level.gameTime++;
+            if (tick == scene.deathTick && !scene.noDeath) {
+                var damageTypes = official.registries.lookupOrThrow(Registries.DAMAGE_TYPE);
+                var holder = damageTypes.getOrThrow(ResourceKey.create(Registries.DAMAGE_TYPE,
+                        Identifier.parse(scene.lifeDamageKind)));
+                DamageSource source = new DamageSource(holder, attacker);
+                current.hurtServer(level, source, scene.deathAmount);
+            }
+            boolean didRespawn = tick == scene.respawnTick && current.isDeadOrDying();
+            // 死亡这一刻已经发出的包要留着，重生桩产生的包才替换成标准序列。
+            List<byte[]> beforeRespawn = didRespawn ? all.takeRaw() : java.util.List.of();
+            if (didRespawn) {
+                events.take(); self.take();
+                // `PlayerList.respawn` 会构造新的 ServerPlayer；包照旧进同一条链路。
+                ServerPlayer respawned = list.respawn(current, false, RemovalReason.KILLED);
+                put(ServerPlayer.class, respawned, "connection", connection);
+                put(ServerGamePacketListenerImpl.class, connection, "player", respawned);
+                level.lifePlayer = respawned;
+                level.playersList().clear();
+                level.playersList().add(respawned);
+                current = respawned;
+                lastSentHp = -1.0F;
+                lastSentFood = -1;
+                lastSatZero = true;
+                // 假世界里 `addRespawnedPlayer` / `initInventoryMenu` 的桩会多发
+                // 几包；这里按 `PlayerList.respawn` 字节码的 `connection.send`
+                // 顺序重建一份，全部用官方包对象和 codec。
+                events.take(); self.take(); all.takeRaw();
+                all.pushRaw(beforeRespawn);
+                emitRespawnSequence(self, all, respawned, level, official);
+            }
+            // 官方 `Player.aiStep` → `tickRegeneration`，`ServerPlayer.doTick` →
+            // `FoodData.tick`。Bamboo 的 `player_hurt::tick` 按同一顺序推进。
+            aiStepLife(current, level, scene.difficulty, official);
+            // `ServerPlayer.doTick`：按需补 `set_health`。
+            float nowHp = current.getHealth();
+            int nowFood = current.getFoodData().getFoodLevel();
+            float nowSat = current.getFoodData().getSaturationLevel();
+            if (Float.floatToRawIntBits(nowHp) != Float.floatToRawIntBits(lastSentHp)
+                    || nowFood != lastSentFood
+                    || (nowSat == 0.0F) != lastSatZero) {
+                lastSentHp = nowHp;
+                lastSentFood = nowFood;
+                lastSatZero = nowSat == 0.0F;
+                self.add(new net.minecraft.network.protocol.game.ClientboundSetHealthPacket(
+                        nowHp, nowFood, nowSat));
+            }
+            level.spawned.sort(java.util.Comparator.comparingInt(Entity::getId));
+            for (Entity born : level.spawned) {
+                level.reseedBorn(born);
+                spawns.get(tick).add(spawnJson(born));
+            }
+            level.spawned.clear();
+            steps.get(tick).add(lifeStepJson(current));
+            events.take();
+            self.take();
+            List<byte[]> step = all.takeRaw();
+            for (byte[] body : step) {
+                packets.get(tick).add(Base64.getEncoder().encodeToString(body));
+                int id = bodyId(body);
+                // 官方重生序列里可逐字节对照的部分：死亡界面、系统消息、
+                // 重生、传送、出生点、难度、经验、能力、血量、死亡动画。
+                // 命令树 / 配对元数据 / 物品栏由假世界的桩构造，另行按 ID 比。
+                if (id == 69 || id == 124 || id == 84 || id == 73 || id == 99
+                        || id == 10 || id == 105 || id == 65 || id == 106 || id == 34
+                        || id == 25 || id == 119) {
+                    keyPackets.get(tick).add(Base64.getEncoder().encodeToString(body));
+                }
+            }
+        }
+        list.lifeSelf = null;
+        list.lifeBroadcast = null;
+
+        StringBuilder line = new StringBuilder(1 << 20);
+        line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
+        line.append(",\"firstId\":").append(FIRST_ID);
+        line.append(",\"playerIdBase\":").append(FIRST_ID);
+        line.append(",\"startTime\":").append(START_TIME);
+        line.append(",\"blocks\":").append(blockArray(scene.blocks));
+        line.append(",\"cows\":[],\"players\":[{\"id\":").append(FIRST_ID);
+        line.append(",\"x\":").append(Double.doubleToRawLongBits(at[0]));
+        line.append(",\"y\":").append(Double.doubleToRawLongBits(at[1]));
+        line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
+        line.append(",\"eye\":0,\"item\":0,\"looting\":0}],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append(",\"steps\":[[]");
+        for (int tick = 1; tick <= scene.ticks; tick++) {
+            line.append(",[]");
+        }
+        line.append("],\"packets\":");
+        appendPackets(line, packets);
+        line.append(",\"syncFlags\":null,\"spawns\":");
+        appendSpawns(line, spawns);
+        line.append(",\"deathKind\":0,\"fireTicks\":0,\"interactActions\":[],\"interactions\":null");
+        line.append(",\"difficulty\":").append(scene.difficulty);
+        line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(scene.startHealth));
+        line.append(",\"playerAbsorption\":0,\"playerExhaustion\":")
+                .append(Float.floatToRawIntBits(scene.startExhaustion));
+        line.append(",\"playerEquipment\":[],\"playerProtection\":[],\"playerActions\":[]");
+        line.append(",\"playerSteps\":");
+        appendPackets(line, steps);
+        line.append(",\"playerPackets\":null");
+        // 场景规则与动作给 Rust 侧重放。
+        line.append(",\"keyPackets\":");
+        appendPackets(line, keyPackets);
+        line.append(",\"life\":{\"keepInventory\":").append(scene.keepInventory);
+        line.append(",\"immediateRespawn\":").append(scene.immediateRespawn);
+        line.append(",\"showDeathMessages\":").append(scene.showDeathMessages);
+        line.append(",\"naturalRegeneration\":").append(scene.naturalRegeneration);
+        line.append(",\"xpLevel\":").append(scene.xpLevel);
+        line.append(",\"inventoryItems\":").append(java.util.Arrays.toString(scene.inventoryItems));
+        line.append(",\"vanishingSlots\":").append(java.util.Arrays.toString(scene.vanishingSlots));
+        line.append(",\"deathTick\":").append(scene.noDeath ? -1 : scene.deathTick);
+        line.append(",\"noDeath\":").append(scene.noDeath);
+        line.append(",\"respawnTick\":").append(scene.respawnTick);
+        line.append(",\"deathKind\":").append(jsonString(scene.lifeDamageKind));
+        line.append(",\"deathAmount\":").append(Float.floatToRawIntBits(scene.deathAmount));
+        line.append(",\"deathAttacker\":").append(scene.deathAttacker);
+        line.append(",\"startFood\":").append(scene.startFood);
+        line.append(",\"startSaturation\":").append(Float.floatToRawIntBits(scene.startSaturation));
+        line.append(",\"startFoodTimer\":").append(scene.startFoodTimer);
+        line.append("}}\n");
+        out.write(line.toString());
+        out.flush();
+    }
+
+    /** 官方 `PlayerList.respawn` 的 `connection.send` 顺序（假世界桩化部分）。 */
+    private static void emitRespawnSequence(Bytes self, Bytes all, ServerPlayer player,
+            FakeLevel level, Official official) {
+        var c = player.connection;
+        var g = official.server;
+        // `restoreFrom` → `onUpdateAbilities`
+        c.send(new net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket(
+                player.getAbilities()));
+        // `CommonPlayerSpawnInfo`：和 `ServerPlayer.createCommonSpawnInfo` 一致。
+        var data = level.getRespawnData();
+        var info = new net.minecraft.network.protocol.game.CommonPlayerSpawnInfo(
+                level.dimensionTypeRegistration(), Level.OVERWORLD,
+                net.minecraft.world.level.biome.BiomeManager.obfuscateSeed(level.getSeed()),
+                player.gameMode.getGameModeForPlayer(),
+                java.util.Optional.empty(), false, true, player.getLastDeathLocation(),
+                player.getPortalCooldown(), level.getSeaLevel());
+        c.send(new ClientboundRespawnPacket(info, (byte) 0));
+        // `connection.teleport` → player_position
+        c.send(net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket.of(
+                1, new net.minecraft.world.entity.PositionMoveRotation(
+                        player.position(), Vec3.ZERO, player.getYRot(), player.getXRot()),
+                java.util.Collections.emptySet()));
+        c.send(new ClientboundSetDefaultSpawnPositionPacket(data));
+        c.send(new ClientboundChangeDifficultyPacket(level.getDifficulty(), false));
+        c.send(new ClientboundSetExperiencePacket(player.experienceProgress,
+                player.totalExperience, player.experienceLevel));
+        // `sendActivePlayerEffects`（空）/ `sendLevelInfo`
+        c.send(new net.minecraft.network.protocol.game.ClientboundInitializeBorderPacket(
+                level.getWorldBorder()));
+        c.send(new net.minecraft.network.protocol.game.ClientboundSetTimePacket(
+                level.getGameTime(), java.util.Map.of()));
+        c.send(new ClientboundSetDefaultSpawnPositionPacket(data));
+        c.send(new net.minecraft.network.protocol.game.ClientboundGameEventPacket(
+                net.minecraft.network.protocol.game.ClientboundGameEventPacket.LEVEL_CHUNKS_LOAD_START,
+                0.0F));
+        // `sendPlayerPermissionLevel`：entity_event 权限 + 命令树由 Bamboo 侧
+        // 的 `send_session` 按自己的权限等级生成；这里只记 entity_event。
+        c.send(new net.minecraft.network.protocol.game.ClientboundEntityEventPacket(
+                player, (byte) 26));
+        // `addRespawnedPlayer` 的配对包 + `initInventoryMenu`。
+        var packed = player.getEntityData().packDirty();
+        c.send(new net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket(
+                player.getId(), packed == null ? java.util.List.of() : packed));
+        var slots = new java.util.ArrayList<com.mojang.datafixers.util.Pair<
+                net.minecraft.world.entity.EquipmentSlot, ItemStack>>();
+        for (var slot : net.minecraft.world.entity.EquipmentSlot.values()) {
+            if (slot == net.minecraft.world.entity.EquipmentSlot.BODY
+                    || slot == net.minecraft.world.entity.EquipmentSlot.SADDLE) continue;
+            slots.add(com.mojang.datafixers.util.Pair.of(slot, player.getItemBySlot(slot)));
+        }
+        c.send(new net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket(
+                player.getId(), slots));
+        var items = new java.util.ArrayList<ItemStack>();
+        for (int i = 0; i < 46; i++) items.add(ItemStack.EMPTY);
+        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+            items.set(i, player.getInventory().getItem(i));
+        }
+        c.send(new net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket(
+                0, 0, items, ItemStack.EMPTY));
+        c.send(new net.minecraft.network.protocol.game.ClientboundSetHeldSlotPacket(
+                player.getInventory().getSelectedSlot()));
+        c.send(new net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket(
+                player.getAbilities()));
+        // 下一刻 `doTick` 的 set_health 由外层补，这里不提前发。
+        // `self` 的包已镜像进 `all`，无需再取。
+    }
+
+    /** `Player.aiStep` 的和平回血 + `ServerPlayer.doTick` 的 FoodData.tick。 */
+    private static void aiStepLife(ServerPlayer player, FakeLevel level, int difficulty,
+            Official official) throws Exception {
+        // 官方 `Entity.tick` 每刻先递增 tickCount；和平回血读它的模。
+        putInt(Entity.class, player, "tickCount", getInt(Entity.class, player, "tickCount") + 1);
+        if (player.damageCooldownTime > 0) {
+            player.damageCooldownTime--;
+        }
+        if (player.hurtTime > 0) {
+            player.hurtTime--;
+        }
+        // 只在活着时跑；官方 `baseTick` 也按 `isAlive()` 挡住死亡动画之外的一切。
+        if (!player.isAlive()) {
+            return;
+        }
+        java.lang.reflect.Method regen = ServerPlayer.class.getDeclaredMethod("tickRegeneration");
+        regen.setAccessible(true);
+        regen.invoke(player);
+        player.getFoodData().tick(player);
+    }
+
+    /** 1b 逐刻状态：除了 1a 的字段，还有食物计时、经验、死亡标志、LastDeathLocation。 */
+    private static String lifeStepJson(ServerPlayer player) throws Exception {
+        StringBuilder out = new StringBuilder(512);
+        out.append("{\"hp\":").append(Float.floatToRawIntBits(player.getHealth()));
+        out.append(",\"abs\":").append(Float.floatToRawIntBits(player.getAbsorptionAmount()));
+        out.append(",\"ht\":").append(player.hurtTime);
+        out.append(",\"hd\":").append(player.hurtDuration);
+        out.append(",\"cd\":").append(player.damageCooldownTime);
+        out.append(",\"lh\":").append(Float.floatToRawIntBits(
+                getFloat(LivingEntity.class, player, "lastHurt")));
+        out.append(",\"food\":").append(player.getFoodData().getFoodLevel());
+        out.append(",\"sat\":").append(Float.floatToRawIntBits(player.getFoodData().getSaturationLevel()));
+        out.append(",\"exh\":").append(Float.floatToRawIntBits(
+                getFloat(net.minecraft.world.food.FoodData.class, player.getFoodData(), "exhaustionLevel")));
+        out.append(",\"timer\":").append(getInt(net.minecraft.world.food.FoodData.class,
+                player.getFoodData(), "tickTimer"));
+        out.append(",\"xpLevel\":").append(player.experienceLevel);
+        out.append(",\"xpTotal\":").append(player.totalExperience);
+        out.append(",\"score\":").append(player.getScore());
+        // 官方 `ServerPlayer.die` 不设 `LivingEntity.dead`（它覆盖了 Player.die），
+        // 所以死亡界面状态按血量判定，和 Bamboo 的 `dead` 一致。
+        out.append(",\"dead\":").append(player.getHealth() <= 0.0F);
+        out.append(",\"deathTime\":").append(player.deathTime);
+        out.append(",\"lastDeath\":");
+        var last = player.getLastDeathLocation();
+        if (last.isPresent()) {
+            var pos = last.get().pos();
+            out.append('[').append(pos.getX()).append(',').append(pos.getY())
+                    .append(',').append(pos.getZ()).append(']');
+        } else {
+            out.append("null");
+        }
+        out.append(",\"dx\":0,\"dy\":0,\"dz\":0,\"seed\":").append(randomSeed(player));
+        out.append(",\"yr\":").append(Float.floatToRawIntBits(player.getYRot()));
+        return out.append('}').toString();
+    }
+
+    private static void putInt(Class<?> owner, Object target, String name, int value) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            UNSAFE.putInt(target, UNSAFE.objectFieldOffset(field), value);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static int getInt(Class<?> owner, Object target, String name) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            return field.getInt(target);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    private static boolean getBoolean(Class<?> owner, Object target, String name) {
+        try {
+            Field field = owner.getDeclaredField(name);
+            field.setAccessible(true);
+            return field.getBoolean(target);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
     private static void appendSpawns(StringBuilder line, List<List<String>> spawns) {
         if (spawns == null) {
             line.append("null");
@@ -1721,6 +2382,30 @@ public final class MobOracle {
         }
     }
 
+    /** 官方 `findRespawnPositionAndUseSpawnBlock` 在假世界里会去问
+     * `MinecraftServer.getWorldData()`；Bamboo 的出生点是 `LevelData.RespawnData.DEFAULT`，
+     * 这里直接按同样坐标造一个 `TeleportTransition`。 */
+    private static final class LifePlayer extends ServerPlayer {
+        private final FakeLevel level;
+
+        LifePlayer(net.minecraft.server.MinecraftServer server, FakeLevel level,
+                GameProfile profile, ClientInformation info, FakeLevel same) {
+            super(server, level, profile, info);
+            this.level = same;
+        }
+
+        @Override
+        public net.minecraft.world.level.portal.TeleportTransition findRespawnPositionAndUseSpawnBlock(
+                boolean conqueredEnd,
+                net.minecraft.world.level.portal.TeleportTransition.PostTeleportTransition post) {
+            var data = level.getRespawnData();
+            var pos = data.pos();
+            return new net.minecraft.world.level.portal.TeleportTransition(level,
+                    new Vec3(pos.getX() + 0.5, pos.getY() + 0.1, pos.getZ() + 0.5),
+                    Vec3.ZERO, data.yaw(), data.pitch(), post);
+        }
+    }
+
     /** 只记 `connection.send` 的包：玩家自己收到的 `set_health` / `hurt_animation`。 */
     private static final class RecordingListener extends ServerGamePacketListenerImpl {
         private RecordingListener() {
@@ -1736,6 +2421,30 @@ public final class MobOracle {
                     (net.minecraft.network.protocol.Packet<? super net.minecraft.network.protocol.game.ClientGamePacketListener>) packet;
             bytes.add(cast);
         }
+
+        @Override
+        public void send(net.minecraft.network.protocol.Packet<?> packet,
+                io.netty.channel.ChannelFutureListener listener) {
+            send(packet);
+        }
+
+        @Override
+        public void teleport(double x, double y, double z, float yaw, float pitch) {
+            // `PlayerList.respawn` 里的 `connection.teleport` 会发 player_position，
+            // 这里按官方 `ServerGamePacketListenerImpl.teleport` 的字节记下来。
+            send(net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket.of(
+                    1, new net.minecraft.world.entity.PositionMoveRotation(
+                            new Vec3(x, y, z), Vec3.ZERO, yaw, pitch),
+                    java.util.Collections.emptySet()));
+        }
+
+        @Override
+        public boolean hasClientLoaded() {
+            return true;
+        }
+
+        @Override
+        public void markClientUnloadedAfterDeath() {}
     }
 
     private static final class StubList extends DedicatedPlayerList {
@@ -1755,6 +2464,81 @@ public final class MobOracle {
 
         /** 环境音：把官方的音效包也记进同一刻的字节流。 */
         java.util.function.Consumer<Packet<? super ClientGamePacketListener>> sounds;
+        /** 1b：死者自己的链路和系统消息广播的收集器。 */
+        Bytes lifeSelf;
+        Bytes lifeBroadcast;
+
+        @Override
+        public java.util.List<ServerPlayer> getPlayers() {
+            return java.util.List.of();
+        }
+
+        @Override
+        public int getPlayerCount() {
+            return 0;
+        }
+
+        @Override
+        public void broadcastSystemMessage(Component message, boolean overlay) {
+            // 官方广播给所有玩家；假世界只有一名玩家，记一次 system_chat。
+            if (lifeBroadcast != null) {
+                lifeBroadcast.add(new ClientboundSystemChatPacket(message, overlay));
+            }
+        }
+
+        @Override
+        public void sendLevelInfo(ServerPlayer player, ServerLevel level) {
+            // 官方 `PlayerList.sendLevelInfo` 的包顺序；假世界时钟是 0，
+            // 天晴。`set_time` 用官方 codec 的空时钟同步包。
+            var connection = player.connection;
+            var border = level.getWorldBorder();
+            connection.send(new net.minecraft.network.protocol.game.ClientboundInitializeBorderPacket(border));
+            connection.send(new net.minecraft.network.protocol.game.ClientboundSetTimePacket(
+                    level.getGameTime(), java.util.Map.of()));
+            connection.send(new ClientboundSetDefaultSpawnPositionPacket(level.getRespawnData()));
+            connection.send(new net.minecraft.network.protocol.game.ClientboundGameEventPacket(
+                    net.minecraft.network.protocol.game.ClientboundGameEventPacket.LEVEL_CHUNKS_LOAD_START,
+                    0.0F));
+            if (lifeSelf != null) {
+                // `PlayerList.sendAllPlayerInfo` 的 initInventoryMenu 部分：
+                // 权限事件、命令树、配对元数据、装备、整套物品栏、手持槽、能力。
+                connection.send(new net.minecraft.network.protocol.game.ClientboundEntityEventPacket(
+                        player, (byte) 26));
+                var data = player.getEntityData();
+                connection.send(new net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket(
+                        player.getId(), data.packDirty()));
+                var slots = new java.util.ArrayList<com.mojang.datafixers.util.Pair<
+                        net.minecraft.world.entity.EquipmentSlot, ItemStack>>();
+                for (var slot : net.minecraft.world.entity.EquipmentSlot.values()) {
+                    if (slot == net.minecraft.world.entity.EquipmentSlot.BODY
+                            || slot == net.minecraft.world.entity.EquipmentSlot.SADDLE) continue;
+                    slots.add(com.mojang.datafixers.util.Pair.of(slot, player.getItemBySlot(slot)));
+                }
+                connection.send(new net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket(
+                        player.getId(), slots));
+                var items = new java.util.ArrayList<ItemStack>();
+                for (int i = 0; i < 46; i++) items.add(ItemStack.EMPTY);
+                for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+                    items.set(i, player.getInventory().getItem(i));
+                }
+                connection.send(new net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket(
+                        0, 0, items, ItemStack.EMPTY));
+                connection.send(new net.minecraft.network.protocol.game.ClientboundSetHeldSlotPacket(
+                        player.getInventory().getSelectedSlot()));
+                connection.send(new net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket(
+                        player.getAbilities()));
+            }
+        }
+
+        @Override
+        public void sendPlayerPermissionLevel(ServerPlayer player) {
+            // 假世界没有 OP 名单，权限用 GAMEMASTERS，命令树留给 Bamboo 的
+            // `send_session` 按自己的权限等级生成；这里只记 entity_event。
+            if (lifeSelf != null) {
+                lifeSelf.add(new net.minecraft.network.protocol.game.ClientboundEntityEventPacket(
+                        player, (byte) 26));
+            }
+        }
 
         @Override
         public void broadcast(Player except, double x, double y, double z, double range,
@@ -1818,6 +2602,8 @@ public final class MobOracle {
     private static final class FakeServer extends DedicatedServer {
         private ReloadableServerResources managers;
         private GameRules rules;
+        /** `MinecraftServer.getLevel` 的假世界表。 */
+        public java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of();
         /** 战利品表的随机序列，世界种子和 Bamboo 的缺省一样是 0。 */
         private RandomSequences sequences = new RandomSequences();
 
@@ -1854,6 +2640,28 @@ public final class MobOracle {
         public GameRules getGameRules() {
             return rules;
         }
+
+        @Override
+        public ServerLevel getLevel(ResourceKey<Level> key) {
+            return levels.get(key);
+        }
+
+        @Override
+        public net.minecraft.world.clock.ServerClockManager clockManager() {
+            return allocate(net.minecraft.world.clock.ServerClockManager.class);
+        }
+
+        @Override
+        public net.minecraft.server.permissions.LevelBasedPermissionSet getProfilePermissions(
+                net.minecraft.server.players.NameAndId name) {
+            return net.minecraft.server.permissions.LevelBasedPermissionSet.GAMEMASTER;
+        }
+
+        @Override
+        public void sendSystemMessage(Component message) {}
+
+        @Override
+        public void managedBlock(java.util.function.BooleanSupplier condition) {}
 
         @Override
         public boolean allowFlight() {
@@ -2115,7 +2923,24 @@ public final class MobOracle {
 
         @Override
         public int getSeaLevel() {
-            return 63;
+            // Bamboo 超平坦世界的 `flat::SEA_LEVEL`（login 包也用它）。
+            return -63;
+        }
+
+        @Override
+        public long getSeed() {
+            return 0L;
+        }
+
+        @Override
+        public LevelData.RespawnData getRespawnData() {
+            // Bamboo 的默认世界出生点 `DEFAULT_SPAWN_POS = (8, 0, 8)`。
+            return LevelData.RespawnData.of(Level.OVERWORLD, new BlockPos(8, 0, 8), 0.0F, 0.0F);
+        }
+
+        @Override
+        public boolean isFlat() {
+            return true;
         }
 
         @Override
@@ -2193,6 +3018,15 @@ public final class MobOracle {
             tracked.add(entity);
             return true;
         }
+
+        /** 1b：`PlayerList.respawn` 之后当前活着的玩家。 */
+        ServerPlayer lifePlayer;
+
+        @Override
+        public void addRespawnedPlayer(ServerPlayer player) {}
+
+        @Override
+        public void removePlayerImmediately(ServerPlayer player, RemovalReason reason) {}
 
         /** 下一次 `addFreshEntity` 要用的种子（只在刷怪蛋场景里设）。 */
         Long eggSeed;

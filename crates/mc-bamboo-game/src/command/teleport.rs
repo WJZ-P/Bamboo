@@ -296,7 +296,24 @@ pub(crate) fn place_player_at_respawn(
     yaw: f32,
     pitch: f32,
 ) {
-    move_player(region, id, position, RotationPlan::Absolute { yaw, pitch });
+    // `PlayerList.respawn` 的 `connection.teleport` 已经发过 player_position；
+    // 这里只更新服务端位置 / 朝向 / player_grid，不再发第二包。
+    let tick = region.tick;
+    let Region {
+        players,
+        player_grid,
+        ..
+    } = region;
+    if let Some(player) = players.get_mut(&id) {
+        let yaw = mc_bamboo_command::wrap_degrees(yaw);
+        let pitch = pitch.clamp(-90.0, 90.0);
+        player.yaw = yaw;
+        player.head_yaw = yaw;
+        player.pitch = pitch;
+        player.on_ground = true;
+        player.teleport.sent_at = tick;
+        crate::movement::teleport_command_state(player, player_grid, position);
+    }
 }
 
 /// 官方 `Entity.teleportTo`：非玩家实体没有传送确认包，位置直接写进实体表，

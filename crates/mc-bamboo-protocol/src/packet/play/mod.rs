@@ -193,6 +193,23 @@ impl ClientboundPacket for PlayerCombatEnter {
     fn write_body(&self, _out: &mut Vec<u8>) {}
 }
 
+/// 离开战斗，官方 `ClientboundPlayerCombatEndPacket`。`duration` 是战斗经过的刻数。
+///
+/// Vanilla `ClientboundPlayerCombatEndPacket`: leaves combat; `duration` is
+/// the number of ticks the combat lasted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerCombatEnd {
+    pub duration: i32,
+}
+
+impl ClientboundPacket for PlayerCombatEnd {
+    const ID: i32 = clientbound::PLAYER_COMBAT_END;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.duration);
+    }
+}
+
 /// 死亡界面，官方 `ClientboundPlayerCombatKillPacket`。只发给死者自己。
 ///
 /// Vanilla `ClientboundPlayerCombatKillPacket`: the death screen, sent to the
@@ -661,6 +678,7 @@ mod tests {
             (SetHeldSlot::ID, 107),
             (HurtAnimation::ID, 43),
             (PlayerCombatEnter::ID, 68),
+            (PlayerCombatEnd::ID, 67),
             (PlayerCombatKill::ID, 69),
             (Respawn::ID, 84),
             (SwingAnimation::ID, 123),
