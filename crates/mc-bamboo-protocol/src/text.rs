@@ -185,6 +185,16 @@ pub const fn is_allowed_chat_character(character: char) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranslateArg(Tag);
 
+impl TranslateArg {
+    /// 参数自己的线上标签，供需要按官方键序自己拼组件的调用方使用。
+    ///
+    /// The argument's wire tag, for callers that assemble a component with the
+    /// official key order.
+    pub fn into_tag(self) -> Tag {
+        self.0
+    }
+}
+
 impl From<Component> for TranslateArg {
     fn from(component: Component) -> Self {
         Self(component.0)

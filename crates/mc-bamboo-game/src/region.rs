@@ -78,7 +78,20 @@ fn spawn_position(spawn: RespawnData) -> Vec3 {
     )
 }
 
-const ABILITIES: PlayerAbilities = PlayerAbilities {
+/// 官方 `ServerPlayer.onUpdateAbilities`：能力按当前游戏模式推。
+pub(crate) fn abilities_for(game_mode: GameMode) -> PlayerAbilities {
+    let creative = matches!(game_mode, GameMode::Creative | GameMode::Spectator);
+    PlayerAbilities {
+        invulnerable: creative,
+        flying: game_mode == GameMode::Spectator,
+        can_fly: creative,
+        instant_build: game_mode == GameMode::Creative,
+        flying_speed: ABILITIES.flying_speed,
+        walking_speed: ABILITIES.walking_speed,
+    }
+}
+
+pub(crate) const ABILITIES: PlayerAbilities = PlayerAbilities {
     invulnerable: true,
     flying: false,
     can_fly: true,

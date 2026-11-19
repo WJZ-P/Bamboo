@@ -282,6 +282,40 @@ fn move_target(region: &mut Region, target: Target, absolute: Vec3, plan: Rotati
     }
 }
 
+/// 重生时把玩家放到出生点：和 `/tp` 的 `RotationPlan::Absolute` 走同一段移动，
+/// `player_grid`、朝向和带确认的 `player_position` 都交给 `move_player`。
+/// 重生点在别的岛时，主控按玩家所在区块整行搬过去。
+///
+/// Respawn placement: the same move as `/tp` with an absolute rotation. The
+/// grid, facing and teleport-confirmation packet all come from `move_player`;
+/// a spawn on another island is relocated by the master.
+pub(crate) fn place_player_at_respawn(
+    region: &mut Region,
+    id: PlayerId,
+    position: Vec3,
+    yaw: f32,
+    pitch: f32,
+) {
+    // `PlayerList.respawn` 的 `connection.teleport` 已经发过 player_position；
+    // 这里只更新服务端位置 / 朝向 / player_grid，不再发第二包。
+    let tick = region.tick;
+    let Region {
+        players,
+        player_grid,
+        ..
+    } = region;
+    if let Some(player) = players.get_mut(&id) {
+        let yaw = mc_bamboo_command::wrap_degrees(yaw);
+        let pitch = pitch.clamp(-90.0, 90.0);
+        player.yaw = yaw;
+        player.head_yaw = yaw;
+        player.pitch = pitch;
+        player.on_ground = true;
+        player.teleport.sent_at = tick;
+        crate::movement::teleport_command_state(player, player_grid, position);
+    }
+}
+
 /// 官方 `Entity.teleportTo`：非玩家实体没有传送确认包，位置直接写进实体表，
 /// 下一刻的 `entity_tracking::sync` 按新位置发同步包。
 ///

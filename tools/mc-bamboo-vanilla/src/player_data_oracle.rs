@@ -817,6 +817,21 @@ fn check_player_fields(report: &mut Report, name: &str, data: &PlayerData, field
         format!("{name}: XpSeed"),
     );
     report.check(get("score") == json!(data.score), format!("{name}: Score"));
+    // 官方 `GlobalPos.CODEC` 写出来是 {dimension, pos:[x,y,z]} 的规范 JSON。
+    let expected_death = match &data.last_death_location {
+        Some((dimension, pos)) => json!({
+            "type": 10,
+            "values": {
+                "dimension": {"type": 8, "value": dimension},
+                "pos": {"type": 11, "values": [pos[0], pos[1], pos[2]]},
+            },
+        }),
+        None => json!({}),
+    };
+    report.check(
+        get("last_death_location") == expected_death,
+        format!("{name}: LastDeathLocation"),
+    );
     report.check(
         get("food_level") == json!(data.food_level),
         format!("{name}: foodLevel"),
@@ -1120,6 +1135,14 @@ fn player_cases() -> Vec<(String, PlayerData)> {
     extreme_food.food_exhaustion = 39.5;
     cases.push(("player extreme health and food".into(), extreme_food));
 
+    // 1b：`LastDeathLocation` 只有 Optional 非空才写，`GlobalPos.CODEC` 是
+    // dimension 字符串 + pos 三个 int 的复合标签。
+    let mut died = cases[0].1.clone();
+    died.health = 0.0;
+    died.death_time = 5;
+    died.last_death_location = Some((player_data::OVERWORLD.to_owned(), [-1234, -59, 9876]));
+    cases.push(("player last death location".into(), died));
+
     let mut unknown = cases[3].1.clone();
     let mut tag = unknown.encode();
     if let Tag::Compound(entries) = &mut tag {
@@ -1195,6 +1218,12 @@ fn player_spec(data: &PlayerData) -> Value {
     });
     if let Some(previous) = data.previous_game_type {
         spec["previous_game_type"] = json!(previous);
+    }
+    if let Some((dimension, pos)) = &data.last_death_location {
+        spec["last_death_dimension"] = json!(dimension);
+        spec["last_death_x"] = json!(pos[0]);
+        spec["last_death_y"] = json!(pos[1]);
+        spec["last_death_z"] = json!(pos[2]);
     }
     if !data.preserved.is_empty() {
         spec["unknown_tag"] = json!("keep");

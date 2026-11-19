@@ -533,6 +533,11 @@ public final class PlayerDataOracle {
             fields.addProperty("seen_credits", input.getBooleanOr("seenCredits", false));
             fields.addProperty("spawn_extra_particles_on_fall",
                     input.getBooleanOr("spawn_extra_particles_on_fall", false));
+            // `LastDeathLocation` 是 GlobalPos.CODEC：只有 Optional 非空才写。
+            fields.add("last_death_location", input.read("LastDeathLocation",
+                    net.minecraft.core.GlobalPos.CODEC)
+                    .map(value -> net.minecraft.core.GlobalPos.CODEC.encodeStart(ops(), value).getOrThrow())
+                    .map(Oracle::canonical).orElseGet(() -> new JsonObject()));
             return fields;
         }
 
@@ -566,6 +571,9 @@ public final class PlayerDataOracle {
             tag.putInt("XpTotal", input.getIntOr("XpTotal", 0));
             tag.putInt("XpSeed", input.getIntOr("XpSeed", 0));
             tag.putInt("Score", input.getIntOr("Score", 0));
+            input.read("LastDeathLocation", net.minecraft.core.GlobalPos.CODEC)
+                    .ifPresent(value -> putCodec(tag, "LastDeathLocation",
+                            net.minecraft.core.GlobalPos.CODEC, value));
             tag.putInt("foodLevel", input.getIntOr("foodLevel", 20));
             tag.putInt("foodTickTimer", input.getIntOr("foodTickTimer", 0));
             tag.putFloat("foodSaturationLevel", input.getFloatOr("foodSaturationLevel", 5.0F));
@@ -625,6 +633,18 @@ public final class PlayerDataOracle {
             tag.putInt("XpTotal", spec.get("xp_total").getAsInt());
             tag.putInt("XpSeed", spec.get("xp_seed").getAsInt());
             tag.putInt("Score", spec.get("score").getAsInt());
+            if (spec.has("last_death_dimension")) {
+                putCodec(tag, "LastDeathLocation", net.minecraft.core.GlobalPos.CODEC,
+                        net.minecraft.core.GlobalPos.of(
+                                net.minecraft.resources.ResourceKey.create(
+                                        net.minecraft.core.registries.Registries.DIMENSION,
+                                        net.minecraft.resources.Identifier.parse(
+                                                spec.get("last_death_dimension").getAsString())),
+                                new BlockPos(
+                                        spec.get("last_death_x").getAsInt(),
+                                        spec.get("last_death_y").getAsInt(),
+                                        spec.get("last_death_z").getAsInt())));
+            }
             tag.putInt("foodLevel", spec.get("food_level").getAsInt());
             tag.putInt("foodTickTimer", spec.get("food_tick_timer").getAsInt());
             tag.putFloat("foodSaturationLevel", spec.get("food_saturation").getAsFloat());

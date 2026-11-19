@@ -93,6 +93,11 @@ pub struct PlayerData {
     pub xp_total: i32,
     pub xp_seed: i32,
     pub score: i32,
+    /// `LastDeathLocation`（`GlobalPos`）：维度名 + 方块坐标；None 表示不写这个键。
+    ///
+    /// Vanilla `LastDeathLocation` (`GlobalPos`): dimension plus block position.
+    /// `None` means the key is absent.
+    pub last_death_location: Option<(String, [i32; 3])>,
     pub food_level: i32,
     pub food_tick_timer: i32,
     pub food_saturation: f32,
@@ -183,6 +188,7 @@ impl Default for PlayerData {
             xp_total: 0,
             xp_seed: 0,
             score: DEFAULT_SCORE,
+            last_death_location: None,
             food_level: DEFAULT_FOOD_LEVEL,
             food_tick_timer: 0,
             food_saturation: 5.0,
@@ -225,6 +231,7 @@ const KNOWN_KEYS: &[&str] = &[
     "XpTotal",
     "XpSeed",
     "Score",
+    "LastDeathLocation",
     "foodLevel",
     "foodTickTimer",
     "foodSaturationLevel",
@@ -334,6 +341,19 @@ impl PlayerData {
         push(&mut root, "XpTotal", Tag::Int(self.xp_total));
         push(&mut root, "XpSeed", Tag::Int(self.xp_seed));
         push(&mut root, "Score", Tag::Int(self.score));
+        if let Some((dimension, pos)) = &self.last_death_location {
+            push(
+                &mut root,
+                "LastDeathLocation",
+                Tag::Compound(vec![
+                    ("dimension".to_owned(), Tag::String(dimension.clone())),
+                    (
+                        "pos".to_owned(),
+                        Tag::IntArray(vec![pos[0], pos[1], pos[2]]),
+                    ),
+                ]),
+            );
+        }
         push(&mut root, "foodLevel", Tag::Int(self.food_level));
         push(&mut root, "foodTickTimer", Tag::Int(self.food_tick_timer));
         push(
@@ -401,6 +421,10 @@ impl PlayerData {
         data.xp_total = opt_int(entries, "XpTotal", 0)?;
         data.xp_seed = opt_int(entries, "XpSeed", data.xp_seed)?;
         data.score = opt_int(entries, "Score", DEFAULT_SCORE)?;
+        data.last_death_location = match field_of(entries, "LastDeathLocation") {
+            Some(tag) => Some(global_pos(tag)?),
+            None => None,
+        };
         data.food_level = opt_int(entries, "foodLevel", DEFAULT_FOOD_LEVEL)?;
         data.food_tick_timer = opt_int(entries, "foodTickTimer", 0)?;
         data.food_saturation = opt_f32(entries, "foodSaturationLevel", 5.0)?;
@@ -557,6 +581,23 @@ fn bad(name: &'static str, message: impl Into<String>) -> PlayerDataError {
         name,
         message: message.into(),
     }
+}
+
+/// `GlobalPos.CODEC`：复合标签里的 `dimension` 字符串和 `pos` 三个 int。
+/// 客户端 / 存档里来的坏值一律报错，不悄悄丢掉。
+fn global_pos(tag: &Tag) -> Result<(String, [i32; 3]), PlayerDataError> {
+    let entries = compound(tag, "LastDeathLocation")?;
+    let dimension = opt_string(entries, "dimension", OVERWORLD)?;
+    let pos = match field_of(entries, "pos") {
+        Some(Tag::IntArray(values)) if values.len() == 3 => [values[0], values[1], values[2]],
+        Some(Tag::List(values)) if values.len() == 3 => [
+            as_int(&values[0], "LastDeathLocation")?,
+            as_int(&values[1], "LastDeathLocation")?,
+            as_int(&values[2], "LastDeathLocation")?,
+        ],
+        _ => return Err(bad("LastDeathLocation", "expected a three-int pos")),
+    };
+    Ok((dimension, pos))
 }
 
 fn compound<'a>(tag: &'a Tag, name: &'static str) -> Result<&'a [(String, Tag)], PlayerDataError> {

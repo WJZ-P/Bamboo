@@ -41,13 +41,28 @@ pub(crate) fn kill(
         Some(selector) => select::targets(region, id, level, selector)?,
         None => vec![source::entity_or_exception(command_source)?],
     };
+    // 官方 `KillCommand`：玩家也走 `LivingEntity.kill`，也就是
+    // `genericKill` 的 `Float.MAX_VALUE` 伤害 → 完整死亡流程。
+    // 玩家不在实体表里，单独按同一条 `hurt_player` 链路打。
+    //
+    // Vanilla `KillCommand` kills players through `LivingEntity.kill`:
+    // a `genericKill` hit with `Float.MAX_VALUE` and the full death flow.
     for target in &targets {
-        if matches!(target, Target::Player(_)) {
-            // 官方 `ServerPlayer.kill` 走完整的玩家死亡和重生流程；Bamboo 还没有，
-            // 明确报错而不是悄悄当作成功。
-            //
-            // Official `ServerPlayer.kill` runs the full player death/respawn path;
-            // Bamboo does not have it yet, so fail instead of silently pretending.
+        let Target::Player(player) = target else {
+            continue;
+        };
+        let random = region
+            .players
+            .get(player)
+            .map(|value| value.random)
+            .unwrap_or_default();
+        let source = DamageSource::environment(DamageKind::GenericKill);
+        let hurt =
+            crate::player_hurt::hurt_player(region, *player, source, f32::MAX, &mut Some(random));
+        if let Some(player) = region.players.get_mut(player) {
+            player.random = random;
+        }
+        if !hurt {
             return Err(fail("command.failed"));
         }
     }
@@ -237,12 +252,16 @@ mod tests {
     }
 
     #[test]
-    fn killing_a_player_reports_the_missing_death_path() {
+    fn killing_a_player_runs_the_death_flow() {
         let (mut global, mut region, id, ids) = world_with_entities();
         let before = region.entities.ids();
         on_command(&mut global, &mut region, id, "kill @s", None);
-        assert_eq!(region.entities.ids(), before, "没有实体被偷偷杀掉");
+        assert_eq!(region.entities.ids(), before, "杀玩家不碰实体表");
         assert!(region.entities.get(ids[0]).is_some());
+        let player = &region.players[&id];
+        assert!(player.dead, "走了 `ServerPlayer.die`");
+        assert_eq!(player.health.health, 0.0);
+        assert!(player.last_death_location.is_some());
     }
 
     #[test]

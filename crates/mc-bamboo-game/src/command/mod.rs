@@ -89,7 +89,7 @@ mod summon;
 mod team;
 mod teleport;
 
-pub(crate) use teleport::place_player;
+pub(crate) use teleport::{place_player, place_player_at_respawn};
 mod text;
 mod time;
 mod title;
