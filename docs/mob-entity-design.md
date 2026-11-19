@@ -485,6 +485,9 @@ Bamboo 全改成相对倒计时 `memory` / `age` / `combat_idle_ticks`，
   （`broadcastSystemToTeam` / `...ExceptTeam`）按全服广播处理。
   `INTENTIONAL_GAME_DESIGN` 在 26.3 建模的伤害种类里触发不到（只有
   `minecraft:bad_respawn_point` 用它），其字节未单独对拍。
+  `FallLocation.getCurrentFallLocation` 的攀爬物（梯子 / 藤蔓 / 脚手架）与
+  水中判定未做，`CombatEntry.fall_location` 恒 `None`，所以摔落消息只覆盖
+  `death.fell.accident.generic` 这一档。
 - **重生点**：用 `RespawnData`（世界出生点 / `/spawnpoint`）的水平坐标，
   y 取超平坦地表 `flat::surface_y()`（和进服一致）；官方的床 / 重生锚
   `findStandUpPosition`、充能扣减、`NO_RESPAWN_BLOCK_AVAILABLE`、
