@@ -148,7 +148,7 @@
 ### 1.2 地物、结构里标 `unsupported` 或被跳过的 — **部分**
 
 **地物**：`crates/mc-bamboo-worldgen/src/feature/dispatch.rs:113` 的 `parse_leaf` 只认
-移植过的叶子；`composition.rs:194` 的 `place_placed` 遇到不支持的修饰器 / 组合类返回
+移植过的叶子；`composition.rs:162` 的 `place_placed` 遇到不支持的修饰器 / 组合类返回
 `PlaceOutcome::unsupported()`；`run.rs:185` / `:197` / `:230` 把整区块标 `unsupported`。
 对拍里 `gen_world.rs:786` 遇到 `result.unsupported` 直接报错，`chunkgen.rs:735` 计入
 `skipped_chunks`，所以「0 不一致」不会被 unsupported 伪装成通过。
@@ -390,8 +390,8 @@ vs 游戏 LIGHT」的整块 oracle，重跑 `gen-light` 和 `structure-e2e`。
   都能编译 `SeededRouter`，`:402` 测过 `TheEndBiomeSource` 的中心/外圈分带。
 - `worldgen java` 逐值比过主世界 / 下界 / 末地的噪声、密度函数、8 条路由输出和群系
   （本轮扩到 8 种子 / 56 维度状态，0 不一致）。
-- `crates/mc-bamboo-worldgen/src/aquifer.rs:159` 的 `new_disabled` 实现了官方
-  `Aquifer.createDisabled`（无 `aquifers` 配置时只用全局流体）；`chunk.rs:373` 的
+- `crates/mc-bamboo-worldgen/src/aquifer.rs:166` 的 `new_disabled` 实现了官方
+  `Aquifer.createDisabled`（无 `aquifers` 配置时只用全局流体）；`chunk.rs:379` 的
   `make_aquifer` 自动切换；`chunkgen --settings nether|end --through carvers`
   6 种子 × 36 区块 × salt 987654321 三阶段 0 不一致。
 
