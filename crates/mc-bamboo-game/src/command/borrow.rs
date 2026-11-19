@@ -65,29 +65,36 @@ pub(crate) fn plan_borrow(islands: &Islands, into: RegionId, id: PlayerId, line:
         return Borrow::All;
     }
     let command = line.strip_prefix('/').unwrap_or(line);
-    let Some(home) = islands.get(into) else {
+    // `into` 一定停放着（混合驱动下玩家自己的岛不在时请求排队），只查停放着的岛，
+    // 免得 `iter()` / `get()` 碰到不在主控手里的槽位。
+    // `into` is always parked (a request waits when its own island is away);
+    // look only at parked islands so no away slot is dereferenced.
+    let Some(home) = islands.parked().find(|island| island.id == into) else {
         return Borrow::World;
     };
     let source = source::of(&home.region, id);
     let level = source::level(&home.region, id);
-    let parsed = match commands().graph.parse(command, level) {
-        Ok(parsed) => parsed,
-        // 解析失败只发一条反馈，和方块无关。
-        // A failed parse only sends feedback and touches no block.
-        Err(_) => return Borrow::All,
-    };
     // 权限门（4.5 原文）：不够的解析一定失败，不能让没有权限的玩家随手让全服顿一下。
     // Permission gate (plan 4.5): such a line cannot parse, and a player
     // without permission must not stall the whole server at will.
     if !crate::command::may_use_root(command, level) {
         return Borrow::All;
     }
+    // 只碰玩家的命令和解析失败的命令都不借岛：它们本来就看全部玩家，
+    // 混合驱动下也照旧走 `gather` 的延后投递。
+    // Player-only commands and failed parses do not borrow islands: they
+    // already see every player and keep the hybrid drive's deferred delivery.
     if class::scope_of(command) == class::CommandScope::Players {
         return Borrow::All;
     }
+    let parsed = match commands().graph.parse(command, level) {
+        Ok(parsed) => parsed,
+        Err(_) => return Borrow::All,
+    };
     if !islands.all_parked() {
-        // 混合驱动下有岛不在主控手里：读不到它的实体/区块，全拼兜底。
-        // An island is away: its entities and chunks cannot be read here.
+        // 规划要读全部岛的实体和区块；有岛不在主控手里就全拼兜底（和改前一样）。
+        // Planning reads every island's entities and chunks; with an island
+        // away fall back to a full join, as before.
         return Borrow::World;
     }
     let mut planner = Planner {
@@ -261,6 +268,19 @@ impl Planner<'_> {
             .collect();
         for pos in feet {
             self.point(pos);
+        }
+    }
+
+    /// 所有玩家位置的保守盒（`/execute` 的相对坐标会在每个分叉上落到这里）。
+    fn player_position_boxes(&mut self) {
+        let positions: Vec<Vec3> = self
+            .islands
+            .iter()
+            .flat_map(|island| island.region.players.values())
+            .map(|player| player.position())
+            .collect();
+        for position in positions {
+            self.point(BlockPos::containing(position));
         }
     }
 
@@ -451,6 +471,10 @@ impl Planner<'_> {
             .any(select::may_include_non_players);
         if entity_selectors {
             self.all_entity_islands();
+            self.entity_position_boxes();
+            // 分叉来源可能是任何玩家/实体的位置；相对坐标（链尾 `~ ~ ~`）会
+            // 落在这些位置，所以所有玩家和实体的位置盒都要借进来。
+            self.player_position_boxes();
             self.entity_position_boxes();
             for island in self.islands.iter() {
                 for player in island.region.players.values() {

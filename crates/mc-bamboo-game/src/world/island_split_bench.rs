@@ -260,9 +260,19 @@ fn island_split_scaling_bench() {
     });
 }
 
-/// 把 `parts` 各自造成一个岛（第一个是家岛），拼成一个再拆回去，各量 [`ROUNDS`] 轮
-/// （第 2 项；`into` 是家岛，和控制台发的命令一样）。
-fn unify_and_divide(title: &str, parts: &[Vec<ChunkPos>], density: Density) {
+/// 把 `parts` 各自造成一个岛（第一个是家岛），只借 `borrow` 里的岛拼成一个再拆回去，
+/// 各量 [`ROUNDS`] 轮（第 2 项；`into` 是家岛，和控制台发的命令一样）。
+/// `borrow` 为 `None` 时全拼（改前的行为），按需借传要借的岛编号集合。
+///
+/// Build one island per part (the first is home), join only the islands in
+/// `borrow` and split them back, timing [`ROUNDS`] rounds. `None` joins every
+/// island (the old behaviour); on-demand borrowing passes its island set.
+fn unify_and_divide(
+    title: &str,
+    parts: &[Vec<ChunkPos>],
+    density: Density,
+    borrow: Option<BTreeSet<u32>>,
+) {
     let all: Vec<ChunkPos> = parts.iter().flatten().copied().collect();
     let mut home = Box::new(Island::new(
         HOME_REGION,
@@ -289,8 +299,22 @@ fn unify_and_divide(title: &str, parts: &[Vec<ChunkPos>], density: Density) {
     for _ in 0..ROUNDS {
         laps::start();
         let started = std::time::Instant::now();
-        let unified = islands.unify(HOME_REGION);
+        let unified = match &borrow {
+            Some(set) => islands.unify_subset(HOME_REGION, set),
+            None => islands.unify(HOME_REGION),
+        };
         unifies.record(started.elapsed(), laps::take());
+        let expected = borrow
+            .as_ref()
+            .map(|set| {
+                parts
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| set.contains(&(*index as u32)))
+                    .map(|(_, part)| part.len())
+                    .sum::<usize>()
+            })
+            .unwrap_or(all.len());
         assert_eq!(
             islands
                 .get(HOME_REGION)
@@ -299,7 +323,7 @@ fn unify_and_divide(title: &str, parts: &[Vec<ChunkPos>], density: Density) {
                 .chunks
                 .loaded_positions()
                 .len(),
-            all.len()
+            expected
         );
         laps::start();
         let started = std::time::Instant::now();
@@ -318,19 +342,20 @@ fn island_unify_scaling_bench() {
     with_stack(|| {
         // 四个岛，各 70 × 70（共 19600 个区块），隔 4 个区块。
         let four: Vec<Vec<ChunkPos>> = (0..4).map(|index| rect(index * 74, 0, 70, 70)).collect();
-        unify_and_divide("4 islands x 4900 chunks", &four, Density::Dense);
-        unify_and_divide("4 islands x 4900 chunks, sparse", &four, Density::Sparse);
+        unify_and_divide("4 islands x 4900 chunks", &four, Density::Dense, None);
+        unify_and_divide("4 islands x 4900 chunks, sparse", &four, Density::Sparse, None);
         // 三个岛：一个大的（14000）和两个小的（各 3000）。
         let three = vec![
             rect(0, 0, 140, 100),
             rect(144, 0, 60, 50),
             rect(144, 54, 60, 50),
         ];
-        unify_and_divide("3 islands 14000+3000+3000 chunks", &three, Density::Dense);
+        unify_and_divide("3 islands 14000+3000+3000 chunks", &three, Density::Dense, None);
         unify_and_divide(
             "3 islands 14000+3000+3000 chunks, sparse",
             &three,
             Density::Sparse,
+            None,
         );
         // 发起人的岛小：小的在前（家岛），大的被并进来。
         let small_home = vec![
@@ -342,11 +367,22 @@ fn island_unify_scaling_bench() {
             "3 islands 3000(home)+14000+3000 chunks",
             &small_home,
             Density::Dense,
+            None,
         );
         unify_and_divide(
             "3 islands 3000(home)+14000+3000 chunks, sparse",
             &small_home,
             Density::Sparse,
+            None,
         );
+        // 按需借：只借家岛 + 1 个岛 / 家岛 + 2 个岛（计划 4.5.1 的测量）。
+        // On demand: home + 1 island / home + 2 islands (plan 4.5.1).
+        for (name, set) in [
+            ("borrow 1 island", BTreeSet::from([HOME_REGION, 1])),
+            ("borrow 2 islands", BTreeSet::from([HOME_REGION, 1, 2])),
+        ] {
+            unify_and_divide(&format!("{name}, dense"), &four, Density::Dense, Some(set.clone()));
+            unify_and_divide(&format!("{name}, sparse"), &four, Density::Sparse, Some(set));
+        }
     });
 }
