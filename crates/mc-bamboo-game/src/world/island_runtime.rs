@@ -281,30 +281,12 @@ impl World {
             self.master.host.split_posts(from, to, sections, &[]);
             return true;
         };
-        let mut chunks: BTreeSet<ChunkPos> = island
-            .region
-            .chunks
-            .loaded_positions()
-            .into_iter()
-            .filter(|&pos| inside(pos))
-            .collect();
-        chunks.extend(
-            island
-                .mailbox
-                .positions()
-                .into_iter()
-                .filter(|&pos| inside(pos)),
-        );
-        let players: BTreeSet<PlayerId> = island
-            .region
-            .players
-            .values()
-            .filter(|player| inside(player.chunk_pos()))
-            .map(|player| player.id)
-            .collect();
+        let (chunks, players) = split_parts(island, sections);
+        crate::region::island_split::lap("collect");
         if !split_ready(&island.region, &players, &inside) {
             return false;
         }
+        crate::region::island_split::lap("ready");
         let origin = *sections.first().expect("拆出来的部分不为空");
         let time = island.region.global.time.0;
         #[cfg_attr(not(test), allow(unused_mut))]
@@ -348,7 +330,9 @@ impl World {
                 slot.debt = debt;
             }
         }
+        crate::region::island_split::lap("seat");
         self.master.host.split_posts(from, to, sections, &moved);
+        crate::region::island_split::lap("host");
         true
     }
 
@@ -611,6 +595,40 @@ impl World {
             }
         }
     }
+}
+
+/// 拆分要搬走的东西：岛 `island` 上落在 `sections` 里的区块（已加载的和信箱里的），和站在
+/// 那里的玩家。
+///
+/// What a split moves off `island`: its chunks in `sections` (loaded and in
+/// the mailbox) and the players standing there.
+pub(crate) fn split_parts(
+    island: &crate::island::Island,
+    sections: &BTreeSet<SectionPos>,
+) -> (BTreeSet<ChunkPos>, BTreeSet<PlayerId>) {
+    let inside = |pos: ChunkPos| sections.contains(&SectionPos::of(pos));
+    let mut chunks: BTreeSet<ChunkPos> = island
+        .region
+        .chunks
+        .loaded_positions()
+        .into_iter()
+        .filter(|&pos| inside(pos))
+        .collect();
+    chunks.extend(
+        island
+            .mailbox
+            .positions()
+            .into_iter()
+            .filter(|&pos| inside(pos)),
+    );
+    let players: BTreeSet<PlayerId> = island
+        .region
+        .players
+        .values()
+        .filter(|player| inside(player.chunk_pos()))
+        .map(|player| player.id)
+        .collect();
+    (chunks, players)
 }
 
 /// 拆分前两边分得开：每名玩家的视野中心、看得见他的人、他看得见的人都在他自己那一边，

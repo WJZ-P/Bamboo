@@ -1119,6 +1119,7 @@ impl Islands {
             let chunks: std::collections::BTreeSet<ChunkPos> =
                 region.chunks.loaded_positions().into_iter().collect();
             let players: std::collections::BTreeSet<_> = region.players.keys().copied().collect();
+            crate::region::island_split::lap("unify record");
             if chunks.is_empty() && players.is_empty() {
                 continue;
             }
@@ -1133,6 +1134,7 @@ impl Islands {
             }
             let delta = target.tick.game_time() - region.tick.game_time();
             let identity = target.absorb_island_keeping(region, delta);
+            crate::region::island_split::lap("unify absorbed");
             unified.0.push(UnifiedIsland {
                 shell,
                 chunks,
@@ -1169,6 +1171,7 @@ impl Islands {
             let id = shell.id;
             let joined = &mut self.get_mut(into).expect("发起人的岛在表里").region;
             players.retain(|player| joined.players.contains_key(player));
+            crate::region::island_split::lap("divide prepare");
             let mut region = joined
                 .split_off_island_restoring(&chunks, &players, identity)
                 .unwrap_or_else(|_| panic!("命令执行完以后拆不回岛 {id}（不在 tick 边界）"));
@@ -1177,6 +1180,7 @@ impl Islands {
             }
             let island = Box::new(Island::from_shell(shell, region));
             self.slots.get_mut(&id).expect("槽位留着").put(island);
+            crate::region::island_split::lap("divide seated");
         }
     }
 
@@ -1478,6 +1482,7 @@ impl Island {
         assert_eq!(self.state, IslandState::Parked, "只能拆停放着的岛");
         assert!(self.replies.is_empty(), "交回还没处理完就拆岛");
         self.region.chunks.finish_light_updates();
+        crate::region::island_split::lap("light");
         let region = self
             .region
             .split_off_island_parts(chunks, players, random, skip)?;
@@ -1485,6 +1490,7 @@ impl Island {
         out.mailbox = self.mailbox.split_off(chunks);
         out.save_plan = self.save_plan.split_off(chunks);
         out.save_report = self.save_report.split_off(chunks);
+        crate::region::island_split::lap("Mailbox/SavePlan/SaveReport");
         out.entity_threads = self.entity_threads;
         out.last_worker = self.last_worker;
         Ok(out)
@@ -1510,6 +1516,7 @@ impl Island {
         self.save_report
             .absorb(std::mem::take(&mut other.save_report));
         self.effects.append(&mut other.effects);
+        crate::region::island_split::lap("merge light/Mailbox/SavePlan/SaveReport");
         let Self { region, .. } = *other;
         self.region.absorb_island(region, delta);
     }

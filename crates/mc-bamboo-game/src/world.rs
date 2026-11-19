@@ -3286,6 +3286,9 @@ mod island_runtime_tests;
 #[path = "world/island_scale_tests.rs"]
 mod island_scale_tests;
 #[cfg(test)]
+#[path = "world/island_split_bench.rs"]
+mod island_split_bench;
+#[cfg(test)]
 #[path = "world/island_split_tests.rs"]
 mod island_split_tests;
 #[cfg(test)]
