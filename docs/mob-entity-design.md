@@ -364,16 +364,15 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   武器 `minecraft:breach`（`modifyArmorEffectiveness`）、抗性效果、格挡
   (`BLOCKS_ATTACKS`)、不死图腾、四种专性保护附魔都**未做**。对拍场景里用无附魔
   武器、无药水效果。
-- **饥饿**：四个字段按官方缺省值存读档，不 tick（`FoodData.tick`、自然回血、
-  `ServerPlayer.tickRegeneration` 的和平回血、饥饿掉血都未做）。受伤时
-  `causeFoodExhaustion` 的累加照官方做（只累加，不触发后果）。
+- **饥饿**：1a 时四个字段只按官方缺省值存读档、不 tick；1b 起按下节实现完整的
+  `FoodData.tick` / 和平回血 / 饥饿掉血（见第 7 节）。
 - **攻击**：左键只对非玩家实体造成一次 `player_attack`；无攻击冷却、无暴击、
   无横扫、无附魔伤害加成、无 `minimum_attack_charge` 校验、无物品耐久 / 音效。
   PVP（打玩家）未做：官方 `Player.canHarmPlayer` 的队伍判定缺失，目前明确忽略。
   旁观者和非法目标按官方 `handleAttack` 忽略（非法目标官方会断开连接，Bamboo 目前
   只忽略，见下一条）。
-- **死亡**：血量可以降到 0，但**不触发死亡**、不掉落、不清经验、不发死亡消息、
-  不重生；`/kill` 对玩家仍明确返回 `command.failed`。这些全部留给 1b。
+- **死亡**：1a 时血量可以降到 0 但不触发死亡；1b 起按下节实现完整死亡 / 掉落 /
+  重生流程，`/kill` 也不再报错（见第 7 节）。
 - **玩家受伤音效**：`DamageType.effects` 的六种变体和 `thorns` 的第二声已按官方发；
   但 `LivingEntity.handleDamageEvent` 的 `getVoicePitch()` 随机变体（玩家恒 1.0）
   未做，`playSecondaryHurtSound` 只覆盖 `thorns`。
@@ -383,3 +382,109 @@ Paper 和 Folia 对寻路算法本身都没动。Folia 的刷怪上限每个区�
   `ViewFacts::sky_darken` 由调用方填 0；`SourceView` 和 `World` 的读数一致。
 - **服务器连接层**：`serverbound::ATTACK` 的畸形包按官方会断开，Bamboo 目前
   只在解码层报 `TrailingBytes`，连接层是否断开由通用解码路径决定。
+
+---
+
+## 7. 玩家生命期 1b（死亡、掉落、重生与自然回血）
+
+期 1b 已合入。官方字节码核对范围：`ServerPlayer.die` / `LivingEntity.die` /
+`dropAllDeathLoot` / `Player.dropEquipment` / `Inventory.dropAll` /
+`ExperienceOrb.award` / `PlayerList.respawn` / `ServerPlayer.restoreFrom` /
+`FoodData.tick` / `ServerPlayer.tickRegeneration` /
+`CombatTracker.getDeathMessage` / `DamageSource.getLocalizedDeathMessage` /
+`ServerGamePacketListenerImpl.handleClientCommand` /
+`Player.addAdditionalSaveData` / `Player.readAdditionalSaveData`。
+
+### 7.1 重置 / 保留字段清单
+
+官方重建 `ServerPlayer` 再 `restoreFrom(old, keepEverything=false)`；Bamboo
+**原地重置 `Player`、不换对象**，唯一入口是
+`crates/mc-bamboo-game/src/player_respawn.rs::reset_after_respawn`。以后改成重建对象
+只需改这一处和 `respawn()` 里的包序列。
+
+| 字段 | 重置为 | 保留 |
+|---|---|---|
+| `health`（血量 / 吸收 / 三个受伤倒计时 / 饥饿四字段） | 官方构造默认值 | — |
+| `dead` / `awaiting_respawn` / `in_combat` / `last_combat` / `deathTime` | false / None / 0 | — |
+| `health_sync` 三个哨兵 / `last_sent_exp` | `INITIAL` / -1 | — |
+| `inventory` / `experience` / `score` | 非 `keepInventory` 时清空 | `keepInventory` 或旁观者时原样保留 |
+| `enchantment_seed` / `ender_chest` / `respawn` / `last_death_location` | — | 原样保留（官方 `restoreFrom` 也搬） |
+| `id` / `uuid` / `name` / `game_mode` / 权限 / `client` | — | 原样保留 |
+| `sync`（含 `seen_by`）/ `menus` / `player_grid` 登记 / `links` / `inbox` | — | 原样保留，不重发配对包 |
+| `random` / `chat` / `spam` / `last_action_millis` / `peer_ips` | — | 原样保留 |
+| 光标 / 采矿 / 预测 / 速度 / 传送确认 / `take_xp_delay` / `recorded_criteria` | 构造默认值 | — |
+| `entity_ticks` | 0（相对计数，不是绝对时刻） | — |
+
+新增按玩家字段全部不是绝对时刻，整行随 `IslandPart::Players` 搬；
+**没有改 `region/island_split.rs`，也没有新增 `IslandPart` 类别**。
+`last_damage_stamp` 仍刻意不建：死亡消息只记最后一条 `CombatEntry` 的种类 /
+攻击者显示组件，不存官方的绝对 `tickCount`。
+
+### 7.2 重生包序列与官方逐包对照结论
+
+`PlayerList.respawn` 的 `connection.send` 顺序（`mob-oracle` 的 22 个
+`player_death_*` / `player_respawn_*` / `player_regen_*` 场景逐字节比对，
+110 cases / 51857 ticks / 0 不一致）：
+
+1. `player_abilities`（`restoreFrom` 里 `onUpdateAbilities`）
+2. `respawn`（`CommonPlayerSpawnInfo` + `dataToKeep=0`）
+3. `player_position`（`connection.teleport`）
+4. `set_default_spawn_position`
+5. `change_difficulty`
+6. `set_experience`
+7. `sendActivePlayerEffects`（Bamboo 没有药水效果，空）
+8. `sendLevelInfo`：`initialize_border` / `set_time` /
+   `set_default_spawn_position` / 雨的三个 `game_event` / `game_event` 13
+9. `sendPlayerPermissionLevel`：`entity_event` 权限 + 命令树
+10. `addRespawnedPlayer` 的配对包与 `initInventoryMenu`：
+    `set_entity_data` / `update_attributes`（仅创造）/ `set_equipment` /
+    `container_set_content`（46 格）/ `set_held_slot` / `player_abilities`
+11. 下一刻 `doTick` 补 `set_health` / `set_experience`
+
+对拍的假世界没有命令派发器，**`commands`（16）包不进 ID / 字节比较**；
+其余关键包（`player_combat_kill` / `system_chat` / `respawn` / `player_position` /
+`set_default_spawn_position` / `change_difficulty` / `set_experience` /
+`player_abilities` / `set_health` / `entity_event` / `damage_event` / `sound`）
+按官方 `StreamCodec` 逐字节相等；配对包的字节由假世界的桩构造，按 ID 序列比。
+`CommonPlayerSpawnInfo` 的 `lastDeathLocation` 与 `seaLevel` 用 Bamboo 现有的
+超平坦常量，官方编解码器一致。`previousGameType` 恒 `None`。
+
+死亡时的包顺序：`damage_event` → `hurt_animation`（`indicateDamage`）→ 死亡音效
+（`entity.player.death`，非受伤音效）→ `player_combat_kill` → `system_chat`
+（全服广播）→ `entity_event`(3) → 可选 `player_combat_end` → `set_health`。
+`show_death_messages=false` 时 `PlayerCombatKill` 的消息体是空组件且不广播。
+
+### 7.3 存档
+
+`PlayerData` 新增 `LastDeathLocation`（`GlobalPos.CODEC`：维度字符串 + pos 三个 int），
+`Optional` 为空时不写键；`runtime_player_data` / `restore_inventory` 双向接上，
+`player-data` oracle 用官方 codec 加了用例（3016 checks / 496 cases）。
+`DeathTime` 与 `Health` 的存读沿用 1a；`dead` 是运行时标志，官方也不存档，
+读档时按 `Health<=0` 推。
+
+### 7.4 新增已知差异
+
+- **饥饿消耗来源**：本期只做受伤（`causeFoodExhaustion`）和回血本身
+  （`FoodData.tick` 里的 `addExhaustion`）；移动、跳跃、疾跑、攻击、挖掘的消耗
+  和吃东西不做。创造 / 旁观模式下 `FoodData.tick` 仍按官方跑（官方无条件调用），
+  但创造模式的能力无敌照旧；原有创造模式测试未变。
+- **摔落伤害**：仍**不做**，只记录 `fall_distance`。下一项单独做。
+- **死亡消息的参数**：`getLocalizedDeathMessage` 的 `.player` 分支里
+  `getKillCredit()`（最近一次打伤自己的玩家）Bamboo 没有记，只有死者一个参数；
+  武器 `custom_name` 的 `.item` 分支已接。队伍可见性
+  （`broadcastSystemToTeam` / `...ExceptTeam`）按全服广播处理。
+- **重生点**：用 `RespawnData`（世界出生点 / `/spawnpoint`）的 `forced` 分支，
+  按 `pos + (0.5, 0.1, 0.5)` 落地；官方的床 / 重生锚 `findStandUpPosition`、
+  充能扣减、`NO_RESPAWN_BLOCK_AVAILABLE`、出生点周围安全位置搜索未做。
+- **`dataToKeep`**：官方末地传送重生传 `KEEP_ALL_DATA`，Bamboo 恒 0；
+  末地 / 维度切换未做。
+- **命令树包**：重生序列里的 `commands` 包由各自命令图生成，假世界没有命令
+  派发器，对拍按 ID 序列排除这一包，其余逐包比字节。
+- **死亡后的 `FoodData.tick`**：官方 `ServerPlayer.doTick` 在死亡界面等待期间
+  仍跑 `FoodData.tick`（`FoodData.tick` 自己按 `isHurt()` 分支），Bamboo 的
+  `player_hurt::tick` 在 `dead` 为真时跳过食物 / 回血，只递减受伤倒计时；
+  等待重生通常只有几刻，对拍场景（最多 2 刻）逐刻状态一致。
+- **死亡动画**：`deathTime` 只存相对倒计时，不推进 `tickDeath` 的
+  `remove(KILLED)`；玩家对象不重建所以不需要移除。
+- **计分板 / 统计**：`DEATH_COUNT`、`ENTITY_KILLED_BY`、`TIME_SINCE_DEATH`
+  等官方死亡时的计分板 / 统计奖励未接。
