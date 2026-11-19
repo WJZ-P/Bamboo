@@ -68,6 +68,8 @@ BAMBOO_PROFILE=10 cargo run --release --bin bamboo
 | `island_handoff` | 只在分离驱动下记：交接本身，派出到 tick 线程开跑，加上岛跑完（主控自己的活也做完）到主控接着干活 |
 | `island_unify` / `island_divide` | 多岛：要整个世界的命令把全部岛临时拼成一个 / 再按原样拆回去的耗时（每次一条样本，第 10 步 c 段） |
 | `island_world_command` | 多岛：这条命令本身在拼好的世界上执行的耗时，夹在拼和拆之间（每次一条样本，第 12 步） |
+| `island_borrowed_islands` | 多岛：按需借岛的命令借了几个岛，0 表示完全没拼、全拼兜底 = 全部岛（每次一条样本，第 13 步 / 计划 4.5.1） |
+| `island_world_command_fallbacks` | 多岛：按需借算不出岛集合、退回全拼的次数（每兜底一次一条样本，计划 4.5.1；看压测里的比例） |
 | `island_split_deferrals` | 多岛：因为某名玩家跟踪的区块跨了拆分切口而推迟的次数（每推迟一次一条样本，第 12 步；见 18.5） |
 
 分离驱动下 `delivery` 阶段记的是和岛并行的那段里主控推进 Director 的耗时；岛在 tick 线程上

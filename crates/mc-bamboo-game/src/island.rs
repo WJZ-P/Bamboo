@@ -566,12 +566,20 @@ pub(crate) struct Islands {
     /// 测试专用：借玩家时不按时钟差平移（改坏确认）。
     #[cfg(test)]
     pub(crate) lend_unshifted: bool,
-    /// 测试专用：要整个世界的命令退回只借玩家（只看得见发起人的岛的方块，改坏确认）。
+    /// 测试专用：要借岛的命令退回只借玩家（只看得见发起人的岛的方块，改坏确认）。
     #[cfg(test)]
     pub(crate) world_view_off: bool,
+    /// 测试专用：按需借的命令强制走全拼（等价性对照的另一半）。
+    #[cfg(test)]
+    pub(crate) borrow_all_islands: bool,
     /// 测试专用：拼了几次（确认命令真的走了这条路）。
     #[cfg(test)]
     pub(crate) unified: usize,
+    /// 最近一次借了几个岛（含发起人岛；0 表示没有拼）。
+    pub(crate) last_borrowed: usize,
+    /// 测试专用：故意改坏按需借（等价性对照的改坏确认）。
+    #[cfg(test)]
+    pub(crate) borrow_break: BorrowBreak,
 }
 
 impl Islands {
@@ -589,7 +597,12 @@ impl Islands {
             #[cfg(test)]
             world_view_off: false,
             #[cfg(test)]
+            borrow_all_islands: false,
+            #[cfg(test)]
             unified: 0,
+            last_borrowed: 0,
+            #[cfg(test)]
+            borrow_break: BorrowBreak::None,
         }
     }
 
@@ -1015,7 +1028,7 @@ impl Islands {
             return gathered;
         }
         let others: Vec<RegionId> = match borrow {
-            Borrow::All | Borrow::World => self
+            Borrow::All | Borrow::World | Borrow::Islands(_) => self
                 .parked_ids()
                 .into_iter()
                 .filter(|&id| id != into)
@@ -1078,12 +1091,14 @@ impl Islands {
         }
     }
 
-    /// 主控要在整个世界上执行一条命令（计划 4.5）：把 `into` 以外的每个岛的 `Region`
-    /// 整个并进 `into`，命令在拼好的 `Region` 上执行，看到的方块、方块实体、容器、实体和
-    /// 玩家都和整个世界一个岛时一样；做完用 [`Self::divide`] 按原样拆回去。每个被并进来
-    /// 的岛记下它的区块集合、玩家集合、四个随机源的状态和剖析器、和 `into` 的时钟差；
-    /// 岛这一层的东西（区块信箱、存盘名单和报告、排队的全局改动、回执、欠刻）留在
-    /// 槽位里不动。全部岛都要停放着（断言）。只有一个岛时什么都不做。
+    /// 主控要在一条命令看到的世界里执行它（计划 4.5 / 4.5.1）：把 `islands` 里 `into`
+    /// 以外的每个岛的 `Region` 整个并进 `into`，命令在拼好的 `Region` 上执行，看到的方块、
+    /// 方块实体、容器、实体和玩家都和拼起这几个岛时一样；做完用 [`Self::divide`] 按原样
+    /// 拆回去。每个被并进来的岛记下它的区块集合、玩家集合、四个随机源的状态和剖析器、
+    /// 和 `into` 的时钟差；岛这一层的东西（区块信箱、存盘名单和报告、排队的全局改动、
+    /// 回执、欠刻）留在槽位里不动。`islands` 只含 `into` 时完全不拼。
+    /// [`Self::unify`] 是「全部岛」的同一段路径（全拼兜底）。
+    /// 全部岛都要停放着（断言）。只有一个岛时什么都不做。
     ///
     /// 什么都没有的岛（没有区块也没有玩家，比如空着的家岛）不并：拆的时候按区块和玩家
     /// 分，它没有这两样，并进来的东西就回不去了。
@@ -1104,16 +1119,34 @@ impl Islands {
     /// back goes by chunks and players. Light tasks queued but not started
     /// travel with their chunks; a round that is half done is finished first.
     pub(crate) fn unify(&mut self, into: RegionId) -> Unified {
+        let all: std::collections::BTreeSet<RegionId> = self.ids().into_iter().collect();
+        self.unify_subset(into, &all)
+    }
+
+    /// 只拼 `islands` 里这几个岛（计划 4.5.1）；[`Self::unify`] 传全部岛。
+    ///
+    /// Join only the islands in `islands` (plan 4.5.1); [`Self::unify`] passes
+    /// every island.
+    pub(crate) fn unify_subset(
+        &mut self,
+        into: RegionId,
+        islands: &std::collections::BTreeSet<RegionId>,
+    ) -> Unified {
         let mut unified = Unified(Vec::new());
-        if self.slots.len() <= 1 {
+        if self.slots.len() <= 1 || islands.len() <= 1 {
             return unified;
         }
-        assert!(self.all_parked(), "要整个世界的命令等全部岛停放");
+        assert!(self.all_parked(), "要借岛的命令等全部岛停放");
         #[cfg(test)]
         {
             self.unified += 1;
         }
-        let others: Vec<RegionId> = self.ids().into_iter().filter(|&id| id != into).collect();
+        self.last_borrowed = islands.len();
+        let others: Vec<RegionId> = self
+            .ids()
+            .into_iter()
+            .filter(|&id| id != into && islands.contains(&id))
+            .collect();
         for id in others {
             let region = &mut self.get_mut(id).expect("在表里").region;
             let chunks: std::collections::BTreeSet<ChunkPos> =
@@ -1160,7 +1193,16 @@ impl Islands {
     /// and is moved later by `World::relocate_players`. Failing to split
     /// means this is not a tick boundary and panics.
     pub(crate) fn divide(&mut self, into: RegionId, unified: Unified) {
-        for part in unified.0 {
+        #[cfg(test)]
+        let break_identity = self.borrow_break == BorrowBreak::MissIdentity;
+        #[cfg_attr(not(test), allow(unused_mut))]
+        for (mut part, index) in unified.0.into_iter().zip(0usize..).collect::<Vec<_>>() {
+            let _ = index;
+            #[cfg(test)]
+            if break_identity && index == 0 {
+                // 故意不把一个岛的时钟平移回去（改坏确认）。
+                part.delta = part.delta.wrapping_add(1);
+            }
             let UnifiedIsland {
                 shell,
                 chunks,
@@ -1194,6 +1236,27 @@ impl Islands {
     }
 }
 
+/// 测试专用：故意漏借一类东西，验证等价性对照真的能抓到（计划 4.5.1 第 7 节）。
+///
+/// Test-only: deliberately miss a class so the equivalence checks must fail.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BorrowBreak {
+    None,
+    /// 规划器漏借一个涉及的岛。
+    MissIsland,
+    /// 选择器筛查漏一个岛的实体。
+    MissSelector,
+    /// 不借 `R` 外的玩家。
+    MissPlayers,
+    /// `/tp` 非玩家实体到别的岛时漏借目的地岛。
+    MissDestination,
+    /// 规划期漏查 `/summon` NBT 里的显式 UUID。
+    MissUuid,
+    /// `divide` 少还原一个岛的随机源。
+    MissIdentity,
+}
+
 /// 主控借玩家时要哪些岛上的玩家（借玩家的唯一入口 `World::on_master` 的参数）。以后
 /// 各岛不再每刻一起停放时（计划 5.2），入口可以按它判断要等哪些岛。
 ///
@@ -1207,13 +1270,22 @@ pub(crate) enum Borrow {
     /// Every island's players: selectors, server-wide broadcasts, feedback to ops.
     All,
     /// 整个世界：全部岛的 `Region` 临时拼成一个（[`Islands::unify`]），命令里的方块坐标、
-    /// 容器、实体和读方块的玩家命令都和整个世界一个岛时一样（计划 4.5）。要全部岛停放。
+    /// 容器、实体和读方块的玩家命令都和整个世界一个岛时一样（计划 4.5）。现在只作按需借
+    /// 算不出范围时的兜底（计划 4.5.1）。要全部岛停放。
     ///
     /// The whole world: every island's `Region` is temporarily joined
     /// ([`Islands::unify`]) so block positions, containers, entities and
     /// player commands that read blocks behave as on a single island (plan
-    /// 4.5). Needs every island parked.
+    /// 4.5). Now only the fallback when on-demand borrowing cannot work out
+    /// the island set (plan 4.5.1). Needs every island parked.
     World,
+    /// 只把这几座岛的 `Region` 并进发起人的岛，其余岛只借玩家（计划 4.5.1）。
+    /// 集合恒含发起人的岛；只有一座岛时完全不拼。
+    ///
+    /// Join only these islands' `Region`s into the sender's; the rest lend
+    /// only their players (plan 4.5.1). The set always contains the sender's
+    /// island; with a single island nothing is joined.
+    Islands(std::collections::BTreeSet<RegionId>),
     /// 只要这几名玩家所在的岛。
     ///
     /// Only the islands these players are on.
