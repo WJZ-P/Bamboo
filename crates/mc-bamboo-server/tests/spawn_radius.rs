@@ -11,8 +11,8 @@
 //! lands within ±10 blocks of the world spawn on block-centred coordinates
 //! with grass underfoot, can move after accepting the teleport at those real
 //! coordinates, and lands within the same bounds again after a death respawn.
-//! With `immediate_respawn` on, death skips the death screen but takes the
-//! same respawn path, so that branch is covered too.
+//! With `immediate_respawn` on the client skips the death screen and sends
+//! `PERFORM_RESPAWN` itself; the server still waits for that packet.
 
 mod common;
 
@@ -110,12 +110,14 @@ fn assert_spawn_landing(player: &Player, landing: &PlayerPosition, what: &str) {
     );
 }
 
-/// `immediate_respawn` 关着时客户端从死亡界面发 PERFORM_RESPAWN，开着时死亡当场重生。
-/// 两种情况下重生包里的落点都按缺省半径散布。
+/// `immediate_respawn` 关着时客户端从死亡界面发 PERFORM_RESPAWN，开着时收到
+/// `player_combat_kill` 后直接发同一个包；服务端两种情况下都等这个包。
+/// 重生包里的落点都按缺省半径散布。
 ///
 /// With `immediate_respawn` off the client sends PERFORM_RESPAWN from the
-/// death screen; with it on death respawns at once. Both landings use the
-/// default-radius scatter.
+/// death screen; with it on, right after `player_combat_kill`. The server
+/// waits for the packet in both cases. Both landings use the default-radius
+/// scatter.
 async fn join_move_and_respawn(immediate: bool) {
     let lists = Lists::new();
     let server = TestServer::start_with_default_spawn_radius(lists.config()).await;
@@ -167,21 +169,35 @@ async fn join_move_and_respawn(immediate: bool) {
             .await;
         player.settle().await;
     }
-    // `/kill @s` 走完整的死亡流程（genericKill）；死亡界面或规则决定何时重生。
-    // `/kill @s` runs the full death flow (genericKill); the death screen or
-    // the game rule decides when respawn happens.
+    // `/kill @s` 走完整的死亡流程（genericKill）；客户端收到死亡界面包后
+    // 由自己发 PERFORM_RESPAWN（规则开着只是不显示那个界面）。
+    // `/kill @s` runs the full death flow (genericKill); the client sends
+    // PERFORM_RESPAWN after the death-screen packet (with the rule on it
+    // just skips showing that screen).
+    let before_death = player.mark();
     player.send(&chat_command("kill @s")).await;
+    player
+        .wait_until("the death screen packet", |frames| {
+            frames[before_death..]
+                .iter()
+                .any(|frame| frame.id == play::clientbound::PLAYER_COMBAT_KILL)
+        })
+        .await;
+    // 服务端不主动重生：客户端不发就收不到重生包和新的 player_position。
+    // The server never respawns on its own: without a client packet there
+    // is no respawn packet and no new player_position.
     player.settle().await;
     assert!(
-        player
-            .frames()
-            .iter()
-            .any(|frame| frame.id == play::clientbound::PLAYER_COMBAT_KILL),
-        "收到了死亡界面包"
+        !player
+            .ids_since(before_death)
+            .contains(&play::clientbound::RESPAWN),
+        "客户端还没发 PERFORM_RESPAWN，服务端没有自己重生"
     );
-    if !immediate {
-        player.send(&client_command(PERFORM_RESPAWN)).await;
-    }
+    assert!(
+        player.since::<PlayerPosition>(before_death).is_empty(),
+        "客户端还没发 PERFORM_RESPAWN，没有新的落点"
+    );
+    player.send(&client_command(PERFORM_RESPAWN)).await;
     // 重生包里的落点：`PlayerList.respawn` 已经发过 `player_position`。
     // The landing in the respawn sequence: `PlayerList.respawn` already
     // sent `player_position`.
@@ -192,6 +208,24 @@ async fn join_move_and_respawn(immediate: bool) {
         .await;
     player.settle().await;
     assert!(!player.is_closed(), "重生后按实际落点确认，连接仍然开着");
+    // 已经重生后再发一次：官方 `handleClientCommand` 在血量 > 0 时忽略，
+    // 不会收到第二个重生包 / 第二个落点。
+    // One more PERFORM_RESPAWN after respawning: vanilla
+    // `handleClientCommand` ignores it while health > 0, so there is no
+    // second respawn packet or landing.
+    let after_respawn = player.mark();
+    player.send(&client_command(PERFORM_RESPAWN)).await;
+    player.settle().await;
+    assert!(
+        !player
+            .ids_since(after_respawn)
+            .contains(&play::clientbound::RESPAWN),
+        "血量大于 0 时 PERFORM_RESPAWN 被忽略"
+    );
+    assert!(
+        player.since::<PlayerPosition>(after_respawn).is_empty(),
+        "被忽略的 PERFORM_RESPAWN 没有产生新的落点"
+    );
 }
 
 #[tokio::test]
@@ -199,9 +233,10 @@ async fn the_default_spawn_radius_scatters_join_and_respawn_landings() {
     join_move_and_respawn(false).await;
 }
 
-/// `immediate_respawn` 打开时不经死亡界面，死亡当场走同一个 `respawn()`。
-/// With `immediate_respawn` on, death skips the death screen and takes the
-/// same `respawn()` at once.
+/// `immediate_respawn` 打开时客户端不经死亡界面，收到 `player_combat_kill`
+/// 后自己发 `PERFORM_RESPAWN`，服务端照常走同一个 `respawn()`。
+/// With `immediate_respawn` on, the client skips the death screen and sends
+/// `PERFORM_RESPAWN` itself; the server takes the same `respawn()` as usual.
 #[tokio::test]
 async fn immediate_respawn_uses_the_same_default_radius_landing() {
     join_move_and_respawn(true).await;

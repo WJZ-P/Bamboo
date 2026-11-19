@@ -1497,7 +1497,8 @@ fn a_respawn_into_a_pending_split_keeps_the_view_on_one_island() {
 /// 全部区块，而且那片区块里的方块更新真的发到他手上。两种方向都造得出来，就都跑：
 /// 玩家留在原岛、重生点在拆出去的那半（`spawn_moves = true`），以及玩家所在的那半被
 /// 拆出去、重生点留在原岛（`spawn_moves = false`）。`immediate_respawn` 打开时不经死亡
-/// 界面，死亡当场走的是同一个 `respawn()`，也各跑一遍。改坏确认同前两条测试。
+/// 界面，客户端自己发 `PERFORM_RESPAWN` 后走同一个 `respawn()`，也各跑一遍。
+/// 改坏确认同前两条测试。
 ///
 /// The window is most often hit by a respawn in a real server: a player on
 /// island A is killed by `/kill`, the world spawn sits in the half whose split
@@ -1511,8 +1512,9 @@ fn a_respawn_into_a_pending_split_keeps_the_view_on_one_island() {
 /// window can be built, so both run: the player stays while the spawn is on
 /// the split-off half (`spawn_moves = true`), and the player's half splits off
 /// while the spawn stays (`spawn_moves = false`). With `immediate_respawn`
-/// on, death takes the same `respawn()` without the death screen; run those
-/// too. Break-it checks as in the two tests above.
+/// on the client skips the death screen but still sends PERFORM_RESPAWN and
+/// takes the same `respawn()`; run those too. Break-it checks as in the two
+/// tests above.
 #[test]
 fn a_real_death_and_respawn_into_a_pending_split_delivers_block_updates() {
     with_stack(|| {
@@ -1854,15 +1856,16 @@ fn run_split_window(break_view: bool, place: impl Fn(&mut Scene, &Client, Vec3))
 }
 
 /// 造一个「已定拆分、还没照做」的窗口，把世界出生点和死者分在切口两边，再走完整的
-/// `/kill` → `PERFORM_RESPAWN` → `player_respawn::respawn`（或
-/// `immediate_respawn` 打开时死亡当场重生）。`spawn_moves` 决定重生点在拆出去的那半
+/// `/kill` → `PERFORM_RESPAWN` → `player_respawn::respawn`（`immediate_respawn`
+/// 打开时客户端也只是不显示死亡界面，仍然发同一个包）。`spawn_moves` 决定重生点在拆出去的那半
 /// （死者在留下的那半）还是反过来。`break_view` 用 e0526f0c 的改坏钩子改回按瞬时
 /// 位置分人。
 ///
 /// Make a window where a split is decided but not replayed, with the world
 /// spawn and the dying player on opposite sides of the cut, then walk the
-/// whole `/kill` → `PERFORM_RESPAWN` → `player_respawn::respawn` path (or the
-/// immediate respawn taken at death when that game rule is on). `spawn_moves`
+/// whole `/kill` → `PERFORM_RESPAWN` → `player_respawn::respawn` path (with
+/// `immediate_respawn` on the client only skips the death screen and still
+/// sends the same packet). `spawn_moves`
 /// picks whether the spawn is on the split-off half (the player stays) or the
 /// other way round. `break_view` uses e0526f0c's break-it switch to split
 /// players by instantaneous position.
@@ -1979,22 +1982,23 @@ fn run_death_respawn_split_window(break_view: bool, spawn_moves: bool, immediate
         .profiler()
         .count_of(Metric::IslandSplitDeferrals);
     // 两条入站请求排进同一刻：`/kill @s` 走 genericKill 的完整死亡流程，
-    // PERFORM_RESPAWN 经 `chat::on_client_command` 调 `player_respawn::respawn`。
+    // 客户端收到死亡界面包后发 PERFORM_RESPAWN（规则开着只是不显示界面），
+    // 经 `chat::on_client_command` 调 `player_respawn::respawn`。
     // Queue both inbound requests for the same tick: `/kill @s` goes through
-    // the full genericKill death flow, PERFORM_RESPAWN goes through
-    // `chat::on_client_command` into `player_respawn::respawn`.
+    // the full genericKill death flow; the client sends PERFORM_RESPAWN after
+    // the death-screen packet (with the rule on it just skips showing it),
+    // which goes through `chat::on_client_command` into
+    // `player_respawn::respawn`.
     scene.server.request(
         &traveller,
         PlayRequest::unsigned_command("kill @s".to_owned()),
     );
-    if !immediate {
-        scene.server.request(
-            &traveller,
-            PlayRequest::ClientCommand {
-                action: ClientCommandKind::PerformRespawn,
-            },
-        );
-    }
+    scene.server.request(
+        &traveller,
+        PlayRequest::ClientCommand {
+            action: ClientCommandKind::PerformRespawn,
+        },
+    );
     scene.server.tick();
     let frames = traveller.take_frames();
     assert!(

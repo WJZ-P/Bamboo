@@ -1189,6 +1189,44 @@ fn login_uses_the_clamped_server_view_distance() {
     }
 }
 
+/// 官方 `PlayerList.placeNewPlayer`：进服的 login 包里 `showDeathScreen` 是
+/// `!IMMEDIATE_RESPAWN`；规则只通知客户端，不让服务端自己重生。
+///
+/// Vanilla `PlayerList.placeNewPlayer`: the login packet's `showDeathScreen`
+/// is `!IMMEDIATE_RESPAWN`. The rule only notifies the client; the server
+/// never respawns on its own.
+#[test]
+fn login_reports_the_immediate_respawn_rule_as_show_death_screen() {
+    for (immediate, show_death_screen) in [(false, true), (true, false)] {
+        let mut server = Harness::new(8);
+        let _ = server.world.master.global.rules_mut().assign(
+            mc_bamboo_data::gamerules::IMMEDIATE_RESPAWN,
+            if immediate { "true" } else { "false" },
+        );
+        server.world.publish_global();
+        let client = server.join("Kitten");
+        server.tick();
+
+        let frames = client.take_frames();
+        let login = frames_with_id(&frames, clientbound::LOGIN);
+        assert_eq!(login.len(), 1);
+        let mut reader = Reader::new(&login[0].body);
+        reader.i32().unwrap(); // 实体 ID
+        reader.bool().unwrap(); // 极限模式
+        reader.varint().unwrap(); // 维度个数
+        reader.string(32767).unwrap();
+        reader.varint().unwrap(); // 最大玩家数
+        reader.varint().unwrap(); // 视距
+        reader.varint().unwrap(); // 模拟距离
+        reader.bool().unwrap(); // 隐藏调试信息
+        assert_eq!(
+            reader.bool(),
+            Ok(show_death_screen),
+            "immediate_respawn={immediate}"
+        );
+    }
+}
+
 #[test]
 fn own_entity_data_comes_from_the_client_information() {
     let mut server = Harness::new(8);

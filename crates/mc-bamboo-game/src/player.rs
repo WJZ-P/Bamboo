@@ -187,11 +187,14 @@ pub(crate) struct Player {
     /// Entity tick count, used modulo 20/10 by peaceful regeneration. Relative,
     /// so island splits and merges need no rebasing.
     pub(crate) entity_ticks: i32,
-    /// `ServerPlayer.respawnConfig` 之外，死亡时等待客户端发来的
-    /// `PERFORM_RESPAWN`；`immediate_respawn` 打开时不进入这个状态。
+    /// `ServerPlayer.respawnConfig` 之外，死亡后一律等待客户端发来的
+    /// `PERFORM_RESPAWN`：`immediate_respawn` 只影响客户端要不要显示死亡界面，
+    /// 服务端不自己重生，客户端不发就一直是死的。
     ///
-    /// Waiting for `PERFORM_RESPAWN` after death; skipped when
-    /// `immediate_respawn` is on.
+    /// After death, always wait for the client's `PERFORM_RESPAWN`:
+    /// `immediate_respawn` only tells the client whether to show the death
+    /// screen. The server never respawns on its own; without a client packet
+    /// the player stays dead.
     pub(crate) awaiting_respawn: bool,
 }
 
