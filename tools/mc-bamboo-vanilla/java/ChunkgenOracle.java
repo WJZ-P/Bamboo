@@ -15,7 +15,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -45,7 +47,9 @@ import net.minecraft.tags.TagLoader;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.levelgen.PositionalRandomFactory;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.LevelHeightAccessor;
+import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.biome.Biome;
@@ -54,11 +58,16 @@ import net.minecraft.world.level.biome.BiomeResolver;
 import net.minecraft.world.level.biome.BiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkGeneratorStructureState;
+import net.minecraft.world.level.chunk.DataLayer;
+import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.LightChunk;
+import net.minecraft.world.level.chunk.LightChunkGetter;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.chunk.ProtoChunk;
 import net.minecraft.world.level.chunk.UpgradeData;
@@ -67,6 +76,9 @@ import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureSet;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
+import net.minecraft.world.level.lighting.LevelLightEngine;
+import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.storage.LevelStorageSource;
 import net.minecraft.util.datafix.DataFixers;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -757,7 +769,7 @@ public final class ChunkgenOracle {
     private record Options(int seeds, int chunks, long salt, int through, int stepsMask,
             String featureAllowList, boolean realPath, String settings,
             Integer forcedX, Integer forcedZ, int scan, boolean structures, Long forcedSeed,
-            Path chunksFile, String mergeOrders) {
+            Path chunksFile, String mergeOrders, boolean lightPipeline) {
         static final int ALL_STEPS = (1 << 11) - 1;
 
         static Options parse(String[] args) {
@@ -794,6 +806,10 @@ public final class ChunkgenOracle {
             // `--merge-neighbors ORDERS`: neighbor-spill merge oracle, one merged
             // line per comma-separated run order (center-first / center-last).
             String mergeOrders = null;
+            // `--light-pipeline`: 官方 FEATURES 后 3×3 跑 initializeLight + light，
+            // 输出中心柱逐格光照和这批方块状态 ID。
+            // Emit the official center-column light over the post-FEATURES 3x3.
+            boolean lightPipeline = false;
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--seeds" -> seeds = Integer.parseInt(args[++i]);
@@ -836,11 +852,13 @@ public final class ChunkgenOracle {
                     case "--seed" -> forcedSeed = Long.parseLong(args[++i]);
                     case "--chunks-file" -> chunksFile = Path.of(args[++i]);
                     case "--merge-neighbors" -> mergeOrders = args[++i];
+                    case "--light-pipeline" -> lightPipeline = true;
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
             return new Options(seeds, chunks, salt, through, stepsMask, featureAllowList, realPath, settings,
-                    forcedX, forcedZ, scan, structures, forcedSeed, chunksFile, mergeOrders);
+                    forcedX, forcedZ, scan, structures, forcedSeed, chunksFile, mergeOrders,
+                    lightPipeline);
         }
     }
 
@@ -931,6 +949,7 @@ public final class ChunkgenOracle {
             header.addProperty("through", this.options.through());
             header.addProperty("steps", this.options.stepsMask());
             header.addProperty("structures", this.options.structures());
+            header.addProperty("lightPipeline", this.options.lightPipeline());
             write(header);
 
             NoiseBasedChunkGenerator generator =
@@ -967,6 +986,11 @@ public final class ChunkgenOracle {
                     // 真正的流程由 ChunkStatus 设置状态；这里补上，getNoiseBiome 才肯读。
                     proto.setPersistedStatus(ChunkStatus.BIOMES);
                     writeBiomes(seed, pos, proto);
+                    if (this.options.lightPipeline()) {
+                        writeLightPipeline(seed, pos, generator, generatorSettings, state,
+                                resolver);
+                        continue;
+                    }
                     if (this.options.through() < 1) {
                         continue;
                     }
@@ -1025,6 +1049,230 @@ public final class ChunkgenOracle {
         }
 
         /**
+         * `--light-pipeline`：官方「FEATURES 后的 3×3 → 官方 LIGHT」整块对拍。
+         *
+         * <p>字节码依据：`ChunkPyramid.GENERATION_PYRAMID` 的 `LIGHT` 要半径 1 的
+         * `INITIALIZE_LIGHT`，每格的 `INITIALIZE_LIGHT` 又在 `FEATURES` 之后；
+         * `ChunkStatusTasks.initializeLight` 登记非空段，`light` 调
+         * `ThreadedLevelLightEngine.lightChunk` → `propagateLightSources`，
+         * 光引擎通过 `LightChunkGetter` 读这批 ProtoChunk 当时的方块。
+         *
+         * <p>先按官方顺序造 7×7 个 CARVERS ProtoChunk（带结构时另用半径 12 的网格
+         * 跑起点 / 引用 / Beardifier），让 5×5 个来源中心各自在干净 3×3 上跑一遍
+         * `applyBiomeDecoration`，记下它们写进中心 3×3 的方块。再按游戏完工组装的
+         * 固定先后（目标自己最先，其余来源按 slot 升序，同格先写的赢）合并，保证
+         * 中心 3×3 每格都带着 9 个来源中心的写，又不引入官方调度差异。最后在
+         * 7×7 光引擎网格上跑 `initializeLight` + `light`：中心 3×3 是真的
+         * ProtoChunk，外两圈全空气，对应游戏侧「视图之外全空气」的边界。
+         *
+         * Whole-chunk light oracle: vanilla post-FEATURES 3x3 → vanilla LIGHT.
+         * A 7x7 of CARVERS chunks lets 5x5 source centers each run FEATURES on a
+         * clean 3x3; their writes into the center 3x3 are merged with the game's
+         * fixed order (target first, then ascending slots, first writer wins), so
+         * every center cell carries all nine sources without scheduling effects.
+         * The 7x7 light world registers sections and propagates sources exactly
+         * like ChunkStatusTasks; the outer air rings match the game's boundary.
+         */
+        private void writeLightPipeline(long seed, ChunkPos pos,
+                NoiseBasedChunkGenerator generator, NoiseGeneratorSettings generatorSettings,
+                RandomState randomState, BiomeResolver resolver) throws Exception {
+            boolean structures = this.options.structures();
+            // 中心 3×3 每格都要带上 9 个来源中心的写；边缘来源还要看到自己 ±2 的
+            // 地形，所以先造 7×7 个 CARVERS ProtoChunk（下标 (dz+3)*7+(dx+3)）。
+            // 带结构时起点 / 引用 / Beardifier 要读 ±8，另用半径 10 的网格。
+            // The center 3x3 needs writes from 9 source centers per cell; edge
+            // sources need terrain out to +/-2, so build a 7x7 of CARVERS chunks.
+            int areaRadius = 3;
+            int areaSize = areaRadius * 2 + 1;
+            TerrainChunk[] area = new TerrainChunk[areaSize * areaSize];
+            StructureChunkGrid structureGrid = null;
+            WorldOptions worldOptions = new WorldOptions(seed, structures, false);
+            // 无结构模式也要 `getLevel()`：沙漠水井 / 化石的模板管理器挂在它的
+            // 服务端上（和 writeFeatures 一样）。
+            // Structure-less runs need `getLevel()` too: the desert well and
+            // fossil reach the template manager through its server.
+            net.minecraft.server.level.ServerLevel entityStub =
+                    installEntityStub(seed, generator);
+            if (structures) {
+                int radius = 12;
+                int size = radius * 2 + 1;
+                ProtoChunk[][] grid = new ProtoChunk[size][size];
+                for (int dx = -radius; dx <= radius; dx++) {
+                    for (int dz = -radius; dz <= radius; dz++) {
+                        grid[dx + radius][dz + radius] =
+                                newChunk(new ChunkPos(pos.x() + dx, pos.z() + dz), generatorSettings);
+                    }
+                }
+                structureGrid = new StructureChunkGrid(pos, grid, radius);
+                HolderLookup<StructureSet> setLookup = registries.lookupOrThrow(Registries.STRUCTURE_SET);
+                ChunkGeneratorStructureState structureState =
+                        ChunkGeneratorStructureState.createForNormal(
+                                randomState, seed, new ChunkPos(0, 0), generator.getBiomeSource(),
+                                setLookup);
+                structureState.ensureStructuresGenerated();
+                for (int dx = -radius; dx <= radius; dx++) {
+                    for (int dz = -radius; dz <= radius; dz++) {
+                        ProtoChunk chunk = structureGrid.chunk(pos, pos.x() + dx, pos.z() + dz);
+                        StructureManager manager = new StructureManager(
+                                structureLevel(registries, chunk, structureGrid, pos), worldOptions, null);
+                        generator.createStructures(registries, structureState, manager, chunk,
+                                templates, net.minecraft.resources.ResourceKey.create(
+                                        Registries.DIMENSION,
+                                        Identifier.withDefaultNamespace("overworld")));
+                    }
+                }
+                WorldGenLevel referenceRegion = referenceRegion(pos, structureGrid, registries);
+                for (int dz = -areaRadius; dz <= areaRadius; dz++) {
+                    for (int dx = -areaRadius; dx <= areaRadius; dx++) {
+                        ProtoChunk chunk = structureGrid.chunk(pos, pos.x() + dx, pos.z() + dz);
+                        generator.createReferences(referenceRegion,
+                                new StructureManager(referenceRegion, worldOptions, null), chunk);
+                    }
+                }
+                for (int dz = -radius; dz <= radius; dz++) {
+                    for (int dx = -radius; dx <= radius; dx++) {
+                        ProtoChunk chunk = structureGrid.chunk(pos, pos.x() + dx, pos.z() + dz);
+                        generator.createBiomes(randomState, Blender.empty(), null, chunk).join();
+                        chunk.setPersistedStatus(ChunkStatus.BIOMES);
+                        if (Math.abs(dx) <= areaRadius && Math.abs(dz) <= areaRadius) {
+                            area[(dz + areaRadius) * areaSize + dx + areaRadius] =
+                                    new TerrainChunk(chunk);
+                        }
+                    }
+                }
+                for (int dz = -areaRadius; dz <= areaRadius; dz++) {
+                    for (int dx = -areaRadius; dx <= areaRadius; dx++) {
+                        ChunkPos at = new ChunkPos(pos.x() + dx, pos.z() + dz);
+                        ProtoChunk chunk = structureGrid.chunk(pos, at.x(), at.z());
+                        StructureManager manager = new StructureManager(
+                                featureLevelForStructures(pos, seed, generatorSettings,
+                                        view3x3Wide(area, 0, 0, areaRadius, areaSize),
+                                        randomState, resolver, structureGrid, entityStub),
+                                worldOptions, null);
+                        buildStructuredTerrain(seed, at, chunk, generator, generatorSettings,
+                                randomState, resolver, structureGrid,
+                                Beardifier.forStructuresInChunk(manager, at));
+                    }
+                }
+            } else {
+                for (int dz = -areaRadius; dz <= areaRadius; dz++) {
+                    for (int dx = -areaRadius; dx <= areaRadius; dx++) {
+                        area[(dz + areaRadius) * areaSize + dx + areaRadius] = generateTerrain(
+                                seed, new ChunkPos(pos.x() + dx, pos.z() + dz), generator,
+                                generatorSettings, randomState, resolver);
+                    }
+                }
+            }
+            // 每个来源中心在干净 3×3 上跑一遍官方 FEATURES，记下它写进中心 3×3
+            // 每格的方块；跑完还原，避免「后跑的中心看得到先跑的写」这种调度差异。
+            // 再按游戏完工组装的固定先后（目标自己最先，其余按 slot 升序、同格先写
+            // 的赢），反向把这些写落到干净地形上。
+            // Each source center runs FEATURES on a clean 3x3 and its writes into
+            // the center 3x3 are recorded. Applying them in reverse of the game's
+            // fixed order (target itself first, then ascending slots, first writer
+            // wins) rebuilds the same post-FEATURES blocks without a dirty view.
+            AreaSnapshot[] clean = new AreaSnapshot[area.length];
+            for (int i = 0; i < area.length; i++) {
+                clean[i] = AreaSnapshot.take(area[i].chunk());
+            }
+            int height = generatorSettings.noiseSettings().height();
+            int minY = generatorSettings.noiseSettings().minY();
+            int cells = height * 256;
+            // [目标 3×3 格][来源 slot] → (cell 下标, 状态 ID) 的列表。
+            List<List<List<int[]>>> perTarget = new ArrayList<>();
+            for (int target = 0; target < 9; target++) {
+                List<List<int[]>> slots = new ArrayList<>();
+                for (int slot = 0; slot < 9; slot++) {
+                    slots.add(new ArrayList<>());
+                }
+                perTarget.add(slots);
+            }
+            // 25 个来源：中心 3×3 每格都要收齐它自己 ±1 的 9 个中心。
+            for (int sz = -2; sz <= 2; sz++) {
+                for (int sx = -2; sx <= 2; sx++) {
+                    for (int i = 0; i < area.length; i++) {
+                        clean[i].restore(area[i].chunk());
+                    }
+                    ChunkPos center = new ChunkPos(pos.x() + sx, pos.z() + sz);
+                    TerrainChunk[] view =
+                            view3x3Wide(area, sx, sz, areaRadius, areaSize);
+                    final WorldGenLevel[] holder = new WorldGenLevel[1];
+                    FeatureLevelHandler handler = new FeatureLevelHandler(center, seed,
+                            generatorSettings, wrapped(view), this.registries,
+                            new BiomeManager((qx, qy, qz) -> holder[0].getNoiseBiome(qx, qy, qz),
+                                    BiomeManager.obfuscateSeed(seed)),
+                            resolver, randomState, structureGrid, entityStub);
+                    WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
+                            ChunkgenOracle.class.getClassLoader(),
+                            new Class<?>[] {WorldGenLevel.class}, handler);
+                    holder[0] = level;
+                    generator.applyBiomeDecoration(level, view[4].chunk(),
+                            new StructureManager(level, worldOptions, null));
+                    for (int v = 0; v < 9; v++) {
+                        int tdx = sx + v % 3 - 1;
+                        int tdz = sz + v / 3 - 1;
+                        if (Math.abs(tdx) > 1 || Math.abs(tdz) > 1) {
+                            continue;
+                        }
+                        int target = (tdz + 1) * 3 + tdx + 1;
+                        // 来源中心相对目标区块的 3×3 下标。
+                        int slot = (sz - tdz + 1) * 3 + (sx - tdx + 1);
+                        ProtoChunk chunk = area[(tdz + areaRadius) * areaSize + tdx + areaRadius].chunk();
+                        AreaSnapshot snapshot = clean[(tdz + areaRadius) * areaSize + tdx + areaRadius];
+                        LevelChunkSection[] now = chunk.getSections();
+                        for (int cell = 0; cell < cells; cell++) {
+                            int y = cell / 256;
+                            int lx = (cell / 16) % 16;
+                            int lz = cell % 16;
+                            BlockState nowState = now[y >> 4].getBlockState(lx, y & 15, lz);
+                            if (nowState != snapshot.state(chunk, y, lx, lz)) {
+                                perTarget.get(target).get(slot).add(new int[] {
+                                    cell, Block.BLOCK_STATE_REGISTRY.getId(nowState)});
+                            }
+                        }
+                    }
+                }
+            }
+            for (int i = 0; i < area.length; i++) {
+                clean[i].restore(area[i].chunk());
+            }
+            // 游戏顺序：中心 4 最先，其余 slot 升序；反向应用让先写的留下。
+            int[] order = {8, 7, 6, 5, 3, 2, 1, 0, 4};
+            for (int target = 0; target < 9; target++) {
+                int tdx = target % 3 - 1;
+                int tdz = target / 3 - 1;
+                ProtoChunk chunk = area[(tdz + areaRadius) * areaSize + tdx + areaRadius].chunk();
+                int chunkX = pos.x() + tdx;
+                int chunkZ = pos.z() + tdz;
+                for (int slot : order) {
+                    for (int[] write : perTarget.get(target).get(slot)) {
+                        int cell = write[0];
+                        int y = minY + cell / 256;
+                        int lx = (cell / 16) % 16;
+                        int lz = cell % 16;
+                        chunk.setBlockState(new BlockPos(chunkX * 16 + lx, y,
+                                chunkZ * 16 + lz), Block.BLOCK_STATE_REGISTRY.byId(write[1]), 0);
+                    }
+                }
+                chunk.setPersistedStatus(ChunkStatus.FEATURES);
+            }
+            ProtoChunk[][] window = new ProtoChunk[3][3];
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    window[dz + 1][dx + 1] =
+                            area[(dz + areaRadius) * areaSize + dx + areaRadius].chunk();
+                }
+            }
+            LightWorld world = new LightWorld(pos, window,
+                    PalettedContainerFactory.create(this.registries));
+            JsonObject line = world.line(seed, pos.x(), pos.z(), structures);
+            line.addProperty("type", "lightscene");
+            line.addProperty("steps", this.options.stepsMask());
+            this.checks += world.checks;
+            write(line);
+        }
+
+        /**
          * 邻居溢出合并对拍：目标区块 `pos` 的最终方块要由 9 个中心（它自己和 8 个邻居）
          * 各自的 `applyBiomeDecoration` 写出来。这里造 5×5 个跑到 CARVERS 的
          * ProtoChunk（带结构时整张网格先跑官方起点 / 引用，5×5 各按自己的引用带
@@ -1050,7 +1298,9 @@ public final class ChunkgenOracle {
             // 5×5 下标 (dz + 2) * 5 + (dx + 2)。
             TerrainChunk[] area = new TerrainChunk[25];
             StructureChunkGrid structureGrid = null;
-            net.minecraft.server.level.ServerLevel entityStub = null;
+            // 无结构模式也要 `getLevel()`：沙漠水井 / 化石的模板管理器挂在它的
+            // 服务端上（和 writeFeatures 一样）。
+            net.minecraft.server.level.ServerLevel entityStub = installEntityStub(seed, generator);
             WorldOptions worldOptions = new WorldOptions(seed, structures, false);
             if (structures) {
                 // 5×5 每格的 Beardifier / 引用要读它 ±8 的起点，地形的 carverBiome 读
@@ -1065,7 +1315,6 @@ public final class ChunkgenOracle {
                     }
                 }
                 structureGrid = new StructureChunkGrid(pos, grid, radius);
-                entityStub = installEntityStub(seed);
                 HolderLookup<StructureSet> setLookup = registries.lookupOrThrow(Registries.STRUCTURE_SET);
                 ChunkGeneratorStructureState structureState =
                         ChunkGeneratorStructureState.createForNormal(
@@ -1355,6 +1604,19 @@ public final class ChunkgenOracle {
             }
         }
 
+        /** 7×7 里以 (dx, dz) 为中心的 3×3，按 (dz, dx) 排。 */
+        private static TerrainChunk[] view3x3Wide(TerrainChunk[] area, int dx, int dz,
+                int radius, int size) {
+            TerrainChunk[] view = new TerrainChunk[9];
+            for (int vz = -1; vz <= 1; vz++) {
+                for (int vx = -1; vx <= 1; vx++) {
+                    view[(vz + 1) * 3 + vx + 1] =
+                            area[(dz + vz + radius) * size + dx + vx + radius];
+                }
+            }
+            return view;
+        }
+
         /** 5×5 里以 (dx, dz) 为中心的 3×3，按 (dz, dx) 排。 */
         private static TerrainChunk[] view3x3(TerrainChunk[] area, int dx, int dz) {
             TerrainChunk[] view = new TerrainChunk[9];
@@ -1390,7 +1652,7 @@ public final class ChunkgenOracle {
                 }
             }
             StructureChunkGrid structureGrid = new StructureChunkGrid(pos, grid);
-            net.minecraft.server.level.ServerLevel entityStub = installEntityStub(seed);
+            net.minecraft.server.level.ServerLevel entityStub = installEntityStub(seed, generator);
             WorldOptions worldOptions = new WorldOptions(seed, true, false);
             HolderLookup<StructureSet> setLookup = registries.lookupOrThrow(Registries.STRUCTURE_SET);
             ChunkGeneratorStructureState structureState =
@@ -1757,7 +2019,7 @@ public final class ChunkgenOracle {
                     // 无结构模式也要 `getLevel()`：沙漠水井 / 化石的模板管理器挂在它的服务端上。
                     // Structure-less runs need `getLevel()` too: the desert well and fossil
                     // reach the template manager through its server.
-                    resolver, randomState, null, installEntityStub(seed));
+                    resolver, randomState, null, installEntityStub(seed, generator));
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
                     ChunkgenOracle.class.getClassLoader(),
                     new Class<?>[] {WorldGenLevel.class}, handler);
@@ -2326,7 +2588,8 @@ public final class ChunkgenOracle {
          * `getLevel()` returns a constructor-less ServerLevel, the entity factory
          * returns an inert minecart, and `addFreshEntity` just returns true.
          */
-        private net.minecraft.server.level.ServerLevel installEntityStub(long seed) {
+        private net.minecraft.server.level.ServerLevel installEntityStub(
+                long seed, NoiseBasedChunkGenerator generator) {
             try {
                 Object type = net.minecraft.world.entity.EntityTypes.CHEST_MINECART;
                 setField(net.minecraft.world.entity.EntityType.class, type, "factory",
@@ -2378,6 +2641,40 @@ public final class ChunkgenOracle {
                 Object fakeLevel = allocate(net.minecraft.server.level.ServerLevel.class);
                 setField(net.minecraft.server.level.ServerLevel.class, fakeLevel, "server", server);
                 setField(net.minecraft.world.level.Level.class, fakeLevel, "levelData", levelData);
+                // `PaleMossDecorator.lambda$place$1` 走
+                // `getLevel().getChunkSource().getGenerator()` 拿 `minecraft:pale_moss_patch`
+                // 的递归 Feature.place；不跑构造器的 ServerLevel 的 chunkSource 是 null。
+                // 按字节码把这条链补成
+                // ServerLevel.chunkSource → ServerChunkCache.chunkMap →
+                // ChunkMap.worldGenContext → WorldGenContext.generator，
+                // generator 就是本次对拍用的那个实例（`getGenDepth()` / `getSeaLevel()` 要给对）。
+                // `chunkSource` / `worldGenContext` 是 final，普通反射写不进，用 Unsafe；
+                // `WorldGenContext` 是 record，Unsafe 不肯给它的字段算偏移，
+                // 直接调公开构造器（构造器只做赋值，不碰别的状态）。
+                //
+                // `PaleMossDecorator.lambda$place$1` reaches the recursive
+                // `minecraft:pale_moss_patch` Feature.place through
+                // `getLevel().getChunkSource().getGenerator()`. A constructor-less
+                // ServerLevel has a null chunkSource; rebuild that chain with the
+                // very generator used for this comparison.
+                Object chunkSource = allocate(net.minecraft.server.level.ServerChunkCache.class);
+                Object chunkMap = allocate(net.minecraft.server.level.ChunkMap.class);
+                Object worldGenContext =
+                        net.minecraft.world.level.chunk.status.WorldGenContext.class
+                                .getConstructor(
+                                        net.minecraft.server.level.ServerLevel.class,
+                                        net.minecraft.world.level.chunk.ChunkGenerator.class,
+                                        StructureTemplateManager.class,
+                                        net.minecraft.server.level.ThreadedLevelLightEngine.class,
+                                        java.util.concurrent.Executor.class,
+                                        net.minecraft.world.level.chunk.LevelChunk.UnsavedListener.class)
+                                .newInstance(fakeLevel, generator, this.templates, null, null, null);
+                putFinal(chunkMap, net.minecraft.server.level.ChunkMap.class,
+                        "worldGenContext", worldGenContext);
+                putFinal(chunkSource, net.minecraft.server.level.ServerChunkCache.class,
+                        "chunkMap", chunkMap);
+                putFinal(fakeLevel, net.minecraft.server.level.ServerLevel.class,
+                        "chunkSource", chunkSource);
                 // 结构件在 FEATURES 阶段生成的实体都不进假世界，但官方仍要构造它们
                 // （女巫小屋、府邸、海底神殿、前哨、村庄……）。工厂换成惰性实例，
                 // 后面的 `snapTo` / `finalizeSpawn` / `addFreshEntity` 全部空操作。
@@ -2430,6 +2727,17 @@ public final class ChunkgenOracle {
         }
 
         /** 写一个可能声明在父类上的 final 字段（世界种子链）。 */
+        /** 写一个类自己声明的 final 引用字段（跳过构造器的实例）。 */
+        private static void putFinal(Object target, Class<?> owner, String name, Object value) {
+            try {
+                Field field = owner.getDeclaredField(name);
+                field.setAccessible(true);
+                UNSAFE.putObject(target, UNSAFE.objectFieldOffset(field), value);
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
         private static void setFieldInHierarchy(Object target, String name, Object value) {
             for (Class<?> owner = target.getClass(); owner != null; owner = owner.getSuperclass()) {
                 try {
@@ -2689,6 +2997,238 @@ public final class ChunkgenOracle {
         private void write(JsonObject line) throws Exception {
             this.out.write(line.toString());
             this.out.write('\n');
+        }
+    }
+
+    /** 官方生成期光照的 7×7 假世界：中心 3×3 是 FEATURES 后的 ProtoChunk，外圈全空气。 */
+    private static final class LightWorld implements LightChunkGetter {
+        /** 每柱逐格数：y(384) × x(16) × z(16)。 */
+        private static final int CELLS = 384 * 16 * 16;
+        /** 光引擎要 3×3 外再两圈全空气，网格 7×7，中心下标 3。 */
+        private static final int RADIUS = 3;
+        private static final int GRID = RADIUS * 2 + 1;
+        private static final int CENTER = RADIUS;
+        private static final int MIN_Y = -64;
+        private static final int HEIGHT = 384;
+        private static final int TASKS_PER_BATCH = 1000;
+
+        private final Map<Long, ProtoChunk> chunks = new HashMap<>();
+        private final BatchedLightEngine engine;
+        private final PalettedContainerFactory containers;
+        private final BlockGetter level = new BlockGetter() {
+            @Override
+            public BlockEntity getBlockEntity(BlockPos pos) {
+                return null;
+            }
+
+            @Override
+            public BlockState getBlockState(BlockPos pos) {
+                return Blocks.AIR.defaultBlockState();
+            }
+
+            @Override
+            public FluidState getFluidState(BlockPos pos) {
+                return Fluids.EMPTY.defaultFluidState();
+            }
+
+            @Override
+            public int getHeight() {
+                return HEIGHT;
+            }
+
+            @Override
+            public int getMinY() {
+                return MIN_Y;
+            }
+        };
+        long checks;
+
+        LightWorld(ChunkPos center, ProtoChunk[][] window, PalettedContainerFactory containers) {
+            this.containers = containers;
+            engine = new BatchedLightEngine(this);
+            for (int gx = 0; gx < GRID; gx++) {
+                for (int gz = 0; gz < GRID; gz++) {
+                    int cx = center.x() + gx - CENTER;
+                    int cz = center.z() + gz - CENTER;
+                    boolean inside = Math.abs(gx - CENTER) <= 1 && Math.abs(gz - CENTER) <= 1;
+                    // 外圈给光引擎一个已加载的空邻域；中心 3×3 原样搬进网格。
+                    // The outer rings are loaded air; the center 3x3 is copied in.
+                    ProtoChunk chunk;
+                    if (inside) {
+                        chunk = copyChunk(window[gz - CENTER + 1][gx - CENTER + 1], cx, cz);
+                    } else {
+                        chunk = new ProtoChunk(new ChunkPos(cx, cz), UpgradeData.EMPTY, level,
+                                containers, null);
+                    }
+                    chunks.put(ChunkPos.pack(cx, cz), chunk);
+                }
+            }
+            // ChunkStatusTasks.initializeLight：登记非空段、算天空光源表。
+            for (ProtoChunk chunk : chunks.values()) {
+                initializeLight(chunk);
+            }
+            engine.flush();
+            // ChunkStatusTasks.light：逐个点亮光源，跑到底。
+            for (ProtoChunk chunk : chunks.values()) {
+                engine.propagateLightSources(chunk.getPos());
+                chunk.setPersistedStatus(ChunkStatus.LIGHT);
+            }
+            engine.flush();
+        }
+
+        /** 把 FEATURES 后的 ProtoChunk 段（方块 + quart 群系）原样搬进 7×7 网格。 */
+        private ProtoChunk copyChunk(ProtoChunk source, int cx, int cz) {
+            ProtoChunk copy = new ProtoChunk(new ChunkPos(cx, cz), UpgradeData.EMPTY, level,
+                    containers, null);
+            LevelChunkSection[] sections = source.getSections();
+            LevelChunkSection[] target = copy.getSections();
+            for (int index = 0; index < sections.length; index++) {
+                LevelChunkSection from = sections[index];
+                for (int y = 0; y < 16; y++) {
+                    for (int x = 0; x < 16; x++) {
+                        for (int z = 0; z < 16; z++) {
+                            // `cave_air` 也照搬：它的 isAir() 为真，但状态 ID 不是
+                            // 空气，光引擎读到的方块状态和逐格对拍都要精确一致。
+                            // Copy cave_air too: its isAir() is true but its state
+                            // id differs from air, and both the engine and the
+                            // block comparison must see the exact state.
+                            target[index].setBlockState(x, y, z, from.getBlockState(x, y, z));
+                        }
+                    }
+                }
+                // 光引擎的 ChunkSkyLightSources 只读方块，但 ProtoChunk 的
+                // getNoiseBiome 会被别的路径问到；用官方的 fillBiomesFromNoise
+                // 把 quart 群系逐格填成源区块的值。
+                target[index].fillBiomesFromNoise(
+                        (qx, qy, qz) -> from.getNoiseBiome(qx, qy, qz), 0, 0, 0);
+            }
+            return copy;
+        }
+
+        private void initializeLight(ProtoChunk chunk) {
+            chunk.initializeLightSources();
+            chunk.setLightEngine(engine);
+            chunk.setPersistedStatus(ChunkStatus.INITIALIZE_LIGHT);
+            LevelChunkSection[] sections = chunk.getSections();
+            for (int index = 0; index < sections.length; index++) {
+                if (!sections[index].hasOnlyAir()) {
+                    int sectionY = chunk.getSectionYFromSectionIndex(index);
+                    engine.updateSectionStatus(SectionPos.of(chunk.getPos(), sectionY), false);
+                }
+            }
+            engine.setLightEnabled(chunk.getPos(), false);
+            engine.retainData(chunk.getPos(), false);
+        }
+
+        JsonObject line(long seed, int x, int z, boolean structures) {
+            // palette：中心 3×3 用到的官方状态 ID（空气 0 恒在下标 0）。
+            LinkedHashMap<Integer, Integer> ids = new LinkedHashMap<>();
+            ids.put(0, 0);
+            JsonArray palette = new JsonArray();
+            palette.add(0);
+            JsonArray chunksJson = new JsonArray();
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    ProtoChunk chunk = chunks.get(ChunkPos.pack(x + dx, z + dz));
+                    JsonObject entry = new JsonObject();
+                    entry.addProperty("dx", dx);
+                    entry.addProperty("dz", dz);
+                    JsonArray blocks = new JsonArray();
+                    LevelChunkSection[] sections = chunk.getSections();
+                    for (int y = 0; y < HEIGHT; y++) {
+                        for (int lx = 0; lx < 16; lx++) {
+                            for (int lz = 0; lz < 16; lz++) {
+                                int state = Block.BLOCK_STATE_REGISTRY.getId(
+                                        sections[y >> 4].getBlockState(lx, y & 15, lz));
+                                if (!ids.containsKey(state)) {
+                                    ids.put(state, ids.size());
+                                    palette.add(state);
+                                }
+                                blocks.add(ids.get(state));
+                            }
+                        }
+                    }
+                    entry.add("blocks", blocks);
+                    chunksJson.add(entry);
+                }
+            }
+            JsonArray sky = new JsonArray();
+            JsonArray block = new JsonArray();
+            for (int y = 0; y < HEIGHT; y++) {
+                for (int lx = 0; lx < 16; lx++) {
+                    for (int lz = 0; lz < 16; lz++) {
+                        BlockPos pos = new BlockPos(x * 16 + lx, MIN_Y + y, z * 16 + lz);
+                        sky.add(engine.getLayerListener(LightLayer.SKY).getLightValue(pos));
+                        block.add(engine.getLayerListener(LightLayer.BLOCK).getLightValue(pos));
+                        this.checks += 2;
+                    }
+                }
+            }
+            JsonObject line = new JsonObject();
+            line.addProperty("seed", seed);
+            line.addProperty("x", x);
+            line.addProperty("z", z);
+            line.addProperty("structures", structures);
+            line.addProperty("minY", MIN_Y);
+            line.addProperty("height", HEIGHT);
+            line.addProperty("cells", CELLS);
+            line.add("palette", palette);
+            line.add("chunks", chunksJson);
+            line.add("sky", sky);
+            line.add("block", block);
+            return line;
+        }
+
+        @Override
+        public LightChunk getChunkForLighting(int x, int z) {
+            return chunks.get(ChunkPos.pack(x, z));
+        }
+
+        @Override
+        public BlockGetter getLevel() {
+            return level;
+        }
+    }
+
+    /** ThreadedLevelLightEngine 的任务队列，不开线程：攒够一批就算，flush 把剩下的算完。 */
+    private static final class BatchedLightEngine extends LevelLightEngine {
+        private final List<Runnable> tasks = new ArrayList<>();
+
+        BatchedLightEngine(LightChunkGetter chunks) {
+            super(chunks, true, true);
+        }
+
+        @Override
+        public void checkBlock(BlockPos pos) {
+            BlockPos immutable = pos.immutable();
+            addTask(() -> super.checkBlock(immutable));
+        }
+
+        @Override
+        public void updateSectionStatus(SectionPos pos, boolean sectionEmpty) {
+            addTask(() -> super.updateSectionStatus(pos, sectionEmpty));
+        }
+
+        private void addTask(Runnable task) {
+            tasks.add(task);
+            if (tasks.size() >= LightWorld.TASKS_PER_BATCH) {
+                runUpdate();
+            }
+        }
+
+        private void runUpdate() {
+            int count = Math.min(tasks.size(), LightWorld.TASKS_PER_BATCH);
+            for (int i = 0; i < count; i++) {
+                tasks.get(i).run();
+            }
+            super.runLightUpdates();
+            tasks.subList(0, count).clear();
+        }
+
+        void flush() {
+            while (!tasks.isEmpty() || hasLightWork()) {
+                runUpdate();
+            }
         }
     }
 }
