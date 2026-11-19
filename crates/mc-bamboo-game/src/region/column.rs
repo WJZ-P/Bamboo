@@ -307,6 +307,26 @@ impl RegionColumn {
         &self.column
     }
 
+    /// 从另一个盒子搬上层内容（方块实体、计划刻、红石、四张表和实体），
+    /// 方块 / 光照仍用当前盒子。读盘的非 full 区块续跑时，阶段纯函数会
+    /// 用新生成的盒子替换方块层，这里把盘上带回来的上层内容装回去：
+    /// 官方 `ChunkStep.apply` 始终把同一个 ChunkAccess 往后传，不会丢掉
+    /// pendingBlockEntities / pendingTicks / 上层表。
+    ///
+    /// Move upper-layer content from another box while keeping this box's
+    /// blocks/light. A non-full disk chunk keeps its pending entities/ticks
+    /// across the resumed stages, just like vanilla's shared ChunkAccess.
+    pub fn adopt_upper_content(&mut self, source: RegionColumn) {
+        self.ticks = source.ticks;
+        self.block_entities = source.block_entities;
+        self.redstone = source.redstone;
+        self.containers = source.containers;
+        self.block_items = source.block_items;
+        self.command_blocks = source.command_blocks;
+        self.books = source.books;
+        self.entities = source.entities;
+    }
+
     /// 存档编码用的只读部件视图。
     pub fn parts(&self) -> RegionColumnView<'_> {
         RegionColumnView {

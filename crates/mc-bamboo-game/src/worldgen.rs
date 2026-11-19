@@ -242,6 +242,84 @@ fn compute_heightmaps(blocks: &[Vec<u32>]) -> BTreeMap<&'static str, Vec<i32>> {
     HEIGHTMAP_KEYS.into_iter().zip(columns).collect()
 }
 
+/// 从读盘柱子还原 `GeneratedChunk` 的方块 / 群系 / 四张 FINAL 高度图，
+/// 给非 full 区块续跑 `features` / `light` 阶段当输入。
+///
+/// Rebuild a `GeneratedChunk` from a decoded column for resumed stages.
+pub fn generated_chunk_from_column(column: &RegionColumn) -> GeneratedChunk {
+    let chunk = column.chunk_column().chunk();
+    let mut blocks = Vec::with_capacity(WORLD_HEIGHT as usize);
+    for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
+        let mut layer = vec![0_u32; 256];
+        for x in 0..WIDTH {
+            for z in 0..WIDTH {
+                layer[x * WIDTH + z] = chunk.block(x, y, z);
+            }
+        }
+        blocks.push(layer);
+    }
+    let mut biomes = Vec::with_capacity(SECTION_COUNT);
+    for section in 0..SECTION_COUNT {
+        let y = MIN_Y + section as i32 * SECTION_SIZE;
+        let mut cells = vec![0_u32; 64];
+        for qx in 0..4 {
+            for qy in 0..4 {
+                for qz in 0..4 {
+                    cells[qx * 16 + qy * 4 + qz] =
+                        chunk.biome_at(qx * 4, y + qy as i32 * 4, qz * 4);
+                }
+            }
+        }
+        biomes.push(cells);
+    }
+    GeneratedChunk {
+        blocks,
+        biomes,
+        heightmaps: compute_heightmaps_public_owned(chunk),
+    }
+}
+
+/// 从读盘柱子取回两层生成期光照（官方 `SerializableChunkData.read` 恢复的段）。
+pub fn generated_light_from_column(
+    column: &RegionColumn,
+) -> mc_bamboo_world::light::generate::GeneratedLight {
+    use mc_bamboo_core::LightLayer;
+    use mc_bamboo_world::light::{LIGHT_SECTION_COUNT, MIN_LIGHT_SECTION, SectionPos};
+    let layers = |layer: LightLayer| {
+        (0..LIGHT_SECTION_COUNT)
+            .map(|slot| {
+                column
+                    .chunk_column()
+                    .section(
+                        layer,
+                        SectionPos::new(0, MIN_LIGHT_SECTION + slot as i32, 0),
+                    )
+                    .cloned()
+            })
+            .collect()
+    };
+    mc_bamboo_world::light::generate::GeneratedLight {
+        sky: layers(LightLayer::Sky),
+        block: layers(LightLayer::Block),
+    }
+}
+
+fn compute_heightmaps_public_owned(
+    chunk: &mc_bamboo_world::chunk::Chunk,
+) -> BTreeMap<&'static str, Vec<i32>> {
+    let mut blocks = Vec::with_capacity(WORLD_HEIGHT as usize);
+    for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
+        let mut layer = vec![0_u32; 256];
+        for x in 0..WIDTH {
+            for z in 0..WIDTH {
+                layer[x * WIDTH + z] = chunk.block(x, y, z);
+            }
+        }
+        blocks.push(layer);
+    }
+    compute_heightmaps(&blocks)
+}
+
 /// 对拍用：从逐层方块算出六张高度图（正式路径里 `build_region_column` 用同一份）。
 ///
 /// Oracle-only: compute the six heightmaps from block layers (the same function

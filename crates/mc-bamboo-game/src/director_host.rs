@@ -200,6 +200,8 @@ pub(crate) struct DirectorHost {
     io: Option<ChunkIo>,
     /// 生成阶段函数。内联执行器和计算池共用这一个。
     generator: Arc<dyn ChunkGenerator>,
+    /// 生成器的世界配置，读盘恢复结构起点时要用同一个种子。
+    world_gen_config: crate::world_options::WorldGenConfig,
     /// 生成期每个区块的半成品 ProtoChunk（CARVERS 地形 + 已按 `TaskId` 顺序合并的
     /// 地物写增量），存成不可变 `Arc`：任务发出后世界线程不再改这份快照，要改就
     /// `Arc::make_mut` 写时复制出新的 `Arc`（设计稿 5.3.1）。只在世界线程读写，
@@ -226,6 +228,13 @@ pub(crate) struct DirectorHost {
     /// The `structures` tag from `structure_references`, installed into the
     /// delivered column at assembly and then cleared.
     generated_structures: BTreeMap<ChunkPos, mc_bamboo_nbt::Tag>,
+    /// 读盘半成品区块的上层内容（方块实体 / 计划刻 / 实体 / 四张表）。续跑的
+    /// 阶段纯函数会替换方块层，完工组装时把这些内容装回交付盒子。
+    /// Upper-layer content of a decoded non-full chunk; stage functions replace
+    /// the block layer, so assembly moves this back into the delivered box.
+    disk_upper_bytes: BTreeMap<ChunkPos, Vec<u8>>,
+    /// 盘上 `Status >= FEATURES` 的区块：完工组装不能重建方块层。
+    disk_saved_after_features: BTreeMap<ChunkPos, bool>,
     /// 计算池。`None` 是内联执行器：解析、生成、序列化当场做完（精确模式、测试）。
     pool: Option<ComputePool<ChunkJob>>,
     /// 还没交给池子的计算任务（待办）。池子里最多放 `threads × POOL_JOBS_PER_THREAD`
@@ -363,10 +372,13 @@ impl DirectorHost {
             parked: 0,
             io: None,
             generator: Arc::new(FlatGenerator::from_env()),
+            world_gen_config: crate::world_options::WorldGenConfig::default(),
             partials: BTreeMap::new(),
             feature_deltas: BTreeMap::new(),
             generated_light: BTreeMap::new(),
             generated_structures: BTreeMap::new(),
+            disk_upper_bytes: BTreeMap::new(),
+            disk_saved_after_features: BTreeMap::new(),
             pool: None,
             compute_backlog: HashMap::new(),
             backlog_order: BinaryHeap::new(),
@@ -475,6 +487,16 @@ impl DirectorHost {
 
     pub(crate) fn set_generator(&mut self, generator: Arc<dyn ChunkGenerator>) {
         self.generator = generator;
+    }
+
+    /// 接上世界生成配置（`World::build` 在读档、选好种子后调用一次）。
+    pub(crate) fn set_world_gen_config(&mut self, config: crate::world_options::WorldGenConfig) {
+        self.world_gen_config = config;
+    }
+
+    /// 结构阶段恢复用的世界生成配置（和生成器同一个种子 / 世界类型）。
+    fn generator_config(&self) -> &crate::world_options::WorldGenConfig {
+        &self.world_gen_config
     }
 
     /// 计算池的线程是不是意外退出了。任务 panic 不算，那会变成失败回执。
@@ -2027,6 +2049,7 @@ impl DirectorHost {
                     // 停放盒子的生成阶段跟着存档元数据走；没有读盘元数据时是 Full。
                     // A parked box carries its persisted stage in archive metadata.
                     let status = column.chunk_column().chunk().archive().status;
+                    self.restore_decoded_stage(pos, status, &column, None);
                     TaskResult::Decoded { column, status }
                 } else if self.io.is_some() {
                     // 官方 `ChunkMap.scheduleChunkLoad` 没有「盘上有就异步、盘上没有就
@@ -2053,10 +2076,14 @@ impl DirectorHost {
                         return None;
                     }
                     match decode_packed(pos, &bytes) {
-                        Ok(decoded) => TaskResult::Decoded {
-                            column: decoded.column,
-                            status: decoded.persisted_status,
-                        },
+                        Ok(decoded) => {
+                            let status = decoded.persisted_status;
+                            self.restore_decoded_stage(pos, status, &decoded.column, Some(&bytes));
+                            TaskResult::Decoded {
+                                column: decoded.column,
+                                status,
+                            }
+                        }
                         Err(error) => TaskResult::BadChunk { error },
                     }
                 } else {
@@ -2119,13 +2146,42 @@ impl DirectorHost {
                 // At completion, assemble from the immutable CARVERS snapshot +
                 // accumulated feature writes (fixed source-center order, reply-
                 // order independent); flat / disk paths keep the original box.
-                let mut column = match self.partials.get(&pos) {
-                    Some(snapshot) => {
-                        let mut deltas = self.feature_deltas.remove(&pos).unwrap_or_default();
-                        assemble_feature_column(snapshot.as_ref(), &mut deltas).unwrap_or(column)
+                // 盘上状态已经跑到 FEATURES 时，方块层是「地物写完之后」的
+                // 视图，不能拿 CARVERS + 新算的写再覆盖一遍（官方 `ChunkStep.apply`
+                // 会跳过已完成的阶段）；只把续跑阶段交回的增量合进去。
+                let disk_after_features = self.disk_saved_after_features.get(&pos) == Some(&true)
+                    && self.partials.contains_key(&pos);
+                let mut column = if disk_after_features {
+                    let snapshot = self.partials.get(&pos).cloned();
+                    if let (Some(snapshot), Some(mut groups)) =
+                        (snapshot, self.feature_deltas.remove(&pos))
+                    {
+                        let mut assembled = (*snapshot.as_ref()).clone();
+                        crate::worldgen_features::merge_feature_writes(
+                            &mut assembled,
+                            groups.drain(..),
+                        );
+                        crate::worldgen::build_region_column(&assembled).unwrap_or(column)
+                    } else {
+                        column
                     }
-                    None => column,
+                } else {
+                    match self.partials.get(&pos) {
+                        Some(snapshot) => {
+                            let mut deltas = self.feature_deltas.remove(&pos).unwrap_or_default();
+                            assemble_feature_column(snapshot.as_ref(), &mut deltas)
+                                .unwrap_or(column)
+                        }
+                        None => column,
+                    }
                 };
+                // 读盘带来的上层内容（方块实体 / 计划刻 / 实体 / 四张表）装回
+                // 完工盒子；阶段函数只换了方块层，不该丢掉这些内容。
+                if let Some(bytes) = self.disk_upper_bytes.remove(&pos)
+                    && let Ok(disk) = decode_packed(pos, &bytes)
+                {
+                    column.adopt_upper_content(*disk.column);
+                }
                 // `light` 阶段算好的天空光 + 方块光装进交付盒子并标记
                 // `isLightOn=true`；flat / 读盘路径没有这份光照，盒子照旧。
                 // Install the `light` stage's sky + block light into the
@@ -2140,8 +2196,19 @@ impl DirectorHost {
                 if let Some(tag) = self.generated_structures.remove(&pos) {
                     crate::worldgen_structures::set_structures_tag(&mut column, &tag);
                 }
+                // 盘上非 full 的区块完工后把 persisted status 抬到 Full；
+                // 生成器新造的盒子默认就是 Full，不能在这里动它的 archive，
+                // 否则 `chunk_mut()` 会把 pristine 标记清掉、卸载时全被停放。
+                // Only decoded non-full chunks need the bump; touching archive
+                // on a freshly generated box would clear its pristine flag.
+                if column.chunk_column().chunk().archive().status != ChunkStatus::Full {
+                    let mut archive = column.chunk_column().chunk().archive().clone();
+                    archive.status = ChunkStatus::Full;
+                    column.set_archive(archive);
+                }
                 self.partials.remove(&pos);
                 self.feature_deltas.remove(&pos);
+                self.disk_saved_after_features.remove(&pos);
                 TaskResult::Assembled { column }
             }
             Task::Save { seq, column, .. } => {
@@ -2319,6 +2386,55 @@ impl DirectorHost {
             .collect()
     }
 
+    /// 读盘的非 full 区块：按阶段恢复中间结果，并留住盘上的上层内容。
+    ///
+    /// `Status >= TERRAIN` 时把盘上方块还原成 `GeneratedChunk` 存进 `partials`
+    /// （后续 `features` / `light` 的输入）；`Status >= LIGHT` 时盘上光照直接
+    /// 复用；`structures` 标签来自读盘元数据。方块实体 / 计划刻 / 实体这些
+    /// 上层内容留在整盒里，完工组装时 `adopt_upper_content` 装回。
+    ///
+    /// Restore a decoded non-full chunk's stage intermediates.
+    fn restore_decoded_stage(
+        &mut self,
+        pos: ChunkPos,
+        status: ChunkStatus,
+        column: &RegionColumn,
+        bytes: Option<&[u8]>,
+    ) {
+        if status == ChunkStatus::Full {
+            return;
+        }
+        // 上层内容由 `restore_decoded_column` 在持有原始 NBT 字节的调用点
+        // 解码第二份盒子留住（方块实体 / 计划刻 / 实体 / 四张表）。
+        self.disk_saved_after_features
+            .insert(pos, (status as usize) >= (ChunkStatus::Features as usize));
+        if let Some(bytes) = bytes {
+            self.disk_upper_bytes.insert(pos, bytes.to_vec());
+        }
+        let world = column.chunk_column().chunk();
+        if status.is_after_terrain() {
+            self.partials.insert(
+                pos,
+                Arc::new(crate::worldgen::generated_chunk_from_column(column)),
+            );
+        }
+        if (status as usize) >= (ChunkStatus::Light as usize) && column.chunk_column().light_on() {
+            self.generated_light
+                .insert(pos, crate::worldgen::generated_light_from_column(column));
+        }
+        if let Some(tag) = world.archive().structures.clone() {
+            self.generated_structures.insert(pos, tag);
+        }
+        // 结构起点 / 引用按盘上标签恢复（计算池线程用线程本地覆盖）。
+        // 生成器持有这份配置，正式路径和读盘路径共用同一个种子。
+        crate::worldgen_structures::install_disk_structures(
+            self.generator_config(),
+            pos.x,
+            pos.z,
+            world.archive().structures.as_ref(),
+        );
+    }
+
     /// 合并一次生成结果：`terrain` 的 CARVERS 快照进缓存（不可变 `Arc`，不改
     /// 已有的那份）；地物写按 `TaskId` 顺序追加到目标区块的增量表。
     /// `compute_event` 已按 `TaskId` 升序、内联路径也在同一世界线程调用，所以
@@ -2359,10 +2475,14 @@ impl DirectorHost {
         let result = match outcome {
             // 取消之前已经开始跑的解析：结果没人要了，盘上的字节还在。
             ChunkOutcome::Decoded(_) if cancelled => TaskResult::Cancelled,
-            ChunkOutcome::Decoded(Ok(decoded)) => TaskResult::Decoded {
-                column: decoded.column,
-                status: decoded.persisted_status,
-            },
+            ChunkOutcome::Decoded(Ok((decoded, bytes))) => {
+                let status = decoded.persisted_status;
+                self.restore_decoded_stage(pos, status, &decoded.column, Some(&bytes));
+                TaskResult::Decoded {
+                    column: decoded.column,
+                    status,
+                }
+            }
             ChunkOutcome::Decoded(Err(error)) => TaskResult::BadChunk { error },
             ChunkOutcome::Generated { stage, output } => {
                 // 取消时已经在跑的生成：Director 不再认它，`Forgot` 也可能已经清过
@@ -2653,6 +2773,8 @@ impl DirectorHost {
                     self.feature_deltas.remove(&pos);
                     self.generated_light.remove(&pos);
                     self.generated_structures.remove(&pos);
+                    self.disk_upper_bytes.remove(&pos);
+                    self.disk_saved_after_features.remove(&pos);
                 }
                 return;
             }
