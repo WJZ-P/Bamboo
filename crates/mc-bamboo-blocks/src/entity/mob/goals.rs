@@ -720,6 +720,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 && ctx.blocks().difficulty() == 3
         }
         Goal::TurtleEgg { .. } => {
+            // `RemoveBlockGoal.canUse` 覆写了 `MoveToBlockGoal`：
+            // mobGriefing → 倒计时 → 先 `findNearestBlock()`，命中才设 10；
+            // 未命中才取 `nextInt(200)` 设下次倒计时。
             if !ctx.blocks().block_game_rules().mob_griefing {
                 return false;
             }
@@ -727,8 +730,6 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 mob.turtle_egg_next_start_tick -= 1;
                 return false;
             }
-            // 官方 `RemoveBlockGoal.canUse` 命中蛋时倒计时 10，未命中才取
-            // `nextInt(200)` 算 `200 + n`（本场景没有蛋，取数在这里）。
             let egg = nearest_turtle_egg(me, ctx);
             mob.turtle_egg_pos = egg;
             if egg.is_some() {
@@ -864,9 +865,26 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             mob.door_break_progress = -1;
             mob.door_break_pos = None;
         }
-        Goal::TurtleEgg { .. } => {
+        Goal::TurtleEgg { speed } => {
+            // `MoveToBlockGoal.start()`：`moveMobToBlock()` 后按官方顺序取
+            // 两次 `nextInt`：内层是 1200，外层是 `1200 + 内层`。
+            let inner = me.random.next_int_bounded(1200);
+            let _max_stay = 1200 + me.random.next_int_bounded(1200 + inner);
             mob.turtle_egg_try_ticks = 0;
             mob.turtle_egg_ticks_since_reached = 0;
+            if let Some(pos) = mob.turtle_egg_pos {
+                let nav = living::nav_mob(me, mob, ctx.blocks());
+                mob.navigation.move_to(
+                    ctx.blocks(),
+                    &nav,
+                    Vec3::new(
+                        f64::from(pos.x) + 0.5,
+                        f64::from(pos.y + 1),
+                        f64::from(pos.z) + 0.5,
+                    ),
+                    *speed,
+                );
+            }
         }
     }
 }
@@ -1596,14 +1614,22 @@ pub(crate) fn monster_walk_target_value(view: &dyn BlockView, pos: BlockPos) -> 
 
 /// `MoveToBlockGoal.findNearestBlock`：以实体为中心搜海龟蛋。
 fn nearest_turtle_egg(me: &Entity, ctx: &dyn EntityCtx) -> Option<BlockPos> {
+    // `RemoveBlockGoal` 构造 `MoveToBlockGoal(mob, speed, 24, verticalRange=3)`：
+    // 水平 searchRange 硬编码 24，纵向从 `verticalSearchStart=0` 到 3，
+    // 官方按「曼哈顿壳层」逐层扫。这里按同一形状扫描。
     let centre = me.block_position();
     let view = ctx.blocks();
-    for dy in -3..=3 {
-        for dz in -3..=3 {
-            for dx in -3..=3 {
-                let pos = centre.offset(dx, dy, dz);
-                if view.block_state(pos).block_id() as u32 == mc_bamboo_data::blocks::TURTLE_EGG {
-                    return Some(pos);
+    for vertical in 0..=3 {
+        for radius in 0..24_i32 {
+            for x in -radius..=radius {
+                for z in -radius..=radius {
+                    if x.abs() != radius && z.abs() != radius {
+                        continue;
+                    }
+                    let pos = centre.offset(x, vertical - 1, z);
+                    if view.block_state(pos).is(mc_bamboo_data::blocks::TURTLE_EGG) {
+                        return Some(pos);
+                    }
                 }
             }
         }
