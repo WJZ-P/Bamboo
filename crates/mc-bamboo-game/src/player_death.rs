@@ -491,14 +491,19 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, _source: DamageSource) {
         region.links.send(id, &PlayerCombatEnd { duration: 0 });
     }
 
-    // `immediate_respawn` 为真时在死亡这一刻直接重生；否则等客户端
-    // `PERFORM_RESPAWN`（死亡界面）。
-    if region.global.rules.bool(gamerules::IMMEDIATE_RESPAWN) {
-        crate::player_respawn::respawn(region, id);
-    } else {
-        let player = region.players.get_mut(&id).expect("玩家刚才还在");
-        player.awaiting_respawn = true;
-    }
+    // 官方 `ServerPlayer` 不读 `IMMEDIATE_RESPAWN`：规则只由 `PlayerList`（进服）
+    // 和 `MinecraftServer`（规则变化）发给客户端，客户端收到死亡界面包后决定
+    // 要不要立刻发 `PERFORM_RESPAWN`。服务端一律等这个包，血量 > 0 时忽略它。
+    // 客户端不发，玩家就一直是死的。
+    //
+    // Vanilla `ServerPlayer` never reads `IMMEDIATE_RESPAWN`: the rule reaches
+    // the client only through `PlayerList` (on join) and `MinecraftServer`
+    // (on rule changes). The client decides whether to send
+    // `PERFORM_RESPAWN` right after the death-screen packet; the server always
+    // waits for it and ignores it while health > 0. Without a client packet
+    // the player stays dead.
+    let player = region.players.get_mut(&id).expect("玩家刚才还在");
+    player.awaiting_respawn = true;
 }
 
 /// `CombatTracker.recordDamage`：一次 `amount != 0` 的完整受击写一条记录。
