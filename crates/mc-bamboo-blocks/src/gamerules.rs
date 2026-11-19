@@ -46,6 +46,8 @@ pub struct BlockGameRules {
     pub max_snow_accumulation_height: i32,
     /// `GameRules.SPAWN_MOBS`。`ServerLevel.tickThunder` 在雷击命中时读它。
     pub spawn_mobs: bool,
+    /// `GameRules.SPAWN_MONSTERS`。和 `spawn_mobs` 一起决定 `isSpawningMonsters()`。
+    pub spawn_monsters: bool,
     /// `GameRules.MOB_GRIEFING`。
     pub mob_griefing: bool,
     /// `GameRules.MOB_DROPS`：生物死时掉不掉战利品和经验。
@@ -73,6 +75,7 @@ impl BlockGameRules {
             max_block_modifications: int_default(gamerules::MAX_BLOCK_MODIFICATIONS),
             max_snow_accumulation_height: int_default(gamerules::MAX_SNOW_ACCUMULATION_HEIGHT),
             spawn_mobs: bool_default(gamerules::SPAWN_MOBS),
+            spawn_monsters: bool_default(gamerules::SPAWN_MONSTERS),
             mob_griefing: bool_default(gamerules::MOB_GRIEFING),
             mob_drops: bool_default(gamerules::MOB_DROPS),
             max_entity_cramming: int_default(gamerules::MAX_ENTITY_CRAMMING),

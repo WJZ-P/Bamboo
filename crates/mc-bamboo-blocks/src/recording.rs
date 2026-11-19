@@ -1552,6 +1552,7 @@ impl Level for Recording<'_> {
                 value.max_block_modifications,
                 value.max_snow_accumulation_height,
                 value.spawn_mobs,
+                value.spawn_monsters,
             ),
         );
         value

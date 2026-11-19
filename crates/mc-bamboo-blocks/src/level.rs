@@ -977,9 +977,24 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 世界里的玩家，按加入顺序。生物的 AI 读它。
     fn for_each_player(&self, _visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {}
 
-    /// `getSkyDarken()`。
+    /// `getSkyDarken()`。天色由主控的时钟和天气发布，这一层只读快照。
     fn sky_darken(&self) -> i32 {
         0
+    }
+
+    /// `Level.isBrightOutside()`：主世界没有固定时间，`skyDarken < 4` 就是白天。
+    fn is_bright_outside(&self) -> bool {
+        !self.dimension_has_fixed_time() && self.sky_darken() < 4
+    }
+
+    /// `DimensionType.hasFixedTime()`。主世界为假。
+    fn dimension_has_fixed_time(&self) -> bool {
+        false
+    }
+
+    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界为真。
+    fn monsters_burn(&self) -> bool {
+        true
     }
 
     /// `getDifficulty().getId()`：0 和平、1 简单、2 普通、3 困难。

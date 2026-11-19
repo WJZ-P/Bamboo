@@ -144,6 +144,19 @@ pub trait BlockView {
         false
     }
 
+    /// `Level.isBrightOutside()`：主世界没有固定时间，天色暗于 4 才算夜里。
+    ///
+    /// `Level.isBrightOutside()`: the overworld has no fixed time, so night
+    /// starts when `skyDarken` reaches 4.
+    fn is_bright_outside(&self) -> bool {
+        self.sky_darken() < 4
+    }
+
+    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界为真。
+    fn monsters_burn(&self) -> bool {
+        true
+    }
+
     /// `level.random.nextFloat()`。只有精确模式的世界能当场取世界随机数；
     /// 并行的只读视图给 0，取数的地方列在设计稿的性能模式差异里。
     fn level_random_float(&self) -> f32 {
@@ -318,6 +331,14 @@ impl BlockView for World<'_> {
         World::is_raining_at(self, pos)
     }
 
+    fn is_bright_outside(&self) -> bool {
+        self.level().is_bright_outside()
+    }
+
+    fn monsters_burn(&self) -> bool {
+        self.level().monsters_burn()
+    }
+
     fn level_random_float(&self) -> f32 {
         self.random().next_float()
     }
@@ -364,7 +385,7 @@ pub struct LandFacts {
 /// 一条对外影响，按「意图」而不是底层操作划分。
 ///
 /// 底层操作（写方块、发事件、生成实体、取世界随机数）都在 [`apply`] 的内部发生。
-/// 给以后生物和 AI 预留的命令名：`ChangeBlock`、`TriggerBlock`、`Damage`、`Push`、
+/// 给以后生物和 AI 预留的命令名：`ChangeBlock`、`TriggerBlock`、
 /// `Spawn`、`Remove`、`ScheduleTick`、`Depart`。这次不实现。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {

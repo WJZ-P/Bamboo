@@ -217,8 +217,10 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
             rules: global.block_rules,
             difficulty: global.difficulty as i32,
+            // 天色由主控的时钟/天气发布；这一层只读快照，不算它。
             sky_darken: 0,
             game_time,
+            weather: global.block_weather,
             ..ViewFacts::default()
         };
         let view = crate::entity_view::EntityBlockView::new(crate::entity_view::ReadOnlyWorld {
