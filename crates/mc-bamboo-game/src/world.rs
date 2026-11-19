@@ -993,6 +993,13 @@ impl World {
     /// forget 后面，每个区块的光照变化紧挨在它的方块变化前面，方块变化排在 ack 前面，
     /// 区块批次放在最后，这样发出去的内容是这一 tick 结束时的世界。
     fn tick(&mut self) -> ControlFlow<()> {
+        // 官方 `MinecraftServer.tickServer` 在 `tickChildren` 之前 `++tickCount`；
+        // 周期时间同步按这个开服以来的刻数计相位，和存档里的 `gameTime` 无关。
+        //
+        // Official `MinecraftServer.tickServer` does `++tickCount` before
+        // `tickChildren`; the periodic time sync uses this since-launch count,
+        // independent of the saved `gameTime`.
+        self.master.global.increment_server_ticks();
         self.profiler().begin_tick();
         self.master.island_wait = Duration::ZERO;
         self.record_tick_counts();

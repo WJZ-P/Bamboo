@@ -182,6 +182,19 @@ pub(crate) struct Global {
     /// The End clock, with the same official defaults.
     end_clock: Clock,
     roster: BTreeMap<PlayerId, RosterEntry>,
+    /// 官方 `MinecraftServer.tickCount`：每次开服从 0 数起，不存档。
+    /// `tickServer` 在 `tickChildren` 之前 `++tickCount`，Bamboo 在 `World::tick`
+    /// 开头做同样的事。不能拿 `GameTime` 代替：读档时 `level.dat` 的 `Time`
+    /// 接着上次的走，和 `tickCount` 的相位一般不同。
+    ///
+    /// Official `MinecraftServer.tickCount`: starts at 0 every launch and is
+    /// not saved. `tickServer` does `++tickCount` before `tickChildren`;
+    /// Bamboo does the same at the start of `World::tick`. It cannot be
+    /// replaced by `GameTime`, which resumes from `level.dat`'s `Time`.
+    server_ticks: i32,
+    /// 测试专用：故意按 `gameTime` 判断周期同步（旧的错相位），改坏确认。
+    #[cfg(test)]
+    pub(crate) time_sync_break_by_game_time: bool,
     ticks_since_latency_broadcast: u32,
     /// 游戏规则。按官方 `GameRuleMap.CODEC` 写进 `data/minecraft/game_rules.dat`，
     /// 启动时读回。和 [`GlobalView`] 共享，改的时候才复制一份。
@@ -270,6 +283,9 @@ impl Default for Global {
             clock: Clock::default(),
             end_clock: Clock::default(),
             roster: BTreeMap::new(),
+            server_ticks: 0,
+            #[cfg(test)]
+            time_sync_break_by_game_time: false,
             ticks_since_latency_broadcast: 0,
             rules: Arc::new(GameRuleSet::vanilla()),
             state: WorldState::default(),
@@ -567,24 +583,42 @@ impl Global {
         self.increment_game_time();
     }
 
+    /// 官方 `MinecraftServer.tickServer` 开头的 `++tickCount`：每刻加一，
+    /// 开服从 0 起、不存档。`World::tick` 开头调用。
+    ///
+    /// Official `MinecraftServer.tickServer`'s `++tickCount` at the start of
+    /// each tick: from 0 on every launch, never saved. Called from `World::tick`.
+    pub(crate) fn increment_server_ticks(&mut self) {
+        self.server_ticks = self.server_ticks.wrapping_add(1);
+    }
+
+    /// 开服以来的刻数；单元测试断言周期相位用。
+    #[cfg(test)]
+    pub(crate) fn server_ticks(&self) -> i32 {
+        self.server_ticks
+    }
+
     /// 官方 `MinecraftServer.tickChildren`：`tickCount % 20 == 0` 时给所有人发一次
     /// 只带 `gameTime`、时钟列表为空的 `set_time`。发包在 `ServerLevel.tick` 之前，
-    /// 所以包里的游戏时间比这一刻 `tickTime` 加一之后的值少一。
+    /// 包里是这一刻 `tickTime` 加一之前的 `gameTime`（读档时它未必和 `tickCount`
+    /// 有固定相位，所以要分开记）。
     ///
     /// Official `MinecraftServer.tickChildren`: when `tickCount % 20 == 0`,
     /// broadcast a `set_time` carrying only `gameTime` with an empty clock map.
-    /// The packet goes out before `ServerLevel.tick`, so its game time is one
-    /// less than the value `tickTime` will set at the end of this tick.
+    /// It goes out before `ServerLevel.tick`, so the packet carries this
+    /// tick's not-yet-incremented `gameTime` (which has no fixed phase
+    /// relation to `tickCount` when a save was loaded).
     pub(crate) fn time_sync_packet_time(&self) -> Option<GameTime> {
-        // `tickChildren` 里 `forceGameTimeSynchronization` 在 `ServerLevel.tick`
-        // 之前，包里的 `gameTime` 是上一刻 `tickTime` 加一之后的值，也就是这里
-        // 还没有再 +1 的当前值。
-        //
-        // `forceGameTimeSynchronization` runs before `ServerLevel.tick`, so
-        // the packet carries the current game time (not yet incremented).
-        // `tickCount` 比 `gameTime` 大一（clocks 阶段在 tickTime 之前），
-        // 所以 `tickCount % 20 == 0` 等价于 `(gameTime + 1) % 20 == 0`。
-        ((self.time.0 + 1) % 20 == 0).then_some(self.time)
+        // 改坏确认：回到按 `gameTime` 判断的旧实现。
+        #[cfg(test)]
+        let due = if self.time_sync_break_by_game_time {
+            (self.time.0 + 1) % 20 == 0
+        } else {
+            self.server_ticks % 20 == 0
+        };
+        #[cfg(not(test))]
+        let due = self.server_ticks % 20 == 0;
+        due.then_some(self.time)
     }
 
     /// 名单上的所有人，发给刚进入的玩家。名单是空的时候返回 `None`。

@@ -1559,6 +1559,69 @@ fn periodic_time_sync_carries_the_game_time_before_this_tick() {
     assert!(reader.rest().is_empty());
 }
 
+/// 官方 `tickCount` 每次开服从 0 数起，和 `level.dat` 的 `Time` 无关：
+/// 读档开服时第一个周期时间同步包必须出现在开服后第 20 刻，
+/// 包里是当时的 `gameTime`。把判断改回按 `gameTime` 的旧做法会被改坏确认抓到。
+#[test]
+fn periodic_time_sync_uses_since_launch_ticks_not_saved_game_time() {
+    use mc_bamboo_protocol::codec::Reader;
+    use mc_bamboo_storage::{level_dat::LevelData, world_dir::WorldDir};
+
+    const SAVED_TIME: i64 = 12_345;
+
+    /// 收到第一个空时钟表的 `set_time` 时，返回 (开服后的刻数, 包里的 gameTime)。
+    fn first_sync(break_by_game_time: bool) -> Option<(i32, i64)> {
+        let tmp = D6TempDir::new("time-sync-phase");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        mc_bamboo_storage::world_dir::save_level_data(
+            &dir,
+            &LevelData {
+                time: SAVED_TIME,
+                ..LevelData::default()
+            },
+        )
+        .unwrap();
+        let mut server = Harness::new_loaded_with_save(2, &tmp.0);
+        assert_eq!(
+            server.world.master.global.time().0,
+            SAVED_TIME,
+            "gameTime 要从 level.dat 的 Time 接着走"
+        );
+        server.world.master.global.time_sync_break_by_game_time = break_by_game_time;
+        let client = server.join("Kitten");
+        server.tick();
+        client.take_frames();
+        for _ in 2..=40 {
+            server.tick();
+            for frame in client.take_frames() {
+                if frame.id != clientbound::SET_TIME {
+                    continue;
+                }
+                let mut reader = Reader::new(&frame.body);
+                let game_time = reader.i64().expect("set_time 的 gameTime");
+                if reader.varint().unwrap_or(-1) == 0 {
+                    return Some((server.world.master.global.server_ticks(), game_time));
+                }
+            }
+        }
+        None
+    }
+
+    let official = first_sync(false).expect("开服后 20 刻内要有周期时间同步包");
+    assert_eq!(official.0, 20, "第一个周期包在开服后第 20 刻: {official:?}");
+    assert_eq!(
+        official.1,
+        SAVED_TIME + 19,
+        "包里是这一刻 tickTime 加一之前的 gameTime: {official:?}"
+    );
+
+    // 改坏：按 `gameTime` 判断会让第一个周期包提前到第 15 刻。
+    let broken = first_sync(true).expect("改坏后仍会发周期包");
+    assert_ne!(broken.0, 20, "按 gameTime 的相位和开服刻数不同: {broken:?}");
+    assert_eq!(broken.0, 15, "12345 + tick 是 20 的倍数时提前到 15 刻");
+}
+
 /// 多岛时每个岛读的都是同一份全局时间和天气算出的天色。
 #[test]
 fn every_island_reads_the_same_sky_darken() {
