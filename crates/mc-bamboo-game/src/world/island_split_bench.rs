@@ -343,14 +343,24 @@ fn island_unify_scaling_bench() {
         // 四个岛，各 70 × 70（共 19600 个区块），隔 4 个区块。
         let four: Vec<Vec<ChunkPos>> = (0..4).map(|index| rect(index * 74, 0, 70, 70)).collect();
         unify_and_divide("4 islands x 4900 chunks", &four, Density::Dense, None);
-        unify_and_divide("4 islands x 4900 chunks, sparse", &four, Density::Sparse, None);
+        unify_and_divide(
+            "4 islands x 4900 chunks, sparse",
+            &four,
+            Density::Sparse,
+            None,
+        );
         // 三个岛：一个大的（14000）和两个小的（各 3000）。
         let three = vec![
             rect(0, 0, 140, 100),
             rect(144, 0, 60, 50),
             rect(144, 54, 60, 50),
         ];
-        unify_and_divide("3 islands 14000+3000+3000 chunks", &three, Density::Dense, None);
+        unify_and_divide(
+            "3 islands 14000+3000+3000 chunks",
+            &three,
+            Density::Dense,
+            None,
+        );
         unify_and_divide(
             "3 islands 14000+3000+3000 chunks, sparse",
             &three,
@@ -381,8 +391,18 @@ fn island_unify_scaling_bench() {
             ("borrow 1 island", BTreeSet::from([HOME_REGION, 1])),
             ("borrow 2 islands", BTreeSet::from([HOME_REGION, 1, 2])),
         ] {
-            unify_and_divide(&format!("{name}, dense"), &four, Density::Dense, Some(set.clone()));
-            unify_and_divide(&format!("{name}, sparse"), &four, Density::Sparse, Some(set));
+            unify_and_divide(
+                &format!("{name}, dense"),
+                &four,
+                Density::Dense,
+                Some(set.clone()),
+            );
+            unify_and_divide(
+                &format!("{name}, sparse"),
+                &four,
+                Density::Sparse,
+                Some(set),
+            );
         }
     });
 }
