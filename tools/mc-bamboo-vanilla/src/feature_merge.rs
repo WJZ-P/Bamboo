@@ -453,6 +453,7 @@ impl Report<'_> {
                 .collect::<Vec<Vec<u32>>>(),
             biomes: Vec::new(),
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
         };
         merge_feature_writes(&mut merged, groups);
         let merged = merged.blocks.into_iter().flatten().collect::<Vec<u32>>();

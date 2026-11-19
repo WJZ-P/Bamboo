@@ -367,6 +367,7 @@ fn place_start(
                 let mut level = FeaturePieceLevel {
                     world,
                     world_random: WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0))),
+                    mark_shape_check: false,
                 };
                 let sea_level = level.world.sea_level;
                 pieces::ocean_monument_place::place_in_chunk(
@@ -425,6 +426,7 @@ fn place_start(
                 let mut adapter = FeaturePieceLevel {
                     world,
                     world_random,
+                    mark_shape_check: false,
                 };
                 pieces::woodland_mansion::after_place(pieces, &mut adapter, &chunk_bb);
             }
@@ -690,6 +692,7 @@ fn place_layout_piece(
     let mut adapter = FeaturePieceLevel {
         world,
         world_random,
+        mark_shape_check: !matches!(kind, "mansion" | "monument"),
     };
     match kind {
         "igloo" | "shipwreck" | "ocean_ruin" => {
@@ -1001,6 +1004,31 @@ fn dispatch_stronghold(
 struct FeaturePieceLevel<'w, 'a> {
     world: &'w mut FeatureWorld<'a>,
     world_random: WorldgenRandom,
+    /// 官方 `StructureTemplate.placeInWorld` 用 `flags=820`（含 bit 16），
+    /// 不记 `SHAPE_CHECK_BLOCKS`；府邸 / 海底神殿走这条路。
+    /// Vanilla's `StructureTemplate.placeInWorld` uses `flags=820` (bit 16 set)
+    /// and skips `SHAPE_CHECK_BLOCKS`; mansions / monuments use this path.
+    mark_shape_check: bool,
+}
+
+/// `StructurePiece.SHAPE_CHECK_BLOCKS`（26.3 字节码的 ImmutableSet）。
+/// `StructurePiece.SHAPE_CHECK_BLOCKS` (the ImmutableSet in 26.3 bytecode).
+fn shape_check_block(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:nether_brick_fence"
+            | "minecraft:torch"
+            | "minecraft:wall_torch"
+            | "minecraft:oak_fence"
+            | "minecraft:spruce_fence"
+            | "minecraft:dark_oak_fence"
+            | "minecraft:pale_oak_fence"
+            | "minecraft:acacia_fence"
+            | "minecraft:birch_fence"
+            | "minecraft:jungle_fence"
+            | "minecraft:ladder"
+            | "minecraft:iron_bars"
+    )
 }
 
 impl PieceLevel for FeaturePieceLevel<'_, '_> {
@@ -1009,7 +1037,23 @@ impl PieceLevel for FeaturePieceLevel<'_, '_> {
     }
 
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
-        self.world.set_block_with_heightmaps(x, y, z, state)
+        // `StructurePiece.placeBlock`：写入后若方块在
+        // `SHAPE_CHECK_BLOCKS`（各种栅栏、火把、梯子、铁栏杆）里就记进
+        // `PostProcessing`，供加载后的形状更新重跑。
+        // `StructurePiece.placeBlock`: after the write, mark the position when
+        // the block is in `SHAPE_CHECK_BLOCKS` (fences, torches, ladder, iron
+        // bars) so a later load can redo the shape update.
+        if self.mark_shape_check
+            && let Some(block) = mc_bamboo_data::block_of_state(state)
+            && shape_check_block(block.name)
+        {
+            self.world.mark_pos_for_post_processing(x, y, z);
+        }
+        if self.mark_shape_check {
+            self.world.set_block_with_heightmaps(x, y, z, state)
+        } else {
+            self.world.set_structure_block(x, y, z, state)
+        }
     }
 
     fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {
@@ -1195,6 +1239,7 @@ mod tests {
             blocks,
             biomes,
             heights,
+            post_processing: std::array::from_fn(|_| Vec::new()),
         }
     }
 }

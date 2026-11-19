@@ -83,18 +83,36 @@ pub fn place(
             // placeColumn：从 top 往下到 bottom+1。
             // placeColumn: from top down to bottom+1.
             let mut y = top;
+            let mut previous_written = false;
             while y > bottom {
-                if disk.target.test(world, (x, y, z))
-                    && let Some(state) =
-                        disk.state_provider
-                            .get_optional_state(world, random, (x, y, z))
-                {
-                    // setBlock(pos, state, 2)：走 ChunkAccess.setBlockState，要更新高度图。
-                    // setBlock(pos, state, 2): goes through ChunkAccess.setBlockState,
-                    // so the heightmaps must be updated.
-                    world.set_block_with_heightmaps(x, y, z, state);
+                let written = if disk.target.test(world, (x, y, z)) {
+                    match disk
+                        .state_provider
+                        .get_optional_state(world, random, (x, y, z))
+                    {
+                        Some(state) => {
+                            // setBlock(pos, state, 2)：走 ChunkAccess.setBlockState，要更新高度图。
+                            // setBlock(pos, state, 2): goes through ChunkAccess.setBlockState,
+                            // so the heightmaps must be updated.
+                            world.set_block_with_heightmaps(x, y, z, state);
+                            true
+                        }
+                        None => false,
+                    }
+                } else {
+                    false
+                };
+                if written {
                     placed_any = true;
+                    // 官方 placeColumn 的 `written` 标志：连续写每段只在第一段
+                    // 调 markAboveForPostProcessing（被非目标方块打断后重新计）。
+                    // Official placeColumn's `written` flag: only the first
+                    // block of a consecutive run calls markAboveForPostProcessing.
+                    if !previous_written {
+                        world.mark_above_for_post_processing((x, y, z));
+                    }
                 }
+                previous_written = written;
                 y -= 1;
             }
         }

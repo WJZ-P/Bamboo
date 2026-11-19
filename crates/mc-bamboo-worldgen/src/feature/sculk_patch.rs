@@ -826,6 +826,11 @@ fn spread_all_with(
                 }
                 let old = world.get_block(target_pos.0, target_pos.1, target_pos.2);
                 if let Some(new_state) = state_for_placement(world, old, target_pos, target_face) {
+                    // `MultifaceSpreader.SpreadConfig.placeBlock` 的 `markPos=true`
+                    // 分支：spreadAll 是 world-gen，每次成功放置前先记位置。
+                    // `MultifaceSpreader.SpreadConfig.placeBlock` with `markPos=true`:
+                    // a world-gen spreadAll marks each successful placement.
+                    world.mark_pos_for_post_processing(target_pos.0, target_pos.1, target_pos.2);
                     world.set_block_with_heightmaps(
                         target_pos.0,
                         target_pos.1,

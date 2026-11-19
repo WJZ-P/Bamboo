@@ -317,6 +317,9 @@ struct Stats {
     /// 比较过的方块实体数量（官方侧与游戏侧都有）。
     /// Block entities compared (present on both the official and game sides).
     block_entities: u64,
+    /// 比较过的 `PostProcessing` packed short 条数。
+    /// Packed-short entries compared in `PostProcessing`.
+    post_processing: u64,
     heightmap_columns: u64,
     heightmap_words: u64,
     mismatches: Vec<String>,
@@ -829,6 +832,7 @@ impl Report {
                 blocks: result.blocks[index].clone(),
                 biomes: Vec::new(),
                 heightmaps: Default::default(),
+                post_processing: Vec::new(),
             };
             compare_blocks_exact(
                 &mut self.stats,
@@ -847,6 +851,23 @@ impl Report {
                 chunk.get("block_entities"),
                 &result.block_entities,
             )?;
+            // 结构件还有几条 `PostProcessing` 标记路径没逐项对拍
+            // （府邸 / 矿井的 `StructureTemplate` flags=820 与 `placeBlock` flags=2
+            // 混用），带结构模式先不把这一项计入逐格比较；默认模式严格比。
+            // A few structure-piece `PostProcessing` marking paths are not
+            // covered yet (mansions / mineshafts mix `StructureTemplate`
+            // flags=820 and `placeBlock` flags=2), so structures mode does not
+            // include this comparison; the default mode compares strictly.
+            if !self.structures {
+                compare_post_processing(
+                    &mut self.stats,
+                    seed,
+                    x + dx,
+                    z + dz,
+                    chunk.get("postProcessing"),
+                    &result.post_processing,
+                )?;
+            }
         }
         Ok(())
     }
@@ -1095,6 +1116,7 @@ impl Report {
             biome_cells,
             blocks,
             block_entities,
+            post_processing,
             heightmap_columns,
             heightmap_words,
             mismatches,
@@ -1104,7 +1126,8 @@ impl Report {
         } = self.stats;
         println!(
             "gen-world: {chunks} chunks, {biome_cells} quart cells, {blocks} blocks, \
-             {block_entities} block entities, {heightmap_columns} heightmap columns, \
+             {block_entities} block entities, {post_processing} post-processing entries, \
+             {heightmap_columns} heightmap columns, \
              {heightmap_words} heightmap words, \
              {coverage_rows} structure rows / {java_pieces} official pieces, \
              {} mismatches, {} official checks",
@@ -1321,6 +1344,76 @@ fn compare_biomes(
             }
         }
     }
+}
+
+/// 逐条比较官方 `PostProcessing`：24 段，每段是按 `markPosForPostProcessing`
+/// 调用顺序排的 packed short。packed = `(x&15) | ((y&15)<<4) | ((z&15)<<8)`，
+/// 段下标 = `(y - MIN_Y) / 16`。
+///
+/// Compare official `PostProcessing` section by section: 24 packed-short lists
+/// in `markPosForPostProcessing` call order.
+/// packed = `(x&15) | ((y&15)<<4) | ((z&15)<<8)`, section = `(y-MIN_Y)/16`.
+fn compare_post_processing(
+    stats: &mut Stats,
+    seed: i64,
+    x: i32,
+    z: i32,
+    official: Option<&Value>,
+    game: &[(i32, i32, i32)],
+) -> Result<(), String> {
+    let Some(official) = official else {
+        return Err(format!(
+            "features seed {seed} ({x},{z}): oracle has no postProcessing"
+        ));
+    };
+    let sections = official
+        .as_array()
+        .ok_or("postProcessing is not an array")?;
+    if sections.len() != mc_bamboo_world::SECTION_COUNT {
+        return Err(format!(
+            "features seed {seed} ({x},{z}): {} postProcessing sections vs {}",
+            sections.len(),
+            mc_bamboo_world::SECTION_COUNT
+        ));
+    }
+    let mut ours: Vec<Vec<u16>> = vec![Vec::new(); mc_bamboo_world::SECTION_COUNT];
+    for &(wx, wy, wz) in game {
+        if wx >> 4 != x || wz >> 4 != z {
+            continue;
+        }
+        let section = (wy - mc_bamboo_world::MIN_Y).div_euclid(16);
+        if !(0..mc_bamboo_world::SECTION_COUNT as i32).contains(&section) {
+            continue;
+        }
+        let packed = ((wx & 15) | ((wy & 15) << 4) | ((wz & 15) << 8)) as u16;
+        ours[section as usize].push(packed);
+    }
+    for (section, (want, have)) in sections.iter().zip(ours.iter()).enumerate() {
+        let want = want
+            .as_array()
+            .ok_or("postProcessing section is not an array")?
+            .iter()
+            .map(|v| v.as_u64().ok_or("bad packed short"))
+            .collect::<Result<Vec<u64>, _>>()?;
+        stats.post_processing += want.len() as u64;
+        let want_u16: Vec<u16> = want.iter().map(|&v| v as u16).collect();
+        if want_u16 == *have {
+            continue;
+        }
+        let first = want_u16
+            .iter()
+            .zip(have.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or(want_u16.len().min(have.len()));
+        stats.mismatches.push(format!(
+            "postProcessing seed {seed} ({x},{z}) section {section}: official {} entries vs game {}, first diff at {first}: official {:?}, game {:?}",
+            want_u16.len(),
+            have.len(),
+            want_u16.get(first),
+            have.get(first)
+        ));
+    }
+    Ok(())
 }
 
 fn compare_blocks(
@@ -1720,6 +1813,7 @@ mod tests {
             blocks: vec![vec![mc_bamboo_data::blocks::STONE; 256]; 1],
             biomes: vec![],
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
         };
         let palette = vec![Value::String("Block{minecraft:stone}".to_owned())];
         let indices: Vec<Value> = (0..256).map(|_| Value::from(0u64)).collect();
@@ -1742,6 +1836,7 @@ mod tests {
             blocks: vec![],
             biomes: vec![vec![registries::biome::PLAINS as u32; 64]],
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
         };
         let sections = vec![vec!["minecraft:desert".to_owned(); 64]];
         let mut stats = Stats::default();
@@ -1761,6 +1856,7 @@ mod tests {
             blocks: vec![],
             biomes: vec![],
             heightmaps,
+            post_processing: Vec::new(),
         };
         let mut columns = serde_json::Map::new();
         for key in mc_bamboo_game::worldgen::HEIGHTMAP_KEYS {
@@ -1839,6 +1935,53 @@ mod tests {
         assert_eq!(amplified.level_type, LevelType::Amplified);
         // flat 不是噪声世界，不接受。/ flat is not a noise world, so it is rejected.
         assert!(Options::parse(&["--level-type", "flat"]).is_err());
+    }
+
+    /// `PostProcessing` 逐段比较器对「漏一条 / 多一条 / 顺序不同」都要报不一致。
+    /// The `PostProcessing` comparator must catch a missing, extra or reordered entry.
+    #[test]
+    fn post_processing_comparator_detects_a_wrong_entry() {
+        let sections = Value::Array(
+            (0..mc_bamboo_world::SECTION_COUNT)
+                .map(|_| Value::Array(Vec::new()))
+                .collect(),
+        );
+        let mut clean = Stats::default();
+        compare_post_processing(&mut clean, 1, 0, 0, Some(&sections), &[]).unwrap();
+        assert!(clean.mismatches.is_empty());
+
+        // 官方期望一条 packed short：游戏侧漏了、给错了、顺序反了都要抓到。
+        // The official expects one packed short: missing, wrong or reordered must fail.
+        let one = Value::Array(
+            (0..mc_bamboo_world::SECTION_COUNT)
+                .map(|section| {
+                    if section == 4 {
+                        Value::Array(vec![Value::from(7u64), Value::from(8u64)])
+                    } else {
+                        Value::Array(Vec::new())
+                    }
+                })
+                .collect(),
+        );
+        let y = mc_bamboo_world::MIN_Y + 4 * 16;
+        let at = |x: i32, z: i32| (x, y, z);
+        let mut missing = Stats::default();
+        compare_post_processing(&mut missing, 1, 0, 0, Some(&one), &[at(7, 0)]).unwrap();
+        assert_eq!(missing.mismatches.len(), 1);
+
+        let mut wrong = Stats::default();
+        compare_post_processing(&mut wrong, 1, 0, 0, Some(&one), &[at(7, 0), at(9, 0)]).unwrap();
+        assert_eq!(wrong.mismatches.len(), 1);
+
+        let mut reordered = Stats::default();
+        compare_post_processing(&mut reordered, 1, 0, 0, Some(&one), &[at(8, 0), at(7, 0)])
+            .unwrap();
+        assert_eq!(reordered.mismatches.len(), 1);
+
+        let mut clean = Stats::default();
+        compare_post_processing(&mut clean, 1, 0, 0, Some(&one), &[at(7, 0), at(8, 0)]).unwrap();
+        assert!(clean.mismatches.is_empty());
+        assert_eq!(clean.post_processing, 2);
     }
 
     /// `--level-type` 必须影响所有构造 `WorldGenConfig` 的路径，不只是 CARVERS。

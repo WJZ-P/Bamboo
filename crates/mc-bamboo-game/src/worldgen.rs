@@ -24,6 +24,7 @@ use std::{
 };
 
 use mc_bamboo_data::{blocks, registries};
+use mc_bamboo_nbt::Tag;
 use mc_bamboo_world::{
     MIN_Y, SECTION_COUNT, SECTION_SIZE, WORLD_HEIGHT,
     chunk::HeightmapKind,
@@ -76,6 +77,9 @@ pub struct GeneratedChunk {
     pub blocks: Vec<Vec<u32>>,
     pub biomes: Vec<Vec<u32>>,
     pub heightmaps: BTreeMap<&'static str, Vec<i32>>,
+    /// 官方 `PostProcessing` 位置表（doFill 的含水层格 + FEATURES 的标记）。
+    /// Official `PostProcessing` positions (doFill aquifer cells + FEATURES marks).
+    pub post_processing: Vec<(i32, i32, i32)>,
 }
 
 // 每条计算线程各缓存一份解析好的 `Worldgen` 和按种子/设置建好的 `Generator`。
@@ -262,6 +266,7 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
         blocks,
         biomes: vec![cells; SECTION_COUNT],
         heightmaps,
+        post_processing: Vec::new(),
     }
 }
 
@@ -804,14 +809,20 @@ pub fn generate_chunk_with_beardifier(
     }
     with_generator(config, |generator| {
         let region = generator.biome_region(x, z)?;
-        let blocks =
-            generator.terrain_with_region(x, z, chunk::Stage::Carvers, beardifier, &region)?;
+        let terrain = generator.terrain_with_region_and_post_processing(
+            x,
+            z,
+            chunk::Stage::Carvers,
+            beardifier,
+            &region,
+        )?;
         let biomes = region.center().sections().to_vec();
-        let heightmaps = compute_heightmaps(&blocks);
+        let heightmaps = compute_heightmaps(&terrain.blocks);
         Ok(GeneratedChunk {
-            blocks,
+            blocks: terrain.blocks,
             biomes,
             heightmaps,
+            post_processing: terrain.post_processing,
         })
     })
 }
@@ -831,6 +842,7 @@ pub fn generate_biomes(config: &WorldGenConfig, x: i32, z: i32) -> Result<Genera
             blocks,
             biomes,
             heightmaps,
+            post_processing: Vec::new(),
         })
     })
 }
@@ -929,8 +941,29 @@ pub fn build_region_column(chunk: &GeneratedChunk) -> Result<Box<RegionColumn>, 
         heightmaps,
         ..ChunkColumnParts::default()
     };
-    let column = ChunkColumn::from_parts(parts)
+    let mut column = ChunkColumn::from_parts(parts)
         .map_err(|error| format!("cannot assemble generated column: {error}"))?;
+    // 官方 `PostProcessing` 是 24 段、每段一个 packed short 列表：
+    // `(x&15) | ((y&15)<<4) | ((z&15)<<8)`，按标记顺序保留重复。
+    // Official `PostProcessing`: 24 packed-short lists, one per section,
+    // `(x&15) | ((y&15)<<4) | ((z&15)<<8)`, duplicates kept in mark order.
+    let mut post_processing: Vec<Vec<Tag>> = vec![Vec::new(); SECTION_COUNT];
+    for &(x, y, z) in &chunk.post_processing {
+        let section = (y - MIN_Y).div_euclid(16);
+        if !(0..SECTION_COUNT as i32).contains(&section) {
+            continue;
+        }
+        let packed = (x & 15) | ((y & 15) << 4) | ((z & 15) << 8);
+        post_processing[section as usize].push(Tag::Short(packed as i16));
+    }
+    column
+        .chunk_mut()
+        .set_archive(mc_bamboo_world::chunk::ChunkArchiveMeta {
+            post_processing: Some(Tag::List(
+                post_processing.into_iter().map(Tag::List).collect(),
+            )),
+            ..Default::default()
+        });
     Ok(RegionColumn::from_parts(RegionColumnParts {
         column: Box::new(column),
         ticks: None,

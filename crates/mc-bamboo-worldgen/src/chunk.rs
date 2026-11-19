@@ -48,6 +48,17 @@ pub enum Stage {
     Carvers,
 }
 
+/// `terrain` 的方块层，加上 `doFill` 期间按官方 `markPosForPostProcessing`
+/// 记下的世界坐标（带流体更新的含水层格）。
+///
+/// Terrain block layers plus the world positions `doFill` marks via the official
+/// `markPosForPostProcessing` (aquifer cells that schedule a fluid update).
+#[derive(Debug, Clone)]
+pub struct TerrainOutput {
+    pub blocks: Vec<Vec<u32>>,
+    pub post_processing: Vec<(i32, i32, i32)>,
+}
+
 /// 一个区块 16×16 个柱子。
 pub const CHUNK_WIDTH: usize = 16;
 /// 群系容器里一个 section 每边 4 个 quart 格。
@@ -368,6 +379,7 @@ impl<'a> Generator<'a> {
         beardifier: Option<&Beardifier>,
     ) -> Result<Vec<Vec<u32>>, String> {
         self.terrain_inner(chunk_x, chunk_z, stage, beardifier, None)
+            .map(|out| out.blocks)
     }
 
     /// 建一个区块用的含水层。有 `aquifers` 配置时是噪声版，没有时（下界）是
@@ -429,6 +441,20 @@ impl<'a> Generator<'a> {
         region: &RegionBiomes,
     ) -> Result<Vec<Vec<u32>>, String> {
         self.terrain_inner(chunk_x, chunk_z, stage, beardifier, Some(region))
+            .map(|out| out.blocks)
+    }
+
+    /// [`Self::terrain_with_region`] 加上 `PostProcessing` 位置表。
+    /// [`Self::terrain_with_region`] plus the `PostProcessing` positions.
+    pub fn terrain_with_region_and_post_processing(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        stage: Stage,
+        beardifier: Option<&Beardifier>,
+        region: &RegionBiomes,
+    ) -> Result<TerrainOutput, String> {
+        self.terrain_inner(chunk_x, chunk_z, stage, beardifier, Some(region))
     }
 
     fn terrain_inner(
@@ -438,7 +464,7 @@ impl<'a> Generator<'a> {
         stage: Stage,
         beardifier: Option<&Beardifier>,
         region: Option<&RegionBiomes>,
-    ) -> Result<Vec<Vec<u32>>, String> {
+    ) -> Result<TerrainOutput, String> {
         let min_y = self.settings.min_y;
         let height = self.settings.height;
         crate::perf::mark(crate::perf::Phase::TerrainSetup);
@@ -476,6 +502,7 @@ impl<'a> Generator<'a> {
 
         crate::perf::mark(crate::perf::Phase::Substance);
         let mut layers = vec![vec![self.empty; 256]; height as usize];
+        let mut post_processing = Vec::new();
         // 切割线以下不生成：留成空气。下游阶段（地表规则、雕刻器、地物、光照）都按"这里
         // 什么都没有"处理，和"深层还没生成"的语义一致；这也是测量对照实验想要的成本。
         // Below the cut line nothing is generated: the layers stay air, so later stages
@@ -494,6 +521,16 @@ impl<'a> Generator<'a> {
                         .unwrap_or(self.default_block);
                     if state != self.empty {
                         layers[(block_y - min_y) as usize][x as usize * 16 + z as usize] = state;
+                        // `NoiseBasedChunkGenerator.doFill`：含水层要求流体更新、
+                        // 且该状态确有流体时记进 PostProcessing。
+                        // `NoiseBasedChunkGenerator.doFill`: mark the cell when the
+                        // aquifer asks for a fluid update and the state has one.
+                        if aquifer.should_schedule_fluid_update()
+                            && mc_bamboo_data::state_fluid(state).fluid
+                                != mc_bamboo_data::registries::fluid::EMPTY
+                        {
+                            post_processing.push((block_x, block_y, block_z));
+                        }
                     }
                 }
             }
@@ -521,6 +558,7 @@ impl<'a> Generator<'a> {
                 possible_biomes.as_deref(),
                 self.worldgen_noises(),
                 self.positional,
+                &mut post_processing,
             )?;
         }
         if stage >= Stage::Carvers {
@@ -538,10 +576,14 @@ impl<'a> Generator<'a> {
                 self.worldgen.noises(),
                 self.positional,
                 self.seed,
+                &mut post_processing,
             )?;
         }
         crate::perf::pause();
-        Ok(layers)
+        Ok(TerrainOutput {
+            blocks: layers,
+            post_processing,
+        })
     }
 
     /// 从某个 y 到世界顶部成批求值 `finalDensity`，返回耗时（毫秒）。

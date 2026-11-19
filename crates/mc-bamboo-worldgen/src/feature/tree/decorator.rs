@@ -444,9 +444,7 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
     /// `Context.setBlock`：走 `decorationSetter`。
     fn set(&mut self, pos: Pos, state: u32) {
         self.place.decorations.insert(pos);
-        self.place
-            .world
-            .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+        self.place.world.set_tree_block(pos.0, pos.1, pos.2, state);
     }
 
     /// `TrunkVineDecorator.place`。

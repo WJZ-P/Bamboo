@@ -114,6 +114,7 @@ fn nine_chunk_input(generator: &Generator<'_>, cx: i32, cz: i32) -> Option<Featu
         blocks: blocks.try_into().expect("9 chunks"),
         biomes: biomes.try_into().expect("9 chunks"),
         heights: heights.try_into().expect("9 chunks"),
+        post_processing: std::array::from_fn(|_| Vec::new()),
     })
 }
 

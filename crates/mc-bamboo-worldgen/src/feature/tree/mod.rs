@@ -242,8 +242,7 @@ impl<'a, 'w> TreePlace<'a, 'w> {
     /// Official `trunkSetter`: record the position, then `level.setBlock(pos, state, 19)`.
     pub fn set_trunk(&mut self, pos: Pos, state: u32) {
         self.trunks.insert(pos);
-        self.world
-            .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+        self.world.set_tree_block(pos.0, pos.1, pos.2, state);
     }
 
     /// 官方 `rootSetter`。
@@ -251,8 +250,7 @@ impl<'a, 'w> TreePlace<'a, 'w> {
     /// Official `rootSetter`.
     pub fn set_root(&mut self, pos: Pos, state: u32) {
         self.roots.insert(pos);
-        self.world
-            .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+        self.world.set_tree_block(pos.0, pos.1, pos.2, state);
     }
 
     /// 官方 `FoliageSetter.set`。
@@ -260,8 +258,7 @@ impl<'a, 'w> TreePlace<'a, 'w> {
     /// Official `FoliageSetter.set`.
     pub fn set_foliage(&mut self, pos: Pos, state: u32) {
         self.foliage.insert(pos);
-        self.world
-            .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+        self.world.set_tree_block(pos.0, pos.1, pos.2, state);
     }
 }
 

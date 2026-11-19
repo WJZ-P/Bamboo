@@ -300,6 +300,11 @@ impl MultifaceGrowthFeature {
             // `setBlockAndUpdate` == `setBlock(pos, state, 3)`，走 `ChunkAccess.setBlockState`。
             // `setBlockAndUpdate` is `setBlock(pos, state, 3)`, i.e. `ChunkAccess.setBlockState`.
             world.set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+            // `MultifaceGrowthFeature.placeGrowthIfPossible` 贴成功后无条件
+            // 调 `ChunkAccess.markPosForPostProcessing`。
+            // `MultifaceGrowthFeature.placeGrowthIfPossible` always calls
+            // `ChunkAccess.markPosForPostProcessing` after a successful placement.
+            world.mark_pos_for_post_processing(pos.0, pos.1, pos.2);
             if random.next_float() < self.chance_of_spreading {
                 self.spread(world, pos, state, face, random);
             }
@@ -403,6 +408,11 @@ impl MultifaceGrowthFeature {
             };
             let old = world.get_block(target_pos.0, target_pos.1, target_pos.2);
             if let Some(new_state) = self.state_for_placement(world, old, target_pos, target_face) {
+                // `MultifaceSpreader.SpreadConfig.placeBlock` 的 `markPos=true`
+                // 分支：换状态前先记一次。
+                // `MultifaceSpreader.SpreadConfig.placeBlock` with `markPos=true`:
+                // mark the position before writing the state.
+                world.mark_pos_for_post_processing(target_pos.0, target_pos.1, target_pos.2);
                 world.set_block_with_heightmaps(
                     target_pos.0,
                     target_pos.1,

@@ -2826,6 +2826,24 @@ public final class ChunkgenOracle {
             }
             line.add("palette", names);
             line.add("blocks", blocks);
+            // `PostProcessing` 是 ProtoChunk 的 short 列表数组；CARVERS 路径里
+            // 恒为 24 个空列表，FEATURES 路径里装的是 markPosForPostProcessing
+            // 记下的位置。空列表也照样输出，让对拍能抓到「本该记却没记」。
+            // `PostProcessing` is the ProtoChunk's array of packed short lists:
+            // empty in CARVERS, filled by markPosForPostProcessing in FEATURES.
+            if (chunk instanceof ProtoChunk proto) {
+                JsonArray post = new JsonArray();
+                for (it.unimi.dsi.fastutil.shorts.ShortList section : proto.getPostProcessing()) {
+                    JsonArray packed = new JsonArray();
+                    if (section != null) {
+                        for (short value : section) {
+                            packed.add(value & 0xFFFF);
+                        }
+                    }
+                    post.add(packed);
+                }
+                line.add("postProcessing", post);
+            }
         }
 
         /**

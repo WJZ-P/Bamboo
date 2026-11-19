@@ -312,6 +312,7 @@ impl MaterialRules {
         possible_biomes: Option<&[u32]>,
         noises: &NoiseRegistry,
         positional: PositionalFactory,
+        post_processing: &mut Vec<(i32, i32, i32)>,
     ) -> Result<(), String> {
         let system = self
             .system
@@ -419,6 +420,16 @@ impl MaterialRules {
                         let state = self.apply(&self.root, &mut scan, context, block_x, y, block_z);
                         if state != NO_STATE {
                             layer_set(layers, settings.min_y, x, y, z, state);
+                            // `MaterialSystem$1.BlockColumn.setBlock`：地表规则写出的
+                            // 每个有流体的状态都记进 PostProcessing（不看含水层标志）。
+                            // `MaterialSystem$1.BlockColumn.setBlock`: every fluid
+                            // state written by the surface rules is marked, without
+                            // checking the aquifer's schedule flag.
+                            if mc_bamboo_data::state_fluid(state).fluid
+                                != mc_bamboo_data::registries::fluid::EMPTY
+                            {
+                                post_processing.push((block_x, y, block_z));
+                            }
                         }
                     }
                 }

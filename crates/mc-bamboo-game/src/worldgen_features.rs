@@ -265,6 +265,7 @@ fn run_features_filtered(
                 }),
                 deltas: std::array::from_fn(|_| Vec::new()),
                 block_entities: Vec::new(),
+                post_processing: Vec::new(),
                 unsupported: false,
             },
             None,
@@ -278,6 +279,8 @@ fn run_features_filtered(
     crate::worldgen_structures::reset_generator_biome_state(config)?;
     let blocks: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.blocks.clone());
     let biomes: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.biomes.clone());
+    let post_processing: [Vec<(i32, i32, i32)>; 9] =
+        view.each_ref().map(|chunk| chunk.post_processing.clone());
     let heights: [Heightmaps; 9] = blocks
         .each_ref()
         .map(|chunk| prime_heightmaps(chunk, MIN_Y, WORLD_HEIGHT));
@@ -289,6 +292,7 @@ fn run_features_filtered(
         blocks,
         biomes,
         heights,
+        post_processing,
     };
     // `applyBiomeDecoration` 的结构分支：按中心区块的 `References` 反查每个起点，
     // 按 `structure.step()` 分组；`generate-structures=false` 时整段跳过。
@@ -490,6 +494,7 @@ pub fn game_pipeline(
             blocks: blocks[index].clone(),
             biomes: biomes[index].clone(),
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
         })
     });
     let (_result, stats) = run_features_filtered(
@@ -1229,6 +1234,7 @@ mod tests {
                 blocks: empty.blocks.clone(),
                 biomes: empty.biomes.clone(),
                 heightmaps: Default::default(),
+                post_processing: Vec::new(),
             })
         });
         let view_real = std::array::from_fn(|_| {
@@ -1236,6 +1242,7 @@ mod tests {
                 blocks: real.blocks.clone(),
                 biomes: real.biomes.clone(),
                 heightmaps: Default::default(),
+                post_processing: Vec::new(),
             })
         });
         let a = run_features(&config, cx, cz, view_empty).unwrap();

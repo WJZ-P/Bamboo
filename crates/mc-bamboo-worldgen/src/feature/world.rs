@@ -50,7 +50,14 @@ pub struct FeatureWorld<'a> {
     /// Block-entity nbt written into the world, `(world position, nbt)` in write order.
     /// `ChunkAccess.setBlockState` drops the old block entity, so the last writer wins
     /// here too.
-    pub block_entities: Vec<((i32, i32, i32), mc_bamboo_nbt::Tag)>,
+    pub block_entities: BlockEntityList,
+    /// 官方 `PostProcessing`：每段一个 packed short 列表，按 `markPosForPostProcessing`
+    /// 的调用顺序追加。用世界坐标列表保存，写盘时再按 chunk/section 打包。
+    ///
+    /// Official `PostProcessing`: one packed-short list per section, appended in
+    /// `markPosForPostProcessing` call order. Kept as world positions here and
+    /// packed per chunk/section when encoding the save.
+    pub post_processing: Vec<(i32, i32, i32)>,
 }
 
 impl<'a> FeatureWorld<'a> {
@@ -72,6 +79,11 @@ impl<'a> FeatureWorld<'a> {
             deltas: empty(),
             write_count: 0,
             block_entities: Vec::new(),
+            post_processing: input
+                .post_processing
+                .iter()
+                .flat_map(|chunk| chunk.iter().copied())
+                .collect(),
         })
     }
 
@@ -92,6 +104,7 @@ impl<'a> FeatureWorld<'a> {
             blocks: self.blocks,
             deltas: self.deltas.map(last_writes),
             block_entities: self.block_entities,
+            post_processing: self.post_processing,
             unsupported,
         }
     }
@@ -105,6 +118,35 @@ impl<'a> FeatureWorld<'a> {
     pub fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {
         self.block_entities.retain(|(pos, _)| *pos != (x, y, z));
         self.block_entities.push(((x, y, z), nbt.clone()));
+    }
+
+    /// `ChunkAccess.markPosForPostProcessing`：只在世界高度内记位置，按调用顺序追加
+    /// （官方的 `ShortList.add` 允许重复，这里也保留重复）。
+    ///
+    /// `ChunkAccess.markPosForPostProcessing`: record positions inside the build
+    /// height in call order; the official `ShortList.add` keeps duplicates.
+    pub fn mark_pos_for_post_processing(&mut self, x: i32, y: i32, z: i32) {
+        if !(self.min_y..self.min_y + self.height).contains(&y) {
+            return;
+        }
+        if self.index_of(x >> 4, z >> 4).is_some() {
+            self.post_processing.push((x, y, z));
+        }
+    }
+
+    /// `Feature.markAboveForPostProcessing`：从 `pos` 往上两格，遇到第一格空气就停，
+    /// 否则把这一格记进 `PostProcessing`。
+    ///
+    /// `Feature.markAboveForPostProcessing`: walk two blocks up from `pos`, stop
+    /// at the first air block, otherwise mark that cell.
+    pub fn mark_above_for_post_processing(&mut self, pos: (i32, i32, i32)) {
+        for dy in 1..=2 {
+            let at = (pos.0, pos.1 + dy, pos.2);
+            if self.is_air(at.0, at.1, at.2) {
+                return;
+            }
+            self.mark_pos_for_post_processing(at.0, at.1, at.2);
+        }
     }
 
     /// `level.getFluidState(pos)`：流体类型与是否源，由状态表给出。
@@ -216,6 +258,30 @@ impl<'a> FeatureWorld<'a> {
     /// incrementally update the four FINAL heightmaps. Only features that go through
     /// `setBlockState` use this; `OreFeature` (BulkSectionAccess) uses `set_block`.
     pub fn set_block_with_heightmaps(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+        self.set_block_inner(x, y, z, state, true)
+    }
+
+    /// `StructurePiece` / `StructureTemplate` 的写用 `flags = 2` 或 `820`：
+    /// 前者只按 `SHAPE_CHECK_BLOCKS` 标记（调用方负责），后者含 bit 16 不标记；
+    /// 两者都不跑 `getPostProcessPos`。
+    ///
+    /// `StructurePiece` / `StructureTemplate` writes use `flags = 2` or `820`:
+    /// the former marks `SHAPE_CHECK_BLOCKS` (done by the caller) and the latter
+    /// has bit 16 set; neither runs `getPostProcessPos`.
+    pub fn set_structure_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+        self.set_block_inner(x, y, z, state, false)
+    }
+
+    /// `TreeFeature` 的树干 / 树叶 / 装饰器写用 `flags = 19`（含 bit 16）：
+    /// 官方 `WorldGenRegion.setBlock` 在这种 flags 下不调 `getPostProcessPos`。
+    ///
+    /// `TreeFeature`'s trunk / foliage / decorator writes use `flags = 19`
+    /// (bit 16 set); `WorldGenRegion.setBlock` skips `getPostProcessPos` then.
+    pub fn set_tree_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+        self.set_block_inner(x, y, z, state, false)
+    }
+
+    fn set_block_inner(&mut self, x: i32, y: i32, z: i32, state: u32, post_process: bool) -> bool {
         let Some((chunk, index)) = self.block_index(x, y, z) else {
             return false;
         };
@@ -224,6 +290,27 @@ impl<'a> FeatureWorld<'a> {
         self.write_count += 1;
         if chunk != CENTER {
             self.deltas[chunk].push((x, y, z, state));
+        }
+        // `WorldGenRegion.setBlock`：`flags & 16 == 0` 时把新状态的
+        // `getPostProcessPos` 记进 PostProcessing。26.3 里只有四个方块设了它：
+        // 棕/红蘑菇记自己，灵魂沙 / 岩浆块记上面一格（`Blocks.postProcessSelf`
+        // / `postProcessAbove`）。`FeatureWorld` 的这条写路径对应官方
+        // `ChunkAccess.setBlockState`，`set_block`（BulkSectionAccess）不走这里。
+        //
+        // `WorldGenRegion.setBlock`: with `flags & 16 == 0`, mark the new state's
+        // `getPostProcessPos`. In 26.3 only four blocks define it: brown/red
+        // mushrooms mark themselves, soul sand / magma mark the cell above
+        // (`Blocks.postProcessSelf` / `postProcessAbove`). This write path is
+        // vanilla's `ChunkAccess.setBlockState`; `set_block` (BulkSectionAccess)
+        // does not go through it.
+        let name = mc_bamboo_data::block_of_state(state).map(|block| block.name);
+        let post = match name {
+            Some("minecraft:brown_mushroom" | "minecraft:red_mushroom") => Some((x, y, z)),
+            Some("minecraft:soul_sand" | "minecraft:magma_block") => Some((x, y + 1, z)),
+            _ => None,
+        };
+        if post_process && let Some((px, py, pz)) = post {
+            self.mark_pos_for_post_processing(px, py, pz);
         }
         // 两个不相交的字段借用：`blocks` 只读（向下重扫要用），`heights` 可变。
         // Disjoint field borrows: `blocks` shared (for the downward rescan), `heights` mutable.
@@ -668,6 +755,7 @@ mod block_writer_tests {
             blocks: blocks_all,
             biomes,
             heights: [Heightmaps::new(min_y); 9],
+            post_processing: std::array::from_fn(|_| Vec::new()),
         }
     }
 
