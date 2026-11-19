@@ -9,6 +9,11 @@
 三块：A 伤害来源、B 吃东西与饥饿消耗、C 药水效果系统。
 不做：喷溅 / 滞留药水、药箭（等弹射物）；信标、潮涌核心；怪物自带效果（等那些怪）。
 
+- 官方 `LivingEntity.activeEffects` 是 `Maps.newHashMap()`（见 `LivingEntity.<init>`
+  字节码），键 `Holder$Reference` 没有覆写 `hashCode` / `equals`，迭代顺序取决于
+  对象身份哈希，**官方自己没有固定顺序**。Bamboo 固定按效果 ID 升序（`BTreeMap`），
+  逐刻状态、存档列表和 `removeAllEffects` 的多包顺序都按这个确定顺序；对拍两侧
+  比的是排序后的全字段，不放宽比较。
 - 效果放在**通用生物层** `mc-bamboo-blocks::entity::mob`，`Mob` 和 `Player`
   共用同一份 `EffectMap` / `EffectInstance` / 每刻推进的纯函数；游戏层
   `mc-bamboo-game` 只负责把结果写回玩家状态、发包、命令、存档和物品使用流程。

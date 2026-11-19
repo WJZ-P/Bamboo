@@ -78,6 +78,7 @@ mod partition_stats;
 mod player;
 pub mod player_death;
 pub mod player_effects;
+pub mod player_environment;
 mod player_grid;
 pub mod player_health;
 pub mod player_hurt;
@@ -1879,6 +1880,300 @@ pub fn replay_player_effects(
         // 官方 `Player.playSound` 的音效经 `level.playSound` 广播给跟踪者；
         // 假世界用 `chunkSource.events` 收进同一刻的字节流。这里把观察者
         // 收到的音效按发生顺序插在 `damage_event` 之后。
+        let mut sounds = take(&observer_capture);
+        if !sounds.is_empty() {
+            let at = step
+                .iter()
+                .position(|body| {
+                    mc_bamboo_protocol::codec::decode_varint(body).is_ok_and(|(packet, _)| {
+                        packet == mc_bamboo_data::packets::play::clientbound::DAMAGE_EVENT
+                    })
+                })
+                .map_or(step.len(), |index| index + 1);
+            for (offset, sound) in sounds.drain(..).enumerate() {
+                step.insert(at + offset, sound);
+            }
+        }
+        packets.push(step);
+    }
+    (steps, packets)
+}
+
+/// S3 环境伤害对拍场景：`block` 是 `MobOracle.envBlock` 的种类，
+/// `fire` / `air` / `frozen` / `fall` 是起始状态，`y` 是玩家纵坐标。
+///
+/// An S3 environment-damage scene; `block` is the `envBlock` kind.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ReplayPlayerEnv {
+    pub ticks: usize,
+    pub start_health: f32,
+    pub start_absorption: f32,
+    pub block: i32,
+    pub fire: i32,
+    pub air: i32,
+    pub frozen: i32,
+    pub fall: i32,
+    pub y: f64,
+    pub difficulty: i32,
+    /// 故意改坏：着火不扣血 / 氧气回满速度 / 摔落伤害公式。
+    pub break_fire: bool,
+    pub break_air: bool,
+    pub break_fall: bool,
+}
+
+/// S3 逐刻状态：环境字段 + 1a 的受伤状态。
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerEnvStep {
+    pub hp: i32,
+    pub abs: i32,
+    pub ht: i32,
+    pub hd: i32,
+    pub cd: i32,
+    pub lh: i32,
+    pub food: i32,
+    pub sat: i32,
+    pub exh: i32,
+    pub fire: i32,
+    pub air: i32,
+    pub frozen: i32,
+    pub fall: i64,
+    pub seed: i64,
+}
+
+/// S3 环境伤害场景的正式重放：用生产代码的 `Region` / `Player` /
+/// `player_environment::tick_environment` 走完整个场景。
+///
+/// Replays an environment-damage scene through the production path.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_player_env(scene: &ReplayPlayerEnv) -> (Vec<PlayerEnvStep>, Vec<Vec<Vec<u8>>>) {
+    use mc_bamboo_core::{BlockPos, Vec3};
+    use mc_bamboo_data::blocks;
+    use mc_bamboo_protocol::packet::play::{ClientInformation, GameMode, SetHealth};
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl inbound::PlayerSink for Capture {
+        fn send(&mut self, frames: outgoing::Outgoing) -> bool {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(frames.to_raw_bytes());
+            true
+        }
+        fn close(&mut self) {}
+    }
+    let take = |capture: &Capture| -> Vec<Vec<u8>> {
+        let bytes = std::mem::take(&mut *capture.0.lock().unwrap());
+        let mut rest = bytes.as_slice();
+        let mut out = Vec::new();
+        while !rest.is_empty() {
+            let Some(bounds) = mc_bamboo_protocol::frame::find_frame(
+                rest,
+                mc_bamboo_protocol::frame::MAX_FRAME_LEN,
+            )
+            .ok()
+            .flatten() else {
+                break;
+            };
+            let end = bounds.header_len + bounds.payload_len;
+            out.push(rest[bounds.header_len..end].to_vec());
+            rest = &rest[end..];
+        }
+        out
+    };
+    let state = match scene.block {
+        1 => blocks::FIRE,
+        2 => blocks::LAVA,
+        3 => blocks::WATER,
+        4 => blocks::CACTUS,
+        5 => blocks::SWEET_BERRY_BUSH,
+        6 => blocks::MAGMA_BLOCK,
+        7 => blocks::POWDER_SNOW,
+        8 => blocks::STONE,
+        9 => blocks::BUBBLE_COLUMN,
+        _ => blocks::AIR,
+    };
+    let mut region = region::Region::new(2, 20, false);
+    region.global.difficulty = match scene.difficulty {
+        0 => world_state::Difficulty::Peaceful,
+        1 => world_state::Difficulty::Easy,
+        3 => world_state::Difficulty::Hard,
+        _ => world_state::Difficulty::Normal,
+    };
+    {
+        use std::sync::Arc;
+        let rules = Arc::make_mut(&mut region.global.rules);
+        let _ = rules.assign(
+            mc_bamboo_data::gamerules::NATURAL_HEALTH_REGENERATION,
+            "false",
+        );
+    }
+    if scene.block != 0 {
+        for y in 63..=65 {
+            region.chunks.set_block(BlockPos::new(0, y, 0), state);
+        }
+        if scene.block == 6 {
+            region.chunks.set_block(BlockPos::new(0, 63, 0), state);
+        }
+    }
+    if scene.fall > 0 {
+        region
+            .chunks
+            .set_block(BlockPos::new(0, 62, 0), blocks::STONE);
+    }
+    let id = inbound::PlayerId(1 << 24);
+    let mut player = player::Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Oracle0".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, scene.y, 0.5),
+    );
+    player.health.health = scene.start_health;
+    player.health.absorption = scene.start_absorption;
+    player.environment.remaining_fire_ticks = scene.fire;
+    player.environment.air_supply = scene.air;
+    player.environment.ticks_frozen = scene.frozen;
+    player.motion.fall_distance = f64::from(scene.fall);
+    player.on_ground = scene.fall > 0;
+    player.random =
+        mc_bamboo_blocks::entity::JavaRandom::new(mc_bamboo_blocks::entity::ENTITY_RANDOM_SEED);
+    let capture = Capture::default();
+    region.links.add(id, Box::new(capture.clone()));
+    let observer = inbound::PlayerId((1 << 24) + 100);
+    let watcher = player::Player::new(
+        observer,
+        Uuid::from_u128(2),
+        "Observer".to_owned(),
+        GameMode::Survival,
+        ClientInformation::default(),
+        Vec3::new(0.5, scene.y, 0.5),
+    );
+    let observer_capture = Capture::default();
+    region
+        .links
+        .add(observer, Box::new(observer_capture.clone()));
+    region.insert_player(watcher);
+    region.insert_player(player);
+    region.sound_seed_generator = mc_bamboo_blocks::LevelRandom::new(12345);
+    // 摔落伤害在 `finish_tick` 里由 `pending_land` 触发。
+    if scene.fall > 0 {
+        region
+            .players
+            .get_mut(&id)
+            .expect("player")
+            .motion
+            .pending_land = true;
+    }
+    let step_of = |player: &player::Player| -> PlayerEnvStep {
+        PlayerEnvStep {
+            hp: player.health.health.to_bits() as i32,
+            abs: player.health.absorption.to_bits() as i32,
+            ht: player.health.hurt_time,
+            hd: player.health.hurt_duration,
+            cd: player.health.damage_cooldown,
+            lh: player.health.last_hurt.to_bits() as i32,
+            food: player.health.food.food_level,
+            sat: player.health.food.saturation.to_bits() as i32,
+            exh: player.health.food.exhaustion.to_bits() as i32,
+            fire: player.environment.remaining_fire_ticks,
+            air: player.environment.air_supply,
+            frozen: player.environment.ticks_frozen,
+            fall: player.motion.fall_distance.to_bits() as i64,
+            seed: player.random.state(),
+        }
+    };
+    region.links.send(
+        id,
+        &SetHealth {
+            health: scene.start_health,
+            food: 20,
+            saturation: 5.0,
+        },
+    );
+    region.links.flush();
+    let _ = take(&capture);
+    if let Some(player) = region.players.get_mut(&id) {
+        player.health_sync = player_hurt::HealthSync::of(player);
+    }
+    let mut steps = vec![step_of(&region.players[&id])];
+    let mut packets: Vec<Vec<Vec<u8>>> = vec![Vec::new()];
+    let mut last_sent = scene.start_health;
+    for tick in 1..=scene.ticks {
+        let sync_before = region.players.get(&id).map(|p| p.health_sync);
+        if scene.fall > 0 && tick == 1 {
+            // 第一刻 `on_land` 结算摔落伤害（官方 `causeFallDamage`）。
+            if scene.break_fall {
+                let amount =
+                    player_environment::fall_damage(&region.players[&id], f64::from(scene.fall))
+                        as f32
+                        + 1.0;
+                player_hurt::hurt_player(
+                    &mut region,
+                    id,
+                    mc_bamboo_blocks::entity::mob::DamageSource::environment(
+                        mc_bamboo_blocks::entity::mob::DamageKind::Fall,
+                    ),
+                    amount,
+                    &mut None,
+                );
+                region
+                    .players
+                    .get_mut(&id)
+                    .expect("player")
+                    .motion
+                    .fall_distance = 0.0;
+            } else {
+                player_environment::on_land(&mut region, id);
+            }
+            if let Some(p) = region.players.get_mut(&id) {
+                p.motion.pending_land = false;
+            }
+        }
+        if let Some(player) = region.players.get_mut(&id) {
+            player.entity_ticks = player.entity_ticks.wrapping_add(1);
+            if scene.break_fire {
+                player.environment.remaining_fire_ticks = 0;
+            }
+            if scene.break_air {
+                player.environment.air_supply = player_environment::MAX_AIR;
+            }
+        }
+        player_environment::tick_environment_players(&mut region, &[id]);
+        // `LivingEntity.baseTick` 在 `onFire` / `isInWall` 伤害之后递减 hurtTime。
+        if let Some(p) = region.players.get_mut(&id) {
+            p.health.hurt_time = (p.health.hurt_time - 1).max(0);
+        }
+        let p = &region.players[&id];
+        let hp = p.health.health;
+        let already_sent = sync_before.is_some_and(|before| before != p.health_sync);
+        let changed = hp.to_bits() != last_sent.to_bits();
+        if changed && !already_sent {
+            region.links.send(
+                id,
+                &SetHealth {
+                    health: hp,
+                    food: p.health.food.food_level,
+                    saturation: p.health.food.saturation,
+                },
+            );
+            region.players.get_mut(&id).expect("player").health_sync = player_hurt::HealthSync {
+                health: hp,
+                food: p.health.food.food_level,
+                saturation_zero: p.health.food.saturation == 0.0,
+            };
+        }
+        if changed || already_sent {
+            last_sent = hp;
+        }
+        steps.push(step_of(&region.players[&id]));
+        region.links.flush();
+        let mut step = take(&capture);
         let mut sounds = take(&observer_capture);
         if !sounds.is_empty() {
             let at = step

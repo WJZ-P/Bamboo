@@ -215,9 +215,18 @@ impl EntitySync {
 }
 
 /// tick 第 3 阶段：`head_yaw`、姿势、元数据脏标记。`entities.md` 第 13 节。
+/// `Entity.ENTITY_FLAG_ON_FIRE`（共享标志位第 0 位）。
+const ENTITY_FLAG_ON_FIRE: u8 = 0x01;
+
 pub(crate) fn update_derived_state(region: &mut Region) {
     for player in region.players.values_mut() {
         player.head_yaw = player.yaw;
+        // `Entity.setSharedFlag(0, isOnFire())`。
+        if crate::player_environment::is_on_fire(player) {
+            player.sync.shared_flags |= ENTITY_FLAG_ON_FIRE;
+        } else {
+            player.sync.shared_flags &= !ENTITY_FLAG_ON_FIRE;
+        }
         player.sync.metadata_dirty |= Metadata::of(player) != player.sync.sent_metadata;
     }
 }

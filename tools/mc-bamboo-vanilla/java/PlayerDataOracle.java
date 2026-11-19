@@ -502,6 +502,7 @@ public final class PlayerDataOracle {
             fields.addProperty("fall_distance", input.getDoubleOr("fall_distance", 0.0));
             fields.addProperty("fire", input.getShortOr("Fire", (short) 0));
             fields.addProperty("air", input.getShortOr("Air", (short) 300));
+            fields.addProperty("ticks_frozen", input.getIntOr("TicksFrozen", 0));
             fields.addProperty("on_ground", input.getBooleanOr("OnGround", false));
             fields.addProperty("invulnerable", input.getBooleanOr("Invulnerable", false));
             fields.addProperty("portal_cooldown", input.getIntOr("PortalCooldown", 0));
@@ -557,6 +558,8 @@ public final class PlayerDataOracle {
             tag.putDouble("fall_distance", input.getDoubleOr("fall_distance", 0.0));
             tag.putShort("Fire", (short) input.getShortOr("Fire", (short) 0));
             tag.putShort("Air", (short) input.getShortOr("Air", (short) 300));
+            int frozen = input.getIntOr("TicksFrozen", 0);
+            if (frozen > 0) tag.putInt("TicksFrozen", frozen);
             tag.putBoolean("OnGround", input.getBooleanOr("OnGround", false));
             tag.putBoolean("Invulnerable", input.getBooleanOr("Invulnerable", false));
             tag.putInt("PortalCooldown", input.getIntOr("PortalCooldown", 0));
@@ -622,6 +625,9 @@ public final class PlayerDataOracle {
             tag.putDouble("fall_distance", spec.get("fall_distance").getAsDouble());
             tag.putShort("Fire", (short) spec.get("fire").getAsInt());
             tag.putShort("Air", (short) spec.get("air").getAsInt());
+            if (spec.has("ticks_frozen") && spec.get("ticks_frozen").getAsInt() > 0) {
+                tag.putInt("TicksFrozen", spec.get("ticks_frozen").getAsInt());
+            }
             tag.putBoolean("OnGround", spec.get("on_ground").getAsBoolean());
             tag.putBoolean("Invulnerable", spec.get("invulnerable").getAsBoolean());
             tag.putInt("PortalCooldown", spec.get("portal_cooldown").getAsInt());

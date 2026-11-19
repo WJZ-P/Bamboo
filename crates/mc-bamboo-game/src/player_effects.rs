@@ -226,11 +226,7 @@ fn apply_action(region: &mut Region, id: PlayerId, effect: i32, action: EffectAc
                 hurt(region, id, DamageKind::Magic, amount);
             }
         }
-        EffectAction::WitherDamage(amount) => {
-            // 26.3 的 `minecraft:wither` 伤害类型在 Bamboo 里还没建模；
-            // 除死亡消息外它和 `magic` 的减伤相同，见差异文档。
-            hurt(region, id, DamageKind::Magic, amount);
-        }
+        EffectAction::WitherDamage(amount) => hurt(region, id, DamageKind::Wither, amount),
         EffectAction::InstantDamage(amount) => hurt(region, id, DamageKind::Magic, amount),
         EffectAction::Exhaustion(amount) => {
             if let Some(player) = region.players.get_mut(&id) {

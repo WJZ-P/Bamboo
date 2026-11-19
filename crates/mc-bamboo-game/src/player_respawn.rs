@@ -89,6 +89,7 @@ pub(crate) fn reset_after_respawn(region: &mut Region, id: PlayerId, keep_invent
     // 重生序列里 `sendActivePlayerEffects` 因此不发效果包。
     // Vanilla rebuilds `ServerPlayer` before `restoreFrom`, so effects are empty.
     player.effects = mc_bamboo_blocks::entity::mob::effects::EffectMap::new();
+    player.environment = crate::player_environment::Environment::default();
     player.dead = false;
     player.awaiting_respawn = false;
     player.in_combat = false;

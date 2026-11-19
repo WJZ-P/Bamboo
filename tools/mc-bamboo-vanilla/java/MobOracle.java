@@ -320,6 +320,13 @@ public final class MobOracle {
         boolean spawnScene;
         /** S2 玩家效果场景：`playEffects` 用独立的官方入口链。 */
         boolean effectScene;
+        /** S3 环境伤害场景：`playEnv` 用官方 `Entity.baseTick` / `hurtServer`。 */
+        boolean envScene;
+        /** 环境场景：{起烟火刻数, 起始氧气, 起始冻结, 摔落距离, 难度}。 */
+        int[] envSetup = new int[5];
+        /** 场景里每格方块的种类：0 空 / 1 火 / 2 岩浆 / 3 水 / 4 仙人掌 /
+         *  5 甜浆果 / 6 岩浆块 / 7 细雪 / 8 石头（卡墙）/ 9 气泡柱。 */
+        int envBlock;
         /** 效果动作：{刻, 0=add 1=clear-one 2=clear-all, 效果 ID, 时长, 等级}。 */
         final List<int[]> effectActions = new ArrayList<>();
         /** 落脚点场景：出生点、规则半径、随机源种子、默认游戏模式、个人出生点。 */
@@ -541,6 +548,26 @@ public final class MobOracle {
         Scene equipment(int[] items, int[] protection) {
             playerEquipment.add(items);
             playerEnchants.add(protection);
+            return this;
+        }
+
+        /** 虚空场景把玩家放到 `minY - 64` 以下。 */
+        Scene envVoid() {
+            players.clear();
+            playerItems.clear();
+            lootingLevels.clear();
+            player(0.5, -200.0, 0.5, Items.AIR);
+            return this;
+        }
+
+        /** S3：环境伤害场景。 */
+        Scene env(int ticks, int block, int fire, int air, int frozen, int fall, int difficulty) {
+            envScene = true;
+            playerPackets = true;
+            this.ticks = ticks;
+            envBlock = block;
+            envSetup = new int[] {fire, air, frozen, fall, difficulty};
+            this.difficulty = difficulty;
             return this;
         }
 
@@ -1048,7 +1075,8 @@ public final class MobOracle {
             for (String kind : new String[] {"generic", "player_attack", "mob_attack",
                     "mob_attack_no_aggro", "magic", "on_fire", "in_fire", "lava", "hot_floor",
                     "cactus", "fall", "freeze", "starve", "arrow", "thorns", "explosion",
-                    "cramming", "drown", "in_wall", "sweet_berry_bush", "out_of_world"}) {
+                    "cramming", "drown", "in_wall", "sweet_berry_bush", "out_of_world",
+                    "wither"}) {
                 Scene one = new Scene("player_hurt_type_" + kind).ticks(20)
                         .difficulty(2).playerPackets().packets();
                 ground(one, 4);
@@ -1250,6 +1278,8 @@ public final class MobOracle {
                     .effectGive(1, 9, 100, 0));
             scenes.add(effectBase("effect_poison_hurt", 30)
                     .effectGive(1, 18, 100, 0));
+            scenes.add(effectBase("effect_wither_hurt", 45)
+                    .effectGive(1, 19, 100, 0));
             scenes.add(effectBase("effect_instant_health", 4)
                     .effectGive(1, 5, 1, 1));
             scenes.add(effectBase("effect_absorption", 12)
@@ -1258,7 +1288,21 @@ public final class MobOracle {
                     .effectGive(1, 0, -1, 0));
             scenes.add(effectBase("effect_resync_600", 610)
                     .effectGive(1, 0, 1200, 0));
+            // ---- S3：环境伤害来源 ----
+            scenes.add(envBase("env_on_fire", 45, 0, 40, 300, 0, 0, 2));
+            scenes.add(envBase("env_drown", 340, 3, 0, 300, 0, 0, 2));
+            scenes.add(envBase("env_drown_short", 30, 3, 0, -19, 0, 0, 2));
+            scenes.add(envBase("env_in_wall", 20, 8, 0, 300, 0, 0, 2));
+            scenes.add(envBase("env_void", 20, 0, 0, 300, 0, 0, 2).envVoid());
+            scenes.add(envBase("env_fall_4", 12, 0, 0, 300, 0, 4, 2));
             return scenes;
+        }
+
+        private static Scene envBase(String name, int ticks, int block, int fire, int air,
+                int frozen, int fall, int difficulty) {
+            Scene scene = new Scene(name).env(ticks, block, fire, air, frozen, fall, difficulty);
+            scene.player(0.5, 64.0, 0.5, Items.AIR);
+            return scene;
         }
 
         private static Scene effectBase(String name, int ticks) {
@@ -1337,6 +1381,10 @@ public final class MobOracle {
         }
         if (scene.effectScene) {
             playEffects(official, out, scene);
+            return;
+        }
+        if (scene.envScene) {
+            playEnv(official, out, scene);
             return;
         }
         // 每个包场景一份共用收集器：实体事件、音效和同步包按发生顺序进同一串字节。
@@ -2101,6 +2149,191 @@ public final class MobOracle {
             at++;
         }
         return value;
+    }
+
+    /**
+     * S3 环境伤害场景：在假世界里直接跑官方 `Entity.baseTick` /
+     * `LivingEntity.baseTick`（反射 `baseTick`，它是 public）。假世界不跑
+     * `ServerPlayer.tick()` 的其余部分（连接层、区块票、推进系统），但
+     * `baseTick` 本身需要的 `level()`、`damageSources()`、`isInWall()`、
+     * `Entity.checkInsideBlocks` 都由桩提供；本场景比较的字段只由它决定。
+     * 逐刻记下血量 / 吸收 / 冷却 / 饥饿 / 着火 / 氧气 / 冻结 / 随机源，以及
+     * `connection.send` 和假世界广播抓到的包字节。
+     */
+    private static void playEnv(Official official, Writer out, Scene scene) throws Exception {
+        Bytes all = new Bytes(official.registries);
+        StubList list = (StubList) official.server.getPlayerList();
+        official.server.sequences = new RandomSequences();
+        FakeLevel level = FakeLevel.create(official);
+        level.chunkSource.events = all::add;
+        level.packets = all::add;
+        list.sounds = all::add;
+        level.nextId = FIRST_ID;
+        ((TickingLevelData) level.levelData).difficulty = Difficulty.values()[scene.difficulty];
+        setRule(official, GameRules.NATURAL_HEALTH_REGENERATION, false);
+        double[] at = scene.players.get(0);
+        // 按 envBlock 在玩家脚、眼睛、头顶和脚下摆方块。
+        BlockState state = switch (scene.envBlock) {
+            case 1 -> Blocks.FIRE.defaultBlockState();
+            case 2 -> Blocks.LAVA.defaultBlockState();
+            case 3 -> Blocks.WATER.defaultBlockState();
+            case 4 -> Blocks.CACTUS.defaultBlockState();
+            case 5 -> Blocks.SWEET_BERRY_BUSH.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.SweetBerryBushBlock.AGE, 3);
+            case 6 -> Blocks.MAGMA_BLOCK.defaultBlockState();
+            case 7 -> Blocks.POWDER_SNOW.defaultBlockState();
+            case 8 -> Blocks.STONE.defaultBlockState();
+            case 9 -> Blocks.BUBBLE_COLUMN.defaultBlockState();
+            default -> Blocks.AIR.defaultBlockState();
+        };
+        if (scene.envBlock != 0) {
+            for (int y = 63; y <= 65; y++) {
+                level.blocks.put(new BlockPos(0, y, 0).asLong(), state);
+            }
+            if (scene.envBlock == 6) {
+                // 岩浆块要落在脚下。
+                level.blocks.put(new BlockPos(0, 63, 0).asLong(), state);
+            }
+        }
+        // 摔落场景的地面。
+        if (scene.envSetup[3] > 0) {
+            level.blocks.put(new BlockPos(0, 62, 0).asLong(), Blocks.STONE.defaultBlockState());
+        }
+
+        List<List<String>> steps = new ArrayList<>();
+        List<List<String>> packets = new ArrayList<>();
+        for (int tick = 0; tick <= scene.ticks; tick++) {
+            steps.add(new ArrayList<>());
+            packets.add(new ArrayList<>());
+        }
+        GameProfile profile = new GameProfile(new UUID(1L, 2L), "Oracle0");
+        LifePlayer player = new LifePlayer(official.server, level, profile,
+                ClientInformation.createDefault(), level);
+        player.setPos(at[0], at[1], at[2]);
+        setRandom(player, ENTITY_RANDOM_SEED);
+        player.setYRot(0.0F);
+        player.setYHeadRot(0.0F);
+        player.setYBodyRot(0.0F);
+        player.setGameMode(GameType.SURVIVAL);
+        player.setHealth(scene.playerHealth);
+        player.setAbsorptionAmount(scene.playerAbsorption);
+        player.setRemainingFireTicks(scene.envSetup[0]);
+        player.setAirSupply(scene.envSetup[1]);
+        player.setTicksFrozen(scene.envSetup[2]);
+        player.fallDistance = scene.envSetup[3];
+        player.setOnGround(scene.envSetup[3] > 0);
+        Bytes self = new Bytes(official.registries);
+        self.mirror = all;
+        RecordingListener connection = allocate(RecordingListener.class);
+        put(ServerGamePacketListenerImpl.class, connection, "player", player);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "server", official.server);
+        put(net.minecraft.server.network.ServerCommonPacketListenerImpl.class,
+                connection, "connection", new Connection(PacketFlow.CLIENTBOUND));
+        connection.bytes = self;
+        put(ServerPlayer.class, player, "connection", connection);
+        level.lifePlayer = player;
+        level.playersList().add(player);
+        official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        java.lang.reflect.Method detect = LivingEntity.class.getDeclaredMethod("detectEquipmentUpdates");
+        detect.setAccessible(true);
+        detect.invoke(player);
+        // 官方 `Entity.baseTick`（LivingEntity.baseTick 会调它）。
+        java.lang.reflect.Method baseTick = LivingEntity.class.getDeclaredMethod("baseTick");
+        baseTick.setAccessible(true);
+        // `Entity.applyEffectsFromBlocks(from, to)` 是公开的官方入口，直接跑
+        // `checkInsideBlocks`（火焰 / 岩浆 / 仙人掌 / 甜浆果 / 岩浆块 / 细雪）。
+        // 假世界不跑 `Entity.move`，每刻传一段「原地」位移即可。
+
+        steps.get(0).add(envStepJson(player));
+        all.take();
+        self.take();
+        float lastSentHp = player.getHealth();
+        for (int tick = 1; tick <= scene.ticks; tick++) {
+            level.gameTime++;
+            putInt(Entity.class, player, "tickCount", getInt(Entity.class, player, "tickCount") + 1);
+            if (tick == 1 && scene.envSetup[3] > 0) {
+                // `LivingEntity.causeFallDamage(d, multiplier, fall())` 是公开的，
+                // 假世界不跑 `Entity.move`，落地那一刻直接调它。
+                player.causeFallDamage(scene.envSetup[3], 1.0F,
+                        level.damageSources().fall());
+                player.fallDistance = 0.0;
+            }
+            // `LivingEntity.baseTick` 自己递减 hurtTime / damageCooldownTime。
+            baseTick.invoke(player);
+            // `Entity.tick` 之后跑 `applyEffectsFromBlocks`：本场景的方块表
+            // 只放水 / 石头 / 空，火焰类方块已在别的场景（牛的 mob-oracle）
+            // 覆盖；这里只让它走官方的「灭火后设 -getFireImmuneTicks()」分支。
+            player.applyEffectsFromBlocks(player.position(), player.position());
+            // `ServerPlayer.doTick`：血量变了补一包 set_health。
+            float hp = player.getHealth();
+            if (Float.floatToRawIntBits(hp) != Float.floatToRawIntBits(lastSentHp)) {
+                lastSentHp = hp;
+                self.add(new net.minecraft.network.protocol.game.ClientboundSetHealthPacket(
+                        hp, player.getFoodData().getFoodLevel(),
+                        player.getFoodData().getSaturationLevel()));
+            }
+            steps.get(tick).add(envStepJson(player));
+            for (byte[] body : all.takeRaw()) {
+                packets.get(tick).add(Base64.getEncoder().encodeToString(body));
+            }
+            self.take();
+        }
+        StringBuilder line = new StringBuilder(1 << 18);
+        line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
+        line.append(",\"firstId\":").append(FIRST_ID);
+        line.append(",\"playerIdBase\":").append(FIRST_ID);
+        line.append(",\"startTime\":").append(START_TIME);
+        line.append(",\"blocks\":").append(blockArray(scene.blocks));
+        line.append(",\"cows\":[],\"players\":[{\"id\":").append(FIRST_ID);
+        line.append(",\"x\":").append(Double.doubleToRawLongBits(at[0]));
+        line.append(",\"y\":").append(Double.doubleToRawLongBits(at[1]));
+        line.append(",\"z\":").append(Double.doubleToRawLongBits(at[2]));
+        line.append(",\"eye\":0,\"item\":0,\"looting\":0}],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append(",\"steps\":[[]");
+        for (int tick = 1; tick <= scene.ticks; tick++) line.append(",[]");
+        line.append("],\"packets\":");
+        appendPackets(line, packets);
+        line.append(",\"syncFlags\":null,\"spawns\":null,\"deathKind\":0,\"fireTicks\":0");
+        line.append(",\"interactActions\":[],\"interactions\":null,\"difficulty\":").append(scene.difficulty);
+        line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(scene.playerHealth));
+        line.append(",\"playerAbsorption\":").append(Float.floatToRawIntBits(scene.playerAbsorption));
+        line.append(",\"playerExhaustion\":0,\"playerEquipment\":[],\"playerProtection\":[]");
+        line.append(",\"playerActions\":[],\"playerSteps\":");
+        appendPackets(line, steps);
+        line.append(",\"playerPackets\":null,\"keyPackets\":null");
+        line.append(",\"envScene\":{\"startHealth\":").append(Float.floatToRawIntBits(scene.playerHealth));
+        line.append(",\"block\":").append(scene.envBlock);
+        line.append(",\"fire\":").append(scene.envSetup[0]);
+        line.append(",\"air\":").append(scene.envSetup[1]);
+        line.append(",\"frozen\":").append(scene.envSetup[2]);
+        line.append(",\"fall\":").append(scene.envSetup[3]);
+        line.append(",\"difficulty\":").append(scene.difficulty);
+        line.append(",\"y\":").append(Double.doubleToRawLongBits(at[1]));
+        line.append("}}\n");
+        out.write(line.toString());
+        out.flush();
+    }
+
+    /** S3 逐刻状态：环境字段 + 1a 的受伤状态。 */
+    private static String envStepJson(ServerPlayer player) throws Exception {
+        StringBuilder out = new StringBuilder(512);
+        out.append("{\"hp\":").append(Float.floatToRawIntBits(player.getHealth()));
+        out.append(",\"abs\":").append(Float.floatToRawIntBits(player.getAbsorptionAmount()));
+        out.append(",\"ht\":").append(player.hurtTime);
+        out.append(",\"hd\":").append(player.hurtDuration);
+        out.append(",\"cd\":").append(player.damageCooldownTime);
+        out.append(",\"lh\":").append(Float.floatToRawIntBits(getFloat(LivingEntity.class, player, "lastHurt")));
+        out.append(",\"food\":").append(player.getFoodData().getFoodLevel());
+        out.append(",\"sat\":").append(Float.floatToRawIntBits(player.getFoodData().getSaturationLevel()));
+        out.append(",\"exh\":").append(Float.floatToRawIntBits(
+                getFloat(net.minecraft.world.food.FoodData.class, player.getFoodData(), "exhaustionLevel")));
+        out.append(",\"fire\":").append(player.getRemainingFireTicks());
+        out.append(",\"air\":").append(player.getAirSupply());
+        out.append(",\"frozen\":").append(player.getTicksFrozen());
+        out.append(",\"fall\":").append(Double.doubleToRawLongBits(player.fallDistance));
+        out.append(",\"seed\":").append(randomSeed(player));
+        return out.append("}").toString();
     }
 
     private static void playEffects(Official official, Writer out, Scene scene) throws Exception {

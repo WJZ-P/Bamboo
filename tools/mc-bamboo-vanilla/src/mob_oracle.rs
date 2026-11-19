@@ -148,6 +148,9 @@ struct Case {
     /// S2 玩家效果场景的规则与动作。
     #[serde(default)]
     effect_scene: Option<EffectScene>,
+    /// S3 环境伤害场景的方块与起始状态。
+    #[serde(default)]
+    env_scene: Option<EnvScene>,
 }
 
 /// 1c 落脚点对拍的官方答案：坐标按 f64 原始位传，随机源末态逐位比。
@@ -735,6 +738,10 @@ impl Report {
         }
         if case.effect_scene.is_some() {
             self.replay_player_effects(case);
+            return;
+        }
+        if case.env_scene.is_some() {
+            self.replay_player_env(case);
             return;
         }
         if case.player_steps.is_some() {
@@ -1421,6 +1428,73 @@ impl Report {
     }
 
     /// 1b 场景：正式 `Region` 重放，逐刻比状态和筛选后的包字节。
+    /// S3：环境伤害场景逐刻比状态原始位和出站包字节。
+    fn replay_player_env(&mut self, case: &Case) {
+        use mc_bamboo_game::{ReplayPlayerEnv, replay_player_env};
+
+        let Some(setup) = &case.env_scene else {
+            return;
+        };
+        let Some(expected_steps) = &case.player_steps else {
+            return;
+        };
+        let scene = ReplayPlayerEnv {
+            ticks: expected_steps.len() - 1,
+            start_health: f32::from_bits(setup.start_health as u32),
+            start_absorption: f32::from_bits(case.player_absorption as u32),
+            block: setup.block,
+            fire: setup.fire,
+            air: setup.air,
+            frozen: setup.frozen,
+            fall: setup.fall,
+            y: f64::from_bits(setup.y as u64),
+            difficulty: setup.difficulty,
+            break_fire: matches!(self.break_test.as_deref(), Some("env_fire")),
+            break_air: matches!(self.break_test.as_deref(), Some("env_air")),
+            break_fall: matches!(self.break_test.as_deref(), Some("env_fall")),
+        };
+        let (steps, packets) = replay_player_env(&scene);
+        for (tick, expected) in expected_steps.iter().enumerate() {
+            self.steps += 1;
+            let Some(ours) = steps.get(tick) else {
+                self.mismatch(format!("{} tick {tick}: no Bamboo env step", case.name));
+                continue;
+            };
+            let Some(text) = expected.first() else {
+                self.mismatch(format!("{} tick {tick}: no official env step", case.name));
+                continue;
+            };
+            let Ok(official) = serde_json::from_str::<PlayerEnvStepJson>(text) else {
+                self.mismatch(format!("{} tick {tick}: bad official env JSON", case.name));
+                continue;
+            };
+            if official != *ours {
+                self.mismatch(format!(
+                    "{} tick {tick} env state: official {official:?}, bamboo {ours:?}",
+                    case.name
+                ));
+            }
+            if tick > 0 {
+                let expected_packets = case.packets.as_ref().and_then(|p| p.get(tick));
+                let Some(expected_packets) = expected_packets else {
+                    self.mismatch(format!("{} tick {tick}: no official packets", case.name));
+                    continue;
+                };
+                compare_packet_list(
+                    &mut self.mismatches,
+                    &self.show,
+                    &case.name,
+                    tick,
+                    &packets[tick],
+                    expected_packets,
+                );
+            }
+            if self.mismatches.len() >= self.show {
+                return;
+            }
+        }
+    }
+
     /// S2：玩家效果场景逐刻比状态原始位和出站包字节。
     fn replay_player_effects(&mut self, case: &Case) {
         use mc_bamboo_game::{ReplayPlayerEffects, replay_player_effects};
@@ -1661,6 +1735,58 @@ impl Report {
             self.cases, self.steps
         );
         Ok(())
+    }
+}
+
+/// S3 环境场景的方块与起始状态。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvScene {
+    start_health: i32,
+    block: i32,
+    fire: i32,
+    air: i32,
+    frozen: i32,
+    fall: i32,
+    difficulty: i32,
+    y: i64,
+}
+
+/// Java 一侧 `envStepJson` 的逐刻状态。
+#[derive(Debug, Deserialize, PartialEq)]
+struct PlayerEnvStepJson {
+    hp: i32,
+    abs: i32,
+    ht: i32,
+    hd: i32,
+    cd: i32,
+    lh: i32,
+    food: i32,
+    sat: i32,
+    exh: i32,
+    fire: i32,
+    air: i32,
+    frozen: i32,
+    fall: i64,
+    seed: i64,
+}
+
+impl PartialEq<mc_bamboo_game::PlayerEnvStep> for PlayerEnvStepJson {
+    fn eq(&self, other: &mc_bamboo_game::PlayerEnvStep) -> bool {
+        self.hp == other.hp
+            && self.abs == other.abs
+            && self.ht == other.ht
+            && self.hd == other.hd
+            && self.cd == other.cd
+            && self.lh == other.lh
+            && self.food == other.food
+            && self.sat == other.sat
+            && self.exh == other.exh
+            && self.fire == other.fire
+            && self.air == other.air
+            && self.frozen == other.frozen
+            && self.fall == other.fall
+            && self.seed == other.seed
     }
 }
 

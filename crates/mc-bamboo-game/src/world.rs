@@ -3097,6 +3097,9 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     // `LivingEntity.baseTick` 的 `tickEffects`：在受伤冷却之后跑持续效果，
     // 治疗和伤害走同一个 `hurt_player` 入口。
     crate::player_effects::tick(region);
+    // `Entity.baseTick` / `LivingEntity.baseTick` 的环境伤害：着火、溺水、
+    // 卡墙、虚空、仙人掌 / 甜浆果 / 岩浆块、细雪冻伤。
+    crate::player_environment::tick_environment(region);
     // 官方 `ServerPlayer.doTick`：总经验变了就给这名玩家补一包 `set_experience`。
     //
     // Official `ServerPlayer.doTick`: a changed total sends one `set_experience`.

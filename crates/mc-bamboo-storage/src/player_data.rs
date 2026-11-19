@@ -73,6 +73,8 @@ pub struct PlayerData {
     pub fall_distance: f64,
     pub fire: i16,
     pub air: i16,
+    /// `Entity.TicksFrozen`，只在大于 0 时写。
+    pub ticks_frozen: i32,
     pub on_ground: bool,
     pub invulnerable: bool,
     pub portal_cooldown: i32,
@@ -173,6 +175,7 @@ impl Default for PlayerData {
             fall_distance: 0.0,
             fire: 0,
             air: DEFAULT_AIR,
+            ticks_frozen: 0,
             on_ground: false,
             invulnerable: false,
             portal_cooldown: 0,
@@ -220,6 +223,7 @@ const KNOWN_KEYS: &[&str] = &[
     "fall_distance",
     "Fire",
     "Air",
+    "TicksFrozen",
     "OnGround",
     "Invulnerable",
     "PortalCooldown",
@@ -317,6 +321,9 @@ impl PlayerData {
         push(&mut root, "fall_distance", zero_double(self.fall_distance));
         push(&mut root, "Fire", Tag::Short(self.fire));
         push(&mut root, "Air", Tag::Short(self.air));
+        if self.ticks_frozen > 0 {
+            push(&mut root, "TicksFrozen", Tag::Int(self.ticks_frozen));
+        }
         push(&mut root, "OnGround", Tag::Byte(i8::from(self.on_ground)));
         push(
             &mut root,
@@ -416,6 +423,7 @@ impl PlayerData {
         data.fall_distance = opt_f64(entries, "fall_distance", 0.0)?;
         data.fire = opt_short(entries, "Fire", 0)?;
         data.air = opt_short(entries, "Air", DEFAULT_AIR)?;
+        data.ticks_frozen = opt_int(entries, "TicksFrozen", 0)?;
         data.on_ground = opt_bool(entries, "OnGround", false)?;
         data.invulnerable = opt_bool(entries, "Invulnerable", false)?;
         data.portal_cooldown = opt_int(entries, "PortalCooldown", 0)?;

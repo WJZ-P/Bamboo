@@ -39,6 +39,7 @@ pub fn runtime_player_data(player: &Player) -> PlayerData {
         score: player.score,
     });
     player.health.save(&mut data);
+    player.environment.save(&mut data);
     // `LivingEntity.addAdditionalSaveData`：空表不写 `active_effects`。
     if !player.effects.is_empty() {
         data.active_effects = Some(mc_bamboo_blocks::entity::mob::nbt::effects_tag(
@@ -108,6 +109,7 @@ pub fn restore_experience_seed(player: &mut Player, data: Option<&PlayerData>) {
 /// random number is drawn.
 pub fn restore_inventory(player: &mut Player, data: &PlayerData) {
     player.health.restore(data);
+    player.environment.restore(data);
     // `LivingEntity.readAdditionalSaveData`：读盘不触发 `onEffectAdded` 的包，
     // 属性修饰和最大血量由玩家效果层在下一刻重建。
     player.effects = data

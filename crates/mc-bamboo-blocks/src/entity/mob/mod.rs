@@ -202,6 +202,7 @@ pub enum DamageKind {
     Starve,
     Thorns,
     Magic,
+    Wither,
     Explosion,
 }
 
@@ -230,6 +231,7 @@ impl DamageKind {
             Self::Starve => "minecraft:starve",
             Self::Thorns => "minecraft:thorns",
             Self::Magic => "minecraft:magic",
+            Self::Wither => "minecraft:wither",
             Self::Explosion => "minecraft:explosion",
         }
     }
@@ -279,6 +281,7 @@ impl DamageKind {
             Self::Starve => "starve",
             Self::Thorns => "thorns",
             Self::Magic => "magic",
+            Self::Wither => "wither",
             Self::Explosion => "explosion",
         }
     }
@@ -287,7 +290,7 @@ impl DamageKind {
     ///
     /// Finds a kind by its short official name. Unknown names return `None`.
     pub fn by_name(name: &str) -> Option<Self> {
-        let all: [DamageKind; 22] = [
+        let all: [DamageKind; 23] = [
             Self::Generic,
             Self::GenericKill,
             Self::InWall,
@@ -309,6 +312,7 @@ impl DamageKind {
             Self::Starve,
             Self::Thorns,
             Self::Magic,
+            Self::Wither,
             Self::Explosion,
         ];
         all.into_iter()
@@ -324,7 +328,7 @@ impl DamageKind {
                 | Self::MobAttackNoAggro
                 | Self::Arrow
                 | Self::Thorns
-        )
+        ) || matches!(self, Self::Wither)
     }
 
     /// `#bypasses_armor`。
@@ -340,6 +344,7 @@ impl DamageKind {
                 | Self::Freeze
                 | Self::OutOfWorld
                 | Self::GenericKill
+                | Self::Wither
         )
     }
 

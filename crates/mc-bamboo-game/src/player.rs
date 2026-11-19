@@ -150,6 +150,10 @@ pub(crate) struct Player {
     /// `LivingEntity.activeEffects`: the same shared map as mobs, with
     /// relative countdowns only.
     pub(crate) effects: EffectMap,
+    /// `Entity` 的环境状态：着火、氧气、细雪冻结。全是相对倒计时。
+    ///
+    /// `Entity` environment state: fire, air, powder-snow freeze. All relative counters.
+    pub(crate) environment: crate::player_environment::Environment,
     /// `ServerPlayer.lastSentHealth` / `lastSentFood` / `lastFoodSaturationZero` 的合并快照。
     /// 官方构造时是 -1e8 / -99999999 / true，进服第一刻必发一包 `set_health`。
     ///
@@ -258,6 +262,7 @@ impl Player {
             recorded_criteria: crate::scoreboard::UNRECORDED_CRITERIA,
             health: PlayerHealth::default(),
             effects: EffectMap::new(),
+            environment: crate::player_environment::Environment::default(),
             health_sync: crate::player_hurt::HealthSync::INITIAL,
             in_combat: false,
             combat_entries: Vec::new(),

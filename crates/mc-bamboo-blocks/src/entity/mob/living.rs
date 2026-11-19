@@ -388,7 +388,7 @@ fn tick_effects(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
                     hurts.push((DamageKind::Magic, amount));
                 }
             }
-            EffectAction::WitherDamage(amount) => hurts.push((DamageKind::Magic, amount)),
+            EffectAction::WitherDamage(amount) => hurts.push((DamageKind::Wither, amount)),
             EffectAction::InstantDamage(amount) => hurts.push((DamageKind::Magic, amount)),
             EffectAction::Exhaustion(_) | EffectAction::Eat { .. } => {
                 // 牛没有 `FoodData`，官方的 `HungerMobEffect` 和

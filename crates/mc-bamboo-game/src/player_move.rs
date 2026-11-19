@@ -78,6 +78,8 @@ pub(crate) struct Motion {
     ///
     /// `Entity.fallDistance`. Recorded, and not turned into damage.
     pub(crate) fall_distance: f64,
+    /// 这一刻有落地，要在 `finish_tick` 里结算摔落伤害。
+    pub(crate) pending_land: bool,
     tick_count: i32,
     received_move_packets: i32,
     known_move_packets: i32,
@@ -118,6 +120,7 @@ impl Motion {
             last_good: position,
             delta: Vec3::default(),
             fall_distance: 0.0,
+            pending_land: false,
             tick_count: 0,
             received_move_packets: 0,
             known_move_packets: 0,
@@ -392,8 +395,14 @@ fn finish_player(region: &mut Region, id: PlayerId) {
     player.motion.sync_goods(here);
     player.motion.tick_count = player.motion.tick_count.wrapping_add(1);
     player.motion.known_move_packets = player.motion.received_move_packets;
+    // `Entity.causeFallDamage`：落地时按 `fall_distance` 算一次摔落伤害。
+    let pending_land = player.motion.pending_land;
+    player.motion.pending_land = false;
     let kick = flying_tick(player);
     let name = player.name.clone();
+    if pending_land && !kick {
+        crate::player_environment::on_land(region, id);
+    }
     if kick {
         warn!("{name} was kicked for floating too long!");
         region
@@ -571,11 +580,15 @@ fn apply_change(
     player.on_ground = change.on_ground;
     player.motion.client_horizontal_collision = change.horizontal_collision;
     let client_delta = change.target.subtract(start);
+    let was_airborne = player.motion.fall_distance > 0.0;
     record_fall(
         &mut player.motion.fall_distance,
         client_delta.y,
         change.on_ground,
     );
+    if change.on_ground && was_airborne {
+        player.motion.pending_land = true;
+    }
     if moved_up {
         player.motion.fall_distance = 0.0;
     }

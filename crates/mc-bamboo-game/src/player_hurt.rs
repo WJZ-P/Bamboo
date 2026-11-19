@@ -272,6 +272,32 @@ fn send_player_combat_enter(region: &mut Region, id: PlayerId, source: &DamageSo
 
 /// `LivingEntity.playHurtSound`：官方 `Level.playSound` 取一次世界随机源当种子，
 /// 广播给范围内除自己以外的玩家。音效由 `DamageType.effects` 决定。
+/// `LivingEntity.causeFallDamage` 的 `playSound(getFallDamageSound(i))`：
+/// 伤害 > 4 用 `big_fall`，否则 `small_fall`，音源 PLAYERS。
+pub(crate) fn play_fall_sound(region: &mut Region, id: PlayerId, damage: i32, position: Vec3) {
+    let name = if damage > 4 {
+        "minecraft:entity.player.big_fall"
+    } else {
+        "minecraft:entity.player.small_fall"
+    };
+    // 官方 `Entity.playSound` 走 `ServerLevel.playSound` →
+    // `sendToTrackingPlayersAndSelf`，玩家自己也收到这一包，且排在伤害事件之前。
+    let seed = region.sound_seed_generator.source().next_long();
+    let sound = Sound {
+        sound: i32::from(sounds::sound_event(name)),
+        inline: None,
+        source: sounds::PLAYERS,
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        volume: 1.0,
+        pitch: 1.0,
+        seed,
+    };
+    let frames = crate::links::encode_frames(&sound);
+    send_to_tracking_and_self(region, id, &frames);
+}
+
 fn play_hurt_sound(region: &mut Region, id: PlayerId, source: &DamageSource, position: Vec3) {
     let name = hurt_sound_name(source);
     play_sound(region, id, name, position);

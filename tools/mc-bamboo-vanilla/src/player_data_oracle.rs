@@ -774,6 +774,10 @@ fn check_player_fields(report: &mut Report, name: &str, data: &PlayerData, field
         format!("{name}: DataVersion"),
     );
     report.check(get("air") == json!(data.air), format!("{name}: Air"));
+    report.check(
+        get("ticks_frozen") == json!(data.ticks_frozen),
+        format!("{name}: TicksFrozen"),
+    );
     report.check(get("fire") == json!(data.fire), format!("{name}: Fire"));
     report.check(
         get("on_ground") == json!(data.on_ground),
@@ -1178,6 +1182,12 @@ fn player_cases() -> Vec<(String, PlayerData)> {
     with_effects.active_effects = Some(effects_tag(&effects));
     cases.push(("player active effects".into(), with_effects));
 
+    let mut frozen = cases[0].1.clone();
+    frozen.fire = 200;
+    frozen.air = 137;
+    frozen.ticks_frozen = 77;
+    cases.push(("player fire air and frost".into(), frozen));
+
     let mut unknown = cases[3].1.clone();
     let mut tag = unknown.encode();
     if let Tag::Compound(entries) = &mut tag {
@@ -1222,6 +1232,7 @@ fn player_spec(data: &PlayerData) -> Value {
         "fall_distance": data.fall_distance,
         "fire": data.fire,
         "air": data.air,
+        "ticks_frozen": data.ticks_frozen,
         "on_ground": data.on_ground,
         "invulnerable": data.invulnerable,
         "portal_cooldown": data.portal_cooldown,
