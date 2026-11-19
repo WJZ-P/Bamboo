@@ -297,6 +297,9 @@ pub fn replay_health_save(
     player.health.food.tick_timer = food_tick_timer;
     player.health.food.saturation = saturation;
     player.health.food.exhaustion = exhaustion;
+    // 1b：`dead` / `LastDeathLocation` 的运行时存档往返。
+    player.dead = health <= 0.0;
+    player.last_death_location = Some(mc_bamboo_core::BlockPos::new(-17, -60, 29));
     let data = player_save::runtime_player_data(&player);
     let mut restored = player::Player::new(
         inbound::PlayerId(1),
@@ -308,6 +311,11 @@ pub fn replay_health_save(
     );
     restored.health = player_health::PlayerHealth::default();
     player_save::restore_inventory(&mut restored, &data);
+    let death_saved = match data.last_death_location {
+        Some((_, pos)) => [pos[0], pos[1], pos[2], i32::from(restored.dead)],
+        None => [0, 0, 0, 0],
+    };
+    assert_eq!(death_saved, [-17, -60, 29, i32::from(health <= 0.0)]);
     [
         restored.health.health.to_bits() as i32,
         restored.health.hurt_time,
