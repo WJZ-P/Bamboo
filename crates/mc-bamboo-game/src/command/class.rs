@@ -301,30 +301,26 @@ mod tests {
     /// use it; otherwise it cannot parse and nothing is joined.
     #[test]
     fn a_command_the_sender_may_not_use_borrows_only_players() {
-        use crate::{
-            command::{borrow_for, borrow_for_console},
-            island::Borrow,
-        };
         use mc_bamboo_command::permission;
-        assert!(matches!(
-            borrow_for("setblock 1 2 3 stone", permission::GAMEMASTERS),
-            Borrow::World
+        // 权限门：不够用这条命令的顶层字面量时不能因为一条命令让全服顿一下。
+        // Permission gate: a level that may not use the root must not be able
+        // to stall the whole server with one command.
+        assert!(crate::command::may_use_root(
+            "setblock 1 2 3 stone",
+            permission::GAMEMASTERS
         ));
-        assert!(matches!(
-            borrow_for("setblock 1 2 3 stone", permission::ALL),
-            Borrow::All
+        assert!(!crate::command::may_use_root(
+            "setblock 1 2 3 stone",
+            permission::ALL
         ));
-        assert!(matches!(
-            borrow_for("/gamemode creative", permission::ALL),
-            Borrow::All
+        assert!(!crate::command::may_use_root(
+            "/gamemode creative",
+            permission::ALL
         ));
-        assert!(matches!(
-            borrow_for("msg a hi", permission::OWNERS),
-            Borrow::All
-        ));
-        assert!(matches!(
-            borrow_for_console("fill 0 0 0 1 1 1 stone"),
-            Borrow::World
+        assert!(crate::command::may_use_root("msg a hi", permission::OWNERS));
+        assert!(crate::command::may_use_root(
+            "fill 0 0 0 1 1 1 stone",
+            permission::OWNERS
         ));
     }
 }
