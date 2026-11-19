@@ -276,6 +276,7 @@ impl ServerSettings {
             // `BAMBOO_ISLAND_DEAD_SECONDS` environment variable wins).
             island_dead_timeout: defaults.island_dead_timeout,
             world_gen: self.world_gen.clone(),
+            spawn_radius: None,
             // 桌面端有 GUI 控制台，不读进程 stdin；广播默认按官方 true。
             // The desktop has a GUI console, so it does not read process stdin;
             // the broadcast flag keeps the official default (true).

@@ -603,7 +603,6 @@ pub(crate) fn landing(
 
 /// 供对拍用：直接在一份 `Search` 上跑共用的落位逻辑（不需要完整 `Region`）。
 /// For the oracle: run the shared landing logic on a bare `Search`.
-#[cfg(feature = "oracle-samples")]
 pub(crate) fn landing_from_search(
     search: &Search<'_>,
     personal: Option<RespawnData>,
@@ -635,7 +634,6 @@ pub(crate) fn landing_from_search(
 
 /// 个人点的两格能不能重生（官方 `isPossibleToRespawnInThis`）。
 /// Whether a personal spawn's two blocks allow respawning.
-#[cfg(feature = "oracle-samples")]
 pub(crate) fn personal_spawn_ready(search: &Search<'_>, spawn: RespawnData) -> bool {
     let feet = state_at(search, spawn.pos, false).unwrap_or(blocks::STONE);
     let head = state_at(search, spawn.pos.offset(0, 1, 0), false).unwrap_or(blocks::STONE);
@@ -850,5 +848,92 @@ mod tests {
             chunks.block(BlockPos::new(pos.x, -61, pos.z)),
             Some(blocks::GRASS_BLOCK)
         );
+    }
+
+    /// 区块没就绪时返回 `NotReady`；全部就绪后同一个搜索给出同一个精确落点。
+    /// An unready chunk yields `NotReady`; once delivered the same search gives
+    /// the same exact landing.
+    #[test]
+    fn unready_noise_chunk_defers_until_the_same_landing_is_available() {
+        use mc_bamboo_world::column::ChunkColumn;
+        let mut rules = GameRuleSet::vanilla();
+        let _ = rules.assign(mc_bamboo_data::gamerules::RESPAWN_RADIUS, "0");
+        static BORDER: std::sync::LazyLock<WorldBorder> =
+            std::sync::LazyLock::new(WorldBorder::default);
+        let mut chunks = ChunkStore::loaded();
+        let spawn = RespawnData::of(BlockPos::new(40, -60, 40), 0.0, 0.0);
+        let unready = Search {
+            chunks: &chunks,
+            rules: &rules,
+            level_type: LevelType::Normal,
+            border: &BORDER,
+            spawn,
+            default_game_mode: mc_bamboo_protocol::packet::play::GameMode::Creative,
+        };
+        assert_eq!(find_spawn(&unready, Some(7)), Err(NotReady));
+        // 走正式的区块交付路径：种子无关的模板就是噪声世界这一格的等价内容。
+        // Deliver through the real chunk path; the template stands in for the
+        // generated column (the algorithm only reads its heightmaps / blocks).
+        chunks.load(ChunkPos::new(2, 2), Box::new(ChunkColumn::from_template()));
+        let ready = Search {
+            chunks: &chunks,
+            rules: &rules,
+            level_type: LevelType::Normal,
+            border: &BORDER,
+            spawn,
+            default_game_mode: mc_bamboo_protocol::packet::play::GameMode::Creative,
+        };
+        let landing = find_spawn(&ready, Some(7)).expect("交付后能算落点");
+        assert_eq!(landing.position_tuple(), (40.5, -60.0, 40.5));
+        assert_eq!(landing.candidate, Some(BlockPos::new(40, -60, 40)));
+        assert_eq!(landing.radius, 0);
+    }
+
+    /// 冒险模式：findSpawn 直接 fixupSpawnHeight，不受半径 / 随机源影响。
+    /// Adventure: findSpawn goes straight to fixupSpawnHeight, with no scatter.
+    #[test]
+    fn adventure_skips_the_scatter() {
+        let mut rules = GameRuleSet::vanilla();
+        let _ = rules.assign(mc_bamboo_data::gamerules::RESPAWN_RADIUS, "10");
+        let chunks = ChunkStore::flat();
+        let mut search = flat(&chunks, &rules, BlockPos::new(8, 0, 8), 10);
+        search.default_game_mode = mc_bamboo_protocol::packet::play::GameMode::Adventure;
+        let landing = find_spawn(&search, Some(42)).expect("chunks ready");
+        assert_eq!(landing.position_tuple(), (8.5, -60.0, 8.5));
+        assert_eq!(landing.radius, 0);
+        assert_eq!(landing.offset, 0);
+    }
+
+    /// 强制个人点两格可重生时直接落地；被实心方块堵住时回退到搜索。
+    /// A forced personal spawn lands directly when its two blocks allow
+    /// respawning, and falls back to the search when blocked.
+    #[test]
+    fn forced_personal_spawn_uses_the_official_direct_branch() {
+        let mut rules = GameRuleSet::vanilla();
+        let _ = rules.assign(mc_bamboo_data::gamerules::RESPAWN_RADIUS, "0");
+        let mut chunks = ChunkStore::flat();
+        let personal = RespawnData::of(BlockPos::new(4, -60, 4), 0.0, 0.0);
+        assert!(personal_spawn_ready(
+            &flat(&chunks, &rules, BlockPos::new(8, 0, 8), 0),
+            personal
+        ));
+        let (direct, missing) = landing_from_search(
+            &flat(&chunks, &rules, BlockPos::new(8, 0, 8), 0),
+            Some(personal),
+            Some(1),
+        )
+        .expect("chunks ready");
+        assert!(!missing);
+        assert_eq!(direct.position_tuple(), (4.5, -59.9, 4.5));
+        // 个人点被石头堵住：官方回退到世界出生点 + findSpawn，并发 missing 包。
+        chunks.set_block(BlockPos::new(4, -60, 4), blocks::STONE);
+        let (fallback, missing) = landing_from_search(
+            &flat(&chunks, &rules, BlockPos::new(8, 0, 8), 0),
+            Some(personal),
+            Some(1),
+        )
+        .expect("chunks ready");
+        assert!(missing);
+        assert_eq!(fallback.position_tuple(), (8.5, -60.0, 8.5));
     }
 }

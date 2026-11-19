@@ -488,10 +488,13 @@ Bamboo 全改成相对倒计时 `memory` / `age` / `combat_idle_ticks`，
   `FallLocation.getCurrentFallLocation` 的攀爬物（梯子 / 藤蔓 / 脚手架）与
   水中判定未做，`CombatEntry.fall_location` 恒 `None`，所以摔落消息只覆盖
   `death.fell.accident.generic` 这一档。
-- **重生点**：用 `RespawnData`（世界出生点 / `/spawnpoint`）的水平坐标，
-  y 取超平坦地表 `flat::surface_y()`（和进服一致）；官方的床 / 重生锚
-  `findStandUpPosition`、充能扣减、`NO_RESPAWN_BLOCK_AVAILABLE`、
-  出生点周围安全位置搜索未做。
+- **重生点**（1c 起按官方）：进服与无床 / 锚重生共用
+  `spawn_landing::landing` → `PlayerSpawnFinder.findSpawn`。两格都能重生的
+  `/spawnpoint` 强制点按 `findRespawnAndUseSpawnBlock` 的 forced 分支直接落地；
+  否则回退到世界出生点并补发 `NO_RESPAWN_BLOCK_AVAILABLE`。床 / 重生锚的
+  `findStandUpPosition`、充能扣减和末地维度传送仍未做。
+- **进服位置**：新玩家由 `PrepareSpawnTask.start` 的 `findSpawn` 决定；老玩家
+  照官方 `SavedPosition.position()` 用存档里的精确位置，不再重跑搜索。
 - **`dataToKeep`**：官方末地传送重生传 `KEEP_ALL_DATA`，Bamboo 恒 0；
   末地 / 维度切换未做。
 - **命令树包**：重生序列里的 `commands` 包内容由 `command-oracle` 管，
@@ -504,3 +507,109 @@ Bamboo 全改成相对倒计时 `memory` / `age` / `combat_idle_ticks`，
   `remove(KILLED)`；玩家对象不重建所以不需要移除。
 - **计分板 / 统计**：`DEATH_COUNT`、`ENTITY_KILLED_BY`、`TIME_SINCE_DEATH`
   等官方死亡时的计分板 / 统计奖励未接。
+
+## 8. 玩家出生落脚点 1c（进服与普通世界重生）
+
+### 8.1 官方算法（`javap -c -p` 核对的方法名）
+
+- 进服 `PrepareSpawnTask.start`：`SavedPosition.position()` 为空（新玩家）时调
+  `PlayerSpawnFinder.findSpawn(spawnLevel, respawnData.pos)`，返回的 `Vec3` 由
+  `PrepareSpawnTask$Ready.spawn` 的 `ServerPlayer.snapTo` 使用；`Preparing.tick`
+  先等 future 完成，再给最终位置所在区块挂 `PLAYER_SPAWN` 半径 3 的加载票，
+  票就绪后才让玩家进场。老玩家的 `SavedPosition.position()` 直接用存档坐标。
+- 重生 `PlayerList.respawn` → `ServerPlayer.findRespawnPositionAndUseSpawnBlock`
+  → `findRespawnAndUseSpawnBlock`。`RespawnConfig` 的 `forced` 位（`/spawnpoint`
+  通过 `SetSpawnCommand.setSpawn` 写入）且 `spawn.pos` 与 `spawn.pos.above()`
+  都满足 `Block.isPossibleToRespawnInThis` 时，直接返回
+  `new Vec3(x + 0.5, y + 0.1, z + 0.5)`，不散布。个人点失效、或没有个人点，
+  走 `TeleportTransition.missingRespawnBlock` / `createDefault` →
+  `findAdjustedSharedSpawnPos` → `Entity.adjustSpawnLocation` →
+  `ServerPlayer.adjustSpawnLocation` → `PlayerSpawnFinder.findSpawn`，前者
+  在 `PlayerList.respawn` 里补一包 `NO_RESPAWN_BLOCK_AVAILABLE` 并清个人点。
+- `PlayerSpawnFinder.findSpawn`：`WorldData.getGameType() == ADVENTURE` 直接
+  `fixupSpawnHeight`；否则 `radius = min(max(0, respawn_radius),
+  floor(WorldBorder.getDistanceToBorder(x, z)))`，边界距离 ≤ 1 时取 1。
+  `candidateCount = min(1024, (2r+1)^2)`，`coprime = count <= 16 ? count-1 : 17`，
+  `offset = RandomSource.createThreadLocalInstance().nextInt(count)`。
+  `scheduleNext` 按 `slot = (offset + coprime*i) % count` 走
+  `x = origin.x + slot % (2r+1) - r`、`z = origin.z + slot / (2r+1) - r`；
+  `scheduleCandidate` 先 `ServerChunkCache.addTicketAndLoadWithRadius(SPAWN_SEARCH, ..., 0)`
+  再调 `lambda$scheduleNext$0`：`getLevelRespawnPos`（MOTION_BLOCKING /
+  WORLD_SURFACE / OCEAN_FLOOR 三张高度图、流体、`Block.isFaceFull(..., UP)`）+
+  `noCollisionNoLiquid`（`EntityDimensions.PLAYER.makeBoundingBox` 的
+  `noCollision(null, AABB, true)`），命中则 `Vec3.atBottomCenterOf`。
+  全部候选失败时 `scheduleNext` 最后一次调 `fixupSpawnHeight`。
+- `ServerPlayer.createCommonSpawnInfo` 的 `isFlat()` 读 `WorldData.isFlatWorld()`，
+  `getSeaLevel()` 读 `ServerChunkCache.getGenerator().getSeaLevel()`：
+  `FlatLevelSource` 恒 -63，`NoiseBasedChunkGenerator` 读
+  `NoiseGeneratorSettings.seaLevel()`（三个主世界预设都是 63）。
+
+### 8.2 我们的实现
+
+`crates/mc-bamboo-game/src/spawn_landing.rs` 是进服与重生**共用的唯一入口**：
+
+- `landing` 判 `/spawnpoint` forced 点，再走 `find_spawn`；`find_spawn_impl`
+  复刻半径、互素步长、候选序列、三张高度图、流体 / 碰撞形状与 fixup 兜底。
+  随机源是 `mc-bamboo-blocks::entity::JavaRandom`（官方
+  `SingleThreadedRandomSource` 的同一条 LCG）；生产按官方语义用不确定的线程
+  本地种子，对拍两边注入固定种子。
+- `region.rs::add_player`：`login` / `respawn` 包的 `is_flat` 与 `sea_level`
+  由发布到 `GlobalView` 的 `world_gen`（存档优先）给出。新玩家走搜索；老玩家
+  按官方 `SavedPosition` 用存档位置。
+- `player_respawn.rs::respawn`：共用 `landing`，失效个人点发
+  `NO_RESPAWN_BLOCK_AVAILABLE` 并清空；跨岛仍走 1b 的
+  `place_player_at_respawn` / `relocate_players`。
+
+### 8.3 区块未就绪时的做法
+
+官方在配置阶段同步等 `SPAWN_SEARCH` / `PLAYER_SPAWN` 票把区块生成完再让玩家
+进场；Bamboo 的岛上不能同步生成，也不在主控线程等待：
+
+- 搜索碰到未交付的**噪声世界**候选列就返回 `NotReady`；进服先用
+  `fixupSpawnHeight` 那段高度的临时位置登记玩家、挂现有的玩家票，
+  **不发** `player_position`；重生同样先不落位。等待期间不跑物理、不受伤、
+  不处理移动包（`player_move` / `player_hurt` / `movement::finish_tick`）。
+- `spawn_landing::finish_pending` 在收信 / 推进一刻时检查覆盖的区块，
+  全部就绪就重跑同一搜索并补发位置包；超平坦模板在所有位置内容一致，
+  未交付位置直接读 store 的模板，不需要等待。40 刻（2 秒）超时后照已加载
+  的部分算一次并记日志，不让玩家永远卡在加载界面。
+- 单元测试 `unready_noise_chunk_defers_until_the_same_landing_is_available`
+  断言：区块没就绪返回 `NotReady`，交付后同一个搜索给出与全就绪时相同的
+  精确落点。
+
+### 8.4 对拍与改变过的期望
+
+`MobOracle.java` 新增 7 个 `player_spawn_*` 场景（地表 / 水面 / 树上 /
+半径 0 / 缺省 10 / 个人点可用 / 个人点被堵 / 冒险模式），反射构造官方
+`PlayerSpawnFinder` 并把候选 `offset` 钉成固定 LCG 重放值；Rust 侧
+`spawn_landing_sample` 用生产代码重放，逐位比坐标、半径、offset、随机源
+末态与 `missing`。三处改坏（`spawn_radius` / `spawn_safety` /
+`spawn_fallback`）全部抓到。旧 `player_life` 场景两边一起把官方
+`respawn_radius` 设成 0，重生包字节不变。全量 `mob-oracle` 124 cases /
+52851 ticks / 0 mismatches。
+
+官方在超平坦世界**也会散布**（Bamboo 缺省 `GameType.CREATIVE`，不走
+ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
+
+- `tools/mc-bamboo-vanilla/java/Probe.java`：从 `player_position` 读实际落点，
+  动态算 `spawnChunk` / `walkTarget` / `expectedSpawnChunks` / 第一批三乘三 /
+  区块中心与最近区块，保留全部原有检查；新增 4 项：x、z 在出生点
+  ±`respawn_radius` 内，且都是「整数 + 0.5」。
+  探针世界用官方格式的 `data/minecraft/game_rules.dat`（由 `seed-world`
+  写出）把 `respawn_radius` 显式设成 0，因为声音 / 活塞 / 物品栏 / 工作台
+  等十几段在固定坐标摆方块；官方半径 0 的结果就是固定落点，仍走新搜索。
+  检查数由 760 增到 764。
+- `crates/mc-bamboo-game/src/world/tests.rs` 的所有 `Harness` 与
+  `crates/mc-bamboo-server/tests/common/mod.rs` 的 `TestServer` 都显式把
+  官方 `respawn_radius` 设成 0（后者通过 `ServerConfig::spawn_radius`），
+  断言固定出生位置的测试因此仍逐位一致；缺省规则未改。
+
+### 8.5 已知差异
+
+- 床 / 重生锚的 `findStandUpPosition`、充能扣减、`bad_respawn_point`
+  伤害与 `PlayerList.respawn` 末端的重生锚音效未做。
+- `dataToKeep` 恒 0（官方末地传送重生传 `KEEP_ALL_DATA`），维度切换未做。
+- `PlayerSpawnFinder.noCollisionNoLiquid` 用生成的碰撞形状数据判两格，
+  依赖方块实体 / 实体的动态碰撞形状按 `CollisionShapeKind::Other` 处理。
+- 官方 `createThreadLocalInstance()` 的 `ThreadLocalRandom` 种子不确定，
+  生产同样不确定；对拍才注入固定种子。
