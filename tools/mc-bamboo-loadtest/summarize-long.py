@@ -194,6 +194,7 @@ def main():
     print(describe("island_split", combine(steady, "island_split")))
     print(describe("island_topology_wait", combine(steady, "island_topology_wait"), "ticks"))
     print(describe("island_unify", combine(steady, "island_unify")))
+    print(describe("island_world_command", combine(steady, "island_world_command")))
     print(describe("island_divide", combine(steady, "island_divide")))
     crossings = combine(steady, "island_crossings")
     if crossings:

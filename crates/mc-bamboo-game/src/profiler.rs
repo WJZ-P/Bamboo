@@ -396,6 +396,11 @@ pub(crate) enum Metric {
     /// Multi-island: splitting the joined world back into its islands after
     /// the command (one sample per command).
     IslandDivide,
+    /// 多岛：要整个世界的命令在拼好的世界上执行本身的耗时（拼和拆之间，每次一条样本）。
+    ///
+    /// Multi-island: running a whole-world command itself on the joined
+    /// world, between the join and the split (one sample per command).
+    IslandWorldCommand,
     /// 混合驱动：岛派出时全部 tick 线程都忙着，从派出到开跑等了多久（每次一条样本）。
     /// 这一段不算交接（`island_handoff` 只记线程空着时的唤醒和交回）。
     ///
@@ -413,7 +418,7 @@ pub(crate) enum Metric {
 }
 
 impl Metric {
-    const ALL: [Self; 30] = [
+    const ALL: [Self; 31] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -442,6 +447,7 @@ impl Metric {
         Self::IslandCrossings,
         Self::IslandUnify,
         Self::IslandDivide,
+        Self::IslandWorldCommand,
         Self::IslandQueueWait,
         Self::IslandDroppedTicks,
     ];
@@ -476,6 +482,7 @@ impl Metric {
             Self::IslandCrossings => "island_crossings",
             Self::IslandUnify => "island_unify",
             Self::IslandDivide => "island_divide",
+            Self::IslandWorldCommand => "island_world_command",
             Self::IslandQueueWait => "island_queue_wait",
             Self::IslandDroppedTicks => "island_dropped_ticks",
             Self::SkippedCatchUps => "skipped_catch_ups",
@@ -514,6 +521,7 @@ impl Metric {
             | Self::IslandSplit
             | Self::IslandUnify
             | Self::IslandDivide
+            | Self::IslandWorldCommand
             | Self::IslandQueueWait => "ms",
         }
     }
@@ -531,6 +539,7 @@ impl Metric {
                 | Self::IslandSplit
                 | Self::IslandUnify
                 | Self::IslandDivide
+                | Self::IslandWorldCommand
                 | Self::IslandQueueWait
         )
     }

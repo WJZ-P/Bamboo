@@ -1403,12 +1403,15 @@ impl World {
             let unified = self.islands.unify(into);
             let joined = joining.elapsed();
             let region = &mut self.islands.get_mut(into).expect("岛在表里").region;
+            let working = Instant::now();
             let out = work(&mut self.master.global, region);
+            let worked = working.elapsed();
             let dividing = Instant::now();
             self.islands.divide(into, unified);
             let divided = dividing.elapsed();
             let profiler = self.profiler();
             profiler.record_duration(Metric::IslandUnify, joined);
+            profiler.record_duration(Metric::IslandWorldCommand, worked);
             profiler.record_duration(Metric::IslandDivide, divided);
             self.publish_global();
             return out;
