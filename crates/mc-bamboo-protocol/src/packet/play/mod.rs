@@ -193,6 +193,91 @@ impl ClientboundPacket for PlayerCombatEnter {
     fn write_body(&self, _out: &mut Vec<u8>) {}
 }
 
+/// 死亡界面，官方 `ClientboundPlayerCombatKillPacket`。只发给死者自己。
+///
+/// Vanilla `ClientboundPlayerCombatKillPacket`: the death screen, sent to the
+/// dead player only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerCombatKill<'a> {
+    pub player_id: i32,
+    pub message: &'a Component,
+}
+
+impl ClientboundPacket for PlayerCombatKill<'_> {
+    const ID: i32 = clientbound::PLAYER_COMBAT_KILL;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        write_varint(out, self.player_id);
+        self.message.write(out);
+    }
+}
+
+/// 重生时客户端要保留什么，官方 `ClientboundRespawnPacket.KEEP_*`。
+pub mod respawn_keep {
+    pub const ATTRIBUTE_MODIFIERS: u8 = 1;
+    pub const ENTITY_DATA: u8 = 2;
+    pub const ALL_DATA: u8 = ATTRIBUTE_MODIFIERS | ENTITY_DATA;
+}
+
+/// 官方 `CommonPlayerSpawnInfo`，重生包的公共部分。Bamboo 只有一个维度。
+///
+/// Vanilla `CommonPlayerSpawnInfo`: the shared part of the respawn packet.
+/// Bamboo has only one dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommonPlayerSpawnInfo<'a> {
+    pub dimension_type: i32,
+    pub dimension: &'a str,
+    pub hashed_seed: i64,
+    pub game_mode: GameMode,
+    /// `GameType.OPTIONAL_STREAM_CODEC`：0 表示没有，否则是 id+1。
+    pub previous_game_mode: Option<GameMode>,
+    pub is_debug: bool,
+    pub is_flat: bool,
+    /// `LastDeathLocation`，`GlobalPos` 的可选形式：0 或 1 + 维度 + 打包坐标。
+    pub last_death: Option<(&'a str, BlockPos)>,
+    pub portal_cooldown: i32,
+    pub sea_level: i32,
+}
+
+/// 重生，官方 `ClientboundRespawnPacket`。`data_to_keep` 见 [`respawn_keep`]。
+///
+/// Vanilla `ClientboundRespawnPacket`; `data_to_keep` uses [`respawn_keep`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Respawn<'a> {
+    pub info: CommonPlayerSpawnInfo<'a>,
+    pub data_to_keep: u8,
+}
+
+impl ClientboundPacket for Respawn<'_> {
+    const ID: i32 = clientbound::RESPAWN;
+
+    fn write_body(&self, out: &mut Vec<u8>) {
+        let info = &self.info;
+        write_varint(out, info.dimension_type);
+        write_string(out, info.dimension);
+        out.extend_from_slice(&info.hashed_seed.to_be_bytes());
+        out.push(info.game_mode as u8);
+        // `OPTIONAL_STREAM_CODEC` 的「空」是 0，非空时写 id+1。
+        match info.previous_game_mode {
+            Some(mode) => write_varint(out, i32::from(mode as u8) + 1),
+            None => write_varint(out, 0),
+        }
+        write_bool(out, info.is_debug);
+        write_bool(out, info.is_flat);
+        match info.last_death {
+            Some((dimension, pos)) => {
+                write_bool(out, true);
+                write_string(out, dimension);
+                out.extend_from_slice(&pos.pack().to_be_bytes());
+            }
+            None => write_bool(out, false),
+        }
+        write_varint(out, info.portal_cooldown);
+        write_varint(out, info.sea_level);
+        out.push(self.data_to_keep);
+    }
+}
+
 /// 同步世界难度，官方 `ClientboundChangeDifficultyPacket`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeDifficulty {
@@ -376,6 +461,8 @@ impl GameEvent {
     pub const THUNDER_LEVEL_CHANGE: u8 = 8;
     /// 客户端收到后才结束加载画面。
     pub const LEVEL_CHUNKS_LOAD_START: u8 = 13;
+    /// 重生点方块失效，官方 `NO_RESPAWN_BLOCK_AVAILABLE`。
+    pub const NO_RESPAWN_BLOCK_AVAILABLE: u8 = 11;
 }
 
 impl ClientboundPacket for GameEvent {
@@ -574,6 +661,8 @@ mod tests {
             (SetHeldSlot::ID, 107),
             (HurtAnimation::ID, 43),
             (PlayerCombatEnter::ID, 68),
+            (PlayerCombatKill::ID, 69),
+            (Respawn::ID, 84),
             (SwingAnimation::ID, 123),
             (SystemChat::ID, 124),
             (UpdateAttributes::ID, 134),
