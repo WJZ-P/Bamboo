@@ -56,7 +56,7 @@ def parse_log(path):
             panics.append(line[:400])
         level = LEVEL.match(line)
         if level:
-            message = re.sub(r"\b\d+(\.\d+)?\b", "N", level.group(3))
+            message = re.sub(r"\d+(\.\d+)?", "N", level.group(3))
             message = re.sub(r"\{.*", "", message).strip()[:120]
             warnings[(level.group(1), message)] += 1
         head = HEADER.match(line)

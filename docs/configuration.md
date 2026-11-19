@@ -260,10 +260,14 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
   到不了 30 秒。环境变量 `BAMBOO_ISLAND_DEAD_SECONDS` 在运行时盖过它；桌面端界面上没有
   这一项。
 - **命令**：玩家命令和控制台命令都等全部岛停放再执行（计划 5.5.2）。碰方块、方块实体或
-  生成实体的命令（`/setblock`、`/fill`、`/clone`、`/summon`、`/loot`、`/gamemode`、
-  `/defaultgamemode`，计划 4.5）把全部岛临时拼成一个执行、再按原样拆回去；拼和拆的耗时
-  和已加载的区块数成正比，**每 1000 个已加载区块合计约 6.5 ms**，那一刻的整刻耗时相应
-  变长。其余命令只借别的岛上的玩家，不拼；权限不够用这条命令的人发它也不拼。
+  非玩家实体的命令（`/setblock`、`/fill`、`/clone`、`/summon`、`/loot`、`/gamemode`、
+  `/defaultgamemode`、`/enchant`、`/execute`、`/kill`、`/teleport`、`/tp`，计划 4.5）在有
+  不止一个岛时把全部岛临时拼成一个执行、再按原样拆回去；拼和拆的耗时和已加载的区块数成
+  正比，**每 1000 个已加载区块合计约 6.5 ms**，那一刻的整刻耗时相应变长。其余命令只借
+  别的岛上的玩家，不拼；权限不够用这条命令的人发它也不拼。
+- **玩家来回跑的服务器**：很多人在相距很远的几处之间频繁往返时，路上的人和身后还没卸载
+  的区块会把几处一直连成一个岛（`profiling.md` 第 17 节），这时和多岛关着差不多；玩家
+  各自长时间待在远处时并行的收益最大。
 - **和精确模式的差异**（全部列在 `world-model-design.md` 第 13 节）：跨岛的传送、命令
   反馈、聊天投递晚一到几刻；各岛的时钟可以短暂不同步（落后的岛在追）；天气的随机序列
   和官方不同（主控用自己的随机源）；岛内的一切和一个岛时相同。
@@ -282,6 +286,13 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 - `BAMBOO_ISLAND_THREADS=<n>`：盖过 `island_threads`，见上面「岛的 tick 线程」。
 - `BAMBOO_ISLANDS=0|1`、`BAMBOO_ISLAND_DEAD_SECONDS=<秒>`：盖过 `islands` /
   `island_dead_seconds`，见上面「多岛」。
+- `BAMBOO_PROFILE_ISLANDS=1|2`：分区器的统计进剖析报告；`2` 另外每刻全量重算对照，并在每次
+  照做拆合之后断言多岛的全部不变量（release 构建也查，长时间压测用，主控每刻多花几到十几
+  毫秒）。
+- `BAMBOO_ISLAND_MERGE_DISTANCE` / `BAMBOO_ISLAND_SPLIT_DISTANCE` / `BAMBOO_ISLAND_SPLIT_DELAY`：
+  只给调参对比用，盖过分区器的合并距离（缺省 2 个 section）、拆分距离（4）和拆分迟滞
+  （200 刻）；组合不合法（合并距离 < 1、拆分距离不大于合并距离）就整组用缺省并警告，设了
+  就在启动日志里警告一次。正式运行不要设。
 - 精确节拍（`BAMBOO_TICK_SLEEP` / `BAMBOO_TICK_SPIN_MAX_US` / `BAMBOO_TICK_QOS`）
   已于 2026-11-12 废弃并删除，见 `performance-optimizations.md` 第 6 节。
 

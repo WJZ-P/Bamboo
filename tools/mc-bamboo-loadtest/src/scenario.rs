@@ -115,15 +115,16 @@ pub enum ScenarioKind {
 pub const ROAM_CAMPS: usize = 6;
 const ROAM_COLUMNS: usize = 3;
 /// 相邻营地隔几个区块：飞（33 格/秒）过去约 47 秒。一个营地连同在里面游走的人约占 20 个
-/// 区块宽，隔 96 个区块时两营地之间空出 70 多个区块，路上的人才会和出发的营地拆开、再并进
-/// 要去的营地；隔 48 个区块时 40 个人在路上和野外的视野把六个营地一直连成一个岛，一小时里
-/// 一次拆分都没有（`docs/profiling.md` 第 17 节）。
+/// 区块宽，隔 96 个区块时两营地之间空出 70 多个区块，路上的人才有机会和出发的营地拆开、再
+/// 并进要去的营地；隔 48 个区块时 40 个人在路上和野外的视野把六个营地连成一个岛，试跑的
+/// 7 分钟里一直只有一个岛（`docs/profiling.md` 第 17 节）。
 ///
 /// Camps are this many chunks apart (about 47 s of flying). A camp with the
 /// bots wandering in it is about 20 chunks wide; 96 leaves 70+ chunks
-/// between camps, so travellers split off the camp they left and merge into
-/// the one they reach. At 48 the views of 40 bots travelling and in the wild
-/// kept all six camps one island and nothing ever split.
+/// between camps, so travellers get a chance to split off the camp they left
+/// and merge into the one they reach. At 48 the views of 40 bots travelling
+/// and in the wild joined all six camps into one island for the whole
+/// 7-minute trial.
 const ROAM_CAMP_STRIDE_CHUNKS: i32 = 96;
 /// `islands-roam` 的假玩家数。
 pub const ROAM_BOTS: usize = 40;
