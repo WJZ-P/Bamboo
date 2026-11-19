@@ -646,6 +646,49 @@ mod tests {
     use super::*;
     use crate::packet::test_util::{body, frame, hex};
 
+    /// 26.3 的 `set_time` 是一张时钟表：空表是周期同步，两项是进服整表。
+    #[test]
+    fn set_time_writes_the_official_clock_map() {
+        let empty = SetTime {
+            game_time: 41,
+            clocks: &[],
+        };
+        let mut expected = 41_i64.to_be_bytes().to_vec();
+        expected.push(0);
+        assert_eq!(body(&empty), expected);
+
+        let clocks = [
+            ClockState {
+                clock: 0,
+                ticks: 18_000,
+                partial: 0.0,
+                rate: 1.0,
+            },
+            ClockState {
+                clock: 1,
+                ticks: 18_000,
+                partial: 0.5,
+                rate: 0.0,
+            },
+        ];
+        let full = SetTime {
+            game_time: 42,
+            clocks: &clocks,
+        };
+        let mut expected = 42_i64.to_be_bytes().to_vec();
+        expected.push(2);
+        expected.push(0);
+        // `ClockNetworkState.totalTicks` 是 VarLong，18000 = 0xd0 0x8c 0x01。
+        expected.extend_from_slice(&[0xd0, 0x8c, 0x01]);
+        expected.extend_from_slice(&0.0_f32.to_be_bytes());
+        expected.extend_from_slice(&1.0_f32.to_be_bytes());
+        expected.push(1);
+        expected.extend_from_slice(&[0xd0, 0x8c, 0x01]);
+        expected.extend_from_slice(&0.5_f32.to_be_bytes());
+        expected.extend_from_slice(&0.0_f32.to_be_bytes());
+        assert_eq!(body(&full), expected);
+    }
+
     #[test]
     fn packet_ids_match_the_specs() {
         let ids = [

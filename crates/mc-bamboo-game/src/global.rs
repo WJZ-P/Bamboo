@@ -539,13 +539,16 @@ impl Global {
         self.end_clock.tick();
     }
 
-    /// 官方 `MinecraftServer.tickChildren`：每 20 刻给所有人发一次
-    /// 只带 `gameTime`、时钟列表为空的 `set_time`。
+    /// 官方 `MinecraftServer.tickChildren`：`tickCount % 20 == 0` 时给所有人发一次
+    /// 只带 `gameTime`、时钟列表为空的 `set_time`。发包在 `ServerLevel.tick` 之前，
+    /// 所以包里的游戏时间比这一刻 `tickTime` 加一之后的值少一。
     ///
-    /// Official `MinecraftServer.tickChildren`: every 20 ticks, broadcast a
-    /// `set_time` carrying only `gameTime` with an empty clock map.
-    pub(crate) fn time_sync_due(&self) -> bool {
-        self.time.0 % 20 == 0
+    /// Official `MinecraftServer.tickChildren`: when `tickCount % 20 == 0`,
+    /// broadcast a `set_time` carrying only `gameTime` with an empty clock map.
+    /// The packet goes out before `ServerLevel.tick`, so its game time is one
+    /// less than the value `tickTime` will set at the end of this tick.
+    pub(crate) fn time_sync_packet_time(&self) -> Option<GameTime> {
+        (self.time.0 % 20 == 0).then_some(GameTime(self.time.0 - 1))
     }
 
     /// 名单上的所有人，发给刚进入的玩家。名单是空的时候返回 `None`。

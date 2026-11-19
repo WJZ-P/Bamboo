@@ -1345,13 +1345,12 @@ impl World {
             self.broadcast_all(&weather);
         }
         self.master.global.advance_time();
-        // 官方 `MinecraftServer.tickChildren`：时钟推进之后，每 20 刻发一次
-        // 只带游戏时间的周期同步，让客户端的 `gameTime` 和世界对齐。
-        // Official `MinecraftServer.tickChildren`: after the clocks tick, every
-        // 20 ticks broadcast a game-time-only sync so the client's `gameTime`
-        // stays aligned with the world.
-        if self.master.global.time_sync_due() {
-            let time = self.master.global.time();
+        // 官方 `MinecraftServer.tickChildren`：在 `ServerLevel.tick` 之前，
+        // 每 20 刻发一次只带游戏时间的周期同步，包里是加一之前的游戏时间。
+        // Official `MinecraftServer.tickChildren`: before `ServerLevel.tick`,
+        // every 20 ticks broadcast a game-time-only sync carrying the game time
+        // from before this tick's increment.
+        if let Some(time) = self.master.global.time_sync_packet_time() {
             for island in self.islands.parked_mut() {
                 island.region.broadcast_game_time(time);
             }

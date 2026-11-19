@@ -1225,6 +1225,33 @@ fn first_batch_is_exactly_the_three_by_three_around_the_spawn() {
     assert_eq!(finished[0].body, [9]);
 }
 
+/// 官方周期同步：每 20 刻一个空时钟表、只带 `gameTime` 的 `set_time`，
+/// 包里的游戏时间是这一刻 `tickTime` 加一之前的值。
+#[test]
+fn periodic_time_sync_carries_the_game_time_before_this_tick() {
+    use mc_bamboo_protocol::codec::Reader;
+
+    let mut server = Harness::new(8);
+    let client = server.join_and_settle("Kitten");
+    let start = server.world.master.global.time().0;
+    client.take_frames();
+    // 跑到下一个 `tickCount % 20 == 0`。
+    let due = start.div_euclid(20) * 20 + 20;
+    while server.world.master.global.time().0 < due {
+        server.tick();
+    }
+    let frames = client.take_frames();
+    let syncs: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.id == clientbound::SET_TIME)
+        .collect();
+    assert_eq!(syncs.len(), 1, "每 20 刻一次周期同步: {frames:?}");
+    let mut reader = Reader::new(&syncs[0].body);
+    assert_eq!(reader.i64().unwrap(), due - 1, "包里的游戏时间");
+    assert_eq!(reader.varint().unwrap(), 0, "时钟表是空的");
+    assert!(reader.rest().is_empty());
+}
+
 /// 多岛时每个岛读的都是同一份全局时间和天气算出的天色。
 #[test]
 fn every_island_reads_the_same_sky_darken() {
