@@ -1130,13 +1130,24 @@ impl BlockEntities {
             .filter_map(|pos| Some((self.positions.remove(pos)?, *pos)))
             .collect();
         moved_slots.sort_unstable();
-        let mut slot_map: HashMap<usize, usize> = HashMap::with_capacity(moved_slots.len());
+        // 下标清单要按整张表走一遍，所以搬走的槽位记在一张按下标的表里（一个数一格），
+        // 每项查一次是一次数组访问。
+        // The index lists are walked whole, so the moved slots are noted in a
+        // table by slot index (one number each) and each lookup is an array access.
+        const STAYS: u32 = u32::MAX;
+        let mut slot_map: Vec<u32> = if moved_slots.is_empty() {
+            Vec::new()
+        } else {
+            vec![STAYS; self.slots.len()]
+        };
+        let mut moved_ordinals: Vec<u64> = Vec::with_capacity(moved_slots.len());
         for &(index, pos) in &moved_slots {
             let slot = self.slots[index];
             let ticker = slot.expect("登记在位置表里的槽位有 ticker");
             debug_assert_eq!(ticker.pos, pos, "位置表和槽位对不上");
             let new_index = out.slots.len();
-            slot_map.insert(index, new_index);
+            slot_map[index] = new_index as u32;
+            moved_ordinals.push(ticker.ordinal);
             out.slots.push(slot);
             out.positions.insert(pos, new_index);
             out.ordinals.insert(ticker.ordinal, new_index);
@@ -1169,30 +1180,28 @@ impl BlockEntities {
                 .all(|ordinal| !out.ordinals.contains_key(ordinal)),
             "搬走的条目还留在原表的睡眠日程里"
         );
-        let (out_order, order): (Vec<_>, Vec<_>) = self
-            .order
-            .drain(..)
-            .partition(|index| slot_map.contains_key(index));
-        self.order = order;
-        out.order = out_order
-            .into_iter()
-            .map(|index| slot_map[&index])
-            .collect();
-        let (out_pending, pending): (Vec<_>, Vec<_>) = self
-            .pending
-            .drain(..)
-            .partition(|index| slot_map.contains_key(index));
-        self.pending = pending;
-        out.pending = out_pending
-            .into_iter()
-            .map(|index| slot_map[&index])
-            .collect();
-        let (out_due, due): (Vec<_>, Vec<_>) = self
-            .due
-            .drain(..)
-            .partition(|ordinal| out.ordinals.contains_key(ordinal));
-        self.due = due;
-        out.due = out_due;
+        if !moved_slots.is_empty() {
+            let moves = |index: &usize| slot_map.get(*index).is_some_and(|&to| to != STAYS);
+            let (out_order, order): (Vec<_>, Vec<_>) = self.order.drain(..).partition(moves);
+            self.order = order;
+            out.order = out_order
+                .into_iter()
+                .map(|index| slot_map[index] as usize)
+                .collect();
+            let (out_pending, pending): (Vec<_>, Vec<_>) = self.pending.drain(..).partition(moves);
+            self.pending = pending;
+            out.pending = out_pending
+                .into_iter()
+                .map(|index| slot_map[index] as usize)
+                .collect();
+            moved_ordinals.sort_unstable();
+            let (out_due, due): (Vec<_>, Vec<_>) = self
+                .due
+                .drain(..)
+                .partition(|ordinal| moved_ordinals.binary_search(ordinal).is_ok());
+            self.due = due;
+            out.due = out_due;
+        }
         out.watchers = self.watchers.split_off_watchers(&moved_positions);
         Ok(out)
     }

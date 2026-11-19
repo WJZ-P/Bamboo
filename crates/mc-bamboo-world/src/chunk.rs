@@ -577,8 +577,13 @@ pub struct Chunk {
     /// 它完全由 `sections` 决定，单独存一份是为了随机刻每刻问「这个区块要 tick 哪几段」时
     /// 只读这一个字，不必把 24 个区块段各读一遍（它们各在各的缓存行上）。
     random_ticking_sections: u32,
-    /// 和 [`HeightmapKind::ALL`] 一一对应。
-    heightmaps: [Heightmap; HeightmapKind::ALL.len()],
+    /// 和 [`HeightmapKind::ALL`] 一一对应。放在堆上：几张高度图合起来约 4 KB，放在区块里
+    /// 时区块有近 5 KB，区块表扩表、岛拆合每搬一个区块都要整个拷两遍；读方块不经过它。
+    ///
+    /// One per [`HeightmapKind::ALL`]. On the heap: together about 4 KB, which
+    /// made a chunk close to 5 KB, copied twice whenever the chunk table grows
+    /// or an island split/merge moves the chunk; block reads never touch it.
+    heightmaps: Box<[Heightmap; HeightmapKind::ALL.len()]>,
     /// 有方块实体的位置和类型。键是 `(y, z, x)`，所以遍历顺序和放置的先后无关。
     block_entities: BTreeMap<(i32, usize, usize), i32>,
     /// 有内容的告示牌。没有条目时内容是空白的，和官方按状态临时建出来的方块实体一样。
@@ -591,7 +596,8 @@ pub struct Chunk {
     /// 值是当时的类型 ID 和整条复合标签；换类型或删掉方块时一起丢。
     preserved_block_entities: BTreeMap<(i32, usize, usize), (i32, Tag)>,
     archive: ChunkArchiveMeta,
-    sky_light_sources: SkyLightSources,
+    /// 同上放在堆上（512 字节）。
+    sky_light_sources: Box<SkyLightSources>,
 }
 
 impl Chunk {
@@ -600,13 +606,13 @@ impl Chunk {
         Self {
             sections: vec![Section::empty(biome); SECTION_COUNT],
             random_ticking_sections: 0,
-            heightmaps: [Heightmap::EMPTY; HeightmapKind::ALL.len()],
+            heightmaps: Box::new([Heightmap::EMPTY; HeightmapKind::ALL.len()]),
             block_entities: BTreeMap::new(),
             signs: BTreeMap::new(),
             update_tags: BTreeMap::new(),
             preserved_block_entities: BTreeMap::new(),
             archive: ChunkArchiveMeta::default(),
-            sky_light_sources: SkyLightSources::default(),
+            sky_light_sources: Box::default(),
         }
     }
 
@@ -663,13 +669,13 @@ impl Chunk {
         let mut chunk = Self {
             random_ticking_sections,
             sections,
-            heightmaps: maps,
+            heightmaps: Box::new(maps),
             block_entities,
             signs: BTreeMap::new(),
             update_tags: BTreeMap::new(),
             preserved_block_entities: BTreeMap::new(),
             archive: ChunkArchiveMeta::default(),
-            sky_light_sources: SkyLightSources::default(),
+            sky_light_sources: Box::default(),
         };
         chunk.initialize_light_sources();
         Ok(chunk)
@@ -718,13 +724,13 @@ impl Chunk {
         let mut chunk = Self {
             random_ticking_sections,
             sections,
-            heightmaps: [Heightmap::EMPTY; HeightmapKind::ALL.len()],
+            heightmaps: Box::new([Heightmap::EMPTY; HeightmapKind::ALL.len()]),
             block_entities: BTreeMap::new(),
             signs: BTreeMap::new(),
             update_tags: BTreeMap::new(),
             preserved_block_entities: BTreeMap::new(),
             archive: ChunkArchiveMeta::default(),
-            sky_light_sources: SkyLightSources::default(),
+            sky_light_sources: Box::default(),
         };
         chunk.initialize_light_sources();
         Ok(chunk)
@@ -797,7 +803,7 @@ impl Chunk {
 
     /// `initializeLightSources`：按现在的方块重算天空光源，生成完区块、开始算光照之前调用一次。
     pub fn initialize_light_sources(&mut self) {
-        self.sky_light_sources = SkyLightSources::fill_from(self);
+        *self.sky_light_sources = SkyLightSources::fill_from(self);
     }
 
     /// `ChunkSkyLightSources.update`：`(x, y, z)` 换了方块，光照性质也变了。

@@ -76,6 +76,43 @@ impl ChunkTiers {
     }
 }
 
+/// 从一个有序集合里拆出 `chunks` 里的那些：要搬的不到一半时逐个取（按升序收进新集合是
+/// 整批建树），否则扫一遍整批重建两边。两种做法结果相同。
+///
+/// Split the members in `chunks` off an ordered set: one by one when less
+/// than half moves (collecting in ascending order builds the tree in bulk), otherwise
+/// one pass rebuilding both sides in bulk. Same result either way.
+fn split_ordered(set: &mut BTreeSet<ChunkPos>, chunks: &BTreeSet<ChunkPos>) -> BTreeSet<ChunkPos> {
+    if chunks.len().saturating_mul(2) < set.len() {
+        chunks
+            .iter()
+            .filter(|pos| set.remove(pos))
+            .copied()
+            .collect()
+    } else {
+        let (moved, kept) = std::mem::take(set)
+            .into_iter()
+            .partition(|pos| chunks.contains(pos));
+        *set = kept;
+        moved
+    }
+}
+
+/// 把一个有序集合并进另一个：小的逐个插进大的，差不多大时整批归并。结果相同。
+///
+/// Merge an ordered set into another: the smaller is inserted one by one
+/// into the larger, similar sizes are merged in bulk. Same result.
+fn absorb_ordered(into: &mut BTreeSet<ChunkPos>, mut from: BTreeSet<ChunkPos>) {
+    if from.len() > into.len() {
+        std::mem::swap(into, &mut from);
+    }
+    if from.len().saturating_mul(16) < into.len() {
+        into.extend(from);
+    } else {
+        into.append(&mut from);
+    }
+}
+
 /// 方块逻辑和实体分别要求半径 1 / 2 的邻居都已交付。
 const BLOCK_RADIUS: i32 = 1;
 const ENTITY_RADIUS: i32 = 2;
@@ -226,16 +263,10 @@ impl TickLevels {
                     to.insert(pos);
                 }
             }
-            for (from, to) in [
-                (&mut self.blocks_ordered, &mut out.blocks_ordered),
-                (&mut self.entities_ordered, &mut out.entities_ordered),
-                (&mut self.random, &mut out.random),
-            ] {
-                if from.remove(&pos) {
-                    to.insert(pos);
-                }
-            }
         }
+        out.blocks_ordered = split_ordered(&mut self.blocks_ordered, chunks);
+        out.entities_ordered = split_ordered(&mut self.entities_ordered, chunks);
+        out.random = split_ordered(&mut self.random, chunks);
         let (moved, kept) = std::mem::take(&mut self.block_tick_changes)
             .into_iter()
             .partition(|(pos, _)| chunks.contains(pos));
@@ -251,10 +282,10 @@ impl TickLevels {
         debug_assert_eq!(self.enabled, other.enabled);
         self.tiers.extend(other.tiers);
         self.blocks.extend(other.blocks);
-        self.blocks_ordered.extend(other.blocks_ordered);
+        absorb_ordered(&mut self.blocks_ordered, other.blocks_ordered);
         self.entities.extend(other.entities);
-        self.entities_ordered.extend(other.entities_ordered);
-        self.random.extend(other.random);
+        absorb_ordered(&mut self.entities_ordered, other.entities_ordered);
+        absorb_ordered(&mut self.random, other.random);
         self.block_tick_changes.extend(other.block_tick_changes);
     }
 

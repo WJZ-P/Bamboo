@@ -237,9 +237,15 @@ pub(crate) struct LightStorage {
     layer: LightLayer,
     /// 没有自己一份的区块柱都是这个样子。
     template: LightColumn,
-    columns: HashMap<ChunkPos, LightColumn>,
+    /// 和区块表一样用便宜的哈希：光照每读写一格都查一次，拆合时每搬一个区块柱查两次。
+    /// 柱放在堆上（一柱约 450 字节，岛拆合每搬一柱只搬一个指针）。
+    ///
+    /// The same cheap hash as the chunk table (looked up on every light read
+    /// and write, twice per column moved by an island split or merge); columns
+    /// are boxed (about 450 bytes each, so a move copies one pointer).
+    columns: HashMap<ChunkPos, Box<LightColumn>, ChunkHasherBuilder>,
     /// 每个区块柱最后一次被写时拿到的版本号，见 [`revision`](Self::revision)。
-    revisions: HashMap<ChunkPos, u64>,
+    revisions: HashMap<ChunkPos, u64, ChunkHasherBuilder>,
     /// `currentLowestY`：存过光照的最低区块段，只降不升。
     lowest_section: i32,
     /// `toRemove`：这一轮结束时要丢掉的段。
@@ -278,8 +284,8 @@ impl LightStorage {
         Self {
             layer,
             template,
-            columns: HashMap::new(),
-            revisions: HashMap::new(),
+            columns: HashMap::default(),
+            revisions: HashMap::default(),
             lowest_section,
             to_remove: BTreeSet::new(),
             affected: BTreeSet::new(),
@@ -334,7 +340,9 @@ impl LightStorage {
             static EMPTY: std::sync::OnceLock<LightColumn> = std::sync::OnceLock::new();
             return EMPTY.get_or_init(LightColumn::empty);
         }
-        self.columns.get(&pos).unwrap_or(&self.template)
+        self.columns
+            .get(&pos)
+            .map_or(&self.template, |column| column)
     }
 
     /// 要写这个区块柱了，没有自己一份的话先从模板复制。所有写都经过这里，每次换一个新的版本号。
@@ -343,7 +351,9 @@ impl LightStorage {
         debug_assert!(self.is_loaded(pos), "没加载的位置不该写入光照柱");
         self.assign_revision(pos);
         let template = &self.template;
-        self.columns.entry(pos).or_insert_with(|| template.clone())
+        self.columns
+            .entry(pos)
+            .or_insert_with(|| Box::new(template.clone()))
     }
 
     /// 这个区块柱写过，内容可能和模板不同。
@@ -431,7 +441,7 @@ impl LightStorage {
         let column = self
             .columns
             .entry(section.chunk())
-            .or_insert_with(|| template.clone());
+            .or_insert_with(|| Box::new(template.clone()));
         if column.changed & (1 << slot) == 0 {
             column.changed |= 1 << slot;
             self.changed.push(section);
@@ -519,7 +529,7 @@ impl LightStorage {
                 let template = &self.template;
                 self.columns
                     .entry(pos)
-                    .or_insert_with(|| template.clone())
+                    .or_insert_with(|| Box::new(template.clone()))
                     .states = states;
             }
             return;
@@ -687,7 +697,7 @@ impl LightStorage {
         let mut column = self
             .columns
             .remove(&pos)
-            .unwrap_or_else(|| self.template.clone());
+            .map_or_else(|| self.template.clone(), |column| *column);
         column.changed = 0;
         self.assign_revision(pos);
         column
@@ -696,7 +706,7 @@ impl LightStorage {
     /// 放进一个区块柱，换上这个存储里从没用过的版本号。引擎和给别人读的那份各放一份。
     pub(crate) fn insert_column(&mut self, pos: ChunkPos, column: &LightColumn) {
         debug_assert!(column.changed == 0, "放进来的柱没有没发布的段");
-        self.columns.insert(pos, column.clone());
+        self.columns.insert(pos, Box::new(column.clone()));
         self.lowest_section = self.lowest_section.min(column.lowest_stored_section());
         self.assign_revision(pos);
     }
@@ -719,8 +729,8 @@ impl LightStorage {
         let mut out = Self {
             layer: self.layer,
             template: self.template.clone(),
-            columns: HashMap::with_capacity(capacity),
-            revisions: HashMap::with_capacity(capacity),
+            columns: HashMap::with_capacity_and_hasher(capacity, Default::default()),
+            revisions: HashMap::with_capacity_and_hasher(capacity, Default::default()),
             lowest_section: self.lowest_section,
             to_remove: BTreeSet::new(),
             affected: BTreeSet::new(),

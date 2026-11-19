@@ -718,6 +718,14 @@ impl ChunkStore {
         Ok(())
     }
 
+    /// 已加载的区块坐标，不排序（只做核对、不在乎先后时用）；无限模式是空的。
+    ///
+    /// The loaded positions in no particular order (for checks that do not
+    /// care); empty in infinite-flat mode.
+    pub fn loaded_unordered(&self) -> impl Iterator<Item = ChunkPos> + '_ {
+        self.loaded.iter().flatten().copied()
+    }
+
     /// 已加载的区块坐标，按坐标升序；无限模式返回空。拆岛时找连通块、测试核对用。
     ///
     /// The loaded positions in ascending order; empty in infinite-flat mode.
@@ -759,6 +767,9 @@ impl ChunkStore {
             return Err(LightPending);
         }
         let loaded = self.loaded.as_ref().expect("已加载模式");
+        // 查邻居用一份散列集合（有序集合每问一次要比十几次）。
+        // A hash set for the neighbour queries (the ordered set compares a dozen times each).
+        let moving: HashSet<ChunkPos, ChunkHasherBuilder> = chunks.iter().copied().collect();
         for &pos in chunks {
             if !loaded.contains(&pos) {
                 continue;
@@ -766,7 +777,7 @@ impl ChunkStore {
             for (dx, dz) in NEIGHBOURS {
                 let neighbour = ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz));
                 assert!(
-                    chunks.contains(&neighbour) || !loaded.contains(&neighbour),
+                    !loaded.contains(&neighbour) || moving.contains(&neighbour),
                     "拆岛时搬走的区块 {pos:?} 和留下的已加载区块 {neighbour:?} 相邻"
                 );
             }

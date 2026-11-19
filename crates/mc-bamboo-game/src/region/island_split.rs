@@ -688,7 +688,7 @@ impl Region {
         );
         let mine = &self.chunks;
         assert_gap(
-            other.chunks.loaded_positions(),
+            other.chunks.loaded_unordered(),
             |_| false,
             |pos| mine.is_loaded(pos),
         );
