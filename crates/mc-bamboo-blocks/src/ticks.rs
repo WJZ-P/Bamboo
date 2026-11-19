@@ -339,10 +339,29 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
     }
 
     /// 并回另一份队列。`TickOrder` 全局唯一，直接按序插回主队列。
+    ///
+    /// 小的一份逐条插进大的（`BTreeMap::append` 会把两边重建成一棵树，开销和两边的总数
+    /// 成正比）；两份差不多大时整体归并。两种做法得到同一张表。
+    ///
+    /// The smaller queue is inserted entry by entry into the larger
+    /// (`BTreeMap::append` rebuilds one tree from both, proportional to the
+    /// total); similar sizes are merged in bulk. Both give the same table.
     fn absorb(&mut self, mut other: Self) {
         let expected = self.queue.len() + other.queue.len();
-        self.queue.append(&mut other.queue);
+        if other.queue.len() > self.queue.len() {
+            std::mem::swap(&mut self.queue, &mut other.queue);
+        }
+        if other.queue.len().saturating_mul(16) < self.queue.len() {
+            for (order, entry) in std::mem::take(&mut other.queue) {
+                self.queue.insert(order, entry);
+            }
+        } else {
+            self.queue.append(&mut other.queue);
+        }
         debug_assert_eq!(self.queue.len(), expected, "两份队列的排序键撞了");
+        if other.scheduled.len() > self.scheduled.len() {
+            std::mem::swap(&mut self.scheduled, &mut other.scheduled);
+        }
         for (pos, kind) in other.scheduled {
             self.scheduled.insert((pos, kind));
         }

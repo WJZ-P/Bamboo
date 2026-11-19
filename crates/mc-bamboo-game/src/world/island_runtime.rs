@@ -607,12 +607,22 @@ pub(crate) fn split_parts(
     sections: &BTreeSet<SectionPos>,
 ) -> (BTreeSet<ChunkPos>, BTreeSet<PlayerId>) {
     let inside = |pos: ChunkPos| sections.contains(&SectionPos::of(pos));
-    let mut chunks: BTreeSet<ChunkPos> = island
-        .region
-        .chunks
-        .loaded_positions()
-        .into_iter()
-        .filter(|&pos| inside(pos))
+    // 只看这些 section 里的区块（每个 section 4 × 4 个），不扫岛上全部已加载的区块。
+    // Only the chunks of these sections (4 × 4 each), not every loaded chunk.
+    let size = crate::island_partition::SECTION_SIZE;
+    let mut chunks: BTreeSet<ChunkPos> = sections
+        .iter()
+        .flat_map(|section| {
+            (0..size).flat_map(move |dx| {
+                (0..size).map(move |dz| {
+                    ChunkPos::new(
+                        section.x.saturating_mul(size).saturating_add(dx),
+                        section.z.saturating_mul(size).saturating_add(dz),
+                    )
+                })
+            })
+        })
+        .filter(|&pos| inside(pos) && island.region.chunks.is_loaded(pos))
         .collect();
     chunks.extend(
         island

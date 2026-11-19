@@ -9,7 +9,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    ops::Bound,
     sync::OnceLock,
 };
 
@@ -689,32 +688,14 @@ impl Region {
     }
 }
 
-/// 把 `table` 里位置落在 `chunks` 里的条目移出来，逐个交给 `emit`。
-///
-/// 只看每个区块所在的那条 16 格宽的 x 带，再逐个移出，不扫整张表，条目也不复制。
+/// 把 `table` 里位置落在 `chunks` 里的条目移出来，逐个交给 `emit`（按区块升序、区块里按
+/// 位置升序）。走表的按区块索引，不扫整张表，条目也不复制。
 fn take_positions<T>(
-    table: &mut BTreeMap<BlockPos, T>,
+    table: &mut crate::pos_map::PosMap<T>,
     chunks: &BTreeSet<ChunkPos>,
     mut emit: impl FnMut(BlockPos, T),
 ) {
-    // `BlockPos` 的 `Ord` 是 (x, y, z)：同一个 x 带里 z 不是连续的一段，所以先按 x 圈出
-    // 16 格宽的带，再按 `pos.chunk() == chunk` 过滤 z。
-    let mut taken: Vec<BlockPos> = Vec::new();
-    for &chunk in chunks {
-        // 区块坐标可能来自客户端，乘 16 会溢出时用饱和算术，不让它触发 panic。
-        let first_x = chunk.x.saturating_mul(16);
-        let from = BlockPos::new(first_x, i32::MIN, i32::MIN);
-        let to = BlockPos::new(first_x.saturating_add(16), i32::MIN, i32::MIN);
-        taken.extend(
-            table
-                .range((Bound::Included(from), Bound::Excluded(to)))
-                .map(|(&pos, _)| pos)
-                .filter(|pos| pos.chunk() == chunk),
-        );
-    }
-    for pos in taken {
-        if let Some(value) = table.remove(&pos) {
-            emit(pos, value);
-        }
+    for (pos, value) in table.take_chunks(chunks) {
+        emit(pos, value);
     }
 }

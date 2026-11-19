@@ -240,6 +240,25 @@ fn split_map<K: Ord, V>(table: &mut BTreeMap<K, V>, moves: impl Fn(&K) -> bool) 
     moved
 }
 
+/// 按区块把一张以区块为键的表分成两份：要搬的区块比表里的条目少时逐个取，否则扫一遍。
+/// 两种做法结果相同。
+///
+/// Split a chunk-keyed table: take the moved chunks one by one when there
+/// are fewer of them than entries, otherwise scan once. Same result.
+fn split_chunk_map<V>(
+    table: &mut BTreeMap<ChunkPos, V>,
+    chunks: &BTreeSet<ChunkPos>,
+) -> BTreeMap<ChunkPos, V> {
+    if chunks.len() < table.len() {
+        chunks
+            .iter()
+            .filter_map(|pos| Some((*pos, table.remove(pos)?)))
+            .collect()
+    } else {
+        split_map(table, |pos| chunks.contains(pos))
+    }
+}
+
 /// 按玩家把一张表分成两份。玩家只有几个，逐个取。
 fn split_players<V>(
     table: &mut BTreeMap<PlayerId, V>,
@@ -263,7 +282,7 @@ fn assert_gap(
             for dz in -reach..=reach {
                 let near = ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz));
                 assert!(
-                    is_moved(near) || !stays(near),
+                    !stays(near) || is_moved(near),
                     "岛的两部分靠得太近：{pos:?} 和 {near:?} 都已加载（要隔开至少 {ISLAND_GAP} 个区块）"
                 );
             }
@@ -347,9 +366,16 @@ impl Region {
             return Err(NotReady);
         }
         let store = &self.chunks;
+        // 查邻居用的一份散列集合：要搬的每个区块问 24 个邻居，有序集合每问一次要比十几次。
+        // A hash set for the neighbour queries: 24 per moved chunk, each a dozen
+        // comparisons in the ordered set.
+        let moving: std::collections::HashSet<
+            ChunkPos,
+            mc_bamboo_world::ticket::ChunkHasherBuilder,
+        > = chunks.iter().copied().collect();
         assert_gap(
             chunks.iter().copied().filter(|&pos| store.is_loaded(pos)),
-            |pos| chunks.contains(&pos),
+            |pos| moving.contains(&pos),
             |pos| store.is_loaded(pos),
         );
         for id in players {
@@ -413,21 +439,21 @@ impl Region {
         };
         lap("Redstone");
         let containers = if moves(IslandPart::Containers) {
-            split_map(&mut self.containers, inside)
+            self.containers.split_off_chunks(chunks)
         } else {
-            BTreeMap::new()
+            crate::pos_map::PosMap::default()
         };
         lap("Containers");
         let block_items = if moves(IslandPart::BlockItems) {
-            split_map(&mut self.block_items, inside)
+            self.block_items.split_off_chunks(chunks)
         } else {
-            BTreeMap::new()
+            crate::pos_map::PosMap::default()
         };
         lap("BlockItems");
         let command_blocks = if moves(IslandPart::CommandBlocks) {
-            split_map(&mut self.command_blocks, inside)
+            self.command_blocks.split_off_chunks(chunks)
         } else {
-            BTreeMap::new()
+            crate::pos_map::PosMap::default()
         };
         lap("CommandBlocks");
         let mut entities = if moves(IslandPart::Entities) {
@@ -460,7 +486,7 @@ impl Region {
         };
         lap("Dirty");
         let light_changes = if moves(IslandPart::LightChanges) {
-            split_map(&mut self.light_changes, |pos| chunks.contains(pos))
+            split_chunk_map(&mut self.light_changes, chunks)
         } else {
             BTreeMap::new()
         };
@@ -475,7 +501,7 @@ impl Region {
         }
         lap("BlockChanges");
         if moves(IslandPart::ChunkCache) {
-            self.chunk_cache.retain(|pos| !chunks.contains(&pos));
+            self.chunk_cache.forget(chunks);
         }
         lap("ChunkCache");
         let lecterns = self.lecterns.split_off(
@@ -729,9 +755,9 @@ impl Region {
         lap("merge BlockEntities");
         self.redstone.absorb(redstone);
         lap("merge Redstone");
-        self.containers.extend(containers);
-        self.block_items.extend(block_items);
-        self.command_blocks.extend(command_blocks);
+        self.containers.absorb(containers);
+        self.block_items.absorb(block_items);
+        self.command_blocks.absorb(command_blocks);
         lap("merge Containers/BlockItems/CommandBlocks");
         self.entities.absorb(entities);
         lap("merge Entities");

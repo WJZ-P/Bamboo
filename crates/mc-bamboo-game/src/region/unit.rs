@@ -4,58 +4,28 @@
 //! 全局形状；这些接口只在单元拓扑变化时用，不在 tick 热路径上。实体表和
 //! `entity_tracking` 的玩家配对这次不拆，等第 5 步的岛再说。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use mc_bamboo_blocks::{BlockEntities, BlockEvents, BlockTicks, RedstoneMemory};
-use mc_bamboo_core::{BlockPos, ChunkPos};
+use mc_bamboo_core::ChunkPos;
 use mc_bamboo_protocol::components::ComponentPatch;
 
 use crate::{
-    command_block::CommandBlockData, container::ContainerEntry, lectern::Book, region::Region,
+    command_block::CommandBlockData, container::ContainerEntry, lectern::Book, pos_map::PosMap,
+    region::Region,
 };
 
 /// 一个单元自己的那份带位置状态。现在没有人并行跑它，只给测试和下一步用。
 pub(crate) struct RegionUnit {
     pub(crate) unit: u64,
-    pub(crate) containers: BTreeMap<BlockPos, ContainerEntry>,
-    pub(crate) block_items: BTreeMap<BlockPos, ComponentPatch>,
-    pub(crate) command_blocks: BTreeMap<BlockPos, CommandBlockData>,
-    pub(crate) books: BTreeMap<BlockPos, Book>,
+    pub(crate) containers: PosMap<ContainerEntry>,
+    pub(crate) block_items: PosMap<ComponentPatch>,
+    pub(crate) command_blocks: PosMap<CommandBlockData>,
+    pub(crate) books: PosMap<Book>,
     pub(crate) block_events: BlockEvents,
     pub(crate) block_entities: BlockEntities,
     pub(crate) redstone: RedstoneMemory,
     pub(crate) ticks: BlockTicks,
-}
-
-/// 把 `table` 里位置落在 `chunks` 里的条目移出来，收集成一张按位置有序的小表。
-///
-/// 只看每个区块所在的那条 16 格宽的 x 带，和 `take_columns` 的取盒路径同一套做法；
-/// 这是拆合时才走的冷路径，不追求比扫表更快。
-fn split_positions<T>(
-    table: &mut BTreeMap<BlockPos, T>,
-    chunks: &BTreeSet<ChunkPos>,
-) -> BTreeMap<BlockPos, T> {
-    let mut out = BTreeMap::new();
-    for &chunk in chunks {
-        // 区块坐标可能来自客户端，乘 16 会溢出时用饱和算术，不让它触发 panic。
-        let first_x = chunk.x.saturating_mul(16);
-        let from = BlockPos::new(first_x, i32::MIN, i32::MIN);
-        let to = BlockPos::new(first_x.saturating_add(16), i32::MIN, i32::MIN);
-        let taken: Vec<BlockPos> = table
-            .range((
-                std::ops::Bound::Included(from),
-                std::ops::Bound::Excluded(to),
-            ))
-            .map(|(&pos, _)| pos)
-            .filter(|pos| pos.chunk() == chunk)
-            .collect();
-        for pos in taken {
-            if let Some(value) = table.remove(&pos) {
-                out.insert(pos, value);
-            }
-        }
-    }
-    out
 }
 
 impl Region {
@@ -75,10 +45,10 @@ impl Region {
         if !self.ready_to_move_columns() {
             return Err(super::column::NotReady);
         }
-        let containers = split_positions(&mut self.containers, chunks);
-        let block_items = split_positions(&mut self.block_items, chunks);
-        let command_blocks = split_positions(&mut self.command_blocks, chunks);
-        let books = split_positions(&mut self.lecterns.books, chunks);
+        let containers = self.containers.split_off_chunks(chunks);
+        let block_items = self.block_items.split_off_chunks(chunks);
+        let command_blocks = self.command_blocks.split_off_chunks(chunks);
+        let books = self.lecterns.books.split_off_chunks(chunks);
         let block_events = self.block_events.split_off(chunks);
         let block_entities = self
             .block_entities
@@ -114,10 +84,10 @@ impl Region {
             ticks,
         } = unit;
         let _ = id;
-        self.containers.extend(containers);
-        self.block_items.extend(block_items);
-        self.command_blocks.extend(command_blocks);
-        self.lecterns.books.extend(books);
+        self.containers.absorb(containers);
+        self.block_items.absorb(block_items);
+        self.command_blocks.absorb(command_blocks);
+        self.lecterns.books.absorb(books);
         self.block_events.absorb(block_events);
         self.block_entities.absorb(block_entities);
         self.redstone.absorb(redstone);

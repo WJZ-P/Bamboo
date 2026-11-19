@@ -81,6 +81,7 @@ pub(crate) mod player_health;
 pub(crate) mod player_hurt;
 mod player_move;
 mod player_save;
+mod pos_map;
 mod profiler;
 pub mod region;
 mod save_data;

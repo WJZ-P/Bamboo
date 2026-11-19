@@ -34,9 +34,20 @@ impl Dirty {
     ///
     /// Island split: move the pending marks of `chunks`.
     pub(crate) fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
-        let pending = std::mem::take(&mut self.pending);
-        let (moved, kept) = pending.into_iter().partition(|pos| chunks.contains(pos));
-        self.pending = kept;
+        // 要搬的区块比待存标记少时逐个取，否则扫一遍；结果相同。
+        // Take one by one when fewer chunks move than are marked, else scan.
+        let moved = if chunks.len() < self.pending.len() {
+            chunks
+                .iter()
+                .filter(|pos| self.pending.remove(pos))
+                .copied()
+                .collect()
+        } else {
+            let pending = std::mem::take(&mut self.pending);
+            let (moved, kept) = pending.into_iter().partition(|pos| chunks.contains(pos));
+            self.pending = kept;
+            moved
+        };
         #[cfg(test)]
         let last_bytes = {
             let all = std::mem::take(&mut self.last_bytes);

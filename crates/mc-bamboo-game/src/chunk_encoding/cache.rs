@@ -146,6 +146,23 @@ impl ChunkCache {
             .collect()
     }
 
+    /// 丢掉 `chunks` 这些区块的包体和帧（岛拆分时原岛丢掉被拆走的那部分）。区块比
+    /// 缓存条目少时逐个删，否则扫一遍缓存；两种做法结果相同。
+    ///
+    /// Drop the bodies and frames of `chunks` (an island split drops the part
+    /// that moved). Removes one by one when there are fewer chunks than cache
+    /// entries, otherwise scans the cache once; the result is the same.
+    pub(crate) fn forget(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) {
+        if chunks.len() < self.bodies.len() + self.frames.len() {
+            for &pos in chunks {
+                self.remove(pos);
+                self.frames.remove(&pos);
+            }
+        } else {
+            self.retain(|pos| !chunks.contains(&pos));
+        }
+    }
+
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(ChunkPos) -> bool) {
         let bytes = &mut self.bytes;
         self.bodies.retain(|&pos, entry| {
