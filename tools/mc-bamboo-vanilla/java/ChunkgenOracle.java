@@ -1065,7 +1065,7 @@ public final class ChunkgenOracle {
                     }
                 }
                 structureGrid = new StructureChunkGrid(pos, grid, radius);
-                entityStub = installEntityStub(seed);
+                entityStub = installEntityStub(seed, generator);
                 HolderLookup<StructureSet> setLookup = registries.lookupOrThrow(Registries.STRUCTURE_SET);
                 ChunkGeneratorStructureState structureState =
                         ChunkGeneratorStructureState.createForNormal(
@@ -1390,7 +1390,7 @@ public final class ChunkgenOracle {
                 }
             }
             StructureChunkGrid structureGrid = new StructureChunkGrid(pos, grid);
-            net.minecraft.server.level.ServerLevel entityStub = installEntityStub(seed);
+            net.minecraft.server.level.ServerLevel entityStub = installEntityStub(seed, generator);
             WorldOptions worldOptions = new WorldOptions(seed, true, false);
             HolderLookup<StructureSet> setLookup = registries.lookupOrThrow(Registries.STRUCTURE_SET);
             ChunkGeneratorStructureState structureState =
@@ -1757,7 +1757,7 @@ public final class ChunkgenOracle {
                     // 无结构模式也要 `getLevel()`：沙漠水井 / 化石的模板管理器挂在它的服务端上。
                     // Structure-less runs need `getLevel()` too: the desert well and fossil
                     // reach the template manager through its server.
-                    resolver, randomState, null, installEntityStub(seed));
+                    resolver, randomState, null, installEntityStub(seed, generator));
             WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
                     ChunkgenOracle.class.getClassLoader(),
                     new Class<?>[] {WorldGenLevel.class}, handler);
@@ -2326,7 +2326,8 @@ public final class ChunkgenOracle {
          * `getLevel()` returns a constructor-less ServerLevel, the entity factory
          * returns an inert minecart, and `addFreshEntity` just returns true.
          */
-        private net.minecraft.server.level.ServerLevel installEntityStub(long seed) {
+        private net.minecraft.server.level.ServerLevel installEntityStub(
+                long seed, NoiseBasedChunkGenerator generator) {
             try {
                 Object type = net.minecraft.world.entity.EntityTypes.CHEST_MINECART;
                 setField(net.minecraft.world.entity.EntityType.class, type, "factory",
@@ -2378,6 +2379,40 @@ public final class ChunkgenOracle {
                 Object fakeLevel = allocate(net.minecraft.server.level.ServerLevel.class);
                 setField(net.minecraft.server.level.ServerLevel.class, fakeLevel, "server", server);
                 setField(net.minecraft.world.level.Level.class, fakeLevel, "levelData", levelData);
+                // `PaleMossDecorator.lambda$place$1` 走
+                // `getLevel().getChunkSource().getGenerator()` 拿 `minecraft:pale_moss_patch`
+                // 的递归 Feature.place；不跑构造器的 ServerLevel 的 chunkSource 是 null。
+                // 按字节码把这条链补成
+                // ServerLevel.chunkSource → ServerChunkCache.chunkMap →
+                // ChunkMap.worldGenContext → WorldGenContext.generator，
+                // generator 就是本次对拍用的那个实例（`getGenDepth()` / `getSeaLevel()` 要给对）。
+                // `chunkSource` / `worldGenContext` 是 final，普通反射写不进，用 Unsafe；
+                // `WorldGenContext` 是 record，Unsafe 不肯给它的字段算偏移，
+                // 直接调公开构造器（构造器只做赋值，不碰别的状态）。
+                //
+                // `PaleMossDecorator.lambda$place$1` reaches the recursive
+                // `minecraft:pale_moss_patch` Feature.place through
+                // `getLevel().getChunkSource().getGenerator()`. A constructor-less
+                // ServerLevel has a null chunkSource; rebuild that chain with the
+                // very generator used for this comparison.
+                Object chunkSource = allocate(net.minecraft.server.level.ServerChunkCache.class);
+                Object chunkMap = allocate(net.minecraft.server.level.ChunkMap.class);
+                Object worldGenContext =
+                        net.minecraft.world.level.chunk.status.WorldGenContext.class
+                                .getConstructor(
+                                        net.minecraft.server.level.ServerLevel.class,
+                                        net.minecraft.world.level.chunk.ChunkGenerator.class,
+                                        StructureTemplateManager.class,
+                                        net.minecraft.server.level.ThreadedLevelLightEngine.class,
+                                        java.util.concurrent.Executor.class,
+                                        net.minecraft.world.level.chunk.LevelChunk.UnsavedListener.class)
+                                .newInstance(fakeLevel, generator, this.templates, null, null, null);
+                putFinal(chunkMap, net.minecraft.server.level.ChunkMap.class,
+                        "worldGenContext", worldGenContext);
+                putFinal(chunkSource, net.minecraft.server.level.ServerChunkCache.class,
+                        "chunkMap", chunkMap);
+                putFinal(fakeLevel, net.minecraft.server.level.ServerLevel.class,
+                        "chunkSource", chunkSource);
                 // 结构件在 FEATURES 阶段生成的实体都不进假世界，但官方仍要构造它们
                 // （女巫小屋、府邸、海底神殿、前哨、村庄……）。工厂换成惰性实例，
                 // 后面的 `snapTo` / `finalizeSpawn` / `addFreshEntity` 全部空操作。
@@ -2430,6 +2465,17 @@ public final class ChunkgenOracle {
         }
 
         /** 写一个可能声明在父类上的 final 字段（世界种子链）。 */
+        /** 写一个类自己声明的 final 引用字段（跳过构造器的实例）。 */
+        private static void putFinal(Object target, Class<?> owner, String name, Object value) {
+            try {
+                Field field = owner.getDeclaredField(name);
+                field.setAccessible(true);
+                UNSAFE.putObject(target, UNSAFE.objectFieldOffset(field), value);
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+
         private static void setFieldInHierarchy(Object target, String name, Object value) {
             for (Class<?> owner = target.getClass(); owner != null; owner = owner.getSuperclass()) {
                 try {
