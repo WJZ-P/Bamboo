@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 use crate::oracle::collect_log;
 
 const USAGE: &str = "usage: resume-world <java> [--seeds N] [--chunks N] [--salt S] \
-     [--structures] [--break-self-test] [--break-neighbor] [--show N] \
+     [--structures] [--break-self-test] [--break-neighbor] [--break-light] [--show N] \
      [--seed S] [--chunk X Z]";
 const SOURCE: &str = "tools/mc-bamboo-vanilla/java/ResumeWorldOracle.java";
 const CHUNKGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkgenOracle.java";
@@ -58,6 +58,7 @@ struct Options {
     structures: bool,
     break_self_test: bool,
     break_neighbor: bool,
+    break_light: bool,
     show: usize,
     /// 固定种子 / 固定区块（`--seed S --chunk X Z`），用于结构起点坐标。
     seed: Option<i64>,
@@ -73,6 +74,7 @@ impl Options {
             structures: false,
             break_self_test: false,
             break_neighbor: false,
+            break_light: false,
             show: 8,
             seed: None,
             chunk: None,
@@ -88,6 +90,7 @@ impl Options {
                 "--structures" => options.structures = true,
                 "--break-self-test" => options.break_self_test = true,
                 "--break-neighbor" => options.break_neighbor = true,
+                "--break-light" => options.break_light = true,
                 "--seed" => options.seed = Some(next()?.parse().map_err(|_| USAGE)?),
                 "--chunk" => {
                     let x = next()?.parse().map_err(|_| USAGE)?;
@@ -145,6 +148,7 @@ pub fn run(options: &[&str], java: &str) -> Result<(), String> {
     // `feature-merge --orders isolated` 已证明这条线和官方逐中心输出逐格一致；
     // 单中心的 `features` 行只覆盖中心自己的地物，少了邻居溢进来的写。
     // Official FULL is the 9-center merge, not the single-center features line.
+    let scenes = official_light_scenes(java, &options)?;
     let merged = official_merged_blocks(java, &options)?;
     for full in &mut official {
         let key = (full.seed, full.pos.x, full.pos.z);
@@ -213,7 +217,11 @@ pub fn run(options: &[&str], java: &str) -> Result<(), String> {
     for full in &official {
         for stage in STAGES {
             for mode in NEIGHBOR_MODES {
-                requests.push(make_request(full, *stage, mode, options.structures));
+                let key = (full.seed, full.pos.x, full.pos.z);
+                let scene = scenes
+                    .get(&key)
+                    .ok_or_else(|| format!("no official lightscene for {key:?}"))?;
+                requests.push(make_request(full, *stage, mode, options.structures, scene));
             }
         }
     }
@@ -327,6 +335,16 @@ fn finish(stats: Stats, options: &Options, requests: usize) -> Result<(), String
             }
         }
         println!("resume-world LIGHT-input gaps by stage: {by_stage:?}");
+        let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+        for message in &light_input_mismatches {
+            let reason = if message.contains("present") {
+                "data-layer presence".to_owned()
+            } else {
+                "per-cell light value".to_owned()
+            };
+            *reasons.entry(reason).or_default() += 1;
+        }
+        println!("resume-world LIGHT-input gaps by reason: {reasons:?}");
         println!(
             "resume-world LIGHT-input gaps (official post-FEATURES vs game CARVERS): {} lines; \
              first few:",
@@ -336,7 +354,7 @@ fn finish(stats: Stats, options: &Options, requests: usize) -> Result<(), String
             eprintln!("  LIGHT-INPUT {message}");
         }
     }
-    if options.break_self_test || options.break_neighbor {
+    if options.break_self_test || options.break_neighbor || options.break_light {
         if breaks == 0 {
             return Err("resume-world break check did not run".to_owned());
         }
@@ -420,6 +438,126 @@ fn forwarded(options: &Options, args: &mut Vec<String>) {
     if let Some((x, z)) = options.chunk {
         args.extend(["--chunk".to_owned(), x.to_string(), z.to_string()]);
     }
+}
+
+/// 官方 `ChunkgenOracle --light-pipeline` 的一条题：FEATURES 后的 3×3 方块
+/// 和官方 `LevelLightEngine` 算出的中心柱逐格天空光 / 方块光。
+#[derive(Debug, Clone)]
+struct LightScene {
+    /// 3×3 每格的方块状态 ID（`CELLS` 个）。
+    blocks: Vec<Vec<u32>>,
+    /// 中心柱逐格天空光（`CELLS` 个 4 位值）。
+    sky: Vec<u8>,
+    /// 中心柱逐格方块光。
+    block: Vec<u8>,
+}
+
+/// 官方 `--light-pipeline` 给出 FEATURES 后 3×3 的真实方块和官方光照。
+///
+/// `resume-world` 的 Java 出题器用这批方块写存档、跑官方光引擎；
+/// 单中心的 `features` 行少了邻居溢出的写，不能当 LIGHT 的输入。
+fn official_light_scenes(
+    java: &str,
+    options: &Options,
+) -> Result<BTreeMap<(i64, i32, i32), LightScene>, String> {
+    let mut command = crate::official_program(java, CHUNKGEN_SOURCE)?;
+    let mut args = vec![
+        "--light-pipeline".to_owned(),
+        "--seeds".to_owned(),
+        options.seeds.to_string(),
+        "--chunks".to_owned(),
+        options.chunks.to_string(),
+        "--salt".to_owned(),
+        options.salt.to_string(),
+    ];
+    forwarded(options, &mut args);
+    if options.structures {
+        args.push("--structures".to_owned());
+    }
+    command.args(&args);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("run light-pipeline: {e}"))?;
+    let log = collect_log(&mut child)?;
+    let stdout = child.stdout.take().ok_or("java has no stdout")?;
+    let mut out = BTreeMap::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|e| format!("read light-pipeline: {e}"))?;
+        let value: Value =
+            serde_json::from_str(&line).map_err(|e| format!("bad light-pipeline line: {e}"))?;
+        if value.get("type").and_then(Value::as_str) != Some("lightscene") {
+            continue;
+        }
+        let (seed, x, z) = line_key(&value)?;
+        let palette = value
+            .get("palette")
+            .and_then(Value::as_array)
+            .ok_or("lightscene missing palette")?;
+        let states = palette
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_u64()
+                    .map(|id| id as u32)
+                    .ok_or("bad lightscene state id".to_owned())
+            })
+            .collect::<Result<Vec<u32>, String>>()?;
+        let chunks = value
+            .get("chunks")
+            .and_then(Value::as_array)
+            .ok_or("lightscene missing chunks")?;
+        if chunks.len() != 9 {
+            return Err(format!("lightscene has {} chunks", chunks.len()));
+        }
+        let mut blocks = Vec::with_capacity(9);
+        for chunk in chunks {
+            let indices = chunk
+                .get("blocks")
+                .and_then(Value::as_array)
+                .ok_or("chunk missing blocks")?;
+            blocks.push(
+                indices
+                    .iter()
+                    .map(|entry| {
+                        let id = entry
+                            .as_u64()
+                            .ok_or("bad lightscene block index".to_owned())?
+                            as usize;
+                        states
+                            .get(id)
+                            .copied()
+                            .ok_or("lightscene state index out of range".to_owned())
+                    })
+                    .collect::<Result<Vec<u32>, String>>()?,
+            );
+        }
+        let sky = byte_values(value.get("sky").ok_or("lightscene missing sky")?)?;
+        let block = byte_values(value.get("block").ok_or("lightscene missing block")?)?;
+        out.insert((seed, x, z), LightScene { blocks, sky, block });
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("wait light-pipeline: {e}"))?;
+    let log = log.recv().unwrap_or_default().join("\n");
+    if !status.success() {
+        return Err(format!("light-pipeline failed: {status}\n{log}"));
+    }
+    Ok(out)
+}
+
+fn byte_values(value: &Value) -> Result<Vec<u8>, String> {
+    value
+        .as_array()
+        .ok_or("light bytes must be an array")?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_u64()
+                .map(|v| v as u8)
+                .ok_or("bad light byte".to_owned())
+        })
+        .collect()
 }
 
 /// `(种子, x, z) → 逐格方块状态`（官方一口气生成到 FULL 的结果）。
@@ -913,16 +1051,19 @@ fn final_states_from_view(view: &(Vec<String>, Vec<u32>)) -> Vec<u32> {
         .collect()
 }
 
-fn make_request(full: &FullChunk, stage: ChunkStatus, mode: &str, structures: bool) -> Value {
-    let view: Vec<Value> = full
-        .view
+fn make_request(
+    full: &FullChunk,
+    stage: ChunkStatus,
+    mode: &str,
+    structures: bool,
+    scene: &LightScene,
+) -> Value {
+    // 官方 `--light-pipeline` 的 3×3 post-FEATURES 方块（状态 ID），
+    // 是 LIGHT 阶段真实读到的视图；单中心 features 行少了邻居溢出。
+    let view: Vec<Value> = scene
+        .blocks
         .iter()
-        .map(|(palette, blocks)| {
-            json!({
-                "palette": palette,
-                "blocks": blocks,
-            })
-        })
+        .map(|blocks| json!({ "blocks": blocks }))
         .collect();
     let biomes: Vec<Value> = full
         .biomes
@@ -973,6 +1114,8 @@ fn make_request(full: &FullChunk, stage: ChunkStatus, mode: &str, structures: bo
         "stage": stage.name(),
         "neighbor": mode,
         "view": view,
+        "sky": scene.sky,
+        "block": scene.block,
         "neighbors": neighbor_tags,
         "full": {
             "palette": full.view[4].0,
@@ -1106,6 +1249,32 @@ fn compare_case(
             stats.breaks += 1;
         }
     }
+    // 光照改坏确认：故意把生成期光照抹成 0，逐格比较器必须报不一致。
+    // 只在 Status < LIGHT（会重算光照）的一个用例上做，省一次生成。
+    if options.break_light && stage == ChunkStatus::Empty && mode == "none" {
+        let broken = resume_chunk(
+            &config,
+            &ResumeCase {
+                pos,
+                chunk_nbt: nbt.clone(),
+                stage,
+            },
+            &neighbor_tags,
+            Some(ResumeBreak::ClearGeneratedLight),
+        )
+        .map_err(|error| format!("{label}: break-light failed: {error}"))?;
+        let official = mc_bamboo_storage::chunk_nbt::decode_bytes(&full_nbt)
+            .map_err(|error| format!("{label}: official full NBT: {error}"))?;
+        let mut probe = Stats::default();
+        compare_light(&mut probe, &label, stage, &official.column, &broken);
+        if probe.light_input_mismatches.is_empty() && probe.mismatches.is_empty() {
+            stats
+                .mismatches
+                .push(format!("{label}: break-light was not detected"));
+        } else {
+            stats.breaks += 1;
+        }
+    }
     if options.break_neighbor && stage == ChunkStatus::StructureStarts && mode == "same" {
         let broken = resume_chunk(
             &config,
@@ -1219,6 +1388,79 @@ fn compare_heightmaps(
     }
 }
 
+/// 官方 `saveAdditional` 无条件写出的构造器默认值：只有「官方值恰好是默认值、
+/// 且游戏侧缺这个键」时才可以忽略。和 `gen-world` 的表同源。
+const BLOCK_ENTITY_DEFAULTS: &[(&str, &str, &str)] = &[
+    ("minecraft:vault", "shared_data", "{}"),
+    ("minecraft:vault", "server_data", "{}"),
+    ("minecraft:furnace", "speed_multiplier", "1.0f"),
+    ("minecraft:blast_furnace", "speed_multiplier", "1.0f"),
+    ("minecraft:smoker", "speed_multiplier", "1.0f"),
+    ("minecraft:sculk_sensor", "last_vibration_frequency", "0"),
+    (
+        "minecraft:sculk_sensor",
+        "listener",
+        "{event_delay:0,selector:{tick:-1L}}",
+    ),
+    (
+        "minecraft:calibrated_sculk_sensor",
+        "last_vibration_frequency",
+        "0",
+    ),
+    (
+        "minecraft:calibrated_sculk_sensor",
+        "listener",
+        "{event_delay:0,selector:{tick:-1L}}",
+    ),
+    ("minecraft:brewing_stand", "total_brew_time", "400"),
+    ("minecraft:brewing_stand", "total_fuel", "20"),
+    ("minecraft:brewing_stand", "speed_multiplier", "1.0f"),
+    ("minecraft:sign", "is_waxed", "0b"),
+    ("minecraft:hanging_sign", "is_waxed", "0b"),
+];
+
+fn block_entity_id(tag: &mc_bamboo_nbt::Tag) -> &str {
+    let mc_bamboo_nbt::Tag::Compound(entries) = tag else {
+        return "";
+    };
+    entries
+        .iter()
+        .find_map(|(key, value)| match (key.as_str(), value) {
+            ("id", mc_bamboo_nbt::Tag::String(text)) => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or("")
+}
+
+fn strip_official_defaults(
+    official: &mc_bamboo_nbt::Tag,
+    ours: &mut Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let id = block_entity_id(official);
+    let mc_bamboo_nbt::Tag::Compound(entries) = official else {
+        return Vec::new();
+    };
+    let mut ignored = Vec::new();
+    for (key, value) in entries {
+        let text = value.to_snbt();
+        let default = BLOCK_ENTITY_DEFAULTS
+            .iter()
+            .any(|(kind, name, expected)| *kind == id && *name == key && *expected == text);
+        if !default {
+            continue;
+        }
+        if let Some(index) = ours.iter().position(|(name, _)| name == key) {
+            if ours[index].1 == text {
+                ours.remove(index);
+                ignored.push((key.clone(), text));
+            }
+        } else {
+            ignored.push((key.clone(), text));
+        }
+    }
+    ignored
+}
+
 fn compare_block_entities(
     stats: &mut Stats,
     label: &str,
@@ -1248,15 +1490,20 @@ fn compare_block_entities(
         .iter()
         .filter_map(|(x, y, z, snbt)| {
             let tag = mc_bamboo_nbt::parse_snbt(snbt).ok()?;
-            Some((format!("{x},{y},{z}"), custom(&tag)))
+            let mut keys = custom(&tag);
+            strip_official_defaults(&tag, &mut keys);
+            Some((format!("{x},{y},{z}"), keys))
         })
         .collect();
     official.sort();
-    let mut ours: Vec<(String, Vec<(String, String)>)> = game
-        .iter()
-        .map(|((x, y, z), tag)| (format!("{x},{y},{z}"), custom(tag)))
-        .collect();
-    ours.sort();
+    let mut ours: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for ((x, y, z), tag) in game {
+        let mut keys = custom(tag);
+        // 游戏侧写了默认值时也一起删掉，避免「一方删一方留」的假差异。
+        strip_official_defaults(tag, &mut keys);
+        ours.insert(format!("{x},{y},{z}"), keys);
+    }
+    let ours: Vec<(String, Vec<(String, String)>)> = ours.into_iter().collect();
     stats.block_entities += official.len() as u64;
     if official != ours {
         stats.mismatches.push(format!(
@@ -1321,11 +1568,31 @@ fn compare_light(
                         }
                     }
                 }
-                (official, game) => differences.push(format!(
-                    "{label}: {layer:?} y {y}: official present {}, game present {}",
-                    official.is_some(),
-                    game.is_some()
-                )),
+                (official, game) => {
+                    // 官方 `SerializableChunkData.copyOf` 跳过
+                    // `DataLayer.isEmpty()`（没分配数组、默认值 0）的段；
+                    // `read` 用 `retainData` 把缺省段恢复成默认 0。Bamboo 为了
+                    // 原样往返把存着的 `Filled(0)` 也写成 2048 字节
+                    // （见 `docs/m3-storage.md` §5.2）。两边语义相同：逐格都是 0。
+                    // 只有「一边没有、另一边有非零光」才是真不一致。
+                    // Vanilla copyOf omits empty (all-zero) DataLayers; read()
+                    // restores them as default 0. Bamboo persists stored Filled(0)
+                    // layers verbatim. Only a non-empty vs absent difference fails.
+                    let official_nonzero = official
+                        .as_ref()
+                        .is_some_and(|bytes| bytes.iter().any(|&b| b != 0));
+                    let game_nonzero = game
+                        .as_ref()
+                        .is_some_and(|bytes| bytes.iter().any(|&b| b != 0));
+                    if official_nonzero != game_nonzero {
+                        differences.push(format!(
+                            "{label}: {layer:?} y {y}: official present {}, game present {} \
+                             (official nonzero {official_nonzero}, game nonzero {game_nonzero})",
+                            official.is_some(),
+                            game.is_some(),
+                        ));
+                    }
+                }
             }
         }
     }

@@ -75,6 +75,8 @@ pub enum ResumeBreak {
     TreatAsFull,
     /// 丢掉 8 个邻居中心溢进中心的写增量（只留中心自己的）。
     DropNeighborWrites,
+    /// 故意把 `LIGHT` 阶段的光照清空，确认光照比较器会报不一致。
+    ClearGeneratedLight,
 }
 
 /// 读回一份盘上的区块，按它的 `Status` 续跑到 `full`，返回完工数据。
@@ -220,7 +222,37 @@ pub fn resume_chunk(
             }
         }
         if let Some(generated) = light.take() {
-            column.set_generated_light(generated);
+            if break_kind == Some(ResumeBreak::ClearGeneratedLight) {
+                // 改坏确认：把生成期光照全部抹成 0（但保留存的段），
+                // 逐格比较器必须报差异。
+                let zeroed = mc_bamboo_world::light::generate::GeneratedLight {
+                    sky: generated
+                        .sky
+                        .iter()
+                        .map(|layer| {
+                            layer.as_ref().map(|data| {
+                                let mut copy = data.clone();
+                                copy.fill(0);
+                                copy
+                            })
+                        })
+                        .collect(),
+                    block: generated
+                        .block
+                        .iter()
+                        .map(|layer| {
+                            layer.as_ref().map(|data| {
+                                let mut copy = data.clone();
+                                copy.fill(0);
+                                copy
+                            })
+                        })
+                        .collect(),
+                };
+                column.set_generated_light(zeroed);
+            } else {
+                column.set_generated_light(generated);
+            }
         }
         if let Some(tag) = structures.take() {
             set_structures_tag(&mut column, &tag);

@@ -83,6 +83,7 @@ public final class ResumeWorldOracle {
     private static final int HEIGHT = 384;
     private static final int WIDTH = 16;
     private static final int CELLS = HEIGHT * WIDTH * WIDTH;
+    private static final int LAYER_BYTES = WIDTH * WIDTH * WIDTH / 2;
     private static final int OUTPUT_BUFFER = 8 << 20;
     private static final int TASKS_PER_BATCH = 1000;
 
@@ -247,24 +248,24 @@ public final class ResumeWorldOracle {
             int[][] states = new int[9][];
             for (int index = 0; index < 9; index++) {
                 JsonObject chunk = view.get(index).getAsJsonObject();
-                JsonArray palette = chunk.getAsJsonArray("palette");
-                int[] ids = new int[palette.size()];
-                for (int i = 0; i < ids.length; i++) {
-                    ids[i] = parseState(palette.get(i).getAsString());
-                }
                 JsonArray indices = chunk.getAsJsonArray("blocks");
                 if (indices.size() != CELLS) {
                     throw new IllegalArgumentException("view chunk has " + indices.size() + " blocks");
                 }
                 int[] cells = new int[CELLS];
                 for (int i = 0; i < CELLS; i++) {
-                    cells[i] = ids[indices.get(i).getAsInt()];
+                    // `lightscene` 直接给官方 `BLOCK_STATE_REGISTRY` 的状态 ID。
+                    cells[i] = indices.get(i).getAsInt();
                 }
                 states[index] = cells;
             }
 
-            // 官方 LIGHT：3×3 的 post-FEATURES 方块喂官方光引擎。外圈全空气
-            // （和 GenLightOracle 的 5×5 边界一致），中心柱结果就是基线。
+            // 官方 LIGHT：把 `ChunkgenOracle --light-pipeline` 给出的 post-FEATURES
+            // 3×3 真实方块喂官方 LevelLightEngine，读出中心柱 26 段的 DataLayer。
+            // 段是否分配（DataLayer.isEmpty）由官方光引擎自己决定，`copyOf` 只跳过
+            // 空段；这样存档里的光照段和逐格值都是官方真实输出。
+            // Official light: drive the official LevelLightEngine on the real
+            // post-FEATURES 3x3 and read the exact DataLayers it stores.
             LightWorld light = new LightWorld(pos, states, containers);
             Map<Integer, byte[]> sky = new LinkedHashMap<>();
             Map<Integer, byte[]> block = new LinkedHashMap<>();
@@ -281,6 +282,14 @@ public final class ResumeWorldOracle {
                     block.put(y, blockLayer.getData().clone());
                 }
             }
+            // 逐格值必须和 `--light-pipeline` 的官方输出一致（不靠本类的近似）。
+            JsonArray skyValues = request.getAsJsonArray("sky");
+            JsonArray blockValues = request.getAsJsonArray("block");
+            if (skyValues.size() != CELLS || blockValues.size() != CELLS) {
+                throw new IllegalArgumentException("official light arrays must hold CELLS values");
+            }
+            verifyLight(light, skyValues, net.minecraft.world.level.LightLayer.SKY, "sky");
+            verifyLight(light, blockValues, net.minecraft.world.level.LightLayer.BLOCK, "block");
 
             // 官方 SerializableChunkData.write()：把 FULL 基准的内容按该阶段写盘。
             // stages 之前的阶段会裁掉还没写出的 sections / 高度图 / 光照 / 结构。
@@ -309,6 +318,25 @@ public final class ResumeWorldOracle {
             }
             answer.add("neighbor_tags", neighborTags);
             return answer;
+        }
+
+        /** 本类跑出的官方光引擎结果必须逐格等于 `--light-pipeline` 的官方输出。 */
+        private static void verifyLight(LightWorld light, JsonArray values,
+                net.minecraft.world.level.LightLayer layer, String name) {
+            int cx = light.center.getPos().x() * WIDTH;
+            int cz = light.center.getPos().z() * WIDTH;
+            for (int cell = 0; cell < CELLS; cell++) {
+                int ly = cell / (WIDTH * WIDTH);
+                int lx = (cell / WIDTH) % WIDTH;
+                int lz = cell % WIDTH;
+                BlockPos at = new BlockPos(cx + lx, MIN_Y + ly, cz + lz);
+                int got = light.engine.getLayerListener(layer).getLightValue(at) & 15;
+                int want = values.get(cell).getAsInt() & 15;
+                if (got != want) {
+                    throw new IllegalStateException("official " + name + " light mismatch at " + at
+                            + ": engine " + got + ", light-pipeline " + want);
+                }
+            }
         }
 
         /**
@@ -496,26 +524,39 @@ public final class ResumeWorldOracle {
         };
 
         LightWorld(ChunkPos center, int[][] states, PalettedContainerFactory containers) {
-            for (int index = 0; index < 9; index++) {
-                int dx = index % 3 - 1;
-                int dz = index / 3 - 1;
-                ChunkPos pos = new ChunkPos(center.x() + dx, center.z() + dz);
-                ProtoChunk chunk = new ProtoChunk(pos, UpgradeData.EMPTY,
-                        LevelHeightAccessor.create(MIN_Y, HEIGHT), containers, null);
-                int[] cells = states[index];
-                for (int cell = 0; cell < CELLS; cell++) {
-                    int state = cells[cell];
-                    if (state == 0) { continue; }
-                    int y = cell / (WIDTH * WIDTH);
-                    int x = (cell / WIDTH) % WIDTH;
-                    int z = cell % WIDTH;
-                    chunk.setBlockState(new BlockPos(pos.getMinBlockX() + x, MIN_Y + y,
-                            pos.getMinBlockZ() + z), Block.BLOCK_STATE_REGISTRY.byId(state), 0);
-                }
-                chunks.put(pos.pack(), chunk);
-                if (index == 4) { this.center = chunk; }
-            }
+            // 和 `ChunkgenOracle --light-pipeline` 完全同形：中心 3×3 放官方
+            // post-FEATURES 方块，外面两圈是已加载的全空气 ProtoChunk（7×7）。
+            // 只有外圈也登记进光引擎，边界段的 DataLayer 分配才和官方一致。
+            // Same shape as official `--light-pipeline`: 3x3 real blocks plus a
+            // 7x7 loaded-air boundary, so DataLayer presence matches exactly.
+            final int radius = 3;
+            final int size = radius * 2 + 1;
             engine = new BatchedLightEngine(this);
+            for (int gx = 0; gx < size; gx++) {
+                for (int gz = 0; gz < size; gz++) {
+                    ChunkPos pos = new ChunkPos(center.x() + gx - radius,
+                            center.z() + gz - radius);
+                    boolean inside = Math.abs(gx - radius) <= 1 && Math.abs(gz - radius) <= 1;
+                    ProtoChunk chunk = new ProtoChunk(pos, UpgradeData.EMPTY,
+                            LevelHeightAccessor.create(MIN_Y, HEIGHT), containers, null);
+                    if (inside) {
+                        int index = (gz - radius + 1) * 3 + (gx - radius + 1);
+                        int[] cells = states[index];
+                        for (int cell = 0; cell < CELLS; cell++) {
+                            int state = cells[cell];
+                            if (state == 0) { continue; }
+                            int y = cell / (WIDTH * WIDTH);
+                            int x = (cell / WIDTH) % WIDTH;
+                            int z = cell % WIDTH;
+                            chunk.setBlockState(new BlockPos(pos.getMinBlockX() + x,
+                                    MIN_Y + y, pos.getMinBlockZ() + z),
+                                    Block.BLOCK_STATE_REGISTRY.byId(state), 0);
+                        }
+                        if (index == 4) { this.center = chunk; }
+                    }
+                    chunks.put(pos.pack(), chunk);
+                }
+            }
             for (ProtoChunk chunk : chunks.values()) {
                 chunk.initializeLightSources();
                 chunk.setLightEngine(engine);
