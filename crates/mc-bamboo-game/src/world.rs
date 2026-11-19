@@ -3283,6 +3283,9 @@ mod island_split_tests;
 #[cfg(test)]
 mod loaded_tests;
 #[cfg(test)]
+#[path = "world/player_death_tests.rs"]
+mod player_death_tests;
+#[cfg(test)]
 #[path = "world/tests/review_probe.rs"]
 mod review_probe;
 #[cfg(test)]

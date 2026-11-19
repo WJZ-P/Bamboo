@@ -173,18 +173,17 @@ pub(crate) fn die(region: &mut Region, id: PlayerId, source: DamageSource) {
             mc_bamboo_blocks::entity::award(&mut world, position, reward);
         }
     }
-    // 清经验三字段和 Score：官方 `PlayerList.respawn` 的
-    // `restoreFrom(..., keepEverything=false)` 不搬这些字段，死亡后客户端
-    // 下一次收到的 `set_experience` 就是 0。
+    // 官方 `ServerPlayer.die` 不清经验；等级经验在下一刻 `PlayerList.respawn`
+    // 的 `restoreFrom` 里丢掉（keepInventory 时原样留下）。Bamboo 原地重置，
+    // 所以到重生那一刻才按 `reset_after_respawn` 清。
     let player = region.players.get_mut(&id).expect("玩家刚才还在");
-    player.experience = crate::experience::Experience::default();
-    player.score = 0;
-    player.last_sent_exp = -1;
     player.dead = true;
     player.health.death_time = 0;
     player.last_combat = Some(entry);
     player.last_death_location = Some(BlockPos::containing(position));
     player.in_combat = false;
+    // `Player.dropEquipment` / 重生后的 `transferInventoryXpAndScore` 只在
+    // `keepInventory` 为假时把经验清成 0，官方读盘状态也这样。
     player.sync.metadata_dirty = true;
 
     // `LivingEntity.die` 的 `broadcastEntityEvent(entity, 3)`：死亡动画给跟踪者。

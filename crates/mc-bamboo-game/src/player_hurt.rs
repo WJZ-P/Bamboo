@@ -61,6 +61,9 @@ pub(crate) fn tick(region: &mut Region) {
     let mut starve = Vec::new();
     for (id, player) in &mut region.players {
         player.entity_ticks = player.entity_ticks.wrapping_add(1);
+        // 官方 `ServerPlayer.tick` 在死亡后仍推进，但 `baseTick` 只在
+        // `isAlive()` 时跑；`FoodData.tick` 仍在 `doTick` 里跑。Bamboo 的
+        // 死亡界面等待期间跳过回血，避免给死者回血。
         if player.dead {
             continue;
         }
@@ -72,7 +75,8 @@ pub(crate) fn tick(region: &mut Region) {
             // `LivingEntity.baseTick` 每刻推一次死亡动画，20 刻后才 discard。
             player.health.death_time += 1;
         }
-        match player.health.tick_food(difficulty, natural_regen) {
+        let food_tick = player.health.tick_food(difficulty, natural_regen);
+        match food_tick {
             crate::player_health::FoodTick::Heal(amount) => player.health.heal(amount),
             crate::player_health::FoodTick::Starve => starve.push(*id),
             crate::player_health::FoodTick::Idle => {}
@@ -100,7 +104,8 @@ pub(crate) fn tick(region: &mut Region) {
             id,
             mc_bamboo_blocks::entity::mob::DamageSource::environment(
                 mc_bamboo_blocks::entity::mob::DamageKind::Starve,
-            ),
+            )
+            .with_non_player_cause(true),
             1.0,
             &mut None,
         );
