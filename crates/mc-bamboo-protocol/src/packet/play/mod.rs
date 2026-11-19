@@ -74,6 +74,14 @@ pub struct Login<'a> {
     ///
     /// Official `ClientboundLoginPacket.enforcesSecureChat`.
     pub enforces_secure_chat: bool,
+    /// 官方 `showDeathScreen`：`PlayerList.placeNewPlayer` 读
+    /// `IMMEDIATE_RESPAWN`，规则开着就不显示死亡界面（客户端收到
+    /// `player_combat_kill` 后直接发 `PERFORM_RESPAWN`）。
+    ///
+    /// Official `showDeathScreen`: `PlayerList.placeNewPlayer` reads
+    /// `IMMEDIATE_RESPAWN`; with the rule on the client skips the death
+    /// screen and sends `PERFORM_RESPAWN` right after `player_combat_kill`.
+    pub show_death_screen: bool,
 }
 
 impl ClientboundPacket for Login<'_> {
@@ -91,8 +99,9 @@ impl ClientboundPacket for Login<'_> {
         write_varint(out, self.view_distance);
         write_varint(out, self.simulation_distance);
         // 依次是：隐藏调试信息、显示死亡画面、限制合成。
+        // Reduced debug info, show death screen, do limited crafting.
         write_bool(out, false);
-        write_bool(out, true);
+        write_bool(out, self.show_death_screen);
         write_bool(out, false);
 
         write_varint(out, self.dimension_type);
@@ -479,7 +488,16 @@ impl GameEvent {
     /// 客户端收到后才结束加载画面。
     pub const LEVEL_CHUNKS_LOAD_START: u8 = 13;
     /// 重生点方块失效，官方 `NO_RESPAWN_BLOCK_AVAILABLE`。
-    pub const NO_RESPAWN_BLOCK_AVAILABLE: u8 = 11;
+    pub const NO_RESPAWN_BLOCK_AVAILABLE: u8 = 0;
+    /// `immediate_respawn` 规则变了，参数是 1 / 0。官方
+    /// `MinecraftServer.onGameRuleChanged` 发给全部玩家。
+    ///
+    /// The `immediate_respawn` rule changed, with 1 / 0 as the parameter.
+    /// Vanilla `MinecraftServer.onGameRuleChanged` broadcasts it to everyone.
+    pub const IMMEDIATE_RESPAWN: u8 = 11;
+    /// `limited_crafting` 规则变了，参数是 1 / 0。
+    /// The `limited_crafting` rule changed, with 1 / 0 as the parameter.
+    pub const LIMITED_CRAFTING: u8 = 12;
 }
 
 impl ClientboundPacket for GameEvent {

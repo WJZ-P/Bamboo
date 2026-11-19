@@ -62,8 +62,11 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.TickRateManager;
 import net.minecraft.world.damagesource.DamageSources;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -290,7 +293,33 @@ public final class MovementOracle {
                 new Vec3(0.5, 81.0, 0.5), true,
                 List.of(new Placed(snow, Blocks.POWDER_SNOW.defaultBlockState())),
                 List.of(move(new Vec3(0.5, 80.0, 0.5), true)), true);
-        return 15;
+        // S2：效果对服务端移动校验的影响。`player.addEffect` 会发包，假世界
+        // 的 RecordingListener 也收得到，但本样例只比位置 / 拉回 / 踢出 / 摔落距离。
+        List<Step> hover = new ArrayList<>();
+        hover.add(move(air, false));
+        for (int i = 0; i < 85; i++) hover.add(serverTick());
+        // 漂浮：官方 `handleMovePlayer` 不把悬空记成飞行，85 刻也不会踢。
+        play(official, out, "effect_levitation_no_kick", GameType.SURVIVAL, false, false,
+                false, true, air, false, List.of(), hover, false,
+                List.of(new int[] {registryId(official, MobEffects.LEVITATION), 1}));
+        // 缓降：下落时 `fallDistance` 一直清零。
+        play(official, out, "effect_slow_falling_fall", GameType.SURVIVAL, false, false,
+                false, true, air, false, List.of(),
+                List.of(move(air.add(0.0, -2.0, 0.0), false), tickEnd(), serverTick()), false,
+                List.of(new int[] {registryId(official, MobEffects.SLOW_FALLING), 0}));
+        // 跳跃提升：`getJumpPower` 每级 +0.1，移动包的高度按官方来。
+        play(official, out, "effect_jump_boost", GameType.SURVIVAL, false, false,
+                false, true, air, true, List.of(),
+                List.of(move(new Vec3(0.5, 80.52, 0.5), false)), false,
+                List.of(new int[] {registryId(official, MobEffects.JUMP_BOOST), 1}));
+        // 没有效果时的对照：85 刻悬空会被踢。
+        play(official, out, "effect_none_kicks", GameType.SURVIVAL, false, false,
+                false, true, air, false, List.of(), new ArrayList<>(hover), false, List.of());
+        return 19;
+    }
+
+    private static int registryId(Official official, Holder<net.minecraft.world.effect.MobEffect> holder) {
+        return official.registries.lookupOrThrow(Registries.MOB_EFFECT).getId(holder.value());
     }
 
     private static int random(Official official, Writer out, int cases, long seed) throws Exception {
@@ -359,7 +388,7 @@ public final class MovementOracle {
             List<Placed> blocks,
             List<Step> packets)
             throws Exception {
-        play(official, out, name, mode, shift, sprint, flying, loaded, start, onGround, blocks, packets, false);
+        play(official, out, name, mode, shift, sprint, flying, loaded, start, onGround, blocks, packets, false, List.of());
     }
 
     private static void play(
@@ -376,6 +405,26 @@ public final class MovementOracle {
             List<Placed> blocks,
             List<Step> packets,
             boolean leatherBoots)
+            throws Exception {
+        play(official, out, name, mode, shift, sprint, flying, loaded, start, onGround, blocks,
+                packets, leatherBoots, List.of());
+    }
+
+    private static void play(
+            Official official,
+            Writer out,
+            String name,
+            GameType mode,
+            boolean shift,
+            boolean sprint,
+            boolean flying,
+            boolean loaded,
+            Vec3 start,
+            boolean onGround,
+            List<Placed> blocks,
+            List<Step> packets,
+            boolean leatherBoots,
+            List<int[]> effects)
             throws Exception {
         session = new Session();
         FakeLevel level = FakeLevel.create(official);
@@ -395,6 +444,13 @@ public final class MovementOracle {
                     new ItemStack(Items.LEATHER_BOOTS, 1));
         }
         player.setSprinting(sprint);
+        for (int[] effect : effects) {
+            var holder = official.registries.lookupOrThrow(Registries.MOB_EFFECT)
+                    .get(effect[0]).orElseThrow();
+            // 直接写 activeEffects，不触发 `onEffectAdded` 的包；本样例只比移动校验。
+            player.getActiveEffectsMap().put(holder,
+                    new MobEffectInstance(holder, Integer.MAX_VALUE / 2, effect[1]));
+        }
         player.getAbilities().flying = flying && (mode == GameType.CREATIVE || mode == GameType.SPECTATOR);
         updatePose(player);
         player.noPhysics = player.isSpectator();
@@ -452,6 +508,12 @@ public final class MovementOracle {
                     .append(']');
         }
         line.append("],\"boots\":").append(leatherBoots);
+        line.append(",\"effects\":[");
+        for (int i = 0; i < effects.size(); i++) {
+            if (i > 0) line.append(',');
+            line.append('[').append(effects.get(i)[0]).append(',').append(effects.get(i)[1]).append(']');
+        }
+        line.append(']');
         line.append(",\"packets\":[");
         for (int i = 0; i < packets.size(); i++) {
             if (i > 0) {
@@ -471,6 +533,11 @@ public final class MovementOracle {
 
     private static void serverTick(RecordingListener listener, ServerPlayer player) throws Exception {
         updatePose(player);
+        // `LivingEntity.aiStep` 的缓降 / 漂浮分支：每刻清零 `fallDistance`。
+        // 本样例不跑完整的 travel，所以单独补这一段，Bamboo 的 finish_tick 同样做。
+        if (player.hasEffect(MobEffects.SLOW_FALLING) || player.hasEffect(MobEffects.LEVITATION)) {
+            player.resetFallDistance();
+        }
         listener.resetPosition();
         player.noPhysics = player.isSpectator();
         int tick = getInt(listener, "tickCount") + 1;

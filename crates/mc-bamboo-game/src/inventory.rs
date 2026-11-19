@@ -688,6 +688,16 @@ pub fn receive_like_player(
     left
 }
 
+/// 吃完东西后同步物品栏槽位（官方 `finishUsingItem` 之后）。
+///
+/// Syncs the inventory slots after `finishUsingItem`.
+pub(crate) fn sync_after_consume(region: &mut Region, id: PlayerId) {
+    let Region { players, links, .. } = region;
+    if let Some(player) = players.get_mut(&id) {
+        send_all_slots(player, links);
+    }
+}
+
 /// 把物品栏里每个槽发给这名玩家。`/give` 和 `/clear` 改完之后用它同步。
 ///
 /// Sends every inventory slot. `/give` and `/clear` use this after they change the inventory.

@@ -774,6 +774,10 @@ fn check_player_fields(report: &mut Report, name: &str, data: &PlayerData, field
         format!("{name}: DataVersion"),
     );
     report.check(get("air") == json!(data.air), format!("{name}: Air"));
+    report.check(
+        get("ticks_frozen") == json!(data.ticks_frozen),
+        format!("{name}: TicksFrozen"),
+    );
     report.check(get("fire") == json!(data.fire), format!("{name}: Fire"));
     report.check(
         get("on_ground") == json!(data.on_ground),
@@ -835,6 +839,22 @@ fn check_player_fields(report: &mut Report, name: &str, data: &PlayerData, field
     report.check(
         get("food_level") == json!(data.food_level),
         format!("{name}: foodLevel"),
+    );
+    // `active_effects`：把 Bamboo 写出的列表按官方 codec 再编一次，
+    // 和规范 JSON 按键比较；空表时官方不写这个键。
+    let expected_effects = match &data.active_effects {
+        Some(Tag::List(effects)) if !effects.is_empty() => {
+            canonical_tag(&Tag::List(effects.clone()))
+        }
+        _ => json!({"type": 9, "values": []}),
+    };
+    report.check(
+        get("active_effects") == expected_effects,
+        format!(
+            "{name}: active_effects official={} bamboo={}",
+            get("active_effects"),
+            expected_effects
+        ),
     );
     report.check(
         get("selected_item_slot") == json!(data.selected_item_slot),
@@ -1143,6 +1163,31 @@ fn player_cases() -> Vec<(String, PlayerData)> {
     died.last_death_location = Some((player_data::OVERWORLD.to_owned(), [-1234, -59, 9876]));
     cases.push(("player last death location".into(), died));
 
+    // S2：`active_effects` 的非默认往返（`id` / `amplifier` / `duration` /
+    // `ambient` / `show_particles` / `show_icon` / `hidden_effect`）。
+    let mut with_effects = cases[0].1.clone();
+    // 用生产代码的 `effects_tag` 造标签，官方 codec 的省键规则由它负责。
+    use mc_bamboo_blocks::entity::mob::{
+        effects::{EffectInstance, EffectMap},
+        nbt::effects_tag,
+    };
+    let mut effects = EffectMap::new();
+    let mut regeneration = EffectInstance::with_flags(9, 1234, 2, true, false);
+    regeneration.show_icon = true;
+    regeneration.hidden = Some(Box::new(EffectInstance::new(9, 600)));
+    effects.add(regeneration);
+    let mut speed = EffectInstance::with_amplifier(0, -1, 255);
+    speed.ambient = false;
+    effects.add(speed);
+    with_effects.active_effects = Some(effects_tag(&effects));
+    cases.push(("player active effects".into(), with_effects));
+
+    let mut frozen = cases[0].1.clone();
+    frozen.fire = 200;
+    frozen.air = 137;
+    frozen.ticks_frozen = 77;
+    cases.push(("player fire air and frost".into(), frozen));
+
     let mut unknown = cases[3].1.clone();
     let mut tag = unknown.encode();
     if let Tag::Compound(entries) = &mut tag {
@@ -1187,6 +1232,7 @@ fn player_spec(data: &PlayerData) -> Value {
         "fall_distance": data.fall_distance,
         "fire": data.fire,
         "air": data.air,
+        "ticks_frozen": data.ticks_frozen,
         "on_ground": data.on_ground,
         "invulnerable": data.invulnerable,
         "portal_cooldown": data.portal_cooldown,
@@ -1227,6 +1273,63 @@ fn player_spec(data: &PlayerData) -> Value {
     }
     if !data.preserved.is_empty() {
         spec["unknown_tag"] = json!("keep");
+    }
+    if let Some(Tag::List(effects)) = &data.active_effects {
+        let rows: Vec<Value> = effects
+            .iter()
+            .filter_map(|tag| {
+                let Tag::Compound(entries) = tag else {
+                    return None;
+                };
+                let get = |key: &str| {
+                    entries
+                        .iter()
+                        .rev()
+                        .find(|(name, _)| name == key)
+                        .map(|(_, value)| value.clone())
+                };
+                let text = |key: &str| match get(key) {
+                    Some(Tag::String(value)) => value,
+                    _ => String::new(),
+                };
+                let int = |key: &str, default: i32| match get(key) {
+                    Some(Tag::Int(value)) => value,
+                    _ => default,
+                };
+                let bool_flag = |key: &str, default: bool| match get(key) {
+                    Some(Tag::Byte(value)) => value != 0,
+                    _ => default,
+                };
+                let mut row = json!({
+                    "id": text("id"),
+                    "amplifier": int("amplifier", 0),
+                    "duration": int("duration", 0),
+                    "ambient": bool_flag("ambient", false),
+                    "show_particles": bool_flag("show_particles", true),
+                    "show_icon": bool_flag("show_icon", bool_flag("show_particles", true)),
+                });
+                if get("hidden_effect").is_some() {
+                    // 官方 codec 的 `hidden_effect` 有自己的默认值；这里只放一层，
+                    // 让 Java 侧 `MobEffectInstance.CODEC.parse` 补齐缺省键。
+                    if let Some(Tag::Compound(hidden)) = get("hidden_effect") {
+                        row["hidden_effect"] = json!({
+                            "amplifier": hidden.iter().rev()
+                                .find(|(k, _)| k == "amplifier")
+                                .and_then(|(_, v)| match v { Tag::Int(v) => Some(*v), _ => None })
+                                .unwrap_or(0),
+                            "duration": hidden.iter().rev()
+                                .find(|(k, _)| k == "duration")
+                                .and_then(|(_, v)| match v { Tag::Int(v) => Some(*v), _ => None })
+                                .unwrap_or(0),
+                            "ambient": false,
+                            "show_particles": true,
+                        });
+                    }
+                }
+                Some(row)
+            })
+            .collect();
+        spec["active_effects"] = json!(rows);
     }
     spec
 }

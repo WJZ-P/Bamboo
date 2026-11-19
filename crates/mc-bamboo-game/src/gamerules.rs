@@ -18,10 +18,40 @@ use mc_bamboo_command::{
     permission,
 };
 use mc_bamboo_data::gamerules::{self, GameRuleKind, RULES};
-use mc_bamboo_protocol::{packet::play::GameRuleValues, text::Component};
+use mc_bamboo_protocol::{
+    packet::play::{GameEvent, GameRuleValues},
+    text::Component,
+};
 use tracing::warn;
 
-use crate::{inbound::PlayerId, region::Region};
+use crate::{inbound::PlayerId, links, region::Region};
+
+/// 官方 `MinecraftServer.onGameRuleChanged`：只有 `IMMEDIATE_RESPAWN` 和
+/// `LIMITED_CRAFTING` 会额外给全部玩家发一个 `game_event`，参数是新规则的
+/// 1 / 0（`REDUCED_DEBUG_INFO` 走 22 / 23 两个实体事件，Bamboo 这一期没建模）。
+/// 规则刚发布到岛上的快照之后调用，读的就是新值。
+///
+/// Vanilla `MinecraftServer.onGameRuleChanged`: only `IMMEDIATE_RESPAWN` and
+/// `LIMITED_CRAFTING` additionally broadcast a `game_event` to every player,
+/// with the new rule's 1 / 0 as parameter (`REDUCED_DEBUG_INFO` uses entity
+/// events 22 / 23, not modelled yet). Call after publishing the new snapshot;
+/// the value read here is the new one.
+pub(crate) fn on_rule_changed(region: &mut Region, index: usize) {
+    let event = match index {
+        gamerules::IMMEDIATE_RESPAWN => GameEvent::IMMEDIATE_RESPAWN,
+        gamerules::LIMITED_CRAFTING => GameEvent::LIMITED_CRAFTING,
+        _ => return,
+    };
+    let frames = links::encode_frames(&GameEvent {
+        event,
+        param: if region.global.rules.bool(index) {
+            1.0
+        } else {
+            0.0
+        },
+    });
+    region.links.broadcast(&frames);
+}
 
 /// 一次赋值的结果。
 ///
@@ -281,6 +311,7 @@ pub(crate) fn apply_set_packet(
         match global.rules_mut().assign(index, &value) {
             Assignment::Updated(text) => {
                 global.publish(region);
+                on_rule_changed(region, index);
                 broadcast_set(region, short, &text);
             }
             Assignment::Unchanged(text) | Assignment::Disabled(text) => {

@@ -2,9 +2,10 @@
 //! `AgeableMob`、`Animal`、`Cow` 各层的 `addAdditionalSaveData` / `readAdditionalSaveData`。
 //!
 //! 读写的键、类型、缺省值和「只在非默认时写」的条件逐条照官方字节码。官方有、这里
-//! 不建模的键（效果、装备、拴绳、`data`、睡觉位置……）读进来放进
-//! [`Mob::passthrough`]，存盘时原样写回；不认识的键和官方一样丢掉。`/summon` 的 NBT
-//! 也走这里（官方 `SummonCommand` 用 `EntityType.loadEntityRecursive`）。
+//! 不建模的键（装备、拴绳、`data`、睡觉位置……）读进来放进
+//! [`Mob::passthrough`]，存盘时原样写回；不认识的键和官方一样丢掉。
+//! `active_effects` 按官方 `MobEffectInstance.CODEC` 建模读写。
+//! `/summon` 的 NBT 也走这里（官方 `SummonCommand` 用 `EntityType.loadEntityRecursive`）。
 //!
 //! Mob archive NBT, following vanilla `Entity.saveWithoutId` / `load` and each
 //! layer's additional save data. Vanilla keys that are not modelled go into
@@ -12,12 +13,13 @@
 //! like vanilla does. `/summon` NBT goes through here too.
 
 use mc_bamboo_core::{BlockPos, Vec3};
-use mc_bamboo_data::registries::attribute;
+use mc_bamboo_data::registries::{attribute, mob_effect};
 use mc_bamboo_nbt::Tag;
 
 use super::{
     CowSoundVariant, CowVariant, Mob, MobType,
     attributes::{Attribute, Modifier, Operation},
+    effects::{EffectInstance, EffectMap},
     living,
 };
 use crate::{
@@ -29,7 +31,6 @@ use crate::{
 ///
 /// Vanilla keys kept verbatim and written back.
 const PASSTHROUGH: &[&str] = &[
-    "active_effects",
     "equipment",
     "drop_chances",
     "leash",
@@ -44,6 +45,136 @@ const PASSTHROUGH: &[&str] = &[
 /// `Brain.Packed.CODEC` 写一头牛的空大脑。
 fn empty_brain() -> Tag {
     Tag::Compound(vec![("memories".to_owned(), Tag::Compound(Vec::new()))])
+}
+
+/// `MobEffectInstance.CODEC` 的一项：`id` 加 `Details` 的六个字段（可递归的
+/// `hidden_effect`）。官方 `optionalFieldOf` 在等于缺省值时省键：
+/// `amplifier` 用 UNSIGNED_BYTE 编（BYTE 标签）、`duration` 用 INT、
+/// `ambient` 缺省 false、`show_particles` 缺省 true；`show_icon` 是
+/// `Optional<Boolean>` 但 getter 永远返回 `Optional.of(...)`，所以总写。
+/// 读档时缺省值由 `Details.create` 补齐（`show_icon` 缺省等于 `show_particles`）。
+///
+/// One entry of `MobEffectInstance.CODEC`. Vanilla's `optionalFieldOf`
+/// omits default values; `show_icon` is always written.
+pub fn effect_tag(instance: &EffectInstance) -> Tag {
+    let mut out = vec![(
+        "id".to_owned(),
+        Tag::String(
+            mob_effect::name_of(instance.effect)
+                .unwrap_or("minecraft:speed")
+                .to_owned(),
+        ),
+    )];
+    put_details(&mut out, instance);
+    Tag::Compound(out)
+}
+
+/// `Details.MAP_CODEC` 的字段（递归的 `hidden_effect` 没有 `id`）。
+fn effect_details_tag(instance: &EffectInstance) -> Tag {
+    let mut out = Vec::new();
+    put_details(&mut out, instance);
+    Tag::Compound(out)
+}
+
+fn put_details(out: &mut Vec<(String, Tag)>, instance: &EffectInstance) {
+    // `ExtraCodecs.UNSIGNED_BYTE` 在 NBT 里是 ByteTag。
+    if instance.amplifier != 0 {
+        put(
+            out,
+            "amplifier",
+            Tag::Byte(instance.amplifier.min(255) as i8),
+        );
+    }
+    if instance.duration != 0 {
+        put(out, "duration", Tag::Int(instance.duration));
+    }
+    if instance.ambient {
+        put(out, "ambient", Tag::Byte(1));
+    }
+    if !instance.visible {
+        put(out, "show_particles", Tag::Byte(0));
+    }
+    put(out, "show_icon", Tag::Byte(i8::from(instance.show_icon)));
+    if let Some(hidden) = &instance.hidden {
+        put(out, "hidden_effect", effect_details_tag(hidden));
+    }
+}
+
+/// `active_effects` 列表，按效果 ID 升序（官方按 HashMap 序，这里取确定顺序）。
+pub fn effects_tag(effects: &EffectMap) -> Tag {
+    Tag::List(effects.entries().iter().map(effect_tag).collect())
+}
+
+/// 读一项 `MobEffectInstance.CODEC`。未知效果 ID 官方会解码失败整表丢弃，
+/// 这里按「跳过这一项」处理，坏数据不会 panic。
+///
+/// Reads one `MobEffectInstance.CODEC` entry. Vanilla fails the whole list on
+/// an unknown effect id; here bad entries are skipped so disk data cannot panic.
+pub fn read_effect(tag: &Tag) -> Option<EffectInstance> {
+    let id = tag::string_or(tag, "id").and_then(mob_effect::by_name)?;
+    let mut instance = EffectInstance {
+        effect: id,
+        duration: tag::int_or(tag, "duration", 0),
+        amplifier: amplifier_field(tag),
+        ambient: tag::bool_or(tag, "ambient", false),
+        visible: tag::bool_or(tag, "show_particles", true),
+        show_icon: match tag::field(tag, "show_icon") {
+            Some(value) => tag::java_i64(value).unwrap_or(0) != 0,
+            None => tag::bool_or(tag, "show_particles", true),
+        },
+        hidden: None,
+    };
+    instance.hidden = tag::field(tag, "hidden_effect")
+        .map(|hidden| read_hidden_effect(hidden, id))
+        .map(Box::new);
+    Some(instance)
+}
+
+/// `ExtraCodecs.UNSIGNED_BYTE` 把 0..255 存成 Java 的 byte（-128..127），
+/// 读回来要按无符号还原。官方写 `255` 时 NBT 里是 `Byte(-1)`。
+///
+/// `ExtraCodecs.UNSIGNED_BYTE` stores 0..255 in a Java byte; read it back
+/// as unsigned (255 is written as `Byte(-1)`).
+fn amplifier_field(tag: &Tag) -> i32 {
+    match tag::field(tag, "amplifier") {
+        Some(Tag::Byte(value)) => i32::from(*value as u8),
+        Some(value) => tag::java_i32(value).unwrap_or(0).clamp(0, 255),
+        None => 0,
+    }
+}
+
+fn read_hidden_effect(tag: &Tag, effect: i32) -> EffectInstance {
+    let mut instance = EffectInstance::new(effect, tag::int_or(tag, "duration", 0));
+    instance.amplifier = amplifier_field(tag);
+    instance.ambient = tag::bool_or(tag, "ambient", false);
+    instance.visible = tag::bool_or(tag, "show_particles", true);
+    instance.show_icon = match tag::field(tag, "show_icon") {
+        Some(value) => tag::java_i64(value).unwrap_or(0) != 0,
+        None => instance.visible,
+    };
+    instance.hidden = tag::field(tag, "hidden_effect")
+        .map(|hidden| read_hidden_effect(hidden, effect))
+        .map(Box::new);
+    instance
+}
+
+/// 读实体存档里的 `active_effects` 字段。不是列表时按空表处理。
+pub fn read_effects(tag: &Tag) -> EffectMap {
+    tag::field(tag, "active_effects")
+        .map(read_effects_tag)
+        .unwrap_or_default()
+}
+
+/// 读一个已经是 `active_effects` 列表的标签（玩家存档层直接持有这个标签）。
+///
+/// Reads a tag that already is the `active_effects` list.
+pub fn read_effects_tag(tag: &Tag) -> EffectMap {
+    let mut map = EffectMap::new();
+    if let Tag::List(entries) = tag {
+        let instances: Vec<EffectInstance> = entries.iter().filter_map(read_effect).collect();
+        map.load(instances);
+    }
+    map
 }
 
 /// 写一个生物：官方 `Entity.save` 的结果（含 `id`）。
@@ -121,6 +252,9 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         Tag::Int(mob.impulse_grace_time),
     );
     put(&mut out, "attributes", attributes_tag(mob));
+    if !mob.effects.is_empty() {
+        put(&mut out, "active_effects", effects_tag(&mob.effects));
+    }
     put(&mut out, "FallFlying", Tag::Byte(i8::from(mob.fall_flying)));
     put(&mut out, "Brain", empty_brain());
     if let Some(uuid) = &mob.last_hurt_by_player_ref {
@@ -282,6 +416,12 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         if let Some(Tag::List(entries)) = tag::field(tag, "attributes") {
             apply_attributes(mob, entries);
         }
+        // 官方先读 `attributes` 再读 `active_effects`，然后按效果重建修饰，
+        // `Health` 才按新的最大血量夹。读盘不触发 `onEffectAdded` 的包。
+        // Vanilla reads `attributes` then `active_effects`, rebuilds the
+        // modifiers, and only then clamps `Health`; loading sends no packets.
+        mob.effects = read_effects(tag);
+        mob.effects.rebuild_attributes(&mut mob.attributes);
         let max = mob.attributes.value(attribute::MAX_HEALTH) as f32;
         mob.health = mc_bamboo_core::mth::clamp_f32(tag::float_or(tag, "Health", max), 0.0, max);
         mob.hurt_time = i32::from(tag::short_or(tag, "HurtTime", 0));
@@ -503,5 +643,87 @@ fn uuid_field(tag: &Tag, key: &str) -> Option<[u8; 16]> {
             Some(out)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_trip(instances: Vec<EffectInstance>) -> EffectMap {
+        let mut map = EffectMap::new();
+        map.load(instances);
+        let tag = Tag::Compound(vec![("active_effects".to_owned(), effects_tag(&map))]);
+        read_effects(&tag)
+    }
+
+    #[test]
+    fn effect_archive_round_trips_all_fields() {
+        let mut instance =
+            EffectInstance::with_flags(mob_effect::REGENERATION, 1234, 3, true, false);
+        instance.show_icon = false;
+        instance.hidden = Some(Box::new(EffectInstance::with_amplifier(
+            mob_effect::REGENERATION,
+            600,
+            1,
+        )));
+        let mut infinite = EffectInstance::with_amplifier(mob_effect::SPEED, -1, 255);
+        infinite.ambient = true;
+        let map = round_trip(vec![instance.clone(), infinite.clone()]);
+        assert_eq!(map.entries(), vec![infinite, instance]);
+    }
+
+    #[test]
+    fn effect_archive_defaults_match_the_vanilla_codec() {
+        let tag = effect_tag(&EffectInstance::new(mob_effect::SPEED, 100));
+        assert_eq!(tag::string_or(&tag, "id"), Some("minecraft:speed"));
+        // 官方 codec 省掉等于缺省值的键：`amplifier` / `ambient` /
+        // `show_particles` 都不写，`duration` 和 `show_icon` 写。
+        assert!(tag::field(&tag, "amplifier").is_none());
+        assert!(tag::field(&tag, "ambient").is_none());
+        assert!(tag::field(&tag, "show_particles").is_none());
+        assert_eq!(tag::int_or(&tag, "duration", -1), 100);
+        assert!(tag::bool_or(&tag, "show_icon", false));
+        // 非缺省值时写 Byte 标签，读回来按任意数值标签取值。
+        let tagged = effect_tag(&EffectInstance::with_flags(
+            mob_effect::REGENERATION,
+            1234,
+            2,
+            true,
+            false,
+        ));
+        assert!(matches!(
+            tag::field(&tagged, "amplifier"),
+            Some(Tag::Byte(2))
+        ));
+        assert_eq!(tag::int_or(&tagged, "amplifier", -1), 2);
+        assert!(tag::bool_or(&tagged, "ambient", false));
+        assert!(!tag::bool_or(&tagged, "show_particles", true));
+        // 改坏确认：把 show_icon 写成 false，往返会丢掉图标。
+        let mut broken = EffectInstance::new(mob_effect::SPEED, 100);
+        broken.show_icon = false;
+        assert!(!tag::bool_or(&effect_tag(&broken), "show_icon", true));
+        assert!(tag::bool_or(&tag, "show_icon", false));
+    }
+
+    #[test]
+    fn unknown_effect_ids_and_bad_tags_are_skipped() {
+        let tag = Tag::Compound(vec![(
+            "active_effects".to_owned(),
+            Tag::List(vec![
+                Tag::Compound(vec![
+                    (
+                        "id".to_owned(),
+                        Tag::String("minecraft:not_an_effect".to_owned()),
+                    ),
+                    ("duration".to_owned(), Tag::Int(100)),
+                ]),
+                Tag::String("not a compound".to_owned()),
+                effect_tag(&EffectInstance::new(mob_effect::HASTE, 42)),
+            ]),
+        )]);
+        let map = read_effects(&tag);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(mob_effect::HASTE).unwrap().duration, 42);
     }
 }

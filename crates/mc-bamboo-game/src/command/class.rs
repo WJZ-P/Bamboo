@@ -86,6 +86,7 @@ pub(crate) const CLASSES: &[(&str, CommandClass)] = &[
     ("random", CommandClass::Global),
     ("kill", CommandClass::Island),
     ("damage", CommandClass::Island),
+    ("effect", CommandClass::Island),
     ("teleport", CommandClass::CrossIsland),
     ("tp", CommandClass::CrossIsland),
     ("give", CommandClass::CrossIsland),
@@ -179,6 +180,7 @@ pub(crate) const SCOPES: &[(&str, CommandScope)] = &[
     ("random", CommandScope::Players),
     ("kill", CommandScope::World),
     ("damage", CommandScope::World),
+    ("effect", CommandScope::World),
     ("teleport", CommandScope::World),
     ("tp", CommandScope::World),
     ("give", CommandScope::Players),
@@ -248,12 +250,12 @@ mod tests {
             };
             roots.push((name.clone(), child));
         }
-        // 4.4 的 51 个加上 `/summon`、`/kill`、`/damage`、`/execute`、`/data`、
-        // `/experience`、`/xp`。
-        // The 51 of 4.4 plus `/summon`, `/kill`, `/damage`, `/execute`, `/data`,
-        // `/experience`, `/xp`.
-        assert_eq!(roots.len(), 58);
-        assert_eq!(CLASSES.len(), 58);
+        // 4.4 的 51 个加上 `/summon`、`/kill`、`/damage`、`/effect`、`/execute`、
+        // `/data`、`/experience`、`/xp`。
+        // The 51 of 4.4 plus `/summon`, `/kill`, `/damage`, `/effect`,
+        // `/execute`, `/data`, `/experience`, `/xp`.
+        assert_eq!(roots.len(), 59);
+        assert_eq!(CLASSES.len(), 59);
         // 每个顶层字面量都定了范围（计划 4.5），不多不少。
         // Every root literal has a scope (plan 4.5), no more and no fewer.
         let scoped: BTreeSet<&str> = SCOPES.iter().map(|(name, _)| *name).collect();
@@ -301,30 +303,26 @@ mod tests {
     /// use it; otherwise it cannot parse and nothing is joined.
     #[test]
     fn a_command_the_sender_may_not_use_borrows_only_players() {
-        use crate::{
-            command::{borrow_for, borrow_for_console},
-            island::Borrow,
-        };
         use mc_bamboo_command::permission;
-        assert!(matches!(
-            borrow_for("setblock 1 2 3 stone", permission::GAMEMASTERS),
-            Borrow::World
+        // 权限门：不够用这条命令的顶层字面量时不能因为一条命令让全服顿一下。
+        // Permission gate: a level that may not use the root must not be able
+        // to stall the whole server with one command.
+        assert!(crate::command::may_use_root(
+            "setblock 1 2 3 stone",
+            permission::GAMEMASTERS
         ));
-        assert!(matches!(
-            borrow_for("setblock 1 2 3 stone", permission::ALL),
-            Borrow::All
+        assert!(!crate::command::may_use_root(
+            "setblock 1 2 3 stone",
+            permission::ALL
         ));
-        assert!(matches!(
-            borrow_for("/gamemode creative", permission::ALL),
-            Borrow::All
+        assert!(!crate::command::may_use_root(
+            "/gamemode creative",
+            permission::ALL
         ));
-        assert!(matches!(
-            borrow_for("msg a hi", permission::OWNERS),
-            Borrow::All
-        ));
-        assert!(matches!(
-            borrow_for_console("fill 0 0 0 1 1 1 stone"),
-            Borrow::World
+        assert!(crate::command::may_use_root("msg a hi", permission::OWNERS));
+        assert!(crate::command::may_use_root(
+            "fill 0 0 0 1 1 1 stone",
+            permission::OWNERS
         ));
     }
 }

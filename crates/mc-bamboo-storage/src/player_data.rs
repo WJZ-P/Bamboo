@@ -73,6 +73,8 @@ pub struct PlayerData {
     pub fall_distance: f64,
     pub fire: i16,
     pub air: i16,
+    /// `Entity.TicksFrozen`，只在大于 0 时写。
+    pub ticks_frozen: i32,
     pub on_ground: bool,
     pub invulnerable: bool,
     pub portal_cooldown: i32,
@@ -102,6 +104,11 @@ pub struct PlayerData {
     pub food_tick_timer: i32,
     pub food_saturation: f32,
     pub food_exhaustion: f32,
+    /// `LivingEntity.active_effects` 的官方 NBT 列表。空表时官方不写这个键；
+    /// `None` 表示不写，`Some(list)` 按 `MobEffectInstance.CODEC` 原样写回。
+    ///
+    /// Vanilla `LivingEntity.active_effects`: the list is omitted when empty.
+    pub active_effects: Option<Tag>,
     pub abilities: Abilities,
     pub seen_credits: bool,
     pub spawn_extra_particles_on_fall: bool,
@@ -168,6 +175,7 @@ impl Default for PlayerData {
             fall_distance: 0.0,
             fire: 0,
             air: DEFAULT_AIR,
+            ticks_frozen: 0,
             on_ground: false,
             invulnerable: false,
             portal_cooldown: 0,
@@ -193,6 +201,7 @@ impl Default for PlayerData {
             food_tick_timer: 0,
             food_saturation: 5.0,
             food_exhaustion: 0.0,
+            active_effects: None,
             abilities: Abilities::default(),
             seen_credits: false,
             spawn_extra_particles_on_fall: false,
@@ -214,6 +223,7 @@ const KNOWN_KEYS: &[&str] = &[
     "fall_distance",
     "Fire",
     "Air",
+    "TicksFrozen",
     "OnGround",
     "Invulnerable",
     "PortalCooldown",
@@ -236,6 +246,7 @@ const KNOWN_KEYS: &[&str] = &[
     "foodTickTimer",
     "foodSaturationLevel",
     "foodExhaustionLevel",
+    "active_effects",
     "abilities",
     "EnderItems",
     "Dimension",
@@ -310,6 +321,9 @@ impl PlayerData {
         push(&mut root, "fall_distance", zero_double(self.fall_distance));
         push(&mut root, "Fire", Tag::Short(self.fire));
         push(&mut root, "Air", Tag::Short(self.air));
+        if self.ticks_frozen > 0 {
+            push(&mut root, "TicksFrozen", Tag::Int(self.ticks_frozen));
+        }
         push(&mut root, "OnGround", Tag::Byte(i8::from(self.on_ground)));
         push(
             &mut root,
@@ -366,6 +380,9 @@ impl PlayerData {
             "foodExhaustionLevel",
             zero_float(self.food_exhaustion),
         );
+        if let Some(list) = &self.active_effects {
+            push(&mut root, "active_effects", list.clone());
+        }
         push(&mut root, "abilities", self.abilities_tag());
         if let Ok(items) = slots::encode_list(&self.ender_items) {
             push(&mut root, "EnderItems", items);
@@ -406,6 +423,7 @@ impl PlayerData {
         data.fall_distance = opt_f64(entries, "fall_distance", 0.0)?;
         data.fire = opt_short(entries, "Fire", 0)?;
         data.air = opt_short(entries, "Air", DEFAULT_AIR)?;
+        data.ticks_frozen = opt_int(entries, "TicksFrozen", 0)?;
         data.on_ground = opt_bool(entries, "OnGround", false)?;
         data.invulnerable = opt_bool(entries, "Invulnerable", false)?;
         data.portal_cooldown = opt_int(entries, "PortalCooldown", 0)?;
@@ -429,6 +447,7 @@ impl PlayerData {
         data.food_tick_timer = opt_int(entries, "foodTickTimer", 0)?;
         data.food_saturation = opt_f32(entries, "foodSaturationLevel", 5.0)?;
         data.food_exhaustion = opt_f32(entries, "foodExhaustionLevel", 0.0)?;
+        data.active_effects = field_of(entries, "active_effects").cloned();
         data.dimension = opt_string(entries, "Dimension", OVERWORLD)?;
         data.game_type = opt_int(entries, "playerGameType", DEFAULT_GAME_TYPE)?;
         data.previous_game_type = match field_of(entries, "previousPlayerGameType") {

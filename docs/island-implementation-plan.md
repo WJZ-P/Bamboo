@@ -349,6 +349,140 @@
 
 **没有的命令**：`/kill`、`/execute`、`/data` 和能选中非玩家实体的 `@e` 现在都不存在（见本节开头），任务书里点名的 `/kill @e`、带 `sort=nearest,limit=` 的 `@e`、`/tp @e`、`/execute as @e at @s run …`、`/execute if block`、`/data get block|entity` 没法测，也没有「悄悄只作用于一部分」的问题（单岛同样选不到）。选择器只选玩家的部分（`@a`、`@p`、带排序和数量上限）照旧借全部玩家，由原有的 `cross_island_commands_and_chat_match_one_island` 覆盖。
 
+**第 12 步之后的状态**：拼 / 拆的代价已经压到「只和搬动的内容成正比」（18.2），但 4.5 的范围语义没改：一次 `World` 命令仍要把**全部**岛的 `Region` 搬两遍，4 岛 × 4900 dense 上界 ≈ 69 ms。下一步改成按需借，见 4.5.1。
+
+#### 4.5.1 命令按需借岛（2026-11-19，设计已审）
+
+**目标**：一条命令真正涉及几个岛，就只把那几个岛的 `Region` 拼起来；能不拼就不拼。范围语义不变——命令在所涉及的那片世界上看到的东西，必须和现在「全部岛拼成一个」逐字节相同。齐步（`island_threads = 0`）与显式精确模式的结果不变，对照测试、不变量断言、全量对照、拆合「不改内容」一条不删、不放宽。
+
+##### 1. 一个集合 `R`，三条必须成立的性质
+
+**`R` = 这条命令（包括它的所有可能分叉）可能读、写、创建、搬动的任何东西所在的岛的集合**，恒含发起人的岛 `into`。规划器只算这个集合；`R` 里的岛并进 `into`，`R` 外的岛**只把玩家七类表借过来**（`gather`）。这样一条命令看到的 `Region` 是「全拼的 `Region` 去掉 `R` 外岛的方块/容器/实体表」，而 `region.players`、`links`、`player_grid` 仍然是全集。
+
+要证明按需借和全拼逐字节相同，只需三条性质：
+
+1. **`R` 是闭包**：命令执行期间碰到的每个位置、每个实体、每个玩家，若在 `R` 外的岛上有对应内容，那条内容一定不被观察。`R` 由 3（选择器）和 4（逐条命令）算出，取保守超集；算不出来就全拼兜底（5）。
+2. **玩家全集**：`feedback::success` 给 `region.players` 里每个 OP 发 `chat.type.admin`（还经 `links.fan_out` 给不在场岛上的 OP）；`interaction::send_effects` 的音效按 `region.players` 全扫、等级事件按 `player_grid.near(…, 64)` 找附近的人——岛之间至少隔 3 个区块，但 64 格的半径能越过这个间隔，所以**不是 OP、也不在任何选择器里的玩家也必须看得见**。故 `R` 外的岛一律 `gather` 借玩家，不按命令种类精简。
+3. **随机数归发起人**：取随机数仍用 `into` 的四个随机源；借进来的岛的随机源状态 `divide` 时原样换回，别的岛的随机源/实体种子源不被推进（4.5 已有逐刻断言）。
+
+**为什么不单独借实体表**：`select::find_with_source` 按「玩家 ID 升序、非玩家 uid 升序」遍历，`EntityStore::absorb` 用 uid 有序的 `BTreeMap`，所以只并一部分岛时实体表仍是全局 uid 升序——但**少了 `R` 外岛的实体**。若某个实体恰好是选择器候选，`@e` 的结果、`sort=random` 洗牌的 `nextInt` 次数、`@e[limit=1,sort=arbitrary]` 的提前收手位置全都会变。因此凡是选择器可能命中非玩家实体的命令，把那些实体所在的岛**整个并进 `R`**，而不是只搬实体表。这样不新增任何拆合代码，也不用处理「实体在执行期间换了位置、该归谁」的问题。代价是这类命令会借多个岛，但仍严格不超过全拼；用户的头号场景 `tp <玩家> <坐标>` 完全不读实体表，`R = {into}`。
+
+**防「静默少看一部分」**：`R` 是超集才安全，规划器绝不能因为漏算而悄悄改变结果。规划器对任何「算不出来 / 参数不认识 / 筛查读不到某个岛」的形态一律全拼兜底（5）；`#[cfg(test)]` 的等价性对照每次命令执行后另起一份「强制全拼」的结果逐字节比（7），改坏确认 ①（故意漏借一个岛）就是验这个对照真的能抓到。正式构建里不加运行时全表扫描，代价要真的降下来。
+
+##### 2. 借什么、怎么还（复用第 12 步的记名单）
+
+`Borrow` 加一个变体 `Islands(BTreeSet<RegionId>)`（`World` 保留作全拼兜底，等于 `Islands(全部岛)`）。`World::on_master` 的 `Islands` 分支执行顺序：
+
+1. **先算 `away` / `absent`**（`away_ids()` / `away_players()`），因为接下来 `lift` 会让借进来的岛的槽位看起来「不在主控手里」；`begin_fan_out(absent)` 仍按这一份名单开。命令本来就等全部岛停放（5.5.2），正常路径上它是空的。
+2. **`Islands::unify_subset(into, R)`**：和现有 `unify` 用同一段 `lift` → `IslandShell` → `absorb_island_keeping`，只是 `others` 从「全部别的岛」换成 `R \ {into}`；`UnifiedIsland` 的记名单（区块、玩家、四个随机源状态、剖析器、时钟差）一字不改。`R = {into}` 时整个跳过，拼/拆次数 0。
+3. **`gather(into, Borrow::All)`**：借玩家。`parked_ids()` 天然跳过第 2 步 lift 过的槽位，所以只借 `R` 外的岛，不用改 `gather`。
+4. **执行**：`work(&mut global, region)` 拿到的是「`R` 的方块/实体 + 全部玩家」。
+5. **还原**：`end_fan_out` → `divide(into, unified)`（按记名单原样拆回借过的岛）→ `scatter`（把借来的玩家还回去，时钟平移回来）→ `publish_global` → `post_fan_out`。`publish_global` 在 `divide` / `scatter` **之后**做（现在的 `Borrow::World` 分支也是这个次序），这样借进来的岛、只借了玩家的岛都拿到同一份全局快照。**不做 `move_stray_entities`**：全拼的 `Borrow::World` 分支也不做（`divide` 按位置把实体分回各岛，哪个岛都没加载的实体留在 `into`），按需借走同一条 `divide` 路径，结果自然相同；多做一次会多搬一次、字节不同。
+
+`Borrow::All`（`Players` 类命令）的路径一行不动。`Borrow::World`（兜底）仍走现在的 3 行拼/做/拆、不 `gather`。三条路径的 `island_unify` / `island_divide` / `island_world_command` 计时保持一致，另外记 `island_borrowed_islands` = 借了几个岛（兜底 = 全部）。
+
+**只 lift 一部分岛的实现细节**：
+
+- `IslandSlot::lift()` 不记 `away_players`：借用期间被 lift 的槽位 `away_players` 为空、`holds_player` 查不到他们，但**所有玩家此刻都在 `into` 的 `Region` 里**，`island_of_player` / `player_ids` 会从 `into` 这个槽位回答，和全拼时一致。**唯一要改的是取名单的时机**：`away_ids()` / `away_players()` 必须在 `lift` **之前**算好（上面第 1 步），否则 `away_ids()` 会把借进来的岛误当成「不在主控手里」，给它们多投一份 fan-out 帧。`post_fan_out` 也用这同一份提前取好的名单。
+- `assert_gap` 仍然成立：`absorb_island_keeping` 的 `assert_gap(other.loaded, |_| false, mine.is_loaded)` 和 `split_off_island` 的 `assert_gap` 只要求「借走的已加载区块」与「留下的已加载区块」切比雪夫距离 ≥ `ISLAND_GAP`(=3)。`R` 外岛的区块根本没并进 `into`（只借了玩家），所以 `into` 里留下的就是 `into` 自己 + 已并进来的 `R` 岛；岛的划分本来就保证任意两岛之间 ≥3 个区块，`R` 是任意子集都成立。`player_grid` / `entity_tracking` 的「视野和配对不跨切口」前提也成立：所有玩家都在 `into` 上，没有哪名玩家被留在 `R` 外的岛上。
+- **插入次序**：`links` / `players` / `entity_tracking` / `entities` 都是按 ID 或 uid 排序的表，插入次序不影响内容和遍历顺序；唯一按插入次序的是 `PlayerGrid::absorb` 往 `cells` 的 `Vec` 里 push，而 `send_level_event` 用 `player_grid.near()` 只是给每个附近的玩家各写一遍**同一份帧**（`debug_assert` 也只比数量），所以每名玩家收到的字节与插入次序无关。等价性测试逐字节比 `take_frames()` 兜底。
+- **兜底 = 全部岛**：`Borrow::World` 的实现保持原样（`unify` 全部 + 不 `gather`），这样兜底路径和改前逐位一致，压测里能直接和改前基线比。
+
+**`Borrow` 的计算入口**：`command::borrow_for` 现在拿 `(line, level)`；改成 `command::plan_borrow(&Islands, into, source_id, line) -> Borrow`，在 `world.rs::on_request`（玩家）和 `world/island_hybrid.rs`（控制台）里、调用 `with_players` / `on_master` **之前**调用。规划只读：用 `commands().graph.parse(line, level)` 得到和执行时同一个 `ParsedCommand`（`graph.parse` 是纯函数，不取随机数、不改状态），按 3/4 折算 `R`；`may_use_root` 权限门保留（不够权限 → `Borrow::All`，和现在一样不拼）。解析失败也归 `Borrow::All`：现在「有权限但写错了」会白拼一次，改成不拼没有可观察差别。控制台的 `source::of` 用 `into` 的出生点快照，和控制台命令现有的坐标解析一致。
+
+##### 3. 选择器 `@e` / `@n` / `@r` 等：逐岛只读找候选岛
+
+主控处理命令时全部岛停放（5.5.2），可以直接读。用户的做法是「逐岛只读找出匹配的实体，只借命中的岛」，这里「匹配」= **过全部过滤条件的候选**（不是排序/`limit` 之后的最终结果）：`sort=nearest` / `furthest` / `random` 要先看到全部候选才知道谁命中，所以借的必须是「至少有一个候选的岛」，而不是「最终选中者所在的岛」。
+
+给 `select.rs` 加一个**只读的候选筛查**：和执行期 `find_with_source` **共用同一份 `matches` 过滤**（`distance` / `dx,dy,dz` / `type` / `name` / `tag` / `game_mode` / `rotation` / `scores` / `team`，`board` 传 `None`，与 `targets` / `players` / `one_target` 一致）、共用 `volume_box` 和 `selector.position(source.position)` 的基准点，逐岛问「有没有任何一个**非玩家实体**能过过滤」，把有候选的岛加入 `R`。玩家候选不产生岛（玩家全借）。筛查**不排序、不截断、不调用 `shuffle`**（`sort=random` 用进程级 `JavaRandom`，规划期绝不能推进它）、不受 `limit` 影响；`@s`、玩家名、UUID 三种短路形式按全局 ID 序找唯一命中者，命中非玩家实体时只并它所在的岛。
+
+这样执行期 `select::find` 看到的候选表 = 全部玩家（借来的）+ 全部有候选的岛的非玩家实体（并进来的），按全局 ID 升序，和全拼**完全同一个集合**（没候选的岛本来就不会贡献候选）。于是：
+
+- `Arbitrary` + `limit` 的提前收手、`Nearest` / `Furthest` 的 `distance_key` 稳定排序、`Random` 的 `shuffle` 取数次数与顺序——都与全拼逐位相同；
+- `@p` / `@a` / `@r` 只选玩家，一个岛都不用并；
+- `distance` / `dx,dy,dz` 的基准点按 `source::of(into.region, id)`（或 `/execute` 模拟出来的来源）算，与执行期同一份来源；
+- 排序、`limit`、`sort=nearest` 全部仍由执行期的 `sort_and_limit` 决定，规划期不重算。
+
+**筛查漏一个岛**（把「有候选」误判成无候选）会让候选集、洗牌序列、`@e[limit=1]` 的结果全变，改坏确认里专门有一条；筛查读不到某个岛（混合驱动下岛不在主控手里）或参数不认识时整条退回全拼兜底，不猜。`/summon` 的 `has_mob_uuid` 是**全表扫描**，不属于选择器，按第 4 节的专门规则（只按显式 UUID 借撞车的那个岛）处理。
+
+##### 4. 逐条命令的岛集合
+
+下表的「发起人岛」恒在 `R` 里（相对坐标 `~` / `^` 按发起人位置/朝向解，反馈和效果写进他的链路；控制台的发起人岛是家岛，坐标按出生点解）。
+
+**方块盒与「邻格」**：`setblock` / `fill` / `clone` 的每格 6 邻格、`affect_neighbors_after_removal` 的邻格、比较器隔一格、`after_block_changed` 的形状更新链（`UPDATE_LIMIT=512` 层、`update_indirect_neighbour_shapes` 还会跳两格）都可能读写别处。取**整条命令的方块范围向外扩 32 格（2 个区块）**的保守盒，盒里每个已加载区块按 `island_of_chunk` 查归属，未加载的不产生岛（见 6）。
+
+界为什么够：`ISLAND_GAP = 3` 是两岛**已加载区块**之间的切比雪夫距离至少 3，中间只隔 2 个未加载区块，也就是 **32 格**（不是 3 个未加载区块）。命令触发的即时方块逻辑，每一跳读写的位置离上一个被改动 / 被读的位置最多 2 格——6 邻格 1 格、`update_neighbour_for_output_signal` 的比较器隔 1 格、`update_indirect_neighbour_shapes` 与红石线斜向 2 格、`affect_neighbors_after_removal` 的邻格 1 格；`UPDATE_LIMIT=512` 说的是**层数**不是跨度，绊线钩、铁轨、活塞、传送门框这类长距离逻辑都沿连续方块走，碰到非匹配方块就停。未加载的位置 `RegionLevel::write_block` 返回 false、`block_state` 读成 `VOID_AIR`，链式更新到那里读到空气 / 写不进去就断了，不再往外传，所以没有哪条连锁能跳过 32 格的未加载带。外扩 2 个区块既盖住所有直接 / 间接更新，又碰不到别的岛。盒里的区块位置数超过上限（暂定 4096）时退回全拼兜底，避免一条超大 `/fill` 让规划本身变成全表扫描。`/clone` 的源盒和目标盒各扩一次；`strict` 变体不跑邻居更新，为规划简单一律取同样的盒。
+
+对抗用例（等价性测试里必须有）：① 命令落在岛 A 已加载区域的边缘、紧贴间隔带；② `setblock` 落在间隔带里、离岛 B 的已加载区块只有 1 格（B 必须进 `R`）；③ 一条红石线或绊线一直铺到岛的边缘，在另一端触发。
+
+| 命令 | `R` | 说明 |
+|---|---|---|
+| `tp` / `teleport` | **目标和目的地都是玩家或坐标时不拼（`R = {into}`）** | 执行只写玩家表 / 链路 / 网格（`teleport.rs::move_player`，和重生的 `place_player_at_respawn` 同一段）和纯数值的 `ensure_spawnable`；跨岛落点之后照旧由 `relocate_players` 搬，反馈发给借用来的全部 OP。目的地是坐标时**不为落点在别的岛而借那个岛**（玩家不按位置拆）。**含非玩家实体时**（`targets` / `destination` / `facingEntity` 里有 `@e` / UUID）按 3 把候选实体岛加入 `R`；并且**非玩家实体的坐标目的地**要把目的地所在盒的岛也加进来：`move_entity` 直接改实体位置，而 `divide` 是按实体当前所在区块分实体的，目的地岛不在 `R` 时这头牛会留在 `into`（全拼时会被分到目的地岛）。`facingLocation` 是纯坐标，不借。 |
+| `setblock` / `fill` / `clone` | 发起人岛 + 受影响盒（含 `clone` 源与目标）里已加载区块所属的岛 | `setblock` 一个 `pos`；`fill` 的 `from..to`（`hollow` / `outline` / `destroy` 范围相同）；`clone` 的 `begin..end` 和 `destination..destination+span`。`clone` 的 `filtered` 谓词读源格状态，盖在同一盒里。 |
+| `summon` | 发起人岛 + `pos`（缺省发起人位置）所在盒的岛 + **显式 UUID 撞车的那个岛** | `finalize_spawn` 读 `pos` 的群系、取发起人岛的随机源；生成物的 `entity_seed_source` 归发起人岛。`summon_cow` 末尾 `has_mob_uuid` 扫全表查重（`DuplicateUuid` 会让命令失败）：**NBT 显式给了 `UUID` 时**，规划期用同一套 `nbt::load_into` codec 只读解出这个 UUID，逐岛只读查有没有实体占用，有就把那个岛并进 `R`，失败和反馈与全拼逐位相同；**没给 UUID**（随机生成）时不为查重额外借岛——岛并行跑刻时各岛加实体本来就不跨岛查 UUID（刷怪蛋、掉落物等都只查本岛），随机 UUID 撞车不在「分开跑 = 一起跑」的等价性要求之内，这是 3.3「岛的随机源」已有的差异。这样 `/summon` 不会因为「全部有非玩家实体的岛 ≈ 全部岛」而退化成全拼。改坏确认加「规划期漏查显式 UUID」。 |
+| `loot` | 发起人岛 + `sourcePos`（`mine` 源读方块 / 方块实体）、`targetPos`（`insert` / `replace block` 读写容器、`spawn` 生成物品实体）所在盒的岛 + 所有选择器候选实体岛 | `give` / `replace entity` 的 `players` / `entities` 选择器按 3 处理；`kill` / `fish` 源现在明确报错（`need_entity` 在求值前就返回），不借额外的岛。`Spawn` 生成的掉落物按位置归属，所以 `targetPos` 的岛必须在 `R`；`random_sequences` 在 `Global`，不借岛。 |
+| `kill` / `damage` | 发起人岛 + 全部选择器（`targets` / `target` / `by` / `from`）候选实体所在盒的岛（按 3 筛查）+ 命中目标所在盒的岛 | `hurt_player` 只动玩家；`hurt_mob` 会读方块（落地、掉落）、产生效果广播，死亡掉落物按实体位置归属；`damage` 的 `at <location>` 只进 `DamageSource`（纯数值），但 `by` / `from` 的实体位置要看得见。命中玩家时也把他脚下那格的盒加进来（`hurt_player` 的死亡 / 受伤路径可能读地面，按保守盒处理）。选择器按 3 的筛查规则处理：只选玩家时不并岛，含 `@e` / UUID 时并所有有候选的实体岛（候选表必须完整，`Nearest` / `Random` / `limit` 才和全拼一样）。 |
+| `enchant` | 发起人岛 + 选择器筛查出的非玩家实体候选岛（见 3）；只选玩家时**不拼** | 只写目标玩家的物品栏和链路、发反馈；`select::targets` 可能选到非玩家实体（单目标失败反馈要 `entity_name` 读实体表）。目标玩家全借即可。 |
+| `gamemode` | 发起人岛 + 每个目标玩家脚下那格所在盒的岛 | `players::apply_mode` 的 `near_ground` 读 `chunks.block(player.position().below())`；选择器 `@a` / 点名按 3 只读找出候选玩家，逐个按当前位置算盒（候选全是玩家，不并实体岛）。 |
+| `defaultgamemode` | **不拼**（`R = {into}`） | 现在 `FORCE_GAME_MODE = false`，只改 `Global.state.default_game_mode` + 反馈；以后常量打开时按全服玩家逐个 `apply_mode`，退化为 `gamemode @a` 的规则（把所有玩家的脚下盒都借进来）。 |
+| `data` | 发起人岛 + 主目标与 `modify … from` 第二目标的 `block`（盒）/ `entity`（候选实体岛）/ `storage`（不借） | `storage` 在 `Global`；`entity` 的存档 codec 读写实体表（`data_source::read/write`），按 3 找候选；`block` 按盒。`string` / `compute` / provider 现在明确报错，不借额外的岛。 |
+| `execute` | 见 5 | — |
+
+##### 5. `/execute` 的确定集合与全拼兜底
+
+`/execute` 的链尾命令在**执行期**才重新解析（`execute.rs::run_action`），链的每一步会改来源位置 / 朝向 / 执行者并可能分叉，静态规划拿不到「执行期最终的坐标」。但 `Context` 的演化只读 `Region`（`target_pose` 读玩家/实体位置、`selection` 按当前上下文过滤），不取随机数、不发反馈，所以可以按 `apply_step` 的语义**只读地模拟整条链**，对每个分叉、每一步收集 `R`：
+
+- **能算出确定集合的形态**：链上每一步都是 `as` / `at` / `positioned` / `rotated` / `facing` / `align` / `anchored` / `in` / `if` / `unless` / `store`（及它们的参数层），链尾命令是第 4 节表里有规则的那些，且 `run_command` 能按链的权限等级 `graph.parse` 成功。模拟器按每层的 `ChainStep.arguments` 折算：`as`/`at`/`facing`/`if|unless entity` 的选择器按 3 找候选岛（实体候选岛要并进来，因为分叉上下文可能是那头牛）；`positioned` / `facing <pos>` / `if|unless block|blocks` 的坐标按**当前分叉的来源**解成盒；`store … block|entity|storage|score|bossbar` 的存储目标按 `data` 的规则折算；链尾命令的 `ParsedCommand` 递归交给同一个规划器（链尾是 `Players` 类时不加方块岛）。所有分叉的岛集合取并集。
+- **保留全拼兜底**：链尾是另一个 `/execute`、链尾解析失败或它自己就是无法规划的命令、链上出现模拟器不认识的分支（`predicate`、`if function`、`summon` 之类当前树里没有的层）、参数名/类型对不上、`if/unless` 的谓词依赖模拟器拿不到的执行期状态、`store` 的目标形状不认识、分叉数量超过上限（暂定 256）、或模拟器任何一步要读它没借到的东西。**一律走现有 `Borrow::World`（全部岛），语义与改前完全一致**；绝不允许「猜一个更小的集合」。
+- 条件分支 `if/unless` 的**条件本身**要读方块/实体，即使条件为假、链尾没执行，也必须借那片岛（否则模拟器和执行期看到的方块不同会影响反馈和 `store`）；模拟器只读，不判断条件真假，两种分支都算进去。
+- **链尾在每个分叉上依次执行，前一个分叉改过的世界会被后一个分叉的选择器 / 条件看到**（例如前一个分叉 `tp` 走了一头牛、后一个分叉 `@e` 就选得到它）。`R` 仍然是超集：新建的实体只会落在已经在 `R` 里的位置（`/summon` 的 `pos`、`/loot spawn` 的 `targetPos`、掉落物的位置都按第 4 节折算过）；被搬的实体本来就是前一个分叉的选择器候选，其目的地（`/tp` 的坐标）也已经按第 4 节加进 `R`；链尾递归规划时把每个分叉的来源都算了一遍并取并集。确定性用例和模糊测试里专门加「多分叉、链尾会改世界」这一类。
+- **计数**：新增剖析指标 `island_world_command_fallbacks`（每兜底一次一条样本，单位 times）和 `island_borrowed_islands`（每次借的岛数，0 表示没拼；每类命令分开看），进 `docs/profiling.md` 的 metrics 表。`islands-roam` 10 分钟里看兜底**次数和比例**，目标是 0 或接近 0；兜底多说明规划器的覆盖面不够，按报告里的形态逐条补，不改语义。
+
+##### 6. 目标区块不在任何岛里（未加载）
+
+和现在全拼时完全一致，**不因为借的范围变小而改变命令看到的东西**：
+
+- 未加载的区块没有归属岛，不进 `R`；`into` 自己也没加载时，命令在 `into` 上跑，`Region::block_level` 的 `write_block` 对未加载格直接返回 false、`block_state` 读成 `VOID_AIR`。这是 4.5 已经核对过的行为：`blocks.rs::loaded` 只检查坐标是否在世界范围内、不检查加载，所以 `/setblock` 到未加载区块照样发效果包和成功反馈，`/fill` 穿过未加载区块照样只写已加载的那两头——两边都一样。
+- `/tp` 到未加载区域：位置直接写进玩家，随后由 `relocate_players` 的「没有岛接手就留在原岛 / 等区块加载」路径处理；借 0 个岛不改变这一段。
+- 保守盒里没加载的区块不产生岛，也不触发 `finish_light_updates`；借进来的岛在拼之前照旧各自 `ready_to_split` / `finish_light_updates`（只对借进来的岛做，别的岛一动不动）。
+
+##### 7. 实现后的等价性验证（最重要）
+
+1. **全拼 / 按需借双跑对照**：测试脚手架里给 `Borrow` 加一个「强制全拼」开关（`#[cfg(test)]`，正式构建恒走按需借）。同一个多岛世界、同一个随机种子、同一条命令，两份从**逐位相同**的初始状态出发（包括四个随机源、实体种子源、玩家缓冲），一份强制全拼、一份按需借，执行后比：每个岛的内容指纹（`island_split_tests::fingerprint`，含方块/光照存档字节、计划刻、方块实体、容器、组件、红石、实体、配对、玩家状态、待存标记）、岛时钟、四个随机源状态、每名玩家收到的**全部字节**（`Client::take_frames()`）、命令反馈组件（`decompose_component` 展开）和返回值。`sort=random` 的进程级 `JavaRandom` 在两份里按同样的次序各取一次，测试里用固定种子重置它以保证可比。这个对照同时验证「借进来的岛按原归属还原」——不能只比发起人岛；已有的 `assert_in_place` 每刻再核一次「每类东西都属于它该在的岛」。
+2. **逐条命令逐形态的确定性用例**：第 4 节表里每条命令的每种形态（相对/绝对/局部坐标、跨岛/同岛、`@e`/`@a`/`@p`/`@r`/点名/UUID、各种 `sort` / `limit` / `distance`、`clone` 的三种 mode 和 filtered、`loot` 的四源五目标、`data` 的三源与 `from`、`execute` 能规划和兜底的形态、未加载目标、没权限、解析失败），至少各一条；用固定种子的 3–5 岛布局。每条都断言「借了几个岛」符合第 4 节表（`tp` 玩家到坐标必须是 0），防止规划器悄悄退回全拼还让对照通过。另加第 4 节的三条方块盒对抗用例、`/summon` 显式 UUID 跨岛撞车、以及「多分叉且链尾会改世界」的 `/execute`。
+3. **随机模糊测试**：固定种子，随机岛布局（组数、中心、每组区块内容、玩家/牛/掉落物分布）× 随机命令 × 随机参数，跑**几千条**，每条都做 1 的双跑对照；把种子和命令原文写进失败信息，能一条命令复现。
+4. **改坏确认**（不许为通过删用例）：① 规划器故意漏借一个涉及的岛；② 选择器候选枚举故意漏一个岛的实体；③ `divide` 少还原一个岛的随机源 / 玩家；④ 没把 `R` 外的玩家借进来；⑤ `tp` 非玩家实体到别的岛时漏借目的地岛；⑥ 规划期漏查 `/summon` NBT 里显式给的 UUID。六种都必须在 1/2/3 里报出来，任一不报就说明比较不够严。
+5. **原有对照一条不删**：`commands_reaching_other_islands_match_one_island`（多岛 vs 单岛逐刻比）、`seeing_only_the_senders_island_is_caught`、`joining_for_a_command_leaves_every_island_as_it_was`、混合驱动「都按时 = 齐步」、6.2 的拆合不改内容对照和 23 类改坏确认、不变量断言、全量对照，全部保留。计数断言从「拼了几次」改成「借了几次 / 借了几个岛」，语义不变。
+
+##### 8. 测量
+
+- 微基准：`world/island_split_bench.rs` 的 `unify_and_divide` 加一档「只借 1 / 2 个岛」，同一份 dense / sparse 负载、同一时段 A-B 交替多轮取中位数，报告机器负载（另一个子代理可能在编译）。
+- 每类命令的停顿：剖析器已有的 `island_unify` / `island_divide` / `island_world_command`，加 `island_borrowed_islands`、`island_world_command_fallbacks`；按命令类别分组比较改前改后。
+- `islands-roam` 10 分钟：改前改后各一次（同一时段交替更可靠），比 `island_unify` / `island_divide` 的 max / mean、每类命令的停顿、全拼兜底次数与比例；0 崩溃 / 0 不变量失败 / 0 判死照旧。
+- 测量口径和结论写进 `docs/profiling.md` 新一节与本节，数字标明负载和取中位数的轮数。
+
+##### 9. 实测（2026-11-19，实现后）
+
+**微基准**（`island_unify_scaling_bench`，release，4 岛 × 4900 区块，9 轮取中位数；机器负载 89–185，另有子代理在编译，绝对值仅供本时段内相对比较）：
+
+| 借几个岛 | dense 拼 / 拆 | sparse 拼 / 拆 |
+|---|---|---|
+| 全部 4 岛（改前） | 20.15 / 46.30 ms | 6.71 / 12.70 ms |
+| 2 岛 | 13.19 / 29.93 ms | 4.46 / 8.45 ms |
+| 1 岛 | 6.38 / 14.10 ms | 2.04 / 4.28 ms |
+| 0 岛（`/tp <玩家> <坐标>`） | 0 / 0 ms | 0 / 0 ms |
+
+**`islands-roam` 10 分钟 A-B-A-B 交替**（40 人，全量对照和不变量断言开着，`WORLD_COMMAND_EVERY=100`，端口 26502–26505；四次都 0 崩溃 / 0 不变量失败 / 0 判死 / 0 丢刻，TPS 中位 19.97–20.00；机器负载 17–112，逐轮写明在 `run.out`）：
+
+| 轮次 | 版本 | 命令次数 | `island_unify` mean / max (ms) | `island_divide` mean / max (ms) | 借岛均值 / 最大 | 全拼兜底 |
+|---|---|---|---|---|---|---|
+| A | 改前 | 142 | 3.428 / 31.422 | 5.713 / 34.550 | — | — |
+| A | 改后 | 137 | 0.027 / 1.716 | 0.020 / 0.953 | 1.022 / 2 | 0（0%） |
+| B | 改前 | 143 | 2.691 / 9.123 | 4.917 / 28.364 | — | — |
+| B | 改后 | 140 | 0.039 / 2.011 | 0.032 / 1.638 | 1.029 / 2 | 0（0%） |
+
+压测里绝大多数要借岛的命令其实一个岛都不用拼（借岛均值 ≈ 1，即只有发起人的岛）；`defaultgamemode` 只改全局默认值，按 4.5.1 的表不拼。全拼兜底 0 次，说明规划器覆盖了这一轮压测用到的全部形态。数字与口径见 `docs/profiling.md` 第 19 节。
+
 ---
 
 ## 5. 各自的时钟

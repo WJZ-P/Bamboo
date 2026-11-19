@@ -199,6 +199,17 @@ def main():
     print(describe("island_unify", combine(steady, "island_unify")))
     print(describe("island_world_command", combine(steady, "island_world_command")))
     print(describe("island_divide", combine(steady, "island_divide")))
+    borrowed = combine(steady, "island_borrowed_islands")
+    fallbacks = combine(steady, "island_world_command_fallbacks")
+    if fallbacks:
+        total = fallbacks["mean"] * fallbacks["samples"]
+        commands = borrowed["samples"] if borrowed else 0
+        ratio = total / commands if commands else float("nan")
+        print(f"island_world_command_fallbacks: total={total:.0f} commands={commands} ratio={ratio:.3f}")
+    else:
+        print(f"island_world_command_fallbacks: total=0 commands={borrowed['samples'] if borrowed else 0} ratio=0.000")
+    if borrowed:
+        print(describe("island_borrowed_islands", borrowed, "islands"))
     crossings = combine(steady, "island_crossings")
     if crossings:
         print(f"island_crossings: players moved={crossings['mean'] * crossings['samples']:.0f}")

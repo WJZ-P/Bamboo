@@ -10,44 +10,11 @@
 
 pub(crate) use players::change_own_mode;
 
-/// 多岛时主控以权限等级 `level` 执行这一行命令要借多少（岛的实施计划 4.5）：要整个世界、
-/// 而且这个等级够用这条命令的，借整个世界；其余只借玩家。等级不够的命令解析一定失败、
-/// 只发一条和方块无关的反馈，拼一次全部岛是白费，也不能让没有权限的玩家随手让全服顿一下。
+/// 权限等级 `level` 够不够用这一行命令的顶层字面量（另见 [`borrow::plan_borrow`]）。
 ///
-/// How much the master borrows to run this command line at permission
-/// `level` with several islands (island plan 4.5): the whole world when the
-/// command needs it and the level may use it, otherwise only the players. A
-/// command the level may not use always fails to parse with feedback that
-/// reads no block, so joining every island for it would be wasted, and a
-/// player without permission must not be able to stall the server at will.
-pub(crate) fn borrow_for(line: &str, level: u8) -> crate::island::Borrow {
-    match class::scope_of(line) {
-        class::CommandScope::World if may_use_root(line, level) => crate::island::Borrow::World,
-        _ => crate::island::Borrow::All,
-    }
-}
-
-/// 一名玩家发的这一行命令要借多少（见 [`borrow_for`]）。`region` 是他所在的岛。
-///
-/// What a player's command line borrows (see [`borrow_for`]); `region` is
-/// the island they are on.
-pub(crate) fn borrow_for_player(
-    region: &Region,
-    id: PlayerId,
-    line: &str,
-) -> crate::island::Borrow {
-    borrow_for(line, level_of(region, id))
-}
-
-/// 控制台发的这一行命令要借多少（见 [`borrow_for`]）。
-///
-/// What a console command line borrows (see [`borrow_for`]).
-pub(crate) fn borrow_for_console(line: &str) -> crate::island::Borrow {
-    borrow_for(line, console::PERMISSION)
-}
-
-/// 权限等级 `level` 够不够用这一行命令的顶层字面量。
-fn may_use_root(line: &str, level: u8) -> bool {
+/// Whether `level` may use this line's root literal (see also
+/// [`borrow::plan_borrow`]).
+pub(crate) fn may_use_root(line: &str, level: u8) -> bool {
     let line = line.strip_prefix('/').unwrap_or(line);
     let root = line.split_whitespace().next().unwrap_or("");
     let graph = &commands().graph;
@@ -59,6 +26,7 @@ fn may_use_root(line: &str, level: u8) -> bool {
 
 pub(crate) mod admin;
 mod blocks;
+pub(crate) mod borrow;
 mod bossbar;
 mod catalog;
 mod class;
@@ -67,6 +35,7 @@ pub(crate) mod console;
 mod damage;
 pub(crate) mod data;
 pub(crate) mod data_source;
+mod effect;
 mod effects;
 mod enchant;
 pub(crate) mod execute;
