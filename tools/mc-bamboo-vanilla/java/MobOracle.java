@@ -129,7 +129,6 @@ import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.gamerules.GameRule;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
-import net.minecraft.util.RandomSource;
 import io.netty.util.internal.ThreadLocalRandom;
 import net.minecraft.server.level.PlayerSpawnFinder;
 import net.minecraft.server.level.TicketType;
@@ -323,7 +322,6 @@ public final class MobOracle {
         long spawnSeed;
         int spawnGameType; // 0 creative, 2 adventure
         int[] personalAt;  // null = 没有个人点；三元素坐标
-        int personalYaw;
         /** 死亡场景的规则：keepInventory / immediateRespawn / showDeathMessages / naturalRegeneration。 */
         boolean keepInventory;
         boolean immediateRespawn;
@@ -1867,15 +1865,6 @@ public final class MobOracle {
         }
     }
 
-    /** `ThreadLocalRandom.nextLong()` 在内部 `rnd == seed` 时返回的值。 */
-    private static long nettyNextLong(long seed) {
-        long hi = (seed * 0x5DEECE66DL + 0xBL) & ((1L << 48) - 1);
-        long lo = (hi * 0x5DEECE66DL + 0xBL) & ((1L << 48) - 1);
-        // `java.util.Random.nextLong()` 的两个 next(32) 都是 int，低半要符号扩展。
-        // Both next(32) values are ints; the low half is sign-extended.
-        return ((long) (int) (hi >>> 16) << 32) + (int) (lo >>> 16);
-    }
-
     /** 1c 落脚点：在假世界里跑官方 `PlayerSpawnFinder.findSpawn`，用固定随机源逐位对拍。 */
     private static void playSpawn(Official official, Writer out, Scene scene) throws Exception {
         FakeLevel level = FakeLevel.create(official);
@@ -1891,9 +1880,9 @@ public final class MobOracle {
         setRule(official, GameRules.RESPAWN_RADIUS, scene.spawnRadius);
         official.server.spawnGameType = GameType.values()[scene.spawnGameType];
         BlockPos spawn = new BlockPos(scene.spawnAt[0], scene.spawnAt[1], scene.spawnAt[2]);
-        // 官方 `RandomSource.createThreadLocalInstance()` 取的是
-        // `ThreadLocalRandom.current().nextLong()`；对拍把它的内部 LCG 状态
-        // 直接设成场景给的种子，使 `SingleThreadedRandomSource` 的起点确定。
+        // 官方 `findSpawn` 的构造会取 `ThreadLocalRandom.current().nextLong()`；
+        // 对拍把这个线程本地随机源钉住，再直接用同一固定种子重放候选序列，
+        // 最终位置由官方 `PlayerSpawnFinder` 自己算出来。
         Field rnd = ThreadLocalRandom.class.getDeclaredField("rnd");
         rnd.setAccessible(true);
         ThreadLocalRandom tlr = ThreadLocalRandom.current();
@@ -1909,11 +1898,9 @@ public final class MobOracle {
         int radius = Math.min(Math.max(0, scene.spawnRadius), borderDistance);
         if (borderDistance <= 1) radius = 1;
         int count = Math.min(1024, (radius * 2 + 1) * (radius * 2 + 1));
-        // `ThreadLocalRandom.current().nextLong()` 不推进 `rnd`（初始化后是
-        // no-op），真正的构造种子就是场景给的 `baseSeed` 经过一次 LCG 后的值。
-        // 用官方 `createThreadLocalInstance(long)` 从同一值重建，逐位一致。
         // 纯 LCG 算出官方 `SingleThreadedRandomSource.setSeed(seed)` 的 48 位
-        // 状态和 `nextInt(count)` 后的末态，不碰任何线程本地随机源。
+        // 状态和 `nextInt(count)` 后的末态，不碰任何线程本地随机源；再把这个
+        // offset 反射写进官方 `PlayerSpawnFinder`，候选顺序逐位可复现。
         final long[] state = {(baseSeed ^ 0x5DEECE66DL) & ((1L << 48) - 1)};
         java.util.function.IntUnaryOperator nextBits = bits -> {
             state[0] = (state[0] * 0x5DEECE66DL + 0xBL) & ((1L << 48) - 1);
