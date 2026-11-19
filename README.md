@@ -992,7 +992,11 @@ WebView2 的渲染进程不算在内。
   红石缓存默认关，打开后按确定性工作量门槛只在划算的触发点生效。
 - 命令已经接上：`/gamemode`、`/gamerule`、`/tp`（`/teleport`）、`/time`、`/give`、`/clear`、`/setblock`、`/fill`、`/say`、`/msg`（`/tell`、`/w`）、`/me`、`/list`、`/kick`、`/help`、`/scoreboard`、`/team`、`/bossbar`、`/tellraw`、`/title`、`/playsound`、`/particle`（这七个要等级 2）；世界设置类还接上了 `/difficulty`、`/defaultgamemode`、`/seed`、`/setworldspawn`、`/spawnpoint`、`/clone`、`/stopsound`、`/random`、`/enchant`、`/loot`、`/weather`；服务器管理类还接上了 `/op`、`/deop`、`/ban`、`/ban-ip`、`/banlist`、`/pardon`、`/pardon-ip`、`/whitelist`、`/stop`、`/setidletimeout`、`/transfer`、`/version`（权限见下一段）。
   语法、权限和提示按官方 Brigadier。启动时从服务器目录读 `ops.json`（命令行版的工作目录或 `--server-dir` 指定的目录，桌面版是 APP 数据目录的 `server/`），名单里的人用上面的等级，其他人是 0；等级 0 但在名单里仍算管理员（免刷屏、能看到管理员广播）。`/op`、`/deop` 可以在运行中改这份名单。
-  26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照，并按官方 `GameRuleMap.CODEC` 写进 `data/minecraft/game_rules.dat`，启动时读回。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`entity_drops` 会挡住下落方块 `spawnAtLocation`，`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius`（缺省 10）按官方 `PlayerSpawnFinder.findSpawn` 用：新玩家进服和无床 / 锚重生都在世界出生点周围散布、找能站的列；冒险模式直接走 `fixupSpawnHeight`，超平坦世界也散布。`/spawnpoint` 设的强制个人点在两格都能重生时直接落在 `pos + (0.5, 0.1, 0.5)`，否则回退到世界出生点并发 `NO_RESPAWN_BLOCK_AVAILABLE`。世界出生点由 `/setworldspawn` 改；老玩家进服照官方 `SavedPosition` 用存档里的位置。床和重生锚的 `findStandUpPosition` / 充能扣减还没做。`/weather` 只写天气状态和回成功提示。世界每 tick 按官方 `ServerLevel.advanceWeatherCycle` 倒计时、自然开始/结束下雨和打雷（`advance_weather` 规则为假时冻结）、每刻把雨和雷暴强度渐变 0.01，并在强度变化、`isRaining()` 翻转时广播 `RAIN_LEVEL_CHANGE` / `THUNDER_LEVEL_CHANGE` / `START_RAINING` / `STOP_RAINING`；进服时按 `PlayerList.sendLevelInfo` 补发当前的渐变强度。战利品表的 `weather_check` 条件也读这份天气。天色按官方 `Level.updateSkyBrightness` 算：主世界时钟的 `minecraft:day` 时间线、
+  26.3 的游戏规则由生成器导出，权威副本在世界线程的全局状态里，全世界共用。`/gamerule` 要等级 2。改完立刻给方块逻辑用的那份快照，并按官方 `GameRuleMap.CODEC` 写进 `data/minecraft/game_rules.dat`，启动时读回。默认特性集下 `max_minecart_speed` 不启用，命令和客户端界面里都没有它。`send_command_feedback` 和 `log_admin_commands` 管命令成功消息和管理员日志。`/fill` 的上限读 `max_block_modifications`（默认 32768）。`block_drops` 会挡住 `Block.popResource` / `popResourceFromFace` 生成物品实体（位置和速度的随机数照取），`entity_drops` 会挡住下落方块 `spawnAtLocation`，`tnt_explodes` 会挡住 TNT 点燃，掉落按战利品表生成物品实体。`respawn_radius`（缺省 10）按官方 `PlayerSpawnFinder.findSpawn` 用：新玩家进服和无床 / 锚重生都在世界出生点周围散布、找能站的列；冒险模式直接走 `fixupSpawnHeight`，超平坦世界也散布。`/spawnpoint` 设的强制个人点在两格都能重生时直接落在 `pos + (0.5, 0.1, 0.5)`，否则回退到世界出生点并发 `NO_RESPAWN_BLOCK_AVAILABLE`。世界出生点由 `/setworldspawn` 改；老玩家进服照官方 `SavedPosition` 用存档里的位置。床和重生锚的 `findStandUpPosition` / 充能扣减还没做。`/weather` 只写天气状态和回成功提示。世界每 tick 按官方 `ServerLevel.advanceWeatherCycle` 倒计时、自然开始/结束下雨和打雷（`advance_weather` 规则为假时冻结）、每刻把雨和雷暴强度渐变 0.01，并在强度变化、`isRaining()` 翻转时广播 `RAIN_LEVEL_CHANGE` / `THUNDER_LEVEL_CHANGE` / `START_RAINING` / `STOP_RAINING`；进服时按 `PlayerList.sendLevelInfo` 补发当前的渐变强度。战利品表的 `weather_check` 条件也读这份天气。夜里或雷暴天右键完整的床会按官方 `ServerPlayer.startSleepInBed` 检查天色、距离、遮挡和
+  附近怪物，成功后置 `occupied`、设重生点、换成睡姿并发位置 / 元数据包；失败发对应的快捷栏提示。
+  `ServerLevel` 的 `SleepStatus` 按 `players_sleeping_percentage` 统计熟睡人数，够了就跳到
+  `minecraft:wake_up_from_sleep` 时间标记、清掉雨和雷、叫醒所有人；`StopSleeping` 也会起床。
+  天色按官方 `Level.updateSkyBrightness` 算：主世界时钟的 `minecraft:day` 时间线、
   `SKY_LIGHT_LEVEL` 关键帧和雨 / 雷暴的 `WeatherAttributes` 层合成 `getSkyDarken()`，
   在 `ServerLevel.tick` 的天气阶段之后、方块刻之前的同一刻发布给每个岛；精确模式的
   `World`、并行的实体只读视图、随机刻里读亮度的作物 / 草和菌丝蔓延 / 冰雪融化 /
@@ -1247,6 +1251,17 @@ cargo run --release -p mc-bamboo-vanilla -- oracle <java 路径> [--cases N] [--
 
 ```bash
 cargo run -p mc-bamboo-vanilla -- clock-oracle <java 路径> [--break-self-test] [--show N]
+```
+
+睡眠判定和跳早数学另用官方 `BedRule` / `SleepStatus` / `ClockTimeMarker` / `GameRules`
+逐项对拍（`sleep-oracle`），三种改坏确认覆盖天色阈值、熟睡人数公式和跳早目标：
+一天 24 000 刻、`players_sleeping_percentage` 多档、正负时间刻都逐项比较。
+方块 oracle 的 `--clock-ticks 18000` 夜晚批让假世界的方块光为 0、天空光为 15，
+于是 `getRawBrightness(pos, skyDarken) = max(block, sky - darken)` 真的随天色变暗，
+作物 / 树苗 / 草和菌丝蔓延 / 霜冰 / 阳光探测器 / 床都在夜里重新对拍。
+
+```bash
+cargo run -p mc-bamboo-vanilla -- sleep-oracle <java 路径> [--break-self-test] [--show N]
 ```
 
 下落方块和点燃的 TNT 的物理也一样：官方 `FallingBlockEntity.tick` 和 `PrimedTnt.tick` 在假世界里跑，

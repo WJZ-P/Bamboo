@@ -3119,16 +3119,28 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     // Official `ServerPlayer.doTick`: a changed total sends one `set_experience`.
     crate::experience::sync_dirty(region);
     crate::command::admin::tick_idle(region);
-    // 官方 `ServerPlayer.doTick` 的六个只读准则：岛算变了的值，主控写计分板。
+    // 官方 `ServerPlayer.doTick` 的六个只读准则和 `ServerLevel.tick` 的睡眠统计：
+    // 岛算变了的值，主控写计分板 / 跳早。
     //
-    // The six read-only criteria from official `ServerPlayer.doTick`: the island
-    // computes the changes, the master writes the scoreboard.
+    // The six read-only criteria from official `ServerPlayer.doTick` and the
+    // sleep bookkeeping of `ServerLevel.tick`: the island computes, the master
+    // writes the scoreboard and skips the night.
     {
         let mut port = match (port_mode, global.as_deref_mut()) {
             (PortMode::Direct, Some(global)) => GlobalPort::Direct(global),
             _ => GlobalPort::Queued(&mut island.effects),
         };
         crate::scoreboard::tick_criteria(&mut port, &mut island.region);
+    }
+    // 睡眠跳过由岛算、主控执行；分开借 `region` 和 `effects` 两个字段。
+    let skip = crate::sleep::tick_sleep(&mut island.region);
+    match (port_mode, global.as_deref_mut()) {
+        (PortMode::Direct, Some(global)) => {
+            for effect in skip {
+                crate::global_port::apply(global, &mut island.region, effect);
+            }
+        }
+        _ => island.effects.extend(skip),
     }
     let region = &mut island.region;
     region.profiler.lap(Phase::PlayerMisc);

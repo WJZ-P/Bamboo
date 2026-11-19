@@ -576,6 +576,7 @@ impl Region {
             profiler: self.profiler.fresh_like(),
             partitioning: self.partitioning.fresh_like(),
             dirty,
+            sleep: crate::sleep::SleepStatus::default(),
         })
     }
 
@@ -733,6 +734,7 @@ impl Region {
             profiler,
             partitioning: _,
             dirty,
+            sleep: _,
         } = other;
         let identity = IslandIdentity {
             random,

@@ -642,6 +642,15 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     crate::command_block::open(region, id, pos);
                 }
             }
+            Effect::SleepInBed {
+                pos,
+                set_spawn,
+                problem,
+            } => {
+                if let Some(id) = initiator {
+                    crate::sleep::on_sleep_in_bed(region, id, pos, set_spawn, problem);
+                }
+            }
         }
     }
 }

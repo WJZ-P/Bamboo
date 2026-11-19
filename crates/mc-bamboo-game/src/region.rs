@@ -328,6 +328,8 @@ pub(crate) struct Region {
     pub(crate) partitioning: crate::region::partition::Partitioning,
     /// 「上次保存之后改过没有」的标记，见 [`dirty`]。
     pub(crate) dirty: dirty::Dirty,
+    /// 官方 `ServerLevel.sleepStatus`：多少活跃玩家、多少人在睡觉。
+    pub(crate) sleep: crate::sleep::SleepStatus,
 }
 
 /// 每次启动不同的种子，官方用 `RandomSupport.generateUniqueSeed`，这里用启动时刻的纳秒数。
@@ -464,6 +466,7 @@ impl Region {
             profiler: Profiler::default(),
             partitioning: crate::region::partition::Partitioning::default(),
             dirty: dirty::Dirty::default(),
+            sleep: crate::sleep::SleepStatus::default(),
         }
     }
 

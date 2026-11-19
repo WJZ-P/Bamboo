@@ -107,6 +107,10 @@ impl Metadata {
 /// 一名玩家的同步状态。`entities.md` 7.1。
 #[derive(Debug)]
 pub(crate) struct EntitySync {
+    /// `ServerPlayer.isSleeping()`：睡在床上时元数据里的姿势是 `SLEEPING`。
+    ///
+    /// `ServerPlayer.isSleeping()`: while in bed the metadata pose is `SLEEPING`.
+    pub(crate) sleeping: bool,
     /// 元数据 index 0 的标志字节。`entities.md` 第 10 节。
     pub(crate) shared_flags: u8,
     /// 元数据变了：这一 tick 进入周期，把变化发给观察者和玩家自己。
@@ -148,6 +152,7 @@ impl EntitySync {
     /// 进服第 6 步把 `client` 里的皮肤外层和主手发给了玩家自己，所以这两项算已经发过。
     pub(crate) fn new(position: Vec3, client: &ClientInformation) -> Self {
         Self {
+            sleeping: false,
             shared_flags: 0,
             metadata_dirty: false,
             shift_key_down: false,
@@ -179,7 +184,9 @@ impl EntitySync {
 
     /// 其他玩家的姿势完全由 index 6 决定，客户端不会根据潜行位自己推算。
     fn pose(&self) -> Pose {
-        if self.is_crouching() {
+        if self.sleeping {
+            Pose::Sleeping
+        } else if self.is_crouching() {
             Pose::Crouching
         } else {
             Pose::Standing
@@ -599,8 +606,8 @@ pub(crate) fn on_player_command(region: &mut Region, id: PlayerId, action: Playe
         PlayerCommandKind::StartSprinting => set_sprinting(region, id, true),
         PlayerCommandKind::StopSprinting => set_sprinting(region, id, false),
         PlayerCommandKind::StartFallFlying => refuse_fall_flying(region, id),
-        PlayerCommandKind::StopSleeping
-        | PlayerCommandKind::StartRidingJump
+        PlayerCommandKind::StopSleeping => crate::sleep::stop_sleeping(region, id),
+        PlayerCommandKind::StartRidingJump
         | PlayerCommandKind::StopRidingJump
         | PlayerCommandKind::OpenInventory => {}
     }

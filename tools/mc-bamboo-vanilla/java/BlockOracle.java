@@ -414,7 +414,9 @@ import sun.misc.Unsafe;
  *               MOTION_BLOCKING 高度图由 FakeChunk 从最高层往下扫场景里的方块得出，群系恒为平原。
  *     流体形状  FlowingFluid.getShape 按流体状态缓存，第一次调用时的位置决定高度。启动时在上面没有同种流体的位置调用过，
  *               所以水源和岩浆源的形状是它们自己的高度 8/9。
- *     亮度      getRawBrightness、getBrightness 恒为 15。
+ *     亮度      白天批两层光都是 15；夜晚批（--clock-ticks 非正午）方块光 0、天空光 15，
+ *                 这样官方 `getRawBrightness(pos, skyDarken) = max(block, sky - darken)` 才会
+ *                 真的变暗，和 Bamboo 的 `max_local_raw_brightness` 用同一份值。
  *     信号      官方真实的实现，方块状态里的 powered、power 真的会产生信号。
  *     方块实体  场景加载时新建，容器内容按 contents 填，别的为空。有三种方块的状态是内容的镜像，内容按状态补齐：
  *               chiseled_bookshelf 的书、jukebox 的唱片、lectern 的书。漏斗、移动活塞和营火的 ticker 会跑：
@@ -468,6 +470,8 @@ public final class BlockOracle {
     /** 官方 server.properties 的默认值。 */
     private static final int MAX_CHAINED_UPDATES = 1_000_000;
     private static final int FULL_BRIGHTNESS = 15;
+    /** 夜晚批的方块光：没有方块光源，`getBrightness(BLOCK, pos)` 是 0。 */
+    private static final int NIGHT_BLOCK_BRIGHTNESS = 0;
     private static final int LEVEL_EVENT_BLOCK_DESTROYED = 2001;
     private static final int SEA_LEVEL = 63;
     private static final int OUTPUT_BUFFER = 4 << 20;
@@ -513,6 +517,9 @@ public final class BlockOracle {
             official.skyDarkenValue = official.skyDarken(
                     options.weather.equals("clear") ? 0.0F : 1.0F,
                     options.weather.equals("thunder") ? 1.0F : 0.0F);
+            if (options.clockTicks != NOON_TICKS) {
+                official.blockBrightness = NIGHT_BLOCK_BRIGHTNESS;
+            }
             official.applyRules(options.rules);
             new Oracle(official, options, out, log).run();
         }
@@ -715,6 +722,8 @@ public final class BlockOracle {
         int clockTicks = NOON_TICKS;
         /** 按题面时钟和天气算出的 `getSkyDarken()`，在出题前填好。 */
         int skyDarkenValue;
+        /** 题面的方块光；夜晚批是 0，好让天色变暗真的改变原始亮度。 */
+        int blockBrightness = FULL_BRIGHTNESS;
         final WorldBorder border = new WorldBorder();
         final RandomSource soundSeeds = RandomSource.create(0);
         final GameProfile profile = new GameProfile(new UUID(0, 1), "Oracle");
@@ -2161,14 +2170,16 @@ public final class BlockOracle {
 
         @Override
         public int getBrightness(LightLayer layer, BlockPos pos) {
-            return FULL_BRIGHTNESS;
+            return layer == LightLayer.BLOCK ? official.blockBrightness : FULL_BRIGHTNESS;
         }
 
         @Override
         public int getRawBrightness(BlockPos pos, int darkening) {
-            // 官方 `LevelReader.getMaxLocalRawBrightness(pos, skyDarken)` 会走到这里；
-            // 天色变暗只通过 `getSkyDarken()` 传进来，这一层的 15 减去它。
-            return Math.max(FULL_BRIGHTNESS - darkening, 0);
+            // 官方 `LevelLightEngine.getRawBrightness(pos, darkening)`：
+            // `max(getBrightness(BLOCK, pos), getBrightness(SKY, pos) - darkening)`。
+            // 假世界没有光照引擎，但两层光是固定的，直接照公式算。
+            return Math.max(getBrightness(LightLayer.BLOCK, pos),
+                    getBrightness(LightLayer.SKY, pos) - darkening);
         }
 
         @Override
@@ -5101,6 +5112,7 @@ public final class BlockOracle {
             line.append(",\"weather\":\"").append(options.weather).append('"');
             line.append(",\"clockTicks\":").append(options.clockTicks);
             line.append(",\"skyDarken\":").append(official.skyDarkenValue);
+            line.append(",\"blockBrightness\":").append(official.blockBrightness);
             if (!options.rules.isEmpty()) {
                 line.append(",\"rules\":{");
                 boolean firstRule = true;

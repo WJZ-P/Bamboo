@@ -125,6 +125,8 @@ struct OracleLevel {
     block_weather: mc_bamboo_blocks::BlockWeather,
     /// 题面主世界时钟算出的 `getSkyDarken()`。
     sky_darken: i32,
+    /// 题面的方块光；与官方假世界的 `getBrightness(BLOCK, pos)` 一致。
+    block_brightness: i32,
     /// 假世界的降水条件：平原、海平面 63、按位置算真实官方温度。
     precipitation: mc_bamboo_worldgen::biome_temperature::BiomeClimate,
 }
@@ -322,6 +324,7 @@ impl OracleLevel {
             block_rules: block_rules_of(header)?,
             block_weather: weather_of(header)?,
             sky_darken: sky_darken_of(header)?,
+            block_brightness: header.block_brightness,
             precipitation: mc_bamboo_worldgen::biome_temperature::BiomeClimate::of(
                 mc_bamboo_data::registries::biome::PLAINS,
             ),
@@ -532,9 +535,13 @@ impl Level for OracleLevel {
         self.max_y
     }
 
-    /// 假世界里 `getBrightness` 恒为 15。
-    fn brightness(&self, _layer: LightLayer, _pos: BlockPos) -> i32 {
-        FULL_BRIGHTNESS
+    /// 官方 `LevelLightEngine` 的两层光：天空光恒 15，方块光由题面给出
+    /// （夜晚批为 0，好让 `getRawBrightness(pos, skyDarken)` 真的变暗）。
+    fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> i32 {
+        match layer {
+            LightLayer::Block => self.block_brightness,
+            LightLayer::Sky => FULL_BRIGHTNESS,
+        }
     }
 
     /// 官方的假世界每次 `getBlockEntity` 都按状态新建一个空的告示牌实体，
@@ -1145,7 +1152,8 @@ fn destroyed_of(outcome: &Outcome) -> Vec<Destroyed> {
             //
             // Action-bar text and the command-block editor are not part of a block case.
             | Effect::Overlay { .. }
-            | Effect::OpenCommandBlock { .. } => None,
+            | Effect::OpenCommandBlock { .. }
+            | Effect::SleepInBed { .. } => None,
         })
         .collect()
 }
@@ -1257,7 +1265,8 @@ fn events_of(outcome: &Outcome) -> (Vec<LevelPlay>, Vec<SoundPlay>) {
             // The campfire food block-entity packet is not compared. The game layer still sends it.
             | Effect::CampfireChanged { .. }
             | Effect::Overlay { .. }
-            | Effect::OpenCommandBlock { .. } => {}
+            | Effect::OpenCommandBlock { .. }
+            | Effect::SleepInBed { .. } => {}
         }
     }
     (events, sounds)
@@ -1321,6 +1330,7 @@ mod tests {
             block_rules: BlockGameRules::vanilla(),
             block_weather: mc_bamboo_blocks::BlockWeather::CLEAR,
             sky_darken: 0,
+            block_brightness: 15,
             precipitation: mc_bamboo_worldgen::biome_temperature::BiomeClimate::of(
                 mc_bamboo_data::registries::biome::PLAINS,
             ),

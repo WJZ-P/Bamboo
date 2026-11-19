@@ -82,6 +82,11 @@ pub(crate) enum GlobalEffect {
     ///
     /// A player left: broadcast "left the game".
     LeaveMessage { player: PlayerId },
+    /// 官方 `ServerLevel.tick` 的睡眠跳过：人数够了跳到早上并清除天气。
+    ///
+    /// Official `ServerLevel.tick`'s sleep skip: enough players asleep, so
+    /// advance the overworld clock to morning and clear the weather.
+    SkipNight,
     /// 玩家离开：从 Boss 栏和 Tab 名单里去掉。
     ///
     /// A player left: drop them from boss bars and the tab list.
@@ -215,6 +220,14 @@ fn apply_on_master(global: &mut Global, region: &mut Region, effect: GlobalEffec
                 // Official `PlayerList.broadcastSystemMessage` checks visibility per player.
                 crate::chat::broadcast_system_message(region, &frames, None);
             }
+        }
+        GlobalEffect::SkipNight => {
+            crate::sleep::skip_night(global);
+            global.publish(region);
+            let time = global.time();
+            let clocks = global.clocks();
+            let advance = global.rules().bool(mc_bamboo_data::gamerules::ADVANCE_TIME);
+            region.broadcast_all_clocks(time, &clocks, advance);
         }
         GlobalEffect::Left { player } => {
             // 官方玩家断开时 `entityRemoved` 直接 return，不广播 reset_score；

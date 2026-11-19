@@ -77,6 +77,16 @@ pub struct Header {
     /// night batch really is dark.
     #[serde(default)]
     pub sky_darken: i32,
+    /// 假世界的方块光；夜晚批是 0，白天批和旧题面是 15。
+    ///
+    /// The fake level's block light: 0 in night batches, 15 in day batches
+    /// and in older batches without this field.
+    #[serde(default = "default_block_brightness")]
+    pub block_brightness: i32,
+}
+
+fn default_block_brightness() -> i32 {
+    15
 }
 
 fn default_clock_ticks() -> i64 {

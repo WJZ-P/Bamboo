@@ -1909,6 +1909,22 @@ impl<'a> World<'a> {
         self.level.sky_darken()
     }
 
+    /// `Level.isDarkOutside()`：床的 `when_dark` 规则读它。
+    pub fn is_dark_outside(&self) -> bool {
+        self.level.is_dark_outside()
+    }
+
+    /// `ServerPlayer.startSleepInBed` 的怪物检查：`Monster.isPreventingPlayerRest`
+    /// 在床周围 8 × 5 × 8 的盒子里。世界里还没有怪物，假世界也恒为假；
+    /// 僵尸分支接上后由 [`Level`] 覆盖。
+    ///
+    /// The monster check in `ServerPlayer.startSleepInBed`: any
+    /// `Monster.isPreventingPlayerRest` within an 8 × 5 × 8 box around the
+    /// bed. No monsters exist yet; mob implementations override [`Level`].
+    pub fn monster_prevents_rest(&self, pos: BlockPos) -> bool {
+        self.level.monster_prevents_rest(pos)
+    }
+
     /// `getSignal`：`pos` 这一格朝 `direction` 输出多强的信号。
     ///
     /// 导体还要算上强充能它的邻居，这就是红石线能被旁边的方块“穿过”充能的原因。
@@ -3626,7 +3642,8 @@ mod tests {
                 | Effect::DispenserEquipped { .. }
                 | Effect::CampfireChanged { .. }
                 | Effect::Overlay { .. }
-                | Effect::OpenCommandBlock { .. } => None,
+                | Effect::OpenCommandBlock { .. }
+                | Effect::SleepInBed { .. } => None,
             })
             .collect()
     }

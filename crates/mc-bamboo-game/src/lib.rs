@@ -91,6 +91,7 @@ pub mod save_session;
 mod scoreboard;
 mod secure_chat;
 mod sign;
+mod sleep;
 pub(crate) mod spawn_landing;
 mod tick_levels;
 mod weather;
@@ -1682,4 +1683,47 @@ pub struct ClockReplayStep {
     pub end_rate: f32,
     pub end_paused: bool,
     pub sky_darken: i32,
+}
+
+/// `sleep-oracle` 用：从产品代码里取出睡眠判定和跳早数学的答案。
+/// 只在 `oracle-samples` feature 下编进库里。
+///
+/// For `sleep-oracle`: read the sleep decisions and morning-skip maths from
+/// the production code. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_sleep_facts(scene: &SleepReplayFacts) -> SleepReplayAnswer {
+    let status = sleep::SleepStatus::of_counts(scene.active, scene.sleeping);
+    SleepReplayAnswer {
+        dark_outside: scene.sky_darken >= 4,
+        needed: status.sleepers_needed(scene.percentage),
+        enough: status.enough_sleeping(scene.percentage),
+        can_sleep_through_night: scene.percentage <= 100,
+        wake_up_ticks: sleep::wake_up_ticks(scene.total_ticks),
+        occurs_at: scene.total_ticks.rem_euclid(24_000) == 0,
+    }
+}
+
+/// `sleep-oracle` 的一道题。
+/// One case of the `sleep-oracle`.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SleepReplayFacts {
+    pub sky_darken: i32,
+    pub percentage: i32,
+    pub active: i32,
+    pub sleeping: i32,
+    pub total_ticks: i64,
+}
+
+/// `sleep-oracle` 的一道题的产品答案。
+/// The production answer to one `sleep-oracle` case.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SleepReplayAnswer {
+    pub dark_outside: bool,
+    pub needed: i32,
+    pub enough: bool,
+    pub can_sleep_through_night: bool,
+    pub wake_up_ticks: i64,
+    pub occurs_at: bool,
 }

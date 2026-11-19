@@ -1263,6 +1263,104 @@ fn first_batch_is_exactly_the_three_by_three_around_the_spawn() {
     assert_eq!(finished[0].body, [9]);
 }
 
+/// 夜里右键床：床被占、玩家睡姿、第二天跳早并清天气。
+#[test]
+fn sleeping_through_the_night_advances_the_clock_and_clears_weather() {
+    use mc_bamboo_blocks::{BlockState, state::OCCUPIED};
+    use mc_bamboo_core::Vec3;
+
+    let mut server = Harness::new_one_island(8);
+    let client = server.join_and_settle("Kitten");
+    let foot = BlockPos::new(8, -59, 8);
+    let head = foot.south();
+    // 完整的床，玩家站在床尾；把时钟设到午夜、开着雷暴。
+    let bed = BlockState(mc_bamboo_data::blocks::RED_BED)
+        .with(mc_bamboo_blocks::state::HORIZONTAL_FACING, Direction::South);
+    server.world.islands.region.chunks.set_block(foot, bed.0);
+    server.world.islands.region.chunks.set_block(
+        head,
+        bed.with(
+            mc_bamboo_blocks::state::BED_PART,
+            mc_bamboo_blocks::state::BedPart::Head,
+        )
+        .0,
+    );
+    let region = &mut server.world.islands.region;
+    if let Some(player) = region.players.get_mut(&client.id) {
+        player.set_position(&mut region.player_grid, Vec3::new(8.5, -59.0, 8.5));
+    }
+    {
+        let global = &mut server.world.master.global;
+        global
+            .clock_named_mut("minecraft:overworld")
+            .unwrap()
+            .total_ticks = 18_000;
+        let weather = &mut global.state_mut().weather;
+        weather.raining = true;
+        weather.thundering = true;
+        weather.rain_level = 1.0;
+        weather.o_rain_level = 1.0;
+        weather.thunder_level = 1.0;
+        weather.o_thunder_level = 1.0;
+    }
+    server.world.publish_global();
+    assert!(
+        server.world.master.global.sky_darken() >= 4,
+        "夜里天色要够暗"
+    );
+    client.take_frames();
+
+    // 走正式的方块右键路径。
+    crate::interaction::on_use_item_on(
+        &mut server.world.islands.region,
+        client.id,
+        crate::interaction::UseItemOn {
+            hand: Hand::Main,
+            pos: foot,
+            face: Direction::Up,
+            cursor: (0.5, 0.5, 0.5),
+            inside: false,
+            sequence: 1,
+        },
+    );
+    let region = &server.world.islands.region;
+    assert!(
+        region
+            .chunks
+            .block(head)
+            .is_some_and(|s| BlockState(s).get(OCCUPIED))
+    );
+    assert!(region.players[&client.id].sleep.is_some(), "玩家应该睡着了");
+    assert!(
+        region.players[&client.id].sync.sleeping,
+        "睡姿应该是 SLEEPING"
+    );
+
+    // 逐刻推进睡眠计数，够了人数就跳到早上、清天气、叫醒所有人。
+    for _ in 0..101 {
+        server.tick();
+    }
+    let global = &server.world.master.global;
+    // 跳早之后时钟照官方继续走，所以这里只要求它落在刚过 0 刻的清晨。
+    assert!(
+        global.clocks()[0].1.total_ticks.rem_euclid(24_000) < 5,
+        "跳到 0 刻（早上）之后照常推进: {}",
+        global.clocks()[0].1.total_ticks
+    );
+    assert!(!global.state().weather.raining);
+    assert!(!global.state().weather.thundering);
+    let region = &server.world.islands.region;
+    assert!(region.players[&client.id].sleep.is_none(), "所有人醒来");
+    assert!(!region.players[&client.id].sync.sleeping);
+    assert!(
+        !region
+            .chunks
+            .block(head)
+            .is_some_and(|s| BlockState(s).get(OCCUPIED)),
+        "床的 occupied 清掉"
+    );
+}
+
 /// 官方周期同步：每 20 刻一个空时钟表、只带 `gameTime` 的 `set_time`，
 /// 包里的游戏时间是这一刻 `tickTime` 加一之前的值。
 #[test]
