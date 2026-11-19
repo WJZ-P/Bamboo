@@ -477,6 +477,11 @@ impl World {
         // leaves it alone.
         global.state_mut().seed = world_gen.seed;
         global.random_sequences = mc_bamboo_loot::RandomSequences::new(world_gen.seed);
+        // `ServerLevel.isFlat()` / `ChunkGenerator.getSeaLevel()` 和落脚点搜索
+        // 都从发布的全局快照读这份参数（存档优先，见上面的 world_gen）。
+        // `ServerLevel.isFlat()`, `ChunkGenerator.getSeaLevel()` and the landing
+        // search all read this from the published snapshot (a save wins).
+        global.world_gen = world_gen.clone();
         // 全新世界（没有 level.dat）按官方 `MinecraftServer.setInitialSpawn` 选出生点；
         // 读档时用存档里的出生点（已由 `apply_level_data` 套回）。超平坦保持不变。
         // A fresh world (no level.dat) picks a spawn like `setInitialSpawn`;
@@ -1260,6 +1265,14 @@ impl World {
         self.run_bench_hooks();
         self.consume_save_commands();
         self.sync_player_tickets();
+        // 这一刻玩家票刚挂上；区块在下一段的 Director 步进里交付。
+        // 已交付 / 新交付的候选区块就绪后，`Region::advance_tick` 与邮筒
+        // 收信处完成落位（见那里）。
+        for island in self.islands.parked_mut() {
+            crate::spawn_landing::finish_pending(&mut island.region);
+        }
+        // 区块就绪后由 `Region::advance_tick` 完成落位（见那里）。
+        // `Region::advance_tick` finishes the landing once chunks are ready.
         self.profiler().lap(Phase::Inbox);
         ControlFlow::Continue(())
     }
@@ -2008,6 +2021,7 @@ impl World {
                 permission_level,
                 is_op,
                 experience: join_experience,
+                new_player: restored.is_none(),
             },
         );
         let now = region.now_millis();
@@ -2794,6 +2808,11 @@ impl World {
         self.master.host.take_posted(island.id, &mut posted);
         let mut replies = std::mem::take(&mut island.replies);
         island.take_mail(&mut posted, &order, &mut replies);
+        // 区块刚交付进 region：照官方 `PrepareSpawnTask.tick` 当场完成
+        // 挂着没落位的进服 / 重生，位置包排在客户端确认包之前。
+        // Chunks just landed: like vanilla `PrepareSpawnTask.tick`, finish
+        // pending landings so the position packet precedes the confirmation.
+        crate::spawn_landing::finish_pending(&mut island.region);
         island.replies = replies;
         self.master.posted_scratch = posted;
     }

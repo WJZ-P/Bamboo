@@ -64,18 +64,23 @@ pub(crate) use island_split::IslandPart;
 pub(crate) use island_split::{IslandIdentity, IslandRandom};
 
 pub(crate) const DIMENSION: &str = "minecraft:overworld";
-/// 默认世界出生点在 `world_state`。进服位置只取它的水平坐标，y 仍按超平坦地表算：
-/// 官方还会在 `respawn_radius` 里随机找落脚点，这里没有死亡重生也不做随机。
+/// 区块还没就绪时的临时位置：`PlayerSpawnFinder.fixupSpawnHeight` 那一段的高度，
+/// 只用于登记玩家和挂票，不发位置包、不是最终落点。进服 / 重生的最终位置
+/// 统一由 [`crate::spawn_landing::landing`] 算。
 ///
-/// The default world spawn lives in [`WorldState`]. Join uses its horizontal position and
-/// keeps the superflat surface as y; official also searches for a spot within
-/// `respawn_radius`, which this server does not implement.
-fn spawn_position(spawn: RespawnData) -> Vec3 {
-    Vec3::new(
-        f64::from(spawn.pos.x) + 0.5,
-        f64::from(flat::surface_y()),
-        f64::from(spawn.pos.z) + 0.5,
-    )
+/// Temporary position while chunks are unready: the height from
+/// `PlayerSpawnFinder.fixupSpawnHeight`. It only registers the player and its
+/// tickets; no position packet is sent and it is never the final landing. The
+/// final join / respawn position always comes from
+/// [`crate::spawn_landing::landing`].
+pub(crate) fn temporary_position(region: &Region) -> Vec3 {
+    let pos = region.global.spawn.pos;
+    let y = if region.global.world_gen.level_type.is_flat() {
+        flat::surface_y()
+    } else {
+        crate::spawn_landing::noise_sea_level(region.global.world_gen.level_type) + 1
+    };
+    Vec3::new(f64::from(pos.x) + 0.5, f64::from(y), f64::from(pos.z) + 0.5)
 }
 
 /// 官方 `ServerPlayer.onUpdateAbilities`：能力按当前游戏模式推。
@@ -352,6 +357,12 @@ pub(crate) struct JoinSettings<'a> {
     pub(crate) permission_level: u8,
     pub(crate) is_op: bool,
     pub(crate) experience: Experience,
+    /// 官方 `PrepareSpawnTask.start`：只有新玩家（`SavedPosition.position()` 为空）
+    /// 才跑 `PlayerSpawnFinder.findSpawn`；老玩家用存档里的精确位置。
+    /// Official `PrepareSpawnTask.start`: only a new player (empty
+    /// `SavedPosition.position()`) runs `PlayerSpawnFinder.findSpawn`; a
+    /// returning player keeps the exact saved position.
+    pub(crate) new_player: bool,
 }
 
 impl Region {
@@ -478,6 +489,12 @@ impl Region {
 
     pub(crate) fn advance_tick(&mut self) {
         self.tick.0 += 1;
+        // 这一刻交付的区块已经进 region：照官方 `PrepareSpawnTask.tick`
+        // 完成挂着的落位搜索，位置包排在下一刻的客户端确认之前。
+        // Chunks delivered this tick are now in the region: like vanilla
+        // `PrepareSpawnTask.tick`, finish pending landings so the position
+        // packet precedes next tick's client confirmation.
+        crate::spawn_landing::finish_pending(self);
     }
 
     /// 岛建立时把时钟定在当时的世界时间；计划刻队列的时钟一起对上。
@@ -675,6 +692,7 @@ impl Region {
             permission_level,
             is_op,
             experience,
+            new_player,
         } = settings;
         // 属性已经进了 Tab 名单，这里用不到。
         let JoinRequest {
@@ -693,6 +711,7 @@ impl Region {
         } = request;
         self.links.add(id, sink);
         self.peer_ips.insert(id, peer_ip);
+        let (is_flat, sea_level) = crate::spawn_landing::search_from(self).level_flags();
 
         let login = Login {
             entity_id: id.0,
@@ -704,8 +723,8 @@ impl Region {
             dimension: DIMENSION,
             hashed_seed: state_seed_hash,
             game_mode,
-            is_flat: true,
-            sea_level: flat::SEA_LEVEL,
+            is_flat,
+            sea_level,
             online_mode: self.online_mode,
             enforces_secure_chat: crate::secure_chat::enforces(self),
         };
@@ -718,7 +737,28 @@ impl Region {
         // Official sends the permission event and the command tree after abilities and before the teleport.
         crate::command::send_session(&mut self.links, id, permission_level, id.0);
 
-        let position = spawn_position(spawn);
+        // `PrepareSpawnTask`：区块就绪时直接算精确落点并发 `player_position`；
+        // 没就绪只放一个临时位置，等票加载完由 `finish_pending` 补发位置包。
+        // `PrepareSpawnTask`: compute the exact landing and send
+        // `player_position` when chunks are ready; otherwise use a temporary
+        // position and let `finish_pending` complete it after ticket delivery.
+        let (position, ready) = if new_player {
+            match crate::spawn_landing::landing(self, None, None, false) {
+                Ok((landing, _)) => (landing.position, true),
+                Err(crate::spawn_landing::NotReady) => (temporary_position(self), false),
+            }
+        } else {
+            // `SavedPosition.position()`：方块中心 +0.5，y 用存档里的精确值。
+            // `SavedPosition.position()`: block centre +0.5 with the saved y.
+            (
+                Vec3::new(
+                    f64::from(spawn.pos.x) + 0.5,
+                    f64::from(spawn.pos.y),
+                    f64::from(spawn.pos.z) + 0.5,
+                ),
+                true,
+            )
+        };
         let mut player = Player::new(id, uuid, name, game_mode, client, position);
         player.experience = experience;
         player.permission_level = permission_level;
@@ -726,13 +766,17 @@ impl Region {
         player.inbox = inbox;
         player.yaw = spawn.yaw;
         player.pitch = spawn.pitch;
-        movement::teleport(
-            &mut player,
-            &mut self.links,
-            &mut self.player_grid,
-            self.tick,
-            position,
-        );
+        if ready {
+            movement::teleport(
+                &mut player,
+                &mut self.links,
+                &mut self.player_grid,
+                self.tick,
+                position,
+            );
+        } else {
+            player.spawn_pending = Some(crate::spawn_landing::PendingLanding::join());
+        }
         self.insert_player(player);
     }
 

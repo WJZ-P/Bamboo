@@ -12,7 +12,6 @@
 //! decides what is reset and what is kept, mirroring the official constructor
 //! plus `restoreFrom`.
 
-use mc_bamboo_core::Vec3;
 use mc_bamboo_data::{gamerules, registries::dimension_type};
 use mc_bamboo_protocol::{
     item::ItemStack,
@@ -123,14 +122,7 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
         return;
     }
     let keep_inventory = region.global.rules.bool(gamerules::KEEP_INVENTORY);
-    let spawn: RespawnData = player.respawn.unwrap_or(region.global.spawn);
-    // 和进服一样用超平坦地表高度；存档里的 spawn.pos.y 是 `/spawnpoint`
-    // 存下的脚下方块，官方还会再找安全落脚点（已知差异）。
-    let position = Vec3::new(
-        f64::from(spawn.pos.x) + 0.5,
-        f64::from(mc_bamboo_world::flat::surface_y()),
-        f64::from(spawn.pos.z) + 0.5,
-    );
+    let personal = player.respawn;
     let last_death = player.last_death_location;
     let game_mode = player.game_mode;
     let permission_level = player.permission_level;
@@ -142,6 +134,38 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
     let time = region.global.time;
     let clock = region.global.clock;
     let world_spawn = region.global.spawn;
+    let (is_flat, sea_level) = crate::spawn_landing::search_from(region).level_flags();
+    // 官方 `findRespawnAndUseSpawnBlock`：强制个人点的两格不能重生就回退到
+    // 世界出生点 + `PlayerSpawnFinder.findSpawn`，并发 NO_RESPAWN_BLOCK_AVAILABLE。
+    // 进服和重生的精确落点都由 `spawn_landing::landing` 算（同一个函数）。
+    // Vanilla `findRespawnAndUseSpawnBlock`: a blocked forced personal spawn
+    // falls back to worldSpawn + `PlayerSpawnFinder.findSpawn` and sends
+    // NO_RESPAWN_BLOCK_AVAILABLE. Join and respawn share `landing`.
+    let missing = crate::spawn_landing::personal_spawn_missing(region, personal);
+    if missing && let Some(player) = region.players.get_mut(&id) {
+        player.respawn = None;
+    }
+    let (position, spawn, ready) =
+        match crate::spawn_landing::landing(region, personal, None, false) {
+            Ok((landing, _)) => (
+                landing.position,
+                RespawnData::of(
+                    mc_bamboo_core::BlockPos::new(
+                        landing.position.x.floor() as i32,
+                        landing.position.y.floor() as i32,
+                        landing.position.z.floor() as i32,
+                    ),
+                    landing.yaw,
+                    landing.pitch,
+                ),
+                true,
+            ),
+            Err(crate::spawn_landing::NotReady) => (
+                crate::region::temporary_position(region),
+                region.global.spawn,
+                false,
+            ),
+        };
     reset_after_respawn(region, id, keep_inventory);
     let experience = region.players.get(&id).expect("玩家刚才还在").experience;
 
@@ -166,11 +190,22 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
         game_mode,
         previous_game_mode: None,
         is_debug: false,
-        is_flat: true,
+        is_flat,
         last_death: last_death.map(|pos| (DIMENSION, pos)),
         portal_cooldown: 0,
-        sea_level: mc_bamboo_world::flat::SEA_LEVEL,
+        sea_level,
     };
+    // `TeleportTransition.missingRespawnBlock` 的那一包在 Respawn 之前。
+    // The `TeleportTransition.missingRespawnBlock` packet precedes Respawn.
+    if missing {
+        region.links.send(
+            id,
+            &GameEvent {
+                event: GameEvent::NO_RESPAWN_BLOCK_AVAILABLE,
+                param: 0.0,
+            },
+        );
+    }
     // `ServerPlayer.restoreFrom` 里 `onUpdateAbilities` 在 Respawn 包之前发。
     region
         .links
@@ -183,18 +218,24 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
         },
     );
     // `ServerGamePacketListenerImpl.teleport`：绝对坐标、绝对朝向、速度 0。
-    region.links.send(
-        id,
-        &PlayerPosition {
-            teleport_id: 1,
-            x: position.x,
-            y: position.y,
-            z: position.z,
-            yaw: spawn.yaw,
-            pitch: spawn.pitch,
-            relative: 0,
-        },
-    );
+    // 搜索覆盖的区块没就绪时这一包等 `finish_pending` 补发。
+    // `ServerGamePacketListenerImpl.teleport`: absolute position / rotation,
+    // zero velocity. When the covered chunks are not ready `finish_pending`
+    // sends this packet later.
+    if ready {
+        region.links.send(
+            id,
+            &PlayerPosition {
+                teleport_id: 1,
+                x: position.x,
+                y: position.y,
+                z: position.z,
+                yaw: spawn.yaw,
+                pitch: spawn.pitch,
+                relative: 0,
+            },
+        );
+    }
     let spawn_packet = SetDefaultSpawnPosition {
         dimension: DIMENSION,
         pos: world_spawn.pos,
@@ -280,6 +321,13 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
     // `player_position` 已在上面发过，这里不再发第二包。跨岛搬运由主控
     // 按玩家所在区块完成，不能直接改坐标。
     crate::command::place_player_at_respawn(region, id, position, spawn.yaw, spawn.pitch);
+    if !ready {
+        region
+            .players
+            .get_mut(&id)
+            .expect("玩家刚才还在")
+            .spawn_pending = Some(crate::spawn_landing::PendingLanding::respawn(personal));
+    }
 }
 
 /// 官方重建玩家后 `ChunkMap.addEntity` 的 `sendPairingData` 和

@@ -259,6 +259,13 @@ pub(crate) struct Global {
     /// `None` with one island: the weather uses that island's `Level.random`
     /// as vanilla does.
     pub(crate) weather_random: Option<mc_bamboo_blocks::random::LevelRandom>,
+    /// 权威的世界生成参数（种子、世界类型、flat 预设、结构开关）。启动时定下来，
+    /// 发布到岛上的全局快照，之后整局不变。
+    ///
+    /// The authoritative world generation parameters (seed, level type, flat
+    /// preset, structures). Fixed at startup and published to the islands'
+    /// global snapshot; it never changes during a session.
+    pub(crate) world_gen: crate::world_options::WorldGenConfig,
 }
 
 impl Default for Global {
@@ -281,6 +288,7 @@ impl Default for Global {
             command_storage: crate::command::data_source::CommandStorage::default(),
             random_sequences: mc_bamboo_loot::RandomSequences::new(crate::world_state::WORLD_SEED),
             weather_random: None,
+            world_gen: crate::world_options::WorldGenConfig::default(),
         }
     }
 }
@@ -415,6 +423,7 @@ impl Global {
             command_storage: self.command_storage.clone(),
             default_game_mode: self.state.default_game_mode,
             seed: self.state.seed,
+            world_gen: self.world_gen.clone(),
             idle_timeout_minutes: self.admin.idle_timeout_minutes,
             scoreboard: Arc::clone(&self.scoreboard),
         }
@@ -666,6 +675,13 @@ pub(crate) struct GlobalView {
     pub(crate) default_game_mode: GameMode,
     /// 世界种子。哈希要算 SHA-256，只在进服时用到，所以发布时不算。
     pub(crate) seed: i64,
+    /// 一局的世界生成参数。`ServerLevel.isFlat()` / `ChunkGenerator.getSeaLevel()`
+    /// 和落脚点搜索都读它；存档里的 `world_gen_settings.dat` 比配置文件优先。
+    ///
+    /// This session's world generation parameters. `ServerLevel.isFlat()`,
+    /// `ChunkGenerator.getSeaLevel()` and the spawn landing search all read it;
+    /// a saved `world_gen_settings.dat` wins over the config file.
+    pub(crate) world_gen: crate::world_options::WorldGenConfig,
     /// `/setidletimeout` 的分钟数，0 表示不踢。
     pub(crate) idle_timeout_minutes: i32,
     pub(crate) scoreboard: Arc<Scoreboard>,

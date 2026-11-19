@@ -117,6 +117,13 @@ pub(crate) struct Player {
     ///
     /// Official `ServerPlayer.respawnConfig`: the player's spawn set by `/spawnpoint`.
     pub(crate) respawn: Option<RespawnData>,
+    /// 进服 / 重生时等搜索覆盖的区块就绪，还没发最终位置包。等待期间不跑物理、
+    /// 不受伤、不处理移动包（官方 `PrepareSpawnTask` 在进服前把区块准备好）。
+    ///
+    /// Join / respawn is waiting for the search-covered chunks before sending
+    /// the final position packet. No physics, hurt or movement while waiting
+    /// (vanilla `PrepareSpawnTask` prepares chunks before the player enters).
+    pub(crate) spawn_pending: Option<crate::spawn_landing::PendingLanding>,
     /// 这名玩家自己的入站队列（岛的实施计划第 6 节第 4 步）。世界线程每刻取一次，
     /// 和主控队列、别的玩家的队列按序号归并；跟着玩家走。
     ///
@@ -238,6 +245,7 @@ impl Player {
             drop_spam: 0,
             chat: PlayerChat::default(),
             respawn: None,
+            spawn_pending: None,
             inbox: crate::inbound::PlayerInbox::default(),
             recorded_criteria: crate::scoreboard::UNRECORDED_CRITERIA,
             health: PlayerHealth::default(),

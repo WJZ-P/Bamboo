@@ -90,6 +90,7 @@ pub mod save_session;
 mod scoreboard;
 mod secure_chat;
 mod sign;
+pub(crate) mod spawn_landing;
 mod tick_levels;
 mod weather;
 mod world;

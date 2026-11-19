@@ -178,6 +178,13 @@ pub(crate) fn on_move_player(
     let Some(player) = players.get_mut(&id) else {
         return;
     };
+    // 等出生点区块就绪时不处理移动包：官方 `PrepareSpawnTask` 在进服前
+    // 把区块准备好，玩家这时还没进场。
+    // Ignore movement while the spawn chunks are pending: vanilla
+    // `PrepareSpawnTask` prepares them before the player enters.
+    if player.spawn_pending.is_some() {
+        return;
+    }
     let reported = position.unwrap_or(player.position());
     let (yaw, pitch) = rotation.unwrap_or((player.yaw, player.pitch));
     if movement::invalid_position(reported, (yaw, pitch)) {
@@ -308,7 +315,12 @@ pub(crate) fn on_player_loaded(region: &mut Region, id: PlayerId) {
 ///
 /// End of one server tick: the load timeout, inside-block effects, flying, and the next tick's origin.
 pub(crate) fn finish_tick(region: &mut Region) {
-    let ids: Vec<PlayerId> = region.players.keys().copied().collect();
+    let ids: Vec<PlayerId> = region
+        .players
+        .iter()
+        .filter(|(_, player)| player.spawn_pending.is_none())
+        .map(|(&id, _)| id)
+        .collect();
     for id in ids {
         finish_player(region, id);
     }
