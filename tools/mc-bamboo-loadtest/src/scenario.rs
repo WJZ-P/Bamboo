@@ -95,6 +95,73 @@ pub enum ScenarioKind {
     /// into pieces that split after the hysteresis; when they return the
     /// pieces merge again. Measures how often and how long these take.
     IslandsShuttle,
+    /// 长时间压力（岛的实施计划第 11 步）：[`ROAM_CAMPS`] 个营地（每个是一组 `islands-K` 的
+    /// 内容，强制加载）排成网格；[`ROAM_BOTS`] 名假玩家在营地之间飞来飞去、在营地里游走，
+    /// 有时飞到野外，自己定时断线重连、聊天、发命令（`roam` 移动方式）。场景每隔一段时间
+    /// 把人直接放到别的营地、从控制台发 `/tp`、`/say`、`/time`、`/weather`、`/gamerule`、
+    /// 碰方块的 `/setblock`。拆合在真实的聚散轨迹上发生。
+    ///
+    /// Long-run stress (island plan step 11): [`ROAM_CAMPS`] camps (each one
+    /// `islands-K` group, force-loaded) on a grid; [`ROAM_BOTS`] bots fly
+    /// between camps, wander inside them, sometimes head into the wild, and
+    /// reconnect, chat and run commands on their own (`roam` pattern). The
+    /// scene periodically places bots at other camps and sends console
+    /// `/tp`, `/say`, `/time`, `/weather`, `/gamerule` and a block-touching
+    /// `/setblock`. Splits and merges follow real gathering and scattering.
+    IslandsRoam,
+}
+
+/// `islands-roam` 的营地数，排成 [`ROAM_COLUMNS`] 列。
+pub const ROAM_CAMPS: usize = 6;
+const ROAM_COLUMNS: usize = 3;
+/// 相邻营地隔几个区块：飞（33 格/秒）过去约 47 秒。一个营地连同在里面游走的人约占 20 个
+/// 区块宽，隔 96 个区块时两营地之间空出 70 多个区块，路上的人才有机会和出发的营地拆开、再
+/// 并进要去的营地；隔 48 个区块时 40 个人在路上和野外的视野把六个营地连成一个岛，试跑的
+/// 7 分钟里一直只有一个岛（`docs/profiling.md` 第 17 节）。
+///
+/// Camps are this many chunks apart (about 47 s of flying). A camp with the
+/// bots wandering in it is about 20 chunks wide; 96 leaves 70+ chunks
+/// between camps, so travellers get a chance to split off the camp they left
+/// and merge into the one they reach. At 48 the views of 40 bots travelling
+/// and in the wild joined all six camps into one island for the whole
+/// 7-minute trial.
+const ROAM_CAMP_STRIDE_CHUNKS: i32 = 96;
+/// `islands-roam` 的假玩家数。
+pub const ROAM_BOTS: usize = 40;
+/// `islands-roam` 的控制台动作的周期（刻）。
+const ROAM_PLACE_EVERY: i64 = 600;
+const ROAM_TP_EVERY: i64 = 900;
+const ROAM_SAY_EVERY: i64 = 400;
+const ROAM_TIME_EVERY: i64 = 1200;
+const ROAM_WEATHER_EVERY: i64 = 2400;
+const ROAM_SETBLOCK_EVERY: i64 = 1800;
+const ROAM_GAMERULE_EVERY: i64 = 3000;
+/// `islands-roam` 每隔这么多刻从控制台发一次 `defaultgamemode creative`（要整个世界的命令）。
+/// 第一刻也发一次：假玩家进服时就是创造模式，飞着赶路不会因为「悬空太久」被踢。
+///
+/// Every this many ticks `islands-roam` sends `defaultgamemode creative`
+/// (a whole-world command) from the console; also on its first tick, so bots
+/// join in creative mode and are not kicked for floating while they fly.
+const ROAM_WORLD_EVERY: i64 = 1200;
+
+/// 第 `camp` 个营地里假玩家游走的中心（方块坐标的 x、z）。离营地原点不远，在强制加载的范围里。
+///
+/// Where bots wander inside camp `camp` (block x, z).
+pub fn roam_camp_spot(camp: usize) -> (f64, f64) {
+    let (ox, oz) = camp_origin(camp);
+    (
+        f64::from(ox + GROUP_PLAYER_SPOT.0) + 0.5,
+        f64::from(oz + GROUP_PLAYER_SPOT.1) + 0.5,
+    )
+}
+
+/// 第 `camp` 个营地的原点（方块坐标），网格排开。
+fn camp_origin(camp: usize) -> (i32, i32) {
+    let stride = ROAM_CAMP_STRIDE_CHUNKS * 16;
+    (
+        (camp % ROAM_COLUMNS) as i32 * stride,
+        (camp / ROAM_COLUMNS) as i32 * stride,
+    )
 }
 
 /// 拆合场景里单数号的人每隔这么多刻换一次位置（走 / 回）。拆分有 200 刻迟滞，这里给足。
@@ -148,6 +215,7 @@ impl ScenarioKind {
             "islands-heavy-4" => Self::IslandsHeavy4,
             "islands-heavy-8" => Self::IslandsHeavy8,
             "islands-shuttle" => Self::IslandsShuttle,
+            "islands-roam" => Self::IslandsRoam,
             _ => return None,
         })
     }
@@ -172,6 +240,7 @@ impl ScenarioKind {
             Self::IslandsHeavy4 => "islands-heavy-4",
             Self::IslandsHeavy8 => "islands-heavy-8",
             Self::IslandsShuttle => "islands-shuttle",
+            Self::IslandsRoam => "islands-roam",
         }
     }
 
@@ -198,6 +267,7 @@ impl ScenarioKind {
             | Self::IslandsHeavy4
             | Self::IslandsHeavy8 => (GROUP_BOTS * self.groups(), "wander", "cluster", 60),
             Self::IslandsShuttle => (SHUTTLE_BOTS, "stand", "cluster", 90),
+            Self::IslandsRoam => (ROAM_BOTS, "roam", "cluster", 3600),
         }
     }
 
@@ -210,6 +280,7 @@ impl ScenarioKind {
             Self::Islands8 | Self::IslandsHeavy8 => 8,
             Self::Islands16 => 16,
             Self::IslandsHeavy4 => 4,
+            Self::IslandsRoam => ROAM_CAMPS,
             _ => 0,
         }
     }
@@ -238,7 +309,8 @@ impl ScenarioKind {
             | Self::Islands8
             | Self::Islands16
             | Self::IslandsHeavy4
-            | Self::IslandsHeavy8 => machines::all().len() * self.groups(),
+            | Self::IslandsHeavy8
+            | Self::IslandsRoam => machines::all().len() * self.groups(),
             _ => 0,
         }
     }
@@ -279,6 +351,7 @@ struct Placement {
 }
 
 struct Plan {
+    kind: ScenarioKind,
     placements: Vec<Placement>,
     chunks: Vec<ChunkPos>,
     actions: Vec<Action>,
@@ -292,6 +365,8 @@ struct Plan {
     world_command_every: i64,
     /// 已经送到自己那一组的假玩家。
     placed: BTreeSet<String>,
+    /// `islands-roam` 已经发过第一条 `defaultgamemode creative`。
+    roam_started: bool,
     forced: bool,
     installed: bool,
 }
@@ -313,7 +388,7 @@ pub fn configure(kind: ScenarioKind) -> BenchHooks {
     let chunks = if kind == ScenarioKind::IslandsShuttle {
         Vec::new()
     } else if groups > 0 {
-        group_chunks(groups)
+        group_chunks(kind)
     } else {
         forced_chunks(&placements)
     };
@@ -332,6 +407,7 @@ pub fn configure(kind: ScenarioKind) -> BenchHooks {
         })
         .collect();
     *PLAN.lock().expect("scenario plan lock") = Some(Plan {
+        kind,
         placements,
         chunks,
         actions,
@@ -343,6 +419,7 @@ pub fn configure(kind: ScenarioKind) -> BenchHooks {
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or(0),
         placed: BTreeSet::new(),
+        roam_started: false,
         forced: false,
         installed: false,
     });
@@ -386,7 +463,7 @@ fn translate_input(input: Input, origin: (i32, i32), index: i64) -> Vec<Action> 
 fn origin_of(kind: ScenarioKind, index: usize) -> (i32, i32) {
     if kind.groups() > 0 {
         let per_group = machines::all().len();
-        let (gx, gz) = group_origin(index / per_group);
+        let (gx, gz) = group_origin(kind, index / per_group);
         let local = (index % per_group) as i32;
         return (
             gx + local % 3 * GROUP_MACHINE_STRIDE,
@@ -404,8 +481,11 @@ fn origin_of(kind: ScenarioKind, index: usize) -> (i32, i32) {
     }
 }
 
-/// 第 `group` 组的原点（方块坐标）。组沿 x 轴排开。
-fn group_origin(group: usize) -> (i32, i32) {
+/// 第 `group` 组的原点（方块坐标）。`islands-K` 的组沿 x 轴排开，`islands-roam` 的营地排成网格。
+fn group_origin(kind: ScenarioKind, group: usize) -> (i32, i32) {
+    if kind == ScenarioKind::IslandsRoam {
+        return camp_origin(group);
+    }
     (group as i32 * GROUP_STRIDE_CHUNKS * 16, 0)
 }
 
@@ -413,10 +493,10 @@ fn group_origin(group: usize) -> (i32, i32) {
 /// 组和组之间不加载，所以是 K 片互不相连的已加载区域。
 ///
 /// Each group force-loads its own rectangle; nothing between groups is loaded.
-fn group_chunks(groups: usize) -> Vec<ChunkPos> {
+fn group_chunks(kind: ScenarioKind) -> Vec<ChunkPos> {
     let mut out = Vec::new();
-    for group in 0..groups {
-        let (ox, oz) = group_origin(group);
+    for group in 0..kind.groups() {
+        let (ox, oz) = group_origin(kind, group);
         let min_x = ox + GROUP_ITEM_CORNER.0.min(GROUP_PLAYER_SPOT.0);
         let min_z = oz + GROUP_ITEM_CORNER.1.min(GROUP_PLAYER_SPOT.1);
         let max_x = ox + 2 * GROUP_MACHINE_STRIDE + MACHINE_EXTENT;
@@ -431,14 +511,14 @@ fn group_chunks(groups: usize) -> Vec<ChunkPos> {
 }
 
 /// 第 `group` 组的掉落物：16×16、间距 2 格，物品种类轮换，落在地表上。
-fn group_items(group: usize) -> Vec<(Vec3, ItemStack)> {
+fn group_items(kind: ScenarioKind, group: usize) -> Vec<(Vec3, ItemStack)> {
     const KINDS: [i32; 4] = [
         items::COBBLESTONE,
         items::DIRT,
         items::OAK_PLANKS,
         items::STICK,
     ];
-    let (ox, oz) = group_origin(group);
+    let (ox, oz) = group_origin(kind, group);
     let mut out = Vec::new();
     for i in 0..GROUP_ITEM_SIDE {
         for j in 0..GROUP_ITEM_SIDE {
@@ -548,7 +628,7 @@ fn setup_scene(world: &mut BenchWorld<'_>) -> bool {
             install_machine(world, builds[placement.build], placement.origin);
         }
         for group in 0..plan.groups {
-            for (position, stack) in group_items(group) {
+            for (position, stack) in group_items(plan.kind, group) {
                 world.spawn_item(position, stack);
             }
         }
@@ -624,6 +704,7 @@ fn tick_scene(world: &mut BenchWorld<'_>) {
         if let Some(plan) = guard.as_mut() {
             place_new_bots(world, plan);
             shuttle_bots(world, plan);
+            roam_actions(world, plan);
         }
         guard
             .as_ref()
@@ -700,15 +781,96 @@ fn shuttle_bots(world: &mut BenchWorld<'_>, plan: &mut Plan) {
     }
 }
 
-/// 岛场景：新进服的假玩家按编号分到 `编号 % K` 组，直接送过去（控制台的 `/tp` 用不了坐标：
-/// 控制台来源没有位置）。他所在的岛这一刻不在手里就下一刻再送。只在有人没送到的时候查一次
-/// 在线名单。
+/// `islands-roam` 的控制台动作和直接放置，按全局游戏时间的固定周期；挑人、挑营地用一个由
+/// 时间派生的伪随机数，同一次运行可重复。控制台命令和连接层送来的一样排队（有岛不在手里时
+/// 等它回来）；直接放置送不成（那人的岛不在手里）就跳过这一次。
+///
+/// The console actions and direct placements of `islands-roam`, on fixed
+/// periods of the global game time; bots and camps are picked by a
+/// pseudo-random number derived from the time, so a run repeats. Console
+/// lines queue like those from the connection layer; a placement whose
+/// island is away is skipped this time.
+fn roam_actions(world: &mut BenchWorld<'_>, plan: &mut Plan) {
+    if plan.kind != ScenarioKind::IslandsRoam {
+        return;
+    }
+    let now = world.game_time();
+    if now <= 0 {
+        return;
+    }
+    let pick = |salt: u64, below: usize| -> usize {
+        let mut x = (now as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ salt;
+        x ^= x >> 31;
+        x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x ^= x >> 29;
+        (x % below.max(1) as u64) as usize
+    };
+    if !plan.roam_started || now % ROAM_WORLD_EVERY == 0 {
+        world.console_command("defaultgamemode creative");
+        plan.roam_started = true;
+    }
+    let names = world.player_names();
+    if now % ROAM_PLACE_EVERY == 0 && !names.is_empty() {
+        let name = &names[pick(1, names.len())];
+        let (x, z) = roam_camp_spot(pick(2, ROAM_CAMPS));
+        let _ = world.teleport_player(name, Vec3::new(x, FLAT_SURFACE_Y, z));
+    }
+    if now % ROAM_TP_EVERY == 0 && names.len() >= 2 {
+        let a = pick(3, names.len());
+        let b = (a + 1 + pick(4, names.len() - 1)) % names.len();
+        world.console_command(&format!("tp {} {}", names[a], names[b]));
+    }
+    if now % ROAM_SAY_EVERY == 0 {
+        world.console_command(&format!("say roam {now}"));
+    }
+    if now % ROAM_TIME_EVERY == 0 {
+        world.console_command("time add 1000");
+    }
+    if now % ROAM_WEATHER_EVERY == 0 {
+        let weather = if (now / ROAM_WEATHER_EVERY) % 2 == 0 {
+            "weather rain 1200"
+        } else {
+            "weather clear"
+        };
+        world.console_command(weather);
+    }
+    if now % ROAM_SETBLOCK_EVERY == 0 {
+        // 碰方块的命令：在一个营地掉落物方阵旁边的空地上来回放、拆一块石头。
+        // A block-touching command: place and remove a stone on free ground
+        // next to a camp's item square.
+        let (ox, oz) = camp_origin(pick(5, ROAM_CAMPS));
+        let block = if (now / ROAM_SETBLOCK_EVERY) % 2 == 0 {
+            "minecraft:stone"
+        } else {
+            "minecraft:air"
+        };
+        world.console_command(&format!(
+            "setblock {} -60 {} {block}",
+            ox + GROUP_ITEM_CORNER.0 - 4,
+            oz + GROUP_ITEM_CORNER.1 - 4
+        ));
+    }
+    if now % ROAM_GAMERULE_EVERY == 0 {
+        let speed = if (now / ROAM_GAMERULE_EVERY) % 2 == 0 {
+            4
+        } else {
+            3
+        };
+        world.console_command(&format!("gamerule random_tick_speed {speed}"));
+    }
+}
+
+/// 岛场景：新进服的假玩家按编号分到 `编号 % K` 组，直接放过去（控制台 `/tp` 要等全部岛停放，
+/// 见 `command::place_player`）。他所在的岛这一刻不在手里就下一刻再送。只在有人没送到的时候
+/// 查一次在线名单。
 ///
 /// Island scenarios: each new bot goes to group `index % K`, placed directly
-/// (the console's `/tp` cannot take coordinates: the console source has no
-/// position); retried next tick while their island is away.
+/// (a console `/tp` waits for every island to park, see
+/// `command::place_player`); retried next tick while their island is away.
 fn place_new_bots(world: &mut BenchWorld<'_>, plan: &mut Plan) {
-    if plan.groups == 0 {
+    // `islands-roam` 的人自己飞，不按组送。
+    // `islands-roam` bots fly on their own and are not sent to groups.
+    if plan.groups == 0 || plan.kind == ScenarioKind::IslandsRoam {
         return;
     }
     for name in world.player_names() {
@@ -716,7 +878,7 @@ fn place_new_bots(world: &mut BenchWorld<'_>, plan: &mut Plan) {
             continue;
         }
         let index = bot_index(&name).unwrap_or(plan.placed.len());
-        let (ox, oz) = group_origin(index % plan.groups);
+        let (ox, oz) = group_origin(plan.kind, index % plan.groups);
         // 同组的人错开几格，免得全挤在一个点上。
         let spread = (index / plan.groups % 5) as f64 * 2.0 - 4.0;
         let x = f64::from(ox + GROUP_PLAYER_SPOT.0) + 0.5 + spread;
@@ -769,7 +931,7 @@ mod tests {
     #[test]
     fn island_groups_are_far_apart_and_cover_their_content() {
         let kind = ScenarioKind::Islands8;
-        let chunks = group_chunks(kind.groups());
+        let chunks = group_chunks(kind);
         // 每组一个矩形，组和组的已加载区块之间至少隔 36 个区块（设计稿 6.1 的「一定不合并」）。
         let group_of = |c: &ChunkPos| (c.x + 16).div_euclid(GROUP_STRIDE_CHUNKS);
         for a in &chunks {
@@ -787,7 +949,7 @@ mod tests {
             }
         }
         for group in 0..kind.groups() {
-            for (position, _) in group_items(group) {
+            for (position, _) in group_items(kind, group) {
                 let pos = ChunkPos::new(
                     (position.x.floor() as i32) >> 4,
                     (position.z.floor() as i32) >> 4,

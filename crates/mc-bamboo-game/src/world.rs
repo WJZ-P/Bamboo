@@ -312,6 +312,13 @@ pub(crate) struct Master {
     /// waiting for the old island to clear their view and pairings, with the
     /// tick (`director_tick`) the wait began.
     transit: std::collections::BTreeMap<PlayerId, u64>,
+    /// 落到别的岛的区块上、还没搬过去的实体所在的岛（[`World::move_stray_entities`]）：那一刻
+    /// 它或者目的地的回执还没交回，拆不了，留到下一次照做拆合时再搬。
+    ///
+    /// Islands with entities that landed on another island's chunk and are not
+    /// moved yet: that island or the destination still had acks out, so the
+    /// move waits for the next settle.
+    stray_sources: std::collections::BTreeSet<mc_bamboo_world::director::RegionId>,
     /// 混合驱动的状态（计划 5.5）：每个不在手里的岛的出站队列、排着队的事、正在进服的
     /// 玩家、留给不在的岛的存盘名单等。别的驱动下一直是空的。
     ///
@@ -520,6 +527,7 @@ impl World {
                 posted_scratch: Vec::new(),
                 islands_mode: config.islands && !infinite_flat,
                 transit: std::collections::BTreeMap::new(),
+                stray_sources: std::collections::BTreeSet::new(),
                 hybrid: island_hybrid::HybridState::default(),
                 profiler: Box::default(),
                 #[cfg(test)]

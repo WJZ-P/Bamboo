@@ -180,6 +180,30 @@ pub fn player_abilities_frame(flags: u8) -> Vec<u8> {
     frame(&body)
 }
 
+/// 离线客户端的 `chat`：不签名，`lastSeen` 为空，时间戳和盐取固定值（服务端只要求时间戳
+/// 不倒退）。
+///
+/// An offline client's `chat`: unsigned, empty `lastSeen`, fixed timestamp
+/// and salt (the server only requires timestamps not to go backwards).
+pub fn chat_frame(message: &str) -> Vec<u8> {
+    let mut body = packet(play::serverbound::CHAT);
+    write_string(&mut body, message);
+    body.extend_from_slice(&0x0000_018b_cfe5_6800_u64.to_be_bytes());
+    body.extend_from_slice(&0x1122_3344_5566_7788_u64.to_be_bytes());
+    body.push(0); // 没有签名 / no signature
+    body.extend_from_slice(&[0, 0, 0, 0, 1]); // offset、acknowledged、checksum
+    frame(&body)
+}
+
+/// `chat_command`：不带斜杠的命令行，不签名。
+///
+/// `chat_command`: the command line without its slash, unsigned.
+pub fn chat_command_frame(command: &str) -> Vec<u8> {
+    let mut body = packet(play::serverbound::CHAT_COMMAND);
+    write_string(&mut body, command);
+    frame(&body)
+}
+
 /// 拆开一批未压缩帧，返回每个包的负载。
 #[cfg(test)]
 pub fn packets(frames: &[u8]) -> Result<Vec<Vec<u8>>, String> {
@@ -540,6 +564,25 @@ mod tests {
             request,
             PlayRequest::PlayerAbilities {
                 flags: ABILITY_FLYING
+            }
+        );
+    }
+
+    #[test]
+    fn chat_and_commands_decode_back() {
+        let PlayRequest::Chat {
+            message, signature, ..
+        } = PlayRequest::decode(&single(&chat_frame("hello there"))).unwrap()
+        else {
+            panic!("not a chat");
+        };
+        assert_eq!(message, "hello there");
+        assert!(signature.is_none());
+        assert_eq!(
+            PlayRequest::decode(&single(&chat_command_frame("msg Bot0001 hi"))).unwrap(),
+            PlayRequest::ChatCommand {
+                command: "msg Bot0001 hi".to_owned(),
+                signed: None,
             }
         );
     }

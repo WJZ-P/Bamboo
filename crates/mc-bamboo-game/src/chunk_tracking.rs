@@ -311,6 +311,16 @@ impl ChunkTracker {
         self.view.map(|view| view.center)
     }
 
+    /// 跟踪范围的中心和切比雪夫半径（`T(vd)` 每个区块离中心都不超过 vd + 1）；还没有视图时
+    /// 是 `None`。
+    ///
+    /// The centre and Chebyshev radius of the tracked range (every chunk of
+    /// `T(vd)` is within vd + 1 of the centre); `None` before the first view.
+    pub(crate) fn tracked_bounds(&self) -> Option<(ChunkPos, i32)> {
+        self.view
+            .map(|view| (view.center, view.view_distance.saturating_add(1)))
+    }
+
     /// 这个区块在跟踪范围里，而且已经发给客户端了。
     ///
     /// 方块更新和实体都只发给满足这个条件的玩家。还在 `pending` 的区块发送时就是最新内容。

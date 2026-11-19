@@ -495,7 +495,13 @@ pub struct PlayerPosition {
     pub x: f64,
     pub y: f64,
     pub z: f64,
+    /// `Relative` 的位集；只可能有朝向两位（[`ROTATION_RELATIVE`]）。
+    /// The `Relative` bit set; only the two rotation bits can be set.
+    pub relatives: i32,
 }
+
+/// `Relative.Y_ROT | Relative.X_ROT`。
+pub const ROTATION_RELATIVE: i32 = 0b1_1000;
 
 impl Packet for PlayerPosition {
     const ID: i32 = clientbound::PLAYER_POSITION;
@@ -508,8 +514,24 @@ impl Packet for PlayerPosition {
         }
         float(reader);
         float(reader);
-        assert_eq!(int(reader), 0, "M2 only teleports to absolute positions");
-        Self { id, x, y, z }
+        // 位置（x / y / z 三位）和速度各位总是绝对的；朝向可以是相对的：`/tp <坐标>` 不改朝向，
+        // 官方发「朝向相对」（`Y_ROT | X_ROT` = 24）。
+        // Position (the x / y / z bits) and the delta bits are always absolute;
+        // rotation may be relative: `/tp <coordinates>` keeps the rotation, and
+        // the official server sends "rotation relative" (`Y_ROT | X_ROT` = 24).
+        let relatives = int(reader);
+        assert_eq!(
+            relatives & !ROTATION_RELATIVE,
+            0,
+            "positions are always absolute"
+        );
+        Self {
+            id,
+            x,
+            y,
+            z,
+            relatives,
+        }
     }
 }
 

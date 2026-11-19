@@ -366,9 +366,22 @@ fn the_cache_forgets_chunks_nobody_tracks() {
         "留下的都是当前视图里的包体"
     );
     assert!(!cache.frames.contains_key(&edited.chunk()));
-    let home = &server.region().chunk_cache;
-    assert!(
-        !home.bodies.contains_key(&edited.chunk()) && !home.frames.contains_key(&edited.chunk()),
-        "家岛也不留旧视图的包体和帧"
-    );
+    // 别的岛（只有一个岛时没有）上没人：缓存整个是空的，不只是不留旧视图的坐标。
+    // No one is on any other island (none with one island): their caches are
+    // empty altogether, not just free of the old view.
+    let mine = server.world.islands.island_of_player(client.id);
+    for island in server.world.islands.iter() {
+        if Some(island.id) == mine {
+            continue;
+        }
+        assert!(island.region.players.is_empty());
+        let cache = &island.region.chunk_cache;
+        assert!(
+            cache.bodies.is_empty() && cache.frames.is_empty(),
+            "岛 {} 没人跟踪，缓存要清空：{:?} / {:?}",
+            island.id,
+            cache.bodies.keys().collect::<Vec<_>>(),
+            cache.frames.keys().collect::<Vec<_>>()
+        );
+    }
 }
