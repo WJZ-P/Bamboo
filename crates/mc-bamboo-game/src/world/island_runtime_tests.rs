@@ -22,7 +22,9 @@ use std::{
     time::Duration,
 };
 
-use mc_bamboo_core::{ChunkPos, Vec3};
+use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
+use mc_bamboo_data::{blocks, packets::play::clientbound};
+use mc_bamboo_protocol::packet::play::{ClientCommandKind, GameMode, PlayRequest};
 use mc_bamboo_world::director::{HOME_REGION, Owner, RegionId, TicketOp};
 
 use super::{
@@ -30,9 +32,9 @@ use super::{
         Scene, Y, at, fingerprint, furnish_scene, furnish_scene_with_sand, group_of, misplaced,
         print, region_at, rng, set_up, with_stack,
     },
-    tests::{Client, Frame, Harness},
+    tests::{Client, Frame, Harness, block_changes, frames_with_id},
 };
-use crate::{island::IslandDrive, profiler::Metric, region::IslandPart};
+use crate::{island::IslandDrive, profiler::Metric, region::IslandPart, world_state::RespawnData};
 
 /// 一个多岛世界按组拼起来的指纹（见模块说明），外加每个岛的时钟。别的岛上出现了某一组的
 /// 东西就 panic，报出是哪一类。
@@ -1488,6 +1490,50 @@ fn a_respawn_into_a_pending_split_keeps_the_view_on_one_island() {
     });
 }
 
+/// 正式运行里最常撞进这个窗口的是重生：玩家在岛 A 被 `/kill` 打死，世界出生点在
+/// 「已定拆分、还没照做」的那一半，客户端发 `PERFORM_RESPAWN` 后 `player_respawn::respawn`
+/// 经 `command::place_player_at_respawn` 在岛的这一刻里先改位置、视野后跟。这里走完整的
+/// 真实路径（不直接调放人函数），确认推迟有界、跟踪区块属于本岛、玩家所在岛拥有他跟踪的
+/// 全部区块，而且那片区块里的方块更新真的发到他手上。两种方向都造得出来，就都跑：
+/// 玩家留在原岛、重生点在拆出去的那半（`spawn_moves = true`），以及玩家所在的那半被
+/// 拆出去、重生点留在原岛（`spawn_moves = false`）。`immediate_respawn` 打开时不经死亡
+/// 界面，死亡当场走的是同一个 `respawn()`，也各跑一遍。改坏确认同前两条测试。
+///
+/// The window is most often hit by a respawn in a real server: a player on
+/// island A is killed by `/kill`, the world spawn sits in the half whose split
+/// is already decided but not replayed, and `PERFORM_RESPAWN` runs
+/// `player_respawn::respawn`, which places through
+/// `command::place_player_at_respawn` inside the island's tick (position moves
+/// first, view follows later). This walks the whole real path without calling
+/// any placement helper: postponement is bounded, tracked chunks stay on the
+/// player's island, that island owns every tracked chunk, and a block update
+/// in one of those chunks really reaches the player. Both directions of the
+/// window can be built, so both run: the player stays while the spawn is on
+/// the split-off half (`spawn_moves = true`), and the player's half splits off
+/// while the spawn stays (`spawn_moves = false`). With `immediate_respawn`
+/// on, death takes the same `respawn()` without the death screen; run those
+/// too. Break-it checks as in the two tests above.
+#[test]
+fn a_real_death_and_respawn_into_a_pending_split_delivers_block_updates() {
+    with_stack(|| {
+        for spawn_moves in [true, false] {
+            for immediate in [false, true] {
+                run_death_respawn_split_window(false, spawn_moves, immediate);
+                // 改坏确认：四种组合都要被按瞬时位置分人抓到。
+                // Break-it check: all four combinations must fail with the
+                // instantaneous-position split.
+                let broken = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_death_respawn_split_window(true, spawn_moves, immediate);
+                }));
+                assert!(
+                    broken.is_err(),
+                    "spawn_moves={spawn_moves} immediate_respawn={immediate}：按瞬时位置分人却没被抓到"
+                );
+            }
+        }
+    });
+}
+
 /// 跟踪范围真的跨了切口时拆分必须推迟，并且推迟有界：视野跟上（不再跨切口）之后
 /// 下一次照做就拆。改坏确认：把 `split_ready` 的跨切口检查拿掉（按瞬时位置分人），
 /// 这次拆分当场照做、推迟计数为 0；`a_split_decided_before_a_player_moves_uses_the_live_roster`
@@ -1804,5 +1850,257 @@ fn run_split_window(break_view: bool, place: impl Fn(&mut Scene, &Client, Vec3))
             .count(),
         1,
         "玩家只在一个岛上"
+    );
+}
+
+/// 造一个「已定拆分、还没照做」的窗口，把世界出生点和死者分在切口两边，再走完整的
+/// `/kill` → `PERFORM_RESPAWN` → `player_respawn::respawn`（或
+/// `immediate_respawn` 打开时死亡当场重生）。`spawn_moves` 决定重生点在拆出去的那半
+/// （死者在留下的那半）还是反过来。`break_view` 用 e0526f0c 的改坏钩子改回按瞬时
+/// 位置分人。
+///
+/// Make a window where a split is decided but not replayed, with the world
+/// spawn and the dying player on opposite sides of the cut, then walk the
+/// whole `/kill` → `PERFORM_RESPAWN` → `player_respawn::respawn` path (or the
+/// immediate respawn taken at death when that game rule is on). `spawn_moves`
+/// picks whether the spawn is on the split-off half (the player stays) or the
+/// other way round. `break_view` uses e0526f0c's break-it switch to split
+/// players by instantaneous position.
+fn run_death_respawn_split_window(break_view: bool, spawn_moves: bool, immediate: bool) {
+    let mut scene = set_up(6, Harness::new_islands(2, 0));
+    assert_eq!(scene.server.world.islands.len(), 3, "三组各成一个岛");
+    scene.server.world.master.split_by_position = break_view;
+    // 把第 1、2 组并进第 0 组：`force_split` 定下一条拆分，先不照做。
+    // Merge groups 1 and 2 into group 0: `force_split` records one split.
+    let first = scene
+        .server
+        .world
+        .master
+        .host
+        .island_of(scene.centers[0])
+        .expect("中心归某个岛");
+    let second = scene
+        .server
+        .world
+        .master
+        .host
+        .island_of(scene.centers[1])
+        .expect("中心归某个岛");
+    let (into, from) = (first.min(second), first.max(second));
+    {
+        let world = &mut scene.server.world;
+        let partition = world.master.host.partition_mut().expect("多岛开着");
+        assert!(partition.force_merge(into, from));
+        world.master.host.take_partition_ops();
+        world.settle_islands();
+    }
+    scene.server.tick();
+    // 切口两边各挑一个组的中心：一个当重生点，另一个当死者所在处。
+    // Pick one group centre on each side of the cut: one for the respawn
+    // spot and the other for the dying player.
+    let (split_off, remaining) = {
+        let world = &mut scene.server.world;
+        let partition = world.master.host.partition_mut().expect("多岛开着");
+        let made = partition.force_split(into);
+        assert_eq!(made.len(), 1, "合起来的岛拆成两块");
+        let ops = partition.take_ops();
+        assert_eq!(ops.len(), 1, "只有一条拆分");
+        let crate::island_partition::TopologyOp::Split { sections, .. } = &ops[0] else {
+            panic!("定下的是拆分");
+        };
+        let inside =
+            |center: ChunkPos| sections.contains(&crate::island_partition::SectionPos::of(center));
+        let split_off = scene
+            .centers
+            .iter()
+            .copied()
+            .find(|&center| inside(center))
+            .expect("拆出去的部分里有一组的中心");
+        let remaining = scene
+            .centers
+            .iter()
+            .copied()
+            .find(|&center| !inside(center))
+            .expect("另一边也有一组的中心");
+        world.master.host.queue_topology_for_test(ops);
+        (split_off, remaining)
+    };
+    let (target, stayed) = if spawn_moves {
+        (split_off, remaining)
+    } else {
+        (remaining, split_off)
+    };
+    assert!(
+        scene.server.world.master.host.has_topology(),
+        "拆分已定、还没照做"
+    );
+    let traveller = scene
+        .clients
+        .iter()
+        .find(|(group, _)| scene.centers[*group] == stayed)
+        .map(|(_, client)| client.clone())
+        .expect("留下的那组有人");
+    // 世界出生点和死者分在切口两边。测试世界的 `respawn_radius` 是 0，
+    // 搜索直接落在出生点这一列；y 取超平坦地面之上一格。
+    // Put the world spawn on the other side of the cut from the player. The
+    // test world's `respawn_radius` is 0, so the search lands on this very
+    // column; y is the block just above the superflat ground.
+    let spawn_pos = BlockPos::new(target.x * 16 + 8, Y, target.z * 16 + 8);
+    scene.server.set_spawn(RespawnData::of(spawn_pos, 0.0, 0.0));
+    scene.server.world.publish_global();
+    {
+        let player = scene.server.player_region(&traveller);
+        let state = player.players.get_mut(&traveller.id).expect("玩家");
+        state.permission_level = 4;
+        state.game_mode = GameMode::Survival;
+        state.respawn = None;
+    }
+    if immediate {
+        let _ = scene
+            .server
+            .world
+            .master
+            .global
+            .rules_mut()
+            .assign(mc_bamboo_data::gamerules::IMMEDIATE_RESPAWN, "true");
+        scene.server.world.publish_global();
+    }
+    let old_center = scene
+        .server
+        .player(&traveller)
+        .chunks
+        .view_center()
+        .expect("玩家已经有视野");
+    assert_ne!(old_center, target, "视野和重生点不在同一边");
+    let _ = traveller.take_frames();
+    let before = scene
+        .server
+        .world
+        .profiler()
+        .count_of(Metric::IslandSplitDeferrals);
+    // 两条入站请求排进同一刻：`/kill @s` 走 genericKill 的完整死亡流程，
+    // PERFORM_RESPAWN 经 `chat::on_client_command` 调 `player_respawn::respawn`。
+    // Queue both inbound requests for the same tick: `/kill @s` goes through
+    // the full genericKill death flow, PERFORM_RESPAWN goes through
+    // `chat::on_client_command` into `player_respawn::respawn`.
+    scene.server.request(
+        &traveller,
+        PlayRequest::unsigned_command("kill @s".to_owned()),
+    );
+    if !immediate {
+        scene.server.request(
+            &traveller,
+            PlayRequest::ClientCommand {
+                action: ClientCommandKind::PerformRespawn,
+            },
+        );
+    }
+    scene.server.tick();
+    let frames = traveller.take_frames();
+    assert!(
+        !frames_with_id(&frames, clientbound::PLAYER_COMBAT_KILL).is_empty(),
+        "走了完整的死亡流程"
+    );
+    assert!(
+        !frames_with_id(&frames, clientbound::RESPAWN).is_empty(),
+        "重生包发给了玩家"
+    );
+    let position = scene.server.player(&traveller).position();
+    assert_eq!(
+        (position.x.floor() as i32, position.z.floor() as i32),
+        (spawn_pos.x, spawn_pos.z),
+        "重生落在世界出生点那一列"
+    );
+    assert_eq!(
+        scene.server.player(&traveller).chunk_pos(),
+        target,
+        "重生点和死时所在的区块分在切口两边"
+    );
+    assert_eq!(
+        scene.server.player(&traveller).chunks.view_center(),
+        Some(target),
+        "这一刻岛的视野更新已经跟上"
+    );
+    // 拆分在这一刻的收包阶段照做（或推迟），岛的视野更新在后面的模拟阶段：
+    // `settle_islands` 的严格不变量断言是在「重生已改位置、视野还没跟上」时跑的，
+    // 上面这个视野已经跟上说明窗口确实被走过，而不是拆分被拖到了下一刻。
+    // The split was replayed (or postponed) in the inbound phase, while the
+    // view update belongs to the later simulation phase: `settle_islands`
+    // asserted its strict invariants when the respawn had moved the player
+    // but the view had not followed yet. The view above is now caught up, so
+    // the window was really crossed rather than deferred to the next tick.
+    scene.server.world.assert_island_invariants();
+    let deferred = scene.server.world.master.host.has_topology();
+    if deferred {
+        assert_eq!(
+            scene
+                .server
+                .world
+                .profiler()
+                .count_of(Metric::IslandSplitDeferrals),
+            before + 1,
+            "推迟记了一条样本"
+        );
+    }
+    // 推迟有界，和 e0526f0c 的三条测试同一个上限：6 刻内拆分照做。
+    // Bounded like the three tests from e0526f0c: the split happens in 6 ticks.
+    let mut split_at = None;
+    for tick in 0..6 {
+        scene.server.tick();
+        scene.server.world.assert_island_invariants();
+        if !scene.server.world.master.host.has_topology() && split_at.is_none() {
+            split_at = Some(tick);
+        }
+    }
+    assert!(split_at.is_some(), "6 刻内拆分照做了");
+    assert_eq!(scene.server.world.islands.len(), 3, "拆分照做了");
+    // 玩家最终所在的岛拥有他跟踪的全部区块。
+    // The player's final island owns every chunk they track.
+    let world = &scene.server.world;
+    let holder = world
+        .islands
+        .island_of_player(traveller.id)
+        .expect("玩家还在世界里");
+    assert_eq!(
+        Some(holder),
+        world.islands.island_of_chunk(target),
+        "玩家搬到了重生点所在的岛"
+    );
+    let player = world
+        .islands
+        .get(holder)
+        .expect("在表里")
+        .region
+        .players
+        .get(&traveller.id)
+        .expect("玩家在岛上");
+    let (center, reach) = player.chunks.tracked_bounds().expect("重生后有视野");
+    let tracked: Vec<ChunkPos> = (-reach..=reach)
+        .flat_map(|dx| (-reach..=reach).map(move |dz| ChunkPos::new(center.x + dx, center.z + dz)))
+        .filter(|&pos| player.chunks.is_chunk_tracked(pos))
+        .collect();
+    assert!(!tracked.is_empty(), "玩家跟踪着区块");
+    for &pos in &tracked {
+        assert_eq!(
+            world.islands.island_of_chunk(pos),
+            Some(holder),
+            "跟踪区块 {pos:?} 属于玩家所在的岛"
+        );
+    }
+    // 跟踪区块里改一格，玩家必须收到这个方块更新：跨岛漏包是永久的客户端失步。
+    // Change one block in a tracked chunk: the player must receive the update.
+    // Missing it across islands is a permanent client desync.
+    let pos = at(target, 1, Y + 1, 1);
+    let world = &mut scene.server.world;
+    let region = &mut world.islands.get_mut(holder).expect("在表里").region;
+    assert!(region.chunks.set_block(pos, blocks::GOLD_BLOCK));
+    region.block_changes.changed.push(pos);
+    let _ = traveller.take_frames();
+    scene.server.tick();
+    scene.server.world.assert_island_invariants();
+    let frames = traveller.take_frames();
+    assert!(
+        block_changes(&frames).contains(&(pos, blocks::GOLD_BLOCK)),
+        "玩家收到了跟踪区块里的方块更新"
     );
 }
