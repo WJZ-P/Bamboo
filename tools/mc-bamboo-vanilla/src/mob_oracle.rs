@@ -1519,7 +1519,6 @@ impl Report {
             start_food_timer: life.start_food_timer,
             credit_hurt_tick: life.credit_hurt_tick,
             death_fall_distance: f32::from_bits(life.death_fall_distance as u32),
-            client_drives_respawn: true,
             break_credit_expiry: matches!(self.break_test.as_deref(), Some("credit")),
             break_xp: matches!(self.break_test.as_deref(), Some("xp")),
             break_keep: matches!(self.break_test.as_deref(), Some("keep")),

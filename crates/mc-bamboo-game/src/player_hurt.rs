@@ -235,7 +235,8 @@ pub(crate) fn hurt_player(
         }
     };
     // `LivingEntity.hurtServer` 在 `isDeadOrDying()` 时调 `die`：
-    // 掉落、死亡消息、死亡界面和 `immediate_respawn` 都在这里接上。
+    // 掉落、死亡消息和死亡界面都在这里接上；重生等客户端的
+    // `PERFORM_RESPAWN`，不受 `immediate_respawn` 影响。
     if dying {
         crate::player_death::die(region, id, source);
     }
