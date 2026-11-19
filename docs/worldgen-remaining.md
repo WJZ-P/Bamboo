@@ -601,6 +601,29 @@ target/release/mc-bamboo-vanilla wg-perf --seeds 3 --chunks 8 --repeat 3 --skip-
 - 把 `features` 邻居合并改成官方调度语义：当前 `feature-merge` 0 differing，
   改它要动 Director 任务结构，收益不确定，应等有实际不一致案例再做。
 
+### 第 0 期新增的已知差异（2026-11-19）
+
+- **`PostProcessing` 在带结构模式的标记路径**：官方结构件混用
+  `StructureTemplate.placeInWorld`（`flags=820`，含 bit 16，不记 `SHAPE_CHECK_BLOCKS`）
+  和 `StructurePiece.placeBlock`（`flags=2`，记栅栏 / 火把 / 梯子 / 铁栏杆）。
+  Bamboo 的 `FeaturePieceLevel` 目前只按结构大类型区分，府邸 / 矿井 / 古迹废墟 /
+  沼泽小屋等 4 个坐标共 10 段仍有逐条差异。`gen-world --through features` 默认
+  （无结构）模式逐段严格比、扩大样本（salt 1/7 × 6 种子 × 36 区块 × 三预设）
+  11 万条 packed short 0 不一致；`--structures` 模式暂不把这一新增项计入比较，
+  方块 / 方块实体 / 结构件 / 光照比较全部保留。后续要按每个结构件的写入 flags
+  精确区分，再把带结构模式也打开。
+
+
+- **沙漠神殿 `(42,-375,-22)` 的结构件重叠写**：`light-pipeline --structures
+  --target 42 -375 -22` 报 281 格方块不一致（官方是橙色 / 蓝色陶瓦与苍白苔藓地毯，
+  游戏侧是砂岩），`feature-merge --structures --isolated --target 42 -375 -22`
+  报同一类差异。原因是多个结构件在同一格写方块，官方由调度先后决定最终状态，
+  Bamboo 按用户已拍板的「固定来源先后、先写的赢」合并。这是已接受的模型差异，
+  不是新缺口：默认结构查询表不放这个坐标，保留 `--target` 做诊断；
+  `structure-e2e` 和默认 `light-pipeline --structures` 都逐格 0 不一致。
+- **非 `full` 区块读回续生成**：§1.5 / §7 里这一行已经单独拆给 `worldgen-resume`
+  分支，不再属于本分支第 0 期；本分支只改自己这边的内容，不动存档读取路径。
+
 ---
 
 ## 9. 交给主代理审的疑点

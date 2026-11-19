@@ -3,9 +3,11 @@
 目标版本 Minecraft Java 26.3（协议 777）。这一篇讲 **从种子到 `terrain` 状态跑完那一刻** 的纯
 函数和它的区块级对拍：群系（`BIOMES`）、噪声填充（`NOISE`）、地表规则（`SURFACE`）、雕刻器
 （`CARVERS`），以及后续 `features` / 结构 / 生成期光照接进 Director 的 `Staged` 流水线。
-地物、结构和生成期光照的光引擎都已逐方块 / 逐格对拍；生成期刷怪（`spawn`）仍是空实现，
-光照阶段的输入、超平坦结构、非 `full` 区块续跑等剩余缺口见文末「还没做」和
-[`docs/worldgen-remaining.md`](worldgen-remaining.md)。
+地物、结构、生成期光照（含 `LIGHT` 阶段的 FEATURES 后输入）、`PostProcessing` 位置表和
+`pale_moss` / 苍白橡树都已逐方块 / 逐格对拍；生成期刷怪（`spawn`）仍是空实现，
+超平坦结构等剩余缺口见文末「还没做」和
+[`docs/worldgen-remaining.md`](worldgen-remaining.md)。非 `full` 区块续跑由
+`worldgen-resume` 分支单独负责，这一篇不覆盖。
 
 ## 官方 26.3 的阶段
 
@@ -619,8 +621,8 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   `run_features_filtered` 调 `chunk::Generator::features_with_structures()`
   （官方 `applyBiomeDecoration`：每个 step 先放结构件再跑地物）。28 个 Feature 类型已逐类型
   对拍 PASS，整步 `--all-features` 0 不一致 / 0 skipped；没移植的分支仍照
-  `feature/run.rs` 标 `unsupported`，对拍会报错或计入 skipped，不会当成通过（当前主世界
-  剩下的主要是 `pale_moss` 树装饰器，见「还没做」）。
+  `feature/run.rs` 标 `unsupported`，对拍会报错或计入 skipped，不会当成通过。主世界的
+  `pale_moss` 树装饰器与 `pale_moss_patch` 递归放置也已移植，见「`pale_moss` 装饰器」。
 * **写邻居的增量**：中心自己的地物、溢出到 8 个邻居的写、以及 8 个邻居中心溢进来的写
   都表示成世界坐标增量，每条都带来源中心的 3×3 下标。世界线程按 `TaskId` 顺序
   （`collect_compute` 已排好序）追加到目标区块的增量表，`Task::Assemble` 时
@@ -647,7 +649,50 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
 邻居快照是干净 CARVERS 地形，`WorldGenRegion` 读的可能是邻居更靠后阶段的内容、后跑的
 中心也看得到先跑中心的写。`feature-merge` 在官方共享 ProtoChunk 的两种调度顺序和
 `isolated` 固定先后合并下都是 0 differing，但这是**有意的差别**；地物 / 结构 / 生成期
-光照越来越多后仍要定期核对，尤其 `light` 阶段的输入见「还没做」。
+光照越来越多后仍要定期核对。`light` 阶段的输入已改成 FEATURES 后视图，
+`light-pipeline` 逐格对拍 0 不一致（见「生成期光照」）。
+
+### 生成期光照的输入（第 0 期第 2 项）
+
+官方 `ChunkPyramid.GENERATION_PYRAMID` 里 `LIGHT` 的直接依赖是半径 1 的
+`INITIALIZE_LIGHT`，每格的 `INITIALIZE_LIGHT` 又排在 `FEATURES` 之后；光引擎经
+`LightChunkGetter` 读到的是中心 3×3 跑完 FEATURES 后的方块，包括邻居中心溢进来的写。
+`mc_bamboo_game::worldgen_light::generate_light_stage` 照做：把流水线存的不可变 CARVERS
+快照拼成 3×3，对每格用与完工组装同一份 `feature_writes_into` + `merge_feature_writes`
+规则折进 9 个来源中心的地物写，再交给 `generate_light_from_layers`。树冠、萤石、灯笼、
+结构光源因此都参与生成期光照；`isLightOn=true` 交付后运行时不会补算。
+
+`light-pipeline` 是新增的整块对拍：`ChunkgenOracle.java --light-pipeline` 在 JVM 里让
+5×5 个来源中心各自在干净 3×3 上跑官方 FEATURES，按游戏固定先后反向合并成中心 3×3，
+再用官方 `LevelLightEngine` 跑 `initializeLight` + `light`，输出方块状态 ID 和中心柱逐格
+天空光 / 方块光；Bamboo 侧逐格比官方 3×3 方块、自己的光引擎、游戏 LIGHT 阶段三组。
+默认 6 个无结构场景 + 3 个带结构场景 0 不一致，`--break-carvers` 把游戏输入退回
+CARVERS 时报 5147 处不一致（改坏确认）。`gen-light` 只覆盖光引擎，不覆盖流水线选的方块。
+
+### `PostProcessing` 位置表和 `pale_moss` 装饰器（第 0 期第 3、4 项）
+
+`PostProcessing` 是 `ProtoChunk` 上一段一个 packed short 的位置表：
+`(x&15) | ((y&15)<<4) | ((z&15)<<8)`，段下标 `(y-MIN_Y)/16`，按标记顺序保留重复。
+Bamboo 在 `GeneratedChunk` / `FeatureChunks` / `FeatureWorld` / `FeatureResult` 里把它带着走，
+并在 `build_region_column` 打包进 `ChunkArchiveMeta.post_processing`，写盘时不再恒写 24 个
+空列表。标记点按官方字节码补齐：`NoiseBasedChunkGenerator.doFill` 与
+`applyCarvingMask` 的含水层流体更新、`MaterialSystem$1.BlockColumn.setBlock` 写出的每个流体
+状态、地表 `topMaterial` 写下方泥土、`Feature.markAboveForPostProcessing`、
+`MultifaceGrowthFeature` 与 `MultifaceSpreader.SpreadConfig.placeBlock`、以及
+`WorldGenRegion.setBlock` 里四个方块的 `getPostProcessPos`（棕 / 红蘑菇记自己，灵魂沙 /
+岩浆块记上面一格；`TreeFeature` 的 `flags=19` 跳过这一步，所以单独走 `set_tree_block`）。
+`gen-world --through features` 的 `compare_post_processing` 逐段比 packed short，
+`--all-features --seeds 6 --chunks 36 --salt 1|7` 各 216 中心 / 11 万条标记 0 不一致；
+比较器单测覆盖漏一条、给错一条、顺序不同三种改坏。带结构模式下官方结构件混用
+`flags=820` 与 `flags=2`，Bamboo 尚未按每个结构件区分，这项新增比较暂只在
+无结构模式启用；见 `docs/worldgen-remaining.md`「第 0 期新增的已知差异」。
+
+`pale_moss`：`Decorator::parse` 接 `minecraft:pale_moss`，`TreeFeature::place` 经
+`place_leaf` 接一个 `Recursion` 上下文，用 `place_placed` 直接放 configured
+`minecraft:pale_moss_patch`（官方 `lambda$place$1` 是 `Feature.place`，没有修饰器链），
+再按 `addMossHanger` 挂苍白悬挂苔藓。`TreeConfig::parse` 里 `pale_oak is_none()` 的
+单测已撤掉，改断言 `is_some()`；`feature-e2e.sh` 加了 salt 1 苍郁花园坐标的
+`minecraft:vegetation_patch` case（69 候选 / 18 改坏格 / 18 不一致，PASS）。
 
 ### 各阶段耗时与生成能否跟上飞行
 
@@ -932,17 +977,19 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
 ## 还没做
 
 这一节按当前代码重写过；每条的代码位置、证据、可见影响、人日和依赖见
-[`docs/worldgen-remaining.md`](worldgen-remaining.md)。扩大样本（多种子、三种噪声预设、
-带/不带结构、超平坦）实跑 0 不一致，只在两处对拍工具上暴露了缺口（`gen-world` 的
-`level_type` 写死 `normal`、`PaleMossDecorator` 需要 JVM 侧 `chunkSource` 桩），
-本轮只记录不修。
+[`docs/worldgen-remaining.md`](worldgen-remaining.md)。第 0 期已把 `gen-world` 写死
+`level_type`、`PaleMossDecorator` 的 JVM `chunkSource` 桩、生成期光照输入、
+`pale_moss` / 苍白橡树和 `PostProcessing` 位置表逐项修完；扩大样本（多种子、三种噪声
+预设、带/不带结构、两种 salt）实跑 0 不一致。非 `full` 区块续跑留给 `worldgen-resume`
+分支，这里不再列为本分支缺口。
 
 * 地物**类型**：`features` 阶段已接进游戏，`docs/worldgen-e2e-coverage.md` 的 28 个 Feature
   类型全部「干净跑 0 不一致 + 改坏确认」PASS（含 `fossil` / `overlay` 沙漠水井）；
   `feature-e2e.sh` 的 `--all-features` 整步对拍和三种预设的 `chunkgen --through features`
   扩大样本都是 0 不一致 / 0 skipped。`minecraft:root_system` 是官方 26.3 自身的死代码。
-  还没移植的是 `pale_moss` 树装饰器（`minecraft:pale_oak` / `pale_oak_creaking` 会标
-  `unsupported`）；生成期实体只保证官方随机序列 / 方块写入一致，不真的进世界。
+  `pale_moss` 树装饰器（`minecraft:pale_oak` / `pale_oak_creaking`）和
+  `pale_moss_patch` 递归放置已移植，salt 1 多种子全地物 0 不一致；生成期实体只保证
+  官方随机序列 / 方块写入一致，不真的进世界。
 * 结构：`structure_starts` / `structure_references` 两阶段已接入（见下），
   `PLACEABLE_TYPES` 的 13 类主世界结构逐方块对拍；`structure-e2e` 默认 60 个查询
   53084160 格 / 4743 结构件 0 不一致，`--known-gaps` 为空。没做的是纯下界 / 末地结构
@@ -951,9 +998,9 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
   `mc_bamboo_world::light::generate::generate_light_from_layers` 在 `light` 阶段算好
   天空光 / 方块光，完工装进交付盒子并标 `isLightOn=true`，不再等运行时光照引擎补算；
   `gen-light` 对拍逐格 0 不一致。剩下的正确性风险是**输入**：`generate_light_stage`
-  读的还是 `terrain` 阶段的 CARVERS 快照，官方 `LIGHT` 读 FEATURES 后的
-  `WorldGenRegion`；树冠、光源和结构件加入后两者不再等价，`gen-light` 的合成场景
-  只证明光引擎一致，不证明整块输入一致。
+  输入也已改成 FEATURES 后视图（见「生成期光照的输入」），`light-pipeline` 整块对拍
+  逐格 0 不一致，`--break-carvers` 改坏确认报 5147 处差异；`gen-light` 的合成场景
+  仍只证明光引擎一致。
 * `spawn` 刷怪仍是空实现：官方 `ChunkStatusTasks.generateSpawn` →
   `ChunkGenerator.spawnOriginalMobs` → `NaturalSpawner.spawnMobsForChunkGeneration`
   用群系 `CREATURE` 加权表、环境属性和 `SpawnPlacements` 放动物；Bamboo 的
@@ -986,14 +1033,14 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
   四张 FINAL 打包位流也和官方逐字对拍 0 不一致（见「高度图」）。`build_region_column`
   优先直接打包 `GeneratedChunk.heightmaps`，FEATURES 阶段按 `Heightmap.update` 增量维护
   四张 FINAL，只有手拼 / 缺图的 chunk 才从方块重算；没搬的只是 doFill 阶段两张 WG 图的
-  增量维护过程，最终值等价，是纯性能差异。后期处理位置表和 `ProtoChunk` 其余字段
-  还没逐项对拍。
-* 非 `full` 的 ProtoChunk 从盘上读回后从它的状态继续生成：流水线按阶段纯函数写好了，
-  但读盘路径用超平坦模板补齐方块 / 光照、下次写盘直接写 `full`，没有把 `status`
-  交给 Director 续跑，也没有多阶段往返对拍。
+  增量维护过程，最终值等价，是纯性能差异。`PostProcessing` 位置表已逐段对拍并写进
+  存档（见「`PostProcessing` 位置表」），`ProtoChunk` 其余字段仍按
+  `docs/worldgen-remaining.md` 记录逐项推进。
+* 非 `full` 的 ProtoChunk 从盘上读回后从它的状态继续生成：由 `worldgen-resume`
+  分支单独实现并写文档，本分支不碰存档读取路径。
 * 出生点 `setInitialSpawn` 仍只比较到 CARVERS 地形；树 / 雪层 / 结构改变
   `MOTION_BLOCKING` 时，个别种子的落点可能和满配官方世界不同。
-* 并行化和 SIMD：先有逐位一致的基线、并把生成期光照输入修对，再谈优化。
+* 并行化和 SIMD：逐位一致的基线已经把生成期光照输入修对，仍建议先不优化。
 
 ### 结构阶段（本轮接入）
 

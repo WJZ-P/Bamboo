@@ -447,7 +447,10 @@ WebView2 的渲染进程不算在内。
   结果取决于实际的生成先后；Bamboo 在中心这次 `features` 里用纯函数重算 8 个邻居中心写进来的增量，按
   来源中心的固定先后（C 自己最先、邻居按 `(dz,dx)`）合、同格先写的赢，邻居快照是干净的 CARVERS 地形。结果与线程
   调度无关、可重现，但边界上重叠的写入可能和某一次官方生成不同；地物越来越多后要重新核对。
-  后期处理位置表、`ProtoChunk` 其余字段、非 `full` 区块从盘上读回后按状态继续生成，都还没逐项对拍。`ChunkColumn::from_parts`
+  `PostProcessing` 位置表已按官方 `markPosForPostProcessing` 逐段对拍并写进存档
+  （`gen-world --through features` 比 packed short，两种 salt 的 6×36 扩大样本各 0 不一致）；
+  `ProtoChunk` 其余字段、非 `full` 区块从盘上读回后按状态继续生成仍由 `worldgen-resume`
+  分支负责。`ChunkColumn::from_parts`
   产出的盒子 `untouched=false`，生成的区块一律算「改过」而写盘，官方可以丢弃原样生成区块。
   出生点的 `setInitialSpawn` 链已按官方逐段移植并对拍（`getOrigin` 气候螺旋、
   `PlayerSpawnFinder` 的 11×11 螺旋 + 高度图/流体/碰撞、`fixupSpawnHeight` 兜底），
@@ -510,8 +513,8 @@ WebView2 的渲染进程不算在内。
   `freeze_top_layer` 已移植并逐方块 0 不一致：它复用 `biome_temperature` 里的
   `getHeightAdjustedTemperature`，逐点群系由主循环的 `BiomeManager` 未缓存解算器给出，
   没有改 `Feature::place` 签名（在 `composition.rs` 的 `place_feature` 里单开一个分支）。
-  已移植的类型都不产生方块实体，所以 `FeatureResult` 的方块实体 / POI / 后期处理位置表输出
-  也还没补；接进游戏时按 `docs/world-model-design.md` 5.3.1 合 9 宫格快照和写增量。
+  已移植的类型都不产生方块实体（本段是早期记录）；`FeatureResult` 现在带
+  方块实体和 `PostProcessing` 位置表，后者已逐段对拍并随 `build_region_column` 写进存档。
 - 结构生成（`docs/worldgen-structures-plan.md`）已接进 Director（本轮）：**所有**结构的起点、引用、
   Beardifier 和 `structures` 存档键都照官方生成并存盘；`cb-wg-structures` 合入 main 后
   四个代码生成单件结构与废弃传送门的 `postProcess` 也已逐方块对拍 0 不一致，允许清单里
@@ -1314,8 +1317,10 @@ cargo run --release -p mc-bamboo-vanilla -- chunkgen <java 路径> \
 
 `gen-world` 是接进游戏后的对拍：同一套官方出题，Bamboo 侧调的是**游戏里用的那份**
 `game::worldgen::generate_chunk`（`OverworldGenerator` 走 `Staged` 流水线时的纯函数）
-而不是直接调 `mc-bamboo-worldgen`，逐 quart 格、逐方块比较 CARVERS 快照；两边都不跑
-地物/结构/光照。`--break-self-test` 故意改坏一个方块，确认对拍会报不一致：
+而不是直接调 `mc-bamboo-worldgen`。默认逐 quart 格、逐方块比较 CARVERS 快照；
+`--through features --all-features` 跑完 11 个 decoration step，逐格比 3×3 方块、
+方块实体和 `PostProcessing` 位置表。`--break-self-test` 故意改坏一个方块，确认
+对拍会报不一致：
 
 ```bash
 cargo run --release -p mc-bamboo-vanilla -- gen-world <java 路径> \
