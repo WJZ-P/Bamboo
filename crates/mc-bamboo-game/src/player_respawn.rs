@@ -141,11 +141,6 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
     let world_spawn = region.global.spawn;
     reset_after_respawn(region, id, keep_inventory);
     let experience = region.players.get(&id).expect("玩家刚才还在").experience;
-    let selected = region
-        .players
-        .get(&id)
-        .map(|p| i32::from(p.inventory.selected))
-        .unwrap_or(0);
 
     // 官方 `PlayerList.respawn` 的 `connection.send` 顺序：
     // 1) 可选的 NO_RESPAWN_BLOCK_AVAILABLE（Bamboo 的出生点总是可用）
@@ -278,11 +273,10 @@ pub(crate) fn respawn(region: &mut Region, id: PlayerId) {
     crate::command::send_session(&mut region.links, id, permission_level, id.0);
     send_pairing_packets(region, id);
 
-    // 位置和朝向走和 `/tp` 相同的 `move_player`（RotationPlan::Absolute），
-    // 同时更新 player_grid 并发带确认的 player_position。跨岛搬运由主控
+    // 位置和朝向走和 `/tp` 相同的移动路径，更新 player_grid；
+    // `player_position` 已在上面发过，这里不再发第二包。跨岛搬运由主控
     // 按玩家所在区块完成，不能直接改坐标。
     crate::command::place_player_at_respawn(region, id, position, spawn.yaw, spawn.pitch);
-    let _ = selected;
 }
 
 /// 官方重建玩家后 `ChunkMap.addEntity` 的 `sendPairingData` 和
