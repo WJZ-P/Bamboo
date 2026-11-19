@@ -199,17 +199,16 @@ fn apply_consume_effect(region: &mut Region, id: PlayerId, effect: &ConsumeEffec
                 }
             }
             for instance in effects {
-                crate::player_effects::give(
-                    region,
-                    id,
-                    mc_bamboo_blocks::entity::mob::effects::EffectInstance::with_flags(
-                        instance.effect,
-                        instance.details.duration,
-                        instance.details.amplifier,
-                        instance.details.ambient,
-                        instance.details.show_particles,
-                    ),
+                let mut effect = mc_bamboo_blocks::entity::mob::effects::EffectInstance::with_flags(
+                    instance.effect,
+                    instance.details.duration,
+                    instance.details.amplifier,
+                    instance.details.ambient,
+                    instance.details.show_particles,
                 );
+                // `ApplyEffects` 组件的 `show_icon` 是独立字段，不走官方五参数构造的缺省。
+                effect.show_icon = instance.details.show_icon;
+                crate::player_effects::give(region, id, effect);
             }
         }
         ConsumeEffect::ClearAllEffects => {

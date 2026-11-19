@@ -39,6 +39,14 @@ const BREAK_GROUPS: &[BreakGroup] = &[
     ("anchored", |line| line.contains(" anchored "), 0),
     ("blocks", |line| line.contains(" blocks "), 0),
     ("store", |line| line.contains(" store "), 3),
+    // `/effect` 的改坏组：反馈哈希（5）、效果状态哈希（6）。
+    ("effect_feedback", |line| line.starts_with("effect "), 5),
+    ("effect_state", |line| line.starts_with("effect give"), 6),
+    (
+        "effect_clear_state",
+        |line| line.contains("effect clear"),
+        6,
+    ),
 ];
 
 /// Java 和 Rust 都按这个脚本跑；每条命令从同一份干净场景开始。
@@ -85,6 +93,20 @@ const SCENARIOS: &[&str] = &[
     "execute if data storage minecraft:test Value run setblock 4 -60 6 stone",
     "execute unless data storage minecraft:test Missing run setblock 4 -60 6 stone",
     "execute store result storage minecraft:test Value int 1 run setblock 4 -60 6 stone",
+    // `/effect give|clear` 的副作用与反馈
+    "effect give @s minecraft:speed 30 1",
+    "effect give @s minecraft:speed infinite 2",
+    "effect give @s minecraft:speed 1000000 255",
+    "effect give @s minecraft:speed 3 0 true",
+    "effect give @e[type=cow] minecraft:regeneration 12 1",
+    "effect give @s minecraft:instant_health 5 2",
+    "effect clear @s",
+    "effect clear @s minecraft:speed",
+    "effect clear @e[type=cow]",
+    "effect give @s minecraft:speed 30 1 ;; effect clear @s minecraft:haste",
+    "effect give @s minecraft:speed 30 1 ;; effect clear @s",
+    "effect give @s minecraft:speed 30 1 ;; effect clear @s minecraft:speed",
+    "effect give @e[type=item] minecraft:speed 10",
 ];
 
 #[derive(Debug)]
@@ -194,8 +216,8 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
     }
 }
 
-fn effects(value: &Json) -> Result<[i32; 6], String> {
-    let mut out = [0; 6];
+fn effects(value: &Json) -> Result<[i32; 7], String> {
+    let mut out = [0; 7];
     for (index, name) in [
         "stone_4_6",
         "stone_cow_a",
@@ -203,6 +225,7 @@ fn effects(value: &Json) -> Result<[i32; 6], String> {
         "score",
         "ran",
         "feedback",
+        "effects",
     ]
     .iter()
     .enumerate()

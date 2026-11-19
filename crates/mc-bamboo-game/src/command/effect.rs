@@ -82,22 +82,16 @@ fn report(
     failed: &'static str,
     single: &'static str,
     multiple: &'static str,
-    args: Vec<TranslateArg>,
-    name: Option<String>,
+    single_args: Vec<TranslateArg>,
+    multiple_args: Vec<TranslateArg>,
 ) -> Result<(), CommandFail> {
     if successes == 0 {
         return Err(fail(failed));
     }
     let message = if successes == 1 {
-        let mut all = args.clone();
-        if let Some(name) = name {
-            all.push(Component::text(name).into());
-        }
-        Component::translate(single, all)
+        Component::translate(single, single_args)
     } else {
-        let mut all = args;
-        all.push(TranslateArg::from(successes as i32));
-        Component::translate(multiple, all)
+        Component::translate(multiple, multiple_args)
     };
     feedback::success(region, source, message, true);
     Ok(())
@@ -172,6 +166,8 @@ fn run_give(
             only_name = source::entity_name(region, *target);
         }
     }
+    let seconds = TranslateArg::from(ticks / 20);
+    let label = display(effect).into();
     report(
         region,
         source,
@@ -179,8 +175,19 @@ fn run_give(
         "commands.effect.give.failed",
         "commands.effect.give.success.single",
         "commands.effect.give.success.multiple",
-        vec![display(effect).into(), TranslateArg::from(ticks / 20)],
-        only_name,
+        vec![
+            label,
+            only_name
+                .clone()
+                .map(|name| Component::text(name).into())
+                .unwrap_or_else(|| TranslateArg::from(0)),
+            seconds,
+        ],
+        vec![
+            display(effect).into(),
+            TranslateArg::from(successes as i32),
+            TranslateArg::from(ticks / 20),
+        ],
     )
 }
 
@@ -234,11 +241,24 @@ pub(crate) fn clear(
             "commands.effect.clear.everything.success.multiple",
         )
     };
-    let mut args = Vec::new();
-    if let Some(effect) = effect {
-        args.push(display(effect).into());
-    }
+    let label: Vec<TranslateArg> = effect
+        .map(|effect| vec![display(effect).into()])
+        .unwrap_or_default();
+    let name = only_name
+        .map(|name| Component::text(name).into())
+        .unwrap_or_else(|| TranslateArg::from(0));
+    let mut single_args = label.clone();
+    single_args.push(name);
+    let mut multiple_args = label;
+    multiple_args.push(TranslateArg::from(successes as i32));
     report(
-        region, source, successes, failed, single, multiple, args, only_name,
+        region,
+        source,
+        successes,
+        failed,
+        single,
+        multiple,
+        single_args,
+        multiple_args,
     )
 }
