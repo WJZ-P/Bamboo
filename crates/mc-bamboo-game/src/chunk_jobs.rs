@@ -14,7 +14,7 @@ use mc_bamboo_core::ChunkPos;
 use mc_bamboo_world::{director::SaveSeq, ticket::ChunkStatus};
 
 use crate::{
-    chunk_codec::{ChunkCodec, InlineCodec, PackedChunk},
+    chunk_codec::{ChunkCodec, DecodedColumn, InlineCodec, PackedChunk},
     chunk_generator::{CenterSnapshot, ChunkGenerator},
     compute_pool::PoolJob,
     region::RegionColumn,
@@ -53,7 +53,7 @@ pub(crate) enum ChunkWork {
 
 /// 计算的产物，`ChunkJob::run` 的输出。
 pub(crate) enum ChunkOutput {
-    Decoded(Result<Box<RegionColumn>, String>),
+    Decoded(Result<DecodedColumn, String>),
     Generated(GenerateOutput),
     Encoded(Result<PackedChunk, String>),
 }
@@ -67,7 +67,7 @@ pub(crate) struct ChunkReply {
 
 /// 回执的内容。世界线程把它变成 `TaskResult`。
 pub(crate) enum ChunkOutcome {
-    Decoded(Result<Box<RegionColumn>, String>),
+    Decoded(Result<DecodedColumn, String>),
     Generated {
         stage: ChunkStatus,
         output: GenerateOutput,
@@ -88,7 +88,7 @@ pub(crate) enum ChunkOutcome {
 }
 
 /// 解开 Director 搬运的容器并解析。内联执行器和计算池共用这一份。
-pub(crate) fn decode_packed(pos: ChunkPos, bytes: &[u8]) -> Result<Box<RegionColumn>, String> {
+pub(crate) fn decode_packed(pos: ChunkPos, bytes: &[u8]) -> Result<DecodedColumn, String> {
     let started = Instant::now();
     let result = PackedChunk::unpack(bytes).and_then(|packed| InlineCodec.decode(pos, &packed));
     crate::director_host::record_codec(started);

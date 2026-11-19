@@ -1,0 +1,1297 @@
+//! `resume-world`：多阶段往返对拍（官方写到一半的区块，读回后接着生成）。
+//!
+//! Java 侧的 `ResumeWorldOracle.java` 用官方 `SerializableChunkData` codec 按每个
+//! `ChunkStatus` 写真实存档 NBT，并用官方 `LevelLightEngine` 在 FEATURES 后的 3×3
+//! 方块上算生成期光照。这里把 `ChunkgenOracle.java --through features` 已逐格对拍
+//! 过的官方 FULL 数据作为题目，交给 Java 写成半成品存档，再用游戏侧的
+//! `resume_replay` 读回、从盘上 `Status` 续跑到 `full`，逐格比：
+//! 方块、quart 群系、六张高度图、方块实体、天空光 / 方块光、`isLightOn`、
+//! 结构 `starts` / `References`，以及下一次写盘的 `Status`。
+//!
+//! `Multi-stage resume comparison`: Java writes real chunk NBT at each
+//! `ChunkStatus` with the official codec and computes official generation-time
+//! light over post-FEATURES blocks; Rust decodes it, resumes generation from the
+//! on-disk status and compares every cell against vanilla's straight-to-FULL run.
+
+use std::{
+    collections::BTreeMap,
+    io::{BufRead, BufReader, Write},
+    process::Stdio,
+};
+
+use mc_bamboo_core::ChunkPos;
+use mc_bamboo_data::{registries, version};
+use mc_bamboo_game::{
+    resume_replay::{ResumeBreak, ResumeCase, clear_resume_overrides, resume_chunk},
+    world_options::{LevelType, WorldGenConfig},
+};
+use mc_bamboo_nbt::Tag;
+use mc_bamboo_world::ticket::ChunkStatus;
+use mc_bamboo_worldgen::feature::state::state_from_official_name;
+use serde_json::{Value, json};
+
+use crate::oracle::collect_log;
+
+const USAGE: &str = "usage: resume-world <java> [--seeds N] [--chunks N] [--salt S] \
+     [--structures] [--break-self-test] [--break-neighbor] [--show N]";
+const SOURCE: &str = "tools/mc-bamboo-vanilla/java/ResumeWorldOracle.java";
+const CHUNKGEN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/ChunkgenOracle.java";
+/// 官方 `Heightmap.Types.sendToClient()` 的四张图，也是存档会写出的图。
+const FINAL_HEIGHTMAP_KEYS: [&str; 4] = [
+    "WORLD_SURFACE",
+    "OCEAN_FLOOR",
+    "MOTION_BLOCKING",
+    "MOTION_BLOCKING_NO_LEAVES",
+];
+
+/// 所有能存盘的阶段（含 empty 与 full）。
+const STAGES: &[ChunkStatus] = &ChunkStatus::ALL;
+/// 邻居盘上状态组合：没有存档、同阶段、已 full、更早期阶段。
+const NEIGHBOR_MODES: &[&str] = &["none", "same", "full", "earlier"];
+
+#[derive(Debug)]
+struct Options {
+    seeds: usize,
+    chunks: usize,
+    salt: i64,
+    structures: bool,
+    break_self_test: bool,
+    break_neighbor: bool,
+    show: usize,
+}
+
+impl Options {
+    fn parse(args: &[&str]) -> Result<Self, String> {
+        let mut options = Self {
+            seeds: 1,
+            chunks: 1,
+            salt: 7,
+            structures: false,
+            break_self_test: false,
+            break_neighbor: false,
+            show: 8,
+        };
+        let mut rest = args.iter();
+        while let Some(&arg) = rest.next() {
+            let mut next = || rest.next().ok_or(USAGE);
+            match arg {
+                "--seeds" => options.seeds = next()?.parse().map_err(|_| USAGE)?,
+                "--chunks" => options.chunks = next()?.parse().map_err(|_| USAGE)?,
+                "--salt" => options.salt = next()?.parse().map_err(|_| USAGE)?,
+                "--show" => options.show = next()?.parse().map_err(|_| USAGE)?,
+                "--structures" => options.structures = true,
+                "--break-self-test" => options.break_self_test = true,
+                "--break-neighbor" => options.break_neighbor = true,
+                _ => return Err(USAGE.to_owned()),
+            }
+        }
+        if options.seeds == 0 || options.chunks == 0 {
+            return Err(USAGE.to_owned());
+        }
+        Ok(options)
+    }
+}
+
+#[derive(Debug, Default)]
+struct Stats {
+    cases: u64,
+    blocks: u64,
+    biomes: u64,
+    heightmaps: u64,
+    light_cells: u64,
+    block_entities: u64,
+    mismatches: Vec<String>,
+    /// 盘上 Status < light 的用例里，因官方 LIGHT 读 FEATURES 后视图、
+    /// 而游戏 `generate_light_stage` 读 CARVERS 快照导致的光照差异。
+    /// 这类单独列出，不能合进总数里藏起来；合并光照修正后必须清零。
+    light_input_mismatches: Vec<String>,
+    breaks: u64,
+}
+
+/// 官方一口气生成到 FULL 的逐格数据（来自 `ChunkgenOracle --through features`）。
+#[derive(Debug, Clone)]
+struct FullChunk {
+    seed: i64,
+    pos: ChunkPos,
+    /// 3×3 视图，每格是 `(调色板名数组, 方块下标数组)`。
+    view: Vec<(Vec<String>, Vec<u32>)>,
+    biomes: Vec<Vec<String>>,
+    heightmaps: BTreeMap<String, Vec<i64>>,
+    heightmap_words: BTreeMap<String, Vec<i64>>,
+    block_entities: Vec<(i32, i32, i32, String)>,
+    structures: BTreeMap<String, String>,
+}
+
+pub fn run(options: &[&str], java: &str) -> Result<(), String> {
+    let options = Options::parse(options)?;
+    // 1. 官方一口气生成到 FEATURES（3×3 视图 + 方块实体 + 结构）。
+    let carvers = official_carvers(java, &options)?;
+    let mut official = official_full_chunks(java, &options, &carvers)?;
+    // 官方 9 个中心各跑一遍地物，再用游戏固定先后合规则得到中心最终方块。
+    // `feature-merge --orders isolated` 已证明这条线和官方逐中心输出逐格一致；
+    // 单中心的 `features` 行只覆盖中心自己的地物，少了邻居溢进来的写。
+    // Official FULL is the 9-center merge, not the single-center features line.
+    let merged = official_merged_blocks(java, &options)?;
+    for full in &mut official {
+        let key = (full.seed, full.pos.x, full.pos.z);
+        let Some(blocks) = merged.get(&key) else {
+            return Err(format!("no isolated merge line for {key:?}"));
+        };
+        let names = blocks
+            .iter()
+            .map(|&state| mc_bamboo_worldgen::feature::state::official_name(state))
+            .collect::<Vec<String>>();
+        let mut palette = Vec::new();
+        let mut indices = Vec::with_capacity(blocks.len());
+        for name in names {
+            let index = palette
+                .iter()
+                .position(|entry| entry == &name)
+                .unwrap_or_else(|| {
+                    palette.push(name);
+                    palette.len() - 1
+                });
+            indices.push(index as u32);
+        }
+        full.view[4] = (palette, indices.clone());
+        // 官方 CARVERS 高度图是地物之前的；FULL 的四张 FINAL 图要按
+        // FEATURES 之后的方块重算（`Heightmap.update` 增量维护的终值等价于
+        // 从最终方块 prime）。`build_region_column` + `final_heightmap_words`
+        // 是游戏写盘走的那条路径，和官方逐字对拍过。
+        // Recompute the four FINAL heightmaps from the post-FEATURES blocks,
+        // matching official `Heightmap.update` (equals primeHeightmaps).
+        let state_ids = final_states_from_view(&full.view[4]);
+        let generated = mc_bamboo_game::worldgen::GeneratedChunk {
+            blocks: state_ids.chunks(256).map(<[u32]>::to_vec).collect(),
+            biomes: vec![vec![0_u32; 64]; mc_bamboo_world::SECTION_COUNT],
+            heightmaps: Default::default(),
+        };
+        let words = mc_bamboo_game::worldgen::final_heightmap_words(&generated)
+            .map_err(|e| format!("final heightmaps {key:?}: {e}"))?;
+        for (name, values) in words {
+            let mut columns = Vec::with_capacity(256);
+            for word in &values {
+                for slot in 0..7 {
+                    columns.push(((word >> (slot * 9)) & 0x1ff) as i64 - 64);
+                }
+            }
+            columns.truncate(256);
+            full.heightmaps.insert(name.to_owned(), columns);
+            full.heightmap_words
+                .insert(name.to_owned(), values.iter().map(|&v| v as i64).collect());
+        }
+    }
+    // 2. 把每一题按 10 个阶段 × 4 种邻居组合交给官方 codec 写成半成品存档。
+    let mut child = crate::official_program(java, SOURCE)?
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot run java: {error}"))?;
+    let log = collect_log(&mut child)?;
+    // 一问一答：Java 的答案含整块 NBT / 光照字节，先把所有请求写完再读会
+    // 填满管道死锁。逐条写、逐条读，顺便把答案按请求顺序收好。
+    // Request/response one at a time: Java answers with full chunk NBT and
+    // light bytes, so writing every request before reading fills the pipe.
+    let mut stdin = child.stdin.take().ok_or("java has no stdin")?;
+    let mut stdout = BufReader::new(child.stdout.take().ok_or("java has no stdout")?);
+    let mut requests = Vec::new();
+    for full in &official {
+        for stage in STAGES {
+            for mode in NEIGHBOR_MODES {
+                requests.push(make_request(full, *stage, mode, options.structures));
+            }
+        }
+    }
+    let mut read_line = || -> Result<String, String> {
+        let mut line = String::new();
+        stdout
+            .read_line(&mut line)
+            .map_err(|error| format!("cannot read java: {error}"))?;
+        if line.is_empty() {
+            return Err("java closed stdout before answering".to_owned());
+        }
+        Ok(line)
+    };
+    let header: Value = serde_json::from_str(&read_line()?)
+        .map_err(|error| format!("bad oracle header: {error}"))?;
+    let reported = header
+        .get("version")
+        .and_then(Value::as_str)
+        .ok_or("header missing version")?;
+    let protocol = header
+        .get("protocol")
+        .and_then(Value::as_i64)
+        .ok_or("header missing protocol")?;
+    if reported != version::GAME_VERSION || protocol != i64::from(version::PROTOCOL_VERSION) {
+        return Err(format!(
+            "oracle is {reported}/{protocol}, bamboo is {}/{}",
+            version::GAME_VERSION,
+            version::PROTOCOL_VERSION
+        ));
+    }
+
+    let mut stats = Stats::default();
+    let mut cases = Vec::new();
+    for request in &requests {
+        writeln!(stdin, "{request}")
+            .map_err(|error| format!("cannot write java stdin: {error}"))?;
+        stdin
+            .flush()
+            .map_err(|error| format!("cannot flush java stdin: {error}"))?;
+        let line = read_line()?;
+        let value: Value =
+            serde_json::from_str(&line).map_err(|error| format!("bad oracle line: {error}"))?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or("oracle line has no type")?;
+        if kind != "case" {
+            return Err(format!("unexpected oracle line type {kind}"));
+        }
+        cases.push(value);
+    }
+    drop(stdin);
+    let status = child
+        .wait()
+        .map_err(|error| format!("cannot wait for java: {error}"))?;
+    let log = log.recv().unwrap_or_default().join("\n");
+    if !status.success() {
+        return Err(format!("ResumeWorldOracle.java failed: {status}\n{log}"));
+    }
+    if cases.len() != requests.len() {
+        return Err(format!(
+            "oracle wrote {} cases for {} requests",
+            cases.len(),
+            requests.len()
+        ));
+    }
+
+    // 3. 每个半成品存档用游戏侧同一批阶段纯函数续跑，和官方 FULL 逐格比。
+    for (case, full) in cases.iter().zip(official.iter().flat_map(|full| {
+        STAGES
+            .iter()
+            .flat_map(move |stage| NEIGHBOR_MODES.iter().map(move |mode| (full, *stage, *mode)))
+    })) {
+        let (full, stage, mode) = full;
+        compare_case(&mut stats, case, full, stage, mode, &options)?;
+    }
+    clear_resume_overrides();
+    finish(stats, &options, requests.len())
+}
+
+fn finish(stats: Stats, options: &Options, requests: usize) -> Result<(), String> {
+    let Stats {
+        cases,
+        blocks,
+        biomes,
+        heightmaps,
+        light_cells,
+        block_entities,
+        mismatches,
+        light_input_mismatches,
+        breaks,
+    } = stats;
+    println!(
+        "resume-world: {requests} requests, {cases} resumed cases, {blocks} blocks, \
+         {biomes} quart cells, {heightmaps} heightmap columns, {light_cells} light cells, \
+         {block_entities} block entities, {} mismatches, \
+         {} known LIGHT-input mismatches, {breaks} break checks",
+        mismatches.len(),
+        light_input_mismatches.len(),
+    );
+    if !light_input_mismatches.is_empty() {
+        let mut by_stage: BTreeMap<String, usize> = BTreeMap::new();
+        for message in &light_input_mismatches {
+            if let Some(stage) = message
+                .split("stage ")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+            {
+                *by_stage.entry(stage.to_owned()).or_default() += 1;
+            }
+        }
+        println!("resume-world LIGHT-input gaps by stage: {by_stage:?}");
+        println!(
+            "resume-world LIGHT-input gaps (official post-FEATURES vs game CARVERS): {} lines; \
+             first few:",
+            light_input_mismatches.len()
+        );
+        for message in light_input_mismatches.iter().take(options.show) {
+            eprintln!("  LIGHT-INPUT {message}");
+        }
+    }
+    if options.break_self_test || options.break_neighbor {
+        if breaks == 0 {
+            return Err("resume-world break check did not run".to_owned());
+        }
+        println!("resume-world break checks: {breaks} confirmed mismatches");
+        return Ok(());
+    }
+    if cases != requests as u64 || blocks == 0 {
+        return Err("resume-world compared no chunks".to_owned());
+    }
+    if !mismatches.is_empty() {
+        let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
+        for message in &mismatches {
+            let kind = message
+                .split_once(": ")
+                .map(|(_, rest)| rest.split_whitespace().next().unwrap_or("?"))
+                .unwrap_or("?");
+            *by_kind.entry(kind.to_owned()).or_default() += 1;
+        }
+        println!("resume-world mismatch kinds: {by_kind:?}");
+        let mut by_stage: BTreeMap<String, usize> = BTreeMap::new();
+        for message in &mismatches {
+            if let Some(stage) = message
+                .split("stage ")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+            {
+                *by_stage.entry(stage.to_owned()).or_default() += 1;
+            }
+        }
+        println!("resume-world mismatches by stage: {by_stage:?}");
+        let mut by_pair: BTreeMap<(String, String), usize> = BTreeMap::new();
+        for message in &mismatches {
+            let stage = message
+                .split("stage ")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .unwrap_or("?");
+            let kind = message
+                .split_once(": ")
+                .map(|(_, rest)| rest.split_whitespace().next().unwrap_or("?"))
+                .unwrap_or("?");
+            *by_pair
+                .entry((stage.to_owned(), kind.to_owned()))
+                .or_default() += 1;
+        }
+        println!("resume-world mismatches by (stage, kind): {by_pair:?}");
+        let mut examples: BTreeMap<String, &String> = BTreeMap::new();
+        for message in &mismatches {
+            let kind = message
+                .split_once(": ")
+                .map(|(_, rest)| rest.split_whitespace().next().unwrap_or("?"))
+                .unwrap_or("?");
+            examples.entry(kind.to_owned()).or_insert(message);
+        }
+        for (kind, message) in examples {
+            eprintln!("  EXAMPLE {kind}: {message}");
+        }
+        for message in mismatches.iter().take(options.show) {
+            eprintln!("  MISMATCH {message}");
+        }
+        return Err(format!(
+            "resume-world found {} mismatches",
+            mismatches.len()
+        ));
+    }
+    if !light_input_mismatches.is_empty() {
+        return Err(format!(
+            "resume-world has {} known LIGHT-input gaps; rerun after the light fix",
+            light_input_mismatches.len()
+        ));
+    }
+    println!("resume-world: 0 mismatches");
+    Ok(())
+}
+
+/// `(种子, x, z) → 逐格方块状态`（官方一口气生成到 FULL 的结果）。
+type BlockBaselines = BTreeMap<(i64, i32, i32), Vec<u32>>;
+
+/// 官方 `ChunkgenOracle --merge-neighbors isolated` 的 9 中心写增量，
+/// 按游戏同一份 `merge_feature_writes` 合成中心最终方块。
+/// 这条线来自官方每个中心真实跑过的 `applyBiomeDecoration`，
+/// `feature-merge` 已逐格证明过它等于 Director 交付的中心方块。
+fn official_merged_blocks(java: &str, options: &Options) -> Result<BlockBaselines, String> {
+    let queries = crate::workspace_root().join("target/vanilla/resume_queries.txt");
+    let text = official_full_chunk_keys(java, options)?
+        .iter()
+        .map(|(seed, x, z)| format!("{seed} {x} {z}\n"))
+        .collect::<String>();
+    std::fs::write(&queries, text).map_err(|e| format!("write queries: {e}"))?;
+    let mut command = crate::official_program(java, CHUNKGEN_SOURCE)?;
+    command.args([
+        "--through",
+        "features",
+        "--merge-neighbors",
+        "isolated",
+        "--chunks-file",
+    ]);
+    command.arg(&queries);
+    if options.structures {
+        command.arg("--structures");
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("run merge oracle: {e}"))?;
+    let log = collect_log(&mut child)?;
+    let stdout = child.stdout.take().ok_or("java has no stdout")?;
+    let mut out = BTreeMap::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|e| format!("read merge oracle: {e}"))?;
+        let value: Value =
+            serde_json::from_str(&line).map_err(|e| format!("bad merge oracle line: {e}"))?;
+        if value.get("type").and_then(Value::as_str) != Some("isolated") {
+            continue;
+        }
+        let (seed, x, z) = line_key(&value)?;
+        let runs = value.get("runs").and_then(Value::as_i64).ok_or("runs")?;
+        if runs != 9 {
+            return Err(format!("isolated ran {runs} centers"));
+        }
+        let baseline = value
+            .get("blocks")
+            .and_then(Value::as_array)
+            .ok_or("isolated missing blocks")?;
+        let names = value
+            .get("palette")
+            .and_then(Value::as_array)
+            .ok_or("isolated missing palette")?;
+        let states = names
+            .iter()
+            .map(|n| {
+                mc_bamboo_worldgen::feature::state::state_from_official_name(
+                    n.as_str().unwrap_or(""),
+                )
+            })
+            .collect::<Result<Vec<u32>, String>>()?;
+        let terrain = baseline
+            .iter()
+            .map(|v| {
+                states
+                    .get(v.as_u64().unwrap_or(0) as usize)
+                    .copied()
+                    .ok_or("state index out of range".to_owned())
+            })
+            .collect::<Result<Vec<u32>, String>>()?;
+        // 9 个来源的写用同一份游戏合并规则；cell 下标是 (y*16+x)*16+z。
+        let write_palette = value
+            .get("writePalette")
+            .and_then(Value::as_array)
+            .ok_or("isolated missing writePalette")?;
+        let write_states = write_palette
+            .iter()
+            .map(|n| {
+                mc_bamboo_worldgen::feature::state::state_from_official_name(
+                    n.as_str().unwrap_or(""),
+                )
+            })
+            .collect::<Result<Vec<u32>, String>>()?;
+        let sources = value
+            .get("sources")
+            .and_then(Value::as_array)
+            .ok_or("isolated missing sources")?;
+        if sources.len() != 9 {
+            return Err(format!("isolated has {} sources", sources.len()));
+        }
+        let mut groups = Vec::new();
+        for (slot, writes) in sources.iter().enumerate() {
+            let mut deltas = Vec::new();
+            for write in writes.as_array().ok_or("source is not an array")? {
+                let pair = write.as_array().ok_or("write is not a pair")?;
+                let cell = pair.first().and_then(Value::as_u64).ok_or("bad cell")? as usize;
+                let id = pair.get(1).and_then(Value::as_u64).ok_or("bad state")? as usize;
+                let state = *write_states.get(id).ok_or("write state out of palette")?;
+                let y = mc_bamboo_world::MIN_Y + (cell / 256) as i32;
+                let lx = ((cell / 16) % 16) as i32;
+                let lz = (cell % 16) as i32;
+                deltas.push((x * 16 + lx, y, z * 16 + lz, state));
+            }
+            groups.push(mc_bamboo_game::worldgen_features::FeatureWrites {
+                slot: slot as u8,
+                deltas,
+            });
+        }
+        let mut chunk = mc_bamboo_game::worldgen::GeneratedChunk {
+            blocks: terrain.chunks(256).map(<[u32]>::to_vec).collect(),
+            biomes: Vec::new(),
+            heightmaps: Default::default(),
+        };
+        mc_bamboo_game::worldgen_features::merge_feature_writes(&mut chunk, groups);
+        out.insert((seed, x, z), chunk.blocks.into_iter().flatten().collect());
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("wait merge oracle: {e}"))?;
+    let log = log.recv().unwrap_or_default().join("\n");
+    if !status.success() {
+        return Err(format!("merge oracle failed: {status}\n{log}"));
+    }
+    Ok(out)
+}
+
+/// 官方 `features` 行的 `(seed, x, z)` 键，用来给 merge oracle 写查询文件。
+fn official_full_chunk_keys(java: &str, options: &Options) -> Result<Vec<(i64, i32, i32)>, String> {
+    let mut command = crate::official_program(java, CHUNKGEN_SOURCE)?;
+    command.args([
+        "--through",
+        "biomes",
+        "--seeds",
+        &options.seeds.to_string(),
+        "--chunks",
+        &options.chunks.to_string(),
+        "--salt",
+        &options.salt.to_string(),
+    ]);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("run biomes oracle: {e}"))?;
+    let log = collect_log(&mut child)?;
+    let stdout = child.stdout.take().ok_or("java has no stdout")?;
+    let mut keys = Vec::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|e| format!("read biomes oracle: {e}"))?;
+        let value: Value =
+            serde_json::from_str(&line).map_err(|e| format!("bad biomes oracle line: {e}"))?;
+        if value.get("type").and_then(Value::as_str) == Some("biomes") {
+            keys.push(line_key(&value)?);
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("wait biomes oracle: {e}"))?;
+    let log = log.recv().unwrap_or_default().join("\n");
+    if !status.success() {
+        return Err(format!("biomes oracle failed: {status}\n{log}"));
+    }
+    Ok(keys)
+}
+
+/// `--real-path --through carvers` 的官方 quart 群系与高度图。
+#[derive(Debug, Clone)]
+struct CarversData {
+    biomes: Vec<Vec<String>>,
+    heightmaps: BTreeMap<String, Vec<i64>>,
+    heightmap_words: BTreeMap<String, Vec<i64>>,
+}
+
+/// 官方 `--through carvers --real-path` 给同一批坐标的 quart 群系和六张高度图。
+///
+/// `ChunkgenOracle` 的 features 行只带 3×3 方块，群系 / 高度图由这条独立的
+/// CARVERS 路径提供（和 `gen-world` 用的是同一份官方输出）。
+fn official_carvers(
+    java: &str,
+    options: &Options,
+) -> Result<BTreeMap<(i64, i32, i32), CarversData>, String> {
+    let mut command = crate::official_program(java, CHUNKGEN_SOURCE)?;
+    command.args([
+        "--through",
+        "carvers",
+        "--real-path",
+        "--seeds",
+        &options.seeds.to_string(),
+        "--chunks",
+        &options.chunks.to_string(),
+        "--salt",
+        &options.salt.to_string(),
+    ]);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("cannot run ChunkgenOracle carvers: {error}"))?;
+    let log = collect_log(&mut child)?;
+    let stdout = child.stdout.take().ok_or("java has no stdout")?;
+    let mut biomes: BTreeMap<(i64, i32, i32), Vec<Vec<String>>> = BTreeMap::new();
+    let mut out = BTreeMap::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| format!("cannot read java: {error}"))?;
+        let value: Value =
+            serde_json::from_str(&line).map_err(|error| format!("bad oracle line: {error}"))?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or("oracle line has no type")?;
+        match kind {
+            "biomes" => {
+                let key = line_key(&value)?;
+                let sections = value
+                    .get("sections")
+                    .and_then(Value::as_array)
+                    .ok_or("biomes line missing sections")?;
+                let parsed = sections
+                    .iter()
+                    .map(|cells| {
+                        cells
+                            .as_array()
+                            .ok_or("bad biome section")?
+                            .iter()
+                            .map(|name| {
+                                name.as_str()
+                                    .map(str::to_owned)
+                                    .ok_or("bad biome name".to_owned())
+                            })
+                            .collect::<Result<Vec<String>, String>>()
+                    })
+                    .collect::<Result<Vec<Vec<String>>, String>>()?;
+                biomes.insert(key, parsed);
+            }
+            "carvers" => {
+                let key = line_key(&value)?;
+                let names = biomes
+                    .remove(&key)
+                    .ok_or_else(|| format!("no biomes line for {key:?}"))?;
+                let columns = value
+                    .get("heightmaps")
+                    .and_then(Value::as_object)
+                    .ok_or("carvers line missing heightmaps")?;
+                let mut heightmaps = BTreeMap::new();
+                for (name, values) in columns {
+                    // `SerializableChunkData.write` 只写 `sendToClient()` 的四张 FINAL 图；
+                    // 两张 WG 图不进存档，不能拿来比。
+                    // Only the four FINAL maps are persisted; the two WG maps are not.
+                    if !FINAL_HEIGHTMAP_KEYS.contains(&name.as_str()) {
+                        continue;
+                    }
+                    let parsed = values
+                        .as_array()
+                        .ok_or("heightmap columns must be an array")?
+                        .iter()
+                        .map(|entry| entry.as_i64().ok_or("bad heightmap column".to_owned()))
+                        .collect::<Result<Vec<i64>, String>>()?;
+                    heightmaps.insert(name.clone(), parsed);
+                }
+                let words = parse_words(
+                    value
+                        .get("heightmap_words")
+                        .ok_or("carvers line missing heightmap_words")?,
+                )?;
+                out.insert(
+                    key,
+                    CarversData {
+                        biomes: names,
+                        heightmaps,
+                        heightmap_words: words,
+                    },
+                );
+            }
+            "noise" | "surface" | "header" | "end" => {}
+            other => return Err(format!("unexpected carvers oracle line {other}")),
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("cannot wait for java: {error}"))?;
+    let log = log.recv().unwrap_or_default().join("\n");
+    if !status.success() {
+        return Err(format!("ChunkgenOracle carvers failed: {status}\n{log}"));
+    }
+    Ok(out)
+}
+
+/// 调 `ChunkgenOracle --through features` 收集官方 FEATURES 后的 3×3 视图。
+fn official_full_chunks(
+    java: &str,
+    options: &Options,
+    carvers: &BTreeMap<(i64, i32, i32), CarversData>,
+) -> Result<Vec<FullChunk>, String> {
+    let mut command = crate::official_program(java, CHUNKGEN_SOURCE)?;
+    command.args([
+        "--through",
+        "features",
+        "--seeds",
+        &options.seeds.to_string(),
+        "--chunks",
+        &options.chunks.to_string(),
+        "--salt",
+        &options.salt.to_string(),
+    ]);
+    if options.structures {
+        command.arg("--structures");
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("cannot run ChunkgenOracle: {error}"))?;
+    let log = collect_log(&mut child)?;
+    let stdout = child.stdout.take().ok_or("java has no stdout")?;
+    let mut out = Vec::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| format!("cannot read java: {error}"))?;
+        let value: Value =
+            serde_json::from_str(&line).map_err(|error| format!("bad oracle line: {error}"))?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or("oracle line has no type")?;
+        match kind {
+            "header" => {}
+            "biomes" => {}
+            "features" => {
+                let key = line_key(&value)?;
+                let (seed, x, z) = key;
+                let chunks = value
+                    .get("chunks")
+                    .and_then(Value::as_array)
+                    .ok_or("features line missing chunks")?;
+                if chunks.len() != 9 {
+                    return Err(format!("features line has {} chunks", chunks.len()));
+                }
+                let mut view = Vec::new();
+                for chunk in chunks {
+                    let names = chunk
+                        .get("palette")
+                        .and_then(Value::as_array)
+                        .ok_or("chunk missing palette")?
+                        .iter()
+                        .map(|entry| {
+                            entry
+                                .as_str()
+                                .map(str::to_owned)
+                                .ok_or("bad palette entry".to_owned())
+                        })
+                        .collect::<Result<Vec<String>, String>>()?;
+                    let indices = chunk
+                        .get("blocks")
+                        .and_then(Value::as_array)
+                        .ok_or("chunk missing blocks")?
+                        .iter()
+                        .map(|entry| {
+                            entry
+                                .as_u64()
+                                .map(|value| value as u32)
+                                .ok_or("bad block index".to_owned())
+                        })
+                        .collect::<Result<Vec<u32>, String>>()?;
+                    view.push((names, indices));
+                }
+                let carvers_data = carvers
+                    .get(&key)
+                    .ok_or_else(|| format!("no carvers line for ({seed},{x},{z})"))?;
+                let biomes = carvers_data.biomes.clone();
+                let heightmap_words = carvers_data.heightmap_words.clone();
+                let heightmaps = carvers_data.heightmaps.clone();
+                let mut block_entities = Vec::new();
+                if let Some(entries) = chunks[4].get("block_entities").and_then(Value::as_array) {
+                    for entry in entries {
+                        let row = entry.as_array().ok_or("bad block entity row")?;
+                        if row.len() != 4 {
+                            return Err("block entity row must have 4 fields".to_owned());
+                        }
+                        block_entities.push((
+                            row[0].as_i64().ok_or("bad x")? as i32,
+                            row[1].as_i64().ok_or("bad y")? as i32,
+                            row[2].as_i64().ok_or("bad z")? as i32,
+                            row[3].as_str().ok_or("bad block entity SNBT")?.to_owned(),
+                        ));
+                    }
+                }
+                // `--structures` 时 Java 侧另外发 coverage 行；features 行本身没有
+                // structures 标签，用游戏侧同一份纯函数补出官方形状的标签。
+                let structures = if options.structures {
+                    structures_for(seed, x, z, options.structures)
+                } else {
+                    BTreeMap::new()
+                };
+                out.push(FullChunk {
+                    seed,
+                    pos: ChunkPos::new(x, z),
+                    view,
+                    biomes,
+                    heightmaps,
+                    heightmap_words,
+                    block_entities,
+                    structures,
+                });
+            }
+            "coverage" | "end" | "noise" | "surface" | "carvers" => {}
+            other => return Err(format!("unexpected ChunkgenOracle line {other}")),
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("cannot wait for java: {error}"))?;
+    let log = log.recv().unwrap_or_default().join("\n");
+    if !status.success() {
+        return Err(format!("ChunkgenOracle.java failed: {status}\n{log}"));
+    }
+    if out.is_empty() {
+        return Err("ChunkgenOracle emitted no features lines".to_owned());
+    }
+    Ok(out)
+}
+
+fn line_key(value: &Value) -> Result<(i64, i32, i32), String> {
+    let get = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_i64)
+            .ok_or_else(|| format!("line missing {key}"))
+    };
+    Ok((get("seed")?, get("x")? as i32, get("z")? as i32))
+}
+
+fn parse_words(value: &Value) -> Result<BTreeMap<String, Vec<i64>>, String> {
+    let object = value
+        .as_object()
+        .ok_or("heightmap words must be an object")?;
+    let mut out = BTreeMap::new();
+    for (name, words) in object {
+        if !FINAL_HEIGHTMAP_KEYS.contains(&name.as_str()) {
+            continue;
+        }
+        let parsed = words
+            .as_array()
+            .ok_or("heightmap words entry must be an array")?
+            .iter()
+            .map(|word| word.as_i64().ok_or("bad heightmap word".to_owned()))
+            .collect::<Result<Vec<i64>, String>>()?;
+        out.insert(name.clone(), parsed);
+    }
+    Ok(out)
+}
+
+fn structures_for(seed: i64, x: i32, z: i32, structures: bool) -> BTreeMap<String, String> {
+    let config = WorldGenConfig {
+        seed,
+        level_type: LevelType::Normal,
+        generate_structures: structures,
+        ..WorldGenConfig::default()
+    };
+    let Ok(tag) = mc_bamboo_game::worldgen_structures::encode_structures(
+        &config,
+        &mc_bamboo_game::worldgen_structures::structure_starts(&config, x, z).unwrap_or_default(),
+        &mc_bamboo_game::worldgen_structures::structure_references_stage(&config, x, z)
+            .unwrap_or_default(),
+    ) else {
+        return BTreeMap::new();
+    };
+    let Tag::Compound(entries) = tag else {
+        return BTreeMap::new();
+    };
+    entries
+        .into_iter()
+        .map(|(key, value)| (key, value.to_snbt()))
+        .collect()
+}
+
+fn final_states_from_view(view: &(Vec<String>, Vec<u32>)) -> Vec<u32> {
+    let states = view
+        .0
+        .iter()
+        .map(|name| state_from_official_name(name).unwrap_or(0))
+        .collect::<Vec<u32>>();
+    view.1
+        .iter()
+        .map(|&index| states.get(index as usize).copied().unwrap_or(0))
+        .collect()
+}
+
+fn make_request(full: &FullChunk, stage: ChunkStatus, mode: &str, structures: bool) -> Value {
+    let view: Vec<Value> = full
+        .view
+        .iter()
+        .map(|(palette, blocks)| {
+            json!({
+                "palette": palette,
+                "blocks": blocks,
+            })
+        })
+        .collect();
+    let biomes: Vec<Value> = full
+        .biomes
+        .iter()
+        .map(|cells| Value::Array(cells.iter().cloned().map(Value::String).collect()))
+        .collect();
+    let block_entities: Vec<Value> = full
+        .block_entities
+        .iter()
+        .map(|(x, y, z, snbt)| json!([x, y, z, snbt]))
+        .collect();
+    let mut heightmaps = serde_json::Map::new();
+    for (key, columns) in &full.heightmaps {
+        heightmaps.insert(
+            key.clone(),
+            Value::Array(columns.iter().map(|&value| json!(value)).collect()),
+        );
+    }
+    let mut words = serde_json::Map::new();
+    for (key, values) in &full.heightmap_words {
+        words.insert(
+            key.clone(),
+            Value::Array(values.iter().map(|&value| json!(value)).collect()),
+        );
+    }
+    let mut neighbor_tags = Vec::new();
+    if mode != "none" {
+        // 邻居的 structures 由同一份纯函数按坐标算出，覆盖起点 / 引用跨区块恢复。
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let tags = structures_for(full.seed, full.pos.x + dx, full.pos.z + dz, structures);
+                neighbor_tags.push(json!({
+                    "x": full.pos.x + dx,
+                    "z": full.pos.z + dz,
+                    "structures": tags,
+                }));
+            }
+        }
+    }
+    json!({
+        "command": "write",
+        "seed": full.seed,
+        "x": full.pos.x,
+        "z": full.pos.z,
+        "stage": stage.name(),
+        "neighbor": mode,
+        "view": view,
+        "neighbors": neighbor_tags,
+        "full": {
+            "palette": full.view[4].0,
+            "blocks": full.view[4].1,
+            "biomes": biomes,
+            "heightmaps": heightmaps,
+            "heightmap_words": words,
+            "block_entities": block_entities,
+            "structures": full.structures,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compare_case(
+    stats: &mut Stats,
+    case: &Value,
+    full: &FullChunk,
+    stage: ChunkStatus,
+    mode: &str,
+    options: &Options,
+) -> Result<(), String> {
+    let seed = case
+        .get("seed")
+        .and_then(Value::as_i64)
+        .ok_or("case missing seed")?;
+    let x = case
+        .get("x")
+        .and_then(Value::as_i64)
+        .ok_or("case missing x")? as i32;
+    let z = case
+        .get("z")
+        .and_then(Value::as_i64)
+        .ok_or("case missing z")? as i32;
+    let pos = ChunkPos::new(x, z);
+    let nbt = decode_base64(case.get("chunk_nbt").ok_or("case missing chunk_nbt")?)?;
+    let full_nbt = decode_base64(case.get("full_nbt").ok_or("case missing full_nbt")?)?;
+    let config = WorldGenConfig {
+        seed,
+        level_type: LevelType::Normal,
+        generate_structures: options.structures,
+        ..WorldGenConfig::default()
+    };
+    let neighbor_tags = parse_neighbor_tags(case)?;
+    let clean = resume_chunk(
+        &config,
+        &ResumeCase {
+            pos,
+            chunk_nbt: nbt.clone(),
+            stage,
+        },
+        &neighbor_tags,
+        None,
+    )
+    .map_err(|error| format!("resume seed {seed} ({x},{z}) stage {stage:?}: {error}"))?;
+    stats.cases += 1;
+    let label = format!(
+        "seed {seed} ({x},{z}) stage {} neighbor {mode}",
+        stage.name()
+    );
+
+    // 方块 / 群系 / 高度图 / 方块实体 / 结构 / Status：和官方一口气到 FULL 逐格比。
+    let expected_states = full.view[4]
+        .0
+        .iter()
+        .map(|name| state_from_official_name(name))
+        .collect::<Result<Vec<u32>, String>>()?;
+    compare_blocks(
+        stats,
+        &label,
+        &expected_states,
+        &full.view[4].0,
+        &full.view[4].1,
+        &clean,
+    );
+    compare_biomes(stats, &label, &full.biomes, &clean);
+    compare_heightmaps(stats, &label, &full.heightmaps, &clean);
+    compare_block_entities(stats, &label, &full.block_entities, &clean);
+    compare_structures(stats, &label, &full_nbt, &clean);
+    if clean.saved_status != ChunkStatus::Full {
+        stats.mismatches.push(format!(
+            "{label}: saved status {:?}, expected full",
+            clean.saved_status
+        ));
+    }
+
+    // 光照：官方 FULL 存档里的两层光照是基线。Status >= light 时官方读盘直接
+    // 复用盘上光照；Status < light 时游戏续跑的 LIGHT 输入现在是 CARVERS，
+    // 差异按主代理要求单独分类列出，不放宽、合并不隐藏。
+    let expected = mc_bamboo_storage::chunk_nbt::decode_bytes(&full_nbt)
+        .map_err(|error| format!("{label}: official full NBT: {error}"))?;
+    compare_light(stats, &label, stage, &expected.column, &clean);
+
+    // 改坏确认：把读回状态当 full、丢掉邻居写进中心的增量，两种都必须报不一致。
+    if options.break_self_test && stage == ChunkStatus::StructureStarts && mode == "none" {
+        let broken = resume_chunk(
+            &config,
+            &ResumeCase {
+                pos,
+                chunk_nbt: nbt.clone(),
+                stage,
+            },
+            &neighbor_tags,
+            Some(ResumeBreak::TreatAsFull),
+        )
+        .map_err(|error| format!("{label}: break-as-full failed: {error}"))?;
+        if broken.blocks == clean.blocks && broken.saved_status == clean.saved_status {
+            stats
+                .mismatches
+                .push(format!("{label}: break-as-full was not detected"));
+        } else {
+            stats.breaks += 1;
+        }
+    }
+    if options.break_neighbor && stage == ChunkStatus::StructureStarts && mode == "same" {
+        let broken = resume_chunk(
+            &config,
+            &ResumeCase {
+                pos,
+                chunk_nbt: nbt,
+                stage,
+            },
+            &neighbor_tags,
+            Some(ResumeBreak::DropNeighborWrites),
+        )
+        .map_err(|error| format!("{label}: break-neighbor failed: {error}"))?;
+        if broken.blocks == clean.blocks {
+            stats
+                .mismatches
+                .push(format!("{label}: break-neighbor was not detected"));
+        } else {
+            stats.breaks += 1;
+        }
+    }
+    Ok(())
+}
+
+fn compare_blocks(
+    stats: &mut Stats,
+    label: &str,
+    states: &[u32],
+    names: &[String],
+    indices: &[u32],
+    clean: &mc_bamboo_game::resume_replay::ResumedChunk,
+) {
+    if indices.len() != clean.blocks.len() * 256 {
+        stats.mismatches.push(format!(
+            "{label}: official {} blocks vs game {}",
+            indices.len(),
+            clean.blocks.len() * 256
+        ));
+        return;
+    }
+    for (index, &id) in indices.iter().enumerate() {
+        let Some(&official) = states.get(id as usize) else {
+            stats
+                .mismatches
+                .push(format!("{label}: palette index {id} out of range"));
+            continue;
+        };
+        let game = clean.blocks[index / 256][index % 256];
+        stats.blocks += 1;
+        if official != game {
+            stats.mismatches.push(format!(
+                "{label}: block {index}: official {official} ({}), game {game} ({})",
+                names.get(id as usize).map(String::as_str).unwrap_or("?"),
+                mc_bamboo_worldgen::feature::state::official_name(game)
+            ));
+        }
+    }
+}
+
+fn compare_biomes(
+    stats: &mut Stats,
+    label: &str,
+    expected: &[Vec<String>],
+    clean: &mc_bamboo_game::resume_replay::ResumedChunk,
+) {
+    if expected.len() != clean.biomes.len() {
+        stats.mismatches.push(format!(
+            "{label}: official {} biome sections vs game {}",
+            expected.len(),
+            clean.biomes.len()
+        ));
+        return;
+    }
+    for (section, (names, cells)) in expected.iter().zip(&clean.biomes).enumerate() {
+        for (cell, (&id, name)) in cells.iter().zip(names).enumerate() {
+            let game = registries::biome::NAMES
+                .get(id as usize)
+                .copied()
+                .unwrap_or("<unknown>");
+            stats.biomes += 1;
+            if game != name {
+                stats.mismatches.push(format!(
+                    "{label}: biome section {section} cell {cell}: official {name}, game {game}"
+                ));
+            }
+        }
+    }
+}
+
+fn compare_heightmaps(
+    stats: &mut Stats,
+    label: &str,
+    expected: &BTreeMap<String, Vec<i64>>,
+    clean: &mc_bamboo_game::resume_replay::ResumedChunk,
+) {
+    for (name, columns) in expected {
+        let key = name.as_str();
+        let Some(game) = clean.heightmaps.get(key) else {
+            stats
+                .mismatches
+                .push(format!("{label}: game has no {name} heightmap"));
+            continue;
+        };
+        for (column, (&official, &ours)) in columns.iter().zip(game).enumerate() {
+            stats.heightmaps += 1;
+            if official != i64::from(ours) {
+                stats.mismatches.push(format!(
+                    "{label}: {name} column {column}: official {official}, game {ours}"
+                ));
+            }
+        }
+    }
+}
+
+fn compare_block_entities(
+    stats: &mut Stats,
+    label: &str,
+    expected: &[(i32, i32, i32, String)],
+    clean: &mc_bamboo_game::resume_replay::ResumedChunk,
+) {
+    let mut official: Vec<String> = expected
+        .iter()
+        .map(|(x, y, z, snbt)| format!("{x},{y},{z},{snbt}"))
+        .collect();
+    official.sort();
+    let mut game: Vec<String> = clean
+        .block_entities
+        .iter()
+        .map(|(label, snbt)| format!("{label},{snbt}"))
+        .collect();
+    game.sort();
+    stats.block_entities += official.len() as u64;
+    if official != game {
+        stats.mismatches.push(format!(
+            "{label}: block entities official {:?}, game {:?}",
+            official, game
+        ));
+    }
+}
+
+fn compare_structures(
+    stats: &mut Stats,
+    label: &str,
+    full_nbt: &[u8],
+    clean: &mc_bamboo_game::resume_replay::ResumedChunk,
+) {
+    let Ok(decoded) = mc_bamboo_storage::chunk_nbt::decode_bytes(full_nbt) else {
+        stats
+            .mismatches
+            .push(format!("{label}: official full NBT cannot be decoded"));
+        return;
+    };
+    let official = decoded.structures.to_snbt();
+    if official != clean.structures {
+        stats.mismatches.push(format!(
+            "{label}: structures official {official}, game {}",
+            clean.structures
+        ));
+    }
+}
+
+fn compare_light(
+    stats: &mut Stats,
+    label: &str,
+    stage: ChunkStatus,
+    expected: &mc_bamboo_world::column::ChunkColumn,
+    clean: &mc_bamboo_game::resume_replay::ResumedChunk,
+) {
+    use mc_bamboo_world::light::{LIGHT_SECTION_COUNT, MIN_LIGHT_SECTION, SectionPos};
+    let mut differences = Vec::new();
+    for slot in 0..LIGHT_SECTION_COUNT {
+        let y = MIN_LIGHT_SECTION + slot as i32;
+        for (layer, game_layers) in [
+            (mc_bamboo_core::LightLayer::Sky, &clean.sky),
+            (mc_bamboo_core::LightLayer::Block, &clean.block_light),
+        ] {
+            let official = expected
+                .section(layer, SectionPos::new(0, y, 0))
+                .map(|data| data.bytes().to_vec());
+            let game = game_layers.get(slot).cloned().unwrap_or_default();
+            match (official, game) {
+                (None, None) => {}
+                (Some(official), Some(game)) => {
+                    for (index, (&a, &b)) in official.iter().zip(&game).enumerate() {
+                        stats.light_cells += 1;
+                        if a != b {
+                            differences.push(format!(
+                                "{label}: {layer:?} y {y} byte {index}: official {a}, game {b}"
+                            ));
+                        }
+                    }
+                }
+                (official, game) => differences.push(format!(
+                    "{label}: {layer:?} y {y}: official present {}, game present {}",
+                    official.is_some(),
+                    game.is_some()
+                )),
+            }
+        }
+    }
+    if expected.light_on() != clean.light_on {
+        stats.mismatches.push(format!(
+            "{label}: isLightOn official {}, game {}",
+            expected.light_on(),
+            clean.light_on
+        ));
+    }
+    // 只对 Status < LIGHT 的「游戏 LIGHT 输入仍是 CARVERS」这一类单独归类。
+    if (stage as usize) < (ChunkStatus::Light as usize) {
+        stats.light_input_mismatches.extend(differences);
+    } else {
+        stats.mismatches.extend(differences);
+    }
+}
+
+fn parse_neighbor_tags(case: &Value) -> Result<BTreeMap<ChunkPos, Tag>, String> {
+    let mut out = BTreeMap::new();
+    let Some(entries) = case.get("neighbor_tags").and_then(Value::as_array) else {
+        return Ok(out);
+    };
+    for entry in entries {
+        let x = entry.get("x").and_then(Value::as_i64).ok_or("neighbor x")? as i32;
+        let z = entry.get("z").and_then(Value::as_i64).ok_or("neighbor z")? as i32;
+        let structures = entry
+            .get("structures")
+            .and_then(Value::as_object)
+            .ok_or("neighbor structures")?;
+        let mut fields = Vec::new();
+        for (key, value) in structures {
+            let snbt = value.as_str().ok_or("neighbor structure SNBT")?;
+            let tag = mc_bamboo_nbt::parse_snbt(snbt).map_err(|e| e.to_string())?;
+            fields.push((key.clone(), tag));
+        }
+        out.insert(ChunkPos::new(x, z), Tag::Compound(fields));
+    }
+    Ok(out)
+}
+
+fn decode_base64(value: &Value) -> Result<Vec<u8>, String> {
+    let text = value.as_str().ok_or("base64 value must be a string")?;
+    crate::storage_oracle::decode_b64(text)
+}

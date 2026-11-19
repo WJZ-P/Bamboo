@@ -342,6 +342,13 @@ impl RegionColumn {
         }
     }
 
+    /// 更新这一柱的读盘元数据（例如生成阶段推进后的 `Status`）。
+    ///
+    /// Update the column's archive metadata (e.g. the generation `Status`).
+    pub fn set_archive(&mut self, archive: mc_bamboo_world::chunk::ChunkArchiveMeta) {
+        self.column.chunk_mut().set_archive(archive);
+    }
+
     /// 组装时把生成期算好的 `structures` 顶层标签装进这一柱，下一次写盘原样带回。
     ///
     /// Install the generated `structures` tag at assembly; the next save writes it
@@ -363,6 +370,12 @@ impl RegionColumn {
     #[cfg(test)]
     pub(crate) fn column(&self) -> &ChunkColumn {
         &self.column
+    }
+
+    /// 测试用：改盒子里的读盘元数据（例如模拟半成品区块的 `Status`）。
+    #[cfg(test)]
+    pub(crate) fn column_mut(&mut self) -> &mut ChunkColumn {
+        &mut self.column
     }
 
     /// 有没有排着计划刻，给测试用。

@@ -22,14 +22,13 @@ use mc_bamboo_world::{
         BIOMES_PER_SECTION, BLOCKS_PER_SECTION, disk_bits, disk_data_len, packed_capacity,
         read_disk_index,
     },
+    ticket::ChunkStatus,
 };
 
 /// 主世界最低的方块段，官方 `getMinSectionY`。
 const MIN_SECTION: i32 = MIN_Y / 16;
 /// 最高（含）的方块段，官方 `getMaxSectionY`。
 const MAX_SECTION: i32 = MIN_SECTION + SECTION_COUNT as i32 - 1;
-/// 磁盘上 `Status` 的值。
-const FULL_STATUS: &str = "minecraft:full";
 /// 官方的默认结构数据。
 const EMPTY_STRUCTURES: [(&str, Tag); 2] = [
     ("starts", Tag::Compound(Vec::new())),
@@ -56,6 +55,13 @@ pub enum ChunkNbtError {
 pub struct ChunkEncodeExtra<'a> {
     /// 这个区块的坐标，写进 `xPos` / `zPos`。
     pub chunk_pos: ChunkPos,
+    /// 盘上的 `Status`。官方 `SerializableChunkData.write` 写
+    /// `ChunkAccess.getPersistedStatus()`，完工区块才写 `minecraft:full`。
+    /// `None` 表示按完工区块处理。
+    ///
+    /// On-disk `Status`: vanilla writes `getPersistedStatus()`; `None` means
+    /// a finished (`full`) chunk.
+    pub status: Option<ChunkStatus>,
     /// `LastUpdate`。
     pub last_update: i64,
     /// `InhabitedTime`。
@@ -86,6 +92,7 @@ impl Default for ChunkEncodeExtra<'_> {
     fn default() -> Self {
         Self {
             chunk_pos: ChunkPos::new(0, 0),
+            status: None,
             last_update: 0,
             inhabited_time: 0,
             block_entity_extra: Vec::new(),
@@ -108,7 +115,10 @@ pub struct DecodedChunk {
     pub column: Box<ChunkColumn>,
     pub chunk_pos: ChunkPos,
     pub data_version: i32,
+    /// 盘上 `Status` 的原始字符串。
     pub status: String,
+    /// `ChunkStatus.CODEC` 解析出来的阶段，不认识的名字按官方回落 `EMPTY`。
+    pub persisted_status: ChunkStatus,
     pub last_update: i64,
     pub inhabited_time: i64,
     pub light_on: bool,
@@ -132,6 +142,7 @@ impl DecodedChunk {
     pub fn extra(&self) -> ChunkEncodeExtra<'_> {
         ChunkEncodeExtra {
             chunk_pos: self.chunk_pos,
+            status: Some(self.persisted_status),
             last_update: self.last_update,
             inhabited_time: self.inhabited_time,
             block_entity_extra: self
@@ -683,7 +694,12 @@ pub fn encode(column: &ChunkColumn, extra: &ChunkEncodeExtra<'_>) -> Result<Tag,
     put(&mut root, "zPos", Tag::Int(extra.chunk_pos.z));
     put(&mut root, "LastUpdate", Tag::Long(extra.last_update));
     put(&mut root, "InhabitedTime", Tag::Long(extra.inhabited_time));
-    put(&mut root, "Status", Tag::String(FULL_STATUS.to_owned()));
+    // 官方 `copyOf` 用 `getPersistedStatus()`：还没生成完的 ProtoChunk 存盘时
+    // 写自己真实的阶段，只有完工的 LevelChunk 才写 `full`。
+    // Vanilla `copyOf` uses `getPersistedStatus()`: an unfinished ProtoChunk
+    // saves its real stage; only a finished LevelChunk writes `full`.
+    let status = extra.status.unwrap_or(ChunkStatus::Full);
+    put(&mut root, "Status", Tag::String(status.disk_name()));
 
     let mut sections = Vec::with_capacity(LIGHT_SECTION_COUNT);
     for slot in 0..LIGHT_SECTION_COUNT {
@@ -889,10 +905,10 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
     let status = as_string(field(root, "Status"), "Status")?.to_owned();
     // 官方 `SerializableChunkData.parse` 读任意 `Status`（`ChunkStatus.CODEC`，
     // 读不出来当 EMPTY），`read` 造 ProtoChunk 后由生成流水线从该状态继续跑到
-    // Full。这里也接受非 full，`status` 原样交给上层决定怎么继续生成。
+    // Full。这里也接受非 full，`persisted_status` 交给上层决定从哪一步续跑。
     // Vanilla parses any status into a ProtoChunk and resumes generation from
-    // it; keep the raw status for the caller instead of rejecting the chunk.
-    let full = status == FULL_STATUS;
+    // it; the parsed status tells the caller where to resume.
+    let persisted_status = ChunkStatus::from_disk_name(&status);
     let chunk_pos = ChunkPos::new(
         as_int(field(root, "xPos"), "xPos")?,
         as_int(field(root, "zPos"), "zPos")?,
@@ -1061,65 +1077,39 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
         .collect();
 
     unknown.extend(preserved.iter().cloned());
-    parts.archive.preserved = unknown.clone();
-    parts.archive.structures = Some(structures.clone());
-    parts.archive.post_processing = Some(post_processing.clone());
-    // 非 full 的 ProtoChunk：官方把已写出的阶段内容装进 ProtoChunk，从该状态
-    // 继续跑生成流水线。Bamboo 只有一步超平坦生成，所以用模板补齐方块层和
-    // 光照（这些阶段在盘上可能还没写出），但保留盘上带来的顶层附加信息，
-    // 让上层能把它当成「已经生成完的 ProtoChunk」继续交付；上层还会保留
-    // 上层内容（方块实体、计划刻、实体），不再整块换成模板。
-    // A non-full ProtoChunk keeps its written upper-layer data and has its
-    // missing block/light stages filled from the flat template.
-    if !full {
-        // 高度图按补齐后的方块重算写四张，不把半成品的原始高度图带回去；
-        // 其它顶层附加信息（LastUpdate / InhabitedTime / 不认识的键）保留。
-        // Recompute the heightmaps from the filled blocks; keep the other
-        // top-level metadata that came from disk.
-        parts = ChunkColumnParts::read_from(&ChunkColumn::from_template());
-        parts.archive = parts_archive_meta(
-            last_update,
-            inhabited_time,
-            &unknown,
-            &structures,
-            &post_processing,
-            &[],
-        );
-        parts.archive.raw_heightmaps = None;
-    } else {
-        parts.archive.raw_heightmaps = Some(heightmaps_raw.clone());
-    }
-    // `from_parts` 把 parts.archive 装进 Chunk；非 full 时高度图按补齐后的
-    // 方块重算，存档元数据里不带原始 Heightmaps。
-    // from_parts installs parts.archive; for a non-full chunk there are no raw
-    // heightmaps, so the next save writes the four recomputed ones.
+    // 非 full 的 ProtoChunk：官方 `SerializableChunkData.read` 把盘上写出的
+    // 方块、群系、高度图、光照和结构原样装回 ProtoChunk，只对
+    // `persistedStatus.heightmapsAfter()` 里缺的图调 `primeHeightmaps` 重算，
+    // 再从该状态继续跑生成流水线。这里也保留盘上每一段内容；缺高度图时
+    // `ChunkColumn::from_parts` 从盘上的方块重算，等价于 primeHeightmaps。
+    // 不再用超平坦模板盖掉半成品区块。
+    // A non-full ProtoChunk keeps every section, heightmap, light layer and
+    // structure tag that was written; missing heightmaps are primed from the
+    // on-disk blocks. Never overwrite a half-generated chunk with a template.
+    parts.archive = parts_archive_meta(
+        last_update,
+        inhabited_time,
+        persisted_status,
+        &unknown,
+        &structures,
+        &post_processing,
+        &heightmaps_raw,
+    );
     let mut column =
         ChunkColumn::from_parts(parts).map_err(|error| ChunkNbtError::Column(error.to_string()))?;
     // 显式再装一次：`from_parts` 之后上层组装会替换方块层，把读盘带来的
     // LastUpdate / InhabitedTime / 原样保留键固定在这一柱上。
     // Re-install explicitly: the caller may rebuild the block layer afterwards,
     // so pin the on-disk metadata to this column now.
-    let archive = if full {
-        parts_archive_meta(
-            last_update,
-            inhabited_time,
-            &unknown,
-            &structures,
-            &post_processing,
-            &heightmaps_raw,
-        )
-    } else {
-        let mut meta = parts_archive_meta(
-            last_update,
-            inhabited_time,
-            &unknown,
-            &structures,
-            &post_processing,
-            &[],
-        );
-        meta.raw_heightmaps = None;
-        meta
-    };
+    let archive = parts_archive_meta(
+        last_update,
+        inhabited_time,
+        persisted_status,
+        &unknown,
+        &structures,
+        &post_processing,
+        &heightmaps_raw,
+    );
     column.chunk_mut().set_archive(archive);
 
     Ok(DecodedChunk {
@@ -1127,6 +1117,7 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
         chunk_pos,
         data_version: version_id,
         status,
+        persisted_status,
         last_update,
         inhabited_time,
         light_on,
@@ -1145,6 +1136,7 @@ pub fn decode(root: &Tag) -> Result<DecodedChunk, ChunkNbtError> {
 fn parts_archive_meta(
     last_update: i64,
     inhabited_time: i64,
+    status: ChunkStatus,
     preserved: &[(String, Tag)],
     structures: &Tag,
     post_processing: &Tag,
@@ -1153,6 +1145,7 @@ fn parts_archive_meta(
     mc_bamboo_world::chunk::ChunkArchiveMeta {
         last_update,
         inhabited_time,
+        status,
         preserved: preserved.to_vec(),
         structures: Some(structures.clone()),
         post_processing: Some(post_processing.clone()),
@@ -1179,6 +1172,7 @@ mod tests {
     };
     use mc_bamboo_data::{blocks, version};
     use mc_bamboo_nbt::Tag;
+    use mc_bamboo_world::ticket::ChunkStatus;
     use mc_bamboo_world::{
         MIN_Y,
         chunk::HeightmapKind,
@@ -1786,13 +1780,15 @@ mod tests {
                 *value = Tag::String("minecraft:structure_starts".to_owned());
             }
         }
-        // 非 full 的 ProtoChunk 不再被拒绝：原样返回 status，方块/光照用模板补齐。
+        // 非 full 的 ProtoChunk 不再被拒绝：原样返回 status 和盘上的方块 / 光照，
+        // 由上层按该阶段接着生成，不用超平坦模板盖掉已写出的内容。
         let proto = decode(&tag).expect("非 full 的区块也要能读回");
         assert_eq!(proto.status, "minecraft:structure_starts");
+        assert_eq!(proto.persisted_status, ChunkStatus::StructureStarts);
         assert_eq!(
             proto.column.chunk().block(3, -61, 5),
-            mc_bamboo_data::blocks::GRASS_BLOCK,
-            "没写出的方块阶段用超平坦模板补齐"
+            column.chunk().block(3, -61, 5),
+            "半成品区块的方块层按盘上的内容保留"
         );
 
         let mut newer = encode(&column, &extra(ChunkPos::new(0, 0))).expect("编码成功");

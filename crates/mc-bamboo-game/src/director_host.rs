@@ -23,7 +23,7 @@ use mc_bamboo_world::{
     },
     light::generate::GeneratedLight,
     store::ChunkRevision,
-    ticket::LevelChange,
+    ticket::{ChunkStatus, LevelChange},
 };
 
 use crate::{
@@ -2024,7 +2024,10 @@ impl DirectorHost {
             // 保证「写盘途中又被请求回来」拿到最新内容而不是从盘上读旧的。
             Task::Read { pos } => {
                 if let Some(column) = self.parking.take(pos) {
-                    TaskResult::Decoded { column }
+                    // 停放盒子的生成阶段跟着存档元数据走；没有读盘元数据时是 Full。
+                    // A parked box carries its persisted stage in archive metadata.
+                    let status = column.chunk_column().chunk().archive().status;
+                    TaskResult::Decoded { column, status }
                 } else if self.io.is_some() {
                     // 官方 `ChunkMap.scheduleChunkLoad` 没有「盘上有就异步、盘上没有就
                     // 同步生成」的快路径：所有区块都先经过异步加载流水线，变成可发的
@@ -2050,12 +2053,16 @@ impl DirectorHost {
                         return None;
                     }
                     match decode_packed(pos, &bytes) {
-                        Ok(column) => TaskResult::Decoded { column },
+                        Ok(decoded) => TaskResult::Decoded {
+                            column: decoded.column,
+                            status: decoded.persisted_status,
+                        },
                         Err(error) => TaskResult::BadChunk { error },
                     }
                 } else {
                     TaskResult::Decoded {
                         column: Box::new(RegionColumn::from_template()),
+                        status: ChunkStatus::Full,
                     }
                 }
             }
@@ -2352,7 +2359,10 @@ impl DirectorHost {
         let result = match outcome {
             // 取消之前已经开始跑的解析：结果没人要了，盘上的字节还在。
             ChunkOutcome::Decoded(_) if cancelled => TaskResult::Cancelled,
-            ChunkOutcome::Decoded(Ok(column)) => TaskResult::Decoded { column },
+            ChunkOutcome::Decoded(Ok(decoded)) => TaskResult::Decoded {
+                column: decoded.column,
+                status: decoded.persisted_status,
+            },
             ChunkOutcome::Decoded(Err(error)) => TaskResult::BadChunk { error },
             ChunkOutcome::Generated { stage, output } => {
                 // 取消时已经在跑的生成：Director 不再认它，`Forgot` 也可能已经清过
@@ -3447,9 +3457,14 @@ mod tests {
         let Event::TaskDone { result, .. } = event else {
             panic!("expected a TaskDone event");
         };
-        let TaskResult::Decoded { column } = result else {
+        let TaskResult::Decoded { column, status } = result else {
             panic!("in-flight write must return the parked box, not a disk read/template");
         };
+        assert_eq!(
+            status,
+            ChunkStatus::Full,
+            "parked boxes are finished chunks"
+        );
         assert_eq!(
             column.column().chunk().block(2, -60, 2),
             blocks::STONE,

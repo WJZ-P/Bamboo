@@ -147,6 +147,7 @@ impl Harness {
                 let value = u64::from_le_bytes(bytes.try_into().expect("8 字节"));
                 TaskResult::Decoded {
                     column: Fake(value),
+                    status: ChunkStatus::Full,
                 }
             }
             Task::Generate { stage, column, .. } => TaskResult::Generated {
@@ -665,6 +666,7 @@ fn staged_pipeline_respects_dependencies_and_write_ranges() {
                     Task::Assemble { column, .. } => TaskResult::Assembled { column },
                     Task::Decode { bytes, .. } => TaskResult::Decoded {
                         column: Fake(u64::from_le_bytes(bytes.try_into().unwrap())),
+                        status: ChunkStatus::Full,
                     },
                     Task::Save { seq, column, .. } => TaskResult::Saved { seq, column },
                 };
@@ -713,6 +715,7 @@ fn staged_pipeline_respects_dependencies_and_write_ranges() {
                 Task::Assemble { column, .. } => TaskResult::Assembled { column },
                 Task::Decode { bytes, .. } => TaskResult::Decoded {
                     column: Fake(u64::from_le_bytes(bytes.try_into().unwrap())),
+                    status: ChunkStatus::Full,
                 },
                 Task::Save { seq, column, .. } => TaskResult::Saved { seq, column },
             };
@@ -936,7 +939,10 @@ fn a_read_result_whose_ticket_was_removed_returns_to_the_parking_table() {
         id,
         pos,
         generation,
-        result: TaskResult::Decoded { column },
+        result: TaskResult::Decoded {
+            column,
+            status: ChunkStatus::Full,
+        },
     });
     assert!(
         effects.iter().any(|effect| matches!(
@@ -986,7 +992,10 @@ fn a_save_result_whose_ticket_returned_is_not_dropped() {
         id,
         pos,
         generation,
-        result: TaskResult::Decoded { column: box_ },
+        result: TaskResult::Decoded {
+            column: box_,
+            status: ChunkStatus::Full,
+        },
     });
     d.handle(Event::Delivered {
         region: crate::director::HOME_REGION,
@@ -1288,6 +1297,65 @@ fn deferred_tasks_retry_after_a_quota_is_released() {
     );
 }
 
+/// 盘上 `Status` 不是 full 时，Director 只从该阶段之后接着生成。
+///
+/// A non-full disk status resumes generation from the stage after it.
+#[test]
+fn a_non_full_decoded_chunk_resumes_from_its_stage() {
+    let mut d = Deferred::new(0);
+    d.director = Director::new(config(PipelineKind::Staged, 0));
+    d.director.set_template(|| Fake(0));
+    let pos = ChunkPos::new(0, 0);
+    d.join(1, pos);
+    let (id, generation) = d.task_at(pos);
+    // 假装读到 `terrain` 阶段的半成品盒子。
+    let effects = d.handle(Event::TaskDone {
+        id,
+        pos,
+        generation,
+        result: TaskResult::Decoded {
+            column: Fake(7),
+            status: ChunkStatus::Terrain,
+        },
+    });
+    let _ = effects;
+    let record = d
+        .director
+        .debug_state()
+        .records()
+        .get(&pos)
+        .copied()
+        .expect("记录还在");
+    assert_eq!(record.stage, ChunkStatus::Terrain, "记录推进到盘上的阶段");
+    // 从 terrain 续跑只该排一个待派阶段任务（Features），不是从 Empty 重跑十步。
+    let pending = d.director.debug_state().pending();
+    assert_eq!(pending.len(), 1, "只排一个续跑任务");
+    assert_eq!(pending.values().next(), Some(&pos));
+    // full 时同一条路径直接交付，不排任何生成阶段。
+    let mut full = Deferred::new(0);
+    full.join(1, pos);
+    let (full_id, full_generation) = full.task_at(pos);
+    let full_effects = full.handle(Event::TaskDone {
+        id: full_id,
+        pos,
+        generation: full_generation,
+        result: TaskResult::Decoded {
+            column: Fake(9),
+            status: ChunkStatus::Full,
+        },
+    });
+    assert!(
+        full_effects.iter().any(|effect| matches!(
+            effect,
+            Effect::ToRegion(RegionMessage::Deliver {
+                column: Fake(9),
+                ..
+            })
+        )),
+        "full 区块应直接交付"
+    );
+}
+
 /// 把 `pos` 交付到 region（读盘结果直接是一个改过的盒子），返回交付时的代数。
 fn deliver_to_region(d: &mut Deferred, pos: ChunkPos) -> u64 {
     d.join(1, pos);
@@ -1296,7 +1364,10 @@ fn deliver_to_region(d: &mut Deferred, pos: ChunkPos) -> u64 {
         id,
         pos,
         generation,
-        result: TaskResult::Decoded { column: Fake(17) },
+        result: TaskResult::Decoded {
+            column: Fake(17),
+            status: ChunkStatus::Full,
+        },
     });
     d.handle(Event::Delivered {
         region: crate::director::HOME_REGION,
@@ -1369,7 +1440,10 @@ fn a_lost_chunk_is_read_again_while_its_ticket_stays() {
         id: read,
         pos,
         generation: newer,
-        result: TaskResult::Decoded { column: Fake(5) },
+        result: TaskResult::Decoded {
+            column: Fake(5),
+            status: ChunkStatus::Full,
+        },
     });
     assert!(effects.iter().any(|effect| matches!(
         effect,

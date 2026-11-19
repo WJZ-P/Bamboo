@@ -14,6 +14,7 @@
 
 use mc_bamboo_core::ChunkPos;
 use mc_bamboo_nbt::{Accounter, Tag, read_named, write_named};
+use mc_bamboo_world::ticket::ChunkStatus;
 use tracing::warn;
 
 use crate::region::{RegionColumn, chunk_content, chunk_content::EncodeParts};
@@ -80,12 +81,22 @@ fn take_blob(rest: &mut &[u8]) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(bytes))
 }
 
+/// 解码出来的盒子连同盘上的生成阶段。`full` 直接交付，其余阶段要续跑流水线。
+///
+/// A decoded box and its on-disk generation stage. `full` is delivered as is;
+/// earlier stages resume generation.
+#[derive(Debug)]
+pub struct DecodedColumn {
+    pub column: Box<RegionColumn>,
+    pub persisted_status: ChunkStatus,
+}
+
 /// 解析/序列化接口。以后可以换成把工作丢进计算池的实现。
 pub trait ChunkCodec: Send {
     /// 把一个已经从 region 收回的盒子编码成两份 NBT 字节。
     fn encode(&self, pos: ChunkPos, column: &RegionColumn) -> Result<PackedChunk, String>;
-    /// 把两份 NBT 字节解码成可以交付给 region 的盒子。
-    fn decode(&self, pos: ChunkPos, packed: &PackedChunk) -> Result<Box<RegionColumn>, String>;
+    /// 把两份 NBT 字节解码成盒子 + 盘上的 `Status`。
+    fn decode(&self, pos: ChunkPos, packed: &PackedChunk) -> Result<DecodedColumn, String>;
 }
 
 /// 把只读部件（`RegionColumn` 或 `BorrowedParts`）编成两份 NBT 字节。
@@ -108,14 +119,15 @@ impl ChunkCodec for InlineCodec {
         encode_parts(pos, column)
     }
 
-    fn decode(&self, pos: ChunkPos, packed: &PackedChunk) -> Result<Box<RegionColumn>, String> {
+    fn decode(&self, pos: ChunkPos, packed: &PackedChunk) -> Result<DecodedColumn, String> {
         let chunk_bytes = packed
             .chunk
             .as_deref()
             .ok_or_else(|| "missing chunk NBT".to_owned())?;
         // `chunk_content::decode` → `chunk_nbt::decode` 会检查 DataVersion；
-        // 非 full 的 ProtoChunk 也读回来（方块/光照由模板补齐，上层内容保留）。
-        // 读坏的仍走 BadChunk（warn + 模板）。
+        // 非 full 的 ProtoChunk 也按盘上的方块 / 群系 / 高度图 / 光照读回来，
+        // `persisted_status` 交给 Director 决定从哪一步续跑。
+        // Vanilla parses every non-full ProtoChunk and resumes from its status.
         let chunk_tag = parse_named(chunk_bytes)?;
         let entities_tag = match &packed.entities {
             Some(bytes) => Some(parse_named(bytes)?),
@@ -126,7 +138,10 @@ impl ChunkCodec for InlineCodec {
         for problem in &decoded.problems {
             warn!(at = %problem.at, message = %problem.message, "chunk decode problem");
         }
-        Ok(decoded.column)
+        Ok(DecodedColumn {
+            column: decoded.column,
+            persisted_status: decoded.persisted_status,
+        })
     }
 }
 
@@ -163,9 +178,10 @@ mod tests {
         let back = codec.decode(pos, &decoded).unwrap();
         // 从盘组装的盒子 `untouched` 为 false，所以比方块层内容而不是 pristine。
         // A box rebuilt from disk is not "untouched", so compare block content.
+        assert_eq!(back.persisted_status, ChunkStatus::Full);
         assert_eq!(
             column.column().chunk().block(0, -60, 0),
-            back.column().chunk().block(0, -60, 0)
+            back.column.column().chunk().block(0, -60, 0)
         );
     }
 
@@ -178,50 +194,83 @@ mod tests {
     }
 
     /// 官方 `SerializableChunkData.parse` 把非 full 的 Status 读成 ProtoChunk，
-    /// 由生成流水线接着跑到 Full。Bamboo 只有一步超平坦生成：读回后用模板补齐
-    /// 没写出的方块/光照阶段，写回盘时 Status 是 minecraft:full。
+    /// 从原阶段接着跑到 Full。读盘必须把阶段交给 Director，也不能把没写出的
+    /// 方块层换成超平坦模板；下一次写盘仍写盘上的真实阶段。
+    ///
+    /// Vanilla parses a non-full Status into a ProtoChunk and resumes from it.
+    /// Decoding must hand the stage to the Director and keep the on-disk
+    /// sections; the next save writes the real (not full) status again.
     #[test]
-    fn a_non_full_chunk_is_completed_from_the_flat_template() {
+    fn a_non_full_chunk_keeps_its_status_and_blocks() {
         let pos = ChunkPos::new(0, 0);
-        let column = RegionColumn::from_template();
+        let mut column = RegionColumn::from_template();
+        // 模拟一个还没跑 terrain 的 ProtoChunk：状态是 structure_starts。
+        // Model a ProtoChunk still before terrain: status structure_starts.
+        let mut archive = column.chunk_column().chunk().archive().clone();
+        archive.status = ChunkStatus::StructureStarts;
+        column.column_mut().chunk_mut().set_archive(archive);
         let packed = InlineCodec.encode(pos, &column).unwrap();
-        let bytes = packed.chunk.as_ref().unwrap();
-        let (_, mut entries) =
-            read_named(bytes, Accounter::uncompressed_quota()).expect("区块 NBT 能解");
-        for (key, value) in &mut entries {
-            if key == "Status" {
-                *value = Tag::String("minecraft:structure_starts".to_owned());
-            }
-        }
-        // sections 是 ProtoChunk 还没写出的阶段：删掉它，模拟半成品。
-        entries.retain(|(key, _)| key != "sections" && key != "Heightmaps");
-        let proto = PackedChunk {
-            chunk: Some(named_bytes(&Tag::Compound(entries))),
-            entities: None,
-        };
-        let decoded = InlineCodec
-            .decode(pos, &proto)
-            .expect("非 full 的 ProtoChunk 要能读回并继续生成");
+        let (_, entries) = read_named(
+            packed.chunk.as_deref().unwrap(),
+            Accounter::uncompressed_quota(),
+        )
+        .unwrap();
         assert_eq!(
-            decoded.column().chunk().block(3, -61, 5),
-            mc_bamboo_data::blocks::GRASS_BLOCK,
-            "没写出的方块阶段用超平坦模板补齐"
+            entries
+                .iter()
+                .find(|(key, _)| key == "Status")
+                .map(|(_, value)| value.clone()),
+            Some(Tag::String("minecraft:structure_starts".to_owned())),
+            "半成品区块写盘要写真实 Status"
         );
-        // 再写盘时按 Full 写出，四张高度图和 sections 都在。
-        let written = InlineCodec.encode(pos, &decoded).unwrap();
+
+        let decoded = InlineCodec
+            .decode(pos, &packed)
+            .expect("非 full 的 ProtoChunk 要能读回并继续生成");
+        assert_eq!(decoded.persisted_status, ChunkStatus::StructureStarts);
+        assert_eq!(
+            decoded.column.column().chunk().block(3, -61, 5),
+            column.column().chunk().block(3, -61, 5),
+            "读回时不能把盘上的方块换成模板"
+        );
+        // 读回后再写盘，Status 仍是原阶段；只有走完流水线才写 full。
+        let written = InlineCodec.encode(pos, &decoded.column).unwrap();
         let (_, written_entries) = read_named(
             written.chunk.as_deref().unwrap(),
             Accounter::uncompressed_quota(),
         )
         .unwrap();
-        let status = written_entries
-            .iter()
-            .find(|(key, _)| key == "Status")
-            .map(|(_, value)| value.clone());
-        assert_eq!(status, Some(Tag::String("minecraft:full".to_owned())));
+        assert_eq!(
+            written_entries
+                .iter()
+                .find(|(key, _)| key == "Status")
+                .map(|(_, value)| value.clone()),
+            Some(Tag::String("minecraft:structure_starts".to_owned()))
+        );
         assert!(
             written_entries.iter().any(|(key, _)| key == "sections"),
-            "补完的区块要写回 sections"
+            "半成品区块仍要写回 sections"
+        );
+        // Bamboo 写出 → Bamboo 读回：盘上的阶段和方块层都不丢，下一次写盘
+        // 仍写同一阶段（官方 `ChunkMap.save` 对 ProtoChunk 的行为）。
+        let again = InlineCodec.decode(pos, &written).unwrap();
+        assert_eq!(again.persisted_status, ChunkStatus::StructureStarts);
+        assert_eq!(
+            again.column.column().chunk().block(3, -61, 5),
+            column.column().chunk().block(3, -61, 5),
+        );
+        let again_written = InlineCodec.encode(pos, &again.column).unwrap();
+        let (_, again_entries) = read_named(
+            again_written.chunk.as_deref().unwrap(),
+            Accounter::uncompressed_quota(),
+        )
+        .unwrap();
+        assert_eq!(
+            again_entries
+                .iter()
+                .find(|(key, _)| key == "Status")
+                .map(|(_, value)| value.clone()),
+            Some(Tag::String("minecraft:structure_starts".to_owned()))
         );
     }
 }

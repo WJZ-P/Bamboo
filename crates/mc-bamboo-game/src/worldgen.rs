@@ -242,6 +242,15 @@ fn compute_heightmaps(blocks: &[Vec<u32>]) -> BTreeMap<&'static str, Vec<i32>> {
     HEIGHTMAP_KEYS.into_iter().zip(columns).collect()
 }
 
+/// 对拍用：从逐层方块算出六张高度图（正式路径里 `build_region_column` 用同一份）。
+///
+/// Oracle-only: compute the six heightmaps from block layers (the same function
+/// `build_region_column` uses when heightmaps are absent).
+#[cfg(feature = "oracle-samples")]
+pub fn compute_heightmaps_public(chunk: &GeneratedChunk) -> BTreeMap<&'static str, Vec<i32>> {
+    compute_heightmaps(&chunk.blocks)
+}
+
 /// 超平坦：按预设的层从 `MIN_Y` 往上填方块，整个区块一个群系。
 ///
 /// Flat: fill blocks from `MIN_Y` using the preset layers; one biome everywhere.
