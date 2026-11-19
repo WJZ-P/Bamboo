@@ -62,6 +62,10 @@ struct Report {
     mismatches: usize,
     shown: usize,
     show: usize,
+    /// 三种改坏分别被抓到的场景数。
+    break_weather: usize,
+    break_timing: usize,
+    break_initial: usize,
 }
 
 impl Report {
@@ -80,9 +84,6 @@ impl Report {
 
 pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
     let options = Options::parse(args)?;
-    if options.break_self_test {
-        return break_self_test();
-    }
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -94,7 +95,7 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         show: options.show,
         ..Report::default()
     };
-    let read = read_lines(stdout, &mut report);
+    let read = read_lines(stdout, &mut report, options.break_self_test);
     if read.is_err() {
         let _ = child.kill();
     }
@@ -105,7 +106,21 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
     if !status.success() {
         return Err(format!("ClockOracle.java failed: {status}\n{log}"));
     }
-    read?;
+    read.map_err(|error| format!("{error}\n{log}"))?;
+    if options.break_self_test {
+        println!(
+            "clock-oracle break checks: {} varying scenes caught; weather={} timing={} initial={} ({} differing items)",
+            report.scenes,
+            report.break_weather,
+            report.break_timing,
+            report.break_initial,
+            report.mismatches
+        );
+        if report.break_weather == 0 || report.break_timing == 0 || report.break_initial == 0 {
+            return Err("a break check was not caught by any scene".to_owned());
+        }
+        return Ok(());
+    }
     println!(
         "clock-oracle: {} scenes, {} checks, {} mismatches",
         report.scenes, report.checks, report.mismatches
@@ -116,7 +131,11 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn read_lines<R: Read>(reader: R, report: &mut Report) -> Result<(), String> {
+fn read_lines<R: Read>(
+    reader: R,
+    report: &mut Report,
+    break_self_test: bool,
+) -> Result<(), String> {
     let mut lines = BufReader::new(reader).lines();
     let Some(line) = lines.next() else {
         return Err("java printed nothing".to_owned());
@@ -128,10 +147,160 @@ fn read_lines<R: Read>(reader: R, report: &mut Report) -> Result<(), String> {
         .and_then(Value::as_array)
         .ok_or("java output has no scenes")?;
     for scene in scenes {
-        compare_scene(scene, report)?;
-        report.scenes += 1;
+        if break_self_test {
+            run_break_checks(scene, report)?;
+        } else {
+            compare_scene(scene, report)?;
+        }
+        report.scenes += usize::from(
+            !break_self_test
+                || scene
+                    .get("steps")
+                    .and_then(Value::as_array)
+                    .is_some_and(|steps| {
+                        steps.iter().any(|step| {
+                            step.get("sky_darken").and_then(Value::as_i64)
+                                != steps[0].get("sky_darken").and_then(Value::as_i64)
+                                || step
+                                    .get("overworld")
+                                    .and_then(|c| c.get("total_ticks"))
+                                    .and_then(Value::as_i64)
+                                    != steps[0]
+                                        .get("overworld")
+                                        .and_then(|c| c.get("total_ticks"))
+                                        .and_then(Value::as_i64)
+                        })
+                    }),
+        );
     }
     Ok(())
+}
+
+/// 官方答案不动，把 Bamboo 的三处实现分别改坏，逐刻比同一份官方输出；
+/// 每处都必须报出不一致，否则说明对拍没有覆盖到那部分逻辑。
+///
+/// Keep the official answers and mutate three parts of Bamboo's replay; each
+/// must differ from official at some tick, or the oracle is not covering it.
+fn run_break_checks(scene: &Value, report: &mut Report) -> Result<(), String> {
+    // 稳定晴天 / 冻结时钟这类场景本来就没有会变的值，改坏也不会产生不一致；
+    // 只要求三种改坏在「有变化」的场景里被抓到（由 `run` 汇总报告）。
+    // Scenes with constant weather and a frozen clock have nothing to change;
+    // require each mutation to be caught in at least one varying scene.
+    let varying = scene
+        .get("steps")
+        .and_then(Value::as_array)
+        .is_some_and(|steps| {
+            steps.iter().any(|step| {
+                step.get("sky_darken").and_then(Value::as_i64)
+                    != steps[0].get("sky_darken").and_then(Value::as_i64)
+                    || step
+                        .get("overworld")
+                        .and_then(|c| c.get("total_ticks"))
+                        .and_then(Value::as_i64)
+                        != steps[0]
+                            .get("overworld")
+                            .and_then(|c| c.get("total_ticks"))
+                            .and_then(Value::as_i64)
+            })
+        });
+    if !varying {
+        return Ok(());
+    }
+    let name = scene
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or("scene without a name")?;
+
+    // 1) 天气贡献：清掉天气层，并把天色写死成 0（旧实现的常量）。
+    let mut input = scene_input(scene)?;
+    input.o_rain = 0.0;
+    input.rain = 0.0;
+    input.o_thunder = 0.0;
+    input.thunder = 0.0;
+    input.rising_rain = false;
+    let mut broken = replay_clock_scene(&input);
+    for step in &mut broken {
+        step.sky_darken = 0;
+    }
+    let mismatches = count_mismatches(scene, &broken);
+    println!("break weather {name}: {mismatches} differing items");
+    if mismatches > 0 {
+        report.break_weather += 1;
+    }
+    report.checks += mismatches;
+    report.mismatches += mismatches;
+
+    // 2) 更新时机：整份逐刻状态晚一刻发布，模拟在错误阶段算
+    // `updateSkyBrightness` / 推进时钟。天气稳定的场景里天色不变，只有时钟刻数能
+    // 暴露这个错误，所以时钟状态和天色一起错位。
+    let mut input = scene_input(scene)?;
+    input.jumps.clear();
+    let good = replay_clock_scene(&input);
+    let mut broken = good.clone();
+    for index in (1..broken.len()).rev() {
+        broken[index] = good[index - 1].clone();
+        broken[index].tick = good[index].tick;
+    }
+    let mismatches = count_mismatches(scene, &broken);
+    println!("break timing {name}: {mismatches} differing items");
+    if mismatches > 0 {
+        report.break_timing += 1;
+    }
+    report.checks += mismatches;
+    report.mismatches += mismatches;
+
+    // 3) 时钟初值：回到旧的「停在正午且暂停」特例。
+    let mut input = scene_input(scene)?;
+    input.start_ticks = 6_000;
+    input.paused = true;
+    input.jumps.clear();
+    let broken = replay_clock_scene(&input);
+    let mismatches = count_mismatches(scene, &broken);
+    println!("break initial {name}: {mismatches} differing items");
+    if mismatches > 0 {
+        report.break_initial += 1;
+    }
+    report.checks += mismatches;
+    report.mismatches += mismatches;
+    Ok(())
+}
+
+/// 官方逐刻答案与一份（可能被改坏的）重放结果之间有多少项不同。
+fn count_mismatches(scene: &Value, actual: &[ClockReplayStep]) -> usize {
+    let Some(steps) = scene.get("steps").and_then(Value::as_array) else {
+        return 1;
+    };
+    let mut mismatches = 0;
+    for (official, bamboo) in steps.iter().zip(actual) {
+        let state = official.get("overworld").unwrap_or(&Value::Null);
+        mismatches += usize::from(clock_differs(
+            state,
+            bamboo.overworld_ticks,
+            bamboo.overworld_partial,
+            bamboo.overworld_rate,
+            bamboo.overworld_paused,
+        ));
+        let state = official.get("the_end").unwrap_or(&Value::Null);
+        mismatches += usize::from(clock_differs(
+            state,
+            bamboo.end_ticks,
+            bamboo.end_partial,
+            bamboo.end_rate,
+            bamboo.end_paused,
+        ));
+        mismatches += usize::from(
+            official.get("sky_darken").and_then(Value::as_i64)
+                != Some(i64::from(bamboo.sky_darken)),
+        );
+    }
+    mismatches.saturating_add(steps.len().saturating_sub(actual.len()))
+}
+
+fn clock_differs(state: &Value, ticks: i64, partial: f32, rate: f32, paused: bool) -> bool {
+    state.get("total_ticks").and_then(Value::as_i64) != Some(ticks)
+        || state.get("partial_tick").and_then(Value::as_f64) != Some(f64::from(partial))
+        || state.get("rate").and_then(Value::as_f64) != Some(f64::from(rate))
+        || state.get("paused").and_then(Value::as_bool) != Some(paused)
 }
 
 fn compare_scene(scene: &Value, report: &mut Report) -> Result<(), String> {
@@ -143,39 +312,7 @@ fn compare_scene(scene: &Value, report: &mut Report) -> Result<(), String> {
         .get("steps")
         .and_then(Value::as_array)
         .ok_or("scene without steps")?;
-    let input = ClockReplayScene {
-        name: name.to_owned(),
-        ticks: steps.len() as i64 - 1,
-        start_ticks: scene
-            .get("start_ticks")
-            .and_then(Value::as_i64)
-            .unwrap_or(0),
-        rate: number(scene, "rate")?,
-        paused: scene
-            .get("paused")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        advance_time: scene
-            .get("advance_time")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        o_rain: number(scene, "o_rain")?,
-        rain: number(scene, "rain")?,
-        o_thunder: number(scene, "o_thunder")?,
-        thunder: number(scene, "thunder")?,
-        rising_rain: name == "rising_rain",
-        // `/time set` 跳变在 Java 侧是「刻号 == 目标刻」。
-        // Java jumps are keyed by tick number and set the clock to that tick.
-        jumps: scene
-            .get("jumps")
-            .and_then(Value::as_array)
-            .ok_or("scene without jumps")?
-            .iter()
-            .filter_map(Value::as_i64)
-            .map(|value| value as i32)
-            .collect(),
-    };
-    let actual = replay_clock_scene(&input);
+    let actual = replay_clock_scene(&scene_input(scene)?);
     if actual.len() != steps.len() {
         return Err(format!(
             "{name}: official {} steps, Bamboo {}",
@@ -253,66 +390,56 @@ fn compare_clock(
     );
 }
 
+fn scene_input(scene: &Value) -> Result<ClockReplayScene, String> {
+    Ok(ClockReplayScene {
+        name: scene
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        ticks: scene
+            .get("steps")
+            .and_then(Value::as_array)
+            .map(|steps| steps.len() as i64 - 1)
+            .unwrap_or(0),
+        start_ticks: scene
+            .get("start_ticks")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        rate: number(scene, "rate")?,
+        paused: scene
+            .get("paused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        advance_time: scene
+            .get("advance_time")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        o_rain: number(scene, "o_rain")?,
+        rain: number(scene, "rain")?,
+        o_thunder: number(scene, "o_thunder")?,
+        thunder: number(scene, "thunder")?,
+        rising_rain: scene
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name == "rising_rain"),
+        // `/time set` 跳变在 Java 侧是「刻号 == 目标刻」。
+        // Java jumps are keyed by tick number and set the clock to that tick.
+        jumps: scene
+            .get("jumps")
+            .and_then(Value::as_array)
+            .ok_or("scene without jumps")?
+            .iter()
+            .filter_map(Value::as_i64)
+            .map(|value| value as i32)
+            .collect(),
+    })
+}
+
 fn number(scene: &Value, key: &str) -> Result<f32, String> {
     scene
         .get(key)
         .and_then(Value::as_f64)
         .map(|value| value as f32)
         .ok_or_else(|| format!("scene field {key} is not a number"))
-}
-
-/// 改坏确认：故意改掉天气对变暗的贡献、更新时机、时钟初值，各自必须报出不一致。
-///
-/// Break checks: deliberately break the weather contribution, the update point
-/// and the clock default; each must produce mismatches.
-fn break_self_test() -> Result<(), String> {
-    let scene = mc_bamboo_game::ClockReplayScene {
-        name: "break_check".to_owned(),
-        ticks: 24_100,
-        start_ticks: 0,
-        rate: 1.0,
-        paused: false,
-        advance_time: true,
-        o_rain: 1.0,
-        rain: 1.0,
-        o_thunder: 1.0,
-        thunder: 1.0,
-        rising_rain: false,
-        jumps: vec![],
-    };
-    let good = replay_clock_scene(&scene);
-    // 1) 天气贡献：按晴天算会把雨夜的 darken 算低。
-    let clear = replay_clock_scene(&mc_bamboo_game::ClockReplayScene {
-        o_rain: 0.0,
-        rain: 0.0,
-        o_thunder: 0.0,
-        thunder: 0.0,
-        ..scene.clone()
-    });
-    let weather_differs = good
-        .iter()
-        .zip(&clear)
-        .any(|(a, b)| a.sky_darken != b.sky_darken);
-    // 2) 更新时机：少推进一刻，时钟和 darken 在黎明附近都会错。
-    let late = replay_clock_scene(&mc_bamboo_game::ClockReplayScene {
-        ticks: 24_099,
-        ..scene.clone()
-    });
-    let timing_differs = good[24_100].overworld_ticks != late[24_099].overworld_ticks
-        || good[13_670].sky_darken != late[13_669].sky_darken;
-    // 3) 时钟初值：停在正午的旧特例与官方初值不同。
-    let noon = replay_clock_scene(&mc_bamboo_game::ClockReplayScene {
-        start_ticks: 6_000,
-        ..scene.clone()
-    });
-    let initial_differs = good[0].overworld_ticks != noon[0].overworld_ticks
-        || good[0].sky_darken != noon[0].sky_darken;
-    println!(
-        "clock-oracle break checks: weather={weather_differs} timing={timing_differs} initial={initial_differs}"
-    );
-    if weather_differs && timing_differs && initial_differs {
-        Ok(())
-    } else {
-        Err("a break check did not change the replay result".to_owned())
-    }
 }
