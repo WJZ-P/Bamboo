@@ -614,6 +614,8 @@ impl World {
                     ..Default::default()
                 });
         }
+        // 读盘恢复结构起点时要和生成器用同一个种子 / 世界类型。
+        world.master.host.set_world_gen_config(world_gen.clone());
         if staged {
             // 真生成比超平坦模板慢得多，默认就用计算池把它挪出世界线程；配置文件
             // 显式给了 `chunk_worker_threads` 就照给的值（0 = 仍然内联）。

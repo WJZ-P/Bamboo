@@ -112,6 +112,34 @@ impl ChunkStatus {
         }
     }
 
+    /// 存档 `Status` 的官方注册名（`minecraft:<name>`）。
+    ///
+    /// Official registry name of the on-disk `Status`.
+    pub fn disk_name(self) -> String {
+        format!("minecraft:{}", self.name())
+    }
+
+    /// `ChunkStatus.CODEC`（`DefaultedRegistry.byNameCodec`）读盘：不认识的
+    /// 名字回落到 `EMPTY`，绝不 panic；客户端给的任何字符串都安全。
+    ///
+    /// `ChunkStatus.CODEC` (`DefaultedRegistry.byNameCodec`) on disk: unknown
+    /// names fall back to `EMPTY`. Any string is safe, never panics.
+    pub fn from_disk_name(name: &str) -> Self {
+        let name = name.strip_prefix("minecraft:").unwrap_or(name);
+        Self::ALL
+            .into_iter()
+            .find(|status| status.name() == name)
+            .unwrap_or(Self::Empty)
+    }
+
+    /// 官方 `heightmapsAfter`：前四个阶段只有两张 WG 图，其余是四张 FINAL 图。
+    ///
+    /// Vanilla `heightmapsAfter`: two WORLDGEN maps for the first four statuses,
+    /// four FINAL maps afterwards.
+    pub const fn is_after_terrain(self) -> bool {
+        (self as usize) >= (Self::Terrain as usize)
+    }
+
     /// `ChunkLevel.byStatus(ChunkStatus)`：`FULL` 阶段累计依赖图里，该阶段需要的最大半径加 33。
     pub const fn level(self) -> i32 {
         match self {

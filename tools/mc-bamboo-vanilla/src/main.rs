@@ -190,6 +190,8 @@ mod predicate_oracle;
 #[cfg(feature = "oracle")]
 mod recipe_oracle;
 #[cfg(feature = "oracle")]
+mod resume_world;
+#[cfg(feature = "oracle")]
 mod saved_data;
 #[cfg(feature = "oracle")]
 mod seed_world;
@@ -452,6 +454,7 @@ fn run() -> Result<(), String> {
         ["gen-world", java, ref options @ ..] => gen_world_cli(java, options),
         ["long-set", java, ref options @ ..] => long_set_cli(java, options),
         ["structure-e2e", java, ref options @ ..] => structure_e2e_cli(java, options),
+        ["resume-world", java, ref options @ ..] => resume_world::run(options, java),
         ["feature-merge", java, ref options @ ..] => feature_merge_cli(java, options),
         ["structure-rings", java, ref options @ ..] => structure_rings_cli(java, options),
         ["structure-validity", java, ref options @ ..] => structure_validity_cli(java, options),

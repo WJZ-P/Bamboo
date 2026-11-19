@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, time::Instant};
 
 use mc_bamboo_core::ChunkPos;
 
-use crate::ticket::TicketTable;
+use crate::ticket::{ChunkStatus, TicketTable};
 
 use super::{
     ChunkBundle, Director, DirectorConfig, Effect, Event, PipelineKind, RegionMessage, Task,
@@ -111,13 +111,17 @@ impl Inline {
         let pos = task.pos();
         let result = match task {
             Task::Read { pos } => match self.parked.remove(&pos) {
-                Some(column) => TaskResult::Decoded { column },
+                Some(column) => TaskResult::Decoded {
+                    column,
+                    status: ChunkStatus::Full,
+                },
                 None => TaskResult::Read { bytes: None },
             },
             Task::Decode { bytes, .. } => {
                 let value = u64::from_le_bytes(bytes.try_into().expect("8 字节"));
                 TaskResult::Decoded {
                     column: Fake(value),
+                    status: ChunkStatus::Full,
                 }
             }
             Task::Generate { stage, column, .. } => TaskResult::Generated {

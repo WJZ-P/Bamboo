@@ -546,14 +546,36 @@ pub struct BlockEntity {
 
 /// 读盘时原样保留的区块顶层信息（D9）。这些不是运行时的方块状态，
 /// 但下一次写盘要按键原样带回；跟着 `Chunk` 一起在 store 和盒子之间搬。
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChunkArchiveMeta {
     pub last_update: i64,
     pub inhabited_time: i64,
+    /// 当前生成阶段。官方 `ChunkAccess.getPersistedStatus()` 跟着区块走，
+    /// `SerializableChunkData.copyOf().write()` 把它写进 `Status`。
+    /// 读盘时来自 `Status`，生成阶段推进时由宿主更新，模板默认是 `Full`。
+    ///
+    /// Current generation stage. Vanilla's `ChunkAccess.getPersistedStatus()`
+    /// travels with the chunk and `SerializableChunkData.write()` persists it.
+    /// Decoding reads it from `Status`; generation bumps it; templates are `Full`.
+    pub status: crate::ticket::ChunkStatus,
     pub preserved: Vec<(String, Tag)>,
     pub structures: Option<Tag>,
     pub post_processing: Option<Tag>,
     pub raw_heightmaps: Option<Vec<(String, Tag)>>,
+}
+
+impl Default for ChunkArchiveMeta {
+    fn default() -> Self {
+        Self {
+            last_update: 0,
+            inhabited_time: 0,
+            status: crate::ticket::ChunkStatus::Full,
+            preserved: Vec::new(),
+            structures: None,
+            post_processing: None,
+            raw_heightmaps: None,
+        }
+    }
 }
 
 impl ChunkArchiveMeta {
@@ -561,6 +583,7 @@ impl ChunkArchiveMeta {
     pub fn is_default(&self) -> bool {
         self.last_update == 0
             && self.inhabited_time == 0
+            && self.status == crate::ticket::ChunkStatus::Full
             && self.preserved.is_empty()
             && self.structures.is_none()
             && self.post_processing.is_none()

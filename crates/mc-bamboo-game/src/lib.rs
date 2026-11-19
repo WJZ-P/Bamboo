@@ -90,6 +90,9 @@ mod player_save;
 mod pos_map;
 mod profiler;
 pub mod region;
+#[cfg(feature = "oracle-samples")]
+#[doc(hidden)]
+pub mod resume_replay;
 mod save_data;
 pub mod save_session;
 mod scoreboard;

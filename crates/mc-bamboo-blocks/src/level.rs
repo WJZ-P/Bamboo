@@ -1730,7 +1730,7 @@ impl RedstoneMemory {
 }
 
 /// 一个区块的全部红石记忆，按位置排序。火把开关记录存的是相对年龄。
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ChunkRedstone {
     comparator_outputs: Vec<(BlockPos, i32)>,
     bookshelf_slots: Vec<(BlockPos, usize)>,
