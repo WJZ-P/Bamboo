@@ -487,6 +487,71 @@ fn missing_an_island_is_caught() {
     });
 }
 
+/// 审查要求的三条方块盒对抗用例：① 命令落在岛 A 已加载区域的边缘、紧贴间隔带；
+/// ② 落在间隔带里、离岛 B 的已加载区块只有 1 格；③ 红石线 / 玻璃一直铺到岛的
+/// 边缘，在另一端触发。每条都和全拼逐字节相同。
+///
+/// The three adversarial box-edge cases required at review: a command at the
+/// edge of a loaded island, one in the gap one block from another island's
+/// loaded chunk, and a long line of blocks reaching the island edge.
+#[test]
+fn block_updates_at_the_gap_match_a_full_join() {
+    with_stack(|| {
+        for seed in 51..54 {
+            let scene = Side::new(seed, true);
+            let centers = scene.scene.centers.clone();
+            let base = centers[1];
+            // 岛 1 已加载区域的边缘（视距 2，中心 ±4 区块）；间隔带在它外面。
+            // Edge of group 1's loaded footprint (view distance 2, ±4 chunks).
+            let edge = ChunkPos::new(base.x + 4, base.z);
+            let gap = ChunkPos::new(base.x + 5, base.z);
+            let beyond = ChunkPos::new(base.x + 7, base.z);
+            let edge_pos = at(edge, 0, Y + 1, 0);
+            let gap_pos = at(gap, 0, Y + 1, 0);
+            let beyond_pos = at(beyond, 0, Y + 1, 0);
+            let mut steps = vec![
+                // ① 紧贴间隔带的边缘放红石方块（会通知六邻格和比较器）。
+                Step::Player(
+                    1,
+                    format!(
+                        "setblock {} {} {} minecraft:redstone_block",
+                        edge_pos.x, edge_pos.y, edge_pos.z
+                    ),
+                ),
+                // ② 间隔带里离岛 B 已加载区块只有 1 格的位置。
+                Step::Player(
+                    1,
+                    format!(
+                        "setblock {} {} {} minecraft:stone",
+                        gap_pos.x, gap_pos.y, gap_pos.z
+                    ),
+                ),
+                // ③ 从边缘拉一条玻璃到间隔带，再在另一端触发邻居更新。
+                Step::Player(
+                    1,
+                    format!(
+                        "fill {} {} {} {} {} {} minecraft:glass",
+                        edge_pos.x, edge_pos.y, edge_pos.z, gap_pos.x, gap_pos.y, gap_pos.z
+                    ),
+                ),
+                Step::Player(
+                    1,
+                    format!(
+                        "setblock {} {} {} minecraft:glowstone",
+                        beyond_pos.x, beyond_pos.y, beyond_pos.z
+                    ),
+                ),
+            ];
+            // 相对坐标形态也走一遍同样的盒。
+            steps.push(Step::Player(
+                1,
+                "setblock ~ ~1 ~ minecraft:stone".to_owned(),
+            ));
+            compare(seed, &steps, BorrowBreak::None, true);
+        }
+    });
+}
+
 /// `tp <玩家> <坐标>` 一个岛都不拼（用户问的头号场景），但仍和全拼逐字节相同。
 #[test]
 fn teleporting_a_player_to_coordinates_joins_no_island() {
