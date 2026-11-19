@@ -63,7 +63,7 @@ pub(crate) fn set(
             //
             // Publish first. `sendSuccess` must see the `send_command_feedback` just written.
             global.publish(region);
-            crate::gamerules::on_rule_changed(region, index);
+            crate::gamerules::on_rule_changed(global, region, index);
             feedback::success(
                 region,
                 id,

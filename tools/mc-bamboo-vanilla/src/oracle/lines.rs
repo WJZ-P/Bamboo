@@ -65,6 +65,22 @@ pub struct Header {
     /// The fake level's weather. A batch without this field is clear weather.
     #[serde(default = "default_weather")]
     pub weather: String,
+    /// 主世界时钟的整数刻，决定假世界的 `getSkyDarken()`。旧题面没有这一项时是正午。
+    ///
+    /// The overworld clock's whole ticks, which determine the fake level's
+    /// `getSkyDarken()`. Older batches without this field are at noon.
+    #[serde(default = "default_clock_ticks")]
+    pub clock_ticks: i64,
+    /// 官方假世界的 `getSkyDarken()`，用来确认夜晚批真的变暗了。
+    ///
+    /// The official fake level's `getSkyDarken()`, used to assert that the
+    /// night batch really is dark.
+    #[serde(default)]
+    pub sky_darken: i32,
+}
+
+fn default_clock_ticks() -> i64 {
+    6_000
 }
 
 fn default_weather() -> String {

@@ -1345,6 +1345,27 @@ impl World {
             self.broadcast_all(&weather);
         }
         self.master.global.advance_time();
+        // 官方 `MinecraftServer.tickChildren`：在 `ServerLevel.tick` 之前，
+        // 每 20 刻发一次只带游戏时间的周期同步，包里是加一之前的游戏时间。
+        // Official `MinecraftServer.tickChildren`: before `ServerLevel.tick`,
+        // every 20 ticks broadcast a game-time-only sync carrying the game time
+        // from before this tick's increment.
+        if let Some(time) = self.master.global.time_sync_packet_time() {
+            for island in self.islands.parked_mut() {
+                island.region.broadcast_game_time(time);
+            }
+            // 不在主控手里的岛：进它的出站队列，落地时发。
+            // Islands that are away: queued, sent when they land.
+            let away = self.islands.away_ids();
+            if !away.is_empty() {
+                let frames =
+                    crate::links::encode_frames(&mc_bamboo_protocol::packet::play::SetTime {
+                        game_time: time.0,
+                        clocks: &[],
+                    });
+                self.post_fan_out(&away, vec![crate::links::FanOut::All(frames.into())]);
+            }
+        }
         // 天气和时间推进完再发布一次，这一刻的方块逻辑读它。
         // Publish again after weather and time; this tick's block logic reads it.
         self.publish_global();

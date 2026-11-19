@@ -1,6 +1,7 @@
 //! `BedBlock`、`StrawBedBlock`，官方的共同父类是 `AbstractBedBlock`。
 //!
-//! 这个世界是白天的主世界：`BedRule` 不让睡，也不会爆炸，右键床只吃掉点击。
+//! 主世界的 `BedRule.canSleep` 是 `when_dark`（官方 `Level.isDarkOutside` 读 `getSkyDarken()`），
+//! 但 Bamboo 还没有睡眠系统，右键床只返回官方方块交互的那一档结果，不进入玩家的睡觉流程。
 //! 主世界里 `destroyOnUse` 总是假，`BedBlock.destroyOnUse`、`StrawBedBlock.destroyOnUse` 走不到。
 
 use mc_bamboo_core::{BlockPos, Direction};

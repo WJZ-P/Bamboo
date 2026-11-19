@@ -1633,3 +1633,53 @@ fn feedback_hash(bytes: &[u8]) -> i32 {
     }
     hash as i32
 }
+
+/// `clock-oracle` 用：把官方逐刻给出的时钟初值和天气 / 时间推进参数在
+/// Bamboo 的同一份实现里重放，返回每个时刻的两份时钟状态和 `sky_darken`。
+/// 只在 `oracle-samples` feature 下编进库里。
+///
+/// For `clock-oracle`: replay the vanilla per-tick clock, weather and game-rule
+/// inputs through Bamboo's own implementation and return both clock states and
+/// `sky_darken` at every tick. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_clock_scene(scene: &ClockReplayScene) -> Vec<ClockReplayStep> {
+    global::replay_clock_scene(scene)
+}
+
+/// 官方 `clock-oracle` 的一道场景。
+/// One scene from the official `clock-oracle`.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ClockReplayScene {
+    pub name: String,
+    pub ticks: i64,
+    pub start_ticks: i64,
+    pub rate: f32,
+    pub paused: bool,
+    pub advance_time: bool,
+    pub o_rain: f32,
+    pub rain: f32,
+    pub o_thunder: f32,
+    pub thunder: f32,
+    pub rising_rain: bool,
+    /// 与 `tick` 对应的 `/time set` 跳变。
+    /// `/time set` jumps keyed by tick.
+    pub jumps: Vec<i32>,
+}
+
+/// `clock-oracle` 逐刻重放的一项结果。
+/// One per-tick result of the `clock-oracle` replay.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClockReplayStep {
+    pub tick: i64,
+    pub overworld_ticks: i64,
+    pub overworld_partial: f32,
+    pub overworld_rate: f32,
+    pub overworld_paused: bool,
+    pub end_ticks: i64,
+    pub end_partial: f32,
+    pub end_rate: f32,
+    pub end_paused: bool,
+    pub sky_darken: i32,
+}

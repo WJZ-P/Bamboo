@@ -1263,6 +1263,67 @@ fn first_batch_is_exactly_the_three_by_three_around_the_spawn() {
     assert_eq!(finished[0].body, [9]);
 }
 
+/// 官方周期同步：每 20 刻一个空时钟表、只带 `gameTime` 的 `set_time`，
+/// 包里的游戏时间是这一刻 `tickTime` 加一之前的值。
+#[test]
+fn periodic_time_sync_carries_the_game_time_before_this_tick() {
+    use mc_bamboo_protocol::codec::Reader;
+
+    let mut server = Harness::new(8);
+    let client = server.join_and_settle("Kitten");
+    let start = server.world.master.global.time().0;
+    client.take_frames();
+    // 跑到下一个 `tickCount % 20 == 0`。
+    let due = start.div_euclid(20) * 20 + 20;
+    while server.world.master.global.time().0 < due {
+        server.tick();
+    }
+    let frames = client.take_frames();
+    let syncs: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.id == clientbound::SET_TIME)
+        .collect();
+    assert_eq!(syncs.len(), 1, "每 20 刻一次周期同步: {frames:?}");
+    let mut reader = Reader::new(&syncs[0].body);
+    assert_eq!(reader.i64().unwrap(), due - 1, "包里的游戏时间");
+    assert_eq!(reader.varint().unwrap(), 0, "时钟表是空的");
+    assert!(reader.rest().is_empty());
+}
+
+/// 多岛时每个岛读的都是同一份全局时间和天气算出的天色。
+#[test]
+fn every_island_reads_the_same_sky_darken() {
+    use crate::island_partition::SectionPos;
+
+    let mut server = Harness::new_loaded(8);
+    let origin = SectionPos::new(64, 64);
+    server.world.islands.ensure(1, origin);
+    server
+        .world
+        .master
+        .global
+        .clock_named_mut("minecraft:overworld")
+        .unwrap()
+        .total_ticks = 18_000;
+    let weather = &mut server.world.master.global.state_mut().weather;
+    weather.o_rain_level = 1.0;
+    weather.rain_level = 1.0;
+    weather.o_thunder_level = 1.0;
+    weather.thunder_level = 1.0;
+    server.world.publish_global();
+    let expected = server.world.master.global.sky_darken();
+    assert!(expected > 0, "夜晚雷暴要变暗");
+    for island in server.world.islands.iter_mut() {
+        assert_eq!(island.region.global.sky_darken, expected);
+        let (level, _) = island.region.block_level();
+        assert_eq!(
+            mc_bamboo_blocks::Level::sky_darken(&level),
+            expected,
+            "精确模式的方块世界读同一份值"
+        );
+    }
+}
+
 #[test]
 fn no_more_chunks_without_an_acknowledgement() {
     let mut server = Harness::new(8);
@@ -1277,7 +1338,14 @@ fn no_more_chunks_without_an_acknowledgement() {
         server.tick();
     }
 
-    assert!(client.take_frames().is_empty());
+    // 官方每 20 刻发一次空的 `set_time`，这里只该有周期性时间同步。
+    // Vanilla sends an empty `set_time` every 20 ticks; only those periodic
+    // time syncs may remain.
+    let frames = client.take_frames();
+    assert!(
+        frames.iter().all(|frame| frame.id == clientbound::SET_TIME),
+        "只有周期时间包: {frames:?}"
+    );
 }
 
 #[test]
@@ -2477,11 +2545,21 @@ fn latency_reaches_the_tab_list_on_the_periodic_broadcast() {
         .unwrap();
     for _ in ticks_so_far..600 {
         server.tick();
-        assert!(client.take_frames().is_empty());
+        // 每 20 刻的官方时间同步包不算延迟广播。
+        // The official 20-tick time sync is not a latency broadcast.
+        let frames = client.take_frames();
+        assert!(
+            frames.iter().all(|frame| frame.id == clientbound::SET_TIME),
+            "只有周期时间包: {frames:?}"
+        );
     }
     server.tick();
 
-    let frames = client.take_frames();
+    let frames: Vec<_> = client
+        .take_frames()
+        .into_iter()
+        .filter(|frame| frame.id != clientbound::SET_TIME)
+        .collect();
     assert_eq!(frames.len(), 1);
     let mut expected = vec![0x10, 0x01];
     expected.extend_from_slice(client.uuid.as_bytes());
@@ -2800,10 +2878,7 @@ fn save_and_reopen_resumes_game_time_day_time_and_scheduled_ticks() {
         state
     };
     assert!(saved_time > 0, "第一局确实推进过游戏时间");
-    assert!(
-        saved_day_time > crate::global::NOON_TICKS,
-        "第一局确实推进过昼夜时间"
-    );
+    assert!(saved_day_time > 0, "第一局确实推进过昼夜时间");
 
     let mut reopened = Harness::new_loaded_with_save(2, &tmp.0);
     assert_eq!(

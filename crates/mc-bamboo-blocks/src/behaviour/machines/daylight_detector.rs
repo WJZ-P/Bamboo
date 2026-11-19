@@ -1,6 +1,7 @@
 //! `DaylightDetectorBlock`。
 //!
-//! 世界时钟停在正午，太阳在正中，官方按太阳角度打的折扣是 1，信号强度就是这一格的天空光，反转时是 15 减它。
+//! `getEffectiveSkyBrightness` 已经按官方 `Level.updateSkyBrightness` 减掉了这一刻的
+//! `getSkyDarken()`，所以信号强度随昼夜和天气变化；反转时是 15 减它。
 //! 只看天空光，火把照不亮它。官方每秒重新算一次，那是方块实体的计时，这里只在右键时算。
 
 use mc_bamboo_core::BlockPos;
@@ -64,6 +65,20 @@ mod tests {
     fn toggle(level: &mut TestLevel) -> BlockState {
         use_item(level, &actor_holding(items::AIR), top_hit(DETECTOR));
         level.get(DETECTOR)
+    }
+
+    /// 官方 `getEffectiveSkyBrightness` 要减掉 `getSkyDarken()`：夜里信号变弱。
+    #[test]
+    fn the_signal_follows_the_darkened_sky() {
+        let mut level = TestLevel::new();
+        level.set(DETECTOR, BlockState(blocks::DAYLIGHT_DETECTOR));
+        level.light = Some((15, 0));
+        level.sky_darken = 11;
+        let toggled = toggle(&mut level);
+        assert!(toggled.get(INVERTED));
+        assert_eq!(toggled.get(POWER), 11);
+        let normal = toggle(&mut level);
+        assert_eq!(normal.get(POWER), 4);
     }
 
     #[test]

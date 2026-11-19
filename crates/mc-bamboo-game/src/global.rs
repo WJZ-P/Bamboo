@@ -29,13 +29,6 @@ use crate::{
 /// 官方的条件是 `++counter > 600`，所以实际周期是 601 tick。
 const LATENCY_BROADCAST_THRESHOLD: u32 = 600;
 
-/// 全新世界的主世界时钟停在正午。`/time` 的 `resume` 可以让它重新走起来；
-/// 老存档由 `world_clocks.dat` 接着走。
-///
-/// A fresh world's overworld clock starts paused at noon. `/time resume` can
-/// start it again; a saved world continues from `world_clocks.dat`.
-pub(crate) const NOON_TICKS: i64 = 6000;
-
 /// 世界时间。写进 `level.dat` 的 `Time`，开服从那里恢复（官方
 /// `PrimaryLevelData.parse` 的 `gameTime`）。和
 /// [`RegionTick`](crate::region::RegionTick) 同步增长，但不是一回事，不能互相比较。
@@ -45,12 +38,12 @@ pub(crate) struct GameTime(pub(crate) i64);
 /// 一个世界时钟的状态，官方 `ServerClockInstance`；字段和
 /// `ClockState.CODEC`（`world_clocks.dat`）一一对应。
 ///
-/// 26.x 起主世界和末地各有一个。主世界新开服时停在正午，末地用 [`Clock::official`]；
-/// 老存档由 `world_clocks.dat` 覆盖这两个初值。
+/// 26.x 起主世界和末地各有一个。两者都用 [`Clock::default`] 的官方初值
+/// （0 刻、流速 1、不暂停）；老存档由 `world_clocks.dat` 覆盖。
 ///
-/// Since 26.x the overworld and the End each have one. A fresh overworld starts
-/// paused at noon; the End uses [`Clock::official`]. Both are overwritten by a
-/// saved `world_clocks.dat` at startup.
+/// Since 26.x the overworld and the End each have one. Both use the official
+/// [`Clock::default`] (tick 0, rate 1, running); a saved `world_clocks.dat`
+/// overwrites them at startup.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Clock {
     pub(crate) total_ticks: i64,
@@ -62,22 +55,11 @@ pub(crate) struct Clock {
     pub(crate) paused: bool,
 }
 
+/// 官方 `ServerClockInstance` 的构造器：四个字段都是 Java 的缺省值。
+///
+/// The official `ServerClockInstance` constructor: all four fields are Java's defaults.
 impl Default for Clock {
     fn default() -> Self {
-        Self {
-            total_ticks: NOON_TICKS,
-            partial_tick: 0.0,
-            rate: 1.0,
-            paused: true,
-        }
-    }
-}
-
-impl Clock {
-    /// 官方新时钟的初值，不是 Bamboo 主世界那个停在正午的特例。
-    ///
-    /// The official initial clock, rather than Bamboo's overworld clock paused at noon.
-    pub(crate) fn official() -> Self {
         Self {
             total_ticks: 0,
             partial_tick: 0.0,
@@ -85,7 +67,9 @@ impl Clock {
             paused: false,
         }
     }
+}
 
+impl Clock {
     /// 官方 `ServerClockInstance.tick`。暂停时什么都不做。
     ///
     /// Official `ServerClockInstance.tick`. A paused clock does nothing.
@@ -114,11 +98,18 @@ impl Clock {
         self.total_ticks = (self.total_ticks + ticks).max(0);
     }
 
-    /// 发给客户端的流速。暂停时是 0，官方的 `packNetworkState` 也是这样。
+    /// 发给客户端的流速。官方 `packNetworkState` 在时钟暂停或
+    /// `advance_time` 规则为假时发 0，客户端才不会自己把时间往前推。
     ///
-    /// The rate sent to the client. A paused clock sends 0, matching official `packNetworkState`.
-    pub(crate) fn network_rate(&self) -> f32 {
-        if self.paused { 0.0 } else { self.rate }
+    /// The rate sent to the client. Official `packNetworkState` sends 0 while
+    /// the clock is paused or `advance_time` is false, so the client does not
+    /// advance time on its own.
+    pub(crate) fn network_rate(&self, advance_time: bool) -> f32 {
+        if self.paused || !advance_time {
+            0.0
+        } else {
+            self.rate
+        }
     }
 
     /// 官方 `setPaused`。
@@ -181,17 +172,14 @@ impl RosterEntry {
 /// 不属于任何区块的状态。`WorldState` 里的随机序列没有 `Debug`。
 pub(crate) struct Global {
     time: GameTime,
-    /// 主世界时钟。全新世界停在正午，和现有的 `set_time` 包一致；老存档从
-    /// `world_clocks.dat` 恢复。
+    /// 主世界时钟。官方初值；老存档从 `world_clocks.dat` 恢复。
     ///
-    /// The overworld clock. A fresh world starts paused at noon, matching the
-    /// existing `set_time` packet; a saved world restores `world_clocks.dat`.
+    /// The overworld clock, with official defaults; a saved world restores
+    /// `world_clocks.dat`.
     clock: Clock,
-    /// 末地时钟。官方 `ServerClockInstance` 的初值：0 刻、流速 1、没有暂停；
-    /// 老存档从 `world_clocks.dat` 恢复。
+    /// 末地时钟，和主世界用同一个官方初值。
     ///
-    /// The End clock. Official `ServerClockInstance` defaults: tick 0, rate 1,
-    /// not paused; a saved world restores `world_clocks.dat`.
+    /// The End clock, with the same official defaults.
     end_clock: Clock,
     roster: BTreeMap<PlayerId, RosterEntry>,
     ticks_since_latency_broadcast: u32,
@@ -273,7 +261,7 @@ impl Default for Global {
         Self {
             time: GameTime::default(),
             clock: Clock::default(),
-            end_clock: Clock::official(),
+            end_clock: Clock::default(),
             roster: BTreeMap::new(),
             ticks_since_latency_broadcast: 0,
             rules: Arc::new(GameRuleSet::vanilla()),
@@ -403,6 +391,7 @@ impl Global {
         GlobalView {
             time: self.time,
             clock: self.clock,
+            end_clock: self.end_clock,
             block_rules: self.rules.block_snapshot(),
             send_command_feedback: self
                 .rules
@@ -416,6 +405,7 @@ impl Global {
             rules: Arc::clone(&self.rules),
             weather: self.state.weather,
             block_weather: self.state.weather.snapshot(),
+            sky_darken: self.sky_darken(),
             world_border: self.world_border.clone(),
             difficulty: self.state.difficulty,
             difficulty_locked: self.state.difficulty_locked,
@@ -427,6 +417,26 @@ impl Global {
             idle_timeout_minutes: self.admin.idle_timeout_minutes,
             scoreboard: Arc::clone(&self.scoreboard),
         }
+    }
+
+    /// 官方 `Level.updateSkyBrightness()`：按当前主世界时钟和天气渐变强度算天色。
+    ///
+    /// `ServerLevel.tick` 在天气推进之后、`tickTime` 和方块刻之前调一次；这里
+    /// 每次发快照时重算，等价于在那一刻用最新状态调用它。
+    ///
+    /// Official `Level.updateSkyBrightness()`: derive the sky darkening from the
+    /// current overworld clock and smoothed weather levels. Vanilla calls it
+    /// once per `ServerLevel.tick`, after the weather step and before `tickTime`
+    /// and block ticks; recomputing at every publish is equivalent.
+    pub(crate) fn sky_darken(&self) -> i32 {
+        let weather = &self.state.weather;
+        let (rain, thunder) = mc_bamboo_blocks::sky::weather_levels(
+            weather.o_rain_level,
+            weather.rain_level,
+            weather.o_thunder_level,
+            weather.thunder_level,
+        );
+        mc_bamboo_blocks::sky::sky_darken(self.clock.total_ticks, rain, thunder)
     }
 
     /// 把快照发布给岛。主控每刻在固定的几处发布（开头、边界推进后、天气和时间推进后）；
@@ -514,14 +524,31 @@ impl Global {
         }
     }
 
+    /// 官方 `MinecraftServer.tickChildren` 的 "clocks" 阶段和
+    /// `ServerLevel.tickTime`：游戏时间总在加，世界时钟只在 `advance_time` 为真时走。
+    ///
+    /// Official `MinecraftServer.tickChildren`'s "clocks" phase and
+    /// `ServerLevel.tickTime`: the game time always advances; the world clocks
+    /// tick only while `advance_time` is true.
     pub(crate) fn advance_time(&mut self) {
         self.time.0 += 1;
+        if !self.rules.bool(mc_bamboo_data::gamerules::ADVANCE_TIME) {
+            return;
+        }
         self.clock.tick();
-        // 末地时钟和主世界一起走。登录时的 `set_time` 仍然只带主世界。
-        //
-        // The End clock advances with the overworld. The login `set_time` packet still carries
-        // only the overworld.
         self.end_clock.tick();
+    }
+
+    /// 官方 `MinecraftServer.tickChildren`：`tickCount % 20 == 0` 时给所有人发一次
+    /// 只带 `gameTime`、时钟列表为空的 `set_time`。发包在 `ServerLevel.tick` 之前，
+    /// 所以包里的游戏时间比这一刻 `tickTime` 加一之后的值少一。
+    ///
+    /// Official `MinecraftServer.tickChildren`: when `tickCount % 20 == 0`,
+    /// broadcast a `set_time` carrying only `gameTime` with an empty clock map.
+    /// The packet goes out before `ServerLevel.tick`, so its game time is one
+    /// less than the value `tickTime` will set at the end of this tick.
+    pub(crate) fn time_sync_packet_time(&self) -> Option<GameTime> {
+        (self.time.0 % 20 == 0).then_some(GameTime(self.time.0 - 1))
     }
 
     /// 名单上的所有人，发给刚进入的玩家。名单是空的时候返回 `None`。
@@ -653,6 +680,8 @@ pub(crate) struct GlobalView {
     pub(crate) time: GameTime,
     /// 主世界时钟。
     pub(crate) clock: Clock,
+    /// 末地时钟，整表同步时和主世界一起发。
+    pub(crate) end_clock: Clock,
     pub(crate) rules: Arc<GameRuleSet>,
     /// 方块逻辑读的那几条规则。
     pub(crate) block_rules: BlockGameRules,
@@ -665,6 +694,14 @@ pub(crate) struct GlobalView {
     pub(crate) weather: Weather,
     /// 方块逻辑读的天气。
     pub(crate) block_weather: BlockWeather,
+    /// `Level.getSkyDarken()`：按官方 `updateSkyBrightness` 从主世界时钟和天气算出，
+    /// 每刻随全局快照一起发布。精确模式的 `World`、并行的实体视图和两种驱动读同一份。
+    ///
+    /// `Level.getSkyDarken()`: computed from the overworld clock and weather as
+    /// vanilla's `updateSkyBrightness` does, published with the global snapshot
+    /// every tick. The exact-mode `World`, the parallel entity view and both
+    /// drives read this one value.
+    pub(crate) sky_darken: i32,
     /// 这一维度的世界边界。方块逻辑、移动校验和实体碰撞都读这一份。
     pub(crate) world_border: WorldBorder,
     pub(crate) difficulty: Difficulty,
@@ -700,6 +737,24 @@ impl GlobalView {
         difficulty_frames(self.difficulty, self.difficulty_locked)
     }
 
+    /// `GameRules.ADVANCE_TIME`，发给客户端的时钟流速要跟着它归零。
+    ///
+    /// `GameRules.ADVANCE_TIME`: the network clock rate becomes zero when it is off.
+    pub(crate) fn time_advances(&self) -> bool {
+        self.rules.bool(mc_bamboo_data::gamerules::ADVANCE_TIME)
+    }
+
+    /// 快照里的两份世界时钟，按注册名。进服和规则变化时的整表同步从这里读。
+    ///
+    /// Both world clocks in this snapshot, keyed by registry name. Full syncs
+    /// on join and game-rule changes read from here.
+    pub(crate) fn clocks(&self) -> [(&'static str, Clock); 2] {
+        [
+            ("minecraft:overworld", self.clock),
+            ("minecraft:the_end", self.end_clock),
+        ]
+    }
+
     /// 写进 `login` 包的种子哈希（官方 `BiomeManager.obfuscateSeed`）。
     pub(crate) fn hashed_seed(&self) -> i64 {
         crate::world_state::hashed_seed(self.seed)
@@ -715,6 +770,64 @@ fn difficulty_frames(difficulty: Difficulty, locked: bool) -> Vec<u8> {
 
 fn update_frames(actions: u8, entries: &[PlayerInfoEntry<'_>]) -> Option<Vec<u8>> {
     (!entries.is_empty()).then(|| encode_frames(&PlayerInfoUpdate { actions, entries }))
+}
+
+/// `clock-oracle` 的逐刻重放：用与 `Global::advance_time` / `Clock::tick` /
+/// `Global::sky_darken` 完全相同的产品实现，把官方场景里的输入重放一遍。
+/// 只在 `oracle-samples` feature 下编进库里。
+///
+/// The `clock-oracle` replay: run the official scene's inputs through the very
+/// same production `Global::advance_time` / `Clock::tick` / `Global::sky_darken`
+/// implementation. Gated behind the `oracle-samples` feature.
+#[cfg(feature = "oracle-samples")]
+pub(crate) fn replay_clock_scene(scene: &crate::ClockReplayScene) -> Vec<crate::ClockReplayStep> {
+    let mut global = Global::default();
+    global.rules_mut().assign(
+        mc_bamboo_data::gamerules::ADVANCE_TIME,
+        if scene.advance_time { "true" } else { "false" },
+    );
+    for clock in [&mut global.clock, &mut global.end_clock] {
+        clock.total_ticks = scene.start_ticks;
+        clock.partial_tick = 0.0;
+        clock.rate = scene.rate;
+        clock.paused = scene.paused;
+    }
+    {
+        let weather = &mut global.state.weather;
+        weather.o_rain_level = scene.o_rain;
+        weather.rain_level = scene.rain;
+        weather.o_thunder_level = scene.o_thunder;
+        weather.thunder_level = scene.thunder;
+    }
+    let mut steps = Vec::with_capacity((scene.ticks + 1) as usize);
+    for tick in 0..=scene.ticks {
+        // 官方场景在某刻执行 `/time set`；和命令实现一样清掉不足一整刻的部分。
+        if scene.jumps.iter().any(|jump| i64::from(*jump) == tick) {
+            global.clock.set_total_ticks(tick);
+        }
+        if scene.rising_rain && tick > 0 {
+            let weather = &mut global.state.weather;
+            weather.o_rain_level = (scene.rain + 0.01 * (tick - 1) as f32).min(1.0);
+            weather.rain_level = (scene.rain + 0.01 * tick as f32).min(1.0);
+            weather.o_thunder_level = 0.0;
+            weather.thunder_level = 0.0;
+        }
+        steps.push(crate::ClockReplayStep {
+            tick,
+            overworld_ticks: global.clock.total_ticks,
+            overworld_partial: global.clock.partial_tick,
+            overworld_rate: global.clock.rate,
+            overworld_paused: global.clock.paused,
+            end_ticks: global.end_clock.total_ticks,
+            end_partial: global.end_clock.partial_tick,
+            end_rate: global.end_clock.rate,
+            end_paused: global.end_clock.paused,
+            sky_darken: global.sky_darken(),
+        });
+        // 官方 `MinecraftServer.tickChildren` 的时钟阶段在这一刻末尾。
+        global.advance_time();
+    }
+    steps
 }
 
 #[cfg(test)]
@@ -851,6 +964,58 @@ mod tests {
             expected.extend_from_slice(&[0x64]);
             assert_eq!(body(&frames), expected);
         }
+    }
+
+    /// 官方 `ServerClockInstance` 的初值和 `packNetworkState` 的流速。
+    #[test]
+    fn fresh_clocks_follow_vanilla_and_freeze_with_the_game_rule() {
+        let mut global = Global::default();
+        let clock = global.clock();
+        assert_eq!(clock.total_ticks, 0);
+        assert_eq!(clock.partial_tick, 0.0);
+        assert_eq!(clock.rate, 1.0);
+        assert!(!clock.paused);
+        assert_eq!(clock.network_rate(true), 1.0);
+        assert_eq!(clock.network_rate(false), 0.0);
+        assert_eq!(global.clocks()[1].1, clock, "末地时钟用同一个官方初值");
+
+        // `advance_time` 为真时两份时钟都走，为假时都不走；游戏时间总在加。
+        global.advance_time();
+        assert_eq!(global.time().0, 1);
+        assert_eq!(global.clock().total_ticks, 1);
+        assert_eq!(global.clocks()[1].1.total_ticks, 1);
+        global
+            .rules_mut()
+            .assign(mc_bamboo_data::gamerules::ADVANCE_TIME, "false");
+        global.advance_time();
+        assert_eq!(global.time().0, 2);
+        assert_eq!(global.clock().total_ticks, 1);
+        assert_eq!(global.clocks()[1].1.total_ticks, 1);
+    }
+
+    /// 天色从主世界时钟和天气算出；夜里、雨和雷暴都要变暗。
+    #[test]
+    fn sky_darken_follows_the_clock_and_weather() {
+        let mut global = Global::default();
+        assert_eq!(
+            global.sky_darken(),
+            mc_bamboo_blocks::sky::sky_darken(0, 0.0, 0.0)
+        );
+        global
+            .clock_named_mut("minecraft:overworld")
+            .unwrap()
+            .total_ticks = 18_000;
+        let night = global.sky_darken();
+        assert!(night > 0, "夜里天色要变暗");
+        let weather = &mut global.state.weather;
+        weather.o_rain_level = 1.0;
+        weather.rain_level = 1.0;
+        weather.o_thunder_level = 1.0;
+        weather.thunder_level = 1.0;
+        let storm = global.sky_darken();
+        assert!(storm > 0, "雷暴天色要变暗");
+        // 快照给精确模式 / 并行视图的是同一份权威值。
+        assert_eq!(global.view().sky_darken, storm);
     }
 
     #[test]
