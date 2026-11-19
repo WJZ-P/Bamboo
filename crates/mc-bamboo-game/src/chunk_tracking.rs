@@ -311,6 +311,18 @@ impl ChunkTracker {
         self.view.map(|view| view.center)
     }
 
+    /// 测试专用：把跟踪范围钉在给定的中心和视距（不改客户端的发包，只给不变量核对用）。
+    ///
+    /// Test only: pin the tracked range to the given centre and view distance
+    /// (no packets, for invariant checks).
+    #[cfg(test)]
+    pub(crate) fn set_view_for_test(&mut self, center: ChunkPos, view_distance: i32) {
+        self.view = Some(ChunkView {
+            center,
+            view_distance,
+        });
+    }
+
     /// 跟踪范围的中心和切比雪夫半径（`T(vd)` 每个区块离中心都不超过 vd + 1）；还没有视图时
     /// 是 `None`。
     ///

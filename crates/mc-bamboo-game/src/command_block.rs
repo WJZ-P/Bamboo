@@ -7,8 +7,6 @@
 //! Execution, chains and scheduled ticks are not implemented. The record lives only in
 //! memory and disappears on restart.
 
-use std::collections::BTreeMap;
-
 use mc_bamboo_blocks::{BlockState, World, world::UPDATE_CLIENTS};
 use mc_bamboo_core::BlockPos;
 use mc_bamboo_data::{blocks, registries::block_entity_type};
@@ -152,8 +150,7 @@ pub(crate) fn on_placed(region: &mut Region, pos: BlockPos) {
     let track_output = region.global.send_command_feedback;
     region
         .command_blocks
-        .entry(pos)
-        .or_insert_with(|| CommandBlockData {
+        .get_or_insert_with(pos, || CommandBlockData {
             track_output,
             ..CommandBlockData::fresh(state)
         });
@@ -171,8 +168,7 @@ pub(crate) fn open(region: &mut Region, id: PlayerId, pos: BlockPos) {
     }
     let bytes = region
         .command_blocks
-        .entry(pos)
-        .or_insert_with(|| CommandBlockData::fresh(state))
+        .get_or_insert_with(pos, || CommandBlockData::fresh(state))
         .network_tag();
     region.links.send(
         id,
@@ -234,8 +230,7 @@ pub(crate) fn on_set(region: &mut Region, id: PlayerId, edit: CommandBlockEdit) 
     {
         let record = region
             .command_blocks
-            .entry(pos)
-            .or_insert_with(|| CommandBlockData::fresh(current));
+            .get_or_insert_with(pos, || CommandBlockData::fresh(current));
         record.command = command.clone();
         record.track_output = track_output;
         record.automatic = automatic;
@@ -293,7 +288,7 @@ fn player_can_use(player: &crate::player::Player) -> bool {
 /// Drop the record when the block becomes something else. Switching among the three
 /// command blocks keeps it.
 pub(crate) fn forget_if_replaced(
-    command_blocks: &mut BTreeMap<BlockPos, CommandBlockData>,
+    command_blocks: &mut crate::pos_map::PosMap<CommandBlockData>,
     pos: BlockPos,
     state: BlockState,
 ) {

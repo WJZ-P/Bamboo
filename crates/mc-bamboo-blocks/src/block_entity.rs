@@ -171,6 +171,15 @@ pub struct BlockEntities {
     /// 每个区块里可能有方块实体的位置，语义是超集：删掉的格子可以不从里面去掉。
     /// 按区块取出时只走这个集合，不扫整张表。
     by_chunk: HashMap<ChunkPos, HashSet<BlockPos>>,
+    /// [`Self::take_chunk`] 搬走了内容、槽位还没回收（下一次 begin_tick 回收）的位置，按区块。
+    /// 那一区块的 `by_chunk` 已经去掉了，岛拆分靠这份找到这些槽位。是超集：槽位被同一格
+    /// 新放的实体复用以后条目留着也不要紧。
+    ///
+    /// Positions whose content [`Self::take_chunk`] moved out while their slot
+    /// waits for the next begin_tick, by chunk. That chunk's `by_chunk` entry
+    /// is gone, so an island split finds these slots here. A superset: an
+    /// entry may outlive the slot's reuse by a new entity in the same cell.
+    unloaded_slots: HashMap<ChunkPos, Vec<BlockPos>>,
     /// 一直醒着的条目，按运行顺序的序号排列。
     awake: BTreeSet<u64>,
     /// 睡着的条目按绝对 `gameTime` 分桶。`i64::MAX` 表示等外部叫醒，永不到期。
@@ -215,6 +224,7 @@ impl Default for BlockEntities {
             free: Vec::new(),
             positions: HashMap::new(),
             by_chunk: HashMap::new(),
+            unloaded_slots: HashMap::new(),
             awake: BTreeSet::new(),
             sleeping: BTreeMap::new(),
             ordinals: HashMap::new(),
@@ -476,6 +486,9 @@ impl BlockEntities {
             self.free.push(index);
         }
         self.order = order;
+        // 卸载留下的槽位刚刚都回收了。
+        // The slots unloading left behind were just recycled.
+        self.unloaded_slots.clear();
 
         let mut due: Vec<u64> = self.awake.iter().copied().collect();
         while let Some(entry) = self.sleeping.first_entry()
@@ -1050,12 +1063,21 @@ impl BlockEntities {
     /// - 新表**不占新的单元编号**，`next_ordinal` / `next_id` 照抄原表，两边接着往上数
     ///   （合并时撞号由 [`Self::absorb_island`] 重排）；
     /// - 原表里搬走的 ordinal 一并删掉；
-    /// - 关注表真的分开（[`Watchers::split_off`]）：岛之间不相邻，关注关系不会跨岛
-    ///   （调试构建断言）。
+    /// - 关注表真的分开（[`Watchers::split_off_watchers`]）：岛之间不相邻，关注关系不会跨岛
+    ///   （调试构建断言）；
+    /// - 只走按区块的位置索引 `by_chunk`（它是全部内容、槽位和关注者位置的超集），按位置
+    ///   的几张表只碰要搬的那些位置，不扫整张表。还按整张表走的只有三份下标清单
+    ///   （`order`、`pending`、`due`，一个数一项，保持原来的先后）。结果和逐项扫整张表
+    ///   时逐位相同。
     ///
     /// Island split: like [`Self::split_off`] but with no new unit number (the
     /// counters are copied), the moved ordinals removed from this table, and
-    /// the watchers really split (no watch relation crosses islands).
+    /// the watchers really split (no watch relation crosses islands). Only the
+    /// per-chunk position index `by_chunk` (a superset of every entity, slot and
+    /// watcher position) is walked, so the positional tables touch only the
+    /// positions that move; only the three index lists (`order`, `pending`,
+    /// `due`, one number per entry, order kept) are still walked whole. The
+    /// result is bit-identical to scanning every table.
     pub fn split_off_island(&mut self, chunks: &BTreeSet<ChunkPos>) -> Result<Self, Busy> {
         if !self.ready_to_move_chunks() {
             return Err(Busy);
@@ -1064,19 +1086,158 @@ impl BlockEntities {
             !self.watchers.crosses_chunks(chunks),
             "方块实体的关注关系跨了两个岛"
         );
-        let unit = self.unit;
-        // 先借 `split_off` 的按位置拆分，再把单元编号和计数改回岛的规则。`split_off`
-        // 要求编号不同，临时给原表换一个不会出现的编号。
-        self.unit = u64::MAX;
-        let mut out = self.split_off(chunks, unit)?;
-        self.unit = unit;
-        out.next_id = self.next_id;
-        out.next_ordinal = self.next_ordinal;
-        for ordinal in out.ordinals.keys() {
-            self.ordinals.remove(ordinal);
+        debug_assert!(self.index_covers_tables(), "方块实体的按区块索引漏了位置");
+        let mut out = Self {
+            unit: self.unit,
+            now: self.now,
+            cursor: self.cursor,
+            sleep_enabled: self.sleep_enabled,
+            border: self.border,
+            last_ran: self.last_ran,
+            ran: self.ran,
+            next_id: self.next_id,
+            next_ordinal: self.next_ordinal,
+            ..Self::default()
+        };
+        // 要搬的位置：按区块索引整份带走（超集，删掉的格子也一起走，和以前按区块拆
+        // 索引相同）。
+        // The positions to move: the chunk index entries move whole (a superset,
+        // removed cells included, as when the index was split by chunk).
+        let mut moved_positions: Vec<BlockPos> = Vec::new();
+        for chunk in chunks {
+            if let Some(positions) = self.by_chunk.remove(chunk) {
+                moved_positions.extend(positions.iter().copied());
+                out.by_chunk.insert(*chunk, positions);
+            }
+            if let Some(positions) = self.unloaded_slots.remove(chunk) {
+                moved_positions.extend(positions.iter().copied());
+                out.unloaded_slots.insert(*chunk, positions);
+            }
         }
-        out.watchers = self.watchers.split_off(chunks);
+        moved_positions.sort_unstable();
+        moved_positions.dedup();
+        for pos in &moved_positions {
+            if let Some(stored) = self.entities.remove(pos) {
+                out.entities.insert(*pos, stored);
+            }
+        }
+        // 槽位：每个有 ticker 的槽位在 `positions` 里恰好登记着它的位置，按原来的下标升序
+        // 搬进新表（新表压紧）。
+        // Slots: every slot with a ticker is registered under its position in
+        // `positions`; they move in ascending original index (packed in the new table).
+        let mut moved_slots: Vec<(usize, BlockPos)> = moved_positions
+            .iter()
+            .filter_map(|pos| Some((self.positions.remove(pos)?, *pos)))
+            .collect();
+        moved_slots.sort_unstable();
+        // 下标清单要按整张表走一遍，所以搬走的槽位记在一张按下标的表里（一个数一格），
+        // 每项查一次是一次数组访问。
+        // The index lists are walked whole, so the moved slots are noted in a
+        // table by slot index (one number each) and each lookup is an array access.
+        const STAYS: u32 = u32::MAX;
+        let mut slot_map: Vec<u32> = if moved_slots.is_empty() {
+            Vec::new()
+        } else {
+            vec![STAYS; self.slots.len()]
+        };
+        let mut moved_ordinals: Vec<u64> = Vec::with_capacity(moved_slots.len());
+        for &(index, pos) in &moved_slots {
+            let slot = self.slots[index];
+            let ticker = slot.expect("登记在位置表里的槽位有 ticker");
+            debug_assert_eq!(ticker.pos, pos, "位置表和槽位对不上");
+            let new_index = out.slots.len();
+            slot_map[index] = new_index as u32;
+            moved_ordinals.push(ticker.ordinal);
+            out.slots.push(slot);
+            out.positions.insert(pos, new_index);
+            out.ordinals.insert(ticker.ordinal, new_index);
+            self.ordinals.remove(&ticker.ordinal);
+            if self.awake.remove(&ticker.ordinal) {
+                out.awake.insert(ticker.ordinal);
+            }
+            if let Some(at) = ticker.wake_at {
+                // 睡着的条目只在它自己的 `wake_at` 那一桶里（`unschedule` 也按它找）。
+                // A sleeping entry lives only in its own `wake_at` bucket
+                // (`unschedule` finds it the same way).
+                if let std::collections::btree_map::Entry::Occupied(mut bucket) =
+                    self.sleeping.entry(at)
+                {
+                    bucket.get_mut().remove(&ticker.ordinal);
+                    if bucket.get().is_empty() {
+                        bucket.remove();
+                    }
+                }
+                out.sleeping.entry(at).or_default().insert(ticker.ordinal);
+            }
+            // 原表把拆走的槽位置空，留到下一次 begin_tick 回收（和 remove 一致）。
+            self.slots[index] = None;
+            self.free.push(index);
+        }
+        debug_assert!(
+            self.sleeping
+                .values()
+                .flatten()
+                .all(|ordinal| !out.ordinals.contains_key(ordinal)),
+            "搬走的条目还留在原表的睡眠日程里"
+        );
+        if !moved_slots.is_empty() {
+            let moves = |index: &usize| slot_map.get(*index).is_some_and(|&to| to != STAYS);
+            let (out_order, order): (Vec<_>, Vec<_>) = self.order.drain(..).partition(moves);
+            self.order = order;
+            out.order = out_order
+                .into_iter()
+                .map(|index| slot_map[index] as usize)
+                .collect();
+            let (out_pending, pending): (Vec<_>, Vec<_>) = self.pending.drain(..).partition(moves);
+            self.pending = pending;
+            out.pending = out_pending
+                .into_iter()
+                .map(|index| slot_map[index] as usize)
+                .collect();
+            moved_ordinals.sort_unstable();
+            let (out_due, due): (Vec<_>, Vec<_>) = self
+                .due
+                .drain(..)
+                .partition(|ordinal| moved_ordinals.binary_search(ordinal).is_ok());
+            self.due = due;
+            out.due = out_due;
+        }
+        out.watchers = self.watchers.split_off_watchers(&moved_positions);
         Ok(out)
+    }
+
+    /// 只给改坏确认用：从按区块的位置索引里漏掉一格（拆分要被核对或断言抓到）。
+    ///
+    /// Break-it checks only: drop one cell from the per-chunk index (a split
+    /// must then be caught by the checks or the assertion).
+    #[doc(hidden)]
+    pub fn forget_chunk_index_for_test(&mut self, pos: BlockPos) {
+        if let Some(positions) = self.by_chunk.get_mut(&pos.chunk()) {
+            positions.remove(&pos);
+        }
+    }
+
+    /// 按区块的位置索引是不是盖住了全部内容、槽位和关注者的位置（调试构建的断言用）。
+    ///
+    /// Whether the per-chunk index covers every entity, slot and watcher
+    /// position (for debug assertions).
+    fn index_covers_tables(&self) -> bool {
+        let covered = |pos: &BlockPos| {
+            self.by_chunk
+                .get(&pos.chunk())
+                .is_some_and(|positions| positions.contains(pos))
+                || self
+                    .unloaded_slots
+                    .get(&pos.chunk())
+                    .is_some_and(|positions| positions.contains(pos))
+        };
+        let slots_registered = self.slots.iter().enumerate().all(|(index, slot)| {
+            slot.is_none_or(|ticker| self.positions.get(&ticker.pos) == Some(&index))
+        });
+        slots_registered
+            && self.entities.keys().all(covered)
+            && self.positions.keys().all(covered)
+            && self.watchers.watcher_positions().all(|pos| covered(&pos))
     }
 
     /// 岛合并：[`Self::split_off_island`] 的逆操作。两边拆开以后各自新登记的 ticker
@@ -1226,6 +1387,12 @@ impl BlockEntities {
         for (chunk, positions) in other.by_chunk.drain() {
             self.by_chunk.entry(chunk).or_default().extend(positions);
         }
+        for (chunk, positions) in other.unloaded_slots.drain() {
+            self.unloaded_slots
+                .entry(chunk)
+                .or_default()
+                .extend(positions);
+        }
         self.slots.append(&mut other.slots);
         // `order` / `pending` 是运行顺序，按 ordinal 升序归并，不能简单接到末尾：
         // 两个单元各自的 ordinal 号段不同，合回来后仍要等于「从没拆过」的顺序。
@@ -1334,7 +1501,7 @@ impl BlockEntities {
         positions.sort_unstable();
         let mut entities = Vec::with_capacity(positions.len());
         let mut sleep_in = Vec::with_capacity(positions.len());
-        for pos in positions {
+        for &pos in &positions {
             // 索引是超集，已经删掉的位置 `remove` 会落空，跳过即可。
             let remaining = self.positions.get(&pos).and_then(|&index| {
                 let ticker = self.slots[index]?;
@@ -1353,6 +1520,18 @@ impl BlockEntities {
                 entities.push(entity);
                 sleep_in.push(remaining);
             }
+        }
+        // 删掉的 ticker 槽位留到下一次 begin_tick 才回收（同一格再放进实体时复用这个槽位
+        // 和它的 ordinal）；这期间岛拆分要能按区块找到它们，另记一份。
+        // Removed tickers keep their slot until the next begin_tick (a new
+        // entity in the same cell reuses the slot and its ordinal); an island
+        // split meanwhile must still find them by chunk, so they are noted apart.
+        let dead: Vec<BlockPos> = positions
+            .into_iter()
+            .filter(|pos| self.positions.contains_key(pos))
+            .collect();
+        if !dead.is_empty() {
+            self.unloaded_slots.entry(chunk).or_default().extend(dead);
         }
         Ok(ChunkBlockEntities { entities, sleep_in })
     }
@@ -2013,6 +2192,32 @@ mod tests {
         );
         let order: Vec<i32> = ticker_order(&mut table).iter().map(|row| row.1).collect();
         assert_eq!(order, [0, 1, 2, 3, 10, 11]);
+    }
+
+    /// 卸载一个区块（内容搬走、槽位等下一次 begin_tick 回收）之后、下一次 begin_tick 之前
+    /// 拆岛，等着回收的槽位跟着区块走：区块再交付回来、同一格放回实体时复用原来的槽位和
+    /// ordinal，并回去以后的运行顺序和从没卸载、拆分过一样。改坏确认：拆分时不看卸载留下的
+    /// 槽位（只走 `by_chunk`），顺序变成 B 在前。
+    ///
+    /// An island split right after unloading a chunk (content moved out, the
+    /// slots waiting for the next begin_tick) carries those slots along: when
+    /// the chunk comes back the cells reuse their slots and ordinals, and after
+    /// merging back the run order is as if nothing happened. Break-it: walking
+    /// only `by_chunk` leaves the slots behind and B runs first.
+    #[test]
+    fn an_island_split_right_after_unloading_carries_the_waiting_slots() {
+        let mut table = BlockEntities::default();
+        for (value, &pos) in [A1, B1, A2, B2].iter().enumerate() {
+            table.insert(Dummy::boxed(pos, value as i32));
+        }
+        let _ = ticker_order(&mut table);
+        let boxed = table.take_chunk(CHUNK_A).unwrap();
+        let wanted: BTreeSet<ChunkPos> = [CHUNK_A].into_iter().collect();
+        let mut island = table.split_off_island(&wanted).unwrap();
+        island.insert_chunk(boxed);
+        table.absorb_island(island);
+        let order: Vec<i32> = ticker_order(&mut table).iter().map(|row| row.1).collect();
+        assert_eq!(order, [0, 1, 2, 3]);
     }
 
     fn ticker_order(entities: &mut BlockEntities) -> Vec<(BlockPos, i32)> {

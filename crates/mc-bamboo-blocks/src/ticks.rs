@@ -307,24 +307,60 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
     }
 
     /// 拆出 `chunks` 这些区块的刻，两边各自保留原来的完整排序键。
+    /// 只在拆合（tick 边界）走，所以可以整批重建两棵有序队列；排刻热路径一点不变。
+    /// 成员查询换成便宜哈希集合（原来每问一次要比十几次）。
+    ///
+    /// Split off the ticks of `chunks`, keeping each side's original ordering
+    /// keys. Only used at tick boundaries by splits and merges, so both trees
+    /// can be rebuilt in bulk; the scheduling hot path is unchanged. Membership
+    /// uses a cheap hash set instead of the ordered set's dozen comparisons.
     fn split_off(&mut self, chunks: &BTreeSet<ChunkPos>) -> Self {
         if chunks.is_empty() {
             return Self::default();
         }
         let mut out = Self::default();
-        let mut taken: Vec<(TickOrder, BlockPos, T)> = Vec::new();
-        self.queue.retain(|&order, &mut (pos, kind)| {
-            if chunks.contains(&pos.chunk()) {
-                taken.push((order, pos, kind));
-                false
-            } else {
-                true
+        // 搬走的少：原树就地删，成员查询直接问有序集合（建散列集合反而比省下的多）。
+        // 搬走的多：成员查询换便宜哈希，两边都按升序整批建树，比逐条删 / 逐条插便宜。
+        // 两种做法得到的表相同。
+        // Few move: delete in place with ordered-set membership (building a
+        // hash set would cost more than it saves). Many move: cheap hash
+        // membership and bulk tree rebuild, cheaper than one-by-one deletes
+        // and inserts. Same result either way.
+        if chunks.len().saturating_mul(8) < self.queue.len() {
+            let mut taken: Vec<(TickOrder, BlockPos, T)> = Vec::new();
+            self.queue.retain(|&order, &mut (pos, kind)| {
+                if chunks.contains(&pos.chunk()) {
+                    taken.push((order, pos, kind));
+                    false
+                } else {
+                    true
+                }
+            });
+            for (order, pos, kind) in taken {
+                self.scheduled.remove(&(pos, kind));
+                out.scheduled.insert((pos, kind));
+                out.queue.insert(order, (pos, kind));
             }
-        });
-        for (order, pos, kind) in taken {
-            self.scheduled.remove(&(pos, kind));
-            out.scheduled.insert((pos, kind));
-            out.queue.insert(order, (pos, kind));
+        } else {
+            let moving: HashSet<ChunkPos, BuildHasherDefault<ChunkHasher>> =
+                chunks.iter().copied().collect();
+            let (mut kept, mut taken) = (Vec::new(), Vec::new());
+            for (order, (pos, kind)) in std::mem::take(&mut self.queue) {
+                if moving.contains(&pos.chunk()) {
+                    taken.push((order, (pos, kind)));
+                } else {
+                    kept.push((order, (pos, kind)));
+                }
+            }
+            // 输入按排序键升序，整批建树比逐条 insert 便宜。
+            // Inputs are in ascending key order; bulk tree construction is
+            // cheaper than inserting one by one.
+            self.queue = kept.into_iter().collect();
+            out.queue = taken.iter().copied().collect();
+            for &(_order, (pos, kind)) in &taken {
+                self.scheduled.remove(&(pos, kind));
+                out.scheduled.insert((pos, kind));
+            }
         }
         for chunk in chunks {
             if let Some(entries) = self.deferred.remove(chunk) {
@@ -339,10 +375,29 @@ impl<T: Copy + Eq + Hash> TickQueue<T> {
     }
 
     /// 并回另一份队列。`TickOrder` 全局唯一，直接按序插回主队列。
+    ///
+    /// 小的一份逐条插进大的（`BTreeMap::append` 会把两边重建成一棵树，开销和两边的总数
+    /// 成正比）；两份差不多大时整体归并。两种做法得到同一张表。
+    ///
+    /// The smaller queue is inserted entry by entry into the larger
+    /// (`BTreeMap::append` rebuilds one tree from both, proportional to the
+    /// total); similar sizes are merged in bulk. Both give the same table.
     fn absorb(&mut self, mut other: Self) {
         let expected = self.queue.len() + other.queue.len();
-        self.queue.append(&mut other.queue);
+        if other.queue.len() > self.queue.len() {
+            std::mem::swap(&mut self.queue, &mut other.queue);
+        }
+        if other.queue.len().saturating_mul(16) < self.queue.len() {
+            for (order, entry) in std::mem::take(&mut other.queue) {
+                self.queue.insert(order, entry);
+            }
+        } else {
+            self.queue.append(&mut other.queue);
+        }
         debug_assert_eq!(self.queue.len(), expected, "两份队列的排序键撞了");
+        if other.scheduled.len() > self.scheduled.len() {
+            std::mem::swap(&mut self.scheduled, &mut other.scheduled);
+        }
         for (pos, kind) in other.scheduled {
             self.scheduled.insert((pos, kind));
         }
@@ -1675,6 +1730,61 @@ mod tests {
             } else {
                 ticks.schedule(entry.pos, entry.kind as usize, entry.delay, entry.priority);
             }
+        }
+    }
+
+    /// 岛拆分的两条路径（搬走的少 → 就地删；搬走的多 → 两边整批建树）结果逐条相同。
+    /// 改坏确认：把 `split_off` 里 `moving.contains` 换成「恒假」，两种规模下拆出去的
+    /// 那份都是空的、原表还留着要搬走的刻，断言会报出来。
+    ///
+    /// The two paths of an island split (few move: delete in place; many move:
+    /// bulk rebuild) give identical results. Break-it check: making
+    /// `moving.contains` always false leaves the outgoing part empty and the
+    /// moved ticks behind, which the assertions catch at both sizes.
+    #[test]
+    fn island_split_rebuilds_both_sides_identically_at_either_size() {
+        let entries = random_entries(&mut Rng::new(0x5eed_1234), 4000);
+        // 位置按 (index % 4) 落在 4 个区块里，另外两条在别的区块。
+        // Positions fall in four chunks by (index % 4), plus two elsewhere.
+        for moved in [2_i32, 3] {
+            let wanted: BTreeSet<ChunkPos> = (0..moved).map(|x| ChunkPos::new(x, 0)).collect();
+            let mut reference = BlockTicks::new();
+            schedule_entries(&mut reference, &entries);
+            let mut split = BlockTicks::new();
+            schedule_entries(&mut split, &entries);
+            let child = split.split_off_island(&wanted);
+            let expected_moved: Vec<_> = reference
+                .pending()
+                .filter(|tick| wanted.contains(&tick.pos.chunk()))
+                .map(|tick| (tick.pos, tick.block, tick.trigger_tick, tick.priority))
+                .collect();
+            let expected_kept: Vec<_> = reference
+                .pending()
+                .filter(|tick| !wanted.contains(&tick.pos.chunk()))
+                .map(|tick| (tick.pos, tick.block, tick.trigger_tick, tick.priority))
+                .collect();
+            let got_moved: Vec<_> = child
+                .pending()
+                .map(|tick| (tick.pos, tick.block, tick.trigger_tick, tick.priority))
+                .collect();
+            let got_kept: Vec<_> = split
+                .pending()
+                .map(|tick| (tick.pos, tick.block, tick.trigger_tick, tick.priority))
+                .collect();
+            assert_eq!(got_moved, expected_moved, "搬走 {moved} 个区块：拆出去的刻");
+            assert_eq!(got_kept, expected_kept, "搬走 {moved} 个区块：留下的刻");
+            // 合回来也逐条等于「从没拆过」。
+            // Absorbing back is identical to never having split.
+            split.absorb(child);
+            let restored: Vec<_> = split
+                .pending()
+                .map(|tick| (tick.pos, tick.block, tick.trigger_tick, tick.priority))
+                .collect();
+            let all: Vec<_> = reference
+                .pending()
+                .map(|tick| (tick.pos, tick.block, tick.trigger_tick, tick.priority))
+                .collect();
+            assert_eq!(restored, all, "搬走 {moved} 个区块：合回来");
         }
     }
 

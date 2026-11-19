@@ -37,7 +37,7 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) chunks: &'a mut ChunkStore,
     pub(crate) changes: &'a mut BlockChanges,
     /// 方块实体从物品带来的组件，换了方块就丢，见 [`crate::block_items`]。
-    pub(crate) block_items: &'a mut BTreeMap<BlockPos, ComponentPatch>,
+    pub(crate) block_items: &'a mut crate::pos_map::PosMap<ComponentPatch>,
     /// 这次挖方块的主手物品，读 `processBlockExperience`。
     /// 只在 [`RegionLevel::set_break_tool`] 里由挖矿路径设置，其余路径是空手。
     pub(crate) break_tool: mc_bamboo_protocol::item::ItemStack,
@@ -46,7 +46,7 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) redstone: &'a mut RedstoneMemory,
     pub(crate) block_entities: &'a mut BlockEntities,
     pub(crate) block_events: &'a mut BlockEvents,
-    pub(crate) containers: &'a mut BTreeMap<BlockPos, ContainerEntry>,
+    pub(crate) containers: &'a mut crate::pos_map::PosMap<ContainerEntry>,
     pub(crate) entities: &'a mut Entities,
     pub(crate) loot_sequences: &'a mc_bamboo_loot::RandomSequences,
     pub(crate) block_rules: BlockGameRules,
@@ -58,7 +58,8 @@ pub(crate) struct RegionLevel<'a> {
     ///
     /// This dimension's world-border snapshot, `Level.getWorldBorder()`.
     pub(crate) world_border: WorldBorder,
-    pub(crate) command_blocks: &'a mut BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
+    pub(crate) command_blocks:
+        &'a mut crate::pos_map::PosMap<crate::command_block::CommandBlockData>,
     /// 这一刻哪些区块参与各阶段。无限超平坦模式下恒为真。
     pub(crate) tick_levels: &'a TickLevels,
     /// 「改过没存」的标记，方块逻辑的每一次写都在这里登记。

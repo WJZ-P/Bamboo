@@ -1225,6 +1225,92 @@ fn leaving_any_class_behind_on_a_split_is_reported() {
     });
 }
 
+/// 拆分只走按区块的索引（容器、方块组件、命令方块、讲台上的书、实体、方块实体、红石
+/// 记忆各有一份）；索引漏掉一项时，这一项会被留在原岛。改坏确认：每份索引各漏掉第 1 组
+/// 里的一项，拆分要么被调试构建的索引断言拦下，要么拆完的核对报出放错地方的类别；索引
+/// 完整时核对为空（同一个场景、同一组）。
+///
+/// Splits walk only the per-chunk indexes (containers, block components,
+/// command blocks, lectern books, entities, block entities, redstone memory);
+/// an entry missing from an index would stay on the old island. Break-it:
+/// drop one group-1 entry from each index in turn; the split must either be
+/// stopped by the debug index assertion or leave something the ownership
+/// check reports. With complete indexes the check is empty.
+#[test]
+fn an_entry_missing_from_a_chunk_index_is_caught() {
+    type Break = fn(&mut Region, BlockPos);
+    let breaks: [(&str, Break); 7] = [
+        ("containers", |region, at| {
+            let pos = at.offset(2, 3, 2);
+            assert!(region.containers.contains_key(&pos));
+            region.containers.forget_index_for_test(pos);
+        }),
+        ("block items", |region, at| {
+            let pos = at.offset(2, 3, 2);
+            assert!(region.block_items.contains_key(&pos));
+            region.block_items.forget_index_for_test(pos);
+        }),
+        ("command blocks", |region, at| {
+            let pos = at.offset(4, 0, 9);
+            assert!(region.command_blocks.contains_key(&pos));
+            region.command_blocks.forget_index_for_test(pos);
+        }),
+        ("books", |region, at| {
+            let pos = at.offset(3, 0, 9);
+            assert!(region.lecterns.books.contains_key(&pos));
+            region.lecterns.books.forget_index_for_test(pos);
+        }),
+        ("entities", |region, at| {
+            let chunk = at.chunk();
+            let uid = region
+                .entities
+                .iter_public()
+                .find(|public| public.chunk_position() == chunk)
+                .map(|public| public.uid)
+                .expect("第 1 组的中心区块里有实体");
+            region.entities.forget_chunk_index_for_test(uid);
+        }),
+        ("block entities", |region, at| {
+            region
+                .block_entities
+                .forget_chunk_index_for_test(at.offset(5, 0, 2));
+        }),
+        ("redstone", |region, at| {
+            region
+                .redstone
+                .forget_chunk_index_for_test(at.offset(7, 0, 9));
+        }),
+    ];
+    with_stack(move || {
+        let groups: BTreeSet<usize> = [1].into_iter().collect();
+        let complete = {
+            let mut scene = build(3);
+            step(island(&mut scene));
+            let (chunks, players) = parts_of(&scene, &groups);
+            let child = split(&mut scene, &groups);
+            let mut found = misplaced(island(&mut scene), &chunks, &players, false);
+            found.extend(misplaced(&child, &chunks, &players, true));
+            found
+        };
+        assert!(complete.is_empty(), "索引完整时核对为空：{complete:?}");
+        for (name, corrupt) in breaks {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut scene = build(3);
+                step(island(&mut scene));
+                let center = scene.centers[1];
+                corrupt(&mut island(&mut scene).region, at(center, 0, Y, 0));
+                let (chunks, players) = parts_of(&scene, &groups);
+                let child = split(&mut scene, &groups);
+                let mut found = misplaced(island(&mut scene), &chunks, &players, false);
+                found.extend(misplaced(&child, &chunks, &players, true));
+                found
+            }))
+            .map_or(true, |found| !found.is_empty());
+            assert!(caught, "索引漏掉一项「{name}」没有被抓到");
+        }
+    });
+}
+
 /// 微基准（`--release -- --ignored --nocapture`）：1000 个已加载区块（每个区块有改过的
 /// 方块、计划刻、容器、漏斗、地上的物品）拆出去再合回来的耗时，另一半 1000 个区块
 /// 留在原岛。目标单次 < 5 ms（计划 3.2）。

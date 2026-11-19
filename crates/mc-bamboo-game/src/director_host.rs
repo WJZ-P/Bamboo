@@ -1023,6 +1023,16 @@ impl DirectorHost {
         }
     }
 
+    /// 测试专用：把给定的拆合原样排进队列而不照做，用来在「做决定」和「照做」之间
+    /// 制造一个确定的窗口。
+    ///
+    /// Test only: queue the given changes verbatim without replaying them,
+    /// creating a deterministic window between decision and replay.
+    #[cfg(test)]
+    pub(crate) fn queue_topology_for_test(&mut self, ops: Vec<TopologyOp>) {
+        self.queue_topology(ops);
+    }
+
     /// 直接看分区器（不变量检查、测试逐刻断言和全量对照用）。
     pub(crate) fn islands(&self) -> Option<&IslandPartition> {
         self.islands.as_ref()

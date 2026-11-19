@@ -104,23 +104,23 @@ impl Watchers {
         out
     }
 
-    /// 岛拆分：关注者在 `wanted` 里的登记整份搬出去，原表撤掉它们。两边的段集合都记成
-    /// 「变过」，实体表那份在下一次同步时收紧。调用方保证关注关系不跨两部分。
+    /// 岛拆分：`positions` 里登记过的关注者整份搬出去，原表撤掉它们；只碰这些位置，
+    /// 不扫整张表。调用方给的位置要盖住要搬的区块里的全部关注者（方块实体表的按区块
+    /// 索引）。按位置登记（格子里关注者列表的先后不随哈希表的遍历顺序变），两边的段集合
+    /// 都记成「变过」，实体表那份在下一次同步时收紧。
     ///
-    /// Island split: watchers inside `wanted` move out and are dropped here.
-    /// Both sides mark their sections changed so the entity table resyncs.
-    pub(crate) fn split_off(
-        &mut self,
-        wanted: &std::collections::BTreeSet<mc_bamboo_core::ChunkPos>,
-    ) -> Self {
-        let mut moved: Vec<(BlockPos, Watch)> = self
-            .by_watcher
+    /// Island split: the watchers registered at `positions` move out and are
+    /// dropped here, touching only those positions. The caller's positions
+    /// cover every watcher in the moved chunks (the block-entity chunk index).
+    /// Watchers register in position order; both sides mark their sections
+    /// changed so the entity table resyncs.
+    pub(crate) fn split_off_watchers(&mut self, positions: &[BlockPos]) -> Self {
+        let mut moved: Vec<(BlockPos, Watch)> = positions
             .iter()
-            .filter(|(watcher, _)| wanted.contains(&watcher.chunk()))
-            .map(|(&watcher, watch)| (watcher, watch.clone()))
+            .filter_map(|watcher| Some((*watcher, self.by_watcher.get(watcher)?.clone())))
             .collect();
-        // 按位置登记，格子里关注者列表的先后不随哈希表的遍历顺序变。
         moved.sort_unstable_by_key(|(watcher, _)| *watcher);
+        moved.dedup_by_key(|(watcher, _)| *watcher);
         let mut out = Self::default();
         for (watcher, watch) in moved {
             self.unwatch(watcher);
@@ -129,6 +129,11 @@ impl Watchers {
         self.sections_changed = true;
         out.sections_changed = true;
         out
+    }
+
+    /// 全部关注者的位置（调试构建核对索引用）。
+    pub(crate) fn watcher_positions(&self) -> impl Iterator<Item = BlockPos> + '_ {
+        self.by_watcher.keys().copied()
     }
 
     /// 有没有关注者和它关注的格子不在 `chunks` 这同一组里。单元划分时若为真，

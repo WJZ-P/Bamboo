@@ -342,6 +342,14 @@ pub(crate) struct Master {
     /// 测试专用：运行时拆岛时故意漏搬这一类（改坏确认）。
     #[cfg(test)]
     pub(crate) split_skip: Option<crate::region::IslandPart>,
+    /// 测试专用：照做拆分时故意按「瞬时位置」而不是跟踪的视野中心给玩家分边
+    /// （改坏确认，模拟用做决定那一刻的名单）。正式构建里不存在。
+    ///
+    /// Test only: assign players to a split by instantaneous position instead
+    /// of by their tracked view centre (break-it check, modelling the
+    /// decision-time roster). Absent in production builds.
+    #[cfg(test)]
+    pub(crate) split_by_position: bool,
     /// 测试专用：拆合之后故意弄坏新生成实体的状态（改坏确认，见
     /// `world/island_runtime_tests.rs`）。`LoseEntity` 丢掉一个实体，`LoseTracking`
     /// 清掉一个新实体的追踪配对。
@@ -532,6 +540,8 @@ impl World {
                 profiler: Box::default(),
                 #[cfg(test)]
                 split_skip: None,
+                #[cfg(test)]
+                split_by_position: false,
                 #[cfg(test)]
                 split_break: None,
             },
@@ -1403,12 +1413,15 @@ impl World {
             let unified = self.islands.unify(into);
             let joined = joining.elapsed();
             let region = &mut self.islands.get_mut(into).expect("岛在表里").region;
+            let working = Instant::now();
             let out = work(&mut self.master.global, region);
+            let worked = working.elapsed();
             let dividing = Instant::now();
             self.islands.divide(into, unified);
             let divided = dividing.elapsed();
             let profiler = self.profiler();
             profiler.record_duration(Metric::IslandUnify, joined);
+            profiler.record_duration(Metric::IslandWorldCommand, worked);
             profiler.record_duration(Metric::IslandDivide, divided);
             self.publish_global();
             return out;
@@ -3285,6 +3298,9 @@ mod island_runtime_tests;
 #[cfg(test)]
 #[path = "world/island_scale_tests.rs"]
 mod island_scale_tests;
+#[cfg(test)]
+#[path = "world/island_split_bench.rs"]
+mod island_split_bench;
 #[cfg(test)]
 #[path = "world/island_split_tests.rs"]
 mod island_split_tests;

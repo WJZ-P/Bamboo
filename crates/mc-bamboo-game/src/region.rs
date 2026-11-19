@@ -235,10 +235,10 @@ pub(crate) struct Region {
     /// 排队的计划刻。
     pub(crate) block_ticks: BlockTicks,
     /// 有内容的方块实体，按位置索引。只在这个区域里存在，没有持久化。
-    pub(crate) containers: BTreeMap<BlockPos, ContainerEntry>,
+    pub(crate) containers: crate::pos_map::PosMap<ContainerEntry>,
     /// 方块实体从物品上带来的组件，官方 `BlockEntity.collectComponents` 的结果，
     /// 见 [`crate::block_items`]。
-    pub(crate) block_items: BTreeMap<BlockPos, ComponentPatch>,
+    pub(crate) block_items: crate::pos_map::PosMap<ComponentPatch>,
     /// 每名玩家打开的菜单。物品栏菜单不在里面，它没有状态要同步。
     pub(crate) menus: BTreeMap<PlayerId, Menu>,
     /// 讲台上的书和打开着的讲台菜单。
@@ -310,7 +310,7 @@ pub(crate) struct Region {
     /// 命令方块里保存的命令。不执行，也不存档。
     ///
     /// Commands stored in command blocks. They are not executed and not saved.
-    pub(crate) command_blocks: BTreeMap<BlockPos, crate::command_block::CommandBlockData>,
+    pub(crate) command_blocks: crate::pos_map::PosMap<crate::command_block::CommandBlockData>,
     /// 这一 tick 里改过的管理名单，tick 末尾统一发布并写盘。
     pub(crate) admin_changes: crate::admin::AdminChanges,
     /// 每名玩家最近一次动作的时刻，单位毫秒。官方 `ServerPlayer.lastActionTime`。
@@ -422,8 +422,8 @@ impl Region {
             block_changes: BlockChanges::default(),
             light_changes: BTreeMap::new(),
             block_ticks: BlockTicks::new(),
-            containers: BTreeMap::new(),
-            block_items: BTreeMap::new(),
+            containers: crate::pos_map::PosMap::default(),
+            block_items: crate::pos_map::PosMap::default(),
             menus: BTreeMap::new(),
             lecterns: crate::lectern::Tables::default(),
             block_entities: BlockEntities::default(),
@@ -446,7 +446,7 @@ impl Region {
             clock_millis: None,
             global: crate::global::GlobalView::default(),
             broadcast_console_to_ops: true,
-            command_blocks: BTreeMap::new(),
+            command_blocks: crate::pos_map::PosMap::default(),
             admin_changes: crate::admin::AdminChanges::default(),
             last_action_millis: BTreeMap::new(),
             peer_ips: BTreeMap::new(),
@@ -504,7 +504,20 @@ impl Region {
     /// afterwards equals running on a clock that was always `delta` apart.
     /// Tick boundary only. The redstone cache is dropped (replay is
     /// result-identical); partition statistics are rebuilt on merge instead.
+    ///
+    /// `delta` 为 0 时每一类都是恒等的（全是同加一个数），不逐条走：拆合时两边的时钟
+    /// 通常相同，逐条走一遍等于每次合并都把被吸收方整个扫一遍。红石缓存照样换空。
+    ///
+    /// With `delta == 0` every class is the identity (all are additive), so
+    /// nothing is walked: both clocks usually agree in a merge and walking
+    /// would scan the whole absorbed island each time. The redstone cache is
+    /// still replaced with an empty one.
     pub(crate) fn rebase_clock(&mut self, delta: i64) {
+        if delta == 0 {
+            self.redstone_cache =
+                mc_bamboo_blocks::cache::RedstoneCache::new(*self.redstone_cache.config());
+            return;
+        }
         self.rebase_clock_parts(delta, ClockParts::ALL);
     }
 

@@ -75,25 +75,32 @@ impl EntityTracking {
         entities: &BTreeSet<i32>,
         players: &BTreeSet<PlayerId>,
     ) -> Self {
-        let tracked = std::mem::take(&mut self.tracked);
         let mut out = Self::default();
-
-        for (id, entry) in tracked {
-            let moves = entities.contains(&id)
-                || (!entry.seen_by.is_empty() && entry.seen_by.is_subset(players));
-            debug_assert!(
-                if moves {
-                    entry.seen_by.is_subset(players)
-                } else {
-                    entry.seen_by.is_disjoint(players)
-                },
-                "实体 {id} 的观察者跨了两个岛"
-            );
-            if moves {
-                out.tracked.insert(id, entry);
-            } else {
-                self.tracked.insert(id, entry);
-            }
+        // 只扫键、挑出要走的再逐个取出，不重建整张表（配对只有玩家附近的实体，和岛的
+        // 大小无关）。
+        // Scan keys and take out the moving entries instead of rebuilding the
+        // table (pairings exist only near players, independent of island size).
+        let going: Vec<i32> = self
+            .tracked
+            .iter()
+            .filter(|(id, entry)| {
+                let moves = entities.contains(id)
+                    || (!entry.seen_by.is_empty() && entry.seen_by.is_subset(players));
+                debug_assert!(
+                    if moves {
+                        entry.seen_by.is_subset(players)
+                    } else {
+                        entry.seen_by.is_disjoint(players)
+                    },
+                    "实体 {id} 的观察者跨了两个岛"
+                );
+                moves
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        for id in going {
+            let entry = self.tracked.remove(&id).expect("刚看过");
+            out.tracked.insert(id, entry);
         }
         out
     }

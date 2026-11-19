@@ -9,7 +9,7 @@
 //! out three parallel arrays for the parallel driver.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicI32, Ordering},
@@ -470,6 +470,13 @@ pub struct EntityStore {
     taken: BTreeMap<EntityUid, usize>,
     free: Vec<usize>,
     grid: BTreeMap<(i32, i32, i32), BTreeSet<usize>>,
+    /// 按所在区块（`EntityPublic::chunk_position`）的子索引：区块 → uid 升序的集合，和
+    /// `index` 一起增删。岛拆分、按区块装盒和存盘快照只走要的那几个区块，不扫整张表。
+    ///
+    /// Sub-index by chunk (`EntityPublic::chunk_position`): chunk → uids in
+    /// ascending order, kept in step with `index`. Island splits, chunk boxing
+    /// and save snapshots visit only the chunks they need instead of the table.
+    by_chunk: HashMap<ChunkPos, BTreeSet<EntityUid>>,
     /// 按注册表实体类型的子索引：类型 ID → uid 升序的行号集合。
     by_type: BTreeMap<usize, BTreeSet<EntityUid>>,
     /// 硬碰撞实体的 uid 集合，现在恒为空。
@@ -525,6 +532,7 @@ impl Default for EntityStore {
             taken: BTreeMap::new(),
             free: Vec::new(),
             grid: BTreeMap::new(),
+            by_chunk: HashMap::new(),
             by_type: BTreeMap::new(),
             hard_colliding: BTreeSet::new(),
             ids: EntityIds::default(),
@@ -726,6 +734,7 @@ impl EntityStore {
     /// 这两个子索引是不是和主表一致；调试构建和单测用它守住 O(1) 的取放路径。
     fn sub_index_matches(&self) -> bool {
         let mut by_type: BTreeMap<usize, BTreeSet<EntityUid>> = BTreeMap::new();
+        let mut by_chunk: HashMap<ChunkPos, BTreeSet<EntityUid>> = HashMap::new();
         let mut hard = BTreeSet::new();
         for (&uid, &row) in &self.index {
             if let Some(entry) = self.slots.get(row).and_then(Option::as_ref) {
@@ -733,12 +742,48 @@ impl EntityStore {
                     .entry(entry.public.kind.type_index())
                     .or_default()
                     .insert(uid);
+                by_chunk
+                    .entry(entry.public.chunk_position())
+                    .or_default()
+                    .insert(uid);
                 if is_hard_colliding(&entry.public) {
                     hard.insert(uid);
                 }
             }
         }
-        self.by_type == by_type && self.hard_colliding == hard
+        self.by_type == by_type && self.hard_colliding == hard && self.by_chunk == by_chunk
+    }
+
+    /// 只给改坏确认用：从按区块的子索引里漏掉一个实体。
+    ///
+    /// Break-it checks only: drop one entity from the chunk sub-index.
+    #[doc(hidden)]
+    pub fn forget_chunk_index_for_test(&mut self, uid: EntityUid) {
+        for uids in self.by_chunk.values_mut() {
+            uids.remove(&uid);
+        }
+    }
+
+    /// 按区块的子索引里记一笔 / 去掉一笔。
+    fn chunk_index_add(&mut self, uid: EntityUid, chunk: ChunkPos) {
+        self.by_chunk.entry(chunk).or_default().insert(uid);
+    }
+
+    fn chunk_index_remove(&mut self, uid: EntityUid, chunk: ChunkPos) {
+        if let Some(uids) = self.by_chunk.get_mut(&chunk) {
+            uids.remove(&uid);
+            if uids.is_empty() {
+                self.by_chunk.remove(&chunk);
+            }
+        }
+    }
+
+    /// 位置落在这个区块里的实体，uid 升序。
+    fn uids_in_chunk(&self, chunk: ChunkPos) -> Vec<EntityUid> {
+        self.by_chunk
+            .get(&chunk)
+            .map(|uids| uids.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// 空间索引里覆盖 `area` 的行号，按行号升序（行号来自 uid 升序的槽位分配，
@@ -883,6 +928,7 @@ impl EntityStore {
         let row_index = self.allocate_slot();
         self.index_sub(row.public.uid, &row.public);
         self.index.insert(row.public.uid, row_index);
+        self.chunk_index_add(row.public.uid, row.public.chunk_position());
         self.grid_insert(row_index, &row.public);
         self.slots[row_index] = Some(row);
     }
@@ -922,6 +968,7 @@ impl EntityStore {
         self.taken.remove(&uid);
         self.taken_snapshots.remove(&uid);
         if let Some(entry) = self.slots[row].take() {
+            self.chunk_index_remove(uid, entry.public.chunk_position());
             self.grid_remove(row, &entry.public);
         }
         self.free.push(row);
@@ -932,6 +979,7 @@ impl EntityStore {
         self.unindex_sub(uid);
         let row = self.index.remove(&uid)?;
         let entry = self.slots[row].take()?;
+        self.chunk_index_remove(uid, entry.public.chunk_position());
         self.grid_remove(row, &entry.public);
         if !self.watched_sections.is_empty() {
             // 只记旧状态；站住的实体不该在每刻 tick 里把自己的漏斗吵醒。
@@ -959,15 +1007,36 @@ impl EntityStore {
         self.replace_row(row, split, false);
         self.index_sub_from_row(uid, row);
         self.index.insert(uid, row);
+        if let Some(chunk) = self.slots[row]
+            .as_ref()
+            .map(|entry| entry.public.chunk_position())
+        {
+            self.chunk_index_add(uid, chunk);
+        }
     }
 
     fn replace_row(&mut self, row: usize, new: EntityRow, note: bool) {
         let old = self.slots[row].take();
-        if let Some(uid) = old
-            .as_ref()
-            .map(|entry| entry.public.uid)
-            .filter(|_| self.index.values().any(|&indexed| indexed == row))
-        {
+        // 这一行在主索引里（uid 指向的就是这一行）。行和 uid 一一对应，所以和「有没有哪个
+        // uid 指向这一行」是一回事，只是不用扫整张索引。
+        // This row is indexed (its uid points at it). Rows and uids are one to
+        // one, so this equals "some uid points at this row" without a scan.
+        let indexed = old.as_ref().map(|entry| entry.public.uid).filter(|uid| {
+            debug_assert_eq!(
+                self.index.get(uid) == Some(&row),
+                self.index.values().any(|&indexed| indexed == row),
+                "实体的行和 uid 不是一一对应"
+            );
+            self.index.get(uid) == Some(&row)
+        });
+        if let (Some(uid), Some(old)) = (indexed, old.as_ref()) {
+            let (from, to) = (old.public.chunk_position(), new.public.chunk_position());
+            if from != to {
+                self.chunk_index_remove(uid, from);
+                self.chunk_index_add(uid, to);
+            }
+        }
+        if let Some(uid) = indexed {
             let same_kind = old.as_ref().is_some_and(|entry| {
                 entry.public.kind.type_index() == new.public.kind.type_index()
                     && is_hard_colliding(&entry.public) == is_hard_colliding(&new.public)
@@ -1226,22 +1295,14 @@ impl EntityStore {
         if !self.ready_to_move_chunks() {
             return Err(Busy);
         }
-        let taken: Vec<EntityUid> = self
-            .index
-            .iter()
-            .filter(|(_, row)| {
-                self.slots[**row]
-                    .as_ref()
-                    .is_some_and(|entry| entry.public.chunk_position() == chunk)
-            })
-            .map(|(&uid, _)| uid)
-            .collect();
+        let taken = self.uids_in_chunk(chunk);
         let mut rows = Vec::with_capacity(taken.len());
         for uid in taken {
             self.unindex_sub(uid);
             let row = self.index.remove(&uid).expect("just indexed");
             self.taken.remove(&uid);
             let entry = self.slots[row].take().expect("indexed row is live");
+            self.chunk_index_remove(uid, chunk);
             self.grid_remove(row, &entry.public);
             self.free.push(row);
             rows.push(entry);
@@ -1260,14 +1321,12 @@ impl EntityStore {
     /// without requiring a tick boundary. Saving encodes content, never moves
     /// the live tables.
     pub fn snapshot_chunk(&self, chunk: ChunkPos) -> Option<ChunkEntities> {
-        let mut rows: Vec<EntityRow> = self
-            .index
-            .values()
-            .filter_map(|&row| self.slots[row].as_ref())
-            .filter(|entry| entry.public.chunk_position() == chunk)
+        let rows: Vec<EntityRow> = self
+            .uids_in_chunk(chunk)
+            .into_iter()
+            .filter_map(|uid| self.slots[*self.index.get(&uid)?].as_ref())
             .cloned()
             .collect();
-        rows.sort_by_key(|entry| entry.public.uid);
         let preserved = self
             .preserved
             .iter()
@@ -1303,16 +1362,17 @@ impl EntityStore {
             return Err(Busy);
         }
         debug_assert!(self.pending.is_empty(), "tick 边界上没有待并入的实体");
-        let moved: Vec<EntityUid> = self
-            .index
+        debug_assert!(self.sub_index_matches(), "实体子索引和主表不一致");
+        // 按区块的子索引只看要搬的区块；按 uid 升序，和按主表顺序筛出来的一样。
+        // The chunk sub-index visits only the moved chunks; sorted by uid, the
+        // same as filtering the main table in order.
+        let mut moved: Vec<EntityUid> = chunks
             .iter()
-            .filter(|(_, row)| {
-                self.slots[**row]
-                    .as_ref()
-                    .is_some_and(|entry| chunks.contains(&entry.public.chunk_position()))
-            })
-            .map(|(&uid, _)| uid)
+            .filter_map(|chunk| self.by_chunk.get(chunk))
+            .flatten()
+            .copied()
             .collect();
+        moved.sort_unstable();
         // 新岛的种子源由调用方给（岛这一层按世界种子、起源 section 和建岛时刻派生，
         // 计划 3.3「岛的随机源」），不掺原岛种子源的状态；原岛的不动（拆了马上合回来
         // 逐位相同）。
@@ -1331,18 +1391,25 @@ impl EntityStore {
         // Spawn snapshots not yet handed to the sync layer follow their entity,
         // whose island builds the tracking state from them; snapshots of
         // entities no longer in the table split by their own position.
-        let snapshots = std::mem::take(&mut self.spawn_snapshots);
-        for (uid, public) in snapshots {
-            let goes = if self.index.contains_key(&uid) {
-                moved.binary_search(&uid).is_ok()
-            } else {
-                chunks.contains(&public.chunk_position())
-            };
-            if goes {
-                out.spawn_snapshots.insert(uid, public);
-            } else {
-                self.spawn_snapshots.insert(uid, public);
-            }
+        // 只扫键、挑出要走的再逐个取出，不重建整张表（这张表只有这一刻新生成的实体，
+        // 和岛的大小无关）。
+        // Scan keys only and take out the moving ones instead of rebuilding the
+        // table (it holds only this tick's new entities, independent of size).
+        let going: Vec<EntityUid> = self
+            .spawn_snapshots
+            .iter()
+            .filter(|(uid, public)| {
+                if self.index.contains_key(uid) {
+                    moved.binary_search(uid).is_ok()
+                } else {
+                    chunks.contains(&public.chunk_position())
+                }
+            })
+            .map(|(&uid, _)| uid)
+            .collect();
+        for uid in going {
+            let public = self.spawn_snapshots.remove(&uid).expect("刚看过");
+            out.spawn_snapshots.insert(uid, public);
         }
         // 被丢弃生物留下的事件按生物离场时所在的区块分：它的行已经离表，`moved` 里
         // 不会有它的 uid（原来按 uid 分，结果是永远留在原岛）。看着它的玩家和那个区块在
@@ -1352,20 +1419,21 @@ impl EntityStore {
         // by uid left the events behind every time). The players watching it
         // are on the same side as that chunk (no view spans islands), and that
         // side's sync layer sends the events to them.
-        let departed = std::mem::take(&mut self.departed_mob_events);
-        for (uid, (chunk, events)) in departed {
-            if chunks.contains(&chunk) {
-                out.departed_mob_events.insert(uid, (chunk, events));
-            } else {
-                self.departed_mob_events.insert(uid, (chunk, events));
-            }
+        let going: Vec<EntityUid> = self
+            .departed_mob_events
+            .iter()
+            .filter(|(_, (chunk, _))| chunks.contains(chunk))
+            .map(|(&uid, _)| uid)
+            .collect();
+        for uid in going {
+            let entry = self.departed_mob_events.remove(&uid).expect("刚看过");
+            out.departed_mob_events.insert(uid, entry);
         }
-        let moved_ids: BTreeSet<EntityUid> = moved.iter().copied().collect();
-        let moved_iter = moved_ids.iter().copied();
-        for uid in moved_iter {
+        for &uid in &moved {
             self.unindex_sub(uid);
             let row = self.index.remove(&uid).expect("just indexed");
             let entry = self.slots[row].take().expect("indexed row is live");
+            self.chunk_index_remove(uid, entry.public.chunk_position());
             self.grid_remove(row, &entry.public);
             self.free.push(row);
             out.insert_row_quietly(entry);

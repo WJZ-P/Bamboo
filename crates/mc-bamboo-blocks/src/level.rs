@@ -1142,17 +1142,6 @@ pub struct RedstoneMemory {
     next_toggle_order: u64,
 }
 
-/// 按区块拆一张 `BlockPos → V` 的表；`HashMap`、`HashSet`、`BTreeMap` 都用得上。
-fn split_positions<C, V, O>(from: &mut C, to: &mut O, chunks: &std::collections::BTreeSet<ChunkPos>)
-where
-    C: PositionalMap<V>,
-    O: PositionalMap<V>,
-{
-    for (pos, value) in from.split_by(chunks) {
-        to.insert_at(pos, value);
-    }
-}
-
 /// 把拆出去的条目并回一张表。
 fn absorb_positions<C, V>(into: &mut C, from: &mut C)
 where
@@ -1164,28 +1153,13 @@ where
 }
 
 trait PositionalMap<V> {
-    fn split_by(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Vec<(BlockPos, V)>;
     fn drain_all(&mut self) -> Vec<(BlockPos, V)>;
     fn insert_at(&mut self, pos: BlockPos, value: V);
 }
 
 macro_rules! positional_map {
-    ($ty:ty, $take:expr) => {
+    ($ty:ty) => {
         impl<V> PositionalMap<V> for $ty {
-            fn split_by(
-                &mut self,
-                chunks: &std::collections::BTreeSet<ChunkPos>,
-            ) -> Vec<(BlockPos, V)> {
-                let keys: Vec<BlockPos> = self
-                    .keys()
-                    .copied()
-                    .filter(|pos| chunks.contains(&pos.chunk()))
-                    .collect();
-                keys.into_iter()
-                    .filter_map(|pos| ($take)(self, &pos).map(|value| (pos, value)))
-                    .collect()
-            }
-
             fn drain_all(&mut self) -> Vec<(BlockPos, V)> {
                 std::mem::take(self).into_iter().collect()
             }
@@ -1197,22 +1171,10 @@ macro_rules! positional_map {
     };
 }
 
-positional_map!(HashMap<BlockPos, V>, |map: &mut HashMap<BlockPos, V>, pos: &BlockPos| map.remove(pos));
-positional_map!(BTreeMap<BlockPos, V>, |map: &mut BTreeMap<BlockPos, V>, pos: &BlockPos| map.remove(pos));
+positional_map!(HashMap<BlockPos, V>);
+positional_map!(BTreeMap<BlockPos, V>);
 
 impl PositionalMap<()> for HashSet<BlockPos> {
-    fn split_by(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Vec<(BlockPos, ())> {
-        let keys: Vec<BlockPos> = self
-            .iter()
-            .copied()
-            .filter(|pos| chunks.contains(&pos.chunk()))
-            .collect();
-        keys.into_iter()
-            .filter(|pos| self.remove(pos))
-            .map(|pos| (pos, ()))
-            .collect()
-    }
-
     fn drain_all(&mut self) -> Vec<(BlockPos, ())> {
         std::mem::take(self)
             .into_iter()
@@ -1226,6 +1188,31 @@ impl PositionalMap<()> for HashSet<BlockPos> {
 }
 
 impl RedstoneMemory {
+    /// 只给改坏确认用：从按区块的索引里漏掉一格。
+    ///
+    /// Break-it checks only: drop one cell from the per-chunk index.
+    #[doc(hidden)]
+    pub fn forget_chunk_index_for_test(&mut self, pos: BlockPos) {
+        if let Some(positions) = self.by_chunk.get_mut(&pos.chunk()) {
+            positions.remove(&pos);
+        }
+    }
+
+    /// 六张按位置的表的每个键都在按区块的索引里（调试构建的断言用）。
+    fn index_covers_tables(&self) -> bool {
+        let covered = |pos: &BlockPos| {
+            self.by_chunk
+                .get(&pos.chunk())
+                .is_some_and(|positions| positions.contains(pos))
+        };
+        self.comparator_outputs.keys().all(covered)
+            && self.bookshelf_slots.keys().all(covered)
+            && self.jukebox_playing.iter().all(covered)
+            && self.crafter_disabled.keys().all(covered)
+            && self.crafter_crafting.keys().all(covered)
+            && self.lecterns.keys().all(covered)
+    }
+
     /// 某张表第一次记下这一格时登记位置。
     fn note_pos(&mut self, pos: BlockPos) {
         self.by_chunk.entry(pos.chunk()).or_default().insert(pos);
@@ -1456,36 +1443,56 @@ impl RedstoneMemory {
     /// 拆出 `chunks` 这些区块的红石记忆，造出另一个单元的表。
     ///
     /// 六张按位置的表按 `by_chunk` 里的位置超集拆开（删掉的格子两边都查不到
-    /// 值，结果与不拆一致）；火把开关记录按位置拆，各自仍按时刻升序。
+    /// 值，结果与不拆一致），只碰要搬的区块的那些位置，不扫整张表；火把开关记录
+    /// 按位置拆，各自仍按时刻升序（这份记录只留最近的开关，很短）。
     /// `pending_lectern` 是一次交互内的瞬时量，tick 边界上一定是 `None`。
+    ///
+    /// The six positional tables split by the position superset in
+    /// `by_chunk`, touching only the moved chunks' positions; torch toggles
+    /// (only recent ones, a short list) split by position in time order.
     pub fn split_off(&mut self, chunks: &std::collections::BTreeSet<ChunkPos>) -> Self {
         debug_assert!(self.pending_lectern.is_none());
+        debug_assert!(self.index_covers_tables(), "红石记忆的按区块索引漏了位置");
         let mut out = Self::default();
-        // 六张表的类型不同，用按位置判定的通用拆分函数逐个处理。
-        split_positions(
-            &mut self.comparator_outputs,
-            &mut out.comparator_outputs,
-            chunks,
-        );
-        split_positions(&mut self.bookshelf_slots, &mut out.bookshelf_slots, chunks);
-        split_positions(&mut self.jukebox_playing, &mut out.jukebox_playing, chunks);
-        split_positions(
-            &mut self.crafter_disabled,
-            &mut out.crafter_disabled,
-            chunks,
-        );
-        split_positions(
-            &mut self.crafter_crafting,
-            &mut out.crafter_crafting,
-            chunks,
-        );
-        split_positions(&mut self.lecterns, &mut out.lecterns, chunks);
-        let (out_by_chunk, by_chunk) = self
-            .by_chunk
-            .drain()
-            .partition(|(chunk, _)| chunks.contains(chunk));
-        self.by_chunk = by_chunk;
-        out.by_chunk = out_by_chunk;
+        // 要搬的区块比索引里的区块少时逐个取，否则扫一遍索引；结果相同。
+        // Take chunk by chunk when fewer chunks move than are indexed, else
+        // scan the index once; same result.
+        let moved: Vec<(ChunkPos, HashSet<BlockPos>)> = if chunks.len() < self.by_chunk.len() {
+            chunks
+                .iter()
+                .filter_map(|chunk| Some((*chunk, self.by_chunk.remove(chunk)?)))
+                .collect()
+        } else {
+            let (moved, kept): (HashMap<_, _>, HashMap<_, _>) = self
+                .by_chunk
+                .drain()
+                .partition(|(chunk, _)| chunks.contains(chunk));
+            self.by_chunk = kept;
+            moved.into_iter().collect()
+        };
+        for (chunk, positions) in moved {
+            for &pos in &positions {
+                if let Some(signal) = self.comparator_outputs.remove(&pos) {
+                    out.comparator_outputs.insert(pos, signal);
+                }
+                if let Some(slot) = self.bookshelf_slots.remove(&pos) {
+                    out.bookshelf_slots.insert(pos, slot);
+                }
+                if self.jukebox_playing.remove(&pos) {
+                    out.jukebox_playing.insert(pos);
+                }
+                if let Some(mask) = self.crafter_disabled.remove(&pos) {
+                    out.crafter_disabled.insert(pos, mask);
+                }
+                if let Some(remaining) = self.crafter_crafting.remove(&pos) {
+                    out.crafter_crafting.insert(pos, remaining);
+                }
+                if let Some(facts) = self.lecterns.remove(&pos) {
+                    out.lecterns.insert(pos, facts);
+                }
+            }
+            out.by_chunk.insert(chunk, positions);
+        }
         let mut kept = Vec::with_capacity(self.torch_toggles.len());
         for (index, &(pos, when)) in self.torch_toggles.iter().enumerate() {
             let seq = self

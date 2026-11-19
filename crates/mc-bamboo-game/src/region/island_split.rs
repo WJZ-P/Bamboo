@@ -240,6 +240,25 @@ fn split_map<K: Ord, V>(table: &mut BTreeMap<K, V>, moves: impl Fn(&K) -> bool) 
     moved
 }
 
+/// 按区块把一张以区块为键的表分成两份：要搬的区块比表里的条目少时逐个取，否则扫一遍。
+/// 两种做法结果相同。
+///
+/// Split a chunk-keyed table: take the moved chunks one by one when there
+/// are fewer of them than entries, otherwise scan once. Same result.
+fn split_chunk_map<V>(
+    table: &mut BTreeMap<ChunkPos, V>,
+    chunks: &BTreeSet<ChunkPos>,
+) -> BTreeMap<ChunkPos, V> {
+    if chunks.len() < table.len() {
+        chunks
+            .iter()
+            .filter_map(|pos| Some((*pos, table.remove(pos)?)))
+            .collect()
+    } else {
+        split_map(table, |pos| chunks.contains(pos))
+    }
+}
+
 /// 按玩家把一张表分成两份。玩家只有几个，逐个取。
 fn split_players<V>(
     table: &mut BTreeMap<PlayerId, V>,
@@ -263,7 +282,7 @@ fn assert_gap(
             for dz in -reach..=reach {
                 let near = ChunkPos::new(pos.x.saturating_add(dx), pos.z.saturating_add(dz));
                 assert!(
-                    is_moved(near) || !stays(near),
+                    !stays(near) || is_moved(near),
                     "岛的两部分靠得太近：{pos:?} 和 {near:?} 都已加载（要隔开至少 {ISLAND_GAP} 个区块）"
                 );
             }
@@ -347,9 +366,16 @@ impl Region {
             return Err(NotReady);
         }
         let store = &self.chunks;
+        // 查邻居用的一份散列集合：要搬的每个区块问 24 个邻居，有序集合每问一次要比十几次。
+        // A hash set for the neighbour queries: 24 per moved chunk, each a dozen
+        // comparisons in the ordered set.
+        let moving: std::collections::HashSet<
+            ChunkPos,
+            mc_bamboo_world::ticket::ChunkHasherBuilder,
+        > = chunks.iter().copied().collect();
         assert_gap(
             chunks.iter().copied().filter(|&pos| store.is_loaded(pos)),
-            |pos| chunks.contains(&pos),
+            |pos| moving.contains(&pos),
             |pos| store.is_loaded(pos),
         );
         for id in players {
@@ -368,6 +394,7 @@ impl Region {
         }));
         let moves = |part: IslandPart| skip != Some(part);
         let inside = |pos: &BlockPos| chunks.contains(&pos.chunk());
+        lap("checks");
 
         // 前提都检查过了，下面每一步都不会失败。
         let new_chunks = if moves(IslandPart::Chunks) {
@@ -377,21 +404,25 @@ impl Region {
         } else {
             ChunkStore::loaded()
         };
+        lap("Chunks");
         let tick_levels = if moves(IslandPart::TickLevels) {
             self.tick_levels.split_off(chunks)
         } else {
             crate::tick_levels::TickLevels::new(self.tick_levels.enabled())
         };
+        lap("TickLevels");
         let block_ticks = if moves(IslandPart::BlockTicks) {
             self.block_ticks.split_off_island(chunks)
         } else {
             self.block_ticks.split_off_island(&BTreeSet::new())
         };
+        lap("BlockTicks");
         let block_events = if moves(IslandPart::BlockEvents) {
             self.block_events.split_off(chunks)
         } else {
             self.block_events.split_off(&BTreeSet::new())
         };
+        lap("BlockEvents");
         let block_entities = self
             .block_entities
             .split_off_island(if moves(IslandPart::BlockEntities) {
@@ -400,26 +431,31 @@ impl Region {
                 const { &BTreeSet::new() }
             })
             .unwrap_or_else(|_| unreachable!("前提已经检查过"));
+        lap("BlockEntities");
         let redstone = if moves(IslandPart::Redstone) {
             self.redstone.split_off(chunks)
         } else {
             self.redstone.split_off(&BTreeSet::new())
         };
+        lap("Redstone");
         let containers = if moves(IslandPart::Containers) {
-            split_map(&mut self.containers, inside)
+            self.containers.split_off_chunks(chunks)
         } else {
-            BTreeMap::new()
+            crate::pos_map::PosMap::default()
         };
+        lap("Containers");
         let block_items = if moves(IslandPart::BlockItems) {
-            split_map(&mut self.block_items, inside)
+            self.block_items.split_off_chunks(chunks)
         } else {
-            BTreeMap::new()
+            crate::pos_map::PosMap::default()
         };
+        lap("BlockItems");
         let command_blocks = if moves(IslandPart::CommandBlocks) {
-            split_map(&mut self.command_blocks, inside)
+            self.command_blocks.split_off_chunks(chunks)
         } else {
-            BTreeMap::new()
+            crate::pos_map::PosMap::default()
         };
+        lap("CommandBlocks");
         let mut entities = if moves(IslandPart::Entities) {
             self.entities
                 .split_off(chunks, random.entity_seeds)
@@ -435,22 +471,26 @@ impl Region {
         if !moves(IslandPart::DepartedMobEvents) {
             self.entities.reclaim_departed_events(&mut entities);
         }
+        lap("Entities");
         let moved_entities: BTreeSet<i32> = entities.ids().into_iter().collect();
         let entity_tracking = if moves(IslandPart::EntityTracking) {
             self.entity_tracking.split_off(&moved_entities, players)
         } else {
             crate::entity_tracking::EntityTracking::default()
         };
+        lap("EntityTracking");
         let dirty = if moves(IslandPart::Dirty) {
             self.dirty.split_off(chunks)
         } else {
             super::dirty::Dirty::default()
         };
+        lap("Dirty");
         let light_changes = if moves(IslandPart::LightChanges) {
-            split_map(&mut self.light_changes, |pos| chunks.contains(pos))
+            split_chunk_map(&mut self.light_changes, chunks)
         } else {
             BTreeMap::new()
         };
+        lap("LightChanges");
         let mut block_changes = BlockChanges::default();
         if moves(IslandPart::BlockChanges) {
             let (moved, kept) = std::mem::take(&mut self.block_changes.changed)
@@ -459,9 +499,11 @@ impl Region {
             self.block_changes.changed = kept;
             block_changes.changed = moved;
         }
+        lap("BlockChanges");
         if moves(IslandPart::ChunkCache) {
-            self.chunk_cache.retain(|pos| !chunks.contains(&pos));
+            self.chunk_cache.forget(chunks);
         }
+        lap("ChunkCache");
         let lecterns = self.lecterns.split_off(
             if moves(IslandPart::Books) {
                 chunks
@@ -474,6 +516,7 @@ impl Region {
                 const { &BTreeSet::new() }
             },
         );
+        lap("Lecterns");
         let none = const { &BTreeSet::new() };
         let pick = |part: IslandPart| if moves(part) { players } else { none };
         let new_players = split_players(&mut self.players, pick(IslandPart::Players));
@@ -483,6 +526,7 @@ impl Region {
         let peer_ips = split_players(&mut self.peer_ips, pick(IslandPart::PeerIps));
         let last_action_millis =
             split_players(&mut self.last_action_millis, pick(IslandPart::LastAction));
+        lap("Players");
 
         let IslandRandom {
             random,
@@ -570,6 +614,7 @@ impl Region {
     ) -> IslandIdentity {
         self.assert_mergeable(&other);
         other.rebase_clock(delta);
+        lap("merge rebase");
         self.merge_rebased(other)
     }
 
@@ -643,10 +688,11 @@ impl Region {
         );
         let mine = &self.chunks;
         assert_gap(
-            other.chunks.loaded_positions(),
+            other.chunks.loaded_unordered(),
             |_| false,
             |pos| mine.is_loaded(pos),
         );
+        lap("merge checks");
         let Region {
             players,
             player_grid,
@@ -698,19 +744,29 @@ impl Region {
         self.chunks
             .absorb(chunks)
             .unwrap_or_else(|_| unreachable!("前提已经检查过"));
+        lap("merge Chunks");
         self.tick_levels.absorb(tick_levels);
+        lap("merge TickLevels");
         self.block_ticks.absorb(block_ticks);
+        lap("merge BlockTicks");
         self.block_events.absorb(block_events);
+        lap("merge BlockEvents");
         self.block_entities.absorb_island(block_entities);
+        lap("merge BlockEntities");
         self.redstone.absorb(redstone);
-        self.containers.extend(containers);
-        self.block_items.extend(block_items);
-        self.command_blocks.extend(command_blocks);
+        lap("merge Redstone");
+        self.containers.absorb(containers);
+        self.block_items.absorb(block_items);
+        self.command_blocks.absorb(command_blocks);
+        lap("merge Containers/BlockItems/CommandBlocks");
         self.entities.absorb(entities);
+        lap("merge Entities");
         self.entity_tracking.absorb(entity_tracking);
+        lap("merge EntityTracking");
         self.dirty.absorb(dirty);
         self.light_changes.extend(light_changes);
         self.block_changes.changed.extend(block_changes.changed);
+        lap("merge Dirty/Light/BlockChanges");
         for (id, player) in players {
             let previous = self.players.insert(id, player);
             assert!(previous.is_none(), "玩家 {id:?} 在两个岛上");
@@ -722,6 +778,7 @@ impl Region {
         self.peer_ips.extend(peer_ips);
         self.last_action_millis.extend(last_action_millis);
         self.admin_changes.merge(admin_changes);
+        lap("merge Players");
         self.partitioning = self.partitioning.fresh_like();
         identity
     }
@@ -823,5 +880,59 @@ impl Region {
         self.lecterns.absorb(lecterns);
         self.peer_ips.extend(peer_ips);
         self.last_action_millis.extend(last_action_millis);
+    }
+}
+
+#[cfg(test)]
+pub(crate) use laps::lap;
+
+/// 正式构建：不记。
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn lap(_: &'static str) {}
+
+/// 测试专用：拆合（和拼 / 拆整个世界）每一段各花了多久，微基准按段打印。正式构建里
+/// [`lap`] 是空函数。
+///
+/// Test only: how long each stage of a split or merge (and of joining /
+/// dividing the world) took, printed per stage by the micro-benchmarks. In
+/// production builds [`lap`] is an empty function.
+#[cfg(test)]
+pub(crate) mod laps {
+    use std::{
+        cell::RefCell,
+        time::{Duration, Instant},
+    };
+
+    type Laps = Option<(Instant, Vec<(&'static str, Duration)>)>;
+
+    thread_local! {
+        static LAPS: RefCell<Laps> = const { RefCell::new(None) };
+    }
+
+    /// 开始记：之后每次 [`lap`] 记下从上一次到现在的时长。
+    pub(crate) fn start() {
+        LAPS.with(|laps| *laps.borrow_mut() = Some((Instant::now(), Vec::new())));
+    }
+
+    /// 记一段（没在记时什么都不做）。
+    pub(crate) fn lap(name: &'static str) {
+        LAPS.with(|laps| {
+            if let Some((last, out)) = laps.borrow_mut().as_mut() {
+                let now = Instant::now();
+                out.push((name, now - *last));
+                *last = now;
+            }
+        });
+    }
+
+    /// 停下并取走记下的各段。
+    pub(crate) fn take() -> Vec<(&'static str, Duration)> {
+        LAPS.with(|laps| {
+            laps.borrow_mut()
+                .take()
+                .map(|(_, out)| out)
+                .unwrap_or_default()
+        })
     }
 }

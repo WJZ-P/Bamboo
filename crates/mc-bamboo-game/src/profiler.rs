@@ -384,6 +384,11 @@ pub(crate) enum Metric {
     IslandSplit,
     /// 多岛：一次拆合从分区器定下到运行时照做等了几刻（每次一条样本）。
     IslandTopologyWait,
+    /// 多岛：因为某名玩家跟踪的区块跨了切口而推迟的拆分次数（每推迟一次一条样本）。
+    ///
+    /// Multi-island: splits postponed because a player's tracked chunks
+    /// straddle the cut (one sample per postponement).
+    IslandSplitDeferrals,
     /// 多岛：这一刻跨岛搬过去的玩家数。
     IslandCrossings,
     /// 多岛：要整个世界的命令把全部岛拼成一个的耗时（每次一条样本，计划 4.5）。
@@ -396,6 +401,11 @@ pub(crate) enum Metric {
     /// Multi-island: splitting the joined world back into its islands after
     /// the command (one sample per command).
     IslandDivide,
+    /// 多岛：要整个世界的命令在拼好的世界上执行本身的耗时（拼和拆之间，每次一条样本）。
+    ///
+    /// Multi-island: running a whole-world command itself on the joined
+    /// world, between the join and the split (one sample per command).
+    IslandWorldCommand,
     /// 混合驱动：岛派出时全部 tick 线程都忙着，从派出到开跑等了多久（每次一条样本）。
     /// 这一段不算交接（`island_handoff` 只记线程空着时的唤醒和交回）。
     ///
@@ -413,7 +423,7 @@ pub(crate) enum Metric {
 }
 
 impl Metric {
-    const ALL: [Self; 30] = [
+    const ALL: [Self; 32] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -439,9 +449,11 @@ impl Metric {
         Self::IslandMerge,
         Self::IslandSplit,
         Self::IslandTopologyWait,
+        Self::IslandSplitDeferrals,
         Self::IslandCrossings,
         Self::IslandUnify,
         Self::IslandDivide,
+        Self::IslandWorldCommand,
         Self::IslandQueueWait,
         Self::IslandDroppedTicks,
     ];
@@ -473,9 +485,11 @@ impl Metric {
             Self::IslandMerge => "island_merge",
             Self::IslandSplit => "island_split",
             Self::IslandTopologyWait => "island_topology_wait",
+            Self::IslandSplitDeferrals => "island_split_deferrals",
             Self::IslandCrossings => "island_crossings",
             Self::IslandUnify => "island_unify",
             Self::IslandDivide => "island_divide",
+            Self::IslandWorldCommand => "island_world_command",
             Self::IslandQueueWait => "island_queue_wait",
             Self::IslandDroppedTicks => "island_dropped_ticks",
             Self::SkippedCatchUps => "skipped_catch_ups",
@@ -502,6 +516,7 @@ impl Metric {
             Self::FlushBytes => "bytes",
             Self::IslandCount => "islands",
             Self::IslandTopologyWait | Self::IslandDroppedTicks => "ticks",
+            Self::IslandSplitDeferrals => "times",
             Self::IslandCrossings => "players",
             Self::SkippedCatchUps => "times",
             Self::TickTotal
@@ -514,6 +529,7 @@ impl Metric {
             | Self::IslandSplit
             | Self::IslandUnify
             | Self::IslandDivide
+            | Self::IslandWorldCommand
             | Self::IslandQueueWait => "ms",
         }
     }
@@ -531,6 +547,7 @@ impl Metric {
                 | Self::IslandSplit
                 | Self::IslandUnify
                 | Self::IslandDivide
+                | Self::IslandWorldCommand
                 | Self::IslandQueueWait
         )
     }
@@ -1034,6 +1051,14 @@ impl Profiler {
     #[cfg(test)]
     pub(crate) fn sub_histogram(&self, sub: SubPhase) -> &Histogram {
         &self.sub_phases[sub as usize]
+    }
+
+    /// 某个数量指标至今记了多少条样本（测试用）。
+    ///
+    /// How many samples a metric has taken so far (for tests).
+    #[cfg(test)]
+    pub(crate) fn count_of(&self, metric: Metric) -> u64 {
+        self.histogram(Series::Metric(metric)).count()
     }
 
     /// 这一刻开始。提前返回也不会留下脏状态：下一刻会重新设 `last_lap`，

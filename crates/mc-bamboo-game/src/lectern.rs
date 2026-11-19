@@ -50,7 +50,7 @@ const STORAGE_SLOTS: usize = 36;
 /// 这一区域里每座讲台的书，以及谁正在看。
 #[derive(Debug, Default)]
 pub(crate) struct Tables {
-    pub(super) books: BTreeMap<BlockPos, Book>,
+    pub(super) books: crate::pos_map::PosMap<Book>,
     views: BTreeMap<PlayerId, View>,
     pending: BTreeMap<PlayerId, PendingSlots>,
 }
@@ -66,13 +66,8 @@ impl Tables {
         chunks: &std::collections::BTreeSet<ChunkPos>,
         players: &std::collections::BTreeSet<PlayerId>,
     ) -> Self {
-        let books = std::mem::take(&mut self.books);
-        let (moved, kept) = books
-            .into_iter()
-            .partition(|(pos, _)| chunks.contains(&pos.chunk()));
-        self.books = kept;
         let mut out = Self {
-            books: moved,
+            books: self.books.split_off_chunks(chunks),
             ..Self::default()
         };
         for id in players {
@@ -91,7 +86,7 @@ impl Tables {
     ///
     /// Island merge: the three tables are merged.
     pub(crate) fn absorb(&mut self, other: Self) {
-        self.books.extend(other.books);
+        self.books.absorb(other.books);
         self.views.extend(other.views);
         self.pending.extend(other.pending);
     }

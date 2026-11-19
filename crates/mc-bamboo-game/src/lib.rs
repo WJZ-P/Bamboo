@@ -83,6 +83,7 @@ pub mod player_hurt;
 mod player_move;
 pub mod player_respawn;
 mod player_save;
+mod pos_map;
 mod profiler;
 pub mod region;
 mod save_data;

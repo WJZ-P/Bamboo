@@ -76,6 +76,43 @@ impl ChunkTiers {
     }
 }
 
+/// 从一个有序集合里拆出 `chunks` 里的那些：要搬的不到一半时逐个取（按升序收进新集合是
+/// 整批建树），否则扫一遍整批重建两边。两种做法结果相同。
+///
+/// Split the members in `chunks` off an ordered set: one by one when less
+/// than half moves (collecting in ascending order builds the tree in bulk), otherwise
+/// one pass rebuilding both sides in bulk. Same result either way.
+fn split_ordered(set: &mut BTreeSet<ChunkPos>, chunks: &BTreeSet<ChunkPos>) -> BTreeSet<ChunkPos> {
+    if chunks.len().saturating_mul(2) < set.len() {
+        chunks
+            .iter()
+            .filter(|pos| set.remove(pos))
+            .copied()
+            .collect()
+    } else {
+        let (moved, kept) = std::mem::take(set)
+            .into_iter()
+            .partition(|pos| chunks.contains(pos));
+        *set = kept;
+        moved
+    }
+}
+
+/// 把一个有序集合并进另一个：小的逐个插进大的，差不多大时整批归并。结果相同。
+///
+/// Merge an ordered set into another: the smaller is inserted one by one
+/// into the larger, similar sizes are merged in bulk. Same result.
+fn absorb_ordered(into: &mut BTreeSet<ChunkPos>, mut from: BTreeSet<ChunkPos>) {
+    if from.len() > into.len() {
+        std::mem::swap(into, &mut from);
+    }
+    if from.len().saturating_mul(16) < into.len() {
+        into.extend(from);
+    } else {
+        into.append(&mut from);
+    }
+}
+
 /// 方块逻辑和实体分别要求半径 1 / 2 的邻居都已交付。
 const BLOCK_RADIUS: i32 = 1;
 const ENTITY_RADIUS: i32 = 2;
@@ -85,13 +122,15 @@ const ENTITY_RADIUS: i32 = 2;
 pub(crate) struct TickLevels {
     /// 已交付区块的档位。`tiers` 里的键就是「已交付」这一事实。
     tiers: TierMap,
-    /// 能跑方块逻辑的区块。哈希集合供成员查询，有序集合供遍历/测试，
-    /// 两份一起增量维护，内容始终相同。
+    /// 能跑方块逻辑的区块，供成员查询。（以前另有一份有序的同样内容，只有测试读，
+    /// 岛拆合时却每个区块都要搬；测试现在按需从这一份排出有序的。）
+    ///
+    /// Chunks that run block logic, for membership queries. (An ordered copy
+    /// used to be kept as well, read only by tests yet moved chunk by chunk
+    /// on every island split and merge; tests now sort this one on demand.)
     blocks: ChunkSet,
-    blocks_ordered: BTreeSet<ChunkPos>,
-    /// 能跑实体的区块，同上两份。
+    /// 能跑实体的区块，同上。
     entities: ChunkSet,
-    entities_ordered: BTreeSet<ChunkPos>,
     /// 逐区块 tick 的区块：属于 `blocks`，且模拟等级 ≤31。
     random: BTreeSet<ChunkPos>,
     /// 已加载模式才启用；无限超平坦模式的查询恒为真。
@@ -119,9 +158,7 @@ impl TickLevels {
         self.enabled = false;
         self.tiers.clear();
         self.blocks.clear();
-        self.blocks_ordered.clear();
         self.entities.clear();
-        self.entities_ordered.clear();
         self.random.clear();
     }
 
@@ -145,13 +182,13 @@ impl TickLevels {
 
     /// 测试用的只读视图（按坐标有序，口径不变）。
     #[cfg(test)]
-    pub(crate) fn block_chunks(&self) -> &BTreeSet<ChunkPos> {
-        &self.blocks_ordered
+    pub(crate) fn block_chunks(&self) -> BTreeSet<ChunkPos> {
+        self.blocks.iter().copied().collect()
     }
 
     #[cfg(test)]
-    pub(crate) fn entity_chunks(&self) -> &BTreeSet<ChunkPos> {
-        &self.entities_ordered
+    pub(crate) fn entity_chunks(&self) -> BTreeSet<ChunkPos> {
+        self.entities.iter().copied().collect()
     }
 
     #[cfg(test)]
@@ -226,16 +263,8 @@ impl TickLevels {
                     to.insert(pos);
                 }
             }
-            for (from, to) in [
-                (&mut self.blocks_ordered, &mut out.blocks_ordered),
-                (&mut self.entities_ordered, &mut out.entities_ordered),
-                (&mut self.random, &mut out.random),
-            ] {
-                if from.remove(&pos) {
-                    to.insert(pos);
-                }
-            }
         }
+        out.random = split_ordered(&mut self.random, chunks);
         let (moved, kept) = std::mem::take(&mut self.block_tick_changes)
             .into_iter()
             .partition(|(pos, _)| chunks.contains(pos));
@@ -251,10 +280,8 @@ impl TickLevels {
         debug_assert_eq!(self.enabled, other.enabled);
         self.tiers.extend(other.tiers);
         self.blocks.extend(other.blocks);
-        self.blocks_ordered.extend(other.blocks_ordered);
         self.entities.extend(other.entities);
-        self.entities_ordered.extend(other.entities_ordered);
-        self.random.extend(other.random);
+        absorb_ordered(&mut self.random, other.random);
         self.block_tick_changes.extend(other.block_tick_changes);
     }
 
@@ -289,17 +316,12 @@ impl TickLevels {
             if was != eligible {
                 self.block_tick_changes.push((center, eligible));
             }
-            set_member(&mut self.blocks, &mut self.blocks_ordered, center, eligible);
+            set_member(&mut self.blocks, center, eligible);
             set_member_ordered(&mut self.random, center, random);
         }
         for center in entity_centers {
             let eligible = self.entities_eligible(center);
-            set_member(
-                &mut self.entities,
-                &mut self.entities_ordered,
-                center,
-                eligible,
-            );
+            set_member(&mut self.entities, center, eligible);
         }
     }
 
@@ -361,21 +383,17 @@ impl TickLevels {
     #[cfg(test)]
     pub(crate) fn assert_invariants(&self) {
         let (blocks, entities, random) = self.recompute_all();
-        assert_eq!(self.blocks_ordered, blocks, "方块集合和定义不一致");
-        assert_eq!(self.entities_ordered, entities, "实体集合和定义不一致");
+        assert_eq!(self.block_chunks(), blocks, "方块集合和定义不一致");
+        assert_eq!(self.entity_chunks(), entities, "实体集合和定义不一致");
         assert_eq!(self.random, random, "逐区块 tick 集合和定义不一致");
-        assert_eq!(self.blocks.len(), blocks.len(), "哈希成员集合漏了方块");
-        assert_eq!(self.entities.len(), entities.len(), "哈希成员集合漏了实体");
     }
 }
 
-fn set_member(set: &mut ChunkSet, ordered: &mut BTreeSet<ChunkPos>, pos: ChunkPos, member: bool) {
+fn set_member(set: &mut ChunkSet, pos: ChunkPos, member: bool) {
     if member {
         set.insert(pos);
-        ordered.insert(pos);
     } else {
         set.remove(&pos);
-        ordered.remove(&pos);
     }
 }
 
