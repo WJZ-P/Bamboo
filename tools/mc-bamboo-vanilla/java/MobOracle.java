@@ -1249,6 +1249,7 @@ public final class MobOracle {
                 ground(night, 12);
                 night.skyDarken = 11;
                 night.brightOutside = false;
+                night.monstersBurn = false;
                 night.mob(1, 0.5, 64.0, 0.5, 0.0F, 9L, 0);
                 night.player(20.5, 64.0, 0.5, Items.AIR);
                 scenes.add(night);
@@ -1947,16 +1948,15 @@ public final class MobOracle {
         level.injectedBrightOutside = scene.brightOutside;
         level.injectedMonstersBurn = scene.monstersBurn;
         level.injectedCanSeeSky = scene.monstersBurn;
-        // 僵尸场景用一层常量覆写 `MONSTERS_BURN`；`v -> false` 让追逐/寻路
-        // 场景不触发白天燃烧的额外随机取数，燃烧场景仍按官方静态层为真。
-        if (!scene.monstersBurn) {
-            official.attributes = EnvironmentAttributeSystem.builder()
-                    .addStaticLayers(level)
-                    .addConstantLayer(
-                            net.minecraft.world.attribute.EnvironmentAttributes.MONSTERS_BURN,
-                            v -> false)
-                    .build();
-        }
+        // `EnvironmentAttributes.MONSTERS_BURN` 的注册默认值是 false，
+        // 假世界没有主世界的 timeline 层；用一层常量显式注入场景值，
+        // 两边读的是同一个布尔，白天燃烧才会真的发生。
+        official.attributes = EnvironmentAttributeSystem.builder()
+                .addStaticLayers(level)
+                .addConstantLayer(
+                        net.minecraft.world.attribute.EnvironmentAttributes.MONSTERS_BURN,
+                        v -> scene.monstersBurn)
+                .build();
         ((TickingLevelData) level.levelData).difficulty = Difficulty.values()[scene.difficulty];
         level.nextId = FIRST_ID;
         java.util.List<ServerPlayer> players = new java.util.ArrayList<>();

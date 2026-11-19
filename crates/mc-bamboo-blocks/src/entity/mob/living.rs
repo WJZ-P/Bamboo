@@ -132,12 +132,18 @@ fn check_despawn(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     let far = mob.mob_type.despawn_distance();
     let far_sqr = f64::from(far * far);
     let near_sqr = 32.0 * 32.0;
+    // 官方第一段：超过 `despawnDistance` 且 `removeWhenFarAway` 为真立刻丢弃，
+    // 不看 `noActionTime`，也不取随机数。牛恒为假，行为与原来一致。
+    if !persistent && distance > far_sqr && mob.mob_type.removes_when_far_away() {
+        me.discard();
+        return;
+    }
     if !persistent
         && mob.no_action_time > 600
         && me.random.next_int_bounded(800) == 0
-        && distance > far_sqr
+        && distance > near_sqr
     {
-        // `removeWhenFarAway` 为真才删：牛恒为假，取数顺序和原来一样。
+        // 官方第二段：`noDespawnDistance`（所有类别都是 32）之外的 1/800 消失。
         if mob.mob_type.removes_when_far_away() {
             me.discard();
         }
@@ -463,12 +469,13 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
+    // 官方 `getLightLevelDependentMagicValue` 用 `getMaxLocalRawBrightness(pos)`
+    // 不带 `skyDarken` 参数（那个版本默认传 `getSkyDarken()`，但此处
+    // `LevelReader.getMaxLocalRawBrightness(BlockPos)` 在 26.3 是另一路）；
+    // 假世界恒返回 15，所以白天/夜里都是 3 点/刻，牛场景不受影响。
     if mob.mob_type.is_monster() {
         let eye = me.block_position();
-        let raw = ctx
-            .blocks()
-            .max_local_raw_brightness(eye, ctx.blocks().sky_darken()) as f32
-            / 15.0;
+        let raw = ctx.blocks().max_local_raw_brightness(eye, 0) as f32 / 15.0;
         let magic = raw / (4.0 - 3.0 * raw);
         if magic > 0.5 {
             mob.no_action_time += 2;

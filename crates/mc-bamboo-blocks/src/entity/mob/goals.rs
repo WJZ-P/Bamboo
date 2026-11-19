@@ -691,12 +691,13 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             if *interval > 0 && me.random.next_int_bounded(*interval) != 0 {
                 return false;
             }
-            if !kind.available() {
-                // 官方的缺实体目标也会查世界，但不会取随机数；这里只跳过搜索。
-                *found = None;
-                return false;
-            }
-            *found = nearest_attackable(me, mob, ctx, *kind);
+            // 官方每个 `NearestAttackableTargetGoal` 都先取 `nextInt(interval)`；
+            // 缺实体的目标仍注册、仍取数，只是查不到目标（场景里明确无此类实体）。
+            *found = if kind.available() {
+                nearest_attackable(me, mob, ctx, *kind)
+            } else {
+                None
+            };
             found.is_some()
         }
         Goal::RestrictSun => {

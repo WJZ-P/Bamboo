@@ -815,7 +815,11 @@ impl Report {
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,
                 bright_outside: case.bright_outside || !case.name.starts_with("zombie_"),
-                monsters_burn: case.monsters_burn || !case.name.starts_with("zombie_"),
+                monsters_burn: if case.name.starts_with("zombie_") {
+                    case.monsters_burn
+                } else {
+                    true
+                },
                 raining: case.raining,
             },
             redstone: mc_bamboo_blocks::RedstoneMemory::default(),
