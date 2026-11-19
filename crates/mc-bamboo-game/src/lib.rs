@@ -607,6 +607,139 @@ pub fn fresh_spawn_sample(config: &WorldGenConfig) -> Option<SpawnSample> {
     })
 }
 
+/// 1c 落脚点对拍的一次场景描述。方块是 `[x, y, z, 官方状态 ID]`。
+/// One spawn-landing oracle scene. Blocks are `[x, y, z, vanilla state id]`.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ReplaySpawnLanding {
+    pub blocks: Vec<[i32; 4]>,
+    pub spawn: [i32; 3],
+    pub radius: i32,
+    /// `ThreadLocalRandom.rnd` 的固定值（官方随机源从这里取 `nextLong()`）。
+    /// The pinned `ThreadLocalRandom.rnd` (vanilla draws `nextLong()` from it).
+    pub thread_seed: i64,
+    pub game_type: i32,
+    pub personal: Option<[i32; 3]>,
+    /// 故意改坏：散布半径、安全判定、兜底（改坏确认用）。
+    /// Deliberate breaks: radius, safety checks, fallback (self-test).
+    pub break_radius: bool,
+    pub break_safety: bool,
+    pub break_fallback: bool,
+}
+
+/// 1c 落脚点对拍的结果：逐位可比的坐标、半径、候选起点、随机源末态、
+/// 是否走了 `/spawnpoint` 的回退。
+/// Result of one landing oracle: bit-comparable position, radius, start
+/// offset, final random state and whether the personal spawn was missing.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpawnLandingSample {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub radius: i32,
+    pub offset: i32,
+    pub random_state: i64,
+    pub missing: bool,
+}
+
+/// 供 `mc-bamboo-vanilla mob-oracle` 对拍：用生产代码的
+/// [`spawn_landing::landing`](crate::spawn_landing::landing) 重放一个场景。
+///
+/// Replay one spawn-landing scene through the production `landing` code for
+/// the official comparison.
+#[cfg(feature = "oracle-samples")]
+pub fn spawn_landing_sample(scene: &ReplaySpawnLanding) -> SpawnLandingSample {
+    use mc_bamboo_blocks::WorldBorder;
+    use mc_bamboo_core::{BlockPos, ChunkPos};
+    use mc_bamboo_protocol::packet::play::GameMode;
+    use mc_bamboo_world::store::ChunkStore;
+
+    let mut chunks = ChunkStore::loaded();
+    // 先把出生点附近的区块登记成已加载（模板就是超平坦地形）。
+    for cx in -3..=3 {
+        for cz in -3..=3 {
+            chunks.load(
+                ChunkPos::new(cx, cz),
+                Box::new(mc_bamboo_world::column::ChunkColumn::from_template()),
+            );
+        }
+    }
+    let mut rules = crate::gamerules::GameRuleSet::vanilla();
+    let radius = if scene.break_radius {
+        (scene.radius + 1).min(32)
+    } else {
+        scene.radius
+    };
+    let _ = rules.assign(
+        mc_bamboo_data::gamerules::RESPAWN_RADIUS,
+        &radius.to_string(),
+    );
+    let border = WorldBorder::default();
+    let level_type = world_options::LevelType::Flat;
+    let spawn = crate::world_state::RespawnData::of(
+        BlockPos::new(scene.spawn[0], scene.spawn[1], scene.spawn[2]),
+        0.0,
+        0.0,
+    );
+    let game_mode = match scene.game_type {
+        2 => GameMode::Adventure,
+        _ => GameMode::Creative,
+    };
+    for &[x, y, z, state] in &scene.blocks {
+        let pos = BlockPos::new(x, y, z);
+        if chunks.is_loaded(pos.chunk()) {
+            chunks.set_block(pos, state as u32);
+        }
+    }
+    let personal = scene
+        .personal
+        .map(|[x, y, z]| crate::world_state::RespawnData::of(BlockPos::new(x, y, z), 0.0, 0.0));
+    let search = spawn_landing::Search {
+        chunks: &chunks,
+        rules: &rules,
+        level_type,
+        border: &border,
+        spawn,
+        default_game_mode: game_mode,
+    };
+    let seed = spawn_landing::oracle_initial_seed(scene.thread_seed);
+    let (mut landing, missing) = if scene.break_safety {
+        // 改坏安全判定：忽略 `noCollisionNoLiquid`，直接拿第一个候选列。
+        let mut forced = spawn_landing::find_spawn(&search, Some(seed)).expect("chunks ready");
+        forced.position.y += 1.0;
+        (forced, false)
+    } else if scene.break_fallback {
+        // 改坏兜底：把出生点 y 抬高，触发 fixup 分支时位置不同。
+        let mut forced = spawn_landing::find_spawn(&search, Some(seed)).expect("chunks ready");
+        forced.position.z += 1.0;
+        (forced, false)
+    } else {
+        spawn_landing::landing_from_search(&search, personal, Some(seed)).expect("chunks ready")
+    };
+    // 冒险 / 强制个人点分支不取随机数；Java 对拍仍按同一固定种子报告
+    // 候选序列的 radius / offset / 末态，这里照同样口径。
+    // Adventure / forced-personal skip the RNG; the Java oracle still reports
+    // the replayed candidate-walk values with the same fixed seed.
+    if missing || scene.game_type == 2 || personal.is_some() {
+        let (radius, offset, state) = spawn_landing::oracle_candidate_walk(&search, seed);
+        landing.radius = radius;
+        landing.offset = offset;
+        landing.random_state = state;
+    }
+    let _ = missing;
+    SpawnLandingSample {
+        x: landing.position.x,
+        y: landing.position.y,
+        z: landing.position.z,
+        radius: landing.radius,
+        offset: landing.offset,
+        random_state: landing.random_state,
+        missing: personal.is_some()
+            && !spawn_landing::personal_spawn_ready(&search, personal.expect("checked")),
+    }
+}
+
 /// 供 `mc-bamboo-vanilla execute-oracle` 对拍：在固定的小块世界里重放一条
 /// `/execute`，返回 `[stone_at_4_6, stone_at_cow_a, stone_at_cow_b, score, success, feedback]`
 /// 中能和官方逐项比较的数字。`feedback` 是反馈翻译键的 FNV-1a 哈希截断。
@@ -1160,6 +1293,12 @@ pub fn replay_player_life(
         _ => world_state::Difficulty::Normal,
     });
     let rules = global.rules_mut();
+    // 官方对拍的假世界重生点是固定的 `(8.5,-60,8.5)`，等价于官方
+    // `respawn_radius = 0`；两边一起用半径 0，1b 的包序列逐字节不变。
+    // The official fake world respawns at a fixed `(8.5,-60,8.5)`, which is
+    // vanilla with `respawn_radius = 0`. Both sides use radius 0 so the 1b
+    // packet sequence stays byte-identical.
+    let _ = rules.assign(mc_bamboo_data::gamerules::RESPAWN_RADIUS, "0");
     let mut set = |index: usize, value: bool| {
         let _ = rules.assign(index, if value { "true" } else { "false" });
     };

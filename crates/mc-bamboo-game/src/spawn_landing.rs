@@ -164,6 +164,54 @@ impl Landing {
     }
 }
 
+/// 对拍用：按官方 `PlayerSpawnFinder` 的构造顺序重放一次候选序列，
+/// 返回 `(radius, offset, 随机源末态)`。冒险 / 强制个人点分支本身不取随机数，
+/// 但 Java 对拍仍用这个口径报告这几个量。
+/// Oracle helper: replay the official candidate walk's RNG draws and return
+/// `(radius, offset, final RNG state)`. Adventure / forced personal branches
+/// do not draw, but the Java oracle reports these values with the same seed.
+#[cfg(feature = "oracle-samples")]
+pub(crate) fn oracle_candidate_walk(search: &Search<'_>, seed: i64) -> (i32, i32, i64) {
+    let wanted = search
+        .rules
+        .int(mc_bamboo_data::gamerules::RESPAWN_RADIUS)
+        .max(0);
+    let distance = search
+        .border
+        .distance_to_border(f64::from(search.spawn.pos.x), f64::from(search.spawn.pos.z));
+    let border = distance.floor() as i32;
+    let mut radius = wanted.min(border);
+    if border <= 1 {
+        radius = 1;
+    }
+    let side = radius.saturating_mul(2).saturating_add(1);
+    let count = MAX_CANDIDATES.min(side.saturating_mul(side)).max(1);
+    let mut random = JavaRandom::from_state(seed);
+    let offset = random.next_int_bounded(count);
+    (radius, offset, random.state())
+}
+
+/// 官方 `RandomSource.createThreadLocalInstance()` 的播种链：
+/// `ThreadLocalRandom.current().nextLong()` → `SingleThreadedRandomSource.setSeed`
+/// （xor 0x5DEECE66D 再掩 48 位）。对拍把 `ThreadLocalRandom` 的内部 `rnd`
+/// 固定成 `thread_seed`，这里算出 `JavaRandom` 应有的初始状态。
+///
+/// Vanilla's `RandomSource.createThreadLocalInstance()` seeding chain:
+/// `ThreadLocalRandom.current().nextLong()` → `SingleThreadedRandomSource.setSeed`
+/// (xor 0x5DEECE66D then mask 48 bits). The oracle pins `ThreadLocalRandom`'s
+/// internal `rnd` to `thread_seed`; this computes the matching `JavaRandom`
+/// initial state.
+#[cfg(feature = "oracle-samples")]
+pub(crate) fn oracle_initial_seed(thread_seed: i64) -> i64 {
+    const MULTIPLIER: u64 = 0x5_DEEC_E66D;
+    const MASK: u64 = (1 << 48) - 1;
+    // 对拍把 `PlayerSpawnFinder` 的随机源直接用固定种子构造：
+    // `SingleThreadedRandomSource.setSeed` xor MULTIPLIER 得到 48 位初态。
+    // The oracle constructs the official RNG from a fixed seed;
+    // `SingleThreadedRandomSource.setSeed` xors MULTIPLIER for its state.
+    ((thread_seed as u64 ^ MULTIPLIER) & MASK) as i64
+}
+
 /// 官方 `PlayerSpawnFinder.findSpawn` 的结果。给 `seed` 时随机源可复现
 /// （生产代码传 `None`，照官方从线程本地随机源取不确定的种子；对拍传固定值）。
 ///
@@ -215,7 +263,14 @@ fn find_spawn_impl(
     let side = radius.saturating_mul(2).saturating_add(1);
     let count = MAX_CANDIDATES.min(side.saturating_mul(side)).max(1);
     let coprime = if count <= 16 { count - 1 } else { 17 };
-    let mut random = JavaRandom::new(seed.unwrap_or_else(thread_local_seed));
+    // 对拍传进来的 `seed` 是官方 `SingleThreadedRandomSource` 的 48 位内部
+    // 状态；生产传 `None` 时用新的 `new Random(seed)`。
+    // The oracle's `seed` is the official 48-bit internal state; production
+    // passes `None` and constructs `new Random(seed)`.
+    let mut random = match seed {
+        Some(state) => JavaRandom::from_state(state),
+        None => JavaRandom::new(thread_local_seed()),
+    };
     let offset = random.next_int_bounded(count);
     let mut unready = false;
     for index in 0..count {
@@ -544,6 +599,47 @@ pub(crate) fn landing(
     let search = search_from(region);
     let landing = find_spawn_impl(&search, seed, allow_partial)?;
     Ok((landing, personal.is_some()))
+}
+
+/// 供对拍用：直接在一份 `Search` 上跑共用的落位逻辑（不需要完整 `Region`）。
+/// For the oracle: run the shared landing logic on a bare `Search`.
+#[cfg(feature = "oracle-samples")]
+pub(crate) fn landing_from_search(
+    search: &Search<'_>,
+    personal: Option<RespawnData>,
+    seed: Option<i64>,
+) -> Result<(Landing, bool), NotReady> {
+    if let Some(personal) = personal
+        && personal_spawn_ready(search, personal)
+    {
+        return Ok((
+            Landing {
+                position: Vec3::new(
+                    f64::from(personal.pos.x) + 0.5,
+                    f64::from(personal.pos.y) + 0.1,
+                    f64::from(personal.pos.z) + 0.5,
+                ),
+                yaw: personal.yaw,
+                pitch: personal.pitch,
+                candidate: None,
+                radius: 0,
+                offset: 0,
+                random_state: 0,
+            },
+            false,
+        ));
+    }
+    let landing = find_spawn(search, seed)?;
+    Ok((landing, personal.is_some()))
+}
+
+/// 个人点的两格能不能重生（官方 `isPossibleToRespawnInThis`）。
+/// Whether a personal spawn's two blocks allow respawning.
+#[cfg(feature = "oracle-samples")]
+pub(crate) fn personal_spawn_ready(search: &Search<'_>, spawn: RespawnData) -> bool {
+    let feet = state_at(search, spawn.pos, false).unwrap_or(blocks::STONE);
+    let head = state_at(search, spawn.pos.offset(0, 1, 0), false).unwrap_or(blocks::STONE);
+    respawn_block_allowed(feet) && respawn_block_allowed(head)
 }
 
 /// `Block.isPossibleToRespawnInThis`：不是固体也不是液体。

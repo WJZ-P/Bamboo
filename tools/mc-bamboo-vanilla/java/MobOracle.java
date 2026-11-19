@@ -126,6 +126,14 @@ import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.level.entity.LevelEntityGetter;
 import net.minecraft.world.level.gameevent.GameEvent;
 import net.minecraft.world.level.gamerules.GameRules;
+import net.minecraft.world.level.gamerules.GameRule;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.util.RandomSource;
+import io.netty.util.internal.ThreadLocalRandom;
+import net.minecraft.server.level.PlayerSpawnFinder;
+import net.minecraft.server.level.TicketType;
+import java.util.concurrent.CompletableFuture;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.storage.LevelData;
 import net.minecraft.world.level.storage.loot.LootTable;
@@ -307,6 +315,15 @@ public final class MobOracle {
         boolean playerPackets;
         /** 1b 玩家生命场景：死亡 / 重生 / 饥饿与回血。 */
         boolean playerLife;
+        /** 1c 落脚点场景：官方 `PlayerSpawnFinder.findSpawn` / 个人出生点。 */
+        boolean spawnScene;
+        /** 落脚点场景：出生点、规则半径、随机源种子、默认游戏模式、个人出生点。 */
+        int[] spawnAt = {8, 0, 8};
+        int spawnRadius = 10;
+        long spawnSeed;
+        int spawnGameType; // 0 creative, 2 adventure
+        int[] personalAt;  // null = 没有个人点；三元素坐标
+        int personalYaw;
         /** 死亡场景的规则：keepInventory / immediateRespawn / showDeathMessages / naturalRegeneration。 */
         boolean keepInventory;
         boolean immediateRespawn;
@@ -485,6 +502,24 @@ public final class MobOracle {
 
         Scene respawnAt(int tick) {
             respawnTick = tick;
+            return this;
+        }
+
+        Scene spawn(int x, int y, int z, int radius, long seed) {
+            spawnScene = true;
+            spawnAt = new int[] {x, y, z};
+            spawnRadius = radius;
+            spawnSeed = seed;
+            return this;
+        }
+
+        Scene spawnGameType(int id) {
+            spawnGameType = id;
+            return this;
+        }
+
+        Scene personalSpawn(int x, int y, int z) {
+            personalAt = new int[] {x, y, z};
             return this;
         }
 
@@ -1165,13 +1200,80 @@ public final class MobOracle {
                 naturalOff.equipment(new int[] {0, 0, 0, 0, 0}, new int[] {0, 0, 0, 0});
                 scenes.add(naturalOff);
             }
+            // ---- 1c：进服 / 重生落脚点，官方 `PlayerSpawnFinder.findSpawn` ----
+            scenes.add(spawnSurface());
+            scenes.add(spawnWater());
+            scenes.add(spawnTree());
+            scenes.add(spawnRadiusZero());
+            scenes.add(spawnPersonalOk());
+            scenes.add(spawnPersonalBlocked());
+            scenes.add(spawnAdventure());
             return scenes;
+        }
+
+        /** 普通地表的缺省半径 10。半径 0 时覆盖同一个出生点（对拍全程同一套方块）。 */
+        private static Scene spawnBase(String name, int radius, long seed, int[] at) {
+            Scene scene = new Scene(name).ticks(0).spawn(at[0], at[1], at[2], radius, seed);
+            // 和 Bamboo 的超平坦模板一致：y=-64 基岩、-63/-62 泥土、-61 草。
+            // 场景坐标和 Java 假世界的 MIN_Y=-64 对齐。
+            scene.fill(-20, -64, -20, 20, -64, 20, STONE);
+            scene.fill(-20, -63, -20, 20, -62, 20, DIRT);
+            scene.fill(-20, -61, -20, 20, -61, 20, GRASS);
+            return scene;
+        }
+
+        private static Scene spawnSurface() {
+            return spawnBase("player_spawn_surface", 10, 12345L, new int[] {8, -60, 8});
+        }
+
+        private static Scene spawnRadiusZero() {
+            return spawnBase("player_spawn_radius_zero", 0, 12345L, new int[] {8, -60, 8});
+        }
+
+        /** 出生点附近有一片水：水面列被 WORLD_SURFACE/OCEAN_FLOOR 排除。 */
+        private static Scene spawnWater() {
+            Scene scene = spawnBase("player_spawn_water", 10, 777L, new int[] {8, -60, 8});
+            scene.fill(6, -60, 6, 10, -60, 10, WATER);
+            return scene;
+        }
+
+        /** 出生点附近有一棵树（原木 + 树叶）：候选必须走 noCollisionNoLiquid。 */
+        private static Scene spawnTree() {
+            Scene scene = spawnBase("player_spawn_tree", 10, 4242L, new int[] {8, -60, 8});
+            scene.fill(8, -60, 8, 8, -57, 8, Blocks.OAK_LOG.defaultBlockState());
+            scene.fill(6, -56, 6, 10, -56, 10, Blocks.OAK_LEAVES.defaultBlockState());
+            return scene;
+        }
+
+        /** `/spawnpoint` 设下两格都能重生的个人点：官方 forced 分支直接落地。 */
+        private static Scene spawnPersonalOk() {
+            Scene scene = spawnBase("player_spawn_personal_ok", 10, 99L, new int[] {8, -60, 8});
+            scene.personalSpawn(14, -60, 14);
+            return scene;
+        }
+
+        /** 个人点的两格有实心方块：官方回退到世界出生点 + findSpawn。 */
+        private static Scene spawnPersonalBlocked() {
+            Scene scene = spawnBase("player_spawn_personal_blocked", 0, 99L, new int[] {8, -60, 8});
+            scene.personalSpawn(14, -60, 14);
+            scene.set(14, -60, 14, STONE);
+            return scene;
+        }
+
+        /** 冒险模式：findSpawn 直接 fixupSpawnHeight，不散布。 */
+        private static Scene spawnAdventure() {
+            return spawnBase("player_spawn_adventure", 10, 31415L, new int[] {8, -60, 8})
+                    .spawnGameType(2);
         }
     }
 
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
+        if (scene.spawnScene) {
+            playSpawn(official, out, scene);
+            return;
+        }
         if (scene.playerLife) {
             playLife(official, out, scene);
             return;
@@ -1734,6 +1836,21 @@ public final class MobOracle {
     // ---- 1b：玩家生命场景 ----
 
     /** 官方 `GameRules.get` 在假世界里改一条布尔规则。 */
+    private static void setRule(Official official, GameRule<Integer> rule, int value) {
+        // 整数规则（1c 的 `respawn_radius`）：和布尔版一样直接改底层 map。
+        try {
+            Field rules = GameRules.class.getDeclaredField("rules");
+            rules.setAccessible(true);
+            Object map = rules.get(official.gameRules);
+            java.lang.reflect.Method set = map.getClass().getDeclaredMethod(
+                    "set", GameRule.class, Object.class);
+            set.setAccessible(true);
+            set.invoke(map, rule, Integer.valueOf(value));
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
     private static void setRule(Official official, GameRule<Boolean> rule, boolean value) {
         // `GameRules.set` 会通知 `NotificationManager`（假服务端没有），
         // 这里直接改底层 `GameRuleMap`，语义和 `GameRules.get` 读到的一样。
@@ -1748,6 +1865,153 @@ public final class MobOracle {
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException(error);
         }
+    }
+
+    /** `ThreadLocalRandom.nextLong()` 在内部 `rnd == seed` 时返回的值。 */
+    private static long nettyNextLong(long seed) {
+        long hi = (seed * 0x5DEECE66DL + 0xBL) & ((1L << 48) - 1);
+        long lo = (hi * 0x5DEECE66DL + 0xBL) & ((1L << 48) - 1);
+        // `java.util.Random.nextLong()` 的两个 next(32) 都是 int，低半要符号扩展。
+        // Both next(32) values are ints; the low half is sign-extended.
+        return ((long) (int) (hi >>> 16) << 32) + (int) (lo >>> 16);
+    }
+
+    /** 1c 落脚点：在假世界里跑官方 `PlayerSpawnFinder.findSpawn`，用固定随机源逐位对拍。 */
+    private static void playSpawn(Official official, Writer out, Scene scene) throws Exception {
+        FakeLevel level = FakeLevel.create(official);
+        level.blocks.putAll(scene.blocks);
+        // 让假世界的区块把方块写进 LevelChunkSection 后 prime 官方高度图，
+        // `PlayerSpawnFinder.getLevelRespawnPos` 读的就是这几张表。
+        for (int cx = -3; cx <= 3; cx++) {
+            for (int cz = -3; cz <= 3; cz++) {
+                LevelChunk chunk = (LevelChunk) level.getChunk(cx, cz, ChunkStatus.FULL, false);
+                Heightmap.primeHeightmaps(chunk, ChunkStatus.FINAL_HEIGHTMAPS);
+            }
+        }
+        setRule(official, GameRules.RESPAWN_RADIUS, scene.spawnRadius);
+        official.server.spawnGameType = GameType.values()[scene.spawnGameType];
+        BlockPos spawn = new BlockPos(scene.spawnAt[0], scene.spawnAt[1], scene.spawnAt[2]);
+        // 官方 `RandomSource.createThreadLocalInstance()` 取的是
+        // `ThreadLocalRandom.current().nextLong()`；对拍把它的内部 LCG 状态
+        // 直接设成场景给的种子，使 `SingleThreadedRandomSource` 的起点确定。
+        Field rnd = ThreadLocalRandom.class.getDeclaredField("rnd");
+        rnd.setAccessible(true);
+        ThreadLocalRandom tlr = ThreadLocalRandom.current();
+        long baseSeed = scene.spawnSeed;
+
+        // `MinecraftServer.getServer()` 的 execute / managedBlock 桩直接跑任务；
+        // `Chunks.addTicketAndLoadWithRadius` 立刻完成（假世界区块全在内存里）。
+        // 反射构造官方 `PlayerSpawnFinder`，再把它的 `offset` 字段换成
+        // 「固定种子的 `SingleThreadedRandomSource.nextInt(count)`」的结果，
+        // 这样既不依赖 `ThreadLocalRandom` 的线程，也逐位复刻官方候选序列。
+        int borderDistance = net.minecraft.util.Mth.floor(
+                level.getWorldBorder().getDistanceToBorder(spawn.getX(), spawn.getZ()));
+        int radius = Math.min(Math.max(0, scene.spawnRadius), borderDistance);
+        if (borderDistance <= 1) radius = 1;
+        int count = Math.min(1024, (radius * 2 + 1) * (radius * 2 + 1));
+        // `ThreadLocalRandom.current().nextLong()` 不推进 `rnd`（初始化后是
+        // no-op），真正的构造种子就是场景给的 `baseSeed` 经过一次 LCG 后的值。
+        // 用官方 `createThreadLocalInstance(long)` 从同一值重建，逐位一致。
+        // 纯 LCG 算出官方 `SingleThreadedRandomSource.setSeed(seed)` 的 48 位
+        // 状态和 `nextInt(count)` 后的末态，不碰任何线程本地随机源。
+        final long[] state = {(baseSeed ^ 0x5DEECE66DL) & ((1L << 48) - 1)};
+        java.util.function.IntUnaryOperator nextBits = bits -> {
+            state[0] = (state[0] * 0x5DEECE66DL + 0xBL) & ((1L << 48) - 1);
+            return (int) (state[0] >>> (48 - bits));
+        };
+        int offset;
+        if ((count & (count - 1)) == 0) {
+            offset = (int) (((long) count * nextBits.applyAsInt(31)) >>> 31);
+        } else {
+            while (true) {
+                int bits = nextBits.applyAsInt(31);
+                int value = bits % count;
+                if (bits - value + (count - 1) >= 0) {
+                    offset = value;
+                    break;
+                }
+            }
+        }
+        long sourceSeed = state[0];
+        java.lang.reflect.Constructor<PlayerSpawnFinder> ctor =
+                PlayerSpawnFinder.class.getDeclaredConstructor(
+                        net.minecraft.server.level.ServerLevel.class, BlockPos.class, int.class);
+        ctor.setAccessible(true);
+        // 构造前才把 `rnd` 钉成场景种子，确保没有别的代码先取数。
+        rnd.setLong(tlr, baseSeed);
+        PlayerSpawnFinder finder = ctor.newInstance(level, spawn, radius);
+        Field offsetField = PlayerSpawnFinder.class.getDeclaredField("offset");
+        offsetField.setAccessible(true);
+        offsetField.setInt(finder, offset);
+        Vec3 position;
+        if (official.server.spawnGameType == GameType.ADVENTURE) {
+            // `findSpawn` 的冒险模式分支：直接 `fixupSpawnHeight`，不散布。
+            java.lang.reflect.Method fixup = PlayerSpawnFinder.class.getDeclaredMethod(
+                    "fixupSpawnHeight", net.minecraft.world.level.CollisionGetter.class,
+                    BlockPos.class);
+            fixup.setAccessible(true);
+            position = (Vec3) fixup.invoke(null, level, spawn);
+        } else {
+            java.lang.reflect.Method schedule =
+                    PlayerSpawnFinder.class.getDeclaredMethod("scheduleNext");
+            schedule.setAccessible(true);
+            schedule.invoke(finder);
+            Field done = PlayerSpawnFinder.class.getDeclaredField("finishedFuture");
+            done.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            CompletableFuture<Vec3> future = (CompletableFuture<Vec3>) done.get(finder);
+            position = future.join();
+        }
+
+        // 官方 `findRespawnAndUseSpawnBlock` 的 forced `/spawnpoint` 分支：
+        // 两格 `isPossibleToRespawnInThis` 时直接落地，否则回退到世界出生点。
+        boolean missing = false;
+        if (scene.personalAt != null) {
+            BlockPos at = new BlockPos(scene.personalAt[0], scene.personalAt[1], scene.personalAt[2]);
+            boolean feet = level.getBlockState(at).getBlock()
+                    .isPossibleToRespawnInThis(level.getBlockState(at));
+            BlockPos above = at.above();
+            boolean head = level.getBlockState(above).getBlock()
+                    .isPossibleToRespawnInThis(level.getBlockState(above));
+            if (feet && head) {
+                position = new Vec3(at.getX() + 0.5, at.getY() + 0.1, at.getZ() + 0.5);
+            } else {
+                missing = true;
+                // 世界出生点的搜索就是上面 findSpawn 的结果。
+            }
+        }
+
+
+        StringBuilder line = new StringBuilder(1 << 16);
+        line.append("{\"type\":\"case\",\"name\":").append(jsonString(scene.name));
+        line.append(",\"firstId\":").append(FIRST_ID);
+        line.append(",\"startTime\":").append(START_TIME);
+        line.append(",\"blocks\":").append(blockArray(scene.blocks));
+        line.append(",\"cows\":[],\"players\":[],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append(",\"steps\":[[]],\"packets\":null,\"syncFlags\":null,\"spawns\":null");
+        line.append(",\"deathKind\":0,\"fireTicks\":0,\"interactActions\":[],\"interactions\":null");
+        line.append(",\"playerSteps\":null,\"playerPackets\":null,\"keyPackets\":null");
+        line.append(",\"spawnResult\":{\"x\":").append(Double.doubleToRawLongBits(position.x));
+        line.append(",\"y\":").append(Double.doubleToRawLongBits(position.y));
+        line.append(",\"z\":").append(Double.doubleToRawLongBits(position.z));
+        line.append(",\"radius\":").append(scene.spawnRadius);
+        line.append(",\"seed\":").append(scene.spawnSeed);
+        line.append(",\"offset\":").append(offset);
+        line.append(",\"randomState\":").append(sourceSeed);
+        line.append(",\"gameType\":").append(scene.spawnGameType);
+        line.append(",\"personal\":");
+        if (scene.personalAt == null) {
+            line.append("null");
+        } else {
+            line.append('[').append(scene.personalAt[0]).append(',').append(scene.personalAt[1])
+                    .append(',').append(scene.personalAt[2]).append(']');
+        }
+        line.append(",\"missing\":").append(missing);
+        line.append(",\"spawnAt\":[").append(scene.spawnAt[0]).append(',').append(scene.spawnAt[1])
+                .append(',').append(scene.spawnAt[2]).append(']');
+        line.append("}}\n");
+        out.write(line.toString());
+        out.flush();
     }
 
     /**
@@ -2710,6 +2974,8 @@ public final class MobOracle {
         public java.util.Map<ResourceKey<Level>, ServerLevel> levels = java.util.Map.of();
         /** 战利品表的随机序列，世界种子和 Bamboo 的缺省一样是 0。 */
         private RandomSequences sequences = new RandomSequences();
+        /** 1c：`WorldData.getGameType()`（冒险模式走 findSpawn 的 fixup 分支）。 */
+        GameType spawnGameType = GameType.CREATIVE;
 
         private FakeServer() {
             super(null, null, null, null, null, null, null, null, null, null);
@@ -2746,6 +3012,24 @@ public final class MobOracle {
         }
 
         @Override
+        public net.minecraft.world.level.storage.WorldData getWorldData() {
+            // `PlayerSpawnFinder.findSpawn` 只读 `getGameType()`；用接口代理
+            // 给一个最小实现，不构造真正的 WorldData。
+            return (net.minecraft.world.level.storage.WorldData) java.lang.reflect.Proxy.newProxyInstance(
+                    net.minecraft.world.level.storage.WorldData.class.getClassLoader(),
+                    new Class<?>[] {net.minecraft.world.level.storage.WorldData.class},
+                    (proxy, method, args) -> {
+                        if (method.getName().equals("getGameType")) return spawnGameType;
+                        if (method.getName().equals("isFlatWorld")) return true;
+                        Class<?> type = method.getReturnType();
+                        if (type == boolean.class) return false;
+                        if (type == int.class) return 0;
+                        if (type == long.class) return 0L;
+                        return null;
+                    });
+        }
+
+        @Override
         public ServerLevel getLevel(ResourceKey<Level> key) {
             return levels.get(key);
         }
@@ -2765,7 +3049,33 @@ public final class MobOracle {
         public void sendSystemMessage(Component message) {}
 
         @Override
-        public void managedBlock(java.util.function.BooleanSupplier condition) {}
+        public void managedBlock(java.util.function.BooleanSupplier condition) {
+            while (!condition.getAsBoolean()) {
+                // 假世界的 chunk future 已经完成，轮询任务队列即可。
+                if (!this.pollTaskForSpawn()) break;
+            }
+        }
+
+        @Override
+        public void execute(Runnable task) {
+            task.run();
+        }
+
+        @Override
+        public void executeIfPossible(Runnable task) {
+            task.run();
+        }
+
+        private boolean pollTaskForSpawn() {
+            try {
+                java.lang.reflect.Method poll = net.minecraft.util.thread.BlockableEventLoop.class
+                        .getDeclaredMethod("pollTask");
+                poll.setAccessible(true);
+                return (Boolean) poll.invoke(this);
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException(error);
+            }
+        }
 
         @Override
         public boolean allowFlight() {
@@ -2841,6 +3151,13 @@ public final class MobOracle {
         @Override
         public LevelChunk getChunkNow(int chunkX, int chunkZ) {
             return (LevelChunk) level.getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+        }
+
+        @Override
+        public CompletableFuture<?> addTicketAndLoadWithRadius(
+                TicketType type, ChunkPos pos, int radius) {
+            // 假世界所有区块都在内存里，官方的加载 future 立刻完成。
+            return CompletableFuture.completedFuture(null);
         }
 
         @Override
