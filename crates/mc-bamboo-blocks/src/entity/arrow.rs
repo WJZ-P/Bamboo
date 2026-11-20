@@ -216,7 +216,9 @@ fn tick_or_check_ground(me: &mut Entity, blocks: &dyn BlockView) -> bool {
             arrow.life += 1;
             me.removed = arrow.life >= 1200;
         }
-        me.apply_effects_from_blocks(blocks);
+        if !me.removed {
+            me.apply_effects_from_blocks(blocks);
+        }
         true
     } else {
         false
@@ -672,6 +674,30 @@ mod tests {
         let arrow = world.entity(uid).unwrap();
         assert_eq!(arrow.position, Vec3::new(1.5, 64.5, 0.5));
         assert_eq!(arrow.delta, Vec3::new(f64::from(0.99_f32), 0.0, 0.0));
+    }
+
+    #[test]
+    fn embedded_arrow_is_removed_at_age_1200() {
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        let pos = BlockPos::new(0, 64, 0);
+        let state = BlockState(mc_bamboo_data::blocks::STONE);
+        level.set(pos, state);
+        let mut arrow = Entity::arrow(Vec3::new(0.5, 64.5, 0.5));
+        let EntityKind::Arrow(data) = &mut arrow.kind else {
+            unreachable!()
+        };
+        data.in_ground = true;
+        data.last_state = Some(state);
+        data.life = 1198;
+        let mut world = World::new(&mut level, &mut ticks);
+        let uid = world.spawn_entity(arrow);
+        world.tick_entities();
+        assert!(
+            matches!(&world.entity(uid).unwrap().kind, EntityKind::Arrow(data) if data.life == 1199)
+        );
+        world.tick_entities();
+        assert!(world.entity(uid).is_none());
     }
 
     #[test]

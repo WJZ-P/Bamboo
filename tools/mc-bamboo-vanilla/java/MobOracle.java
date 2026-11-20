@@ -230,7 +230,7 @@ public final class MobOracle {
                 cases++;
             }
             for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "arrow_block_overlaps_flight",
-                    "arrow_no_gravity",
+                    "arrow_no_gravity", "arrow_despawn",
                     "skeleton_bow_normal", "skeleton_bow_hard")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
@@ -2375,6 +2375,8 @@ public final class MobOracle {
         boolean wall = name.equals("arrow_hits_wall");
         boolean overlap = name.equals("arrow_block_overlaps_flight");
         boolean noGravity = name.equals("arrow_no_gravity");
+        boolean despawn = name.equals("arrow_despawn");
+        boolean hasWall = wall || noGravity || despawn;
         Difficulty difficulty = name.endsWith("_hard") ? Difficulty.HARD : Difficulty.NORMAL;
         FakeLevel world = FakeLevel.create(official);
         world.injectedBrightOutside = false;
@@ -2391,13 +2393,13 @@ public final class MobOracle {
             }
         }
         BlockPos obstacle = new BlockPos(7, 65, 0);
-        if (wall || noGravity) world.blocks.put(obstacle.asLong(), Blocks.STONE.defaultBlockState());
+        if (hasWall) world.blocks.put(obstacle.asLong(), Blocks.STONE.defaultBlockState());
         String blocks = blockArray(world.blocks);
         int playerId = FIRST_ID + 1024;
         ServerPlayer player = new ServerPlayer(official.server, world,
                 new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
         player.setId(playerId);
-        double playerX = skeleton ? 11.5 : (wall || noGravity) ? 18.5 : 6.5;
+        double playerX = skeleton ? 11.5 : hasWall ? 18.5 : 6.5;
         player.setPos(playerX, 64.0, 0.5);
         setRandom(player, ENTITY_RANDOM_SEED);
         player.setYRot(0.0F);
@@ -2452,6 +2454,9 @@ public final class MobOracle {
                 if (wall && tick == 12) world.blocks.remove(obstacle.asLong());
                 if (overlap && tick == 2) world.blocks.put(BlockPos.asLong(0, 65, 0), Blocks.STONE.defaultBlockState());
                 if (noGravity && tick == 10) arrows.getFirst().setNoGravity(false);
+                if (despawn && tick == 6) {
+                    put(net.minecraft.world.entity.projectile.arrow.AbstractArrow.class, arrows.getFirst(), "life", 1198);
+                }
                 if (player.damageCooldownTime > 0) player.damageCooldownTime--;
                 if (player.hurtTime > 0) player.hurtTime--;
                 if (shooter != null) {
@@ -2512,7 +2517,8 @@ public final class MobOracle {
             zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
         }
         if (name.equals("arrow_hits_player") && player.getHealth() == 20.0F
-                || (wall || noGravity) && embeds == 0 || overlap && embeds != ticks - 1 || skeleton && arrows.size() < 2) {
+                || hasWall && embeds == 0 || overlap && embeds != ticks - 1 || skeleton && arrows.size() < 2
+                || despawn && (embeds != 2 || !arrows.getFirst().isRemoved())) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
         }
         out.write("{\"type\":\"projectile\",\"name\":" + jsonString(name) + ",\"difficulty\":" + difficulty.getId()

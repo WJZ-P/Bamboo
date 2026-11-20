@@ -161,6 +161,13 @@ impl Report {
                         }
                     });
                 }
+                if case.name == "arrow_despawn" && tick == 6 {
+                    level.entities.with_mut(case.first_id, |entity| {
+                        if let EntityKind::Arrow(data) = &mut entity.kind {
+                            data.life = 1198;
+                        }
+                    });
+                }
                 level.game.as_mut().unwrap().tick_cooldowns();
                 ticks.set_time(1000 + tick as i64);
                 World::new(&mut level, &mut ticks).tick_entities();
