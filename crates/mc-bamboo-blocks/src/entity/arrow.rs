@@ -195,6 +195,9 @@ impl Entity {
         arrow.weapon = shot.weapon.clone();
         arrow.base_damage = 2.0;
         if let Some(weapon) = &arrow.weapon {
+            if weapon.item == mc_bamboo_data::items::CROSSBOW {
+                arrow.sound = mc_bamboo_data::sounds::sound_event("minecraft:item.crossbow.hit");
+            }
             arrow.pierce = enchantment_level(weapon, "minecraft:piercing") as i8;
             if enchantment_level(weapon, "minecraft:flame") > 0 {
                 entity.remaining_fire_ticks = 2000;

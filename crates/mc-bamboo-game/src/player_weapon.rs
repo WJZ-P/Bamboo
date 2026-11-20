@@ -79,11 +79,13 @@ pub(crate) fn start(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
     let creative = player.game_mode == GameMode::Creative;
     match stack.item {
         items::BOW => {
-            if !creative && find_projectile(player, &stack).is_none() {
+            if !creative && find_projectile(player).is_none() {
                 return false;
             }
-            player.weapon_use = Some(WeaponUse::new(hand, stack.item));
-            player.sync.metadata_dirty = true;
+            if player.weapon_use.is_none() && player.use_item.is_none() {
+                player.weapon_use = Some(WeaponUse::new(hand, stack.item));
+                player.sync.metadata_dirty = true;
+            }
             true
         }
         items::CROSSBOW => {
@@ -91,11 +93,13 @@ pub(crate) fn start(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
                 shoot_crossbow(region, id, hand);
                 return true;
             }
-            if find_projectile(player, &stack).is_none() {
+            if find_projectile(player).is_none() {
                 return false;
             }
-            player.weapon_use = Some(WeaponUse::new(hand, stack.item));
-            player.sync.metadata_dirty = true;
+            if player.weapon_use.is_none() && player.use_item.is_none() {
+                player.weapon_use = Some(WeaponUse::new(hand, stack.item));
+                player.sync.metadata_dirty = true;
+            }
             true
         }
         _ => false,
@@ -175,26 +179,22 @@ fn charge_tick(region: &mut Region, id: PlayerId, hand: Hand, time_held: i32) {
         }
     }
     let position = player_position(region, id);
-    let (start_sound, end_sound) = charging_sounds(&stack);
-    if play_start && let Some(name) = start_sound {
+    let (start_sound, mid_sound) = charging_sounds(&stack);
+    if play_start {
+        play_sound(region, position, start_sound, 0.5, 1.0);
+    }
+    if play_mid && let Some(name) = mid_sound {
         play_sound(region, position, name, 0.5, 1.0);
     }
-    if play_mid {
+    if percent >= 1.0 && !is_charged(&stack) && load_projectiles(region, id, hand) {
+        let pitch = 1.0 / (level_random_float(region) * 0.5 + 1.0) + 0.2;
         play_sound(
             region,
             position,
-            "minecraft:item.crossbow.loading_middle",
-            0.5,
+            "minecraft:item.crossbow.loading_end",
             1.0,
+            pitch,
         );
-    }
-    if percent >= 1.0
-        && !is_charged(&stack)
-        && load_projectiles(region, id, hand)
-        && let Some(name) = end_sound
-    {
-        let pitch = 1.0 / (level_random_float(region) * 0.5 + 1.0) + 0.2;
-        play_sound(region, position, name, 1.0, pitch);
     }
 }
 
@@ -206,10 +206,10 @@ fn load_projectiles(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
         return false;
     };
     let stack = player.inventory.held(hand).clone();
-    let Some(ammo) = find_projectile(player, &stack) else {
+    let Some(ammo) = find_projectile(player) else {
         return false;
     };
-    let drawn = draw_ammo(player, &stack, ammo);
+    let (drawn, consumed) = draw_ammo(player, &stack, ammo);
     if drawn.is_empty() {
         return false;
     }
@@ -224,6 +224,7 @@ fn load_projectiles(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
         kinds::CHARGED_PROJECTILES,
         ComponentValue::ChargedProjectiles(templates),
     );
+    sync_slots(region, id, consumed.into_iter().chain([slot]));
     true
 }
 
@@ -261,10 +262,10 @@ fn release_bow(region: &mut Region, id: PlayerId, hand: Hand, power: f32) {
         return;
     };
     let weapon = player.inventory.held(hand).clone();
-    let Some(ammo) = find_projectile(player, &weapon) else {
+    let Some(ammo) = find_projectile(player) else {
         return;
     };
-    let drawn = draw_ammo(player, &weapon, ammo);
+    let (drawn, consumed) = draw_ammo(player, &weapon, ammo);
     let Some(projectile) = drawn.into_iter().next() else {
         return;
     };
@@ -273,33 +274,27 @@ fn release_bow(region: &mut Region, id: PlayerId, hand: Hand, power: f32) {
     };
     let (yaw, pitch) = player_rotation(region, id);
     let dir = shoot_from_rotation(pitch, yaw, 0.0);
-    let movement = player_movement(region, id);
-    spawn_arrow(
-        region,
-        id,
+    let mut shot = prepare_shot(
+        &region.players[&id],
         position,
         dir,
         power * 3.0,
-        1.0,
         projectile,
-        Some(weapon),
+        weapon,
         power == 1.0,
-        movement,
     );
+    shot.source_movement = player_movement(region, id);
+    spawn_arrow(region, shot);
+    hurt_weapon(region, id, hand);
+    sync_slots(region, id, consumed);
     let pitch = 1.0 / (level_random_float(region) * 0.4 + 1.2) + power * 0.5;
     play_sound(
         region,
-        Some(position),
+        player_position(region, id),
         "minecraft:entity.arrow.shoot",
         1.0,
         pitch,
     );
-    // 耐久在箭发射之后扣；创造模式不扣。
-    crate::durability::run(region, id, hand, |region| {
-        let (mut level, ticks) = region.block_level();
-        let world = World::new(&mut level, ticks);
-        mc_bamboo_blocks::durability::hurt_hand(&world, hand, 1);
-    });
 }
 
 /// `CrossbowItem.performShooting`：组件里的弹药逐个射出。
@@ -322,11 +317,15 @@ fn shoot_crossbow(region: &mut Region, id: PlayerId, hand: Hand) {
         return;
     }
     let projectiles: Vec<ItemStack> = charged.iter().filter_map(item_stack).collect();
+    if projectiles.is_empty() || projectiles.iter().any(|stack| !supported_projectile(stack)) {
+        return;
+    }
     let slot = player.inventory.hand_slot(hand);
     clear_component(
         &mut player.inventory.slots[slot],
         kinds::CHARGED_PROJECTILES,
     );
+    let cleared = player.inventory.slots[slot].clone();
     let Some(position) = player_eye(region, id) else {
         return;
     };
@@ -337,7 +336,7 @@ fn shoot_crossbow(region: &mut Region, id: PlayerId, hand: Hand) {
     } else {
         2.0 * spread / (projectiles.len() - 1) as f32
     };
-    let angle_offset = ((projectiles.len() - 1) % 2) as f32 * angle_step / 2.0;
+    let angle_offset = (projectiles.len().saturating_sub(1) % 2) as f32 * angle_step / 2.0;
     let mut direction = 1.0_f32;
     for (index, projectile) in projectiles.into_iter().enumerate() {
         let angle = angle_offset + direction * (index.div_ceil(2) as f32) * angle_step;
@@ -347,31 +346,25 @@ fn shoot_crossbow(region: &mut Region, id: PlayerId, hand: Hand) {
         } else {
             rotated_view_vector(pitch, yaw, angle)
         };
-        spawn_arrow(
-            region,
-            id,
+        let shot = prepare_shot(
+            &region.players[&id],
             position,
             dir,
             3.15,
-            1.0,
             projectile,
-            Some(weapon.clone()),
+            weapon.clone(),
             true,
-            player_movement(region, id),
         );
+        spawn_arrow(region, shot);
         let pitch = shot_pitch(region, id, index);
         play_sound(
             region,
-            Some(position),
+            player_position(region, id),
             "minecraft:item.crossbow.shoot",
             1.0,
             pitch,
         );
-        crate::durability::run(region, id, hand, |region| {
-            let (mut level, ticks) = region.block_level();
-            let world = World::new(&mut level, ticks);
-            mc_bamboo_blocks::durability::hurt_hand(&world, hand, 1);
-        });
+        hurt_weapon(region, id, hand);
         if region
             .players
             .get(&id)
@@ -380,47 +373,49 @@ fn shoot_crossbow(region: &mut Region, id: PlayerId, hand: Hand) {
             break;
         }
     }
+    if region.players[&id].inventory.slots[slot].matches(&cleared) {
+        sync_slots(region, id, [slot]);
+    }
 }
 
-/// 生成一支玩家的箭并放进世界。
-///
-/// Spawns one player arrow and adds it to the world.
-#[allow(clippy::too_many_arguments)]
-fn spawn_arrow(
-    region: &mut Region,
-    id: PlayerId,
-    eye: Vec3,
+fn hurt_weapon(region: &mut Region, id: PlayerId, hand: Hand) {
+    crate::durability::run(region, id, hand, |region| {
+        let (mut level, ticks) = region.block_level();
+        let world = World::new(&mut level, ticks);
+        mc_bamboo_blocks::durability::hurt_hand(&world, hand, 1);
+    });
+}
+
+fn prepare_shot(
+    shooter: &Player,
+    position: Vec3,
     direction: Vec3,
     power: f32,
-    uncertainty: f32,
     ammo: ItemStack,
-    weapon: Option<ItemStack>,
+    weapon: ItemStack,
     critical: bool,
-    movement: Option<Vec3>,
-) {
-    let intangible = is_intangible(&ammo);
-    let pickup = if intangible {
+) -> ArrowShot {
+    let pickup = if is_intangible(&ammo) {
         Pickup::CreativeOnly
     } else {
         Pickup::Allowed
     };
-    let uuid = region
-        .players
-        .get(&id)
-        .map(|player| *player.uuid.as_bytes());
-    let shot = ArrowShot {
-        position: eye,
+    ArrowShot {
+        position,
         direction,
         power,
-        uncertainty,
-        source_movement: movement,
-        owner: Some(id.0),
-        owner_uuid: uuid,
+        uncertainty: 1.0,
+        source_movement: None,
+        owner: Some(shooter.id.0),
+        owner_uuid: Some(*shooter.uuid.as_bytes()),
         ammo,
-        weapon,
+        weapon: Some(weapon),
         critical,
         pickup,
-    };
+    }
+}
+
+fn spawn_arrow(region: &mut Region, shot: ArrowShot) {
     let (mut level, ticks) = region.block_level();
     let mut world = World::new(&mut level, ticks);
     world.spawn_arrow_shot(shot);
@@ -429,7 +424,7 @@ fn spawn_arrow(
 /// 找到这份武器能用的弹药：副手、主手，再按 `Inventory` 下标扫背包。
 ///
 /// `Player.getProjectile`: off hand, main hand, then the inventory indices.
-fn find_projectile(player: &Player, _weapon: &ItemStack) -> Option<(usize, ItemStack)> {
+fn find_projectile(player: &Player) -> Option<(usize, ItemStack)> {
     let off = player.inventory.hand_slot(Hand::Off);
     let main = player.inventory.hand_slot(Hand::Main);
     for slot in [off, main] {
@@ -474,19 +469,30 @@ fn supported_projectile(stack: &ItemStack) -> bool {
 ///
 /// `ProjectileWeaponItem.draw` and `useAmmo`: the stacks to fire, with the real
 /// ammo deducted.
-fn draw_ammo(player: &mut Player, weapon: &ItemStack, ammo: (usize, ItemStack)) -> Vec<ItemStack> {
+fn draw_ammo(
+    player: &mut Player,
+    weapon: &ItemStack,
+    ammo: (usize, ItemStack),
+) -> (Vec<ItemStack>, Option<usize>) {
     let count = projectile_count(weapon).max(1);
     let (slot, projectile) = ammo;
     let mut drawn = Vec::new();
+    let mut consumed = None;
     for index in 0..count {
         let source = projectile.clone();
         let force_infinite = index > 0;
         let used = use_ammo(player, weapon, source, slot, force_infinite);
         if !used.is_empty() {
+            if !force_infinite
+                && slot != usize::MAX
+                && player.inventory.slots[slot].count != projectile.count
+            {
+                consumed = Some(slot);
+            }
             drawn.push(used);
         }
     }
-    drawn
+    (drawn, consumed)
 }
 
 /// `ProjectileWeaponItem.useAmmo`。
@@ -554,7 +560,9 @@ fn projectile_spread(weapon: &ItemStack) -> f32 {
     enchantment_level(weapon, "minecraft:multishot").max(0) as f32 * 10.0
 }
 
-/// `BowItem.getPowerForTime`。
+/// 按拉弓刻数计算蓄力。
+///
+/// Computes the draw strength using `BowItem.getPowerForTime`.
 pub(crate) fn get_power_for_time(time_held: i32) -> f32 {
     let mut power = time_held as f32 / 20.0;
     power = (power * power + power * 2.0) / 3.0;
@@ -587,7 +595,7 @@ fn is_intangible(stack: &ItemStack) -> bool {
 /// `CrossbowItem.getChargingSounds`：快速装填换开始音效。
 ///
 /// `getChargingSounds`: Quick Charge swaps the start sound.
-fn charging_sounds(stack: &ItemStack) -> (Option<&'static str>, Option<&'static str>) {
+fn charging_sounds(stack: &ItemStack) -> (&'static str, Option<&'static str>) {
     let quick = enchantment_level(stack, "minecraft:quick_charge");
     let start = match quick {
         0 => "minecraft:item.crossbow.loading_start",
@@ -595,7 +603,10 @@ fn charging_sounds(stack: &ItemStack) -> (Option<&'static str>, Option<&'static 
         2 => "minecraft:item.crossbow.quick_charge_2",
         _ => "minecraft:item.crossbow.quick_charge_3",
     };
-    (Some(start), Some("minecraft:item.crossbow.loading_end"))
+    (
+        start,
+        (quick == 0).then_some("minecraft:item.crossbow.loading_middle"),
+    )
 }
 
 /// `CrossbowItem.getShotPitch`：第一发 1.0，其余按奇偶取随机音高。
@@ -690,55 +701,42 @@ fn shoot_from_rotation(y_rot: f32, x_rot: f32, y_offset: f32) -> Vec3 {
     Vec3::new(f64::from(xd), f64::from(yd), f64::from(zd))
 }
 
-/// `CrossbowItem.getProjectileShotVector`：绕射手的上方向轴转 `angle` 度。
+/// 玩家弩按 `CrossbowItem.shootProjectile` 绕视角的上方向转动。
 ///
-/// `getProjectileShotVector`: rotate the view vector about the shooter's up
-/// vector by `angle` degrees, using JOML's quaternion arithmetic.
-fn rotated_view_vector(x_rot: f32, y_rot: f32, angle: f32) -> Vec3 {
-    let view = view_vector(x_rot, y_rot);
-    let mut axis = cross(view, Vec3::new(0.0, 1.0, 0.0));
-    if axis.length_sqr() <= 1.0e-7 {
-        axis = cross(view, view_vector(x_rot - 90.0, y_rot));
-    }
-    let right = rotate_axis_angle(view, axis, std::f32::consts::FRAC_PI_2);
-    rotate_axis_angle(view, right, angle * (std::f32::consts::PI / 180.0))
+/// Vanilla's untargeted `CrossbowItem.shootProjectile` rotates about the view's up vector.
+fn rotated_view_vector(pitch: f32, yaw: f32, angle: f32) -> Vec3 {
+    let view = view_vector(pitch, yaw);
+    let axis = view_vector(pitch - 90.0, yaw);
+    let half = f64::from(angle * (std::f32::consts::PI / 180.0)) * 0.5;
+    let s = half.sin();
+    let x = (axis.x * s) as f32;
+    let y = (axis.y * s) as f32;
+    let z = (axis.z * s) as f32;
+    let w = (1.0 - s * s).sqrt() as f32;
+    transform_quaternion(view, x, y, z, w)
 }
 
-/// `Vec3.cross`。
+/// JOML 默认关闭融合乘加；各系数和向量分量都按单精度舍入。
 ///
-/// `Vec3.cross`.
-fn cross(a: Vec3, b: Vec3) -> Vec3 {
+/// JOML defaults to unfused multiply-add; every coefficient and vector component is single precision.
+fn transform_quaternion(v: Vec3, x: f32, y: f32, z: f32, w: f32) -> Vec3 {
+    let (xx, yy, zz, ww) = (x * x, y * y, z * z, w * w);
+    let (xy, xz, yz, xw, yw, zw) = (x * y, x * z, y * z, x * w, y * w, z * w);
+    let inv = 1.0 / (xx + yy + zz + ww);
+    let (vx, vy, vz) = (v.x as f32, v.y as f32, v.z as f32);
     Vec3::new(
-        a.y * b.z - a.z * b.y,
-        a.z * b.x - a.x * b.z,
-        a.x * b.y - a.y * b.x,
-    )
-}
-
-/// JOML `Quaternionf.setAngleAxis` + `rotate(Vector3f)`，`angle` 是弧度。
-///
-/// JOML `Quaternionf.setAngleAxis` followed by `rotate(Vector3f)`; `angle` is
-/// in radians.
-fn rotate_axis_angle(vector: Vec3, axis: Vec3, angle: f32) -> Vec3 {
-    let half = f64::from(angle * 0.5);
-    let s = half.sin() as f32;
-    let c = half.cos() as f32;
-    let axis = if (axis.length_sqr() - 1.0).abs() > f64::EPSILON {
-        axis.normalize()
-    } else {
-        axis
-    };
-    let (x, y, z) = (axis.x as f32 * s, axis.y as f32 * s, axis.z as f32 * s);
-    let w = c;
-    let (fx, fy, fz) = (vector.x as f32, vector.y as f32, vector.z as f32);
-    let ix = w * fx + y * fz - z * fy;
-    let iy = w * fy + z * fx - x * fz;
-    let iz = w * fz + x * fy - y * fx;
-    let iw = -x * fx - y * fy - z * fz;
-    Vec3::new(
-        f64::from(ix * w + iw * -x + iy * -z - iz * -y),
-        f64::from(iy * w + iw * -y + iz * -x - ix * -z),
-        f64::from(iz * w + iw * -z + ix * -y - iy * -x),
+        f64::from(
+            (xx - yy - zz + ww) * inv * vx
+                + (2.0 * (xy - zw) * inv * vy + 2.0 * (xz + yw) * inv * vz),
+        ),
+        f64::from(
+            2.0 * (xy + zw) * inv * vx
+                + ((yy - xx - zz + ww) * inv * vy + 2.0 * (yz - xw) * inv * vz),
+        ),
+        f64::from(
+            2.0 * (xz - yw) * inv * vx
+                + (2.0 * (yz + xw) * inv * vy + (zz - xx - yy + ww) * inv * vz),
+        ),
     )
 }
 
@@ -749,7 +747,7 @@ fn player_position(region: &Region, id: PlayerId) -> Option<Vec3> {
 
 /// `getEyeY() - 0.1` 的箭生成位置。
 ///
-/// The spawn position, `getEyeY() - 0.1`.
+/// The spawn position, `getEyeY() - 0.1F`.
 fn player_eye(region: &Region, id: PlayerId) -> Option<Vec3> {
     let player = region.players.get(&id)?;
     let position = player.position();
@@ -775,13 +773,35 @@ fn player_rotation(region: &Region, id: PlayerId) -> (f32, f32) {
 ///
 /// `ServerPlayer.lastKnownClientMovement`.
 fn player_movement(region: &Region, id: PlayerId) -> Option<Vec3> {
-    region.players.get(&id).map(|player| player.motion.delta)
+    region.players.get(&id).map(|player| {
+        let movement = player.motion.known_movement;
+        Vec3::new(
+            movement.x,
+            if player.on_ground { 0.0 } else { movement.y },
+            movement.z,
+        )
+    })
 }
 
 fn level_random_float(region: &mut Region) -> f32 {
     let (mut level, ticks) = region.block_level();
     let world = World::new(&mut level, ticks);
     world.random().next_float()
+}
+
+/// 未开菜单时同步变动的玩家物品栏槽位；否则由菜单同步。
+///
+/// Sync changed player inventory slots unless an open menu will sync them.
+fn sync_slots(region: &mut Region, id: PlayerId, slots: impl IntoIterator<Item = usize>) {
+    if region.menus.contains_key(&id) {
+        return;
+    }
+    let Some(player) = region.players.get_mut(&id) else {
+        return;
+    };
+    for slot in slots {
+        crate::inventory::send_slot(player, &mut region.links, slot);
+    }
 }
 
 fn play_sound(region: &mut Region, position: Option<Vec3>, name: &str, volume: f32, pitch: f32) {
