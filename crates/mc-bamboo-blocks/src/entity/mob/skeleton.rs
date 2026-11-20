@@ -280,7 +280,23 @@ pub(super) fn finalize_spawn(world: &mut World<'_>, entity: &mut Entity) {
             }
         }
         mob.can_pick_up_loot = random.next_float() < 0.55 * special;
+        if mob.equipment.get(EquipmentSlot::Head).is_empty() && world.level().is_halloween() {
+            equip_halloween_head(mob, random);
+        }
     });
+}
+
+fn equip_halloween_head(mob: &mut Mob, random: &crate::random::LegacyRandom) {
+    if random.next_float() < 0.25 {
+        let item = if random.next_float() < 0.1 {
+            items::JACK_O_LANTERN
+        } else {
+            items::CARVED_PUMPKIN
+        };
+        mob.equipment
+            .set(EquipmentSlot::Head, ItemStack::new(item, 1));
+        mob.equipment.set_drop_chance(EquipmentSlot::Head, 0.0);
+    }
 }
 
 fn populate_armor(
@@ -354,6 +370,35 @@ fn populate_armor(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn halloween_head_draws_the_variant_only_after_a_successful_roll() {
+        use super::*;
+        use crate::entity::mob::MobType;
+        use crate::random::LegacyRandom;
+        for (seed, item, draws) in [
+            (0, items::AIR, 1),
+            (4096, items::CARVED_PUMPKIN, 2),
+            (4104, items::JACK_O_LANTERN, 2),
+        ] {
+            let mut mob = Mob::new(MobType::Skeleton);
+            let random = LegacyRandom::new(seed);
+            equip_halloween_head(&mut mob, &random);
+            assert_eq!(mob.equipment.get(EquipmentSlot::Head).item, item);
+            assert_eq!(
+                mob.equipment.drop_chance(EquipmentSlot::Head),
+                if draws == 1 {
+                    super::super::equipment::DEFAULT_DROP_CHANCE
+                } else {
+                    0.0
+                }
+            );
+            let expected = LegacyRandom::new(seed);
+            for _ in 0..draws {
+                expected.next_float();
+            }
+            assert_eq!(random.seed(), expected.seed());
+        }
+    }
     use super::*;
     use crate::{
         BlockTicks,

@@ -1953,6 +1953,7 @@ dependencies = [
 name = "mc-bamboo-game"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "libc",
  "mc-bamboo-blocks",
  "mc-bamboo-command",

@@ -766,6 +766,12 @@ impl Level for RegionLevel<'_> {
         }
     }
 
+    fn is_halloween(&self) -> bool {
+        use chrono::Datelike;
+        let date = chrono::Local::now().date_naive();
+        date.month() == 10 && date.day() == 31
+    }
+
     fn player_mob_attack(
         &self,
         uid: i32,

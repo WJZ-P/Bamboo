@@ -980,6 +980,13 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 世界里的玩家，按加入顺序。生物的 AI 读它。
     fn for_each_player(&self, _visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {}
 
+    /// 现实中的本地日期，不是世界时间。
+    ///
+    /// The local calendar date, independent of the world clock.
+    fn is_halloween(&self) -> bool {
+        false
+    }
+
     fn player_mob_attack(&self, _uid: EntityUid) -> Option<crate::entity::mob::PlayerMobAttack> {
         None
     }
