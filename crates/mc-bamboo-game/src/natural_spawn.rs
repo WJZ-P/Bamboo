@@ -69,7 +69,7 @@ pub(crate) fn tick(region: &mut Region) {
     {
         let (mut level, ticks) = region.block_level();
         let world = World::new(&mut level, ticks);
-        natural::shuffle(&mut chunks, world.random());
+        mc_bamboo_blocks::shuffle(world.random(), &mut chunks);
     }
     for chunk in chunks {
         let (mut level, ticks) = region.block_level();

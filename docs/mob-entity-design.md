@@ -687,3 +687,10 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   所以已支持生物的实际产率低于官方（权重、组大小和取数次数本身照官方）。僵尸/尸壳的
   `finalizeSpawn` 沿用 9.3 的实现，随机序列和官方不同。生成期刷怪、结构刷怪、刷怪笼、
   `customSpawners`、下界要塞表未做。
+- **对拍**（`mc-bamboo-vanilla natural-spawn`）：`NaturalSpawnOracle.java` 对每个群系的每个
+  `MobCategory`，用 7 个固定种子各跑 8 次官方 `WeightedList.getRandom` + `IntProvider.sample`，
+  再取一个 `nextInt(1000)` 当随机源指纹；另外把 0..15 交给官方 `Util.shuffle`。
+  Bamboo 用导出的表按同一顺序重放（`natural::pick` / `natural::sample` /
+  `mc_bamboo_blocks::shuffle`），1701 个用例 **0 不一致**；`--break-self-test` 改坏一项会被抓到。
+  **没有对拍完整刷怪链路**：`spawnCategoryForPosition` 的方块/光照/距离判定与
+  `finalizeSpawn` 只有单元测试，因为假世界要完整造出官方 `ServerLevel`；这一块列为未对拍。

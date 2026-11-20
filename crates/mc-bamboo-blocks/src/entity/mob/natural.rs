@@ -507,28 +507,54 @@ fn random_spawn_mob_at(
         return None;
     }
     let table = mobs_at(world, category, pos);
+    let picked = pick(table, world.random())?;
+    MobType::by_entity_type(picked.entity_type)?;
+    Some(SpawnEntry::of(picked))
+}
+
+/// `IntProvider.sample` 的取数入口，参数是已经挑中的那一项。
+fn sample_count(world: &World, entry: SpawnEntry) -> i32 {
+    let def = MobSpawnerDef {
+        entity_type: entry.entity_type,
+        weight: entry.weight,
+        min: entry.min,
+        max: entry.max,
+    };
+    sample(&def, world.random())
+}
+
+/// 官方 `WeightedList.getRandom`：`nextInt(总权重)` 之后按累减权重挑一项。
+/// 表为空或总权重为 0 时返回 `None` 且不取随机数（官方 `selector == null` 直接返回空）。
+///
+/// Vanilla `WeightedList.getRandom`: draw `nextInt(totalWeight)` and walk the
+/// cumulative weights. An empty table or a zero total returns `None` without a draw.
+pub fn pick<'a>(
+    table: &'a [MobSpawnerDef],
+    random: &crate::random::LegacyRandom,
+) -> Option<&'a MobSpawnerDef> {
     let total: i32 = table.iter().map(|entry| entry.weight).sum();
     if total <= 0 {
         return None;
     }
-    let mut selection = world.random().next_int(total);
+    let mut selection = random.next_int(total);
     for entry in table {
         selection -= entry.weight;
         if selection < 0 {
-            MobType::by_entity_type(entry.entity_type)?;
-            return Some(SpawnEntry::of(entry));
+            return Some(entry);
         }
     }
     None
 }
 
 /// `IntProvider.sample`：官方刷怪表里只有常量和均匀分布。
-fn sample_count(world: &World, entry: SpawnEntry) -> i32 {
+///
+/// `IntProvider.sample`: the vanilla spawn tables only use constants and uniform ranges.
+pub fn sample(entry: &MobSpawnerDef, random: &crate::random::LegacyRandom) -> i32 {
     let span = entry.max - entry.min + 1;
     if span <= 1 {
         entry.min
     } else {
-        entry.min + world.random().next_int(span)
+        entry.min + random.next_int(span)
     }
 }
 
@@ -757,17 +783,6 @@ fn nearest_player_distance_sqr(world: &World, x: f64, y: f64, z: f64) -> Option<
     best
 }
 
-/// `Util.shuffle`：把刷怪区块列表按给定随机源打乱，倒着换，和官方一样。
-///
-/// `Util.shuffle`: shuffle the spawning chunk list with the given random source in
-/// vanilla order (Fisher-Yates from the end).
-pub fn shuffle<T>(items: &mut [T], random: &crate::random::LegacyRandom) {
-    for index in (1..items.len()).rev() {
-        let other = random.next_int(index as i32 + 1) as usize;
-        items.swap(index, other);
-    }
-}
-
 /// 群系标签查询，只有刷怪相关的两个标签用得到。
 fn biome_tag_contains(name: &str, biome: i32) -> bool {
     mc_bamboo_data::tags::TAG_GROUPS
@@ -954,7 +969,7 @@ mod tests {
         // 从末尾往前走，取 `nextInt(index + 1)` 交换。
         let random = crate::random::LegacyRandom::new(42);
         let mut items: Vec<u8> = (0..8).collect();
-        shuffle(&mut items, &random);
+        crate::random::shuffle(&random, &mut items);
         assert_eq!(items.len(), 8);
         let mut sorted = items.clone();
         sorted.sort_unstable();
@@ -962,7 +977,7 @@ mod tests {
         // 同一个种子必须给出同一个排列。
         let random = crate::random::LegacyRandom::new(42);
         let mut again: Vec<u8> = (0..8).collect();
-        shuffle(&mut again, &random);
+        crate::random::shuffle(&random, &mut again);
         assert_eq!(items, again);
     }
 }

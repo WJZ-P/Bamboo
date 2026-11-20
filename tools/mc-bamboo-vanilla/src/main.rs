@@ -113,6 +113,9 @@
 //!     多种子下把新世界的出生区块和出生点与官方逐个对拍；--break-self-test 故意改坏一处
 //!     Compare fresh-world spawn chunks and positions against vanilla across seeds;
 //!     --break-self-test deliberately corrupts one spawn.
+//! mc-bamboo-vanilla natural-spawn <java 路径> [--show N] [--break-self-test]
+//!     对每个群系的每个 MobCategory 用固定种子重放官方的加权刷怪选择和组大小
+//!     Replay vanilla weighted spawn picks, group sizes and the chunk shuffle per seed.
 //! mc-bamboo-vanilla flat-world <java 路径> [--show N] [--break-self-test]
 //!     把 generator-settings 的五个字段和超平坦地形逐方块对拍官方 FlatLevelSource
 //!     Compare the five generator-settings fields and flat terrain block-by-block
@@ -179,6 +182,8 @@ mod menu;
 mod mob_oracle;
 #[cfg(feature = "oracle")]
 mod move_oracle;
+#[cfg(feature = "oracle")]
+mod natural_spawn;
 #[cfg(feature = "probe-online")]
 mod online;
 #[cfg(feature = "oracle")]
@@ -347,6 +352,8 @@ const MOVE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MovementOracle.ja
 #[cfg(feature = "oracle")]
 const MOB_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/MobOracle.java";
 #[cfg(feature = "oracle")]
+const NATURAL_SPAWN_SOURCE: &str = "tools/mc-bamboo-vanilla/java/NaturalSpawnOracle.java";
+#[cfg(feature = "oracle")]
 const PATH_TYPE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/PathTypeOracle.java";
 #[cfg(feature = "oracle")]
 const STORAGE_ORACLE_SOURCE: &str = "tools/mc-bamboo-vanilla/java/StorageOracle.java";
@@ -386,6 +393,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-pieces <java 路径>
       mc-bamboo-vanilla jigsaw <java 路径>
       mc-bamboo-vanilla spawn <java 路径> [--seeds N] [--salt S] [--show N] [--level-type normal|large_biomes|amplified] [--break-self-test]
+      mc-bamboo-vanilla natural-spawn <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla flat-world <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla beard <java 路径> [--through noise|surface|carvers] [--break-self-test]
       mc-bamboo-vanilla gen-light <java 路径> [--scenes N] [--seed S] [--show N] [--break-self-test]
@@ -472,6 +480,7 @@ fn run() -> Result<(), String> {
         ["structure-pieces", java, ref options @ ..] => structure_pieces_cli(java, options),
         ["jigsaw", java, ref options @ ..] => jigsaw_cli(java, options),
         ["spawn", java, ref options @ ..] => spawn_cli(java, options),
+        ["natural-spawn", java, ref options @ ..] => natural_spawn_cli(java, options),
         ["flat-world", java, ref options @ ..] => flat_world_cli(java, options),
         ["beard", java, ref options @ ..] => beard_cli(java, options),
         ["gen-light", java, ref options @ ..] => gen_light_cli(java, options),
@@ -962,6 +971,11 @@ fn spawn_cli(java: &str, options: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(feature = "oracle")]
+fn natural_spawn_cli(java: &str, options: &[&str]) -> Result<(), String> {
+    natural_spawn::run(official_program(java, NATURAL_SPAWN_SOURCE)?, options)
+}
+
+#[cfg(feature = "oracle")]
 fn flat_world_cli(java: &str, options: &[&str]) -> Result<(), String> {
     flat_world::run(official_program(java, FLAT_WORLD_SOURCE)?, options)
 }
@@ -1262,6 +1276,11 @@ fn structure_rings_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
 
 #[cfg(not(feature = "oracle"))]
 fn spawn_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
+    Err("这个版本编译时关掉了 oracle 功能".to_owned())
+}
+
+#[cfg(not(feature = "oracle"))]
+fn natural_spawn_cli(_java: &str, _options: &[&str]) -> Result<(), String> {
     Err("这个版本编译时关掉了 oracle 功能".to_owned())
 }
 
