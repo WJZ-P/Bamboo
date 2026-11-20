@@ -80,6 +80,8 @@ struct ProjectileFrame {
     drawing: Option<bool>,
     player_thermal: Option<[i32; 2]>,
     targets: Option<[i32; 2]>,
+    effect_target: Option<[i32; 2]>,
+    player_motion: Option<[i64; 3]>,
     /// 本刻的熄火音效：x/y/z 的原始位、音量、音高、声源序号。
     ///
     /// Extinguish sounds this tick: raw x/y/z bits, volume, pitch, and source ordinal.
@@ -103,6 +105,54 @@ impl ProjectileCase {
 
     fn piercing(&self) -> bool {
         self.name.starts_with("arrow_piercing_")
+    }
+
+    fn power_punch(&self) -> bool {
+        self.name == "arrow_power_punch_hit"
+    }
+
+    fn effect(&self) -> Option<i32> {
+        use mc_bamboo_data::registries::mob_effect;
+        match self.name.as_str() {
+            "arrow_tipped_hit" => Some(mob_effect::POISON),
+            "arrow_spectral_hit" => Some(mob_effect::GLOWING),
+            _ => None,
+        }
+    }
+
+    fn configure_effect_arrow(&self, data: &mut mc_bamboo_blocks::entity::arrow::Arrow) {
+        use mc_bamboo_blocks::entity::arrow::ArrowVariant;
+        use mc_bamboo_data::{
+            items,
+            registries::{data_component_type, mob_effect, potion},
+        };
+        use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+        match self.effect() {
+            Some(mob_effect::GLOWING) => {
+                data.pickup_item = ItemStack::new(items::SPECTRAL_ARROW, 1);
+                data.variant = ArrowVariant::of_ammo(&data.pickup_item);
+            }
+            Some(mob_effect::POISON) => {
+                let mut patch = ComponentPatch::new();
+                patch.put(
+                    data_component_type::POTION_CONTENTS,
+                    PatchEntry::Set(ComponentValue::PotionContents {
+                        potion: Some(potion::POISON),
+                        custom_color: None,
+                        custom_effects: Vec::new(),
+                        custom_name: None,
+                    }),
+                );
+                let (added, removed) = patch.to_opaque();
+                data.pickup_item = ItemStack {
+                    added,
+                    removed,
+                    ..ItemStack::new(items::TIPPED_ARROW, 1)
+                };
+            }
+            _ => {}
+        }
     }
 
     fn overlaps_flight(&self) -> bool {
@@ -186,6 +236,41 @@ impl ProjectileCase {
             let mut arrow = world.prepare_entity(Entity::arrow(Vec3::new(0.5, y, 0.5)));
             if let EntityKind::Arrow(data) = &mut arrow.kind {
                 data.no_gravity = self.starts_without_gravity();
+                self.configure_effect_arrow(data);
+                if self.power_punch() {
+                    use mc_bamboo_protocol::components::{
+                        ComponentPatch, ComponentValue, PatchEntry,
+                    };
+                    let registry = mc_bamboo_data::registries::SYNCED_REGISTRIES
+                        .iter()
+                        .find(|registry| registry.name == "minecraft:enchantment")
+                        .unwrap();
+                    let levels = ["minecraft:power", "minecraft:punch"]
+                        .into_iter()
+                        .zip([3, 2])
+                        .map(|(name, level)| {
+                            (
+                                registry
+                                    .entries
+                                    .iter()
+                                    .position(|entry| *entry == name)
+                                    .unwrap() as i32,
+                                level,
+                            )
+                        })
+                        .collect();
+                    let mut patch = ComponentPatch::new();
+                    patch.put(
+                        mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+                        PatchEntry::Set(ComponentValue::Enchantments(levels)),
+                    );
+                    let (added, removed) = patch.to_opaque();
+                    data.weapon = Some(ItemStack {
+                        added,
+                        removed,
+                        ..ItemStack::new(mc_bamboo_data::items::BOW, 1)
+                    });
+                }
                 if self.piercing() || self.water_tail() {
                     data.pierce = i8::from(!break_pierce);
                     data.base_damage = 0.5;
@@ -206,6 +291,11 @@ impl ProjectileCase {
                 );
             }
             world.add_prepared_entity(arrow);
+            if self.effect().is_some() {
+                let mut target = Entity::by_mob_type(MobType::Cow, Vec3::new(6.5, 64.0, 0.5));
+                target.with_mob(|_, mob| mob.no_ai = true);
+                world.spawn_entity(target);
+            }
             if self.piercing() {
                 for x in [3.5, 5.5] {
                     let mut target = Entity::by_mob_type(MobType::Cow, Vec3::new(x, 64.0, 0.5));
@@ -316,6 +406,33 @@ impl Report {
                     .arrow_target_thermal(case.player_id);
                 if actual != thermal {
                     self.mismatch(format!("{} tick {tick} player fire/frozen: official {thermal:?}, bamboo {actual:?}", case.name));
+                }
+            }
+            if let Some(theirs) = expected.player_motion {
+                let delta = level
+                    .game
+                    .as_ref()
+                    .unwrap()
+                    .arrow_target_motion(case.player_id);
+                let ours = [delta.x, delta.y, delta.z].map(|component| component.to_bits() as i64);
+                if ours != theirs {
+                    self.mismatch(format!(
+                        "{} tick {tick} Punch velocity: official {:?}, bamboo {delta:?}",
+                        case.name,
+                        theirs.map(|value| f64::from_bits(value as u64))
+                    ));
+                }
+            }
+            if let Some(theirs) = expected.effect_target {
+                let entity = level.entities.get(case.first_id + 1).unwrap();
+                let mob = entity.kind.mob().unwrap();
+                let effect = mob.effects.get(case.effect().unwrap());
+                let ours = [
+                    mob.health.to_bits() as i32,
+                    effect.map_or(-1, |effect| effect.duration),
+                ];
+                if ours != theirs {
+                    self.mismatch(format!("{} tick {tick} target health bits/effect duration: official {theirs:?}, bamboo {ours:?}", case.name));
                 }
             }
             if let Some(targets) = expected.targets {

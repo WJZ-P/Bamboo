@@ -71,6 +71,7 @@ pub struct ArrowPublic {
     pub needs_sync: bool,
     pub sync_velocity: bool,
     pub variant: ArrowVariant,
+    pub color: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,6 +151,7 @@ impl Arrow {
             needs_sync: self.needs_sync,
             sync_velocity: self.sync_velocity,
             variant: self.variant,
+            color: potion_color(self),
         }
     }
 }
@@ -236,13 +238,12 @@ impl Entity {
                 self.random.triangle(0.0, spread),
             ))
             .scale(f64::from(power));
-        if let Some(movement) = source_movement {
-            let y = if self.on_ground { 0.0 } else { movement.y };
-            self.delta = self.delta.add(Vec3::new(movement.x, y, movement.z));
-        }
         let (yaw, pitch) = rotation(self.delta);
         self.y_rot = yaw;
         arrow.pitch = pitch;
+        if let Some(movement) = source_movement {
+            self.delta = self.delta.add(movement);
+        }
         arrow.life = 0;
         arrow.needs_sync = true;
     }
@@ -689,6 +690,10 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
         position: Some(me.position),
         projectile_motion: Some(me.delta),
         arrow_ignite_ticks: if me.remaining_fire_ticks > 0 { 100 } else { 0 },
+        arrow_punch: arrow
+            .weapon
+            .as_ref()
+            .map_or(0, |weapon| enchantment_level(weapon, "minecraft:punch")),
         attacker_uuid: arrow.owner_uuid,
         scale_when_non_player: owner
             .as_ref()
@@ -706,10 +711,9 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
         // 受伤成功之后；玩家目标只做药水效果（玩家击退不走实体推力）。
         //
         // Vanilla runs `doKnockback` and `doPostHurtEffects` on a living
-        // target after a successful hurt. Player targets only get the potion
-        // effects; player knockback does not go through an entity push.
+        // target after a successful hurt. Player targets apply Punch in the hurt adapter.
         if !hit.player {
-            apply_punch_knockback(me, world, hit.uid);
+            apply_punch_knockback(world, hit.uid, &source);
         }
         apply_post_hurt_effects(me, world, hit.uid, hit.player);
         if arrow_pierces(me) {
@@ -740,45 +744,23 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
 ///
 /// `AbstractArrow.doKnockback`: the Punch enchantment pushes again after a
 /// successful hurt.
-fn apply_punch_knockback(me: &Entity, world: &mut World<'_>, target: EntityUid) {
-    let EntityKind::Arrow(arrow) = &me.kind else {
-        return;
-    };
-    let Some(weapon) = &arrow.weapon else {
-        return;
-    };
-    let level = enchantment_level(weapon, "minecraft:punch");
-    if level <= 0 {
+fn apply_punch_knockback(world: &mut World<'_>, target: EntityUid, source: &DamageSource) {
+    if source.arrow_punch <= 0 {
         return;
     }
-    let horizontal = Vec3::new(me.delta.x, 0.0, me.delta.z);
-    if horizontal.length_sqr() == 0.0 {
-        return;
-    }
-    let direction = horizontal.normalize();
-    let knockback = f64::from(level as f32);
     world.with_entity_mut(target, &mut |entity| {
         let Some(mob) = entity.kind.mob() else {
             return;
         };
         let resistance = mob
             .attributes
-            .value(mc_bamboo_data::registries::attribute::KNOCKBACK_RESISTANCE)
-            .max(0.0);
-        let scale = knockback * 0.6 * (1.0 - resistance).max(0.0);
-        let movement = direction.scale(scale);
-        if movement.length_sqr() > 0.0 {
-            // `Entity.push`：直接加到速度上。
-            //
-            // `Entity.push`: added straight to the velocity.
-            entity.delta = entity.delta.add(Vec3::new(movement.x, 0.1, movement.z));
+            .value(mc_bamboo_data::registries::attribute::KNOCKBACK_RESISTANCE);
+        if let Some(push) = source.arrow_push(resistance) {
+            entity.delta = entity.delta.add(push);
         }
     });
 }
 
-/// `Arrow.doPostHurtEffects` 和 `SpectralArrow.doPostHurtEffects`。
-///
-/// Vanilla's `Arrow.doPostHurtEffects` and `SpectralArrow.doPostHurtEffects`.
 fn apply_post_hurt_effects(me: &Entity, world: &mut World<'_>, target: EntityUid, player: bool) {
     let EntityKind::Arrow(arrow) = &me.kind else {
         return;
@@ -814,6 +796,55 @@ fn apply_post_hurt_effects(me: &Entity, world: &mut World<'_>, target: EntityUid
 ///
 /// `PotionContents.forEachEffect`: the base potion first, then the custom
 /// effects, with durations scaled by the component.
+/// 按 `PotionContents.getColor` 取自定义色，或按等级对可见效果求加权平均。
+///
+/// `PotionContents.getColor`: custom colour or a weighted mean of visible effects.
+fn potion_color(arrow: &Arrow) -> i32 {
+    use mc_bamboo_data::registries::data_component_type::POTION_CONTENTS;
+    use mc_bamboo_protocol::components::{ComponentValue, defaults};
+
+    if arrow.variant != ArrowVariant::Normal || arrow.pickup_item.added.is_empty() {
+        return -1;
+    }
+    let patch = arrow.pickup_item.patch();
+    let Some(ComponentValue::PotionContents {
+        potion,
+        custom_color,
+        custom_effects,
+        custom_name,
+    }) = defaults::resolve(arrow.pickup_item.item, &patch, POTION_CONTENTS)
+    else {
+        return -1;
+    };
+    if let Some(color) = custom_color {
+        return *color;
+    }
+    if potion.is_none() && custom_effects.is_empty() && custom_name.is_none() {
+        return -1;
+    }
+    let mut totals = [0; 3];
+    let mut weight = 0;
+    for effect in potion_effect_instances(arrow)
+        .into_iter()
+        .filter(|effect| effect.visible)
+    {
+        let color = mc_bamboo_data::potions::EFFECT_COLORS
+            .get(effect.effect as usize)
+            .copied()
+            .unwrap_or_default();
+        let amount = effect.amplifier + 1;
+        for (sum, shift) in totals.iter_mut().zip([16, 8, 0]) {
+            *sum += amount * (color >> shift & 0xff);
+        }
+        weight += amount;
+    }
+    if weight == 0 {
+        return -13_083_194;
+    }
+    let [r, g, b] = totals.map(|sum| sum / weight);
+    (0xff00_0000_u32 as i32) | (r << 16) | (g << 8) | b
+}
+
 fn potion_effect_instances(arrow: &Arrow) -> Vec<crate::entity::mob::effects::EffectInstance> {
     use crate::entity::mob::effects::EffectInstance;
     use mc_bamboo_data::registries::data_component_type as kinds;

@@ -1141,8 +1141,17 @@ public final class Extractor {
         out.addProperty("arrowFlags", arrowAccessorId("ID_FLAGS"));
         out.addProperty("arrowPierce", arrowAccessorId("PIERCE_LEVEL"));
         out.addProperty("arrowInGround", arrowAccessorId("IN_GROUND"));
+        Field color = net.minecraft.world.entity.projectile.arrow.Arrow.class.getDeclaredField("ID_EFFECT_COLOR");
+        color.setAccessible(true);
+        out.addProperty("arrowColor", ((net.minecraft.network.syncher.EntityDataAccessor<?>) color.get(null)).id());
         out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
         out.add("potionEffects", potionEffects());
+        var effectRegistry = BuiltInRegistries.MOB_EFFECT;
+        JsonArray colors = new JsonArray();
+        for (int id = 0; id < effectRegistry.size(); id++) {
+            colors.add(effectRegistry.byId(id).getColor());
+        }
+        out.add("effectColors", colors);
         return out;
     }
 

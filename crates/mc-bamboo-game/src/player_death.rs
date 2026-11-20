@@ -463,6 +463,7 @@ pub(crate) fn die_in(
     // 所以到重生那一刻才按 `reset_after_respawn` 清。
     let player = parts.players.get_mut(&id).expect("玩家刚才还在");
     player.dead = true;
+    player.weapon_use = None;
     player.health.death_time = 0;
     player.last_death_location = Some(BlockPos::containing(position));
     player.in_combat = false;

@@ -3266,6 +3266,7 @@ fn registries_file(data: &VersionData) -> String {
     write_registry_ids(&mut out, data, "mob_effect", MOB_EFFECT_REGISTRY);
     write_registry_ids(&mut out, data, "banner_pattern", BANNER_PATTERN_REGISTRY);
     write_registry_ids(&mut out, data, "menu", MENU_REGISTRY);
+    write_registry_ids(&mut out, data, "stat_type", "minecraft:stat_type");
 
     let _ = writeln!(out, "/// 属性的默认值，没有任何状态效果和附魔时的起点。");
     let _ = writeln!(out, "pub mod attribute_defaults {{");
@@ -3331,6 +3332,7 @@ fn entity_types_file(data: &VersionData) -> String {
         "pub const ARROW_IN_GROUND: u8 = {};",
         facts.arrow_in_ground
     );
+    let _ = writeln!(out, "pub const ARROW_COLOR: u8 = {};", facts.arrow_color);
     let _ = writeln!(
         out,
         "pub const SKELETON_EYE_HEIGHT: f32 = {};",
@@ -3371,6 +3373,15 @@ fn potions_file(data: &VersionData) -> String {
         "    usize::try_from(potion).ok().and_then(|id| EFFECTS.get(id)).copied()"
     );
     let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "/// 状态效果注册表中各条目的 RGB 色值。");
+    let _ = writeln!(out, "///");
+    let _ = writeln!(out, "/// RGB colours indexed by mob-effect registry ID.");
+    let _ = writeln!(
+        out,
+        "pub static EFFECT_COLORS: &[i32] = &{:?};",
+        data.projectile_facts.effect_colors
+    );
     out
 }
 

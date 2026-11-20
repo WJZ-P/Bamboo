@@ -164,10 +164,15 @@ fn arrow(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) 
     // `DispenserBlock.getDispensePosition(source, 0.7, new Vec3(0, 0.1, 0))`。
     //
     // `DispenserBlock.getDispensePosition(source, 0.7, new Vec3(0, 0.1, 0))`.
-    let position = super::dispense_position(pos, facing).add(Vec3::new(0.0, 0.1, 0.0));
+    let (x, y, z) = (f64::from(x), f64::from(y), f64::from(z));
+    let position = Vec3::new(
+        f64::from(pos.x) + 0.5 + (0.7 * x),
+        f64::from(pos.y) + 0.5 + (0.7 * y + 0.1),
+        f64::from(pos.z) + 0.5 + (0.7 * z),
+    );
     let shot = ArrowShot {
         position,
-        direction: Vec3::new(f64::from(x), f64::from(y), f64::from(z)),
+        direction: Vec3::new(x, y, z),
         power: 1.1,
         uncertainty: 6.0,
         source_movement: None,

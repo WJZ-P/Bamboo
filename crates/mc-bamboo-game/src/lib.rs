@@ -2549,6 +2549,7 @@ pub struct ReplayShot {
     pub hold_ticks: i32,
     pub yaw: i32,
     pub pitch: i32,
+    pub movement: Option<mc_bamboo_core::Vec3>,
     pub enchantments: Vec<(String, i32)>,
     pub potion: Option<i32>,
     pub creative: bool,
@@ -2602,6 +2603,7 @@ pub fn replay_shot(scene: &ReplayShot) -> ReplayShotResult {
     use uuid::Uuid;
 
     let mut region = region::Region::new(2, 20, false);
+    region.random = mc_bamboo_blocks::LevelRandom::new(1);
     let id = inbound::PlayerId(1 << 24);
     let game_mode = if scene.creative {
         GameMode::Creative
@@ -2617,7 +2619,9 @@ pub fn replay_shot(scene: &ReplayShot) -> ReplayShotResult {
         Vec3::new(0.5, 64.0, 0.5),
     );
     player.yaw = f32::from_bits(scene.yaw as u32);
+    player.head_yaw = player.yaw;
     player.pitch = f32::from_bits(scene.pitch as u32);
+    player.motion.known_movement = scene.movement.unwrap_or_default();
     player.random =
         mc_bamboo_blocks::entity::JavaRandom::new(mc_bamboo_blocks::entity::ENTITY_RANDOM_SEED);
     let main = player.inventory.hand_slot(Hand::Main);

@@ -15,6 +15,9 @@ use super::*;
 pub(super) struct ShotCase {
     name: String,
     hold: i32,
+    yaw: i32,
+    pitch: i32,
+    level_seed: i64,
     arrows: Vec<ShotArrow>,
     ammo: i32,
     ammo_item: i32,
@@ -47,7 +50,21 @@ impl ShotCase {
     fn player(&self) -> Option<PlayerShot> {
         let plain = || Vec::new();
         let scene = match self.name.as_str() {
-            "shot_bow_half_draw" => (items::BOW, items::ARROW, 5, plain(), None, false),
+            "shot_bow_short_draw" | "shot_bow_half_draw" | "shot_bow_moving" => {
+                (items::BOW, items::ARROW, 5, plain(), None, false)
+            }
+            "shot_bow_enchanted" => (
+                items::BOW,
+                items::ARROW,
+                5,
+                ["power", "punch", "flame", "unbreaking"]
+                    .into_iter()
+                    .zip([3, 2, 1, 2])
+                    .map(|(name, level)| (format!("minecraft:{name}"), level))
+                    .collect(),
+                None,
+                false,
+            ),
             "shot_bow_full_draw" => (items::BOW, items::ARROW, 5, plain(), None, false),
             "shot_bow_infinity" => (
                 items::BOW,
@@ -67,7 +84,7 @@ impl ShotCase {
             ),
             "shot_bow_creative" => (items::BOW, items::ARROW, 5, plain(), None, true),
             "shot_crossbow_load" => (items::CROSSBOW, items::ARROW, 5, plain(), None, false),
-            "shot_crossbow_multishot" => (
+            "shot_crossbow_multishot" | "shot_crossbow_angled_multishot" => (
                 items::CROSSBOW,
                 items::ARROW,
                 5,
@@ -83,7 +100,15 @@ impl ShotCase {
                 None,
                 false,
             ),
-            "shot_dispenser_arrow" => return None,
+            "shot_crossbow_piercing" => (
+                items::CROSSBOW,
+                items::ARROW,
+                5,
+                vec![("minecraft:piercing".to_owned(), 3)],
+                None,
+                false,
+            ),
+            "shot_dispenser_arrow" | "shot_dispenser_arrow_up" => return None,
             other => panic!("unrecognized shot scene {other}"),
         };
         Some(scene)
@@ -96,8 +121,9 @@ impl ShotCase {
             ammo_item,
             ammo_count,
             hold_ticks: self.hold,
-            yaw: 0.0_f32.to_bits() as i32,
-            pitch: 0.0_f32.to_bits() as i32,
+            yaw: self.yaw,
+            pitch: self.pitch,
+            movement: (self.yaw != 0).then_some(Vec3::new(0.125, -0.25, 0.0625)),
             enchantments,
             potion,
             creative,
@@ -115,6 +141,12 @@ impl ShotCase {
                 result.ammo,
                 result.ammo_item,
                 result.weapon_damage
+            ));
+        }
+        if result.level_seed != self.level_seed {
+            report.mismatch(format!(
+                "{} level random: official {}, bamboo {}",
+                self.name, self.level_seed, result.level_seed
             ));
         }
         if result.player_seed != self.player_seed {
@@ -148,7 +180,11 @@ impl ShotCase {
             let left = mc_bamboo_blocks::dispense::dispense_arrow_at(
                 &mut world,
                 BlockPos::new(0, 64, 0),
-                mc_bamboo_core::Direction::East,
+                if self.name.ends_with("_up") {
+                    mc_bamboo_core::Direction::Up
+                } else {
+                    mc_bamboo_core::Direction::East
+                },
                 ItemStack::new(items::ARROW, 1),
             );
             let same_item = left.count == 0 || left.item == self.ammo_item;

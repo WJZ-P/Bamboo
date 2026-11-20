@@ -5,11 +5,11 @@
 
 use mc_bamboo_blocks::entity::arrow::Pickup;
 use mc_bamboo_core::{BlockPos, Direction, Hand};
-use mc_bamboo_data::{items, registries::data_component_type as kinds};
+use mc_bamboo_data::{items, packets::play::clientbound, registries::data_component_type as kinds};
 use mc_bamboo_protocol::{
     components::{ComponentPatch, ComponentValue, PatchEntry, defaults},
     item::ItemStack,
-    packet::play::{GameMode, PlayRequest, PlayerActionKind},
+    packet::play::{ClientCommandKind, GameMode, PlayRequest, PlayerActionKind},
 };
 
 use super::*;
@@ -91,6 +91,30 @@ fn put(server: &mut Harness, client: &Client, slot: usize, stack: ItemStack) {
     player.inventory.slots[slot] = stack;
 }
 
+fn request_stats(server: &mut Harness, client: &Client) -> Vec<Vec<u8>> {
+    server.request(
+        client,
+        PlayRequest::ClientCommand {
+            action: ClientCommandKind::RequestStats,
+        },
+    );
+    server.tick();
+    client
+        .take_frames()
+        .into_iter()
+        .filter(|frame| frame.id == clientbound::AWARD_STATS)
+        .map(|frame| frame.body)
+        .collect()
+}
+
+fn item_used_count(item: i32, count: i32) -> Vec<u8> {
+    let mut body = Vec::new();
+    for value in [1, mc_bamboo_data::registries::stat_type::USED, item, count] {
+        mc_bamboo_protocol::codec::write_varint(&mut body, value);
+    }
+    body
+}
+
 #[test]
 fn a_full_draw_bow_spawns_an_arrow_and_spends_one() {
     let (mut server, client) = settled();
@@ -106,9 +130,10 @@ fn a_full_draw_bow_spawns_an_arrow_and_spends_one() {
 
     use_item(&mut server, &client, 1);
     server.tick();
-    for _ in 0..20 {
+    for _ in 0..19 {
         server.tick();
     }
+    use_item(&mut server, &client, 2);
     release_item(&mut server, &client);
     server.tick();
 
@@ -124,6 +149,23 @@ fn a_full_draw_bow_spawns_an_arrow_and_spends_one() {
         Some(&ComponentValue::Damage(1)),
         "弓掉一点耐久"
     );
+    let slots: Vec<_> = client
+        .take_frames()
+        .into_iter()
+        .filter(|frame| frame.id == clientbound::CONTAINER_SET_SLOT)
+        .map(|frame| {
+            let mut reader = mc_bamboo_protocol::codec::Reader::new(&frame.body);
+            reader.varint().unwrap();
+            reader.varint().unwrap();
+            reader.i16().unwrap()
+        })
+        .collect();
+    assert!(slots.contains(&37));
+    assert_eq!(
+        request_stats(&mut server, &client),
+        [item_used_count(items::BOW, 1)]
+    );
+    assert_eq!(request_stats(&mut server, &client), [[0x00]]);
 }
 
 #[test]
@@ -146,6 +188,7 @@ fn a_bow_released_too_early_spawns_nothing() {
     assert!(arrows(&mut server).is_empty());
     let player = server.region().players.get(&client.id).unwrap();
     assert_eq!(player.inventory.slots[37].count, 5);
+    assert_eq!(request_stats(&mut server, &client), [[0x00]]);
 }
 
 #[test]
@@ -213,6 +256,10 @@ fn a_charged_crossbow_fires_and_multishot_spends_one_arrow() {
     assert_eq!(arrows(&mut server).len(), 3, "多重射击一次射出三支箭");
     let player = server.region().players.get(&client.id).unwrap();
     assert_eq!(player.inventory.slots[37].count, 4, "齐射只消耗一支箭");
+    assert_eq!(
+        request_stats(&mut server, &client),
+        [item_used_count(items::CROSSBOW, 1)]
+    );
 }
 
 #[test]

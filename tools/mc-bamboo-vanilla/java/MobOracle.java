@@ -239,17 +239,19 @@ public final class MobOracle {
             for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "arrow_block_overlaps_flight",
                     "arrow_no_gravity", "arrow_despawn", "arrow_flame_hit", "arrow_flame_rejected",
                     "arrow_piercing_hit", "arrow_piercing_rejected",
-                    "arrow_water_crossing", "arrow_water_after_pierce",
+                    "arrow_water_crossing", "arrow_water_after_pierce", "arrow_tipped_hit", "arrow_spectral_hit", "arrow_power_punch_hit",
                     "skeleton_bow_normal", "skeleton_bow_hard")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
             }
-            for (String name : List.of("shot_bow_half_draw", "shot_bow_full_draw",
+            for (String name : List.of("shot_bow_short_draw", "shot_bow_half_draw", "shot_bow_full_draw",
+                    "shot_bow_moving", "shot_bow_enchanted",
                     "shot_bow_infinity", "shot_bow_tipped", "shot_bow_creative",
                     "shot_crossbow_load", "shot_crossbow_multishot",
-                    "shot_crossbow_quick_charge", "shot_dispenser_arrow")) {
-                if (only != null && !only.equals("shot") && !name.startsWith(only)) continue;
+                    "shot_crossbow_quick_charge", "shot_crossbow_angled_multishot",
+                    "shot_crossbow_piercing", "shot_dispenser_arrow", "shot_dispenser_arrow_up")) {
+                if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playShot(official, out, name);
                 cases++;
             }
@@ -2609,11 +2611,17 @@ public final class MobOracle {
         boolean quick = name.contains("quick_charge");
         boolean infinity = name.contains("infinity");
         boolean tipped = name.contains("tipped");
-        int hold = crossbow ? (quick ? 15 : 25) : (name.contains("half_draw") ? 10 : 20);
+        boolean angled = name.contains("angled") || name.contains("moving");
+        boolean moving = name.contains("moving") || name.contains("angled");
+        float yaw = angled ? 37.0F : 0.0F;
+        float pitch = angled ? -42.0F : 0.0F;
+        int hold = crossbow ? (quick ? 15 : 25)
+                : (name.contains("short_draw") ? 2 : name.contains("half_draw") ? 10 : 20);
         FakeLevel level = FakeLevel.create(official);
         level.nextId = FIRST_ID;
         ((TickingLevelData) level.levelData).difficulty = Difficulty.NORMAL;
         official.server.levels = java.util.Map.of(Level.OVERWORLD, level);
+        level.getRandom().setSeed(1L);
 
         ServerPlayer player = null;
         int ammoCount;
@@ -2621,22 +2629,23 @@ public final class MobOracle {
         int damage = 0;
         long playerSeed = 0;
         if (dispenser) {
+            Direction facing = name.endsWith("_up") ? Direction.UP : Direction.EAST;
             BlockPos pos = new BlockPos(0, 64, 0);
             net.minecraft.core.dispenser.BlockSource source = new net.minecraft.core.dispenser.BlockSource(
                     level, pos,
                     Blocks.DISPENSER.defaultBlockState().setValue(
-                            net.minecraft.world.level.block.DispenserBlock.FACING, Direction.EAST),
+                            net.minecraft.world.level.block.DispenserBlock.FACING, facing),
                     null);
             ItemStack stack = new ItemStack(Items.ARROW, 1);
             var arrow = (net.minecraft.world.entity.projectile.arrow.Arrow)
                     ((net.minecraft.world.item.ArrowItem) Items.ARROW)
                             .asProjectile(level, net.minecraft.world.level.block.DispenserBlock
                                     .getDispensePosition(source, 0.7, new Vec3(0.0, 0.1, 0.0)),
-                                    stack, Direction.EAST);
+                                    stack, facing);
             setRandom(arrow, level.entitySeeds.nextLong());
             arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
             net.minecraft.world.entity.projectile.Projectile.spawnProjectile(
-                    arrow, level, stack, a -> a.shoot(1.0, 0.0, 0.0, 1.1F, 6.0F));
+                    arrow, level, stack, a -> a.shoot(facing.getStepX(), facing.getStepY(), facing.getStepZ(), 1.1F, 6.0F));
             stack.shrink(1);
             ammoCount = stack.getCount();
             ammoItem = BuiltInRegistries.ITEM.getId(stack.getItem());
@@ -2646,9 +2655,10 @@ public final class MobOracle {
             player.setId(FIRST_ID + 1024);
             player.setPos(0.5, 64.0, 0.5);
             setRandom(player, ENTITY_RANDOM_SEED);
-            player.setYRot(0.0F);
-            player.setXRot(0.0F);
-            player.setYHeadRot(0.0F);
+            player.setYRot(yaw);
+            player.setXRot(pitch);
+            if (moving) player.setKnownMovement(new Vec3(0.125, -0.25, 0.0625));
+            player.setYHeadRot(yaw);
             player.setYBodyRot(0.0F);
             player.getAbilities().instabuild = creative;
             level.playersList().add(player);
@@ -2661,6 +2671,13 @@ public final class MobOracle {
             if (infinity) enchant(official, weapon, Enchantments.INFINITY, 1);
             if (multishot) enchant(official, weapon, Enchantments.MULTISHOT, 1);
             if (quick) enchant(official, weapon, Enchantments.QUICK_CHARGE, 2);
+            if (name.contains("piercing")) enchant(official, weapon, Enchantments.PIERCING, 3);
+            if (name.contains("enchanted")) {
+                enchant(official, weapon, Enchantments.POWER, 3);
+                enchant(official, weapon, Enchantments.PUNCH, 2);
+                enchant(official, weapon, Enchantments.FLAME, 1);
+                enchant(official, weapon, Enchantments.UNBREAKING, 2);
+            }
             player.getInventory().setItem(player.getInventory().getSelectedSlot(), weapon);
             player.getInventory().setItem(1, ammo);
 
@@ -2719,6 +2736,8 @@ public final class MobOracle {
         StringBuilder line = new StringBuilder(4096);
         line.append("{\"type\":\"shot\",\"name\":").append(jsonString(name));
         line.append(",\"hold\":").append(hold);
+        line.append(",\"yaw\":").append(Float.floatToRawIntBits(yaw));
+        line.append(",\"pitch\":").append(Float.floatToRawIntBits(pitch));
         line.append(",\"arrows\":").append(arrows);
         line.append(",\"ammo\":").append(ammoCount);
         line.append(",\"ammoItem\":").append(ammoItem);
@@ -2795,6 +2814,10 @@ public final class MobOracle {
     }
 
     private static void playProjectile(Official official, Writer out, String name) throws Exception {
+        boolean enchanted = name.equals("arrow_power_punch_hit");
+        boolean tipped = name.equals("arrow_tipped_hit");
+        boolean spectral = name.equals("arrow_spectral_hit");
+        boolean effectHit = tipped || spectral;
         boolean skeleton = name.startsWith("skeleton_");
         boolean wall = name.equals("arrow_hits_wall");
         boolean overlap = name.equals("arrow_block_overlaps_flight");
@@ -2832,7 +2855,7 @@ public final class MobOracle {
         ServerPlayer player = new ServerPlayer(official.server, world,
                 new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
         player.setId(playerId);
-        double playerX = skeleton ? 11.5 : (waterTail || piercing) ? 2.0 : hasWall ? 18.5 : 6.5;
+        double playerX = effectHit ? 18.5 : skeleton ? 11.5 : (waterTail || piercing) ? 2.0 : hasWall ? 18.5 : 6.5;
         player.setPos(playerX, 64.0, 0.5);
         setRandom(player, ENTITY_RANDOM_SEED);
         player.setYRot(0.0F);
@@ -2868,7 +2891,23 @@ public final class MobOracle {
             shooter.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.BOW));
             world.tracked.add(shooter);
         } else {
-            var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
+            net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow;
+            if (enchanted) {
+                ItemStack bow = new ItemStack(Items.BOW);
+                enchant(official, bow, Enchantments.POWER, 3);
+                enchant(official, bow, Enchantments.PUNCH, 2);
+                arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(
+                        world, 0.5, 65.5, 0.5, new ItemStack(Items.ARROW), bow);
+            } else if (spectral) {
+                arrow = new net.minecraft.world.entity.projectile.arrow.SpectralArrow(EntityTypes.SPECTRAL_ARROW, world);
+            } else {
+                arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
+            }
+            if (tipped) {
+                ItemStack ammo = new ItemStack(Items.TIPPED_ARROW);
+                ammo.set(DataComponents.POTION_CONTENTS, new PotionContents(Potions.POISON));
+                arrow.getSlot(0).set(ammo);
+            }
             setRandom(arrow, world.entitySeeds.nextLong());
             arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
             arrow.setPos(0.5, water ? 65.25 : piercing ? 65.0 : 65.5, 0.5);
@@ -2895,11 +2934,20 @@ public final class MobOracle {
             }
         }
 
+        Cow effectTarget = null;
+        if (effectHit) {
+            effectTarget = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+            effectTarget.setPos(6.5, 64.0, 0.5);
+            effectTarget.setNoAi(true);
+            world.tracked.add(effectTarget);
+        }
+        var effectType = spectral ? MobEffects.GLOWING : MobEffects.POISON;
+
         var frames = new StringBuilder("[");
         var playerStates = new StringBuilder("[");
         var playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
-        int ticks = skeleton ? 105 : (piercing || water) ? 3 : 26;
+        int ticks = (effectHit || enchanted) ? 4 : skeleton ? 105 : (piercing || water) ? 3 : 26;
         int embeds = 0;
         int extinguishes = 0;
         for (int tick = 0; tick <= ticks; tick++) {
@@ -2932,6 +2980,7 @@ public final class MobOracle {
                         sync.remove(arrow.getId());
                     }
                 }
+                if (effectTarget != null) effectTarget.tick();
                 world.tracked.removeIf(Entity::isRemoved);
                 for (Entity entity : world.spawned) {
                     if (entity instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow arrow) {
@@ -2982,12 +3031,31 @@ public final class MobOracle {
                         .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
                 world.projectileExtinguishes.clear();
             }
+            if (enchanted) {
+                Vec3 delta = player.getDeltaMovement();
+                frames.append(",\"playerMotion\":[")
+                        .append(Double.doubleToRawLongBits(delta.x)).append(',')
+                        .append(Double.doubleToRawLongBits(delta.y)).append(',')
+                        .append(Double.doubleToRawLongBits(delta.z)).append(']');
+            }
+            if (effectTarget != null) {
+                var effect = effectTarget.getEffect(effectType);
+                frames.append(",\"effectTarget\":[")
+                        .append(Float.floatToRawIntBits(effectTarget.getHealth()))
+                        .append(',').append(effect == null ? -1 : effect.getDuration()).append(']');
+            }
             if (piercing) {
                 frames.append(",\"targets\":").append(Arrays.toString(targets.stream()
                         .mapToInt(target -> Float.floatToRawIntBits(target.getHealth())).toArray()));
             }
             frames.append('}');
             zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
+        }
+        if (enchanted && (player.getHealth() >= 16.0F || player.getDeltaMovement().x <= 1.2)) {
+            throw new IllegalStateException("projectile scenario missed powered damage or Punch");
+        }
+        if (effectTarget != null && !effectTarget.hasEffect(effectType)) {
+            throw new IllegalStateException("projectile scenario missed " + name);
         }
         if (name.equals("arrow_hits_player") && player.getHealth() == 20.0F
                 || hasWall && embeds == 0 || overlap && embeds != ticks - 1 || skeleton && arrows.size() < 2
