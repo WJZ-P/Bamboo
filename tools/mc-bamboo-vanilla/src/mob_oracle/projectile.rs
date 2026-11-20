@@ -80,6 +80,10 @@ struct ProjectileFrame {
     drawing: Option<bool>,
     player_thermal: Option<[i32; 2]>,
     targets: Option<[i32; 2]>,
+    /// 本刻的熄火音效：x/y/z 的原始位、音量、音高、声源序号。
+    ///
+    /// Extinguish sounds this tick: raw x/y/z bits, volume, pitch, and source ordinal.
+    extinguished: Option<Vec<[i64; 6]>>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -89,6 +93,7 @@ struct ArrowFrame {
     ground: bool,
     shake: u8,
     seed: i64,
+    fire: Option<i32>,
 }
 
 impl ProjectileCase {
@@ -106,6 +111,14 @@ impl ProjectileCase {
 
     fn starts_without_gravity(&self) -> bool {
         self.name == "arrow_no_gravity"
+    }
+
+    fn water(&self) -> bool {
+        self.name.starts_with("arrow_water_")
+    }
+
+    fn water_tail(&self) -> bool {
+        self.name == "arrow_water_after_pierce"
     }
 
     fn level(&self) -> MobLevel {
@@ -163,19 +176,32 @@ impl ProjectileCase {
             }
             world.add_prepared_entity(skeleton);
         } else {
-            let y = if self.piercing() { 65.0 } else { 65.5 };
+            let y = if self.water() {
+                65.25
+            } else if self.piercing() {
+                65.0
+            } else {
+                65.5
+            };
             let mut arrow = world.prepare_entity(Entity::arrow(Vec3::new(0.5, y, 0.5)));
             if let EntityKind::Arrow(data) = &mut arrow.kind {
                 data.no_gravity = self.starts_without_gravity();
-                if self.piercing() {
+                if self.piercing() || self.water_tail() {
                     data.pierce = i8::from(!break_pierce);
                     data.base_damage = 0.5;
                 }
             }
             if !self.overlaps_flight() {
+                let power = if self.water() {
+                    7.0
+                } else if self.piercing() {
+                    6.0
+                } else {
+                    1.6
+                };
                 arrow.shoot_arrow(
                     Vec3::new(1.0, if mutate { 0.25 } else { 0.0 }, 0.0),
-                    if self.piercing() { 6.0 } else { 1.6 },
+                    power,
                     0.0,
                 );
             }
@@ -212,9 +238,13 @@ impl Report {
         let mut shots = 0;
         let mut embeds = 0;
         let mut packet_count = 0;
+        let extinguish_sound = i32::from(mc_bamboo_data::sounds::sound_event(
+            "minecraft:entity.generic.extinguish_fire",
+        ));
         for (tick, expected) in case.frames.iter().enumerate() {
+            let mut extinguished = Vec::new();
             if tick != 0 {
-                if case.flaming() && tick == 1 {
+                if (case.flaming() || case.water()) && tick == 1 {
                     level
                         .entities
                         .with_mut(case.first_id, |arrow| arrow.remaining_fire_ticks = 200);
@@ -244,7 +274,33 @@ impl Report {
                 }
                 level.game.as_mut().unwrap().tick_cooldowns();
                 ticks.set_time(1000 + tick as i64);
-                World::new(&mut level, &mut ticks).tick_entities();
+                let mut world = World::new(&mut level, &mut ticks);
+                world.tick_entities();
+                extinguished.extend(world.drain_effects().iter().filter_map(|effect| {
+                    let mc_bamboo_blocks::Effect::Sound {
+                        sound,
+                        source,
+                        x,
+                        y,
+                        z,
+                        volume,
+                        pitch,
+                        ..
+                    } = effect
+                    else {
+                        return None;
+                    };
+                    (*sound == extinguish_sound).then(|| {
+                        [
+                            x.to_bits() as i64,
+                            y.to_bits() as i64,
+                            z.to_bits() as i64,
+                            i64::from(volume.to_bits()),
+                            i64::from(pitch.to_bits()),
+                            i64::from(source.id()),
+                        ]
+                    })
+                }));
             }
             if let Some(thermal) = expected.player_thermal {
                 let actual = level
@@ -323,12 +379,20 @@ impl Report {
                         ground: data.in_ground,
                         shake: data.shake_time,
                         seed: entity.random.state(),
+                        fire: case.water().then_some(entity.remaining_fire_ticks),
                     }
                 })
                 .collect();
             embeds += arrows.iter().filter(|arrow| arrow.ground).count();
             let label = format!("{} tick {tick}", case.name);
             self.check_arrow_frames(&label, &expected.arrows, &arrows);
+            if let Some(expected_effects) = &expected.extinguished
+                && *expected_effects != extinguished
+            {
+                self.mismatch(format!(
+                    "{label} extinguish sounds: official {expected_effects:?}, bamboo {extinguished:?}"
+                ));
+            }
             if let Some(expected_motion) = expected.shooter {
                 let shooter = level.entities.get(case.first_id).unwrap();
                 let mob = shooter.kind.mob().unwrap();
@@ -408,11 +472,16 @@ impl Report {
             ));
         }
         for (theirs, ours) in expected.iter().zip(actual) {
-            if (theirs.id, theirs.ground, theirs.shake, theirs.seed)
-                != (ours.id, ours.ground, ours.shake, ours.seed)
+            if (
+                theirs.id,
+                theirs.ground,
+                theirs.shake,
+                theirs.seed,
+                theirs.fire,
+            ) != (ours.id, ours.ground, ours.shake, ours.seed, ours.fire)
             {
-                self.mismatch(format!("{label} arrow id/ground/shake/seed: official ({}, {}, {}, {}), bamboo ({}, {}, {}, {})",
-                    theirs.id, theirs.ground, theirs.shake, theirs.seed, ours.id, ours.ground, ours.shake, ours.seed));
+                self.mismatch(format!("{label} arrow id/ground/shake/seed/fire: official ({}, {}, {}, {}, {:?}), bamboo ({}, {}, {}, {}, {:?})",
+                    theirs.id, theirs.ground, theirs.shake, theirs.seed, theirs.fire, ours.id, ours.ground, ours.shake, ours.seed, ours.fire));
             }
             self.check_projectile_motion(label, "arrow", &theirs.motion, &ours.motion);
         }

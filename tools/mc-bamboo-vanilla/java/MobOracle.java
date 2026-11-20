@@ -232,6 +232,7 @@ public final class MobOracle {
             for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "arrow_block_overlaps_flight",
                     "arrow_no_gravity", "arrow_despawn", "arrow_flame_hit", "arrow_flame_rejected",
                     "arrow_piercing_hit", "arrow_piercing_rejected",
+                    "arrow_water_crossing", "arrow_water_after_pierce",
                     "skeleton_bow_normal", "skeleton_bow_hard")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
@@ -2587,8 +2588,10 @@ public final class MobOracle {
         boolean despawn = name.equals("arrow_despawn");
         boolean flame = name.startsWith("arrow_flame_");
         boolean piercing = name.startsWith("arrow_piercing_");
+        boolean water = name.startsWith("arrow_water_");
+        boolean waterTail = name.equals("arrow_water_after_pierce");
         boolean rejected = name.endsWith("_rejected");
-        boolean hasWall = wall || noGravity || despawn;
+        boolean hasWall = wall || noGravity || despawn || waterTail;
         Difficulty difficulty = name.endsWith("_hard") ? Difficulty.HARD : Difficulty.NORMAL;
         FakeLevel world = FakeLevel.create(official);
         world.injectedBrightOutside = false;
@@ -2606,12 +2609,16 @@ public final class MobOracle {
         }
         BlockPos obstacle = new BlockPos(7, 65, 0);
         if (hasWall) world.blocks.put(obstacle.asLong(), Blocks.STONE.defaultBlockState());
+        if (water) {
+            world.blocks.put(BlockPos.asLong(waterTail ? 4 : 3, 65, 0), Blocks.WATER.defaultBlockState());
+            world.projectileExtinguishes = new ArrayList<>();
+        }
         String blocks = blockArray(world.blocks);
         int playerId = FIRST_ID + 1024;
         ServerPlayer player = new ServerPlayer(official.server, world,
                 new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
         player.setId(playerId);
-        double playerX = skeleton ? 11.5 : hasWall ? 18.5 : piercing ? 2.0 : 6.5;
+        double playerX = skeleton ? 11.5 : (waterTail || piercing) ? 2.0 : hasWall ? 18.5 : 6.5;
         player.setPos(playerX, 64.0, 0.5);
         setRandom(player, ENTITY_RANDOM_SEED);
         player.setYRot(0.0F);
@@ -2650,16 +2657,16 @@ public final class MobOracle {
             var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
             setRandom(arrow, world.entitySeeds.nextLong());
             arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
-            arrow.setPos(0.5, piercing ? 65.0 : 65.5, 0.5);
+            arrow.setPos(0.5, water ? 65.25 : piercing ? 65.0 : 65.5, 0.5);
             arrow.setNoGravity(noGravity);
-            if (piercing) {
+            if (piercing || waterTail) {
                 var setPierce = net.minecraft.world.entity.projectile.arrow.AbstractArrow.class
                         .getDeclaredMethod("setPierceLevel", byte.class);
                 setPierce.setAccessible(true);
                 setPierce.invoke(arrow, (byte)1);
                 arrow.setBaseDamage(0.5);
             }
-            if (!overlap) arrow.shoot(1.0, 0.0, 0.0, piercing ? 6.0F : 1.6F, 0.0F);
+            if (!overlap) arrow.shoot(1.0, 0.0, 0.0, water ? 7.0F : piercing ? 6.0F : 1.6F, 0.0F);
             arrows.add(arrow);
             world.tracked.add(arrow);
         }
@@ -2678,14 +2685,15 @@ public final class MobOracle {
         var playerStates = new StringBuilder("[");
         var playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
-        int ticks = skeleton ? 105 : piercing ? 3 : 26;
+        int ticks = skeleton ? 105 : (piercing || water) ? 3 : 26;
         int embeds = 0;
+        int extinguishes = 0;
         for (int tick = 0; tick <= ticks; tick++) {
             var arrowPackets = new ArrayList<String>();
             if (tick == 0 && !skeleton) pairArrow(world, official, arrows.getFirst(), sync, arrowPackets);
             if (tick > 0) {
                 world.gameTime++;
-                if (flame && tick == 1) arrows.getFirst().setRemainingFireTicks(200);
+                if ((flame || water) && tick == 1) arrows.getFirst().setRemainingFireTicks(200);
                 if (wall && tick == 12) world.blocks.remove(obstacle.asLong());
                 if (overlap && tick == 2) world.blocks.put(BlockPos.asLong(0, 65, 0), Blocks.STONE.defaultBlockState());
                 if (noGravity && tick == 10) arrows.getFirst().setNoGravity(false);
@@ -2738,7 +2746,9 @@ public final class MobOracle {
                 frames.append("{\"id\":").append(arrow.getId());
                 frames.append(",\"motion\":").append(projectileMotion(arrow));
                 frames.append(",\"ground\":").append(embedded).append(",\"shake\":").append(arrow.shakeTime);
-                frames.append(",\"seed\":").append(randomSeed(arrow)).append('}');
+                frames.append(",\"seed\":").append(randomSeed(arrow));
+                if (water) frames.append(",\"fire\":").append(arrow.getRemainingFireTicks());
+                frames.append('}');
             }
             frames.append("],\"packets\":").append(arrowPackets.stream().map(MobOracle::jsonString)
                     .collect(java.util.stream.Collectors.joining(",", "[", "]")));
@@ -2748,9 +2758,15 @@ public final class MobOracle {
                 frames.append(",\"aggressive\":").append(shooter.isAggressive());
                 frames.append(",\"drawing\":").append(shooter.isUsingItem());
             }
-            if (flame) {
+            if (flame || water) {
                 frames.append(",\"playerThermal\":[").append(player.getRemainingFireTicks())
                         .append(',').append(player.getTicksFrozen()).append(']');
+            }
+            if (water) {
+                extinguishes += world.projectileExtinguishes.size();
+                frames.append(",\"extinguished\":").append(world.projectileExtinguishes.stream()
+                        .map(Arrays::toString).collect(java.util.stream.Collectors.joining(",", "[", "]")));
+                world.projectileExtinguishes.clear();
             }
             if (piercing) {
                 frames.append(",\"targets\":").append(Arrays.toString(targets.stream()
@@ -2775,6 +2791,14 @@ public final class MobOracle {
                 || targets.getFirst().getHealth() != (rejected ? 9.0F : 7.0F)
                 || targets.getLast().getHealth() != 10.0F || !arrows.getFirst().isRemoved())) {
             throw new IllegalStateException("piercing scenario did not exercise the hit cap: " + name);
+        }
+        if (water && (player.getHealth() == 20.0F || extinguishes != 1
+                || player.getRemainingFireTicks() != (waterTail ? 100 : 0)
+                || arrows.getFirst().getRemainingFireTicks() != 0)) {
+            throw new IllegalStateException("water scenario missed the expected contact: " + name
+                    + " health=" + player.getHealth() + " sounds=" + extinguishes
+                    + " player_fire=" + player.getRemainingFireTicks()
+                    + " arrow_fire=" + arrows.getFirst().getRemainingFireTicks());
         }
         out.write("{\"type\":\"projectile\",\"name\":" + jsonString(name) + ",\"difficulty\":" + difficulty.getId()
                 + ",\"wall\":" + wall + ",\"skeleton\":" + skeleton + ",\"firstId\":" + FIRST_ID
@@ -5019,6 +5043,7 @@ public final class MobOracle {
     }
 
     private static final class FakeLevel extends ServerLevel {
+        List<long[]> projectileExtinguishes;
         DifficultyInstance spawnDifficulty;
 
         private Official official;
@@ -5510,6 +5535,11 @@ public final class MobOracle {
             if (packets != null) {
                 packets.accept(new net.minecraft.network.protocol.game.ClientboundSoundPacket(
                         sound, source, x, y, z, volume, pitch, seed));
+            }
+            if (projectileExtinguishes != null && sound.value() == net.minecraft.sounds.SoundEvents.GENERIC_EXTINGUISH_FIRE) {
+                projectileExtinguishes.add(new long[] {Double.doubleToRawLongBits(x),
+                        Double.doubleToRawLongBits(y), Double.doubleToRawLongBits(z),
+                        Float.floatToRawIntBits(volume), Float.floatToRawIntBits(pitch), source.ordinal()});
             }
         }
 
