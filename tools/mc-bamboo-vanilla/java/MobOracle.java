@@ -230,7 +230,8 @@ public final class MobOracle {
                 cases++;
             }
             for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "arrow_block_overlaps_flight",
-                    "arrow_no_gravity", "arrow_despawn",
+                    "arrow_no_gravity", "arrow_despawn", "arrow_flame_hit", "arrow_flame_rejected",
+                    "arrow_piercing_hit", "arrow_piercing_rejected",
                     "skeleton_bow_normal", "skeleton_bow_hard")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
@@ -2584,6 +2585,9 @@ public final class MobOracle {
         boolean overlap = name.equals("arrow_block_overlaps_flight");
         boolean noGravity = name.equals("arrow_no_gravity");
         boolean despawn = name.equals("arrow_despawn");
+        boolean flame = name.startsWith("arrow_flame_");
+        boolean piercing = name.startsWith("arrow_piercing_");
+        boolean rejected = name.endsWith("_rejected");
         boolean hasWall = wall || noGravity || despawn;
         Difficulty difficulty = name.endsWith("_hard") ? Difficulty.HARD : Difficulty.NORMAL;
         FakeLevel world = FakeLevel.create(official);
@@ -2607,12 +2611,17 @@ public final class MobOracle {
         ServerPlayer player = new ServerPlayer(official.server, world,
                 new GameProfile(new UUID(1L, 2L), "ArrowOracle"), ClientInformation.createDefault());
         player.setId(playerId);
-        double playerX = skeleton ? 11.5 : hasWall ? 18.5 : 6.5;
+        double playerX = skeleton ? 11.5 : hasWall ? 18.5 : piercing ? 2.0 : 6.5;
         player.setPos(playerX, 64.0, 0.5);
         setRandom(player, ENTITY_RANDOM_SEED);
         player.setYRot(0.0F);
         player.setYHeadRot(0.0F);
         player.setYBodyRot(0.0F);
+        if (flame) {
+            player.setRemainingFireTicks(37);
+            player.setTicksFrozen(80);
+        }
+        player.getAbilities().invulnerable = rejected;
         Bytes playerSink = new Bytes(official.registries);
         RecordingListener connection = allocate(RecordingListener.class);
         put(ServerGamePacketListenerImpl.class, connection, "player", player);
@@ -2641,24 +2650,42 @@ public final class MobOracle {
             var arrow = new net.minecraft.world.entity.projectile.arrow.Arrow(EntityTypes.ARROW, world);
             setRandom(arrow, world.entitySeeds.nextLong());
             arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
-            arrow.setPos(0.5, 65.5, 0.5);
+            arrow.setPos(0.5, piercing ? 65.0 : 65.5, 0.5);
             arrow.setNoGravity(noGravity);
-            if (!overlap) arrow.shoot(1.0, 0.0, 0.0, 1.6F, 0.0F);
+            if (piercing) {
+                var setPierce = net.minecraft.world.entity.projectile.arrow.AbstractArrow.class
+                        .getDeclaredMethod("setPierceLevel", byte.class);
+                setPierce.setAccessible(true);
+                setPierce.invoke(arrow, (byte)1);
+                arrow.setBaseDamage(0.5);
+            }
+            if (!overlap) arrow.shoot(1.0, 0.0, 0.0, piercing ? 6.0F : 1.6F, 0.0F);
             arrows.add(arrow);
             world.tracked.add(arrow);
+        }
+        var targets = new ArrayList<Cow>();
+        if (piercing) {
+            for (double x : new double[] {3.5, 5.5}) {
+                var target = EntityTypes.COW.create(world, EntitySpawnReason.COMMAND);
+                target.setPos(x, 64.0, 0.5);
+                target.setNoAi(true);
+                world.tracked.add(target);
+                targets.add(target);
+            }
         }
 
         var frames = new StringBuilder("[");
         var playerStates = new StringBuilder("[");
         var playerPackets = new StringBuilder("[");
         float[] lastSentHealth = {-1.0e8F};
-        int ticks = skeleton ? 105 : 26;
+        int ticks = skeleton ? 105 : piercing ? 3 : 26;
         int embeds = 0;
         for (int tick = 0; tick <= ticks; tick++) {
             var arrowPackets = new ArrayList<String>();
             if (tick == 0 && !skeleton) pairArrow(world, official, arrows.getFirst(), sync, arrowPackets);
             if (tick > 0) {
                 world.gameTime++;
+                if (flame && tick == 1) arrows.getFirst().setRemainingFireTicks(200);
                 if (wall && tick == 12) world.blocks.remove(obstacle.asLong());
                 if (overlap && tick == 2) world.blocks.put(BlockPos.asLong(0, 65, 0), Blocks.STONE.defaultBlockState());
                 if (noGravity && tick == 10) arrows.getFirst().setNoGravity(false);
@@ -2721,6 +2748,14 @@ public final class MobOracle {
                 frames.append(",\"aggressive\":").append(shooter.isAggressive());
                 frames.append(",\"drawing\":").append(shooter.isUsingItem());
             }
+            if (flame) {
+                frames.append(",\"playerThermal\":[").append(player.getRemainingFireTicks())
+                        .append(',').append(player.getTicksFrozen()).append(']');
+            }
+            if (piercing) {
+                frames.append(",\"targets\":").append(Arrays.toString(targets.stream()
+                        .mapToInt(target -> Float.floatToRawIntBits(target.getHealth())).toArray()));
+            }
             frames.append('}');
             zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
         }
@@ -2728,6 +2763,18 @@ public final class MobOracle {
                 || hasWall && embeds == 0 || overlap && embeds != ticks - 1 || skeleton && arrows.size() < 2
                 || despawn && (embeds < 2 || !arrows.getFirst().isRemoved())) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
+        }
+        if (flame && (player.getTicksFrozen() != 0
+                || player.getRemainingFireTicks() != (rejected ? 1 : 100)
+                || (player.getHealth() == 20.0F) != rejected)) {
+            throw new IllegalStateException("flame scenario did not exercise ignition: " + name
+                    + " health=" + player.getHealth() + " fire=" + player.getRemainingFireTicks()
+                    + " frozen=" + player.getTicksFrozen());
+        }
+        if (piercing && ((player.getHealth() == 20.0F) != rejected
+                || targets.getFirst().getHealth() != (rejected ? 9.0F : 7.0F)
+                || targets.getLast().getHealth() != 10.0F || !arrows.getFirst().isRemoved())) {
+            throw new IllegalStateException("piercing scenario did not exercise the hit cap: " + name);
         }
         out.write("{\"type\":\"projectile\",\"name\":" + jsonString(name) + ",\"difficulty\":" + difficulty.getId()
                 + ",\"wall\":" + wall + ",\"skeleton\":" + skeleton + ",\"firstId\":" + FIRST_ID

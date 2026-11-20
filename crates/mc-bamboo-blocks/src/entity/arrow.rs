@@ -28,6 +28,7 @@ pub struct ArrowPublic {
     pub on_fire: bool,
     pub no_gravity: bool,
     pub needs_sync: bool,
+    pub sync_velocity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +56,7 @@ pub struct Arrow {
     left_owner_checked: bool,
     pub has_been_shot: bool,
     needs_sync: bool,
+    sync_velocity: bool,
     pierced: Vec<EntityUid>,
 }
 
@@ -81,6 +83,7 @@ impl Default for Arrow {
             left_owner_checked: false,
             has_been_shot: false,
             needs_sync: false,
+            sync_velocity: false,
             pierced: Vec::new(),
         }
     }
@@ -100,6 +103,7 @@ impl Arrow {
             on_fire: remaining_fire_ticks > 0,
             no_gravity: self.no_gravity,
             needs_sync: self.needs_sync,
+            sync_velocity: self.sync_velocity,
         }
     }
 }
@@ -179,6 +183,7 @@ fn tick_or_check_ground(me: &mut Entity, blocks: &dyn BlockView) -> bool {
         return true;
     };
     arrow.needs_sync = false;
+    arrow.sync_velocity = false;
     let nearby_blocks = blocks.block_collisions(surrounding, collision);
     if nearby_blocks
         .iter()
@@ -632,24 +637,48 @@ fn finish_flight(me: &mut Entity, blocks: &dyn BlockView) {
         me.delta = me.delta.scale(f64::from(0.99_f32));
     }
     if matches!(&me.kind, EntityKind::Arrow(arrow) if !arrow.in_ground && !arrow.no_gravity) {
-        me.delta.y -= 0.05;
+        // Entity.applyGravity 把整支向量加上 (0, -g, 0)，也会规范化反弹留下的 -0。
+        // Entity.applyGravity adds (0, -g, 0) to the whole vector, normalizing -0 after a reversal.
+        me.delta = me.delta.add(Vec3::new(0.0, -0.05, 0.0));
     }
+    let in_lava = me.update_projectile_fluid(blocks);
+    // Entity.baseTick 的 on_fire 伤害会让 Projectile.markHurt，即使没有损血。
+    // Entity.baseTick's on-fire pulse calls Projectile.markHurt even without health damage.
+    let sync_velocity =
+        me.remaining_fire_ticks > 0 && me.remaining_fire_ticks % 20 == 0 && !in_lava;
     if me.remaining_fire_ticks > 0 {
         me.remaining_fire_ticks -= 1;
     }
-    me.update_projectile_fluid(blocks);
     if me.position.y < f64::from(blocks.min_y() - 64) {
         me.removed = true;
     }
     me.first_tick = false;
     if let EntityKind::Arrow(arrow) = &mut me.kind {
         arrow.has_been_shot = true;
+        arrow.sync_velocity = sync_velocity;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn burning_arrow_forces_velocity_sync_on_the_fire_damage_pulse() {
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut arrow = Entity::arrow(Vec3::new(0.5, 65.0, 0.5));
+        arrow.remaining_fire_ticks = 20;
+        let id = world.spawn_entity(arrow);
+        for expected in [true, false] {
+            world.tick_entities();
+            let entity = world.entity(id).unwrap();
+            assert!(
+                matches!(&entity.kind, EntityKind::Arrow(data) if data.sync_velocity == expected)
+            );
+        }
+    }
 
     #[test]
     fn piercing_arrow_keeps_hitting_after_rejection_until_it_reaches_the_limit() {

@@ -216,7 +216,7 @@ pub(crate) fn hurt_player_in(
         && let Some(previous) = previous_fire
         && let Some(player) = parts.players.get_mut(&id)
     {
-        player.environment.remaining_fire_ticks = previous;
+        crate::player_environment::set_player_fire_ticks(player, previous);
     }
     outcome
 }
@@ -671,6 +671,26 @@ mod mob_hit_tests {
         }
         let player = &region.players[&id];
         assert_eq!(player.health.health, 20.0);
+        assert_eq!(player.environment.remaining_fire_ticks, 1);
+        assert_eq!(player.environment.ticks_frozen, 0);
+    }
+
+    #[test]
+    fn flaming_arrow_restores_the_uncapped_fire_timer_in_survival() {
+        let (mut region, id) = region_with_player(20.0);
+        let player = region.players.get_mut(&id).unwrap();
+        player.environment.remaining_fire_ticks = 37;
+        player.environment.ticks_frozen = 80;
+        let mut source = DamageSource::environment(DamageKind::Arrow);
+        source.arrow_ignite_ticks = 100;
+        {
+            let (mut level, ticks) = region.entity_level();
+            let mut world = mc_bamboo_blocks::World::new(&mut level, ticks);
+            assert!(world.hurt_player_from_mob(id.0, zombie_hit(), 3.0, None));
+            assert!(!world.hurt_player_from_mob(id.0, source, 2.0, None));
+        }
+        let player = &region.players[&id];
+        assert_eq!(player.health.health, 17.0);
         assert_eq!(player.environment.remaining_fire_ticks, 37);
         assert_eq!(player.environment.ticks_frozen, 0);
     }

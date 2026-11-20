@@ -78,6 +78,8 @@ struct ProjectileFrame {
     shooter_seed: Option<i64>,
     aggressive: Option<bool>,
     drawing: Option<bool>,
+    player_thermal: Option<[i32; 2]>,
+    targets: Option<[i32; 2]>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -90,6 +92,14 @@ struct ArrowFrame {
 }
 
 impl ProjectileCase {
+    fn flaming(&self) -> bool {
+        self.name.starts_with("arrow_flame_")
+    }
+
+    fn piercing(&self) -> bool {
+        self.name.starts_with("arrow_piercing_")
+    }
+
     fn overlaps_flight(&self) -> bool {
         self.name == "arrow_block_overlaps_flight"
     }
@@ -133,7 +143,7 @@ impl ProjectileCase {
         }
     }
 
-    fn spawn(&self, world: &mut World<'_>, mutate: bool) {
+    fn spawn(&self, world: &mut World<'_>, mutate: bool, break_pierce: bool) {
         if self.skeleton {
             let mut skeleton = world.prepare_entity(Entity::by_mob_type(
                 MobType::Skeleton,
@@ -153,18 +163,30 @@ impl ProjectileCase {
             }
             world.add_prepared_entity(skeleton);
         } else {
-            let mut arrow = world.prepare_entity(Entity::arrow(Vec3::new(0.5, 65.5, 0.5)));
+            let y = if self.piercing() { 65.0 } else { 65.5 };
+            let mut arrow = world.prepare_entity(Entity::arrow(Vec3::new(0.5, y, 0.5)));
             if let EntityKind::Arrow(data) = &mut arrow.kind {
                 data.no_gravity = self.starts_without_gravity();
+                if self.piercing() {
+                    data.pierce = i8::from(!break_pierce);
+                    data.base_damage = 0.5;
+                }
             }
             if !self.overlaps_flight() {
                 arrow.shoot_arrow(
                     Vec3::new(1.0, if mutate { 0.25 } else { 0.0 }, 0.0),
-                    1.6,
+                    if self.piercing() { 6.0 } else { 1.6 },
                     0.0,
                 );
             }
             world.add_prepared_entity(arrow);
+            if self.piercing() {
+                for x in [3.5, 5.5] {
+                    let mut target = Entity::by_mob_type(MobType::Cow, Vec3::new(x, 64.0, 0.5));
+                    target.with_mob(|_, mob| mob.no_ai = true);
+                    world.spawn_entity(target);
+                }
+            }
         }
     }
 }
@@ -173,11 +195,17 @@ impl Report {
     pub(super) fn replay_projectile(&mut self, case: &ProjectileCase) {
         self.cases += 1;
         let mut level = case.level();
+        level.game.as_mut().unwrap().set_arrow_target(
+            case.player_id,
+            case.name.ends_with("_rejected"),
+            case.flaming().then_some([37, 80]),
+        );
         let mut ticks = BlockTicks::default();
         ticks.set_time(1000);
         case.spawn(
             &mut World::new(&mut level, &mut ticks),
             self.break_test.as_deref() == Some("projectile"),
+            self.break_test.as_deref() == Some("arrow_piercing"),
         );
         let mut tracking = EntityTracking::default();
         let mut previous = BTreeSet::new();
@@ -186,6 +214,11 @@ impl Report {
         let mut packet_count = 0;
         for (tick, expected) in case.frames.iter().enumerate() {
             if tick != 0 {
+                if case.flaming() && tick == 1 {
+                    level
+                        .entities
+                        .with_mut(case.first_id, |arrow| arrow.remaining_fire_ticks = 200);
+                }
                 if case.wall && tick == 12 {
                     level.blocks.remove(&BlockPos::new(7, 65, 0));
                 }
@@ -212,6 +245,32 @@ impl Report {
                 level.game.as_mut().unwrap().tick_cooldowns();
                 ticks.set_time(1000 + tick as i64);
                 World::new(&mut level, &mut ticks).tick_entities();
+            }
+            if let Some(thermal) = expected.player_thermal {
+                let actual = level
+                    .game
+                    .as_ref()
+                    .unwrap()
+                    .arrow_target_thermal(case.player_id);
+                if actual != thermal {
+                    self.mismatch(format!("{} tick {tick} player fire/frozen: official {thermal:?}, bamboo {actual:?}", case.name));
+                }
+            }
+            if let Some(targets) = expected.targets {
+                let actual = [case.first_id + 1, case.first_id + 2].map(|id| {
+                    level
+                        .entities
+                        .get(id)
+                        .unwrap()
+                        .kind
+                        .mob()
+                        .unwrap()
+                        .health
+                        .to_bits() as i32
+                });
+                if actual != targets {
+                    self.mismatch(format!("{} tick {tick} target health bits: official {targets:?}, bamboo {actual:?}", case.name));
+                }
             }
             let mut packets = Vec::new();
             let active: BTreeSet<_> = level
@@ -247,7 +306,7 @@ impl Report {
                     packets.extend(tracking.tracked_for_oracle(&snapshot).step(
                         &snapshot,
                         snapshot.needs_sync,
-                        false,
+                        snapshot.sync_velocity,
                     ));
                 }
             }

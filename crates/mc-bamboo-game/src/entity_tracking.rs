@@ -467,7 +467,11 @@ impl TrackedEntity {
         }
         self.tick_count += 1;
         if sync_velocity {
-            self.last_movement = snapshot.delta;
+            // 箭的 syncVelocity 来自 markHurt；官方这个分支不更新常规速度基线。
+            // Arrow syncVelocity comes from markHurt; vanilla leaves its regular velocity baseline intact.
+            if !matches!(snapshot.data, KindData::Arrow(_)) {
+                self.last_movement = snapshot.delta;
+            }
             packets.push(packet_body(&SetEntityMotion {
                 entity_id: snapshot.id,
                 movement: snapshot.delta,
@@ -757,7 +761,7 @@ impl Snapshot {
             chunk: public.chunk_position(),
             data: KindData::of(&public.kind),
             needs_sync: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.needs_sync),
-            sync_velocity: false,
+            sync_velocity: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.sync_velocity),
             sync_position: false,
             fall_flying: false,
         }

@@ -117,6 +117,33 @@ impl ReplayPlayers {
         }
     }
 
+    /// 给弹射物定点场景设无敌、火焰和冰冻初值。
+    ///
+    /// Set invulnerability, fire and freezing in a projectile fixture.
+    pub fn set_arrow_target(
+        &mut self,
+        target: EntityUid,
+        invulnerable: bool,
+        thermal: Option<[i32; 2]>,
+    ) {
+        let player = self.region.players.get_mut(&PlayerId(target)).unwrap();
+        if invulnerable {
+            player.game_mode = GameMode::Creative;
+        }
+        if let Some([fire, frozen]) = thermal {
+            player.environment.remaining_fire_ticks = fire;
+            player.environment.ticks_frozen = frozen;
+        }
+    }
+
+    /// 火焰和冰冻计时独立于血量快照。
+    ///
+    /// Returns the fire timer and freeze timer separately from the health snapshot.
+    pub fn arrow_target_thermal(&self, target: EntityUid) -> [i32; 2] {
+        let env = &self.region.players[&PlayerId(target)].environment;
+        [env.remaining_fire_ticks, env.ticks_frozen]
+    }
+
     /// 逐刻比对的玩家状态：血量位、受伤冷却、受伤动画、是否死亡、着火刻数。
     pub fn state(&self, target: EntityUid) -> [i64; 5] {
         self.region
