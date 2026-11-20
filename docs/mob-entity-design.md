@@ -669,7 +669,7 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   每名玩家附近的计数），`filtered_categories` 按全局上限
   （`maxInstancesPerChunk * spawnableChunkCount / 289`）、`spawn_mobs` / `spawn_monsters`
   和 `gameTime % 400 == 0` 的持久类别过滤；`spawn_for_chunk` → `spawn_category_for_chunk`
-  → `spawn_category_for_position` 逐条照官方：3 组、组大小 `nextFloat * 4`、每步两次
+  → `spawn_category_for_position`：3 组、初始步数 `ceil(nextFloat * 4)`、每步四次
   `nextInt(6)`、加权表 `nextInt(总权重)`、`count.sample`、离玩家/出生点 24 格、
   `ON_GROUND` 的方块/光照/碰撞条件、`noCollision`、`checkSpawnObstruction`、
   `finalizeSpawn` 与组生成。
@@ -682,24 +682,21 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
   `PathfinderMob.checkSpawnRules`（`getWalkTargetValue >= 0`，牛看草方块/亮度，怪物取负的
   光照代价）、`checkSpawnObstruction`（不泡液体、没有实体挡路）。
 - **接入**：`crates/mc-bamboo-game/src/natural_spawn.rs` 在 `run_island_simulation` 里
-  随机刻之前跑（官方 `ServerChunkCache.tickChunks` 的顺序）；刷怪区块取能 tick 实体的
-  区块（无限超平坦按玩家模拟距离的方形），用 `Region.random` 打乱，即使没有可刷的类别也打乱
-  （官方把打乱放在类别判断之外）；`spawnableChunkCount` 用「玩家周围切比雪夫距离 8 内
-  （17×17 的方形）、已加载的区块数」对应官方的
-  `FixedPlayerDistanceChunkTracker`（八方向传播、旁观者的玩家票也算）。
+  随机刻之前跑。先收集可 tick 方块且水平距非旁观玩家不到 128 格的候选区块，用
+  `Region.random` 打乱，再检查实体 tick 等级。全局上限使用本岛玩家周围 17×17 方形的并集，
+  不限制为已加载区块；旁观者仅在 `spectators_generate_chunks` 开启时贡献区块。
 - **配置**：`bamboo.toml` 的 `spawn_per_player_cap`，默认开；关掉只剩官方全局上限。
 - **对拍**：`mc-bamboo-vanilla natural-spawn` 见下节。
-- **已知差异**：只有牛、僵尸、尸壳会真的生成；表里其它生物被挑中后当作没有刷怪数据、
-  这一组结束。一个组只会刷一种生物，所以已支持生物的期望产率不变；差的是挑中之后的随机数
-  序列（官方会继续为那种生物取朝向、生成规则和 `finalizeSpawn` 的随机数），以及官方把它们
-  算进类别计数、让全局上限更早卡住。僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
+- **已知差异**：只有牛、僵尸、尸壳会真的生成；表里其它生物被挑中后照常抽组大小，
+  然后结束这一组，不复现官方后续随机数和上限占用，不能保证逐刻产率一致。
+  僵尸/尸壳的 `finalizeSpawn` 沿用 9.3 的实现，随机序列和
   官方不同。`doMobSpawning` 为假时整段不跑（官方仍会打乱刷怪区块列表）。区块列表按坐标顺序
-  收集而不是官方 `Long2ByteOpenHashMap` 的哈希顺序，所以打乱后的具体顺序不同。
+  收集而不是官方 `Long2ByteOpenHashMap` 的哈希顺序，官方还在刷怪列表内穿插雷击。
   生成期刷怪、结构刷怪、刷怪笼、`customSpawners`、下界要塞表未做。
 - **对拍**（`mc-bamboo-vanilla natural-spawn`）：`NaturalSpawnOracle.java` 对每个群系的每个
   `MobCategory`，用 7 个固定种子各跑 8 次官方 `WeightedList.getRandom` + `IntProvider.sample`，
   再取一个 `nextInt(1000)` 当随机源指纹；另外把 0..15 交给官方 `Util.shuffle`。
-  Bamboo 用导出的表按同一顺序重放（`natural::pick` / `natural::sample` /
-  `mc_bamboo_blocks::shuffle`），1701 个用例 **0 不一致**；`--break-self-test` 改坏一项会被抓到。
+  也直接调用官方 `getRandomPosWithin`（含空列和非平面高度表）与
+  `ChunkMap.euclideanDistanceSquared`，比较起点、后续随机指纹与 128 格区块距离条件。
   **没有对拍完整刷怪链路**：`spawnCategoryForPosition` 的方块/光照/距离判定与
-  `finalizeSpawn` 只有单元测试，因为假世界要完整造出官方 `ServerLevel`；这一块列为未对拍。
+  `finalizeSpawn` 仍未做端到端比较。

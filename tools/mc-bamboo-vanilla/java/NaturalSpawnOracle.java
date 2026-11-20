@@ -22,11 +22,14 @@ import java.io.FileOutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintStream;
 import java.io.Writer;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import net.minecraft.SharedConstants;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
@@ -36,6 +39,8 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.RegistryLayer;
+import net.minecraft.server.level.ChunkMap;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.packs.PackType;
 import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
@@ -47,8 +52,15 @@ import net.minecraft.util.Util;
 import net.minecraft.util.random.WeightedList;
 import net.minecraft.world.attribute.EnvironmentAttributes;
 import net.minecraft.world.entity.MobCategory;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.NaturalSpawner;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.MobSpawnSettings;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.phys.Vec3;
+import sun.misc.Unsafe;
 
 public final class NaturalSpawnOracle {
     private static final int OUTPUT_BUFFER = 1 << 20;
@@ -103,7 +115,89 @@ public final class NaturalSpawnOracle {
                 out.write(shuffleCase(seed).toString());
                 out.write('\n');
             }
+            writePositionCases(out);
             out.flush();
+        }
+    }
+
+    // 跳过构造，只注入官方随机起点方法读取的高度和随机源，不启动世界线程。
+    // Skip constructors and inject only the height and RNG read by the official method.
+    private static void writePositionCases(Writer out) throws Exception {
+        Field singleton = Unsafe.class.getDeclaredField("theUnsafe");
+        singleton.setAccessible(true);
+        Unsafe unsafe = (Unsafe) singleton.get(null);
+        PositionLevel level = (PositionLevel) unsafe.allocateInstance(PositionLevel.class);
+        PositionChunk chunk = (PositionChunk) unsafe.allocateInstance(PositionChunk.class);
+        Field randomField = Level.class.getDeclaredField("random");
+        randomField.setAccessible(true);
+        Method origin = NaturalSpawner.class.getDeclaredMethod("getRandomPosWithin", Level.class, LevelChunk.class);
+        origin.setAccessible(true);
+        Method distance = ChunkMap.class.getDeclaredMethod("euclideanDistanceSquared", ChunkPos.class, Vec3.class);
+        distance.setAccessible(true);
+        chunk.pos = new ChunkPos(-3, 2);
+        for (boolean empty : new boolean[]{true, false}) {
+            chunk.empty = empty;
+            for (long seed : SEEDS) {
+                RandomSource random = RandomSource.create(seed);
+                randomField.set(level, random);
+                JsonArray positions = new JsonArray();
+                for (int i = 0; i < PICKS_PER_CASE; i++) {
+                    BlockPos pos = (BlockPos) origin.invoke(null, level, chunk);
+                    JsonArray point = new JsonArray();
+                    point.add(pos.getX());
+                    point.add(pos.getY());
+                    point.add(pos.getZ());
+                    positions.add(point);
+                }
+                JsonObject row = new JsonObject();
+                row.addProperty("type", "origin");
+                row.addProperty("seed", seed);
+                row.addProperty("empty", empty);
+                row.add("positions", positions);
+                row.addProperty("after", seedAfter(random));
+                out.write(row + "\n");
+            }
+        }
+        for (double dx : new double[]{24, 32, 90.5, 127.999, 128, 128.001}) {
+            for (double dz : new double[]{0, 90.5}) {
+                Vec3 player = new Vec3(chunk.pos.getMiddleBlockX() + dx, 999, chunk.pos.getMiddleBlockZ() + dz);
+                JsonObject row = new JsonObject();
+                row.addProperty("type", "chunk_distance");
+                row.addProperty("x", player.x);
+                row.addProperty("z", player.z);
+                row.addProperty("close", (double) distance.invoke(null, chunk.pos, player) < 16384.0);
+                out.write(row + "\n");
+            }
+        }
+    }
+
+    private static final class PositionLevel extends ServerLevel {
+        private PositionLevel() {
+            super(null, null, null, null, null, null, false, 0L, null, false);
+        }
+
+        @Override
+        public int getMinY() {
+            return -64;
+        }
+    }
+
+    private static final class PositionChunk extends LevelChunk {
+        private ChunkPos pos;
+        private boolean empty;
+
+        private PositionChunk() {
+            super(null, null);
+        }
+
+        @Override
+        public ChunkPos getPos() {
+            return pos;
+        }
+
+        @Override
+        public int getHeight(Heightmap.Types type, int x, int z) {
+            return empty ? -65 : 63 + (x & 15) - (z & 15);
         }
     }
 

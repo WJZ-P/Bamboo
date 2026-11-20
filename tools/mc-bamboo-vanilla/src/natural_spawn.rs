@@ -5,6 +5,7 @@
 //! 「之后 `nextInt(1000)`」的指纹；另外把 0..15 交给官方 `Util.shuffle`。
 //! Bamboo 侧用生成的刷怪表和同一套取数顺序重放，挑中的生物、组大小、打乱结果和指纹
 //! 都要逐个相同。`--break-self-test` 故意改坏一项确认会被抓到。
+//! 随机起点和区块中心距离也由官方方法给出，Bamboo 用运行时的实现重放。
 //!
 //! `natural-spawn`: compare the weighted spawn selection and group sizes against
 //! vanilla. `NaturalSpawnOracle.java` runs `WeightedList.getRandom` plus
@@ -13,10 +14,12 @@
 //! vanilla `Util.shuffle`. Bamboo replays the same draws over the exported tables and
 //! must match the picked type, the count, the shuffled order and the fingerprint.
 //! `--break-self-test` corrupts one pick to prove the detector works.
+//! Vanilla also supplies the random origin and chunk distance for runtime replay.
 
 use std::process::Command;
 
 use mc_bamboo_blocks::entity::mob::natural;
+use mc_bamboo_core::{ChunkPos, Vec3};
 use mc_bamboo_data::spawning::{self, MobCategory, MobSpawnerDef};
 use serde_json::Value;
 
@@ -85,6 +88,8 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         let mismatch = match kind {
             "pick" => replay_pick(&value, options.break_self_test && first)?,
             "shuffle" => replay_shuffle(&value, options.break_self_test && first)?,
+            "origin" => replay_origin(&value)?,
+            "chunk_distance" => replay_chunk_distance(&value)?,
             other => return Err(format!("unexpected oracle line type {other}")),
         };
         first = false;
@@ -94,6 +99,43 @@ pub fn run(mut command: Command, args: &[&str]) -> Result<(), String> {
         }
     }
     finish(stats, &options)
+}
+
+fn replay_origin(value: &Value) -> Result<Option<String>, String> {
+    let seed = value["seed"].as_i64().ok_or("origin seed missing")?;
+    let empty = value["empty"]
+        .as_bool()
+        .ok_or("origin empty flag missing")?;
+    let want = value["positions"]
+        .as_array()
+        .ok_or("origin positions missing")?;
+    let random = mc_bamboo_blocks::LegacyRandom::new(seed);
+    let ours: Vec<_> = (0..want.len())
+        .map(|_| {
+            let pos = natural::random_pos_within(&random, ChunkPos::new(-3, 2), -64, |x, z| {
+                if empty { -64 } else { 64 + (x & 15) - (z & 15) }
+            });
+            serde_json::json!([pos.x, pos.y, pos.z])
+        })
+        .collect();
+    let after = random.next_int(1000);
+    Ok((ours != *want || value["after"] != after).then(|| {
+        format!(
+            "origin seed {seed} empty {empty}: official {want:?} then {}, game {ours:?} then {after}",
+            value["after"]
+        )
+    }))
+}
+
+fn replay_chunk_distance(value: &Value) -> Result<Option<String>, String> {
+    let x = value["x"].as_f64().ok_or("chunk distance x missing")?;
+    let z = value["z"].as_f64().ok_or("chunk distance z missing")?;
+    let want = value["close"]
+        .as_bool()
+        .ok_or("chunk distance outcome missing")?;
+    let ours = natural::is_close_to_spawn_chunk(Vec3::new(x, 999.0, z), ChunkPos::new(-3, 2));
+    Ok((want != ours)
+        .then(|| format!("chunk distance at ({x}, {z}): official {want}, game {ours}")))
 }
 
 fn replay_pick(value: &Value, break_self_test: bool) -> Result<Option<String>, String> {
