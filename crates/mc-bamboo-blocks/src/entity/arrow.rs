@@ -181,8 +181,12 @@ fn tick_or_check_ground(me: &mut Entity, blocks: &dyn BlockView) -> bool {
         })
     {
         me.delta = Vec3::default();
+        // `setInGround(true)` 只在值变化时触发 `onSyncedDataUpdated`，那里才设震动。
+        // `setInGround(true)` only fires `onSyncedDataUpdated` on a real change, which
+        // is where the shake is set.
+        let was_in_ground = arrow.in_ground;
         arrow.in_ground = true;
-        if !me.first_tick && arrow.shake_time == 0 {
+        if !was_in_ground && !me.first_tick && arrow.shake_time == 0 {
             arrow.shake_time = 7;
         }
     }
@@ -690,6 +694,27 @@ mod tests {
         assert!(matches!(&detached.kind, EntityKind::Arrow(a) if !a.in_ground && a.life == 0));
         world.tick_entities();
         assert_eq!(world.entity(uid).unwrap().delta.y, -0.05);
+    }
+
+    #[test]
+    fn an_arrow_already_inside_a_block_only_shakes_on_the_first_change() {
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        level.set(
+            BlockPos::new(0, 64, 0),
+            BlockState(mc_bamboo_data::blocks::STONE),
+        );
+        let arrow = Entity::arrow(Vec3::new(0.5, 64.5, 0.5));
+        let mut world = World::new(&mut level, &mut ticks);
+        let uid = world.spawn_entity(arrow);
+        for _ in 0..20 {
+            world.tick_entities();
+        }
+        let arrow = world.entity(uid).unwrap();
+        // 箭的第一刻就在方块里，`setInGround(true)` 不震动，之后也不能再震动。
+        // The arrow starts inside the block, so the first change sets no shake and
+        // the following ticks must not re-trigger it.
+        assert!(matches!(&arrow.kind, EntityKind::Arrow(a) if a.in_ground && a.shake_time == 0));
     }
 
     #[test]
