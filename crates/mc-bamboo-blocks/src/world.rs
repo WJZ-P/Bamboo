@@ -2636,6 +2636,24 @@ impl<'a> World<'a> {
         }
     }
 
+    /// 按完工表处理一格。流体可能改写世界，第二步仍分派给先前读出的方块状态。
+    /// Process one generation mark, dispatching both ticks on the original state.
+    pub fn post_process_generation_at(&mut self, pos: BlockPos) {
+        let state = self.block_state(pos);
+        let fluid = state.fluid();
+        if !fluid.is_empty() {
+            crate::fluid::tick(self, pos, fluid.fluid());
+        }
+        if state.is_a(BlockAncestor::LiquidBlock) {
+            state.tick(self, pos);
+        } else {
+            let updated = self.update_from_neighbour_shapes(state, pos);
+            if updated != state {
+                self.set_block(pos, updated, UPDATE_NONE | UPDATE_KNOWN_SHAPE);
+            }
+        }
+    }
+
     /// `Block.updateFromNeighbourShapes`：按六个邻居重新算一遍状态，不写入世界。
     pub fn update_from_neighbour_shapes(&mut self, state: BlockState, pos: BlockPos) -> BlockState {
         let mut updated = state;
@@ -3564,6 +3582,32 @@ mod tests {
         let mut ticks = BlockTicks::new();
         let mut world = World::new(level, &mut ticks);
         run(&mut world)
+    }
+
+    #[test]
+    fn post_process_generation_ticks_waterlogged_blocks_before_updating_the_shape() {
+        let mut level = TestLevel::new();
+        let pos = BlockPos::new(15, 64, 0);
+        let fence = BlockState(blocks::OAK_FENCE).default_state();
+        level.set(pos, fence.with(WATERLOGGED, true));
+        level.set(pos.east(), fence);
+        let mut ticks = BlockTicks::new();
+        World::new(&mut level, &mut ticks).post_process_generation_at(pos);
+        assert!(level.get(pos.below()).fluid().is_water());
+        assert!(level.get(pos).get(crate::state::EAST));
+        assert!(!level.get(pos.east()).get(crate::state::WEST));
+        assert!(ticks.has_scheduled_fluid(pos, BlockState::WATER.fluid().fluid()));
+    }
+
+    #[test]
+    fn post_process_generation_ticks_liquid_blocks_above_soul_sand() {
+        let mut level = TestLevel::new();
+        level.set(CENTER.below(), BlockState(blocks::SOUL_SAND));
+        level.set(CENTER, BlockState::WATER);
+        level.set(CENTER.above(), BlockState::WATER);
+        with_world(&mut level, |world| world.post_process_generation_at(CENTER));
+        assert!(level.get(CENTER).is(blocks::BUBBLE_COLUMN));
+        assert!(level.get(CENTER.above()).is(blocks::BUBBLE_COLUMN));
     }
 
     /// 冻结区块里的方块实体不 tick，留在表里、运行顺序不变；解冻后照常接着跑。
