@@ -451,6 +451,8 @@ struct CowStep {
     hc: i32,
     #[serde(default)]
     armor: i64,
+    #[serde(default, rename = "rabbitCarrotTicks")]
+    rabbit_carrot_ticks: i32,
 }
 
 const fn minus_one_i64() -> i64 {
@@ -1079,6 +1081,7 @@ impl Report {
                 );
                 let yaw = f32::from_bits(cow.yaw as u32);
                 let kind = match cow.kind {
+                    3 => mc_bamboo_blocks::entity::mob::MobType::Rabbit,
                     2 => mc_bamboo_blocks::entity::mob::MobType::Husk,
                     1 => mc_bamboo_blocks::entity::mob::MobType::Zombie,
                     _ => mc_bamboo_blocks::entity::mob::MobType::Cow,
@@ -2892,6 +2895,7 @@ fn step_of_mob(entity: &Entity, mob: &Mob, lr: i64) -> CowStep {
         pht: 0,
         pcd: 0,
         bh: 0,
+        rabbit_carrot_ticks: mob.rabbit.more_carrot_ticks,
         hd: {
             let head = mob
                 .equipment

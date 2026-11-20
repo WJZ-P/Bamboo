@@ -1579,6 +1579,18 @@ public final class MobOracle {
             scenes.add(consumeBase("consume_enchanted_apple", 40,
                     itemId(Items.ENCHANTED_GOLDEN_APPLE), 20));
             scenes.add(consumeBase("consume_stew", 40, itemId(Items.SUSPICIOUS_STEW), 10));
+            Scene rabbitHop = new Scene("rabbit_hop").ticks(240);
+            rabbitHop.fill(-15, 63, -15, 15, 63, 15, Blocks.GRASS_BLOCK.defaultBlockState());
+            rabbitHop.mob(3, 0.5, 64.0, 0.5, 0.0F, 42L, 0);
+            scenes.add(rabbitHop);
+
+            Scene rabbitRaid = new Scene("rabbit_raid").ticks(60);
+            rabbitRaid.fill(-4, 63, -4, 4, 63, 4, Blocks.GRASS_BLOCK.defaultBlockState());
+            rabbitRaid.set(0, 63, 0, Blocks.FARMLAND.defaultBlockState());
+            rabbitRaid.set(0, 64, 0, Blocks.CARROTS.defaultBlockState()
+                    .setValue(net.minecraft.world.level.block.CarrotBlock.AGE, 7));
+            rabbitRaid.mob(3, 0.5, 64.0, 0.5, 0.0F, 17L, 0);
+            scenes.add(rabbitRaid);
             return scenes;
         }
 
@@ -1665,7 +1677,7 @@ public final class MobOracle {
     // ---- 运行 ----
 
     private static void play(Official official, Writer out, Scene scene) throws Exception {
-        if (scene.name.startsWith("zombie_")) {
+        if (scene.name.startsWith("zombie_") || scene.name.startsWith("rabbit_")) {
             playZombie(official, out, scene);
             return;
         }
@@ -2912,6 +2924,7 @@ public final class MobOracle {
             // `EntityType.create` 在和平难度会拒绝敌对生物；场景要能先生成再
             // 观察 `checkDespawn` 的和平清除，所以直接调构造函数。
             Mob mob = switch (kind[0]) {
+                case 3 -> EntityTypes.RABBIT.create(level, EntitySpawnReason.COMMAND);
                 case 2 -> new Husk(EntityTypes.HUSK, level);
                 case 1 -> new Zombie(EntityTypes.ZOMBIE, level);
                 default -> EntityTypes.COW.create(level, EntitySpawnReason.COMMAND);
@@ -3130,7 +3143,10 @@ public final class MobOracle {
             out.append(",\"fire\":").append(mob.getRemainingFireTicks());
             out.append(",\"air\":").append(mob.getAirSupply());
             out.append(",\"seed\":").append(randomSeed(mob));
-            out.append(",\"age\":").append(mob instanceof Cow cow ? cow.getAge() : 0);
+            out.append(",\"age\":").append(mob instanceof net.minecraft.world.entity.AgeableMob ageable ? ageable.getAge() : 0);
+            if (mob instanceof net.minecraft.world.entity.animal.rabbit.Rabbit rabbit) {
+                out.append(",\"rabbitCarrotTicks\":").append(getInt(rabbit.getClass(), rabbit, "moreCarrotTicks"));
+            }
             out.append(",\"love\":0,\"lh\":").append(mob.isLeftHanded());
             out.append(",\"fr\":").append(Double.doubleToRawLongBits(
                     mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE)));

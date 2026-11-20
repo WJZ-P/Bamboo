@@ -177,6 +177,10 @@ pub enum EntityData {
     ///
     /// index 18, COW_VARIANT. `Cow.DATA_VARIANT_ID`, a VarInt registry id.
     CowVariant(i32),
+    /// `Rabbit.DATA_TYPE_ID`：普通整数序列化器，值为旧版品种 ID。
+    ///
+    /// `Rabbit.DATA_TYPE_ID`: ordinary integer serializer, with a legacy variant ID.
+    RabbitVariant(i32),
     /// index 19，COW_SOUND_VARIANT。`Cow.DATA_SOUND_VARIANT_ID`。
     CowSoundVariant(i32),
     /// index 8，INT。`ExperienceOrb.DATA_VALUE`：这一球值多少经验。
@@ -228,6 +232,7 @@ impl EntityData {
             Self::MainHand(_) | Self::Baby(_) => 16,
             Self::ModelCustomisation(_) | Self::AgeLocked(_) | Self::SpecialType(_) => 17,
             Self::CowVariant(_) | Self::DrownedConverting(_) => 18,
+            Self::RabbitVariant(_) => mc_bamboo_data::entity_types::RABBIT_VARIANT,
             Self::CowSoundVariant(_) => 19,
         }
     }
@@ -356,7 +361,7 @@ impl EntityData {
                 write_data_header(out, 19, SERIALIZER_COW_SOUND_VARIANT);
                 write_varint(out, *variant);
             }
-            Self::SpecialType(kind) => {
+            Self::SpecialType(kind) | Self::RabbitVariant(kind) => {
                 write_data_header(out, 17, SERIALIZER_INT);
                 write_varint(out, *kind);
             }

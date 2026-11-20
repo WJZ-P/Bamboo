@@ -10,7 +10,7 @@
 //! player's inventory. The live path and the oracle share this function.
 
 use mc_bamboo_core::{Hand, Vec3};
-use mc_bamboo_data::{items, tags::item_tags};
+use mc_bamboo_data::items;
 use mc_bamboo_protocol::item::ItemStack;
 
 use super::{Mob, MobEvent, living};
@@ -55,8 +55,7 @@ impl MobInteraction {
 
 /// `AbstractCow.mobInteract`：`BUCKET` + 成年 → 挤奶；否则交给 `Animal.mobInteract`。
 pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
-    let _ = me;
-    if req.held.item == items::BUCKET && !mob.is_baby() {
+    if mob.mob_type == super::MobType::Cow && req.held.item == items::BUCKET && !mob.is_baby() {
         // `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，位置取交互发生处。
         mob.events.push(MobEvent::MilkSound {
             position: req.position,
@@ -67,7 +66,11 @@ pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> Mob
             replacement: Some(ItemStack::new(items::MILK_BUCKET, 1)),
         };
     }
-    let food = !req.held.is_empty() && item_is_tagged(req.held.item, item_tags::COW_FOOD);
+    let food = !req.held.is_empty()
+        && mob
+            .mob_type
+            .food_tag()
+            .is_some_and(|tag| item_is_tagged(req.held.item, tag));
     if !food {
         return MobInteraction::pass();
     }

@@ -760,7 +760,11 @@ impl Snapshot {
             yaw: public.yaw,
             chunk: public.chunk_position(),
             data: KindData::of(&public.kind),
-            needs_sync: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.needs_sync),
+            needs_sync: match &public.kind {
+                KindPublic::Arrow(arrow) => arrow.needs_sync,
+                KindPublic::Mob(mob) => mob.needs_sync,
+                _ => false,
+            },
             sync_velocity: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.sync_velocity),
             sync_position: false,
             fall_flying: false,
@@ -918,6 +922,11 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
             15 => EntityData::MobFlags(0),
             16 => EntityData::Baby(false),
             17 => EntityData::AgeLocked(false),
+            entity_types::RABBIT_VARIANT
+                if kind == mc_bamboo_blocks::entity::mob::MobType::Rabbit =>
+            {
+                EntityData::RabbitVariant(0)
+            }
             18 => EntityData::CowVariant(1),
             19 => EntityData::CowSoundVariant(0),
             // `CustomName` 是 optional component，空时写 boolean false。
@@ -1071,6 +1080,9 @@ fn mob_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<E
     }
     // 注册表默认的是 temperate / classic。
     // The registry defaults are temperate / classic.
+    if mob.mob_type == mc_bamboo_blocks::entity::mob::MobType::Rabbit && mob.rabbit_variant != 0 {
+        out.push(EntityData::RabbitVariant(mob.rabbit_variant));
+    }
     if mob.variant.registry_id() != 1 {
         out.push(EntityData::CowVariant(mob.variant.registry_id()));
     }

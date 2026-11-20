@@ -218,6 +218,13 @@ pub(crate) fn finalize_spawn(
     }
     let biome = world.biome_id(entity.block_position());
     let random = world.random();
+    if kind == MobType::Rabbit {
+        entity.with_mob(|_, mob| {
+            mob.rabbit.variant = super::rabbit::random_variant(biome, random);
+            finalize_animal(mob, random);
+        });
+        return;
+    }
     let variant = cow_variant_for_biome(biome);
     let _ = random.next_int(1);
     let sound = if random.next_int(2) == 0 {
@@ -228,19 +235,23 @@ pub(crate) fn finalize_spawn(
     entity.with_mob(|_, mob| {
         mob.variant = variant;
         mob.sound_variant = sound;
-        if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
-            && range.modifier(RANDOM_SPAWN_BONUS).is_none()
-        {
-            let amount = random.triangle(0.0, 0.114_850_000_000_000_01);
-            range.modifiers.push(Modifier {
-                id: RANDOM_SPAWN_BONUS.to_owned(),
-                amount,
-                operation: Operation::AddMultipliedBase,
-                permanent: true,
-            });
-        }
-        mob.left_handed = random.next_float() < 0.05;
+        finalize_animal(mob, random);
     });
+}
+
+fn finalize_animal(mob: &mut super::Mob, random: &crate::random::LegacyRandom) {
+    if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
+        && range.modifier(RANDOM_SPAWN_BONUS).is_none()
+    {
+        let amount = random.triangle(0.0, 0.114_850_000_000_000_01);
+        range.modifiers.push(Modifier {
+            id: RANDOM_SPAWN_BONUS.to_owned(),
+            amount,
+            operation: Operation::AddMultipliedBase,
+            permanent: true,
+        });
+    }
+    mob.left_handed = random.next_float() < 0.05;
 }
 
 /// `Zombie.finalizeSpawn` 的随机取数顺序（本期不生成鸡骑士/增援）：
@@ -294,7 +305,7 @@ fn cow_variant_for_biome(biome: i32) -> CowVariant {
     }
 }
 
-fn biome_tag_contains(name: &str, biome: i32) -> bool {
+pub(super) fn biome_tag_contains(name: &str, biome: i32) -> bool {
     mc_bamboo_data::tags::TAG_GROUPS
         .iter()
         .filter(|group| group.registry == "minecraft:worldgen/biome")

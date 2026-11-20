@@ -528,7 +528,7 @@ pub enum Command {
     },
     /// `BreedGoal.breed` → `Animal.spawnChildFromBreeding`：给伴侣设冷却、生小牛和经验球。
     /// 父亲自己那一份状态已经在 `serverAiStep` 里改好（年龄递减还在后面）。
-    BreedCows {
+    BreedAnimals {
         partner: EntityUid,
         position: mc_bamboo_core::Vec3,
     },
@@ -557,6 +557,12 @@ pub enum Command {
     },
     /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
     /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
+    /// 兔子吃掉一龄胡萝卜作物。
+    ///
+    /// A rabbit removes one growth stage from a carrot crop.
+    RabbitEatCarrots {
+        pos: mc_bamboo_core::BlockPos,
+    },
     RemoveMobBlock {
         pos: mc_bamboo_core::BlockPos,
     },
@@ -634,7 +640,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         Command::MergeExperienceOrbs { others, value } => {
             super::orb::apply_merge(me, &others, value, world)
         }
-        Command::BreedCows { partner, position } => {
+        Command::BreedAnimals { partner, position } => {
             super::mob::living::apply_breed(me, partner, position, world)
         }
         Command::HurtPlayer {
@@ -660,6 +666,7 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 except_initiator: false,
             });
         }
+        Command::RabbitEatCarrots { pos } => super::mob::rabbit::eat_carrots(world, pos),
         Command::RemoveMobBlock { pos } => {
             let _ = world.remove_block(pos);
         }

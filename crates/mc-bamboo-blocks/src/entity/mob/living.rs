@@ -511,9 +511,6 @@ pub fn remove_effect(mob: &mut Mob, effect: i32) -> bool {
     !events.changes.is_empty()
 }
 
-/// `AbstractCow.getSoundVolume()`：叫声、受伤和死亡都用这个音量。
-const COW_SOUND_VOLUME: f32 = 0.4;
-
 /// `Entity.playSound`：静音的生物不出声（音高这些参数调用方已经取过）。
 ///
 /// `Entity.playSound`: a silent mob makes no sound (the caller already drew the pitch).
@@ -533,13 +530,11 @@ pub(crate) fn play_sound(me: &Entity, mob: &mut Mob, sound: &'static str, volume
 /// `Mob.playAmbientSound`：`makeSound(getAmbientSound())`。
 pub(crate) fn play_ambient_sound(me: &mut Entity, mob: &mut Mob) {
     let pitch = voice_pitch(me, mob);
-    play_sound(
-        me,
-        mob,
-        mob.sound_variant.ambient(),
-        COW_SOUND_VOLUME,
-        pitch,
-    );
+    let sound = mob
+        .mob_type
+        .ambient_sound()
+        .unwrap_or_else(|| mob.sound_variant.ambient());
+    play_sound(me, mob, sound, mob.mob_type.sound_volume(), pitch);
 }
 
 /// `getVoicePitch()`：两个 `nextFloat`，牛的叫声从不为空，静音时也照取。
@@ -595,6 +590,7 @@ fn tick_death(me: &mut Entity, mob: &mut Mob) {
 
 /// `Animal.aiStep` → `AgeableMob.aiStep` → `Mob.aiStep` → `LivingEntity.aiStep`。
 fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
+    mob.rabbit.needs_sync = false;
     // `Monster.aiStep` 先于 `LivingEntity.aiStep`：亮处每刻多涨 2 点 noActionTime。
     // `Entity.getLightLevelDependentMagicValue` 取眼睛所在格，
     // `LevelReader.getMaxLocalRawBrightness(pos)` 带上 `getSkyDarken()`。
@@ -752,6 +748,9 @@ fn ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             }
         }
     }
+    if mob.mob_type == super::MobType::Rabbit {
+        super::rabbit::ai_step(mob);
+    }
 }
 
 /// `LivingEntity.SPEED_MODIFIER_POWDER_SNOW_ID`。
@@ -798,7 +797,7 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
             set_age(me, mob, 6000);
             mob.events.push(MobEvent::Hearts);
             ctx.emit(
-                Command::BreedCows {
+                Command::BreedAnimals {
                     partner,
                     position: me.position,
                 },
@@ -809,12 +808,24 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     timing::span!(Navigation);
     let nav = nav_mob(me, mob, ctx.blocks());
     if let Some((wanted, speed)) = mob.navigation.tick(ctx.blocks(), &nav) {
-        mob.mover
-            .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
+        if mob.mob_type == super::MobType::Rabbit {
+            super::rabbit::set_wanted(me, mob, wanted, speed);
+        } else {
+            mob.mover
+                .set_wanted_position(wanted.x, wanted.y, wanted.z, speed);
+        }
     }
     // `Animal.customServerAiStep`。
     if mob.age != 0 {
         mob.in_love = 0;
+    }
+    if mob.mob_type == super::MobType::Rabbit {
+        super::rabbit::custom_server_ai_step(me, mob);
+        super::rabbit::before_move_control(me, mob);
+        move_control_tick(me, mob, ctx.blocks());
+        look_control_tick(me, mob);
+        super::rabbit::tick_jump_control(me, mob);
+        return;
     }
     move_control_tick(me, mob, ctx.blocks());
     look_control_tick(me, mob);
@@ -959,22 +970,29 @@ fn block_jump_factor(me: &Entity, view: &dyn BlockView) -> f32 {
 }
 
 /// `jumpFromGround`。
-fn jump_from_ground(me: &mut Entity, mob: &Mob, view: &dyn BlockView) {
+fn jump_from_ground(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
     let strength = mob.attributes.value(attribute::JUMP_STRENGTH) as f32;
     // `LivingEntity.getJumpBoostPower()`：每级 +0.1。
     let boost = mob
         .effects
         .amplifier(mob_effect::JUMP_BOOST)
         .map_or(0.0, |amplifier| 0.1 * (amplifier.max(0) as f32 + 1.0));
-    let power = strength * 1.0 * block_jump_factor(me, view) + boost;
-    if power <= 1.0e-5 {
-        return;
+    let is_rabbit = mob.mob_type == super::MobType::Rabbit;
+    let multiplier = if is_rabbit {
+        super::rabbit::jump_power_multiplier(me, mob)
+    } else {
+        1.0
+    };
+    let power = strength * multiplier * block_jump_factor(me, view) + boost;
+    if power > 1.0e-5 {
+        me.delta.y = mth::java_max(f64::from(power), me.delta.y);
+        if is_rabbit {
+            mob.rabbit.needs_sync = true;
+        }
     }
-    me.delta = Vec3::new(
-        me.delta.x,
-        mth::java_max(f64::from(power), me.delta.y),
-        me.delta.z,
-    );
+    if is_rabbit {
+        super::rabbit::after_ground_jump(me, mob);
+    }
 }
 
 // ---- travel ----
@@ -1083,7 +1101,7 @@ fn relative_friction_movement(
 }
 
 /// `Entity.moveRelative`。
-fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
+pub(super) fn move_relative(me: &mut Entity, speed: f32, input: Vec3) {
     let length = input.length_sqr();
     if length < 1.0e-7 {
         return;
@@ -1598,7 +1616,7 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
 }
 
-/// [`Command::BreedCows`] 的落地：`Animal.spawnChildFromBreeding` 和
+/// [`Command::BreedAnimals`] 的落地：`Animal.spawnChildFromBreeding` 和
 /// `finalizeSpawnChildFromBreeding`。父母的年龄设成 6000、求爱清零，父亲发爱心事件，
 /// 按 `mob_drops` 生成一颗 `1 + random.nextInt(7)` 的经验球。
 ///
@@ -1610,9 +1628,21 @@ pub(crate) fn apply_breed(
     position: Vec3,
     world: &mut crate::world::World,
 ) {
-    // `Cow.getBreedOffspring` 从父亲随机源取一个 `nextBoolean` 选花色，
-    // 然后 `finalizeSpawnChildFromBreeding` 取 `nextInt(7)+1` 定经验值。
-    let _from_father = me.random.next_boolean();
+    let Some(parent) = me.kind.mob() else { return };
+    let kind = parent.mob_type;
+    let rabbit_variant = if kind == super::MobType::Rabbit {
+        let father = parent.rabbit.variant;
+        let mut mother = father;
+        world.with_entity_mut(partner, &mut |entity| {
+            if let Some(mob) = entity.kind.mob() {
+                mother = mob.rabbit.variant;
+            }
+        });
+        super::rabbit::offspring_variant(me, father, mother, world)
+    } else {
+        let _ = me.random.next_boolean();
+        super::rabbit::Variant::default()
+    };
     let xp = 1 + me.random.next_int_bounded(7);
     world.with_entity_mut(partner, &mut |entity| {
         entity.with_mob(|me, mob| {
@@ -1621,11 +1651,12 @@ pub(crate) fn apply_breed(
         });
     });
     // 官方先构造幼崽（拿到 ID）再构造经验球；岛种子源和网络 ID 都按这个顺序。
-    let mut calf = Entity::cow(position);
+    let mut calf = Entity::by_mob_type(kind, position);
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。
     calf.y_rot = 0.0;
     calf.with_mob(|me, mob| {
+        mob.rabbit.variant = rabbit_variant;
         set_age(me, mob, -24000);
         mob.y_rot_o = 0.0;
         mob.y_body_rot = 0.0;

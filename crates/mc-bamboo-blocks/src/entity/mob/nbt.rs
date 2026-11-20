@@ -310,7 +310,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "NoAI", Tag::Byte(1));
     }
     // ---- AgeableMob / Animal / Cow ----
-    if mob.mob_type == MobType::Cow {
+    if mob.mob_type.food_tag().is_some() {
         put(&mut out, "Age", Tag::Int(mob.age));
         put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
         put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
@@ -318,6 +318,16 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         if let Some(uuid) = &mob.love_cause {
             put(&mut out, "LoveCause", uuid_tag(uuid));
         }
+    }
+    if mob.mob_type == MobType::Rabbit {
+        put(&mut out, "RabbitType", Tag::Int(mob.rabbit.variant.id()));
+        put(
+            &mut out,
+            "MoreCarrotTicks",
+            Tag::Int(mob.rabbit.more_carrot_ticks),
+        );
+    }
+    if mob.mob_type == MobType::Cow {
         put(
             &mut out,
             "variant",
@@ -464,12 +474,18 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.loot_table_seed = tag::long_or(tag, "DeathLootTableSeed", 0);
         mob.no_ai = tag::bool_or(tag, "NoAI", false);
         // ---- AgeableMob / Animal / Cow ----
-        if mob.mob_type == MobType::Cow {
+        if mob.mob_type.food_tag().is_some() {
             living::set_age(me, mob, tag::int_or(tag, "Age", 0));
             mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
             mob.in_love = tag::int_or(tag, "InLove", 0);
             mob.love_cause = uuid_field(tag, "LoveCause");
+        }
+        if mob.mob_type == MobType::Rabbit {
+            mob.rabbit.variant = super::rabbit::Variant::from_id(tag::int_or(tag, "RabbitType", 0));
+            mob.rabbit.more_carrot_ticks = tag::int_or(tag, "MoreCarrotTicks", 0);
+        }
+        if mob.mob_type == MobType::Cow {
             if let Some(variant) = tag::string_or(tag, "variant").and_then(CowVariant::from_name) {
                 mob.variant = variant;
             }

@@ -1142,6 +1142,18 @@ public final class Extractor {
         out.addProperty("arrowPierce", arrowAccessorId("PIERCE_LEVEL"));
         out.addProperty("arrowInGround", arrowAccessorId("IN_GROUND"));
         out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
+        var rabbit = net.minecraft.world.entity.EntityTypes.RABBIT.getDimensions();
+        var baby = (net.minecraft.world.entity.EntityDimensions) readField(Rabbit.class, "BABY_DIMENSIONS", null);
+        var attributes = Rabbit.createAttributes().build();
+        var variant = (net.minecraft.network.syncher.EntityDataAccessor<?>) readField(Rabbit.class, "DATA_TYPE_ID", null);
+        out.addProperty("rabbitEyeHeight", rabbit.eyeHeight());
+        out.addProperty("rabbitBabyWidth", baby.width());
+        out.addProperty("rabbitBabyHeight", baby.height());
+        out.addProperty("rabbitBabyEyeHeight", baby.eyeHeight());
+        out.addProperty("rabbitVariant", variant.id());
+        out.addProperty("rabbitMaxHealth", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH));
+        out.addProperty("rabbitMovementSpeed", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        out.addProperty("rabbitAttackDamage", attributes.getValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE));
         return out;
     }
 

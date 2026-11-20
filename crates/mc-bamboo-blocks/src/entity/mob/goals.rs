@@ -8,10 +8,7 @@
 //! family, with identical scheduling and random draw order.
 
 use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
-use mc_bamboo_data::{
-    blocks,
-    tags::{fluid_tags, item_tags},
-};
+use mc_bamboo_data::{blocks, tags::fluid_tags};
 
 use super::{Mob, living, navigation::Navigation, path::static_path_type};
 use crate::{
@@ -36,6 +33,8 @@ pub enum Flag {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Goal {
     Float,
+    RabbitPowderSnow,
+    RabbitRaid(super::rabbit::RaidGarden),
     Panic {
         speed: f64,
         target: Vec3,
@@ -135,7 +134,8 @@ impl Goal {
     /// 构造函数里 `setFlags` 设的标志。
     pub const fn flags(&self) -> &'static [Flag] {
         match self {
-            Self::Float => &[Flag::Jump],
+            Self::Float | Self::RabbitPowderSnow => &[Flag::Jump],
+            Self::RabbitRaid(_) => &[Flag::Move, Flag::Jump],
             Self::Panic { .. } | Self::Stroll { .. } => &[Flag::Move],
             Self::Breed { .. } | Self::Tempt { .. } | Self::RandomLookAround { .. } => {
                 &[Flag::Move, Flag::Look]
@@ -159,6 +159,8 @@ impl Goal {
         matches!(
             self,
             Self::Float
+                | Self::RabbitPowderSnow
+                | Self::RabbitRaid(_)
                 | Self::RandomLookAround { .. }
                 | Self::MeleeAttack { .. }
                 | Self::Bow(_)
@@ -170,6 +172,8 @@ impl Goal {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Float => "FloatGoal",
+            Self::RabbitPowderSnow => "ClimbOnTopOfPowderSnowGoal",
+            Self::RabbitRaid(_) => "RaidGardenGoal",
             Self::Panic { .. } => "PanicGoal",
             Self::Breed { .. } => "BreedGoal",
             Self::Tempt { .. } => "TemptGoal",
@@ -646,7 +650,7 @@ impl GoalSelector {
 }
 
 /// `Goal.reducedTickDelay`。
-const fn reduced_tick_delay(ticks: i32) -> i32 {
+pub(super) const fn reduced_tick_delay(ticks: i32) -> i32 {
     mth::positive_ceil_div(ticks, 2)
 }
 
@@ -666,6 +670,8 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             super::skeleton::bow_slot(mob).is_some() && combat_target(mob, ctx).is_some()
         }
         Goal::Float => float_can_use(me, mob),
+        Goal::RabbitPowderSnow => super::rabbit::can_climb_powder_snow(me, mob, ctx.blocks()),
+        Goal::RabbitRaid(raid) => raid.can_use(me, mob, ctx.blocks()),
         Goal::Panic { target, .. } => {
             if !should_panic(mob, ctx) {
                 return false;
@@ -688,7 +694,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             if mob.in_love <= 0 {
                 return false;
             }
-            *partner = free_partner(me, ctx);
+            *partner = free_partner(me, mob, ctx);
             partner.is_some()
         }
         Goal::Tempt {
@@ -887,6 +893,8 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             super::skeleton::bow_slot(mob).is_some()
                 && (combat_target(mob, ctx).is_some() || !mob.navigation.is_done())
         }
+        Goal::RabbitPowderSnow => super::rabbit::can_climb_powder_snow(me, mob, ctx.blocks()),
+        Goal::RabbitRaid(_) => false,
         Goal::Panic { .. } | Goal::Stroll { .. } => !mob.navigation.is_done(),
         Goal::Breed {
             partner, love_time, ..
@@ -984,6 +992,8 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
 
 fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
+        Goal::RabbitRaid(raid) => raid.start(me, mob, ctx.blocks()),
+        Goal::RabbitPowderSnow => {}
         Goal::Bow(_) => mob.aggressive = true,
         Goal::Panic { speed, target } => {
             let nav = living::nav_mob(me, mob, ctx.blocks());
@@ -1097,8 +1107,12 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         Goal::FollowParent { parent, .. } => *parent = None,
         Goal::Stroll { .. } => mob.navigation.stop(),
         Goal::LookAtPlayer { look_at, .. } => *look_at = None,
-        Goal::Float | Goal::Panic { .. } | Goal::RandomLookAround { .. } | Goal::Unavailable(_) => {
-        }
+        Goal::Float
+        | Goal::RabbitRaid(_)
+        | Goal::RabbitPowderSnow
+        | Goal::Panic { .. }
+        | Goal::RandomLookAround { .. }
+        | Goal::Unavailable(_) => {}
         Goal::RestrictSun => mob.navigation.avoid_sun = false,
         // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
         Goal::HurtByTarget { .. } => mob.target = None,
@@ -1231,6 +1245,11 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             mob.look
                 .set_look_at_default(me.position.x + *rel_x, eye, me.position.z + *rel_z);
         }
+        Goal::Panic { speed, .. } if mob.mob_type == super::MobType::Rabbit => {
+            super::rabbit::set_speed_modifier(me, mob, *speed);
+        }
+        Goal::RabbitRaid(raid) => raid.tick(me, mob, ctx),
+        Goal::RabbitPowderSnow => mob.jump.jump = true,
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
         Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
         Goal::NearestAttackableTarget { unseen_ticks, .. } => {
@@ -1543,8 +1562,9 @@ fn nearest_tempting_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
         if player.spectator || !player.alive {
             continue;
         }
-        let follows = item_is_tagged(player.main_hand, item_tags::COW_FOOD)
-            || item_is_tagged(player.off_hand, item_tags::COW_FOOD);
+        let follows = mob.mob_type.food_tag().is_some_and(|tag| {
+            item_is_tagged(player.main_hand, tag) || item_is_tagged(player.off_hand, tag)
+        });
         if !follows {
             continue;
         }
@@ -1561,7 +1581,7 @@ fn nearest_tempting_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
 }
 
 /// `BreedGoal.getFreePartner`：8 格内同种、在发情、不在恐慌的，取最近的。
-fn free_partner(me: &Entity, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+fn free_partner(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
     let area = me.bounding_box().inflate(8.0, 8.0, 8.0);
     let mut best = f64::MAX;
     let mut found = None;
@@ -1569,7 +1589,12 @@ fn free_partner(me: &Entity, ctx: &dyn EntityCtx) -> Option<EntityUid> {
         let KindPublic::Mob(public) = &other.kind else {
             return;
         };
-        if other.uid == me.id || public.in_love <= 0 || public.panicking || !public.is_alive() {
+        if other.uid == me.id
+            || public.mob_type != mob.mob_type
+            || public.in_love <= 0
+            || public.panicking
+            || !public.is_alive()
+        {
             return;
         }
         let distance = me.position.distance_to_sqr(other.position);
@@ -1597,7 +1622,7 @@ fn mob_restricted(me: &Entity, mob: &Mob, distance: f64) -> bool {
 }
 
 /// `Mob.isWithinHome(BlockPos)`。
-fn within_home(mob: &Mob, pos: BlockPos) -> bool {
+pub(super) fn within_home(mob: &Mob, pos: BlockPos) -> bool {
     mob.home.is_none_or(|(home, radius)| {
         let dx = f64::from(home.x - pos.x);
         let dy = f64::from(home.y - pos.y);

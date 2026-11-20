@@ -603,6 +603,7 @@ fn plain_name_of(
     }
     match public.kind.entity_type() {
         entity_type::COW => "Cow",
+        entity_type::RABBIT => "Rabbit",
         entity_type::ITEM => "Item",
         entity_type::FALLING_BLOCK => "Falling Block",
         entity_type::TNT => "Block of TNT",
