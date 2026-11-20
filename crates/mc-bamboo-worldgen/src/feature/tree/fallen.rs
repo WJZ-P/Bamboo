@@ -64,11 +64,14 @@ impl FallenTreeFeature {
         random: &WorldgenRandom,
         origin: Pos,
     ) -> bool {
+        // 倒木的装饰器不用递归地物；给一个不会用到的群系回调占位。
+        // Fallen-tree decorators never recurse; pass a placeholder biome callback.
+        let mut no_biome = |_x: i32, _y: i32, _z: i32| 0_u32;
         // `placeStump`。
         let mut stump = TreePlace::new(world);
         self.place_log_block(&mut stump, random, origin, None);
         for decorator in &self.stump_decorators {
-            decorator.place(&mut stump, random);
+            decorator.place(&mut stump, random, &mut no_biome, None);
         }
         let world = stump.world;
 
@@ -102,7 +105,7 @@ impl FallenTreeFeature {
             pos.2 += step.1;
         }
         for decorator in &self.log_decorators {
-            decorator.place(&mut log, random);
+            decorator.place(&mut log, random, &mut no_biome, None);
         }
         true
     }

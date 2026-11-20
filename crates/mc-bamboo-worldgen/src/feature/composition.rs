@@ -21,8 +21,10 @@ use super::{
     dispatch::{parse_leaf, place_leaf},
     freeze_top_layer,
     placement::{Modifier, PlaceOutcome, PlacementEnv, place_candidates},
+    provider::WorldGenerationContext,
     registry::Registry,
     run::resolve_feature,
+    tree::decorator::Recursion,
     world::FeatureWorld,
 };
 
@@ -213,11 +215,24 @@ fn place_feature<'a>(
         };
     }
     if let Some(leaf) = parse_leaf(kind, config, &|name| registry.state_provider(name)) {
-        let placed = place_leaf(&leaf, world, random, env.region_random, pos);
-        return PlaceOutcome {
-            supported: true,
-            placed,
+        let recursion = Recursion {
+            registry,
+            region_random: env.region_random,
+            generation: WorldGenerationContext {
+                min_y: world.min_y,
+                height: world.height,
+                sea_level: world.sea_level,
+            },
         };
+        return place_leaf(
+            &leaf,
+            world,
+            random,
+            env.region_random,
+            pos,
+            &mut *env.biome_at,
+            Some(&recursion),
+        );
     }
     // `vegetation_patch` / `waterlogged_vegetation_patch` 需要注册表和 `PlacementEnv`
     // 才能递归放子地物，不能当叶子。

@@ -86,9 +86,7 @@ pub(crate) fn update_leaves(place: &mut TreePlace<'_, '_>) -> Option<(HashSet<Po
                 // Official `setValue` throws without a `distance` property; every
                 // registered position had one, so a missing one is simply skipped.
                 if let Some(updated) = with_property(state, "distance", &smallest.to_string()) {
-                    place
-                        .world
-                        .set_block_with_heightmaps(pos.0, pos.1, pos.2, updated);
+                    place.world.set_tree_block(pos.0, pos.1, pos.2, updated);
                 }
             }
             shape.insert(pos);

@@ -3,6 +3,7 @@
 //! Entity-selector execution. Players and non-player entities are all candidates;
 //! filtering and ordering follow official `EntitySelector`.
 
+#[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
 
 use mc_bamboo_blocks::entity::{EntityPublic, JavaRandom};
@@ -152,61 +153,75 @@ pub(crate) fn may_include_non_players(selector: &EntitySelector) -> bool {
     selector.includes_entities || selector.uuid.is_some()
 }
 
-/// 规划期只读筛查：这个岛上有没有任何一个**非玩家实体**能过选择器的全部过滤
-/// 条件（计划 4.5.1 第 3 节）。和执行期共用 `matches` / `volume_box` /
-/// `selector.position`，但**不排序、不截断、不取随机数、不受 `limit` 影响**：
-/// `sort=nearest` / `random` 要先看到全部候选才知道谁命中，所以借的是「至少
-/// 有一个候选的岛」，不是「最终选中者所在的岛」。
+/// 规划期只读枚举：这个岛上过选择器全部过滤条件的候选（玩家和非玩家实体）。
+/// 和执行期共用 `matches` / `volume_box` / `selector.position`，但**不排序、不
+/// 截断、不取随机数、不受 `limit` 影响**：`sort=nearest` / `random` 要先看到
+/// 全部候选才知道谁命中，所以借的是「有候选的岛」，不是「最终选中者所在的岛」
+/// （计划 4.5.1 第 3 节）。
 ///
-/// Read-only planning pass: does this island hold at least one non-player
-/// entity passing every filter (plan 4.5.1, section 3)? Shares `matches`,
-/// `volume_box` and `selector.position` with execution, but never sorts,
-/// truncates, draws randomness or honours `limit`: nearest/random ordering
-/// needs the complete candidate set before it can tell who wins.
-pub(crate) fn has_non_player_candidate(
+/// Read-only planning pass: every candidate on this island passing all filters
+/// (players and non-player entities). Shares `matches`, `volume_box` and
+/// `selector.position` with execution, but never sorts, truncates, draws
+/// randomness or honours `limit`: nearest/random ordering needs the complete
+/// candidate set before it can tell who wins (plan 4.5.1, section 3).
+pub(crate) fn candidates(
     region: &Region,
     source: source::Source,
     selector: &EntitySelector,
     origin: Vec3,
-) -> bool {
-    if !may_include_non_players(selector) {
-        return false;
-    }
+) -> Vec<Target> {
     let origin = selector.position(origin);
     let volume = volume_box(origin, selector);
-    // 名字 / UUID / `@s` 的短路形式：和执行期一样，按全局 ID 序找唯一命中者。
-    // Name / UUID / `@s` short-circuit like execution: find the one match in
-    // ascending global id order.
-    if selector.player_name.is_some() {
-        return false;
+    // 名字 / UUID / `@s` 的短路形式：和执行期一样，名字和 UUID 不再过其余过滤。
+    // Name / UUID / `@s` short-circuit like execution: names and UUIDs do not
+    // run the remaining filters.
+    if let Some(name) = &selector.player_name {
+        return player_by_name(region, name).into_iter().collect();
     }
     if let Some(uuid) = selector.uuid {
-        return entity_by_uuid(region, uuid).is_some_and(|target| {
-            matches!(target, Target::World(_))
-                && matches(region, target, selector, origin, volume, None)
-        });
+        return entity_by_uuid(region, uuid).into_iter().collect();
     }
     if selector.current_entity {
-        return match source.entity {
-            Some(Target::World(uid)) => region.entities.public_at(uid).is_some_and(|_| {
-                matches(region, Target::World(uid), selector, origin, volume, None)
-            }),
-            _ => false,
+        let Some(entity) = source.entity else {
+            return Vec::new();
         };
+        return matches(region, entity, selector, origin, volume, None)
+            .then_some(entity)
+            .into_iter()
+            .collect();
     }
+    let mut found = Vec::new();
     let limited_type = positive_type(selector);
+    let skip_players =
+        selector.level.is_some() || limited_type.is_some_and(|id| id != entity_type::PLAYER);
     let skip_entities =
         !selector.includes_entities || limited_type.is_some_and(|id| id == entity_type::PLAYER);
-    if skip_entities {
-        return false;
-    }
-    region.entities.iter_public().any(|public| {
-        if public.removed {
-            return false;
+    if !skip_players {
+        for player in region.players.keys() {
+            if matches(
+                region,
+                Target::Player(*player),
+                selector,
+                origin,
+                volume,
+                None,
+            ) {
+                found.push(Target::Player(*player));
+            }
         }
-        let target = Target::World(public.uid);
-        matches(region, target, selector, origin, volume, None)
-    })
+    }
+    if !skip_entities {
+        for public in region.entities.iter_public() {
+            if public.removed {
+                continue;
+            }
+            let target = Target::World(public.uid);
+            if matches(region, target, selector, origin, volume, None) {
+                found.push(target);
+            }
+        }
+    }
+    found
 }
 
 /// 官方 `EntitySelector.findEntities`：先按名字/UUID 短路，再收集候选、排序、截断。
@@ -751,17 +766,37 @@ fn distance_sqr(region: &Region, target: &Target, origin: Vec3) -> f64 {
 /// `Collections.shuffle` 的进程级随机源（官方 `java.util.Collections` 里那一份）。
 /// The process-wide source behind `Collections.shuffle` (the one in official
 /// `java.util.Collections`).
+#[cfg(not(test))]
 static SHUFFLE_RANDOM: OnceLock<Mutex<JavaRandom>> = OnceLock::new();
 
-fn shuffle_random() -> &'static Mutex<JavaRandom> {
-    SHUFFLE_RANDOM.get_or_init(|| Mutex::new(JavaRandom::new(0x6a09_e667_f3bc_c909)))
-}
-
+#[cfg(not(test))]
 fn shuffle(ids: &mut [Target]) {
-    let mut random = shuffle_random()
+    let mut random = SHUFFLE_RANDOM
+        .get_or_init(|| Mutex::new(JavaRandom::new(SHUFFLE_SEED)))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     random.shuffle(ids);
+}
+
+/// 进程级随机源的初始种子。
+const SHUFFLE_SEED: i64 = 0x6a09_e667_f3bc_c909;
+
+// 单元测试在同一个进程里并行跑，各自重置、各自取数；进程级的一份会被别的测试插队，
+// 双跑对照的两份世界就取到不同的序列。测试构建里每条测试线程各用一份（命令都在
+// 跑世界的那条线程上执行），正式构建仍是进程级的一份。
+// Unit tests run in parallel in one process, each resetting and drawing; a
+// single process-wide source would let another test cut in between the two
+// halves of a comparison. Test builds keep one per test thread (commands run
+// on the world's thread); release builds keep the process-wide one.
+#[cfg(test)]
+thread_local! {
+    static SHUFFLE_RANDOM: std::cell::RefCell<JavaRandom> =
+        std::cell::RefCell::new(JavaRandom::new(SHUFFLE_SEED));
+}
+
+#[cfg(test)]
+fn shuffle(ids: &mut [Target]) {
+    SHUFFLE_RANDOM.with(|random| random.borrow_mut().shuffle(ids));
 }
 
 /// 测试专用：把 `sort=random` 的进程级随机源重置回初始值，让两份对照世界
@@ -771,7 +806,5 @@ fn shuffle(ids: &mut [Target]) {
 /// worlds start from the same state (plan 4.5.1, section 7).
 #[cfg(test)]
 pub(crate) fn reset_shuffle_random() {
-    *shuffle_random()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = JavaRandom::new(0x6a09_e667_f3bc_c909);
+    SHUFFLE_RANDOM.with(|random| *random.borrow_mut() = JavaRandom::new(SHUFFLE_SEED));
 }

@@ -488,6 +488,7 @@ impl Carvers {
         noises: &NoiseRegistry,
         positional: PositionalFactory,
         seed: i64,
+        post_processing: &mut Vec<(i32, i32, i32)>,
     ) -> Result<(), String> {
         let min_y = settings.min_y;
         let height = settings.height;
@@ -555,6 +556,7 @@ impl Carvers {
         crate::perf::mark(crate::perf::Phase::CarverApply);
         self.apply_mask(
             &mask,
+            post_processing,
             layers,
             chunk_x,
             chunk_z,
@@ -690,6 +692,7 @@ impl Carvers {
     fn apply_mask(
         &self,
         mask: &CarvingMask,
+        post_processing: &mut Vec<(i32, i32, i32)>,
         layers: &mut [Vec<u32>],
         chunk_x: i32,
         chunk_z: i32,
@@ -741,6 +744,16 @@ impl Carvers {
                     continue;
                 };
                 layer_set(layers, settings.min_y, x, y, z, new_state);
+                // `lambda$applyCarvingMask$0`：换成含水层物质后，含水层要求流体
+                // 更新且新状态确有流体时记进 PostProcessing。
+                // `lambda$applyCarvingMask$0`: mark a carved cell when the aquifer
+                // asks for a fluid update and the new state has one.
+                if aquifer.should_schedule_fluid_update()
+                    && mc_bamboo_data::state_fluid(new_state).fluid
+                        != mc_bamboo_data::registries::fluid::EMPTY
+                {
+                    post_processing.push((block_x, y, block_z));
+                }
                 if surface_flag && y > settings.min_y {
                     let below = layer_get(layers, settings.min_y, x, y - 1, z);
                     if below == dirt {
@@ -780,6 +793,15 @@ impl Carvers {
                             }
                         };
                         if let Some(state) = top {
+                            // `lambda$applyCarvingMask$1`：topMaterial 写下方泥土时，
+                            // 新状态有流体就无条件记进 PostProcessing。
+                            // `lambda$applyCarvingMask$1`: the topMaterial write on
+                            // the cell below marks any fluid state unconditionally.
+                            if mc_bamboo_data::state_fluid(state).fluid
+                                != mc_bamboo_data::registries::fluid::EMPTY
+                            {
+                                post_processing.push((block_x, y - 1, block_z));
+                            }
                             layer_set(layers, settings.min_y, x, y - 1, z, state);
                         }
                     }

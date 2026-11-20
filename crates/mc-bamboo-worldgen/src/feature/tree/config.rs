@@ -175,7 +175,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_plain_trees_and_gates_unported_ones() {
+    fn parses_plain_trees_and_the_pale_moss_decorator() {
         let root: Value = serde_json::from_str(mc_bamboo_data::worldgen::WORLDGEN).unwrap();
         let features = root["feature"].as_object().unwrap();
         // 没有树根的树都能解析。
@@ -187,9 +187,9 @@ mod tests {
         // Decorated and rooted trees parse too.
         assert!(TreeConfig::parse(&features["minecraft:swamp_oak"]).is_some());
         assert!(TreeConfig::parse(&features["minecraft:mangrove"]).is_some());
-        // pale_oak 带 pale_moss 装饰器，还不行。
-        // pale_oak has the pale_moss decorator and does not parse yet.
-        assert!(TreeConfig::parse(&features["minecraft:pale_oak"]).is_none());
+        // pale_oak 带 pale_moss 装饰器，递归放 pale_moss_patch 的路径已移植。
+        // pale_oak has the pale_moss decorator, whose recursive patch is ported.
+        assert!(TreeConfig::parse(&features["minecraft:pale_oak"]).is_some());
     }
 
     #[test]

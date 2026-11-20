@@ -131,6 +131,7 @@ mod tests {
             blocks: blocks_all,
             biomes,
             heights: [heights; 9],
+            post_processing: std::array::from_fn(|_| Vec::new()),
         }
     }
 }

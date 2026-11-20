@@ -59,6 +59,10 @@ use crate::{
 /// One feature `setBlock` write in world coordinates `(x, y, z, state id)`.
 pub(crate) type BlockDelta = (i32, i32, i32, u32);
 
+/// 一条 `PostProcessing` 标记的世界坐标 `(x, y, z)`。
+/// The world position `(x, y, z)` of one `PostProcessing` mark.
+pub type MarkPos = (i32, i32, i32);
+
 /// 一个来源中心写进目标区块的全部地物写。`slot` 是来源中心相对目标区块的
 /// 3×3 下标 `(dz+1)*3+(dx+1)`；中心自己是 4，其余按 `slot` 升序后到。
 /// 只有 `features` 阶段产生这些写，完工时 `assemble_feature_column` 按 `slot`
@@ -77,6 +81,17 @@ pub struct FeatureWrites {
     /// 这一中心的写增量（同一格最多一条，见 `feature::world::last_writes`）。
     /// The center's writes (at most one per cell, see `feature::world::last_writes`).
     pub deltas: Vec<BlockDelta>,
+    /// 这一中心跑 `features` 时新记进目标区块的 `PostProcessing` 世界坐标，按
+    /// `markPosForPostProcessing` 的调用顺序、保留重复；不含输入地形已带的标记。
+    /// 官方 `WorldGenRegion.markPosForPostProcessing` 把标记记进坐标所属的区块，
+    /// 所以邻居中心也会往目标区块里加。
+    ///
+    /// `PostProcessing` positions this center newly marked inside the target
+    /// chunk during `features`, in `markPosForPostProcessing` call order with
+    /// duplicates kept; marks already carried by the input terrain are excluded.
+    /// Vanilla records a mark in the chunk owning the position, so neighbor
+    /// centers add to the target too.
+    pub marks: Vec<MarkPos>,
 }
 
 /// 按中心的固定先后合并一组写：中心自己（`CENTER`）最先，其余 8 个来源按
@@ -96,6 +111,17 @@ pub struct FeatureWrites {
 /// last write (real data has at most one per source per cell, see
 /// `feature::world::last_writes`). Out-of-range y values are ignored by
 /// `apply_deltas`.
+///
+/// `PostProcessing` 也在这里合：`chunk.post_processing`（地形标记，或读盘恢复的表）
+/// 保持在前，各来源的 `marks` 按同一个固定先后追加，组内保持调用顺序、保留重复。
+/// 官方跨中心的先后取决于调度，本身不确定；这里取约定顺序，每段的多重集合与
+/// 官方相同。
+///
+/// `PostProcessing` is merged here too: `chunk.post_processing` (terrain marks, or
+/// the table restored from disk) stays first and each source's `marks` are
+/// appended in the same fixed order, keeping call order and duplicates. Vanilla's
+/// cross-center order depends on scheduling; this is the agreed order, with each
+/// section's multiset equal to vanilla's.
 pub fn merge_feature_writes(
     chunk: &mut GeneratedChunk,
     groups: impl IntoIterator<Item = FeatureWrites>,
@@ -106,6 +132,7 @@ pub fn merge_feature_writes(
         u8,
         std::collections::HashMap<(i32, i32, i32), u32>,
     > = std::collections::BTreeMap::new();
+    let mut marks: std::collections::BTreeMap<u8, Vec<MarkPos>> = std::collections::BTreeMap::new();
     for group in groups {
         let writes = per_slot.entry(group.slot).or_default();
         for &(x, y, z, state) in &group.deltas {
@@ -113,12 +140,21 @@ pub fn merge_feature_writes(
                 writes.insert((x, y, z), state);
             }
         }
+        if !group.marks.is_empty() {
+            marks.entry(group.slot).or_default().extend(group.marks);
+        }
+    }
+    let source_order = |slot: &u8| (u8::from(*slot != CENTER as u8), *slot);
+    let mut mark_order: Vec<(u8, Vec<MarkPos>)> = marks.into_iter().collect();
+    mark_order.sort_by_key(|(slot, _)| source_order(slot));
+    for (_, group) in mark_order {
+        chunk.post_processing.extend(group);
     }
     // 固定先后：中心自己最先，其余按 slot 升序。从后往前覆盖，先写的留下。
     // Fixed order: the center first, then ascending slots. Walk backwards so
     // earlier sources overwrite later ones and the first writer survives.
     let mut order: Vec<u8> = per_slot.keys().copied().collect();
-    order.sort_by_key(|&slot| (u8::from(slot != CENTER as u8), slot));
+    order.sort_by_key(source_order);
     let mut winners: std::collections::HashMap<(i32, i32, i32), u32> =
         std::collections::HashMap::new();
     for slot in order.into_iter().rev() {
@@ -265,6 +301,7 @@ fn run_features_filtered(
                 }),
                 deltas: std::array::from_fn(|_| Vec::new()),
                 block_entities: Vec::new(),
+                post_processing: Vec::new(),
                 unsupported: false,
             },
             None,
@@ -278,6 +315,8 @@ fn run_features_filtered(
     crate::worldgen_structures::reset_generator_biome_state(config)?;
     let blocks: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.blocks.clone());
     let biomes: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.biomes.clone());
+    let post_processing: [Vec<(i32, i32, i32)>; 9] =
+        view.each_ref().map(|chunk| chunk.post_processing.clone());
     let heights: [Heightmaps; 9] = blocks
         .each_ref()
         .map(|chunk| prime_heightmaps(chunk, MIN_Y, WORLD_HEIGHT));
@@ -289,6 +328,7 @@ fn run_features_filtered(
         blocks,
         biomes,
         heights,
+        post_processing,
     };
     // `applyBiomeDecoration` 的结构分支：按中心区块的 `References` 反查每个起点，
     // 按 `structure.step()` 分组；`generate-structures=false` 时整段跳过。
@@ -490,6 +530,7 @@ pub fn game_pipeline(
             blocks: blocks[index].clone(),
             biomes: biomes[index].clone(),
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
         })
     });
     let (_result, stats) = run_features_filtered(
@@ -565,6 +606,12 @@ pub fn game_pipeline(
 /// eight hold the overflow into the neighbors.
 struct FeatureRun {
     deltas: [Vec<BlockDelta>; 9],
+    /// 这次运行新记的 `PostProcessing` 标记，按目标格（3×3 下标）分开，组内保持
+    /// 调用顺序；不含输入地形已带的标记。
+    ///
+    /// `PostProcessing` marks newly recorded by this run, split by target cell
+    /// (3×3 index) in call order; input terrain marks are excluded.
+    marks: [Vec<MarkPos>; 9],
 }
 
 type FeatureCacheKey = (i64, Option<&'static str>, i32, i32, bool);
@@ -611,10 +658,17 @@ fn feature_shard_index(key: &FeatureCacheKey) -> usize {
 /// 一条地物结果的实测堆字节数（9 份写增量的容量之和）。
 /// Measured heap bytes held by one feature result (sum of 9 delta capacities).
 fn feature_run_heap_bytes(run: &FeatureRun) -> usize {
-    run.deltas
+    let deltas: usize = run
+        .deltas
         .iter()
         .map(|deltas| deltas.capacity() * size_of::<BlockDelta>())
-        .sum()
+        .sum();
+    let marks: usize = run
+        .marks
+        .iter()
+        .map(|marks| marks.capacity() * size_of::<(i32, i32, i32)>())
+        .sum();
+    deltas + marks
 }
 
 /// 测量 / 冷启动用：清掉整份地物结果缓存。
@@ -785,11 +839,36 @@ fn compute_feature_run(
 ) -> Result<Arc<FeatureRun>, String> {
     let view = build_view(config, cx, cz)?;
     let terrain = Arc::clone(&view[CENTER]);
+    let input_marks: usize = view.iter().map(|chunk| chunk.post_processing.len()).sum();
     let result = run_features(config, cx, cz, view)?;
     let own = center_writes(cx, cz, &terrain, &result);
     let mut deltas = result.deltas;
     deltas[CENTER] = own;
-    Ok(Arc::new(FeatureRun { deltas }))
+    let marks = split_new_marks(cx, cz, &result.post_processing, input_marks);
+    Ok(Arc::new(FeatureRun { deltas, marks }))
+}
+
+/// 把一次运行的 `PostProcessing` 去掉输入地形带的前缀，按目标格（3×3 下标）分开。
+/// `FeatureWorld::new` 把 9 格输入标记按格序摊平放在最前，新标记只往后追加。
+///
+/// Drop the input-terrain prefix from one run's `PostProcessing` and split the
+/// new marks by target cell. `FeatureWorld::new` flattens the 9 inputs first in
+/// cell order; new marks are only appended.
+fn split_new_marks(
+    cx: i32,
+    cz: i32,
+    all: &[(i32, i32, i32)],
+    input_marks: usize,
+) -> [Vec<(i32, i32, i32)>; 9] {
+    let mut out: [Vec<(i32, i32, i32)>; 9] = std::array::from_fn(|_| Vec::new());
+    for &(x, y, z) in all.get(input_marks..).unwrap_or(&[]) {
+        let dx = (x >> 4) - cx;
+        let dz = (z >> 4) - cz;
+        if (-1..=1).contains(&dx) && (-1..=1).contains(&dz) {
+            out[((dz + 1) * 3 + dx + 1) as usize].push((x, y, z));
+        }
+    }
+    out
 }
 
 /// 测试用：只用纯函数（`build_view` 的 3×3 + 8 个邻居中心的溢出）算出一个区块
@@ -830,6 +909,7 @@ pub fn feature_writes_into(
     let mut out = vec![FeatureWrites {
         slot: CENTER as u8,
         deltas: own.deltas[CENTER].clone(),
+        marks: own.marks[CENTER].clone(),
     }];
     for dz in -1..=1 {
         for dx in -1..=1 {
@@ -844,6 +924,7 @@ pub fn feature_writes_into(
             out.push(FeatureWrites {
                 slot: slot as u8,
                 deltas: run.deltas[index].clone(),
+                marks: run.marks[index].clone(),
             });
         }
     }
@@ -972,7 +1053,8 @@ pub mod oracle_merge {
     use std::sync::Mutex;
 
     use super::{
-        CENTER, FeatureWrites, WorldGenConfig, feature_writes_into as game_feature_writes_into,
+        CENTER, FeatureWrites, MarkPos, WorldGenConfig,
+        feature_writes_into as game_feature_writes_into,
     };
 
     /// 故意改坏合并，确认对拍抓得到。
@@ -985,6 +1067,11 @@ pub mod oracle_merge {
         /// 同格冲突退回旧规则：状态 ID 最大的赢。
         /// Revert same-cell conflicts to the old rule: the largest state id wins.
         LargestStateWins,
+        /// 只丢掉 `(cx+dx, cz+dz)` 这个邻居记进本区块的 `PostProcessing` 标记，
+        /// 方块写照旧。
+        /// Drop only the `PostProcessing` marks from the neighbor at
+        /// `(cx+dx, cz+dz)`; its block writes stay.
+        DropNeighborMarks { dx: i32, dz: i32 },
     }
 
     /// 开关只对这一个种子生效，别的世界不受影响。
@@ -1016,6 +1103,12 @@ pub mod oracle_merge {
             MergeBreak::DropNeighbor { dx, dz } => {
                 let slot = ((dz + 1) * 3 + dx + 1) as u8;
                 groups.retain(|group| group.slot != slot);
+            }
+            MergeBreak::DropNeighborMarks { dx, dz } => {
+                let slot = ((dz + 1) * 3 + dx + 1) as u8;
+                for group in groups.iter_mut().filter(|group| group.slot == slot) {
+                    group.marks.clear();
+                }
             }
             MergeBreak::LargestStateWins => {
                 // 旧规则：按 `(x,y,z,state)` 排序后同格最后一条（状态 ID 最大）生效。
@@ -1054,6 +1147,24 @@ pub mod oracle_merge {
         let mut out: [Vec<super::BlockDelta>; 9] = std::array::from_fn(|_| Vec::new());
         for group in groups {
             out[group.slot as usize] = group.deltas;
+        }
+        Ok(out)
+    }
+
+    /// 记进 `(cx, cz)` 的新 `PostProcessing` 标记，按来源中心分 9 份，下标同
+    /// [`feature_writes_into`]；组内保持调用顺序。
+    ///
+    /// New `PostProcessing` marks recorded into `(cx, cz)`, split by source center
+    /// with the same indexing as [`feature_writes_into`], in call order.
+    pub fn feature_marks_into(
+        config: &WorldGenConfig,
+        cx: i32,
+        cz: i32,
+    ) -> Result<[Vec<MarkPos>; 9], String> {
+        let groups = game_feature_writes_into(config, cx, cz)?;
+        let mut out: [Vec<MarkPos>; 9] = std::array::from_fn(|_| Vec::new());
+        for group in groups {
+            out[group.slot as usize] = group.marks;
         }
         Ok(out)
     }
@@ -1229,6 +1340,7 @@ mod tests {
                 blocks: empty.blocks.clone(),
                 biomes: empty.biomes.clone(),
                 heightmaps: Default::default(),
+                post_processing: Vec::new(),
             })
         });
         let view_real = std::array::from_fn(|_| {
@@ -1236,6 +1348,7 @@ mod tests {
                 blocks: real.blocks.clone(),
                 biomes: real.biomes.clone(),
                 heightmaps: Default::default(),
+                post_processing: Vec::new(),
             })
         });
         let a = run_features(&config, cx, cz, view_empty).unwrap();
@@ -1346,6 +1459,7 @@ mod tests {
                 .map(|&slot| FeatureWrites {
                     slot,
                     deltas: vec![(3, 0, 5, 100 + slot as u32), (slot as i32, 1, 6, 222)],
+                    marks: Vec::new(),
                 })
                 .collect::<Vec<_>>()
         };
@@ -1357,6 +1471,7 @@ mod tests {
         c.push(FeatureWrites {
             slot: CENTER as u8,
             deltas: vec![(3, 0, 5, 999)],
+            marks: Vec::new(),
         });
         let ca = assemble_feature_column(&terrain, &mut a).unwrap();
         let cb = assemble_feature_column(&terrain, &mut b).unwrap();
@@ -1450,5 +1565,73 @@ mod tests {
         let mut again = (*terrain).clone();
         merge_feature_writes(&mut again, reversed);
         assert_eq!(again.blocks, expected.blocks);
+    }
+
+    /// `PostProcessing` 合并：已有的表在前，来源按「中心先、slot 升序」追加，
+    /// 组内保持顺序和重复，与分组传入顺序无关。
+    /// PostProcessing merge: the existing table first, sources appended center
+    /// first then ascending slot, in-group order and duplicates kept, independent
+    /// of the order groups arrive in.
+    #[test]
+    fn merge_feature_writes_appends_marks_in_source_order() {
+        let base = GeneratedChunk {
+            blocks: vec![vec![0_u32; 256]; WORLD_HEIGHT as usize],
+            biomes: Vec::new(),
+            heightmaps: Default::default(),
+            post_processing: vec![(0, 1, 0)],
+        };
+        let group = |slot: u8, marks: Vec<(i32, i32, i32)>| FeatureWrites {
+            slot,
+            deltas: Vec::new(),
+            marks,
+        };
+        let groups = vec![
+            group(7, vec![(7, 0, 0)]),
+            group(0, vec![(0, 0, 0), (0, 0, 0)]),
+            group(CENTER as u8, vec![(4, 2, 0), (4, 1, 0)]),
+            group(2, Vec::new()),
+        ];
+        let expected = vec![
+            (0, 1, 0),
+            (4, 2, 0),
+            (4, 1, 0),
+            (0, 0, 0),
+            (0, 0, 0),
+            (7, 0, 0),
+        ];
+        let mut chunk = base.clone();
+        merge_feature_writes(&mut chunk, groups.iter().cloned());
+        assert_eq!(chunk.post_processing, expected);
+        let mut reversed = base;
+        merge_feature_writes(&mut reversed, groups.into_iter().rev());
+        assert_eq!(reversed.post_processing, expected);
+    }
+
+    /// 每个来源记进目标区块的标记都落在目标区块里，且不重复带上输入地形的标记。
+    /// Every source's marks land inside the target chunk and never repeat the
+    /// input terrain marks.
+    #[test]
+    fn feature_marks_land_in_the_target_chunk() {
+        let config = normal(0x0fea_7c10);
+        let (cx, cz) = (3, -2);
+        let groups = feature_writes_into(&config, cx, cz).unwrap();
+        let terrain = cached_generate_chunk(&config, cx, cz).unwrap();
+        let mut total = 0;
+        for group in &groups {
+            for &(x, _, z) in &group.marks {
+                assert_eq!((x >> 4, z >> 4), (cx, cz), "slot {}", group.slot);
+            }
+            total += group.marks.len();
+        }
+        let mut chunk = (*terrain).clone();
+        merge_feature_writes(&mut chunk, groups);
+        assert_eq!(
+            chunk.post_processing.len(),
+            terrain.post_processing.len() + total
+        );
+        assert_eq!(
+            &chunk.post_processing[..terrain.post_processing.len()],
+            terrain.post_processing.as_slice()
+        );
     }
 }

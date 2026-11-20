@@ -2415,7 +2415,7 @@ impl DirectorHost {
         if status.is_after_terrain() {
             self.partials.insert(
                 pos,
-                Arc::new(crate::worldgen::generated_chunk_from_column(column)),
+                Arc::new(crate::worldgen::generated_chunk_from_column(column, pos)),
             );
         }
         if (status as usize) >= (ChunkStatus::Light as usize) && column.chunk_column().light_on() {

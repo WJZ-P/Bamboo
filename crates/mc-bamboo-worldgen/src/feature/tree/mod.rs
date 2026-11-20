@@ -5,10 +5,6 @@
 //! `distance` 写好。树根、树干、树叶、装饰的位置各记在一个和 Java `HashSet` 迭代顺序
 //! 一致的集合里，见 [`java_set`]。
 //!
-//! 还没移植的部分（`pale_moss` 装饰器）在
-//! [`config::TreeConfig::parse`] 返回 `None`，由分发把整个 placed feature 标成
-//! unsupported。
-//!
 //! `TreeFeature`, translated line by line from official 26.3 `TreeFeature.place` /
 //! `doPlace`.
 //!
@@ -18,8 +14,6 @@
 //! `distance`. Root, trunk, foliage and decoration positions are each recorded in a set
 //! that iterates like Java's `HashSet`, see [`java_set`].
 //!
-//! The one unported part (the `pale_moss` decorator) makes
-//! [`config::TreeConfig::parse`] return `None`, so the placed feature stays unsupported.
 
 pub mod config;
 pub mod decorator;
@@ -40,9 +34,12 @@ use mc_bamboo_data::{
 
 use crate::random::WorldgenRandom;
 
-use crate::feature::{shape_update::update_shape_at_edge, world::FeatureWorld};
+use crate::feature::{
+    placement::PlaceOutcome, shape_update::update_shape_at_edge, world::FeatureWorld,
+};
 
 use config::TreeConfig;
+use decorator::Recursion;
 use java_set::JavaHashSet;
 
 pub(crate) type Pos = (i32, i32, i32);
@@ -97,16 +94,34 @@ impl TreeFeature {
     /// 官方 `TreeFeature.place`，返回是否放了方块。
     ///
     /// Official `TreeFeature.place`; returns whether anything was placed.
-    pub fn place(&self, world: &mut FeatureWorld<'_>, random: &WorldgenRandom, pos: Pos) -> bool {
+    pub fn place<'r, 'a, 'w>(
+        &self,
+        world: &'w mut FeatureWorld<'a>,
+        random: &'r WorldgenRandom,
+        pos: Pos,
+        biome_at: &'r mut dyn FnMut(i32, i32, i32) -> u32,
+        recursion: Option<&'r Recursion<'r>>,
+    ) -> PlaceOutcome {
         let mut place = TreePlace::new(world);
         if !self.do_place(&mut place, random, pos) {
-            return false;
+            return PlaceOutcome {
+                supported: true,
+                placed: false,
+            };
         }
         if place.trunks.is_empty() && place.foliage.is_empty() {
-            return false;
+            return PlaceOutcome {
+                supported: true,
+                placed: false,
+            };
         }
+        let mut outcome = PlaceOutcome {
+            supported: true,
+            placed: true,
+        };
         for decorator in &self.config.decorators {
-            decorator.place(&mut place, random);
+            let placed = decorator.place(&mut place, random, &mut *biome_at, recursion);
+            outcome.supported &= placed.supported;
         }
         // `StructureTemplate.updateShapeAtEdge(level, 3, shape, ...)`：树的外表面两侧各做
         // 一次 `updateShape`，比如失去支撑的藤蔓在这里被移除。
@@ -115,7 +130,7 @@ impl TreeFeature {
         if let Some((shape, bounds)) = leaves::update_leaves(&mut place) {
             let _ = update_shape_at_edge(place.world, &shape, bounds.min, bounds.max);
         }
-        true
+        outcome
     }
 
     /// 官方 `TreeFeature.doPlace`。
@@ -227,8 +242,7 @@ impl<'a, 'w> TreePlace<'a, 'w> {
     /// Official `trunkSetter`: record the position, then `level.setBlock(pos, state, 19)`.
     pub fn set_trunk(&mut self, pos: Pos, state: u32) {
         self.trunks.insert(pos);
-        self.world
-            .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+        self.world.set_tree_block(pos.0, pos.1, pos.2, state);
     }
 
     /// 官方 `rootSetter`。
@@ -236,8 +250,7 @@ impl<'a, 'w> TreePlace<'a, 'w> {
     /// Official `rootSetter`.
     pub fn set_root(&mut self, pos: Pos, state: u32) {
         self.roots.insert(pos);
-        self.world
-            .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+        self.world.set_tree_block(pos.0, pos.1, pos.2, state);
     }
 
     /// 官方 `FoliageSetter.set`。
@@ -245,8 +258,7 @@ impl<'a, 'w> TreePlace<'a, 'w> {
     /// Official `FoliageSetter.set`.
     pub fn set_foliage(&mut self, pos: Pos, state: u32) {
         self.foliage.insert(pos);
-        self.world
-            .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
+        self.world.set_tree_block(pos.0, pos.1, pos.2, state);
     }
 }
 

@@ -204,6 +204,15 @@ pub fn chat_command_frame(command: &str) -> Vec<u8> {
     frame(&body)
 }
 
+/// `client_command` 的 `PERFORM_RESPAWN`：死亡界面上点「重生」。
+///
+/// `client_command` with `PERFORM_RESPAWN`: the death screen's respawn button.
+pub fn perform_respawn_frame() -> Vec<u8> {
+    let mut body = packet(play::serverbound::CLIENT_COMMAND);
+    write_varint(&mut body, 0);
+    frame(&body)
+}
+
 /// 拆开一批未压缩帧，返回每个包的负载。
 #[cfg(test)]
 pub fn packets(frames: &[u8]) -> Result<Vec<Vec<u8>>, String> {
@@ -234,6 +243,7 @@ pub enum ServerPacket {
     ChunkBatchFinished,
     PlayerPosition(PlayerPosition),
     LevelChunkWithLight { x: i32, z: i32 },
+    PlayerCombatKill,
     Disconnect(&'static str),
     Other,
 }
@@ -304,6 +314,7 @@ pub fn classify(state: State, payload: &[u8]) -> ServerPacket {
                 };
                 ServerPacket::LevelChunkWithLight { x, z }
             }
+            play::clientbound::PLAYER_COMBAT_KILL => ServerPacket::PlayerCombatKill,
             play::clientbound::DISCONNECT => ServerPacket::Disconnect("disconnect"),
             _ => ServerPacket::Other,
         },

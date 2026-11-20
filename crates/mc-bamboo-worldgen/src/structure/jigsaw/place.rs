@@ -936,17 +936,17 @@ pub trait BlockWriter {
 }
 
 impl BlockWriter for crate::feature::world::FeatureWorld<'_> {
-    /// 官方 `StructureTemplate.placeInWorld` 走 `level.setBlock(...)` →
-    /// `ChunkAccess.setBlockState`，会按 `Heightmap.update` 增量维护四张 FINAL 高度图。
-    /// 结构件写完后的 `freeze_top_layer` 等 step 10 地物会读它们，所以这里不能只改
-    /// `blocks` 不更新 `heights`。
+    /// 官方 `StructureTemplate.placeInWorld` 走 `level.setBlock(..., 820)` →
+    /// `ChunkAccess.setBlockState`，会按 `Heightmap.update` 增量维护四张 FINAL 高度图；
+    /// `flags` 含 bit 16，所以 `WorldGenRegion.setBlock` 不跑
+    /// `getPostProcessPos`、不记 `PostProcessing`。
     ///
-    /// Vanilla's `StructureTemplate.placeInWorld` goes through
-    /// `ChunkAccess.setBlockState`, which incrementally updates the four FINAL
-    /// heightmaps. Step-10 features such as `freeze_top_layer` read those, so the
-    /// plain `set_block` path would leave them stale.
+    /// Vanilla's `StructureTemplate.placeInWorld` uses `level.setBlock(..., 820)`
+    /// → `ChunkAccess.setBlockState`, which incrementally updates the four FINAL
+    /// heightmaps. Bit 16 in `flags` means `WorldGenRegion.setBlock` skips
+    /// `getPostProcessPos`, so no `PostProcessing` entry is recorded.
     fn set_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
-        crate::feature::world::FeatureWorld::set_block_with_heightmaps(self, x, y, z, state)
+        crate::feature::world::FeatureWorld::set_structure_block(self, x, y, z, state)
     }
 
     /// 官方 `blockEntity.loadWithComponents(...)`：nbt 交给假世界的方块实体表。

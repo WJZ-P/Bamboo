@@ -1388,7 +1388,7 @@ public final class ChunkgenOracle {
                 }
             }
             switch (order) {
-                case "center-first" -> centers.add(0, new int[] {0, 0});
+                case "center-first", "post-process" -> centers.add(0, new int[] {0, 0});
                 case "center-last" -> centers.add(new int[] {0, 0});
                 default -> throw new IllegalArgumentException("unknown merge order " + order);
             }
@@ -1416,6 +1416,12 @@ public final class ChunkgenOracle {
                 runs++;
             }
 
+            if ("post-process".equals(order)) {
+                writePostProcessDiagnostic(seed, pos, area, runs, generatorSettings, randomState,
+                        resolver, structureGrid, entityStub);
+                return;
+            }
+
             JsonObject line = new JsonObject();
             line.addProperty("type", "merged");
             line.addProperty("seed", seed);
@@ -1430,6 +1436,93 @@ public final class ChunkgenOracle {
             }
             line.add("writes", counts);
             addBlocks(line, area[12].chunk());
+            write(line);
+        }
+
+        /**
+         * 完工后处理诊断：9 个中心按 center-first 写进共享 ProtoChunk 之后，按目标的
+         * `PostProcessing` 表逐条走 `LevelChunk.postProcessGeneration` 的分支：流体非空
+         * （`FluidState.tick`）和 `LiquidBlock`（`BlockState.tick`）只计数不模拟；其余跑官方
+         * `Block.updateFromNeighbourShapes`，变了就 `setBlock(pos, s, 276)`。交回会变的格子
+         * 数和按方块分的计数，以及处理后的目标方块。只是诊断：Bamboo 还没有这一步。
+         *
+         * Post-processing diagnostic: after the 9 centers write center-first into the
+         * shared ProtoChunks, walk the target's `PostProcessing` like
+         * `LevelChunk.postProcessGeneration`: fluid (`FluidState.tick`) and
+         * `LiquidBlock` (`BlockState.tick`) entries are only counted; the rest run the
+         * official `Block.updateFromNeighbourShapes` and `setBlock(pos, s, 276)` on change.
+         */
+        private void writePostProcessDiagnostic(long seed, ChunkPos pos, TerrainChunk[] area,
+                int runs, NoiseGeneratorSettings generatorSettings, RandomState randomState,
+                BiomeResolver resolver, StructureChunkGrid structureGrid,
+                net.minecraft.server.level.ServerLevel entityStub) throws Exception {
+            TerrainChunk[] view = view3x3(area, 0, 0);
+            final WorldGenLevel[] holder = new WorldGenLevel[1];
+            FeatureLevelHandler handler = new FeatureLevelHandler(pos, seed, generatorSettings,
+                    wrapped(view), this.registries,
+                    new BiomeManager((qx, qy, qz) -> holder[0].getNoiseBiome(qx, qy, qz),
+                            BiomeManager.obfuscateSeed(seed)),
+                    resolver, randomState, structureGrid, entityStub);
+            WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(
+                    ChunkgenOracle.class.getClassLoader(), new Class<?>[] {WorldGenLevel.class},
+                    handler);
+            holder[0] = level;
+            ProtoChunk target = area[12].chunk();
+            it.unimi.dsi.fastutil.shorts.ShortList[] post = target.getPostProcessing();
+            int entries = 0;
+            int fluid = 0;
+            int liquid = 0;
+            int changed = 0;
+            java.util.TreeMap<String, Integer> byBlock = new java.util.TreeMap<>();
+            JsonArray cells = new JsonArray();
+            for (int i = 0; i < post.length; i++) {
+                if (post[i] == null) {
+                    continue;
+                }
+                short[] packed = post[i].toShortArray();
+                for (short value : packed) {
+                    entries++;
+                    BlockPos at = ProtoChunk.unpackOffsetCoordinates(value,
+                            target.getSectionYFromSectionIndex(i), pos);
+                    BlockState state = target.getBlockState(at);
+                    if (!state.getFluidState().isEmpty()) {
+                        fluid++;
+                    }
+                    if (state.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock) {
+                        liquid++;
+                        continue;
+                    }
+                    BlockState updated = net.minecraft.world.level.block.Block
+                            .updateFromNeighbourShapes(state, level, at);
+                    if (updated != state) {
+                        changed++;
+                        byBlock.merge(net.minecraft.core.registries.BuiltInRegistries.BLOCK
+                                .getKey(state.getBlock()).toString(), 1, Integer::sum);
+                        level.setBlock(at, updated, 276);
+                        JsonArray cell = new JsonArray();
+                        cell.add(at.getX());
+                        cell.add(at.getY());
+                        cell.add(at.getZ());
+                        cell.add(state.toString());
+                        cell.add(updated.toString());
+                        cells.add(cell);
+                    }
+                }
+            }
+            JsonObject line = new JsonObject();
+            line.addProperty("type", "postprocess");
+            line.addProperty("seed", seed);
+            line.addProperty("x", pos.x());
+            line.addProperty("z", pos.z());
+            line.addProperty("runs", runs);
+            line.addProperty("entries", entries);
+            line.addProperty("fluid", fluid);
+            line.addProperty("liquid", liquid);
+            line.addProperty("changed", changed);
+            JsonObject blocks = new JsonObject();
+            byBlock.forEach(blocks::addProperty);
+            line.add("byBlock", blocks);
+            line.add("cells", cells);
             write(line);
         }
 
@@ -1461,6 +1554,7 @@ public final class ChunkgenOracle {
             List<BlockState> palette = new ArrayList<>();
             java.util.Map<BlockState, Integer> ids = new java.util.HashMap<>();
             JsonArray sources = new JsonArray();
+            JsonArray marks = new JsonArray();
             int runs = 0;
             for (int dz = -1; dz <= 1; dz++) {
                 for (int dx = -1; dx <= 1; dx++) {
@@ -1484,6 +1578,11 @@ public final class ChunkgenOracle {
                             new StructureManager(level, worldOptions, null));
                     runs++;
                     boolean self = dx == 0 && dz == 0;
+                    // 这个中心新记进目标区块的 `PostProcessing`：每段超出干净前缀的部分，
+                    // 保持调用顺序（`markPosForPostProcessing` 只往段尾追加）。
+                    // Marks this center added to the target: each section's entries
+                    // past the clean prefix, in call order (marks only append).
+                    marks.add(saved[12].newMarks(target));
                     JsonArray writes = new JsonArray();
                     AreaSnapshot clean = saved[12];
                     for (int y = 0; y < height; y++) {
@@ -1529,6 +1628,9 @@ public final class ChunkgenOracle {
             }
             line.add("writePalette", names);
             line.add("sources", sources);
+            line.add("marks", marks);
+            // 还原后目标的 `postProcessing` 就是干净地形（doFill / 地表）的标记。
+            // After the restore the target's `postProcessing` is the clean terrain marks.
             addBlocks(line, target);
             write(line);
         }
@@ -1543,7 +1645,8 @@ public final class ChunkgenOracle {
         private record AreaSnapshot(net.minecraft.world.level.chunk.LevelChunkSection[] sections,
                 java.util.Map<Heightmap.Types, long[]> heightmaps,
                 java.util.Map<BlockPos, CompoundTag> pending,
-                java.util.Map<BlockPos, BlockEntity> entities) {
+                java.util.Map<BlockPos, BlockEntity> entities,
+                short[][] postProcessing) {
             static AreaSnapshot take(ProtoChunk chunk) throws Exception {
                 net.minecraft.world.level.chunk.LevelChunkSection[] live = sections(chunk);
                 net.minecraft.world.level.chunk.LevelChunkSection[] copy =
@@ -1561,8 +1664,30 @@ public final class ChunkgenOracle {
                 @SuppressWarnings("unchecked")
                 java.util.Map<BlockPos, BlockEntity> entities =
                         (java.util.Map<BlockPos, BlockEntity>) blockEntityMap(chunk, "blockEntities");
+                it.unimi.dsi.fastutil.shorts.ShortList[] post = chunk.getPostProcessing();
+                short[][] postCopy = new short[post.length][];
+                for (int i = 0; i < post.length; i++) {
+                    postCopy[i] = post[i] == null ? null : post[i].toShortArray();
+                }
                 return new AreaSnapshot(copy, maps, new java.util.HashMap<>(pending),
-                        new java.util.HashMap<>(entities));
+                        new java.util.HashMap<>(entities), postCopy);
+            }
+
+            /** 每段超出快照前缀的标记（24 段 packed short）。 */
+            JsonArray newMarks(ProtoChunk chunk) {
+                it.unimi.dsi.fastutil.shorts.ShortList[] post = chunk.getPostProcessing();
+                JsonArray out = new JsonArray();
+                for (int i = 0; i < post.length; i++) {
+                    JsonArray section = new JsonArray();
+                    int start = this.postProcessing[i] == null ? 0 : this.postProcessing[i].length;
+                    if (post[i] != null) {
+                        for (int k = start; k < post[i].size(); k++) {
+                            section.add(post[i].getShort(k) & 0xFFFF);
+                        }
+                    }
+                    out.add(section);
+                }
+                return out;
             }
 
             void restore(ProtoChunk chunk) throws Exception {
@@ -1583,6 +1708,14 @@ public final class ChunkgenOracle {
                         (java.util.Map<BlockPos, BlockEntity>) blockEntityMap(chunk, "blockEntities");
                 entitiesNow.clear();
                 entitiesNow.putAll(this.entities);
+                // `PostProcessing` 也还原，每个中心都从同一份地形标记开始。
+                // Restore `PostProcessing` too so every center starts from the terrain marks.
+                it.unimi.dsi.fastutil.shorts.ShortList[] post = chunk.getPostProcessing();
+                for (int i = 0; i < post.length; i++) {
+                    post[i] = this.postProcessing[i] == null
+                            ? null
+                            : new it.unimi.dsi.fastutil.shorts.ShortArrayList(this.postProcessing[i]);
+                }
             }
 
             BlockState state(ProtoChunk chunk, int y, int x, int z) {
@@ -1711,6 +1844,14 @@ public final class ChunkgenOracle {
                             Beardifier.forStructuresInChunk(manager, at));
                 }
             }
+            // terrain 阶段（含 doFill 的含水层标记）的 `PostProcessing` 快照：
+            // 续生成对拍在 TERRAIN..FEATURES 之间的存档里要写出这一份。
+            // Snapshot `PostProcessing` after terrain (including doFill aquifer
+            // marks) for the resume oracle's TERRAIN..FEATURES saves.
+            JsonArray[] terrainPost = new JsonArray[9];
+            for (int index = 0; index < 9; index++) {
+                terrainPost[index] = postProcessingJson(chunks[index].chunk());
+            }
             // 4. FEATURES：和 writeFeatures 同一个 3×3 写区代理，只是这次
             // StructureManager 开结构，且 4 参数 getChunk 能看到整张起点网格。
             final WorldGenLevel[] holder = new WorldGenLevel[1];
@@ -1747,6 +1888,7 @@ public final class ChunkgenOracle {
                     entry.addProperty("dz", dz);
                     addBlocks(entry, chunks[index].chunk());
                     addBlockEntities(entry, chunks[index].chunk());
+                    entry.add("postProcessingTerrain", terrainPost[index]);
                     results.add(entry);
                 }
             }
@@ -2003,6 +2145,10 @@ public final class ChunkgenOracle {
                             generatorSettings, randomState, resolver);
                 }
             }
+            JsonArray[] terrainPost = new JsonArray[9];
+            for (int index = 0; index < 9; index++) {
+                terrainPost[index] = postProcessingJson(chunks[index].chunk());
+            }
             // WorldGenRegion 构造 149-165：BiomeManager 的 BiomeResolver 是 region 自己，
             // 不是 ServerLevel.uncachedBiomeResolver()。这里让代理实现 BiomeResolver，
             // 用同一份 obfuscateSeed(seed) 建 manager，BiomeFilter 才会读 3×3 里
@@ -2038,6 +2184,7 @@ public final class ChunkgenOracle {
                     entry.addProperty("dz", dz);
                     addBlocks(entry, chunks[index].chunk());
                     addBlockEntities(entry, chunks[index].chunk());
+                    entry.add("postProcessingTerrain", terrainPost[index]);
                     results.add(entry);
                 }
             }
@@ -2826,6 +2973,31 @@ public final class ChunkgenOracle {
             }
             line.add("palette", names);
             line.add("blocks", blocks);
+            // `PostProcessing` 是 ProtoChunk 的 short 列表数组；CARVERS 路径里
+            // 恒为 24 个空列表，FEATURES 路径里装的是 markPosForPostProcessing
+            // 记下的位置。空列表也照样输出，让对拍能抓到「本该记却没记」。
+            // `PostProcessing` is the ProtoChunk's array of packed short lists:
+            // empty in CARVERS, filled by markPosForPostProcessing in FEATURES.
+            if (chunk instanceof ProtoChunk) {
+                line.add("postProcessing", postProcessingJson(chunk));
+            }
+        }
+
+        /** ProtoChunk 的 `PostProcessing` 按段打包输出；空列表也照样输出。 */
+        private JsonArray postProcessingJson(ChunkAccess chunk) {
+            JsonArray post = new JsonArray();
+            if (chunk instanceof ProtoChunk proto) {
+                for (it.unimi.dsi.fastutil.shorts.ShortList section : proto.getPostProcessing()) {
+                    JsonArray packed = new JsonArray();
+                    if (section != null) {
+                        for (short value : section) {
+                            packed.add(value & 0xFFFF);
+                        }
+                    }
+                    post.add(packed);
+                }
+            }
+            return post;
         }
 
         /**
