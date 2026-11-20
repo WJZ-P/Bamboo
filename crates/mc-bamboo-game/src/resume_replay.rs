@@ -81,6 +81,11 @@ pub enum ResumeBreak {
     ClearGeneratedLight,
     /// 读回时丢掉盘上的 `PostProcessing`，确认表比较器会报不一致。
     DiscardPostProcessing,
+    /// 续跑 `features` 时用新标记替换已有的表（而不是追加在后面），
+    /// 确认表比较器会报不一致。
+    /// Replace the existing table with the resumed `features` marks instead of
+    /// appending, so the table comparator must report it.
+    ReplacePostProcessing,
 }
 
 /// 读回一份盘上的区块，按它的 `Status` 续跑到 `full`，返回完工数据。
@@ -138,25 +143,22 @@ pub fn resume_chunk(
     // Restore stage intermediates: before terrain only structures/biomes exist;
     // from terrain on, rebuild the CARVERS-like `GeneratedChunk` from the disk
     // blocks so features/light can consume them.
+    // 盘上的 `PostProcessing` 是已跑阶段留下的标记，随快照一起恢复；续跑阶段的
+    // 新标记在完工组装（`merge_feature_writes`）时追加在后面。改坏确认可以在这里
+    // 故意丢掉盘上的表。
+    // The on-disk `PostProcessing` holds marks from finished stages and is
+    // restored with the snapshot; resumed stages append their marks at assembly
+    // (`merge_feature_writes`). The break confirmation drops the disk table.
     let mut partial = if disk_status.is_after_terrain() {
-        Some(Arc::new(crate::worldgen::generated_chunk_from_column(
-            &column, case.pos,
-        )))
+        let mut restored = crate::worldgen::generated_chunk_from_column(&column, case.pos);
+        if break_kind == Some(ResumeBreak::DiscardPostProcessing) {
+            restored.post_processing.clear();
+        }
+        Some(Arc::new(restored))
     } else {
         None
     };
     let mut deltas: Vec<crate::worldgen_features::FeatureWrites> = Vec::new();
-    // 盘上的 `PostProcessing` 是已跑阶段留下的标记，续跑新阶段的标记再往后加。
-    // 改坏确认可以在这里故意丢掉盘上的表。
-    // The on-disk `PostProcessing` holds marks from finished stages; resumed
-    // stages append after them. The break confirmation drops the disk table.
-    let mut post_processing = crate::worldgen::post_processing_from_archive(
-        column.chunk_column().chunk().archive(),
-        case.pos,
-    );
-    if break_kind == Some(ResumeBreak::DiscardPostProcessing) {
-        post_processing.clear();
-    }
     // 官方 `SerializableChunkData.read`：`Status >= LIGHT` 且 `isLightOn` 为真时
     // 盘上的光照段灌进光引擎，`light` 步也不重算（`isLighted` 返回真）。
     // 这里把盘上的两层光照原样留到完工组装。
@@ -213,14 +215,6 @@ pub fn resume_chunk(
             &mut structures,
             output,
         );
-        if stage == ChunkStatus::Features {
-            // `features` 跑完后的表 = 输入地形已有的标记 + 本阶段新标记；
-            // 在干净的 3×3 上算出的这份和盘上地形标记一致，直接替换。
-            // After `features`, the table is terrain marks plus new marks; the
-            // clean 3x3 run reproduces the same terrain marks, so replace.
-            post_processing =
-                crate::worldgen_features::feature_post_processing(config, case.pos.x, case.pos.z)?;
-        }
     }
 
     // 完工组装：官方 `full` 步把 ProtoChunk 变成 LevelChunk，Bamboo 把
@@ -242,6 +236,10 @@ pub fn resume_chunk(
                 let mut assembled = (*snapshot.as_ref()).clone();
                 crate::worldgen_features::merge_feature_writes(&mut assembled, groups.drain(..));
                 column = *crate::worldgen::build_region_column(&assembled)?;
+            } else if break_kind == Some(ResumeBreak::ReplacePostProcessing) {
+                let mut replaced = (*snapshot.as_ref()).clone();
+                replaced.post_processing.clear();
+                column = *assemble_feature_column(&replaced, &mut groups)?;
             } else {
                 column = *assemble_feature_column(snapshot, &mut groups)?;
             }
@@ -284,7 +282,6 @@ pub fn resume_chunk(
         }
         set_persisted_status(&mut column, ChunkStatus::Full);
     }
-    crate::worldgen::set_post_processing_tag(&mut column, &post_processing);
     let saved_nbt = chunk_nbt::encode_bytes(
         column.chunk_column(),
         &encode_extra_from_disk(case.pos, &decoded),
@@ -335,7 +332,7 @@ fn encode_extra_from_disk(
         inhabited_time: decoded.inhabited_time,
         preserved: decoded.preserved.clone(),
         structures: Some(decoded.structures.clone()),
-        // 列上的表已经是续跑累加后的最终表（`set_post_processing_tag`），
+        // 列上的表已经是续跑累加后的最终表（完工组装时写进存档元数据），
         // 不能再用盘上的旧表覆盖。
         // The column already carries the final accumulated table.
         post_processing: None,
@@ -420,16 +417,10 @@ fn snapshot_resumed(pos: ChunkPos, column: &RegionColumn, saved_nbt: &[u8]) -> R
         }
         biomes.push(cells);
     }
-    // 完工的 `PostProcessing` 从存档元数据还原成 24 段 packed short 列表。
-    // Restore the finished `PostProcessing` into 24 packed-short section lists.
-    let mut post_processing: Vec<Vec<u16>> = vec![Vec::new(); SECTION_COUNT];
-    for (x, y, z) in crate::worldgen::post_processing_from_archive(chunk.archive(), pos) {
-        let section = (y - MIN_Y).div_euclid(16);
-        if (0..SECTION_COUNT as i32).contains(&section) {
-            let packed = ((x & 15) | ((y & 15) << 4) | ((z & 15) << 8)) as u16;
-            post_processing[section as usize].push(packed);
-        }
-    }
+    // 完工的 `PostProcessing` 按存档元数据原样取出（24 段 packed short）。
+    // The finished `PostProcessing` as stored (24 packed-short sections).
+    let post_processing =
+        crate::worldgen::post_processing_sections(chunk.archive()).unwrap_or_default();
     // 高度图按完工方块重算，和 `build_region_column` / 官方增量更新的终值一致。
     // Recompute from the finished blocks, matching assembly and official updates.
     let all = rebuild_final_heightmaps(column);

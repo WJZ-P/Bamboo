@@ -284,23 +284,32 @@ pub fn post_processing_from_archive(
     out
 }
 
-/// 把世界坐标的 `PostProcessing` 写进交付盒子的存档元数据（按标记顺序打包）。
+/// 存档元数据里的 `PostProcessing` 原样按段取出（每段 packed short，按标记顺序）。
+/// 没有这个键时返回 `None`；段或条目类型不对的跳过。
 ///
-/// Pack world-space `PostProcessing` positions into the delivered column's
-/// archive metadata, preserving mark order.
-pub fn set_post_processing_tag(column: &mut RegionColumn, positions: &[(i32, i32, i32)]) {
-    let mut sections: Vec<Vec<Tag>> = vec![Vec::new(); SECTION_COUNT];
-    for &(x, y, z) in positions {
-        let section = (y - MIN_Y).div_euclid(16);
-        if !(0..SECTION_COUNT as i32).contains(&section) {
-            continue;
-        }
-        let packed = (x & 15) | ((y & 15) << 4) | ((z & 15) << 8);
-        sections[section as usize].push(Tag::Short(packed as i16));
-    }
-    let mut archive = column.chunk_column().chunk().archive().clone();
-    archive.post_processing = Some(Tag::List(sections.into_iter().map(Tag::List).collect()));
-    column.set_archive(archive);
+/// The archive's `PostProcessing` as per-section packed shorts in mark order;
+/// `None` when the key is absent, malformed sections/entries are skipped.
+pub fn post_processing_sections(
+    archive: &mc_bamboo_world::chunk::ChunkArchiveMeta,
+) -> Option<Vec<Vec<u16>>> {
+    let Some(Tag::List(sections)) = archive.post_processing.as_ref() else {
+        return None;
+    };
+    Some(
+        sections
+            .iter()
+            .map(|section| match section {
+                Tag::List(entries) => entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Tag::Short(packed) => Some(*packed as u16),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect(),
+    )
 }
 
 /// 从读盘柱子还原 `GeneratedChunk` 的方块 / 群系 / 四张 FINAL 高度图与
