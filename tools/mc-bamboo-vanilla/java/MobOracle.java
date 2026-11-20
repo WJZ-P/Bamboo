@@ -811,10 +811,19 @@ public final class MobOracle {
                 Scene pig = new Scene("pig_saddle").ticks(24);
                 ground(pig, 6);
                 pig.cow(0.5, 64.0, 0.5, 0.0F, 39L);
-                pig.player(1.5, 64.0, 0.5, Items.SADDLE);
+                pig.player(1.5, 64.0, 0.5, Items.AIR);
                 pig.interact(3, 0, 0, BuiltInRegistries.ITEM.getId(Items.SADDLE), 0);
                 pig.packets = true;
                 scenes.add(pig);
+                // 上鞍后被玩家打死：战利品、必掉的鞍、经验的取数顺序。
+                // Killed after saddling: loot, the guaranteed saddle and XP draw order.
+                Scene dead = new Scene("pig_saddle_death").ticks(60).drops().packets();
+                ground(dead, 6);
+                dead.cow(0.5, 64.0, 0.5, 0.0F, 40L);
+                dead.player(1.5, 64.0, 0.5, Items.AIR);
+                dead.interact(3, 0, 0, BuiltInRegistries.ITEM.getId(Items.SADDLE), 0);
+                dead.hurts.add(new double[] {20, 0, 30.0, 0});
+                scenes.add(dead);
             }
             for (long seed : seeds) {
                 Scene flat = new Scene("flat_" + seed).ticks(2000);

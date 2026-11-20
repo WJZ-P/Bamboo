@@ -1591,43 +1591,27 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     let adult = !mob.is_baby();
     let drops = ctx.blocks().block_game_rules().mob_drops;
-    if mob.mob_type == super::MobType::Pig && adult && drops {
+    if !mob.mob_type.is_monster() {
         mob.events.push(MobEvent::Death);
-        ctx.emit(
-            Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
+        animal_death_drops(
             me,
+            mob,
+            ctx,
+            source,
+            by_player && adult && drops,
+            adult && drops,
         );
-        if let Some(stack) = super::skeleton_drops::drop_slot(
-            &mut mob.equipment,
-            mc_bamboo_protocol::packet::play::EquipmentSlot::Saddle,
-            by_player,
-            source.looting_level,
-            &mut me.random,
-        ) {
-            ctx.emit(Command::DropItem { stack }, me);
-        }
-        if by_player {
-            let amount = 1 + me.random.next_int_bounded(3);
-            ctx.emit(Command::AwardDeathExperience { amount }, me);
-        }
         return;
     }
-    let experience = if mob.mob_type.is_monster() {
-        // `Monster.xpReward=5`，幼年 `Zombie.getBaseExperienceReward` 乘 2.5。
-        let base = if adult {
-            mob.mob_type.xp_reward()
-        } else {
-            (f64::from(mob.mob_type.xp_reward()) * 2.5) as i32
-        };
-        if by_player && drops { base } else { 0 }
-    } else if by_player && adult && drops {
-        // `Animal.getBaseExperienceReward`：`1 + random.nextInt(3)`。
-        1 + me.random.next_int_bounded(3)
+    // `Monster.xpReward=5`，幼年 `Zombie.getBaseExperienceReward` 乘 2.5。
+    let base = if adult {
+        mob.mob_type.xp_reward()
     } else {
-        0
+        (f64::from(mob.mob_type.xp_reward()) * 2.5) as i32
     };
+    let experience = if by_player && drops { base } else { 0 };
     mob.events.push(MobEvent::Death);
-    if (adult || mob.mob_type.is_monster()) && drops {
+    if drops {
         ctx.emit(
             Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
             me,
@@ -1635,6 +1619,48 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     if experience > 0 {
         ctx.emit(Command::AwardDeathExperience { amount: experience }, me);
+    }
+}
+
+/// `LivingEntity.dropAllDeathLoot` 的动物分支：战利品表、`Mob.dropCustomDeathLoot`
+/// 按槽位顺序掉装备（鞍），最后 `Animal.getBaseExperienceReward` 取 `1 + nextInt(3)`。
+///
+/// The animal branch of `dropAllDeathLoot`: loot table, then equipment slots in ordinal
+/// order (the saddle), then `Animal.getBaseExperienceReward` draws `1 + nextInt(3)`.
+fn animal_death_drops(
+    me: &mut Entity,
+    mob: &mut Mob,
+    ctx: &mut dyn EntityCtx,
+    source: DamageSource,
+    experience: bool,
+    loot: bool,
+) {
+    let by_player = mob.last_hurt_by_player_memory_time > 0;
+    if loot {
+        ctx.emit(
+            Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
+            me,
+        );
+        let looting = if source.attacker_is_player {
+            source.looting_level
+        } else {
+            0
+        };
+        for slot in super::equipment::SLOTS {
+            if let Some(stack) = super::skeleton_drops::drop_slot(
+                &mut mob.equipment,
+                slot,
+                by_player,
+                looting,
+                &mut me.random,
+            ) {
+                ctx.emit(Command::DropItem { stack }, me);
+            }
+        }
+    }
+    if experience {
+        let amount = 1 + me.random.next_int_bounded(3);
+        ctx.emit(Command::AwardDeathExperience { amount }, me);
     }
 }
 
