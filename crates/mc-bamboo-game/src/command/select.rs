@@ -152,61 +152,75 @@ pub(crate) fn may_include_non_players(selector: &EntitySelector) -> bool {
     selector.includes_entities || selector.uuid.is_some()
 }
 
-/// 规划期只读筛查：这个岛上有没有任何一个**非玩家实体**能过选择器的全部过滤
-/// 条件（计划 4.5.1 第 3 节）。和执行期共用 `matches` / `volume_box` /
-/// `selector.position`，但**不排序、不截断、不取随机数、不受 `limit` 影响**：
-/// `sort=nearest` / `random` 要先看到全部候选才知道谁命中，所以借的是「至少
-/// 有一个候选的岛」，不是「最终选中者所在的岛」。
+/// 规划期只读枚举：这个岛上过选择器全部过滤条件的候选（玩家和非玩家实体）。
+/// 和执行期共用 `matches` / `volume_box` / `selector.position`，但**不排序、不
+/// 截断、不取随机数、不受 `limit` 影响**：`sort=nearest` / `random` 要先看到
+/// 全部候选才知道谁命中，所以借的是「有候选的岛」，不是「最终选中者所在的岛」
+/// （计划 4.5.1 第 3 节）。
 ///
-/// Read-only planning pass: does this island hold at least one non-player
-/// entity passing every filter (plan 4.5.1, section 3)? Shares `matches`,
-/// `volume_box` and `selector.position` with execution, but never sorts,
-/// truncates, draws randomness or honours `limit`: nearest/random ordering
-/// needs the complete candidate set before it can tell who wins.
-pub(crate) fn has_non_player_candidate(
+/// Read-only planning pass: every candidate on this island passing all filters
+/// (players and non-player entities). Shares `matches`, `volume_box` and
+/// `selector.position` with execution, but never sorts, truncates, draws
+/// randomness or honours `limit`: nearest/random ordering needs the complete
+/// candidate set before it can tell who wins (plan 4.5.1, section 3).
+pub(crate) fn candidates(
     region: &Region,
     source: source::Source,
     selector: &EntitySelector,
     origin: Vec3,
-) -> bool {
-    if !may_include_non_players(selector) {
-        return false;
-    }
+) -> Vec<Target> {
     let origin = selector.position(origin);
     let volume = volume_box(origin, selector);
-    // 名字 / UUID / `@s` 的短路形式：和执行期一样，按全局 ID 序找唯一命中者。
-    // Name / UUID / `@s` short-circuit like execution: find the one match in
-    // ascending global id order.
-    if selector.player_name.is_some() {
-        return false;
+    // 名字 / UUID / `@s` 的短路形式：和执行期一样，名字和 UUID 不再过其余过滤。
+    // Name / UUID / `@s` short-circuit like execution: names and UUIDs do not
+    // run the remaining filters.
+    if let Some(name) = &selector.player_name {
+        return player_by_name(region, name).into_iter().collect();
     }
     if let Some(uuid) = selector.uuid {
-        return entity_by_uuid(region, uuid).is_some_and(|target| {
-            matches!(target, Target::World(_))
-                && matches(region, target, selector, origin, volume, None)
-        });
+        return entity_by_uuid(region, uuid).into_iter().collect();
     }
     if selector.current_entity {
-        return match source.entity {
-            Some(Target::World(uid)) => region.entities.public_at(uid).is_some_and(|_| {
-                matches(region, Target::World(uid), selector, origin, volume, None)
-            }),
-            _ => false,
+        let Some(entity) = source.entity else {
+            return Vec::new();
         };
+        return matches(region, entity, selector, origin, volume, None)
+            .then_some(entity)
+            .into_iter()
+            .collect();
     }
+    let mut found = Vec::new();
     let limited_type = positive_type(selector);
+    let skip_players =
+        selector.level.is_some() || limited_type.is_some_and(|id| id != entity_type::PLAYER);
     let skip_entities =
         !selector.includes_entities || limited_type.is_some_and(|id| id == entity_type::PLAYER);
-    if skip_entities {
-        return false;
-    }
-    region.entities.iter_public().any(|public| {
-        if public.removed {
-            return false;
+    if !skip_players {
+        for player in region.players.keys() {
+            if matches(
+                region,
+                Target::Player(*player),
+                selector,
+                origin,
+                volume,
+                None,
+            ) {
+                found.push(Target::Player(*player));
+            }
         }
-        let target = Target::World(public.uid);
-        matches(region, target, selector, origin, volume, None)
-    })
+    }
+    if !skip_entities {
+        for public in region.entities.iter_public() {
+            if public.removed {
+                continue;
+            }
+            let target = Target::World(public.uid);
+            if matches(region, target, selector, origin, volume, None) {
+                found.push(target);
+            }
+        }
+    }
+    found
 }
 
 /// 官方 `EntitySelector.findEntities`：先按名字/UUID 短路，再收集候选、排序、截断。

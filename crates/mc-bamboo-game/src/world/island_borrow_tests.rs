@@ -291,6 +291,100 @@ fn cases(centers: &[ChunkPos], names: &BTreeMap<usize, String>) -> Vec<Vec<Step>
     out.push(vec![Step::Player(0, "gamemode creative @a".to_owned())]);
     out.push(vec![Step::Console("defaultgamemode adventure".to_owned())]);
     out.push(vec![Step::Console(format!("gamemode survival {}", n(1)))]);
+    // 第二轮收紧的常用写法：只按候选目标算盒。
+    out.push(vec![Step::Player(0, "gamemode creative".to_owned())]);
+    out.push(vec![Step::Player(0, "kill @s".to_owned())]);
+    out.push(vec![Step::Player(
+        0,
+        "kill @e[type=minecraft:cow,distance=..5]".to_owned(),
+    )]);
+    out.push(vec![Step::Player(0, "effect give @s speed 5".to_owned())]);
+    out.push(vec![Step::Player(
+        0,
+        "effect give @e[type=minecraft:cow] slowness 5".to_owned(),
+    )]);
+    out.push(vec![Step::Player(0, "effect clear @a".to_owned())]);
+    out.push(vec![Step::Player(
+        0,
+        "effect clear @e[type=minecraft:cow] minecraft:slowness".to_owned(),
+    )]);
+    out.push(vec![Step::Console(format!(
+        "execute as {} run gamemode survival",
+        n(1)
+    ))]);
+    out.push(vec![Step::Console(format!(
+        "execute as {} at @s run setblock ~ ~-1 ~ minecraft:stone",
+        n(1)
+    ))]);
+    out.push(vec![Step::Player(
+        0,
+        "execute as @s at @s run setblock ~ ~-1 ~ minecraft:stone".to_owned(),
+    )]);
+    out.push(vec![Step::Player(0, format!("gamemode survival {}", n(1)))]);
+    out.push(vec![Step::Player(
+        0,
+        format!("effect give {} minecraft:speed 5", n(1)),
+    )]);
+    out.push(vec![Step::Player(
+        2,
+        "effect give @e[type=minecraft:cow,sort=nearest,limit=1] minecraft:glowing 5".to_owned(),
+    )]);
+    out.push(vec![Step::Player(
+        0,
+        "effect give @r minecraft:haste 5".to_owned(),
+    )]);
+    out.push(vec![Step::Console(
+        "effect give @e[sort=random,limit=1] minecraft:speed 5".to_owned(),
+    )]);
+    out.push(vec![Step::Player(1, "effect clear".to_owned())]);
+    // 分叉上的 `@s` 是牛：链尾按分叉的执行者算候选。
+    // `@s` on each branch is a cow: the tail's candidates follow the branch.
+    out.push(vec![Step::Console(
+        "execute as @e[type=minecraft:cow] run effect give @s minecraft:slowness 5".to_owned(),
+    )]);
+    out.push(vec![Step::Console(
+        "execute as @e[type=minecraft:cow] run kill".to_owned(),
+    )]);
+    // `at` 别的岛上的玩家：链尾的距离按他的位置算。
+    // `at` a player on another island: the tail's distance uses their position.
+    out.push(vec![Step::Console(format!(
+        "execute at {} run kill @e[type=minecraft:cow,distance=..5]",
+        n(1)
+    ))]);
+    out.push(vec![Step::Player(
+        2,
+        format!(
+            "damage {} 1 minecraft:generic by @e[type=minecraft:cow,sort=nearest,limit=1]",
+            n(1)
+        ),
+    )]);
+    out.push(vec![Step::Player(
+        0,
+        format!(
+            "damage @e[type=minecraft:cow,sort=furthest,limit=1] 1 minecraft:generic by {}",
+            n(2)
+        ),
+    )]);
+    // `positioned <pos>` 之后的相对坐标按新位置解：从第 1 组发、落点在第 0 组，
+    // 偏移到第 2 组。
+    // Relative coordinates after `positioned <pos>` use the new position:
+    // sent from group 1, positioned at group 0, offset into group 2.
+    out.push(vec![Step::Player(
+        1,
+        format!(
+            "execute positioned {} run setblock ~{} ~ ~{} minecraft:stone",
+            c(0, 0, 1, 0),
+            (centers[2].x - centers[0].x) * 16 + 5,
+            (centers[2].z - centers[0].z) * 16 + 5
+        ),
+    )]);
+    // `store ... entity` 的目标按 (0, 0, 0) 的零上下文选：从第 1 组发，选中家岛的牛。
+    // The `store ... entity` target is chosen from the zero context at
+    // (0, 0, 0): sent from group 1, it picks the home island's cow.
+    out.push(vec![Step::Player(
+        1,
+        "execute store result entity @e[type=minecraft:cow,distance=..80,limit=1] Health float 1 run kill @e[type=minecraft:cow,distance=..5]".to_owned(),
+    )]);
     out.push(vec![Step::Player(
         0,
         "data get block 100000 -60 100000".to_owned(),
@@ -402,6 +496,7 @@ fn compare(seed: u64, steps: &[Step], break_kind: BorrowBreak, furnish: bool) ->
         assert_equal(&left, &right, &what);
         on_demand.scene.server.world.assert_island_invariants();
         joins += on_demand.scene.server.world.islands.last_borrowed;
+        on_demand.scene.server.world.islands.last_borrowed = 0;
     }
     on_demand.scene.server.world.islands.borrow_break = BorrowBreak::None;
     joins
@@ -411,20 +506,32 @@ fn compare(seed: u64, steps: &[Step], break_kind: BorrowBreak, furnish: bool) ->
 #[test]
 fn every_command_shape_matches_a_full_join() {
     with_stack(|| {
-        let mut scene = Side::new(51, true);
-        let mut names = BTreeMap::new();
-        for group in 0..scene.scene.centers.len() {
-            let client = first_of(&scene.scene, group);
-            names.insert(group, name_of(&mut scene.scene, &client));
-        }
-        let centers = scene.scene.centers.clone();
-        let cases = cases(&centers, &names);
+        // 每条用例在自己的种子里跑，坐标和玩家名按那个种子的岛布局算。
+        // Each case runs under its own seed with coordinates and names taken
+        // from that seed's layout.
+        let pools: BTreeMap<u64, Vec<Vec<Step>>> =
+            (51..58).map(|seed| (seed, pool_for(seed))).collect();
+        let count = pools[&51].len();
+        assert!(pools.values().all(|pool| pool.len() == count));
         // 每条用例各自搭两份世界，避免前一条留下的改动影响后一条。
-        for (index, steps) in cases.iter().enumerate() {
-            let seed = 51 + index as u64 % 7;
-            compare(seed, steps, BorrowBreak::None, true);
+        let seeds = (0..count).map(|index| (index, 51 + index as u64 % 7));
+        for (index, seed) in seeds {
+            compare(seed, &pools[&seed][index], BorrowBreak::None, true);
         }
     });
+}
+
+/// 一个种子的命令池：坐标和玩家名都按这个种子的岛布局。
+///
+/// One seed's command pool, with coordinates and names from its layout.
+fn pool_for(seed: u64) -> Vec<Vec<Step>> {
+    let mut scene = Side::new(seed, true);
+    let mut names = BTreeMap::new();
+    for group in 0..scene.scene.centers.len() {
+        let client = first_of(&scene.scene, group);
+        names.insert(group, name_of(&mut scene.scene, &client));
+    }
+    cases(&scene.scene.centers, &names)
 }
 
 /// 固定种子的随机模糊测试：随机岛布局 × 随机命令 × 随机参数，每条都做双跑对照。
@@ -435,17 +542,9 @@ fn fuzzed_commands_match_a_full_join() {
         // 每个种子一份命令池：命令里的坐标必须和该种子的岛布局一致。
         // One command pool per seed: the coordinates must match that seed's
         // island layout.
-        let mut pools: BTreeMap<u64, Vec<Vec<Step>>> = BTreeMap::new();
-        for seed in 51..60 {
-            let mut scene = Side::new(seed, true);
-            let mut names = BTreeMap::new();
-            for group in 0..scene.scene.centers.len() {
-                let client = first_of(&scene.scene, group);
-                names.insert(group, name_of(&mut scene.scene, &client));
-            }
-            pools.insert(seed, cases(&scene.scene.centers, &names));
-        }
-        for round in 0..300 {
+        let pools: BTreeMap<u64, Vec<Vec<Step>>> =
+            (51..60).map(|seed| (seed, pool_for(seed))).collect();
+        for round in 0..500 {
             let seed = 51 + next() % 9;
             let pool = &pools[&seed];
             let mut steps = Vec::new();
@@ -478,11 +577,53 @@ fn missing_an_island_is_caught() {
             BorrowBreak::MissDestination,
             BorrowBreak::MissUuid,
             BorrowBreak::MissIdentity,
+            BorrowBreak::MissCandidatePlayer,
+            BorrowBreak::MissEffect,
         ] {
             let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 compare(51, &steps, kind, true);
             }));
             assert!(caught.is_err(), "改坏 {kind:?} 没有被抓到");
+        }
+    });
+}
+
+/// 第二轮的两条改坏各自用对应的命令单独确认：只放一条（或一组）命令，抓到的一定是
+/// 这条命令的形态。`/kill` 别的岛上的玩家要先给他东西，死亡掉落才会落在他的岛上。
+///
+/// The two second-round breaks are each confirmed on their own command: with
+/// only that command in the run, the catch must come from its shape. The
+/// other-island player gets items first so their death drops land there.
+#[test]
+fn narrowing_breaks_are_caught_by_their_own_commands() {
+    with_stack(|| {
+        let mut scene = Side::new(51, true);
+        let client = first_of(&scene.scene, 1);
+        let name = name_of(&mut scene.scene, &client);
+        let runs = [
+            (
+                BorrowBreak::MissEffect,
+                vec![Step::Player(
+                    0,
+                    "effect give @e[type=minecraft:cow] minecraft:slowness 5".to_owned(),
+                )],
+            ),
+            (
+                BorrowBreak::MissCandidatePlayer,
+                vec![
+                    Step::Console(format!("give {name} minecraft:stone 5")),
+                    Step::Player(0, format!("kill {name}")),
+                ],
+            ),
+        ];
+        for (kind, steps) in runs {
+            // 不改坏时同一串命令必须相等，抓到的差异才算改坏造成的。
+            // Unbroken, the same run must match, so a catch is the break's.
+            compare(51, &steps, BorrowBreak::None, true);
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                compare(51, &steps, kind, true);
+            }));
+            assert!(caught.is_err(), "改坏 {kind:?} 没有被它自己的命令抓到");
         }
     });
 }
@@ -548,6 +689,107 @@ fn block_updates_at_the_gap_match_a_full_join() {
                 "setblock ~ ~1 ~ minecraft:stone".to_owned(),
             ));
             compare(seed, &steps, BorrowBreak::None, true);
+        }
+    });
+}
+
+/// 第二轮收紧的常用写法：每条命令只借候选目标所在的岛，借几个岛按场景推算后写死
+/// （计划 4.5.1 第 7 节第 2 条；不许悄悄退回全拼）。
+///
+/// 场景（种子 51）：三组各一座岛，第 0 组就在家岛上；每组中心一头牛；发起人是
+/// 第 0 组的第一名玩家（管理员）。借岛数含发起人自己的岛：只用自己的岛是 1、
+/// 不拼；大于 1 才拼一次。
+///
+/// The common shapes narrowed in the second round, with the island counts
+/// worked out from the scene and pinned: three groups on three islands
+/// (group 0 on home), a cow at each group centre, the sender is group 0's
+/// first player. Counts include the sender's island; 1 means nothing joined.
+#[test]
+fn narrow_commands_borrow_only_their_targets() {
+    with_stack(|| {
+        let mut side = Side::new(51, false);
+        furnish_entities(&mut side);
+        // 场景前提：三组、三座岛，每组的岛各不相同，第 0 组在家岛上。
+        // Preconditions: three groups on three distinct islands, group 0 at home.
+        let centers = side.scene.centers.clone();
+        assert_eq!(centers.len(), 3, "场景应有三组");
+        assert_eq!(
+            side.scene.server.world.islands.ids().len(),
+            3,
+            "场景应有三座岛"
+        );
+        let owners: BTreeSet<RegionId> = centers
+            .iter()
+            .map(|&center| {
+                side.scene
+                    .server
+                    .world
+                    .islands
+                    .island_of_chunk(center)
+                    .expect("组中心已加载")
+            })
+            .collect();
+        assert_eq!(owners.len(), 3, "三组各在一座岛上");
+        assert!(
+            owners.contains(&mc_bamboo_world::director::HOME_REGION),
+            "第 0 组在家岛上"
+        );
+        let mut names = BTreeMap::new();
+        for group in 0..centers.len() {
+            let client = first_of(&side.scene, group);
+            names.insert(group, name_of(&mut side.scene, &client));
+        }
+        let sender = first_of(&side.scene, 0);
+        let other = &names[&1];
+        let cases = [
+            // 改自己的模式：只读自己脚下，自己的岛。
+            ("gamemode creative".to_owned(), 1),
+            // 别的岛上的玩家：他脚下那格在他的岛上，借 2 个。
+            (format!("gamemode survival {other}"), 2),
+            // 自己 `as` / `at` 自己：链尾的方块在自己的岛上。
+            (
+                "execute as @s at @s run setblock ~ ~-1 ~ minecraft:stone".to_owned(),
+                1,
+            ),
+            // 玩家效果不读方块、不碰实体表，只用自己的岛。
+            ("effect give @s minecraft:speed 5".to_owned(), 1),
+            // 三头牛在三座岛上：三座都借。
+            (
+                "effect give @e[type=minecraft:cow] minecraft:slowness 5".to_owned(),
+                3,
+            ),
+            (
+                "effect clear @e[type=minecraft:cow] minecraft:slowness".to_owned(),
+                3,
+            ),
+            // 只选玩家的选择器：一个别的岛都不借。
+            ("effect clear @a".to_owned(), 1),
+            // 打别的岛上的玩家：可能致死，掉落物按他的位置归属，借他的岛。
+            (format!("damage {other} 1"), 2),
+            // 只选身边 5 格的牛：别的岛上的牛都离得远，只用自己的岛。
+            ("kill @e[type=minecraft:cow,distance=..5]".to_owned(), 1),
+            // 对照：不限距离的牛三座岛都有。
+            ("kill @e[type=minecraft:cow]".to_owned(), 3),
+            // 杀自己：掉落在自己的位置。放最后，死了以后不再发命令。
+            ("kill @s".to_owned(), 1),
+        ];
+        for (line, expected) in cases {
+            let islands = &mut side.scene.server.world.islands;
+            islands.unified = 0;
+            islands.last_borrowed = 0;
+            islands.last_fallback = false;
+            side.scene
+                .server
+                .request(&sender, PlayRequest::unsigned_command(line.clone()));
+            side.scene.server.tick();
+            let islands = &side.scene.server.world.islands;
+            assert!(!islands.last_fallback, "`{line}` 不该退回全拼");
+            assert_eq!(islands.last_borrowed, expected, "`{line}` 借了几个岛");
+            assert_eq!(
+                islands.unified,
+                usize::from(expected > 1),
+                "`{line}` 拼了几次"
+            );
         }
     });
 }
