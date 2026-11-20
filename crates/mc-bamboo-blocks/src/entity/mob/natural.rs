@@ -539,7 +539,9 @@ pub fn sample(entry: &MobSpawnerDef, random: &crate::random::LegacyRandom) -> i3
     }
 }
 
-/// `SpawnPlacements.isSpawnPositionOk`：牛、僵尸、尸壳都是 `ON_GROUND`。
+/// 已支持的自然生成生物使用 `SpawnPlacements` 的 `ON_GROUND`。
+///
+/// The modelled natural spawns use the `ON_GROUND` placement.
 fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
     if !world.world_border().is_within_bounds_pos(pos) {
         return false;
@@ -615,7 +617,7 @@ fn check_spawn_rules(world: &World, kind: MobType, pos: BlockPos) -> bool {
                 .is_tagged(block_tags::ANIMALS_SPAWNABLE_ON)
                 && world.raw_brightness(pos) > 8
         }
-        MobType::Zombie => {
+        MobType::Zombie | MobType::Skeleton => {
             is_dark_enough_to_spawn(world, pos) && valid_mob_spawn_block(world, kind, pos)
         }
         MobType::Husk => {
@@ -804,6 +806,7 @@ mod tests {
 
     fn player(uid: i32, position: Vec3) -> PlayerView {
         PlayerView {
+            uuid: None,
             uid,
             position,
             eye_height: 1.62,
@@ -1043,31 +1046,29 @@ mod tests {
     }
 
     #[test]
-    fn zombies_can_spawn_when_it_is_dark() {
+    fn zombies_and_skeletons_can_spawn_when_it_is_dark() {
         let mut level = TestLevel::new();
         grass_platform(&mut level);
         level.light = Some((0, 0));
         level.players.push(player(1, Vec3::new(8.5, 64.0, 40.5)));
         let params = params(289 * 4, true);
         let chunk = ChunkPos::new(0, 0);
-        let mut zombies = 0;
+        let mut zombies = false;
+        let mut skeletons = false;
         for _ in 0..3000 {
-            zombies += run_tick(&mut level, chunk, &params);
-            if zombies > 0 {
+            run_tick(&mut level, chunk, &params);
+            for entity in level.entities().iter() {
+                let mob = entity.kind.mob().expect("natural spawn must be a mob");
+                assert_eq!(mob.mob_type.mob_category(), MobCategory::Monster);
+                zombies |= mob.mob_type.entity_type() == types::ZOMBIE;
+                skeletons |= mob.mob_type.entity_type() == types::SKELETON;
+            }
+            if zombies && skeletons {
                 break;
             }
         }
-        assert!(zombies > 0, "黑暗里应该刷出怪物");
-        for entity in level.entities().iter() {
-            let Some(mob) = entity.kind.mob() else {
-                continue;
-            };
-            assert!(
-                mob.mob_type.mob_category() == MobCategory::Monster,
-                "黑暗里只会刷出怪物"
-            );
-            assert_eq!(mob.mob_type.entity_type(), types::ZOMBIE);
-        }
+        assert!(zombies, "黑暗里应该刷出僵尸");
+        assert!(skeletons, "黑暗里应该刷出骷髅");
     }
 
     #[test]

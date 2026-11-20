@@ -223,7 +223,7 @@ impl MobType {
     /// Looks a kind up by `minecraft:entity_type` registry id; `None` for types
     /// Bamboo does not model.
     pub fn by_entity_type(entity_type: i32) -> Option<Self> {
-        [Self::Cow, Self::Zombie, Self::Husk]
+        [Self::Cow, Self::Zombie, Self::Husk, Self::Skeleton]
             .into_iter()
             .find(|kind| kind.entity_type() == entity_type)
     }
@@ -249,9 +249,9 @@ impl MobType {
         matches!(self, Self::Cow)
     }
 
-    /// `EntityType.fireImmune()`：牛、僵尸、尸壳都不防火。
+    /// `EntityType.fireImmune()`：已支持的自然生成生物均不防火。
     ///
-    /// `EntityType.fireImmune()`: cows, zombies and husks are all flammable.
+    /// `EntityType.fireImmune()`: all modelled natural spawns are vulnerable to fire.
     pub const fn fire_immune(self) -> bool {
         false
     }
