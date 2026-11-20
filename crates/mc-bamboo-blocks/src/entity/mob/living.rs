@@ -777,6 +777,9 @@ fn server_ai_step(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
         // 官方 `Mob.serverAiStep`：两个选择器共用同一个隔刻判断，先 target 后 goal。
         // `tickCount` 是实体自己的 tick 数；`id` 用网络实体 ID。
         let mut goals = std::mem::take(&mut mob.goals);
+        if mob.mob_type == super::MobType::Skeleton {
+            goals.reassess_skeleton_weapon(me, mob, ctx);
+        }
         let mut targets = std::mem::take(&mut mob.target_goals);
         let phase = me.tick_count.wrapping_add(me.id);
         if phase % 2 != 0 && me.tick_count > 1 {
@@ -876,7 +879,8 @@ fn move_control_tick(me: &mut Entity, mob: &mut Mob, view: &dyn BlockView) {
                 mob.mover.operation = Operation::Wait;
             }
         }
-        Operation::Wait | Operation::Strafe => mob.zza = 0.0,
+        Operation::Strafe => super::skeleton::strafe(me, mob, view),
+        Operation::Wait => mob.zza = 0.0,
     }
 }
 
@@ -1352,14 +1356,15 @@ pub(crate) fn hurt_server(
         mob.events.push(MobEvent::Damage {
             kind: source.kind,
             attacker: source.attacker,
+            direct: source.direct,
         });
         if !source.kind.no_impact() {
             mob.hurt_marked = true;
         }
         if !source.kind.no_knockback() {
-            let (dx, dz) = source.position.map_or((0.0, 0.0), |position| {
-                (position.x - me.position.x, position.z - me.position.z)
-            });
+            let (dx, dz) = source
+                .knockback_direction(me.position)
+                .unwrap_or((0.0, 0.0));
             knockback(me, mob, f64::from(0.4_f32), dx, dz);
         }
     }
@@ -1560,6 +1565,11 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     }
     mob.dead = true;
     let by_player = mob.last_hurt_by_player_memory_time > 0;
+    if mob.mob_type == super::MobType::Skeleton {
+        mob.events.push(MobEvent::Death);
+        super::skeleton_drops::drop_on_death(me, mob, ctx, source, by_player);
+        return;
+    }
     let adult = !mob.is_baby();
     let drops = ctx.blocks().block_game_rules().mob_drops;
     let experience = if mob.mob_type.is_monster() {
@@ -1579,24 +1589,12 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     mob.events.push(MobEvent::Death);
     if (adult || mob.mob_type.is_monster()) && drops {
         ctx.emit(
-            Command::DropMobLoot {
-                table: mob.mob_type.loot_table(),
-                on_fire: me.remaining_fire_ticks > 0,
-                killer: source.attacker,
-                experience,
-            },
+            Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
             me,
         );
-    } else if experience > 0 {
-        ctx.emit(
-            Command::DropMobLoot {
-                table: "",
-                on_fire: false,
-                killer: source.attacker,
-                experience,
-            },
-            me,
-        );
+    }
+    if experience > 0 {
+        ctx.emit(Command::AwardDeathExperience { amount: experience }, me);
     }
 }
 
@@ -1684,28 +1682,4 @@ pub(crate) fn apply_push(
     if self_pushable {
         me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
     }
-}
-
-/// [`Command::DropMobLoot`] 的落地：战利品表交给世界，经验球按 `ExperienceOrb.award`
-/// 拆成几个，每个先取一次 `level.random.nextInt(40)`（`tryMergeToExisting`）。
-pub(crate) fn apply_death_drops(
-    me: &mut Entity,
-    table: &'static str,
-    on_fire: bool,
-    killer: Option<crate::entity::EntityUid>,
-    experience: i32,
-    world: &mut crate::world::World,
-) {
-    if !table.is_empty() {
-        for stack in world.mob_loot_drops(table, on_fire, killer) {
-            if !stack.is_empty() {
-                world.spawn_at_location(me.position, stack);
-            }
-        }
-    }
-    // `ExperienceOrb.award` 的拆分和每个 `nextInt(40)` 都在这一条路径里；
-    // 生成的球进实体表、发配对包、能存盘。
-    // `ExperienceOrb.award` splits the amount and draws one `nextInt(40)` per
-    // orb. The orbs enter the entity table, are paired and can be saved.
-    super::super::orb::award(world, me.position, experience);
 }

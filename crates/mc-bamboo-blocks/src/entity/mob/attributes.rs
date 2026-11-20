@@ -221,6 +221,30 @@ impl Attributes {
         table
     }
 
+    /// AbstractSkeleton.createAttributes：Monster 属性加 0.25 移速。
+    ///
+    /// AbstractSkeleton.createAttributes: Monster attributes with 0.25 movement speed.
+    pub fn skeleton() -> Self {
+        use mc_bamboo_data::registries::attribute_defaults as defaults;
+        let mut table = Self::cow();
+        table.set_base(attribute::MAX_HEALTH, defaults::MAX_HEALTH);
+        table.set_base(attribute::MOVEMENT_SPEED, 0.25);
+        table.set_base(attribute::TEMPT_RANGE, defaults::TEMPT_RANGE);
+        if let Some(entry) = table
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == attribute::ATTACK_DAMAGE)
+        {
+            entry.base = defaults::ATTACK_DAMAGE;
+        } else {
+            table.entries.push(Attribute::new(
+                attribute::ATTACK_DAMAGE,
+                defaults::ATTACK_DAMAGE,
+            ));
+        }
+        table
+    }
+
     /// 对拍的改坏确认用：直接改一个属性的基础值。
     pub fn set_base_for_oracle(&mut self, id: i32, base: f64) {
         self.set_base(id, base);

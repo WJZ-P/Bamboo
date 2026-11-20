@@ -181,3 +181,8 @@ pub static FACTS: &[EntityTypeFacts] = &[
     EntityTypeFacts { name: "minecraft:player", client_tracking_range: 32, update_interval: 2, track_deltas: false, width: 0.6, height: 1.8 },
     EntityTypeFacts { name: "minecraft:fishing_bobber", client_tracking_range: 4, update_interval: 5, track_deltas: true, width: 0.25, height: 0.25 },
 ];
+
+pub const ARROW_FLAGS: u8 = 8;
+pub const ARROW_PIERCE: u8 = 9;
+pub const ARROW_IN_GROUND: u8 = 10;
+pub const SKELETON_EYE_HEIGHT: f32 = 1.74;

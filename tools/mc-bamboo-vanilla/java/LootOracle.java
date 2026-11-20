@@ -160,11 +160,14 @@ public final class LootOracle {
         System.setOut(log);
         int cases = 4000;
         long seed = 20261108L;
+        String entityTable = null;
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--cases" -> cases = Integer.parseInt(args[++i]);
                 case "--seed" -> seed = Long.parseLong(args[++i]);
-                default -> throw new IllegalArgumentException("usage: LootOracle [--cases N] [--seed S]");
+                case "--entity-table" -> entityTable = args[++i];
+                default -> throw new IllegalArgumentException(
+                        "usage: LootOracle [--entity-table ID] [--cases N] [--seed S]");
             }
         }
 
@@ -177,18 +180,23 @@ public final class LootOracle {
                 new MultiPackResourceManager(PackType.SERVER_DATA, repository.openAllSelected())) {
             World world = World.load(resources);
             Random random = new Random(seed);
-            int blockCases = Math.max(cases, 0);
-            int chestCases = Math.max(cases / 5, 1);
-            int entityCount = Math.max(cases / 5, 1);
+            int blockCases = entityTable == null ? Math.max(cases, 0) : 0;
+            int chestCases = entityTable == null ? Math.max(cases / 5, 1) : 0;
+            int entityCount = Math.max(entityTable == null ? cases / 5 : cases, 1);
+            List<ResourceKey<LootTable>> tables = world.entityTables();
+            if (entityTable != null) {
+                String selected = entityTable;
+                tables = tables.stream().filter(key -> key.identifier().toString().equals(selected)).toList();
+                if (tables.isEmpty()) throw new IllegalArgumentException("unknown entity table: " + selected);
+            }
             int excluded = 0;
             excluded += blockCases(world, random, blockCases);
             excluded += chestCases(world, random, chestCases);
-            excluded += entityCases(world, random, entityCount);
-            int blockEntityCases = blockEntityCases(world, random);
-            excluded += blockEntityCases;
+            excluded += entityCases(world, random, entityCount, tables);
+            if (entityTable == null) excluded += blockEntityCases(world, random);
             JsonObject summary = new JsonObject();
             summary.addProperty("kind", "summary");
-            summary.addProperty("cases", blockCases + chestCases + entityCount + 1);
+            summary.addProperty("cases", blockCases + chestCases + entityCount + (entityTable == null ? 1 : 0));
             summary.addProperty("excluded", excluded);
             OUT.println(summary);
         }
@@ -306,8 +314,7 @@ public final class LootOracle {
      * Entity death drops, matching {@code LivingEntity.dropFromLootTable}. A non-zero loot seed
      * replaces the random sequence. {@code LAST_DAMAGE_PLAYER} is left unset.
      */
-    private static int entityCases(World world, Random random, int cases) {
-        List<ResourceKey<LootTable>> tables = world.entityTables();
+    private static int entityCases(World world, Random random, int cases, List<ResourceKey<LootTable>> tables) {
         if (tables.isEmpty()) {
             return 0;
         }
@@ -1111,6 +1118,13 @@ public final class LootOracle {
         @Override
         public BlockState getBlockState(BlockPos pos) {
             return Blocks.AIR.defaultBlockState();
+        }
+
+        @Override
+        public Optional<BlockPos> findSupportingBlock(Entity entity, net.minecraft.world.phys.AABB box) {
+            // 假世界只有空气，没有区块源可供支撑方块查询。
+            // The fake level is all air and has no chunk source to query for support.
+            return Optional.empty();
         }
 
         @Override

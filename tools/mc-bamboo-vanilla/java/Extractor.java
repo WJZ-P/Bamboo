@@ -286,6 +286,7 @@ public final class Extractor {
             root.add("blocks", blocks());
             root.add("items", items());
             root.add("entityTypes", entityTypes());
+            root.add("projectileFacts", projectileFacts());
             root.add("stateTables", new StateTables().build());
             root.add("lightTables", new LightTables().build());
             root.add("blockMaps", blockMaps(resources, layers.compositeAccess()));
@@ -1147,6 +1148,23 @@ public final class Extractor {
             types.add(object);
         }
         return types;
+    }
+
+    // 读取实际类树分配后的元数据索引和骷髅的眼高。
+    // Read the allocated class-tree metadata indices and the skeleton eye height.
+    private static JsonObject projectileFacts() throws ReflectiveOperationException {
+        JsonObject out = new JsonObject();
+        out.addProperty("arrowFlags", arrowAccessorId("ID_FLAGS"));
+        out.addProperty("arrowPierce", arrowAccessorId("PIERCE_LEVEL"));
+        out.addProperty("arrowInGround", arrowAccessorId("IN_GROUND"));
+        out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
+        return out;
+    }
+
+    private static int arrowAccessorId(String name) throws ReflectiveOperationException {
+        Field field = net.minecraft.world.entity.projectile.arrow.AbstractArrow.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return ((net.minecraft.network.syncher.EntityDataAccessor<?>) field.get(null)).id();
     }
 
     /** 官方数据包的全部配方，按注册表的顺序。`getRecipeFor` 取第一条匹配的，先后由这个顺序决定。 */

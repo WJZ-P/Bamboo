@@ -25,9 +25,14 @@ use mc_bamboo_blocks::{
 use mc_bamboo_core::{BlockPos, ChunkPos, LightLayer, Vec3, sign::SignContent};
 use mc_bamboo_data::version;
 use mc_bamboo_game::entity_tracking::{EntityTracking, Snapshot, event_packets};
+use mc_bamboo_protocol::item::ItemStack;
 use serde::Deserialize;
 
 use crate::oracle::collect_log;
+
+mod projectile;
+mod skeleton_death;
+mod skeleton_spawn;
 
 const MIN_Y: i32 = -64;
 const MAX_Y: i32 = 319;
@@ -65,6 +70,10 @@ mod base64_stub {
 enum Line {
     Header(Header),
     Case(Box<Case>),
+    Projectile(Box<projectile::ProjectileCase>),
+    ArrowPickup(projectile::ArrowPickupCase),
+    SkeletonDeath(skeleton_death::DeathCase),
+    SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
     End(End),
 }
 
@@ -459,8 +468,10 @@ struct End {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ZombieFacts {
+    halloween: bool,
     /// 主世界时钟（真实时间模式逐刻推进，否则 0）。
     clock: i64,
+    inhabited_time: i64,
     can_see_sky: bool,
     sky_darken: i32,
     difficulty: i32,
@@ -668,6 +679,18 @@ impl Level for MobLevel {
         self.facts.clock
     }
 
+    fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
+        self.facts.inhabited_time
+    }
+
+    fn enchant_mob_spawn_equipment(&self, stack: &mut ItemStack, special: f32) {
+        skeleton_spawn::enchant_equipment(stack, special, self.random.source());
+    }
+
+    fn is_halloween(&self) -> bool {
+        self.facts.halloween
+    }
+
     /// `LivingEntity.dropFromLootTable`：官方一侧用真的 `minecraft:entities/cow` 表，
     /// 世界种子 0 的随机序列，攻击者的主手带抢夺等级。
     ///
@@ -675,50 +698,65 @@ impl Level for MobLevel {
     /// cow table, a world-seed-0 random sequence and the killer's looting level.
     fn mob_loot_drops(
         &mut self,
-        table: &str,
-        on_fire: bool,
-        killer: Option<mc_bamboo_blocks::EntityUid>,
+        loot: mc_bamboo_blocks::entity::mob::MobDeathLoot,
+        origin: Vec3,
     ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        use mc_bamboo_data::registries::entity_type;
         use mc_bamboo_loot::{
             DamageSourceView, EntityDeathParams, EntityView, LootStack, Position,
             entity_death_drops,
         };
-        let mut victim = EntityView::new(mc_bamboo_data::registries::entity_type::COW);
+        let mut victim = EntityView::new(loot.victim.entity_type());
         victim.is_living = true;
-        victim.is_on_fire = on_fire;
-        let mut killer_view = None;
-        if let Some(uid) = killer {
+        victim.is_on_fire = loot.on_fire;
+        let player = |uid| {
+            let index = self.players.iter().position(|p| p.uid == uid)?;
             let mut view = EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER);
             view.is_living = true;
-            if let Some(index) = self.players.iter().position(|p| p.uid == uid) {
-                let level = self.looting[index];
-                if level > 0 {
-                    let mut held = LootStack::new(mc_bamboo_data::items::DIAMOND_SWORD, 1);
-                    let mut enchants = std::collections::BTreeMap::new();
-                    enchants.insert("minecraft:looting".to_owned(), level);
-                    held.set_enchantment_levels(mc_bamboo_loot::ENCHANTMENTS_COMPONENT, enchants);
-                    view.equipment[mc_bamboo_loot::EquipmentSlot::Mainhand.index()] = Some(held);
-                }
+            if let Some(&level) = self.looting.get(index)
+                && level > 0
+            {
+                let mut held = LootStack::new(mc_bamboo_data::items::DIAMOND_SWORD, 1);
+                let mut enchants = std::collections::BTreeMap::new();
+                enchants.insert("minecraft:looting".to_owned(), level);
+                held.set_enchantment_levels(mc_bamboo_loot::ENCHANTMENTS_COMPONENT, enchants);
+                view.equipment[mc_bamboo_loot::EquipmentSlot::Mainhand.index()] = Some(held);
             }
-            killer_view = Some(view);
+            Some(view)
+        };
+        let source = loot.source;
+        let attacker = source.attacker.and_then(player);
+        let direct = source.direct.and_then(player).or_else(|| {
+            source
+                .projectile_motion
+                .map(|_| EntityView::new(entity_type::ARROW))
+        });
+        let last_damage_player = match loot.recent_player {
+            Some(uuid) => self
+                .players
+                .iter()
+                .find(|p| p.uuid == Some(uuid))
+                .map(|p| p.uid),
+            None => loot.recent_player_id,
         }
+        .and_then(player);
         let params = EntityDeathParams {
             entity: victim,
-            origin: Position::new(0.0, 0.0, 0.0),
+            origin: Position::new(origin.x, origin.y, origin.z),
             damage_source: DamageSourceView {
-                damage_type: 0,
-                direct_entity: killer_view.clone().map(Box::new),
-                source_entity: killer_view.clone().map(Box::new),
-                is_direct: true,
+                damage_type: mc_bamboo_data::damage_type_id(source.kind.name()).unwrap_or_default(),
+                direct_entity: direct.clone().map(Box::new),
+                source_entity: attacker.clone().map(Box::new),
+                is_direct: source.direct == source.attacker,
             },
-            attacking_entity: killer_view.clone(),
-            direct_attacking_entity: killer_view.clone(),
-            last_damage_player: killer_view,
+            attacking_entity: attacker,
+            direct_attacking_entity: direct,
+            last_damage_player,
             luck: 0.0,
             level: None,
         };
         match entity_death_drops(
-            table,
+            loot.victim.loot_table(),
             &params,
             0,
             Some(&self.loot_sequences),
@@ -731,11 +769,23 @@ impl Level for MobLevel {
             Err(_) => Vec::new(),
         }
     }
+
+    fn player_mob_attack(
+        &self,
+        uid: i32,
+    ) -> Option<mc_bamboo_blocks::entity::mob::PlayerMobAttack> {
+        let index = self.players.iter().position(|player| player.uid == uid)?;
+        Some(mc_bamboo_blocks::entity::mob::PlayerMobAttack {
+            uuid: self.players[index].uuid?,
+            looting: self.looting.get(index).copied().unwrap_or(0),
+        })
+    }
 }
 
 struct Report {
     cases: u32,
     steps: usize,
+    skeleton_spawns: skeleton_spawn::Coverage,
     mismatches: Vec<String>,
     ended: bool,
     show: usize,
@@ -744,7 +794,27 @@ struct Report {
 }
 
 /// 启动官方进程，逐个场景重放。
-pub fn run(mut command: Command, options: &[&str]) -> Result<(), String> {
+///
+/// 玩家场景的重放函数在 debug 构建里一帧就有几十 KB，主线程默认的 1 MB 栈不够，
+/// 所以挪到一条大栈线程上跑。
+///
+/// Runs the official process and replays every scene. The player replays use frames
+/// dozens of KB deep in debug builds, which overflows the main thread's default 1 MB
+/// stack, so they run on a thread with a larger one.
+pub fn run(command: Command, options: &[&str]) -> Result<(), String> {
+    let options: Vec<String> = options.iter().map(|option| (*option).to_owned()).collect();
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(move || {
+            let options: Vec<&str> = options.iter().map(String::as_str).collect();
+            run_with_options(command, &options)
+        })
+        .map_err(|error| format!("cannot start the oracle thread: {error}"))?
+        .join()
+        .map_err(|_| "the oracle thread panicked".to_owned())?
+}
+
+fn run_with_options(mut command: Command, options: &[&str]) -> Result<(), String> {
     let mut show = 12;
     let mut break_test: Option<String> = None;
     let mut index = 0;
@@ -779,6 +849,7 @@ pub fn run(mut command: Command, options: &[&str]) -> Result<(), String> {
     let mut report = Report {
         cases: 0,
         steps: 0,
+        skeleton_spawns: skeleton_spawn::Coverage::default(),
         mismatches: Vec::new(),
         ended: false,
         show,
@@ -815,6 +886,10 @@ impl Report {
             match parsed {
                 Line::Header(header) => self.check_header(&header)?,
                 Line::Case(case) => self.replay(&case),
+                Line::Projectile(case) => self.replay_projectile(&case),
+                Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
+                Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
+                Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {
@@ -917,7 +992,9 @@ impl Report {
             looting: case.players.iter().map(|player| player.looting).collect(),
             rules: mc_bamboo_blocks::BlockGameRules::vanilla(),
             facts: ZombieFacts {
+                halloween: false,
                 clock: 0,
+                inhabited_time: 0,
                 can_see_sky: case.monsters_burn,
                 sky_darken: case.sky_darken,
                 difficulty: case.difficulty,
@@ -937,6 +1014,7 @@ impl Report {
                 .players
                 .iter()
                 .map(|player| PlayerView {
+                    uuid: None,
                     uid: player.id,
                     position: Vec3::new(
                         f64::from_bits(player.x as u64),
@@ -2176,6 +2254,7 @@ impl Report {
         if !self.ended {
             return Err("mob oracle stopped before the end line".to_owned());
         }
+        self.skeleton_spawns.print();
         if !self.mismatches.is_empty() {
             return Err(format!(
                 "mob oracle: {} mismatches\n{}",

@@ -865,6 +865,19 @@ fn enchant_with_levels(
     stack
 }
 
+/// EnchantmentsByCostWithDifficulty：先取等级，再从刷怪装备标签中选附魔。
+///
+/// EnchantmentsByCostWithDifficulty draws a cost, then selects from the mob-spawn tag.
+pub fn mob_spawn_enchantments(
+    stack: &LootStack,
+    special: f32,
+    random: &dyn RandomSource,
+) -> Vec<(i32, i32)> {
+    let cost = 5 + random.next_int((special * 17.0) as i32 + 1);
+    let options = names::tag_ids("minecraft:enchantment", "minecraft:on_mob_spawn_equipment");
+    select_enchantment(stack, cost, options, random)
+}
+
 /// `EnchantmentHelper.selectEnchantment`。
 fn select_enchantment(
     stack: &LootStack,

@@ -280,11 +280,10 @@ impl PlayerHealth {
         self.hurt_duration = outcome.hurt_duration;
         self.last_damage_source = Some(source.kind);
         if outcome.full_hit
-            && let Some(at) = source.position
+            && let Some((dx, dz)) = source.knockback_direction(position)
         {
-            // `ServerPlayer.indicateDamage`: atan2(dz, dx) 转角度再减玩家朝向。
-            let dx = at.x - position.x;
-            let dz = at.z - position.z;
+            // ServerPlayer.indicateDamage：同一击退方向先取 atan2(dz, dx)，再减玩家朝向。
+            // ServerPlayer.indicateDamage takes atan2(dz, dx) of the knockback direction.
             // 官方 `Mth.atan2` 再乘 `57.2957763671875d`（常量，不是 180/PI）。
             self.hurt_dir = (mc_bamboo_core::mth::atan2(dz, dx) * 57.295_776_367_187_5_f64) as f32;
         }

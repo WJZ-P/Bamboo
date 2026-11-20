@@ -1910,11 +1910,10 @@ impl<'a> World<'a> {
     /// 生物死时的战利品，见 [`Level::mob_loot_drops`]。
     pub(crate) fn mob_loot_drops(
         &mut self,
-        table: &str,
-        on_fire: bool,
-        killer: Option<crate::entity::EntityUid>,
+        loot: crate::entity::mob::MobDeathLoot,
+        origin: Vec3,
     ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
-        self.level.mob_loot_drops(table, on_fire, killer)
+        self.level.mob_loot_drops(loot, origin)
     }
 
     /// `Block.getDrops`，见 [`Level::block_loot_drops`]。
@@ -3048,12 +3047,18 @@ impl<'a> World<'a> {
     pub fn hurt_mob(
         &mut self,
         id: i32,
-        source: crate::entity::mob::DamageSource,
+        mut source: crate::entity::mob::DamageSource,
         amount: f32,
     ) -> bool {
         let Some(mut entity) = self.level.take_entity(id) else {
             return false;
         };
+        if source.attacker_is_player
+            && let Some(uid) = source.attacker
+            && let Some(player) = self.level.player_mob_attack(uid)
+        {
+            source = source.with_player_mob_attack(player);
+        }
         let hurt = {
             let mut ctx = crate::entity::ctx::PreciseCtx::new(self, id);
             entity

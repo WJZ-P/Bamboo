@@ -3484,7 +3484,20 @@ fn entity_types_file(data: &VersionData) -> String {
             float_literal(type_.height),
         );
     }
-    let _ = writeln!(out, "];");
+    let _ = writeln!(out, "];\n");
+    let facts = &data.projectile_facts;
+    let _ = writeln!(out, "pub const ARROW_FLAGS: u8 = {};", facts.arrow_flags);
+    let _ = writeln!(out, "pub const ARROW_PIERCE: u8 = {};", facts.arrow_pierce);
+    let _ = writeln!(
+        out,
+        "pub const ARROW_IN_GROUND: u8 = {};",
+        facts.arrow_in_ground
+    );
+    let _ = writeln!(
+        out,
+        "pub const SKELETON_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.skeleton_eye_height)
+    );
     out
 }
 

@@ -129,6 +129,7 @@ pub enum KindPublic {
     },
     /// 生物：血量、朝向、年龄这些别的实体和同步要读的。
     Mob(Box<super::mob::MobPublic>),
+    Arrow(super::arrow::ArrowPublic),
 }
 
 impl KindPublic {
@@ -139,6 +140,7 @@ impl KindPublic {
             Self::Tnt { .. } => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item { .. } => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb { .. } => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
+            Self::Arrow(_) => mc_bamboo_data::registries::entity_type::ARROW,
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }
@@ -189,6 +191,7 @@ pub enum KindState {
     ExperienceOrb(super::ExperienceOrb),
     /// 生物的全部状态。公开的那一半在 [`KindPublic::Mob`] 里另有一份拷贝。
     Mob(Box<super::mob::Mob>),
+    Arrow(Box<super::arrow::Arrow>),
 }
 
 /// `FallingBlockEntity` 里别人不读的字段。
@@ -302,6 +305,7 @@ impl EntityRow {
                 orb.value = value;
                 EntityKind::ExperienceOrb(orb)
             }
+            (KindPublic::Arrow(_), KindState::Arrow(arrow)) => EntityKind::Arrow(arrow),
             (KindPublic::Mob(_), KindState::Mob(mob)) => EntityKind::Mob(mob),
             // 两半永远成对生成，配对错了是内部错误而不是客户端输入。
             _ => unreachable!("mismatched public and private entity halves"),
@@ -371,6 +375,10 @@ impl Entity {
             EntityKind::ExperienceOrb(orb) => (
                 KindPublic::ExperienceOrb { value: orb.value },
                 KindState::ExperienceOrb(orb),
+            ),
+            EntityKind::Arrow(arrow) => (
+                KindPublic::Arrow(arrow.public(self.remaining_fire_ticks)),
+                KindState::Arrow(arrow),
             ),
             EntityKind::Mob(mob) => (
                 KindPublic::Mob(Box::new(super::mob::MobPublic::of(
@@ -874,6 +882,9 @@ impl EntityStore {
         entity.finish_item_random();
         super::orb::finish_spawn(&mut entity, Vec3::default());
         entity.finish_mob_random();
+        if let EntityKind::Arrow(arrow) = &mut entity.kind {
+            arrow.uuid = super::mob::insecure_uuid(&mut entity.random);
+        }
         entity
     }
 

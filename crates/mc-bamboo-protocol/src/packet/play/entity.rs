@@ -187,6 +187,9 @@ pub enum EntityData {
     SpecialType(i32),
     /// index 18，BOOLEAN。`Zombie.DATA_DROWNED_CONVERSION_ID`。
     DrownedConverting(bool),
+    ArrowFlags(u8),
+    ArrowPierce(i8),
+    ArrowInGround(bool),
 }
 
 /// [`EntityData::SharedFlags`] 里表示按住潜行键的位。
@@ -215,6 +218,9 @@ impl EntityData {
             | Self::TntFuse(_)
             | Self::LivingFlags(_)
             | Self::ExperienceValue(_) => 8,
+            Self::ArrowFlags(_) => mc_bamboo_data::entity_types::ARROW_FLAGS,
+            Self::ArrowPierce(_) => mc_bamboo_data::entity_types::ARROW_PIERCE,
+            Self::ArrowInGround(_) => mc_bamboo_data::entity_types::ARROW_IN_GROUND,
             Self::TntBlockState(_) | Self::Health(_) => 9,
             Self::EffectParticles(_) => 10,
             Self::EffectAmbience(_) => 11,
@@ -228,6 +234,18 @@ impl EntityData {
 
     fn write(&self, out: &mut Vec<u8>) {
         match self {
+            Self::ArrowFlags(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*value);
+            }
+            Self::ArrowPierce(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BYTE);
+                out.push(*value as u8);
+            }
+            Self::ArrowInGround(value) => {
+                write_data_header(out, self.index(), SERIALIZER_BOOLEAN);
+                out.push(u8::from(*value));
+            }
             Self::Item(stack) => {
                 write_data_header(out, 8, SERIALIZER_ITEM_STACK);
                 // 组件按官方原样发给所有观察者。

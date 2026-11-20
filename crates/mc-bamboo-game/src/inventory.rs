@@ -344,12 +344,29 @@ impl Inventory {
     ///
     /// Vanilla `Inventory.add` mutates the stack it is given. This returns what did not fit.
     /// Creative mode clears the leftover, so the caller sees a successful add.
-    pub(crate) fn receive(&mut self, mut incoming: ItemStack, creative: bool) -> ItemStack {
+    pub(crate) fn receive(&mut self, incoming: ItemStack, creative: bool) -> ItemStack {
+        self.receive_with_add_result(incoming, creative).0
+    }
+
+    /// 返回余量和 `Inventory.add` 的布尔值。最后一轮放不下时，
+    /// 生存模式即使已塞进一部分，也返回 false。
+    ///
+    /// Returns the remainder and vanilla's `Inventory.add` result. In survival,
+    /// partial insertion can still return false if the last pass made no progress.
+    pub(crate) fn receive_with_add_result(
+        &mut self,
+        mut incoming: ItemStack,
+        creative: bool,
+    ) -> (ItemStack, bool) {
         if incoming.is_empty() {
-            return incoming;
+            return (incoming, false);
         }
         if incoming.is_damaged() {
-            return self.receive_damaged(incoming, creative);
+            return if self.add_damaged(incoming.clone(), creative) {
+                (ItemStack::empty(), true)
+            } else {
+                (incoming, false)
+            };
         }
         let mut last;
         loop {
@@ -361,17 +378,10 @@ impl Inventory {
             }
         }
         if incoming.count == last && creative {
-            ItemStack::empty()
+            (ItemStack::empty(), true)
         } else {
-            incoming
-        }
-    }
-
-    fn receive_damaged(&mut self, incoming: ItemStack, creative: bool) -> ItemStack {
-        if self.add_damaged(incoming.clone(), creative) {
-            ItemStack::empty()
-        } else {
-            incoming
+            let accepted = incoming.count < last;
+            (incoming, accepted)
         }
     }
 

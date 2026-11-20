@@ -25,6 +25,8 @@ pub mod natural;
 pub mod navigation;
 pub mod nbt;
 pub mod path;
+pub mod skeleton;
+mod skeleton_drops;
 pub mod spawn;
 pub(crate) mod timing;
 
@@ -50,6 +52,7 @@ pub enum MobType {
     Cow,
     Zombie,
     Husk,
+    Skeleton,
 }
 
 impl MobType {
@@ -60,6 +63,7 @@ impl MobType {
             Self::Cow => ids::COW,
             Self::Zombie => ids::ZOMBIE,
             Self::Husk => ids::HUSK,
+            Self::Skeleton => ids::SKELETON,
         }
     }
 
@@ -69,11 +73,12 @@ impl MobType {
             Self::Cow => "minecraft:cow",
             Self::Zombie => "minecraft:zombie",
             Self::Husk => "minecraft:husk",
+            Self::Skeleton => "minecraft:skeleton",
         }
     }
 
     pub fn by_name(name: &str) -> Option<Self> {
-        [Self::Cow, Self::Zombie, Self::Husk]
+        [Self::Cow, Self::Zombie, Self::Husk, Self::Skeleton]
             .into_iter()
             .find(|kind| kind.name() == name)
     }
@@ -81,6 +86,14 @@ impl MobType {
     /// 成年和幼年的（宽，高，眼高）。
     pub const fn dimensions(self, baby: bool) -> (f32, f32, f32) {
         match (self, baby) {
+            (Self::Skeleton, _) => {
+                let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
+                (
+                    facts.width,
+                    facts.height,
+                    mc_bamboo_data::entity_types::SKELETON_EYE_HEIGHT,
+                )
+            }
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
             (Self::Cow, true) => (0.45, 0.7, 0.69),
@@ -92,7 +105,7 @@ impl MobType {
 
     /// 是不是 `Monster` 一支（决定消失规则、经验和战利品规则）。
     pub const fn is_monster(self) -> bool {
-        matches!(self, Self::Zombie | Self::Husk)
+        matches!(self, Self::Zombie | Self::Husk | Self::Skeleton)
     }
 
     /// `EntityType.isAllowedInPeaceful()`：牛为真，敌对生物为假。
@@ -122,13 +135,14 @@ impl MobType {
             Self::Cow => "minecraft:entities/cow",
             Self::Zombie => "minecraft:entities/zombie",
             Self::Husk => "minecraft:entities/husk",
+            Self::Skeleton => "minecraft:entities/skeleton",
         }
     }
 
     /// `EntityTypeTags.BURN_IN_DAYLIGHT` 加 `Zombie.isSunSensitive()`：
     /// 尸壳不烧，僵尸烧。
     pub const fn burns_in_daylight(self) -> bool {
-        matches!(self, Self::Zombie)
+        matches!(self, Self::Zombie | Self::Skeleton)
     }
 
     /// `Mob.getAmbientSoundInterval()`：牛覆写成 120，僵尸用缺省 80。
@@ -147,6 +161,7 @@ impl MobType {
             Self::Cow => None,
             Self::Zombie => Some("minecraft:entity.zombie.ambient"),
             Self::Husk => Some("minecraft:entity.husk.ambient"),
+            Self::Skeleton => Some("minecraft:entity.skeleton.ambient"),
         }
     }
 
@@ -155,6 +170,7 @@ impl MobType {
             Self::Cow => None,
             Self::Zombie => Some("minecraft:entity.zombie.hurt"),
             Self::Husk => Some("minecraft:entity.husk.hurt"),
+            Self::Skeleton => Some("minecraft:entity.skeleton.hurt"),
         }
     }
 
@@ -163,6 +179,7 @@ impl MobType {
             Self::Cow => None,
             Self::Zombie => Some("minecraft:entity.zombie.death"),
             Self::Husk => Some("minecraft:entity.husk.death"),
+            Self::Skeleton => Some("minecraft:entity.skeleton.death"),
         }
     }
 
@@ -171,6 +188,7 @@ impl MobType {
             Self::Cow => None,
             Self::Zombie => Some("minecraft:entity.zombie.step"),
             Self::Husk => Some("minecraft:entity.husk.step"),
+            Self::Skeleton => Some("minecraft:entity.skeleton.step"),
         }
     }
 
@@ -181,6 +199,7 @@ impl MobType {
             Self::Cow => items::COW_SPAWN_EGG,
             Self::Zombie => items::ZOMBIE_SPAWN_EGG,
             Self::Husk => items::HUSK_SPAWN_EGG,
+            Self::Skeleton => items::SKELETON_SPAWN_EGG,
         }
     }
 
@@ -190,12 +209,13 @@ impl MobType {
             Self::Cow => "entity.minecraft.cow",
             Self::Zombie => "entity.minecraft.zombie",
             Self::Husk => "entity.minecraft.husk",
+            Self::Skeleton => "entity.minecraft.skeleton",
         }
     }
 
     /// 幼年是不是用 `Zombie.DATA_BABY_ID`（布尔元数据），而不是牛的 `age < 0`。
     pub const fn uses_baby_metadata(self) -> bool {
-        self.is_monster()
+        matches!(self, Self::Zombie | Self::Husk)
     }
 
     /// 按 `minecraft:entity_type` 注册表 ID 找种类，Bamboo 没建模的返回 `None`。
@@ -626,6 +646,7 @@ pub struct DamageSource {
     pub creative_player: bool,
     /// `getSourcePosition()`：显式位置，或者回退到攻击者位置。击退方向读它。
     pub position: Option<Vec3>,
+    pub projectile_motion: Option<Vec3>,
     /// `sourcePositionRaw()`：只有 `at <location>` 才有值，`DamageEvent` 读它。
     pub raw_position: Option<Vec3>,
     /// 冲刺攻击时玩家的朝向，`causeExtraKnockback` 的方向用它。
@@ -637,6 +658,11 @@ pub struct DamageSource {
     /// 主手武器带来的附魔（这一期只读破甲之外的效果，见 `damage::protection`）。
     /// 空表示没有武器。
     pub weapon: Option<u16>,
+    /// 火矢命中时，在受伤判定前尝试点燃目标的刻数。
+    ///
+    /// If nonzero, a flaming arrow tries to ignite the target before damage.
+    pub arrow_ignite_ticks: i32,
+    pub(super) looting_level: i32,
 }
 
 impl DamageSource {
@@ -649,11 +675,25 @@ impl DamageSource {
             attacker_is_player: false,
             creative_player: false,
             position: None,
+            projectile_motion: None,
             raw_position: None,
             sprint_yaw: None,
             attacker_uuid: None,
             scale_when_non_player: false,
             weapon: None,
+            arrow_ignite_ticks: 0,
+            looting_level: 0,
+        }
+    }
+
+    /// LivingEntity.dealDefaultKnockback：弹射物取速度反向，其余取攻击点。
+    ///
+    /// LivingEntity.dealDefaultKnockback uses reversed projectile motion or the source position.
+    pub fn knockback_direction(&self, target: Vec3) -> Option<(f64, f64)> {
+        if let Some(delta) = self.projectile_motion {
+            Some((-delta.x, -delta.z))
+        } else {
+            self.position.map(|at| (at.x - target.x, at.z - target.z))
         }
     }
 
@@ -682,6 +722,15 @@ impl DamageSource {
         self
     }
 
+    /// 记录致因玩家的 UUID 和命中时的主手抢夺。
+    ///
+    /// Capture the causing player's UUID and their main-hand Looting at impact.
+    pub(crate) fn with_player_mob_attack(mut self, player: PlayerMobAttack) -> Self {
+        self.attacker_uuid = Some(player.uuid);
+        self.looting_level = player.looting;
+        self
+    }
+
     /// `damageSources().playerAttack(player)`。
     pub const fn player(uid: EntityUid, position: Vec3, creative: bool) -> Self {
         Self {
@@ -691,11 +740,14 @@ impl DamageSource {
             attacker_is_player: true,
             creative_player: creative,
             position: Some(position),
+            projectile_motion: None,
             raw_position: None,
             sprint_yaw: None,
             attacker_uuid: None,
             scale_when_non_player: false,
             weapon: None,
+            arrow_ignite_ticks: 0,
+            looting_level: 0,
         }
     }
 
@@ -703,6 +755,40 @@ impl DamageSource {
     /// `when_caused_by_living_non_player` 只在造成者是非玩家生物时缩放。
     pub const fn scales_with_difficulty(self) -> bool {
         self.kind.scales_with_difficulty() || self.scale_when_non_player
+    }
+}
+
+/// 命中生物时取的玩家信息；弹射物也按致因玩家当前持有物计算抢夺。
+///
+/// Player data at a mob hit; projectiles also use their owner's current main hand.
+#[derive(Debug, Clone, Copy)]
+pub struct PlayerMobAttack {
+    pub uuid: [u8; 16],
+    pub looting: i32,
+}
+
+/// 掉落表区分致死来源和最近伤害过它的玩家。
+///
+/// Death loot distinguishes the fatal source from the last player who hurt the mob.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MobDeathLoot {
+    pub victim: MobType,
+    pub on_fire: bool,
+    pub source: DamageSource,
+    pub recent_player: Option<[u8; 16]>,
+    pub recent_player_id: Option<EntityUid>,
+}
+
+impl MobDeathLoot {
+    pub(super) fn new(me: &super::Entity, mob: &Mob, source: DamageSource) -> Self {
+        let credited = mob.last_hurt_by_player_memory_time > 0;
+        Self {
+            victim: mob.mob_type,
+            on_fire: me.remaining_fire_ticks > 0,
+            source,
+            recent_player: mob.last_hurt_by_player_ref.filter(|_| credited),
+            recent_player_id: mob.last_hurt_by_player.filter(|_| credited),
+        }
     }
 }
 
@@ -812,6 +898,7 @@ pub struct Mob {
     pub target: Option<EntityUid>,
     /// `Mob.setAggressive`：`ZombieAttackGoal` 抬手时置真，同步进 `MobFlags` 的第 4 位。
     pub aggressive: bool,
+    pub using_item_flags: u8,
     /// `Zombie.canBreakDoors`；`finalizeSpawn` 按 0.1 概率置真。
     pub can_break_doors: bool,
     /// `BreakDoorGoal` 的 240 刻进度，随实体行搬岛。
@@ -872,6 +959,7 @@ pub enum MobEvent {
     Damage {
         kind: DamageKind,
         attacker: Option<EntityUid>,
+        direct: Option<EntityUid>,
     },
     /// `broadcastEntityEvent(this, 3)`：死亡。
     Death,
@@ -903,22 +991,22 @@ impl Mob {
 
     /// 按类型构造。牛的属性/目标/导航一条不改，其它类型只换这三张表。
     pub fn new(mob_type: MobType) -> Self {
-        let attributes = if mob_type.is_monster() {
-            Attributes::zombie()
-        } else {
-            Attributes::cow()
+        let attributes = match mob_type {
+            MobType::Cow => Attributes::cow(),
+            MobType::Skeleton => Attributes::skeleton(),
+            MobType::Zombie | MobType::Husk => Attributes::zombie(),
         };
         let follow_range = attributes.base(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
         let mut navigation = Navigation::new(follow_range);
-        let goals = if mob_type.is_monster() {
-            GoalSelector::zombie(&mut navigation)
-        } else {
-            GoalSelector::cow(&mut navigation)
+        let goals = match mob_type {
+            MobType::Cow => GoalSelector::cow(&mut navigation),
+            MobType::Skeleton => GoalSelector::skeleton(),
+            MobType::Zombie | MobType::Husk => GoalSelector::zombie(&mut navigation),
         };
-        let target_goals = if mob_type.is_monster() {
-            GoalSelector::zombie_targets()
-        } else {
-            GoalSelector::default()
+        let target_goals = match mob_type {
+            MobType::Cow => GoalSelector::default(),
+            MobType::Skeleton => GoalSelector::skeleton_targets(),
+            MobType::Zombie | MobType::Husk => GoalSelector::zombie_targets(),
         };
         let health = attributes.value(mc_bamboo_data::registries::attribute::MAX_HEALTH) as f32;
         Self {
@@ -1004,6 +1092,7 @@ impl Mob {
             loot_table_seed: 0,
             target: None,
             aggressive: false,
+            using_item_flags: 0,
             can_break_doors: false,
             door_break_time: 0,
             door_break_progress: -1,
@@ -1081,9 +1170,15 @@ impl Mob {
     }
 
     /// 岛合并时把绝对时刻平移 `delta`。
+    ///
+    /// Shift the absolute timestamps by `delta` when islands merge.
     pub fn rebase(&mut self, delta: i64) {
         self.last_damage_stamp = self.last_damage_stamp.saturating_add(delta);
         self.navigation.rebase(delta);
+        // `MeleeAttackGoal.lastCanUseCheck` 也是 `gameTime`，牛没有这个目标，平移到它身上是空操作。
+        // `MeleeAttackGoal.lastCanUseCheck` is `gameTime` as well; cows have no such goal,
+        // so rebasing it is a no-op for them.
+        self.goals.rebase_clock(delta);
     }
 }
 
@@ -1121,6 +1216,7 @@ pub struct MobPublic {
     pub dying: bool,
     /// `Mob.DATA_MOB_FLAGS_ID` 的攻击性位；牛恒为假。
     pub aggressive: bool,
+    pub using_item_flags: u8,
     /// `Zombie.DATA_BABY_ID`（布尔元数据），牛不用。
     pub zombie_baby: bool,
     /// `Zombie.DATA_SPECIAL_TYPE_ID`。
@@ -1168,6 +1264,7 @@ impl MobPublic {
             left_handed: mob.left_handed,
             dying: mob.is_dead_or_dying(),
             aggressive: mob.aggressive,
+            using_item_flags: mob.using_item_flags,
             zombie_baby: mob.zombie_baby,
             zombie_special_type: mob.zombie_special_type,
             drowned_converting: mob.drowned_converting,
