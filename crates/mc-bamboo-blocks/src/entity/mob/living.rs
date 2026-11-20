@@ -1492,6 +1492,24 @@ pub(crate) fn do_hurt_target(
                 );
             }
         }
+        // `Husk.doHurtTarget`：打中了、空手时给 `HUNGER`，时长 `140 * (int) f`。
+        if hurt
+            && mob.mob_type == super::MobType::Husk
+            && mob
+                .equipment
+                .get(mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand)
+                .is_empty()
+        {
+            let difficulty = ctx.blocks().effective_difficulty(me.block_position());
+            ctx.emit(
+                Command::GivePlayerEffect {
+                    target,
+                    effect: mc_bamboo_data::registries::mob_effect::HUNGER,
+                    duration: 140 * difficulty as i32,
+                },
+                me,
+            );
+        }
     } else if let Some(other) = ctx.other(target) {
         let _ = other;
         ctx.emit(

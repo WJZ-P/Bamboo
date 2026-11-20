@@ -518,6 +518,12 @@ pub enum Command {
     },
     /// `Zombie.doHurtTarget` 的着火传染（打到玩家）。
     IgnitePlayer { target: EntityUid, ticks: i32 },
+    /// `Husk.doHurtTarget` 给打中的玩家加饥饿。
+    GivePlayerEffect {
+        target: EntityUid,
+        effect: i32,
+        duration: i32,
+    },
     /// `Mob.doHurtTarget` 打到另一头生物。
     HurtMob {
         target: EntityUid,
@@ -530,6 +536,14 @@ pub enum Command {
         pos: mc_bamboo_core::BlockPos,
         data: i32,
     },
+    /// `level.destroyBlockProgress(id, pos, progress)`：`BreakDoorGoal` 的门上裂纹，-1 清掉。
+    DestroyProgress {
+        pos: mc_bamboo_core::BlockPos,
+        progress: i32,
+    },
+    /// `BreakDoorGoal.tick` 到点：`removeBlock(pos, false)`，再 `levelEvent(1021)` 和
+    /// `levelEvent(2001, 拆完以后这一格的状态)`。
+    BreakDoor { pos: mc_bamboo_core::BlockPos },
     /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
     /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
     RemoveMobBlock { pos: mc_bamboo_core::BlockPos },
@@ -597,6 +611,11 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             super::mob::living::apply_hurt_player(world, me, target, source, amount);
         }
         Command::IgnitePlayer { target, ticks } => world.ignite_player_from_mob(target, ticks),
+        Command::GivePlayerEffect {
+            target,
+            effect,
+            duration,
+        } => world.give_player_effect_from_mob(target, effect, duration),
         Command::HurtMob {
             target,
             source,
@@ -614,6 +633,24 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
         }
         Command::RemoveMobBlock { pos } => {
             let _ = world.remove_block(pos);
+        }
+        Command::DestroyProgress { pos, progress } => {
+            world.push_effect(crate::Effect::DestroyProgress {
+                breaker: me.id,
+                pos,
+                progress,
+            });
+        }
+        Command::BreakDoor { pos } => {
+            let _ = world.remove_block(pos);
+            for (event, data) in [(1021, 0), (2001, world.block_state(pos).0 as i32)] {
+                world.push_effect(crate::Effect::LevelEvent {
+                    event,
+                    pos,
+                    data,
+                    except_initiator: false,
+                });
+            }
         }
         Command::TrampleTurtleEgg { pos, chance } => {
             super::mob::living::apply_trample_turtle_egg(world, pos, chance);

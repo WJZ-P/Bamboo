@@ -174,6 +174,10 @@ struct Case {
     /// 每刻生物发出的 `entity_event` 和 `set_equipment`（base64，按发生顺序）。
     #[serde(default)]
     mob_event_packets: Option<Vec<Vec<String>>>,
+    /// 僵尸场景每刻的 `levelEvent`（`[0, 事件, x, y, z, 数据]`）和
+    /// `destroyBlockProgress`（`[1, 实体, x, y, z, 阶段]`），按发生顺序。
+    #[serde(default)]
+    level_events: Option<Vec<Vec<[i32; 6]>>>,
     /// 每刻 0 号玩家的状态：血量位、受伤冷却、受伤动画、死亡、着火刻数。
     #[serde(default)]
     zombie_player_states: Option<Vec<[i64; 5]>>,
@@ -489,6 +493,8 @@ struct MobLevel {
     game: Option<mc_bamboo_game::ReplayPlayers>,
     /// 改坏确认：`wasHurt` 一律当真。
     wrong_was_hurt: bool,
+    /// 改坏确认 `zombie_hunger`：尸壳给的饥饿少一刻。
+    short_hunger: bool,
 }
 
 impl LevelTables for MobLevel {
@@ -637,6 +643,21 @@ impl Level for MobLevel {
         true
     }
 
+    fn give_player_effect_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        effect: i32,
+        duration: i32,
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        // 改坏确认：尸壳的饥饿少给一刻。
+        let duration = duration - i32::from(self.short_hunger);
+        game.give_effect(target, effect, duration);
+        true
+    }
+
     fn sky_darken(&self) -> i32 {
         self.facts.sky_darken
     }
@@ -673,6 +694,33 @@ impl Level for MobLevel {
     ///
     /// Matches `LivingEntity.dropFromLootTable` on the official side: the real
     /// cow table, a world-seed-0 random sequence and the killer's looting level.
+    /// 方块掉落：僵尸破门时门的下半被形状更新拆掉，掉一扇门（官方 `dropResources`）。
+    fn block_loot_drops(
+        &mut self,
+        state: BlockState,
+        pos: BlockPos,
+    ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        let view = LootBlocks(&self.blocks);
+        let params = mc_bamboo_loot::BlockDropParams {
+            state,
+            pos: (pos.x, pos.y, pos.z),
+            level: &view,
+            block_entity: None,
+            breaker: None,
+            tool: None,
+            explosion_radius: None,
+            luck: 0.0,
+        };
+        match mc_bamboo_loot::block_drops(&params, Some(&self.loot_sequences), self.random.source())
+        {
+            Ok(stacks) => stacks
+                .iter()
+                .map(|stack| mc_bamboo_protocol::item::ItemStack::new(stack.item, stack.count))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     fn mob_loot_drops(
         &mut self,
         table: &str,
@@ -730,6 +778,52 @@ impl Level for MobLevel {
                 .collect(),
             Err(_) => Vec::new(),
         }
+    }
+}
+
+/// 方块掉落的战利品表能读到的那点世界：假世界的方块表，晴天，主世界。
+struct LootBlocks<'a>(&'a HashMap<BlockPos, BlockState>);
+
+impl mc_bamboo_loot::LevelView for LootBlocks<'_> {
+    fn is_loaded(&self, _: i32, _: i32, _: i32) -> Option<bool> {
+        Some(true)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> Option<BlockState> {
+        Some(
+            self.0
+                .get(&BlockPos::new(x, y, z))
+                .copied()
+                .unwrap_or(BlockState(mc_bamboo_data::blocks::AIR)),
+        )
+    }
+
+    fn biome(&self, _: i32, _: i32, _: i32) -> Option<i32> {
+        None
+    }
+
+    fn can_see_sky(&self, _: i32, _: i32, _: i32) -> Option<bool> {
+        None
+    }
+
+    fn is_raining(&self) -> Option<bool> {
+        Some(false)
+    }
+
+    fn is_thundering(&self) -> Option<bool> {
+        Some(false)
+    }
+
+    fn day_time(&self) -> Option<i64> {
+        None
+    }
+
+    fn game_time(&self) -> Option<i64> {
+        None
+    }
+
+    fn dimension(&self) -> Option<&'static str> {
+        Some("minecraft:overworld")
     }
 }
 
@@ -976,6 +1070,7 @@ impl Report {
                 mc_bamboo_game::ReplayPlayers::new(case.difficulty, &setups)
             }),
             wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
+            short_hunger: matches!(break_test, Some("zombie_hunger")),
         };
         for &[x, y, z, state] in &case.blocks {
             level
@@ -1041,6 +1136,7 @@ impl Report {
                         }
                     } else if kind.is_monster()
                         && case.difficulty == 3
+                        && !matches!(break_test, Some("zombie_door"))
                         && let Some(mob) = entity.kind.mob_mut()
                     {
                         mob.can_break_doors = true;
@@ -1150,6 +1246,7 @@ impl Report {
                 game.tick_cooldowns();
             }
             let mut ours_interactions = Vec::new();
+            let tick_effects;
             {
                 let mut world = World::new(&mut level, &mut ticks);
                 for &[tick, cow, kind, effect, duration, amplifier] in &case.cow_effect_actions {
@@ -1279,6 +1376,7 @@ impl Report {
                     ids.push(id);
                 }
                 world.tick_entities();
+                tick_effects = world.into_effects();
             }
             // 这一刻新生成的实体：快照是在 `addFreshEntity` 时记下的，官方
             // `ChunkMap.addEntity` 也在同一时刻建 `ServerEntity`。
@@ -1372,6 +1470,31 @@ impl Report {
             }
             self.compare(&case.name, index, &ours, expected);
             self.compare_zombie_player(case, &mut level, index);
+            if let Some(expected) = case.level_events.as_ref().and_then(|all| all.get(index)) {
+                let ours: Vec<[i32; 6]> = tick_effects
+                    .iter()
+                    .filter_map(|effect| match *effect {
+                        mc_bamboo_blocks::Effect::LevelEvent {
+                            event, pos, data, ..
+                        } => Some([0, event, pos.x, pos.y, pos.z, data]),
+                        mc_bamboo_blocks::Effect::Destroyed { pos, state, .. } => {
+                            Some([0, 2001, pos.x, pos.y, pos.z, state.0 as i32])
+                        }
+                        mc_bamboo_blocks::Effect::DestroyProgress {
+                            breaker,
+                            pos,
+                            progress,
+                        } => Some([1, breaker, pos.x, pos.y, pos.z, progress]),
+                        _ => None,
+                    })
+                    .collect();
+                if &ours != expected && self.mismatches.len() < self.show {
+                    self.mismatches.push(format!(
+                        "{} tick {index} level events: official {expected:?} bamboo {ours:?}",
+                        case.name
+                    ));
+                }
+            }
             if let Some(expected) = &case.mob_event_packets
                 && let Some(expected) = expected.get(index)
             {
@@ -1442,10 +1565,11 @@ impl Report {
 
     /// 真实玩家的僵尸场景：比 0 号玩家的状态和它自己收到的那几种包。
     fn compare_zombie_player(&mut self, case: &Case, level: &mut MobLevel, index: usize) {
-        const SELF_PACKETS: [u8; 5] = [43, 67, 68, 69, 106];
+        const SELF_PACKETS: [u8; 6] = [43, 67, 68, 69, 106, 135];
         let (Some(game), Some(player)) = (level.game.as_mut(), case.players.first()) else {
             return;
         };
+        game.sync_health();
         let ours: Vec<Vec<u8>> = game
             .take_packets(player.id)
             .into_iter()

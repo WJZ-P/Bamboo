@@ -70,6 +70,8 @@ impl ReplayPlayers {
                 setup.position,
             );
             player.health.health = setup.health;
+            // 进服时已经同步过一次血量，场景从这个快照开始。
+            player.health_sync = crate::player_hurt::HealthSync::of(&player);
             player.random = mc_bamboo_blocks::entity::JavaRandom::new(setup.seed);
             let capture = Capture::default();
             region.links.add(id, Box::new(capture.clone()));
@@ -107,6 +109,45 @@ impl ReplayPlayers {
     pub fn ignite(&mut self, target: EntityUid, ticks: i32) {
         if let Some(player) = self.region.players.get_mut(&PlayerId(target)) {
             crate::player_environment::ignite_player(player, ticks);
+        }
+    }
+
+    /// 生物给玩家加一个等级 0 的持续效果。
+    pub fn give_effect(&mut self, target: EntityUid, effect: i32, duration: i32) {
+        let instance =
+            mc_bamboo_blocks::entity::mob::effects::EffectInstance::new(effect, duration);
+        let region = &mut self.region;
+        let _ = crate::player_effects::give_in(
+            &mut region.players,
+            &mut region.links,
+            PlayerId(target),
+            instance,
+        );
+    }
+
+    /// 玩家阶段的 `set_health`（官方 `ServerPlayer.doTick`）：血量快照变了就补一包。
+    /// 活着的玩家被生物打中时不当场发，等这里。
+    pub fn sync_health(&mut self) {
+        let mut pending = Vec::new();
+        for (id, player) in &mut self.region.players {
+            if player.dead {
+                continue;
+            }
+            let now = crate::player_hurt::HealthSync::of(player);
+            if now != player.health_sync {
+                player.health_sync = now;
+                pending.push((
+                    *id,
+                    mc_bamboo_protocol::packet::play::SetHealth {
+                        health: now.health,
+                        food: now.food,
+                        saturation: player.health.food.saturation,
+                    },
+                ));
+            }
+        }
+        for (id, packet) in pending {
+            self.region.links.send(id, &packet);
         }
     }
 

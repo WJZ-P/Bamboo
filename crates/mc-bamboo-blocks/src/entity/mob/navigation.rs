@@ -51,6 +51,8 @@ pub struct Navigation {
     pub max_visited_nodes: i32,
     pub is_stuck: bool,
     pub required_path_length: f32,
+    /// `GroundPathNavigation.avoidSun`：`RestrictSunGoal` 运行时为真，路径在第一个露天节点截断。
+    pub avoid_sun: bool,
 }
 
 impl Navigation {
@@ -76,6 +78,7 @@ impl Navigation {
             max_visited_nodes: mth::floor(follow_range_base * 16.0),
             is_stuck: false,
             required_path_length: 16.0,
+            avoid_sun: false,
         }
     }
 
@@ -149,7 +152,7 @@ impl Navigation {
         if self.is_done() {
             return false;
         }
-        self.trim_path(view);
+        self.trim_path(view, mob);
         if self.path.as_ref().is_none_or(|path| path.node_count() == 0) {
             return false;
         }
@@ -346,8 +349,31 @@ impl Navigation {
         }
     }
 
+    /// `GroundPathNavigation.trimPath`：先 `PathNavigation.trimPath`（炼药锅格子上抬一格），
+    /// 躲太阳时如果自己（脚下半格往上）不在露天，就把路径截到第一个露天节点之前。
+    fn trim_path(&mut self, view: &dyn BlockView, mob: &NavMob) {
+        self.trim_cauldrons(view);
+        if !self.avoid_sun {
+            return;
+        }
+        let at = mob.path.position;
+        if view.can_see_sky(BlockPos::containing(Vec3::new(at.x, at.y + 0.5, at.z))) {
+            return;
+        }
+        let Some(path) = &mut self.path else {
+            return;
+        };
+        if let Some(index) = path
+            .nodes
+            .iter()
+            .position(|node| view.can_see_sky(node.pos()))
+        {
+            path.nodes.truncate(index);
+        }
+    }
+
     /// `PathNavigation.trimPath`：炼药锅格子上抬一格。
-    fn trim_path(&mut self, view: &dyn BlockView) {
+    fn trim_cauldrons(&mut self, view: &dyn BlockView) {
         let Some(path) = &mut self.path else {
             return;
         };

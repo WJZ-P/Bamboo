@@ -1041,6 +1041,17 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
+    /// 精确驱动当场给玩家加效果（`LivingEntity.addEffect(instance, mob)`）。`false` 表示
+    /// 不能当场做，调用方改成延后的 [`Effect::GivePlayerEffect`]。
+    fn give_player_effect_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _effect: i32,
+        _duration: i32,
+    ) -> bool {
+        false
+    }
+
     /// `ServerPlayer.startSleepInBed` 的怪物查询：以床的 `Vec3.atBottomCenterOf(pos)` 为中心、
     /// 水平 ±8、竖直 ±5 的盒，`getEntitiesOfClass(Monster.class, box,
     /// m -> m.isPreventingPlayerRest(level, player))` 非空。
@@ -2066,8 +2077,22 @@ pub enum Effect {
         source: DamageSource,
         amount: f32,
     },
+    /// `ServerLevel.destroyBlockProgress(breaker, pos, progress)`：32 格内、不是 `breaker`
+    /// 自己的玩家收到裂纹包。生物破门用它；`progress` 为 -1 时清掉。
+    DestroyProgress {
+        breaker: i32,
+        pos: BlockPos,
+        progress: i32,
+    },
     /// `Zombie.doHurtTarget` 的着火传染打到玩家：`igniteForTicks(ticks)`。
     IgnitePlayer { target: EntityUid, ticks: i32 },
+    /// 生物打中玩家后给的效果（`Husk.doHurtTarget` 的饥饿）：
+    /// `addEffect(new MobEffectInstance(effect, duration), mob)`，等级 0、缺省标志。
+    GivePlayerEffect {
+        target: EntityUid,
+        effect: i32,
+        duration: i32,
+    },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

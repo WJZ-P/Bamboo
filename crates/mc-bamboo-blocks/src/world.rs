@@ -702,6 +702,22 @@ impl<'a> World<'a> {
         }
     }
 
+    /// 生物给玩家加效果（`Husk.doHurtTarget` 的饥饿）：能当场就当场，否则记成延后的效果。
+    pub fn give_player_effect_from_mob(
+        &mut self,
+        target: crate::entity::EntityUid,
+        effect: i32,
+        duration: i32,
+    ) {
+        if !self.level.give_player_effect_now(target, effect, duration) {
+            self.push_effect(Effect::GivePlayerEffect {
+                target,
+                effect,
+                duration,
+            });
+        }
+    }
+
     /// 生物给玩家点火（`Entity.igniteForTicks`）：能当场就当场，否则记成延后的效果。
     pub fn ignite_player_from_mob(&mut self, target: crate::entity::EntityUid, ticks: i32) {
         if !self.level.ignite_player_now(target, ticks) {
@@ -3738,6 +3754,8 @@ mod tests {
                 | Effect::OpenCommandBlock { .. }
                 | Effect::HurtPlayer { .. }
                 | Effect::IgnitePlayer { .. }
+                | Effect::GivePlayerEffect { .. }
+                | Effect::DestroyProgress { .. }
                 | Effect::SleepInBed { .. } => None,
             })
             .collect()

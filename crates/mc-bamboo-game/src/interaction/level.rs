@@ -397,6 +397,7 @@ impl Level for RegionLevel<'_> {
             difficulty: self.difficulty as i32,
             rules: side.rules,
             attacker,
+            defer_health: true,
         };
         let (hurt, death_drops) =
             crate::player_hurt::hurt_player_by_mob(&mut parts, PlayerId(target), source, amount);
@@ -414,6 +415,32 @@ impl Level for RegionLevel<'_> {
         if let Some(player) = self.players.get_mut(&PlayerId(target)) {
             crate::player_environment::ignite_player(player, ticks);
         }
+        true
+    }
+
+    fn give_player_effect_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        effect: i32,
+        duration: i32,
+    ) -> bool {
+        let Some(side) = self.player_side.as_mut() else {
+            return false;
+        };
+        let instance =
+            mc_bamboo_blocks::entity::mob::effects::EffectInstance::new(effect, duration);
+        let (_, actions) = crate::player_effects::give_in(
+            &mut *self.players,
+            &mut *side.links,
+            crate::inbound::PlayerId(target),
+            instance,
+        );
+        // 生物给的都是持续效果，没有瞬间动作；万一有，交回延后路径会重复加效果，
+        // 所以这里只能断言。
+        debug_assert!(
+            actions.is_empty(),
+            "mob-given effects have no instant actions"
+        );
         true
     }
 

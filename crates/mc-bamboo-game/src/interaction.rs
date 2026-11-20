@@ -667,6 +667,22 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                     world.spawn_player_death_drops(&drops);
                 }
             }
+            Effect::DestroyProgress {
+                breaker,
+                pos,
+                progress,
+            } => mining::send_destroy_progress(region, breaker, pos, progress),
+            Effect::GivePlayerEffect {
+                target,
+                effect,
+                duration,
+            } => {
+                crate::player_effects::give(
+                    region,
+                    crate::inbound::PlayerId(target),
+                    mc_bamboo_blocks::entity::mob::effects::EffectInstance::new(effect, duration),
+                );
+            }
             Effect::IgnitePlayer { target, ticks } => {
                 crate::player_environment::ignite_for_ticks(
                     region,

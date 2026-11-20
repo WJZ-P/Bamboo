@@ -968,6 +968,44 @@ public final class MobOracle {
                 kill.hurts.add(new double[] {20, 0, 6.0, 0});
                 kill.hurts.add(new double[] {60, 0, 6.0, 0});
                 scenes.add(kill);
+                // 困难难度破门：墙上一扇关着的门，僵尸追墙后的玩家。木门 240 刻后拆掉
+                // （裂纹、敲门声、1021 / 2001 事件逐刻比），铁门和普通难度都破不了。
+                for (String door : new String[] {"oak", "iron", "normal"}) {
+                    Scene doors = new Scene("zombie_door_" + door).ticks(420)
+                            .difficulty(door.equals("normal") ? 2 : 3);
+                    doors.monstersBurn = false;
+                    ground(doors, 12);
+                    BlockState stone = Blocks.STONE.defaultBlockState();
+                    for (int z = -12; z <= 12; z++) {
+                        doors.set(3, 64, z, stone);
+                        doors.set(3, 65, z, stone);
+                    }
+                    // 玩家站在墙后的石柱上：僵尸隔着两格高的墙看得见他。
+                    for (int y = 64; y <= 67; y++) {
+                        doors.set(7, y, 0, stone);
+                    }
+                    Block block = door.equals("iron") ? Blocks.IRON_DOOR : Blocks.OAK_DOOR;
+                    BlockState lower = block.defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.DoorBlock.FACING,
+                                    net.minecraft.core.Direction.WEST);
+                    doors.set(3, 64, 0, lower);
+                    doors.set(3, 65, 0, lower.setValue(net.minecraft.world.level.block.DoorBlock.HALF,
+                            net.minecraft.world.level.block.state.properties.DoubleBlockHalf.UPPER));
+                    doors.mob(1, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
+                    doors.player(7.5, 68.0, 0.5, Items.AIR);
+                    scenes.add(doors);
+                }
+                // 尸壳打中玩家：空手时给饥饿，时长 `140 * (int)` 区域难度（`Husk.doHurtTarget`）。
+                for (int difficulty = 2; difficulty <= 3; difficulty++) {
+                    Scene husk = new Scene("zombie_husk_hunger_" + difficulty).ticks(60)
+                            .difficulty(difficulty);
+                    husk.monstersBurn = false;
+                    husk.realPlayers = true;
+                    ground(husk, 12);
+                    husk.mob(2, 0.5, 64.0, 0.5, 0.0F, 23L, 0);
+                    husk.player(2.5, 64.0, 0.5, Items.AIR);
+                    scenes.add(husk);
+                }
             }
             {
                 // 生成入口：`/summon` 不带 NBT（跑 `finalizeSpawn`）、带 NBT（不跑）、UUID 重复；
@@ -2352,6 +2390,10 @@ public final class MobOracle {
         Bytes mobSink = new Bytes(official.registries);
         level.mobPackets = mobSink::add;
         StringBuilder mobEvents = new StringBuilder("[[");
+        java.util.List<int[]> worldEvents = new java.util.ArrayList<>();
+        level.levelEvents = worldEvents::add;
+        level.shapeUpdates = true;
+        StringBuilder levelEventsJson = new StringBuilder("[[");
         java.util.List<Mob> mobs = new java.util.ArrayList<>();
         for (int i = 0; i < scene.cows.size(); i++) {
             double[] at = scene.cows.get(i);
@@ -2474,6 +2516,15 @@ public final class MobOracle {
             }
             level.tracked.removeIf(Entity::isRemoved);
             appendMobEvents(mobEvents, mobSink.takeRaw());
+            levelEventsJson.append("],[");
+            for (int i = 0; i < worldEvents.size(); i++) {
+                int[] event = worldEvents.get(i);
+                if (i > 0) levelEventsJson.append(',');
+                levelEventsJson.append('[').append(event[0]).append(',').append(event[1]).append(',')
+                        .append(event[2]).append(',').append(event[3]).append(',').append(event[4])
+                        .append(',').append(event[5]).append(']');
+            }
+            worldEvents.clear();
             line.append(',').append(zombieStepJson(mobs, players, level));
             if (scene.realPlayers) {
                 zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
@@ -2482,6 +2533,7 @@ public final class MobOracle {
         }
         line.append("]");
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
+        line.append(",\"levelEvents\":").append(levelEventsJson).append("]]");
         if (scene.realPlayers) {
             line.append(",\"zombiePlayerStates\":").append(playerStates).append(']');
             line.append(",\"zombiePlayerPackets\":").append(playerPackets).append(']');
@@ -2507,7 +2559,7 @@ public final class MobOracle {
 
     /** 玩家自己收到的包里要比的那几种：受伤动画、进入 / 离开战斗、死亡界面、血量。 */
     private static final java.util.Set<Integer> ZOMBIE_SELF_PACKETS = java.util.Set.of(
-            43, 67, 68, 69, 106);
+            43, 67, 68, 69, 106, 135);
 
     /**
      * 僵尸场景一刻结束时：按 `ServerPlayer.doTick` 补 `set_health`，记下玩家状态
@@ -2537,7 +2589,8 @@ public final class MobOracle {
         packets.append('[');
         boolean comma = false;
         for (byte[] body : sink.takeRaw()) {
-            if (body.length == 0 || !ZOMBIE_SELF_PACKETS.contains((int) body[0])) continue;
+            // 包 ID 的第一个字节：`update_mob_effect` 是 135，VarInt 写成 0x87 0x01。
+            if (body.length == 0 || !ZOMBIE_SELF_PACKETS.contains(body[0] & 0xFF)) continue;
             if (comma) packets.append(',');
             packets.append('"').append(Base64.getEncoder().encodeToString(body)).append('"');
             comma = true;
@@ -4650,13 +4703,30 @@ public final class MobOracle {
 
         @Override
         public boolean removeBlock(BlockPos pos, boolean moving) {
+            BlockState old = getBlockState(pos);
             blocks.remove(pos.asLong());
             chunkCache.clear();
+            if (shapeUpdates) {
+                // 官方 `Level.setBlock` → `markAndNotifyBlock` 的形状更新（flags 3 去掉 1 和 32）：
+                // 门的另一半在这里被 `updateOrDestroy` 拆掉（`destroyBlock`、2001 事件、掉落）。
+                BlockState air = Blocks.AIR.defaultBlockState();
+                old.updateIndirectNeighbourShapes(this, pos, 2, 511);
+                air.updateNeighbourShapes(this, pos, 2, 511);
+                air.updateIndirectNeighbourShapes(this, pos, 2, 511);
+            }
             return true;
         }
 
+        /** 僵尸场景：`removeBlock` 照官方做邻居形状更新。 */
+        boolean shapeUpdates;
+
+        /** 僵尸场景：`levelEvent` 和 `destroyBlockProgress` 按发生顺序记下来（`[0, 事件, x, y, z, 数据]` / `[1, 实体, x, y, z, 阶段]`）。 */
+        java.util.function.Consumer<int[]> levelEvents;
+
         @Override
-        public void destroyBlockProgress(int id, BlockPos pos, int progress) {}
+        public void destroyBlockProgress(int id, BlockPos pos, int progress) {
+            if (levelEvents != null) levelEvents.accept(new int[] {1, id, pos.getX(), pos.getY(), pos.getZ(), progress});
+        }
 
         /** 官方 `MONSTERS_BURN` 由静态环境属性系统给出；僵尸场景按用例开关。 */
         @Override
@@ -4852,7 +4922,8 @@ public final class MobOracle {
                 // 官方 `ServerLevel.getCurrentDifficultyAt`：难度、主世界时钟、区块居住时间（假世界 0）、月相亮度。
                 return new net.minecraft.world.DifficultyInstance(getDifficulty(), clock, 0L, getMoonBrightness(pos));
             }
-            return new net.minecraft.world.DifficultyInstance(Difficulty.NORMAL, gameTime, 0L, 0.0F);
+            // 非真实时间的场景：时钟按游戏刻、月相亮度 0，难度照场景。
+            return new net.minecraft.world.DifficultyInstance(getDifficulty(), gameTime, 0L, 0.0F);
         }
 
         @Override
@@ -4932,7 +5003,9 @@ public final class MobOracle {
         public void sendBlockUpdated(BlockPos pos, BlockState old, BlockState current, int flags) {}
 
         @Override
-        public void levelEvent(Entity source, int type, BlockPos pos, int data) {}
+        public void levelEvent(Entity source, int type, BlockPos pos, int data) {
+            if (levelEvents != null) levelEvents.accept(new int[] {0, type, pos.getX(), pos.getY(), pos.getZ(), data});
+        }
 
         @Override
         public <T extends net.minecraft.core.particles.ParticleOptions> int sendParticles(
