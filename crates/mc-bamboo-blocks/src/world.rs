@@ -1894,11 +1894,10 @@ impl<'a> World<'a> {
     /// 生物死时的战利品，见 [`Level::mob_loot_drops`]。
     pub(crate) fn mob_loot_drops(
         &mut self,
-        table: &str,
-        on_fire: bool,
-        killer: Option<crate::entity::EntityUid>,
+        loot: crate::entity::mob::MobDeathLoot,
+        origin: Vec3,
     ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
-        self.level.mob_loot_drops(table, on_fire, killer)
+        self.level.mob_loot_drops(loot, origin)
     }
 
     /// `Block.getDrops`，见 [`Level::block_loot_drops`]。

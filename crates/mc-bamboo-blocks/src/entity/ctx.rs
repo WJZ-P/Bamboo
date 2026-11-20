@@ -483,7 +483,10 @@ pub enum Command {
         end: Vec3,
     },
     /// TNT 引信归零：整段爆炸，包括射线、洗牌、逐格破坏、连锁点燃、掉落和伤害物品。
-    Explode { center: Vec3, radius: f32 },
+    Explode {
+        center: Vec3,
+        radius: f32,
+    },
     /// 下落方块这一刻的落地判定和后果：能不能放回去、发 1031 还是 1029、
     /// 要不要掉成物品、自己消不消失。需要 `&mut World` 的只读判定也在这里。
     ///
@@ -495,11 +498,15 @@ pub enum Command {
         land: LandFacts,
     },
     /// 与附近的物品合并。候选 ID 按 uid 升序，落地时重新读双方当前状态。
-    MergeWithNeighbours { others: Vec<EntityUid> },
+    MergeWithNeighbours {
+        others: Vec<EntityUid>,
+    },
     /// 漏斗吸取：跑 `HopperBlock.entityInside` 的整段，写容器也写自己。
     SuckIntoHopper,
     /// `Entity.spawnAtLocation`：生成一件掉落物。
-    DropItem { stack: ItemStack },
+    DropItem {
+        stack: ItemStack,
+    },
     /// `LivingEntity.pushEntities` 里的一次 `doPush`：对方被推开，自己被推回来。
     /// 落地时按双方当前的位置重算，`from` 是算阶段看到的对方位置。
     PushMob {
@@ -507,16 +514,18 @@ pub enum Command {
         from: Vec3,
         self_pushable: bool,
     },
-    /// `LivingEntity.dropAllDeathLoot`：按战利品表掉东西，再按经验值生成经验球。
-    /// 表名为空时只掉经验。
-    DropMobLoot {
-        table: &'static str,
-        on_fire: bool,
-        killer: Option<EntityUid>,
-        experience: i32,
+    /// 死亡战利品表，与装备和经验分开，保留原版的生成顺序。
+    ///
+    /// Death loot table, separate from equipment and XP to preserve vanilla order.
+    DropMobLoot(super::mob::MobDeathLoot),
+    AwardDeathExperience {
+        amount: i32,
     },
     /// `ExperienceOrb.scanForMerges`：周围同值的球合并到自己身上。
-    MergeExperienceOrbs { others: Vec<EntityUid>, value: i32 },
+    MergeExperienceOrbs {
+        others: Vec<EntityUid>,
+        value: i32,
+    },
     /// `BreedGoal.breed` → `Animal.spawnChildFromBreeding`：给伴侣设冷却、生小牛和经验球。
     /// 父亲自己那一份状态已经在 `serverAiStep` 里改好（年龄递减还在后面）。
     BreedCows {
@@ -530,7 +539,10 @@ pub enum Command {
         amount: f32,
     },
     /// `Zombie.doHurtTarget` 的着火传染（打到玩家）。
-    IgnitePlayer { target: EntityUid, ticks: i32 },
+    IgnitePlayer {
+        target: EntityUid,
+        ticks: i32,
+    },
     /// `Mob.doHurtTarget` 打到另一头生物。
     HurtMob {
         target: EntityUid,
@@ -545,7 +557,9 @@ pub enum Command {
     },
     /// `level.removeBlock(pos, false)`：`BreakDoorGoal` 破门、`RemoveBlockGoal` 啄碎海龟蛋。
     /// 只换成这一格的流体或空气，`2001` 之类的事件由调用方另发。
-    RemoveMobBlock { pos: mc_bamboo_core::BlockPos },
+    RemoveMobBlock {
+        pos: mc_bamboo_core::BlockPos,
+    },
     /// `TurtleEggBlock.destroyEgg` 里取世界随机数之后的部分：`nextInt(chance) == 0`
     /// 时 `decreaseEggs`。世界随机数只在落地时取，两种驱动取数顺序一样。
     TrampleTurtleEgg {
@@ -553,7 +567,9 @@ pub enum Command {
         chance: i32,
     },
     /// `ZombieAttackTurtleEggGoal.playBreakSound`：音高取世界随机数。
-    TurtleEggBreakSound { pos: mc_bamboo_core::BlockPos },
+    TurtleEggBreakSound {
+        pos: mc_bamboo_core::BlockPos,
+    },
     /// `level.playSound(null, pos, sound, source, volume, pitch)`：方块中心的音效。
     MobBlockSound {
         pos: mc_bamboo_core::BlockPos,
@@ -604,12 +620,14 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             from,
             self_pushable,
         } => super::mob::living::apply_push(me, other, from, self_pushable, world),
-        Command::DropMobLoot {
-            table,
-            on_fire,
-            killer,
-            experience,
-        } => super::mob::living::apply_death_drops(me, table, on_fire, killer, experience, world),
+        Command::DropMobLoot(loot) => {
+            for stack in world.mob_loot_drops(loot, me.position) {
+                world.spawn_at_location(me.position, stack);
+            }
+        }
+        Command::AwardDeathExperience { amount } => {
+            super::orb::award(world, me.position, amount);
+        }
         Command::MergeExperienceOrbs { others, value } => {
             super::orb::apply_merge(me, &others, value, world)
         }

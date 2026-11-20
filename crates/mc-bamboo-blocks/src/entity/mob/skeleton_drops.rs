@@ -26,12 +26,7 @@ pub(super) fn drop_on_death(
         return;
     }
     ctx.emit(
-        Command::DropMobLoot {
-            table: mob.mob_type.loot_table(),
-            on_fire: me.remaining_fire_ticks > 0,
-            killer: source.attacker,
-            experience: 0,
-        },
+        Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
         me,
     );
     // Mob.dropCustomDeathLoot 在计算经验以前移除掉落装备。
@@ -54,15 +49,7 @@ pub(super) fn drop_on_death(
     }
     if player_kill {
         let experience = experience_reward(mob, &mut me.random);
-        ctx.emit(
-            Command::DropMobLoot {
-                table: "",
-                on_fire: false,
-                killer: None,
-                experience,
-            },
-            me,
-        );
+        ctx.emit(Command::AwardDeathExperience { amount: experience }, me);
     }
 }
 
@@ -126,6 +113,22 @@ fn experience_reward(mob: &Mob, random: &mut JavaRandom) -> i32 {
 mod tests {
     use super::*;
     use mc_bamboo_data::items::BOW;
+
+    #[test]
+    fn environmental_death_keeps_recent_player_separate_from_fatal_source() {
+        use crate::entity::mob::{DamageKind, MobDeathLoot, MobType};
+        let me = Entity::by_mob_type(MobType::Skeleton, mc_bamboo_core::Vec3::default());
+        let mut mob = Mob::new(MobType::Skeleton);
+        mob.last_hurt_by_player_ref = Some([3; 16]);
+        mob.last_hurt_by_player_memory_time = 1;
+        let source = DamageSource::environment(DamageKind::Fall);
+        let loot = MobDeathLoot::new(&me, &mob, source);
+        assert_eq!(loot.source.attacker, None);
+        assert_eq!(loot.source.direct, None);
+        assert_eq!(loot.recent_player, Some([3; 16]));
+        mob.last_hurt_by_player_memory_time = 0;
+        assert_eq!(MobDeathLoot::new(&me, &mob, source).recent_player, None);
+    }
 
     #[test]
     fn preserved_gear_drops_unchanged_without_a_player_kill() {

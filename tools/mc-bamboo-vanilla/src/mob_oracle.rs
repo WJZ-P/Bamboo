@@ -692,29 +692,22 @@ impl Level for MobLevel {
     /// cow table, a world-seed-0 random sequence and the killer's looting level.
     fn mob_loot_drops(
         &mut self,
-        table: &str,
-        on_fire: bool,
-        killer: Option<mc_bamboo_blocks::EntityUid>,
+        loot: mc_bamboo_blocks::entity::mob::MobDeathLoot,
+        origin: Vec3,
     ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
         use mc_bamboo_data::registries::entity_type;
         use mc_bamboo_loot::{
             DamageSourceView, EntityDeathParams, EntityView, LootStack, Position,
             entity_death_drops,
         };
-        let victim_type = if table == "minecraft:entities/skeleton" {
-            entity_type::SKELETON
-        } else {
-            entity_type::COW
-        };
-        let mut victim = EntityView::new(victim_type);
+        let mut victim = EntityView::new(loot.victim.entity_type());
         victim.is_living = true;
-        victim.is_on_fire = on_fire;
-        let mut killer_view = None;
-        if let Some(uid) = killer {
+        victim.is_on_fire = loot.on_fire;
+        let player = |uid| {
+            let index = self.players.iter().position(|p| p.uid == uid)?;
             let mut view = EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER);
             view.is_living = true;
-            if let Some(index) = self.players.iter().position(|p| p.uid == uid) {
-                let level = self.looting[index];
+            if let Some(&level) = self.looting.get(index) {
                 if level > 0 {
                     let mut held = LootStack::new(mc_bamboo_data::items::DIAMOND_SWORD, 1);
                     let mut enchants = std::collections::BTreeMap::new();
@@ -723,25 +716,41 @@ impl Level for MobLevel {
                     view.equipment[mc_bamboo_loot::EquipmentSlot::Mainhand.index()] = Some(held);
                 }
             }
-            killer_view = Some(view);
+            Some(view)
+        };
+        let source = loot.source;
+        let attacker = source.attacker.and_then(player);
+        let direct = source.direct.and_then(player).or_else(|| {
+            source
+                .projectile_motion
+                .map(|_| EntityView::new(entity_type::ARROW))
+        });
+        let last_damage_player = match loot.recent_player {
+            Some(uuid) => self
+                .players
+                .iter()
+                .find(|p| p.uuid == Some(uuid))
+                .map(|p| p.uid),
+            None => loot.recent_player_id,
         }
+        .and_then(player);
         let params = EntityDeathParams {
             entity: victim,
-            origin: Position::new(0.0, 0.0, 0.0),
+            origin: Position::new(origin.x, origin.y, origin.z),
             damage_source: DamageSourceView {
-                damage_type: 0,
-                direct_entity: killer_view.clone().map(Box::new),
-                source_entity: killer_view.clone().map(Box::new),
-                is_direct: true,
+                damage_type: mc_bamboo_data::damage_type_id(source.kind.name()).unwrap_or_default(),
+                direct_entity: direct.clone().map(Box::new),
+                source_entity: attacker.clone().map(Box::new),
+                is_direct: source.direct == source.attacker,
             },
-            attacking_entity: killer_view.clone(),
-            direct_attacking_entity: killer_view.clone(),
-            last_damage_player: killer_view,
+            attacking_entity: attacker,
+            direct_attacking_entity: direct,
+            last_damage_player,
             luck: 0.0,
             level: None,
         };
         match entity_death_drops(
-            table,
+            loot.victim.loot_table(),
             &params,
             0,
             Some(&self.loot_sequences),

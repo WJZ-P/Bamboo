@@ -712,6 +712,31 @@ impl DamageSource {
     }
 }
 
+/// 掉落表区分致死来源和最近伤害过它的玩家。
+///
+/// Death loot distinguishes the fatal source from the last player who hurt the mob.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MobDeathLoot {
+    pub victim: MobType,
+    pub on_fire: bool,
+    pub source: DamageSource,
+    pub recent_player: Option<[u8; 16]>,
+    pub recent_player_id: Option<EntityUid>,
+}
+
+impl MobDeathLoot {
+    pub(super) fn new(me: &super::Entity, mob: &Mob, source: DamageSource) -> Self {
+        let credited = mob.last_hurt_by_player_memory_time > 0;
+        Self {
+            victim: mob.mob_type,
+            on_fire: me.remaining_fire_ticks > 0,
+            source,
+            recent_player: mob.last_hurt_by_player_ref.filter(|_| credited),
+            recent_player_id: mob.last_hurt_by_player.filter(|_| credited),
+        }
+    }
+}
+
 /// 一个生物的全部状态。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mob {

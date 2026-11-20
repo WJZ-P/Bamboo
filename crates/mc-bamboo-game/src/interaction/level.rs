@@ -683,57 +683,67 @@ impl Level for RegionLevel<'_> {
     /// `LivingEntity.dropFromLootTable`：牛死时的战利品表。
     /// `on_fire` 决定牛肉是不是熟的，攻击者的主手附魔决定抢夺和熔炼加成。
     ///
-    /// `LivingEntity.dropFromLootTable` for a dying cow. `on_fire` decides whether
-    /// the beef is cooked; the killer's held item supplies the looting level.
+    /// `LivingEntity.dropFromLootTable` distinguishes the fatal damage source
+    /// from the remembered player who supplies kill credit.
     fn mob_loot_drops(
         &mut self,
-        table: &str,
-        on_fire: bool,
-        killer: Option<mc_bamboo_blocks::EntityUid>,
+        loot: mc_bamboo_blocks::entity::mob::MobDeathLoot,
+        origin: Vec3,
     ) -> Vec<ItemStack> {
-        let mut attacker = None;
-        let mut direct = None;
-        let mut last_player = None;
-        if let Some(uid) = killer {
-            let held = self
+        use mc_bamboo_blocks::entity::KindPublic;
+        let source = loot.source;
+        let actor = |uid| {
+            if let Some(player) = self.players.get(&PlayerId(uid)) {
+                return Some(death_loot_player(player));
+            }
+            if let Some(entity) = self.entities.public_at(uid) {
+                let mut view = mc_bamboo_loot::EntityView::new(entity.kind.entity_type());
+                view.position = Some(loot_position(entity.position));
+                if let KindPublic::Mob(mob) = &entity.kind {
+                    view.is_living = true;
+                    view.equipment[mc_bamboo_loot::EquipmentSlot::Mainhand.index()] = mob
+                        .equipment
+                        .iter()
+                        .find(|(slot, _)| {
+                            *slot == mc_bamboo_protocol::packet::play::EquipmentSlot::MainHand
+                        })
+                        .map(|(_, stack)| game_stack_to_loot(stack));
+                }
+                return Some(view);
+            }
+            // 命中的箭正在落地命令中，暂时离开实体表。
+            // An impacting arrow can be temporarily absent from the entity store.
+            (source.direct == Some(uid) && source.projectile_motion.is_some())
+                .then(|| mc_bamboo_loot::EntityView::new(entity_type::ARROW))
+        };
+        let attacker = source.attacker.and_then(actor);
+        let direct = source.direct.and_then(actor);
+        let last_player = match loot.recent_player {
+            Some(uuid) => self
                 .players
                 .values()
-                .find(|player| player.id.0 == uid)
-                .map(|player| {
-                    game_stack_to_loot(player.inventory.held(mc_bamboo_core::Hand::Main))
-                });
-            let mut view =
-                mc_bamboo_loot::EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER);
-            view.is_living = true;
-            if let Some(stack) = held {
-                view.equipment[mc_bamboo_loot::EquipmentSlot::Mainhand.index()] = Some(stack);
-            }
-            let boxed = Box::new(view.clone());
-            attacker = Some(view.clone());
-            direct = Some(view);
-            last_player = Some(*boxed);
+                .find(|player| player.uuid.as_bytes() == &uuid),
+            None => loot
+                .recent_player_id
+                .and_then(|uid| self.players.get(&PlayerId(uid))),
         }
-        let victim_type = match table {
-            "minecraft:entities/zombie" => mc_bamboo_data::registries::entity_type::ZOMBIE,
-            "minecraft:entities/husk" => mc_bamboo_data::registries::entity_type::HUSK,
-            "minecraft:entities/skeleton" => mc_bamboo_data::registries::entity_type::SKELETON,
-            _ => mc_bamboo_data::registries::entity_type::COW,
-        };
-        let mut victim = mc_bamboo_loot::EntityView::new(victim_type);
+        .map(death_loot_player);
+        let mut victim = mc_bamboo_loot::EntityView::new(loot.victim.entity_type());
         victim.is_living = true;
-        victim.is_on_fire = on_fire;
+        victim.is_on_fire = loot.on_fire;
+        victim.position = Some(loot_position(origin));
         let view = crate::block_drops::ChunkLevel {
             chunks: self.chunks,
             weather: self.block_weather,
         };
         let params = mc_bamboo_loot::EntityDeathParams {
             entity: victim,
-            origin: mc_bamboo_loot::Position::new(0.0, 0.0, 0.0),
+            origin: loot_position(origin),
             damage_source: mc_bamboo_loot::DamageSourceView {
-                damage_type: 0,
+                damage_type: mc_bamboo_data::damage_type_id(source.kind.name()).unwrap_or_default(),
                 direct_entity: direct.clone().map(Box::new),
                 source_entity: attacker.clone().map(Box::new),
-                is_direct: true,
+                is_direct: source.direct == source.attacker,
             },
             attacking_entity: attacker,
             direct_attacking_entity: direct,
@@ -742,7 +752,7 @@ impl Level for RegionLevel<'_> {
             level: Some(&view),
         };
         match mc_bamboo_loot::entity_death_drops(
-            table,
+            loot.victim.loot_table(),
             &params,
             0,
             Some(self.loot_sequences),
@@ -831,6 +841,20 @@ fn equip_target(player: &Player) -> EquipTarget {
 ///
 /// Converts a game item stack into a loot stack, carrying the enchantment levels
 /// that loot conditions and `enchanted_count_increase` read.
+fn loot_position(pos: Vec3) -> mc_bamboo_loot::Position {
+    mc_bamboo_loot::Position::new(pos.x, pos.y, pos.z)
+}
+
+fn death_loot_player(player: &Player) -> mc_bamboo_loot::EntityView {
+    let mut view = mc_bamboo_loot::EntityView::new(entity_type::PLAYER);
+    view.is_living = true;
+    view.position = Some(loot_position(player.position()));
+    view.equipment[mc_bamboo_loot::EquipmentSlot::Mainhand.index()] = Some(game_stack_to_loot(
+        player.inventory.held(mc_bamboo_core::Hand::Main),
+    ));
+    view
+}
+
 fn game_stack_to_loot(stack: &ItemStack) -> mc_bamboo_loot::LootStack {
     let mut out = mc_bamboo_loot::LootStack::new(stack.item, stack.count);
     if let Some(mc_bamboo_protocol::components::ComponentValue::Enchantments(levels)) =

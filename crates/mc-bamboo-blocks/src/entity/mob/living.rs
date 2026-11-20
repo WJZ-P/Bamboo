@@ -1589,24 +1589,12 @@ fn die(me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx, source: DamageSo
     mob.events.push(MobEvent::Death);
     if (adult || mob.mob_type.is_monster()) && drops {
         ctx.emit(
-            Command::DropMobLoot {
-                table: mob.mob_type.loot_table(),
-                on_fire: me.remaining_fire_ticks > 0,
-                killer: source.attacker,
-                experience,
-            },
+            Command::DropMobLoot(super::MobDeathLoot::new(me, mob, source)),
             me,
         );
-    } else if experience > 0 {
-        ctx.emit(
-            Command::DropMobLoot {
-                table: "",
-                on_fire: false,
-                killer: source.attacker,
-                experience,
-            },
-            me,
-        );
+    }
+    if experience > 0 {
+        ctx.emit(Command::AwardDeathExperience { amount: experience }, me);
     }
 }
 
@@ -1694,28 +1682,4 @@ pub(crate) fn apply_push(
     if self_pushable {
         me.delta = me.delta.add(Vec3::new(dx, 0.0, dz));
     }
-}
-
-/// [`Command::DropMobLoot`] 的落地：战利品表交给世界，经验球按 `ExperienceOrb.award`
-/// 拆成几个，每个先取一次 `level.random.nextInt(40)`（`tryMergeToExisting`）。
-pub(crate) fn apply_death_drops(
-    me: &mut Entity,
-    table: &'static str,
-    on_fire: bool,
-    killer: Option<crate::entity::EntityUid>,
-    experience: i32,
-    world: &mut crate::world::World,
-) {
-    if !table.is_empty() {
-        for stack in world.mob_loot_drops(table, on_fire, killer) {
-            if !stack.is_empty() {
-                world.spawn_at_location(me.position, stack);
-            }
-        }
-    }
-    // `ExperienceOrb.award` 的拆分和每个 `nextInt(40)` 都在这一条路径里；
-    // 生成的球进实体表、发配对包、能存盘。
-    // `ExperienceOrb.award` splits the amount and draws one `nextInt(40)` per
-    // orb. The orbs enter the entity table, are paired and can be saved.
-    super::super::orb::award(world, me.position, experience);
 }

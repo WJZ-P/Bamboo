@@ -965,17 +965,15 @@ pub trait Level: LevelSideState + LevelEntities {
         Vec::new()
     }
 
-    /// 生物死时的战利品，`LivingEntity.dropFromLootTable`。`table` 是战利品表名，
-    /// 随机数取这张表的随机序列。默认没有战利品。
+    /// 生物死时的战利品，取战利品表自己的随机序列。默认不掉落。
     ///
     /// Mob death loot. The draw uses the table's random sequence. Default: nothing.
     fn mob_loot_drops(
         &mut self,
-        table: &str,
-        on_fire: bool,
-        killer: Option<EntityUid>,
+        loot: crate::entity::mob::MobDeathLoot,
+        origin: mc_bamboo_core::Vec3,
     ) -> Vec<ItemStack> {
-        let _ = (table, on_fire, killer);
+        let _ = (loot, origin);
         Vec::new()
     }
 
