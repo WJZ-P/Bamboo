@@ -115,55 +115,65 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 }
 
 /// 进程峰值常驻内存（字节）。macOS 的 `ru_maxrss` 单位就是字节。
+/// Windows 没有 `getrusage`，那里报 0，让基准仍能编译和运行。
+///
 /// Peak resident set size in bytes; macOS `ru_maxrss` is already in bytes.
+/// Windows has no `getrusage`, so it reports 0 and the benchmark still builds.
 fn peak_rss_bytes() -> u64 {
-    #[repr(C)]
-    struct RUsage {
-        ru_utime: [i64; 2],
-        ru_stime: [i64; 2],
-        ru_maxrss: i64,
-        ru_ixrss: i64,
-        ru_idrss: i64,
-        ru_isrss: i64,
-        ru_minflt: i64,
-        ru_majflt: i64,
-        ru_nswap: i64,
-        ru_inblock: i64,
-        ru_oublock: i64,
-        ru_msgsnd: i64,
-        ru_msgrcv: i64,
-        ru_nsignals: i64,
-        ru_nvcsw: i64,
-        ru_nivcsw: i64,
+    #[cfg(not(unix))]
+    {
+        return 0;
     }
-    unsafe extern "C" {
-        fn getrusage(who: i32, usage: *mut RUsage) -> i32;
-    }
-    let mut usage = RUsage {
-        ru_utime: [0; 2],
-        ru_stime: [0; 2],
-        ru_maxrss: 0,
-        ru_ixrss: 0,
-        ru_idrss: 0,
-        ru_isrss: 0,
-        ru_minflt: 0,
-        ru_majflt: 0,
-        ru_nswap: 0,
-        ru_inblock: 0,
-        ru_oublock: 0,
-        ru_msgsnd: 0,
-        ru_msgrcv: 0,
-        ru_nsignals: 0,
-        ru_nvcsw: 0,
-        ru_nivcsw: 0,
-    };
-    // RUSAGE_SELF = 0. 只读进程自己的计数，失败就报 0，不让基准 panic。
-    // RUSAGE_SELF = 0; read only our own counters and report 0 on failure.
-    let ok = unsafe { getrusage(0, &raw mut usage) };
-    if ok == 0 {
-        usage.ru_maxrss.max(0) as u64
-    } else {
-        0
+    #[cfg(unix)]
+    {
+        #[repr(C)]
+        struct RUsage {
+            ru_utime: [i64; 2],
+            ru_stime: [i64; 2],
+            ru_maxrss: i64,
+            ru_ixrss: i64,
+            ru_idrss: i64,
+            ru_isrss: i64,
+            ru_minflt: i64,
+            ru_majflt: i64,
+            ru_nswap: i64,
+            ru_inblock: i64,
+            ru_oublock: i64,
+            ru_msgsnd: i64,
+            ru_msgrcv: i64,
+            ru_nsignals: i64,
+            ru_nvcsw: i64,
+            ru_nivcsw: i64,
+        }
+        unsafe extern "C" {
+            fn getrusage(who: i32, usage: *mut RUsage) -> i32;
+        }
+        let mut usage = RUsage {
+            ru_utime: [0; 2],
+            ru_stime: [0; 2],
+            ru_maxrss: 0,
+            ru_ixrss: 0,
+            ru_idrss: 0,
+            ru_isrss: 0,
+            ru_minflt: 0,
+            ru_majflt: 0,
+            ru_nswap: 0,
+            ru_inblock: 0,
+            ru_oublock: 0,
+            ru_msgsnd: 0,
+            ru_msgrcv: 0,
+            ru_nsignals: 0,
+            ru_nvcsw: 0,
+            ru_nivcsw: 0,
+        };
+        // RUSAGE_SELF = 0. 只读进程自己的计数，失败就报 0，不让基准 panic。
+        // RUSAGE_SELF = 0; read only our own counters and report 0 on failure.
+        let ok = unsafe { getrusage(0, &raw mut usage) };
+        if ok == 0 {
+            usage.ru_maxrss.max(0) as u64
+        } else {
+            0
+        }
     }
 }
 
