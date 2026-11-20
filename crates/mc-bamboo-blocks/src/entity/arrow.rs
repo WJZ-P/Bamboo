@@ -530,7 +530,9 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
             me.removed = true;
         }
     }
-    false
+    // 拒伤造成的反弹发生在 onHitEntity 内，不是目标主动偏转。
+    // Reversal after rejected damage happens within onHitEntity, not as a target deflection.
+    arrow_pierces(me) && !me.removed
 }
 
 fn impact_damage(arrow: &Arrow) -> f64 {
@@ -648,6 +650,33 @@ fn finish_flight(me: &mut Entity, blocks: &dyn BlockView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn piercing_arrow_keeps_hitting_after_rejection_until_it_reaches_the_limit() {
+        use crate::entity::mob::MobType;
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut arrow = Entity::arrow(Vec3::new(0.5, 65.0, 0.5));
+        if let EntityKind::Arrow(data) = &mut arrow.kind {
+            data.pierce = 1;
+            data.base_damage = 0.5;
+        }
+        arrow.shoot_arrow(Vec3::new(1.0, 0.0, 0.0), 6.0, 0.0);
+        let projectile = world.spawn_entity(arrow);
+        let targets = [2.0, 3.5, 5.5].map(|x| {
+            let mut target = Entity::by_mob_type(MobType::Cow, Vec3::new(x, 64.0, 0.5));
+            target.with_mob(|_, mob| {
+                mob.no_ai = true;
+                mob.invulnerable = x == 2.0;
+            });
+            world.spawn_entity(target)
+        });
+        world.tick_entities();
+        let health = targets.map(|id| world.entity(id).unwrap().kind.mob().unwrap().health);
+        assert_eq!(health, [10.0, 9.0, 10.0]);
+        assert!(world.entity(projectile).is_none());
+    }
 
     #[test]
     fn no_gravity_keeps_air_drag_and_does_not_add_vertical_speed() {
