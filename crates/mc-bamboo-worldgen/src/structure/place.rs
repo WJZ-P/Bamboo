@@ -25,11 +25,6 @@ use crate::{
     },
 };
 
-/// 官方 `StructurePiece.postProcess` 的 `level` 和 `chunkBB` 两件参数，外加结构件自己的
-/// 朝向、rotation 和 mirror。
-///
-/// The `level` and `chunkBB` parameters of vanilla `StructurePiece.postProcess`, plus the
-/// piece's own orientation, rotation and mirror.
 /// `StructurePiece.SHAPE_CHECK_BLOCKS`（26.3 字节码里的 ImmutableSet：栅栏 /
 /// 火把 / 梯子 / 铁栏杆）。
 /// `StructurePiece.SHAPE_CHECK_BLOCKS` (the ImmutableSet in 26.3 bytecode:
@@ -67,6 +62,11 @@ pub type WriteLog = Option<Vec<Write>>;
 /// A  result: the height adjustment and the write log.
 pub type Placed = (Option<(i32, [i32; 6])>, WriteLog);
 
+/// 官方 `StructurePiece.postProcess` 的 `level` 和 `chunkBB` 两件参数，外加结构件自己的
+/// 朝向、rotation 和 mirror。
+///
+/// The `level` and `chunkBB` parameters of vanilla `StructurePiece.postProcess`, plus the
+/// piece's own orientation, rotation and mirror.
 pub struct PieceContext<'a, 'b> {
     pub world: &'a mut FeatureWorld<'b>,
     /// `chunkBB`：只在这个盒子里写字，出了盒子 `placeBlock` 直接丢弃。

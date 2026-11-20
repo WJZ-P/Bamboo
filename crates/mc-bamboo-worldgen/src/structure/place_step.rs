@@ -384,10 +384,12 @@ fn place_start(
                 let place_random =
                     pieces::make_random(options.seed ^ 0x5DEECE66D, input.center_x, input.center_z);
                 let before = world.write_count;
+                // 海底神殿的件走 `StructurePiece.placeBlock` / `generateBox`（`flags=2`）。
+                // Monument pieces use `StructurePiece.placeBlock` / `generateBox` (`flags=2`).
                 let mut level = FeaturePieceLevel {
                     world,
                     world_random: WorldgenRandom::new(Random::Legacy(LegacyRandom::new(0))),
-                    mark_shape_check: false,
+                    mark_shape_check: true,
                 };
                 let sea_level = level.world.sea_level;
                 pieces::ocean_monument_place::place_in_chunk(
@@ -712,7 +714,7 @@ fn place_layout_piece(
     let mut adapter = FeaturePieceLevel {
         world,
         world_random,
-        mark_shape_check: !matches!(kind, "mansion" | "monument"),
+        mark_shape_check: kind != "mansion",
     };
     match kind {
         "igloo" | "shipwreck" | "ocean_ruin" => {
@@ -1024,10 +1026,13 @@ fn dispatch_stronghold(
 struct FeaturePieceLevel<'w, 'a> {
     world: &'w mut FeatureWorld<'a>,
     world_random: WorldgenRandom,
-    /// 官方 `StructureTemplate.placeInWorld` 用 `flags=820`（含 bit 16），
-    /// 不记 `SHAPE_CHECK_BLOCKS`；府邸 / 海底神殿走这条路。
-    /// Vanilla's `StructureTemplate.placeInWorld` uses `flags=820` (bit 16 set)
-    /// and skips `SHAPE_CHECK_BLOCKS`; mansions / monuments use this path.
+    /// 为真时 `set_block` 是 `StructurePiece.placeBlock`（`flags=2`：记
+    /// `SHAPE_CHECK_BLOCKS`、跑 `getPostProcessPos`）；为假时是府邸模板的
+    /// `StructureTemplate.placeInWorld`（`flags=820`，含 bit 16，两样都不记）。
+    /// When true, `set_block` is `StructurePiece.placeBlock` (`flags=2`: marks
+    /// `SHAPE_CHECK_BLOCKS` and runs `getPostProcessPos`); when false it is the
+    /// mansion templates' `StructureTemplate.placeInWorld` (`flags=820`, bit 16
+    /// set, neither).
     mark_shape_check: bool,
 }
 
@@ -1057,10 +1062,13 @@ impl PieceLevel for FeaturePieceLevel<'_, '_> {
         }
     }
 
-    /// 结构件直接 `level.setBlock(..., 2)` 的写入，不记 `SHAPE_CHECK_BLOCKS`。
-    /// A direct `level.setBlock(..., 2)` write, without `SHAPE_CHECK_BLOCKS` marks.
+    /// 结构件直接 `level.setBlock(..., 2)` 的写入，不记 `SHAPE_CHECK_BLOCKS`；
+    /// `flags=2` 不含 bit 16，`WorldGenRegion.setBlock` 照常跑 `getPostProcessPos`。
+    /// A direct `level.setBlock(..., 2)` write: no `SHAPE_CHECK_BLOCKS` mark, but
+    /// `flags=2` lacks bit 16, so `WorldGenRegion.setBlock` still runs
+    /// `getPostProcessPos`.
     fn set_block_direct(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
-        self.world.set_structure_block(x, y, z, state)
+        self.world.set_block_with_heightmaps(x, y, z, state)
     }
 
     fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {

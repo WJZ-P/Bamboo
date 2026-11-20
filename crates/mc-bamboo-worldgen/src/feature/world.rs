@@ -261,13 +261,16 @@ impl<'a> FeatureWorld<'a> {
         self.set_block_inner(x, y, z, state, true)
     }
 
-    /// `StructurePiece` / `StructureTemplate` 的写用 `flags = 2` 或 `820`：
-    /// 前者只按 `SHAPE_CHECK_BLOCKS` 标记（调用方负责），后者含 bit 16 不标记；
-    /// 两者都不跑 `getPostProcessPos`。
+    /// `StructureTemplate.placeInWorld` 的写用 `flags = 820`：含 bit 16，
+    /// `WorldGenRegion.setBlock` 不跑 `getPostProcessPos`，也不记 `SHAPE_CHECK_BLOCKS`。
+    /// `StructurePiece.placeBlock`（`flags = 2`）不走这里，用
+    /// [`Self::set_block_with_heightmaps`] 并由调用方补 `SHAPE_CHECK_BLOCKS`。
     ///
-    /// `StructurePiece` / `StructureTemplate` writes use `flags = 2` or `820`:
-    /// the former marks `SHAPE_CHECK_BLOCKS` (done by the caller) and the latter
-    /// has bit 16 set; neither runs `getPostProcessPos`.
+    /// `StructureTemplate.placeInWorld` writes use `flags = 820`: bit 16 is set,
+    /// so `WorldGenRegion.setBlock` skips `getPostProcessPos` and nothing records
+    /// `SHAPE_CHECK_BLOCKS`. `StructurePiece.placeBlock` (`flags = 2`) uses
+    /// [`Self::set_block_with_heightmaps`] instead, with the caller adding the
+    /// `SHAPE_CHECK_BLOCKS` mark.
     pub fn set_structure_block(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
         self.set_block_inner(x, y, z, state, false)
     }
