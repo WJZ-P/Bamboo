@@ -7,7 +7,7 @@
 //! 检查距离、光照、方块和碰撞条件，最后 `finalizeSpawn` 并按组生成。
 //!
 //! 随机数的取数顺序照官方：`getRandomPosWithin` 三次、每组一次 `nextFloat` 定上限、
-//! 每步两次 `nextInt(6)`、挑表 `nextInt(总权重)`、组大小 `count.sample`、生成规则里的
+//! 每步四次 `nextInt(6)`、挑表 `nextInt(总权重)`、组大小 `count.sample`、生成规则里的
 //! `nextInt(32)` / `nextInt(8)`、朝向 `nextFloat`、`finalizeSpawn` 各取数。
 //!
 //! Natural spawning, vanilla `NaturalSpawner`. Each tick rebuilds a [`SpawnState`] from
@@ -48,26 +48,6 @@ const GROUP_ATTEMPTS: i32 = 3;
 
 /// 每步候选点的水平漂移上限（`nextInt(6) - nextInt(6)`）。
 const STEP_RANGE: i32 = 6;
-
-/// 刷怪表里的一项，按加权表挑出来以后要能回查。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SpawnEntry {
-    entity_type: i32,
-    weight: i32,
-    min: i32,
-    max: i32,
-}
-
-impl SpawnEntry {
-    fn of(entry: &MobSpawnerDef) -> Self {
-        Self {
-            entity_type: entry.entity_type,
-            weight: entry.weight,
-            min: entry.min,
-            max: entry.max,
-        }
-    }
-}
 
 /// `PotentialCalculator.PointCharge`。
 #[derive(Debug, Clone, Copy)]
@@ -226,7 +206,7 @@ impl SpawnState {
     fn players_close_to(&self, chunk: ChunkPos) -> Vec<PlayerView> {
         self.players
             .iter()
-            .filter(|player| player_is_close_to_chunk(**player, chunk))
+            .filter(|player| is_close_to_spawn_chunk(player.position, chunk))
             .copied()
             .collect()
     }
@@ -320,21 +300,28 @@ fn spawn_category_for_chunk(
     state: &mut SpawnState,
     params: &SpawnParams,
 ) {
-    let start = random_pos_within(world, chunk);
+    let min_y = world.min_y();
+    let start = random_pos_within(world.random(), chunk, min_y, |x, z| {
+        world.world_surface_y(BlockPos::new(x, min_y, z))
+    });
     if start.y > world.min_y() {
         spawn_category_for_position(world, category, chunk, start, state, params);
     }
 }
 
-/// `NaturalSpawner.getRandomPosWithin`：先取 x、z，再用 `WORLD_SURFACE` 高度图取 y。
-fn random_pos_within(world: &World, chunk: ChunkPos) -> BlockPos {
-    let random = world.random();
+/// `NaturalSpawner.getRandomPosWithin`：先取 x、z，再从世界底部到第一个空位（含）抽 y。
+///
+/// Vanilla `getRandomPosWithin`: draw x and z, then draw y from the world bottom
+/// through the first available height (inclusive).
+pub fn random_pos_within(
+    random: &crate::random::LegacyRandom,
+    chunk: ChunkPos,
+    min_y: i32,
+    first_available_y: impl FnOnce(i32, i32) -> i32,
+) -> BlockPos {
     let x = chunk.x * 16 + random.next_int(16);
     let z = chunk.z * 16 + random.next_int(16);
-    let top_empty_y = world.world_surface_y(BlockPos::new(x, world.min_y(), z)) + 1;
-    let min_y = world.min_y();
-    let span = (top_empty_y - min_y + 1).max(1);
-    let y = min_y + random.next_int(span);
+    let y = random.next_int_between_inclusive(min_y, first_available_y(x, z));
     BlockPos::new(x, y, z)
 }
 
@@ -355,7 +342,7 @@ fn spawn_category_for_position(
     for _group in 0..GROUP_ATTEMPTS {
         let mut x = start.x;
         let mut z = start.z;
-        let mut current: Option<SpawnEntry> = None;
+        let mut current = None;
         let mut group: Option<spawn::SpawnGroup> = None;
         let mut max = mth::ceil(f64::from(world.random().next_float()) * 4.0);
         let mut group_size = 0;
@@ -380,10 +367,14 @@ fn spawn_category_for_position(
                     break;
                 };
                 current = Some(entry);
-                max = sample_count(world, entry);
+                max = sample(entry, world.random());
             }
             let entry = current.expect("上面刚填过");
-            let kind = MobType::by_entity_type(entry.entity_type).expect("刷怪表只留已支持的类型");
+            // 保留未实现生物的权重和组大小抽取，但不能为它创建实体。
+            // Preserve the weight and group-size draw of unimplemented mobs, but do not create them.
+            let Some(kind) = MobType::by_entity_type(entry.entity_type) else {
+                break;
+            };
             if !is_valid_spawn_position_for_type(world, category, entry, kind, pos, nearest, state)
             {
                 continue;
@@ -433,14 +424,16 @@ fn is_right_distance_to_player_and_spawn_point(
         }
     }
     let chunk_pos = chunk_at(pos);
-    chunk_pos == chunk || world.level().chunk_ticks_entities(chunk_pos)
+    chunk_pos == chunk
+        || (world.level().chunk_ticks_entities(chunk_pos)
+            && world.world_border().is_within_bounds_chunk(chunk_pos))
 }
 
 /// `NaturalSpawner.isValidSpawnPostitionForType`。
 fn is_valid_spawn_position_for_type(
     world: &mut World,
     category: MobCategory,
-    entry: SpawnEntry,
+    entry: &MobSpawnerDef,
     kind: MobType,
     pos: BlockPos,
     nearest_player_distance_sqr: f64,
@@ -462,22 +455,22 @@ fn is_valid_spawn_position_for_type(
     if !check_spawn_rules(world, kind, pos) {
         return false;
     }
-    if !state.can_spawn(world, kind, pos) {
-        return false;
-    }
-    no_collision(world, spawn_aabb(kind, pos))
+    no_collision(world, spawn_aabb(kind, pos)) && state.can_spawn(world, kind, pos)
 }
 
-/// `NaturalSpawner.canSpawnMobAt`：这一点的群系表里还有这一项。
+/// `NaturalSpawner.canSpawnMobAt` 比较 `SpawnerData`；权重属于列表，不参与比较。
+///
+/// Vanilla `canSpawnMobAt` compares `SpawnerData`; the list owns the weight.
 fn can_spawn_mob_at(
     world: &World,
     category: MobCategory,
-    entry: SpawnEntry,
+    entry: &MobSpawnerDef,
     pos: BlockPos,
 ) -> bool {
-    mobs_at(world, category, pos)
-        .iter()
-        .any(|candidate| SpawnEntry::of(candidate) == entry)
+    mobs_at(world, category, pos).iter().any(|candidate| {
+        (candidate.entity_type, candidate.min, candidate.max)
+            == (entry.entity_type, entry.min, entry.max)
+    })
 }
 
 /// `NaturalSpawner.mobsAt`（下界要塞那一支不建模）。
@@ -490,15 +483,14 @@ fn settings_at(world: &World, pos: BlockPos) -> MobSpawnSettings {
     spawning::for_biome_id(world.biome_id(pos))
 }
 
-/// `NaturalSpawner.getRandomSpawnMobAt`，外加「挑到 Bamboo 没有的生物时当作没有刷怪数据」。
+/// `NaturalSpawner.getRandomSpawnMobAt`：先抽完整刷怪表，再由调用方决定能否生成。
 ///
-/// `NaturalSpawner.getRandomSpawnMobAt`, plus "a pick Bamboo cannot create counts as no
-/// spawn data": only the modelled mob types can spawn.
+/// Vanilla `getRandomSpawnMobAt`: draw from the full table before checking support.
 fn random_spawn_mob_at(
     world: &mut World,
     category: MobCategory,
     pos: BlockPos,
-) -> Option<SpawnEntry> {
+) -> Option<&'static MobSpawnerDef> {
     if category == MobCategory::WaterAmbient
         && biome_tag_contains(
             "minecraft:reduced_water_ambient_spawns",
@@ -509,20 +501,7 @@ fn random_spawn_mob_at(
         return None;
     }
     let table = mobs_at(world, category, pos);
-    let picked = pick(table, world.random())?;
-    MobType::by_entity_type(picked.entity_type)?;
-    Some(SpawnEntry::of(picked))
-}
-
-/// `IntProvider.sample` 的取数入口，参数是已经挑中的那一项。
-fn sample_count(world: &World, entry: SpawnEntry) -> i32 {
-    let def = MobSpawnerDef {
-        entity_type: entry.entity_type,
-        weight: entry.weight,
-        min: entry.min,
-        max: entry.max,
-    };
-    sample(&def, world.random())
+    pick(table, world.random())
 }
 
 /// 官方 `WeightedList.getRandom`：`nextInt(总权重)` 之后按累减权重挑一项。
@@ -733,9 +712,9 @@ fn contains_any_liquid(world: &World, box_: Aabb) -> bool {
         box_.min(Axis::Z).floor() as i32,
     );
     let max = BlockPos::new(
-        box_.max(Axis::X).ceil() as i32,
-        box_.max(Axis::Y).ceil() as i32,
-        box_.max(Axis::Z).ceil() as i32,
+        box_.max(Axis::X).floor() as i32,
+        box_.max(Axis::Y).floor() as i32,
+        box_.max(Axis::Z).floor() as i32,
     );
     for y in min.y..=max.y {
         for z in min.z..=max.z {
@@ -774,15 +753,15 @@ fn is_max_group_size_reached(kind: MobType, group_size: i32) -> bool {
     false
 }
 
-/// `ChunkMap.playerIsCloseEnoughForSpawning`：不是旁观者，离区块中心小于 128 格。
-fn player_is_close_to_chunk(player: PlayerView, chunk: ChunkPos) -> bool {
-    if player.spectator {
-        return false;
-    }
+/// `ChunkMap.playerIsCloseEnoughForSpawning` 的几何条件：水平距区块中心小于 128 格。
+///
+/// The geometric part of `ChunkMap.playerIsCloseEnoughForSpawning`: horizontal
+/// distance from the chunk centre is strictly less than 128 blocks.
+pub fn is_close_to_spawn_chunk(position: Vec3, chunk: ChunkPos) -> bool {
     let cx = f64::from(chunk.x * 16 + 8);
     let cz = f64::from(chunk.z * 16 + 8);
-    let dx = cx - player.position.x;
-    let dz = cz - player.position.z;
+    let dx = cx - position.x;
+    let dz = cz - position.z;
     dx * dx + dz * dz < 16384.0
 }
 
@@ -896,6 +875,24 @@ mod tests {
         assert_eq!(state.count(MobCategory::Creature), 1);
         assert_eq!(state.count(MobCategory::Monster), 1);
         assert_eq!(state.count(MobCategory::WaterCreature), 0);
+    }
+
+    #[test]
+    fn spawn_obstruction_ignores_liquid_beyond_the_bounding_box() {
+        let mut level = TestLevel::new();
+        let liquid = BlockPos::new(1, 64, 0);
+        level.set(liquid, BlockState(blocks::WATER));
+        let mut ticks = BlockTicks::new();
+        let world = World::new(&mut level, &mut ticks);
+        assert!(!world.fluid_state(liquid).is_empty());
+        assert!(!contains_any_liquid(
+            &world,
+            Aabb::new(0.1, 64.0, 0.1, 0.9, 65.4, 0.9)
+        ));
+        assert!(contains_any_liquid(
+            &world,
+            Aabb::new(0.1, 64.0, 0.1, 1.0, 65.4, 0.9)
+        ));
     }
 
     #[test]

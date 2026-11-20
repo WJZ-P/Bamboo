@@ -19,6 +19,8 @@ use std::collections::BTreeSet;
 use mc_bamboo_blocks::World;
 use mc_bamboo_blocks::entity::mob::natural::{self, SpawnParams, SpawnState};
 use mc_bamboo_core::ChunkPos;
+use mc_bamboo_data::gamerules::SPECTATORS_GENERATE_CHUNKS;
+use mc_bamboo_protocol::packet::play::GameMode;
 
 use crate::region::Region;
 
@@ -40,7 +42,8 @@ pub(crate) fn tick(region: &mut Region) {
         return;
     }
     let spawn_enemies = region.global.block_rules.spawn_monsters;
-    let spawnable_chunk_count = spawnable_chunk_count(region);
+    let candidates = spawn_candidate_chunks(region);
+    let spawnable_chunk_count = candidates.len() as i32;
     if spawnable_chunk_count == 0 {
         return;
     }
@@ -50,7 +53,6 @@ pub(crate) fn tick(region: &mut Region) {
         per_player_cap: region.spawn_per_player_cap,
         respawn_pos: Some(region.global.spawn.pos),
     };
-    // `createState` 读这一刻的实体表和玩家表，两样都借自 region。
     let mut state = {
         let (mut level, ticks) = region.block_level();
         let world = World::new(&mut level, ticks);
@@ -58,7 +60,7 @@ pub(crate) fn tick(region: &mut Region) {
     };
     let spawn_persistent = region.tick.game_time() % 400 == 0;
     let categories = state.filtered_categories(spawn_enemies, spawn_persistent);
-    let mut chunks = spawning_chunks(region);
+    let mut chunks = spawning_chunks(region, &candidates);
     // 官方即使没有可刷的类别也照样收集并打乱刷怪区块列表（`tickChunks` 里打乱在
     // 类别判断之外），所以这里也每刻取这一串随机数。
     //
@@ -74,6 +76,9 @@ pub(crate) fn tick(region: &mut Region) {
         return;
     }
     for chunk in chunks {
+        if !region.tick_levels.chunk_ticks_entities(chunk) {
+            continue;
+        }
         let (mut level, ticks) = region.block_level();
         let mut world = World::new(&mut level, ticks);
         natural::spawn_for_chunk(&mut world, chunk, &mut state, &params, &categories);
@@ -82,55 +87,51 @@ pub(crate) fn tick(region: &mut Region) {
     }
 }
 
-/// `chunkMap.collectSpawningChunks`：能 tick 实体的区块。无限超平坦模式没有等级，
-/// 按每名玩家模拟距离内的方形收集（和随机刻的兜底一致）。
+/// `ChunkMap.collectSpawningChunks`：从候选区块中收集已达方块 tick 等级、且区块中心距
+/// 非旁观玩家不到 128 格的区块。实体 tick 的门槛在打乱之后检查。
 ///
-/// `chunkMap.collectSpawningChunks`: the entity-ticking chunks. Infinite superflat has
-/// no levels, so the player squares inside the simulation distance are used, as the
-/// random-tick fallback does.
-fn spawning_chunks(region: &Region) -> Vec<ChunkPos> {
-    if region.tick_levels.enabled() {
-        let mut chunks: Vec<ChunkPos> = region
-            .tick_levels
-            .entity_chunks()
-            .into_iter()
-            .filter(|chunk| region.chunks.is_loaded(*chunk))
-            .collect();
-        chunks.sort();
-        return chunks;
-    }
+/// `ChunkMap.collectSpawningChunks`: collect block-ticking candidates whose centres
+/// are less than 128 blocks from a non-spectator. Check entity ticking after shuffling.
+fn spawning_chunks(region: &Region, candidates: &BTreeSet<ChunkPos>) -> Vec<ChunkPos> {
     let radius = crate::interaction::SIMULATION_DISTANCE.min(region.view_distance + 1);
-    let mut chunks = BTreeSet::new();
-    for player in region.players.values() {
-        let center = player.chunk_pos();
-        for dx in -radius..=radius {
-            for dz in -radius..=radius {
-                chunks.insert(ChunkPos::new(center.x + dx, center.z + dz));
-            }
-        }
-    }
-    chunks.into_iter().collect()
+    candidates
+        .iter()
+        .copied()
+        .filter(|&chunk| {
+            region.chunks.is_loaded(chunk)
+                && region.tick_levels.chunk_ticks_blocks(chunk)
+                && region.players.values().any(|player| {
+                    player.game_mode != GameMode::Spectator
+                        && (region.tick_levels.enabled()
+                            || in_chunk_square(player.chunk_pos(), chunk, radius))
+                        && natural::is_close_to_spawn_chunk(player.position(), chunk)
+                })
+        })
+        .collect()
 }
 
 /// `DistanceManager.getNaturalSpawnChunkCount()`：玩家周围 8 个区块（切比雪夫距离，
 /// 也就是 17×17 的方形）里的区块个数，按区块去重。官方的追踪器从玩家所在区块出发、
 /// 每跨一格（含对角）加一，所以是方形而不是菱形；它也只看玩家票，不看区块是否加载，
-/// 旁观者的玩家票同样算数。
+/// 旁观者仅在 `spectators_generate_chunks` 开启时贡献玩家票。
 ///
 /// `DistanceManager.getNaturalSpawnChunkCount()`: the number of chunks within 8
 /// chunks of a player, counted once per chunk. The vanilla tracker grows by one per
 /// step in all eight directions, so the shape is a square, not a diamond. It counts
-/// player tickets only (spectators included) and does not look at load state.
-fn spawnable_chunk_count(region: &Region) -> i32 {
-    let mut chunks = BTreeSet::new();
-    for player in region.players.values() {
-        for chunk in chunk_square(player.chunk_pos(), SPAWN_CHUNK_RADIUS) {
-            if region.chunks.is_loaded(chunk) {
-                chunks.insert(chunk);
-            }
-        }
-    }
-    chunks.len() as i32
+/// player tickets only, includes spectators only when they generate chunks, and
+/// does not look at load state.
+fn spawn_candidate_chunks(region: &Region) -> BTreeSet<ChunkPos> {
+    let spectators_generate = region.global.rules.bool(SPECTATORS_GENERATE_CHUNKS);
+    region
+        .players
+        .values()
+        .filter(|player| spectators_generate || player.game_mode != GameMode::Spectator)
+        .flat_map(|player| chunk_square(player.chunk_pos(), SPAWN_CHUNK_RADIUS))
+        .collect()
+}
+
+fn in_chunk_square(center: ChunkPos, chunk: ChunkPos, radius: i32) -> bool {
+    (center.x - chunk.x).abs().max((center.z - chunk.z).abs()) <= radius
 }
 
 /// 以 `center` 为中心、切比雪夫半径 `radius` 的区块，含对角。
