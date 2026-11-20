@@ -90,6 +90,10 @@ pub enum Goal {
     /// `HurtByTargetGoal`：记住上一次伤害的时间戳，把攻击者设成目标。
     HurtByTarget {
         timestamp: i32,
+        /// `TargetGoal.unseenTicks`：连续看不见目标的刻数（`mustSee` 为真）。
+        unseen_ticks: i32,
+        /// `TargetGoal.targetMob`：`start` 时记下的目标，`getTarget()` 读成空时回退到它。
+        target_mob: Option<EntityUid>,
     },
     /// `NearestAttackableTargetGoal`：按 `TargetType` 选最近目标，缺省类型跳过。
     NearestAttackableTarget {
@@ -364,7 +368,14 @@ impl GoalSelector {
         };
         Self {
             goals: vec![
-                wrap(1, Goal::HurtByTarget { timestamp: -1 }),
+                wrap(
+                    1,
+                    Goal::HurtByTarget {
+                        timestamp: -1,
+                        unseen_ticks: 0,
+                        target_mob: None,
+                    },
+                ),
                 wrap(
                     2,
                     Goal::NearestAttackableTarget {
@@ -688,10 +699,24 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             );
             start_path.is_some() || within_melee_range(me, mob, target)
         }
-        Goal::HurtByTarget { timestamp } => {
-            let last = mob.last_hurt_by_mob;
-            let stamp = mob.last_hurt_by_mob_timestamp;
-            last.is_some() && stamp != *timestamp
+        Goal::HurtByTarget { timestamp, .. } => {
+            let Some(last) = mob.last_hurt_by_mob else {
+                return false;
+            };
+            if mob.last_hurt_by_mob_timestamp == *timestamp {
+                return false;
+            }
+            // `canAttack(last, HURT_BY_TARGETING)`：战斗条件，不看距离、视线和隐身。
+            // 打它的是别的生物时（本期只有玩家会打僵尸）不在这里拦。
+            match player_by_uid(ctx.blocks(), last) {
+                Some(player) => {
+                    player.alive
+                        && !player.spectator
+                        && can_attack_player(ctx.blocks(), &player)
+                        && !allied(mob, ctx.blocks(), &player)
+                }
+                None => true,
+            }
         }
         Goal::NearestAttackableTarget {
             kind,
@@ -823,21 +848,21 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             // `!navigation.isDone()` 才继续；路径走完就停。
             target_player(mob, ctx).is_some() && !mob.navigation.is_done()
         }
-        Goal::HurtByTarget { .. } | Goal::NearestAttackableTarget { .. } => {
-            // `TargetGoal.canContinueToUse`：`getTarget()` 把打不了的目标（死了、创造、
-            // 旁观、和平难度）读成 null，回退到的 `targetMob` 是同一个玩家，同样打不了；
-            // 打得了还要在跟随距离内。`mustSee` 的视线记忆本期不建模（目标恒看得见）。
-            let range = mob
-                .attributes
-                .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
-            target_player(mob, ctx).is_some_and(|player| {
-                let (dx, dy, dz) = (
-                    player.position.x - me.position.x,
-                    player.position.y - me.position.y,
-                    player.position.z - me.position.z,
-                );
-                dx * dx + dy * dy + dz * dz <= range * range
-            })
+        Goal::HurtByTarget {
+            unseen_ticks,
+            target_mob,
+            ..
+        } => {
+            // `HurtByTargetGoal.start` 把 `unseenMemoryTicks` 改成 300。
+            let target = target_player(mob, ctx)
+                .map(|player| player.uid)
+                .or(*target_mob);
+            target_continues(me, mob, ctx, target, unseen_ticks, 300)
+        }
+        Goal::NearestAttackableTarget { unseen_ticks, .. } => {
+            // 这个目标不写 `targetMob`，`getTarget()` 读成空就停。
+            let target = target_player(mob, ctx).map(|player| player.uid);
+            target_continues(me, mob, ctx, target, unseen_ticks, 60)
         }
         Goal::RestrictSun => {
             ctx.blocks().is_bright_outside()
@@ -914,9 +939,16 @@ fn start_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Ent
             // `ZombieAttackGoal.tick()` 会按抬手计时再覆盖。
             mob.aggressive = true;
         }
-        Goal::HurtByTarget { timestamp } => {
-            *timestamp = mob.last_hurt_by_mob_timestamp;
+        Goal::HurtByTarget {
+            timestamp,
+            unseen_ticks,
+            target_mob,
+        } => {
+            // `setTarget(lastHurtByMob)` 经过 `asValidTarget`，`targetMob = getTarget()`。
             mob.target = mob.last_hurt_by_mob;
+            *target_mob = target_player(mob, ctx).map(|player| player.uid);
+            *timestamp = mob.last_hurt_by_mob_timestamp;
+            *unseen_ticks = 0;
         }
         Goal::NearestAttackableTarget {
             found,
@@ -989,7 +1021,10 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         // `RestrictSunGoal.stop`：`setAvoidSun(false)`。
         Goal::RestrictSun => mob.navigation.avoid_sun = false,
         // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
-        Goal::HurtByTarget { .. } => mob.target = None,
+        Goal::HurtByTarget { target_mob, .. } => {
+            mob.target = None;
+            *target_mob = None;
+        }
         Goal::NearestAttackableTarget { found, .. } => {
             mob.target = None;
             *found = None;
@@ -1121,12 +1156,11 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 .set_look_at_default(me.position.x + *rel_x, eye, me.position.z + *rel_z);
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
-        Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
-        Goal::NearestAttackableTarget { unseen_ticks, .. } => {
-            *unseen_ticks += 1;
-            // 官方 `TargetGoal.canContinueToUse` 在 `mustSee` 时按视线刷新
-            // `unseenTicks`；本期的玩家目标恒可攻击，不改随机源。
-        }
+        // `TargetGoal` 没有 `tick`，视线记忆在 `canContinueToUse` 里推进。
+        Goal::Unavailable(_)
+        | Goal::HurtByTarget { .. }
+        | Goal::NearestAttackableTarget { .. }
+        | Goal::RestrictSun => {}
         Goal::MeleeAttack {
             speed,
             ticks_until_next_attack,
@@ -1146,9 +1180,11 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
                 30.0,
             );
             *ticks_until_path_recalc = (*ticks_until_path_recalc - 1).max(0);
-            // 官方 `MeleeAttackGoal.tick`：三个短路串行，
+            // 官方 `MeleeAttackGoal.tick`：僵尸的 `followingTargetEvenIfNotSeen` 为假，
+            // 看不见目标时不重新寻路；后面三个短路串行，
             // `nextFloat` 只在「pathed 非零且目标离它 < 1」时被求值。
-            if *ticks_until_path_recalc == 0
+            if living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position())
+                && *ticks_until_path_recalc == 0
                 && (*pathed_target == Vec3::default()
                     || target.position.distance_to_sqr(*pathed_target) >= 1.0
                     || me.random.next_float() < 0.05)
@@ -1439,6 +1475,58 @@ pub(crate) fn player_by_uid(view: &dyn BlockView, uid: EntityUid) -> Option<Play
     found
 }
 
+/// `LivingEntity.canAttack(player)`：和平难度打不了玩家，否则看 `canBeSeenAsEnemy`
+/// （活着、不是旁观、不是创造的无敌）。
+fn can_attack_player(view: &dyn BlockView, player: &PlayerView) -> bool {
+    view.difficulty() != 0 && player.alive && !player.spectator && !player.creative
+}
+
+/// `Entity.isAlliedTo(player)`：生物在队伍里，而且和玩家是同一队。
+fn allied(mob: &Mob, view: &dyn BlockView, player: &PlayerView) -> bool {
+    view.entity_team(&mob.uuid)
+        .is_some_and(|team| player.team == Some(team))
+}
+
+/// `TargetGoal.canContinueToUse`（`mustSee` 为真，`unseenMemoryTicks` 由调用方给）：
+/// 目标打得了、不同队、在跟随距离内；看得见就清零记忆，看不见超过
+/// `reducedTickDelay(memory)` 刻就放弃。继续时 `setTarget(target)`。
+fn target_continues(
+    me: &Entity,
+    mob: &mut Mob,
+    ctx: &dyn EntityCtx,
+    target: Option<EntityUid>,
+    unseen_ticks: &mut i32,
+    memory: i32,
+) -> bool {
+    let view = ctx.blocks();
+    let Some(player) = target.and_then(|uid| player_by_uid(view, uid)) else {
+        return false;
+    };
+    if !can_attack_player(view, &player) {
+        return false;
+    }
+    // `mob.getTeam() != null && target.getTeam() == mob.getTeam()`。
+    if allied(mob, view, &player) {
+        return false;
+    }
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+    if me.position.distance_to_sqr(player.position) > range * range {
+        return false;
+    }
+    if living::has_line_of_sight(me, mob, view, player.uid, player.eye_position()) {
+        *unseen_ticks = 0;
+    } else {
+        *unseen_ticks += 1;
+        if *unseen_ticks > reduced_tick_delay(memory) {
+            return false;
+        }
+    }
+    mob.target = Some(player.uid);
+    true
+}
+
 /// `TargetingConditions.test` 里和玩家有关的部分，`range` 为 0 时不看距离。
 fn targeting_test(
     me: &Entity,
@@ -1447,8 +1535,13 @@ fn targeting_test(
     player: &PlayerView,
     range: f64,
     check_line_of_sight: bool,
+    combat: bool,
 ) -> bool {
     if player.spectator || !player.alive {
+        return false;
+    }
+    // `isCombat`：`attacker.canAttack(target) && !attacker.isAlliedTo(target)`。
+    if combat && (!can_attack_player(view, player) || allied(mob, view, player)) {
         return false;
     }
     if range > 0.0 {
@@ -1493,7 +1586,7 @@ fn nearest_look_target(
     let mut found = None;
     for player in players {
         // `notRiding(mob)`：牛不当坐骑，玩家不会骑在它身上。
-        if !targeting_test(me, mob, view, &player, range, true) {
+        if !targeting_test(me, mob, view, &player, range, true, false) {
             continue;
         }
         let distance = player.position.distance_to_sqr(eye);
@@ -1524,7 +1617,7 @@ fn nearest_tempting_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
         if !follows {
             continue;
         }
-        if !targeting_test(me, mob, view, &player, range, false) {
+        if !targeting_test(me, mob, view, &player, range, false, false) {
             continue;
         }
         let distance = player.position.distance_to_sqr(me.position);
@@ -1766,10 +1859,11 @@ fn nearest_attackable(
     let mut best = f64::MAX;
     let mut found = None;
     for player in players {
-        if !targeting_test(me, mob, view, &player, range, true) {
+        if !targeting_test(me, mob, view, &player, range, true, true) {
             continue;
         }
-        let distance = eye.distance_to_sqr(player.eye_position());
+        // `getNearestEntity`：玩家脚下的位置到生物 (x, eyeY, z) 的距离。
+        let distance = player.position.distance_to_sqr(eye);
         if distance < best {
             best = distance;
             found = Some(player.uid);

@@ -117,6 +117,14 @@ pub trait BlockView {
     /// The players, in `ServerLevel.players()` order. Default: none.
     fn for_each_player(&self, _visit: &mut dyn FnMut(&PlayerView)) {}
 
+    /// 一个实体（按 UUID 找它的计分板名字）所在的队伍，和 [`PlayerView::team`]
+    /// 用同一套下标。默认谁都不在队伍里。
+    ///
+    /// The team of an entity looked up by UUID, indexed like [`PlayerView::team`].
+    fn entity_team(&self, _uuid: &[u8; 16]) -> Option<u32> {
+        None
+    }
+
     /// `getSkyDarken()`：昼夜和天气让天空光暗了多少。
     fn sky_darken(&self) -> i32 {
         0
@@ -216,6 +224,9 @@ pub struct PlayerView {
     /// 主手和副手的物品 ID，空手是 0。
     pub main_hand: i32,
     pub off_hand: i32,
+    /// 所在队伍（`getTeam()`）在计分板队伍表里的下标，同一刻的快照里一队一个值；
+    /// 不在队伍里是 `None`。只用来判断和生物是不是同队。
+    pub team: Option<u32>,
 }
 
 impl PlayerView {
@@ -336,6 +347,10 @@ impl BlockView for World<'_> {
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
         self.level().for_each_player(visit);
+    }
+
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.level().entity_team(uuid)
     }
 
     fn sky_darken(&self) -> i32 {

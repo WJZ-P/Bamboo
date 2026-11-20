@@ -56,6 +56,8 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) sky_darken: i32,
     /// `getOverworldClockTime()`：主世界时钟的整数刻，`MONSTERS_BURN` 和区域难度读它。
     pub(crate) clock_ticks: i64,
+    /// 计分板：玩家和生物的队伍（`TargetGoal` 的同队判断）。
+    pub(crate) scoreboard: &'a crate::scoreboard::Scoreboard,
     /// 这一刻的难度 ID，权威副本在 `GlobalView`。
     pub(crate) difficulty: crate::world_state::Difficulty,
     /// 这一维度的世界边界快照，`Level.getWorldBorder()`。
@@ -175,8 +177,12 @@ impl Level for RegionLevel<'_> {
     /// spectators or dead players; each caller applies its own predicates.
     fn for_each_player(&self, visit: &mut dyn FnMut(&mc_bamboo_blocks::entity::ctx::PlayerView)) {
         for (id, player) in self.players.iter() {
-            visit(&player.view(*id));
+            visit(&player.view_in(*id, self.scoreboard));
         }
+    }
+
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.scoreboard.entity_team_index(uuid)
     }
 
     /// 官方 `Block.tryDropExperience` + `Block.popExperience`：

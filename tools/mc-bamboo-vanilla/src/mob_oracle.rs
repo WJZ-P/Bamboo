@@ -92,6 +92,9 @@ struct Case {
     /// 刷怪蛋：（刻、生成格 x、y、z、`shouldOffsetYMore`）。
     #[serde(default)]
     eggs: Vec<[i32; 5]>,
+    /// 僵尸场景：（刻、x、y、z、状态 ID），那一刻实体 tick 之前直接写进方块表。
+    #[serde(default)]
+    place_at: Vec<[i32; 5]>,
     steps: Vec<Vec<CowStep>>,
     /// 每刻每头牛的全部出站包字节（base64，ID + 包体，不含帧长）。
     ///
@@ -374,6 +377,9 @@ struct CowSetup {
     /// 0 牛 / 1 僵尸 / 2 尸壳；缺省按牛（旧场景）。
     #[serde(default)]
     kind: i32,
+    /// 僵尸场景的队伍编号，-1 不在队伍里。
+    #[serde(default = "minus_one")]
+    team: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -386,6 +392,9 @@ struct PlayerSetup {
     item: i32,
     #[serde(default)]
     looting: i32,
+    /// 僵尸场景的队伍编号，-1 不在队伍里。
+    #[serde(default = "minus_one")]
+    team: i32,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -491,6 +500,8 @@ struct MobLevel {
     players: Vec<PlayerView>,
     /// 走真实受伤链路的玩家；有它时 `for_each_player` 和生物打玩家都交给它。
     game: Option<mc_bamboo_game::ReplayPlayers>,
+    /// 僵尸场景里生物的队伍，按 UUID。
+    mob_teams: HashMap<[u8; 16], u32>,
     /// 改坏确认：`wasHurt` 一律当真。
     wrong_was_hurt: bool,
     /// 改坏确认 `zombie_hunger`：尸壳给的饥饿少一刻。
@@ -602,6 +613,10 @@ impl Level for MobLevel {
 
     fn with_container(&mut self, _pos: BlockPos, _f: &mut dyn FnMut(&mut dyn Container)) -> bool {
         false
+    }
+
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.mob_teams.get(uuid).copied()
     }
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
@@ -1046,6 +1061,7 @@ impl Report {
                     armor_cover: 0.0,
                     main_hand: player.item,
                     off_hand: 0,
+                    team: u32::try_from(player.team).ok(),
                 })
                 .collect(),
             game: case.real_players.then(|| {
@@ -1069,6 +1085,19 @@ impl Report {
                     .collect();
                 mc_bamboo_game::ReplayPlayers::new(case.difficulty, &setups)
             }),
+            mob_teams: if matches!(break_test, Some("zombie_team")) {
+                // 改坏确认：生物不进队伍，同队的玩家也会被当成目标。
+                HashMap::new()
+            } else {
+                case.cows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, cow)| {
+                        let team = u32::try_from(cow.team).ok()?;
+                        Some(((index as u128 + 1).to_be_bytes(), team))
+                    })
+                    .collect()
+            },
             wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
             short_hunger: matches!(break_test, Some("zombie_hunger")),
         };
@@ -1242,6 +1271,32 @@ impl Report {
         for (index, expected) in case.steps.iter().enumerate().skip(1) {
             ticks.set_time(case.start_time + index as i64);
             set_zombie_clock(&mut level, case, index as i64, self.break_test.as_deref());
+            for &[tick, x, y, z, state] in &case.place_at {
+                if tick as usize == index {
+                    level
+                        .blocks
+                        .insert(BlockPos::new(x, y, z), BlockState(state as u32));
+                }
+            }
+            if matches!(self.break_test.as_deref(), Some("zombie_sight")) {
+                // 改坏确认：视线记忆永不过期，僵尸隔着墙也不放弃目标。
+                let mut world = World::new(&mut level, &mut ticks);
+                for &id in &ids {
+                    world.with_entity_mut(id, &mut |entity| {
+                        if let Some(mob) = entity.kind.mob_mut() {
+                            for wrapped in &mut mob.target_goals.goals {
+                                if let mc_bamboo_blocks::entity::mob::goals::Goal::NearestAttackableTarget {
+                                    unseen_ticks,
+                                    ..
+                                } = &mut wrapped.goal
+                                {
+                                    *unseen_ticks = 0;
+                                }
+                            }
+                        }
+                    });
+                }
+            }
             if let Some(game) = level.game.as_mut() {
                 game.tick_cooldowns();
             }

@@ -49,6 +49,8 @@ pub(crate) struct ReadOnlyWorld<'a> {
     /// This island's players, copied in join order at the start of the
     /// compute phase.
     pub(crate) players: Vec<PlayerView>,
+    /// 计分板，生物按 UUID 查自己的队伍。
+    pub(crate) scoreboard: &'a crate::scoreboard::Scoreboard,
 }
 
 impl BlockSource for ReadOnlyWorld<'_> {
@@ -97,6 +99,10 @@ impl BlockSource for ReadOnlyWorld<'_> {
         for player in &self.players {
             visit(player);
         }
+    }
+
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.scoreboard.entity_team_index(uuid)
     }
 
     fn world_border(&self) -> WorldBorder {

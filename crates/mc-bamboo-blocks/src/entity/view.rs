@@ -127,6 +127,14 @@ pub trait BlockSource: Sync {
     /// see the same list.
     fn for_each_player(&self, _visit: &mut dyn FnMut(&super::ctx::PlayerView)) {}
 
+    /// 一个实体（按 UUID 找它的计分板名字）所在的队伍，和 [`PlayerView::team`](super::ctx::PlayerView::team)
+    /// 用同一套下标。默认谁都不在队伍里。
+    ///
+    /// The team of an entity looked up by UUID, indexed like [`PlayerView::team`](super::ctx::PlayerView::team).
+    fn entity_team(&self, _uuid: &[u8; 16]) -> Option<u32> {
+        None
+    }
+
     /// 这片格子里有没有漏斗。默认按格读方块表；游戏层用预先拷出的位置集合覆盖它。
     /// 判定和 `World` 完全一致，所以两种视图、两种驱动发出的命令完全相同。
     fn any_hopper_in(&self, min: BlockPos, max: BlockPos) -> bool {
@@ -417,6 +425,10 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
         self.0.for_each_player(visit);
+    }
+
+    fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
+        self.0.entity_team(uuid)
     }
 
     fn world_border(&self) -> WorldBorder {

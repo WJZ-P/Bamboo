@@ -977,6 +977,14 @@ pub trait Level: LevelSideState + LevelEntities {
     /// 世界里的玩家，按加入顺序。生物的 AI 读它。
     fn for_each_player(&self, _visit: &mut dyn FnMut(&crate::entity::ctx::PlayerView)) {}
 
+    /// 一个实体（按 UUID 找它的计分板名字）所在的队伍，和 [`PlayerView::team`](crate::entity::ctx::PlayerView::team)
+    /// 用同一套下标。默认谁都不在队伍里。
+    ///
+    /// The team of an entity looked up by UUID, indexed like [`PlayerView::team`](crate::entity::ctx::PlayerView::team).
+    fn entity_team(&self, _uuid: &[u8; 16]) -> Option<u32> {
+        None
+    }
+
     /// `getSkyDarken()`。天色由主控的时钟和天气发布，这一层只读快照。
     fn sky_darken(&self) -> i32 {
         0

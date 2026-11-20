@@ -673,6 +673,7 @@ impl Region {
             block_weather: self.global.block_weather,
             sky_darken: self.global.sky_darken,
             clock_ticks: self.global.clock.total_ticks,
+            scoreboard: &self.global.scoreboard,
             difficulty: self.global.difficulty,
             world_border: self.global.world_border.clone(),
             command_blocks: &mut self.command_blocks,

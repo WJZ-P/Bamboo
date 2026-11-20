@@ -416,6 +416,23 @@ public final class MobOracle {
             return mob(0, x, y, z, yaw, seed, age);
         }
 
+        /** 僵尸场景：生物和玩家的队伍编号（-1 不在队伍里），同号同队。 */
+        java.util.List<Integer> mobTeams = new ArrayList<>();
+        /** 僵尸场景：第 `tick` 刻开头（实体 tick 之前）直接写进方块表的方块，不发更新。 */
+        final List<int[]> placeAt = new ArrayList<>();
+
+        Scene placeAt(int tick, int x, int y, int z, BlockState state) {
+            placeAt.add(new int[] {tick, x, y, z, Block.getId(state)});
+            return this;
+        }
+        java.util.List<Integer> playerTeams = new ArrayList<>();
+
+        Scene teams(int[] mob, int[] player) {
+            for (int team : mob) mobTeams.add(team);
+            for (int team : player) playerTeams.add(team);
+            return this;
+        }
+
         Scene mob(int kind, double x, double y, double z, float yaw, long seed, int age) {
             cows.add(new double[] {x, y, z});
             yaws.add(new float[] {yaw});
@@ -994,6 +1011,32 @@ public final class MobOracle {
                     doors.mob(1, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
                     doors.player(7.5, 68.0, 0.5, Items.AIR);
                     scenes.add(doors);
+                }
+                // 视线记忆：玩家站在够不着的石柱上，僵尸先看见他；第 40 刻一堵墙挡住视线，
+                // `unseenMemoryTicks`（60，减半后 30 刻）用完后放弃目标。
+                Scene sight = new Scene("zombie_lose_sight").ticks(140).difficulty(2);
+                sight.monstersBurn = false;
+                ground(sight, 12);
+                for (int y = 64; y <= 67; y++) sight.set(9, y, 0, Blocks.STONE.defaultBlockState());
+                for (int y = 64; y <= 72; y++) {
+                    for (int z = -4; z <= 4; z++) {
+                        sight.placeAt(40, 6, y, z, Blocks.STONE.defaultBlockState());
+                    }
+                }
+                sight.mob(1, 0.5, 64.0, 0.5, 0.0F, 71L, 0);
+                sight.player(9.5, 68.0, 0.5, Items.AIR);
+                scenes.add(sight);
+                // 队伍：同队的玩家不当目标（`TargetingConditions` 的 `isAlliedTo`），
+                // 不同队的照常追。
+                for (int other = 0; other <= 1; other++) {
+                    Scene team = new Scene(other == 0 ? "zombie_same_team" : "zombie_other_team")
+                            .ticks(100).difficulty(2);
+                    team.monstersBurn = false;
+                    ground(team, 12);
+                    team.mob(1, 0.5, 64.0, 0.5, 0.0F, 73L, 0);
+                    team.player(6.5, 64.0, 0.5, Items.AIR);
+                    team.teams(new int[] {0}, new int[] {other});
+                    scenes.add(team);
                 }
                 // 尸壳打中玩家：空手时给饥饿，时长 `140 * (int)` 区域难度（`Husk.doHurtTarget`）。
                 for (int difficulty = 2; difficulty <= 3; difficulty++) {
@@ -2310,6 +2353,19 @@ public final class MobOracle {
     }
 
 
+    private static int teamOf(java.util.List<Integer> teams, int index) {
+        return index < teams.size() ? teams.get(index) : -1;
+    }
+
+    /** 把计分板名字加进 `t<编号>` 队伍（没有就先建）。 */
+    private static void joinTeam(Level level, String holder, int team) {
+        if (team < 0) return;
+        net.minecraft.world.scores.Scoreboard board = level.getScoreboard();
+        net.minecraft.world.scores.PlayerTeam found = board.getPlayerTeam("t" + team);
+        if (found == null) found = board.addPlayerTeam("t" + team);
+        board.addPlayerToTeam(holder, found);
+    }
+
     /** 僵尸场景：官方 `Mob` 逐刻 tick，输出与 `CowStep` 同形的状态加僵尸专属字段。 */
     private static void playZombie(Official official, Writer out, Scene scene) throws Exception {
         FakeLevel level = FakeLevel.create(official);
@@ -2384,6 +2440,7 @@ public final class MobOracle {
             put(ServerPlayer.class, player, "connection", connection);
             players.add(player);
             zombieSinks.add(sink);
+            joinTeam(level, player.getScoreboardName(), teamOf(scene.playerTeams, i));
         }
         level.playersList().addAll(players);
         // 实体事件和 `sendToTrackingPlayers` 的包：这里只比装备和实体事件两种。
@@ -2411,6 +2468,7 @@ public final class MobOracle {
             // `Mob.serverAiStep` 的 `(tickCount + id) % 2` 才能逐刻一致。
             mob.setId(FIRST_ID + i);
             mob.setUUID(new UUID(0L, i + 1));
+            joinTeam(level, mob.getScoreboardName(), teamOf(scene.mobTeams, i));
             mob.snapTo(at[0], at[1], at[2], scene.yaws.get(i)[0], 0.0F);
             mob.setYHeadRot(scene.yaws.get(i)[0]);
             mob.setYBodyRot(scene.yaws.get(i)[0]);
@@ -2445,7 +2503,8 @@ public final class MobOracle {
             line.append(",\"yaw\":").append(Float.floatToRawIntBits(scene.yaws.get(i)[0]));
             line.append(",\"seed\":").append(scene.seeds.get(i));
             line.append(",\"age\":").append(scene.cowAges.get(i));
-            line.append(",\"kind\":").append(kind[0]).append('}');
+            line.append(",\"kind\":").append(kind[0]);
+            line.append(",\"team\":").append(teamOf(scene.mobTeams, i)).append('}');
         }
         line.append("],\"players\":[");
         for (int i = 0; i < players.size(); i++) {
@@ -2456,9 +2515,18 @@ public final class MobOracle {
             line.append(",\"y\":").append(Double.doubleToRawLongBits(player.getY()));
             line.append(",\"z\":").append(Double.doubleToRawLongBits(player.getZ()));
             line.append(",\"eye\":").append(Float.floatToRawIntBits(player.getEyeHeight()));
-            line.append(",\"item\":0,\"looting\":0}");
+            line.append(",\"item\":0,\"looting\":0");
+            line.append(",\"team\":").append(teamOf(scene.playerTeams, i)).append('}');
         }
         line.append("],\"hurts\":[],\"summons\":[],\"eggs\":[]");
+        line.append(",\"placeAt\":[");
+        for (int i = 0; i < scene.placeAt.size(); i++) {
+            int[] at = scene.placeAt.get(i);
+            if (i > 0) line.append(',');
+            line.append('[').append(at[0]).append(',').append(at[1]).append(',').append(at[2])
+                    .append(',').append(at[3]).append(',').append(at[4]).append(']');
+        }
+        line.append(']');
         line.append(",\"difficulty\":").append(scene.difficulty);
         line.append(",\"skyDarken\":").append(scene.skyDarken);
         line.append(",\"raining\":").append(scene.raining);
@@ -2489,6 +2557,12 @@ public final class MobOracle {
                 level.clock = scene.clockStart + tick;
                 official.attributes.invalidateTickCache();
                 level.updateSkyBrightness();
+            }
+            for (int[] at : scene.placeAt) {
+                if (at[0] == tick) {
+                    level.blocks.put(BlockPos.asLong(at[1], at[2], at[3]), Block.stateById(at[4]));
+                    level.chunkCache.clear();
+                }
             }
             if (scene.realPlayers) {
                 // 只推进受伤冷却和受伤动画（`ServerPlayer.tick` / `baseTick`），
