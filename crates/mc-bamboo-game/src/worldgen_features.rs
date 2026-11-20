@@ -59,6 +59,10 @@ use crate::{
 /// One feature `setBlock` write in world coordinates `(x, y, z, state id)`.
 pub(crate) type BlockDelta = (i32, i32, i32, u32);
 
+/// 一条 `PostProcessing` 标记的世界坐标 `(x, y, z)`。
+/// The world position `(x, y, z)` of one `PostProcessing` mark.
+pub type MarkPos = (i32, i32, i32);
+
 /// 一个来源中心写进目标区块的全部地物写。`slot` 是来源中心相对目标区块的
 /// 3×3 下标 `(dz+1)*3+(dx+1)`；中心自己是 4，其余按 `slot` 升序后到。
 /// 只有 `features` 阶段产生这些写，完工时 `assemble_feature_column` 按 `slot`
@@ -87,7 +91,7 @@ pub struct FeatureWrites {
     /// duplicates kept; marks already carried by the input terrain are excluded.
     /// Vanilla records a mark in the chunk owning the position, so neighbor
     /// centers add to the target too.
-    pub marks: Vec<(i32, i32, i32)>,
+    pub marks: Vec<MarkPos>,
 }
 
 /// 按中心的固定先后合并一组写：中心自己（`CENTER`）最先，其余 8 个来源按
@@ -128,8 +132,7 @@ pub fn merge_feature_writes(
         u8,
         std::collections::HashMap<(i32, i32, i32), u32>,
     > = std::collections::BTreeMap::new();
-    let mut marks: std::collections::BTreeMap<u8, Vec<(i32, i32, i32)>> =
-        std::collections::BTreeMap::new();
+    let mut marks: std::collections::BTreeMap<u8, Vec<MarkPos>> = std::collections::BTreeMap::new();
     for group in groups {
         let writes = per_slot.entry(group.slot).or_default();
         for &(x, y, z, state) in &group.deltas {
@@ -142,7 +145,7 @@ pub fn merge_feature_writes(
         }
     }
     let source_order = |slot: &u8| (u8::from(*slot != CENTER as u8), *slot);
-    let mut mark_order: Vec<(u8, Vec<(i32, i32, i32)>)> = marks.into_iter().collect();
+    let mut mark_order: Vec<(u8, Vec<MarkPos>)> = marks.into_iter().collect();
     mark_order.sort_by_key(|(slot, _)| source_order(slot));
     for (_, group) in mark_order {
         chunk.post_processing.extend(group);
@@ -608,7 +611,7 @@ struct FeatureRun {
     ///
     /// `PostProcessing` marks newly recorded by this run, split by target cell
     /// (3×3 index) in call order; input terrain marks are excluded.
-    marks: [Vec<(i32, i32, i32)>; 9],
+    marks: [Vec<MarkPos>; 9],
 }
 
 type FeatureCacheKey = (i64, Option<&'static str>, i32, i32, bool);
@@ -1050,7 +1053,8 @@ pub mod oracle_merge {
     use std::sync::Mutex;
 
     use super::{
-        CENTER, FeatureWrites, WorldGenConfig, feature_writes_into as game_feature_writes_into,
+        CENTER, FeatureWrites, MarkPos, WorldGenConfig,
+        feature_writes_into as game_feature_writes_into,
     };
 
     /// 故意改坏合并，确认对拍抓得到。
@@ -1156,9 +1160,9 @@ pub mod oracle_merge {
         config: &WorldGenConfig,
         cx: i32,
         cz: i32,
-    ) -> Result<[Vec<(i32, i32, i32)>; 9], String> {
+    ) -> Result<[Vec<MarkPos>; 9], String> {
         let groups = game_feature_writes_into(config, cx, cz)?;
-        let mut out: [Vec<(i32, i32, i32)>; 9] = std::array::from_fn(|_| Vec::new());
+        let mut out: [Vec<MarkPos>; 9] = std::array::from_fn(|_| Vec::new());
         for group in groups {
             out[group.slot as usize] = group.marks;
         }

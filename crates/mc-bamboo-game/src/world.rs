@@ -383,6 +383,12 @@ pub(crate) struct Master {
     pub(crate) sleep_break_late: bool,
 }
 
+/// 对拍脚手架用：一个区块的 `PostProcessing`（每段 packed short），交付盒子里的和
+/// 写盘再读回的各一份。
+/// Oracle scaffolding: a chunk's `PostProcessing` (packed shorts per section),
+/// as delivered and after a save round trip.
+#[doc(hidden)]
+pub type PostProcessingTables = (Vec<Vec<u16>>, Vec<Vec<u16>>);
 impl World {
     /// 创建一个空世界。`config` 的视距超出合法范围时取最接近的值。
     pub fn new(config: WorldConfig, inbox: InboundReceiver) -> Self {
@@ -994,7 +1000,7 @@ impl World {
     pub fn chunk_post_processing_unpaced(
         &self,
         pos: mc_bamboo_core::ChunkPos,
-    ) -> Option<Result<(Vec<Vec<u16>>, Vec<Vec<u16>>), String>> {
+    ) -> Option<Result<PostProcessingTables, String>> {
         use crate::chunk_codec::ChunkCodec;
         let island = self.islands.get(self.islands.island_of_chunk(pos)?)?;
         let column = island.region.chunks.column_clone(pos)?;
