@@ -761,6 +761,7 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::OpenCommandBlock { .. } => 18,
         Effect::HurtPlayer { .. } => 20,
         Effect::SleepInBed { .. } => 19,
+        Effect::IgnitePlayer { .. } => 21,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -866,6 +867,10 @@ fn hash_effect(effect: &Effect) -> u64 {
             target.hash(&mut hasher);
             std::hash::Hash::hash(&source.kind, &mut hasher);
             amount.to_bits().hash(&mut hasher);
+        }
+        Effect::IgnitePlayer { target, ticks } => {
+            target.hash(&mut hasher);
+            ticks.hash(&mut hasher);
         }
         Effect::Overlay { key, first, second } => {
             key.hash(&mut hasher);

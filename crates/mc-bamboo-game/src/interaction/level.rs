@@ -54,6 +54,8 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
     /// `Level.getSkyDarken()`：这一刻由全局快照算好的天色变暗值。
     pub(crate) sky_darken: i32,
+    /// `getOverworldClockTime()`：主世界时钟的整数刻，`MONSTERS_BURN` 和区域难度读它。
+    pub(crate) clock_ticks: i64,
     /// 这一刻的难度 ID，权威副本在 `GlobalView`。
     pub(crate) difficulty: crate::world_state::Difficulty,
     /// 这一维度的世界边界快照，`Level.getWorldBorder()`。
@@ -73,6 +75,16 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) partition_profiler: Option<&'a crate::profiler::Profiler>,
     /// `halo = 1 / 2` 两套划分，观察点据此判断触发碰到的区块在不在范围内。
     pub(crate) partitions: &'a [crate::region::partition::Partition],
+    /// 精确驱动的实体循环额外借出的玩家那一半；有它时生物打玩家当场落地，
+    /// 没有时（方块逻辑、并行驱动的落地阶段）记成延后的效果。
+    pub(crate) player_side: Option<PlayerSide<'a>>,
+}
+
+/// [`RegionLevel::player_side`]：玩家受伤链路在玩家表之外要用的连接、音效种子和规则。
+pub(crate) struct PlayerSide<'a> {
+    pub(crate) links: &'a mut crate::links::Links,
+    pub(crate) sound_seeds: &'a LevelRandom,
+    pub(crate) rules: &'a crate::gamerules::GameRuleSet,
 }
 
 impl LevelTables for RegionLevel<'_> {
@@ -358,6 +370,51 @@ impl Level for RegionLevel<'_> {
     /// `getDifficulty().getId()`：权威副本在 `GlobalView`，这里读每刻发布的快照。
     fn difficulty_id(&self) -> i32 {
         self.difficulty as i32
+    }
+
+    fn clock_ticks(&self) -> i64 {
+        self.clock_ticks
+    }
+
+    fn inhabited_time(&self, chunk: mc_bamboo_core::ChunkPos) -> i64 {
+        self.chunks.chunk(chunk).archive().inhabited_time
+    }
+
+    /// 精确驱动里生物打玩家：拼出和区域入口同一组借用，当场走玩家受伤的正式入口。
+    fn hurt_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        source: mc_bamboo_blocks::entity::mob::DamageSource,
+        amount: f32,
+        attacker: Option<&mc_bamboo_blocks::entity::EntityPublic>,
+    ) -> Option<mc_bamboo_blocks::PlayerHurtNow> {
+        let side = self.player_side.as_mut()?;
+        let mut parts = crate::player_hurt::HurtParts {
+            players: &mut *self.players,
+            links: &mut *side.links,
+            sound_seeds: side.sound_seeds,
+            entities: &*self.entities,
+            difficulty: self.difficulty as i32,
+            rules: side.rules,
+            attacker,
+        };
+        let (hurt, death_drops) =
+            crate::player_hurt::hurt_player_by_mob(&mut parts, PlayerId(target), source, amount);
+        Some(mc_bamboo_blocks::PlayerHurtNow { hurt, death_drops })
+    }
+
+    fn ignite_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        ticks: i32,
+    ) -> bool {
+        if self.player_side.is_none() {
+            return false;
+        }
+        if let Some(player) = self.players.get_mut(&PlayerId(target)) {
+            crate::player_environment::ignite_player(player, ticks);
+        }
+        true
     }
 
     /// `getHeightmapPos(MOTION_BLOCKING, pos).getY()`：读区块里算好的真实高度图。

@@ -157,6 +157,15 @@ struct Case {
     bright_outside: bool,
     #[serde(default)]
     monsters_burn: bool,
+    /// 僵尸场景：玩家走游戏层真实的受伤链路（[`mc_bamboo_game::ReplayPlayers`]）。
+    #[serde(default)]
+    real_players: bool,
+    /// 每刻 0 号玩家的状态：血量位、受伤冷却、受伤动画、死亡、着火刻数。
+    #[serde(default)]
+    zombie_player_states: Option<Vec<[i64; 5]>>,
+    /// 每刻 0 号玩家自己收到的那几种包（受伤动画、战斗进出、死亡界面、血量）。
+    #[serde(default)]
+    zombie_player_packets: Option<Vec<Vec<String>>>,
     /// S2 玩家效果场景的规则与动作。
     #[serde(default)]
     effect_scene: Option<EffectScene>,
@@ -448,6 +457,10 @@ struct MobLevel {
     block_events: BlockEvents,
     entities: Entities,
     players: Vec<PlayerView>,
+    /// 走真实受伤链路的玩家；有它时 `for_each_player` 和生物打玩家都交给它。
+    game: Option<mc_bamboo_game::ReplayPlayers>,
+    /// 改坏确认：`wasHurt` 一律当真。
+    wrong_was_hurt: bool,
 }
 
 impl LevelTables for MobLevel {
@@ -558,9 +571,42 @@ impl Level for MobLevel {
     }
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
+        if let Some(game) = &self.game {
+            for player in game.views() {
+                visit(&player);
+            }
+            return;
+        }
         for player in &self.players {
             visit(player);
         }
+    }
+
+    fn hurt_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        source: DamageSource,
+        amount: f32,
+        attacker: Option<&mc_bamboo_blocks::entity::EntityPublic>,
+    ) -> Option<mc_bamboo_blocks::PlayerHurtNow> {
+        let game = self.game.as_mut()?;
+        let mut outcome = game.hurt(target, source, amount, attacker);
+        if self.wrong_was_hurt {
+            outcome.hurt = true;
+        }
+        Some(outcome)
+    }
+
+    fn ignite_player_now(
+        &mut self,
+        target: mc_bamboo_blocks::entity::EntityUid,
+        ticks: i32,
+    ) -> bool {
+        let Some(game) = self.game.as_mut() else {
+            return false;
+        };
+        game.ignite(target, ticks);
+        true
     }
 
     fn sky_darken(&self) -> i32 {
@@ -874,6 +920,28 @@ impl Report {
                     off_hand: 0,
                 })
                 .collect(),
+            game: case.real_players.then(|| {
+                let health = f32::from_bits(case.player_health as u32);
+                let setups: Vec<_> = case
+                    .players
+                    .iter()
+                    .enumerate()
+                    .map(|(index, player)| mc_bamboo_game::ReplayPlayerSetup {
+                        id: player.id,
+                        uuid: (1_u128 << 64) | (2 + index as u128),
+                        name: format!("ZombieOracle{index}"),
+                        position: Vec3::new(
+                            f64::from_bits(player.x as u64),
+                            f64::from_bits(player.y as u64),
+                            f64::from_bits(player.z as u64),
+                        ),
+                        health,
+                        seed: 0x0DDB_1A5E_5BAD_5EED_i64.wrapping_add(index as i64),
+                    })
+                    .collect();
+                mc_bamboo_game::ReplayPlayers::new(case.difficulty, &setups)
+            }),
+            wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
         };
         for &[x, y, z, state] in &case.blocks {
             level
@@ -990,6 +1058,7 @@ impl Report {
         };
         let ours = snapshot(&level, &ids);
         self.compare(&case.name, 0, &ours, first);
+        self.compare_zombie_player(case, &mut level, 0);
         // 场景开始时的牛也算「刚生成」，但它们在 tick 0 已经建过同步状态，
         // 不该出现在后面逐刻的新实体比对里。
         let _ = level.entities.take_spawn_snapshots();
@@ -1024,6 +1093,9 @@ impl Report {
         }
         for (index, expected) in case.steps.iter().enumerate().skip(1) {
             ticks.set_time(case.start_time + index as i64);
+            if let Some(game) = level.game.as_mut() {
+                game.tick_cooldowns();
+            }
             let mut ours_interactions = Vec::new();
             {
                 let mut world = World::new(&mut level, &mut ticks);
@@ -1236,8 +1308,17 @@ impl Report {
                 );
             }
             self.steps += 1;
-            let ours = snapshot(&level, &ids);
+            let mut ours = snapshot(&level, &ids);
+            // 官方一侧输出的是 `Mob.getTarget()`：打不了的目标（死了的玩家）读成 null。
+            if let Some(game) = &level.game {
+                for step in ours.iter_mut().flatten() {
+                    if step.target >= 0 && game.state(step.target)[3] != 0 {
+                        step.target = -1;
+                    }
+                }
+            }
             self.compare(&case.name, index, &ours, expected);
+            self.compare_zombie_player(case, &mut level, index);
             // 官方 `ChunkMap.removeEntity` 在被丢弃的那一刻发移除包。
             let mut gone = Vec::new();
             for &id in &ids {
@@ -1285,6 +1366,42 @@ impl Report {
             if self.mismatches.len() >= self.show {
                 return;
             }
+        }
+    }
+
+    /// 真实玩家的僵尸场景：比 0 号玩家的状态和它自己收到的那几种包。
+    fn compare_zombie_player(&mut self, case: &Case, level: &mut MobLevel, index: usize) {
+        const SELF_PACKETS: [u8; 5] = [43, 67, 68, 69, 106];
+        let (Some(game), Some(player)) = (level.game.as_mut(), case.players.first()) else {
+            return;
+        };
+        let ours: Vec<Vec<u8>> = game
+            .take_packets(player.id)
+            .into_iter()
+            .filter(|body| body.first().is_some_and(|id| SELF_PACKETS.contains(id)))
+            .collect();
+        if let Some(states) = &case.zombie_player_states
+            && let Some(expected) = states.get(index)
+        {
+            let state = game.state(player.id);
+            if &state != expected && self.mismatches.len() < self.show {
+                self.mismatches.push(format!(
+                    "{} tick {index} player: official {expected:?} bamboo {state:?}",
+                    case.name
+                ));
+            }
+        }
+        if let Some(packets) = &case.zombie_player_packets
+            && let Some(expected) = packets.get(index)
+        {
+            compare_packet_list(
+                &mut self.mismatches,
+                &self.show,
+                &case.name,
+                index,
+                &ours,
+                expected,
+            );
         }
     }
 

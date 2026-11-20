@@ -33,8 +33,11 @@ pub struct ViewFacts {
     /// `Level.isRaining()` / `isThundering()` 的天气快照，和 `Level::block_weather()`
     /// 是同一份值；算阶段不借用世界，按值拷进来。
     pub weather: BlockWeather,
-    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界为真。
+    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线求值，
+    /// 发布方用 [`crate::sky::monsters_burn`] 从同一个时钟算好。
     pub monsters_burn: bool,
+    /// 主世界时钟的整数刻（`getOverworldClockTime()`），区域难度和月相读它。
+    pub clock_ticks: i64,
 }
 
 impl Default for ViewFacts {
@@ -50,6 +53,7 @@ impl Default for ViewFacts {
             game_time: 0,
             weather: BlockWeather::CLEAR,
             monsters_burn: true,
+            clock_ticks: 0,
         }
     }
 }
@@ -89,6 +93,11 @@ pub trait BlockSource: Sync {
     /// `ShulkerBoxBlockEntity.getBoundingBox(state)`，算阶段开始时就按位置拷出来的形状。
     fn shulker_box_shape(&self, _pos: BlockPos) -> Option<Aabb> {
         None
+    }
+
+    /// 区块的 `InhabitedTime`。没有区块表的视图给 0。
+    fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
+        0
     }
 
     /// 这一整段 16³ 里有没有可能产生碰撞形状的方块状态。默认按有算，
@@ -452,6 +461,20 @@ impl<T: BlockSource> BlockView for SourceView<T> {
 
     fn monsters_burn(&self) -> bool {
         self.0.facts().monsters_burn
+    }
+
+    fn clock_ticks(&self) -> i64 {
+        self.0.facts().clock_ticks
+    }
+
+    fn effective_difficulty(&self, pos: BlockPos) -> f32 {
+        let clock = self.clock_ticks();
+        crate::sky::effective_difficulty(
+            self.difficulty(),
+            clock,
+            self.0.inhabited_time(ChunkPos::new(pos.x >> 4, pos.z >> 4)),
+            crate::sky::moon_brightness(clock),
+        )
     }
 }
 

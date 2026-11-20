@@ -1428,25 +1428,26 @@ pub(crate) fn do_hurt_target(
         found
     };
     if is_player {
-        ctx.emit(
-            Command::HurtPlayer {
-                target,
-                source,
-                amount,
-            },
-            me,
-        );
-        // `Zombie.doHurtTarget`：空手、自身着火时按有效难度传染火焰。
-        if mob.mob_type == super::MobType::Zombie
+        let attacker = {
+            let mut whole = me.clone();
+            whole.kind = crate::entity::EntityKind::Mob(Box::new(mob.clone()));
+            whole.split().public
+        };
+        let hurt = ctx.hurt_player(target, source, amount, me, &attacker);
+        // `Zombie.doHurtTarget`：打中了、空手、自己着火时，按区域难度传染火焰：
+        // `nextFloat() < f * 0.3` 才 `igniteForSeconds(2 * (int) f)`。
+        if hurt
+            && matches!(mob.mob_type, super::MobType::Zombie | super::MobType::Husk)
+            && mob.held_item.is_none()
             && me.remaining_fire_ticks > 0
-            && mob.helmet.is_none()
         {
-            let difficulty = ctx.blocks().difficulty() as f32;
+            let difficulty = ctx.blocks().effective_difficulty(me.block_position());
             if me.random.next_float() < difficulty * 0.3 {
+                let seconds = 2 * difficulty as i32;
                 ctx.emit(
                     Command::IgnitePlayer {
                         target,
-                        seconds: (2.0 * difficulty).max(0.0),
+                        ticks: mth::floor_f32(seconds as f32 * 20.0),
                     },
                     me,
                 );
@@ -1465,19 +1466,17 @@ pub(crate) fn do_hurt_target(
     }
 }
 
-/// 落地 `Command::HurtPlayer`：转成 `Effect::HurtPlayer`，游戏层在
-/// 同一刻的实体循环里按实体顺序调正式的 `hurt_player`。
+/// 落地 `Command::HurtPlayer`（并行驱动的缓冲命令）：能当场落地就当场落地，
+/// 否则转成 `Effect::HurtPlayer`，由游戏层在同一刻的效果阶段调正式的 `hurt_player`。
 pub(crate) fn apply_hurt_player(
     world: &mut crate::world::World,
+    me: &Entity,
     target: crate::entity::EntityUid,
     source: DamageSource,
     amount: f32,
 ) {
-    world.push_effect(crate::Effect::HurtPlayer {
-        target,
-        source,
-        amount,
-    });
+    let attacker = me.clone().split().public;
+    let _ = world.hurt_player_from_mob(target, source, amount, Some(&attacker));
 }
 
 /// 落地 `Command::TrampleTurtleEgg`：`TurtleEggBlock.destroyEgg` 从「还是不是蛋」开始的部分。

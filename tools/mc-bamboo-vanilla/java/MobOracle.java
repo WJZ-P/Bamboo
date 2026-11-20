@@ -378,6 +378,8 @@ public final class MobOracle {
         boolean raining;
         boolean brightOutside = true;
         boolean monstersBurn = true;
+        /** 僵尸场景：玩家走真实的受伤链路，逐刻比玩家状态和玩家自己收到的包。 */
+        boolean realPlayers;
         /** 场景里明确没有村民/铁傀儡/海龟/狼/僵尸猪灵/鸡。 */
         boolean noOtherEntities = true;
 
@@ -1435,6 +1437,36 @@ public final class MobOracle {
                 two.mob(1, 1.5, 64.0, 0.5, 0.0F, 29L, 0);
                 two.player(2.5, 64.0, 0.5, Items.AIR);
                 scenes.add(two);
+                // 着火的僵尸打玩家：打中才按区域难度取数传染火焰（`Zombie.doHurtTarget`）。
+                Scene fireHit = new Scene("zombie_fire_hit").ticks(80).difficulty(2);
+                fireHit.monstersBurn = false;
+                fireHit.realPlayers = true;
+                fireHit.fireTicks = 400;
+                ground(fireHit, 12);
+                fireHit.mob(1, 0.5, 64.0, 0.5, 0.0F, 23L, 0);
+                fireHit.player(2.5, 64.0, 0.5, Items.AIR);
+                scenes.add(fireHit);
+                // 两只着火的僵尸同一刻打同一名玩家：第二只打进无敌帧，`wasHurt` 为假，不取那个数。
+                Scene fireTwo = new Scene("zombie_fire_two_hit").ticks(80).difficulty(2);
+                fireTwo.monstersBurn = false;
+                fireTwo.realPlayers = true;
+                fireTwo.fireTicks = 400;
+                ground(fireTwo, 12);
+                fireTwo.mob(1, 0.5, 64.0, 0.5, 0.0F, 23L, 0);
+                fireTwo.mob(1, 1.5, 64.0, 0.5, 0.0F, 29L, 0);
+                fireTwo.player(2.5, 64.0, 0.5, Items.AIR);
+                scenes.add(fireTwo);
+                // 第一下就打死玩家：死亡流程在僵尸自己的 tick 里当场跑完，
+                // 同一刻后面的僵尸看到的是死人。
+                Scene kill = new Scene("zombie_kill_player").ticks(60).difficulty(2);
+                kill.monstersBurn = false;
+                kill.realPlayers = true;
+                kill.playerHealth = 2.0F;
+                ground(kill, 12);
+                kill.mob(1, 0.5, 64.0, 0.5, 0.0F, 23L, 0);
+                kill.mob(1, 1.5, 64.0, 0.5, 0.0F, 29L, 0);
+                kill.player(2.5, 64.0, 0.5, Items.AIR);
+                scenes.add(kill);
             }
             // ---- S2：玩家药水效果的状态和出站包 ----
             scenes.add(effectBase("effect_give_600", 60)
@@ -2213,6 +2245,10 @@ public final class MobOracle {
         ((TickingLevelData) level.levelData).difficulty = Difficulty.values()[scene.difficulty];
         level.nextId = FIRST_ID;
         java.util.List<ServerPlayer> players = new java.util.ArrayList<>();
+        java.util.List<Bytes> zombieSinks = new java.util.ArrayList<>();
+        StringBuilder playerStates = new StringBuilder("[");
+        StringBuilder playerPackets = new StringBuilder("[");
+        float[] lastSentHealth = {-1.0e8F};
         for (int i = 0; i < scene.players.size(); i++) {
             double[] at = scene.players.get(i);
             ServerPlayer player = new ServerPlayer(official.server, level,
@@ -2224,6 +2260,9 @@ public final class MobOracle {
             player.setYHeadRot(0.0F);
             player.setYBodyRot(0.0F);
             player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(scene.playerItems.get(i)));
+            if (scene.realPlayers) {
+                player.setHealth(scene.playerHealth);
+            }
             // `ServerPlayer.isInvulnerableTo` 会读 `connection.hasClientLoaded()`；
             // 僵尸近战必须有一个连接桩，包字节本身在这个场景里不比。
             Bytes sink = new Bytes(official.registries);
@@ -2236,6 +2275,7 @@ public final class MobOracle {
             ((RecordingListener) connection).bytes = sink;
             put(ServerPlayer.class, player, "connection", connection);
             players.add(player);
+            zombieSinks.add(sink);
         }
         level.playersList().addAll(players);
         java.util.List<Mob> mobs = new java.util.ArrayList<>();
@@ -2304,15 +2344,29 @@ public final class MobOracle {
         line.append(",\"brightOutside\":").append(scene.brightOutside);
         line.append(",\"monstersBurn\":").append(scene.monstersBurn);
         line.append(",\"deathKind\":0,\"fireTicks\":").append(scene.fireTicks);
-        line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(20.0F));
+        line.append(",\"playerHealth\":").append(Float.floatToRawIntBits(
+                scene.realPlayers ? scene.playerHealth : 20.0F));
+        line.append(",\"realPlayers\":").append(scene.realPlayers);
         line.append(",\"playerAbsorption\":0,\"playerExhaustion\":0");
         line.append(",\"playerSteps\":null,\"playerPackets\":null,\"keyPackets\":null");
         line.append(",\"interactActions\":[],\"interactions\":null");
         line.append(",\"packets\":null,\"syncFlags\":null,\"spawns\":null,\"life\":null,\"spawnResult\":null");
         line.append(",\"steps\":[");
         line.append(zombieStepJson(mobs, players, level));
+        if (scene.realPlayers) {
+            zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
+                    lastSentHealth, true);
+        }
         for (int tick = 1; tick <= scene.ticks; tick++) {
             level.gameTime++;
+            if (scene.realPlayers) {
+                // 只推进受伤冷却和受伤动画（`ServerPlayer.tick` / `baseTick`），
+                // 不跑物理、饥饿和回血；Bamboo 一侧是 `PlayerHealth::tick_cooldowns`。
+                for (ServerPlayer player : players) {
+                    if (player.damageCooldownTime > 0) player.damageCooldownTime--;
+                    if (player.hurtTime > 0) player.hurtTime--;
+                }
+            }
             for (double[] hurt : scene.hurts) {
                 if ((int) hurt[0] == tick && (int) hurt[1] < mobs.size()) {
                     Mob target = mobs.get((int) hurt[1]);
@@ -2331,9 +2385,58 @@ public final class MobOracle {
             }
             level.tracked.removeIf(Entity::isRemoved);
             line.append(',').append(zombieStepJson(mobs, players, level));
+            if (scene.realPlayers) {
+                zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
+                        lastSentHealth, false);
+            }
         }
-        line.append("]}\n");
+        line.append("]");
+        if (scene.realPlayers) {
+            line.append(",\"zombiePlayerStates\":").append(playerStates).append(']');
+            line.append(",\"zombiePlayerPackets\":").append(playerPackets).append(']');
+        }
+        line.append("}\n");
         out.write(line.toString());
+    }
+
+    /** 玩家自己收到的包里要比的那几种：受伤动画、进入 / 离开战斗、死亡界面、血量。 */
+    private static final java.util.Set<Integer> ZOMBIE_SELF_PACKETS = java.util.Set.of(
+            43, 67, 68, 69, 106);
+
+    /**
+     * 僵尸场景一刻结束时：按 `ServerPlayer.doTick` 补 `set_health`，记下玩家状态
+     * （血量位、受伤冷却、受伤动画、死亡、着火刻数）和这一刻要比的包。
+     */
+    private static void zombiePlayerStep(ServerPlayer player, Bytes sink, StringBuilder states,
+            StringBuilder packets, float[] lastSentHealth, boolean first) {
+        float health = player.getHealth();
+        if (!first && Float.floatToRawIntBits(health) != Float.floatToRawIntBits(lastSentHealth[0])) {
+            lastSentHealth[0] = health;
+            sink.add(new net.minecraft.network.protocol.game.ClientboundSetHealthPacket(
+                    health, player.getFoodData().getFoodLevel(),
+                    player.getFoodData().getSaturationLevel()));
+        }
+        if (first) {
+            lastSentHealth[0] = health;
+        }
+        if (!first) {
+            states.append(',');
+            packets.append(',');
+        }
+        states.append('[').append(Float.floatToRawIntBits(health))
+                .append(',').append(player.damageCooldownTime)
+                .append(',').append(player.hurtTime)
+                .append(',').append(player.isAlive() ? 0 : 1)
+                .append(',').append(player.getRemainingFireTicks()).append(']');
+        packets.append('[');
+        boolean comma = false;
+        for (byte[] body : sink.takeRaw()) {
+            if (body.length == 0 || !ZOMBIE_SELF_PACKETS.contains((int) body[0])) continue;
+            if (comma) packets.append(',');
+            packets.append('"').append(Base64.getEncoder().encodeToString(body)).append('"');
+            comma = true;
+        }
+        packets.append(']');
     }
 
     /** 与 `CowStep` 同形；牛专属字段给缺省值，僵尸专属字段逐刻输出。 */

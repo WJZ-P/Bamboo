@@ -992,9 +992,21 @@ pub trait Level: LevelSideState + LevelEntities {
         false
     }
 
-    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界为真。
+    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线在
+    /// [`Level::clock_ticks`] 处求值；有固定时间的维度没有这条时间线，恒假。
     fn monsters_burn(&self) -> bool {
-        true
+        !self.dimension_has_fixed_time() && crate::sky::monsters_burn(self.clock_ticks())
+    }
+
+    /// `getOverworldClockTime()`：主世界时钟的整数刻，和算 `skyDarken` 的是同一个值。
+    /// 默认 0（新世界的第一刻）。
+    fn clock_ticks(&self) -> i64 {
+        0
+    }
+
+    /// 区块的 `InhabitedTime`：区域难度读它。默认 0。
+    fn inhabited_time(&self, _chunk: ChunkPos) -> i64 {
+        0
     }
 
     /// `Level.isDarkOutside()`：没有固定时间的维度里 `skyDarken >= 4`。
@@ -1004,6 +1016,29 @@ pub trait Level: LevelSideState + LevelEntities {
     /// fixed time. The overworld uses it for the bed's `when_dark` rule.
     fn is_dark_outside(&self) -> bool {
         self.sky_darken() >= 4
+    }
+
+    /// 精确驱动当场落地生物对玩家的一次伤害，官方 `Mob.doHurtTarget` 里的
+    /// `target.hurtServer(...)`。返回真实的 `wasHurt` 和死亡掉落；`None` 表示这一层
+    /// 不能当场落地，调用方改成延后的 [`Effect::HurtPlayer`]。`attacker` 是打人的生物
+    /// 这一刻的公开数据：它正在 tick，不在实体表里，死亡消息要靠它拿名字。
+    ///
+    /// Applies a mob's hit on a player at once in the precise driver. `None` means
+    /// this level cannot, and the caller falls back to a deferred effect.
+    fn hurt_player_now(
+        &mut self,
+        _target: crate::entity::EntityUid,
+        _source: crate::entity::mob::DamageSource,
+        _amount: f32,
+        _attacker: Option<&crate::entity::EntityPublic>,
+    ) -> Option<PlayerHurtNow> {
+        None
+    }
+
+    /// 精确驱动当场给玩家点火（`Entity.igniteForSeconds`）。`false` 表示不能当场做，
+    /// 调用方改成延后的 [`Effect::IgnitePlayer`]。
+    fn ignite_player_now(&mut self, _target: crate::entity::EntityUid, _ticks: i32) -> bool {
+        false
     }
 
     /// `Monster.isPreventingPlayerRest` 的近似入口；世界里还没有怪物，默认没有。
@@ -1877,6 +1912,27 @@ impl BedProblem {
     }
 }
 
+/// [`Level::hurt_player_now`] 的结果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerHurtNow {
+    /// 官方 `hurtServer` 的返回值。
+    pub hurt: bool,
+    /// 这一下把玩家打死时，`ServerPlayer.die` 要在世界里生成的掉落。
+    pub death_drops: Option<PlayerDeathDrops>,
+}
+
+/// `Player.dropEquipment` + `LivingEntity.dropExperience`：死亡那一刻要生成的物品和经验。
+/// 游戏层算好，由 [`crate::World::spawn_player_death_drops`] 在世界里生成。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerDeathDrops {
+    /// 玩家死时的位置（经验球的落点）。
+    pub position: mc_bamboo_core::Vec3,
+    /// 按背包顺序掉出的物品。
+    pub items: Vec<mc_bamboo_protocol::item::ItemStack>,
+    /// 经验值，0 表示不掉。
+    pub experience: i32,
+}
+
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
 ///
 /// The non-block results of one action, handed to the caller for delivery.
@@ -1991,6 +2047,8 @@ pub enum Effect {
         source: DamageSource,
         amount: f32,
     },
+    /// `Zombie.doHurtTarget` 的着火传染打到玩家：`igniteForTicks(ticks)`。
+    IgnitePlayer { target: EntityUid, ticks: i32 },
     /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
     /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
     ///

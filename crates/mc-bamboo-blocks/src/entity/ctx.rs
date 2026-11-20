@@ -152,9 +152,26 @@ pub trait BlockView {
         self.sky_darken() < 4
     }
 
-    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界为真。
+    /// `EnvironmentAttributes.MONSTERS_BURN`：主世界按 `day` 时间线求值。
     fn monsters_burn(&self) -> bool {
-        true
+        crate::sky::monsters_burn(self.clock_ticks())
+    }
+
+    /// `getOverworldClockTime()`：主世界时钟的整数刻。没有时钟的视图给 0。
+    fn clock_ticks(&self) -> i64 {
+        0
+    }
+
+    /// `getCurrentDifficultyAt(pos).getEffectiveDifficulty()`：区域难度。
+    /// 默认把区块的 `InhabitedTime` 当 0。
+    fn effective_difficulty(&self, _pos: BlockPos) -> f32 {
+        let clock = self.clock_ticks();
+        crate::sky::effective_difficulty(
+            self.difficulty(),
+            clock,
+            0,
+            crate::sky::moon_brightness(clock),
+        )
     }
 
     /// `level.random.nextFloat()`。只有精确模式的世界能当场取世界随机数；
@@ -339,6 +356,21 @@ impl BlockView for World<'_> {
         self.level().monsters_burn()
     }
 
+    fn clock_ticks(&self) -> i64 {
+        self.level().clock_ticks()
+    }
+
+    fn effective_difficulty(&self, pos: BlockPos) -> f32 {
+        let clock = self.level().clock_ticks();
+        crate::sky::effective_difficulty(
+            self.level().difficulty_id(),
+            clock,
+            self.level()
+                .inhabited_time(ChunkPos::new(pos.x >> 4, pos.z >> 4)),
+            crate::sky::moon_brightness(clock),
+        )
+    }
+
     fn level_random_float(&self) -> f32 {
         self.random().next_float()
     }
@@ -371,6 +403,35 @@ pub trait EntityCtx {
     /// `me` 是发出者的完整视图；落地函数可以直接改它，tick 函数在 `emit` 之后
     /// 看到的就是改完的自己。tick 函数不能根据 `emit` 之后自己的状态分支。
     fn emit(&mut self, command: Command, me: &mut Entity);
+    /// 生物打一名玩家（官方 `Mob.doHurtTarget` 里的 `target.hurtServer`），返回 `wasHurt`。
+    ///
+    /// 精确驱动当场落地，返回真实结果；并行驱动缓冲成 [`Command::HurtPlayer`]，
+    /// 一律按打中算（性能模式的已知差异）。
+    ///
+    /// `attacker` 是打人的生物这一刻完整的公开数据（tick 期间 `me.kind` 被临时取走，
+    /// 死亡消息要从这里拿名字和 UUID）。
+    ///
+    /// A mob hits a player. The precise driver applies it at once and returns the real
+    /// `wasHurt`; the parallel driver buffers a command and reports a hit.
+    fn hurt_player(
+        &mut self,
+        target: EntityUid,
+        source: crate::entity::mob::DamageSource,
+        amount: f32,
+        me: &mut Entity,
+        attacker: &EntityPublic,
+    ) -> bool {
+        let _ = attacker;
+        self.emit(
+            Command::HurtPlayer {
+                target,
+                source,
+                amount,
+            },
+            me,
+        );
+        true
+    }
 }
 
 /// 下落方块「算」阶段得到的落地判定事实，随命令带进落地阶段。
@@ -437,7 +498,7 @@ pub enum Command {
         amount: f32,
     },
     /// `Zombie.doHurtTarget` 的着火传染（打到玩家）。
-    IgnitePlayer { target: EntityUid, seconds: f32 },
+    IgnitePlayer { target: EntityUid, ticks: i32 },
     /// `Mob.doHurtTarget` 打到另一头生物。
     HurtMob {
         target: EntityUid,
@@ -514,11 +575,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
             source,
             amount,
         } => {
-            super::mob::living::apply_hurt_player(world, target, source, amount);
+            super::mob::living::apply_hurt_player(world, me, target, source, amount);
         }
-        Command::IgnitePlayer { target, seconds } => {
-            let _ = (target, seconds);
-        }
+        Command::IgnitePlayer { target, ticks } => world.ignite_player_from_mob(target, ticks),
         Command::HurtMob {
             target,
             source,
@@ -616,6 +675,19 @@ impl EntityCtx for PreciseCtx<'_, '_> {
 
     fn emit(&mut self, command: Command, me: &mut Entity) {
         apply(command, me, self.world);
+    }
+
+    fn hurt_player(
+        &mut self,
+        target: EntityUid,
+        source: crate::entity::mob::DamageSource,
+        amount: f32,
+        _me: &mut Entity,
+        attacker: &EntityPublic,
+    ) -> bool {
+        // 打人的生物正被驱动拿在手里，不在表里；把它这一刻的公开数据带过去。
+        self.world
+            .hurt_player_from_mob(target, source, amount, Some(attacker))
     }
 }
 

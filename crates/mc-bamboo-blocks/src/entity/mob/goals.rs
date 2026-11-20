@@ -809,7 +809,22 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
             // `!navigation.isDone()` 才继续；路径走完就停。
             target_player(mob, ctx).is_some() && !mob.navigation.is_done()
         }
-        Goal::HurtByTarget { .. } | Goal::NearestAttackableTarget { .. } => mob.target.is_some(),
+        Goal::HurtByTarget { .. } | Goal::NearestAttackableTarget { .. } => {
+            // `TargetGoal.canContinueToUse`：`getTarget()` 把打不了的目标（死了、创造、
+            // 旁观、和平难度）读成 null，回退到的 `targetMob` 是同一个玩家，同样打不了；
+            // 打得了还要在跟随距离内。`mustSee` 的视线记忆本期不建模（目标恒看得见）。
+            let range = mob
+                .attributes
+                .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+            target_player(mob, ctx).is_some_and(|player| {
+                let (dx, dy, dz) = (
+                    player.position.x - me.position.x,
+                    player.position.y - me.position.y,
+                    player.position.z - me.position.z,
+                );
+                dx * dx + dy * dy + dz * dz <= range * range
+            })
+        }
         Goal::RestrictSun => ctx.blocks().is_bright_outside() && mob.helmet.is_none(),
         Goal::FleeSun { .. } => !mob.navigation.is_done(),
         Goal::BreakDoor => mob.door_break_time <= 240 && ctx.blocks().difficulty() == 3,
@@ -942,9 +957,13 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         | Goal::Panic { .. }
         | Goal::RandomLookAround { .. }
         | Goal::Unavailable(_)
-        | Goal::RestrictSun
-        | Goal::HurtByTarget { .. }
-        | Goal::NearestAttackableTarget { .. } => {}
+        | Goal::RestrictSun => {}
+        // `TargetGoal.stop`：`setTarget(null)`，`targetMob = null`。
+        Goal::HurtByTarget { .. } => mob.target = None,
+        Goal::NearestAttackableTarget { found, .. } => {
+            mob.target = None;
+            *found = None;
+        }
         Goal::MeleeAttack { .. } => {
             // `MeleeAttackGoal.stop()`：目标是创造或旁观模式的玩家才清掉
             // （`NO_CREATIVE_OR_SPECTATOR`），普通玩家目标保留。
@@ -1067,18 +1086,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => {}
         Goal::Unavailable(_) | Goal::HurtByTarget { .. } | Goal::RestrictSun => {}
-        Goal::NearestAttackableTarget {
-            unseen_ticks,
-            found,
-            ..
-        } => {
-            if let Some(uid) = found
-                && let Some(target) = player_by_uid(ctx.blocks(), *uid)
-                && !target.alive
-            {
-                mob.target = None;
-                *found = None;
-            }
+        Goal::NearestAttackableTarget { unseen_ticks, .. } => {
             *unseen_ticks += 1;
             // 官方 `TargetGoal.canContinueToUse` 在 `mustSee` 时按视线刷新
             // `unseenTicks`；本期的玩家目标恒可攻击，不改随机源。

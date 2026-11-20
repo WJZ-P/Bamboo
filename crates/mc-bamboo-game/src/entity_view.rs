@@ -76,6 +76,10 @@ impl BlockSource for ReadOnlyWorld<'_> {
         self.shulker_box_shapes.get(&pos).copied()
     }
 
+    fn inhabited_time(&self, chunk: ChunkPos) -> i64 {
+        self.chunks.chunk(chunk).archive().inhabited_time
+    }
+
     fn section_has_collision(&self, section_x: i32, section_y: i32, section_z: i32) -> bool {
         self.chunks
             .section_has_any_collision(ChunkPos::new(section_x, section_z), section_y)
