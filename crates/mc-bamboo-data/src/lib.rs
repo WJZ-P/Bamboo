@@ -89,6 +89,15 @@ pub mod facts {
     pub const PATHFINDABLE_LAND: u64 = 1 << 35;
     /// `isSuffocating(EmptyBlockGetter, pos)`，`Entity.isInWall` 用。
     pub const SUFFOCATING: u64 = 1 << 36;
+    /// `isValidSpawn(EmptyBlockGetter, pos, COW)`：这个状态能不能当生物的落脚块。
+    /// 官方默认是「顶面 `isFaceSturdy(FULL)` 且发光小于 14」，少数方块整个换掉（床、玻璃、
+    /// 树叶、冰、雕刻南瓜等）；用牛来问，因为只有豹猫/鹦鹉和北极熊的方块按实体类型分别回答。
+    ///
+    /// `isValidSpawn(EmptyBlockGetter, pos, COW)`: whether mobs may stand on this state.
+    /// The default is `isFaceSturdy(FULL)` on top and emission below 14, but a few blocks
+    /// replace it outright. Asked with a cow: only the ocelot/parrot and polar-bear blocks
+    /// answer per entity type.
+    pub const VALID_SPAWN: u64 = 1 << 37;
 }
 
 /// 官方 `WalkNodeEvaluator` 给寻路格子分的类别，顺序和官方 `PathType` 一致。

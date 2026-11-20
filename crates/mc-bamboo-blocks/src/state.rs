@@ -222,6 +222,16 @@ impl BlockState {
         self.fact(facts::SUFFOCATING)
     }
 
+    /// `isValidSpawn(level, pos, type)`：生物能不能把这个状态当落脚块。按空世界、牛来算，
+    /// 因为只有豹猫/鹦鹉和北极熊的方块按实体类型分别回答（Bamboo 不生成它们）。
+    ///
+    /// `isValidSpawn(level, pos, type)`: whether a mob may stand on this state. Read with
+    /// an empty world and a cow; only the ocelot/parrot and polar-bear blocks answer per
+    /// entity type, and Bamboo spawns neither.
+    pub fn is_valid_spawn_surface(self) -> bool {
+        self.fact(facts::VALID_SPAWN)
+    }
+
     /// `isSignalSource`。
     pub fn is_signal_source(self) -> bool {
         self.fact(facts::SIGNAL_SOURCE)

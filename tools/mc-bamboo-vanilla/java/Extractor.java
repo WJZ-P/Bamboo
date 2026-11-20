@@ -88,6 +88,7 @@ import net.minecraft.tags.TagNetworkSerialization;
 import net.minecraft.world.attribute.EnvironmentAttributes;
 import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.EquipmentSlotGroup;
 import net.minecraft.world.entity.LivingEntity;
@@ -242,6 +243,12 @@ public final class Extractor {
     private static final long FACT_MOTION_BLOCKING_NO_LEAVES = 1L << 34;
     private static final long FACT_PATHFINDABLE_LAND = 1L << 35;
     private static final long FACT_SUFFOCATING = 1L << 36;
+    /**
+     * {@code BlockBehaviour.BlockStateBase.isValidSpawn}：这个状态能不能当生物的落脚块。
+     *
+     * <p>用牛来问，因为只有豹猫/鹦鹉和北极熊的方块会按实体类型分别回答；这三种 Bamboo 都不生成。
+     */
+    private static final long FACT_VALID_SPAWN = 1L << 37;
     private static final int LIGHT_BLOCKED = 16;
     private static final int STURDY_MASK = (1 << 18) - 1;
     /** 26.3 主世界多噪声预设 `collectPossibleBiomes().distinct()` 的数量。 */
@@ -2115,6 +2122,7 @@ public final class Extractor {
             facts |= state.isPathfindable(net.minecraft.world.level.pathfinder.PathComputationType.LAND)
                     ? FACT_PATHFINDABLE_LAND : 0;
             facts |= state.isSuffocating(EMPTY, pos) ? FACT_SUFFOCATING : 0;
+            facts |= state.isValidSpawn(EMPTY, pos, EntityTypes.COW) ? FACT_VALID_SPAWN : 0;
             return facts;
         }
 

@@ -676,7 +676,9 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - **刷怪规则**：牛走 `Animal.checkAnimalSpawnRules`（`#animals_spawnable_on` + 原始亮度 > 8），
   僵尸走 `Monster.checkMonsterSpawnRules`（`isDarkEnoughToSpawn`：天空光 `> nextInt(32)`、
   方块光上限 0、`maxLocalRawBrightness <= nextInt(8)`，再查可生成方块），
-  尸壳额外要求 `canSeeSky`。生成的实体还要过 `isValidPositionForMob`：
+  尸壳额外要求 `canSeeSky`。落脚块用生成器导出的状态位 `facts::VALID_SPAWN`（官方
+  `BlockState.isValidSpawn`，用牛问：默认是顶面 `isFaceSturdy(FULL)` 且发光 < 14，树叶、玻璃、
+  冰、雕刻南瓜等整个换掉），生成实体还要过 `isValidPositionForMob`：
   `PathfinderMob.checkSpawnRules`（`getWalkTargetValue >= 0`，牛看草方块/亮度，怪物取负的
   光照代价）、`checkSpawnObstruction`（不泡液体、没有实体挡路）。
 - **接入**：`crates/mc-bamboo-game/src/natural_spawn.rs` 在 `run_island_simulation` 里

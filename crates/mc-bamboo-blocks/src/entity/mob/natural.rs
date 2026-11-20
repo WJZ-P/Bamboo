@@ -19,11 +19,11 @@
 
 use std::collections::BTreeMap;
 
-use mc_bamboo_core::{Axis, BlockPos, ChunkPos, Direction, LightLayer, Vec3, mth};
+use mc_bamboo_core::{Axis, BlockPos, ChunkPos, LightLayer, Vec3, mth};
+use mc_bamboo_data::BlockAncestor;
 use mc_bamboo_data::blocks::{CACTUS, LAVA, LAVA_CAULDRON, MAGMA_BLOCK, POWDER_SNOW};
 use mc_bamboo_data::spawning::{self, MobCategory, MobSpawnSettings, MobSpawnerDef};
 use mc_bamboo_data::tags::block_tags;
-use mc_bamboo_data::{BlockAncestor, light_emission};
 
 use super::{MobType, spawn};
 use crate::{
@@ -33,7 +33,7 @@ use crate::{
         store::KindPublic,
     },
     shape::{Aabb, CollisionContext},
-    state::{BlockState, LIT, SupportType},
+    state::{BlockState, LIT},
     world::World,
 };
 
@@ -573,10 +573,14 @@ fn spawn_placement_ok(world: &World, kind: MobType, pos: BlockPos) -> bool {
     is_valid_empty_spawn_block(world, kind, pos) && is_valid_empty_spawn_block(world, kind, above)
 }
 
-/// `BlockState.isValidSpawn`：`isFaceSturdy(UP)` 且发光小于 14。
+/// `BlockState.isValidSpawn`：能不能当落脚块。官方默认是「顶面 `isFaceSturdy(FULL)` 且发光
+/// 小于 14」，但树叶、玻璃、冰、雕刻南瓜这些方块整个换掉了它，所以查生成器导出的状态位。
+///
+/// `BlockState.isValidSpawn`: whether this can be a footing block. Vanilla defaults to a
+/// sturdy top face with emission below 14, but leaves, glass, ice and carved pumpkins
+/// replace that outright, so the generated per-state bit is used.
 fn is_valid_spawn_below(world: &World, pos: BlockPos) -> bool {
-    world.is_face_sturdy(pos, Direction::Up, SupportType::Full)
-        && light_emission(world.block_state(pos).0) < 14
+    world.block_state(pos).is_valid_spawn_surface()
 }
 
 /// `NaturalSpawner.isValidEmptySpawnBlock`。
@@ -985,6 +989,22 @@ mod tests {
             &cow,
             BlockPos::new(0, 63, 0)
         ));
+    }
+
+    #[test]
+    fn the_spawn_surface_follows_is_valid_spawn() {
+        let mut level = TestLevel::new();
+        level.set(BlockPos::new(0, 60, 0), BlockState(blocks::GRASS_BLOCK));
+        level.set(BlockPos::new(0, 61, 0), BlockState(blocks::OAK_LEAVES));
+        level.set(BlockPos::new(0, 62, 0), BlockState(blocks::GLASS));
+        let mut ticks = BlockTicks::new();
+        let world = World::new(&mut level, &mut ticks);
+        // 草方块能当落脚块；树叶和玻璃换掉了 `isValidSpawn` 的默认实现，不能。
+        // Grass is a valid footing block; leaves and glass replace the default
+        // `isValidSpawn` and are not.
+        assert!(is_valid_spawn_below(&world, BlockPos::new(0, 60, 0)));
+        assert!(!is_valid_spawn_below(&world, BlockPos::new(0, 61, 0)));
+        assert!(!is_valid_spawn_below(&world, BlockPos::new(0, 62, 0)));
     }
 
     #[test]
