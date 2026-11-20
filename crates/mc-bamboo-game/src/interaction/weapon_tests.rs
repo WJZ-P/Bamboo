@@ -318,3 +318,32 @@ fn quick_charge_shortens_the_charge_to_fifteen_ticks() {
         "快速装填 II 是 15 刻"
     );
 }
+
+#[test]
+fn releasing_a_crossbow_at_the_charge_threshold_loads_it() {
+    let (mut server, client) = settled();
+    put(&mut server, &client, 36, ItemStack::new(items::CROSSBOW, 1));
+    put(&mut server, &client, 37, ItemStack::new(items::ARROW, 5));
+    let crossbow = enchant(&mut server, &client, 36, "minecraft:quick_charge", 2);
+    put(&mut server, &client, 36, crossbow);
+    server
+        .region()
+        .players
+        .get_mut(&client.id)
+        .unwrap()
+        .game_mode = GameMode::Survival;
+    use_item(&mut server, &client, 1);
+    for _ in 0..15 {
+        server.tick();
+    }
+    release_item(&mut server, &client);
+    server.tick();
+    let player = &server.region().players[&client.id];
+    let crossbow = player.inventory.held(Hand::Main);
+    assert!(matches!(
+        defaults::resolve(crossbow.item, &crossbow.patch(), kinds::CHARGED_PROJECTILES),
+        Some(ComponentValue::ChargedProjectiles(projectiles)) if projectiles.len() == 1
+    ));
+    assert_eq!(player.inventory.slots[37].count, 4);
+    assert!(arrows(&mut server).is_empty());
+}

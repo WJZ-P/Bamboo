@@ -270,6 +270,15 @@ fn load_projectiles(region: &mut Region, id: PlayerId, hand: Hand) -> bool {
 /// `Player.releaseUsingItem` for bows and crossbows. A crossbow does not fire
 /// here; it only stops loading.
 pub(crate) fn release(region: &mut Region, id: PlayerId) {
+    // 弩在停用前额外跑一次 onUseTick：刚好到充满阈值时松手仍然可以装填。
+    // Crossbows run one more onUseTick before stopping, so release at the threshold can load.
+    if let Some(player) = region.players.get(&id)
+        && let Some(using) = player.weapon_use.as_ref()
+        && using.item == items::CROSSBOW
+        && player.inventory.held(using.hand).item == using.item
+    {
+        charge_tick(region, id, using.hand, using.time_held());
+    }
     let Some(player) = region.players.get_mut(&id) else {
         return;
     };
