@@ -499,19 +499,24 @@ WebView2 的渲染进程不算在内。
   `spawn_mobs` / `spawn_monsters` 规则、`gameTime % 400 == 0` 才刷的持久类别、按玩家的上限
   （`bamboo.toml` 的 `spawn_per_player_cap`，默认开）、`getRandomPosWithin` 与
   `WORLD_SURFACE` 高度图、离玩家和出生点 24 格、`ON_GROUND` 的方块/光照/碰撞条件、
+  `Monster.isDarkEnoughToSpawn`、`PathfinderMob.checkSpawnRules`（`getWalkTargetValue >= 0`）、
   `finalizeSpawn` 与按组生成（牛按 `AgeableMobGroupData` 抽幼年）。刷怪区块列表用岛自己的
-  世界随机源打乱。**已知差异与未做**：
+  世界随机源打乱（即使这一刻没有可刷的类别也照官方打乱）。**已知差异与未做**：
   - **只有牛、僵尸、尸壳会真的生成**：群系刷怪表里其它条目（羊、猪、鸡、骷髅、苦力怕、蜘蛛、
-    史莱姆、末影人、女巫、蝙蝠、鱿鱼等）被挑中后当作「没有刷怪数据」结束这一组。权重表、
-    组大小和随机取数次数照官方，但**已支持生物的实际产率因此低于官方**。
+    史莱姆、末影人、女巫、蝙蝠、鱿鱼等）被挑中后当作没有刷怪数据、结束这一组。因为一个组只会
+    刷一种生物，这不会改变已支持生物的期望产率（官方刷到那一刻也是刷别的种类），但**挑中这种
+    条目以后的随机数序列和官方不同**（官方会继续为那种生物取朝向、生成规则和 `finalizeSpawn`
+    的随机数），官方还会把它们算进类别计数、让全局上限更早卡住。
   - 僵尸和尸壳的 `finalizeSpawn` 沿用期 2 的实现：缺 `Mob.finalizeSpawn` 的跟随距离加成和
     左撇子、装备/附魔抽取，也没有鸡骑士，随机序列和官方不同；牛的这一段逐项照官方。
   - 未做：下界要塞的 `FORTRESS_ENEMIES`、生成期刷怪（`spawnMobsForChunkGeneration`）、
     结构刷怪、刷怪笼、`customSpawners`（猫、流浪商人）、溺尸转化和刷怪增援。
-  - `spawnableChunkCount` 用「玩家周围曼哈顿距离 8 内已加载的区块数」近似官方
-    `DistanceManager` 的 `FixedPlayerDistanceChunkTracker`；多人多岛时可能和官方差几块。
+  - `spawnableChunkCount` 用「玩家周围切比雪夫距离 8 内（17×17 的方形）已加载的区块数」
+    对应官方 `DistanceManager` 的 `FixedPlayerDistanceChunkTracker`（官方的追踪器八方向传播、
+    旁观者的玩家票也算）；真正加载状态官方不看，这里多一层 `is_loaded`，岛边缘可能差几块。
   - 官方按哈希顺序遍历刷怪区块，Bamboo 按坐标顺序收集、再用世界随机源打乱，所以列表内容
     与计数一致、打乱后的具体顺序不同。
+  - `doMobSpawning` 为假时整段不跑、一个随机数都不取；官方这时仍会打乱刷怪区块列表。
 - 地物（`ChunkStatus.FEATURES`）阶段：纯函数已按 `docs/worldgen-features-plan.md` 的分类
   逐类移植，接入游戏流水线由流水线分支负责。按 5.2 的分类，非植被里已按官方 26.3
   移植并对拍 0 不一致的有 `ore`（流水线里程碑）、`disk`、`underwater_magma`、

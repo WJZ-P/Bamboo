@@ -20,21 +20,21 @@ use mc_bamboo_blocks::World;
 use mc_bamboo_blocks::entity::mob::natural::{self, SpawnParams, SpawnState};
 use mc_bamboo_core::ChunkPos;
 
-use mc_bamboo_protocol::packet::play::GameMode;
-
 use crate::region::Region;
 
 /// `NaturalSpawner.SPAWN_DISTANCE_CHUNK`：`getNaturalSpawnChunkCount` 只算玩家周围 8 个
-/// 区块内（曼哈顿距离）的已加载区块。
+/// 区块内的区块（切比雪夫距离）。
 ///
-/// `NaturalSpawner.SPAWN_DISTANCE_CHUNK`: `getNaturalSpawnChunkCount` only counts loaded
-/// chunks within 8 chunks (Manhattan) of a player.
+/// `NaturalSpawner.SPAWN_DISTANCE_CHUNK`: `getNaturalSpawnChunkCount` only counts chunks
+/// within 8 chunks (Chebyshev) of a player.
 const SPAWN_CHUNK_RADIUS: i32 = 8;
 
-/// 随机刻之外的自然生成。`spawn_mobs` 关掉时整段不做，一个随机数都不取。
+/// 随机刻之外的自然生成。`spawn_mobs` 关掉时整段不做，一个随机数都不取（官方这时仍会
+/// 打乱刷怪区块列表，这条差异见 README 的已知差异）。
 ///
 /// Natural spawning beside the random ticks. With `spawn_mobs` off nothing runs and no
-/// random number is drawn.
+/// random number is drawn (vanilla still shuffles the chunk list then; see the known
+/// differences in the README).
 pub(crate) fn tick(region: &mut Region) {
     if !region.global.block_rules.spawn_mobs {
         return;
@@ -58,17 +58,20 @@ pub(crate) fn tick(region: &mut Region) {
     };
     let spawn_persistent = region.tick.game_time() % 400 == 0;
     let categories = state.filtered_categories(spawn_enemies, spawn_persistent);
-    if categories.is_empty() {
-        return;
-    }
     let mut chunks = spawning_chunks(region);
-    if chunks.is_empty() {
-        return;
-    }
+    // 官方即使没有可刷的类别也照样收集并打乱刷怪区块列表（`tickChunks` 里打乱在
+    // 类别判断之外），所以这里也每刻取这一串随机数。
+    //
+    // Vanilla collects and shuffles the spawning chunks even when no category can
+    // spawn (the shuffle sits outside the category check), so the draws happen
+    // every tick here too.
     {
         let (mut level, ticks) = region.block_level();
         let world = World::new(&mut level, ticks);
         mc_bamboo_blocks::shuffle(world.random(), &mut chunks);
+    }
+    if categories.is_empty() || chunks.is_empty() {
+        return;
     }
     for chunk in chunks {
         let (mut level, ticks) = region.block_level();
@@ -109,23 +112,21 @@ fn spawning_chunks(region: &Region) -> Vec<ChunkPos> {
     chunks.into_iter().collect()
 }
 
-/// `DistanceManager.getNaturalSpawnChunkCount()`：玩家周围 8 个区块（曼哈顿距离）里
-/// 已加载的区块个数，按区块去重。
+/// `DistanceManager.getNaturalSpawnChunkCount()`：玩家周围 8 个区块（切比雪夫距离，
+/// 也就是 17×17 的方形）里的区块个数，按区块去重。官方的追踪器从玩家所在区块出发、
+/// 每跨一格（含对角）加一，所以是方形而不是菱形；它也只看玩家票，不看区块是否加载，
+/// 旁观者的玩家票同样算数。
 ///
-/// `DistanceManager.getNaturalSpawnChunkCount()`: the number of loaded chunks within
-/// 8 chunks (Manhattan) of a player, counted once per chunk.
+/// `DistanceManager.getNaturalSpawnChunkCount()`: the number of chunks within 8
+/// chunks of a player, counted once per chunk. The vanilla tracker grows by one per
+/// step in all eight directions, so the shape is a square, not a diamond. It counts
+/// player tickets only (spectators included) and does not look at load state.
 fn spawnable_chunk_count(region: &Region) -> i32 {
     let mut chunks = BTreeSet::new();
     for player in region.players.values() {
-        if player.game_mode == GameMode::Spectator {
-            continue;
-        }
         let center = player.chunk_pos();
         for dx in -SPAWN_CHUNK_RADIUS..=SPAWN_CHUNK_RADIUS {
             for dz in -SPAWN_CHUNK_RADIUS..=SPAWN_CHUNK_RADIUS {
-                if dx.abs() + dz.abs() > SPAWN_CHUNK_RADIUS {
-                    continue;
-                }
                 let chunk = ChunkPos::new(center.x + dx, center.z + dz);
                 if region.chunks.is_loaded(chunk) {
                     chunks.insert(chunk);

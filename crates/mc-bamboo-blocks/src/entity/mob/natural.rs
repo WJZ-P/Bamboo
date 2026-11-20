@@ -299,6 +299,11 @@ pub fn spawn_for_chunk(
     params: &SpawnParams,
     categories: &[MobCategory],
 ) {
+    // `ServerLevel.canSpawnEntitiesInChunk` 的另一半：区块在世界上边界内。
+    // The other half of `ServerLevel.canSpawnEntitiesInChunk`: the chunk is in bounds.
+    if !world.world_border().is_within_bounds_chunk(chunk) {
+        return;
+    }
     for &category in categories {
         if params.per_player_cap && !state.can_spawn_for_category_local(category, chunk) {
             continue;
@@ -418,9 +423,11 @@ fn is_right_distance_to_player_and_spawn_point(
         return false;
     }
     if let Some(respawn) = params.respawn_pos {
-        let dx = f64::from(pos.x) + 0.5 - f64::from(respawn.x);
-        let dy = f64::from(pos.y) - f64::from(respawn.y);
-        let dz = f64::from(pos.z) + 0.5 - f64::from(respawn.z);
+        // `Vec3i.distToCenterSqr` 把 `BlockPos` 当中心（每个轴上加 0.5）来算。
+        // `Vec3i.distToCenterSqr` treats the `BlockPos` as a centre (plus 0.5 per axis).
+        let dx = f64::from(pos.x) + 0.5 - (f64::from(respawn.x) + 0.5);
+        let dy = f64::from(pos.y) - (f64::from(respawn.y) + 0.5);
+        let dz = f64::from(pos.z) + 0.5 - (f64::from(respawn.z) + 0.5);
         if dx * dx + dy * dy + dz * dz < MIN_SPAWN_DISTANCE_SQR {
             return false;
         }
@@ -675,13 +682,26 @@ fn is_valid_position_for_mob(
     if nearest_player_distance_sqr > despawn * despawn && kind.removes_when_far_away() {
         return false;
     }
-    // `Mob.checkSpawnRules` 在 `Mob` 基类里恒真；`checkSpawnObstruction` 要求不泡在液体里
-    // 且没有实体挡住（Bamboo 的 `is_unobstructed` 只看玩家）。
+    // `Mob.checkSpawnObstruction`：不泡在液体里，且没有实体挡住（Bamboo 的
+    // `is_unobstructed` 只看玩家）。
     //
-    // `Mob.checkSpawnRules` is true on the base class; `checkSpawnObstruction` needs no
-    // liquid in the box and nothing in the way (Bamboo's check only knows players).
-    !contains_any_liquid(world, entity.bounding_box())
+    // `Mob.checkSpawnObstruction`: no liquid in the box and nothing in the way
+    // (Bamboo's check only knows players).
+    pathfinder_spawn_rules(world, entity, entity.block_position())
+        && !contains_any_liquid(world, entity.bounding_box())
         && world.level().is_unobstructed(&[entity.bounding_box()])
+}
+
+/// `PathfinderMob.checkSpawnRules`：`getWalkTargetValue(pos) >= 0`。牛看脚下是不是草方块，
+/// 否则按亮度算路径代价；僵尸取负的代价。
+///
+/// `PathfinderMob.checkSpawnRules`: `getWalkTargetValue(pos) >= 0`. Cows look at the
+/// block below and otherwise use the light-based path cost; monsters negate that cost.
+fn pathfinder_spawn_rules(world: &World, entity: &Entity, pos: BlockPos) -> bool {
+    let Some(mob) = entity.kind.mob() else {
+        return true;
+    };
+    super::goals::walk_target_value(mob, world, pos) >= 0.0
 }
 
 /// `EntityType.getSpawnAABB(x, y, z)`：以 (x, y, z) 为脚底中心的身体盒。
@@ -762,11 +782,15 @@ fn player_is_close_to_chunk(player: PlayerView, chunk: ChunkPos) -> bool {
     dx * dx + dz * dz < 16384.0
 }
 
-/// `Level.getNearestPlayer(x, y, z, -1.0, false)` 的距离平方：非旁观者、非创造。
+/// `Level.getNearestPlayer(x, y, z, -1.0, false)` 的距离平方：只排除旁观者，
+/// 创造模式玩家照官方一样算数。
+///
+/// The squared distance of `Level.getNearestPlayer(x, y, z, -1.0, false)`: only
+/// spectators are skipped, creative players count as in vanilla.
 fn nearest_player_distance_sqr(world: &World, x: f64, y: f64, z: f64) -> Option<f64> {
     let mut best: Option<f64> = None;
     world.for_each_player(&mut |player| {
-        if player.spectator || player.creative {
+        if player.spectator {
             return;
         }
         let dx = player.position.x - x;
@@ -914,6 +938,78 @@ mod tests {
         for _ in 0..50 {
             assert_eq!(run_tick(&mut level, chunk, &params), 0);
         }
+    }
+
+    #[test]
+    fn creative_players_still_keep_mobs_away() {
+        let mut level = TestLevel::new();
+        grass_platform(&mut level);
+        // 官方的 `getNearestPlayer(..., false)` 只排除旁观者，创造模式玩家照样算最近的玩家。
+        // Vanilla's `getNearestPlayer(..., false)` only skips spectators, so a creative
+        // player is still the nearest player.
+        let mut creative = player(1, Vec3::new(8.5, 64.0, 8.5));
+        creative.creative = true;
+        level.players.push(creative);
+        let params = params(289 * 4, true);
+        let chunk = ChunkPos::new(0, 0);
+        for _ in 0..200 {
+            assert_eq!(run_tick(&mut level, chunk, &params), 0);
+        }
+    }
+
+    #[test]
+    fn cows_need_grass_or_bright_light_to_stay() {
+        let mut level = TestLevel::new();
+        level.set(BlockPos::new(0, 62, 0), BlockState(blocks::DIRT));
+        // 亮度 15：`getLightLevelDependentMagicValue` 给 1，路径代价 0.5，牛可以留下。
+        // Light 15: the magic value is 1, so the light path cost is 0.5 and a cow stays.
+        let mut ticks = BlockTicks::new();
+        let world = World::new(&mut level, &mut ticks);
+        let cow = Entity::cow(Vec3::new(0.5, 63.0, 0.5));
+        assert!(pathfinder_spawn_rules(
+            &world,
+            &cow,
+            BlockPos::new(0, 63, 0)
+        ));
+
+        let mut dark = TestLevel::new();
+        dark.set(BlockPos::new(0, 62, 0), BlockState(blocks::DIRT));
+        dark.light = Some((9, 0));
+        // 亮度 9 在泥土上：代价转负，`PathfinderMob.checkSpawnRules` 不通过。
+        // Light 9 over dirt: the cost turns negative and `PathfinderMob.checkSpawnRules`
+        // fails.
+        let mut ticks = BlockTicks::new();
+        let world = World::new(&mut dark, &mut ticks);
+        assert!(!pathfinder_spawn_rules(
+            &world,
+            &cow,
+            BlockPos::new(0, 63, 0)
+        ));
+    }
+
+    #[test]
+    fn monsters_need_darkness_to_stay() {
+        let mut lit = TestLevel::new();
+        let mut ticks = BlockTicks::new();
+        let world = World::new(&mut lit, &mut ticks);
+        let zombie = Entity::zombie(Vec3::new(0.5, 63.0, 0.5));
+        // 亮度 15 下 `Monster.getWalkTargetValue` 是负的。
+        // At light 15 `Monster.getWalkTargetValue` is negative.
+        assert!(!pathfinder_spawn_rules(
+            &world,
+            &zombie,
+            BlockPos::new(0, 63, 0)
+        ));
+
+        let mut dark = TestLevel::new();
+        dark.light = Some((0, 0));
+        let mut ticks = BlockTicks::new();
+        let world = World::new(&mut dark, &mut ticks);
+        assert!(pathfinder_spawn_rules(
+            &world,
+            &zombie,
+            BlockPos::new(0, 63, 0)
+        ));
     }
 
     #[test]
