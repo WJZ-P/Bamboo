@@ -4766,10 +4766,6 @@ public final class MobOracle {
     private static final class FakeLevel extends ServerLevel {
         DifficultyInstance spawnDifficulty;
 
-        @Override
-        public DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {
-            return spawnDifficulty == null ? super.getCurrentDifficultyAt(pos) : spawnDifficulty;
-        }
         private Official official;
         private Long2ObjectOpenHashMap<BlockState> blocks;
         private LevelTicks<Block> blockTicks;
@@ -5128,6 +5124,9 @@ public final class MobOracle {
 
         @Override
         public net.minecraft.world.DifficultyInstance getCurrentDifficultyAt(BlockPos pos) {
+            if (spawnDifficulty != null) {
+                return spawnDifficulty;
+            }
             if (realSky) {
                 // 官方 `ServerLevel.getCurrentDifficultyAt`：难度、主世界时钟、区块居住时间（假世界 0）、月相亮度。
                 return new net.minecraft.world.DifficultyInstance(getDifficulty(), clock, 0L, getMoonBrightness(pos));
