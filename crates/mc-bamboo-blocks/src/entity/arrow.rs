@@ -167,12 +167,13 @@ fn at_point(pos: Vec3, radius: f64) -> Aabb {
 
 pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     let movement = me.delta;
-    if !tick_or_check_ground(me, ctx.blocks()) {
+    if !tick_or_check_ground(me, ctx) {
         fly(me, ctx, movement);
     }
 }
 
-fn tick_or_check_ground(me: &mut Entity, blocks: &dyn BlockView) -> bool {
+fn tick_or_check_ground(me: &mut Entity, ctx: &mut dyn EntityCtx) -> bool {
+    let blocks = ctx.blocks();
     let position = me.position;
     let block_pos = me.block_position();
     let current_state = blocks.block_state(block_pos);
@@ -221,8 +222,10 @@ fn tick_or_check_ground(me: &mut Entity, blocks: &dyn BlockView) -> bool {
             arrow.life += 1;
             me.removed = arrow.life >= 1200;
         }
-        if !me.removed {
-            me.apply_effects_from_blocks(blocks);
+        if !me.removed
+            && let Some(pitch) = travel_effects(me, blocks, position)
+        {
+            ctx.emit(Command::ArrowExtinguished { pitch }, me);
         }
         true
     } else {
@@ -272,8 +275,10 @@ fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
     let hits = find_targets(me, ctx, end);
     if hits.is_empty() && block_hit.is_none() {
         me.position = end;
-        me.apply_effects_along(blocks, position);
-        finish_flight(me, blocks);
+        if let Some(pitch) = travel_effects(me, blocks, position) {
+            ctx.emit(Command::ArrowExtinguished { pitch }, me);
+        }
+        finish_flight(me, ctx.blocks());
     } else {
         ctx.emit(
             Command::ArrowImpact {
@@ -464,7 +469,9 @@ pub(super) fn impact(
     while !me.removed {
         let from = me.position;
         me.position = hits.first().map_or(end, |hit| hit.contact);
-        me.apply_effects_along(world, from);
+        if let Some(pitch) = travel_effects(me, world, from) {
+            play_extinguished_sound(me, world, pitch);
+        }
         if me.removed {
             break;
         }
@@ -483,6 +490,26 @@ pub(super) fn impact(
         hits = find_targets(me, &ctx, end);
     }
     finish_flight(me, world);
+}
+
+fn travel_effects(me: &mut Entity, blocks: &dyn BlockView, from: Vec3) -> Option<f32> {
+    let burning = me.remaining_fire_ticks > 0;
+    me.apply_effects_along(blocks, from);
+    // Entity.playEntityOnFireExtinguishedSound 使用本实体的随机源。
+    // Entity.playEntityOnFireExtinguishedSound uses the entity's own random stream.
+    (burning && me.remaining_fire_ticks <= 0)
+        .then(|| 1.6 + (me.random.next_float() - me.random.next_float()) * 0.4)
+}
+
+pub(super) fn play_extinguished_sound(me: &Entity, world: &mut World<'_>, pitch: f32) {
+    world.play_sound(
+        me.position,
+        sounds::sound_event("minecraft:entity.generic.extinguish_fire"),
+        sounds::NEUTRAL,
+        0.7,
+        pitch,
+        false,
+    );
 }
 
 fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bool {
@@ -684,6 +711,30 @@ fn finish_flight(me: &mut Entity, blocks: &dyn BlockView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrow_crossing_water_extinguishes_before_ending_in_dry_air() {
+        let mut level = crate::testing::TestLevel::new();
+        level.set(
+            BlockPos::new(2, 65, 0),
+            BlockState(mc_bamboo_data::blocks::WATER),
+        );
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let mut arrow = Entity::arrow(Vec3::new(0.5, 65.25, 0.5));
+        arrow.delta = Vec3::new(5.0, 0.0, 0.0);
+        arrow.remaining_fire_ticks = 200;
+        let id = world.spawn_entity(arrow);
+        let mut expected = world.entity(id).unwrap().random;
+        expected.next_float();
+        expected.next_float();
+        world.tick_entities();
+        let arrow = world.entity(id).unwrap();
+        assert_eq!(arrow.position, Vec3::new(5.5, 65.25, 0.5));
+        assert_eq!(arrow.remaining_fire_ticks, 0);
+        assert_eq!(arrow.random.state(), expected.state());
+        assert!(!arrow.in_water);
+    }
 
     #[test]
     fn piercing_rescans_and_applies_blocks_in_the_remaining_segment() {

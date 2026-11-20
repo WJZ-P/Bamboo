@@ -16,7 +16,10 @@
 use std::cmp::Ordering;
 
 use mc_bamboo_core::{Axis, BlockPos, Direction, Vec3, mth};
-use mc_bamboo_data::{BlockAncestor, blocks, tags::block_tags};
+use mc_bamboo_data::{
+    BlockAncestor, blocks,
+    tags::{block_tags, fluid_tags},
+};
 
 use crate::{
     WorldBorder,
@@ -490,10 +493,34 @@ impl Entity {
                 visited.push(pos);
                 self.block_inside(state);
             }
+            if self.remaining_fire_ticks > 0 && matches!(self.kind, super::EntityKind::Arrow(_)) {
+                self.extinguish_arrow_in_water(world, pos, from, to);
+            }
             true
         };
         for_each_block_intersected_between(from, to, deflated, &mut visit);
         iterations
+    }
+
+    fn extinguish_arrow_in_water(
+        &mut self,
+        world: &dyn BlockView,
+        pos: BlockPos,
+        from: Vec3,
+        to: Vec3,
+    ) {
+        let fluid = world.fluid_state(pos);
+        if !fluid.is_tagged(fluid_tags::WATER) {
+            return;
+        }
+        let (x, y, z) = (f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+        let height = f64::from(world.fluid_height(fluid, pos));
+        let fluid_box = Aabb::new(x, y, z, x + 1.0, y + height, z + 1.0);
+        // WaterFluid.entityInside 只在扫过实际流体形状时熄火。
+        // WaterFluid.entityInside extinguishes on intersection with the swept fluid shape.
+        if self.collided_with_shape_moving_from(from, to, &[fluid_box]) {
+            self.remaining_fire_ticks = 0;
+        }
     }
 
     /// `entityInside`：只有蜘蛛网和细雪对这两个实体有影响。

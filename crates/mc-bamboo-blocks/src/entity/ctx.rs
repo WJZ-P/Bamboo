@@ -578,6 +578,9 @@ pub enum Command {
         volume: f32,
         pitch: f32,
     },
+    ArrowExtinguished {
+        pitch: f32,
+    },
 }
 
 /// 所有命令共用的落地入口。两种驱动调的是同一个函数。
@@ -671,6 +674,9 @@ pub fn apply(command: Command, me: &mut Entity, world: &mut World) {
                 0.7,
                 pitch,
             );
+        }
+        Command::ArrowExtinguished { pitch } => {
+            super::arrow::play_extinguished_sound(me, world, pitch);
         }
         Command::MobBlockSound {
             pos,
