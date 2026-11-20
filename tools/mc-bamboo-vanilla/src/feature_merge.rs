@@ -86,6 +86,15 @@ const DEFAULT_STRUCTURE_TARGETS: &[(i64, i32, i32)] = &[
     (2026, 2, 2),
     (42, -17, 22),
     (42, -155, 96),
+    // 方块实体：平原村庄、要塞起点（和矿井重叠）、沙漠神殿的四个箱子、三个互相覆盖的
+    // 海底遗迹件（后放的件换掉可疑的沙砾，方块实体要跟着消失）。
+    // Block entities: a plains village, the stronghold start (overlapping a
+    // mineshaft), the desert pyramid's four chests, and three overlapping ocean
+    // ruin pieces (a later piece replaces suspicious gravel, dropping its entity).
+    (42, -383, -289),
+    (42, -121, 96),
+    (42, -375, -22),
+    (42, 67, -236),
 ];
 
 #[derive(Debug)]
