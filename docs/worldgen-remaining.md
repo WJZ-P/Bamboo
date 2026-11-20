@@ -527,7 +527,6 @@ target/release/mc-bamboo-vanilla wg-perf --seeds 3 --chunks 8 --repeat 3 --skip-
 | 缺口 | 代码位置 | 用户可见影响 | 量级（人日） | 依赖 |
 |---|---|---|---:|---|
 | 出生点 `setInitialSpawn` 仍在 CARVERS 快照上算 | `worldgen_spawn.rs:11`、`:190`；`SpawnOracle.java` 只比到 CARVERS | 树 / 雪层 / 结构改变 `MOTION_BLOCKING` 时，个别种子的出生点和满配官方世界不同 | 1–2 | §1.2 完工方块、`full` 阶段 |
-| 完工后处理 `LevelChunk.postProcessGeneration` 没做（`PostProcessing` 表本身已逐条对齐并写进存档，不清空） | `ChunkMap.lambda$prepareTickingChunk$2`；Bamboo 无对应代码 | 结构里的栅栏 / 铁栏杆 / 梯子 / 火把不连接，含水层边缘的水不流；`feature-merge --post-process-diagnostic` 可见 | 3–6 | 运行时形状更新、流体 tick、岛 / ticket 的 ticking 时机 |
 | 生成期实体不进假世界，只保证随机序列和方块写入一致 | `docs/worldgen-structures-e2e.md` §已知限制、`ChunkgenOracle.java:2329` | 村庄 / 府邸 / 海底神殿没有村民、悦灵、守卫者、女巫、猫 | 见 §2 | 实体系统 |
 | `features` 邻居溢出合并是「固定来源先后、先写的赢」，官方由调度决定 | `worldgen_features.rs:99`、README 已知限制、`feature-merge` oracle | 边界上重叠写入可能和某一次官方生成不同；本轮 `feature-merge` 3 / 5 行 0 differing | 2–5（若要改成官方调度语义） | Director 任务结构 |
 | 超平坦 / 噪声世界的 `generate-structures=false` 语义不同 | `worldgen_structures.rs:410`、`:419`、`worldgen_features.rs:685`、`world.rs:467` | flat 里关不关结构都一样（本来就没结构） | 见 §1.3 | §1.3 |
@@ -546,7 +545,6 @@ target/release/mc-bamboo-vanilla wg-perf --seeds 3 --chunks 8 --repeat 3 --skip-
 | 超平坦 `features` / `lakes` / `structure_overrides` | 3–6 | 结构 / 地物纯函数；flat 是否走 `Staged` | 是（范围） |
 | 非 `full` 读盘续跑 + 多阶段往返 oracle | 5–8 | `chunk_content::decode` 改接口、存档层 | 否 |
 | 出生点改用 `full` 地形 | 1–2 | 完工方块、§1.7 | 否 |
-| `PostProcessing` / `ProtoChunk` 其余字段（表已做完；剩完工后处理） | 3–6 | 运行时形状更新、流体 tick | 否 |
 | `Heightmap.update` 增量维护（纯性能） | 0–2 | 无 | 否 |
 | 生成期刷怪（最小：只放牛） | 5–10 | 环境属性导出、实体表 / 存档、新 oracle | **是（实体范围）** |
 | 生物系统 + 20 种生成期实体全量 | 30–60 | `docs/mob-entity-design.md`、`zombie-skeleton-plan.md` | **是** |
@@ -609,11 +607,10 @@ target/release/mc-bamboo-vanilla wg-perf --seeds 3 --chunks 8 --repeat 3 --skip-
   （只跑 `getPostProcessPos`）三条路径，`structure-e2e` 带结构比较 0 不一致。完工表
   也改成「地形标记 + 9 个中心的标记按约定顺序追加」，`feature-merge` / `resume-world`
   逐段比交付盒子和存档往返，0 不一致（见 `docs/worldgen.md`「`PostProcessing` 位置表」）。
-- **完工后处理 `LevelChunk.postProcessGeneration` 没做**：官方区块变 ticking 时按表做
-  形状更新、流体 tick 后清表；Bamboo 不做，结构里的栅栏 / 铁栏杆 / 梯子 / 火把不连接，
-  含水层边缘的水不流。`feature-merge --post-process-diagnostic` 列出差异（默认带结构
-  目标：沼泽小屋 4 根栅栏、3 处发光地衣、1 处矮草），不计入失败。在这一步落地前
-  full 区块的表不清空、随存档保留。玩家看得见，排在下一期。
+- **完工后处理 `LevelChunk.postProcessGeneration`**（已解决）：区块加载等级跨入
+  `BLOCK_TICKING` 时在拥有它的岛上按表做形状更新、流体 tick 和液体方块 tick，清表后
+  才可发送；`post-process` 对拍 0 不一致。生成的方块实体也随九中心组装进交付盒子
+  （见 `docs/worldgen.md`「`PostProcessing` 位置表」）。
 
 
 - **沙漠神殿 `(42,-375,-22)` 的结构件重叠写**：`light-pipeline --structures

@@ -26,10 +26,7 @@
 //! **必须 0 不一致**。官方跨中心的先后取决于调度，本身不确定；按约定顺序比同时
 //! 保证了每段的多重集合相等和每个中心内部的调用顺序。
 //!
-//! `--post-process-diagnostic` 另外让官方把 9 个中心 center-first 写进共享 ProtoChunk 后，
-//! 按目标的 `PostProcessing` 表走一遍 `LevelChunk.postProcessGeneration`（形状更新照
-//! 官方算，流体 / `LiquidBlock` 的 tick 只计数），列出完工后会变的格子，并对照
-//! Director 交付的方块。Bamboo 还没有这一步，这组差异是已知的，只打印不计入失败。
+//! 完工后处理（`postProcessGeneration`）的严格对拍在 `post-process` 命令里。
 //!
 //! `feature-merge`: whole-chunk oracle for merging neighbor feature spills. Vanilla
 //! runs `applyBiomeDecoration` on all 9 centers around C, either each on a clean
@@ -65,7 +62,7 @@ use crate::oracle::collect_log;
 const USAGE: &str = "usage: feature-merge <java> [--structures] [--target SEED X Z]... \
      [--orders isolated,center-first,center-last] [--threads N] [--show N] \
      [--break-drop-neighbor DX DZ | --break-drop-neighbor-marks DX DZ | --break-largest-state | --break-drop-block-entities] \
-     [--post-process-diagnostic] | --scan SEED X0 Z0 SIDE [--structures]";
+     | --scan SEED X0 Z0 SIDE [--structures]";
 
 /// 默认目标（`--scan` 挑的）：(-2,-2) 收到邻居的流体（湖）和树冠溢出，(0,0)、(2,2)
 /// 收到树冠溢出；三块都收到 8 个方向里大部分邻居的溢出。
@@ -106,9 +103,6 @@ struct Options {
     show: usize,
     break_mode: Option<MergeBreak>,
     scan: Option<(i64, i32, i32, i32)>,
-    /// 打印官方完工后处理（`postProcessGeneration`）会改的格子；只是诊断。
-    /// Print the cells vanilla's `postProcessGeneration` would change; diagnostic only.
-    post_process_diagnostic: bool,
 }
 
 impl Options {
@@ -125,7 +119,6 @@ impl Options {
             show: 12,
             break_mode: None,
             scan: None,
-            post_process_diagnostic: false,
         };
         let mut index = 0;
         let next = |index: &mut usize| -> Result<String, String> {
@@ -177,7 +170,6 @@ impl Options {
                 "--break-drop-block-entities" => {
                     options.break_mode = Some(MergeBreak::DropBlockEntities);
                 }
-                "--post-process-diagnostic" => options.post_process_diagnostic = true,
                 "--scan" => {
                     let seed = number(next(&mut index)?)?;
                     let x = number(next(&mut index)?)? as i32;
@@ -243,11 +235,7 @@ pub fn run(command: Command, queries_path: &Path, args: &[&str]) -> Result<(), S
     // 2. 官方：9 个中心都跑过的整块。
     let mut command = command;
     command.args(["--through", "features", "--merge-neighbors"]);
-    let mut java_orders = options.orders.clone();
-    if options.post_process_diagnostic {
-        java_orders.push("post-process".to_owned());
-    }
-    command.arg(java_orders.join(","));
+    command.arg(options.orders.join(","));
     command.arg("--chunks-file").arg(queries_path);
     if options.structures {
         command.arg("--structures");
@@ -270,7 +258,6 @@ pub fn run(command: Command, queries_path: &Path, args: &[&str]) -> Result<(), S
         post_mismatches: Vec::new(),
         post_lines: 0,
         post_marks_by_source: [0; 9],
-        post_process_lines: Vec::new(),
         compared: 0,
         cells: 0,
         mismatches: Vec::new(),
@@ -451,8 +438,6 @@ struct Report<'a> {
     /// 官方各来源中心记进目标的新标记条数之和（下标 (dz+1)*3+(dx+1)），
     /// 用来确认邻居记进来的标记真的被覆盖到。
     post_marks_by_source: [u64; 9],
-    /// `--post-process-diagnostic` 的逐目标报告（不计入失败）。
-    post_process_lines: Vec<String>,
     compared: usize,
     cells: u64,
     mismatches: Vec<String>,
@@ -474,7 +459,6 @@ impl Report<'_> {
             match value.get("type").and_then(Value::as_str) {
                 Some("merged") => self.on_merged(&value)?,
                 Some("isolated") => self.on_isolated(&value)?,
-                Some("postprocess") => self.on_post_process(&value)?,
                 Some("header" | "biomes" | "end") => {}
                 other => return Err(format!("unexpected oracle line {other:?}")),
             }
@@ -634,76 +618,6 @@ impl Report<'_> {
             format!("per-source differences: {}", source_diffs.join("; "))
         };
         self.compare(seed, x, z, "isolated", &merged, note)
-    }
-
-    /// 官方完工后处理诊断线：官方会改的格子，对照 Director 交付的方块（Bamboo 没有
-    /// 这一步，交付的仍是处理前的状态）。只记报告，不计入失败。
-    /// Vanilla post-processing diagnostic line: cells vanilla would change, checked
-    /// against the Director's delivered blocks (Bamboo still delivers the
-    /// pre-processing state). Reported only, never a failure.
-    fn on_post_process(&mut self, value: &Value) -> Result<(), String> {
-        let get = |key: &str| {
-            value
-                .get(key)
-                .and_then(Value::as_i64)
-                .ok_or_else(|| format!("postprocess line missing {key}"))
-        };
-        let (seed, x, z) = (get("seed")?, get("x")? as i32, get("z")? as i32);
-        if get("runs")? != 9 {
-            return Err(format!(
-                "seed {seed} ({x},{z}) postprocess: not all 9 centers ran"
-            ));
-        }
-        let ours = self
-            .bamboo
-            .get(&(seed, x, z))
-            .ok_or_else(|| format!("no game blocks for seed {seed} ({x},{z})"))?;
-        let cells = value
-            .get("cells")
-            .and_then(Value::as_array)
-            .ok_or("postprocess line missing cells")?;
-        let mut differ = 0usize;
-        let mut samples = Vec::new();
-        for cell in cells {
-            let cell = cell.as_array().ok_or("postprocess cell is not an array")?;
-            let coord = |index: usize| {
-                cell.get(index)
-                    .and_then(Value::as_i64)
-                    .map(|v| v as i32)
-                    .ok_or("bad postprocess cell")
-            };
-            let (wx, wy, wz) = (coord(0)?, coord(1)?, coord(2)?);
-            let after = cell.get(4).and_then(Value::as_str).unwrap_or("");
-            let index = ((wy - mc_bamboo_world::MIN_Y) as usize * 16 + (wx - x * 16) as usize) * 16
-                + (wz - z * 16) as usize;
-            let game = ours
-                .get(index)
-                .copied()
-                .map(official_name)
-                .unwrap_or_default();
-            if game != after {
-                differ += 1;
-                if samples.len() < 3 {
-                    samples.push(format!("({wx},{wy},{wz}) vanilla {after}, game {game}"));
-                }
-            }
-        }
-        self.post_process_lines.push(format!(
-            "seed {seed} ({x},{z}) postProcessGeneration: {} entries, {} fluid, {} liquid-block \
-             (ticks not simulated), {} shape updates {}; {differ} of them differ from the \
-             delivered blocks{}{}",
-            get("entries")?,
-            get("fluid")?,
-            get("liquid")?,
-            get("changed")?,
-            value
-                .get("byBlock")
-                .map(Value::to_string)
-                .unwrap_or_default(),
-            if samples.is_empty() { "" } else { ": " },
-            samples.join("; ")
-        ));
-        Ok(())
     }
 
     /// 交付区块写盘的 `block_entities` 和官方 9 个中心的方块实体（按游戏同一条合并
@@ -1003,24 +917,6 @@ impl Report<'_> {
             self.entity_checks,
             self.entity_mismatches.len()
         );
-        if self.options.post_process_diagnostic {
-            // 已知差异：Bamboo 还没有完工后处理，这里只打印，不计入失败。
-            // Known gap: Bamboo has no post-processing pass yet; print only.
-            println!(
-                "post-process diagnostic (known gap, not counted): {} targets",
-                self.post_process_lines.len()
-            );
-            for line in &self.post_process_lines {
-                println!("  {line}");
-            }
-            if self.post_process_lines.len() != self.options.targets.len() {
-                return Err(format!(
-                    "feature-merge: {} post-process lines for {} targets",
-                    self.post_process_lines.len(),
-                    self.options.targets.len()
-                ));
-            }
-        }
         println!(
             "feature-merge: {} target×order lines, {} cells; isolated (fixed-order \
              first-writer merge of vanilla per-center writes) {} differing; shared ProtoChunk \

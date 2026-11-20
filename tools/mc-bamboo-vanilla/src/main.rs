@@ -396,7 +396,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla structure-generation <java 路径> [--break-self-test]
       mc-bamboo-vanilla structure-pipeline <java 路径> [--break-self-test]
       mc-bamboo-vanilla structure-e2e <java 路径> [--break-self-test] [--structure-types IDS]
-      mc-bamboo-vanilla feature-merge <java 路径> [--structures] [--target SEED X Z]... [--orders O1,O2] [--threads N] [--break-drop-neighbor DX DZ | --break-drop-neighbor-marks DX DZ | --break-largest-state | --break-drop-block-entities] [--post-process-diagnostic] | --scan SEED X0 Z0 SIDE
+      mc-bamboo-vanilla feature-merge <java 路径> [--structures] [--target SEED X Z]... [--orders O1,O2] [--threads N] [--break-drop-neighbor DX DZ | --break-drop-neighbor-marks DX DZ | --break-largest-state | --break-drop-block-entities] | --scan SEED X0 Z0 SIDE
       mc-bamboo-vanilla post-process <java 路径> [--target SEED X Z STRUCTURES]... [--break-skip-fluid | --break-keep-table | --break-send-early]
       mc-bamboo-vanilla structure-single <java 路径>
       mc-bamboo-vanilla structure-templated <java 路径>

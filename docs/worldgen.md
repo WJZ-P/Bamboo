@@ -711,17 +711,58 @@ Bamboo 在 `GeneratedChunk` / `FeatureChunks` / `FeatureWorld` / `FeatureResult`
 两组 0 不一致；`--break-post-processing` 两处改坏（读回丢表、续跑替换代替追加）都能
 报出。
 
-**完工后处理还没做（已知差异）。** 官方在区块变 ticking 时
-（`ChunkMap.lambda$prepareTickingChunk$2`）调 `LevelChunk.postProcessGeneration(ServerLevel)`，
-按这张表逐条处理：流体非空时 `FluidState.tick`；`LiquidBlock` 走 `BlockState.tick`；其余
-`Block.updateFromNeighbourShapes`，结果变了就 `ServerLevel.setBlock(pos, s, 276)`；处理完
-清空表。Bamboo 没有这一步，所以结构里的栅栏、铁栏杆、梯子、火把不按邻居连接，含水层
-边缘的流体也不 tick。`feature-merge --post-process-diagnostic` 在官方 center-first 共享
-运行上重放这一步（形状更新照官方算，流体 tick 只计数），列出会改变的格子并对照交付
-方块，只打印、不计入失败。默认带结构目标上：沼泽小屋 4 根 `oak_fence`
-不连接，`(42,17,7)` 有 3 处 `glow_lichen`、`(42,16,6)` 有 1 处 `short_grass`，官方会移除。
-在这一步落地前，full 区块的 `PostProcessing` 表**不清空**，照常随存档保留：落地后，
-老存档里的区块变 ticking 时还能补做。
+**完工后处理（`LevelChunk.postProcessGeneration`）。** 官方在 `ChunkMap.prepareTickingChunk`
+里等区块的加载等级跨入 `BLOCK_TICKING`、半径 1 的区块都到 `FULL`，然后在主线程上依次做
+`LevelChunk.postProcessGeneration`、`ServerLevel.startTickingChunk`，最后才
+`onChunkReadyToSend`。触发只看加载等级，不看模拟等级。`postProcessGeneration` 按段、
+段内按表的顺序逐条处理。每条先读原状态：流体非空就 `FluidState.tick`；然后仍按原状态
+分派，`LiquidBlock` 走 `BlockState.tick`，其余走 `Block.updateFromNeighbourShapes`，结果
+变了就 `ServerLevel.setBlock(pos, s, 276)`。各段处理完就清空。之后把
+`pendingBlockEntities` 逐个转正，最后跑 `UpgradeData.upgrade`。276 = 4 + 16 + 256：
+4 是不通知客户端，16 是不再递归做形状更新，256 是不触发旧方块实体移除的副作用；
+没有 1 和 2，但高度图、光照和 `onPlace` 照常。流体 tick 可以写到相邻区块、排流体刻；
+`LiquidBlock.tick` 可以往上更新气泡柱。
+
+Bamboo 的对应设计如下。
+
+- **时机。** `TickLevels` 另外维护一组只看加载等级的状态：加载等级 ≤ 32、周围 8 个区块
+  都已交付时进「待处理」。拥有这个区块的岛线程在交付之后、光照和计划刻之前调
+  `generation_post_process::prepare_ticking_chunks`，做完才进「可发送」。跌出这一条件时
+  两边都清掉。`send_chunks` 只发可发送的区块，所以先处理、后发包，客户端看不到没连好的
+  栅栏。玩家视距内、模拟距离外的区块也会走到这一步，所以没有复用要求模拟等级的方块
+  逻辑集合。新生成的区块和读盘的区块走同一条路。
+- **处理本身。** 逐条走方块运行时的 `post_process_generation_at`，派发和 276 的语义照上面
+  一一对应，流体和液体方块 tick 排的计划刻进岛的计划刻队列。`pendingBlockEntities` 在
+  Bamboo 里没有单独的一步：方块实体在读盘或完工组装时就建好了。`UpgradeData` 只出现在
+  旧版本存档里，Bamboo 只读同版本存档，所以也没有这一步。
+- **岛和线程。** 半径 1 的邻居都已交付，读写的格子就都在同一个岛上：岛拆分要求两部分的
+  已交付区块至少隔开 3 个区块。待处理集合按坐标升序，所以齐步、精确和并行模式下处理
+  顺序相同。热路径上没有锁，也没有全局等待；改坏开关只是一个原子读。
+- **存档。** 处理完清表并标脏，存档里的表随之变空。如果老存档的 full 区块还留着表，
+  它下次变成可运行时会从存档元数据里读出这张表补做。不到可运行的 full 区块（视距边缘）
+  照常带着表存盘。
+- **方块实体。** 地物和结构写下的方块实体 NBT 按目标区块分开，跟方块增量一起带到组装：
+  每格取赢得该格方块的那个来源的方块实体。`build_region_column` 补上 `id` 和坐标后，
+  走和读盘相同的 `install_block_entities`。之前组装只传方块，结构里的箱子、发射器、宝库、
+  刷怪笼在游戏里没有方块实体（种子 42 沙漠神殿的四个箱子没有战利品表）。
+  `StructureTemplate.placeInWorld` 对每个 `RandomizableContainer` 都取一次 `nextLong`，
+  不管有没有 `LootTable`；之前漏了没有战利品表的容器，后面的种子都错了一位。
+
+对拍：`post-process` 把 Director 交付的 `FULL` 3×3（还没做后处理）原样交给
+`BlockOracle.java --post-process`，在假世界里对中心区块调真实的 `postProcessGeneration`。
+游戏侧把同一个中心升进 `BLOCK_TICKING`，然后两边逐格比整个 3×3、全高度的改动和新排的
+计划刻（坐标、类型、ID、延迟、优先级）。同时检查三件事：处理前不可发送；处理后交付盒子
+和写盘读回的表都是空的；官方处理期间没取世界随机数。默认 10 个目标：沼泽小屋
+`(42,-17,22)`、`(42,-155,96)`、试炼密室 `(42,17,7)` 和 `(42,16,6)`、平原村庄
+`(42,-383,-289)`、要塞 `(42,-121,96)`、沙漠神殿 `(42,-375,-22)`，以及无结构的含水层
+区块 `(2026,±2,±2)`、`(2026,0,0)`。共 2426 条，其中 568 条带流体；官方 14 处改动、72 个
+计划刻，0 不一致。三处改坏都能报出：`--break-skip-fluid`（漏处理带流体的一类）、
+`--break-keep-table`（处理后不清表）、`--break-send-early`（发包早于处理）。
+`feature-merge --orders isolated --structures` 另外比交付存档里的 `block_entities` 和官方
+9 个隔离中心的结果，36 条 0 不一致；`--break-drop-block-entities` 报 32 处。
+`mc-bamboo-server` 的 `tests/worldgen.rs` 让玩家进种子 42 的普通世界、传送到沼泽小屋：
+收到的区块包里栅栏已经连好。之后用 `setblock ... strict` 把栅栏改回不连，退出重进、
+重启服务端都不会再连回去；`KeepTable` 改坏时这条测试失败。
 
 `pale_moss`：`Decorator::parse` 接 `minecraft:pale_moss`，`TreeFeature::place` 经
 `place_leaf` 接一个 `Recursion` 上下文，用 `place_placed` 直接放 configured
@@ -1089,11 +1130,9 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
   常用命令：`mc-bamboo-vanilla resume-world java --seeds 1 --chunks 1 --salt 7`、
   带结构加 `--seed 42 --chunk 17 7 --structures`、改坏确认加
   `--break-self-test --break-neighbor --break-light`。
-* 完工后处理 `LevelChunk.postProcessGeneration` 没做（见「`PostProcessing` 位置表」）：
-  表已逐条对齐并随存档保留、不清空，但区块变 ticking 时不按表做形状更新和流体 tick。
-  落地时的要点：触发时机照 `ChunkMap.prepareTickingChunk`（周围一圈都 full 之后）；
-  逐条按流体 tick、`LiquidBlock` tick、`updateFromNeighbourShapes` + `setBlock(..., 276)`
-  的顺序处理；处理完清表；理清它和岛、ticket 的关系。
+* 完工后处理 `LevelChunk.postProcessGeneration` 已做（见「`PostProcessing` 位置表」）：
+  区块加载等级跨入 `BLOCK_TICKING` 时在岛线程上按表处理、清表，处理完才发包；
+  `post-process` 对拍 0 不一致。
 * 出生点 `setInitialSpawn` 仍只比较到 CARVERS 地形；树 / 雪层 / 结构改变
   `MOTION_BLOCKING` 时，个别种子的落点可能和满配官方世界不同。
 * 并行化和 SIMD：逐位一致的基线已经把生成期光照输入修对，仍建议先不优化。
