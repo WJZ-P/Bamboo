@@ -1711,6 +1711,14 @@ public final class ChunkgenOracle {
                             Beardifier.forStructuresInChunk(manager, at));
                 }
             }
+            // terrain 阶段（含 doFill 的含水层标记）的 `PostProcessing` 快照：
+            // 续生成对拍在 TERRAIN..FEATURES 之间的存档里要写出这一份。
+            // Snapshot `PostProcessing` after terrain (including doFill aquifer
+            // marks) for the resume oracle's TERRAIN..FEATURES saves.
+            JsonArray[] terrainPost = new JsonArray[9];
+            for (int index = 0; index < 9; index++) {
+                terrainPost[index] = postProcessingJson(chunks[index].chunk());
+            }
             // 4. FEATURES：和 writeFeatures 同一个 3×3 写区代理，只是这次
             // StructureManager 开结构，且 4 参数 getChunk 能看到整张起点网格。
             final WorldGenLevel[] holder = new WorldGenLevel[1];
@@ -1747,6 +1755,7 @@ public final class ChunkgenOracle {
                     entry.addProperty("dz", dz);
                     addBlocks(entry, chunks[index].chunk());
                     addBlockEntities(entry, chunks[index].chunk());
+                    entry.add("postProcessingTerrain", terrainPost[index]);
                     results.add(entry);
                 }
             }
@@ -2003,6 +2012,10 @@ public final class ChunkgenOracle {
                             generatorSettings, randomState, resolver);
                 }
             }
+            JsonArray[] terrainPost = new JsonArray[9];
+            for (int index = 0; index < 9; index++) {
+                terrainPost[index] = postProcessingJson(chunks[index].chunk());
+            }
             // WorldGenRegion 构造 149-165：BiomeManager 的 BiomeResolver 是 region 自己，
             // 不是 ServerLevel.uncachedBiomeResolver()。这里让代理实现 BiomeResolver，
             // 用同一份 obfuscateSeed(seed) 建 manager，BiomeFilter 才会读 3×3 里
@@ -2038,6 +2051,7 @@ public final class ChunkgenOracle {
                     entry.addProperty("dz", dz);
                     addBlocks(entry, chunks[index].chunk());
                     addBlockEntities(entry, chunks[index].chunk());
+                    entry.add("postProcessingTerrain", terrainPost[index]);
                     results.add(entry);
                 }
             }
@@ -2831,8 +2845,15 @@ public final class ChunkgenOracle {
             // 记下的位置。空列表也照样输出，让对拍能抓到「本该记却没记」。
             // `PostProcessing` is the ProtoChunk's array of packed short lists:
             // empty in CARVERS, filled by markPosForPostProcessing in FEATURES.
+            if (chunk instanceof ProtoChunk) {
+                line.add("postProcessing", postProcessingJson(chunk));
+            }
+        }
+
+        /** ProtoChunk 的 `PostProcessing` 按段打包输出；空列表也照样输出。 */
+        private JsonArray postProcessingJson(ChunkAccess chunk) {
+            JsonArray post = new JsonArray();
             if (chunk instanceof ProtoChunk proto) {
-                JsonArray post = new JsonArray();
                 for (it.unimi.dsi.fastutil.shorts.ShortList section : proto.getPostProcessing()) {
                     JsonArray packed = new JsonArray();
                     if (section != null) {
@@ -2842,8 +2863,8 @@ public final class ChunkgenOracle {
                     }
                     post.add(packed);
                 }
-                line.add("postProcessing", post);
             }
+            return post;
         }
 
         /**
