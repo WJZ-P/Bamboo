@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use mc_bamboo_command::{EntitySelector, ParsedCommand, Value, permission};
+use mc_bamboo_command::{Coordinates, EntitySelector, ParsedCommand, Value, permission};
 use mc_bamboo_core::{BlockPos, ChunkPos, Vec3};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_world::director::RegionId;
@@ -19,8 +19,11 @@ use mc_bamboo_world::director::RegionId;
 use crate::{
     command::{class, commands, select, source},
     inbound::PlayerId,
-    island::{Borrow, Islands},
+    island::{Borrow, BorrowClass, Islands},
 };
+
+#[cfg(test)]
+use crate::island::BorrowBreak;
 
 /// 方块盒向外扩这么多格：即时方块逻辑每一跳最多 2 格，岛之间隔着 2 个未加载
 /// 区块（32 格），所以 2 个区块的外扩既盖住更新链又碰不到别的岛（计划 4.5.1）。
@@ -42,12 +45,18 @@ const MAX_BOX_CHUNKS: i64 = 4096;
 /// Cap on the branch sources the `/execute` planner may simulate.
 const MAX_BRANCHES: usize = 256;
 
+/// 一个候选：它所在的岛、它是谁、它此刻的位置。
+///
+/// One candidate: the island it lives on, who it is, and its current position.
+struct Candidate {
+    island: RegionId,
+    target: select::Target,
+    position: Vec3,
+}
+
 /// 一次规划的可变状态。
 struct Planner<'a> {
     islands: &'a Islands,
-    into: RegionId,
-    /// 来源（玩家或控制台）。
-    source: source::Source,
     /// 来源的权限等级。
     level: u8,
     /// 借进来的岛（恒含发起人的岛）。
@@ -65,12 +74,13 @@ pub(crate) fn plan_borrow(islands: &Islands, into: RegionId, id: PlayerId, line:
         return Borrow::All;
     }
     let command = line.strip_prefix('/').unwrap_or(line);
+    let root = command.split_whitespace().next().unwrap_or("");
     // `into` 一定停放着（混合驱动下玩家自己的岛不在时请求排队），只查停放着的岛，
     // 免得 `iter()` / `get()` 碰到不在主控手里的槽位。
     // `into` is always parked (a request waits when its own island is away);
     // look only at parked islands so no away slot is dereferenced.
     let Some(home) = islands.parked().find(|island| island.id == into) else {
-        return Borrow::World;
+        return Borrow::World(BorrowClass::Other);
     };
     let source = source::of(&home.region, id);
     let level = source::level(&home.region, id);
@@ -91,33 +101,32 @@ pub(crate) fn plan_borrow(islands: &Islands, into: RegionId, id: PlayerId, line:
         Ok(parsed) => parsed,
         Err(_) => return Borrow::All,
     };
+    // 命令类别只用来给剖析指标分组。
+    // The command class only groups the profiler samples.
+    let class = class_of(root);
     if !islands.all_parked() {
         // 规划要读全部岛的实体和区块；有岛不在主控手里就全拼兜底（和改前一样）。
         // Planning reads every island's entities and chunks; with an island
         // away fall back to a full join, as before.
-        return Borrow::World;
+        return Borrow::World(class);
     }
     let mut planner = Planner {
         islands,
-        into,
-        source,
         level,
         set: BTreeSet::from([into]),
         fallback: false,
     };
-    let root = command.split_whitespace().next().unwrap_or("");
     planner.command(&parsed, root, source, 0);
     if planner.fallback {
-        return Borrow::World;
+        return Borrow::World(class);
     }
     if planner.set.iter().any(|&id| !islands.contains(id)) {
-        return Borrow::World;
+        return Borrow::World(class);
     }
     #[cfg(test)]
     let mut set = planner.set;
     #[cfg(test)]
     {
-        use crate::island::BorrowBreak;
         match islands.borrow_break {
             BorrowBreak::MissIsland | BorrowBreak::MissSelector | BorrowBreak::MissDestination => {
                 // 故意漏借一个非发起人的岛（改坏确认）。
@@ -131,7 +140,21 @@ pub(crate) fn plan_borrow(islands: &Islands, into: RegionId, id: PlayerId, line:
     }
     #[cfg(not(test))]
     let set = planner.set;
-    Borrow::Islands(set)
+    Borrow::Islands(set, class)
+}
+
+/// 剖析样本按顶层字面量归类（`/execute` 不论链尾是什么都算一类）。
+///
+/// Profiler sample class by root literal (`/execute` is one class whatever
+/// its tail).
+fn class_of(root: &str) -> BorrowClass {
+    match root {
+        "gamemode" => BorrowClass::Gamemode,
+        "kill" | "damage" => BorrowClass::Hurt,
+        "effect" => BorrowClass::Effect,
+        "execute" => BorrowClass::Execute,
+        _ => BorrowClass::Other,
+    }
 }
 
 impl Planner<'_> {
@@ -149,6 +172,7 @@ impl Planner<'_> {
             "summon" => self.summon(parsed, source),
             "loot" => self.loot(parsed, source),
             "kill" | "damage" => self.hurt(parsed, source),
+            "effect" => self.effect(parsed, source),
             "enchant" => self.enchant(parsed, source),
             "gamemode" => self.gamemode(parsed, source),
             "defaultgamemode" => {}
@@ -201,36 +225,120 @@ impl Planner<'_> {
         Some(source::position(coordinates, source))
     }
 
-    /// 选择器候选所在的岛（计划 4.5.1 第 3 节）：逐岛只读筛「有没有非玩家实体
-    /// 过全部过滤条件」，把有候选的岛并进 `R`。规划期不排序、不截断、不取随机数。
-    fn selector_islands(&mut self, selector: &EntitySelector, origin: Vec3) {
-        if !select::may_include_non_players(selector) {
-            return;
+    /// 规划期权限门：选择器语法要求 GM 等级；等级不够时执行期这一步就报错，
+    /// 链尾不会跑，也就不用借。
+    ///
+    /// Planning-time permission gate: selector syntax needs gamemasters; a
+    /// lower level makes execution fail at this step, so nothing is borrowed.
+    fn selector_denied(&self, selector: &EntitySelector) -> bool {
+        selector.uses_selectors && self.level < permission::GAMEMASTERS
+    }
+
+    /// 逐岛只读求候选（计划 4.5.1 第 3 节）：和执行期共用 `select::candidates`，
+    /// 不排序、不截断、不取随机数。`source` 是这一步的执行上下文（`/execute`
+    /// 的分叉），`@s` 和距离都按它算。
+    ///
+    /// Read-only candidates island by island (plan 4.5.1, section 3), sharing
+    /// `select::candidates` with execution. `source` is this step's context
+    /// (an `/execute` branch); `@s` and distances follow it.
+    fn candidates(&self, source: source::Source, selector: &EntitySelector) -> Vec<Candidate> {
+        if self.selector_denied(selector) {
+            return Vec::new();
         }
-        if self.level < permission::GAMEMASTERS && selector.uses_selectors {
-            self.fallback = true;
-            return;
-        }
+        let mut out = Vec::new();
         for island in self.islands.iter() {
-            if island.id == self.into {
-                continue;
-            }
-            if select::has_non_player_candidate(&island.region, self.source, selector, origin) {
-                self.set.insert(island.id);
+            for target in select::candidates(&island.region, source, selector, source.position) {
+                let position = match target {
+                    select::Target::Player(id) => island
+                        .region
+                        .players
+                        .get(&id)
+                        .map(|player| player.position()),
+                    select::Target::World(uid) => island
+                        .region
+                        .entities
+                        .public_at(uid)
+                        .map(|public| public.position),
+                };
+                let Some(position) = position else {
+                    continue;
+                };
+                // 改坏确认：候选筛查漏掉目标玩家（来源自己除外）。
+                // Break check: drop the target players (except the source itself).
+                #[cfg(test)]
+                if self.islands.borrow_break == BorrowBreak::MissCandidatePlayer
+                    && matches!(target, select::Target::Player(_))
+                    && Some(target) != source.entity
+                {
+                    continue;
+                }
+                out.push(Candidate {
+                    island: island.id,
+                    target,
+                    position,
+                });
             }
         }
+        out
+    }
+
+    /// 求候选并把非玩家候选所在的岛并进 `R`：实体表在各岛的 `Region` 里，不借就选不到；
+    /// 玩家不用，别的岛的玩家本来就借过来了。
+    ///
+    /// Collect candidates and join the islands of the non-player ones: entity
+    /// tables live in each island's `Region` and are invisible otherwise;
+    /// players are lent from every island anyway.
+    fn note_candidates(
+        &mut self,
+        source: source::Source,
+        selector: &EntitySelector,
+    ) -> Vec<Candidate> {
+        let candidates = self.candidates(source, selector);
+        for candidate in &candidates {
+            if matches!(candidate.target, select::Target::World(_)) {
+                self.set.insert(candidate.island);
+            }
+        }
+        candidates
     }
 
     /// 参数表里所有 `Entity` 值按选择器规则折算。
-    fn selectors_in<'a>(&mut self, values: impl Iterator<Item = &'a Value>, origin: Vec3) {
+    fn selectors_in<'a>(
+        &mut self,
+        values: impl Iterator<Item = &'a Value>,
+        source: source::Source,
+    ) {
         let selectors: Vec<EntitySelector> = values.filter_map(Value::as_entity).cloned().collect();
         for selector in &selectors {
-            self.selector_islands(selector, origin);
+            self.note_candidates(source, selector);
         }
     }
 
-    /// 把所有非玩家实体所在的岛并进来（`/summon` 的显式 UUID 查重、
-    /// `/tp` 的实体目的地、`/execute` 的 `as @e` 分叉）。
+    /// 一个执行者实体此刻的位置（`/execute as` 可能把来源换成别的岛上的玩家或实体）。
+    ///
+    /// The current position of a source entity (`/execute as` may have swapped
+    /// in a player or an entity on another island).
+    fn entity_position(&self, entity: Option<select::Target>) -> Option<Vec3> {
+        match entity? {
+            select::Target::Player(id) => self.islands.iter().find_map(|island| {
+                island
+                    .region
+                    .players
+                    .get(&id)
+                    .map(|player| player.position())
+            }),
+            select::Target::World(uid) => self.islands.iter().find_map(|island| {
+                island
+                    .region
+                    .entities
+                    .public_at(uid)
+                    .map(|public| public.position)
+            }),
+        }
+    }
+    /// 把所有非玩家实体所在的岛并进来（`/tp` 的实体目的地）。
+    ///
+    /// Join every island holding a non-player entity (`/tp` destinations).
     fn all_entity_islands(&mut self) {
         for island in self.islands.iter() {
             if island
@@ -258,37 +366,8 @@ impl Planner<'_> {
         }
     }
 
-    /// 所有玩家脚下那格的保守盒（`gamemode` / `hurt` 会读地面）。
-    fn player_feet_boxes(&mut self) {
-        let feet: Vec<BlockPos> = self
-            .islands
-            .iter()
-            .flat_map(|island| island.region.players.values())
-            .map(|player| BlockPos::containing(player.position()).below())
-            .collect();
-        for pos in feet {
-            self.point(pos);
-        }
-    }
-
-    /// 所有玩家位置的保守盒（`/execute` 的相对坐标会在每个分叉上落到这里）。
-    fn player_position_boxes(&mut self) {
-        let positions: Vec<Vec3> = self
-            .islands
-            .iter()
-            .flat_map(|island| island.region.players.values())
-            .map(|player| player.position())
-            .collect();
-        for position in positions {
-            self.point(BlockPos::containing(position));
-        }
-    }
-
     fn teleport(&mut self, parsed: &ParsedCommand, source: source::Source) {
-        self.selectors_in(
-            parsed.arguments.iter().map(|(_, value)| value),
-            source.position,
-        );
+        self.selectors_in(parsed.arguments.iter().map(|(_, value)| value), source);
         // 目标或目的地含非玩家实体时 `move_entity` 会改实体位置，`divide` 按实体
         // 当前区块分实体：所有实体岛和它们位置的盒都要借进来（保守超集）。
         // With non-player targets/destinations `move_entity` changes entity
@@ -383,10 +462,7 @@ impl Planner<'_> {
     }
 
     fn loot(&mut self, parsed: &ParsedCommand, source: source::Source) {
-        self.selectors_in(
-            parsed.arguments.iter().map(|(_, value)| value),
-            source.position,
-        );
+        self.selectors_in(parsed.arguments.iter().map(|(_, value)| value), source);
         for name in ["pos", "targetPos"] {
             if let Some(value) = parsed.get(name) {
                 let pos = self
@@ -400,25 +476,92 @@ impl Planner<'_> {
     }
 
     fn hurt(&mut self, parsed: &ParsedCommand, source: source::Source) {
-        self.selectors_in(
-            parsed.arguments.iter().map(|(_, value)| value),
-            source.position,
-        );
-        // `hurt_mob` 会按实体位置读方块、掉物品；`hurt_player` 可能读脚下地面。
-        self.entity_position_boxes();
-        self.player_feet_boxes();
+        // 目标（`kill` 的 `targets`、`damage` 的 `target`）：候选所在位置的盒。
+        // `hurt_mob` 在目标处读方块、掉物品，玩家死亡（`player_death::die`）在他的
+        // 位置生成掉落物，`divide` 按位置把新实体分回去，所以候选玩家也要算盒。
+        // Targets: a box at each candidate. `hurt_mob` reads blocks and drops
+        // loot there and a dying player (`player_death::die`) spawns drops at
+        // their position, which `divide` splits by position; players count too.
+        let mut targeted = false;
+        for name in ["targets", "target"] {
+            if let Some(selector) = parsed.get(name).and_then(Value::as_entity) {
+                targeted = true;
+                let positions: Vec<Vec3> = self
+                    .note_candidates(source, selector)
+                    .into_iter()
+                    .map(|candidate| candidate.position)
+                    .collect();
+                for position in positions {
+                    self.point(BlockPos::containing(position));
+                }
+            }
+        }
+        // `damage ... by <entity> [from <cause>]`：只取第一个结果的 ID 和位置填进伤害
+        // 来源，不在那里读写方块；非玩家候选的岛要借进来才选得到。
+        // `by` / `from` only feed the damage source (id and position) and touch
+        // no blocks there; non-player candidates need their islands to be seen.
+        for name in ["entity", "cause"] {
+            if let Some(selector) = parsed.get(name).and_then(Value::as_entity) {
+                self.note_candidates(source, selector);
+            }
+        }
+        if !targeted {
+            // 无参 `/kill` 就是来源实体（`/execute as` 可能把它换成别的岛的玩家或实体）。
+            // A bare `/kill` uses the source entity, which `/execute as` may have
+            // swapped for a player or entity on another island.
+            if let Some(position) = self.entity_position(source.entity) {
+                self.point(BlockPos::containing(position));
+            }
+        }
+    }
+
+    fn effect(&mut self, parsed: &ParsedCommand, source: source::Source) {
+        // 按 `command/effect.rs` 逐条核过：玩家走 `player_effects::give/clear`，只改
+        // 这名玩家的效果表、血量上限、吸收值和元数据脏标记，包只发给他自己，瞬间效果
+        // 不当场结算（`addEffect`，下一刻 `tickEffects`）；非玩家走
+        // `add_mob_effect` / `clear_mob_effects`，在实体表里取出放回，不读方块；反馈
+        // 发给发起人和管理员，都是玩家。所以玩家目标一个岛都不借，非玩家候选借它的岛。
+        // `clear` 不带目标时是发起人自己。
+        // Checked against `command/effect.rs`: players only change their own
+        // effect table, health cap, absorption and metadata flag, packets go
+        // to that player, instantaneous effects settle next tick; mobs are
+        // taken out of and put back into the entity table, no blocks read;
+        // feedback goes to players. Player targets borrow nothing, non-player
+        // candidates borrow their island.
+        #[cfg(test)]
+        if self.islands.borrow_break == BorrowBreak::MissEffect {
+            return;
+        }
+        if let Some(selector) = parsed.get("targets").and_then(Value::as_entity) {
+            self.note_candidates(source, selector);
+        }
     }
 
     fn enchant(&mut self, parsed: &ParsedCommand, source: source::Source) {
-        self.selectors_in(
-            parsed.arguments.iter().map(|(_, value)| value),
-            source.position,
-        );
+        self.selectors_in(parsed.arguments.iter().map(|(_, value)| value), source);
     }
 
-    fn gamemode(&mut self, _parsed: &ParsedCommand, _source: source::Source) {
-        // `apply_mode` 的 `near_ground` 读目标脚下一格；候选全是玩家，逐个算盒。
-        self.player_feet_boxes();
+    fn gamemode(&mut self, parsed: &ParsedCommand, source: source::Source) {
+        // `apply_mode` 的 `near_ground` 读目标脚下一格；只对候选玩家算盒。
+        // `near_ground` reads the block under each target: feet boxes only.
+        if let Some(selector) = parsed.get("target").and_then(Value::as_entity) {
+            let feet: Vec<BlockPos> = self
+                .candidates(source, selector)
+                .into_iter()
+                .filter(|candidate| matches!(candidate.target, select::Target::Player(_)))
+                .map(|candidate| BlockPos::containing(candidate.position).below())
+                .collect();
+            for pos in feet {
+                self.point(pos);
+            }
+        } else if let Some(position) = self.entity_position(source.entity) {
+            // 没有目标时 `players::gamemode` 改的是发起人自己（在 `into` 上，恒在 `R`
+            // 里）；`/execute as` 换过的执行者也算一盒，保守超集。
+            // Without a target `players::gamemode` changes the sender, whose
+            // island `into` is always in `R`; the `/execute as` executor gets a
+            // box too, as a conservative superset.
+            self.point(BlockPos::containing(position).below());
+        }
     }
 
     fn data(&mut self, parsed: &ParsedCommand, source: source::Source) {
@@ -429,10 +572,7 @@ impl Planner<'_> {
                 self.point(pos);
             }
         }
-        self.selectors_in(
-            parsed.arguments.iter().map(|(_, value)| value),
-            source.position,
-        );
+        self.selectors_in(parsed.arguments.iter().map(|(_, value)| value), source);
     }
 
     /// `/execute`：只读模拟整条链（计划 4.5.1 第 5 节）。链尾在每个分叉上依次
@@ -460,50 +600,70 @@ impl Planner<'_> {
             self.fallback = true;
             return;
         }
-        // 分叉来源：链上的 `as` / `at` / `facing` 选择器可能把来源放到任何实体或
-        // 玩家的位置。保守地把所有实体/玩家位置都当作分叉来源。
-        let mut branches = vec![base];
-        let entity_selectors = parsed
+        let steps: Vec<_> = parsed
             .chain
             .iter()
-            .flat_map(|step| step.arguments.iter())
-            .filter_map(|(_, value)| Value::as_entity(value))
-            .any(select::may_include_non_players);
-        if entity_selectors {
-            self.all_entity_islands();
-            self.entity_position_boxes();
-            // 分叉来源可能是任何玩家/实体的位置；相对坐标（链尾 `~ ~ ~`）会
-            // 落在这些位置，所以所有玩家和实体的位置盒都要借进来。
-            self.player_position_boxes();
-            self.entity_position_boxes();
-            for island in self.islands.iter() {
-                for player in island.region.players.values() {
-                    branches.push(source::Source {
-                        position: player.position(),
-                        ..base
-                    });
-                }
-                for public in island.region.entities.iter_public() {
-                    if !public.removed {
-                        branches.push(source::Source {
-                            position: public.position,
-                            ..base
-                        });
+            .take_while(|step| step.kind != "run")
+            .collect();
+        // 局部坐标（`^ ^ ^`）按执行上下文的位置和朝向解；规划器不模拟朝向，
+        // 链上又有一层会换朝向（`at` / `rotated` / `facing`）时就退回全拼。
+        // Local coordinates use the context's rotation; the planner does not
+        // model rotation, so a rotation-changing step plus local coordinates
+        // falls back to a full join.
+        let turns = steps
+            .iter()
+            .any(|step| matches!(step.kind.as_str(), "at" | "rotated" | "facing"));
+        let local = has_local_coords(&tail)
+            || steps
+                .iter()
+                .any(|step| step.arguments.iter().any(|(_, value)| is_local(value)));
+        if turns && local {
+            self.fallback = true;
+            return;
+        }
+        // `store ... block|entity|storage` 的目标在全部分叉跑完以后才写（`apply_store`），
+        // 用的是位置 (0, 0, 0)、没有执行者的零上下文，和分叉无关：按零上下文另算一遍。
+        // The `store ... block|entity|storage` target is written after every
+        // branch (`apply_store`) from a zero context at (0, 0, 0) with no
+        // executor, independent of the branches: plan it from that context too.
+        if steps
+            .iter()
+            .any(|step| matches!(step.kind.as_str(), "result" | "success"))
+        {
+            let zero = source::Source {
+                position: Vec3::default(),
+                yaw: 0.0,
+                pitch: 0.0,
+                entity: None,
+            };
+            for step in steps
+                .iter()
+                .filter(|step| matches!(step.kind.as_str(), "block" | "entity" | "storage"))
+            {
+                for (_, value) in &step.arguments {
+                    if let Some(pos) = self.block_at(value, zero) {
+                        self.point(pos);
+                    } else if let Some(selector) = value.as_entity() {
+                        self.note_candidates(zero, selector);
                     }
                 }
             }
         }
-        if branches.len() > MAX_BRANCHES {
-            self.fallback = true;
-            return;
-        }
-        // 链上每一步的坐标 / 选择器参数，按所有分叉来源都折算一遍（保守超集）。
-        // 条件为假、链尾没执行时，条件读到的方块/实体也必须借（4.5.1）。
-        for step in parsed.chain.iter().take_while(|step| step.kind != "run") {
+        // 按 `apply_step` 的语义只读模拟链：`as` 换执行者，`at` / `positioned as`
+        // 换位置，`positioned <pos>` / `align` 改位置，分叉逐个候选展开。条件为假、
+        // 链尾没执行时，条件读到的方块 / 实体也必须借（4.5.1）。
+        // Simulate the chain read-only like `apply_step`: `as` swaps the
+        // executor, `at` / `positioned as` move to each candidate, `positioned
+        // <pos>` / `align` move the position, and each candidate becomes a
+        // branch. Conditions are planned even when they turn out false.
+        let mut branches = vec![base];
+        for step in steps {
             if !known_step(&step.kind) {
                 self.fallback = true;
                 return;
             }
+            // 坐标参数按当前分叉折算（条件、`positioned` 的落点、`facing` 的点）。
+            // Coordinates resolve against each current branch.
             for (_, value) in &step.arguments {
                 if matches!(value, Value::BlockPos(_) | Value::Vec3(_)) {
                     for branch in &branches {
@@ -511,11 +671,89 @@ impl Planner<'_> {
                             self.point(pos);
                         }
                     }
-                } else if let Some(selector) = value.as_entity() {
-                    for branch in &branches {
-                        self.selector_islands(selector, branch.position);
+                }
+            }
+            let targets = step
+                .arguments
+                .iter()
+                .find(|(name, _)| name == "targets")
+                .and_then(|(_, value)| value.as_entity());
+            let changes_entity = step.kind == "as";
+            let changes_position =
+                step.kind == "at" || (step.kind == "positioned" && targets.is_some());
+            if !changes_entity && !changes_position {
+                // 条件、`store`、`facing entity` 等只读选择器：候选实体所在的岛要借。
+                // Conditions, `store`, `facing entity`: join the candidates' islands.
+                for branch in &branches {
+                    for (_, value) in &step.arguments {
+                        if let Some(selector) = value.as_entity() {
+                            self.note_candidates(*branch, selector);
+                        }
                     }
                 }
+                match step.kind.as_str() {
+                    "positioned" => {
+                        // `positioned <pos>`：位置换成按当前分叉解出的落点。
+                        // `positioned <pos>` moves each branch to the resolved point.
+                        if let Some(value) = parsed.step_value(step, "pos") {
+                            for branch in &mut branches {
+                                if let Some(position) = self.vec_at(value, *branch) {
+                                    branch.position = position;
+                                }
+                            }
+                        }
+                    }
+                    "align" => {
+                        if let Some(axes) = parsed.step_value(step, "axes").and_then(Value::as_str)
+                        {
+                            for branch in &mut branches {
+                                for axis in axes.chars() {
+                                    let coordinate = match axis {
+                                        'x' => &mut branch.position.x,
+                                        'y' => &mut branch.position.y,
+                                        _ => &mut branch.position.z,
+                                    };
+                                    *coordinate = coordinate.floor();
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            let Some(selector) = targets else {
+                self.fallback = true;
+                return;
+            };
+            let mut next = Vec::new();
+            for branch in &branches {
+                for candidate in self.note_candidates(*branch, selector) {
+                    if changes_entity {
+                        next.push(source::Source {
+                            entity: Some(candidate.target),
+                            ..*branch
+                        });
+                    } else {
+                        // 只换位置；链尾和后面的条件按新位置自己算盒。
+                        // Only the position changes; the tail and later
+                        // conditions box their own coordinates from it.
+                        next.push(source::Source {
+                            position: candidate.position,
+                            ..*branch
+                        });
+                    }
+                }
+            }
+            branches = next;
+            if branches.len() > MAX_BRANCHES {
+                self.fallback = true;
+                return;
+            }
+            if branches.is_empty() {
+                // 选择器没有候选：执行期链尾不会跑，前面的条件已经算过。
+                // No candidates: the tail never runs; earlier steps are planned.
+                return;
             }
         }
         if class::scope_of(line) == class::CommandScope::World {
@@ -523,6 +761,23 @@ impl Planner<'_> {
                 self.command(&tail, tail_root, branch, depth + 1);
             }
         }
+    }
+}
+
+/// 命令参数里有没有局部坐标（`^ ^ ^`）。
+///
+/// Whether a command's arguments contain local coordinates (`^ ^ ^`).
+fn has_local_coords(parsed: &ParsedCommand) -> bool {
+    parsed.arguments.iter().any(|(_, value)| is_local(value))
+}
+
+/// 一个参数值是不是局部坐标。
+fn is_local(value: &Value) -> bool {
+    match value {
+        Value::BlockPos(coords) | Value::Vec3(coords) => {
+            matches!(coords, Coordinates::Local { .. })
+        }
+        _ => false,
     }
 }
 

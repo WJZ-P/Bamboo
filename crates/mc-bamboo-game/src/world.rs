@@ -35,7 +35,7 @@ use crate::{
     inbound::{Inbound, InboundReceiver, JoinRequest, PlayerId, PlayerInbox, Sequenced},
     interaction::{self, UseItemOn},
     inventory,
-    island::{Borrow, Island, IslandAccess, IslandDrive, Islands, Posted},
+    island::{Borrow, BorrowClass, Island, IslandAccess, IslandDrive, Islands, Posted},
     island_pool::{IslandPool, MAX_ISLAND_THREADS, Wait},
     lectern, light_updates, menu, movement,
     pacing::{Pacer, WallTiming},
@@ -1564,12 +1564,14 @@ impl World {
         #[cfg_attr(not(test), allow(unused_mut))]
         let mut borrow = borrow;
         #[cfg(test)]
-        if self.islands.world_view_off && matches!(borrow, Borrow::World | Borrow::Islands(_)) {
+        if self.islands.world_view_off && matches!(borrow, Borrow::World(_) | Borrow::Islands(..)) {
             borrow = Borrow::All;
         }
         #[cfg(test)]
-        if self.islands.borrow_all_islands && matches!(borrow, Borrow::Islands(_)) {
-            borrow = Borrow::World;
+        if self.islands.borrow_all_islands
+            && let Borrow::Islands(_, class) = &borrow
+        {
+            borrow = Borrow::World(*class);
         }
         // 按需借（计划 4.5.1）：先取「不在主控手里」的岛名单，再 lift 借进来的岛；
         // lift 过的槽位看起来也不在，晚取会多投一份 fan-out 帧。
@@ -1578,14 +1580,14 @@ impl World {
         // it later would post an extra fan-out copy.
         let away = self.islands.away_ids();
         let absent = self.islands.away_players();
-        if matches!(borrow, Borrow::World | Borrow::Islands(_)) {
+        if matches!(borrow, Borrow::World(_) | Borrow::Islands(..)) {
             // 全拼兜底走原来的三段；按需借只并算出来的那几个岛，其余岛只借玩家。
             // Full-join fallback keeps the old three stages; on-demand joins
             // only the planned islands and lends players from the rest.
             let joining = Instant::now();
             let unified = match &borrow {
-                Borrow::World => self.islands.unify(into),
-                Borrow::Islands(ids) => self.islands.unify_subset(into, ids),
+                Borrow::World(_) => self.islands.unify(into),
+                Borrow::Islands(ids, _) => self.islands.unify_subset(into, ids),
                 _ => unreachable!("上面已经筛过"),
             };
             let joined = joining.elapsed();
@@ -1618,18 +1620,45 @@ impl World {
             let dividing = Instant::now();
             self.islands.divide(into, unified);
             let divided = dividing.elapsed();
-            let borrowed = match &borrow {
-                Borrow::World => self.islands.ids().len() as u64,
-                Borrow::Islands(ids) => ids.len() as u64,
-                _ => 0,
+            let (borrowed, class, fallback) = match &borrow {
+                Borrow::World(class) => (self.islands.ids().len() as u64, *class, true),
+                Borrow::Islands(ids, class) => (ids.len() as u64, *class, false),
+                _ => (0, BorrowClass::Other, false),
             };
+            #[cfg(test)]
+            {
+                self.islands.last_borrowed = borrowed as usize;
+                self.islands.last_fallback = fallback;
+            }
             let profiler = self.profiler();
             profiler.record_duration(Metric::IslandUnify, joined);
             profiler.record_duration(Metric::IslandWorldCommand, worked);
             profiler.record_duration(Metric::IslandDivide, divided);
             profiler.record(Metric::IslandBorrowedIslands, borrowed);
-            if matches!(borrow, Borrow::World) {
+            if fallback {
                 profiler.record(Metric::IslandWorldCommandFallbacks, 1);
+            }
+            // 每类命令各记一条「借了几个岛」/「兜底了一次」（计划 4.5.1 第 8 节）。
+            // One borrowed-island sample and one fallback sample per class
+            // (plan 4.5.1, section 8).
+            let borrowed_metric = match class {
+                BorrowClass::Other => None,
+                BorrowClass::Gamemode => Some(Metric::IslandBorrowedGamemode),
+                BorrowClass::Hurt => Some(Metric::IslandBorrowedHurt),
+                BorrowClass::Effect => Some(Metric::IslandBorrowedEffect),
+                BorrowClass::Execute => Some(Metric::IslandBorrowedExecute),
+            };
+            if let Some(metric) = borrowed_metric {
+                profiler.record(metric, borrowed);
+                if fallback {
+                    let metric = match class {
+                        BorrowClass::Gamemode => Metric::IslandFallbackGamemode,
+                        BorrowClass::Hurt => Metric::IslandFallbackHurt,
+                        BorrowClass::Effect => Metric::IslandFallbackEffect,
+                        _ => Metric::IslandFallbackExecute,
+                    };
+                    profiler.record(metric, 1);
+                }
             }
             self.publish_global();
             self.post_fan_out(&away, fan_out);
@@ -1638,7 +1667,7 @@ impl World {
         let away = match borrow {
             Borrow::All => away,
             Borrow::PlayersOf(_) => Vec::new(),
-            Borrow::World | Borrow::Islands(_) => unreachable!("上面已经返回"),
+            Borrow::World(_) | Borrow::Islands(..) => unreachable!("上面已经返回"),
         };
         let gathered = self.islands.gather(into, &borrow);
         let region = &mut self.islands.get_mut(into).expect("岛在表里").region;

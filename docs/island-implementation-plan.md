@@ -394,7 +394,7 @@
 
 主控处理命令时全部岛停放（5.5.2），可以直接读。用户的做法是「逐岛只读找出匹配的实体，只借命中的岛」，这里「匹配」= **过全部过滤条件的候选**（不是排序/`limit` 之后的最终结果）：`sort=nearest` / `furthest` / `random` 要先看到全部候选才知道谁命中，所以借的必须是「至少有一个候选的岛」，而不是「最终选中者所在的岛」。
 
-给 `select.rs` 加一个**只读的候选筛查**：和执行期 `find_with_source` **共用同一份 `matches` 过滤**（`distance` / `dx,dy,dz` / `type` / `name` / `tag` / `game_mode` / `rotation` / `scores` / `team`，`board` 传 `None`，与 `targets` / `players` / `one_target` 一致）、共用 `volume_box` 和 `selector.position(source.position)` 的基准点，逐岛问「有没有任何一个**非玩家实体**能过过滤」，把有候选的岛加入 `R`。玩家候选不产生岛（玩家全借）。筛查**不排序、不截断、不调用 `shuffle`**（`sort=random` 用进程级 `JavaRandom`，规划期绝不能推进它）、不受 `limit` 影响；`@s`、玩家名、UUID 三种短路形式按全局 ID 序找唯一命中者，命中非玩家实体时只并它所在的岛。
+给 `select.rs` 加一个**只读的候选筛查**：和执行期 `find_with_source` **共用同一份 `matches` 过滤**（`distance` / `dx,dy,dz` / `type` / `name` / `tag` / `game_mode` / `rotation` / `scores` / `team`，`board` 传 `None`，与 `targets` / `players` / `one_target` 一致）、共用 `volume_box` 和 `selector.position(source.position)` 的基准点，逐岛列出过滤后的**全部候选**（玩家和非玩家实体，`select::candidates`），非玩家候选所在的岛加入 `R`；玩家候选本身不产生岛（玩家全借），但命令要在玩家的位置读写方块时（`gamemode` 的脚下、`kill` / `damage` 的死亡掉落、`/execute at` 之后的相对坐标），按**候选玩家此刻的位置**算盒（第二轮，见第 4、5 节）。筛查**不排序、不截断、不调用 `shuffle`**（`sort=random` 用进程级 `JavaRandom`，规划期绝不能推进它）、不受 `limit` 影响；`@s`、玩家名、UUID 三种短路形式和执行期一样不再过其余过滤，各岛只读找命中者。`@s` 和 `distance` 的基准都取**这一步的执行上下文**（`/execute` 的分叉），不是发起人。
 
 这样执行期 `select::find` 看到的候选表 = 全部玩家（借来的）+ 全部有候选的岛的非玩家实体（并进来的），按全局 ID 升序，和全拼**完全同一个集合**（没候选的岛本来就不会贡献候选）。于是：
 
@@ -421,9 +421,10 @@
 | `setblock` / `fill` / `clone` | 发起人岛 + 受影响盒（含 `clone` 源与目标）里已加载区块所属的岛 | `setblock` 一个 `pos`；`fill` 的 `from..to`（`hollow` / `outline` / `destroy` 范围相同）；`clone` 的 `begin..end` 和 `destination..destination+span`。`clone` 的 `filtered` 谓词读源格状态，盖在同一盒里。 |
 | `summon` | 发起人岛 + `pos`（缺省发起人位置）所在盒的岛 + **显式 UUID 撞车的那个岛** | `finalize_spawn` 读 `pos` 的群系、取发起人岛的随机源；生成物的 `entity_seed_source` 归发起人岛。`summon_cow` 末尾 `has_mob_uuid` 扫全表查重（`DuplicateUuid` 会让命令失败）：**NBT 显式给了 `UUID` 时**，规划期用同一套 `nbt::load_into` codec 只读解出这个 UUID，逐岛只读查有没有实体占用，有就把那个岛并进 `R`，失败和反馈与全拼逐位相同；**没给 UUID**（随机生成）时不为查重额外借岛——岛并行跑刻时各岛加实体本来就不跨岛查 UUID（刷怪蛋、掉落物等都只查本岛），随机 UUID 撞车不在「分开跑 = 一起跑」的等价性要求之内，这是 3.3「岛的随机源」已有的差异。这样 `/summon` 不会因为「全部有非玩家实体的岛 ≈ 全部岛」而退化成全拼。改坏确认加「规划期漏查显式 UUID」。 |
 | `loot` | 发起人岛 + `sourcePos`（`mine` 源读方块 / 方块实体）、`targetPos`（`insert` / `replace block` 读写容器、`spawn` 生成物品实体）所在盒的岛 + 所有选择器候选实体岛 | `give` / `replace entity` 的 `players` / `entities` 选择器按 3 处理；`kill` / `fish` 源现在明确报错（`need_entity` 在求值前就返回），不借额外的岛。`Spawn` 生成的掉落物按位置归属，所以 `targetPos` 的岛必须在 `R`；`random_sequences` 在 `Global`，不借岛。 |
-| `kill` / `damage` | 发起人岛 + 全部选择器（`targets` / `target` / `by` / `from`）候选实体所在盒的岛（按 3 筛查）+ 命中目标所在盒的岛 | `hurt_player` 只动玩家；`hurt_mob` 会读方块（落地、掉落）、产生效果广播，死亡掉落物按实体位置归属；`damage` 的 `at <location>` 只进 `DamageSource`（纯数值），但 `by` / `from` 的实体位置要看得见。命中玩家时也把他脚下那格的盒加进来（`hurt_player` 的死亡 / 受伤路径可能读地面，按保守盒处理）。选择器按 3 的筛查规则处理：只选玩家时不并岛，含 `@e` / UUID 时并所有有候选的实体岛（候选表必须完整，`Nearest` / `Random` / `limit` 才和全拼一样）。 |
+| `kill` / `damage` | 发起人岛 + 目标（`kill` 的 `targets`、`damage` 的 `target`）**每个候选**（含玩家）此刻位置的盒 + `by` / `from` 的非玩家候选所在的岛；无参 `kill` 取执行者的位置盒 | `hurt_mob` 在目标处读方块、掉物品；`hurt_player` 可能致死，`player_death::die` 在玩家的位置生成掉落物，`divide` 按位置把它分回去，所以**候选玩家也要算盒**（第二轮：以前取全部玩家和全部实体的位置）。`by` / `from` 只把第一个结果的 ID 和位置填进 `DamageSource`，不在那里读写方块，只需借非玩家候选的岛让它选得到；`at <location>` 是纯数值。`kill @s` = 自己的岛；`damage <别的岛的玩家> 1` = 2 个岛。 |
 | `enchant` | 发起人岛 + 选择器筛查出的非玩家实体候选岛（见 3）；只选玩家时**不拼** | 只写目标玩家的物品栏和链路、发反馈；`select::targets` 可能选到非玩家实体（单目标失败反馈要 `entity_name` 读实体表）。目标玩家全借即可。 |
-| `gamemode` | 发起人岛 + 每个目标玩家脚下那格所在盒的岛 | `players::apply_mode` 的 `near_ground` 读 `chunks.block(player.position().below())`；选择器 `@a` / 点名按 3 只读找出候选玩家，逐个按当前位置算盒（候选全是玩家，不并实体岛）。 |
+| `gamemode` | 发起人岛 + **候选目标玩家**脚下那格所在盒的岛 | `players::apply_mode` 的 `near_ground` 读 `chunks.block(player.position().below())`；`target` 按 3 只读求候选，只对候选玩家算盒（第二轮：以前取全部玩家）。不带目标时 `players::gamemode` 改的是发起人自己（在 `into`），`/execute as` 换过的执行者也保守地算一盒。`gamemode creative` = 自己的岛；`gamemode survival <别的岛的玩家>` = 2 个岛。 |
+| `effect give` / `effect clear` | 发起人岛 + `targets` 的**非玩家候选**所在的岛；目标全是玩家时**不拼** | 按 `command/effect.rs` 逐条核过：玩家走 `player_effects::give` / `clear`，只改这名玩家的效果表、血量上限（`refresh_limits`）、吸收值和元数据脏标记，`update_mob_effect` / `remove_mob_effect` 只发给他自己；`/effect give` 走 `addEffect`，瞬间效果不当场结算（下一刻 `tickEffects`），所以命令本身不会伤害、致死；非玩家走 `World::add_mob_effect` / `clear_mob_effects`，从实体表里取出放回，不读方块；反馈发给发起人和管理员。`clear` 不带目标时是发起人自己。`effect give @s speed` = 自己的岛；`effect give @e[type=cow] slowness` = 有牛的岛。 |
 | `defaultgamemode` | **不拼**（`R = {into}`） | 现在 `FORCE_GAME_MODE = false`，只改 `Global.state.default_game_mode` + 反馈；以后常量打开时按全服玩家逐个 `apply_mode`，退化为 `gamemode @a` 的规则（把所有玩家的脚下盒都借进来）。 |
 | `data` | 发起人岛 + 主目标与 `modify … from` 第二目标的 `block`（盒）/ `entity`（候选实体岛）/ `storage`（不借） | `storage` 在 `Global`；`entity` 的存档 codec 读写实体表（`data_source::read/write`），按 3 找候选；`block` 按盒。`string` / `compute` / provider 现在明确报错，不借额外的岛。 |
 | `execute` | 见 5 | — |
@@ -432,7 +433,7 @@
 
 `/execute` 的链尾命令在**执行期**才重新解析（`execute.rs::run_action`），链的每一步会改来源位置 / 朝向 / 执行者并可能分叉，静态规划拿不到「执行期最终的坐标」。但 `Context` 的演化只读 `Region`（`target_pose` 读玩家/实体位置、`selection` 按当前上下文过滤），不取随机数、不发反馈，所以可以按 `apply_step` 的语义**只读地模拟整条链**，对每个分叉、每一步收集 `R`：
 
-- **能算出确定集合的形态**：链上每一步都是 `as` / `at` / `positioned` / `rotated` / `facing` / `align` / `anchored` / `in` / `if` / `unless` / `store`（及它们的参数层），链尾命令是第 4 节表里有规则的那些，且 `run_command` 能按链的权限等级 `graph.parse` 成功。模拟器按每层的 `ChainStep.arguments` 折算：`as`/`at`/`facing`/`if|unless entity` 的选择器按 3 找候选岛（实体候选岛要并进来，因为分叉上下文可能是那头牛）；`positioned` / `facing <pos>` / `if|unless block|blocks` 的坐标按**当前分叉的来源**解成盒；`store … block|entity|storage|score|bossbar` 的存储目标按 `data` 的规则折算；链尾命令的 `ParsedCommand` 递归交给同一个规划器（链尾是 `Players` 类时不加方块岛）。所有分叉的岛集合取并集。
+- **能算出确定集合的形态**：链上每一步都是 `as` / `at` / `positioned` / `rotated` / `facing` / `align` / `anchored` / `in` / `if` / `unless` / `store`（及它们的参数层），链尾命令是第 4 节表里有规则的那些，且 `run_command` 能按链的权限等级 `graph.parse` 成功。模拟器按每层的 `ChainStep.arguments` 折算，分叉和执行期 `apply_step` 一一对应（第二轮）：`as` 对每个候选分出一个执行者，`at` / `positioned as` 对每个候选分出一个位置（候选此刻的位置，不再取全部玩家和实体），`positioned <pos>` / `align` 改分叉的位置；`facing` / `if|unless entity` 等只读选择器的非玩家候选岛并进来；`positioned` / `facing <pos>` / `if|unless block` 的坐标按**当前分叉的来源**解成盒；`store … block|entity|storage` 的目标在全部分叉跑完以后由 `apply_store` 按**位置 (0, 0, 0)、没有执行者的零上下文**解，规划器也按这个零上下文另算一遍盒和候选；`score` / `bossbar` 不借岛；局部坐标 `^` 遇到会换朝向的层（`at` / `rotated` / `facing`）时全拼兜底（规划器不模拟朝向）；链尾命令的 `ParsedCommand` 递归交给同一个规划器（链尾是 `Players` 类时不加方块岛）。所有分叉的岛集合取并集。
 - **保留全拼兜底**：链尾是另一个 `/execute`、链尾解析失败或它自己就是无法规划的命令、链上出现模拟器不认识的分支（`predicate`、`if function`、`summon` 之类当前树里没有的层）、参数名/类型对不上、`if/unless` 的谓词依赖模拟器拿不到的执行期状态、`store` 的目标形状不认识、分叉数量超过上限（暂定 256）、或模拟器任何一步要读它没借到的东西。**一律走现有 `Borrow::World`（全部岛），语义与改前完全一致**；绝不允许「猜一个更小的集合」。
 - 条件分支 `if/unless` 的**条件本身**要读方块/实体，即使条件为假、链尾没执行，也必须借那片岛（否则模拟器和执行期看到的方块不同会影响反馈和 `store`）；模拟器只读，不判断条件真假，两种分支都算进去。
 - **链尾在每个分叉上依次执行，前一个分叉改过的世界会被后一个分叉的选择器 / 条件看到**（例如前一个分叉 `tp` 走了一头牛、后一个分叉 `@e` 就选得到它）。`R` 仍然是超集：新建的实体只会落在已经在 `R` 里的位置（`/summon` 的 `pos`、`/loot spawn` 的 `targetPos`、掉落物的位置都按第 4 节折算过）；被搬的实体本来就是前一个分叉的选择器候选，其目的地（`/tp` 的坐标）也已经按第 4 节加进 `R`；链尾递归规划时把每个分叉的来源都算了一遍并取并集。确定性用例和模糊测试里专门加「多分叉、链尾会改世界」这一类。
@@ -451,7 +452,7 @@
 1. **全拼 / 按需借双跑对照**：测试脚手架里给 `Borrow` 加一个「强制全拼」开关（`#[cfg(test)]`，正式构建恒走按需借）。同一个多岛世界、同一个随机种子、同一条命令，两份从**逐位相同**的初始状态出发（包括四个随机源、实体种子源、玩家缓冲），一份强制全拼、一份按需借，执行后比：每个岛的内容指纹（`island_split_tests::fingerprint`，含方块/光照存档字节、计划刻、方块实体、容器、组件、红石、实体、配对、玩家状态、待存标记）、岛时钟、四个随机源状态、每名玩家收到的**全部字节**（`Client::take_frames()`）、命令反馈组件（`decompose_component` 展开）和返回值。`sort=random` 的进程级 `JavaRandom` 在两份里按同样的次序各取一次，测试里用固定种子重置它以保证可比。这个对照同时验证「借进来的岛按原归属还原」——不能只比发起人岛；已有的 `assert_in_place` 每刻再核一次「每类东西都属于它该在的岛」。
 2. **逐条命令逐形态的确定性用例**：第 4 节表里每条命令的每种形态（相对/绝对/局部坐标、跨岛/同岛、`@e`/`@a`/`@p`/`@r`/点名/UUID、各种 `sort` / `limit` / `distance`、`clone` 的三种 mode 和 filtered、`loot` 的四源五目标、`data` 的三源与 `from`、`execute` 能规划和兜底的形态、未加载目标、没权限、解析失败），至少各一条；用固定种子的 3–5 岛布局。每条都断言「借了几个岛」符合第 4 节表（`tp` 玩家到坐标必须是 0），防止规划器悄悄退回全拼还让对照通过。另加第 4 节的三条方块盒对抗用例、`/summon` 显式 UUID 跨岛撞车、以及「多分叉且链尾会改世界」的 `/execute`。
 3. **随机模糊测试**：固定种子，随机岛布局（组数、中心、每组区块内容、玩家/牛/掉落物分布）× 随机命令 × 随机参数，跑**几千条**，每条都做 1 的双跑对照；把种子和命令原文写进失败信息，能一条命令复现。
-4. **改坏确认**（不许为通过删用例）：① 规划器故意漏借一个涉及的岛；② 选择器候选枚举故意漏一个岛的实体；③ `divide` 少还原一个岛的随机源 / 玩家；④ 没把 `R` 外的玩家借进来；⑤ `tp` 非玩家实体到别的岛时漏借目的地岛；⑥ 规划期漏查 `/summon` NBT 里显式给的 UUID。六种都必须在 1/2/3 里报出来，任一不报就说明比较不够严。
+4. **改坏确认**（不许为通过删用例）：① 规划器故意漏借一个涉及的岛；② 选择器候选枚举故意漏一个岛的实体；③ `divide` 少还原一个岛的随机源 / 玩家；④ 没把 `R` 外的玩家借进来；⑤ `tp` 非玩家实体到别的岛时漏借目的地岛；⑥ 规划期漏查 `/summon` NBT 里显式给的 UUID；⑦（第二轮）候选筛查漏掉目标玩家；⑧（第二轮）`/effect` 漏借目标实体的岛。八种都必须在 1/2/3 里报出来，任一不报就说明比较不够严；⑦⑧ 另外各用对应的那条命令单独确认（`kill <别的岛上有物品的玩家>`、`effect give @e[type=cow] slowness`）。
 5. **原有对照一条不删**：`commands_reaching_other_islands_match_one_island`（多岛 vs 单岛逐刻比）、`seeing_only_the_senders_island_is_caught`、`joining_for_a_command_leaves_every_island_as_it_was`、混合驱动「都按时 = 齐步」、6.2 的拆合不改内容对照和 23 类改坏确认、不变量断言、全量对照，全部保留。计数断言从「拼了几次」改成「借了几次 / 借了几个岛」，语义不变。
 
 ##### 8. 测量
@@ -482,6 +483,16 @@
 | B | 改后 | 140 | 0.039 / 2.011 | 0.032 / 1.638 | 1.029 / 2 | 0（0%） |
 
 压测里绝大多数要借岛的命令其实一个岛都不用拼（借岛均值 ≈ 1，即只有发起人的岛）；`defaultgamemode` 只改全局默认值，按 4.5.1 的表不拼。全拼兜底 0 次，说明规划器覆盖了这一轮压测用到的全部形态。数字与口径见 `docs/profiling.md` 第 19 节。
+
+##### 10. 第二轮：按候选目标收紧（2026-11-20）
+
+审查发现 `gamemode` / `kill` / `damage` / `/execute` 的盒取的是**全部玩家**（和全部实体）的位置，常用写法几乎还是借进全部有人的岛；`/effect` 规划器不认识、一律全拼。第二轮改成：
+
+- 只读候选筛查 `select::candidates` 返回过滤后的全部候选（玩家 + 非玩家实体），和执行期共用 `matches`，仍不排序、不截断、不取随机数（`@r` / `sort=random` 取过滤后的全部候选）；`@s` 和 `distance` 按这一步的执行上下文算。
+- `gamemode` 只对候选玩家算脚下盒；`kill` / `damage` 对目标的每个候选（含玩家）算位置盒，`by` / `from` 只借非玩家候选的岛；`/effect` 见第 4 节表；`/execute` 的 `as` / `at` / `positioned` / `align` 按分叉逐个模拟，`store` 的目标按零上下文另算（见第 5 节）。
+- 借岛数（含发起人的岛，1 = 不拼）写死在 `narrow_commands_borrow_only_their_targets`：`gamemode creative` 1、`gamemode survival <别的岛的人>` 2、`execute as @s at @s run setblock ~ ~-1 ~ stone` 1、`effect give @s speed` 1、`effect give @e[type=cow] slowness` 3（三座岛各一头牛）、`effect clear @a` 1、`damage <别的岛的人> 1` 2、`kill @e[type=cow,distance=..5]` 1、`kill @e[type=cow]` 3、`kill @s` 1，并断言都没有退回全拼。
+- 逐命令用例和模糊池加了 `/effect`、分叉上 `@s` 是牛的 `/execute`、`at` 别的岛的人之后按距离选、`damage ... by`、`positioned <pos>` 之后的相对坐标、`store ... entity` 的零上下文；逐命令用例改成每条用自己种子的布局算坐标（以前坐标按种子 51 算、跑在别的种子里，跨岛用例有一部分落空）。模糊测试 500 轮 × 8 条 = 4000 条。改坏 ⑦⑧ 在整串用例里和各自的单条命令里都抓到。
+- `islands-roam` 10 分钟：`gamemode` / `kill @s` / `effect` 三类借岛均值 1.192 / 1.000 / 1.000、最大 2 / 1 / 1，全拼兜底 0；数字与口径见 `docs/profiling.md` 19.3。
 
 ---
 

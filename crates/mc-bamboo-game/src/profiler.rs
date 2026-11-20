@@ -416,6 +416,39 @@ pub(crate) enum Metric {
     /// Multi-island: fallbacks to a full join when the island set cannot be
     /// planned (one sample per fallback).
     IslandWorldCommandFallbacks,
+    /// 多岛：每条 `/gamemode` 借了几个岛（含发起人的岛；兜底 = 全部岛）。
+    ///
+    /// Multi-island: islands borrowed by each `/gamemode` (the sender's
+    /// included; a fallback counts every island).
+    IslandBorrowedGamemode,
+    /// 多岛：每条 `/kill` / `/damage` 借了几个岛。
+    ///
+    /// Multi-island: islands borrowed by each `/kill` or `/damage`.
+    IslandBorrowedHurt,
+    /// 多岛：每条 `/effect` 借了几个岛。
+    ///
+    /// Multi-island: islands borrowed by each `/effect`.
+    IslandBorrowedEffect,
+    /// 多岛：每条 `/execute` 借了几个岛。
+    ///
+    /// Multi-island: islands borrowed by each `/execute`.
+    IslandBorrowedExecute,
+    /// 多岛：`/gamemode` 退回全拼的次数（每兜底一次一条样本）。
+    ///
+    /// Multi-island: `/gamemode` fallbacks to a full join (one sample each).
+    IslandFallbackGamemode,
+    /// 多岛：`/kill` / `/damage` 退回全拼的次数。
+    ///
+    /// Multi-island: `/kill` and `/damage` fallbacks to a full join.
+    IslandFallbackHurt,
+    /// 多岛：`/effect` 退回全拼的次数。
+    ///
+    /// Multi-island: `/effect` fallbacks to a full join.
+    IslandFallbackEffect,
+    /// 多岛：`/execute` 退回全拼的次数。
+    ///
+    /// Multi-island: `/execute` fallbacks to a full join.
+    IslandFallbackExecute,
     /// 混合驱动：岛派出时全部 tick 线程都忙着，从派出到开跑等了多久（每次一条样本）。
     /// 这一段不算交接（`island_handoff` 只记线程空着时的唤醒和交回）。
     ///
@@ -433,7 +466,7 @@ pub(crate) enum Metric {
 }
 
 impl Metric {
-    const ALL: [Self; 34] = [
+    const ALL: [Self; 42] = [
         Self::TickTotal,
         Self::TickStartLateness,
         Self::TickIntervalDeviation,
@@ -466,6 +499,14 @@ impl Metric {
         Self::IslandWorldCommand,
         Self::IslandBorrowedIslands,
         Self::IslandWorldCommandFallbacks,
+        Self::IslandBorrowedGamemode,
+        Self::IslandBorrowedHurt,
+        Self::IslandBorrowedEffect,
+        Self::IslandBorrowedExecute,
+        Self::IslandFallbackGamemode,
+        Self::IslandFallbackHurt,
+        Self::IslandFallbackEffect,
+        Self::IslandFallbackExecute,
         Self::IslandQueueWait,
         Self::IslandDroppedTicks,
     ];
@@ -504,6 +545,14 @@ impl Metric {
             Self::IslandWorldCommand => "island_world_command",
             Self::IslandBorrowedIslands => "island_borrowed_islands",
             Self::IslandWorldCommandFallbacks => "island_world_command_fallbacks",
+            Self::IslandBorrowedGamemode => "island_borrowed_gamemode",
+            Self::IslandBorrowedHurt => "island_borrowed_hurt",
+            Self::IslandBorrowedEffect => "island_borrowed_effect",
+            Self::IslandBorrowedExecute => "island_borrowed_execute",
+            Self::IslandFallbackGamemode => "island_fallback_gamemode",
+            Self::IslandFallbackHurt => "island_fallback_hurt",
+            Self::IslandFallbackEffect => "island_fallback_effect",
+            Self::IslandFallbackExecute => "island_fallback_execute",
             Self::IslandQueueWait => "island_queue_wait",
             Self::IslandDroppedTicks => "island_dropped_ticks",
             Self::SkippedCatchUps => "skipped_catch_ups",
@@ -530,9 +579,17 @@ impl Metric {
             Self::FlushBytes => "bytes",
             Self::IslandCount => "islands",
             Self::IslandTopologyWait | Self::IslandDroppedTicks => "ticks",
+            Self::IslandBorrowedGamemode
+            | Self::IslandBorrowedHurt
+            | Self::IslandBorrowedEffect
+            | Self::IslandBorrowedExecute => "islands",
             Self::IslandSplitDeferrals
             | Self::IslandBorrowedIslands
-            | Self::IslandWorldCommandFallbacks => "times",
+            | Self::IslandWorldCommandFallbacks
+            | Self::IslandFallbackGamemode
+            | Self::IslandFallbackHurt
+            | Self::IslandFallbackEffect
+            | Self::IslandFallbackExecute => "times",
             Self::IslandCrossings => "players",
             Self::SkippedCatchUps => "times",
             Self::TickTotal
