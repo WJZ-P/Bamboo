@@ -700,12 +700,12 @@ impl<'a> Generator<'a> {
         Ok(bands)
     }
 
-    /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight(x, z, WORLD_SURFACE_WG, ...)`。
+    /// 结构布局用的常数列高度，照 `FlatLevelSource.getBaseHeight`：从地层里反扫第一个
+    /// MOTION_BLOCKING 不透明的层，`OceanFloorWg` 版本的谓词单独算一次。
     ///
-    /// 照 `iterateNoiseColumn` 用一块 1×height×1、步长 1 的体积和全新的含水层，自顶向下
-    /// 结构布局用的常数列高度，照 `FlatLevelSource.getBaseHeight`。
-    ///
-    /// Cache the constant column heights used by `FlatLevelSource.getBaseHeight`.
+    /// Cache the constant column heights used by `FlatLevelSource.getBaseHeight`:
+    /// scan the layers for the last MOTION_BLOCKING-opaque one, and compute the
+    /// `OceanFloorWg` variant separately.
     pub fn set_flat_columns(
         &mut self,
         biome: &'static str,
@@ -735,6 +735,9 @@ impl<'a> Generator<'a> {
         self.flat_columns = Some((biome, surface, floor));
     }
 
+    /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight(x, z, WORLD_SURFACE_WG, ...)`。
+    ///
+    /// 照 `iterateNoiseColumn` 用一块 1×height×1、步长 1 的体积和全新的含水层，自顶向下
     /// 找第一个非空气方块。`getBaseHeight` 返回 blockY+1，`getFirstOccupiedHeight` 再减 1，
     /// 所以这里直接返回该 blockY；整列都是空气时返回 minY-1。
     ///
