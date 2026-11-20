@@ -707,14 +707,14 @@ impl Level for MobLevel {
             let index = self.players.iter().position(|p| p.uid == uid)?;
             let mut view = EntityView::new(mc_bamboo_data::registries::entity_type::PLAYER);
             view.is_living = true;
-            if let Some(&level) = self.looting.get(index) {
-                if level > 0 {
-                    let mut held = LootStack::new(mc_bamboo_data::items::DIAMOND_SWORD, 1);
-                    let mut enchants = std::collections::BTreeMap::new();
-                    enchants.insert("minecraft:looting".to_owned(), level);
-                    held.set_enchantment_levels(mc_bamboo_loot::ENCHANTMENTS_COMPONENT, enchants);
-                    view.equipment[mc_bamboo_loot::EquipmentSlot::Mainhand.index()] = Some(held);
-                }
+            if let Some(&level) = self.looting.get(index)
+                && level > 0
+            {
+                let mut held = LootStack::new(mc_bamboo_data::items::DIAMOND_SWORD, 1);
+                let mut enchants = std::collections::BTreeMap::new();
+                enchants.insert("minecraft:looting".to_owned(), level);
+                held.set_enchantment_levels(mc_bamboo_loot::ENCHANTMENTS_COMPONENT, enchants);
+                view.equipment[mc_bamboo_loot::EquipmentSlot::Mainhand.index()] = Some(held);
             }
             Some(view)
         };
