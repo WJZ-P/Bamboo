@@ -228,7 +228,8 @@ public final class MobOracle {
                 play(official, out, scene);
                 cases++;
             }
-            for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "skeleton_bow_normal", "skeleton_bow_hard")) {
+            for (String name : List.of("arrow_hits_player", "arrow_hits_wall", "arrow_block_overlaps_flight",
+                    "skeleton_bow_normal", "skeleton_bow_hard")) {
                 if (only != null && !only.equals("projectile") && !name.startsWith(only)) continue;
                 playProjectile(official, out, name);
                 cases++;
@@ -2299,6 +2300,7 @@ public final class MobOracle {
     private static void playProjectile(Official official, Writer out, String name) throws Exception {
         boolean skeleton = name.startsWith("skeleton_");
         boolean wall = name.equals("arrow_hits_wall");
+        boolean overlap = name.equals("arrow_block_overlaps_flight");
         Difficulty difficulty = name.endsWith("_hard") ? Difficulty.HARD : Difficulty.NORMAL;
         FakeLevel world = FakeLevel.create(official);
         world.injectedBrightOutside = false;
@@ -2356,7 +2358,7 @@ public final class MobOracle {
             setRandom(arrow, world.entitySeeds.nextLong());
             arrow.setUUID(Mth.createInsecureUUID(arrow.getRandom()));
             arrow.setPos(0.5, 65.5, 0.5);
-            arrow.shoot(1.0, 0.0, 0.0, 1.6F, 0.0F);
+            if (!overlap) arrow.shoot(1.0, 0.0, 0.0, 1.6F, 0.0F);
             arrows.add(arrow);
             world.tracked.add(arrow);
         }
@@ -2373,6 +2375,7 @@ public final class MobOracle {
             if (tick > 0) {
                 world.gameTime++;
                 if (wall && tick == 12) world.blocks.remove(obstacle.asLong());
+                if (overlap && tick == 2) world.blocks.put(BlockPos.asLong(0, 65, 0), Blocks.STONE.defaultBlockState());
                 if (player.damageCooldownTime > 0) player.damageCooldownTime--;
                 if (player.hurtTime > 0) player.hurtTime--;
                 if (shooter != null) {
@@ -2433,7 +2436,7 @@ public final class MobOracle {
             zombiePlayerStep(player, playerSink, playerStates, playerPackets, lastSentHealth, tick == 0);
         }
         if (name.equals("arrow_hits_player") && player.getHealth() == 20.0F
-                || wall && embeds == 0 || skeleton && arrows.size() < 2) {
+                || wall && embeds == 0 || overlap && embeds != ticks - 1 || skeleton && arrows.size() < 2) {
             throw new IllegalStateException("projectile scenario failed to exercise " + name);
         }
         out.write("{\"type\":\"projectile\",\"name\":" + jsonString(name) + ",\"difficulty\":" + difficulty.getId()

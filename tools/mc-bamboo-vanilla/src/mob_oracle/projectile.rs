@@ -49,6 +49,10 @@ struct ArrowFrame {
 }
 
 impl ProjectileCase {
+    fn overlaps_flight(&self) -> bool {
+        self.name == "arrow_block_overlaps_flight"
+    }
+
     fn level(&self) -> MobLevel {
         MobLevel {
             blocks: self
@@ -105,11 +109,13 @@ impl ProjectileCase {
             world.add_prepared_entity(skeleton);
         } else {
             let mut arrow = world.prepare_entity(Entity::arrow(Vec3::new(0.5, 65.5, 0.5)));
-            arrow.shoot_arrow(
-                Vec3::new(1.0, if mutate { 0.25 } else { 0.0 }, 0.0),
-                1.6,
-                0.0,
-            );
+            if !self.overlaps_flight() {
+                arrow.shoot_arrow(
+                    Vec3::new(1.0, if mutate { 0.25 } else { 0.0 }, 0.0),
+                    1.6,
+                    0.0,
+                );
+            }
             world.add_prepared_entity(arrow);
         }
     }
@@ -134,6 +140,12 @@ impl Report {
             if tick != 0 {
                 if case.wall && tick == 12 {
                     level.blocks.remove(&BlockPos::new(7, 65, 0));
+                }
+                if case.overlaps_flight() && tick == 2 {
+                    level.blocks.insert(
+                        BlockPos::new(0, 65, 0),
+                        BlockState(mc_bamboo_data::blocks::STONE),
+                    );
                 }
                 level.game.as_mut().unwrap().tick_cooldowns();
                 ticks.set_time(1000 + tick as i64);

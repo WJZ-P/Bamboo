@@ -47,6 +47,10 @@ pub struct Arrow {
     pub last_state: Option<BlockState>,
     pub sound: u16,
     pub left_owner: bool,
+    /// `Projectile.leftOwnerChecked`：只查一次，之后不再更新。
+    ///
+    /// `Projectile.leftOwnerChecked`: the check runs once and is never redone.
+    left_owner_checked: bool,
     pub has_been_shot: bool,
     needs_sync: bool,
     pierced: Vec<EntityUid>,
@@ -71,6 +75,7 @@ impl Default for Arrow {
             last_state: None,
             sound: arrow_hit_sound(),
             left_owner: false,
+            left_owner_checked: false,
             has_been_shot: false,
             needs_sync: false,
             pierced: Vec::new(),
@@ -248,7 +253,13 @@ fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
         unreachable!()
     };
     arrow.owner = owner;
-    arrow.left_owner |= !owner_in_range;
+    // `Projectile.checkLeftOwner` 只在第一次调用时更新，之后 `leftOwnerChecked` 挡住。
+    // `Projectile.checkLeftOwner` only updates on its first call; `leftOwnerChecked`
+    // blocks every later one.
+    if !arrow.left_owner && !arrow.left_owner_checked {
+        arrow.left_owner = !owner_in_range;
+        arrow.left_owner_checked = true;
+    }
     let end = position.add(movement);
     let block_hit = clip_including_border(blocks, position, end, collision);
     let end = block_hit.map_or(end, |hit| hit.location);
@@ -685,6 +696,9 @@ mod tests {
                 panic!("expected arrow state")
             };
             saved.needs_sync = false;
+            // `leftOwnerChecked` 不写进存档，读回来从 false 开始。
+            // `leftOwnerChecked` is not saved, so a reloaded arrow starts from false.
+            saved.left_owner_checked = false;
             assert_eq!(super::super::KindState::Arrow(saved), restored.state.kind);
         }
         level.set(block, BlockState(mc_bamboo_data::blocks::AIR));
@@ -697,24 +711,24 @@ mod tests {
     }
 
     #[test]
-    fn an_arrow_already_inside_a_block_only_shakes_on_the_first_change() {
+    fn a_block_placed_around_an_arrow_only_starts_shaking_once() {
         let mut level = crate::testing::TestLevel::new();
         let mut ticks = crate::BlockTicks::default();
-        level.set(
+        let mut world = World::new(&mut level, &mut ticks);
+        let uid = world.spawn_entity(Entity::arrow(Vec3::new(0.5, 64.5, 0.5)));
+        world.tick_entities();
+        world.set_block(
             BlockPos::new(0, 64, 0),
             BlockState(mc_bamboo_data::blocks::STONE),
+            2,
         );
-        let arrow = Entity::arrow(Vec3::new(0.5, 64.5, 0.5));
-        let mut world = World::new(&mut level, &mut ticks);
-        let uid = world.spawn_entity(arrow);
-        for _ in 0..20 {
+        for expected in [6, 5, 4, 3, 2, 1, 0, 0, 0] {
             world.tick_entities();
+            let arrow = world.entity(uid).unwrap();
+            assert!(
+                matches!(&arrow.kind, EntityKind::Arrow(a) if a.in_ground && a.shake_time == expected)
+            );
         }
-        let arrow = world.entity(uid).unwrap();
-        // 箭的第一刻就在方块里，`setInGround(true)` 不震动，之后也不能再震动。
-        // The arrow starts inside the block, so the first change sets no shake and
-        // the following ticks must not re-trigger it.
-        assert!(matches!(&arrow.kind, EntityKind::Arrow(a) if a.in_ground && a.shake_time == 0));
     }
 
     #[test]
