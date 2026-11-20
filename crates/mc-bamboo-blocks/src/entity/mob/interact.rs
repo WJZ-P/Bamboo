@@ -55,6 +55,9 @@ impl MobInteraction {
 
 /// `AbstractCow.mobInteract`：`BUCKET` + 成年 → 挤奶；否则交给 `Animal.mobInteract`。
 pub fn interact(me: &mut Entity, mob: &mut Mob, req: &MobInteractRequest) -> MobInteraction {
+    if mob.mob_type.is_equine() {
+        return super::equine::interact(me, mob, req);
+    }
     let _ = me;
     if req.held.item == items::BUCKET && !mob.is_baby() {
         // `Player.playSound(COW_MILK, 1, 1)`：音源是玩家，位置取交互发生处。

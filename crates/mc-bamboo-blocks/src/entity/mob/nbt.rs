@@ -310,7 +310,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         put(&mut out, "NoAI", Tag::Byte(1));
     }
     // ---- AgeableMob / Animal / Cow ----
-    if mob.mob_type == MobType::Cow {
+    if !mob.mob_type.is_monster() {
         put(&mut out, "Age", Tag::Int(mob.age));
         put(&mut out, "ForcedAge", Tag::Int(mob.forced_age));
         put(&mut out, "AgeLocked", Tag::Byte(i8::from(mob.age_locked)));
@@ -318,6 +318,8 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
         if let Some(uuid) = &mob.love_cause {
             put(&mut out, "LoveCause", uuid_tag(uuid));
         }
+    }
+    if mob.mob_type == MobType::Cow {
         put(
             &mut out,
             "variant",
@@ -329,6 +331,7 @@ pub fn write_mob(row: &EntityRow) -> Result<Tag> {
             Tag::String(mob.sound_variant.name().to_owned()),
         );
     }
+    super::equine::save(mob, &mut out)?;
     // ---- Zombie ----
     if mob.mob_type.uses_baby_metadata() {
         put(&mut out, "IsBaby", Tag::Byte(i8::from(mob.zombie_baby)));
@@ -464,12 +467,14 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
         mob.loot_table_seed = tag::long_or(tag, "DeathLootTableSeed", 0);
         mob.no_ai = tag::bool_or(tag, "NoAI", false);
         // ---- AgeableMob / Animal / Cow ----
-        if mob.mob_type == MobType::Cow {
+        if !mob.mob_type.is_monster() {
             living::set_age(me, mob, tag::int_or(tag, "Age", 0));
             mob.forced_age = tag::int_or(tag, "ForcedAge", 0);
             mob.age_locked = tag::bool_or(tag, "AgeLocked", false);
             mob.in_love = tag::int_or(tag, "InLove", 0);
             mob.love_cause = uuid_field(tag, "LoveCause");
+        }
+        if mob.mob_type == MobType::Cow {
             if let Some(variant) = tag::string_or(tag, "variant").and_then(CowVariant::from_name) {
                 mob.variant = variant;
             }
@@ -479,6 +484,7 @@ pub fn load_into(entity: &mut Entity, tag: &Tag) -> Result<()> {
                 mob.sound_variant = variant;
             }
         }
+        super::equine::load(mob, tag);
         // ---- Zombie ----
         if mob.mob_type.uses_baby_metadata() {
             let baby = tag::bool_or(tag, "IsBaby", false);
@@ -643,7 +649,7 @@ pub(crate) fn uuid_tag(bytes: &[u8; 16]) -> Tag {
     Tag::IntArray(words.to_vec())
 }
 
-fn uuid_field(tag: &Tag, key: &str) -> Option<[u8; 16]> {
+pub(super) fn uuid_field(tag: &Tag, key: &str) -> Option<[u8; 16]> {
     match tag::field(tag, key) {
         Some(Tag::IntArray(words)) if words.len() == 4 => {
             let mut out = [0u8; 16];

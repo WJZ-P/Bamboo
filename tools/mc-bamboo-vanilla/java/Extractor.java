@@ -1142,6 +1142,10 @@ public final class Extractor {
         out.addProperty("arrowPierce", arrowAccessorId("PIERCE_LEVEL"));
         out.addProperty("arrowInGround", arrowAccessorId("IN_GROUND"));
         out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
+        out.addProperty("llamaEyeHeight", net.minecraft.world.entity.EntityTypes.LLAMA.getDimensions().eyeHeight());
+        out.addProperty("muleEyeHeight", net.minecraft.world.entity.EntityTypes.MULE.getDimensions().eyeHeight());
+        out.addProperty("donkeyEyeHeight", net.minecraft.world.entity.EntityTypes.DONKEY.getDimensions().eyeHeight());
+        out.addProperty("horseEyeHeight", net.minecraft.world.entity.EntityTypes.HORSE.getDimensions().eyeHeight());
         return out;
     }
 

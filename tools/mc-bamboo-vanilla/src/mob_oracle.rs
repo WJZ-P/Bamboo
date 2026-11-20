@@ -30,6 +30,7 @@ use serde::Deserialize;
 
 use crate::oracle::collect_log;
 
+mod equine;
 mod projectile;
 mod skeleton_death;
 mod skeleton_spawn;
@@ -74,6 +75,8 @@ enum Line {
     ArrowPickup(projectile::ArrowPickupCase),
     SkeletonDeath(skeleton_death::DeathCase),
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
+    EquineSpawn(equine::SpawnCase),
+    EquineBreed(equine::BreedCase),
     End(End),
 }
 
@@ -890,6 +893,8 @@ impl Report {
                 Line::ArrowPickup(case) => self.replay_arrow_pickup(&case),
                 Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
+                Line::EquineSpawn(case) => self.replay_equine_spawn(case),
+                Line::EquineBreed(case) => self.replay_equine_breed(case),
                 Line::End(end) => {
                     self.ended = true;
                     if end.cases != self.cases {

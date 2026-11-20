@@ -3334,6 +3334,26 @@ fn entity_types_file(data: &VersionData) -> String {
         "pub const SKELETON_EYE_HEIGHT: f32 = {};",
         float_literal(facts.skeleton_eye_height)
     );
+    let _ = writeln!(
+        out,
+        "pub const LLAMA_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.llama_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const MULE_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.mule_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const DONKEY_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.donkey_eye_height)
+    );
+    let _ = writeln!(
+        out,
+        "pub const HORSE_EYE_HEIGHT: f32 = {};",
+        float_literal(facts.horse_eye_height)
+    );
     out
 }
 

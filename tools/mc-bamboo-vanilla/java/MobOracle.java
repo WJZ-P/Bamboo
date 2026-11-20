@@ -238,6 +238,9 @@ public final class MobOracle {
                 playProjectile(official, out, name);
                 cases++;
             }
+            if (only == null || "equine".startsWith(only)) {
+                cases += playEquines(official, out);
+            }
             if ("skeleton_spawn".equals(only)
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out, false);
@@ -2556,6 +2559,78 @@ public final class MobOracle {
             throw new IllegalStateException("skeleton_halloween needs both holiday items and an ordinary helmet");
         }
         return cases;
+    }
+
+    private static int playEquines(Official official, Writer out) throws Exception {
+        var world = FakeLevel.create(official);
+        var pos = new BlockPos(0, 64, 0);
+        var types = List.of(EntityTypes.HORSE, EntityTypes.DONKEY, EntityTypes.MULE, EntityTypes.LLAMA);
+        var eggs = List.of(Items.HORSE_SPAWN_EGG, Items.DONKEY_SPAWN_EGG, Items.MULE_SPAWN_EGG, Items.LLAMA_SPAWN_EGG);
+        int cases = 0;
+        for (int typeIndex = 0; typeIndex < types.size(); typeIndex++) {
+            var type = types.get(typeIndex);
+            for (int sample = 0; sample < 8; sample++) {
+                long seed = 20261120L + sample * 104729L;
+                for (boolean egg : new boolean[] {false, true}) {
+                    world.getRandom().setSeed(seed);
+                    var reason = egg ? EntitySpawnReason.SPAWN_ITEM_USE : EntitySpawnReason.COMMAND;
+                    var mob = egg
+                            ? type.spawn(world, new ItemStack(eggs.get(typeIndex)), null, pos, reason, true, false)
+                            : type.create(world, reason);
+                    if (!egg) {
+                        mob.setPos(0.5, 64, 0.5);
+                        mob.finalizeSpawn(world, world.spawnDifficulty, reason, null);
+                    }
+                    out.write("{\"type\":\"equineSpawn\",\"seed\":" + seed
+                            + ",\"kind\":" + typeIndex + ",\"egg\":" + egg
+                            + ",\"state\":" + equineState(mob)
+                            + ",\"leftHanded\":" + mob.isLeftHanded()
+                            + ",\"yaw\":" + (egg ? Float.floatToRawIntBits(mob.getYRot()) : 0)
+                            + ",\"levelSeed\":" + levelSeed(world) + "}\n");
+                    cases++;
+                }
+
+                var parent = type.create(world, EntitySpawnReason.COMMAND);
+                var partnerType = typeIndex < 2 && (sample & 1) == 1 ? types.get(1 - typeIndex) : type;
+                var partner = partnerType.create(world, EntitySpawnReason.COMMAND);
+                world.getRandom().setSeed(seed);
+                parent.finalizeSpawn(world, world.spawnDifficulty, EntitySpawnReason.COMMAND, null);
+                partner.finalizeSpawn(world, world.spawnDifficulty, EntitySpawnReason.COMMAND, null);
+                setRandom(parent, seed);
+                long parentSeed = randomSeed(parent);
+                var child = typeIndex == 2 ? null : parent.getBreedOffspring(world, partner);
+                if (typeIndex == 2) {
+                    if (parent.canMate(partner)) throw new IllegalStateException("Mules unexpectedly fertile");
+                }
+                out.write("{\"type\":\"equineBreed\",\"seed\":" + seed
+                        + ",\"kind\":" + typeIndex + ",\"partner\":" + types.indexOf(partnerType)
+                        + ",\"parentSeed\":" + parentSeed + ",\"afterSeed\":" + randomSeed(parent)
+                        + ",\"parentState\":" + equineState(parent) + ",\"partnerState\":" + equineState(partner)
+                        + ",\"child\":" + (child == null ? "null" : equineState((net.minecraft.world.entity.animal.equine.AbstractHorse) child))
+                        + ",\"childKind\":" + (child == null ? -1 : types.indexOf(child.getType())) + "}\n");
+                cases++;
+            }
+        }
+        return cases;
+    }
+
+    private static String equineState(net.minecraft.world.entity.animal.equine.AbstractHorse mob) {
+        var a = net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH;
+        var b = net.minecraft.world.entity.ai.attributes.Attributes.JUMP_STRENGTH;
+        var c = net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED;
+        int variant = 0;
+        int strength = 0;
+        if (mob instanceof net.minecraft.world.entity.animal.equine.Horse horse) {
+            variant = horse.getVariant().getId() | (horse.getMarkings().getId() << 8);
+        } else if (mob instanceof net.minecraft.world.entity.animal.equine.Llama llama) {
+            variant = llama.getVariant().getId();
+            strength = llama.getStrength();
+        }
+        return "[" + Double.doubleToRawLongBits(mob.getAttributeBaseValue(a))
+                + "," + Double.doubleToRawLongBits(mob.getAttributeBaseValue(b))
+                + "," + Double.doubleToRawLongBits(mob.getAttributeBaseValue(c))
+                + "," + variant + "," + strength
+                + "," + Float.floatToRawIntBits(mob.getEyeHeight()) + "]";
     }
 
     private static Mob skeletonSpawn(FakeLevel world, BlockPos pos, boolean egg) {

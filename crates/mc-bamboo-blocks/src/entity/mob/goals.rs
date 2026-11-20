@@ -8,10 +8,7 @@
 //! family, with identical scheduling and random draw order.
 
 use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
-use mc_bamboo_data::{
-    blocks,
-    tags::{fluid_tags, item_tags},
-};
+use mc_bamboo_data::{blocks, tags::fluid_tags};
 
 use super::{Mob, living, navigation::Navigation, path::static_path_type};
 use crate::{
@@ -283,6 +280,105 @@ impl GoalSelector {
                 .collect(),
             locked: [None; 4],
             disabled: [false; 4],
+        }
+    }
+
+    /// 马科已实现的目标，按官方注册顺序排列。
+    ///
+    /// Implemented equine goals in vanilla registration order.
+    pub(super) fn equine(kind: super::MobType, navigation: &mut Navigation) -> Self {
+        let llama = kind == super::MobType::Llama;
+        let wrap = |priority, goal| WrappedGoal {
+            priority,
+            running: false,
+            goal,
+        };
+        navigation.flags.can_float = true;
+        let float = wrap(0, Goal::Float);
+        let panic = wrap(
+            if llama { 3 } else { 1 },
+            Goal::Panic {
+                speed: 1.2,
+                target: Vec3::default(),
+            },
+        );
+        let breed = wrap(
+            if llama { 4 } else { 2 },
+            Goal::Breed {
+                speed: 1.0,
+                partner: None,
+                love_time: 0,
+            },
+        );
+        let tempt = wrap(
+            if llama { 5 } else { 3 },
+            Goal::Tempt {
+                speed: 1.25,
+                player: None,
+                calm_down: 0,
+            },
+        );
+        let follow = wrap(
+            if llama { 6 } else { 4 },
+            Goal::FollowParent {
+                speed: 1.0,
+                parent: None,
+                time_to_recalc_path: 0,
+            },
+        );
+        let stroll = wrap(
+            if llama { 7 } else { 6 },
+            Goal::Stroll {
+                speed: 0.7,
+                interval: 120,
+                probability: 0.001,
+                wanted: Vec3::default(),
+                force_trigger: false,
+            },
+        );
+        let look = wrap(
+            if llama { 8 } else { 7 },
+            Goal::LookAtPlayer {
+                look_distance: 6.0,
+                probability: 0.02,
+                look_at: None,
+                look_time: 0,
+            },
+        );
+        let random_look = wrap(
+            if llama { 9 } else { 8 },
+            Goal::RandomLookAround {
+                rel_x: 0.0,
+                rel_z: 0.0,
+                look_time: 0,
+            },
+        );
+        let goals = if llama {
+            vec![
+                float,
+                panic,
+                breed,
+                tempt,
+                follow,
+                stroll,
+                look,
+                random_look,
+            ]
+        } else {
+            vec![
+                breed,
+                follow,
+                stroll,
+                look,
+                random_look,
+                float,
+                panic,
+                tempt,
+            ]
+        };
+        Self {
+            goals,
+            ..Self::default()
         }
     }
 
@@ -688,7 +784,7 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
             if mob.in_love <= 0 {
                 return false;
             }
-            *partner = free_partner(me, ctx);
+            *partner = free_partner(me, mob, ctx);
             partner.is_some()
         }
         Goal::Tempt {
@@ -1543,8 +1639,8 @@ fn nearest_tempting_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
         if player.spectator || !player.alive {
             continue;
         }
-        let follows = item_is_tagged(player.main_hand, item_tags::COW_FOOD)
-            || item_is_tagged(player.off_hand, item_tags::COW_FOOD);
+        let tag = super::equine::tempt_tag(mob.mob_type);
+        let follows = item_is_tagged(player.main_hand, tag) || item_is_tagged(player.off_hand, tag);
         if !follows {
             continue;
         }
@@ -1561,7 +1657,10 @@ fn nearest_tempting_player(me: &Entity, mob: &mut Mob, ctx: &dyn EntityCtx) -> O
 }
 
 /// `BreedGoal.getFreePartner`：8 格内同种、在发情、不在恐慌的，取最近的。
-fn free_partner(me: &Entity, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+fn free_partner(me: &Entity, mob: &Mob, ctx: &dyn EntityCtx) -> Option<EntityUid> {
+    if mob.mob_type.is_equine() && !super::equine::can_parent(mob) {
+        return None;
+    }
     let area = me.bounding_box().inflate(8.0, 8.0, 8.0);
     let mut best = f64::MAX;
     let mut found = None;
@@ -1569,7 +1668,18 @@ fn free_partner(me: &Entity, ctx: &dyn EntityCtx) -> Option<EntityUid> {
         let KindPublic::Mob(public) = &other.kind else {
             return;
         };
-        if other.uid == me.id || public.in_love <= 0 || public.panicking || !public.is_alive() {
+        let compatible = if mob.mob_type.is_equine() {
+            public.can_parent_equine
+                && super::equine::offspring_kind(mob.mob_type, public.mob_type).is_some()
+        } else {
+            public.mob_type == mob.mob_type
+        };
+        if !compatible
+            || other.uid == me.id
+            || public.in_love <= 0
+            || public.panicking
+            || !public.is_alive()
+        {
             return;
         }
         let distance = me.position.distance_to_sqr(other.position);

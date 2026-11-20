@@ -1612,8 +1612,28 @@ pub(crate) fn apply_breed(
 ) {
     // `Cow.getBreedOffspring` 从父亲随机源取一个 `nextBoolean` 选花色，
     // 然后 `finalizeSpawnChildFromBreeding` 取 `nextInt(7)+1` 定经验值。
-    let _from_father = me.random.next_boolean();
-    let xp = 1 + me.random.next_int_bounded(7);
+    let mut calf = if let Some(first) = me.kind.mob().filter(|mob| mob.mob_type.is_equine()) {
+        let Some(second) = world.entity(partner) else {
+            return;
+        };
+        let Some(second) = second.kind.mob() else {
+            return;
+        };
+        let Some(child) = super::equine::offspring(&mut me.random, first, second, position) else {
+            return;
+        };
+        child
+    } else {
+        let _from_father = me.random.next_boolean();
+        Entity::cow(position)
+    };
+    let xp = if world.block_game_rules().mob_drops
+        || !calf.kind.mob().is_some_and(|mob| mob.mob_type.is_equine())
+    {
+        1 + me.random.next_int_bounded(7)
+    } else {
+        0
+    };
     world.with_entity_mut(partner, &mut |entity| {
         entity.with_mob(|me, mob| {
             mob.in_love = 0;
@@ -1621,7 +1641,6 @@ pub(crate) fn apply_breed(
         });
     });
     // 官方先构造幼崽（拿到 ID）再构造经验球；岛种子源和网络 ID 都按这个顺序。
-    let mut calf = Entity::cow(position);
     // `setBaby(true)` 在 `addFreshEntity` 之前设好年龄和尺寸；`snapTo` 只清 yRot，
     // 构造时的 `yHeadRot` 保留。
     calf.y_rot = 0.0;

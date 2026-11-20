@@ -250,7 +250,7 @@ impl Attributes {
         self.set_base(id, base);
     }
 
-    fn set_base(&mut self, id: i32, base: f64) {
+    pub(super) fn set_base(&mut self, id: i32, base: f64) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
             entry.base = base;
         }

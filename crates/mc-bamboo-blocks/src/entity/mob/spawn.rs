@@ -216,6 +216,13 @@ pub(crate) fn finalize_spawn(
         finalize_monster(world, kind, entity);
         return;
     }
+    if kind.is_equine() {
+        entity.with_mob(|_, mob| {
+            super::equine::finalize_spawn(mob, world.random());
+            finalize_mob(world.random(), mob);
+        });
+        return;
+    }
     let biome = world.biome_id(entity.block_position());
     let random = world.random();
     let variant = cow_variant_for_biome(biome);
@@ -228,19 +235,23 @@ pub(crate) fn finalize_spawn(
     entity.with_mob(|_, mob| {
         mob.variant = variant;
         mob.sound_variant = sound;
-        if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
-            && range.modifier(RANDOM_SPAWN_BONUS).is_none()
-        {
-            let amount = random.triangle(0.0, 0.114_850_000_000_000_01);
-            range.modifiers.push(Modifier {
-                id: RANDOM_SPAWN_BONUS.to_owned(),
-                amount,
-                operation: Operation::AddMultipliedBase,
-                permanent: true,
-            });
-        }
-        mob.left_handed = random.next_float() < 0.05;
+        finalize_mob(random, mob);
     });
+}
+
+fn finalize_mob(random: &crate::random::LegacyRandom, mob: &mut super::Mob) {
+    if let Some(range) = mob.attributes.instance(attribute::FOLLOW_RANGE)
+        && range.modifier(RANDOM_SPAWN_BONUS).is_none()
+    {
+        let amount = random.triangle(0.0, 0.114_850_000_000_000_01);
+        range.modifiers.push(Modifier {
+            id: RANDOM_SPAWN_BONUS.to_owned(),
+            amount,
+            operation: Operation::AddMultipliedBase,
+            permanent: true,
+        });
+    }
+    mob.left_handed = random.next_float() < 0.05;
 }
 
 /// `Zombie.finalizeSpawn` 的随机取数顺序（本期不生成鸡骑士/增援）：

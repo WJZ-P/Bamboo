@@ -22,7 +22,7 @@ pub(super) fn monster(world: &mut World, ctx: &UseContext, kind: MobType) -> Int
     use_egg(world, ctx, kind)
 }
 
-fn use_egg(world: &mut World, ctx: &UseContext, kind: MobType) -> InteractionResult {
+pub(super) fn use_egg(world: &mut World, ctx: &UseContext, kind: MobType) -> InteractionResult {
     let pos = ctx.clicked_pos();
     // `SpawnEggItem.useOn` 在流体方块上直接放过。
     // `SpawnEggItem.useOn` refuses to spawn on a fluid block.
