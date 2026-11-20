@@ -391,7 +391,7 @@ fn shoot_crossbow(region: &mut Region, id: PlayerId, hand: Hand) {
             dir,
             3.15,
             projectile,
-            weapon.clone(),
+            region.players[&id].inventory.held(hand).clone(),
             true,
         );
         spawn_arrow(region, shot);

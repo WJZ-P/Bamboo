@@ -254,6 +254,23 @@ fn a_charged_crossbow_fires_and_multishot_spends_one_arrow() {
     server.tick();
 
     assert_eq!(arrows(&mut server).len(), 3, "多重射击一次射出三支箭");
+    let region = server.region();
+    for (index, uid) in region.entities.ids().into_iter().enumerate() {
+        let entity = region.entities.get(uid).unwrap();
+        let mc_bamboo_blocks::entity::EntityKind::Arrow(data) = &entity.kind else {
+            panic!("unexpected entity in crossbow fixture");
+        };
+        let weapon = data.weapon.as_ref().unwrap();
+        assert!(!matches!(
+            defaults::resolve(weapon.item, &weapon.patch(), kinds::CHARGED_PROJECTILES),
+            Some(ComponentValue::ChargedProjectiles(projectiles)) if !projectiles.is_empty()
+        ));
+        assert_eq!(
+            defaults::resolve(weapon.item, &weapon.patch(), kinds::DAMAGE),
+            Some(&ComponentValue::Damage(index as i32))
+        );
+    }
+
     let player = server.region().players.get(&client.id).unwrap();
     assert_eq!(player.inventory.slots[37].count, 4, "齐射只消耗一支箭");
     assert_eq!(
