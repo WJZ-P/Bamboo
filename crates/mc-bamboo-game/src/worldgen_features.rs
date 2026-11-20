@@ -291,28 +291,9 @@ fn run_features_filtered(
     ),
     String,
 > {
-    if config.level_type.is_flat() {
-        // flat 世界没有噪声地物；流水线也不是 Staged，这里只是防御。
-        // Flat worlds have no noise features; the pipeline is not Staged either.
-        return Ok((
-            FeatureResult {
-                blocks: std::array::from_fn(|_| {
-                    vec![vec![mc_bamboo_data::blocks::AIR; 256]; WORLD_HEIGHT as usize]
-                }),
-                deltas: std::array::from_fn(|_| Vec::new()),
-                block_entities: Vec::new(),
-                post_processing: Vec::new(),
-                unsupported: false,
-            },
-            None,
-        ));
+    if !config.level_type.is_flat() {
+        crate::worldgen_structures::reset_generator_biome_state(config)?;
     }
-    // 结构阶段 / 邻居起点重算改写了共享的群系 R 树 `lastResult`；地物的
-    // `BiomeFilter` 走单点查询，从确定状态起步才与计算池的区块到达顺序无关。
-    // Structure stages / neighbour-start recomputation mutated the shared biome
-    // R-tree `lastResult`; features' BiomeFilter uses single-point lookups, so
-    // start clean to stay independent of compute-pool arrival order.
-    crate::worldgen_structures::reset_generator_biome_state(config)?;
     let blocks: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.blocks.clone());
     let biomes: [Vec<Vec<u32>>; 9] = view.each_ref().map(|chunk| chunk.biomes.clone());
     let post_processing: [Vec<(i32, i32, i32)>; 9] =
@@ -334,8 +315,11 @@ fn run_features_filtered(
     // 按 `structure.step()` 分组；`generate-structures=false` 时整段跳过。
     // Vanilla's structure branch: resolve the starts referenced by the center,
     // group by `structure.step()`; skipped when `generate-structures=false`.
-    let references =
-        crate::worldgen_structures::structure_references_stage(config, cx, cz).unwrap_or_default();
+    let references = if config.generate_structures {
+        crate::worldgen_structures::structure_references_stage(config, cx, cz)?
+    } else {
+        Default::default()
+    };
     let mut starts: Vec<StartInput> = Vec::new();
     if config.generate_structures {
         for (structure, keys) in &references {
@@ -401,9 +385,23 @@ fn run_features_filtered(
     // 在 features 里按同样顺序查它，进主循环前清到确定状态。
     // Resolving starts/references above mutates the shared biome R-tree
     // `lastResult`; clear it before the feature loop reads it.
-    crate::worldgen_structures::reset_generator_biome_state(config)?;
+    if !config.level_type.is_flat() {
+        crate::worldgen_structures::reset_generator_biome_state(config)?;
+    }
     with_generator(config, |generator| {
-        generator.features_with_structures(&input, steps_mask, allowed_kinds, Some(&placement))
+        let placement = Some(&placement);
+        if config.level_type.is_flat() {
+            let flat = &config.flat;
+            let decoration = mc_bamboo_worldgen::feature::flat::FlatDecoration {
+                biome: flat.biome,
+                features: flat.features,
+                lakes: flat.lakes,
+                layers: &flat.layers,
+            };
+            generator.features_flat(&input, steps_mask, allowed_kinds, placement, &decoration)
+        } else {
+            generator.features_with_structures(&input, steps_mask, allowed_kinds, placement)
+        }
     })
 }
 
@@ -614,7 +612,14 @@ struct FeatureRun {
     marks: [Vec<MarkPos>; 9],
 }
 
-type FeatureCacheKey = (i64, Option<&'static str>, i32, i32, bool);
+type FeatureCacheKey = (
+    i64,
+    Option<&'static str>,
+    i32,
+    i32,
+    bool,
+    Option<crate::world_options::FlatSettings>,
+);
 /// 一个中心的地物结果，或正在算它的线程占位。等待方在 `OnceLock` 上等，
 /// 拿到的是计算方放进来的同一个 `Arc`。
 /// A center's feature result, or the in-flight placeholder. Waiters block on
@@ -736,7 +741,7 @@ pub(crate) fn cached_generate_chunk_with_structures(
     x: i32,
     z: i32,
 ) -> Result<Arc<GeneratedChunk>, String> {
-    if !config.generate_structures {
+    if !config.generate_structures || config.level_type.is_flat() {
         return cached_generate_chunk(config, x, z);
     }
     let beardifier = crate::worldgen_structures::beardifier_for(config, x, z)?;
@@ -761,6 +766,7 @@ fn cached_feature_run(
         cx,
         cz,
         config.generate_structures,
+        config.level_type.is_flat().then(|| config.flat.clone()),
     );
     let shards = feature_shards();
     let index = feature_shard_index(&key);
@@ -782,7 +788,7 @@ fn cached_feature_run(
         } else {
             crate::worldgen_profile::count(&FEATURE_RUN_MISSES);
             let slot = Arc::new(OnceLock::new());
-            shard.inflight.insert(key, Arc::clone(&slot));
+            shard.inflight.insert(key.clone(), Arc::clone(&slot));
             slot
         }
     };
@@ -808,7 +814,7 @@ fn cached_feature_run(
     if let Ok(mut shard) = shards[index].lock()
         && !shard.entries.contains_key(&key)
     {
-        shard.order.push_back(key);
+        shard.order.push_back(key.clone());
         shard.entries.insert(key, Arc::clone(&run));
         shard.bytes += feature_run_heap_bytes(&run);
         let target = FEATURE_CACHE_BYTE_LIMIT / FEATURE_CACHE_SHARDS * 3 / 4;

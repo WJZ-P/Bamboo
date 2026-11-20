@@ -71,75 +71,30 @@ impl Options {
     }
 }
 
-#[repr(C)]
-struct RUsage {
-    utime: [i64; 2],
-    stime: [i64; 2],
-    ru_maxrss: i64,
-    ixrss: i64,
-    idrss: i64,
-    isrss: i64,
-    minflt: i64,
-    majflt: i64,
-    nswap: i64,
-    inblock: i64,
-    oublock: i64,
-    msgsnd: i64,
-    msgrcv: i64,
-    nsignals: i64,
-    nvcsw: i64,
-    nivcsw: i64,
-}
-#[repr(C)]
-struct TimeSpec {
-    sec: i64,
-    nsec: i64,
-}
-unsafe extern "C" {
-    fn getrusage(who: i32, usage: *mut RUsage) -> i32;
-    fn clock_gettime(clock: u32, time: *mut TimeSpec) -> i32;
+#[path = "support/process_cpu.rs"]
+mod process_cpu;
+use process_cpu::process_cpu_ms;
+
+/// 当前线程的累计 CPU 毫秒（不含等待）。
+///
+/// Accumulated CPU milliseconds of the current thread, excluding waits.
+#[cfg(unix)]
+fn thread_cpu_ms() -> f64 {
+    let mut time: libc::timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut time) } != 0 {
+        return 0.0;
+    }
+    time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0
 }
 
-/// 当前线程（世界线程）累计 CPU 毫秒（macOS `CLOCK_THREAD_CPUTIME_ID` = 16）。
-/// 测量循环不睡觉，世界线程等计算池时也在空转，所以要把它从进程 CPU 里分出来。
-///
-/// CPU milliseconds of the calling (world) thread. The measurement loop never
-/// sleeps, so the world thread spins while waiting for the pool; split it out.
+#[cfg(windows)]
 fn thread_cpu_ms() -> f64 {
-    let mut time = TimeSpec { sec: 0, nsec: 0 };
-    let ok = unsafe { clock_gettime(16, &raw mut time) };
-    if ok != 0 {
-        return 0.0;
-    }
-    time.sec as f64 * 1000.0 + time.nsec as f64 / 1_000_000.0
-}
-/// 进程累计 CPU 毫秒（RUSAGE_SELF=0，macOS timeval 是秒/微秒）。
-/// Process-wide accumulated CPU milliseconds.
-fn process_cpu_ms() -> f64 {
-    let mut usage = RUsage {
-        utime: [0; 2],
-        stime: [0; 2],
-        ru_maxrss: 0,
-        ixrss: 0,
-        idrss: 0,
-        isrss: 0,
-        minflt: 0,
-        majflt: 0,
-        nswap: 0,
-        inblock: 0,
-        oublock: 0,
-        msgsnd: 0,
-        msgrcv: 0,
-        nsignals: 0,
-        nvcsw: 0,
-        nivcsw: 0,
-    };
-    let ok = unsafe { getrusage(0, &raw mut usage) };
-    if ok != 0 {
-        return 0.0;
-    }
-    (usage.utime[0] + usage.stime[0]) as f64 * 1000.0
-        + (usage.utime[1] + usage.stime[1]) as f64 / 1000.0
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    process_cpu::filetime_cpu_ms(|created, exited, kernel, user| {
+        // 当前线程的伪句柄无需释放。
+        // The current thread pseudo-handle does not need closing.
+        unsafe { GetThreadTimes(GetCurrentThread(), created, exited, kernel, user) }
+    })
 }
 
 /// tick 到这批区块全部交付、计算池排空再多跑 4 刻；返回期间交付的区块数。

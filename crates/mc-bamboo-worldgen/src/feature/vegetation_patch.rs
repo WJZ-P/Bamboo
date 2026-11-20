@@ -542,6 +542,7 @@ mod tests {
         let registry = Registry::parse(root.as_object().unwrap()).unwrap();
         let mut biome_at = |_: i32, _: i32, _: i32| 0_u32;
         let mut env = PlacementEnv {
+            flat: None,
             generation: crate::feature::provider::WorldGenerationContext {
                 min_y: -64,
                 height: 384,
@@ -641,6 +642,7 @@ mod tests {
         let registry = Registry::parse(root.as_object().unwrap()).unwrap();
         let mut biome_at = |_: i32, _: i32, _: i32| 0_u32;
         let mut env = PlacementEnv {
+            flat: None,
             generation: crate::feature::provider::WorldGenerationContext {
                 min_y: -64,
                 height: 384,

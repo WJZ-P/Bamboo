@@ -113,7 +113,7 @@ pub(crate) fn with_generator<T>(
     let settings_id = config
         .level_type
         .settings_id()
-        .ok_or_else(|| "flat worlds have no noise generator".to_owned())?;
+        .unwrap_or("minecraft:overworld");
     let key = (config.seed, settings_id);
     GENERATORS.with(|cache| {
         let mut cache = cache.borrow_mut();
@@ -406,13 +406,10 @@ pub fn compute_heightmaps_public(chunk: &GeneratedChunk) -> BTreeMap<&'static st
 /// Flat: fill blocks from `MIN_Y` using the preset layers; one biome everywhere.
 fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
     let mut blocks = vec![vec![blocks::AIR; WIDTH * WIDTH]; WORLD_HEIGHT as usize];
-    let mut y = MIN_Y;
-    for &(state, thickness) in &config.flat.layers {
-        for _ in 0..thickness {
-            if (0..WORLD_HEIGHT).contains(&(y - MIN_Y)) {
-                blocks[(y - MIN_Y) as usize].fill(state);
-            }
-            y += 1;
+    use mc_bamboo_worldgen::feature::flat::{layer_states, terrain_layer};
+    for (layer, state) in blocks.iter_mut().zip(layer_states(&config.flat.layers)) {
+        if terrain_layer(state) {
+            layer.fill(state);
         }
     }
     let cells = vec![config.flat.biome; SECTION_BIOMES];
@@ -431,7 +428,14 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
 /// Terrain cache key: `(seed, settings, x, z, has Beardifier)`. Terrain with
 /// structure influence differs from the `Beardifier.EMPTY` one, so the two must
 /// not share an entry. Terrain is pure; a hit only affects speed.
-type TerrainCacheKey = (i64, Option<&'static str>, i32, i32, bool);
+type TerrainCacheKey = (
+    i64,
+    Option<&'static str>,
+    i32,
+    i32,
+    bool,
+    Option<crate::world_options::FlatSettings>,
+);
 
 /// 全进程共用的地形缓存上限：256 MiB。
 ///
@@ -504,6 +508,21 @@ fn terrain_shards() -> &'static [Mutex<TerrainShard>] {
             .map(|_| Mutex::new(TerrainShard::default()))
             .collect()
     })
+}
+
+fn terrain_cache_key(config: &WorldGenConfig, x: i32, z: i32, beardified: bool) -> TerrainCacheKey {
+    if config.level_type.is_flat() {
+        (0, None, 0, 0, false, Some(config.flat.clone()))
+    } else {
+        (
+            config.seed,
+            config.level_type.settings_id(),
+            x,
+            z,
+            beardified,
+            None,
+        )
+    }
 }
 
 fn shard_index(key: &TerrainCacheKey) -> usize {
@@ -719,13 +738,7 @@ fn cached_terrain(
     z: i32,
     beardifier: Option<&mc_bamboo_worldgen::beardifier::Beardifier>,
 ) -> Result<Arc<GeneratedChunk>, String> {
-    let key = (
-        config.seed,
-        config.level_type.settings_id(),
-        x,
-        z,
-        beardifier.is_some(),
-    );
+    let key = terrain_cache_key(config, x, z, beardifier.is_some());
     let shards = terrain_shards();
     let index = shard_index(&key);
     // 锁内只做查表 / 放占位；生成在锁外。同一个键只有一条线程真正在算，
@@ -753,7 +766,7 @@ fn cached_terrain(
             existing
         } else {
             let slot = Arc::new(OnceLock::new());
-            shard.inflight.insert(key, Arc::clone(&slot));
+            shard.inflight.insert(key.clone(), Arc::clone(&slot));
             shard.misses += 1;
             LOOKUP_MISSES.fetch_add(1, Ordering::Relaxed);
             slot
@@ -810,7 +823,7 @@ fn cached_terrain(
     let mut cleanup = Cleanup {
         shards,
         index,
-        key,
+        key: key.clone(),
         slot: &slot,
         armed: true,
     };
@@ -880,7 +893,7 @@ fn cached_terrain(
     let bytes = generated_chunk_heap_bytes(&chunk);
     let thread_id = MEASURE_THREAD_ID.with(|id| *id);
     if let Ok(mut shard) = shards[index].lock() {
-        let computed = shard.computed_by.entry(key).or_default();
+        let computed = shard.computed_by.entry(key.clone()).or_default();
         if !computed.contains(&thread_id) {
             computed.push(thread_id);
         }
@@ -891,10 +904,10 @@ fn cached_terrain(
             // waiter that re-ran restores it so the two maps stay in sync.
             shard
                 .inflight
-                .entry(key)
+                .entry(key.clone())
                 .or_insert_with(|| Arc::clone(&slot));
-            shard.order.push_back(key);
-            shard.entries.insert(key, Arc::clone(&chunk));
+            shard.order.push_back(key.clone());
+            shard.entries.insert(key.clone(), Arc::clone(&chunk));
             shard.bytes += bytes;
             let total = TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
             PEAK_BYTES.fetch_max(total, Ordering::Relaxed);
@@ -1349,7 +1362,7 @@ mod tests {
         let cached = cached_generate_chunk(&cfg, x, z).unwrap();
         assert_eq!(cached.blocks, fresh.blocks);
         assert_eq!(cached.biomes, fresh.biomes);
-        let key = (cfg.seed, cfg.level_type.settings_id(), x, z, false);
+        let key = terrain_cache_key(&cfg, x, z, false);
         let shards = terrain_shards();
         let shard = shards[shard_index(&key)].lock().expect("shard");
         assert!(shard.entries.contains_key(&key));
@@ -1370,7 +1383,7 @@ mod tests {
         TEST_COMPUTE_ERROR.store(true, Ordering::Relaxed);
         let error = cached_generate_chunk(&cfg, x, z).unwrap_err();
         assert!(error.contains("test-only"));
-        let key = (cfg.seed, cfg.level_type.settings_id(), x, z, false);
+        let key = terrain_cache_key(&cfg, x, z, false);
         let shards = terrain_shards();
         {
             let shard = shards[shard_index(&key)].lock().expect("shard");
@@ -1397,7 +1410,7 @@ mod tests {
         let _test_guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = normal(0x5eed_5555);
         let (x, z) = (5111, -4111);
-        let key = (cfg.seed, cfg.level_type.settings_id(), x, z, false);
+        let key = terrain_cache_key(&cfg, x, z, false);
         let shards = terrain_shards();
         let index = shard_index(&key);
         clear_terrain_cache();
@@ -1407,7 +1420,7 @@ mod tests {
         let fresh: Inflight = Arc::new(OnceLock::new());
         {
             let mut shard = shards[index].lock().expect("shard");
-            shard.inflight.insert(key, Arc::clone(&old));
+            shard.inflight.insert(key.clone(), Arc::clone(&old));
         }
         // 用 Err 路径的清理条件（同一个 Arc 才删）验证不会删掉 fresh。
         // The cleanup condition must not delete `fresh`.
@@ -1419,7 +1432,7 @@ mod tests {
                     .get(&key)
                     .is_some_and(|current| Arc::ptr_eq(current, &fresh))
             );
-            shard.inflight.insert(key, Arc::clone(&fresh));
+            shard.inflight.insert(key.clone(), Arc::clone(&fresh));
         }
         {
             let mut shard = shards[index].lock().expect("shard");

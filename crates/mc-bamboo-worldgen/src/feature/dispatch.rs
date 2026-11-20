@@ -84,6 +84,7 @@ pub enum Leaf {
     Tree(Box<TreeFeature>),
     UnderwaterMagma(UnderwaterMagmaFeature),
     Vines(VinesFeature),
+    VoidStartPlatform,
 }
 
 impl Leaf {
@@ -158,6 +159,7 @@ pub fn parse_leaf<'a>(
             Leaf::UnderwaterMagma(UnderwaterMagmaFeature::parse(config).ok()?)
         }
         "minecraft:vines" => Leaf::Vines(VinesFeature::parse(config)?),
+        "minecraft:void_start_platform" => Leaf::VoidStartPlatform,
         _ => return None,
     };
     leaf.is_supported().then_some(leaf)
@@ -207,6 +209,7 @@ pub fn place_leaf<'r>(
         }
         Leaf::UnderwaterMagma(feature) => underwater_magma::place(feature, world, random, pos),
         Leaf::Vines(feature) => feature.place(world, random, pos),
+        Leaf::VoidStartPlatform => super::flat::place_void_platform(world, pos),
     };
     PlaceOutcome {
         supported: true,

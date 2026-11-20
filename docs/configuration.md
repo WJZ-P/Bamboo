@@ -57,15 +57,16 @@ bamboo 127.0.0.1:25566                  # 临时覆盖这一次的监听地址�
 |---|---|---|---|
 | `level-seed` | 字符串 | ``（空） | 空 = 随机种子（首次存档时写进 `world_gen_settings.dat` 后固定）；数字按 `Long.parseLong`；其它字符串按 `String.hashCode()` |
 | `level-type` | 字符串 | `minecraft:normal` | 世界预设。认 `normal` / `flat` / `large_biomes` / `amplified`（含旧名 `default` / `largebiomes`）；查不到回退 `normal` 并记日志；**新世界默认 normal，不再是超平坦** |
-| `generator-settings` | JSON | `{}` | 只在 `flat` 预设生效，`FlatLevelGeneratorSettings.CODEC` 的 `layers` / `biome`（`features` / `lakes` 等本轮不接）；坏 JSON 回退默认超平坦预设 |
-| `generate-structures` | bool | `true` | 先读进来存进 `world_gen_settings.dat`；结构阶段接上后生效，目前结构阶段是空实现 |
+| `generator-settings` | JSON | `{}` | 只在 `flat` 预设生效，`FlatLevelGeneratorSettings.CODEC` 的 `layers` / `biome` / `features` / `lakes` / `structure_overrides`；坏 JSON 回退默认超平坦预设 |
+| `generate-structures` | bool | `true` | 控制新区块的结构起点与放置（噪声世界和超平坦都生效），也写进 `world_gen_settings.dat`；关掉不影响地物和湖 |
 
 **只对全新世界生效**：世界存在 `data/minecraft/world_gen_settings.dat` 时，种子、
 世界类型和 flat 预设一律以存档为准，`level-type` / `level-seed` 改了也不影响老存档
 （官方行为）。四种 `level-type` 的差别：三种噪声世界共用 `minecraft:overworld`
 群系预设，只是 `NoiseGeneratorSettings` 不同（`normal`=`overworld`、
-`large_biomes`=`large_biomes`、`amplified`=`amplified`）；`flat` 走 `FlatLevelSource`。
-`generate-structures` 目前只存储、不影响生成。
+`large_biomes`=`large_biomes`、`amplified`=`amplified`）；`flat` 对应 `FlatLevelSource`。默认超平坦预设选要塞和村庄；
+自定义预设省略 `structure_overrides` 时选固定群系适用的全部内置结构集，显式 `[]` 不选任何集。
+`generate-structures=false` 不影响 `features` 或 `lakes`。
 
 **和 `ServerConfig::default()` 的关系**：写出来的文件和这份表格一律用官方默认值；
 `ServerConfig::default()` 是「不读配置文件」的嵌入用法（单元测试、oracle、probe、
