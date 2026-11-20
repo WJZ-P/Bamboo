@@ -5,7 +5,7 @@
 （`CARVERS`），以及后续 `features` / 结构 / 生成期光照接进 Director 的 `Staged` 流水线。
 地物、结构、生成期光照（含 `LIGHT` 阶段的 FEATURES 后输入）、`PostProcessing` 位置表和
 `pale_moss` / 苍白橡树都已逐方块 / 逐格对拍；生成期刷怪（`spawn`）仍是空实现，
-超平坦结构等剩余缺口见文末「还没做」和
+其他剩余缺口见文末「还没做」和
 [`docs/worldgen-remaining.md`](worldgen-remaining.md)。非 `full` 区块续跑由
 `worldgen-resume` 分支单独负责，这一篇不覆盖。
 
@@ -577,7 +577,7 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
   `WorldOptions.parseSeed`），新世界默认 `normal`；`World::build` 用
   `PipelineKind::Staged`、把 `WorldState.seed` 设成配置种子、并默认起一个小计算池
   （`chunk_worker_threads` 未配时取核数一半、夹在 1..=4），让几十毫秒的地形生成
-  不占住 20 TPS 的世界线程。flat 配置仍走原来的超平坦模板 + 一步流水线，行为不变。
+  不占住 20 TPS 的世界线程。自定义或启用结构的 flat 也走 `Staged`。只有关闭结构的默认 flat 保留一步模板。
 * 十个 `ChunkStatus` 阶段是纯函数 `(阶段, 位置, 配置) → RegionColumn`：
   `structure_starts` / `structure_references` 现在按纯函数重算起点和引用（见文末
   「结构阶段」）；`biomes` 透传；`terrain` 一步同时算 quart 群系和
@@ -668,6 +668,16 @@ terrain 的纯函数已经接进游戏（`mc-bamboo-game/src/worldgen.rs` +
 天空光 / 方块光；Bamboo 侧逐格比官方 3×3 方块、自己的光引擎、游戏 LIGHT 阶段三组。
 默认 6 个无结构场景 + 3 个带结构场景 0 不一致，`--break-carvers` 把游戏输入退回
 CARVERS 时报 5147 处不一致（改坏确认）。`gen-light` 只覆盖光引擎，不覆盖流水线选的方块。
+
+### 超平坦的结构、地物与湖
+
+`FlatLevelSource.createState` 的固定群系过滤、`structure_overrides` 的可选集合与
+`generate-structures` 共用现有结构起点、引用、放置和存档链路。区别是 flat 用常数
+基础高度，不加 Beardifier；要塞环用种子 0。地物按固定群系调整后的序号播种，
+熔岩湖可单独开关，非阻挡地层到末步才填。`flat-world` 用官方
+`buildTerrain` / `createStructures` / `createReferences` / `applyBiomeDecoration`
+逐格对拍，见 `docs/worldgen-remaining.md` §1.3。超平坦仍不生成期刷怪；
+光照和续生成走已有路径，本轮没有逐格对拍这两个 flat 阶段。
 
 ### `PostProcessing` 位置表和 `pale_moss` 装饰器（第 0 期第 3、4 项）
 
@@ -1048,10 +1058,6 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
   `TheEndBiomeSource`。`features_per_step` 只按主世界群系导出全局 index，下界 / 末地
   placed feature 会标 `unsupported`；末地岛 / 黑曜石柱 / 折跃门 / 紫颂 / 下界菌 /
   下界要塞 / 堡垒遗迹 / 末地城 / 末影龙都没做。游戏侧仍只有主世界一个维度。
-* 超平坦 `features` / `lakes` / `structure_overrides`：五个 codec 字段全部解析并
-  写进 `world_gen_settings.dat`，`flat-world` 逐字段 / 逐方块对拍 0 不一致；但
-  `FlatGenerator` 只填地层和群系，不生成地物 / 湖 / 结构，关结构时也没有官方
-  `ChunkGeneratorStructureState.createForFlat` 的覆盖行为。
 * `BlendingData` / `Blender` / `BelowZeroRetrogen` 的非空路径（老存档升级、旧区块混合）
   没做：Rust 只有 `Blender.empty()` 分支，存档认识这些键但不写，`DataVersion != 5023`
   明确报错，老布局当空世界；所以当前读老存档**走不到**非空 Blender。

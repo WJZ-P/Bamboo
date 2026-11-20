@@ -88,18 +88,10 @@ impl LevelType {
 
 /// 超平坦预设，从 `generator-settings` 的 JSON 解析。
 ///
-/// 照官方 26.3 `FlatLevelGeneratorSettings.CODEC` 解析全部五个字段：`layers`、
-/// `biome`、`features`、`lakes`、`structure_overrides`。`features` / `lakes` /
-/// `structure_overrides` 只影响地物、湖和结构，Bamboo 的超平坦地形只填地层和群系，
-/// 所以解析后存着但不参与 `flat_chunk`（见 README 已知限制）。空 JSON（`{}`）按
-/// `server.properties` 的默认超平坦预设补齐。
+/// 官方超平坦生成器的五字段设置：地层、固定群系、地物、湖与可选结构集。
 ///
-/// Flat preset parsed from `generator-settings` JSON, reading all five fields of
-/// vanilla 26.3 `FlatLevelGeneratorSettings.CODEC`: `layers`, `biome`, `features`,
-/// `lakes`, `structure_overrides`. The last three drive features / lakes /
-/// structures only; Bamboo's flat terrain fills just layers and biome, so they
-/// are stored but do not affect `flat_chunk` (see README known limitations).
-/// An empty `{}` falls back to the `server.properties` default flat preset.
+/// The five vanilla flat generator settings: layers, fixed biome, decoration,
+/// lakes and an optional set of structure sets.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlatSettings {
     /// 从世界底部往上的 `(默认状态 ID, 层数)`。
@@ -118,13 +110,11 @@ pub struct FlatSettings {
 }
 
 impl Default for FlatSettings {
-    /// 官方默认：`bedrock ×1`、`dirt ×2`、`grass_block ×1`，群系 `plains`，
-    /// features/lakes/structure_overrides 都是关/空。
-    /// 和 `mc_bamboo_world::flat::generate_chunk` / 导出的 `WORLD_GEN_SETTINGS` 一致。
+    /// 官方 `FlatLevelGeneratorSettings.getDefault`：基岩、泥土、草方块，平原，
+    /// 不开地物和湖，结构集选要塞与村庄。
     ///
-    /// Official default: `bedrock ×1`, `dirt ×2`, `grass_block ×1`, biome `plains`,
-    /// features/lakes/structure_overrides off/empty. Matches
-    /// `mc_bamboo_world::flat::generate_chunk` and the exported `WORLD_GEN_SETTINGS`.
+    /// Vanilla `FlatLevelGeneratorSettings.getDefault`: bedrock, dirt and grass
+    /// block in plains; no decoration or lakes, with strongholds and villages.
     fn default() -> Self {
         Self {
             layers: vec![
@@ -147,13 +137,13 @@ impl FlatSettings {
     /// 解析 `generator-settings`。解析失败返回错误，让调用方回落默认预设。
     /// 照官方 `FlatLevelGeneratorSettings.CODEC` 认全部五个字段：`layers`、
     /// `biome`、`features`、`lakes`、`structure_overrides`；`features` / `lakes`
-    /// 缺省 false，`structure_overrides` 缺省空，和官方的
+    /// 缺省 false；自定义地层时，`structure_overrides` 缺省为 None，和官方的
     /// `optionalAlwaysPresentFieldOf` / `lenientOptionalFieldOf` 一致。
     ///
     /// Parse `generator-settings`; on failure the caller falls back to the
     /// default. Reads all five fields of vanilla `FlatLevelGeneratorSettings.CODEC`:
     /// `layers`, `biome`, `features`, `lakes`, `structure_overrides`. `features` /
-    /// `lakes` default to false and `structure_overrides` to empty, matching the
+    /// `lakes` default to false; with custom layers, `structure_overrides` defaults to None, matching the
     /// official `optionalAlwaysPresentFieldOf` / `lenientOptionalFieldOf`.
     pub fn parse(json: &str) -> Result<Self, String> {
         let text = if json.trim().is_empty() { "{}" } else { json };
@@ -206,9 +196,9 @@ impl FlatSettings {
             .unwrap_or(false);
         settings.lakes = root.get("lakes").and_then(Value::as_bool).unwrap_or(false);
         // `structure_overrides`：标签是单个 `#tag` 字符串，直接列表是字符串数组；
-        // 坏形状按 `lenientOptionalFieldOf` 当空处理。
+        // 坏形状按 `lenientOptionalFieldOf` 当缺省处理。
         // `structure_overrides`: a tag is one `#tag` string, a direct list is a
-        // string array; a bad shape is treated as empty (lenient).
+        // string array; a bad shape is treated as absent (lenient).
         if root.get("layers").is_some() || root.get("structure_overrides").is_some() {
             settings.structure_overrides = match root.get("structure_overrides") {
                 Some(Value::String(tag)) => Some(vec![tag.clone()]),

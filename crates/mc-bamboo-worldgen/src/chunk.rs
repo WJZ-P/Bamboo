@@ -703,6 +703,38 @@ impl<'a> Generator<'a> {
     /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight(x, z, WORLD_SURFACE_WG, ...)`。
     ///
     /// 照 `iterateNoiseColumn` 用一块 1×height×1、步长 1 的体积和全新的含水层，自顶向下
+    /// 结构布局用的常数列高度，照 `FlatLevelSource.getBaseHeight`。
+    ///
+    /// Cache the constant column heights used by `FlatLevelSource.getBaseHeight`.
+    pub fn set_flat_columns(
+        &mut self,
+        biome: &'static str,
+        min_y: i32,
+        height: i32,
+        layers: &[(u32, i32)],
+    ) {
+        use crate::feature::{
+            flat::terrain_layer,
+            world::{HeightmapKind, is_heightmap_opaque},
+        };
+        let (mut surface, mut floor) = (min_y - 1, min_y - 1);
+        // 官方从 min(layers.size() - 1, heightAccessor.getMaxY()) 反扫，限制的是层下标。
+        // Vanilla caps the layer index (not the resulting world Y) at getMaxY().
+        let count = (min_y + height).max(0) as usize;
+        for (index, state) in crate::feature::flat::layer_states(layers)
+            .take(count)
+            .enumerate()
+        {
+            if terrain_layer(state) {
+                surface = min_y + index as i32;
+                if is_heightmap_opaque(state, HeightmapKind::OceanFloorWg) {
+                    floor = surface;
+                }
+            }
+        }
+        self.flat_columns = Some((biome, surface, floor));
+    }
+
     /// 找第一个非空气方块。`getBaseHeight` 返回 blockY+1，`getFirstOccupiedHeight` 再减 1，
     /// 所以这里直接返回该 blockY；整列都是空气时返回 minY-1。
     ///
@@ -720,35 +752,6 @@ impl<'a> Generator<'a> {
     /// accounts for structure terrain, so this stays on the EMPTY branch and must never call
     /// `terrain_with_beardifier`. Keep it EMPTY when a real Beardifier is wired in, or structure
     /// height checks would wrongly include structure terrain and diverge from vanilla.
-    /// ? FlatLevelSource.getBaseHeight ???????????????????
-    ///
-    /// Use FlatLevelSource.getBaseHeight's constant column for structure layout queries.
-    pub fn set_flat_columns(
-        &mut self,
-        biome: &'static str,
-        min_y: i32,
-        height: i32,
-        layers: &[(u32, i32)],
-    ) {
-        use crate::feature::{
-            flat::terrain_layer,
-            world::{HeightmapKind, is_heightmap_opaque},
-        };
-        let (mut surface, mut floor) = (min_y - 1, min_y - 1);
-        let mut y = min_y;
-        for &(state, count) in layers {
-            let end = y + count;
-            if y < min_y + height && count > 0 && terrain_layer(state) {
-                surface = end.min(min_y + height) - 1;
-                if is_heightmap_opaque(state, HeightmapKind::OceanFloorWg) {
-                    floor = surface;
-                }
-            }
-            y = end;
-        }
-        self.flat_columns = Some((biome, surface, floor));
-    }
-
     pub fn first_occupied_height(&self, block_x: i32, block_z: i32) -> Result<i32, String> {
         if let Some((_, surface, _)) = self.flat_columns {
             return Ok(surface);

@@ -90,26 +90,58 @@ impl FlatDecoration<'_> {
     ///
     /// FillLayerFeature restores non-MOTION_BLOCKING layers last, without replacing occupied cells.
     pub(super) fn fill_layers(&self, world: &mut FeatureWorld<'_>, origin: (i32, i32, i32)) {
-        let (x, mut y, z) = origin;
-        for &(state, thickness) in self.layers {
-            if state != blocks::AIR && !terrain_layer(state) {
-                for layer in y..y + thickness {
-                    for dx in 0..16 {
-                        for dz in 0..16 {
-                            if world.is_air(x + dx, layer, z + dz) {
-                                world.set_block_with_heightmaps(x + dx, layer, z + dz, state);
-                            }
-                        }
+        let (x, min_y, z) = origin;
+        for (index, state) in layer_states(self.layers)
+            .take(world.height as usize)
+            .enumerate()
+        {
+            if terrain_layer(state) {
+                continue;
+            }
+            let y = min_y + index as i32;
+            for dx in 0..16 {
+                for dz in 0..16 {
+                    let (x, z) = (x + dx, z + dz);
+                    if world.is_air(x, y, z) && world.get_block(x, y, z) != state {
+                        world.set_block_with_heightmaps(x, y, z, state);
                     }
                 }
             }
-            y += thickness;
         }
     }
 }
 
+pub fn layer_states(layers: &[(u32, i32)]) -> impl Iterator<Item = u32> {
+    layers
+        .iter()
+        .flat_map(|&(state, count)| std::iter::repeat_n(state, count.max(0) as usize))
+}
+
 pub fn terrain_layer(state: u32) -> bool {
     is_heightmap_opaque(state, HeightmapKind::MotionBlocking)
+}
+
+/// VoidStartPlatformFeature.place：每个区块只写平台落在自身边界内的部分。
+///
+/// VoidStartPlatformFeature.place: each chunk writes only its slice of the platform.
+pub(super) fn place_void_platform(world: &mut FeatureWorld<'_>, origin: (i32, i32, i32)) -> bool {
+    let (x, y, z) = origin;
+    let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+    if cx.abs().max(cz.abs()) <= 1 {
+        for z in cz * 16..cz * 16 + 16 {
+            for x in cx * 16..cx * 16 + 16 {
+                if (x - 8).abs().max((z - 8).abs()) <= 16 {
+                    let state = if x == 8 && z == 8 {
+                        blocks::COBBLESTONE
+                    } else {
+                        blocks::STONE
+                    };
+                    world.set_block_with_heightmaps(x, y + 3, z, state);
+                }
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]

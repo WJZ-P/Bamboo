@@ -200,17 +200,27 @@ fn with_thread<T>(
                         .raw()
                         .get("structure_set")
                         .ok_or("missing structure_set")?;
-                    let overrides = config
-                        .flat
-                        .structure_overrides
-                        .as_deref()
-                        .filter(|names| names.iter().all(|name| all_sets.get(name).is_some()));
+                    // 内置注册表没有结构集标签；未知 holder 让 lenientOptionalFieldOf 回退到缺省。
+                    // There are no builtin structure-set tags; an unknown holder falls back to absent.
+                    let overrides = config.flat.structure_overrides.as_ref().and_then(|names| {
+                        names
+                            .iter()
+                            .map(|name| {
+                                let name = if name.contains(':') {
+                                    name.clone()
+                                } else {
+                                    format!("minecraft:{name}")
+                                };
+                                all_sets.get(&name).map(|_| name)
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    });
                     WorldStructureState::new_flat(
                         worldgen,
                         config.seed,
                         &mut resolver,
                         biome,
-                        overrides,
+                        overrides.as_deref(),
                     )?
                 } else {
                     WorldStructureState::new(worldgen, config.seed, &mut resolver)?

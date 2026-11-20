@@ -110,7 +110,7 @@ WebView2 的渲染进程不算在内。
   最近还没匀速轮到的脏改动和没落完的快照；`/save-off` 期间不写盘也不卸载。
   方块实体里不存档的运行态（容器开合人数、告示牌编辑中的玩家）改了不标脏；
   以后接结构、生物群系存档时要补上对应的标脏入口。
-- 只持久化改动过的（脏）区块。flat 世界没改过的按超平坦模板重建；噪声世界生成的区块
+- 只持久化改动过的（脏）区块。关结构的默认 flat 未改过的区块按模板重建；走多阶段的世界生成的区块
   一律算「改过」而写盘（官方可以丢弃原样生成区块，见世界生成已知限制）。
   `data/minecraft/world_gen_settings.dat` 用官方 `WorldGenSettings.CODEC` 写出这一局的
   种子和维度生成器：flat 写 `minecraft:flat` + 地层（层和超平坦模板一致），噪声世界写
@@ -401,10 +401,11 @@ WebView2 的渲染进程不算在内。
   对拍在 `normal` / `large_biomes` / `amplified` 上多个种子把出生区块和最终出生点与官方
   逐个比，0 不一致。`saved-data` 让官方 `WorldGenSettings.CODEC` 复核了噪声生成器的形状
   （三种 settings id 都过）。
-- **flat `generator-settings`** 照 `FlatLevelGeneratorSettings.CODEC` 解析全部五个字段
-  （`layers` / `biome` / `features` / `lakes` / `structure_overrides`）并写进
-  `world_gen_settings.dat`；`flat-world <java>` 让官方 `FlatLevelSource.buildTerrain` 与
-  `generate_chunk` 逐方块对拍，5 组配置 / 491520 个方块 0 不一致。
+- **flat `generator-settings`**：五个字段保存到 `world_gen_settings.dat`。
+  `structure_overrides` 缺省选所有符合固定群系的结构集，显式 `[]` 选空集；
+  `generate-structures=false` 关结构而不关地物和湖。`features`、`lakes` 和非阻挡地层
+  的末步填充均经过 Director 流水线。`flat-world <java>` 比 11 格 terrain 和 54 格
+  FEATURES（含村庄、关结构、空覆盖、虚空平台/雪层、平原草、熔岩湖），共 6,389,760 方块 0 不一致。
 - release 实测 `generate_chunk` 各阶段耗时、在 `normal` 世界上跑了 6 个飞行假玩家的压测
   （生成不占世界线程、默认 4 线程会积压区块），数字和计算池默认线程数建议见 `docs/worldgen.md`。
 
@@ -470,9 +471,9 @@ WebView2 的渲染进程不算在内。
   `COLLISION_FULL_BLOCK` 事实近似，对 CARVERS 的完整方块/流体/空气等价。`setInitialSpawn`
   本身不调 `fixupSpawnHeight`（那是 `PlayerSpawnFinder.findSpawn` 进服兜底），Bamboo 只在
   11×11 整片找不到落点这一罕见情形用它，且在实测种子上是恒等变换。flat 世界仍保留旧的
-  超平坦出生点（`(8, 0, 8)`），`initial_spawn` 只对三种噪声世界生效；flat 的
-  `features` / `lakes` / `structure_overrides` 已解析并写入存档，但超平坦地形只填地层和群系，
-  不生成地物/湖/结构（对应阶段没接）。奖励箱按官方专用服务端默认关闭。
+  超平坦出生点（`(8, 0, 8)`），`initial_spawn` 只对三种噪声世界生效。超平坦结构只用内置注册表，
+  不加载数据包自定义结构集或标签；未对拍所有结构、群系组合或超平坦光照与续生成。
+  奖励箱按官方专用服务端默认关闭。
   随机种子（`level-seed` 为空）用 `nanoTime ^ uniquifier` 近似官方 `RandomSupport`，进程内固定，
   只和官方「空种子 = 随机」的语义一致、不逐位比较。`normal` 世界的飞行压测已实跑：生成
   不占世界线程（`tick_total` p50 0.12–1.18 ms），但默认 4 线程在 6 个飞行玩家下会积压
@@ -785,8 +786,8 @@ WebView2 的渲染进程不算在内。
   对拍：`chunkgen --through features` 放开全部 26 组含树的 placed feature，随机 156 个
   中心区块 0 不一致；红树林沼泽、斑驳森林、黑森林、蘑菇岛各取 3×3 的定点区块
   （共 72 个中心）0 不一致；把树叶 `distance`、红树根、白杨横向原木各故意改坏一处都会
-  报不一致。已知限制：`pale_moss` 装饰器没做（它要放 `pale_moss_patch`，属于还没移植的
-  `vegetation_patch`），所以苍白橡树整棵标 `unsupported`；蜂巢里的蜜蜂、战利品这类方块
+  报不一致。苍白橡树的 `pale_moss`（含递归 `pale_moss_patch`）也已移植；种子 0
+  的苍郁花园定点 9 个中心、7,962,624 方块 0 不一致。蜂巢里的蜜蜂、战利品这类方块
   实体内容没有对拍，只照取了随机数；`HashSet` 的一个桶超过 8 个元素时 Java 会把它变成
   红黑树，这种情况没有复现，只置了标记（树的坐标聚在一起，哈希几乎不冲突）。
 - Beardifier / 结构对地形密度的影响（分支 `cb-wg-beard`）：`mc-bamboo-worldgen::beardifier`

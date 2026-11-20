@@ -1,13 +1,8 @@
-// 官方 `FlatLevelGeneratorSettings.CODEC` + `FlatLevelSource.buildTerrain` 对拍。
-// 对一组 generator-settings JSON：用官方 codec 解析（验证全部五个字段），再用官方
-// FlatLevelSource 生成区块，输出解码后的字段和逐方块快照给 Rust 侧比较。
-// 只加载官方类、在 JVM 内造 ProtoChunk，不启动服务端、不读存档、不接受 EULA。
+// 超平坦对拍：官方 codec、平坦地形、结构起点/引用及单中心 3×3 FEATURES。
+// 不启动服务端，不接受 EULA。
 //
-// Vanilla `FlatLevelGeneratorSettings.CODEC` + `FlatLevelSource.buildTerrain`
-// oracle. For each generator-settings JSON: parse with the official codec
-// (validating all five fields), generate a chunk with the official FlatLevelSource,
-// and emit the decoded fields and a per-block snapshot for the Rust side.
-// Only official classes, in-JVM ProtoChunks; no server, no save, no EULA.
+// Superflat oracle: vanilla codec, terrain, structure starts/references, and
+// one center's 3×3 FEATURES view. No live server or EULA.
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -26,8 +21,6 @@ import java.util.List;
 import java.util.Optional;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Holder;
-import net.minecraft.core.HolderLookup;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
@@ -56,6 +49,9 @@ import net.minecraft.world.level.levelgen.blending.Blender;
 import net.minecraft.world.level.levelgen.flat.FlatLayerInfo;
 import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
 import net.minecraft.world.level.levelgen.structure.StructureSet;
+import net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement;
+import net.minecraft.world.level.levelgen.WorldgenRandom;
+import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
 
 public final class FlatWorldOracle {
     private static final int OUTPUT_BUFFER = 4 << 20;
@@ -97,11 +93,74 @@ public final class FlatWorldOracle {
             RegistryOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, registries);
             for (String input : CASES) {
                 JsonObject line = runCase(input, ops, registries);
-                out.write(line.toString());
-                out.write('\n');
+                write(out, line);
             }
+            runDecorationCases(registries, resources, ops, out);
             out.flush();
         }
+    }
+
+    private static void write(Writer out, JsonObject line) throws Exception {
+        out.write(line.toString());
+        out.write('\n');
+    }
+
+    private static void runDecorationCases(RegistryAccess.Frozen registries,
+            CloseableResourceManager resources, RegistryOps<JsonElement> ops, Writer out)
+            throws Exception {
+        var fixture = new ChunkgenOracle.FlatFixture(registries, resources, out);
+        var village = (RandomSpreadStructurePlacement) registries
+                .lookupOrThrow(Registries.STRUCTURE_SET)
+                .getValue(net.minecraft.resources.Identifier.withDefaultNamespace("villages")).placement();
+        var villagePos = village.getPotentialStructureChunk(0L, 0, 0);
+        String villageInput = "{\"layers\":[{\"block\":\"minecraft:bedrock\",\"height\":1},"
+                + "{\"block\":\"minecraft:dirt\",\"height\":2},"
+                + "{\"block\":\"minecraft:grass_block\",\"height\":1}],"
+                + "\"biome\":\"minecraft:plains\",\"structure_overrides\":[\"minecraft:villages\"]}";
+        emitDecoration(out, ops, registries, fixture, "village", villageInput, villagePos, true);
+        emitDecoration(out, ops, registries, fixture, "structures-disabled", villageInput, villagePos, false);
+        emitDecoration(out, ops, registries, fixture, "empty-overrides",
+                villageInput.replace("[\"minecraft:villages\"]", "[]"), villagePos, true);
+        emitDecoration(out, ops, registries, fixture, "void-platform-and-deferred-layer",
+                "{\"layers\":[{\"block\":\"minecraft:snow\",\"height\":1}],\"biome\":\"minecraft:the_void\",\"features\":true}",
+                new ChunkPos(0, 0), false);
+        emitDecoration(out, ops, registries, fixture, "plains-decoration",
+                "{\"layers\":[{\"block\":\"minecraft:dirt\",\"height\":127},"
+                        + "{\"block\":\"minecraft:grass_block\",\"height\":1}],"
+                        + "\"biome\":\"minecraft:plains\",\"features\":true}",
+                new ChunkPos(0, 0), false);
+        emitDecoration(out, ops, registries, fixture, "lava-lake",
+                "{\"layers\":[{\"block\":\"minecraft:stone\",\"height\":160}],\"biome\":\"minecraft:plains\",\"lakes\":true}",
+                lakeChunk(), false);
+    }
+
+    // 找一个确实通过表面湖 rarity 的区块；Rust 侧还要求输出里有湖的熔岩。
+    // Find a chunk that passes the surface-lake rarity roll; Rust also requires actual lava.
+    private static ChunkPos lakeChunk() {
+        var random = new WorldgenRandom(new XoroshiroRandomSource(0L));
+        for (int x = 0; x < 4096; x++) {
+            var pos = new ChunkPos(x, 0);
+            long seed = random.setDecorationSeed(0L, pos.getMinBlockX(), pos.getMinBlockZ());
+            random.setFeatureSeed(seed, 1, 1);
+            if (random.nextFloat() < 1.0F / 200) {
+                return pos;
+            }
+        }
+        throw new IllegalStateException("no surface lava lake candidate");
+    }
+
+    private static void emitDecoration(Writer out, RegistryOps<JsonElement> ops,
+            RegistryAccess.Frozen registries, ChunkgenOracle.FlatFixture fixture, String name,
+            String input, ChunkPos pos, boolean structures) throws Exception {
+        var line = runCase(input, ops, registries);
+        var settings = FlatLevelGeneratorSettings.CODEC
+                .parse(ops, JsonParser.parseString(input)).getOrThrow();
+        line.addProperty("case", name);
+        line.addProperty("x", pos.x());
+        line.addProperty("z", pos.z());
+        line.addProperty("generateStructures", structures);
+        fixture.decorate(new FlatLevelSource(settings), 0L, pos, structures, line);
+        write(out, line);
     }
 
     private static LayeredRegistryAccess<RegistryLayer> loadRegistries(
@@ -149,12 +208,14 @@ public final class FlatWorldOracle {
             layers.add(entry);
         }
         line.add("layers", layers);
-        line.add("structure_overrides", decodedOverrides(settings.structureOverrides()));
+        settings.structureOverrides().ifPresent(set ->
+                line.add("structure_overrides", decodedOverrides(set)));
 
         // 官方 FlatLevelSource.buildTerrain：只填地层，不受 features/lakes/结构影响。
         // Official FlatLevelSource.buildTerrain: fills layers only, unaffected by
         // features / lakes / structures.
         FlatLevelSource generator = new FlatLevelSource(settings);
+        generator.validate();
         LevelHeightAccessor height = LevelHeightAccessor.create(-64, 384);
         ChunkPos pos = new ChunkPos(0, 0);
         ProtoChunk chunk = new ProtoChunk(pos, UpgradeData.EMPTY, height,
@@ -167,12 +228,8 @@ public final class FlatWorldOracle {
 
     /** 把 HolderSet 规范化成字符串列表（#tag 或注册名列表），和 Bamboo 侧一致。 */
     /** Normalize a HolderSet into a string list (#tag or ids), matching Bamboo. */
-    private static JsonArray decodedOverrides(Optional<HolderSet<StructureSet>> overrides) {
+    private static JsonArray decodedOverrides(HolderSet<StructureSet> set) {
         JsonArray result = new JsonArray();
-        if (overrides.isEmpty()) {
-            return result;
-        }
-        HolderSet<StructureSet> set = overrides.get();
         Optional<TagKey<StructureSet>> tag = set.unwrapKey();
         if (tag.isPresent()) {
             result.add("#" + tag.get().location().toString());

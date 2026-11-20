@@ -406,15 +406,10 @@ pub fn compute_heightmaps_public(chunk: &GeneratedChunk) -> BTreeMap<&'static st
 /// Flat: fill blocks from `MIN_Y` using the preset layers; one biome everywhere.
 fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
     let mut blocks = vec![vec![blocks::AIR; WIDTH * WIDTH]; WORLD_HEIGHT as usize];
-    let mut y = MIN_Y;
-    for &(state, thickness) in &config.flat.layers {
-        for _ in 0..thickness {
-            if (0..WORLD_HEIGHT).contains(&(y - MIN_Y))
-                && mc_bamboo_worldgen::feature::flat::terrain_layer(state)
-            {
-                blocks[(y - MIN_Y) as usize].fill(state);
-            }
-            y += 1;
+    use mc_bamboo_worldgen::feature::flat::{layer_states, terrain_layer};
+    for (layer, state) in blocks.iter_mut().zip(layer_states(&config.flat.layers)) {
+        if terrain_layer(state) {
+            layer.fill(state);
         }
     }
     let cells = vec![config.flat.biome; SECTION_BIOMES];

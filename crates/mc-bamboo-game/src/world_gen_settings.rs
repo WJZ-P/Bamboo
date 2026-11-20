@@ -105,14 +105,9 @@ fn noise_generator(settings_id: &str) -> Tag {
     ])
 }
 
-/// `FlatLevelSource.CODEC` 的 `settings`：照 `FlatLevelGeneratorSettings.CODEC`
-/// 写出 `layers` / `biome` / `features` / `lakes` / `structure_overrides` 全部字段。
-/// Bamboo 的超平坦地形只填地层和群系，但存档里保留用户配置，官方打开时字段不丢。
+/// 写出超平坦生成器的设置，保留缺省与显式空的结构集。
 ///
-/// `settings` for `FlatLevelSource.CODEC`: write all five
-/// `FlatLevelGeneratorSettings.CODEC` fields (`layers` / `biome` / `features` /
-/// `lakes` / `structure_overrides`). Bamboo's flat terrain only fills layers and
-/// biome, but the save keeps the user's config so vanilla does not lose it.
+/// Encode the flat generator settings, preserving absent and explicitly empty structure sets.
 fn flat_generator(flat: &FlatSettings) -> Tag {
     let layers = flat
         .layers
@@ -241,9 +236,7 @@ fn decode_flat(generator: &Tag) -> FlatSettings {
             };
             layers.push((block.default_state, height));
         }
-        if !layers.is_empty() {
-            flat.layers = layers;
-        }
+        flat.layers = layers;
     }
     flat
 }
@@ -328,6 +321,21 @@ mod tests {
             decode(&encode(&list_config)).unwrap().flat,
             list_config.flat
         );
+    }
+
+    #[test]
+    fn flat_settings_round_trip_keeps_empty_layers_and_override_presence() {
+        for structure_overrides in [None, Some(Vec::new())] {
+            let config = WorldGenConfig {
+                flat: FlatSettings {
+                    layers: Vec::new(),
+                    structure_overrides,
+                    ..FlatSettings::default()
+                },
+                ..WorldGenConfig::default()
+            };
+            assert_eq!(decode(&encode(&config)).unwrap(), config);
+        }
     }
 
     #[test]

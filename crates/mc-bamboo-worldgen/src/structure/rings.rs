@@ -149,7 +149,7 @@ pub fn ring_positions(
     })
 }
 
-/// ???????????? FixedBiomeSource.findBiomeHorizontal ????????
+/// 固定群系用零种子，`FixedBiomeSource.findBiomeHorizontal` 直接抽取两个坐标。
 ///
 /// Fixed biomes use ring seed zero and draw two coordinates in FixedBiomeSource.findBiomeHorizontal.
 pub(super) fn flat_ring_positions(
