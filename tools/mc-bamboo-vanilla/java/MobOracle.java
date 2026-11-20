@@ -240,6 +240,9 @@ public final class MobOracle {
                     || (only == null && !net.minecraft.util.SpecialDates.isHalloween())) {
                 cases += playSkeletonSpawns(official, out);
             }
+            if (only == null || "skeleton_death".startsWith(only)) {
+                cases += playSkeletonDeaths(official, out);
+            }
             out.write("{\"type\":\"end\",\"cases\":" + cases + "}\n");
             out.flush();
         }
@@ -2301,6 +2304,106 @@ public final class MobOracle {
             arrow.setBaseDamageFromMob(power);
             return arrow;
         }
+    }
+
+    private static int playSkeletonDeaths(Official official, Writer out) throws Exception {
+        final int samples = 32;
+        boolean previousMobDrops = official.gameRules.get(GameRules.MOB_DROPS);
+        try {
+            for (int sample = 0; sample < samples; sample++) {
+                playSkeletonDeath(official, out, sample);
+            }
+        } finally {
+            setRule(official, GameRules.MOB_DROPS, previousMobDrops);
+        }
+        return samples;
+    }
+
+    private static void playSkeletonDeath(Official official, Writer out, int sample) throws Exception {
+        int mode = sample % 8;
+        long seed = 20261120L + sample * 104729L;
+        boolean playerKill = mode == 1 || mode == 2 || mode == 3 || mode == 6 || mode == 7;
+        boolean drops = mode != 6;
+        int looting = mode == 3 || mode == 7 ? 3 : 0;
+        FakeLevel world = FakeLevel.create(official);
+        setRule(official, GameRules.MOB_DROPS, drops);
+        official.server.sequences = new RandomSequences();
+        var mob = EntityTypes.SKELETON.create(world, EntitySpawnReason.COMMAND);
+        mob.setPos(0.5, 64.0, 0.5);
+        setRandom(mob, seed);
+        var slots = net.minecraft.world.entity.EquipmentSlot.VALUES.subList(0, 6);
+        List<String> gear = new ArrayList<>();
+        switch (mode) {
+            case 0 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 0.085F, 0, false);
+            case 2 -> {
+                equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 0.085F, 0, false);
+                equipSkeletonDeath(official, mob, gear, slots.get(2), Items.IRON_BOOTS, 1.0F, 0, false);
+            }
+            case 3 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 0.085F, 0, false);
+            case 4 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 2.0F, 31, false);
+            case 5 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 2.0F, 31, true);
+            case 6 -> equipSkeletonDeath(official, mob, gear, slots.get(0), Items.BOW, 2.0F, 0, false);
+        }
+        var source = playerKill
+                ? world.damageSources().playerAttack(skeletonDeathPlayer(official, world, looting))
+                : world.damageSources().fall();
+        if (!mob.hurtServer(world, source, 100.0F) || !mob.isDeadOrDying()) {
+            throw new IllegalStateException("skeleton_death did not kill the mob: " + sample);
+        }
+        List<String> spawned = new ArrayList<>();
+        for (Entity entity : world.spawned) {
+            switch (entity) {
+                case net.minecraft.world.entity.item.ItemEntity item -> {
+                    var stack = item.getItem();
+                    spawned.add("{\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem())
+                            + ",\"count\":" + stack.getCount() + ",\"damage\":" + stack.getDamageValue() + ",\"xp\":0}");
+                }
+                case net.minecraft.world.entity.ExperienceOrb orb -> spawned.add(
+                        "{\"item\":0,\"count\":0,\"damage\":0,\"xp\":" + orb.getValue() + "}");
+                default -> throw new IllegalStateException("unexpected skeleton death spawn: " + entity);
+            }
+        }
+        if ((!drops && !spawned.isEmpty())
+                || (mode == 4 && !mob.getItemBySlot(slots.getFirst()).isEmpty())
+                || (mode == 5 && mob.getItemBySlot(slots.getFirst()).isEmpty())) {
+            throw new IllegalStateException("skeleton_death did not exercise the expected drops: " + sample);
+        }
+        int[] remaining = slots.stream().map(mob::getItemBySlot)
+                .mapToInt(stack -> BuiltInRegistries.ITEM.getId(stack.getItem())).toArray();
+        out.write("{\"type\":\"skeletonDeath\",\"seed\":" + seed + ",\"gear\":[" + String.join(",", gear)
+                + "],\"playerKill\":" + playerKill + ",\"looting\":" + looting + ",\"drops\":" + drops
+                + ",\"spawned\":[" + String.join(",", spawned) + "],\"remaining\":" + Arrays.toString(remaining)
+                + ",\"mobSeed\":" + randomSeed(mob) + ",\"levelSeed\":" + levelSeed(world) + "}\n");
+    }
+
+    private static void equipSkeletonDeath(Official official, Mob mob, List<String> gear,
+            net.minecraft.world.entity.EquipmentSlot slot, Item item, float chance, int damage, boolean vanishing) {
+        ItemStack stack = new ItemStack(item);
+        stack.setDamageValue(damage);
+        if (vanishing) {
+            stack.enchant(official.registries.lookupOrThrow(Registries.ENCHANTMENT)
+                    .getOrThrow(net.minecraft.world.item.enchantment.Enchantments.VANISHING_CURSE), 1);
+        }
+        mob.setItemSlot(slot, stack);
+        mob.setDropChance(slot, chance);
+        gear.add("{\"slot\":" + slot.ordinal() + ",\"item\":" + BuiltInRegistries.ITEM.getId(item)
+                + ",\"chance\":" + chance + ",\"damage\":" + damage + ",\"vanishing\":" + vanishing + "}");
+    }
+
+    private static ServerPlayer skeletonDeathPlayer(Official official, FakeLevel world, int looting) {
+        ServerPlayer player = new ServerPlayer(official.server, world,
+                new GameProfile(new UUID(1L, 2L), "DeathOracle"), ClientInformation.createDefault());
+        player.setId(1025);
+        player.setPos(2.5, 64.0, 0.5);
+        ItemStack sword = new ItemStack(Items.DIAMOND_SWORD);
+        if (looting > 0) {
+            sword.enchant(official.registries.lookupOrThrow(Registries.ENCHANTMENT)
+                    .getOrThrow(net.minecraft.world.item.enchantment.Enchantments.LOOTING), looting);
+        }
+        player.setItemInHand(InteractionHand.MAIN_HAND, sword);
+        world.playersList().add(player);
+        world.tracked.add(player);
+        return player;
     }
 
     private static int playSkeletonSpawns(Official official, Writer out) throws Exception {

@@ -31,6 +31,7 @@ use serde::Deserialize;
 use crate::oracle::collect_log;
 
 mod projectile;
+mod skeleton_death;
 mod skeleton_spawn;
 
 const MIN_Y: i32 = -64;
@@ -70,6 +71,7 @@ enum Line {
     Header(Header),
     Case(Box<Case>),
     Projectile(Box<projectile::ProjectileCase>),
+    SkeletonDeath(skeleton_death::DeathCase),
     SkeletonSpawn(skeleton_spawn::SkeletonSpawnCase),
     End(End),
 }
@@ -694,11 +696,17 @@ impl Level for MobLevel {
         on_fire: bool,
         killer: Option<mc_bamboo_blocks::EntityUid>,
     ) -> Vec<mc_bamboo_protocol::item::ItemStack> {
+        use mc_bamboo_data::registries::entity_type;
         use mc_bamboo_loot::{
             DamageSourceView, EntityDeathParams, EntityView, LootStack, Position,
             entity_death_drops,
         };
-        let mut victim = EntityView::new(mc_bamboo_data::registries::entity_type::COW);
+        let victim_type = if table == "minecraft:entities/skeleton" {
+            entity_type::SKELETON
+        } else {
+            entity_type::COW
+        };
+        let mut victim = EntityView::new(victim_type);
         victim.is_living = true;
         victim.is_on_fire = on_fire;
         let mut killer_view = None;
@@ -853,6 +861,7 @@ impl Report {
                 Line::Header(header) => self.check_header(&header)?,
                 Line::Case(case) => self.replay(&case),
                 Line::Projectile(case) => self.replay_projectile(&case),
+                Line::SkeletonDeath(case) => self.replay_skeleton_death(&case),
                 Line::SkeletonSpawn(case) => self.replay_skeleton_spawn(&case),
                 Line::End(end) => {
                     self.ended = true;
