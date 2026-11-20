@@ -683,9 +683,45 @@ Bamboo 在 `GeneratedChunk` / `FeatureChunks` / `FeatureWorld` / `FeatureResult`
 岩浆块记上面一格；`TreeFeature` 的 `flags=19` 跳过这一步，所以单独走 `set_tree_block`）。
 `gen-world --through features` 的 `compare_post_processing` 逐段比 packed short，
 `--all-features --seeds 6 --chunks 36 --salt 1|7` 各 216 中心 / 11 万条标记 0 不一致；
-比较器单测覆盖漏一条、给错一条、顺序不同三种改坏。带结构模式下官方结构件混用
-`flags=820` 与 `flags=2`，Bamboo 尚未按每个结构件区分，这项新增比较暂只在
-无结构模式启用；见 `docs/worldgen-remaining.md`「第 0 期新增的已知差异」。
+比较器单测覆盖漏一条、给错一条、顺序不同三种改坏。
+
+结构件按字节码分三条写路径：`StructurePiece.placeBlock` / `generateBox`（`flags=2`：
+写后按 `SHAPE_CHECK_BLOCKS`——各种栅栏、火把、梯子、铁栏杆——记标记，并照常跑
+`getPostProcessPos`）；`StructureTemplate.placeInWorld`（`flags=820`，含 bit 16，两样都
+不记；jigsaw 模板和林地府邸走这条）；结构件里直接 `level.setBlock(pos, s, 2)` 的写
+（矿井 `fillPillarDownOrChainUp` 的栅栏：不记 `SHAPE_CHECK_BLOCKS`，但跑
+`getPostProcessPos`）。带结构模式的比较已打开：`structure-e2e` 60 个查询 33836 条
+0 不一致，`gen-world ... --structures --break-shape-check` 关掉结构件标记时
+`(42,-17,22)` 沼泽小屋报出缺条目。
+
+**完工表的组装。** 官方 `WorldGenRegion.markPosForPostProcessing` 把标记记进坐标所属的
+区块，所以区块 C 的完工表 = C 的地形标记（doFill / 地表）+ 9 个中心各自 `features` 时
+记进 C 的标记。`FeatureRun` 按目标格保存本次运行**新记**的标记，`FeatureWrites.marks`
+和方块增量一起带到组装；`merge_feature_writes` 把它们追加在快照表（地形标记，或读盘
+恢复的表）之后。来源顺序和方块合并一样固定：中心先，然后 slot 升序。组内保持调用
+顺序和重复。Director 正常完工、`disk_after_features` 续跑和 `resume_replay` 都走这一个
+函数。官方跨中心的先后取决于调度，本身不确定；Bamboo 取这个约定顺序，每段的多重
+集合与官方相同。之前交付盒子只合方块，完工表只剩地形标记。
+
+对拍：`feature-merge --orders isolated [--structures]` 让官方每个中心在干净 3×3 上跑完后
+交回它新记进目标的标记，按约定顺序拼成基准，逐段逐项比 Director 交付盒子里的表、
+写盘再读回的表和每个来源的标记。无结构 3 目标 960 条、带结构 7 目标（含沼泽小屋和
+`(42,-155,96)`）3766 条，0 不一致；`--break-drop-neighbor-marks DX DZ` 只丢一个邻居的
+标记时报出差异。`resume-world` 的官方 FULL 表取同一份 9 中心基准，读盘恢复、续跑追加，
+两组 0 不一致；`--break-post-processing` 两处改坏（读回丢表、续跑替换代替追加）都能
+报出。
+
+**完工后处理还没做（已知差异）。** 官方在区块变 ticking 时
+（`ChunkMap.lambda$prepareTickingChunk$2`）调 `LevelChunk.postProcessGeneration(ServerLevel)`，
+按这张表逐条处理：流体非空时 `FluidState.tick`；`LiquidBlock` 走 `BlockState.tick`；其余
+`Block.updateFromNeighbourShapes`，结果变了就 `ServerLevel.setBlock(pos, s, 276)`；处理完
+清空表。Bamboo 没有这一步，所以结构里的栅栏、铁栏杆、梯子、火把不按邻居连接，含水层
+边缘的流体也不 tick。`feature-merge --post-process-diagnostic` 在官方 center-first 共享
+运行上重放这一步（形状更新照官方算，流体 tick 只计数），列出会改变的格子并对照交付
+方块，只打印、不计入失败。默认带结构目标上：沼泽小屋 4 根 `oak_fence`
+不连接，`(42,17,7)` 有 3 处 `glow_lichen`、`(42,16,6)` 有 1 处 `short_grass`，官方会移除。
+在这一步落地前，full 区块的 `PostProcessing` 表**不清空**，照常随存档保留：落地后，
+老存档里的区块变 ticking 时还能补做。
 
 `pale_moss`：`Decorator::parse` 接 `minecraft:pale_moss`，`TreeFeature::place` 经
 `place_leaf` 接一个 `Recursion` 上下文，用 `place_placed` 直接放 configured
@@ -1046,11 +1082,18 @@ cargo run --release -q -p mc-bamboo-vanilla -- gen-world java \
   生成期光照和结构标签；写盘写真实阶段。
   对拍 `mc-bamboo-vanilla resume-world` 用官方 `SerializableChunkData` codec 写
   各阶段存档，Bamboo 读回续跑，和官方一口气生成到 `full` 的方块、群系、高度图、
-  方块实体、光照、结构逐格比；带结构 / 不带结构各一组，含四种邻居状态组合和三种
-  改坏确认（把状态当 full、丢掉邻居写增量、抹掉生成期光照）。全部 0 不一致。
+  方块实体、光照、结构和 `PostProcessing` 逐格 / 逐段比；带结构 / 不带结构各一组，含
+  四种邻居状态组合和改坏确认（把状态当 full、丢掉邻居写增量、抹掉生成期光照，以及
+  `--break-post-processing` 的读回丢表、续跑替换代替追加）。全部 0 不一致。
+  `PostProcessing` 读盘时随快照恢复，续跑阶段的新标记在完工组装时追加。
   常用命令：`mc-bamboo-vanilla resume-world java --seeds 1 --chunks 1 --salt 7`、
   带结构加 `--seed 42 --chunk 17 7 --structures`、改坏确认加
   `--break-self-test --break-neighbor --break-light`。
+* 完工后处理 `LevelChunk.postProcessGeneration` 没做（见「`PostProcessing` 位置表」）：
+  表已逐条对齐并随存档保留、不清空，但区块变 ticking 时不按表做形状更新和流体 tick。
+  落地时的要点：触发时机照 `ChunkMap.prepareTickingChunk`（周围一圈都 full 之后）；
+  逐条按流体 tick、`LiquidBlock` tick、`updateFromNeighbourShapes` + `setBlock(..., 276)`
+  的顺序处理；处理完清表；理清它和岛、ticket 的关系。
 * 出生点 `setInitialSpawn` 仍只比较到 CARVERS 地形；树 / 雪层 / 结构改变
   `MOTION_BLOCKING` 时，个别种子的落点可能和满配官方世界不同。
 * 并行化和 SIMD：逐位一致的基线已经把生成期光照输入修对，仍建议先不优化。

@@ -454,7 +454,10 @@ WebView2 的渲染进程不算在内。
   来源中心的固定先后（C 自己最先、邻居按 `(dz,dx)`）合、同格先写的赢，邻居快照是干净的 CARVERS 地形。结果与线程
   调度无关、可重现，但边界上重叠的写入可能和某一次官方生成不同；地物越来越多后要重新核对。
   `PostProcessing` 位置表已按官方 `markPosForPostProcessing` 逐段对拍并写进存档
-  （`gen-world --through features` 比 packed short，两种 salt 的 6×36 扩大样本各 0 不一致）；
+  （`gen-world --through features` 比 packed short，两种 salt 的 6×36 扩大样本各 0 不一致；
+  完工表按「地形标记 + 9 个中心的标记」组装，`feature-merge` 比交付盒子和存档往返）。
+  官方区块变 ticking 时按这张表做的 `postProcessGeneration`（形状更新、流体 tick）
+  Bamboo 还没做，结构里的栅栏等不连接；表随存档保留、不清空；
   `ProtoChunk` 其余字段、非 `full` 区块从盘上读回后按状态继续生成仍由 `worldgen-resume`
   分支负责。`ChunkColumn::from_parts`
   产出的盒子 `untouched=false`，生成的区块一律算「改过」而写盘，官方可以丢弃原样生成区块。
