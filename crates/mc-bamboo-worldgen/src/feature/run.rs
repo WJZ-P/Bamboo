@@ -25,6 +25,7 @@ pub struct FeatureContext<'a> {
     pub biomes: &'a BiomeManager<'a>,
     pub settings: &'a Settings,
     pub seed: i64,
+    pub flat: Option<&'a super::flat::FlatDecoration<'a>>,
     /// 只跑这些 step；`(1<<11)-1` 表示全部。过渡期诊断用。
     pub steps_mask: i32,
     /// 只跑这些条目；`None` 表示全部。每个条目是 Feature 类型 ID 或 placed feature
@@ -51,7 +52,6 @@ pub struct FeatureContext<'a> {
 
 /// `ChunkGenerator.applyBiomeDecoration`，纯函数。
 pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<FeatureResult, String> {
-    let mut world = FeatureWorld::new(input, ctx.settings.sea_level, ctx.seed)?;
     let mut unsupported = false;
 
     // 字节码 132-177：ChunkPos.rangeClosed(center,1) 九个区块，把每个 section 的
@@ -75,12 +75,16 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
     let decoration_seed =
         random.set_decoration_seed(ctx.seed, input.center_x * 16, input.center_z * 16);
 
-    let generation = WorldGenerationContext {
-        min_y: ctx.settings.min_y,
-        height: ctx.settings.height,
-        sea_level: ctx.settings.sea_level,
-    };
-    let origin = (input.center_x * 16, ctx.settings.min_y, input.center_z * 16);
+    let generation = ctx.flat.map_or(
+        WorldGenerationContext {
+            min_y: ctx.settings.min_y,
+            height: ctx.settings.height,
+            sea_level: ctx.settings.sea_level,
+        },
+        |flat| flat.generation(input),
+    );
+    let mut world = FeatureWorld::new(input, generation.sea_level, ctx.seed)?;
+    let origin = (input.center_x * 16, input.min_y, input.center_z * 16);
     // BiomeManager 的 resolver 是 createUncachedResolver(state)：官方用
     // SamplerContext.EMPTY_UNCACHED，单点求值不记忆缓存。这里不能用带缓存的
     // Context，否则同一坐标在不同调用顺序下会读到上一次成批求值的缓冲。
@@ -95,6 +99,9 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
     let center_x = input.center_x;
     let center_z = input.center_z;
     let mut biome_at = |x: i32, y: i32, z: i32| -> u32 {
+        if let Some(flat) = ctx.flat {
+            return flat.biome;
+        }
         let corner = crate::biome_manager::fiddled_corner(zoom_seed, x, y, z);
         match super::world::noise_biome_in(
             biomes, center_x, center_z, min_y, corner.0, corner.1, corner.2,
@@ -129,60 +136,83 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
                 registry: ctx.registry,
                 samplers: ctx.samplers,
                 biomes: ctx.biomes,
-                settings: ctx.settings,
+                generation,
+                flat: ctx.flat,
                 region_random: ctx.region_random,
                 feature_chunks: input,
             };
             placement.place(&mut world, input, step, Some(&feature_ctx))?;
         }
-        let globals = &ctx.registry.steps()[step];
-        if globals.is_empty() {
-            continue;
-        }
+        let flat_features;
+        let globals = if let Some(flat) = ctx.flat {
+            flat_features = flat.features_at(ctx.registry, step)?;
+            flat_features.as_slice()
+        } else {
+            &ctx.registry.steps()[step]
+        };
         // 418-561：IntArraySet indices，遍历并集里的每个群系的 features[step]，
         // 把每个 placed feature 换成 featuresPerStep[step] 的全局 index。
         let mut indices: Vec<u32> = Vec::new();
-        for &biome in &biome_set {
-            for name in ctx.registry.biome_features(biome, step) {
-                let Some(id) = ctx.registry.placed_id(name) else {
-                    continue;
-                };
-                // 过渡期 `--feature-types` / `--types` / `--ore-only`：Java 侧把不在
-                // 白名单里的 HolderSet 换空了，这里要用同一套判定收集 indices，否则
-                // 两边跑的 (index, step) 集合不同。白名单条目既可以是 placed feature
-                // 注册名，也可以是 Feature 类型 ID；两处都精确匹配其一，和 Java 对称。
-                // Java empties the non-whitelisted HolderSets; collect indices with
-                // the same rule so both sides run the same (index, step) set. A
-                // selector is a placed-feature name OR a Feature type ID, matched
-                // exactly, symmetric with Java's allow list.
-                if let Some(selectors) = ctx.allowed_kinds {
-                    let by_name = selectors.iter().any(|s| s == name);
-                    if !by_name {
-                        let Some(placed) = ctx.registry.placed(id) else {
-                            continue;
-                        };
-                        let Some((kind, _)) = resolve_feature(ctx.registry, &placed.feature) else {
-                            continue;
-                        };
-                        if !selectors.iter().any(|s| s == &kind) {
-                            continue;
+        if ctx.flat.is_some() {
+            for (index, &id) in globals.iter().enumerate() {
+                let placed = ctx
+                    .registry
+                    .placed(id)
+                    .ok_or("missing flat placed feature")?;
+                if ctx.allowed_kinds.is_none_or(|selectors| {
+                    selectors
+                        .iter()
+                        .any(|s| ctx.registry.placed_id(s) == Some(id))
+                        || resolve_feature(ctx.registry, &placed.feature)
+                            .is_some_and(|(kind, _)| selectors.contains(&kind))
+                }) {
+                    indices.push(index as u32);
+                }
+            }
+        } else {
+            for &biome in &biome_set {
+                for name in ctx.registry.biome_features(biome, step) {
+                    let Some(id) = ctx.registry.placed_id(name) else {
+                        continue;
+                    };
+                    // 过渡期 `--feature-types` / `--types` / `--ore-only`：Java 侧把不在
+                    // 白名单里的 HolderSet 换空了，这里要用同一套判定收集 indices，否则
+                    // 两边跑的 (index, step) 集合不同。白名单条目既可以是 placed feature
+                    // 注册名，也可以是 Feature 类型 ID；两处都精确匹配其一，和 Java 对称。
+                    // Java empties the non-whitelisted HolderSets; collect indices with
+                    // the same rule so both sides run the same (index, step) set. A
+                    // selector is a placed-feature name OR a Feature type ID, matched
+                    // exactly, symmetric with Java's allow list.
+                    if let Some(selectors) = ctx.allowed_kinds {
+                        let by_name = selectors.iter().any(|s| s == name);
+                        if !by_name {
+                            let Some(placed) = ctx.registry.placed(id) else {
+                                continue;
+                            };
+                            let Some((kind, _)) = resolve_feature(ctx.registry, &placed.feature)
+                            else {
+                                continue;
+                            };
+                            if !selectors.iter().any(|s| s == &kind) {
+                                continue;
+                            }
                         }
                     }
-                }
-                // featuresPerStep[step] 是按全局 index 排好的列表，下标即 index。
-                // 找不到说明这个 placed feature 不在导出的全局顺序里 —— 目前
-                // `features_per_step` 只按主世界群系的并集排（见 `Extractor.featuresPerStep`），
-                // 所以下界 / 末地群系的 placed feature 都会落到这里。静默跳过会让
-                // 对拍报出「0 不一致」的假绿，必须标 unsupported。
-                //
-                // A missing index means the placed feature is not in the exported global
-                // order: `features_per_step` is sorted over the overworld biome set only
-                // (see `Extractor.featuresPerStep`), so nether and end entries land here.
-                // Skipping silently would report a false "0 mismatches".
-                if let Some(index) = ctx.registry.step_index(step, id) {
-                    indices.push(index);
-                } else {
-                    unsupported = true;
+                    // featuresPerStep[step] 是按全局 index 排好的列表，下标即 index。
+                    // 找不到说明这个 placed feature 不在导出的全局顺序里 —— 目前
+                    // `features_per_step` 只按主世界群系的并集排（见 `Extractor.featuresPerStep`），
+                    // 所以下界 / 末地群系的 placed feature 都会落到这里。静默跳过会让
+                    // 对拍报出「0 不一致」的假绿，必须标 unsupported。
+                    //
+                    // A missing index means the placed feature is not in the exported global
+                    // order: `features_per_step` is sorted over the overworld biome set only
+                    // (see `Extractor.featuresPerStep`), so nether and end entries land here.
+                    // Skipping silently would report a false "0 mismatches".
+                    if let Some(index) = ctx.registry.step_index(step, id) {
+                        indices.push(index);
+                    } else {
+                        unsupported = true;
+                    }
                 }
             }
         }
@@ -205,6 +235,7 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
             // per placed feature. The 3x3 quart-cell lookup and out-of-range
             // single-point climate fallback are unchanged.
             let mut env = PlacementEnv {
+                flat: ctx.flat,
                 generation,
                 biome_at: &mut biome_at,
                 registry: ctx.registry,
@@ -229,6 +260,11 @@ pub fn features(input: &FeatureChunks, ctx: &FeatureContext<'_>) -> Result<Featu
             if !outcome.supported {
                 unsupported = true;
             }
+        }
+        if step == 10
+            && let Some(flat) = ctx.flat
+        {
+            flat.fill_layers(&mut world, origin);
         }
     }
 

@@ -304,6 +304,7 @@ impl Modifier {
 
 /// `FeaturePlacer.place(PlacedFeature, random, origin)` 需要的上下文。
 pub struct PlacementContext<'a> {
+    flat: Option<&'a super::flat::FlatDecoration<'a>>,
     /// 修饰器链只读世界（`getHeight` 等）；放置阶段另借可变引用。
     pub world: &'a FeatureWorld<'a>,
     pub generation: WorldGenerationContext,
@@ -317,6 +318,7 @@ pub struct PlacementContext<'a> {
 /// 与 `FeatureWorld` 无关的修饰器链参数，单独放一份，方便在每次 `modify` 时
 /// 临时构造一个短生命周期的 [`PlacementContext`]。
 pub struct PlacementEnv<'a> {
+    pub flat: Option<&'a super::flat::FlatDecoration<'a>>,
     pub generation: WorldGenerationContext,
     pub biome_at: &'a mut dyn FnMut(i32, i32, i32) -> u32,
     pub registry: &'a Registry,
@@ -388,7 +390,10 @@ fn modify(
                 return;
             };
             let biome = (ctx.biome_at)(x, y, z);
-            if ctx.registry.biome_has_feature(biome, placed) {
+            if ctx.flat.map_or_else(
+                || ctx.registry.biome_has_feature(biome, placed),
+                |flat| flat.has_feature(ctx.registry, placed),
+            ) {
                 out.push(pos);
             }
         }
@@ -731,6 +736,7 @@ pub fn place_candidates(
             // `modify` only reads the world; ending this scope lets the place callback borrow it.
             let frozen: &FeatureWorld<'_> = world;
             let mut ctx = PlacementContext {
+                flat: env.flat,
                 world: frozen,
                 generation: env.generation,
                 biome_at: &mut *env.biome_at,

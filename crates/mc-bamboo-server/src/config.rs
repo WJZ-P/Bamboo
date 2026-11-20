@@ -190,7 +190,7 @@ impl Default for ServerConfig {
             island_threads: mc_bamboo_game::default_island_threads(),
             islands: mc_bamboo_game::default_islands(),
             island_dead_timeout: mc_bamboo_game::default_island_dead_timeout(),
-            world_gen: WorldGenConfig::default(),
+            world_gen: WorldGenConfig::flat_template(),
             spawn_radius: None,
             broadcast_console_to_ops: true,
             console_enabled: false,

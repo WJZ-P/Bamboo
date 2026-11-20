@@ -94,7 +94,8 @@ pub struct FeaturePlacementContext<'a> {
     pub registry: &'a Registry,
     pub samplers: &'a crate::settings::Samplers,
     pub biomes: &'a crate::biome_manager::BiomeManager<'a>,
-    pub settings: &'a crate::settings::Settings,
+    pub generation: WorldGenerationContext,
+    pub flat: Option<&'a crate::feature::flat::FlatDecoration<'a>>,
     pub region_random: &'a Random,
     /// 3×3 quart 群系格，`BiomeFilter` 用。
     pub feature_chunks: &'a FeatureChunks,
@@ -557,11 +558,7 @@ fn place_feature_pool_element(
     let Some(placed) = placed else {
         return Ok(());
     };
-    let generation = WorldGenerationContext {
-        min_y: ctx.settings.min_y,
-        height: ctx.settings.height,
-        sea_level: ctx.settings.sea_level,
-    };
+    let generation = ctx.generation;
     // `BiomeFilter.shouldPlace` 问 `WorldGenLevel.getBiome(pos)`：先按
     // `obfuscateSeed(worldSeed)` 做八角 fiddled distance 选 quart 角，再读 3×3
     // 的 quart 格；越界才回退单点气候重算。与主地物循环用同一条路径。
@@ -572,6 +569,9 @@ fn place_feature_pool_element(
     let zoom_seed = crate::biome_manager::obfuscate_seed(world.seed);
     let mut density_context = crate::sampler::Context::uncached();
     let mut biome_at = |x: i32, y: i32, z: i32| -> u32 {
+        if let Some(flat) = ctx.flat {
+            return flat.biome;
+        }
         let corner = crate::biome_manager::fiddled_corner(zoom_seed, x, y, z);
         match crate::feature::world::noise_biome_in(
             biomes, center_x, center_z, min_y, corner.0, corner.1, corner.2,
@@ -587,6 +587,7 @@ fn place_feature_pool_element(
         }
     };
     let mut env = PlacementEnv {
+        flat: ctx.flat,
         generation,
         biome_at: &mut biome_at,
         registry: ctx.registry,
