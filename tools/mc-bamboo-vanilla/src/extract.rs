@@ -845,6 +845,11 @@ pub struct ProjectileFacts {
     pub pig_sound_variant: u8,
     pub pig_variant_serializer: i32,
     pub pig_sound_variant_serializer: i32,
+    pub sheep_wool: u8,
+    pub chicken_variant: u8,
+    pub chicken_sound_variant: u8,
+    pub chicken_variant_serializer: i32,
+    pub chicken_sound_variant_serializer: i32,
 }
 
 /// 一个物品。列表里的位置就是它的注册表 ID。

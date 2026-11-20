@@ -1150,6 +1150,14 @@ public final class Extractor {
         out.addProperty("pigSoundVariant", sound.id());
         out.addProperty("pigVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(variant.serializer()));
         out.addProperty("pigSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(sound.serializer()));
+        out.addProperty("sheepWool", entityAccessor(net.minecraft.world.entity.animal.sheep.Sheep.class, "DATA_WOOL_ID").id());
+        Class<?> chicken = net.minecraft.world.entity.animal.chicken.Chicken.class;
+        var chickenVariant = entityAccessor(chicken, "DATA_VARIANT_ID");
+        var chickenSound = entityAccessor(chicken, "DATA_SOUND_VARIANT_ID");
+        out.addProperty("chickenVariant", chickenVariant.id());
+        out.addProperty("chickenSoundVariant", chickenSound.id());
+        out.addProperty("chickenVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenVariant.serializer()));
+        out.addProperty("chickenSoundVariantSerializer", net.minecraft.network.syncher.EntityDataSerializers.getSerializedId(chickenSound.serializer()));
         return out;
     }
 

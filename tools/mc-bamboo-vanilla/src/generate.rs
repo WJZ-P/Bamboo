@@ -3338,6 +3338,9 @@ fn entity_types_file(data: &VersionData) -> String {
         ("PIG_BOOST_TIME", facts.pig_boost_time),
         ("PIG_VARIANT", facts.pig_variant),
         ("PIG_SOUND_VARIANT", facts.pig_sound_variant),
+        ("SHEEP_WOOL", facts.sheep_wool),
+        ("CHICKEN_VARIANT", facts.chicken_variant),
+        ("CHICKEN_SOUND_VARIANT", facts.chicken_sound_variant),
     ] {
         let _ = writeln!(out, "pub const {name}: u8 = {value};");
     }
@@ -3346,6 +3349,11 @@ fn entity_types_file(data: &VersionData) -> String {
         (
             "PIG_SOUND_VARIANT_SERIALIZER",
             facts.pig_sound_variant_serializer,
+        ),
+        ("CHICKEN_VARIANT_SERIALIZER", facts.chicken_variant_serializer),
+        (
+            "CHICKEN_SOUND_VARIANT_SERIALIZER",
+            facts.chicken_sound_variant_serializer,
         ),
     ] {
         let _ = writeln!(out, "pub const {name}: i32 = {value};");
