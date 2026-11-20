@@ -3,6 +3,7 @@
 //! Entity-selector execution. Players and non-player entities are all candidates;
 //! filtering and ordering follow official `EntitySelector`.
 
+#[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
 
 use mc_bamboo_blocks::entity::{EntityPublic, JavaRandom};
@@ -765,17 +766,37 @@ fn distance_sqr(region: &Region, target: &Target, origin: Vec3) -> f64 {
 /// `Collections.shuffle` 的进程级随机源（官方 `java.util.Collections` 里那一份）。
 /// The process-wide source behind `Collections.shuffle` (the one in official
 /// `java.util.Collections`).
+#[cfg(not(test))]
 static SHUFFLE_RANDOM: OnceLock<Mutex<JavaRandom>> = OnceLock::new();
 
-fn shuffle_random() -> &'static Mutex<JavaRandom> {
-    SHUFFLE_RANDOM.get_or_init(|| Mutex::new(JavaRandom::new(0x6a09_e667_f3bc_c909)))
-}
-
+#[cfg(not(test))]
 fn shuffle(ids: &mut [Target]) {
-    let mut random = shuffle_random()
+    let mut random = SHUFFLE_RANDOM
+        .get_or_init(|| Mutex::new(JavaRandom::new(SHUFFLE_SEED)))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     random.shuffle(ids);
+}
+
+/// 进程级随机源的初始种子。
+const SHUFFLE_SEED: i64 = 0x6a09_e667_f3bc_c909;
+
+// 单元测试在同一个进程里并行跑，各自重置、各自取数；进程级的一份会被别的测试插队，
+// 双跑对照的两份世界就取到不同的序列。测试构建里每条测试线程各用一份（命令都在
+// 跑世界的那条线程上执行），正式构建仍是进程级的一份。
+// Unit tests run in parallel in one process, each resetting and drawing; a
+// single process-wide source would let another test cut in between the two
+// halves of a comparison. Test builds keep one per test thread (commands run
+// on the world's thread); release builds keep the process-wide one.
+#[cfg(test)]
+thread_local! {
+    static SHUFFLE_RANDOM: std::cell::RefCell<JavaRandom> =
+        std::cell::RefCell::new(JavaRandom::new(SHUFFLE_SEED));
+}
+
+#[cfg(test)]
+fn shuffle(ids: &mut [Target]) {
+    SHUFFLE_RANDOM.with(|random| random.borrow_mut().shuffle(ids));
 }
 
 /// 测试专用：把 `sort=random` 的进程级随机源重置回初始值，让两份对照世界
@@ -785,7 +806,5 @@ fn shuffle(ids: &mut [Target]) {
 /// worlds start from the same state (plan 4.5.1, section 7).
 #[cfg(test)]
 pub(crate) fn reset_shuffle_random() {
-    *shuffle_random()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = JavaRandom::new(0x6a09_e667_f3bc_c909);
+    SHUFFLE_RANDOM.with(|random| *random.borrow_mut() = JavaRandom::new(SHUFFLE_SEED));
 }
