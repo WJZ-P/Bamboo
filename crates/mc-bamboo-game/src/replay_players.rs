@@ -25,6 +25,8 @@ pub struct ReplayPlayerSetup {
     pub health: f32,
     /// 玩家实体随机源的初始种子（`JavaRandom::new`）。
     pub seed: i64,
+    /// 创造模式（否则生存）。
+    pub creative: bool,
 }
 
 #[derive(Clone, Default)]
@@ -65,7 +67,11 @@ impl ReplayPlayers {
                 id,
                 uuid::Uuid::from_u128(setup.uuid),
                 setup.name.clone(),
-                GameMode::Survival,
+                if setup.creative {
+                    GameMode::Creative
+                } else {
+                    GameMode::Survival
+                },
                 ClientInformation::default(),
                 setup.position,
             );

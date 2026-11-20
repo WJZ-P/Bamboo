@@ -83,6 +83,7 @@ pub use level::{
     ArchiveRedstone, BedProblem, ChunkRedstone, Effect, EntityTables, LecternFacts, Level,
     LevelEntities, LevelSideState, LevelTables, Observation, PlayerDeathDrops, PlayerHurtNow,
     RedstoneEntry, RedstoneMemory, Trigger, custom_sound_name, intern_custom_sound,
+    monster_prevents_rest_in,
 };
 pub use machine_container::entity_container_items;
 pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};

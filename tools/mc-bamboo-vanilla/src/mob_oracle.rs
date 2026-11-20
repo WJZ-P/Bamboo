@@ -95,6 +95,16 @@ struct Case {
     /// 僵尸场景：（刻、x、y、z、状态 ID），那一刻实体 tick 之前直接写进方块表。
     #[serde(default)]
     place_at: Vec<[i32; 5]>,
+    /// 僵尸场景：第 `sleep_tick` 刻开头 0 号玩家右键床头 `bed`，官方结果是 `sleep_result`。
+    #[serde(default = "minus_one")]
+    sleep_tick: i32,
+    #[serde(default)]
+    bed: Option<[i32; 3]>,
+    #[serde(default)]
+    sleep_result: String,
+    /// 0 号玩家是创造模式。
+    #[serde(default)]
+    player_creative: bool,
     steps: Vec<Vec<CowStep>>,
     /// 每刻每头牛的全部出站包字节（base64，ID + 包体，不含帧长）。
     ///
@@ -502,6 +512,8 @@ struct MobLevel {
     game: Option<mc_bamboo_game::ReplayPlayers>,
     /// 僵尸场景里生物的队伍，按 UUID。
     mob_teams: HashMap<[u8; 16], u32>,
+    /// 改坏确认 `zombie_bed`：床的怪物检查一律放行。
+    ignore_bed_monsters: bool,
     /// 改坏确认：`wasHurt` 一律当真。
     wrong_was_hurt: bool,
     /// 改坏确认 `zombie_hunger`：尸壳给的饥饿少一刻。
@@ -617,6 +629,13 @@ impl Level for MobLevel {
 
     fn entity_team(&self, uuid: &[u8; 16]) -> Option<u32> {
         self.mob_teams.get(uuid).copied()
+    }
+
+    fn monster_prevents_rest(&self, pos: BlockPos) -> bool {
+        if self.ignore_bed_monsters {
+            return false;
+        }
+        mc_bamboo_blocks::monster_prevents_rest_in(self, pos)
     }
 
     fn for_each_player(&self, visit: &mut dyn FnMut(&PlayerView)) {
@@ -1081,6 +1100,7 @@ impl Report {
                         ),
                         health,
                         seed: 0x0DDB_1A5E_5BAD_5EED_i64.wrapping_add(index as i64),
+                        creative: index == 0 && case.player_creative,
                     })
                     .collect();
                 mc_bamboo_game::ReplayPlayers::new(case.difficulty, &setups)
@@ -1098,6 +1118,7 @@ impl Report {
                     })
                     .collect()
             },
+            ignore_bed_monsters: matches!(break_test, Some("zombie_bed")),
             wrong_was_hurt: matches!(break_test, Some("zombie_was_hurt")),
             short_hunger: matches!(break_test, Some("zombie_hunger")),
         };
@@ -1276,6 +1297,18 @@ impl Report {
                     level
                         .blocks
                         .insert(BlockPos::new(x, y, z), BlockState(state as u32));
+                }
+            }
+            if case.sleep_tick >= 0
+                && case.sleep_tick as usize == index
+                && let Some([x, y, z]) = case.bed
+            {
+                let result = try_sleep(&mut level, &mut ticks, case, BlockPos::new(x, y, z));
+                if result != case.sleep_result {
+                    self.mismatches.push(format!(
+                        "{} tick {index} sleep: official {:?} bamboo {result:?}",
+                        case.name, case.sleep_result
+                    ));
                 }
             }
             if matches!(self.break_test.as_deref(), Some("zombie_sight")) {
@@ -2848,6 +2881,71 @@ fn table_hashes() -> [i64; 2] {
 
 /// 真实时间模式：这一刻的主世界时钟和由它算出的天色、白天、`MONSTERS_BURN`。
 /// 和官方一侧一样，在实体 tick 之前更新。
+/// 0 号玩家右键床头：走正式的 `use_item_on`，从 `Effect::SleepInBed` 读结果，
+/// 名字和官方 `BedSleepingProblem` 一样，成功是 `OK`。
+fn try_sleep(level: &mut MobLevel, ticks: &mut BlockTicks, case: &Case, head: BlockPos) -> String {
+    use mc_bamboo_blocks::{
+        BedProblem, Effect,
+        context::{Actor, BlockHit},
+    };
+
+    let Some(player) = case.players.first() else {
+        return String::new();
+    };
+    let position = Vec3::new(
+        f64::from_bits(player.x as u64),
+        f64::from_bits(player.y as u64),
+        f64::from_bits(player.z as u64),
+    );
+    let creative = case.player_creative;
+    let actor = Actor {
+        uuid: ((1_u128 << 64) | 2).to_be_bytes(),
+        position,
+        yaw: 0.0,
+        head_yaw: 0.0,
+        pitch: 0.0,
+        secondary_use: false,
+        main_hand: mc_bamboo_data::items::AIR,
+        off_hand: mc_bamboo_data::items::AIR,
+        eye_height: f64::from(f32::from_bits(player.eye as u32)),
+        block_interaction_range: if creative { 5.0 } else { 4.5 },
+        may_build: true,
+        prevents_block_drops: creative,
+        can_use_game_master_blocks: false,
+    };
+    let hit = BlockHit {
+        pos: head,
+        face: mc_bamboo_core::Direction::Up,
+        location: Vec3::new(
+            f64::from(head.x) + 0.5,
+            f64::from(head.y) + 0.5625,
+            f64::from(head.z) + 0.5,
+        ),
+        inside: false,
+    };
+    let outcome = mc_bamboo_blocks::interact::use_item_on(
+        level,
+        ticks,
+        &actor,
+        mc_bamboo_core::Hand::Main,
+        &hit,
+    );
+    for effect in &outcome.effects {
+        if let Effect::SleepInBed { problem, .. } = effect {
+            return match problem {
+                None => "OK",
+                Some(BedProblem::NotPossibleNow) => "NOT_POSSIBLE_NOW",
+                Some(BedProblem::NotSafe) => "NOT_SAFE",
+                Some(BedProblem::TooFarAway) => "TOO_FAR_AWAY",
+                Some(BedProblem::Obstructed) => "OBSTRUCTED",
+                Some(BedProblem::OtherProblem) => "OTHER_PROBLEM",
+            }
+            .to_owned();
+        }
+    }
+    "NO_SLEEP".to_owned()
+}
+
 fn set_zombie_clock(level: &mut MobLevel, case: &Case, tick: i64, break_test: Option<&str>) {
     if case.clock_start < 0 {
         return;

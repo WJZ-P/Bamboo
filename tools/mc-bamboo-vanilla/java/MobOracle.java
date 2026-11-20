@@ -421,6 +421,18 @@ public final class MobOracle {
         /** 僵尸场景：第 `tick` 刻开头（实体 tick 之前）直接写进方块表的方块，不发更新。 */
         final List<int[]> placeAt = new ArrayList<>();
 
+        /** 僵尸场景：第 `sleepTick` 刻开头 0 号玩家右键床头 `bed`（`startSleepInBed`）。 */
+        int sleepTick = -1;
+        int[] bed;
+        /** 僵尸场景：0 号玩家是创造模式。 */
+        boolean playerCreative;
+
+        Scene sleepAt(int tick, int x, int y, int z) {
+            sleepTick = tick;
+            bed = new int[] {x, y, z};
+            return this;
+        }
+
         Scene placeAt(int tick, int x, int y, int z, BlockState state) {
             placeAt.add(new int[] {tick, x, y, z, Block.getId(state)});
             return this;
@@ -1011,6 +1023,42 @@ public final class MobOracle {
                     doors.mob(1, 0.5, 64.0, 0.5, 0.0F, 61L, 0);
                     doors.player(7.5, 68.0, 0.5, Items.AIR);
                     scenes.add(doors);
+                }
+                // 床的怪物检查（`startSleepInBed`）：午夜、床头在 (0, 64, 0) 朝东，盒子是床头
+                // 底面中心 ±8 / ±5 / ±8。盒内和盒边附近（第 0 刻走动之后还压着盒边）的僵尸
+                // 让人睡不了，盒外和盒下方的不挡；创造模式不查。
+                String[] beds = {"inside", "edge", "outside", "below", "creative"};
+                // 创造模式那只在盒内角落、离玩家 8 格开外：玩家躺下后位置变了，
+                // 僵尸不该去看他（`LookAtPlayerGoal` 只看 8 格内）。
+                double[] bedX = {6.5, 8.8, 10.5, 0.5, -7.0};
+                double[] bedY = {64.0, 64.0, 64.0, 57.0, 64.0};
+                double[] bedZ = {0.5, 0.5, 0.5, 0.5, -6.5};
+                for (int b = 0; b < beds.length; b++) {
+                    Scene sleep = new Scene("zombie_bed_" + beds[b]).ticks(3).difficulty(2);
+                    sleep.monstersBurn = false;
+                    sleep.clockStart = 18000;
+                    ground(sleep, 12);
+                    sleep.set(0, 64, 0, Blocks.BED.red().defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.BedBlock.FACING, net.minecraft.core.Direction.EAST)
+                            .setValue(net.minecraft.world.level.block.BedBlock.PART,
+                                    net.minecraft.world.level.block.state.properties.BedPart.HEAD));
+                    sleep.set(-1, 64, 0, Blocks.BED.red().defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.BedBlock.FACING, net.minecraft.core.Direction.EAST)
+                            .setValue(net.minecraft.world.level.block.BedBlock.PART,
+                                    net.minecraft.world.level.block.state.properties.BedPart.FOOT));
+                    if (bedY[b] < 64.0) {
+                        for (int x = -3; x <= 3; x++) {
+                            for (int z = -3; z <= 3; z++) {
+                                sleep.set(x, 56, z, Blocks.STONE.defaultBlockState());
+                            }
+                        }
+                    }
+                    sleep.mob(1, bedX[b], bedY[b], bedZ[b], 0.0F, 81L + b, 0);
+                    sleep.player(0.5, 64.0, 2.5, Items.AIR);
+                    sleep.realPlayers = true;
+                    sleep.sleepAt(1, 0, 64, 0);
+                    sleep.playerCreative = beds[b].equals("creative");
+                    scenes.add(sleep);
                 }
                 // 视线记忆：玩家站在够不着的石柱上，僵尸先看见他；第 40 刻一堵墙挡住视线，
                 // `unseenMemoryTicks`（60，减半后 30 刻）用完后放弃目标。
@@ -2353,6 +2401,35 @@ public final class MobOracle {
     }
 
 
+    /**
+     * `AbstractBedBlock.useWithoutItem` 点在床头：用这张床的 `BedRule` 调 `startSleepInBed`，
+     * 返回失败原因的名字，成功是 `OK`。成功之后的统计和进度在假世界里可能接不上，
+     * 那时玩家已经躺下（`isSleeping`），照样算成功。
+     */
+    private static String trySleep(FakeLevel level, ServerPlayer player, int[] at) {
+        BlockPos pos = new BlockPos(at[0], at[1], at[2]);
+        BlockState state = level.getBlockState(pos);
+        net.minecraft.world.level.block.AbstractBedBlock bed =
+                (net.minecraft.world.level.block.AbstractBedBlock) state.getBlock();
+        try {
+            var result = player.startSleepInBed(bed, state,
+                    net.minecraft.world.attribute.BedRule.CAN_SLEEP_WHEN_DARK, pos);
+            return result.map(MobOracle::bedProblemName, unit -> "OK");
+        } catch (RuntimeException failed) {
+            if (player.isSleeping()) return "OK";
+            throw failed;
+        }
+    }
+
+    /** `BedSleepingProblem` 是带消息的记录：常量按引用认，`BedRule.asProblem` 给的按消息键认。 */
+    private static String bedProblemName(net.minecraft.world.entity.player.Player.BedSleepingProblem problem) {
+        if (problem == net.minecraft.world.entity.player.Player.BedSleepingProblem.TOO_FAR_AWAY) return "TOO_FAR_AWAY";
+        if (problem == net.minecraft.world.entity.player.Player.BedSleepingProblem.OBSTRUCTED) return "OBSTRUCTED";
+        if (problem == net.minecraft.world.entity.player.Player.BedSleepingProblem.OTHER_PROBLEM) return "OTHER_PROBLEM";
+        if (problem == net.minecraft.world.entity.player.Player.BedSleepingProblem.NOT_SAFE) return "NOT_SAFE";
+        return "NOT_POSSIBLE_NOW";
+    }
+
     private static int teamOf(java.util.List<Integer> teams, int index) {
         return index < teams.size() ? teams.get(index) : -1;
     }
@@ -2441,6 +2518,7 @@ public final class MobOracle {
             players.add(player);
             zombieSinks.add(sink);
             joinTeam(level, player.getScoreboardName(), teamOf(scene.playerTeams, i));
+            if (i == 0 && scene.playerCreative) player.setGameMode(GameType.CREATIVE);
         }
         level.playersList().addAll(players);
         // 实体事件和 `sendToTrackingPlayers` 的包：这里只比装备和实体事件两种。
@@ -2551,6 +2629,7 @@ public final class MobOracle {
             zombiePlayerStep(players.get(0), zombieSinks.get(0), playerStates, playerPackets,
                     lastSentHealth, true);
         }
+        String sleepResult = "";
         for (int tick = 1; tick <= scene.ticks; tick++) {
             level.gameTime++;
             if (level.realSky) {
@@ -2563,6 +2642,9 @@ public final class MobOracle {
                     level.blocks.put(BlockPos.asLong(at[1], at[2], at[3]), Block.stateById(at[4]));
                     level.chunkCache.clear();
                 }
+            }
+            if (tick == scene.sleepTick) {
+                sleepResult = trySleep(level, players.get(0), scene.bed);
             }
             if (scene.realPlayers) {
                 // 只推进受伤冷却和受伤动画（`ServerPlayer.tick` / `baseTick`），
@@ -2608,6 +2690,13 @@ public final class MobOracle {
         line.append("]");
         line.append(",\"mobEventPackets\":").append(mobEvents).append("]]");
         line.append(",\"levelEvents\":").append(levelEventsJson).append("]]");
+        line.append(",\"sleepTick\":").append(scene.sleepTick);
+        line.append(",\"playerCreative\":").append(scene.playerCreative);
+        if (scene.bed != null) {
+            line.append(",\"bed\":[").append(scene.bed[0]).append(',').append(scene.bed[1])
+                    .append(',').append(scene.bed[2]).append(']');
+        }
+        line.append(",\"sleepResult\":\"").append(sleepResult).append('"');
         if (scene.realPlayers) {
             line.append(",\"zombiePlayerStates\":").append(playerStates).append(']');
             line.append(",\"zombiePlayerPackets\":").append(playerPackets).append(']');
@@ -4770,8 +4859,16 @@ public final class MobOracle {
          *  依赖区块缓存，这里直接写表即可。 */
         @Override
         public boolean setBlock(BlockPos pos, BlockState state, int flags, int limit) {
+            BlockState old = getBlockState(pos);
             blocks.put(pos.asLong(), state);
             chunkCache.clear();
+            if (shapeUpdates && old != state && (flags & 16) == 0 && limit > 0) {
+                // 官方 `Level.markAndNotifyBlock` 的形状更新：床头置 `occupied` 时床尾跟着改。
+                int neighbourFlags = flags & -34;
+                old.updateIndirectNeighbourShapes(this, pos, neighbourFlags, limit - 1);
+                state.updateNeighbourShapes(this, pos, neighbourFlags, limit - 1);
+                state.updateIndirectNeighbourShapes(this, pos, neighbourFlags, limit - 1);
+            }
             return true;
         }
 
@@ -4791,7 +4888,7 @@ public final class MobOracle {
             return true;
         }
 
-        /** 僵尸场景：`removeBlock` 照官方做邻居形状更新。 */
+        /** 僵尸场景：`setBlock` / `removeBlock` 照官方做邻居形状更新。 */
         boolean shapeUpdates;
 
         /** 僵尸场景：`levelEvent` 和 `destroyBlockProgress` 按发生顺序记下来（`[0, 事件, x, y, z, 数据]` / `[1, 实体, x, y, z, 阶段]`）。 */

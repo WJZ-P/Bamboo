@@ -1072,20 +1072,7 @@ pub trait Level: LevelSideState + LevelEntities {
     /// intersects the ±8 / ±5 / ±8 box around the bed's bottom centre. Dying monsters
     /// still count, as in vanilla; discarded ones do not.
     fn monster_prevents_rest(&self, pos: BlockPos) -> bool {
-        let x = f64::from(pos.x) + 0.5;
-        let y = f64::from(pos.y);
-        let z = f64::from(pos.z) + 0.5;
-        let area = mc_bamboo_core::Aabb::new(x - 8.0, y - 5.0, z - 8.0, x + 8.0, y + 5.0, z + 8.0);
-        let mut found = false;
-        self.for_each_entity_in(area, &mut |public| {
-            if !public.removed
-                && let crate::entity::KindPublic::Mob(mob) = &public.kind
-                && mob.mob_type.is_monster()
-            {
-                found = true;
-            }
-        });
-        found
+        monster_prevents_rest_in(self, pos)
     }
 
     /// `getDifficulty().getId()`：0 和平、1 简单、2 普通、3 困难。
@@ -1969,6 +1956,26 @@ pub struct PlayerDeathDrops {
     pub items: Vec<mc_bamboo_protocol::item::ItemStack>,
     /// 经验值，0 表示不掉。
     pub experience: i32,
+}
+
+/// [`Level::monster_prevents_rest`] 的缺省实现，单独拿出来让覆盖它的假世界也能调到。
+///
+/// The default body of [`Level::monster_prevents_rest`], callable from overrides.
+pub fn monster_prevents_rest_in<L: Level + ?Sized>(level: &L, pos: BlockPos) -> bool {
+    let x = f64::from(pos.x) + 0.5;
+    let y = f64::from(pos.y);
+    let z = f64::from(pos.z) + 0.5;
+    let area = mc_bamboo_core::Aabb::new(x - 8.0, y - 5.0, z - 8.0, x + 8.0, y + 5.0, z + 8.0);
+    let mut found = false;
+    level.for_each_entity_in(area, &mut |public| {
+        if !public.removed
+            && let crate::entity::KindPublic::Mob(mob) = &public.kind
+            && mob.mob_type.is_monster()
+        {
+            found = true;
+        }
+    });
+    found
 }
 
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
