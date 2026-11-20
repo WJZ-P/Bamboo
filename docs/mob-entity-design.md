@@ -656,3 +656,34 @@ ADVENTURE 的 fixup 分支；草方块每列都能站）。因此：
 - 尸壳不接饥饿效果；HARD 增援、溺尸转化、鸡骑士、村民/铁傀儡/海龟/狼目标、
   长矛与穿村行为按字节码保留注册项但本期不建模，写进已知差异。
 - 正式游戏的白天燃烧端到端测试等 `day-night` 合入后补；本期不在正式世界计算天色。
+
+### 9.4 期 4：自然生成（2026-11-20）
+
+- **数据**：生成器从官方 `Biome` 的 `NATURAL_MOB_SPAWNS` 环境属性（overlay 到空表上）导出
+  每个群系的加权刷怪表与 `spawn_cost`，以及 `MobCategory.values()` 的上限表
+  （`Extractor.java` 的 `mobSpawns`；`mc-bamboo-data/src/generated/mob_spawns.rs`）。
+  条目顺序就是 `WeightedList.unwrap()` 的顺序，`SpawnerData.count()` 展开成 `min` / `max`
+  （官方刷怪表里只有常量和均匀分布，别的类型在提取时直接报错）。
+- **`NaturalSpawner`**（`mc-bamboo-blocks/src/entity/mob/natural.rs`）：
+  `SpawnState::create` 每刻从本岛实体表重算（跳过持久化生物、按类别计数、刷怪代价、
+  每名玩家附近的计数），`filtered_categories` 按全局上限
+  （`maxInstancesPerChunk * spawnableChunkCount / 289`）、`spawn_mobs` / `spawn_monsters`
+  和 `gameTime % 400 == 0` 的持久类别过滤；`spawn_for_chunk` → `spawn_category_for_chunk`
+  → `spawn_category_for_position` 逐条照官方：3 组、组大小 `nextFloat * 4`、每步两次
+  `nextInt(6)`、加权表 `nextInt(总权重)`、`count.sample`、离玩家/出生点 24 格、
+  `ON_GROUND` 的方块/光照/碰撞条件、`noCollision`、`checkSpawnObstruction`、
+  `finalizeSpawn` 与组生成。
+- **刷怪规则**：牛走 `Animal.checkAnimalSpawnRules`（`#animals_spawnable_on` + 原始亮度 > 8），
+  僵尸走 `Monster.checkMonsterSpawnRules`（`isDarkEnoughToSpawn`：天空光 `> nextInt(32)`、
+  方块光上限 0、`maxLocalRawBrightness <= nextInt(8)`，再查可生成方块），
+  尸壳额外要求 `canSeeSky`。
+- **接入**：`crates/mc-bamboo-game/src/natural_spawn.rs` 在 `run_island_simulation` 里
+  随机刻之前跑（官方 `ServerChunkCache.tickChunks` 的顺序）；刷怪区块取能 tick 实体的
+  区块（无限超平坦按玩家模拟距离的方形），用 `Region.random` 打乱；`spawnableChunkCount`
+  用「玩家周围曼哈顿距离 8 内已加载的区块数」。
+- **配置**：`bamboo.toml` 的 `spawn_per_player_cap`，默认开；关掉只剩官方全局上限。
+- **对拍**：`mc-bamboo-vanilla natural-spawn` 见下节。
+- **已知差异**：只有牛、僵尸、尸壳会真的生成；表里其它生物被挑中后当作没有刷怪数据，
+  所以已支持生物的实际产率低于官方（权重、组大小和取数次数本身照官方）。僵尸/尸壳的
+  `finalizeSpawn` 沿用 9.3 的实现，随机序列和官方不同。生成期刷怪、结构刷怪、刷怪笼、
+  `customSpawners`、下界要塞表未做。
