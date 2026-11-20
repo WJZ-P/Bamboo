@@ -2660,6 +2660,17 @@ public final class Probe {
             check("commands: other ops see the admin broadcast",
                     containsText(observer, "[Kitten: Set minecraft:overworld to 1000 tick(s)]"));
 
+            // 这个场景断言的是「世界里恰好有这些东西」，自然刷怪会在正午的平原上刷出
+            // 生物，所以先关掉（和随机刻速度一样属于场景校准）。这个 Gamerule 在 26.3
+            // 叫 `spawn_mobs`。
+            //
+            // This scene asserts an exact set of entities, and natural spawning adds
+            // mobs to a plains world at noon, so turn it off (scene calibration, like
+            // the random tick speed). The 26.3 game rule is called `spawn_mobs`.
+            actor.send(new ServerboundChatCommandPacket("gamerule spawn_mobs false"));
+            await("commands: mob spawning is off",
+                    () -> containsText(actor, "Game rule spawn_mobs is now set to false"));
+
             BlockPos stone = new BlockPos(4, -59, 4);
             BlockPos stairs = new BlockPos(4, -58, 4);
             actor.send(new ServerboundChatCommandPacket("setblock 4 -59 4 stone"));
@@ -2677,8 +2688,14 @@ public final class Probe {
             // 牛的生成包、元数据、属性包和之后的移动包，都要能被官方的包定义解析。
             // The cow's spawn, metadata, attributes and later movement packets must
             // all decode with the official packet definitions.
+            // 牛的自然生成可能在这个场景之前就刷出过牛，所以按「这一次 summoned 多加了一头」
+            // 来数，而不是「全服一共只有一头」。
+            //
+            // Natural spawning may already have added cows before this scene, so count
+            // "this summon added one" instead of "there is exactly one cow in total".
+            int cowsBeforeSummon = actor.cowAdds;
             actor.send(new ServerboundChatCommandPacket("summon minecraft:cow 12 -60 8"));
-            await("cow: /summon sends an add_entity", () -> actor.cowAdds == 1);
+            await("cow: /summon sends an add_entity", () -> actor.cowAdds == cowsBeforeSummon + 1);
             await("cow: the pairing bundle carries metadata", () -> actor.cowData >= 1);
             await("cow: the pairing bundle carries attributes", () -> actor.cowAttributes >= 1);
             check("cow: the client knows the new entity", actor.remotes.containsKey(actor.lastCowId));
