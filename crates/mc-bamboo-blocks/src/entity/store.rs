@@ -140,7 +140,7 @@ impl KindPublic {
             Self::Tnt { .. } => mc_bamboo_data::registries::entity_type::TNT,
             Self::Item { .. } => mc_bamboo_data::registries::entity_type::ITEM,
             Self::ExperienceOrb { .. } => mc_bamboo_data::registries::entity_type::EXPERIENCE_ORB,
-            Self::Arrow(_) => mc_bamboo_data::registries::entity_type::ARROW,
+            Self::Arrow(arrow) => arrow.variant.entity_type(),
             Self::Mob(mob) => mob.mob_type.entity_type(),
         }
     }

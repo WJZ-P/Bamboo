@@ -87,6 +87,7 @@ pub mod player_hurt;
 mod player_move;
 pub mod player_respawn;
 mod player_save;
+pub mod player_weapon;
 mod pos_map;
 mod profiler;
 pub mod region;
@@ -2534,4 +2535,200 @@ pub fn replay_player_consume(
         packets.push(filtered);
     }
     (steps, packets)
+}
+
+/// 一次射箭重放的场景：武器、弹药、拉弓刻数、附魔和视角。
+///
+/// One shot replay scene: weapon, ammo, draw ticks, enchantments and view angles.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone)]
+pub struct ReplayShot {
+    pub weapon: i32,
+    pub ammo_item: i32,
+    pub ammo_count: i32,
+    pub hold_ticks: i32,
+    pub yaw: i32,
+    pub pitch: i32,
+    pub enchantments: Vec<(String, i32)>,
+    pub potion: Option<i32>,
+    pub creative: bool,
+}
+
+/// 一支箭的初始状态，按原始位记录。
+///
+/// One arrow's initial state, as raw bits.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayShotArrow {
+    /// 位置 x/y/z、速度 x/y/z 的 f64 原始位。
+    pub motion: [i64; 6],
+    pub yaw: i32,
+    pub pitch: i32,
+    pub critical: bool,
+    pub pierce: i32,
+    pub fire: i32,
+    pub pickup: u8,
+    /// `pickup` 物品堆的物品 ID 和数量。
+    pub item: i32,
+    pub count: i32,
+}
+
+/// 一次射箭重放的结果。
+///
+/// One shot replay result.
+#[cfg(feature = "oracle-samples")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayShotResult {
+    pub arrows: Vec<ReplayShotArrow>,
+    pub ammo: i32,
+    pub ammo_item: i32,
+    pub weapon_damage: i32,
+    pub player_seed: i64,
+    pub level_seed: i64,
+}
+
+/// 玩家射箭的正式重放，用和游戏里同一套 `player_weapon` 入口。
+///
+/// The production replay of a player shot, through the same `player_weapon`
+/// entry points the game uses.
+#[cfg(feature = "oracle-samples")]
+pub fn replay_shot(scene: &ReplayShot) -> ReplayShotResult {
+    use mc_bamboo_core::{Hand, Vec3};
+    use mc_bamboo_protocol::{
+        components::{ComponentPatch, ComponentValue, PatchEntry},
+        item::ItemStack,
+        packet::play::{ClientInformation, GameMode},
+    };
+    use uuid::Uuid;
+
+    let mut region = region::Region::new(2, 20, false);
+    let id = inbound::PlayerId(1 << 24);
+    let game_mode = if scene.creative {
+        GameMode::Creative
+    } else {
+        GameMode::Survival
+    };
+    let mut player = player::Player::new(
+        id,
+        Uuid::from_u128(1),
+        "Oracle0".to_owned(),
+        game_mode,
+        ClientInformation::default(),
+        Vec3::new(0.5, 64.0, 0.5),
+    );
+    player.yaw = f32::from_bits(scene.yaw as u32);
+    player.pitch = f32::from_bits(scene.pitch as u32);
+    player.random =
+        mc_bamboo_blocks::entity::JavaRandom::new(mc_bamboo_blocks::entity::ENTITY_RANDOM_SEED);
+    let main = player.inventory.hand_slot(Hand::Main);
+    player.inventory.slots[main] = ItemStack::new(scene.weapon, 1);
+    player.inventory.slots[main + 1] = ItemStack::new(scene.ammo_item, scene.ammo_count);
+    let mut ammo_patch = ComponentPatch::new();
+    if let Some(potion) = scene.potion {
+        ammo_patch.put(
+            mc_bamboo_data::registries::data_component_type::POTION_CONTENTS,
+            PatchEntry::Set(ComponentValue::PotionContents {
+                potion: Some(potion),
+                custom_color: None,
+                custom_effects: Vec::new(),
+                custom_name: None,
+            }),
+        );
+    }
+    let (added, removed) = ammo_patch.to_opaque();
+    player.inventory.slots[main + 1].added = added;
+    player.inventory.slots[main + 1].removed = removed;
+    let mut weapon_patch = ComponentPatch::new();
+    if !scene.enchantments.is_empty() {
+        let levels: Vec<(i32, i32)> = scene
+            .enchantments
+            .iter()
+            .filter_map(|(name, level)| {
+                mc_bamboo_data::registries::SYNCED_REGISTRIES
+                    .iter()
+                    .find(|registry| registry.name == "minecraft:enchantment")
+                    .and_then(|registry| registry.entries.iter().position(|entry| entry == name))
+                    .map(|id| (id as i32, *level))
+            })
+            .collect();
+        weapon_patch.put(
+            mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+            PatchEntry::Set(ComponentValue::Enchantments(levels)),
+        );
+    }
+    let (added, removed) = weapon_patch.to_opaque();
+    player.inventory.slots[main].added = added;
+    player.inventory.slots[main].removed = removed;
+    region.insert_player(player);
+
+    player_weapon::start(&mut region, id, Hand::Main);
+    // 弩要多跑一刻：官方 `onUseTick` 在递减之前调用，装满发生在第 hold 刻。
+    //
+    // A crossbow needs one more tick: `onUseTick` runs before the decrement, so
+    // loading happens on the hold-th tick.
+    let ticks = scene.hold_ticks + i32::from(scene.weapon == mc_bamboo_data::items::CROSSBOW);
+    for _ in 0..ticks {
+        player_weapon::tick(&mut region);
+    }
+    if scene.weapon == mc_bamboo_data::items::CROSSBOW {
+        player_weapon::release(&mut region, id);
+        player_weapon::start(&mut region, id, Hand::Main);
+    } else {
+        player_weapon::release(&mut region, id);
+    }
+
+    let arrows = region
+        .entities
+        .ids()
+        .into_iter()
+        .filter_map(|uid| {
+            let entity = region.entities.public_at(uid)?;
+            let mc_bamboo_blocks::entity::KindPublic::Arrow(public) = entity.kind else {
+                return None;
+            };
+            let state = region.entities.get(uid)?;
+            let mc_bamboo_blocks::entity::EntityKind::Arrow(arrow) = &state.kind else {
+                return None;
+            };
+            Some(ReplayShotArrow {
+                motion: [
+                    entity.position.x.to_bits() as i64,
+                    entity.position.y.to_bits() as i64,
+                    entity.position.z.to_bits() as i64,
+                    entity.delta.x.to_bits() as i64,
+                    entity.delta.y.to_bits() as i64,
+                    entity.delta.z.to_bits() as i64,
+                ],
+                yaw: entity.yaw.to_bits() as i32,
+                pitch: public.pitch.to_bits() as i32,
+                critical: public.critical,
+                pierce: i32::from(public.pierce),
+                fire: state.remaining_fire_ticks,
+                pickup: match public.pickup {
+                    mc_bamboo_blocks::entity::arrow::Pickup::Disallowed => 0,
+                    mc_bamboo_blocks::entity::arrow::Pickup::Allowed => 1,
+                    mc_bamboo_blocks::entity::arrow::Pickup::CreativeOnly => 2,
+                },
+                item: arrow.pickup_item.item,
+                count: arrow.pickup_item.count,
+            })
+        })
+        .collect();
+    let held = region.players[&id].inventory.held(Hand::Main).clone();
+    let damage = match mc_bamboo_protocol::components::defaults::resolve(
+        held.item,
+        &held.patch(),
+        mc_bamboo_data::registries::data_component_type::DAMAGE,
+    ) {
+        Some(ComponentValue::Damage(value)) => *value,
+        _ => 0,
+    };
+    ReplayShotResult {
+        arrows,
+        ammo: region.players[&id].inventory.slots[main + 1].count,
+        ammo_item: region.players[&id].inventory.slots[main + 1].item,
+        weapon_damage: damage,
+        player_seed: region.players[&id].random.state(),
+        level_seed: region.random.source().seed(),
+    }
 }

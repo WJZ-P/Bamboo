@@ -1142,6 +1142,27 @@ public final class Extractor {
         out.addProperty("arrowPierce", arrowAccessorId("PIERCE_LEVEL"));
         out.addProperty("arrowInGround", arrowAccessorId("IN_GROUND"));
         out.addProperty("skeletonEyeHeight", net.minecraft.world.entity.EntityTypes.SKELETON.getDimensions().eyeHeight());
+        out.add("potionEffects", potionEffects());
+        return out;
+    }
+
+    /**
+     * 药水注册表每条药水自带的效果列表，顺序就是注册表 ID。
+     * `PotionContents.forEachEffect` 和药水箭的 `doPostHurtEffects` 都读它。
+     */
+    private static JsonArray potionEffects() {
+        JsonArray out = new JsonArray();
+        for (net.minecraft.world.item.alchemy.Potion potion : BuiltInRegistries.POTION) {
+            JsonArray effects = new JsonArray();
+            for (net.minecraft.world.effect.MobEffectInstance effect : potion.getEffects()) {
+                JsonArray entry = new JsonArray();
+                entry.add(BuiltInRegistries.MOB_EFFECT.getId(effect.getEffect().value()));
+                entry.add(effect.getDuration());
+                entry.add(effect.getAmplifier());
+                effects.add(entry);
+            }
+            out.add(effects);
+        }
         return out;
     }
 

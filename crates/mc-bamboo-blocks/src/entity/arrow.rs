@@ -15,6 +15,47 @@ pub enum Pickup {
     CreativeOnly,
 }
 
+/// 箭的两种官方类：`Arrow` 和 `SpectralArrow`。
+///
+/// 两者共用 `AbstractArrow` 的飞行、命中和持久化，只有命中后的效果和实体类型不同。
+///
+/// The two official classes: `Arrow` and `SpectralArrow`. They share
+/// `AbstractArrow` flight, impacts and persistence; only the post-hit effect
+/// and the entity type differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArrowVariant {
+    #[default]
+    Normal,
+    /// `SpectralArrow`，`duration` 是发光刻数（默认 200）。
+    ///
+    /// `SpectralArrow`; `duration` is the glowing tick count (default 200).
+    Spectral { duration: i32 },
+}
+
+impl ArrowVariant {
+    /// 注册表里的实体类型。
+    ///
+    /// The registry entity type.
+    pub const fn entity_type(self) -> i32 {
+        match self {
+            Self::Normal => mc_bamboo_data::registries::entity_type::ARROW,
+            Self::Spectral { .. } => mc_bamboo_data::registries::entity_type::SPECTRAL_ARROW,
+        }
+    }
+
+    /// 按弹药物品决定箭的种类。`SpectralArrowItem.createArrow` 造 `SpectralArrow`。
+    ///
+    /// The variant chosen by the ammo item; `SpectralArrowItem.createArrow`
+    /// builds a `SpectralArrow`.
+    pub fn of_ammo(ammo: &ItemStack) -> Self {
+        if ammo.item == item::SPECTRAL_ARROW {
+            Self::Spectral { duration: 200 }
+        } else {
+            Self::Normal
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArrowPublic {
     pub uuid: [u8; 16],
@@ -29,6 +70,7 @@ pub struct ArrowPublic {
     pub no_gravity: bool,
     pub needs_sync: bool,
     pub sync_velocity: bool,
+    pub variant: ArrowVariant,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +92,7 @@ pub struct Arrow {
     pub last_state: Option<BlockState>,
     pub sound: u16,
     pub left_owner: bool,
+    pub variant: ArrowVariant,
     /// `Projectile.leftOwnerChecked`：同一刻内只查一次，每刻末尾由 `Projectile.tick` 清掉。
     ///
     /// `Projectile.leftOwnerChecked`: at most one check per tick, cleared by
@@ -86,6 +129,7 @@ impl Default for Arrow {
             needs_sync: false,
             sync_velocity: false,
             pierced: Vec::new(),
+            variant: ArrowVariant::Normal,
         }
     }
 }
@@ -105,6 +149,7 @@ impl Arrow {
             no_gravity: self.no_gravity,
             needs_sync: self.needs_sync,
             sync_velocity: self.sync_velocity,
+            variant: self.variant,
         }
     }
 }
@@ -118,10 +163,64 @@ impl Entity {
         Self::new(EntityKind::Arrow(Box::default()), position)
     }
 
+    /// 一次射箭的输入。玩家弓、弩和发射器都走这里，区别只在弹药、武器和拾取方式。
+    ///
+    /// One shot's inputs. The player bow, crossbow and dispenser all use this;
+    /// only ammo, weapon and pickup mode differ.
+    pub fn arrow_from_shot(shot: ArrowShot) -> Self {
+        let mut entity = Self::configured_arrow(&shot);
+        entity.shoot_arrow_with_movement(
+            shot.direction,
+            shot.power,
+            shot.uncertainty,
+            shot.source_movement,
+        );
+        entity
+    }
+
+    /// 只设字段、不射。调用方先用 [`EntityStore::prepare`] 拿种子和 UUID，再射。
+    ///
+    /// Configure only. The caller lets [`EntityStore::prepare`] draw the seed and
+    /// UUID first, then shoots.
+    pub fn configured_arrow(shot: &ArrowShot) -> Self {
+        let mut entity = Self::arrow(shot.position);
+        let EntityKind::Arrow(arrow) = &mut entity.kind else {
+            unreachable!()
+        };
+        arrow.variant = ArrowVariant::of_ammo(&shot.ammo);
+        arrow.pickup = shot.pickup;
+        arrow.pickup_item = shot.ammo.clone();
+        arrow.owner = shot.owner;
+        arrow.owner_uuid = shot.owner_uuid;
+        arrow.weapon = shot.weapon.clone();
+        arrow.base_damage = 2.0;
+        if let Some(weapon) = &arrow.weapon {
+            arrow.pierce = enchantment_level(weapon, "minecraft:piercing") as i8;
+            if enchantment_level(weapon, "minecraft:flame") > 0 {
+                entity.remaining_fire_ticks = 2000;
+            }
+        }
+        arrow.critical = shot.critical;
+        entity
+    }
+
     /// Projectile.shoot：先归一化，再按 XYZ 顺序抽散布，最后乘速度。
     ///
     /// Projectile.shoot normalizes first, draws spread in XYZ order, then scales.
     pub fn shoot_arrow(&mut self, direction: Vec3, power: f32, uncertainty: f32) {
+        self.shoot_arrow_with_movement(direction, power, uncertainty, None);
+    }
+
+    /// `Projectile.shootFromRotation` 的最后一步：再加上射手的已知移动。
+    ///
+    /// The last step of `Projectile.shootFromRotation`: add the shooter's known movement.
+    pub fn shoot_arrow_with_movement(
+        &mut self,
+        direction: Vec3,
+        power: f32,
+        uncertainty: f32,
+        source_movement: Option<Vec3>,
+    ) {
         let EntityKind::Arrow(arrow) = &mut self.kind else {
             return;
         };
@@ -134,12 +233,46 @@ impl Entity {
                 self.random.triangle(0.0, spread),
             ))
             .scale(f64::from(power));
+        if let Some(movement) = source_movement {
+            let y = if self.on_ground { 0.0 } else { movement.y };
+            self.delta = self.delta.add(Vec3::new(movement.x, y, movement.z));
+        }
         let (yaw, pitch) = rotation(self.delta);
         self.y_rot = yaw;
         arrow.pitch = pitch;
         arrow.life = 0;
         arrow.needs_sync = true;
     }
+}
+
+/// [`Entity::arrow_from_shot`] 的输入。
+///
+/// The inputs to [`Entity::arrow_from_shot`].
+#[derive(Debug, Clone)]
+pub struct ArrowShot {
+    pub position: Vec3,
+    /// 射手视线方向，`shootFromRotation` 的 `(x, y, z)`；发射器传朝向的步长。
+    ///
+    /// The shooter's view vector; the dispenser passes the facing step.
+    pub direction: Vec3,
+    pub power: f32,
+    pub uncertainty: f32,
+    /// `ServerPlayer.lastKnownClientMovement`；发射器为 `None`。
+    ///
+    /// `ServerPlayer.lastKnownClientMovement`; `None` for a dispenser.
+    pub source_movement: Option<Vec3>,
+    pub owner: Option<EntityUid>,
+    pub owner_uuid: Option<[u8; 16]>,
+    /// 弹药物品，原样写进 `pickup`（含药水组件）。
+    ///
+    /// The ammo stack, stored as-is for pickup (including potion components).
+    pub ammo: ItemStack,
+    /// 弓或弩；发射器为 `None`。
+    ///
+    /// The bow or crossbow; `None` for a dispenser.
+    pub weapon: Option<ItemStack>,
+    pub critical: bool,
+    pub pickup: Pickup,
 }
 
 fn rotation(movement: Vec3) -> (f32, f32) {
@@ -566,6 +699,16 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
     };
     if accepted {
         play_hit_sound(me, world);
+        // 官方 `LivingEntity` 目标上的 `doKnockback` 和 `doPostHurtEffects` 都在
+        // 受伤成功之后；玩家目标只做药水效果（玩家击退不走实体推力）。
+        //
+        // Vanilla runs `doKnockback` and `doPostHurtEffects` on a living
+        // target after a successful hurt. Player targets only get the potion
+        // effects; player knockback does not go through an entity push.
+        if !hit.player {
+            apply_punch_knockback(me, world, hit.uid);
+        }
+        apply_post_hurt_effects(me, world, hit.uid, hit.player);
         if arrow_pierces(me) {
             return true;
         }
@@ -590,6 +733,142 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
     arrow_pierces(me) && !me.removed
 }
 
+/// `AbstractArrow.doKnockback`：冲击附魔在受伤成功后再推一次。
+///
+/// `AbstractArrow.doKnockback`: the Punch enchantment pushes again after a
+/// successful hurt.
+fn apply_punch_knockback(me: &Entity, world: &mut World<'_>, target: EntityUid) {
+    let EntityKind::Arrow(arrow) = &me.kind else {
+        return;
+    };
+    let Some(weapon) = &arrow.weapon else {
+        return;
+    };
+    let level = enchantment_level(weapon, "minecraft:punch");
+    if level <= 0 {
+        return;
+    }
+    let horizontal = Vec3::new(me.delta.x, 0.0, me.delta.z);
+    if horizontal.length_sqr() == 0.0 {
+        return;
+    }
+    let direction = horizontal.normalize();
+    let knockback = f64::from(level as f32);
+    world.with_entity_mut(target, &mut |entity| {
+        let Some(mob) = entity.kind.mob() else {
+            return;
+        };
+        let resistance = mob
+            .attributes
+            .value(mc_bamboo_data::registries::attribute::KNOCKBACK_RESISTANCE)
+            .max(0.0);
+        let scale = knockback * 0.6 * (1.0 - resistance).max(0.0);
+        let movement = direction.scale(scale);
+        if movement.length_sqr() > 0.0 {
+            // `Entity.push`：直接加到速度上。
+            //
+            // `Entity.push`: added straight to the velocity.
+            entity.delta = entity.delta.add(Vec3::new(movement.x, 0.1, movement.z));
+        }
+    });
+}
+
+/// `Arrow.doPostHurtEffects` 和 `SpectralArrow.doPostHurtEffects`。
+///
+/// Vanilla's `Arrow.doPostHurtEffects` and `SpectralArrow.doPostHurtEffects`.
+fn apply_post_hurt_effects(me: &Entity, world: &mut World<'_>, target: EntityUid, player: bool) {
+    let EntityKind::Arrow(arrow) = &me.kind else {
+        return;
+    };
+    let effects = match arrow.variant {
+        ArrowVariant::Spectral { duration } => {
+            vec![crate::entity::mob::effects::EffectInstance::new(
+                mc_bamboo_data::registries::mob_effect::GLOWING,
+                duration,
+            )]
+        }
+        ArrowVariant::Normal => potion_effect_instances(arrow),
+    };
+    for effect in effects {
+        if crate::entity::mob::effects::is_instantaneous(effect.effect) {
+            // 官方 `LivingEntity.addEffect` 对瞬间效果当场结算。
+            //
+            // Vanilla `LivingEntity.addEffect` settles instantaneous effects at once.
+            if player {
+                world.instant_player_effect(target, effect.effect, effect.amplifier);
+            } else {
+                world.apply_mob_instant_effect(target, effect.effect, effect.amplifier);
+            }
+        } else if player {
+            world.give_player_effect(target, effect);
+        } else {
+            world.add_mob_effect(target, effect);
+        }
+    }
+}
+
+/// `PotionContents.forEachEffect`：先基础药水，再自定义效果，时长按组件缩放。
+///
+/// `PotionContents.forEachEffect`: the base potion first, then the custom
+/// effects, with durations scaled by the component.
+fn potion_effect_instances(arrow: &Arrow) -> Vec<crate::entity::mob::effects::EffectInstance> {
+    use crate::entity::mob::effects::EffectInstance;
+    use mc_bamboo_data::registries::data_component_type as kinds;
+    use mc_bamboo_protocol::components::{ComponentValue, defaults};
+
+    let patch = arrow.pickup_item.patch();
+    let Some(ComponentValue::PotionContents {
+        potion,
+        custom_effects,
+        ..
+    }) = defaults::resolve(arrow.pickup_item.item, &patch, kinds::POTION_CONTENTS)
+    else {
+        return Vec::new();
+    };
+    let scale =
+        match defaults::resolve(arrow.pickup_item.item, &patch, kinds::POTION_DURATION_SCALE) {
+            Some(ComponentValue::PotionDurationScale(scale)) => *scale,
+            _ => 1.0,
+        };
+    let mut out = Vec::new();
+    if let Some(potion) = potion
+        && let Some(effects) = mc_bamboo_data::potions::effects(*potion)
+    {
+        for &(effect, duration, amplifier) in effects {
+            out.push(EffectInstance::with_amplifier(
+                effect,
+                scaled_duration(duration, scale),
+                amplifier,
+            ));
+        }
+    }
+    for instance in custom_effects {
+        let details = &instance.details;
+        let mut effect = EffectInstance::with_flags(
+            instance.effect,
+            scaled_duration(details.duration, scale),
+            details.amplifier,
+            details.ambient,
+            details.show_particles,
+        );
+        effect.show_icon = details.show_icon;
+        out.push(effect);
+    }
+    out
+}
+
+/// `MobEffectInstance.withScaledDuration`：无限时长和 0 不缩放，其余至少 1 刻。
+///
+/// `MobEffectInstance.withScaledDuration`: infinite and zero durations stay,
+/// everything else gets at least one tick.
+fn scaled_duration(duration: i32, scale: f32) -> i32 {
+    if duration <= 0 {
+        duration
+    } else {
+        (((duration as f32) * scale) as i32).max(1)
+    }
+}
+
 fn impact_damage(arrow: &Arrow) -> f64 {
     let Some(weapon) = &arrow.weapon else {
         return arrow.base_damage;
@@ -602,7 +881,10 @@ fn impact_damage(arrow: &Arrow) -> f64 {
     f64::from(damage)
 }
 
-pub(super) fn enchantment_level(stack: &ItemStack, enchantment: &str) -> i32 {
+/// 武器上某个附魔的等级；没有 `enchantments` 组件时是 0。
+///
+/// One enchantment's level on a stack; 0 without an `enchantments` component.
+pub fn enchantment_level(stack: &ItemStack, enchantment: &str) -> i32 {
     use mc_bamboo_data::registries::{SYNCED_REGISTRIES, data_component_type::ENCHANTMENTS};
     use mc_bamboo_protocol::components::{ComponentValue, defaults};
 
@@ -869,6 +1151,148 @@ mod tests {
         );
         world.tick_entities();
         assert!(world.entity(uid).is_none());
+    }
+
+    #[test]
+    fn spectral_arrows_glow_the_target() {
+        use crate::entity::mob::MobType;
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let target =
+            world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(3.0, 64.0, 0.5)));
+        let arrow = Entity::arrow_from_shot(ArrowShot {
+            position: Vec3::new(0.5, 65.0, 0.5),
+            direction: Vec3::new(1.0, 0.0, 0.0),
+            power: 6.0,
+            uncertainty: 0.0,
+            source_movement: None,
+            owner: None,
+            owner_uuid: None,
+            ammo: ItemStack::new(item::SPECTRAL_ARROW, 1),
+            weapon: None,
+            critical: false,
+            pickup: Pickup::Allowed,
+        });
+        world.spawn_entity(arrow);
+        world.tick_entities();
+        let entity = world.entity(target).unwrap();
+        let mob = entity.kind.mob().unwrap();
+        assert!(
+            mob.effects
+                .has(mc_bamboo_data::registries::mob_effect::GLOWING)
+        );
+        assert_eq!(
+            mob.effects
+                .get(mc_bamboo_data::registries::mob_effect::GLOWING)
+                .map(|effect| effect.duration),
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn a_tipped_arrow_applies_its_potion_effects() {
+        use crate::entity::mob::MobType;
+        use mc_bamboo_data::registries::{data_component_type as kinds, mob_effect};
+        use mc_bamboo_protocol::components::{ComponentPatch, ComponentValue, PatchEntry};
+
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let target =
+            world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(3.0, 64.0, 0.5)));
+        let mut ammo = ItemStack::new(item::TIPPED_ARROW, 1);
+        let mut patch = ComponentPatch::new();
+        patch.put(
+            kinds::POTION_CONTENTS,
+            PatchEntry::Set(ComponentValue::PotionContents {
+                potion: Some(mc_bamboo_data::registries::potion::POISON),
+                custom_color: None,
+                custom_effects: Vec::new(),
+                custom_name: None,
+            }),
+        );
+        let (added, removed) = patch.to_opaque();
+        ammo.added = added;
+        ammo.removed = removed;
+        let arrow = Entity::arrow_from_shot(ArrowShot {
+            position: Vec3::new(0.5, 65.0, 0.5),
+            direction: Vec3::new(1.0, 0.0, 0.0),
+            power: 6.0,
+            uncertainty: 0.0,
+            source_movement: None,
+            owner: None,
+            owner_uuid: None,
+            ammo,
+            weapon: None,
+            critical: false,
+            pickup: Pickup::Allowed,
+        });
+        world.spawn_entity(arrow);
+        world.tick_entities();
+        let entity = world.entity(target).unwrap();
+        let mob = entity.kind.mob().unwrap();
+        assert!(mob.effects.has(mob_effect::POISON));
+        assert_eq!(
+            mob.effects
+                .get(mob_effect::POISON)
+                .map(|effect| effect.duration),
+            Some(112),
+            "药水箭的 `potion_duration_scale` 是 0.125，45 秒的毒变成 112 刻"
+        );
+    }
+
+    #[test]
+    fn punch_pushes_the_target_along_the_arrow() {
+        use crate::entity::mob::MobType;
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let target =
+            world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(3.0, 64.0, 0.5)));
+        let mut weapon = ItemStack::new(item::BOW, 1);
+        let mut patch = mc_bamboo_protocol::components::ComponentPatch::new();
+        patch.put(
+            mc_bamboo_data::registries::data_component_type::ENCHANTMENTS,
+            mc_bamboo_protocol::components::PatchEntry::Set(
+                mc_bamboo_protocol::components::ComponentValue::Enchantments(vec![(
+                    enchantment_id("minecraft:punch"),
+                    1,
+                )]),
+            ),
+        );
+        let (added, removed) = patch.to_opaque();
+        weapon.added = added;
+        weapon.removed = removed;
+        let arrow = Entity::arrow_from_shot(ArrowShot {
+            position: Vec3::new(0.5, 65.0, 0.5),
+            direction: Vec3::new(1.0, 0.0, 0.0),
+            power: 6.0,
+            uncertainty: 0.0,
+            source_movement: None,
+            owner: None,
+            owner_uuid: None,
+            ammo: ItemStack::new(item::ARROW, 1),
+            weapon: Some(weapon),
+            critical: false,
+            pickup: Pickup::Allowed,
+        });
+        world.spawn_entity(arrow);
+        world.tick_entities();
+        let entity = world.entity(target).unwrap();
+        assert!(
+            entity.delta.x > 0.0,
+            "冲击附魔把目标沿箭的方向推出去，got {:?}",
+            entity.delta
+        );
+    }
+
+    fn enchantment_id(name: &str) -> i32 {
+        mc_bamboo_data::registries::SYNCED_REGISTRIES
+            .iter()
+            .find(|registry| registry.name == "minecraft:enchantment")
+            .and_then(|registry| registry.entries.iter().position(|entry| *entry == name))
+            .expect("enchantment is registered") as i32
     }
 
     #[test]

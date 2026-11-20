@@ -17,14 +17,20 @@
 //! Arrows, eggs, snowballs, potions, fireworks, fire charges and wind charges take the default
 //! throw. Official uses a projectile event for those, not these random draws.
 
-use mc_bamboo_core::{BlockPos, Direction};
+use mc_bamboo_core::{BlockPos, Direction, Vec3};
 use mc_bamboo_data::{
     items, registries::data_component_type as kinds, tags::block_tags, tags::fluid_tags,
 };
 use mc_bamboo_protocol::{components::defaults, item::ItemStack};
 
 use super::{Shot, nested_default, throw_one};
-use crate::{behaviour::common::item_of, dispenser::without_one, world::World};
+use crate::{
+    behaviour::common::item_of,
+    container::copy_with_count,
+    dispenser::without_one,
+    entity::arrow::{ArrowShot, Pickup},
+    world::World,
+};
 
 pub(super) fn handles(item: i32) -> bool {
     is_projectile(item)
@@ -41,6 +47,9 @@ pub(super) fn execute(
     stack: ItemStack,
 ) -> Shot {
     let item = stack.item;
+    if is_arrow(item) {
+        return arrow(world, pos, facing, stack);
+    }
     if is_projectile(item) {
         return Shot::plain(throw_one(world, pos, facing, stack));
     }
@@ -144,6 +153,40 @@ fn minecart(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStac
     } else {
         Shot::plain(nested_default(world, pos, facing, stack))
     }
+}
+
+/// `ProjectileDispenseBehavior` 里注册成弹射物的箭。`ArrowItem.asProjectile` 生成可拾取的箭。
+///
+/// An arrow registered as a projectile. `ArrowItem.asProjectile` builds a
+/// pickup-capable arrow.
+fn arrow(world: &mut World, pos: BlockPos, facing: Direction, stack: ItemStack) -> Shot {
+    let (x, y, z) = facing.normal();
+    // `DispenserBlock.getDispensePosition(source, 0.7, new Vec3(0, 0.1, 0))`。
+    //
+    // `DispenserBlock.getDispensePosition(source, 0.7, new Vec3(0, 0.1, 0))`.
+    let position = super::dispense_position(pos, facing).add(Vec3::new(0.0, 0.1, 0.0));
+    let shot = ArrowShot {
+        position,
+        direction: Vec3::new(f64::from(x), f64::from(y), f64::from(z)),
+        power: 1.1,
+        uncertainty: 6.0,
+        source_movement: None,
+        owner: None,
+        owner_uuid: None,
+        ammo: copy_with_count(&stack, 1),
+        weapon: None,
+        critical: false,
+        pickup: Pickup::Allowed,
+    };
+    world.spawn_arrow_shot(shot);
+    Shot::with_event(without_one(&stack), 1002)
+}
+
+fn is_arrow(item: i32) -> bool {
+    matches!(
+        item,
+        items::ARROW | items::TIPPED_ARROW | items::SPECTRAL_ARROW
+    )
 }
 
 fn is_projectile(item: i32) -> bool {
