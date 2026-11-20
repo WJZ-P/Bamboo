@@ -100,7 +100,7 @@ impl LevelType {
 /// structures only; Bamboo's flat terrain fills just layers and biome, so they
 /// are stored but do not affect `flat_chunk` (see README known limitations).
 /// An empty `{}` falls back to the `server.properties` default flat preset.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlatSettings {
     /// 从世界底部往上的 `(默认状态 ID, 层数)`。
     pub layers: Vec<(u32, i32)>,

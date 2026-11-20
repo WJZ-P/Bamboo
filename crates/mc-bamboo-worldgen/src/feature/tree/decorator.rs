@@ -864,6 +864,7 @@ impl<'r, 'a, 'w> Context<'r, 'a, 'w> {
             // modifiers and starts one block above the lowest log.
             let feature_name = serde_json::Value::String("minecraft:pale_moss_patch".to_owned());
             let mut env = PlacementEnv {
+                flat: None,
                 generation: context.generation,
                 biome_at: self.biome_at,
                 registry: context.registry,

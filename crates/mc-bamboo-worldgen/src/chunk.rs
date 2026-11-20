@@ -904,6 +904,40 @@ impl<'a> Generator<'a> {
         ),
         String,
     > {
+        self.run_decoration(input, steps_mask, allowed_kinds, structures, None)
+    }
+
+    pub fn features_flat(
+        &self,
+        input: &crate::feature::FeatureChunks,
+        steps_mask: i32,
+        allowed_kinds: Option<&[String]>,
+        structures: Option<&crate::structure::place_step::StructurePlacement<'_>>,
+        flat: &crate::feature::flat::FlatDecoration<'_>,
+    ) -> Result<
+        (
+            crate::feature::FeatureResult,
+            Option<crate::structure::place_step::PlaceStats>,
+        ),
+        String,
+    > {
+        self.run_decoration(input, steps_mask, allowed_kinds, structures, Some(flat))
+    }
+
+    fn run_decoration(
+        &self,
+        input: &crate::feature::FeatureChunks,
+        steps_mask: i32,
+        allowed_kinds: Option<&[String]>,
+        structures: Option<&crate::structure::place_step::StructurePlacement<'_>>,
+        flat: Option<&crate::feature::flat::FlatDecoration<'_>>,
+    ) -> Result<
+        (
+            crate::feature::FeatureResult,
+            Option<crate::structure::place_step::PlaceStats>,
+        ),
+        String,
+    > {
         let biomes = BiomeManager::new(self.biomes, self.seed);
         // `WorldGenRegion.random`：`getOrCreateRandomFactory("worldgen_region_random")`
         // 在中心区块的**世界原点**（`center.getWorldPosition()`）上取一个随机源。
@@ -922,11 +956,13 @@ impl<'a> Generator<'a> {
         // `MossyCarpetBlock.placeAt`'s `nextBoolean()` is
         // `XoroshiroRandomSource.nextBoolean() = (nextLong() & 1) != 0` (the low bit).
         // Wrapping it in `WorldgenRandom` would use `next(1)` (the high bit).
-        let region_random = self
-            .region_random
-            .at(input.center_x * 16, 0, input.center_z * 16);
+        let factory = flat.map_or(self.region_random, |_| {
+            Compiler::new(self.seed, false).random_factory("minecraft:worldgen_region_random")
+        });
+        let region_random = factory.at(input.center_x * 16, 0, input.center_z * 16);
         let context = crate::feature::run::FeatureContext {
             registry: &self.features,
+            flat,
             samplers: &self.router,
             biomes: &biomes,
             settings: self.settings,

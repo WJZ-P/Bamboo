@@ -412,6 +412,7 @@ pub(crate) fn place_child<'a>(
     // 官方 `PlacedFeature.place` 是 `placeWithBiomeCheck=false`，topFeature 为空。
     // Official `PlacedFeature.place` uses `placeWithBiomeCheck=false` (empty topFeature).
     let mut child_env = PlacementEnv {
+        flat: env.flat,
         generation: env.generation,
         biome_at: &mut *env.biome_at,
         registry: env.registry,

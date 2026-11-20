@@ -113,7 +113,7 @@ pub(crate) fn with_generator<T>(
     let settings_id = config
         .level_type
         .settings_id()
-        .ok_or_else(|| "flat worlds have no noise generator".to_owned())?;
+        .unwrap_or("minecraft:overworld");
     let key = (config.seed, settings_id);
     GENERATORS.with(|cache| {
         let mut cache = cache.borrow_mut();
@@ -409,7 +409,9 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
     let mut y = MIN_Y;
     for &(state, thickness) in &config.flat.layers {
         for _ in 0..thickness {
-            if (0..WORLD_HEIGHT).contains(&(y - MIN_Y)) {
+            if (0..WORLD_HEIGHT).contains(&(y - MIN_Y))
+                && mc_bamboo_worldgen::feature::flat::terrain_layer(state)
+            {
                 blocks[(y - MIN_Y) as usize].fill(state);
             }
             y += 1;
@@ -431,7 +433,14 @@ fn flat_chunk(config: &WorldGenConfig) -> GeneratedChunk {
 /// Terrain cache key: `(seed, settings, x, z, has Beardifier)`. Terrain with
 /// structure influence differs from the `Beardifier.EMPTY` one, so the two must
 /// not share an entry. Terrain is pure; a hit only affects speed.
-type TerrainCacheKey = (i64, Option<&'static str>, i32, i32, bool);
+type TerrainCacheKey = (
+    i64,
+    Option<&'static str>,
+    i32,
+    i32,
+    bool,
+    Option<crate::world_options::FlatSettings>,
+);
 
 /// 全进程共用的地形缓存上限：256 MiB。
 ///
@@ -725,6 +734,7 @@ fn cached_terrain(
         x,
         z,
         beardifier.is_some(),
+        config.level_type.is_flat().then(|| config.flat.clone()),
     );
     let shards = terrain_shards();
     let index = shard_index(&key);
@@ -753,7 +763,7 @@ fn cached_terrain(
             existing
         } else {
             let slot = Arc::new(OnceLock::new());
-            shard.inflight.insert(key, Arc::clone(&slot));
+            shard.inflight.insert(key.clone(), Arc::clone(&slot));
             shard.misses += 1;
             LOOKUP_MISSES.fetch_add(1, Ordering::Relaxed);
             slot
@@ -810,7 +820,7 @@ fn cached_terrain(
     let mut cleanup = Cleanup {
         shards,
         index,
-        key,
+        key: key.clone(),
         slot: &slot,
         armed: true,
     };
@@ -880,7 +890,7 @@ fn cached_terrain(
     let bytes = generated_chunk_heap_bytes(&chunk);
     let thread_id = MEASURE_THREAD_ID.with(|id| *id);
     if let Ok(mut shard) = shards[index].lock() {
-        let computed = shard.computed_by.entry(key).or_default();
+        let computed = shard.computed_by.entry(key.clone()).or_default();
         if !computed.contains(&thread_id) {
             computed.push(thread_id);
         }
@@ -891,10 +901,10 @@ fn cached_terrain(
             // waiter that re-ran restores it so the two maps stay in sync.
             shard
                 .inflight
-                .entry(key)
+                .entry(key.clone())
                 .or_insert_with(|| Arc::clone(&slot));
-            shard.order.push_back(key);
-            shard.entries.insert(key, Arc::clone(&chunk));
+            shard.order.push_back(key.clone());
+            shard.entries.insert(key.clone(), Arc::clone(&chunk));
             shard.bytes += bytes;
             let total = TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
             PEAK_BYTES.fetch_max(total, Ordering::Relaxed);
@@ -1407,7 +1417,7 @@ mod tests {
         let fresh: Inflight = Arc::new(OnceLock::new());
         {
             let mut shard = shards[index].lock().expect("shard");
-            shard.inflight.insert(key, Arc::clone(&old));
+            shard.inflight.insert(key.clone(), Arc::clone(&old));
         }
         // 用 Err 路径的清理条件（同一个 Arc 才删）验证不会删掉 fresh。
         // The cleanup condition must not delete `fresh`.
@@ -1419,7 +1429,7 @@ mod tests {
                     .get(&key)
                     .is_some_and(|current| Arc::ptr_eq(current, &fresh))
             );
-            shard.inflight.insert(key, Arc::clone(&fresh));
+            shard.inflight.insert(key.clone(), Arc::clone(&fresh));
         }
         {
             let mut shard = shards[index].lock().expect("shard");
