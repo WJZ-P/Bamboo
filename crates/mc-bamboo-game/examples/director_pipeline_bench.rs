@@ -71,6 +71,7 @@ impl Options {
     }
 }
 
+#[cfg(unix)]
 #[repr(C)]
 struct RUsage {
     utime: [i64; 2],
@@ -90,11 +91,13 @@ struct RUsage {
     nvcsw: i64,
     nivcsw: i64,
 }
+#[cfg(unix)]
 #[repr(C)]
 struct TimeSpec {
     sec: i64,
     nsec: i64,
 }
+#[cfg(unix)]
 unsafe extern "C" {
     fn getrusage(who: i32, usage: *mut RUsage) -> i32;
     fn clock_gettime(clock: u32, time: *mut TimeSpec) -> i32;
@@ -106,40 +109,57 @@ unsafe extern "C" {
 /// CPU milliseconds of the calling (world) thread. The measurement loop never
 /// sleeps, so the world thread spins while waiting for the pool; split it out.
 fn thread_cpu_ms() -> f64 {
-    let mut time = TimeSpec { sec: 0, nsec: 0 };
-    let ok = unsafe { clock_gettime(16, &raw mut time) };
-    if ok != 0 {
+    #[cfg(not(unix))]
+    {
         return 0.0;
     }
-    time.sec as f64 * 1000.0 + time.nsec as f64 / 1_000_000.0
+    #[cfg(unix)]
+    {
+        let mut time = TimeSpec { sec: 0, nsec: 0 };
+        let ok = unsafe { clock_gettime(16, &raw mut time) };
+        if ok != 0 {
+            return 0.0;
+        }
+        time.sec as f64 * 1000.0 + time.nsec as f64 / 1_000_000.0
+    }
 }
 /// 进程累计 CPU 毫秒（RUSAGE_SELF=0，macOS timeval 是秒/微秒）。
-/// Process-wide accumulated CPU milliseconds.
+/// Windows 没有 `getrusage` / `clock_gettime`，那里报 0，让基准仍能编译和运行。
+///
+/// Process-wide accumulated CPU milliseconds. Windows has neither syscall, so
+/// it reports 0 and the benchmark still builds.
 fn process_cpu_ms() -> f64 {
-    let mut usage = RUsage {
-        utime: [0; 2],
-        stime: [0; 2],
-        ru_maxrss: 0,
-        ixrss: 0,
-        idrss: 0,
-        isrss: 0,
-        minflt: 0,
-        majflt: 0,
-        nswap: 0,
-        inblock: 0,
-        oublock: 0,
-        msgsnd: 0,
-        msgrcv: 0,
-        nsignals: 0,
-        nvcsw: 0,
-        nivcsw: 0,
-    };
-    let ok = unsafe { getrusage(0, &raw mut usage) };
-    if ok != 0 {
+    #[cfg(not(unix))]
+    {
         return 0.0;
     }
-    (usage.utime[0] + usage.stime[0]) as f64 * 1000.0
-        + (usage.utime[1] + usage.stime[1]) as f64 / 1000.0
+    #[cfg(unix)]
+    {
+        let mut usage = RUsage {
+            utime: [0; 2],
+            stime: [0; 2],
+            ru_maxrss: 0,
+            ixrss: 0,
+            idrss: 0,
+            isrss: 0,
+            minflt: 0,
+            majflt: 0,
+            nswap: 0,
+            inblock: 0,
+            oublock: 0,
+            msgsnd: 0,
+            msgrcv: 0,
+            nsignals: 0,
+            nvcsw: 0,
+            nivcsw: 0,
+        };
+        let ok = unsafe { getrusage(0, &raw mut usage) };
+        if ok != 0 {
+            return 0.0;
+        }
+        (usage.utime[0] + usage.stime[0]) as f64 * 1000.0
+            + (usage.utime[1] + usage.stime[1]) as f64 / 1000.0
+    }
 }
 
 /// tick 到这批区块全部交付、计算池排空再多跑 4 刻；返回期间交付的区块数。
