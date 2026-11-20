@@ -930,6 +930,12 @@ impl Chunk {
         &self.archive
     }
 
+    /// 只改 `InhabitedTime`：[`crate::store::ChunkStore`] 把单独记的累计值写回要存盘或
+    /// 搬走的那一份。
+    pub fn set_inhabited_time(&mut self, ticks: i64) {
+        self.archive.inhabited_time = ticks;
+    }
+
     /// 读盘组装时写入顶层附加信息。
     pub fn set_archive(&mut self, archive: ChunkArchiveMeta) {
         self.archive = archive;

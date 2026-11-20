@@ -383,7 +383,7 @@ impl Level for RegionLevel<'_> {
     }
 
     fn inhabited_time(&self, chunk: mc_bamboo_core::ChunkPos) -> i64 {
-        self.chunks.chunk(chunk).archive().inhabited_time
+        self.chunks.inhabited_time(chunk)
     }
 
     /// 精确驱动里生物打玩家：拼出和区域入口同一组借用，当场走玩家受伤的正式入口。

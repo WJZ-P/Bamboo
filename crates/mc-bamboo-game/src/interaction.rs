@@ -258,6 +258,8 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
 /// 和 `forEachBlockTickingChunk`（里面是 `tickChunk`）是两个独立的循环。Bamboo 按坐标顺序
 /// 遍历，官方按哈希顺序并打乱前者，这是已有的差异。
 pub(crate) fn run_random_ticks(region: &mut Region) {
+    // `tickSpawningChunk` 第一句是 `incrementInhabitedTime`，在 `tickThunder` 之前。
+    crate::spawning_chunks::increment_inhabited_time(region);
     let chunks = random_ticking_chunks(region);
     // 官方 `tickSpawningChunk` 只在下雨且打雷时调 `tickThunder`；晴天一个随机数都不取。
     // 这里先按天气快照短路，避免每 tick 为每个区块建一次方块世界。

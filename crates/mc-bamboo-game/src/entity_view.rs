@@ -79,7 +79,7 @@ impl BlockSource for ReadOnlyWorld<'_> {
     }
 
     fn inhabited_time(&self, chunk: ChunkPos) -> i64 {
-        self.chunks.chunk(chunk).archive().inhabited_time
+        self.chunks.inhabited_time(chunk)
     }
 
     fn section_has_collision(&self, section_x: i32, section_y: i32, section_z: i32) -> bool {

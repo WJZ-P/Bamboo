@@ -103,6 +103,8 @@ mod scoreboard;
 mod secure_chat;
 mod sign;
 mod sleep;
+mod spawning_chunks;
+pub use spawning_chunks::spawning_chunk_candidates;
 pub(crate) mod spawn_landing;
 mod tick_levels;
 mod weather;
