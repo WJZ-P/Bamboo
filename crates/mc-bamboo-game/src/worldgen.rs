@@ -23,6 +23,7 @@ use std::{
     },
 };
 
+use mc_bamboo_core::ChunkPos;
 use mc_bamboo_data::{blocks, registries};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_world::{
@@ -246,11 +247,68 @@ fn compute_heightmaps(blocks: &[Vec<u32>]) -> BTreeMap<&'static str, Vec<i32>> {
     HEIGHTMAP_KEYS.into_iter().zip(columns).collect()
 }
 
-/// 从读盘柱子还原 `GeneratedChunk` 的方块 / 群系 / 四张 FINAL 高度图，
-/// 给非 full 区块续跑 `features` / `light` 阶段当输入。
+/// 从存档元数据里还原 `PostProcessing` 的世界坐标列表（按存档里的标记顺序）。
 ///
-/// Rebuild a `GeneratedChunk` from a decoded column for resumed stages.
-pub fn generated_chunk_from_column(column: &RegionColumn) -> GeneratedChunk {
+/// 存档里是 24 段 packed short 列表，段下标 `s` 对应
+/// `y = MIN_Y + s*16 + ((packed>>4)&15)`，`x` / `z` 取低 8 位的低 / 高半字节。
+///
+/// Restore the world-space `PostProcessing` list from saved archive metadata,
+/// preserving the recorded order. The save stores 24 packed-short section lists.
+pub fn post_processing_from_archive(
+    archive: &mc_bamboo_world::chunk::ChunkArchiveMeta,
+    pos: ChunkPos,
+) -> Vec<(i32, i32, i32)> {
+    let Some(Tag::List(sections)) = archive.post_processing.as_ref() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (section, entries) in sections.iter().enumerate() {
+        let Tag::List(entries) = entries else {
+            continue;
+        };
+        for entry in entries {
+            let Tag::Short(packed) = entry else {
+                continue;
+            };
+            let packed = *packed as u16;
+            let x = (packed & 15) as i32;
+            let y = ((packed >> 4) & 15) as i32;
+            let z = ((packed >> 8) & 15) as i32;
+            out.push((
+                pos.x * 16 + x,
+                MIN_Y + section as i32 * 16 + y,
+                pos.z * 16 + z,
+            ));
+        }
+    }
+    out
+}
+
+/// 把世界坐标的 `PostProcessing` 写进交付盒子的存档元数据（按标记顺序打包）。
+///
+/// Pack world-space `PostProcessing` positions into the delivered column's
+/// archive metadata, preserving mark order.
+pub fn set_post_processing_tag(column: &mut RegionColumn, positions: &[(i32, i32, i32)]) {
+    let mut sections: Vec<Vec<Tag>> = vec![Vec::new(); SECTION_COUNT];
+    for &(x, y, z) in positions {
+        let section = (y - MIN_Y).div_euclid(16);
+        if !(0..SECTION_COUNT as i32).contains(&section) {
+            continue;
+        }
+        let packed = (x & 15) | ((y & 15) << 4) | ((z & 15) << 8);
+        sections[section as usize].push(Tag::Short(packed as i16));
+    }
+    let mut archive = column.chunk_column().chunk().archive().clone();
+    archive.post_processing = Some(Tag::List(sections.into_iter().map(Tag::List).collect()));
+    column.set_archive(archive);
+}
+
+/// 从读盘柱子还原 `GeneratedChunk` 的方块 / 群系 / 四张 FINAL 高度图与
+/// `PostProcessing`，给非 full 区块续跑 `features` / `light` 阶段当输入。
+///
+/// Rebuild a `GeneratedChunk` (blocks, biomes, FINAL heightmaps and
+/// `PostProcessing`) from a decoded column for resumed stages.
+pub fn generated_chunk_from_column(column: &RegionColumn, pos: ChunkPos) -> GeneratedChunk {
     let chunk = column.chunk_column().chunk();
     let mut blocks = Vec::with_capacity(WORLD_HEIGHT as usize);
     for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
@@ -280,6 +338,7 @@ pub fn generated_chunk_from_column(column: &RegionColumn) -> GeneratedChunk {
         blocks,
         biomes,
         heightmaps: compute_heightmaps_public_owned(chunk),
+        post_processing: post_processing_from_archive(chunk.archive(), pos),
     }
 }
 

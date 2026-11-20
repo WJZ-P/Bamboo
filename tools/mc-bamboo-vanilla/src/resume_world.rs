@@ -179,6 +179,7 @@ pub fn run(options: &[&str], java: &str) -> Result<(), String> {
             blocks: state_ids.chunks(256).map(<[u32]>::to_vec).collect(),
             biomes: vec![vec![0_u32; 64]; mc_bamboo_world::SECTION_COUNT],
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
         };
         let words = mc_bamboo_game::worldgen::final_heightmap_words(&generated)
             .map_err(|e| format!("final heightmaps {key:?}: {e}"))?;
@@ -631,6 +632,7 @@ fn official_merged_blocks(java: &str, options: &Options) -> Result<BlockBaseline
             blocks: terrain.chunks(256).map(<[u32]>::to_vec).collect(),
             biomes: Vec::new(),
             heightmaps: Default::default(),
+            post_processing: Vec::new(),
         };
         mc_bamboo_game::worldgen_features::merge_feature_writes(&mut chunk, groups);
         out.insert((seed, x, z), chunk.blocks.into_iter().flatten().collect());

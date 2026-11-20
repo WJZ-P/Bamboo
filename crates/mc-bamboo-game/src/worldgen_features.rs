@@ -570,6 +570,12 @@ pub fn game_pipeline(
 /// eight hold the overflow into the neighbors.
 struct FeatureRun {
     deltas: [Vec<BlockDelta>; 9],
+    /// 中心区块跑完 `features` 后的 `PostProcessing` 世界坐标表：输入地形已有的
+    /// 标记在前，本阶段新标记按调用顺序在后。
+    ///
+    /// The center chunk's `PostProcessing` after `features`: terrain marks from
+    /// the input first, then this stage's new marks in call order.
+    post_processing: Vec<(i32, i32, i32)>,
 }
 
 type FeatureCacheKey = (i64, Option<&'static str>, i32, i32, bool);
@@ -794,7 +800,30 @@ fn compute_feature_run(
     let own = center_writes(cx, cz, &terrain, &result);
     let mut deltas = result.deltas;
     deltas[CENTER] = own;
-    Ok(Arc::new(FeatureRun { deltas }))
+    // 官方 `PostProcessing` 按目标区块分开存；这个缓存条目只服务中心区块，
+    // 所以只留中心坐标上的标记（含输入地形已经带着的）。
+    // Vanilla stores `PostProcessing` per target chunk; this cache entry serves
+    // only the center, so keep the marks that land in it (including input ones).
+    let post_processing = result
+        .post_processing
+        .into_iter()
+        .filter(|&(x, _, z)| x >> 4 == cx && z >> 4 == cz)
+        .collect();
+    Ok(Arc::new(FeatureRun {
+        deltas,
+        post_processing,
+    }))
+}
+
+/// 中心区块跑完 `features` 后的 `PostProcessing`（`compute_feature_run` 的缓存）。
+///
+/// The center chunk's `PostProcessing` after `features`, from the cached run.
+pub fn feature_post_processing(
+    config: &WorldGenConfig,
+    cx: i32,
+    cz: i32,
+) -> Result<Vec<(i32, i32, i32)>, String> {
+    Ok(cached_feature_run(config, cx, cz)?.post_processing.clone())
 }
 
 /// 测试用：只用纯函数（`build_view` 的 3×3 + 8 个邻居中心的溢出）算出一个区块

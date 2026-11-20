@@ -17,8 +17,8 @@ use mc_bamboo_core::{ChunkPos, LightLayer};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_storage::chunk_nbt::{self, ChunkEncodeExtra};
 use mc_bamboo_world::{
-    MIN_Y, SECTION_COUNT, SECTION_SIZE, WORLD_HEIGHT,
-    chunk::{ChunkArchiveMeta, HeightmapKind},
+    MIN_Y, SECTION_COUNT, WORLD_HEIGHT,
+    chunk::ChunkArchiveMeta,
     light::{DataLayer, LIGHT_SECTION_COUNT, MIN_LIGHT_SECTION, SectionPos},
     ticket::ChunkStatus,
 };
@@ -62,6 +62,8 @@ pub struct ResumedChunk {
     pub block_entities: Vec<(String, String)>,
     /// 顶层 `structures`（`starts` + `References`）的 SNBT。
     pub structures: String,
+    /// 完工后的 `PostProcessing`：24 段 packed short 列表，按标记顺序。
+    pub post_processing: Vec<Vec<u16>>,
     /// 下一次写盘写出的 `Status`。
     pub saved_status: ChunkStatus,
     /// 下一次写盘写出的未压缩 NBT 字节，供「Bamboo 写 → Bamboo 读」往返用。
@@ -77,6 +79,8 @@ pub enum ResumeBreak {
     DropNeighborWrites,
     /// 故意把 `LIGHT` 阶段的光照清空，确认光照比较器会报不一致。
     ClearGeneratedLight,
+    /// 读回时丢掉盘上的 `PostProcessing`，确认表比较器会报不一致。
+    DiscardPostProcessing,
 }
 
 /// 读回一份盘上的区块，按它的 `Status` 续跑到 `full`，返回完工数据。
@@ -135,11 +139,24 @@ pub fn resume_chunk(
     // from terrain on, rebuild the CARVERS-like `GeneratedChunk` from the disk
     // blocks so features/light can consume them.
     let mut partial = if disk_status.is_after_terrain() {
-        Some(Arc::new(generated_from_column(&column)))
+        Some(Arc::new(crate::worldgen::generated_chunk_from_column(
+            &column, case.pos,
+        )))
     } else {
         None
     };
     let mut deltas: Vec<crate::worldgen_features::FeatureWrites> = Vec::new();
+    // 盘上的 `PostProcessing` 是已跑阶段留下的标记，续跑新阶段的标记再往后加。
+    // 改坏确认可以在这里故意丢掉盘上的表。
+    // The on-disk `PostProcessing` holds marks from finished stages; resumed
+    // stages append after them. The break confirmation drops the disk table.
+    let mut post_processing = crate::worldgen::post_processing_from_archive(
+        column.chunk_column().chunk().archive(),
+        case.pos,
+    );
+    if break_kind == Some(ResumeBreak::DiscardPostProcessing) {
+        post_processing.clear();
+    }
     // 官方 `SerializableChunkData.read`：`Status >= LIGHT` 且 `isLightOn` 为真时
     // 盘上的光照段灌进光引擎，`light` 步也不重算（`isLighted` 返回真）。
     // 这里把盘上的两层光照原样留到完工组装。
@@ -196,6 +213,14 @@ pub fn resume_chunk(
             &mut structures,
             output,
         );
+        if stage == ChunkStatus::Features {
+            // `features` 跑完后的表 = 输入地形已有的标记 + 本阶段新标记；
+            // 在干净的 3×3 上算出的这份和盘上地形标记一致，直接替换。
+            // After `features`, the table is terrain marks plus new marks; the
+            // clean 3x3 run reproduces the same terrain marks, so replace.
+            post_processing =
+                crate::worldgen_features::feature_post_processing(config, case.pos.x, case.pos.z)?;
+        }
     }
 
     // 完工组装：官方 `full` 步把 ProtoChunk 变成 LevelChunk，Bamboo 把
@@ -259,6 +284,7 @@ pub fn resume_chunk(
         }
         set_persisted_status(&mut column, ChunkStatus::Full);
     }
+    crate::worldgen::set_post_processing_tag(&mut column, &post_processing);
     let saved_nbt = chunk_nbt::encode_bytes(
         column.chunk_column(),
         &encode_extra_from_disk(case.pos, &decoded),
@@ -309,7 +335,10 @@ fn encode_extra_from_disk(
         inhabited_time: decoded.inhabited_time,
         preserved: decoded.preserved.clone(),
         structures: Some(decoded.structures.clone()),
-        post_processing: Some(decoded.post_processing.clone()),
+        // 列上的表已经是续跑累加后的最终表（`set_post_processing_tag`），
+        // 不能再用盘上的旧表覆盖。
+        // The column already carries the final accumulated table.
+        post_processing: None,
         raw_block_entities: None,
         raw_heightmaps: None,
         block_ticks: decoded.block_ticks.clone(),
@@ -339,6 +368,7 @@ fn rebuild_final_heightmaps(column: &RegionColumn) -> BTreeMap<&'static str, Vec
         blocks,
         biomes: vec![vec![0_u32; 64]; SECTION_COUNT],
         heightmaps: BTreeMap::new(),
+        post_processing: Vec::new(),
     };
     crate::worldgen::compute_heightmaps_public(&generated)
 }
@@ -362,55 +392,6 @@ fn light_from_column(column: &RegionColumn) -> mc_bamboo_world::light::generate:
     mc_bamboo_world::light::generate::GeneratedLight {
         sky: layers(LightLayer::Sky),
         block: layers(LightLayer::Block),
-    }
-}
-
-/// 把读盘柱子的方块 / 群系 / 高度图还原成 `GeneratedChunk`（CARVERS 形状的纯数据）。
-fn generated_from_column(column: &RegionColumn) -> GeneratedChunk {
-    let chunk = column.chunk_column().chunk();
-    let mut blocks = Vec::with_capacity(usize::try_from(WORLD_HEIGHT).unwrap_or(384));
-    for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
-        let mut layer = vec![0_u32; 256];
-        for x in 0..16 {
-            for z in 0..16 {
-                layer[x * 16 + z] = chunk.block(x, y, z);
-            }
-        }
-        blocks.push(layer);
-    }
-    let mut biomes = Vec::with_capacity(SECTION_COUNT);
-    for section in 0..SECTION_COUNT {
-        let y = MIN_Y + section as i32 * SECTION_SIZE;
-        let mut cells = vec![0_u32; 64];
-        for qx in 0..4 {
-            for qy in 0..4 {
-                for qz in 0..4 {
-                    cells[qx * 16 + qy * 4 + qz] =
-                        chunk.biome_at(qx * 4, y + (qy * 4) as i32, qz * 4);
-                }
-            }
-        }
-        biomes.push(cells);
-    }
-    let mut heightmaps = BTreeMap::new();
-    for (kind, key) in HeightmapKind::ALL.into_iter().zip([
-        "WORLD_SURFACE",
-        "OCEAN_FLOOR",
-        "MOTION_BLOCKING",
-        "MOTION_BLOCKING_NO_LEAVES",
-    ]) {
-        let mut columns = vec![0_i32; 256];
-        for x in 0..16 {
-            for z in 0..16 {
-                columns[x + z * 16] = chunk.heightmap_y(kind, x, z);
-            }
-        }
-        heightmaps.insert(key, columns);
-    }
-    GeneratedChunk {
-        blocks,
-        biomes,
-        heightmaps,
     }
 }
 
@@ -438,6 +419,16 @@ fn snapshot_resumed(pos: ChunkPos, column: &RegionColumn, saved_nbt: &[u8]) -> R
             }
         }
         biomes.push(cells);
+    }
+    // 完工的 `PostProcessing` 从存档元数据还原成 24 段 packed short 列表。
+    // Restore the finished `PostProcessing` into 24 packed-short section lists.
+    let mut post_processing: Vec<Vec<u16>> = vec![Vec::new(); SECTION_COUNT];
+    for (x, y, z) in crate::worldgen::post_processing_from_archive(chunk.archive(), pos) {
+        let section = (y - MIN_Y).div_euclid(16);
+        if (0..SECTION_COUNT as i32).contains(&section) {
+            let packed = ((x & 15) | ((y & 15) << 4) | ((z & 15) << 8)) as u16;
+            post_processing[section as usize].push(packed);
+        }
     }
     // 高度图按完工方块重算，和 `build_region_column` / 官方增量更新的终值一致。
     // Recompute from the finished blocks, matching assembly and official updates.
@@ -494,6 +485,7 @@ fn snapshot_resumed(pos: ChunkPos, column: &RegionColumn, saved_nbt: &[u8]) -> R
         light_on: column.chunk_column().light_on(),
         block_entities,
         structures,
+        post_processing,
         saved_status: chunk.archive().status,
         saved_nbt: saved_nbt.to_vec(),
     }
