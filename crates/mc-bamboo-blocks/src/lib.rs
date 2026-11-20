@@ -41,6 +41,7 @@ pub mod random;
 pub mod random_tick;
 pub mod recording;
 pub mod shape;
+pub mod sky;
 pub(crate) mod sleep_clock;
 pub mod state;
 pub mod ticks;
@@ -79,9 +80,9 @@ pub use interact::{
 pub use item_exchange::{ItemExchange, wash_dyed_color};
 pub use item_use::{StickSelect, debug_stick_select};
 pub use level::{
-    ArchiveRedstone, ChunkRedstone, Effect, EntityTables, LecternFacts, Level, LevelEntities,
-    LevelSideState, LevelTables, Observation, RedstoneEntry, RedstoneMemory, Trigger,
-    custom_sound_name, intern_custom_sound,
+    ArchiveRedstone, BedProblem, ChunkRedstone, Effect, EntityTables, LecternFacts, Level,
+    LevelEntities, LevelSideState, LevelTables, Observation, RedstoneEntry, RedstoneMemory,
+    Trigger, custom_sound_name, intern_custom_sound,
 };
 pub use machine_container::entity_container_items;
 pub use random::{LegacyRandom, LevelRandom, RandomSource, Seed128, XoroshiroRandom, shuffle};

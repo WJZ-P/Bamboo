@@ -217,8 +217,7 @@ pub(crate) fn parallel_entity_ticks(threads: usize, region: &mut Region) {
             max_y: mc_bamboo_world::MIN_Y + mc_bamboo_world::WORLD_HEIGHT - 1,
             rules: global.block_rules,
             difficulty: global.difficulty as i32,
-            // 天色由主控的时钟/天气发布；这一层只读快照，不算它。
-            sky_darken: 0,
+            sky_darken: global.sky_darken,
             game_time,
             weather: global.block_weather,
             ..ViewFacts::default()
@@ -658,6 +657,15 @@ pub(crate) fn send_effects(region: &mut Region, initiator: Option<PlayerId>, eff
                 let hurt = crate::player_hurt::hurt_player(region, id, source, amount, &mut random);
                 if hurt && let (Some(state), Some(player)) = (random, region.players.get_mut(&id)) {
                     player.random = state;
+                }
+            }
+            Effect::SleepInBed {
+                pos,
+                set_spawn,
+                problem,
+            } => {
+                if let Some(id) = initiator {
+                    crate::sleep::on_sleep_in_bed(region, id, pos, set_spawn, problem);
                 }
             }
         }

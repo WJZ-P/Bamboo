@@ -26,17 +26,27 @@ use tracing::warn;
 
 use crate::{inbound::PlayerId, links, region::Region};
 
-/// 官方 `MinecraftServer.onGameRuleChanged`：只有 `IMMEDIATE_RESPAWN` 和
-/// `LIMITED_CRAFTING` 会额外给全部玩家发一个 `game_event`，参数是新规则的
-/// 1 / 0（`REDUCED_DEBUG_INFO` 走 22 / 23 两个实体事件，Bamboo 这一期没建模）。
-/// 规则刚发布到岛上的快照之后调用，读的就是新值。
+/// 官方 `MinecraftServer.onGameRuleChanged`：规则真的变了之后，命令和客户端的规则设置包
+/// 两条路径都走这里。`IMMEDIATE_RESPAWN` 和 `LIMITED_CRAFTING` 给全部玩家发一个
+/// `game_event`，参数是新规则的 1 / 0；`ADVANCE_TIME` 发整表时钟同步
+/// （`packNetworkState` 的流速跟着规则变成 0 或恢复）。`REDUCED_DEBUG_INFO` 走
+/// 22 / 23 两个实体事件，Bamboo 这一期没建模。规则刚发布到岛上的快照之后调用，
+/// 读的就是新值。
 ///
-/// Vanilla `MinecraftServer.onGameRuleChanged`: only `IMMEDIATE_RESPAWN` and
-/// `LIMITED_CRAFTING` additionally broadcast a `game_event` to every player,
-/// with the new rule's 1 / 0 as parameter (`REDUCED_DEBUG_INFO` uses entity
-/// events 22 / 23, not modelled yet). Call after publishing the new snapshot;
-/// the value read here is the new one.
-pub(crate) fn on_rule_changed(region: &mut Region, index: usize) {
+/// Vanilla `MinecraftServer.onGameRuleChanged`, reached from both the command
+/// and the client's set-game-rule packet once a rule really changed.
+/// `IMMEDIATE_RESPAWN` and `LIMITED_CRAFTING` broadcast a `game_event` with
+/// the new rule's 1 / 0 as parameter; `ADVANCE_TIME` broadcasts a full clock
+/// sync (`packNetworkState` zeroes or restores the rate with the rule).
+/// `REDUCED_DEBUG_INFO` uses entity events 22 / 23, not modelled yet. Call
+/// after publishing the new snapshot; the value read here is the new one.
+pub(crate) fn on_rule_changed(global: &crate::global::Global, region: &mut Region, index: usize) {
+    if index == gamerules::ADVANCE_TIME {
+        let clocks = global.clocks();
+        let advance = global.rules().bool(gamerules::ADVANCE_TIME);
+        region.broadcast_all_clocks(global.time(), &clocks, advance);
+        return;
+    }
     let event = match index {
         gamerules::IMMEDIATE_RESPAWN => GameEvent::IMMEDIATE_RESPAWN,
         gamerules::LIMITED_CRAFTING => GameEvent::LIMITED_CRAFTING,
@@ -311,7 +321,7 @@ pub(crate) fn apply_set_packet(
         match global.rules_mut().assign(index, &value) {
             Assignment::Updated(text) => {
                 global.publish(region);
-                on_rule_changed(region, index);
+                on_rule_changed(global, region, index);
                 broadcast_set(region, short, &text);
             }
             Assignment::Unchanged(text) | Assignment::Disabled(text) => {

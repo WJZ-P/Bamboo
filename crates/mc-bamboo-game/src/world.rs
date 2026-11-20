@@ -234,6 +234,14 @@ pub struct World {
 /// together within 2 seconds (island plan 5.2, step 7).
 pub(crate) struct Master {
     pub(crate) global: Global,
+    /// 上一刻全部岛交回的睡眠计数；主控在这一刻开头、天气之后据此决定跳早。
+    /// 官方 `ServerLevel.tick` 的 `areEnoughSleeping` / `areEnoughDeepSleeping`
+    /// 也是在天气之后、时间推进之前读上一刻的玩家状态。
+    ///
+    /// Sleep counts from all islands at the previous hand-back. The master
+    /// uses them at the start of this tick, after weather and before time,
+    /// exactly where `ServerLevel.tick` reads the previous tick's players.
+    pub(crate) sleep: crate::sleep::SleepCounts,
     /// 主控队列（岛的实施计划第 6 节第 4 步）。玩家自己的队列挂在玩家上。
     inbox: InboundReceiver,
     /// 进服被拒的连接还会发请求、最后发 `Leave`：它们的队列留在这里照常取空、
@@ -366,6 +374,13 @@ pub(crate) struct Master {
     /// drops one entity; `LoseTracking` clears one fresh entity's pairing.
     #[cfg(test)]
     pub(crate) split_break: Option<crate::world::island_runtime::FreshEntityBreak>,
+    /// 测试专用：把第一次跳早决定推迟一刻（模拟「岛末尾判断、交回执行」的旧时机）。
+    /// 正式构建里不存在。
+    ///
+    /// Test-only: delay the first morning-skip decision by one tick, to model
+    /// the old "decide at island end, apply at hand-back" timing.
+    #[cfg(test)]
+    pub(crate) sleep_break_late: bool,
 }
 
 impl World {
@@ -524,6 +539,7 @@ impl World {
         let mut world = Self {
             master: Master {
                 global,
+                sleep: crate::sleep::SleepCounts::default(),
                 inbox,
                 refused_inboxes: Vec::new(),
                 pacer: Pacer,
@@ -562,6 +578,8 @@ impl World {
                 split_by_position: false,
                 #[cfg(test)]
                 split_break: None,
+                #[cfg(test)]
+                sleep_break_late: false,
             },
             islands: {
                 let budget = MailBudget {
@@ -614,6 +632,8 @@ impl World {
                     ..Default::default()
                 });
         }
+        // 读盘恢复结构起点时要和生成器用同一个种子 / 世界类型。
+        world.master.host.set_world_gen_config(world_gen.clone());
         if staged {
             // 真生成比超平坦模板慢得多，默认就用计算池把它挪出世界线程；配置文件
             // 显式给了 `chunk_worker_threads` 就照给的值（0 = 仍然内联）。
@@ -975,6 +995,13 @@ impl World {
     /// forget 后面，每个区块的光照变化紧挨在它的方块变化前面，方块变化排在 ack 前面，
     /// 区块批次放在最后，这样发出去的内容是这一 tick 结束时的世界。
     fn tick(&mut self) -> ControlFlow<()> {
+        // 官方 `MinecraftServer.tickServer` 在 `tickChildren` 之前 `++tickCount`；
+        // 周期时间同步按这个开服以来的刻数计相位，和存档里的 `gameTime` 无关。
+        //
+        // Official `MinecraftServer.tickServer` does `++tickCount` before
+        // `tickChildren`; the periodic time sync uses this since-launch count,
+        // independent of the saved `gameTime`.
+        self.master.global.increment_server_ticks();
         self.profiler().begin_tick();
         self.master.island_wait = Duration::ZERO;
         self.record_tick_counts();
@@ -1320,13 +1347,26 @@ impl World {
 
     /// 世界边界、天气和时间推进一刻，前后各发布一次快照。
     ///
-    /// 官方 `ServerLevel.tick` 开头的 "world border" 阶段在天气和时间之前。
-    /// 渐变推进后把新快照发布给 region，这一刻的方块逻辑和实体碰撞都读它。
+    /// 官方 `MinecraftServer.tickChildren` / `ServerLevel.tick` 的开头：
+    /// clocks 阶段推进世界时钟 → 周期时间同步 → world border → 天气 →
+    /// 睡眠统计（够了就跳早、叫醒、清天气）→ `updateSkyBrightness` →
+    /// `tickTime`（游戏时间 +1）。跳早用的是上一刻全部岛交回的计数，
+    /// 在岛这一刻开跑之前做，多岛读同一份结果。
     ///
-    /// Vanilla `ServerLevel.tick`'s "world border" phase comes before weather and time.
-    /// After the lerp step, publish the new snapshot; this tick's block logic and
-    /// entity collisions read it.
+    /// Official `MinecraftServer.tickChildren` / `ServerLevel.tick` prefix:
+    /// clocks tick → periodic time sync → world border → weather → sleep
+    /// bookkeeping (skip night, wake, clear weather) → `updateSkyBrightness`
+    /// → `tickTime`. The skip uses the counts all islands handed back last
+    /// tick and happens before any island runs this tick.
     fn advance_world_clock(&mut self) {
+        // 跳早标志只在决定跳早的这一刻为真；下一刻重新算。
+        self.master.global.sleep_skip = false;
+        // `MinecraftServer.tickChildren` 的 "clocks" 阶段在 `ServerLevel.tick` 之前。
+        self.master.global.tick_clocks();
+        // `forceGameTimeSynchronization` 在 levels 循环之前，包里是这一刻
+        // `tickTime` 加一之前的游戏时间。先取出来，后面游戏时间才 +1。
+        let sync_time = self.master.global.time_sync_packet_time();
+
         self.master.global.tick_world_border();
         self.publish_global();
         // 官方 `ServerLevel.tick` 的天气阶段在 `tickTime` 之前；广播帧排在时间包之前发出。
@@ -1344,9 +1384,70 @@ impl World {
         if !weather.is_empty() {
             self.broadcast_all(&weather);
         }
-        self.master.global.advance_time();
-        // 天气和时间推进完再发布一次，这一刻的方块逻辑读它。
-        // Publish again after weather and time; this tick's block logic reads it.
+
+        // 官方 `ServerLevel.tick`：`players_sleeping_percentage` 加上
+        // `areEnoughSleeping` / `areEnoughDeepSleeping` 决定跳早；
+        // `moveToTimeMarker` 要 `advance_time` 为真，`wakeUpAllPlayers` 无条件，
+        // `resetWeatherCycle` 要 `advance_weather` 为真且正在下雨。
+        //
+        // Official `ServerLevel.tick`: `players_sleeping_percentage` plus
+        // `areEnoughSleeping` / `areEnoughDeepSleeping` decide the skip.
+        // `moveToTimeMarker` needs `advance_time`; `wakeUpAllPlayers` is
+        // unconditional; `resetWeatherCycle` needs `advance_weather` and rain.
+        let rules = self.master.global.rules();
+        let percentage = rules.int(mc_bamboo_data::gamerules::PLAYERS_SLEEPING_PERCENTAGE);
+        let advance_time = rules.bool(mc_bamboo_data::gamerules::ADVANCE_TIME);
+        let advance_weather = rules.bool(mc_bamboo_data::gamerules::ADVANCE_WEATHER);
+        let should_skip = self.master.sleep.should_skip(percentage);
+        // 改坏确认：第一次成立时故意不做，把决定推到下一刻。
+        #[cfg(test)]
+        let should_skip = if should_skip && self.master.sleep_break_late {
+            self.master.sleep_break_late = false;
+            false
+        } else {
+            should_skip
+        };
+        if should_skip {
+            let clock_moved =
+                crate::sleep::skip_night(&mut self.master.global, advance_time, advance_weather);
+            if clock_moved {
+                // `ServerClockManager.modifyClock` 只发被改的那一个时钟。
+                let time = self.master.global.time();
+                let clock = self.master.global.clocks()[0].1;
+                let frames =
+                    crate::links::encode_frames(&mc_bamboo_protocol::packet::play::SetTime {
+                        game_time: time.0,
+                        clocks: &[mc_bamboo_protocol::packet::play::ClockState {
+                            clock: mc_bamboo_data::registries::world_clock::OVERWORLD,
+                            ticks: clock.total_ticks,
+                            partial: clock.partial_tick,
+                            rate: clock.network_rate(advance_time),
+                        }],
+                    });
+                self.broadcast_all(&frames);
+            }
+        }
+
+        // `ServerLevel.tickTime`：游戏时间照常加一；世界时钟已在开头推进过。
+        self.master.global.increment_game_time();
+        if let Some(time) = sync_time {
+            for island in self.islands.parked_mut() {
+                island.region.broadcast_game_time(time);
+            }
+            // 不在主控手里的岛：进它的出站队列，落地时发。
+            // Islands that are away: queued, sent when they land.
+            let away = self.islands.away_ids();
+            if !away.is_empty() {
+                let frames =
+                    crate::links::encode_frames(&mc_bamboo_protocol::packet::play::SetTime {
+                        game_time: time.0,
+                        clocks: &[],
+                    });
+                self.post_fan_out(&away, vec![crate::links::FanOut::All(frames.into())]);
+            }
+        }
+        // 天气、跳早和时间推进完再发布一次，这一刻的方块逻辑读它。
+        // Publish again after weather, skip and time; this tick's block logic reads it.
         self.publish_global();
     }
 
@@ -1673,6 +1774,18 @@ impl World {
         }
     }
 
+    /// 汇总全部已停放岛的睡眠计数，供主控在下一刻开头决定跳早。
+    ///
+    /// Sum the sleep counts of every parked island for the master's decision
+    /// at the start of the next tick.
+    pub(super) fn aggregate_sleep(&mut self) {
+        let mut sleep = crate::sleep::SleepCounts::default();
+        for island in self.islands.parked() {
+            sleep.add(crate::sleep::counts_of(&island.region));
+        }
+        self.master.sleep = sleep;
+    }
+
     /// 第 3 段（两种驱动共用）：交回、刷出站缓冲、自动保存和匀速存盘、`/save-all`、
     /// 关服检查和名单变更。
     ///
@@ -1684,6 +1797,13 @@ impl World {
         // Lockstep with one island already sent the latency update in place.
         let latency_here = detached || self.islands.several();
         self.hand_back();
+        // 官方 `ServerLevel.tick` 开头读的是上一刻末尾的 `SleepStatus` 和
+        // `sleepCounter`；这里把全部已交回岛的计数汇总，下一刻开头用。
+        //
+        // Official `ServerLevel.tick` reads the previous tick's `SleepStatus`
+        // and `sleepCounter`; sum the counts from all handed-back islands for
+        // the start of the next tick.
+        self.aggregate_sleep();
         // 混合驱动：这一轮的岛落地以后，排着队的事能做的先做（都按时的时候队列是空的）。
         // Hybrid: once this round's islands have landed, run what was held
         // (nothing is held when every island is on time).
@@ -3084,6 +3204,14 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
         Some((global, mode)) => (Some(global), mode),
         None => (None, PortMode::Queued),
     };
+    // 官方 `ServerLevel.tick` 开头（天气之后、时间推进之前）决定跳早，
+    // `wakeUpAllPlayers` 在这一刻的玩家 tick 之前叫醒所有人。主控已经把
+    // 标志发布到全局快照里，岛在自己一刻开头照它做。
+    //
+    // Official `ServerLevel.tick` decides the skip at its start (after
+    // weather, before time) and wakes everyone before player ticks. The
+    // master published the flag; the island applies it at its tick start.
+    crate::sleep::wake_from_skip(&mut island.region);
     // 划分阶段串行、只算不用；三个阶段的执行顺序和行为不变。读岛的时钟。
     let now = island.region.tick.game_time();
     run_partition_stage(&mut island.region, now);
@@ -3155,8 +3283,8 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
     crate::command::admin::tick_idle(region);
     // 官方 `ServerPlayer.doTick` 的六个只读准则：岛算变了的值，主控写计分板。
     //
-    // The six read-only criteria from official `ServerPlayer.doTick`: the island
-    // computes the changes, the master writes the scoreboard.
+    // The six read-only criteria from official `ServerPlayer.doTick`: the
+    // island computes, the master writes the scoreboard.
     {
         let mut port = match (port_mode, global.as_deref_mut()) {
             (PortMode::Direct, Some(global)) => GlobalPort::Direct(global),
@@ -3164,6 +3292,8 @@ fn run_island_simulation(island: &mut Island, master: Option<(&mut Global, PortM
         };
         crate::scoreboard::tick_criteria(&mut port, &mut island.region);
     }
+    // `ServerPlayer.doTick` 每刻推进 `sleepCounter`；主控在交回后读这份计数。
+    crate::sleep::tick_sleep_counters(&mut island.region);
     let region = &mut island.region;
     region.profiler.lap(Phase::PlayerMisc);
 

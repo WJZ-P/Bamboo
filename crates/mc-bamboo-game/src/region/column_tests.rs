@@ -1087,7 +1087,7 @@ fn disk_restart_keeps_chunks_players_and_level() {
         .expect("解码");
     // 逐项比内容。`from_parts` 重建时部分字段的默认值/顺序会变，重编码的字节
     // 不一定逐字节相同，所以和 `archive_round_trip` 一样比读回的内容。
-    let got = decoded.parts();
+    let got = decoded.column.parts();
     let want = original.parts();
     for y in -64..0 {
         for x in 0_usize..16 {
@@ -1524,7 +1524,7 @@ fn a_half_burnt_furnace_survives_a_disk_restart() {
         .decode(CHUNK, &PackedChunk { chunk, entities })
         .expect("解码成功");
     io.close();
-    let parts = decoded.parts();
+    let parts = decoded.column.parts();
     let mut furnace = None;
     parts.block_entities.entities().iter().for_each(|entity| {
         if entity.pos() == FURNACE {
@@ -1721,7 +1721,9 @@ fn sleeping_machines_survive_a_disk_restart() {
 
         // 读回的盒子分别放进开 / 关休眠的新世界，再逐刻比较。
         // 同一份解码结果重新编码 / 解码两次，得到两个独立但内容相同的盒子。
-        let packed = InlineCodec.encode(CHUNK, &decoded).expect("重新编码成功");
+        let packed = InlineCodec
+            .encode(CHUNK, &decoded.column)
+            .expect("重新编码成功");
         let mut sleeping = build(kind, true);
         let mut always = build(kind, false);
         for server in [&mut sleeping, &mut always] {
@@ -1730,7 +1732,10 @@ fn sleeping_machines_survive_a_disk_restart() {
             let _ = region
                 .take_columns(&[CHUNK].into_iter().collect())
                 .expect("前提满足");
-            let copy = InlineCodec.decode(CHUNK, &packed).expect("重新解码成功");
+            let copy = InlineCodec
+                .decode(CHUNK, &packed)
+                .expect("重新解码成功")
+                .column;
             region.insert_column(CHUNK, copy).expect("前提满足");
             settle_light(region);
         }

@@ -997,6 +997,24 @@ pub trait Level: LevelSideState + LevelEntities {
         true
     }
 
+    /// `Level.isDarkOutside()`：没有固定时间的维度里 `skyDarken >= 4`。
+    /// 主世界没有 `hasFixedTime`，床的 `when_dark` 规则走这个判断。
+    ///
+    /// `Level.isDarkOutside()`: `skyDarken >= 4` in dimensions without a
+    /// fixed time. The overworld uses it for the bed's `when_dark` rule.
+    fn is_dark_outside(&self) -> bool {
+        self.sky_darken() >= 4
+    }
+
+    /// `Monster.isPreventingPlayerRest` 的近似入口；世界里还没有怪物，默认没有。
+    /// 见 [`World::monster_prevents_rest`](crate::World::monster_prevents_rest)。
+    ///
+    /// Hook for `Monster.isPreventingPlayerRest`; no monsters yet, so false.
+    /// See [`World::monster_prevents_rest`](crate::World::monster_prevents_rest).
+    fn monster_prevents_rest(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
     /// `getDifficulty().getId()`：0 和平、1 简单、2 普通、3 困难。
     /// 权威副本在 `GlobalView`，方块世界和并行只读视图都要给同一份答案。
     /// 默认是普通，和没有难度配置时的旧行为一致。
@@ -1745,7 +1763,7 @@ impl RedstoneMemory {
 }
 
 /// 一个区块的全部红石记忆，按位置排序。火把开关记录存的是相对年龄。
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ChunkRedstone {
     comparator_outputs: Vec<(BlockPos, i32)>,
     bookshelf_slots: Vec<(BlockPos, usize)>,
@@ -1827,7 +1845,41 @@ const _: fn() = || {
     assert_send_debug::<ChunkRedstone>();
 };
 
+/// `Player.BedSleepingProblem` 里床的右键会遇到的几种失败原因。
+///
+/// The bed failures in `Player.BedSleepingProblem` that a right click can hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BedProblem {
+    /// `NOT_POSSIBLE_NOW`：`canSleep = when_dark` 且不是夜里 / 雷暴天。
+    NotPossibleNow,
+    /// `NOT_SAFE`：附近有会阻止休息的怪物。
+    NotSafe,
+    /// `TOO_FAR_AWAY`：床不在够得到的范围内。
+    TooFarAway,
+    /// `OBSTRUCTED`：床头或床尾上方被挡住。
+    Obstructed,
+    /// `OTHER_PROBLEM`：玩家已经睡着或者不在人世。
+    OtherProblem,
+}
+
+impl BedProblem {
+    /// 官方 `BedSleepingProblem` 挂在玩家快捷栏上方的翻译键。
+    ///
+    /// The action-bar translation key of official `BedSleepingProblem`.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NotPossibleNow => "block.minecraft.bed.no_sleep",
+            Self::NotSafe => "block.minecraft.bed.not_safe",
+            Self::TooFarAway => "block.minecraft.bed.too_far_away",
+            Self::Obstructed => "block.minecraft.bed.obstructed",
+            Self::OtherProblem => "block.minecraft.bed.occupied",
+        }
+    }
+}
+
 /// 一次操作留下的、方块以外的结果，由调用方发给玩家。
+///
+/// The non-block results of one action, handed to the caller for delivery.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Effect {
     /// `levelEvent(2001, pos, state)`。`except_initiator` 表示不用发给发起者，它自己已经预测过了。
@@ -1938,6 +1990,19 @@ pub enum Effect {
         target: EntityUid,
         source: DamageSource,
         amount: f32,
+    },
+    /// 官方 `ServerPlayer.startSleepInBed` 的结果。方块侧已经把床的 `occupied`
+    /// 置位（成功时）或没动（失败时），游戏层接着设置玩家睡姿、重生点、提示和包。
+    ///
+    /// The result of official `ServerPlayer.startSleepInBed`. Block logic has
+    /// already set the bed's `occupied` flag on success; the game layer sets
+    /// the player's sleeping pose, spawn point, message and packets.
+    SleepInBed {
+        pos: BlockPos,
+        /// `BedRule.canSetSpawn`：普通床为真，草垫为假。
+        set_spawn: bool,
+        /// `Some` 是失败原因，`None` 是成功入睡。
+        problem: Option<BedProblem>,
     },
 }
 

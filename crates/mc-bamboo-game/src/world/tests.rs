@@ -1263,6 +1263,399 @@ fn first_batch_is_exactly_the_three_by_three_around_the_spawn() {
     assert_eq!(finished[0].body, [9]);
 }
 
+/// 把夜里睡觉的场景搭好：完整的床、站在床尾的玩家、午夜 + 雷暴。
+fn sleep_scene() -> (Harness, Client, BlockPos, BlockPos) {
+    use mc_bamboo_blocks::{BlockState, state::BED_PART, state::BedPart};
+    use mc_bamboo_core::Vec3;
+
+    let mut server = Harness::new_one_island(8);
+    let client = server.join_and_settle("Kitten");
+    let foot = BlockPos::new(8, -59, 8);
+    let head = foot.south();
+    let bed = BlockState(mc_bamboo_data::blocks::RED_BED)
+        .with(mc_bamboo_blocks::state::HORIZONTAL_FACING, Direction::South);
+    server.world.islands.region.chunks.set_block(foot, bed.0);
+    server
+        .world
+        .islands
+        .region
+        .chunks
+        .set_block(head, bed.with(BED_PART, BedPart::Head).0);
+    let region = &mut server.world.islands.region;
+    if let Some(player) = region.players.get_mut(&client.id) {
+        player.set_position(&mut region.player_grid, Vec3::new(8.5, -59.0, 8.5));
+    }
+    {
+        let global = &mut server.world.master.global;
+        global
+            .clock_named_mut("minecraft:overworld")
+            .unwrap()
+            .total_ticks = 18_000;
+        let weather = &mut global.state_mut().weather;
+        weather.raining = true;
+        weather.thundering = true;
+        weather.rain_level = 1.0;
+        weather.o_rain_level = 1.0;
+        weather.thunder_level = 1.0;
+        weather.o_thunder_level = 1.0;
+    }
+    server.world.publish_global();
+    assert!(
+        server.world.master.global.sky_darken() >= 4,
+        "夜里天色要够暗"
+    );
+    client.take_frames();
+    crate::interaction::on_use_item_on(
+        &mut server.world.islands.region,
+        client.id,
+        crate::interaction::UseItemOn {
+            hand: Hand::Main,
+            pos: foot,
+            face: Direction::Up,
+            cursor: (0.5, 0.5, 0.5),
+            inside: false,
+            sequence: 1,
+        },
+    );
+    assert!(
+        server.world.islands.region.players[&client.id]
+            .sleep
+            .is_some(),
+        "玩家应该睡着了"
+    );
+    client.take_frames();
+    (server, client, foot, head)
+}
+
+/// 逐刻记录跳早的那一刻：时钟跳到多少、哪一刻发醒来包和时钟同步包。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct SleepTrace {
+    /// 时钟从夜里跳到清晨的刻号。
+    clock_jump_tick: Option<i64>,
+    /// 跳到的主世界时钟刻。
+    clock_jump_to: i64,
+    /// 发出站姿 `set_entity_data` 的刻号。
+    wake_pose_tick: Option<i64>,
+    /// 发出带主世界时钟的 `set_time` 的刻号（周期同步是空表，不算）。
+    clock_sync_tick: Option<i64>,
+}
+
+fn sleep_trace(server: &mut Harness, client: &Client, ticks: usize) -> SleepTrace {
+    let mut trace = SleepTrace::default();
+    let mut last_clock = server.world.master.global.clocks()[0].1.total_ticks;
+    let mut was_sleeping = server
+        .world
+        .islands
+        .region
+        .players
+        .get(&client.id)
+        .is_some_and(|player| player.sleep.is_some());
+    for _ in 0..ticks {
+        let before = server.world.master.global.time().0;
+        server.tick();
+        let clock = server.world.master.global.clocks()[0].1.total_ticks;
+        let expected = last_clock + 1;
+        if clock != expected && trace.clock_jump_tick.is_none() {
+            trace.clock_jump_tick = Some(before);
+            trace.clock_jump_to = clock;
+        }
+        let sleeping = server
+            .world
+            .islands
+            .region
+            .players
+            .get(&client.id)
+            .is_some_and(|player| player.sleep.is_some());
+        let woke = was_sleeping && !sleeping;
+        was_sleeping = sleeping;
+        let frames = client.take_frames();
+        if woke && trace.wake_pose_tick.is_none() {
+            trace.wake_pose_tick = Some(before);
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.id == clientbound::SET_ENTITY_DATA),
+                "醒来的这一刻要发站姿元数据: tick {before}"
+            );
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.id == clientbound::PLAYER_POSITION),
+                "醒来的这一刻要发传送包: tick {before}"
+            );
+        }
+        if trace.clock_sync_tick.is_none() {
+            for frame in &frames {
+                if frame.id == clientbound::SET_TIME {
+                    let mut reader = Reader::new(&frame.body);
+                    let _game_time = reader.i64().expect("set_time 的 gameTime");
+                    if reader.varint().unwrap_or(0) > 0 {
+                        trace.clock_sync_tick = Some(before);
+                        break;
+                    }
+                }
+            }
+        }
+        last_clock = clock;
+    }
+    trace
+}
+
+/// 夜里右键床：床被占、玩家睡姿、第二天跳早并清天气。
+#[test]
+fn sleeping_through_the_night_advances_the_clock_and_clears_weather() {
+    use mc_bamboo_blocks::{BlockState, state::OCCUPIED};
+
+    let (mut server, _client, _foot, head) = sleep_scene();
+    let region = &server.world.islands.region;
+    assert!(
+        region
+            .chunks
+            .block(head)
+            .is_some_and(|s| BlockState(s).get(OCCUPIED))
+    );
+    assert!(
+        region.players[&PlayerId(1)].sleep.is_some(),
+        "玩家应该睡着了"
+    );
+    assert!(
+        region.players[&PlayerId(1)].sync.sleeping,
+        "睡姿应该是 SLEEPING"
+    );
+
+    // 逐刻推进睡眠计数，够了人数就跳到早上、清天气、叫醒所有人。
+    for _ in 0..101 {
+        server.tick();
+    }
+    let global = &server.world.master.global;
+    // 跳早之后时钟照官方继续走，所以这里只要求它落在刚过 0 刻的清晨。
+    assert!(
+        global.clocks()[0].1.total_ticks.rem_euclid(24_000) < 5,
+        "跳到 0 刻（早上）之后照常推进: {}",
+        global.clocks()[0].1.total_ticks
+    );
+    assert!(!global.state().weather.raining);
+    assert!(!global.state().weather.thundering);
+    let region = &server.world.islands.region;
+    assert!(region.players[&PlayerId(1)].sleep.is_none(), "所有人醒来");
+    assert!(!region.players[&PlayerId(1)].sync.sleeping);
+    assert!(
+        !region
+            .chunks
+            .block(head)
+            .is_some_and(|s| BlockState(s).get(OCCUPIED)),
+        "床的 occupied 清掉"
+    );
+}
+
+/// 跳早在主控每刻开头（天气之后、岛开跑之前）决定：逐刻比跳的时刻、
+/// 跳到的刻数、醒来包和时钟同步包都在同一刻。把决定推迟一刻的改坏必须被抓到。
+#[test]
+fn sleep_skip_happens_at_the_official_tick() {
+    let (mut server, client, _foot, _head) = sleep_scene();
+    let official = sleep_trace(&mut server, &client, 105);
+    assert!(
+        official.clock_jump_tick.is_some(),
+        "熟睡人数够了应该跳早: {official:?}"
+    );
+    assert_eq!(
+        official.clock_jump_tick, official.clock_sync_tick,
+        "时钟同步包必须和跳时间同一刻: {official:?}"
+    );
+    assert_eq!(
+        official.clock_jump_tick, official.wake_pose_tick,
+        "醒来（站姿 / 传送包）必须和跳时间同一刻: {official:?}"
+    );
+    assert_eq!(
+        official.clock_jump_to.rem_euclid(24_000),
+        0,
+        "跳到 wake_up_from_sleep 标记: {official:?}"
+    );
+
+    // 改坏：把第一次跳早决定推迟一刻，逐刻记录应该整体晚一刻。
+    let (mut broken, broken_client, _foot, _head) = sleep_scene();
+    broken.world.master.sleep_break_late = true;
+    let late = sleep_trace(&mut broken, &broken_client, 106);
+    assert_eq!(
+        late.clock_jump_tick,
+        official.clock_jump_tick.map(|tick| tick + 1),
+        "改坏后跳早必须晚一刻: official {official:?}, broken {late:?}"
+    );
+    assert_eq!(
+        late.clock_sync_tick,
+        official.clock_sync_tick.map(|tick| tick + 1),
+        "改坏后时钟同步包也要晚一刻: {late:?}"
+    );
+    assert_eq!(
+        late.wake_pose_tick,
+        official.wake_pose_tick.map(|tick| tick + 1),
+        "改坏后醒来包也要晚一刻: {late:?}"
+    );
+}
+
+/// 官方 `ServerLevel.tick` 的两个独立规则：`advance_time` 为假时不跳时间，
+/// `advance_weather` 为假时不清天气，但 `wakeUpAllPlayers` 无条件发生。
+#[test]
+fn sleep_skip_rules_are_independent() {
+    let (mut server, _client, _foot, _head) = sleep_scene();
+    let _ = server
+        .world
+        .master
+        .global
+        .rules_mut()
+        .assign(mc_bamboo_data::gamerules::ADVANCE_TIME, "false");
+    let _ = server
+        .world
+        .master
+        .global
+        .rules_mut()
+        .assign(mc_bamboo_data::gamerules::ADVANCE_WEATHER, "false");
+    server.world.publish_global();
+    for _ in 0..105 {
+        server.tick();
+    }
+    let global = &server.world.master.global;
+    assert_eq!(
+        global.clocks()[0].1.total_ticks,
+        18_000,
+        "advance_time 为假时时钟不动"
+    );
+    assert!(
+        global.state().weather.raining,
+        "advance_weather 为假时天气不清"
+    );
+    assert!(
+        server.world.islands.region.players[&PlayerId(1)]
+            .sleep
+            .is_none(),
+        "wakeUpAllPlayers 无条件发生"
+    );
+}
+
+/// 官方周期同步：每 20 刻一个空时钟表、只带 `gameTime` 的 `set_time`，
+/// 包里的游戏时间是这一刻 `tickTime` 加一之前的值。
+#[test]
+fn periodic_time_sync_carries_the_game_time_before_this_tick() {
+    use mc_bamboo_protocol::codec::Reader;
+
+    let mut server = Harness::new(8);
+    let client = server.join_and_settle("Kitten");
+    let start = server.world.master.global.time().0;
+    client.take_frames();
+    // 跑到下一个 `tickCount % 20 == 0`。
+    let due = start.div_euclid(20) * 20 + 20;
+    while server.world.master.global.time().0 < due {
+        server.tick();
+    }
+    let frames = client.take_frames();
+    let syncs: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.id == clientbound::SET_TIME)
+        .collect();
+    assert_eq!(syncs.len(), 1, "每 20 刻一次周期同步: {frames:?}");
+    let mut reader = Reader::new(&syncs[0].body);
+    assert_eq!(reader.i64().unwrap(), due - 1, "包里的游戏时间");
+    assert_eq!(reader.varint().unwrap(), 0, "时钟表是空的");
+    assert!(reader.rest().is_empty());
+}
+
+/// 官方 `tickCount` 每次开服从 0 数起，和 `level.dat` 的 `Time` 无关：
+/// 读档开服时第一个周期时间同步包必须出现在开服后第 20 刻，
+/// 包里是当时的 `gameTime`。把判断改回按 `gameTime` 的旧做法会被改坏确认抓到。
+#[test]
+fn periodic_time_sync_uses_since_launch_ticks_not_saved_game_time() {
+    use mc_bamboo_protocol::codec::Reader;
+    use mc_bamboo_storage::{level_dat::LevelData, world_dir::WorldDir};
+
+    const SAVED_TIME: i64 = 12_345;
+
+    /// 收到第一个空时钟表的 `set_time` 时，返回 (开服后的刻数, 包里的 gameTime)。
+    fn first_sync(break_by_game_time: bool) -> Option<(i32, i64)> {
+        let tmp = D6TempDir::new("time-sync-phase");
+        let dir = WorldDir::new(&tmp.0);
+        dir.create_layout().unwrap();
+        mc_bamboo_storage::world_dir::save_level_data(
+            &dir,
+            &LevelData {
+                time: SAVED_TIME,
+                ..LevelData::default()
+            },
+        )
+        .unwrap();
+        let mut server = Harness::new_loaded_with_save(2, &tmp.0);
+        assert_eq!(
+            server.world.master.global.time().0,
+            SAVED_TIME,
+            "gameTime 要从 level.dat 的 Time 接着走"
+        );
+        server.world.master.global.time_sync_break_by_game_time = break_by_game_time;
+        let client = server.join("Kitten");
+        server.tick();
+        client.take_frames();
+        for _ in 2..=40 {
+            server.tick();
+            for frame in client.take_frames() {
+                if frame.id != clientbound::SET_TIME {
+                    continue;
+                }
+                let mut reader = Reader::new(&frame.body);
+                let game_time = reader.i64().expect("set_time 的 gameTime");
+                if reader.varint().unwrap_or(-1) == 0 {
+                    return Some((server.world.master.global.server_ticks(), game_time));
+                }
+            }
+        }
+        None
+    }
+
+    let official = first_sync(false).expect("开服后 20 刻内要有周期时间同步包");
+    assert_eq!(official.0, 20, "第一个周期包在开服后第 20 刻: {official:?}");
+    assert_eq!(
+        official.1,
+        SAVED_TIME + 19,
+        "包里是这一刻 tickTime 加一之前的 gameTime: {official:?}"
+    );
+
+    // 改坏：按 `gameTime` 判断会让第一个周期包提前到第 15 刻。
+    let broken = first_sync(true).expect("改坏后仍会发周期包");
+    assert_ne!(broken.0, 20, "按 gameTime 的相位和开服刻数不同: {broken:?}");
+    assert_eq!(broken.0, 15, "12345 + tick 是 20 的倍数时提前到 15 刻");
+}
+
+/// 多岛时每个岛读的都是同一份全局时间和天气算出的天色。
+#[test]
+fn every_island_reads_the_same_sky_darken() {
+    use crate::island_partition::SectionPos;
+
+    let mut server = Harness::new_loaded(8);
+    let origin = SectionPos::new(64, 64);
+    server.world.islands.ensure(1, origin);
+    server
+        .world
+        .master
+        .global
+        .clock_named_mut("minecraft:overworld")
+        .unwrap()
+        .total_ticks = 18_000;
+    let weather = &mut server.world.master.global.state_mut().weather;
+    weather.o_rain_level = 1.0;
+    weather.rain_level = 1.0;
+    weather.o_thunder_level = 1.0;
+    weather.thunder_level = 1.0;
+    server.world.publish_global();
+    let expected = server.world.master.global.sky_darken();
+    assert!(expected > 0, "夜晚雷暴要变暗");
+    for island in server.world.islands.iter_mut() {
+        assert_eq!(island.region.global.sky_darken, expected);
+        let (level, _) = island.region.block_level();
+        assert_eq!(
+            mc_bamboo_blocks::Level::sky_darken(&level),
+            expected,
+            "精确模式的方块世界读同一份值"
+        );
+    }
+}
+
 #[test]
 fn no_more_chunks_without_an_acknowledgement() {
     let mut server = Harness::new(8);
@@ -1277,7 +1670,14 @@ fn no_more_chunks_without_an_acknowledgement() {
         server.tick();
     }
 
-    assert!(client.take_frames().is_empty());
+    // 官方每 20 刻发一次空的 `set_time`，这里只该有周期性时间同步。
+    // Vanilla sends an empty `set_time` every 20 ticks; only those periodic
+    // time syncs may remain.
+    let frames = client.take_frames();
+    assert!(
+        frames.iter().all(|frame| frame.id == clientbound::SET_TIME),
+        "只有周期时间包: {frames:?}"
+    );
 }
 
 #[test]
@@ -2477,11 +2877,21 @@ fn latency_reaches_the_tab_list_on_the_periodic_broadcast() {
         .unwrap();
     for _ in ticks_so_far..600 {
         server.tick();
-        assert!(client.take_frames().is_empty());
+        // 每 20 刻的官方时间同步包不算延迟广播。
+        // The official 20-tick time sync is not a latency broadcast.
+        let frames = client.take_frames();
+        assert!(
+            frames.iter().all(|frame| frame.id == clientbound::SET_TIME),
+            "只有周期时间包: {frames:?}"
+        );
     }
     server.tick();
 
-    let frames = client.take_frames();
+    let frames: Vec<_> = client
+        .take_frames()
+        .into_iter()
+        .filter(|frame| frame.id != clientbound::SET_TIME)
+        .collect();
     assert_eq!(frames.len(), 1);
     let mut expected = vec![0x10, 0x01];
     expected.extend_from_slice(client.uuid.as_bytes());
@@ -2800,10 +3210,7 @@ fn save_and_reopen_resumes_game_time_day_time_and_scheduled_ticks() {
         state
     };
     assert!(saved_time > 0, "第一局确实推进过游戏时间");
-    assert!(
-        saved_day_time > crate::global::NOON_TICKS,
-        "第一局确实推进过昼夜时间"
-    );
+    assert!(saved_day_time > 0, "第一局确实推进过昼夜时间");
 
     let mut reopened = Harness::new_loaded_with_save(2, &tmp.0);
     assert_eq!(

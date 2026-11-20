@@ -759,7 +759,8 @@ fn hash_effect(effect: &Effect) -> u64 {
         Effect::CampfireChanged { .. } => 16,
         Effect::Overlay { .. } => 17,
         Effect::OpenCommandBlock { .. } => 18,
-        Effect::HurtPlayer { .. } => 19,
+        Effect::HurtPlayer { .. } => 20,
+        Effect::SleepInBed { .. } => 19,
     };
     tag.hash(&mut hasher);
     match *effect {
@@ -870,6 +871,15 @@ fn hash_effect(effect: &Effect) -> u64 {
             key.hash(&mut hasher);
             first.hash(&mut hasher);
             second.hash(&mut hasher);
+        }
+        Effect::SleepInBed {
+            pos,
+            set_spawn,
+            problem,
+        } => {
+            pos.hash(&mut hasher);
+            set_spawn.hash(&mut hasher);
+            core::mem::discriminant(&problem).hash(&mut hasher);
         }
     }
     hasher.finish()

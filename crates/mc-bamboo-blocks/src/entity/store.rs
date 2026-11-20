@@ -414,7 +414,7 @@ impl Entity {
 }
 
 /// 一个区块里的全部实体，按 uid 排序。字段不公开，只能整体搬走和放回。
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ChunkEntities {
     rows: Vec<EntityRow>,
     /// 读盘时不认识的实体类型（官方世界里的生物等），整条原样保留、写回。

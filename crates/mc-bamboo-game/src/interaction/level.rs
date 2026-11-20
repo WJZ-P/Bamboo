@@ -52,6 +52,8 @@ pub(crate) struct RegionLevel<'a> {
     pub(crate) block_rules: BlockGameRules,
     /// 方块逻辑读到的天气快照。权威副本在 `Global`，改完立刻写过来。
     pub(crate) block_weather: mc_bamboo_blocks::BlockWeather,
+    /// `Level.getSkyDarken()`：这一刻由全局快照算好的天色变暗值。
+    pub(crate) sky_darken: i32,
     /// 这一刻的难度 ID，权威副本在 `GlobalView`。
     pub(crate) difficulty: crate::world_state::Difficulty,
     /// 这一维度的世界边界快照，`Level.getWorldBorder()`。
@@ -345,6 +347,12 @@ impl Level for RegionLevel<'_> {
 
     fn block_weather(&self) -> mc_bamboo_blocks::BlockWeather {
         self.block_weather
+    }
+
+    /// `getSkyDarken()`：权威副本在 `GlobalView`，精确模式的 `World` 和
+    /// 并行的 `SourceView` 都读这一份。
+    fn sky_darken(&self) -> i32 {
+        self.sky_darken
     }
 
     /// `getDifficulty().getId()`：权威副本在 `GlobalView`，这里读每刻发布的快照。
