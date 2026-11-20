@@ -138,12 +138,21 @@ impl Report {
             }
         });
         let uid = world.add_prepared_entity(entity);
-        let mut source = if case.player_kill {
-            DamageSource::player(player.uid, player.position, false)
+        let source = if case.player_kill {
+            let mut weapon = ItemStack::new(items::DIAMOND_SWORD, 1);
+            if case.looting > 0 {
+                let id = mc_bamboo_loot::enchantment_id("minecraft:looting").unwrap();
+                let mut patch = weapon.patch();
+                patch.put(
+                    kinds::ENCHANTMENTS,
+                    PatchEntry::Set(ComponentValue::Enchantments(vec![(id, case.looting)])),
+                );
+                (weapon.added, weapon.removed) = patch.to_opaque();
+            }
+            DamageSource::player(player.uid, player.position, false).with_looting_from(&weapon)
         } else {
             DamageSource::environment(DamageKind::Fall)
         };
-        source.looting_level = case.looting;
         if self.break_test.as_deref() == Some("skeleton_death") {
             world.with_entity_mut(uid, &mut |entity| {
                 entity.random.next_float();
@@ -165,7 +174,7 @@ impl Report {
             .filter_map(snapshot)
             .collect();
         let expected = (true, true, case.mob_seed, case.level_seed);
-        let label = format!("skeleton_death seed {}", case.seed);
+        let label = format!("skeleton_death seed {} looting {}", case.seed, case.looting);
         if state != expected {
             self.mismatch(format!(
                 "{label} hit/dead/mob RNG/world RNG: official {expected:?}, bamboo {state:?}"

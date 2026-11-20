@@ -850,3 +850,58 @@ fn game_stack_to_loot(stack: &ItemStack) -> mc_bamboo_loot::LootStack {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use mc_bamboo_blocks::{
+        World,
+        entity::{
+            Entity, KindPublic,
+            mob::{DamageKind, DamageSource, MobType},
+        },
+    };
+    use mc_bamboo_data::items;
+    use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
+
+    use crate::region::Region;
+    use mc_bamboo_core::Vec3;
+
+    #[test]
+    fn skeleton_death_uses_the_region_loot_table_and_drops_preserved_gear() {
+        let mut region = Region::new(2, 20, false);
+        let mut skeleton = Entity::by_mob_type(MobType::Skeleton, Vec3::new(0.5, 64.0, 0.5));
+        skeleton.with_mob(|_, mob| {
+            mob.equipment
+                .set(EquipmentSlot::MainHand, ItemStack::new(items::BOW, 1));
+            mob.equipment.set_drop_chance(EquipmentSlot::MainHand, 2.0);
+        });
+        // 世界种子 0 的首组战利品可以为空；连续击杀推进同一条表随机序列。
+        // Seed zero can produce empty initial loot; repeated kills advance the same table stream.
+        let mut saw_loot = false;
+        for _ in 0..4 {
+            {
+                let (mut level, ticks) = region.block_level();
+                let mut world = World::new(&mut level, ticks);
+                let uid = world.spawn_entity(skeleton.clone());
+                assert!(world.hurt_mob(uid, DamageSource::environment(DamageKind::Fall), 100.0));
+            }
+            let spawned = region.entities.take_spawn_snapshots();
+            let items: Vec<_> = spawned
+                .iter()
+                .filter_map(|entity| match &entity.kind {
+                    KindPublic::Item { stack, .. } => Some(stack.item),
+                    KindPublic::ExperienceOrb { .. } => panic!("environmental death awarded XP"),
+                    _ => None,
+                })
+                .collect();
+            let (last, loot) = items.split_last().expect("preserved bow drop");
+            assert_eq!(*last, items::BOW);
+            assert!(
+                loot.iter()
+                    .all(|&item| matches!(item, items::ARROW | items::BONE))
+            );
+            saw_loot |= !loot.is_empty();
+        }
+        assert!(saw_loot);
+    }
+}

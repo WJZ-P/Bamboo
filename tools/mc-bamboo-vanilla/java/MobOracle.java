@@ -2307,7 +2307,7 @@ public final class MobOracle {
     }
 
     private static int playSkeletonDeaths(Official official, Writer out) throws Exception {
-        final int samples = 32;
+        final int samples = 34;
         boolean previousMobDrops = official.gameRules.get(GameRules.MOB_DROPS);
         try {
             for (int sample = 0; sample < samples; sample++) {
@@ -2320,11 +2320,14 @@ public final class MobOracle {
     }
 
     private static void playSkeletonDeath(Official official, Writer out, int sample) throws Exception {
-        int mode = sample % 8;
-        long seed = 20261120L + sample * 104729L;
+        // 同一个临界随机种子的两次玩家击杀，只改变抢夺等级。
+        // Two player kills with the same boundary seed; only Looting changes.
+        boolean lootingBoundary = sample >= 32;
+        int mode = lootingBoundary ? 3 : sample % 8;
+        long seed = lootingBoundary ? 20261173L : 20261120L + sample * 104729L;
         boolean playerKill = mode == 1 || mode == 2 || mode == 3 || mode == 6 || mode == 7;
         boolean drops = mode != 6;
-        int looting = mode == 3 || mode == 7 ? 3 : 0;
+        int looting = (mode == 3 && sample != 32) || mode == 7 ? 3 : 0;
         FakeLevel world = FakeLevel.create(official);
         setRule(official, GameRules.MOB_DROPS, drops);
         official.server.sequences = new RandomSequences();
@@ -2351,6 +2354,7 @@ public final class MobOracle {
             throw new IllegalStateException("skeleton_death did not kill the mob: " + sample);
         }
         List<String> spawned = new ArrayList<>();
+        boolean xpDropped = false;
         for (Entity entity : world.spawned) {
             switch (entity) {
                 case net.minecraft.world.entity.item.ItemEntity item -> {
@@ -2358,14 +2362,17 @@ public final class MobOracle {
                     spawned.add("{\"item\":" + BuiltInRegistries.ITEM.getId(stack.getItem())
                             + ",\"count\":" + stack.getCount() + ",\"damage\":" + stack.getDamageValue() + ",\"xp\":0}");
                 }
-                case net.minecraft.world.entity.ExperienceOrb orb -> spawned.add(
-                        "{\"item\":0,\"count\":0,\"damage\":0,\"xp\":" + orb.getValue() + "}");
+                case net.minecraft.world.entity.ExperienceOrb orb -> {
+                    xpDropped = true;
+                    spawned.add("{\"item\":0,\"count\":0,\"damage\":0,\"xp\":" + orb.getValue() + "}");
+                }
                 default -> throw new IllegalStateException("unexpected skeleton death spawn: " + entity);
             }
         }
-        if ((!drops && !spawned.isEmpty())
-                || (mode == 4 && !mob.getItemBySlot(slots.getFirst()).isEmpty())
-                || (mode == 5 && mob.getItemBySlot(slots.getFirst()).isEmpty())) {
+        boolean mainHandDropped = mob.getItemBySlot(slots.getFirst()).isEmpty();
+        if ((!drops && !spawned.isEmpty()) || xpDropped != (playerKill && drops)
+                || (mode == 4 && !mainHandDropped) || (mode == 5 && mainHandDropped)
+                || (lootingBoundary && mainHandDropped != (looting > 0))) {
             throw new IllegalStateException("skeleton_death did not exercise the expected drops: " + sample);
         }
         int[] remaining = slots.stream().map(mob::getItemBySlot)

@@ -619,7 +619,7 @@ pub struct DamageSource {
     /// 主手武器带来的附魔（这一期只读破甲之外的效果，见 `damage::protection`）。
     /// 空表示没有武器。
     pub weapon: Option<u16>,
-    pub looting_level: i32,
+    pub(super) looting_level: i32,
 }
 
 impl DamageSource {
