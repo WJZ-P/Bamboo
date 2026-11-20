@@ -471,8 +471,12 @@ WebView2 的渲染进程不算在内。
   `COLLISION_FULL_BLOCK` 事实近似，对 CARVERS 的完整方块/流体/空气等价。`setInitialSpawn`
   本身不调 `fixupSpawnHeight`（那是 `PlayerSpawnFinder.findSpawn` 进服兜底），Bamboo 只在
   11×11 整片找不到落点这一罕见情形用它，且在实测种子上是恒等变换。flat 世界仍保留旧的
-  超平坦出生点（`(8, 0, 8)`），`initial_spawn` 只对三种噪声世界生效。超平坦结构只用内置注册表，
-  不加载数据包自定义结构集或标签；未对拍所有结构、群系组合或超平坦光照与续生成。
+  超平坦出生点（`(8, 0, 8)`），`initial_spawn` 只对三种噪声世界生效。超平坦结构只用内置注册表：
+  `structure_overrides` 里的 `#tag` 或任何查不到的名字都按 `lenientOptionalFieldOf` 当作
+  缺省（生成该固定群系适用的全部结构集），不展开标签；缺 `layers` 的 JSON 官方会整份解析失败、
+  回退默认预设，Bamboo 只对 `structure_overrides` 做同样的回退，同一 JSON 里的 `biome` /
+  `features` / `lakes` 仍会生效。
+  未对拍所有结构、群系组合或超平坦光照与续生成。
   奖励箱按官方专用服务端默认关闭。
   随机种子（`level-seed` 为空）用 `nanoTime ^ uniquifier` 近似官方 `RandomSupport`，进程内固定，
   只和官方「空种子 = 随机」的语义一致、不逐位比较。`normal` 世界的飞行压测已实跑：生成
