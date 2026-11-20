@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+use mc_bamboo_game::world_options::{FlatSettings, LevelType, WorldGenConfig};
 use mc_bamboo_server::{
     CLIENT_READ_TIMEOUT, ForwardingMode, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE, ServerConfig,
     config_files::{
@@ -58,6 +59,44 @@ impl From<ForwardingMode> for Forwarding {
             ForwardingMode::Off => Self::Off,
             ForwardingMode::Legacy => Self::Legacy,
             ForwardingMode::Modern => Self::Modern,
+        }
+    }
+}
+
+/// 新世界用的世界预设，和 [`LevelType`] 一一对应。
+///
+/// 另写一份是为了固定 JSON 里的拼写，不把世界生成的枚举直接暴露给前端。
+///
+/// The world preset for a new world, one-to-one with [`LevelType`]. A separate
+/// copy fixes the JSON spelling instead of exposing the worldgen enum.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorldType {
+    #[default]
+    Normal,
+    Flat,
+    LargeBiomes,
+    Amplified,
+}
+
+impl From<WorldType> for LevelType {
+    fn from(world_type: WorldType) -> Self {
+        match world_type {
+            WorldType::Normal => Self::Normal,
+            WorldType::Flat => Self::Flat,
+            WorldType::LargeBiomes => Self::LargeBiomes,
+            WorldType::Amplified => Self::Amplified,
+        }
+    }
+}
+
+impl From<LevelType> for WorldType {
+    fn from(level_type: LevelType) -> Self {
+        match level_type {
+            LevelType::Normal => Self::Normal,
+            LevelType::Flat => Self::Flat,
+            LevelType::LargeBiomes => Self::LargeBiomes,
+            LevelType::Amplified => Self::Amplified,
         }
     }
 }
@@ -173,13 +212,28 @@ pub struct ServerSettings {
     /// its own default.
     #[serde(default = "default_islands")]
     pub islands: bool,
-    /// 世界生成参数，从 `server.properties` 的四个键解析而来，不进界面 JSON。
-    /// 界面目前不编辑这四项，`as_files` 会原样保留已有值。
+    /// 世界生成种子，对应 `level-seed` 的原文：空串表示新建世界时随机取一个，
+    /// 数字按 `Long.parseLong`，其它字符串按 `String.hashCode` 算成种子（和官方相同）。
+    /// 只在新建世界时生效，已有存档的种子以存档里的为准。
     ///
-    /// World generation parameters parsed from the four `server.properties` keys.
-    /// Not part of the UI JSON; the UI does not edit them and `as_files` keeps them.
-    #[serde(skip)]
-    pub world_gen: mc_bamboo_game::WorldGenConfig,
+    /// The world seed, verbatim from `level-seed`: empty picks a random one when
+    /// a world is created, digits use `Long.parseLong`, any other string uses
+    /// `String.hashCode`. Only applies to new worlds; an existing save keeps its
+    /// seed.
+    pub level_seed: String,
+    /// 世界类型，对应 `level-type`。只在新建世界时生效。
+    ///
+    /// The world preset (`level-type`). Only applies to new worlds.
+    pub level_type: WorldType,
+    /// 新世界要不要生成结构，对应 `generate-structures`。
+    ///
+    /// Whether a new world generates structures (`generate-structures`).
+    pub generate_structures: bool,
+    /// 超平坦预设的 JSON 原文，对应 `generator-settings`，只在 [`WorldType::Flat`] 下生效。
+    ///
+    /// The flat preset JSON, verbatim from `generator-settings`; only used by
+    /// [`WorldType::Flat`].
+    pub generator_settings: String,
 }
 
 impl Default for ServerSettings {
@@ -223,14 +277,31 @@ impl ServerSettings {
             reclaims_per_tick: u32::try_from(bamboo.reclaims_per_tick).unwrap_or(u32::MAX),
             island_threads: u32::try_from(bamboo.island_threads).unwrap_or(u32::MAX),
             islands: bamboo.islands,
-            world_gen: mc_bamboo_game::world_options::WorldGenConfig::from_properties(
-                &official.level_seed,
-                &official.level_type,
-                &official.generator_settings,
-                official.generate_structures,
-            )
-            .0,
+            level_seed: official.level_seed.clone(),
+            // 旧名 `default` / `largebiomes` 和大小写都按 `LevelType` 归一；
+            // 认不出的值服务端本来也会回退 `normal`，界面直接显示成回退后的值。
+            // Legacy names and casing normalize through `LevelType`; an unknown
+            // value already falls back to `normal` on the server, so show that.
+            level_type: LevelType::from_level_id(&official.level_type)
+                .unwrap_or_default()
+                .into(),
+            generate_structures: official.generate_structures,
+            generator_settings: official.generator_settings.clone(),
         }
+    }
+
+    /// 按官方 `DedicatedServerProperties` 把四个界面字段解析成生成参数。
+    ///
+    /// Parse the four UI fields into generation parameters the way vanilla's
+    /// `DedicatedServerProperties` does.
+    fn world_gen(&self) -> WorldGenConfig {
+        WorldGenConfig::from_properties(
+            &self.level_seed,
+            LevelType::from(self.level_type).id(),
+            &self.generator_settings,
+            self.generate_structures,
+        )
+        .0
     }
 
     pub fn to_server_config(&self) -> ServerConfig {
@@ -275,7 +346,7 @@ impl ServerSettings {
             // The dead-island timeout is not in the UI: the default (the
             // `BAMBOO_ISLAND_DEAD_SECONDS` environment variable wins).
             island_dead_timeout: defaults.island_dead_timeout,
-            world_gen: self.world_gen.clone(),
+            world_gen: self.world_gen(),
             spawn_radius: None,
             // 桌面端有 GUI 控制台，不读进程 stdin；广播默认按官方 true。
             // The desktop has a GUI console, so it does not read process stdin;
@@ -298,6 +369,16 @@ impl ServerSettings {
         };
         files.official.server_port = self.port;
         files.official.level_name = self.level_name.trim().to_owned();
+        // 四个世界生成键按官方 `Properties.store` 的写法写回原文（值的转义由那边负责）。
+        // `level-type` 归一成注册名；种子和 JSON 前后空白在官方解析时本来就会忽略。
+        //
+        // Write the four world-generation keys back verbatim, escaped by the
+        // official `Properties.store` rules. `level-type` normalizes to its
+        // registry id; leading/trailing space is ignored by vanilla's parsers.
+        files.official.level_seed = self.level_seed.trim().to_owned();
+        files.official.level_type = LevelType::from(self.level_type).id().to_owned();
+        files.official.generator_settings = self.generator_settings.trim().to_owned();
+        files.official.generate_structures = self.generate_structures;
         files
     }
 
@@ -341,6 +422,14 @@ impl ServerSettings {
         }
         if self.compression_threshold < -1 {
             return Err("压缩阈值最小是 -1，-1 表示关闭压缩".to_owned());
+        }
+        // 官方只对 flat 预设解析 `generator-settings`，坏 JSON 会安静地退回默认预设；
+        // 界面这边说清楚，免得用户以为自己填的 preset 生效了。
+        // Vanilla parses `generator-settings` only for the flat preset and falls
+        // back silently on bad JSON; the UI says so instead of dropping the input.
+        if self.level_type == WorldType::Flat && !self.generator_settings.trim().is_empty() {
+            FlatSettings::parse(&self.generator_settings)
+                .map_err(|error| format!("超平坦设置不是合法的 JSON：{error}"))?;
         }
         if self.forwarding == Forwarding::Modern && self.forwarding_secret.is_empty() {
             return Err("现代转发必须填写转发密钥".to_owned());
@@ -511,6 +600,10 @@ mod tests {
         assert_eq!(defaults.reclaims_per_tick, 64);
         assert_eq!(defaults.port, 25565);
         assert_eq!(defaults.level_name, "world");
+        assert_eq!(defaults.level_seed, "");
+        assert_eq!(defaults.level_type, WorldType::Normal);
+        assert!(defaults.generate_structures);
+        assert_eq!(defaults.generator_settings, "{}");
         assert_eq!(ServerSettings::default().validate(), Ok(()));
     }
 
@@ -541,7 +634,10 @@ mod tests {
             reclaims_per_tick: 8,
             island_threads: 2,
             islands: true,
-            world_gen: Default::default(),
+            level_seed: "123456789".to_owned(),
+            level_type: WorldType::Amplified,
+            generate_structures: false,
+            generator_settings: r#"{"layers":[{"block":"minecraft:stone","height":3}]}"#.to_owned(),
         };
         let config = settings.to_server_config();
         assert_eq!(config.motd, "hello");
@@ -572,6 +668,11 @@ mod tests {
             mc_bamboo_game::islands_from_env().unwrap_or(true)
         );
         assert_eq!(config.list_directory, PathBuf::from("/tmp/server"));
+        assert_eq!(config.world_gen.seed, 123_456_789);
+        assert_eq!(config.world_gen.level_type, LevelType::Amplified);
+        assert!(!config.world_gen.generate_structures);
+        assert_eq!(config.world_gen.flat.layers.len(), 1);
+        assert_eq!(config.world_gen.flat.layers[0].1, 3);
     }
 
     #[test]
@@ -633,6 +734,12 @@ mod tests {
         settings.entity_threads = 2;
         settings.deliveries_per_tick = 32;
         settings.keep_alive_seconds = 20;
+        settings.level_seed = "my seed".to_owned();
+        settings.level_type = WorldType::Flat;
+        settings.generate_structures = false;
+        settings.generator_settings =
+            r#"{"layers":[{"block":"minecraft:stone","height":3}],"biome":"minecraft:desert"}"#
+                .to_owned();
         let files = settings.as_files(&ConfigFiles::default());
         write(&directory, &files).unwrap();
         let loaded = ServerSettings::from_files(
@@ -645,12 +752,130 @@ mod tests {
         assert_eq!(loaded.entity_threads, 2);
         assert_eq!(loaded.deliveries_per_tick, 32);
         assert_eq!(loaded.keep_alive_seconds, 20);
+        assert_eq!(loaded.level_seed, "my seed");
+        assert_eq!(loaded.level_type, WorldType::Flat);
+        assert!(!loaded.generate_structures);
+        assert_eq!(loaded.generator_settings, settings.generator_settings);
         let properties = fs::read_to_string(directory.join(PROPERTIES_FILE)).unwrap();
         assert!(properties.contains("server-port=25600\n"));
         assert!(properties.contains("motd=my server\n"));
         assert!(properties.contains("white-list=true\n"));
+        assert!(properties.contains("level-seed=my seed\n"));
+        assert!(properties.contains("level-type=minecraft\\:flat\n"));
+        assert!(properties.contains("generate-structures=false\n"));
+        // `:` 按官方 `Properties.store` 转义成 `\:`，读回来再还原。
+        // `:` is escaped to `\:` like `Properties.store`; reading restores it.
+        assert!(
+            properties.contains(
+                r#"generator-settings={"layers"\:[{"block"\:"minecraft\:stone","height"\:3}],"biome"\:"minecraft\:desert"}"#
+            ),
+            "{properties}"
+        );
         let bamboo = fs::read_to_string(directory.join(BAMBOO_FILE)).unwrap();
         assert!(bamboo.contains("entity_threads = 2\n"));
+    }
+
+    /// 世界生成四项在界面 JSON 里的拼写是固定的 camelCase，读写要能原样往返。
+    /// The four world-gen fields keep fixed camelCase spellings in the UI JSON and
+    /// must survive a round trip unchanged.
+    #[test]
+    fn world_gen_fields_round_trip_through_the_ui_json() {
+        let settings = ServerSettings {
+            level_seed: "hello".to_owned(),
+            level_type: WorldType::LargeBiomes,
+            generate_structures: false,
+            generator_settings: r#"{"biome":"minecraft:desert"}"#.to_owned(),
+            ..ServerSettings::default()
+        };
+        let text = serde_json::to_string(&settings).unwrap();
+        assert!(text.contains(r#""levelSeed":"hello""#), "{text}");
+        assert!(text.contains(r#""levelType":"largeBiomes""#), "{text}");
+        assert!(text.contains(r#""generateStructures":false"#), "{text}");
+        assert!(
+            text.contains(r#""generatorSettings":"{\"biome\":\"minecraft:desert\"}""#),
+            "{text}"
+        );
+        let parsed: ServerSettings = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.level_seed, "hello");
+        assert_eq!(parsed.level_type, WorldType::LargeBiomes);
+        assert!(!parsed.generate_structures);
+        assert_eq!(parsed.generator_settings, r#"{"biome":"minecraft:desert"}"#);
+    }
+
+    #[test]
+    fn world_type_maps_one_to_one_to_the_level_type() {
+        assert_eq!(LevelType::from(WorldType::Normal), LevelType::Normal);
+        assert_eq!(LevelType::from(WorldType::Flat), LevelType::Flat);
+        assert_eq!(
+            LevelType::from(WorldType::LargeBiomes),
+            LevelType::LargeBiomes
+        );
+        assert_eq!(LevelType::from(WorldType::Amplified), LevelType::Amplified);
+        assert_eq!(WorldType::from(LevelType::Flat), WorldType::Flat);
+    }
+
+    /// 旧名 `default` 读进界面时归一成 `normal`，保存写回注册名。
+    /// The legacy `default` alias shows up as `normal` and is saved as the id.
+    #[test]
+    fn legacy_level_type_aliases_load_as_the_canonical_preset() {
+        let mut files = ConfigFiles::default();
+        files.official.level_type = "default".to_owned();
+        let settings = ServerSettings::from_files(&files, "");
+        assert_eq!(settings.level_type, WorldType::Normal);
+        assert_eq!(
+            settings.as_files(&files).official.level_type,
+            "minecraft:normal"
+        );
+    }
+
+    #[test]
+    fn a_bad_flat_preset_is_rejected_before_saving() {
+        assert!(
+            validate(|settings| {
+                settings.level_type = WorldType::Flat;
+                settings.generator_settings = "[".to_owned();
+            })
+            .is_err()
+        );
+        assert!(
+            validate(|settings| {
+                settings.level_type = WorldType::Flat;
+                settings.generator_settings =
+                    r#"{"layers":[{"block":"minecraft:nope","height":1}]}"#.to_owned();
+            })
+            .is_err()
+        );
+        assert_eq!(
+            validate(|settings| {
+                settings.level_type = WorldType::Flat;
+                settings.generator_settings = String::new();
+            }),
+            Ok(())
+        );
+        // 非 flat 预设下官方根本不看这个键，坏 JSON 也不该拦住保存。
+        // Outside the flat preset vanilla never reads the key, so bad JSON must
+        // not block saving either.
+        assert_eq!(
+            validate(|settings| {
+                settings.level_type = WorldType::Normal;
+                settings.generator_settings = "[".to_owned();
+            }),
+            Ok(())
+        );
+    }
+
+    /// 空种子保存成空的 `level-seed`，交给服务端在建世界时取随机值。
+    /// An empty seed is saved as an empty `level-seed`; the server rolls one when
+    /// it creates the world.
+    #[test]
+    fn an_empty_seed_is_written_as_an_empty_value() {
+        let settings = ServerSettings {
+            level_seed: "   ".to_owned(),
+            ..ServerSettings::default()
+        };
+        let files = settings.as_files(&ConfigFiles::default());
+        assert_eq!(files.official.level_seed, "");
+        assert_ne!(settings.to_server_config().world_gen.seed, 0);
     }
 
     #[test]
@@ -832,5 +1057,12 @@ mod tests {
         assert!(!parsed.prevent_proxy_connections);
         assert_eq!(parsed.entity_threads, 0);
         assert_eq!(parsed.deliveries_per_tick, 64);
+        // 世界生成四项也要保持官方默认，不能让旧草稿把新世界变成超平坦。
+        // The four world-gen fields keep their official defaults too, so an old
+        // draft cannot silently turn a new world into superflat.
+        assert_eq!(parsed.level_seed, "");
+        assert_eq!(parsed.level_type, WorldType::Normal);
+        assert!(parsed.generate_structures);
+        assert_eq!(parsed.generator_settings, "{}");
     }
 }
