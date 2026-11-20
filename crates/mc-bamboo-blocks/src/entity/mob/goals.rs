@@ -7,7 +7,7 @@
 //! Goals: vanilla `GoalSelector`, `WrappedGoal`, the eight cow goals and the `RandomPos`
 //! family, with identical scheduling and random draw order.
 
-use mc_bamboo_core::{BlockPos, Vec3, mth};
+use mc_bamboo_core::{Aabb, BlockPos, Vec3, mth};
 use mc_bamboo_data::{
     blocks,
     tags::{fluid_tags, item_tags},
@@ -411,6 +411,17 @@ impl GoalSelector {
         }
     }
 
+    pub(crate) fn rebase_clock(&mut self, delta: i64) {
+        for goal in &mut self.goals {
+            if let Goal::MeleeAttack {
+                last_can_use_check, ..
+            } = &mut goal.goal
+            {
+                *last_can_use_check = last_can_use_check.saturating_add(delta);
+            }
+        }
+    }
+
     pub(crate) fn skeleton_targets() -> Self {
         let mut selector = Self::zombie_targets();
         selector.goals.remove(2);
@@ -652,7 +663,7 @@ const fn adjusted_tick_delay(every_tick: bool, ticks: i32) -> i32 {
 fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) -> bool {
     match goal {
         Goal::Bow(_) => {
-            super::skeleton::bow_slot(mob).is_some() && target_player(mob, ctx).is_some()
+            super::skeleton::bow_slot(mob).is_some() && combat_target(mob, ctx).is_some()
         }
         Goal::Float => float_can_use(me, mob),
         Goal::Panic { target, .. } => {
@@ -776,12 +787,9 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
                 return false;
             }
             *last_can_use_check = now;
-            let Some(target) = target_player(mob, ctx) else {
+            let Some(target) = combat_target(mob, ctx) else {
                 return false;
             };
-            if !target.alive {
-                return false;
-            }
             let nav = living::nav_mob(me, mob, ctx.blocks());
             *start_path = mob.navigation.create_path(
                 ctx.blocks(),
@@ -794,7 +802,11 @@ fn can_use(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Entity
         Goal::HurtByTarget { timestamp } => {
             let last = mob.last_hurt_by_mob;
             let stamp = mob.last_hurt_by_mob_timestamp;
-            last.is_some() && stamp != *timestamp
+            stamp != *timestamp
+                && last.is_some_and(|uid| {
+                    mob.mob_type != super::MobType::Skeleton
+                        || target_by_uid(mob, ctx, uid).is_some()
+                })
         }
         Goal::NearestAttackableTarget {
             kind,
@@ -873,7 +885,7 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
     match goal {
         Goal::Bow(_) => {
             super::skeleton::bow_slot(mob).is_some()
-                && (target_player(mob, ctx).is_some() || !mob.navigation.is_done())
+                && (combat_target(mob, ctx).is_some() || !mob.navigation.is_done())
         }
         Goal::Panic { .. } | Goal::Stroll { .. } => !mob.navigation.is_done(),
         Goal::Breed {
@@ -925,23 +937,29 @@ fn can_continue(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn E
         Goal::MeleeAttack { .. } => {
             // 官方 `followingTargetEvenIfNotSeen=false`：目标活着且
             // `!navigation.isDone()` 才继续；路径走完就停。
-            target_player(mob, ctx).is_some() && !mob.navigation.is_done()
+            combat_target(mob, ctx).is_some() && !mob.navigation.is_done()
+        }
+        Goal::NearestAttackableTarget { unseen_ticks, .. }
+            if mob.mob_type == super::MobType::Skeleton =>
+        {
+            let Some(target) = combat_target(mob, ctx) else {
+                return false;
+            };
+            if !target_in_follow_range(me, mob, target) {
+                return false;
+            }
+            if living::has_line_of_sight(me, mob, ctx.blocks(), target.uid, target.eye_position()) {
+                *unseen_ticks = 0;
+            } else {
+                *unseen_ticks += 1;
+            }
+            *unseen_ticks <= reduced_tick_delay(60)
         }
         Goal::HurtByTarget { .. } | Goal::NearestAttackableTarget { .. } => {
             // `TargetGoal.canContinueToUse`：`getTarget()` 把打不了的目标（死了、创造、
             // 旁观、和平难度）读成 null，回退到的 `targetMob` 是同一个玩家，同样打不了；
             // 打得了还要在跟随距离内。`mustSee` 的视线记忆本期不建模（目标恒看得见）。
-            let range = mob
-                .attributes
-                .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
-            target_player(mob, ctx).is_some_and(|player| {
-                let (dx, dy, dz) = (
-                    player.position.x - me.position.x,
-                    player.position.y - me.position.y,
-                    player.position.z - me.position.z,
-                );
-                dx * dx + dy * dy + dz * dz <= range * range
-            })
+            combat_target(mob, ctx).is_some_and(|target| target_in_follow_range(me, mob, target))
         }
         Goal::RestrictSun => {
             ctx.blocks().is_bright_outside()
@@ -1116,7 +1134,7 @@ fn stop_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
 fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn EntityCtx) {
     match goal {
         Goal::Bow(bow) => {
-            if let Some(target) = target_player(mob, ctx) {
+            if let Some(target) = combat_target(mob, ctx) {
                 bow.tick(me, mob, ctx, target);
             }
         }
@@ -1228,7 +1246,7 @@ fn tick_goal(goal: &mut Goal, me: &mut Entity, mob: &mut Mob, ctx: &mut dyn Enti
             raise_arm_ticks,
             ..
         } => {
-            let Some(target) = target_player(mob, ctx) else {
+            let Some(target) = combat_target(mob, ctx) else {
                 return;
             };
             mob.look.set_look_at(
@@ -1737,14 +1755,94 @@ pub(crate) fn land_random_pos(
 
 // ---- 敌对目标的查询 ----
 
-/// `Mob.getTarget()` 在 Bamboo 里只可能是本岛玩家（别的生物还没做目标实体）。
-fn target_player(mob: &Mob, ctx: &dyn EntityCtx) -> Option<PlayerView> {
-    // 官方 `TargetingConditions.forCombat().test` 的视线要求由
-    // `NearestAttackableTargetGoal` 在选择目标时已判；近战目标只看活着、非旁观/创造。
-    mob.target
-        .and_then(|uid| player_by_uid(ctx.blocks(), uid))
-        .filter(|player| player.alive && !player.spectator && !player.creative)
-        .filter(|_| ctx.blocks().difficulty() != 0)
+/// 当前岛上可攻击的生物快照；跨岛目标读作缺失。
+///
+/// A local attack target snapshot. Unavailable cross-island targets are absent.
+#[derive(Clone, Copy)]
+pub(crate) struct CombatTarget {
+    pub(crate) uid: EntityUid,
+    pub(crate) position: Vec3,
+    eye: f32,
+    pub(crate) height: f64,
+    hitbox: Aabb,
+}
+
+impl CombatTarget {
+    pub(crate) fn player(view: PlayerView, skeleton: bool) -> Self {
+        let feet = view.position;
+        let half = if skeleton {
+            f64::from(0.6_f32) / 2.0
+        } else {
+            0.3
+        };
+        let height = if skeleton {
+            f64::from(if view.sneaking { 1.5_f32 } else { 1.8_f32 })
+        } else {
+            1.8
+        };
+        Self {
+            uid: view.uid,
+            position: feet,
+            eye: view.eye_height,
+            height,
+            hitbox: Aabb::new(
+                feet.x - half,
+                feet.y,
+                feet.z - half,
+                feet.x + half,
+                feet.y + height,
+                feet.z + half,
+            ),
+        }
+    }
+
+    pub(crate) fn eye_y(&self) -> f64 {
+        self.position.y + f64::from(self.eye)
+    }
+
+    pub(crate) fn eye_position(&self) -> Vec3 {
+        Vec3::new(self.position.x, self.eye_y(), self.position.z)
+    }
+}
+
+fn combat_target(mob: &Mob, ctx: &dyn EntityCtx) -> Option<CombatTarget> {
+    target_by_uid(mob, ctx, mob.target?)
+}
+
+fn target_in_follow_range(me: &Entity, mob: &Mob, target: CombatTarget) -> bool {
+    let range = mob
+        .attributes
+        .value(mc_bamboo_data::registries::attribute::FOLLOW_RANGE);
+    me.position.distance_to_sqr(target.position) <= range * range
+}
+
+fn target_by_uid(mob: &Mob, ctx: &dyn EntityCtx, uid: EntityUid) -> Option<CombatTarget> {
+    if ctx.blocks().difficulty() == 0 {
+        return None;
+    }
+    let skeleton = mob.mob_type == super::MobType::Skeleton;
+    if let Some(player) = player_by_uid(ctx.blocks(), uid) {
+        return (player.alive && !player.spectator && !player.creative)
+            .then(|| CombatTarget::player(player, skeleton));
+    }
+    if !skeleton {
+        return None;
+    }
+    let other = ctx.other(uid)?;
+    let KindPublic::Mob(target) = &other.kind else {
+        return None;
+    };
+    if other.removed || !target.is_alive() {
+        return None;
+    }
+    let (_, _, eye) = target.mob_type.dimensions(target.baby);
+    Some(CombatTarget {
+        uid,
+        position: other.position,
+        eye,
+        height: f64::from(target.dimensions().1),
+        hitbox: other.bounding_box(),
+    })
 }
 
 /// `NearestAttackableTargetGoal.findTarget` 的玩家分支：按 `FOLLOW_RANGE`
@@ -1785,7 +1883,7 @@ fn nearest_attackable(
 }
 
 /// `PathfinderMob.isWithinMeleeAttackRange`：用实体交互范围算的方形距离。
-fn within_melee_range(me: &Entity, _mob: &Mob, player: PlayerView) -> bool {
+fn within_melee_range(me: &Entity, _mob: &Mob, target: CombatTarget) -> bool {
     // `Mob.DEFAULT_ATTACK_REACH = sqrt(2.04f) - 0.6f`（26.3 字节码）。
     // 官方用 `getAttackBoundingBox(reach).intersects(target.getHitbox())`，
     // 这里按双方 Aabb 膨胀后的相交判定，而不是旧的「交互范围 + 1」方格。
@@ -1800,15 +1898,7 @@ fn within_melee_range(me: &Entity, _mob: &Mob, player: PlayerView) -> bool {
         me.position.y + f64::from(height) + reach,
         me.position.z + half + reach,
     );
-    let theirs = crate::shape::Aabb::new(
-        player.position.x - 0.3,
-        player.position.y,
-        player.position.z - 0.3,
-        player.position.x + 0.3,
-        player.position.y + 1.8,
-        player.position.z + 0.3,
-    );
-    ours.intersects(theirs)
+    ours.intersects(target.hitbox)
 }
 
 /// `FleeSunGoal.getHidePos`：10 次随机采样，找看不见天且路径代价小于 0 的格子。

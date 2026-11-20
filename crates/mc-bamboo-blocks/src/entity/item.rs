@@ -633,6 +633,10 @@ impl Entity {
         }
         scan.heights
     }
+
+    pub(crate) fn update_projectile_fluid(&mut self, world: &dyn BlockView) {
+        self.update_item_fluid(world);
+    }
 }
 
 struct FluidDetail {

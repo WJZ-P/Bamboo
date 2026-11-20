@@ -86,7 +86,11 @@ impl MobType {
         match (self, baby) {
             (Self::Skeleton, _) => {
                 let facts = &mc_bamboo_data::entity_types::FACTS[self.entity_type() as usize];
-                (facts.width, facts.height, 1.74)
+                (
+                    facts.width,
+                    facts.height,
+                    mc_bamboo_data::entity_types::SKELETON_EYE_HEIGHT,
+                )
             }
             (Self::Cow, false) => (0.9, 1.4, 1.3),
             // `Cow.BABY_DIMENSIONS`：`scalable(0.45F, 0.7F).withEyeHeight(0.69F)`。
@@ -602,6 +606,7 @@ pub struct DamageSource {
     pub creative_player: bool,
     /// `getSourcePosition()`：显式位置，或者回退到攻击者位置。击退方向读它。
     pub position: Option<Vec3>,
+    pub projectile_motion: Option<Vec3>,
     /// `sourcePositionRaw()`：只有 `at <location>` 才有值，`DamageEvent` 读它。
     pub raw_position: Option<Vec3>,
     /// 冲刺攻击时玩家的朝向，`causeExtraKnockback` 的方向用它。
@@ -625,11 +630,23 @@ impl DamageSource {
             attacker_is_player: false,
             creative_player: false,
             position: None,
+            projectile_motion: None,
             raw_position: None,
             sprint_yaw: None,
             attacker_uuid: None,
             scale_when_non_player: false,
             weapon: None,
+        }
+    }
+
+    /// LivingEntity.dealDefaultKnockback：弹射物取速度反向，其余取攻击点。
+    ///
+    /// LivingEntity.dealDefaultKnockback uses reversed projectile motion or the source position.
+    pub fn knockback_direction(&self, target: Vec3) -> Option<(f64, f64)> {
+        if let Some(delta) = self.projectile_motion {
+            Some((-delta.x, -delta.z))
+        } else {
+            self.position.map(|at| (at.x - target.x, at.z - target.z))
         }
     }
 
@@ -667,6 +684,7 @@ impl DamageSource {
             attacker_is_player: true,
             creative_player: creative,
             position: Some(position),
+            projectile_motion: None,
             raw_position: None,
             sprint_yaw: None,
             attacker_uuid: None,
@@ -849,6 +867,7 @@ pub enum MobEvent {
     Damage {
         kind: DamageKind,
         attacker: Option<EntityUid>,
+        direct: Option<EntityUid>,
     },
     /// `broadcastEntityEvent(this, 3)`：死亡。
     Death,
@@ -1062,6 +1081,9 @@ impl Mob {
     pub fn rebase(&mut self, delta: i64) {
         self.last_damage_stamp = self.last_damage_stamp.saturating_add(delta);
         self.navigation.rebase(delta);
+        if self.mob_type == MobType::Skeleton {
+            self.goals.rebase_clock(delta);
+        }
     }
 }
 

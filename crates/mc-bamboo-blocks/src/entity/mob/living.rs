@@ -1356,14 +1356,15 @@ pub(crate) fn hurt_server(
         mob.events.push(MobEvent::Damage {
             kind: source.kind,
             attacker: source.attacker,
+            direct: source.direct,
         });
         if !source.kind.no_impact() {
             mob.hurt_marked = true;
         }
         if !source.kind.no_knockback() {
-            let (dx, dz) = source.position.map_or((0.0, 0.0), |position| {
-                (position.x - me.position.x, position.z - me.position.z)
-            });
+            let (dx, dz) = source
+                .knockback_direction(me.position)
+                .unwrap_or((0.0, 0.0));
             knockback(me, mob, f64::from(0.4_f32), dx, dz);
         }
     }

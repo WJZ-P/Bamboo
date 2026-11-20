@@ -747,7 +747,27 @@ struct Report {
 }
 
 /// 启动官方进程，逐个场景重放。
-pub fn run(mut command: Command, options: &[&str]) -> Result<(), String> {
+///
+/// 玩家场景的重放函数在 debug 构建里一帧就有几十 KB，主线程默认的 1 MB 栈不够，
+/// 所以挪到一条大栈线程上跑。
+///
+/// Runs the official process and replays every scene. The player replays use frames
+/// dozens of KB deep in debug builds, which overflows the main thread's default 1 MB
+/// stack, so they run on a thread with a larger one.
+pub fn run(command: Command, options: &[&str]) -> Result<(), String> {
+    let options: Vec<String> = options.iter().map(|option| (*option).to_owned()).collect();
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(move || {
+            let options: Vec<&str> = options.iter().map(String::as_str).collect();
+            run_with_options(command, &options)
+        })
+        .map_err(|error| format!("cannot start the oracle thread: {error}"))?
+        .join()
+        .map_err(|_| "the oracle thread panicked".to_owned())?
+}
+
+fn run_with_options(mut command: Command, options: &[&str]) -> Result<(), String> {
     let mut show = 12;
     let mut break_test: Option<String> = None;
     let mut index = 0;

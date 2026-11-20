@@ -159,7 +159,14 @@ fn pickup_for(region: &mut Region, id: PlayerId) {
             continue;
         };
         if let mc_bamboo_blocks::entity::EntityKind::Arrow(arrow) = &entity.kind {
-            if !entity.removed && arrow.in_ground && arrow.shake_time == 0 {
+            if !entity.removed
+                && arrow.in_ground
+                && arrow.shake_time == 0
+                && region
+                    .players
+                    .get(&id)
+                    .is_some_and(|player| !player.health.is_dead_or_dying())
+            {
                 pickup_arrow(region, id, entity_id, arrow, creative);
             }
             continue;
@@ -236,7 +243,7 @@ fn pickup_arrow(
             let left = player
                 .inventory
                 .receive(arrow.pickup_item.clone(), creative);
-            if !left.is_empty() {
+            if left.count >= arrow.pickup_item.count {
                 return;
             }
             for slot in changed_slots(&before, &player.inventory) {
@@ -293,4 +300,71 @@ fn throw_delta(player: &mut Player) -> Vec3 {
 /// The player's random seed is derived from the id, same as entities, so tests can replay it.
 pub(crate) fn player_random(id: PlayerId) -> JavaRandom {
     JavaRandom::new(i64::from(id.0) ^ ENTITY_RANDOM_SEED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mc_bamboo_blocks::entity::{Entity, EntityKind, arrow::Pickup};
+    use mc_bamboo_protocol::packet::play::ClientInformation;
+    use uuid::Uuid;
+
+    #[test]
+    fn embedded_arrow_pickup_checks_mode_and_shake() {
+        let id = PlayerId(100);
+        let mut region = Region::new(2, 20, false);
+        let at = Vec3::new(0.5, 64.0, 0.5);
+        region.insert_player(Player::new(
+            id,
+            Uuid::nil(),
+            "ArrowTest".to_owned(),
+            GameMode::Survival,
+            ClientInformation::default(),
+            at,
+        ));
+        let embed = |pickup, shake_time, region: &mut Region| {
+            let mut entity = Entity::arrow(at);
+            let EntityKind::Arrow(arrow) = &mut entity.kind else {
+                unreachable!()
+            };
+            arrow.pickup = pickup;
+            arrow.in_ground = true;
+            arrow.shake_time = shake_time;
+            region.entities.spawn(entity)
+        };
+        let refused = embed(Pickup::Disallowed, 0, &mut region);
+        let shaky = embed(Pickup::Allowed, 1, &mut region);
+        let creative = embed(Pickup::CreativeOnly, 0, &mut region);
+        let ready = embed(Pickup::Allowed, 0, &mut region);
+
+        pickup_before_entities(&mut region);
+        for stays in [refused, shaky, creative] {
+            assert!(!region.entities.get(stays).unwrap().removed);
+        }
+        assert!(region.entities.get(ready).unwrap().removed);
+        assert_eq!(
+            region.players[&id]
+                .inventory
+                .slots
+                .iter()
+                .filter(|stack| stack.item == mc_bamboo_data::items::ARROW)
+                .map(|stack| stack.count)
+                .sum::<i32>(),
+            1
+        );
+
+        region.players.get_mut(&id).unwrap().game_mode = GameMode::Creative;
+        pickup_before_entities(&mut region);
+        assert!(region.entities.get(creative).unwrap().removed);
+        assert_eq!(
+            region.players[&id]
+                .inventory
+                .slots
+                .iter()
+                .filter(|stack| stack.item == mc_bamboo_data::items::ARROW)
+                .map(|stack| stack.count)
+                .sum::<i32>(),
+            1
+        );
+    }
 }

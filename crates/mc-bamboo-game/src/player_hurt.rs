@@ -337,7 +337,11 @@ fn broadcast_damage_event(parts: &mut HurtParts<'_>, id: PlayerId, source: &Dama
 /// `CombatTracker.recordDamage`：造成者是非玩家生物时，`ServerPlayer.onEnterCombat`
 /// 给玩家自己发一个没有包体的 `player_combat_enter`。
 fn send_player_combat_enter(parts: &mut HurtParts<'_>, id: PlayerId, source: &DamageSource) {
-    if source.attacker.is_some() && parts.players.get(&id).is_some_and(|p| !p.in_combat) {
+    let living_source = source.attacker.is_some()
+        && (source.kind != mc_bamboo_blocks::entity::mob::DamageKind::Arrow
+            || source.attacker_is_player
+            || source.scale_when_non_player);
+    if living_source && parts.players.get(&id).is_some_and(|p| !p.in_combat) {
         if let Some(player) = parts.players.get_mut(&id) {
             player.in_combat = true;
         }
@@ -465,9 +469,7 @@ fn knockback(
     position: Vec3,
     random: &mut Option<JavaRandom>,
 ) {
-    let (mut dx, mut dz) = source
-        .position
-        .map_or((0.0, 0.0), |at| (at.x - position.x, at.z - position.z));
+    let (mut dx, mut dz) = source.knockback_direction(position).unwrap_or((0.0, 0.0));
     if let Some(random) = random.as_mut()
         && dx * dx + dz * dz < 1.0e-5
     {

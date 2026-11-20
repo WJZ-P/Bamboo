@@ -83,7 +83,7 @@ fn uuid_from(input: &Tag, key: &str) -> Option<[u8; 16]> {
         return None;
     };
     let mut bytes = [0; 16];
-    for (output, word) in bytes.chunks_exact_mut(4).zip([a, b, c, d]) {
+    for (output, word) in bytes.as_chunks_mut::<4>().0.iter_mut().zip([a, b, c, d]) {
         output.copy_from_slice(&word.to_be_bytes());
     }
     Some(bytes)

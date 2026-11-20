@@ -217,10 +217,12 @@ impl EntityData {
             | Self::FallingBlockStart(_)
             | Self::TntFuse(_)
             | Self::LivingFlags(_)
-            | Self::ExperienceValue(_)
-            | Self::ArrowFlags(_) => 8,
-            Self::TntBlockState(_) | Self::Health(_) | Self::ArrowPierce(_) => 9,
-            Self::EffectParticles(_) | Self::ArrowInGround(_) => 10,
+            | Self::ExperienceValue(_) => 8,
+            Self::ArrowFlags(_) => mc_bamboo_data::entity_types::ARROW_FLAGS,
+            Self::ArrowPierce(_) => mc_bamboo_data::entity_types::ARROW_PIERCE,
+            Self::ArrowInGround(_) => mc_bamboo_data::entity_types::ARROW_IN_GROUND,
+            Self::TntBlockState(_) | Self::Health(_) => 9,
+            Self::EffectParticles(_) => 10,
             Self::EffectAmbience(_) => 11,
             Self::MobFlags(_) => 15,
             Self::MainHand(_) | Self::Baby(_) => 16,

@@ -2,12 +2,12 @@ use mc_bamboo_core::{Vec3, mth};
 use mc_bamboo_data::{items, registries::attribute};
 use mc_bamboo_protocol::{item::ItemStack, packet::play::EquipmentSlot};
 
-use super::{Mob, control, living};
+use super::{Mob, control, goals::CombatTarget, living};
 use crate::{
     World,
     entity::{
         Entity, EntityKind, EntityUid,
-        ctx::{BlockView, Command, EntityCtx, PlayerView},
+        ctx::{BlockView, Command, EntityCtx},
     },
 };
 
@@ -61,7 +61,7 @@ impl BowGoal {
         me: &mut Entity,
         mob: &mut Mob,
         ctx: &mut dyn EntityCtx,
-        target: PlayerView,
+        target: CombatTarget,
     ) {
         let Some(slot) = bow_slot(mob) else { return };
         let visible =
@@ -94,7 +94,7 @@ impl BowGoal {
         me: &mut Entity,
         mob: &mut Mob,
         view: &dyn BlockView,
-        target: PlayerView,
+        target: CombatTarget,
     ) {
         const RADIUS_SQR: f64 = 15.0 * 15.0;
         let distance = target.position.distance_to_sqr(me.position);
@@ -144,7 +144,7 @@ fn look_at_now(me: &mut Entity, mob: &mut Mob, eye: Vec3) {
     let dy = eye.y - (me.position.y + f64::from(mob.eye_height));
     let dz = eye.z - me.position.z;
     let horizontal = (dx * dx + dz * dz).sqrt();
-    let degrees = |rad: f64| rad * 180.0 / f64::from(std::f32::consts::PI);
+    let degrees = |rad: f64| rad * f64::from(180.0_f32 / std::f32::consts::PI);
     let yaw = degrees(mth::atan2(dz, dx)) as f32 - 90.0;
     let pitch = -degrees(mth::atan2(dy, horizontal)) as f32;
     me.y_rot = control::rotate_towards(me.y_rot, yaw, 30.0);
@@ -155,7 +155,7 @@ fn shoot(
     me: &mut Entity,
     mob: &mut Mob,
     ctx: &mut dyn EntityCtx,
-    target: PlayerView,
+    target: CombatTarget,
     slot: EquipmentSlot,
 ) {
     let position = Vec3::new(
@@ -165,10 +165,9 @@ fn shoot(
     );
     let relative = target.position.subtract(position);
     let distance = (relative.x * relative.x + relative.z * relative.z).sqrt();
-    let target_height = if target.sneaking { 1.5_f32 } else { 1.8_f32 };
     let direction = Vec3::new(
         relative.x,
-        (target.position.y + f64::from(target_height) / 3.0 - position.y)
+        (target.position.y + target.height * 0.333_333_333_333_333_3 - position.y)
             + distance * f64::from(0.2_f32),
         relative.z,
     );
@@ -205,6 +204,10 @@ pub(crate) fn spawn_arrow(
     };
     arrow.owner = Some(owner);
     arrow.owner_uuid = Some(owner_uuid);
+    arrow.pierce = crate::entity::arrow::enchantment_level(&weapon, "minecraft:piercing") as i8;
+    if crate::entity::arrow::enchantment_level(&weapon, "minecraft:flame") > 0 {
+        entity.remaining_fire_ticks = 2000;
+    }
     arrow.weapon = Some(weapon);
     arrow.base_damage = 2.0
         + entity
@@ -352,7 +355,10 @@ fn populate_armor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BlockTicks, entity::ctx::PreciseCtx};
+    use crate::{
+        BlockTicks,
+        entity::ctx::{PlayerView, PreciseCtx},
+    };
 
     #[test]
     fn draw_takes_twenty_ticks_in_addition_to_difficulty_cooldown() {
@@ -387,7 +393,7 @@ mod tests {
                 shooter.tick_count = tick;
                 mob.seen.clear();
                 let mut ctx = PreciseCtx::new(&mut world, shooter.id);
-                goal.tick(shooter, mob, &mut ctx, player);
+                goal.tick(shooter, mob, &mut ctx, CombatTarget::player(player, true));
                 let count = world.entity_ids().len();
                 if count > previous {
                     shots.push(tick);
@@ -399,16 +405,35 @@ mod tests {
     }
 
     #[test]
-    fn skeleton_finalize_spawn_equips_the_bow() {
+    fn skeleton_command_and_egg_equip_the_bow_without_changing_nbt_summon() {
         let mut level = crate::testing::TestLevel::new();
         let mut ticks = BlockTicks::default();
         let mut world = World::new(&mut level, &mut ticks);
-        let mut skeleton = Entity::by_mob_type(super::super::MobType::Skeleton, Vec3::default());
-        assert!(bow_slot(skeleton.kind.mob().unwrap()).is_none());
-        finalize_spawn(&mut world, &mut skeleton);
-        let mob = skeleton.kind.mob().unwrap();
-        assert_eq!(bow_slot(mob), Some(EquipmentSlot::MainHand));
-        assert_eq!(mob.health, 20.0);
-        assert_eq!(mob.attributes.value(attribute::MOVEMENT_SPEED), 0.25);
+        use super::super::{
+            MobType,
+            spawn::{spawn_egg, summon_mob},
+        };
+        use mc_bamboo_core::BlockPos;
+
+        let position = Vec3::new(0.5, 64.0, 0.5);
+        let summon = summon_mob(&mut world, MobType::Skeleton, position, None).unwrap();
+        let egg = spawn_egg(
+            &mut world,
+            MobType::Skeleton,
+            BlockPos::new(1, 64, 0),
+            false,
+            None,
+        );
+        let tag = mc_bamboo_nbt::Tag::Compound(Vec::new());
+        let nbt = summon_mob(&mut world, MobType::Skeleton, position, Some(&tag)).unwrap();
+        for uid in [summon, egg] {
+            let entity = world.entity(uid).unwrap();
+            let mob = entity.kind.mob().unwrap();
+            assert_eq!(bow_slot(mob), Some(EquipmentSlot::MainHand));
+            assert_eq!(mob.health, 20.0);
+            assert_eq!(mob.attributes.value(attribute::MOVEMENT_SPEED), 0.25);
+        }
+        let entity = world.entity(nbt).unwrap();
+        assert!(bow_slot(entity.kind.mob().unwrap()).is_none());
     }
 }

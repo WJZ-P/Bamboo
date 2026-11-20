@@ -37,6 +37,7 @@ pub struct Extracted {
     pub blocks: Vec<Block>,
     pub items: Vec<ExtractedItem>,
     pub entity_types: Vec<EntityTypeFacts>,
+    pub projectile_facts: ProjectileFacts,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -832,6 +833,15 @@ pub struct EntityTypeFacts {
     pub height: f32,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectileFacts {
+    pub arrow_flags: u8,
+    pub arrow_pierce: u8,
+    pub arrow_in_ground: u8,
+    pub skeleton_eye_height: f32,
+}
+
 /// 一个物品。列表里的位置就是它的注册表 ID。
 pub struct Item {
     pub name: String,
@@ -1057,6 +1067,7 @@ pub struct VersionData {
     pub blocks: Vec<Block>,
     pub items: Vec<Item>,
     pub entity_types: Vec<EntityTypeFacts>,
+    pub projectile_facts: ProjectileFacts,
     pub state_tables: StateTables,
     pub light_tables: LightTables,
     pub block_maps: BlockMaps,
@@ -1188,6 +1199,7 @@ fn read_version_data(
         blocks: extracted.blocks,
         items,
         entity_types: extracted.entity_types,
+        projectile_facts: extracted.projectile_facts,
         state_tables: extracted.state_tables,
         light_tables: extracted.light_tables,
         block_maps: extracted.block_maps,

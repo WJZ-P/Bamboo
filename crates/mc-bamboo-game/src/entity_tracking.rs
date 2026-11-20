@@ -281,7 +281,7 @@ impl TrackedEntity {
             entity_id: snapshot.id,
             uuid: snapshot
                 .data
-                .mob_uuid()
+                .stable_uuid()
                 .map_or_else(|| entity_uuid(snapshot.id), Uuid::from_bytes),
             entity_type: snapshot.entity_type,
             position: self.base,
@@ -291,14 +291,14 @@ impl TrackedEntity {
             head_yaw: self.last_head,
             data: snapshot.add_data(),
         })];
-        // 官方 `trackedDataValues` 在构造时总是非 null（哪怕空表），所以配对时
-        // 总有一个 `set_entity_data`，空表时只有一个结束标记。
-        // Vanilla's `trackedDataValues` is never null, so pairing always sends
-        // one `set_entity_data`; an empty list only carries the end marker.
-        out.push(packet_body(&SetEntityData {
-            entity_id: snapshot.id,
-            items: &self.last_data,
-        }));
+        // 官方箭的 trackedDataValues 为空时不发；其它类型保留现有空表包行为。
+        // Vanilla skips empty arrow metadata; other types retain their existing empty packet.
+        if !matches!(snapshot.data, KindData::Arrow(_)) || !self.last_data.is_empty() {
+            out.push(packet_body(&SetEntityData {
+                entity_id: snapshot.id,
+                items: &self.last_data,
+            }));
+        }
         // `LivingEntity` 的可同步属性，属性表里哪些是同步的由数据层给出。
         // 官方 `AttributeSnapshot` 带 `getModifiers()` 的全部修饰符，临时的（效果、装备、
         // 细雪减速）也在里面。
@@ -379,7 +379,9 @@ impl TrackedEntity {
         let mut packets = Vec::new();
         // `SteppedInterpolationTracker.updateTracking` 每刻都加一，`getPositionPath`
         // 在发位置包时把攒下的刻数记成一步，然后清空。
-        self.ticks_since_step += 1;
+        if !matches!(snapshot.data, KindData::Arrow(_)) {
+            self.ticks_since_step += 1;
+        }
         if snapshot.sync_position {
             self.ticks_since_step = 0;
         }
@@ -502,9 +504,9 @@ impl TrackedEntity {
                 Some(item) if Some(item) != before => item.clone(),
                 None if matches!(snapshot.data, KindData::Arrow(_)) => match index {
                     0 => EntityData::SharedFlags(0),
-                    8 => EntityData::ArrowFlags(0),
-                    9 => EntityData::ArrowPierce(0),
-                    10 => EntityData::ArrowInGround(false),
+                    entity_types::ARROW_FLAGS => EntityData::ArrowFlags(0),
+                    entity_types::ARROW_PIERCE => EntityData::ArrowPierce(0),
+                    entity_types::ARROW_IN_GROUND => EntityData::ArrowInGround(false),
                     _ => continue,
                 },
                 None if before.is_some() => default_data_for_type(
@@ -669,7 +671,10 @@ impl TrackedEntity {
             self.teleport_delay = 0;
             return Some(Movement::Sync);
         }
-        let send_position = has_moved(self.base, snapshot.position)
+        let arrow = matches!(snapshot.data, KindData::Arrow(_));
+        let rotation_changed = arrow || rotation_changed;
+        let send_position = arrow
+            || has_moved(self.base, snapshot.position)
             || self.tick_count % FORCED_POS_UPDATE_PERIOD == 0;
         if !send_position {
             return rotation_changed.then_some(Movement::Rotation);
@@ -750,7 +755,7 @@ impl Snapshot {
             yaw: public.yaw,
             chunk: public.chunk_position(),
             data: KindData::of(&public.kind),
-            needs_sync: false,
+            needs_sync: matches!(public.kind, KindPublic::Arrow(arrow) if arrow.needs_sync),
             sync_velocity: false,
             sync_position: false,
             fall_flying: false,
@@ -813,7 +818,7 @@ impl KindData {
     }
 
     /// 生物自己的 UUID；其它三类按网络 ID 派生。
-    fn mob_uuid(&self) -> Option<[u8; 16]> {
+    fn stable_uuid(&self) -> Option<[u8; 16]> {
         match self {
             Self::Mob(mob) => Some(mob.uuid),
             Self::Arrow(arrow) => Some(arrow.uuid),
@@ -873,7 +878,7 @@ impl KindData {
             }
             Self::Mob(mob) => {
                 if mob.mob_type.is_monster() {
-                    zombie_non_default_data(mob)
+                    monster_non_default_data(mob)
                 } else {
                     mob_non_default_data(mob)
                 }
@@ -888,7 +893,7 @@ impl KindData {
 /// The default value of a metadata index, sent when an item returns to its
 /// default. Only these cow indices can become non-default.
 fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType) -> EntityData {
-    match (index, kind.is_monster()) {
+    match (index, kind.uses_baby_metadata()) {
         (16, true) => EntityData::Baby(false),
         (17, true) => EntityData::SpecialType(0),
         (18, true) => EntityData::DrownedConverting(false),
@@ -924,7 +929,7 @@ fn default_data_for_type(index: u8, kind: mc_bamboo_blocks::entity::mob::MobType
 /// 僵尸/尸壳的元数据。官方 `ClassTreeIdRegistry` 按类树导出：
 /// 16 `ZombieBaby`(BOOL)、17 `SpecialType`(INT)、18 `DrownedConverting`(BOOL)，
 /// 和牛的 `AgeableMob.Baby`(16) 不是同一个字段。
-fn zombie_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
+fn monster_non_default_data(mob: &mc_bamboo_blocks::entity::mob::MobPublic) -> Vec<EntityData> {
     use mc_bamboo_protocol::packet::play::Pose;
     let mut flags = 0u8;
     if mob.on_fire {
@@ -1163,13 +1168,17 @@ fn event_packet(
             pitch: 1.0,
             seed: sound_seed(),
         }),
-        MobEvent::Damage { kind, attacker } => {
+        MobEvent::Damage {
+            kind,
+            attacker,
+            direct,
+        } => {
             let damage_type = mc_bamboo_data::damage_type_id(kind.name()).unwrap_or(0);
             EventPacket::Tracking(packet_body(&DamageEvent {
                 entity_id: id,
                 damage_type,
                 source_cause: *attacker,
-                source_direct: *attacker,
+                source_direct: direct.or(*attacker),
                 position: None,
             }))
         }

@@ -1,11 +1,11 @@
-use mc_bamboo_core::{Aabb, Axis, Vec3, mth};
+use mc_bamboo_core::{Aabb, Axis, BlockPos, Direction, Vec3, mth};
 use mc_bamboo_data::{items as item, sounds};
 use mc_bamboo_protocol::item::ItemStack;
 
 use super::ctx::{BlockView, Command, EntityCtx, PlayerView};
 use super::mob::{DamageKind, DamageSource};
 use super::{Entity, EntityKind, EntityUid, KindPublic};
-use crate::{BlockHit, BlockState, World};
+use crate::{BlockHit, BlockState, CollisionContext, World};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Pickup {
@@ -26,6 +26,7 @@ pub struct ArrowPublic {
     pub shake_time: u8,
     pub pickup: Pickup,
     pub on_fire: bool,
+    pub needs_sync: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +48,7 @@ pub struct Arrow {
     pub sound: u16,
     pub left_owner: bool,
     pub has_been_shot: bool,
+    needs_sync: bool,
     pierced: Vec<EntityUid>,
 }
 
@@ -70,6 +72,7 @@ impl Default for Arrow {
             sound: arrow_hit_sound(),
             left_owner: false,
             has_been_shot: false,
+            needs_sync: false,
             pierced: Vec::new(),
         }
     }
@@ -87,6 +90,7 @@ impl Arrow {
             shake_time: self.shake_time,
             pickup: self.pickup,
             on_fire: remaining_fire_ticks > 0,
+            needs_sync: self.needs_sync,
         }
     }
 }
@@ -120,13 +124,13 @@ impl Entity {
         self.y_rot = yaw;
         arrow.pitch = pitch;
         arrow.life = 0;
-        self.requires_precise_position = true;
+        arrow.needs_sync = true;
     }
 }
 
 fn rotation(movement: Vec3) -> (f32, f32) {
     let horizontal = (movement.x * movement.x + movement.z * movement.z).sqrt();
-    let deg = |r| (r * 180.0 / f64::from(std::f32::consts::PI)) as f32;
+    let deg = |r| (r * f64::from(180.0_f32 / std::f32::consts::PI)) as f32;
     (
         deg(mth::atan2(movement.x, movement.z)),
         deg(mth::atan2(movement.y, horizontal)),
@@ -150,15 +154,22 @@ fn at_point(pos: Vec3, radius: f64) -> Aabb {
 
 pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     let movement = me.delta;
+    if !tick_or_check_ground(me, ctx.blocks()) {
+        fly(me, ctx, movement);
+    }
+}
+
+fn tick_or_check_ground(me: &mut Entity, blocks: &dyn BlockView) -> bool {
     let position = me.position;
     let block_pos = me.block_position();
-    let blocks = ctx.blocks();
     let current_state = blocks.block_state(block_pos);
     let collision = me.collision_context();
     let surrounding = at_point(position, 0.06);
+    let top = BlockPos::containing(Vec3::new(position.x, me.bounding_box().max_y, position.z));
     let EntityKind::Arrow(arrow) = &mut me.kind else {
-        return;
+        return true;
     };
+    arrow.needs_sync = false;
     let nearby_blocks = blocks.block_collisions(surrounding, collision);
     if nearby_blocks
         .iter()
@@ -176,8 +187,8 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
         }
     }
     arrow.shake_time = arrow.shake_time.saturating_sub(1);
-    if me.in_water || blocks.is_raining_at(block_pos) {
-        me.remaining_fire_ticks = 0;
+    if me.in_water || blocks.is_raining_at(block_pos) || blocks.is_raining_at(top) {
+        me.remaining_fire_ticks = me.remaining_fire_ticks.min(0);
     }
     if arrow.in_ground {
         if arrow.last_state != Some(current_state) && nearby_blocks.is_empty() {
@@ -193,8 +204,19 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
             me.removed = arrow.life >= 1200;
         }
         me.apply_effects_from_blocks(blocks);
-        return;
+        true
+    } else {
+        false
     }
+}
+
+fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
+    let blocks = ctx.blocks();
+    let position = me.position;
+    let collision = me.collision_context();
+    let EntityKind::Arrow(arrow) = &mut me.kind else {
+        return;
+    };
     if me.in_water {
         me.delta = me.delta.scale(f64::from(0.6_f32));
     }
@@ -224,23 +246,13 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
     arrow.owner = owner;
     arrow.left_owner |= !owner_in_range;
     let end = position.add(movement);
-    let block_hit = blocks.clip_collider(position, end, collision);
+    let block_hit = clip_including_border(blocks, position, end, collision);
     let end = block_hit.map_or(end, |hit| hit.location);
     let mut hits = Vec::new();
     let margin = f64::from(((me.tick_count - 2) as f32 / 20.0).clamp(0.0, 0.3));
     let mut consider = |uid, feet, bb: Aabb, player| {
         if (arrow.left_owner || Some(uid) != owner) && !arrow.pierced.contains(&uid) {
-            let contact = clip_entity(bb, position, end).or_else(|| {
-                if margin == 0.0 {
-                    return None;
-                }
-                let outside = clip_entity(bb.inflated(margin), position, end)?;
-                let center = bb.center();
-                let inside = blocks
-                    .clip_collider(outside, center, collision)
-                    .map_or(center, |hit| hit.location);
-                clip_entity(bb, outside, inside).map(|_| outside)
-            });
+            let contact = clip_entity_with_margin(blocks, bb, position, end, collision, margin);
             if let Some(contact) = contact {
                 hits.push((
                     position.distance_to_sqr(feet),
@@ -276,6 +288,58 @@ pub(crate) fn tick(me: &mut Entity, ctx: &mut dyn EntityCtx) {
             me,
         );
     }
+}
+
+fn clip_entity_with_margin(
+    view: &dyn BlockView,
+    bb: Aabb,
+    from: Vec3,
+    to: Vec3,
+    context: CollisionContext,
+    margin: f64,
+) -> Option<Vec3> {
+    clip_entity(bb, from, to).or_else(|| {
+        if margin == 0.0 {
+            return None;
+        }
+        let outside = clip_entity(bb.inflated(margin), from, to)?;
+        let center = bb.center();
+        let inside = clip_including_border(view, outside, center, context)
+            .map_or(center, |hit| hit.location);
+        clip_entity(bb, outside, inside).map(|_| outside)
+    })
+}
+
+fn clip_including_border(
+    view: &dyn BlockView,
+    from: Vec3,
+    to: Vec3,
+    context: CollisionContext,
+) -> Option<BlockHit> {
+    let hit = view.clip_collider(from, to, context);
+    let end = hit.map_or(to, |hit| hit.location);
+    let border = view.world_border();
+    if !border.is_within_bounds(from.x, from.z, 0.0) || border.is_within_bounds(end.x, end.z, 0.0) {
+        return hit;
+    }
+    let delta = end.subtract(from);
+    let mut face = Direction::North;
+    let mut highest = f32::from_bits(1);
+    for direction in Direction::ALL {
+        let (x, y, z) = direction.normal();
+        let dot = delta.x as f32 * x as f32 + delta.y as f32 * y as f32 + delta.z as f32 * z as f32;
+        if dot > highest {
+            highest = dot;
+            face = direction;
+        }
+    }
+    let location = border.clamp_vec3(end);
+    Some(BlockHit {
+        pos: BlockPos::containing(location),
+        face,
+        location,
+        inside: false,
+    })
 }
 
 fn resolve_owner(ctx: &dyn EntityCtx, uuid: [u8; 16]) -> Option<EntityUid> {
@@ -352,7 +416,9 @@ pub(super) fn impact(
     block: Option<BlockHit>,
     end: Vec3,
 ) {
-    me.requires_precise_position = true;
+    if let EntityKind::Arrow(arrow) = &mut me.kind {
+        arrow.needs_sync = true;
+    }
     let first = hits.first();
     me.position = first.map_or(end, |hit| hit.contact);
     me.apply_effects_from_blocks(world);
@@ -383,7 +449,7 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
         arrow.pierced.push(hit.uid);
     }
     let speed = me.delta.length() as f32;
-    let mut damage = (f64::from(speed) * arrow.base_damage)
+    let mut damage = (f64::from(speed) * impact_damage(arrow))
         .clamp(0.0, f64::from(i32::MAX))
         .ceil() as i32;
     if arrow.critical {
@@ -409,16 +475,22 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
         attacker_is_player: owner_player.is_some(),
         creative_player: owner_player.is_some_and(|p| p.creative),
         position: Some(me.position),
+        projectile_motion: Some(me.delta),
         attacker_uuid: arrow.owner_uuid,
         scale_when_non_player: owner
             .as_ref()
             .is_some_and(|p| matches!(p.kind, KindPublic::Mob(_))),
         ..DamageSource::environment(DamageKind::Arrow)
     };
+    let burning = me.remaining_fire_ticks > 0;
     let accepted = if hit.player {
-        world.hurt_player_from_mob(hit.uid, source, damage as f32, owner.as_ref())
+        let accepted = world.hurt_player_from_mob(hit.uid, source, damage as f32, owner.as_ref());
+        if accepted && burning {
+            world.ignite_player_from_mob(hit.uid, 100);
+        }
+        accepted
     } else {
-        world.hurt_mob(hit.uid, source, damage as f32)
+        hurt_mob(world, hit.uid, source, damage as f32, burning)
     };
     if accepted {
         play_hit_sound(me, world);
@@ -442,6 +514,72 @@ fn hit_entity(me: &mut Entity, world: &mut World<'_>, hit: ArrowEntityHit) -> bo
         }
     }
     false
+}
+
+fn impact_damage(arrow: &Arrow) -> f64 {
+    let Some(weapon) = &arrow.weapon else {
+        return arrow.base_damage;
+    };
+    let mut damage = arrow.base_damage as f32;
+    let level = enchantment_level(weapon, "minecraft:power");
+    if level > 0 {
+        damage += 1.0 + (level - 1) as f32 * 0.5;
+    }
+    f64::from(damage)
+}
+
+pub(super) fn enchantment_level(stack: &ItemStack, enchantment: &str) -> i32 {
+    use mc_bamboo_data::registries::{SYNCED_REGISTRIES, data_component_type::ENCHANTMENTS};
+    use mc_bamboo_protocol::components::{ComponentValue, defaults};
+
+    let patch = stack.patch();
+    let Some(ComponentValue::Enchantments(levels)) =
+        defaults::resolve(stack.item, &patch, ENCHANTMENTS)
+    else {
+        return 0;
+    };
+    let Some(id) = SYNCED_REGISTRIES
+        .iter()
+        .find(|registry| registry.name == "minecraft:enchantment")
+        .and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .position(|name| *name == enchantment)
+        })
+    else {
+        return 0;
+    };
+    levels
+        .iter()
+        .find_map(|&(key, level)| (key == id as i32).then_some(level))
+        .unwrap_or(0)
+}
+
+fn hurt_mob(
+    world: &mut World<'_>,
+    target: EntityUid,
+    source: DamageSource,
+    damage: f32,
+    burning: bool,
+) -> bool {
+    let mut previous_fire = 0;
+    if burning {
+        world.with_entity_mut(target, &mut |entity| {
+            previous_fire = entity.remaining_fire_ticks;
+            entity.remaining_fire_ticks = previous_fire.max(100);
+            if let Some(mob) = entity.kind.mob_mut() {
+                mob.ticks_frozen = 0;
+            }
+        });
+    }
+    let accepted = world.hurt_mob(target, source, damage);
+    if burning && !accepted {
+        world.with_entity_mut(target, &mut |entity| {
+            entity.remaining_fire_ticks = previous_fire
+        });
+    }
+    accepted
 }
 
 fn arrow_pierces(me: &Entity) -> bool {
@@ -471,7 +609,7 @@ fn hit_block(me: &mut Entity, world: &mut World<'_>, hit: BlockHit) {
 fn play_hit_sound(me: &mut Entity, world: &mut World<'_>) {
     if let EntityKind::Arrow(arrow) = &me.kind {
         let pitch = 1.2 / (me.random.next_float() * 0.2 + 0.9);
-        world.play_sound(me.position, arrow.sound, sounds::MASTER, 1.0, pitch, false);
+        world.play_sound(me.position, arrow.sound, sounds::NEUTRAL, 1.0, pitch, false);
     }
 }
 
@@ -485,7 +623,10 @@ fn finish_flight(me: &mut Entity, blocks: &dyn BlockView) {
     if me.remaining_fire_ticks > 0 {
         me.remaining_fire_ticks -= 1;
     }
-    me.in_water = blocks.fluid_state(me.block_position()).is_water();
+    me.update_projectile_fluid(blocks);
+    if me.position.y < f64::from(blocks.min_y() - 64) {
+        me.removed = true;
+    }
     me.first_tick = false;
     if let EntityKind::Arrow(arrow) = &mut me.kind {
         arrow.has_been_shot = true;
@@ -495,7 +636,6 @@ fn finish_flight(me: &mut Entity, blocks: &dyn BlockView) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mc_bamboo_core::BlockPos;
 
     #[test]
     fn entity_clip_excludes_inside_starts_and_endpoint_contacts() {
@@ -532,8 +672,16 @@ mod tests {
             let restored = crate::archive::entity::read_entity(&tag, uid)
                 .unwrap()
                 .unwrap();
-            assert_eq!(row.public.kind, restored.public.kind);
-            assert_eq!(row.state.kind, restored.state.kind);
+            let KindPublic::Arrow(mut original) = row.public.kind else {
+                panic!("expected arrow")
+            };
+            original.needs_sync = false;
+            assert_eq!(KindPublic::Arrow(original), restored.public.kind);
+            let super::super::KindState::Arrow(mut saved) = row.state.kind else {
+                panic!("expected arrow state")
+            };
+            saved.needs_sync = false;
+            assert_eq!(super::super::KindState::Arrow(saved), restored.state.kind);
         }
         level.set(block, BlockState(mc_bamboo_data::blocks::AIR));
         let mut world = World::new(&mut level, &mut ticks);
