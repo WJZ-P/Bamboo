@@ -383,6 +383,12 @@ pub(crate) struct Master {
     pub(crate) sleep_break_late: bool,
 }
 
+/// 对拍脚手架用：一个区块的 `PostProcessing`（每段 packed short），交付盒子里的和
+/// 写盘再读回的各一份。
+/// Oracle scaffolding: a chunk's `PostProcessing` (packed shorts per section),
+/// as delivered and after a save round trip.
+#[doc(hidden)]
+pub type PostProcessingTables = (Vec<Vec<u16>>, Vec<Vec<u16>>);
 impl World {
     /// 创建一个空世界。`config` 的视距超出合法范围时取最接近的值。
     pub fn new(config: WorldConfig, inbox: InboundReceiver) -> Self {
@@ -981,6 +987,38 @@ impl World {
             }
         }
         Some(out)
+    }
+
+    /// 对拍脚手架用：已交付区块的 `PostProcessing`（每段 packed short，按标记顺序），
+    /// 以及把它按存档路径只读编码、再解码回来后的同一张表。没交付或表正忙时
+    /// 返回 `None`；存档里没有这个键时对应一侧是空列表。
+    /// Oracle scaffolding: a delivered chunk's `PostProcessing` (packed shorts per
+    /// section, mark order) plus the same table after a read-only save encode and
+    /// decode. `None` if not delivered or mid-tick; an absent key yields an empty
+    /// list on that side.
+    #[doc(hidden)]
+    pub fn chunk_post_processing_unpaced(
+        &self,
+        pos: mc_bamboo_core::ChunkPos,
+    ) -> Option<Result<PostProcessingTables, String>> {
+        use crate::chunk_codec::ChunkCodec;
+        let island = self.islands.get(self.islands.island_of_chunk(pos)?)?;
+        let column = island.region.chunks.column_clone(pos)?;
+        let delivered =
+            crate::worldgen::post_processing_sections(column.chunk().archive()).unwrap_or_default();
+        let packed = match island.region.encode_loaded_column(pos)? {
+            Ok(packed) => packed,
+            Err(error) => return Some(Err(error)),
+        };
+        let reloaded = match crate::chunk_codec::InlineCodec.decode(pos, &packed) {
+            Ok(decoded) => decoded,
+            Err(error) => return Some(Err(error)),
+        };
+        let reloaded = crate::worldgen::post_processing_sections(
+            reloaded.column.chunk_column().chunk().archive(),
+        )
+        .unwrap_or_default();
+        Some(Ok((delivered, reloaded)))
     }
 
     /// 测量脚手架用：计算池里还有没有在途任务。

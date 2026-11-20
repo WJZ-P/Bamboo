@@ -721,6 +721,7 @@ impl Report<'_> {
             blocks: blocks.try_into().expect("9 chunks"),
             biomes: biomes.try_into().expect("9 chunks"),
             heights: heights.try_into().expect("9 chunks"),
+            post_processing: std::array::from_fn(|_| Vec::new()),
         };
         let result = match generator.features(&input, steps, allowed.as_deref()) {
             Ok(result) => result,

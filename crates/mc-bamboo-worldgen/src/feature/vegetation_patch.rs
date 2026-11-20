@@ -502,6 +502,7 @@ mod tests {
             blocks: std::array::from_fn(|_| chunk_blocks()),
             biomes: std::array::from_fn(|_| sections()),
             heights: std::array::from_fn(|_| crate::feature::Heightmaps::new(min_y)),
+            post_processing: std::array::from_fn(|_| Vec::new()),
         }
     }
 

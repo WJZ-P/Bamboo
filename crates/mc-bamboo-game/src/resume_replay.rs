@@ -17,8 +17,8 @@ use mc_bamboo_core::{ChunkPos, LightLayer};
 use mc_bamboo_nbt::Tag;
 use mc_bamboo_storage::chunk_nbt::{self, ChunkEncodeExtra};
 use mc_bamboo_world::{
-    MIN_Y, SECTION_COUNT, SECTION_SIZE, WORLD_HEIGHT,
-    chunk::{ChunkArchiveMeta, HeightmapKind},
+    MIN_Y, SECTION_COUNT, WORLD_HEIGHT,
+    chunk::ChunkArchiveMeta,
     light::{DataLayer, LIGHT_SECTION_COUNT, MIN_LIGHT_SECTION, SectionPos},
     ticket::ChunkStatus,
 };
@@ -62,6 +62,8 @@ pub struct ResumedChunk {
     pub block_entities: Vec<(String, String)>,
     /// 顶层 `structures`（`starts` + `References`）的 SNBT。
     pub structures: String,
+    /// 完工后的 `PostProcessing`：24 段 packed short 列表，按标记顺序。
+    pub post_processing: Vec<Vec<u16>>,
     /// 下一次写盘写出的 `Status`。
     pub saved_status: ChunkStatus,
     /// 下一次写盘写出的未压缩 NBT 字节，供「Bamboo 写 → Bamboo 读」往返用。
@@ -77,6 +79,13 @@ pub enum ResumeBreak {
     DropNeighborWrites,
     /// 故意把 `LIGHT` 阶段的光照清空，确认光照比较器会报不一致。
     ClearGeneratedLight,
+    /// 读回时丢掉盘上的 `PostProcessing`，确认表比较器会报不一致。
+    DiscardPostProcessing,
+    /// 续跑 `features` 时用新标记替换已有的表（而不是追加在后面），
+    /// 确认表比较器会报不一致。
+    /// Replace the existing table with the resumed `features` marks instead of
+    /// appending, so the table comparator must report it.
+    ReplacePostProcessing,
 }
 
 /// 读回一份盘上的区块，按它的 `Status` 续跑到 `full`，返回完工数据。
@@ -134,8 +143,18 @@ pub fn resume_chunk(
     // Restore stage intermediates: before terrain only structures/biomes exist;
     // from terrain on, rebuild the CARVERS-like `GeneratedChunk` from the disk
     // blocks so features/light can consume them.
+    // 盘上的 `PostProcessing` 是已跑阶段留下的标记，随快照一起恢复；续跑阶段的
+    // 新标记在完工组装（`merge_feature_writes`）时追加在后面。改坏确认可以在这里
+    // 故意丢掉盘上的表。
+    // The on-disk `PostProcessing` holds marks from finished stages and is
+    // restored with the snapshot; resumed stages append their marks at assembly
+    // (`merge_feature_writes`). The break confirmation drops the disk table.
     let mut partial = if disk_status.is_after_terrain() {
-        Some(Arc::new(generated_from_column(&column)))
+        let mut restored = crate::worldgen::generated_chunk_from_column(&column, case.pos);
+        if break_kind == Some(ResumeBreak::DiscardPostProcessing) {
+            restored.post_processing.clear();
+        }
+        Some(Arc::new(restored))
     } else {
         None
     };
@@ -217,6 +236,10 @@ pub fn resume_chunk(
                 let mut assembled = (*snapshot.as_ref()).clone();
                 crate::worldgen_features::merge_feature_writes(&mut assembled, groups.drain(..));
                 column = *crate::worldgen::build_region_column(&assembled)?;
+            } else if break_kind == Some(ResumeBreak::ReplacePostProcessing) {
+                let mut replaced = (*snapshot.as_ref()).clone();
+                replaced.post_processing.clear();
+                column = *assemble_feature_column(&replaced, &mut groups)?;
             } else {
                 column = *assemble_feature_column(snapshot, &mut groups)?;
             }
@@ -309,7 +332,10 @@ fn encode_extra_from_disk(
         inhabited_time: decoded.inhabited_time,
         preserved: decoded.preserved.clone(),
         structures: Some(decoded.structures.clone()),
-        post_processing: Some(decoded.post_processing.clone()),
+        // 列上的表已经是续跑累加后的最终表（完工组装时写进存档元数据），
+        // 不能再用盘上的旧表覆盖。
+        // The column already carries the final accumulated table.
+        post_processing: None,
         raw_block_entities: None,
         raw_heightmaps: None,
         block_ticks: decoded.block_ticks.clone(),
@@ -339,6 +365,7 @@ fn rebuild_final_heightmaps(column: &RegionColumn) -> BTreeMap<&'static str, Vec
         blocks,
         biomes: vec![vec![0_u32; 64]; SECTION_COUNT],
         heightmaps: BTreeMap::new(),
+        post_processing: Vec::new(),
     };
     crate::worldgen::compute_heightmaps_public(&generated)
 }
@@ -362,55 +389,6 @@ fn light_from_column(column: &RegionColumn) -> mc_bamboo_world::light::generate:
     mc_bamboo_world::light::generate::GeneratedLight {
         sky: layers(LightLayer::Sky),
         block: layers(LightLayer::Block),
-    }
-}
-
-/// 把读盘柱子的方块 / 群系 / 高度图还原成 `GeneratedChunk`（CARVERS 形状的纯数据）。
-fn generated_from_column(column: &RegionColumn) -> GeneratedChunk {
-    let chunk = column.chunk_column().chunk();
-    let mut blocks = Vec::with_capacity(usize::try_from(WORLD_HEIGHT).unwrap_or(384));
-    for y in MIN_Y..MIN_Y + WORLD_HEIGHT {
-        let mut layer = vec![0_u32; 256];
-        for x in 0..16 {
-            for z in 0..16 {
-                layer[x * 16 + z] = chunk.block(x, y, z);
-            }
-        }
-        blocks.push(layer);
-    }
-    let mut biomes = Vec::with_capacity(SECTION_COUNT);
-    for section in 0..SECTION_COUNT {
-        let y = MIN_Y + section as i32 * SECTION_SIZE;
-        let mut cells = vec![0_u32; 64];
-        for qx in 0..4 {
-            for qy in 0..4 {
-                for qz in 0..4 {
-                    cells[qx * 16 + qy * 4 + qz] =
-                        chunk.biome_at(qx * 4, y + (qy * 4) as i32, qz * 4);
-                }
-            }
-        }
-        biomes.push(cells);
-    }
-    let mut heightmaps = BTreeMap::new();
-    for (kind, key) in HeightmapKind::ALL.into_iter().zip([
-        "WORLD_SURFACE",
-        "OCEAN_FLOOR",
-        "MOTION_BLOCKING",
-        "MOTION_BLOCKING_NO_LEAVES",
-    ]) {
-        let mut columns = vec![0_i32; 256];
-        for x in 0..16 {
-            for z in 0..16 {
-                columns[x + z * 16] = chunk.heightmap_y(kind, x, z);
-            }
-        }
-        heightmaps.insert(key, columns);
-    }
-    GeneratedChunk {
-        blocks,
-        biomes,
-        heightmaps,
     }
 }
 
@@ -439,6 +417,10 @@ fn snapshot_resumed(pos: ChunkPos, column: &RegionColumn, saved_nbt: &[u8]) -> R
         }
         biomes.push(cells);
     }
+    // 完工的 `PostProcessing` 按存档元数据原样取出（24 段 packed short）。
+    // The finished `PostProcessing` as stored (24 packed-short sections).
+    let post_processing =
+        crate::worldgen::post_processing_sections(chunk.archive()).unwrap_or_default();
     // 高度图按完工方块重算，和 `build_region_column` / 官方增量更新的终值一致。
     // Recompute from the finished blocks, matching assembly and official updates.
     let all = rebuild_final_heightmaps(column);
@@ -494,6 +476,7 @@ fn snapshot_resumed(pos: ChunkPos, column: &RegionColumn, saved_nbt: &[u8]) -> R
         light_on: column.chunk_column().light_on(),
         block_entities,
         structures,
+        post_processing,
         saved_status: chunk.archive().status,
         saved_nbt: saved_nbt.to_vec(),
     }

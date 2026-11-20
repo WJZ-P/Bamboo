@@ -87,6 +87,7 @@ fn synthetic_chunks(cx: i32, cz: i32) -> mc_bamboo_worldgen::feature::FeatureChu
         blocks,
         biomes,
         heights,
+        post_processing: std::array::from_fn(|_| Vec::new()),
     }
 }
 

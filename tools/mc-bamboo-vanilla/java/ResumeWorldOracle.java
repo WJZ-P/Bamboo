@@ -471,11 +471,39 @@ public final class ResumeWorldOracle {
                 }
             }
             CompoundTag structures = structuresFromFull(full, index >= ChunkStatus.STRUCTURE_STARTS.getIndex());
+            // `PostProcessing` 按阶段写出：TERRAIN 之后是 doFill 的含水层标记，
+            // FEATURES 之后再加上地物 / 结构件的标记；更早的阶段是空表。
+            // `PostProcessing` by stage: doFill aquifer marks after TERRAIN, plus
+            // feature/piece marks after FEATURES; empty before TERRAIN.
+            it.unimi.dsi.fastutil.shorts.ShortList[] postProcessing =
+                    new it.unimi.dsi.fastutil.shorts.ShortList[height.getSectionsCount()];
+            JsonArray postSource = null;
+            if (index >= ChunkStatus.FEATURES.getIndex() && full.has("post_processing")) {
+                postSource = full.getAsJsonArray("post_processing");
+            } else if (index >= ChunkStatus.TERRAIN.getIndex()
+                    && full.has("post_processing_terrain")) {
+                postSource = full.getAsJsonArray("post_processing_terrain");
+            }
+            if (postSource != null) {
+                for (int section = 0; section < postSource.size()
+                        && section < postProcessing.length; section++) {
+                    JsonArray packed = postSource.get(section).getAsJsonArray();
+                    if (packed.isEmpty()) {
+                        continue;
+                    }
+                    it.unimi.dsi.fastutil.shorts.ShortArrayList list =
+                            new it.unimi.dsi.fastutil.shorts.ShortArrayList(packed.size());
+                    for (int i = 0; i < packed.size(); i++) {
+                        list.add((short) packed.get(i).getAsInt());
+                    }
+                    postProcessing[section] = list;
+                }
+            }
             SerializableChunkData data = new SerializableChunkData(
                     containers, pos, height.getMinSectionY(), 1234L, 99L,
                     status, null, null, UpgradeData.EMPTY, heightmaps,
                     new ChunkAccess.PackedTicks(List.of(), List.of()),
-                    new it.unimi.dsi.fastutil.shorts.ShortList[height.getSectionsCount()],
+                    postProcessing,
                     hasLight, sections, List.of(), blockEntities, structures);
             return data.write();
         }
