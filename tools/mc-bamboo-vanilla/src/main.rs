@@ -24,7 +24,7 @@
 //!     让官方 BlockPredicate 对随机方块状态和随机谓词出题，用 mc-bamboo-blocks 重放并比较
 //! mc-bamboo-vanilla recipe-oracle <java 路径> [--cases N] [--seed S] [--show N]
 //!     让官方 RecipeManager 对大量网格和输入查配方，用 mc-bamboo-recipes 重放并比较
-//! mc-bamboo-vanilla loot-oracle <java 路径> [--cases N] [--seed S] [--show N]
+//! mc-bamboo-vanilla loot-oracle <java 路径> [--entity-table ID] [--cases N] [--seed S] [--show N]
 //!     让官方战利品表对随机方块、工具、爆炸和箱子种子出题，用 mc-bamboo-loot 重放并比较
 //! mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N]
 //!                            [--biome-points N] [--show N]
@@ -375,7 +375,7 @@ const USAGE: &str = "用法：mc-bamboo-vanilla generate <server.jar> [java 路�
       mc-bamboo-vanilla execute-oracle <java 路径> [--show N] [--break-self-test]
       mc-bamboo-vanilla predicate-oracle <java 路径> [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla recipe-oracle <java 路径> [--cases N] [--seed S] [--show N]
-      mc-bamboo-vanilla loot-oracle <java 路径> [--cases N] [--seed S] [--show N]
+      mc-bamboo-vanilla loot-oracle <java 路径> [--entity-table ID] [--cases N] [--seed S] [--show N]
       mc-bamboo-vanilla worldgen <java 路径> [--seeds N] [--salt S] [--points N] [--biome-points N] [--show N]
       mc-bamboo-vanilla chunkgen <java 路径> [--seeds N] [--chunks N] [--salt S] [--through STAGE] [--biomes-only] [--show N] [--chunk X Z] [--scan N]
       mc-bamboo-vanilla structures <java 路径>

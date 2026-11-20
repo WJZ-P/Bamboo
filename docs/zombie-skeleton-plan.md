@@ -358,6 +358,7 @@ keepInventory）。
 - `EntityKind::Arrow` / `KindState::Arrow` / `KindPublic::Arrow` 共用已有实体表，精确驱动在当刻落地伤害，并行驱动仍用已有的意图落地阶段。箭的存档、跟踪、震颤后拾取与两类命中已接入。拾取复用已有的玩家接触阶段；箭与方块重叠时，只有插地标志从假变真才触发震颤回调，首刻不触发震颤。
 - 骷髅共用 Monster 基础、目标选择器、移动控制、装备和战利品；无弓走近战。日晒规避和拉弓状态在生物行里，箭的归属 UID 和相对计时在箭实体行里，岛拆合没有增加新的 Part。
 - `mob-oracle --only projectile` 包含普通箭命中玩家、插墙与拆墙、飞行时被新方块包住，以及 NORMAL/HARD 骷髅射击。比较逐刻轨迹、箭的随机源、插地与震颤、骷髅拉弓与随机源、玩家状态和相关包字节。`--break-self-test projectile` 同时改变直射箭仰角并卸掉骷髅弓。
+- `loot-oracle --entity-table minecraft:entities/skeleton` 单独比较骷髅死亡战利品表的物品和随机流；不覆盖装备槽掉落及经验球。
 - 未建模和可能不一致的边界见 README「箭和骷髅的已知限制」。期 4 未做。
 
 ### 期 4：自然生成（4–6 人日，单独一项）
