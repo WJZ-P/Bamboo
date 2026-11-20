@@ -50,9 +50,10 @@ pub struct Arrow {
     pub last_state: Option<BlockState>,
     pub sound: u16,
     pub left_owner: bool,
-    /// `Projectile.leftOwnerChecked`：只查一次，之后不再更新。
+    /// `Projectile.leftOwnerChecked`：同一刻内只查一次，每刻末尾由 `Projectile.tick` 清掉。
     ///
-    /// `Projectile.leftOwnerChecked`: the check runs once and is never redone.
+    /// `Projectile.leftOwnerChecked`: at most one check per tick, cleared by
+    /// `Projectile.tick` at the end of every tick.
     left_owner_checked: bool,
     pub has_been_shot: bool,
     needs_sync: bool,
@@ -264,7 +265,7 @@ fn fly(me: &mut Entity, ctx: &mut dyn EntityCtx, movement: Vec3) {
     arrow.owner = owner;
     // `Projectile.checkLeftOwner` 只在第一次调用时更新，之后 `leftOwnerChecked` 挡住。
     // `Projectile.checkLeftOwner` only updates on its first call; `leftOwnerChecked`
-    // blocks every later one.
+    // blocks every later one within the same tick.
     if !arrow.left_owner && !arrow.left_owner_checked {
         arrow.left_owner = !owner_in_range;
         arrow.left_owner_checked = true;
@@ -705,6 +706,11 @@ fn finish_flight(me: &mut Entity, blocks: &dyn BlockView) {
     if let EntityKind::Arrow(arrow) = &mut me.kind {
         arrow.has_been_shot = true;
         arrow.sync_velocity = sync_velocity;
+        // `Projectile.tick` 在每刻末尾把 `leftOwnerChecked` 清回 false，
+        // 所以下一飞行的刻还会再判一次，直到真的离开主人。
+        // `Projectile.tick` clears `leftOwnerChecked` at the end of each tick,
+        // so the next flying tick checks again until the arrow really left its owner.
+        arrow.left_owner_checked = false;
     }
 }
 
@@ -958,5 +964,32 @@ mod tests {
         arrow.shoot_arrow(Vec3::new(0., 0., 2.), 1.6, 6.);
         assert_eq!(arrow.delta, expected);
         assert_eq!(arrow.random, random);
+    }
+
+    #[test]
+    fn left_owner_is_rechecked_on_every_flying_tick() {
+        use crate::entity::mob::MobType;
+        let mut level = crate::testing::TestLevel::new();
+        let mut ticks = crate::BlockTicks::default();
+        let mut world = World::new(&mut level, &mut ticks);
+        let owner =
+            world.spawn_entity(Entity::by_mob_type(MobType::Cow, Vec3::new(0.5, 64.0, 0.5)));
+        let mut arrow = Entity::arrow(Vec3::new(0.5, 65.0, 0.5));
+        if let EntityKind::Arrow(data) = &mut arrow.kind {
+            data.owner = Some(owner);
+        }
+        arrow.delta = Vec3::new(5.0, 0.0, 0.0);
+        let uid = world.spawn_entity(arrow);
+        let left_owner = |world: &World<'_>| {
+            let entity = world.entity(uid).unwrap();
+            let EntityKind::Arrow(data) = &entity.kind else {
+                panic!("expected arrow")
+            };
+            data.left_owner
+        };
+        world.tick_entities();
+        assert!(!left_owner(&world));
+        world.tick_entities();
+        assert!(left_owner(&world));
     }
 }
