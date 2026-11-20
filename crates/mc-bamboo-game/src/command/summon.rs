@@ -1,8 +1,9 @@
-//! `/summon`：官方 `SummonCommand`。这一轮只能召唤牛；别的实体类型报
-//! `commands.summon.failed`（官方能召唤，Bamboo 还没有这些实体）。
+//! `/summon`：官方 `SummonCommand`。能召唤的生物是 `MobType` 里已建模的几种；
+//! 别的实体类型报 `commands.summon.failed`（官方能召唤，Bamboo 还没有这些实体）。
 //!
-//! `/summon`, vanilla `SummonCommand`. Only cows this round; other entity types fail
-//! with `commands.summon.failed` because Bamboo does not have them yet.
+//! `/summon`, vanilla `SummonCommand`. The summonable mobs are the modeled
+//! `MobType` variants; other entity types fail with `commands.summon.failed`
+//! because Bamboo does not have them yet.
 
 use mc_bamboo_blocks::{
     World,
