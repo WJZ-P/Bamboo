@@ -18,6 +18,7 @@ pub mod items;
 pub mod jukebox_songs;
 pub mod light;
 pub mod loot;
+pub mod mob_spawns;
 pub mod packets;
 pub mod recipes;
 pub mod registries;

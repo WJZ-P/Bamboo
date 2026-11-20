@@ -12,23 +12,27 @@ use mc_bamboo_core::Aabb;
 /// 配方表的数据结构和官方数据包导出的全部配方。
 pub mod recipe;
 
+/// 自然刷怪的类别上限和每个群系的刷怪设置。
+///
+/// Natural-spawn category caps and per-biome spawn settings.
+pub mod spawning;
+
 pub use recipe::{
     CookingKind, FireworkShape, Ingredient, PotionIngredient, Recipe, RecipeKind, RecipeType,
     Stack, has_dye_component, is_damageable,
 };
 
+pub use generated::sounds::{
+    NOTE_BLOCK_INSTRUMENTS, NoteBlockInstrumentDef, SOUND_EVENTS, SOUND_TYPES, STATE_SOUND_TYPE,
+    SoundEventDef, SoundSource, SoundTypeDef, jukebox_song, note_block_instrument, sound_event,
+};
 pub use generated::{
     biomes::{BIOME_CLIMATES, BiomeClimate},
     block_classes::{BlockAncestor, BlockClass},
     block_maps, block_transformers, blocks, command_argument_types, component_enums,
     component_registries, crafting_remainders, entity_types, gamerules, heightmaps,
-    item_components, item_damage, items, jukebox_songs, light, loot, packets, recipes, registries,
-    saved_world, shapes, sounds, states, structures, tags, version, worldgen,
-};
-
-pub use generated::sounds::{
-    NOTE_BLOCK_INSTRUMENTS, NoteBlockInstrumentDef, SOUND_EVENTS, SOUND_TYPES, STATE_SOUND_TYPE,
-    SoundEventDef, SoundSource, SoundTypeDef, jukebox_song, note_block_instrument, sound_event,
+    item_components, item_damage, items, jukebox_songs, light, loot, mob_spawns, packets, recipes,
+    registries, saved_world, shapes, sounds, states, structures, tags, version, worldgen,
 };
 
 const BLOCK_TAG_REGISTRY: &str = "minecraft:block";
