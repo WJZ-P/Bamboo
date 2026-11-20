@@ -30,6 +30,28 @@ use crate::{
 ///
 /// The `level` and `chunkBB` parameters of vanilla `StructurePiece.postProcess`, plus the
 /// piece's own orientation, rotation and mirror.
+/// `StructurePiece.SHAPE_CHECK_BLOCKS`（26.3 字节码里的 ImmutableSet：栅栏 /
+/// 火把 / 梯子 / 铁栏杆）。
+/// `StructurePiece.SHAPE_CHECK_BLOCKS` (the ImmutableSet in 26.3 bytecode:
+/// fences, torches, ladder, iron bars).
+pub(crate) fn shape_check_block(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:nether_brick_fence"
+            | "minecraft:torch"
+            | "minecraft:wall_torch"
+            | "minecraft:oak_fence"
+            | "minecraft:spruce_fence"
+            | "minecraft:dark_oak_fence"
+            | "minecraft:pale_oak_fence"
+            | "minecraft:acacia_fence"
+            | "minecraft:birch_fence"
+            | "minecraft:jungle_fence"
+            | "minecraft:ladder"
+            | "minecraft:iron_bars"
+    )
+}
+
 /// 一次写入：`(x, y, z, state)`。
 ///
 /// One write: `(x, y, z, state)`.
@@ -142,6 +164,16 @@ impl PieceContext<'_, '_> {
         // Vanilla's `placeBlock` goes through `ChunkAccess.setBlockState`, which
         // incrementally updates the four FINAL heightmaps. Step-9 features read
         // MOTION_BLOCKING after the pieces are placed.
+        // `StructurePiece.placeBlock`（`flags=2`）：写入后 `SHAPE_CHECK_BLOCKS`
+        // 里的方块要记进 `PostProcessing`，供加载后的形状更新重跑。
+        // `StructurePiece.placeBlock` (`flags=2`): after the write, blocks in
+        // `SHAPE_CHECK_BLOCKS` are marked for the post-load shape update.
+        if !super::place_step::skip_shape_check_public()
+            && let Some(block) = mc_bamboo_data::block_of_state(state)
+            && shape_check_block(block.name)
+        {
+            self.world.mark_pos_for_post_processing(pos.0, pos.1, pos.2);
+        }
         self.world
             .set_block_with_heightmaps(pos.0, pos.1, pos.2, state);
     }

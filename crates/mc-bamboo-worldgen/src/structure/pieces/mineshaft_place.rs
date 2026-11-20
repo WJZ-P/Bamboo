@@ -441,7 +441,15 @@ fn fill_pillar_down_or_chain_up(piece: &mut ShaftPiece<'_>, pillar: u32, x: i32,
             let above = piece.level.get_block(wx, ay, wz);
             let empty = is_replaceable_by_structures(above);
             if !empty && crate::structure::piece_place::can_hang_chain_below(above) {
-                piece.level.set_block(wx, wy + 1, wz, piece.shaft.fence());
+                // 官方 `fillPillarDownOrChainUp` 直接调
+                // `level.setBlock(pos, fence, 2)`，不经过 `placeBlock`，
+                // 因此不记 `SHAPE_CHECK_BLOCKS`。
+                // Official `fillPillarDownOrChainUp` calls
+                // `level.setBlock(pos, fence, 2)` directly, bypassing
+                // `placeBlock`, so no `SHAPE_CHECK_BLOCKS` mark.
+                piece
+                    .level
+                    .set_block_direct(wx, wy + 1, wz, piece.shaft.fence());
                 fill_column_between(
                     piece.level,
                     block("minecraft:iron_chain"),

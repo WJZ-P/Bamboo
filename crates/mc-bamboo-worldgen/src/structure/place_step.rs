@@ -36,6 +36,26 @@ use crate::{
     },
 };
 
+// 对拍改坏确认：关掉结构件的 `SHAPE_CHECK_BLOCKS` 标记。
+// Oracle break confirmation: suppress structure-piece `SHAPE_CHECK_BLOCKS` marks.
+thread_local! {
+    static SKIP_SHAPE_CHECK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 关掉 / 恢复结构件的 `PostProcessing` 形状检查标记；仅供对拍改坏确认。
+/// Disable / restore structure-piece `PostProcessing` shape-check marks;
+/// only for the oracle's break confirmation.
+pub fn set_skip_shape_check(skip: bool) {
+    SKIP_SHAPE_CHECK.with(|slot| slot.set(skip));
+}
+
+/// 当前是否关掉了结构件的形状检查标记；`place.rs` 复用同一个开关。
+/// Whether structure-piece shape-check marks are currently suppressed;
+/// `place.rs` shares the switch.
+pub(crate) fn skip_shape_check_public() -> bool {
+    SKIP_SHAPE_CHECK.with(|slot| slot.get())
+}
+
 /// 本轮已经逐方块对拍 0 不一致的结构类型；其余起点和引用照官方生成，但放置标
 /// `unsupported` 跳过。`structure::single` 的四个代码生成单件结构和废弃传送门的
 /// `postProcess` 由另一个分支负责，等它合进来再打开。
@@ -1011,26 +1031,6 @@ struct FeaturePieceLevel<'w, 'a> {
     mark_shape_check: bool,
 }
 
-/// `StructurePiece.SHAPE_CHECK_BLOCKS`（26.3 字节码的 ImmutableSet）。
-/// `StructurePiece.SHAPE_CHECK_BLOCKS` (the ImmutableSet in 26.3 bytecode).
-fn shape_check_block(name: &str) -> bool {
-    matches!(
-        name,
-        "minecraft:nether_brick_fence"
-            | "minecraft:torch"
-            | "minecraft:wall_torch"
-            | "minecraft:oak_fence"
-            | "minecraft:spruce_fence"
-            | "minecraft:dark_oak_fence"
-            | "minecraft:pale_oak_fence"
-            | "minecraft:acacia_fence"
-            | "minecraft:birch_fence"
-            | "minecraft:jungle_fence"
-            | "minecraft:ladder"
-            | "minecraft:iron_bars"
-    )
-}
-
 impl PieceLevel for FeaturePieceLevel<'_, '_> {
     fn get_block(&self, x: i32, y: i32, z: i32) -> u32 {
         self.world.get_block(x, y, z)
@@ -1044,8 +1044,9 @@ impl PieceLevel for FeaturePieceLevel<'_, '_> {
         // the block is in `SHAPE_CHECK_BLOCKS` (fences, torches, ladder, iron
         // bars) so a later load can redo the shape update.
         if self.mark_shape_check
+            && !skip_shape_check_public()
             && let Some(block) = mc_bamboo_data::block_of_state(state)
-            && shape_check_block(block.name)
+            && super::place::shape_check_block(block.name)
         {
             self.world.mark_pos_for_post_processing(x, y, z);
         }
@@ -1054,6 +1055,12 @@ impl PieceLevel for FeaturePieceLevel<'_, '_> {
         } else {
             self.world.set_structure_block(x, y, z, state)
         }
+    }
+
+    /// 结构件直接 `level.setBlock(..., 2)` 的写入，不记 `SHAPE_CHECK_BLOCKS`。
+    /// A direct `level.setBlock(..., 2)` write, without `SHAPE_CHECK_BLOCKS` marks.
+    fn set_block_direct(&mut self, x: i32, y: i32, z: i32, state: u32) -> bool {
+        self.world.set_structure_block(x, y, z, state)
     }
 
     fn set_block_entity(&mut self, x: i32, y: i32, z: i32, nbt: &mc_bamboo_nbt::Tag) {

@@ -43,7 +43,8 @@ const USAGE: &str = "usage: gen-world <java> [--seeds N] [--chunks N] [--salt S]
      [--show N] [--level-type normal|large_biomes|amplified] [--break-self-test] \
      [--through features [--structures] [--feature-types IDS | --types IDS | --all-features] \
       [--steps MASK] [--coverage] [--break-type KIND] [--break-heightmap FIELD:COLUMN] \
-      [--structure-types IDS] [--break-structure KIND] [--structure-coverage]]";
+      [--structure-types IDS] [--break-structure KIND] [--structure-coverage] \
+      [--break-shape-check]]";
 const DEFAULT_SHOW: usize = 8;
 /// 全部 11 个 decoration step（和 `chunkgen.rs` / Java 侧的 `ALL_STEPS` 一致）。
 const ALL_STEPS: i32 = (1 << 11) - 1;
@@ -94,6 +95,11 @@ struct Options {
     /// 带结构模式下的改坏开关：跳过一个特定结构类型的结构件放置。
     /// Break confirmation in structures mode: skip one structure type.
     break_structure: Option<String>,
+    /// 改坏确认：关掉结构件的 `SHAPE_CHECK_BLOCKS` 标记，证明
+    /// `PostProcessing` 比较器会抓到缺条目。
+    /// Break confirmation: suppress structure-piece `SHAPE_CHECK_BLOCKS` marks
+    /// so the `PostProcessing` comparator must report missing entries.
+    break_shape_check: bool,
 }
 
 impl Options {
@@ -120,6 +126,7 @@ impl Options {
             structures: false,
             structure_coverage: false,
             break_structure: None,
+            break_shape_check: false,
         };
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
@@ -262,6 +269,15 @@ impl Options {
                     options.break_structure = Some((*args.next().ok_or(USAGE)?).to_owned());
                     options.structure_coverage = true;
                 }
+                "--break-shape-check" => {
+                    if !options.features || !options.structures {
+                        return Err(
+                            "--break-shape-check requires --through features --structures"
+                                .to_owned(),
+                        );
+                    }
+                    options.break_shape_check = true;
+                }
                 "--through" => {
                     let value = args.next().ok_or(USAGE)?;
                     if *value != "features" {
@@ -381,6 +397,7 @@ pub fn run_with_queries(
         structures: options.structures,
         structure_coverage: options.structure_coverage,
         break_structure: options.break_structure.clone(),
+        break_shape_check: options.break_shape_check,
         structure_totals: BTreeMap::new(),
         pending_coverage: HashMap::new(),
         coverage_totals: BTreeMap::new(),
@@ -438,6 +455,9 @@ struct Report {
     /// 带结构改坏确认：跳过这个结构类型的结构件放置。
     /// Structures-mode break confirmation: skip this structure type.
     break_structure: Option<String>,
+    /// 关掉结构件的形状检查标记（改坏确认）。
+    /// Suppress structure-piece shape-check marks (break confirmation).
+    break_shape_check: bool,
     /// 结构类型 ID → (结构件数, 结构件写下的方块数)。
     /// Structure type → (placed pieces, blocks written by those pieces).
     structure_totals: BTreeMap<String, (u64, u64)>,
@@ -721,6 +741,7 @@ impl Report {
             None => Some(&ore_only),
         };
         mc_bamboo_worldgen::perf::set_heightmap_break(self.break_heightmap);
+        mc_bamboo_worldgen::structure::place_step::set_skip_shape_check(self.break_shape_check);
         mc_bamboo_worldgen::perf::begin(-64, i32::MIN, mc_bamboo_worldgen::perf::Phase::Features);
         let mut result = mc_bamboo_game::worldgen_features::game_features_with_mask_skipping(
             &config,
@@ -745,6 +766,7 @@ impl Report {
             let _ = mc_bamboo_worldgen::perf::finish();
         }
         mc_bamboo_worldgen::perf::set_heightmap_break(None);
+        mc_bamboo_worldgen::structure::place_step::set_skip_shape_check(false);
         if self.break_self_test {
             // 自检：把九宫格第一格的第一个方块改成岩浆，确认下面会报不一致。
             // Self-test: corrupt one block so the comparison must report a mismatch.
@@ -851,23 +873,14 @@ impl Report {
                 chunk.get("block_entities"),
                 &result.block_entities,
             )?;
-            // 结构件还有几条 `PostProcessing` 标记路径没逐项对拍
-            // （府邸 / 矿井的 `StructureTemplate` flags=820 与 `placeBlock` flags=2
-            // 混用），带结构模式先不把这一项计入逐格比较；默认模式严格比。
-            // A few structure-piece `PostProcessing` marking paths are not
-            // covered yet (mansions / mineshafts mix `StructureTemplate`
-            // flags=820 and `placeBlock` flags=2), so structures mode does not
-            // include this comparison; the default mode compares strictly.
-            if !self.structures {
-                compare_post_processing(
-                    &mut self.stats,
-                    seed,
-                    x + dx,
-                    z + dz,
-                    chunk.get("postProcessing"),
-                    &result.post_processing,
-                )?;
-            }
+            compare_post_processing(
+                &mut self.stats,
+                seed,
+                x + dx,
+                z + dz,
+                chunk.get("postProcessing"),
+                &result.post_processing,
+            )?;
         }
         Ok(())
     }
